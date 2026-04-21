@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dashboard/dist/
+worker/dist/
+
+# Runtime data
+data/
+exports/
+
+# Secrets — NEVER commit
+.env
+*.env
+.dev.vars
+worker/.dev.vars
+
+# Wrangler / CF runtime
+.wrangler/
+worker/.wrangler/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# Pytest / python caches
+__pycache__/
+*.pyc
+
+# Scraped content (contains URLs / private data)
+notes/
+keywords-learned-*.txt
+
+# Dashboard screenshots (dev artifacts)
+dashboard-*.png
+x-com-tweet.png
+
+# Local editor / MCP state
+.claude/
+.mcp.json
+.playwright-mcp/

@@ -1,0 +1,70 @@
+# Seed keywords for list 1643236611378008066 (topic: AI Development & Tools)
+# Initialized from 120 tweets analysis on 2026-03-30
+# Feel free to edit — lines starting with # are comments, - removes a keyword
+
+# Models & orgs
+AI
+AGI
+LLM
+GPT
+Claude
+Gemini
+Llama
+Mistral
+OpenAI
+Anthropic
+DeepSeek
+Google AI
+Meta AI
+Grok
+xAI
+Qwen
+
+# AI products & tools
+Cursor
+Copilot
+Replit
+Midjourney
+Perplexity
+ChatGPT
+Windsurf
+Sora
+Pika
+v0
+
+# Dev tools & infrastructure
+MCP
+CLI
+API
+token
+model
+agent
+Multi Agent
+open source
+TypeScript
+
+# Concepts
+vibe cod
+agentic
+RAG
+context window
+prompt
+fine-tun
+code review
+programming workflow
+
+# Infrastructure
+NVIDIA
+H100
+TPU
+Stargate
+
+# Chinese
+模型
+开源
+智能体
+多智能体
+开发工具
+语音AI
+AI编程
+招聘

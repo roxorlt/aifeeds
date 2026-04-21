@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  color-scheme: light;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #fafafa;
+  color: #171717;
+}
+
+/* Feed body height: full viewport on mobile (1 column), capped on desktop */
+.feed-body {
+  max-height: calc(100vh - 8rem);
+}
+@media (min-width: 768px) {
+  .feed-body {
+    max-height: 720px;
+  }
+}
+
+/* Hide scrollbar on filter chips rail for a cleaner mobile look */
+.chips-rail {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.chips-rail::-webkit-scrollbar {
+  display: none;
+}

@@ -1,0 +1,11 @@
+name = "xlist-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "xlist"
+database_id = "2973d54b-ca13-48e4-8d20-1430c57f5260"
+
+[triggers]
+crons = ["*/5 * * * *"]

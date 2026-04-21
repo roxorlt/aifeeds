@@ -1,0 +1,1057 @@
+// Enrich module: pull missing quote_of / link_card / metrics for items in D1
+// by calling cdn.syndication.twimg.com (same API react-tweet uses).
+// Replaces the local Python enrich_from_syndication.py for cloud-side runs.
+
+export interface EnrichEnv {
+  DB: D1Database;
+  DEEPSEEK_API_KEY?: string;
+}
+
+const SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result";
+const HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Referer: "https://platform.twitter.com/",
+  Accept: "*/*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+// ─── Token algorithm (react-tweet original) ────────────────────
+function getToken(tid: string): string {
+  const n = (Number(tid) / 1e15) * Math.PI;
+  return n.toString(36).replace(/(0+|\.)/g, "");
+}
+
+// ─── API fetch with retries ────────────────────────────────────
+export interface FetchResult {
+  data?: Record<string, unknown>;
+  notFound?: boolean;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export async function fetchTweet(
+  tid: string,
+  maxRetries = 5,
+): Promise<FetchResult | null> {
+  const token = getToken(tid);
+  const url = `${SYNDICATION_URL}?id=${tid}&lang=en&token=${token}`;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch(url, {
+        headers: HEADERS,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (resp.status === 404) {
+        return { notFound: true };
+      }
+      if (resp.status === 429) {
+        const wait = Math.min(2 ** attempt * 1000, 32000);
+        console.log(
+          `tweet_id=${tid} attempt=${attempt} HTTP 429 backoff=${wait}ms`,
+        );
+        await sleep(wait);
+        continue;
+      }
+      if (resp.status >= 500) {
+        const wait = Math.min(2 ** attempt * 1000, 16000);
+        console.log(
+          `tweet_id=${tid} attempt=${attempt} HTTP ${resp.status} backoff=${wait}ms`,
+        );
+        await sleep(wait);
+        continue;
+      }
+      if (!resp.ok) {
+        console.error(
+          `tweet_id=${tid} HTTP ${resp.status} permanent`,
+        );
+        return null;
+      }
+      const data = await resp.json<Record<string, unknown>>();
+      if (attempt > 1) {
+        console.log(`tweet_id=${tid} SUCCESS after ${attempt} attempts`);
+      }
+      return { data };
+    } catch (e) {
+      const wait = Math.min(2 ** attempt * 1000, 16000);
+      const name = e instanceof Error ? e.name : "unknown";
+      console.log(
+        `tweet_id=${tid} attempt=${attempt} NETWORK_ERROR ${name} backoff=${wait}ms`,
+      );
+      await sleep(wait);
+    }
+  }
+  console.error(`tweet_id=${tid} EXHAUSTED ${maxRetries} retries`);
+  return null;
+}
+
+// ─── API response → our JSON shapes ────────────────────────────
+function normalizeMediaUrl(url: string): string {
+  if (!url) return url;
+  if (url.includes("?")) {
+    if (url.includes("name=")) {
+      return url.replace(/name=\w+/, "name=medium");
+    }
+    return url + "&name=medium";
+  }
+  return url + "?format=jpg&name=medium";
+}
+
+interface QuoteOf {
+  id: string | null;
+  author: string | null;
+  handle: string | null;
+  content: string | null;
+  profile_image_url: string | null;
+  is_verified: number;
+  media: Array<{ type: string; url: string; width?: number; height?: number }>;
+  published_at: string | null;
+  content_translated?: string | null;
+}
+
+export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
+  const user = (qt.user as Record<string, unknown>) || {};
+  const mediaDetails = (qt.mediaDetails as Array<Record<string, unknown>>) || [];
+  const media: QuoteOf["media"] = [];
+  for (const m of mediaDetails) {
+    const rawUrl = (m.media_url_https as string) || "";
+    if (!rawUrl) continue;
+    const oi = (m.original_info as Record<string, unknown>) || {};
+    media.push({
+      type:
+        m.type === "photo"
+          ? "image"
+          : ((m.type as string) || "image"),
+      url: normalizeMediaUrl(rawUrl),
+      width: oi.width as number | undefined,
+      height: oi.height as number | undefined,
+    });
+  }
+  const verified =
+    (user.verified as boolean) || (user.is_blue_verified as boolean);
+  return {
+    id: (qt.id_str as string) || null,
+    author: (user.name as string) || null,
+    handle: (user.screen_name as string) || null,
+    content: (qt.text as string) || null,
+    profile_image_url: (user.profile_image_url_https as string) || null,
+    is_verified: verified ? 1 : 0,
+    media,
+    published_at: (qt.created_at as string) || null,
+  };
+}
+
+export interface LinkCard {
+  url: string | null;
+  display_url: string | null;
+  title: string | null;
+  description: string | null;
+  domain: string | null;
+  image_url: string | null;
+  title_translated?: string | null;
+  description_translated?: string | null;
+}
+
+export function apiToLinkCard(data: Record<string, unknown>): LinkCard | null {
+  const card = data.card as Record<string, unknown> | undefined;
+  if (!card) return null;
+  const bv =
+    (card.binding_values as Record<string, Record<string, unknown>>) || {};
+
+  const val = (key: string): string | null => {
+    const v = bv[key];
+    if (!v) return null;
+    return (v.string_value as string) || null;
+  };
+  const img = (key: string): string | null => {
+    const v = bv[key];
+    if (!v) return null;
+    const iv = v.image_value as Record<string, unknown> | undefined;
+    return iv ? ((iv.url as string) || null) : null;
+  };
+
+  const title = val("title");
+  const description = val("description");
+  if (!title && !description) return null;
+
+  const imageUrl =
+    img("thumbnail_image_large") ||
+    img("photo_image_full_size_large") ||
+    img("summary_photo_image_large") ||
+    img("thumbnail_image_original");
+
+  const displayUrl = val("vanity_url");
+  const entities = data.entities as Record<string, unknown> | undefined;
+  const urls = (entities?.urls as Array<Record<string, unknown>>) || [];
+  let expandedUrl: string | null = null;
+  if (urls.length > 0) {
+    expandedUrl =
+      (urls[0].expanded_url as string) ||
+      (urls[0].url as string) ||
+      null;
+  }
+  if (!expandedUrl) {
+    expandedUrl = (card.url as string) || null;
+  }
+
+  return {
+    url: expandedUrl,
+    display_url: displayUrl,
+    title,
+    description,
+    domain: val("domain"),
+    image_url: imageUrl,
+  };
+}
+
+export interface Metrics {
+  replies?: number;
+  retweets?: number;
+  likes?: number;
+  views?: number;
+  bookmarks?: number;
+}
+
+export function apiToMetrics(data: Record<string, unknown>): Metrics {
+  return {
+    replies: (data.conversation_count as number) ?? undefined,
+    retweets: (data.retweet_count as number) ?? undefined,
+    likes: (data.favorite_count as number) ?? undefined,
+    bookmarks: (data.bookmark_count as number) ?? undefined,
+  };
+}
+
+// ─── State persistence via enrich_state table ──────────────────
+export interface EnrichState {
+  processed_ids: string[];
+  failed_ids: string[];
+  not_found_ids: string[];
+  started_at: string;
+  last_update: string | null;
+  counts?: Record<string, number>;
+}
+
+export async function loadState(
+  env: EnrichEnv,
+  mode: string,
+): Promise<EnrichState> {
+  const row = await env.DB.prepare(
+    "SELECT state FROM enrich_state WHERE mode = ?",
+  )
+    .bind(mode)
+    .first<{ state: string }>();
+  if (row?.state) {
+    try {
+      return JSON.parse(row.state) as EnrichState;
+    } catch {
+      // fall through to fresh state
+    }
+  }
+  return {
+    processed_ids: [],
+    failed_ids: [],
+    not_found_ids: [],
+    started_at: new Date().toISOString(),
+    last_update: null,
+  };
+}
+
+export async function saveState(
+  env: EnrichEnv,
+  mode: string,
+  state: EnrichState,
+): Promise<void> {
+  state.last_update = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO enrich_state (mode, state, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(mode) DO UPDATE SET
+       state = excluded.state,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(mode, JSON.stringify(state), state.last_update)
+    .run();
+}
+
+// ─── Candidate selection + patch write ─────────────────────────
+interface CandidateRow {
+  id: string;
+  source_id: string;
+  extra: string | null;
+}
+
+/** items.extra is JSON; candidates are is_relevant=1 items not yet enriched.
+ *  enriched_at is written on every processed item (including empty results)
+ *  so the SQL filter permanently excludes them on subsequent runs. The
+ *  quote_of/link_card fallback handles pre-enriched_at items (pre-2026-04-20). */
+async function selectBackfillCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+): Promise<CandidateRow[]> {
+  const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND is_relevant = 1
+       AND (extra IS NULL
+            OR (extra NOT LIKE '%"enriched_at"%'
+                AND extra NOT LIKE '%"quote_of"%'
+                AND extra NOT LIKE '%"link_card"%'))
+     ORDER BY scraped_at DESC
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<CandidateRow>();
+
+  const out: CandidateRow[] = [];
+  for (const r of rows.results) {
+    if (!done.has(r.source_id)) {
+      out.push(r);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+interface Patch {
+  metrics?: Metrics;
+  quote_of?: QuoteOf | null;
+  quote_of_id?: string | null;
+  link_card?: LinkCard | null;
+  clearThreadRoot?: boolean;
+}
+
+/** Apply patch to an item: merge into extra JSON + update metrics column. */
+async function applyPatch(
+  env: EnrichEnv,
+  row: CandidateRow,
+  patch: Patch,
+): Promise<void> {
+  let extra: Record<string, unknown> = {};
+  if (row.extra) {
+    try {
+      extra = JSON.parse(row.extra) as Record<string, unknown>;
+    } catch {
+      extra = {};
+    }
+  }
+  if (patch.quote_of !== undefined) extra.quote_of = patch.quote_of;
+  if (patch.quote_of_id !== undefined) extra.quote_of_id = patch.quote_of_id;
+  if (patch.link_card !== undefined) extra.link_card = patch.link_card;
+  if (patch.clearThreadRoot) delete extra.thread_root_id;
+  extra.enriched_at = new Date().toISOString();
+
+  const updates: string[] = ["extra = ?"];
+  const vals: unknown[] = [JSON.stringify(extra)];
+  if (patch.metrics) {
+    updates.push("metrics = ?");
+    vals.push(JSON.stringify(patch.metrics));
+  }
+  vals.push(row.id);
+  await env.DB.prepare(
+    `UPDATE items SET ${updates.join(", ")} WHERE id = ?`,
+  )
+    .bind(...vals)
+    .run();
+}
+
+// ─── Main runner: backfill-quotes mode ─────────────────────────
+export interface RunResult {
+  mode: string;
+  processed: number;
+  with_quote: number;
+  with_card: number;
+  empty: number;
+  not_found: number;
+  failed: number;
+  elapsed_ms: number;
+  remaining_hint?: number;
+}
+
+/** Run up to `limit` candidates. Sleeps `rateSleepMs` between calls.
+ *  Designed to be called from a cron handler — caller decides frequency. */
+export async function runBackfillQuotes(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+): Promise<RunResult> {
+  const mode = "backfill-quotes";
+  const t0 = Date.now();
+  const state = await loadState(env, mode);
+  const done = new Set<string>([
+    ...state.processed_ids,
+    ...state.not_found_ids,
+  ]);
+
+  const candidates = await selectBackfillCandidates(env, done, limit);
+  const counts = {
+    processed: 0,
+    with_quote: 0,
+    with_card: 0,
+    empty: 0,
+    not_found: 0,
+    failed: 0,
+  };
+
+  for (const row of candidates) {
+    const tid = row.source_id;
+    const res = await fetchTweet(tid);
+    if (res === null) {
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (res.notFound) {
+      state.not_found_ids.push(tid);
+      counts.not_found++;
+    } else if (res.data) {
+      const qt = res.data.quoted_tweet as
+        | Record<string, unknown>
+        | undefined;
+      const card = apiToLinkCard(res.data);
+      const apiReplyTo = res.data.in_reply_to_status_id_str as
+        | string
+        | undefined;
+
+      const patch: Patch = {};
+      let gotAny = false;
+      if (qt && qt.id_str) {
+        patch.quote_of_id = qt.id_str as string;
+        patch.quote_of = apiToQuoteOf(qt);
+        counts.with_quote++;
+        gotAny = true;
+      }
+      if (card) {
+        patch.link_card = card;
+        counts.with_card++;
+        gotAny = true;
+      }
+      if (!apiReplyTo) {
+        patch.clearThreadRoot = true;
+      }
+      if (!gotAny) counts.empty++;
+
+      await applyPatch(env, row, patch);
+      state.processed_ids.push(tid);
+      counts.processed++;
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    // Save state every 25 items to survive cron timeout
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    with_quote: counts.with_quote,
+    with_card: counts.with_card,
+    empty: counts.empty,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── refresh-metrics mode ──────────────────────────────────────
+// Continuously refresh interaction metrics (likes/retweets/replies/bookmarks)
+// for recent items. Unlike backfill-quotes which is one-shot per item,
+// this mode cycles through candidates repeatedly.
+//
+// State semantics: processed_ids is a "this round" marker. When the round
+// completes (all recent items processed), it resets to [] and starts over.
+
+interface RefreshRow {
+  id: string;
+  source_id: string;
+}
+
+/** Select items published in the last N days, excluding those already
+ *  processed in the current round. */
+async function selectRefreshCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+  lookbackDays: number,
+): Promise<RefreshRow[]> {
+  const cutoff = new Date(
+    Date.now() - lookbackDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const fetchBatch = Math.min(Math.max(limit * 3, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id
+     FROM items
+     WHERE source_type = 'x_list'
+       AND is_relevant = 1
+       AND published_at >= ?
+     ORDER BY published_at DESC
+     LIMIT ?`,
+  )
+    .bind(cutoff, fetchBatch)
+    .all<RefreshRow>();
+
+  const out: RefreshRow[] = [];
+  for (const r of rows.results) {
+    if (!done.has(r.source_id)) {
+      out.push(r);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+async function updateMetrics(
+  env: EnrichEnv,
+  id: string,
+  metrics: Metrics,
+): Promise<void> {
+  await env.DB.prepare("UPDATE items SET metrics = ? WHERE id = ?")
+    .bind(JSON.stringify(metrics), id)
+    .run();
+}
+
+export interface RefreshResult {
+  mode: string;
+  processed: number;
+  updated: number;
+  not_found: number;
+  failed: number;
+  round_reset: boolean;
+  elapsed_ms: number;
+  remaining_hint: number;
+}
+
+/** Refresh metrics for up to `limit` recent items.
+ *  lookbackDays: only consider items published within this window. */
+export async function runRefreshMetrics(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+  lookbackDays = 14,
+): Promise<RefreshResult> {
+  const mode = "refresh-metrics";
+  const t0 = Date.now();
+  let state = await loadState(env, mode);
+  let done = new Set<string>(state.processed_ids);
+  let roundReset = false;
+
+  let candidates = await selectRefreshCandidates(
+    env,
+    done,
+    limit,
+    lookbackDays,
+  );
+
+  // If round is complete (nothing left), reset and start over.
+  if (candidates.length === 0 && state.processed_ids.length > 0) {
+    state = {
+      processed_ids: [],
+      failed_ids: [],
+      not_found_ids: [],
+      started_at: new Date().toISOString(),
+      last_update: null,
+    };
+    done = new Set<string>();
+    roundReset = true;
+    candidates = await selectRefreshCandidates(env, done, limit, lookbackDays);
+  }
+
+  const counts = { processed: 0, updated: 0, not_found: 0, failed: 0 };
+
+  for (const row of candidates) {
+    const tid = row.source_id;
+    const res = await fetchTweet(tid);
+    if (res === null) {
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (res.notFound) {
+      // Don't persist not-found here — item may come back (deleted-then-restored rare).
+      // But skip this round.
+      counts.not_found++;
+      state.processed_ids.push(tid);
+    } else if (res.data) {
+      const m = apiToMetrics(res.data);
+      const hasAny =
+        m.replies !== undefined ||
+        m.retweets !== undefined ||
+        m.likes !== undefined ||
+        m.bookmarks !== undefined;
+      if (hasAny) {
+        await updateMetrics(env, row.id, m);
+        counts.updated++;
+      }
+      state.processed_ids.push(tid);
+      counts.processed++;
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    updated: counts.updated,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    round_reset: roundReset,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── fill-translations mode ────────────────────────────────────
+// Fills missing translations on: items.content_translated,
+// extra.quote_of.content_translated, extra.link_card.{title,description}_translated.
+// Uses DeepSeek chat (OpenAI-compatible). SQL broadly selects candidates,
+// then code filters to texts actually needing translation.
+
+const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+const DEEPSEEK_MODEL = "deepseek-chat";
+
+const TRANSLATION_PROMPT_HEADER =
+  "Translate each numbered tweet below from English to Chinese for an AI news feed.\n" +
+  "Rules:\n" +
+  "1. Keep proper nouns in English: person names, company names, product names, " +
+  "model names (GPT-4, Claude, Gemini-cli, codex, Cursor, VS Code, etc.).\n" +
+  "2. Keep these technical terms in English — do NOT translate even when used as verbs: " +
+  "fork, branch, merge, rebase, commit, PR, repo, clone, push, pull, deploy, " +
+  "pretrain, RLHF, prompt, embedding, RAG, LLM, API, SDK, CLI, IDE, CI/CD, OSS, MCP.\n" +
+  "3. Chinese AI community conventions for these specific terms:\n" +
+  "   - 'fine-tune' / 'fine-tuning' → '微调' (correct standard Chinese AI term)\n" +
+  "   - 'agent' → '智能体' (NOT '代理', which means proxy/middleman in Chinese)\n" +
+  "   - 'token' / 'tokens' → keep as 'token' or 'Token' (NEVER '令牌', which means OAuth token)\n" +
+  "   - 'fork' as verb → 'fork' (NOT '分叉'): 'fork codex' → '去 fork codex'\n" +
+  "   - 'PR' → 'PR' (NOT '拉取请求' or '合并请求')\n" +
+  "4. Keep code, commands, file paths, URLs, and @handles verbatim.\n" +
+  "5. Keep common English abbreviations: UI, UX, MVP, SaaS, B2B, OSS, etc.\n" +
+  "6. Output natural colloquial Chinese (口语化), avoid stilted translations.\n" +
+  "Reply ONLY with one line per tweet in the format  index:translated_text\n" +
+  "No extra text.\n\n";
+
+function cjkRatio(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  let total = 0;
+  for (const c of text) {
+    if (/\s/.test(c)) continue;
+    total++;
+    const code = c.charCodeAt(0);
+    if (code >= 0x4e00 && code <= 0x9fff) cjk++;
+  }
+  return total === 0 ? 0 : cjk / total;
+}
+
+function isLikelyChinese(text: string): boolean {
+  return !!text && cjkRatio(text) > 0.3;
+}
+
+/** Sanity check thresholds calibrated against 500-sample content translations
+ *  (2026-04-20). p5 length_ratio=0.08; p25=0.31; p50=0.38. Threshold 0.15
+ *  flags ~5% (below p5). CJK ratio <20% flags ~4.4%, >=99.9% flags ~4.2%. */
+function sanityHit(original: string, translated: string): string | null {
+  if (!translated || !original) return null;
+  const ratio = translated.length / original.length;
+  if (ratio < 0.15) return "too_short";
+  if (ratio > 2.0) return "too_long";
+  const cjk = cjkRatio(translated);
+  if (cjk < 0.20) return "low_cjk";
+  if (cjk >= 0.999) return "all_cjk";
+  return null;
+}
+
+type TaskField =
+  | "content"
+  | "quote_of"
+  | "link_card_title"
+  | "link_card_desc";
+
+interface TranslationTask {
+  itemId: string;
+  field: TaskField;
+  text: string;
+}
+
+interface TranslationRow {
+  id: string;
+  source_id: string;
+  content: string | null;
+  lang: string | null;
+  content_translated: string | null;
+  extra: string | null;
+}
+
+async function selectTranslationCandidates(
+  env: EnrichEnv,
+  limit: number,
+): Promise<TranslationRow[]> {
+  const fetchBatch = Math.min(Math.max(limit * 3, 60), 300);
+  // Use json_extract for precise matching. Previous LIKE-based match
+  // swept up Chinese-quote tweets (extra has quote_of but content is zh),
+  // which extractTasks then rejected via isLikelyChinese — wasting slots.
+  //
+  // ORDER BY RANDOM() spreads sampling across the ~760 candidates. DESC
+  // biased to freshest tweets where zh-quote-zh dominates, producing 0 tasks
+  // every cron slot. Random hits the ~5-10% English-quote gems in the tail.
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, content, lang, content_translated, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND is_relevant = 1
+       AND (
+         (content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL)
+         OR (
+           json_extract(extra, '$.quote_of.content') IS NOT NULL
+           AND json_extract(extra, '$.quote_of.content_translated') IS NULL
+         )
+         OR (
+           json_extract(extra, '$.link_card.title') IS NOT NULL
+           AND json_extract(extra, '$.link_card.title_translated') IS NULL
+         )
+         OR (
+           json_extract(extra, '$.link_card.description') IS NOT NULL
+           AND json_extract(extra, '$.link_card.description_translated') IS NULL
+         )
+       )
+     ORDER BY RANDOM()
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<TranslationRow>();
+  return rows.results;
+}
+
+function extractTasks(row: TranslationRow): TranslationTask[] {
+  const tasks: TranslationTask[] = [];
+  // Main content
+  if (
+    row.content_translated === null &&
+    row.lang !== "zh" &&
+    row.content &&
+    !isLikelyChinese(row.content)
+  ) {
+    tasks.push({ itemId: row.id, field: "content", text: row.content });
+  }
+  // Extra
+  let extra: Record<string, unknown> = {};
+  if (row.extra) {
+    try {
+      extra = JSON.parse(row.extra) as Record<string, unknown>;
+    } catch {
+      extra = {};
+    }
+  }
+  const qo = extra.quote_of as Record<string, unknown> | null | undefined;
+  if (qo && typeof qo === "object") {
+    const qc = qo.content as string | null | undefined;
+    const qt = qo.content_translated as string | null | undefined;
+    if (qc && !qt && !isLikelyChinese(qc)) {
+      tasks.push({ itemId: row.id, field: "quote_of", text: qc });
+    }
+  }
+  const lc = extra.link_card as Record<string, unknown> | null | undefined;
+  if (lc && typeof lc === "object") {
+    const title = lc.title as string | null | undefined;
+    const tTr = lc.title_translated as string | null | undefined;
+    if (title && !tTr && !isLikelyChinese(title)) {
+      tasks.push({ itemId: row.id, field: "link_card_title", text: title });
+    }
+    const desc = lc.description as string | null | undefined;
+    const dTr = lc.description_translated as string | null | undefined;
+    if (desc && !dTr && !isLikelyChinese(desc)) {
+      tasks.push({ itemId: row.id, field: "link_card_desc", text: desc });
+    }
+  }
+  return tasks;
+}
+
+async function callDeepSeek(
+  apiKey: string,
+  prompt: string,
+  maxTokens: number,
+): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    const resp = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: maxTokens,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) {
+      console.error(`DeepSeek HTTP ${resp.status}`);
+      return null;
+    }
+    const data = (await resp.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const text = data.choices?.[0]?.message?.content?.trim();
+    return text || null;
+  } catch (e) {
+    const name = e instanceof Error ? e.name : "unknown";
+    console.error(`DeepSeek call failed: ${name}`);
+    return null;
+  }
+}
+
+async function translateBatch(
+  apiKey: string,
+  texts: string[],
+): Promise<Map<number, string>> {
+  const numbered = texts.map((t, i) => `${i}:${t}`).join("\n");
+  const prompt = TRANSLATION_PROMPT_HEADER + numbered;
+  const maxTokens = Math.max(texts.length * 200, 500);
+  const raw = await callDeepSeek(apiKey, prompt, maxTokens);
+  const out = new Map<number, string>();
+  if (!raw) return out;
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const idxStr = line.slice(0, colon).trim();
+    const idx = parseInt(idxStr, 10);
+    if (Number.isNaN(idx) || String(idx) !== idxStr) continue;
+    const text = line.slice(colon + 1).trim();
+    if (text) out.set(idx, text);
+  }
+  return out;
+}
+
+interface TranslationItemPatch {
+  content_translated?: string;
+  quote_content_translated?: string;
+  link_title_translated?: string;
+  link_desc_translated?: string;
+  translation_quality?: string;
+  translation_attempts?: number;
+}
+
+async function applyTranslationPatch(
+  env: EnrichEnv,
+  row: TranslationRow,
+  patch: TranslationItemPatch,
+): Promise<void> {
+  let extra: Record<string, unknown> = {};
+  if (row.extra) {
+    try {
+      extra = JSON.parse(row.extra) as Record<string, unknown>;
+    } catch {
+      extra = {};
+    }
+  }
+  if (patch.quote_content_translated) {
+    const qo = extra.quote_of as Record<string, unknown> | null | undefined;
+    if (qo && typeof qo === "object") {
+      qo.content_translated = patch.quote_content_translated;
+    }
+  }
+  if (patch.link_title_translated || patch.link_desc_translated) {
+    const lc = extra.link_card as Record<string, unknown> | null | undefined;
+    if (lc && typeof lc === "object") {
+      if (patch.link_title_translated) {
+        lc.title_translated = patch.link_title_translated;
+      }
+      if (patch.link_desc_translated) {
+        lc.description_translated = patch.link_desc_translated;
+      }
+    }
+  }
+  const updates: string[] = ["extra = ?"];
+  const vals: unknown[] = [JSON.stringify(extra)];
+  if (patch.content_translated) {
+    updates.push("content_translated = ?");
+    vals.push(patch.content_translated);
+  }
+  if (patch.translation_quality) {
+    updates.push("translation_quality = ?");
+    vals.push(patch.translation_quality);
+  }
+  if (patch.translation_attempts !== undefined) {
+    updates.push("translation_attempts = ?");
+    vals.push(patch.translation_attempts);
+  }
+  vals.push(row.id);
+  await env.DB.prepare(
+    `UPDATE items SET ${updates.join(", ")} WHERE id = ?`,
+  )
+    .bind(...vals)
+    .run();
+}
+
+export interface TranslateResult {
+  mode: string;
+  candidates: number;
+  tasks: number;
+  translated: number;
+  items_updated: number;
+  api_calls: number;
+  sanity_suspect: number;
+  sanity_retried: number;
+  sanity_remained_suspect: number;
+  items_marked_ok: number;
+  items_marked_suspect: number;
+  elapsed_ms: number;
+  skipped_no_key?: boolean;
+}
+
+export async function runFillTranslations(
+  env: EnrichEnv,
+  limit = 30,
+  batchSize = 5,
+): Promise<TranslateResult> {
+  const mode = "fill-translations";
+  const t0 = Date.now();
+  const base: TranslateResult = {
+    mode,
+    candidates: 0,
+    tasks: 0,
+    translated: 0,
+    items_updated: 0,
+    api_calls: 0,
+    sanity_suspect: 0,
+    sanity_retried: 0,
+    sanity_remained_suspect: 0,
+    items_marked_ok: 0,
+    items_marked_suspect: 0,
+    elapsed_ms: 0,
+  };
+  if (!env.DEEPSEEK_API_KEY) {
+    console.warn("fill-translations: DEEPSEEK_API_KEY missing, skipping");
+    return { ...base, skipped_no_key: true, elapsed_ms: Date.now() - t0 };
+  }
+
+  const rows = await selectTranslationCandidates(env, limit);
+  base.candidates = rows.length;
+  const rowMap = new Map<string, TranslationRow>();
+  const tasks: TranslationTask[] = [];
+  for (const row of rows) {
+    rowMap.set(row.id, row);
+    const rowTasks = extractTasks(row);
+    // Only take up to `limit` distinct items with tasks, to bound work.
+    if (rowTasks.length === 0) continue;
+    tasks.push(...rowTasks);
+    if (rowMap.size >= limit && tasks.length >= limit) break;
+  }
+  base.tasks = tasks.length;
+  if (tasks.length === 0) {
+    return { ...base, elapsed_ms: Date.now() - t0 };
+  }
+
+  const translations = new Map<number, string>();
+  for (let start = 0; start < tasks.length; start += batchSize) {
+    const batch = tasks.slice(start, start + batchSize);
+    base.api_calls++;
+    const result = await translateBatch(
+      env.DEEPSEEK_API_KEY,
+      batch.map((t) => t.text),
+    );
+    for (let i = 0; i < batch.length; i++) {
+      const tr = result.get(i);
+      if (tr) {
+        translations.set(start + i, tr);
+        base.translated++;
+      }
+    }
+  }
+
+  // Sanity check: retry suspect translations once.
+  const suspectIndices: number[] = [];
+  for (const [idx, tr] of translations) {
+    if (sanityHit(tasks[idx].text, tr)) suspectIndices.push(idx);
+  }
+  base.sanity_suspect = suspectIndices.length;
+
+  if (suspectIndices.length > 0) {
+    console.log(`sanity check: ${suspectIndices.length} suspect, retrying once`);
+    for (let start = 0; start < suspectIndices.length; start += batchSize) {
+      const idxBatch = suspectIndices.slice(start, start + batchSize);
+      const retryBatch = idxBatch.map((i) => tasks[i]);
+      base.api_calls++;
+      base.sanity_retried += idxBatch.length;
+      const result = await translateBatch(
+        env.DEEPSEEK_API_KEY,
+        retryBatch.map((t) => t.text),
+      );
+      for (let j = 0; j < idxBatch.length; j++) {
+        const retryTr = result.get(j);
+        if (retryTr) translations.set(idxBatch[j], retryTr);
+      }
+    }
+  }
+
+  // Group translations into patches + assess item-level quality.
+  const patches = new Map<string, TranslationItemPatch>();
+  const retriedItemIds = new Set<string>(
+    suspectIndices.map((i) => tasks[i].itemId),
+  );
+  const suspectItemIds = new Set<string>();
+  const itemsWithAnyTr = new Set<string>();
+
+  for (let i = 0; i < tasks.length; i++) {
+    const tr = translations.get(i);
+    if (!tr) continue;
+    const task = tasks[i];
+    itemsWithAnyTr.add(task.itemId);
+    const p = patches.get(task.itemId) || {};
+    if (task.field === "content") p.content_translated = tr;
+    else if (task.field === "quote_of") p.quote_content_translated = tr;
+    else if (task.field === "link_card_title") p.link_title_translated = tr;
+    else if (task.field === "link_card_desc") p.link_desc_translated = tr;
+    patches.set(task.itemId, p);
+    if (sanityHit(task.text, tr)) suspectItemIds.add(task.itemId);
+  }
+  base.sanity_remained_suspect = 0;
+  for (const i of suspectIndices) {
+    const tr = translations.get(i);
+    if (tr && sanityHit(tasks[i].text, tr)) base.sanity_remained_suspect++;
+  }
+
+  for (const itemId of itemsWithAnyTr) {
+    const p = patches.get(itemId);
+    if (!p) continue;
+    const suspect = suspectItemIds.has(itemId);
+    p.translation_quality = suspect ? "suspect" : "ok";
+    p.translation_attempts = retriedItemIds.has(itemId) ? 2 : 1;
+    if (suspect) base.items_marked_suspect++;
+    else base.items_marked_ok++;
+  }
+
+  for (const [itemId, patch] of patches) {
+    const row = rowMap.get(itemId);
+    if (!row) continue;
+    await applyTranslationPatch(env, row, patch);
+    base.items_updated++;
+  }
+
+  return { ...base, elapsed_ms: Date.now() - t0 };
+}
