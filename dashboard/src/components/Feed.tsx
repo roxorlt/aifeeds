@@ -4,7 +4,12 @@ import type { Item, SourceType } from "../types";
 import { TweetCard } from "./TweetCard";
 import { ThreadCard } from "./ThreadCard";
 import { SourceIcon } from "./icons";
-import { groupByThread } from "../lib/utils";
+import {
+  groupByThread,
+  getLastSeen,
+  setLastSeen,
+  rowMaxScrapedAt,
+} from "../lib/utils";
 
 interface Props {
   sourceType: SourceType;
@@ -16,6 +21,12 @@ interface Props {
 const INITIAL_LIMIT = 30;
 const LOAD_MORE_LIMIT = 30;
 const POLL_INTERVAL_MS = 30_000;
+// After this long of page-visible time, commit current top item to localStorage
+// as the new last-seen boundary. Next visit's waistband will sit just below it.
+// Commit the current top item as "seen" after this much *visible* page time.
+// Timer is paused while the tab is hidden — so if the user opens the tab but
+// never looks at it, last-seen stays where it was.
+const MARK_SEEN_DELAY_MS = 5_000;
 
 function SkeletonCard() {
   return (
@@ -143,7 +154,66 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     if (pending[0]) setLastUpdated(pending[0].scraped_at);
   };
 
+  // Capture last-seen boundary ONCE at mount — stays stable through the session
+  // so the waistband position doesn't shift while the user reads.
+  const initialLastSeenRef = useRef<string | null>(null);
+  const initializedLastSeen = useRef(false);
+  if (!initializedLastSeen.current && !placeholder) {
+    initialLastSeenRef.current = getLastSeen(sourceType);
+    initializedLastSeen.current = true;
+  }
+
+  // After MARK_SEEN_DELAY_MS of visible page time, commit current top item as
+  // the new last-seen boundary in localStorage. Also commit on visibility hidden.
+  useEffect(() => {
+    if (placeholder || items.length === 0) return;
+    const topScrapedAt = items[0].scraped_at;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const commit = () => setLastSeen(sourceType, topScrapedAt);
+    const scheduleCommit = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(commit, MARK_SEEN_DELAY_MS);
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        // Don't commit immediately on hidden — otherwise a brief tab switch
+        // would lock in the current top as "seen" even if user hasn't actually
+        // looked at it. Just clear the timer; next visible will reschedule.
+        if (timer) clearTimeout(timer);
+      } else {
+        scheduleCommit();
+      }
+    };
+
+    if (!document.hidden) scheduleCommit();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [sourceType, placeholder, items]);
+
   const rows = useMemo(() => groupByThread(items), [items]);
+
+  // Find the waistband insertion index: first row whose newest scraped_at is
+  // <= initialLastSeen (i.e., the first "already seen" row). Returns -1 if
+  // either everything is new (not loaded enough) or everything is seen.
+  const waistbandIndex = useMemo(() => {
+    const boundary = initialLastSeenRef.current;
+    if (!boundary || rows.length === 0) return -1;
+    let firstSeen = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rowMaxScrapedAt(rows[i]) <= boundary) {
+        firstSeen = i;
+        break;
+      }
+    }
+    // Only show divider if there's at least one unseen row above it, otherwise
+    // the "上次看到这里" line would appear at the very top with nothing new.
+    if (firstSeen <= 0) return -1;
+    return firstSeen;
+  }, [rows]);
 
   return (
     <div className="flex flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm">
@@ -204,13 +274,33 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
           </div>
         ) : (
           <>
-            {rows.map((row) =>
-              row.kind === "single" ? (
-                <TweetCard key={row.item.id} item={row.item} hideThreadBanner />
-              ) : (
-                <ThreadCard key={`thread-${row.rootId}`} items={row.items} />
-              ),
-            )}
+            {rows.flatMap((row, idx) => {
+              const nodes = [];
+              if (idx === waistbandIndex) {
+                nodes.push(
+                  <div
+                    key="waistband"
+                    className="flex items-center gap-2 border-y border-blue-200 bg-blue-50/60 px-3 py-1.5 text-[11px] font-medium text-blue-600"
+                  >
+                    <span className="h-px flex-1 bg-blue-200" />
+                    上次看到这里
+                    <span className="h-px flex-1 bg-blue-200" />
+                  </div>,
+                );
+              }
+              nodes.push(
+                row.kind === "single" ? (
+                  <TweetCard
+                    key={row.item.id}
+                    item={row.item}
+                    hideThreadBanner
+                  />
+                ) : (
+                  <ThreadCard key={`thread-${row.rootId}`} items={row.items} />
+                ),
+              );
+              return nodes;
+            })}
             {/* Infinite scroll sentinel */}
             {hasMore && (
               <div
