@@ -146,6 +146,23 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     return () => obs.disconnect();
   }, [placeholder, hasMore, loadMore]);
 
+  // Hot mode: if the initial fetch or a page-load returns items that all get
+  // filtered out as "seen", items becomes empty but hasMore is still true.
+  // Auto-chain into the next page so the user doesn't see a dead empty state.
+  useEffect(() => {
+    if (
+      !placeholder &&
+      isHot &&
+      !loading &&
+      !loadingMore &&
+      hasMore &&
+      nextCursor &&
+      items.length === 0
+    ) {
+      loadMore();
+    }
+  }, [placeholder, isHot, loading, loadingMore, hasMore, nextCursor, items.length, loadMore]);
+
   // Polling for new items — only meaningful in time-desc mode. In hot mode,
   // new scraped items don't necessarily appear at the top (they sort by score),
   // so the "N 条新内容" banner would be misleading.
@@ -329,7 +346,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
           </>
         ) : items.length === 0 ? (
           <div className="flex h-40 items-center justify-center text-sm text-neutral-400">
-            暂无内容
+            {isHot ? "热门内容已看完，试试时间倒序" : "暂无内容"}
           </div>
         ) : (
           <>
