@@ -52,7 +52,7 @@
 | 路径 | 方法 | 用途 | 鉴权 |
 |------|------|------|------|
 | `/api/ingest` | POST | 接收本地 push 的 tweets → 写 D1 items/sources | Bearer `INGEST_TOKEN` |
-| `/api/items` | GET | Dashboard 列表（支持分页、filter） | 无（只读） |
+| `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`） | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
@@ -63,6 +63,11 @@
 - CDN 边缘缓存：`cacheTtl=86400` + `Cache-Control: max-age=604800, immutable`
 - 白名单：`pbs.twimg.com` / `abs.twimg.com` / `video.twimg.com`（防被当开放代理滥用）
 - 命中 GFW 封锁的 CN 用户借此恢复图片加载
+
+**`/api/items` 热度排序**（2026-04-21 上线）：
+- 加 `sort=hot` 参数时按 HN 风格分数排序：`likes + 2*retweets + 3*replies`（24h `published_at` 窗口内）
+- 返回项额外带 `hot_score` 字段（仅 hot 模式）
+- 游标格式 `score|id`；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
 - `mode=backfill-quotes`（默认）/ `refresh-metrics` / `fill-translations`
