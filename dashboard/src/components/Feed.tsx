@@ -68,6 +68,9 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const [pullY, setPullY] = useState(0);
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
   const pullStartY = useRef<number | null>(null);
+  const pullYRef = useRef(0);
+  const loadingRef = useRef(false);
+  const isDraggingRef = useRef(false);
 
   const isHot = sortMode === "hot";
 
@@ -153,38 +156,74 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     if (isRefreshingPull && !loading) setIsRefreshingPull(false);
   }, [isRefreshingPull, loading]);
 
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
+
   const PULL_THRESHOLD = 60;
   const PULL_RESISTANCE = 2.5;
   const PULL_MAX = 110;
 
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (!feedBodyRef.current) return;
-    if (feedBodyRef.current.scrollTop <= 0) {
-      pullStartY.current = e.touches[0].clientY;
-    } else {
-      pullStartY.current = null;
-    }
-  };
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (pullStartY.current === null) return;
-    if (!feedBodyRef.current || feedBodyRef.current.scrollTop > 0) {
-      pullStartY.current = null;
+  // Native touch listeners so we can preventDefault in touchmove — React attaches
+  // its synthetic touchmove as a passive listener, so the browser's own pull-down
+  // behavior wins and the finger never "drags" the feed.
+  useEffect(() => {
+    if (placeholder) return;
+    const el = feedBodyRef.current;
+    if (!el) return;
+
+    const onStart = (e: TouchEvent) => {
+      if (el.scrollTop <= 0) {
+        pullStartY.current = e.touches[0].clientY;
+        isDraggingRef.current = false;
+      } else {
+        pullStartY.current = null;
+      }
+    };
+    const onMove = (e: TouchEvent) => {
+      if (pullStartY.current === null) return;
+      if (el.scrollTop > 0) {
+        pullStartY.current = null;
+        pullYRef.current = 0;
+        isDraggingRef.current = false;
+        setPullY(0);
+        return;
+      }
+      const dy = e.touches[0].clientY - pullStartY.current;
+      if (dy > 0) {
+        if (e.cancelable) e.preventDefault();
+        isDraggingRef.current = true;
+        const next = Math.min(dy / PULL_RESISTANCE, PULL_MAX);
+        pullYRef.current = next;
+        setPullY(next);
+      }
+    };
+    const onEnd = () => {
+      const shouldRefresh =
+        pullStartY.current !== null &&
+        pullYRef.current > PULL_THRESHOLD &&
+        !loadingRef.current;
+      if (shouldRefresh) {
+        setIsRefreshingPull(true);
+        setRetryTick((t) => t + 1);
+      }
+      pullYRef.current = 0;
+      isDraggingRef.current = false;
       setPullY(0);
-      return;
-    }
-    const dy = e.touches[0].clientY - pullStartY.current;
-    if (dy > 0) {
-      setPullY(Math.min(dy / PULL_RESISTANCE, PULL_MAX));
-    }
-  };
-  const handleTouchEnd = () => {
-    if (pullY > PULL_THRESHOLD && !loading) {
-      setIsRefreshingPull(true);
-      setRetryTick((t) => t + 1);
-    }
-    setPullY(0);
-    pullStartY.current = null;
-  };
+      pullStartY.current = null;
+    };
+
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, [placeholder]);
 
   // Hot mode: if the initial fetch or a page-load returns items that all get
   // filtered out as "seen", items becomes empty but hasMore is still true.
@@ -315,30 +354,31 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!placeholder && (
-            <div className="inline-flex overflow-hidden rounded-md border border-neutral-200 bg-white text-[11px]">
-              <button
-                type="button"
-                onClick={() => setSortMode("time")}
-                className={cn(
-                  "px-2 py-0.5 transition-colors",
-                  sortMode === "time"
-                    ? "bg-neutral-900 text-white"
-                    : "text-neutral-600 hover:bg-neutral-100",
-                )}
-              >
-                时间
-              </button>
+            <div className="inline-flex items-center gap-1.5 text-[11px]">
               <button
                 type="button"
                 onClick={() => setSortMode("hot")}
                 className={cn(
-                  "px-2 py-0.5 transition-colors",
+                  "transition-colors",
                   sortMode === "hot"
-                    ? "bg-neutral-900 text-white"
-                    : "text-neutral-600 hover:bg-neutral-100",
+                    ? "font-semibold text-neutral-900"
+                    : "text-neutral-400 hover:text-neutral-700",
                 )}
               >
                 热门
+              </button>
+              <span className="text-neutral-300">·</span>
+              <button
+                type="button"
+                onClick={() => setSortMode("time")}
+                className={cn(
+                  "transition-colors",
+                  sortMode === "time"
+                    ? "font-semibold text-neutral-900"
+                    : "text-neutral-400 hover:text-neutral-700",
+                )}
+              >
+                时间
               </button>
             </div>
           )}
@@ -363,18 +403,17 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       <div
         ref={feedBodyRef}
         className="flex-1 overflow-y-auto feed-body"
-        style={{ overscrollBehavior: "contain" }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={handleTouchEnd}
+        style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
       >
         {(pullY > 0 || isRefreshingPull) && !placeholder && (
           <div
-            className="flex items-end justify-center text-[11px] text-neutral-400 transition-[height]"
+            className="flex items-end justify-center overflow-hidden text-[11px] text-neutral-400"
             style={{
               height: isRefreshingPull ? PULL_THRESHOLD : pullY,
               paddingBottom: 6,
+              transition: isDraggingRef.current
+                ? "none"
+                : "height 200ms ease-out",
             }}
           >
             <span
