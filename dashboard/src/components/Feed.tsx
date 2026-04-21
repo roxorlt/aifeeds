@@ -58,7 +58,6 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const lastScrapedAt = useRef<string | null>(null);
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -92,7 +91,6 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         setPending([]);
         setNextCursor(res.next_cursor);
         setHasMore(res.has_more);
-        setLastUpdated(res.items[0]?.scraped_at || null);
         lastScrapedAt.current = res.items[0]?.scraped_at || null;
       })
       .catch((e) => !cancelled && setError(String(e)))
@@ -194,7 +192,6 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const showPending = () => {
     setItems((prev) => [...pending, ...prev]);
     setPending([]);
-    if (pending[0]) setLastUpdated(pending[0].scraped_at);
   };
 
   // Capture last-seen boundary ONCE at mount — stays stable through the session
@@ -303,8 +300,19 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
               </button>
             </div>
           )}
+          {!placeholder && (
+            <button
+              type="button"
+              onClick={() => setRetryTick((t) => t + 1)}
+              disabled={loading || loadingMore}
+              className="rounded-md border border-neutral-200 bg-white px-1.5 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"
+              title="刷新"
+            >
+              <span className={cn("inline-block", (loading || loadingMore) && "animate-spin")}>⟳</span>
+            </button>
+          )}
           <div className="text-[11px] text-neutral-500">
-            {placeholder ? "规划中" : loading && !lastUpdated ? "加载中" : ""}
+            {placeholder ? "规划中" : ""}
           </div>
         </div>
       </header>

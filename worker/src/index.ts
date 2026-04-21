@@ -259,15 +259,18 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const cursor = url.searchParams.get('cursor');
   const sortParam = url.searchParams.get('sort');
   const isHot = sortParam === 'hot';
-  // Hot mode: rank by engagement within 24h window. Time column still used as
-  // tiebreaker/default time filter but actual ordering is by hot_score.
   const sort = sortParam === 'published_at' || isHot ? 'published_at' : 'scraped_at';
-  // HN-style engagement: likes + 2×retweets + 3×replies. No age decay since we
-  // already clamp to a 24h window — raw engagement is the signal we want.
+  // Hot score: HN-style engagement with gravity decay so recent items win
+  // but older high-engagement items can still bubble up.
+  //   score = engagement / (age_hours + 2)^1.5
+  // Paired with a 30d soft window (below) to keep the candidate set bounded
+  // and let the pool feel rich without scanning the whole table.
   const HOT_EXPR = `(
-    COALESCE(CAST(json_extract(metrics, '$.likes') AS INTEGER), 0) +
-    2 * COALESCE(CAST(json_extract(metrics, '$.retweets') AS INTEGER), 0) +
-    3 * COALESCE(CAST(json_extract(metrics, '$.replies') AS INTEGER), 0)
+    (
+      COALESCE(CAST(json_extract(metrics, '$.likes') AS INTEGER), 0) +
+      2 * COALESCE(CAST(json_extract(metrics, '$.retweets') AS INTEGER), 0) +
+      3 * COALESCE(CAST(json_extract(metrics, '$.replies') AS INTEGER), 0)
+    ) * 1.0 / POW((julianday('now') - julianday(published_at)) * 24 + 2, 1.5)
   )`;
 
   const conditions: string[] = [];
@@ -294,10 +297,11 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
 
   // Time range
   if (isHot) {
-    // Hot mode: always 24h window on published_at, ignore since/until/default-7d
-    const day = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // Hot mode: 30d window on published_at (gravity decay handles ordering).
+    // Wider than 24h so the pool stays rich after the user has seen recent peaks.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     conditions.push(`published_at >= ?`);
-    params.push(day);
+    params.push(thirtyDaysAgo);
   } else {
     if (since) {
       conditions.push(`${sort} >= ?`);
@@ -320,7 +324,7 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     if (a && b) {
       if (isHot) {
         conditions.push(`(${HOT_EXPR} < ? OR (${HOT_EXPR} = ? AND id < ?))`);
-        params.push(parseInt(a), parseInt(a), b);
+        params.push(parseFloat(a), parseFloat(a), b);
       } else {
         conditions.push(`(${sort} < ? OR (${sort} = ? AND id < ?))`);
         params.push(a, a, b);
