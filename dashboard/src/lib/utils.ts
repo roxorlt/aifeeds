@@ -68,6 +68,39 @@ export function parseJsonField<T>(field: unknown): T | null {
   return field as T;
 }
 
+// last-seen storage: per-feed boundary (scraped_at string) marking the newest
+// item the user has seen. Used to render the "上次看到这里" waistband.
+const LAST_SEEN_PREFIX = "xlist:last_seen:";
+
+export function getLastSeen(sourceType: string): string | null {
+  try {
+    return localStorage.getItem(LAST_SEEN_PREFIX + sourceType);
+  } catch {
+    return null;
+  }
+}
+
+export function setLastSeen(sourceType: string, scrapedAt: string): void {
+  try {
+    const prev = localStorage.getItem(LAST_SEEN_PREFIX + sourceType);
+    // Only write forward — never move the boundary backward.
+    if (!prev || scrapedAt > prev) {
+      localStorage.setItem(LAST_SEEN_PREFIX + sourceType, scrapedAt);
+    }
+  } catch {
+    // ignore — localStorage may be disabled
+  }
+}
+
+export function rowMaxScrapedAt(row: FeedRow): string {
+  if (row.kind === "single") return row.item.scraped_at;
+  // Thread row: any item in the thread being "new" makes the whole thread new.
+  return row.items.reduce(
+    (max, i) => (i.scraped_at > max ? i.scraped_at : max),
+    "",
+  );
+}
+
 export type FeedRow =
   | { kind: "single"; item: Item }
   | { kind: "thread"; rootId: string; items: Item[] };
