@@ -16,6 +16,12 @@ body,
   margin: 0;
 }
 
+html,
+body {
+  /* Block browser pull-to-refresh so the inner feed gesture owns the interaction. */
+  overscroll-behavior-y: none;
+}
+
 body {
   background: #fafafa;
   color: #171717;

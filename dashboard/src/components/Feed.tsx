@@ -62,8 +62,12 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
-  const [sortMode, setSortMode] = useState<SortMode>("time");
+  const [sortMode, setSortMode] = useState<SortMode>("hot");
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const feedBodyRef = useRef<HTMLDivElement | null>(null);
+  const [pullY, setPullY] = useState(0);
+  const [isRefreshingPull, setIsRefreshingPull] = useState(false);
+  const pullStartY = useRef<number | null>(null);
 
   const isHot = sortMode === "hot";
 
@@ -143,6 +147,44 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     obs.observe(el);
     return () => obs.disconnect();
   }, [placeholder, hasMore, loadMore]);
+
+  // Release the pull spinner once the refresh actually completes.
+  useEffect(() => {
+    if (isRefreshingPull && !loading) setIsRefreshingPull(false);
+  }, [isRefreshingPull, loading]);
+
+  const PULL_THRESHOLD = 60;
+  const PULL_RESISTANCE = 2.5;
+  const PULL_MAX = 110;
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (!feedBodyRef.current) return;
+    if (feedBodyRef.current.scrollTop <= 0) {
+      pullStartY.current = e.touches[0].clientY;
+    } else {
+      pullStartY.current = null;
+    }
+  };
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (pullStartY.current === null) return;
+    if (!feedBodyRef.current || feedBodyRef.current.scrollTop > 0) {
+      pullStartY.current = null;
+      setPullY(0);
+      return;
+    }
+    const dy = e.touches[0].clientY - pullStartY.current;
+    if (dy > 0) {
+      setPullY(Math.min(dy / PULL_RESISTANCE, PULL_MAX));
+    }
+  };
+  const handleTouchEnd = () => {
+    if (pullY > PULL_THRESHOLD && !loading) {
+      setIsRefreshingPull(true);
+      setRetryTick((t) => t + 1);
+    }
+    setPullY(0);
+    pullStartY.current = null;
+  };
 
   // Hot mode: if the initial fetch or a page-load returns items that all get
   // filtered out as "seen", items becomes empty but hasMore is still true.
@@ -300,17 +342,6 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
               </button>
             </div>
           )}
-          {!placeholder && (
-            <button
-              type="button"
-              onClick={() => setRetryTick((t) => t + 1)}
-              disabled={loading || loadingMore}
-              className="rounded-md border border-neutral-200 bg-white px-1.5 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"
-              title="刷新"
-            >
-              <span className={cn("inline-block", (loading || loadingMore) && "animate-spin")}>⟳</span>
-            </button>
-          )}
           <div className="text-[11px] text-neutral-500">
             {placeholder ? "规划中" : ""}
           </div>
@@ -329,7 +360,38 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       )}
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto feed-body">
+      <div
+        ref={feedBodyRef}
+        className="flex-1 overflow-y-auto feed-body"
+        style={{ overscrollBehavior: "contain" }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+      >
+        {(pullY > 0 || isRefreshingPull) && !placeholder && (
+          <div
+            className="flex items-end justify-center text-[11px] text-neutral-400 transition-[height]"
+            style={{
+              height: isRefreshingPull ? PULL_THRESHOLD : pullY,
+              paddingBottom: 6,
+            }}
+          >
+            <span
+              className={cn(
+                "inline-block mr-2",
+                isRefreshingPull && "animate-spin",
+              )}
+            >⟳</span>
+            <span>
+              {isRefreshingPull
+                ? "正在刷新"
+                : pullY > PULL_THRESHOLD
+                  ? "松手刷新"
+                  : "下拉刷新"}
+            </span>
+          </div>
+        )}
         {placeholder ? (
           <div className="flex h-40 items-center justify-center text-sm text-neutral-400">
             暂无数据源
@@ -345,7 +407,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
               重试
             </button>
           </div>
-        ) : loading && items.length === 0 ? (
+        ) : items.length === 0 && hasMore ? (
           <>
             <SkeletonCard />
             <SkeletonCard />
