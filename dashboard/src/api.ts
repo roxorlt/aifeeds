@@ -11,7 +11,7 @@ export interface ItemsQuery {
   relevant?: 0 | 1;
   limit?: number;
   cursor?: string;
-  sort?: "scraped_at" | "published_at";
+  sort?: "scraped_at" | "published_at" | "hot";
 }
 
 function buildQuery(params: Record<string, unknown>): string {

@@ -92,6 +92,54 @@ export function setLastSeen(sourceType: string, scrapedAt: string): void {
   }
 }
 
+// seen-ids LRU: used by hot-sort mode to filter out already-seen items so
+// both pull-down and pull-up surface "unseen hottest". Stored as newest-first
+// array with a size cap and TTL. TTL matches hot window + slack — stale ids
+// outside the hot window don't affect filtering anyway, but keeping them
+// capped bounds localStorage usage.
+const SEEN_IDS_PREFIX = "xlist:seen_ids:";
+const SEEN_IDS_MAX = 500;
+const SEEN_IDS_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+interface SeenEntry {
+  id: string;
+  at: number;
+}
+
+export function getSeenIds(sourceType: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(SEEN_IDS_PREFIX + sourceType);
+    if (!raw) return new Set();
+    const entries: SeenEntry[] = JSON.parse(raw);
+    const cutoff = Date.now() - SEEN_IDS_TTL_MS;
+    return new Set(entries.filter((e) => e.at >= cutoff).map((e) => e.id));
+  } catch {
+    return new Set();
+  }
+}
+
+export function markSeen(sourceType: string, ids: string[]): void {
+  if (ids.length === 0) return;
+  try {
+    const key = SEEN_IDS_PREFIX + sourceType;
+    const raw = localStorage.getItem(key);
+    const existing: SeenEntry[] = raw ? JSON.parse(raw) : [];
+    const cutoff = Date.now() - SEEN_IDS_TTL_MS;
+    const now = Date.now();
+    // Drop expired + dedup (new ids win by pushing to front).
+    const fresh = new Map<string, number>();
+    for (const e of existing) if (e.at >= cutoff) fresh.set(e.id, e.at);
+    for (const id of ids) fresh.set(id, now);
+    // Most-recent-first, cap to MAX.
+    const combined = Array.from(fresh, ([id, at]) => ({ id, at }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, SEEN_IDS_MAX);
+    localStorage.setItem(key, JSON.stringify(combined));
+  } catch {
+    // ignore
+  }
+}
+
 export function rowMaxScrapedAt(row: FeedRow): string {
   if (row.kind === "single") return row.item.scraped_at;
   // Thread row: any item in the thread being "new" makes the whole thread new.

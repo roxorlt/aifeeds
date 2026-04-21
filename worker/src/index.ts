@@ -257,7 +257,18 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const relevant = url.searchParams.get('relevant') ?? '1';
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200);
   const cursor = url.searchParams.get('cursor');
-  const sort = url.searchParams.get('sort') === 'published_at' ? 'published_at' : 'scraped_at';
+  const sortParam = url.searchParams.get('sort');
+  const isHot = sortParam === 'hot';
+  // Hot mode: rank by engagement within 24h window. Time column still used as
+  // tiebreaker/default time filter but actual ordering is by hot_score.
+  const sort = sortParam === 'published_at' || isHot ? 'published_at' : 'scraped_at';
+  // HN-style engagement: likes + 2×retweets + 3×replies. No age decay since we
+  // already clamp to a 24h window — raw engagement is the signal we want.
+  const HOT_EXPR = `(
+    COALESCE(CAST(json_extract(metrics, '$.likes') AS INTEGER), 0) +
+    2 * COALESCE(CAST(json_extract(metrics, '$.retweets') AS INTEGER), 0) +
+    3 * COALESCE(CAST(json_extract(metrics, '$.replies') AS INTEGER), 0)
+  )`;
 
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -282,33 +293,49 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   }
 
   // Time range
-  if (since) {
-    conditions.push(`${sort} >= ?`);
-    params.push(since);
-  } else if (!cursor) {
-    // Default: last 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    conditions.push(`${sort} >= ?`);
-    params.push(sevenDaysAgo);
-  }
-  if (until) {
-    conditions.push(`${sort} <= ?`);
-    params.push(until);
+  if (isHot) {
+    // Hot mode: always 24h window on published_at, ignore since/until/default-7d
+    const day = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    conditions.push(`published_at >= ?`);
+    params.push(day);
+  } else {
+    if (since) {
+      conditions.push(`${sort} >= ?`);
+      params.push(since);
+    } else if (!cursor) {
+      // Default: last 7 days
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      conditions.push(`${sort} >= ?`);
+      params.push(sevenDaysAgo);
+    }
+    if (until) {
+      conditions.push(`${sort} <= ?`);
+      params.push(until);
+    }
   }
 
-  // Cursor pagination: compound cursor "scraped_at|id"
+  // Cursor pagination. For hot mode cursor is "score|id"; otherwise "time|id".
   if (cursor) {
-    const [cursorTime, cursorId] = cursor.split('|');
-    if (cursorTime && cursorId) {
-      conditions.push(`(${sort} < ? OR (${sort} = ? AND id < ?))`);
-      params.push(cursorTime, cursorTime, cursorId);
+    const [a, b] = cursor.split('|');
+    if (a && b) {
+      if (isHot) {
+        conditions.push(`(${HOT_EXPR} < ? OR (${HOT_EXPR} = ? AND id < ?))`);
+        params.push(parseInt(a), parseInt(a), b);
+      } else {
+        conditions.push(`(${sort} < ? OR (${sort} = ? AND id < ?))`);
+        params.push(a, a, b);
+      }
     }
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   // Fetch limit+1 to determine has_more
-  const sql = `SELECT * FROM items ${where} ORDER BY ${sort} DESC, id DESC LIMIT ?`;
+  const orderBy = isHot
+    ? `${HOT_EXPR} DESC, id DESC`
+    : `${sort} DESC, id DESC`;
+  const selectHotScore = isHot ? `, ${HOT_EXPR} AS hot_score` : '';
+  const sql = `SELECT *${selectHotScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
   params.push(limit + 1);
 
   const start = Date.now();
@@ -325,7 +352,9 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
-    nextCursor = `${last[sort]}|${last.id}`;
+    nextCursor = isHot
+      ? `${last.hot_score}|${last.id}`
+      : `${last[sort]}|${last.id}`;
   }
 
   return jsonResponse({
