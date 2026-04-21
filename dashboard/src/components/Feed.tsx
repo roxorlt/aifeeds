@@ -9,7 +9,12 @@ import {
   getLastSeen,
   setLastSeen,
   rowMaxScrapedAt,
+  getSeenIds,
+  markSeen,
+  cn,
 } from "../lib/utils";
+
+type SortMode = "time" | "hot";
 
 interface Props {
   sourceType: SourceType;
@@ -58,18 +63,32 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
+  const [sortMode, setSortMode] = useState<SortMode>("time");
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // Initial load + refresh on tick
+  const isHot = sortMode === "hot";
+
+  // Initial load + refresh on tick or sort change
   useEffect(() => {
     if (placeholder) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchItems({ source_type: sourceType, limit: INITIAL_LIMIT })
+    fetchItems({
+      source_type: sourceType,
+      limit: INITIAL_LIMIT,
+      sort: isHot ? "hot" : undefined,
+    })
       .then((res) => {
         if (cancelled) return;
-        setItems(res.items);
+        let itemsToShow = res.items;
+        if (isHot) {
+          // Filter out already-seen ids so pull-down surfaces unseen hottest.
+          const seen = getSeenIds(sourceType);
+          itemsToShow = res.items.filter((i) => !seen.has(i.id));
+          markSeen(sourceType, itemsToShow.map((i) => i.id));
+        }
+        setItems(itemsToShow);
         setPending([]);
         setNextCursor(res.next_cursor);
         setHasMore(res.has_more);
@@ -81,7 +100,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -91,10 +110,15 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         source_type: sourceType,
         cursor: nextCursor,
         limit: LOAD_MORE_LIMIT,
+        sort: isHot ? "hot" : undefined,
       });
+      const seen = isHot ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
-        const fresh = res.items.filter((i) => !existing.has(i.id));
+        const fresh = res.items.filter(
+          (i) => !existing.has(i.id) && (!seen || !seen.has(i.id)),
+        );
+        if (isHot) markSeen(sourceType, fresh.map((i) => i.id));
         return [...prev, ...fresh];
       });
       setNextCursor(res.next_cursor);
@@ -104,7 +128,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     } finally {
       setLoadingMore(false);
     }
-  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType]);
+  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot]);
 
   // IntersectionObserver for infinite scroll
   useEffect(() => {
@@ -122,9 +146,11 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     return () => obs.disconnect();
   }, [placeholder, hasMore, loadMore]);
 
-  // Polling for new items
+  // Polling for new items — only meaningful in time-desc mode. In hot mode,
+  // new scraped items don't necessarily appear at the top (they sort by score),
+  // so the "N 条新内容" banner would be misleading.
   useEffect(() => {
-    if (placeholder) return;
+    if (placeholder || isHot) return;
     const poll = async () => {
       if (!lastScrapedAt.current) return;
       try {
@@ -146,7 +172,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     };
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [sourceType, placeholder, items, pending]);
+  }, [sourceType, placeholder, items, pending, isHot]);
 
   const showPending = () => {
     setItems((prev) => [...pending, ...prev]);
@@ -165,8 +191,9 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
 
   // After MARK_SEEN_DELAY_MS of visible page time, commit current top item as
   // the new last-seen boundary in localStorage. Also commit on visibility hidden.
+  // Skip in hot mode — "top" is not chronological there.
   useEffect(() => {
-    if (placeholder || items.length === 0) return;
+    if (placeholder || isHot || items.length === 0) return;
     const topScrapedAt = items[0].scraped_at;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -192,14 +219,16 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [sourceType, placeholder, items]);
+  }, [sourceType, placeholder, items, isHot]);
 
   const rows = useMemo(() => groupByThread(items), [items]);
 
   // Find the waistband insertion index: first row whose newest scraped_at is
   // <= initialLastSeen (i.e., the first "already seen" row). Returns -1 if
   // either everything is new (not loaded enough) or everything is seen.
+  // Always -1 in hot mode since rows aren't chronologically ordered.
   const waistbandIndex = useMemo(() => {
+    if (isHot) return -1;
     const boundary = initialLastSeenRef.current;
     if (!boundary || rows.length === 0) return -1;
     let firstSeen = -1;
@@ -213,7 +242,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     // the "上次看到这里" line would appear at the very top with nothing new.
     if (firstSeen <= 0) return -1;
     return firstSeen;
-  }, [rows]);
+  }, [rows, isHot]);
 
   return (
     <div className="flex flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm">
@@ -228,8 +257,38 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
             {title}
           </span>
         </div>
-        <div className="shrink-0 text-[11px] text-neutral-500">
-          {placeholder ? "规划中" : loading && !lastUpdated ? "加载中" : ""}
+        <div className="flex shrink-0 items-center gap-2">
+          {!placeholder && (
+            <div className="inline-flex overflow-hidden rounded-md border border-neutral-200 bg-white text-[11px]">
+              <button
+                type="button"
+                onClick={() => setSortMode("time")}
+                className={cn(
+                  "px-2 py-0.5 transition-colors",
+                  sortMode === "time"
+                    ? "bg-neutral-900 text-white"
+                    : "text-neutral-600 hover:bg-neutral-100",
+                )}
+              >
+                时间
+              </button>
+              <button
+                type="button"
+                onClick={() => setSortMode("hot")}
+                className={cn(
+                  "px-2 py-0.5 transition-colors",
+                  sortMode === "hot"
+                    ? "bg-neutral-900 text-white"
+                    : "text-neutral-600 hover:bg-neutral-100",
+                )}
+              >
+                热门
+              </button>
+            </div>
+          )}
+          <div className="text-[11px] text-neutral-500">
+            {placeholder ? "规划中" : loading && !lastUpdated ? "加载中" : ""}
+          </div>
         </div>
       </header>
 
