@@ -381,7 +381,7 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
 
   const today = new Date().toISOString().slice(0, 10);
   const itemsToday = await env.DB.prepare(
-    'SELECT COUNT(*) as count FROM items WHERE scraped_at >= ?'
+    'SELECT COUNT(*) as count FROM items WHERE scraped_at >= ? AND is_relevant = 1'
   ).bind(today).first<{ count: number }>();
 
   const bySourceMap: Record<string, number> = {};
