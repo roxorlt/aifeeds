@@ -65,9 +65,11 @@
 - 命中 GFW 封锁的 CN 用户借此恢复图片加载
 
 **`/api/items` 热度排序**（2026-04-21 上线）：
-- 加 `sort=hot` 参数时按 HN 风格分数排序：`likes + 2*retweets + 3*replies`（24h `published_at` 窗口内）
-- 返回项额外带 `hot_score` 字段（仅 hot 模式）
-- 游标格式 `score|id`；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
+- 加 `sort=hot` 参数时按 HN 风格重力衰减分数排序：
+  `score = (likes + 2*retweets + 3*replies) / (age_hours + 2)^1.5`
+  覆盖 30 天 `published_at` 窗口，老病毒推文可与新推文混排
+- 返回项额外带 `hot_score` 浮点字段（仅 hot 模式）
+- 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
 - `mode=backfill-quotes`（默认）/ `refresh-metrics` / `fill-translations`
