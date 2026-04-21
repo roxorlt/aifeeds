@@ -6,7 +6,15 @@ export function cn(...classes: (string | false | null | undefined)[]): string {
 
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "";
-  const date = new Date(iso.replace(" ", "T"));
+  // D1 stores scraped_at as UTC naive string (e.g. "2026-04-21 09:31:22").
+  // Without a timezone suffix, new Date() parses as local time — on UTC+8
+  // that would shift UTC 09:31 to 01:31, producing "8 小时前" for a fresh row.
+  // Force UTC by appending Z.
+  const normalized = iso.includes("T") ? iso : iso.replace(" ", "T");
+  const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(normalized)
+    ? normalized
+    : `${normalized}Z`;
+  const date = new Date(withTz);
   if (isNaN(date.getTime())) return iso;
   const diff = Date.now() - date.getTime();
   const sec = Math.floor(diff / 1000);
