@@ -1390,3 +1390,321 @@ export async function runFillTranslations(
 
   return { ...base, elapsed_ms: Date.now() - t0 };
 }
+
+// ─── Long-form (X Premium note_tweet) detection + serve ────────
+// X Premium users can post tweets up to 25k chars. The DOM and the public
+// syndication API both surface only the 280-char teaser; the full body sits
+// behind a NoteTweetResults entity that's reachable only via the auth'd
+// GraphQL API. So we split the work:
+//
+//   1. Detection (here, on Worker): heuristic-pick suspect items
+//      (length 270-290, mid-word ending), call syndication, look for
+//      `note_tweet.id`. Mark detection result on items.extra.longform.
+//   2. Browser fetch (local Mac script): poll /api/longform/pending,
+//      open x.com/{handle}/status/{id} with cookies, scrape full text,
+//      POST back via /api/longform/submit.
+//
+// extra.longform shape:
+//   {
+//     detected_at: ISO,
+//     note_id?: string,        // present iff X says it's a long-form tweet
+//     fetched_at?: ISO,        // set by /submit on success
+//     fetch_error?: string,    // set by /submit on failure
+//     fetch_attempts?: number, // for retry budget
+//   }
+
+interface LongformDetection {
+  detected_at: string;
+  note_id?: string;
+  fetched_at?: string;
+  fetch_error?: string;
+  fetch_attempts?: number;
+}
+
+const SENTENCE_END_CHARS = new Set([
+  '.', '!', '?', '。', '！', '？',
+  '"', '”', "'", '’',
+  ')', ']', '}', '~',
+  ' ', '\n', '\t',
+]);
+
+function noteIdFromTweet(data: Record<string, unknown>): string | null {
+  const nt = data.note_tweet as Record<string, unknown> | undefined;
+  if (!nt) return null;
+  const id = nt.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function readLongform(extra: string | null): LongformDetection | null {
+  if (!extra) return null;
+  try {
+    const parsed = JSON.parse(extra) as Record<string, unknown>;
+    const lf = parsed.longform as Record<string, unknown> | undefined;
+    if (!lf) return null;
+    return lf as unknown as LongformDetection;
+  } catch {
+    return null;
+  }
+}
+
+async function writeLongform(
+  env: EnrichEnv,
+  itemId: string,
+  rowExtra: string | null,
+  detection: LongformDetection,
+): Promise<void> {
+  let extra: Record<string, unknown> = {};
+  if (rowExtra) {
+    try { extra = JSON.parse(rowExtra); } catch { extra = {}; }
+  }
+  extra.longform = detection;
+  await env.DB.prepare("UPDATE items SET extra = ? WHERE id = ?")
+    .bind(JSON.stringify(extra), itemId)
+    .run();
+}
+
+interface DetectCandidateRow {
+  id: string;
+  source_id: string;
+  content: string;
+  extra: string | null;
+}
+
+/** Pick suspect-truncated items: length around 280 chars, ending mid-word,
+ *  with no longform marker yet. Filter is index-friendly via length() on
+ *  content; the 'NOT LIKE' clause is acceptable because the suspect bucket is
+ *  small (<5k items) and runs once historical seed completes. */
+async function selectLongformCandidates(
+  env: EnrichEnv,
+  limit: number,
+): Promise<DetectCandidateRow[]> {
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, content, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND length(content) BETWEEN 270 AND 290
+       AND (extra IS NULL OR extra NOT LIKE '%"longform"%')
+     ORDER BY scraped_at DESC
+     LIMIT ?`,
+  )
+    .bind(Math.min(Math.max(limit * 3, 60), 600))
+    .all<DetectCandidateRow>();
+
+  const out: DetectCandidateRow[] = [];
+  for (const r of rows.results) {
+    const last = r.content.charAt(r.content.length - 1);
+    if (SENTENCE_END_CHARS.has(last)) continue;
+    out.push(r);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+export interface LongformDetectResult {
+  mode: string;
+  scanned: number;
+  with_note: number;
+  no_note: number;
+  not_found: number;
+  failed: number;
+  elapsed_ms: number;
+  remaining_hint?: number;
+}
+
+export async function runDetectLongform(
+  env: EnrichEnv,
+  limit = 30,
+  rateSleepMs = 400,
+): Promise<LongformDetectResult> {
+  const mode = "detect-longform";
+  const t0 = Date.now();
+  const candidates = await selectLongformCandidates(env, limit);
+  const counts = {
+    scanned: 0,
+    with_note: 0,
+    no_note: 0,
+    not_found: 0,
+    failed: 0,
+  };
+  const nowIso = (): string => new Date().toISOString();
+
+  for (const row of candidates) {
+    const tid = row.source_id;
+    const res = await fetchTweet(tid);
+    if (res === null) {
+      counts.failed++;
+    } else if (res.notFound) {
+      // Tweet deleted or private — record as checked (no note) so we don't
+      // re-scan; the local fetcher won't pick it up because note_id is unset.
+      await writeLongform(env, row.id, row.extra, {
+        detected_at: nowIso(),
+        fetch_error: "syndication_404",
+      });
+      counts.not_found++;
+      counts.scanned++;
+    } else if (res.data) {
+      const noteId = noteIdFromTweet(res.data);
+      const det: LongformDetection = { detected_at: nowIso() };
+      if (noteId) {
+        det.note_id = noteId;
+        counts.with_note++;
+      } else {
+        counts.no_note++;
+      }
+      await writeLongform(env, row.id, row.extra, det);
+      counts.scanned++;
+    }
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+  }
+
+  return {
+    mode,
+    scanned: counts.scanned,
+    with_note: counts.with_note,
+    no_note: counts.no_note,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.scanned),
+  };
+}
+
+// ─── Pending list + submit (paired with local browser fetcher) ─
+
+export interface PendingLongformItem {
+  id: string;
+  source_id: string;
+  handle: string;
+  url: string;
+  content_len: number;
+  note_id: string;
+  attempts: number;
+}
+
+export async function listPendingLongform(
+  env: EnrichEnv,
+  limit = 20,
+  maxAttempts = 3,
+): Promise<PendingLongformItem[]> {
+  // SQL pre-filter narrows by JSON markers; in-app validate to avoid
+  // false positives from string-matching on unrelated fields.
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, handle, url, content, extra
+     FROM items
+     WHERE extra LIKE '%"note_id"%'
+       AND extra NOT LIKE '%"fetched_at"%'
+     ORDER BY scraped_at DESC
+     LIMIT ?`,
+  )
+    .bind(Math.min(Math.max(limit * 2, 20), 200))
+    .all<{
+      id: string;
+      source_id: string;
+      handle: string;
+      url: string;
+      content: string;
+      extra: string | null;
+    }>();
+
+  const out: PendingLongformItem[] = [];
+  for (const r of rows.results) {
+    const lf = readLongform(r.extra);
+    if (!lf || !lf.note_id) continue;
+    if (lf.fetched_at) continue;
+    const attempts = lf.fetch_attempts ?? 0;
+    if (attempts >= maxAttempts) continue;
+    out.push({
+      id: r.id,
+      source_id: r.source_id,
+      handle: r.handle,
+      url: r.url,
+      content_len: r.content.length,
+      note_id: lf.note_id,
+      attempts,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+export interface SubmitResult {
+  updated: boolean;
+  reason?: string;
+  new_len?: number;
+  prev_len?: number;
+}
+
+export async function submitLongformText(
+  env: EnrichEnv,
+  itemId: string,
+  fullText: string | null,
+  fetchError?: string,
+): Promise<SubmitResult> {
+  const row = await env.DB.prepare(
+    "SELECT id, content, extra FROM items WHERE id = ?",
+  )
+    .bind(itemId)
+    .first<{ id: string; content: string; extra: string | null }>();
+  if (!row) return { updated: false, reason: "item_not_found" };
+
+  let extra: Record<string, unknown> = {};
+  if (row.extra) {
+    try { extra = JSON.parse(row.extra); } catch { extra = {}; }
+  }
+  const lf = (extra.longform as LongformDetection | undefined) ?? {
+    detected_at: new Date().toISOString(),
+  };
+  lf.fetch_attempts = (lf.fetch_attempts ?? 0) + 1;
+
+  const trimmed = (fullText ?? "").trim();
+  if (!trimmed || fetchError) {
+    lf.fetch_error = fetchError || "empty_text";
+    extra.longform = lf;
+    await env.DB.prepare("UPDATE items SET extra = ? WHERE id = ?")
+      .bind(JSON.stringify(extra), itemId)
+      .run();
+    return {
+      updated: false,
+      reason: lf.fetch_error,
+      prev_len: row.content.length,
+    };
+  }
+
+  // Sanity: only accept text that's longer than what we have. Otherwise the
+  // browser likely captured a teaser-equivalent or something went wrong.
+  if (trimmed.length <= row.content.length) {
+    lf.fetch_error = "not_longer";
+    extra.longform = lf;
+    await env.DB.prepare("UPDATE items SET extra = ? WHERE id = ?")
+      .bind(JSON.stringify(extra), itemId)
+      .run();
+    return {
+      updated: false,
+      reason: "not_longer",
+      prev_len: row.content.length,
+      new_len: trimmed.length,
+    };
+  }
+
+  lf.fetched_at = new Date().toISOString();
+  delete lf.fetch_error;
+  extra.longform = lf;
+
+  await env.DB.prepare(
+    `UPDATE items
+       SET content = ?,
+           content_translated = NULL,
+           translation_quality = NULL,
+           translation_attempts = 0,
+           extra = ?
+     WHERE id = ?`,
+  )
+    .bind(trimmed, JSON.stringify(extra), itemId)
+    .run();
+
+  return {
+    updated: true,
+    prev_len: row.content.length,
+    new_len: trimmed.length,
+  };
+}
