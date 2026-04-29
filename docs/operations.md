@@ -57,6 +57,8 @@
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
+| `/api/longform/pending` | GET | 长推 fetch 队列（`?limit=20`，最多 50；`attempts < 3`） | Bearer `INGEST_TOKEN` |
+| `/api/longform/submit` | POST | 提交本地浏览器抓回的完整长推正文 | Bearer `INGEST_TOKEN` |
 | `/img` | GET | twimg 图片反代（绕 GFW，CF 边缘缓存 7 天） | 无（host 白名单限 pbs/abs/video.twimg.com） |
 
 **`/img` 图片代理**（2026-04-20 上线）：
@@ -73,9 +75,9 @@
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `refresh-metrics` / `refresh-tiered` / `fill-translations` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
-- `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）
-- `rate_sleep_ms=400`（backfill / refresh / tiered）
+- `mode=backfill-quotes`（默认）/ `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
+- `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）；detect-longform 默认 30（1-80）
+- `rate_sleep_ms=400`（backfill / refresh / tiered / detect-longform）
 - `lookback_days=14`（仅 refresh-metrics，1-90）
 - `max_tier=4`（仅 refresh-tiered，0-4；灰度时设 1 = 只刷 L0+L1）
 - `batch_size=5`（仅 fill-translations，1-20；一次 DeepSeek 调用包多少条文本）
@@ -84,9 +86,9 @@
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
+| `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
 
-**调度节奏**（2026-04-21 回退到原 fill-light 配比）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 8 次 backfill-quotes（`:05 :10 :20 :25 :35 :40 :50 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill 槽跑 cleanup。
+**调度节奏**（2026-04-29 加入 detect-longform）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 6 次 backfill-quotes（`:05 :20 :25 :35 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill 槽跑 cleanup。
 
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
@@ -97,14 +99,16 @@
 > 2026-04-21 曾短暂调成 fill-heavy（8x/hr）清积压，实测 722 条 quote_pending 中仅 **0.3%**（1 条）是非中文，qual_ok 到 20 后彻底停滞。Backfill 才是真正的瓶颈（syndication API hydration）。
 
 **每模式容量**：
-- backfill-quotes：20 条/次 × 8 次/小时 × 24 = 3840 条/天（日增 ~100 条，绰绰有余；syndication API 才是真瓶颈）
+- backfill-quotes：20 条/次 × 6 次/小时 × 24 = 2880 条/天（日增 ~100 条，绰绰有余；syndication API 才是真瓶颈）
 - refresh-metrics：20 条/次 × 2 次/小时 × 24 = 960 条/天（最近 14 天的 item 轮转刷新）
 - fill-translations：30 条/次 × 2 次/小时 × 24 = 1440 条/天（每条最多补 4 个字段：content + quote_of + link_card title/desc；实际翻译候选极少，多数 run 命中 tasks:0）
+- detect-longform：25 条/次 × 2 次/小时 × 24 = 1200 条/天（候选 SQL 限 length 270-290 mid-word；命中 ~75% 写 `extra.longform.note_id`，等本地浏览器拉取）
 
 **子请求预算**（CF Free 限 50/invocation）：
 - backfill-quotes：~43-48（20 fetch + 20 UPDATE + overhead）
 - refresh-metrics：~43-48（同上，metrics UPDATE）
 - fill-translations：~30-48（1 SELECT + 3-12 DeepSeek 初翻 + 最多 3 DeepSeek 重试 + 15 UPDATE；sanity check 触发重试时吃上限）
+- detect-longform：~43-48（1 SELECT + 25 syndication GET + ~17 UPDATE，命中率 ~70% 时贴上限）
 
 **翻译质量 sanity check**（2026-04-20 上线，两端一致）：
 - 阈值：`length_ratio < 0.15 or > 2.0`，`CJK_ratio < 20% or >= 99.9%`
@@ -247,6 +251,7 @@
 | `cleanup_translations.py` | 修复历史翻译（黑名单扫全库） | 按需手动 |
 | `sync_reclassified_to_cloud.py` | 本地 reclassify 后补推到 D1 | 按需手动 |
 | `balance_check.py` | 查 DeepSeek 余额 | 按需手动 |
+| `enrich_longform.py` | 长推 fetch（browser-use 抓完整正文 → POST Worker /api/longform/submit） | 按需手动；推荐每周/有积压时跑 `--limit 50` 排空 pending |
 | `backfill_cloud.py` / `backfill_quote_of.py` / `backfill.py` | 历史遗留 backfill | 已基本弃用 |
 
 ### 3. 本地数据目录

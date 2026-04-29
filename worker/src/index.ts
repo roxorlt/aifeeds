@@ -4,6 +4,9 @@ import {
   runRefreshMetrics,
   runRefreshTiered,
   runFillTranslations,
+  runDetectLongform,
+  listPendingLongform,
+  submitLongformText,
 } from './enrich';
 
 export interface Env {
@@ -76,6 +79,12 @@ export default {
       if (path === '/api/enrich/run' && request.method === 'POST') {
         return handleEnrichRun(request, env);
       }
+      if (path === '/api/longform/pending' && request.method === 'GET') {
+        return handleLongformPending(request, env);
+      }
+      if (path === '/api/longform/submit' && request.method === 'POST') {
+        return handleLongformSubmit(request, env);
+      }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
       }
@@ -94,19 +103,22 @@ export default {
     // Mode rotation on */5 cadence (12 triggers/hour):
     //   :00 :30           → refresh-metrics     (2x/hour)
     //   :15 :45           → fill-translations   (2x/hour)
-    //   others (8 slots)  → backfill-quotes     (8x/hour)
+    //   :10 :50           → detect-longform     (2x/hour, marks note_tweet candidates)
+    //   others (6 slots)  → backfill-quotes     (6x/hour)
     // 2026-04-21: rolled back from fill-heavy. Backlog cleared — only ~0.3%
     // of quote_pending is non-Chinese, so 2/hr sentinel is enough for incoming.
-    // backfill-quotes is the real bottleneck (syndication API hydration).
+    // 2026-04-29: detect-longform takes :10 :50 to keep up with new note tweets;
+    // ~50/hr is enough for incoming. Browser-side fetch happens locally.
     const utc = new Date(event.scheduledTime);
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
     // 03:35 UTC daily → cleanup (steals one backfill slot per day, runs ~1s)
     const isCleanupSlot = hour === 3 && minute === 35;
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'cleanup';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'cleanup' | 'detect-longform';
     if (isCleanupSlot) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
+    else if (minute === 10 || minute === 50) mode = 'detect-longform';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -136,7 +148,9 @@ export default {
               ? await runCleanup(env)
               : mode === 'fill-translations'
                 ? await runFillTranslations(env)
-                : await runBackfillQuotes(env);
+                : mode === 'detect-longform'
+                  ? await runDetectLongform(env, 25, 400)
+                  : await runBackfillQuotes(env);
           console.log(`[cron] ${mode} result:`, JSON.stringify(result));
         } catch (e) {
           console.error(`[cron] ${mode} error:`, e);
@@ -543,7 +557,83 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const result = await runFillTranslations(env, limit, batchSize);
     return jsonResponse(result, 200, request, env);
   }
+  if (mode === 'detect-longform') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '30'), 1),
+      80,
+    );
+    const result = await runDetectLongform(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
   return jsonResponse({ error: `Unknown mode: ${mode}` }, 400, request, env);
+}
+
+// ─── GET /api/longform/pending ─────────────────────────────────
+// Local browser fetcher pulls a batch of items that need full long-form text.
+// Auth via INGEST_TOKEN. Caller iterates: fetch each URL with cookies, scrape
+// [data-testid="tweetText"], POST result via /api/longform/submit.
+//
+// Query: ?limit=N (default 20, max 50), ?max_attempts=K (default 3)
+
+async function handleLongformPending(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const auth = request.headers.get('Authorization');
+  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
+  }
+  const url = new URL(request.url);
+  const limit = Math.min(
+    Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+    50,
+  );
+  const maxAttempts = Math.min(
+    Math.max(parseInt(url.searchParams.get('max_attempts') || '3'), 1),
+    5,
+  );
+  const items = await listPendingLongform(env, limit, maxAttempts);
+  return jsonResponse({ items, count: items.length }, 200, request, env);
+}
+
+// ─── POST /api/longform/submit ─────────────────────────────────
+// Local fetcher reports back the full text (or the error encountered).
+// Body: { id: string, full_text?: string, error?: string }
+//
+// Worker validates: only commits when full_text > existing content length.
+// On accepted update, content_translated is nulled so fill-translations
+// re-translates the new full body.
+
+interface SubmitBody {
+  id?: unknown;
+  full_text?: unknown;
+  error?: unknown;
+}
+
+async function handleLongformSubmit(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const auth = request.headers.get('Authorization');
+  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
+  }
+  let body: SubmitBody;
+  try {
+    body = await request.json<SubmitBody>();
+  } catch {
+    return jsonResponse({ error: 'invalid json' }, 400, request, env);
+  }
+  const id = typeof body.id === 'string' ? body.id : '';
+  if (!id) {
+    return jsonResponse({ error: 'missing id' }, 400, request, env);
+  }
+  const fullText =
+    typeof body.full_text === 'string' ? body.full_text : null;
+  const fetchError =
+    typeof body.error === 'string' ? body.error : undefined;
+  const result = await submitLongformText(env, id, fullText, fetchError);
+  return jsonResponse(result, 200, request, env);
 }
 
 // ─── GET /img?url=... ──────────────────────────────────────────
