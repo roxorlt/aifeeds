@@ -12,6 +12,7 @@
 - [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
 - [ ] 引用 + 被引用 feed 去重策略（同一条被 quote 又独立出现）
 - [ ] 前端 on-demand metrics 刷新（Worker /api/refresh/:id + 前端曝光触发）
+- [ ] **metrics 数据完整性**：当前 likes/retweets/replies/views 在全表覆盖率 64-77%，导致部分卡片显示 metric 数 < 4。前端兜底已用「null → "—"」处理（见 frontend-responsive-iteration spec），后端层面要让 enrich daemon 主动回扫缺失字段（特别是 retweets 64% 最低），目标全表 ≥ 95% 覆盖。可在 enricher L0/L1 高频层增一道"补全空字段"扫描
 - [ ] 关键词自学习优化: LEARNED_MIN_HITS 3→8、mid-sentence capitalization only、seed 共现
 
 ## 已完成
