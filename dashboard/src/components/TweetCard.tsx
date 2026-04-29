@@ -203,8 +203,22 @@ export function TweetCard({
   // (fallback for pre-backfill tweets). If we have quote_of, render nested card instead.
   const hasQuotePlaceholder = Boolean(extra.quote_of_id) && !quoteOf;
 
+  const downPos = useRef<{ x: number; y: number } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    downPos.current = { x: e.clientX, y: e.clientY };
+  };
+
   const handleCardClick = (e: React.MouseEvent) => {
     if (embedded) return;
+    const start = downPos.current;
+    if (start) {
+      const dx = Math.abs(e.clientX - start.x);
+      const dy = Math.abs(e.clientY - start.y);
+      if (dx > 5 || dy > 5) return; // drag → not a click
+    }
+    const sel = window.getSelection();
+    if (sel && sel.toString().trim().length > 0) return; // text selected
     const target = e.target as HTMLElement;
     if (target.closest("button") || target.closest("a")) return;
     openTweet(item, siblings || []);
@@ -228,6 +242,7 @@ export function TweetCard({
 
   return (
     <article
+      onPointerDown={handlePointerDown}
       onClick={handleCardClick}
       className={cn(
         "group relative px-4 py-3 transition-colors",
