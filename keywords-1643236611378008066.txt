@@ -19,6 +19,7 @@ Meta AI
 Grok
 xAI
 Qwen
+Hugging Face
 
 # AI products & tools
 Cursor

@@ -64,9 +64,32 @@ docs/
 - **Cookie 解密**：从 Chrome Default profile 提取 x.com cookie（AES-128-CBC + macOS Keychain），注入到 Profile 1 的 browser-use 会话
 - **浏览器**：browser-use Python API，用 Profile 1（体积小，~500MB）+ 注入 Default 的 cookie
 - **翻译/过滤**：DeepSeek Chat API（OpenAI 兼容），批量处理
-- **游标**：基于 tweet snowflake ID，存在 lists 表的 cursor 字段
 - **分页容错**：每页暂存到 data/pages/，崩溃后自动恢复
-- **停止条件**：遇到游标 / 超过 max(100, 当日推文数) / 连续无新内容
+- **停止条件**：时间盒 / 连续无新增 / 已知覆盖率高（见下方"抓取停止条件"节）
+
+### ⚠️ 抓取停止条件：禁用 ID 游标（反复踩过的坑）
+
+**核心事实**：X list 页面的默认排序是**热度排序**（For You / Top），**不是时间倒序**，**不是 ID 倒序**。
+这意味着：
+
+- 往下滚 ≠ ID 依次变小
+- 新热的 tweet 可能 ID 比"更老但冷门"的 tweet 大
+- 一个 batch 里会同时出现 2025-10 的老爆款 + 2026-04 的新帖
+
+**禁止的做法**（已经讨论过很多次，别再提了）：
+
+- ❌ 基于 `tweet_id ≤ last_max_tweet_id` 做早停
+- ❌ 把 snowflake ID 当成 "pagination cursor" 来判断"是否已经翻过"
+- ❌ 把 `lists.cursor` / `lists.last_max_tweet_id` 列当 ID 边界用（这些列的存在是历史包袱，不要依赖）
+
+**允许的停止信号**（都是 sort-agnostic，热度乱序下也成立）：
+
+1. **连续 N 个 batch 都是"0 new-to-DB"**：`known_ids` 命中率 100% 持续 N 轮 → feed 已耗尽新内容
+2. **已知覆盖率 ≥ 阈值持续 K 轮**：例如最近 3 个 batch 里 ≥80% 的 tweet 都在 DB 里 → 已经在反复看老货
+3. **时间盒**：整轮超过 T 秒强制结束（当前 30 分钟，可以收紧到 5-10 分钟）
+4. **滚动轮数上限**：超过 M 次 scroll 直接停（粗粒度兜底）
+
+如果某 PR 里出现"根据 tweet_id 判断是否过了游标"这种逻辑，就是走错了路，打回重写。
 
 ## SQLite Schema
 

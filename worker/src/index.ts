@@ -1,9 +1,23 @@
-import { runBackfillQuotes, runRefreshMetrics, runFillTranslations } from './enrich';
+import {
+  runBackfillQuotes,
+  runCleanup,
+  runRefreshMetrics,
+  runRefreshTiered,
+  runFillTranslations,
+} from './enrich';
 
 export interface Env {
   DB: D1Database;
   INGEST_TOKEN: string;
   DEEPSEEK_API_KEY?: string;
+  // M4: refresh-metrics mode dispatch.
+  //   'tiered'  → runRefreshTiered (uses tier/next_refresh_at/last_velocity)
+  //   'legacy'  → runRefreshMetrics (round-robin, default — preserves pre-M4 behavior)
+  //   'off'     → skip refresh entirely
+  REFRESH_MODE?: string;
+  // Cap on which tiers the tiered refresher touches. Default '1' = gradual
+  // rollout (L0+L1 only); set to '4' for full coverage once stable.
+  REFRESH_TIER_MAX?: string;
 }
 
 // CORS origins allowed
@@ -84,17 +98,42 @@ export default {
     // 2026-04-21: rolled back from fill-heavy. Backlog cleared — only ~0.3%
     // of quote_pending is non-Chinese, so 2/hr sentinel is enough for incoming.
     // backfill-quotes is the real bottleneck (syndication API hydration).
-    const minute = new Date(event.scheduledTime).getUTCMinutes();
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes';
-    if (minute === 0 || minute === 30) mode = 'refresh-metrics';
+    const utc = new Date(event.scheduledTime);
+    const minute = utc.getUTCMinutes();
+    const hour = utc.getUTCHours();
+    // 03:35 UTC daily → cleanup (steals one backfill slot per day, runs ~1s)
+    const isCleanupSlot = hour === 3 && minute === 35;
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'cleanup';
+    if (isCleanupSlot) mode = 'cleanup';
+    else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
     else mode = 'backfill-quotes';
+    const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
+    const maxTier = Math.min(
+      Math.max(parseInt(env.REFRESH_TIER_MAX || '1', 10) || 1, 0),
+      4,
+    );
     ctx.waitUntil(
       (async () => {
         try {
+          if (mode === 'refresh-metrics') {
+            if (refreshMode === 'off') {
+              console.log('[cron] refresh-metrics skipped (REFRESH_MODE=off)');
+              return;
+            }
+            const result =
+              refreshMode === 'tiered'
+                ? await runRefreshTiered(env, 20, 400, maxTier)
+                : await runRefreshMetrics(env);
+            console.log(
+              `[cron] refresh-metrics(${refreshMode},maxTier=${maxTier}) result:`,
+              JSON.stringify(result),
+            );
+            return;
+          }
           const result =
-            mode === 'refresh-metrics'
-              ? await runRefreshMetrics(env)
+            mode === 'cleanup'
+              ? await runCleanup(env)
               : mode === 'fill-translations'
                 ? await runFillTranslations(env)
                 : await runBackfillQuotes(env);
@@ -462,6 +501,26 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       90,
     );
     const result = await runRefreshMetrics(env, limit, rateSleepMs, lookbackDays);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'refresh-tiered') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const maxTier = Math.min(
+      Math.max(parseInt(url.searchParams.get('max_tier') || '4'), 0),
+      4,
+    );
+    const result = await runRefreshTiered(env, limit, rateSleepMs, maxTier);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'cleanup') {
+    const retentionDays = Math.min(
+      Math.max(parseInt(url.searchParams.get('retention_days') || '30'), 7),
+      365,
+    );
+    const result = await runCleanup(env, retentionDays);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-quotes') {

@@ -3,7 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-04-20（含 ai-feeds.com 自定义域 + /img 图片代理 + CF 安全规则）
+最后更新：2026-04-29（M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
 
 ---
 
@@ -12,7 +12,8 @@
 ```
 ┌─────────────────── 本地 MacBook ──────────────────┐     ┌───────────── Cloudflare ─────────────┐
 │                                                   │     │                                      │
-│  launchd (每 30 min)                              │     │  Worker: xlist-api                   │
+│  launchd.cron  (5min tick + C2 hybrid gate)       │     │  Worker: xlist-api                   │
+│  launchd.tune  (周一 04:00 重算 params.json)      │     │                                      │
 │    └→ cron.sh                                     │     │    - POST /api/ingest   (接收本地)  │
 │         ├→ list_scraper.py  (browser-use 抓 X)   │     │    - GET  /api/items    (dashboard) │
 │         ├→ tweet_processor.py (DeepSeek 分类+翻译)│─push│    - GET  /api/sources  (dashboard) │
@@ -25,8 +26,8 @@
 └───────────────────────────────────────────────────┘     │                                      │
                                                           │  D1: xlist                           │
                                                           │    items / sources / run_stats /     │
-                                                          │    enrich_state                      │
-                                                          │                                      │
+                                                          │    enrich_state / metrics_snapshots  │
+                                                          │    refresh_log                       │
                                                           │  Pages: xlist-dashboard              │
                                                           │    (React + Vite, 读 Worker API)     │
                                                           └──────────────────────────────────────┘
@@ -72,19 +73,26 @@
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `refresh-metrics` / `fill-translations`
-- `limit`：默认 20（backfill / refresh，1-100）；fill-translations 默认 15（1-50）
-- `rate_sleep_ms=400`（backfill / refresh）
+- `mode=backfill-quotes`（默认）/ `refresh-metrics` / `refresh-tiered` / `fill-translations` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
+- `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）
+- `rate_sleep_ms=400`（backfill / refresh / tiered）
 - `lookback_days=14`（仅 refresh-metrics，1-90）
+- `max_tier=4`（仅 refresh-tiered，0-4；灰度时设 1 = 只刷 L0+L1）
 - `batch_size=5`（仅 fill-translations，1-20；一次 DeepSeek 调用包多少条文本）
 
 **定时任务**（单一 cron 内部模式轮转）：
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`；`:15` `:45` → `runFillTranslations`；其他 8 个触发点 → `runBackfillQuotes` |
+| `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
 
-**调度节奏**（2026-04-21 回退到原 fill-light 配比）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 8 次 backfill-quotes（`:05 :10 :20 :25 :35 :40 :50 :55`）。
+**调度节奏**（2026-04-21 回退到原 fill-light 配比）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 8 次 backfill-quotes（`:05 :10 :20 :25 :35 :40 :50 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill 槽跑 cleanup。
+
+**M4 refresh-metrics 模式切换**（2026-04-29 上线）：
+- `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
+- `REFRESH_TIER_MAX` env var：tiered 模式下只刷 `tier <= N` 的 item（默认 1 = 灰度只刷 L0+L1；调到 4 = 全量 L0-L4）
+- 设置：`cd worker && npx wrangler secret put REFRESH_MODE`（输入 `tiered` 即开启灰度）
+- 回滚：`npx wrangler secret put REFRESH_MODE` → 输入 `legacy`，无需重部署
 
 > 2026-04-21 曾短暂调成 fill-heavy（8x/hr）清积压，实测 722 条 quote_pending 中仅 **0.3%**（1 条）是非中文，qual_ok 到 20 后彻底停滞。Backfill 才是真正的瓶颈（syndication API hydration）。
 
@@ -107,11 +115,13 @@
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **4 个表**：
-  - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量）
+- **6 个表**：
+  - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
   - `enrich_state` — cron enrich 的进度（processed_ids / failed_ids / not_found_ids）
+  - `metrics_snapshots`（2026-04-23 M1.5 新增）— 每次 `runRefreshMetrics` 覆盖 `items.metrics` 时 append 一行 (item_id, captured_at, likes, retweets, replies, bookmarks, views)，append-only 时间序列。为 M4/M5 的 tiered 刷新策略提供真 Δlikes 数据。保留 30 天（清理机制 M5 时加）
+  - `refresh_log`（2026-04-23 M3 新增）— 每次 `runRefreshTiered` 执行时 append 一行 (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)，观测 CF subrequest 配额在各 tier 的分配。保留 30 天（清理机制 M5 时加）
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -173,15 +183,57 @@
 
 - **plist**：`~/Library/LaunchAgents/com.xlist-scraper.cron.plist`
 - **脚本**：`~/.claude/skills/xlist-scraper/scripts/cron.sh`
-- **频率**：每 30 分钟（`StartInterval=1800`）
+- **频率**：每 5 分钟 tick（`StartInterval=300`），实际是否抓由 `schedule.py` 动态决定（见下方）
 - **日志**：
   - `data/launchd-stdout.log` / `data/launchd-stderr.log`（launchd 原始输出）
   - `data/cron.log`（cron.sh 自己记的结构化日志）
 - **行为**：
   1. cookie 过期检查（< 30 天弹窗提醒）
   2. 前置检查：网络（curl x.com）、电量（<20% 且未充电跳过）
-  3. 锁文件防重入（`data/scraper.lock`）
-  4. 跑 `main.py <list_id>` → list_scraper + tweet_processor + output.push_to_cloud
+  3. **动态调度 gate**：读 `data/.next-scrape-at`，未到时间则 `[SKIP:SCHED]` 退出
+  4. 锁文件防重入（`data/scraper.lock`）
+  5. 跑 `main.py <list_id>` → list_scraper + tweet_processor + output.push_to_cloud → `schedule.schedule_next` 写下次时间
+
+### 1a. 动态抓取频率（`schedule.py`）
+
+- **源码**：`~/.claude/skills/xlist-scraper/scripts/schedule.py`
+- **策略**：C2 hybrid（按 prior 阈值切分热/冷）
+  - **hot zone**（prior ≥ 0.15 tweets/min，约对应 BJT 20-02 + 中午的美国峰）：固定 **20min**，保证新鲜度
+  - **cold zone**（prior < 0.15，约对应 BJT 13-18 的亚洲白天）：`target_new=10` 动态，blend prior + recent，上限 60min
+- **回溯模拟结果**（14d train + 14d sim, 1892 tweets，参见 `scripts/simulate_schedules.py`）：
+  - 之前 Fixed 30min：672 runs, 20.7% zero-yield, p95 发现延迟 29min
+  - 切到 C2 hybrid：490 runs (**-27%**), 11.8% zero-yield, p95 发现延迟 56min
+  - hot 时段 p50 延迟 15m → ≤10m；cold 时段被拉长到 20-60m 换成本节省
+- **算法**：
+  - prior：过去 30 天同 (BJT 星期, 小时) 的 tweets/分钟
+  - recent（仅 cold zone 用）：最近 3 个 run_stats 区间的 new_count/分钟
+  - cold zone: blended = 0.5 × prior + 0.5 × recent；interval = target_new / blended，clamp 到 [min, max]
+  - hot zone: 跳过 recent，直接固定 hot_interval_sec
+- **输出**：写 Unix 时间戳到 `data/.next-scrape-at`
+- **触发**：每次 `main.py` 成功跑完在 `finally` 后调 `schedule_next(list_id)`
+- **参数来源**：`data/schedule_params.json`（由 `tune_schedule.py` 每周覆写，见 1b）。文件不存在或损坏时回退到 `schedule.py` 顶部 `DEFAULT_PARAMS`（threshold=0.15 / hot=1200s / target=10 / min=600 / max=3600）
+- **手动预览**：`XLIST_DATA_DIR=/Users/roxor/brain/30-projects/xlist-scraper python3 ~/.claude/skills/xlist-scraper/scripts/schedule.py <list_id>`
+
+### 1b. 周度自动调参（`tune_schedule.py`）
+
+- **源码**：`~/.claude/skills/xlist-scraper/scripts/tune_schedule.py`
+- **plist**：`~/Library/LaunchAgents/com.xlist-scraper.tune.plist`
+- **频率**：每周一 04:00 BJT（冷时段，避开 scrape）
+- **目标**：根据最近 14 天的 tweets 重新计算 `hot_prior_threshold` / `hot_interval_sec` / `target_new`
+- **算法**：
+  - `hot_prior_threshold` = 过去 14 天 (weekday, hour) prior 分布的 60 分位（只算非零格）
+  - `hot_interval_sec` = target_new / hot 格 prior 中位数 × 60s，clamp 到 [10min, 30min]
+  - `target_new` 固定 10（后续可改 cost-aware）
+- **三道护栏**：
+  1. **最小数据量**：最近 14 天 tweets < 500 → 整体 skip，用 `DEFAULT_PARAMS` / 继承上次
+  2. **变化率限制**：新 `hot_interval_sec` 相对当前不能变化超过 ±30%，超出按 30% 硬 clamp
+  3. **Dry-run 拒绝**：对最近 7 天做 `simulate_schedules.py` 同款回溯，若新参数在 `runs` / `zero_rate` / `p95_delay_min` 任一项比当前参数差 >20% → 拒绝更新（保留旧参数）
+- **审计日志**：每次运行（ACCEPT / REJECT / SKIP）追加一条到 `data/schedule_params_log.md`
+- **日志**：`data/launchd-tune-stdout.log` / `data/launchd-tune-stderr.log`
+- **手动触发**：
+  - `launchctl start com.xlist-scraper.tune`（按线上路径跑，落盘）
+  - `XLIST_DATA_DIR=... python3 scripts/tune_schedule.py --dry-run`（只预览不写盘）
+- **回滚**：删除 `data/schedule_params.json` 即可回到硬编码 defaults。不改代码、不重启 launchd
 
 ### 2. 手动脚本（不在 cron 里）
 
@@ -207,6 +259,9 @@
 ├── scraper.lock            cron 锁文件
 ├── cookie-warn-stamp       cookie 过期警告节流
 ├── cron.log / launchd-*    日志
+├── .next-scrape-at         下一次抓取 Unix 时间戳（schedule.py 写，cron.sh 读）
+├── schedule_params.json    tune_schedule.py 每周覆写的动态参数（不存在则用 DEFAULT_PARAMS）
+├── schedule_params_log.md  调参审计日志（每次 ACCEPT/REJECT/SKIP 追加一行）
 └── exports/YYYY-MM-DD-*.md 每次抓取导出的 markdown
 ```
 

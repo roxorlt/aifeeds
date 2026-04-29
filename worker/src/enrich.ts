@@ -519,9 +519,28 @@ async function updateMetrics(
   id: string,
   metrics: Metrics,
 ): Promise<void> {
-  await env.DB.prepare("UPDATE items SET metrics = ? WHERE id = ?")
-    .bind(JSON.stringify(metrics), id)
-    .run();
+  // M1.5: also append a snapshot so we can compute real Δ over time.
+  // D1.batch() is atomic and runs both in one round-trip.
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE items SET metrics = ? WHERE id = ?").bind(
+      JSON.stringify(metrics),
+      id,
+    ),
+    env.DB.prepare(
+      "INSERT INTO metrics_snapshots " +
+        "(item_id, captured_at, likes, retweets, replies, bookmarks, views) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      id,
+      now,
+      metrics.likes ?? null,
+      metrics.retweets ?? null,
+      metrics.replies ?? null,
+      metrics.bookmarks ?? null,
+      metrics.views ?? null,
+    ),
+  ]);
 }
 
 export interface RefreshResult {
@@ -616,6 +635,322 @@ export async function runRefreshMetrics(
     round_reset: roundReset,
     elapsed_ms: Date.now() - t0,
     remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── refresh-tiered mode (M4) ──────────────────────────────────
+// Tier-aware replacement for runRefreshMetrics. Pulls items where
+// next_refresh_at has elapsed and tier <= maxTier, computes Δlikes velocity
+// from the latest metrics_snapshots row, recomputes tier (age + velocity
+// dual), schedules next refresh, logs to refresh_log.
+//
+// Thresholds calibrated from M1 cumulative-average proxy (N=1369). Real Δ
+// from snapshots typically 2-3x the proxy, so M5 will likely relax these.
+
+const VEL_THRESHOLDS = {
+  L1: 0.2,   // velocity >= 0.2 → L1 active (20min)
+  L2: 0.08,  // velocity >= 0.08 → L2 active (60min)
+  L3: 0.05,  // velocity >= 0.05 → L3 active (6h)
+  L4: 0.04,  // velocity >= 0.04 → L4 active (3d)
+} as const;
+
+// [active_interval_sec, inactive_interval_sec] per tier; L0 has no
+// velocity-split (always 10min), L5 never refreshes.
+const TIER_INTERVAL_SEC: Record<number, [number, number] | [null, null]> = {
+  0: [600, 600],          // 10m / 10m
+  1: [1200, 2700],        // 20m / 45m
+  2: [3600, 7200],        // 60m / 120m
+  3: [21600, 86400],      // 6h  / 24h
+  4: [259200, 604800],    // 3d  / 7d
+  5: [null, null],        // never
+};
+
+function determineTier(
+  ageSec: number,
+  velocity: number,
+): { tier: number; intervalSec: number | null } {
+  const ageTier =
+    ageSec < 3600 ? 0 :
+    ageSec < 21600 ? 1 :
+    ageSec < 86400 ? 2 :
+    ageSec < 604800 ? 3 :
+    ageSec < 1209600 ? 4 :
+    5;
+
+  if (ageTier === 5) return { tier: 5, intervalSec: null };
+
+  // Lowest tier whose threshold velocity meets (5 = no upgrade)
+  const velTier =
+    velocity >= VEL_THRESHOLDS.L1 ? 1 :
+    velocity >= VEL_THRESHOLDS.L2 ? 2 :
+    velocity >= VEL_THRESHOLDS.L3 ? 3 :
+    velocity >= VEL_THRESHOLDS.L4 ? 4 :
+    5;
+
+  // Take more aggressive (lower) tier; L0 reserved for fresh items only.
+  let tier = Math.min(ageTier, velTier);
+  if (ageTier > 0 && tier === 0) tier = 1;
+
+  // Active threshold = velocity needed to keep this tier's "active" interval.
+  const activeThreshold =
+    tier === 0 ? 0 :
+    tier === 1 ? VEL_THRESHOLDS.L1 :
+    tier === 2 ? VEL_THRESHOLDS.L2 :
+    tier === 3 ? VEL_THRESHOLDS.L3 :
+    tier === 4 ? VEL_THRESHOLDS.L4 :
+    Number.POSITIVE_INFINITY;
+
+  const [active, inactive] = TIER_INTERVAL_SEC[tier];
+  if (active === null) return { tier: 5, intervalSec: null };
+  return {
+    tier,
+    intervalSec: velocity >= activeThreshold ? active : inactive,
+  };
+}
+
+function computeVelocity(
+  newLikes: number,
+  prevLikes: number | null,
+  prevCapturedAt: number | null,
+  ageSec: number,
+  nowSec: number,
+): number {
+  if (prevLikes !== null && prevCapturedAt !== null && nowSec > prevCapturedAt) {
+    const dtMin = (nowSec - prevCapturedAt) / 60;
+    if (dtMin > 0) return Math.max(0, (newLikes - prevLikes) / dtMin);
+  }
+  // Fallback: cumulative average (likes / age_minutes) — same proxy used in M3 backfill.
+  const ageMin = ageSec / 60;
+  if (ageMin <= 0 || newLikes <= 0) return 0;
+  return newLikes / ageMin;
+}
+
+interface TierCandidateRow {
+  id: string;
+  source_id: string;
+  published_at: string;
+  tier: number;
+  prev_likes: number | null;
+  prev_captured_at: number | null;
+}
+
+async function selectTieredCandidates(
+  env: EnrichEnv,
+  limit: number,
+  maxTier: number,
+  nowSec: number,
+): Promise<TierCandidateRow[]> {
+  // Correlated subqueries on idx_snapshots_item_time → cheap.
+  const rows = await env.DB.prepare(
+    `SELECT i.id, i.source_id, i.published_at, i.tier,
+       (SELECT likes FROM metrics_snapshots ms
+        WHERE ms.item_id = i.id
+        ORDER BY ms.captured_at DESC LIMIT 1) AS prev_likes,
+       (SELECT captured_at FROM metrics_snapshots ms
+        WHERE ms.item_id = i.id
+        ORDER BY ms.captured_at DESC LIMIT 1) AS prev_captured_at
+     FROM items i
+     WHERE i.source_type = 'x_list'
+       AND i.is_relevant = 1
+       AND i.deleted_at IS NULL
+       AND i.tier <= ?
+       AND (i.next_refresh_at IS NULL OR i.next_refresh_at <= ?)
+     ORDER BY i.tier ASC, i.next_refresh_at ASC
+     LIMIT ?`,
+  )
+    .bind(maxTier, nowSec, limit)
+    .all<TierCandidateRow>();
+  return rows.results;
+}
+
+async function applyTieredUpdate(
+  env: EnrichEnv,
+  id: string,
+  metrics: Metrics,
+  tier: number,
+  velocity: number,
+  intervalSec: number | null,
+  nowSec: number,
+): Promise<void> {
+  const nextRefreshAt = intervalSec === null ? null : nowSec + intervalSec;
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE items
+       SET metrics = ?, tier = ?, last_velocity = ?, next_refresh_at = ?
+       WHERE id = ?`,
+    ).bind(JSON.stringify(metrics), tier, velocity, nextRefreshAt, id),
+    env.DB.prepare(
+      `INSERT INTO metrics_snapshots
+       (item_id, captured_at, likes, retweets, replies, bookmarks, views)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      id,
+      nowSec,
+      metrics.likes ?? null,
+      metrics.retweets ?? null,
+      metrics.replies ?? null,
+      metrics.bookmarks ?? null,
+      metrics.views ?? null,
+    ),
+  ]);
+}
+
+async function markDeleted(
+  env: EnrichEnv,
+  id: string,
+  nowSec: number,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE items
+     SET deleted_at = ?, next_refresh_at = NULL, tier = 5
+     WHERE id = ?`,
+  )
+    .bind(nowSec, id)
+    .run();
+}
+
+interface TierAgg {
+  items: number;
+  subreqs: number;
+  errors: number;
+}
+
+async function logRefresh(
+  env: EnrichEnv,
+  byTier: Map<number, TierAgg>,
+  durationMs: number,
+  refreshedAt: number,
+): Promise<void> {
+  if (byTier.size === 0) return;
+  const stmts = Array.from(byTier.entries()).map(([tier, agg]) =>
+    env.DB.prepare(
+      `INSERT INTO refresh_log
+       (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(refreshedAt, tier, agg.items, agg.subreqs, durationMs, agg.errors),
+  );
+  if (stmts.length === 1) await stmts[0].run();
+  else await env.DB.batch(stmts);
+}
+
+export interface TieredRefreshResult {
+  mode: string;
+  candidates: number;
+  updated: number;
+  not_found: number;
+  failed: number;
+  by_tier: Record<string, number>;
+  elapsed_ms: number;
+}
+
+/** Tier-aware refresh entry point. Picks items with elapsed next_refresh_at
+ *  (limited to tier <= maxTier), recomputes tier from age+velocity, writes
+ *  metrics + tier + next_refresh_at + snapshot atomically. */
+export async function runRefreshTiered(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+  maxTier = 4,
+): Promise<TieredRefreshResult> {
+  const t0 = Date.now();
+  const nowSec = Math.floor(t0 / 1000);
+  const candidates = await selectTieredCandidates(env, limit, maxTier, nowSec);
+
+  const counts = { updated: 0, not_found: 0, failed: 0 };
+  const byTier = new Map<number, TierAgg>();
+  const tierCount: Record<string, number> = {};
+
+  const bumpTier = (
+    tier: number,
+    items: number,
+    subreqs: number,
+    errors: number,
+  ): void => {
+    const agg = byTier.get(tier) || { items: 0, subreqs: 0, errors: 0 };
+    agg.items += items;
+    agg.subreqs += subreqs;
+    agg.errors += errors;
+    byTier.set(tier, agg);
+  };
+
+  for (const row of candidates) {
+    const ageSec = Math.max(
+      0,
+      nowSec - Math.floor(new Date(row.published_at).getTime() / 1000),
+    );
+    const res = await fetchTweet(row.source_id);
+
+    if (res === null) {
+      counts.failed++;
+      bumpTier(row.tier, 0, 1, 1);
+      // Leave next_refresh_at unchanged so the next tick retries.
+    } else if (res.notFound) {
+      await markDeleted(env, row.id, nowSec);
+      counts.not_found++;
+      bumpTier(5, 1, 2, 0);
+    } else if (res.data) {
+      const m = apiToMetrics(res.data);
+      const newLikes = m.likes ?? 0;
+      const velocity = computeVelocity(
+        newLikes,
+        row.prev_likes,
+        row.prev_captured_at,
+        ageSec,
+        nowSec,
+      );
+      const { tier, intervalSec } = determineTier(ageSec, velocity);
+      await applyTieredUpdate(env, row.id, m, tier, velocity, intervalSec, nowSec);
+      counts.updated++;
+      tierCount[String(tier)] = (tierCount[String(tier)] || 0) + 1;
+      bumpTier(tier, 1, 2, 0);
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+  }
+
+  await logRefresh(env, byTier, Date.now() - t0, nowSec);
+
+  return {
+    mode: 'refresh-tiered',
+    candidates: candidates.length,
+    updated: counts.updated,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    by_tier: tierCount,
+    elapsed_ms: Date.now() - t0,
+  };
+}
+
+// ─── cleanup mode (M5) ─────────────────────────────────────────
+// Drops metrics_snapshots / refresh_log rows older than the retention
+// window so D1 doesn't grow unbounded. Designed for daily cron use.
+
+export interface CleanupResult {
+  mode: string;
+  cutoff_ts: number;
+  snapshots_deleted: number;
+  refresh_log_deleted: number;
+  elapsed_ms: number;
+}
+
+export async function runCleanup(
+  env: EnrichEnv,
+  retentionDays = 30,
+): Promise<CleanupResult> {
+  const t0 = Date.now();
+  const cutoffTs = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+
+  const [snapRes, logRes] = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM metrics_snapshots WHERE captured_at < ?`).bind(cutoffTs),
+    env.DB.prepare(`DELETE FROM refresh_log WHERE refreshed_at < ?`).bind(cutoffTs),
+  ]);
+
+  return {
+    mode: "cleanup",
+    cutoff_ts: cutoffTs,
+    snapshots_deleted: snapRes.meta?.changes ?? 0,
+    refresh_log_deleted: logRes.meta?.changes ?? 0,
+    elapsed_ms: Date.now() - t0,
   };
 }
 

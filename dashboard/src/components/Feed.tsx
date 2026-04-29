@@ -11,8 +11,11 @@ import {
   rowMaxScrapedAt,
   getSeenIds,
   markSeen,
+  parseJsonField,
+  proxyImg,
   cn,
 } from "../lib/utils";
+import type { ItemExtra } from "../types";
 
 type SortMode = "time" | "hot";
 
@@ -32,6 +35,39 @@ const POLL_INTERVAL_MS = 30_000;
 // Timer is paused while the tab is hidden — so if the user opens the tab but
 // never looks at it, last-seen stays where it was.
 const MARK_SEEN_DELAY_MS = 5_000;
+
+function PendingAvatars({ pending }: { pending: Item[] }) {
+  // Pick up to 3 unique-handle avatars from the pending queue (newest first).
+  const avatars: { url: string; handle: string }[] = [];
+  const seen = new Set<string>();
+  for (const it of pending) {
+    const handle = it.handle || "";
+    if (!handle || seen.has(handle)) continue;
+    const extra = parseJsonField<ItemExtra>(it.extra);
+    const url = extra?.profile_image_url;
+    if (!url) continue;
+    seen.add(handle);
+    avatars.push({ url, handle });
+    if (avatars.length >= 3) break;
+  }
+  if (avatars.length === 0) {
+    return <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />;
+  }
+  return (
+    <div className="flex -space-x-2">
+      {avatars.map((a, i) => (
+        <img
+          key={a.handle}
+          src={proxyImg(a.url)}
+          alt={a.handle}
+          className="h-5 w-5 rounded-full ring-2 ring-blue-50 object-cover"
+          style={{ zIndex: avatars.length - i }}
+          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+        />
+      ))}
+    </div>
+  );
+}
 
 function SkeletonCard() {
   return (
@@ -242,11 +278,13 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     }
   }, [placeholder, isHot, loading, loadingMore, hasMore, nextCursor, items.length, loadMore]);
 
-  // Polling for new items — only meaningful in time-desc mode. In hot mode,
-  // new scraped items don't necessarily appear at the top (they sort by score),
-  // so the "N 条新内容" banner would be misleading.
+  // Polling for new items. In time mode we prepend to `pending` and let the
+  // banner show "N 条新内容"; click prepends + scrolls to top. In hot mode the
+  // sort is score-based, so newly-scraped items may not belong at the top —
+  // we still count them, but clicking the banner triggers a full re-fetch with
+  // fresh hot ranking instead of prepending stale positions.
   useEffect(() => {
-    if (placeholder || isHot) return;
+    if (placeholder) return;
     const poll = async () => {
       if (!lastScrapedAt.current) return;
       try {
@@ -255,7 +293,6 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
           since: lastScrapedAt.current,
           limit: 50,
         });
-        // Filter out items we already have (the 'since' boundary may include the latest)
         const existingIds = new Set([...items, ...pending].map((i) => i.id));
         const fresh = res.items.filter((i) => !existingIds.has(i.id));
         if (fresh.length > 0) {
@@ -268,11 +305,41 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     };
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [sourceType, placeholder, items, pending, isHot]);
+  }, [sourceType, placeholder, items, pending]);
 
   const showPending = () => {
+    if (isHot) {
+      // Hot mode: re-fetch top of feed so items land in correct score-sorted
+      // positions (not blindly prepended). Keep `pending` in place until the
+      // fetch succeeds so the banner stays visible as a retry affordance.
+      setLoading(true);
+      fetchItems({
+        source_type: sourceType,
+        limit: INITIAL_LIMIT,
+        sort: "hot",
+      })
+        .then((res) => {
+          const seen = getSeenIds(sourceType);
+          const itemsToShow = res.items.filter((i) => !seen.has(i.id));
+          markSeen(sourceType, itemsToShow.map((i) => i.id));
+          setItems(itemsToShow);
+          setPending([]);
+          setNextCursor(res.next_cursor);
+          setHasMore(res.has_more);
+          if (res.items.length > 0) {
+            lastScrapedAt.current = res.items[0].scraped_at;
+          }
+          feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+        })
+        .catch(() => {
+          // Keep pending so banner remains as retry affordance.
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
     setItems((prev) => [...pending, ...prev]);
     setPending([]);
+    feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   // Capture last-seen boundary ONCE at mount — stays stable through the session
@@ -388,14 +455,17 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         </div>
       </header>
 
-      {/* New items banner */}
+      {/* New items banner — stacked avatars + count (Twitter-style) */}
       {pending.length > 0 && (
         <button
           type="button"
           onClick={showPending}
-          className="border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
+          className="flex items-center justify-center gap-2 border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
         >
-          ↑ {pending.length} 条新内容
+          <PendingAvatars pending={pending} />
+          <span>
+            ↑ {pending.length} 条新推文{isHot ? "，点击刷新热门" : ""}
+          </span>
         </button>
       )}
 
