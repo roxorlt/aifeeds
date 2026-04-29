@@ -46,9 +46,9 @@ docs/
 
 ### 本项目 git 状态
 
-- `/Users/roxor/brain/30-projects/xlist-scraper/` 目前**非 git 仓库**（含 dashboard + worker + docs + data）
+- `/Users/roxor/brain/30-projects/xlist-scraper/` 已是 git 仓库（含 dashboard + worker + docs；`.gitignore` 排除 data/、node_modules/、exports/）。无 remote，本地分支管理
 - `/Users/roxor/.claude/skills/xlist-scraper/` 是 git 仓库（scraper 脚本）
-- 下次做需要严格流程的改动前，先在前者 init git 并把 `.gitignore` 配好（排除 data/、node_modules/、exports/）
+- 改动按"开 feature branch → 验证 → 合 main"流程走，两个仓库各自独立分支
 
 ### 发布前 checklist
 
