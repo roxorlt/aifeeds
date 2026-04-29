@@ -91,7 +91,8 @@ function MetricButton({
   count: number | null | undefined;
   hoverColor: "sky" | "green" | "pink" | "neutral";
 }) {
-  if (count === undefined || count === null) return null;
+  const isMissing = count === undefined || count === null;
+  const display = isMissing ? "—" : formatNumber(count);
   const colorClasses: Record<typeof hoverColor, string> = {
     sky: "group-hover/metric:bg-sky-50 group-hover/metric:text-sky-500",
     green: "group-hover/metric:bg-emerald-50 group-hover/metric:text-emerald-500",
@@ -112,13 +113,20 @@ function MetricButton({
       <span
         className={cn(
           "flex h-7 w-7 items-center justify-center rounded-full transition-colors",
+          isMissing ? "text-neutral-300" : "",
           colorClasses[hoverColor],
         )}
       >
         {icon}
       </span>
-      <span className={cn("text-[12px] tabular-nums transition-colors", textColor[hoverColor])}>
-        {formatNumber(count)}
+      <span
+        className={cn(
+          "text-[12px] tabular-nums transition-colors",
+          isMissing ? "text-neutral-300" : "",
+          textColor[hoverColor],
+        )}
+      >
+        {display}
       </span>
     </span>
   );
