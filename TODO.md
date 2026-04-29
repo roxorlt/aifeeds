@@ -16,6 +16,7 @@
 
 ## 已完成
 - [x] 长推（X Premium note_tweet）抓全（2026-04-29）：CF Worker 端加 detect-longform 模式（heuristic SQL + syndication API 标 note_id）、`/api/longform/{pending,submit}` 端点、cron 接管 `:10 :50` 两个槽自动检测；本地 `enrich_longform.py` 用 browser-use 抓详情页完整正文 → POST 回 Worker，更新 D1 后置 content_translated=NULL 触发既有 fill-translations cron 重译。验证：sundarpichai 那条原内容 278→1480 字符。历史候选 ~5894 条等待 cron 慢慢扫
+- [x] ingest UPSERT 保留 Worker enrich（2026-04-29）：上一条上线后发现 Pichai 又退回 278 字符 — 根因是 `handleIngest` 的 `ON CONFLICT DO UPDATE` 无条件用 excluded 覆盖 content/extra，本地 scraper 重推同 id 时把长文 + longform 标记一起清空。修复：CASE 表达式只在新内容更长时才覆盖 content/translation，extra 通过 `json_patch` 保留 `$.longform` / `$.enriched_at`（本地永远不会设这俩字段）。已部署 + 给 Pichai 重新注入 note_id 走 enrich_longform.py 复跑回 1480。当前 92 条已成功 enrich，pending 19 条
 - [x] 周度自动调参（2026-04-22）：`scripts/tune_schedule.py` + 独立 launchd `com.xlist-scraper.tune`（周一 04:00 BJT）。schedule.py 解耦成读 `data/schedule_params.json`，无文件时回退 DEFAULT_PARAMS。三道护栏：最小数据 500 条、hot_interval 变化 ±30% clamp、dry-run sim 任一指标差 >20% 拒绝。审计落 `data/schedule_params_log.md`。回滚 = 删 json 文件
 - [x] 动态抓取频率切换到 C2 hybrid（2026-04-22）：回溯模拟（`scripts/simulate_schedules.py`, 14d train + 14d sim, 1892 tweets）对比 A/B/C 多个变体后选定 C2：prior≥0.15 → hot 固定 20min（比线上 30m 更新鲜），否则 target_new=10 动态（上限 60m）。模拟结果：490 runs vs 线上 672 (-27%)，zero 20.7% → 11.8%，hot 段 p50 延迟 15m → ≤10m
 - [x] 分类引入引用/thread 上下文（2026-04-22）：tweet_processor._build_judge_content 把 quote_of + reply_to 父文喂给 LLM，显式标注 [QUOTED by @x] / [REPLY TO @x]；prompt 加明确规则：父文在主题且当前是合理回应就放行，父文跑题或只是闲聊就 N
