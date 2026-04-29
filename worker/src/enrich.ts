@@ -1158,27 +1158,55 @@ async function callDeepSeek(
   }
 }
 
+// Multi-paragraph tweets (e.g. note_tweet long-form) embed real \n inside the
+// text. We can't use \n as a record separator in either prompt or response, so
+// we replace it with a sentinel marker and ask the model to preserve it.
+const NL_MARK = "⟪NL⟫";
+
 async function translateBatch(
   apiKey: string,
   texts: string[],
 ): Promise<Map<number, string>> {
-  const numbered = texts.map((t, i) => `${i}:${t}`).join("\n");
-  const prompt = TRANSLATION_PROMPT_HEADER + numbered;
-  const maxTokens = Math.max(texts.length * 200, 500);
+  const numbered = texts
+    .map((t, i) => `${i}:${t.replace(/\r\n/g, "\n").replace(/\n/g, NL_MARK)}`)
+    .join("\n");
+  const prompt =
+    TRANSLATION_PROMPT_HEADER +
+    `Each tweet is one line in 'index:text' form. The marker ${NL_MARK} stands ` +
+    `for a real line break inside the original text — preserve every ${NL_MARK} ` +
+    `verbatim in your output (do NOT replace with actual newlines).\n\n` +
+    numbered;
+  const maxTokens = Math.max(
+    texts.reduce((sum, t) => sum + Math.ceil(t.length / 2), 0),
+    500,
+  );
   const raw = await callDeepSeek(apiKey, prompt, maxTokens);
   const out = new Map<number, string>();
   if (!raw) return out;
+  // Accumulate: each line beginning with `<digit>+:` starts a new entry; any
+  // following lines without that prefix are appended (the model occasionally
+  // emits a real \n despite instructions). Final \n→NL_MARK→\n round-trip
+  // preserves intended paragraph breaks while ignoring stray ones.
+  let curIdx: number | null = null;
+  let curParts: string[] = [];
+  const flush = (): void => {
+    if (curIdx === null) return;
+    const text = curParts.join("\n").replace(/⟪NL⟫/g, "\n").trim();
+    if (text) out.set(curIdx, text);
+    curIdx = null;
+    curParts = [];
+  };
   for (const rawLine of raw.split("\n")) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    const colon = line.indexOf(":");
-    if (colon === -1) continue;
-    const idxStr = line.slice(0, colon).trim();
-    const idx = parseInt(idxStr, 10);
-    if (Number.isNaN(idx) || String(idx) !== idxStr) continue;
-    const text = line.slice(colon + 1).trim();
-    if (text) out.set(idx, text);
+    const m = /^(\d+)\s*:\s*(.*)$/.exec(rawLine);
+    if (m) {
+      flush();
+      curIdx = parseInt(m[1], 10);
+      curParts = [m[2]];
+    } else if (curIdx !== null) {
+      curParts.push(rawLine);
+    }
   }
+  flush();
   return out;
 }
 
@@ -1632,6 +1660,7 @@ export interface SubmitResult {
   reason?: string;
   new_len?: number;
   prev_len?: number;
+  translated?: boolean;
 }
 
 export async function submitLongformText(
@@ -1702,9 +1731,48 @@ export async function submitLongformText(
     .bind(trimmed, JSON.stringify(extra), itemId)
     .run();
 
+  // Translate inline. Without this the item would sit with content_translated
+  // = NULL and rely on the random-sampled fill-translations cron to catch it,
+  // which can take hours. Coupling submit→translate makes "longform fetched
+  // but not translated" structurally impossible. Failure here is non-fatal —
+  // the cron will pick it up via normal flow.
+  const translated = await translateLongformContent(env, trimmed);
+  if (translated) {
+    await env.DB.prepare(
+      `UPDATE items
+         SET content_translated = ?,
+             translation_quality = ?,
+             translation_attempts = 1
+       WHERE id = ?`,
+    )
+      .bind(translated.text, translated.quality, itemId)
+      .run();
+  }
+
   return {
     updated: true,
     prev_len: row.content.length,
     new_len: trimmed.length,
+    translated: !!translated,
   };
+}
+
+async function translateLongformContent(
+  env: EnrichEnv,
+  text: string,
+): Promise<{ text: string; quality: "ok" | "suspect" } | null> {
+  if (!env.DEEPSEEK_API_KEY) return null;
+  try {
+    const result = await translateBatch(env.DEEPSEEK_API_KEY, [text]);
+    const tr = result.get(0);
+    if (!tr) return null;
+    const quality = sanityHit(text, tr) ? "suspect" : "ok";
+    return { text: tr, quality };
+  } catch (e) {
+    console.warn(
+      "[longform-submit] inline translation failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+    return null;
+  }
 }
