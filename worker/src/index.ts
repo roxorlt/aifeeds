@@ -226,13 +226,32 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
             scraped_at, is_relevant, matched_by, lang, extra)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
-            content = excluded.content,
-            content_translated = excluded.content_translated,
+            content = CASE
+              WHEN items.content IS NULL OR length(coalesce(excluded.content, '')) >= length(items.content)
+                THEN excluded.content
+              ELSE items.content
+            END,
+            content_translated = CASE
+              WHEN items.content IS NULL OR length(coalesce(excluded.content, '')) >= length(items.content)
+                THEN excluded.content_translated
+              ELSE items.content_translated
+            END,
             media = excluded.media,
             metrics = excluded.metrics,
             is_relevant = excluded.is_relevant,
             matched_by = excluded.matched_by,
-            extra = excluded.extra
+            extra = CASE
+              WHEN (items.extra -> '$.longform') IS NOT NULL
+                   OR (items.extra -> '$.enriched_at') IS NOT NULL
+                THEN json_patch(
+                  coalesce(excluded.extra, '{}'),
+                  json_object(
+                    'longform',    items.extra -> '$.longform',
+                    'enriched_at', items.extra -> '$.enriched_at'
+                  )
+                )
+              ELSE excluded.extra
+            END
         `).bind(
           id,
           item.source_type,
