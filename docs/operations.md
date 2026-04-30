@@ -54,6 +54,7 @@
 |------|------|------|------|
 | `/api/ingest` | POST | 接收本地 push 的 tweets → 写 D1 items/sources | Bearer `INGEST_TOKEN` |
 | `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`） | 无（只读） |
+| `/api/items/:id` | GET | 单条详情 + thread siblings（`:id` 是 composite，如 `x_list:123…`） | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |

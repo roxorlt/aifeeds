@@ -5,7 +5,11 @@
 
 ## 待做
 - [ ] **分享功能**（依赖下面 4 个前置全部完成）：PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
-- [ ] 前置 1: Dashboard URL routing — 当前是纯 SPA 全站 `/`，要补 tweet 详情页 `/t/:id` 和 thread 页 `/thread/:id` 两条路由，用 react-router + drawer overlay 共存（desktop 用 drawer，mobile 深链直达页面）
+- [ ] 前置 1: Dashboard URL routing — 在 `feat/dashboard-url-routing` 分支完成，待合 main + 部署：
+  - Worker 加 `GET /api/items/:id`（单条 + thread siblings）
+  - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
+  - `/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）
+  - 设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
 - [ ] 前置 2: 账号 + 登录系统 — 轻量 OAuth（Google / GitHub 起步），D1 新增 `users` 表，Worker 签发 JWT，dashboard 全站状态感知
 - [ ] 前置 3: 数据上报 SDK — 前端统一 `track(event, payload)` 方法，Worker `/api/track` 落到新增 `events` 表（事件类型、user_id、ts、referer、payload JSON），要考虑去重和批量
 - [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），看分享外链点击 → 回访 → 留存漏斗，按 tweet / author / referer 维度下钻
