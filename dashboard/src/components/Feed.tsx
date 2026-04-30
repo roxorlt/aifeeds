@@ -528,11 +528,17 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                 nodes.push(
                   <div
                     key="waistband"
-                    className="flex items-center gap-2 border-y border-blue-200 bg-blue-50/60 px-3 py-1.5 text-[11px] font-medium text-blue-600"
+                    className="flex items-center justify-center gap-1.5 border-b border-neutral-100 bg-neutral-50/40 px-4 py-2.5 text-[11px] text-neutral-400"
                   >
-                    <span className="h-px flex-1 bg-blue-200" />
-                    上次看到这里
-                    <span className="h-px flex-1 bg-blue-200" />
+                    <svg
+                      className="h-3 w-3"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                    </svg>
+                    <span>上次看到这里</span>
                   </div>,
                 );
               }
