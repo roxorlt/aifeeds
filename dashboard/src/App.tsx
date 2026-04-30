@@ -71,7 +71,7 @@ function App() {
     <div className="min-h-screen bg-neutral-50">
       {/* Top bar */}
       <header className="sticky top-0 z-10 border-b border-neutral-200 bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-6 sm:py-3">
+        <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
           <div className="flex items-baseline gap-3">
             <h1 className="text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
               xList
@@ -117,7 +117,7 @@ function App() {
       </header>
 
       {/* 3-column grid */}
-      <main className="mx-auto max-w-[1400px] px-3 py-3 sm:px-6 sm:py-6">
+      <main className="mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
             const isPlaceholder = !liveSourceTypes.has(col.source_type);

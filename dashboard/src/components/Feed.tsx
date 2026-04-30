@@ -407,7 +407,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   }, [rows, isHot]);
 
   return (
-    <div className="flex flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm">
+    <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header */}
       <header className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
         <div className="flex items-center gap-2 min-w-0">
