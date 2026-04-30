@@ -502,7 +502,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </div>
         )}
         {placeholder ? (
-          <div className="flex h-40 items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
             暂无数据源
           </div>
         ) : error ? (
@@ -518,13 +518,12 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </div>
         ) : items.length === 0 && hasMore ? (
           <>
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
+            {Array.from({ length: 8 }).map((_, i) => (
+              <SkeletonCard key={i} />
+            ))}
           </>
         ) : items.length === 0 ? (
-          <div className="flex h-40 items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
             {isHot ? "热门内容已看完，试试时间倒序" : "暂无内容"}
           </div>
         ) : (
