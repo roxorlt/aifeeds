@@ -70,6 +70,10 @@ export default {
       if (path === '/api/items' && request.method === 'GET') {
         return handleItems(request, env);
       }
+      const itemByIdMatch = path.match(/^\/api\/items\/(.+)$/);
+      if (itemByIdMatch && request.method === 'GET') {
+        return handleItemById(request, env, decodeURIComponent(itemByIdMatch[1]));
+      }
       if (path === '/api/sources' && request.method === 'GET') {
         return handleSources(request, env);
       }
@@ -449,6 +453,38 @@ function parseItemRow(row: Record<string, unknown>): Record<string, unknown> {
     }
   }
   return parsed;
+}
+
+// ─── GET /api/items/:id ────────────────────────────────────────
+// :id is the composite primary key `${source_type}:${source_id}`.
+// Returns { item, siblings } where siblings are thread members
+// (same extra.thread_root_id, ordered by published_at ASC) if any.
+
+async function handleItemById(request: Request, env: Env, id: string): Promise<Response> {
+  const item = await env.DB.prepare(
+    'SELECT * FROM items WHERE id = ?'
+  ).bind(id).first<Record<string, unknown>>();
+
+  if (!item) {
+    return jsonResponse({ error: 'not_found' }, 404, request, env);
+  }
+
+  const parsedItem = parseItemRow(item);
+  const extra = parsedItem.extra as { thread_root_id?: string } | null | undefined;
+  const threadRootId = extra && typeof extra === 'object' ? extra.thread_root_id : undefined;
+
+  let siblings: Record<string, unknown>[] = [];
+  if (threadRootId) {
+    const result = await env.DB.prepare(
+      `SELECT * FROM items
+       WHERE source_type = ?
+         AND extra ->> '$.thread_root_id' = ?
+       ORDER BY published_at ASC, id ASC`
+    ).bind(parsedItem.source_type, threadRootId).all();
+    siblings = result.results.map(parseItemRow);
+  }
+
+  return jsonResponse({ item: parsedItem, siblings }, 200, request, env);
 }
 
 // ─── GET /api/sources ──────────────────────────────────────────
