@@ -73,6 +73,8 @@ export interface ItemExtra {
   reply_to_id?: string;
   quote_of_id?: string;
   quote_of?: QuoteOf;
+  reply_of_id?: string | null;
+  reply_of?: QuoteOf | null;
   link_card?: LinkCard;
   thread_root_id?: string;
   hashtags?: string[];

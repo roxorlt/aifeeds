@@ -197,11 +197,14 @@ export function TweetCard({
 
   // Thread / reply / quote indicators
   const isThread = Boolean(extra.thread_root_id);
-  const isReply = Boolean(extra.reply_to_id);
+  const replyOf = extra.reply_of;
+  const isReply = Boolean(extra.reply_to_id) || Boolean(extra.reply_of_id);
   const quoteOf = extra.quote_of;
   // Only show the "❝ 引用推文" banner if we have quote_of_id but no full quote_of data
   // (fallback for pre-backfill tweets). If we have quote_of, render nested card instead.
   const hasQuotePlaceholder = Boolean(extra.quote_of_id) && !quoteOf;
+  // Reply placeholder when we know it's a reply but parent fetch hasn't run yet.
+  const hasReplyPlaceholder = isReply && !replyOf;
 
   const downPos = useRef<{ x: number; y: number } | null>(null);
 
@@ -258,7 +261,7 @@ export function TweetCard({
         <div className="pointer-events-none absolute left-[35px] top-[52px] bottom-0 w-[2px] bg-neutral-200" />
       )}
       {/* Thread / reply / quote banner */}
-      {((isThread && !hideThreadBanner) || isReply || hasQuotePlaceholder) && (
+      {((isThread && !hideThreadBanner) || hasReplyPlaceholder || hasQuotePlaceholder || replyOf) && (
         <div className="mb-1.5 ml-[52px] flex items-center gap-1.5 text-[12px] text-neutral-500">
           {isThread && !hideThreadBanner && (
             <span className="flex items-center gap-1">
@@ -266,7 +269,15 @@ export function TweetCard({
               <span>Thread</span>
             </span>
           )}
-          {isReply && !isThread && (
+          {replyOf && !isThread && (
+            <span className="flex items-center gap-1">
+              <span>↩</span>
+              <span>
+                回复 @{replyOf.handle || "?"}
+              </span>
+            </span>
+          )}
+          {hasReplyPlaceholder && !isThread && (
             <span className="flex items-center gap-1">
               <span>↩</span>
               <span>回复</span>
@@ -328,6 +339,9 @@ export function TweetCard({
               )}
             </div>
           </div>
+
+          {/* Reply parent (rendered above the reply body for context) */}
+          {replyOf && <QuotedTweet quote={replyOf} />}
 
           {/* Body */}
           <div
