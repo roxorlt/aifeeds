@@ -54,6 +54,7 @@
 |------|------|------|------|
 | `/api/ingest` | POST | 接收本地 push 的 tweets → 写 D1 items/sources | Bearer `INGEST_TOKEN` |
 | `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`） | 无（只读） |
+| `/api/items/:id` | GET | 单条详情 + thread siblings（`:id` 是 composite，如 `x_list:123…`） | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
@@ -75,7 +76,9 @@
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
+- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
+- `mode=backfill-replies`：回填 reply_to_id + reply_of 父推快照（用 syndication `parent` 字段，与 quote 平行）。cron 占 :05 :35 槽（2/h），历史回补主要靠本地 loop。
+- `mode=reclassify-threads`：清理错分的 thread_root_id（默认 `dry_run=1` 只统计；`dry_run=0` 真执行）。一次性，等 backfill-replies 跑完再触发。
 - `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）；detect-longform 默认 30（1-80）
 - `rate_sleep_ms=400`（backfill / refresh / tiered / detect-longform）
 - `lookback_days=14`（仅 refresh-metrics，1-90）
@@ -88,7 +91,7 @@
 |------|------|---------|
 | `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
 
-**调度节奏**（2026-04-29 加入 detect-longform）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 6 次 backfill-quotes（`:05 :20 :25 :35 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill 槽跑 cleanup。
+**调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
 
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
