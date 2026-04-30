@@ -4,7 +4,7 @@ import { TweetDrawer } from "./components/TweetDrawer";
 import { DrawerProvider } from "./lib/drawer";
 import { fetchSources, fetchStats } from "./api";
 import type { Source, SourceType, Stats } from "./types";
-import { cn, timeAgo } from "./lib/utils";
+import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 
@@ -177,13 +177,26 @@ function App() {
           })}
         </div>
 
-        {/* Stats footer */}
-        {stats && (
-          <footer className="mt-6 text-center text-xs text-neutral-400">
-            共 {stats.relevant_items.toLocaleString()} 条 AI 相关内容 · 今日新增{" "}
-            {stats.items_today} · 最后更新 {timeAgo(stats.last_updated)}
-          </footer>
-        )}
+        <footer className="mt-6 text-center text-xs text-neutral-400">
+          Built by{" "}
+          <a
+            href="https://blog.ai-feeds.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-neutral-600 hover:underline"
+          >
+            roxor
+          </a>
+          <span className="mx-1.5">·</span>
+          <a
+            href="https://github.com/roxorlt"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-neutral-600 hover:underline"
+          >
+            GitHub
+          </a>
+        </footer>
       </main>
       <TweetDrawer />
     </div>
