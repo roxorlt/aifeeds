@@ -1,5 +1,6 @@
 import {
   runBackfillQuotes,
+  runBackfillReplies,
   runCleanup,
   runRefreshMetrics,
   runRefreshTiered,
@@ -562,6 +563,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillQuotes(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-replies') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillReplies(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'fill-translations') {

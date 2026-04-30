@@ -329,6 +329,15 @@ interface Patch {
   quote_of_id?: string | null;
   link_card?: LinkCard | null;
   clearThreadRoot?: boolean;
+  // PR-B: reply parent enrichment. reply_of_id is the canonical id field
+  // (parallel to quote_of_id); reply_of is the full snapshot from
+  // syndication's `parent` payload. reply_to_screen_name lets the UI render
+  // "↩ 回复 @handle" even when the snapshot fetch is missing.
+  reply_of_id?: string | null;
+  reply_of?: QuoteOf | null;
+  reply_to_screen_name?: string | null;
+  // Sentinel that backfill-replies has examined this item (idempotent skip).
+  reply_enriched?: boolean;
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
@@ -349,6 +358,18 @@ async function applyPatch(
   if (patch.quote_of_id !== undefined) extra.quote_of_id = patch.quote_of_id;
   if (patch.link_card !== undefined) extra.link_card = patch.link_card;
   if (patch.clearThreadRoot) delete extra.thread_root_id;
+  if (patch.reply_of !== undefined) extra.reply_of = patch.reply_of;
+  if (patch.reply_of_id !== undefined) {
+    extra.reply_of_id = patch.reply_of_id;
+    // Mirror to legacy field for any downstream code still reading reply_to_id
+    extra.reply_to_id = patch.reply_of_id;
+  }
+  if (patch.reply_to_screen_name !== undefined) {
+    extra.reply_to_screen_name = patch.reply_to_screen_name;
+  }
+  if (patch.reply_enriched) {
+    extra.reply_enriched_at = new Date().toISOString();
+  }
   extra.enriched_at = new Date().toISOString();
 
   const updates: string[] = ["extra = ?"];
@@ -460,6 +481,131 @@ export async function runBackfillQuotes(
     with_quote: counts.with_quote,
     with_card: counts.with_card,
     empty: counts.empty,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── backfill-replies mode ─────────────────────────────────────
+// PR-B: pull reply parent snapshot via syndication API's `parent` field.
+// Parallel to backfill-quotes but covers ALL items (not just quote candidates),
+// because the legacy scraper never captured reply_to_id — every existing item
+// is potentially missing reply data. Ordered newest-first so recently-shared
+// content gets fixed first.
+
+async function selectReplyBackfillCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+): Promise<CandidateRow[]> {
+  const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND is_relevant = 1
+       AND (extra IS NULL
+            OR (extra NOT LIKE '%"reply_enriched_at"%'
+                AND extra NOT LIKE '%"reply_of"%'))
+     ORDER BY published_at DESC, id DESC
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<CandidateRow>();
+
+  const out: CandidateRow[] = [];
+  for (const r of rows.results) {
+    if (!done.has(r.source_id)) {
+      out.push(r);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+export async function runBackfillReplies(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+): Promise<RunResult> {
+  const mode = "backfill-replies";
+  const t0 = Date.now();
+  const state = await loadState(env, mode);
+  const done = new Set<string>([
+    ...state.processed_ids,
+    ...state.not_found_ids,
+  ]);
+
+  const candidates = await selectReplyBackfillCandidates(env, done, limit);
+  const counts = {
+    processed: 0,
+    with_reply: 0,
+    no_reply: 0,
+    not_found: 0,
+    failed: 0,
+    // Reuse RunResult's existing fields below, mapped:
+    //   with_quote → with_reply (we filled reply_of)
+    //   with_card  → 0 (not relevant here)
+    //   empty      → no_reply (item is not a reply)
+  };
+
+  for (const row of candidates) {
+    const tid = row.source_id;
+    const res = await fetchTweet(tid);
+    if (res === null) {
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (res.notFound) {
+      state.not_found_ids.push(tid);
+      counts.not_found++;
+    } else if (res.data) {
+      const apiReplyToId = res.data.in_reply_to_status_id_str as
+        | string
+        | undefined;
+      const apiReplyToHandle = res.data.in_reply_to_screen_name as
+        | string
+        | undefined;
+      const parent = res.data.parent as Record<string, unknown> | undefined;
+
+      const patch: Patch = { reply_enriched: true };
+      if (apiReplyToId) {
+        patch.reply_of_id = apiReplyToId;
+        patch.reply_to_screen_name = apiReplyToHandle ?? null;
+        if (parent && parent.id_str) {
+          patch.reply_of = apiToQuoteOf(parent);
+        } else {
+          // Parent suppressed (deleted/protected) — keep id+handle for the
+          // "↩ 回复 @handle" placeholder, leave reply_of null.
+          patch.reply_of = null;
+        }
+        counts.with_reply++;
+      } else {
+        // Confirmed not a reply. Still mark sentinel so we skip on rerun.
+        counts.no_reply++;
+      }
+
+      await applyPatch(env, row, patch);
+      state.processed_ids.push(tid);
+      counts.processed++;
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    with_quote: counts.with_reply,
+    with_card: 0,
+    empty: counts.no_reply,
     not_found: counts.not_found,
     failed: counts.failed,
     elapsed_ms: Date.now() - t0,
