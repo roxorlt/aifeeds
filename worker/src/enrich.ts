@@ -613,6 +613,169 @@ export async function runBackfillReplies(
   };
 }
 
+// ─── reclassify-threads mode ───────────────────────────────────
+// PR-B step 2: clear thread_root_id from items that are NOT part of a real
+// self-thread. Definition of self-thread: a chain of same-author tweets where
+// each member's reply_of_id points to either the root or another in-chain
+// member by the same author. Anything else (Q&A reply trees with mixed
+// authors, replies to non-list users, etc.) gets thread_root_id stripped so
+// it renders as a standalone card instead of bundled.
+//
+// Idempotent. Run after backfill-replies completes coverage of all members.
+// ALWAYS runs full sweep (one-shot) — no cron rotation. Trigger via
+// /api/enrich/run?mode=reclassify-threads&dry_run=1 first to inspect.
+
+interface ReclassifyResult {
+  mode: "reclassify-threads";
+  groups_total: number;
+  groups_kept_intact: number;
+  groups_partially_cleared: number;
+  groups_fully_cleared: number;
+  members_kept: number;
+  members_cleared: number;
+  members_skipped_unenriched: number;
+  dry_run: boolean;
+  elapsed_ms: number;
+}
+
+interface ThreadRow {
+  id: string;
+  source_id: string;
+  handle: string | null;
+  extra: string | null;
+}
+
+export async function runReclassifyThreads(
+  env: EnrichEnv,
+  dryRun = true,
+): Promise<ReclassifyResult> {
+  const t0 = Date.now();
+
+  // Pull every item with thread_root_id set. ~6500 rows; small enough to
+  // process in memory.
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, handle, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND extra ->> '$.thread_root_id' IS NOT NULL`,
+  ).all<ThreadRow>();
+
+  // Bucket by thread_root_id
+  const groups = new Map<string, ThreadRow[]>();
+  for (const r of rows.results) {
+    const extra = r.extra ? (JSON.parse(r.extra) as Record<string, unknown>) : {};
+    const root = extra.thread_root_id as string | undefined;
+    if (!root) continue;
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(r);
+  }
+
+  let groupsKept = 0;
+  let groupsPartial = 0;
+  let groupsCleared = 0;
+  let totalKept = 0;
+  let totalCleared = 0;
+  let totalSkipped = 0;
+
+  const idsToClear: string[] = [];
+
+  for (const [rootId, members] of groups) {
+    // Index members by source_id for graph walk
+    const bySourceId = new Map<string, ThreadRow>();
+    for (const m of members) bySourceId.set(m.source_id, m);
+
+    // Find the root member (its source_id == rootId, present in this group)
+    const root = bySourceId.get(rootId);
+    if (!root) {
+      // Root not in our group (root not scraped) — fallback: keep largest
+      // same-author connected component reachable via reply chains.
+      // But conservatively just skip and clear all (we can't verify).
+      for (const m of members) idsToClear.push(m.id);
+      groupsCleared++;
+      totalCleared += members.length;
+      continue;
+    }
+
+    const rootHandle = root.handle;
+
+    // BFS: anchor = root; iteratively pull members whose reply_of points to
+    // an already-anchored same-author member.
+    const anchored = new Set<string>([rootId]);
+    let changed = true;
+    let skippedThisGroup = 0;
+    while (changed) {
+      changed = false;
+      for (const m of members) {
+        if (anchored.has(m.source_id)) continue;
+        const ex = m.extra ? (JSON.parse(m.extra) as Record<string, unknown>) : {};
+        const replyEnriched = ex.reply_enriched_at as string | undefined;
+        const replyTo = (ex.reply_of_id || ex.reply_to_id) as string | undefined;
+        if (!replyEnriched) {
+          // Not yet checked by backfill-replies. Don't decide yet.
+          skippedThisGroup++;
+          continue;
+        }
+        if (replyTo && anchored.has(replyTo) && m.handle === rootHandle) {
+          anchored.add(m.source_id);
+          changed = true;
+        }
+      }
+    }
+
+    let cleared = 0;
+    for (const m of members) {
+      if (!anchored.has(m.source_id)) {
+        idsToClear.push(m.id);
+        cleared++;
+      }
+    }
+
+    if (cleared === 0) {
+      groupsKept++;
+      totalKept += members.length;
+    } else if (cleared === members.length) {
+      groupsCleared++;
+      totalCleared += cleared;
+    } else {
+      groupsPartial++;
+      totalKept += members.length - cleared;
+      totalCleared += cleared;
+    }
+    totalSkipped += skippedThisGroup;
+  }
+
+  if (!dryRun && idsToClear.length > 0) {
+    // Bulk update: clear thread_root_id from extra JSON. D1 doesn't support
+    // arbitrary IN list size in one prepared statement reliably for huge
+    // lists, so chunk.
+    const CHUNK = 100;
+    for (let i = 0; i < idsToClear.length; i += CHUNK) {
+      const chunk = idsToClear.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      await env.DB.prepare(
+        `UPDATE items
+         SET extra = json_remove(extra, '$.thread_root_id')
+         WHERE id IN (${placeholders})`,
+      )
+        .bind(...chunk)
+        .run();
+    }
+  }
+
+  return {
+    mode: "reclassify-threads",
+    groups_total: groups.size,
+    groups_kept_intact: groupsKept,
+    groups_partially_cleared: groupsPartial,
+    groups_fully_cleared: groupsCleared,
+    members_kept: totalKept,
+    members_cleared: totalCleared,
+    members_skipped_unenriched: totalSkipped,
+    dry_run: dryRun,
+    elapsed_ms: Date.now() - t0,
+  };
+}
+
 // ─── refresh-metrics mode ──────────────────────────────────────
 // Continuously refresh interaction metrics (likes/retweets/replies/bookmarks)
 // for recent items. Unlike backfill-quotes which is one-shot per item,
