@@ -12,7 +12,10 @@
 html,
 body,
 #root {
-  height: 100%;
+  /* min-height instead of height: PC feed cells are bounded by md:max-h-[70vh]
+     so #root needs full viewport; mobile uses page-level scroll, so #root must
+     be allowed to grow taller than the viewport. */
+  min-height: 100%;
   margin: 0;
 }
 
@@ -27,15 +30,9 @@ body {
   color: #171717;
 }
 
-/* Feed body height: full viewport on mobile (1 column), capped on desktop */
-.feed-body {
-  max-height: calc(100vh - 8rem);
-}
-@media (min-width: 768px) {
-  .feed-body {
-    max-height: 720px;
-  }
-}
+/* Feed body height is now controlled by Tailwind on the element itself
+   (md:flex-1 md:overflow-y-auto inside md:max-h-[70vh] wrapper). Mobile
+   gets natural document flow — no internal scroll. */
 
 /* Hide scrollbar on filter chips rail for a cleaner mobile look */
 .chips-rail {
