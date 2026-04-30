@@ -39,26 +39,24 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
 function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [filter, setFilter] = useState<FilterKey>(() =>
-    typeof window !== "undefined" &&
-    window.matchMedia("(max-width: 767px)").matches
-      ? "x_list"
-      : "all",
-  );
+  const [storedFilter, setFilter] = useState<FilterKey>("all");
   const [refreshTick, setRefreshTick] = useState(0);
 
   const isNarrow = useIsNarrow();
   const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
 
+  // Derived filter: PC always shows "all" (chips hidden); mobile coerces
+  // "all" → "x_list" since the "all" chip isn't rendered on narrow.
+  const filter: FilterKey = !isNarrow
+    ? "all"
+    : storedFilter === "all"
+      ? "x_list"
+      : storedFilter;
+
   useEffect(() => {
     fetchSources().then(setSources).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
-
-  // When narrow, "all" is invalid — drop to x_list
-  useEffect(() => {
-    if (isNarrow && filter === "all") setFilter("x_list");
-  }, [isNarrow, filter]);
 
   // Derive which source types have live data
   const liveSourceTypes = new Set(
