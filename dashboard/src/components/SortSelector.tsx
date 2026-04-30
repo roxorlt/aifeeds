@@ -27,11 +27,11 @@ export function SortSelector({ value, onChange }: Props) {
         e.stopPropagation(); // don't bubble to header tap-to-scroll
         onChange(value === "hot" ? "time" : "hot");
       }}
-      className="group inline-flex items-center gap-1.5 text-[11px]"
+      className="group inline-flex items-center text-[11px]"
       aria-label={`排序方式（当前 ${LABELS[value]}，点击切换）`}
     >
       <span className={cls("hot")}>{LABELS.hot}</span>
-      <span className="text-neutral-300">·</span>
+      <span className="text-neutral-300">/</span>
       <span className={cls("time")}>{LABELS.time}</span>
     </button>
   );
