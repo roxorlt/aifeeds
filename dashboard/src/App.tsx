@@ -105,8 +105,8 @@ function App() {
         }}
       >
         <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
-          <div className="flex items-baseline gap-3">
-            <h1 className="text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
+          <div className="flex shrink-0 items-baseline gap-3">
+            <h1 className="whitespace-nowrap text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
               AI-Feeds
             </h1>
             {/* Subtitle slogan TBD; intentionally empty for now */}
@@ -131,7 +131,7 @@ function App() {
                       }
                     }}
                     className={cn(
-                      "shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors",
+                      "shrink-0 min-w-[64px] rounded-full px-3 py-1 text-center text-xs font-medium transition-colors",
                       isActive
                         ? "bg-neutral-900 text-white"
                         : "text-neutral-600 hover:bg-neutral-100",
