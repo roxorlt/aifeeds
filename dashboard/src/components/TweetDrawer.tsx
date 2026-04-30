@@ -1,7 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useDrawer } from "../lib/drawer";
 import { TweetCard } from "./TweetCard";
-import { parseJsonField } from "../lib/utils";
+import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import type { Item, ItemExtra } from "../types";
 
@@ -10,6 +10,18 @@ export function TweetDrawer() {
   const { item, siblings, loading, error } = state;
   const open = Boolean(item) || loading || Boolean(error);
   const isNarrow = useIsNarrow();
+  const targetRef = useRef<HTMLDivElement | null>(null);
+
+  // Scroll the URL-targeted tweet into view when opening into a thread where
+  // the target isn't the root. X-style behavior for shared replies.
+  useEffect(() => {
+    if (!item) return;
+    const node = targetRef.current;
+    if (!node) return;
+    requestAnimationFrame(() => {
+      node.scrollIntoView({ behavior: "auto", block: "start" });
+    });
+  }, [item?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -86,9 +98,21 @@ export function TweetDrawer() {
         </header>
         <div className="flex-1 overflow-y-auto">
           {item ? (
-            threadMembers.map((it) => (
-              <TweetCard key={it.id} item={it} embedded hideThreadBanner />
-            ))
+            threadMembers.map((it) => {
+              const isTarget = it.id === item.id && threadMembers.length > 1;
+              return (
+                <div
+                  key={it.id}
+                  ref={isTarget ? targetRef : undefined}
+                  className={cn(
+                    isTarget &&
+                      "border-l-2 border-sky-500 bg-sky-50/40",
+                  )}
+                >
+                  <TweetCard item={it} embedded hideThreadBanner />
+                </div>
+              );
+            })
           ) : loading ? (
             <DrawerSkeleton />
           ) : (
