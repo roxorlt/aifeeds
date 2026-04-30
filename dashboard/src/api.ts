@@ -1,8 +1,27 @@
-import type { ItemsResponse, Source, SourceType, Stats } from "./types";
+import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE ||
-  "https://api.ai-feeds.com";
+export interface ItemDetailResponse {
+  item: Item;
+  siblings: Item[];
+}
+
+export class ItemNotFoundError extends Error {
+  constructor(id: string) {
+    super(`item not found: ${id}`);
+    this.name = "ItemNotFoundError";
+  }
+}
+
+const API_BASE = (() => {
+  if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "http://localhost:8788";
+    }
+  }
+  return "https://api.ai-feeds.com";
+})();
 
 export interface ItemsQuery {
   source_type?: SourceType | SourceType[];
@@ -40,6 +59,14 @@ export async function fetchSources(): Promise<Source[]> {
   if (!res.ok) throw new Error(`fetchSources failed: ${res.status}`);
   const data = await res.json();
   return data.sources || [];
+}
+
+export async function fetchItem(id: string): Promise<ItemDetailResponse> {
+  const url = `${API_BASE}/api/items/${encodeURIComponent(id)}`;
+  const res = await fetch(url);
+  if (res.status === 404) throw new ItemNotFoundError(id);
+  if (!res.ok) throw new Error(`fetchItem failed: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchStats(): Promise<Stats> {

@@ -7,8 +7,8 @@ import type { Item, ItemExtra } from "../types";
 
 export function TweetDrawer() {
   const { state, close } = useDrawer();
-  const { item, siblings } = state;
-  const open = Boolean(item);
+  const { item, siblings, loading, error } = state;
+  const open = Boolean(item) || loading || Boolean(error);
   const isNarrow = useIsNarrow();
 
   useEffect(() => {
@@ -30,11 +30,18 @@ export function TweetDrawer() {
     };
   }, [open]);
 
-  if (!item) return null;
+  if (!open) return null;
 
-  // If this tweet is part of a thread and we have siblings, show them in order.
-  // Otherwise just show the single tweet.
-  const threadMembers = resolveThreadMembers(item, siblings);
+  const threadMembers = item ? resolveThreadMembers(item, siblings) : [];
+  const headerTitle = item
+    ? threadMembers.length > 1
+      ? `Thread · ${threadMembers.length} 条`
+      : "推文详情"
+    : loading
+      ? "加载中…"
+      : error === "not_found"
+        ? "推文不存在"
+        : "加载失败";
 
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
@@ -61,10 +68,10 @@ export function TweetDrawer() {
             </button>
           </div>
           <div className="justify-self-center truncate text-sm font-semibold text-neutral-900">
-            {threadMembers.length > 1 ? `Thread · ${threadMembers.length} 条` : "推文详情"}
+            {headerTitle}
           </div>
           <div className="justify-self-end">
-            {item.url && (
+            {item?.url && (
               <a
                 href={item.url}
                 target="_blank"
@@ -78,11 +85,61 @@ export function TweetDrawer() {
           </div>
         </header>
         <div className="flex-1 overflow-y-auto">
-          {threadMembers.map((it) => (
-            <TweetCard key={it.id} item={it} embedded hideThreadBanner />
-          ))}
+          {item ? (
+            threadMembers.map((it) => (
+              <TweetCard key={it.id} item={it} embedded hideThreadBanner />
+            ))
+          ) : loading ? (
+            <DrawerSkeleton />
+          ) : (
+            <DrawerError code={error} onClose={close} />
+          )}
         </div>
       </aside>
+    </div>
+  );
+}
+
+function DrawerSkeleton() {
+  return (
+    <div className="animate-pulse space-y-3 p-4">
+      <div className="flex items-center gap-3">
+        <div className="h-10 w-10 rounded-full bg-neutral-200" />
+        <div className="flex-1 space-y-2">
+          <div className="h-3 w-1/3 rounded bg-neutral-200" />
+          <div className="h-3 w-1/4 rounded bg-neutral-200" />
+        </div>
+      </div>
+      <div className="space-y-2">
+        <div className="h-3 w-full rounded bg-neutral-200" />
+        <div className="h-3 w-11/12 rounded bg-neutral-200" />
+        <div className="h-3 w-3/4 rounded bg-neutral-200" />
+      </div>
+    </div>
+  );
+}
+
+function DrawerError({
+  code,
+  onClose,
+}: {
+  code: "not_found" | "network" | null;
+  onClose: () => void;
+}) {
+  const message =
+    code === "not_found"
+      ? "这条推文不存在或已被删除。"
+      : "加载失败，请检查网络后重试。";
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+      <p className="text-sm text-neutral-600">{message}</p>
+      <button
+        type="button"
+        onClick={onClose}
+        className="rounded-md border border-neutral-200 bg-white px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+      >
+        返回首页
+      </button>
     </div>
   );
 }
