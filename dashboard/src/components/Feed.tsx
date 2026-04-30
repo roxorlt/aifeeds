@@ -17,8 +17,8 @@ import {
 } from "../lib/utils";
 import type { ItemExtra } from "../types";
 import { scrollFeedOrPage } from "../lib/scroll";
-
-type SortMode = "time" | "hot";
+import { SortSelector, type SortMode } from "./SortSelector";
+import { useIsNarrow } from "../lib/breakpoint";
 
 interface Props {
   sourceType: SourceType;
@@ -109,6 +109,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
 
+  const isNarrow = useIsNarrow();
   const isHot = sortMode === "hot";
 
   // Initial load + refresh on tick or sort change
@@ -422,33 +423,11 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!placeholder && (
-            <div className="inline-flex items-center gap-1.5 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setSortMode("hot")}
-                className={cn(
-                  "transition-colors",
-                  sortMode === "hot"
-                    ? "font-semibold text-neutral-900"
-                    : "text-neutral-400 hover:text-neutral-700",
-                )}
-              >
-                热门
-              </button>
-              <span className="text-neutral-300">·</span>
-              <button
-                type="button"
-                onClick={() => setSortMode("time")}
-                className={cn(
-                  "transition-colors",
-                  sortMode === "time"
-                    ? "font-semibold text-neutral-900"
-                    : "text-neutral-400 hover:text-neutral-700",
-                )}
-              >
-                时间
-              </button>
-            </div>
+            <SortSelector
+              value={sortMode}
+              onChange={setSortMode}
+              isNarrow={isNarrow}
+            />
           )}
           <div className="text-[11px] text-neutral-500">
             {placeholder ? "规划中" : ""}
