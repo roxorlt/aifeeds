@@ -31,7 +31,7 @@ export function SortSelector({ value, onChange }: Props) {
       aria-label={`排序方式（当前 ${LABELS[value]}，点击切换）`}
     >
       <span className={cls("hot")}>{LABELS.hot}</span>
-      <span className="text-neutral-300">/</span>
+      <span className="text-neutral-300">|</span>
       <span className={cls("time")}>{LABELS.time}</span>
     </button>
   );
