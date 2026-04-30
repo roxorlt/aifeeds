@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { fetchItems } from "../api";
 import type { Item, SourceType } from "../types";
 import { TweetCard } from "./TweetCard";
@@ -16,7 +16,7 @@ import {
   cn,
 } from "../lib/utils";
 import type { ItemExtra } from "../types";
-import { scrollFeedOrPage } from "../lib/scroll";
+import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
 import { useIsNarrow } from "../lib/breakpoint";
 
@@ -89,7 +89,14 @@ function SkeletonCard() {
   );
 }
 
-export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
+export interface FeedHandle {
+  scrollToTop: () => void;
+}
+
+export const Feed = forwardRef<FeedHandle, Props>(function Feed(
+  { sourceType, title, placeholder, refreshTick },
+  ref,
+) {
   const [items, setItems] = useState<Item[]>([]);
   const [pending, setPending] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
@@ -410,10 +417,23 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     return firstSeen;
   }, [rows, isHot]);
 
+  useImperativeHandle(ref, () => ({
+    scrollToTop: () => smoothScrollToTop(feedBodyRef.current),
+  }));
+
   return (
     <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header */}
-      <header className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+      <header
+        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 md:cursor-pointer"
+        onClick={(e) => {
+          // Mobile: chip rail handles回顶 via active-tap; skip header tap
+          if (window.matchMedia("(max-width: 767px)").matches) return;
+          // Skip when click bubbled from a button (sort selector, refresh)
+          if ((e.target as HTMLElement).closest("button")) return;
+          smoothScrollToTop(feedBodyRef.current);
+        }}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <SourceIcon
             source_type={sourceType}
@@ -557,4 +577,4 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       </div>
     </div>
   );
-}
+});

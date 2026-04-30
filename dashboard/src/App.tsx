@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
-import { Feed } from "./components/Feed";
+import { useEffect, useRef, useState } from "react";
+import { Feed, type FeedHandle } from "./components/Feed";
 import { TweetDrawer } from "./components/TweetDrawer";
 import { DrawerProvider } from "./lib/drawer";
 import { fetchSources, fetchStats } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn, timeAgo } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
-import { scrollFeedOrPage } from "./lib/scroll";
+import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 
 interface SourceConfig {
   source_type: SourceType;
@@ -48,6 +48,7 @@ function App() {
   const [refreshTick, setRefreshTick] = useState(0);
 
   const isNarrow = useIsNarrow();
+  const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
 
   useEffect(() => {
     fetchSources().then(setSources).catch(() => {});
@@ -80,11 +81,31 @@ function App() {
     return col.title;
   };
 
+  async function onTopBarClick() {
+    if (isNarrow) {
+      return smoothScrollWindowToTop();
+    }
+    const pageAtTop = window.scrollY <= 1;
+    if (!pageAtTop) {
+      return smoothScrollWindowToTop();
+    }
+    // Already at page top → scroll all PC columns to top
+    feedRefs.current.forEach((handle) => handle?.scrollToTop());
+  }
+
   return (
     <DrawerProvider>
     <div className="min-h-screen bg-neutral-50">
       {/* Top bar */}
-      <header className="sticky top-0 z-10 border-b border-neutral-200 bg-white/80 backdrop-blur">
+      <header
+        className="sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur"
+        onClick={(e) => {
+          // Skip when click is on chips, refresh button, etc.
+          if ((e.target as HTMLElement).closest("button")) return;
+          if ((e.target as HTMLElement).closest("nav")) return;
+          onTopBarClick();
+        }}
+      >
         <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
           <div className="flex items-baseline gap-3">
             <h1 className="text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
@@ -145,6 +166,10 @@ function App() {
             return (
               <Feed
                 key={col.source_type}
+                ref={(h) => {
+                  if (h) feedRefs.current.set(col.source_type, h);
+                  else feedRefs.current.delete(col.source_type);
+                }}
                 sourceType={col.source_type}
                 title={getTitleForColumn(col)}
                 placeholder={isPlaceholder}
