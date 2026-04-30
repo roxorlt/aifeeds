@@ -13,26 +13,26 @@ const LABELS: Record<SortMode, string> = {
 };
 
 export function SortSelector({ value, onChange }: Props) {
-  const handle = (mode: SortMode) => (e: React.MouseEvent) => {
-    e.stopPropagation(); // don't bubble to header tap-to-scroll
-    if (mode !== value) onChange(mode);
-  };
   const cls = (mode: SortMode) =>
     cn(
       "transition-colors",
       value === mode
         ? "font-semibold text-neutral-900"
-        : "text-neutral-400 hover:text-neutral-700",
+        : "text-neutral-400 group-hover:text-neutral-700",
     );
   return (
-    <div className="inline-flex items-center gap-1.5 text-[11px]">
-      <button type="button" onClick={handle("hot")} className={cls("hot")}>
-        {LABELS.hot}
-      </button>
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation(); // don't bubble to header tap-to-scroll
+        onChange(value === "hot" ? "time" : "hot");
+      }}
+      className="group inline-flex items-center gap-1.5 text-[11px]"
+      aria-label={`排序方式（当前 ${LABELS[value]}，点击切换）`}
+    >
+      <span className={cls("hot")}>{LABELS.hot}</span>
       <span className="text-neutral-300">·</span>
-      <button type="button" onClick={handle("time")} className={cls("time")}>
-        {LABELS.time}
-      </button>
-    </div>
+      <span className={cls("time")}>{LABELS.time}</span>
+    </button>
   );
 }
