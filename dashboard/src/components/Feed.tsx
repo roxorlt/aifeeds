@@ -16,6 +16,7 @@ import {
   cn,
 } from "../lib/utils";
 import type { ItemExtra } from "../types";
+import { scrollFeedOrPage } from "../lib/scroll";
 
 type SortMode = "time" | "hot";
 
@@ -329,7 +330,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
           if (res.items.length > 0) {
             lastScrapedAt.current = res.items[0].scraped_at;
           }
-          feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+          scrollFeedOrPage(feedBodyRef.current);
         })
         .catch(() => {
           // Keep pending so banner remains as retry affordance.
@@ -339,7 +340,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     }
     setItems((prev) => [...pending, ...prev]);
     setPending([]);
-    feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    scrollFeedOrPage(feedBodyRef.current);
   };
 
   // Capture last-seen boundary ONCE at mount — stays stable through the session
