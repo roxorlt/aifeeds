@@ -2,12 +2,14 @@ import { useEffect } from "react";
 import { useDrawer } from "../lib/drawer";
 import { TweetCard } from "./TweetCard";
 import { parseJsonField } from "../lib/utils";
+import { useIsNarrow } from "../lib/breakpoint";
 import type { Item, ItemExtra } from "../types";
 
 export function TweetDrawer() {
   const { state, close } = useDrawer();
   const { item, siblings } = state;
   const open = Boolean(item);
+  const isNarrow = useIsNarrow();
 
   useEffect(() => {
     if (!open) return;
@@ -43,11 +45,25 @@ export function TweetDrawer() {
       />
       {/* Panel */}
       <aside className="absolute inset-y-0 right-0 flex w-full max-w-[600px] flex-col bg-white shadow-xl sm:w-[560px]">
-        <header className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50 px-4 py-2.5">
-          <div className="text-sm font-semibold text-neutral-900">
+        <header className="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-2 py-2 sm:px-3">
+          <div className="justify-self-start">
+            <button
+              type="button"
+              onClick={close}
+              className="rounded-md px-2 py-1 text-neutral-600 hover:bg-neutral-200"
+              aria-label={isNarrow ? "返回" : "关闭"}
+            >
+              {isNarrow ? (
+                <span className="text-xl leading-none">‹</span>
+              ) : (
+                <span className="text-base leading-none">✕</span>
+              )}
+            </button>
+          </div>
+          <div className="justify-self-center truncate text-sm font-semibold text-neutral-900">
             {threadMembers.length > 1 ? `Thread · ${threadMembers.length} 条` : "推文详情"}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="justify-self-end">
             {item.url && (
               <a
                 href={item.url}
@@ -56,17 +72,9 @@ export function TweetDrawer() {
                 className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200"
                 title="在 x.com 打开"
               >
-                ↗
+                原文
               </a>
             )}
-            <button
-              type="button"
-              onClick={close}
-              className="rounded-md px-2 py-1 text-lg text-neutral-500 hover:bg-neutral-200"
-              aria-label="关闭"
-            >
-              ✕
-            </button>
           </div>
         </header>
         <div className="flex-1 overflow-y-auto">
