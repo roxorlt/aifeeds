@@ -18,7 +18,6 @@ import {
 import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
-import { useIsNarrow } from "../lib/breakpoint";
 
 interface Props {
   sourceType: SourceType;
@@ -116,7 +115,6 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
 
-  const isNarrow = useIsNarrow();
   const isHot = sortMode === "hot";
 
   // Initial load + refresh on tick or sort change
@@ -445,11 +443,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!placeholder && (
-            <SortSelector
-              value={sortMode}
-              onChange={setSortMode}
-              isNarrow={isNarrow}
-            />
+            <SortSelector value={sortMode} onChange={setSortMode} />
           )}
           <div className="text-[11px] text-neutral-500">
             {placeholder ? "规划中" : ""}
