@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { fetchItems } from "../api";
 import type { Item, SourceType } from "../types";
 import { TweetCard } from "./TweetCard";
@@ -16,8 +16,9 @@ import {
   cn,
 } from "../lib/utils";
 import type { ItemExtra } from "../types";
-
-type SortMode = "time" | "hot";
+import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
+import { SortSelector, type SortMode } from "./SortSelector";
+import { useIsNarrow } from "../lib/breakpoint";
 
 interface Props {
   sourceType: SourceType;
@@ -88,7 +89,14 @@ function SkeletonCard() {
   );
 }
 
-export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
+export interface FeedHandle {
+  scrollToTop: () => void;
+}
+
+export const Feed = forwardRef<FeedHandle, Props>(function Feed(
+  { sourceType, title, placeholder, refreshTick },
+  ref,
+) {
   const [items, setItems] = useState<Item[]>([]);
   const [pending, setPending] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
@@ -108,6 +116,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
 
+  const isNarrow = useIsNarrow();
   const isHot = sortMode === "hot";
 
   // Initial load + refresh on tick or sort change
@@ -205,11 +214,13 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   // behavior wins and the finger never "drags" the feed.
   useEffect(() => {
     if (placeholder) return;
-    const el = feedBodyRef.current;
-    if (!el) return;
+    // Only activate PRR on mobile — PC uses bounded cell scroll, no pull gesture
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+
+    const isAtTop = () => window.scrollY <= 0;
 
     const onStart = (e: TouchEvent) => {
-      if (el.scrollTop <= 0) {
+      if (isAtTop()) {
         pullStartY.current = e.touches[0].clientY;
         isDraggingRef.current = false;
       } else {
@@ -218,7 +229,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     };
     const onMove = (e: TouchEvent) => {
       if (pullStartY.current === null) return;
-      if (el.scrollTop > 0) {
+      if (!isAtTop()) {
         pullStartY.current = null;
         pullYRef.current = 0;
         isDraggingRef.current = false;
@@ -249,15 +260,15 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       pullStartY.current = null;
     };
 
-    el.addEventListener("touchstart", onStart, { passive: true });
-    el.addEventListener("touchmove", onMove, { passive: false });
-    el.addEventListener("touchend", onEnd);
-    el.addEventListener("touchcancel", onEnd);
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onEnd);
+    window.addEventListener("touchcancel", onEnd);
     return () => {
-      el.removeEventListener("touchstart", onStart);
-      el.removeEventListener("touchmove", onMove);
-      el.removeEventListener("touchend", onEnd);
-      el.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
     };
   }, [placeholder]);
 
@@ -329,7 +340,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
           if (res.items.length > 0) {
             lastScrapedAt.current = res.items[0].scraped_at;
           }
-          feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+          scrollFeedOrPage(feedBodyRef.current);
         })
         .catch(() => {
           // Keep pending so banner remains as retry affordance.
@@ -339,7 +350,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     }
     setItems((prev) => [...pending, ...prev]);
     setPending([]);
-    feedBodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    scrollFeedOrPage(feedBodyRef.current);
   };
 
   // Capture last-seen boundary ONCE at mount — stays stable through the session
@@ -406,10 +417,23 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     return firstSeen;
   }, [rows, isHot]);
 
+  useImperativeHandle(ref, () => ({
+    scrollToTop: () => smoothScrollToTop(feedBodyRef.current),
+  }));
+
   return (
-    <div className="flex flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm">
+    <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header */}
-      <header className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+      <header
+        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 md:cursor-pointer"
+        onClick={(e) => {
+          // Mobile: chip rail handles回顶 via active-tap; skip header tap
+          if (window.matchMedia("(max-width: 767px)").matches) return;
+          // Skip when click bubbled from a button (sort selector, refresh)
+          if ((e.target as HTMLElement).closest("button")) return;
+          smoothScrollToTop(feedBodyRef.current);
+        }}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <SourceIcon
             source_type={sourceType}
@@ -421,33 +445,11 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!placeholder && (
-            <div className="inline-flex items-center gap-1.5 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setSortMode("hot")}
-                className={cn(
-                  "transition-colors",
-                  sortMode === "hot"
-                    ? "font-semibold text-neutral-900"
-                    : "text-neutral-400 hover:text-neutral-700",
-                )}
-              >
-                热门
-              </button>
-              <span className="text-neutral-300">·</span>
-              <button
-                type="button"
-                onClick={() => setSortMode("time")}
-                className={cn(
-                  "transition-colors",
-                  sortMode === "time"
-                    ? "font-semibold text-neutral-900"
-                    : "text-neutral-400 hover:text-neutral-700",
-                )}
-              >
-                时间
-              </button>
-            </div>
+            <SortSelector
+              value={sortMode}
+              onChange={setSortMode}
+              isNarrow={isNarrow}
+            />
           )}
           <div className="text-[11px] text-neutral-500">
             {placeholder ? "规划中" : ""}
@@ -472,7 +474,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       {/* Body */}
       <div
         ref={feedBodyRef}
-        className="flex-1 overflow-y-auto feed-body"
+        className="feed-body md:flex-1 md:overflow-y-auto"
         style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
       >
         {(pullY > 0 || isRefreshingPull) && !placeholder && (
@@ -575,4 +577,4 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       </div>
     </div>
   );
-}
+});
