@@ -207,11 +207,13 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
   // behavior wins and the finger never "drags" the feed.
   useEffect(() => {
     if (placeholder) return;
-    const el = feedBodyRef.current;
-    if (!el) return;
+    // Only activate PRR on mobile — PC uses bounded cell scroll, no pull gesture
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+
+    const isAtTop = () => window.scrollY <= 0;
 
     const onStart = (e: TouchEvent) => {
-      if (el.scrollTop <= 0) {
+      if (isAtTop()) {
         pullStartY.current = e.touches[0].clientY;
         isDraggingRef.current = false;
       } else {
@@ -220,7 +222,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
     };
     const onMove = (e: TouchEvent) => {
       if (pullStartY.current === null) return;
-      if (el.scrollTop > 0) {
+      if (!isAtTop()) {
         pullStartY.current = null;
         pullYRef.current = 0;
         isDraggingRef.current = false;
@@ -251,15 +253,15 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       pullStartY.current = null;
     };
 
-    el.addEventListener("touchstart", onStart, { passive: true });
-    el.addEventListener("touchmove", onMove, { passive: false });
-    el.addEventListener("touchend", onEnd);
-    el.addEventListener("touchcancel", onEnd);
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onEnd);
+    window.addEventListener("touchcancel", onEnd);
     return () => {
-      el.removeEventListener("touchstart", onStart);
-      el.removeEventListener("touchmove", onMove);
-      el.removeEventListener("touchend", onEnd);
-      el.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
     };
   }, [placeholder]);
 
@@ -452,7 +454,7 @@ export function Feed({ sourceType, title, placeholder, refreshTick }: Props) {
       {/* Body */}
       <div
         ref={feedBodyRef}
-        className="flex-1 overflow-y-auto feed-body"
+        className="feed-body md:flex-1 md:overflow-y-auto"
         style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
       >
         {(pullY > 0 || isRefreshingPull) && !placeholder && (
