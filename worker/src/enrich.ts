@@ -349,7 +349,13 @@ async function applyPatch(
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
@@ -586,9 +592,15 @@ export async function runBackfillReplies(
         counts.no_reply++;
       }
 
-      await applyPatch(env, row, patch);
-      state.processed_ids.push(tid);
-      counts.processed++;
+      try {
+        await applyPatch(env, row, patch);
+        state.processed_ids.push(tid);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-replies] applyPatch failed for ${tid}:`, e);
+        state.failed_ids.push(tid);
+        counts.failed++;
+      }
     }
 
     if (rateSleepMs > 0) await sleep(rateSleepMs);
@@ -1399,7 +1411,13 @@ function extractTasks(row: TranslationRow): TranslationTask[] {
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
@@ -1536,7 +1554,13 @@ async function applyTranslationPatch(
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
