@@ -2,6 +2,7 @@
 // 设计参考：docs/plans/2026-05-01-auth-system-design.md § 9 + § 6
 
 import type { Env } from '../index';
+import { nanoid } from 'nanoid';
 import { verifyTurnstile } from './turnstile';
 import {
   checkRateLimits,
@@ -11,6 +12,7 @@ import {
   hashCode,
   sendSmsViaTencent,
 } from './sms';
+import { createSession, buildSessionCookie } from './session';
 import { pushDeerAlert } from '../notifier';
 
 // ─── 工具 ─────────────────────────────────────────────────
@@ -143,4 +145,149 @@ export async function handleSmsSend(
   ).run();
 
   return jsonOk({ ok: true, ttl: 300 });
+}
+
+// ─── POST /api/auth/login ────────────────────────────────
+
+interface LoginBody {
+  phone: string;
+  code: string;
+}
+
+const SESSION_COOKIE_DEV_MARKER = 'localhost';  // 区分 dev/prod 环境
+
+function isDevHost(req: Request): boolean {
+  const h = req.headers.get('Host') || '';
+  return h.includes(SESSION_COOKIE_DEV_MARKER) || h.includes('127.0.0.1');
+}
+
+export async function handleLogin(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const deviceId = request.headers.get('X-Device-Id');
+  if (!deviceId || deviceId.length < 8 || deviceId.length > 64) {
+    return jsonErr('missing or invalid X-Device-Id', 400);
+  }
+
+  let body: LoginBody;
+  try {
+    body = (await request.json()) as LoginBody;
+  } catch {
+    return jsonErr('invalid json', 400);
+  }
+
+  if (typeof body.phone !== 'string' || !PHONE_REGEX.test(body.phone)) {
+    return jsonErr('invalid phone', 400);
+  }
+  if (typeof body.code !== 'string' || !/^\d{6}$/.test(body.code)) {
+    return jsonErr('invalid code format', 400);
+  }
+
+  const ip = getClientIp(request);
+  const ua = request.headers.get('User-Agent') || '';
+  const now = Date.now();
+
+  // 1. 找最新一条未消费的 success row
+  const row = await env.DB.prepare(
+    `SELECT id, code_hash, code_expires_at, code_attempts, sent_at
+     FROM sms_send_log
+     WHERE phone = ? AND result = 'success' AND code_used_at IS NULL
+     ORDER BY sent_at DESC LIMIT 1`,
+  ).bind(body.phone).first<{
+    id: number;
+    code_hash: string;
+    code_expires_at: number;
+    code_attempts: number;
+    sent_at: number;
+  }>();
+
+  if (!row) {
+    return jsonErr('no pending code', 401);
+  }
+
+  // 2. 过期检查
+  if (row.code_expires_at < now) {
+    return jsonErr('code expired', 401);
+  }
+
+  // 3. 锁定检查（错码 5 次）
+  if (row.code_attempts >= 5) {
+    return jsonErr('too many attempts, locked', 429);
+  }
+
+  // 4. 校验 code
+  const inputHash = await hashCode(body.code, 'xlist-sms-v1');
+  if (inputHash !== row.code_hash) {
+    // 错码 → attempts++
+    await env.DB.prepare(
+      `UPDATE sms_send_log SET code_attempts = code_attempts + 1 WHERE id = ?`,
+    ).bind(row.id).run();
+    const remaining = 5 - (row.code_attempts + 1);
+    return jsonErr('invalid code', 401, { attempts_remaining: Math.max(remaining, 0) });
+  }
+
+  // 5. 校验通过 → mark used
+  await env.DB.prepare(
+    `UPDATE sms_send_log SET code_used_at = ? WHERE id = ?`,
+  ).bind(now, row.id).run();
+
+  // 6. 找/建 user
+  const ident = await env.DB.prepare(
+    `SELECT user_id FROM identities
+     WHERE provider = 'phone' AND identity_value = ? AND unbound_at IS NULL`,
+  ).bind(body.phone).first<{ user_id: string }>();
+
+  let userId: string;
+  let isNewUser = false;
+  if (ident) {
+    userId = ident.user_id;
+    // 更新 last_active_at
+    await env.DB.prepare(
+      `UPDATE users SET last_active_at = ? WHERE id = ?`,
+    ).bind(now, userId).run();
+  } else {
+    // 自动注册：建 user + identity
+    userId = nanoid(14);
+    isNewUser = true;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO users (id, created_at, last_active_at, status)
+         VALUES (?, ?, ?, 'active')`,
+      ).bind(userId, now, now),
+      env.DB.prepare(
+        `INSERT INTO identities (user_id, provider, identity_value, verified_at)
+         VALUES (?, 'phone', ?, ?)`,
+      ).bind(userId, body.phone, now),
+    ]);
+  }
+
+  // 7. 关联 device → 历史 events 行的 user_id
+  ctx.waitUntil(
+    env.DB.prepare(
+      `UPDATE events SET user_id = ?
+       WHERE device_id = ? AND user_id IS NULL AND occurred_at > ?`,
+    ).bind(userId, deviceId, now - 30 * 24 * 3600_000).run(),  // 仅回填最近 30 天，防误关联
+  );
+
+  // 8. 创建 session
+  const session = await createSession(env, userId, deviceId, ip, ua);
+  const cookie = buildSessionCookie(session.id, isDevHost(request));
+
+  return jsonOk(
+    {
+      user: {
+        id: userId,
+        display_name: null,
+        avatar_url: null,
+        is_new: isNewUser,
+      },
+      session: {
+        id: session.id,
+        expires_at: session.expiresAt,
+      },
+    },
+    { 'Set-Cookie': cookie },
+  );
 }
