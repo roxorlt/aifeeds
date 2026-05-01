@@ -105,7 +105,13 @@ function App() {
         }}
       >
         <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
-          <div className="flex shrink-0 items-baseline gap-3">
+          <div className="flex shrink-0 items-center gap-2">
+            <img
+              src="/favicon.svg"
+              alt="AI-Feeds"
+              className="h-7 w-7 sm:h-8 sm:w-8"
+              draggable={false}
+            />
             <h1 className="whitespace-nowrap text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
               AI-Feeds
             </h1>
