@@ -10,6 +10,7 @@ import {
   listPendingLongform,
   submitLongformText,
 } from './enrich';
+import { handleTrack } from './track';
 
 export interface Env {
   DB: D1Database;
@@ -90,6 +91,15 @@ export default {
       }
       if (path === '/api/longform/submit' && request.method === 'POST') {
         return handleLongformSubmit(request, env);
+      }
+      if (path === '/api/track' && request.method === 'POST') {
+        const resp = await handleTrack(request, env);
+        // 给响应加 CORS headers（与其他 endpoint 一致）
+        const newHeaders = new Headers(resp.headers);
+        for (const [k, v] of Object.entries(corsHeaders(request, env))) {
+          newHeaders.set(k, v);
+        }
+        return new Response(resp.body, { status: resp.status, headers: newHeaders });
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
