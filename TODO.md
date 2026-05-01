@@ -16,9 +16,12 @@
   - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
   - `/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）
   - 设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
-- [ ] 前置 2: 账号 + 登录系统 — 轻量 OAuth（Google / GitHub 起步），D1 新增 `users` 表，Worker 签发 JWT，dashboard 全站状态感知
-- [ ] 前置 3: 数据上报 SDK — 前端统一 `track(event, payload)` 方法，Worker `/api/track` 落到新增 `events` 表（事件类型、user_id、ts、referer、payload JSON），要考虑去重和批量
-- [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），看分享外链点击 → 回访 → 留存漏斗，按 tweet / author / referer 维度下钻
+- [ ] **前置 2 + 3 合并：账号系统 + telemetry SDK**（共拆 6 个 PR，按依赖串联）
+  - 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md)
+  - 决策要点：手机号短信登录（个人主体起步，企业主体后置）+ Session 不走 JWT + LocalStorage device_id（合规优先）+ Turnstile + 4 层 SMS 防刷 + 200 条/天 hard cap + PushDeer 告警
+  - 实施路线：PR1 telemetry SDK → PR2 auth backend → PR3 登录 UI（含右上角 UserMenu / Settings / 注销） → PR4 强制登录拦截 → PR5 收藏订阅 → PR6 上线后加固
+  - 微信 OAuth / 一键登录 SDK / 第三方登录：等切企业主体后再做（identities 表 schema 已预留）
+- [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），基于 events 表做漏斗 / 留存 / 来源分析，按 tweet / author / referer 维度下钻
 - [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
 - [ ] 引用 + 被引用 feed 去重策略（同一条被 quote 又独立出现）
 - [ ] 前端 on-demand metrics 刷新（Worker /api/refresh/:id + 前端曝光触发）
