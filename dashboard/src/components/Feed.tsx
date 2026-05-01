@@ -18,6 +18,7 @@ import {
 import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
+import { useDrawer } from "../lib/drawer";
 
 interface Props {
   sourceType: SourceType;
@@ -392,7 +393,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
   }, [sourceType, placeholder, items, isHot]);
 
-  const rows = useMemo(() => groupByThread(items), [items]);
+  const { spotlightItem } = useDrawer();
+
+  // Inject the spotlight tweet (from cold-link or in-app drawer open) at the
+  // top of this column's data, so closing the drawer leaves the user able to
+  // find it. Only applies to columns matching the spotlight's source_type;
+  // skipped if it's already in the loaded feed.
+  const itemsWithSpotlight = useMemo(() => {
+    if (!spotlightItem) return items;
+    if (spotlightItem.source_type !== sourceType) return items;
+    if (items.find((i) => i.id === spotlightItem.id)) return items;
+    return [spotlightItem, ...items];
+  }, [items, spotlightItem, sourceType]);
+
+  const rows = useMemo(() => groupByThread(itemsWithSpotlight), [itemsWithSpotlight]);
 
   // Find the waistband insertion index: first row whose newest scraped_at is
   // <= initialLastSeen (i.e., the first "already seen" row). Returns -1 if

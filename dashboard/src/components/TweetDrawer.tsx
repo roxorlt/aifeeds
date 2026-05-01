@@ -178,7 +178,7 @@ export function TweetDrawer() {
                 className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200"
                 title="在 x.com 打开"
               >
-                原文
+                打开X原文 ↗
               </a>
             )}
           </div>

@@ -22,6 +22,12 @@ interface DrawerContextValue {
   state: DrawerState;
   openTweet: (item: Item, siblings?: Item[]) => void;
   close: () => void;
+  // Spotlight: latest item the user opened via /t/:id (cold link or in-app
+  // click). Feed prepends this to its data with dedup, so closing the drawer
+  // doesn't leave the user without the tweet they just shared/landed on.
+  // Persists for the session — cleared only on full page reload or when
+  // overwritten by a different /t/:id navigation.
+  spotlightItem: Item | null;
 }
 
 const DrawerContext = createContext<DrawerContextValue | null>(null);
@@ -40,6 +46,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     loading: false,
     error: null,
   });
+  const [spotlightItem, setSpotlightItem] = useState<Item | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -51,6 +58,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     (item: Item, siblings: Item[] = []) => {
       // Optimistic open: set state first so the URL effect sees the cache hit.
       setState({ item, siblings, loading: false, error: null });
+      setSpotlightItem(item);
       activeIdRef.current = item.id;
       navigate(`/t/${encodeURIComponent(item.source_id)}`);
     },
@@ -93,6 +101,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       .then(({ item, siblings }) => {
         if (activeIdRef.current !== compositeId) return;
         setState({ item, siblings, loading: false, error: null });
+        setSpotlightItem(item);
       })
       .catch((err: unknown) => {
         if (activeIdRef.current !== compositeId) return;
@@ -102,7 +111,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, close }}>
+    <DrawerContext.Provider value={{ state, openTweet, close, spotlightItem }}>
       {children}
     </DrawerContext.Provider>
   );
