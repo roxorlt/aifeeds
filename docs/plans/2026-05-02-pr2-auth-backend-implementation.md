@@ -8,7 +8,7 @@
 - 沿用 worker/src/index.ts 单文件路由模式（不引入框架），新增 `worker/src/auth/` 子目录拆 5 个职责文件
 - D1 4 张新表通过 migration 落地（编号 006/007 接 PR1 的 005）
 - KV namespace 一个新建，专门存每日 SMS 发送量计数器（hard cap = 200）
-- 阿里云 SMS V2 API（HMAC-SHA1 签名），Turnstile siteverify，PushDeer message/push — 全部用 Worker 原生 fetch + crypto.subtle，无 SDK 依赖
+- 腾讯云 SMS V3 API（TC3-HMAC-SHA256 签名，2021-01-11 版本），Turnstile siteverify，PushDeer message/push — 全部用 Worker 原生 fetch + crypto.subtle，无 SDK 依赖
 
 **Tech Stack:**
 - Worker：TypeScript + Cloudflare Workers + D1 + KV + wrangler
@@ -32,8 +32,8 @@ PR2 的代码可以全写完，但 deploy 到生产需要这些**用户必须先
 
 | 依赖 | 用户要做的事 | 阻塞哪个 phase |
 |------|-----------|--------------|
-| 阿里云个人主体 SMS 服务 | 用个人支付宝实名注册阿里云 → 短信服务申请「应用登录验证码」类型的签名 + 模板（审核 1-2 天）→ 充值 100 元 → 设每日发送上限 200 条 | F2 / F3 |
-| CF Turnstile site | CF Dashboard → Turnstile → 创建 site，挑 managed mode，记 site key + secret | F2 |
+| 腾讯云个人主体 SMS 服务 | 个人实名注册腾讯云 → 短信 → 应用管理创建应用拿 SmsSdkAppId（1400 开头 7 位）→ 申请签名（个人需要纸质资料 + 公章邮寄）→ 申请正文模板（一般 1-2 天）→ 控制台设额度上限 | F2 / F3 |
+| CF Turnstile widget | CF Dashboard → Turnstile → **Add widget**（旧文案叫 "Create site"，本质相同）→ managed mode → 拿 site key + secret | F2 |
 | CF KV namespace | `npx wrangler kv namespace create AUTH_KV`（命令本身在 A3 task 里跑） | A3 完成后写入 wrangler.toml |
 | PushDeer admin keys | 已有（xueqiuFollow 项目里两个 admin key：iPhone + Mac） | F2 |
 
@@ -50,7 +50,7 @@ PR2 的代码可以全写完，但 deploy 到生产需要这些**用户必须先
 - `worker/migrations/007-sms-send-log.sql` — sms_send_log 表
 - `worker/src/auth/types.ts` — 共享 TS 类型
 - `worker/src/auth/turnstile.ts` — Turnstile siteverify
-- `worker/src/auth/sms.ts` — 阿里云 SMS V2 调用 + 三维度限流计数 + 每日 cap
+- `worker/src/auth/sms.ts` — 腾讯云 SMS V3 调用 + 三维度限流计数 + 每日 cap
 - `worker/src/auth/session.ts` — session 创建/校验/撤销 + cookie 工具
 - `worker/src/auth/handlers.ts` — 5 个 endpoint handler
 - `worker/src/notifier.ts` — PushDeer 告警
@@ -346,13 +346,15 @@ export interface Env {
   REFRESH_TIER_MAX?: string;
   // PR2 auth secrets (上线前用 wrangler secret put 设置)
   TURNSTILE_SECRET_KEY?: string;
-  ALIYUN_SMS_ACCESS_KEY_ID?: string;
-  ALIYUN_SMS_ACCESS_KEY_SECRET?: string;
-  ALIYUN_SMS_SIGN_NAME?: string;
-  ALIYUN_SMS_TEMPLATE_CODE?: string;
-  PUSHDEER_ADMIN_KEYS?: string;       // 逗号分隔多个 key
+  TENCENT_SMS_SECRET_ID?: string;       // 腾讯云 API SecretId（类似 AccessKeyId）
+  TENCENT_SMS_SECRET_KEY?: string;      // 腾讯云 API SecretKey
+  TENCENT_SMS_SDK_APP_ID?: string;      // 短信应用 ID（控制台分配，1400 开头 7 位）
+  TENCENT_SMS_SIGN_NAME?: string;       // 已审签名，例：xList
+  TENCENT_SMS_TEMPLATE_ID?: string;     // 已审模板 ID，例：1234567
+  TENCENT_SMS_REGION?: string;          // 默认 ap-guangzhou
+  PUSHDEER_ADMIN_KEYS?: string;         // 逗号分隔多个 key
   // PR2 配置
-  SMS_DAILY_CAP?: string;             // 默认 200，可临时降到 0 = kill switch
+  SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
 }
 ```
 
@@ -376,12 +378,12 @@ feat(worker): Env interface 扩展 PR2 auth 必需的 binding 和 secret
 新增：
 - AUTH_KV: KVNamespace (每日 SMS cap 计数器)
 - TURNSTILE_SECRET_KEY: Turnstile siteverify
-- ALIYUN_SMS_*: 阿里云 SMS API（4 个 secret）
+- TENCENT_SMS_*: 腾讯云 SMS API V3（5 个 secret + 1 region 可选）
 - PUSHDEER_ADMIN_KEYS: 风控告警（逗号分隔多 key）
 - SMS_DAILY_CAP: 默认 200，可作 kill switch
 
 所有 secret 字段标 optional，dev 环境无 secret 时 typecheck 不破，
-真发短信时拒绝（具体 fail 路径在 sms.ts 处理）。
+真发短信时 dev 模式 simulate（具体 fail 路径在 sms.ts 处理）。
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -665,13 +667,13 @@ EOF
 
 ---
 
-### Task B4: auth/sms.ts — 阿里云 SMS API + 三维度限流 + 每日 cap
+### Task B4: auth/sms.ts — 腾讯云 SMS API + 三维度限流 + 每日 cap
 
 **Files:**
 - Create: `worker/src/auth/sms.ts`
 
 最复杂的子模块。包含：
-1. 阿里云 V2 API 签名（HMAC-SHA1）和发送
+1. 腾讯云 SMS V3 API 签名（TC3-HMAC-SHA256）和发送
 2. 三维度限流（phone / ip / device）
 3. 每日 cap（KV 计数器）
 4. 30min 验证码失败锁定
@@ -680,15 +682,19 @@ EOF
 - [ ] **Step 1: 创建 `worker/src/auth/sms.ts`**
 
 ```typescript
-// PR2 阿里云 SMS V2 API + 多层防刷
+// PR2 腾讯云 SMS V3 API + 多层防刷
 // 设计参考：docs/plans/2026-05-01-auth-system-design.md § 7
+// 腾讯云 V3 签名：https://cloud.tencent.com/document/api/382/52071
 
 import type { Env } from '../index';
 import type { RateLimitResult } from './types';
 import { pushDeerAlert } from '../notifier';
 
-const SMS_ENDPOINT = 'https://dysmsapi.aliyuncs.com/';
-const CODE_TTL_MS = 5 * 60 * 1000;      // 验证码 5 分钟
+const SMS_HOST = 'sms.tencentcloudapi.com';
+const SMS_SERVICE = 'sms';
+const SMS_ACTION = 'SendSms';
+const SMS_VERSION = '2021-01-11';
+const CODE_TTL_MS = 5 * 60 * 1000;       // 验证码 5 分钟
 const LOCK_DURATION_MS = 30 * 60 * 1000; // 失败锁 30 分钟
 const MAX_ATTEMPTS_BEFORE_LOCK = 5;
 const DEFAULT_DAILY_CAP = 200;
@@ -810,27 +816,79 @@ export async function hashCode(code: string, salt: string): Promise<string> {
     .join('');
 }
 
-// ─── 4. 阿里云 SMS V2 API ───────────────────────────────────
+// ─── 4. 腾讯云 SMS V3 API ──────────────────────────────────
 
-/** 阿里云 V2 percent-encode（与 Java SDK aliEncode 一致） */
-function aliEncode(s: string): string {
-  return encodeURIComponent(s)
-    .replace(/\+/g, '%20')
-    .replace(/\*/g, '%2A')
-    .replace(/%7E/g, '~');
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function hmacSha1Base64(key: string, msg: string): Promise<string> {
-  const enc = new TextEncoder();
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return bytesToHex(new Uint8Array(buf));
+}
+
+async function hmacSha256(key: ArrayBuffer | string, msg: string): Promise<Uint8Array> {
+  const keyBuf = typeof key === 'string' ? new TextEncoder().encode(key) : key;
   const ck = await crypto.subtle.importKey(
     'raw',
-    enc.encode(key),
-    { name: 'HMAC', hash: 'SHA-1' },
+    keyBuf,
+    { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
-  const sig = await crypto.subtle.sign('HMAC', ck, enc.encode(msg));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
+  const sig = await crypto.subtle.sign('HMAC', ck, new TextEncoder().encode(msg));
+  return new Uint8Array(sig);
+}
+
+/**
+ * 腾讯云 V3 签名 (TC3-HMAC-SHA256)
+ * 文档：https://cloud.tencent.com/document/api/382/52071
+ *
+ * 关键点：
+ * - SignedHeaders 最小集 'content-type;host'，content-type 在签名内必须小写
+ * - 实际请求 header 大小写不敏感但官方示例 Content-Type
+ * - timestamp 容忍 ±5 分钟
+ * - date 部分用 UTC YYYY-MM-DD
+ */
+async function tc3SignAuthHeader(
+  service: string,
+  host: string,
+  payload: string,
+  timestamp: number,
+  secretId: string,
+  secretKey: string,
+): Promise<string> {
+  const date = new Date(timestamp * 1000).toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  // Step 1: canonical request
+  const httpRequestMethod = 'POST';
+  const canonicalUri = '/';
+  const canonicalQueryString = '';
+  const canonicalHeaders =
+    `content-type:application/json; charset=utf-8\n` +
+    `host:${host}\n`;
+  const signedHeaders = 'content-type;host';
+  const hashedRequestPayload = await sha256Hex(payload);
+  const canonicalRequest =
+    `${httpRequestMethod}\n${canonicalUri}\n${canonicalQueryString}\n` +
+    `${canonicalHeaders}\n${signedHeaders}\n${hashedRequestPayload}`;
+
+  // Step 2: string to sign
+  const algorithm = 'TC3-HMAC-SHA256';
+  const credentialScope = `${date}/${service}/tc3_request`;
+  const hashedCanonicalRequest = await sha256Hex(canonicalRequest);
+  const stringToSign = `${algorithm}\n${timestamp}\n${credentialScope}\n${hashedCanonicalRequest}`;
+
+  // Step 3: derived key chain
+  const secretDate = await hmacSha256(`TC3${secretKey}`, date);
+  const secretService = await hmacSha256(secretDate.buffer as ArrayBuffer, service);
+  const secretSigning = await hmacSha256(secretService.buffer as ArrayBuffer, 'tc3_request');
+
+  // Step 4: signature
+  const signatureBytes = await hmacSha256(secretSigning.buffer as ArrayBuffer, stringToSign);
+  const signature = bytesToHex(signatureBytes);
+
+  // Step 5: Authorization
+  return `${algorithm} Credential=${secretId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 }
 
 interface SendSmsResult {
@@ -840,63 +898,87 @@ interface SendSmsResult {
   errMsg?: string;
 }
 
-/** 调阿里云 SMS V2 API 发短信 */
-export async function sendSmsViaAliyun(
+/** 调腾讯云 SMS V3 API 发短信 */
+export async function sendSmsViaTencent(
   env: Env,
   phone: string,
   code: string,
 ): Promise<SendSmsResult> {
   if (
-    !env.ALIYUN_SMS_ACCESS_KEY_ID ||
-    !env.ALIYUN_SMS_ACCESS_KEY_SECRET ||
-    !env.ALIYUN_SMS_SIGN_NAME ||
-    !env.ALIYUN_SMS_TEMPLATE_CODE
+    !env.TENCENT_SMS_SECRET_ID ||
+    !env.TENCENT_SMS_SECRET_KEY ||
+    !env.TENCENT_SMS_SDK_APP_ID ||
+    !env.TENCENT_SMS_SIGN_NAME ||
+    !env.TENCENT_SMS_TEMPLATE_ID
   ) {
-    console.warn('[sms] ALIYUN_SMS_* not fully configured, simulate success (dev only)');
+    console.warn(`[sms] TENCENT_SMS_* not fully configured, dev simulate. phone=${phone} code=${code}`);
     return { ok: true, requestId: 'dev-simulated' };
   }
 
-  // 公共参数 + 业务参数（不含 Signature）
-  const params: Record<string, string> = {
-    Action: 'SendSms',
-    Version: '2017-05-25',
-    RegionId: 'cn-hangzhou',
-    PhoneNumbers: phone,
-    SignName: env.ALIYUN_SMS_SIGN_NAME,
-    TemplateCode: env.ALIYUN_SMS_TEMPLATE_CODE,
-    TemplateParam: JSON.stringify({ code }),
-    AccessKeyId: env.ALIYUN_SMS_ACCESS_KEY_ID,
-    SignatureMethod: 'HMAC-SHA1',
-    SignatureVersion: '1.0',
-    SignatureNonce: crypto.randomUUID(),
-    Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    Format: 'JSON',
-  };
+  const region = env.TENCENT_SMS_REGION || 'ap-guangzhou';
+  const timestamp = Math.floor(Date.now() / 1000);
 
-  // V2 签名：sort + canonicalize + HMAC-SHA1
-  const sortedKeys = Object.keys(params).sort();
-  const canonical = sortedKeys.map((k) => `${aliEncode(k)}=${aliEncode(params[k])}`).join('&');
-  const stringToSign = `POST&${aliEncode('/')}&${aliEncode(canonical)}`;
-  const signature = await hmacSha1Base64(env.ALIYUN_SMS_ACCESS_KEY_SECRET + '&', stringToSign);
-  params.Signature = signature;
+  // 业务 body
+  const body = {
+    PhoneNumberSet: [`+86${phone}`],
+    SmsSdkAppId: env.TENCENT_SMS_SDK_APP_ID,
+    SignName: env.TENCENT_SMS_SIGN_NAME,
+    TemplateId: env.TENCENT_SMS_TEMPLATE_ID,
+    TemplateParamSet: [code],
+  };
+  const payload = JSON.stringify(body);
+
+  // V3 签名
+  const authHeader = await tc3SignAuthHeader(
+    SMS_SERVICE,
+    SMS_HOST,
+    payload,
+    timestamp,
+    env.TENCENT_SMS_SECRET_ID,
+    env.TENCENT_SMS_SECRET_KEY,
+  );
 
   // 发请求
   let r: Response;
   try {
-    r = await fetch(SMS_ENDPOINT, {
+    r = await fetch(`https://${SMS_HOST}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(params).toString(),
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Host': SMS_HOST,
+        'X-TC-Action': SMS_ACTION,
+        'X-TC-Version': SMS_VERSION,
+        'X-TC-Region': region,
+        'X-TC-Timestamp': String(timestamp),
+        'Authorization': authHeader,
+      },
+      body: payload,
     });
   } catch (e) {
     return { ok: false, errCode: 'NETWORK', errMsg: String(e) };
   }
 
-  const data = (await r.json()) as { Code?: string; Message?: string; RequestId?: string };
-  if (data.Code === 'OK') {
-    return { ok: true, requestId: data.RequestId };
+  // 腾讯云返回包格式：{"Response":{"Error":{Code,Message}|absent, RequestId, SendStatusSet:[{Code,Message,SerialNo,PhoneNumber}]}}
+  const data = (await r.json()) as {
+    Response?: {
+      Error?: { Code: string; Message: string };
+      RequestId?: string;
+      SendStatusSet?: Array<{ SerialNo: string; PhoneNumber: string; Code: string; Message: string }>;
+    };
+  };
+
+  if (data.Response?.Error) {
+    return { ok: false, errCode: data.Response.Error.Code, errMsg: data.Response.Error.Message };
   }
-  return { ok: false, errCode: data.Code || 'UNKNOWN', errMsg: data.Message || JSON.stringify(data) };
+  // 单条 PhoneNumberSet 应返回 SendStatusSet 长度 1，Code='Ok' 表示成功
+  const status = data.Response?.SendStatusSet?.[0];
+  if (!status) {
+    return { ok: false, errCode: 'NO_SEND_STATUS', errMsg: JSON.stringify(data) };
+  }
+  if (status.Code !== 'Ok') {
+    return { ok: false, errCode: status.Code, errMsg: status.Message };
+  }
+  return { ok: true, requestId: data.Response?.RequestId };
 }
 ```
 
@@ -922,10 +1004,17 @@ feat(worker): auth/sms.ts — SMS 完整防刷链路 (PR2)
 - checkAndIncrDailyCap: KV 每日 200 条 hard cap，SMS_DAILY_CAP=0 = kill switch
 - checkDailyCapAlerts: 跨 80%/95% 阈值时 PushDeer 告警
 - generateCode + hashCode: 6 位数字 + SHA-256(salt+code) hex
-- sendSmsViaAliyun: V2 API HMAC-SHA1 签名 + URLencode + POST
+- sendSmsViaTencent: 腾讯云 V3 API TC3-HMAC-SHA256 签名 + JSON POST
 
-dev 时 ALIYUN secret 缺失返回 simulated success，生产部署
-前必须 wrangler secret put 全部 5 个。
+V3 签名要点（避免坑）：
+- SignedHeaders 最小集 'content-type;host'
+- canonical headers 内 content-type 必须小写
+- date 用 UTC YYYY-MM-DD
+- HMAC 链式派生：TC3+secretKey → date → service → tc3_request
+
+dev 时 TENCENT_SMS_* secret 缺失返回 simulated success +
+console.log 明文 code 便于本地调试，生产部署前必须 wrangler
+secret put 全部 5 个 (SECRET_ID/KEY/SDK_APP_ID/SIGN_NAME/TEMPLATE_ID)。
 
 详见 docs/plans/2026-05-01-auth-system-design.md § 7
 
@@ -1103,7 +1192,7 @@ import {
   checkDailyCapAlerts,
   generateCode,
   hashCode,
-  sendSmsViaAliyun,
+  sendSmsViaTencent,
 } from './sms';
 import { pushDeerAlert } from '../notifier';
 
@@ -1211,8 +1300,8 @@ export async function handleSmsSend(
   const now = Date.now();
   const expiresAt = now + 5 * 60_000;
 
-  // 7. 调阿里云发送
-  const sendResult = await sendSmsViaAliyun(env, body.phone, code);
+  // 7. 调腾讯云发送
+  const sendResult = await sendSmsViaTencent(env, body.phone, code);
   if (!sendResult.ok) {
     await env.DB.prepare(
       `INSERT INTO sms_send_log (phone, ip, device_id, ua, sent_at, result, metadata)
@@ -1252,7 +1341,7 @@ git commit -m "$(cat <<'EOF'
 feat(worker): /api/auth/sms/send handler (PR2)
 
 完整发送链路：device_id 必填 → phone 正则 → Turnstile → 三维度限流
-→ 每日 cap → 生成 code → hash 存 D1 → 调阿里云 → 落 success 行。
+→ 每日 cap → 生成 code → hash 存 D1 → 调腾讯云 → 落 success 行。
 失败路径都落 sms_send_log 不同 result 值，便于风控分析。
 严重风控命中 + 当日 cap 耗尽自动 PushDeer 告警。
 
@@ -1290,7 +1379,7 @@ import {
   checkDailyCapAlerts,
   generateCode,
   hashCode,
-  sendSmsViaAliyun,
+  sendSmsViaTencent,
 } from './sms';
 ```
 
@@ -1857,67 +1946,24 @@ DID="dev-test-$(date +%s)"
 PHONE="13800001234"
 TOKEN_HEADER="X-Device-Id: $DID"
 
-echo "=== 1. send 应 200（dev 无 ALIYUN secret 走 simulate）==="
+echo "=== 1. send 应 200（dev 无 TENCENT secret 走 simulate）==="
 curl -s -i -X POST http://localhost:8788/api/auth/sms/send \
   -H "Content-Type: application/json" \
   -H "$TOKEN_HEADER" \
   -d "{\"phone\":\"$PHONE\",\"turnstile_token\":\"dev-bypass\"}"
 
 echo ""
-echo "=== 2. dev 模式找出 code（直接查 D1，因为没真发短信）==="
-# dev 用 console.log 不输出 code，需要从 sms.ts simulate 路径推断；
-# 实际方法：临时改 sms.ts 的 simulate 分支让它 return 一个固定 code，或者 query D1：
-#   SELECT code_hash 然后 brute force 4 位... 行不通。
-# 推荐方法：在 sms.ts dev 路径加一行 console.log(`[dev] code=${code}`)
-# 或者更稳：dev 模式下 generateCode 返固定 '123456'。
-# 见下面 Step 3 的修改建议。
+echo "=== 2. wrangler dev 终端找 code ==="
+# B4 task 已经在 sendSmsViaTencent 的 dev simulate 分支里 console.log
+# 了明文 code（[sms] TENCENT_SMS_* not fully configured ... code=XXXXXX）。
+# 看 wrangler dev 那个终端的最近一行 [sms] 输出，把 6 位 code 抄下来。
 ```
 
-> **关于 dev 模式 code 拿不到的问题**：sms.ts 的 simulate 路径不会真发短信，code 只存在 D1 的 hash 里。dev 测试需要拿到明文 code。两个选项：
->
-> a. 临时改 sms.ts：在 dev secret 缺失时，generateCode 改返固定 `'123456'`（生产 secret 配齐后逻辑回到 random）
-> b. 在 sms.ts simulate 分支加一行 `console.log(\`[dev] sent code ${code} to ${phone}\`)`
->
-> 推荐选 b（log 更通用，不破坏 random 行为），看 wrangler dev terminal 输出能看到 code。
-
-- [ ] **Step 3: 给 sms.ts dev 模式补 console.log 拿 code**
-
-打开 `worker/src/auth/sms.ts`，找到 `if (!env.ALIYUN_SMS_ACCESS_KEY_ID || ...) { console.warn(...); return { ok: true, requestId: 'dev-simulated' }; }` 这块，改为：
-
-```typescript
-  if (
-    !env.ALIYUN_SMS_ACCESS_KEY_ID ||
-    !env.ALIYUN_SMS_ACCESS_KEY_SECRET ||
-    !env.ALIYUN_SMS_SIGN_NAME ||
-    !env.ALIYUN_SMS_TEMPLATE_CODE
-  ) {
-    console.warn(`[sms] ALIYUN_SMS_* not fully configured, dev simulate. phone=${phone} code=${code}`);
-    return { ok: true, requestId: 'dev-simulated' };
-  }
-```
-
-注意 `code` 参数已经是 sendSmsViaAliyun 的入参，直接打 log 即可。
-
-修改完 typecheck 验证：
+- [ ] **Step 3: 重启 wrangler dev（如有改动）+ 拿 code 跑后续矩阵**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
-npx tsc --noEmit
-```
-
-把这个改动单独 commit：
-
-```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
-git add worker/src/auth/sms.ts
-git commit -m "chore(worker): dev 模式 console.log 明文 code 便于本地测试"
-```
-
-- [ ] **Step 4: 重启 wrangler dev 让改动生效，重新跑 curl 矩阵**
-
-```bash
-# 终端 1: kill 之前 wrangler dev
-pkill -f "wrangler dev"
+# kill 之前的 wrangler dev（如有）
+pkill -f "wrangler dev" 2>/dev/null || true
 sleep 2
 
 cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
@@ -2062,11 +2108,13 @@ cd worker
 # Turnstile（CF Dashboard - Turnstile 创建 site 后给）
 npx wrangler secret put TURNSTILE_SECRET_KEY
 
-# 阿里云 SMS（个人主体 RAM 子账号 / 主账号 AK）
-npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_ID
-npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_SECRET
-npx wrangler secret put ALIYUN_SMS_SIGN_NAME       # 例：xList
-npx wrangler secret put ALIYUN_SMS_TEMPLATE_CODE   # 例：SMS_xxx
+# 腾讯云 SMS（API V3 凭证 + 应用/签名/模板 ID）
+npx wrangler secret put TENCENT_SMS_SECRET_ID         # 类似 AccessKeyId，AKID 开头 36 字符
+npx wrangler secret put TENCENT_SMS_SECRET_KEY        # 32 字符
+npx wrangler secret put TENCENT_SMS_SDK_APP_ID        # 短信应用 ID，1400 开头 7 位数字
+npx wrangler secret put TENCENT_SMS_SIGN_NAME         # 已审签名，例：xList
+npx wrangler secret put TENCENT_SMS_TEMPLATE_ID       # 已审模板 ID，例：1234567
+# 可选：TENCENT_SMS_REGION（默认 ap-guangzhou，国内一般不动）
 
 # PushDeer 风控告警（xueqiuFollow admin 组：iPhone + Mac）
 npx wrangler secret put PUSHDEER_ADMIN_KEYS  # 输入：PDU394...,PDU394...
@@ -2124,7 +2172,7 @@ EOF
 
 ## Phase F: 生产部署（外部依赖就绪后再做）
 
-> ⚠️ 本 phase 必须在用户完成「外部依赖」清单（阿里云 SMS / Turnstile）后才能跑。如果 secret 没就绪，跳过 F2-F4 但仍可跑 F1（远端 schema migration 不依赖 secret）。
+> ⚠️ 本 phase 必须在用户完成「外部依赖」清单（腾讯云 SMS / Turnstile）后才能跑。如果 secret 没就绪，跳过 F2-F4 但仍可跑 F1（远端 schema migration 不依赖 secret）。
 
 ### Task F1: 远端 D1 应用迁移
 
@@ -2146,15 +2194,16 @@ npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE ty
 
 ### Task F2: 上传 5 个 secret（用户操作前置）
 
-- [ ] **Step 1: 用户已搞定阿里云 SMS / Turnstile / PushDeer 后**
+- [ ] **Step 1: 用户已搞定腾讯云 SMS / Turnstile / PushDeer 后**
 
 ```bash
 cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
 npx wrangler secret put TURNSTILE_SECRET_KEY
-npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_ID
-npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_SECRET
-npx wrangler secret put ALIYUN_SMS_SIGN_NAME
-npx wrangler secret put ALIYUN_SMS_TEMPLATE_CODE
+npx wrangler secret put TENCENT_SMS_SECRET_ID
+npx wrangler secret put TENCENT_SMS_SECRET_KEY
+npx wrangler secret put TENCENT_SMS_SDK_APP_ID
+npx wrangler secret put TENCENT_SMS_SIGN_NAME
+npx wrangler secret put TENCENT_SMS_TEMPLATE_ID
 npx wrangler secret put PUSHDEER_ADMIN_KEYS
 ```
 
@@ -2166,7 +2215,7 @@ npx wrangler secret put PUSHDEER_ADMIN_KEYS
 npx wrangler secret list
 ```
 
-应看到 7 个 secret（之前的 INGEST_TOKEN + DEEPSEEK_API_KEY + 6 个新加）。
+应看到 8 个 secret（之前的 INGEST_TOKEN + DEEPSEEK_API_KEY + 7 个新加）。
 
 ### Task F3: 部署 Worker
 
