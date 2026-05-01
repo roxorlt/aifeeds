@@ -79,55 +79,30 @@ function renderRichText(text: string): ReactNode[] {
   return out;
 }
 
-// Action (icon + count) with X-style hover halo
-function MetricButton({
+// X-platform metric (read-only metadata, not an action button).
+// Flat icon + number — no halo / rounded container / hover so it doesn't
+// look interactive.
+function Metric({
   icon,
   label,
   count,
-  hoverColor,
 }: {
   icon: ReactNode;
   label: string;
   count: number | null | undefined;
-  hoverColor: "sky" | "green" | "pink" | "neutral";
 }) {
   const isMissing = count === undefined || count === null;
   const display = isMissing ? "—" : formatNumber(count);
-  const colorClasses: Record<typeof hoverColor, string> = {
-    sky: "group-hover/metric:bg-sky-50 group-hover/metric:text-sky-500",
-    green: "group-hover/metric:bg-emerald-50 group-hover/metric:text-emerald-500",
-    pink: "group-hover/metric:bg-pink-50 group-hover/metric:text-pink-500",
-    neutral: "group-hover/metric:bg-neutral-100 group-hover/metric:text-neutral-700",
-  };
-  const textColor: Record<typeof hoverColor, string> = {
-    sky: "group-hover/metric:text-sky-500",
-    green: "group-hover/metric:text-emerald-500",
-    pink: "group-hover/metric:text-pink-500",
-    neutral: "group-hover/metric:text-neutral-700",
-  };
   return (
     <span
       aria-label={label}
-      className="group/metric flex items-center gap-1 text-neutral-500 transition-colors"
+      className={cn(
+        "flex items-center gap-1",
+        isMissing ? "text-neutral-300" : "text-neutral-500",
+      )}
     >
-      <span
-        className={cn(
-          "flex h-7 w-7 items-center justify-center rounded-full transition-colors",
-          isMissing ? "text-neutral-300" : "",
-          colorClasses[hoverColor],
-        )}
-      >
-        {icon}
-      </span>
-      <span
-        className={cn(
-          "text-[12px] tabular-nums transition-colors",
-          isMissing ? "text-neutral-300" : "",
-          textColor[hoverColor],
-        )}
-      >
-        {display}
-      </span>
+      {icon}
+      <span className="text-[12px] tabular-nums">{display}</span>
     </span>
   );
 }
@@ -403,31 +378,27 @@ export function TweetCard({
             </button>
           )}
 
-          {/* Metrics bar (with 原文/译文 toggle pushed to the right) */}
-          <div className="-ml-1.5 mt-1.5 flex items-center gap-5">
-            <MetricButton
-              icon={<IconReply className="h-[16px] w-[16px] fill-current" />}
+          {/* Metrics bar (read-only X-platform data, not interactive) */}
+          <div className="mt-2 flex items-center gap-4">
+            <Metric
+              icon={<IconReply className="h-[14px] w-[14px] fill-current" />}
               label="回复"
               count={metrics.replies}
-              hoverColor="sky"
             />
-            <MetricButton
-              icon={<IconRetweet className="h-[16px] w-[16px] fill-current" />}
+            <Metric
+              icon={<IconRetweet className="h-[14px] w-[14px] fill-current" />}
               label="转推"
               count={metrics.retweets}
-              hoverColor="green"
             />
-            <MetricButton
-              icon={<IconHeart className="h-[16px] w-[16px] fill-current" />}
+            <Metric
+              icon={<IconHeart className="h-[14px] w-[14px] fill-current" />}
               label="喜欢"
               count={metrics.likes}
-              hoverColor="pink"
             />
-            <MetricButton
-              icon={<IconEye className="h-[16px] w-[16px] fill-current" />}
+            <Metric
+              icon={<IconEye className="h-[14px] w-[14px] fill-current" />}
               label="查看"
               count={metrics.views}
-              hoverColor="neutral"
             />
           </div>
         </div>
