@@ -20,6 +20,13 @@ import {
   countGithubReadmeTranslatePending,
   countGithubR2Pending,
 } from './github';
+import {
+  handleSmsSend,
+  handleLogin,
+  handleLogout,
+  handleLogoutAll,
+  handleMe,
+} from './auth/handlers';
 
 export interface Env {
   DB: D1Database;
@@ -90,8 +97,16 @@ function jsonResponse(data: unknown, status: number, request: Request, env: Env)
   });
 }
 
+function withCors(resp: Response, request: Request, env: Env): Response {
+  const newHeaders = new Headers(resp.headers);
+  for (const [k, v] of Object.entries(corsHeaders(request, env))) {
+    newHeaders.set(k, v);
+  }
+  return new Response(resp.body, { status: resp.status, headers: newHeaders });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -127,13 +142,22 @@ export default {
         return handleLongformSubmit(request, env);
       }
       if (path === '/api/track' && request.method === 'POST') {
-        const resp = await handleTrack(request, env);
-        // 给响应加 CORS headers（与其他 endpoint 一致）
-        const newHeaders = new Headers(resp.headers);
-        for (const [k, v] of Object.entries(corsHeaders(request, env))) {
-          newHeaders.set(k, v);
-        }
-        return new Response(resp.body, { status: resp.status, headers: newHeaders });
+        return withCors(await handleTrack(request, env), request, env);
+      }
+      if (path === '/api/auth/sms/send' && request.method === 'POST') {
+        return withCors(await handleSmsSend(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/login' && request.method === 'POST') {
+        return withCors(await handleLogin(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/logout' && request.method === 'POST') {
+        return withCors(await handleLogout(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/logout-all' && request.method === 'POST') {
+        return withCors(await handleLogoutAll(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me' && request.method === 'GET') {
+        return withCors(await handleMe(request, env, ctx), request, env);
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
