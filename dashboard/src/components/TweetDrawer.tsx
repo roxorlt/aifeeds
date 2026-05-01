@@ -87,14 +87,28 @@ export function TweetDrawer() {
       const t = e.touches[0];
       const dx = t.clientX - dragStart.current.x;
       const dy = t.clientY - dragStart.current.y;
-      // If user is scrolling vertically, abort drag
-      if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 10) {
+
+      // Stay on the fence until the gesture has moved at least 10px in some
+      // direction. Otherwise tiny horizontal jitter on a vertical swipe (e.g.
+      // when scrolling at the README bottom and reversing direction) would
+      // hit the dx > 0 branch and preventDefault, blocking native scroll.
+      const moved = Math.max(Math.abs(dx), Math.abs(dy));
+      if (moved < 10) return;
+
+      // Decision: vertical wins → not a close gesture, abort drag.
+      if (Math.abs(dy) >= Math.abs(dx)) {
         dragStart.current = null;
         setDrag(0);
         setIsDragging(false);
         return;
       }
-      if (dx <= 0) return; // only rightward swipe is a close gesture
+      // Horizontal: only rightward swipe closes.
+      if (dx <= 0) {
+        dragStart.current = null;
+        setDrag(0);
+        setIsDragging(false);
+        return;
+      }
       if (e.cancelable) e.preventDefault();
       setIsDragging(true);
       setDrag(dx);
@@ -189,7 +203,7 @@ export function TweetDrawer() {
             )}
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto overscroll-contain">
           {item ? (
             isGithub ? (
               <GithubDrawerBody item={item} />
