@@ -80,27 +80,6 @@ export function TweetDrawer() {
         dragStart.current = null;
         return;
       }
-      // Skip if touch starts inside a scrollable element (e.g. drawer body
-      // with markdown README). Otherwise our touchmove handler can interfere
-      // with native scroll near boundaries — repro: scroll README to bottom
-      // then reverse direction would lose the first frame to swipe-detection
-      // and feel stuck. swipe-to-close still works from header / non-scroll
-      // areas (avatar/title/repo header above the scroll body).
-      const target = e.target as Element | null;
-      let el: Element | null = target;
-      while (el && el !== aside) {
-        if (el instanceof HTMLElement) {
-          const style = window.getComputedStyle(el);
-          if (
-            (style.overflowY === "auto" || style.overflowY === "scroll") &&
-            el.scrollHeight > el.clientHeight
-          ) {
-            dragStart.current = null;
-            return;
-          }
-        }
-        el = el.parentElement;
-      }
       dragStart.current = { x: t.clientX, y: t.clientY };
     };
     const onMove = (e: TouchEvent) => {
