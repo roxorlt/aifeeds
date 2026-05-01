@@ -36,11 +36,20 @@ interface DrawerContextValue {
 
 const DrawerContext = createContext<DrawerContextValue | null>(null);
 
-const SOURCE_TYPE = "x_list" as const;
-
-function parseTweetIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/t\/([^/]+)$/);
-  return match ? match[1] : null;
+function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null {
+  // /t/:source_id  → x_list:<source_id>
+  const tweetMatch = pathname.match(/^\/t\/([^/]+)$/);
+  if (tweetMatch) {
+    return { compositeId: `x_list:${tweetMatch[1]}` };
+  }
+  // /g/:owner/:repo → github:<owner>/<repo>
+  const ghMatch = pathname.match(/^\/g\/([^/]+)\/([^/]+)$/);
+  if (ghMatch) {
+    const owner = decodeURIComponent(ghMatch[1]);
+    const repo = decodeURIComponent(ghMatch[2]);
+    return { compositeId: `github:${owner}/${repo}` };
+  }
+  return null;
 }
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
@@ -71,24 +80,20 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
 
   const openItem = useCallback(
     (item: Item, siblings: Item[] = []) => {
+      // Optimistic open: set state first so URL effect sees cache hit.
+      setState({ item, siblings, loading: false, error: null });
+      setSpotlightItem(item);
+      activeIdRef.current = item.id;
       if (item.source_type === "x_list") {
-        // Existing /t/:id flow with URL routing.
-        setState({ item, siblings, loading: false, error: null });
-        setSpotlightItem(item);
-        activeIdRef.current = item.id;
         navigate(`/t/${encodeURIComponent(item.source_id)}`);
       } else if (item.source_type === "github") {
-        // PR-5 will navigate to /g/:owner/:repo. For now, open without URL
-        // change so PR-4 cards work end-to-end before PR-5 routing lands.
-        setState({ item, siblings, loading: false, error: null });
-        setSpotlightItem(item);
-        activeIdRef.current = item.id;
-      } else {
-        // Future: youtube / podcast / arxiv / product_hunt — open without URL.
-        setState({ item, siblings, loading: false, error: null });
-        setSpotlightItem(item);
-        activeIdRef.current = item.id;
+        // /g/:owner/:repo (two segments — same shape as github.com URLs)
+        const [owner, repo] = item.source_id.split("/");
+        if (owner && repo) {
+          navigate(`/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+        }
       }
+      // Future sources: youtube / podcast / arxiv / product_hunt — add URL forms here.
     },
     [navigate],
   );
@@ -106,9 +111,9 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
 
   // URL → drawer state sync.
   useEffect(() => {
-    const sourceId = parseTweetIdFromPath(location.pathname);
+    const parsed = parseDeepLinkFromPath(location.pathname);
 
-    if (!sourceId) {
+    if (!parsed) {
       if (activeIdRef.current !== null) {
         activeIdRef.current = null;
         setState({ item: null, siblings: [], loading: false, error: null });
@@ -116,7 +121,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const compositeId = `${SOURCE_TYPE}:${sourceId}`;
+    const { compositeId } = parsed;
     if (activeIdRef.current === compositeId) return;
 
     activeIdRef.current = compositeId;

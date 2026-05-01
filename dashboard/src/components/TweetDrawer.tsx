@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useDrawer } from "../lib/drawer";
 import { TweetCard } from "./TweetCard";
+import { GithubDrawerBody } from "./GithubDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import type { Item, ItemExtra } from "../types";
@@ -127,16 +128,21 @@ export function TweetDrawer() {
 
   if (!open) return null;
 
-  const threadMembers = item ? resolveThreadMembers(item, siblings) : [];
+  const isGithub = item?.source_type === "github";
+  const threadMembers = item && !isGithub ? resolveThreadMembers(item, siblings) : [];
   const headerTitle = item
-    ? threadMembers.length > 1
-      ? `Thread · ${threadMembers.length} 条`
-      : "推文详情"
+    ? isGithub
+      ? "GitHub 项目详情"
+      : threadMembers.length > 1
+        ? `Thread · ${threadMembers.length} 条`
+        : "推文详情"
     : loading
       ? "加载中…"
       : error === "not_found"
-        ? "推文不存在"
+        ? "内容不存在"
         : "加载失败";
+  const externalLinkLabel = isGithub ? "在 GitHub 打开 ↗" : "打开X原文 ↗";
+  const externalLinkTitle = isGithub ? "在 GitHub 打开" : "在 x.com 打开";
 
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
@@ -176,30 +182,34 @@ export function TweetDrawer() {
                 target="_blank"
                 rel="noopener noreferrer"
                 className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200"
-                title="在 x.com 打开"
+                title={externalLinkTitle}
               >
-                打开X原文 ↗
+                {externalLinkLabel}
               </a>
             )}
           </div>
         </header>
         <div className="flex-1 overflow-y-auto">
           {item ? (
-            threadMembers.map((it) => {
-              const isTarget = it.id === item.id && threadMembers.length > 1;
-              return (
-                <div
-                  key={it.id}
-                  ref={isTarget ? targetRef : undefined}
-                  className={cn(
-                    isTarget &&
-                      "border-l-2 border-sky-500 bg-sky-50/40",
-                  )}
-                >
-                  <TweetCard item={it} embedded hideThreadBanner />
-                </div>
-              );
-            })
+            isGithub ? (
+              <GithubDrawerBody item={item} />
+            ) : (
+              threadMembers.map((it) => {
+                const isTarget = it.id === item.id && threadMembers.length > 1;
+                return (
+                  <div
+                    key={it.id}
+                    ref={isTarget ? targetRef : undefined}
+                    className={cn(
+                      isTarget &&
+                        "border-l-2 border-sky-500 bg-sky-50/40",
+                    )}
+                  >
+                    <TweetCard item={it} embedded hideThreadBanner />
+                  </div>
+                );
+              })
+            )
           ) : loading ? (
             <DrawerSkeleton />
           ) : (
