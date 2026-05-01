@@ -11,7 +11,11 @@
 
 ## 待做
 - [ ] **分享功能**（依赖下面 4 个前置全部完成）：PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
-- [ ] 前置 1: Dashboard URL routing — 代码完成（branch `feat/dashboard-url-routing`），smoke 6/6 通过，**等 PR-B 数据干净再合 main**
+- [x] 前置 1: Dashboard URL routing — 已合 main（PR-A + PR-B），待部署 dashboard：
+  - Worker `GET /api/items/:id`（单条 + thread siblings）已上线
+  - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
+  - `/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）
+  - 设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
 - [ ] 前置 2: 账号 + 登录系统 — 轻量 OAuth（Google / GitHub 起步），D1 新增 `users` 表，Worker 签发 JWT，dashboard 全站状态感知
 - [ ] 前置 3: 数据上报 SDK — 前端统一 `track(event, payload)` 方法，Worker `/api/track` 落到新增 `events` 表（事件类型、user_id、ts、referer、payload JSON），要考虑去重和批量
 - [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），看分享外链点击 → 回访 → 留存漏斗，按 tweet / author / referer 维度下钻
