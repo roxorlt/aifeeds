@@ -280,7 +280,7 @@ export function GithubDrawerBody({ item }: Props) {
           </div>
           <div className="max-w-none break-words p-5 text-[13px]">
             {tab === "zh" && !readmeTranslated ? (
-              <p className="italic text-neutral-400">译文尚未生成（异步任务，未来 v2 接入）</p>
+              <p className="text-neutral-400">译文还没准备好，稍后再看</p>
             ) : (
               <Markdown
                 remarkPlugins={[remarkGfm]}
