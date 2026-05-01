@@ -20,6 +20,7 @@ import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
 import { useDrawer } from "../lib/drawer";
+import { track, EVENTS } from "../lib/telemetry";
 
 interface Props {
   sourceType: SourceType;
@@ -462,7 +463,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!placeholder && sourceType !== "github" && (
-            <SortSelector value={sortMode} onChange={setSortMode} />
+            <SortSelector
+              value={sortMode}
+              onChange={(next) => {
+                if (next !== sortMode) {
+                  track(EVENTS.SORT_CHANGE, { from: sortMode, to: next, source: sourceType });
+                }
+                setSortMode(next);
+              }}
+            />
           )}
           <div className="text-[11px] text-neutral-500">
             {placeholder ? "规划中" : ""}
@@ -474,7 +483,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       {pending.length > 0 && (
         <button
           type="button"
-          onClick={showPending}
+          onClick={() => {
+            track(EVENTS.NEW_CONTENT_BANNER_CLICK, { count_pending: pending.length, source: sourceType });
+            showPending();
+          }}
           className="flex items-center justify-center gap-2 border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
         >
           <PendingAvatars pending={pending} />

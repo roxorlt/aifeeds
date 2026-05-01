@@ -148,9 +148,9 @@ function App() {
                     type="button"
                     onClick={() => {
                       if (isActive) {
-                        // Tap active chip → scroll current Feed to top
                         scrollFeedOrPage(null);
                       } else {
+                        track(EVENTS.SOURCE_FILTER_CHANGE, { from_id: storedFilter, to_id: key });
                         setFilter(key);
                       }
                     }}
