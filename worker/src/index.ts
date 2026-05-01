@@ -36,8 +36,14 @@ const ALLOWED_ORIGINS = [
 
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get('Origin') || '';
-  // Allow any *.pages.dev, ai-feeds.com, or configured localhost origins
-  const allowed = ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.pages.dev');
+  // Allow any *.pages.dev, ai-feeds.com, configured localhost origins,
+  // or any localhost:<port> / 127.0.0.1:<port> for dev convenience
+  // (Vite often falls back to 5174+ when 5173 is in use)
+  const allowed =
+    ALLOWED_ORIGINS.includes(origin) ||
+    origin.endsWith('.pages.dev') ||
+    /^http:\/\/localhost:\d+$/.test(origin) ||
+    /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
   return {
     'Access-Control-Allow-Origin': allowed ? origin : '',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
