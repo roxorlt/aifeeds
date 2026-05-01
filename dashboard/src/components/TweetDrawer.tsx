@@ -240,7 +240,10 @@ export function TweetDrawer() {
             )}
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+        <div
+          className="flex-1 min-h-0 overflow-y-scroll overscroll-none touch-pan-y"
+          style={{ WebkitOverflowScrolling: "touch" }}
+        >
           {item ? (
             isGithub ? (
               <GithubDrawerBody item={item} />
