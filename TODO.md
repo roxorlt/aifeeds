@@ -2,10 +2,16 @@
 
 ## 进行中
 - [ ] enricher daemon: L0-L5 分层 metrics 刷新，按热度衰减调度
+- [ ] **PR-B 对话上下文数据修复**（2026-05-01 启动）：branch `fix/conversation-context-data`，worker 已部署。
+  - 本地 loop 跑全表 36k 的 `backfill-replies`（cron `:05 :35` 兜底增量）
+  - 完成后跑 `reclassify-threads dry_run=0` 清错分（dry-run 显示 5398/6442 待清）
+  - 验证 case：t1=2048759762414674337 / t2=2048753722432360677 / Eric Cursor 3 root
+  - 触发 reclassify 真执行前要 `wrangler d1 export` 备份
+- [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
 
 ## 待做
 - [ ] **分享功能**（依赖下面 4 个前置全部完成）：PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
-- [ ] 前置 1: Dashboard URL routing — 当前是纯 SPA 全站 `/`，要补 tweet 详情页 `/t/:id` 和 thread 页 `/thread/:id` 两条路由，用 react-router + drawer overlay 共存（desktop 用 drawer，mobile 深链直达页面）
+- [ ] 前置 1: Dashboard URL routing — 代码完成（branch `feat/dashboard-url-routing`），smoke 6/6 通过，**等 PR-B 数据干净再合 main**
 - [ ] 前置 2: 账号 + 登录系统 — 轻量 OAuth（Google / GitHub 起步），D1 新增 `users` 表，Worker 签发 JWT，dashboard 全站状态感知
 - [ ] 前置 3: 数据上报 SDK — 前端统一 `track(event, payload)` 方法，Worker `/api/track` 落到新增 `events` 表（事件类型、user_id、ts、referer、payload JSON），要考虑去重和批量
 - [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），看分享外链点击 → 回访 → 留存漏斗，按 tweet / author / referer 维度下钻

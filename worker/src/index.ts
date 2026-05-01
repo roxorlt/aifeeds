@@ -1,5 +1,7 @@
 import {
   runBackfillQuotes,
+  runBackfillReplies,
+  runReclassifyThreads,
   runCleanup,
   runRefreshMetrics,
   runRefreshTiered,
@@ -104,21 +106,25 @@ export default {
     //   :00 :30           → refresh-metrics     (2x/hour)
     //   :15 :45           → fill-translations   (2x/hour)
     //   :10 :50           → detect-longform     (2x/hour, marks note_tweet candidates)
-    //   others (6 slots)  → backfill-quotes     (6x/hour)
+    //   :05 :35           → backfill-replies    (2x/hour, PR-B incremental)
+    //   others (4 slots)  → backfill-quotes     (4x/hour, was 6, gave 2 to replies)
     // 2026-04-21: rolled back from fill-heavy. Backlog cleared — only ~0.3%
     // of quote_pending is non-Chinese, so 2/hr sentinel is enough for incoming.
     // 2026-04-29: detect-longform takes :10 :50 to keep up with new note tweets;
     // ~50/hr is enough for incoming. Browser-side fetch happens locally.
+    // 2026-05-01: backfill-replies takes :05 :35 — historical 36k bulk runs
+    // via local loop; cron is just incremental tail (~100 new replies/day).
     const utc = new Date(event.scheduledTime);
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
-    // 03:35 UTC daily → cleanup (steals one backfill slot per day, runs ~1s)
+    // 03:35 UTC daily → cleanup (steals the :35 backfill-replies slot once/day, runs ~1s)
     const isCleanupSlot = hour === 3 && minute === 35;
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'cleanup' | 'detect-longform';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform';
     if (isCleanupSlot) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
     else if (minute === 10 || minute === 50) mode = 'detect-longform';
+    else if (minute === 5 || minute === 35) mode = 'backfill-replies';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -150,7 +156,9 @@ export default {
                 ? await runFillTranslations(env)
                 : mode === 'detect-longform'
                   ? await runDetectLongform(env, 25, 400)
-                  : await runBackfillQuotes(env);
+                  : mode === 'backfill-replies'
+                    ? await runBackfillReplies(env, 40, 200)
+                    : await runBackfillQuotes(env);
           console.log(`[cron] ${mode} result:`, JSON.stringify(result));
         } catch (e) {
           console.error(`[cron] ${mode} error:`, e);
@@ -562,6 +570,19 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillQuotes(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-replies') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillReplies(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'reclassify-threads') {
+    const dryRun = url.searchParams.get('dry_run') !== '0';
+    const result = await runReclassifyThreads(env, dryRun);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'fill-translations') {

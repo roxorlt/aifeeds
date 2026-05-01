@@ -329,6 +329,15 @@ interface Patch {
   quote_of_id?: string | null;
   link_card?: LinkCard | null;
   clearThreadRoot?: boolean;
+  // PR-B: reply parent enrichment. reply_of_id is the canonical id field
+  // (parallel to quote_of_id); reply_of is the full snapshot from
+  // syndication's `parent` payload. reply_to_screen_name lets the UI render
+  // "↩ 回复 @handle" even when the snapshot fetch is missing.
+  reply_of_id?: string | null;
+  reply_of?: QuoteOf | null;
+  reply_to_screen_name?: string | null;
+  // Sentinel that backfill-replies has examined this item (idempotent skip).
+  reply_enriched?: boolean;
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
@@ -340,7 +349,13 @@ async function applyPatch(
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
@@ -349,6 +364,18 @@ async function applyPatch(
   if (patch.quote_of_id !== undefined) extra.quote_of_id = patch.quote_of_id;
   if (patch.link_card !== undefined) extra.link_card = patch.link_card;
   if (patch.clearThreadRoot) delete extra.thread_root_id;
+  if (patch.reply_of !== undefined) extra.reply_of = patch.reply_of;
+  if (patch.reply_of_id !== undefined) {
+    extra.reply_of_id = patch.reply_of_id;
+    // Mirror to legacy field for any downstream code still reading reply_to_id
+    extra.reply_to_id = patch.reply_of_id;
+  }
+  if (patch.reply_to_screen_name !== undefined) {
+    extra.reply_to_screen_name = patch.reply_to_screen_name;
+  }
+  if (patch.reply_enriched) {
+    extra.reply_enriched_at = new Date().toISOString();
+  }
   extra.enriched_at = new Date().toISOString();
 
   const updates: string[] = ["extra = ?"];
@@ -464,6 +491,300 @@ export async function runBackfillQuotes(
     failed: counts.failed,
     elapsed_ms: Date.now() - t0,
     remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── backfill-replies mode ─────────────────────────────────────
+// PR-B: pull reply parent snapshot via syndication API's `parent` field.
+// Parallel to backfill-quotes but covers ALL items (not just quote candidates),
+// because the legacy scraper never captured reply_to_id — every existing item
+// is potentially missing reply data. Ordered newest-first so recently-shared
+// content gets fixed first.
+
+async function selectReplyBackfillCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+): Promise<CandidateRow[]> {
+  const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND is_relevant = 1
+       AND (extra IS NULL
+            OR (extra NOT LIKE '%"reply_enriched_at"%'
+                AND extra NOT LIKE '%"reply_of"%'))
+     ORDER BY published_at DESC, id DESC
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<CandidateRow>();
+
+  const out: CandidateRow[] = [];
+  for (const r of rows.results) {
+    if (!done.has(r.source_id)) {
+      out.push(r);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+export async function runBackfillReplies(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+): Promise<RunResult> {
+  const mode = "backfill-replies";
+  const t0 = Date.now();
+  const state = await loadState(env, mode);
+  const done = new Set<string>([
+    ...state.processed_ids,
+    ...state.not_found_ids,
+  ]);
+
+  const candidates = await selectReplyBackfillCandidates(env, done, limit);
+  const counts = {
+    processed: 0,
+    with_reply: 0,
+    no_reply: 0,
+    not_found: 0,
+    failed: 0,
+    // Reuse RunResult's existing fields below, mapped:
+    //   with_quote → with_reply (we filled reply_of)
+    //   with_card  → 0 (not relevant here)
+    //   empty      → no_reply (item is not a reply)
+  };
+
+  for (const row of candidates) {
+    const tid = row.source_id;
+    const res = await fetchTweet(tid);
+    if (res === null) {
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (res.notFound) {
+      state.not_found_ids.push(tid);
+      counts.not_found++;
+    } else if (res.data) {
+      const apiReplyToId = res.data.in_reply_to_status_id_str as
+        | string
+        | undefined;
+      const apiReplyToHandle = res.data.in_reply_to_screen_name as
+        | string
+        | undefined;
+      const parent = res.data.parent as Record<string, unknown> | undefined;
+
+      const patch: Patch = { reply_enriched: true };
+      if (apiReplyToId) {
+        patch.reply_of_id = apiReplyToId;
+        patch.reply_to_screen_name = apiReplyToHandle ?? null;
+        if (parent && parent.id_str) {
+          patch.reply_of = apiToQuoteOf(parent);
+        } else {
+          // Parent suppressed (deleted/protected) — keep id+handle for the
+          // "↩ 回复 @handle" placeholder, leave reply_of null.
+          patch.reply_of = null;
+        }
+        counts.with_reply++;
+      } else {
+        // Confirmed not a reply. Still mark sentinel so we skip on rerun.
+        counts.no_reply++;
+      }
+
+      try {
+        await applyPatch(env, row, patch);
+        state.processed_ids.push(tid);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-replies] applyPatch failed for ${tid}:`, e);
+        state.failed_ids.push(tid);
+        counts.failed++;
+      }
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    with_quote: counts.with_reply,
+    with_card: 0,
+    empty: counts.no_reply,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── reclassify-threads mode ───────────────────────────────────
+// PR-B step 2: clear thread_root_id from items that are NOT part of a real
+// self-thread. Definition of self-thread: a chain of same-author tweets where
+// each member's reply_of_id points to either the root or another in-chain
+// member by the same author. Anything else (Q&A reply trees with mixed
+// authors, replies to non-list users, etc.) gets thread_root_id stripped so
+// it renders as a standalone card instead of bundled.
+//
+// Idempotent. Run after backfill-replies completes coverage of all members.
+// ALWAYS runs full sweep (one-shot) — no cron rotation. Trigger via
+// /api/enrich/run?mode=reclassify-threads&dry_run=1 first to inspect.
+
+interface ReclassifyResult {
+  mode: "reclassify-threads";
+  groups_total: number;
+  groups_kept_intact: number;
+  groups_partially_cleared: number;
+  groups_fully_cleared: number;
+  members_kept: number;
+  members_cleared: number;
+  members_skipped_unenriched: number;
+  dry_run: boolean;
+  elapsed_ms: number;
+}
+
+interface ThreadRow {
+  id: string;
+  source_id: string;
+  handle: string | null;
+  extra: string | null;
+}
+
+export async function runReclassifyThreads(
+  env: EnrichEnv,
+  dryRun = true,
+): Promise<ReclassifyResult> {
+  const t0 = Date.now();
+
+  // Pull every item with thread_root_id set. ~6500 rows; small enough to
+  // process in memory.
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, handle, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND extra ->> '$.thread_root_id' IS NOT NULL`,
+  ).all<ThreadRow>();
+
+  // Bucket by thread_root_id
+  const groups = new Map<string, ThreadRow[]>();
+  for (const r of rows.results) {
+    const extra = r.extra ? (JSON.parse(r.extra) as Record<string, unknown>) : {};
+    const root = extra.thread_root_id as string | undefined;
+    if (!root) continue;
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(r);
+  }
+
+  let groupsKept = 0;
+  let groupsPartial = 0;
+  let groupsCleared = 0;
+  let totalKept = 0;
+  let totalCleared = 0;
+  let totalSkipped = 0;
+
+  const idsToClear: string[] = [];
+
+  for (const [rootId, members] of groups) {
+    // Index members by source_id for graph walk
+    const bySourceId = new Map<string, ThreadRow>();
+    for (const m of members) bySourceId.set(m.source_id, m);
+
+    // Find the root member (its source_id == rootId, present in this group)
+    const root = bySourceId.get(rootId);
+    if (!root) {
+      // Root not in our group (root not scraped) — fallback: keep largest
+      // same-author connected component reachable via reply chains.
+      // But conservatively just skip and clear all (we can't verify).
+      for (const m of members) idsToClear.push(m.id);
+      groupsCleared++;
+      totalCleared += members.length;
+      continue;
+    }
+
+    const rootHandle = root.handle;
+
+    // BFS: anchor = root; iteratively pull members whose reply_of points to
+    // an already-anchored same-author member.
+    const anchored = new Set<string>([rootId]);
+    let changed = true;
+    let skippedThisGroup = 0;
+    while (changed) {
+      changed = false;
+      for (const m of members) {
+        if (anchored.has(m.source_id)) continue;
+        const ex = m.extra ? (JSON.parse(m.extra) as Record<string, unknown>) : {};
+        const replyEnriched = ex.reply_enriched_at as string | undefined;
+        const replyTo = (ex.reply_of_id || ex.reply_to_id) as string | undefined;
+        if (!replyEnriched) {
+          // Not yet checked by backfill-replies. Don't decide yet.
+          skippedThisGroup++;
+          continue;
+        }
+        if (replyTo && anchored.has(replyTo) && m.handle === rootHandle) {
+          anchored.add(m.source_id);
+          changed = true;
+        }
+      }
+    }
+
+    let cleared = 0;
+    for (const m of members) {
+      if (!anchored.has(m.source_id)) {
+        idsToClear.push(m.id);
+        cleared++;
+      }
+    }
+
+    if (cleared === 0) {
+      groupsKept++;
+      totalKept += members.length;
+    } else if (cleared === members.length) {
+      groupsCleared++;
+      totalCleared += cleared;
+    } else {
+      groupsPartial++;
+      totalKept += members.length - cleared;
+      totalCleared += cleared;
+    }
+    totalSkipped += skippedThisGroup;
+  }
+
+  if (!dryRun && idsToClear.length > 0) {
+    // Bulk update: clear thread_root_id from extra JSON. D1 doesn't support
+    // arbitrary IN list size in one prepared statement reliably for huge
+    // lists, so chunk.
+    const CHUNK = 100;
+    for (let i = 0; i < idsToClear.length; i += CHUNK) {
+      const chunk = idsToClear.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      await env.DB.prepare(
+        `UPDATE items
+         SET extra = json_remove(extra, '$.thread_root_id')
+         WHERE id IN (${placeholders})`,
+      )
+        .bind(...chunk)
+        .run();
+    }
+  }
+
+  return {
+    mode: "reclassify-threads",
+    groups_total: groups.size,
+    groups_kept_intact: groupsKept,
+    groups_partially_cleared: groupsPartial,
+    groups_fully_cleared: groupsCleared,
+    members_kept: totalKept,
+    members_cleared: totalCleared,
+    members_skipped_unenriched: totalSkipped,
+    dry_run: dryRun,
+    elapsed_ms: Date.now() - t0,
   };
 }
 
@@ -1090,7 +1411,13 @@ function extractTasks(row: TranslationRow): TranslationTask[] {
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
@@ -1227,7 +1554,13 @@ async function applyTranslationPatch(
   let extra: Record<string, unknown> = {};
   if (row.extra) {
     try {
-      extra = JSON.parse(row.extra) as Record<string, unknown>;
+      // Legacy rows can store the literal string "null" (from
+      // JSON.stringify(undefined ?? null) at ingest); parse yields null,
+      // not an object. Guard against that + arrays.
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extra = parsed as Record<string, unknown>;
+      }
     } catch {
       extra = {};
     }
