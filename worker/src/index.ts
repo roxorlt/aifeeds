@@ -11,11 +11,20 @@ import {
   submitLongformText,
 } from './enrich';
 import { handleTrack } from './track';
+import {
+  runGithubFetchTrending,
+  runGithubEnrichPending,
+  countGithubPending,
+} from './github';
 
 export interface Env {
   DB: D1Database;
   INGEST_TOKEN: string;
   DEEPSEEK_API_KEY?: string;
+  // GITHUB_TOKEN: optional PAT (public_repo scope). Lifts API rate limit
+  // 60→5000/hr. Without it, /repos/* /search/issues calls will be aggressively
+  // throttled. Set via `wrangler secret put GITHUB_TOKEN`.
+  GITHUB_TOKEN?: string;
   // M4: refresh-metrics mode dispatch.
   //   'tiered'  → runRefreshTiered (uses tier/next_refresh_at/last_velocity)
   //   'legacy'  → runRefreshMetrics (round-robin, default — preserves pre-M4 behavior)
@@ -137,10 +146,18 @@ export default {
     const utc = new Date(event.scheduledTime);
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
-    // 03:35 UTC daily → cleanup (steals the :35 backfill-replies slot once/day, runs ~1s)
-    const isCleanupSlot = hour === 3 && minute === 35;
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform';
-    if (isCleanupSlot) mode = 'cleanup';
+
+    // GitHub trending fetch (phase 1) at BJT 01:00 + 13:00 (= UTC 17:00 + 05:00).
+    // 2 subrequests, doesn't conflict with X cron rotation.
+    const isGithubFetchSlot = (hour === 17 || hour === 5) && minute === 0;
+
+    // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
+    // preempt this slot for one repo's enrich (~9 subrequests vs running an X
+    // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
+    // 20 X cron slots stolen, ~7% of 288/day.
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich';
+    if (isGithubFetchSlot) mode = 'github-fetch';
+    else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
     else if (minute === 10 || minute === 50) mode = 'detect-longform';
@@ -154,6 +171,21 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
+          // Try github-enrich preempt: if pending exists on a non-github-fetch
+          // slot, drain one before falling through to the X mode.
+          if (mode !== 'github-fetch') {
+            const pending = await countGithubPending(env);
+            if (pending > 0) {
+              const r = await runGithubEnrichPending(env, 1);
+              console.log(`[cron] github-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+          }
+          if (mode === 'github-fetch') {
+            const r = await runGithubFetchTrending(env);
+            console.log(`[cron] github-fetch result:`, JSON.stringify(r));
+            return;
+          }
           if (mode === 'refresh-metrics') {
             if (refreshMode === 'off') {
               console.log('[cron] refresh-metrics skipped (REFRESH_MODE=off)');
@@ -822,6 +854,18 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       80,
     );
     const result = await runDetectLongform(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'github-fetch') {
+    const result = await runGithubFetchTrending(env);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'github-enrich') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '1'), 1),
+      10,
+    );
+    const result = await runGithubEnrichPending(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   return jsonResponse({ error: `Unknown mode: ${mode}` }, 400, request, env);

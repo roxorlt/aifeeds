@@ -94,6 +94,11 @@
 
 **调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
 
+**GitHub trending（2026-05-02 上线，迁自本地 launchd）**：
+- **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
+- **Phase 2 — `runGithubEnrichPending`**：在每个 `*/5min` cron tick 上**抢占式**运行：先查 `extra.gh_pending=1` 的待 enrich 行，有则取 1 条做 GitHub API（license/watchers/PRs/contributors）+ raw README + DeepSeek LLM 判别 → UPDATE items（`is_relevant=0/1` + `extra.ai_category/ai_summary` 等），最后 batch 重算当日 `daily_rank`。**~9 subrequests/run**，远低于 50 限额。X 模式仅在没 pending 时走。
+- **手动触发**：`POST /api/enrich/run?mode=github-fetch` / `POST /api/enrich/run?mode=github-enrich&limit=5`，都需 Bearer `INGEST_TOKEN`
+
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
 - `REFRESH_TIER_MAX` env var：tiered 模式下只刷 `tier <= N` 的 item（默认 1 = 灰度只刷 L0+L1；调到 4 = 全量 L0-L4）
@@ -245,21 +250,18 @@
   - `XLIST_DATA_DIR=... python3 scripts/tune_schedule.py --dry-run`（只预览不写盘）
 - **回滚**：删除 `data/schedule_params.json` 即可回到硬编码 defaults。不改代码、不重启 launchd
 
-### 1c. launchd: `com.aifeeds.github-scraper`（GitHub trending AI 源）
+### 1c. ~~launchd: `com.aifeeds.github-scraper`~~（已退役，迁移到 CF 端）
 
-- **plist**：`~/Library/LaunchAgents/com.aifeeds.github-scraper.plist`（项目内副本：`launchd/com.aifeeds.github-scraper.plist`）
-- **脚本**：`scrapers/github/cron.sh`（项目内）
-- **频率**：BJT **01:00 + 13:00** 各一次（StartCalendarInterval 双触发）
-- **日志**：
-  - `data/launchd-github-stdout.log` / `data/launchd-github-stderr.log`
-  - `data/logs/github-cron-YYYYMMDD.log`（cron.sh 自己 append）
-- **行为**：
-  1. fetch `https://github.com/trending?since=daily` 解析 ~25 条
-  2. 每条：DB 已存在 → append 一行 metrics + update last_seen_on_trending_at；不存在 → GitHub API enrich (license / watchers / open_issues / open_prs / contributors_count) + raw README + LLM judge (DeepSeek V4 Flash) → INSERT
-  3. 跑完后 batch 重排当日 is_ai=1 AND sponsor=0 的 daily_rank
-  4. 推到 D1（worker /api/ingest，含 metrics_snapshots_gh 自动写入）
-- **重试 NULL is_ai**：`python3 -m scrapers.github.scraper --retry-null --retry-limit 10`
-- **手动触发**：`launchctl start com.aifeeds.github-scraper` 或 `bash scrapers/github/cron.sh`
+> **已迁移到 CF Worker**（2026-05-02）。本地 launchd plist 已 unload；
+> 项目里 `launchd/com.aifeeds.github-scraper.plist`、`scrapers/github/*.py`、
+> `scrapers/_lib/*.py` 保留作历史参考但不再调度。新的远端实现见
+> "CF Worker → 1.1 GitHub trending phase 1/2 cron" 章节。
+
+- **退役命令**（用户已执行）：
+  ```bash
+  launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aifeeds.github-scraper.plist
+  rm ~/Library/LaunchAgents/com.aifeeds.github-scraper.plist  # 可选
+  ```
 
 
 
