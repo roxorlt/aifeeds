@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aifeeds.github-scraper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/roxor/brain/30-projects/xlist-scraper/scrapers/github/cron.sh</string>
+    </array>
+
+    <!-- BJT 01:00 + 13:00 (machine is in BJT, so local time = BJT) -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>1</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>13</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- Don't launch multiple instances if previous run is still going -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Run missed job after wake from sleep -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Stdout/stderr for launchd-level debugging -->
+    <key>StandardOutPath</key>
+    <string>/Users/roxor/brain/30-projects/xlist-scraper/data/launchd-github-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/roxor/brain/30-projects/xlist-scraper/data/launchd-github-stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/roxor/brain/30-projects/xlist-scraper</string>
+</dict>
+</plist>

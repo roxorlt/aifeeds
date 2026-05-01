@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitHub 卡片 mockup — AI-Feeds</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+    .line-clamp-3 {
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-50">
+
+  <!-- Top bar -->
+  <header class="sticky top-0 z-10 border-b border-neutral-200 bg-white/80 backdrop-blur">
+    <div class="mx-auto flex max-w-[1280px] items-center justify-between gap-4 px-8 py-3 lg:px-16">
+      <div class="flex shrink-0 items-baseline gap-3">
+        <h1 class="whitespace-nowrap text-xl font-bold tracking-tight text-neutral-900">AI-Feeds</h1>
+        <span class="text-xs text-neutral-400">GitHub 卡片样式 mockup · 三方案对比</span>
+      </div>
+      <span class="text-xs text-neutral-400">2026-05-01</span>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1280px] px-8 py-6 lg:px-16">
+    <div class="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <strong>说明：</strong>三列展示同一个 repo（TradingAgents）的三种 ai_summary 显示方案，方便对比。
+      数据是 DeepSeek V4 Flash 真实输出 + mock 的 stars/contributor。打开后全屏看，刷新可换方案标签。
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+
+      <!-- ============================================================ -->
+      <!-- 方案 A：summary 全文展开 -->
+      <!-- ============================================================ -->
+      <section class="flex flex-col">
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-base font-bold text-neutral-900">方案 A · 全文展开</h2>
+          <span class="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">信息密度最高</span>
+        </div>
+        <p class="mb-3 text-xs text-neutral-500">summary 全文，约 150 字，扫读时一眼到位。代价是卡片高度参差。</p>
+
+        <div class="flex flex-col gap-3">
+          <!-- Card A: TradingAgents -->
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200">
+            <!-- header: repo name + category chip -->
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/TauricResearch" alt=""
+                   class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-baseline gap-1.5">
+                  <span class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch / TradingAgents</span>
+                </div>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1">
+                    <span class="h-2 w-2 rounded-full bg-blue-400"></span>Python
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span>⭐ 18.2k</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="font-medium text-emerald-700">+250 today</span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">agent</span>
+            </div>
+
+            <!-- description -->
+            <p class="mt-3 text-[14px] text-neutral-700">Multi-Agents LLM Financial Trading Framework</p>
+
+            <!-- ai_summary 全文 -->
+            <div class="mt-3 rounded-lg bg-neutral-50 p-3 border border-neutral-100">
+              <div class="mb-1 text-[10px] font-medium uppercase tracking-wider text-neutral-400">AI 解读</div>
+              <p class="text-[13px] leading-relaxed text-neutral-700">
+                多智能体金融交易框架，通过 LangGraph 编排分析师、研究员、交易员、风控等角色协作决策。亮点在于专门针对金融交易场景的多 Agent 设计，支持 OpenAI/Gemini/DeepSeek 等主流 LLM，并具备持久化记忆和断点恢复功能。研究向，非投资建议。
+              </p>
+            </div>
+
+            <!-- contributors + actions -->
+            <div class="mt-3 flex items-center justify-between">
+              <div class="flex items-center -space-x-2">
+                <img src="https://avatars.githubusercontent.com/yijia-z" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <img src="https://avatars.githubusercontent.com/xianjun-yang" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <img src="https://avatars.githubusercontent.com/cynthiao" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <span class="ml-3 text-[11px] text-neutral-500">+12 contributors</span>
+              </div>
+              <a href="#" class="text-[12px] text-sky-600 hover:underline">github.com →</a>
+            </div>
+          </article>
+
+          <!-- Card A2: ollama (filler so column doesn't look empty) -->
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/ollama" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <span class="text-[15px] font-bold leading-tight text-neutral-900">ollama / ollama</span>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-cyan-400"></span>Go</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                    142k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                    11.4k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                    2.3k
+                  </span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700">infra</span>
+            </div>
+            <p class="mt-3 text-[14px] text-neutral-700">Get up and running with large language models locally.</p>
+            <div class="mt-3 rounded-lg bg-neutral-50 p-3 border border-neutral-100">
+              <div class="mb-1 text-[10px] font-medium uppercase tracking-wider text-neutral-400">AI 解读</div>
+              <p class="text-[13px] leading-relaxed text-neutral-700">
+                本地运行开源 LLM 的一站式工具，支持 Llama / Mistral / Qwen 等数十个模型，自带 OpenAI 兼容 API。比 llama.cpp 上手门槛低很多，比 LM Studio 更适合开发者集成；常驻 daemon 模式让 IDE 插件、桌面 app 调用本地模型变得像调云端一样简单。
+              </p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- 方案 B：summary 截断 3 行 + 展开（终稿） -->
+      <!-- ============================================================ -->
+      <section class="flex flex-col">
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-base font-bold text-neutral-900">方案 B · 终稿 ✓</h2>
+          <span class="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">已选</span>
+        </div>
+        <p class="mb-3 text-xs text-neutral-500">summary 截 3 行 + 干掉 description / 干掉 contributors / 干掉外跳。底部留"上榜 N 天"。点卡进 drawer 看全文 + GitHub 跳转。</p>
+
+        <div class="flex flex-col gap-3">
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200 hover:border-neutral-300 cursor-pointer transition-colors">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/TauricResearch" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <span class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch / TradingAgents</span>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-400"></span>Python</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                    18.2k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                    3.1k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                    542
+                  </span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">agent</span>
+            </div>
+
+            <p class="mt-3 line-clamp-3 text-[13px] leading-relaxed text-neutral-700">
+              多智能体金融交易框架，通过 LangGraph 编排分析师、研究员、交易员、风控等角色协作决策。亮点在于专门针对金融交易场景的多 Agent 设计，支持 OpenAI/Gemini/DeepSeek 等主流 LLM，并具备持久化记忆和断点恢复功能。研究向，非投资建议。
+            </p>
+            <button class="mt-1 text-[11px] text-sky-600 hover:underline">展开 ↓</button>
+
+            <!-- bottom strip: date · rank | contributors -->
+            <div class="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
+              <span class="inline-flex cursor-help items-center gap-1.5" title="4 月 29 日 GitHub 热榜第 2 名">
+                <span class="font-medium tabular-nums">04-29</span>
+                <svg class="h-3.5 w-3.5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/>
+                  <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
+                  <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
+                  <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
+                </svg>
+                <span class="font-semibold tabular-nums text-neutral-700">2nd</span>
+              </span>
+              <!-- contributors (best-effort, 有就显示头像 + 文字) -->
+              <span class="inline-flex items-center gap-2">
+                <span class="flex items-center -space-x-1.5">
+                  <img src="https://avatars.githubusercontent.com/yijia-z" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/xianjun-yang" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/cynthiao" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                </span>
+                <span class="text-neutral-500">12 contributors</span>
+              </span>
+            </div>
+          </article>
+
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200 hover:border-neutral-300 cursor-pointer transition-colors">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/ollama" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <span class="text-[15px] font-bold leading-tight text-neutral-900">ollama / ollama</span>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-cyan-400"></span>Go</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                    142k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                    11.4k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                    2.3k
+                  </span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700">infra</span>
+            </div>
+            <p class="mt-3 line-clamp-3 text-[13px] leading-relaxed text-neutral-700">
+              本地运行开源 LLM 的一站式工具，支持 Llama / Mistral / Qwen 等数十个模型，自带 OpenAI 兼容 API。比 llama.cpp 上手门槛低很多，比 LM Studio 更适合开发者集成；常驻 daemon 模式让 IDE 插件、桌面 app 调用本地模型变得像调云端一样简单。
+            </p>
+            <button class="mt-1 text-[11px] text-sky-600 hover:underline">展开 ↓</button>
+            <div class="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
+              <span class="inline-flex cursor-help items-center gap-1.5" title="4 月 27 日 GitHub 热榜第 5 名">
+                <span class="font-medium tabular-nums">04-27</span>
+                <svg class="h-3.5 w-3.5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/>
+                  <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
+                  <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
+                  <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
+                </svg>
+                <span class="font-semibold tabular-nums text-neutral-700">5th</span>
+              </span>
+              <!-- 这条没拿到 contributors，留空（不占位） -->
+              <span></span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- 方案 C：summary 不显示，只 description + chip -->
+      <!-- ============================================================ -->
+      <section class="flex flex-col">
+        <div class="mb-2 flex items-center justify-between">
+          <h2 class="text-base font-bold text-neutral-900">方案 C · 极简（summary 进 drawer）</h2>
+          <span class="rounded-full bg-neutral-100 px-2 py-0.5 text-[10px] font-medium text-neutral-700">扫读最快</span>
+        </div>
+        <p class="mb-3 text-xs text-neutral-500">卡片只显 description + 元数据。点开 drawer 才看 AI 解读。</p>
+
+        <div class="flex flex-col gap-3">
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200 hover:border-neutral-300 cursor-pointer transition-colors">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/TauricResearch" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <span class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch / TradingAgents</span>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-400"></span>Python</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                    18.2k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                    3.1k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                    542
+                  </span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">agent</span>
+            </div>
+            <p class="mt-3 text-[14px] text-neutral-700">Multi-Agents LLM Financial Trading Framework</p>
+            <div class="mt-3 flex items-center justify-between">
+              <div class="flex items-center -space-x-2">
+                <img src="https://avatars.githubusercontent.com/yijia-z" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <img src="https://avatars.githubusercontent.com/xianjun-yang" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <img src="https://avatars.githubusercontent.com/cynthiao" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <span class="ml-3 text-[11px] text-neutral-500">+12</span>
+              </div>
+              <a href="#" class="text-[12px] text-sky-600 hover:underline">github.com →</a>
+            </div>
+          </article>
+
+          <article class="rounded-2xl bg-white p-4 shadow-sm border border-neutral-200 hover:border-neutral-300 cursor-pointer transition-colors">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/ollama" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <span class="text-[15px] font-bold leading-tight text-neutral-900">ollama / ollama</span>
+                <div class="mt-0.5 flex items-center gap-2 text-[12px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-cyan-400"></span>Go</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                    142k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                    11.4k
+                  </span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                    2.3k
+                  </span>
+                </div>
+              </div>
+              <span class="shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700">infra</span>
+            </div>
+            <p class="mt-3 text-[14px] text-neutral-700">Get up and running with large language models locally.</p>
+            <div class="mt-3 flex items-center justify-between">
+              <div class="flex items-center -space-x-2">
+                <img src="https://avatars.githubusercontent.com/mxyng" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <img src="https://avatars.githubusercontent.com/jmorganca" class="h-6 w-6 rounded-full border-2 border-white bg-neutral-200" />
+                <span class="ml-2 text-[11px] text-neutral-500">+330</span>
+              </div>
+              <a href="#" class="text-[12px] text-sky-600 hover:underline">github.com →</a>
+            </div>
+          </article>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- 评估表 -->
+    <div class="mt-10 rounded-2xl border border-neutral-200 bg-white p-6">
+      <h3 class="mb-4 text-base font-bold text-neutral-900">三方案对比</h3>
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-neutral-200 text-left text-xs uppercase tracking-wider text-neutral-500">
+            <th class="py-2 pr-4">维度</th>
+            <th class="py-2 pr-4">A · 全文</th>
+            <th class="py-2 pr-4">B · 截断 3 行</th>
+            <th class="py-2 pr-4">C · drawer</th>
+          </tr>
+        </thead>
+        <tbody class="text-neutral-700">
+          <tr class="border-b border-neutral-100">
+            <td class="py-2 pr-4 font-medium">扫读速度</td>
+            <td class="py-2 pr-4">慢（信息多）</td>
+            <td class="py-2 pr-4">中</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">快</td>
+          </tr>
+          <tr class="border-b border-neutral-100">
+            <td class="py-2 pr-4 font-medium">第一眼信息密度</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">高</td>
+            <td class="py-2 pr-4">中</td>
+            <td class="py-2 pr-4">低</td>
+          </tr>
+          <tr class="border-b border-neutral-100">
+            <td class="py-2 pr-4 font-medium">列表整齐度</td>
+            <td class="py-2 pr-4">差（高度参差）</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">好</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">好</td>
+          </tr>
+          <tr class="border-b border-neutral-100">
+            <td class="py-2 pr-4 font-medium">summary 触达率</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">100%</td>
+            <td class="py-2 pr-4">~80%（看得到 3 行）</td>
+            <td class="py-2 pr-4">需点击（~30%）</td>
+          </tr>
+          <tr class="border-b border-neutral-100">
+            <td class="py-2 pr-4 font-medium">跟现有 X 卡的视觉一致性</td>
+            <td class="py-2 pr-4">中（X 卡也常较高）</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">好</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">好</td>
+          </tr>
+          <tr>
+            <td class="py-2 pr-4 font-medium">推荐</td>
+            <td class="py-2 pr-4">日活 < 50 时（重内容）</td>
+            <td class="py-2 pr-4 font-medium text-emerald-700">默认推荐</td>
+            <td class="py-2 pr-4">移动端可选</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Section 4 prompt 微调备忘 -->
+    <div class="mt-6 rounded-2xl border border-neutral-200 bg-white p-6">
+      <h3 class="mb-3 text-base font-bold text-neutral-900">Section 4 · Prompt 微调（已加 + 验证 ✓）</h3>
+      <ul class="space-y-2 text-sm text-neutral-700 list-disc list-inside">
+        <li>summary 第一句不要以"项目名 + 是一个"开头，直接讲做什么（已加正反例强化，实测生效）</li>
+        <li>如果 README 有 disclaimer / license 限制 / 研究向声明，summary 末尾必须保留一句（实测生效）</li>
+      </ul>
+      <p class="mt-3 text-xs text-neutral-500">实际输出："多智能体金融交易框架，通过 LangGraph 编排... 研究向，非投资建议。"</p>
+    </div>
+
+    <!-- Drawer mockup -->
+    <div class="mt-10">
+      <h2 class="mb-2 text-lg font-bold text-neutral-900">Drawer · 点开卡片后的详情页</h2>
+      <p class="mb-4 text-xs text-neutral-500">右侧 slide-in 抽屉，跟现有 X 推文 drawer 视觉一致。下方为静态展示，PC 真实状态是右侧滑出 + 左侧半透明遮罩；移动端全宽 + 右滑关闭。</p>
+
+      <!-- 模拟整页 fixed-position 显示 -->
+      <div class="relative h-[820px] overflow-hidden rounded-2xl border border-neutral-300 bg-neutral-100 shadow-lg">
+        <!-- 半透明遮罩（左侧） -->
+        <div class="absolute inset-0 bg-black/40"></div>
+
+        <!-- 右侧 drawer panel -->
+        <aside class="absolute inset-y-0 right-0 flex w-[600px] flex-col bg-white shadow-xl">
+          <!-- header (复用 TweetDrawer 三栏 grid) -->
+          <header class="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-3 py-1.5">
+            <div class="justify-self-start">
+              <button class="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-200" aria-label="关闭">
+                <span class="text-base leading-none">✕</span>
+              </button>
+            </div>
+            <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">GitHub 项目详情</div>
+            <div class="justify-self-end">
+              <a href="#" class="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200" title="在 GitHub 打开">在 GitHub 打开 ↗</a>
+            </div>
+          </header>
+
+          <!-- body -->
+          <div class="flex-1 overflow-y-auto">
+            <!-- repo 头部 -->
+            <div class="border-b border-neutral-100 p-5">
+              <div class="flex items-start gap-3">
+                <img src="https://avatars.githubusercontent.com/TauricResearch" class="h-12 w-12 shrink-0 rounded-full bg-neutral-200 object-cover" />
+                <div class="min-w-0 flex-1">
+                  <div class="text-[16px] font-bold leading-tight text-neutral-900">TauricResearch / TradingAgents</div>
+                  <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-400"></span>Python</span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-1">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                      18.2k
+                    </span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-1">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                      3.1k
+                    </span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-1">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                      542
+                    </span>
+                  </div>
+                </div>
+                <span class="shrink-0 rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-medium text-violet-700">agent</span>
+              </div>
+              <!-- 排名 chip（外显文字，无 hover） -->
+              <div class="mt-3">
+                <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[12px] text-neutral-700 ring-1 ring-amber-200">
+                  <span class="font-medium tabular-nums">04-29</span>
+                  <svg class="h-3.5 w-3.5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/>
+                    <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
+                    <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
+                    <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
+                  </svg>
+                  <span class="font-semibold tabular-nums">2nd</span>
+                  <span class="text-neutral-500">· GitHub 热榜</span>
+                </span>
+              </div>
+
+              <!-- 项目元数据（4.8 上移到此区域，跟 chip 同区） -->
+              <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-neutral-600">
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="h-3.5 w-3.5 text-neutral-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></svg>
+                  License: <span class="font-medium text-neutral-900">Apache-2.0</span>
+                </span>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="h-3.5 w-3.5 text-emerald-600" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8Z"/></svg>
+                  Issues: <span class="font-medium text-neutral-900">42</span>
+                </span>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="h-3.5 w-3.5 text-violet-600" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0Z"/></svg>
+                  PRs: <span class="font-medium text-neutral-900">7</span>
+                </span>
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="h-3.5 w-3.5 text-neutral-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0Zm.75 4.75v3.5a.75.75 0 0 1-.22.53l-2 2a.75.75 0 0 1-1.06-1.06l1.78-1.78V4.75a.75.75 0 0 1 1.5 0Z"/></svg>
+                  commit: <span class="font-medium text-neutral-900">2 hours ago</span>
+                </span>
+              </div>
+
+              <!-- 12 contributors -->
+              <div class="mt-2.5 inline-flex items-center gap-2">
+                <span class="flex items-center -space-x-1.5">
+                  <img src="https://avatars.githubusercontent.com/yijia-z" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/xianjun-yang" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/cynthiao" class="h-5 w-5 rounded-full border-2 border-white bg-neutral-200" />
+                </span>
+                <span class="text-[11px] text-neutral-500">12 contributors</span>
+              </div>
+            </div>
+
+            <!-- AI 解读全文（无小标题、无水印） -->
+            <div class="border-b border-neutral-100 p-5">
+              <p class="text-[14px] leading-relaxed text-neutral-700">
+                多智能体金融交易框架，通过 LangGraph 编排分析师、研究员、交易员、风控等角色协作决策。亮点在于专门针对金融交易场景的多 Agent 设计，支持 OpenAI/Gemini/DeepSeek 等主流 LLM，并具备持久化记忆和断点恢复功能。研究向，非投资建议。
+              </p>
+            </div>
+
+            <!-- README（统一标题；如果原文是英文则出双 tab，中文则不出 tab） -->
+            <div>
+              <div class="flex items-center justify-between border-b border-neutral-100 px-5 pt-5 pb-2">
+                <h3 class="text-[13px] font-semibold text-neutral-900">README</h3>
+                <!-- 仅当 readme_lang ≠ 'zh' 时渲染这个 tab 切换 -->
+                <div class="flex gap-1 rounded-md bg-neutral-100 p-0.5">
+                  <button class="rounded bg-white px-2.5 py-1 text-[11px] font-semibold text-neutral-900 shadow-sm">English</button>
+                  <button class="rounded px-2.5 py-1 text-[11px] text-neutral-600 hover:text-neutral-900">中文</button>
+                </div>
+              </div>
+              <div class="prose prose-sm max-w-none p-5 text-[13px] leading-relaxed text-neutral-700">
+                <p><strong>TradingAgents</strong> is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents — fundamental analysts, sentiment experts, technical analysts, traders, risk management — the platform collaboratively evaluates market conditions and informs trading decisions.</p>
+                <p class="mt-2"><strong>Analyst Team:</strong> Fundamentals / Sentiment / News / Technical</p>
+                <p class="mt-2"><strong>Researcher Team:</strong> Bullish + Bearish researchers debate insights from analysts.</p>
+                <p class="mt-2"><strong>Trader Agent:</strong> Composes reports into trading decisions...</p>
+                <!-- 演示落库到 CF 的图片 -->
+                <img src="https://avatars.githubusercontent.com/TauricResearch" alt="schema" class="mt-3 max-w-full rounded-md border border-neutral-200" />
+                <p class="mt-2 text-[11px] text-neutral-400">↑ 图片由 enrich pipeline 异步下载到 CF R2，避免外链失效</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <p class="mt-3 text-xs text-neutral-500">
+        说明：mockup 用 fixed-height 容器模拟 viewport。生产代码沿用 TweetDrawer 的 inset-y-0 right-0 + max-w-[600px] 模式，复用 swipe-to-close、keyboard ESC、URL routing 等基础设施。
+      </p>
+    </div>
+
+    <!-- Mobile drawer mockup -->
+    <div class="mt-10">
+      <h2 class="mb-2 text-lg font-bold text-neutral-900">Drawer · 移动端</h2>
+      <p class="mb-4 text-xs text-neutral-500">移动端 drawer 是全屏页（`isNarrow` 分流），左上角 ‹ 返回；右滑可关闭（复用 TweetDrawer 的 SWIPE_COMMIT_PX 实现）。</p>
+
+      <div class="flex justify-center">
+        <!-- 模拟手机框 375x780 -->
+        <div class="relative h-[780px] w-[375px] overflow-hidden rounded-[2.2rem] border-[10px] border-neutral-800 bg-white shadow-2xl">
+          <!-- 顶部返回栏（drawer header，三栏 grid） -->
+          <header class="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-2 py-1.5">
+            <div class="justify-self-start">
+              <button class="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-700" aria-label="返回">
+                <span class="text-2xl leading-none">‹</span>
+              </button>
+            </div>
+            <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">GitHub 项目详情</div>
+            <div class="justify-self-end">
+              <a href="#" class="rounded-md px-2 py-1 text-xs text-neutral-600">打开 GitHub ↗</a>
+            </div>
+          </header>
+
+          <div class="h-[calc(100%-44px)] overflow-y-auto">
+            <!-- repo 头部 -->
+            <div class="border-b border-neutral-100 p-4">
+              <div class="flex items-start gap-3">
+                <img src="https://avatars.githubusercontent.com/TauricResearch" class="h-11 w-11 shrink-0 rounded-full bg-neutral-200 object-cover" />
+                <div class="min-w-0 flex-1">
+                  <div class="text-[15px] font-bold leading-tight text-neutral-900 break-words">TauricResearch / TradingAgents</div>
+                  <div class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-neutral-500">
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-400"></span>Python</span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-0.5">
+                      <svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+                      18.2k
+                    </span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-0.5">
+                      <svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0Z"/></svg>
+                      3.1k
+                    </span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-0.5">
+                      <svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>
+                      542
+                    </span>
+                  </div>
+                </div>
+                <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">agent</span>
+              </div>
+              <div class="mt-3">
+                <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-1 text-[11px] text-neutral-700 ring-1 ring-amber-200">
+                  <span class="font-medium tabular-nums">04-29</span>
+                  <svg class="h-3 w-3 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/>
+                    <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
+                    <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
+                    <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
+                  </svg>
+                  <span class="font-semibold tabular-nums">2nd</span>
+                  <span class="text-neutral-500">· GitHub 热榜</span>
+                </span>
+              </div>
+              <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 text-[11px] text-neutral-600">
+                <span>License: <span class="font-medium text-neutral-900">Apache-2.0</span></span>
+                <span>Issues: <span class="font-medium text-neutral-900">42</span></span>
+                <span>PRs: <span class="font-medium text-neutral-900">7</span></span>
+                <span>commit: <span class="font-medium text-neutral-900">2h ago</span></span>
+              </div>
+              <div class="mt-2 inline-flex items-center gap-2">
+                <span class="flex items-center -space-x-1.5">
+                  <img src="https://avatars.githubusercontent.com/yijia-z" class="h-4 w-4 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/xianjun-yang" class="h-4 w-4 rounded-full border-2 border-white bg-neutral-200" />
+                  <img src="https://avatars.githubusercontent.com/cynthiao" class="h-4 w-4 rounded-full border-2 border-white bg-neutral-200" />
+                </span>
+                <span class="text-[10px] text-neutral-500">12 contributors</span>
+              </div>
+            </div>
+
+            <div class="border-b border-neutral-100 p-4">
+              <p class="text-[14px] leading-relaxed text-neutral-700">
+                多智能体金融交易框架，通过 LangGraph 编排分析师、研究员、交易员、风控等角色协作决策。亮点在于专门针对金融交易场景的多 Agent 设计，支持 OpenAI/Gemini/DeepSeek 等主流 LLM，并具备持久化记忆和断点恢复功能。研究向，非投资建议。
+              </p>
+            </div>
+
+            <!-- README（统一标题；如果原文中文则不出 tab） -->
+            <div>
+              <div class="flex items-center justify-between border-b border-neutral-100 px-4 pt-4 pb-2">
+                <h3 class="text-[12px] font-semibold text-neutral-900">README</h3>
+                <div class="flex gap-1 rounded-md bg-neutral-100 p-0.5">
+                  <button class="rounded bg-white px-2 py-0.5 text-[10px] font-semibold text-neutral-900 shadow-sm">English</button>
+                  <button class="rounded px-2 py-0.5 text-[10px] text-neutral-600">中文</button>
+                </div>
+              </div>
+              <div class="prose prose-sm max-w-none p-4 text-[12px] leading-relaxed text-neutral-700">
+                <p><strong>TradingAgents</strong> is a multi-agent trading framework that mirrors the dynamics of real-world trading firms...</p>
+                <p class="mt-2"><strong>Analyst Team:</strong> Fundamentals / Sentiment / News / Technical</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="mt-3 text-center text-xs text-neutral-500">
+        375 × 780 模拟视口，全屏 drawer 沿用 mobile breakpoint 分支
+      </p>
+
+      <!-- README tab 条件渲染说明 -->
+      <div class="mt-6 rounded-lg border border-blue-200 bg-blue-50 p-4 text-[12px] text-blue-900">
+        <strong>README 条件渲染规则：</strong>
+        <ul class="mt-1.5 space-y-1 list-disc list-inside">
+          <li>原文是中文（<code class="rounded bg-white px-1 py-0.5">readme_lang = 'zh'</code>）→ 不出 tab，直接出原文</li>
+          <li>原文是其他语言（英文 / 日文 / 韩文 等）→ 出双 tab "English / 中文"，默认选原文</li>
+          <li>语言判定：抓 README 后扫前 N 字符的 CJK 占比 ≥ 30% → 'zh'，否则 'en' / 'other'（启发式 + 0 LLM 成本）</li>
+          <li>中文翻译 = enrich pipeline 异步任务，新建 <code class="rounded bg-white px-1 py-0.5">readme_translated</code> 字段；翻译时 README 中的 <code class="rounded bg-white px-1 py-0.5">&lt;img&gt;</code> 资源 URL 抽出 → 下载到 CF R2 → 重写到 markdown 落库（参考 xlist 现有 link_card 图片做法）</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- URL routing & share section -->
+    <div class="mt-10 rounded-2xl border border-neutral-200 bg-white p-6">
+      <h2 class="mb-3 text-lg font-bold text-neutral-900">分享 / URL routing 设计</h2>
+      <p class="mb-4 text-sm text-neutral-700">
+        复用 X 推文 drawer 已实现的 <code class="rounded bg-neutral-100 px-1 py-0.5 text-[12px]">/t/:id</code> 模式（见 <code>docs/plans/2026-04-30-dashboard-url-routing-design.md</code>），GitHub repo 用对应路由。
+      </p>
+
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div class="rounded-lg border border-neutral-200 bg-neutral-50 p-4">
+          <h3 class="mb-2 text-[13px] font-semibold text-neutral-900">URL 结构</h3>
+          <ul class="space-y-1.5 text-[12px] text-neutral-700">
+            <li><code class="rounded bg-white px-1.5 py-0.5">/g/:owner/:repo</code> — 单条 repo 详情（与 GitHub 自身 URL 同构）</li>
+            <li><code class="rounded bg-white px-1.5 py-0.5">/t/:id</code> — X 推文（已上线，保持不动）</li>
+            <li>未来：<code class="rounded bg-white px-1.5 py-0.5">/p/:paper_id</code>、<code class="rounded bg-white px-1.5 py-0.5">/v/:video_id</code> 等</li>
+          </ul>
+          <p class="mt-3 text-[11px] text-neutral-500">用 source-prefixed slug 而非统一 <code>/i/:source/:id</code>，URL 更短更可读，分享回流时人眼能识别"这是个 GitHub 项目"。</p>
+        </div>
+
+        <div class="rounded-lg border border-neutral-200 bg-neutral-50 p-4">
+          <h3 class="mb-2 text-[13px] font-semibold text-neutral-900">深链行为（同 X 推文）</h3>
+          <ul class="space-y-1.5 text-[12px] text-neutral-700">
+            <li>应用内点卡片 → <code>history.pushState('/g/:owner/:repo')</code> → drawer 开</li>
+            <li>关闭 drawer / ESC / 遮罩 → <code>history.back()</code> → 回 <code>/</code></li>
+            <li>冷启动深链 → <code>replaceState('/')</code> + <code>pushState('/g/...')</code> seed 历史栈</li>
+            <li>后退键 → 回首页 feed（不退出站）</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
+        <h3 class="mb-2 text-[13px] font-semibold text-blue-900">分享回流：被分享的 repo 强插到 feed 顶部</h3>
+        <p class="text-[12px] leading-relaxed text-blue-900">
+          复用 d80a38f commit 的"被分享推文强插到 feed 顶部"机制：用户点击别人分享的链接进入 <code class="rounded bg-white px-1 py-0.5">/g/:owner/:repo</code>，drawer 打开后，关闭 drawer 时底层 GitHub 列里这条 repo 出现在最顶部（即使它已经过期不在当日 trending）。
+        </p>
+        <ul class="mt-2 space-y-1 text-[12px] text-blue-900 list-disc list-inside">
+          <li>Worker 端：<code>GET /api/items/:source/:id</code> 返回单条；<code>GET /api/feed?source=github&pinned=:owner_repo</code> 把 pinned id 排首位</li>
+          <li>前端：从 <code>/g/:owner/:repo</code> 进入时，feed query 带 <code>?ref=share&pinned=...</code>，对应卡显示一个不显眼的 "from share" 视觉锚点（参考 X 那条的实现）</li>
+          <li>后续：上报 SDK 落 <code>events</code> 表，分享外链点击 → drawer 打开 → 强插 → 关闭后保留在 feed 顶部，回流路径完整</li>
+        </ul>
+      </div>
+    </div>
+  </main>
+
+</body>
+</html>

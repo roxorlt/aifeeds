@@ -802,7 +802,13 @@ interface RefreshRow {
 }
 
 /** Select items published in the last N days, excluding those already
- *  processed in the current round. */
+ *  processed in the current round.
+ *
+ *  Within the lookback window, prioritize rows where any of the four
+ *  user-visible metric fields (likes/retweets/replies/views) is NULL —
+ *  these show up as "—" on the dashboard. bookmarks is excluded from
+ *  the completeness check because it's almost always null on X (only
+ *  visible to logged-in viewers). */
 async function selectRefreshCandidates(
   env: EnrichEnv,
   done: Set<string>,
@@ -814,12 +820,20 @@ async function selectRefreshCandidates(
   ).toISOString();
   const fetchBatch = Math.min(Math.max(limit * 3, 100), 1000);
   const rows = await env.DB.prepare(
-    `SELECT id, source_id
+    `SELECT id, source_id,
+            CASE
+              WHEN metrics IS NULL OR metrics = '' OR metrics = '{}' THEN 1
+              WHEN json_extract(metrics, '$.likes')    IS NULL
+                OR json_extract(metrics, '$.retweets') IS NULL
+                OR json_extract(metrics, '$.replies')  IS NULL
+                OR json_extract(metrics, '$.views')    IS NULL THEN 1
+              ELSE 0
+            END AS is_incomplete
      FROM items
      WHERE source_type = 'x_list'
        AND is_relevant = 1
        AND published_at >= ?
-     ORDER BY published_at DESC
+     ORDER BY is_incomplete DESC, published_at DESC
      LIMIT ?`,
   )
     .bind(cutoff, fetchBatch)

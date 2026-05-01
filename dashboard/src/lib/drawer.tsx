@@ -21,6 +21,10 @@ interface DrawerState {
 interface DrawerContextValue {
   state: DrawerState;
   openTweet: (item: Item, siblings?: Item[]) => void;
+  // Generic: open any source's item in the drawer. For X items this delegates
+  // to openTweet (URL → /t/:id); for GitHub items it sets state directly until
+  // PR-5 wires /g/:owner/:repo. Either way the drawer renders.
+  openItem: (item: Item, siblings?: Item[]) => void;
   close: () => void;
   // Spotlight: latest item the user opened via /t/:id (cold link or in-app
   // click). Feed prepends this to its data with dedup, so closing the drawer
@@ -32,11 +36,20 @@ interface DrawerContextValue {
 
 const DrawerContext = createContext<DrawerContextValue | null>(null);
 
-const SOURCE_TYPE = "x_list" as const;
-
-function parseTweetIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/t\/([^/]+)$/);
-  return match ? match[1] : null;
+function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null {
+  // /t/:source_id  → x_list:<source_id>
+  const tweetMatch = pathname.match(/^\/t\/([^/]+)$/);
+  if (tweetMatch) {
+    return { compositeId: `x_list:${tweetMatch[1]}` };
+  }
+  // /g/:owner/:repo → github:<owner>/<repo>
+  const ghMatch = pathname.match(/^\/g\/([^/]+)\/([^/]+)$/);
+  if (ghMatch) {
+    const owner = decodeURIComponent(ghMatch[1]);
+    const repo = decodeURIComponent(ghMatch[2]);
+    return { compositeId: `github:${owner}/${repo}` };
+  }
+  return null;
 }
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
@@ -65,6 +78,26 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     [navigate],
   );
 
+  const openItem = useCallback(
+    (item: Item, siblings: Item[] = []) => {
+      // Optimistic open: set state first so URL effect sees cache hit.
+      setState({ item, siblings, loading: false, error: null });
+      setSpotlightItem(item);
+      activeIdRef.current = item.id;
+      if (item.source_type === "x_list") {
+        navigate(`/t/${encodeURIComponent(item.source_id)}`);
+      } else if (item.source_type === "github") {
+        // /g/:owner/:repo (two segments — same shape as github.com URLs)
+        const [owner, repo] = item.source_id.split("/");
+        if (owner && repo) {
+          navigate(`/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+        }
+      }
+      // Future sources: youtube / podcast / arxiv / product_hunt — add URL forms here.
+    },
+    [navigate],
+  );
+
   const close = useCallback(() => {
     // Going back triggers popstate → URL becomes / → URL effect clears state.
     // main.tsx seeds '/' under any cold /t/:id, so history.length > 1 always
@@ -78,9 +111,9 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
 
   // URL → drawer state sync.
   useEffect(() => {
-    const sourceId = parseTweetIdFromPath(location.pathname);
+    const parsed = parseDeepLinkFromPath(location.pathname);
 
-    if (!sourceId) {
+    if (!parsed) {
       if (activeIdRef.current !== null) {
         activeIdRef.current = null;
         setState({ item: null, siblings: [], loading: false, error: null });
@@ -88,7 +121,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const compositeId = `${SOURCE_TYPE}:${sourceId}`;
+    const { compositeId } = parsed;
     if (activeIdRef.current === compositeId) return;
 
     activeIdRef.current = compositeId;
@@ -111,7 +144,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, close, spotlightItem }}>
+    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem }}>
       {children}
     </DrawerContext.Provider>
   );

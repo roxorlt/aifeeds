@@ -303,6 +303,49 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
         }
       }
     }
+
+    // GitHub metrics snapshot: append one row per github item per ingest.
+    // metrics_snapshots_gh is append-only history (vs items.metrics which holds
+    // the current state). Same pattern as X's metrics_snapshots.
+    const githubItems = batch.filter(it => it.source_type === 'github');
+    if (githubItems.length > 0) {
+      const snapStmts: D1PreparedStatement[] = [];
+      for (const item of githubItems) {
+        const id = `${item.source_type}:${item.source_id}`;
+        const m = (typeof item.metrics === 'string'
+          ? safeJson(item.metrics)
+          : item.metrics) as Record<string, unknown> | null;
+        const ex = (typeof item.extra === 'string'
+          ? safeJson(item.extra)
+          : item.extra) as Record<string, unknown> | null;
+        const capturedAt = Math.floor(Date.parse(item.scraped_at) / 1000) || Math.floor(Date.now() / 1000);
+        snapStmts.push(
+          env.DB.prepare(
+            `INSERT INTO metrics_snapshots_gh
+               (item_id, captured_at, trending_date_str,
+                total_stars, today_stars, forks, watchers, open_issues, open_prs)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            id,
+            capturedAt,
+            (ex?.trending_date_str as string) ?? null,
+            toIntOrNull(m?.stars ?? m?.total_stars),
+            toIntOrNull(m?.today_stars),
+            toIntOrNull(m?.forks),
+            toIntOrNull(m?.watchers),
+            toIntOrNull(m?.open_issues),
+            toIntOrNull(m?.open_prs),
+          ),
+        );
+      }
+      try {
+        await env.DB.batch(snapStmts);
+      } catch (e) {
+        // Don't fail the ingest if snapshot table is missing or full;
+        // worker logs only.
+        console.error('[ingest] metrics_snapshots_gh insert error:', e);
+      }
+    }
   }
 
   // Update source cursor if provided
@@ -344,6 +387,13 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const sortParam = url.searchParams.get('sort');
   const isHot = sortParam === 'hot';
   const sort = sortParam === 'published_at' || isHot ? 'published_at' : 'scraped_at';
+
+  // GitHub feed uses a totally different shape: pick today's AI-relevant
+  // non-sponsor rows (latest trending_date_str in DB), order by daily_rank ASC,
+  // optionally pin a specific id to the top (share-link strong-insert).
+  if (sourceType === 'github') {
+    return handleGithubFeed(request, env);
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
@@ -463,6 +513,104 @@ function parseItemRow(row: Record<string, unknown>): Record<string, unknown> {
   return parsed;
 }
 
+function safeJson(s: string): unknown {
+  try { return JSON.parse(s); } catch { return null; }
+}
+
+function toIntOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === 'number' ? v : parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ─── GET /api/items?source_type=github ─────────────────────────
+// GitHub feed:
+//   - latest trending_date_str in DB
+//   - is_relevant=1 AND extra.sponsor=0 (admin-only sponsors not in feed)
+//   - ORDER BY extra.daily_rank ASC
+//   - optional ?pinned=gh:owner/repo to bubble a shared link to the top
+//   - cursor: "rank|id" pagination
+async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
+  const cursor = url.searchParams.get('cursor');
+  const pinned = url.searchParams.get('pinned');
+
+  // Latest trending_date for github
+  const latestDate = await env.DB.prepare(
+    `SELECT MAX(json_extract(extra, '$.trending_date_str')) AS d
+       FROM items
+      WHERE source_type='github'`
+  ).first<{ d: string | null }>();
+  const todayStr = latestDate?.d;
+  if (!todayStr) {
+    return jsonResponse({ items: [], next_cursor: null, has_more: false }, 200, request, env);
+  }
+
+  const conditions: string[] = [
+    "source_type='github'",
+    'is_relevant=1',
+    "COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0",
+    "json_extract(extra, '$.trending_date_str') = ?",
+    'deleted_at IS NULL',
+  ];
+  const params: unknown[] = [todayStr];
+
+  if (cursor) {
+    const [rankStr, idStr] = cursor.split('|');
+    const rank = parseInt(rankStr, 10);
+    if (!Number.isNaN(rank) && idStr) {
+      conditions.push(`(
+        CAST(json_extract(extra, '$.daily_rank') AS INTEGER) > ?
+        OR (CAST(json_extract(extra, '$.daily_rank') AS INTEGER) = ? AND id > ?)
+      )`);
+      params.push(rank, rank, idStr);
+    }
+  }
+
+  const where = conditions.join(' AND ');
+  // Pinned: when present, this id always sorts to the top regardless of rank.
+  // We only need to sort the page; the actual pin lookup is also separately
+  // returned inline in the items list (so even if rank=NULL it's still visible).
+  const pinExpr = pinned
+    ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), `
+    : '';
+  if (pinned) params.unshift(pinned);  // bind for the SELECT param order: pin id first
+
+  const sql = `
+    SELECT * FROM items
+    WHERE ${where}
+    ORDER BY ${pinExpr}CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
+             id ASC
+    LIMIT ?
+  `;
+  params.push(limit + 1);
+
+  const start = Date.now();
+  const result = await env.DB.prepare(sql).bind(...params).all();
+  const queryTime = Date.now() - start;
+
+  const hasMore = result.results.length > limit;
+  const rows = hasMore ? result.results.slice(0, limit) : result.results;
+  const items = rows.map(parseItemRow);
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1] as Record<string, unknown>;
+    const lastExtra = last.extra as Record<string, unknown> | null;
+    const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
+    nextCursor = `${lastRank ?? 'null'}|${last.id}`;
+  }
+
+  return jsonResponse({
+    items,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    trending_date: todayStr,
+    query_time_ms: queryTime,
+  }, 200, request, env);
+}
+
 // ─── GET /api/items/:id ────────────────────────────────────────
 // :id is the composite primary key `${source_type}:${source_id}`.
 // Returns { item, siblings } where siblings are thread members
@@ -492,7 +640,30 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     siblings = result.results.map(parseItemRow);
   }
 
-  return jsonResponse({ item: parsedItem, siblings }, 200, request, env);
+  // For GitHub items, attach metrics_history (last 30 days) so drawer can
+  // render a sparkline (v2). Cheap query, ~20-60 rows per repo.
+  let metricsHistory: Record<string, unknown>[] = [];
+  if (parsedItem.source_type === 'github') {
+    try {
+      const thirtyDaysAgoUnix = Math.floor(Date.now() / 1000) - 30 * 86400;
+      const histResult = await env.DB.prepare(
+        `SELECT captured_at, trending_date_str,
+                total_stars, today_stars, forks, watchers, open_issues, open_prs
+           FROM metrics_snapshots_gh
+          WHERE item_id = ? AND captured_at >= ?
+       ORDER BY captured_at ASC`
+      ).bind(id, thirtyDaysAgoUnix).all();
+      metricsHistory = histResult.results;
+    } catch (e) {
+      // Table may not exist yet pre-migration — silently empty.
+    }
+  }
+
+  return jsonResponse({
+    item: parsedItem,
+    siblings,
+    metrics_history: metricsHistory,
+  }, 200, request, env);
 }
 
 // ─── GET /api/sources ──────────────────────────────────────────
