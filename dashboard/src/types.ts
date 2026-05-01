@@ -80,7 +80,35 @@ export interface ItemExtra {
   hashtags?: string[];
   urls?: Array<{ display_url?: string; expanded_url?: string; url?: string }>;
   ocr_text?: string;
+
+  // GitHub-source specific fields (source_type = 'github')
+  ai_category?: "agent" | "model" | "tool" | "infra" | "app" | "tutorial" | "other" | null;
+  ai_summary?: string;
+  llm_model?: string;
+  llm_called_at?: number;
+  readme_excerpt?: string;
+  readme_translated?: string | null;
+  contributors_inline?: Array<{ login: string; avatar_url: string }>;
+  contributors_count?: number | null;
+  sponsor?: number;
+  daily_rank?: number | null;
+  trending_date_str?: string;
+  first_trending_at?: number;
+  last_seen_on_trending_at?: number;
+  default_branch?: string;
+  license_spdx?: string | null;
+
   [k: string]: unknown;
+}
+
+export interface GithubMetrics {
+  stars?: number;
+  today_stars?: number;
+  forks?: number;
+  watchers?: number;
+  open_issues?: number;
+  open_prs?: number;
+  [k: string]: number | undefined;
 }
 
 export interface ItemsResponse {

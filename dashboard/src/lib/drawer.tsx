@@ -21,6 +21,10 @@ interface DrawerState {
 interface DrawerContextValue {
   state: DrawerState;
   openTweet: (item: Item, siblings?: Item[]) => void;
+  // Generic: open any source's item in the drawer. For X items this delegates
+  // to openTweet (URL → /t/:id); for GitHub items it sets state directly until
+  // PR-5 wires /g/:owner/:repo. Either way the drawer renders.
+  openItem: (item: Item, siblings?: Item[]) => void;
   close: () => void;
   // Spotlight: latest item the user opened via /t/:id (cold link or in-app
   // click). Feed prepends this to its data with dedup, so closing the drawer
@@ -61,6 +65,30 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       setSpotlightItem(item);
       activeIdRef.current = item.id;
       navigate(`/t/${encodeURIComponent(item.source_id)}`);
+    },
+    [navigate],
+  );
+
+  const openItem = useCallback(
+    (item: Item, siblings: Item[] = []) => {
+      if (item.source_type === "x_list") {
+        // Existing /t/:id flow with URL routing.
+        setState({ item, siblings, loading: false, error: null });
+        setSpotlightItem(item);
+        activeIdRef.current = item.id;
+        navigate(`/t/${encodeURIComponent(item.source_id)}`);
+      } else if (item.source_type === "github") {
+        // PR-5 will navigate to /g/:owner/:repo. For now, open without URL
+        // change so PR-4 cards work end-to-end before PR-5 routing lands.
+        setState({ item, siblings, loading: false, error: null });
+        setSpotlightItem(item);
+        activeIdRef.current = item.id;
+      } else {
+        // Future: youtube / podcast / arxiv / product_hunt — open without URL.
+        setState({ item, siblings, loading: false, error: null });
+        setSpotlightItem(item);
+        activeIdRef.current = item.id;
+      }
     },
     [navigate],
   );
@@ -111,7 +139,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, close, spotlightItem }}>
+    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem }}>
       {children}
     </DrawerContext.Provider>
   );

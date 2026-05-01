@@ -1,8 +1,20 @@
 import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
 
+export interface MetricsSnapshotGh {
+  captured_at: number;
+  trending_date_str: string | null;
+  total_stars: number | null;
+  today_stars: number | null;
+  forks: number | null;
+  watchers: number | null;
+  open_issues: number | null;
+  open_prs: number | null;
+}
+
 export interface ItemDetailResponse {
   item: Item;
   siblings: Item[];
+  metrics_history?: MetricsSnapshotGh[];
 }
 
 export class ItemNotFoundError extends Error {

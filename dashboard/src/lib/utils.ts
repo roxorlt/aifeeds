@@ -37,6 +37,23 @@ export function formatNumber(n: number | undefined | null): string {
   return String(n);
 }
 
+// en-US compact: 1.2k / 142k / 1.2M (used for GitHub stars/forks/watchers
+// since the rest of GitHub UI uses this convention worldwide).
+export function formatCompact(n: number | undefined | null): string {
+  if (n === undefined || n === null) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+// 1 → "1st", 2 → "2nd", 3 → "3rd", 4 → "4th", ..., 11 → "11th", 21 → "21st"
+export function ordinal(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "";
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
+}
+
 // pbs.twimg.com / abs.twimg.com / video.twimg.com are blocked on CN networks.
 // Route them through our own worker proxy to restore image loading.
 const PROXY_HOSTS = new Set(["pbs.twimg.com", "abs.twimg.com", "video.twimg.com"]);
