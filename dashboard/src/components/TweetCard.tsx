@@ -260,27 +260,14 @@ export function TweetCard({
       {hasThreadBelow && (
         <div className="pointer-events-none absolute left-[35px] top-[52px] bottom-0 w-[2px] bg-neutral-200" />
       )}
-      {/* Thread / reply / quote banner */}
-      {((isThread && !hideThreadBanner) || hasReplyPlaceholder || hasQuotePlaceholder || replyOf) && (
+      {/* Thread / quote-placeholder banner (kept outside avatar block — rare cases).
+          Reply banner moves into the content column, below the header (see further down). */}
+      {((isThread && !hideThreadBanner) || hasQuotePlaceholder) && (
         <div className="mb-1.5 ml-[52px] flex items-center gap-1.5 text-[12px] text-neutral-500">
           {isThread && !hideThreadBanner && (
             <span className="flex items-center gap-1">
               <span className="text-sky-500">🧵</span>
               <span>Thread</span>
-            </span>
-          )}
-          {replyOf && !isThread && (
-            <span className="flex items-center gap-1">
-              <span>↩</span>
-              <span>
-                回复 @{replyOf.handle || "?"}
-              </span>
-            </span>
-          )}
-          {hasReplyPlaceholder && !isThread && (
-            <span className="flex items-center gap-1">
-              <span>↩</span>
-              <span>回复</span>
             </span>
           )}
           {hasQuotePlaceholder && (
@@ -311,37 +298,46 @@ export function TweetCard({
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          {/* Header: author (row 1) + @handle · time (row 2) */}
-          <div className="leading-tight">
-            <div className="flex items-center gap-1 text-[15px]">
-              <span className="truncate font-bold text-neutral-900">
-                {author}
+          {/* Header: single row — author + ✓ + @handle · time + 原文 toggle */}
+          <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
+            <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
+              {author}
+            </span>
+            {isVerified && (
+              <span className="shrink-0 self-center">
+                <VerifiedBadge />
               </span>
-              {isVerified && <VerifiedBadge />}
-            </div>
-            <div className="flex items-center gap-1 text-[13px] text-neutral-500">
-              {handle && <span className="truncate">@{handle}</span>}
-              {handle && <span className="text-neutral-400">·</span>}
-              <span className="shrink-0">
-                {timeAgo(item.published_at || item.scraped_at)}
-              </span>
-              {canToggleOriginal && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowOriginal((v) => !v);
-                  }}
-                  className="shrink-0 hover:text-neutral-900"
-                >
-                  {showOriginal ? "译文" : "原文"}
-                </button>
-              )}
-            </div>
+            )}
+            {handle && <span className="truncate">@{handle}</span>}
+            <span className="shrink-0 text-neutral-400">·</span>
+            <span className="shrink-0">
+              {timeAgo(item.published_at || item.scraped_at)}
+            </span>
+            {canToggleOriginal && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowOriginal((v) => !v);
+                }}
+                className="shrink-0 hover:text-neutral-900"
+              >
+                {showOriginal ? "译文" : "原文"}
+              </button>
+            )}
           </div>
 
-          {/* Reply parent (rendered above the reply body for context) */}
-          {replyOf && <QuotedTweet quote={replyOf} />}
+          {/* Reply banner (a): under header, above body */}
+          {(replyOf || hasReplyPlaceholder) && !isThread && (
+            <div className="mt-0.5 flex items-center gap-1 text-[12px] text-neutral-500">
+              <span>↩</span>
+              <span>
+                {replyOf
+                  ? `回复 @${replyOf.handle || "?"}`
+                  : "回复"}
+              </span>
+            </div>
+          )}
 
           {/* Body */}
           <div
@@ -367,6 +363,9 @@ export function TweetCard({
               {expanded ? "收起" : "展开"}
             </button>
           )}
+
+          {/* Reply parent (d) — show below body for context, like a footnote */}
+          {replyOf && <QuotedTweet quote={replyOf} />}
 
           {/* Quoted tweet (nested card) */}
           {quoteOf && <QuotedTweet quote={quoteOf} />}
