@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { MediaItem } from "../types";
 import { proxyImg } from "../lib/utils";
+import { track, EVENTS } from "../lib/telemetry";
 
 interface Props {
   media: MediaItem[];
@@ -29,6 +30,15 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
     return () => {
       document.body.style.overflow = prev;
     };
+  }, []);
+
+  // Telemetry: lightbox open (mount once)
+  useEffect(() => {
+    track(EVENTS.IMAGE_LIGHTBOX_OPEN, {
+      image_index: startIndex,
+      images_count: media.length,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const current = media[index];
@@ -87,6 +97,14 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
         alt={current.alt || ""}
         className="max-h-[90vh] max-w-[92vw] object-contain"
         onClick={(e) => e.stopPropagation()}
+        onError={() => {
+          let host = "";
+          try { host = new URL(current.url).host; } catch {}
+          track(EVENTS.IMAGE_LOAD_ERROR, {
+            url_host: host,
+            source: "lightbox",
+          });
+        }}
       />
     </div>
   );
