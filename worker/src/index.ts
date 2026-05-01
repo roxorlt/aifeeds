@@ -23,6 +23,7 @@ import {
 
 export interface Env {
   DB: D1Database;
+  AUTH_KV: KVNamespace;
   INGEST_TOKEN: string;
   DEEPSEEK_API_KEY?: string;
   // GITHUB_TOKEN: optional PAT (public_repo scope). Lifts API rate limit
@@ -40,6 +41,17 @@ export interface Env {
   // Cap on which tiers the tiered refresher touches. Default '1' = gradual
   // rollout (L0+L1 only); set to '4' for full coverage once stable.
   REFRESH_TIER_MAX?: string;
+  // PR2 auth secrets (上线前用 wrangler secret put 设置)
+  TURNSTILE_SECRET_KEY?: string;
+  TENCENT_SMS_SECRET_ID?: string;       // 腾讯云 API SecretId
+  TENCENT_SMS_SECRET_KEY?: string;      // 腾讯云 API SecretKey
+  TENCENT_SMS_SDK_APP_ID?: string;      // 短信应用 ID（控制台分配，1400 开头 7 位）
+  TENCENT_SMS_SIGN_NAME?: string;       // 已审签名，例：xList
+  TENCENT_SMS_TEMPLATE_ID?: string;     // 已审模板 ID
+  TENCENT_SMS_REGION?: string;          // 默认 ap-guangzhou
+  PUSHDEER_ADMIN_KEYS?: string;         // 逗号分隔多个 key
+  // PR2 配置
+  SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
 }
 
 // CORS origins allowed
