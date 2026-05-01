@@ -1,4 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { track, EVENTS } from "../lib/telemetry";
+import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, MediaItem, Metrics } from "../types";
 import { cn, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
@@ -132,6 +134,13 @@ export function TweetCard({
   inThread,
 }: Props) {
   const { openTweet } = useDrawer();
+  const impressionRef = useImpression(() => {
+    if (embedded) return; // drawer 内嵌套的卡片不算曝光
+    track(EVENTS.ITEM_IMPRESSION, {
+      item_id: item.id,
+      source: item.source_type,
+    });
+  });
   const [expanded, setExpanded] = useState(Boolean(embedded));
   const [showOriginal, setShowOriginal] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -199,6 +208,10 @@ export function TweetCard({
     if (sel && sel.toString().trim().length > 0) return; // text selected
     const target = e.target as HTMLElement;
     if (target.closest("button") || target.closest("a")) return;
+    track(EVENTS.ITEM_CLICK, {
+      item_id: item.id,
+      source: item.source_type,
+    });
     openTweet(item, siblings || []);
   };
 
@@ -220,6 +233,7 @@ export function TweetCard({
 
   return (
     <article
+      ref={impressionRef}
       onPointerDown={handlePointerDown}
       onClick={handleCardClick}
       className={cn(
