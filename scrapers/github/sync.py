@@ -158,9 +158,16 @@ def main(argv: list[str] | None = None) -> int:
     import os
 
     ap = argparse.ArgumentParser(description="Sync local github_repos → D1 items")
-    ap.add_argument("--base-url", default=os.environ.get("AIFEEDS_WORKER_URL", DEFAULT_WORKER_BASE))
-    ap.add_argument("--token", default=os.environ.get("INGEST_TOKEN", ""),
-                    help="Worker INGEST_TOKEN (env INGEST_TOKEN preferred)")
+    ap.add_argument("--base-url", default=(
+        os.environ.get("AIFEEDS_WORKER_URL")
+        or os.environ.get("XLIST_WORKER_URL")
+        or DEFAULT_WORKER_BASE
+    ))
+    ap.add_argument("--token", default=(
+        os.environ.get("INGEST_TOKEN")
+        or os.environ.get("XLIST_INGEST_TOKEN", "")
+    ),
+                    help="Worker INGEST_TOKEN (env INGEST_TOKEN or XLIST_INGEST_TOKEN)")
     ap.add_argument("--batch-size", type=int, default=100)
     ap.add_argument("--dry-run", action="store_true",
                     help="print payload preview, don't POST")

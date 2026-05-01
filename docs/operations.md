@@ -53,8 +53,8 @@
 | 路径 | 方法 | 用途 | 鉴权 |
 |------|------|------|------|
 | `/api/ingest` | POST | 接收本地 push 的 tweets → 写 D1 items/sources | Bearer `INGEST_TOKEN` |
-| `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`） | 无（只读） |
-| `/api/items/:id` | GET | 单条详情 + thread siblings（`:id` 是 composite，如 `x_list:123…`） | 无（只读） |
+| `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`、`source_type=github` 走 daily_rank 排序 + `pinned`） | 无（只读） |
+| `/api/items/:id` | GET | 单条详情 + thread siblings（`:id` 是 composite，如 `x_list:123…` 或 `github:owner/repo`）；`source_type=github` 时附 `metrics_history`（最近 30 天 `metrics_snapshots_gh`） | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
@@ -127,6 +127,7 @@
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
   - `enrich_state` — cron enrich 的进度（processed_ids / failed_ids / not_found_ids）
+  - `metrics_snapshots_gh` — GitHub 源专属 metrics 历史（item_id / captured_at / trending_date_str / total_stars / today_stars / forks / watchers / open_issues / open_prs；2026-05-01 加入，跟 `metrics_snapshots`（X 用，likes/retweets/replies/bookmarks/views）独立避免字段维度污染。migration: `worker/migrations/004-metrics-snapshots-gh.sql`）
   - `metrics_snapshots`（2026-04-23 M1.5 新增）— 每次 `runRefreshMetrics` 覆盖 `items.metrics` 时 append 一行 (item_id, captured_at, likes, retweets, replies, bookmarks, views)，append-only 时间序列。为 M4/M5 的 tiered 刷新策略提供真 Δlikes 数据。保留 30 天（清理机制 M5 时加）
   - `refresh_log`（2026-04-23 M3 新增）— 每次 `runRefreshTiered` 执行时 append 一行 (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)，观测 CF subrequest 配额在各 tier 的分配。保留 30 天（清理机制 M5 时加）
 
@@ -242,7 +243,23 @@
   - `XLIST_DATA_DIR=... python3 scripts/tune_schedule.py --dry-run`（只预览不写盘）
 - **回滚**：删除 `data/schedule_params.json` 即可回到硬编码 defaults。不改代码、不重启 launchd
 
-### 2. 手动脚本（不在 cron 里）
+### 1c. launchd: `com.aifeeds.github-scraper`（GitHub trending AI 源）
+
+- **plist**：`~/Library/LaunchAgents/com.aifeeds.github-scraper.plist`（项目内副本：`launchd/com.aifeeds.github-scraper.plist`）
+- **脚本**：`scrapers/github/cron.sh`（项目内）
+- **频率**：BJT **01:00 + 13:00** 各一次（StartCalendarInterval 双触发）
+- **日志**：
+  - `data/launchd-github-stdout.log` / `data/launchd-github-stderr.log`
+  - `data/logs/github-cron-YYYYMMDD.log`（cron.sh 自己 append）
+- **行为**：
+  1. fetch `https://github.com/trending?since=daily` 解析 ~25 条
+  2. 每条：DB 已存在 → append 一行 metrics + update last_seen_on_trending_at；不存在 → GitHub API enrich (license / watchers / open_issues / open_prs / contributors_count) + raw README + LLM judge (DeepSeek V4 Flash) → INSERT
+  3. 跑完后 batch 重排当日 is_ai=1 AND sponsor=0 的 daily_rank
+  4. 推到 D1（worker /api/ingest，含 metrics_snapshots_gh 自动写入）
+- **重试 NULL is_ai**：`python3 -m scrapers.github.scraper --retry-null --retry-limit 10`
+- **手动触发**：`launchctl start com.aifeeds.github-scraper` 或 `bash scrapers/github/cron.sh`
+
+
 
 | 脚本 | 用途 | 现状 |
 |------|------|------|
