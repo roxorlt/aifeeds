@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metrics 样式对比 — 现状 vs A/B/C</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background: #f5f5f5;
+      }
+      .badge {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+      }
+    </style>
+  </head>
+  <body class="text-neutral-900">
+    <div class="mx-auto max-w-[1480px] px-6 py-8">
+      <header class="mb-6">
+        <h1 class="text-xl font-semibold">Metrics 样式对比</h1>
+        <p class="mt-1 text-sm text-neutral-600">
+          目标：<strong>明示这是 X 平台的转评赞数据，不是 ai-feeds 的可交互按钮</strong>。
+          每张卡同一条推文，区别只在底部 metrics 区。把鼠标悬停到 metrics 上观察「是否还像可点的按钮」。
+        </p>
+      </header>
+
+      <!-- ───────── 4 张卡片并排 ───────── -->
+      <div class="grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-4">
+        <!-- ▒▒ 0. 现状（baseline）▒▒ -->
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="badge rounded bg-neutral-900 px-2 py-0.5 font-mono uppercase text-white">
+              现状
+            </span>
+            <span class="text-xs text-neutral-500">完全照搬 X 的 hover halo</span>
+          </div>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="tweet-body"></div>
+            <!-- metrics: current -->
+            <div class="-ml-1.5 mt-3 flex items-center gap-5">
+              <span aria-label="回复" class="group/m flex items-center gap-1 text-neutral-500 transition-colors">
+                <span class="flex h-7 w-7 items-center justify-center rounded-full transition-colors group-hover/m:bg-sky-50 group-hover/m:text-sky-500">
+                  <svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current">
+                    <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z" />
+                  </svg>
+                </span>
+                <span class="text-[12px] tabular-nums transition-colors group-hover/m:text-sky-500">
+                  127
+                </span>
+              </span>
+              <span aria-label="转推" class="group/m flex items-center gap-1 text-neutral-500 transition-colors">
+                <span class="flex h-7 w-7 items-center justify-center rounded-full transition-colors group-hover/m:bg-emerald-50 group-hover/m:text-emerald-500">
+                  <svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current">
+                    <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z" />
+                  </svg>
+                </span>
+                <span class="text-[12px] tabular-nums transition-colors group-hover/m:text-emerald-500">
+                  46
+                </span>
+              </span>
+              <span aria-label="喜欢" class="group/m flex items-center gap-1 text-neutral-500 transition-colors">
+                <span class="flex h-7 w-7 items-center justify-center rounded-full transition-colors group-hover/m:bg-pink-50 group-hover/m:text-pink-500">
+                  <svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current">
+                    <path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z" />
+                  </svg>
+                </span>
+                <span class="text-[12px] tabular-nums transition-colors group-hover/m:text-pink-500">
+                  823
+                </span>
+              </span>
+              <span aria-label="查看" class="group/m flex items-center gap-1 text-neutral-500 transition-colors">
+                <span class="flex h-7 w-7 items-center justify-center rounded-full transition-colors group-hover/m:bg-neutral-100 group-hover/m:text-neutral-700">
+                  <svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current">
+                    <path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z" />
+                  </svg>
+                </span>
+                <span class="text-[12px] tabular-nums transition-colors group-hover/m:text-neutral-700">
+                  12.4K
+                </span>
+              </span>
+            </div>
+          </article>
+          <p class="text-xs text-neutral-500">
+            ⚠️ hover 出 pastel 背景 + 文字变色，和 X 原生按钮几乎一致 →
+            用户预期点击会 reply/RT/like
+          </p>
+        </section>
+
+        <!-- ▒▒ A. 极简：去掉 hover/圆形容器，灰字 + 旁注 ▒▒ -->
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="badge rounded bg-sky-600 px-2 py-0.5 font-mono uppercase text-white">
+              方案 A
+            </span>
+            <span class="text-xs text-neutral-500">极简：去 halo 去圆形 + 「来自 X」</span>
+          </div>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="tweet-body"></div>
+            <!-- metrics: A -->
+            <div class="mt-3 flex items-center gap-4 text-neutral-400">
+              <span class="flex items-center gap-1">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">127</span>
+              </span>
+              <span class="flex items-center gap-1">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">46</span>
+              </span>
+              <span class="flex items-center gap-1">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">823</span>
+              </span>
+              <span class="flex items-center gap-1">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">12.4K</span>
+              </span>
+              <span class="ml-auto flex items-center gap-1 text-[11px] text-neutral-400">
+                <svg viewBox="0 0 24 24" class="h-[10px] w-[10px] fill-current">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                </svg>
+                来自 X
+              </span>
+            </div>
+          </article>
+          <p class="text-xs text-neutral-500">
+            优点：最克制；icon 缩小、纯灰、无 hover；右边 X logo + 「来自 X」点出来源。
+            缺点：原本 metrics 占主视觉，现在被压得有点过弱。
+          </p>
+        </section>
+
+        <!-- ▒▒ B. 中庸：保留视觉权重，加来源标签 + 去 hover ▒▒ -->
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="badge rounded bg-emerald-600 px-2 py-0.5 font-mono uppercase text-white">
+              方案 B
+            </span>
+            <span class="text-xs text-neutral-500">中庸：保留 icon 大小、去 hover、加 X 标签</span>
+          </div>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="tweet-body"></div>
+            <!-- metrics: B -->
+            <div class="mt-3 flex items-center gap-4 border-t border-dashed border-neutral-200 pt-2.5">
+              <span class="flex items-center gap-1 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+                <svg viewBox="0 0 24 24" class="h-[10px] w-[10px] fill-current">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                </svg>
+                X 数据
+              </span>
+              <span class="flex items-center gap-1 text-neutral-500">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">127</span>
+              </span>
+              <span class="flex items-center gap-1 text-neutral-500">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">46</span>
+              </span>
+              <span class="flex items-center gap-1 text-neutral-500">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">823</span>
+              </span>
+              <span class="flex items-center gap-1 text-neutral-500">
+                <svg viewBox="0 0 24 24" class="h-[14px] w-[14px] fill-current">
+                  <path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z" />
+                </svg>
+                <span class="text-[12px] tabular-nums">12.4K</span>
+              </span>
+            </div>
+          </article>
+          <p class="text-xs text-neutral-500">
+            优点：「X 数据」徽标第一眼就告诉用户「这是引用，不是按钮」，metrics 视觉权重保留。
+            缺点：徽标占左边一格，整体略拥挤；徽标和 metrics 高度对齐需要微调。
+          </p>
+        </section>
+
+        <!-- ▒▒ C. 收成 metadata 行：紧凑、去 icon 圆形容器、行内 ▒▒ -->
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="badge rounded bg-purple-600 px-2 py-0.5 font-mono uppercase text-white">
+              方案 C
+            </span>
+            <span class="text-xs text-neutral-500">收成元信息行：小字、灰色、行内 dot 分隔</span>
+          </div>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="tweet-body"></div>
+            <!-- metrics: C -->
+            <div class="mt-3 flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <svg viewBox="0 0 24 24" class="h-[10px] w-[10px] shrink-0 fill-current">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+              </svg>
+              <span class="font-medium uppercase tracking-wider">X 数据</span>
+              <span class="text-neutral-300">·</span>
+              <span class="flex items-center gap-0.5">
+                <svg viewBox="0 0 24 24" class="h-[11px] w-[11px] fill-current">
+                  <path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z" />
+                </svg>
+                <span class="tabular-nums">127</span> 回复
+              </span>
+              <span class="text-neutral-300">·</span>
+              <span class="flex items-center gap-0.5">
+                <svg viewBox="0 0 24 24" class="h-[11px] w-[11px] fill-current">
+                  <path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z" />
+                </svg>
+                <span class="tabular-nums">46</span> 转推
+              </span>
+              <span class="text-neutral-300">·</span>
+              <span class="flex items-center gap-0.5">
+                <svg viewBox="0 0 24 24" class="h-[11px] w-[11px] fill-current">
+                  <path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z" />
+                </svg>
+                <span class="tabular-nums">823</span> 点赞
+              </span>
+              <span class="text-neutral-300">·</span>
+              <span class="flex items-center gap-0.5">
+                <svg viewBox="0 0 24 24" class="h-[11px] w-[11px] fill-current">
+                  <path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z" />
+                </svg>
+                <span class="tabular-nums">12.4K</span> 阅读
+              </span>
+            </div>
+          </article>
+          <p class="text-xs text-neutral-500">
+            优点：彻底脱离按钮语义，作为「元信息」呈现，类似文章底部的「字数 · 阅读时长」。
+            缺点：信息密度高、字号小，扫读时不如方案 B 显眼；视觉层级降级最明显。
+          </p>
+        </section>
+      </div>
+
+      <!-- ───────── 缺数据状态对比 ───────── -->
+      <div class="mt-12">
+        <h2 class="text-lg font-semibold">缺 metrics 状态对比（22% 推文处于此状态）</h2>
+        <p class="mt-1 text-sm text-neutral-600">
+          没有 metrics 时显示 placeholder + 单条 fetch 触发提示（drawer 打开时自动 refresh）。
+        </p>
+        <div class="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-4">
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="text-xs font-mono uppercase text-neutral-500 mb-2">现状</div>
+            <div class="-ml-1.5 mt-2 flex items-center gap-5 text-neutral-300">
+              <span class="flex items-center gap-1"><span class="flex h-7 w-7 items-center justify-center rounded-full"><svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current"><path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z"/></svg></span><span class="text-[12px]">—</span></span>
+              <span class="flex items-center gap-1"><span class="flex h-7 w-7 items-center justify-center rounded-full"><svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current"><path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z"/></svg></span><span class="text-[12px]">—</span></span>
+              <span class="flex items-center gap-1"><span class="flex h-7 w-7 items-center justify-center rounded-full"><svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current"><path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z"/></svg></span><span class="text-[12px]">—</span></span>
+              <span class="flex items-center gap-1"><span class="flex h-7 w-7 items-center justify-center rounded-full"><svg viewBox="0 0 24 24" class="h-[16px] w-[16px] fill-current"><path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z"/></svg></span><span class="text-[12px]">—</span></span>
+            </div>
+          </article>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="text-xs font-mono uppercase text-neutral-500 mb-2">A 缺数据态</div>
+            <div class="mt-2 flex items-center gap-4 text-neutral-300">
+              <span class="text-[12px]">— 回复</span>
+              <span class="text-[12px]">— 转推</span>
+              <span class="text-[12px]">— 点赞</span>
+              <span class="text-[12px]">— 阅读</span>
+              <span class="ml-auto text-[11px] text-neutral-400 italic">点开抽屉自动获取</span>
+            </div>
+          </article>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="text-xs font-mono uppercase text-neutral-500 mb-2">B 缺数据态</div>
+            <div class="mt-2 flex items-center gap-3 border-t border-dashed border-neutral-200 pt-2.5">
+              <span class="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-neutral-500">X 数据</span>
+              <span class="text-[12px] italic text-neutral-400">数据待抓取，点开抽屉自动刷新</span>
+            </div>
+          </article>
+          <article class="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+            <div class="text-xs font-mono uppercase text-neutral-500 mb-2">C 缺数据态</div>
+            <div class="mt-2 flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <svg viewBox="0 0 24 24" class="h-[10px] w-[10px] shrink-0 fill-current">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+              </svg>
+              <span class="font-medium uppercase tracking-wider">X 数据</span>
+              <span class="text-neutral-300">·</span>
+              <span class="italic">待抓取（点抽屉触发）</span>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <!-- ───────── 决策建议 ───────── -->
+      <div class="mt-12 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        <div class="font-semibold">我的推荐</div>
+        <ul class="mt-2 list-disc space-y-1 pl-5">
+          <li>
+            <strong>方案 B</strong> 综合最稳：「X 数据」徽标第一眼就解决「这不是按钮」的认知问题，
+            同时保留 icon 视觉权重让用户能扫到大致量级。
+          </li>
+          <li>
+            <strong>方案 C</strong> 适合后续 dashboard 整体走「资讯阅读」气质（放弃社交感）的方向，
+            metrics 完全降级为元信息。如果 List 数据需要做「热度排序」之类操作，C 视觉太弱反而不利。
+          </li>
+          <li>
+            <strong>方案 A</strong> 视觉最克制但右上角「来自 X」的 affordance 信号弱，
+            不如 B 的徽标显眼，可能还是会有人误点。
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 推文正文复用 -->
+    <template id="tweet-body-template">
+      <header class="flex items-start gap-3">
+        <div class="h-10 w-10 shrink-0 rounded-full bg-gradient-to-br from-sky-400 to-purple-500"></div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1 text-[14px]">
+            <span class="font-semibold text-neutral-900">Andrej Karpathy</span>
+            <svg viewBox="0 0 22 22" class="h-[16px] w-[16px] shrink-0 fill-sky-500">
+              <path d="M20.396 11c-.018-.646-.215-1.275-.57-1.816-.354-.54-.852-.972-1.438-1.246.223-.607.27-1.264.14-1.897-.131-.634-.437-1.218-.882-1.687-.47-.445-1.053-.75-1.687-.882-.633-.13-1.29-.083-1.897.14-.273-.587-.704-1.086-1.245-1.44S11.647 1.62 11 1.604c-.646.017-1.273.213-1.813.568s-.969.854-1.24 1.44c-.608-.223-1.267-.272-1.902-.14-.635.13-1.22.436-1.69.882-.445.47-.749 1.055-.878 1.688-.13.633-.08 1.29.144 1.896-.587.274-1.087.705-1.443 1.245-.356.54-.555 1.17-.574 1.817.02.647.218 1.276.574 1.817.356.54.856.972 1.443 1.245-.224.606-.274 1.263-.144 1.896.13.634.433 1.218.877 1.688.47.443 1.054.747 1.687.878.633.132 1.29.084 1.897-.136.274.586.705 1.084 1.246 1.439.54.354 1.17.551 1.816.569.647-.016 1.276-.213 1.817-.567s.972-.854 1.245-1.44c.604.239 1.266.296 1.903.164.636-.132 1.22-.447 1.68-.907.46-.46.776-1.044.908-1.681s.075-1.299-.165-1.903c.586-.274 1.084-.705 1.439-1.246.354-.54.551-1.17.569-1.816zM9.662 14.85l-3.429-3.428 1.293-1.302 2.072 2.072 4.4-4.794 1.347 1.246z" />
+            </svg>
+            <span class="text-neutral-500">@karpathy · 2h</span>
+          </div>
+          <div class="mt-1.5 text-[15px] leading-[22px] text-neutral-900">
+            训练 LLM 的下一个突破，可能不在更大的模型规模，而在更聪明的数据 curation——
+            让模型只学习真正高 signal 的样本，把噪声样本权重压到接近 0。
+            这不是新想法（Anthropic 的 RLHF 数据过滤、GPT-4 的合成数据筛选都在做），
+            但缺一个能在 100B+ 数据集上规模化的好方法。
+          </div>
+          <div class="mt-1 text-[13px] italic text-neutral-500">
+            原文：The next breakthrough in LLM training likely isn't larger scale, but smarter
+            data curation...
+          </div>
+        </div>
+      </header>
+    </template>
+
+    <script>
+      // 把推文正文模板填进每张卡片
+      const tpl = document.getElementById("tweet-body-template");
+      document.querySelectorAll(".tweet-body").forEach((el) => {
+        el.appendChild(tpl.content.cloneNode(true));
+      });
+    </script>
+  </body>
+</html>
