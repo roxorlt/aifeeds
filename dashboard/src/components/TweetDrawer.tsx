@@ -111,7 +111,16 @@ export function TweetDrawer() {
     };
   }, [open, item?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Mobile swipe-to-close: drag panel rightward to dismiss.
+  // Mobile swipe-to-close: rightward swipe → close.
+  //
+  // Decision is made entirely on `touchend` from the start/end position delta,
+  // so we never attach a `touchmove` listener (no `preventDefault` ever fires
+  // on the aside). That guarantees native scroll has zero interference,
+  // including the iOS scroll-trap at the README bottom.
+  //
+  // Visual: aside slides off via existing CSS transition on close. We don't
+  // follow the finger during the swipe (small UX trade-off for a reliable
+  // body scroll).
   useEffect(() => {
     if (!open || !isNarrow) return;
     const aside = asideRef.current;
@@ -126,59 +135,35 @@ export function TweetDrawer() {
       }
       dragStart.current = { x: t.clientX, y: t.clientY };
     };
-    const onMove = (e: TouchEvent) => {
+    const onEnd = (e: TouchEvent) => {
       if (!dragStart.current) return;
-      const t = e.touches[0];
+      const t = e.changedTouches[0];
+      if (!t) {
+        dragStart.current = null;
+        return;
+      }
       const dx = t.clientX - dragStart.current.x;
       const dy = t.clientY - dragStart.current.y;
-
-      // Stay on the fence until the gesture has moved at least 10px in some
-      // direction. Otherwise tiny horizontal jitter on a vertical swipe (e.g.
-      // when scrolling at the README bottom and reversing direction) would
-      // hit the dx > 0 branch and preventDefault, blocking native scroll.
-      const moved = Math.max(Math.abs(dx), Math.abs(dy));
-      if (moved < 10) return;
-
-      // Decision: vertical wins → not a close gesture, abort drag.
-      if (Math.abs(dy) >= Math.abs(dx)) {
-        dragStart.current = null;
-        setDrag(0);
-        setIsDragging(false);
-        return;
-      }
-      // Horizontal: only rightward swipe closes.
-      if (dx <= 0) {
-        dragStart.current = null;
-        setDrag(0);
-        setIsDragging(false);
-        return;
-      }
-      if (e.cancelable) e.preventDefault();
-      setIsDragging(true);
-      setDrag(dx);
-    };
-    const onEnd = () => {
-      if (!dragStart.current) return;
-      if (dragXRef.current > SWIPE_COMMIT_PX) {
-        // Commit: slide off-screen, then close after transition
+      // Commit close only on a clearly horizontal-rightward gesture: dx past
+      // threshold AND horizontal motion at least 1.5× vertical.
+      if (dx > SWIPE_COMMIT_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        // Visual cue: snap aside off-screen then close after transition
         setIsDragging(false);
         setDrag(window.innerWidth);
         setTimeout(close, SWIPE_ANIM_MS);
-      } else {
-        // Spring back
-        setIsDragging(false);
-        setDrag(0);
       }
+      // For other gestures (vertical scroll, leftward, etc.) just clear
+      // start state — let the user-agent handle the rest natively.
       dragStart.current = null;
     };
 
+    // Both listeners are passive: we never call preventDefault, so the
+    // browser commits to native scroll immediately on touchmove.
     aside.addEventListener("touchstart", onStart, { passive: true });
-    aside.addEventListener("touchmove", onMove, { passive: false });
-    aside.addEventListener("touchend", onEnd);
-    aside.addEventListener("touchcancel", onEnd);
+    aside.addEventListener("touchend", onEnd, { passive: true });
+    aside.addEventListener("touchcancel", onEnd, { passive: true });
     return () => {
       aside.removeEventListener("touchstart", onStart);
-      aside.removeEventListener("touchmove", onMove);
       aside.removeEventListener("touchend", onEnd);
       aside.removeEventListener("touchcancel", onEnd);
     };
