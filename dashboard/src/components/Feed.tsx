@@ -107,7 +107,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
-  const [sortMode, setSortMode] = useState<SortMode>("hot");
+  // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
+  // Default for other sources stays "hot" (existing X behavior).
+  const [sortMode, setSortMode] = useState<SortMode>(
+    sourceType === "github" ? "time" : "hot",
+  );
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
   const [pullY, setPullY] = useState(0);
