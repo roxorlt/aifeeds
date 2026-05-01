@@ -78,27 +78,36 @@ xlist-scraper 此前只有 X List 一个源。本设计接入 5 个新源中的�
 
 ## 3. DB Schema
 
-**架构选择**：分表 + UNION ALL view（**不合**进 `tweets` 表）。
+**架构**：本地 SQLite **分表**（每源一张），D1 **大一统**（items + extra JSON），metrics 历史**按源分表**。
 
-理由：5 个未来源的字段差异大（推文 vs repo vs 论文 vs 视频 vs 播客），强类型分表 schema 更清晰、ETL 互不污染、加新源是"新建表 + 改 view"的结构增量。统一 feed 通过 view 屏蔽底层。
+理由：
+- **本地按源分表**：每个 scraper 自带 schema 演进，互不干扰；字段强类型清晰；scraper 故障也不会污染其他源。这是现状（X 用 `tweets` 表，独立 SQLite db）。
+- **D1 大一统**：worker schema header 注释直接写"统一内容模型，支持多数据源"，已为多源准备好（`source_type`/`source_id`/`extra` JSON/`is_relevant`）。现有 X 36k 条已经在跑，沿用即可。
+- **metrics 历史按源分表**：X 走 chrome / 风控严 / 字段是 likes/retweets，GitHub 走 API / 风控宽 / 字段是 stars/forks，硬合一会让 query 复杂。未来 PH/arXiv/podcast 各自独立 metrics 表。
 
-### `github_repos` 主表
+push_to_cloud 时本地 row → D1 row 做 schema 映射。
+
+### 本地 SQLite
+
+ai-feeds 项目自带本地 DB（不复用 skills/xlist-scraper 的 `data/xlist.db`，**两个 scraper 互不干扰**）。位置：`data/aifeeds.db`。
+
+scraper 启动时 `CREATE TABLE IF NOT EXISTS`，无需独立 migration 文件。
 
 ```sql
 CREATE TABLE github_repos (
   -- 标识
   owner_repo TEXT PRIMARY KEY,           -- 'pytorch/pytorch'
-  url TEXT NOT NULL,                     -- 'https://github.com/pytorch/pytorch'
+  url TEXT NOT NULL,
   owner TEXT NOT NULL,
   repo TEXT NOT NULL,
 
-  -- 基础元数据（首次抓取后基本不变）
+  -- 基础元数据
   description TEXT,
   language TEXT,                         -- 可空
-  license TEXT,                          -- SPDX id, 'Apache-2.0' / 'MIT' / NULL
-  default_branch TEXT,                   -- 'main' / 'master'
+  license_spdx TEXT,                     -- 'Apache-2.0' / 'MIT' / NULL
+  default_branch TEXT,
 
-  -- Trending snapshot（首次抓取的快照，metrics 实时值在 metrics 表）
+  -- Trending snapshot（首次抓取的快照）
   total_stars_first INTEGER,
   today_stars_first INTEGER,
   forks_first INTEGER,
@@ -108,96 +117,120 @@ CREATE TABLE github_repos (
   is_ai INTEGER,                         -- 0/1/NULL（NULL=待重试）
   ai_category TEXT,                      -- 'agent'|'model'|'tool'|'infra'|'app'|'tutorial'|'other'
   ai_summary TEXT,
-  llm_raw_response TEXT,                 -- 完整 JSON（debug）
-  llm_model TEXT,                        -- 'deepseek-v4-flash'
+  llm_raw_response TEXT,
+  llm_model TEXT,
   llm_called_at INTEGER,
 
   -- README
   readme_excerpt TEXT,                   -- 抓到的 README 全文
-  readme_lang TEXT,                      -- 'zh' | 'en' | 'other'，启发式判定
-  readme_translated TEXT,                -- 中文翻译（异步 enrich 填，v2）
+  readme_lang TEXT,                      -- 'zh' | 'en' | 'other'
+  readme_translated TEXT,                -- 中文翻译（异步 enrich，v2）
   readme_fetched_at INTEGER,
 
-  -- Built-by 头像（best-effort，能解析就存，不能就 NULL）
-  contributors_json TEXT,                -- JSON: [{login, avatar_url}, ...]
-  contributors_count INTEGER,            -- 总贡献人数（GitHub API 给 / 解析不到留 NULL）
+  -- Built-by 头像（best-effort）
+  contributors_json TEXT,                -- JSON [{login, avatar_url}, ...]
+  contributors_count INTEGER,
 
   -- 标记
-  sponsor INTEGER NOT NULL DEFAULT 0,    -- trending 上的 Sponsored repo
-  emitted INTEGER NOT NULL DEFAULT 1,    -- 0=管理员手动隐藏（feed 不显示）
+  sponsor INTEGER NOT NULL DEFAULT 0,
+  emitted INTEGER NOT NULL DEFAULT 1,
 
   -- 排名 & 时间
   daily_rank INTEGER,                    -- 当日 AI 相关里按 today_stars 的排名
-  trending_date_str TEXT,                -- '2026-05-01' BJT 字符串
-  first_trending_at INTEGER,             -- unix ts，首次上榜
+  trending_date_str TEXT,                -- '2026-05-01' BJT
+  first_trending_at INTEGER,
   first_scraped_at INTEGER,
-  last_seen_on_trending_at INTEGER       -- 多日上榜跟踪
+  last_seen_on_trending_at INTEGER,
+  last_pushed_at INTEGER                 -- 最后一次同步到 D1 的时间
 );
 
 CREATE INDEX idx_gr_trending_date ON github_repos(trending_date_str);
-CREATE INDEX idx_gr_is_ai_stars ON github_repos(is_ai, daily_rank);
+CREATE INDEX idx_gr_is_ai_rank ON github_repos(is_ai, daily_rank);
 CREATE INDEX idx_gr_sponsor ON github_repos(sponsor);
-```
 
-### `github_repo_metrics` 历史表
-
-```sql
+-- 本地 metrics 历史
 CREATE TABLE github_repo_metrics (
   owner_repo TEXT NOT NULL,
-  measured_at INTEGER NOT NULL,          -- unix ts
-  trending_date_str TEXT,                -- '2026-05-01' BJT
+  measured_at INTEGER NOT NULL,
+  trending_date_str TEXT,
   total_stars INTEGER,
   today_stars INTEGER,
   forks INTEGER,
   watchers INTEGER,
   open_issues INTEGER,
   open_prs INTEGER,
-  PRIMARY KEY (owner_repo, measured_at),
-  FOREIGN KEY (owner_repo) REFERENCES github_repos(owner_repo)
+  PRIMARY KEY (owner_repo, measured_at)
 );
 CREATE INDEX idx_grm_owner_at ON github_repo_metrics(owner_repo, measured_at);
 ```
 
-每次 cron：
-- 已入库 repo → append 一行 metrics + update 主表 `last_seen_on_trending_at`
-- 新 repo → INSERT 主表 + 第一行 metrics
+### D1（CF）
 
-热门 repo 留榜 N 天 × 每天 2 cron = 2N 行 metrics。可算"半天速度"、"跨日斜率"、"留榜衰减曲线"。
+复用现有 `items` 大一统表（schema 不动）。push_to_cloud 时映射：
 
-### feed view（跨源统一查询）
+| `items` 列 | GitHub 含义 |
+|---|---|
+| `id` | `gh:owner/repo` |
+| `source_type` | `'github'` |
+| `source_id` | `owner/repo` |
+| `title` | `owner/repo` |
+| `content` | description |
+| `author` | owner |
+| `url` | repo URL |
+| `media` | JSON: README 里的图片（v2 落 CF 后） |
+| `metrics` | JSON: `{stars, today_stars, forks, watchers, open_issues, open_prs, license_spdx}` |
+| `published_at` | first_trending_at（ISO string） |
+| `scraped_at` | first_scraped_at（ISO string） |
+| `is_relevant` | `is_ai`（X 也用这个判 AI 相关） |
+| `lang` | `readme_lang` |
+| `extra` | JSON: `{ai_category, ai_summary, llm_model, llm_called_at, readme_excerpt, readme_translated, contributors[], contributors_count, sponsor, daily_rank, trending_date_str, first_trending_at, last_seen_on_trending_at, default_branch}` |
+
+**GitHub 历史 metrics 独立 D1 表**（用户决策：X 走 chrome 风控严，GitHub 走 API 宽松，字段维度差异大，独立更清晰）：
 
 ```sql
-CREATE VIEW feed_items AS
-  SELECT 'twitter' AS source, tweet_id AS id,
-         author AS title, text AS content,
-         created_at AS published_at, scraped_at,
-         metrics, media,
-         is_ai, NULL AS ai_category, NULL AS ai_summary,
-         NULL AS daily_rank, 0 AS sponsor, emitted
-    FROM tweets
-  UNION ALL
-  SELECT 'github' AS source, owner_repo AS id,
-         (owner || '/' || repo) AS title, description AS content,
-         first_trending_at AS published_at, first_scraped_at AS scraped_at,
-         NULL AS metrics, NULL AS media,
-         is_ai, ai_category, ai_summary,
-         daily_rank, sponsor, emitted
-    FROM github_repos;
+-- worker/migrations/004-metrics-snapshots-gh.sql
+CREATE TABLE IF NOT EXISTS metrics_snapshots_gh (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,                 -- 'gh:owner/repo'
+  captured_at INTEGER NOT NULL,
+  trending_date_str TEXT,
+  total_stars INTEGER,
+  today_stars INTEGER,
+  forks INTEGER,
+  watchers INTEGER,
+  open_issues INTEGER,
+  open_prs INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_msgh_item_time ON metrics_snapshots_gh(item_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_msgh_trending_date ON metrics_snapshots_gh(trending_date_str);
 ```
 
-未来加源时 union 一段。前端跨源统计、admin 看板用这个 view；分源 feed query 直接打主表。
+`metrics_snapshots`（X 专用，likes/retweets/...）保持现状不动。未来 PH/arXiv/podcast 各自再开 `metrics_snapshots_ph` / `_arxiv` / `_pod`。
+
+### 同步流程
+
+```
+GitHub trending HTML
+  ↓ scrape + GitHub API enrich + LLM
+本地 aifeeds.db: github_repos 一行 + github_repo_metrics 一行
+  ↓ push_to_cloud（schema 映射）
+D1: items UPSERT (source_type='github', source_id='owner/repo') + metrics_snapshots_gh INSERT
+```
+
+每次 cron：
+- 本地 `github_repos`：已存在 repo 只 update `last_seen_on_trending_at` + 新 metrics 行；新 repo 走完整 LLM 流程后 INSERT
+- 本地 `github_repo_metrics`：每次 cron 都 append 一行（含已存在 repo）
+- push_to_cloud：把本地未同步的 row 推到 D1（按 `last_pushed_at < last_seen_on_trending_at` 选）
 
 ### Migration
 
-新建 `migrations/0010_github_repos.sql`（worker 端）+ 本地 `scripts/migrate.py` 执行。同样的 SQL 在 D1 上跑：
+只有 D1 端新建一张表：
 
 ```bash
-# 本地
-sqlite3 data/xlist.db < migrations/0010_github_repos.sql
-
-# D1
-cd worker && npx wrangler d1 execute xlist-db --remote --file ../migrations/0010_github_repos.sql
+cd worker && npx wrangler d1 execute xlist-db --remote --file migrations/004-metrics-snapshots-gh.sql
 ```
+
+`items` 表不需要 migration，extra JSON 容纳所有 GitHub 特定字段。本地 SQLite 走 `CREATE TABLE IF NOT EXISTS`，scraper 启动时自动建。
 
 ---
 
@@ -436,32 +469,50 @@ body:
 
 ## 9. Worker 端
 
-新增 endpoints：
+新增 endpoints（全部基于 D1 `items` 表 + `metrics_snapshots_gh` 表）：
 
 ```typescript
 // 单条 repo 详情
 GET /api/items/github/:owner/:repo
-→ { source: 'github', id: 'owner/repo', ...github_repos row, metrics: [...latest 30 days] }
+→ {
+    ...items row WHERE source_type='github' AND source_id='owner/repo',
+    metrics_history: [...latest 30 days from metrics_snapshots_gh]
+  }
 
 // GitHub 列分页 feed
 GET /api/feed?source=github&limit=20&cursor=<id>&pinned=<owner_repo>
-→ { items: [...], next_cursor: ... }
-  query: SELECT * FROM github_repos
-         WHERE is_ai=1 AND sponsor=0 AND emitted=1
-         AND trending_date_str = (SELECT MAX(trending_date_str) FROM github_repos)
-         ORDER BY (CASE WHEN owner_repo = ? THEN 0 ELSE 1 END), daily_rank ASC
-         LIMIT ? OFFSET ?
+→ {
+    items: [...],
+    next_cursor: ...
+  }
+
+  query 大致：
+    SELECT * FROM items
+    WHERE source_type='github'
+      AND is_relevant=1                                          -- AI 相关
+      AND json_extract(extra, '$.sponsor') = 0                   -- 非 sponsor
+      AND deleted_at IS NULL
+      AND json_extract(extra, '$.trending_date_str')
+          = (SELECT MAX(json_extract(extra, '$.trending_date_str'))
+               FROM items WHERE source_type='github')            -- 当日
+    ORDER BY (CASE WHEN id = ? THEN 0 ELSE 1 END),               -- pinned 顶上
+             json_extract(extra, '$.daily_rank') ASC
+    LIMIT ? OFFSET ?
 
 // 跨源统一 feed（admin / 全局搜索用）
 GET /api/feed?source=all
-→ 用 feed_items view
+→ 直接打 items 表，不需要 view（source_type 字段已经够区分）
 
-// LLM null 重试（cron 定时调）
+// LLM null 重试（worker cron 调，可选）
 POST /api/github/retry-llm
-→ pick is_ai IS NULL 的 repo，重新跑 LLM
+→ pick is_relevant IS NULL AND source_type='github' 的 row，重新跑 LLM
 ```
 
-ingest endpoint 复用现有 `/api/ingest`，scraper 端调用前先按 source 路由到不同 SQL（`tweets` vs `github_repos`）。
+**ingest endpoint 改造**：现有 `/api/ingest` 接受 tweets payload。需要支持 `source_type='github'` 的 payload：
+
+- 共用一个 endpoint，按 payload `source_type` 分流写入 items 表
+- GitHub payload 字段映射在 worker 端做（参考 Section 3 的 D1 字段映射表）
+- metrics_snapshots_gh 行随 ingest 一起 INSERT
 
 ---
 
@@ -470,17 +521,18 @@ ingest endpoint 复用现有 `/api/ingest`，scraper 端调用前先按 source �
 按"小步快跑"切：
 
 1. **PR 1：Schema + scraper**（不上线，只本地验证）
-   - migrations 落 `github_repos` + `github_repo_metrics` + 改 view
-   - 新写 `scripts/github_scraper.py`（HTML scrape + GitHub API enrich）
+   - 在 ai-feeds main repo 新建 `scrapers/github/`（不动 skills/xlist-scraper）+ `scrapers/_lib/`（共享 db/config/pushdeer 模块）
+   - 本地 SQLite `data/aifeeds.db`：`github_repos` + `github_repo_metrics` 走 `CREATE TABLE IF NOT EXISTS`
+   - 新写 `scrapers/github/scraper.py`（HTML scrape + GitHub API enrich）
    - 单元测试：mock trending HTML → 解析正确
-   - 集成测试：实跑一次 trending → 写本地 SQLite → 看数据完整
+   - 集成测试：`--dry-run` 实跑一次 trending → 写本地 SQLite → 看数据完整
 
 2. **PR 2：LLM enrichment + cron 接通**
-   - 新写 `scripts/github_llm_judge.py`（prompt v2 + JSON 校验 + 失败重试 + PushDeer）
-   - 把 system prompt 落到 module-level 常量（不要硬编码在多处）
-   - 改 `cron.sh` 加 GitHub 抓取槽位（BJT 01:00 + 13:00）
+   - 新写 `scrapers/github/llm_judge.py`（prompt v2 + JSON 校验 + 失败重试 + PushDeer 通知）
+   - 把 system prompt 落到 module-level 常量
+   - cron 接入：launchd plist 或 ai-feeds 自己的 `cron.sh`（BJT 01:00 + 13:00）
    - 本地跑一次实战，看 DB 完整 + LLM 输出 quality
-   - push_to_cloud 适配 github_repos 表
+   - 写 `scrapers/github/sync.py` 推到 D1（schema 映射本地 `github_repos` → D1 `items` + `metrics_snapshots_gh`）
 
 3. **PR 3：Worker endpoints**
    - 新增 `/api/items/github/:owner/:repo`
