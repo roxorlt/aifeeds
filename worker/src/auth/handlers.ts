@@ -19,6 +19,7 @@ import {
   authenticate,
   revokeSession,
   revokeAllSessionsOfUser,
+  getUserById,
 } from './session';
 import { pushDeerAlert } from '../notifier';
 
@@ -327,4 +328,39 @@ export async function handleLogoutAll(
   }
   const count = await revokeAllSessionsOfUser(env, auth.userId);
   return jsonOk({ ok: true, revoked: count }, { 'Set-Cookie': buildClearCookie(isDevHost(request)) });
+}
+
+// ─── GET /api/auth/me ────────────────────────────────────
+
+export async function handleMe(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') {
+    return jsonErr('not authenticated', 401);
+  }
+  const user = await getUserById(env, auth.userId);
+  if (!user) {
+    return jsonErr('user not found', 404);
+  }
+  // 找当前主 phone identity（脱敏）
+  const ident = await env.DB.prepare(
+    `SELECT identity_value FROM identities
+     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+     ORDER BY verified_at DESC LIMIT 1`,
+  ).bind(auth.userId).first<{ identity_value: string }>();
+  const phoneMasked = ident
+    ? `${ident.identity_value.slice(0, 3)}****${ident.identity_value.slice(-4)}`
+    : null;
+  return jsonOk({
+    user: {
+      id: user.id,
+      display_name: user.display_name,
+      avatar_url: user.avatar_url,
+      created_at: user.created_at,
+      phone_masked: phoneMasked,
+    },
+  });
 }
