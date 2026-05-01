@@ -1,16 +1,16 @@
 """GitHub trending AI scraper — main orchestration.
 
-Pipeline (PR-1, no LLM yet):
+Pipeline:
   fetch trending HTML → parse → for each repo:
     - exists in DB? append metrics + update last_seen
-    - new? GitHub API enrich (license, watchers, PRs, contributors, readme)
-            → INSERT github_repos + first metrics row
-
-LLM judge + daily_rank ranking land in PR-2.
+    - new? GitHub API enrich + LLM judge → INSERT github_repos + first metrics
+  → after all repos: recompute daily_rank for is_ai=1 AND sponsor=0 today
 
 Run:
   ~/.browser-use-env/bin/python3 -m scrapers.github.scraper --dry-run
-  ~/.browser-use-env/bin/python3 -m scrapers.github.scraper           # write DB
+  ~/.browser-use-env/bin/python3 -m scrapers.github.scraper           # full pipeline
+  ~/.browser-use-env/bin/python3 -m scrapers.github.scraper --skip-llm # PR-1 mode
+  ~/.browser-use-env/bin/python3 -m scrapers.github.scraper --retry-null # fix NULL is_ai rows
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from typing import Any
 import requests
 
 from .._lib import config, db
-from . import gh_api, parser
+from . import gh_api, llm_judge, parser
 
 log = logging.getLogger("github_scraper")
 
@@ -80,8 +80,7 @@ def enrich_repo(repo: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_new_repo(conn, repo: dict[str, Any], now_ts: int, today_str: str) -> None:
-    """INSERT a freshly-discovered repo into github_repos. is_ai/ai_summary
-    stay NULL — PR-2 LLM judge fills them."""
+    """INSERT a freshly-discovered repo into github_repos."""
     conn.execute(
         """
         INSERT INTO github_repos (
@@ -94,7 +93,7 @@ def insert_new_repo(conn, repo: dict[str, Any], now_ts: int, today_str: str) -> 
             sponsor, emitted,
             daily_rank, trending_date_str,
             first_trending_at, first_scraped_at, last_seen_on_trending_at, last_pushed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   ?, ?, NULL, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL)
         """,
         (
@@ -103,6 +102,8 @@ def insert_new_repo(conn, repo: dict[str, Any], now_ts: int, today_str: str) -> 
             repo.get("license_spdx"), repo.get("default_branch"),
             repo.get("total_stars"), repo.get("today_stars"),
             repo.get("forks"), repo.get("watchers"),
+            repo.get("is_ai"), repo.get("ai_category"), repo.get("ai_summary"),
+            repo.get("llm_raw_response"), repo.get("llm_model"), repo.get("llm_called_at"),
             repo.get("readme_excerpt"), repo.get("readme_lang"), repo.get("readme_fetched_at"),
             json.dumps(repo.get("contributors_inline", []), ensure_ascii=False),
             repo.get("contributors_count"),
@@ -136,7 +137,42 @@ def insert_metrics(conn, repo: dict[str, Any], now_ts: int, today_str: str) -> N
     )
 
 
-def run(dry_run: bool = False) -> dict[str, int]:
+def recompute_daily_rank(conn, today_str: str) -> int:
+    """Re-rank today's AI-relevant non-sponsor repos by today_stars_first DESC.
+    Returns count ranked.
+    """
+    rows = conn.execute(
+        """
+        SELECT owner_repo
+          FROM github_repos
+         WHERE trending_date_str = ?
+           AND is_ai = 1
+           AND sponsor = 0
+           AND emitted = 1
+        ORDER BY today_stars_first DESC, total_stars_first DESC
+        """,
+        (today_str,),
+    ).fetchall()
+
+    for rank, row in enumerate(rows, start=1):
+        conn.execute(
+            "UPDATE github_repos SET daily_rank = ? WHERE owner_repo = ?",
+            (rank, row["owner_repo"]),
+        )
+    # Reset rank for non-AI / sponsor / hidden today rows so stale ranks don't linger
+    conn.execute(
+        """
+        UPDATE github_repos
+           SET daily_rank = NULL
+         WHERE trending_date_str = ?
+           AND (is_ai != 1 OR sponsor = 1 OR emitted = 0)
+        """,
+        (today_str,),
+    )
+    return len(rows)
+
+
+def run(dry_run: bool = False, skip_llm: bool = False) -> dict[str, int]:
     """Single cron tick. Returns counts for logging."""
     db.init_db()
 
@@ -148,7 +184,8 @@ def run(dry_run: bool = False) -> dict[str, int]:
     now_ts = int(time.time())
     today = bjt_date_str(now_ts)
 
-    counts = {"parsed": len(parsed), "new": 0, "seen_again": 0, "errors": 0}
+    counts = {"parsed": len(parsed), "new": 0, "seen_again": 0,
+              "llm_ok": 0, "llm_null": 0, "errors": 0}
 
     with db.connect() as conn:
         for repo in parsed:
@@ -163,22 +200,81 @@ def run(dry_run: bool = False) -> dict[str, int]:
                              repo["owner_repo"], repo.get("today_stars"))
                 else:
                     enrich_repo(repo)
+                    if not skip_llm:
+                        result = llm_judge.judge(repo)
+                        repo.update(result)
+                        if result["is_ai"] is None:
+                            counts["llm_null"] += 1
+                        else:
+                            counts["llm_ok"] += 1
                     if not dry_run:
+                        repo.setdefault("trending_date_str", today)
                         insert_new_repo(conn, repo, now_ts, today)
                         insert_metrics(conn, repo, now_ts, today)
                     counts["new"] += 1
                     log.info("new: %s (lang=%s, stars=%s, today=%s, sponsor=%s, "
-                             "license=%s, watchers=%s, prs=%s, readme=%s chars/%s)",
+                             "is_ai=%s, cat=%s, license=%s, watchers=%s, prs=%s)",
                              repo["owner_repo"], repo.get("language"),
                              repo.get("total_stars"), repo.get("today_stars"),
-                             repo.get("sponsor"), repo.get("license_spdx"),
-                             repo.get("watchers"), repo.get("open_prs"),
-                             len(repo.get("readme_excerpt") or ""), repo.get("readme_lang"))
+                             repo.get("sponsor"),
+                             repo.get("is_ai"), repo.get("ai_category"),
+                             repo.get("license_spdx"),
+                             repo.get("watchers"), repo.get("open_prs"))
             except Exception as exc:  # noqa: BLE001
                 counts["errors"] += 1
                 log.exception("repo %s failed: %s", repo.get("owner_repo"), exc)
 
-    log.info("done | %s | dry_run=%s", counts, dry_run)
+        # Re-rank today's AI-relevant non-sponsor rows
+        if not dry_run:
+            ranked = recompute_daily_rank(conn, today)
+            log.info("daily_rank: %d AI repos ranked for %s", ranked, today)
+
+    log.info("done | %s | dry_run=%s skip_llm=%s", counts, dry_run, skip_llm)
+    return counts
+
+
+def retry_null(limit: int = 10) -> dict[str, int]:
+    """Re-run LLM on rows where is_ai IS NULL (previous failures)."""
+    db.init_db()
+    counts = {"picked": 0, "llm_ok": 0, "llm_null": 0}
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT owner_repo, owner, repo, description, language,
+                      total_stars_first AS total_stars,
+                      today_stars_first AS today_stars,
+                      readme_excerpt, trending_date_str
+                 FROM github_repos
+                WHERE is_ai IS NULL
+                ORDER BY first_scraped_at DESC
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        counts["picked"] = len(rows)
+
+        for r in rows:
+            repo = dict(r)
+            result = llm_judge.judge(repo)
+            if result["is_ai"] is None:
+                counts["llm_null"] += 1
+            else:
+                counts["llm_ok"] += 1
+            conn.execute(
+                """UPDATE github_repos
+                      SET is_ai = ?, ai_category = ?, ai_summary = ?,
+                          llm_raw_response = ?, llm_model = ?, llm_called_at = ?
+                    WHERE owner_repo = ?""",
+                (result["is_ai"], result["ai_category"], result["ai_summary"],
+                 result["llm_raw_response"], result["llm_model"], result["llm_called_at"],
+                 repo["owner_repo"]),
+            )
+
+        # Re-rank after retry
+        if rows:
+            today = rows[0]["trending_date_str"]
+            recompute_daily_rank(conn, today)
+
+    log.info("retry-null done | %s", counts)
     return counts
 
 
@@ -186,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="GitHub trending AI scraper")
     ap.add_argument("--dry-run", action="store_true",
                     help="parse + enrich but don't write DB")
+    ap.add_argument("--skip-llm", action="store_true",
+                    help="skip LLM judge (writes is_ai=NULL for new rows)")
+    ap.add_argument("--retry-null", action="store_true",
+                    help="re-run LLM on existing rows where is_ai IS NULL")
+    ap.add_argument("--retry-limit", type=int, default=10,
+                    help="max rows for --retry-null (default 10)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args(argv)
 
@@ -196,8 +298,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not config.GITHUB_TOKEN:
         log.warning("GITHUB_TOKEN not set — API calls will hit 60/hr limit")
+    if not config.DEEPSEEK_API_KEY and not args.skip_llm and not args.dry_run:
+        log.error("DEEPSEEK_API_KEY missing — pass --skip-llm or set the env")
+        return 2
 
-    counts = run(dry_run=args.dry_run)
+    if args.retry_null:
+        counts = retry_null(limit=args.retry_limit)
+        return 0
+    counts = run(dry_run=args.dry_run, skip_llm=args.skip_llm)
     return 0 if counts["errors"] == 0 else 1
 
 
