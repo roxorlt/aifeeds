@@ -12,7 +12,14 @@ import {
   hashCode,
   sendSmsViaTencent,
 } from './sms';
-import { createSession, buildSessionCookie } from './session';
+import {
+  createSession,
+  buildSessionCookie,
+  buildClearCookie,
+  authenticate,
+  revokeSession,
+  revokeAllSessionsOfUser,
+} from './session';
 import { pushDeerAlert } from '../notifier';
 
 // ─── 工具 ─────────────────────────────────────────────────
@@ -290,4 +297,34 @@ export async function handleLogin(
     },
     { 'Set-Cookie': cookie },
   );
+}
+
+// ─── POST /api/auth/logout ───────────────────────────────
+
+export async function handleLogout(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') {
+    return jsonErr('not authenticated', 401);
+  }
+  await revokeSession(env, auth.sessionId);
+  return jsonOk({ ok: true }, { 'Set-Cookie': buildClearCookie(isDevHost(request)) });
+}
+
+// ─── POST /api/auth/logout-all ───────────────────────────
+
+export async function handleLogoutAll(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') {
+    return jsonErr('not authenticated', 401);
+  }
+  const count = await revokeAllSessionsOfUser(env, auth.userId);
+  return jsonOk({ ok: true, revoked: count }, { 'Set-Cookie': buildClearCookie(isDevHost(request)) });
 }
