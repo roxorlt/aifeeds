@@ -13,5 +13,10 @@ database_id = "2973d54b-ca13-48e4-8d20-1430c57f5260"
 binding = "READMES"
 bucket_name = "xlist-readme-assets"
 
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "07d666433fef483a9457146f7d5a62d5"
+preview_id = "78f0a9567d434d8b87c71cc29eea88f9"
+
 [triggers]
 crons = ["*/5 * * * *"]
