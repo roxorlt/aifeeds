@@ -49,13 +49,37 @@ export function TweetDrawer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, close]);
 
-  // Lock body scroll while open
+  // Lock body scroll while open — iOS-safe pattern.
+  // Plain `overflow:hidden` doesn't fully prevent iOS Safari from rubber-banding
+  // the underlying page when an inner scroller hits its boundary, which traps
+  // gestures inside the drawer body. The fix is to take the body out of flow
+  // (position:fixed, top:-scrollY), then restore on close.
   useEffect(() => {
     if (!open) return;
-    const prev = document.body.style.overflow;
+    const scrollY = window.scrollY;
+    const prev = {
+      overflow: document.body.style.overflow,
+      position: document.body.style.position,
+      top: document.body.style.top,
+      width: document.body.style.width,
+      left: document.body.style.left,
+      right: document.body.style.right,
+    };
     document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
     return () => {
-      document.body.style.overflow = prev;
+      document.body.style.overflow = prev.overflow;
+      document.body.style.position = prev.position;
+      document.body.style.top = prev.top;
+      document.body.style.width = prev.width;
+      document.body.style.left = prev.left;
+      document.body.style.right = prev.right;
+      // Restore the previous scroll position (lost when we set position:fixed)
+      window.scrollTo(0, scrollY);
     };
   }, [open]);
 
@@ -231,7 +255,7 @@ export function TweetDrawer() {
             )}
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <div className="flex-1 overflow-y-auto overscroll-contain touch-pan-y">
           {item ? (
             isGithub ? (
               <GithubDrawerBody item={item} />
