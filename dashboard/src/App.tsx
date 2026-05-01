@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Feed, type FeedHandle } from "./components/Feed";
 import { TweetDrawer } from "./components/TweetDrawer";
 import { DrawerProvider } from "./lib/drawer";
-import { fetchSources, fetchStats } from "./api";
+import { fetchSources, fetchStats, TRACK_ENDPOINT } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
+import { initTelemetry, track, EVENTS } from "./lib/telemetry";
+import { installVitals } from "./lib/telemetry/vitals";
+import { installErrorHandlers } from "./lib/telemetry/errors";
 
 interface SourceConfig {
   source_type: SourceType;
@@ -57,6 +60,21 @@ function App() {
     fetchSources().then(setSources).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
+
+  // Telemetry init（仅一次）
+  useEffect(() => {
+    initTelemetry({ endpoint: TRACK_ENDPOINT });
+    installVitals();
+    installErrorHandlers();
+    track(EVENTS.APP_OPEN, {
+      utm_source: new URLSearchParams(window.location.search).get('utm_source') || undefined,
+      utm_campaign: new URLSearchParams(window.location.search).get('utm_campaign') || undefined,
+      referrer: document.referrer || undefined,
+    });
+    track(EVENTS.PAGE_VIEW, {
+      path: window.location.pathname + window.location.search,
+    });
+  }, []);
 
   // Derive which source types have live data
   const liveSourceTypes = new Set(
