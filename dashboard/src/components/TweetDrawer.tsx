@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useDrawer } from "../lib/drawer";
+import { track, EVENTS } from "../lib/telemetry";
 import { TweetCard } from "./TweetCard";
 import { GithubDrawerBody } from "./GithubDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
@@ -66,6 +67,25 @@ export function TweetDrawer() {
       setIsDragging(false);
     }
   }, [open]);
+
+  // Telemetry: open/close/dwell
+  const openTimeRef = useRef<number>(0);
+  useEffect(() => {
+    if (!open || !item) return;
+    openTimeRef.current = Date.now();
+    track(EVENTS.ITEM_OPEN_DRAWER, {
+      item_id: item.id,
+      source: item.source_type,
+    });
+    const startedAt = openTimeRef.current;
+    const itemId = item.id;
+    return () => {
+      track(EVENTS.ITEM_CLOSE_DRAWER, {
+        item_id: itemId,
+        dwell_ms: Date.now() - startedAt,
+      });
+    };
+  }, [open, item?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Mobile swipe-to-close: drag panel rightward to dismiss.
   useEffect(() => {
@@ -195,6 +215,14 @@ export function TweetDrawer() {
                 href={item.url}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => {
+                  let host = "x.com";
+                  try { host = new URL(item.url!).host; } catch {}
+                  track(EVENTS.EXTERNAL_LINK_CLICK, {
+                    item_id: item.id,
+                    target_url_host: host,
+                  });
+                }}
                 className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200"
                 title={externalLinkTitle}
               >
