@@ -3,7 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-04-29（M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
+最后更新：2026-05-02（PR2 auth backend：4 张表 + 5 个 endpoint + 4 层 SMS 防刷 + Turnstile + PushDeer 告警；M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
 
 ---
 
@@ -61,6 +61,11 @@
 | `/api/longform/pending` | GET | 长推 fetch 队列（`?limit=20`，最多 50；`attempts < 3`） | Bearer `INGEST_TOKEN` |
 | `/api/longform/submit` | POST | 提交本地浏览器抓回的完整长推正文 | Bearer `INGEST_TOKEN` |
 | `/api/track` | POST | Dashboard telemetry 上报（dashboard SDK 用，必带 `X-Device-Id`） | 无（CORS 白名单 + did 必填） |
+| `/api/auth/sms/send` | POST | 发送短信验证码（必带 `X-Device-Id` + Turnstile token） | 无 + 4 层防刷 |
+| `/api/auth/login` | POST | 提交 phone+code 登录或自动注册（必带 `X-Device-Id`） | 无 |
+| `/api/auth/logout` | POST | 撤销当前 session | session token |
+| `/api/auth/logout-all` | POST | 撤销该 user 全部 session | session token |
+| `/api/auth/me` | GET | 返回当前 user（含脱敏 phone） | session token |
 | `/img` | GET | twimg 图片反代（绕 GFW，CF 边缘缓存 7 天） | 无（host 白名单限 pbs/abs/video.twimg.com） |
 
 **`/img` 图片代理**（2026-04-20 上线）：
@@ -128,7 +133,7 @@
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **7 个表**：
+- **11 个表**：
   - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
@@ -137,6 +142,10 @@
   - `metrics_snapshots`（2026-04-23 M1.5 新增）— 每次 `runRefreshMetrics` 覆盖 `items.metrics` 时 append 一行 (item_id, captured_at, likes, retweets, replies, bookmarks, views)，append-only 时间序列。为 M4/M5 的 tiered 刷新策略提供真 Δlikes 数据。保留 30 天（清理机制 M5 时加）
   - `refresh_log`（2026-04-23 M3 新增）— 每次 `runRefreshTiered` 执行时 append 一行 (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)，观测 CF subrequest 配额在各 tier 的分配。保留 30 天（清理机制 M5 时加）
   - `events`（2026-05-01 PR1 新增）— Dashboard telemetry 落地点。完整产品行为上报：导航 / 内容 / 筛选 / 分享 / 登录 / 性能 / 错误。写入：`POST /api/track`（前端 SDK）。索引：`idx_events_did_time` / `idx_events_user_time` / `idx_events_type_time` / `idx_events_path_time` / `idx_events_ingested`。事件白名单：`worker/src/track.ts` `EVENT_TYPE_WHITELIST` 与 `dashboard/src/lib/telemetry/event-types.ts` 镜像（任一端新增需两边都改）。30 天 retention cron 待加（PR 后置 TODO）。完整 schema 见 `migrations/004-events-table.sql` + 设计 `docs/plans/2026-05-01-auth-system-design.md` § 3.5
+  - `users`（2026-05-02 PR2 新增）— 永久身份主键。`status` 枚举 active/banned/self_deleted；nanoid 14 字符 id。详见 `docs/plans/2026-05-01-auth-system-design.md` § 3.1
+  - `identities`（2026-05-02 PR2 新增）— 登录凭证多对一关联 user。`provider` 枚举 phone/wechat/email；UNIQUE(provider, identity_value, unbound_at) 保证同一凭证同时只能绑定一个 user。详见 § 3.2
+  - `sessions`（2026-05-02 PR2 新增）— cookie/bearer 双兼容 token，nanoid 32 字符 id，30 天滑动过期。详见 § 3.3
+  - `sms_send_log`（2026-05-02 PR2 新增）— 短信发送日志 + 防刷计数 + 验证码 hash。`result` 枚举 success/rate_limited/turnstile_failed/sms_api_error/budget_capped。30 天 retention cron 待加。详见 § 3.4
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -145,7 +154,44 @@
 
 **推 schema**：`cd worker && npm run db:init`（推远程）/ `npm run db:init:local`（本地）。
 
-### 3. Pages: `xlist-dashboard`
+### 3. Secrets（PR2 上线必备）
+
+```bash
+cd worker
+
+# Turnstile（CF Dashboard - Turnstile - Add widget 后给）
+npx wrangler secret put TURNSTILE_SECRET_KEY
+
+# 腾讯云 SMS V3（API V3 凭证 + 应用/签名/模板 ID）
+npx wrangler secret put TENCENT_SMS_SECRET_ID         # AKID 开头 36 字符
+npx wrangler secret put TENCENT_SMS_SECRET_KEY        # 32 字符
+npx wrangler secret put TENCENT_SMS_SDK_APP_ID        # 短信应用 ID，1400 开头 7 位
+npx wrangler secret put TENCENT_SMS_SIGN_NAME         # 已审签名，例：xList
+npx wrangler secret put TENCENT_SMS_TEMPLATE_ID       # 已审模板 ID，例：1234567
+
+# PushDeer 风控告警（xueqiuFollow admin 组：iPhone + Mac）
+npx wrangler secret put PUSHDEER_ADMIN_KEYS  # 输入：PDU394...,PDU394...
+```
+
+**Kill switch**：`SMS_DAILY_CAP=0` 立刻停发短信（不动代码）。
+**回滚 secret**：`wrangler secret put X` 输入新值即覆盖；删除用 `wrangler secret delete X`。
+
+### 3.5. SMS 防刷阈值（PR2 设计参考）
+
+| Layer | 维度 | 阈值 | 修改位置 |
+|-------|------|------|---------|
+| L1 | CF Turnstile | managed 模式 | CF dashboard |
+| L1 | CF Rate Limiting (per IP) | `/api/auth/sms/send` 5/min/IP | CF dashboard rules |
+| L2 | phone 60s | ≥ 1 拒 | `worker/src/auth/sms.ts` |
+| L2 | phone 5min | ≥ 3 拒 | 同上 |
+| L2 | phone 24h | ≥ 10 拒 | 同上 |
+| L2 | ip 1h unique phones | ≥ 10 拒 | 同上 |
+| L2 | ip 24h total | ≥ 30 拒 | 同上 |
+| L2 | device 24h unique phones | ≥ 5 拒 | 同上 |
+| L3 | 全局每日 cap | 200 条 | `SMS_DAILY_CAP` env |
+| L4 | 验证码错码锁 | 5 次错 → 30 min 锁 | `worker/src/auth/sms.ts` MAX_ATTEMPTS_BEFORE_LOCK / LOCK_DURATION_MS |
+
+### 5. Pages: `xlist-dashboard`
 
 - **公网地址**：
   - 自定义域：`https://ai-feeds.com` / `https://www.ai-feeds.com`（主入口）
@@ -154,7 +200,7 @@
 - **API base**：`dashboard/src/api.ts` 默认指向 `https://api.ai-feeds.com`（可用 `VITE_API_BASE` 覆盖）
 - **部署命令**：`cd dashboard && npm run build && npx wrangler pages deploy dist --project-name=xlist-dashboard`
 
-### 4. 自定义域名与 DNS
+### 6. 自定义域名与 DNS
 
 域名：`ai-feeds.com`（CF 注册 + 托管）
 
@@ -166,7 +212,7 @@
 
 **DNS proxy 必须全开橙云**（CF WAF / 缓存 / DDoS 保护依赖此）。
 
-### 5. CF 安全配置
+### 7. CF 安全配置
 
 **已开启项**：
 - **SSL/TLS** 模式：Full (strict)
@@ -186,7 +232,7 @@
 **可选加固**（未配置，见本项目 TODO）：
 - 第一优先级加一条 Skip 规则：`cf.verified_bot_category in {"Search Engine Crawler"}` → Skip all rules，保证搜索引擎 100% 不被误杀
 
-### 6. CF 账户其他项目（非本项目）
+### 8. CF 账户其他项目（非本项目）
 
 - Pages: `yt-dubbing-privacy` — 另一个项目，别误删
 
