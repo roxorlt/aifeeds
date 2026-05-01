@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import type { Components } from "react-markdown";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
 import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
@@ -9,6 +13,83 @@ import {
   IconStarFill,
   IconWatching,
 } from "./icons";
+
+// Tailwind-styled markdown elements (no @tailwindcss/typography dep).
+const MARKDOWN_COMPONENTS: Components = {
+  h1: ({ node: _node, ...props }) => (
+    <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
+  ),
+  h2: ({ node: _node, ...props }) => (
+    <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
+  ),
+  h3: ({ node: _node, ...props }) => (
+    <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
+  ),
+  h4: ({ node: _node, ...props }) => (
+    <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
+  ),
+  p: ({ node: _node, ...props }) => (
+    <p className="my-2 leading-relaxed text-neutral-700" {...props} />
+  ),
+  a: ({ node: _node, ...props }) => (
+    <a
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-sky-600 hover:underline break-all"
+      onClick={(e) => e.stopPropagation()}
+      {...props}
+    />
+  ),
+  ul: ({ node: _node, ...props }) => (
+    <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
+  ),
+  ol: ({ node: _node, ...props }) => (
+    <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
+  ),
+  li: ({ node: _node, ...props }) => <li {...props} />,
+  code: ({ node: _node, className, children, ...props }) => {
+    const isInline = !className?.includes("language-");
+    if (isInline) {
+      return (
+        <code className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800" {...props}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className={cn("font-mono text-[12px]", className)} {...props}>
+        {children}
+      </code>
+    );
+  },
+  pre: ({ node: _node, ...props }) => (
+    <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
+  ),
+  blockquote: ({ node: _node, ...props }) => (
+    <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
+  ),
+  hr: ({ node: _node, ...props }) => (
+    <hr className="my-4 border-neutral-200" {...props} />
+  ),
+  img: ({ node: _node, ...props }) => (
+    <img
+      className="my-2 max-w-full rounded-md border border-neutral-200"
+      loading="lazy"
+      {...props}
+    />
+  ),
+  table: ({ node: _node, ...props }) => (
+    <div className="my-3 overflow-x-auto">
+      <table className="min-w-full border-collapse text-[12px]" {...props} />
+    </div>
+  ),
+  th: ({ node: _node, ...props }) => (
+    <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
+  ),
+  td: ({ node: _node, ...props }) => (
+    <td className="border border-neutral-200 px-2 py-1" {...props} />
+  ),
+};
 
 const CATEGORY_STYLE: Record<string, string> = {
   agent: "bg-violet-100 text-violet-700",
@@ -174,7 +255,7 @@ export function GithubDrawerBody({ item }: Props) {
         <div>
           <div className="flex items-center justify-between border-b border-neutral-100 px-5 pt-5 pb-2">
             <h3 className="text-[13px] font-semibold text-neutral-900">README</h3>
-            {showTabs && readmeTranslated && (
+            {showTabs && (
               <div className="flex gap-1 rounded-md bg-neutral-100 p-0.5">
                 <button
                   onClick={() => setTab("orig")}
@@ -183,7 +264,7 @@ export function GithubDrawerBody({ item }: Props) {
                     tab === "orig" ? "bg-white font-semibold text-neutral-900 shadow-sm" : "text-neutral-600 hover:text-neutral-900",
                   )}
                 >
-                  English
+                  原文
                 </button>
                 <button
                   onClick={() => setTab("zh")}
@@ -192,14 +273,24 @@ export function GithubDrawerBody({ item }: Props) {
                     tab === "zh" ? "bg-white font-semibold text-neutral-900 shadow-sm" : "text-neutral-600 hover:text-neutral-900",
                   )}
                 >
-                  中文
+                  译文
                 </button>
               </div>
             )}
           </div>
-          <pre className="prose prose-sm max-w-none whitespace-pre-wrap break-words p-5 text-[13px] leading-relaxed text-neutral-700">
-            {readmeToShow || (showTabs && tab === "zh" ? "翻译尚未生成（异步任务）" : readmeRaw)}
-          </pre>
+          <div className="max-w-none break-words p-5 text-[13px]">
+            {tab === "zh" && !readmeTranslated ? (
+              <p className="italic text-neutral-400">译文尚未生成（异步任务，未来 v2 接入）</p>
+            ) : (
+              <Markdown
+                remarkPlugins={[remarkGfm]}
+                rehypePlugins={[rehypeRaw]}
+                components={MARKDOWN_COMPONENTS}
+              >
+                {readmeToShow || readmeRaw}
+              </Markdown>
+            )}
+          </div>
         </div>
       )}
     </div>

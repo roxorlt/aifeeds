@@ -524,63 +524,59 @@ function toIntOrNull(v: unknown): number | null {
 }
 
 // ─── GET /api/items?source_type=github ─────────────────────────
-// GitHub feed:
-//   - latest trending_date_str in DB
+// GitHub feed (cross-day):
 //   - is_relevant=1 AND extra.sponsor=0 (admin-only sponsors not in feed)
-//   - ORDER BY extra.daily_rank ASC
+//   - ORDER BY trending_date_str DESC, daily_rank ASC, id ASC
+//     (newest day first; within day, top-rank repos by today_stars first)
 //   - optional ?pinned=gh:owner/repo to bubble a shared link to the top
-//   - cursor: "rank|id" pagination
+//   - cursor: "trending_date|rank|id" for cross-day pagination
 async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
   const pinned = url.searchParams.get('pinned');
 
-  // Latest trending_date for github
-  const latestDate = await env.DB.prepare(
-    `SELECT MAX(json_extract(extra, '$.trending_date_str')) AS d
-       FROM items
-      WHERE source_type='github'`
-  ).first<{ d: string | null }>();
-  const todayStr = latestDate?.d;
-  if (!todayStr) {
-    return jsonResponse({ items: [], next_cursor: null, has_more: false }, 200, request, env);
-  }
-
   const conditions: string[] = [
     "source_type='github'",
     'is_relevant=1',
     "COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0",
-    "json_extract(extra, '$.trending_date_str') = ?",
     'deleted_at IS NULL',
   ];
-  const params: unknown[] = [todayStr];
+  const params: unknown[] = [];
 
   if (cursor) {
-    const [rankStr, idStr] = cursor.split('|');
+    const [dateStr, rankStr, idStr] = cursor.split('|');
     const rank = parseInt(rankStr, 10);
-    if (!Number.isNaN(rank) && idStr) {
+    if (dateStr && !Number.isNaN(rank) && idStr) {
+      // Lexicographic on (date DESC, rank ASC, id ASC):
+      //   date < cursor.date
+      //   OR (date = cursor.date AND (rank > cursor.rank
+      //                                OR (rank = cursor.rank AND id > cursor.id)))
       conditions.push(`(
-        CAST(json_extract(extra, '$.daily_rank') AS INTEGER) > ?
-        OR (CAST(json_extract(extra, '$.daily_rank') AS INTEGER) = ? AND id > ?)
+        json_extract(extra, '$.trending_date_str') < ?
+        OR (
+          json_extract(extra, '$.trending_date_str') = ?
+          AND (
+            CAST(json_extract(extra, '$.daily_rank') AS INTEGER) > ?
+            OR (CAST(json_extract(extra, '$.daily_rank') AS INTEGER) = ? AND id > ?)
+          )
+        )
       )`);
-      params.push(rank, rank, idStr);
+      params.push(dateStr, dateStr, rank, rank, idStr);
     }
   }
 
   const where = conditions.join(' AND ');
-  // Pinned: when present, this id always sorts to the top regardless of rank.
-  // We only need to sort the page; the actual pin lookup is also separately
-  // returned inline in the items list (so even if rank=NULL it's still visible).
-  const pinExpr = pinned
-    ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), `
-    : '';
-  if (pinned) params.unshift(pinned);  // bind for the SELECT param order: pin id first
+  // Pinned: bubble id to the top regardless of date/rank (share-link strong-insert).
+  const pinExpr = pinned ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), ` : '';
+  if (pinned) params.unshift(pinned);
 
   const sql = `
     SELECT * FROM items
     WHERE ${where}
-    ORDER BY ${pinExpr}CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
+    ORDER BY ${pinExpr}
+             json_extract(extra, '$.trending_date_str') DESC,
+             CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
              id ASC
     LIMIT ?
   `;
@@ -598,15 +594,15 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
     const lastExtra = last.extra as Record<string, unknown> | null;
+    const lastDate = lastExtra && typeof lastExtra === 'object' ? lastExtra.trending_date_str : null;
     const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
-    nextCursor = `${lastRank ?? 'null'}|${last.id}`;
+    nextCursor = `${lastDate ?? ''}|${lastRank ?? 'null'}|${last.id}`;
   }
 
   return jsonResponse({
     items,
     next_cursor: nextCursor,
     has_more: hasMore,
-    trending_date: todayStr,
     query_time_ms: queryTime,
   }, 200, request, env);
 }

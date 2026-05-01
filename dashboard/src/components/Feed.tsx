@@ -457,7 +457,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {!placeholder && (
+          {!placeholder && sourceType !== "github" && (
             <SortSelector value={sortMode} onChange={setSortMode} />
           )}
           <div className="text-[11px] text-neutral-500">
