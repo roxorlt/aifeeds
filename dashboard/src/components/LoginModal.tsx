@@ -66,7 +66,8 @@ export function LoginModal() {
   const [turnstileWidgetId, setTurnstileWidgetId] = useState<string | null>(null);
   const [codeSent, setCodeSent] = useState(false);   // 是否已成功发出验证码
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [phoneError, setPhoneError] = useState('');  // 紧挨手机号输入框的提示
+  const [codeError, setCodeError] = useState('');    // 紧挨验证码输入框的提示
   const [cooldownSec, setCooldownSec] = useState(0);
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
@@ -81,7 +82,8 @@ export function LoginModal() {
     setTurnstileToken(dev ? 'dev-bypass' : null);  // dev 模式直接给 fake token
     setCodeSent(false);
     setLoading(false);
-    setErrorMsg('');
+    setPhoneError('');
+    setCodeError('');
     setCooldownSec(0);
   }, [open, trigger, dev]);
 
@@ -124,13 +126,14 @@ export function LoginModal() {
   }, [cooldownSec]);
 
   async function handleSendCode() {
-    setErrorMsg('');
+    setPhoneError('');
+    setCodeError('');
     if (!PHONE_REGEX.test(phone)) {
-      setErrorMsg('手机号格式不对');
+      setPhoneError('请输入正确的手机号');
       return;
     }
     if (!turnstileToken) {
-      setErrorMsg('请先完成人机验证');
+      setPhoneError('请先完成人机验证');
       return;
     }
     setLoading(true);
@@ -148,7 +151,7 @@ export function LoginModal() {
       else if (a.status === 429 && a.reason === 'phone_locked_30min') msg = '账户已临时锁定，请 30 分钟后再试';
       else if (a.status === 503) msg = '服务暂不可用，请稍后再试';
       else if (a.status === 403) msg = '人机验证失败，请重试';
-      setErrorMsg(msg);
+      setPhoneError(msg);
       // 真 widget 时 token 已被消费，reset
       if (!dev && turnstileWidgetId && window.turnstile) {
         window.turnstile.reset(turnstileWidgetId);
@@ -160,9 +163,9 @@ export function LoginModal() {
   }
 
   async function handleLogin() {
-    setErrorMsg('');
+    setCodeError('');
     if (!/^\d{6}$/.test(code)) {
-      setErrorMsg('验证码必须是 6 位数字');
+      setCodeError('验证码必须是 6 位数字');
       return;
     }
     setLoading(true);
@@ -179,7 +182,7 @@ export function LoginModal() {
       else if (a.status === 401 && a.attemptsRemaining !== undefined) {
         msg = `验证码错误，还可尝试 ${a.attemptsRemaining} 次`;
       } else if (a.status === 429) msg = '尝试次数过多，账户已临时锁定 30 分钟';
-      setErrorMsg(msg);
+      setCodeError(msg);
     } finally {
       setLoading(false);
     }
@@ -210,12 +213,12 @@ export function LoginModal() {
 
         {/* 手机号 + 获取验证码 */}
         <label className="mb-1 block text-sm text-neutral-700">手机号</label>
-        <div className="mb-3 flex gap-2">
+        <div className="flex gap-2">
           <input
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-            placeholder="13800001234"
+            placeholder="请输入手机号"
             disabled={codeSent && cooldownSec > 0}
             className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
             autoFocus
@@ -235,36 +238,38 @@ export function LoginModal() {
               : '获取验证码'}
           </button>
         </div>
+        {phoneError && (
+          <p className="mt-1 text-xs text-rose-600">{phoneError}</p>
+        )}
 
         {/* Turnstile widget — dev 不渲染 */}
         {!dev && (
-          <div ref={turnstileContainerRef} className="mb-3 flex justify-center" />
+          <div ref={turnstileContainerRef} className="mt-3 flex justify-center" />
         )}
 
         {/* 验证码 — 始终显示，未发码时 disabled */}
-        <label className="mb-1 block text-sm text-neutral-700">验证码</label>
+        <label className="mb-1 mt-3 block text-sm text-neutral-700">验证码</label>
         <input
           type="tel"
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-          placeholder={codeSent ? '6 位数字' : '请先获取验证码'}
+          placeholder={codeSent ? '请输入验证码' : '请先获取验证码'}
           disabled={!codeSent}
-          className="mb-3 w-full rounded-md border border-neutral-300 px-3 py-2 text-center text-2xl tracking-[.4em] focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-300 disabled:placeholder:text-neutral-400"
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400"
         />
+        {codeError && (
+          <p className="mt-1 text-xs text-rose-600">{codeError}</p>
+        )}
 
         {/* 登录按钮 */}
         <button
           type="button"
           onClick={handleLogin}
           disabled={loginDisabled}
-          className="w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300"
+          className="mt-4 w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300"
         >
           {loading && codeSent ? '登录中…' : '登录 / 注册'}
         </button>
-
-        {errorMsg && (
-          <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{errorMsg}</p>
-        )}
 
         <p className="mt-4 text-center text-[11px] text-neutral-500">
           登录即同意{' '}
