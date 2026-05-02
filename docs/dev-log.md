@@ -35,3 +35,25 @@
 **对 design doc 的影响**：风险登记 #1 命中（"CF Browser Rendering 过不了 PH turnstile"），按预案 fallback A，整体工时不变（设计时已预算 +1 天）。Phase 2 起改用 `scrapers/ph/` Python 实现，结构对齐 `scrapers/github/`。
 
 ---
+
+## 2026-05-03 · PH 原生 categories 暂时不解析（用 LLM 分类顶上）
+
+**现象**：PH 产品页 HTML 里 `"categories":[...]` 数组出现 ~10 次：
+
+- 主产品 1 个
+- 相关产品 9 个（每个产品自己的 categories）
+- 还有 `featuredCategories`（推荐位）+ `trendingCategories`（热门位）
+
+单凭正则定位主产品的那一个不可靠（每个相关产品也长一样的结构），需要顺
+着 NextJS RSC stream 找到带主产品 `slug` 的对象。
+
+**决策**：v1 跳过原生 categories 解析，`extract_categories()` 直接返回空。
+让 LLM judge 输出的 `ai_category`（基于 tagline + description + maker post
+推断的 AI 分类 slug）顶上。mockup 上 drawer 的 category chip 也是用 AI 分
+类，UI 不依赖原生 categories。
+
+**未来改进**：如果想要 PH 原生 categories 准确解析，得做 RSC stream 解码
+（self.__next_f.push 的 JSON-string-encoded 流式数据）。工作量 ~半天，
+v2 再做。
+
+---
