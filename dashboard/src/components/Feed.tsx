@@ -39,6 +39,31 @@ const POLL_INTERVAL_MS = 30_000;
 // never looks at it, last-seen stays where it was.
 const MARK_SEEN_DELAY_MS = 5_000;
 
+// Network Information API is non-standard but supported on Chrome/Edge/
+// Android Chrome (i.e. the bulk of mobile traffic). Use it for telemetry
+// only — feature-detect at call-time and degrade silently elsewhere.
+type NavConn = {
+  effectiveType?: string;
+  downlink?: number;
+  rtt?: number;
+  saveData?: boolean;
+};
+function readConnectionInfo(): {
+  connection_type?: string;
+  downlink?: number;
+  rtt?: number;
+  save_data?: boolean;
+} {
+  const conn = (navigator as Navigator & { connection?: NavConn }).connection;
+  if (!conn) return {};
+  return {
+    connection_type: conn.effectiveType,
+    downlink: conn.downlink,
+    rtt: conn.rtt,
+    save_data: conn.saveData,
+  };
+}
+
 function PendingAvatars({ pending }: { pending: Item[] }) {
   // Pick up to 3 unique-handle avatars from the pending queue (newest first).
   const avatars: { url: string; handle: string }[] = [];
@@ -150,7 +175,19 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         setHasMore(res.has_more);
         lastScrapedAt.current = res.items[0]?.scraped_at || null;
       })
-      .catch((e) => !cancelled && setError(String(e)))
+      .catch((e) => {
+        if (cancelled) return;
+        const errMsg = String(e);
+        setError(errMsg);
+        track(EVENTS.FEED_LOAD_ERROR, {
+          source_type: sourceType,
+          sort: isHot ? "hot" : "time",
+          phase: "initial",
+          error_msg: errMsg,
+          online: navigator.onLine,
+          ...readConnectionInfo(),
+        });
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -178,8 +215,17 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       });
       setNextCursor(res.next_cursor);
       setHasMore(res.has_more);
-    } catch {
-      // fail silently; next observer trigger or scroll will retry
+    } catch (e) {
+      // Silent for UX (next observer trigger or scroll will retry), but emit
+      // telemetry so we can see how often load-more fails.
+      track(EVENTS.FEED_LOAD_ERROR, {
+        source_type: sourceType,
+        sort: isHot ? "hot" : "time",
+        phase: "load_more",
+        error_msg: e instanceof Error ? e.message : String(e),
+        online: navigator.onLine,
+        ...readConnectionInfo(),
+      });
     } finally {
       setLoadingMore(false);
     }
@@ -454,9 +500,14 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   return (
     <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
-      {/* Header */}
+      {/* Header — `max-md:touch-pan-x` blocks vertical page scroll initiation
+          from this strip on mobile. Without this, touching the column title
+          row to read the sort selector or just to rest a finger immediately
+          starts dragging the feed up/down. Tap (sort dropdown, etc.) still
+          works since touch-action only gates pan/zoom. PC unaffected — mouse
+          ignores touch-action. */}
       <header
-        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 md:cursor-pointer"
+        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 max-md:touch-pan-x md:cursor-pointer"
         onClick={(e) => {
           // Mobile: chip rail handles回顶 via active-tap; skip header tap
           if (window.matchMedia("(max-width: 767px)").matches) return;

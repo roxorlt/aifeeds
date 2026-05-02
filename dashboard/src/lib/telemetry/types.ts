@@ -37,4 +37,5 @@ export type EventTypeName =
   // 性能
   | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb'
   // 错误
-  | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error';
+  | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error'
+  | 'feed_load_error';
