@@ -109,7 +109,7 @@ export function LoginModal() {
         });
         setTurnstileWidgetId(id);
       } catch (e) {
-        setErrorMsg(`captcha 加载失败：${e instanceof Error ? e.message : String(e)}`);
+        setPhoneError(`captcha 加载失败：${e instanceof Error ? e.message : String(e)}`);
       }
     })();
     return () => {
