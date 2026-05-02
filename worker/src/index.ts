@@ -239,7 +239,10 @@ export default {
             }
             const r2Pending = await countGithubR2Pending(env);
             if (r2Pending > 0) {
-              const r = await runGithubR2Migrate(env, 2);
+              // Bumped per-repo cap to 20; lower batch size to 1 so each tick
+              // does one repo fully (vs 2 partial repos). Subrequest budget:
+              // 1 SELECT + 1 × (20 GET + 1 UPDATE) = 22 (CF Free 50 OK).
+              const r = await runGithubR2Migrate(env, 1);
               console.log(`[cron] github-r2-migrate (preempt, ${r2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
