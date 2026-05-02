@@ -46,3 +46,7 @@ x-com-tweet.png
 .playwright-mcp/
 .superpowers/
 .worktrees/
+
+.dev.vars*
+!.dev.vars.example
+!.env.example

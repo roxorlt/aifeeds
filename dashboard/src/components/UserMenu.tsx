@@ -29,7 +29,7 @@ export function UserMenu() {
     <button
       type="button"
       onClick={() => navigate('/settings')}
-      className="rounded-full hover:opacity-80"
+      className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-full hover:opacity-80"
       aria-label="账号设置"
     >
       <img
@@ -37,7 +37,7 @@ export function UserMenu() {
         alt=""
         width={32}
         height={32}
-        className="block h-8 w-8 shrink-0 rounded-full bg-neutral-100 object-cover ring-1 ring-neutral-200"
+        className="block h-8 w-8 rounded-full bg-neutral-100 object-cover ring-1 ring-neutral-200"
       />
     </button>
   );
