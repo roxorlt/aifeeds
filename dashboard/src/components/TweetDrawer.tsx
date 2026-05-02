@@ -30,6 +30,7 @@ export function TweetDrawer() {
   }, [item?.id]);
 
   const asideRef = useRef<HTMLElement | null>(null);
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const dragXRef = useRef(0);
@@ -169,6 +170,38 @@ export function TweetDrawer() {
     };
   }, [open, isNarrow, close]);
 
+  // iOS Safari boundary scroll-trap workaround.
+  //
+  // When an inner overflow:scroll container has scrollTop === 0 OR scrollTop
+  // pinned at scrollHeight - clientHeight, iOS Safari sometimes refuses to
+  // recognise the next reverse-direction touch — the gesture is silently
+  // discarded as "we're at the edge, nothing to do here", and the user has
+  // to lift the finger and re-touch to get a response. Worst case it bubbles
+  // out to the (locked) body and just freezes.
+  //
+  // The proven fix (used by body-scroll-lock, Vaul, Stripe, etc.): on every
+  // touchstart, nudge scrollTop 1px off the boundary so the container always
+  // appears scrollable in both directions. The 1px is invisible and momentum
+  // scroll is unaffected.
+  useEffect(() => {
+    if (!open || !isNarrow) return;
+    const el = bodyScrollRef.current;
+    if (!el) return;
+
+    const nudgeOffBoundary = () => {
+      if (el.scrollTop <= 0) {
+        el.scrollTop = 1;
+      } else if (
+        el.scrollTop + el.clientHeight >= el.scrollHeight
+      ) {
+        el.scrollTop = el.scrollHeight - el.clientHeight - 1;
+      }
+    };
+
+    el.addEventListener("touchstart", nudgeOffBoundary, { passive: true });
+    return () => el.removeEventListener("touchstart", nudgeOffBoundary);
+  }, [open, isNarrow]);
+
   if (!open) return null;
 
   const isGithub = item?.source_type === "github";
@@ -241,6 +274,7 @@ export function TweetDrawer() {
           </div>
         </header>
         <div
+          ref={bodyScrollRef}
           className="flex-1 min-h-0 overflow-y-scroll overscroll-none touch-pan-y"
           style={{ WebkitOverflowScrolling: "touch" }}
         >

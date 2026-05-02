@@ -40,25 +40,46 @@ const API_BASE = (() => {
 export const TRACK_ENDPOINT = `${API_BASE}/api/track`;
 
 /**
- * 统一 fetch 包装：自动注入 X-Device-Id，失败上报 api_error。
+ * 统一 fetch 包装：自动注入 X-Device-Id，失败上报 api_error，
+ * 对网络错误和 5xx 自动重试一次（移动端常见的瞬时抖动）。
  * 业务 endpoint（/api/items / /api/sources 等）走这个；
  * /api/track 自身不能走（会循环），用原生 fetch。
  */
+const RETRY_BACKOFF_MS = 250;
+
 async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   const headers = new Headers(init.headers);
   headers.set('X-Device-Id', getDeviceId());
 
+  const doFetch = () => fetch(url, { ...init, headers });
+
   let res: Response;
   try {
-    res = await fetch(url, { ...init, headers });
+    res = await doFetch();
   } catch (e) {
-    track(EVENTS.API_ERROR, {
-      endpoint: path,
-      status: 0,
-      error_msg: e instanceof Error ? e.message : String(e),
-    });
-    throw e;
+    // Network error — retry once after short backoff
+    try {
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+      res = await doFetch();
+    } catch (e2) {
+      track(EVENTS.API_ERROR, {
+        endpoint: path,
+        status: 0,
+        error_msg: e2 instanceof Error ? e2.message : String(e2),
+      });
+      throw e2;
+    }
+  }
+
+  // Retry once on 5xx (idempotent GET requests only — that's all we issue here)
+  if (res.status >= 500 && res.status < 600) {
+    await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+    try {
+      res = await doFetch();
+    } catch {
+      // keep the original 5xx response below if the retry itself errored
+    }
   }
 
   if (!res.ok && res.status >= 400) {
