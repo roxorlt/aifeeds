@@ -28,6 +28,14 @@ import {
   handleMe,
   handleDelete,
 } from './auth/handlers';
+import {
+  serveAdminHtml,
+  adminSmsStatus,
+  adminUnlockSms,
+  adminUser,
+  adminCleanupAccount,
+  adminDailyCap,
+} from './admin';
 
 export interface Env {
   DB: D1Database;
@@ -61,6 +69,9 @@ export interface Env {
   // PR2 配置
   SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
   SMS_PROVIDER?: string;                // 'tencent'（默认）/ 'pushdeer'（dev/staging 走 PushDeer 推到 admin）
+  // Admin panel 凭据（HTTP Basic Auth）。用 wrangler secret put 注入，git 不留痕。
+  ADMIN_USER?: string;
+  ADMIN_PASS?: string;
 }
 
 // CORS origins allowed
@@ -81,12 +92,20 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
     origin.endsWith('.pages.dev') ||
     /^http:\/\/localhost:\d+$/.test(origin) ||
     /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
-  return {
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': allowed ? origin : '',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id',
     'Access-Control-Max-Age': '86400',
   };
+  // Allow-Credentials 仅在 allowed origin 才返回，配合 dashboard 的 fetch credentials:'include'。
+  // 浏览器规范：credentials=include 时 Allow-Credentials 必须 'true' 否则拒收响应；同时
+  // Allow-Origin 不可为 '*'，必须具体 origin（上面已经是具体 origin）。
+  if (allowed) {
+    headers['Access-Control-Allow-Credentials'] = 'true';
+    headers['Vary'] = 'Origin';
+  }
+  return headers;
 }
 
 function jsonResponse(data: unknown, status: number, request: Request, env: Env): Response {
@@ -163,6 +182,25 @@ export default {
       }
       if (path === '/api/auth/delete' && request.method === 'POST') {
         return withCors(await handleDelete(request, env, ctx), request, env);
+      }
+      // Admin panel（HTTP Basic Auth；不走 corsHeaders，同源访问）
+      if (path === '/admin' || path === '/admin/') {
+        return serveAdminHtml(request, env);
+      }
+      if (path === '/api/admin/sms-status' && request.method === 'GET') {
+        return adminSmsStatus(request, env);
+      }
+      if (path === '/api/admin/unlock-sms' && request.method === 'POST') {
+        return adminUnlockSms(request, env);
+      }
+      if (path === '/api/admin/user' && request.method === 'GET') {
+        return adminUser(request, env);
+      }
+      if (path === '/api/admin/cleanup-account' && request.method === 'POST') {
+        return adminCleanupAccount(request, env);
+      }
+      if (path === '/api/admin/daily-cap' && request.method === 'GET') {
+        return adminDailyCap(request, env);
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
