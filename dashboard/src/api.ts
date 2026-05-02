@@ -1,6 +1,7 @@
 import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
 import { getDeviceId } from "./lib/device";
 import { track, EVENTS } from "./lib/telemetry";
+import { useAuthStore } from "./lib/authStore";
 
 export interface MetricsSnapshotGh {
   captured_at: number;
@@ -62,10 +63,21 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      return await fetch(url, { ...init, headers, signal: ctrl.signal });
+      return await fetch(url, { ...init, headers, credentials: 'include', signal: ctrl.signal });
     } finally {
       clearTimeout(timer);
     }
+  };
+
+  // 401 拦截：仅对个人态 endpoint 弹登录（避免 /api/items 等公开 endpoint 误触发）
+  const handle401 = (status: number) => {
+    if (status !== 401) return;
+    const protectedPaths = ['/api/auth/me', '/api/favorites', '/api/subscriptions'];
+    const isProtected = protectedPaths.some((p) => path.startsWith(p));
+    if (!isProtected) return;
+    const store = useAuthStore.getState();
+    if (store.user) store.logout();
+    store.openLoginModal('api_401');
   };
 
   let res: Response | null = null;
@@ -91,6 +103,7 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
           attempts: attempt + 1,
         });
       }
+      handle401(r.status);
       return r;
     } catch (e) {
       lastErr = e;
