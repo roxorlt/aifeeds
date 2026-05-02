@@ -59,6 +59,7 @@ export interface Env {
   PUSHDEER_ADMIN_KEYS?: string;         // 逗号分隔多个 key
   // PR2 配置
   SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
+  SMS_PROVIDER?: string;                // 'tencent'（默认）/ 'pushdeer'（dev/staging 走 PushDeer 推到 admin）
 }
 
 // CORS origins allowed

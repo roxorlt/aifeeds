@@ -214,12 +214,50 @@ interface SendSmsResult {
   errMsg?: string;
 }
 
-/** 调腾讯云 SMS V3 API 发短信 */
+/**
+ * 通过 PushDeer 推验证码到 admin（dev / staging / 冷启动期手动通道）
+ * — 真实"短信"渠道不通时（腾讯云审核中、或临时停服），任何 phone
+ *   的验证码都推到 admin 配置的 PushDeer 设备（用户自己手机 + Mac）。
+ * 适用：本地 dev、staging 阶段、朋友熟人冷启动期手动验证。
+ * 限制：单人 dev tool，不能给真实多用户产品用。
+ */
+async function sendSmsViaPushDeer(
+  env: Env,
+  phone: string,
+  code: string,
+): Promise<SendSmsResult> {
+  if (!env.PUSHDEER_ADMIN_KEYS) {
+    console.warn('[sms] SMS_PROVIDER=pushdeer 但 PUSHDEER_ADMIN_KEYS 未配置');
+    return { ok: false, errCode: 'NO_PUSHDEER_KEY', errMsg: 'PUSHDEER_ADMIN_KEYS missing' };
+  }
+  await pushDeerAlert(
+    env,
+    'xList 验证码',
+    `phone：${phone.slice(0, 3)}***${phone.slice(-4)}\n\n**${code}**\n\n5 分钟有效。如非本人请求请忽略。`,
+  );
+  return { ok: true, requestId: `pushdeer-${Date.now()}` };
+}
+
+/**
+ * 发送短信验证码（路由器）— 按 SMS_PROVIDER 切换 provider：
+ * - 'pushdeer'  → sendSmsViaPushDeer（推到 admin PushDeer，dev/staging）
+ * - 'tencent'（默认） → 真实腾讯云 V3
+ * - secret 缺失时 fallback 到 dev simulate（console.log 明文 code）
+ *
+ * 函数名保留 sendSmsViaTencent 是历史包袱，实际职责已是 router。
+ */
 export async function sendSmsViaTencent(
   env: Env,
   phone: string,
   code: string,
 ): Promise<SendSmsResult> {
+  // Provider 路由
+  const provider = (env.SMS_PROVIDER || 'tencent').toLowerCase();
+  if (provider === 'pushdeer') {
+    return sendSmsViaPushDeer(env, phone, code);
+  }
+
+  // 默认 tencent — secret 缺失走 dev simulate
   if (
     !env.TENCENT_SMS_SECRET_ID ||
     !env.TENCENT_SMS_SECRET_KEY ||
