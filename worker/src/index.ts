@@ -72,6 +72,10 @@ export interface Env {
   // Admin panel 凭据（HTTP Basic Auth）。用 wrangler secret put 注入，git 不留痕。
   ADMIN_USER?: string;
   ADMIN_PASS?: string;
+  // CF Browser Rendering binding — used by PH source POC + Phase 2 scraper.
+  // Set in wrangler.toml `[browser] binding = "BROWSER"`.
+  // Requires Workers Paid plan (10h browser/month included).
+  BROWSER?: Fetcher;
 }
 
 // CORS origins allowed
@@ -207,6 +211,10 @@ export default {
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
+      }
+      if (path === '/poc/ph' && request.method === 'GET') {
+        const { handlePhPoc } = await import('./scrapers/ph_poc');
+        return handlePhPoc(request, env);
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {

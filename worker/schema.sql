@@ -84,6 +84,22 @@ CREATE TABLE IF NOT EXISTS metrics_snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_item_time ON metrics_snapshots(item_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON metrics_snapshots(captured_at);
 
+-- M8: PH 单独维度（votes / comments / reviews / followers / daily_rank）
+CREATE TABLE IF NOT EXISTS metrics_snapshots_ph (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  launch_date_pt TEXT,
+  votes INTEGER,
+  comments_count INTEGER,
+  reviews_count INTEGER,
+  reviews_avg REAL,
+  followers INTEGER,
+  daily_rank INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_msph_item_time ON metrics_snapshots_ph(item_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_msph_launch_date ON metrics_snapshots_ph(launch_date_pt);
+
 -- M3: Per-invocation refresh observability (tier-indexed).
 CREATE TABLE IF NOT EXISTS refresh_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
