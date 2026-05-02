@@ -18,6 +18,10 @@ export interface GithubEnv {
   DB: D1Database;
   GITHUB_TOKEN?: string;
   DEEPSEEK_API_KEY?: string;
+  // R2 bucket for migrated README assets (v2.3). Optional; missing binding
+  // means R2 migration is skipped and original GitHub raw URLs stay in the
+  // readme markdown.
+  READMES?: R2Bucket;
 }
 
 const TRENDING_URL = "https://github.com/trending?since=daily";
@@ -770,6 +774,258 @@ export async function countGithubReadmeTranslatePending(env: GithubEnv): Promise
         AND json_extract(extra, '$.readme_excerpt') IS NOT NULL
         AND json_extract(extra, '$.readme_translated') IS NULL
         AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'`,
+  ).first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
+// ─── README 资源落 CF R2 (v2.3) ────────────────────────────────
+// Pipeline: scan readme_excerpt (and readme_translated when present) for
+// remote image / video URLs, download (size-capped), upload to R2 under
+// gh/<owner>/<repo>/<sha256>.<ext>, then rewrite the original URLs to a
+// proxy-served `/r/<key>` form. Marks extra.r2_migrated_at on completion.
+
+const R2_MAX_BYTES = 5 * 1024 * 1024;        // 5 MB hard cap per asset
+const R2_MAX_ASSETS_PER_REPO = 8;            // per cron tick
+const R2_KEY_PREFIX = "gh";                  // bucket-internal layout: gh/<owner>/<repo>/...
+
+const ALLOWED_IMG_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/svg+xml",
+  "image/avif",
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+]);
+
+const EXT_FROM_TYPE: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/avif": "avif",
+  "image/x-icon": "ico",
+  "image/vnd.microsoft.icon": "ico",
+};
+
+function resolveAssetUrl(src: string, owner: string, repo: string, branch: string): string | null {
+  if (!src) return null;
+  // Skip data: / mailto: / blob: / anchor — not migratable
+  if (/^(data:|mailto:|blob:|#)/i.test(src)) return null;
+  // Already absolute
+  if (/^https?:\/\//i.test(src)) return src;
+  // Relative — resolve to GitHub raw
+  const b = branch || "main";
+  if (src.startsWith("/")) return `https://raw.githubusercontent.com/${owner}/${repo}/${b}${src}`;
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${b}/${src.replace(/^\.\//, "")}`;
+}
+
+interface AssetHit {
+  matchedSrc: string;       // exact text in the markdown that we'll replace
+  resolvedUrl: string;      // absolute fetchable URL
+}
+
+function extractAssetUrls(
+  markdown: string,
+  owner: string,
+  repo: string,
+  branch: string,
+): AssetHit[] {
+  const hits: AssetHit[] = [];
+  const seen = new Set<string>();
+  // Markdown image: ![alt](url "optional title")
+  const mdImgRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = mdImgRe.exec(markdown)) !== null) {
+    const src = m[1];
+    if (seen.has(src)) continue;
+    seen.add(src);
+    const resolved = resolveAssetUrl(src, owner, repo, branch);
+    if (resolved) hits.push({ matchedSrc: src, resolvedUrl: resolved });
+  }
+  // HTML img: <img src="url" .../>
+  const htmlImgRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  while ((m = htmlImgRe.exec(markdown)) !== null) {
+    const src = m[1];
+    if (seen.has(src)) continue;
+    seen.add(src);
+    const resolved = resolveAssetUrl(src, owner, repo, branch);
+    if (resolved) hits.push({ matchedSrc: src, resolvedUrl: resolved });
+  }
+  return hits;
+}
+
+async function sha256Hex(data: ArrayBuffer): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function extFromUrl(url: string, contentType: string | null): string {
+  if (contentType && EXT_FROM_TYPE[contentType.toLowerCase().split(";")[0].trim()]) {
+    return EXT_FROM_TYPE[contentType.toLowerCase().split(";")[0].trim()];
+  }
+  // Fall back to URL extension
+  const m = url.match(/\.([a-zA-Z0-9]{2,5})(?:\?|$)/);
+  return m ? m[1].toLowerCase() : "bin";
+}
+
+async function migrateOneAsset(
+  env: GithubEnv,
+  owner: string,
+  repo: string,
+  url: string,
+): Promise<string | null> {
+  if (!env.READMES) return null;
+  try {
+    // GET (use streaming to avoid loading full body when too big — but we
+    // still need the body to compute sha256 and PUT to R2, so just GET full
+    // and check size after)
+    const r = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+    if (!r.ok) return null;
+    const ct = r.headers.get("content-type") || "";
+    const lenStr = r.headers.get("content-length");
+    const len = lenStr ? parseInt(lenStr, 10) : -1;
+    if (len > 0 && len > R2_MAX_BYTES) return null;
+    if (ct && !ALLOWED_IMG_TYPES.has(ct.toLowerCase().split(";")[0].trim())) {
+      // Not a known image type — skip (videos / arbitrary binaries can be
+      // added later; for now we only mirror images)
+      return null;
+    }
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > R2_MAX_BYTES) return null;
+    const hash = await sha256Hex(buf);
+    const ext = extFromUrl(url, ct);
+    const key = `${R2_KEY_PREFIX}/${owner}/${repo}/${hash}.${ext}`;
+
+    // PUT (idempotent — same hash key means same content; OK to overwrite)
+    await env.READMES.put(key, buf, {
+      httpMetadata: { contentType: ct || "application/octet-stream" },
+      customMetadata: { "src-url": url, "owner-repo": `${owner}/${repo}` },
+    });
+
+    return `/r/${key}`;
+  } catch (e) {
+    console.error(`[github-r2-migrate] asset error ${url}:`, e);
+    return null;
+  }
+}
+
+function rewriteUrls(markdown: string, mapping: Map<string, string>): string {
+  let out = markdown;
+  for (const [src, target] of mapping) {
+    // Replace all occurrences. We do raw substring replace since the matched
+    // src came from regex extraction earlier (so it's already a literal URL).
+    // Escape regex metacharacters before turning into a global RegExp.
+    const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(escaped, "g"), target);
+  }
+  return out;
+}
+
+export async function runGithubR2Migrate(
+  env: GithubEnv,
+  limit = 1,
+): Promise<{ picked: number; ok: number; assets_migrated: number; assets_failed: number; failed: number }> {
+  const counts = { picked: 0, ok: 0, assets_migrated: 0, assets_failed: 0, failed: 0 };
+
+  if (!env.READMES) {
+    console.warn("[github-r2-migrate] R2 binding READMES not configured — skipping");
+    return counts;
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id,
+            json_extract(extra, '$.readme_excerpt')   AS readme,
+            json_extract(extra, '$.readme_translated') AS translated,
+            json_extract(extra, '$.default_branch')   AS branch
+       FROM items
+      WHERE source_type='github'
+        AND is_relevant = 1
+        AND json_extract(extra, '$.readme_excerpt') IS NOT NULL
+        AND json_extract(extra, '$.r2_migrated_at') IS NULL
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{
+      id: string;
+      source_id: string;
+      readme: string | null;
+      translated: string | null;
+      branch: string | null;
+    }>();
+
+  counts.picked = rows.results.length;
+  if (counts.picked === 0) return counts;
+
+  for (const row of rows.results) {
+    if (!row.readme) {
+      counts.failed++;
+      continue;
+    }
+    const [owner, repo] = (row.source_id || "").split("/");
+    const branch = row.branch || "main";
+    const hits = extractAssetUrls(row.readme, owner, repo, branch);
+    const mapping = new Map<string, string>(); // matchedSrc → R2 path
+
+    for (let i = 0; i < Math.min(hits.length, R2_MAX_ASSETS_PER_REPO); i++) {
+      const r2Path = await migrateOneAsset(env, owner, repo, hits[i].resolvedUrl);
+      if (r2Path) {
+        mapping.set(hits[i].matchedSrc, r2Path);
+        counts.assets_migrated++;
+      } else {
+        counts.assets_failed++;
+      }
+    }
+
+    // Rewrite URLs in readme_excerpt (and readme_translated if present).
+    const newReadme = mapping.size > 0 ? rewriteUrls(row.readme, mapping) : row.readme;
+    const newTranslated = row.translated && mapping.size > 0
+      ? rewriteUrls(row.translated, mapping)
+      : row.translated;
+
+    try {
+      await env.DB.prepare(
+        `UPDATE items
+            SET extra = json_set(extra,
+                                 '$.readme_excerpt', ?,
+                                 '$.readme_translated', ?,
+                                 '$.r2_migrated_at', ?,
+                                 '$.r2_assets_count', ?)
+          WHERE id = ?`,
+      )
+        .bind(
+          newReadme,
+          newTranslated,
+          Math.floor(Date.now() / 1000),
+          mapping.size,
+          row.id,
+        )
+        .run();
+      counts.ok++;
+      console.log(`[github-r2-migrate] ${row.id}: ${mapping.size}/${hits.length} assets migrated`);
+    } catch (e) {
+      counts.failed++;
+      console.error(`[github-r2-migrate] ${row.id}: D1 update error`, e);
+    }
+  }
+
+  console.log(`[github-r2-migrate] ${JSON.stringify(counts)}`);
+  return counts;
+}
+
+export async function countGithubR2Pending(env: GithubEnv): Promise<number> {
+  const r = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+       FROM items
+      WHERE source_type='github'
+        AND is_relevant = 1
+        AND json_extract(extra, '$.readme_excerpt') IS NOT NULL
+        AND json_extract(extra, '$.r2_migrated_at') IS NULL`,
   ).first<{ n: number }>();
   return r?.n ?? 0;
 }
