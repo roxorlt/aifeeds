@@ -144,6 +144,14 @@ function makeMarkdownComponents(
           className="my-2 max-w-full cursor-zoom-in rounded-md border border-neutral-200"
           loading="lazy"
           onClick={(e) => {
+            // README 里 [![alt](src)](url) 这种"图片包链接"在 markdown 里
+            // 渲染成 <a href><img/></a>。点 img 时事件冒泡到 anchor，
+            // 触发其导航 default action — iOS 上装了 GitHub app 就被
+            // universal link 拦截，整个跳出 ai-feeds。preventDefault 阻
+            // 止 anchor 的默认导航，stopPropagation 防 anchor 自己的
+            // onClick 也跑（虽然现在 a 的 onClick 只 stopPropagation
+            // 没别的副作用，但保险起见）。Lightbox 正常打开。
+            e.preventDefault();
             e.stopPropagation();
             if (resolved && onImageClick) onImageClick(resolved);
           }}
