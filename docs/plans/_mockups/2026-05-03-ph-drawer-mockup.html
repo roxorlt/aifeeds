@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>PH Drawer Mockup — Zed</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body { background: #f4f4f4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+      .device { max-width: 420px; margin: 24px auto; box-shadow: 0 4px 24px rgba(0,0,0,0.08); border-radius: 16px; overflow: hidden; }
+      .label { font: 11px/1.4 monospace; color: #888; padding: 12px 24px 4px; max-width: 420px; margin: 0 auto; }
+      .gallery::-webkit-scrollbar { display: none; }
+    </style>
+  </head>
+  <body>
+
+    <div class="label">▼ 移动端 drawer · sample: Zed</div>
+
+    <div class="device bg-white">
+      <!-- Drawer header (sticky) -->
+      <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50/95 backdrop-blur px-2 py-1.5">
+        <div class="justify-self-start">
+          <button class="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-200">
+            <span class="text-2xl leading-none">‹</span>
+          </button>
+        </div>
+        <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">
+          产品详情
+        </div>
+        <div class="justify-self-end">
+          <a class="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200">在 PH 打开 ↗</a>
+        </div>
+      </header>
+
+      <!-- ① 产品头部 -->
+      <div class="border-b border-neutral-100 p-5" data-section="header">
+        <div class="flex items-start gap-3">
+          <img src="https://ph-files.imgix.net/5e384dcc-8e07-4d0a-93b6-720c0bb005b6.jpeg?auto=format&w=128" class="h-16 w-16 shrink-0 rounded-2xl bg-neutral-200 object-cover" />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5 text-[12px] text-neutral-500 mb-0.5">
+              <span class="inline-flex items-center gap-0.5 rounded-full bg-amber-50 ring-1 ring-amber-200 text-amber-700 px-1.5 font-medium tabular-nums">#1</span>
+              <span>· 2026-05-02 PT</span>
+            </div>
+            <div class="text-[18px] font-bold leading-tight text-neutral-900 break-words">Zed</div>
+            <div class="text-[14px] text-neutral-600 mt-0.5">The Fastest AI Code Editor</div>
+          </div>
+        </div>
+        <!-- 类别 chip -->
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <span class="inline-flex items-center rounded-full bg-violet-50 text-violet-700 px-2 py-0.5 text-[11px] font-medium ring-1 ring-violet-200">🤖 AI 代码编辑</span>
+          <span class="inline-flex items-center rounded-full bg-neutral-100 text-neutral-700 px-2 py-0.5 text-[11px]">vibe-coding</span>
+          <span class="inline-flex items-center rounded-full bg-neutral-100 text-neutral-700 px-2 py-0.5 text-[11px]">engineering-development</span>
+        </div>
+        <!-- 官网 — 弱链接形式，前缀「官网：」+ 域名 -->
+        <div class="mt-3 text-[12px] text-neutral-500">
+          官网：<a class="inline-flex items-center gap-0.5 hover:text-sky-600 hover:underline">zed.dev<span>↗</span></a>
+        </div>
+      </div>
+
+      <!-- ② KPI 行 -->
+      <div class="border-b border-neutral-100 px-5 py-3 grid grid-cols-4 gap-2 text-center">
+        <div>
+          <div class="text-[16px] font-bold text-neutral-900 tabular-nums">▲ 1.2k</div>
+          <div class="text-[10px] text-neutral-500">votes (本次)</div>
+        </div>
+        <div>
+          <div class="text-[16px] font-bold text-neutral-900 tabular-nums">💬 527</div>
+          <div class="text-[10px] text-neutral-500">comments</div>
+        </div>
+        <div>
+          <div class="text-[16px] font-bold text-neutral-900 tabular-nums">⭐ 4.95</div>
+          <div class="text-[10px] text-neutral-500">38 reviews</div>
+        </div>
+        <div>
+          <div class="text-[16px] font-bold text-neutral-900 tabular-nums">👥 1244</div>
+          <div class="text-[10px] text-neutral-500">followers</div>
+        </div>
+      </div>
+
+      <!-- ③ Gallery 横滑（提到 AI 摘要前面，视觉先行） -->
+      <div class="border-b border-neutral-100 py-4">
+        <div class="text-[11px] font-semibold text-neutral-700 px-5 mb-2">截图与视频</div>
+        <div class="gallery flex gap-2 overflow-x-auto px-5 snap-x snap-mandatory">
+          <img src="https://ph-files.imgix.net/621ffa4d-846e-419d-812c-6db49862c4ac.webp?auto=format&w=480" class="h-48 w-72 shrink-0 rounded-lg bg-neutral-200 object-cover snap-start" />
+          <img src="https://ph-files.imgix.net/bfb1fce2-d59d-409e-8988-5ad3e402a374.webp?auto=format&w=480" class="h-48 w-72 shrink-0 rounded-lg bg-neutral-200 object-cover snap-start" />
+          <div class="h-48 w-72 shrink-0 rounded-lg bg-neutral-100 ring-1 ring-neutral-200 flex items-center justify-center text-neutral-400 text-sm snap-start">+ 3 more</div>
+        </div>
+      </div>
+
+      <!-- ④ AI 摘要 — 干掉标题，直接铺正文 -->
+      <div class="border-b border-neutral-100 p-5 bg-neutral-50/40">
+        <p class="text-[14px] leading-relaxed text-neutral-800">
+          Zed 1.0 是一款主打 <strong>极致性能 + AI 协作</strong> 的下一代代码编辑器。
+          相比 VS Code / Cursor，Zed 强调原生体验（Rust 实现）、极简界面、
+          多人协同实时编辑。本次 launch 是首次正式版发布，社区反馈集中
+          于"轻、快、设计克制"，缺点是扩展生态较弱。值得关注的"以代码体验
+          为本位"的 AI 编辑器代表。
+        </p>
+      </div>
+
+      <!-- ⑤ Maker post — Maker 标签着色加重 -->
+      <div class="border-b border-neutral-100 p-5">
+        <div class="flex items-center gap-2 mb-2.5">
+          <img src="https://ph-avatars.imgix.net/673679/original.jpeg?auto=format&w=80" class="h-9 w-9 rounded-full bg-neutral-200 object-cover" />
+          <div class="flex-1 min-w-0">
+            <div class="flex items-baseline gap-1.5 flex-wrap">
+              <span class="text-[14px] font-semibold text-neutral-900">Thorsten Ball</span>
+              <span class="text-[12px] text-neutral-500">@thorstenball</span>
+              <span class="text-[10px] text-violet-700 bg-violet-100 px-1.5 py-0.5 rounded font-semibold">MAKER</span>
+              <span class="text-[12px] text-neutral-400">· 14h ago</span>
+            </div>
+          </div>
+          <div class="flex gap-1 rounded-md bg-neutral-100 p-0.5 shrink-0">
+            <button class="rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-neutral-900 shadow-sm">译文</button>
+            <button class="rounded px-2 py-0.5 text-[11px] text-neutral-600">原文</button>
+          </div>
+        </div>
+        <p class="text-[13px] leading-relaxed text-neutral-700">
+          Hi everyone! 今天我们要发布 Zed 1.0…<br/>
+          这是一款用 Rust 从头开始构建的代码编辑器，专为高性能协作而设计。
+          我们做了 3 年，目标是让你和 AI、和团队成员都能在同一个编辑器里
+          顺滑工作。期待大家试用！
+        </p>
+      </div>
+
+      <!-- ⑥ 团队 -->
+      <div class="border-b border-neutral-100 p-5">
+        <h3 class="text-[13px] font-semibold text-neutral-700 mb-2.5">团队 & Hunter</h3>
+        <div class="flex flex-wrap gap-3">
+          <div class="flex items-center gap-2">
+            <img src="https://ph-avatars.imgix.net/673679/original.jpeg?auto=format&w=64" class="h-8 w-8 rounded-full bg-neutral-200 object-cover" />
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900">Thorsten Ball</div>
+              <div class="text-[11px] text-neutral-500">@thorstenball · Maker</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <img src="https://ph-avatars.imgix.net/5619769/original.png?auto=format&w=64" class="h-8 w-8 rounded-full bg-neutral-200 object-cover" />
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900">Jason</div>
+              <div class="text-[11px] text-neutral-500">@jvmncs · Maker</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <img src="https://ph-avatars.imgix.net/4182936/original.jpeg?auto=format&w=64" class="h-8 w-8 rounded-full bg-neutral-200 object-cover" />
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900">Danilo Leal</div>
+              <div class="text-[11px] text-neutral-500">@daniloslg · Maker</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ⑦ Top Reviews — 多展开几条 + 翻译切换 -->
+      <div class="border-b border-neutral-100 p-5">
+        <div class="flex items-baseline justify-between mb-3">
+          <h3 class="text-[13px] font-semibold text-neutral-700">⭐ 4.95 · 38 reviews</h3>
+          <div class="flex gap-1 rounded-md bg-neutral-100 p-0.5">
+            <button class="rounded bg-white px-2 py-0.5 text-[11px] font-semibold shadow-sm">译文</button>
+            <button class="rounded px-2 py-0.5 text-[11px] text-neutral-600">原文</button>
+          </div>
+        </div>
+        <div class="space-y-3">
+          <!-- review 1 -->
+          <div class="rounded-lg bg-neutral-50 p-3">
+            <div class="flex items-center gap-2 mb-1.5">
+              <div class="h-6 w-6 rounded-full bg-neutral-300"></div>
+              <span class="text-[12px] font-medium text-neutral-900">Some User</span>
+              <span class="text-[11px] text-amber-500">⭐⭐⭐⭐⭐</span>
+            </div>
+            <p class="text-[12px] text-neutral-700 leading-relaxed">
+              我在大型 monorepo 里用 Zed 写 Ruby 和 TypeScript。Ruby 的 LSP 在任何编辑器里都比较糟，
+              但 TypeScript 在 Zed 里跑得不错。
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1 text-[10px]">
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 lightweight</span>
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 clean interface</span>
+              <span class="rounded bg-rose-50 text-rose-700 px-1.5">👎 limited extensions</span>
+            </div>
+          </div>
+          <!-- review 2 -->
+          <div class="rounded-lg bg-neutral-50 p-3">
+            <div class="flex items-center gap-2 mb-1.5">
+              <div class="h-6 w-6 rounded-full bg-neutral-300"></div>
+              <span class="text-[12px] font-medium text-neutral-900">Sarah Chen</span>
+              <span class="text-[11px] text-amber-500">⭐⭐⭐⭐⭐</span>
+            </div>
+            <p class="text-[12px] text-neutral-700 leading-relaxed">
+              切换到 Zed 已经 6 个月了，编辑器再也没有崩溃过，启动比 VS Code 快 5 倍。
+              内置的 AI 协作非常自然，团队 pair programming 神器。
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1 text-[10px]">
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 fast performance</span>
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 collaboration features</span>
+            </div>
+          </div>
+          <!-- review 3 -->
+          <div class="rounded-lg bg-neutral-50 p-3">
+            <div class="flex items-center gap-2 mb-1.5">
+              <div class="h-6 w-6 rounded-full bg-neutral-300"></div>
+              <span class="text-[12px] font-medium text-neutral-900">Mike R.</span>
+              <span class="text-[11px] text-amber-500">⭐⭐⭐⭐</span>
+            </div>
+            <p class="text-[12px] text-neutral-700 leading-relaxed">
+              Zed 的设计很克制，性能也确实强。唯一不爽的是插件生态比 VSCode 弱很多，
+              一些常用的 linter / formatter 还得手动配置。
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1 text-[10px]">
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 minimal design</span>
+              <span class="rounded bg-rose-50 text-rose-700 px-1.5">👎 limited extensions</span>
+            </div>
+          </div>
+          <!-- review 4 -->
+          <div class="rounded-lg bg-neutral-50 p-3">
+            <div class="flex items-center gap-2 mb-1.5">
+              <div class="h-6 w-6 rounded-full bg-neutral-300"></div>
+              <span class="text-[12px] font-medium text-neutral-900">Yuki Tanaka</span>
+              <span class="text-[11px] text-amber-500">⭐⭐⭐⭐⭐</span>
+            </div>
+            <p class="text-[12px] text-neutral-700 leading-relaxed">
+              比 VS Code 快太多了，Rust 真不是吹的。团队从 VSCode 全换到 Zed 之后，
+              code review 体验提升明显。期待官方插件市场发展。
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1 text-[10px]">
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 fast performance</span>
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 collaboration features</span>
+            </div>
+          </div>
+          <!-- review 5 -->
+          <div class="rounded-lg bg-neutral-50 p-3">
+            <div class="flex items-center gap-2 mb-1.5">
+              <div class="h-6 w-6 rounded-full bg-neutral-300"></div>
+              <span class="text-[12px] font-medium text-neutral-900">Alex P.</span>
+              <span class="text-[11px] text-amber-500">⭐⭐⭐⭐</span>
+            </div>
+            <p class="text-[12px] text-neutral-700 leading-relaxed">
+              主力编辑器从 Sublime 切到了 Zed。性能、UI 都很满意。
+              希望能加上更多 vim 模式的快捷键映射。
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1 text-[10px]">
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 minimal design</span>
+              <span class="rounded bg-emerald-50 text-emerald-700 px-1.5">👍 lightweight</span>
+            </div>
+          </div>
+          <div class="text-center pt-1">
+            <a class="text-[11px] text-sky-600 hover:underline">在 PH 看全部 38 条 review ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ⑧ Top 10 评论 — 多展开几条 + 翻译切换 -->
+      <div class="border-b border-neutral-100 p-5">
+        <div class="flex items-baseline justify-between mb-3">
+          <h3 class="text-[13px] font-semibold text-neutral-700">💬 Top 10 评论 · 共 527</h3>
+          <div class="flex gap-1 rounded-md bg-neutral-100 p-0.5">
+            <button class="rounded bg-white px-2 py-0.5 text-[11px] font-semibold shadow-sm">译文</button>
+            <button class="rounded px-2 py-0.5 text-[11px] text-neutral-600">原文</button>
+          </div>
+        </div>
+        <div class="space-y-4">
+          <!-- comment 1 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Marie Curie</span>
+              <span class="text-[11px] text-neutral-500">@mariec</span>
+              <span class="text-[11px] text-neutral-400">· 8h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              强烈祝贺 Zed 1.0 发布！协作编辑那块儿真的甩 VS Code 几条街，
+              用了一个月再也回不去了。期待团队继续打磨。
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 24</div>
+            <!-- maker reply -->
+            <div class="ml-9 mt-2 pl-3 border-l-2 border-neutral-200">
+              <div class="flex items-center gap-2 mb-0.5">
+                <div class="h-5 w-5 rounded-full bg-neutral-300"></div>
+                <span class="text-[12px] font-medium text-neutral-900">Thorsten Ball</span>
+                <span class="text-[10px] text-violet-700 bg-violet-100 px-1 rounded font-semibold">MAKER</span>
+                <span class="text-[10px] text-neutral-400">· 7h</span>
+              </div>
+              <p class="text-[12px] leading-relaxed text-neutral-700">
+                谢谢支持！我们下个版本会加入更多 LSP 和插件 API，请保持关注 ❤️
+              </p>
+            </div>
+          </div>
+
+          <!-- comment 2 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Linus T.</span>
+              <span class="text-[11px] text-neutral-500">@linus</span>
+              <span class="text-[11px] text-neutral-400">· 12h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              Zed 在性能上比 VS Code 强非常多，启动 0.3 秒内完成，
+              打开大型项目几乎无延迟。Rust 真的是底层语言之王。
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 18</div>
+          </div>
+
+          <!-- comment 3 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Aria Davis</span>
+              <span class="text-[11px] text-neutral-500">@ariadavis</span>
+              <span class="text-[11px] text-neutral-400">· 10h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              请问 Windows 端什么时候能更稳定一些？现在偶尔会有 cursor 跟不上的情况。
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 11</div>
+            <div class="ml-9 mt-2 pl-3 border-l-2 border-neutral-200">
+              <div class="flex items-center gap-2 mb-0.5">
+                <div class="h-5 w-5 rounded-full bg-neutral-300"></div>
+                <span class="text-[12px] font-medium text-neutral-900">Jason</span>
+                <span class="text-[10px] text-violet-700 bg-violet-100 px-1 rounded font-semibold">MAKER</span>
+                <span class="text-[10px] text-neutral-400">· 9h</span>
+              </div>
+              <p class="text-[12px] leading-relaxed text-neutral-700">
+                Windows 性能修复在 1.0.1 已修了大头，1.0.2 还会继续完善 IME 输入。
+              </p>
+            </div>
+          </div>
+
+          <!-- comment 4 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Tom W.</span>
+              <span class="text-[11px] text-neutral-500">@tomw</span>
+              <span class="text-[11px] text-neutral-400">· 11h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              试用了两天，从 Cursor 切换过来感觉差异不大，但启动快是真的香。
+              不过 AI 集成的体验 Cursor 还是更顺滑一些，希望 Zed 能继续优化。
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 9</div>
+          </div>
+
+          <!-- comment 5 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Lucy K.</span>
+              <span class="text-[11px] text-neutral-500">@lucy</span>
+              <span class="text-[11px] text-neutral-400">· 13h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              Zed 团队一直默默打磨，从开源开始就一直在用。1.0 终于出了，里程碑！
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 7</div>
+          </div>
+
+          <!-- comment 6 -->
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="h-7 w-7 rounded-full bg-neutral-300"></div>
+              <span class="text-[13px] font-medium text-neutral-900">Sam K.</span>
+              <span class="text-[11px] text-neutral-500">@samk</span>
+              <span class="text-[11px] text-neutral-400">· 14h</span>
+            </div>
+            <p class="text-[13px] leading-relaxed text-neutral-700 ml-9">
+              很期待企业版的功能，比如团队协作 + 私有 LLM 接入。多人 pair-programming
+              用 Zed 比用 Live Share 要顺得多。
+            </p>
+            <div class="ml-9 mt-1 text-[11px] text-neutral-500">▲ 5</div>
+          </div>
+
+          <div class="text-center pt-2">
+            <a class="text-[11px] text-sky-600 hover:underline">查看全部 527 条评论 ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ⑨ 论坛 + 类似产品 + Pricing -->
+      <div class="border-b border-neutral-100 p-5">
+        <h3 class="text-[13px] font-semibold text-neutral-700 mb-2">更多</h3>
+        <div class="space-y-2">
+          <a class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2 hover:bg-neutral-50">
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900">论坛深度讨论</div>
+              <div class="text-[11px] text-neutral-500">PH 论坛页 /p/zed</div>
+            </div>
+            <span class="text-neutral-400">↗</span>
+          </a>
+          <a class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2 hover:bg-neutral-50">
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900">类似产品</div>
+              <div class="text-[11px] text-neutral-500">Cursor · VS Code · Windsurf...</div>
+            </div>
+            <span class="text-neutral-400">↗</span>
+          </a>
+        </div>
+        <!-- 当前产品的 pricing chip 行 -->
+        <div class="mt-3 flex flex-wrap gap-1.5 items-center text-[12px] text-neutral-500">
+          <span class="rounded-full bg-emerald-50 ring-1 ring-emerald-200 text-emerald-700 px-2 py-0.5 font-medium">Free</span>
+          <span class="rounded-full bg-violet-50 ring-1 ring-violet-200 text-violet-700 px-2 py-0.5 font-medium">开源</span>
+          <span>· Web</span>
+        </div>
+      </div>
+
+      <!-- 底部留白 -->
+      <div class="h-12"></div>
+    </div>
+
+    <!-- ====== 第二屏：滚动后 sticky header 切到 owner-style title ====== -->
+    <!-- ====== 第三屏：pricing chip 各状态参考 ====== -->
+    <div class="label">▼ pricing chip 各状态展示参考（不同产品根据 PH `pricingType` 显示不同 chip 组合）</div>
+    <div class="device bg-white p-5 space-y-3">
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-emerald-50 ring-1 ring-emerald-200 text-emerald-700 px-2 py-0.5 text-[12px] font-medium">Free</span>
+        <span class="text-[11px] text-neutral-500">完全免费（多见于 utility / 开源产品）</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-sky-50 ring-1 ring-sky-200 text-sky-700 px-2 py-0.5 text-[12px] font-medium">Freemium</span>
+        <span class="text-[11px] text-neutral-500">有免费层 + 付费高级功能（PH `free_options`）</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-amber-50 ring-1 ring-amber-200 text-amber-700 px-2 py-0.5 text-[12px] font-medium">订阅</span>
+        <span class="text-[11px] text-neutral-500 tabular-nums">起 $9 / 月</span>
+        <span class="text-[11px] text-neutral-400">（如能拿到 offers.price）</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-neutral-100 ring-1 ring-neutral-300 text-neutral-700 px-2 py-0.5 text-[12px] font-medium">Paid</span>
+        <span class="text-[11px] text-neutral-500">完全付费（一次性买断或纯订阅，无免费层）</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-violet-50 ring-1 ring-violet-200 text-violet-700 px-2 py-0.5 text-[12px] font-medium">开源</span>
+        <span class="text-[11px] text-neutral-500">独立标记，可与上面任一 chip 叠加</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-rose-50 ring-1 ring-rose-200 text-rose-700 px-2 py-0.5 text-[12px] font-medium">Free trial</span>
+        <span class="text-[11px] text-neutral-500">试用期（如 14 / 30 天）后转付费</span>
+      </div>
+      <div class="pt-2 mt-2 border-t border-neutral-100 text-[11px] text-neutral-500 leading-relaxed">
+        组合举例：<br/>
+        · Cursor: <span class="rounded-full bg-sky-50 text-sky-700 px-1.5 py-0">Freemium</span> + 起 $20 / 月<br/>
+        · VS Code: <span class="rounded-full bg-emerald-50 text-emerald-700 px-1.5 py-0">Free</span> + <span class="rounded-full bg-violet-50 text-violet-700 px-1.5 py-0">开源</span><br/>
+        · Sublime Text: <span class="rounded-full bg-neutral-100 text-neutral-700 px-1.5 py-0">Paid</span> + 一次性 $99
+      </div>
+    </div>
+
+    <div class="label">▼ 滚动 owner/repo 出屏后，header title 自动接管为 "Zed · #1"</div>
+    <div class="device bg-white">
+      <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50/95 backdrop-blur px-2 py-1.5 shadow-sm">
+        <div class="justify-self-start">
+          <button class="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600">
+            <span class="text-2xl leading-none">‹</span>
+          </button>
+        </div>
+        <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">
+          Zed · #1
+        </div>
+        <div class="justify-self-end">
+          <a class="rounded-md px-2 py-1 text-xs text-neutral-600">在 PH 打开 ↗</a>
+        </div>
+      </header>
+      <div class="bg-neutral-50/40 p-5 text-center text-[11px] text-neutral-500">
+        ↑ 这是用户向上滑了一段以后看到的 header 状态。"产品详情" → "Zed · #1"
+      </div>
+      <div class="border-t border-neutral-100 p-5">
+        <p class="text-[13px] leading-relaxed text-neutral-600">
+          ……（AI 解读 / maker post / 团队 / reviews / 评论 等都在下面）……
+        </p>
+      </div>
+    </div>
+
+  </body>
+</html>
