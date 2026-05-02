@@ -163,7 +163,7 @@ export default {
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
       }
-      if (path.startsWith('/r/') && request.method === 'GET') {
+      if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
