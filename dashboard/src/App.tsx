@@ -128,8 +128,8 @@ function App() {
           onTopBarClick();
         }}
       >
-        <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
-          <div className="flex shrink-0 items-center gap-2">
+        <div className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
+          <div className="flex shrink-0 items-center gap-2 max-md:touch-pan-y">
             <img
               src="/favicon.svg"
               alt="AI-Feeds"
@@ -142,9 +142,15 @@ function App() {
             {/* Subtitle slogan TBD; intentionally empty for now */}
           </div>
 
-          {/* Filter chips — mobile only, excludes "全部" */}
+          {/* Filter chips — mobile only, excludes "全部".
+              `self-stretch` makes the rail fill the header's full vertical
+              padding so its `touch-action: pan-x` covers the entire row at
+              the chips' x-range, not just the ~20px the chip buttons span.
+              Without this, swipes 8px above/below the chip line fell
+              through to the parent (touch-action: auto) and iOS picked the
+              vertical axis, dragging the feed below. */}
           {isNarrow && (
-            <nav className="chips-rail flex min-w-0 items-center gap-1 overflow-x-auto">
+            <nav className="chips-rail flex min-w-0 items-center gap-1 self-stretch overflow-x-auto">
               {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
                 const hasData = liveSourceTypes.has(key as SourceType);
@@ -178,7 +184,7 @@ function App() {
           <button
             type="button"
             onClick={() => setRefreshTick((t) => t + 1)}
-            className="shrink-0 rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
+            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100 max-md:touch-pan-y"
             title="刷新"
           >
             ⟳

@@ -225,6 +225,19 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     const isAtTop = () => window.scrollY <= 0;
 
     const onStart = (e: TouchEvent) => {
+      // CRITICAL: skip when the touch starts inside an open modal/drawer.
+      // This listener is on `window` and runs in non-passive mode for
+      // touchmove (it preventDefault's downward swipes to power pull-to-
+      // refresh). Without this guard, swiping DOWN inside the drawer's
+      // own scroll container — i.e., reversing direction to read content
+      // above — would have its native scroll preventDefault'd by us,
+      // freezing the drawer until the user lifts off and tries again.
+      // See heroui#5974, vaul#168 for the same pattern in other libs.
+      const target = e.target as Element | null;
+      if (target?.closest('[role="dialog"]')) {
+        pullStartY.current = null;
+        return;
+      }
       if (isAtTop()) {
         pullStartY.current = e.touches[0].clientY;
         isDraggingRef.current = false;
