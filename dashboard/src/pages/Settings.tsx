@@ -72,7 +72,7 @@ export function Settings() {
                 <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-500">默认</span>
               )}
             </div>
-            <div className="font-mono text-sm text-neutral-500">{user.phone_masked || '—'}</div>
+            <div className="font-mono text-sm text-neutral-500">{user.phone_masked || 'xxx****xxxx'}</div>
           </div>
           <button
             type="button"

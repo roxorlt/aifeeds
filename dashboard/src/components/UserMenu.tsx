@@ -35,7 +35,9 @@ export function UserMenu() {
       <img
         src={avatarUrlOf(user)}
         alt=""
-        className="h-8 w-8 rounded-full bg-neutral-100 object-cover"
+        width={32}
+        height={32}
+        className="block h-8 w-8 shrink-0 rounded-full bg-neutral-100 object-cover ring-1 ring-neutral-200"
       />
     </button>
   );

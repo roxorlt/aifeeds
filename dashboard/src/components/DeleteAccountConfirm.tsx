@@ -20,7 +20,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
 
   if (!open || !user) return null;
 
-  const phoneMask = user.phone_masked || '****';
+  const phoneMask = user.phone_masked || 'xxx****xxxx';
 
   const handleConfirm = async () => {
     setErrorMsg('');
@@ -63,9 +63,10 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
         </ul>
         <p className="mb-4 text-sm font-medium text-rose-700">操作不可逆。</p>
 
-        <label className="mb-1 block text-sm text-neutral-700">
-          确认手机号 <span className="font-mono text-neutral-500">{phoneMask}</span> 后注销
-        </label>
+        <div className="mb-1 flex items-baseline gap-2 text-sm">
+          <span className="text-neutral-700">手机号</span>
+          <span className="font-mono text-neutral-500">{phoneMask}</span>
+        </div>
         <input
           type="tel"
           value={phoneInput}
