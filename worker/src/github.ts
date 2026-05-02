@@ -814,6 +814,9 @@ function resolveAssetUrl(src: string, owner: string, repo: string, branch: strin
   if (!src) return null;
   // Skip data: / mailto: / blob: / anchor — not migratable
   if (/^(data:|mailto:|blob:|#)/i.test(src)) return null;
+  // Already-migrated R2 path (from a previous run): skip — don't re-extract
+  // and don't try to re-fetch from GitHub raw (that path doesn't exist there).
+  if (src.startsWith("/r/")) return null;
   // Already absolute
   if (/^https?:\/\//i.test(src)) return src;
   // Relative — resolve to GitHub raw
