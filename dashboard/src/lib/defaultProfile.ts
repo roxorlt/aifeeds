@@ -1,4 +1,4 @@
-// 默认 profile 兜底：user.display_name 为 null 时前端基于 user.id 派生稳定昵称 / 头像字。
+// 默认 profile 兜底：user.display_name / avatar_url 为 null 时前端基于 user.id 派生稳定值。
 
 const NICKNAME_POOL = [
   '数字游民', '夜猫子', '冲浪选手', '产品猎人', '探险家', '观察者',
@@ -8,6 +8,11 @@ const NICKNAME_POOL = [
   '拾荒者', '种树人', '记录者', '编织者', '远行者', '守夜人',
   '逐光人', '解谜人',
 ] as const;
+
+// 30 张默认头像池（dashboard/public/avatars/avatar-01.png … avatar-30.png）
+export const DEFAULT_AVATAR_POOL: readonly string[] = Array.from({ length: 30 }, (_, i) =>
+  `/avatars/avatar-${String(i + 1).padStart(2, '0')}.png`,
+);
 
 // 简单 djb2 hash，稳定不依赖 Web Crypto
 function hash(s: string): number {
@@ -26,6 +31,15 @@ export function defaultNickname(userId: string): string {
   return `${word}${num}`;
 }
 
+export function defaultAvatarUrl(userId: string): string {
+  const h = hash(userId + ':avatar'); // 不与昵称共用 hash 域
+  return DEFAULT_AVATAR_POOL[h % DEFAULT_AVATAR_POOL.length];
+}
+
 export function displayNameOf(user: { id: string; display_name: string | null }): string {
   return user.display_name?.trim() || defaultNickname(user.id);
+}
+
+export function avatarUrlOf(user: { id: string; avatar_url?: string | null }): string {
+  return user.avatar_url || defaultAvatarUrl(user.id);
 }

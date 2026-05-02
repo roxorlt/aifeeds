@@ -123,14 +123,22 @@
 </button>
 ```
 
-**危险按钮（Danger，限定注销 / 删除 / 不可逆操作）**：
+**危险按钮（Danger，仅用于独立破坏入口）**：
 ```html
 <button class="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40">
-  确认注销
+  立即删除
 </button>
 ```
 
+> ⚠️ **rose-600 的使用边界**：仅用于"列表行直接发起破坏的按钮"或"确认 dialog 之外的一次性危险操作"。
+>
+> **破坏性 confirm 弹窗里的主操作按钮（如「确认注销」「确认删除」）一律用主按钮 `bg-neutral-900`**——dialog 标题 + 描述 + 「确认 X」三层文字已经传达了警示语义，按钮再涂红反而过度报警，也违背"破坏性操作菜单入口应弱化、不引导用户"的原则。rose 留给警示文字（`text-rose-700`）和错误提示（`text-rose-600`）。
+>
+> 反例：以前的 `<button class="bg-rose-600">确认注销</button>` 把 confirm 按钮涂红。现在 confirm dialog 主按钮改成黑色 `bg-neutral-900`，与登录、退出弹窗保持一致。
+
 > ⚠️ disabled 状态用 `opacity-40` 而不是 `bg-neutral-300` / `bg-rose-300`：低饱和灰色在白底上对比度不足（≈1.6:1，低于 WCAG AA 4.5:1），用户分不清按钮在哪。`opacity-40` 保留按钮原色作为视觉锚点，且保证 disabled 含义清晰。
+
+> 💡 **菜单入口弱化**：列表里的破坏性入口（如"注销账号" row）用 `text-neutral-500`（甚至更淡），不要 `text-rose-600`。把强警示留给确认弹窗的文案。
 
 **图标按钮（顶栏 / 关闭 ✕ / 收起）**：
 ```html

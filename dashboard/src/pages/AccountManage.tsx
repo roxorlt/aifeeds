@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuthStore } from '../lib/authStore';
 import { DeleteAccountConfirm } from '../components/DeleteAccountConfirm';
+import { toast } from '../lib/toast';
 
 export function AccountManage() {
   const user = useAuthStore((s) => s.user);
@@ -42,19 +43,27 @@ export function AccountManage() {
       </header>
 
       <div className="overflow-hidden rounded-lg border border-neutral-200 bg-white">
-        <button
-          type="button"
-          disabled
-          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-neutral-400 disabled:cursor-not-allowed"
-        >
-          <span>更换手机号</span>
-          <span className="text-xs">即将开放</span>
-        </button>
+        {/* 手机号 + 更改入口 */}
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
+          <span className="text-sm text-neutral-700">手机号</span>
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-sm text-neutral-500">{user.phone_masked || '—'}</span>
+            <button
+              type="button"
+              onClick={() => toast.info('即将开放')}
+              className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-50"
+            >
+              更改
+            </button>
+          </div>
+        </div>
         <div className="border-t border-neutral-100" />
+
+        {/* 注销账号（弱化样式） */}
         <button
           type="button"
           onClick={() => setDeleteOpen(true)}
-          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-rose-600 hover:bg-rose-50"
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-neutral-500 hover:bg-neutral-50"
         >
           <span>注销账号</span>
           <span className="text-neutral-400">›</span>

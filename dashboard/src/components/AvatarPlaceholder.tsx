@@ -1,11 +1,10 @@
-// 首字母圆形头像 placeholder
-// PR3 用：UserMenu / Settings / DeleteAccountConfirm
-// 未来支持上传时（PR5+），传 src 优先用 src
+// 头像渲染。
+// 优先级：src 显式传入 > 字母兜底（不用默认池，留给调用方 avatarUrlOf(user) 拼装）
 
 interface Props {
   name?: string | null;             // 取首字母（中文取首字、英文取大写首字母）
   phoneMasked?: string | null;      // 兜底：name 缺失时取 phoneMasked 倒二位
-  src?: string | null;
+  src?: string | null;              // 直接图片 URL（含默认池图）
   size?: number;                    // px
   className?: string;
 }
@@ -18,7 +17,7 @@ export function AvatarPlaceholder({ name, phoneMasked, src, size = 36, className
         alt=""
         width={size}
         height={size}
-        className={`rounded-full object-cover ${className ?? ''}`}
+        className={`shrink-0 rounded-full object-cover bg-neutral-100 ${className ?? ''}`}
       />
     );
   }
@@ -38,7 +37,7 @@ export function AvatarPlaceholder({ name, phoneMasked, src, size = 36, className
   const bg = palette[code % palette.length];
   return (
     <div
-      className={`flex items-center justify-center rounded-full text-white font-semibold ${bg} ${className ?? ''}`}
+      className={`flex shrink-0 items-center justify-center rounded-full text-white font-semibold ${bg} ${className ?? ''}`}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.42) }}
     >
       {letter}

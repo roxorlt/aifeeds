@@ -1,7 +1,6 @@
 import { useNavigate } from 'react-router';
 import { useAuthStore } from '../lib/authStore';
-import { AvatarPlaceholder } from './AvatarPlaceholder';
-import { displayNameOf } from '../lib/defaultProfile';
+import { avatarUrlOf } from '../lib/defaultProfile';
 
 export function UserMenu() {
   const user = useAuthStore((s) => s.user);
@@ -26,7 +25,6 @@ export function UserMenu() {
     );
   }
 
-  const name = displayNameOf(user);
   return (
     <button
       type="button"
@@ -34,7 +32,11 @@ export function UserMenu() {
       className="rounded-full hover:opacity-80"
       aria-label="账号设置"
     >
-      <AvatarPlaceholder name={name} phoneMasked={user.phone_masked ?? undefined} size={32} />
+      <img
+        src={avatarUrlOf(user)}
+        alt=""
+        className="h-8 w-8 rounded-full bg-neutral-100 object-cover"
+      />
     </button>
   );
 }

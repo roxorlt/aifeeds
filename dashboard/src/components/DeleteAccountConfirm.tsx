@@ -55,7 +55,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
         className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-2 text-lg font-semibold text-rose-700">确认注销账号？</h2>
+        <h2 className="mb-2 text-lg font-semibold text-neutral-900">确认注销账号？</h2>
         <p className="mb-2 text-sm text-neutral-700">注销后将永久失去：</p>
         <ul className="mb-3 ml-4 list-disc text-sm text-neutral-700">
           <li>收藏的所有内容</li>
@@ -64,15 +64,14 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
         <p className="mb-4 text-sm font-medium text-rose-700">操作不可逆。</p>
 
         <label className="mb-1 block text-sm text-neutral-700">
-          请输入要注销账号的登录手机号
+          确认手机号 <span className="font-mono text-neutral-500">{phoneMask}</span> 后注销
         </label>
-        <p className="mb-1 font-mono text-xs text-neutral-500">提示：{phoneMask}</p>
         <input
           type="tel"
           value={phoneInput}
           onChange={(e) => setPhoneInput(e.target.value.replace(/\D/g, '').slice(0, 11))}
           placeholder="请输入要注销账号的登录手机号"
-          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-rose-500 focus:outline-none"
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none"
           autoFocus
         />
         {errorMsg && <p className="mt-1 text-xs text-rose-600">{errorMsg}</p>}
@@ -90,7 +89,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
             type="button"
             onClick={handleConfirm}
             disabled={loading}
-            className="flex-1 rounded-md bg-rose-600 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex-1 rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {loading ? '注销中…' : '确认注销'}
           </button>

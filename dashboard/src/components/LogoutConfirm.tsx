@@ -26,8 +26,7 @@ export function LogoutConfirm({ open, onClose, onConfirm }: Props) {
         className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-2 text-lg font-semibold text-neutral-900">确认退出登录？</h2>
-        <p className="mb-5 text-sm text-neutral-600">退出后下次访问需要重新登录。</p>
+        <h2 className="mb-5 text-lg font-semibold text-neutral-900">确认退出登录？</h2>
         <div className="flex gap-3">
           <button
             type="button"
