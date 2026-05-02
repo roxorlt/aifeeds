@@ -14,7 +14,9 @@ import { handleTrack } from './track';
 import {
   runGithubFetchTrending,
   runGithubEnrichPending,
+  runGithubReadmeTranslate,
   countGithubPending,
+  countGithubReadmeTranslatePending,
 } from './github';
 
 export interface Env {
@@ -171,13 +173,21 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          // Try github-enrich preempt: if pending exists on a non-github-fetch
-          // slot, drain one before falling through to the X mode.
+          // Github preempt order: enrich (initial) > readme-translate (v2.2) >
+          // X cron rotation. Each preempt does 1 row per tick (~3-9 subrequests).
+          // github-fetch slot itself never gets preempted (it's the only window
+          // for fresh trending data).
           if (mode !== 'github-fetch') {
             const pending = await countGithubPending(env);
             if (pending > 0) {
               const r = await runGithubEnrichPending(env, 1);
               console.log(`[cron] github-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            const trPending = await countGithubReadmeTranslatePending(env);
+            if (trPending > 0) {
+              const r = await runGithubReadmeTranslate(env, 1);
+              console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
               return;
             }
           }
@@ -866,6 +876,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       10,
     );
     const result = await runGithubEnrichPending(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'github-readme-translate') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '1'), 1),
+      10,
+    );
+    const result = await runGithubReadmeTranslate(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   return jsonResponse({ error: `Unknown mode: ${mode}` }, 400, request, env);

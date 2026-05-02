@@ -639,3 +639,137 @@ export async function countGithubPending(env: GithubEnv): Promise<number> {
   ).first<{ n: number }>();
   return r?.n ?? 0;
 }
+
+// ─── README 中文翻译 (v2.2) ────────────────────────────────────
+
+const README_TRANSLATE_PROMPT = `你是 markdown 翻译助手。把以下 README 文档翻译成中文。规则：
+
+1. 保留**所有 markdown 结构**（# 标题 / - 列表 / [text](url) 链接 / ![alt](url) 图片 / > 引用 / 表格 | / --- 分隔线 等）
+2. **代码块（\`\`\` 包围）和行内代码（\` 包围）**：内容**不翻译**，原样保留
+3. **链接的 URL** 不翻译，只翻译显示文字（[显示文字](url) 中的 "显示文字"）
+4. **HTML 标签**（<p> <img> <iframe> <video> <details> <summary> <a> <br> 等）保留原样，标签内的文字翻译
+5. **专业术语保留英文原文**（如 Transformer / RAG / fine-tuning / agent / vector embedding / LLM / inference），需要时在英文后括号补简短中文释义，例如 "Transformer（自注意力架构）"
+6. **代码注释** 不翻译
+7. **品牌名 / 产品名 / 项目名 / GitHub 用户名**（@xxx）保留原文
+8. 翻译后的文字风格：清晰、自然、技术性，避免营销腔
+
+输出 ONLY 翻译后的 markdown 文档，不要任何前后缀解释、不要 \`\`\`markdown 代码块包装。`;
+
+const README_MAX_INPUT_CHARS = 60_000; // ≈ 15-20k tokens, 留 8k output 余量
+const TRANSLATE_MAX_TOKENS = 8000;
+
+async function callTranslateLlm(env: GithubEnv, readme: string): Promise<string | null> {
+  if (!env.DEEPSEEK_API_KEY) return null;
+
+  let input = readme;
+  let truncated = false;
+  if (input.length > README_MAX_INPUT_CHARS) {
+    input = input.slice(0, README_MAX_INPUT_CHARS) + "\n\n[... 原文已截断 ...]";
+    truncated = true;
+  }
+
+  try {
+    const r = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        messages: [
+          { role: "system", content: README_TRANSLATE_PROMPT },
+          { role: "user", content: input },
+        ],
+        temperature: 0.1, // 翻译略放低 0，避免每次输出不一样
+        max_tokens: TRANSLATE_MAX_TOKENS,
+      }),
+    });
+    if (!r.ok) {
+      console.error(`[github-readme-translate] HTTP ${r.status}`);
+      return null;
+    }
+    const data = await r.json<{ choices?: { message?: { content?: string } }[] }>();
+    let text = data.choices?.[0]?.message?.content?.trim() ?? null;
+    if (!text) return null;
+    // Strip stray ```markdown / ``` wrapping if model added it despite prompt
+    text = text.replace(/^```(?:markdown)?\n?/, "").replace(/\n?```$/, "");
+    if (truncated) text += "\n\n_[原 README 过长已截断]_";
+    return text;
+  } catch (e) {
+    console.error("[github-readme-translate] error:", e);
+    return null;
+  }
+}
+
+export async function runGithubReadmeTranslate(
+  env: GithubEnv,
+  limit = 1,
+): Promise<{ picked: number; ok: number; failed: number }> {
+  const counts = { picked: 0, ok: 0, failed: 0 };
+
+  // Pick rows with non-zh README and no translation yet, prioritize newest items.
+  const rows = await env.DB.prepare(
+    `SELECT id, json_extract(extra, '$.readme_excerpt') AS readme,
+            json_extract(extra, '$.readme_lang')   AS lang
+       FROM items
+      WHERE source_type='github'
+        AND is_relevant = 1
+        AND json_extract(extra, '$.readme_excerpt') IS NOT NULL
+        AND json_extract(extra, '$.readme_translated') IS NULL
+        AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{ id: string; readme: string | null; lang: string | null }>();
+
+  counts.picked = rows.results.length;
+  if (counts.picked === 0) return counts;
+
+  for (const row of rows.results) {
+    if (!row.readme) {
+      counts.failed++;
+      continue;
+    }
+    const translated = await callTranslateLlm(env, row.readme);
+    if (!translated) {
+      counts.failed++;
+      console.error(`[github-readme-translate] ${row.id}: empty translation`);
+      continue;
+    }
+    try {
+      await env.DB.prepare(
+        `UPDATE items
+            SET extra = json_set(extra,
+                                 '$.readme_translated', ?,
+                                 '$.readme_translated_at', ?)
+          WHERE id = ?`,
+      )
+        .bind(translated, Math.floor(Date.now() / 1000), row.id)
+        .run();
+      counts.ok++;
+      console.log(`[github-readme-translate] ${row.id}: ok (${translated.length} chars)`);
+    } catch (e) {
+      counts.failed++;
+      console.error(`[github-readme-translate] ${row.id}: D1 update error`, e);
+    }
+  }
+
+  console.log(`[github-readme-translate] ${JSON.stringify(counts)}`);
+  return counts;
+}
+
+// Count rows that need translation (used by scheduled() to decide preempt).
+export async function countGithubReadmeTranslatePending(env: GithubEnv): Promise<number> {
+  const r = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+       FROM items
+      WHERE source_type='github'
+        AND is_relevant = 1
+        AND json_extract(extra, '$.readme_excerpt') IS NOT NULL
+        AND json_extract(extra, '$.readme_translated') IS NULL
+        AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'`,
+  ).first<{ n: number }>();
+  return r?.n ?? 0;
+}
