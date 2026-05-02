@@ -5,6 +5,7 @@ import { TweetCard } from "./TweetCard";
 import { GithubDrawerBody } from "./GithubDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
+import { smoothScrollToTop } from "../lib/scroll";
 import type { Item, ItemExtra } from "../types";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
@@ -33,6 +34,10 @@ export function TweetDrawer() {
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  // Tracks whether the in-body title (owner/repo for GH, etc.) has scrolled
+  // above the visible area — when true, the header surfaces it as a
+  // "sticky" replacement title.
+  const [titleHidden, setTitleHidden] = useState(false);
   const dragXRef = useRef(0);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
@@ -202,14 +207,42 @@ export function TweetDrawer() {
     return () => el.removeEventListener("touchstart", nudgeOffBoundary);
   }, [open, isNarrow]);
 
+  // Watch when the in-body anchor title scrolls past the top of the
+  // drawer body — flip `titleHidden` so the header surfaces a fallback
+  // title (owner/repo for GH). Resets to false on each item change.
+  useEffect(() => {
+    setTitleHidden(false);
+    if (!open || !item) return;
+    const el = bodyScrollRef.current;
+    if (!el) return;
+    const anchor = el.querySelector<HTMLElement>("[data-drawer-title-anchor]");
+    if (!anchor) return;
+
+    const onScroll = () => {
+      // Title is "above the screen" once the bottom of the anchor element
+      // is above the scroller's visible top.
+      const threshold = anchor.offsetTop + anchor.offsetHeight;
+      setTitleHidden(el.scrollTop > threshold);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [open, item?.id]);
+
   if (!open) return null;
 
   const isGithub = item?.source_type === "github";
   const threadMembers = item && !isGithub ? resolveThreadMembers(item, siblings) : [];
   const githubOwnerRepo = isGithub ? (item?.title || item?.source_id || "") : "";
+  // Default title is generic ("项目详情" / "推文详情" / etc.). Once the body's
+  // own title element scrolls past the top, the header takes over and
+  // displays the actual identifier (owner/repo for GH).
+  const defaultGithubTitle = "项目详情";
   const headerTitle = item
     ? isGithub
-      ? githubOwnerRepo || "GitHub"
+      ? titleHidden
+        ? githubOwnerRepo || defaultGithubTitle
+        : defaultGithubTitle
       : threadMembers.length > 1
         ? `Thread · ${threadMembers.length} 条`
         : "推文详情"
@@ -222,10 +255,12 @@ export function TweetDrawer() {
   const externalLinkTitle = isGithub ? "在 GitHub 打开" : "在 x.com 打开";
 
   // Double-tap on the title bar (excluding the back / external-link buttons)
-  // scrolls the drawer body to top — useful for long READMEs.
+  // scrolls the drawer body to top via 300ms ease-out (smoothScrollToTop).
+  // Native `scrollTo({behavior:'smooth'})` duration varies across browsers
+  // and feels inconsistent — fixed-duration animation is predictable.
   const onHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
     if ((e.target as HTMLElement).closest("button, a")) return;
-    bodyScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    smoothScrollToTop(bodyScrollRef.current);
   };
 
   return (
