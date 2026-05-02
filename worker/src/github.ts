@@ -785,7 +785,7 @@ export async function countGithubReadmeTranslatePending(env: GithubEnv): Promise
 // proxy-served `/r/<key>` form. Marks extra.r2_migrated_at on completion.
 
 const R2_MAX_BYTES = 5 * 1024 * 1024;        // 5 MB hard cap per asset
-const R2_MAX_ASSETS_PER_REPO = 8;            // per cron tick
+const R2_MAX_ASSETS_PER_REPO = 20;           // per repo per migrate run — covers most READMEs (8 was too low, missed body images)
 const R2_KEY_PREFIX = "gh";                  // bucket-internal layout: gh/<owner>/<repo>/...
 
 const ALLOWED_IMG_TYPES = new Set([

@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import type { Components } from "react-markdown";
-import type { GithubMetrics, Item, ItemExtra } from "../types";
+import type { GithubMetrics, Item, ItemExtra, MediaItem } from "../types";
 import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
   IconRepoForked,
@@ -42,9 +43,42 @@ function resolveRelative(
   return `${base}/${src.replace(/^\.\//, "")}`;
 }
 
+// Extract image URLs from the readme markdown in render order, resolved
+// to absolute (R2 / GitHub raw / external) URLs. Used to feed Lightbox.
+export function extractReadmeImages(
+  markdown: string,
+  owner: string,
+  repo: string,
+  branch: string,
+): MediaItem[] {
+  const out: MediaItem[] = [];
+  const seen = new Set<string>();
+  const push = (rawSrc: string) => {
+    const resolved = resolveRelative(rawSrc, owner, repo, branch, "raw");
+    if (!resolved || seen.has(resolved)) return;
+    seen.add(resolved);
+    out.push({ type: "image", url: resolved });
+  };
+  // Markdown ![alt](url "optional title")
+  const mdRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = mdRe.exec(markdown)) !== null) push(m[1]);
+  // HTML <img src="url" .../>
+  const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  while ((m = htmlRe.exec(markdown)) !== null) push(m[1]);
+  return out;
+}
+
 // Tailwind-styled markdown elements + relative-URL rewriter (closure-bound
 // to owner/repo/branch so img/a in the README resolve to GitHub raw / blob).
-function makeMarkdownComponents(owner: string, repo: string, branch: string): Components {
+// onImageClick: callback fired when user clicks an inline image, with the
+// resolved URL — caller maps to lightbox index for opening.
+function makeMarkdownComponents(
+  owner: string,
+  repo: string,
+  branch: string,
+  onImageClick?: (resolvedSrc: string) => void,
+): Components {
   return {
     h1: ({ node: _node, ...props }) => (
       <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
@@ -102,18 +136,25 @@ function makeMarkdownComponents(owner: string, repo: string, branch: string): Co
     hr: ({ node: _node, ...props }) => (
       <hr className="my-4 border-neutral-200" {...props} />
     ),
-    img: ({ node: _node, src, ...props }) => (
-      <img
-        src={resolveRelative(src as string | undefined, owner, repo, branch, "raw")}
-        className="my-2 max-w-full rounded-md border border-neutral-200"
-        loading="lazy"
-        onError={(e) => {
-          // Hide broken images instead of showing the broken-link icon.
-          (e.currentTarget as HTMLImageElement).style.display = "none";
-        }}
-        {...props}
-      />
-    ),
+    img: ({ node: _node, src, ...props }) => {
+      const resolved = resolveRelative(src as string | undefined, owner, repo, branch, "raw");
+      return (
+        <img
+          src={resolved}
+          className="my-2 max-w-full cursor-zoom-in rounded-md border border-neutral-200"
+          loading="lazy"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (resolved && onImageClick) onImageClick(resolved);
+          }}
+          onError={(e) => {
+            // Hide broken images instead of showing the broken-link icon.
+            (e.currentTarget as HTMLImageElement).style.display = "none";
+          }}
+          {...props}
+        />
+      );
+    },
     table: ({ node: _node, ...props }) => (
       <div className="my-3 overflow-x-auto">
         <table className="min-w-full border-collapse text-[12px]" {...props} />
@@ -169,9 +210,16 @@ export function GithubDrawerBody({ item }: Props) {
   const openIssues = latestMetrics?.open_issues ?? metrics.open_issues;
   const openPrs = latestMetrics?.open_prs ?? metrics.open_prs;
 
-  // Tab state — only relevant when readme is non-Chinese
+  // Tab state — only relevant when readme is non-Chinese.
+  // Default to '译文' if translation already available (saves a click for
+  // Chinese readers); otherwise '原文'.
   const showTabs = readmeLang !== "zh";
-  const [tab, setTab] = useState<"orig" | "zh">(showTabs ? "orig" : "orig");
+  const [tab, setTab] = useState<"orig" | "zh">(
+    showTabs && readmeTranslated ? "zh" : "orig",
+  );
+
+  // Lightbox state for README images (mirrors X TweetCard behavior).
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   useEffect(() => {
     // Pull metrics_history to surface freshest open_issues / open_prs.
@@ -189,10 +237,22 @@ export function GithubDrawerBody({ item }: Props) {
   const readmeToShow = tab === "zh" ? readmeTranslated : readmeRaw;
 
   // Markdown components closure-bound to repo info so img/a resolve relative
-  // URLs to the right GitHub raw / blob URL.
+  // URLs to the right GitHub raw / blob URL. Click on inline image opens
+  // Lightbox at the matching index.
   const repoName = ownerRepo.split("/")[1] || "";
   const defaultBranch = (extra.default_branch as string | undefined) || "main";
-  const markdownComponents = makeMarkdownComponents(owner, repoName, defaultBranch);
+  const readmeImages = useMemo(
+    () => extractReadmeImages(readmeToShow || readmeRaw || "", owner, repoName, defaultBranch),
+    [readmeToShow, readmeRaw, owner, repoName, defaultBranch],
+  );
+  const markdownComponents = useMemo(
+    () =>
+      makeMarkdownComponents(owner, repoName, defaultBranch, (resolvedSrc) => {
+        const idx = readmeImages.findIndex((m) => m.url === resolvedSrc);
+        if (idx >= 0) setLightboxIndex(idx);
+      }),
+    [owner, repoName, defaultBranch, readmeImages],
+  );
 
   return (
     <div className="text-neutral-900">
@@ -335,6 +395,15 @@ export function GithubDrawerBody({ item }: Props) {
             )}
           </div>
         </div>
+      )}
+
+      {/* Lightbox for README images (mirrors X TweetCard behavior). */}
+      {lightboxIndex !== null && readmeImages.length > 0 && (
+        <Lightbox
+          media={readmeImages}
+          startIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
       )}
     </div>
   );
