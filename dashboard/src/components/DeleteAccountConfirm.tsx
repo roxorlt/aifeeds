@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAuthStore } from '../lib/authStore';
 import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
+import { toast } from '../lib/toast';
 
 interface Props {
   open: boolean;
@@ -19,6 +20,8 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
 
   if (!open || !user) return null;
 
+  const phoneMask = user.phone_masked || '****';
+
   const handleConfirm = async () => {
     setErrorMsg('');
     if (!/^\d{11}$/.test(phoneInput)) {
@@ -29,6 +32,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
     try {
       await deleteAct(phoneInput);
       track(EVENTS.ACCOUNT_DELETE, {});
+      toast.success('账号已注销');
       onSuccess?.();
       onClose();
     } catch (e) {
@@ -47,33 +51,38 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <h2 className="mb-2 text-lg font-semibold text-rose-700">⚠️ 确认注销账号？</h2>
-        <p className="mb-3 text-sm text-neutral-700">注销后将永久失去：</p>
+      <div
+        className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="mb-2 text-lg font-semibold text-rose-700">确认注销账号？</h2>
+        <p className="mb-2 text-sm text-neutral-700">注销后将永久失去：</p>
         <ul className="mb-3 ml-4 list-disc text-sm text-neutral-700">
           <li>收藏的所有内容</li>
-          <li>订阅的 author / 关键词</li>
           <li>阅读历史</li>
         </ul>
-        <p className="mb-3 text-sm font-medium text-rose-700">操作不可逆。</p>
+        <p className="mb-4 text-sm font-medium text-rose-700">操作不可逆。</p>
+
         <label className="mb-1 block text-sm text-neutral-700">
-          请输入完整手机号（{user.phone_masked || '****'}）确认：
+          请输入要注销账号的登录手机号
         </label>
+        <p className="mb-1 font-mono text-xs text-neutral-500">提示：{phoneMask}</p>
         <input
           type="tel"
           value={phoneInput}
           onChange={(e) => setPhoneInput(e.target.value.replace(/\D/g, '').slice(0, 11))}
-          placeholder="13800001234"
-          className="mb-3 w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-rose-500 focus:outline-none"
+          placeholder="请输入要注销账号的登录手机号"
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-rose-500 focus:outline-none"
           autoFocus
         />
-        {errorMsg && <p className="mb-3 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{errorMsg}</p>}
-        <div className="flex gap-3">
+        {errorMsg && <p className="mt-1 text-xs text-rose-600">{errorMsg}</p>}
+
+        <div className="mt-4 flex gap-3">
           <button
             type="button"
             onClick={onClose}
             disabled={loading}
-            className="flex-1 rounded-md border border-neutral-300 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+            className="flex-1 rounded-md border border-neutral-300 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             取消
           </button>
@@ -81,7 +90,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
             type="button"
             onClick={handleConfirm}
             disabled={loading}
-            className="flex-1 rounded-md bg-rose-600 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:bg-rose-300"
+            className="flex-1 rounded-md bg-rose-600 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {loading ? '注销中…' : '确认注销'}
           </button>

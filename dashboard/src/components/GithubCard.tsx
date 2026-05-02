@@ -3,7 +3,9 @@ import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import {
+  IconIssueOpened,
   IconLeaderboard,
+  IconPullRequest,
   IconRepoForked,
   IconStarFill,
   IconWatching,
@@ -79,6 +81,8 @@ export function GithubCard({ item }: Props) {
   const stars = metrics.stars ?? metrics.total_stars;
   const forks = metrics.forks;
   const watchers = metrics.watchers;
+  const openIssues = metrics.open_issues;
+  const openPrs = metrics.open_prs;
   const summary = extra.ai_summary || "";
   const category = extra.ai_category as string | null | undefined;
   const dailyRank = extra.daily_rank as number | null | undefined;
@@ -136,6 +140,26 @@ export function GithubCard({ item }: Props) {
                   <span className="inline-flex items-center gap-1">
                     <IconWatching className="h-3.5 w-3.5" />
                     {formatCompact(watchers)}
+                  </span>
+                )}
+                {openIssues !== undefined && <span className="text-neutral-400">·</span>}
+                {openIssues !== undefined && (
+                  <span
+                    className="inline-flex cursor-help items-center gap-1"
+                    title={`${openIssues} 个 open issue`}
+                  >
+                    <IconIssueOpened className="h-3.5 w-3.5" />
+                    {formatCompact(openIssues)}
+                  </span>
+                )}
+                {openPrs !== undefined && <span className="text-neutral-400">·</span>}
+                {openPrs !== undefined && (
+                  <span
+                    className="inline-flex cursor-help items-center gap-1"
+                    title={`${openPrs} 个 open PR`}
+                  >
+                    <IconPullRequest className="h-3.5 w-3.5" />
+                    {formatCompact(openPrs)}
                   </span>
                 )}
               </div>

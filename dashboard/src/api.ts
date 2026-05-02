@@ -31,8 +31,9 @@ const API_BASE = (() => {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
   if (typeof window !== "undefined") {
     const host = window.location.hostname;
+    // Dev: 走相对路径 → vite proxy 透传到目标 worker（默认 prod，可用 VITE_API_PROXY 覆盖）
     if (host === "localhost" || host === "127.0.0.1") {
-      return "http://localhost:8788";
+      return "";
     }
   }
   return "https://api.ai-feeds.com";

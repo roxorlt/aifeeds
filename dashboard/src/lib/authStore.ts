@@ -26,7 +26,6 @@ interface AuthStore {
   closeLoginModal: () => void;
   onLoginSuccess: (user: User) => Promise<void>;
   logout: () => Promise<void>;
-  logoutAll: () => Promise<void>;
   deleteAccount: (phoneConfirm: string) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -74,13 +73,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   async logout() {
     try {
       await authApi.logout();
-    } catch {}
-    set({ user: null });
-  },
-
-  async logoutAll() {
-    try {
-      await authApi.logoutAll();
     } catch {}
     set({ user: null });
   },

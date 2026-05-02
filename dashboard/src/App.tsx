@@ -19,7 +19,9 @@ import { installErrorHandlers } from "./lib/telemetry/errors";
 import { Routes, Route } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { LoginModal } from "./components/LoginModal";
+import { Toast } from "./components/Toast";
 import { Settings } from "./pages/Settings";
+import { AccountManage } from "./pages/AccountManage";
 import { useAuthStore } from "./lib/authStore";
 
 interface SourceConfig {
@@ -261,14 +263,6 @@ function DashboardHome() {
             </nav>
           )}
 
-          <button
-            type="button"
-            onClick={() => setRefreshTick((t) => t + 1)}
-            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
-            title="刷新"
-          >
-            ⟳
-          </button>
           <UserMenu />
         </div>
       </header>
@@ -341,8 +335,10 @@ function App() {
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/settings/account" element={<AccountManage />} />
       </Routes>
       <LoginModal />
+      <Toast />
     </>
   );
 }

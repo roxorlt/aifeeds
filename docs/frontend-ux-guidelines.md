@@ -111,7 +111,7 @@
 
 **主按钮（Primary CTA）**：
 ```html
-<button class="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300">
+<button class="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40">
   登录
 </button>
 ```
@@ -125,10 +125,12 @@
 
 **危险按钮（Danger，限定注销 / 删除 / 不可逆操作）**：
 ```html
-<button class="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:bg-rose-300">
+<button class="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40">
   确认注销
 </button>
 ```
+
+> ⚠️ disabled 状态用 `opacity-40` 而不是 `bg-neutral-300` / `bg-rose-300`：低饱和灰色在白底上对比度不足（≈1.6:1，低于 WCAG AA 4.5:1），用户分不清按钮在哪。`opacity-40` 保留按钮原色作为视觉锚点，且保证 disabled 含义清晰。
 
 **图标按钮（顶栏 / 关闭 ✕ / 收起）**：
 ```html

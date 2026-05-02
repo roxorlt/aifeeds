@@ -11,4 +11,15 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  server: {
+    // Dev 默认把 /api/* 透传到 prod worker（同源化，cookie 自然工作）。
+    // 想本地起 wrangler dev 时把 VITE_API_PROXY=http://localhost:8788 传进来即可。
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_PROXY || 'https://api.ai-feeds.com',
+        changeOrigin: true,
+        secure: true,
+      },
+    },
+  },
 })

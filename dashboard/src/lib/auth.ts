@@ -9,8 +9,9 @@ const API_BASE = (() => {
   }
   if (typeof window !== 'undefined') {
     const host = window.location.hostname;
+    // Dev: 走相对路径 → vite proxy 透传到目标 worker（默认 prod，可用 VITE_API_PROXY 覆盖）
     if (host === 'localhost' || host === '127.0.0.1') {
-      return 'http://localhost:8788';
+      return '';
     }
   }
   return 'https://api.ai-feeds.com';
@@ -110,11 +111,6 @@ export async function fetchMe(): Promise<{ user: User }> {
 
 export async function logout(): Promise<{ ok: true }> {
   const res = await authFetch('/api/auth/logout', { method: 'POST' });
-  return parseOrThrow(res);
-}
-
-export async function logoutAll(): Promise<{ ok: true; revoked: number }> {
-  const res = await authFetch('/api/auth/logout-all', { method: 'POST' });
   return parseOrThrow(res);
 }
 

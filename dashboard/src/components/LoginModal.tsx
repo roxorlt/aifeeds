@@ -3,17 +3,11 @@ import { useAuthStore } from '../lib/authStore';
 import * as authApi from '../lib/auth';
 import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
+import { toast } from '../lib/toast';
 
 const TURNSTILE_SITE_KEY = '0x4AAAAAADHQ15rM-NnOZ2zL';
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const PHONE_REGEX = /^1[3-9]\d{9}$/;
-
-/** dev 环境检测：localhost / 127.0.0.1 跳过 Turnstile widget（dev worker 也 bypass 服务端校验） */
-function isDevHost(): boolean {
-  if (typeof window === 'undefined') return false;
-  const h = window.location.hostname;
-  return h === 'localhost' || h === '127.0.0.1';
-}
 
 declare global {
   interface Window {
@@ -71,7 +65,6 @@ export function LoginModal() {
   const [cooldownSec, setCooldownSec] = useState(0);
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
-  const dev = isDevHost();
 
   // open 改 true：上报埋点 + reset 状态
   useEffect(() => {
@@ -79,27 +72,24 @@ export function LoginModal() {
     track(EVENTS.LOGIN_MODAL_OPEN, { trigger_action: trigger });
     setPhone('');
     setCode('');
-    setTurnstileToken(dev ? 'dev-bypass' : null);  // dev 模式直接给 fake token
+    setTurnstileToken(null);
     setCodeSent(false);
     setLoading(false);
     setPhoneError('');
     setCodeError('');
     setCooldownSec(0);
-  }, [open, trigger, dev]);
+  }, [open, trigger]);
 
-  // open + 非 dev：加载 + render Turnstile widget
+  // open：加载 + render Turnstile widget。
+  // 每次 open 都全新 render，close 时显式 remove，避免老 widgetId 失效后 reset 报错。
   useEffect(() => {
-    if (!open || dev) return;
+    if (!open) return;
     let cancelled = false;
+    let createdId: string | null = null;
     (async () => {
       try {
         await loadTurnstileScript();
         if (cancelled || !turnstileContainerRef.current || !window.turnstile) return;
-        if (turnstileWidgetId) {
-          window.turnstile.reset(turnstileWidgetId);
-          setTurnstileToken(null);
-          return;
-        }
         const id = window.turnstile.render(turnstileContainerRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           theme: 'auto',
@@ -107,6 +97,7 @@ export function LoginModal() {
           'error-callback': () => setTurnstileToken(null),
           'expired-callback': () => setTurnstileToken(null),
         });
+        createdId = id;
         setTurnstileWidgetId(id);
       } catch (e) {
         setPhoneError(`captcha 加载失败：${e instanceof Error ? e.message : String(e)}`);
@@ -114,9 +105,12 @@ export function LoginModal() {
     })();
     return () => {
       cancelled = true;
+      if (createdId && window.turnstile) {
+        try { window.turnstile.remove(createdId); } catch {}
+      }
+      setTurnstileWidgetId(null);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, dev]);
+  }, [open]);
 
   // 倒计时
   useEffect(() => {
@@ -152,8 +146,8 @@ export function LoginModal() {
       else if (a.status === 503) msg = '服务暂不可用，请稍后再试';
       else if (a.status === 403) msg = '人机验证失败，请重试';
       setPhoneError(msg);
-      // 真 widget 时 token 已被消费，reset
-      if (!dev && turnstileWidgetId && window.turnstile) {
+      // token 已被消费，reset 让用户重过验证
+      if (turnstileWidgetId && window.turnstile) {
         window.turnstile.reset(turnstileWidgetId);
         setTurnstileToken(null);
       }
@@ -173,6 +167,7 @@ export function LoginModal() {
     try {
       const data = await authApi.login(phone, code);
       track(EVENTS.LOGIN_SUCCESS, { is_new_user: data.user.is_new, login_method: 'phone-sms' });
+      toast.success(data.user.is_new ? '注册成功' : '登录成功');
       await onLoginSuccess(data.user);
     } catch (e) {
       const a = e as AuthError;
@@ -242,10 +237,8 @@ export function LoginModal() {
           <p className="mt-1 text-xs text-rose-600">{phoneError}</p>
         )}
 
-        {/* Turnstile widget — dev 不渲染 */}
-        {!dev && (
-          <div ref={turnstileContainerRef} className="mt-3 flex justify-center" />
-        )}
+        {/* Turnstile widget */}
+        <div ref={turnstileContainerRef} className="mt-3 flex justify-center" />
 
         {/* 验证码 — 始终显示，未发码时 disabled */}
         <label className="mb-1 mt-3 block text-sm text-neutral-700">验证码</label>
@@ -266,7 +259,7 @@ export function LoginModal() {
           type="button"
           onClick={handleLogin}
           disabled={loginDisabled}
-          className="mt-4 w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300"
+          className="mt-4 w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {loading && codeSent ? '登录中…' : '登录 / 注册'}
         </button>
