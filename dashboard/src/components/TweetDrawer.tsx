@@ -206,9 +206,10 @@ export function TweetDrawer() {
 
   const isGithub = item?.source_type === "github";
   const threadMembers = item && !isGithub ? resolveThreadMembers(item, siblings) : [];
+  const githubOwnerRepo = isGithub ? (item?.title || item?.source_id || "") : "";
   const headerTitle = item
     ? isGithub
-      ? "GitHub 项目详情"
+      ? githubOwnerRepo || "GitHub"
       : threadMembers.length > 1
         ? `Thread · ${threadMembers.length} 条`
         : "推文详情"
@@ -219,6 +220,13 @@ export function TweetDrawer() {
         : "加载失败";
   const externalLinkLabel = isGithub ? "在 GitHub 打开 ↗" : "打开X原文 ↗";
   const externalLinkTitle = isGithub ? "在 GitHub 打开" : "在 x.com 打开";
+
+  // Double-tap on the title bar (excluding the back / external-link buttons)
+  // scrolls the drawer body to top — useful for long READMEs.
+  const onHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    if ((e.target as HTMLElement).closest("button, a")) return;
+    bodyScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
@@ -233,7 +241,10 @@ export function TweetDrawer() {
           transition: isDragging ? "none" : "transform 200ms ease-out",
         }}
       >
-        <header className="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-2 py-1.5 sm:px-3">
+        <header
+          className="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-2 py-1.5 sm:px-3"
+          onDoubleClick={onHeaderDoubleClick}
+        >
           <div className="justify-self-start">
             <button
               type="button"
