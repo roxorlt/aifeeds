@@ -34,10 +34,17 @@ body {
    (md:flex-1 md:overflow-y-auto inside md:max-h-[70vh] wrapper). Mobile
    gets natural document flow — no internal scroll. */
 
-/* Hide scrollbar on filter chips rail for a cleaner mobile look */
+/* Filter chips rail. Hide scrollbar + explicitly claim horizontal touch
+   so iOS Safari routes left/right swipes to the rail rather than
+   letting them fall through to the page (which otherwise produced a
+   confusing partial scroll on the feed below or a flash of system
+   back-gesture). */
 .chips-rail {
   scrollbar-width: none;
   -ms-overflow-style: none;
+  touch-action: pan-x;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
 }
 .chips-rail::-webkit-scrollbar {
   display: none;

@@ -1,7 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Feed, type FeedHandle } from "./components/Feed";
-import { TweetDrawer } from "./components/TweetDrawer";
 import { DrawerProvider } from "./lib/drawer";
+
+// Drawer drags in react-markdown + remark-gfm + rehype-raw (~150kb gzipped).
+// Defer it until first drawer open so initial paint isn't blocked by markdown
+// deps the user may never need.
+const TweetDrawer = lazy(() =>
+  import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
+);
 import { fetchSources, fetchStats, TRACK_ENDPOINT } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
@@ -222,7 +228,9 @@ function App() {
           </a>
         </footer>
       </main>
-      <TweetDrawer />
+      <Suspense fallback={null}>
+        <TweetDrawer />
+      </Suspense>
     </div>
     </DrawerProvider>
   );
