@@ -5,47 +5,120 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>隐私政策 — AI-Feeds</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; max-width: 720px; margin: 2em auto; padding: 1em; line-height: 1.7; color: #1a1a1a; }
-    h1 { border-bottom: 1px solid #ddd; padding-bottom: .3em; }
-    h2 { margin-top: 1.6em; }
-    a { color: #2563eb; }
-    .meta { color: #666; font-size: .9em; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 760px; margin: 2em auto; padding: 1.2em; line-height: 1.75; color: #171717; background: #fafafa; }
+    h1 { border-bottom: 1px solid #e5e5e5; padding-bottom: .4em; margin-top: 0; }
+    h2 { margin-top: 2em; font-size: 1.15em; }
+    h3 { margin-top: 1.5em; font-size: 1em; color: #404040; }
+    p, li { color: #262626; }
+    a { color: #0284c7; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .meta { color: #737373; font-size: .9em; }
+    .callout { border-left: 3px solid #d4d4d4; padding: .4em 1em; margin: 1em 0; background: #fff; color: #404040; }
+    table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .92em; }
+    th, td { border: 1px solid #e5e5e5; padding: .5em .8em; text-align: left; vertical-align: top; }
+    th { background: #f5f5f5; font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>隐私政策</h1>
-  <p class="meta">最后更新：2026-05-02</p>
+  <p class="meta">最后更新：2026-05-02 · 生效日期：2026-05-02</p>
 
-  <h2>我们是谁</h2>
-  <p>AI-Feeds（ai-feeds.com）是一个独立开发者项目，由个人维护，提供一站式 AI 信息聚合看板。</p>
+  <div class="callout">
+    <p>AI-Feeds（ai-feeds.com，以下简称"本服务"）由独立开发者运营，提供 AI 行业信息聚合看板。本政策说明我们收集哪些信息、为什么收集、如何使用、如何保护，以及你拥有哪些选择权。</p>
+    <p>使用本服务即表示你已阅读并同意本政策。请你在使用前仔细阅读，对其中重要内容（粗体或下划线标注）做合理理解。</p>
+  </div>
 
-  <h2>我们收集哪些信息</h2>
+  <h2>一、我们是谁</h2>
+  <p>AI-Feeds 是个人维护的项目，运营主体为独立开发者，不属于任何公司主体。本政策中"我们"指本服务的运营者。</p>
+
+  <h2>二、我们收集哪些信息以及为什么收集</h2>
+
+  <h3>2.1 你访问时自动收集</h3>
+  <table>
+    <tr><th>信息</th><th>用途</th><th>是否必须</th></tr>
+    <tr><td><strong>device_id</strong>（匿名访客标识，本地生成 21 字符随机字符串，存在浏览器 LocalStorage）</td><td>区分访客做去重统计、行为埋点、防刷计数</td><td>必须（清缓存即重置）</td></tr>
+    <tr><td><strong>IP 地址 / User-Agent / Referer</strong></td><td>防刷、地域统计、来源分析、安全审计</td><td>必须（HTTP 协议自带）</td></tr>
+    <tr><td><strong>浏览行为事件</strong>（页面访问、卡片曝光、点击、停留时长、滚动深度、性能指标 LCP/INP/CLS、JavaScript 错误）</td><td>了解用户使用情况优化产品；定位前端 bug</td><td>必须</td></tr>
+  </table>
+
+  <p><strong>我们不收集的</strong>：设备硬件信息（IMEI / MAC / 传感器列表）、浏览器指纹（canvas / WebGL hash）、第三方 cookie、定位坐标、通讯录、相册。</p>
+
+  <h3>2.2 你登录后才收集</h3>
+  <table>
+    <tr><th>信息</th><th>用途</th><th>是否必须</th></tr>
+    <tr><td><strong>手机号</strong></td><td>身份验证、登录凭证、安全告警通知（仅自己）</td><td>登录必须</td></tr>
+    <tr><td><strong>验证码</strong>（哈希后）</td><td>验证 + 短期防刷计数</td><td>登录必须</td></tr>
+    <tr><td><strong>session token</strong>（cookie）</td><td>保持登录状态</td><td>登录必须</td></tr>
+    <tr><td>昵称 / 头像（可选填）</td><td>展示</td><td>非必须</td></tr>
+    <tr><td>收藏 / 订阅 / 阅读偏好（未来功能）</td><td>个性化体验</td><td>非必须</td></tr>
+  </table>
+
+  <h3>2.3 短信验证码</h3>
+  <p>登录时我们会通过短信服务（腾讯云短信 / 紧急情况下经 PushDeer 发到管理员设备转发）向你的手机号发送 6 位数字验证码。验证码有效期 5 分钟，错误超过 5 次会临时锁定账户 30 分钟。验证码本身在数据库中以 SHA-256 哈希形式存储，明文不会落库。</p>
+
+  <h2>三、信息如何存储与保护</h2>
+
+  <h3>3.1 存储位置</h3>
+  <p>本服务的数据库（D1）和静态资源（Pages / R2）托管于 <strong>Cloudflare 全球分布式节点</strong>。这意味着你的数据可能存储在中国大陆境外的服务器（包括但不限于美国、欧洲、亚太地区其他国家）。本服务采取业界标准的传输加密（HTTPS）和访问控制，但无法对你网络环境之外的传输路径做绝对保证。</p>
+  <div class="callout">
+    <strong>请注意</strong>：登录注册即表示你理解并同意，你提供的手机号、登录凭证、行为日志可能出境到 Cloudflare 全球节点存储。如不接受，请停止使用本服务。
+  </div>
+
+  <h3>3.2 保留期限</h3>
   <ul>
-    <li><b>device_id（匿名访客标识）</b>：首次访问时本地生成的随机字符串，存在你浏览器的 LocalStorage 里。<b>不读取设备硬件信息，不形成"设备指纹"</b>。</li>
-    <li><b>IP 地址 / 浏览器 User-Agent / Referer</b>：每次请求自动记录，用于防刷、地域统计、安全审计。</li>
-    <li><b>手机号</b>（仅注册/登录后）：用于唯一身份验证，仅在登录流程中使用，存储为不可逆方式或脱敏显示。</li>
-    <li><b>验证码（hash 后）</b>：登录流程，仅校验用，明文不入库。</li>
-    <li><b>行为事件</b>（浏览、点击、停留时长、性能指标、错误日志）：通过 events 表统一收集，不包含手机号或敏感个人信息。</li>
+    <li>device_id（本地）：直到你清除浏览器缓存</li>
+    <li>行为事件 events：保留 30 天后自动清理（cron 删除）</li>
+    <li>短信日志 sms_send_log：保留 30 天后自动清理</li>
+    <li>session：30 天滑动过期，主动登出立即撤销</li>
+    <li>用户主体（users）+ 身份凭证（identities）：账号有效期内保留；注销后立即清空昵称、头像，手机号哈希后保留以避免引用丢失</li>
   </ul>
 
-  <h2>我们使用哪些第三方服务</h2>
+  <h3>3.3 安全措施</h3>
   <ul>
-    <li><b>Cloudflare Turnstile</b>：人机验证（防刷），不收集敏感信息。</li>
-    <li><b>腾讯云 / PushDeer</b>：发送短信验证码（依实际后台配置）。</li>
-    <li><b>Cloudflare Workers / D1 / Pages / R2</b>：数据存储和服务托管。</li>
+    <li>验证码 SHA-256 加盐哈希存储</li>
+    <li>session cookie 标记 HttpOnly（JavaScript 不可读）+ Secure（仅 HTTPS）+ SameSite=Lax</li>
+    <li>多层防刷：Cloudflare Turnstile 人机验证 + 三维度限流（手机号 / IP / 设备）+ 每日全局额度上限</li>
+    <li>错误率 / 异常 IP 实时告警到管理员</li>
   </ul>
 
-  <h2>用户控制权</h2>
+  <h2>四、信息如何共享</h2>
+  <p>我们<strong>不出售</strong>你的个人信息。在以下有限场景才会共享：</p>
   <ul>
-    <li>清除浏览器缓存即可重置 device_id（你浏览器主导）。</li>
-    <li>设置页可主动「退出登录」「退出全部设备」「注销账号」。</li>
-    <li>注销账号会立即清空 PII 字段，identity 哈希后保留以避免引用丢失。</li>
+    <li><strong>必要的服务提供商</strong>：Cloudflare（基础设施）、腾讯云短信 / PushDeer（短信通道）、DeepSeek（AI 翻译，仅处理公开内容，不传你的 PII）</li>
+    <li><strong>法律要求</strong>：依据有效法律程序（生效法律法规、政府要求、司法令状）必须披露的情况</li>
+    <li><strong>注销账号后的匿名化数据</strong>：行为统计可能在去除可关联到你的字段后保留用于产品分析</li>
   </ul>
 
-  <h2>政策变更</h2>
-  <p>政策变更时，我们将在本页面更新「最后更新」日期。重大变更会在登录后的 dashboard 顶部提示。</p>
+  <h2>五、你的权利</h2>
+  <p>你可以随时：</p>
+  <ul>
+    <li><strong>查询 / 复制</strong>当前账号信息（在「设置」页可见昵称 / 脱敏手机号 / 创建时间）</li>
+    <li><strong>退出登录</strong>（撤销当前会话）或<strong>退出全部设备</strong>（撤销所有会话）</li>
+    <li><strong>清除本地标识</strong>（在「设置 → 数据」点击"清除本地浏览器标识"会重置 device_id）</li>
+    <li><strong>注销账号</strong>（在「设置 → 危险区」点击"注销账号"，输入完整手机号确认后，账户立即不可登录，PII 字段清空）</li>
+    <li>需要导出全部数据 / 撤回同意 / 投诉处理结果，发邮件到 <a href="mailto:ltsms86@gmail.com">ltsms86@gmail.com</a>，我们会在 15 个工作日内回复</li>
+  </ul>
 
-  <h2>联系我们</h2>
-  <p>邮箱：<a href="mailto:ltsms86@gmail.com">ltsms86@gmail.com</a></p>
+  <h2>六、Cookie 与本地存储</h2>
+  <p>本服务使用以下技术：</p>
+  <ul>
+    <li><strong>LocalStorage</strong>：存 device_id、telemetry 队列缓存、登录态等。可在浏览器设置中清除。</li>
+    <li><strong>SessionStorage</strong>：存当前会话临时数据。关闭标签页即清。</li>
+    <li><strong>HTTP Cookie</strong>：仅一项 <code>xlist_sid</code>，用于登录状态保持，HttpOnly 标记。退出登录即清。</li>
+    <li>本服务<strong>不使用</strong>第三方追踪 Cookie（如 Google Analytics、Facebook Pixel 等）。</li>
+  </ul>
+
+  <h2>七、未成年人保护</h2>
+  <p>本服务面向 14 周岁以上用户。我们不会主动收集未成年人个人信息。如发现未成年人未经监护人同意提供个人信息，请通过下方邮箱联系我们，我们会立即删除相关信息。</p>
+
+  <h2>八、政策更新</h2>
+  <p>本政策会随产品功能调整而更新。重大变更（涉及收集类型或共享范围）会通过 dashboard 顶部公告或邮件（如已绑定）提醒你重新同意。次要变更仅更新顶部"最后更新"日期。建议你定期回看本页面。</p>
+
+  <h2>九、联系我们</h2>
+  <p>对本政策有任何疑问、建议或投诉，欢迎邮件至：<a href="mailto:ltsms86@gmail.com">ltsms86@gmail.com</a></p>
+  <p>我们会在 15 个工作日内回复实质性问题；涉及账号紧急情况会在 3 个工作日内回复。</p>
+
+  <hr>
+  <p class="meta">本政策遵循《中华人民共和国个人信息保护法》《电信和互联网用户个人信息保护规定》及相关法律法规起草。</p>
 </body>
 </html>

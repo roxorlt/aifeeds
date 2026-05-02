@@ -55,6 +55,7 @@ docs/
 - [ ] 不含敏感数据（cookie、API key、token、本地绝对路径）
 - [ ] worker 改动：先本地 `wrangler dev` 验证 endpoint
 - [ ] dashboard 改动：`npm run build` 无 error，dev server 手动 smoke
+- [ ] **dashboard 视觉改动：对照 `docs/frontend-ux-guidelines.md` 检查 token / 组件规范**（颜色、字号、间距、按钮 variant、错误位置等不能跑偏）
 - [ ] scraper/processor 改动：小批量跑一次，看 DB 状态
 - [ ] 涉及 D1 数据同步：确认 `push_to_cloud()` 已覆盖本地变更
 - [ ] **远端服务变更同步更新运维文档**（见下方"运维手册"节），遗漏会导致跨 session 维护断档
@@ -173,6 +174,19 @@ scraper 的 DOM 抓取无法可靠识别引用推文（X 把 quote card 的 /sta
 - 翻译: quote_of.content + link_card.title/description → DeepSeek
 
 脚本: `enrich_from_syndication.py --mode backfill-quotes|fill-translations|refresh-metrics|full`
+
+## 前端 UX 规范
+
+**位置**：[docs/frontend-ux-guidelines.md](docs/frontend-ux-guidelines.md)
+
+**基线**：以 X List 卡片（`TweetCard.tsx`）的视觉风格为整站标准。GitHub 卡片 / Drawer / 弹窗 / 设置页 / 未来源都要向它对齐。
+
+**强制约定**：
+
+- **写新前端组件 / 改现有组件之前必须读这份规范**（设计 token、按钮 variant、表单错误位置、模态结构等）
+- 颜色、字号、间距、圆角、阴影、转场都按规范的 token，不出现 `text-[14px]` / `bg-blue-600` / 自创色彩这类离群值
+- 业务真需要规范外的元素（新色 / 新字号 / 新组件），先在规范文档里讨论 + 加进去，再实施
+- 检查清单见规范文档第六节，提交 dashboard 改动前对照过一遍
 
 ## 运维手册
 
