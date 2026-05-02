@@ -41,54 +41,75 @@ export const TRACK_ENDPOINT = `${API_BASE}/api/track`;
 
 /**
  * 统一 fetch 包装：自动注入 X-Device-Id，失败上报 api_error，
- * 对网络错误和 5xx 自动重试一次（移动端常见的瞬时抖动）。
+ * AbortController 超时 + 指数 backoff 重试（移动端 / WeChat WebView
+ * 的 fetch 抖动通常瞬时；快速失败 + 重试比单次长等待 UX 好）。
  * 业务 endpoint（/api/items / /api/sources 等）走这个；
  * /api/track 自身不能走（会循环），用原生 fetch。
  */
-const RETRY_BACKOFF_MS = 250;
+const FETCH_TIMEOUT_MS = 5000;
+const RETRY_BACKOFFS_MS = [200, 600] as const; // 重试 2 次 = 共 3 次 attempt
 
 async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   const headers = new Headers(init.headers);
   headers.set('X-Device-Id', getDeviceId());
 
-  const doFetch = () => fetch(url, { ...init, headers });
-
-  let res: Response;
-  try {
-    res = await doFetch();
-  } catch (e) {
-    // Network error — retry once after short backoff
+  // Each attempt is wrapped in its own AbortController so a single hung
+  // request can't block the entire retry chain. WeChat WebView is known
+  // to occasionally drop fetches without erroring out, leaving them
+  // pending forever.
+  const tryOnce = async (): Promise<Response> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
-      res = await doFetch();
-    } catch (e2) {
-      track(EVENTS.API_ERROR, {
-        endpoint: path,
-        status: 0,
-        error_msg: e2 instanceof Error ? e2.message : String(e2),
-      });
-      throw e2;
+      return await fetch(url, { ...init, headers, signal: ctrl.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let res: Response | null = null;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt <= RETRY_BACKOFFS_MS.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFFS_MS[attempt - 1]));
+    }
+    try {
+      const r = await tryOnce();
+      // 5xx is retryable (idempotent GETs only)
+      if (r.status >= 500 && r.status < 600 && attempt < RETRY_BACKOFFS_MS.length) {
+        res = r;
+        lastErr = new Error(`HTTP ${r.status}`);
+        continue;
+      }
+      // Final response (success / 4xx / final 5xx)
+      if (!r.ok && r.status >= 400) {
+        track(EVENTS.API_ERROR, {
+          endpoint: path,
+          status: r.status,
+          attempts: attempt + 1,
+        });
+      }
+      return r;
+    } catch (e) {
+      lastErr = e;
+      // Last attempt — give up
+      if (attempt >= RETRY_BACKOFFS_MS.length) {
+        track(EVENTS.API_ERROR, {
+          endpoint: path,
+          status: 0,
+          error_msg: e instanceof Error ? e.message : String(e),
+          attempts: attempt + 1,
+        });
+        throw e;
+      }
     }
   }
 
-  // Retry once on 5xx (idempotent GET requests only — that's all we issue here)
-  if (res.status >= 500 && res.status < 600) {
-    await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
-    try {
-      res = await doFetch();
-    } catch {
-      // keep the original 5xx response below if the retry itself errored
-    }
-  }
-
-  if (!res.ok && res.status >= 400) {
-    track(EVENTS.API_ERROR, {
-      endpoint: path,
-      status: res.status,
-    });
-  }
-  return res;
+  // Unreachable in practice — loop either returns or throws. Keep TS happy.
+  if (res) return res;
+  throw lastErr;
 }
 
 export interface ItemsQuery {
