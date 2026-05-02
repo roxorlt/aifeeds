@@ -56,9 +56,10 @@
 | 元信息 | meta（@handle / 时间 / 数据） | `text-[13px] text-neutral-500` |
 | 表单 label | label | `text-sm text-neutral-700` |
 | 表单 input value | 移动端键盘必须 ≥ 16px 防 iOS 缩放 | `text-base` |
+| 表单 input placeholder | 视觉不抢眼，比 input value 小一档 | `placeholder:text-sm placeholder:text-neutral-400` |
 | 极小辅助 | 标签内 / footer / 链接补充 | `text-[11px]` 或 `text-xs` |
 
-> ⚠️ 移动端表单输入框必须用 `text-base`（≥ 16px），iOS Safari 在小于 16px 时会自动 zoom-in，体验差。
+> ⚠️ 移动端表单输入框必须用 `text-base`（≥ 16px），iOS Safari 在小于 16px 时会自动 zoom-in，体验差。但 placeholder **可以**单独缩成 `text-sm`（CSS `::placeholder` 字号缩小不会触发 iOS 缩放），让占位文本不抢戏。
 
 ### 间距
 
@@ -145,7 +146,7 @@
 <input
   type="tel"
   placeholder="请输入手机号"
-  class="w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
+  class="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
 />
 {error && <p class="mt-1 text-xs text-rose-600">{error}</p>}
 ```

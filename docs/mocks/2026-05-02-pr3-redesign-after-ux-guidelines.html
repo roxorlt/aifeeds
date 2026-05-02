@@ -39,8 +39,8 @@
 
     <!-- ================ Section 1: GithubCard ================= -->
     <section class="mb-12">
-      <h2 class="text-xl font-semibold mb-1">① GithubCard</h2>
-      <p class="meta mb-4">三个变体：彩色 → neutral / 单色家族 / 完全去标签。挑你最满意的。</p>
+      <h2 class="text-xl font-semibold mb-1">① GithubCard 跟 X card 对齐</h2>
+      <p class="meta mb-4">核心问题：summary（描述）和底部 footer（日期 + contributors）<strong>没在内容列里</strong>，导致它们从头像左边开始，不缩进。X card 的正文是缩进对齐到头像后的 — 这是「跟 X 不一个风格」的根因。彩色徽章保留。</p>
 
       <div class="toggle-row">
         <!-- BEFORE -->
@@ -65,7 +65,8 @@
                   </div>
                   <span class="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">app</span>
                 </div>
-                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">基于终端的智能开发环境，集成了 AI Agent 能力，支持内置 coding agent 或接入 Claude Code、Codex 等第三方 CLI agent...</p>
+                <!-- ❌ summary 在 article 直接子元素，从最左对齐 -->
+                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">基于终端的智能开发环境，集成了 AI Agent 能力，支持内置 coding agent 或接入 Claude Code、Codex 等第三方 CLI agent。由 OpenAI 赞助...</p>
                 <div class="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
                   <span>05-01 · 🥇 1st</span>
                   <span>45 contributors</span>
@@ -86,150 +87,155 @@
                   </div>
                   <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">agent</span>
                 </div>
-                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">多智能体金融交易框架，通过模拟真实交易团队的分工...</p>
+                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">多智能体金融交易框架，通过模拟真实交易团队的分工（基本面分析师、情绪分析师、技术分析师、交易员、风控等）...</p>
+                <div class="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
+                  <span>05-01 · 🥈 2nd</span>
+                  <span>20 contributors</span>
+                </div>
               </article>
             </div>
           </div>
           <ul class="diff-list mt-3 ml-4 list-disc text-neutral-600">
-            <li><code class="bg-neutral-100 px-1">px-4 py-4</code> 内边距比 TweetCard 多 1（后者 py-3）</li>
-            <li><code class="bg-neutral-100 px-1">text-[12px]</code> meta 字号比 TweetCard 小 1px（后者 13px）</li>
-            <li><code class="bg-neutral-100 px-1">hover:bg-neutral-50/50</code> 透明度跟全站不一致（应 /60）</li>
-            <li>显式 <code class="bg-neutral-100 px-1">bg-white</code> 跟列表 bg-neutral-50 对比过强</li>
-            <li>category 6 hue 彩色徽章（agent/model/tool/infra/app/tutorial）= 站点视觉碎片化</li>
+            <li><strong>正文与 footer 不缩进</strong>：summary / 日期 / contributors 在 article 直接子元素，从最左开始（甚至到了头像左边以下区域），跟 X card 的「正文紧贴头像右侧、缩进对齐 author」完全不一致 ← 这是<strong>核心问题</strong></li>
+            <li><code class="bg-neutral-100 px-1">px-4 py-4</code> 比 X card 多 1（后者 py-3）</li>
+            <li><code class="bg-neutral-100 px-1">text-[12px]</code> meta 字号比 X card 少 1px（后者 13px）</li>
+            <li><code class="bg-neutral-100 px-1">hover:bg-neutral-50/50</code> 透明度不一致（应 /60）</li>
+            <li>显式 <code class="bg-neutral-100 px-1">bg-white</code> 跟 body bg-neutral-50 对比过强</li>
           </ul>
         </div>
 
         <!-- AFTER -->
         <div>
-          <div class="mb-2"><span class="label label-after">改后 方案 A：徽章 neutral 单色 (推荐)</span></div>
+          <div class="mb-2"><span class="label label-after">改后（保留彩色徽章）</span></div>
           <div class="panel" style="padding: 0;">
             <div class="feed-shell">
               <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
                 <div class="flex items-start gap-3">
                   <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
+                  <!-- ✅ summary 和 footer 移到 content column 内 -->
                   <div class="min-w-0 flex-1">
-                    <div class="text-[15px] font-bold leading-tight text-neutral-900 break-words">warpdotdev/warp</div>
-                    <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                      <span class="inline-flex items-center gap-1"><span class="lang-rs h-2 w-2 rounded-full"></span>Rust</span>
-                      <span class="text-neutral-400">·</span>
-                      <span>★ 50.9k</span>
-                      <span class="text-neutral-400">·</span>
-                      <span>⑂ 3.4k</span>
-                      <span class="text-neutral-400">·</span>
-                      <span>👁 318</span>
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="min-w-0 flex-1">
+                        <div class="text-[15px] font-bold leading-tight text-neutral-900 break-words">warpdotdev/warp</div>
+                        <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                          <span class="inline-flex items-center gap-1"><span class="lang-rs h-2 w-2 rounded-full"></span>Rust</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>★ 50.9k</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>⑂ 3.4k</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>👁 318</span>
+                        </div>
+                      </div>
+                      <span class="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">app</span>
+                    </div>
+                    <p class="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-3">基于终端的智能开发环境，集成了 AI Agent 能力，支持内置 coding agent 或接入 Claude Code、Codex 等第三方 CLI agent。由 OpenAI 赞助...</p>
+                    <div class="mt-3 flex items-center justify-between text-[12px] text-neutral-500">
+                      <span>05-01 · 🥇 1st</span>
+                      <span>45 contributors</span>
                     </div>
                   </div>
-                  <span class="shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">app</span>
-                </div>
-                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">基于终端的智能开发环境，集成了 AI Agent 能力，支持内置 coding agent 或接入 Claude Code、Codex 等第三方 CLI agent...</p>
-                <div class="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
-                  <span>05-01 · 🥇 1st</span>
-                  <span>45 contributors</span>
                 </div>
               </article>
               <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
                 <div class="flex items-start gap-3">
                   <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
                   <div class="min-w-0 flex-1">
-                    <div class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch/TradingAgents</div>
-                    <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                      <span class="inline-flex items-center gap-1"><span class="lang-py h-2 w-2 rounded-full"></span>Python</span>
-                      <span class="text-neutral-400">·</span>
-                      <span>★ 59.0k</span>
-                      <span class="text-neutral-400">·</span>
-                      <span>⑂ 11.3k</span>
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="min-w-0 flex-1">
+                        <div class="text-[15px] font-bold leading-tight text-neutral-900 break-words">TauricResearch/TradingAgents</div>
+                        <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                          <span class="inline-flex items-center gap-1"><span class="lang-py h-2 w-2 rounded-full"></span>Python</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>★ 59.0k</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>⑂ 11.3k</span>
+                        </div>
+                      </div>
+                      <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">agent</span>
+                    </div>
+                    <p class="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-3">多智能体金融交易框架，通过模拟真实交易团队的分工（基本面分析师、情绪分析师、技术分析师、交易员、风控等）...</p>
+                    <div class="mt-3 flex items-center justify-between text-[12px] text-neutral-500">
+                      <span>05-01 · 🥈 2nd</span>
+                      <span>20 contributors</span>
                     </div>
                   </div>
-                  <span class="shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">agent</span>
                 </div>
-                <p class="mt-3 text-[13px] leading-relaxed text-neutral-700 line-clamp-3">多智能体金融交易框架，通过模拟真实交易团队的分工...</p>
               </article>
             </div>
           </div>
           <ul class="diff-list mt-3 ml-4 list-disc text-neutral-600">
-            <li>✅ <code class="bg-neutral-100 px-1">px-4 py-3</code> + <code class="bg-neutral-100 px-1">hover/60</code> 跟 TweetCard 对齐</li>
+            <li>✅ <strong>summary + footer 移进内容列</strong>：跟 X card 一样从头像右侧缩进对齐</li>
+            <li>✅ summary 字号 <code class="bg-neutral-100 px-1">text-[15px] leading-[1.45]</code> 跟 X card 推文正文一致</li>
+            <li>✅ <code class="bg-neutral-100 px-1">px-4 py-3</code> + <code class="bg-neutral-100 px-1">hover/60</code> 对齐</li>
             <li>✅ <code class="bg-neutral-100 px-1">text-[13px]</code> meta 字号统一</li>
-            <li>✅ 移除 <code class="bg-neutral-100 px-1">bg-white</code> 让 body 透出</li>
-            <li>✅ 徽章统一 neutral 单色，6 hue → 0 hue（视觉统一）</li>
-            <li>✅ 语言色点保留（GitHub 平台标识，业内约定）</li>
+            <li>✅ 移除 <code class="bg-neutral-100 px-1">bg-white</code></li>
+            <li>✅ 彩色徽章保留（agent/model/tool/infra/app/tutorial 6 hue 不变）</li>
           </ul>
         </div>
       </div>
 
-      <!-- 方案 B + C 备选 -->
-      <details class="mt-6">
-        <summary class="cursor-pointer text-sm font-medium text-neutral-700 hover:text-neutral-900">查看其他方案：B 单色家族 / C 完全去徽章 ▾</summary>
-        <div class="toggle-row mt-4">
-          <div>
-            <div class="mb-2"><span class="label label-after">方案 B：徽章保留色彩但收敛到 violet 单家族</span></div>
-            <div class="panel" style="padding: 0;">
-              <div class="feed-shell">
-                <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
-                  <div class="flex items-start gap-3">
-                    <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
-                    <div class="min-w-0 flex-1">
-                      <div class="text-[15px] font-bold leading-tight text-neutral-900">warpdotdev/warp</div>
-                      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                        <span class="inline-flex items-center gap-1"><span class="lang-rs h-2 w-2 rounded-full"></span>Rust · ★ 50.9k · ⑂ 3.4k · 👁 318</span>
-                      </div>
+      <!-- 关键对比：跟 X card 并排 -->
+      <h3 class="text-base font-medium mt-8 mb-3">⊕ X card vs 改后 GithubCard 并排（验证视觉一致）</h3>
+      <div class="toggle-row">
+        <div>
+          <div class="mb-2"><span class="label" style="background:#eff6ff;color:#1e40af;">X card baseline</span></div>
+          <div class="panel" style="padding: 0;">
+            <div class="feed-shell">
+              <article class="border-b border-neutral-200 px-4 py-3 hover:bg-neutral-50/60">
+                <div class="flex gap-3">
+                  <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-baseline gap-1 text-[13px] text-neutral-500">
+                      <span class="truncate text-[15px] font-bold leading-tight text-neutral-900">Sam Altman</span>
+                      <span>@sama</span>
+                      <span>·</span>
+                      <span>22 分钟前</span>
                     </div>
-                    <span class="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">app</span>
-                  </div>
-                </article>
-                <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
-                  <div class="flex items-start gap-3">
-                    <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
-                    <div class="min-w-0 flex-1">
-                      <div class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch/TradingAgents</div>
-                      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                        <span class="inline-flex items-center gap-1"><span class="lang-py h-2 w-2 rounded-full"></span>Python · ★ 59.0k · ⑂ 11.3k</span>
-                      </div>
+                    <div class="mt-1 text-[15px] leading-[1.45] text-neutral-900 break-words">我们想构建工具来增强和提升人类，而不是取代他们的实体。</div>
+                    <div class="mt-2 flex items-center gap-4 text-[13px] text-neutral-500">
+                      <span>💬 312</span><span>🔁 150</span><span>♥ 1.4K</span><span>👁 4</span>
                     </div>
-                    <span class="shrink-0 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-600">agent</span>
                   </div>
-                </article>
-              </div>
+                </div>
+              </article>
             </div>
-            <p class="diff-list mt-2 text-neutral-600">所有徽章用 violet 一个 hue 的深浅变化（agent 浅 / app 深）— 保留色彩但不碎片化</p>
-          </div>
-          <div>
-            <div class="mb-2"><span class="label label-after">方案 C：完全去徽章，分类用文字</span></div>
-            <div class="panel" style="padding: 0;">
-              <div class="feed-shell">
-                <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
-                  <div class="flex items-start gap-3">
-                    <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
-                    <div class="min-w-0 flex-1">
-                      <div class="text-[15px] font-bold leading-tight text-neutral-900">warpdotdev/warp</div>
-                      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                        <span>app</span>
-                        <span class="text-neutral-400">·</span>
-                        <span class="inline-flex items-center gap-1"><span class="lang-rs h-2 w-2 rounded-full"></span>Rust</span>
-                        <span class="text-neutral-400">·</span>
-                        <span>★ 50.9k</span>
-                      </div>
-                    </div>
-                  </div>
-                </article>
-                <article class="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60">
-                  <div class="flex items-start gap-3">
-                    <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
-                    <div class="min-w-0 flex-1">
-                      <div class="text-[15px] font-bold leading-tight text-neutral-900">TauricResearch/TradingAgents</div>
-                      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                        <span>agent</span>
-                        <span class="text-neutral-400">·</span>
-                        <span class="inline-flex items-center gap-1"><span class="lang-py h-2 w-2 rounded-full"></span>Python</span>
-                      </div>
-                    </div>
-                  </div>
-                </article>
-              </div>
-            </div>
-            <p class="diff-list mt-2 text-neutral-600">分类直接放到 meta 行，跟 language / stars 同级 — 极简</p>
           </div>
         </div>
-      </details>
+        <div>
+          <div class="mb-2"><span class="label label-after">改后 GithubCard</span></div>
+          <div class="panel" style="padding: 0;">
+            <div class="feed-shell">
+              <article class="border-b border-neutral-200 px-4 py-3 hover:bg-neutral-50/60">
+                <div class="flex items-start gap-3">
+                  <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-200"></div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="min-w-0 flex-1">
+                        <div class="text-[15px] font-bold leading-tight text-neutral-900 break-words">warpdotdev/warp</div>
+                        <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                          <span class="inline-flex items-center gap-1"><span class="lang-rs h-2 w-2 rounded-full"></span>Rust</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>★ 50.9k</span>
+                          <span class="text-neutral-400">·</span>
+                          <span>⑂ 3.4k</span>
+                        </div>
+                      </div>
+                      <span class="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">app</span>
+                    </div>
+                    <p class="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-3">基于终端的智能开发环境...</p>
+                    <div class="mt-3 flex items-center justify-between text-[12px] text-neutral-500">
+                      <span>05-01 · 🥇 1st</span>
+                      <span>45 contributors</span>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="meta mt-3">现在两个卡片的视觉骨架完全一致：头像 40px + 12px 间隙 + 内容列（标题 / 元信息 / 正文 / footer 都缩进到内容列内）。</p>
     </section>
 
     <!-- ================ Section 2: TweetDrawer header ============= -->
@@ -301,7 +307,7 @@
 
         <label class="mb-1 block text-sm text-neutral-700">手机号</label>
         <div class="flex gap-2">
-          <input type="tel" placeholder="请输入手机号" class="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none">
+          <input type="tel" placeholder="请输入手机号" class="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none">
           <button class="shrink-0 rounded-md border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50">获取验证码</button>
         </div>
         <p class="mt-1 text-xs text-rose-600">请输入正确的手机号</p>
@@ -311,7 +317,7 @@
         </div>
 
         <label class="mb-1 mt-3 block text-sm text-neutral-700">验证码</label>
-        <input type="tel" placeholder="请先获取验证码" disabled class="w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400">
+        <input type="tel" placeholder="请输入验证码" disabled class="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400">
 
         <button class="mt-4 w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:bg-neutral-300" disabled>登录 / 注册</button>
 

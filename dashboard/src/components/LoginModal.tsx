@@ -220,7 +220,7 @@ export function LoginModal() {
             onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
             placeholder="请输入手机号"
             disabled={codeSent && cooldownSec > 0}
-            className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
+            className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
             autoFocus
           />
           <button
@@ -253,9 +253,9 @@ export function LoginModal() {
           type="tel"
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-          placeholder={codeSent ? '请输入验证码' : '请先获取验证码'}
+          placeholder="请输入验证码"
           disabled={!codeSent}
-          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400"
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400"
         />
         {codeError && (
           <p className="mt-1 text-xs text-rose-600">{codeError}</p>
