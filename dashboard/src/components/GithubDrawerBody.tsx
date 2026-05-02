@@ -15,8 +15,13 @@ import {
 } from "./icons";
 
 // Resolve relative URLs in README to absolute GitHub URLs.
+//   - "/r/..." (worker R2 proxy path written by v2.3 r2-migrate) → leave as
+//     same-origin path so browser hits ai-feeds.com/r/<key>. Without this
+//     the URL got mangled to raw.githubusercontent.com/.../r/gh/... → 404 →
+//     onError display:none → user thought "image link is github" because
+//     they only saw non-migrated images (badges/external).
 //   - relative path "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
-//   - root-relative "/foo" → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
+//   - root-relative "/foo" (other than /r/) → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
 //   - absolute http(s):/data:/blob:/mailto:/anchor → untouched
 function resolveRelative(
   src: string | undefined,
@@ -27,6 +32,8 @@ function resolveRelative(
 ): string | undefined {
   if (!src) return src;
   if (/^(https?:|data:|blob:|mailto:|#)/i.test(src)) return src;
+  // R2 proxy path (server-side rewrite of v2.3) — leave as-is for same origin
+  if (src.startsWith("/r/")) return src;
   const base =
     type === "raw"
       ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`

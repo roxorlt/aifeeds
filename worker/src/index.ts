@@ -218,29 +218,34 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          // Github preempt order:
-          //   1. enrich (initial API + LLM judge, ~9 subrequests)
-          //   2. r2-migrate (download + upload assets, ~1 + 2N subrequests, capped 8 assets)
-          //   3. readme-translate (DeepSeek translate, ~3 subrequests)
+          // Github preempt order (each preempt drains a batch sequentially —
+          // no 5-min gap between rows):
+          //   1. enrich (initial API + LLM judge, ~5-10s/row)
+          //   2. r2-migrate (download + upload assets, ~5-15s/row capped 8 assets)
+          //   3. readme-translate (DeepSeek translate, ~3-5s/row)
           //   ↓ if no github work, fall through to X cron rotation.
           // github-fetch slot itself never gets preempted (it's the only window
           // for fresh trending data).
+          //
+          // Per-tick batch sizes sized to fit ~30s of wall time — drain queue
+          // fast without bumping CF Worker time limit. translate is the
+          // cheapest so largest batch.
           if (mode !== 'github-fetch') {
             const pending = await countGithubPending(env);
             if (pending > 0) {
-              const r = await runGithubEnrichPending(env, 1);
+              const r = await runGithubEnrichPending(env, 3);
               console.log(`[cron] github-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
               return;
             }
             const r2Pending = await countGithubR2Pending(env);
             if (r2Pending > 0) {
-              const r = await runGithubR2Migrate(env, 1);
+              const r = await runGithubR2Migrate(env, 2);
               console.log(`[cron] github-r2-migrate (preempt, ${r2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
             const trPending = await countGithubReadmeTranslatePending(env);
             if (trPending > 0) {
-              const r = await runGithubReadmeTranslate(env, 1);
+              const r = await runGithubReadmeTranslate(env, 6);
               console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
               return;
             }
