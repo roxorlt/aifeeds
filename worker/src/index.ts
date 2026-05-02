@@ -14,7 +14,11 @@ import { handleTrack } from './track';
 import {
   runGithubFetchTrending,
   runGithubEnrichPending,
+  runGithubReadmeTranslate,
+  runGithubR2Migrate,
   countGithubPending,
+  countGithubReadmeTranslatePending,
+  countGithubR2Pending,
 } from './github';
 
 export interface Env {
@@ -25,6 +29,9 @@ export interface Env {
   // 60→5000/hr. Without it, /repos/* /search/issues calls will be aggressively
   // throttled. Set via `wrangler secret put GITHUB_TOKEN`.
   GITHUB_TOKEN?: string;
+  // R2 bucket for migrated README assets (v2.3). Bound via wrangler.toml
+  // [[r2_buckets]]. Served via Worker /r/<key> with cache headers.
+  READMES?: R2Bucket;
   // M4: refresh-metrics mode dispatch.
   //   'tiered'  → runRefreshTiered (uses tier/next_refresh_at/last_velocity)
   //   'legacy'  → runRefreshMetrics (round-robin, default — preserves pre-M4 behavior)
@@ -119,6 +126,9 @@ export default {
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
       }
+      if (path.startsWith('/r/') && request.method === 'GET') {
+        return handleR2Asset(request, env, path.slice(3));
+      }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal error';
@@ -171,13 +181,30 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          // Try github-enrich preempt: if pending exists on a non-github-fetch
-          // slot, drain one before falling through to the X mode.
+          // Github preempt order:
+          //   1. enrich (initial API + LLM judge, ~9 subrequests)
+          //   2. r2-migrate (download + upload assets, ~1 + 2N subrequests, capped 8 assets)
+          //   3. readme-translate (DeepSeek translate, ~3 subrequests)
+          //   ↓ if no github work, fall through to X cron rotation.
+          // github-fetch slot itself never gets preempted (it's the only window
+          // for fresh trending data).
           if (mode !== 'github-fetch') {
             const pending = await countGithubPending(env);
             if (pending > 0) {
               const r = await runGithubEnrichPending(env, 1);
               console.log(`[cron] github-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            const r2Pending = await countGithubR2Pending(env);
+            if (r2Pending > 0) {
+              const r = await runGithubR2Migrate(env, 1);
+              console.log(`[cron] github-r2-migrate (preempt, ${r2Pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            const trPending = await countGithubReadmeTranslatePending(env);
+            if (trPending > 0) {
+              const r = await runGithubReadmeTranslate(env, 1);
+              console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
               return;
             }
           }
@@ -868,6 +895,22 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const result = await runGithubEnrichPending(env, limit);
     return jsonResponse(result, 200, request, env);
   }
+  if (mode === 'github-readme-translate') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '1'), 1),
+      10,
+    );
+    const result = await runGithubReadmeTranslate(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'github-r2-migrate') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '1'), 1),
+      10,
+    );
+    const result = await runGithubR2Migrate(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
   return jsonResponse({ error: `Unknown mode: ${mode}` }, 400, request, env);
 }
 
@@ -984,4 +1027,25 @@ async function handleImageProxy(request: Request): Promise<Response> {
     status: 200,
     headers,
   });
+}
+
+// ─── GET /r/:key ───────────────────────────────────────────────
+// Serve migrated README assets from R2 with long cache + CORS.
+// Key shape: gh/<owner>/<repo>/<sha256>.<ext>
+
+async function handleR2Asset(request: Request, env: Env, key: string): Promise<Response> {
+  if (!env.READMES) return new Response('R2 not configured', { status: 503 });
+  if (!key) return new Response('missing key', { status: 400 });
+
+  const obj = await env.READMES.get(key);
+  if (!obj) return new Response('not found', { status: 404 });
+
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  headers.set('Access-Control-Allow-Origin', '*');
+  // ETag from R2 lets browsers and CF edge revalidate.
+  if (obj.httpEtag) headers.set('ETag', obj.httpEtag);
+
+  return new Response(obj.body, { status: 200, headers });
 }

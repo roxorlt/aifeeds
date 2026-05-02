@@ -14,82 +14,112 @@ import {
   IconWatching,
 } from "./icons";
 
-// Tailwind-styled markdown elements (no @tailwindcss/typography dep).
-const MARKDOWN_COMPONENTS: Components = {
-  h1: ({ node: _node, ...props }) => (
-    <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
-  ),
-  h2: ({ node: _node, ...props }) => (
-    <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
-  ),
-  h3: ({ node: _node, ...props }) => (
-    <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
-  ),
-  h4: ({ node: _node, ...props }) => (
-    <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
-  ),
-  p: ({ node: _node, ...props }) => (
-    <p className="my-2 leading-relaxed text-neutral-700" {...props} />
-  ),
-  a: ({ node: _node, ...props }) => (
-    <a
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-sky-600 hover:underline break-all"
-      onClick={(e) => e.stopPropagation()}
-      {...props}
-    />
-  ),
-  ul: ({ node: _node, ...props }) => (
-    <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
-  ),
-  ol: ({ node: _node, ...props }) => (
-    <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
-  ),
-  li: ({ node: _node, ...props }) => <li {...props} />,
-  code: ({ node: _node, className, children, ...props }) => {
-    const isInline = !className?.includes("language-");
-    if (isInline) {
+// Resolve relative URLs in README to absolute GitHub URLs.
+//   - relative path "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
+//   - root-relative "/foo" → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
+//   - absolute http(s):/data:/blob:/mailto:/anchor → untouched
+function resolveRelative(
+  src: string | undefined,
+  owner: string,
+  repo: string,
+  branch: string,
+  type: "raw" | "page",
+): string | undefined {
+  if (!src) return src;
+  if (/^(https?:|data:|blob:|mailto:|#)/i.test(src)) return src;
+  const base =
+    type === "raw"
+      ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`
+      : `https://github.com/${owner}/${repo}/blob/${branch || "main"}`;
+  if (src.startsWith("/")) return `${base}${src}`;
+  return `${base}/${src.replace(/^\.\//, "")}`;
+}
+
+// Tailwind-styled markdown elements + relative-URL rewriter (closure-bound
+// to owner/repo/branch so img/a in the README resolve to GitHub raw / blob).
+function makeMarkdownComponents(owner: string, repo: string, branch: string): Components {
+  return {
+    h1: ({ node: _node, ...props }) => (
+      <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
+    ),
+    h2: ({ node: _node, ...props }) => (
+      <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
+    ),
+    h3: ({ node: _node, ...props }) => (
+      <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
+    ),
+    h4: ({ node: _node, ...props }) => (
+      <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
+    ),
+    p: ({ node: _node, ...props }) => (
+      <p className="my-2 leading-relaxed text-neutral-700" {...props} />
+    ),
+    a: ({ node: _node, href, ...props }) => (
+      <a
+        href={resolveRelative(href, owner, repo, branch, "page")}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-sky-600 hover:underline break-all"
+        onClick={(e) => e.stopPropagation()}
+        {...props}
+      />
+    ),
+    ul: ({ node: _node, ...props }) => (
+      <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
+    ),
+    ol: ({ node: _node, ...props }) => (
+      <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
+    ),
+    li: ({ node: _node, ...props }) => <li {...props} />,
+    code: ({ node: _node, className, children, ...props }) => {
+      const isInline = !className?.includes("language-");
+      if (isInline) {
+        return (
+          <code className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800" {...props}>
+            {children}
+          </code>
+        );
+      }
       return (
-        <code className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800" {...props}>
+        <code className={cn("font-mono text-[12px]", className)} {...props}>
           {children}
         </code>
       );
-    }
-    return (
-      <code className={cn("font-mono text-[12px]", className)} {...props}>
-        {children}
-      </code>
-    );
-  },
-  pre: ({ node: _node, ...props }) => (
-    <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
-  ),
-  blockquote: ({ node: _node, ...props }) => (
-    <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
-  ),
-  hr: ({ node: _node, ...props }) => (
-    <hr className="my-4 border-neutral-200" {...props} />
-  ),
-  img: ({ node: _node, ...props }) => (
-    <img
-      className="my-2 max-w-full rounded-md border border-neutral-200"
-      loading="lazy"
-      {...props}
-    />
-  ),
-  table: ({ node: _node, ...props }) => (
-    <div className="my-3 overflow-x-auto">
-      <table className="min-w-full border-collapse text-[12px]" {...props} />
-    </div>
-  ),
-  th: ({ node: _node, ...props }) => (
-    <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
-  ),
-  td: ({ node: _node, ...props }) => (
-    <td className="border border-neutral-200 px-2 py-1" {...props} />
-  ),
-};
+    },
+    pre: ({ node: _node, ...props }) => (
+      <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
+    ),
+    blockquote: ({ node: _node, ...props }) => (
+      <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
+    ),
+    hr: ({ node: _node, ...props }) => (
+      <hr className="my-4 border-neutral-200" {...props} />
+    ),
+    img: ({ node: _node, src, ...props }) => (
+      <img
+        src={resolveRelative(src as string | undefined, owner, repo, branch, "raw")}
+        className="my-2 max-w-full rounded-md border border-neutral-200"
+        loading="lazy"
+        onError={(e) => {
+          // Hide broken images instead of showing the broken-link icon.
+          (e.currentTarget as HTMLImageElement).style.display = "none";
+        }}
+        {...props}
+      />
+    ),
+    table: ({ node: _node, ...props }) => (
+      <div className="my-3 overflow-x-auto">
+        <table className="min-w-full border-collapse text-[12px]" {...props} />
+      </div>
+    ),
+    th: ({ node: _node, ...props }) => (
+      <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
+    ),
+    td: ({ node: _node, ...props }) => (
+      <td className="border border-neutral-200 px-2 py-1" {...props} />
+    ),
+  };
+}
 
 const CATEGORY_STYLE: Record<string, string> = {
   agent: "bg-violet-100 text-violet-700",
@@ -150,6 +180,12 @@ export function GithubDrawerBody({ item }: Props) {
   }, [item.id]);
 
   const readmeToShow = tab === "zh" ? readmeTranslated : readmeRaw;
+
+  // Markdown components closure-bound to repo info so img/a resolve relative
+  // URLs to the right GitHub raw / blob URL.
+  const repoName = ownerRepo.split("/")[1] || "";
+  const defaultBranch = (extra.default_branch as string | undefined) || "main";
+  const markdownComponents = makeMarkdownComponents(owner, repoName, defaultBranch);
 
   return (
     <div className="text-neutral-900">
@@ -285,7 +321,7 @@ export function GithubDrawerBody({ item }: Props) {
               <Markdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeRaw]}
-                components={MARKDOWN_COMPONENTS}
+                components={markdownComponents}
               >
                 {readmeToShow || readmeRaw}
               </Markdown>

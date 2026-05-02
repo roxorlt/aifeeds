@@ -7,5 +7,11 @@ binding = "DB"
 database_name = "xlist"
 database_id = "2973d54b-ca13-48e4-8d20-1430c57f5260"
 
+# README 图片/视频迁移落库（v2.3）。
+# 通过 Worker /r/<key> 端点对外提供（避免 R2 公网域名管理 + 加 cache headers）。
+[[r2_buckets]]
+binding = "READMES"
+bucket_name = "xlist-readme-assets"
+
 [triggers]
 crons = ["*/5 * * * *"]
