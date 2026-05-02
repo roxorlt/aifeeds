@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>隐私政策 — AI-Feeds</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; max-width: 720px; margin: 2em auto; padding: 1em; line-height: 1.7; color: #1a1a1a; }
+    h1 { border-bottom: 1px solid #ddd; padding-bottom: .3em; }
+    h2 { margin-top: 1.6em; }
+    a { color: #2563eb; }
+    .meta { color: #666; font-size: .9em; }
+  </style>
+</head>
+<body>
+  <h1>隐私政策</h1>
+  <p class="meta">最后更新：2026-05-02</p>
+
+  <h2>我们是谁</h2>
+  <p>AI-Feeds（ai-feeds.com）是一个独立开发者项目，由个人维护，提供一站式 AI 信息聚合看板。</p>
+
+  <h2>我们收集哪些信息</h2>
+  <ul>
+    <li><b>device_id（匿名访客标识）</b>：首次访问时本地生成的随机字符串，存在你浏览器的 LocalStorage 里。<b>不读取设备硬件信息，不形成"设备指纹"</b>。</li>
+    <li><b>IP 地址 / 浏览器 User-Agent / Referer</b>：每次请求自动记录，用于防刷、地域统计、安全审计。</li>
+    <li><b>手机号</b>（仅注册/登录后）：用于唯一身份验证，仅在登录流程中使用，存储为不可逆方式或脱敏显示。</li>
+    <li><b>验证码（hash 后）</b>：登录流程，仅校验用，明文不入库。</li>
+    <li><b>行为事件</b>（浏览、点击、停留时长、性能指标、错误日志）：通过 events 表统一收集，不包含手机号或敏感个人信息。</li>
+  </ul>
+
+  <h2>我们使用哪些第三方服务</h2>
+  <ul>
+    <li><b>Cloudflare Turnstile</b>：人机验证（防刷），不收集敏感信息。</li>
+    <li><b>腾讯云 / PushDeer</b>：发送短信验证码（依实际后台配置）。</li>
+    <li><b>Cloudflare Workers / D1 / Pages / R2</b>：数据存储和服务托管。</li>
+  </ul>
+
+  <h2>用户控制权</h2>
+  <ul>
+    <li>清除浏览器缓存即可重置 device_id（你浏览器主导）。</li>
+    <li>设置页可主动「退出登录」「退出全部设备」「注销账号」。</li>
+    <li>注销账号会立即清空 PII 字段，identity 哈希后保留以避免引用丢失。</li>
+  </ul>
+
+  <h2>政策变更</h2>
+  <p>政策变更时，我们将在本页面更新「最后更新」日期。重大变更会在登录后的 dashboard 顶部提示。</p>
+
+  <h2>联系我们</h2>
+  <p>邮箱：<a href="mailto:ltsms86@gmail.com">ltsms86@gmail.com</a></p>
+</body>
+</html>
