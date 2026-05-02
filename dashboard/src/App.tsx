@@ -128,8 +128,19 @@ function App() {
           onTopBarClick();
         }}
       >
-        <div className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
-          <div className="flex shrink-0 items-center gap-2 max-md:touch-pan-y">
+        {/* Bottom row of the app bar.
+            `max-md:touch-pan-x` locks the *entire* mobile header to
+            horizontal-only gestures. This is the only reliable way to
+            stop iOS from splitting a near-horizontal swipe between the
+            chips rail (pan-x) and the page (auto, vertical) when the
+            finger lands in a sibling element or a flex gap. Per spec,
+            touch-action on a child intersects with its ancestors, so
+            we deliberately do NOT set pan-y on logo/refresh — that
+            would intersect to "none" and block tap recognition timing
+            on iOS. Vertical page scroll has to start from below the
+            header, which is fine since the header is ~36px tall. */}
+        <div className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16 max-md:touch-pan-x">
+          <div className="flex shrink-0 items-center gap-2">
             <img
               src="/favicon.svg"
               alt="AI-Feeds"
@@ -184,7 +195,7 @@ function App() {
           <button
             type="button"
             onClick={() => setRefreshTick((t) => t + 1)}
-            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100 max-md:touch-pan-y"
+            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
             title="刷新"
           >
             ⟳

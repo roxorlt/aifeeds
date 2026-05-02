@@ -133,6 +133,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
+  // Cooldown: after N consecutive load_more failures we stop auto-firing
+  // loadMore via IntersectionObserver and show a manual retry button.
+  // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
+  // the observer kept re-triggering as the user scrolled, each fetch
+  // failed, and we burned battery + log noise without recourse for the
+  // user. Tap on retry resets the counter.
+  const LOAD_MORE_FAIL_THRESHOLD = 3;
+  const consecutiveFailRef = useRef(0);
+  const [loadMoreCoolingDown, setLoadMoreCoolingDown] = useState(false);
   // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
   // Default for other sources stays "hot" (existing X behavior).
   const [sortMode, setSortMode] = useState<SortMode>(
@@ -196,6 +205,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
+    if (consecutiveFailRef.current >= LOAD_MORE_FAIL_THRESHOLD) return;
     setLoadingMore(true);
     try {
       const res = await fetchItems({
@@ -204,6 +214,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         limit: LOAD_MORE_LIMIT,
         sort: isHot ? "hot" : undefined,
       });
+      consecutiveFailRef.current = 0;
       const seen = isHot ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
@@ -216,20 +227,29 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       setNextCursor(res.next_cursor);
       setHasMore(res.has_more);
     } catch (e) {
-      // Silent for UX (next observer trigger or scroll will retry), but emit
-      // telemetry so we can see how often load-more fails.
+      consecutiveFailRef.current += 1;
+      if (consecutiveFailRef.current >= LOAD_MORE_FAIL_THRESHOLD) {
+        setLoadMoreCoolingDown(true);
+      }
       track(EVENTS.FEED_LOAD_ERROR, {
         source_type: sourceType,
         sort: isHot ? "hot" : "time",
         phase: "load_more",
         error_msg: e instanceof Error ? e.message : String(e),
         online: navigator.onLine,
+        consecutive_fails: consecutiveFailRef.current,
         ...readConnectionInfo(),
       });
     } finally {
       setLoadingMore(false);
     }
   }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot]);
+
+  const retryLoadMore = useCallback(() => {
+    consecutiveFailRef.current = 0;
+    setLoadMoreCoolingDown(false);
+    void loadMore();
+  }, [loadMore]);
 
   // IntersectionObserver for infinite scroll
   useEffect(() => {
@@ -654,8 +674,24 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               );
               return nodes;
             })}
-            {/* Infinite scroll sentinel */}
-            {hasMore && (
+            {/* Infinite scroll sentinel — replaced by a manual retry button
+                once we've hit the consecutive-failure threshold. WeChat
+                WebView gives bursts of "Load failed" that stop the
+                IntersectionObserver from being a useful auto-trigger
+                (telemetry showed 30+ failures in 45s). */}
+            {hasMore && loadMoreCoolingDown && (
+              <div className="flex flex-col items-center gap-2 py-4 text-center text-xs">
+                <span className="text-neutral-500">网络不稳定，加载失败</span>
+                <button
+                  type="button"
+                  onClick={retryLoadMore}
+                  className="rounded-md border border-neutral-200 bg-white px-3 py-1 text-neutral-700 hover:bg-neutral-50"
+                >
+                  重试
+                </button>
+              </div>
+            )}
+            {hasMore && !loadMoreCoolingDown && (
               <div
                 ref={sentinelRef}
                 className="py-4 text-center text-xs text-neutral-400"
