@@ -277,14 +277,14 @@ export function TweetDrawer() {
         }}
       >
         <header
-          className="grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50 px-2 py-1.5 sm:px-3"
+          className="grid grid-cols-3 items-center border-b border-neutral-200 px-2 py-1.5 sm:px-3"
           onDoubleClick={onHeaderDoubleClick}
         >
           <div className="justify-self-start">
             <button
               type="button"
               onClick={close}
-              className="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-200 active:bg-neutral-300"
+              className="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
               aria-label={isNarrow ? "返回" : "关闭"}
             >
               {isNarrow ? (
@@ -311,7 +311,7 @@ export function TweetDrawer() {
                     target_url_host: host,
                   });
                 }}
-                className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200"
+                className="rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
                 title={externalLinkTitle}
               >
                 {externalLinkLabel}
