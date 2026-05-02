@@ -291,16 +291,17 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     const isAtTop = () => window.scrollY <= 0;
 
     const onStart = (e: TouchEvent) => {
-      // CRITICAL: skip when the touch starts inside an open modal/drawer.
-      // This listener is on `window` and runs in non-passive mode for
-      // touchmove (it preventDefault's downward swipes to power pull-to-
-      // refresh). Without this guard, swiping DOWN inside the drawer's
-      // own scroll container — i.e., reversing direction to read content
-      // above — would have its native scroll preventDefault'd by us,
-      // freezing the drawer until the user lifts off and tries again.
-      // See heroui#5974, vaul#168 for the same pattern in other libs.
+      // Skip when touch starts in any non-feed zone — drawer, app header,
+      // or column header. PRR is for the feed cards area only; firing it
+      // from non-scroll zones would steal vertical motion and trigger
+      // the pull-spinner where the user just wanted to tap.
+      // (Drawer guard: heroui#5974 / vaul#168 — non-passive touchmove on
+      // window blocks the drawer's own scroll otherwise.)
       const target = e.target as Element | null;
-      if (target?.closest('[role="dialog"]')) {
+      if (
+        target?.closest('[role="dialog"]') ||
+        target?.closest("[data-no-page-scroll]")
+      ) {
         pullStartY.current = null;
         return;
       }
@@ -520,13 +521,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   return (
     <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
-      {/* Header — `max-md:touch-pan-x` blocks vertical page scroll initiation
-          from this strip on mobile. Without this, touching the column title
-          row to read the sort selector or just to rest a finger immediately
-          starts dragging the feed up/down. Tap (sort dropdown, etc.) still
-          works since touch-action only gates pan/zoom. PC unaffected — mouse
-          ignores touch-action. */}
+      {/* Header — marked `data-no-page-scroll` so the App-level touch
+          handler blocks page-scroll initiation from this strip on mobile.
+          (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView
+          per WebKit bug 133112; the JS handler in App.tsx is the actual
+          enforcer.) Tap (sort dropdown, etc.) still works since the
+          handler only preventDefault's touchmove. PC unaffected — touch
+          handlers don't fire for mouse. */}
       <header
+        data-no-page-scroll
         className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 max-md:touch-pan-x md:cursor-pointer"
         onClick={(e) => {
           // Mobile: chip rail handles回顶 via active-tap; skip header tap

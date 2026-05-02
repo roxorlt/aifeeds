@@ -67,6 +67,67 @@ function App() {
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
 
+  // Block page-scroll initiation from non-scroll zones (top app bar,
+  // feed column headers). iOS Safari / WeChat WebView ignores
+  // `touch-action: pan-x` on most ancestor/descendant configurations
+  // (WebKit bug 133112 / 233417), so we enforce it imperatively.
+  //
+  // Rules:
+  //   - touch starts inside `.chips-rail` → allow horizontal motion,
+  //     block vertical (after a small lock-direction threshold).
+  //   - touch starts inside `[data-no-page-scroll]` (and not chips-rail)
+  //     → block all motion (prevents page scroll initiation).
+  //   - else → don't preventDefault, let the browser scroll normally.
+  //
+  // Direction-lock at 8px so a horizontal swipe with a tiny vertical
+  // wobble doesn't get killed mid-gesture.
+  useEffect(() => {
+    if (!isNarrow) return;
+    let target: Element | null = null;
+    let startX = 0;
+    let startY = 0;
+    let direction: "h" | "v" | null = null;
+
+    const onStart = (e: TouchEvent) => {
+      target = e.target as Element | null;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      direction = null;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!target) return;
+      const t = e.touches[0];
+      const dx = Math.abs(t.clientX - startX);
+      const dy = Math.abs(t.clientY - startY);
+      if (direction === null && (dx > 8 || dy > 8)) {
+        direction = dx > dy ? "h" : "v";
+      }
+      if (target.closest(".chips-rail")) {
+        if (direction === "v" && e.cancelable) e.preventDefault();
+        return;
+      }
+      if (target.closest("[data-no-page-scroll]")) {
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    const onEnd = () => {
+      target = null;
+      direction = null;
+    };
+
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onEnd, { passive: true });
+    window.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+    };
+  }, [isNarrow]);
+
   // Telemetry init（仅一次）
   useEffect(() => {
     initTelemetry({ endpoint: TRACK_ENDPOINT });
@@ -139,7 +200,10 @@ function App() {
             would intersect to "none" and block tap recognition timing
             on iOS. Vertical page scroll has to start from below the
             header, which is fine since the header is ~36px tall. */}
-        <div className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16 max-md:touch-pan-x">
+        <div
+          data-no-page-scroll
+          className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16 max-md:touch-pan-x"
+        >
           <div className="flex shrink-0 items-center gap-2">
             <img
               src="/favicon.svg"
