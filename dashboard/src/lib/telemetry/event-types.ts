@@ -45,4 +45,5 @@ export const EVENTS = {
   UNHANDLED_PROMISE: 'unhandled_promise',
   API_ERROR: 'api_error',
   IMAGE_LOAD_ERROR: 'image_load_error',
+  FEED_LOAD_ERROR: 'feed_load_error',
 } as const satisfies Record<string, EventTypeName>;

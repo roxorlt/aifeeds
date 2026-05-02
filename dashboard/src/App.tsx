@@ -67,6 +67,67 @@ function App() {
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
 
+  // Block page-scroll initiation from non-scroll zones (top app bar,
+  // feed column headers). iOS Safari / WeChat WebView ignores
+  // `touch-action: pan-x` on most ancestor/descendant configurations
+  // (WebKit bug 133112 / 233417), so we enforce it imperatively.
+  //
+  // Rules:
+  //   - touch starts inside `.chips-rail` → allow horizontal motion,
+  //     block vertical (after a small lock-direction threshold).
+  //   - touch starts inside `[data-no-page-scroll]` (and not chips-rail)
+  //     → block all motion (prevents page scroll initiation).
+  //   - else → don't preventDefault, let the browser scroll normally.
+  //
+  // Direction-lock at 8px so a horizontal swipe with a tiny vertical
+  // wobble doesn't get killed mid-gesture.
+  useEffect(() => {
+    if (!isNarrow) return;
+    let target: Element | null = null;
+    let startX = 0;
+    let startY = 0;
+    let direction: "h" | "v" | null = null;
+
+    const onStart = (e: TouchEvent) => {
+      target = e.target as Element | null;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      direction = null;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!target) return;
+      const t = e.touches[0];
+      const dx = Math.abs(t.clientX - startX);
+      const dy = Math.abs(t.clientY - startY);
+      if (direction === null && (dx > 8 || dy > 8)) {
+        direction = dx > dy ? "h" : "v";
+      }
+      if (target.closest(".chips-rail")) {
+        if (direction === "v" && e.cancelable) e.preventDefault();
+        return;
+      }
+      if (target.closest("[data-no-page-scroll]")) {
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    const onEnd = () => {
+      target = null;
+      direction = null;
+    };
+
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onEnd, { passive: true });
+    window.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+    };
+  }, [isNarrow]);
+
   // Telemetry init（仅一次）
   useEffect(() => {
     initTelemetry({ endpoint: TRACK_ENDPOINT });
@@ -128,7 +189,21 @@ function App() {
           onTopBarClick();
         }}
       >
-        <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16">
+        {/* Bottom row of the app bar.
+            `max-md:touch-pan-x` locks the *entire* mobile header to
+            horizontal-only gestures. This is the only reliable way to
+            stop iOS from splitting a near-horizontal swipe between the
+            chips rail (pan-x) and the page (auto, vertical) when the
+            finger lands in a sibling element or a flex gap. Per spec,
+            touch-action on a child intersects with its ancestors, so
+            we deliberately do NOT set pan-y on logo/refresh — that
+            would intersect to "none" and block tap recognition timing
+            on iOS. Vertical page scroll has to start from below the
+            header, which is fine since the header is ~36px tall. */}
+        <div
+          data-no-page-scroll
+          className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16 max-md:touch-pan-x"
+        >
           <div className="flex shrink-0 items-center gap-2">
             <img
               src="/favicon.svg"
@@ -142,9 +217,15 @@ function App() {
             {/* Subtitle slogan TBD; intentionally empty for now */}
           </div>
 
-          {/* Filter chips — mobile only, excludes "全部" */}
+          {/* Filter chips — mobile only, excludes "全部".
+              `self-stretch` makes the rail fill the header's full vertical
+              padding so its `touch-action: pan-x` covers the entire row at
+              the chips' x-range, not just the ~20px the chip buttons span.
+              Without this, swipes 8px above/below the chip line fell
+              through to the parent (touch-action: auto) and iOS picked the
+              vertical axis, dragging the feed below. */}
           {isNarrow && (
-            <nav className="chips-rail flex min-w-0 items-center gap-1 overflow-x-auto">
+            <nav className="chips-rail flex min-w-0 items-center gap-1 self-stretch overflow-x-auto">
               {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
                 const hasData = liveSourceTypes.has(key as SourceType);
@@ -178,7 +259,7 @@ function App() {
           <button
             type="button"
             onClick={() => setRefreshTick((t) => t + 1)}
-            className="shrink-0 rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
+            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
             title="刷新"
           >
             ⟳

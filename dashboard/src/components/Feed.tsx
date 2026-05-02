@@ -39,6 +39,31 @@ const POLL_INTERVAL_MS = 30_000;
 // never looks at it, last-seen stays where it was.
 const MARK_SEEN_DELAY_MS = 5_000;
 
+// Network Information API is non-standard but supported on Chrome/Edge/
+// Android Chrome (i.e. the bulk of mobile traffic). Use it for telemetry
+// only — feature-detect at call-time and degrade silently elsewhere.
+type NavConn = {
+  effectiveType?: string;
+  downlink?: number;
+  rtt?: number;
+  saveData?: boolean;
+};
+function readConnectionInfo(): {
+  connection_type?: string;
+  downlink?: number;
+  rtt?: number;
+  save_data?: boolean;
+} {
+  const conn = (navigator as Navigator & { connection?: NavConn }).connection;
+  if (!conn) return {};
+  return {
+    connection_type: conn.effectiveType,
+    downlink: conn.downlink,
+    rtt: conn.rtt,
+    save_data: conn.saveData,
+  };
+}
+
 function PendingAvatars({ pending }: { pending: Item[] }) {
   // Pick up to 3 unique-handle avatars from the pending queue (newest first).
   const avatars: { url: string; handle: string }[] = [];
@@ -108,6 +133,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
+  // Cooldown: after N consecutive load_more failures we stop auto-firing
+  // loadMore via IntersectionObserver and show a manual retry button.
+  // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
+  // the observer kept re-triggering as the user scrolled, each fetch
+  // failed, and we burned battery + log noise without recourse for the
+  // user. Tap on retry resets the counter.
+  const LOAD_MORE_FAIL_THRESHOLD = 3;
+  const consecutiveFailRef = useRef(0);
+  const [loadMoreCoolingDown, setLoadMoreCoolingDown] = useState(false);
   // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
   // Default for other sources stays "hot" (existing X behavior).
   const [sortMode, setSortMode] = useState<SortMode>(
@@ -150,7 +184,19 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         setHasMore(res.has_more);
         lastScrapedAt.current = res.items[0]?.scraped_at || null;
       })
-      .catch((e) => !cancelled && setError(String(e)))
+      .catch((e) => {
+        if (cancelled) return;
+        const errMsg = String(e);
+        setError(errMsg);
+        track(EVENTS.FEED_LOAD_ERROR, {
+          source_type: sourceType,
+          sort: isHot ? "hot" : "time",
+          phase: "initial",
+          error_msg: errMsg,
+          online: navigator.onLine,
+          ...readConnectionInfo(),
+        });
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -159,6 +205,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
+    if (consecutiveFailRef.current >= LOAD_MORE_FAIL_THRESHOLD) return;
     setLoadingMore(true);
     try {
       const res = await fetchItems({
@@ -167,6 +214,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         limit: LOAD_MORE_LIMIT,
         sort: isHot ? "hot" : undefined,
       });
+      consecutiveFailRef.current = 0;
       const seen = isHot ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
@@ -178,12 +226,30 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       });
       setNextCursor(res.next_cursor);
       setHasMore(res.has_more);
-    } catch {
-      // fail silently; next observer trigger or scroll will retry
+    } catch (e) {
+      consecutiveFailRef.current += 1;
+      if (consecutiveFailRef.current >= LOAD_MORE_FAIL_THRESHOLD) {
+        setLoadMoreCoolingDown(true);
+      }
+      track(EVENTS.FEED_LOAD_ERROR, {
+        source_type: sourceType,
+        sort: isHot ? "hot" : "time",
+        phase: "load_more",
+        error_msg: e instanceof Error ? e.message : String(e),
+        online: navigator.onLine,
+        consecutive_fails: consecutiveFailRef.current,
+        ...readConnectionInfo(),
+      });
     } finally {
       setLoadingMore(false);
     }
   }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot]);
+
+  const retryLoadMore = useCallback(() => {
+    consecutiveFailRef.current = 0;
+    setLoadMoreCoolingDown(false);
+    void loadMore();
+  }, [loadMore]);
 
   // IntersectionObserver for infinite scroll
   useEffect(() => {
@@ -225,6 +291,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     const isAtTop = () => window.scrollY <= 0;
 
     const onStart = (e: TouchEvent) => {
+      // Skip when touch starts in any non-feed zone — drawer, app header,
+      // or column header. PRR is for the feed cards area only; firing it
+      // from non-scroll zones would steal vertical motion and trigger
+      // the pull-spinner where the user just wanted to tap.
+      // (Drawer guard: heroui#5974 / vaul#168 — non-passive touchmove on
+      // window blocks the drawer's own scroll otherwise.)
+      const target = e.target as Element | null;
+      if (
+        target?.closest('[role="dialog"]') ||
+        target?.closest("[data-no-page-scroll]")
+      ) {
+        pullStartY.current = null;
+        return;
+      }
       if (isAtTop()) {
         pullStartY.current = e.touches[0].clientY;
         isDraggingRef.current = false;
@@ -441,9 +521,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   return (
     <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
-      {/* Header */}
+      {/* Header — marked `data-no-page-scroll` so the App-level touch
+          handler blocks page-scroll initiation from this strip on mobile.
+          (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView
+          per WebKit bug 133112; the JS handler in App.tsx is the actual
+          enforcer.) Tap (sort dropdown, etc.) still works since the
+          handler only preventDefault's touchmove. PC unaffected — touch
+          handlers don't fire for mouse. */}
       <header
-        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 md:cursor-pointer"
+        data-no-page-scroll
+        className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 max-md:touch-pan-x md:cursor-pointer"
         onClick={(e) => {
           // Mobile: chip rail handles回顶 via active-tap; skip header tap
           if (window.matchMedia("(max-width: 767px)").matches) return;
@@ -590,8 +677,24 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               );
               return nodes;
             })}
-            {/* Infinite scroll sentinel */}
-            {hasMore && (
+            {/* Infinite scroll sentinel — replaced by a manual retry button
+                once we've hit the consecutive-failure threshold. WeChat
+                WebView gives bursts of "Load failed" that stop the
+                IntersectionObserver from being a useful auto-trigger
+                (telemetry showed 30+ failures in 45s). */}
+            {hasMore && loadMoreCoolingDown && (
+              <div className="flex flex-col items-center gap-2 py-4 text-center text-xs">
+                <span className="text-neutral-500">网络不稳定，加载失败</span>
+                <button
+                  type="button"
+                  onClick={retryLoadMore}
+                  className="rounded-md border border-neutral-200 bg-white px-3 py-1 text-neutral-700 hover:bg-neutral-50"
+                >
+                  重试
+                </button>
+              </div>
+            )}
+            {hasMore && !loadMoreCoolingDown && (
               <div
                 ref={sentinelRef}
                 className="py-4 text-center text-xs text-neutral-400"
