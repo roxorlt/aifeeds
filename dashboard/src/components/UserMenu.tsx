@@ -37,7 +37,7 @@ export function UserMenu() {
       <button
         type="button"
         onClick={() => openLogin('manual')}
-        className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+        className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-800"
       >
         登录
       </button>

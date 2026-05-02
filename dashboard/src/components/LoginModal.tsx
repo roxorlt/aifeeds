@@ -8,6 +8,13 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAADHQ15rM-NnOZ2zL';
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const PHONE_REGEX = /^1[3-9]\d{9}$/;
 
+/** dev 环境检测：localhost / 127.0.0.1 跳过 Turnstile widget（dev worker 也 bypass 服务端校验） */
+function isDevHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const h = window.location.hostname;
+  return h === 'localhost' || h === '127.0.0.1';
+}
+
 declare global {
   interface Window {
     turnstile?: {
@@ -47,41 +54,40 @@ async function loadTurnstileScript(): Promise<void> {
   });
 }
 
-type Phase = 'phone' | 'code';
-
 export function LoginModal() {
   const open = useAuthStore((s) => s.loginModalOpen);
   const trigger = useAuthStore((s) => s.loginTrigger);
   const closeModal = useAuthStore((s) => s.closeLoginModal);
   const onLoginSuccess = useAuthStore((s) => s.onLoginSuccess);
 
-  const [phase, setPhase] = useState<Phase>('phone');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileWidgetId, setTurnstileWidgetId] = useState<string | null>(null);
+  const [codeSent, setCodeSent] = useState(false);   // 是否已成功发出验证码
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [cooldownSec, setCooldownSec] = useState(0);
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
+  const dev = isDevHost();
 
   // open 改 true：上报埋点 + reset 状态
   useEffect(() => {
     if (!open) return;
     track(EVENTS.LOGIN_MODAL_OPEN, { trigger_action: trigger });
-    setPhase('phone');
     setPhone('');
     setCode('');
-    setTurnstileToken(null);
+    setTurnstileToken(dev ? 'dev-bypass' : null);  // dev 模式直接给 fake token
+    setCodeSent(false);
     setLoading(false);
     setErrorMsg('');
     setCooldownSec(0);
-  }, [open, trigger]);
+  }, [open, trigger, dev]);
 
-  // open 阶段 phone：加载 + render Turnstile
+  // open + 非 dev：加载 + render Turnstile widget
   useEffect(() => {
-    if (!open || phase !== 'phone') return;
+    if (!open || dev) return;
     let cancelled = false;
     (async () => {
       try {
@@ -108,7 +114,7 @@ export function LoginModal() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, phase]);
+  }, [open, dev]);
 
   // 倒计时
   useEffect(() => {
@@ -132,7 +138,7 @@ export function LoginModal() {
     try {
       await authApi.sendSmsCode(phone, turnstileToken);
       track(EVENTS.SMS_SEND_SUCCESS, {});
-      setPhase('code');
+      setCodeSent(true);
       setCooldownSec(60);
     } catch (e) {
       const a = e as AuthError;
@@ -143,7 +149,8 @@ export function LoginModal() {
       else if (a.status === 503) msg = '服务暂不可用，请稍后再试';
       else if (a.status === 403) msg = '人机验证失败，请重试';
       setErrorMsg(msg);
-      if (turnstileWidgetId && window.turnstile) {
+      // 真 widget 时 token 已被消费，reset
+      if (!dev && turnstileWidgetId && window.turnstile) {
         window.turnstile.reset(turnstileWidgetId);
         setTurnstileToken(null);
       }
@@ -180,6 +187,9 @@ export function LoginModal() {
 
   if (!open) return null;
 
+  const sendDisabled = loading || !phone || !turnstileToken || cooldownSec > 0;
+  const loginDisabled = loading || !codeSent || code.length !== 6;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div
@@ -198,68 +208,62 @@ export function LoginModal() {
           </button>
         </header>
 
-        {phase === 'phone' && (
-          <>
-            <label className="mb-1 block text-sm text-neutral-700">📱 手机号</label>
-            <input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-              placeholder="13800001234"
-              className="mb-3 w-full rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-blue-500 focus:outline-none"
-              autoFocus
-            />
-            <div ref={turnstileContainerRef} className="mb-3 flex justify-center" />
-            <button
-              type="button"
-              onClick={handleSendCode}
-              disabled={loading || !phone || !turnstileToken}
-              className="mb-2 w-full rounded-md bg-blue-600 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-300"
-            >
-              {loading ? '发送中…' : '获取验证码'}
-            </button>
-          </>
+        {/* 手机号 + 获取验证码 */}
+        <label className="mb-1 block text-sm text-neutral-700">手机号</label>
+        <div className="mb-3 flex gap-2">
+          <input
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+            placeholder="13800001234"
+            disabled={codeSent && cooldownSec > 0}
+            className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
+            autoFocus
+          />
+          <button
+            type="button"
+            onClick={handleSendCode}
+            disabled={sendDisabled}
+            className="shrink-0 rounded-md border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {cooldownSec > 0
+              ? `${cooldownSec}s`
+              : loading && !codeSent
+              ? '发送中…'
+              : codeSent
+              ? '重发'
+              : '获取验证码'}
+          </button>
+        </div>
+
+        {/* Turnstile widget — dev 不渲染 */}
+        {!dev && (
+          <div ref={turnstileContainerRef} className="mb-3 flex justify-center" />
         )}
 
-        {phase === 'code' && (
-          <>
-            <p className="mb-3 text-sm text-neutral-600">
-              已发送验证码到 <span className="font-mono">{phone}</span>
-            </p>
-            <label className="mb-1 block text-sm text-neutral-700">📝 6 位验证码</label>
-            <input
-              type="tel"
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              placeholder="382751"
-              className="mb-3 w-full rounded-md border border-neutral-300 px-3 py-2 text-center text-2xl tracking-[.4em] focus:border-blue-500 focus:outline-none"
-              autoFocus
-            />
-            <button
-              type="button"
-              onClick={handleLogin}
-              disabled={loading || code.length !== 6}
-              className="mb-2 w-full rounded-md bg-blue-600 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-300"
-            >
-              {loading ? '登录中…' : '登录 / 注册'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (cooldownSec > 0) return;
-                setPhase('phone');
-                setErrorMsg('');
-              }}
-              disabled={cooldownSec > 0}
-              className="w-full text-xs text-neutral-500 hover:text-neutral-700 disabled:cursor-not-allowed"
-            >
-              {cooldownSec > 0 ? `${cooldownSec}s 后可重新获取` : '重新获取验证码'}
-            </button>
-          </>
-        )}
+        {/* 验证码 — 始终显示，未发码时 disabled */}
+        <label className="mb-1 block text-sm text-neutral-700">验证码</label>
+        <input
+          type="tel"
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          placeholder={codeSent ? '6 位数字' : '请先获取验证码'}
+          disabled={!codeSent}
+          className="mb-3 w-full rounded-md border border-neutral-300 px-3 py-2 text-center text-2xl tracking-[.4em] focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-300 disabled:placeholder:text-neutral-400"
+        />
+
+        {/* 登录按钮 */}
+        <button
+          type="button"
+          onClick={handleLogin}
+          disabled={loginDisabled}
+          className="w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300"
+        >
+          {loading && codeSent ? '登录中…' : '登录 / 注册'}
+        </button>
 
         {errorMsg && (
-          <p className="mt-2 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{errorMsg}</p>
+          <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{errorMsg}</p>
         )}
 
         <p className="mt-4 text-center text-[11px] text-neutral-500">
