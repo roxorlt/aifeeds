@@ -176,6 +176,43 @@ npx wrangler secret put PUSHDEER_ADMIN_KEYS  # 输入：PDU394...,PDU394...
 **Kill switch**：`SMS_DAILY_CAP=0` 立刻停发短信（不动代码）。
 **回滚 secret**：`wrangler secret put X` 输入新值即覆盖；删除用 `wrangler secret delete X`。
 
+### 3.4. SMS Provider 切换（dev / staging / 冷启动期手动通道）
+
+`worker/src/auth/sms.ts` 的 `sendSmsViaTencent` 实际是 router，按 `SMS_PROVIDER` env 切换：
+
+| SMS_PROVIDER 值 | 行为 | 适用场景 |
+|---|---|---|
+| 未设置 / `tencent` | 真实腾讯云 V3 API；secret 缺失时 fallback 到 dev simulate（console.warn 明文 code） | 生产正常态 |
+| `pushdeer` | 任何 phone 的验证码都推到 `PUSHDEER_ADMIN_KEYS` 的所有设备（admin 自己手机 + Mac），body 含 phone 脱敏 + 6 位 code | 腾讯云审核中、staging 阶段、朋友熟人冷启动期手动验证 |
+
+**切到 PushDeer 通道**（腾讯云未到位时上线）：
+
+```bash
+cd worker
+npx wrangler secret put SMS_PROVIDER          # 输入 pushdeer
+npx wrangler secret put PUSHDEER_ADMIN_KEYS   # 输入 PDU394...,PDU394... 逗号分隔
+npx wrangler secret put TURNSTILE_SECRET_KEY  # （独立的，PushDeer 模式仍走 Turnstile 防刷）
+npm run deploy
+```
+
+**切回腾讯云**（审核通过后）：
+
+```bash
+cd worker
+# 1. 先把 5 个 TENCENT_SMS_* secret put 进去
+npx wrangler secret put TENCENT_SMS_SECRET_ID
+# ... (同上其他 4 个)
+# 2. 切 provider
+npx wrangler secret put SMS_PROVIDER          # 输入 tencent
+# 或者直接删（默认就是 tencent）
+npx wrangler secret delete SMS_PROVIDER
+npm run deploy
+```
+
+⚠️ **限制**：`SMS_PROVIDER=pushdeer` 是**单人 dev tool**，不能给真多用户产品用（验证码不发给用户而是发给 admin）。仅适合：
+- 本地 dev / staging 测试 PR3 前端登录 UI
+- 朋友熟人冷启动期手动转发（admin 收到后微信 / 截图给试用者）
+
 ### 3.5. SMS 防刷阈值（PR2 设计参考）
 
 | Layer | 维度 | 阈值 | 修改位置 |
