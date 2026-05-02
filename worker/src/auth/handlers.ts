@@ -364,3 +364,64 @@ export async function handleMe(
     },
   });
 }
+
+// ─── POST /api/auth/delete ───────────────────────────────
+
+interface DeleteBody {
+  phone_confirm: string;
+}
+
+const DELETE_HASH_SALT = 'xlist-deleted-v1';
+
+export async function handleDelete(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') {
+    return jsonErr('not authenticated', 401);
+  }
+
+  let body: DeleteBody;
+  try {
+    body = (await request.json()) as DeleteBody;
+  } catch {
+    return jsonErr('invalid json', 400);
+  }
+
+  // 找当前 phone identity 用于二次确认
+  const ident = await env.DB.prepare(
+    `SELECT id, identity_value FROM identities
+     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+     ORDER BY verified_at DESC LIMIT 1`,
+  ).bind(auth.userId).first<{ id: number; identity_value: string }>();
+
+  if (!ident) {
+    return jsonErr('phone identity not found', 404);
+  }
+
+  if (typeof body.phone_confirm !== 'string' || body.phone_confirm !== ident.identity_value) {
+    return jsonErr('phone confirm mismatch', 400);
+  }
+
+  const now = Date.now();
+  const hashedPhone = await hashCode(ident.identity_value, DELETE_HASH_SALT);
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE users SET display_name = NULL, avatar_url = NULL, status = 'self_deleted' WHERE id = ?`,
+    ).bind(auth.userId),
+    env.DB.prepare(
+      `UPDATE identities SET identity_value = ?, unbound_at = ? WHERE id = ?`,
+    ).bind(hashedPhone, now, ident.id),
+    env.DB.prepare(
+      `UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`,
+    ).bind(now, auth.userId),
+  ]);
+
+  return jsonOk(
+    { ok: true },
+    { 'Set-Cookie': buildClearCookie(isDevHost(request)) },
+  );
+}

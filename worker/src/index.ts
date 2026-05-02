@@ -26,6 +26,7 @@ import {
   handleLogout,
   handleLogoutAll,
   handleMe,
+  handleDelete,
 } from './auth/handlers';
 
 export interface Env {
@@ -159,6 +160,9 @@ export default {
       }
       if (path === '/api/auth/me' && request.method === 'GET') {
         return withCors(await handleMe(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/delete' && request.method === 'POST') {
+        return withCors(await handleDelete(request, env, ctx), request, env);
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);

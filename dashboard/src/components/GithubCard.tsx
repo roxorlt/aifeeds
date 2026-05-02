@@ -3,7 +3,9 @@ import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import {
+  IconIssueOpened,
   IconLeaderboard,
+  IconPullRequest,
   IconRepoForked,
   IconStarFill,
   IconWatching,
@@ -79,6 +81,8 @@ export function GithubCard({ item }: Props) {
   const stars = metrics.stars ?? metrics.total_stars;
   const forks = metrics.forks;
   const watchers = metrics.watchers;
+  const openIssues = metrics.open_issues;
+  const openPrs = metrics.open_prs;
   const summary = extra.ai_summary || "";
   const category = extra.ai_category as string | null | undefined;
   const dailyRank = extra.daily_rank as number | null | undefined;
@@ -94,7 +98,7 @@ export function GithubCard({ item }: Props) {
   return (
     <article
       onClick={open}
-      className="cursor-pointer border-b border-neutral-200 bg-white px-4 py-4 transition-colors hover:bg-neutral-50/50"
+      className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >
       <div className="flex items-start gap-3">
         <img
@@ -104,78 +108,103 @@ export function GithubCard({ item }: Props) {
           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
         />
         <div className="min-w-0 flex-1">
-          <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
-            {ownerRepo}
+          {/* Header row: title + meta + category badge（徽章浮在右侧顶部） */}
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
+                {ownerRepo}
+              </div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                {language && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className={cn("h-2 w-2 rounded-full", langDot(language))} />
+                    {language}
+                  </span>
+                )}
+                {language && stars !== undefined && <span className="text-neutral-400">·</span>}
+                {stars !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconStarFill className="h-3.5 w-3.5" />
+                    {formatCompact(stars)}
+                  </span>
+                )}
+                {forks !== undefined && <span className="text-neutral-400">·</span>}
+                {forks !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconRepoForked className="h-3.5 w-3.5" />
+                    {formatCompact(forks)}
+                  </span>
+                )}
+                {watchers !== undefined && <span className="text-neutral-400">·</span>}
+                {watchers !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconWatching className="h-3.5 w-3.5" />
+                    {formatCompact(watchers)}
+                  </span>
+                )}
+                {openIssues !== undefined && <span className="text-neutral-400">·</span>}
+                {openIssues !== undefined && (
+                  <span
+                    className="inline-flex cursor-help items-center gap-1"
+                    title={`${openIssues} 个 open issue`}
+                  >
+                    <IconIssueOpened className="h-3.5 w-3.5" />
+                    {formatCompact(openIssues)}
+                  </span>
+                )}
+                {openPrs !== undefined && <span className="text-neutral-400">·</span>}
+                {openPrs !== undefined && (
+                  <span
+                    className="inline-flex cursor-help items-center gap-1"
+                    title={`${openPrs} 个 open PR`}
+                  >
+                    <IconPullRequest className="h-3.5 w-3.5" />
+                    {formatCompact(openPrs)}
+                  </span>
+                )}
+              </div>
+            </div>
+            {category && (
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                  CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
+                )}
+              >
+                {category}
+              </span>
+            )}
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-neutral-500">
-            {language && (
-              <span className="inline-flex items-center gap-1">
-                <span className={cn("h-2 w-2 rounded-full", langDot(language))} />
-                {language}
-              </span>
-            )}
-            {language && stars !== undefined && <span className="text-neutral-400">·</span>}
-            {stars !== undefined && (
-              <span className="inline-flex items-center gap-1">
-                <IconStarFill className="h-3.5 w-3.5" />
-                {formatCompact(stars)}
-              </span>
-            )}
-            {forks !== undefined && <span className="text-neutral-400">·</span>}
-            {forks !== undefined && (
-              <span className="inline-flex items-center gap-1">
-                <IconRepoForked className="h-3.5 w-3.5" />
-                {formatCompact(forks)}
-              </span>
-            )}
-            {watchers !== undefined && <span className="text-neutral-400">·</span>}
-            {watchers !== undefined && (
-              <span className="inline-flex items-center gap-1">
-                <IconWatching className="h-3.5 w-3.5" />
-                {formatCompact(watchers)}
-              </span>
-            )}
-          </div>
-        </div>
-        {category && (
-          <span
-            className={cn(
-              "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium",
-              CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
-            )}
-          >
-            {category}
-          </span>
-        )}
-      </div>
 
-      {summary && (
-        <>
-          <p
-            className={cn(
-              "mt-3 text-[13px] leading-relaxed text-neutral-700",
-              !expanded && "line-clamp-3",
-            )}
-          >
-            {summary}
-          </p>
-          {!expanded && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded(true);
-              }}
-              className="mt-1 text-[11px] text-sky-600 hover:underline"
-            >
-              展开 ↓
-            </button>
+          {/* Summary（缩进对齐到标题，跟 X card 推文正文一致字号 15 / 1.45） */}
+          {summary && (
+            <>
+              <p
+                className={cn(
+                  "mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words",
+                  !expanded && "line-clamp-3",
+                )}
+              >
+                {summary}
+              </p>
+              {!expanded && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpanded(true);
+                  }}
+                  className="mt-1 text-[14px] text-sky-600 hover:underline"
+                >
+                  展开
+                </button>
+              )}
+            </>
           )}
-        </>
-      )}
 
-      <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-500">
-        {(dateMd || dailyRank) && (
+          {/* Footer 行 */}
+          <div className="mt-3 flex items-center justify-between text-[12px] text-neutral-500">
+            {(dateMd || dailyRank) && (
           <span
             className="inline-flex cursor-help items-center gap-1.5"
             title={
@@ -213,6 +242,8 @@ export function GithubCard({ item }: Props) {
             )}
           </span>
         )}
+          </div>
+        </div>
       </div>
     </article>
   );

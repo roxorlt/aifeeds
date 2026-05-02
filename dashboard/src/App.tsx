@@ -16,6 +16,13 @@ import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
+import { Routes, Route } from "react-router";
+import { UserMenu } from "./components/UserMenu";
+import { LoginModal } from "./components/LoginModal";
+import { Toast } from "./components/Toast";
+import { Settings } from "./pages/Settings";
+import { AccountManage } from "./pages/AccountManage";
+import { useAuthStore } from "./lib/authStore";
 
 interface SourceConfig {
   source_type: SourceType;
@@ -45,11 +52,11 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "arxiv", label: "arXiv" },
 ];
 
-function App() {
+function DashboardHome() {
   const [sources, setSources] = useState<Source[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [storedFilter, setFilter] = useState<FilterKey>("all");
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [refreshTick, _setRefreshTick] = useState(0);
 
   const isNarrow = useIsNarrow();
   const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
@@ -256,14 +263,7 @@ function App() {
             </nav>
           )}
 
-          <button
-            type="button"
-            onClick={() => setRefreshTick((t) => t + 1)}
-            className="shrink-0 self-center rounded-md border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100"
-            title="刷新"
-          >
-            ⟳
-          </button>
+          <UserMenu />
         </div>
       </header>
 
@@ -314,6 +314,32 @@ function App() {
       </Suspense>
     </div>
     </DrawerProvider>
+  );
+}
+
+function App() {
+  const hydrate = useAuthStore((s) => s.hydrate);
+  const hydrated = useAuthStore((s) => s.hydrated);
+
+  // 启动时调 /api/auth/me hydrate
+  useEffect(() => {
+    if (!hydrated) {
+      hydrate();
+    }
+  }, [hydrate, hydrated]);
+
+  return (
+    <>
+      <Routes>
+        <Route path="/" element={<DashboardHome />} />
+        <Route path="/t/:id" element={<DashboardHome />} />
+        <Route path="/g/:owner/:repo" element={<DashboardHome />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/settings/account" element={<AccountManage />} />
+      </Routes>
+      <LoginModal />
+      <Toast />
+    </>
   );
 }
 
