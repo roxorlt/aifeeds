@@ -33,6 +33,7 @@ from . import parser
 from . import leaderboard as leaderboard_mod
 from . import llm_judge
 from . import dom_extract
+from . import translate as translate_mod
 from .._lib import browser_utils as bu_utils
 
 log = logging.getLogger("ph_scraper")
@@ -266,6 +267,17 @@ def scrape_leaderboard_day(yyyy: int, mm: int, dd: int, save_html: bool = True,
                         log.warning("[%d] %s judge failed: %s — leaving is_ai=NULL",
                                     entry.daily_rank, entry.slug, exc)
                         p["is_ai"] = None
+                # 翻译 — 仅 is_ai=1 的产品翻（is_ai=0 不展示，不浪费配额）
+                if judge and p.get("is_ai") == 1:
+                    try:
+                        translate_mod.translate_product(p)
+                        p["translated"] = 1
+                    except Exception as exc:
+                        log.warning("[%d] %s translate failed: %s",
+                                    entry.daily_rank, entry.slug, exc)
+                        p["translated"] = 0
+                else:
+                    p["translated"] = 0
                 results.append(p)
                 log.info("[%2d/%d] %s — %s (ld=%d, is_ai=%s, cat=%s)",
                          entry.daily_rank, len(entries), entry.slug,
