@@ -10,7 +10,16 @@
 - [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
 
 ## 待做
-- [ ] **分享功能**（依赖下面 4 个前置全部完成）：PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
+
+> **下一阶段 Roadmap（2026-05-03 调整）**
+>
+> 1. **PR4 强制登录拦截** — 路由 guards + 401 trigger（依赖 PR3 已合）
+> 2. **staging 环境落地** — 按 [`docs/plans/2026-05-03-staging-environment-design.md`](docs/plans/2026-05-03-staging-environment-design.md) 一次性搭完，~1.5h
+> 3. **PR5 分享功能**（原 PR5 收藏 / 订阅推迟到 PR7）— PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
+> 4. **PR6 上线加固** — 限流参数调优 / admin 看板增强 / 数据备份 launchd / 异常告警分级
+> 5. **PR7 收藏 + 订阅 (newsletter)** — 待澄清「订阅」语义：站内 sub（author/keyword/thread）vs 邮件 newsletter（每日/每周摘要发邮箱）vs 两者都做
+> 6. 之后：`/admin/analytics` 数据看板、dark mode、enricher daemon 调度优化
+
 - [x] 前置 1: Dashboard URL routing — 已合 main（PR-A + PR-B），待部署 dashboard：
   - Worker `GET /api/items/:id`（单条 + thread siblings）已上线
   - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
@@ -19,7 +28,8 @@
 - [ ] **前置 2 + 3 合并：账号系统 + telemetry SDK**（共拆 6 个 PR，按依赖串联）
   - 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md)
   - 决策要点：手机号短信登录（个人主体起步，企业主体后置）+ Session 不走 JWT + LocalStorage device_id（合规优先）+ Turnstile + 4 层 SMS 防刷 + 200 条/天 hard cap + PushDeer 告警
-  - 实施路线：PR1 telemetry SDK → PR2 auth backend → PR3 登录 UI（含右上角 UserMenu / Settings / 注销） → PR4 强制登录拦截 → PR5 收藏订阅 → PR6 上线后加固
+  - 实施路线：PR1 telemetry SDK ✅ → PR2 auth backend ✅ → PR3 登录 UI ✅ → PR4 强制登录拦截 → staging 环境 → PR5 分享功能 → PR6 上线后加固 → PR7 收藏订阅 / newsletter
+  - **顺序调整（2026-05-03）**：staging 提前到 PR4 之后（替代原"PR6 一次性"），PR5/PR7 内容互换（分享功能优先于收藏订阅，因为分享不依赖写表）
   - 微信 OAuth / 一键登录 SDK / 第三方登录：等切企业主体后再做（identities 表 schema 已预留）
 - [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），基于 events 表做漏斗 / 留存 / 来源分析，按 tweet / author / referer 维度下钻
 - [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
