@@ -77,30 +77,38 @@ EXTRACT_COMMENTS_JS = r"""
     };
   }
 
-  // Step 1: 按 thread 容器拿 top-level comment（每个 thread 第一个 comment 节点）
+  // Step 1: 按 thread 容器拿 top-level comment。
+  // PH 把 *每条* comment（含 reply）都包在 [data-test^="thread-"] 里，
+  // 区别在于 reply 的 thread-N 嵌套在父 thread-M 里。所以必须只处理
+  // 真正顶层的 thread（祖先里没有别的 thread-X）。
+  // PH 约定：thread-N 的顶层 comment 节点 data-test == comment-N（同 ID）。
+  // 同一 thread DOM 在 mobile / desktop 双渲染会出现两次，按 thread-N
+  // 去重。
   const threads = document.querySelectorAll('[data-test^="thread-"]');
   threads.forEach((thread) => {
     try {
-      const firstComment = thread.querySelector('[data-test]');
-      if (!firstComment) return;
-      // 挖到第一个真 comment 节点（thread 容器自己 data-test 是 thread-xxx，
-      // 容器内第一个 [data-test=comment-N] 才是 top-level）
-      const candidates = thread.querySelectorAll('[data-test]');
-      let topComment = null;
-      for (const c of candidates) {
-        const idAttr = c.getAttribute('data-test') || '';
-        if (/^comment-\d+$/.test(idAttr)) {
-          topComment = c;
-          break;
-        }
+      const threadIdAttr = thread.getAttribute('data-test') || '';
+      const threadMatch = threadIdAttr.match(/^thread-(\d+)$/);
+      if (!threadMatch) return;
+      const threadId = threadMatch[1];
+
+      // 嵌套检查：祖先链里是否有别的 thread-X → 是 reply，跳过
+      let p = thread.parentElement;
+      let nested = false;
+      while (p && p !== document.body) {
+        const a = p.getAttribute && p.getAttribute('data-test');
+        if (a && /^thread-\d+$/.test(a)) { nested = true; break; }
+        p = p.parentElement;
       }
+      if (nested) return;
+
+      if (processed.has(threadId)) return;
+      processed.add(threadId);
+
+      // 用 PH 约定：thread-N 的顶层 comment 直接是 comment-N
+      const topComment = thread.querySelector('[data-test="comment-' + threadId + '"]');
       if (!topComment) return;
-      const idMatch = topComment.getAttribute('data-test').match(/^comment-(\d+)$/);
-      if (!idMatch) return;
-      const id = idMatch[1];
-      if (processed.has(id)) return;
-      processed.add(id);
-      const parsed = parseCommentNode(topComment, id);
+      const parsed = parseCommentNode(topComment, threadId);
       if (parsed && (parsed.body || parsed.author_handle)) out.push(parsed);
     } catch (e) {}
   });
