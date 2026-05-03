@@ -113,21 +113,34 @@ export function PhDrawerBody({ item }: Props) {
 
   const allTopComments = (extra.top_comments as PhComment[]) || [];
   // 过滤掉 phantom rows（无 text 或无 handle 的，旧数据 dom_extract 误抓
-  // comment-form / comment-menu-button 等非评论 DOM 时会留空 row；handle
-  // 去重防止同一评论双渲染）
+  // comment-form / comment-menu-button 等非评论 DOM 时会留空 row）。
+  //
+  // dedup-by-handle：scraper 当前抓的是所有 [data-test^="comment-"] DOM
+  // 节点，把回复也算进了顶级评论，导致同一作者多次出现（schole-2 vinitra
+  // × 5、manus 早期数据 orion_zou × 3）。彻底修复需要 scraper 按 thread
+  // 容器抓 top-level only，先在渲染层每作者只留最高赞那条压住表象。
   const topComments = (() => {
-    const seen = new Set<string>();
-    const out: PhComment[] = [];
+    const byHandle = new Map<string, PhComment>();
+    const noHandleOut: PhComment[] = [];
     for (const c of allTopComments) {
       const text = (c.text || "").trim();
-      const handle = c.author_handle || "";
+      const handle = (c.author_handle || "").trim();
       if (!text && !handle) continue;
-      const dedupeKey = `${handle}|${text.slice(0, 30)}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      out.push(c);
+      if (!handle) {
+        noHandleOut.push(c);
+        continue;
+      }
+      const prev = byHandle.get(handle);
+      if (!prev) {
+        byHandle.set(handle, c);
+        continue;
+      }
+      // 同 handle 已有 → 留 upvotes 高的那条
+      const prevVotes = prev.upvotes ?? -1;
+      const curVotes = c.upvotes ?? -1;
+      if (curVotes > prevVotes) byHandle.set(handle, c);
     }
-    return out;
+    return [...byHandle.values(), ...noHandleOut];
   })();
   const topReviews = (extra.top_reviews as PhReview[]) || [];
 
@@ -234,32 +247,37 @@ export function PhDrawerBody({ item }: Props) {
       {galleryItems.length > 0 && (
         <div className="border-b border-neutral-200 py-4">
           <div className="mb-2 px-5 text-[13px] font-medium text-neutral-500">截图与视频</div>
-          <div className="flex snap-x snap-mandatory gap-2 overflow-x-auto px-5">
-            {galleryItems.map((m, i) => {
-              const url = resolveAssetUrl(m.url);
-              return m.type === "video" ? (
-                <video
-                  key={i}
-                  src={url}
-                  className="h-44 w-72 shrink-0 snap-start rounded-md bg-neutral-200 object-cover"
-                  controls
-                  preload="metadata"
-                />
-              ) : (
-                <img
-                  key={i}
-                  src={url}
-                  className="h-44 w-72 shrink-0 cursor-zoom-in snap-start rounded-md bg-neutral-200 object-cover"
-                  loading="lazy"
-                  alt=""
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setLightboxIndex(i);
-                  }}
-                  onError={(e) => (e.currentTarget.style.display = "none")}
-                />
-              );
-            })}
+          {/* px-5 放在内层 flex 容器（不是 overflow-x-auto），保证首图左侧
+              和末图右侧都能看到 padding——某些 WebKit 版本对 padding 在
+              overflow-x-auto 自身上的渲染不一致 */}
+          <div className="overflow-x-auto">
+            <div className="flex snap-x snap-mandatory gap-2 px-5">
+              {galleryItems.map((m, i) => {
+                const url = resolveAssetUrl(m.url);
+                return m.type === "video" ? (
+                  <video
+                    key={i}
+                    src={url}
+                    className="h-44 w-72 shrink-0 snap-start rounded-md bg-neutral-200 object-cover"
+                    controls
+                    preload="metadata"
+                  />
+                ) : (
+                  <img
+                    key={i}
+                    src={url}
+                    className="h-44 w-72 shrink-0 cursor-zoom-in snap-start rounded-md bg-neutral-200 object-cover"
+                    loading="lazy"
+                    alt=""
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setLightboxIndex(i);
+                    }}
+                    onError={(e) => (e.currentTarget.style.display = "none")}
+                  />
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
