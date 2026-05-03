@@ -88,3 +88,28 @@ v2 再做。
 "主产品最新 launch"。下次实跑发现数字跟 PH 网页对不上时再考虑改进。
 
 ---
+
+## 2026-05-03 · PH CF turnstile rate-limit per-IP
+
+**现象**：第一次 fresh 抓 PH 产品页 OK；30s 内连续第二次抓另一个产品 → CF
+返回 turnstile 挑战页，Chinese 提示"请稍候..."；等 60s 再试又能通过。
+
+**结论**：PH 的 CF turnstile 不止看 cookie + fingerprint，**还按 IP 评估
+请求频率**。短时间内同 IP 多次"开新 Chrome 实例"会被识别为可疑流量。
+
+**对架构的影响**：
+
+- 不能用"每个产品一个 fresh browser-use session"模式（CF 会触发 challenge）
+- Phase 2 多产品抓取必须改用**单持久 session**：
+  1. 启动一次 Chrome session
+  2. 同 session 内 navigate 到 leaderboard
+  3. 同 session 内逐个 navigate 到每个 product URL
+  4. 全部抓完再关 session
+- 单产品之间加 **3-5s pacing**（模拟人浏览节奏，给 CF 心跳一些喘息）
+- 单 session 内的 navigation 共享同一 Chrome 实例的 fingerprint + cookie 历史，
+  CF 对持续浏览的"真人模式"通过率高得多
+
+**实施细节**：scraper.py 重构成 `class PHSession` 模式（开启一次 → loop 抓
+一批 → 关闭），单产品抓取作为 method 而非独立函数。
+
+---

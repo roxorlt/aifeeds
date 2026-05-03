@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import config
 from . import parser
+from .._lib import browser_utils as bu_utils
 
 log = logging.getLogger("ph_scraper")
 
@@ -53,32 +54,53 @@ def _bu(*args: str, timeout: int = 30) -> str:
     return proc.stdout
 
 
-def fetch_html_via_browser_use(url: str, render_wait_sec: int = 8) -> str:
+def fetch_html_via_browser_use(url: str, render_wait_sec: int = 15) -> str:
     """打开 PH 页面，等渲染后取完整 DOM。
 
     流程：
-      1. `bu --profile "Profile 1" --headed open <url>` — 用已登录 Profile 1
+      1. snapshot 用户当前 frontmost（_lib.browser_utils）
+      2. `bu --profile "Profile 1" --headed open <url>` — 用已登录 Profile 1
          启动 headed Chrome，cookies 自动跟随，turnstile 看到合法 cookie 放行
-      2. sleep render_wait_sec 等 NextJS RSC 流式 + turnstile 解
-      3. `bu eval 'document.documentElement.outerHTML'` 拿渲染后 HTML
-      4. `bu close` 收尾（finally 块兜底）
+      3. push Chrome to back 还焦点
+      4. sleep render_wait_sec 等 NextJS RSC 流式 + turnstile 解
+      5. `bu eval 'document.documentElement.outerHTML'` 拿渲染后 HTML
+      6. `bu close` + kill-by-data-dir 收尾
 
-    NOTE: 暂未集成 focus push-back / kill-by-data-dir（X scraper 已有完整
-    实现，下一步 commit 复用过来）。当前测试如果发现 Chrome 抢焦点严重，
-    手动 close 后再讨论。
+    遵循 CLAUDE.md「自动化 Chrome 工作流统一规范」5 条强制约定。
     """
     log.info("fetching %s", url)
     t0 = time.time()
+    prev_frontmost = bu_utils.snapshot_frontmost()
+    log.debug("[focus] prev frontmost: %s", prev_frontmost)
+
+    session_data_dir: str | None = None
+    html = ""
+    # 启动前先 close 任何残留 session（防止 "Session 'default' already running" 错）
+    _bu("close", timeout=10)
     try:
-        # 启动 session
+        # 启动 session（这一步 Chrome 起来抢焦点）
         _bu("--profile", config.CHROME_PROFILE, "--headed", "open", url, timeout=60)
+        # 立刻把焦点还给用户原 app
+        bu_utils.push_chrome_to_back(prev_frontmost)
+        # 记下临时 data dir，结束时按这个杀进程（防孤儿）
+        session_data_dir = bu_utils.find_session_data_dir()
+        log.debug("session data dir: %s", session_data_dir)
+
         # 等渲染（包含 turnstile 解 + RSC 流）
         time.sleep(render_wait_sec)
-        # 取 HTML — bu eval 输出包含 'result: ' 前缀（参考 X scraper 同处理）
+
+        # `bu open` 的导航会再 re-front Chrome，再 push 一次保险
+        bu_utils.push_chrome_to_back(prev_frontmost)
+
+        # 取 HTML — bu eval 输出包含 'result: ' 前缀
         raw = _bu("eval", "document.documentElement.outerHTML", timeout=20)
         html = raw[len("result: "):] if raw.startswith("result: ") else raw
     finally:
+        # 先 graceful close
         _bu("close", timeout=15)
+        # 再按 data-dir 兜底杀（browser-use daemon SIGKILL 不会传染到 Chrome 子进程）
+        bu_utils.kill_chrome_by_data_dir(session_data_dir)
+
     elapsed = time.time() - t0
     log.info("fetched in %.1fs, html size %d bytes", elapsed, len(html))
     return html
