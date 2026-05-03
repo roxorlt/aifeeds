@@ -7,30 +7,12 @@ import { displayNameOf, avatarUrlOf } from '../lib/defaultProfile';
 import { toast } from '../lib/toast';
 
 export function Settings() {
-  const user = useAuthStore((s) => s.user);
-  const hydrated = useAuthStore((s) => s.hydrated);
+  // user 由 <RequireAuth> 守卫保证非空
+  const user = useAuthStore((s) => s.user)!;
   const logoutAction = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
-
-  if (!hydrated) {
-    return <div className="p-8 text-center text-neutral-500">加载中…</div>;
-  }
-  if (!user) {
-    return (
-      <div className="mx-auto max-w-md p-8 text-center">
-        <p className="mb-4 text-neutral-700">请先登录</p>
-        <button
-          type="button"
-          onClick={() => navigate('/')}
-          className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800"
-        >
-          返回首页
-        </button>
-      </div>
-    );
-  }
 
   const name = displayNameOf(user);
   const avatarSrc = avatarUrlOf(user);
