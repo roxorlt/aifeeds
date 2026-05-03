@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ai-feeds 三环境运维指南</title>
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", Roboto, sans-serif;
+    background: #0b0e14; color: #e6e8eb; line-height: 1.6;
+  }
+  .container { max-width: 920px; margin: 0 auto; padding: 32px 24px 96px; }
+  h1 { font-size: 28px; margin: 0 0 8px; color: #fff; font-weight: 700; }
+  .subtitle { color: #9ca3af; font-size: 14px; margin: 0 0 32px; }
+  h2 {
+    font-size: 20px; margin: 56px 0 16px;
+    padding-bottom: 8px; border-bottom: 1px solid #1f2937;
+    color: #fff; font-weight: 600;
+  }
+  h2 .num { color: #9ca3af; font-weight: 400; margin-right: 8px; }
+  h3 { font-size: 16px; margin: 28px 0 12px; color: #d1d5db; font-weight: 600; }
+  p, li { color: #d1d5db; }
+  a { color: #93c5fd; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: #1f2937; padding: 2px 6px; border-radius: 4px;
+    font-size: 0.9em; color: #fde68a; font-family: ui-monospace, monospace;
+  }
+  pre {
+    background: #11161f; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; line-height: 1.5;
+    font-size: 13px; color: #d1d5db; font-family: ui-monospace, monospace;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0;
+    background: #11161f; border-radius: 8px; overflow: hidden;
+  }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #1f2937; font-size: 14px; }
+  th { background: #1f2937; color: #d1d5db; font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.cell-prod { color: #6ee7b7; }
+  td.cell-stg { color: #fdba74; }
+  td.cell-dev { color: #93c5fd; }
+  .callout {
+    border-left: 3px solid; padding: 12px 16px; margin: 16px 0;
+    border-radius: 0 6px 6px 0; background: #11161f;
+  }
+  .callout.warn { border-color: #f59e0b; }
+  .callout.tip { border-color: #10b981; }
+  .callout.danger { border-color: #ef4444; }
+  .callout strong { color: #fff; }
+  .nav-toc {
+    background: #11161f; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 16px 20px; margin: 0 0 32px;
+  }
+  .nav-toc h4 { margin: 0 0 8px; font-size: 13px; color: #9ca3af;
+                font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+  .nav-toc ol { margin: 0; padding: 0 0 0 24px; columns: 2; }
+  .nav-toc li { font-size: 14px; padding: 2px 0; }
+  .ascii {
+    background: #11161f; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 16px 20px; overflow-x: auto;
+    font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.4;
+    color: #d1d5db; white-space: pre;
+  }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.prod { background: #064e3b; color: #6ee7b7; }
+  .badge.stg { background: #7c2d12; color: #fdba74; }
+  .badge.dev { background: #1e3a8a; color: #93c5fd; }
+  .scene {
+    border: 1px solid #1f2937; border-radius: 8px;
+    padding: 20px; margin: 16px 0;
+    background: #0e1219;
+  }
+  .scene h3 { margin-top: 0; color: #fff; }
+  .scene .what { color: #fdba74; font-weight: 600; font-size: 13px; margin: 12px 0 4px; }
+  .scene .step { margin: 4px 0; padding-left: 24px; position: relative; }
+  .scene .step::before {
+    content: ''; position: absolute; left: 8px; top: 12px;
+    width: 4px; height: 4px; background: #6b7280; border-radius: 50%;
+  }
+  details {
+    background: #11161f; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 12px 16px; margin: 12px 0;
+  }
+  summary { cursor: pointer; color: #d1d5db; font-weight: 500; }
+  summary:hover { color: #fff; }
+  details[open] summary { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #1f2937; }
+  hr { border: none; border-top: 1px solid #1f2937; margin: 32px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>ai-feeds 三环境运维指南</h1>
+<p class="subtitle">vibe coder friendly · 维护：roxor · 最后更新：2026-05-03</p>
+
+<div class="nav-toc">
+  <h4>目录</h4>
+  <ol>
+    <li><a href="#sec1">三个环境是干嘛的</a></li>
+    <li><a href="#sec2">架构图</a></li>
+    <li><a href="#sec3">日常 workflow</a></li>
+    <li><a href="#sec4">数据怎么管</a></li>
+    <li><a href="#sec5">定时任务在哪跑</a></li>
+    <li><a href="#sec6">备份 &amp; 恢复</a></li>
+    <li><a href="#sec7">应急 playbook</a></li>
+    <li><a href="#sec8">Claude Code 帮你做</a></li>
+    <li><a href="#sec9">命令速查</a></li>
+  </ol>
+</div>
+
+<h2 id="sec1"><span class="num">1.</span>三个环境是干嘛的</h2>
+
+<p>ai-feeds 总共 3 套环境，目的不重叠：</p>
+
+<table>
+<tr><th>环境</th><th>谁在用</th><th>能写吗</th><th>挂了影响</th></tr>
+<tr>
+  <td><span class="badge prod">prod</span></td>
+  <td>真实用户</td><td>能（用户登录、订阅）</td>
+  <td class="cell-prod">所有人看不到内容 / 登不上 → 紧急</td>
+</tr>
+<tr>
+  <td><span class="badge stg">staging</span></td>
+  <td>你测试新功能用</td><td>能（不污染 prod 数据）</td>
+  <td class="cell-stg">影响 0 — 只有你访问</td>
+</tr>
+<tr>
+  <td><span class="badge dev">dev</span></td>
+  <td>你本地写代码</td><td>能（默认连 staging）</td>
+  <td class="cell-dev">影响 0 — 只有你电脑</td>
+</tr>
+</table>
+
+<div class="callout tip">
+<strong>一句话原则</strong>：写代码在 dev，测改动在 staging，给用户用是 prod。任何写操作（登录、注册、发短信）都先在 staging 跑一遍，再合 main 部署 prod。
+</div>
+
+<h2 id="sec2"><span class="num">2.</span>架构图</h2>
+
+<div class="ascii">┌─────────── PROD（用户访问） ───────────┐    ┌────── STAGING（你测试） ──────┐
+│                                        │    │                              │
+│  ai-feeds.com                          │    │  staging.ai-feeds.com        │
+│   ↓                                    │    │   ↓                          │
+│  api.ai-feeds.com                      │    │  staging-api.ai-feeds.com    │
+│   ↓                                    │    │   ↓                          │
+│  Worker: xlist-api                     │    │  Worker: xlist-api-staging   │
+│   ├─ D1: xlist            ← 真用户数据│    │   ├─ D1: xlist-staging       │
+│   ├─ KV: AUTH_KV                       │    │   ├─ KV: AUTH_KV_STAGING     │
+│   └─ R2: xlist-readme-assets           │    │   └─ R2: xlist-readme-stg    │
+│                                        │    │                              │
+│  Cron: 5min 抓取/enrich 全开           │    │  Cron: 全关（手动触发）      │
+│  SMS:  真腾讯云（用户收真短信）        │    │  SMS:  PushDeer 推 admin     │
+└────────────────────────────────────────┘    └──────────────────────────────┘
+
+                ┌────── LOCAL DEV（你的 macbook） ─────┐
+                │                                      │
+                │  localhost:5173 (vite dev server)    │
+                │   ↓ vite proxy /api/*                │
+                │  默认: staging-api.ai-feeds.com      │
+                │  （想连 prod？VITE_API_PROXY 覆盖）  │
+                └──────────────────────────────────────┘</div>
+
+<p>每条线代表「请求从哪儿打到哪儿」。<strong>prod 跟 staging 完全不共享数据库 / 缓存 / 文件存储</strong>，独立资源 ID。</p>
+
+<h2 id="sec3"><span class="num">3.</span>日常 workflow（按场景）</h2>
+
+<div class="scene">
+<h3>场景 A：改一个 dashboard 按钮颜色</h3>
+<p class="what">流程：dev → 直接合 prod（纯视觉，跳过 staging）</p>
+<div class="step">在 worktree 里改组件，<code>npm run dev</code> 在浏览器看效果</div>
+<div class="step">改对了 → commit 到 main</div>
+<div class="step"><code>cd dashboard &amp;&amp; npm run build &amp;&amp; npx wrangler pages deploy dist --project-name=xlist-dashboard --branch=main</code></div>
+<div class="step">ai-feeds.com 强刷验证</div>
+</div>
+
+<div class="scene">
+<h3>场景 B：改 worker 加新 API endpoint</h3>
+<p class="what">流程：dev → staging → prod（任何 worker 改动都过 staging）</p>
+<div class="step">开 feature branch + worktree</div>
+<div class="step">改 worker/src/，加新 endpoint</div>
+<div class="step">本地 dashboard <code>npm run dev</code> 调 staging worker（默认）—— 等 staging 部署后再测</div>
+<div class="step"><code>cd worker &amp;&amp; npx wrangler deploy --env staging</code></div>
+<div class="step">在 staging 域名下测新 endpoint：<code>curl https://staging-api.ai-feeds.com/api/xxx</code></div>
+<div class="step">OK → 合 main → <code>npx wrangler deploy</code>（不带 env 默认 prod）</div>
+<div class="step">prod 验收</div>
+</div>
+
+<div class="scene">
+<h3>场景 C：D1 schema 变更（加列、新表）</h3>
+<p class="what">流程：staging migration → 验证 → prod migration → 部署 worker</p>
+<div class="step">写 <code>worker/migrations/0NN-xxx.sql</code></div>
+<div class="step">staging 先跑：<code>npx wrangler d1 migrations apply xlist-staging --env staging --remote</code></div>
+<div class="step">staging worker 部署 + 跑测试 endpoint，确认 schema 变更不破坏现有数据</div>
+<div class="step">prod 跑 migration：<code>npx wrangler d1 migrations apply xlist --remote</code></div>
+<div class="step">prod worker 部署</div>
+<div class="callout danger" style="margin-top:12px">
+<strong>禁止</strong>：直接 <code>wrangler d1 execute --remote --command="ALTER TABLE..."</code> 改 prod。一定要走 migration 文件，方便回滚。
+</div>
+</div>
+
+<div class="scene">
+<h3>场景 D：测试登录 / SMS 流程</h3>
+<p class="what">流程：staging（永远不在 prod 测登录）</p>
+<div class="step">staging 的 SMS_PROVIDER=pushdeer，验证码会推到管理员手机的 PushDeer，不发真短信</div>
+<div class="step">本地 <code>npm run dev</code> 默认连 staging，登录流程跑通</div>
+<div class="step">登录态、注销、风控都在 staging 演练</div>
+<div class="callout warn" style="margin-top:12px">
+<strong>不要在 prod 测登录</strong>：会消耗每日 200 条 SMS cap、把你手机号写进 prod 风控表，被锁后还得用 admin panel 解。
+</div>
+</div>
+
+<div class="scene">
+<h3>场景 E：dashboard + worker 同时改（最容易翻车）</h3>
+<p class="what">流程：必须同时部署 staging 验证 → 同时合 main → 同时部署 prod</p>
+<div class="step">同一 feature branch 改 worker + dashboard</div>
+<div class="step">worker 先 staging：<code>wrangler deploy --env staging</code></div>
+<div class="step">dashboard 后 staging：<code>npm run deploy:staging</code></div>
+<div class="step">在 staging.ai-feeds.com 验真</div>
+<div class="step">合 main → 同一会话部署 prod 两边</div>
+<div class="callout danger" style="margin-top:12px">
+<strong>反面教材</strong>：PR3 第一次部署，dashboard 升级了 fetch <code>credentials: 'include'</code>，但 worker CORS 没跟上 <code>Allow-Credentials: true</code>，prod 全站 fetch 失败。如果当时 staging 同步部署，5 分钟内就能发现。
+</div>
+</div>
+
+<h2 id="sec4"><span class="num">4.</span>数据怎么管</h2>
+
+<table>
+<tr><th>数据类型</th><th>prod 策略</th><th>staging 策略</th></tr>
+<tr>
+  <td>Items（推文/repo）</td>
+  <td>cron 自动抓取/enrich</td>
+  <td>cron 关，从 prod export 一次种子</td>
+</tr>
+<tr>
+  <td>Users / Sessions</td>
+  <td>真用户数据</td>
+  <td>schema-only + 你自己手动注册的测试账号</td>
+</tr>
+<tr>
+  <td>Events（埋点）</td>
+  <td>所有用户行为</td>
+  <td>只有你测试时产生的；不污染 prod 漏斗</td>
+</tr>
+<tr>
+  <td>SMS log</td>
+  <td>真发短信记录</td>
+  <td>PushDeer 推送记录</td>
+</tr>
+</table>
+
+<h3>staging 数据初始化</h3>
+
+<pre><code># 1. 从 prod export schema（不带数据，避免泄露真用户隐私）
+cd worker
+npx wrangler d1 export xlist --remote --output=schema.sql --no-data
+
+# 2. 灌进 staging
+npx wrangler d1 execute xlist-staging --env staging --remote --file=schema.sql
+
+# 3. 手动塞几条测试数据（自己在 staging.ai-feeds.com 注册一次就行）
+
+# 4. 想要内容数据？跑一次 GitHub trending fetch 即可
+curl -X POST -H "Authorization: Bearer $INGEST_TOKEN_STAGING" \
+  https://staging-api.ai-feeds.com/api/enrich/run?mode=github-fetch</code></pre>
+
+<h2 id="sec5"><span class="num">5.</span>定时任务在哪跑</h2>
+
+<table>
+<tr><th>任务</th><th>prod</th><th>staging</th><th>说明</th></tr>
+<tr><td>X 抓取（每 5min）</td><td class="cell-prod">launchd 本地 cron</td><td class="cell-stg">不跑</td><td>本地推 prod，staging 不需要新数据</td></tr>
+<tr><td>GitHub fetch</td><td class="cell-prod">worker cron */5</td><td class="cell-stg">关闭</td><td>staging 想测临时手动触发</td></tr>
+<tr><td>refresh-metrics</td><td class="cell-prod">worker cron */5</td><td class="cell-stg">关闭</td><td>同上</td></tr>
+<tr><td>enrich pipeline</td><td class="cell-prod">worker cron */5</td><td class="cell-stg">关闭</td><td>同上</td></tr>
+<tr><td>D1 备份</td><td class="cell-prod">launchd 本地周日 02:00</td><td>—</td><td>仅 prod 需要备份</td></tr>
+</table>
+
+<p><strong>staging 手动触发 cron</strong>：<code>curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled</code></p>
+
+<h2 id="sec6"><span class="num">6.</span>备份 &amp; 恢复</h2>
+
+<h3>本地 launchd 周备份（已规划，PR6 落地）</h3>
+
+<pre><code># ~/Library/LaunchAgents/com.aifeeds.d1-backup.plist
+# 每周日 02:00 BJT 触发
+cd ~/brain/30-projects/xlist-scraper/worker
+DATE=$(date +%Y%m%d)
+npx wrangler d1 export xlist --remote --output=/tmp/xlist-$DATE.sql
+gzip /tmp/xlist-$DATE.sql
+
+# 上传到 staging R2 bucket（prod / staging 共用 R2 配额，免费）
+npx wrangler r2 object put \
+  xlist-readme-assets-staging/backups/xlist-$DATE.sql.gz \
+  --file=/tmp/xlist-$DATE.sql.gz
+
+rm /tmp/xlist-$DATE.sql.gz
+
+# 保留最近 12 周（旧的 R2 lifecycle 自动删，或脚本扫）</code></pre>
+
+<h3>恢复</h3>
+
+<pre><code># 1. 拉备份
+npx wrangler r2 object get \
+  xlist-readme-assets-staging/backups/xlist-20260503.sql.gz \
+  --file=/tmp/restore.sql.gz
+gunzip /tmp/restore.sql.gz
+
+# 2. 灌进新 D1（不要直接覆盖 prod！）
+npx wrangler d1 create xlist-restore
+npx wrangler d1 execute xlist-restore --remote --file=/tmp/restore.sql
+
+# 3. 验证 xlist-restore 数据没问题
+
+# 4. 切换：改 wrangler.toml 的 database_id 指向新库 + 部署</code></pre>
+
+<h2 id="sec7"><span class="num">7.</span>应急 playbook</h2>
+
+<details>
+<summary>🔥 prod 全站 fetch 挂了（CORS / 500）</summary>
+<pre><code># 1. 看 worker 日志
+cd worker && npx wrangler tail
+
+# 2. 是不是 dashboard 跟 worker 不匹配？看最近一次部署
+npx wrangler deployments list
+
+# 3. 回滚 worker（用上一个 version ID）
+npx wrangler rollback &lt;version-id&gt;
+
+# 4. dashboard 也回滚（CF Pages dashboard → Deployments → 历史里点 Rollback）
+
+# 5. 找到根因再部署</code></pre>
+</details>
+
+<details>
+<summary>🔥 prod D1 数据被误改 / 删</summary>
+<pre><code># 立刻检查最近备份
+npx wrangler r2 object list xlist-readme-assets-staging --prefix=backups/
+
+# 拉最新一份恢复（见第 6 节）
+# 切换到 xlist-restore 验证 → 改 wrangler.toml 切回</code></pre>
+</details>
+
+<details>
+<summary>🔥 admin secret 泄露</summary>
+<pre><code>cd worker
+echo "新强密码" | npx wrangler secret put ADMIN_PASS
+
+# 部署即刻生效，无需重新 deploy（secret 是 hot reload 的）
+# 但保险起见跑一次 wrangler deploy</code></pre>
+</details>
+
+<details>
+<summary>🔥 SMS 风控锁住 / 用量爆了</summary>
+<pre><code># 看用量
+curl -u "***ADMIN-CREDS-REDACTED***" https://api.ai-feeds.com/api/admin/daily-cap
+
+# 临时关闭 SMS（设 SMS_DAILY_CAP=0 是 kill switch）
+echo "0" | npx wrangler secret put SMS_DAILY_CAP
+
+# 解锁某号
+curl -u "***ADMIN-CREDS-REDACTED***" -X POST -H "Content-Type: application/json" \
+  https://api.ai-feeds.com/api/admin/unlock-sms \
+  -d '{"phone":"166xxxxxxxx"}'
+
+# 或直接打开 admin panel：https://api.ai-feeds.com/admin</code></pre>
+</details>
+
+<details>
+<summary>🔥 worker / dashboard 一个改对、一个忘了部署</summary>
+<pre><code># 看当前部署状态
+npx wrangler deployments list  # worker
+npx wrangler pages deployment list --project-name=xlist-dashboard  # dashboard
+
+# 看 source 字段对应的 commit hash 是不是 main HEAD
+git log --oneline -1
+
+# 不一致的那边重新部署</code></pre>
+</details>
+
+<h2 id="sec8"><span class="num">8.</span>Claude Code 帮你做</h2>
+
+<p>下面这些事你不用记命令，跟 Claude Code 说一句中文就行：</p>
+
+<table>
+<tr><th>说什么</th><th>Claude 帮你跑</th></tr>
+<tr><td>「部署 dashboard 到 prod」</td><td>build + wrangler pages deploy + 验证</td></tr>
+<tr><td>「部署 worker 到 staging」</td><td>wrangler deploy --env staging</td></tr>
+<tr><td>「备份 prod D1」</td><td>wrangler d1 export + 上传 R2</td></tr>
+<tr><td>「把 prod schema 同步到 staging」</td><td>export schema-only + execute on staging</td></tr>
+<tr><td>「prod 在挂吗？」</td><td>curl + wrangler tail + 看最近部署 hash</td></tr>
+<tr><td>「16619811550 命中风控解一下」</td><td>调 admin endpoint 或直接 d1 execute UPDATE</td></tr>
+<tr><td>「合并 main + 部署」</td><td>merge --no-ff + 双端 deploy + 验真</td></tr>
+</table>
+
+<div class="callout tip">
+<strong>但是</strong>：涉及 prod 写操作（部署、删数据、改 schema、merge）Claude 都会先跟你确认再动手。你可以授权一次性自动跑（"直接做完不用问"），但默认是 ask-first。
+</div>
+
+<h2 id="sec9"><span class="num">9.</span>命令速查</h2>
+
+<h3>部署</h3>
+<pre><code># Worker
+cd worker
+npx wrangler deploy                  # → prod
+npx wrangler deploy --env staging    # → staging
+
+# Dashboard (CF Pages)
+cd dashboard
+npm run build
+npx wrangler pages deploy dist --project-name=xlist-dashboard --branch=main          # prod
+npx wrangler pages deploy dist --project-name=xlist-dashboard-staging                # staging
+
+# 看部署历史
+npx wrangler deployments list                          # worker
+npx wrangler pages deployment list --project-name=...  # dashboard
+
+# 回滚
+npx wrangler rollback &lt;version-id&gt;</code></pre>
+
+<h3>D1</h3>
+<pre><code># 查 schema
+npx wrangler d1 execute xlist --remote --command="SELECT name FROM sqlite_master WHERE type='table'"
+
+# 跑临时查询（生产慎用）
+npx wrangler d1 execute xlist --remote --command="SELECT COUNT(*) FROM items"
+
+# 应用 migration
+npx wrangler d1 migrations apply xlist --remote
+npx wrangler d1 migrations apply xlist-staging --env staging --remote
+
+# 导出
+npx wrangler d1 export xlist --remote --output=backup.sql
+npx wrangler d1 export xlist --remote --no-data --output=schema.sql  # 仅 schema</code></pre>
+
+<h3>Secret</h3>
+<pre><code>echo "value" | npx wrangler secret put NAME              # prod
+echo "value" | npx wrangler secret put NAME --env staging # staging
+npx wrangler secret list</code></pre>
+
+<h3>Admin panel（直接访问）</h3>
+<pre><code>https://api.ai-feeds.com/admin
+账号：roxor / 密码：（你自己记的那个）
+
+5 个工具卡片：
+- SMS 状态查询
+- 解锁 SMS 限流
+- User 详情
+- 清除测试账号
+- 今日 SMS 用量</code></pre>
+
+<h3>日志</h3>
+<pre><code>npx wrangler tail                  # worker 实时日志
+npx wrangler tail --env staging    # staging worker 日志</code></pre>
+
+<hr>
+
+<p style="text-align:center; color:#6b7280; font-size:13px; margin-top:48px;">
+设计文档：<a href="plans/2026-05-03-staging-environment-design.md">docs/plans/2026-05-03-staging-environment-design.md</a><br>
+运维手册：<a href="operations.md">docs/operations.md</a><br>
+项目说明：<a href="../CLAUDE.md">CLAUDE.md</a>
+</p>
+
+</div>
+</body>
+</html>
