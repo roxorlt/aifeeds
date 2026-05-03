@@ -20,6 +20,7 @@ import { Routes, Route } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { LoginModal } from "./components/LoginModal";
 import { Toast } from "./components/Toast";
+import { RequireAuth } from "./components/RequireAuth";
 import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
 import { useAuthStore } from "./lib/authStore";
@@ -334,8 +335,8 @@ function App() {
         <Route path="/" element={<DashboardHome />} />
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/settings/account" element={<AccountManage />} />
+        <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+        <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
       </Routes>
       <LoginModal />
       <Toast />
