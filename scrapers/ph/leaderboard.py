@@ -24,11 +24,18 @@ class LeaderboardEntry:
     href: str
 
 
-# /products/<slug> 是产品主页（多 launch 都聚合到这页）
-# /posts/<slug>   是单次 launch 页（更精确，但也可能直接给 product）
-# 取 /products/ 优先，fallback /posts/
-PRODUCT_LINK_RE = re.compile(r'href="(/products/([a-z0-9][a-z0-9-]*))"')
-POST_LINK_RE = re.compile(r'href="(/posts/([a-z0-9][a-z0-9-]*))"')
+# PH 偶尔会对 bot UA 返回 LLM-friendly 的 plain text 格式（"# Best of
+# Product Hunt: ..."），用 markdown 列表 + 完整 URL；正常情况返回 HTML
+# 用 href="/products/...". 双格式兼容：
+#   1) href="/products/<slug>"          (HTML)
+#   2) https://www.producthunt.com/products/<slug>  (text)
+#   3) /posts/<slug>                     (旧格式 fallback)
+PRODUCT_LINK_RE = re.compile(
+    r'(?:href="/products/|https?://(?:www\.)?producthunt\.com/products/)([a-z0-9][a-z0-9-]*)'
+)
+POST_LINK_RE = re.compile(
+    r'(?:href="/posts/|https?://(?:www\.)?producthunt\.com/posts/)([a-z0-9][a-z0-9-]*)'
+)
 
 
 def parse_leaderboard(html: str) -> list[LeaderboardEntry]:
@@ -41,9 +48,9 @@ def parse_leaderboard(html: str) -> list[LeaderboardEntry]:
     out: list[LeaderboardEntry] = []
     seen: set[str] = set()
 
-    # 抓所有 /products/<slug> 链接，按页面顺序
+    # 抓所有 /products/<slug>，按页面顺序
     for m in PRODUCT_LINK_RE.finditer(html):
-        slug = m.group(2)
+        slug = m.group(1)
         if slug in seen:
             continue
         # 过滤明显非产品的链接（PH 自身导航 / 类别等）
@@ -53,20 +60,20 @@ def parse_leaderboard(html: str) -> list[LeaderboardEntry]:
         out.append(LeaderboardEntry(
             daily_rank=len(out) + 1,
             slug=slug,
-            href=m.group(1),
+            href=f"/products/{slug}",
         ))
 
     # 暂没 /products/ 链接时退回 /posts/ — 这种情况不应出现，但兜底
     if not out:
         for m in POST_LINK_RE.finditer(html):
-            slug = m.group(2)
+            slug = m.group(1)
             if slug in seen:
                 continue
             seen.add(slug)
             out.append(LeaderboardEntry(
                 daily_rank=len(out) + 1,
                 slug=slug,
-                href=m.group(1),
+                href=f"/posts/{slug}",
             ))
 
     return out
