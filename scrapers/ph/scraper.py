@@ -32,6 +32,7 @@ from . import config
 from . import parser
 from . import leaderboard as leaderboard_mod
 from . import llm_judge
+from . import dom_extract
 from .._lib import browser_utils as bu_utils
 
 log = logging.getLogger("ph_scraper")
@@ -116,6 +117,11 @@ class PHSession:
 
     def get_html(self) -> str:
         raw = _bu("eval", "document.documentElement.outerHTML", timeout=30)
+        return raw[len("result: "):] if raw.startswith("result: ") else raw
+
+    def eval_js(self, js: str, timeout: int = 30) -> str:
+        """跑 JS 拿结果（去掉 'result: ' 前缀）。"""
+        raw = _bu("eval", js, timeout=timeout)
         return raw[len("result: "):] if raw.startswith("result: ") else raw
 
     def pace(self) -> None:
@@ -204,6 +210,53 @@ def scrape_leaderboard_day(yyyy: int, mm: int, dd: int, save_html: bool = True,
                 p["_daily_rank"] = entry.daily_rank
                 p["_launch_date_pt"] = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
                 p["_url"] = config.product_url(entry.slug)
+                # DOM 抓 — Top 10 评论 + Top 5 reviews
+                try:
+                    raw_c = s.eval_js(dom_extract.EXTRACT_COMMENTS_JS, timeout=15)
+                    comments = json.loads(raw_c) if raw_c.strip() else []
+                    p["all_comments_raw"] = comments  # 全部评论（不限 10），sync 时按 upvote/order 取 top 10
+                except Exception as exc:
+                    log.warning("[%d] %s comments extract failed: %s", entry.daily_rank, entry.slug, exc)
+                    p["all_comments_raw"] = []
+                try:
+                    raw_r = s.eval_js(dom_extract.EXTRACT_REVIEWS_JS, timeout=15)
+                    reviews = json.loads(raw_r) if raw_r.strip() else []
+                    p["all_reviews_raw"] = reviews
+                except Exception as exc:
+                    log.warning("[%d] %s reviews extract failed: %s", entry.daily_rank, entry.slug, exc)
+                    p["all_reviews_raw"] = []
+                # 识别 maker post：第一条由 makers[].handle 之一发的评论
+                maker_handles = {m["handle"] for m in (p.get("makers") or []) if m.get("handle")}
+                maker_post = next(
+                    (c for c in p["all_comments_raw"]
+                     if c.get("author_handle") in maker_handles),
+                    None,
+                )
+                p["maker_post"] = maker_post
+                p["maker_post_text"] = (maker_post or {}).get("body", "") if maker_post else ""
+                # Top 10 非 maker 评论（按 DOM 顺序，已是 PH 默认排序）
+                non_maker = [c for c in p["all_comments_raw"]
+                             if c.get("author_handle") not in maker_handles]
+                p["top_comments"] = [
+                    {
+                        "author_name": c.get("author_name"),
+                        "author_handle": c.get("author_handle"),
+                        "avatar_url": c.get("avatar_url"),
+                        "text": c.get("body"),
+                        "upvotes": c.get("upvotes"),
+                        "posted_at": c.get("posted_at"),
+                        "is_reply": c.get("is_reply"),
+                    } for c in non_maker[:10]
+                ]
+                p["top_reviews"] = [
+                    {
+                        "author_name": r.get("author_name"),
+                        "author_handle": r.get("author_handle"),
+                        "avatar_url": r.get("avatar_url"),
+                        "rating": r.get("rating"),
+                        "body": r.get("body"),
+                    } for r in p.get("all_reviews_raw", [])[:5]
+                ]
                 # LLM judge — 给 is_ai / ai_category / ai_summary
                 if judge and p.get("name"):
                     try:
@@ -271,6 +324,9 @@ def main():
             "name": r.get("name"),
             "ld_blocks": r.get("_ld_block_count"),
             "votes": r.get("metrics", {}).get("votes"),
+            "comments": len(r.get("top_comments", [])),
+            "reviews": len(r.get("top_reviews", [])),
+            "maker_post": bool(r.get("maker_post")),
             "is_ai": r.get("is_ai"),
             "category": r.get("ai_category"),
             "summary": (r.get("ai_summary") or "")[:80],
