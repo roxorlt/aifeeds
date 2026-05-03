@@ -34,6 +34,7 @@ from . import leaderboard as leaderboard_mod
 from . import llm_judge
 from . import dom_extract
 from . import translate as translate_mod
+from . import sync as sync_mod
 from .._lib import browser_utils as bu_utils
 
 log = logging.getLogger("ph_scraper")
@@ -303,6 +304,8 @@ def main():
                     help="leaderboard 模式下限制只抓前 N 个产品（dev/test 用）")
     ap.add_argument("--no-judge", action="store_true",
                     help="跳过 LLM judge（dev/test 省 DeepSeek 配额）")
+    ap.add_argument("--push", action="store_true",
+                    help="抓完 push 到 D1（worker /api/ingest）")
     ap.add_argument("--save/--no-save", dest="save", default=True)
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
@@ -326,6 +329,13 @@ def main():
 
     results = scrape_leaderboard_day(y, m, d, save_html=args.save, limit=args.limit,
                                      judge=not args.no_judge)
+    # Push to D1
+    if args.push:
+        try:
+            r = sync_mod.push_to_d1(results)
+            log.info("ingest result: %s", r)
+        except Exception as exc:
+            log.error("push to D1 failed: %s", exc)
     print(json.dumps({
         "date_pt": f"{y:04d}-{m:02d}-{d:02d}",
         "count": len(results),
