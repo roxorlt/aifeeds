@@ -54,8 +54,11 @@ docs/
 
 - [ ] 不含敏感数据（cookie、API key、token、本地绝对路径）
 - [ ] worker 改动：先本地 `wrangler dev` 验证 endpoint
-- [ ] dashboard 改动：`npm run build` 无 error，dev server 手动 smoke
+- [ ] **worker 改动：deploy staging 验证（`wrangler deploy --env staging`）再合 main 部署 prod**（PR3 翻车教训：dashboard 升级 fetch credentials，worker CORS 没跟上 → prod 全挂）
+- [ ] dashboard 改动：`npm run build` 无 error，dev server 手动 smoke（dev 默认连 staging worker）
 - [ ] **dashboard 视觉改动：对照 `docs/frontend-ux-guidelines.md` 检查 token / 组件规范**（颜色、字号、间距、按钮 variant、错误位置等不能跑偏）
+- [ ] **dashboard + worker 同时改：必须同步部署 staging 验证 → 同步部署 prod**（不要单边升级）
+- [ ] **D1 schema 变更：先 staging 跑 migration（`wrangler d1 execute xlist-staging --env staging --remote --file=migrations/0NN.sql`），验证后再 prod**
 - [ ] scraper/processor 改动：小批量跑一次，看 DB 状态
 - [ ] 涉及 D1 数据同步：确认 `push_to_cloud()` 已覆盖本地变更
 - [ ] **远端服务变更同步更新运维文档**（见下方"运维手册"节），遗漏会导致跨 session 维护断档
@@ -187,6 +190,17 @@ scraper 的 DOM 抓取无法可靠识别引用推文（X 把 quote card 的 /sta
 - 颜色、字号、间距、圆角、阴影、转场都按规范的 token，不出现 `text-[14px]` / `bg-blue-600` / 自创色彩这类离群值
 - 业务真需要规范外的元素（新色 / 新字号 / 新组件），先在规范文档里讨论 + 加进去，再实施
 - 检查清单见规范文档第六节，提交 dashboard 改动前对照过一遍
+
+## 三环境（dev / staging / prod）
+
+- **设计文档**：[docs/plans/2026-05-03-staging-environment-design.md](docs/plans/2026-05-03-staging-environment-design.md)
+- **vibe coder 教程**（推荐先看这份）：[docs/dev-staging-prod-guide.html](docs/dev-staging-prod-guide.html)
+- **资源对照表**：见 [docs/operations.md](docs/operations.md) §「Staging 环境」节
+
+URL：
+- Prod: `https://ai-feeds.com` / `https://api.ai-feeds.com`
+- Staging: `https://staging.ai-feeds.com` / `https://staging-api.ai-feeds.com`
+- Dev: `localhost:5173`（vite proxy 默认连 staging worker）
 
 ## 运维手册
 
