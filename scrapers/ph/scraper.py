@@ -31,6 +31,7 @@ from pathlib import Path
 from . import config
 from . import parser
 from . import leaderboard as leaderboard_mod
+from . import llm_judge
 from .._lib import browser_utils as bu_utils
 
 log = logging.getLogger("ph_scraper")
@@ -165,7 +166,7 @@ def scrape_product(slug: str, save: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 def scrape_leaderboard_day(yyyy: int, mm: int, dd: int, save_html: bool = True,
-                           limit: int | None = None) -> list[dict]:
+                           limit: int | None = None, judge: bool = True) -> list[dict]:
     """抓某天 PT leaderboard + 全榜每个产品。返回每个产品 parsed dict 列表。
 
     用单持久 PHSession（首次开启 → loop 各 product → 关闭），同 session 内
@@ -203,11 +204,22 @@ def scrape_leaderboard_day(yyyy: int, mm: int, dd: int, save_html: bool = True,
                 p["_daily_rank"] = entry.daily_rank
                 p["_launch_date_pt"] = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
                 p["_url"] = config.product_url(entry.slug)
+                # LLM judge — 给 is_ai / ai_category / ai_summary
+                if judge and p.get("name"):
+                    try:
+                        verdict = llm_judge.judge_product(p)
+                        p.update(verdict)
+                    except Exception as exc:
+                        log.warning("[%d] %s judge failed: %s — leaving is_ai=NULL",
+                                    entry.daily_rank, entry.slug, exc)
+                        p["is_ai"] = None
                 results.append(p)
-                log.info("[%2d/%d] %s — %s (ld=%d)",
+                log.info("[%2d/%d] %s — %s (ld=%d, is_ai=%s, cat=%s)",
                          entry.daily_rank, len(entries), entry.slug,
                          (p.get("name") or "?"),
-                         p.get("_ld_block_count", 0))
+                         p.get("_ld_block_count", 0),
+                         p.get("is_ai", "?"),
+                         p.get("ai_category", "?"))
             except Exception as exc:
                 log.warning("[%d] %s failed: %s", entry.daily_rank, entry.slug, exc)
                 continue
@@ -224,6 +236,8 @@ def main():
     ap.add_argument("--leaderboard", help="拉某天 leaderboard, 例如 2026-05-02 (PT 日期)")
     ap.add_argument("--limit", type=int, default=None,
                     help="leaderboard 模式下限制只抓前 N 个产品（dev/test 用）")
+    ap.add_argument("--no-judge", action="store_true",
+                    help="跳过 LLM judge（dev/test 省 DeepSeek 配额）")
     ap.add_argument("--save/--no-save", dest="save", default=True)
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
@@ -245,16 +259,21 @@ def main():
         y, m, d = yesterday_pt()
         log.info("no --leaderboard, using yesterday PT: %d-%02d-%02d", y, m, d)
 
-    results = scrape_leaderboard_day(y, m, d, save_html=args.save, limit=args.limit)
+    results = scrape_leaderboard_day(y, m, d, save_html=args.save, limit=args.limit,
+                                     judge=not args.no_judge)
     print(json.dumps({
         "date_pt": f"{y:04d}-{m:02d}-{d:02d}",
         "count": len(results),
+        "ai_count": sum(1 for r in results if r.get("is_ai") == 1),
         "products": [{
             "rank": r.get("_daily_rank"),
             "slug": r.get("_slug"),
             "name": r.get("name"),
             "ld_blocks": r.get("_ld_block_count"),
             "votes": r.get("metrics", {}).get("votes"),
+            "is_ai": r.get("is_ai"),
+            "category": r.get("ai_category"),
+            "summary": (r.get("ai_summary") or "")[:80],
         } for r in results],
     }, ensure_ascii=False, indent=2))
     return 0
