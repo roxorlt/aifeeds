@@ -37,6 +37,51 @@
 
 ---
 
+## Staging 环境（2026-05-03 上线）
+
+> 完整设计：[`docs/plans/2026-05-03-staging-environment-design.md`](plans/2026-05-03-staging-environment-design.md)
+> vibe coder 教程：[`docs/dev-staging-prod-guide.html`](dev-staging-prod-guide.html)
+
+| 资源 | Prod | Staging |
+|---|---|---|
+| Worker | `xlist-api` (`api.ai-feeds.com`) | `xlist-api-staging` (`staging-api.ai-feeds.com`) |
+| D1 | `xlist` (`2973d54b-…`) | `xlist-staging` (`fc029d89-6871-4e5c-b653-7ed27e6fb649`) |
+| KV | `AUTH_KV` (`07d666…`) | `AUTH_KV_STAGING` (`76f7a326a94c4b8685668e39a23b3fe9`, preview `f187810317a845eca4b20f6e7b357a79`) |
+| R2 | `xlist-readme-assets` | `xlist-readme-assets-staging` |
+| Pages | `xlist-dashboard` (`ai-feeds.com`) | `xlist-dashboard-staging` (`staging.ai-feeds.com`) |
+| Cron | `*/5 * * * *` 全开 | 全关（手动触发） |
+| SMS | tencent / pushdeer fallback | `pushdeer`（不发真短信） |
+| Secrets | 真值 | 独立设：`INGEST_TOKEN` 新生成；`ADMIN_USER/PASS` 共用；`TURNSTILE/DEEPSEEK/GITHUB/PUSHDEER` 共用 |
+
+**部署命令**：
+```bash
+# Worker
+cd worker
+npx wrangler deploy --env staging
+
+# Dashboard
+cd dashboard
+npm run deploy:staging         # = build:staging + wrangler pages deploy
+```
+
+**手动触发 staging cron**：
+```bash
+curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
+```
+
+**staging D1 schema 同步**（prod 改 schema 时）：
+```bash
+# 先在 staging 上执行 migration 文件验证
+cd worker
+npx wrangler d1 execute xlist-staging --env staging --remote --file=migrations/0NN-xxx.sql
+# 验证后再 prod
+npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
+```
+
+**Dev 默认连 staging**：`vite.config.ts` proxy 默认 target 已切到 `staging-api.ai-feeds.com`。临时连 prod：`VITE_API_PROXY=https://api.ai-feeds.com npm run dev`。
+
+---
+
 ## 远端服务（Cloudflare）
 
 ### 1. Worker: `xlist-api`

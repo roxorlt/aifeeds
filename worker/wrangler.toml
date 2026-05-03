@@ -27,3 +27,37 @@ binding = "BROWSER"
 
 [triggers]
 crons = ["*/5 * * * *"]
+
+# ─────────────────── Staging 环境 ───────────────────
+# 部署：wrangler deploy --env staging
+# 设计：docs/plans/2026-05-03-staging-environment-design.md
+[env.staging]
+name = "xlist-api-staging"
+compatibility_flags = ["nodejs_compat"]
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "xlist-staging"
+database_id = "fc029d89-6871-4e5c-b653-7ed27e6fb649"
+
+[[env.staging.r2_buckets]]
+binding = "READMES"
+bucket_name = "xlist-readme-assets-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "AUTH_KV"
+id = "76f7a326a94c4b8685668e39a23b3fe9"
+preview_id = "f187810317a845eca4b20f6e7b357a79"
+
+[env.staging.browser]
+binding = "BROWSER"
+
+# Staging cron 默认全关，要手动测时再放开
+[env.staging.triggers]
+crons = []
+
+# Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
+# wrangler deploy 时自动注册 + 配 DNS（CF managed）。
+[[env.staging.routes]]
+pattern = "staging-api.ai-feeds.com"
+custom_domain = true
