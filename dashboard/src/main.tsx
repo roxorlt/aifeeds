@@ -9,7 +9,7 @@ import App from './App.tsx'
 // Runs only at fresh page load (main.tsx); SPA in-app nav never re-enters here.
 {
   const p = window.location.pathname
-  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/')
+  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/') || p.startsWith('/ph/')
   if (isDeepLink) {
     const target = window.location.pathname + window.location.search + window.location.hash
     window.history.replaceState({}, '', '/')

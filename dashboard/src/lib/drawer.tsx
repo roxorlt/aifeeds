@@ -49,6 +49,13 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const repo = decodeURIComponent(ghMatch[2]);
     return { compositeId: `github:${owner}/${repo}` };
   }
+  // /ph/:slug/:date → product_hunt:<slug>:<date>
+  const phMatch = pathname.match(/^\/ph\/([^/]+)\/([^/]+)$/);
+  if (phMatch) {
+    const slug = decodeURIComponent(phMatch[1]);
+    const date = decodeURIComponent(phMatch[2]);
+    return { compositeId: `product_hunt:${slug}:${date}` };
+  }
   return null;
 }
 
@@ -91,6 +98,12 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         const [owner, repo] = item.source_id.split("/");
         if (owner && repo) {
           navigate(`/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+        }
+      } else if (item.source_type === "product_hunt") {
+        // /ph/:slug/:date — source_id 是 <slug>:<launch_date> 复合键
+        const [slug, date] = item.source_id.split(":");
+        if (slug && date) {
+          navigate(`/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}`);
         }
       }
       // Future sources: youtube / podcast / arxiv / product_hunt — add URL forms here.

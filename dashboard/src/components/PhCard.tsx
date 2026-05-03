@@ -1,10 +1,17 @@
-// Product Hunt card — feed item view (B variant from mockup
-// docs/plans/_mockups/2026-05-03-ph-drawer-mockup.html top region):
-//   logo (64×64) | rank badge · launch date · category · name · tagline · metrics row
+// Product Hunt feed card.
+// 视觉基线对齐 TweetCard / GithubCard，按 docs/frontend-ux-guidelines.md：
+//   - 卡片：px-4 py-3，hover:bg-neutral-50/60，border-b 分隔，无 shadow
+//   - 头像：h-10 w-10 rounded-md（产品 logo 是品牌图标，方形圆角更合适，
+//     X tweet / GH owner 是头像用 rounded-full）
+//   - 标题：text-[15px] font-bold
+//   - 正文：text-[15px] leading-[1.45]
+//   - meta：text-[13px] text-neutral-500
+//   - chip：rounded-full bg-neutral-100 text-neutral-700（不再 14 个色）
 
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
+import { resolveAssetUrl } from "../lib/asset";
 
 function parseMedia(raw: Item["media"]): MediaItem[] {
   if (!raw) return [];
@@ -18,23 +25,6 @@ function parseMedia(raw: Item["media"]): MediaItem[] {
   }
   return Array.isArray(raw) ? raw : [];
 }
-
-const AI_CATEGORY_STYLE: Record<string, { label: string; cls: string }> = {
-  ai_code_editor:    { label: "AI Code Editor",    cls: "bg-violet-50 text-violet-700 ring-1 ring-violet-200" },
-  ai_chatbot:        { label: "AI Chatbot",        cls: "bg-sky-50 text-sky-700 ring-1 ring-sky-200" },
-  ai_agent:          { label: "AI Agent",          cls: "bg-rose-50 text-rose-700 ring-1 ring-rose-200" },
-  ai_image_gen:      { label: "AI Image Gen",      cls: "bg-pink-50 text-pink-700 ring-1 ring-pink-200" },
-  ai_video_gen:      { label: "AI Video Gen",      cls: "bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200" },
-  ai_audio:          { label: "AI Audio",          cls: "bg-amber-50 text-amber-700 ring-1 ring-amber-200" },
-  ai_writing:        { label: "AI Writing",        cls: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" },
-  ai_search:         { label: "AI Search",         cls: "bg-blue-50 text-blue-700 ring-1 ring-blue-200" },
-  ai_dev_tool:       { label: "AI Dev Tool",       cls: "bg-cyan-50 text-cyan-700 ring-1 ring-cyan-200" },
-  ai_workflow:       { label: "AI Workflow",       cls: "bg-orange-50 text-orange-700 ring-1 ring-orange-200" },
-  ai_voice_agent:    { label: "AI Voice Agent",    cls: "bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200" },
-  ai_data_analysis:  { label: "AI Data Analysis",  cls: "bg-teal-50 text-teal-700 ring-1 ring-teal-200" },
-  ai_design_tool:    { label: "AI Design Tool",    cls: "bg-lime-50 text-lime-700 ring-1 ring-lime-200" },
-  ai_other:          { label: "AI",                cls: "bg-neutral-100 text-neutral-700 ring-1 ring-neutral-200" },
-};
 
 interface Props {
   item: Item;
@@ -51,12 +41,14 @@ export function PhCard({ item }: Props) {
   const dailyRank = (extra as { daily_rank?: number }).daily_rank;
   const launchDate = extra.launch_date_pt || "";
   const dateMd = launchDate ? launchDate.slice(5) : ""; // "MM-DD"
+  const aiCategoryRaw = (extra.ai_category as string) || "";
+  // 转 "ai_code_editor" → "AI Code Editor"
+  const aiCategoryLabel = aiCategoryRaw
+    ? aiCategoryRaw.replace(/^ai_/, "AI ").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).replace(/^Ai /, "AI ")
+    : "";
 
-  const aiCategory = (extra.ai_category as string) || "";
-  const catStyle = AI_CATEGORY_STYLE[aiCategory];
-
-  const logo = media.find((m: MediaItem) => (m as MediaItem & { role?: string }).role === "logo");
-  const logoUrl = logo?.url;
+  const logo = media.find((m) => (m as MediaItem & { role?: string }).role === "logo");
+  const logoUrl = logo?.url ? resolveAssetUrl(logo.url) : "";
 
   const votes = metrics.votes;
   const comments = metrics.comments;
@@ -71,72 +63,69 @@ export function PhCard({ item }: Props) {
       onClick={open}
       className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >
-      <div className="flex items-start gap-3">
-        {/* Logo */}
+      <div className="flex gap-3">
+        {/* Logo (product brand icon — rounded-md 方形圆角，区分人脸头像 rounded-full) */}
         {logoUrl ? (
           <img
             src={logoUrl}
             alt={name}
-            className="h-14 w-14 shrink-0 rounded-2xl bg-neutral-200 object-cover"
+            className="h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
           />
         ) : (
-          <div className="h-14 w-14 shrink-0 rounded-2xl bg-neutral-200" />
+          <div className="h-10 w-10 shrink-0 rounded-md bg-neutral-200" />
         )}
 
         <div className="min-w-0 flex-1">
-          {/* Header: rank · date · category */}
-          <div className="flex items-center gap-1.5 text-[12px] text-neutral-500 mb-0.5">
+          {/* Title row：name + 行内 daily rank（克制风格，不在最显眼位置） */}
+          <div className="flex items-baseline gap-1.5">
+            <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
+              {name}
+            </span>
             {dailyRank !== undefined && (
               <span
-                className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 font-medium tabular-nums text-amber-700 ring-1 ring-amber-200"
+                className="shrink-0 text-[13px] font-medium text-neutral-500 tabular-nums"
                 title={`PH 当日榜第 ${dailyRank} 名`}
               >
-                #{dailyRank}
-              </span>
-            )}
-            {dateMd && <span>· {dateMd} PT</span>}
-            {catStyle && (
-              <span className={cn("ml-1 rounded-full px-1.5 py-0 text-[11px] font-medium", catStyle.cls)}>
-                {catStyle.label}
+                · #{dailyRank}
               </span>
             )}
           </div>
 
-          {/* Name */}
-          <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
-            {name}
+          {/* Meta：date + category（neutral chip，不彩） */}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
+            {dateMd && <span className="tabular-nums">{dateMd} PT</span>}
+            {dateMd && aiCategoryLabel && <span className="text-neutral-400">·</span>}
+            {aiCategoryLabel && (
+              <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+                {aiCategoryLabel}
+              </span>
+            )}
           </div>
 
-          {/* Tagline (1 line) */}
+          {/* Tagline */}
           {tagline && (
-            <p className="mt-0.5 line-clamp-2 text-[13.5px] leading-snug text-neutral-700">
+            <p className="mt-1 line-clamp-3 text-[15px] leading-[1.45] text-neutral-900 break-words">
               {tagline}
             </p>
           )}
 
-          {/* Footer metrics row */}
-          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-neutral-500">
+          {/* Footer metrics (neutral, flat) */}
+          <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
             {votes !== undefined && (
-              <span className="inline-flex items-center gap-0.5">
-                <span className="text-orange-500">▲</span>
-                <span className="font-medium tabular-nums">{formatCompact(votes)}</span>
+              <span className="inline-flex items-center gap-1" aria-label="votes">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l5 6H3l5-6z"/></svg>
+                <span className="tabular-nums">{formatCompact(votes)}</span>
               </span>
             )}
             {comments !== undefined && (
-              <>
-                <span className="text-neutral-400">·</span>
-                <span className="inline-flex items-center gap-0.5">
-                  <span>💬</span>
-                  <span className="tabular-nums">{formatCompact(comments)}</span>
-                </span>
-              </>
+              <span className="inline-flex items-center gap-1" aria-label="comments">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
+                <span className="tabular-nums">{formatCompact(comments)}</span>
+              </span>
             )}
             {makerHandle && (
-              <>
-                <span className="text-neutral-400">·</span>
-                <span>by @{makerHandle}</span>
-              </>
+              <span className="truncate text-neutral-500">by @{makerHandle}</span>
             )}
             {dailyRank !== undefined && (
               <span className="ml-auto text-[11px] text-neutral-400" title={ordinal(dailyRank)}>
