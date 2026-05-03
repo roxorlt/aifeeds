@@ -57,3 +57,34 @@
 v2 再做。
 
 ---
+
+## 2026-05-03 · PH browser-use + Profile 1 cookie 注入：turnstile 通过 ✅
+
+**测试**：用户在 Chrome Profile 1（ltsms86@gmail.com）登录 PH 后，
+`~/.browser-use-env/bin/python3 -m scrapers.ph.scraper --slug=zed` 实测：
+
+| 项 | 结果 |
+|---|------|
+| 总耗时 | ~10s |
+| HTML 大小 | 1.4MB（live 页面比保存样本多 3 个 JSON-LD blocks）|
+| Turnstile | 自动放行 ✅ |
+| name / tagline / makers / metrics / pricing | 全部解析正确 |
+| Chrome 进程清理 | `bu close` 干净，无孤儿（pgrep 验证）|
+
+**机制**：browser-use `--profile "Profile 1" --headed` 启动 Chrome 时复用
+该 profile 的 cookie，PH 看到合法登录态自动跳过 CF turnstile。X scraper
+同款方式跑了几个月稳定，PH 走同路径同样稳。
+
+**注意点**：
+
+- 同一 profile 名（"Profile 1"）X / PH 共用，cookie / history / 登录态都
+  在同一份 profile data 里，互不干扰但要小心 Chrome 实例锁
+- 当前实现还没接 focus push-back（窗口可能短暂抢前台），下一步从
+  `~/.claude/skills/xlist-scraper/scripts/list_scraper.py` 复用
+  `_snapshot_frontmost / _push_chrome_to_back / _kill_chrome_by_data_dir`
+
+**附**：metrics 解析有一个边界：`votesCount / commentsCount` 出现多次
+（每次 launch 一个独立 count），当前 regex 取**第一次出现**，可能不是
+"主产品最新 launch"。下次实跑发现数字跟 PH 网页对不上时再考虑改进。
+
+---
