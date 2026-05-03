@@ -49,3 +49,12 @@ body {
 .chips-rail::-webkit-scrollbar {
   display: none;
 }
+
+/* Generic scrollbar-hide utility (PH gallery, future horizontal rails). */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

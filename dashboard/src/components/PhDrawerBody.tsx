@@ -252,7 +252,7 @@ export function PhDrawerBody({ item }: Props) {
               滚出视野。修法：在外层 scroll 容器加 scroll-px-5（snap 视
               padding 为 scrollport 边界，snap 点偏移 20px），同时内层
               flex 仍用 px-5 保证非 snap 状态下也有间距。 */}
-          <div className="overflow-x-auto scroll-px-5">
+          <div className="overflow-x-auto scroll-px-5 no-scrollbar">
             <div className="flex snap-x snap-mandatory gap-2 px-5">
               {galleryItems.map((m, i) => {
                 const url = resolveAssetUrl(m.url);
