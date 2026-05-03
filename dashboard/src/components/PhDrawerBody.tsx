@@ -111,7 +111,24 @@ export function PhDrawerBody({ item }: Props) {
   const makerPostText = (extra.maker_post_text as string) || makerPost?.text || "";
   const makerPostTranslated = (extra.maker_post_translated as string) || "";
 
-  const topComments = (extra.top_comments as PhComment[]) || [];
+  const allTopComments = (extra.top_comments as PhComment[]) || [];
+  // 过滤掉 phantom rows（无 text 或无 handle 的，旧数据 dom_extract 误抓
+  // comment-form / comment-menu-button 等非评论 DOM 时会留空 row；handle
+  // 去重防止同一评论双渲染）
+  const topComments = (() => {
+    const seen = new Set<string>();
+    const out: PhComment[] = [];
+    for (const c of allTopComments) {
+      const text = (c.text || "").trim();
+      const handle = c.author_handle || "";
+      if (!text && !handle) continue;
+      const dedupeKey = `${handle}|${text.slice(0, 30)}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      out.push(c);
+    }
+    return out;
+  })();
   const topReviews = (extra.top_reviews as PhReview[]) || [];
 
   const pricingType = (extra.pricing_type as string) || metrics.pricing_type || "";

@@ -20,20 +20,30 @@ from __future__ import annotations
 EXTRACT_COMMENTS_JS = r"""
 (function() {
   const out = [];
-  const blocks = document.querySelectorAll('[data-test^="comment-"]');
+  const seen = new Set();
+  // 只匹配 data-test="comment-<纯数字>"，过滤 comment-form / comment-menu-button 等非评论元素
+  const blocks = document.querySelectorAll('[data-test]');
   blocks.forEach((el) => {
     try {
       const idAttr = el.getAttribute('data-test') || '';
-      const id = idAttr.replace('comment-', '');
+      const idMatch = idAttr.match(/^comment-(\d+)$/);
+      if (!idMatch) return;
+      const id = idMatch[1];
+      if (seen.has(id)) return;  // 同一 comment id 多个 DOM 节点（mobile / desktop 双渲染）去重
+      seen.add(id);
 
-      // author handle from any /@<handle> link inside
+      // author handle 取第一个 /@xxx 链接（avatar wrapper）拿 handle
+      // author name 取真正含名字文本的链接（PH 把 name 放第二个 <a>，font-semibold）
       let authorHandle = '';
       let authorName = '';
-      const authorLink = el.querySelector('a[href*="/@"]');
-      if (authorLink) {
-        const m = authorLink.getAttribute('href').match(/\/@([\w-]+)/);
-        authorHandle = m ? m[1] : '';
-        authorName = (authorLink.textContent || '').trim();
+      const allUserLinks = el.querySelectorAll('a[href*="/@"]');
+      for (const a of allUserLinks) {
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/\/@([\w-]+)/);
+        if (m && !authorHandle) authorHandle = m[1];
+        const txt = (a.textContent || '').trim();
+        if (txt && !authorName) authorName = txt;
+        if (authorHandle && authorName) break;
       }
 
       // avatar
