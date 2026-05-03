@@ -84,15 +84,16 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://ai-feeds.com',
   'https://www.ai-feeds.com',
+  'https://staging.ai-feeds.com',
 ];
 
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get('Origin') || '';
-  // Allow any *.pages.dev, ai-feeds.com, configured localhost origins,
-  // or any localhost:<port> / 127.0.0.1:<port> for dev convenience
-  // (Vite often falls back to 5174+ when 5173 is in use)
+  // Allow any *.ai-feeds.com (含 staging.ai-feeds.com 等子域) /
+  // any *.pages.dev / configured localhost ports.
   const allowed =
     ALLOWED_ORIGINS.includes(origin) ||
+    origin.endsWith('.ai-feeds.com') ||
     origin.endsWith('.pages.dev') ||
     /^http:\/\/localhost:\d+$/.test(origin) ||
     /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
