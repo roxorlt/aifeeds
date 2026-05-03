@@ -335,6 +335,7 @@ function App() {
         <Route path="/" element={<DashboardHome />} />
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
+        <Route path="/ph/:slug/:date" element={<DashboardHome />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
       </Routes>
