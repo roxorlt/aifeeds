@@ -13,10 +13,10 @@
 
 > **下一阶段 Roadmap（2026-05-03 调整）**
 >
-> 1. **PR4 强制登录拦截** — 路由 guards + 401 trigger（依赖 PR3 已合）
-> 2. **staging 环境落地** — 按 [`docs/plans/2026-05-03-staging-environment-design.md`](docs/plans/2026-05-03-staging-environment-design.md) 一次性搭完，~1.5h
-> 3. **PR5 分享功能**（原 PR5 收藏 / 订阅推迟到 PR7）— PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计
-> 4. **PR6 上线加固** — 限流参数调优 / admin 看板增强 / 数据备份 launchd / 异常告警分级
+> 1. ~~**PR4 强制登录拦截**~~ ✅ 2026-05-03 上线
+> 2. ~~**staging 环境落地**~~ ✅ 2026-05-03 上线（[操作记录](docs/operations.md#staging-环境-2026-05-03-上线)）
+> 3. **PR5 分享功能** — PC（复制链接）/ 移动端（系统 share sheet）/ 移动端微信内（引导打开菜单）三态分流；分享 link 带 `?from=<uid>&ref=share`，落地后上报到 Worker 做回流统计 ← **下一步**
+> 4. **PR6 上线加固** — 限流参数调优 / admin 看板增强 / 数据备份 launchd（按 staging 设计 §10 跑） / 异常告警分级
 > 5. **PR7 收藏 + newsletter** — `favorites` 表 + UI；newsletter = **邮件订阅**（每日/每周摘要发用户邮箱），需新增：user.email 字段 / 模板系统 / Resend 或 Cloudflare Email Workers 发送 / 退订 link / 反垃圾合规
 > 6. 之后：`/admin/analytics` 数据看板、dark mode、enricher daemon 调度优化
 
