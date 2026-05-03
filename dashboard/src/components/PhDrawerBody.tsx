@@ -247,10 +247,12 @@ export function PhDrawerBody({ item }: Props) {
       {galleryItems.length > 0 && (
         <div className="border-b border-neutral-200 py-4">
           <div className="mb-2 px-5 text-[13px] font-medium text-neutral-500">截图与视频</div>
-          {/* px-5 放在内层 flex 容器（不是 overflow-x-auto），保证首图左侧
-              和末图右侧都能看到 padding——某些 WebKit 版本对 padding 在
-              overflow-x-auto 自身上的渲染不一致 */}
-          <div className="overflow-x-auto">
+          {/* 横滑首图必须留 20px padding。坑：snap-mandatory + snap-start
+              会强制把首图左边缘吸附到 scrollport 左边缘，把 px-5 padding
+              滚出视野。修法：在外层 scroll 容器加 scroll-px-5（snap 视
+              padding 为 scrollport 边界，snap 点偏移 20px），同时内层
+              flex 仍用 px-5 保证非 snap 状态下也有间距。 */}
+          <div className="overflow-x-auto scroll-px-5">
             <div className="flex snap-x snap-mandatory gap-2 px-5">
               {galleryItems.map((m, i) => {
                 const url = resolveAssetUrl(m.url);

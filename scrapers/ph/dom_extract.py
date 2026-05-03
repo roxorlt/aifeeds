@@ -16,97 +16,121 @@ maker 识别：用 makers[].handle 反查（PH 不打 maker badge 在评论上�
 from __future__ import annotations
 
 
-# Maker post / Top comments / Replies — 一次 eval 拿全部
+# Top-level comments only —— 按 [data-test^="thread-"] 容器分组，每个 thread
+# 取第一个 comment 节点作为 top-level（其余是回复，先丢掉）。
+# 旧实现抓所有 [data-test^="comment-"] 把回复也算进去了，导致同作者刷屏
+# （schole-2 vinitra × 5 即此 bug 的实例）。
 EXTRACT_COMMENTS_JS = r"""
 (function() {
   const out = [];
-  const seen = new Set();
-  // 只匹配 data-test="comment-<纯数字>"，过滤 comment-form / comment-menu-button 等非评论元素
-  const blocks = document.querySelectorAll('[data-test]');
-  blocks.forEach((el) => {
+  const processed = new Set();
+
+  function parseCommentNode(el, id) {
+    let authorHandle = '';
+    let authorName = '';
+    const allUserLinks = el.querySelectorAll('a[href*="/@"]');
+    for (const a of allUserLinks) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/\/@([\w-]+)/);
+      if (m && !authorHandle) authorHandle = m[1];
+      const txt = (a.textContent || '').trim();
+      if (txt && !authorName) authorName = txt;
+      if (authorHandle && authorName) break;
+    }
+
+    let avatarUrl = '';
+    const avatarImg = el.querySelector('img[src*="ph-avatars.imgix.net"], img[srcset*="ph-avatars.imgix.net"]');
+    if (avatarImg) {
+      const srcset = avatarImg.getAttribute('srcset') || '';
+      const src = avatarImg.getAttribute('src') || '';
+      const oneX = srcset.split(',').map(s => s.trim()).find(s => s.endsWith(' 1x'));
+      avatarUrl = oneX ? oneX.split(' ')[0] : src;
+    }
+
+    let body = '';
+    const richText = el.querySelector('.prose');
+    if (richText) {
+      body = (richText.innerText || richText.textContent || '').trim();
+    }
+
+    let upvotes = null;
+    const voteBtn = el.querySelector('[data-test="action-bar-vote-button"]');
+    if (voteBtn) {
+      const txt = voteBtn.parentElement ? voteBtn.parentElement.innerText.trim() : '';
+      const m = txt.match(/(\d[\d,]*)/);
+      upvotes = m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    }
+
+    let postedAt = '';
+    const timeEl = el.querySelector('time[datetime]');
+    if (timeEl) postedAt = timeEl.getAttribute('datetime') || '';
+
+    return {
+      id,
+      author_name: authorName,
+      author_handle: authorHandle,
+      avatar_url: avatarUrl,
+      body,
+      upvotes,
+      posted_at: postedAt,
+      is_reply: false,
+    };
+  }
+
+  // Step 1: 按 thread 容器拿 top-level comment（每个 thread 第一个 comment 节点）
+  const threads = document.querySelectorAll('[data-test^="thread-"]');
+  threads.forEach((thread) => {
     try {
-      const idAttr = el.getAttribute('data-test') || '';
-      const idMatch = idAttr.match(/^comment-(\d+)$/);
-      if (!idMatch) return;
-      const id = idMatch[1];
-      if (seen.has(id)) return;  // 同一 comment id 多个 DOM 节点（mobile / desktop 双渲染）去重
-      seen.add(id);
-
-      // author handle 取第一个 /@xxx 链接（avatar wrapper）拿 handle
-      // author name 取真正含名字文本的链接（PH 把 name 放第二个 <a>，font-semibold）
-      let authorHandle = '';
-      let authorName = '';
-      const allUserLinks = el.querySelectorAll('a[href*="/@"]');
-      for (const a of allUserLinks) {
-        const href = a.getAttribute('href') || '';
-        const m = href.match(/\/@([\w-]+)/);
-        if (m && !authorHandle) authorHandle = m[1];
-        const txt = (a.textContent || '').trim();
-        if (txt && !authorName) authorName = txt;
-        if (authorHandle && authorName) break;
-      }
-
-      // avatar
-      let avatarUrl = '';
-      const avatarImg = el.querySelector('img[src*="ph-avatars.imgix.net"], img[srcset*="ph-avatars.imgix.net"]');
-      if (avatarImg) {
-        const srcset = avatarImg.getAttribute('srcset') || '';
-        const src = avatarImg.getAttribute('src') || '';
-        // 优先 srcset 1x（最清晰且非 base path）
-        const oneX = srcset.split(',').map(s => s.trim()).find(s => s.endsWith(' 1x'));
-        avatarUrl = oneX ? oneX.split(' ')[0] : src;
-      }
-
-      // body — 'prose' richText container
-      let body = '';
-      const richText = el.querySelector('.prose');
-      if (richText) {
-        body = (richText.innerText || richText.textContent || '').trim();
-      }
-
-      // upvotes — inside this comment's action-bar-vote-button
-      let upvotes = null;
-      const voteBtn = el.querySelector('[data-test="action-bar-vote-button"]');
-      if (voteBtn) {
-        // Number is usually adjacent text node or sibling span
-        const txt = voteBtn.parentElement ? voteBtn.parentElement.innerText.trim() : '';
-        const m = txt.match(/(\d[\d,]*)/);
-        upvotes = m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
-      }
-
-      // posted_at — try [data-test*="time"] or <time> tag near
-      let postedAt = '';
-      const timeEl = el.querySelector('time[datetime]');
-      if (timeEl) postedAt = timeEl.getAttribute('datetime') || '';
-
-      // detect reply / nesting level via container offset (PH uses CSS for nesting,
-      // not data-attr). Heuristic: if the comment is wrapped in a div with
-      // padding-left > 16px indicating a reply.
-      let isReply = false;
-      let parent = el.parentElement;
-      while (parent && parent !== document.body) {
-        const cls = parent.className || '';
-        if (typeof cls === 'string' && /pl-\d|ml-\d/.test(cls) && /comment-/.test(parent.outerHTML.slice(0, 200))) {
-          isReply = true;
+      const firstComment = thread.querySelector('[data-test]');
+      if (!firstComment) return;
+      // 挖到第一个真 comment 节点（thread 容器自己 data-test 是 thread-xxx，
+      // 容器内第一个 [data-test=comment-N] 才是 top-level）
+      const candidates = thread.querySelectorAll('[data-test]');
+      let topComment = null;
+      for (const c of candidates) {
+        const idAttr = c.getAttribute('data-test') || '';
+        if (/^comment-\d+$/.test(idAttr)) {
+          topComment = c;
           break;
         }
-        parent = parent.parentElement;
       }
-
-      out.push({
-        id,
-        author_name: authorName,
-        author_handle: authorHandle,
-        avatar_url: avatarUrl,
-        body,
-        upvotes,
-        posted_at: postedAt,
-        is_reply: isReply,
-      });
-    } catch (e) {
-      // skip individual failure
-    }
+      if (!topComment) return;
+      const idMatch = topComment.getAttribute('data-test').match(/^comment-(\d+)$/);
+      if (!idMatch) return;
+      const id = idMatch[1];
+      if (processed.has(id)) return;
+      processed.add(id);
+      const parsed = parseCommentNode(topComment, id);
+      if (parsed && (parsed.body || parsed.author_handle)) out.push(parsed);
+    } catch (e) {}
   });
+
+  // Step 2: 兜底——若没找到 thread 容器（PH 改版），扫所有 comment 节点，
+  // 按 DOM 嵌套排除回复（祖先里若有另一个 comment-N 节点 → 是回复，跳过）
+  if (out.length === 0) {
+    document.querySelectorAll('[data-test]').forEach((el) => {
+      try {
+        const idAttr = el.getAttribute('data-test') || '';
+        const idMatch = idAttr.match(/^comment-(\d+)$/);
+        if (!idMatch) return;
+        const id = idMatch[1];
+        if (processed.has(id)) return;
+        // 祖先链里是否已经有另一个 comment 节点 → 是回复
+        let p = el.parentElement;
+        let nested = false;
+        while (p && p !== document.body) {
+          const a = p.getAttribute && p.getAttribute('data-test');
+          if (a && /^comment-\d+$/.test(a)) { nested = true; break; }
+          p = p.parentElement;
+        }
+        if (nested) return;
+        processed.add(id);
+        const parsed = parseCommentNode(el, id);
+        if (parsed && (parsed.body || parsed.author_handle)) out.push(parsed);
+      } catch (e) {}
+    });
+  }
+
   return JSON.stringify(out);
 })()
 """
