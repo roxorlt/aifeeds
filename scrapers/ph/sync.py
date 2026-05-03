@@ -35,7 +35,14 @@ INGEST_URL_DEFAULT = os.environ.get(
     "AIFEEDS_INGEST_URL",
     "https://xlist-api.ltsms86.workers.dev/api/ingest",
 )
-INGEST_TOKEN = os.environ.get("INGEST_TOKEN") or os.environ.get("AIFEEDS_INGEST_TOKEN", "")
+# 多个 env 名兼容：XLIST_INGEST_TOKEN（X scraper 现存约定）/
+# AIFEEDS_INGEST_TOKEN（更通用名）/ INGEST_TOKEN（裸名）。
+def _read_token() -> str:
+    for k in ("XLIST_INGEST_TOKEN", "AIFEEDS_INGEST_TOKEN", "INGEST_TOKEN"):
+        v = os.environ.get(k, "")
+        if v:
+            return v
+    return ""
 
 
 def product_to_item(p: dict[str, Any]) -> dict[str, Any]:
@@ -109,11 +116,13 @@ def product_to_item(p: dict[str, Any]) -> dict[str, Any]:
 
 def push_to_d1(products: list[dict[str, Any]],
                url: str = INGEST_URL_DEFAULT,
-               token: str = INGEST_TOKEN) -> dict[str, Any]:
+               token: str | None = None) -> dict[str, Any]:
     """批量 POST 到 /api/ingest。返回 worker 的 response。"""
+    if token is None:
+        token = _read_token()
     if not token:
         raise RuntimeError(
-            "INGEST_TOKEN missing — set in env or .env (or AIFEEDS_INGEST_TOKEN)"
+            "ingest token missing — set XLIST_INGEST_TOKEN / AIFEEDS_INGEST_TOKEN / INGEST_TOKEN in env or .env"
         )
     items = [product_to_item(p) for p in products if p.get("name")]
     payload = {
