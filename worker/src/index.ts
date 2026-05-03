@@ -20,6 +20,7 @@ import {
   countGithubReadmeTranslatePending,
   countGithubR2Pending,
 } from './github';
+import { runPhR2Migrate, countPhR2Pending } from './ph';
 import {
   handleSmsSend,
   handleLogin,
@@ -301,6 +302,14 @@ export default {
             if (trPending > 0) {
               const r = await runGithubReadmeTranslate(env, 6);
               console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            // PH 资源迁移 — 抢占同一 cron slot，单次 1 个 item，subrequest
+            // 预算：1 SELECT + 1 × (~38 GET + 1 UPDATE) = 40（接近 CF Free 50 上限）
+            const phR2Pending = await countPhR2Pending(env);
+            if (phR2Pending > 0) {
+              const r = await runPhR2Migrate(env, 1);
+              console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
           }
