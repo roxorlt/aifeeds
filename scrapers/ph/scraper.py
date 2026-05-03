@@ -43,30 +43,45 @@ def yesterday_pt() -> tuple[int, int, int]:
     return yesterday.year, yesterday.month, yesterday.day
 
 
-def fetch_html_via_browser_use(url: str, timeout_sec: int = config.PAGE_LOAD_TIMEOUT_SEC) -> str:
-    """调用 browser-use CLI 打开 URL → 注入用户 Chrome cookie → 等渲染 → 返回 HTML。
+def _bu(*args: str, timeout: int = 30) -> str:
+    """browser-use CLI 子进程，stateful session — 第一次 `open` 起 session，
+    后续 `eval` / `close` 共享 session。"""
+    cmd = [config.BU_BIN] + list(args)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        log.warning("bu %s failed (%d): %s", args[0], proc.returncode, proc.stderr[-300:])
+    return proc.stdout
 
-    关键 flag：
-      --user-data-dir <Chrome 默认 profile> 让 cookie 走真实账号
-      --headless=False 因为 turnstile 对 headless 评分低
-      --eval 'document.documentElement.outerHTML' 拿渲染后 HTML
+
+def fetch_html_via_browser_use(url: str, render_wait_sec: int = 8) -> str:
+    """打开 PH 页面，等渲染后取完整 DOM。
+
+    流程：
+      1. `bu --profile "Profile 1" --headed open <url>` — 用已登录 Profile 1
+         启动 headed Chrome，cookies 自动跟随，turnstile 看到合法 cookie 放行
+      2. sleep render_wait_sec 等 NextJS RSC 流式 + turnstile 解
+      3. `bu eval 'document.documentElement.outerHTML'` 拿渲染后 HTML
+      4. `bu close` 收尾（finally 块兜底）
+
+    NOTE: 暂未集成 focus push-back / kill-by-data-dir（X scraper 已有完整
+    实现，下一步 commit 复用过来）。当前测试如果发现 Chrome 抢焦点严重，
+    手动 close 后再讨论。
     """
     log.info("fetching %s", url)
-    # eval 拿 HTML（输出到 stdout 捕获）
-    cmd = [
-        config.BU_BIN, "open", url,
-        "--wait", str(timeout_sec),
-        "--eval", "document.documentElement.outerHTML",
-    ]
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec + 30)
+    try:
+        # 启动 session
+        _bu("--profile", config.CHROME_PROFILE, "--headed", "open", url, timeout=60)
+        # 等渲染（包含 turnstile 解 + RSC 流）
+        time.sleep(render_wait_sec)
+        # 取 HTML — bu eval 输出包含 'result: ' 前缀（参考 X scraper 同处理）
+        raw = _bu("eval", "document.documentElement.outerHTML", timeout=20)
+        html = raw[len("result: "):] if raw.startswith("result: ") else raw
+    finally:
+        _bu("close", timeout=15)
     elapsed = time.time() - t0
-    if proc.returncode != 0:
-        log.error("browser-use exit %d after %.1fs\nstderr: %s",
-                  proc.returncode, elapsed, proc.stderr[-500:])
-        raise RuntimeError(f"browser-use failed: {proc.returncode}")
-    log.info("fetched in %.1fs, html size %d bytes", elapsed, len(proc.stdout))
-    return proc.stdout
+    log.info("fetched in %.1fs, html size %d bytes", elapsed, len(html))
+    return html
 
 
 def save_snapshot(slug: str, html: str) -> Path:
