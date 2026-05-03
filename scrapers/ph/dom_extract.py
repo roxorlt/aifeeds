@@ -144,34 +144,54 @@ EXTRACT_COMMENTS_JS = r"""
 """
 
 
-# Reviews — 类似 comments 但 selector 不同
+# Reviews — 用 detailed-review-<id>-actionbar 定位每条 review 的 actionbar，
+# 然后向上找该 review 的 root 容器。
+#
+# 老 bug：原来要求 root 同时包含 @-link 和 "X out of 5" 文本，但 PH 用星标
+# icon 不写文本，rating 永远找不到 → 走到 5 层外的公共父级，3 条不同 review
+# 都拿到同一个 body（manus Orion Zou × 3 即此 bug）。
+#
+# 新策略：向上走直到下一层祖先含多个不同 handle，停在前一层（即包含恰好
+# 1 个 handle 的最深祖先 = 该 review 的 root）。
 EXTRACT_REVIEWS_JS = r"""
 (function() {
   const out = [];
-  // detailed-review-<id> 是 review 的 actionbar，review body 容器是上层
-  // 拿所有 detailed-review-<id> 的父容器（review root）
   const seen = new Set();
   const actionbars = document.querySelectorAll('[data-test^="detailed-review-"][data-test$="-actionbar"]');
+
+  function collectHandles(el) {
+    const links = el.querySelectorAll('a[href*="/@"]');
+    const handles = new Set();
+    for (const a of links) {
+      const m = (a.getAttribute('href') || '').match(/\/@([\w-]+)/);
+      if (m) handles.add(m[1]);
+    }
+    return handles;
+  }
+
   actionbars.forEach((bar) => {
     try {
       const idAttr = bar.getAttribute('data-test') || '';
-      const m = idAttr.match(/detailed-review-(\d+)-actionbar/);
+      const m = idAttr.match(/^detailed-review-(\d+)-actionbar$/);
       if (!m) return;
       const id = m[1];
-      if (seen.has(id)) return;
-      seen.add(id);
+      if (seen.has(id)) return;  // mobile/desktop 双渲染去重
 
-      // Walk up to review container (heuristic: parent that contains both rating + body)
+      // 向上找该 review 的 root：祖先里有别的 handle 加入就停
       let root = bar.parentElement;
-      for (let i = 0; i < 5 && root; i++) {
-        if (root.querySelector('a[href*="/@"]') && (root.innerText || '').match(/\d\s*(out of|\/)\s*5/i)) break;
+      let bestRoot = null;
+      for (let i = 0; i < 12 && root; i++) {
+        const handles = collectHandles(root);
+        if (handles.size > 1) break;        // 已混入别的 review → 上一层是边界
+        if (handles.size === 1) bestRoot = root;
         root = root.parentElement;
       }
-      if (!root) return;
+      if (!bestRoot) return;
+      seen.add(id);
 
       let authorName = '';
       let authorHandle = '';
-      const authorLink = root.querySelector('a[href*="/@"]');
+      const authorLink = bestRoot.querySelector('a[href*="/@"]');
       if (authorLink) {
         authorName = (authorLink.textContent || '').trim();
         const hm = authorLink.getAttribute('href').match(/\/@([\w-]+)/);
@@ -179,17 +199,28 @@ EXTRACT_REVIEWS_JS = r"""
       }
 
       let avatarUrl = '';
-      const ai = root.querySelector('img[src*="ph-avatars.imgix.net"], img[srcset*="ph-avatars.imgix.net"]');
-      if (ai) avatarUrl = ai.getAttribute('src') || '';
+      const ai = bestRoot.querySelector('img[src*="ph-avatars.imgix.net"], img[srcset*="ph-avatars.imgix.net"]');
+      if (ai) {
+        const srcset = ai.getAttribute('srcset') || '';
+        const src = ai.getAttribute('src') || '';
+        const oneX = srcset.split(',').map(s => s.trim()).find(s => s.endsWith(' 1x'));
+        avatarUrl = oneX ? oneX.split(' ')[0] : src;
+      }
 
-      // rating — count filled stars or extract from text
+      // rating — 优先 ARIA / 星标数；fallback 文本匹配
       let rating = null;
-      const ratingText = (root.innerText || '').match(/(\d+(?:\.\d+)?)\s*(?:out of|\/)\s*5/i);
-      if (ratingText) rating = parseFloat(ratingText[1]);
+      const ratingText = (bestRoot.innerText || '').match(/(\d+(?:\.\d+)?)\s*(?:out of|\/)\s*5/i);
+      if (ratingText) {
+        rating = parseFloat(ratingText[1]);
+      } else {
+        // 数 SVG / [aria-label*="star"] 之类的填充星标
+        const filledStars = bestRoot.querySelectorAll('svg[fill][class*="text-amber"], svg[class*="filled"], [aria-label*="star" i][aria-label*="filled" i]').length;
+        if (filledStars > 0 && filledStars <= 5) rating = filledStars;
+      }
 
-      // body — biggest text block (heuristic)
+      // body — 最大文本块（prose / richText / 长 p）
       let body = '';
-      const blocks = root.querySelectorAll('p, div.prose, [class*="richText"]');
+      const blocks = bestRoot.querySelectorAll('p, div.prose, [class*="richText"]');
       let longest = '';
       blocks.forEach((b) => {
         const t = (b.innerText || '').trim();
@@ -205,9 +236,7 @@ EXTRACT_REVIEWS_JS = r"""
         rating,
         body,
       });
-    } catch (e) {
-      // skip
-    }
+    } catch (e) {}
   });
   return JSON.stringify(out);
 })()
