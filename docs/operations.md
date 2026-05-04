@@ -12,22 +12,25 @@
 ```
 ┌─────────────────── 本地 MacBook ──────────────────┐     ┌───────────── Cloudflare ─────────────┐
 │                                                   │     │                                      │
-│  launchd.cron  (5min tick + C2 hybrid gate)       │     │  Worker: xlist-api                   │
+│  launchd.cron  (5min tick + C2 hybrid gate) — X   │     │  Worker: xlist-api                   │
 │  launchd.tune  (周一 04:00 重算 params.json)      │     │                                      │
-│    └→ cron.sh                                     │     │    - POST /api/ingest   (接收本地)  │
-│         ├→ list_scraper.py  (browser-use 抓 X)   │     │    - GET  /api/items    (dashboard) │
-│         ├→ tweet_processor.py (DeepSeek 分类+翻译)│─push│    - GET  /api/sources  (dashboard) │
-│         └→ output.py push_to_cloud ───────────────┼────→│    - GET  /api/stats    (dashboard) │
-│                                                   │     │    - POST /api/enrich/run (手动)    │
-│  本地 SQLite: data/xlist.db (staging)             │     │    - scheduled() + cron */5 * * * * │
-│                                                   │     │      ├→ runBackfillQuotes           │
-│                                                   │     │      ├→ runRefreshMetrics           │
+│  launchd.ph    (PT 0:30 daily) — Product Hunt     │     │    - POST /api/ingest   (接收本地)  │
+│    └→ cron.sh                                     │     │    - GET  /api/items    (dashboard) │
+│         ├→ list_scraper.py  (browser-use 抓 X)   │     │    - GET  /api/sources  (dashboard) │
+│         ├→ tweet_processor.py (DeepSeek 分类+翻译)│─push│    - GET  /api/stats    (dashboard) │
+│         └→ output.py push_to_cloud ───────────────┼────→│    - POST /api/enrich/run (手动)    │
+│    └→ scrapers/ph/scraper.py (PH leaderboard)─────┼─push│    - GET  /r/<key>     (R2 反代)    │
+│                                                   │     │    - scheduled() + cron */5 * * * * │
+│  本地 SQLite: data/xlist.db (staging)             │     │      ├→ runBackfillQuotes           │
+│  本地 R2 mirror: data/ph/pages/                   │     │      ├→ runRefreshMetrics           │
 │                                                   │     │      └→ runFillTranslations         │
 └───────────────────────────────────────────────────┘     │                                      │
                                                           │  D1: xlist                           │
                                                           │    items / sources / run_stats /     │
                                                           │    enrich_state / metrics_snapshots  │
                                                           │    refresh_log                       │
+                                                          │  R2: xlist-readme-assets             │
+                                                          │    GH README + PH logo/screenshot    │
                                                           │  Pages: xlist-dashboard              │
                                                           │    (React + Vite, 读 Worker API)     │
                                                           └──────────────────────────────────────┘
@@ -112,6 +115,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/api/auth/logout-all` | POST | 撤销该 user 全部 session | session token |
 | `/api/auth/me` | GET | 返回当前 user（含脱敏 phone） | session token |
 | `/img` | GET | twimg 图片反代（绕 GFW，CF 边缘缓存 7 天） | 无（host 白名单限 pbs/abs/video.twimg.com） |
+| `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存 | 无（R2 私有，仅 worker 暴露） |
 
 **`/img` 图片代理**（2026-04-20 上线）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由 twimg 域名到此端点
@@ -143,6 +147,13 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
 
 **调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
+
+**Product Hunt（2026-05-04 上线）**：
+- **抓取在本地**：CF Browser Rendering 过不了 PH 的 turnstile（POC 实测 25s wait + 鼠标 + scroll 模拟都失败）；用 browser-use Profile 1 + 持久 session（PHSession）+ 5s pacing，10s/产品稳定通过。详见 `docs/dev-log.md`
+- **Worker 端**：仅 `/api/ingest` 接收本地 push（`source_type=product_hunt`，source_id 复合键 `<slug>:<launch_date_pt>`）+ `worker/src/ph.ts` 做 R2 资源迁移（logo/screenshot/video/avatar 二进制 → SHA-256 key 写 R2，extra.media URL 改写到 `/r/<key>`）+ `/r/<key>` 反代
+- **PH 数据落 D1**：items 表统一 schema，PH 专属字段全在 `items.extra` JSON：`product_slug` / `launch_date_pt` / `daily_rank` / `categories` / `pricing_type` / `is_open_source` / `makers` / `hunter` / `maker_post` / `maker_post_text` / `maker_post_translated` / `top_comments[]` / `top_reviews[]` / `ai_summary` / `ai_category` / `ph_url` / `website_url`
+- **R2 迁移幂等**：`extra.r2_migrated_at` 标记已迁移；ingest 走二次 worker 内部 fetch 触发迁移，避免 push 阻塞
+- **手动重抓**：见下方"本地服务 → PH leaderboard scraper"
 
 **GitHub trending（2026-05-02 上线，迁自本地 launchd）**：
 - **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
@@ -378,6 +389,20 @@ npm run deploy
   - `XLIST_DATA_DIR=... python3 scripts/tune_schedule.py --dry-run`（只预览不写盘）
 - **回滚**：删除 `data/schedule_params.json` 即可回到硬编码 defaults。不改代码、不重启 launchd
 
+### 1d. launchd: `com.aifeeds.ph-scraper`（PH leaderboard，2026-05-04 上线）
+
+- **plist**：`launchd/com.aifeeds.ph-scraper.plist`（项目内，部署时 symlink 到 `~/Library/LaunchAgents/`）
+- **wrapper**：`scrapers/ph/cron.sh`（PRE/POST PID diff 兜底 kill-by-data-dir，跟 X scraper 同一套防 Chrome 孤儿 pattern）
+- **频率**：BJT 16:30 起跑（plist `Hour=16 Minute=30`）。⚠️ launchd 不支持时区，用 BJT 时间硬编码——PDT 期间对应 PT 00:30 / UTC 07:30，PST（冬令时）期间会比 PT 0:30 早一个钟，要手动把 plist Hour 改成 17 重 load
+- **抓什么**：PT 前一天的 leaderboard URL `/leaderboard/daily/Y/M/D` → 全榜 ~21 条产品（默认排序，PH bot UA 给的是 LLM-friendly markdown 格式，scraper 双格式兼容）
+- **pipeline 单产品**：navigate → JSON-LD parse → DOM extract（top-level threads only / single-handle review root）→ DeepSeek judge（is_ai + ai_category + ai_summary）→ DeepSeek translate（仅 is_ai=1）→ `sync.push_to_d1`
+- **限速**：单 PHSession 跑全榜，5s/产品 pace；rank 14+ 偶有 turnstile 失败（"Starting agent..."），用下面的补抓脚本兜底
+- **日志**：`data/logs/ph-cron-YYYYMMDD.log`（cron.sh，按天分文件）+ stdout/stderr → launchd 默认 std 输出（plist 没显式定向，看 `~/Library/Logs/com.aifeeds.ph-scraper.*` 或追溯到 cron.sh 自记日志）
+- **手动触发**：
+  - 整天：`~/.browser-use-env/bin/python3 -m scrapers.ph.scraper --leaderboard YYYY-MM-DD --push --log-level INFO`
+  - 特定 slug（应对 turnstile 漏抓）：`~/.browser-use-env/bin/python3 -m scripts.rescrape_ph_slugs --date YYYY-MM-DD --slugs slug1,slug2,slug3 --pace-sec 15`
+- **退役**：`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aifeeds.ph-scraper.plist`
+
 ### 1c. ~~launchd: `com.aifeeds.github-scraper`~~（已退役，迁移到 CF 端）
 
 > **已迁移到 CF Worker**（2026-05-02）。本地 launchd plist 已 unload；
@@ -412,6 +437,9 @@ npm run deploy
 /Users/roxor/brain/30-projects/xlist-scraper/data/
 ├── xlist.db                本地 SQLite（staging）
 ├── pages/                  分页抓取临时缓存（崩溃恢复）
+├── ph/pages/               PH 抓取的产品页 HTML 快照（每个 product 一个，崩溃时复跑解析；定期人工清理）
+├── logs/ph-cron-*.log      PH scraper cron.sh 按天结构化日志
+├── ph-rescrape-*.log       手动整榜 / 单 slug 重抓的日志
 ├── enrich_state/*.json     本地 enrich 进度（Worker 化后将废弃）
 ├── scraper.lock            cron 锁文件
 ├── cookie-warn-stamp       cookie 过期警告节流

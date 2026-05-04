@@ -153,19 +153,21 @@ docs/
 - `lists` 表：list_id, name, url, cursor
 - `tweets` 表：tweet_id, list_id, author(显示名), handle(@用户名), text(正文), created_at(发布时间), metrics(JSON), media(JSON 附件), scraped_at, is_ai(0/1/NULL), translated, emitted(0/1), quote_of_id, quote_of(JSON), link_card(JSON), thread_root_id, reply_to_id
 
-## 架构概览（2026-04-17 更新）
+## 架构概览（2026-05-04 更新）
 
 ```
-[X List] → list_scraper.py (browser-use) → SQLite
-                                              ↓
-                                     tweet_processor.py (keyword + LLM 分类 + 翻译)
-                                              ↓
-                                     output.py → push_to_cloud() → Cloudflare Worker → D1
-                                              ↓
-                                     enrich_from_syndication.py (syndication API 补 quote/card/metrics/翻译)
-                                              ↓
-                                     Dashboard (React + Vite + Tailwind) → Cloudflare Pages
+[X List]            → list_scraper.py (browser-use)            ─┐
+[GitHub trending]   → CF Worker runGithubFetchTrending           ├→ /api/ingest → D1 (items 表统一 schema)
+[Product Hunt]      → scrapers/ph/scraper.py (browser-use)      ─┘                    ↓
+                                                                          (源专属字段全在 extra JSON)
+                                                                                       ↓
+X 增量补全：worker cron */5 → backfill-quotes / refresh-metrics / fill-translations / detect-longform
+PH 资源迁移：worker/src/ph.ts → R2 (logo/screenshot/video/avatar) + /r/<key> 反代
+                                                                                       ↓
+                                                              Dashboard (React + Vite + Tailwind) → CF Pages
 ```
+
+数据源接入流程（新源）：见 `docs/source-integration-sop.md`（PH 接入即按这套 7 阶段 SOP 走完，可复用）。
 
 ### Syndication API enrichment
 
