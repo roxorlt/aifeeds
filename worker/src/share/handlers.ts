@@ -85,6 +85,26 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
 export async function handleSharePoster(request: Request, env: Env, token: string): Promise<Response> {
   const url = new URL(request.url);
   const fake = url.searchParams.get('fake'); // 'x' | 'github' | 'ph' — 跳过 DB 用 hardcoded 样本，仅 staging 验视觉
+  const noCache = url.searchParams.get('nocache') === '1' || fake; // fake 模式 / 强制 bypass 不走 R2
+
+  // ─── R2 缓存：命中直接返回 ────────────────────────────
+  // key 形如 share/poster/<token>.png；写一次后 immutable，命中即时返回
+  const r2Key = `share/poster/${token}.png`;
+  if (env.READMES && !noCache) {
+    const cached = await env.READMES.get(r2Key);
+    if (cached) {
+      return new Response(cached.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'X-Poster-Cache': 'HIT',
+          ...(cached.httpEtag ? { ETag: cached.httpEtag } : {}),
+        },
+      });
+    }
+  }
+
   let rel: ShareRelation | null = null;
   if (fake) {
     rel = {
@@ -153,25 +173,109 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     metrics: safeJson(item.metrics),
     extra: safeJson(item.extra),
   };
+  // ─── 拉分享人真实信息 ─────────────────────────────────
+  // from_uid 查 users 表拿 display_name + avatar_url；display_name 缺失留给
+  // svg-template 用 hash 默认值；avatar_url 缺失则按 dashboard 同款规则推默认
+  // /avatars/avatar-NN.png（保持前端 / 海报视觉一致）。头像 URL 需要 fetch 出
+  // bytes → base64 嵌入 SVG（resvg 不主动 fetch external image）
+  let sharerName: string | undefined;
+  let sharerAvatarDataUri: string | undefined;
+  if (!fake) {
+    const user = await env.DB.prepare(
+      `SELECT display_name, avatar_url FROM users WHERE id = ?`,
+    ).bind(rel.from_uid).first<{ display_name: string | null; avatar_url: string | null }>();
+    if (user?.display_name) sharerName = user.display_name;
+    const avatarUrl = user?.avatar_url || defaultAvatarPath(rel.from_uid);
+    sharerAvatarDataUri = await fetchAvatarAsDataUri(avatarUrl, request);
+  }
+
   const { renderShareSvg } = await import('./svg-template');
   const { renderSvgToPng } = await import('./poster');
   const { site } = originsFor(request);
   const svg = await renderShareSvg(posterItem, {
     token,
     shareUrl: `${site}/s/${token}`,
+    sharerSeed: rel.from_uid,
+    sharerName,
+    sharerAvatarDataUri,
   });
   // ?dev=1 → 直接返回 SVG 文本（debug 用）
   if (url.searchParams.get('dev') === '1') {
     return new Response(svg, { status: 200, headers: { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' } });
   }
   const png = await renderSvgToPng(svg);
+
+  // 写 R2（fake 模式不写避免污染缓存）
+  if (env.READMES && !noCache) {
+    try {
+      await env.READMES.put(r2Key, png, {
+        httpMetadata: { contentType: 'image/png', cacheControl: 'public, max-age=31536000, immutable' },
+      });
+    } catch (e) {
+      console.error('[share-poster] R2 put failed:', e);
+    }
+  }
+
   return new Response(png, {
     status: 200,
     headers: {
       'Content-Type': 'image/png',
-      'Cache-Control': 'no-store', // Step 2.3 切到 R2 缓存
+      'Cache-Control': noCache ? 'no-store' : 'public, max-age=31536000, immutable',
+      'X-Poster-Cache': 'MISS',
     },
   });
+}
+
+// 根据 avatar URL fetch + base64 → data URI
+// 支持：https://... 完整 URL / /avatars/avatar-NN.png（需要拼 site origin）
+async function fetchAvatarAsDataUri(avatarUrl: string, request: Request): Promise<string | undefined> {
+  let absUrl = avatarUrl;
+  if (avatarUrl.startsWith('/')) {
+    const { site } = originsFor(request);
+    absUrl = site + avatarUrl;
+  }
+  try {
+    const res = await fetch(absUrl, {
+      cf: { cacheTtl: 86400, cacheEverything: true },
+      headers: { 'User-Agent': 'ai-feeds-poster-renderer/1.0' },
+    });
+    if (!res.ok) return undefined;
+    const ct = res.headers.get('content-type') || 'image/png';
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > 2 * 1024 * 1024) return undefined; // > 2MB 跳过，避免拖累渲染
+    const b64 = arrayBufferToBase64(buf);
+    return `data:${ct};base64,${b64}`;
+  } catch (e) {
+    console.error('[share-poster] avatar fetch failed:', avatarUrl, e);
+    return undefined;
+  }
+}
+
+// dashboard/lib/defaultProfile.ts 同源 djb2 hash + 30 张头像池
+function djb2Hash(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h) + s.charCodeAt(i);
+    h = h | 0;
+  }
+  return Math.abs(h);
+}
+
+function defaultAvatarPath(userId: string): string {
+  const h = djb2Hash(userId + ':avatar');
+  const n = String((h % 30) + 1).padStart(2, '0');
+  return `/avatars/avatar-${n}.png`;
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  // 分块拼接，避免 String.fromCharCode 单次处理过多元素栈溢出
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+  }
+  return btoa(bin);
 }
 
 // ─── GET /s/:token ───────────────────────────────────────────────────

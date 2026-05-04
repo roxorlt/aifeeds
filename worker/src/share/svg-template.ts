@@ -248,39 +248,54 @@ function topLevelDefs(): string {
 }
 
 // ─── Footer 区（avatar + nickname + QR） ─────────────────────
-async function renderFooter(seed: string, qrUrl: string, x: number, y: number, w: number, h: number): Promise<string> {
+async function renderFooter(
+  ctx: { seed: string; nickname: string; avatarDataUri?: string; qrUrl: string },
+  x: number, y: number, w: number, h: number,
+): Promise<string> {
   const innerCard = renderCardBg(x, y, w, h, 40);
 
-  // Sharer 区（左侧）：avatar 120 + meta
+  // Sharer 区（左侧）：avatar 120 + meta，整块在 footer 内垂直居中
   const padX = 44;
-  const padY = 36;
   const avatarSize = 120;
   const avatarX = x + padX;
-  const avatarY = y + padY;
-  const nickname = defaultNickname(seed);
-  const initial = nickname.charAt(0); // 中文/英文都取第一字符
-  const bg = avatarBg(seed);
-  const sharerAvatar = `
-    <circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="${bg}"/>
-    <text x="${avatarX + avatarSize / 2}" y="${avatarY + avatarSize / 2 + 22}"
-          font-family='${FONT}' font-size="60" font-weight="700" fill="${C.ink}"
-          text-anchor="middle">${esc(initial)}</text>`;
+  // 整体（avatar + meta 两行）高度 ≈ avatarSize；以 footer 中心对齐
+  const avatarY = y + (h - avatarSize) / 2;
+  const initial = ctx.nickname.charAt(0);
+  const bg = avatarBg(ctx.seed);
+  let sharerAvatar: string;
+  if (ctx.avatarDataUri) {
+    // 真实头像：圆形 clip + image
+    const clipId = `sharer-clip-${ctx.seed.replace(/[^A-Za-z0-9]/g, '')}`;
+    sharerAvatar = `
+      <defs><clipPath id="${clipId}"><circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}"/></clipPath></defs>
+      <image href="${ctx.avatarDataUri}" x="${avatarX}" y="${avatarY}" width="${avatarSize}" height="${avatarSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    // 兜底：色块圆 + 首字母
+    sharerAvatar = `
+      <circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="${bg}"/>
+      <text x="${avatarX + avatarSize / 2}" y="${avatarY + avatarSize / 2 + 22}"
+            font-family='${FONT}' font-size="60" font-weight="700" fill="${C.ink}"
+            text-anchor="middle">${esc(initial)}</text>`;
+  }
 
   const metaX = avatarX + avatarSize + 28;
-  const metaY = avatarY + 4;
+  // meta 两行：「分享自」(26px) + nickname (36px)，总高约 26+14+36 = 76
+  // 以 avatar 中心对齐
+  const metaCenterY = avatarY + avatarSize / 2;
+  const metaTopY = metaCenterY - 76 / 2;
   const sharerMeta = `
-    <text x="${metaX}" y="${metaY + 26}" font-family='${FONT}' font-size="26" fill="${C.muted}">分享自</text>
-    <text x="${metaX}" y="${metaY + 26 + 56}" font-family='${FONT}' font-size="36" font-weight="400" fill="${C.ink}">${esc(nickname)}</text>`;
+    <text x="${metaX}" y="${metaTopY + 22}" font-family='${FONT}' font-size="26" fill="${C.muted}">分享自</text>
+    <text x="${metaX}" y="${metaTopY + 22 + 50}" font-family='${FONT}' font-size="36" font-weight="500" fill="${C.ink}">${esc(ctx.nickname)}</text>`;
 
-  // QR 区（右侧）
+  // QR 区（右侧）：以 footer 中心对齐
   const qrSize = 168;
   const qrX = x + w - padX - qrSize;
-  const qrY = avatarY - 24;
+  const qrY = y + (h - qrSize) / 2 - 8; // 留 16 给 hint
   let qrSvgInner = '';
   try {
     // qrcode lib 输出 <svg viewBox="0 0 N N">...<path d="M0 0h1v1h-1z"/></svg>
     // 提取 viewBox 维度 + inner，外层 <g> 用 translate + scale 把 N×N 缩到 qrSize
-    const fullSvg = await QRCode.toString(qrUrl, {
+    const fullSvg = await QRCode.toString(ctx.qrUrl, {
       type: 'svg',
       errorCorrectionLevel: 'M',
       margin: 1, // 留 1 模块白边，扫码软件更稳
@@ -316,27 +331,27 @@ function renderXContent(opts: {
   body: string;
   metrics?: { replies?: number; retweets?: number; likes?: number; views?: number };
 }): { svg: string; height: number } {
-  const padX = 58;
-  const padTop = 64;
+  const padX = 36;       // 56→36：让 body 宽度更接近 v7 mockup 期望
+  const padTop = 56;
   const innerX = opts.x + padX;
   const innerW = opts.w - padX * 2;
 
   let cy = opts.y + padTop;
 
-  // top-line: avatar 112 + name + handle
+  // top-line: avatar 112 + name + handle（avatar 改圆形 — X 平台头像本来就是圆）
   const avatarSize = 112;
   const avatarBgColor = avatarBg(opts.authorHandle || opts.authorName);
   const initial = (opts.authorName || '?').charAt(0);
   const topLine = `
-    <rect x="${innerX}" y="${cy}" width="${avatarSize}" height="${avatarSize}" rx="28" fill="${avatarBgColor}"/>
+    <circle cx="${innerX + avatarSize / 2}" cy="${cy + avatarSize / 2}" r="${avatarSize / 2}" fill="${avatarBgColor}"/>
     <text x="${innerX + avatarSize / 2}" y="${cy + avatarSize / 2 + 20}"
           font-family='${FONT}' font-size="56" font-weight="700" fill="${C.ink}" text-anchor="middle">${esc(initial)}</text>
-    <text x="${innerX + avatarSize + 24}" y="${cy + 50}" font-family='${FONT}' font-size="52" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(truncate(opts.authorName, 14))}</text>
-    <text x="${innerX + avatarSize + 24}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="36" fill="${C.muted}">${esc(truncate(opts.authorHandle || '', 24))}</text>`;
-  cy += avatarSize + 30; // gap 30
+    <text x="${innerX + avatarSize + 24}" y="${cy + 50}" font-family='${FONT}' font-size="52" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(truncate(opts.authorName, 16))}</text>
+    <text x="${innerX + avatarSize + 24}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="36" fill="${C.muted}">${esc(truncate(opts.authorHandle || '', 28))}</text>`;
+  cy += avatarSize + 30;
 
-  // body：38px / line-height 1.52 / max 5 lines / 单行宽 ~16-17 中文字 (innerW 约 920)
-  const lines = wrapText(opts.body, 17.5, 8); // 上限 8 行，让 X-no-media 占满空间
+  // body：38px / line-height 1.52；innerW=1008（38px ≈ 1em 中文，max 22 字 = 836px 还有富余）
+  const lines = wrapText(opts.body, 22, 8);
   const bodySize = 38;
   const bodyLine = bodySize * 1.52;
   const body = lines
@@ -378,6 +393,18 @@ function renderXContent(opts: {
   return { svg: topLine + body + engagementSvg, height: totalH };
 }
 
+// owner/repo 优先按 / 分两行，再各自截断到 maxChars 字符
+function splitRepoFullName(name: string, maxChars: number): string[] {
+  if (!name) return [''];
+  const slash = name.indexOf('/');
+  if (slash > 0 && slash < name.length - 1) {
+    const owner = name.slice(0, slash);
+    const repo = name.slice(slash + 1);
+    return [truncate(owner + '/', maxChars), truncate(repo, maxChars)];
+  }
+  return [truncate(name, maxChars)];
+}
+
 function truncate(s: string, max: number): string {
   if (!s) return '';
   let w = 0;
@@ -412,7 +439,7 @@ function renderGithubContent(opts: {
   contributors?: string;
   body: string;
 }): { svg: string; height: number } {
-  const padX = 58, padTop = 64;
+  const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
   const innerW = opts.w - padX * 2;
   let cy = opts.y + padTop;
@@ -440,9 +467,9 @@ function renderGithubContent(opts: {
     return dots;
   })();
 
-  // repo name + tag
+  // repo name + tag。owner/repo 优先按 / 分两行（owner 一行、repo 一行），单段超长再 wrap
   const nameX = logoX + logoSize + 34;
-  const nameMaxLines = wrapText(opts.repoFullName, 13, 2);
+  const nameMaxLines = splitRepoFullName(opts.repoFullName, 18);
   const repoTitleSize = 66;
   const repoTitleLineH = repoTitleSize * 1.08;
   const titleSvg = nameMaxLines
@@ -502,7 +529,7 @@ function renderGithubContent(opts: {
   // body 36px / 1.48 / clamp 5
   const bodySize = 36;
   const bodyLine = bodySize * 1.48;
-  const bodyLines = wrapText(opts.body, 18, 5);
+  const bodyLines = wrapText(opts.body, 22, 5);
   const bodySvg = bodyLines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
     .join('');
@@ -521,7 +548,7 @@ function renderPhContent(opts: {
   body: string;
   stats?: { comments?: number | string; rating?: string; followers?: number | string };
 }): { svg: string; height: number } {
-  const padX = 58, padTop = 64;
+  const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
   const innerW = opts.w - padX * 2;
   let cy = opts.y + padTop;
@@ -559,7 +586,7 @@ function renderPhContent(opts: {
   // body 36 / 1.48 / 5 lines
   const bodySize = 36;
   const bodyLine = bodySize * 1.48;
-  const bodyLines = wrapText(opts.body, 18, 5);
+  const bodyLines = wrapText(opts.body, 22, 5);
   const bodySvg = bodyLines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
     .join('');
@@ -608,10 +635,16 @@ export interface PosterItem {
 }
 
 export interface PosterShareCtx {
-  /** share_relations.token，用作昵称 / 头像的 hash seed */
+  /** share_relations.token，作 hash fallback seed + clipPath id 唯一性 */
   token: string;
   /** 落地短链：https://ai-feeds.com/s/<token> — QR 内容 */
   shareUrl: string;
+  /** 真实分享人昵称；缺失则按 from_uid hash fallback */
+  sharerName?: string;
+  /** 真实头像 data URI（worker fetch + base64 后传入）；缺失则色块 + 首字母 */
+  sharerAvatarDataUri?: string;
+  /** sharer hash seed（fallback 头像背景色 + 默认昵称用），通常传 from_uid */
+  sharerSeed: string;
 }
 
 export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Promise<string> {
@@ -681,7 +714,15 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
   const footerX = 56;
   const footerY = cardY + contentH + footerMargin;
   const footerW = 1080 - 56 * 2;
-  const footerSvg = await renderFooter(ctx.token, ctx.shareUrl, footerX, footerY, footerW, footerH);
+  const footerSvg = await renderFooter(
+    {
+      seed: ctx.sharerSeed,
+      nickname: ctx.sharerName?.trim() || defaultNickname(ctx.sharerSeed),
+      avatarDataUri: ctx.sharerAvatarDataUri,
+      qrUrl: ctx.shareUrl,
+    },
+    footerX, footerY, footerW, footerH,
+  );
 
   const totalH = footerY + footerH + 56;
 
