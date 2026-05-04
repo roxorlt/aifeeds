@@ -92,20 +92,41 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
         </>
       )}
 
-      <img
-        src={proxyImg(current.url)}
-        alt={current.alt || ""}
-        className="max-h-[90vh] max-w-[92vw] object-contain"
-        onClick={(e) => e.stopPropagation()}
-        onError={() => {
-          let host = "";
-          try { host = new URL(current.url).host; } catch {}
-          track(EVENTS.IMAGE_LOAD_ERROR, {
-            url_host: host,
-            source: "lightbox",
-          });
-        }}
-      />
+      {current.type === "video" ? (
+        <video
+          key={current.url}
+          src={proxyImg(current.url)}
+          poster={current.poster ? proxyImg(current.poster) : undefined}
+          className="max-h-[90vh] max-w-[92vw]"
+          controls
+          autoPlay
+          playsInline
+          onClick={(e) => e.stopPropagation()}
+          onError={() => {
+            let host = "";
+            try { host = new URL(current.url).host; } catch {}
+            track(EVENTS.IMAGE_LOAD_ERROR, {
+              url_host: host,
+              source: "lightbox-video",
+            });
+          }}
+        />
+      ) : (
+        <img
+          src={proxyImg(current.url)}
+          alt={current.alt || ""}
+          className="max-h-[90vh] max-w-[92vw] object-contain"
+          onClick={(e) => e.stopPropagation()}
+          onError={() => {
+            let host = "";
+            try { host = new URL(current.url).host; } catch {}
+            track(EVENTS.IMAGE_LOAD_ERROR, {
+              url_host: host,
+              source: "lightbox",
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

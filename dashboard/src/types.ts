@@ -12,6 +12,11 @@ export interface MediaItem {
   width?: number;
   height?: number;
   alt?: string;
+  // Video-only fields. PH 给的 launch video 可能附 thumbnail；X video.twimg.com
+  // 我们让浏览器自己 preload="metadata" 抓首帧（poster 留空）。
+  poster?: string;
+  // PH gallery role: "logo" | "gallery" | undefined（旧 X 数据无此字段）
+  role?: string;
 }
 
 export interface Metrics {
