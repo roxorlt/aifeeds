@@ -6,6 +6,8 @@ import { GithubDrawerBody } from "./GithubDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import { smoothScrollToTop } from "../lib/scroll";
+import { IconShare } from "./icons";
+import { ShareDialog } from "./ShareDialog";
 import type { Item, ItemExtra } from "../types";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
@@ -38,6 +40,7 @@ export function TweetDrawer() {
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
   const [titleHidden, setTitleHidden] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const dragXRef = useRef(0);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
@@ -298,7 +301,17 @@ export function TweetDrawer() {
             {headerTitle}
           </div>
           <div className="justify-self-end">
-            {/* PR5 Step 3 will mount ShareButton here */}
+            {item && (
+              <button
+                type="button"
+                onClick={() => setShareOpen(true)}
+                className="-mr-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100 active:bg-neutral-200"
+                aria-label="分享"
+                title="分享"
+              >
+                <IconShare className="h-5 w-5" />
+              </button>
+            )}
           </div>
         </header>
         <div
@@ -356,6 +369,14 @@ export function TweetDrawer() {
           )}
         </div>
       </aside>
+      {item && (
+        <ShareDialog
+          open={shareOpen}
+          itemId={item.id}
+          itemTitle={isGithub ? githubOwnerRepo : (item.author || item.title || undefined)}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
     </div>
   );
 }
