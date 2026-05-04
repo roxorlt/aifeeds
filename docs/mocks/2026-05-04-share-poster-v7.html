@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI-Feeds 分享海报 v7 · flex 自适应高度</title>
+<style>
+  :root {
+    --page-bg: #eef1f5;
+    --poster-bg: #f6f7fa;
+    --ink: #111318;
+    --muted: #687084;
+    --muted2: #98a0af;
+    --line: rgba(15, 23, 42, .085);
+    --purple: #6d4bd8;
+    --purple-soft: #f3eeff;
+    --green: #2da866;
+    --green-soft: rgba(46,170,104,.10);
+    --blue: #397cff;
+    --blue-soft: rgba(59,124,255,.10);
+    --orange: #ff653f;
+    --orange-soft: #fff0eb;
+    --card: #fff;
+    --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--page-bg); color:var(--ink); font-family:var(--font); }
+  .toolbar { position:sticky; top:0; z-index:20; padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:16px; background:rgba(247,248,251,.92); backdrop-filter:blur(18px); border-bottom:1px solid rgba(15,23,42,.08); }
+  .toolbar h1 { margin:0; font-size:16px; letter-spacing:-.02em; }
+  .toolbar p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+  .toolbar code { padding:2px 7px; border-radius:8px; background:#fff; border:1px solid var(--line); }
+  .gallery { max-width:1460px; margin:0 auto; padding:28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:32px; align-items:start; }
+  .poster-wrap { display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .caption { width:390px; display:flex; justify-content:space-between; gap:12px; color:var(--muted); font-size:13px; }
+  .caption b { color:var(--ink); }
+  /* viewport 缩放容器 — 高度由 JS 动态测量 poster 后设置（自适应海报实际高度） */
+  .poster-viewport { width:390px; border-radius:22px; overflow:hidden; box-shadow:0 22px 80px rgba(15,23,42,.18); background:var(--poster-bg); position:relative; }
+
+  /* 海报 1080 宽 / 高度由内容撑开 / scale 0.361 缩到 390 宽 */
+  .poster {
+    width:1080px;
+    transform:scale(.361111);
+    transform-origin:0 0;
+    background:var(--poster-bg);
+    display:flex;
+    flex-direction:column;
+    isolation:isolate;
+    position:relative;
+  }
+
+  /* ── HERO 顶部黑色品牌区 ─────────────────────────────── */
+  /* mask 椭圆 horizontal-radius=100%（=540px 半宽），50% transparent → 弧形两端
+     正好贴 hero 左下角 (0, 底) 和右下角 (1080, 底)；vertical-radius 200 → 弧形深 100px
+     hero 加高到 360 让 bg 下边沿往下，黑色区域更多 */
+  .hero {
+    height:360px;
+    position:relative;
+    z-index:1;
+    padding:60px 70px 0 70px;
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:32px;
+    color:#fff;
+    overflow:hidden;
+  }
+  .hero::before {
+    content:"";
+    position:absolute;
+    inset:0;
+    background:
+      radial-gradient(circle at 82% 22%, rgba(111,99,255,.34), transparent 22%),
+      linear-gradient(180deg,#050505 0%,#0c0c10 100%);
+    -webkit-mask-image: radial-gradient(ellipse 100% 200px at 50% 100%, transparent 50%, #000 51%);
+            mask-image: radial-gradient(ellipse 100% 200px at 50% 100%, transparent 50%, #000 51%);
+    z-index:0;
+  }
+  .hero::after {
+    content:"";
+    position:absolute;
+    top:-170px; right:-240px;
+    width:740px; height:740px;
+    border-radius:50%;
+    background:repeating-radial-gradient(circle,transparent 0 42px,rgba(255,255,255,.08) 45px 47px);
+    opacity:.5;
+    pointer-events:none;
+    z-index:0;
+  }
+  .hero > * { position:relative; z-index:1; }
+  .hero-logo { width:104px; height:104px; flex:0 0 auto; }
+  /* 旧 hero-curve / mask 方案弃用，回到 content-card 圆角咬合 hero 矩形的方案 */
+  .hero-brand { display:flex; align-items:center; gap:30px; z-index:3; }
+  /* hero-logo 已在上方更新到 104px */
+  .hero-logo img { width:100%; height:100%; display:block; }
+  .hero-name { margin:0; font-size:62px; line-height:1; font-weight:950; letter-spacing:-.04em; }
+  .hero-slogan { margin:14px 0 0; font-size:28px; line-height:1; font-weight:600; color:rgba(255,255,255,.66); letter-spacing:.04em; }
+  .hero-source { z-index:3; align-self:flex-start; margin-top:20px; }
+  .hero-source .source-chip {
+    display:inline-flex;
+    align-items:center;
+    gap:14px;
+    padding:18px 32px;
+    border-radius:999px;
+    font-size:32px;
+    font-weight:850;
+    line-height:1;
+    background:rgba(255,255,255,.10);
+    border:1px solid rgba(255,255,255,.18);
+    color:#fff;
+    backdrop-filter:blur(12px);
+  }
+  .hero-source .source-chip::before { content:"来源"; font-size:24px; font-weight:600; opacity:.65; }
+
+  /* ── 内容卡 ───────────────────────────────────────── */
+  .content-card {
+    margin:-130px 56px 0;         /* overlap 130：卡片顶嵌入 hero 黑色区域（约 brand 底之下 66px），弧形大部分被覆盖、仅卡片左右两侧底部露出弧形透明区 */
+    z-index:4;
+    background:#fff;
+    border:1px solid rgba(15,23,42,.06);
+    border-radius:48px;
+    box-shadow:0 34px 96px rgba(15,23,42,.13);
+    padding:64px 58px 42px;
+    display:flex;
+    flex-direction:column;
+    gap:30px;
+    overflow:hidden;
+    position:relative;
+  }
+  .content-card * { min-width:0; }
+
+  /* ── Footer 分享区 ──────────────────────────────── */
+  .footer {
+    margin:48px 56px 56px;
+    background:#fff;
+    border:1px solid rgba(15,23,42,.05);
+    border-radius:40px;
+    box-shadow:0 22px 66px rgba(15,23,42,.09);
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 220px;
+    gap:36px;
+    align-items:center;
+    padding:36px 44px;
+    overflow:hidden;
+    z-index:3;
+  }
+  .sharer { display:flex; align-items:center; gap:28px; min-width:0; }
+  .sharer-avatar {
+    width:120px; height:120px;
+    flex:0 0 auto;
+    border-radius:999px;
+    background:#f4f4f6;
+    overflow:hidden;
+  }
+  .sharer-avatar img { width:100%; height:100%; object-fit:cover; display:block; }
+  .sharer-meta { min-width:0; }
+  .sharer-meta small { display:block; font-size:26px; color:var(--muted); line-height:1; }
+  .sharer-meta strong { display:block; font-size:36px; font-weight:400; line-height:1.1; letter-spacing:0; margin-top:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--ink); }
+  .qr-area {
+    display:grid;
+    grid-template-rows:168px 24px;
+    align-items:center;
+    justify-items:end;
+    gap:12px;
+  }
+  .qr-box { width:168px; height:168px; border-radius:18px; border:1px solid rgba(15,23,42,.08); overflow:hidden; background:#fff; }
+  .qr-svg { width:100%; height:100%; display:block; }
+  .qr-scan { color:var(--muted2); font-size:22px; line-height:1; white-space:nowrap; }
+
+  /* ── 通用 chips / pills ───────────────────────── */
+  .pill { display:inline-flex; align-items:center; justify-content:center; gap:12px; max-width:100%; width:max-content; padding:12px 24px; border-radius:999px; background:var(--purple-soft); color:#5d3ed0; font-size:32px; line-height:1; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pill.small { font-size:28px; padding:10px 20px; }
+  .pill.tiny { font-size:24px; padding:10px 17px; }
+  .pill.soft { background:#f2f3f6; color:var(--muted); }
+  .pill.green { background:var(--green-soft); color:var(--green); }
+  .pill.blue { background:var(--blue-soft); color:var(--blue); }
+  .pill.orange { background:var(--orange-soft); color:#f0542e; }
+
+  /* hero source-chip 在 hero 上不同色调，content-card 内不需额外区分 */
+  .source-chip.x { color:#fff; }
+  .source-chip.github { color:#c1f0d8; }
+  .source-chip.ph { color:#ffd1c1; }
+
+  /* ── X 内容 ──────────────────────────────────── */
+  .top-line { display:flex; justify-content:space-between; align-items:flex-start; gap:28px; }
+  .author { display:flex; align-items:center; gap:24px; min-width:0; }
+  .avatar { width:112px; height:112px; flex:0 0 auto; display:grid; place-items:center; border-radius:28px; background:#f4f4f6; overflow:hidden; }
+  .name-row { display:flex; align-items:center; gap:12px; min-width:0; }
+  .name { font-size:52px; line-height:1; font-weight:950; letter-spacing:-.03em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .handle { margin-top:14px; color:var(--muted); font-size:36px; line-height:1; max-width:560px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .verified { width:40px; height:40px; flex:0 0 auto; border-radius:999px; display:grid; place-items:center; background:#18a7f4; color:#fff; font-size:24px; font-weight:950; }
+
+  .headline { margin:0; font-size:70px; line-height:1.12; letter-spacing:-.06em; font-weight:950; overflow-wrap:anywhere; word-break:break-word; }
+  .headline.repo-title-text { font-size:66px; line-height:1.08; }
+  .headline.product-title-text { font-size:92px; line-height:.95; }
+  .body-text {
+    margin:0;
+    font-size:38px;
+    line-height:1.52;
+    color:#111318;             /* 加深正文颜色让内容更突出 */
+    font-weight:500;           /* medium 让正文比 metric 数字更"重" */
+    letter-spacing:-.015em;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+    display:-webkit-box;
+    -webkit-line-clamp:5;
+    -webkit-box-orient:vertical;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    max-height:calc(1.52em * 5);
+  }
+  .compact-body { font-size:36px; line-height:1.48; max-height:calc(1.48em * 5); }
+
+  .engagement { display:grid; grid-template-columns:repeat(4,1fr); border-top:1px solid var(--line); padding-top:30px; color:#687084; font-size:30px; }
+  .engagement div { display:flex; align-items:center; justify-content:center; gap:12px; border-right:1px solid rgba(15,23,42,.08); white-space:nowrap; overflow:hidden; }
+  .engagement div:last-child { border-right:0; }
+
+  .metric-row,.ph-stats { display:grid; grid-template-columns:repeat(3,1fr); border-bottom:1px solid var(--line); padding-bottom:24px; }
+  .metric-row div,.ph-stats div { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; border-right:1px solid var(--line); min-height:96px; text-align:center; font-size:32px; color:var(--muted); }
+  .metric-row div:last-child,.ph-stats div:last-child { border-right:0; }
+  /* 数字比正文 38 略小且更轻，让正文更突出 */
+  .metric-row b,.ph-stats b { font-size:34px; line-height:1; font-weight:700; color:var(--ink); }
+  .metric-row small,.ph-stats small { font-size:24px; color:var(--muted2); line-height:1; font-weight:500; }
+
+  .meta-row { display:grid; grid-template-columns:1fr 330px; gap:28px; align-items:center; color:var(--muted); font-size:30px; padding-bottom:22px; border-bottom:1px solid var(--line); overflow:hidden; }
+  .meta-row .trophy-icon { color:#f59e0b; }  /* trophy 金色，跟 dashboard GH card daily_rank 一致 */
+  .meta-row span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .contrib { display:flex; align-items:center; gap:0; overflow:hidden; }
+  .contrib i { width:38px; height:38px; border-radius:999px; border:3px solid #fff; margin-left:-12px; background:linear-gradient(135deg,#a3bffa,#f9a8d4); flex:0 0 auto; }
+  .contrib i:first-child { margin-left:0; }
+
+  /* X media chart preview */
+  .chart-preview { border:1px solid rgba(15,23,42,.10); border-radius:34px; padding:30px; background:linear-gradient(180deg,#fff,#fbfbff); overflow:hidden; }
+  .mini-charts { display:grid; grid-template-columns:repeat(4,1fr); gap:22px 18px; }
+  .mini-chart { min-height:128px; display:flex; flex-direction:column; justify-content:flex-end; gap:8px; }
+  .mini-chart h4 { margin:0; font-size:20px; line-height:1; text-align:center; font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bars { height:84px; border-bottom:1px solid rgba(15,23,42,.12); display:flex; justify-content:center; align-items:flex-end; gap:10px; }
+  .bar { display:block; width:20px; border-radius:5px 5px 0 0; background:#d8d3f6; }
+  .bar.main { background:linear-gradient(180deg,#8e66db,#6f49cd); }
+  .bar.google { background:#e7ecef; }
+  .legend { margin-top:18px; display:flex; justify-content:center; gap:28px; color:#596071; font-size:20px; flex-wrap:wrap; }
+  .legend i { display:inline-block; width:34px; height:10px; border-radius:999px; background:#8e66db; margin-right:8px; }
+  .legend .l2 { background:#d9d2f8; } .legend .l3 { background:#e7ecef; }
+
+  /* GitHub */
+  .repo-title { display:grid; grid-template-columns:128px minmax(0,1fr); gap:34px; align-items:start; }
+  .repo-logo { width:128px; height:128px; border-radius:999px; background:#08090a; display:grid; place-items:center; overflow:hidden; }
+  .repo-dot-logo { width:96px; height:96px; display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+  .repo-dot-logo i { border-radius:50%; background:rgba(18,185,129,.22); }
+  .repo-dot-logo i.on { background:#12b981; }
+  .repo-name-wrap { min-width:0; overflow:hidden; }
+  .category-line { margin-top:16px; display:flex; justify-content:flex-start; align-items:center; gap:12px; overflow:hidden; }
+
+  /* PH */
+  .product-header { display:grid; grid-template-columns:128px minmax(0,1fr); gap:34px; align-items:start; }
+  .product-logo { width:128px; height:128px; border-radius:30px; border:1px solid rgba(15,23,42,.08); background:#fbfbfc; display:grid; place-items:center; overflow:hidden; }
+  .product-info { min-width:0; overflow:hidden; }
+  .product-title-row { display:flex; gap:22px; align-items:baseline; min-width:0; }
+  .rank { flex:0 0 auto; color:var(--muted); font-size:54px; font-weight:900; }
+  .thumbs { display:grid; grid-template-columns:1fr 1fr; gap:28px; }
+  .thumb { height:220px; border-radius:30px; border:1px solid rgba(109,77,225,.10); background:radial-gradient(circle at 78% 78%,rgba(219,39,119,.23),transparent 34%),linear-gradient(135deg,#fff,#f5edff 56%,#ffe8ef); padding:42px; position:relative; overflow:hidden; }
+  .thumb b { display:block; max-width:70%; font-size:38px; line-height:1.05; font-weight:900; }
+  .thumb i { position:absolute; right:38px; top:62px; width:190px; height:88px; border-radius:999px; background:rgba(255,255,255,.86); box-shadow:0 22px 50px rgba(15,23,42,.10); }
+
+  .repo-title-text, .product-title-text { display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden; text-overflow:ellipsis; }
+  .repo-title-text { -webkit-line-clamp:2; max-height:calc(1.08em * 2); }
+  .product-title-text { -webkit-line-clamp:1; max-height:1em; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <div>
+    <h1>AI-Feeds 分享海报 v7 · flex 自适应高度</h1>
+    <p>brand 移回顶部 hero / 来源 chip 在右上 / 底部分享人 + 二维码 / 海报高度由内容撑开</p>
+  </div>
+  <p>实际尺寸：<code>1080 × auto</code></p>
+</div>
+<main class="gallery" id="gallery"></main>
+
+<script>
+const AI_FEEDS_LOGO = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNNTQgMzQwIEw0MDUgOTQiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSIxOCIvPjxwYXRoIGQ9Ik03MCAzMzEgTDM5NCAxMDQiIHN0cm9rZT0iIzBCMEYxNCIgc3Ryb2tlLXdpZHRoPSI1IiBvcGFjaXR5PSIwLjkyIi8+PGVsbGlwc2UgY3g9IjU1IiBjeT0iMzQwIiByeD0iOS41IiByeT0iMTIuNSIgdHJhbnNmb3JtPSJyb3RhdGUoLTU1IDU1IDM0MCkiIGZpbGw9IiMwQjBGMTQiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSI2Ii8+PHBhdGggZD0iTTE1MCAyNzYgQzE1NCAyNjcgMTYzIDI2NyAxNjYgMjc0IiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iNSIvPjxwYXRoIGQ9Ik0yNzYgMTg4IEMyODEgMTc4IDI5MSAxODAgMjkyIDE4OCIgc3Ryb2tlPSIjRjNGNEY2IiBzdHJva2Utd2lkdGg9IjUiLz48L2c+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRjNGNEY2IiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMzk4IDEwMCBDMzg2IDg4IDM5MCA3NiA0MDMgODMgQzQxNCA5MCA0MTEgMTAyIDM5OCAxMDBaIi8+PHBhdGggZD0iTTQwNSA5OSBDNDIzIDgzIDQzNiA4NCA0MzcgOTMgQzQzOCAxMDMgNDIwIDEwNiA0MDUgOTlaIi8+PHBhdGggZD0iTTQwNCAxMDAgQzM5MiAxMTMgMzgzIDEyMCAzNzcgMTE1Ii8+PHBhdGggZD0iTTQwNyAxMDIgQzQyMCAxMTUgNDI5IDEyMiA0MzUgMTE2Ii8+PC9nPjxwYXRoIGQ9Ik00MDUgMTAzIEw0MDUgMjQxIiBmaWxsPSJub25lIiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iNS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48ZyBmaWxsPSJub25lIiBzdHJva2U9IiM4REREM0QiIHN0cm9rZS13aWR0aD0iNi41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik00MDUgMjQ2IEw0MDUgMTc4Ii8+PHBhdGggZD0iTTQwNSAyMTQgTDM4NCAxOTMiLz48cGF0aCBkPSJNNDA1IDIxMCBMNDMwIDE4NyIvPjxwYXRoIGQ9Ik00MDYgMjI5IEwzNzEgMjE4Ii8+PHBhdGggZD0iTTQwNyAyMjUgTDQ0NCAyMTgiLz48cGF0aCBkPSJNNDAxIDIzMyBMMzgyIDI0NiIvPjxwYXRoIGQ9Ik00MTAgMjM1IEw0MzcgMjQ4Ii8+PHBhdGggZD0iTTQwNSAxOTAgTDM5NCAxNzkiLz48cGF0aCBkPSJNNDA1IDE5OCBMNDE4IDE4NCIvPjxwYXRoIGQ9Ik0zODQgMTkzIEwzNzAgMTkwIi8+PHBhdGggZD0iTTM4NCAxOTMgTDM4MSAxNzkiLz48cGF0aCBkPSJNNDMwIDE4NyBMNDQzIDE4NCIvPjxwYXRoIGQ9Ik00MzAgMTg3IEw0MzIgMTcyIi8+PHBhdGggZD0iTTM3MSAyMTggTDM1OCAyMTUiLz48cGF0aCBkPSJNMzcxIDIxOCBMMzY1IDIwNSIvPjxwYXRoIGQ9Ik00NDQgMjE4IEw0NTggMjE4Ii8+PHBhdGggZD0iTTQ0NCAyMTggTDQ1MiAyMDUiLz48L2c+PGcgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMzgyIDI0OSBDMzY1IDI4MSAzNjUgMzUzIDM5MCA0NDQgQzM5MiA0NTIgNDAxIDQ1MiA0MDQgNDQ0IEM0MzEgMzUzIDQyOSAyODAgNDEzIDI0OSBDNDA1IDIzNyAzOTAgMjM3IDM4MiAyNDlaIiBmaWxsPSIjRkY5QTFBIiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iOCIvPjxwYXRoIGQ9Ik0zODEgMjkxIEMzOTQgMjk5IDQwNyAzMDAgNDIxIDI5NCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMDhBIiBzdHJva2Utd2lkdGg9IjQuNSIgb3BhY2l0eT0iMC45Ii8+PHBhdGggZD0iTTM3NiAzMzEgQzM5MSAzMzkgNDA1IDM0MCA0MjMgMzMzIiBmaWxsPSJub25lIiBzdHJva2U9IiNGRkQwOEEiIHN0cm9rZS13aWR0aD0iNC41IiBvcGFjaXR5PSIwLjkiLz48cGF0aCBkPSJNMzg0IDM3OCBDMzk3IDM4NCA0MTAgMzg0IDQyMCAzNzkiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0ZGRDA4QSIgc3Ryb2tlLXdpZHRoPSI0LjUiIG9wYWNpdHk9IjAuOSIvPjxwYXRoIGQ9Ik0zOTAgNDE0IEMzOTggNDE5IDQwNyA0MTkgNDE0IDQxNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMDhBIiBzdHJva2Utd2lkdGg9IjQuNSIgb3BhY2l0eT0iMC45Ii8+PC9nPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik00MDQgMjQ3IEMzODUgMjI2IDM1OSAyMzEgMzY5IDI1MCBDMzc4IDI2OCAzOTIgMjYwIDQwNCAyNDdaIi8+PHBhdGggZD0iTTQwNiAyNDcgQzQyOCAyMjQgNDUyIDIzMiA0NDIgMjUxIEM0MzIgMjY4IDQxOCAyNjEgNDA2IDI0N1oiLz48cGF0aCBkPSJNNDA0IDI0OCBDMzk4IDI1OSAzOTIgMjY3IDM4NSAyNzMiLz48cGF0aCBkPSJNNDA3IDI0OCBDNDE1IDI2MCA0MjEgMjY4IDQyOSAyNzMiLz48L2c+PC9zdmc+";
+
+// 真实 SVG icons（dashboard/src/components/icons.tsx 同源）：
+//   - X 互动：reply / retweet / heart / eye 用 X 风格 24x24 path
+//   - GH 指标：star / fork / watching 用 octicons 16x16 path
+//   - 排名：lucide-style 24x24 trophy
+// inline 字符串里 width/height 用 1em 跟随父 font-size，fill 用 currentColor 跟随父 color
+const ICON = {
+  comment: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M1.751 10c0-4.42 3.584-8 8.005-8h4.366c4.49 0 8.129 3.64 8.129 8.13 0 2.96-1.607 5.68-4.196 7.11l-8.054 4.46v-3.69h-.067c-4.49.1-8.183-3.51-8.183-8.01z"/></svg>',
+  repost:  '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z"/></svg>',
+  heart:   '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z"/></svg>',
+  eye:     '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z"/></svg>',
+  star:    '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>',
+  fork:    '<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>',
+  watching:'<svg viewBox="0 0 16 16" width="1em" height="1em" fill="currentColor" style="vertical-align:-.18em;flex:0 0 auto"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"/></svg>',
+  trophy:  '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-.18em;flex:0 0 auto"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>'
+};
+// 兼容老的 icons 对象（之前 emoji，现在指向 inline SVG）
+const icons = {
+  comment: ICON.comment, repost: ICON.repost, heart: ICON.heart, eye: ICON.eye,
+  star: ICON.star, fork: ICON.fork, watching: ICON.watching, trophy: ICON.trophy
+};
+
+const sourceMap = {
+  x:      { label:'X',           chipClass:'x' },
+  github: { label:'GitHub',       chipClass:'github' },
+  ph:     { label:'Product Hunt', chipClass:'ph' }
+};
+
+const DATA = [
+  { id:'x-media',     title:'X · 有媒体版',     desc:'带图表预览',   source:'x',  hasMedia:true,  author:'Qwen',  handle:'@Alibaba_Qwen', verified:true,
+    headline:'来认识一下 Qwen3.6-35B-A3B：现已开源！',
+    body:'这是一个稀疏 MoE 模型，总参数量 350 亿，激活参数量 30 亿。采用 Apache 2.0 许可证。其智能体编程能力与激活参数量是其 10 倍的模型相当，具备强大的推理与真实世界任务处理能力。',
+    engagement:['评论 444','转发 2.3K','喜欢 1','浏览 262'] },
+  { id:'github-media', title:'GitHub · 有媒体版', desc:'标准项目卡',   source:'github', hasMedia:true,
+    repo:'TauricResearch/TradingAgents', tag:'agent',
+    stars:'59.0k', forks:'11.3k', watchers:'497', date:'05-01', rank:'GitHub 热榜 2nd', contributors:'20 contributors',
+    body:'多智能体金融交易框架，通过模拟真实交易团队的分工（基本面分析师、情绪分析师、技术分析师、交易员、风控等），利用 LLM 驱动各角色协作决策。支持多种 LLM 提供商与灵活配置，并具备记忆与检查点恢复能力。研究向，非投资建议。',
+    engagement:['评论 20','转发 113','喜欢 59','浏览 497'] },
+  { id:'ph-media', title:'PH · 有媒体版', desc:'产品截图卡', source:'ph', hasMedia:true,
+    product:'Manus', rank:'#2', tag:'AI Agent',
+    body:'Manus 是一个通用 AI 智能体，能将你的想法转化为实际行动，擅长处理工作与生活中的各类任务；提供持续在线的云端计算机环境，无需服务器搭建即可运行 bot、Python 脚本、数据库等，实现 24/7 自动化执行；独特卖点是持久化云端运行与零运维。',
+    stats:['44|comments','4.20|reviews','1.8k|followers'] },
+  { id:'x-no',     title:'X · 无媒体版',     desc:'简洁摘要卡',   source:'x',  hasMedia:false, author:'Qwen',  handle:'@Alibaba_Qwen', verified:true,
+    headline:'来认识一下 Qwen3.6-35B-A3B：现已开源！',
+    body:'这是一个稀疏 MoE 模型，总参数量 350 亿，激活参数量 30 亿。采用 Apache 2.0 许可证。其智能体编程能力与激活参数量是其 10 倍的模型相当，具备强大的推理与真实世界任务处理能力。',
+    engagement:['评论 444','转发 2.3K','喜欢 1','浏览 262'] },
+  { id:'github-no', title:'GitHub · 无媒体版', desc:'简洁项目卡',   source:'github', hasMedia:false,
+    repo:'TauricResearch/TradingAgents', tag:'agent',
+    stars:'59.0k', forks:'11.3k', watchers:'497', date:'05-01', rank:'GitHub 热榜 2nd', contributors:'20 contributors',
+    body:'多智能体金融交易框架，通过模拟真实交易团队的分工，利用 LLM 驱动各角色协作决策。支持多种 LLM 提供商与灵活配置，并具备记忆与检查点恢复能力。研究向，非投资建议。',
+    engagement:['评论 20','转发 113','喜欢 59','浏览 497'] },
+  { id:'ph-no', title:'PH · 无媒体版', desc:'简洁产品卡', source:'ph', hasMedia:false,
+    product:'Manus', rank:'#2', tag:'AI Agent',
+    body:'通用 AI 智能体，能将你的想法转化为实际行动。提供持续在线的云端计算机环境，无需服务器搭建即可运行 bot / Python / 数据库，实现 24/7 自动化执行。',
+    stats:['44|comments','4.20|reviews','1.8k|followers'] }
+];
+
+function qwenLogo()  { return `<svg viewBox="0 0 80 80" width="96" height="96"><path d="M39 7 63 20v21L39 55 15 41V20L39 7Z" fill="none" stroke="#6a4fea" stroke-width="8"/><path d="M24 17 50 17 62 39 48 64H22L10 42Z" fill="none" stroke="#8765ff" stroke-width="8" opacity=".85"/></svg>`; }
+function repoLogo()  { const on=new Set([2,3,4,8,9,10,11,12,17,24,31,38,45,16,23,30,37,44,15,22,29,36,43]); return `<div class="repo-dot-logo">${Array.from({length:49},(_,i)=>`<i class="${on.has(i)?'on':''}"></i>`).join('')}</div>`; }
+function manusLogo() { return `<svg viewBox="0 0 64 64" width="96" height="96"><path d="M27 49c-9-1-17-8-15-17 2-9 11-12 17-8" stroke="#202124" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M29 24c-2-9 2-16 8-16 6 0 8 5 7 10" stroke="#202124" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M37 20c9-2 15 3 14 10-1 8-9 11-18 9" stroke="#202124" stroke-width="5" fill="none" stroke-linecap="round"/><circle cx="19" cy="15" r="3" fill="#202124"/></svg>`; }
+
+function qr(seed) {
+  let out = `<svg class="qr-svg" viewBox="0 0 168 168" xmlns="http://www.w3.org/2000/svg"><rect width="168" height="168" fill="#fff"/>`;
+  const finder = (x,y) => `<rect x="${x}" y="${y}" width="38" height="38" fill="#fff" stroke="#111" stroke-width="6"/><rect x="${x+13}" y="${y+13}" width="12" height="12" fill="#111"/>`;
+  out += finder(18,18) + finder(112,18) + finder(18,112);
+  for (let y=18; y<152; y+=6) {
+    for (let x=18; x<152; x+=6) {
+      const inF = (x<60&&y<60) || (x>106&&y<60) || (x<60&&y>106);
+      if (inF) continue;
+      const code = (x*13 + y*17 + seed.length*19 + seed.charCodeAt((x+y)%seed.length)) % 7;
+      if (code < 3) out += `<rect x="${x}" y="${y}" width="5" height="5" fill="#111"/>`;
+    }
+  }
+  return out + `</svg>`;
+}
+
+// hero（统一）：左侧品牌 + 右侧来源 chip · 底部弧度由 CSS mask 实现（见 .hero）
+function heroHtml(source) {
+  const s = sourceMap[source];
+  return `<header class="hero">
+    <div class="hero-brand">
+      <div class="hero-logo"><img src="${AI_FEEDS_LOGO}" alt="AI-Feeds"></div>
+      <div>
+        <h1 class="hero-name">AI-Feeds</h1>
+        <div class="hero-slogan">专注 AI 领域资讯聚合</div>
+      </div>
+    </div>
+    <div class="hero-source"><span class="source-chip ${s.chipClass}">${s.label}</span></div>
+  </header>`;
+}
+
+// 默认昵称池 + 头像池（与 dashboard/src/lib/defaultProfile.ts 同源）
+const NICKNAME_POOL = [
+  '数字游民','夜猫子','冲浪选手','产品猎人','探险家','观察者',
+  '思考者','设计师','工程师','创作者','收藏家','行者',
+  '匠人','诗人','观星人','潜水员','飞行员','攀登者',
+  '骑手','航海家','极客','咖啡因','云游者','听风者',
+  '拾荒者','种树人','记录者','编织者','远行者','守夜人',
+  '逐光人','解谜人'
+];
+function hashSeed(s){ let h=5381; for(let i=0;i<s.length;i++){ h=((h<<5)+h)+s.charCodeAt(i); h|=0; } return Math.abs(h); }
+function defaultNickname(seed){ const h=hashSeed(seed); return NICKNAME_POOL[h % NICKNAME_POOL.length] + ((h % 9000) + 1000); }
+function defaultAvatar(seed){ const h=hashSeed(seed+':avatar'); const n=String((h % 30) + 1).padStart(2,'0'); return `https://ai-feeds.com/avatars/avatar-${n}.png`; }
+
+function footerHtml(id) {
+  // 每张海报用 id 作为 hash 种子 → 不同头像 + 昵称
+  const avatar = defaultAvatar(id);
+  const nickname = defaultNickname(id);
+  return `<footer class="footer">
+    <div class="sharer">
+      <div class="sharer-avatar"><img src="${avatar}" alt=""></div>
+      <div class="sharer-meta">
+        <small>分享自</small>
+        <strong>${nickname}</strong>
+      </div>
+    </div>
+    <div class="qr-area">
+      <div class="qr-box">${qr(id)}</div>
+      <div class="qr-scan">扫码查看完整内容</div>
+    </div>
+  </footer>`;
+}
+
+function engagement(items) { const ic=[icons.comment,icons.repost,icons.heart,icons.eye]; return `<div class="engagement">${items.map((t,i)=>`<div><span>${ic[i]}</span><span>${t}</span></div>`).join('')}</div>`; }
+function metrics(d) { return `<div class="metric-row"><div><span>${ICON.star}</span><b>${d.stars}</b><small>Stars</small></div><div><span>${ICON.fork}</span><b>${d.forks}</b><small>Forks</small></div><div><span>${ICON.watching}</span><b>${d.watchers}</b><small>Watchers</small></div></div>`; }
+function meta(d)    { return `<div class="meta-row"><span><span class="trophy-icon">${icons.trophy}</span> ${d.rank}</span><span class="contrib"><i></i><i></i><i></i><span>${d.contributors}</span></span></div>`; }
+function phStats(d) { return `<div class="ph-stats">${d.stats.map(x=>{const [a,b]=x.split('|');return `<div><b>${a}</b><small>${b}</small></div>`}).join('')}</div>`; }
+
+function chartPreview() {
+  const charts=['ArenaHard','SWE-bench','SWE-ML','LiveCode','LiveBench','QwenWeb','NL2Repo','MCPMark','GAIA','HMMT','MMMU','WorldQA'];
+  return `<div class="chart-preview"><div class="mini-charts">${charts.map((t,i)=>`<div class="mini-chart"><h4>${t}</h4><div class="bars"><b class="bar main" style="height:${38+(i*13)%40}px"></b><b class="bar" style="height:${32+(i*11)%34}px"></b><b class="bar google" style="height:${24+(i*7)%32}px"></b></div></div>`).join('')}</div><div class="legend"><span><i></i>Qwen3.6</span><span><i class="l2"></i>Qwen3.5</span><span><i class="l3"></i>Gemma/G</span></div></div>`;
+}
+function phThumbs() { return `<div class="thumbs"><div class="thumb"><b>Introducing Cloud Computer</b><i></i></div><div class="thumb"><b>Run Any Operation You've ever Wanted</b><i></i></div></div>`; }
+
+function renderX(d) {
+  return `<div class="poster ${d.id} x-card ${d.hasMedia?'x-media':'x-no'}">
+    ${heroHtml(d.source)}
+    <section class="content-card">
+      <div class="top-line"><div class="author"><div class="avatar">${qwenLogo()}</div><div><div class="name-row"><div class="name">${d.author}</div>${d.verified?'<span class="verified">✓</span>':''}</div><div class="handle">${d.handle}</div></div></div></div>
+      <h1 class="headline">${d.headline}</h1>
+      <p class="body-text">${d.body}</p>
+      ${d.hasMedia?chartPreview():''}
+      ${engagement(d.engagement)}
+    </section>
+    ${footerHtml(d.id)}
+  </div>`;
+}
+function renderGithub(d) {
+  return `<div class="poster ${d.id} github-card">
+    ${heroHtml(d.source)}
+    <section class="content-card">
+      <div class="repo-title"><div class="repo-logo">${repoLogo()}</div><div class="repo-name-wrap"><h1 class="headline repo-title-text">${d.repo}</h1><div class="category-line"><span class="pill small">${d.tag}</span></div></div></div>
+      ${metrics(d)}
+      ${meta(d)}
+      <p class="body-text compact-body">${d.body}</p>
+    </section>
+    ${footerHtml(d.id)}
+  </div>`;
+}
+function renderPh(d) {
+  return `<div class="poster ${d.id} ph-card">
+    ${heroHtml(d.source)}
+    <section class="content-card">
+      <div class="product-header"><div class="product-logo">${manusLogo()}</div><div class="product-info"><div class="product-title-row"><h1 class="headline product-title-text">${d.product}</h1><span class="rank">${d.rank}</span></div><div class="category-line"><span class="pill orange small">${d.tag}</span></div></div></div>
+      <p class="body-text compact-body">${d.body}</p>
+      ${phStats(d)}
+      ${d.hasMedia?phThumbs():''}
+    </section>
+    ${footerHtml(d.id)}
+  </div>`;
+}
+function renderPoster(d) { if(d.source==='x') return renderX(d); if(d.source==='github') return renderGithub(d); return renderPh(d); }
+
+const gallery = document.getElementById('gallery');
+DATA.forEach(d => {
+  const wrap = document.createElement('section');
+  wrap.className = 'poster-wrap';
+  wrap.innerHTML = `<div class="caption"><b>${d.title}</b><span>${d.desc}</span></div><div class="poster-viewport">${renderPoster(d)}</div>`;
+  gallery.appendChild(wrap);
+});
+
+// 高度自适应：scale 0.361 后 viewport 跟着 poster 实际 offsetHeight 走
+function fitViewports() {
+  const scale = 390/1080;
+  document.querySelectorAll('.poster-viewport').forEach(vp => {
+    const poster = vp.querySelector('.poster');
+    if (poster) vp.style.height = (poster.offsetHeight * scale) + 'px';
+  });
+}
+const ro = new ResizeObserver(fitViewports);
+document.querySelectorAll('.poster').forEach(p => ro.observe(p));
+window.addEventListener('load', fitViewports);
+window.addEventListener('resize', fitViewports);
+fitViewports();
+</script>
+</body>
+</html>
