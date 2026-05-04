@@ -74,8 +74,26 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   const rel = await env.DB.prepare(`SELECT * FROM share_relations WHERE token = ?`).bind(token).first<ShareRelation>();
   if (!rel) return jsonErr('share token not found', 404);
 
-  // TODO Step 2: SVG 模板 + resvg-wasm + R2 缓存
-  return jsonRes({ todo: 'poster rendering pending Step 2', token, item_id: rel.item_id }, 501);
+  // Step 2.1 占位 smoke：渲染一个最小 SVG，验证 wasm + 字体正确打进 worker bundle。
+  // Step 2.2 接 SVG 模板（按 v7 mockup），Step 2.3 接 R2 缓存。
+  const url = new URL(request.url);
+  if (url.searchParams.get('smoke') === '1') {
+    const { renderSvgToPng } = await import('./poster');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200">
+      <rect width="100%" height="100%" fill="#0b1019"/>
+      <text x="40" y="80" fill="#fff" font-family="Noto Sans SC" font-size="44" font-weight="500">分享海报渲染测试</text>
+      <text x="40" y="140" fill="#9aa3b2" font-family="Noto Sans SC" font-size="28" font-weight="500">token: ${token}</text>
+    </svg>`;
+    const png = await renderSvgToPng(svg);
+    return new Response(png, {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+  return jsonRes({ todo: 'poster rendering pending Step 2.2/2.3', token, item_id: rel.item_id }, 501);
 }
 
 // ─── GET /s/:token ───────────────────────────────────────────────────

@@ -15,6 +15,7 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "nanoid": "^5.1.11"
   }
 }
