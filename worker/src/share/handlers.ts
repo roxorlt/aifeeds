@@ -6,7 +6,19 @@ import type { Env } from '../index';
 import type { CreateShareRequest, CreateShareResponse, LandingRequest, ShareRelation } from './types';
 import { authenticate } from '../auth/session';
 
-const PUBLIC_DOMAIN = 'https://ai-feeds.com';
+// 根据 worker 请求 host 推 (site, api) origin，三环境（dev/staging/prod）都能匹配
+function originsFor(request: Request): { site: string; api: string } {
+  const url = new URL(request.url);
+  const host = url.host;
+  if (host === 'staging-api.ai-feeds.com') {
+    return { site: 'https://staging.ai-feeds.com', api: 'https://staging-api.ai-feeds.com' };
+  }
+  if (host === 'api.ai-feeds.com') {
+    return { site: 'https://ai-feeds.com', api: 'https://api.ai-feeds.com' };
+  }
+  // dev / wrangler local：site 跟 api 同 origin（vite proxy 透传）
+  return { site: url.origin, api: url.origin };
+}
 
 function jsonRes(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -55,12 +67,12 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
     .bind(token, auth.userId, body.item_id, now)
     .run();
 
-  // 5. 返回
-  // TODO: poster_url 在 Step 2 接入实际渲染（目前指向 endpoint，命中后才渲染）
+  // 5. 返回 — origin 跟着 request host 走，staging / prod 不串
+  const { site, api } = originsFor(request);
   const response: CreateShareResponse = {
     token,
-    share_url: `${PUBLIC_DOMAIN}/s/${token}`,
-    poster_url: `https://api.ai-feeds.com/api/share/poster/${token}`,
+    share_url: `${site}/s/${token}`,
+    poster_url: `${api}/api/share/poster/${token}`,
     expires_at: now + 30 * 24 * 3600 * 1000, // 30 天（用于前端 hint，实际不强制 expire token）
   };
   return jsonRes(response);
@@ -143,9 +155,10 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   };
   const { renderShareSvg } = await import('./svg-template');
   const { renderSvgToPng } = await import('./poster');
+  const { site } = originsFor(request);
   const svg = await renderShareSvg(posterItem, {
     token,
-    shareUrl: `${PUBLIC_DOMAIN}/s/${token}`,
+    shareUrl: `${site}/s/${token}`,
   });
   // ?dev=1 → 直接返回 SVG 文本（debug 用）
   if (url.searchParams.get('dev') === '1') {
@@ -165,10 +178,11 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
 // 扫码命中：写 landed_at + to_did，redirect 到详情页
 
 export async function handleShareRedirect(request: Request, env: Env, ctx: ExecutionContext, token: string): Promise<Response> {
+  const { site } = originsFor(request);
   const rel = await env.DB.prepare(`SELECT * FROM share_relations WHERE token = ?`).bind(token).first<ShareRelation>();
   if (!rel) {
     // token 不存在直接 redirect 首页
-    return Response.redirect(PUBLIC_DOMAIN, 302);
+    return Response.redirect(site, 302);
   }
 
   const did = request.headers.get('X-Device-Id') || extractDeviceIdFromCookie(request);
@@ -196,7 +210,7 @@ export async function handleShareRedirect(request: Request, env: Env, ctx: Execu
   // 解析 item_id 拿 detail URL：item_id 形如 'x_list:123…' / 'github:owner/repo' / 'product_hunt:slug'
   // 详情页路由跟 dashboard 现有 url-routing 一致：/t/<full_id> 或 /g/<owner>/<repo>
   const detailPath = buildDetailPath(rel.item_id);
-  const target = `${PUBLIC_DOMAIN}${detailPath}?from=${encodeURIComponent(rel.from_uid)}&ref=share&token=${token}`;
+  const target = `${site}${detailPath}?from=${encodeURIComponent(rel.from_uid)}&ref=share&token=${token}`;
   return Response.redirect(target, 302);
 }
 

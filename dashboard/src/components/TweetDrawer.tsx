@@ -8,6 +8,8 @@ import { useIsNarrow } from "../lib/breakpoint";
 import { smoothScrollToTop } from "../lib/scroll";
 import { IconShare } from "./icons";
 import { ShareDialog } from "./ShareDialog";
+import { useAuthStore } from "../lib/authStore";
+import type { CreateShareResponse } from "../lib/share";
 import type { Item, ItemExtra } from "../types";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
@@ -41,6 +43,19 @@ export function TweetDrawer() {
   // "sticky" replacement title.
   const [titleHidden, setTitleHidden] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  // 同 itemId 不重复 createShare：缓存最近一次为该 item 创建的 token
+  const [shareCache, setShareCache] = useState<Record<string, CreateShareResponse>>({});
+  const user = useAuthStore((s) => s.user);
+  const openLoginModal = useAuthStore((s) => s.openLoginModal);
+
+  const onClickShare = () => {
+    if (!user) {
+      // 未登录 → 弹登录 modal，登录成功后 retry 自动打开 ShareDialog
+      openLoginModal("manual", () => setShareOpen(true));
+      return;
+    }
+    setShareOpen(true);
+  };
   const dragXRef = useRef(0);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
@@ -304,7 +319,7 @@ export function TweetDrawer() {
             {item && (
               <button
                 type="button"
-                onClick={() => setShareOpen(true)}
+                onClick={onClickShare}
                 className="-mr-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100 active:bg-neutral-200"
                 aria-label="分享"
                 title="分享"
@@ -373,7 +388,8 @@ export function TweetDrawer() {
         <ShareDialog
           open={shareOpen}
           itemId={item.id}
-          itemTitle={isGithub ? githubOwnerRepo : (item.author || item.title || undefined)}
+          cachedShare={shareCache[item.id] ?? null}
+          onShareCreated={(id, share) => setShareCache((prev) => ({ ...prev, [id]: share }))}
           onClose={() => setShareOpen(false)}
         />
       )}

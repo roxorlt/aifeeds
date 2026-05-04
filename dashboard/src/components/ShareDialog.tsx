@@ -1,62 +1,64 @@
 // PR5 share dialog：弹模态框，渲海报预览 + 复制链接 / 三态分发
 // 设计：docs/plans/2026-05-04-pr5-share-implementation.md § 5
+//
+// 行为约定：
+// - share 数据由父组件（drawer）按 itemId 缓存并传入；同 itemId 重开不换 token
+// - 未登录由父组件在 click 处理时拦截（openLoginModal + retry 回调），dialog 不再处理鉴权
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createShare, type CreateShareResponse } from "../lib/share";
 import { toast } from "../lib/toast";
-import { useAuthStore } from "../lib/authStore";
 
 interface Props {
   open: boolean;
   itemId: string;
-  itemTitle?: string;
+  /** 父组件提供的缓存（同 itemId 之前已创建过的 share 数据），首次为 null */
+  cachedShare: CreateShareResponse | null;
+  /** 父组件回写：成功创建后存入 cache，避免下次重新生成 token */
+  onShareCreated: (itemId: string, share: CreateShareResponse) => void;
   onClose: () => void;
 }
 
 type Stage = "idle" | "creating" | "rendering" | "ready" | "error";
 
-export function ShareDialog({ open, itemId, itemTitle, onClose }: Props) {
+export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose }: Props) {
   const [stage, setStage] = useState<Stage>("idle");
-  const [share, setShare] = useState<CreateShareResponse | null>(null);
+  const [share, setShare] = useState<CreateShareResponse | null>(cachedShare);
   const [errMsg, setErrMsg] = useState<string>("");
-  const triggeredRef = useRef<string>("");
-  const user = useAuthStore((s) => s.user);
-  const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
+  // 同步父组件 cache：itemId 切换或 cachedShare 更新时拉进来
   useEffect(() => {
-    // 关闭时清状态
-    if (!open) {
+    setShare(cachedShare);
+    if (cachedShare) {
+      setStage("ready");
+    } else {
       setStage("idle");
-      setShare(null);
-      setErrMsg("");
-      triggeredRef.current = "";
-      return;
     }
-    // 未登录 → 提示并触发登录
-    if (!user) {
-      onClose();
-      openLoginModal("manual");
-      toast.info("登录后即可生成分享海报");
-      return;
-    }
-    // 同一 itemId 不重复创建
-    if (triggeredRef.current === itemId) return;
-    triggeredRef.current = itemId;
+    setErrMsg("");
+  }, [itemId, cachedShare]);
+
+  // open 切换为 true 且尚无 share → 触发创建
+  useEffect(() => {
+    if (!open) return;
+    if (cachedShare) return; // 已有缓存，不重复创建
+    if (stage === "creating" || stage === "rendering") return;
     setStage("creating");
     setErrMsg("");
     createShare(itemId)
       .then((res) => {
         setShare(res);
         setStage("rendering");
+        onShareCreated(itemId, res);
       })
       .catch((err) => {
         setErrMsg(err instanceof Error ? err.message : "创建失败");
         setStage("error");
       });
-  }, [open, itemId, user, openLoginModal, onClose]);
+    // 故意不监听 stage：避免 stage→creating 触发自身重入
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, itemId, cachedShare]);
 
   if (!open) return null;
-  if (!user) return null;
 
   const onCopy = async () => {
     if (!share) return;
@@ -86,7 +88,7 @@ export function ShareDialog({ open, itemId, itemTitle, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-neutral-100 px-5 py-3">
-          <h3 className="text-sm font-semibold text-neutral-900">分享 · 生成海报</h3>
+          <h3 className="text-sm font-semibold text-neutral-900">分享</h3>
           <button
             type="button"
             onClick={onClose}
@@ -98,12 +100,6 @@ export function ShareDialog({ open, itemId, itemTitle, onClose }: Props) {
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto bg-neutral-50 p-4">
-          {itemTitle && (
-            <div className="mb-3 truncate text-xs text-neutral-500" title={itemTitle}>
-              {itemTitle}
-            </div>
-          )}
-
           {stage === "creating" && <Skeleton hint="正在生成短链…" />}
           {stage === "rendering" && share && (
             <PosterPreview
@@ -124,18 +120,14 @@ export function ShareDialog({ open, itemId, itemTitle, onClose }: Props) {
               <button
                 type="button"
                 onClick={() => {
-                  triggeredRef.current = "";
-                  setStage("idle");
-                  setTimeout(() => {
-                    triggeredRef.current = itemId;
-                    setStage("creating");
-                    createShare(itemId)
-                      .then((res) => { setShare(res); setStage("rendering"); })
-                      .catch((err) => {
-                        setErrMsg(err instanceof Error ? err.message : "创建失败");
-                        setStage("error");
-                      });
-                  }, 0);
+                  setStage("creating");
+                  setErrMsg("");
+                  createShare(itemId)
+                    .then((res) => { setShare(res); setStage("rendering"); onShareCreated(itemId, res); })
+                    .catch((err) => {
+                      setErrMsg(err instanceof Error ? err.message : "创建失败");
+                      setStage("error");
+                    });
                 }}
                 className="rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
               >
@@ -145,33 +137,23 @@ export function ShareDialog({ open, itemId, itemTitle, onClose }: Props) {
           )}
         </div>
 
-        <footer className="flex flex-col gap-2 border-t border-neutral-100 bg-white px-4 py-3">
-          {share && (
-            <div className="truncate rounded-md bg-neutral-50 px-3 py-2 text-xs text-neutral-600" title={share.share_url}>
-              {share.share_url}
-            </div>
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={onCopy}
-              disabled={!share}
-              className="rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              复制链接
-            </button>
-            <button
-              type="button"
-              onClick={onSavePoster}
-              disabled={!share || stage !== "ready"}
-              className="rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              保存海报
-            </button>
-          </div>
-          <p className="text-center text-[11px] text-neutral-400">
-            微信内：长按海报保存图片 · PC：直接保存
-          </p>
+        <footer className="grid grid-cols-2 gap-2 border-t border-neutral-100 bg-white px-4 py-3">
+          <button
+            type="button"
+            onClick={onCopy}
+            disabled={!share}
+            className="rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            复制链接
+          </button>
+          <button
+            type="button"
+            onClick={onSavePoster}
+            disabled={!share || stage !== "ready"}
+            className="rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            保存海报
+          </button>
         </footer>
       </div>
     </div>
