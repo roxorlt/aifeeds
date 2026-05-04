@@ -1,0 +1,115 @@
+# Dev Log
+
+> 跨 session / 跨 phase 的开发实测发现 / 决策点 / 路径调整。**append-only**，不改旧条目。
+> 跟 design doc 的区别：design doc 描述「应该做什么」，dev log 记「做了之后才发现的事」。
+
+---
+
+## 2026-05-03 · PH Phase 1 POC：CF Browser Rendering 不够
+
+**背景**：PH 站走 Cloudflare turnstile 防护，curl 直接 403。Phase 0 设计选 CF Browser Rendering（B 方案）作首选，本地 Python（A 方案）作 fallback。
+
+**POC 实测**：worker `/poc/ph?slug=zed`，跑了两轮：
+
+| 轮次 | 配置 | 结果 |
+|------|------|------|
+| 1 | `waitUntil: domcontentloaded` + 8s wait-for-selector | status 403, title `"Just a moment..."`, isTurnstileFinal: **true**, ldJsonBlocks: 0, total 8.7s |
+| 2 | 同上 + 25s wait + mouse 移动 + scroll 模拟 | status 403, title `"Just a moment..."`, isTurnstileFinal: **true**, ldJsonBlocks: 0, total 28.9s |
+
+**结论**：CF Browser Rendering **不能自动通过 PH 的 CF turnstile**。即使加大等待时长 + 行为模拟（鼠标移动 / scroll）turnstile 仍未放行。CF Browser 的 IP / fingerprint 被识别为非真人浏览器。
+
+**根因（推测）**：
+
+- CF Browser Rendering 跑在 CF 数据中心 IP 段，PH 的 turnstile 对数据中心 IP 评分较低
+- @cloudflare/puppeteer 默认 fingerprint 仍带 `navigator.webdriver=true` 等机器人信号
+- PH 自身用的是 CF turnstile，但不代表"自己人放行自己人"——分账户独立评估
+
+**决策**：切换到 fallback A — **本地 Python + browser-use**。理由：
+
+- X scraper 已经用同样方式跑了几个月稳定（`~/.claude/skills/xlist-scraper/`）
+- browser-use 自动从 Chrome profile 复制 cookie，注入一次 PH 登录后 30 天内 turnstile 免疫
+- 本地跑没有 CF Browser 月度时长成本
+
+**保留**：worker 的 `/poc/ph` 路由保留作诊断工具。未来若需重测（CF Browser 升级、PH 降低防护等场景）可直接用，不用从零再写一遍 POC。
+
+**对 design doc 的影响**：风险登记 #1 命中（"CF Browser Rendering 过不了 PH turnstile"），按预案 fallback A，整体工时不变（设计时已预算 +1 天）。Phase 2 起改用 `scrapers/ph/` Python 实现，结构对齐 `scrapers/github/`。
+
+---
+
+## 2026-05-03 · PH 原生 categories 暂时不解析（用 LLM 分类顶上）
+
+**现象**：PH 产品页 HTML 里 `"categories":[...]` 数组出现 ~10 次：
+
+- 主产品 1 个
+- 相关产品 9 个（每个产品自己的 categories）
+- 还有 `featuredCategories`（推荐位）+ `trendingCategories`（热门位）
+
+单凭正则定位主产品的那一个不可靠（每个相关产品也长一样的结构），需要顺
+着 NextJS RSC stream 找到带主产品 `slug` 的对象。
+
+**决策**：v1 跳过原生 categories 解析，`extract_categories()` 直接返回空。
+让 LLM judge 输出的 `ai_category`（基于 tagline + description + maker post
+推断的 AI 分类 slug）顶上。mockup 上 drawer 的 category chip 也是用 AI 分
+类，UI 不依赖原生 categories。
+
+**未来改进**：如果想要 PH 原生 categories 准确解析，得做 RSC stream 解码
+（self.__next_f.push 的 JSON-string-encoded 流式数据）。工作量 ~半天，
+v2 再做。
+
+---
+
+## 2026-05-03 · PH browser-use + Profile 1 cookie 注入：turnstile 通过 ✅
+
+**测试**：用户在 Chrome Profile 1（ltsms86@gmail.com）登录 PH 后，
+`~/.browser-use-env/bin/python3 -m scrapers.ph.scraper --slug=zed` 实测：
+
+| 项 | 结果 |
+|---|------|
+| 总耗时 | ~10s |
+| HTML 大小 | 1.4MB（live 页面比保存样本多 3 个 JSON-LD blocks）|
+| Turnstile | 自动放行 ✅ |
+| name / tagline / makers / metrics / pricing | 全部解析正确 |
+| Chrome 进程清理 | `bu close` 干净，无孤儿（pgrep 验证）|
+
+**机制**：browser-use `--profile "Profile 1" --headed` 启动 Chrome 时复用
+该 profile 的 cookie，PH 看到合法登录态自动跳过 CF turnstile。X scraper
+同款方式跑了几个月稳定，PH 走同路径同样稳。
+
+**注意点**：
+
+- 同一 profile 名（"Profile 1"）X / PH 共用，cookie / history / 登录态都
+  在同一份 profile data 里，互不干扰但要小心 Chrome 实例锁
+- 当前实现还没接 focus push-back（窗口可能短暂抢前台），下一步从
+  `~/.claude/skills/xlist-scraper/scripts/list_scraper.py` 复用
+  `_snapshot_frontmost / _push_chrome_to_back / _kill_chrome_by_data_dir`
+
+**附**：metrics 解析有一个边界：`votesCount / commentsCount` 出现多次
+（每次 launch 一个独立 count），当前 regex 取**第一次出现**，可能不是
+"主产品最新 launch"。下次实跑发现数字跟 PH 网页对不上时再考虑改进。
+
+---
+
+## 2026-05-03 · PH CF turnstile rate-limit per-IP
+
+**现象**：第一次 fresh 抓 PH 产品页 OK；30s 内连续第二次抓另一个产品 → CF
+返回 turnstile 挑战页，Chinese 提示"请稍候..."；等 60s 再试又能通过。
+
+**结论**：PH 的 CF turnstile 不止看 cookie + fingerprint，**还按 IP 评估
+请求频率**。短时间内同 IP 多次"开新 Chrome 实例"会被识别为可疑流量。
+
+**对架构的影响**：
+
+- 不能用"每个产品一个 fresh browser-use session"模式（CF 会触发 challenge）
+- Phase 2 多产品抓取必须改用**单持久 session**：
+  1. 启动一次 Chrome session
+  2. 同 session 内 navigate 到 leaderboard
+  3. 同 session 内逐个 navigate 到每个 product URL
+  4. 全部抓完再关 session
+- 单产品之间加 **3-5s pacing**（模拟人浏览节奏，给 CF 心跳一些喘息）
+- 单 session 内的 navigation 共享同一 Chrome 实例的 fingerprint + cookie 历史，
+  CF 对持续浏览的"真人模式"通过率高得多
+
+**实施细节**：scraper.py 重构成 `class PHSession` 模式（开启一次 → loop 抓
+一批 → 关闭），单产品抓取作为 method 而非独立函数。
+
+---

@@ -27,7 +27,7 @@ export class ItemNotFoundError extends Error {
   }
 }
 
-const API_BASE = (() => {
+export const API_BASE = (() => {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
   if (typeof window !== "undefined") {
     const host = window.location.hostname;

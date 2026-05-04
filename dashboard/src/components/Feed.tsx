@@ -4,6 +4,7 @@ import type { Item, SourceType } from "../types";
 import { TweetCard } from "./TweetCard";
 import { ThreadCard } from "./ThreadCard";
 import { GithubCard } from "./GithubCard";
+import { PhCard } from "./PhCard";
 import { SourceIcon } from "./icons";
 import {
   groupByThread,
@@ -145,7 +146,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
   // Default for other sources stays "hot" (existing X behavior).
   const [sortMode, setSortMode] = useState<SortMode>(
-    sourceType === "github" ? "time" : "hot",
+    sourceType === "github" || sourceType === "product_hunt" ? "time" : "hot",
   );
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
@@ -549,7 +550,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {!placeholder && sourceType !== "github" && (
+          {!placeholder && sourceType !== "github" && sourceType !== "product_hunt" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {
@@ -664,6 +665,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                 row.kind === "single" ? (
                   row.item.source_type === "github" ? (
                     <GithubCard key={row.item.id} item={row.item} />
+                  ) : row.item.source_type === "product_hunt" ? (
+                    <PhCard key={row.item.id} item={row.item} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

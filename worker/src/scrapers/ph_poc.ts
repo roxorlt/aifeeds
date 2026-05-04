@@ -17,8 +17,11 @@ const DEFAULT_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
-const NAV_TIMEOUT_MS = 15_000;
-const POST_NAV_WAIT_MS = 8_000;
+const NAV_TIMEOUT_MS = 30_000;
+const POST_NAV_WAIT_MS = 25_000;
+// PH 主页加载完会出现 og:title/h1 包含 product name；这是 turnstile 通过后
+// 才看得到的标志，作为 challenge-cleared 判定。
+const PH_CONTENT_SELECTOR = 'meta[property="og:title"][content*="Product Hunt"]';
 
 export async function handlePhPoc(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -55,13 +58,20 @@ export async function handlePhPoc(request: Request, env: Env): Promise<Response>
     const html1 = await page.content();
     const isTurnstile1 = isChallengePage(html1);
 
-    // If challenge present, give it a moment to auto-solve (CF turnstile
-    // sometimes resolves silently for known clients).
+    // 模拟人类停顿 + 鼠标移动，触发 turnstile 心跳。CF turnstile 评估
+    // 一些行为信号决定是否自动放行 / 显示 captcha。
     let waitTime = 0;
     if (isTurnstile1) {
       const ws = Date.now();
       try {
-        await page.waitForSelector('h1', { timeout: POST_NAV_WAIT_MS });
+        // 小幅鼠标移动 + scroll，模拟人在等待
+        await page.mouse.move(100, 100);
+        await new Promise((r) => setTimeout(r, 800));
+        await page.mouse.move(300, 200);
+        await new Promise((r) => setTimeout(r, 600));
+        await page.evaluate('window.scrollBy(0, 120)');
+        // 长 wait：等真正的产品页 DOM 出现
+        await page.waitForSelector(PH_CONTENT_SELECTOR, { timeout: POST_NAV_WAIT_MS });
       } catch {
         /* timeout — keep going, we'll record final state */
       }
@@ -82,7 +92,7 @@ export async function handlePhPoc(request: Request, env: Env): Promise<Response>
     const passes = {
       not_turnstile: !isTurnstile2,
       ldjson_4_or_more: ldJsonBlocks >= 4,
-      time_under_8s: totalTime < 8_000,
+      time_under_30s: totalTime < 30_000,
       has_og_title: !!ogTitle,
     };
     const allPass = Object.values(passes).every((v) => v);

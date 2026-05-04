@@ -98,7 +98,55 @@ export interface ItemExtra {
   default_branch?: string;
   license_spdx?: string | null;
 
+  // Product Hunt-source specific fields (source_type = 'product_hunt')
+  launch_date_pt?: string;
+  product_slug?: string;
+  ph_url?: string;
+  website_url?: string | null;
+  description?: string;
+  pricing_type?: "free" | "free_options" | "paid" | "subscription" | string | null;
+  is_open_source?: boolean;
+  categories?: Array<{ name: string; slug: string; parent_name?: string; parent_slug?: string }>;
+  makers?: Array<{ name?: string; handle?: string; avatar_url?: string; profile_url?: string }>;
+  hunter?: { name?: string; handle?: string; avatar_url?: string } | null;
+  maker_post_text?: string;
+  maker_post_translated?: string;
+  maker_post?: PhComment | null;
+  top_comments?: PhComment[];
+  top_reviews?: PhReview[];
+  r2_migrated_at?: string | null;
+
   [k: string]: unknown;
+}
+
+export interface PhComment {
+  author_name?: string;
+  author_handle?: string;
+  avatar_url?: string;
+  text?: string;
+  translated?: string;
+  upvotes?: number | null;
+  posted_at?: string;
+  is_reply?: boolean;
+}
+
+export interface PhReview {
+  author_name?: string;
+  author_handle?: string;
+  avatar_url?: string;
+  rating?: number | null;
+  body?: string;
+  body_translated?: string;
+}
+
+export interface PhMetrics {
+  votes?: number;
+  comments?: number;
+  reviews_count?: number;
+  reviews_avg?: number;
+  followers?: number;
+  pricing_type?: string;
+  [k: string]: number | string | undefined;
 }
 
 export interface GithubMetrics {
