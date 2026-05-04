@@ -71,29 +71,94 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
 // 当前占位：返回 501 Not Implemented，dashboard 看到此状态可显示「正在生成…」
 
 export async function handleSharePoster(request: Request, env: Env, token: string): Promise<Response> {
-  const rel = await env.DB.prepare(`SELECT * FROM share_relations WHERE token = ?`).bind(token).first<ShareRelation>();
-  if (!rel) return jsonErr('share token not found', 404);
-
-  // Step 2.1 占位 smoke：渲染一个最小 SVG，验证 wasm + 字体正确打进 worker bundle。
-  // Step 2.2 接 SVG 模板（按 v7 mockup），Step 2.3 接 R2 缓存。
   const url = new URL(request.url);
-  if (url.searchParams.get('smoke') === '1') {
-    const { renderSvgToPng } = await import('./poster');
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200">
-      <rect width="100%" height="100%" fill="#0b1019"/>
-      <text x="40" y="80" fill="#fff" font-family="Noto Sans SC" font-size="44" font-weight="500">分享海报渲染测试</text>
-      <text x="40" y="140" fill="#9aa3b2" font-family="Noto Sans SC" font-size="28" font-weight="500">token: ${token}</text>
-    </svg>`;
-    const png = await renderSvgToPng(svg);
-    return new Response(png, {
-      status: 200,
-      headers: {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'no-store',
-      },
-    });
+  const fake = url.searchParams.get('fake'); // 'x' | 'github' | 'ph' — 跳过 DB 用 hardcoded 样本，仅 staging 验视觉
+  let rel: ShareRelation | null = null;
+  if (fake) {
+    rel = {
+      id: 0,
+      token,
+      from_uid: 'usr_fake',
+      item_id: fake === 'github' ? 'github:TauricResearch/TradingAgents' : fake === 'ph' ? 'product_hunt:manus' : 'x_list:fake',
+      shared_at: Date.now(),
+      to_did: null,
+      to_uid: null,
+      landed_at: null,
+      registered_at: null,
+      scan_count: 0,
+      last_scanned_at: null,
+    };
+  } else {
+    rel = await env.DB.prepare(`SELECT * FROM share_relations WHERE token = ?`).bind(token).first<ShareRelation>();
+    if (!rel) return jsonErr('share token not found', 404);
   }
-  return jsonRes({ todo: 'poster rendering pending Step 2.2/2.3', token, item_id: rel.item_id }, 501);
+
+  // Step 2.2 串通：用 svg-template 渲 v7 模板 → resvg 出 PNG。Step 2.3 接 R2 缓存。
+  let item: Record<string, unknown> | null;
+  if (fake === 'github') {
+    item = {
+      id: rel.item_id, source_type: 'github', title: 'TauricResearch/TradingAgents',
+      content: '多智能体金融交易框架，通过模拟真实交易团队的分工（基本面分析师、情绪分析师、技术分析师、交易员、风控等），利用 LLM 驱动各角色协作决策。支持多种 LLM 提供商与灵活配置，并具备记忆与检查点恢复能力。研究向，非投资建议。',
+      content_translated: null,
+      metrics: JSON.stringify({ stars: 59000, forks: 11300, watchers: 497 }),
+      extra: JSON.stringify({ daily_rank: 2, category: 'agent', contributors_count: 20 }),
+    };
+  } else if (fake === 'ph') {
+    item = {
+      id: rel.item_id, source_type: 'product_hunt', title: 'Manus',
+      content: 'Manus 是一个通用 AI 智能体，能将你的想法转化为实际行动，擅长处理工作与生活中的各类任务；提供持续在线的云端计算机环境，无需服务器搭建即可运行 bot、Python 脚本、数据库等，实现 24/7 自动化执行；独特卖点是持久化云端运行与零运维。',
+      content_translated: null,
+      metrics: JSON.stringify({ comments: 44, rating: '4.20', followers: 1800 }),
+      extra: JSON.stringify({ rank: 2, category: 'AI Agent' }),
+    };
+  } else if (fake === 'x') {
+    item = {
+      id: rel.item_id, source_type: 'x_list', author: 'Qwen', handle: '@Alibaba_Qwen',
+      content: '来认识一下 Qwen3.6-35B-A3B：现已开源！这是一个稀疏 MoE 模型，总参数量 350 亿，激活参数量 30 亿。采用 Apache 2.0 许可证。其智能体编程能力与激活参数量是其 10 倍的模型相当，具备强大的推理与真实世界任务处理能力。',
+      content_translated: null,
+      metrics: JSON.stringify({ replies: 444, retweets: 2300, likes: 1, views: 262 }),
+      extra: null,
+    };
+  } else {
+    item = await env.DB.prepare(`SELECT * FROM items WHERE id = ?`).bind(rel.item_id).first<Record<string, unknown>>();
+    if (!item) {
+      return jsonErr('item not found', 404);
+    }
+  }
+  // 解析 metrics / extra（DB 里是 JSON 字符串）
+  const safeJson = (v: unknown): Record<string, unknown> | null => {
+    if (typeof v !== 'string') return (v as Record<string, unknown>) ?? null;
+    try { return JSON.parse(v); } catch { return null; }
+  };
+  const posterItem = {
+    id: rel.item_id,
+    source_type: String(item.source_type || ''),
+    author: typeof item.author === 'string' ? item.author : undefined,
+    handle: typeof item.handle === 'string' ? item.handle : undefined,
+    title: typeof item.title === 'string' ? item.title : undefined,
+    content: typeof item.content === 'string' ? item.content : undefined,
+    content_translated: typeof item.content_translated === 'string' ? item.content_translated : undefined,
+    metrics: safeJson(item.metrics),
+    extra: safeJson(item.extra),
+  };
+  const { renderShareSvg } = await import('./svg-template');
+  const { renderSvgToPng } = await import('./poster');
+  const svg = await renderShareSvg(posterItem, {
+    token,
+    shareUrl: `${PUBLIC_DOMAIN}/s/${token}`,
+  });
+  // ?dev=1 → 直接返回 SVG 文本（debug 用）
+  if (url.searchParams.get('dev') === '1') {
+    return new Response(svg, { status: 200, headers: { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' } });
+  }
+  const png = await renderSvgToPng(svg);
+  return new Response(png, {
+    status: 200,
+    headers: {
+      'Content-Type': 'image/png',
+      'Cache-Control': 'no-store', // Step 2.3 切到 R2 缓存
+    },
+  });
 }
 
 // ─── GET /s/:token ───────────────────────────────────────────────────
