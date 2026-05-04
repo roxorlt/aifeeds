@@ -298,25 +298,7 @@ export function TweetDrawer() {
             {headerTitle}
           </div>
           <div className="justify-self-end">
-            {item?.url && (
-              <a
-                href={item.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={() => {
-                  let host = "x.com";
-                  try { host = new URL(item.url!).host; } catch {}
-                  track(EVENTS.EXTERNAL_LINK_CLICK, {
-                    item_id: item.id,
-                    target_url_host: host,
-                  });
-                }}
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                title={externalLinkTitle}
-              >
-                {externalLinkLabel}
-              </a>
-            )}
+            {/* PR5 Step 3 will mount ShareButton here */}
           </div>
         </header>
         <div
@@ -325,25 +307,48 @@ export function TweetDrawer() {
           style={{ WebkitOverflowScrolling: "touch" }}
         >
           {item ? (
-            isGithub ? (
-              <GithubDrawerBody item={item} />
-            ) : (
-              threadMembers.map((it) => {
-                const isTarget = it.id === item.id && threadMembers.length > 1;
-                return (
-                  <div
-                    key={it.id}
-                    ref={isTarget ? targetRef : undefined}
-                    className={cn(
-                      isTarget &&
-                        "border-l-2 border-sky-500 bg-sky-50/40",
-                    )}
+            <>
+              {isGithub ? (
+                <GithubDrawerBody item={item} />
+              ) : (
+                threadMembers.map((it) => {
+                  const isTarget = it.id === item.id && threadMembers.length > 1;
+                  return (
+                    <div
+                      key={it.id}
+                      ref={isTarget ? targetRef : undefined}
+                      className={cn(
+                        isTarget &&
+                          "border-l-2 border-sky-500 bg-sky-50/40",
+                      )}
+                    >
+                      <TweetCard item={it} embedded hideThreadBanner />
+                    </div>
+                  );
+                })
+              )}
+              {item.url && (
+                <div className="flex justify-center border-t border-neutral-100 px-4 py-5">
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      let host = "x.com";
+                      try { host = new URL(item.url!).host; } catch {}
+                      track(EVENTS.EXTERNAL_LINK_CLICK, {
+                        item_id: item.id,
+                        target_url_host: host,
+                      });
+                    }}
+                    className="inline-flex items-center justify-center rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                    title={externalLinkTitle}
                   >
-                    <TweetCard item={it} embedded hideThreadBanner />
-                  </div>
-                );
-              })
-            )
+                    {externalLinkLabel}
+                  </a>
+                </div>
+              )}
+            </>
           ) : loading ? (
             <DrawerSkeleton />
           ) : (
