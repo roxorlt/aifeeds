@@ -505,10 +505,30 @@ function renderGithubContent(opts: {
     logoSvg = `<circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="#08090a"/>${dots}`;
   }
 
-  // repo name + tag。owner/repo 优先按 / 分两行（owner 一行、repo 一行），单段超长再 wrap
+  // repo name + tag。
+  // 策略：先尝试整个 owner/repo 单行，按右边距动态缩字号；如果最小字号 54px 还塞不下
+  // 才退化到按 / 分两行（owner 一行 + repo 一行）。这样短名字（virattt/dexter）单行展示，
+  // 长名字（TauricResearch/TradingAgents）两行分。
   const nameX = logoX + logoSize + 34;
-  const nameMaxLines = splitRepoFullName(opts.repoFullName, 18);
-  const repoTitleSize = 66;
+  const innerRightLimit = innerW - logoSize - 34; // owner/repo 那一行最大可用宽
+  // letter-spacing -3 + font-weight 900 紧凑字宽估算 ≈ 0.85
+  const fitOneLine = (txt: string): number | null => {
+    for (const sz of [70, 66, 62, 58, 54]) {
+      if (estimateTextWidth(txt, sz, 0.85) <= innerRightLimit) return sz;
+    }
+    return null;
+  };
+  let repoTitleSize: number;
+  let nameMaxLines: string[];
+  const oneLineSize = fitOneLine(opts.repoFullName);
+  if (oneLineSize !== null) {
+    repoTitleSize = oneLineSize;
+    nameMaxLines = [opts.repoFullName];
+  } else {
+    nameMaxLines = splitRepoFullName(opts.repoFullName, 22);
+    const longest = nameMaxLines.reduce((a, b) => (b.length > a.length ? b : a), '');
+    repoTitleSize = fitOneLine(longest) ?? 50;
+  }
   const repoTitleLineH = repoTitleSize * 1.08;
   const titleSvg = nameMaxLines
     .map((line, i) => `<text x="${nameX}" y="${cy + repoTitleSize + i * repoTitleLineH}" font-family='${FONT}' font-size="${repoTitleSize}" font-weight="900" fill="${C.ink}" letter-spacing="-3">${esc(line)}</text>`)

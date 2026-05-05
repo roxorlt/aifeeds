@@ -418,11 +418,12 @@ async function tryFetchPosterImage(
     const { api } = originsFor(request);
     url = api + url;
   }
-  // PH imgix：限宽 1080 减小 fetch 体积
+  // PH imgix：限宽 1080 减小 fetch 体积；强转 png（resvg-wasm 不支持 gif/webp 嵌入）
   if (url.includes('ph-files.imgix.net')) {
     const u = new URL(url);
     u.searchParams.set('w', '1080');
     u.searchParams.set('fit', 'max');
+    u.searchParams.set('fm', 'png'); // gif/webp source → png output
     url = u.toString();
   }
   // X pbs.twimg.com：把 name=small/120x120 改成 name=large 拿原图，避免缩略图变形
