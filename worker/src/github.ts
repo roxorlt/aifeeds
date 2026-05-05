@@ -417,6 +417,53 @@ async function fetchContributorsCount(env: GithubEnv, owner: string, repo: strin
   }
 }
 
+// PR6.2: 抓最近 5 条 commit。drawer 头部展示「最近提交」列表。
+// 存到 extra.recent_commits，shape:
+//   [{ sha: '7位短哈希', message: '首行 ≤200 字', author: 'login or name', avatar: 'url|null', date: 'ISO', url: 'commit URL' }]
+export interface RecentCommit {
+  sha: string;
+  message: string;
+  author: string;
+  avatar: string | null;
+  date: string;
+  url: string;
+}
+
+async function fetchRecentCommits(
+  env: GithubEnv,
+  owner: string,
+  repo: string,
+): Promise<RecentCommit[] | null> {
+  try {
+    const r = await fetch(
+      `${GITHUB_API}/repos/${owner}/${repo}/commits?per_page=5`,
+      { headers: ghHeaders(env) },
+    );
+    if (!r.ok) return null;
+    const arr = await r.json<Array<Record<string, unknown>>>();
+    if (!Array.isArray(arr)) return null;
+    return arr.slice(0, 5).map((c) => {
+      const commit = (c.commit as Record<string, unknown>) || {};
+      const commitAuthor = (commit.author as Record<string, unknown>) || {};
+      const author = (c.author as Record<string, unknown>) || {};
+      const message = (commit.message as string) || "";
+      // GitHub login 优先（drawer 可点头像跳 profile），fallback 到 commit author name
+      const login = (author.login as string) || "";
+      const avatarUrl = (author.avatar_url as string) || "";
+      return {
+        sha: ((c.sha as string) || "").slice(0, 7),
+        message: message.split("\n")[0].slice(0, 200),
+        author: login || (commitAuthor.name as string) || "",
+        avatar: login ? avatarUrl : null,
+        date: (commitAuthor.date as string) || "",
+        url: (c.html_url as string) || "",
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function fetchReadme(
   owner: string,
   repo: string,
@@ -526,12 +573,15 @@ export async function runGithubEnrichPending(
       // 3. contributors count via Link header
       const contributorsCount = await fetchContributorsCount(env, owner, repoName);
 
-      // 4. README
+      // 4. recent commits（PR6.2）
+      const recentCommits = await fetchRecentCommits(env, owner, repoName);
+
+      // 5. README
       const { content: readme, branch: branchUsed } = await fetchReadme(owner, repoName, defaultBranch);
       trending.readme = readme;
       trending.language = trending.language ?? (meta?.language as string | undefined) ?? null;
 
-      // 5. LLM judge
+      // 6. LLM judge
       const llm = await callLlm(env, trending);
 
       // Merge metrics + extra and write back
@@ -555,6 +605,7 @@ export async function runGithubEnrichPending(
         license_spdx: license,
         contributors_count: contributorsCount,
         language: trending.language,
+        recent_commits: recentCommits ?? extra.recent_commits ?? null,
       };
 
       await env.DB.prepare(
@@ -660,10 +711,11 @@ export async function refreshGithubItem(
   const watchers = (meta.subscribers_count as number | undefined) ?? null;
   const openIssues = (meta.open_issues_count as number | undefined) ?? null;
 
-  // 并行拉 PRs + contributors（独立请求）
-  const [openPrs, contributorsCount] = await Promise.all([
+  // 并行拉 PRs + contributors + recent commits（独立请求）
+  const [openPrs, contributorsCount, recentCommits] = await Promise.all([
     fetchOpenPrs(env, owner, repo),
     fetchContributorsCount(env, owner, repo),
+    fetchRecentCommits(env, owner, repo),
   ]);
 
   // 读旧 metrics + extra，merge（保 today_stars / license_spdx 等 API 不返字段）
@@ -687,6 +739,8 @@ export async function refreshGithubItem(
   const newExtra = {
     ...oldExtra,
     contributors_count: contributorsCount,
+    // 拿不到时不覆盖旧值（rate limit / 私库等场景）
+    recent_commits: recentCommits ?? oldExtra.recent_commits ?? null,
   };
 
   const now = Math.floor(Date.now() / 1000);
