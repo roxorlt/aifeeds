@@ -22,9 +22,12 @@ interface Props {
 type Stage = "idle" | "creating" | "rendering" | "ready" | "error";
 
 export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose }: Props) {
+  // ⚠️ 所有 hooks 必须在任何 early-return 之前声明，且每次 render 顺序一致
+  // （React Rules of Hooks）。把 useState/useEffect 全集中放上面，return null 才放后面。
   const [stage, setStage] = useState<Stage>("idle");
   const [share, setShare] = useState<CreateShareResponse | null>(cachedShare);
   const [errMsg, setErrMsg] = useState<string>("");
+  const [saving, setSaving] = useState(false);
 
   // 同步父组件 cache：itemId 切换或 cachedShare 更新时拉进来
   useEffect(() => {
@@ -70,7 +73,6 @@ export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose
     }
   };
 
-  const [saving, setSaving] = useState(false);
   const onSavePoster = async () => {
     if (!share || saving) return;
     setSaving(true);
