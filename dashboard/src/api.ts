@@ -35,6 +35,11 @@ export const API_BASE = (() => {
     if (host === "localhost" || host === "127.0.0.1") {
       return "";
     }
+    // Staging dashboard 必须打 staging worker，否则线上 prod 没有最新 endpoint
+    // 时（例如 PR 部署的新接口）会全线 404
+    if (host === "staging.ai-feeds.com" || host.endsWith(".xlist-dashboard-staging.pages.dev")) {
+      return "https://staging-api.ai-feeds.com";
+    }
   }
   return "https://api.ai-feeds.com";
 })();
