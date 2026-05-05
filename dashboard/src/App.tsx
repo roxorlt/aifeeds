@@ -56,7 +56,17 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
 function DashboardHome() {
   const [sources, setSources] = useState<Source[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [storedFilter, setFilter] = useState<FilterKey>("all");
+  // 反馈 #7：冷启动落在 deep link 上时，初始 filter 跟着对应 tab，避免关掉
+  // drawer 后用户看到 X 流（mobile 默认）以为没回到 GH/PH。
+  // 仅初次构造时读 pathname；后续用户切 tab / 直接打 / 都正常工作。
+  const initialFilter: FilterKey = (() => {
+    const p = typeof window !== "undefined" ? window.location.pathname : "/";
+    if (p.startsWith("/g/")) return "github";
+    if (p.startsWith("/ph/")) return "product_hunt";
+    if (p.startsWith("/t/")) return "x_list";
+    return "all";
+  })();
+  const [storedFilter, setFilter] = useState<FilterKey>(initialFilter);
   const [refreshTick, _setRefreshTick] = useState(0);
 
   const isNarrow = useIsNarrow();

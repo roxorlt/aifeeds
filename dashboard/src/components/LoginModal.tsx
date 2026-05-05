@@ -240,15 +240,16 @@ export function LoginModal() {
         {/* Turnstile widget */}
         <div ref={turnstileContainerRef} className="mt-3 flex justify-center" />
 
-        {/* 验证码 — 始终显示，未发码时 disabled */}
+        {/* 验证码 — 始终可点击；用户可以提前聚焦 / 粘贴。
+            登录按钮的 disabled 已经依赖 codeSent + 6 位长度，
+            没必要在输入框上再卡一道（卡了反而 UX 差，每次发码后才能点）。 */}
         <label className="mb-1 mt-3 block text-sm text-neutral-700">验证码</label>
         <input
           type="tel"
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-          placeholder="请输入验证码"
-          disabled={!codeSent}
-          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-400"
+          placeholder={codeSent ? '请输入验证码' : '请先点击「获取验证码」'}
+          className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none"
         />
         {codeError && (
           <p className="mt-1 text-xs text-rose-600">{codeError}</p>
