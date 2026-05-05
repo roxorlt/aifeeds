@@ -2,9 +2,14 @@
 // by calling cdn.syndication.twimg.com (same API react-tweet uses).
 // Replaces the local Python enrich_from_syndication.py for cloud-side runs.
 
+import { fetchTweetsScrapeBadger } from './scrapebadger';
+
 export interface EnrichEnv {
   DB: D1Database;
   DEEPSEEK_API_KEY?: string;
+  // 可选：配置后 refresh-metrics 优先走 ScrapeBadger 批量（覆盖 syndication
+  // 不返 retweet_count/view_count 的死角），失败/未命中再回落到 syndication。
+  SCRAPEBADGER_API_KEY?: string;
 }
 
 const SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result";
@@ -1335,11 +1340,52 @@ export async function runRefreshTiered(
     byTier.set(tier, agg);
   };
 
+  // ── 批量预取（如配置 SCRAPEBADGER_API_KEY）──
+  // ScrapeBadger get-tweets-by-ids 单次 N 个 ID = 1 call ≈ 1+N credits，
+  // 替代 N 次 syndication subrequest（同时还能拿回 retweet_count/view_count，
+  // syndication 已经不返这两字段）。失败/未命中的 ID fall back 走原来的
+  // syndication 单条路径，零行为变化。
+  const sbBatch = env.SCRAPEBADGER_API_KEY
+    ? await fetchTweetsScrapeBadger(env, candidates.map((c) => c.source_id))
+    : null;
+  if (sbBatch?.error) {
+    console.warn(
+      `[refresh-tiered] scrapebadger ${sbBatch.error} status=${sbBatch.status} dur=${sbBatch.durationMs}ms; fallback to syndication`,
+    );
+  } else if (sbBatch) {
+    console.log(
+      `[refresh-tiered] scrapebadger hit=${sbBatch.metrics.size}/${candidates.length} miss=${sbBatch.missing.length} credits=${sbBatch.creditsUsed} ratelimit_remaining=${sbBatch.rateLimitRemaining} dur=${sbBatch.durationMs}ms`,
+    );
+  }
+
   for (const row of candidates) {
     const ageSec = Math.max(
       0,
       nowSec - Math.floor(new Date(row.published_at).getTime() / 1000),
     );
+
+    // 优先走 SB 批量结果；命中即走完整 tier/velocity/snapshot 链路。
+    const sbMetrics = sbBatch?.metrics.get(row.source_id);
+    if (sbMetrics) {
+      const newLikes = sbMetrics.likes ?? 0;
+      const velocity = computeVelocity(
+        newLikes,
+        row.prev_likes,
+        row.prev_captured_at,
+        ageSec,
+        nowSec,
+      );
+      const { tier, intervalSec } = determineTier(ageSec, velocity);
+      await applyTieredUpdate(env, row.id, sbMetrics, tier, velocity, intervalSec, nowSec);
+      counts.updated++;
+      tierCount[String(tier)] = (tierCount[String(tier)] || 0) + 1;
+      // SB batch 是 1 个 subreq 平摊到所有命中项，记账不必精确
+      bumpTier(tier, 1, 1, 0);
+      // SB 已拿到，不再睡眠（API 自身延迟 3-7s 已经是天然 pacing）
+      continue;
+    }
+
+    // 未命中：可能 SB 漏了 / 没配 key / 失败回落 → 走原 syndication 路径
     const res = await fetchTweet(row.source_id);
 
     if (res === null) {

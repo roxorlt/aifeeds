@@ -66,6 +66,9 @@ export interface Env {
   // Cap on which tiers the tiered refresher touches. Default '1' = gradual
   // rollout (L0+L1 only); set to '4' for full coverage once stable.
   REFRESH_TIER_MAX?: string;
+  // ScrapeBadger 第三方 X 抓取服务（替代 syndication 拿回 retweet/view 字段）
+  // 接 refresh-tiered 路径；缺失时自动回落到 syndication
+  SCRAPEBADGER_API_KEY?: string;
   // PR2 auth secrets (上线前用 wrangler secret put 设置)
   TURNSTILE_SECRET_KEY?: string;
   TENCENT_SMS_SECRET_ID?: string;       // 腾讯云 API SecretId
