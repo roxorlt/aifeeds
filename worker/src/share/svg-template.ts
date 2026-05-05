@@ -643,9 +643,9 @@ function renderGithubContent(opts: {
   const trophyY = metaLineY - trophySize + 5;
   const trophySvg = strokeIcon(TROPHY_PATHS, innerX, trophyY, trophySize, C.trophy, 2.5);
   const rankX = innerX + trophySize + 14;
-  // 排名后接「最近提交 X 天前」(可选)，用 · 分隔
+  // 排名后接「commit X 天前」(可选)，用 · 分隔
   const rankFullText = opts.lastCommitAgo
-    ? `${opts.rankLabel} · 最近提交 ${opts.lastCommitAgo}`
+    ? `${opts.rankLabel} · commit ${opts.lastCommitAgo}`
     : opts.rankLabel;
   const rankSvg = `<text x="${rankX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(rankFullText)}</text>`;
   let contribSvg = '';

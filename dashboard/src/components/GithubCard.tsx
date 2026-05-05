@@ -108,70 +108,74 @@ export function GithubCard({ item }: Props) {
           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
         />
         <div className="min-w-0 flex-1">
-          {/* Header row: title + meta + category badge（徽章浮在右侧顶部） */}
+          {/* 第一行：标题 + 右上角 rank pill（替代原 category 徽章位置） */}
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
                 {ownerRepo}
               </div>
-              {/* icon 行只保留 lang/stars/forks/watchers — issues/prs/commit 改为下面文字行（与抽屉一致） */}
-              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-                {language && (
-                  <span className="inline-flex items-center gap-1">
-                    <span className={cn("h-2 w-2 rounded-full", langDot(language))} />
-                    {language}
-                  </span>
-                )}
-                {language && stars !== undefined && <span className="text-neutral-400">·</span>}
-                {stars !== undefined && (
-                  <span className="inline-flex items-center gap-1">
-                    <IconStarFill className="h-3.5 w-3.5" />
-                    {formatCompact(stars)}
-                  </span>
-                )}
-                {forks !== undefined && <span className="text-neutral-400">·</span>}
-                {forks !== undefined && (
-                  <span className="inline-flex items-center gap-1">
-                    <IconRepoForked className="h-3.5 w-3.5" />
-                    {formatCompact(forks)}
-                  </span>
-                )}
-                {watchers !== undefined && <span className="text-neutral-400">·</span>}
-                {watchers !== undefined && (
-                  <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
-                    <IconWatching className="h-3.5 w-3.5" />
-                    {formatCompact(watchers)}
-                  </span>
-                )}
-              </div>
             </div>
-            {category && (
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
-                  CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
-                )}
-              >
-                {category}
+            {dailyRank && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-amber-200">
+                {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
+                <IconLeaderboard className="h-3 w-3 text-amber-500" />
+                <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
               </span>
             )}
           </div>
 
-          {/* Rank chip — 与抽屉同款（drawer 用 amber 胶囊样式） */}
-          {dailyRank && (
-            <div className="mt-2">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[12px] text-neutral-700 ring-1 ring-amber-200">
-                {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
-                <IconLeaderboard className="h-3.5 w-3.5 text-amber-500" />
-                <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
-                <span className="text-neutral-500">· GitHub 热榜</span>
-              </span>
+          {/* 第二行：Lang + Category（同一行；category 不再放右上角） */}
+          {(language || category) && (
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+              {language && (
+                <span className="inline-flex items-center gap-1">
+                  <span className={cn("h-2 w-2 rounded-full", langDot(language))} />
+                  {language}
+                </span>
+              )}
+              {language && category && <span className="text-neutral-400">·</span>}
+              {category && (
+                <span
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                    CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
+                  )}
+                >
+                  {category}
+                </span>
+              )}
             </div>
           )}
 
-          {/* 文字 meta 行：Issues / PRs / 最近提交 — 与抽屉一致 */}
+          {/* 第三行：stars / forks / watchers (= view) icons */}
+          {(stars !== undefined || forks !== undefined || watchers !== undefined) && (
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+              {stars !== undefined && (
+                <span className="inline-flex items-center gap-1">
+                  <IconStarFill className="h-3.5 w-3.5" />
+                  {formatCompact(stars)}
+                </span>
+              )}
+              {forks !== undefined && <span className="text-neutral-400">·</span>}
+              {forks !== undefined && (
+                <span className="inline-flex items-center gap-1">
+                  <IconRepoForked className="h-3.5 w-3.5" />
+                  {formatCompact(forks)}
+                </span>
+              )}
+              {watchers !== undefined && <span className="text-neutral-400">·</span>}
+              {watchers !== undefined && (
+                <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
+                  <IconWatching className="h-3.5 w-3.5" />
+                  {formatCompact(watchers)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* 第四行：Issues / PRs / commit — 与抽屉一致 */}
           {(openIssues != null || openPrs != null || lastCommitAgo) && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-neutral-600">
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-neutral-600">
               {openIssues != null && (
                 <span>Issues: <span className="font-medium text-neutral-900">{openIssues}</span></span>
               )}
@@ -179,7 +183,7 @@ export function GithubCard({ item }: Props) {
                 <span>PRs: <span className="font-medium text-neutral-900">{openPrs}</span></span>
               )}
               {lastCommitAgo && (
-                <span>最近提交 <span className="font-medium text-neutral-900">{lastCommitAgo}</span></span>
+                <span>commit <span className="font-medium text-neutral-900">{lastCommitAgo}</span></span>
               )}
             </div>
           )}
