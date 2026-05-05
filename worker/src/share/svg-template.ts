@@ -361,14 +361,30 @@ function renderXContent(opts: {
     <text x="${innerX + avatarSize + 24}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="36" fill="${C.muted}">${esc(truncate(opts.authorHandle || '', 28))}</text>`;
   cy += avatarSize + 30;
 
-  // body：38px / line-height 1.52；innerW=1008（38px ≈ 1em 中文，max 22 字 = 836px 还有富余）
+  // body：38px / line-height 1.52；innerW=1008（38px ≈ 1em 中文，max 24 字 = 912px）
   const lines = wrapText(opts.body, 24, 8);
   const bodySize = 38;
   const bodyLine = bodySize * 1.52;
   const body = lines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.6">${esc(line)}</text>`)
     .join('');
-  cy += lines.length * bodyLine + 30;
+  cy += lines.length * bodyLine + 24;
+
+  // 有媒体（X 推文图）：body 之后 / engagement 之前插入 media block
+  let mediaSvg = '';
+  if (opts.mediaImageDataUri) {
+    const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
+    const mediaH = Math.min(innerW / ar, 520);
+    const mediaW = mediaH * ar;
+    const mediaX = innerX + (innerW - mediaW) / 2;
+    const mediaY = cy;
+    const clipId = `x-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    mediaSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+    cy = mediaY + mediaH + 26;
+  }
 
   // engagement: top border + 4 columns (reply/retweet/heart/eye)
   const engY = cy;
@@ -400,24 +416,8 @@ function renderXContent(opts: {
   }
   cy = engY + engHeight;
 
-  // 有媒体（X 推文图）：engagement 后插入 media block
-  let mediaSvg = '';
-  if (opts.mediaImageDataUri) {
-    const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
-    const mediaH = Math.min(innerW / ar, 520);
-    const mediaW = mediaH * ar;
-    const mediaX = innerX + (innerW - mediaW) / 2;
-    const mediaY = cy + 24;
-    const clipId = `x-media-clip-${Math.random().toString(36).slice(2, 8)}`;
-    mediaSvg = `
-      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
-      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
-    cy = mediaY + mediaH;
-  }
-
   const totalH = cy - opts.y + 42; // 42 padding-bottom
-  return { svg: topLine + body + engagementSvg + mediaSvg, height: totalH };
+  return { svg: topLine + body + mediaSvg + engagementSvg, height: totalH };
 }
 
 // owner/repo 优先按 / 分两行，再各自截断到 maxChars 字符
@@ -469,18 +469,25 @@ function renderGithubContent(opts: {
   body: string;
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
+  ownerAvatarDataUri?: string;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
   const innerW = opts.w - padX * 2;
   let cy = opts.y + padTop;
 
-  // repo logo（dot pattern）
+  // repo logo：优先 owner GitHub 头像（圆形 clip），缺失 fallback 到 dot pattern
   const logoX = innerX, logoY = cy;
   const logoSize = 128;
-  const logoBg = `<circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="#08090a"/>`;
-  // 7×7 dot grid
-  const dotPattern = (() => {
+  let logoSvg: string;
+  if (opts.ownerAvatarDataUri) {
+    const clipId = `gh-owner-clip-${Math.random().toString(36).slice(2, 8)}`;
+    logoSvg = `
+      <defs><clipPath id="${clipId}"><circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}"/></clipPath></defs>
+      <circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="#f4f4f6"/>
+      <image href="${opts.ownerAvatarDataUri}" x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    // 7×7 dot grid fallback
     const on = new Set([2, 3, 4, 8, 9, 10, 11, 12, 17, 24, 31, 38, 45, 16, 23, 30, 37, 44, 15, 22, 29, 36, 43]);
     const dotSize = 8;
     const gap = 5;
@@ -495,8 +502,8 @@ function renderGithubContent(opts: {
       const fill = on.has(i) ? '#12b981' : 'rgba(18,185,129,0.22)';
       dots += `<circle cx="${cx}" cy="${cy_}" r="${dotSize / 2}" fill="${fill}"/>`;
     }
-    return dots;
-  })();
+    logoSvg = `<circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="#08090a"/>${dots}`;
+  }
 
   // repo name + tag。owner/repo 优先按 / 分两行（owner 一行、repo 一行），单段超长再 wrap
   const nameX = logoX + logoSize + 34;
@@ -592,7 +599,7 @@ function renderGithubContent(opts: {
   cy += 12; // 卡片底部内边距收尾
 
   const totalH = cy - opts.y;
-  return { svg: logoBg + dotPattern + titleSvg + tagSvg + metricsSvg + bodySvg + mediaSvg, height: totalH };
+  return { svg: logoSvg + titleSvg + tagSvg + metricsSvg + bodySvg + mediaSvg, height: totalH };
 }
 
 // ─── Product Hunt 变体 内容渲染 ────────────────────────────
@@ -605,6 +612,7 @@ function renderPhContent(opts: {
   stats?: { comments?: number | string; rating?: string; followers?: number | string };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
+  productLogoDataUri?: string;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
@@ -614,11 +622,20 @@ function renderPhContent(opts: {
   // product header: logo 128 + product name + rank + tag
   const logoSize = 128;
   const logoX = innerX, logoY = cy;
-  const logoBg = `<rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30" fill="#fbfbfc" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
-  // 简化产品 logo：渐变方块
-  const phLogoInner = `
-    <text x="${logoX + logoSize / 2}" y="${logoY + logoSize / 2 + 28}"
-          font-family='${FONT}' font-size="68" font-weight="900" fill="${C.orangeInk}" text-anchor="middle">${esc((opts.productName || '?').charAt(0))}</text>`;
+  let logoSvg: string;
+  if (opts.productLogoDataUri) {
+    const clipId = `ph-logo-clip-${Math.random().toString(36).slice(2, 8)}`;
+    logoSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30"/></clipPath></defs>
+      <rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30" fill="#fbfbfc" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>
+      <image href="${opts.productLogoDataUri}" x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    // fallback：圆角方块 + 产品名首字母
+    logoSvg = `
+      <rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30" fill="#fbfbfc" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>
+      <text x="${logoX + logoSize / 2}" y="${logoY + logoSize / 2 + 28}"
+            font-family='${FONT}' font-size="68" font-weight="900" fill="${C.orangeInk}" text-anchor="middle">${esc((opts.productName || '?').charAt(0))}</text>`;
+  }
 
   // product title row
   const nameX = logoX + logoSize + 34;
@@ -692,7 +709,7 @@ function renderPhContent(opts: {
   cy += 12;
 
   const totalH = cy - opts.y;
-  return { svg: logoBg + phLogoInner + titleSvg + rankSvg + tagSvg + bodySvg + statsSvg + mediaSvg, height: totalH };
+  return { svg: logoSvg + titleSvg + rankSvg + tagSvg + bodySvg + statsSvg + mediaSvg, height: totalH };
 }
 
 // ─── 顶层入口：renderShareSvg ──────────────────────────────
@@ -715,6 +732,11 @@ export interface PosterItem {
   mediaImageDataUri?: string;
   // 媒体图原始宽高比（fetched 后传入），用于按比缩放避免变形
   mediaAspectRatio?: number;
+  // 作者/项目头像（worker fetch + base64 后传入）
+  // GH = owner 头像 https://github.com/<owner>.png
+  // PH = 产品 logo（media JSON role=logo 那张）
+  // X = 不传（推文头像 scraper 没存）
+  authorAvatarDataUri?: string;
 }
 
 export interface PosterShareCtx {
@@ -755,6 +777,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       body: bodyText(item),
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
+      ownerAvatarDataUri: item.authorAvatarDataUri,
     });
     contentSvg = r.svg;
     contentH = r.height;
@@ -769,6 +792,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       body: bodyText(item),
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
+      productLogoDataUri: item.authorAvatarDataUri,
       stats: {
         comments: m.comments as number | undefined,
         rating: m.rating ? String(m.rating) : undefined,

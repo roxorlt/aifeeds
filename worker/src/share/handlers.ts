@@ -165,13 +165,11 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   };
   const itemMedia = safeJson(item.media);
   const itemExtra = safeJson(item.extra);
-  // GH/PH 抽第一张可用图作为海报媒体；fetch + base64 嵌入 SVG（resvg 不主动 fetch）
-  const mediaInfo = await pickPosterMedia(
-    String(item.source_type || ''),
-    itemExtra,
-    itemMedia,
-    request,
-  );
+  const sourceType = String(item.source_type || '');
+  // GH/PH/X 抽第一张可用图作为海报媒体（fetch + base64 嵌 SVG）
+  const mediaInfo = await pickPosterMedia(sourceType, itemExtra, itemMedia, request, env);
+  // GH owner 头像 / PH 产品 logo（X 暂不抓推文作者头像 — scraper 没存）
+  const authorAvatarDataUri = await pickAuthorAvatar(sourceType, rel.item_id, itemMedia, request, env);
   const posterItem = {
     id: rel.item_id,
     source_type: String(item.source_type || ''),
@@ -184,6 +182,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     extra: itemExtra,
     mediaImageDataUri: mediaInfo?.dataUri,
     mediaAspectRatio: mediaInfo?.aspectRatio,
+    authorAvatarDataUri,
   };
   // ─── 拉分享人真实信息 ─────────────────────────────────
   // from_uid 查 users 表拿 display_name + avatar_url；display_name 缺失留给
@@ -280,6 +279,36 @@ function defaultAvatarPath(userId: string): string {
   return `/avatars/avatar-${n}.png`;
 }
 
+// 选作者/项目头像（海报左上 logo 位置）：
+// - GH = `https://github.com/<owner>.png`（GitHub 公开 endpoint，免登录）
+// - PH = media JSON 中 role=logo 那张
+// - X = 没数据，返回 undefined（落 hash 色块 + 首字母 fallback）
+async function pickAuthorAvatar(
+  sourceType: string,
+  itemId: string,
+  media: unknown,
+  request: Request,
+  env: Env,
+): Promise<string | undefined> {
+  let url: string | undefined;
+  if (sourceType === 'github') {
+    // itemId 形如 'github:owner/repo'
+    const m = itemId.match(/^github:([^/]+)\//);
+    if (m) {
+      url = `https://github.com/${m[1]}.png?size=256`;
+    }
+  } else if (sourceType === 'product_hunt') {
+    if (Array.isArray(media)) {
+      const arr = media as Array<{ type?: string; url?: string; role?: string }>;
+      const logo = arr.find(x => x?.role === 'logo' && typeof x.url === 'string');
+      if (logo?.url) url = logo.url;
+    }
+  }
+  if (!url) return undefined;
+  const result = await tryFetchPosterImage(url, request, env);
+  return result?.dataUri;
+}
+
 // 选海报媒体图：GH 抽 readme_excerpt 全部非 SVG <img>，PH 抽 media JSON gallery；
 // 顺序 fetch 每张做质量门控，第一张通过的用作海报媒体。
 // 门控：
@@ -291,6 +320,7 @@ async function pickPosterMedia(
   extra: Record<string, unknown> | null,
   media: unknown,
   request: Request,
+  env: Env,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   // candidate 可带 known dims（X media 已提供 w/h，避免 fetch 后再探）
   const candidates: Array<{ url: string; width?: number; height?: number }> = [];
@@ -298,10 +328,15 @@ async function pickPosterMedia(
   if (sourceType === 'github') {
     const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
     if (readme) {
-      const re = /<img[^>]*\bsrc="([^"]+\.(?:png|jpg|jpeg|gif|webp))"/gi;
+      // 接受所有 <img src="...">，但跳过 .svg（多是 shields/badges）
+      // GitHub user-attachments URL 不带扩展名（github.com/user-attachments/assets/<uuid>）
+      // 也要纳入候选，让质量门控判断
+      const re = /<img[^>]*\bsrc="([^"]+)"/gi;
       let m;
       while ((m = re.exec(readme)) !== null) {
-        candidates.push({ url: m[1] });
+        const u = m[1];
+        if (/\.svg(\?|$)/i.test(u)) continue;
+        candidates.push({ url: u });
         if (candidates.length >= 8) break;
       }
     }
@@ -338,7 +373,7 @@ async function pickPosterMedia(
         continue;
       }
     }
-    const result = await tryFetchPosterImage(c.url, request, c.width, c.height);
+    const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height);
     if (result) return result;
   }
   return undefined;
@@ -347,14 +382,39 @@ async function pickPosterMedia(
 async function tryFetchPosterImage(
   rawUrl: string,
   request: Request,
+  env: Env,
   knownW?: number,
   knownH?: number,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
+  // /r/* 资源在 R2：直接读 R2 binding，绕过 worker self-fetch（prod 上 self-fetch
+  // 自己暴露的 /r/ 路由会再次进 worker，cold path 时延 + 偶发 504）
+  if (rawUrl.startsWith('/r/')) {
+    if (env.READMES) {
+      const key = rawUrl.slice(3); // strip '/r/'
+      try {
+        const obj = await env.READMES.get(key);
+        if (!obj) {
+          console.log(`[share-poster] R2 miss: ${key}`);
+          return undefined;
+        }
+        const buf = await obj.arrayBuffer();
+        if (buf.byteLength > 4 * 1024 * 1024) {
+          console.log(`[share-poster] R2 too big: ${key} ${buf.byteLength}`);
+          return undefined;
+        }
+        const ct = obj.httpMetadata?.contentType || 'image/png';
+        return validateAndEncode(buf, ct, rawUrl, knownW, knownH);
+      } catch (e) {
+        console.error('[share-poster] R2 read failed:', key, e);
+        return undefined;
+      }
+    }
+    // 非 prod 环境（staging worker 没 mirror R2 资源）兜底走 prod fetch
+    rawUrl = 'https://api.ai-feeds.com' + rawUrl;
+  }
+
   let url = rawUrl;
-  // /r/* immutable hash 资源永远拉 prod（staging R2 不 mirror）
-  if (url.startsWith('/r/')) {
-    url = 'https://api.ai-feeds.com' + url;
-  } else if (url.startsWith('/')) {
+  if (url.startsWith('/')) {
     const { api } = originsFor(request);
     url = api + url;
   }
@@ -377,39 +437,50 @@ async function tryFetchPosterImage(
       cf: { cacheTtl: 86400, cacheEverything: true },
       headers: { 'User-Agent': 'ai-feeds-poster-renderer/1.0' },
     });
-    if (!res.ok) return undefined;
+    if (!res.ok) {
+      console.log(`[share-poster] fetch ${url} → ${res.status}`);
+      return undefined;
+    }
     const ct = res.headers.get('content-type') || 'image/png';
     const buf = await res.arrayBuffer();
-    if (buf.byteLength > 4 * 1024 * 1024) return undefined;
-
-    // 质量门控（仅 PNG 能从字节流读维度；非 PNG 走通）
-    const dim = probePngDimensions(buf);
-    if (dim) {
-      const ar = dim.width / dim.height;
-      // 1) 极端长条 banner 才弃：aspect > 4（如 wordmark logo / hero）或 < 0.25（极竖）
-      // 架构图 / schema 图常见 aspect 2.5-3.5，需保留
-      if (ar > 4 || ar < 0.25) {
-        console.log(`[share-poster] reject ${rawUrl}: aspect ${ar.toFixed(2)}`);
-        return undefined;
-      }
-      // 2) 字节密度阈值 < 0.05：只弃近乎空白的图（如大画布上的小 icon、shields 类）
-      // 架构图 / 流程图 / schema 多在 0.08-0.20，需保留；真正纯色 logo 多 < 0.05
-      const density = buf.byteLength / (dim.width * dim.height);
-      if (density < 0.05) {
-        console.log(`[share-poster] reject ${rawUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
-        return undefined;
-      }
-    }
-    const b64 = arrayBufferToBase64(buf);
-    // aspect 优先：PNG IHDR 探出来 > 外部传入 > undefined
-    const aspectRatio = dim
-      ? dim.width / dim.height
-      : (knownW && knownH ? knownW / knownH : undefined);
-    return { dataUri: `data:${ct};base64,${b64}`, aspectRatio };
+    return validateAndEncode(buf, ct, rawUrl, knownW, knownH);
   } catch (e) {
     console.error('[share-poster] media fetch failed:', rawUrl, e);
     return undefined;
   }
+}
+
+// 共用质量门控 + base64 编码：fetch 路径 / R2 路径都走这个
+function validateAndEncode(
+  buf: ArrayBuffer,
+  contentType: string,
+  origUrl: string,
+  knownW?: number,
+  knownH?: number,
+): { dataUri: string; aspectRatio?: number } | undefined {
+  if (buf.byteLength > 4 * 1024 * 1024) {
+    console.log(`[share-poster] reject ${origUrl}: too big ${buf.byteLength}`);
+    return undefined;
+  }
+  // 质量门控（仅 PNG 能从字节流读维度；非 PNG 走通）
+  const dim = probePngDimensions(buf);
+  if (dim) {
+    const ar = dim.width / dim.height;
+    if (ar > 4 || ar < 0.25) {
+      console.log(`[share-poster] reject ${origUrl}: aspect ${ar.toFixed(2)}`);
+      return undefined;
+    }
+    const density = buf.byteLength / (dim.width * dim.height);
+    if (density < 0.05) {
+      console.log(`[share-poster] reject ${origUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
+      return undefined;
+    }
+  }
+  const b64 = arrayBufferToBase64(buf);
+  const aspectRatio = dim
+    ? dim.width / dim.height
+    : (knownW && knownH ? knownW / knownH : undefined);
+  return { dataUri: `data:${contentType};base64,${b64}`, aspectRatio };
 }
 
 // 探 PNG 文件头宽高（IHDR chunk: bytes 16-19=width, 20-23=height）；非 PNG 返回 undefined
