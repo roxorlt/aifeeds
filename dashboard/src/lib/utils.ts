@@ -4,6 +4,27 @@ export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
+// 像 timeAgo，但超过 30 天直接显示 mm-dd（commit 这种"大于一个月"语义不强的字段更友好）
+export function timeAgoOrDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const normalized = iso.includes("T") ? iso : iso.replace(" ", "T");
+  const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
+  const date = new Date(withTz);
+  if (isNaN(date.getTime())) return iso;
+  const diff = Date.now() - date.getTime();
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return "刚刚";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  // 超过 30 天直接 mm-dd（北京时区）
+  const bjt = new Date(date.getTime() + (date.getTimezoneOffset() + 480) * 60 * 1000);
+  return `${String(bjt.getMonth() + 1).padStart(2, "0")}-${String(bjt.getDate()).padStart(2, "0")}`;
+}
+
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "";
   // D1 stores scraped_at as UTC naive string (e.g. "2026-04-21 09:31:22").

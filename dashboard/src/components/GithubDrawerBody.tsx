@@ -6,7 +6,7 @@ import type { Components } from "react-markdown";
 import type { GithubMetrics, Item, ItemExtra, MediaItem } from "../types";
 import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
-import { cn, formatCompact, ordinal, parseJsonField, timeAgo } from "../lib/utils";
+import { cn, formatCompact, ordinal, parseJsonField, timeAgo, timeAgoOrDate } from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
@@ -237,6 +237,9 @@ export function GithubDrawerBody({ item }: Props) {
   // Lightbox state for README images (mirrors X TweetCard behavior).
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
+  // 提交记录折叠（PR6 反馈：默认收起，点击 meta 行的「提交记录」展开）
+  const [showCommits, setShowCommits] = useState(false);
+
   useEffect(() => {
     // Pull metrics_history to surface freshest open_issues / open_prs.
     let cancelled = false;
@@ -333,7 +336,7 @@ export function GithubDrawerBody({ item }: Props) {
           </div>
         )}
 
-        {/* 项目元数据：License / Issues / PRs */}
+        {/* 项目元数据：License / Issues / PRs / 最近提交（点"提交记录"展开列表） */}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-neutral-600">
           {license && (
             <span>License: <span className="font-medium text-neutral-900">{license}</span></span>
@@ -344,47 +347,61 @@ export function GithubDrawerBody({ item }: Props) {
           {openPrs !== undefined && openPrs !== null && (
             <span>PRs: <span className="font-medium text-neutral-900">{openPrs}</span></span>
           )}
+          {recentCommits && recentCommits.length > 0 && recentCommits[0]?.date && (
+            <span>
+              最近提交{" "}
+              <span className="font-medium text-neutral-900">
+                {timeAgoOrDate(recentCommits[0].date)}
+              </span>
+            </span>
+          )}
+          {recentCommits && recentCommits.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowCommits((v) => !v)}
+              className="inline-flex items-center gap-0.5 text-sky-600 hover:text-sky-700 hover:underline"
+              aria-expanded={showCommits}
+            >
+              提交记录
+              <span className="text-[10px]">{showCommits ? "▴" : "▾"}</span>
+            </button>
+          )}
         </div>
 
-        {/* 最近提交（PR6.2）— 数据由 worker enrich/refresh 写到 extra.recent_commits */}
-        {recentCommits && recentCommits.length > 0 && (
-          <div className="mt-4">
-            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
-              最近提交
-            </div>
-            <ul className="space-y-1.5">
-              {recentCommits.map((c) => (
-                <li key={c.sha} className="flex items-start gap-2 text-[12px]">
-                  {c.avatar ? (
-                    <img
-                      src={c.avatar}
-                      alt={c.author}
-                      className="mt-0.5 h-4 w-4 shrink-0 rounded-full bg-neutral-200 object-cover"
-                      onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                    />
-                  ) : (
-                    <span className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-full bg-neutral-200" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <a
-                      href={c.url}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="text-neutral-900 hover:text-neutral-700 hover:underline line-clamp-1 break-all"
-                      title={c.message}
-                    >
-                      {c.message}
-                    </a>
-                    <div className="mt-0.5 text-[11px] text-neutral-500">
-                      <span className="font-mono">{c.sha}</span>
-                      {c.author && <span> · {c.author}</span>}
-                      {c.date && <span> · {timeAgo(c.date)}</span>}
-                    </div>
+        {/* 折叠的 commit 明细列表 */}
+        {showCommits && recentCommits && recentCommits.length > 0 && (
+          <ul className="mt-3 space-y-1.5 border-t border-neutral-100 pt-3">
+            {recentCommits.map((c) => (
+              <li key={c.sha} className="flex items-start gap-2 text-[12px]">
+                {c.avatar ? (
+                  <img
+                    src={c.avatar}
+                    alt={c.author}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded-full bg-neutral-200 object-cover"
+                    onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                  />
+                ) : (
+                  <span className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-full bg-neutral-200" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <a
+                    href={c.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="text-neutral-900 hover:text-neutral-700 hover:underline line-clamp-1 break-all"
+                    title={c.message}
+                  >
+                    {c.message}
+                  </a>
+                  <div className="mt-0.5 text-[11px] text-neutral-500">
+                    <span className="font-mono">{c.sha}</span>
+                    {c.author && <span> · {c.author}</span>}
+                    {c.date && <span> · {timeAgo(c.date)}</span>}
                   </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
 
         {/* contributors */}
