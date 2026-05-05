@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from "react-router";
 import type { Item } from "../types";
 import { fetchItem, ItemNotFoundError } from "../api";
+import { dispatchItemUpdate } from "./itemUpdateBus";
 
 interface DrawerState {
   item: Item | null;
@@ -179,6 +180,8 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         if (cancelled || activeIdRef.current !== id) return;
         setState({ item: fresh.item, siblings: fresh.siblings, loading: false, error: null });
         setSpotlightItem(fresh.item);
+        // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）
+        dispatchItemUpdate(fresh.item);
       } catch {
         // 静默失败
       }
