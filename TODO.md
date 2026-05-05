@@ -16,7 +16,7 @@
 > 1. ~~**PR4 强制登录拦截**~~ ✅ 2026-05-03 上线
 > 2. ~~**staging 环境落地**~~ ✅ 2026-05-03 上线（[操作记录](docs/operations.md#staging-环境-2026-05-03-上线)）
 > 3. ~~**PR5 分享功能**~~ ✅ 2026-05-05 上线 — 5 endpoint + share_relations 表 + Noto SC 字体子集 + resvg-wasm + R2 海报缓存 + dashboard 抽屉分享按钮 + 三变体（X/GH/PH）SVG 模板 + 媒体图质量门控（aspect/density 双闸）+ 移动端 navigator.share 直存相册。**未完成 P2**：landing 回流（点过来的人 to_did/to_uid 回填）；三态分发 UI（PC 已有，移动端微信内提示待完善）。已 ship MVP，迭代留 PR6
-> 4. **PR6 上线加固** — landing 回流（PR5 P2）+ `feat/lazy-enrich-on-drawer`（抽屉打开主动 enrich + 落库）+ 限流参数调优 / admin 看板增强 / 数据备份 launchd / 异常告警分级
+> 4. **PR6 上线加固 + dashboard / 海报数据增强** — landing 回流（PR5 P2）+ `feat/lazy-enrich-on-drawer`（抽屉打开主动 enrich + 落库）+ **PR5 分享海报试用反馈跟进**（GH commit 数据落库 + 抽屉展示 / GH feed 卡片正文 4 行 / PH 卡片改造 4.1-4.4 / PH 抽屉 5.1-5.2 / 视频封面预抓帧落库下方详）+ 限流参数调优 / admin 看板增强 / 数据备份 launchd / 异常告警分级
 > 5. **PR7 收藏 + newsletter** — `favorites` 表 + UI；newsletter = **邮件订阅**（每日/每周摘要发用户邮箱），需新增：user.email 字段 / 模板系统 / Resend 或 Cloudflare Email Workers 发送 / 退订 link / 反垃圾合规
 > 6. 之后：`/admin/analytics` 数据看板、dark mode、enricher daemon 调度优化
 
@@ -48,6 +48,24 @@
     - syndication 全局并发限速（X 反爬触发后惩罚）
     - PH browser fetch 慢（5-10s），抽屉打开时立即返回旧数据 + 后台 enrich，下次抽屉打开看到新值（hybrid lazy）
   - dashboard 侧：拿到 enrich 结果后通过 zustand store 把新 metrics 同步给 feed 卡片（GithubDrawerBody 已有 `setLatestMetrics` 模式可参考）
+- [ ] **PR5 海报试用反馈跟进**（2026-05-05 排，PR6 一起做）
+  - **GH commit 数据落库 + 抽屉展示**：scraper / worker / D1 schema / GithubDrawerBody
+  - **GH feed 卡片正文加高到 4 行**：GithubCard 单文件
+  - **PH feed 卡片改造**（4 项）：
+    - 4.1 第二行排版：日期（去掉 "PT" 前缀）、#排名、分类标签 顺序固定
+    - 4.2 分类标签恢复颜色（PhCard 之前有色现在没了）
+    - 4.3 卡片正文加高到 4 行
+    - 4.4 右下角去掉重复"名次"，把"团队 & Hunter" makers 信息右对齐（`by @张三 等 3 人`，能放头像就放最多 N 个）
+  - **PH 抽屉**（5.1 顺序、5.2 标签颜色）：PhDrawerBody 单文件
+  - **海报视频封面预抓帧（D 方案，跟分享海报相关但要 scraper 改动）**：
+    - 现状：GH `<video>` / X video.twimg / PH 上传视频，海报上没封面只是黑底 + play
+    - 改：scraper 端用 ffmpeg / headless browser 抽视频首帧（避开纯色帧）落 R2 + extra.video_thumbnail
+    - 海报渲染时直接用 `extra.video_thumbnail`（已实现 isVideo+image overlay 流程，差数据源）
+    - 各源策略：
+      - X：`scrapers/_lib` 加 video_thumbnail 抓取（fetch video first 100KB → ffmpeg pipe → JPEG）
+      - GH：`scrapers/github/` 解 readme `<video src>`，按相同方式抽帧
+      - PH：`scrapers/ph/` 已经有 video.poster 字段（YouTube embed thumbnail），上传视频补抽帧
+    - YouTube video 直接用 `https://img.youtube.com/vi/<id>/maxres.jpg` URL（PH 部分已可用）
 - [ ] **metrics 数据完整性**：当前 likes/retweets/replies/views 在全表覆盖率 64-77%，导致部分卡片显示 metric 数 < 4。前端兜底已用「null → "—"」处理（见 frontend-responsive-iteration spec），后端层面要让 enrich daemon 主动回扫缺失字段（特别是 retweets 64% 最低），目标全表 ≥ 95% 覆盖。可在 enricher L0/L1 高频层增一道"补全空字段"扫描
 - [ ] 关键词自学习优化: LEARNED_MIN_HITS 3→8、mid-sentence capitalization only、seed 共现
 
