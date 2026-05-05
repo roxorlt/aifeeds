@@ -359,14 +359,9 @@ export function TweetCard({
             </button>
           )}
 
-          {/* Reply parent (d) — show below body for context, like a footnote */}
-          {replyOf && <QuotedTweet quote={replyOf} />}
-
-          {/* Quoted tweet (nested card) */}
-          {quoteOf && <QuotedTweet quote={quoteOf} />}
-
-          {/* Link preview card (URL auto-expanded by X) */}
-          {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}
+          {/* 顺序（PR6 反馈 #4.3）：A 自身 body → A 自身 media → 引用块 (B/D)。
+              当 A 回复 B 或 C 引用 D 且 A/C 自带图片时，图片应贴在 A/C 正文下方，
+              而不是钻到 B/D 引用块下面。无 reply/quote 时这个顺序也不影响普通推文。 */}
 
           {/* Media — 图 / video 首帧用 <img>/<video poster>，点击进 Lightbox 全屏播 */}
           {firstMedia && !mediaFailed && (
@@ -418,6 +413,15 @@ export function TweetCard({
               )}
             </button>
           )}
+
+          {/* Reply parent (d) — show below A 自身 media，作为上下文脚注 */}
+          {replyOf && <QuotedTweet quote={replyOf} />}
+
+          {/* Quoted tweet (nested card) */}
+          {quoteOf && <QuotedTweet quote={quoteOf} />}
+
+          {/* Link preview card (URL auto-expanded by X) */}
+          {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}
 
           {/* Metrics bar (read-only X-platform data, not interactive) */}
           <div className="mt-2 flex items-center gap-4">

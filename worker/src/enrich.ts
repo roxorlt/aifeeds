@@ -1044,7 +1044,22 @@ export async function runRefreshMetrics(
         m.likes !== undefined ||
         m.bookmarks !== undefined;
       if (hasAny) {
-        await updateMetrics(env, row.id, m);
+        // ⚠️ syndication 当前不返 retweet_count / view_count（X 平台收紧）。
+        // 直接 UPDATE 会把 metrics 整张表覆写，存在 DB 里 scraper DOM 抓
+        // 到的 retweets / views 会被清成 null。merge 旧数据 + 仅覆盖
+        // syndication 实际返回的字段。
+        const oldRow = await env.DB.prepare(
+          `SELECT metrics FROM items WHERE id = ?`,
+        ).bind(row.id).first<{ metrics: string | null }>();
+        let oldMetrics: Record<string, number | undefined> = {};
+        if (oldRow?.metrics) {
+          try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+        }
+        const merged: Metrics = {
+          ...oldMetrics,
+          ...prunedNonUndefined(m as unknown as Record<string, unknown>),
+        } as Metrics;
+        await updateMetrics(env, row.id, merged);
         counts.updated++;
       }
       state.processed_ids.push(tid);
@@ -1207,12 +1222,25 @@ async function applyTieredUpdate(
   nowSec: number,
 ): Promise<void> {
   const nextRefreshAt = intervalSec === null ? null : nowSec + intervalSec;
+  // 同 runRefreshMetrics：syndication 不返 retweets/views，直接覆写会清空
+  // scraper DOM 抓到的旧值。读旧 metrics merge 后写回，仅覆盖本次实际收到的字段。
+  const oldRow = await env.DB.prepare(
+    `SELECT metrics FROM items WHERE id = ?`,
+  ).bind(id).first<{ metrics: string | null }>();
+  let oldMetrics: Record<string, number | undefined> = {};
+  if (oldRow?.metrics) {
+    try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+  }
+  const merged: Metrics = {
+    ...oldMetrics,
+    ...prunedNonUndefined(metrics as unknown as Record<string, unknown>),
+  } as Metrics;
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE items
        SET metrics = ?, tier = ?, last_velocity = ?, next_refresh_at = ?
        WHERE id = ?`,
-    ).bind(JSON.stringify(metrics), tier, velocity, nextRefreshAt, id),
+    ).bind(JSON.stringify(merged), tier, velocity, nextRefreshAt, id),
     env.DB.prepare(
       `INSERT INTO metrics_snapshots
        (item_id, captured_at, likes, retweets, replies, bookmarks, views)
