@@ -60,7 +60,12 @@ export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose
       .catch((err) => {
         // 若 itemId 已切换（dialog 关 / 切到别的 item），不再 setStage，避免污染新状态
         if (triggeredRef.current !== requestedItemId) return;
-        setErrMsg(err instanceof Error ? err.message : "创建失败");
+        // 区分网络错误 vs 业务错误：fetch 抛 TypeError "Failed to fetch" 时给中文提示
+        const raw = err instanceof Error ? err.message : "";
+        const friendly = err instanceof TypeError || /Failed to fetch|NetworkError/i.test(raw)
+          ? "网络异常，请检查网络后重试"
+          : (raw || "创建失败");
+        setErrMsg(friendly);
         setStage("error");
       });
   }, [open, itemId, cachedShare, onShareCreated]);
