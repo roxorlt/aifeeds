@@ -182,7 +182,7 @@ export function GithubCard({ item }: Props) {
               <p
                 className={cn(
                   "mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words",
-                  !expanded && "line-clamp-3",
+                  !expanded && "line-clamp-4",
                 )}
               >
                 {summary}

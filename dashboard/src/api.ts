@@ -35,6 +35,11 @@ export const API_BASE = (() => {
     if (host === "localhost" || host === "127.0.0.1") {
       return "";
     }
+    // Staging dashboard 必须打 staging worker，否则线上 prod 没有最新 endpoint
+    // 时（例如 PR 部署的新接口）会全线 404
+    if (host === "staging.ai-feeds.com" || host.endsWith(".xlist-dashboard-staging.pages.dev")) {
+      return "https://staging-api.ai-feeds.com";
+    }
   }
   return "https://api.ai-feeds.com";
 })();
@@ -169,6 +174,22 @@ export async function fetchItem(id: string): Promise<ItemDetailResponse> {
   const res = await apiFetch(path);
   if (res.status === 404) throw new ItemNotFoundError(id);
   if (!res.ok) throw new Error(`fetchItem failed: ${res.status}`);
+  return res.json();
+}
+
+// PR6.6 on-demand refresh — drawer 打开时调一次。worker 端 KV throttle 5min。
+// reason: throttled / unsupported_source / item_not_found / fetch_failed / success
+export interface RefreshItemResponse {
+  refreshed: boolean;
+  source_type: string;
+  reason?: 'throttled' | 'unsupported_source' | 'item_not_found' | 'fetch_failed' | 'success';
+  metrics?: Record<string, number | null | undefined>;
+}
+
+export async function refreshItem(id: string): Promise<RefreshItemResponse> {
+  const path = `/api/items/${encodeURIComponent(id)}/refresh`;
+  const res = await apiFetch(path, { method: 'POST' });
+  if (!res.ok) return { refreshed: false, source_type: 'unknown', reason: 'fetch_failed' };
   return res.json();
 }
 

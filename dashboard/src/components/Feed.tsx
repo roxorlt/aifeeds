@@ -21,6 +21,7 @@ import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
 import { useDrawer } from "../lib/drawer";
+import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
 
 interface Props {
@@ -158,6 +159,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const isDraggingRef = useRef(false);
 
   const isHot = sortMode === "hot";
+
+  // 订阅 drawer 单条更新：抽屉打开触发的 lazy-enrich 拿到 fresh.item 后，
+  // 把 feed 列表里同 id 的那张卡片也替换掉，避免抽屉新 / feed 老。
+  useEffect(() => {
+    return subscribeItemUpdate((updated) => {
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+      setPending((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+    });
+  }, []);
 
   // Initial load + refresh on tick or sort change
   useEffect(() => {

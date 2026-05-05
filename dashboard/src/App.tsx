@@ -8,7 +8,7 @@ import { DrawerProvider } from "./lib/drawer";
 const TweetDrawer = lazy(() =>
   import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
 );
-import { fetchSources, fetchStats, TRACK_ENDPOINT } from "./api";
+import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
@@ -16,7 +16,7 @@ import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
-import { Routes, Route } from "react-router";
+import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { LoginModal } from "./components/LoginModal";
 import { Toast } from "./components/Toast";
@@ -149,6 +149,25 @@ function DashboardHome() {
     track(EVENTS.PAGE_VIEW, {
       path: window.location.pathname + window.location.search,
     });
+    // PR5 landing 回流：从 /s/:token redirect 过来时 worker 加了
+    // ?ref=share&token=<token>&from=<uid>，前端拿到 token 上报 landing
+    // 让 worker 把当前 device_id 写入 share_relations.to_did + landed_at
+    // 同 token 上报一次后从 sessionStorage 标记，避免刷新页面重复上报
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get('ref');
+    const token = params.get('token');
+    if (ref === 'share' && token) {
+      const flagKey = `share_landing_reported:${token}`;
+      try {
+        if (!sessionStorage.getItem(flagKey)) {
+          import('./lib/share').then(({ reportLanding }) => reportLanding(token));
+          sessionStorage.setItem(flagKey, '1');
+        }
+      } catch {
+        // sessionStorage unavailable (incognito iOS Safari) → 直接上报，不去重
+        import('./lib/share').then(({ reportLanding }) => reportLanding(token));
+      }
+    }
   }, []);
 
   // Derive which source types have live data
@@ -318,6 +337,23 @@ function DashboardHome() {
   );
 }
 
+// /s/:token — 兼容老海报：QR 码原本指向 site 域，CF Pages 没这路由，
+// 这里 client-side 直接 location.replace 到 worker /s/:token，让 worker
+// 处理 share_relations + redirect 到详情页。新海报 QR 直接指 worker，不走这。
+function ShareLanding() {
+  const { token } = useParams<{ token: string }>();
+  useEffect(() => {
+    if (!token) return;
+    const target = `${API_BASE || 'https://api.ai-feeds.com'}/s/${encodeURIComponent(token)}`;
+    window.location.replace(target);
+  }, [token]);
+  return (
+    <div className="flex h-screen items-center justify-center text-sm text-neutral-500">
+      正在打开分享内容…
+    </div>
+  );
+}
+
 function App() {
   const hydrate = useAuthStore((s) => s.hydrate);
   const hydrated = useAuthStore((s) => s.hydrated);
@@ -336,6 +372,7 @@ function App() {
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
         <Route path="/ph/:slug/:date" element={<DashboardHome />} />
+        <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
       </Routes>

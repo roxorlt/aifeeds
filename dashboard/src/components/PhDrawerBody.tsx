@@ -47,6 +47,22 @@ function aiCategoryLabel(slug: string): string {
     .replace(/^Ai /, "AI ");
 }
 
+// PH 分类彩色 chip（跟 PhCard 保持一致）
+const PH_CATEGORY_STYLE: Record<string, string> = {
+  ai_agent: "bg-violet-100 text-violet-700",
+  ai_code_editor: "bg-blue-100 text-blue-700",
+  ai_image_gen: "bg-rose-100 text-rose-700",
+  ai_audio: "bg-amber-100 text-amber-700",
+  ai_voice_agent: "bg-orange-100 text-orange-700",
+  ai_data_analysis: "bg-emerald-100 text-emerald-700",
+  ai_other: "bg-neutral-100 text-neutral-700",
+};
+
+function phCategoryStyle(cat: string | undefined): string {
+  if (!cat) return "bg-neutral-100 text-neutral-700";
+  return PH_CATEGORY_STYLE[cat] || "bg-neutral-100 text-neutral-700";
+}
+
 const PRICING_LABEL: Record<string, string> = {
   free: "Free",
   free_options: "Freemium",
@@ -180,22 +196,23 @@ export function PhDrawerBody({ item }: Props) {
               <span className="text-[17px] font-bold leading-tight text-neutral-900 break-words">
                 {name}
               </span>
-              {dailyRank !== undefined && (
-                <span className="shrink-0 text-[13px] font-medium text-neutral-500 tabular-nums">
-                  · #{dailyRank}
-                </span>
-              )}
             </div>
             {/* tagline 用译文（若有），原文小字辅助 */}
             <div className="mt-0.5 text-[14px] text-neutral-700">
               {taglineTranslated || tagline}
             </div>
-            {/* meta line：date + category chip */}
+            {/* meta line：日期(无 PT) / #排名 / 分类标签（彩色 chip） */}
             <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
-              {launchDate && <span className="tabular-nums">{launchDate} PT</span>}
-              {launchDate && aiCategoryText && <span className="text-neutral-400">·</span>}
+              {launchDate && <span className="tabular-nums">{launchDate}</span>}
+              {launchDate && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
+              {dailyRank !== undefined && (
+                <span className="tabular-nums" title={`PH 当日榜第 ${dailyRank} 名`}>
+                  #{dailyRank}
+                </span>
+              )}
+              {(launchDate || dailyRank !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
               {aiCategoryText && (
-                <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${phCategoryStyle(aiCategory)}`}>
                   {aiCategoryText}
                 </span>
               )}

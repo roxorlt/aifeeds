@@ -229,6 +229,105 @@ export function apiToMetrics(data: Record<string, unknown>): Metrics {
   };
 }
 
+// ─── 单 item on-demand refresh（drawer 打开时调用） ─────────────
+// PR6.6 lazy-enrich-on-drawer：不是 cron 全表轮询，而是用户点开抽屉时立即刷新这一条。
+// 三源策略：
+//   - x_list：syndication API 拉 metrics + quote_of + link_card（1-3s）
+//   - github：GitHub REST API 拉 stars/forks/watchers/issues/PRs/contributors（<1s）
+//   - product_hunt：留到下次 PR（CF Browser binding 5-10s）
+//
+// 节流：KV 存 last_refreshed_at，60s 内同 item 只刷一次（短到允许"关掉再开"，
+// 长到避免单条疯狂刷）。
+// 失败：返回旧数据 + 不写 KV（下次能重试）。
+
+const REFRESH_THROTTLE_KEY_PREFIX = 'item-refresh-throttle:';
+const REFRESH_THROTTLE_TTL = 60; // 60s — 短到允许"关掉再开"看到新数据，长到避免单条疯狂刷
+
+export interface SingleItemRefreshResult {
+  refreshed: boolean;
+  source_type: string;
+  reason?: 'throttled' | 'unsupported_source' | 'item_not_found' | 'fetch_failed' | 'success';
+  metrics?: Metrics | Record<string, number | string | null>;
+}
+
+// 去掉 undefined 字段（JSON.stringify 也会 drop，但 spread 时 undefined 还是会
+// 覆盖前面对象的同名字段 — 显式过滤一下避免误操作）
+function prunedNonUndefined<T extends Record<string, unknown>>(o: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const k in o) {
+    if (o[k] !== undefined) out[k] = o[k];
+  }
+  return out;
+}
+
+export async function refreshSingleItem(
+  env: EnrichEnv & { AUTH_KV?: KVNamespace; GITHUB_TOKEN?: string },
+  itemId: string,
+): Promise<SingleItemRefreshResult> {
+  // 1. throttle check（KV，5min 内不重刷）
+  if (env.AUTH_KV) {
+    const ttlKey = REFRESH_THROTTLE_KEY_PREFIX + itemId;
+    const last = await env.AUTH_KV.get(ttlKey);
+    if (last) {
+      return { refreshed: false, source_type: 'unknown', reason: 'throttled' };
+    }
+  }
+
+  // 2. 查 item，识别 source_type + source_id
+  const item = await env.DB.prepare(
+    `SELECT id, source_type, source_id FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ id: string; source_type: string; source_id: string }>();
+  if (!item) {
+    return { refreshed: false, source_type: 'unknown', reason: 'item_not_found' };
+  }
+
+  // 3. 按 source_type 分发（目前只 X 走 syndication）
+  if (item.source_type === 'x_list') {
+    const r = await fetchTweet(item.source_id);
+    if (!r || r.notFound || !r.data) {
+      return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
+    }
+    // ⚠️ X syndication 当前已不返 retweet_count / view_count（平台隐私收紧）
+    // apiToMetrics 这两个字段是 undefined，JSON.stringify 后 drop 掉，导致直接
+    // UPDATE 会清掉 D1 里旧的 retweets / views 数据 → 永远显示「—」
+    // 修：merge 旧 metrics，仅覆盖 syndication 实际返回的字段
+    const newPart = apiToMetrics(r.data);
+    const oldRow = await env.DB.prepare(
+      `SELECT metrics FROM items WHERE id = ?`,
+    ).bind(item.id).first<{ metrics: string | null }>();
+    let oldMetrics: Record<string, number | undefined> = {};
+    if (oldRow?.metrics) {
+      try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+    }
+    const merged: Metrics = { ...oldMetrics, ...prunedNonUndefined(newPart as unknown as Record<string, unknown>) } as Metrics;
+    await updateMetrics(env, item.id, merged);
+    // 写 throttle key
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: merged };
+  }
+
+  if (item.source_type === 'github') {
+    const { refreshGithubItem } = await import('./github');
+    const r = await refreshGithubItem(env, item.id, item.source_id);
+    if (!r) {
+      return { refreshed: false, source_type: 'github', reason: 'fetch_failed' };
+    }
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'github', reason: 'success', metrics: r.metrics };
+  }
+
+  // PH 暂留下个 PR（需要 CF Browser binding）
+  return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
+}
+
 // ─── State persistence via enrich_state table ──────────────────
 export interface EnrichState {
   processed_ids: string[];

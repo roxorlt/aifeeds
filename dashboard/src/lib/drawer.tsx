@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from "react-router";
 import type { Item } from "../types";
 import { fetchItem, ItemNotFoundError } from "../api";
+import { dispatchItemUpdate } from "./itemUpdateBus";
 
 interface DrawerState {
   item: Item | null;
@@ -155,6 +156,38 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         setState({ item: null, siblings: [], loading: false, error: code });
       });
   }, [location.pathname]);
+
+  // PR6.6 lazy enrich：drawer 上的 item 变化时立即触发 on-demand refresh（X syndication）
+  // 用单独的 useEffect 监听 state.item?.id，覆盖三种打开方式：
+  // (1) URL 直接访问 → URL useEffect 跑 fetchItem → state 设置
+  // (2) openTweet/openItem (点卡片，optimistic) → state 立即设置，URL useEffect 因
+  //     activeIdRef 已被预设而 early return，不会跑 fetchItem
+  // 两种情况下，state.item 都更新到新 id，这个 useEffect 都会触发
+  // worker 端 KV 5min throttle，重复打开不会重复 syndication 调用
+  useEffect(() => {
+    const id = state.item?.id;
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { refreshItem } = await import("../api");
+        const r = await refreshItem(id);
+        if (cancelled || !r.refreshed) return;
+        // 等 worker 写完 D1（~100ms），再拉新数据
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        if (cancelled || activeIdRef.current !== id) return;
+        const fresh = await fetchItem(id);
+        if (cancelled || activeIdRef.current !== id) return;
+        setState({ item: fresh.item, siblings: fresh.siblings, loading: false, error: null });
+        setSpotlightItem(fresh.item);
+        // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）
+        dispatchItemUpdate(fresh.item);
+      } catch {
+        // 静默失败
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [state.item?.id]);
 
   return (
     <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem }}>

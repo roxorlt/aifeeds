@@ -71,7 +71,7 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
   const { site, api } = originsFor(request);
   const response: CreateShareResponse = {
     token,
-    share_url: `${site}/s/${token}`,
+    share_url: `${api}/s/${token}`,
     poster_url: `${api}/api/share/poster/${token}`,
     expires_at: now + 30 * 24 * 3600 * 1000, // 30 天（用于前端 hint，实际不强制 expire token）
   };
@@ -203,10 +203,10 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
 
   const { renderShareSvg } = await import('./svg-template');
   const { renderSvgToPng } = await import('./poster');
-  const { site } = originsFor(request);
+  const { api } = originsFor(request);
   const svg = await renderShareSvg(posterItem, {
     token,
-    shareUrl: `${site}/s/${token}`,
+    shareUrl: `${api}/s/${token}`,
     sharerSeed: rel.from_uid,
     sharerName,
     sharerAvatarDataUri,
@@ -374,6 +374,15 @@ async function fetchAvatarOnly(rawUrl: string, env: Env): Promise<string | undef
 //   1. 宽高比 > 2 或 < 0.5 → banner / 长条，弃
 //   2. 字节密度（file_size / pixel_count）< 0.18 → 大块纯色低信息，弃
 // 最多探 5 张，避免拖慢 cold render。
+// 从 X video URL 推算 poster URL（X 公开 URL pattern）
+// https://video.twimg.com/tweet_video/<ID>.mp4 → https://pbs.twimg.com/tweet_video_thumb/<ID>.jpg
+// amp_video_iframe / ext_tw_video 等其他 pattern 暂不支持（少见）
+function twimgVideoPoster(videoUrl: string): string | undefined {
+  const m = videoUrl.match(/video\.twimg\.com\/tweet_video\/([^.?]+)\.mp4/);
+  if (m) return `https://pbs.twimg.com/tweet_video_thumb/${m[1]}.jpg`;
+  return undefined;
+}
+
 async function pickPosterMedia(
   sourceType: string,
   extra: Record<string, unknown> | null,
@@ -408,7 +417,7 @@ async function pickPosterMedia(
     }
   } else if (sourceType === 'product_hunt') {
     if (Array.isArray(media)) {
-      const arr = media as Array<{ type?: string; url?: string; role?: string; poster?: string }>;
+      const arr = media as Array<{ type?: string; url?: string; role?: string; poster?: string; video_id?: string; platform?: string }>;
       // 先 gallery image
       for (const x of arr) {
         if (typeof x?.url === 'string' && x.role !== 'logo' && x.type === 'image') {
@@ -416,22 +425,40 @@ async function pickPosterMedia(
           if (candidates.length >= 8) break;
         }
       }
-      // 再 video（PH 视频带 poster URL，YouTube/上传视频统一处理）
+      // 再 video poster：scraper 存的（如有）/ YouTube 推 maxresdefault.jpg
       for (const x of arr) {
-        if (x?.type === 'video' && typeof x.poster === 'string') {
-          candidates.push({ url: x.poster, isVideo: true });
-          if (candidates.length >= 8) break;
+        if (x?.type === 'video') {
+          let poster: string | undefined = typeof x.poster === 'string' ? x.poster : undefined;
+          if (!poster && x.platform === 'youtube' && x.video_id) {
+            poster = `https://img.youtube.com/vi/${x.video_id}/maxresdefault.jpg`;
+          }
+          if (poster) {
+            candidates.push({ url: poster, isVideo: true });
+            if (candidates.length >= 8) break;
+          }
         }
       }
     }
   } else if (sourceType === 'x_list') {
-    // X media: [{type:'image'|'video', url, width, height, alt}]
+    // X media: [{type:'image'|'video', url, width, height, alt, poster?}]
+    // 视频从 video.twimg.com/tweet_video/<id>.mp4 推 pbs.twimg.com/tweet_video_thumb/<id>.jpg
     if (Array.isArray(media)) {
-      const arr = media as Array<{ type?: string; url?: string; width?: number; height?: number }>;
+      const arr = media as Array<{ type?: string; url?: string; width?: number; height?: number; poster?: string }>;
+      // 先 image
       for (const x of arr) {
         if (x?.type === 'image' && typeof x.url === 'string') {
           candidates.push({ url: x.url, width: x.width, height: x.height });
           if (candidates.length >= 8) break;
+        }
+      }
+      // 再 video poster
+      for (const x of arr) {
+        if (x?.type === 'video' && typeof x.url === 'string') {
+          const poster = (typeof x.poster === 'string' ? x.poster : undefined) || twimgVideoPoster(x.url);
+          if (poster) {
+            candidates.push({ url: poster, width: x.width, height: x.height, isVideo: true });
+            if (candidates.length >= 8) break;
+          }
         }
       }
     }
@@ -447,7 +474,7 @@ async function pickPosterMedia(
         continue;
       }
     }
-    const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height);
+    const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height, c.isVideo);
     if (result) return { ...result, isVideo: c.isVideo };
   }
   // fallback：GH readme 有 <video> 但所有 <img> 都被弃 → 灰底 + play 占位
@@ -467,6 +494,7 @@ async function tryFetchPosterImage(
   env: Env,
   knownW?: number,
   knownH?: number,
+  isVideoPoster?: boolean,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   // /r/* 资源在 R2：直接读 R2 binding，绕过 worker self-fetch（prod 上 self-fetch
   // 自己暴露的 /r/ 路由会再次进 worker，cold path 时延 + 偶发 504）
@@ -485,7 +513,7 @@ async function tryFetchPosterImage(
           return undefined;
         }
         const ct = obj.httpMetadata?.contentType || 'image/png';
-        return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH);
+        return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster);
       } catch (e) {
         console.error('[share-poster] R2 read failed:', key, e);
         return undefined;
@@ -526,7 +554,7 @@ async function tryFetchPosterImage(
     }
     const ct = res.headers.get('content-type') || 'image/png';
     const buf = await res.arrayBuffer();
-    return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH);
+    return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster);
   } catch (e) {
     console.error('[share-poster] media fetch failed:', rawUrl, e);
     return undefined;
@@ -540,6 +568,7 @@ async function maybeConvertAndEncode(
   origUrl: string,
   knownW?: number,
   knownH?: number,
+  isVideoPoster?: boolean,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   // 优先信 magic bytes，不信 R2 metadata / response header（GH user-attachments
   // 跟 R2 mirror 经常 ct 跟实际 bytes 不符 — .png 文件里塞 JPEG 之类的）
@@ -547,7 +576,7 @@ async function maybeConvertAndEncode(
   const isSvg = realType === 'svg' || (!realType && (contentType.includes('svg') || /\.svg(\?|$)/i.test(origUrl)));
   if (!isSvg) {
     const ct = realType ? mimeFor(realType) : contentType;
-    return validateAndEncode(buf, ct, origUrl, knownW, knownH);
+    return validateAndEncode(buf, ct, origUrl, knownW, knownH, isVideoPoster);
   }
   try {
     const svgText = new TextDecoder().decode(new Uint8Array(buf));
@@ -583,12 +612,14 @@ function validateAndEncode(
   origUrl: string,
   knownW?: number,
   knownH?: number,
+  isVideoPoster?: boolean,
 ): { dataUri: string; aspectRatio?: number } | undefined {
   if (buf.byteLength > 4 * 1024 * 1024) {
     console.log(`[share-poster] reject ${origUrl}: too big ${buf.byteLength}`);
     return undefined;
   }
   // 质量门控：PNG / JPEG / GIF 都能读维度；不认识的格式跳过门控
+  // video poster 跳过尺寸门控（X video thumbnail 一般 480×480 / 720×720）
   const dim = probeImageDimensions(buf);
   if (dim) {
     const ar = dim.width / dim.height;
@@ -601,17 +632,18 @@ function validateAndEncode(
       console.log(`[share-poster] reject ${origUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
       return undefined;
     }
-    // 全局最小尺寸：max dim < 600 → 弃（icon、button、shields、wechat 群 QR 都偏小）
-    // 真正的内容图（架构图、截图、产品 hero）通常 > 800 宽
-    const maxDim = Math.max(dim.width, dim.height);
-    if (maxDim < 600) {
-      console.log(`[share-poster] reject ${origUrl}: too small ${dim.width}x${dim.height}`);
-      return undefined;
-    }
-    // 中等尺寸方图额外门控：> 600 但 < 1000 + aspect ~1 也按 icon/QR 处理
-    if (maxDim < 1000 && ar > 0.7 && ar < 1.4) {
-      console.log(`[share-poster] reject ${origUrl}: small square ${dim.width}x${dim.height}`);
-      return undefined;
+    if (!isVideoPoster) {
+      // 全局最小尺寸：max dim < 600 → 弃（icon、button、shields、wechat 群 QR 都偏小）
+      const maxDim = Math.max(dim.width, dim.height);
+      if (maxDim < 600) {
+        console.log(`[share-poster] reject ${origUrl}: too small ${dim.width}x${dim.height}`);
+        return undefined;
+      }
+      // 中等尺寸方图额外门控：> 600 但 < 1000 + aspect ~1 也按 icon/QR 处理
+      if (maxDim < 1000 && ar > 0.7 && ar < 1.4) {
+        console.log(`[share-poster] reject ${origUrl}: small square ${dim.width}x${dim.height}`);
+        return undefined;
+      }
     }
   }
   const b64 = arrayBufferToBase64(buf);
