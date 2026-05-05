@@ -152,16 +152,19 @@ export function PhCard({ item }: Props) {
                 <span className="tabular-nums">{formatCompact(comments)}</span>
               </span>
             )}
-            {/* makers 右对齐：最多 3 个头像 + 文字 */}
+            {/* makers 右对齐：最多 3 个头像 + 文字。
+                ml-auto 把整组推到右；min-w-0 + 内层 truncate 让 by @ 文字在窄屏
+                上能省略号收尾，不会再溢出到卡片外。 */}
             {(visibleMakers.length > 0 || firstHandle) && (
-              <span className="ml-auto flex shrink-0 items-center gap-1.5 text-neutral-500">
+              <span className="ml-auto flex min-w-0 items-center gap-1.5 text-neutral-500">
                 {visibleMakers.length > 0 && (
-                  <span className="flex -space-x-1.5">
-                    {visibleMakers.map((m, i) => (
-                      m.avatar_url ? (
+                  <span className="flex shrink-0 -space-x-1.5">
+                    {visibleMakers.map((m, i) => {
+                      const src = resolveAssetUrl(m.avatar_url);
+                      return src ? (
                         <img
                           key={m.handle || i}
-                          src={m.avatar_url}
+                          src={src}
                           alt={m.name || m.handle || ""}
                           className="h-5 w-5 rounded-full border border-white bg-neutral-200 object-cover"
                           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -171,12 +174,12 @@ export function PhCard({ item }: Props) {
                           key={m.handle || i}
                           className="h-5 w-5 rounded-full border border-white bg-neutral-200"
                         />
-                      )
-                    ))}
+                      );
+                    })}
                   </span>
                 )}
                 {firstHandle && (
-                  <span className="truncate text-[13px]">
+                  <span className="min-w-0 truncate text-[13px]">
                     by @{firstHandle}{makers.length > 1 ? ` 等 ${makers.length} 人` : ""}
                   </span>
                 )}
