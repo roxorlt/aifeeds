@@ -334,6 +334,8 @@ function renderXContent(opts: {
   authorHandle: string;
   body: string;
   metrics?: { replies?: number; retweets?: number; likes?: number; views?: number };
+  mediaImageDataUri?: string;
+  mediaAspectRatio?: number;
 }): { svg: string; height: number } {
   const padX = 36;       // 56→36：让 body 宽度更接近 v7 mockup 期望
   const padTop = 56;
@@ -393,8 +395,24 @@ function renderXContent(opts: {
   }
   cy = engY + engHeight;
 
+  // 有媒体（X 推文图）：engagement 后插入 media block
+  let mediaSvg = '';
+  if (opts.mediaImageDataUri) {
+    const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
+    const mediaH = Math.min(innerW / ar, 520);
+    const mediaW = mediaH * ar;
+    const mediaX = innerX + (innerW - mediaW) / 2;
+    const mediaY = cy + 24;
+    const clipId = `x-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    mediaSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+    cy = mediaY + mediaH;
+  }
+
   const totalH = cy - opts.y + 42; // 42 padding-bottom
-  return { svg: topLine + body + engagementSvg, height: totalH };
+  return { svg: topLine + body + engagementSvg + mediaSvg, height: totalH };
 }
 
 // owner/repo 优先按 / 分两行，再各自截断到 maxChars 字符
@@ -765,6 +783,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
         likes: Number((item.metrics as { likes?: number | string })?.likes) || 0,
         views: Number((item.metrics as { views?: number | string })?.views) || 0,
       },
+      mediaImageDataUri: item.mediaImageDataUri,
+      mediaAspectRatio: item.mediaAspectRatio,
     });
     contentSvg = r.svg;
     contentH = r.height;

@@ -292,14 +292,16 @@ async function pickPosterMedia(
   media: unknown,
   request: Request,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
-  const candidates: string[] = [];
+  // candidate 可带 known dims（X media 已提供 w/h，避免 fetch 后再探）
+  const candidates: Array<{ url: string; width?: number; height?: number }> = [];
+
   if (sourceType === 'github') {
     const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
     if (readme) {
       const re = /<img[^>]*\bsrc="([^"]+\.(?:png|jpg|jpeg|gif|webp))"/gi;
       let m;
       while ((m = re.exec(readme)) !== null) {
-        candidates.push(m[1]);
+        candidates.push({ url: m[1] });
         if (candidates.length >= 8) break;
       }
     }
@@ -308,7 +310,18 @@ async function pickPosterMedia(
       const arr = media as Array<{ type?: string; url?: string; role?: string }>;
       for (const x of arr) {
         if (typeof x?.url === 'string' && x.role !== 'logo' && x.type === 'image') {
-          candidates.push(x.url);
+          candidates.push({ url: x.url });
+          if (candidates.length >= 8) break;
+        }
+      }
+    }
+  } else if (sourceType === 'x_list') {
+    // X media: [{type:'image'|'video', url, width, height, alt}]
+    if (Array.isArray(media)) {
+      const arr = media as Array<{ type?: string; url?: string; width?: number; height?: number }>;
+      for (const x of arr) {
+        if (x?.type === 'image' && typeof x.url === 'string') {
+          candidates.push({ url: x.url, width: x.width, height: x.height });
           if (candidates.length >= 8) break;
         }
       }
@@ -316,7 +329,16 @@ async function pickPosterMedia(
   }
 
   for (let i = 0; i < Math.min(candidates.length, 8); i++) {
-    const result = await tryFetchPosterImage(candidates[i], request);
+    const c = candidates[i];
+    // 已有 known dims：先做 aspect 门控避免无效 fetch
+    if (c.width && c.height) {
+      const ar = c.width / c.height;
+      if (ar > 4 || ar < 0.25) {
+        console.log(`[share-poster] skip ${c.url}: known aspect ${ar.toFixed(2)}`);
+        continue;
+      }
+    }
+    const result = await tryFetchPosterImage(c.url, request, c.width, c.height);
     if (result) return result;
   }
   return undefined;
@@ -325,6 +347,8 @@ async function pickPosterMedia(
 async function tryFetchPosterImage(
   rawUrl: string,
   request: Request,
+  knownW?: number,
+  knownH?: number,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   let url = rawUrl;
   // /r/* immutable hash 资源永远拉 prod（staging R2 不 mirror）
@@ -339,6 +363,12 @@ async function tryFetchPosterImage(
     const u = new URL(url);
     u.searchParams.set('w', '1080');
     u.searchParams.set('fit', 'max');
+    url = u.toString();
+  }
+  // X pbs.twimg.com：把 name=small/120x120 改成 name=large 拿原图，避免缩略图变形
+  if (url.includes('pbs.twimg.com')) {
+    const u = new URL(url);
+    u.searchParams.set('name', 'large');
     url = u.toString();
   }
 
@@ -371,10 +401,11 @@ async function tryFetchPosterImage(
       }
     }
     const b64 = arrayBufferToBase64(buf);
-    return {
-      dataUri: `data:${ct};base64,${b64}`,
-      aspectRatio: dim ? dim.width / dim.height : undefined,
-    };
+    // aspect 优先：PNG IHDR 探出来 > 外部传入 > undefined
+    const aspectRatio = dim
+      ? dim.width / dim.height
+      : (knownW && knownH ? knownW / knownH : undefined);
+    return { dataUri: `data:${ct};base64,${b64}`, aspectRatio };
   } catch (e) {
     console.error('[share-poster] media fetch failed:', rawUrl, e);
     return undefined;
