@@ -227,27 +227,29 @@ function renderHero(sourceLabel: string, sourceChipColor: string): string {
     <text x="${brandX}" y="${brandY + 56 + 42}" font-family='${FONT}' font-size="28" font-weight="600" fill="rgba(255,255,255,0.66)" letter-spacing="1.1">专注 AI 领域资讯聚合</text>`;
 
   // source chip：右上角胶囊 backdrop-blur 半透明
-  // 估宽：「来源 · X」(28+24+24)：约 220 宽
-  // 「来源 · GitHub」：约 290；「来源 · Product Hunt」：约 380
+  // 文字组（"来源" + label）整体在 chip 内左右居中（用 text-anchor middle 避免估宽误差）
   const chipText = sourceLabel;
-  const chipPadX = 32;
+  const chipPadX = 40;
   const chipFontSize = 32;
   const chipPrefixSize = 24;
-  // 估宽：prefix「来源」24*1*2 + gap 14 + label chipFontSize*0.55*ascii 或 *1*chinese
-  const labelWidth = estimateTextWidth(chipText, chipFontSize, 0.85);
+  // 估宽：font-weight 850 ASCII 实际比 normal 宽 ~15%，weight boost 给到 1.0
+  const labelWidth = estimateTextWidth(chipText, chipFontSize, 1.0);
   const prefixWidth = estimateTextWidth('来源', chipPrefixSize, 1);
-  const chipInnerWidth = prefixWidth + 14 + labelWidth;
+  const gap = 14;
+  const chipInnerWidth = prefixWidth + gap + labelWidth;
   const chipWidth = chipPadX * 2 + chipInnerWidth;
   const chipHeight = 76;
   const chipX = 1080 - 70 - chipWidth;
   const chipY = 60 + 20; // 跟 hero-source margin-top:20 对齐
+  // 文字组整体居中：起点 = chipX + (chipWidth - chipInnerWidth)/2 = chipX + chipPadX
+  const groupStartX = chipX + (chipWidth - chipInnerWidth) / 2;
 
   const heroSource = `
     <g>
       <rect x="${chipX}" y="${chipY}" width="${chipWidth}" height="${chipHeight}" rx="${chipHeight / 2}"
             fill="rgba(255,255,255,0.10)" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
-      <text x="${chipX + chipPadX}" y="${chipY + chipHeight / 2 + 9}" font-family='${FONT}' font-size="${chipPrefixSize}" font-weight="600" fill="rgba(255,255,255,0.65)">来源</text>
-      <text x="${chipX + chipPadX + prefixWidth + 14}" y="${chipY + chipHeight / 2 + 11}" font-family='${FONT}' font-size="${chipFontSize}" font-weight="850" fill="${sourceChipColor}">${esc(chipText)}</text>
+      <text x="${groupStartX}" y="${chipY + chipHeight / 2 + 9}" font-family='${FONT}' font-size="${chipPrefixSize}" font-weight="600" fill="rgba(255,255,255,0.65)">来源</text>
+      <text x="${groupStartX + prefixWidth + gap}" y="${chipY + chipHeight / 2 + 11}" font-family='${FONT}' font-size="${chipFontSize}" font-weight="850" fill="${sourceChipColor}">${esc(chipText)}</text>
     </g>`;
 
   return heroBg + heroBrand + heroSource;

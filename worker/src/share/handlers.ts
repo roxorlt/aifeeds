@@ -313,7 +313,7 @@ async function pickAuthorAvatar(
   return await fetchAvatarOnly(url, env);
 }
 
-// 头像专用 fetcher：跳过 media 门控
+// 头像专用 fetcher：跳过 media 门控；但 logo 太小（< 64）也弃，海报上糊
 async function fetchAvatarOnly(rawUrl: string, env: Env): Promise<string | undefined> {
   let url = rawUrl;
   if (url.startsWith('/r/') && env.READMES) {
@@ -330,6 +330,12 @@ async function fetchAvatarOnly(rawUrl: string, env: Env): Promise<string | undef
         const { renderSvgToPng } = await import('./poster');
         const png = new Uint8Array(await renderSvgToPng(svgText));
         return `data:image/png;base64,${arrayBufferToBase64(png.buffer)}`;
+      }
+      // 维度检查：太小（< 64）的 logo 拉伸到 128 会糊，让上层走首字母 fallback
+      const dim = probeImageDimensions(buf);
+      if (dim && Math.max(dim.width, dim.height) < 64) {
+        console.log(`[share-poster] avatar too small ${rawUrl}: ${dim.width}x${dim.height}`);
+        return undefined;
       }
       return `data:${ct};base64,${arrayBufferToBase64(buf)}`;
     } catch (e) {
