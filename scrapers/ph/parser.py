@@ -84,6 +84,70 @@ def _to_int(v: str | None) -> int | None:
     return int(v) if v is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Video — JSON-LD 不暴露视频，在 PH 页内 RSC stream 里塞 GraphQL 风格的
+# Media block（每个 Media 有 __typename / metadata / mediaType / imageUuid 等）。
+# 视频典型形态：
+#   {"__typename":"Media",
+#    "metadata":{"__typename":"MediaMetadata",
+#                "url":"https://youtu.be/<videoId>" | "https://...mp4",
+#                "platform":"youtube" | "vimeo" | null,
+#                "videoId":"<id>" | null,
+#                "thumbnailWidth":null,"thumbnailHeight":null,...},
+#    "mediaType":"video",
+#    "imageUuid":"<uuid>.jpeg",   # → poster: https://ph-files.imgix.net/<uuid>
+#    "originalWidth":200,"originalHeight":113}
+# 同 video 在页面里 mobile/desktop 双渲染会出现两次，按 (url, imageUuid) 去重。
+# ---------------------------------------------------------------------------
+
+# 抓 Media 块：__typename:Media + metadata + mediaType + imageUuid
+# 用 lookahead 抓到 imageUuid 字段就够，metadata 内嵌的 } 不影响（regex 不
+# 需要平衡括号，按字段名分别提）。
+_MEDIA_BLOCK_RE = re.compile(
+    r'"__typename":"Media","metadata":\{[^}]{0,400}\},"id":"\d+","imageUuid":"([^"]+)","mediaType":"(\w+)"'
+)
+_VIDEO_URL_RE = re.compile(r'"url":"([^"]+)","platform":"([^"]*)","videoId":"([^"]*)"')
+
+
+def extract_videos(html: str) -> list[dict[str, Any]]:
+    """从 RSC stream 抓 mediaType=video 的 Media 块。返回去重后的视频列表。
+
+    每个视频 dict 字段：
+      url:       原始 URL（YouTube / Vimeo embed link 或直链 mp4）
+      platform:  "youtube" / "vimeo" / "" (空字符串表示直链 mp4)
+      video_id:  YouTube/Vimeo videoId（platform=youtube/vimeo 时有值）
+      poster_url: PH imgix CDN 的封面图（用 imageUuid 拼）
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _MEDIA_BLOCK_RE.finditer(html):
+        image_uuid = m.group(1)
+        media_type = m.group(2)
+        if media_type != "video":
+            continue
+        # 同 block 内拿 url / platform / videoId
+        block = html[max(0, m.start() - 400):m.end()]
+        url_match = _VIDEO_URL_RE.search(block)
+        if not url_match:
+            continue
+        url = url_match.group(1)
+        platform = url_match.group(2)
+        video_id = url_match.group(3)
+        if not url:
+            continue
+        key = (url, image_uuid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "url": url,
+            "platform": platform,
+            "video_id": video_id,
+            "poster_url": f"https://ph-files.imgix.net/{image_uuid}?auto=format",
+        })
+    return out
+
+
 def extract_categories(html: str) -> list[dict[str, str]]:
     """主产品的 PH 原生 categories。
 
@@ -129,11 +193,13 @@ def parse_product_page(html: str) -> dict[str, Any]:
         })
 
     rating = main.get("aggregateRating") or {}
+    videos = extract_videos(html)
     return {
         "name": main.get("name"),
         "tagline": main.get("description"),
         "image": main.get("image"),
         "screenshots": main.get("screenshot", []),
+        "videos": videos,
         "datePublished": main.get("datePublished"),
         "dateModified": main.get("dateModified"),
         "applicationCategory": main.get("applicationCategory"),

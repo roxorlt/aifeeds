@@ -224,12 +224,18 @@ export function TweetCard({
       .filter((m) => m.type === "image")
       .map((m) => pbsMediaId(m.url)),
   );
-  const images = media.filter(
-    (m) => m.type === "image" && !quotedImageIds.has(pbsMediaId(m.url)),
+  // 同时保留 image 和 video，按 DOM 顺序拼成 lightbox 数据。卡片本身只
+  // 画第一个 media（image / video 都能当封面）；video 走 <video poster
+  // muted preload=metadata>，浏览器自动抓首帧当 poster；卡片不自动播放，
+  // 点击进 Lightbox 才用 controls + autoPlay。
+  const lightboxMedia = media.filter(
+    (m) =>
+      (m.type === "image" || m.type === "video") &&
+      !(m.type === "image" && quotedImageIds.has(pbsMediaId(m.url))),
   );
-  const firstImage = images[0];
-  const imageCount = images.length;
-  const hasVideo = media.some((m) => m.type === "video");
+  const firstMedia = lightboxMedia[0];
+  const mediaCount = lightboxMedia.length;
+  const hasVideo = lightboxMedia.some((m) => m.type === "video");
 
   return (
     <article
@@ -362,8 +368,8 @@ export function TweetCard({
           {/* Link preview card (URL auto-expanded by X) */}
           {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}
 
-          {/* Media */}
-          {firstImage && !mediaFailed && (
+          {/* Media — 图 / video 首帧用 <img>/<video poster>，点击进 Lightbox 全屏播 */}
+          {firstMedia && !mediaFailed && (
             <button
               type="button"
               onClick={(e) => {
@@ -372,19 +378,40 @@ export function TweetCard({
               }}
               className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
             >
-              <img
-                src={proxyImg(firstImage.url)}
-                alt={firstImage.alt || ""}
-                loading="lazy"
-                className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
-                onError={() => setMediaFailed(true)}
-              />
-              {imageCount > 1 && (
-                <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
-                  +{imageCount - 1}
+              {firstMedia.type === "video" ? (
+                <video
+                  src={proxyImg(firstMedia.url)}
+                  poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
+                  preload="metadata"
+                  muted
+                  playsInline
+                  className="aspect-[16/9] w-full bg-black object-cover"
+                  onError={() => setMediaFailed(true)}
+                />
+              ) : (
+                <img
+                  src={proxyImg(firstMedia.url)}
+                  alt={firstMedia.alt || ""}
+                  loading="lazy"
+                  className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
+                  onError={() => setMediaFailed(true)}
+                />
+              )}
+              {/* 视频中央 ▶ 按钮（视觉提示可播放） */}
+              {firstMedia.type === "video" && (
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <span className="flex h-14 w-14 items-center justify-center rounded-full bg-black/55 text-2xl text-white shadow-lg">
+                    ▶
+                  </span>
                 </span>
               )}
-              {hasVideo && (
+              {mediaCount > 1 && (
+                <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+                  +{mediaCount - 1}
+                </span>
+              )}
+              {/* 顶部角标只在 first 是图但里面有 video 时显示（提醒"还有视频"） */}
+              {firstMedia.type === "image" && hasVideo && (
                 <span className="absolute left-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
                   ▶ 视频
                 </span>
@@ -418,9 +445,9 @@ export function TweetCard({
         </div>
       </div>
 
-      {lightboxIndex !== null && images.length > 0 && (
+      {lightboxIndex !== null && lightboxMedia.length > 0 && (
         <Lightbox
-          media={images}
+          media={lightboxMedia}
           startIndex={lightboxIndex}
           onClose={() => setLightboxIndex(null)}
         />

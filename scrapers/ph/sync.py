@@ -70,6 +70,21 @@ def product_to_item(p: dict[str, Any]) -> dict[str, Any]:
         media.append({"type": "image", "url": p["image"], "role": "logo"})
     for s in (p.get("screenshots") or []):
         media.append({"type": "image", "url": s, "role": "gallery"})
+    # Video block — PH 用 YouTube / Vimeo embed 居多，少数是直链 mp4。
+    # platform 字段告诉前端用 <iframe> (embed) 还是 <video> (mp4)；worker
+    # R2 迁移按 platform 跳过 embed（不能下成二进制）。
+    for v in (p.get("videos") or []):
+        url = v.get("url")
+        if not url:
+            continue
+        media.append({
+            "type": "video",
+            "url": url,
+            "role": "gallery",
+            "platform": v.get("platform") or "",  # "" = 直链 mp4
+            "video_id": v.get("video_id") or "",
+            "poster": v.get("poster_url") or None,
+        })
 
     extra = {
         "daily_rank": p.get("_daily_rank"),

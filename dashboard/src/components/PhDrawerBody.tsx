@@ -256,6 +256,30 @@ export function PhDrawerBody({ item }: Props) {
             <div className="flex snap-x snap-mandatory gap-2 px-5">
               {galleryItems.map((m, i) => {
                 const url = resolveAssetUrl(m.url);
+                // PH 视频：embed (YouTube/Vimeo, platform 非空) 用 <iframe>，
+                // 直链 mp4 (platform="") 用 <video>。无 platform 字段（旧
+                // 数据 / X 兼容）默认走 <video>。
+                const mWithPlatform = m as MediaItem & { platform?: string; video_id?: string };
+                const isEmbed = m.type === "video" && !!mWithPlatform.platform;
+                if (isEmbed) {
+                  const vid = mWithPlatform.video_id || "";
+                  const embedUrl =
+                    mWithPlatform.platform === "youtube"
+                      ? `https://www.youtube-nocookie.com/embed/${vid}`
+                      : mWithPlatform.platform === "vimeo"
+                        ? `https://player.vimeo.com/video/${vid}`
+                        : url;
+                  return (
+                    <iframe
+                      key={i}
+                      src={embedUrl}
+                      className="h-44 w-72 shrink-0 snap-start rounded-md border-0 bg-black"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                      title={`Video ${i + 1}`}
+                    />
+                  );
+                }
                 return m.type === "video" ? (
                   <video
                     key={i}

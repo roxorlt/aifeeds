@@ -164,6 +164,10 @@ function collectAssets(
     if (m.role === 'logo') {
       logos.push({ url: m.url, kind: 'logo', maxBytes: IMG_MAX_BYTES });
     } else if (m.type === 'video') {
+      // PH video 大半是 YouTube / Vimeo embed（platform 非空），不能下成
+      // 二进制。只迁直链 mp4（platform=""）。embed 视频靠前端 iframe 渲。
+      const platform = (m as MediaItem & { platform?: string }).platform || '';
+      if (platform) continue;
       videos.push({ url: m.url, kind: 'video', maxBytes: VIDEO_MAX_BYTES });
     } else {
       galleryImages.push({ url: m.url, kind: 'gallery', maxBytes: IMG_MAX_BYTES });
