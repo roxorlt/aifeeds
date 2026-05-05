@@ -356,15 +356,16 @@ async function tryFetchPosterImage(
     const dim = probePngDimensions(buf);
     if (dim) {
       const ar = dim.width / dim.height;
-      // 1) 宽高比检查：> 2（横长条）或 < 0.5（竖长条）→ 弃
-      if (ar > 2 || ar < 0.5) {
+      // 1) 极端长条 banner 才弃：aspect > 4（如 wordmark logo / hero）或 < 0.25（极竖）
+      // 架构图 / schema 图常见 aspect 2.5-3.5，需保留
+      if (ar > 4 || ar < 0.25) {
         console.log(`[share-poster] reject ${rawUrl}: aspect ${ar.toFixed(2)}`);
         return undefined;
       }
-      // 2) 字节密度（粗略反映信息熵）：byte / pixel 太低 = 大块纯色（icon/banner 多为此）
-      // 经验阈值 0.18：内容截图 png 一般 0.5-2.0；icon/纯色 logo 普遍 0.05-0.15
+      // 2) 字节密度阈值 < 0.05：只弃近乎空白的图（如大画布上的小 icon、shields 类）
+      // 架构图 / 流程图 / schema 多在 0.08-0.20，需保留；真正纯色 logo 多 < 0.05
       const density = buf.byteLength / (dim.width * dim.height);
-      if (density < 0.18) {
+      if (density < 0.05) {
         console.log(`[share-poster] reject ${rawUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
         return undefined;
       }
