@@ -114,6 +114,11 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/api/auth/logout` | POST | 撤销当前 session | session token |
 | `/api/auth/logout-all` | POST | 撤销该 user 全部 session | session token |
 | `/api/auth/me` | GET | 返回当前 user（含脱敏 phone） | session token |
+| `/api/share/create` | POST | 生成 share token + 短链 + 海报 url（item_id 在 body） | session（cookie） |
+| `/api/share/poster/:token` | GET | 海报 PNG（首次 SVG → resvg → R2 缓存；后续 R2 HIT 1.4s 内返回） | 无（CORS `*`） |
+| `/s/:token` | GET | 扫码落地：写 to_did + landed_at，302 redirect 到详情页 | 无 |
+| `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
+| `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | HTTP Basic Auth (`ADMIN_USER`/`PASS`) |
 | `/img` | GET | twimg 图片反代（绕 GFW，CF 边缘缓存 7 天） | 无（host 白名单限 pbs/abs/video.twimg.com） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存 | 无（R2 私有，仅 worker 暴露） |
 
@@ -180,6 +185,22 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - fill-translations：~30-48（1 SELECT + 3-12 DeepSeek 初翻 + 最多 3 DeepSeek 重试 + 15 UPDATE；sanity check 触发重试时吃上限）
 - detect-longform：~43-48（1 SELECT + 25 syndication GET + ~17 UPDATE，命中率 ~70% 时贴上限）
 
+**PR5 分享海报**（2026-05-05 上线）：
+- **5 个 endpoint**：`/api/share/create` (POST + cookie auth)、`/api/share/poster/:token` (GET + R2 cache)、`/s/:token` (302 redirect)、`/api/share/landing` (POST + did)、`/api/admin/share/:token` (Basic Auth)
+- **数据表**：`share_relations`（migration `009-share-relations.sql`，prod + staging 都已 apply）
+  - 字段：token / from_uid / item_id / shared_at / to_did / to_uid / landed_at / registered_at / scan_count / last_scanned_at
+  - 4 个索引：token unique / from_uid+time / item+time / to_did
+- **海报渲染管线**：worker SVG 模板 (`worker/src/share/svg-template.ts`，~530 行) → resvg-wasm → PNG → R2 缓存（key: `share/poster/<token>.png` in `xlist-readme-assets` bucket）
+  - 首次 cold render ~3-4s（wasm init + 渲染 + R2 put），HIT 1.4s 内返回，CDN cache `immutable`
+  - 字体：Noto Sans SC Medium 子集（`worker/src/share/assets/noto-sc-medium.woff2`，1MB，覆盖 GB2312 6700+ 字 + ASCII + 标点）
+  - 三变体：X / GitHub / Product Hunt，按 `source_type` 自动分发
+  - 头像：worker 查 users 表拿 display_name + avatar_url，按 dashboard `defaultProfile.ts` 同款 djb2 hash 推 `/avatars/avatar-NN.png` 默认；fetch + base64 嵌入 SVG
+  - 媒体图：GH = readme_excerpt 第一张非 SVG（`/r/*` 永远拉 prod，hash immutable 跨环境安全）；PH = media JSON 第一张 gallery；X = item.media 第一张 image
+  - 质量门控：宽高比 > 4 || < 0.25 弃；字节密度 < 0.05 弃（避免 wordmark hero / shields / 大画布小 icon）
+- **dashboard 接入**：抽屉头部右上角「分享」按钮 + ShareDialog 模态框；未登录 → openLoginModal('manual', retry=setShareOpen(true))；同 itemId 用 drawer 级 shareCache 不重复换 token；移动端调 `navigator.share({files})` 直接保存到相册，PC 走 `<a download>` 下载
+- **CORS**：dashboard fetch poster_url 拿 blob 需要，已加 `Access-Control-Allow-Origin: *`
+- **三环境支持**：handlers `originsFor(request)` 根据 host 推 site/api origin；staging-api → staging.ai-feeds.com / api → ai-feeds.com；不再写死 prod 域名
+
 **翻译质量 sanity check**（2026-04-20 上线，两端一致）：
 - 阈值：`length_ratio < 0.15 or > 2.0`，`CJK_ratio < 20% or >= 99.9%`
 - 命中即重试 1 次；重试后仍 suspect 则保留译文 + 标 `translation_quality='suspect'`
@@ -189,7 +210,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **11 个表**：
+- **12 个表**：
   - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
@@ -202,6 +223,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - `identities`（2026-05-02 PR2 新增）— 登录凭证多对一关联 user。`provider` 枚举 phone/wechat/email；UNIQUE(provider, identity_value, unbound_at) 保证同一凭证同时只能绑定一个 user。详见 § 3.2
   - `sessions`（2026-05-02 PR2 新增）— cookie/bearer 双兼容 token，nanoid 32 字符 id，30 天滑动过期。详见 § 3.3
   - `sms_send_log`（2026-05-02 PR2 新增）— 短信发送日志 + 防刷计数 + 验证码 hash。`result` 枚举 success/rate_limited/turnstile_failed/sms_api_error/budget_capped。30 天 retention cron 待加。详见 § 3.4
+  - `share_relations`（2026-05-04 PR5 新增）— 分享关系图。`token` (nanoid 8) UNIQUE / `from_uid` 分享人 / `item_id` 复合 id / `to_did` 落地浏览器 device_id（首次扫码补） / `to_uid` 落地用户后续注册的 user.id / `landed_at` / `registered_at` / `scan_count` / `last_scanned_at`。4 索引：token / from_uid+time / item+time / to_did。社交关系图基础数据。migration `009-share-relations.sql`
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
