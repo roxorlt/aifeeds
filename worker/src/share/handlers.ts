@@ -98,6 +98,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
         headers: {
           'Content-Type': 'image/png',
           'Cache-Control': 'public, max-age=31536000, immutable',
+          'Access-Control-Allow-Origin': '*', // dashboard fetch (跨域) 取 blob 需要
           'X-Poster-Cache': 'HIT',
           ...(cached.httpEtag ? { ETag: cached.httpEtag } : {}),
         },
@@ -221,6 +222,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     headers: {
       'Content-Type': 'image/png',
       'Cache-Control': noCache ? 'no-store' : 'public, max-age=31536000, immutable',
+      'Access-Control-Allow-Origin': '*', // dashboard fetch (跨域) 取 blob 需要
       'X-Poster-Cache': 'MISS',
     },
   });
