@@ -1,11 +1,9 @@
 import { useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
-import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { cn, formatCompact, ordinal, parseJsonField, timeAgoOrDate } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import {
-  IconIssueOpened,
   IconLeaderboard,
-  IconPullRequest,
   IconRepoForked,
   IconStarFill,
   IconWatching,
@@ -90,6 +88,8 @@ export function GithubCard({ item }: Props) {
   const dateMd = trendingDate ? trendingDate.slice(5) : "";
   const contributorsInline = (extra.contributors_inline as Array<{ login: string; avatar_url: string }>) || [];
   const contributorsCount = (extra.contributors_count as number | null | undefined) ?? null;
+  const recentCommits = (extra.recent_commits as Array<{ date: string }> | null) || null;
+  const lastCommitAgo = recentCommits && recentCommits[0]?.date ? timeAgoOrDate(recentCommits[0].date) : "";
 
   function open() {
     drawer.openItem(item);
@@ -114,6 +114,7 @@ export function GithubCard({ item }: Props) {
               <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
                 {ownerRepo}
               </div>
+              {/* icon 行只保留 lang/stars/forks/watchers — issues/prs/commit 改为下面文字行（与抽屉一致） */}
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
                 {language && (
                   <span className="inline-flex items-center gap-1">
@@ -137,29 +138,9 @@ export function GithubCard({ item }: Props) {
                 )}
                 {watchers !== undefined && <span className="text-neutral-400">·</span>}
                 {watchers !== undefined && (
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
                     <IconWatching className="h-3.5 w-3.5" />
                     {formatCompact(watchers)}
-                  </span>
-                )}
-                {openIssues !== undefined && <span className="text-neutral-400">·</span>}
-                {openIssues !== undefined && (
-                  <span
-                    className="inline-flex cursor-help items-center gap-1"
-                    title={`${openIssues} 个 open issue`}
-                  >
-                    <IconIssueOpened className="h-3.5 w-3.5" />
-                    {formatCompact(openIssues)}
-                  </span>
-                )}
-                {openPrs !== undefined && <span className="text-neutral-400">·</span>}
-                {openPrs !== undefined && (
-                  <span
-                    className="inline-flex cursor-help items-center gap-1"
-                    title={`${openPrs} 个 open PR`}
-                  >
-                    <IconPullRequest className="h-3.5 w-3.5" />
-                    {formatCompact(openPrs)}
                   </span>
                 )}
               </div>
@@ -175,6 +156,33 @@ export function GithubCard({ item }: Props) {
               </span>
             )}
           </div>
+
+          {/* Rank chip — 与抽屉同款（drawer 用 amber 胶囊样式） */}
+          {dailyRank && (
+            <div className="mt-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[12px] text-neutral-700 ring-1 ring-amber-200">
+                {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
+                <IconLeaderboard className="h-3.5 w-3.5 text-amber-500" />
+                <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
+                <span className="text-neutral-500">· GitHub 热榜</span>
+              </span>
+            </div>
+          )}
+
+          {/* 文字 meta 行：Issues / PRs / 最近提交 — 与抽屉一致 */}
+          {(openIssues != null || openPrs != null || lastCommitAgo) && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-neutral-600">
+              {openIssues != null && (
+                <span>Issues: <span className="font-medium text-neutral-900">{openIssues}</span></span>
+              )}
+              {openPrs != null && (
+                <span>PRs: <span className="font-medium text-neutral-900">{openPrs}</span></span>
+              )}
+              {lastCommitAgo && (
+                <span>最近提交 <span className="font-medium text-neutral-900">{lastCommitAgo}</span></span>
+              )}
+            </div>
+          )}
 
           {/* Summary（缩进对齐到标题，跟 X card 推文正文一致字号 15 / 1.45） */}
           {summary && (
@@ -202,47 +210,27 @@ export function GithubCard({ item }: Props) {
             </>
           )}
 
-          {/* Footer 行 */}
-          <div className="mt-3 flex items-center justify-between text-[12px] text-neutral-500">
-            {(dateMd || dailyRank) && (
-          <span
-            className="inline-flex cursor-help items-center gap-1.5"
-            title={
-              dailyRank && dateMd
-                ? `${dateMd.replace("-", " 月 ")} 日 GitHub 热榜第 ${dailyRank} 名`
-                : ""
-            }
-          >
-            {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
-            {dailyRank && (
-              <>
-                <IconLeaderboard className="h-3.5 w-3.5 text-amber-500" />
-                <span className="font-semibold tabular-nums text-neutral-700">
-                  {ordinal(dailyRank)}
+          {/* Footer 行：日期/奖杯已上提到 rank pill；这里只剩 contributors 头像组 */}
+          {contributorsInline.length > 0 && (
+            <div className="mt-3 flex items-center text-[12px] text-neutral-500">
+              <span className="inline-flex items-center gap-2">
+                <span className="flex items-center -space-x-1.5">
+                  {contributorsInline.slice(0, 3).map((c) => (
+                    <img
+                      key={c.login}
+                      src={c.avatar_url}
+                      alt={c.login}
+                      className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
+                      onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                    />
+                  ))}
                 </span>
-              </>
-            )}
-          </span>
-        )}
-        {contributorsInline.length > 0 && (
-          <span className="inline-flex items-center gap-2">
-            <span className="flex items-center -space-x-1.5">
-              {contributorsInline.slice(0, 3).map((c) => (
-                <img
-                  key={c.login}
-                  src={c.avatar_url}
-                  alt={c.login}
-                  className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
-                  onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                />
-              ))}
-            </span>
-            {contributorsCount && contributorsCount > 0 && (
-              <span className="text-neutral-500">{contributorsCount} contributors</span>
-            )}
-          </span>
-        )}
-          </div>
+                {contributorsCount && contributorsCount > 0 && (
+                  <span className="text-neutral-500">{contributorsCount} contributors</span>
+                )}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </article>
