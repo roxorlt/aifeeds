@@ -8,7 +8,7 @@ import { DrawerProvider } from "./lib/drawer";
 const TweetDrawer = lazy(() =>
   import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
 );
-import { fetchSources, fetchStats, TRACK_ENDPOINT } from "./api";
+import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
@@ -16,7 +16,7 @@ import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
-import { Routes, Route } from "react-router";
+import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { LoginModal } from "./components/LoginModal";
 import { Toast } from "./components/Toast";
@@ -337,6 +337,23 @@ function DashboardHome() {
   );
 }
 
+// /s/:token — 兼容老海报：QR 码原本指向 site 域，CF Pages 没这路由，
+// 这里 client-side 直接 location.replace 到 worker /s/:token，让 worker
+// 处理 share_relations + redirect 到详情页。新海报 QR 直接指 worker，不走这。
+function ShareLanding() {
+  const { token } = useParams<{ token: string }>();
+  useEffect(() => {
+    if (!token) return;
+    const target = `${API_BASE || 'https://api.ai-feeds.com'}/s/${encodeURIComponent(token)}`;
+    window.location.replace(target);
+  }, [token]);
+  return (
+    <div className="flex h-screen items-center justify-center text-sm text-neutral-500">
+      正在打开分享内容…
+    </div>
+  );
+}
+
 function App() {
   const hydrate = useAuthStore((s) => s.hydrate);
   const hydrated = useAuthStore((s) => s.hydrated);
@@ -355,6 +372,7 @@ function App() {
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
         <Route path="/ph/:slug/:date" element={<DashboardHome />} />
+        <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
       </Routes>

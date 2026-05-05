@@ -71,7 +71,7 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
   const { site, api } = originsFor(request);
   const response: CreateShareResponse = {
     token,
-    share_url: `${site}/s/${token}`,
+    share_url: `${api}/s/${token}`,
     poster_url: `${api}/api/share/poster/${token}`,
     expires_at: now + 30 * 24 * 3600 * 1000, // 30 天（用于前端 hint，实际不强制 expire token）
   };
@@ -206,7 +206,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   const { site } = originsFor(request);
   const svg = await renderShareSvg(posterItem, {
     token,
-    shareUrl: `${site}/s/${token}`,
+    shareUrl: `${api}/s/${token}`,
     sharerSeed: rel.from_uid,
     sharerName,
     sharerAvatarDataUri,
