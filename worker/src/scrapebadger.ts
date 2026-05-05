@@ -171,3 +171,126 @@ export async function fetchTweetsScrapeBadger(
     durationMs,
   };
 }
+
+// ─── List timeline 抓取（替代本地 chrome 抓取） ──────────────────
+// GET /v1/twitter/lists/{list_id}/tweets?cursor=...
+// 一次 ~20 条 tweet（页大小未文档化，但实测约 20）；带 cursor 可翻页。
+// 调用方决定何时停（典型策略：碰到已经在 DB 里的 ID 就 break，节省 credits）。
+
+const SB_LIST_PATH_PREFIX = '/twitter/lists/'; // /{list_id}/tweets
+
+// 完整 tweet 形状（list 端点和 by-ids 端点字段一致；这里把 by-ids 隐式接口
+// 提升为对外 export，list-poll 路径要用全套字段不止 metrics）。
+export interface SbTweet {
+  id: string;
+  text?: string;
+  full_text?: string;
+  created_at?: string;
+  lang?: string;
+  user_id?: string;
+  username?: string;
+  user_name?: string;
+  user_profile_image_url?: string;
+  user_is_blue_verified?: boolean;
+  user_verified?: boolean;
+  favorite_count?: number;
+  retweet_count?: number;
+  reply_count?: number;
+  quote_count?: number;
+  view_count?: string | number | null;
+  bookmark_count?: number | null;
+  is_quote_status?: boolean;
+  is_retweet?: boolean;
+  conversation_id?: string;
+  in_reply_to_status_id?: string | null;
+  in_reply_to_user_id?: string | null;
+  in_reply_to_screen_name?: string | null;
+  display_text_range?: number[];
+  media?: Array<{
+    media_key?: string;
+    type?: string;
+    url?: string;
+    preview_image_url?: string | null;
+    width?: number | null;
+    height?: number | null;
+  }>;
+  urls?: Array<{ url?: string; expanded_url?: string | null; display_url?: string | null }>;
+  hashtags?: Array<{ text?: string }>;
+  user_mentions?: Array<{ id?: string; username?: string; name?: string }>;
+  quoted_status_id?: string | null;
+  retweeted_status_id?: string | null;
+  has_card?: boolean;
+  thumbnail_url?: string | null;
+  thumbnail_title?: string | null;
+}
+
+interface ScrapeBadgerListPageResponse {
+  data?: SbTweet[];
+  next_cursor?: string | null;
+}
+
+export interface ScrapeBadgerListPageResult {
+  tweets: SbTweet[];
+  nextCursor: string | null;
+  creditsUsed?: number;
+  rateLimitRemaining?: number;
+  durationMs?: number;
+  error?: 'no_key' | 'rate_limit' | 'no_credits' | 'http_error' | 'fetch_failed';
+  status?: number;
+}
+
+export async function fetchListTweetsPage(
+  env: ScrapeBadgerEnv,
+  listId: string,
+  cursor?: string | null,
+): Promise<ScrapeBadgerListPageResult> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { tweets: [], nextCursor: null, error: 'no_key' };
+  }
+  const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+  const url = `${SB_BASE}${SB_LIST_PATH_PREFIX}${encodeURIComponent(listId)}/tweets${qs}`;
+  const t0 = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-api-key': env.SCRAPEBADGER_API_KEY,
+        Accept: 'application/json',
+      },
+    });
+  } catch (e) {
+    console.error('[scrapebadger.list] fetch error:', e);
+    return { tweets: [], nextCursor: null, error: 'fetch_failed', durationMs: Date.now() - t0 };
+  }
+
+  const durationMs = Date.now() - t0;
+  const creditsUsed = Number(res.headers.get('x-credits-used')) || undefined;
+  const rateLimitRemaining = Number(res.headers.get('x-ratelimit-remaining')) || undefined;
+
+  if (res.status === 402) {
+    return { tweets: [], nextCursor: null, error: 'no_credits', status: 402, creditsUsed, rateLimitRemaining, durationMs };
+  }
+  if (res.status === 429) {
+    return { tweets: [], nextCursor: null, error: 'rate_limit', status: 429, creditsUsed, rateLimitRemaining, durationMs };
+  }
+  if (!res.ok) {
+    return { tweets: [], nextCursor: null, error: 'http_error', status: res.status, creditsUsed, rateLimitRemaining, durationMs };
+  }
+
+  let body: ScrapeBadgerListPageResponse;
+  try {
+    body = (await res.json()) as ScrapeBadgerListPageResponse;
+  } catch (e) {
+    console.error('[scrapebadger.list] json parse:', e);
+    return { tweets: [], nextCursor: null, error: 'http_error', status: res.status, creditsUsed, rateLimitRemaining, durationMs };
+  }
+
+  return {
+    tweets: body.data || [],
+    nextCursor: body.next_cursor ?? null,
+    creditsUsed,
+    rateLimitRemaining,
+    durationMs,
+  };
+}

@@ -69,6 +69,8 @@ export interface Env {
   // ScrapeBadger 第三方 X 抓取服务（替代 syndication 拿回 retweet/view 字段）
   // 接 refresh-tiered 路径；缺失时自动回落到 syndication
   SCRAPEBADGER_API_KEY?: string;
+  // List 实验用：list-poll-measure cron 抓哪个 list（默认 1643236611378008066）
+  LIST_POLL_LIST_ID?: string;
   // PR2 auth secrets (上线前用 wrangler secret put 设置)
   TURNSTILE_SECRET_KEY?: string;
   TENCENT_SMS_SECRET_ID?: string;       // 腾讯云 API SecretId
@@ -289,13 +291,14 @@ export default {
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-measure';
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
     else if (minute === 10 || minute === 50) mode = 'detect-longform';
     else if (minute === 5 || minute === 35) mode = 'backfill-replies';
+    else if (minute === 25 || minute === 55) mode = 'list-poll-measure';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -365,6 +368,29 @@ export default {
             console.log(
               `[cron] refresh-metrics(${refreshMode},maxTier=${maxTier}) result:`,
               JSON.stringify(result),
+            );
+            return;
+          }
+          if (mode === 'list-poll-measure') {
+            // ScrapeBadger list-poll 1-day usage 实验：30 min 一次（minute=25/55），
+            // 调一次 SB list endpoint，记录 credits/duration/tweet_count 到 refresh_log
+            // (tier=99 标记)，不写 items 表（避免污染 feed）。1 天后查表分析。
+            const listId = env.LIST_POLL_LIST_ID || '1643236611378008066';
+            const { fetchListTweetsPage } = await import('./scrapebadger');
+            const t0 = Date.now();
+            const r = await fetchListTweetsPage(env, listId, null);
+            const dur = Date.now() - t0;
+            const errors = r.error ? 1 : 0;
+            try {
+              await env.DB.prepare(
+                `INSERT INTO refresh_log (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
+                 VALUES (?, 99, ?, ?, ?, ?)`,
+              ).bind(Math.floor(Date.now() / 1000), r.tweets.length, r.creditsUsed ?? 0, dur, errors).run();
+            } catch (e) {
+              console.error('[list-poll-measure] log insert failed:', e);
+            }
+            console.log(
+              `[cron] list-poll-measure list=${listId} tweets=${r.tweets.length} credits=${r.creditsUsed} rate_remaining=${r.rateLimitRemaining} dur=${dur}ms err=${r.error || 'none'}`,
             );
             return;
           }
@@ -1014,6 +1040,63 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const dryRun = url.searchParams.get('dry_run') !== '0';
     const result = await runReclassifyThreads(env, dryRun);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'list-poll-measure') {
+    // 测量模式：调 SB list endpoint 但不写 D1，仅返回 tweet 形状预览 +
+    // credits_used + rate_limit + first/last tweet IDs。
+    // 用于 1 day usage 实验：验证抓回的 tweets 是否完整、credits 消耗速率，
+    // 之后再决定要不要全量替换本地 chrome scraper。
+    const listId = url.searchParams.get('list_id');
+    if (!listId) return jsonResponse({ error: 'list_id required' }, 400, request, env);
+    const maxPages = Math.min(Math.max(parseInt(url.searchParams.get('max_pages') || '1'), 1), 5);
+    const { fetchListTweetsPage } = await import('./scrapebadger');
+    const pages: Array<{
+      pageIdx: number;
+      tweetCount: number;
+      firstId?: string;
+      lastId?: string;
+      sampleAuthors?: string[];
+      creditsUsed?: number;
+      rateLimitRemaining?: number;
+      durationMs?: number;
+      error?: string;
+      nextCursor?: string | null;
+    }> = [];
+    let cursor: string | null = null;
+    let totalCredits = 0;
+    let totalTweets = 0;
+    for (let i = 0; i < maxPages; i++) {
+      const r = await fetchListTweetsPage(env, listId, cursor);
+      const tids = r.tweets.map((t) => t.id).filter(Boolean);
+      pages.push({
+        pageIdx: i,
+        tweetCount: r.tweets.length,
+        firstId: tids[0],
+        lastId: tids[tids.length - 1],
+        sampleAuthors: Array.from(new Set(r.tweets.slice(0, 5).map((t) => t.username || ''))).filter(Boolean),
+        creditsUsed: r.creditsUsed,
+        rateLimitRemaining: r.rateLimitRemaining,
+        durationMs: r.durationMs,
+        error: r.error,
+        nextCursor: r.nextCursor,
+      });
+      totalCredits += r.creditsUsed || 0;
+      totalTweets += r.tweets.length;
+      if (r.error || !r.nextCursor) break;
+      cursor = r.nextCursor;
+    }
+    return jsonResponse(
+      {
+        mode: 'list-poll-measure',
+        list_id: listId,
+        total_credits: totalCredits,
+        total_tweets: totalTweets,
+        pages,
+      },
+      200,
+      request,
+      env,
+    );
   }
   if (mode === 'fill-translations') {
     const limit = Math.min(
