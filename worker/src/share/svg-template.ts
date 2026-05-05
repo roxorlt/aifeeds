@@ -486,26 +486,6 @@ function truncate(s: string, max: number): string {
   return out;
 }
 
-// 中文相对时间，超过 30 天用 mm-dd（与 dashboard utils.timeAgoOrDate 对齐）
-function gitTimeAgoChinese(iso: string): string {
-  const normalized = iso.includes('T') ? iso : iso.replace(' ', 'T');
-  const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
-  const date = new Date(withTz);
-  if (isNaN(date.getTime())) return iso;
-  const diff = Date.now() - date.getTime();
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return '刚刚';
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} 分钟前`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} 小时前`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day} 天前`;
-  // BJT mm-dd
-  const bjt = new Date(date.getTime() + 8 * 3600 * 1000);
-  return `${String(bjt.getUTCMonth() + 1).padStart(2, '0')}-${String(bjt.getUTCDate()).padStart(2, '0')}`;
-}
-
 function formatStat(n: number | string | undefined | null): string {
   // missing → "—"（跟 dashboard TweetCard / PhDrawerBody isMissing 行为一致），
   // 实际值 0 仍渲为 "0"
@@ -526,7 +506,6 @@ function renderGithubContent(opts: {
   forks: number | string;
   watchers: number | string;
   rankLabel: string;
-  lastCommitAgo?: string;
   contributors?: string;
   body: string;
   mediaImageDataUri?: string;
@@ -643,11 +622,8 @@ function renderGithubContent(opts: {
   const trophyY = metaLineY - trophySize + 5;
   const trophySvg = strokeIcon(TROPHY_PATHS, innerX, trophyY, trophySize, C.trophy, 2.5);
   const rankX = innerX + trophySize + 14;
-  // 排名后接「commit X 天前」(可选)，用 · 分隔
-  const rankFullText = opts.lastCommitAgo
-    ? `${opts.rankLabel} · commit ${opts.lastCommitAgo}`
-    : opts.rankLabel;
-  const rankSvg = `<text x="${rankX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(rankFullText)}</text>`;
+  // rank 行只放 rankLabel（已含 mm-dd 日期），不再带 commit 信息
+  const rankSvg = `<text x="${rankX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(opts.rankLabel)}</text>`;
   let contribSvg = '';
   if (opts.contributors) {
     const contribText = opts.contributors;
@@ -841,10 +817,15 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     const tag = pickGithubTag(item);
     const m = item.metrics || {};
     const extra = item.extra || {};
-    // 提取最近一条 commit 的相对时间（中文）
-    const recentCommits = (extra.recent_commits as Array<{ date?: string }> | undefined) || undefined;
-    const firstCommitDate = recentCommits && recentCommits[0]?.date;
-    const lastCommitAgo = firstCommitDate ? gitTimeAgoChinese(firstCommitDate) : undefined;
+    // rank 行：mm-dd · GitHub 热榜 · ordinal（日期来自 trending_date_str，BJT 当日）
+    const trendingDateStr = (extra.trending_date_str as string | undefined) || '';
+    const rankDateMd = trendingDateStr.length >= 10 ? trendingDateStr.slice(5) : '';
+    const rankOrdinal = extra.daily_rank ? ordinal(Number(extra.daily_rank)) : '';
+    const rankLabelParts: string[] = [];
+    if (rankDateMd) rankLabelParts.push(rankDateMd);
+    rankLabelParts.push('GitHub 热榜');
+    if (rankOrdinal) rankLabelParts.push(rankOrdinal);
+    const rankLabel = rankLabelParts.join(' · ');
     const r = renderGithubContent({
       x: cardX, y: cardY, w: cardW,
       repoFullName: repo,
@@ -852,8 +833,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       stars: (m.stars as number) ?? (m.total_stars as number) ?? 0,
       forks: (m.forks as number) ?? 0,
       watchers: (m.watchers as number) ?? 0,
-      rankLabel: extra.daily_rank ? `GitHub 热榜 ${ordinal(Number(extra.daily_rank))}` : 'GitHub 热榜',
-      lastCommitAgo,
+      rankLabel,
       contributors: extra.contributors_count ? `${extra.contributors_count} contributors` : undefined,
       body: bodyText(item),
       mediaImageDataUri: item.mediaImageDataUri,
