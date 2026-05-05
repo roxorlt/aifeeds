@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField, timeAgoOrDate } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
+import { langDotClass } from "../lib/githubLang";
 import {
   IconLeaderboard,
   IconRepoForked,
@@ -19,28 +20,6 @@ const CATEGORY_STYLE: Record<string, string> = {
   other: "bg-neutral-100 text-neutral-700",
 };
 
-function langDot(lang: string | null | undefined) {
-  if (!lang) return null;
-  // Approx GitHub language colors for the common ones
-  const colors: Record<string, string> = {
-    Python: "bg-blue-400",
-    JavaScript: "bg-yellow-300",
-    TypeScript: "bg-sky-500",
-    Go: "bg-cyan-400",
-    Rust: "bg-orange-500",
-    C: "bg-neutral-400",
-    "C++": "bg-pink-400",
-    Java: "bg-red-500",
-    Ruby: "bg-red-600",
-    Shell: "bg-green-500",
-    Swift: "bg-orange-400",
-    Kotlin: "bg-purple-500",
-    HTML: "bg-orange-300",
-    CSS: "bg-blue-300",
-    Vue: "bg-emerald-400",
-  };
-  return colors[lang] || "bg-neutral-300";
-}
 
 function bjtDateFromIso(isoOrTs: string | number | undefined | null): string {
   if (!isoOrTs) return "";
@@ -129,7 +108,7 @@ export function GithubCard({ item }: Props) {
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
               {language && (
                 <span className="inline-flex items-center gap-1">
-                  <span className={cn("h-2 w-2 rounded-full", langDot(language))} />
+                  <span className={cn("h-2 w-2 rounded-full", langDotClass(language))} />
                   {language}
                 </span>
               )}

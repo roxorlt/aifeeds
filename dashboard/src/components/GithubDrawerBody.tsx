@@ -7,6 +7,7 @@ import type { GithubMetrics, Item, ItemExtra, MediaItem } from "../types";
 import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
 import { cn, formatCompact, ordinal, parseJsonField, timeAgo, timeAgoOrDate } from "../lib/utils";
+import { langDotClass } from "../lib/githubLang";
 import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
@@ -218,6 +219,10 @@ export function GithubDrawerBody({ item }: Props) {
     url: string;
   }> | null) || null;
 
+  const language = ((metrics as Record<string, unknown>).language as string | undefined)
+    || ((extra as unknown as Record<string, unknown>).language as string | undefined)
+    || null;
+
   // Live metrics (latest snapshot) — fall back to metrics column for new items
   const stars = metrics.stars ?? metrics.total_stars;
   const forks = metrics.forks;
@@ -275,7 +280,7 @@ export function GithubDrawerBody({ item }: Props) {
 
   return (
     <div className="text-neutral-900">
-      {/* repo 头部 */}
+      {/* repo 头部 — 布局对齐 GithubCard：标题 + 右上角 rank pill / lang+cat / metrics / meta */}
       <div className="border-b border-neutral-100 p-5">
         <div className="flex items-start gap-3">
           <img
@@ -285,56 +290,73 @@ export function GithubDrawerBody({ item }: Props) {
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
           />
           <div className="min-w-0 flex-1">
-            <div
-              data-drawer-title-anchor
-              className="text-[16px] font-bold leading-tight break-words"
-            >
-              {ownerRepo}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-              {stars !== undefined && (
-                <span className="inline-flex items-center gap-1">
-                  <IconStarFill className="h-3.5 w-3.5" />
-                  {formatCompact(stars)}
-                </span>
-              )}
-              {forks !== undefined && <span className="text-neutral-400">·</span>}
-              {forks !== undefined && (
-                <span className="inline-flex items-center gap-1">
-                  <IconRepoForked className="h-3.5 w-3.5" />
-                  {formatCompact(forks)}
-                </span>
-              )}
-              {watchers !== undefined && <span className="text-neutral-400">·</span>}
-              {watchers !== undefined && (
-                <span className="inline-flex items-center gap-1">
-                  <IconWatching className="h-3.5 w-3.5" />
-                  {formatCompact(watchers)}
+            {/* 第一行：标题 + 右上角 rank pill */}
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div
+                  data-drawer-title-anchor
+                  className="text-[16px] font-bold leading-tight break-words"
+                >
+                  {ownerRepo}
+                </div>
+              </div>
+              {dailyRank && (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-amber-200">
+                  {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
+                  <IconLeaderboard className="h-3 w-3 text-amber-500" />
+                  <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
                 </span>
               )}
             </div>
-          </div>
-          {category && (
-            <span className={cn(
-              "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium",
-              CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
-            )}>
-              {category}
-            </span>
-          )}
-        </div>
 
-        {/* 排名 chip */}
-        {dailyRank && (
-          <div className="mt-3">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[12px] text-neutral-700 ring-1 ring-amber-200">
-              {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
-              <IconLeaderboard className="h-3.5 w-3.5 text-amber-500" />
-              <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
-              <span className="text-neutral-500">· GitHub 热榜</span>
-            </span>
+            {/* 第二行：Lang + Category */}
+            {(language || category) && (
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                {language && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className={cn("h-2 w-2 rounded-full", langDotClass(language))} />
+                    {language}
+                  </span>
+                )}
+                {language && category && <span className="text-neutral-400">·</span>}
+                {category && (
+                  <span className={cn(
+                    "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                    CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
+                  )}>
+                    {category}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* 第三行：stars / forks / watchers */}
+            {(stars !== undefined || forks !== undefined || watchers !== undefined) && (
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                {stars !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconStarFill className="h-3.5 w-3.5" />
+                    {formatCompact(stars)}
+                  </span>
+                )}
+                {forks !== undefined && <span className="text-neutral-400">·</span>}
+                {forks !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconRepoForked className="h-3.5 w-3.5" />
+                    {formatCompact(forks)}
+                  </span>
+                )}
+                {watchers !== undefined && <span className="text-neutral-400">·</span>}
+                {watchers !== undefined && (
+                  <span className="inline-flex items-center gap-1">
+                    <IconWatching className="h-3.5 w-3.5" />
+                    {formatCompact(watchers)}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
-        )}
+        </div>
 
         {/* 项目元数据：License / Issues / PRs / 最近提交（点"提交记录"展开列表） */}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px] text-neutral-600">
