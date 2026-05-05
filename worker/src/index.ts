@@ -37,6 +37,13 @@ import {
   adminCleanupAccount,
   adminDailyCap,
 } from './admin';
+import {
+  handleShareCreate,
+  handleSharePoster,
+  handleShareRedirect,
+  handleShareLanding,
+  handleAdminShareStats,
+} from './share/handlers';
 
 export interface Env {
   DB: D1Database;
@@ -207,6 +214,25 @@ export default {
       }
       if (path === '/api/admin/daily-cap' && request.method === 'GET') {
         return adminDailyCap(request, env);
+      }
+      // ─── PR5 share endpoints ───────────────────────────────────
+      if (path === '/api/share/create' && request.method === 'POST') {
+        return withCors(await handleShareCreate(request, env, ctx), request, env);
+      }
+      const sharePosterMatch = path.match(/^\/api\/share\/poster\/(.+)$/);
+      if (sharePosterMatch && request.method === 'GET') {
+        return handleSharePoster(request, env, sharePosterMatch[1]);
+      }
+      if (path === '/api/share/landing' && request.method === 'POST') {
+        return withCors(await handleShareLanding(request, env), request, env);
+      }
+      const adminShareMatch = path.match(/^\/api\/admin\/share\/(.+)$/);
+      if (adminShareMatch && request.method === 'GET') {
+        return handleAdminShareStats(request, env, adminShareMatch[1]);
+      }
+      const shareRedirectMatch = path.match(/^\/s\/([^/]+)$/);
+      if (shareRedirectMatch && request.method === 'GET') {
+        return handleShareRedirect(request, env, ctx, shareRedirectMatch[1]);
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);

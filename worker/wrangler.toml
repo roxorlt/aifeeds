@@ -4,6 +4,14 @@ compatibility_date = "2024-12-01"
 # nodejs_compat: required by @cloudflare/puppeteer (uses node:buffer internally)
 compatibility_flags = ["nodejs_compat"]
 
+# PR5 share poster：把 woff2 字体子集 + resvg wasm 当二进制 asset 打进 worker bundle。
+# *.wasm 走 wrangler 默认的 CompiledWasm rule（返回 WebAssembly.Module，给 resvg initWasm 用）。
+# *.woff2 加 Data rule，import 出 ArrayBuffer / Uint8Array。
+[[rules]]
+type = "Data"
+globs = ["**/*.woff2"]
+fallthrough = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "xlist"

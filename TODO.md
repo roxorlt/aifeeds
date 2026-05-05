@@ -35,6 +35,19 @@
 - [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
 - [ ] 引用 + 被引用 feed 去重策略（同一条被 quote 又独立出现）
 - [ ] 前端 on-demand metrics 刷新（Worker /api/refresh/:id + 前端曝光触发）
+- [ ] **`feat/lazy-enrich-on-drawer`：抽屉打开时主动 enrich + 落库**（PR5 试用反馈，2026-05-05 排）
+  - 现状：dashboard 抽屉打开仅 `GET /api/items/:id`（纯读 D1），缺数据字段（X 互动数、PH reviews_avg 等）显示「—」；分享后海报上同样缺
+  - 期望：抽屉打开 → worker 主动拉新值 → 写回 items 表 → 抽屉/feed 卡片/海报全部用新值
+  - 各源策略：
+    - **X**：用 syndication API（`cdn.syndication.twimg.com/tweet-result`，免费，反爬轻）补 metrics + quote_of + link_card；现有 `enrich_from_syndication.py` / worker `runRefreshMetrics` 可复用，关键是触发时机改为 on-demand
+    - **GH**：worker 加 fresh-fetch endpoint，调 GitHub REST `/repos/:owner/:repo` 拿 stars/forks/watchers/contributors_count；issue/PR 计数走 search API
+    - **PH**：PH 没有公开 API；worker 用 CF browser binding（`env.BROWSER`）实时打开 PH 页面解析（POC 已有 `worker/src/scrapers/ph_poc.ts`）；成本：browser 时间月 10h 含
+  - 频率 + 缓存（待跟用户深入聊）：
+    - 单 item KV throttle，比如 5min 内只刷一次
+    - 命中近期 fetch（< 1h）跳过
+    - syndication 全局并发限速（X 反爬触发后惩罚）
+    - PH browser fetch 慢（5-10s），抽屉打开时立即返回旧数据 + 后台 enrich，下次抽屉打开看到新值（hybrid lazy）
+  - dashboard 侧：拿到 enrich 结果后通过 zustand store 把新 metrics 同步给 feed 卡片（GithubDrawerBody 已有 `setLatestMetrics` 模式可参考）
 - [ ] **metrics 数据完整性**：当前 likes/retweets/replies/views 在全表覆盖率 64-77%，导致部分卡片显示 metric 数 < 4。前端兜底已用「null → "—"」处理（见 frontend-responsive-iteration spec），后端层面要让 enrich daemon 主动回扫缺失字段（特别是 retweets 64% 最低），目标全表 ≥ 95% 覆盖。可在 enricher L0/L1 高频层增一道"补全空字段"扫描
 - [ ] 关键词自学习优化: LEARNED_MIN_HITS 3→8、mid-sentence capitalization only、seed 共现
 

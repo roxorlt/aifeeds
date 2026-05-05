@@ -7,6 +7,10 @@ import { PhDrawerBody } from "./PhDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import { smoothScrollToTop } from "../lib/scroll";
+import { IconShare } from "./icons";
+import { ShareDialog } from "./ShareDialog";
+import { useAuthStore } from "../lib/authStore";
+import type { CreateShareResponse } from "../lib/share";
 import type { Item, ItemExtra } from "../types";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
@@ -39,6 +43,20 @@ export function TweetDrawer() {
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
   const [titleHidden, setTitleHidden] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  // 同 itemId 不重复 createShare：缓存最近一次为该 item 创建的 token
+  const [shareCache, setShareCache] = useState<Record<string, CreateShareResponse>>({});
+  const user = useAuthStore((s) => s.user);
+  const openLoginModal = useAuthStore((s) => s.openLoginModal);
+
+  const onClickShare = () => {
+    if (!user) {
+      // 未登录 → 弹登录 modal，登录成功后 retry 自动打开 ShareDialog
+      openLoginModal("manual", () => setShareOpen(true));
+      return;
+    }
+    setShareOpen(true);
+  };
   const dragXRef = useRef(0);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
@@ -314,24 +332,17 @@ export function TweetDrawer() {
             {headerTitle}
           </div>
           <div className="justify-self-end">
-            {item?.url && (
-              <a
-                href={item.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={() => {
-                  let host = "x.com";
-                  try { host = new URL(item.url!).host; } catch {}
-                  track(EVENTS.EXTERNAL_LINK_CLICK, {
-                    item_id: item.id,
-                    target_url_host: host,
-                  });
-                }}
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
-                title={externalLinkTitle}
+            {item && (
+              <button
+                type="button"
+                onClick={onClickShare}
+                className="-mr-1 flex h-9 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-100 active:bg-neutral-200"
+                aria-label="分享"
+                title="分享"
               >
-                {externalLinkLabel}
-              </a>
+                <IconShare className="h-4 w-4" />
+                <span>分享</span>
+              </button>
             )}
           </div>
         </header>
@@ -341,27 +352,50 @@ export function TweetDrawer() {
           style={{ WebkitOverflowScrolling: "touch" }}
         >
           {item ? (
-            isGithub ? (
-              <GithubDrawerBody item={item} />
-            ) : isPh ? (
-              <PhDrawerBody item={item} />
-            ) : (
-              threadMembers.map((it) => {
-                const isTarget = it.id === item.id && threadMembers.length > 1;
-                return (
-                  <div
-                    key={it.id}
-                    ref={isTarget ? targetRef : undefined}
-                    className={cn(
-                      isTarget &&
-                        "border-l-2 border-sky-500 bg-sky-50/40",
-                    )}
+            <>
+              {isGithub ? (
+                <GithubDrawerBody item={item} />
+              ) : isPh ? (
+                <PhDrawerBody item={item} />
+              ) : (
+                threadMembers.map((it) => {
+                  const isTarget = it.id === item.id && threadMembers.length > 1;
+                  return (
+                    <div
+                      key={it.id}
+                      ref={isTarget ? targetRef : undefined}
+                      className={cn(
+                        isTarget &&
+                          "border-l-2 border-sky-500 bg-sky-50/40",
+                      )}
+                    >
+                      <TweetCard item={it} embedded hideThreadBanner />
+                    </div>
+                  );
+                })
+              )}
+              {item.url && (
+                <div className="flex justify-center border-t border-neutral-100 px-4 py-5">
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      let host = "x.com";
+                      try { host = new URL(item.url!).host; } catch {}
+                      track(EVENTS.EXTERNAL_LINK_CLICK, {
+                        item_id: item.id,
+                        target_url_host: host,
+                      });
+                    }}
+                    className="inline-flex items-center justify-center rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+                    title={externalLinkTitle}
                   >
-                    <TweetCard item={it} embedded hideThreadBanner />
-                  </div>
-                );
-              })
-            )
+                    {externalLinkLabel}
+                  </a>
+                </div>
+              )}
+            </>
           ) : loading ? (
             <DrawerSkeleton />
           ) : (
@@ -369,6 +403,15 @@ export function TweetDrawer() {
           )}
         </div>
       </aside>
+      {item && (
+        <ShareDialog
+          open={shareOpen}
+          itemId={item.id}
+          cachedShare={shareCache[item.id] ?? null}
+          onShareCreated={(id, share) => setShareCache((prev) => ({ ...prev, [id]: share }))}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
     </div>
   );
 }
