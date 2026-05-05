@@ -4,14 +4,35 @@
 //   - 头像：h-10 w-10 rounded-md（产品 logo 是品牌图标，方形圆角更合适，
 //     X tweet / GH owner 是头像用 rounded-full）
 //   - 标题：text-[15px] font-bold
-//   - 正文：text-[15px] leading-[1.45]
-//   - meta：text-[13px] text-neutral-500
-//   - chip：rounded-full bg-neutral-100 text-neutral-700（不再 14 个色）
+//   - 正文：text-[15px] leading-[1.45]，line-clamp 4 行
+//   - meta（第二行）：日期(无 PT 后缀) / #排名 / 分类标签（彩色 chip）
+//   - footer：互动数据 + makers 头像（最多 3）+ "by @first 等 N 人"
 
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { formatCompact, parseJsonField } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import { resolveAssetUrl } from "../lib/asset";
+
+// PH 分类彩色 chip 风格，跟 GithubCard 同款语义（同色系区分品类）
+const PH_CATEGORY_STYLE: Record<string, string> = {
+  ai_agent: "bg-violet-100 text-violet-700",
+  ai_code_editor: "bg-blue-100 text-blue-700",
+  ai_image_gen: "bg-rose-100 text-rose-700",
+  ai_audio: "bg-amber-100 text-amber-700",
+  ai_voice_agent: "bg-orange-100 text-orange-700",
+  ai_data_analysis: "bg-emerald-100 text-emerald-700",
+  ai_other: "bg-neutral-100 text-neutral-700",
+};
+
+function categoryStyle(cat: string | undefined): string {
+  if (!cat) return "bg-neutral-100 text-neutral-700";
+  return PH_CATEGORY_STYLE[cat] || "bg-neutral-100 text-neutral-700";
+}
+
+function categoryLabel(cat: string): string {
+  // ai_code_editor → AI Code Editor
+  return cat.replace(/^ai_/, "AI ").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).replace(/^Ai /, "AI ");
+}
 
 function parseMedia(raw: Item["media"]): MediaItem[] {
   if (!raw) return [];
@@ -24,6 +45,12 @@ function parseMedia(raw: Item["media"]): MediaItem[] {
     }
   }
   return Array.isArray(raw) ? raw : [];
+}
+
+interface Maker {
+  name?: string;
+  handle?: string;
+  avatar_url?: string;
 }
 
 interface Props {
@@ -40,19 +67,20 @@ export function PhCard({ item }: Props) {
   const tagline = item.content_translated || item.content || "";
   const dailyRank = (extra as { daily_rank?: number }).daily_rank;
   const launchDate = extra.launch_date_pt || "";
-  const dateMd = launchDate ? launchDate.slice(5) : ""; // "MM-DD"
+  const dateMd = launchDate ? launchDate.slice(5) : ""; // "MM-DD"，无 PT 后缀
   const aiCategoryRaw = (extra.ai_category as string) || "";
-  // 转 "ai_code_editor" → "AI Code Editor"
-  const aiCategoryLabel = aiCategoryRaw
-    ? aiCategoryRaw.replace(/^ai_/, "AI ").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).replace(/^Ai /, "AI ")
-    : "";
+  const aiCategoryLabel = aiCategoryRaw ? categoryLabel(aiCategoryRaw) : "";
 
   const logo = media.find((m) => (m as MediaItem & { role?: string }).role === "logo");
   const logoUrl = logo?.url ? resolveAssetUrl(logo.url) : "";
 
   const votes = metrics.votes;
   const comments = metrics.comments;
-  const makerHandle = item.handle || "";
+
+  // makers：取前 3 头像，+ 总数文本
+  const makers: Maker[] = (extra.makers as Maker[] | undefined) || [];
+  const visibleMakers = makers.slice(0, 3);
+  const firstHandle = makers[0]?.handle || item.handle || "";
 
   function open() {
     drawer.openItem(item);
@@ -64,7 +92,7 @@ export function PhCard({ item }: Props) {
       className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >
       <div className="flex gap-3">
-        {/* Logo (product brand icon — rounded-md 方形圆角，区分人脸头像 rounded-full) */}
+        {/* Logo (产品品牌图标，rounded-md 方形圆角) */}
         {logoUrl ? (
           <img
             src={logoUrl}
@@ -77,40 +105,40 @@ export function PhCard({ item }: Props) {
         )}
 
         <div className="min-w-0 flex-1">
-          {/* Title row：name + 行内 daily rank（克制风格，不在最显眼位置） */}
+          {/* Title row：单纯产品名（rank 挪到第二行避免重复） */}
           <div className="flex items-baseline gap-1.5">
             <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
               {name}
             </span>
-            {dailyRank !== undefined && (
-              <span
-                className="shrink-0 text-[13px] font-medium text-neutral-500 tabular-nums"
-                title={`PH 当日榜第 ${dailyRank} 名`}
-              >
-                · #{dailyRank}
-              </span>
-            )}
           </div>
 
-          {/* Meta：date + category（neutral chip，不彩） */}
+          {/* Meta（第二行）：日期 / #排名 / 分类标签（彩色 chip） */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
-            {dateMd && <span className="tabular-nums">{dateMd} PT</span>}
-            {dateMd && aiCategoryLabel && <span className="text-neutral-400">·</span>}
+            {dateMd && <span className="tabular-nums">{dateMd}</span>}
+            {dateMd && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
+            {dailyRank !== undefined && (
+              <span className="tabular-nums" title={`PH 当日榜第 ${dailyRank} 名`}>
+                #{dailyRank}
+              </span>
+            )}
+            {(dateMd || dailyRank !== undefined) && aiCategoryLabel && (
+              <span className="text-neutral-400">·</span>
+            )}
             {aiCategoryLabel && (
-              <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+              <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${categoryStyle(aiCategoryRaw)}`}>
                 {aiCategoryLabel}
               </span>
             )}
           </div>
 
-          {/* Tagline */}
+          {/* Tagline 正文 — 4 行 */}
           {tagline && (
-            <p className="mt-1 line-clamp-3 text-[15px] leading-[1.45] text-neutral-900 break-words">
+            <p className="mt-1 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
               {tagline}
             </p>
           )}
 
-          {/* Footer metrics (neutral, flat) */}
+          {/* Footer：左 votes/comments，右 makers 头像 + by @xxx 等 N 人 */}
           <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
             {votes !== undefined && (
               <span className="inline-flex items-center gap-1" aria-label="votes">
@@ -124,12 +152,34 @@ export function PhCard({ item }: Props) {
                 <span className="tabular-nums">{formatCompact(comments)}</span>
               </span>
             )}
-            {makerHandle && (
-              <span className="truncate text-neutral-500">by @{makerHandle}</span>
-            )}
-            {dailyRank !== undefined && (
-              <span className="ml-auto text-[11px] text-neutral-400" title={ordinal(dailyRank)}>
-                {ordinal(dailyRank)}
+            {/* makers 右对齐：最多 3 个头像 + 文字 */}
+            {(visibleMakers.length > 0 || firstHandle) && (
+              <span className="ml-auto flex shrink-0 items-center gap-1.5 text-neutral-500">
+                {visibleMakers.length > 0 && (
+                  <span className="flex -space-x-1.5">
+                    {visibleMakers.map((m, i) => (
+                      m.avatar_url ? (
+                        <img
+                          key={m.handle || i}
+                          src={m.avatar_url}
+                          alt={m.name || m.handle || ""}
+                          className="h-5 w-5 rounded-full border border-white bg-neutral-200 object-cover"
+                          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                        />
+                      ) : (
+                        <span
+                          key={m.handle || i}
+                          className="h-5 w-5 rounded-full border border-white bg-neutral-200"
+                        />
+                      )
+                    ))}
+                  </span>
+                )}
+                {firstHandle && (
+                  <span className="truncate text-[13px]">
+                    by @{firstHandle}{makers.length > 1 ? ` 等 ${makers.length} 人` : ""}
+                  </span>
+                )}
               </span>
             )}
           </div>
