@@ -277,7 +277,9 @@ function djb2Hash(s: string): number {
 function defaultAvatarPath(userId: string): string {
   const h = djb2Hash(userId + ':avatar');
   const n = String((h % 30) + 1).padStart(2, '0');
-  return `/avatars/avatar-${n}.png`;
+  // 用 256x256 小尺寸（dashboard/public/avatars-sm/，海报 120x120 用足够），
+  // 减少 1254→120 暴力下采样的糊感
+  return `/avatars-sm/avatar-${n}.png`;
 }
 
 // 选作者/项目头像（海报左上 logo 位置）：
