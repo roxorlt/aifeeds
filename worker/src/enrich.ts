@@ -249,6 +249,16 @@ export interface SingleItemRefreshResult {
   metrics?: Metrics;
 }
 
+// 去掉 undefined 字段（JSON.stringify 也会 drop，但 spread 时 undefined 还是会
+// 覆盖前面对象的同名字段 — 显式过滤一下避免误操作）
+function prunedNonUndefined<T extends Record<string, unknown>>(o: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const k in o) {
+    if (o[k] !== undefined) out[k] = o[k];
+  }
+  return out;
+}
+
 export async function refreshSingleItem(
   env: EnrichEnv & { AUTH_KV?: KVNamespace },
   itemId: string,
@@ -276,15 +286,27 @@ export async function refreshSingleItem(
     if (!r || r.notFound || !r.data) {
       return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
     }
-    const m = apiToMetrics(r.data);
-    await updateMetrics(env, item.id, m);
+    // ⚠️ X syndication 当前已不返 retweet_count / view_count（平台隐私收紧）
+    // apiToMetrics 这两个字段是 undefined，JSON.stringify 后 drop 掉，导致直接
+    // UPDATE 会清掉 D1 里旧的 retweets / views 数据 → 永远显示「—」
+    // 修：merge 旧 metrics，仅覆盖 syndication 实际返回的字段
+    const newPart = apiToMetrics(r.data);
+    const oldRow = await env.DB.prepare(
+      `SELECT metrics FROM items WHERE id = ?`,
+    ).bind(item.id).first<{ metrics: string | null }>();
+    let oldMetrics: Record<string, number | undefined> = {};
+    if (oldRow?.metrics) {
+      try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+    }
+    const merged: Metrics = { ...oldMetrics, ...prunedNonUndefined(newPart as unknown as Record<string, unknown>) } as Metrics;
+    await updateMetrics(env, item.id, merged);
     // 写 throttle key
     if (env.AUTH_KV) {
       await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
         expirationTtl: REFRESH_THROTTLE_TTL,
       });
     }
-    return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: m };
+    return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: merged };
   }
 
   // GH / PH 暂留下个 PR

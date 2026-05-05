@@ -203,7 +203,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
 
   const { renderShareSvg } = await import('./svg-template');
   const { renderSvgToPng } = await import('./poster');
-  const { site } = originsFor(request);
+  const { api } = originsFor(request);
   const svg = await renderShareSvg(posterItem, {
     token,
     shareUrl: `${api}/s/${token}`,
