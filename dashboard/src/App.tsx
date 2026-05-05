@@ -149,6 +149,25 @@ function DashboardHome() {
     track(EVENTS.PAGE_VIEW, {
       path: window.location.pathname + window.location.search,
     });
+    // PR5 landing 回流：从 /s/:token redirect 过来时 worker 加了
+    // ?ref=share&token=<token>&from=<uid>，前端拿到 token 上报 landing
+    // 让 worker 把当前 device_id 写入 share_relations.to_did + landed_at
+    // 同 token 上报一次后从 sessionStorage 标记，避免刷新页面重复上报
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get('ref');
+    const token = params.get('token');
+    if (ref === 'share' && token) {
+      const flagKey = `share_landing_reported:${token}`;
+      try {
+        if (!sessionStorage.getItem(flagKey)) {
+          import('./lib/share').then(({ reportLanding }) => reportLanding(token));
+          sessionStorage.setItem(flagKey, '1');
+        }
+      } catch {
+        // sessionStorage unavailable (incognito iOS Safari) → 直接上报，不去重
+        import('./lib/share').then(({ reportLanding }) => reportLanding(token));
+      }
+    }
   }, []);
 
   // Derive which source types have live data

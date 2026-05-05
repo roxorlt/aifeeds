@@ -279,6 +279,16 @@ export async function handleLogin(
     ).bind(userId, deviceId, now - 30 * 24 * 3600_000).run(),  // 仅回填最近 30 天，防误关联
   );
 
+  // 7.5 PR5 landing 回流：当前 device 之前从分享链接落地过（share_relations.to_did）
+  // 现在该用户注册/登录 → 回填 to_uid + registered_at（社交关系图基础数据）
+  // 仅 to_uid IS NULL 的 row 才回填（避免覆盖已登记的注册关联）
+  ctx.waitUntil(
+    env.DB.prepare(
+      `UPDATE share_relations SET to_uid = ?, registered_at = ?
+       WHERE to_did = ? AND to_uid IS NULL`,
+    ).bind(userId, now, deviceId).run(),
+  );
+
   // 8. 创建 session
   const session = await createSession(env, userId, deviceId, ip, ua);
   const cookie = buildSessionCookie(session.id, isDevHost(request));
