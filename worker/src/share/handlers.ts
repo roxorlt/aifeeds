@@ -163,6 +163,15 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     if (typeof v !== 'string') return (v as Record<string, unknown>) ?? null;
     try { return JSON.parse(v); } catch { return null; }
   };
+  const itemMedia = safeJson(item.media);
+  const itemExtra = safeJson(item.extra);
+  // GH/PH 抽第一张可用图作为海报媒体；fetch + base64 嵌入 SVG（resvg 不主动 fetch）
+  const mediaInfo = await pickPosterMedia(
+    String(item.source_type || ''),
+    itemExtra,
+    itemMedia,
+    request,
+  );
   const posterItem = {
     id: rel.item_id,
     source_type: String(item.source_type || ''),
@@ -172,7 +181,9 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     content: typeof item.content === 'string' ? item.content : undefined,
     content_translated: typeof item.content_translated === 'string' ? item.content_translated : undefined,
     metrics: safeJson(item.metrics),
-    extra: safeJson(item.extra),
+    extra: itemExtra,
+    mediaImageDataUri: mediaInfo?.dataUri,
+    mediaAspectRatio: mediaInfo?.aspectRatio,
   };
   // ─── 拉分享人真实信息 ─────────────────────────────────
   // from_uid 查 users 表拿 display_name + avatar_url；display_name 缺失留给
@@ -267,6 +278,78 @@ function defaultAvatarPath(userId: string): string {
   const h = djb2Hash(userId + ':avatar');
   const n = String((h % 30) + 1).padStart(2, '0');
   return `/avatars/avatar-${n}.png`;
+}
+
+// 选海报第一张可用媒体图：GH = readme_excerpt 第一张非 SVG <img/>，PH = media JSON 第一张
+// role=gallery（fall back 到任意 image）。fetch + base64 → data URI；同时探宽高比给排版用。
+async function pickPosterMedia(
+  sourceType: string,
+  extra: Record<string, unknown> | null,
+  media: unknown,
+  request: Request,
+): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
+  let url: string | undefined;
+  if (sourceType === 'github') {
+    const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
+    if (readme) {
+      // 跳过 .svg（多是 shields/badge），找第一张 png/jpg/jpeg/gif/webp
+      const m = readme.match(/<img[^>]*\bsrc="([^"]+\.(?:png|jpg|jpeg|gif|webp))"/i);
+      if (m) url = m[1];
+    }
+  } else if (sourceType === 'product_hunt') {
+    if (Array.isArray(media)) {
+      const arr = media as Array<{ type?: string; url?: string; role?: string }>;
+      const gallery = arr.find(x => x?.role === 'gallery' && typeof x.url === 'string');
+      url = gallery?.url || arr.find(x => x?.type === 'image' && typeof x.url === 'string' && x.role !== 'logo')?.url;
+    }
+  }
+  if (!url) return undefined;
+
+  // 相对路径补 origin：
+  // - /r/... 是 GH/PH README & gallery R2 反代，资源只在 prod R2 存（staging
+  //   不 mirror）；按 hash 寻址 immutable，跨环境拉 prod 安全
+  // - 其他 / 路径走当前 host
+  if (url.startsWith('/r/')) {
+    url = 'https://api.ai-feeds.com' + url;
+  } else if (url.startsWith('/')) {
+    const { api } = originsFor(request);
+    url = api + url;
+  }
+  // PH imgix：限宽 1080 减小 fetch 体积
+  if (url.includes('ph-files.imgix.net')) {
+    const u = new URL(url);
+    u.searchParams.set('w', '1080');
+    u.searchParams.set('fit', 'max');
+    url = u.toString();
+  }
+
+  try {
+    const res = await fetch(url, {
+      cf: { cacheTtl: 86400, cacheEverything: true },
+      headers: { 'User-Agent': 'ai-feeds-poster-renderer/1.0' },
+    });
+    if (!res.ok) return undefined;
+    const ct = res.headers.get('content-type') || 'image/png';
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > 4 * 1024 * 1024) return undefined; // > 4MB 跳过
+    const b64 = arrayBufferToBase64(buf);
+    return { dataUri: `data:${ct};base64,${b64}`, aspectRatio: probePngAspectRatio(buf) };
+  } catch (e) {
+    console.error('[share-poster] media fetch failed:', url, e);
+    return undefined;
+  }
+}
+
+// 探 PNG 文件头宽高（IHDR chunk: bytes 16-19=width, 20-23=height）；非 PNG 返回 undefined
+function probePngAspectRatio(buf: ArrayBuffer): number | undefined {
+  const view = new DataView(buf);
+  if (buf.byteLength < 24) return undefined;
+  // PNG 签名 89 50 4E 47 0D 0A 1A 0A
+  if (view.getUint32(0) !== 0x89504E47 || view.getUint32(4) !== 0x0D0A1A0A) return undefined;
+  const w = view.getUint32(16);
+  const h = view.getUint32(20);
+  if (!w || !h) return undefined;
+  return w / h;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {

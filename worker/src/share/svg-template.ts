@@ -315,10 +315,10 @@ async function renderFooter(
     qrSvgInner = `<rect x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" fill="#fff" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
   }
 
-  // 「扫码查看完整内容」hint
-  const hintX = qrX + qrSize;
+  // 「微信扫码查看」hint：以 QR 中心左右居中
+  const hintX = qrX + qrSize / 2;
   const hintY = qrY + qrSize + 24 + 6;
-  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="22" fill="${C.muted2}" text-anchor="end">微信扫码查看</text>`;
+  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="22" fill="${C.muted2}" text-anchor="middle">微信扫码查看</text>`;
 
   return innerCard + sharerAvatar + sharerMeta + qrSvgInner + hint;
 }
@@ -351,7 +351,7 @@ function renderXContent(opts: {
   cy += avatarSize + 30;
 
   // body：38px / line-height 1.52；innerW=1008（38px ≈ 1em 中文，max 22 字 = 836px 还有富余）
-  const lines = wrapText(opts.body, 22, 8);
+  const lines = wrapText(opts.body, 24, 8);
   const bodySize = 38;
   const bodyLine = bodySize * 1.52;
   const body = lines
@@ -438,6 +438,8 @@ function renderGithubContent(opts: {
   rankLabel: string;
   contributors?: string;
   body: string;
+  mediaImageDataUri?: string;
+  mediaAspectRatio?: number;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
@@ -537,14 +539,31 @@ function renderGithubContent(opts: {
   // body 36px / 1.48 / clamp 5
   const bodySize = 36;
   const bodyLine = bodySize * 1.48;
-  const bodyLines = wrapText(opts.body, 22, 5);
+  const bodyLines = wrapText(opts.body, 24, 5);
   const bodySvg = bodyLines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
     .join('');
-  cy += bodyLines.length * bodyLine + 42;
+  cy += bodyLines.length * bodyLine + 30;
+
+  // 有媒体：body 之后再放第一张 README 图（按比例缩放占满 innerW，最大高 480）
+  let mediaSvg = '';
+  if (opts.mediaImageDataUri) {
+    const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
+    const mediaH = Math.min(innerW / ar, 520);
+    const mediaW = mediaH * ar;
+    const mediaX = innerX + (innerW - mediaW) / 2;
+    const mediaY = cy;
+    const clipId = `gh-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    mediaSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+    cy += mediaH + 16;
+  }
+  cy += 12; // 卡片底部内边距收尾
 
   const totalH = cy - opts.y;
-  return { svg: logoBg + dotPattern + titleSvg + tagSvg + metricsSvg + bodySvg, height: totalH };
+  return { svg: logoBg + dotPattern + titleSvg + tagSvg + metricsSvg + bodySvg + mediaSvg, height: totalH };
 }
 
 // ─── Product Hunt 变体 内容渲染 ────────────────────────────
@@ -555,6 +574,8 @@ function renderPhContent(opts: {
   tag: string;
   body: string;
   stats?: { comments?: number | string; rating?: string; followers?: number | string };
+  mediaImageDataUri?: string;
+  mediaAspectRatio?: number;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
   const innerX = opts.x + padX;
@@ -577,8 +598,10 @@ function renderPhContent(opts: {
   const productTitleY = cy + productTitleSize - 8;
   const titleSvg = `<text x="${nameX}" y="${productTitleY}" font-family='${FONT}' font-size="${productTitleSize}" font-weight="950" fill="${C.ink}" letter-spacing="-4">${esc(productTitle)}</text>`;
   // rank（灰）紧跟 title 右侧，baseline 对齐
-  const titleW = estimateTextWidth(productTitle, productTitleSize, 0.82);
-  const rankX = nameX + titleW + 22;
+  // 英文 title 用 0.95 boost（接近实际渲染宽，避免 rank 跟 title 贴一起）；中文用 1
+  const isEnTitle = /^[\x00-\x7F\s]+$/.test(productTitle);
+  const titleW = estimateTextWidth(productTitle, productTitleSize, isEnTitle ? 0.95 : 1);
+  const rankX = nameX + titleW + 32;
   const rankSvg = `<text x="${rankX}" y="${productTitleY}" font-family='${FONT}' font-size="54" font-weight="900" fill="${C.muted}">${esc(opts.rank)}</text>`;
 
   // tag pill (orange)
@@ -594,7 +617,7 @@ function renderPhContent(opts: {
   // body 36 / 1.48 / 5 lines
   const bodySize = 36;
   const bodyLine = bodySize * 1.48;
-  const bodyLines = wrapText(opts.body, 22, 5);
+  const bodyLines = wrapText(opts.body, 24, 5);
   const bodySvg = bodyLines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
     .join('');
@@ -620,10 +643,27 @@ function renderPhContent(opts: {
     }
   });
   statsSvg += `<line x1="${innerX}" y1="${statRowY + statRowH + 8}" x2="${innerX + innerW}" y2="${statRowY + statRowH + 8}" stroke="${C.line}" stroke-width="1"/>`;
-  cy = statRowY + statRowH + 30;
+  cy = statRowY + statRowH + 24;
 
-  const totalH = cy - opts.y + 32;
-  return { svg: logoBg + phLogoInner + titleSvg + rankSvg + tagSvg + bodySvg + statsSvg, height: totalH };
+  // 有媒体：stats 之后放第一张 gallery 图（按比例缩放占满 innerW，最大高 520）
+  let mediaSvg = '';
+  if (opts.mediaImageDataUri) {
+    const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
+    const mediaH = Math.min(innerW / ar, 520);
+    const mediaW = mediaH * ar;
+    const mediaX = innerX + (innerW - mediaW) / 2;
+    const mediaY = cy;
+    const clipId = `ph-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    mediaSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+    cy += mediaH + 16;
+  }
+  cy += 12;
+
+  const totalH = cy - opts.y;
+  return { svg: logoBg + phLogoInner + titleSvg + rankSvg + tagSvg + bodySvg + statsSvg + mediaSvg, height: totalH };
 }
 
 // ─── 顶层入口：renderShareSvg ──────────────────────────────
@@ -640,6 +680,12 @@ export interface PosterItem {
   // GitHub 字段（来自 items.metrics + items.extra）
   metrics?: Record<string, unknown> | null;
   extra?: Record<string, unknown> | null;
+  // 媒体图（worker 端 fetch 后传入 base64 data URI）
+  // GH = readme_excerpt 第一张非 SVG 图；PH = media JSON 第一张 role=gallery
+  // 有 → 渲 "有媒体" 排版（介于 header 和 body 之间）；无 → 排版同 v1
+  mediaImageDataUri?: string;
+  // 媒体图原始宽高比（fetched 后传入），用于按比缩放避免变形
+  mediaAspectRatio?: number;
 }
 
 export interface PosterShareCtx {
@@ -678,6 +724,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       rankLabel: extra.daily_rank ? `GitHub 热榜 ${ordinal(Number(extra.daily_rank))}` : 'GitHub 热榜',
       contributors: extra.contributors_count ? `${extra.contributors_count} contributors` : undefined,
       body: bodyText(item),
+      mediaImageDataUri: item.mediaImageDataUri,
+      mediaAspectRatio: item.mediaAspectRatio,
     });
     contentSvg = r.svg;
     contentH = r.height;
@@ -690,6 +738,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       rank: extra.daily_rank ? `#${extra.daily_rank}` : (extra.rank ? `#${extra.rank}` : ''),
       tag: pickPhTag(item),
       body: bodyText(item),
+      mediaImageDataUri: item.mediaImageDataUri,
+      mediaAspectRatio: item.mediaAspectRatio,
       stats: {
         comments: m.comments as number | undefined,
         rating: m.rating ? String(m.rating) : undefined,
@@ -769,7 +819,14 @@ function pickPhTag(item: PosterItem): string {
 }
 
 function bodyText(item: PosterItem): string {
-  return item.content_translated || item.content || item.title || '';
+  // GH / PH 优先用 extra.ai_summary（dashboard 抽屉「AI 解读亮点」即此字段）；
+  // X 走 content_translated || content（推文正文本身就是要展示的主体）。
+  const extra = item.extra || {};
+  const aiSummary = typeof extra.ai_summary === 'string' ? extra.ai_summary.trim() : '';
+  if ((item.source_type === 'github' || item.source_type === 'product_hunt') && aiSummary) {
+    return aiSummary;
+  }
+  return item.content_translated || item.content || aiSummary || item.title || '';
 }
 
 function ordinal(n: number): string {
