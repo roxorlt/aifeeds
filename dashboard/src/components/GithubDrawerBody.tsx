@@ -349,7 +349,7 @@ export function GithubDrawerBody({ item }: Props) {
           )}
           {recentCommits && recentCommits.length > 0 && recentCommits[0]?.date && (
             <span>
-              最近提交{" "}
+              commit{" "}
               <span className="font-medium text-neutral-900">
                 {timeAgoOrDate(recentCommits[0].date)}
               </span>
