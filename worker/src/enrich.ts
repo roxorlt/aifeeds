@@ -233,20 +233,21 @@ export function apiToMetrics(data: Record<string, unknown>): Metrics {
 // PR6.6 lazy-enrich-on-drawer：不是 cron 全表轮询，而是用户点开抽屉时立即刷新这一条。
 // 三源策略：
 //   - x_list：syndication API 拉 metrics + quote_of + link_card（1-3s）
-//   - github：留到下次 PR（GitHub REST 调用）
+//   - github：GitHub REST API 拉 stars/forks/watchers/issues/PRs/contributors（<1s）
 //   - product_hunt：留到下次 PR（CF Browser binding 5-10s）
 //
-// 节流：KV 存 last_refreshed_at，5 min 内同 item 只刷一次。
+// 节流：KV 存 last_refreshed_at，60s 内同 item 只刷一次（短到允许"关掉再开"，
+// 长到避免单条疯狂刷）。
 // 失败：返回旧数据 + 不写 KV（下次能重试）。
 
 const REFRESH_THROTTLE_KEY_PREFIX = 'item-refresh-throttle:';
-const REFRESH_THROTTLE_TTL = 60 * 5; // 5 min
+const REFRESH_THROTTLE_TTL = 60; // 60s — 短到允许"关掉再开"看到新数据，长到避免单条疯狂刷
 
 export interface SingleItemRefreshResult {
   refreshed: boolean;
   source_type: string;
   reason?: 'throttled' | 'unsupported_source' | 'item_not_found' | 'fetch_failed' | 'success';
-  metrics?: Metrics;
+  metrics?: Metrics | Record<string, number | string | null>;
 }
 
 // 去掉 undefined 字段（JSON.stringify 也会 drop，但 spread 时 undefined 还是会
@@ -260,7 +261,7 @@ function prunedNonUndefined<T extends Record<string, unknown>>(o: T): Partial<T>
 }
 
 export async function refreshSingleItem(
-  env: EnrichEnv & { AUTH_KV?: KVNamespace },
+  env: EnrichEnv & { AUTH_KV?: KVNamespace; GITHUB_TOKEN?: string },
   itemId: string,
 ): Promise<SingleItemRefreshResult> {
   // 1. throttle check（KV，5min 内不重刷）
@@ -309,7 +310,21 @@ export async function refreshSingleItem(
     return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: merged };
   }
 
-  // GH / PH 暂留下个 PR
+  if (item.source_type === 'github') {
+    const { refreshGithubItem } = await import('./github');
+    const r = await refreshGithubItem(env, item.id, item.source_id);
+    if (!r) {
+      return { refreshed: false, source_type: 'github', reason: 'fetch_failed' };
+    }
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'github', reason: 'success', metrics: r.metrics };
+  }
+
+  // PH 暂留下个 PR（需要 CF Browser binding）
   return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
 }
 

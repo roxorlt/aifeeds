@@ -632,6 +632,88 @@ export async function runGithubEnrichPending(
   return counts;
 }
 
+// ─── On-demand GH refresh（drawer 打开时调） ───────────────────
+// PR6.6：与 X syndication 对应，drawer 触发后实时刷一次 GitHub REST API。
+// 只补 stars/forks/watchers/open_issues/open_prs/contributors_count；
+// today_stars 来自 trending HTML（API 不返），保留旧值；license_spdx 同理。
+// 调用方（enrich.refreshSingleItem）已做 KV throttle，这里不重复。
+
+export interface GhRefreshResult {
+  ok: boolean;
+  metrics: Record<string, number | string | null>;
+  contributors_count: number | null;
+}
+
+export async function refreshGithubItem(
+  env: GithubEnv,
+  itemId: string,
+  ownerRepo: string,
+): Promise<GhRefreshResult | null> {
+  const [owner, repo] = (ownerRepo || "").split("/");
+  if (!owner || !repo) return null;
+
+  const meta = await fetchRepoMeta(env, owner, repo);
+  if (!meta) return null;
+
+  const stars = (meta.stargazers_count as number | undefined) ?? null;
+  const forks = (meta.forks_count as number | undefined) ?? null;
+  const watchers = (meta.subscribers_count as number | undefined) ?? null;
+  const openIssues = (meta.open_issues_count as number | undefined) ?? null;
+
+  // 并行拉 PRs + contributors（独立请求）
+  const [openPrs, contributorsCount] = await Promise.all([
+    fetchOpenPrs(env, owner, repo),
+    fetchContributorsCount(env, owner, repo),
+  ]);
+
+  // 读旧 metrics + extra，merge（保 today_stars / license_spdx 等 API 不返字段）
+  const row = await env.DB.prepare(
+    `SELECT metrics, extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ metrics: string | null; extra: string | null }>();
+
+  let oldMetrics: Record<string, unknown> = {};
+  let oldExtra: Record<string, unknown> = {};
+  try { if (row?.metrics) oldMetrics = JSON.parse(row.metrics) || {}; } catch { /* ignore */ }
+  try { if (row?.extra) oldExtra = JSON.parse(row.extra) || {}; } catch { /* ignore */ }
+
+  const newMetrics: Record<string, number | string | null> = {
+    ...(oldMetrics as Record<string, number | string | null>),
+    stars,
+    forks,
+    watchers,
+    open_issues: openIssues,
+    open_prs: openPrs,
+  };
+  const newExtra = {
+    ...oldExtra,
+    contributors_count: contributorsCount,
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE items SET metrics = ?, extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newMetrics), JSON.stringify(newExtra), itemId),
+    env.DB.prepare(
+      `INSERT INTO metrics_snapshots_gh
+         (item_id, captured_at, trending_date_str, total_stars, today_stars, forks, watchers, open_issues, open_prs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      itemId,
+      now,
+      bjtDateStr(now),
+      stars,
+      (oldMetrics.today_stars as number | undefined) ?? null,
+      forks,
+      watchers,
+      openIssues,
+      openPrs,
+    ),
+  ]);
+
+  return { ok: true, metrics: newMetrics, contributors_count: contributorsCount };
+}
+
 // Convenience: count remaining pending github items (used by scheduled() to
 // decide whether to dispatch enrich vs the X cron rotation).
 export async function countGithubPending(env: GithubEnv): Promise<number> {
