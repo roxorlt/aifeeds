@@ -287,10 +287,14 @@ async function renderFooter(
     <text x="${metaX}" y="${metaTopY + 22}" font-family='${FONT}' font-size="26" fill="${C.muted}">分享自</text>
     <text x="${metaX}" y="${metaTopY + 22 + 50}" font-family='${FONT}' font-size="36" font-weight="500" fill="${C.ink}">${esc(ctx.nickname)}</text>`;
 
-  // QR 区（右侧）：以 footer 中心对齐
+  // QR 区（右侧）：QR + hint 作为一个整体在 footer 内垂直居中
+  // 整组高 = qrSize + gap(14) + hintFontSize(22) = 204
   const qrSize = 168;
+  const hintGap = 14;
+  const hintSize = 22;
+  const qrGroupH = qrSize + hintGap + hintSize;
   const qrX = x + w - padX - qrSize;
-  const qrY = y + (h - qrSize) / 2 - 8; // 留 16 给 hint
+  const qrY = y + (h - qrGroupH) / 2;
   let qrSvgInner = '';
   try {
     // qrcode lib 输出 <svg viewBox="0 0 N N">...<path d="M0 0h1v1h-1z"/></svg>
@@ -315,10 +319,10 @@ async function renderFooter(
     qrSvgInner = `<rect x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" fill="#fff" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`;
   }
 
-  // 「微信扫码查看」hint：以 QR 中心左右居中
+  // 「微信扫码查看」hint：以 QR 中心左右居中，QR 下方紧贴
   const hintX = qrX + qrSize / 2;
-  const hintY = qrY + qrSize + 24 + 6;
-  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="22" fill="${C.muted2}" text-anchor="middle">微信扫码查看</text>`;
+  const hintY = qrY + qrSize + hintGap + hintSize - 4; // baseline ≈ top + size - descender
+  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="${hintSize}" fill="${C.muted2}" text-anchor="middle">微信扫码查看</text>`;
 
   return innerCard + sharerAvatar + sharerMeta + qrSvgInner + hint;
 }
@@ -767,7 +771,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
   }
 
   // Footer 区
-  const footerH = 220;
+  const footerH = 264; // QR(168) + gap(14) + hint(22) + 上下各 30 留白
   const footerMargin = 48;
   const footerX = 56;
   const footerY = cardY + contentH + footerMargin;

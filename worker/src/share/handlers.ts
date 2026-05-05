@@ -280,35 +280,54 @@ function defaultAvatarPath(userId: string): string {
   return `/avatars/avatar-${n}.png`;
 }
 
-// 选海报第一张可用媒体图：GH = readme_excerpt 第一张非 SVG <img/>，PH = media JSON 第一张
-// role=gallery（fall back 到任意 image）。fetch + base64 → data URI；同时探宽高比给排版用。
+// 选海报媒体图：GH 抽 readme_excerpt 全部非 SVG <img>，PH 抽 media JSON gallery；
+// 顺序 fetch 每张做质量门控，第一张通过的用作海报媒体。
+// 门控：
+//   1. 宽高比 > 2 或 < 0.5 → banner / 长条，弃
+//   2. 字节密度（file_size / pixel_count）< 0.18 → 大块纯色低信息，弃
+// 最多探 5 张，避免拖慢 cold render。
 async function pickPosterMedia(
   sourceType: string,
   extra: Record<string, unknown> | null,
   media: unknown,
   request: Request,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
-  let url: string | undefined;
+  const candidates: string[] = [];
   if (sourceType === 'github') {
     const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
     if (readme) {
-      // 跳过 .svg（多是 shields/badge），找第一张 png/jpg/jpeg/gif/webp
-      const m = readme.match(/<img[^>]*\bsrc="([^"]+\.(?:png|jpg|jpeg|gif|webp))"/i);
-      if (m) url = m[1];
+      const re = /<img[^>]*\bsrc="([^"]+\.(?:png|jpg|jpeg|gif|webp))"/gi;
+      let m;
+      while ((m = re.exec(readme)) !== null) {
+        candidates.push(m[1]);
+        if (candidates.length >= 8) break;
+      }
     }
   } else if (sourceType === 'product_hunt') {
     if (Array.isArray(media)) {
       const arr = media as Array<{ type?: string; url?: string; role?: string }>;
-      const gallery = arr.find(x => x?.role === 'gallery' && typeof x.url === 'string');
-      url = gallery?.url || arr.find(x => x?.type === 'image' && typeof x.url === 'string' && x.role !== 'logo')?.url;
+      for (const x of arr) {
+        if (typeof x?.url === 'string' && x.role !== 'logo' && x.type === 'image') {
+          candidates.push(x.url);
+          if (candidates.length >= 8) break;
+        }
+      }
     }
   }
-  if (!url) return undefined;
 
-  // 相对路径补 origin：
-  // - /r/... 是 GH/PH README & gallery R2 反代，资源只在 prod R2 存（staging
-  //   不 mirror）；按 hash 寻址 immutable，跨环境拉 prod 安全
-  // - 其他 / 路径走当前 host
+  for (let i = 0; i < Math.min(candidates.length, 8); i++) {
+    const result = await tryFetchPosterImage(candidates[i], request);
+    if (result) return result;
+  }
+  return undefined;
+}
+
+async function tryFetchPosterImage(
+  rawUrl: string,
+  request: Request,
+): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
+  let url = rawUrl;
+  // /r/* immutable hash 资源永远拉 prod（staging R2 不 mirror）
   if (url.startsWith('/r/')) {
     url = 'https://api.ai-feeds.com' + url;
   } else if (url.startsWith('/')) {
@@ -331,25 +350,46 @@ async function pickPosterMedia(
     if (!res.ok) return undefined;
     const ct = res.headers.get('content-type') || 'image/png';
     const buf = await res.arrayBuffer();
-    if (buf.byteLength > 4 * 1024 * 1024) return undefined; // > 4MB 跳过
+    if (buf.byteLength > 4 * 1024 * 1024) return undefined;
+
+    // 质量门控（仅 PNG 能从字节流读维度；非 PNG 走通）
+    const dim = probePngDimensions(buf);
+    if (dim) {
+      const ar = dim.width / dim.height;
+      // 1) 宽高比检查：> 2（横长条）或 < 0.5（竖长条）→ 弃
+      if (ar > 2 || ar < 0.5) {
+        console.log(`[share-poster] reject ${rawUrl}: aspect ${ar.toFixed(2)}`);
+        return undefined;
+      }
+      // 2) 字节密度（粗略反映信息熵）：byte / pixel 太低 = 大块纯色（icon/banner 多为此）
+      // 经验阈值 0.18：内容截图 png 一般 0.5-2.0；icon/纯色 logo 普遍 0.05-0.15
+      const density = buf.byteLength / (dim.width * dim.height);
+      if (density < 0.18) {
+        console.log(`[share-poster] reject ${rawUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
+        return undefined;
+      }
+    }
     const b64 = arrayBufferToBase64(buf);
-    return { dataUri: `data:${ct};base64,${b64}`, aspectRatio: probePngAspectRatio(buf) };
+    return {
+      dataUri: `data:${ct};base64,${b64}`,
+      aspectRatio: dim ? dim.width / dim.height : undefined,
+    };
   } catch (e) {
-    console.error('[share-poster] media fetch failed:', url, e);
+    console.error('[share-poster] media fetch failed:', rawUrl, e);
     return undefined;
   }
 }
 
 // 探 PNG 文件头宽高（IHDR chunk: bytes 16-19=width, 20-23=height）；非 PNG 返回 undefined
-function probePngAspectRatio(buf: ArrayBuffer): number | undefined {
+function probePngDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
   const view = new DataView(buf);
   if (buf.byteLength < 24) return undefined;
   // PNG 签名 89 50 4E 47 0D 0A 1A 0A
   if (view.getUint32(0) !== 0x89504E47 || view.getUint32(4) !== 0x0D0A1A0A) return undefined;
-  const w = view.getUint32(16);
-  const h = view.getUint32(20);
-  if (!w || !h) return undefined;
-  return w / h;
+  const width = view.getUint32(16);
+  const height = view.getUint32(20);
+  if (!width || !height) return undefined;
+  return { width, height };
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
