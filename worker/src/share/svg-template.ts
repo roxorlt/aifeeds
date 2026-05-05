@@ -157,6 +157,20 @@ function strokeIcon(paths: string[], x: number, y: number, size: number, color: 
   return `<g transform="translate(${x} ${y}) scale(${scale})" stroke="${color}" stroke-linecap="round" stroke-linejoin="round" fill="none">${ps}</g>`;
 }
 
+// 视频封面叠加 play 按钮：半透明圆 + 白色三角，居中放在 media block
+function playOverlay(centerX: number, centerY: number, radius = 60): string {
+  const size = radius * 2;
+  const triangleW = radius * 0.7;
+  const triangleH = radius * 0.85;
+  // 三角形左上角偏移（让中心稍偏右一点视觉对齐）
+  const tx = centerX - triangleW / 2 + radius * 0.08;
+  const ty = centerY - triangleH / 2;
+  return `
+    <circle cx="${centerX}" cy="${centerY}" r="${radius}" fill="rgba(0,0,0,0.55)"/>
+    <circle cx="${centerX}" cy="${centerY}" r="${radius}" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="2"/>
+    <path d="M ${tx} ${ty} L ${tx + triangleW} ${ty + triangleH / 2} L ${tx} ${ty + triangleH} Z" fill="white"/>`;
+}
+
 // AI-Feeds logo（square_bw_night 同款）：base64 SVG → 直接 data URL <image>
 const AI_FEEDS_LOGO_DATA_URL =
   'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNNTQgMzQwIEw0MDUgOTQiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSIxOCIvPjxwYXRoIGQ9Ik03MCAzMzEgTDM5NCAxMDQiIHN0cm9rZT0iIzBCMEYxNCIgc3Ryb2tlLXdpZHRoPSI1IiBvcGFjaXR5PSIwLjkyIi8+PGVsbGlwc2UgY3g9IjU1IiBjeT0iMzQwIiByeD0iOS41IiByeT0iMTIuNSIgdHJhbnNmb3JtPSJyb3RhdGUoLTU1IDU1IDM0MCkiIGZpbGw9IiMwQjBGMTQiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSI2Ii8+PHBhdGggZD0iTTE1MCAyNzYgQzE1NCAyNjcgMTYzIDI2NyAxNjYgMjc0IiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iNSIvPjxwYXRoIGQ9Ik0yNzYgMTg4IEMyODEgMTc4IDI5MSAxODAgMjkyIDE4OCIgc3Ryb2tlPSIjRjNGNEY2IiBzdHJva2Utd2lkdGg9IjUiLz48L2c+PGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRjNGNEY2IiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMzk4IDEwMCBDMzg2IDg4IDM5MCA3NiA0MDMgODMgQzQxNCA5MCA0MTEgMTAyIDM5OCAxMDBaIi8+PHBhdGggZD0iTTQwNSA5OSBDNDIzIDgzIDQzNiA4NCA0MzcgOTMgQzQzOCAxMDMgNDIwIDEwNiA0MDUgOTlaIi8+PHBhdGggZD0iTTQwNCAxMDAgQzM5MiAxMTMgMzgzIDEyMCAzNzcgMTE1Ii8+PHBhdGggZD0iTTQwNyAxMDIgQzQyMCAxMTUgNDI5IDEyMiA0MzUgMTE2Ii8+PC9nPjxwYXRoIGQ9Ik00MDUgMTAzIEw0MDUgMjQxIiBmaWxsPSJub25lIiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iNS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48ZyBmaWxsPSJub25lIiBzdHJva2U9IiM4REREM0QiIHN0cm9rZS13aWR0aD0iNi41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik00MDUgMjQ2IEw0MDUgMTc4Ii8+PHBhdGggZD0iTTQwNSAyMTQgTDM4NCAxOTMiLz48cGF0aCBkPSJNNDA1IDIxMCBMNDMwIDE4NyIvPjxwYXRoIGQ9Ik00MDYgMjI5IEwzNzEgMjE4Ii8+PHBhdGggZD0iTTQwNyAyMjUgTDQ0NCAyMTgiLz48cGF0aCBkPSJNNDAxIDIzMyBMMzgyIDI0NiIvPjxwYXRoIGQ9Ik00MTAgMjM1IEw0MzcgMjQ4Ii8+PHBhdGggZD0iTTQwNSAxOTAgTDM5NCAxNzkiLz48cGF0aCBkPSJNNDA1IDE5OCBMNDE4IDE4NCIvPjxwYXRoIGQ9Ik0zODQgMTkzIEwzNzAgMTkwIi8+PHBhdGggZD0iTTM4NCAxOTMgTDM4MSAxNzkiLz48cGF0aCBkPSJNNDMwIDE4NyBMNDQzIDE4NCIvPjxwYXRoIGQ9Ik00MzAgMTg3IEw0MzIgMTcyIi8+PHBhdGggZD0iTTM3MSAyMTggTDM1OCAyMTUiLz48cGF0aCBkPSJNMzcxIDIxOCBMMzY1IDIwNSIvPjxwYXRoIGQ9Ik00NDQgMjE4IEw0NTggMjE4Ii8+PHBhdGggZD0iTTQ0NCAyMTggTDQ1MiAyMDUiLz48L2c+PGcgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMzgyIDI0OSBDMzY1IDI4MSAzNjUgMzUzIDM5MCA0NDQgQzM5MiA0NTIgNDAxIDQ1MiA0MDQgNDQ0IEM0MzEgMzUzIDQyOSAyODAgNDEzIDI0OSBDNDA1IDIzNyAzOTAgMjM3IDM4MiAyNDlaIiBmaWxsPSIjRkY5QTFBIiBzdHJva2U9IiNGM0Y0RjYiIHN0cm9rZS13aWR0aD0iOCIvPjxwYXRoIGQ9Ik0zODEgMjkxIEMzOTQgMjk5IDQwNyAzMDAgNDIxIDI5NCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMDhBIiBzdHJva2Utd2lkdGg9IjQuNSIgb3BhY2l0eT0iMC45Ii8+PHBhdGggZD0iTTM3NiAzMzEgQzM5MSAzMzkgNDA1IDM0MCA0MjMgMzMzIiBmaWxsPSJub25lIiBzdHJva2U9IiNGRkQwOEEiIHN0cm9rZS13aWR0aD0iNC41IiBvcGFjaXR5PSIwLjkiLz48cGF0aCBkPSJNMzg0IDM3OCBDMzk3IDM4NCA0MTAgMzg0IDQyMCAzNzkiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0ZGRDA4QSIgc3Ryb2tlLXdpZHRoPSI0LjUiIG9wYWNpdHk9IjAuOSIvPjxwYXRoIGQ9Ik0zOTAgNDE0IEMzOTggNDE5IDQwNyA0MTkgNDE0IDQxNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMDhBIiBzdHJva2Utd2lkdGg9IjQuNSIgb3BhY2l0eT0iMC45Ii8+PC9nPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0YzRjRGNiIgc3Ryb2tlLXdpZHRoPSI2IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik00MDQgMjQ3IEMzODUgMjI2IDM1OSAyMzEgMzY5IDI1MCBDMzc4IDI2OCAzOTIgMjYwIDQwNCAyNDdaIi8+PHBhdGggZD0iTTQwNiAyNDcgQzQyOCAyMjQgNDUyIDIzMiA0NDIgMjUxIEM0MzIgMjY4IDQxOCAyNjEgNDA2IDI0N1oiLz48cGF0aCBkPSJNNDA0IDI0OCBDMzk4IDI1OSAzOTIgMjY3IDM4NSAyNzMiLz48cGF0aCBkPSJNNDA3IDI0OCBDNDE1IDI2MCA0MjEgMjY4IDQyOSAyNzMiLz48L2c+PC9zdmc+';
@@ -341,6 +355,7 @@ function renderXContent(opts: {
   };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
+  mediaIsVideo?: boolean;
 }): { svg: string; height: number } {
   const padX = 36;       // 56→36：让 body 宽度更接近 v7 mockup 期望
   const padTop = 56;
@@ -379,10 +394,11 @@ function renderXContent(opts: {
     const mediaX = innerX + (innerW - mediaW) / 2;
     const mediaY = cy;
     const clipId = `x-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
     mediaSvg = `
       <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
       <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
     cy = mediaY + mediaH + 26;
   }
 
@@ -469,6 +485,7 @@ function renderGithubContent(opts: {
   body: string;
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
+  mediaIsVideo?: boolean;
   ownerAvatarDataUri?: string;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
@@ -610,10 +627,11 @@ function renderGithubContent(opts: {
     const mediaX = innerX + (innerW - mediaW) / 2;
     const mediaY = cy;
     const clipId = `gh-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
     mediaSvg = `
       <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
       <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
     cy += mediaH + 16;
   }
   cy += 12; // 卡片底部内边距收尾
@@ -632,6 +650,7 @@ function renderPhContent(opts: {
   stats?: { comments?: number | string; rating?: string; followers?: number | string };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
+  mediaIsVideo?: boolean;
   productLogoDataUri?: string;
 }): { svg: string; height: number } {
   const padX = 36, padTop = 56;
@@ -720,10 +739,11 @@ function renderPhContent(opts: {
     const mediaX = innerX + (innerW - mediaW) / 2;
     const mediaY = cy;
     const clipId = `ph-media-clip-${Math.random().toString(36).slice(2, 8)}`;
+    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
     mediaSvg = `
       <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
       <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
     cy += mediaH + 16;
   }
   cy += 12;
@@ -752,6 +772,8 @@ export interface PosterItem {
   mediaImageDataUri?: string;
   // 媒体图原始宽高比（fetched 后传入），用于按比缩放避免变形
   mediaAspectRatio?: number;
+  // 媒体图是视频封面 → 渲完图叠加圆形 play 按钮
+  mediaIsVideo?: boolean;
   // 作者/项目头像（worker fetch + base64 后传入）
   // GH = owner 头像 https://github.com/<owner>.png
   // PH = 产品 logo（media JSON role=logo 那张）
@@ -797,6 +819,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       body: bodyText(item),
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
+      mediaIsVideo: item.mediaIsVideo,
       ownerAvatarDataUri: item.authorAvatarDataUri,
     });
     contentSvg = r.svg;
@@ -812,6 +835,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       body: bodyText(item),
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
+      mediaIsVideo: item.mediaIsVideo,
       productLogoDataUri: item.authorAvatarDataUri,
       stats: {
         comments: m.comments as number | undefined,
@@ -838,6 +862,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       },
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
+      mediaIsVideo: item.mediaIsVideo,
     });
     contentSvg = r.svg;
     contentH = r.height;

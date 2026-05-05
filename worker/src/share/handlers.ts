@@ -182,6 +182,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     extra: itemExtra,
     mediaImageDataUri: mediaInfo?.dataUri,
     mediaAspectRatio: mediaInfo?.aspectRatio,
+    mediaIsVideo: mediaInfo?.isVideo,
     authorAvatarDataUri,
   };
   // ─── 拉分享人真实信息 ─────────────────────────────────
@@ -321,31 +322,46 @@ async function pickPosterMedia(
   media: unknown,
   request: Request,
   env: Env,
-): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
+): Promise<{ dataUri: string; aspectRatio?: number; isVideo?: boolean } | undefined> {
   // candidate 可带 known dims（X media 已提供 w/h，避免 fetch 后再探）
-  const candidates: Array<{ url: string; width?: number; height?: number }> = [];
+  // isVideo 标记：用作 svg-template 渲 media 时叠加 play 按钮
+  const candidates: Array<{ url: string; width?: number; height?: number; isVideo?: boolean }> = [];
 
   if (sourceType === 'github') {
     const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
     if (readme) {
-      // 接受所有 <img src="...">，但跳过 .svg（多是 shields/badges）
-      // GitHub user-attachments URL 不带扩展名（github.com/user-attachments/assets/<uuid>）
-      // 也要纳入候选，让质量门控判断
+      // 接受所有 <img src="...">，包括 SVG（resvg 二次渲染成 PNG）
+      // GitHub user-attachments URL 不带扩展名也纳入候选
+      // 顺序：非 SVG 优先、SVG 后备（多数 SVG 是 shields/badges）
       const re = /<img[^>]*\bsrc="([^"]+)"/gi;
+      const nonSvg: string[] = [];
+      const svgs: string[] = [];
       let m;
       while ((m = re.exec(readme)) !== null) {
         const u = m[1];
-        if (/\.svg(\?|$)/i.test(u)) continue;
+        if (/\.svg(\?|$)/i.test(u)) svgs.push(u);
+        else nonSvg.push(u);
+        if (nonSvg.length + svgs.length >= 16) break;
+      }
+      for (const u of [...nonSvg, ...svgs]) {
         candidates.push({ url: u });
-        if (candidates.length >= 8) break;
+        if (candidates.length >= 10) break;
       }
     }
   } else if (sourceType === 'product_hunt') {
     if (Array.isArray(media)) {
-      const arr = media as Array<{ type?: string; url?: string; role?: string }>;
+      const arr = media as Array<{ type?: string; url?: string; role?: string; poster?: string }>;
+      // 先 gallery image
       for (const x of arr) {
         if (typeof x?.url === 'string' && x.role !== 'logo' && x.type === 'image') {
           candidates.push({ url: x.url });
+          if (candidates.length >= 8) break;
+        }
+      }
+      // 再 video（PH 视频带 poster URL，YouTube/上传视频统一处理）
+      for (const x of arr) {
+        if (x?.type === 'video' && typeof x.poster === 'string') {
+          candidates.push({ url: x.poster, isVideo: true });
           if (candidates.length >= 8) break;
         }
       }
@@ -374,7 +390,7 @@ async function pickPosterMedia(
       }
     }
     const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height);
-    if (result) return result;
+    if (result) return { ...result, isVideo: c.isVideo };
   }
   return undefined;
 }
@@ -403,7 +419,7 @@ async function tryFetchPosterImage(
           return undefined;
         }
         const ct = obj.httpMetadata?.contentType || 'image/png';
-        return validateAndEncode(buf, ct, rawUrl, knownW, knownH);
+        return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH);
       } catch (e) {
         console.error('[share-poster] R2 read failed:', key, e);
         return undefined;
@@ -444,9 +460,44 @@ async function tryFetchPosterImage(
     }
     const ct = res.headers.get('content-type') || 'image/png';
     const buf = await res.arrayBuffer();
-    return validateAndEncode(buf, ct, rawUrl, knownW, knownH);
+    return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH);
   } catch (e) {
     console.error('[share-poster] media fetch failed:', rawUrl, e);
+    return undefined;
+  }
+}
+
+// SVG → PNG 二次渲染（用 resvg），其他类型直接走 validateAndEncode
+async function maybeConvertAndEncode(
+  buf: ArrayBuffer,
+  contentType: string,
+  origUrl: string,
+  knownW?: number,
+  knownH?: number,
+): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
+  const isSvg = contentType.includes('svg') || /\.svg(\?|$)/i.test(origUrl);
+  if (!isSvg) return validateAndEncode(buf, contentType, origUrl, knownW, knownH);
+  try {
+    const svgText = new TextDecoder().decode(new Uint8Array(buf));
+    // 快速 viewBox 探查：太长条 banner 提前弃，避免无谓 resvg 渲染
+    const vb = svgText.match(/viewBox=["']\s*[\d.\-]+\s+[\d.\-]+\s+([\d.]+)\s+([\d.]+)/);
+    if (vb) {
+      const w = parseFloat(vb[1]);
+      const h = parseFloat(vb[2]);
+      if (w > 0 && h > 0) {
+        const ar = w / h;
+        if (ar > 4 || ar < 0.25) {
+          console.log(`[share-poster] reject ${origUrl}: svg viewBox aspect ${ar.toFixed(2)}`);
+          return undefined;
+        }
+      }
+    }
+    const { renderSvgToPng } = await import('./poster');
+    const png = await renderSvgToPng(svgText);
+    // 再走 PNG 维度 + 密度门控
+    return validateAndEncode(png.buffer as ArrayBuffer, 'image/png', origUrl, knownW, knownH);
+  } catch (e) {
+    console.error('[share-poster] svg → png failed:', origUrl, e);
     return undefined;
   }
 }
