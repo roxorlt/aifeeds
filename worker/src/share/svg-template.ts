@@ -157,6 +157,37 @@ function strokeIcon(paths: string[], x: number, y: number, size: number, color: 
   return `<g transform="translate(${x} ${y}) scale(${scale})" stroke="${color}" stroke-linecap="round" stroke-linejoin="round" fill="none">${ps}</g>`;
 }
 
+// 媒体 block：image / video poster / video placeholder（无 thumbnail）
+// dataUri 空 + isVideo=true → 灰底占位 + play（GH user-attachments video 没 poster URL）
+function renderMediaBlock(
+  dataUri: string | undefined,
+  aspectRatio: number | undefined,
+  isVideo: boolean | undefined,
+  innerX: number,
+  innerW: number,
+  cy: number,
+  clipPrefix: string,
+): string {
+  const ar = aspectRatio && aspectRatio > 0 ? aspectRatio : 16 / 9;
+  const mediaH = Math.min(innerW / ar, 520);
+  const mediaW = mediaH * ar;
+  const mediaX = innerX + (innerW - mediaW) / 2;
+  const mediaY = cy;
+  const clipId = `${clipPrefix}-clip-${Math.random().toString(36).slice(2, 8)}`;
+  const overlay = isVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
+  // 没图但是 isVideo → 渲灰底占位
+  if (!dataUri && isVideo) {
+    return `
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#1a1d24" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      ${overlay}`;
+  }
+  if (!dataUri) return '';
+  return `
+    <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+    <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+    <image href="${dataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
+}
+
 // 视频封面叠加 play 按钮：半透明圆 + 白色三角，居中放在 media block
 function playOverlay(centerX: number, centerY: number, radius = 60): string {
   const size = radius * 2;
@@ -387,19 +418,11 @@ function renderXContent(opts: {
 
   // 有媒体（X 推文图）：body 之后 / engagement 之前插入 media block
   let mediaSvg = '';
-  if (opts.mediaImageDataUri) {
+  if (opts.mediaImageDataUri || opts.mediaIsVideo) {
+    mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'x-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
     const mediaH = Math.min(innerW / ar, 520);
-    const mediaW = mediaH * ar;
-    const mediaX = innerX + (innerW - mediaW) / 2;
-    const mediaY = cy;
-    const clipId = `x-media-clip-${Math.random().toString(36).slice(2, 8)}`;
-    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
-    mediaSvg = `
-      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
-      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
-    cy = mediaY + mediaH + 26;
+    cy = cy + mediaH + 26;
   }
 
   // engagement: top border + 4 columns (reply/retweet/heart/eye)
@@ -620,18 +643,10 @@ function renderGithubContent(opts: {
 
   // 有媒体：body 之后再放第一张 README 图（按比例缩放占满 innerW，最大高 480）
   let mediaSvg = '';
-  if (opts.mediaImageDataUri) {
+  if (opts.mediaImageDataUri || opts.mediaIsVideo) {
+    mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'gh-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
     const mediaH = Math.min(innerW / ar, 520);
-    const mediaW = mediaH * ar;
-    const mediaX = innerX + (innerW - mediaW) / 2;
-    const mediaY = cy;
-    const clipId = `gh-media-clip-${Math.random().toString(36).slice(2, 8)}`;
-    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
-    mediaSvg = `
-      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
-      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
     cy += mediaH + 16;
   }
   cy += 12; // 卡片底部内边距收尾
@@ -732,18 +747,10 @@ function renderPhContent(opts: {
 
   // 有媒体：stats 之后放第一张 gallery 图（按比例缩放占满 innerW，最大高 520）
   let mediaSvg = '';
-  if (opts.mediaImageDataUri) {
+  if (opts.mediaImageDataUri || opts.mediaIsVideo) {
+    mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'ph-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
     const mediaH = Math.min(innerW / ar, 520);
-    const mediaW = mediaH * ar;
-    const mediaX = innerX + (innerW - mediaW) / 2;
-    const mediaY = cy;
-    const clipId = `ph-media-clip-${Math.random().toString(36).slice(2, 8)}`;
-    const overlay = opts.mediaIsVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
-    mediaSvg = `
-      <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
-      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
-      <image href="${opts.mediaImageDataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
     cy += mediaH + 16;
   }
   cy += 12;

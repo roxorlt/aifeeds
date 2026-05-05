@@ -308,8 +308,58 @@ async function pickAuthorAvatar(
     }
   }
   if (!url) return undefined;
-  const result = await tryFetchPosterImage(url, request, env);
-  return result?.dataUri;
+  // 头像走单独路径：只需要 fetch + sniff + base64，不做 media 门控
+  // （avatar 本来就是小方图，会被 max-dim < 800 + aspect~1 误杀）
+  return await fetchAvatarOnly(url, env);
+}
+
+// 头像专用 fetcher：跳过 media 门控
+async function fetchAvatarOnly(rawUrl: string, env: Env): Promise<string | undefined> {
+  let url = rawUrl;
+  if (url.startsWith('/r/') && env.READMES) {
+    const key = url.slice(3);
+    try {
+      const obj = await env.READMES.get(key);
+      if (!obj) return undefined;
+      const buf = await obj.arrayBuffer();
+      const sniffed = sniffImageType(buf);
+      const ct = sniffed ? mimeFor(sniffed) : (obj.httpMetadata?.contentType || 'image/png');
+      if (sniffed === 'svg') {
+        // SVG → PNG via resvg
+        const svgText = new TextDecoder().decode(new Uint8Array(buf));
+        const { renderSvgToPng } = await import('./poster');
+        const png = new Uint8Array(await renderSvgToPng(svgText));
+        return `data:image/png;base64,${arrayBufferToBase64(png.buffer)}`;
+      }
+      return `data:${ct};base64,${arrayBufferToBase64(buf)}`;
+    } catch (e) {
+      console.error('[share-poster] avatar R2 read failed:', key, e);
+      return undefined;
+    }
+  }
+  if (url.startsWith('/')) {
+    const url2 = (rawUrl.startsWith('/r/') ? 'https://api.ai-feeds.com' : '') + url;
+    url = url2;
+  }
+  if (url.includes('ph-files.imgix.net')) {
+    const u = new URL(url);
+    u.searchParams.set('w', '512');
+    u.searchParams.set('fit', 'max');
+    u.searchParams.set('fm', 'png');
+    url = u.toString();
+  }
+  try {
+    const res = await fetch(url, { cf: { cacheTtl: 86400, cacheEverything: true } });
+    if (!res.ok) return undefined;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > 2 * 1024 * 1024) return undefined;
+    const sniffed = sniffImageType(buf);
+    const ct = sniffed ? mimeFor(sniffed) : (res.headers.get('content-type') || 'image/png');
+    return `data:${ct};base64,${arrayBufferToBase64(buf)}`;
+  } catch (e) {
+    console.error('[share-poster] avatar fetch failed:', rawUrl, e);
+    return undefined;
+  }
 }
 
 // 选海报媒体图：GH 抽 readme_excerpt 全部非 SVG <img>，PH 抽 media JSON gallery；
@@ -394,6 +444,14 @@ async function pickPosterMedia(
     const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height);
     if (result) return { ...result, isVideo: c.isVideo };
   }
+  // fallback：GH readme 有 <video> 但所有 <img> 都被弃 → 灰底 + play 占位
+  // （GitHub user-attachments video 没有可拿的 poster URL，video 解码超出 worker 能力）
+  if (sourceType === 'github') {
+    const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
+    if (/<video\b/i.test(readme)) {
+      return { dataUri: '', aspectRatio: 16 / 9, isVideo: true };
+    }
+  }
   return undefined;
 }
 
@@ -477,8 +535,14 @@ async function maybeConvertAndEncode(
   knownW?: number,
   knownH?: number,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
-  const isSvg = contentType.includes('svg') || /\.svg(\?|$)/i.test(origUrl);
-  if (!isSvg) return validateAndEncode(buf, contentType, origUrl, knownW, knownH);
+  // 优先信 magic bytes，不信 R2 metadata / response header（GH user-attachments
+  // 跟 R2 mirror 经常 ct 跟实际 bytes 不符 — .png 文件里塞 JPEG 之类的）
+  const realType = sniffImageType(buf);
+  const isSvg = realType === 'svg' || (!realType && (contentType.includes('svg') || /\.svg(\?|$)/i.test(origUrl)));
+  if (!isSvg) {
+    const ct = realType ? mimeFor(realType) : contentType;
+    return validateAndEncode(buf, ct, origUrl, knownW, knownH);
+  }
   try {
     const svgText = new TextDecoder().decode(new Uint8Array(buf));
     // 快速 viewBox 探查：太长条 banner 提前弃，避免无谓 resvg 渲染
@@ -496,8 +560,10 @@ async function maybeConvertAndEncode(
     }
     const { renderSvgToPng } = await import('./poster');
     const png = await renderSvgToPng(svgText);
-    // 再走 PNG 维度 + 密度门控
-    return validateAndEncode(png.buffer as ArrayBuffer, 'image/png', origUrl, knownW, knownH);
+    // ⚠️ resvg.asPng() 返回 Uint8Array view 指向 wasm memory；必须复制出实际 bytes
+    // 否则后续 base64 编码会把整块 wasm memory（含其他 PNG/无关数据）一起编进去
+    const pngCopy = new Uint8Array(png);
+    return validateAndEncode(pngCopy.buffer, 'image/png', origUrl, knownW, knownH);
   } catch (e) {
     console.error('[share-poster] svg → png failed:', origUrl, e);
     return undefined;
@@ -516,8 +582,8 @@ function validateAndEncode(
     console.log(`[share-poster] reject ${origUrl}: too big ${buf.byteLength}`);
     return undefined;
   }
-  // 质量门控（仅 PNG 能从字节流读维度；非 PNG 走通）
-  const dim = probePngDimensions(buf);
+  // 质量门控：PNG / JPEG / GIF 都能读维度；不认识的格式跳过门控
+  const dim = probeImageDimensions(buf);
   if (dim) {
     const ar = dim.width / dim.height;
     if (ar > 4 || ar < 0.25) {
@@ -529,12 +595,55 @@ function validateAndEncode(
       console.log(`[share-poster] reject ${origUrl}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
       return undefined;
     }
+    // 全局最小尺寸：max dim < 600 → 弃（icon、button、shields、wechat 群 QR 都偏小）
+    // 真正的内容图（架构图、截图、产品 hero）通常 > 800 宽
+    const maxDim = Math.max(dim.width, dim.height);
+    if (maxDim < 600) {
+      console.log(`[share-poster] reject ${origUrl}: too small ${dim.width}x${dim.height}`);
+      return undefined;
+    }
+    // 中等尺寸方图额外门控：> 600 但 < 1000 + aspect ~1 也按 icon/QR 处理
+    if (maxDim < 1000 && ar > 0.7 && ar < 1.4) {
+      console.log(`[share-poster] reject ${origUrl}: small square ${dim.width}x${dim.height}`);
+      return undefined;
+    }
   }
   const b64 = arrayBufferToBase64(buf);
   const aspectRatio = dim
     ? dim.width / dim.height
     : (knownW && knownH ? knownW / knownH : undefined);
   return { dataUri: `data:${contentType};base64,${b64}`, aspectRatio };
+}
+
+// 嗅探图片真实类型（magic bytes）：内容为王，不信 content-type / extension
+function sniffImageType(buf: ArrayBuffer): 'png' | 'jpeg' | 'gif' | 'webp' | 'svg' | undefined {
+  if (buf.byteLength < 12) return undefined;
+  const v = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (v.getUint32(0) === 0x89504E47 && v.getUint32(4) === 0x0D0A1A0A) return 'png';
+  // JPEG: FF D8 FF
+  if (u8[0] === 0xFF && u8[1] === 0xD8 && u8[2] === 0xFF) return 'jpeg';
+  // GIF: 47 49 46 38
+  if (v.getUint32(0) === 0x47494638) return 'gif';
+  // WebP: RIFF.... WEBP
+  if (v.getUint32(0) === 0x52494646 && v.getUint32(8) === 0x57454250) return 'webp';
+  // SVG（XML）：检查首 ~256 字节有 '<svg' 或 '<?xml ... <svg'
+  const headLen = Math.min(buf.byteLength, 256);
+  const head = new TextDecoder().decode(u8.slice(0, headLen));
+  if (/<svg\b/i.test(head)) return 'svg';
+  if (/^\s*<\?xml/i.test(head)) return 'svg'; // XML prolog 通常意味着 SVG
+  return undefined;
+}
+
+function mimeFor(t: 'png' | 'jpeg' | 'gif' | 'webp' | 'svg'): string {
+  switch (t) {
+    case 'png': return 'image/png';
+    case 'jpeg': return 'image/jpeg';
+    case 'gif': return 'image/gif';
+    case 'webp': return 'image/webp';
+    case 'svg': return 'image/svg+xml';
+  }
 }
 
 // 探 PNG 文件头宽高（IHDR chunk: bytes 16-19=width, 20-23=height）；非 PNG 返回 undefined
@@ -547,6 +656,42 @@ function probePngDimensions(buf: ArrayBuffer): { width: number; height: number }
   const height = view.getUint32(20);
   if (!width || !height) return undefined;
   return { width, height };
+}
+
+// 通用维度探查：PNG / JPEG / GIF / WebP；不认识返回 undefined
+function probeImageDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
+  const png = probePngDimensions(buf);
+  if (png) return png;
+  const v = new DataView(buf);
+  if (buf.byteLength < 4) return undefined;
+  // JPEG: walk segments (FF Mn LL LL ...) 找 SOF (C0-CF except C4/C8/CC)
+  if (v.getUint8(0) === 0xFF && v.getUint8(1) === 0xD8) {
+    let i = 2;
+    while (i < buf.byteLength - 1) {
+      if (v.getUint8(i) !== 0xFF) return undefined;
+      const marker = v.getUint8(i + 1);
+      i += 2;
+      // SOF0..SOF15，跳过 DHT (C4) / JPG (C8) / DAC (CC)
+      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+        if (i + 7 > buf.byteLength) return undefined;
+        const height = v.getUint16(i + 3);
+        const width = v.getUint16(i + 5);
+        if (!width || !height) return undefined;
+        return { width, height };
+      }
+      // 普通 segment：长度 2 字节 + 数据
+      if (i + 2 > buf.byteLength) return undefined;
+      const segLen = v.getUint16(i);
+      i += segLen;
+    }
+    return undefined;
+  }
+  // GIF: 47 49 46 38 ... 6,7=width(LE) 8,9=height(LE)
+  if (v.getUint32(0) === 0x47494638 && buf.byteLength >= 10) {
+    return { width: v.getUint16(6, true), height: v.getUint16(8, true) };
+  }
+  // WebP VP8/VP8L/VP8X: 复杂，省略（少见且这场景遇到概率低）
+  return undefined;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
