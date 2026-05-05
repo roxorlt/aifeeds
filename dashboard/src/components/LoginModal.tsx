@@ -62,6 +62,7 @@ export function LoginModal() {
   const [loading, setLoading] = useState(false);
   const [phoneError, setPhoneError] = useState('');  // 紧挨手机号输入框的提示
   const [codeError, setCodeError] = useState('');    // 紧挨验证码输入框的提示
+  const [turnstileError, setTurnstileError] = useState('');  // 人机校验自身错误（hostname 未授权 / 网络挂等）
   const [cooldownSec, setCooldownSec] = useState(0);
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
@@ -93,8 +94,19 @@ export function LoginModal() {
         const id = window.turnstile.render(turnstileContainerRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           theme: 'auto',
-          callback: (token: string) => setTurnstileToken(token),
-          'error-callback': () => setTurnstileToken(null),
+          callback: (token: string) => {
+            setTurnstileToken(token);
+            setTurnstileError('');
+          },
+          'error-callback': (code?: string) => {
+            setTurnstileToken(null);
+            // 600010 = sitekey 配置 / hostname 未授权；其他保留原始码，便于反馈
+            const friendly =
+              code === '600010'
+                ? '人机校验配置异常（站点 hostname 未在 Cloudflare Turnstile 授权列表内）。请联系管理员。'
+                : `人机校验失败（错误码 ${code || 'unknown'}），请刷新重试。`;
+            setTurnstileError(friendly);
+          },
           'expired-callback': () => setTurnstileToken(null),
         });
         createdId = id;
@@ -239,6 +251,9 @@ export function LoginModal() {
 
         {/* Turnstile widget */}
         <div ref={turnstileContainerRef} className="mt-3 flex justify-center" />
+        {turnstileError && (
+          <p className="mt-1 text-center text-xs text-rose-600">{turnstileError}</p>
+        )}
 
         {/* 验证码 — 始终可点击；用户可以提前聚焦 / 粘贴。
             登录按钮的 disabled 已经依赖 codeSent + 6 位长度，
