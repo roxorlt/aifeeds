@@ -318,7 +318,7 @@ async function renderFooter(
   // 「扫码查看完整内容」hint
   const hintX = qrX + qrSize;
   const hintY = qrY + qrSize + 24 + 6;
-  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="22" fill="${C.muted2}" text-anchor="end">扫码查看完整内容</text>`;
+  const hint = `<text x="${hintX}" y="${hintY}" font-family='${FONT}' font-size="22" fill="${C.muted2}" text-anchor="end">微信扫码查看</text>`;
 
   return innerCard + sharerAvatar + sharerMeta + qrSvgInner + hint;
 }
@@ -494,25 +494,33 @@ function renderGithubContent(opts: {
   ];
   const metColW = innerW / 3;
   let metricsSvg = '';
+  // 每列：[icon + 数字] 同一水平行居中；下方一行 label
+  // 列高 96，icon+数字这一行 baseline 在 metRowY+44，label baseline 在 metRowY+82
   metricsArr.forEach((m, i) => {
     const cx = innerX + metColW * i + metColW / 2;
-    const iconSize = 32;
-    const numberY = metRowY + 36;
-    const labelY = numberY + 36;
-    metricsSvg += fillIcon(m.icon, cx - iconSize / 2 - 60, numberY - iconSize, iconSize, C.muted, m.viewBox);
-    metricsSvg += `<text x="${cx - 40}" y="${numberY}" font-family='${FONT}' font-size="34" font-weight="700" fill="${C.ink}" text-anchor="start">${esc(m.value)}</text>`;
-    metricsSvg += `<text x="${cx}" y="${labelY}" font-family='${FONT}' font-size="24" font-weight="500" fill="${C.muted2}" text-anchor="middle">${esc(m.label)}</text>`;
+    const iconSize = 30;
+    const numberSize = 34;
+    const numberValueText = m.value;
+    const numberW = estimateTextWidth(numberValueText, numberSize, 0.85);
+    const groupW = iconSize + 12 + numberW;
+    const groupX = cx - groupW / 2;
+    const iconY = metRowY + 44 - iconSize + 4; // icon 顶 baseline 微调对齐
+    metricsSvg += fillIcon(m.icon, groupX, iconY, iconSize, C.muted, m.viewBox);
+    metricsSvg += `<text x="${groupX + iconSize + 12}" y="${metRowY + 44}" font-family='${FONT}' font-size="${numberSize}" font-weight="700" fill="${C.ink}">${esc(numberValueText)}</text>`;
+    metricsSvg += `<text x="${cx}" y="${metRowY + 82}" font-family='${FONT}' font-size="24" font-weight="500" fill="${C.muted2}" text-anchor="middle">${esc(m.label)}</text>`;
     if (i < 2) {
-      metricsSvg += `<line x1="${cx + metColW / 2}" y1="${metRowY}" x2="${cx + metColW / 2}" y2="${metRowY + 96}" stroke="${C.line}" stroke-width="1"/>`;
+      metricsSvg += `<line x1="${cx + metColW / 2}" y1="${metRowY + 8}" x2="${cx + metColW / 2}" y2="${metRowY + 88}" stroke="${C.line}" stroke-width="1"/>`;
     }
   });
   metricsSvg += `<line x1="${innerX}" y1="${metRowY + 110}" x2="${innerX + innerW}" y2="${metRowY + 110}" stroke="${C.line}" stroke-width="1"/>`;
   cy += 130;
 
-  // meta row: trophy + rank (left), contributors (right)
-  const trophySize = 36;
-  const metaLineY = cy;
-  const trophySvg = strokeIcon(TROPHY_PATHS, innerX, metaLineY - trophySize + 4, trophySize, C.trophy, 2.5);
+  // meta row: trophy + rank (左)，contributors（右）
+  // trophy 24×24 viewBox，渲到 32×32；让 icon 视觉中心 = text baseline 上方 ~10px
+  const metaLineY = cy + 22; // text baseline
+  const trophySize = 32;
+  const trophyY = metaLineY - trophySize + 5;
+  const trophySvg = strokeIcon(TROPHY_PATHS, innerX, trophyY, trophySize, C.trophy, 2.5);
   const rankX = innerX + trophySize + 14;
   const rankSvg = `<text x="${rankX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(opts.rankLabel)}</text>`;
   let contribSvg = '';
@@ -523,7 +531,7 @@ function renderGithubContent(opts: {
     contribSvg = `<text x="${contribTextX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(contribText)}</text>`;
   }
   metricsSvg += trophySvg + rankSvg + contribSvg;
-  metricsSvg += `<line x1="${innerX}" y1="${metaLineY + 22}" x2="${innerX + innerW}" y2="${metaLineY + 22}" stroke="${C.line}" stroke-width="1"/>`;
+  metricsSvg += `<line x1="${innerX}" y1="${metaLineY + 24}" x2="${innerX + innerW}" y2="${metaLineY + 24}" stroke="${C.line}" stroke-width="1"/>`;
   cy = metaLineY + 44;
 
   // body 36px / 1.48 / clamp 5
@@ -679,7 +687,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     const r = renderPhContent({
       x: cardX, y: cardY, w: cardW,
       productName: item.title || 'Product',
-      rank: extra.rank ? `#${extra.rank}` : '',
+      rank: extra.daily_rank ? `#${extra.daily_rank}` : (extra.rank ? `#${extra.rank}` : ''),
       tag: pickPhTag(item),
       body: bodyText(item),
       stats: {
@@ -724,7 +732,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     footerX, footerY, footerW, footerH,
   );
 
-  const totalH = footerY + footerH + 56;
+  const totalH = footerY + footerH + 96; // 底部留白 56 → 96
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="${totalH}" viewBox="0 0 1080 ${totalH}">
     ${topLevelDefs()}
@@ -745,12 +753,19 @@ function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph'; labe
 
 function pickGithubTag(item: PosterItem): string {
   const extra = item.extra || {};
-  return (extra.category as string) || (extra.topic as string) || 'project';
+  // dashboard GithubCard 用 extra.ai_category；旧 / 兜底走 category / topic / 'project'
+  return (extra.ai_category as string)
+    || (extra.category as string)
+    || (extra.topic as string)
+    || 'project';
 }
 
 function pickPhTag(item: PosterItem): string {
   const extra = item.extra || {};
-  return (extra.category as string) || 'product';
+  // dashboard PhCard 也用 ai_category；categories[] 取首项作进一步兜底
+  if (extra.ai_category) return String(extra.ai_category);
+  if (Array.isArray(extra.categories) && extra.categories.length > 0) return String(extra.categories[0]);
+  return 'product';
 }
 
 function bodyText(item: PosterItem): string {

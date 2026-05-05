@@ -336,11 +336,12 @@ export function TweetDrawer() {
               <button
                 type="button"
                 onClick={onClickShare}
-                className="-mr-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100 active:bg-neutral-200"
+                className="-mr-1 flex h-9 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-100 active:bg-neutral-200"
                 aria-label="分享"
                 title="分享"
               >
-                <IconShare className="h-5 w-5" />
+                <IconShare className="h-4 w-4" />
+                <span>分享</span>
               </button>
             )}
           </div>

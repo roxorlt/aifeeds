@@ -70,15 +70,48 @@ export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose
     }
   };
 
-  const onSavePoster = () => {
-    if (!share) return;
-    // 触发浏览器下载（PC 场景）
-    const a = document.createElement("a");
-    a.href = share.poster_url;
-    a.download = `ai-feeds-${share.token}.png`;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.click();
+  const [saving, setSaving] = useState(false);
+  const onSavePoster = async () => {
+    if (!share || saving) return;
+    setSaving(true);
+    try {
+      // fetch 成 blob 才能可靠保存：iOS Safari 下 <a download> 跨域不生效会直接预览图，
+      // 拿 blob + ObjectURL 后能强制下载；移动端进一步用 navigator.share + files
+      // 调起原生分享面板（"保存到相册" 选项）。
+      const res = await fetch(share.poster_url);
+      if (!res.ok) throw new Error(`fetch ${res.status}`);
+      const blob = await res.blob();
+      const filename = `ai-feeds-${share.token}.png`;
+      const file = new File([blob], filename, { type: blob.type || "image/png" });
+
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      const canShareFiles =
+        typeof navigator !== "undefined" &&
+        typeof (navigator as Navigator & { canShare?: (data: { files: File[] }) => boolean }).canShare === "function"
+        && (navigator as Navigator & { canShare: (data: { files: File[] }) => boolean }).canShare({ files: [file] });
+
+      if (isMobile && canShareFiles) {
+        await navigator.share({ files: [file] });
+        return;
+      }
+
+      // PC / 不支持 share-with-files 的移动端：触发下载
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      // 用户取消 share dialog 不算错
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      toast.error("保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
