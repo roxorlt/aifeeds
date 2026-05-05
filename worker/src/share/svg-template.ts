@@ -333,7 +333,12 @@ function renderXContent(opts: {
   authorName: string;
   authorHandle: string;
   body: string;
-  metrics?: { replies?: number; retweets?: number; likes?: number; views?: number };
+  metrics?: {
+    replies?: number | string | null;
+    retweets?: number | string | null;
+    likes?: number | string | null;
+    views?: number | string | null;
+  };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
 }): { svg: string; height: number } {
@@ -441,9 +446,11 @@ function truncate(s: string, max: number): string {
 }
 
 function formatStat(n: number | string | undefined | null): string {
-  if (n === undefined || n === null || n === '') return '0';
+  // missing → "—"（跟 dashboard TweetCard / PhDrawerBody isMissing 行为一致），
+  // 实际值 0 仍渲为 "0"
+  if (n === undefined || n === null || n === '') return '—';
   const num = typeof n === 'string' ? parseInt(n, 10) : n;
-  if (!Number.isFinite(num)) return String(n);
+  if (!Number.isFinite(num)) return '—';
   if (num >= 1_000_000) return (num / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   if (num >= 1_000) return (num / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
   return String(num);
@@ -772,16 +779,18 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     contentH = r.height;
   } else {
     // X / X List 默认走 X 模板
+    // metrics 缺失保留 undefined（不强转 0），让 formatStat 渲成 "—" 跟 dashboard 一致
+    const xm = (item.metrics as Record<string, unknown> | null) || {};
     const r = renderXContent({
       x: cardX, y: cardY, w: cardW,
       authorName: item.author || '?',
       authorHandle: item.handle || '',
       body: bodyText(item),
       metrics: {
-        replies: Number((item.metrics as { replies?: number | string })?.replies) || 0,
-        retweets: Number((item.metrics as { retweets?: number | string })?.retweets) || 0,
-        likes: Number((item.metrics as { likes?: number | string })?.likes) || 0,
-        views: Number((item.metrics as { views?: number | string })?.views) || 0,
+        replies: xm.replies as number | string | undefined,
+        retweets: xm.retweets as number | string | undefined,
+        likes: xm.likes as number | string | undefined,
+        views: xm.views as number | string | undefined,
       },
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
