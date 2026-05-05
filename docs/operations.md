@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-02（PR2 auth backend：4 张表 + 5 个 endpoint + 4 层 SMS 防刷 + Turnstile + PushDeer 告警；M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
+最后更新：2026-05-05（PR6.6 lazy-enrich-on-drawer：新增 `POST /api/items/:id/refresh` endpoint，drawer 打开主动刷 X syndication / GitHub REST，dashboard 通过 itemUpdateBus 同步 feed 卡片）
+
+历史：2026-05-02（PR2 auth backend：4 张表 + 5 个 endpoint + 4 层 SMS 防刷 + Turnstile + PushDeer 告警；M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
 
 ---
 
@@ -103,6 +105,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/api/ingest` | POST | 接收本地 push 的 tweets → 写 D1 items/sources | Bearer `INGEST_TOKEN` |
 | `/api/items` | GET | Dashboard 列表（支持分页、filter、`sort=hot`、`source_type=github` 走 daily_rank 排序 + `pinned`） | 无（只读） |
 | `/api/items/:id` | GET | 单条详情 + thread siblings（`:id` 是 composite，如 `x_list:123…` 或 `github:owner/repo`）；`source_type=github` 时附 `metrics_history`（最近 30 天 `metrics_snapshots_gh`） | 无（只读） |
+| `/api/items/:id/refresh` | POST | Drawer 打开时 dashboard 主动调，触发 on-demand enrich：`x_list` 走 syndication API 拉 metrics + quote_of + link_card；`github` 走 GitHub REST 拉 stars/forks/watchers/issues/PRs/contributors。返回 `{refreshed,source_type,reason,metrics?}`，dashboard 拿到 `refreshed:true` 后重新 `fetchItem` 并 dispatch 到 feed。`product_hunt` 当前返回 `unsupported_source`（待 Browser binding）。KV `item-refresh-throttle:<id>` 60s throttle | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
