@@ -9,6 +9,7 @@ import {
   runDetectLongform,
   listPendingLongform,
   submitLongformText,
+  refreshSingleItem,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -155,6 +156,11 @@ export default {
       }
       if (path === '/api/items' && request.method === 'GET') {
         return handleItems(request, env);
+      }
+      // POST /api/items/:id/refresh — drawer 打开时调用 on-demand enrich（PR6.6）
+      const itemRefreshMatch = path.match(/^\/api\/items\/(.+)\/refresh$/);
+      if (itemRefreshMatch && request.method === 'POST') {
+        return withCors(await handleItemRefresh(request, env, decodeURIComponent(itemRefreshMatch[1])), request, env);
       }
       const itemByIdMatch = path.match(/^\/api\/items\/(.+)$/);
       if (itemByIdMatch && request.method === 'GET') {
@@ -811,6 +817,18 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
     has_more: hasMore,
     query_time_ms: queryTime,
   }, 200, request, env);
+}
+
+// ─── POST /api/items/:id/refresh ──────────────────────────────
+// Drawer 打开时 dashboard 主动调，触发 on-demand enrich（X 走 syndication）。
+// KV throttle 5min；返回 { refreshed, source_type, reason, metrics? }，
+// dashboard 拿到 refreshed=true 后重新 fetchItem 拿最新数据更新 UI。
+
+async function handleItemRefresh(request: Request, env: Env, id: string): Promise<Response> {
+  // 不需要登录：刷新公开 metrics 不涉及私密数据
+  // 节流：worker 内部 KV throttle 5min；前端调用时 anti-burst 自己也加防抖
+  const r = await refreshSingleItem(env, id);
+  return jsonResponse(r, 200, request, env);
 }
 
 // ─── GET /api/items/:id ────────────────────────────────────────

@@ -229,6 +229,68 @@ export function apiToMetrics(data: Record<string, unknown>): Metrics {
   };
 }
 
+// ─── 单 item on-demand refresh（drawer 打开时调用） ─────────────
+// PR6.6 lazy-enrich-on-drawer：不是 cron 全表轮询，而是用户点开抽屉时立即刷新这一条。
+// 三源策略：
+//   - x_list：syndication API 拉 metrics + quote_of + link_card（1-3s）
+//   - github：留到下次 PR（GitHub REST 调用）
+//   - product_hunt：留到下次 PR（CF Browser binding 5-10s）
+//
+// 节流：KV 存 last_refreshed_at，5 min 内同 item 只刷一次。
+// 失败：返回旧数据 + 不写 KV（下次能重试）。
+
+const REFRESH_THROTTLE_KEY_PREFIX = 'item-refresh-throttle:';
+const REFRESH_THROTTLE_TTL = 60 * 5; // 5 min
+
+export interface SingleItemRefreshResult {
+  refreshed: boolean;
+  source_type: string;
+  reason?: 'throttled' | 'unsupported_source' | 'item_not_found' | 'fetch_failed' | 'success';
+  metrics?: Metrics;
+}
+
+export async function refreshSingleItem(
+  env: EnrichEnv & { AUTH_KV?: KVNamespace },
+  itemId: string,
+): Promise<SingleItemRefreshResult> {
+  // 1. throttle check（KV，5min 内不重刷）
+  if (env.AUTH_KV) {
+    const ttlKey = REFRESH_THROTTLE_KEY_PREFIX + itemId;
+    const last = await env.AUTH_KV.get(ttlKey);
+    if (last) {
+      return { refreshed: false, source_type: 'unknown', reason: 'throttled' };
+    }
+  }
+
+  // 2. 查 item，识别 source_type + source_id
+  const item = await env.DB.prepare(
+    `SELECT id, source_type, source_id FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ id: string; source_type: string; source_id: string }>();
+  if (!item) {
+    return { refreshed: false, source_type: 'unknown', reason: 'item_not_found' };
+  }
+
+  // 3. 按 source_type 分发（目前只 X 走 syndication）
+  if (item.source_type === 'x_list') {
+    const r = await fetchTweet(item.source_id);
+    if (!r || r.notFound || !r.data) {
+      return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
+    }
+    const m = apiToMetrics(r.data);
+    await updateMetrics(env, item.id, m);
+    // 写 throttle key
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: m };
+  }
+
+  // GH / PH 暂留下个 PR
+  return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
+}
+
 // ─── State persistence via enrich_state table ──────────────────
 export interface EnrichState {
   processed_ids: string[];

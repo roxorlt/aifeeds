@@ -148,12 +148,35 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         if (activeIdRef.current !== compositeId) return;
         setState({ item, siblings, loading: false, error: null });
         setSpotlightItem(item);
+        // PR6.6 lazy enrich：drawer 打开后立即触发 on-demand refresh（X syndication）
+        // worker 端 KV throttle 5min，5min 内不会真跑；refreshed=true 时
+        // 1.5s 后重新 fetchItem 把更新后的 metrics 同步到 UI（不阻塞主流程）
+        triggerOnDemandRefresh(compositeId);
       })
       .catch((err: unknown) => {
         if (activeIdRef.current !== compositeId) return;
         const code = err instanceof ItemNotFoundError ? "not_found" : "network";
         setState({ item: null, siblings: [], loading: false, error: code });
       });
+
+    function triggerOnDemandRefresh(id: string): void {
+      // 失败/throttled 静默，不影响主流程
+      import("../api").then(async ({ refreshItem }) => {
+        try {
+          const r = await refreshItem(id);
+          if (!r.refreshed || activeIdRef.current !== id) return;
+          // 等 worker 写完 D1（updateMetrics 是 batch update，~100ms），再拉新数据
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          if (activeIdRef.current !== id) return;
+          const fresh = await fetchItem(id);
+          if (activeIdRef.current !== id) return;
+          setState({ item: fresh.item, siblings: fresh.siblings, loading: false, error: null });
+          setSpotlightItem(fresh.item);
+        } catch {
+          // 静默失败
+        }
+      });
+    }
   }, [location.pathname]);
 
   return (

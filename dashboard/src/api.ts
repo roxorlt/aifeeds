@@ -172,6 +172,22 @@ export async function fetchItem(id: string): Promise<ItemDetailResponse> {
   return res.json();
 }
 
+// PR6.6 on-demand refresh — drawer 打开时调一次。worker 端 KV throttle 5min。
+// reason: throttled / unsupported_source / item_not_found / fetch_failed / success
+export interface RefreshItemResponse {
+  refreshed: boolean;
+  source_type: string;
+  reason?: 'throttled' | 'unsupported_source' | 'item_not_found' | 'fetch_failed' | 'success';
+  metrics?: Record<string, number | null | undefined>;
+}
+
+export async function refreshItem(id: string): Promise<RefreshItemResponse> {
+  const path = `/api/items/${encodeURIComponent(id)}/refresh`;
+  const res = await apiFetch(path, { method: 'POST' });
+  if (!res.ok) return { refreshed: false, source_type: 'unknown', reason: 'fetch_failed' };
+  return res.json();
+}
+
 export async function fetchStats(): Promise<Stats> {
   const res = await apiFetch('/api/stats');
   if (!res.ok) throw new Error(`fetchStats failed: ${res.status}`);
