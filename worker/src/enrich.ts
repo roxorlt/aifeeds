@@ -2,7 +2,7 @@
 // by calling cdn.syndication.twimg.com (same API react-tweet uses).
 // Replaces the local Python enrich_from_syndication.py for cloud-side runs.
 
-import { fetchTweetsScrapeBadger } from './scrapebadger';
+import { fetchTweetsScrapeBadger, fetchListTweetsPage, sbTweetToIngestItem } from './scrapebadger';
 
 export interface EnrichEnv {
   DB: D1Database;
@@ -1313,6 +1313,159 @@ export interface TieredRefreshResult {
 /** Tier-aware refresh entry point. Picks items with elapsed next_refresh_at
  *  (limited to tier <= maxTier), recomputes tier from age+velocity, writes
  *  metrics + tier + next_refresh_at + snapshot atomically. */
+// ─── list-poll-ingest（替代本地 chrome 抓取） ───────────────────
+// 调 ScrapeBadger get-list-tweets 一次拿 ~56 条，分页直到 known IDs（早停）。
+// 每条 tweet upsert 进 items 表（is_relevant=1，matched_by='list-poll-sb'）。
+// 与本地 launchd chrome 共存阶段：双写不冲突，items.id PK + INSERT...ON
+// CONFLICT DO UPDATE 自然去重，content 长度 monotonic 增长，metrics 后写者赢。
+//
+// 频率：cron minute=25/55（30 min 一次，跟本地 chrome 频率持平）。
+// 早停：当前页全部 ID 在 D1 → 不翻下一页，避免无谓花 credits。
+
+export interface ListPollIngestResult {
+  mode: 'list-poll-ingest';
+  list_id: string;
+  pages: number;
+  tweets_seen: number;
+  inserted_or_updated: number;
+  newly_inserted: number;
+  credits_used: number;
+  rate_limit_remaining: number | undefined;
+  duration_ms: number;
+  early_stop: boolean;
+  error?: string;
+}
+
+export async function runListPollIngest(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  listId: string,
+  maxPages = 3,
+): Promise<ListPollIngestResult> {
+  const t0 = Date.now();
+  let cursor: string | null = null;
+  let totalCredits = 0;
+  let totalSeen = 0;
+  let inserted = 0;
+  let newCount = 0;
+  let earlyStop = false;
+  let pages = 0;
+  let lastRateRemaining: number | undefined;
+  let firstError: string | undefined;
+
+  for (let p = 0; p < maxPages; p++) {
+    const r = await fetchListTweetsPage(env, listId, cursor);
+    pages++;
+    totalCredits += r.creditsUsed || 0;
+    totalSeen += r.tweets.length;
+    lastRateRemaining = r.rateLimitRemaining;
+    if (r.error) {
+      firstError = r.error;
+      break;
+    }
+    if (r.tweets.length === 0) break;
+
+    const composedIds = r.tweets.map((t) => `x_list:${t.id}`).filter(Boolean);
+    if (composedIds.length === 0) break;
+
+    // 哪些已经在 D1 — 用来判断 early stop + 区分 insert vs update
+    const placeholders = composedIds.map(() => '?').join(',');
+    const existingRows = await env.DB.prepare(
+      `SELECT id FROM items WHERE id IN (${placeholders})`,
+    )
+      .bind(...composedIds)
+      .all<{ id: string }>();
+    const existingSet = new Set(existingRows.results.map((row) => row.id));
+
+    // upsert 整页（已存在的也走，让 metrics 跟着 SB 实时刷新）
+    const stmts: D1PreparedStatement[] = [];
+    for (const t of r.tweets) {
+      const item = sbTweetToIngestItem(t);
+      if (!item) continue;
+      const id = `x_list:${item.source_id}`;
+      stmts.push(
+        env.DB.prepare(`
+          INSERT INTO items (id, source_type, source_id, title, content,
+            content_translated, author, handle, url, media, metrics, published_at,
+            scraped_at, is_relevant, matched_by, lang, extra)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            content = CASE
+              WHEN items.content IS NULL OR length(coalesce(excluded.content, '')) >= length(items.content)
+                THEN excluded.content
+              ELSE items.content
+            END,
+            media = excluded.media,
+            metrics = excluded.metrics,
+            extra = CASE
+              WHEN (items.extra -> '$.longform') IS NOT NULL
+                   OR (items.extra -> '$.enriched_at') IS NOT NULL
+                THEN json_patch(
+                  coalesce(excluded.extra, '{}'),
+                  json_object(
+                    'longform',    items.extra -> '$.longform',
+                    'enriched_at', items.extra -> '$.enriched_at'
+                  )
+                )
+              ELSE excluded.extra
+            END
+        `).bind(
+          id,
+          item.source_type,
+          item.source_id,
+          item.title,
+          item.content,
+          item.content_translated,
+          item.author,
+          item.handle,
+          item.url,
+          item.media,
+          item.metrics,
+          item.published_at,
+          item.scraped_at,
+          item.is_relevant,
+          item.matched_by,
+          item.lang,
+          item.extra,
+        ),
+      );
+      if (!existingSet.has(id)) newCount++;
+      else inserted++; // 实际是 update
+    }
+
+    if (stmts.length > 0) {
+      try {
+        await env.DB.batch(stmts);
+      } catch (e) {
+        console.error('[list-poll-ingest] batch error:', e);
+        firstError = e instanceof Error ? e.message : 'batch_error';
+        break;
+      }
+    }
+
+    // 全部都 already known → early stop
+    if (existingSet.size === composedIds.length) {
+      earlyStop = true;
+      break;
+    }
+    cursor = r.nextCursor;
+    if (!cursor) break;
+  }
+
+  return {
+    mode: 'list-poll-ingest',
+    list_id: listId,
+    pages,
+    tweets_seen: totalSeen,
+    inserted_or_updated: inserted + newCount,
+    newly_inserted: newCount,
+    credits_used: totalCredits,
+    rate_limit_remaining: lastRateRemaining,
+    duration_ms: Date.now() - t0,
+    early_stop: earlyStop,
+    error: firstError,
+  };
+}
+
 export async function runRefreshTiered(
   env: EnrichEnv,
   limit = 20,

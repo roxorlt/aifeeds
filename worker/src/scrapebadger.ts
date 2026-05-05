@@ -239,6 +239,121 @@ export interface ScrapeBadgerListPageResult {
   status?: number;
 }
 
+// ─── SB tweet → 我们 items 表的 ingest 形状映射 ─────────────────
+// 与本地 list_scraper.py + tweet_processor.py 输出对齐，让现有 ingest /
+// fill-translations / detect-longform / backfill-quotes 等下游 cron 沿用。
+//
+// 决策（用户拍板）：
+//   - 列表本身已是 user-curated，全部 is_relevant=1，不再 inline LLM 过滤
+//   - RT 也进 feed（X 转推 / Twitter retweet），覆盖原 chrome scraper 盲区
+//   - matched_by='list-poll-sb' 标记来源便于回查
+//   - long_form：SB 直接返 full_text（never truncated），content 放 full_text，
+//     detect-longform cron 不会再补这条（length 已是真实长度）
+
+export interface IngestItem {
+  source_type: 'x_list';
+  source_id: string;
+  title: null;
+  content: string;
+  content_translated: null;
+  author: string | null;
+  handle: string | null;
+  url: string | null;
+  media: string;
+  metrics: string;
+  published_at: string | null;
+  scraped_at: string;
+  is_relevant: number;
+  matched_by: string;
+  lang: string | null;
+  extra: string;
+}
+
+// X created_at 形如 "Tue May 05 23:16:48 +0000 2026"。JS Date() 能直接 parse。
+// 输出 D1 datetime 友好的 "YYYY-MM-DD HH:MM:SS"（其它 cron 拿这个字段做对齐）。
+function twitterDateToD1(s?: string): string | null {
+  if (!s) return null;
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function nowD1(): string {
+  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+}
+
+// SB media[] 形状 → 现有 MediaItem 形状
+// SB type: 'photo' | 'video' | 'animated_gif'
+// 我们：'image' | 'video'，video 带 poster
+function mapMedia(m: NonNullable<SbTweet['media']>): Array<Record<string, unknown>> {
+  return (m || []).map((x) => {
+    const type = x.type === 'photo' ? 'image' : x.type === 'video' || x.type === 'animated_gif' ? 'video' : x.type || 'image';
+    return {
+      type,
+      url: x.url,
+      width: x.width ?? null,
+      height: x.height ?? null,
+      alt: null,
+      // 视频的 thumbnail；图片此字段 SB 不给，留空
+      poster: type === 'video' ? x.preview_image_url ?? x.url ?? null : null,
+    };
+  });
+}
+
+export function sbTweetToIngestItem(t: SbTweet): IngestItem | null {
+  if (!t.id) return null;
+  const handle = t.username || null;
+  const author = t.user_name || null;
+
+  const metrics = {
+    replies: t.reply_count,
+    retweets: t.retweet_count,
+    likes: t.favorite_count,
+    views: parseIntStrict(t.view_count),
+    bookmarks: t.bookmark_count,
+  };
+
+  const extra: Record<string, unknown> = {};
+  if (t.quoted_status_id) extra.quote_of_id = t.quoted_status_id;
+  if (t.in_reply_to_status_id) extra.reply_to_id = t.in_reply_to_status_id;
+  if (t.in_reply_to_user_id) extra.reply_to_user_id = t.in_reply_to_user_id;
+  if (t.in_reply_to_screen_name) extra.reply_to_handle = t.in_reply_to_screen_name;
+  if (t.is_retweet) extra.is_retweet = true;
+  if (t.retweeted_status_id) extra.retweeted_status_id = t.retweeted_status_id;
+  if (t.is_quote_status) extra.is_quote_status = true;
+  if (t.user_is_blue_verified) extra.is_verified = true;
+  if (t.user_profile_image_url) extra.profile_image_url = t.user_profile_image_url;
+  if (t.has_card && t.thumbnail_title) extra.card_title = t.thumbnail_title;
+  if (t.thumbnail_url) extra.card_thumbnail = t.thumbnail_url;
+  if (t.hashtags && t.hashtags.length) extra.hashtags = t.hashtags.map((h) => h.text).filter(Boolean);
+  if (t.user_mentions && t.user_mentions.length) {
+    extra.user_mentions = t.user_mentions.map((m) => m.username).filter(Boolean);
+  }
+  if (t.urls && t.urls.length) {
+    const expanded = t.urls.map((u) => u.expanded_url).filter(Boolean);
+    if (expanded.length) extra.urls = expanded;
+  }
+
+  return {
+    source_type: 'x_list',
+    source_id: t.id,
+    title: null,
+    content: t.full_text || t.text || '',
+    content_translated: null,
+    author,
+    handle,
+    url: handle ? `https://x.com/${handle}/status/${t.id}` : null,
+    media: JSON.stringify(mapMedia(t.media || [])),
+    metrics: JSON.stringify(metrics),
+    published_at: twitterDateToD1(t.created_at),
+    scraped_at: nowD1(),
+    is_relevant: 1,
+    matched_by: 'list-poll-sb',
+    lang: t.lang || null,
+    extra: JSON.stringify(extra),
+  };
+}
+
 export async function fetchListTweetsPage(
   env: ScrapeBadgerEnv,
   listId: string,

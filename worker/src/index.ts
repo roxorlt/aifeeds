@@ -10,6 +10,7 @@ import {
   listPendingLongform,
   submitLongformText,
   refreshSingleItem,
+  runListPollIngest,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -69,7 +70,7 @@ export interface Env {
   // ScrapeBadger 第三方 X 抓取服务（替代 syndication 拿回 retweet/view 字段）
   // 接 refresh-tiered 路径；缺失时自动回落到 syndication
   SCRAPEBADGER_API_KEY?: string;
-  // List 实验用：list-poll-measure cron 抓哪个 list（默认 1643236611378008066）
+  // List 实验用：list-poll-ingest cron 抓哪个 list（默认 1643236611378008066）
   LIST_POLL_LIST_ID?: string;
   // PR2 auth secrets (上线前用 wrangler secret put 设置)
   TURNSTILE_SECRET_KEY?: string;
@@ -291,14 +292,14 @@ export default {
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-measure';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest';
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 15 || minute === 45) mode = 'fill-translations';
     else if (minute === 10 || minute === 50) mode = 'detect-longform';
     else if (minute === 5 || minute === 35) mode = 'backfill-replies';
-    else if (minute === 25 || minute === 55) mode = 'list-poll-measure';
+    else if (minute === 25 || minute === 55) mode = 'list-poll-ingest';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -371,27 +372,27 @@ export default {
             );
             return;
           }
-          if (mode === 'list-poll-measure') {
-            // ScrapeBadger list-poll 1-day usage 实验：30 min 一次（minute=25/55），
-            // 调一次 SB list endpoint，记录 credits/duration/tweet_count 到 refresh_log
-            // (tier=99 标记)，不写 items 表（避免污染 feed）。1 天后查表分析。
+          if (mode === 'list-poll-ingest') {
+            // ScrapeBadger 替代本地 chrome list 抓取：30 min 一次（minute=25/55），
+            // upsert items 表（is_relevant=1，trust 列表 curation；RT 也进 feed）。
+            // refresh_log tier=99 跟踪 credits 消耗便于运维。
             const listId = env.LIST_POLL_LIST_ID || '1643236611378008066';
-            const { fetchListTweetsPage } = await import('./scrapebadger');
-            const t0 = Date.now();
-            const r = await fetchListTweetsPage(env, listId, null);
-            const dur = Date.now() - t0;
-            const errors = r.error ? 1 : 0;
+            const r = await runListPollIngest(env, listId, 3);
             try {
               await env.DB.prepare(
                 `INSERT INTO refresh_log (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
                  VALUES (?, 99, ?, ?, ?, ?)`,
-              ).bind(Math.floor(Date.now() / 1000), r.tweets.length, r.creditsUsed ?? 0, dur, errors).run();
+              ).bind(
+                Math.floor(Date.now() / 1000),
+                r.tweets_seen,
+                r.credits_used,
+                r.duration_ms,
+                r.error ? 1 : 0,
+              ).run();
             } catch (e) {
-              console.error('[list-poll-measure] log insert failed:', e);
+              console.error('[list-poll-ingest] log insert failed:', e);
             }
-            console.log(
-              `[cron] list-poll-measure list=${listId} tweets=${r.tweets.length} credits=${r.creditsUsed} rate_remaining=${r.rateLimitRemaining} dur=${dur}ms err=${r.error || 'none'}`,
-            );
+            console.log(`[cron] list-poll-ingest result:`, JSON.stringify(r));
             return;
           }
           const result =
@@ -1042,10 +1043,8 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'list-poll-measure') {
-    // 测量模式：调 SB list endpoint 但不写 D1，仅返回 tweet 形状预览 +
-    // credits_used + rate_limit + first/last tweet IDs。
-    // 用于 1 day usage 实验：验证抓回的 tweets 是否完整、credits 消耗速率，
-    // 之后再决定要不要全量替换本地 chrome scraper。
+    // Dry-run：调 SB list 但不写 D1，仅返回 tweet 形状预览 + credits + ID 摘要。
+    // 用于排查 / 验证 SB 返回是否符合预期，不影响线上数据。
     const listId = url.searchParams.get('list_id');
     if (!listId) return jsonResponse({ error: 'list_id required' }, 400, request, env);
     const maxPages = Math.min(Math.max(parseInt(url.searchParams.get('max_pages') || '1'), 1), 5);
@@ -1097,6 +1096,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       request,
       env,
     );
+  }
+  if (mode === 'list-poll-ingest') {
+    // 真实 ingest：上 D1（is_relevant=1，matched_by='list-poll-sb'）
+    // 同 cron */30 入口走的是同一函数，仅 list_id / max_pages 可调。
+    const listId = url.searchParams.get('list_id') || env.LIST_POLL_LIST_ID || '1643236611378008066';
+    const maxPages = Math.min(Math.max(parseInt(url.searchParams.get('max_pages') || '3'), 1), 5);
+    const result = await runListPollIngest(env, listId, maxPages);
+    return jsonResponse(result, 200, request, env);
   }
   if (mode === 'fill-translations') {
     const limit = Math.min(
