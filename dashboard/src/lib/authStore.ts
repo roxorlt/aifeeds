@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import * as authApi from './auth';
+import { AuthError } from './auth';
 import type { User } from './auth';
 
 export type LoginTrigger =
@@ -48,9 +49,17 @@ export const useAuthStore = create<AuthStore>()(
     try {
       const { user } = await authApi.fetchMe();
       set({ user, hydrated: true });
-    } catch {
-      // cookie 失效 / 网络挂了：清掉持久化的 user 防止假登录态
-      set({ user: null, hydrated: true });
+    } catch (e) {
+      // 区分真 401（cookie/服务端 session 失效）和瞬时错误（网络挂、CF 冷启动、5xx）：
+      // - 401 → 清 user（真的要登出）
+      // - 其他 → 保留 persisted user，标记 hydrated 让 UI 渲染
+      // 之前一刀切清 user，每次发版偶发的网络抖动就把用户假踢出（cookie 还在但
+      // UI 已经按未登录态画了，体验非常差）。
+      if (e instanceof AuthError && e.status === 401) {
+        set({ user: null, hydrated: true });
+      } else {
+        set({ hydrated: true });
+      }
     }
   },
 
@@ -103,8 +112,11 @@ export const useAuthStore = create<AuthStore>()(
     try {
       const { user } = await authApi.fetchMe();
       set({ user });
-    } catch {
-      set({ user: null });
+    } catch (e) {
+      // 同 hydrate：仅 401 才清 user，瞬时错误保留旧 user
+      if (e instanceof AuthError && e.status === 401) {
+        set({ user: null });
+      }
     }
   },
     }),

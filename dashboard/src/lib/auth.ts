@@ -56,6 +56,8 @@ interface AuthFetchInit extends Omit<RequestInit, 'body'> {
   body?: unknown;
 }
 
+// 幂等 GET（如 /api/auth/me）允许一次重试，应对 CF 冷启动 / WeChat WebView
+// 偶发网络抖动；其他方法（POST 登录/登出等）不重试避免重复副作用。
 async function authFetch(path: string, init: AuthFetchInit = {}): Promise<Response> {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   const { body, headers: rawHeaders, ...rest } = init;
@@ -66,12 +68,24 @@ async function authFetch(path: string, init: AuthFetchInit = {}): Promise<Respon
     headers.set('Content-Type', 'application/json');
     fetchBody = typeof body === 'string' ? body : JSON.stringify(body);
   }
-  return fetch(url, {
-    ...rest,
-    headers,
-    body: fetchBody,
-    credentials: 'include',
-  });
+  const method = (rest.method as string | undefined)?.toUpperCase() || 'GET';
+  const idempotent = method === 'GET' || method === 'HEAD';
+  const doFetch = () => fetch(url, { ...rest, headers, body: fetchBody, credentials: 'include' });
+  try {
+    const r = await doFetch();
+    // 5xx + 幂等 → 重试一次（500ms 退避）
+    if (idempotent && r.status >= 500 && r.status < 600) {
+      await new Promise((res) => setTimeout(res, 500));
+      try { return await doFetch(); } catch { return r; }
+    }
+    return r;
+  } catch (e) {
+    if (idempotent) {
+      await new Promise((res) => setTimeout(res, 500));
+      return doFetch();
+    }
+    throw e;
+  }
 }
 
 async function parseOrThrow<T>(res: Response): Promise<T> {
