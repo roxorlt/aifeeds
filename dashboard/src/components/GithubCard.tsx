@@ -167,55 +167,58 @@ export function GithubCard({ item }: Props) {
             </div>
           )}
 
-          {/* Summary（缩进对齐到标题，跟 X card 推文正文一致字号 15 / 1.45） */}
-          {summary && (
-            <>
-              <p
-                className={cn(
-                  "mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words",
-                  !expanded && "line-clamp-4",
-                )}
-              >
-                {summary}
-              </p>
-              {!expanded && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setExpanded(true);
-                  }}
-                  className="mt-1 text-[14px] text-sky-600 hover:underline"
-                >
-                  展开
-                </button>
-              )}
-            </>
-          )}
-
-          {/* Footer 行：日期/奖杯已上提到 rank pill；这里只剩 contributors 头像组 */}
-          {contributorsInline.length > 0 && (
-            <div className="mt-3 flex items-center text-[12px] text-neutral-500">
-              <span className="inline-flex items-center gap-2">
-                <span className="flex items-center -space-x-1.5">
-                  {contributorsInline.slice(0, 3).map((c) => (
-                    <img
-                      key={c.login}
-                      src={c.avatar_url}
-                      alt={c.login}
-                      className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
-                      onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                    />
-                  ))}
-                </span>
-                {contributorsCount && contributorsCount > 0 && (
-                  <span className="text-neutral-500">{contributorsCount} contributors</span>
-                )}
-              </span>
-            </div>
-          )}
         </div>
       </div>
+
+      {/* Summary 跨整张卡宽（不再缩进到 avatar 右），meta 行保留在 avatar 右列。
+          PH/GH 走 YouTube 卡片风格：标题块紧凑头部，正文 + footer 占满宽度，
+          跟 X 推文（严格左对齐）的视觉风格区分。 */}
+      {summary && (
+        <>
+          <p
+            className={cn(
+              "mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words",
+              !expanded && "line-clamp-4",
+            )}
+          >
+            {summary}
+          </p>
+          {!expanded && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded(true);
+              }}
+              className="mt-1 text-[14px] text-sky-600 hover:underline"
+            >
+              展开
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Contributors footer 跨整张卡宽 */}
+      {contributorsInline.length > 0 && (
+        <div className="mt-3 flex items-center text-[12px] text-neutral-500">
+          <span className="inline-flex items-center gap-2">
+            <span className="flex items-center -space-x-1.5">
+              {contributorsInline.slice(0, 3).map((c) => (
+                <img
+                  key={c.login}
+                  src={c.avatar_url}
+                  alt={c.login}
+                  className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
+                  onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                />
+              ))}
+            </span>
+            {contributorsCount && contributorsCount > 0 && (
+              <span className="text-neutral-500">{contributorsCount} contributors</span>
+            )}
+          </span>
+        </div>
+      )}
     </article>
   );
 }

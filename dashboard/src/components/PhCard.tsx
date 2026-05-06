@@ -91,8 +91,10 @@ export function PhCard({ item }: Props) {
       onClick={open}
       className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >
-      <div className="flex gap-3">
-        {/* Logo (产品品牌图标，rounded-md 方形圆角) */}
+      {/* 头部块：logo + (title + meta)，紧凑高度。
+          正文 / footer 跨整张卡宽（不再缩进到 logo 右）让窄屏可读性更好；
+          视觉上跟 X 推文风格区分（X 是严格左对齐，PH 是 YouTube 卡片风格）。 */}
+      <div className="flex items-center gap-3">
         {logoUrl ? (
           <img
             src={logoUrl}
@@ -105,7 +107,7 @@ export function PhCard({ item }: Props) {
         )}
 
         <div className="min-w-0 flex-1">
-          {/* Title row：单纯产品名（rank 挪到第二行避免重复） */}
+          {/* Title row：单纯产品名 */}
           <div className="flex items-baseline gap-1.5">
             <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
               {name}
@@ -130,64 +132,62 @@ export function PhCard({ item }: Props) {
               </span>
             )}
           </div>
-
-          {/* Tagline 正文 — 4 行 */}
-          {tagline && (
-            <p className="mt-1 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
-              {tagline}
-            </p>
-          )}
-
-          {/* Footer：左 votes/comments，右 makers 头像 + by @xxx 等 N 人 */}
-          <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
-            {votes !== undefined && (
-              <span className="inline-flex items-center gap-1" aria-label="votes">
-                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l5 6H3l5-6z"/></svg>
-                <span className="tabular-nums">{formatCompact(votes)}</span>
-              </span>
-            )}
-            {comments !== undefined && (
-              <span className="inline-flex items-center gap-1" aria-label="comments">
-                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
-                <span className="tabular-nums">{formatCompact(comments)}</span>
-              </span>
-            )}
-            {/* makers 右对齐：最多 3 个头像 + 文字。
-                flex-1 + justify-end 让它占满剩余宽度并右对齐；min-w-0 + 内层
-                truncate 让 by @ 长 handle 在窄屏省略号收尾，不再溢出。
-                ml-auto 单独不够 — 那只控制位置，不限制宽度上限。 */}
-            {(visibleMakers.length > 0 || firstHandle) && (
-              <span className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-neutral-500">
-                {visibleMakers.length > 0 && (
-                  <span className="flex shrink-0 -space-x-1.5">
-                    {visibleMakers.map((m, i) => {
-                      const src = resolveAssetUrl(m.avatar_url);
-                      return src ? (
-                        <img
-                          key={m.handle || i}
-                          src={src}
-                          alt={m.name || m.handle || ""}
-                          className="h-5 w-5 rounded-full border border-white bg-neutral-200 object-cover"
-                          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                        />
-                      ) : (
-                        <span
-                          key={m.handle || i}
-                          className="h-5 w-5 rounded-full border border-white bg-neutral-200"
-                        />
-                      );
-                    })}
-                  </span>
-                )}
-                {firstHandle && (
-                  <span className="min-w-0 truncate text-[13px]">
-                    by @{firstHandle}{makers.length > 1 ? ` 等 ${makers.length} 人` : ""}
-                  </span>
-                )}
-              </span>
-            )}
-          </div>
         </div>
+      </div>
+
+      {/* Tagline 正文 — 跨整张卡宽，4 行 */}
+      {tagline && (
+        <p className="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
+          {tagline}
+        </p>
+      )}
+
+      {/* Footer：左 votes/comments，右 makers 头像 + by @xxx 等 N 人。
+          跨整张卡宽给 makers 行更多空间。makers span 用 flex-1 + justify-end +
+          min-w-0 + 内层 truncate 兜底（仍长就省略号，不会溢出）。 */}
+      <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
+        {votes !== undefined && (
+          <span className="inline-flex items-center gap-1" aria-label="votes">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l5 6H3l5-6z"/></svg>
+            <span className="tabular-nums">{formatCompact(votes)}</span>
+          </span>
+        )}
+        {comments !== undefined && (
+          <span className="inline-flex items-center gap-1" aria-label="comments">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
+            <span className="tabular-nums">{formatCompact(comments)}</span>
+          </span>
+        )}
+        {(visibleMakers.length > 0 || firstHandle) && (
+          <span className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-neutral-500">
+            {visibleMakers.length > 0 && (
+              <span className="flex shrink-0 -space-x-1.5">
+                {visibleMakers.map((m, i) => {
+                  const src = resolveAssetUrl(m.avatar_url);
+                  return src ? (
+                    <img
+                      key={m.handle || i}
+                      src={src}
+                      alt={m.name || m.handle || ""}
+                      className="h-5 w-5 rounded-full border border-white bg-neutral-200 object-cover"
+                      onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                    />
+                  ) : (
+                    <span
+                      key={m.handle || i}
+                      className="h-5 w-5 rounded-full border border-white bg-neutral-200"
+                    />
+                  );
+                })}
+              </span>
+            )}
+            {firstHandle && (
+              <span className="min-w-0 truncate text-[13px]">
+                by @{firstHandle}{makers.length > 1 ? ` 等 ${makers.length} 人` : ""}
+              </span>
+            )}
+          </span>
+        )}
       </div>
     </article>
   );
