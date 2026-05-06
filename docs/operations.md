@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-06（Turnstile widget 升级到 v3 `0x4AAAAAADJyUx6JD4IMD_1i`，prod + staging worker `TURNSTILE_SECRET_KEY` 同步换新；起因是诊断中误把 chrome-devtools-mcp 触发的 600010 当成 widget 配置 bug — **CF 600010 是 DevTools 检测机制**，普通用户访问不会触发，社区证据见 https://community.cloudflare.com/t/turnstile-errors-600010-when-devtools-is-open/733892）
+最后更新：2026-05-06（CF Workers Paid 升级到 $5/月：subrequest 50→1000、CPU 10ms→30s、解锁 DO/Queues。后续架构决策默认按 Paid 配额算账，详见下方「CF 计划与配额」节）
+
+历史：2026-05-06（Turnstile widget 升级到 v3 `0x4AAAAAADJyUx6JD4IMD_1i`，prod + staging worker `TURNSTILE_SECRET_KEY` 同步换新；起因是诊断中误把 chrome-devtools-mcp 触发的 600010 当成 widget 配置 bug — **CF 600010 是 DevTools 检测机制**，普通用户访问不会触发，社区证据见 https://community.cloudflare.com/t/turnstile-errors-600010-when-devtools-is-open/733892）
 
 历史：2026-05-06（ScrapeBadger 接入：refresh-tiered 用 batch endpoint 拿回 retweets/views，本地 chrome list-scraper 退役（launchd `.cron` + `.tune` unload，SB list-poll-ingest cron */30 接管），频率 / 成本表见 [`scrapebadger-cost-and-frequency.md`](scrapebadger-cost-and-frequency.md)）
 
@@ -43,6 +45,31 @@
 ```
 
 数据唯一真相源：**远端 D1**。本地 SQLite 只是抓取暂存，push_to_cloud 成功后可随时丢。
+
+---
+
+## CF 计划与配额（2026-05-06 升级 Workers Paid）
+
+> 在评估「能不能在 worker 里多塞点活」「要不要拆 cron 槽」「能不能直接下 zip」时**默认按这套配额算账**，不要再用 Free tier 心智。
+
+| 维度 | Workers Free（已退出） | **Workers Paid（当前，$5/月）** |
+|---|---|---|
+| Subrequests / invocation | 50 | **1000**（20×）|
+| CPU time / invocation | 10ms | **30s**（3000×，wasm 渲染、ZIP 解压、PDF parse 等 CPU-heavy 操作不再担心 timeout）|
+| Cron 频率 | 最高 1/min | 同 1/min（不变，但 invocation 限额 +∞）|
+| 包含 requests | 100k/天 | 1000 万/月 |
+| Durable Objects | ❌ | ✅（未来可解锁分布式协调）|
+| Queues | ❌ | ✅（producer/consumer 模式拆任务） |
+
+**架构选型默认假设**：
+- `*/5` cron 单次跑可消耗 ~200-300 subreq 仍有大量余量，不需要再为「省 subreq」做拆 cron 槽这种纯配额优化（保留按业务语义拆槽，比如 backfill / refresh / translate 解耦）
+- 接新源时算账模板：1 list fetch + N detail fetch + N zip/asset fetch + N×2 D1 write，N 一般 ≤ 50，安全
+- batch D1 写入仍然推荐（`db.batch([...])` 一次 subreq），但目的是性能不是节流
+- 新加 cron 模式不需要先精算 50 预算
+
+**升级路径回顾**：CF Dashboard → 头像 → Plans → Workers & Pages 切到 Paid，绑卡即生效，无需重部署。
+
+**反向降级判断**（什么时候考虑切回 Free）：流量持续 < 100k req/天 + 无 cron 业务 + 不依赖 DO/Queues。当前都不满足，长期保持 Paid。
 
 ---
 
@@ -493,7 +520,7 @@ npm run deploy
 | Secret | 存在哪里 | 用途 |
 |--------|----------|------|
 | `INGEST_TOKEN` | CF Worker secret（`wrangler secret list` 可查） | 保护 /api/ingest 和 /api/enrich/run |
-| `DEEPSEEK_API_KEY` | 本地 `~/.claude/skills/xlist-scraper/scripts/.env` + CF Worker secret（两端同一把 key） | 本地：分类 + 翻译；Worker：fill-translations 翻译 |
+| `DEEPSEEK_API_KEY` | 本地 `~/.claude/skills/xlist-scraper/scripts/.env` + CF Worker secret（两端同一把 key） | 本地：分类 + 翻译；Worker：fill-translations 翻译。**模型选型**见 [`CLAUDE.md` § DeepSeek 模型选型](../CLAUDE.md)：默认 `deepseek-v4-flash`，复杂推理用 `deepseek-v4-pro`，文档 https://api-docs.deepseek.com/zh-cn/ |
 | x.com cookies | Chrome Default profile → cookie_manager.py 解密 | 抓取登录态 |
 
 **设置 Worker secret**：`cd worker && npx wrangler secret put INGEST_TOKEN`

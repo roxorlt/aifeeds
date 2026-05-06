@@ -67,9 +67,29 @@ docs/
 
 - **Cookie 解密**：从 Chrome Default profile 提取 x.com cookie（AES-128-CBC + macOS Keychain），注入到 Profile 1 的 browser-use 会话
 - **浏览器**：browser-use Python API，用 Profile 1（体积小，~500MB）+ 注入 Default 的 cookie
-- **翻译/过滤**：DeepSeek Chat API（OpenAI 兼容），批量处理
+- **翻译/过滤/LLM 判别**：DeepSeek API（OpenAI 兼容），批量处理。**模型选型**见下方"DeepSeek 模型选型"节
 - **分页容错**：每页暂存到 data/pages/，崩溃后自动恢复
 - **停止条件**：时间盒 / 连续无新增 / 已知覆盖率高（见下方"抓取停止条件"节）
+
+### DeepSeek 模型选型（所有 LLM 任务通用）
+
+文档：https://api-docs.deepseek.com/zh-cn/
+
+| 场景 | 模型 | 选型理由 |
+|------|------|---------|
+| **翻译**（summary / changelog / 推文 / 文章正文 / README 等）| `deepseek-v4-flash` | 简单转写任务，要求时效高、批量并发，flash 足够 |
+| **AI 相关性判别**（is_relevant 二分类，X / GH / PH）| `deepseek-v4-flash` | 单分类轻量任务，flash 足够 |
+| **简短结构化抽取**（ai_category / ai_summary 等单字段填充）| `deepseek-v4-flash` | 同上 |
+| **复杂推理任务**（多步比较、综合分析、长上下文判断、需要 chain-of-thought）| `deepseek-v4-pro` | 推理深度优先，时效次要 |
+| **文档关系图谱抽取 / 跨内容综合 / 主题自动归类**（未来场景）| `deepseek-v4-pro` | 同上 |
+
+**默认 fallback**：拿不准就用 `deepseek-v4-flash`；只有明确判断"需要深度推理 + 不在意 5-10s 延迟"时才升 pro。
+
+**配置位置**：
+- Python（scrapers/）：`scrapers/_lib/config.py` 的 `DEEPSEEK_MODEL`
+- Worker（worker/src/）：各业务文件顶部的 `DEEPSEEK_MODEL` 常量（如 `worker/src/github.ts`、`worker/src/enrich.ts`）
+
+**统一规范**：新加的源/任务遵循上表，不要凭感觉乱挑模型。如有"必须升 pro"的复杂场景，先在 PR 里写清楚理由。
 
 ### ⚠️ 抓取停止条件：禁用 ID 游标（反复踩过的坑）
 
