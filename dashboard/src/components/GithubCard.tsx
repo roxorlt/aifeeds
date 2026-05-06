@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
-import { cn, formatCompact, ordinal, parseJsonField, timeAgoOrDate } from "../lib/utils";
+import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import { langDotClass } from "../lib/githubLang";
 import {
@@ -58,8 +58,7 @@ export function GithubCard({ item }: Props) {
   const stars = metrics.stars ?? metrics.total_stars;
   const forks = metrics.forks;
   const watchers = metrics.watchers;
-  const openIssues = metrics.open_issues;
-  const openPrs = metrics.open_prs;
+  // issues/PRs/commit 不在 feed 卡片展示，抽屉里仍会读 metrics.* 显示
   const summary = extra.ai_summary || "";
   const category = extra.ai_category as string | null | undefined;
   const dailyRank = extra.daily_rank as number | null | undefined;
@@ -67,8 +66,6 @@ export function GithubCard({ item }: Props) {
   const dateMd = trendingDate ? trendingDate.slice(5) : "";
   const contributorsInline = (extra.contributors_inline as Array<{ login: string; avatar_url: string }>) || [];
   const contributorsCount = (extra.contributors_count as number | null | undefined) ?? null;
-  const recentCommits = (extra.recent_commits as Array<{ date: string }> | null) || null;
-  const lastCommitAgo = recentCommits && recentCommits[0]?.date ? timeAgoOrDate(recentCommits[0].date) : "";
 
   function open() {
     drawer.openItem(item);
@@ -126,46 +123,9 @@ export function GithubCard({ item }: Props) {
             </div>
           )}
 
-          {/* 第三行：stars / forks / watchers (= view) icons */}
-          {(stars !== undefined || forks !== undefined || watchers !== undefined) && (
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
-              {stars !== undefined && (
-                <span className="inline-flex items-center gap-1">
-                  <IconStarFill className="h-3.5 w-3.5" />
-                  {formatCompact(stars)}
-                </span>
-              )}
-              {forks !== undefined && <span className="text-neutral-400">·</span>}
-              {forks !== undefined && (
-                <span className="inline-flex items-center gap-1">
-                  <IconRepoForked className="h-3.5 w-3.5" />
-                  {formatCompact(forks)}
-                </span>
-              )}
-              {watchers !== undefined && <span className="text-neutral-400">·</span>}
-              {watchers !== undefined && (
-                <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
-                  <IconWatching className="h-3.5 w-3.5" />
-                  {formatCompact(watchers)}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* 第四行：Issues / PRs / commit — 与抽屉一致 */}
-          {(openIssues != null || openPrs != null || lastCommitAgo) && (
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-neutral-600">
-              {openIssues != null && (
-                <span>Issues: <span className="font-medium text-neutral-900">{openIssues}</span></span>
-              )}
-              {openPrs != null && (
-                <span>PRs: <span className="font-medium text-neutral-900">{openPrs}</span></span>
-              )}
-              {lastCommitAgo && (
-                <span>commit <span className="font-medium text-neutral-900">{lastCommitAgo}</span></span>
-              )}
-            </div>
-          )}
+          {/* feed 卡片不再显示 stars/forks/watchers（下移到 footer 跟 PH
+              vote/comments 同位置）+ issues/PRs/commit（feed 不展示，
+              抽屉里保留）。让 meta 区紧凑，正文获得更多视觉重心。 */}
 
         </div>
       </div>
@@ -198,25 +158,47 @@ export function GithubCard({ item }: Props) {
         </>
       )}
 
-      {/* Contributors footer 跨整张卡宽 */}
-      {contributorsInline.length > 0 && (
-        <div className="mt-3 flex items-center text-[12px] text-neutral-500">
-          <span className="inline-flex items-center gap-2">
-            <span className="flex items-center -space-x-1.5">
-              {contributorsInline.slice(0, 3).map((c) => (
-                <img
-                  key={c.login}
-                  src={c.avatar_url}
-                  alt={c.login}
-                  className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
-                  onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                />
-              ))}
+      {/* Footer 跨整张卡宽：左 stars/forks/watchers（跟 PH 卡片 vote/comments
+          位置一致），右 contributors（头像 + count）— 跟 PH 的 makers 行同款
+          排版对齐三个源 */}
+      {(stars !== undefined || forks !== undefined || watchers !== undefined || contributorsInline.length > 0) && (
+        <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
+          {stars !== undefined && (
+            <span className="inline-flex items-center gap-1">
+              <IconStarFill className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{formatCompact(stars)}</span>
             </span>
-            {contributorsCount && contributorsCount > 0 && (
-              <span className="text-neutral-500">{contributorsCount} contributors</span>
-            )}
-          </span>
+          )}
+          {forks !== undefined && (
+            <span className="inline-flex items-center gap-1">
+              <IconRepoForked className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{formatCompact(forks)}</span>
+            </span>
+          )}
+          {watchers !== undefined && (
+            <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
+              <IconWatching className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{formatCompact(watchers)}</span>
+            </span>
+          )}
+          {contributorsInline.length > 0 && (
+            <span className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-neutral-500">
+              <span className="flex shrink-0 -space-x-1.5">
+                {contributorsInline.slice(0, 3).map((c) => (
+                  <img
+                    key={c.login}
+                    src={c.avatar_url}
+                    alt={c.login}
+                    className="h-5 w-5 rounded-full border border-white bg-neutral-200"
+                    onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                  />
+                ))}
+              </span>
+              {contributorsCount && contributorsCount > 0 && (
+                <span className="min-w-0 truncate text-[12px]">{contributorsCount} contributors</span>
+              )}
+            </span>
+          )}
         </div>
       )}
     </article>
