@@ -263,7 +263,10 @@ export interface IngestItem {
   metrics: string;
   published_at: string | null;
   scraped_at: string;
-  is_relevant: number;
+  // is_relevant=NULL：等 classify-pending cron 跑 DeepSeek 判定，
+  // 命中(=1)再走 fill-translations cron。是这里**一定要 null** 而不是 1，
+  // 否则 dashboard feed 直接展示未分类内容。
+  is_relevant: number | null;
   matched_by: string;
   lang: string | null;
   extra: string;
@@ -347,7 +350,7 @@ export function sbTweetToIngestItem(t: SbTweet): IngestItem | null {
     metrics: JSON.stringify(metrics),
     published_at: twitterDateToD1(t.created_at),
     scraped_at: nowD1(),
-    is_relevant: 1,
+    is_relevant: null,
     matched_by: 'list-poll-sb',
     lang: t.lang || null,
     extra: JSON.stringify(extra),

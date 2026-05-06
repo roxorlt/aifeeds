@@ -11,6 +11,8 @@ import {
   submitLongformText,
   refreshSingleItem,
   runListPollIngest,
+  runLongformViaSb,
+  runClassifyPending,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -292,7 +294,7 @@ export default {
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest' | 'classify-pending';
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
@@ -300,6 +302,7 @@ export default {
     else if (minute === 10 || minute === 50) mode = 'detect-longform';
     else if (minute === 5 || minute === 35) mode = 'backfill-replies';
     else if (minute === 25 || minute === 55) mode = 'list-poll-ingest';
+    else if (minute === 20 || minute === 40) mode = 'classify-pending';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -370,6 +373,13 @@ export default {
               `[cron] refresh-metrics(${refreshMode},maxTier=${maxTier}) result:`,
               JSON.stringify(result),
             );
+            return;
+          }
+          if (mode === 'classify-pending') {
+            // SB list-poll-ingest 默认 is_relevant=NULL，由这条 cron 用 DeepSeek
+            // 批量判定（命中→翻译 cron 接力）。20/40 minute 各跑 1 批 15。
+            const result = await runClassifyPending(env, 15);
+            console.log(`[cron] classify-pending result:`, JSON.stringify(result));
             return;
           }
           if (mode === 'list-poll-ingest') {
@@ -1103,6 +1113,20 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const listId = url.searchParams.get('list_id') || env.LIST_POLL_LIST_ID || '1643236611378008066';
     const maxPages = Math.min(Math.max(parseInt(url.searchParams.get('max_pages') || '3'), 1), 5);
     const result = await runListPollIngest(env, listId, maxPages);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'longform-via-sb') {
+    // 替代本地 .longform launchd：批量从 SB 拉 full_text 写回 items.content。
+    // limit 默认 50；SB 端单次 200 IDs 会 125s 超时，前端 cap 50（实测稳定）。
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 50);
+    const result = await runLongformViaSb(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'classify-pending') {
+    // DeepSeek 批量判定 is_relevant + ai_summary。manual 触发用于一次性清 backlog
+    // 或验证 prompt 效果。limit 默认 15（每批 1 次 LLM call ~10-30s）。
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 30);
+    const result = await runClassifyPending(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'fill-translations') {

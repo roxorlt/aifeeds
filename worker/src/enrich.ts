@@ -286,25 +286,41 @@ export async function refreshSingleItem(
     return { refreshed: false, source_type: 'unknown', reason: 'item_not_found' };
   }
 
-  // 3. 按 source_type 分发（目前只 X 走 syndication）
+  // 3. 按 source_type 分发
   if (item.source_type === 'x_list') {
-    const r = await fetchTweet(item.source_id);
-    if (!r || r.notFound || !r.data) {
-      return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
+    // 优先走 SB 拿全量 metrics（含 retweets/views）；没配 key 时回落 syndication
+    let merged: Metrics;
+    if (env.SCRAPEBADGER_API_KEY) {
+      const sb = await fetchTweetsScrapeBadger(env, [item.source_id]);
+      const m = sb.metrics.get(item.source_id);
+      if (!m || sb.error) {
+        return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
+      }
+      // SB 已经返 5 个字段全套，但仍 merge 旧值兜底（极少数情况下 SB 漏字段）
+      const oldRow = await env.DB.prepare(
+        `SELECT metrics FROM items WHERE id = ?`,
+      ).bind(item.id).first<{ metrics: string | null }>();
+      let oldMetrics: Record<string, number | undefined> = {};
+      if (oldRow?.metrics) {
+        try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+      }
+      merged = { ...oldMetrics, ...prunedNonUndefined(m as unknown as Record<string, unknown>) } as Metrics;
+    } else {
+      // Fallback：syndication（已不返 retweet_count/view_count）
+      const r = await fetchTweet(item.source_id);
+      if (!r || r.notFound || !r.data) {
+        return { refreshed: false, source_type: 'x_list', reason: 'fetch_failed' };
+      }
+      const newPart = apiToMetrics(r.data);
+      const oldRow = await env.DB.prepare(
+        `SELECT metrics FROM items WHERE id = ?`,
+      ).bind(item.id).first<{ metrics: string | null }>();
+      let oldMetrics: Record<string, number | undefined> = {};
+      if (oldRow?.metrics) {
+        try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
+      }
+      merged = { ...oldMetrics, ...prunedNonUndefined(newPart as unknown as Record<string, unknown>) } as Metrics;
     }
-    // ⚠️ X syndication 当前已不返 retweet_count / view_count（平台隐私收紧）
-    // apiToMetrics 这两个字段是 undefined，JSON.stringify 后 drop 掉，导致直接
-    // UPDATE 会清掉 D1 里旧的 retweets / views 数据 → 永远显示「—」
-    // 修：merge 旧 metrics，仅覆盖 syndication 实际返回的字段
-    const newPart = apiToMetrics(r.data);
-    const oldRow = await env.DB.prepare(
-      `SELECT metrics FROM items WHERE id = ?`,
-    ).bind(item.id).first<{ metrics: string | null }>();
-    let oldMetrics: Record<string, number | undefined> = {};
-    if (oldRow?.metrics) {
-      try { oldMetrics = JSON.parse(oldRow.metrics) || {}; } catch { /* ignore */ }
-    }
-    const merged: Metrics = { ...oldMetrics, ...prunedNonUndefined(newPart as unknown as Record<string, unknown>) } as Metrics;
     await updateMetrics(env, item.id, merged);
     // 写 throttle key
     if (env.AUTH_KV) {
@@ -1463,6 +1479,312 @@ export async function runListPollIngest(
     duration_ms: Date.now() - t0,
     early_stop: earlyStop,
     error: firstError,
+  };
+}
+
+// ─── classify-pending：DeepSeek 批量判 is_relevant + ai_summary ───
+// SB list-poll-ingest 写 is_relevant=NULL 后，由这条 cron 把 NULL 项过一遍
+// DeepSeek，相关性命中(=1)的同时给 1 行中文 ai_summary。
+//
+// 跟本地 tweet_processor.py 同样的语义：列表里都是 AI 圈用户，但他们也会
+// 发吐槽 / 广告 / 个人事项；这里只放跟 AI / 工程 / 产品 / 技术相关的。
+//
+// 翻译不在这里做：fill-translations cron 会 select content_translated IS NULL
+// AND lang != 'zh' AND is_relevant=1 自动接力。
+
+const CLASSIFY_PROMPT = `你判断每条推文是否属于 AI / 软件工程 / 产品 / 创业 / 技术议题。
+对每条返回 JSON 对象 { idx, is_relevant: 0|1, ai_summary }。
+- is_relevant=1：跟 AI / LLM / agent / 产品 / 工程 / 创业 / dev tooling 相关
+- is_relevant=0：纯个人生活、政治、广告、不相干吐槽
+- ai_summary：仅 is_relevant=1 时给 1 行中文摘要（≤ 40 字），抓核心信息；
+  否则空字符串
+
+输入推文（JSON 数组，每条 { idx, handle, text }）：
+%INPUT%
+
+只返回一个 JSON 对象 { items: [{ idx, is_relevant, ai_summary }, ...] }，不要任何其他文字。`;
+
+export interface ClassifyPendingResult {
+  mode: 'classify-pending';
+  selected: number;
+  classified: number;
+  relevant: number;
+  irrelevant: number;
+  duration_ms: number;
+  error?: string;
+}
+
+interface ClassifyResponse {
+  items?: Array<{ idx: number; is_relevant: 0 | 1; ai_summary?: string }>;
+}
+
+export async function runClassifyPending(
+  env: EnrichEnv,
+  limit = 15,
+): Promise<ClassifyPendingResult> {
+  const t0 = Date.now();
+  if (!env.DEEPSEEK_API_KEY) {
+    return { mode: 'classify-pending', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: 0, error: 'no_deepseek_key' };
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, content, handle, extra
+       FROM items
+      WHERE source_type = 'x_list'
+        AND deleted_at IS NULL
+        AND is_relevant IS NULL
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string; source_id: string; content: string | null; handle: string | null; extra: string | null }>();
+
+  const selected = rows.results.length;
+  if (selected === 0) {
+    return { mode: 'classify-pending', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0 };
+  }
+
+  const input = rows.results.map((r, i) => ({
+    idx: i,
+    handle: r.handle || '',
+    text: (r.content || '').slice(0, 600), // 截断防止 prompt 太长
+  }));
+  const prompt = CLASSIFY_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let res: Response;
+  try {
+    res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        max_tokens: 4000,
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    return { mode: 'classify-pending', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'fetch_failed' };
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    return { mode: 'classify-pending', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: `http_${res.status}` };
+  }
+
+  const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: ClassifyResponse;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { mode: 'classify-pending', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'json_parse' };
+  }
+  const results = parsed.items || [];
+
+  const nowIso = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [];
+  let relevant = 0;
+  let irrelevant = 0;
+  let classified = 0;
+  for (const item of results) {
+    const idx = item.idx;
+    if (idx == null || idx < 0 || idx >= rows.results.length) continue;
+    const row = rows.results[idx];
+    const isRel = item.is_relevant === 1 ? 1 : 0;
+    const summary = (item.ai_summary || '').trim();
+    classified++;
+    if (isRel) relevant++; else irrelevant++;
+    stmts.push(
+      env.DB.prepare(
+        `UPDATE items
+            SET is_relevant = ?,
+                matched_by = COALESCE(matched_by, 'classify-pending'),
+                extra = json_set(coalesce(extra, '{}'),
+                                 '$.ai_summary', ?,
+                                 '$.classified_at', ?)
+          WHERE id = ?`,
+      ).bind(isRel, summary, nowIso, row.id),
+    );
+  }
+
+  if (stmts.length > 0) {
+    try {
+      await env.DB.batch(stmts);
+    } catch (e) {
+      console.error('[classify-pending] batch error:', e);
+      return { mode: 'classify-pending', selected, classified: 0, relevant, irrelevant, duration_ms: Date.now() - t0, error: 'batch_error' };
+    }
+  }
+
+  return {
+    mode: 'classify-pending',
+    selected,
+    classified,
+    relevant,
+    irrelevant,
+    duration_ms: Date.now() - t0,
+  };
+}
+
+// ─── longform-via-sb：替代本地 chrome longform-cron 的批量补全 ───
+// SB get-tweets-by-ids 直接返 full_text（never truncated），50 IDs/call ≈ 51 credits。
+// 把 D1 里 extra.longform.note_id 标过但 fetched_at 还空的 item 一锅端：
+//   1. SELECT 一批
+//   2. 一次 SB batch
+//   3. 对每条命中：UPDATE content = full_text，extra.longform.fetched_at = now
+//   4. 没命中（X 已删 / 私密等）→ extra.longform.fetch_error
+// 用法：cron 每 5 min 跑一次 limit=50（清完后 cap 不再扣 credits 因为 SELECT 0 行）；
+// 或 /api/enrich/run?mode=longform-via-sb&limit=200 一次性清 backlog。
+
+export interface LongformViaSbResult {
+  mode: 'longform-via-sb';
+  selected: number;
+  updated: number;
+  not_found: number;
+  credits_used: number;
+  duration_ms: number;
+  error?: string;
+}
+
+export async function runLongformViaSb(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  limit = 50,
+): Promise<LongformViaSbResult> {
+  const t0 = Date.now();
+
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, content, extra
+       FROM items
+      WHERE source_type = 'x_list'
+        AND deleted_at IS NULL
+        AND json_extract(extra, '$.longform.note_id') IS NOT NULL
+        AND json_extract(extra, '$.longform.fetched_at') IS NULL
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string; source_id: string; content: string | null; extra: string | null }>();
+
+  const selected = rows.results.length;
+  if (selected === 0) {
+    return { mode: 'longform-via-sb', selected: 0, updated: 0, not_found: 0, credits_used: 0, duration_ms: Date.now() - t0 };
+  }
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { mode: 'longform-via-sb', selected, updated: 0, not_found: 0, credits_used: 0, duration_ms: Date.now() - t0, error: 'no_key' };
+  }
+
+  const ids = rows.results.map((r) => r.source_id);
+  const sb = await fetchTweetsScrapeBadger(env, ids);
+
+  if (sb.error) {
+    return {
+      mode: 'longform-via-sb',
+      selected,
+      updated: 0,
+      not_found: 0,
+      credits_used: sb.creditsUsed ?? 0,
+      duration_ms: Date.now() - t0,
+      error: sb.error,
+    };
+  }
+
+  // SB by-ids 返 metrics shape，但 full_text 我们额外要。
+  // 直接 raw 调一次更省事 — 但已经走过 fetchTweetsScrapeBadger 拿到 metrics map，
+  // 还得 raw fetch 一次取 full_text。两次浪费 credits。
+  // 简单做法：再调一次 raw，按 50 IDs 一批，从原始响应里读 full_text。
+  // ✱ 但 sb.metrics 已经 cost 了，重复一次成本 double。
+  // 折中：直接 raw curl，一次拿 full_text 同时也覆盖 metrics（通过 applyTieredUpdate 路径不走，因为这条
+  // 我们其实不更新 metrics）— 只为 full_text 走一次 fetch，避免 fetchTweetsScrapeBadger 的简化输出。
+  // → 下面用 raw fetch 实现。
+
+  const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${ids.join(',')}`;
+  const t1 = Date.now();
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+  });
+  const creditsUsed = Number(res.headers.get('x-credits-used')) || 0;
+  if (!res.ok) {
+    return {
+      mode: 'longform-via-sb',
+      selected,
+      updated: 0,
+      not_found: 0,
+      credits_used: creditsUsed,
+      duration_ms: Date.now() - t0,
+      error: `http_${res.status}`,
+    };
+  }
+  const body = (await res.json()) as { data?: Array<{ id?: string; full_text?: string; text?: string }> };
+  const fullTextById = new Map<string, string>();
+  for (const t of body.data || []) {
+    if (!t.id) continue;
+    const ft = t.full_text || t.text || '';
+    if (ft) fullTextById.set(t.id, ft);
+  }
+
+  const nowIso = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [];
+  let updated = 0;
+  let notFound = 0;
+  for (const r of rows.results) {
+    const ft = fullTextById.get(r.source_id);
+    if (ft) {
+      // 更新 content（仅在 SB 给的更长时才覆盖；同 ingest 的 monotonic 规则）
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE items
+              SET content = CASE
+                    WHEN content IS NULL OR length(?) >= length(content) THEN ?
+                    ELSE content
+                  END,
+                  extra = json_set(coalesce(extra, '{}'), '$.longform.fetched_at', ?)
+            WHERE id = ?`,
+        ).bind(ft, ft, nowIso, r.id),
+      );
+      updated++;
+    } else {
+      // SB 没返该条（已删 / 私密 / 受限），记 fetch_error 避免下次再选中
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE items
+              SET extra = json_set(coalesce(extra, '{}'), '$.longform.fetch_error', ?,
+                                                          '$.longform.fetched_at', ?)
+            WHERE id = ?`,
+        ).bind('not_returned_by_sb', nowIso, r.id),
+      );
+      notFound++;
+    }
+  }
+
+  if (stmts.length > 0) {
+    try {
+      await env.DB.batch(stmts);
+    } catch (e) {
+      console.error('[longform-via-sb] batch error:', e);
+      return {
+        mode: 'longform-via-sb',
+        selected,
+        updated: 0,
+        not_found: 0,
+        credits_used: creditsUsed,
+        duration_ms: Date.now() - t0,
+        error: e instanceof Error ? e.message : 'batch_error',
+      };
+    }
+  }
+
+  console.log(`[longform-via-sb] selected=${selected} updated=${updated} not_found=${notFound} credits=${creditsUsed} dur=${Date.now() - t1}ms`);
+
+  return {
+    mode: 'longform-via-sb',
+    selected,
+    updated,
+    not_found: notFound,
+    credits_used: creditsUsed,
+    duration_ms: Date.now() - t0,
   };
 }
 
