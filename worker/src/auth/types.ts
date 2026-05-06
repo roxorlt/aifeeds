@@ -66,3 +66,37 @@ export interface RateLimitResult {
     | 'device_24h_unique_phones_limit'
     | 'phone_locked_30min';
 }
+
+export interface EmailLogRow {
+  id: number;
+  email: string;
+  ip: string;
+  device_id: string | null;
+  ua: string | null;
+  sent_at: number;
+  result:
+    | 'success'
+    | 'turnstile_failed'
+    | 'rate_limited'
+    | 'disposable_blocked'
+    | 'mx_failed'
+    | 'budget_capped'
+    | 'resend_api_error';
+  code_hash: string | null;
+  code_expires_at: number | null;
+  code_used_at: number | null;
+  code_attempts: number;
+  metadata: string | null;
+}
+
+export interface EmailRateLimitResult {
+  ok: boolean;
+  reason?:
+    | 'email_60s_limit'
+    | 'email_5min_limit'
+    | 'email_24h_limit'
+    | 'ip_1h_unique_emails_limit'
+    | 'ip_24h_total_limit'
+    | 'device_24h_unique_emails_limit'
+    | 'email_locked_30min';
+}
