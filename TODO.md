@@ -8,9 +8,10 @@
   - 验证 case：t1=2048759762414674337 / t2=2048753722432360677 / Eric Cursor 3 root
   - 触发 reclassify 真执行前要 `wrangler d1 export` 备份
 - [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
-- [ ] **ClawHub 接入**（2026-05-06 brainstorm 启动）：v1 设计已对齐（worker-only + Convex API + 1200 skill/天 + lazy zip 改 eager；详见 `docs/plans/2026-05-06-clawhub-source-design.md` 待写）。v2 后置项：
-  - drawer 30 天趋势模块**仅当数据点 ≥ 阈值**才展示（避免冷启动期空线条；阈值待定，建议 ≥ 7 个 snapshot + variance > 5%）
-  - 海报模板（PR6.x 后再加 ClawHub 变体到 share/poster）
+- [ ] **ClawHub v1 后置项**（v0 已上线，2026-05-06）：
+  - **ZIP 流水线**：下载 `/api/v1/download?slug=...` → 抠 SKILL.md / README.md / 媒体图 → frontmatter+H1 strip → DeepSeek 翻译 README 全文（保留代码块）→ 落 `items.content_translated` + `extra.skill_md` + media R2 迁移 → drawer 文件清单/SKILL.md 原文实数据 + 海报 body 改用 README 前 N 行
+  - **drawer 30 天趋势**：仅当数据点 ≥ 7 + 波动率 > 5% 才展示
+  - **顶部筛选 3-dropdown**：取代 SortSelector 的"热度|时间"toggle，按 mockup 出排序+分类+隐藏可疑三件套（需要 Feed.tsx 支持 source-specific 顶 bar）
 - [ ] **CF 服务端迁移**（2026-05-06 讨论文档已落）：5 阶段 roadmap — Phase 1 Web Analytics + Workers Logs + AI Gateway（这周内，3h）→ Phase 2 Images cdn-cgi 改造 dashboard（半天）→ Phase 3 GH 链试点 Workflow（1-2 周）→ Phase 4 X 主链 Workflow 双写迁移（2-3 周，下线 6 个 cron mode）→ Phase 5 按需 Queue / Logpush / Container。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实业务量 261/天 X、ScrapeBadger batch 计费、各产品月费估算、待决策项）
 
 ## 待做

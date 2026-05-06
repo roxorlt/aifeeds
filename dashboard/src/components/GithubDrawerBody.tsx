@@ -426,20 +426,23 @@ export function GithubDrawerBody({ item }: Props) {
           </ul>
         )}
 
-        {/* contributors */}
-        {contributorsInline.length > 0 && (
+        {/* contributors — inline 头像可空但有 count 时仍显示文字（兜底新数据
+            scraper 落 contributors_count 但漏 contributors_inline 的情况） */}
+        {(contributorsInline.length > 0 || (contributorsCount && contributorsCount > 0)) && (
           <div className="mt-2.5 inline-flex items-center gap-2">
-            <span className="flex items-center -space-x-1.5">
-              {contributorsInline.slice(0, 5).map((c) => (
-                <img
-                  key={c.login}
-                  src={c.avatar_url}
-                  alt={c.login}
-                  className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
-                  onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                />
-              ))}
-            </span>
+            {contributorsInline.length > 0 && (
+              <span className="flex items-center -space-x-1.5">
+                {contributorsInline.slice(0, 5).map((c) => (
+                  <img
+                    key={c.login}
+                    src={c.avatar_url}
+                    alt={c.login}
+                    className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
+                    onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                  />
+                ))}
+              </span>
+            )}
             {contributorsCount && (
               <span className="text-[11px] text-neutral-500">{contributorsCount} contributors</span>
             )}

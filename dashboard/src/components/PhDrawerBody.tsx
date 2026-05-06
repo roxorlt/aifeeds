@@ -201,8 +201,8 @@ export function PhDrawerBody({ item }: Props) {
             <div className="mt-0.5 text-[14px] text-neutral-700">
               {taglineTranslated || tagline}
             </div>
-            {/* meta line：日期(无 PT) / #排名 / votes / 分类标签（彩色 chip）
-                votes 从 KPI 行挪上来，让下方 KPI 行能跟海报对齐 3 列布局 */}
+            {/* meta line：日期(无 PT) / #排名 / 分类标签（彩色 chip）
+                votes 回到下方 KPI 行（不再挪上来） */}
             <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
               {launchDate && <span className="tabular-nums">{launchDate}</span>}
               {launchDate && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
@@ -211,13 +211,7 @@ export function PhDrawerBody({ item }: Props) {
                   #{dailyRank}
                 </span>
               )}
-              {(launchDate || dailyRank !== undefined) && metrics.votes !== undefined && <span className="text-neutral-400">·</span>}
-              {metrics.votes !== undefined && (
-                <span className="inline-flex items-center gap-0.5 tabular-nums">
-                  <IconUpvote className="h-3 w-3" />{formatCompact(metrics.votes)}
-                </span>
-              )}
-              {(launchDate || dailyRank !== undefined || metrics.votes !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
+              {(launchDate || dailyRank !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
               {aiCategoryText && (
                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${phCategoryStyle(aiCategory)}`}>
                   {aiCategoryText}
@@ -245,15 +239,21 @@ export function PhDrawerBody({ item }: Props) {
         )}
       </div>
 
-      {/* ② KPI 行 — 3 列各 1/3，跟海报对齐（comments / reviews / followers）
-          votes 已挪到上方 meta line（更紧凑且不重复）。reviews 没数据时
-          仍占一列显示 "—"，保证三列恒定布局 */}
-      {(metrics.comments !== undefined || metrics.reviews_count !== undefined || metrics.followers !== undefined) && (
-        <div className="grid grid-cols-3 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
+      {/* ② KPI 行 — 4 列各 1/4，跟海报对齐（votes / comments / reviews /
+          followers）。短期热度（votes/comments）+ 长期口碑（reviews/followers）
+          全维度展示。缺数据列 / value === 0 都显 "—"（兜底 scraper 多 launch
+          老产品 votesCount 抓 0 的视觉污染，等 backfill 后真值显示）。 */}
+      {(metrics.votes !== undefined || metrics.comments !== undefined || metrics.reviews_count !== undefined || metrics.followers !== undefined) && (
+        <div className="grid grid-cols-4 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
+          <Kpi
+            icon={<IconUpvote className="h-3.5 w-3.5" />}
+            label="votes"
+            value={metrics.votes && metrics.votes > 0 ? formatCompact(metrics.votes) : "—"}
+          />
           <Kpi
             icon={<IconComment className="h-3.5 w-3.5" />}
             label="comments"
-            value={metrics.comments !== undefined ? formatCompact(metrics.comments) : "—"}
+            value={metrics.comments && metrics.comments > 0 ? formatCompact(metrics.comments) : "—"}
           />
           <Kpi
             icon={<IconStar className="h-3.5 w-3.5" />}
@@ -267,7 +267,7 @@ export function PhDrawerBody({ item }: Props) {
           <Kpi
             icon={<IconFollow className="h-3.5 w-3.5" />}
             label="followers"
-            value={metrics.followers !== undefined ? formatCompact(metrics.followers) : "—"}
+            value={metrics.followers && metrics.followers > 0 ? formatCompact(metrics.followers) : "—"}
           />
         </div>
       )}

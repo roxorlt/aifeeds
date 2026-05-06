@@ -711,7 +711,7 @@ function renderPhContent(opts: {
   rank: string;
   tag: string;
   body: string;
-  stats?: { votes?: number | string; comments?: number | string; followers?: number | string };
+  stats?: { votes?: number | string; comments?: number | string; rating?: string; followers?: number | string };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
   mediaIsVideo?: boolean;
@@ -772,16 +772,18 @@ function renderPhContent(opts: {
     .join('');
   cy += bodyLines.length * bodyLine + 30;
 
-  // ph-stats: 3 cols (votes / comments / followers，跟抽屉对齐)
+  // ph-stats: 4 cols (votes / comments / reviews / followers，跟抽屉对齐)
+  // 短期热度 (votes/comments) + 长期口碑 (reviews/followers)
   const statRowY = cy;
   const statRowH = 100;
   const m = opts.stats || {};
   const statsArr = [
     { value: formatStat(m.votes), label: 'votes' },
     { value: formatStat(m.comments), label: 'comments' },
+    { value: m.rating || '—', label: 'reviews' },
     { value: formatStat(m.followers), label: 'followers' },
   ];
-  const statColW = innerW / 3;
+  const statColW = innerW / 4;
   let statsSvg = `<line x1="${innerX}" y1="${statRowY}" x2="${innerX + innerW}" y2="${statRowY}" stroke="${C.line}" stroke-width="1"/>`;
   statsArr.forEach((s, i) => {
     const cx = innerX + statColW * i + statColW / 2;
@@ -1071,9 +1073,11 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       mediaIsVideo: item.mediaIsVideo,
       productLogoDataUri: item.authorAvatarDataUri,
       stats: {
-        votes: m.votes as number | undefined,
-        comments: m.comments as number | undefined,
-        followers: m.followers as number | undefined,
+        // 0 当 missing 处理（PH multi-launch 老产品 scraper 抓 0 的兜底，让 formatStat 渲 "—"）
+        votes: (m.votes as number | undefined) || undefined,
+        comments: (m.comments as number | undefined) || undefined,
+        rating: m.rating ? String(m.rating) : undefined,
+        followers: (m.followers as number | undefined) || undefined,
       },
     });
     contentSvg = r.svg;

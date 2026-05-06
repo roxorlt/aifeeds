@@ -64,7 +64,11 @@ export function PhCard({ item }: Props) {
   const media = parseMedia(item.media);
 
   const name = item.title || "?";
-  const tagline = item.content_translated || item.content || "";
+  // 正文优先用 AI 解读（跟 GithubCard 一致 — feed 卡片用 ai_summary 信息
+  // 密度更高），缺失时退到 PH 原始 tagline 翻译/原文。drawer 里 ai_summary
+  // 作为独立 section 全文展示，卡片用它当 4 行预览。
+  const aiSummary = (extra.ai_summary as string) || "";
+  const tagline = aiSummary || item.content_translated || item.content || "";
   const dailyRank = (extra as { daily_rank?: number }).daily_rank;
   const launchDate = extra.launch_date_pt || "";
   const dateMd = launchDate ? launchDate.slice(5) : ""; // "MM-DD"，无 PT 后缀
