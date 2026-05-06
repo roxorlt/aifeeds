@@ -52,6 +52,7 @@ docs/
 
 ### 发布前 checklist
 
+- [ ] **rebase 检查**：部署 staging 或 prod 前必须确认当前 branch 已 rebase 上最新 main（多 session 并行时尤其关键，避免覆盖别人的改动）。即使是 prod 紧急 hotfix 直接在 main 改，也要先 `git log --oneline main..HEAD` 看是否落后；多 worktree 并行时主仓库 HEAD 可能被切动，部署前 `git status` + `git rev-parse HEAD` 确认在预期 branch 上
 - [ ] 不含敏感数据（cookie、API key、token、本地绝对路径）
 - [ ] worker 改动：先本地 `wrangler dev` 验证 endpoint
 - [ ] **worker 改动：deploy staging 验证（`wrangler deploy --env staging`）再合 main 部署 prod**（PR3 翻车教训：dashboard 升级 fetch credentials，worker CORS 没跟上 → prod 全挂）
