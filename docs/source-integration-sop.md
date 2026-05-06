@@ -1,11 +1,11 @@
 # 信息源接入 SOP
 
-> 验证于 X List + GitHub 两个源接入。接下来 YouTube / Podcast / Product Hunt / arXiv 走这套路径，目标 80% 复用 + 20% 源特异性。
+> 验证于 X List + GitHub + Product Hunt + ClawHub 四个源接入。接下来 YouTube / Podcast / arXiv 走这套路径，目标 80% 复用 + 20% 源特异性。
 
 ## 0. TL;DR Checklist（每个新源照做）
 
 ```
-□ Phase 0  设计文档 + HTML mockup（用户确认后再写代码）
+□ Phase 0  设计文档 + HTML mockup：feed 卡片 + drawer + 分享海报三件套（用户确认后再写代码）
 □ Phase 1  Schema 增量（item.source_type 枚举、metrics_snapshots_<src>、event 白名单）
 □ Phase 2  Scraper（fetch → parse → LLM judge → translate → DB）
 □ Phase 3  Worker pipeline（cron 抢占 + /api/items 复用 + R2 endpoint 复用）
@@ -100,10 +100,16 @@ LLM client / DB client / 翻译 / R2 上传都已有 helper，复用即可。
    - 数据源、抓取策略、停止条件
    - schema 增量（items.source_type 新值、是否新建 metrics 表、extra 字段表）
    - LLM prompt 设计（关键句直接抄进文档便于回看）
-   - UI 决策（card / drawer / hero / icon / sort）
+   - UI 决策：**feed 卡片 + drawer 详情 + 分享海报**（三件套都要画，缺一不可）
    - 与已有源的差异点
-3. 生成 HTML mockup（PC + 移动两版，多 variant 让用户挑）放 `docs/plans/_mockups/`
+3. 生成 HTML mockup（PC + 移动两版，多 variant 让用户挑）放 `docs/plans/_mockups/`，**必须包含**：
+   - feed 卡片样式
+   - drawer 详情区段
+   - **分享海报（1080×1350）排版**（哪些字段进海报、视觉重心、是否带媒体图、CTA 块、品牌区）
 4. 用户确认后再开 Phase 1。**不要跳过这一步**，越往后改越贵
+
+> **为什么分享海报要进 Phase 0**：PR5 之后每个新源都得加 SVG 模板变体到 `worker/src/share/svg-template.ts`，海报跟 feed/drawer 的字段要预先对齐（比如 GH 的 commit 数 / PH 的票数 / Skill marketplace 的 install 命令），不然 Phase 4/5 才发现海报缺字段就要倒回去改 schema + scraper。
+> 沿用约束：1080×1350 PNG · resvg-wasm 渲染 · Noto Sans SC 字体子集 · R2 缓存 · navigator.share 直存相册（移动）/ a[download]（PC）。
 
 ### Phase 1：Schema（0.5 天）
 
@@ -195,6 +201,178 @@ UI 验收用 mockup 做对照，PC + 移动都要测。
 | 4 | Podcast | 5-7 天 | 转录最贵，可选 Snipd 集成 | 否（音频用原始链接） |
 
 YouTube 优先因为最高频内容、用户场景刚需。
+
+## 4.5 接入新源前后的横向规则（2026-05-06 加，从 ClawHub 接入抽象）
+
+> 这一节是**通用规则**，不放具体源的字段映射。具体源的细节进各自的设计文档。
+
+### A. Reconnaissance 阶段（动手做 mockup 之前必跑）
+
+1. **检查页面是不是 SPA**：curl 拿首页 HTML，grep `__NEXT_DATA__ / __NUXT__ / self.__next_f / $tsr / window.__INITIAL_STATE__` 等水印识别框架。SPA 直接 curl 拿不到数据，但 80% 情况能从 JS bundle 抠到后端 endpoint。
+2. **从 footer / `runtimeEnv` chunk 找 backend**：现代 SPA 一般会暴露 `VITE_*_URL`、`NEXT_PUBLIC_*_API` 这种常量。Convex / Supabase / Pocketbase 类后端常见且**默认对外开放只读 API，无鉴权**。
+3. **优先尝试官方 REST V1**（如有），其次直接打后端 query 接口（Convex `/api/query`），最后才考虑 HTML 解析。能拿 JSON 不抓 HTML。
+4. **审计源站 UI 元素清单**：fetch 一个 detail 页 HTML + 一张 listing 页 HTML，把 sidebar / sort options / category filter / KPI 字段都列全。新源 mockup **必须复刻源站自己强调的字段**，少一个 user 都会指出来。
+5. **抓源站实际 icon 库**（grep `lucide-[a-z-]+` / `heroicons-[a-z-]+` / `phosphor-[a-z-]+`），用同款 SVG。**严禁用 emoji 替代真实 icon**（详见 § F）。
+
+### B. Schema 设计
+
+1. **`items` 表共通字段不再加列**：每个新源的特有字段全进 `extra` JSON。schema 不应该出现 `<src>_<field>_count` 这种列。
+2. **`metrics_snapshots_<src>` 表只放真正需要追时间序列的指标**，单值类 meta（license / version 文本 / comments 计数）放 `items.metrics` 或 `extra` 顶层。30 天 retention 默认。
+3. **新源接入第一周不强求 trends 模块**：给 dashboard drawer 留 "30 天趋势" 折叠区段，但 v1 默认隐藏 — **数据点 ≥ 7 + variance > 5%** 才出。冷启动期空线条比没有更差。
+
+### C. LLM judge / 翻译策略分类（按源决定）
+
+| 源类型 | LLM relevance judge | summary 翻译时机 | 主体内容翻译 |
+|--------|---------------------|----------------|------------|
+| 流式新闻（X / 微博 / Twitter）| ★ 必做（噪音多） | eager（cron 时） | eager |
+| 优选 marketplace（PH / Skill marketplace 等）| ☆ 跳过（默认 is_relevant=1） | eager | eager（区分代码块）|
+| 长尾发现（GH trending / arXiv）| ★ 必做（trending 含杂）| eager | excerpt eager + 全文 lazy |
+| 视频 / 播客 | ★ 必做（转录贵）| eager | excerpt eager + 时间戳 lazy |
+
+**翻译规则统一**：
+- 代码块原文不译（fenced ``` / inline `code`）
+- 翻译 prompt 显式 "preserve all fenced code blocks verbatim, including bash / yaml / json"
+- 非用户面向的"指令文档"（如给 LLM 读的 SKILL.md / system prompt）**不翻**，只展示原文
+- terminologies 翻译要专业：用对应领域的标准译法，避免直译
+
+### D. UI / Mockup 阶段的横向规则
+
+1. **不要发明 hero image 槽位**：除非源站本身把 hero image 当主体（PH 的 product gallery 是；GH / X / Skill marketplace 类都不是）。文字密集的内容直接 text + avatar。
+2. **server-side risk tags vs client-side category filter 不要混**：很多 marketplace 同时有「安全风险标签」（server 算）和「内容分类」（前端关键词匹配）。前者放 drawer Safety section，后者放 feed 顶部下拉。
+3. **stat label 必须中文化**：drawer 里 "stars / downloads / installs" 改 "星标数 / 下载量 / 安装量"。保留英文标签等于偷懒。
+4. **顶部筛选默认 dropdown 优于 chip 排**：分类 ≥ 5 项时 chip 行会折断 / 横滚。两个 native select 是 baseline。空间紧时压缩到 title 同行右侧。
+5. **稀有但严重的安全告警才上颜色**：默认安全标签用纯文字行 + amber 文字色；只有高 severity finding 才上 rose ring。**整块 amber 背景是设计 antipattern**。
+6. **Files manifest 用代码块的目录树渲染**：等宽字体 + ASCII 树字符（├─ └─ │）。比表格紧凑、扫读快、避免移动端横滚。
+7. **drawer 区段顺序按"用户决策"路径而非按 schema 顺序**：先看是什么（README / 正文）→ 安不安全（Safety）→ 怎么装/用（Install / Action）→ 走势如何（Trends）→ 还有啥（Files / 原文）→ 走出去（Footer）。
+
+### E. CF Workers Paid 后的算账模板
+
+参见 `operations.md` § CF 计划与配额。新源接入算账时按 1000 subreq/invocation 心智，不再为"省 subreq"做拆 cron 槽优化。
+
+### F. ⚠️ 强制规则：mockup + 真实代码都不准用 emoji 做 icon
+
+**错的写法**：
+
+```html
+<span>★ 3,479</span>          <!-- 用 emoji ★ 当星标 icon -->
+<span>↓ 422k</span>            <!-- 用 ↓ 当下载 icon -->
+<span>📦 active</span>         <!-- 用 📦 当 install icon -->
+<option>★ 星标</option>        <!-- dropdown option 前缀 emoji -->
+<span>⚠️ 风险</span>           <!-- ⚠️ 当 warning icon -->
+```
+
+**对的写法**：
+
+```html
+<span><svg><use href="#ico-star"/></svg> 3,479</span>
+<span><svg><use href="#ico-download"/></svg> 422k</span>
+<option>星标</option>
+```
+
+**理由**：
+- emoji 跨平台 / 跨字体渲染差异极大（macOS / Windows / 安卓 / iOS / 微信 webview / 不同 system font 下 emoji 字形不一样）
+- 中文系统下部分 emoji 走 fallback 字体，跟 UI 主字体大小、对齐错位
+- 信息可访问性差（screen reader 念出 emoji 名字 vs SVG 用 aria-label 可控）
+- design token 不可控（emoji 颜色 / 大小 / 描边粗细全由 OS 决定）
+
+**例外白名单**（emoji 唯一可用的场景）：
+- skill 自身 frontmatter 的 emoji 字段（如 ClawHub `clawdis.emoji: "🎮"`），按数据原样渲染不动
+- 用户输入内容（推文 / 评论 / README 正文里的 emoji），按原文渲染
+- **任何 UI chrome（导航 / 按钮 / 标签 / 状态指示）必须 SVG，没有 emoji**
+
+**实操**：
+- 项目里的 SVG icon 集统一在 `dashboard/src/components/icons.tsx`（lucide-react 同款）
+- mockup 写 `<svg><symbol id="ico-xxx">` 全文件 reuse；不写 `★ ↓ ↑ 📦 ⚠️ 🆕 🕐 ✨` 之类
+- code review 见到 emoji 当 icon 用直接打回
+
+### G. 分享海报结构（PR5 之后每个新源都要加变体的固化骨架）
+
+**实现位置**：`worker/src/share/svg-template.ts`（共享）+ 每个源新写一个 `renderXxxContent` 函数
+
+**真实海报由顶层 `renderShareSvg` 拼出 3 个区域**（不是 1 个大白卡）：
+
+```
+┌─────────────────────────────────────┐
+│ Hero 区（0..360 高，全宽 1080）     │
+│  · 深色径向渐变 #050505 → #0c0c10   │
+│  · 右上紫色 glow rgba(111,99,255,.34)│
+│  · 底部贝塞尔弧线（resvg 不支持      │
+│     clipPath 时直接画 path 闭合）    │
+│  ┌────────┐                ┌──────┐ │
+│  │ logo + │                │ 来源 │ │
+│  │ 名称 + │                │ chip │ │
+│  │ slogan │                │ pill │ │
+│  └────────┘                └──────┘ │
+│                                      │
+│        （hero 弧线在这附近凹下去）   │
+├─────────────────────────────────────┤  ← cardY = 360 - cardOverlap(130) = 230
+│ ┌─────────────────────────────────┐ │
+│ │ Content 卡（独立 rounded rect）   │ │
+│ │   inset 56px / cardW = 968       │ │
+│ │   rx = 48, 白底, soft shadow      │ │
+│ │   高度 = contentH（按内容变）     │ │
+│ │  ┌──────┐ Title 大字 + tag pill   │ │
+│ │  │avatar│                         │ │
+│ │  │ 128  │ ────────────────────    │ │
+│ │  └──────┘ Metrics 3 列            │ │
+│ │  ────────────────────             │ │
+│ │  Meta 行（左 / 右）               │ │
+│ │  Body（5 行 × 36px wrap 24 字）    │ │
+│ │  [可选媒体图]                      │ │
+│ └─────────────────────────────────┘ │
+│                                      │
+│        ↑ footerMargin = 48           │
+│ ┌─────────────────────────────────┐ │
+│ │ Footer 卡（独立 rounded rect）    │ │
+│ │   inset 56px / 同 cardW          │ │
+│ │   rx = 48, 白底, soft shadow      │ │
+│ │   固定高 264                     │ │
+│ │ ┌──┐ 分享自        ┌─────┐ QR    │ │
+│ │ │ 头│ <nickname>    │ QR  │       │ │
+│ │ │像│                │ 168 │ 微信  │ │
+│ │ │120│               └─────┘ 扫码  │ │
+│ │ └──┘                              │ │
+│ └─────────────────────────────────┘ │
+│                                      │
+│        ↑ totalH = footerY + 264 + 96 │
+└─────────────────────────────────────┘
+        全图底色 #f6f7fa（浅灰）
+```
+
+**新源加变体的硬性规则**：
+
+1. **永远只写 content 区**（即新增 `renderXxxContent` 函数 + `pickSourceMeta` 加分支），hero / footer 不动
+2. content 函数签名抄 `renderGithubContent` 或 `renderPhContent`（取决于源更像哪个），改字段不改结构
+3. 必须给该源选一个**chipColor**（hero 右上角"来源 xxx"的强调色），跟现有变体不撞色：
+   - X = `#ffffff` (白)
+   - GitHub = `#c1f0d8` (mint)
+   - Product Hunt = `#ffd1c1` (peach)
+   - ClawHub = `#d8c8f5` (lavender)
+   - 新源建议从 cyan / yellow / rose 等冷暖系剩余色挑，登记到 `pickSourceMeta`
+4. content 区 Body 必须从该源的"primary text"摘段：tweet 全文 / README 首段 / summary / 摘要描述等。**不要拼太多字段进 body** — 那是 drawer 的活，海报只要一段
+5. content 区是否带媒体图（renderMediaBlock）由源决定。文字密集型（X/GH/skill marketplace）默认无；视觉密集型（PH product / arXiv 论文图）建议有
+6. **mockup 必须画三件套**（hero + content + footer）等比缩放预览，不要只画 content。1:2.5 缩放是 baseline（432 宽预览对应 1080 实际）
+
+**复用清单**（不要重写）：
+- `renderHero(sourceLabel, sourceChipColor)` — 整个 hero 区
+- `renderFooter(ctx, x, y, w, h)` — 整个 footer 区
+- `renderCardBg(x, y, w, h, rx)` — 卡片底（白底 + shadow filter）
+- `renderMediaBlock(...)` — 媒体图块（含 video play overlay）
+- `wrapText(text, maxCharsPerLine, maxLines)` — body 文字 wrap
+- `formatStat(n)` — 数字千分位 / k/m/b 后缀
+- `estimateTextWidth(text, size, weight)` — 自适应字号宽度估算
+
+**字段映射小抄**（不同源 content 区字段对照）：
+
+| 区段 | X | GitHub | Product Hunt | ClawHub |
+|------|---|--------|--------------|---------|
+| 头像 | 圆 112 | owner 圆 128 | 圆角方 128 | owner 圆 128 |
+| 主标题 | display_name (52px) | owner/repo (54-70px 自适应) | product (92px) | displayName (54-70px 自适应) |
+| tag pill | — | language (purpleSoft) | category (orangeSoft) | category (按 8 类色) |
+| metrics 列 | 4 | 3 | 3 | 3 |
+| meta 行 | — | trophy + rank + contribs | — | version+license / N versions · 更新 |
+| body | tweet 全文（8 行）| readme excerpt (5 行) | summary (5 行) | README 前 N 行去 frontmatter+H1 |
+| 媒体 | tweet 配图 | readme 第一张非 SVG | gallery 第一张 | 通常无 |
 
 ## 5. 反模式（不要做的事）
 

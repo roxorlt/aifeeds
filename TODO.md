@@ -8,6 +8,10 @@
   - 验证 case：t1=2048759762414674337 / t2=2048753722432360677 / Eric Cursor 3 root
   - 触发 reclassify 真执行前要 `wrangler d1 export` 备份
 - [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
+- [ ] **ClawHub 接入**（2026-05-06 brainstorm 启动）：v1 设计已对齐（worker-only + Convex API + 1200 skill/天 + lazy zip 改 eager；详见 `docs/plans/2026-05-06-clawhub-source-design.md` 待写）。v2 后置项：
+  - drawer 30 天趋势模块**仅当数据点 ≥ 阈值**才展示（避免冷启动期空线条；阈值待定，建议 ≥ 7 个 snapshot + variance > 5%）
+  - 海报模板（PR6.x 后再加 ClawHub 变体到 share/poster）
+- [ ] **CF 服务端迁移**（2026-05-06 讨论文档已落）：5 阶段 roadmap — Phase 1 Web Analytics + Workers Logs + AI Gateway（这周内，3h）→ Phase 2 Images cdn-cgi 改造 dashboard（半天）→ Phase 3 GH 链试点 Workflow（1-2 周）→ Phase 4 X 主链 Workflow 双写迁移（2-3 周，下线 6 个 cron mode）→ Phase 5 按需 Queue / Logpush / Container。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实业务量 261/天 X、ScrapeBadger batch 计费、各产品月费估算、待决策项）
 
 ## 待做
 
@@ -25,12 +29,13 @@
   - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
   - `/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）
   - 设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
-- [ ] **前置 2 + 3 合并：账号系统 + telemetry SDK**（共拆 6 个 PR，按依赖串联）
-  - 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md)
+- [x] **前置 2 + 3 合并：账号系统 + telemetry SDK**（共拆 6 个 PR + email auth 兜底，2026-05-06 主体完成；PR7 收藏 / newsletter 拆出独立项）
+  - 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md) + [`docs/plans/2026-05-06-email-auth-design.md`](docs/plans/2026-05-06-email-auth-design.md)
   - 决策要点：手机号短信登录（个人主体起步，企业主体后置）+ Session 不走 JWT + LocalStorage device_id（合规优先）+ Turnstile + 4 层 SMS 防刷 + 200 条/天 hard cap + PushDeer 告警
-  - 实施路线：PR1 telemetry SDK ✅ → PR2 auth backend ✅ → PR3 登录 UI ✅ → PR4 强制登录拦截 → staging 环境 → PR5 分享功能 → PR6 上线后加固 → PR7 收藏订阅 / newsletter
+  - 实施路线：PR1 telemetry SDK ✅ → PR2 auth backend ✅ → PR3 登录 UI ✅ → PR4 强制登录拦截 ✅ → staging 环境 ✅ → PR5 分享功能 ✅ → PR6 上线后加固 ✅ → **email auth ✅（2026-05-06 上线，绕过 ICP 备案，Resend HTTPS API + disposable 黑名单 + MX DoH，SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 加回双通道）**
   - **顺序调整（2026-05-03）**：staging 提前到 PR4 之后（替代原"PR6 一次性"），PR5/PR7 内容互换（分享功能优先于收藏订阅，因为分享不依赖写表）
   - 微信 OAuth / 一键登录 SDK / 第三方登录：等切企业主体后再做（identities 表 schema 已预留）
+- [ ] **PR7 收藏 + newsletter**（独立项，从「前置 2+3」拆出）：`favorites` 表 + UI；newsletter = 邮件订阅（每日/每周摘要发用户邮箱），复用现有 Resend 通道（mail.ai-feeds.com 已 verified）+ 退订 link + 反垃圾合规
 - [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），基于 events 表做漏斗 / 留存 / 来源分析，按 tweet / author / referer 维度下钻
 - [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
 - [ ] 引用 + 被引用 feed 去重策略（同一条被 quote 又独立出现）

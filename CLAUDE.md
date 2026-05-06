@@ -171,6 +171,7 @@ scraper 的 DOM 抓取无法可靠识别引用推文（X 把 quote card 的 /sta
 - 颜色、字号、间距、圆角、阴影、转场都按规范的 token，不出现 `text-[14px]` / `bg-blue-600` / 自创色彩这类离群值
 - 业务真需要规范外的元素（新色 / 新字号 / 新组件），先在规范文档里讨论 + 加进去，再实施
 - 检查清单见规范文档第六节，提交 dashboard 改动前对照过一遍
+- **⚠️ emoji 不准当 icon 用**（mockup + 真实代码都不行）：UI chrome 一律 SVG（lucide-react 同款）；emoji 仅允许出现在「源数据原文」（如用户推文 / skill emoji 字段）。详细规则见 [`docs/source-integration-sop.md`](docs/source-integration-sop.md) § 4.5 F
 
 ## 三环境（dev / staging / prod）
 

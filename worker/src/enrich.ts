@@ -345,6 +345,31 @@ export async function refreshSingleItem(
     return { refreshed: true, source_type: 'github', reason: 'success', metrics: r.metrics };
   }
 
+  if (item.source_type === 'clawhub') {
+    const extraRow = await env.DB.prepare(
+      `SELECT extra FROM items WHERE id = ?`,
+    ).bind(item.id).first<{ extra: string | null }>();
+    const { refreshClawhubItem } = await import('./clawhub');
+    const r = await refreshClawhubItem(env, {
+      id: item.id,
+      source_id: item.source_id,
+      extra: extraRow?.extra ?? null,
+    });
+    // 把 clawhub 自己的 reason 映射到 SingleItemRefreshResult 的窄类型 union
+    if (!r.refreshed) {
+      const reason: SingleItemRefreshResult['reason'] = r.reason === 'not_found'
+        ? 'item_not_found'
+        : 'fetch_failed';
+      return { refreshed: false, source_type: 'clawhub', reason };
+    }
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'clawhub', reason: 'success', metrics: r.metrics };
+  }
+
   // PH 暂留下个 PR（需要 CF Browser binding）
   return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
 }

@@ -5,6 +5,7 @@ import { TweetCard } from "./TweetCard";
 import { ThreadCard } from "./ThreadCard";
 import { GithubCard } from "./GithubCard";
 import { PhCard } from "./PhCard";
+import { ClawhubCard } from "./ClawhubCard";
 import { SourceIcon } from "./icons";
 import {
   groupByThread,
@@ -680,6 +681,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                     <GithubCard key={row.item.id} item={row.item} />
                   ) : row.item.source_type === "product_hunt" ? (
                     <PhCard key={row.item.id} item={row.item} />
+                  ) : row.item.source_type === "clawhub" ? (
+                    <ClawhubCard key={row.item.id} item={row.item} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

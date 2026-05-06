@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClawHub 接入 mockup v2 — AI-Feeds</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .device { width: 420px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); border-radius: 16px; overflow: hidden; background: white; }
+    .anno { font: 10px/1.4 monospace; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+    .anno-must { color: #059669; background: #f0fdf4; }
+    .anno-rec  { color: #2563eb; background: #eff6ff; }
+    .anno-opt  { color: #ca8a04; background: #fefce8; }
+    .anno-skip { color: #6b7280; background: #f9fafb; }
+    .gallery::-webkit-scrollbar { display: none; }
+    /* highlight rules for section blocks in drawer */
+    .section-marker { position: relative; }
+    .section-marker::before {
+      content: attr(data-marker);
+      position: absolute;
+      top: 4px;
+      left: -86px;
+      width: 80px;
+      font: 10px/1.3 monospace;
+      color: #6b7280;
+      text-align: right;
+      white-space: pre-line;
+    }
+    @media (max-width: 1280px) { .section-marker::before { display: none; } }
+    .feed-card-link { display: block; }
+    .feed-card-link:hover { background: rgba(245, 245, 245, 0.6); }
+    /* lucide-like icon defaults */
+    .ico { width: 14px; height: 14px; flex-shrink: 0; }
+    .ico-stat { width: 12px; height: 12px; flex-shrink: 0; }
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-100">
+
+  <!-- SVG icon defs (reused via <use>) -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="ico-star" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></symbol>
+      <symbol id="ico-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/></symbol>
+      <symbol id="ico-package" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/></symbol>
+      <symbol id="ico-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/></symbol>
+      <symbol id="ico-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+      <symbol id="ico-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+      <symbol id="ico-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></symbol>
+      <symbol id="ico-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Top bar -->
+  <header class="sticky top-0 z-20 border-b border-neutral-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-[1480px] items-center justify-between gap-4 px-6 py-3">
+      <div class="flex shrink-0 items-baseline gap-3">
+        <h1 class="text-xl font-bold tracking-tight text-neutral-900">ClawHub 接入 mockup</h1>
+        <span class="text-xs text-neutral-400">v2 · 2026-05-06 · brainstorm Phase 0</span>
+      </div>
+      <div class="flex gap-2 text-[10px]">
+        <span class="anno anno-must">★★★ 必须</span>
+        <span class="anno anno-rec">★★ 建议</span>
+        <span class="anno anno-opt">★ 可选</span>
+        <span class="anno anno-skip">☆ 不做</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1480px] px-6 py-6">
+
+    <!-- 决策 banner -->
+    <div class="mb-6 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900">
+      <div class="font-semibold mb-2">v3 改动（按反馈）</div>
+      <ul class="space-y-1 text-[13px] list-disc pl-5">
+        <li>Feed 顶部三个筛选器（排序 / 分类 / 隐藏可疑）压缩到一行，跟 ClawHub 标题同行右侧</li>
+        <li>Stats 标签全中文：星标数 / 下载量 / 版本数 / 当前安装 / 累计安装 / 最近更新</li>
+        <li>Safety capability tag 改纯文字行 + amber 文字色：「安全审查：需要敏感凭证」</li>
+        <li>Files manifest 改目录树代码块（等宽字体 + ASCII 树字符），完整列出全部文件</li>
+        <li>severity 标签改中文 + 颜色双编码：低度（灰）/ 中度（黄）/ 高度（红）</li>
+      </ul>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-[480px_1fr] gap-8">
+
+      <!-- ============================================================ -->
+      <!-- LEFT: Feed cards -->
+      <!-- ============================================================ -->
+      <section>
+        <div class="mb-3">
+          <h2 class="text-base font-bold text-neutral-900">① Feed 卡片</h2>
+          <p class="mt-1 text-xs text-neutral-500">text + avatar 风格，无 hero image。3 项 metric：stars / downloads / installs（active）。</p>
+        </div>
+
+        <div class="device">
+          <!-- Feed header (sticky) — title + 3 compact filters in one row -->
+          <header class="sticky top-0 z-10 border-b border-neutral-200 bg-white/95 backdrop-blur px-3 py-2 flex items-center gap-2">
+            <div class="text-[15px] font-bold text-neutral-900 shrink-0">ClawHub</div>
+            <div class="flex-1 flex items-center justify-end gap-1.5">
+              <!-- 排序 -->
+              <label class="relative">
+                <select class="appearance-none rounded-md border border-neutral-300 bg-white pl-2 pr-6 py-1 text-[11px] text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300" title="排序">
+                  <option>星标数</option>
+                  <option>下载量</option>
+                  <option>安装量</option>
+                  <option>最新发布</option>
+                  <option>最近更新</option>
+                  <option>名称 A-Z</option>
+                </select>
+                <svg class="ico-stat absolute right-1.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"><use href="#ico-chevron"/></svg>
+              </label>
+              <!-- 分类 -->
+              <label class="relative">
+                <select class="appearance-none rounded-md border border-neutral-300 bg-white pl-2 pr-6 py-1 text-[11px] text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300" title="分类">
+                  <option>全部分类</option>
+                  <option>MCP 工具</option>
+                  <option>Prompts</option>
+                  <option>Workflows</option>
+                  <option>Dev 工具</option>
+                  <option>数据 &amp; API</option>
+                  <option>安全</option>
+                  <option>自动化</option>
+                  <option>其他</option>
+                </select>
+                <svg class="ico-stat absolute right-1.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none"><use href="#ico-chevron"/></svg>
+              </label>
+              <!-- 隐藏可疑 toggle（带可见文字 label）-->
+              <label class="inline-flex items-center gap-1 text-[11px] text-neutral-600 cursor-pointer select-none px-1.5 py-1 rounded-md hover:bg-neutral-100" title="ClawHub 安全扫描标记为可疑的 skill 不显示（默认开启）">
+                <input type="checkbox" checked class="w-3 h-3 accent-neutral-700">
+                <span>隐藏可疑</span>
+              </label>
+            </div>
+          </header>
+
+          <!-- Card 1 -->
+          <article class="feed-card-link border-b border-neutral-100 px-4 py-3">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/u/177305814?v=4" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="text-[15px] font-bold leading-tight text-neutral-900 truncate">Self-Improving Agent</div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-neutral-500">
+                  <span class="truncate">@pskoett</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v3.0.21</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="rounded-full bg-neutral-100 text-neutral-600 px-1.5 text-[10px]">Workflow</span>
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4">
+              捕获学习、错误和纠正以实现持续改进。在以下情况使用：(1) 命令或操作意外失败 (2) 用户纠正 Claude（"不，错了..."、"实际上..."）(3) 用户请求不存在的能力 (4) 外部 API 或工具失败 (5) Claude 意识到知识过期或不正确 (6) 重复任务发现更优解法。
+            </p>
+            <div class="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat text-amber-500"><use href="#ico-star"/></svg>3,479</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-download"/></svg>422k</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-package"/></svg>6,160 active</span>
+            </div>
+          </article>
+
+          <!-- Card 2 -->
+          <article class="feed-card-link border-b border-neutral-100 px-4 py-3">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/u/257035288?v=4" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="text-[15px] font-bold leading-tight text-neutral-900 truncate">Skill Vetter</div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-neutral-500">
+                  <span class="truncate">@spclaudehome</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v1.0.0</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="rounded-full bg-neutral-100 text-neutral-600 px-1.5 text-[10px]">安全</span>
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4">
+              面向 AI agent 的安全优先 skill 审核工具。在从 ClawHub、GitHub 或其他来源安装任何 skill 之前先用它跑一遍。检查危险信号、权限范围和可疑模式。
+            </p>
+            <div class="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat text-amber-500"><use href="#ico-star"/></svg>1,041</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-download"/></svg>231k</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-package"/></svg>4,183 active</span>
+            </div>
+          </article>
+
+          <!-- Card 3 -->
+          <article class="feed-card-link border-b border-neutral-100 px-4 py-3">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/u/58493?v=4" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="text-[15px] font-bold leading-tight text-neutral-900 truncate">Gog</div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-neutral-500">
+                  <span class="truncate">@steipete</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v1.0.0</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="rounded-full bg-neutral-100 text-neutral-600 px-1.5 text-[10px]">Dev 工具</span>
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4">
+              Google Workspace 命令行工具，统一管理 Gmail、Calendar、Drive、Contacts、Sheets、Docs。
+            </p>
+            <div class="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat text-amber-500"><use href="#ico-star"/></svg>877</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-download"/></svg>168k</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-package"/></svg>3,402 active</span>
+            </div>
+          </article>
+
+          <!-- Card 4 -->
+          <article class="feed-card-link border-b border-neutral-100 px-4 py-3">
+            <div class="flex items-start gap-3">
+              <div class="h-10 w-10 shrink-0 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white font-bold">M</div>
+              <div class="min-w-0 flex-1">
+                <div class="text-[15px] font-bold leading-tight text-neutral-900 truncate">Multi Search Engine</div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-neutral-500">
+                  <span class="truncate">@chenyuxin</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v2.1.0</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="rounded-full bg-neutral-100 text-neutral-600 px-1.5 text-[10px]">MCP 工具</span>
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4">
+              集成 16 个搜索引擎（7 个国内 + 9 个全球）。支持高级搜索运算符、时间过滤、站内搜索、隐私引擎、Wolfram Alpha 等。
+            </p>
+            <div class="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat text-amber-500"><use href="#ico-star"/></svg>650</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-download"/></svg>135k</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-package"/></svg>1,906 active</span>
+            </div>
+          </article>
+
+          <!-- Card 5 -->
+          <article class="feed-card-link px-4 py-3">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/u/3995?v=4" class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="text-[15px] font-bold leading-tight text-neutral-900 truncate">Humanizer</div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-neutral-500">
+                  <span class="truncate">@gstack</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v0.4.2</span>
+                  <span class="text-neutral-400">·</span>
+                  <span class="rounded-full bg-neutral-100 text-neutral-600 px-1.5 text-[10px]">Prompts</span>
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4">
+              去除 AI 生成文本的痕迹。基于 Wikipedia "AI 写作信号"完整指南，识别并修复夸大象征、推广性语言、表层 -ing 分析、含糊归因、破折号过度使用、三段式、AI 词汇等模式。
+            </p>
+            <div class="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat text-amber-500"><use href="#ico-star"/></svg>587</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-download"/></svg>102k</span>
+              <span class="inline-flex items-center gap-1"><svg class="ico-stat"><use href="#ico-package"/></svg>1,320 active</span>
+            </div>
+          </article>
+        </div>
+
+        <div class="mt-3 text-[11px] text-neutral-500 leading-relaxed">
+          <div class="font-semibold text-neutral-700">变更</div>
+          <ul class="mt-1 space-y-0.5 list-disc pl-4">
+            <li>顶部筛选：两个原生 select（排序 / 分类），右上角 "已隐藏可疑" 弱提示（默认 nonSuspicious=true）</li>
+            <li>metric 行 3 项：lucide 同款 SVG（star / download / package）</li>
+            <li>砍掉 comments、砍掉右上角 ⚠️ 微标</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- RIGHT: Drawer -->
+      <!-- ============================================================ -->
+      <section>
+        <div class="mb-3">
+          <h2 class="text-base font-bold text-neutral-900">② Drawer 详情</h2>
+          <p class="mt-1 text-xs text-neutral-500">区段顺序：Header → Stats → README → Safety → Install → Trends → Files → SKILL.md → Footer</p>
+        </div>
+
+        <div class="device" style="margin-left: 90px;">
+          <!-- Drawer header (sticky) -->
+          <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-neutral-50/95 backdrop-blur px-2 py-1.5">
+            <div class="justify-self-start">
+              <button class="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-200">
+                <span class="text-2xl leading-none">‹</span>
+              </button>
+            </div>
+            <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">Skill 详情</div>
+            <div class="justify-self-end">
+              <button class="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200">分享</button>
+            </div>
+          </header>
+
+          <!-- ① Header -->
+          <div class="section-marker border-b border-neutral-100 p-5" data-marker="① Header&#10;★★★">
+            <div class="flex items-start gap-3">
+              <img src="https://avatars.githubusercontent.com/u/177305814?v=4" class="h-14 w-14 shrink-0 rounded-2xl bg-neutral-200 object-cover" />
+              <div class="min-w-0 flex-1">
+                <div class="text-[18px] font-bold leading-tight text-neutral-900 break-words">Self-Improving Agent</div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-neutral-500">
+                  <span>by</span>
+                  <a class="text-neutral-700 font-medium hover:underline">@pskoett</a>
+                  <span class="text-neutral-400">·</span>
+                  <span class="tabular-nums">v3.0.21</span>
+                  <span class="text-neutral-400">·</span>
+                  <span title="开源协议">MIT-0</span>
+                </div>
+                <!-- category chip 跟 title 左对齐（不与头像对齐）-->
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <span class="inline-flex items-center rounded-full bg-neutral-100 text-neutral-700 px-2 py-0.5 text-[11px] font-medium">Workflow</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ② Stats row（6 字段，2×3，中文标签）-->
+          <div class="section-marker border-b border-neutral-100 px-5 py-3" data-marker="② Stats&#10;★★★">
+            <div class="grid grid-cols-3 gap-3 text-center">
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-amber-500"><use href="#ico-star"/></svg>3,479
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">星标数</div>
+              </div>
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-download"/></svg>422,951
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">下载量</div>
+              </div>
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-tag"/></svg>31
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">版本数</div>
+              </div>
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-package"/></svg>6,160
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">当前安装</div>
+              </div>
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-package"/></svg>6,495
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">累计安装</div>
+              </div>
+              <div>
+                <div class="flex items-center justify-center gap-1 text-[15px] font-bold text-neutral-900 tabular-nums">
+                  <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-clock"/></svg>2 天前
+                </div>
+                <div class="text-[10px] text-neutral-500 mt-0.5">最近更新</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ③ README (zh, primary) -->
+          <div class="section-marker border-b border-neutral-100 p-5" data-marker="③ README&#10;★★★">
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">README</div>
+            <div class="prose prose-sm prose-neutral max-w-none text-[14px] leading-relaxed text-neutral-800 space-y-3">
+              <h3 class="text-[16px] font-semibold mt-0">Self-Improvement Skill</h3>
+              <p>将学习与错误记录到 markdown 文件以实现持续改进。后续编码 agent 可处理这些条目生成修复方案，重要的学习会晋升到 project memory。</p>
+
+              <h4 class="text-[14px] font-semibold mt-4">首次初始化</h4>
+              <p>记录任何内容前，确保 <code class="bg-neutral-100 px-1 rounded">.learnings/</code> 目录及文件存在于项目或 workspace 根目录。如缺失则创建：</p>
+
+              <pre class="rounded-md bg-neutral-900 text-neutral-100 p-3 text-[12px] overflow-x-auto"><code>mkdir -p .learnings
+[ -f .learnings/LEARNINGS.md ] || printf "# Learnings\n\n..." > .learnings/LEARNINGS.md
+[ -f .learnings/ERRORS.md ] || printf "# Errors\n\n..." > .learnings/ERRORS.md</code></pre>
+              <p class="text-[11px] text-neutral-400 italic">↑ 代码块按规则保留英文原文不翻译</p>
+
+              <p>勿覆写已存在文件。如目录已初始化，此操作无副作用。不要记录 secrets、tokens、private key、环境变量或完整源/配置文件，除非用户明确要求该详细程度。</p>
+
+              <h4 class="text-[14px] font-semibold mt-4">快速参考</h4>
+              <table class="w-full text-[12px] border-collapse">
+                <thead><tr class="border-b border-neutral-200"><th class="text-left py-1 font-semibold">情境</th><th class="text-left py-1 font-semibold">动作</th></tr></thead>
+                <tbody>
+                  <tr class="border-b border-neutral-100"><td class="py-1">命令/操作失败</td><td class="py-1"><code class="bg-neutral-100 px-1 rounded">.learnings/ERRORS.md</code></td></tr>
+                  <tr class="border-b border-neutral-100"><td class="py-1">用户纠正</td><td class="py-1"><code class="bg-neutral-100 px-1 rounded">LEARNINGS.md</code> · category=correction</td></tr>
+                  <tr><td class="py-1">需求新功能</td><td class="py-1"><code class="bg-neutral-100 px-1 rounded">FEATURE_REQUESTS.md</code></td></tr>
+                </tbody>
+              </table>
+
+              <p class="text-[11px] text-neutral-400 italic">…（省略，drawer 渲染时全文展开）</p>
+            </div>
+          </div>
+
+          <!-- ④ Safety section（capability tag 改纯文字行 + amber 文字色） -->
+          <div class="section-marker border-b border-neutral-100 p-5" data-marker="④ Safety&#10;★★&#10;（条件显示）">
+            <div class="flex items-center gap-2 mb-3">
+              <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-shield"/></svg>
+              <div class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">安全审查</div>
+            </div>
+
+            <!-- capability tag 改纯文字行（amber 文字色，无 emoji）-->
+            <p class="mb-3 text-[12px] text-amber-700 leading-relaxed">
+              需要敏感凭证
+              <span class="text-neutral-400 mx-1">·</span>
+              <span class="text-amber-700">需要 OAuth 令牌</span>
+            </p>
+
+            <!-- LLM finding（中度严重度，朴素白底）-->
+            <details class="rounded-md bg-white ring-1 ring-neutral-200 p-3" open>
+              <summary class="cursor-pointer text-[12px] flex items-start gap-2">
+                <span class="shrink-0 inline-flex items-center justify-center rounded bg-amber-50 text-amber-700 ring-1 ring-amber-200 text-[10px] font-mono px-1.5 py-0.5">中度</span>
+                <div class="flex-1">
+                  <span class="font-semibold text-neutral-900">记忆与上下文污染（ASI06）</span>
+                </div>
+              </summary>
+              <div class="mt-2 pt-2 border-t border-neutral-100 space-y-2 text-[12px] text-neutral-700">
+                <div>
+                  <span class="text-[10px] font-semibold uppercase text-neutral-400">证据 · SKILL.md</span>
+                  <p class="mt-0.5 italic text-neutral-600">"important learnings get promoted to project memory ... Promote to <code class="bg-neutral-100 px-1 rounded">CLAUDE.md</code>, <code class="bg-neutral-100 px-1 rounded">AGENTS.md</code>"</p>
+                </div>
+                <div>
+                  <span class="text-[10px] font-semibold uppercase text-neutral-400">建议</span>
+                  <p class="mt-0.5">该 skill 会主动存储学习并能将条目晋升到后续 agent 会话可读的指令文件。建议定期检查 <code class="bg-neutral-100 px-1 rounded">.learnings</code> 与晋升后的 memory 文件，过滤敏感信息，并需用户确认才晋升。</p>
+                </div>
+              </div>
+            </details>
+
+            <!-- 高严重度示例（severity=high 时上 rose ring）-->
+            <details class="rounded-md bg-white ring-2 ring-rose-300 p-3 mt-2" open>
+              <summary class="cursor-pointer text-[12px] flex items-start gap-2">
+                <span class="shrink-0 inline-flex items-center justify-center rounded bg-rose-100 text-rose-700 ring-1 ring-rose-200 text-[10px] font-mono px-1.5 py-0.5 font-semibold">高度</span>
+                <div class="flex-1">
+                  <span class="font-semibold text-neutral-900">权限边界过宽（ASI03）</span>
+                </div>
+              </summary>
+              <div class="mt-2 pt-2 border-t border-rose-100 space-y-2 text-[12px] text-neutral-700">
+                <div>
+                  <span class="text-[10px] font-semibold uppercase text-neutral-400">演示数据（参考 gog 的 OAuth scope 案例）</span>
+                  <p class="mt-0.5 text-neutral-600">该 skill 请求广泛的 Google Workspace 权限（Gmail / Calendar / Drive / Contacts / Sheets / Docs）。建议核对 OAuth 授权范围，仅勾选实际需要的服务，优先用测试账号，使用完毕及时撤销。</p>
+                </div>
+              </div>
+            </details>
+
+            <!-- severity 颜色编码说明（v3 加，给 user 看 legend） -->
+            <div class="mt-3 flex items-center gap-3 text-[10px] text-neutral-500">
+              <span class="inline-flex items-center gap-1">
+                <span class="inline-block w-2 h-2 rounded-full bg-neutral-300"></span>低度
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>中度
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <span class="inline-block w-2 h-2 rounded-full bg-rose-500"></span>高度
+              </span>
+              <span class="ml-auto text-neutral-400">来源：ClawHub 安全扫描</span>
+            </div>
+          </div>
+
+          <!-- ⑤ Install -->
+          <div class="section-marker border-b border-neutral-100 p-5" data-marker="⑤ Install&#10;★★★">
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">安装</div>
+            <div class="space-y-2">
+              <div class="flex items-center gap-2 rounded-md bg-neutral-900 text-neutral-100 px-3 py-2 font-mono text-[12px]">
+                <span class="text-neutral-500">$</span>
+                <span class="flex-1 truncate">claw install pskoett/self-improving-agent</span>
+                <button class="text-neutral-400 hover:text-white text-[11px] shrink-0">复制</button>
+              </div>
+              <div class="flex items-center gap-2 rounded-md bg-neutral-50 ring-1 ring-neutral-200 px-3 py-2 font-mono text-[12px] text-neutral-700">
+                <span class="text-neutral-400">$</span>
+                <span class="flex-1 truncate">brew install pskoett/tap/self-improving-agent</span>
+                <button class="text-neutral-400 hover:text-neutral-700 text-[11px] shrink-0">复制</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ⑥ Trends 30d (collapsible, 数据点 ≥ 阈值才显示) -->
+          <details class="section-marker border-b border-neutral-100 group" data-marker="⑥ Trends&#10;★&#10;（v2 / 数据&#10;阈值后显示）">
+            <summary class="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+              <svg class="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform"><use href="#ico-chevron"/></svg>
+              30 天趋势
+              <span class="ml-auto text-[10px] text-neutral-400 font-normal">v1 不显示 · 待 snapshots 累积</span>
+            </summary>
+            <div class="px-5 pb-5">
+              <div class="h-32 rounded-md bg-gradient-to-b from-emerald-50 to-white ring-1 ring-emerald-200 flex items-center justify-center gap-1.5 text-[11px] text-emerald-700">
+                <svg class="w-3.5 h-3.5"><use href="#ico-star"/></svg>
+                星标数走势（demo placeholder）
+              </div>
+            </div>
+          </details>
+
+          <!-- ⑦ Files manifest（目录树代码块） -->
+          <details class="section-marker border-b border-neutral-100 group" data-marker="⑦ Files&#10;★★">
+            <summary class="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+              <svg class="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform"><use href="#ico-chevron"/></svg>
+              文件清单
+              <span class="ml-auto text-[10px] text-neutral-400 font-normal tabular-nums">15 个文件 · 41 KB</span>
+            </summary>
+            <div class="px-5 pb-5">
+              <pre class="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-3 text-[11px] font-mono text-neutral-700 leading-relaxed overflow-x-auto"><span class="text-neutral-900 font-semibold">self-improving-agent/</span>
+├── README.md                            <span class="text-neutral-400">378 B</span>
+├── SKILL.md                          <span class="text-neutral-400">20.7 KB</span>
+├── _meta.json                           <span class="text-neutral-400">140 B</span>
+├── <span class="text-neutral-900">assets/</span>
+│   ├── ERRORS.md                         <span class="text-neutral-400">75 B</span>
+│   ├── FEATURE_REQUESTS.md               <span class="text-neutral-400">84 B</span>
+│   ├── LEARNINGS.md                   <span class="text-neutral-400">1.1 KB</span>
+│   └── SKILL-TEMPLATE.md              <span class="text-neutral-400">3.3 KB</span>
+├── <span class="text-neutral-900">hooks/openclaw/</span>
+│   ├── HOOK.md                          <span class="text-neutral-400">589 B</span>
+│   ├── handler.js                     <span class="text-neutral-400">3.3 KB</span>
+│   └── handler.ts                     <span class="text-neutral-400">3.4 KB</span>
+├── <span class="text-neutral-900">references/</span>
+│   ├── examples.md                    <span class="text-neutral-400">8.1 KB</span>
+│   ├── hooks-setup.md                 <span class="text-neutral-400">5.0 KB</span>
+│   └── openclaw-integration.md        <span class="text-neutral-400">5.9 KB</span>
+└── <span class="text-neutral-900">scripts/</span>
+    ├── activator.sh                     <span class="text-neutral-400">680 B</span>
+    ├── error-detector.sh              <span class="text-neutral-400">1.3 KB</span>
+    └── extract-skill.sh               <span class="text-neutral-400">5.2 KB</span></pre>
+              <p class="mt-2 text-[10px] text-neutral-400">完整目录结构（树形渲染，等宽字体）</p>
+            </div>
+          </details>
+
+          <!-- ⑧ SKILL.md original -->
+          <details class="section-marker border-b border-neutral-100 group" data-marker="⑧ SKILL.md&#10;★&#10;（默认折叠）">
+            <summary class="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+              <svg class="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform"><use href="#ico-chevron"/></svg>
+              SKILL.md 原文
+              <span class="ml-auto text-[10px] text-neutral-400 font-normal tabular-nums">20.7 KB</span>
+            </summary>
+            <div class="px-5 pb-5">
+              <pre class="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-3 text-[11px] text-neutral-700 overflow-x-auto whitespace-pre-wrap"># Self-Improvement Skill
+Log learnings and errors to markdown files for continuous improvement. Coding agents can later process these into fixes, and important learnings get promoted to project memory.
+
+## First-Use Initialisation
+Before logging anything, ensure the .learnings/ directory and files exist...
+（省略 ~20KB 全文）</pre>
+            </div>
+          </details>
+
+          <!-- ⑨ Footer -->
+          <div class="section-marker p-5" data-marker="⑨ Footer&#10;★★★">
+            <div class="flex flex-col gap-2">
+              <a class="inline-flex items-center justify-between rounded-md ring-1 ring-neutral-200 px-3 py-2 text-[13px] text-neutral-700 hover:bg-neutral-50">
+                <span>在 ClawHub 打开</span>
+                <svg class="w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>
+              </a>
+              <a class="inline-flex items-center justify-between rounded-md ring-1 ring-neutral-200 px-3 py-2 text-[13px] text-neutral-700 hover:bg-neutral-50">
+                <span>查看作者 GitHub @pskoett</span>
+                <svg class="w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Drawer notes -->
+        <div class="mt-4 ml-[90px] max-w-[420px] text-[11px] text-neutral-500 leading-relaxed space-y-2">
+          <div class="font-semibold text-neutral-700">capability tag 中文翻译表（专业术语校对了）</div>
+          <table class="w-full text-[11px] tabular-nums">
+            <thead class="text-neutral-400">
+              <tr><th class="text-left py-0.5">English</th><th class="text-left py-0.5">中文</th></tr>
+            </thead>
+            <tbody class="text-neutral-700">
+              <tr class="border-t border-neutral-200"><td class="py-1 font-mono">crypto</td><td class="py-1">涉及加密资产</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">requires-wallet</td><td class="py-1">需要加密钱包</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">can-make-purchases</td><td class="py-1">可发起付款</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">can-sign-transactions</td><td class="py-1">可签署链上交易</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">requires-oauth-token</td><td class="py-1">需要 OAuth 令牌</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">requires-sensitive-credentials</td><td class="py-1">需要敏感凭证</td></tr>
+              <tr class="border-t border-neutral-100"><td class="py-1 font-mono">posts-externally</td><td class="py-1">可对外发布</td></tr>
+            </tbody>
+          </table>
+
+          <div class="font-semibold text-neutral-700 mt-3">还需要拍的</div>
+          <ul class="space-y-1 list-disc pl-4">
+            <li>Stats 6 字段顺序（stars / downloads / versions / active / all-time / updated）OK 不？</li>
+            <li>Safety section 视觉降噪后的程度合适不？要更弱（默认折叠）还是当前（默认展开+朴素白底）？</li>
+            <li>Files manifest 显示前 5 个 + "还有 N 个"（折叠 详情列表）OK 不？</li>
+            <li>severity 标签用 "低度 / 中度 / 高度" 还是 "low / medium / high"（保留英文标签）？</li>
+          </ul>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- ③ 分享海报（v3：按 GH 真实代码对齐） -->
+    <!-- ============================================================ -->
+    <section class="mt-12">
+      <div class="mb-4">
+        <h2 class="text-base font-bold text-neutral-900">③ 分享海报排版（GH 同款）</h2>
+        <p class="mt-1 text-xs text-neutral-500 leading-relaxed">
+          按 <code class="bg-neutral-100 px-1 rounded text-[10px]">worker/src/share/svg-template.ts</code> 的 <code class="bg-neutral-100 px-1 rounded text-[10px]">renderGithubContent</code> 视觉骨架来。1080 宽 PNG（下方 1:2.5 缩略预览）。
+          <br/>
+          <strong>vs GH 变体差异</strong>：① metrics 改 星标/下载/当前安装 ② meta 行去 trophy+rank（ClawHub 没 daily rank），改成 v3.0.21·MIT-0（左）+ 31 versions·2 天前（右）③ body 取 README 前 N 行（去 frontmatter + H1）④ 不放媒体图（skill 多数无图）⑤ 砍 safety（drawer 已展，海报不放）。Footer 完全沿用 GH/PH/X 共享的 <code class="bg-neutral-100 px-1 rounded text-[10px]">renderFooter</code>（avatar 120 + 分享自 + nickname / QR 168 + 微信扫码查看）。
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-[480px_1fr] gap-8 max-w-[1200px]">
+
+        <!-- 海报缩略预览 -->
+        <div>
+          <div class="flex items-center gap-2 mb-2">
+            <span class="text-[13px] font-semibold text-neutral-900">缩略预览（1:2.5）</span>
+            <span class="anno anno-must">B · GH 同款</span>
+          </div>
+
+          <!-- 海报容器（432 宽，整体底色 posterBg #f6f7fa）-->
+          <div style="width:432px; background:#f6f7fa;" class="rounded-2xl shadow-lg overflow-hidden relative">
+
+            <!-- ⓪ Hero 区（0-144px 高 / 真实 0-360，整宽 432，底部贝塞尔弧线）-->
+            <div style="height:144px; background: radial-gradient(ellipse at 82% 22%, rgba(111,99,255,0.34) 0%, transparent 35%), linear-gradient(to bottom, #050505, #0c0c10); clip-path: path('M 0 0 L 432 0 L 432 144 Q 216 88 0 144 Z'); position:relative;">
+              <!-- 左：AI-Feeds logo + 名称 + slogan -->
+              <div style="position:absolute; left:28px; top:24px; display:flex; gap:12px; align-items:flex-start;">
+                <div style="width:42px; height:42px; flex-shrink:0; background:#0B0F14; border-radius:8px; display:flex; align-items:center; justify-content:center;">
+                  <svg viewBox="0 0 512 512" style="width:36px; height:36px;">
+                    <g fill="none" stroke="#F3F4F6" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M54 340 L405 94" stroke-width="18"/>
+                      <ellipse cx="55" cy="340" rx="9.5" ry="12.5" transform="rotate(-55 55 340)" fill="#0B0F14" stroke-width="6"/>
+                    </g>
+                    <path d="M382 249 C365 281 365 353 390 444 C392 452 401 452 404 444 C431 353 429 280 413 249 C405 237 390 237 382 249Z" fill="#FF9A1A" stroke="#F3F4F6" stroke-width="8"/>
+                  </svg>
+                </div>
+                <div style="line-height:1;">
+                  <div style="color:#fff; font-size:25px; font-weight:900; letter-spacing:-1px;">AI-Feeds</div>
+                  <div style="color:rgba(255,255,255,0.66); font-size:11px; font-weight:600; letter-spacing:0.4px; margin-top:6px;">专注 AI 领域资讯聚合</div>
+                </div>
+              </div>
+              <!-- 右：来源 chip pill（真实尺寸 height 76 → 30，padding 40 → 16）-->
+              <div style="position:absolute; right:28px; top:32px; height:30px; background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.18); border-radius:15px; padding:0 16px; display:inline-flex; align-items:center; gap:6px;">
+                <span style="color:rgba(255,255,255,0.65); font-size:9.5px; font-weight:600;">来源</span>
+                <span style="color:#d8c8f5; font-size:13px; font-weight:850;">ClawHub</span>
+              </div>
+            </div>
+
+            <!-- 内容卡（独立 rounded 卡片，inset 22px / 真实 56，rounded 19px / 真实 48，向上 overlap -52px / 真实 -130 进 hero 弧线）-->
+            <div style="margin:-52px 22px 0 22px; padding:22px 14px 16px 14px; background:#ffffff; border-radius:19px; box-shadow:0 7px 14px rgba(0,0,0,0.05); border:1px solid rgba(15,23,42,0.06); position:relative;">
+              <!-- header: avatar 圆形 51（真实 128） + 标题大字 -->
+              <div class="flex items-start gap-[14px]">
+                <img src="https://avatars.githubusercontent.com/u/177305814?v=4" class="h-[51px] w-[51px] shrink-0 rounded-full bg-neutral-100 object-cover" />
+                <div class="min-w-0 flex-1">
+                  <div class="text-[26px] font-black leading-[1.08] text-neutral-900" style="letter-spacing:-1.2px;">Self-Improving Agent</div>
+                  <!-- tag pill: violet（沿用 GH purpleSoft）-->
+                  <div class="mt-[8px]">
+                    <span class="inline-block rounded-full bg-violet-100 text-violet-800 text-[11px] font-bold px-3 py-1 leading-none">workflow</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- metrics row: 3 cols + 上下分隔线 + 列分隔线 -->
+              <div class="mt-[18px] grid grid-cols-3 border-t border-b border-neutral-200 py-[14px] text-center">
+                <div class="border-r border-neutral-200">
+                  <div class="flex items-center justify-center gap-1 text-[14px] font-bold text-neutral-900 tabular-nums">
+                    <svg class="w-3.5 h-3.5 text-amber-500"><use href="#ico-star"/></svg>3,479
+                  </div>
+                  <div class="text-[10px] text-neutral-500 mt-1">星标数</div>
+                </div>
+                <div class="border-r border-neutral-200">
+                  <div class="flex items-center justify-center gap-1 text-[14px] font-bold text-neutral-900 tabular-nums">
+                    <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-download"/></svg>422,951
+                  </div>
+                  <div class="text-[10px] text-neutral-500 mt-1">下载量</div>
+                </div>
+                <div>
+                  <div class="flex items-center justify-center gap-1 text-[14px] font-bold text-neutral-900 tabular-nums">
+                    <svg class="w-3.5 h-3.5 text-neutral-500"><use href="#ico-package"/></svg>6,160
+                  </div>
+                  <div class="text-[10px] text-neutral-500 mt-1">当前安装</div>
+                </div>
+              </div>
+
+              <!-- meta row: license/version 左 + versions count/updated 右 -->
+              <div class="flex items-center justify-between py-[12px] text-[11px] text-neutral-500 border-b border-neutral-200 tabular-nums">
+                <div class="flex items-center gap-1.5">
+                  <svg class="w-3 h-3 text-neutral-500"><use href="#ico-tag"/></svg>
+                  <span class="font-medium">v3.0.21</span>
+                  <span class="text-neutral-400">·</span>
+                  <span>MIT-0</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span>31 versions</span>
+                  <span class="text-neutral-400">·</span>
+                  <svg class="w-3 h-3 text-neutral-500"><use href="#ico-clock"/></svg>
+                  <span>2 天前更新</span>
+                </div>
+              </div>
+
+              <!-- body: README 前 N 行（去 frontmatter + H1）-->
+              <div class="pt-[14px] pb-[8px] text-[13.5px] leading-[1.48] text-neutral-900" style="letter-spacing:-0.2px;">
+                <p>将学习与错误记录到 markdown 文件以实现持续改进。后续编码 agent 可处理这些条目生成修复方案，重要的学习会晋升到 project memory。记录任何内容前，确保 .learnings/ 目录及文件存在于项目或 workspace 根目录；如缺失则创建。</p>
+              </div>
+            </div>
+
+            <!-- footer 上 margin（真实 48 → 19）-->
+            <div style="height:19px;"></div>
+
+            <!-- footer 卡（renderFooter，独立 rounded 卡片，跟内容卡同宽 inset 22px，rounded 19，soft shadow，无 border）-->
+            <div style="margin:0 22px 38px 22px; height:106px; background:#ffffff; border-radius:19px; box-shadow:0 7px 14px rgba(0,0,0,0.05); border:1px solid rgba(15,23,42,0.06); padding:0 18px; display:flex; align-items:center; justify-content:space-between;">
+              <!-- 左：分享人 avatar 48 圆形（真实 120）+ meta 两行 -->
+              <div style="display:flex; align-items:center; gap:11px;">
+                <div style="height:48px; width:48px; flex-shrink:0; border-radius:50%; background:linear-gradient(135deg, #60a5fa, #a78bfa); display:flex; align-items:center; justify-content:center; color:#fff; font-size:20px; font-weight:700;">L</div>
+                <div style="line-height:1;">
+                  <div style="font-size:10px; color:#687084;">分享自</div>
+                  <div style="font-size:14px; font-weight:500; color:#111318; margin-top:6px;">ltsms</div>
+                </div>
+              </div>
+              <!-- 右：QR 67 + hint（真实 QR 168 + hint 22）-->
+              <div style="display:flex; flex-direction:column; align-items:center;">
+                <div style="height:67px; width:67px; background:#fff; border-radius:7px; padding:3px; border:1px solid rgba(15,23,42,0.08); display:grid; grid-template-columns:repeat(7,1fr); grid-template-rows:repeat(7,1fr); gap:1px;">
+                  <div style="background:#111"></div><div style="background:#111"></div><div style="background:#111"></div><div></div><div style="background:#111"></div><div></div><div style="background:#111"></div>
+                  <div style="background:#111"></div><div></div><div style="background:#111"></div><div></div><div></div><div style="background:#111"></div><div style="background:#111"></div>
+                  <div style="background:#111"></div><div></div><div></div><div style="background:#111"></div><div style="background:#111"></div><div></div><div style="background:#111"></div>
+                  <div></div><div style="background:#111"></div><div style="background:#111"></div><div></div><div style="background:#111"></div><div style="background:#111"></div><div></div>
+                  <div style="background:#111"></div><div style="background:#111"></div><div></div><div style="background:#111"></div><div></div><div></div><div style="background:#111"></div>
+                  <div></div><div></div><div style="background:#111"></div><div style="background:#111"></div><div style="background:#111"></div><div></div><div style="background:#111"></div>
+                  <div style="background:#111"></div><div></div><div></div><div></div><div style="background:#111"></div><div style="background:#111"></div><div></div>
+                </div>
+                <div style="font-size:9px; color:#98a0af; margin-top:5px;">微信扫码查看</div>
+              </div>
+            </div>
+          </div>
+
+          <p class="mt-2 text-[10px] text-neutral-500">↑ 实际 1080×~1800px PNG（高度按 body 行数浮动），预览缩 1:2.5</p>
+        </div>
+
+        <!-- 右栏：实施清单 + 字段对照 -->
+        <div>
+          <div class="text-[13px] font-semibold text-neutral-900 mb-2">实施清单（按 GH 变体抄）</div>
+          <ol class="text-[12px] text-neutral-700 leading-relaxed list-decimal pl-5 space-y-1.5">
+            <li><code class="bg-neutral-100 px-1 rounded text-[10.5px]">pickSourceMeta()</code> 加 <code class="text-[10.5px]">'clawhub'</code> 分支：<code class="text-[10.5px]">{ kind:'clawhub', label:'ClawHub', chipColor:'#d8c8f5' }</code>（lavender，跟现有 GitHub mint / PH peach 区分）</li>
+            <li>新增 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderClawhubContent</code> 函数（抄 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderGithubContent</code>，差异点见下）放在 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">svg-template.ts</code></li>
+            <li>顶部 dispatch 处加 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">sourceMeta.kind === 'clawhub'</code> 分支（参考 ph 那段）</li>
+            <li><code class="bg-neutral-100 px-1 rounded text-[10.5px]">poster.ts</code> / <code class="bg-neutral-100 px-1 rounded text-[10.5px]">handlers.ts</code> 注入字段：<code class="text-[10.5px]">extra.license</code> / <code class="text-[10.5px]">latest_version</code> / <code class="text-[10.5px]">versions_count</code> / <code class="text-[10.5px]">updated_at</code> / <code class="text-[10.5px]">readme_first_paragraph</code></li>
+            <li>README 前 N 行抽取（worker 端）：<code class="text-[10.5px]">stripFrontmatter()</code> 去 YAML（<code class="text-[10.5px]">^---\n...\n---</code>）→ <code class="text-[10.5px]">stripH1()</code> 去 H1（<code class="text-[10.5px]">^# .+</code>）→ 取首段非空 prose（≤ 5 行 wrap，沿用 <code class="text-[10.5px]">wrapText</code> helper）</li>
+            <li>category chip 颜色按 8 类映射：workflow=violet · mcp=blue · prompts=violet · dev=neutral · data=teal · security=rose · automation=emerald · other=neutral</li>
+            <li>Avatar fallback：无 GitHub 头像时圆形 + skill 名首字母（参考 GH 的 dot grid fallback 模式，但用首字母代替 dots）</li>
+            <li>Hero 区（AI-Feeds logo + 名称 + slogan + 来源 chip）与 Footer（avatar 120 + 分享自 + nickname / QR + 微信扫码查看）<strong>完全复用</strong> <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderHero</code> + <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderFooter</code>（无需改动）</li>
+          </ol>
+
+          <div class="mt-6 text-[13px] font-semibold text-neutral-900 mb-2">vs GH/PH/X 变体的字段对照</div>
+          <table class="w-full text-[11.5px]">
+            <thead class="text-neutral-500 text-left">
+              <tr class="border-b border-neutral-200">
+                <th class="pb-1.5 font-medium">字段</th>
+                <th class="pb-1.5 font-medium">X</th>
+                <th class="pb-1.5 font-medium">GitHub</th>
+                <th class="pb-1.5 font-medium">PH</th>
+                <th class="pb-1.5 font-medium">ClawHub</th>
+              </tr>
+            </thead>
+            <tbody class="text-neutral-700">
+              <tr class="border-b border-neutral-100"><td class="py-1.5">头像</td><td>用户 (圆 112)</td><td>owner (圆 128)</td><td>logo (方圆角 128)</td><td>skill owner (圆 128)</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">主标题</td><td>display_name (52px)</td><td>owner/repo (54-70px 自适应)</td><td>product (92px)</td><td>displayName (54-70px 自适应)</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">tag pill</td><td>—</td><td>language (purpleSoft)</td><td>category (orangeSoft)</td><td>category (按类别 8 色)</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">metrics 列</td><td>4: replies/RT/likes/views</td><td>3: stars/forks/watchers</td><td>3: comments/reviews/followers</td><td>3: 星标/下载/当前安装</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">meta 行</td><td>—</td><td>trophy + rank label + contributors</td><td>—</td><td>tag+v · license / N versions · 更新时间</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">主体（body）</td><td>tweet 全文 (8 行)</td><td>readme excerpt (5 行)</td><td>summary 中文 (5 行)</td><td>README 前 N 行（去 frontmatter+H1，5 行）</td></tr>
+              <tr class="border-b border-neutral-100"><td class="py-1.5">媒体图</td><td>tweet 配图</td><td>readme 第一张非 SVG</td><td>gallery 第一张</td><td>—（skill 多数无图）</td></tr>
+              <tr><td class="py-1.5">Footer</td><td colspan="4" class="text-neutral-500">所有变体共用 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderFooter</code>：avatar 120 + 分享自 + nickname (左) / QR 168 + 微信扫码查看 (右)</td></tr>
+            </tbody>
+          </table>
+
+          <div class="mt-6 text-[12px] text-neutral-500 leading-relaxed">
+            <div class="font-semibold text-neutral-700 mb-1">基础参数（沿用，不改）</div>
+            <ul class="space-y-0.5 list-disc pl-4">
+              <li>1080 宽 / cardX-Y/W 由顶层 <code class="bg-neutral-100 px-1 rounded text-[10.5px]">renderShareSvg</code> 注入（cardX=56, cardW=968）</li>
+              <li>card padX=36, padTop=56（内容区 968-72=896 宽）</li>
+              <li>FONT = Noto Sans SC Medium 子集（已加载）</li>
+              <li>R2 缓存 key: <code class="bg-neutral-100 px-1 rounded text-[10.5px]">share/poster/&lt;token&gt;.png</code></li>
+              <li>resvg-wasm 渲染，cold ~3-4s，HIT &lt;1.4s</li>
+              <li>footerH=264, footerMargin=48, totalH=footerY+footerH+96</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="mt-10 text-center text-[11px] text-neutral-400">
+      AI-Feeds · ClawHub source design Phase 0 · 2026-05-06 · v3
+    </footer>
+  </main>
+</body>
+</html>
