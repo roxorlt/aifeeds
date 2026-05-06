@@ -369,22 +369,36 @@ export async function handleMe(
   if (!user) {
     return jsonErr('user not found', 404);
   }
-  // 找当前主 phone identity（脱敏）
+  // 找当前主 identity（脱敏；优先按 verified_at DESC 取最近，跨 provider）
   const ident = await env.DB.prepare(
-    `SELECT identity_value FROM identities
-     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+    `SELECT provider, identity_value FROM identities
+     WHERE user_id = ? AND unbound_at IS NULL
      ORDER BY verified_at DESC LIMIT 1`,
-  ).bind(auth.userId).first<{ identity_value: string }>();
-  const phoneMasked = ident
-    ? `${ident.identity_value.slice(0, 3)}****${ident.identity_value.slice(-4)}`
-    : null;
+  ).bind(auth.userId).first<{ provider: string; identity_value: string }>();
+
+  let identityMasked: string | null = null;
+  let identityProvider: string | null = null;
+  if (ident) {
+    identityProvider = ident.provider;
+    if (ident.provider === 'phone') {
+      identityMasked = `${ident.identity_value.slice(0, 3)}****${ident.identity_value.slice(-4)}`;
+    } else if (ident.provider === 'email') {
+      // 脱敏：abc@xx.com → a***@xx.com
+      const [local, domain] = ident.identity_value.split('@');
+      identityMasked = `${local[0]}***@${domain}`;
+    }
+  }
+
   return jsonOk({
     user: {
       id: user.id,
       display_name: user.display_name,
       avatar_url: user.avatar_url,
       created_at: user.created_at,
-      phone_masked: phoneMasked,
+      identity_masked: identityMasked,
+      identity_provider: identityProvider,
+      // 老字段保留兼容（dashboard 全量切到 identity_masked 后下线）
+      phone_masked: ident?.provider === 'phone' ? identityMasked : null,
     },
   });
 }
@@ -392,7 +406,8 @@ export async function handleMe(
 // ─── POST /api/auth/delete ───────────────────────────────
 
 interface DeleteBody {
-  phone_confirm: string;
+  phone_confirm?: string;
+  confirm?: string;
 }
 
 const DELETE_HASH_SALT = 'xlist-deleted-v1';
@@ -414,19 +429,21 @@ export async function handleDelete(
     return jsonErr('invalid json', 400);
   }
 
-  // 找当前 phone identity 用于二次确认
+  // 找当前主 identity（任意 provider，按最近验证）
   const ident = await env.DB.prepare(
-    `SELECT id, identity_value FROM identities
-     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+    `SELECT id, provider, identity_value FROM identities
+     WHERE user_id = ? AND unbound_at IS NULL
      ORDER BY verified_at DESC LIMIT 1`,
-  ).bind(auth.userId).first<{ id: number; identity_value: string }>();
+  ).bind(auth.userId).first<{ id: number; provider: string; identity_value: string }>();
 
   if (!ident) {
-    return jsonErr('phone identity not found', 404);
+    return jsonErr('no identity found', 404);
   }
 
-  if (typeof body.phone_confirm !== 'string' || body.phone_confirm !== ident.identity_value) {
-    return jsonErr('phone confirm mismatch', 400);
+  // body 字段历史叫 phone_confirm，扩展为通用 confirm（保留 phone_confirm fallback）
+  const confirm = body.confirm ?? body.phone_confirm;
+  if (typeof confirm !== 'string' || confirm !== ident.identity_value) {
+    return jsonErr('identity confirm mismatch', 400);
   }
 
   const now = Date.now();
