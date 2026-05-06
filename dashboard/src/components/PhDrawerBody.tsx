@@ -89,6 +89,9 @@ const IconUpvote = ({ className }: { className?: string }) => (
 const IconComment = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
 );
+const IconStar = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 16 16" fill="currentColor" className={className}><path d="M8 1l2.2 4.6 5 .7-3.6 3.5.9 5L8 12.3 3.5 14.8l.9-5L.8 6.3l5-.7L8 1z"/></svg>
+);
 const IconFollow = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><circle cx="8" cy="6" r="3"/><path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>
 );
@@ -236,24 +239,35 @@ export function PhDrawerBody({ item }: Props) {
         )}
       </div>
 
-      {/* ② KPI 行 — 3 列各 1/3，跟海报对齐（votes / comments / followers）
-          缺数据列保留 "—" 占位，保证三列恒定布局 */}
-      {(metrics.votes !== undefined || metrics.comments !== undefined || metrics.followers !== undefined) && (
-        <div className="grid grid-cols-3 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
+      {/* ② KPI 行 — 4 列各 1/4，跟海报对齐（votes / comments / reviews /
+          followers）。短期热度（votes/comments）+ 长期口碑（reviews/followers）
+          全维度展示。缺数据列 / value === 0 都显 "—"（兜底 scraper 多 launch
+          老产品 votesCount 抓 0 的视觉污染，等 backfill 后真值显示）。 */}
+      {(metrics.votes !== undefined || metrics.comments !== undefined || metrics.reviews_count !== undefined || metrics.followers !== undefined) && (
+        <div className="grid grid-cols-4 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
           <Kpi
             icon={<IconUpvote className="h-3.5 w-3.5" />}
             label="votes"
-            value={metrics.votes !== undefined ? formatCompact(metrics.votes) : "—"}
+            value={metrics.votes && metrics.votes > 0 ? formatCompact(metrics.votes) : "—"}
           />
           <Kpi
             icon={<IconComment className="h-3.5 w-3.5" />}
             label="comments"
-            value={metrics.comments !== undefined ? formatCompact(metrics.comments) : "—"}
+            value={metrics.comments && metrics.comments > 0 ? formatCompact(metrics.comments) : "—"}
+          />
+          <Kpi
+            icon={<IconStar className="h-3.5 w-3.5" />}
+            label={metrics.reviews_count ? `${metrics.reviews_count} reviews` : "reviews"}
+            value={
+              metrics.reviews_count && metrics.reviews_avg !== undefined
+                ? metrics.reviews_avg.toFixed(2)
+                : "—"
+            }
           />
           <Kpi
             icon={<IconFollow className="h-3.5 w-3.5" />}
             label="followers"
-            value={metrics.followers !== undefined ? formatCompact(metrics.followers) : "—"}
+            value={metrics.followers && metrics.followers > 0 ? formatCompact(metrics.followers) : "—"}
           />
         </div>
       )}

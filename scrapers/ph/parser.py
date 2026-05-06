@@ -66,13 +66,25 @@ def extract_first(html: str, pattern: str) -> str | None:
 
 
 def extract_metrics(html: str) -> dict[str, Any]:
-    """votes / comments / reviews / followers — 取第一次出现（页面顶部主产品）。
+    """votes / comments / reviews / followers 抓取。
 
-    注意：votesCount 可能是 launch 维度（每次 launch 独立计数），
-    而 followersCount / reviewsCount 是 product 维度累计。
+    votesCount 是 launch 维度（每次 launch 独立计数）；followersCount /
+    reviewsCount 是 product 维度累计。
+
+    旧逻辑取"第一个 votesCount" 在多 launch 老产品上错抓老 launch 的
+    （Filect / Framer / Manus 等知名产品有过多次 PH 发布，第一个 launch
+    的 votesCount 可能为 0 或老票数）。新策略：抓所有 votesCount 取
+    **最后一个非零** —— PH RSC stream 通常按 launch 时间顺序，最后是
+    当前 active launch；非零兜底个别 launch 字段缺失。
     """
+    all_votes = [int(m.group(1)) for m in re.finditer(r'"votesCount":\s*(\d+)', html)]
+    if all_votes:
+        nonzero = [v for v in all_votes if v > 0]
+        votes = nonzero[-1] if nonzero else all_votes[-1]
+    else:
+        votes = None
     return {
-        "votes": _to_int(extract_first(html, r'"votesCount":\s*(\d+)')),
+        "votes": votes,
         "comments_count": _to_int(extract_first(html, r'"commentsCount":\s*(\d+)')),
         "reviews_count": _to_int(extract_first(html, r'"reviewsCount":\s*(\d+)')),
         "followers": _to_int(extract_first(html, r'"followersCount":\s*(\d+)')),
