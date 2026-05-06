@@ -89,26 +89,72 @@ function esc(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
-// 超长文本按"每行 N 字 × M 行"硬截断，第 M 行超长加省略号。
+// 超长文本按"每行 N 字 × M 行"截断 + 尾行省略号。
 // 中文字宽 ≈ 1em，英文字符 ≈ 0.55em，按混合估算。
+//
+// Word-aware：连续 ASCII 字符（A-Za-z0-9._-/' 等）当作一个不可分 token，
+// 避免 "Andrej Karpathy" 在 P/a 之间硬切。中文字符仍按单字断行。
+// 单 token 超 maxCharsPerLine（极长 URL）才退化到字符级硬切兜底。
 function wrapText(text: string, maxCharsPerLine: number, maxLines: number): string[] {
-  const lines: string[] = [];
   const cleaned = text.replace(/\s+/g, ' ').trim();
-  let current = '';
-  let weight = 0; // 累计字符宽度（中文=1，英文=0.55）
+  const charWidth = (ch: string) => (/[一-鿿　-〿]/.test(ch) ? 1 : 0.55);
+  const tokenWidth = (s: string) => {
+    let w = 0;
+    for (const ch of s) w += charWidth(ch);
+    return w;
+  };
 
+  // 切 token：连续 ASCII word-char 是一个 token；其他字符（中文 / 空格 / 标点）单独 token
+  const tokens: string[] = [];
+  let buf = '';
   for (const ch of cleaned) {
-    const w = /[一-鿿A-Z　-〿]/.test(ch) ? 1 : 0.55;
-    if (weight + w > maxCharsPerLine && current) {
-      lines.push(current);
-      current = '';
-      weight = 0;
-      if (lines.length >= maxLines) break;
+    if (/[A-Za-z0-9._\-/'’"]/.test(ch)) {
+      buf += ch;
+    } else {
+      if (buf) { tokens.push(buf); buf = ''; }
+      tokens.push(ch);
     }
-    current += ch;
-    weight += w;
   }
-  if (current && lines.length < maxLines) lines.push(current);
+  if (buf) tokens.push(buf);
+
+  const lines: string[] = [];
+  let current = '';
+  let weight = 0;
+
+  const flushLine = () => {
+    if (current) lines.push(current.replace(/\s+$/, ''));
+    current = '';
+    weight = 0;
+  };
+
+  outer: for (const tok of tokens) {
+    const tw = tokenWidth(tok);
+    // 单 token 长过整行（极罕见，比如长 URL 或拼写错的全大写 word）：
+    // 先 flush 当前行，再字符级硬切这个 token。
+    if (tw > maxCharsPerLine) {
+      flushLine();
+      if (lines.length >= maxLines) break;
+      for (const ch of tok) {
+        const cw = charWidth(ch);
+        if (weight + cw > maxCharsPerLine) {
+          flushLine();
+          if (lines.length >= maxLines) break outer;
+        }
+        current += ch;
+        weight += cw;
+      }
+      continue;
+    }
+    if (weight + tw > maxCharsPerLine && current) {
+      flushLine();
+      if (lines.length >= maxLines) break;
+      // 新行以空格开头则跳过（行首空格无意义）
+      if (tok === ' ') continue;
+    }
+    current += tok;
+    weight += tw;
+  }
+  if (current && lines.length < maxLines) lines.push(current.replace(/\s+$/, ''));
 
   // 若内容还有剩余 → 尾行加省略号
   const used = lines.join('').length;

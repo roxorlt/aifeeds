@@ -153,10 +153,11 @@ export function PhCard({ item }: Props) {
               </span>
             )}
             {/* makers 右对齐：最多 3 个头像 + 文字。
-                ml-auto 把整组推到右；min-w-0 + 内层 truncate 让 by @ 文字在窄屏
-                上能省略号收尾，不会再溢出到卡片外。 */}
+                flex-1 + justify-end 让它占满剩余宽度并右对齐；min-w-0 + 内层
+                truncate 让 by @ 长 handle 在窄屏省略号收尾，不再溢出。
+                ml-auto 单独不够 — 那只控制位置，不限制宽度上限。 */}
             {(visibleMakers.length > 0 || firstHandle) && (
-              <span className="ml-auto flex min-w-0 items-center gap-1.5 text-neutral-500">
+              <span className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-neutral-500">
                 {visibleMakers.length > 0 && (
                   <span className="flex shrink-0 -space-x-1.5">
                     {visibleMakers.map((m, i) => {
