@@ -94,6 +94,13 @@ export interface Env {
   // Set in wrangler.toml `[browser] binding = "BROWSER"`.
   // Requires Workers Paid plan (10h browser/month included).
   BROWSER?: Fetcher;
+  // PR-EmailAuth：Resend + email 风控配置
+  RESEND_API_KEY?: string;              // wrangler secret put 设置（不入 git）
+  EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
+  EMAIL_MONTHLY_CAP?: string;           // 默认 3000（Resend free 3000/月）
+  EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
+  ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
+  ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
 }
 
 // CORS origins allowed
