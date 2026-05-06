@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-05（PR6.6 lazy-enrich-on-drawer：新增 `POST /api/items/:id/refresh` endpoint，drawer 打开主动刷 X syndication / GitHub REST，dashboard 通过 itemUpdateBus 同步 feed 卡片）
+最后更新：2026-05-06（ScrapeBadger 接入：refresh-tiered 用 batch endpoint 拿回 retweets/views，本地 chrome list-scraper 退役（launchd `.cron` + `.tune` unload，SB list-poll-ingest cron */30 接管），频率 / 成本表见 [`scrapebadger-cost-and-frequency.md`](scrapebadger-cost-and-frequency.md)）
+
+历史：2026-05-05（PR6.6 lazy-enrich-on-drawer：新增 `POST /api/items/:id/refresh` endpoint，drawer 打开主动刷 X syndication / GitHub REST，dashboard 通过 itemUpdateBus 同步 feed 卡片）
 
 历史：2026-05-02（PR2 auth backend：4 张表 + 5 个 endpoint + 4 层 SMS 防刷 + Turnstile + PushDeer 告警；M4 enricher daemon 全量上线 + M5 配套：`REFRESH_MODE=tiered` + `REFRESH_TIER_MAX=4` cron 走 `runRefreshTiered`；新增每天 03:35 UTC 的 `runCleanup` 清 30 天前 snapshots/refresh_log；M5 阈值校准脚本 `analyze_tier_perf.py` 已就位）
 
@@ -358,7 +360,14 @@ npm run deploy
 
 ## 本地服务（MacBook）
 
-### 1. launchd: `com.xlist-scraper.cron`
+### 1. launchd: `com.xlist-scraper.cron`（**已停用 2026-05-06**）
+
+> **状态**：`launchctl unload` 已执行，被 worker 端 ScrapeBadger list-poll-ingest cron 取代。
+> plist 文件保留作 fallback；如 SB 服务出问题可 `launchctl load` 临时恢复。
+> ScrapeBadger 频率 / 月成本对照见 [`docs/scrapebadger-cost-and-frequency.md`](scrapebadger-cost-and-frequency.md)。
+> 关联 `.tune`（schedule 自动调参）也已 unload，没了 `.cron` 它没意义。
+>
+> 还在跑的：`.longform`（处理 D1 里既存的截断推文 backlog；SB 接管后新推文直返 full_text 不需要它，但旧 item 还得它兜底）。
 
 - **plist**：`~/Library/LaunchAgents/com.xlist-scraper.cron.plist`
 - **脚本**：`~/.claude/skills/xlist-scraper/scripts/cron.sh`
