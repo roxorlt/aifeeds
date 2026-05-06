@@ -1392,10 +1392,45 @@ export async function runListPollIngest(
       .all<{ id: string }>();
     const existingSet = new Set(existingRows.results.map((row) => row.id));
 
+    // 视频补全：SB get-tweets-by-ids/lists 都不返 mp4 url，只给缩略图。
+    // 找出本页带视频的 tweet，逐条调免费的 syndication API 拿 mp4 variants。
+    // 数量小（典型 3-8 视频/页），串行调用即可，免费不计 SB credits。
+    const videoMp4Map = new Map<string, string>();
+    const videoTweets = r.tweets.filter((t) =>
+      (t.media || []).some((m) => m.type === 'video' || m.type === 'animated_gif'),
+    );
+    for (const vt of videoTweets) {
+      if (!vt.id) continue;
+      try {
+        const fr = await fetchTweet(vt.id);
+        if (!fr?.data) continue;
+        const mediaDetails = (fr.data as Record<string, unknown>).mediaDetails as
+          | Array<Record<string, unknown>>
+          | undefined;
+        if (!mediaDetails) continue;
+        for (const md of mediaDetails) {
+          if (md.type !== 'video' && md.type !== 'animated_gif') continue;
+          const variants =
+            ((md.video_info as Record<string, unknown>)?.variants as Array<{
+              content_type?: string;
+              bitrate?: number;
+              url?: string;
+            }>) || [];
+          const mp4s = variants.filter((v) => v.content_type === 'video/mp4' && v.url);
+          mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          const best = mp4s[0]?.url;
+          const mediaKey = (md.id_str as string) || (md.id as number | undefined)?.toString() || '';
+          if (best && mediaKey) videoMp4Map.set(mediaKey, best);
+        }
+      } catch {
+        // 单条失败不影响其它，下次 cron 还会再试
+      }
+    }
+
     // upsert 整页（已存在的也走，让 metrics 跟着 SB 实时刷新）
     const stmts: D1PreparedStatement[] = [];
     for (const t of r.tweets) {
-      const item = sbTweetToIngestItem(t);
+      const item = sbTweetToIngestItem(t, videoMp4Map);
       if (!item) continue;
       const id = `x_list:${item.source_id}`;
       stmts.push(

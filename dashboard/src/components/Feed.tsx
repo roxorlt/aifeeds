@@ -588,7 +588,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           className="flex items-center justify-center gap-2 border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
         >
           <PendingAvatars pending={pending} />
-          <span>↑ {pending.length} 条新推文</span>
+          <span>
+            ↑ {pending.length}{" "}
+            {sourceType === "github" ? "个新 repo" : sourceType === "product_hunt" ? "个新产品" : "条新推文"}
+          </span>
         </button>
       )}
 

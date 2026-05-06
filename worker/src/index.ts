@@ -294,7 +294,7 @@ export default {
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest' | 'classify-pending';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest' | 'classify-pending' | 'longform-via-sb';
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
@@ -303,6 +303,7 @@ export default {
     else if (minute === 5 || minute === 35) mode = 'backfill-replies';
     else if (minute === 25 || minute === 55) mode = 'list-poll-ingest';
     else if (minute === 20 || minute === 40) mode = 'classify-pending';
+    else if (minute === 18 || minute === 48) mode = 'longform-via-sb';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -380,6 +381,14 @@ export default {
             // 批量判定（命中→翻译 cron 接力）。20/40 minute 各跑 1 批 15。
             const result = await runClassifyPending(env, 15);
             console.log(`[cron] classify-pending result:`, JSON.stringify(result));
+            return;
+          }
+          if (mode === 'longform-via-sb') {
+            // 替代本地 .longform launchd：批量从 SB 拉 full_text 写回 items.content。
+            // SB by-ids 单次 ≥20 IDs 容易超 CF worker 30s 墙时，limit=10 实测稳定（~18s/批）。
+            // 18/48 各 1 批 = 480 条/天，drain 当前 414 backlog ~20h。
+            const result = await runLongformViaSb(env, 10);
+            console.log(`[cron] longform-via-sb result:`, JSON.stringify(result));
             return;
           }
           if (mode === 'list-poll-ingest') {

@@ -288,22 +288,28 @@ function nowD1(): string {
 // SB media[] 形状 → 现有 MediaItem 形状
 // SB type: 'photo' | 'video' | 'animated_gif'
 // 我们：'image' | 'video'，video 带 poster
-function mapMedia(m: NonNullable<SbTweet['media']>): Array<Record<string, unknown>> {
+function mapMedia(
+  m: NonNullable<SbTweet['media']>,
+  videoMp4Override?: Map<string, string>, // media_key → mp4 url (从 syndication 拿到的)
+): Array<Record<string, unknown>> {
   return (m || []).map((x) => {
     const type = x.type === 'photo' ? 'image' : x.type === 'video' || x.type === 'animated_gif' ? 'video' : x.type || 'image';
+    // 视频：默认 url 是 SB 给的 thumbnail jpg（无法播放）。
+    // 如有 syndication 兜底拿到的 mp4，覆盖 url；否则 url == poster，UI 兜底渲染静态封面。
+    const mp4 = type === 'video' && x.media_key ? videoMp4Override?.get(x.media_key) : undefined;
+    const finalUrl = mp4 || x.url;
     return {
       type,
-      url: x.url,
+      url: finalUrl,
       width: x.width ?? null,
       height: x.height ?? null,
       alt: null,
-      // 视频的 thumbnail；图片此字段 SB 不给，留空
       poster: type === 'video' ? x.preview_image_url ?? x.url ?? null : null,
     };
   });
 }
 
-export function sbTweetToIngestItem(t: SbTweet): IngestItem | null {
+export function sbTweetToIngestItem(t: SbTweet, videoMp4Override?: Map<string, string>): IngestItem | null {
   if (!t.id) return null;
   const handle = t.username || null;
   const author = t.user_name || null;
@@ -346,7 +352,7 @@ export function sbTweetToIngestItem(t: SbTweet): IngestItem | null {
     author,
     handle,
     url: handle ? `https://x.com/${handle}/status/${t.id}` : null,
-    media: JSON.stringify(mapMedia(t.media || [])),
+    media: JSON.stringify(mapMedia(t.media || [], videoMp4Override)),
     metrics: JSON.stringify(metrics),
     published_at: twitterDateToD1(t.created_at),
     scraped_at: nowD1(),
