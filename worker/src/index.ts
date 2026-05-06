@@ -295,15 +295,16 @@ export default {
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
     let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest' | 'classify-pending' | 'longform-via-sb';
+    // classify-pending + fill-translations 已经走 preempt 路径（每个 tick 都查队列），
+    // 不再占独立 minute 槽位；longform-via-sb 改成 5/35 之前曾占的槽（backfill-replies
+    // 让到 catch-all），所有 minute 都是 */5 实际能命中的值
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
-    else if (minute === 15 || minute === 45) mode = 'fill-translations';
-    else if (minute === 10 || minute === 50) mode = 'detect-longform';
-    else if (minute === 5 || minute === 35) mode = 'backfill-replies';
+    else if (minute === 10 || minute === 40) mode = 'longform-via-sb';
+    else if (minute === 15 || minute === 45) mode = 'detect-longform';
     else if (minute === 25 || minute === 55) mode = 'list-poll-ingest';
-    else if (minute === 20 || minute === 40) mode = 'classify-pending';
-    else if (minute === 18 || minute === 48) mode = 'longform-via-sb';
+    else if (minute === 5 || minute === 35) mode = 'backfill-replies';
     else mode = 'backfill-quotes';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
@@ -355,6 +356,32 @@ export default {
               console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
+            // classify-pending 抢占：12 ticks/hour 都可能跑（队列有就干），
+            // 把"新 item NULL → 进 feed"延迟从 30 min 拉到 5 min。
+            // DeepSeek QPM 不是瓶颈，唯一限制是 CF Worker subrequest 预算
+            // (15 items 1 prompt = 1 LLM call + 15 D1 update ≈ 17 subreq，OK)。
+            const classifyPending = await env.DB.prepare(
+              `SELECT count(*) AS n FROM items WHERE source_type='x_list' AND deleted_at IS NULL AND is_relevant IS NULL`,
+            ).first<{ n: number }>();
+            if ((classifyPending?.n ?? 0) > 0) {
+              const r = await runClassifyPending(env, 15);
+              console.log(`[cron] classify-pending (preempt, ${classifyPending?.n} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            // fill-translations 抢占：同样 12 ticks/hour，每批 15 个 item。
+            // batchSize 5 × 3 batches = 3 LLM call/tick，subreq ~30 内可控。
+            const translatePending = await env.DB.prepare(
+              `SELECT count(*) AS n FROM items
+                 WHERE source_type='x_list' AND deleted_at IS NULL
+                   AND is_relevant=1 AND content_translated IS NULL
+                   AND lang IS NOT NULL AND lang != 'zh'
+                   AND content IS NOT NULL AND length(content) > 0`,
+            ).first<{ n: number }>();
+            if ((translatePending?.n ?? 0) > 0) {
+              const r = await runFillTranslations(env, 15, 5);
+              console.log(`[cron] fill-translations (preempt, ${translatePending?.n} pending) result:`, JSON.stringify(r));
+              return;
+            }
           }
           if (mode === 'github-fetch') {
             const r = await runGithubFetchTrending(env);
@@ -374,13 +401,6 @@ export default {
               `[cron] refresh-metrics(${refreshMode},maxTier=${maxTier}) result:`,
               JSON.stringify(result),
             );
-            return;
-          }
-          if (mode === 'classify-pending') {
-            // SB list-poll-ingest 默认 is_relevant=NULL，由这条 cron 用 DeepSeek
-            // 批量判定（命中→翻译 cron 接力）。20/40 minute 各跑 1 批 15。
-            const result = await runClassifyPending(env, 15);
-            console.log(`[cron] classify-pending result:`, JSON.stringify(result));
             return;
           }
           if (mode === 'longform-via-sb') {
@@ -417,13 +437,11 @@ export default {
           const result =
             mode === 'cleanup'
               ? await runCleanup(env)
-              : mode === 'fill-translations'
-                ? await runFillTranslations(env)
-                : mode === 'detect-longform'
-                  ? await runDetectLongform(env, 25, 400)
-                  : mode === 'backfill-replies'
-                    ? await runBackfillReplies(env, 40, 200)
-                    : await runBackfillQuotes(env);
+              : mode === 'detect-longform'
+                ? await runDetectLongform(env, 25, 400)
+                : mode === 'backfill-replies'
+                  ? await runBackfillReplies(env, 40, 200)
+                  : await runBackfillQuotes(env);
           console.log(`[cron] ${mode} result:`, JSON.stringify(result));
         } catch (e) {
           console.error(`[cron] ${mode} error:`, e);

@@ -5,7 +5,7 @@ import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
 import { toast } from '../lib/toast';
 
-const TURNSTILE_SITE_KEY = '0x4AAAAAADHQ15rM-NnOZ2zL';
+const TURNSTILE_SITE_KEY = '0x4AAAAAADJv6E97EmdL4BGO';
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const PHONE_REGEX = /^1[3-9]\d{9}$/;
 
