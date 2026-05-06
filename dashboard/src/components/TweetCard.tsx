@@ -55,6 +55,10 @@ function VideoPlayer({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playStartedRef = useRef(false);
+  // autoplay 静默播时不显示 controls 蒙层；用户点一下才出 controls（暂停、
+  // 静音切换、全屏等）。一旦显示就不再自动隐藏（toggle 隐藏会跟 controls
+  // 上的按钮 click bubble 打架，简化处理）。
+  const [showControls, setShowControls] = useState(false);
 
   useEffect(() => {
     if (!autoplay) return;
@@ -98,11 +102,12 @@ function VideoPlayer({
       src={src}
       poster={poster}
       preload="metadata"
-      controls
+      controls={showControls}
       muted={autoplay}
       loop={autoplay}
       playsInline
       className="aspect-[16/9] w-full bg-black object-cover"
+      onClick={() => setShowControls(true)}
       onPlay={handlePlay}
       onError={onError}
     />
