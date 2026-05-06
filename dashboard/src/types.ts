@@ -4,7 +4,8 @@ export type SourceType =
   | "podcast"
   | "product_hunt"
   | "github"
-  | "arxiv";
+  | "arxiv"
+  | "clawhub";
 
 export interface MediaItem {
   type: "image" | "video" | string;

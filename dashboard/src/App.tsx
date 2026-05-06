@@ -34,11 +34,12 @@ interface SourceConfig {
 // show "暂无数据源" until their scrapers come online.
 const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "x_list", title: "X List" },
-  { source_type: "youtube", title: "YouTube" },
   { source_type: "github", title: "GitHub" },
-  { source_type: "podcast", title: "Podcast" },
   { source_type: "product_hunt", title: "Product Hunt" },
+  { source_type: "youtube", title: "YouTube" },
+  { source_type: "podcast", title: "Podcast" },
   { source_type: "arxiv", title: "arXiv" },
+  { source_type: "clawhub", title: "ClawHub" },
 ];
 
 type FilterKey = "all" | SourceType;
@@ -46,11 +47,12 @@ type FilterKey = "all" | SourceType;
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "x_list", label: "X" },
-  { key: "youtube", label: "YouTube" },
   { key: "github", label: "GitHub" },
-  { key: "podcast", label: "Podcast" },
   { key: "product_hunt", label: "PH" },
+  { key: "youtube", label: "YouTube" },
+  { key: "podcast", label: "Podcast" },
   { key: "arxiv", label: "arXiv" },
+  { key: "clawhub", label: "ClawHub" },
 ];
 
 function DashboardHome() {
