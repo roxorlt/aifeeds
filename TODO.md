@@ -8,6 +8,7 @@
   - 验证 case：t1=2048759762414674337 / t2=2048753722432360677 / Eric Cursor 3 root
   - 触发 reclassify 真执行前要 `wrangler d1 export` 备份
 - [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
+- [ ] **CF 服务端迁移**（2026-05-06 讨论文档已落）：5 阶段 roadmap — Phase 1 Web Analytics + Workers Logs + AI Gateway（这周内，3h）→ Phase 2 Images cdn-cgi 改造 dashboard（半天）→ Phase 3 GH 链试点 Workflow（1-2 周）→ Phase 4 X 主链 Workflow 双写迁移（2-3 周，下线 6 个 cron mode）→ Phase 5 按需 Queue / Logpush / Container。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实业务量 261/天 X、ScrapeBadger batch 计费、各产品月费估算、待决策项）
 
 ## 待做
 
