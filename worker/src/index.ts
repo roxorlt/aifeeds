@@ -13,6 +13,7 @@ import {
   runListPollIngest,
   runLongformViaSb,
   runClassifyPending,
+  runBackfillVideoMp4,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -1147,6 +1148,13 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     // limit 默认 50；SB 端单次 200 IDs 会 125s 超时，前端 cap 50（实测稳定）。
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 50);
     const result = await runLongformViaSb(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-video-mp4') {
+    // 一次性补齐：mp4 lookup key bug 修复前进来的 video item 全是 jpg
+    // thumbnail，跑这个 mode 用 syndication 把 url 补成 mp4。
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '30'), 1), 50);
+    const result = await runBackfillVideoMp4(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'classify-pending') {

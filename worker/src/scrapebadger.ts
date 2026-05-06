@@ -290,14 +290,18 @@ function nowD1(): string {
 // 我们：'image' | 'video'，video 带 poster
 function mapMedia(
   m: NonNullable<SbTweet['media']>,
-  videoMp4Override?: Map<string, string>, // media_key → mp4 url (从 syndication 拿到的)
+  tweetMp4?: string, // 这个 tweet 的最佳 mp4 url（syndication 兜底拿的，per-tweet 粒度）
 ): Array<Record<string, unknown>> {
+  let mp4Used = false;
   return (m || []).map((x) => {
     const type = x.type === 'photo' ? 'image' : x.type === 'video' || x.type === 'animated_gif' ? 'video' : x.type || 'image';
     // 视频：默认 url 是 SB 给的 thumbnail jpg（无法播放）。
-    // 如有 syndication 兜底拿到的 mp4，覆盖 url；否则 url == poster，UI 兜底渲染静态封面。
-    const mp4 = type === 'video' && x.media_key ? videoMp4Override?.get(x.media_key) : undefined;
-    const finalUrl = mp4 || x.url;
+    // 第一个 video item 用 mp4 覆盖；多 video 推罕见，余下 fallback thumbnail。
+    let finalUrl = x.url;
+    if (type === 'video' && tweetMp4 && !mp4Used) {
+      finalUrl = tweetMp4;
+      mp4Used = true;
+    }
     return {
       type,
       url: finalUrl,
@@ -352,7 +356,7 @@ export function sbTweetToIngestItem(t: SbTweet, videoMp4Override?: Map<string, s
     author,
     handle,
     url: handle ? `https://x.com/${handle}/status/${t.id}` : null,
-    media: JSON.stringify(mapMedia(t.media || [], videoMp4Override)),
+    media: JSON.stringify(mapMedia(t.media || [], t.id ? videoMp4Override?.get(t.id) : undefined)),
     metrics: JSON.stringify(metrics),
     published_at: twitterDateToD1(t.created_at),
     scraped_at: nowD1(),

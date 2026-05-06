@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, MediaItem, Metrics } from "../types";
@@ -18,6 +18,22 @@ import {
 // Match URL | #hashtag (CJK + ASCII) | @mention
 const RICH_PATTERN =
   /(https?:\/\/[^\s<>"']+)|(#[\u4e00-\u9fa5\u3040-\u30ffA-Za-z0-9_]+)|(@[A-Za-z0-9_]{1,20})/g;
+
+// 决定是否 autoplay video。
+// 浏览器现状（隐私收紧）：除 Chrome 外几乎都不暴露 navigator.connection；
+// 即便暴露的，conn.type 也基本永远是 undefined，只有 effectiveType（"网速估计"
+// 而非物理类型，wifi 和蜂窝都可能是 '4g'）。所以"严格 wifi-only autoplay"
+// 在浏览器层做不到。务实做法：默认 autoplay（含 Safari/手机 wifi/Chrome），
+// 只在两种明确"省流"信号下关掉：用户主动开 Data Saver（saveData=true）
+// 或网络慢到 2g 级别（effectiveType in {'2g','slow-2g'}）。这样 mobile 4G
+// 也会 autoplay — 是已知 trade-off，换 mobile wifi 体验对齐 PC。
+function detectWifiAutoplay(): boolean {
+  const conn = (navigator as unknown as { connection?: { type?: string; effectiveType?: string; saveData?: boolean } }).connection;
+  if (!conn) return true; // Safari 等无 NetworkInformation：默认 autoplay
+  if (conn.saveData) return false;
+  if (conn.effectiveType === 'slow-2g' || conn.effectiveType === '2g') return false;
+  return true;
+}
 
 // pbs.twimg.com media URL looks like
 //   https://pbs.twimg.com/media/<ID>?format=jpg&name=small
@@ -145,6 +161,14 @@ export function TweetCard({
   const [showOriginal, setShowOriginal] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [mediaFailed, setMediaFailed] = useState(false);
+  const [autoplayVideo, setAutoplayVideo] = useState<boolean>(() => detectWifiAutoplay());
+  useEffect(() => {
+    const conn = (navigator as unknown as { connection?: EventTarget }).connection;
+    if (!conn) return;
+    const handler = () => setAutoplayVideo(detectWifiAutoplay());
+    conn.addEventListener('change', handler);
+    return () => conn.removeEventListener('change', handler);
+  }, []);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [canExpand, setCanExpand] = useState(false);
@@ -363,8 +387,36 @@ export function TweetCard({
               当 A 回复 B 或 C 引用 D 且 A/C 自带图片时，图片应贴在 A/C 正文下方，
               而不是钻到 B/D 引用块下面。无 reply/quote 时这个顺序也不影响普通推文。 */}
 
-          {/* Media — 图 / video 首帧用 <img>/<video poster>，点击进 Lightbox 全屏播 */}
-          {firstMedia && !mediaFailed && (
+          {/* Media —
+              视频：流内 inline 播放，HTML5 controls（含原生全屏按钮）。wifi
+              autoplay/muted/loop，非 wifi 不 autoplay 让用户主动点。卡片其它
+              位置点击仍可开 drawer，video 自身 onClick 阻止冒泡避免误触。
+              图片：保留点击进 Lightbox 大图查看的旧行为。 */}
+          {firstMedia && !mediaFailed && firstMedia.type === "video" && (
+            <div
+              className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <video
+                src={proxyImg(firstMedia.url)}
+                poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
+                preload="metadata"
+                controls
+                muted={autoplayVideo}
+                autoPlay={autoplayVideo}
+                loop={autoplayVideo}
+                playsInline
+                className="aspect-[16/9] w-full bg-black object-cover"
+                onError={() => setMediaFailed(true)}
+              />
+              {mediaCount > 1 && (
+                <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+                  +{mediaCount - 1}
+                </span>
+              )}
+            </div>
+          )}
+          {firstMedia && !mediaFailed && firstMedia.type === "image" && (
             <button
               type="button"
               onClick={(e) => {
@@ -373,40 +425,20 @@ export function TweetCard({
               }}
               className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
             >
-              {firstMedia.type === "video" ? (
-                <video
-                  src={proxyImg(firstMedia.url)}
-                  poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
-                  preload="metadata"
-                  muted
-                  playsInline
-                  className="aspect-[16/9] w-full bg-black object-cover"
-                  onError={() => setMediaFailed(true)}
-                />
-              ) : (
-                <img
-                  src={proxyImg(firstMedia.url)}
-                  alt={firstMedia.alt || ""}
-                  loading="lazy"
-                  className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
-                  onError={() => setMediaFailed(true)}
-                />
-              )}
-              {/* 视频中央 ▶ 按钮（视觉提示可播放） */}
-              {firstMedia.type === "video" && (
-                <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                  <span className="flex h-14 w-14 items-center justify-center rounded-full bg-black/55 text-2xl text-white shadow-lg">
-                    ▶
-                  </span>
-                </span>
-              )}
+              <img
+                src={proxyImg(firstMedia.url)}
+                alt={firstMedia.alt || ""}
+                loading="lazy"
+                className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
+                onError={() => setMediaFailed(true)}
+              />
               {mediaCount > 1 && (
                 <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
                   +{mediaCount - 1}
                 </span>
               )}
               {/* 顶部角标只在 first 是图但里面有 video 时显示（提醒"还有视频"） */}
-              {firstMedia.type === "image" && hasVideo && (
+              {hasVideo && (
                 <span className="absolute left-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
                   ▶ 视频
                 </span>

@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-06（ScrapeBadger 接入：refresh-tiered 用 batch endpoint 拿回 retweets/views，本地 chrome list-scraper 退役（launchd `.cron` + `.tune` unload，SB list-poll-ingest cron */30 接管），频率 / 成本表见 [`scrapebadger-cost-and-frequency.md`](scrapebadger-cost-and-frequency.md)）
+最后更新：2026-05-06（Turnstile widget 升级到 v3 `0x4AAAAAADJyUx6JD4IMD_1i`，prod + staging worker `TURNSTILE_SECRET_KEY` 同步换新；起因是诊断中误把 chrome-devtools-mcp 触发的 600010 当成 widget 配置 bug — **CF 600010 是 DevTools 检测机制**，普通用户访问不会触发，社区证据见 https://community.cloudflare.com/t/turnstile-errors-600010-when-devtools-is-open/733892）
+
+历史：2026-05-06（ScrapeBadger 接入：refresh-tiered 用 batch endpoint 拿回 retweets/views，本地 chrome list-scraper 退役（launchd `.cron` + `.tune` unload，SB list-poll-ingest cron */30 接管），频率 / 成本表见 [`scrapebadger-cost-and-frequency.md`](scrapebadger-cost-and-frequency.md)）
 
 历史：2026-05-05（PR6.6 lazy-enrich-on-drawer：新增 `POST /api/items/:id/refresh` endpoint，drawer 打开主动刷 X syndication / GitHub REST，dashboard 通过 itemUpdateBus 同步 feed 卡片）
 
@@ -503,6 +505,53 @@ grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut 
 ```
 
 **本地开发 Worker**：`worker/.dev.vars`（gitignored），格式 `KEY=value`，每行一对。需要包含 `INGEST_TOKEN` + `DEEPSEEK_API_KEY`（后者可用同样的 pipe 注入：`echo "DEEPSEEK_API_KEY=$(grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut -d= -f2-)" >> .dev.vars`）。
+
+### Cloudflare 运维 token（跨 session 共享）
+
+**位置**：项目根 `.secrets/cf-ops.env`（已 gitignored，路径见 `.gitignore` `.secrets/` 一行）
+
+**内容**：
+- `CF_OPS_API_TOKEN` — account-owned token，权限是「创建 account-owned 子 token」（不能直接操作 Turnstile / Workers / DNS 等具体资源）
+- `CF_ACCOUNT_ID` — CF account ID
+
+**用途**：让 Claude Code session 跨对话延续 CF 运维能力。session 用 master token 现场创建一个「最小权限 + 短 TTL」的子 token 去做实际操作（list widgets、推 secret、改 DNS 等），避免长期暴露高权限 token。
+
+**典型用法**（Bash）：
+```bash
+source .secrets/cf-ops.env
+
+# Step 1: 查 permission group ID（一次性，可缓存到笔记里）
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens/permission_groups" \
+  -H "Authorization: Bearer $CF_OPS_API_TOKEN" | jq '.result[] | select(.name | test("Turnstile"))'
+
+# Step 2: 用 master token 创建一个只带需要权限的子 token（24h 过期）
+EXPIRES=$(date -u -v+24H +"%Y-%m-%dT%H:%M:%SZ")
+SUB_TOKEN=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens" \
+  -H "Authorization: Bearer $CF_OPS_API_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"name\":\"ops-$(date +%s)\",\"policies\":[{\"effect\":\"allow\",\"permission_groups\":[{\"id\":\"<PERMISSION_GROUP_ID>\"}],\"resources\":{\"com.cloudflare.api.account.$CF_ACCOUNT_ID\":\"*\"}}],\"expires_on\":\"$EXPIRES\"}" \
+  | jq -r '.result.value')
+
+# Step 3: 用子 token 干活（示例：列 Turnstile widgets）
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/challenges/widgets" \
+  -H "Authorization: Bearer $SUB_TOKEN"
+```
+
+**已知 permission group ID**（用过的，免去重新查）：
+| 名称 | ID |
+|---|---|
+| Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` |
+| Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` |
+
+**轮换 / 撤销**：
+- 怀疑泄露：CF Dashboard → 头像 → My Profile → API Tokens → 找到 token → Roll（生成新值）或 Delete
+- Roll 后把新值覆盖写回 `.secrets/cf-ops.env`
+- master token 本身权限低（只能创建子 token），泄露风险有限，但**仍建议每 6-12 个月主动 roll 一次**
+
+**安全约定**：
+- ❌ 不要在对话中明文重复贴 token（log 里会留痕）
+- ❌ 不要写到 `wrangler.toml` / 任何 git-tracked 文件
+- ❌ 子 token 一律带 `expires_on`，不要做永久 token
+- ✅ 操作完成后子 token 自动过期，不需要手动撤
 
 ---
 

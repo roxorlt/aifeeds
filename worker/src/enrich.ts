@@ -1395,6 +1395,10 @@ export async function runListPollIngest(
     // 视频补全：SB get-tweets-by-ids/lists 都不返 mp4 url，只给缩略图。
     // 找出本页带视频的 tweet，逐条调免费的 syndication API 拿 mp4 variants。
     // 数量小（典型 3-8 视频/页），串行调用即可，免费不计 SB credits。
+    //
+    // Lookup key 用 tweet_id 而非 SB media_key：syndication mediaDetails 里
+    // id_str/id 经常返 null（实测过），用它当 key 永远 miss。一个 tweet
+    // 99% 只有 1 个 video，用 tweet_id 简单可靠；多 video 推 fallback 取首条。
     const videoMp4Map = new Map<string, string>();
     const videoTweets = r.tweets.filter((t) =>
       (t.media || []).some((m) => m.type === 'video' || m.type === 'animated_gif'),
@@ -1419,8 +1423,7 @@ export async function runListPollIngest(
           const mp4s = variants.filter((v) => v.content_type === 'video/mp4' && v.url);
           mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
           const best = mp4s[0]?.url;
-          const mediaKey = (md.id_str as string) || (md.id as number | undefined)?.toString() || '';
-          if (best && mediaKey) videoMp4Map.set(mediaKey, best);
+          if (best && !videoMp4Map.has(vt.id)) videoMp4Map.set(vt.id, best);
         }
       } catch {
         // 单条失败不影响其它，下次 cron 还会再试
@@ -1674,6 +1677,115 @@ export async function runClassifyPending(
 //   4. 没命中（X 已删 / 私密等）→ extra.longform.fetch_error
 // 用法：cron 每 5 min 跑一次 limit=50（清完后 cap 不再扣 credits 因为 SELECT 0 行）；
 // 或 /api/enrich/run?mode=longform-via-sb&limit=200 一次性清 backlog。
+
+// ─── backfill-video-mp4 mode ──────────────────────────────────
+// 一次性补齐：SB list-poll-ingest 之前 video item 全是 jpg thumbnail（mp4
+// lookup key bug 导致 syndication 兜底永远失效）。修代码后新视频会带 mp4，
+// 这个 mode 用 syndication 把存量 video item 的 url 也补上 mp4。
+//
+// 选条件：source_type='x_list'、media 里有 video 类型、url 还是 thumbnail
+// 域名（pbs.twimg.com 而不是 video.twimg.com）。
+export interface BackfillVideoMp4Result {
+  mode: 'backfill-video-mp4';
+  selected: number;
+  updated: number;
+  no_mp4: number;
+  fetch_failed: number;
+  duration_ms: number;
+}
+
+export async function runBackfillVideoMp4(
+  env: EnrichEnv,
+  limit = 30,
+): Promise<BackfillVideoMp4Result> {
+  const t0 = Date.now();
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, media
+       FROM items
+      WHERE source_type = 'x_list'
+        AND deleted_at IS NULL
+        AND media LIKE '%"type":"video"%'
+        AND media NOT LIKE '%video.twimg.com%'
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string; source_id: string; media: string }>();
+
+  const selected = rows.results.length;
+  let updated = 0;
+  let noMp4 = 0;
+  let fetchFailed = 0;
+
+  for (const row of rows.results) {
+    try {
+      const fr = await fetchTweet(row.source_id);
+      if (!fr?.data) {
+        fetchFailed++;
+        continue;
+      }
+      const mediaDetails = (fr.data as Record<string, unknown>).mediaDetails as
+        | Array<Record<string, unknown>>
+        | undefined;
+      let bestMp4: string | undefined;
+      if (mediaDetails) {
+        for (const md of mediaDetails) {
+          if (md.type !== 'video' && md.type !== 'animated_gif') continue;
+          const variants =
+            ((md.video_info as Record<string, unknown>)?.variants as Array<{
+              content_type?: string;
+              bitrate?: number;
+              url?: string;
+            }>) || [];
+          const mp4s = variants.filter((v) => v.content_type === 'video/mp4' && v.url);
+          mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          if (mp4s[0]?.url) {
+            bestMp4 = mp4s[0].url;
+            break;
+          }
+        }
+      }
+      if (!bestMp4) {
+        noMp4++;
+        continue;
+      }
+
+      // 替换 media JSON 里第一个 video item 的 url
+      let arr: Array<Record<string, unknown>>;
+      try {
+        arr = JSON.parse(row.media) as Array<Record<string, unknown>>;
+      } catch {
+        fetchFailed++;
+        continue;
+      }
+      let mp4Used = false;
+      for (const m of arr) {
+        if (m.type === 'video' && !mp4Used) {
+          m.url = bestMp4;
+          mp4Used = true;
+        }
+      }
+      if (!mp4Used) {
+        noMp4++;
+        continue;
+      }
+      const newMedia = JSON.stringify(arr);
+      await env.DB.prepare(`UPDATE items SET media = ? WHERE id = ?`)
+        .bind(newMedia, row.id)
+        .run();
+      updated++;
+    } catch {
+      fetchFailed++;
+    }
+  }
+
+  return {
+    mode: 'backfill-video-mp4',
+    selected,
+    updated,
+    no_mp4: noMp4,
+    fetch_failed: fetchFailed,
+    duration_ms: Date.now() - t0,
+  };
+}
 
 export interface LongformViaSbResult {
   mode: 'longform-via-sb';
@@ -2062,9 +2174,8 @@ async function selectTranslationCandidates(
   // swept up Chinese-quote tweets (extra has quote_of but content is zh),
   // which extractTasks then rejected via isLikelyChinese — wasting slots.
   //
-  // ORDER BY RANDOM() spreads sampling across the ~760 candidates. DESC
-  // biased to freshest tweets where zh-quote-zh dominates, producing 0 tasks
-  // every cron slot. Random hits the ~5-10% English-quote gems in the tail.
+  // 优先 content 未翻译的（命中率 ~100%，没 isLikelyChinese 浪费），
+  // 其次是 quote_of/link_card 边角；同优先级里 RANDOM 散布。
   const rows = await env.DB.prepare(
     `SELECT id, source_id, content, lang, content_translated, extra
      FROM items
@@ -2085,7 +2196,9 @@ async function selectTranslationCandidates(
            AND json_extract(extra, '$.link_card.description_translated') IS NULL
          )
        )
-     ORDER BY RANDOM()
+     ORDER BY
+       CASE WHEN content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL THEN 0 ELSE 1 END,
+       RANDOM()
      LIMIT ?`,
   )
     .bind(fetchBatch)
