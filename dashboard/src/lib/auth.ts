@@ -22,6 +22,10 @@ export interface User {
   display_name: string | null;
   avatar_url: string | null;
   created_at?: number;
+  // 新字段（推荐使用）
+  identity_masked?: string | null;
+  identity_provider?: string | null;
+  // 老字段保留兼容
   phone_masked?: string | null;
 }
 
@@ -110,10 +114,25 @@ export async function sendSmsCode(
   return parseOrThrow(res);
 }
 
-export async function login(phone: string, code: string): Promise<LoginResponse> {
+export async function sendEmailCode(
+  email: string,
+  turnstileToken: string,
+): Promise<{ ok: true; ttl: number }> {
+  const res = await authFetch('/api/auth/email/send', {
+    method: 'POST',
+    body: { email, turnstile_token: turnstileToken },
+  });
+  return parseOrThrow(res);
+}
+
+/**
+ * 登录入口：identifier 同时接受 phone 或 email
+ * worker handler 按格式自动路由到对应 verify path
+ */
+export async function login(identifier: string, code: string): Promise<LoginResponse> {
   const res = await authFetch('/api/auth/login', {
     method: 'POST',
-    body: { phone, code },
+    body: { identifier, code },
   });
   return parseOrThrow(res);
 }

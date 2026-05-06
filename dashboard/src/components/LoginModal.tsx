@@ -7,7 +7,7 @@ import { toast } from '../lib/toast';
 
 const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widget
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-const PHONE_REGEX = /^1[3-9]\d{9}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 declare global {
   interface Window {
@@ -54,7 +54,7 @@ export function LoginModal() {
   const closeModal = useAuthStore((s) => s.closeLoginModal);
   const onLoginSuccess = useAuthStore((s) => s.onLoginSuccess);
 
-  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileWidgetId, setTurnstileWidgetId] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export function LoginModal() {
   useEffect(() => {
     if (!open) return;
     track(EVENTS.LOGIN_MODAL_OPEN, { trigger_action: trigger });
-    setPhone('');
+    setEmail('');
     setCode('');
     setTurnstileToken(null);
     setCodeSent(false);
@@ -134,8 +134,9 @@ export function LoginModal() {
   async function handleSendCode() {
     setPhoneError('');
     setCodeError('');
-    if (!PHONE_REGEX.test(phone)) {
-      setPhoneError('请输入正确的手机号');
+    const trimmed = email.trim().toLowerCase();
+    if (!EMAIL_REGEX.test(trimmed)) {
+      setPhoneError('请输入正确的邮箱');
       return;
     }
     if (!turnstileToken) {
@@ -143,22 +144,25 @@ export function LoginModal() {
       return;
     }
     setLoading(true);
-    track(EVENTS.SMS_SEND_ATTEMPT, {});
+    track(EVENTS.SMS_SEND_ATTEMPT, { channel: 'email' });
     try {
-      await authApi.sendSmsCode(phone, turnstileToken);
-      track(EVENTS.SMS_SEND_SUCCESS, {});
+      await authApi.sendEmailCode(trimmed, turnstileToken);
+      track(EVENTS.SMS_SEND_SUCCESS, { channel: 'email' });
       setCodeSent(true);
       setCooldownSec(60);
     } catch (e) {
       const a = e as AuthError;
       let msg = a.message;
-      if (a.status === 429 && a.reason === 'phone_60s_limit') msg = '请稍候再试（60 秒内只能发 1 次）';
-      else if (a.status === 429 && a.reason === 'phone_24h_limit') msg = '今日发送次数过多，请明天再试';
-      else if (a.status === 429 && a.reason === 'phone_locked_30min') msg = '账户已临时锁定，请 30 分钟后再试';
+      if (a.status === 400 && a.reason === 'disposable_blocked') msg = '请使用真实邮箱（不支持临时邮箱）';
+      else if (a.status === 400 && a.reason === 'mx_failed') msg = '邮箱地址无效';
+      else if (a.status === 429 && a.reason === 'email_60s_limit') msg = '请稍候再试（60 秒内只能发 1 次）';
+      else if (a.status === 429 && a.reason === 'email_5min_limit') msg = '请稍候再试';
+      else if (a.status === 429 && a.reason === 'email_24h_limit') msg = '今日发送次数过多，请明天再试';
+      else if (a.status === 429 && a.reason === 'email_locked_30min') msg = '账户已临时锁定，请 30 分钟后再试';
       else if (a.status === 503) msg = '服务暂不可用，请稍后再试';
+      else if (a.status === 502) msg = '邮件服务暂时不可用，请稍后重试';
       else if (a.status === 403) msg = '人机验证失败，请重试';
       setPhoneError(msg);
-      // token 已被消费，reset 让用户重过验证
       if (turnstileWidgetId && window.turnstile) {
         window.turnstile.reset(turnstileWidgetId);
         setTurnstileToken(null);
@@ -175,10 +179,10 @@ export function LoginModal() {
       return;
     }
     setLoading(true);
-    track(EVENTS.CODE_VERIFY_ATTEMPT, {});
+    track(EVENTS.CODE_VERIFY_ATTEMPT, { channel: 'email' });
     try {
-      const data = await authApi.login(phone, code);
-      track(EVENTS.LOGIN_SUCCESS, { is_new_user: data.user.is_new, login_method: 'phone-sms' });
+      const data = await authApi.login(email.trim().toLowerCase(), code);
+      track(EVENTS.LOGIN_SUCCESS, { is_new_user: data.user.is_new, login_method: 'email-code' });
       toast.success(data.user.is_new ? '注册成功' : '登录成功');
       await onLoginSuccess(data.user);
     } catch (e) {
@@ -197,7 +201,7 @@ export function LoginModal() {
 
   if (!open) return null;
 
-  const sendDisabled = loading || !phone || !turnstileToken || cooldownSec > 0;
+  const sendDisabled = loading || !email || !turnstileToken || cooldownSec > 0;
   const loginDisabled = loading || !codeSent || code.length !== 6;
 
   return (
@@ -218,17 +222,18 @@ export function LoginModal() {
           </button>
         </header>
 
-        {/* 手机号 + 获取验证码 */}
-        <label className="mb-1 block text-sm text-neutral-700">手机号</label>
+        {/* 邮箱 + 获取验证码 */}
+        <label className="mb-1 block text-sm text-neutral-700">邮箱</label>
         <div className="flex gap-2">
           <input
-            type="tel"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-            placeholder="请输入手机号"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value.slice(0, 254))}
+            placeholder="请输入邮箱"
             disabled={codeSent && cooldownSec > 0}
             className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
             autoFocus
+            autoComplete="email"
           />
           <button
             type="button"

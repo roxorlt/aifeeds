@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-06（CF Workers Paid 升级到 $5/月：subrequest 50→1000、CPU 10ms→30s、解锁 DO/Queues。后续架构决策默认按 Paid 配额算账，详见下方「CF 计划与配额」节）
+最后更新：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
+
+历史：2026-05-06（CF Workers Paid 升级到 $5/月：subrequest 50→1000、CPU 10ms→30s、解锁 DO/Queues。后续架构决策默认按 Paid 配额算账，详见下方「CF 计划与配额」节）
 
 历史：2026-05-06（Turnstile widget 升级到 v3 `0x4AAAAAADJyUx6JD4IMD_1i`，prod + staging worker `TURNSTILE_SECRET_KEY` 同步换新；起因是诊断中误把 chrome-devtools-mcp 触发的 600010 当成 widget 配置 bug — **CF 600010 是 DevTools 检测机制**，普通用户访问不会触发，社区证据见 https://community.cloudflare.com/t/turnstile-errors-600010-when-devtools-is-open/733892）
 
@@ -339,6 +341,77 @@ npm run deploy
 | L2 | device 24h unique phones | ≥ 5 拒 | 同上 |
 | L3 | 全局每日 cap | 200 条 | `SMS_DAILY_CAP` env |
 | L4 | 验证码错码锁 | 5 次错 → 30 min 锁 | `worker/src/auth/sms.ts` MAX_ATTEMPTS_BEFORE_LOCK / LOCK_DURATION_MS |
+
+### 3.6. Resend Email 服务（2026-05-06 上线，备案前主登录路径）
+
+**用途**：登录验证码邮件发送。绕过 ICP 备案（SMS / 一键登录 / 微信 connect 都依赖备案，Resend 不依赖），国内外通吃。
+
+**API key**：通过 `wrangler secret put` 配置，名 `RESEND_API_KEY`，prod + staging 各一份。
+- **永远不要**写到 git tracked 文件
+- 旋转：Resend Dashboard → API Keys → Revoke 旧 key → Create new → `cd worker && npx wrangler secret put RESEND_API_KEY`（staging 加 `--env staging`）
+
+**免费档限额**：100 封/天 + 3000 封/月（双重限制，超限服务直接 503）。
+
+**告警阈值（PushDeer，复用现有 admin 通道）**：
+
+| 阈值 | 级别 | 触发动作 |
+|---|---|---|
+| 当日 ≥ 80 / 95 | warn / urgent | 「今日 email 已发 N/100」 |
+| 当日 ≥ 100 | critical | 服务返 503 + 告警 |
+| 当月 ≥ 2400 / 2850 | warn / urgent | 「本月 email 已发 N/3000」 |
+| 当月 ≥ 3000 | critical | 服务返 503 + 告警 |
+| 风控严重命中（24h / locked / ip_24h_total） | info | `worker/src/auth/email-handlers.ts` |
+| 一次性邮箱 / MX 失败 | 仅落 `email_send_log`，不告警（噪音太大） | — |
+
+告警去重：同阈值同日 / 同月只发一次（KV `email_alert_<scope>_<level>_<date>`）。
+
+**发件域**：`mail.ai-feeds.com`（子域，独立 reputation；marketing 邮件未来在主域不会拖累 transactional 信誉）。
+
+**DNS 记录（CF DNS 加 4 条 TXT/MX；Resend 后台 Domains 页面给出具体值）**：
+- `mail.ai-feeds.com` TXT — SPF
+- `resend._domainkey.mail.ai-feeds.com` TXT — DKIM
+- `_dmarc.mail.ai-feeds.com` TXT — DMARC
+- `feedback.mail.ai-feeds.com` MX — return-path
+
+**配置 secret**：
+
+```bash
+cd worker
+
+# Resend HTTPS API key（在 Resend Dashboard - API Keys 创建）
+npx wrangler secret put RESEND_API_KEY                # prod
+npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod 同 key 或独立）
+
+# Turnstile + PushDeer 已存在（沿用 SMS 时的同一组）
+```
+
+**Kill switch**：
+- `EMAIL_DAILY_CAP=0` 立刻停发（不动代码）
+- `ENABLE_EMAIL_LOGIN=false` 紧急关闭整个 email 通道（503）
+
+**Email auth 多维度防刷**（PR-EmailAuth 设计参考）：
+
+| Layer | 维度 | 阈值 | 修改位置 |
+|---|---|---|---|
+| L0 | Turnstile | managed 模式（与 SMS 共用 widget） | CF dashboard |
+| L1 | 一次性邮箱黑名单 | npm `disposable-email-domains` 包 ~12 万域名 | `worker/src/auth/email-validation.ts` |
+| L1 | MX 预校验 | CF DoH 查询，KV 缓存 24h | 同上 |
+| L2 | email 60s | ≥ 1 拒 | `worker/src/auth/email-rate-limit.ts` |
+| L2 | email 5min | ≥ 3 拒 | 同上 |
+| L2 | email 24h | ≥ 10 拒 | 同上 |
+| L2 | ip 1h unique emails | ≥ 10 拒 | 同上 |
+| L2 | ip 24h total | ≥ 30 拒 | 同上 |
+| L2 | device 24h unique emails | ≥ 5 拒 | 同上 |
+| L3 | 全局每日 cap | 100 条（Resend free） | `EMAIL_DAILY_CAP` env |
+| L3 | 全局每月 cap | 3000 条（Resend free） | `EMAIL_MONTHLY_CAP` env |
+| L4 | 验证码错码锁 | 5 次错 → 30 min 锁 | `worker/src/auth/email-rate-limit.ts` |
+
+**Feature flags**（备案完成后翻）：
+- `ENABLE_SMS_LOGIN`（worker env）：备案前 = `false`（关闭 SMS 通道，前端 LoginModal 走 email-only）；备案后 = `true` → 重做双 tab UI（届时另起 PR）
+- `ENABLE_EMAIL_LOGIN`（worker env）：默认 `true`，紧急关闭设 `false`
+- `VITE_AUTH_CHANNEL`（dashboard env）：备案前 = `email`，备案后 = `sms+email` → 触发新 LoginModal UI
+
+**完整设计文档**：[`docs/plans/2026-05-06-email-auth-design.md`](plans/2026-05-06-email-auth-design.md)
 
 ### 5. Pages: `xlist-dashboard`
 

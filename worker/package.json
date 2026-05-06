@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@resvg/resvg-wasm": "^2.6.2",
+    "disposable-email-domains": "^1.0.62",
     "nanoid": "^5.1.11",
     "qrcode": "^1.5.4"
   }

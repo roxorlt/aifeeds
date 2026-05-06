@@ -34,6 +34,7 @@ import {
   handleMe,
   handleDelete,
 } from './auth/handlers';
+import { handleEmailSend } from './auth/email-handlers';
 import {
   serveAdminHtml,
   adminSmsStatus,
@@ -90,6 +91,13 @@ export interface Env {
   // Admin panel 凭据（HTTP Basic Auth）。用 wrangler secret put 注入，git 不留痕。
   ADMIN_USER?: string;
   ADMIN_PASS?: string;
+  // PR-EmailAuth：Resend + email 风控配置
+  RESEND_API_KEY?: string;              // wrangler secret put 设置（不入 git）
+  EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
+  EMAIL_MONTHLY_CAP?: string;           // 默认 3000（Resend free 3000/月）
+  EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
+  ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
+  ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
   // CF Browser Rendering binding — used by PH source POC + Phase 2 scraper.
   // Set in wrangler.toml `[browser] binding = "BROWSER"`.
   // Requires Workers Paid plan (10h browser/month included).
@@ -195,6 +203,9 @@ export default {
       }
       if (path === '/api/auth/sms/send' && request.method === 'POST') {
         return withCors(await handleSmsSend(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/email/send' && request.method === 'POST') {
+        return withCors(await handleEmailSend(request, env, ctx), request, env);
       }
       if (path === '/api/auth/login' && request.method === 'POST') {
         return withCors(await handleLogin(request, env, ctx), request, env);

@@ -158,7 +158,8 @@ export async function handleSmsSend(
 // ─── POST /api/auth/login ────────────────────────────────
 
 interface LoginBody {
-  phone: string;
+  identifier?: string;  // 新字段：phone 或 email（推荐）
+  phone?: string;       // 老字段 fallback：仅 phone（hedge dashboard 缓存场景）
   code: string;
 }
 
@@ -168,6 +169,11 @@ function isDevHost(req: Request): boolean {
   const h = req.headers.get('Host') || '';
   return h.includes(SESSION_COOKIE_DEV_MARKER) || h.includes('127.0.0.1');
 }
+
+const PHONE_REGEX_LOGIN = /^1[3-9]\d{9}$/;
+const EMAIL_REGEX_LOGIN = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
+const SMS_HASH_SALT = 'xlist-sms-v1';
+const EMAIL_HASH_SALT = 'xlist-email-v1';
 
 export async function handleLogin(
   request: Request,
@@ -186,9 +192,30 @@ export async function handleLogin(
     return jsonErr('invalid json', 400);
   }
 
-  if (typeof body.phone !== 'string' || !PHONE_REGEX.test(body.phone)) {
-    return jsonErr('invalid phone', 400);
+  // identifier 兼容：优先 identifier，fallback 老 phone 字段
+  const rawId = (body.identifier ?? body.phone ?? '').trim();
+  if (!rawId) return jsonErr('missing identifier', 400);
+
+  let provider: 'phone' | 'email';
+  let identifier: string;
+  if (PHONE_REGEX_LOGIN.test(rawId)) {
+    provider = 'phone';
+    identifier = rawId;
+  } else if (EMAIL_REGEX_LOGIN.test(rawId.toLowerCase())) {
+    provider = 'email';
+    identifier = rawId.toLowerCase();
+  } else {
+    return jsonErr('invalid identifier', 400);
   }
+
+  // Feature flag：备案前 phone 通道关闭
+  if (provider === 'phone' && env.ENABLE_SMS_LOGIN !== 'true') {
+    return jsonErr('sms login disabled', 403, { reason: 'sms_disabled' });
+  }
+  if (provider === 'email' && env.ENABLE_EMAIL_LOGIN === 'false') {
+    return jsonErr('email login disabled', 403, { reason: 'email_disabled' });
+  }
+
   if (typeof body.code !== 'string' || !/^\d{6}$/.test(body.code)) {
     return jsonErr('invalid code format', 400);
   }
@@ -197,13 +224,19 @@ export async function handleLogin(
   const ua = request.headers.get('User-Agent') || '';
   const now = Date.now();
 
+  // 表名 + 列名 + salt 按 provider 切换
+  // 注：logTable / idCol 均为常量字面量，非用户输入，无 SQL 注入风险
+  const logTable = provider === 'phone' ? 'sms_send_log' : 'email_send_log';
+  const idCol = provider === 'phone' ? 'phone' : 'email';
+  const hashSalt = provider === 'phone' ? SMS_HASH_SALT : EMAIL_HASH_SALT;
+
   // 1. 找最新一条未消费的 success row
   const row = await env.DB.prepare(
     `SELECT id, code_hash, code_expires_at, code_attempts, sent_at
-     FROM sms_send_log
-     WHERE phone = ? AND result = 'success' AND code_used_at IS NULL
+     FROM ${logTable}
+     WHERE ${idCol} = ? AND result = 'success' AND code_used_at IS NULL
      ORDER BY sent_at DESC LIMIT 1`,
-  ).bind(body.phone).first<{
+  ).bind(identifier).first<{
     id: number;
     code_hash: string;
     code_expires_at: number;
@@ -211,77 +244,58 @@ export async function handleLogin(
     sent_at: number;
   }>();
 
-  if (!row) {
-    return jsonErr('no pending code', 401);
-  }
+  if (!row) return jsonErr('no pending code', 401);
+  if (row.code_expires_at < now) return jsonErr('code expired', 401);
+  if (row.code_attempts >= 5) return jsonErr('too many attempts, locked', 429);
 
-  // 2. 过期检查
-  if (row.code_expires_at < now) {
-    return jsonErr('code expired', 401);
-  }
-
-  // 3. 锁定检查（错码 5 次）
-  if (row.code_attempts >= 5) {
-    return jsonErr('too many attempts, locked', 429);
-  }
-
-  // 4. 校验 code
-  const inputHash = await hashCode(body.code, 'xlist-sms-v1');
+  // 2. 校验 code
+  const inputHash = await hashCode(body.code, hashSalt);
   if (inputHash !== row.code_hash) {
-    // 错码 → attempts++
     await env.DB.prepare(
-      `UPDATE sms_send_log SET code_attempts = code_attempts + 1 WHERE id = ?`,
+      `UPDATE ${logTable} SET code_attempts = code_attempts + 1 WHERE id = ?`,
     ).bind(row.id).run();
     const remaining = 5 - (row.code_attempts + 1);
     return jsonErr('invalid code', 401, { attempts_remaining: Math.max(remaining, 0) });
   }
 
-  // 5. 校验通过 → mark used
+  // 3. mark used
   await env.DB.prepare(
-    `UPDATE sms_send_log SET code_used_at = ? WHERE id = ?`,
+    `UPDATE ${logTable} SET code_used_at = ? WHERE id = ?`,
   ).bind(now, row.id).run();
 
-  // 6. 找/建 user
+  // 4. 找/建 user（按 provider 查 identities）
   const ident = await env.DB.prepare(
     `SELECT user_id FROM identities
-     WHERE provider = 'phone' AND identity_value = ? AND unbound_at IS NULL`,
-  ).bind(body.phone).first<{ user_id: string }>();
+     WHERE provider = ? AND identity_value = ? AND unbound_at IS NULL`,
+  ).bind(provider, identifier).first<{ user_id: string }>();
 
   let userId: string;
   let isNewUser = false;
   if (ident) {
     userId = ident.user_id;
-    // 更新 last_active_at
-    await env.DB.prepare(
-      `UPDATE users SET last_active_at = ? WHERE id = ?`,
-    ).bind(now, userId).run();
+    await env.DB.prepare(`UPDATE users SET last_active_at = ? WHERE id = ?`).bind(now, userId).run();
   } else {
-    // 自动注册：建 user + identity
     userId = nanoid(14);
     isNewUser = true;
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO users (id, created_at, last_active_at, status)
-         VALUES (?, ?, ?, 'active')`,
+        `INSERT INTO users (id, created_at, last_active_at, status) VALUES (?, ?, ?, 'active')`,
       ).bind(userId, now, now),
       env.DB.prepare(
-        `INSERT INTO identities (user_id, provider, identity_value, verified_at)
-         VALUES (?, 'phone', ?, ?)`,
-      ).bind(userId, body.phone, now),
+        `INSERT INTO identities (user_id, provider, identity_value, verified_at) VALUES (?, ?, ?, ?)`,
+      ).bind(userId, provider, identifier, now),
     ]);
   }
 
-  // 7. 关联 device → 历史 events 行的 user_id
+  // 5. 关联 device → 历史 events 行的 user_id
   ctx.waitUntil(
     env.DB.prepare(
       `UPDATE events SET user_id = ?
        WHERE device_id = ? AND user_id IS NULL AND occurred_at > ?`,
-    ).bind(userId, deviceId, now - 30 * 24 * 3600_000).run(),  // 仅回填最近 30 天，防误关联
+    ).bind(userId, deviceId, now - 30 * 24 * 3600_000).run(),
   );
 
-  // 7.5 PR5 landing 回流：当前 device 之前从分享链接落地过（share_relations.to_did）
-  // 现在该用户注册/登录 → 回填 to_uid + registered_at（社交关系图基础数据）
-  // 仅 to_uid IS NULL 的 row 才回填（避免覆盖已登记的注册关联）
+  // 6. PR5 landing 回流
   ctx.waitUntil(
     env.DB.prepare(
       `UPDATE share_relations SET to_uid = ?, registered_at = ?
@@ -289,7 +303,7 @@ export async function handleLogin(
     ).bind(userId, now, deviceId).run(),
   );
 
-  // 8. 创建 session
+  // 7. 创建 session
   const session = await createSession(env, userId, deviceId, ip, ua);
   const cookie = buildSessionCookie(session.id, isDevHost(request));
 
@@ -355,22 +369,36 @@ export async function handleMe(
   if (!user) {
     return jsonErr('user not found', 404);
   }
-  // 找当前主 phone identity（脱敏）
+  // 找当前主 identity（脱敏；优先按 verified_at DESC 取最近，跨 provider）
   const ident = await env.DB.prepare(
-    `SELECT identity_value FROM identities
-     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+    `SELECT provider, identity_value FROM identities
+     WHERE user_id = ? AND unbound_at IS NULL
      ORDER BY verified_at DESC LIMIT 1`,
-  ).bind(auth.userId).first<{ identity_value: string }>();
-  const phoneMasked = ident
-    ? `${ident.identity_value.slice(0, 3)}****${ident.identity_value.slice(-4)}`
-    : null;
+  ).bind(auth.userId).first<{ provider: string; identity_value: string }>();
+
+  let identityMasked: string | null = null;
+  let identityProvider: string | null = null;
+  if (ident) {
+    identityProvider = ident.provider;
+    if (ident.provider === 'phone') {
+      identityMasked = `${ident.identity_value.slice(0, 3)}****${ident.identity_value.slice(-4)}`;
+    } else if (ident.provider === 'email') {
+      // 脱敏：abc@xx.com → a***@xx.com
+      const [local, domain] = ident.identity_value.split('@');
+      identityMasked = `${local[0]}***@${domain}`;
+    }
+  }
+
   return jsonOk({
     user: {
       id: user.id,
       display_name: user.display_name,
       avatar_url: user.avatar_url,
       created_at: user.created_at,
-      phone_masked: phoneMasked,
+      identity_masked: identityMasked,
+      identity_provider: identityProvider,
+      // 老字段保留兼容（dashboard 全量切到 identity_masked 后下线）
+      phone_masked: ident?.provider === 'phone' ? identityMasked : null,
     },
   });
 }
@@ -378,7 +406,8 @@ export async function handleMe(
 // ─── POST /api/auth/delete ───────────────────────────────
 
 interface DeleteBody {
-  phone_confirm: string;
+  phone_confirm?: string;
+  confirm?: string;
 }
 
 const DELETE_HASH_SALT = 'xlist-deleted-v1';
@@ -400,19 +429,21 @@ export async function handleDelete(
     return jsonErr('invalid json', 400);
   }
 
-  // 找当前 phone identity 用于二次确认
+  // 找当前主 identity（任意 provider，按最近验证）
   const ident = await env.DB.prepare(
-    `SELECT id, identity_value FROM identities
-     WHERE user_id = ? AND provider = 'phone' AND unbound_at IS NULL
+    `SELECT id, provider, identity_value FROM identities
+     WHERE user_id = ? AND unbound_at IS NULL
      ORDER BY verified_at DESC LIMIT 1`,
-  ).bind(auth.userId).first<{ id: number; identity_value: string }>();
+  ).bind(auth.userId).first<{ id: number; provider: string; identity_value: string }>();
 
   if (!ident) {
-    return jsonErr('phone identity not found', 404);
+    return jsonErr('no identity found', 404);
   }
 
-  if (typeof body.phone_confirm !== 'string' || body.phone_confirm !== ident.identity_value) {
-    return jsonErr('phone confirm mismatch', 400);
+  // body 字段历史叫 phone_confirm，扩展为通用 confirm（保留 phone_confirm fallback）
+  const confirm = body.confirm ?? body.phone_confirm;
+  if (typeof confirm !== 'string' || confirm !== ident.identity_value) {
+    return jsonErr('identity confirm mismatch', 400);
   }
 
   const now = Date.now();
