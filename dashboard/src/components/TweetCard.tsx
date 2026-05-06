@@ -35,6 +35,80 @@ function detectWifiAutoplay(): boolean {
   return true;
 }
 
+// 视频起播：HTML5 `autoPlay` 属性在 mobile WebView/微信里时序经常不稳，src
+// 还没 ready 就触发 → silently fail。改用 ref + useEffect 显式调 video.play()，
+// 拿 promise rejection 反馈 + 埋点上报，定位为什么不 autoplay。
+function VideoPlayer({
+  src,
+  poster,
+  autoplay,
+  itemId,
+  sourceType,
+  onError,
+}: {
+  src: string;
+  poster?: string;
+  autoplay: boolean;
+  itemId: string;
+  sourceType: string;
+  onError: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const playStartedRef = useRef(false);
+
+  useEffect(() => {
+    if (!autoplay) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const conn = (navigator as unknown as { connection?: { type?: string; effectiveType?: string; saveData?: boolean } }).connection;
+    const networkInfo = {
+      effective_type: conn?.effectiveType ?? "unknown",
+      save_data: conn?.saveData ?? false,
+      conn_type: conn?.type ?? "unknown",
+    };
+    track(EVENTS.VIDEO_AUTOPLAY_ATTEMPT, {
+      item_id: itemId,
+      source: sourceType,
+      ...networkInfo,
+    });
+    video.play().catch((err: Error) => {
+      track(EVENTS.VIDEO_AUTOPLAY_BLOCKED, {
+        item_id: itemId,
+        source: sourceType,
+        error_name: err.name,
+        error_message: (err.message || "").slice(0, 120),
+        ...networkInfo,
+      });
+    });
+  }, [autoplay, itemId, sourceType]);
+
+  const handlePlay = () => {
+    if (playStartedRef.current) return;
+    playStartedRef.current = true;
+    track(EVENTS.VIDEO_PLAY_START, {
+      item_id: itemId,
+      source: sourceType,
+      triggered: autoplay ? "auto" : "user",
+    });
+  };
+
+  return (
+    <video
+      ref={videoRef}
+      src={src}
+      poster={poster}
+      preload="metadata"
+      controls
+      muted={autoplay}
+      loop={autoplay}
+      playsInline
+      className="aspect-[16/9] w-full bg-black object-cover"
+      onPlay={handlePlay}
+      onError={onError}
+    />
+  );
+}
+
 // pbs.twimg.com media URL looks like
 //   https://pbs.twimg.com/media/<ID>?format=jpg&name=small
 // or https://pbs.twimg.com/media/<ID>.jpg
@@ -397,16 +471,12 @@ export function TweetCard({
               className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
               onClick={(e) => e.stopPropagation()}
             >
-              <video
+              <VideoPlayer
                 src={proxyImg(firstMedia.url)}
                 poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
-                preload="metadata"
-                controls
-                muted={autoplayVideo}
-                autoPlay={autoplayVideo}
-                loop={autoplayVideo}
-                playsInline
-                className="aspect-[16/9] w-full bg-black object-cover"
+                autoplay={autoplayVideo}
+                itemId={item.id}
+                sourceType={item.source_type}
                 onError={() => setMediaFailed(true)}
               />
               {mediaCount > 1 && (

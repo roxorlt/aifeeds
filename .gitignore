@@ -54,3 +54,9 @@ x-com-tweet.png
 
 # wrangler 4.x 在主仓库根自动生成的 jsonc，跟 worker/wrangler.toml 冲突
 wrangler.jsonc
+
+# 仓库根没 package.json，npm 误生成的空 lock 是噪音
+/package-lock.json
+
+# events 健康度脚本（别 session 在用，先 ignore 避免噪音）
+scripts/events_health.py

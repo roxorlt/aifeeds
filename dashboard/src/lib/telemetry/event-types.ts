@@ -35,6 +35,10 @@ export const EVENTS = {
   // 互动（PR5）
   FAVORITE_TOGGLE: 'favorite_toggle',
   SUBSCRIBE_TOGGLE: 'subscribe_toggle',
+  // 视频起播（用于诊断 mobile/微信 autoplay 受限）
+  VIDEO_AUTOPLAY_ATTEMPT: 'video_autoplay_attempt',
+  VIDEO_AUTOPLAY_BLOCKED: 'video_autoplay_blocked',
+  VIDEO_PLAY_START: 'video_play_start',
   // 性能
   PERF_LCP: 'perf_lcp',
   PERF_INP: 'perf_inp',

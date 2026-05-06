@@ -20,6 +20,8 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'code_verify_attempt', 'login_success', 'logout', 'account_delete',
   // 互动（PR5 才会真发）
   'favorite_toggle', 'subscribe_toggle',
+  // 视频起播（诊断 mobile/微信 autoplay 受限）
+  'video_autoplay_attempt', 'video_autoplay_blocked', 'video_play_start',
   // 性能
   'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb',
   // 错误
