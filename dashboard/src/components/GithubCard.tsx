@@ -181,19 +181,21 @@ export function GithubCard({ item }: Props) {
               <span className="tabular-nums">{formatCompact(watchers)}</span>
             </span>
           )}
-          {contributorsInline.length > 0 && (
+          {(contributorsInline.length > 0 || (contributorsCount && contributorsCount > 0)) && (
             <span className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-neutral-500">
-              <span className="flex shrink-0 -space-x-1.5">
-                {contributorsInline.slice(0, 3).map((c) => (
-                  <img
-                    key={c.login}
-                    src={c.avatar_url}
-                    alt={c.login}
-                    className="h-5 w-5 rounded-full border border-white bg-neutral-200"
-                    onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                  />
-                ))}
-              </span>
+              {contributorsInline.length > 0 && (
+                <span className="flex shrink-0 -space-x-1.5">
+                  {contributorsInline.slice(0, 3).map((c) => (
+                    <img
+                      key={c.login}
+                      src={c.avatar_url}
+                      alt={c.login}
+                      className="h-5 w-5 rounded-full border border-white bg-neutral-200"
+                      onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                    />
+                  ))}
+                </span>
+              )}
               {contributorsCount && contributorsCount > 0 && (
                 <span className="min-w-0 truncate text-[12px]">{contributorsCount} contributors</span>
               )}

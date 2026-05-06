@@ -711,7 +711,7 @@ function renderPhContent(opts: {
   rank: string;
   tag: string;
   body: string;
-  stats?: { comments?: number | string; rating?: string; followers?: number | string };
+  stats?: { votes?: number | string; comments?: number | string; followers?: number | string };
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
   mediaIsVideo?: boolean;
@@ -772,13 +772,13 @@ function renderPhContent(opts: {
     .join('');
   cy += bodyLines.length * bodyLine + 30;
 
-  // ph-stats: 3 cols
+  // ph-stats: 3 cols (votes / comments / followers，跟抽屉对齐)
   const statRowY = cy;
   const statRowH = 100;
   const m = opts.stats || {};
   const statsArr = [
+    { value: formatStat(m.votes), label: 'votes' },
     { value: formatStat(m.comments), label: 'comments' },
-    { value: m.rating || '—', label: 'reviews' },
     { value: formatStat(m.followers), label: 'followers' },
   ];
   const statColW = innerW / 3;
@@ -903,8 +903,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       mediaIsVideo: item.mediaIsVideo,
       productLogoDataUri: item.authorAvatarDataUri,
       stats: {
+        votes: m.votes as number | undefined,
         comments: m.comments as number | undefined,
-        rating: m.rating ? String(m.rating) : undefined,
         followers: m.followers as number | undefined,
       },
     });

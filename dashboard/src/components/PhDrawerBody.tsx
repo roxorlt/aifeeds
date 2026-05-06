@@ -89,9 +89,6 @@ const IconUpvote = ({ className }: { className?: string }) => (
 const IconComment = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
 );
-const IconStar = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 16 16" fill="currentColor" className={className}><path d="M8 1l2.2 4.6 5 .7-3.6 3.5.9 5L8 12.3 3.5 14.8l.9-5L.8 6.3l5-.7L8 1z"/></svg>
-);
 const IconFollow = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><circle cx="8" cy="6" r="3"/><path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>
 );
@@ -201,8 +198,8 @@ export function PhDrawerBody({ item }: Props) {
             <div className="mt-0.5 text-[14px] text-neutral-700">
               {taglineTranslated || tagline}
             </div>
-            {/* meta line：日期(无 PT) / #排名 / votes / 分类标签（彩色 chip）
-                votes 从 KPI 行挪上来，让下方 KPI 行能跟海报对齐 3 列布局 */}
+            {/* meta line：日期(无 PT) / #排名 / 分类标签（彩色 chip）
+                votes 回到下方 KPI 行（不再挪上来） */}
             <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
               {launchDate && <span className="tabular-nums">{launchDate}</span>}
               {launchDate && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
@@ -211,13 +208,7 @@ export function PhDrawerBody({ item }: Props) {
                   #{dailyRank}
                 </span>
               )}
-              {(launchDate || dailyRank !== undefined) && metrics.votes !== undefined && <span className="text-neutral-400">·</span>}
-              {metrics.votes !== undefined && (
-                <span className="inline-flex items-center gap-0.5 tabular-nums">
-                  <IconUpvote className="h-3 w-3" />{formatCompact(metrics.votes)}
-                </span>
-              )}
-              {(launchDate || dailyRank !== undefined || metrics.votes !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
+              {(launchDate || dailyRank !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
               {aiCategoryText && (
                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${phCategoryStyle(aiCategory)}`}>
                   {aiCategoryText}
@@ -245,24 +236,19 @@ export function PhDrawerBody({ item }: Props) {
         )}
       </div>
 
-      {/* ② KPI 行 — 3 列各 1/3，跟海报对齐（comments / reviews / followers）
-          votes 已挪到上方 meta line（更紧凑且不重复）。reviews 没数据时
-          仍占一列显示 "—"，保证三列恒定布局 */}
-      {(metrics.comments !== undefined || metrics.reviews_count !== undefined || metrics.followers !== undefined) && (
+      {/* ② KPI 行 — 3 列各 1/3，跟海报对齐（votes / comments / followers）
+          缺数据列保留 "—" 占位，保证三列恒定布局 */}
+      {(metrics.votes !== undefined || metrics.comments !== undefined || metrics.followers !== undefined) && (
         <div className="grid grid-cols-3 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
+          <Kpi
+            icon={<IconUpvote className="h-3.5 w-3.5" />}
+            label="votes"
+            value={metrics.votes !== undefined ? formatCompact(metrics.votes) : "—"}
+          />
           <Kpi
             icon={<IconComment className="h-3.5 w-3.5" />}
             label="comments"
             value={metrics.comments !== undefined ? formatCompact(metrics.comments) : "—"}
-          />
-          <Kpi
-            icon={<IconStar className="h-3.5 w-3.5" />}
-            label={metrics.reviews_count ? `${metrics.reviews_count} reviews` : "reviews"}
-            value={
-              metrics.reviews_count && metrics.reviews_avg !== undefined
-                ? metrics.reviews_avg.toFixed(2)
-                : "—"
-            }
           />
           <Kpi
             icon={<IconFollow className="h-3.5 w-3.5" />}
