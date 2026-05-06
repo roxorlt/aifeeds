@@ -34,6 +34,7 @@ import {
   handleMe,
   handleDelete,
 } from './auth/handlers';
+import { handleEmailSend } from './auth/email-handlers';
 import {
   serveAdminHtml,
   adminSmsStatus,
@@ -202,6 +203,9 @@ export default {
       }
       if (path === '/api/auth/sms/send' && request.method === 'POST') {
         return withCors(await handleSmsSend(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/email/send' && request.method === 'POST') {
+        return withCors(await handleEmailSend(request, env, ctx), request, env);
       }
       if (path === '/api/auth/login' && request.method === 'POST') {
         return withCors(await handleLogin(request, env, ctx), request, env);
