@@ -13,6 +13,8 @@
 //   ⑨ Footer
 
 import { useState, useEffect } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { Item } from "../types";
 import { fetchItem } from "../api";
 import { cn, formatCompact, parseJsonField } from "../lib/utils";
@@ -110,8 +112,12 @@ interface ClawhubExtra {
   category?: string;
   owner_image?: string;
   owner_github_url?: string;
+  summary_en?: string;
   summary_translated?: string;
   ch_pending?: boolean;
+  // v1 ZIP 流水线产出
+  skill_md?: string;
+  files_manifest?: Array<{ path: string; size: number }>;
 }
 
 function relativeFromMs(ms: number | undefined): string {
@@ -176,7 +182,16 @@ export function ClawhubDrawerBody({ item }: Props) {
   const categoryStyle = CATEGORY_STYLE[category] || CATEGORY_STYLE.other;
   const categoryLabel = CATEGORY_LABEL[category] || category;
 
-  const summary = item.content_translated || extra.summary_translated || item.content || "";
+  // v1: 优先 content_translated（README 中文译文），回退 summary 中文（短）
+  const readme = item.content_translated || item.content || "";
+  const summaryEn = extra.summary_en || "";
+  const summaryZh = extra.summary_translated || "";
+  // 「内容是 README 还是 summary fallback」判断：当 content === summary 时（v0 兼容 +
+  // ZIP 没抓到 README 的兜底），不是 README，按 plain text 渲染。否则按 markdown 渲染。
+  const isReadme = readme.length > 0
+    && readme !== summaryEn
+    && readme !== summaryZh;
+  const fallbackSummary = summaryZh || summaryEn;
 
   const capabilityTags = extra.capability_tags || [];
   const llmFindings = extra.llm_analysis?.findings || [];
@@ -274,16 +289,22 @@ export function ClawhubDrawerBody({ item }: Props) {
         </div>
       </div>
 
-      {/* ③ 简介 — 来自 ClawHub listing API 的 summary 字段（短描述，~200 字符）
-            真正的 README.md 全文需要 ZIP 流水线拉，v1 后置项；现阶段标签写「简介」更准确 */}
-      {summary && (
+      {/* ③ README / 简介 — v1 ZIP 流水线后：有 README.md 就 markdown 渲染中文译文；
+            无 README 时回退展示 listing summary（短描述）。两种内容用不同标签区分 */}
+      {(isReadme || fallbackSummary) && (
         <div className="border-b border-neutral-200 p-5">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">
-            简介
+            {isReadme ? "README" : "简介"}
           </div>
-          <p className="text-[14px] leading-relaxed text-neutral-800 whitespace-pre-wrap break-words">
-            {summary}
-          </p>
+          {isReadme ? (
+            <div className="prose prose-sm prose-neutral max-w-none text-[14px] leading-relaxed text-neutral-800 break-words">
+              <Markdown remarkPlugins={[remarkGfm]}>{readme}</Markdown>
+            </div>
+          ) : (
+            <p className="text-[14px] leading-relaxed text-neutral-800 whitespace-pre-wrap break-words">
+              {fallbackSummary}
+            </p>
+          )}
           {extra.ch_pending && (
             <p className="mt-2 text-[11px] text-neutral-400 italic">
               翻译进行中，稍后刷新可看完整中文译文
@@ -456,46 +477,45 @@ export function ClawhubDrawerBody({ item }: Props) {
         </details>
       )}
 
-      {/* ⑦ Files manifest（默认折叠，v0 无 ZIP 数据） */}
-      <details className="border-b border-neutral-200 group">
-        <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-          文件清单
-          <span className="ml-auto text-[10px] text-neutral-400 font-normal">v1 ZIP 流水线</span>
-        </summary>
-        <div className="px-5 pb-5">
-          <div className="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-4 text-[12px] text-neutral-500">
-            待 v1 ZIP 流水线接入后展示完整目录树（SKILL.md / README.md / scripts/ / assets/ 等）。
-            <a
-              href={phUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="ml-1 text-sky-600 hover:underline"
-            >
-              在 ClawHub 查看 ↗
-            </a>
+      {/* ⑦ Files manifest — v1 ZIP 抓回的真实文件清单（目录树 ASCII 渲染）*/}
+      {(extra.files_manifest && extra.files_manifest.length > 0) && (
+        <details className="border-b border-neutral-200 group">
+          <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+            文件清单
+            <span className="ml-auto text-[10px] text-neutral-400 font-normal tabular-nums">
+              {extra.files_manifest.length} 个文件
+            </span>
+          </summary>
+          <div className="px-5 pb-5">
+            <pre className="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-3 text-[11px] font-mono text-neutral-700 leading-relaxed overflow-x-auto whitespace-pre">
+              {renderFileTree(extra.files_manifest)}
+            </pre>
           </div>
-        </div>
-      </details>
+        </details>
+      )}
 
-      {/* ⑧ SKILL.md 原文（默认折叠，v0 无 ZIP 数据） */}
-      <details className="border-b border-neutral-200 group">
-        <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-          SKILL.md 原文
-          <span className="ml-auto text-[10px] text-neutral-400 font-normal">v1 ZIP 流水线</span>
-        </summary>
-        <div className="px-5 pb-5">
-          <div className="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-4 text-[12px] text-neutral-500">
-            待 v1 ZIP 流水线接入后展示原文（永不翻译，给 power user 看 Claude 指令文档）。
+      {/* ⑧ SKILL.md 原文 — v1 ZIP 抓回，永不翻译（给 Claude 读的指令文档）*/}
+      {extra.skill_md && extra.skill_md.length > 0 && (
+        <details className="border-b border-neutral-200 group">
+          <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+            SKILL.md 原文
+            <span className="ml-auto text-[10px] text-neutral-400 font-normal tabular-nums">
+              {(extra.skill_md.length / 1024).toFixed(1)} KB
+            </span>
+          </summary>
+          <div className="px-5 pb-5">
+            <pre className="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-3 text-[11px] font-mono text-neutral-700 leading-relaxed overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto">
+              {extra.skill_md}
+            </pre>
           </div>
-        </div>
-      </details>
+        </details>
+      )}
 
       {/* ⑨ Footer */}
       <div className="p-5">
@@ -528,6 +548,43 @@ export function ClawhubDrawerBody({ item }: Props) {
       </div>
     </>
   );
+}
+
+// 把 [{path, size}] 渲染成 ASCII 目录树。按路径分组，递归出 ├── └── │   缩进。
+function renderFileTree(files: Array<{ path: string; size: number }>): string {
+  // sort 路径自然顺序
+  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  // 按目录分组
+  const tree: Record<string, Array<{ name: string; size: number; isDir: boolean }>> = {};
+  for (const f of sorted) {
+    const parts = f.path.split("/");
+    const fileName = parts[parts.length - 1];
+    const dirPath = parts.slice(0, -1).join("/");
+    if (!tree[dirPath]) tree[dirPath] = [];
+    tree[dirPath].push({ name: fileName, size: f.size, isDir: false });
+  }
+
+  function fmtSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  // 简化版：按目录分组打印（不做完整递归 tree）
+  const lines: string[] = [];
+  const dirs = Object.keys(tree).sort();
+  for (const dir of dirs) {
+    if (dir) lines.push(`${dir}/`);
+    const items = tree[dir];
+    items.forEach((item, i) => {
+      const isLast = i === items.length - 1;
+      const prefix = dir ? "  " : "";
+      const branch = isLast ? "└── " : "├── ";
+      const padding = " ".repeat(Math.max(1, 36 - (prefix + branch + item.name).length));
+      lines.push(`${prefix}${branch}${item.name}${padding}${fmtSize(item.size)}`);
+    });
+  }
+  return lines.join("\n");
 }
 
 function Stat({ icon, value, label }: { icon: React.ReactNode; value: string; label: string }) {

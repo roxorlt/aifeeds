@@ -63,9 +63,12 @@ export function ClawhubCard({ item }: Props) {
   const ownerAvatar = extra.owner_image || (ownerHandle ? `https://avatars.githubusercontent.com/${ownerHandle}` : "");
   const displayName = item.title || item.source_id || "";
 
+  // v1: items.content / content_translated 现在装的是 README 全文（长文档），
+  // 卡片正文改用 extra.summary_translated（200 字短描述，刚好放 4 行）。
+  // 老 v0 数据 fallback 到 content_translated/content（那时 content 装的就是 summary）
   const summary =
-    item.content_translated ||
     extra.summary_translated ||
+    item.content_translated ||
     item.content ||
     "";
 

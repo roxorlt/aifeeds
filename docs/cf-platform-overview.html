@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Cloudflare 平台能力对照 — xlist-scraper</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #18181b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --card: #ffffff;
+    --used: #16a34a;
+    --strong: #2563eb;
+    --weak: #d97706;
+    --skip: #71717a;
+    --code-bg: #f4f4f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    margin: 0;
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .container {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+  header {
+    margin-bottom: 32px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    margin: 0 0 8px;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 8px;
+    font-family: ui-monospace, monospace;
+  }
+  section {
+    margin: 36px 0;
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: white;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-used { background: var(--used); }
+  .badge-strong { background: var(--strong); }
+  .badge-weak { background: var(--weak); }
+  .badge-skip { background: var(--skip); }
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+  }
+  h2 .count {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 15px;
+  }
+  .section-tldr {
+    color: var(--muted);
+    font-size: 14px;
+    margin: 0 0 14px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    text-align: left;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    background: #f4f4f5;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafafa; }
+  td.product {
+    font-weight: 600;
+    white-space: nowrap;
+    width: 22%;
+  }
+  td.tagline {
+    color: var(--muted);
+    width: 28%;
+    font-size: 14px;
+  }
+  td.usage {
+    width: 50%;
+  }
+  td.usage strong {
+    color: var(--fg);
+    font-weight: 600;
+  }
+  code {
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  .recommendation {
+    margin-top: 48px;
+    padding: 20px 24px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    border-left: 4px solid var(--strong);
+  }
+  .recommendation h3 {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .recommendation ol {
+    margin: 0;
+    padding-left: 20px;
+  }
+  .recommendation li {
+    margin: 8px 0;
+  }
+  .recommendation li strong {
+    color: var(--strong);
+  }
+  footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  @media (max-width: 640px) {
+    table, thead, tbody, tr, th, td { display: block; }
+    th { display: none; }
+    tr {
+      border-bottom: 1px solid var(--border);
+      padding: 14px;
+    }
+    tr:last-child { border-bottom: none; }
+    td {
+      border: none;
+      padding: 4px 0;
+      width: auto !important;
+    }
+    td.product { font-size: 16px; margin-bottom: 4px; }
+    td.tagline { font-size: 13px; margin-bottom: 6px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Cloudflare 平台能力对照</h1>
+  <p class="subtitle">按 xlist-scraper / ai-feeds.com 业务相关性分四档：已用 / 强相关 / 弱相关 / 暂不必。</p>
+  <p class="meta">2026-05-06 · 项目当前 stack：Workers Paid · Pages · D1(76MB) · R2 · KV · Browser Rendering · Turnstile · Resend</p>
+</header>
+
+<!-- ━━━ 一、已用 ━━━ -->
+<section>
+  <div class="section-header">
+    <span class="badge badge-used">已在用</span>
+    <h2>一、当前业务支柱 <span class="count">— 9 个产品</span></h2>
+  </div>
+  <p class="section-tldr">从抓取 → 存储 → 分发 → 用户认证全链路覆盖。</p>
+  <table>
+    <thead>
+      <tr><th>产品</th><th>定位</th><th>你怎么用</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="product">Workers</td>
+        <td class="tagline">无服务器函数（边缘）</td>
+        <td class="usage"><code>xlist-api</code>（cron + REST）+ <code>xlist-api-staging</code>。$5/月 Paid，1000 subreq / 30s CPU 配额</td>
+      </tr>
+      <tr>
+        <td class="product">Pages</td>
+        <td class="tagline">静态托管（含 SPA）</td>
+        <td class="usage"><code>xlist-dashboard</code> / staging — React + Vite + Tailwind 打包产物</td>
+      </tr>
+      <tr>
+        <td class="product">D1</td>
+        <td class="tagline">SQLite（serverless）</td>
+        <td class="usage">主库 76 MB，16 张表（items / events / users / identities / sessions / sms_send_log / email_send_log / 风控 log 等）+ staging 库</td>
+      </tr>
+      <tr>
+        <td class="product">R2</td>
+        <td class="tagline">S3 兼容对象存储（无出口费）</td>
+        <td class="usage"><code>xlist-readme-assets</code> — PH logo / video / GH README 资源迁移 + Worker <code>/r/&lt;key&gt;</code> 反代</td>
+      </tr>
+      <tr>
+        <td class="product">KV</td>
+        <td class="tagline">边缘 key-value 缓存</td>
+        <td class="usage"><code>AUTH_KV</code> — SMS/email cap 计数、Turnstile 风控、MX DoH 缓存、告警去重</td>
+      </tr>
+      <tr>
+        <td class="product">Browser Rendering</td>
+        <td class="tagline">边缘 headless Chromium</td>
+        <td class="usage">PH POC + Phase 2 scraper（<code>env.BROWSER</code> binding，10 h/月含）</td>
+      </tr>
+      <tr>
+        <td class="product">Turnstile</td>
+        <td class="tagline">无打扰 captcha</td>
+        <td class="usage">LoginModal 人机校验（widget v3 <code>0x4AAAAAADJyUx6JD4IMD_1i</code>）</td>
+      </tr>
+      <tr>
+        <td class="product">Cron Triggers</td>
+        <td class="tagline">Worker 定时任务</td>
+        <td class="usage"><code>*/5 * * * *</code> 抓取 / refresh-tiered / fill-translations / detect-longform / classify-pending</td>
+      </tr>
+      <tr>
+        <td class="product">DNS</td>
+        <td class="tagline">权威 DNS</td>
+        <td class="usage">ai-feeds.com / mail.ai-feeds.com（Resend SPF/DKIM/MX）/ staging.ai-feeds.com 全在 CF</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ━━━ 二、强相关 ━━━ -->
+<section>
+  <div class="section-header">
+    <span class="badge badge-strong">强相关</span>
+    <h2>二、下一步真该评估的 <span class="count">— 4 个产品</span></h2>
+  </div>
+  <p class="section-tldr">每个都有明确的业务切口，不是「可能能用」级别的虚词。</p>
+  <table>
+    <thead>
+      <tr><th>产品</th><th>定位</th><th>你的业务怎么吃下</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="product">AI Gateway</td>
+        <td class="tagline">LLM 调用 proxy（缓存 / analytics / fallback）</td>
+        <td class="usage"><strong>5 分钟接入 ROI 最高</strong>。DeepSeek 调用全走 Gateway：(a) 同 prompt 自动缓存（<code>is_relevant</code> 判别同推文几小时内会重复 score 多次）；(b) 全套 QPS / latency / cost analytics；(c) 配 fallback（DeepSeek 挂自动切 Workers AI / OpenAI 兜底）。几乎纯收益</td>
+      </tr>
+      <tr>
+        <td class="product">Vectorize</td>
+        <td class="tagline">向量数据库（embedding + ANN）</td>
+        <td class="usage">三个直接场景：<strong>(a) 跨源去重</strong>（X/GH/PH 同一个产品，文本 embedding 相似度 &gt; 0.85 合并）；<strong>(b) 语义搜索</strong>（dashboard 加搜索框，"最近 AI agent 框架" → 真相关 item，不只关键词）；<strong>(c) 类似项目推荐</strong>（GH drawer 加 "Related repos"）</td>
+      </tr>
+      <tr>
+        <td class="product">Queues</td>
+        <td class="tagline">持久消息队列（producer/consumer）</td>
+        <td class="usage">解耦 scraper / classify / translate / enrich：当前 <code>*/5</code> cron 串行调用，translate 慢就阻塞别的；迁 queue 后 scraper push → consumer 异步处理，吞吐 + 失败重试都白送</td>
+      </tr>
+      <tr>
+        <td class="product">Workflows</td>
+        <td class="tagline">持久多步流程（sleep / retry / 状态自动持久化）</td>
+        <td class="usage"><strong>PR7 newsletter 完美场景</strong>：每周触发 → 拉所有订阅用户 → 每个用户拼摘要 → 发邮件 → 失败自动 retry。手写 cron 要自己处理状态、断点续跑；Workflow 直接搞定。也适合 PH 单产品页深度抓取这类多步异步 pipeline</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ━━━ 三、弱相关 ━━━ -->
+<section>
+  <div class="section-header">
+    <span class="badge badge-weak">弱相关</span>
+    <h2>三、有特定场景出现时再考虑 <span class="count">— 5 个产品</span></h2>
+  </div>
+  <p class="section-tldr">不是不能用，是「现在做没意义，等触发条件出现再回头看」。</p>
+  <table>
+    <thead>
+      <tr><th>产品</th><th>定位</th><th>你业务的潜在切口</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="product">Workers AI</td>
+        <td class="tagline">CF 自家 LLM 推理（开源模型 / 边缘运行）</td>
+        <td class="usage">替代 DeepSeek 做 <code>is_relevant</code> 二分类 / embedding 生成。<code>@cf/baai/bge-base-en-v1.5</code> 做 embedding 几乎免费。但中文翻译 / 复杂判断仍 DeepSeek 强</td>
+      </tr>
+      <tr>
+        <td class="product">Images</td>
+        <td class="tagline">边缘图片变换（resize / format / quality）</td>
+        <td class="usage">PH/GH/X 抓回的封面图，前端按设备宽度动态请求 <code>cdn-cgi/image/width=400,format=webp</code>，移动端瘦身 60%+。但你已有 R2 + <code>/r/&lt;key&gt;</code>，迁移有 cost</td>
+      </tr>
+      <tr>
+        <td class="product">Email Routing</td>
+        <td class="tagline">入站邮件转发（user@ai-feeds.com → Gmail）</td>
+        <td class="usage"><code>support@</code> / <code>unsubscribe@ai-feeds.com</code> 转你 Gmail；newsletter 退订链接走专用收件地址，落地处理省事</td>
+      </tr>
+      <tr>
+        <td class="product">Web Analytics</td>
+        <td class="tagline">真实用户性能监控（LCP / FID / 错误率）</td>
+        <td class="usage"><strong>10 分钟开关，免费</strong>。telemetry SDK 已埋 Web Vitals 但只落 D1；Web Analytics 给完整 UI 看分位数 + 设备分布 + 路由级 latency</td>
+      </tr>
+      <tr>
+        <td class="product">Workers Logs / Logpush</td>
+        <td class="tagline">日志聚合 / 落 R2 / 推外部 SIEM</td>
+        <td class="usage"><code>wrangler tail</code> 已是 dev 调试用。<strong>Logpush 推 R2</strong> 适合 90 天后 events 表满了想抽样存档分析，或 PR6 「异常告警分级」从 logpush + ETL 出</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ━━━ 四、暂不必看 ━━━ -->
+<section>
+  <div class="section-header">
+    <span class="badge badge-skip">暂不必</span>
+    <h2>四、明确不必投入精力（但解释为什么）<span class="count">— 5 个产品</span></h2>
+  </div>
+  <p class="section-tldr">别被 CF marketing 拉走注意力，这些跟你业务模型不匹配。</p>
+  <table>
+    <thead>
+      <tr><th>产品</th><th>定位</th><th>不用的理由</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="product">Hyperdrive</td>
+        <td class="tagline">Postgres 连接池</td>
+        <td class="usage">你用 D1（SQLite），用不上。除非未来数据量 / 并发突破 D1 上限</td>
+      </tr>
+      <tr>
+        <td class="product">Durable Objects</td>
+        <td class="tagline">强一致 + 有状态分布式对象</td>
+        <td class="usage">chat room / 实时协作场景。你业务是「写一次读多次」内容流，D1 + KV 完全够，DO 是 over-engineering</td>
+      </tr>
+      <tr>
+        <td class="product">Stream</td>
+        <td class="tagline">视频托管 + HLS 转码</td>
+        <td class="usage">你只抓 X/PH 的 video URL 直链，不自己做 video 服务</td>
+      </tr>
+      <tr>
+        <td class="product">Containers</td>
+        <td class="tagline">Docker 镜像 runtime（公测中）</td>
+        <td class="usage">理论可替代本地 browser-use Python scraper，但限制多（CPU 时长 / 启动慢 / 价格 vs 本地白嫖）。<strong>等 GA 再看</strong>，你本地 cron 跑得很好</td>
+      </tr>
+      <tr>
+        <td class="product">Workers for Platforms</td>
+        <td class="tagline">让你的用户在你 Worker 里跑他们自己 Worker</td>
+        <td class="usage">Shopify Functions 类多租户场景。你不是平台</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<div class="recommendation">
+  <h3>👉 我会推荐的下一步顺序</h3>
+  <ol>
+    <li><strong>AI Gateway 包 DeepSeek</strong>（半天）— 省 20-30% 重复调用成本 + 全套 analytics 白送 + fallback 防 DeepSeek 挂</li>
+    <li><strong>Vectorize 做跨源去重 + 语义搜索</strong>（2-3 天）— 直接给 dashboard 加产品力，"AI agent 框架" 搜出真相关结果</li>
+    <li><strong>Web Analytics 开关</strong>（10 分钟，免费）— 补 telemetry SDK 短板，看 prod 真实分位数</li>
+  </ol>
+</div>
+
+<footer>
+  <p>本文档基于 2026-05-06 业务现状生成；CF 产品矩阵会变动，半年后回头复核一次。</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -14,11 +14,14 @@
 //   via DeepSeek, writes back. ~5 subrequests/invocation. Runs on any
 //   */5min slot when there's pending work.
 //
-// V0 scope: NO ZIP download, NO README extraction, NO SKILL.md, NO inline
-// image R2 migration. Those land in v1 iteration. v0 fills feed cards +
-// minimal drawer (header + stats + summary + capability_tags + install).
+// V1 (2026-05-07)：phase 2 加 ZIP 流水线 — fetch /api/v1/download?slug=... → fflate
+// unzip → 抠 README.md/SKILL.md/files manifest → strip frontmatter → DeepSeek
+// translate README（保留代码块）→ 写 items.content + content_translated +
+// extra.skill_md / files_manifest。inline 图 R2 迁移 v1.5 后置（多数 skill README 无图）。
 //
 // Design: docs/plans/2026-05-06-clawhub-source-design.md
+
+import { unzipSync, strFromU8 } from "fflate";
 
 export interface ClawhubEnv {
   DB: D1Database;
@@ -274,6 +277,115 @@ async function translateShort(env: ClawhubEnv, text: string): Promise<string | n
   return out || null;
 }
 
+// ─── ZIP 流水线（v1）────────────────────────────────────────────────────────
+// fetch ClawHub /api/v1/download?slug=... → fflate unzip → 抠 README.md/SKILL.md
+// + 文件清单。每个 ZIP ~25KB，unzip CPU ~50ms。
+
+interface ExtractedSkill {
+  readme: string;     // README.md 原文（已 strip frontmatter）
+  skillMd: string;    // SKILL.md 原文（不翻译）
+  files: Array<{ path: string; size: number }>; // 全部文件清单
+}
+
+async function fetchAndExtractSkill(slug: string): Promise<ExtractedSkill | null> {
+  const url = `${CONVEX_REST}/download?slug=${encodeURIComponent(slug)}`;
+  const res = await fetch(url, {
+    headers: { "User-Agent": USER_AGENT },
+    cf: { cacheTtl: 300 },
+  });
+  if (!res.ok) {
+    console.error(`[clawhub] ZIP fetch ${slug}: HTTP ${res.status}`);
+    return null;
+  }
+  const buf = new Uint8Array(await res.arrayBuffer());
+  // size cap 防 memory 爆炸（worker 128MB 限制；正常 ZIP <100KB）
+  if (buf.length > 5 * 1024 * 1024) {
+    console.warn(`[clawhub] ZIP too large ${slug}: ${buf.length}B`);
+    return null;
+  }
+
+  let unzipped: Record<string, Uint8Array>;
+  try {
+    unzipped = unzipSync(buf, {
+      // 只解我们要的文件 + 跳过 node_modules / hidden files
+      filter: (file) =>
+        file.name === "README.md" ||
+        file.name === "SKILL.md" ||
+        (!file.name.startsWith(".") && !file.name.includes("node_modules/")),
+    });
+  } catch (e: any) {
+    console.error(`[clawhub] unzip ${slug} failed: ${e?.message || e}`);
+    return null;
+  }
+
+  const readmeBytes = unzipped["README.md"];
+  const skillMdBytes = unzipped["SKILL.md"];
+  const readme = readmeBytes ? stripFrontmatter(strFromU8(readmeBytes)) : "";
+  const skillMd = skillMdBytes ? strFromU8(skillMdBytes) : "";
+  const files = Object.entries(unzipped).map(([path, bytes]) => ({
+    path,
+    size: bytes.length,
+  }));
+
+  return { readme, skillMd, files };
+}
+
+function stripFrontmatter(md: string): string {
+  // YAML frontmatter: ^---\n...\n---\n
+  return md.replace(/^---\n[\s\S]*?\n---\n+/, "");
+}
+
+// ─── README 翻译（保留代码块）─────────────────────────────────────────────
+const TRANSLATE_MARKDOWN_PROMPT = `You are translating Markdown documentation to Chinese (zh-CN) for a developer-focused content feed.
+
+CRITICAL RULES — DO NOT VIOLATE:
+1. PRESERVE all fenced code blocks (\`\`\`...\`\`\`) verbatim. Do not translate any code, comments inside code, shell commands, or path arguments.
+2. PRESERVE all inline code spans (\`...\`) verbatim.
+3. PRESERVE all Markdown structure: headings (#), lists (-, *, 1.), tables (| ... |), links ([](url)), images (![](url)), bold/italic.
+4. Inside table cells: translate text, preserve code/links.
+5. KEEP these technical terms in English even in prose: OAuth, API, MCP, skill, plugin, agent, hook, prompt, workflow, LLM, RAG, claw, npm, brew, bash, yaml, json, JSON, README.
+6. Preserve all proper nouns (product/library names, GitHub handles, file paths, URLs) verbatim.
+7. Keep YAML frontmatter (between leading "---" lines) as-is if present.
+
+Output Chinese Markdown only, no preamble, no explanation.`;
+
+async function translateMarkdown(env: ClawhubEnv, md: string): Promise<string | null> {
+  if (!env.DEEPSEEK_API_KEY) return null;
+  if (!md || md.trim().length === 0) return null;
+
+  // CJK > 50% → 已是中文，原样返回
+  const cjk = (md.match(/[一-鿿]/g) || []).length;
+  if (md.length > 0 && cjk / md.length > 0.5) return md;
+
+  // 长文档单次调用上限：DeepSeek input 64k tokens，1 字符 ~1 token，留余量按 30k chars 切
+  // 多数 skill README < 5k chars，单次足够。超长的截断到 30k 翻第一段
+  const text = md.length > 30000 ? md.slice(0, 30000) + "\n\n... (内容过长，已截断)" : md;
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: DEEPSEEK_MODEL,
+      messages: [
+        { role: "system", content: TRANSLATE_MARKDOWN_PROMPT },
+        { role: "user", content: text },
+      ],
+      temperature: 0.2,
+      max_tokens: 8000,
+    }),
+  });
+  if (!res.ok) {
+    console.error(`[clawhub] DeepSeek markdown translate failed: HTTP ${res.status}`);
+    return null;
+  }
+  const j = (await res.json()) as any;
+  const out = j?.choices?.[0]?.message?.content?.trim();
+  return out || null;
+}
+
 // ─── LLM findings translation ───────────────────────────────────────────────
 // llmAnalysis 来自 ClawHub 的 LLM 分析，每条 finding 含 categoryLabel / evidence /
 // recommendation 都是英文。drawer 安全审查区段对中文用户更友好需要翻译。
@@ -403,7 +515,7 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
   for (const it of allBySort.values()) {
     const row = rowFromListEntry(it);
     const extra = {
-      ch_pending: true, // phase 2 will enrich license/install/capability
+      ch_pending: true, // phase 2 will enrich license/install/capability + ZIP/README
       slug: row.source_id,
       latest_version: row.latestVersion,
       versions_count: row.metrics.versions,
@@ -411,6 +523,9 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
       category: row.category,
       owner_image: row.ownerImage,
       owner_github_url: row.handle ? `https://github.com/${row.handle}` : undefined,
+      // summary 单独存 — phase 2 ZIP 抓到 README 后会把 items.content 改成 README，
+      // 所以 summary 必须独立保留供 feed 卡片正文用（短文，不会过长）
+      summary_en: row.summary,
     };
 
     // published_at = skill.updatedAt（ISO）：让 /api/items 的 7-day window
@@ -426,7 +541,10 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
          VALUES (?, 'clawhub', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'en', ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
-           content = CASE WHEN excluded.content IS NOT NULL AND length(excluded.content) > 0
+           -- content 长度比较：phase 1 传 summary（~200 字符），phase 2 enrich 写 README（~5k 字符）
+           -- 用 max-length 策略避免 phase 1 cron 第二轮以 summary 覆盖已抓到的 README
+           content = CASE WHEN excluded.content IS NOT NULL
+                          AND length(excluded.content) > length(COALESCE(items.content, ''))
                           THEN excluded.content ELSE items.content END,
            author = CASE WHEN excluded.author IS NOT NULL AND length(excluded.author) > 0
                           THEN excluded.author ELSE items.author END,
@@ -534,15 +652,33 @@ export async function runClawhubEnrichPending(
       const llmFindings = lv.llmAnalysis?.agenticRiskFindings || [];
 
       const existingExtra = JSON.parse(row.extra || "{}");
-      const summaryText = (row.content || "") as string;
-      // summary + LLM finding 翻译并行启动
-      const [summaryT, translatedFindings] = await Promise.all([
-        existingExtra.summary_translated || !summaryText
+      // 现在 row.content 在 v1 写入策略下是 README 原文（如果之前 v0 fill 过的话是 summary，
+      // 兼容到位）。summary 单独读 extra.summary_en 优先，回退 row.content（v0 旧数据）
+      const summaryEnglish = (existingExtra.summary_en as string) || (row.content || "") as string;
+
+      // 三件并行：summary 翻译 + LLM finding 翻译 + ZIP 抓取
+      const [summaryT, translatedFindings, extracted] = await Promise.all([
+        existingExtra.summary_translated || !summaryEnglish
           ? Promise.resolve(existingExtra.summary_translated)
-          : translateShort(env, summaryText),
+          : translateShort(env, summaryEnglish),
         translateLlmFindings(env, llmFindings),
+        fetchAndExtractSkill(slug),
       ]);
       const summaryTranslated = summaryT;
+
+      // README 翻译（如果 ZIP 抓到了 README.md 内容）
+      let readmeOriginal = "";
+      let readmeTranslated: string | null = null;
+      let skillMd = "";
+      let filesManifest: Array<{ path: string; size: number }> = [];
+      if (extracted) {
+        readmeOriginal = extracted.readme;
+        skillMd = extracted.skillMd;
+        filesManifest = extracted.files;
+        if (readmeOriginal) {
+          readmeTranslated = await translateMarkdown(env, readmeOriginal);
+        }
+      }
 
       const newExtra = {
         ...existingExtra,
@@ -551,19 +687,32 @@ export async function runClawhubEnrichPending(
         install: installList,
         capability_tags: capabilityTags,
         llm_analysis: translatedFindings.length > 0 ? { findings: translatedFindings, lang: 'zh' } : undefined,
+        // summary 单独存 — feed 卡片正文用（短）；drawer body 用 content_translated（长 README）
+        summary_en: summaryEnglish || existingExtra.summary_en,
         summary_translated: summaryTranslated || existingExtra.summary_translated,
+        // ZIP 流水线产出
+        skill_md: skillMd || existingExtra.skill_md || "",
+        files_manifest: filesManifest.length > 0 ? filesManifest : existingExtra.files_manifest,
         enriched_at: Math.floor(Date.now() / 1000),
       };
 
+      // items.content / content_translated 写入策略：
+      // - 抓到 README → content = README 原文，content_translated = README 中文译文
+      // - 抓不到 ZIP / 没 README → 回退 summary（v0 行为）
+      const finalContent = readmeOriginal || summaryEnglish;
+      const finalContentTranslated = readmeTranslated || summaryTranslated;
+
       await env.DB.prepare(
         `UPDATE items
-            SET content_translated = COALESCE(?, content_translated),
+            SET content = COALESCE(?, content),
+                content_translated = COALESCE(?, content_translated),
                 lang = ?,
                 extra = ?,
                 translation_attempts = COALESCE(translation_attempts, 0) + 1
           WHERE id = ?`,
       ).bind(
-        summaryTranslated || null,
+        finalContent || null,
+        finalContentTranslated || null,
         existingExtra.lang === "zh" ? "zh" : "en",
         JSON.stringify(newExtra),
         row.id,

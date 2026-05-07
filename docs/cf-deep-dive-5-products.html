@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>CF 5 产品 × 业务模块对照 — xlist-scraper</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #18181b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --card: #ffffff;
+    --code-bg: #f4f4f5;
+    --accent: #2563eb;
+    --green: #16a34a;
+    --amber: #d97706;
+    --red: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    margin: 0;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  /* Layout: 主内容居中，TOC 是 drawer */
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+
+  /* TOC toggle button (fixed top-left) */
+  .toc-toggle { display: none; }   /* checkbox 隐藏 */
+  .toc-btn {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 100;
+    width: 38px;
+    height: 38px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    transition: background 0.15s;
+  }
+  .toc-btn:hover { background: #f4f4f5; }
+  .toc-btn span,
+  .toc-btn span::before,
+  .toc-btn span::after {
+    display: block;
+    width: 16px;
+    height: 2px;
+    background: var(--fg);
+    border-radius: 1px;
+    position: relative;
+    transition: transform 0.2s, opacity 0.2s;
+  }
+  .toc-btn span::before,
+  .toc-btn span::after {
+    content: '';
+    position: absolute;
+    left: 0;
+  }
+  .toc-btn span::before { top: -5px; }
+  .toc-btn span::after  { top: 5px; }
+  .toc-toggle:checked ~ .toc-btn span { background: transparent; }
+  .toc-toggle:checked ~ .toc-btn span::before { top: 0; transform: rotate(45deg); }
+  .toc-toggle:checked ~ .toc-btn span::after  { top: 0; transform: rotate(-45deg); }
+
+  /* TOC drawer (左侧 slide-in) */
+  nav.toc {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 240px;
+    height: 100vh;
+    padding: 64px 22px 24px;
+    background: white;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 90;
+    font-size: 13px;
+    box-shadow: 4px 0 16px rgba(0,0,0,0.04);
+  }
+  nav.toc a {
+    display: block;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 5px 0;
+  }
+  nav.toc a:hover { color: var(--fg); }
+  nav.toc strong {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin: 16px 0 6px;
+  }
+  nav.toc strong:first-child { margin-top: 0; }
+
+  /* Backdrop overlay */
+  .toc-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.25);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+    z-index: 80;
+  }
+
+  /* Open state */
+  .toc-toggle:checked ~ nav.toc { transform: translateX(0); }
+  .toc-toggle:checked ~ .toc-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  header {
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 26px; margin: 0 0 8px; }
+  header .subtitle { color: var(--muted); font-size: 14px; }
+  header .meta { font-family: ui-monospace, monospace; color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+  section.product {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  section.product h2 {
+    font-size: 22px;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  section.product .one-liner {
+    color: var(--muted);
+    font-size: 14px;
+    margin: 0 0 20px;
+  }
+  section.product h3 {
+    font-size: 16px;
+    margin: 24px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+  section.product h4 {
+    font-size: 14px;
+    margin: 16px 0 8px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 16px;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    background: #f4f4f5;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--muted);
+  }
+  tr:last-child td { border-bottom: none; }
+  table.compact th, table.compact td { padding: 8px 10px; }
+  table.decision td.verdict-do { color: var(--green); font-weight: 600; }
+  table.decision td.verdict-skip { color: var(--muted); font-weight: 600; }
+  table.decision td.verdict-watch { color: var(--amber); font-weight: 600; }
+
+  code {
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: #18181b;
+    color: #f4f4f5;
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 8px 0 16px;
+  }
+  pre code { background: transparent; padding: 0; color: inherit; }
+
+  .pricing-card {
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin: 8px 0 16px;
+  }
+  .pricing-card strong { color: #78350f; }
+
+  .verdict-box {
+    background: #f0fdf4;
+    border: 1px solid #86efac;
+    border-left: 4px solid var(--green);
+    padding: 14px 18px;
+    border-radius: 6px;
+    margin: 16px 0 0;
+    font-size: 14px;
+  }
+  .verdict-box.skip {
+    background: #f4f4f5;
+    border-color: var(--border);
+    border-left-color: var(--muted);
+  }
+  .verdict-box.partial {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    border-left-color: var(--amber);
+  }
+  .verdict-box h4 { margin: 0 0 6px; font-size: 14px; font-weight: 700; }
+  .verdict-box p { margin: 0; }
+
+  .badge-do {
+    display: inline-block;
+    background: var(--green);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    vertical-align: middle;
+  }
+  .badge-watch { background: var(--amber); }
+  .badge-skip { background: var(--muted); }
+
+  .disclaimer {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #991b1b;
+    margin: 12px 0 20px;
+  }
+
+  /* 小屏 main 跟 toggle button 同列 → header 让位 48px 避免遮挡 h1 */
+  @media (max-width: 968px) {
+    header h1, header .subtitle, header .meta { padding-left: 48px; }
+  }
+  @media (max-width: 640px) {
+    main { padding: 24px 16px 60px; }
+    section.product { padding: 18px 16px; }
+    nav.toc { width: 80%; max-width: 280px; }
+  }
+</style>
+</head>
+<body>
+
+<input type="checkbox" id="toc-toggle" class="toc-toggle">
+<label for="toc-toggle" class="toc-btn" aria-label="目录"><span></span></label>
+<label for="toc-toggle" class="toc-backdrop"></label>
+
+<nav class="toc">
+  <strong>5 个产品</strong>
+  <a href="#queues">1. Queues</a>
+  <a href="#workflows">2. Workflows</a>
+  <a href="#images">3. Images</a>
+  <a href="#web-analytics">4. Web Analytics</a>
+  <a href="#workers-logs">5. Workers Logs / Logpush</a>
+  <strong>汇总</strong>
+  <a href="#summary">六、决策总表</a>
+</nav>
+
+<main>
+
+<header>
+  <h1>CF 5 产品深度对照</h1>
+  <p class="subtitle">每个产品 × xlist-scraper 当前业务每个模块的「做不做 / 收益 vs 成本」决策矩阵。</p>
+  <p class="meta">2026-05-06 · 业务现状：X 11 cron mode + GH 4 mode + PH 1 launchd + auth/telemetry/share</p>
+  <div class="disclaimer">
+    ⚠️ <strong>价格基于 2025-Q4 / 2026-Q1 公开数据。CF 调价快，下单前必须 verify <a href="https://developers.cloudflare.com/" target="_blank">官方 pricing</a>。</strong>
+  </div>
+</header>
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ Queues ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="queues" class="product">
+  <h2>1. Queues</h2>
+  <p class="one-liner">持久消息队列：producer 写入 → consumer worker 异步消费 + 自动 retry + DLQ。</p>
+
+  <h3>核心 API / 用法</h3>
+
+  <h4>Producer 端（worker.toml binding + send）</h4>
+<pre><code>[[queues.producers]]
+binding = "X_PIPELINE"
+queue   = "x-pipeline"
+
+# 代码：
+await env.X_PIPELINE.send({ tweetId, op: 'classify' });
+await env.X_PIPELINE.sendBatch([{body:...},{body:...}]);  // 最多 100 条 / 256KB</code></pre>
+
+  <h4>Consumer 端（同 worker 或独立 worker）</h4>
+<pre><code>[[queues.consumers]]
+queue                = "x-pipeline"
+max_batch_size       = 25       # 1-100, 默认 10
+max_batch_timeout    = 5        # seconds, 凑齐 batch 或超时即触发
+max_retries          = 3        # 失败 retry 次数
+dead_letter_queue    = "x-dlq"  # 重试耗尽进 DLQ
+
+# 代码：
+export default {
+  async queue(batch, env, ctx) {
+    for (const msg of batch.messages) {
+      try {
+        await processOne(msg.body, env);
+        msg.ack();
+      } catch (e) {
+        msg.retry({ delaySeconds: 30 });
+      }
+    }
+  }
+}</code></pre>
+
+  <h3>价格与配额</h3>
+  <div class="pricing-card">
+    <strong>免费额度（含在 Workers Paid $5/月里）</strong>：1M operations/月（1 op = 1 次 send / receive / delete，所以一条消息端到端 = 3 ops）<br>
+    <strong>超额</strong>：$0.40/M operations<br>
+    <strong>消息体大小</strong>：≤ 128 KB / 单条；batch ≤ 256 KB<br>
+    <strong>Visibility timeout</strong>：30s 默认，最大 12h<br>
+    <strong>消息保留</strong>：4 天（未消费消息 4 天后丢弃）<br>
+    <strong>Concurrency</strong>：consumer 自动 scale 1-100 并发实例
+  </div>
+  <p style="font-size:13px;color:var(--muted)">实际成本估算：你当前每天约 5000 推文流过 pipeline，假设每条经历 4 个 op（fetch/classify/translate/refresh），= 20k ops/天 = 600k ops/月，<strong>完全在免费额度内</strong>。</p>
+
+  <h3>业务每个模块的对照</h3>
+  <table class="decision">
+    <thead><tr><th>当前模块</th><th>现状</th><th>切到 Queue 后</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>list-poll-ingest</code><br>(X cron */30→*/5)</td>
+        <td>cron 直接 fetch ScrapeBadger → 落 D1 + 调 syndication 补全 + 调 DeepSeek 分类（顺序串行）</td>
+        <td>cron 只做 fetch + 落 D1 → push 新 tweet_id 到 <code>x-pipeline</code> → consumer 异步分类 / 翻译 / 补全</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>classify-pending</code></td>
+        <td>cron 抢占 slot 跑批（每次 ≤ 50 条），DeepSeek 慢的话占满 cron 时长</td>
+        <td>consumer 单独 scale，不跟 cron 抢 CPU</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>fill-translations</code></td>
+        <td>cron 抢占 slot，DeepSeek 翻译 batch ≤ 30 条；429/500 时整个 cron 失败</td>
+        <td>每条翻译 = 一条消息 → 失败自动 retry 3 次 → 还失败进 DLQ 人工看</td>
+        <td class="verdict-do">强推荐</td>
+      </tr>
+      <tr>
+        <td><code>backfill-quotes</code> / <code>backfill-replies</code></td>
+        <td>cron 跑批，syndication API 偶发 429 触发整 batch 失败</td>
+        <td>单条 retry，不影响别的</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>refresh-tiered</code> (L0-L4)</td>
+        <td>cron 按 next_refresh_at 排序拿 N 条 → 批量 ScrapeBadger batch endpoint → 顺序落 D1</td>
+        <td>**反而不适合切 Queue**：tiered 优势是 batch endpoint（一次拿 100 条），拆成消息反而 chatty + 失去 batch 折扣</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td><code>github-fetch</code> + <code>github-enrich</code> + <code>readme-translate</code> + <code>r2-migrate</code></td>
+        <td>4 个模式串联，cron 抢占顺序跑（fetch 写 pending → enrich 拉详情 → translate → r2 迁移）</td>
+        <td>fetch consumer push 到 <code>gh-enrich</code> queue → enrich consumer push 到 <code>gh-translate</code> queue → 各自 fanout</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>detect-longform</code> + <code>longform-via-sb</code></td>
+        <td>cron 探测长推 → ScrapeBadger 抓全文 → 翻译。当前 detect 完积压候选靠随机抽样命中，慢</td>
+        <td>detect 直接 push 到 <code>longform-fetch</code> queue → consumer 立即抓 → 完成 push 到 translate queue</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>cleanup</code></td>
+        <td>每天一次 03:35 UTC 清 30 天前 snapshots</td>
+        <td>定时任务 = workflow 或 cron 都行，Queue 不解决问题</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td><code>POST /api/items/:id/refresh</code><br>（lazy-enrich-on-drawer）</td>
+        <td>同步刷 X syndication / GitHub REST → 写 D1 → 返回</td>
+        <td>同步等待是用户体验需要（drawer 立即看到新数据），切 Queue 反而加延迟</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>SMS / email send</td>
+        <td>用户点「获取验证码」→ worker 同步 fetch 腾讯云 / Resend → 同步落 D1</td>
+        <td>必须同步等结果给前端反馈，不切</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>telemetry events 上报</td>
+        <td>前端 batch 10 条 / 5s POST /api/track → worker 写 D1</td>
+        <td>前端已经做了客户端 batch + sendBeacon，再加一层 Queue 价值低</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>分享海报生成</td>
+        <td>POST /api/share/poster/:token → resvg-wasm 渲染 → R2 缓存 → 返 PNG</td>
+        <td>同步生成（用户等 PNG），切 Queue 用户体验差</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="verdict-box">
+    <h4>✅ 推荐：分阶段切 X / GH pipeline 到 Queue（保留 refresh-tiered + 同步交互）</h4>
+    <p><strong>第一刀</strong>（半天）：把 <code>fill-translations</code> 改 Queue，最痛点（DeepSeek 慢 + 偶发 429）。<strong>第二刀</strong>（1 天）：classify + ingest 整条链 push 到 Queue。<strong>第三刀</strong>（1 天）：GitHub 4 模式整条链。<br><br>
+    <strong>收益</strong>：(1) cron 不再抢占 slot，删掉 enrich.ts / index.ts 中的 preempt 抢占逻辑；(2) 单条失败不阻塞别的；(3) consumer 自动 scale，吞吐天花板从「单 cron 串行」变「100 并发」；(4) 失败重试 / DLQ 白送，比手写 attempts 列简单。<br><br>
+    <strong>成本</strong>：~3 天工时 + 学习成本（首次接触 CF Queues），月运行成本 0（在免费额度内）。<br><br>
+    <strong>风险</strong>：消息无序（多 consumer 并发），但你 pipeline 业务上没强顺序要求（每条独立处理）。</p>
+  </div>
+</section>
+
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ Workflows ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="workflows" class="product">
+  <h2>2. Workflows</h2>
+  <p class="one-liner">持久执行引擎：每个 step 自动持久化 + 失败重试 + 可 sleep 数天数月，类比 AWS Step Functions 但跟 Worker 同源。</p>
+
+  <h3>核心 API / 用法</h3>
+
+  <h4>定义 Workflow class（一个 Workflow = 一个完整业务流程）</h4>
+<pre><code>import { WorkflowEntrypoint } from 'cloudflare:workers';
+
+export class TweetIngestWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    const tweet = await step.do('fetch-from-sb', async () => {
+      return await fetchFromScrapeBadger(event.payload.list_id);
+    });
+
+    const isAi = await step.do(
+      'classify',
+      { retries: { limit: 3, delay: '10 second', backoff: 'exponential' } },
+      async () => llmJudgeRelevant(tweet, this.env.DEEPSEEK_API_KEY)
+    );
+
+    if (!isAi) return { skipped: true };
+
+    const translated = await step.do('translate', () => translateBatch([tweet]));
+
+    await step.sleep('cooldown', '30 minutes');  // 等 30min 再补 quote / metrics
+
+    const enriched = await step.do('enrich-syndication', () => fetchSyndication(tweet.id));
+
+    await step.do('save-to-d1', () => saveToD1(this.env.DB, { tweet, translated, enriched }));
+
+    return { ok: true };
+  }
+}</code></pre>
+
+  <h4>触发实例（worker handler 里）</h4>
+<pre><code>const instance = await env.TWEET_WORKFLOW.create({
+  id: tweet.id,           // 业务幂等 key
+  params: { tweet_id: tweet.id, list_id: '...' },
+});
+// 实例自动开始执行；查状态：
+const status = await instance.status();</code></pre>
+
+  <h3>价格与配额</h3>
+  <div class="pricing-card">
+    <strong>免费额度（含在 Workers Paid $5/月里）</strong>：<br>
+    • 100k workflow steps / 月（每个 step.do / step.sleep 算 1 step）<br>
+    • 不限并发实例数（单实例最长存活 1 年）<br>
+    <strong>超额</strong>：$0.30 per 1k step invocations + Workers CPU time 按 worker 标准计<br>
+    <strong>State 持久化</strong>：自动用 CF Durable Object 后端，不收额外存储费<br>
+    <strong>Step 失败 retry</strong>：内置指数退避，参数化 limit + delay
+  </div>
+  <p style="font-size:13px;color:var(--muted)">每天 5000 推文 × 4 step (fetch+classify+translate+save) = 20k step/天 = 600k step/月，<strong>超出免费额度 ~6 倍</strong>。需要 ~$150/月（500k overage × $0.30）。这是切之前必算清楚的账。</p>
+
+  <h3>业务每个模块对照</h3>
+  <table class="decision">
+    <thead><tr><th>当前模块</th><th>现状</th><th>切到 Workflow 后</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>X 单推文完整 pipeline<br>(ingest → classify → translate → enrich → save)</td>
+        <td>4 个 cron mode 异步串联，靠 D1 字段（is_ai NULL / translated NULL / quote_of NULL）做状态机</td>
+        <td>一个 Workflow instance / 推文，4 个 step 自动 persist + retry，无需 D1 字段做状态</td>
+        <td class="verdict-watch">看价格</td>
+      </tr>
+      <tr>
+        <td>GitHub trending → enrich → translate → r2-migrate</td>
+        <td>4 个 cron mode 串联，靠 ai_generated/readme_translated/r2_migrated 字段做状态</td>
+        <td>一个 Workflow instance / repo，4 个 step 顺序执行 + retry</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>PH 单产品深度抓取<br>(slug → product detail → comments → makers → reviews → translate → r2)</td>
+        <td>本地 launchd 跑 browser-use script，单个长 Python 进程，挂了从头来</td>
+        <td>worker 触发 Workflow，每段抓取一个 step，挂了从断点续；但 PH 抓取依赖 browser-use，**Workflow 跑在 worker，不能直接调 browser-use**</td>
+        <td class="verdict-skip">不直接切</td>
+      </tr>
+      <tr>
+        <td>Longform 探测 → 抓全文 → 翻译</td>
+        <td>3 个 cron mode 串联（detect-longform → longform-via-sb → fill-translations）</td>
+        <td>Workflow 一次串完，单个长推从探测到翻译完整 trace</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td><code>refresh-tiered</code> 周期性</td>
+        <td>cron 按 tier 调度，每次 fetch N 条 batch update</td>
+        <td>这是 batch 任务，每个 tier 内并行处理，Workflow 的「单实例长流程」模型不匹配</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td><code>cleanup</code> 每日 03:35 UTC</td>
+        <td>cron 跑 DELETE FROM ... WHERE 30 days ago</td>
+        <td>简单 cron 任务，Workflow 是 over-engineering</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>auth: SMS/email send + login</td>
+        <td>同步 worker handler，5 分钟内一次性流程</td>
+        <td>不需要持久化（用户 5min 内输码），Workflow 是 over-engineering</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td><code>POST /api/items/:id/refresh</code> drawer 主动 enrich</td>
+        <td>同步 fetch + 写 D1，~2-5s 返回</td>
+        <td>同步交互不适合 Workflow（用户等结果）</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>分享海报生成</td>
+        <td>同步 resvg 渲染（CPU heavy）</td>
+        <td>30s CPU 配额够，不需要 Workflow 的持久化能力</td>
+        <td class="verdict-skip">不切</td>
+      </tr>
+      <tr>
+        <td>定时报表 / 周度汇总（暂无）</td>
+        <td>—</td>
+        <td>未来如果要做「每周一发上周 top 10 邮件」这种持续多步任务（拉数据 → 渲染 HTML → 调 Resend → 失败重试），是 Workflow 经典场景</td>
+        <td class="verdict-watch">未来再看</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Workflow vs Queue 对比（很多人混淆）</h3>
+  <table class="compact">
+    <thead><tr><th>维度</th><th>Queue</th><th>Workflow</th></tr></thead>
+    <tbody>
+      <tr><td>单元</td><td>消息（无关联）</td><td>实例（一个完整流程）</td></tr>
+      <tr><td>状态</td><td>无（每条消息独立）</td><td>有（step 间共享 + 持久化）</td></tr>
+      <tr><td>顺序</td><td>无序（多 consumer 并发）</td><td>严格顺序（step 1 → 2 → 3）</td></tr>
+      <tr><td>Sleep 能力</td><td>消息延迟最多 12h</td><td>step.sleep 最长 1 年</td></tr>
+      <tr><td>典型场景</td><td>大量独立任务并行</td><td>少量长流程 + 跨步骤状态依赖</td></tr>
+      <tr><td>价格</td><td>$0.40/M ops（很便宜）</td><td>$0.30/k steps（贵 1000 倍）</td></tr>
+    </tbody>
+  </table>
+
+  <div class="verdict-box partial">
+    <h4>⚠️ 部分推荐：只切 GitHub 4 模式 + Longform 链，X 主链留 Queue 更划算</h4>
+    <p><strong>不切的部分</strong>：X 主 ingest pipeline 切 Workflow 月成本 ~$150（按 600k step 算），相比 Queue（~免费）不划算。X 量大的部分（5000/天）走 Queue，量小的（GH 50/天 + longform 100/天）才适合 Workflow。<br><br>
+    <strong>推荐切的</strong>：(1) GitHub 完整链（fetch → enrich → translate → r2-migrate），50 个 repo/天 × 4 step = 6k step/月，免费额度内；(2) Longform 链（探测 + 抓全文 + 翻译），100/天 × 3 step = 9k step/月，免费额度内。两个加起来 15k step/月。<br><br>
+    <strong>核心收益</strong>：(1) trace 可视（CF Dashboard 看每个 instance 走到哪步、为啥失败）；(2) retry 内置；(3) 删掉 D1 里 ai_generated/readme_translated/r2_migrated 等状态字段（Workflow 自管 state）。<br><br>
+    <strong>成本</strong>：~2 天迁 GH，~1 天迁 longform。学习曲线比 Queue 略陡（cloudflare:workers SDK + WorkflowEntrypoint）。</p>
+  </div>
+</section>
+
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ Images ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="images" class="product">
+  <h2>3. Images</h2>
+  <p class="one-liner">边缘图片变换 + 存储。两个产品别混：<strong>Cloudflare Images</strong>（图片托管 + 自动变换 URL）和 <strong>Image Resizing</strong>（zone-level cdn-cgi/image，对任意源图变换）。</p>
+
+  <h3>两种产品的差异</h3>
+  <table class="compact">
+    <thead><tr><th>维度</th><th>Cloudflare Images</th><th>Image Resizing (cdn-cgi/image)</th></tr></thead>
+    <tbody>
+      <tr><td>定位</td><td>上传到 CF 当 CDN，URL 自动变换</td><td>对你 origin 的图做变换 proxy</td></tr>
+      <tr><td>需要存储吗</td><td>是（CF Images 内置存储）</td><td>否（origin 在哪都行）</td></tr>
+      <tr><td>价格</td><td>$5/月 100k stored + 1M delivered</td><td>不分开计费，按 Pro/Business plan 含</td></tr>
+      <tr><td>Worker 集成</td><td>有 binding（<code>env.IMAGES.input(...).transform(...)</code>）</td><td>fetch <code>/cdn-cgi/image/...</code> URL</td></tr>
+    </tbody>
+  </table>
+
+  <h3>核心 API / 用法</h3>
+
+  <h4>方式 A：cdn-cgi/image URL（最简单，对你最适合）</h4>
+<pre><code>原图 URL：
+  https://api.ai-feeds.com/r/abc123-screenshot.png
+
+加变换：
+  https://api.ai-feeds.com/cdn-cgi/image/width=400,format=auto,quality=80/r/abc123-screenshot.png
+
+参数：width / height / fit (cover/contain/scale-down) / format (auto/webp/avif/jpeg) / quality (1-100)
+   / sharpen / blur / dpr / metadata=keep|copyright|none</code></pre>
+
+  <h4>方式 B：Worker Images binding（程序化调用）</h4>
+<pre><code>[[images]]
+binding = "IMAGES"
+
+const transformed = await env.IMAGES.input(originalImage)
+  .transform({ width: 400, format: 'webp', quality: 80 })
+  .output();
+return transformed.response();</code></pre>
+
+  <h3>价格与配额</h3>
+  <div class="pricing-card">
+    <strong>Image Resizing (cdn-cgi/image)</strong>：<br>
+    • Workers Paid plan 含：<strong>5000 unique transformations / 月免费</strong>（同 URL+参数命中 cache 不再计）<br>
+    • 超额：$0.50 / 1000 unique transformations<br>
+    • <strong>关键</strong>：cache hit 不收费，所以反复访问同张图同尺寸 = 1 次费<br><br>
+    <strong>Cloudflare Images</strong>（你不需要这个，下面解释）：<br>
+    • $5/月含 100k 张存储 + 1M 张 delivered<br>
+    • 适合需要把图片源迁到 CF 的场景，你已有 R2 + Worker /r/ 反代，没必要再迁
+  </div>
+  <p style="font-size:13px;color:var(--muted)">估算：dashboard 当前每天 ~1000 PV，每页 ~30 image = 30k req/天。<strong>但</strong> cdn-cgi/image 按 unique transformations 算，同图同尺寸 cache hit。假设独立组合 ~500/天 × 30 天 = 15k unique/月，超 5k 免费 → ~$5-10/月。</p>
+
+  <h3>业务每个模块对照</h3>
+  <table class="decision">
+    <thead><tr><th>当前模块</th><th>现状</th><th>切到 Images 后</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>X 推文图片<br>(<code>pbs.twimg.com/*</code>)</td>
+        <td>前端 <code>proxyImg()</code> 把 twimg URL 改写到 worker <code>/img?url=...</code> 反代（避免 X 拒外链 + 跨域）</td>
+        <td>worker <code>/img</code> handler 内部调 <code>cdn-cgi/image/width=...,format=auto</code> + fetch X 原图，返回 webp。前端 <code>proxyImg(url, {w: 400})</code> 加宽度参数</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>X 视频封面<br>(<code>video.twimg.com/*</code>)</td>
+        <td>同上 proxyImg()</td>
+        <td>同上，移动端可以请求 width=200 / quality=70 大幅瘦身</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>头像（avatar 40px）</td>
+        <td>原图（可能 200-400px）拉下来浏览器再缩</td>
+        <td>请求 <code>width=80</code>（@2x DPI 80px），瘦身 70%+</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>R2 资源（PH/GH 迁移过的，<code>/r/&lt;key&gt;</code>）</td>
+        <td>worker handleR2Asset 直返原图 + cache headers</td>
+        <td>worker 内部加一层 cdn-cgi/image transform：根据 query 参数变 width/format</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>分享海报（<code>/api/share/poster/:token</code>）</td>
+        <td>resvg-wasm 服务端渲染 PNG → R2 缓存</td>
+        <td>已经是 PNG output，不需要再变换；但海报里嵌入的 cover image 可以预先 cdn-cgi/image webp 缩尺寸再嵌入 SVG</td>
+        <td class="verdict-watch">局部优化</td>
+      </tr>
+      <tr>
+        <td>PH 截图 / 多图 gallery</td>
+        <td>R2 反代原图（PH 原图常 1920px）</td>
+        <td>移动端 width=600 + format=webp 节省 80%+ 流量</td>
+        <td class="verdict-do">强推荐</td>
+      </tr>
+      <tr>
+        <td>Lightbox 全屏图</td>
+        <td>原图直接显示</td>
+        <td>按 viewport.width DPR 请求精确尺寸（width=1920 等）</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>实施改造点（dashboard）</h3>
+<pre><code>// dashboard/src/lib/utils.ts 改造 proxyImg:
+export function proxyImg(
+  url: string | null | undefined,
+  opts?: { w?: number; h?: number; q?: number; fit?: 'cover'|'contain' }
+): string {
+  if (!url) return "";
+  // ... 现有解析 ...
+  const params = [];
+  if (opts?.w) params.push(`width=${opts.w}`);
+  if (opts?.h) params.push(`height=${opts.h}`);
+  if (opts?.q) params.push(`quality=${opts.q}`);
+  params.push('format=auto');  // 自动 webp/avif
+  const transform = params.join(',');
+  return `${PROXY_BASE}/cdn-cgi/image/${transform}/img?url=${encodeURIComponent(url)}`;
+}
+
+// 调用方升级（举例）：
+&lt;img src={proxyImg(avatarUrl, { w: 80, q: 80 })} /&gt;          // 头像
+&lt;img src={proxyImg(media.url, { w: 800, q: 75 })} /&gt;          // 卡片图
+&lt;img src={proxyImg(media.url, { w: window.innerWidth * 2 })} /&gt;  // Lightbox</code></pre>
+
+  <div class="verdict-box">
+    <h4>✅ 推荐做：纯收益（流量 / LCP 双降）</h4>
+    <p><strong>收益</strong>：(1) 移动端流量减 60-80%（webp + 精确尺寸）；(2) LCP / 首屏速度显著提升；(3) format=auto 自动 avif → webp → jpeg 兜底，浏览器侧无需改。<br><br>
+    <strong>成本</strong>：(1) 月费 $5-10（按估算 unique 量）；(2) ~半天工时改 dashboard <code>proxyImg()</code> + 调 5-10 个调用方；(3) cdn-cgi/image 不支持加 query 给同一变换不同 URL（参数变了就是新 transformation）— 注意 dashboard 同图同尺寸要稳定。<br><br>
+    <strong>风险</strong>：origin 图（X / R2）必须能从 CF 边缘 fetch（X 已经能了，R2 同 zone 必通）。</p>
+  </div>
+</section>
+
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ Web Analytics ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="web-analytics" class="product">
+  <h2>4. Web Analytics</h2>
+  <p class="one-liner">真实用户性能 + 流量监控。CF Dashboard 直接配，不需要写代码（或一行 beacon）。</p>
+
+  <h3>核心特性 / 配置</h3>
+
+  <h4>开启方式（10 分钟）</h4>
+  <ul style="font-size:14px">
+    <li><strong>方式 A（最快）</strong>：CF Dashboard → Analytics & Logs → Web Analytics → Add a site → 选你的 zone（ai-feeds.com）→ Free plan auto enable，**zone 内所有流量自动统计**，不需要改代码。</li>
+    <li><strong>方式 B（更精准）</strong>：用 RUM beacon JS（一行 <code>&lt;script&gt;</code>），可以拿 SPA 路由级数据。复制 dashboard 给的 <code>&lt;script&gt;</code> 加到 <code>index.html</code>。</li>
+  </ul>
+
+  <h4>能拿到的指标</h4>
+  <table class="compact">
+    <thead><tr><th>类别</th><th>指标</th></tr></thead>
+    <tbody>
+      <tr><td>流量</td><td>Page views / Unique visitors / Sessions / Bounce rate / Avg session duration</td></tr>
+      <tr><td>来源</td><td>Referrer / Direct / Search engines / Social</td></tr>
+      <tr><td>地理</td><td>Country / City / ASN</td></tr>
+      <tr><td>设备</td><td>Browser / OS / Device type / Viewport</td></tr>
+      <tr><td>性能 (Core Web Vitals)</td><td>LCP / FID / CLS / INP / TTFB / FCP</td></tr>
+      <tr><td>路由</td><td>Top pages / 404 错误率（按 path 分组）</td></tr>
+    </tbody>
+  </table>
+
+  <h3>价格与配额</h3>
+  <div class="pricing-card">
+    <strong>免费档</strong>：<br>
+    • <strong>完全免费</strong>，CF Dashboard 直接看<br>
+    • Retention：30 天<br>
+    • 数据采样：低流量站点（&lt; 10k req/天）100% 采样，高流量站点自动采样<br>
+    • 不计入 Workers Paid quota
+  </div>
+
+  <h3>跟你现有 Telemetry SDK 的关系</h3>
+  <p>你已经在 dashboard 里埋了一套自己的 telemetry SDK（PR1，2026-05-01 上线），上报到 worker <code>/api/track</code> + D1 events 表。Web Analytics 不**替代**它，是<strong>互补</strong>：</p>
+
+  <table class="compact">
+    <thead><tr><th>能力</th><th>你的 telemetry SDK</th><th>CF Web Analytics</th></tr></thead>
+    <tbody>
+      <tr><td>用户级关联（device_id / user_id）</td><td>✅ 强（PR1 设计核心）</td><td>❌ 匿名汇总</td></tr>
+      <tr><td>业务事件（item_click / share_click）</td><td>✅ 自定义</td><td>❌ 只有 page view</td></tr>
+      <tr><td>漏斗 / 留存分析</td><td>✅（events 表自查）</td><td>❌</td></tr>
+      <tr><td>Core Web Vitals 全量上报</td><td>✅ 上报到 D1</td><td>✅ 现成 UI</td></tr>
+      <tr><td>分位数 UI（P50/P75/P95 LCP）</td><td>❌ 你要自己写 SQL + 看板</td><td>✅ 现成</td></tr>
+      <tr><td>地理 / 设备分布看板</td><td>❌ 要自己写</td><td>✅ 现成</td></tr>
+      <tr><td>Top pages / referrer 看板</td><td>❌</td><td>✅ 现成</td></tr>
+      <tr><td>D1 存储成本（读多了贵）</td><td>有</td><td>无</td></tr>
+    </tbody>
+  </table>
+
+  <h3>业务每个模块对照</h3>
+  <table class="decision">
+    <thead><tr><th>使用场景</th><th>当前怎么解决</th><th>切到 Web Analytics 后</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>「prod LCP 怎么样？」（性能监控）</td>
+        <td>D1 events 表 SELECT + 自写聚合，没看板</td>
+        <td>CF Dashboard 直接看 P50/P75/P95 + 设备分布</td>
+        <td class="verdict-do">直接用</td>
+      </tr>
+      <tr>
+        <td>「今天多少 UV？」</td>
+        <td>D1 SELECT COUNT(DISTINCT device_id)</td>
+        <td>WA Dashboard 直接看</td>
+        <td class="verdict-do">直接用</td>
+      </tr>
+      <tr>
+        <td>「移动端 vs PC 占比？」</td>
+        <td>D1 telemetry 没存 device type</td>
+        <td>WA 自动 ua parse</td>
+        <td class="verdict-do">直接用</td>
+      </tr>
+      <tr>
+        <td>「分享落地页转化率」</td>
+        <td>events 表 share_relations + landing 自查</td>
+        <td>WA 看不到 user-level，仍走自家 SDK</td>
+        <td class="verdict-skip">SDK 主导</td>
+      </tr>
+      <tr>
+        <td>「item_click 后用户去哪了」漏斗</td>
+        <td>events 表自查</td>
+        <td>WA 不支持漏斗</td>
+        <td class="verdict-skip">SDK 主导</td>
+      </tr>
+      <tr>
+        <td>「prod 哪个 page 404 多」</td>
+        <td>worker logs 自查</td>
+        <td>WA Top pages → 看 status code 分布</td>
+        <td class="verdict-do">直接用</td>
+      </tr>
+      <tr>
+        <td>「来源 referrer 分布」（哪些站给我引流）</td>
+        <td>D1 events 表 referrer 字段（如有）</td>
+        <td>WA 自动统计，看板</td>
+        <td class="verdict-do">直接用</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="verdict-box">
+    <h4>✅ 推荐：10 分钟开关，不用犹豫</h4>
+    <p><strong>收益</strong>：性能 + 流量看板免费白送，省自己写 dashboard 的事。补 SDK 短板（地理 / 设备 / 路由级 latency）。<br><br>
+    <strong>成本</strong>：开关 10 分钟，0 月费。<br><br>
+    <strong>分工</strong>：Web Analytics 负责「平台级聚合视图」（流量 / 性能 / 来源），自家 SDK 负责「业务级用户行为」（item_click / login_success / share_landing）。两个互补不冲突。<br><br>
+    <strong>下一步</strong>：开后 1 周回看，如果 Web Analytics 已经覆盖了 SDK 里某些事件（特别是 vitals），可以下线 SDK 那部分，省 D1 写入量。</p>
+  </div>
+</section>
+
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ Workers Logs ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="workers-logs" class="product">
+  <h2>5. Workers Logs / Logpush</h2>
+  <p class="one-liner">三个相关产品别混：<strong>wrangler tail</strong>（dev 实时）、<strong>Workers Logs</strong>（CF Dashboard 集中查询）、<strong>Logpush</strong>（推到 R2 / S3 / Datadog 长期存档）。</p>
+
+  <h3>三种工具的差异</h3>
+  <table class="compact">
+    <thead><tr><th>维度</th><th>wrangler tail</th><th>Workers Logs</th><th>Logpush</th></tr></thead>
+    <tbody>
+      <tr><td>查询方式</td><td>命令行流式</td><td>CF Dashboard 查询 UI</td><td>推到外部 destination</td></tr>
+      <tr><td>用途</td><td>本地 debug</td><td>事后看 prod 日志</td><td>长期归档 / SIEM 联动</td></tr>
+      <tr><td>Retention</td><td>实时（不存）</td><td>3-7 天（默认）</td><td>无限（按 destination）</td></tr>
+      <tr><td>查询字段</td><td>console.log 全文</td><td>结构化字段 + 全文</td><td>JSON 行（destination 自定义查询）</td></tr>
+      <tr><td>价格</td><td>免费</td><td>Workers Paid 含；超额 $0.60/M log lines</td><td>按 destination；R2 destination 免费</td></tr>
+    </tbody>
+  </table>
+
+  <h3>核心 API / 用法</h3>
+
+  <h4>Workers Logs（CF Dashboard 看）</h4>
+<pre><code># wrangler.toml 加：
+[observability]
+enabled = true                        # 开启 Workers Logs 写入
+head_sampling_rate = 1.0              # 1.0 = 全采样, 0.1 = 10% 采样降本
+
+[observability.logs]
+invocation_logs = true                # 自动加 request meta（path/status/duration）
+
+# 查询：CF Dashboard → Workers → 你的 worker → Logs tab
+# 支持 filter: status, path, region, ray_id, custom field</code></pre>
+
+  <h4>Logpush（推到 R2）</h4>
+<pre><code># 一次性创建 logpush job（CF API or wrangler，下面 API 示例）
+curl -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/logpush/jobs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "name": "xlist-worker-logs",
+    "destination_conf": "r2://xlist-logs/{DATE}?account-id=...&access-key-id=...&secret-access-key=...",
+    "dataset": "workers_trace_events",
+    "output_options": {
+      "field_names": ["EventTimestampMs", "Outcome", "Logs", "ScriptName", "ExceptionStack"]
+    }
+  }'</code></pre>
+
+  <h3>价格与配额</h3>
+  <div class="pricing-card">
+    <strong>Workers Logs（CF Dashboard）</strong>：<br>
+    • Workers Paid 含：<strong>20M log lines / 月</strong>免费<br>
+    • 超额：$0.60 / M lines<br>
+    • Retention：3 天默认（Paid plan）<br><br>
+    <strong>Logpush 到 R2</strong>：<br>
+    • Workers Paid 含 logpush 自身（之前是 Enterprise only，现在 Paid 也行）<br>
+    • R2 存储费按 R2 标准（Class A 写 $4.5/M，存储 $0.015/GB/月）<br>
+    • 估算每天 100k log lines × 30 天 = 3M lines/月，每行 ~500B = 1.5GB → R2 月费 ~$0.05<br><br>
+    <strong>Logpush 到 Datadog/Splunk/etc</strong>：<br>
+    • 第三方收费，CF 这边只算 API 调用免费
+  </div>
+
+  <h3>业务每个模块对照</h3>
+  <table class="decision">
+    <thead><tr><th>当前痛点</th><th>现状</th><th>切到 Logs/Logpush 后</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>「上周二下午 cron 跑挂了，原因？」</td>
+        <td>当时没 wrangler tail 着 → 日志丢了；只能从 D1 状态推断</td>
+        <td>Workers Logs 3 天内可查；Logpush R2 永久存档</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>「DeepSeek 这周失败率多少？」</td>
+        <td>console.warn 输出但没聚合，要肉眼看 wrangler tail</td>
+        <td>Logs 按 ScriptName 分组，filter "deepseek 503" 查总数</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>「prod 慢请求 P99」</td>
+        <td>没数据</td>
+        <td>Logs invocation_logs 自带 duration，按 path 看分位</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>「ScrapeBadger 用了多少配额本月」</td>
+        <td>没埋 → 只能去 SB 后台看</td>
+        <td>console.log 加结构化日志（<code>{ provider: 'sb', cost_units: ... }</code>）→ Logs 按 provider 聚合</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>「risk: SMS / email 风控触发记录历史 90 天看一下」</td>
+        <td>D1 sms_send_log + email_send_log 表保留</td>
+        <td>D1 已经存了，Logs 不替代；但 Logs 可以补「拒绝原因 + IP + 时间」的实时聚合视图</td>
+        <td class="verdict-watch">D1 主，Logs 辅</td>
+      </tr>
+      <tr>
+        <td>「PR6 异常告警分级」（TODO.md 待办）</td>
+        <td>设计中，目前 PushDeer 单一通道</td>
+        <td>Logpush 推到 R2 → 定时 worker 读 R2 跑规则 → 分级告警；或直接 Logpush → Datadog 用现成告警</td>
+        <td class="verdict-do">推荐做</td>
+      </tr>
+      <tr>
+        <td>「过 90 天审计 events 表满了想抽样存档」</td>
+        <td>没方案</td>
+        <td>D1 → Logpush dataset 不同（Logpush 是 worker invocation log，不是 D1）→ 仍需 D1 自己 export 到 R2</td>
+        <td class="verdict-skip">Logpush 不解决</td>
+      </tr>
+      <tr>
+        <td>本地 launchd（PH/GH scraper）日志</td>
+        <td>stdout 落本地文件 launchd 系统日志</td>
+        <td>Workers Logs/Logpush 是 CF 边缘的，本地 launchd 不在范围</td>
+        <td class="verdict-skip">不适用</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>建议的实施分两步</h3>
+  <h4>第一步（10 分钟）：开 Workers Logs</h4>
+  <p>改 <code>wrangler.toml</code> 加 <code>[observability] enabled = true</code> + <code>invocation_logs = true</code>。重新 deploy。立即生效，3 天内 prod 日志可在 CF Dashboard 查。免费额度内。</p>
+
+  <h4>第二步（按需）：Logpush 到 R2 长期归档</h4>
+  <p>仅当：(a) PR6 异常告警分级要做了；或 (b) 想跑历史日志分析（比如周报）；才花 1 天接 Logpush。月成本极低（~$0.05 R2 存储）。</p>
+
+  <div class="verdict-box">
+    <h4>✅ 第一步立刻做（Workers Logs，10 分钟），第二步等需求触发</h4>
+    <p><strong>第一步收益</strong>：(1) wrangler tail 不用挂着也能事后查；(2) 接到 PushDeer 告警后能立刻定位日志；(3) 看 cron 各模式跑得稳不稳。0 成本。<br><br>
+    <strong>第二步触发条件</strong>：PR6 异常告警分级排上来时，或者发现「我经常想查 30 天前的日志」。否则别提前做。<br><br>
+    <strong>不做的事</strong>：D1 业务数据（sms/email_send_log / events / items）不要往 Logpush 推，Logpush 是 worker invocation log dataset，跟 D1 不通。D1 归档另议（用 worker cron + R2 export）。</p>
+  </div>
+</section>
+
+
+<!-- ━━━━━━━━━━━━━━━━━━━━━ 决策总表 ━━━━━━━━━━━━━━━━━━━━━ -->
+<section id="summary" class="product">
+  <h2>六、决策总表</h2>
+  <p class="one-liner">5 个产品 × 业务影响 × ROI 排序，给你拿去做 PR-roadmap 优先级用。</p>
+
+  <table class="decision">
+    <thead><tr><th>产品</th><th>推荐级别</th><th>立即可做的范围</th><th>预估工时</th><th>预估月成本</th><th>核心收益</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Web Analytics</strong></td>
+        <td class="verdict-do">立即做</td>
+        <td>Dashboard 开关 + RUM beacon</td>
+        <td>10 分钟</td>
+        <td>$0</td>
+        <td>性能 + 流量看板免费白送</td>
+      </tr>
+      <tr>
+        <td><strong>Workers Logs</strong></td>
+        <td class="verdict-do">立即做</td>
+        <td>wrangler.toml 加 observability + 重 deploy</td>
+        <td>10 分钟</td>
+        <td>$0（20M lines/月 含 Paid）</td>
+        <td>事后查 prod 日志能力</td>
+      </tr>
+      <tr>
+        <td><strong>Images (cdn-cgi/image)</strong></td>
+        <td class="verdict-do">优先做</td>
+        <td>proxyImg() 加 width/format 参数 + 5-10 个调用方升级</td>
+        <td>~半天</td>
+        <td>$5-10</td>
+        <td>移动端流量减 60-80%，LCP 显著提升</td>
+      </tr>
+      <tr>
+        <td><strong>Queues</strong></td>
+        <td class="verdict-do">分阶段做</td>
+        <td>第一刀 fill-translations → 第二刀 X 主链 → 第三刀 GH 链</td>
+        <td>~3 天</td>
+        <td>$0（在免费额度内）</td>
+        <td>单条失败不阻塞，cron 不再串行卡顿，吞吐 ×100</td>
+      </tr>
+      <tr>
+        <td><strong>Workflows</strong></td>
+        <td class="verdict-watch">部分做</td>
+        <td>GH 4 模式 + Longform 链（不切 X 主链 — 太贵）</td>
+        <td>~3 天</td>
+        <td>$0（免费额度内，X 主链留 Queue）</td>
+        <td>trace 可视 + 删掉 D1 状态字段 + retry 内置</td>
+      </tr>
+      <tr>
+        <td><strong>Logpush</strong></td>
+        <td class="verdict-watch">按需</td>
+        <td>PR6 异常告警分级触发时再做</td>
+        <td>~1 天</td>
+        <td>$0.05（R2 存储）</td>
+        <td>30+ 天日志归档 + 异常告警基础</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>建议的 PR-roadmap 排列</h3>
+  <ol style="font-size:14px">
+    <li><strong>这周（2 小时）</strong>：开 Web Analytics + Workers Logs（共 20 分钟）+ AI Gateway 包 DeepSeek（半天，前一份文档推荐过）</li>
+    <li><strong>下周（半天 + 3 天）</strong>：Images cdn-cgi 改造 dashboard（半天，立见效）+ Queue 第一刀 fill-translations（1 天，最痛点）</li>
+    <li><strong>下下周（2 天）</strong>：Queue 第二刀 X 主 ingest 链 + 第三刀 GH 链</li>
+    <li><strong>之后（按需）</strong>：Workflow 切 GH 链 + Longform；Logpush 等 PR6 一起做</li>
+  </ol>
+</section>
+
+</main>
+
+<script>
+  // 点 TOC 链接后自动关闭 drawer
+  document.querySelectorAll('nav.toc a').forEach(a => {
+    a.addEventListener('click', () => {
+      document.getElementById('toc-toggle').checked = false;
+    });
+  });
+</script>
+</body>
+</html>
