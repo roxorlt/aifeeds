@@ -336,18 +336,38 @@ function stripFrontmatter(md: string): string {
 }
 
 // ─── README 翻译（保留代码块）─────────────────────────────────────────────
-const TRANSLATE_MARKDOWN_PROMPT = `You are translating Markdown documentation to Chinese (zh-CN) for a developer-focused content feed.
+const TRANSLATE_MARKDOWN_PROMPT = `你是 markdown 翻译助手。把以下 ClawHub skill 的 README 文档翻译成中文。
 
-CRITICAL RULES — DO NOT VIOLATE:
-1. PRESERVE all fenced code blocks (\`\`\`...\`\`\`) verbatim. Do not translate any code, comments inside code, shell commands, or path arguments.
-2. PRESERVE all inline code spans (\`...\`) verbatim.
-3. PRESERVE all Markdown structure: headings (#), lists (-, *, 1.), tables (| ... |), links ([](url)), images (![](url)), bold/italic.
-4. Inside table cells: translate text, preserve code/links.
-5. KEEP these technical terms in English even in prose: OAuth, API, MCP, skill, plugin, agent, hook, prompt, workflow, LLM, RAG, claw, npm, brew, bash, yaml, json, JSON, README.
-6. Preserve all proper nouns (product/library names, GitHub handles, file paths, URLs) verbatim.
-7. Keep YAML frontmatter (between leading "---" lines) as-is if present.
+【质量门槛】中文译文必须满足：
+- 16 岁聪明青少年第一次读就能理解（不用术语堆砌，复杂概念用平实话讲清）。
+- 中文母语者认可的中文用语习惯 — 句子节奏、词序、连接词都要符合中文语感，**不要逐字直译保留英文句式**。需要时整句重组。
+- 避免翻译腔：能用动词的地方少用"对于 X 来说"/"X 的 Y"/"进行+动词"/"做出+名词"。段首不要无故堆"在……方面"/"关于……"。
+- 用动词主导、短句自然的中文节奏（例："运行这个命令" 不写 "执行该命令的运行"）。
 
-Output Chinese Markdown only, no preamble, no explanation.`;
+【markdown 结构规则】
+1. 保留**所有 markdown 结构**（# 标题 / - 列表 / 1. 编号 / [text](url) 链接 / ![alt](url) 图片 / > 引用 / | 表格 | / --- 分隔线 / **粗体** / *斜体* / ~~删除线~~）。
+2. **代码块（\`\`\` 包围）和行内代码（\` 包围）**：内容**完全不翻译**，原样保留 — 代码、注释、shell 命令、路径参数都保留英文。
+3. **链接 URL** 不翻译，只翻译显示文字（[显示文字](url) 中的 "显示文字"）。
+4. **HTML 标签**（<p> <img> <iframe> <video> <details> <summary> <a> <br> 等）保留原样，标签内的文字才翻译。
+5. **YAML frontmatter**（开头 \`---\` ... \`---\` 之间）原样保留，不翻译。
+6. **表格单元格**：翻译文字，保留代码 / 链接 / 结构。
+
+【术语规则】
+7. **技术术语保留英文原文**（OAuth / API / MCP / agent / plugin / hook / prompt / workflow / LLM / RAG / Transformer / fine-tuning / embedding / claw / npm / brew / bash / yaml / json / JSON / README / SKILL.md），需要的时候在英文后用括号补简短中文释义，例如 "Transformer（自注意力架构）"、"RAG（检索增强生成）"。**短语已经常用化的（如 OAuth、API）不补释义**。
+8. **品牌名 / 产品名 / 项目名 / GitHub 用户名 @xxx / 文件路径 / URL** 一律保留原文。
+9. **代码注释** 不翻译。
+
+【常用译法对照】
+- agent → 智能体（不译"代理"）
+- token / tokens → token / Token（不译"令牌"，那是 OAuth 用法）
+- fine-tune / fine-tuning → 微调
+- prompt → 提示词 / prompt（看上下文选）
+- fork（动词）→ fork
+- PR → PR
+- repo → repo / 代码仓库
+
+【输出】
+仅输出翻译后的 markdown，不要任何前后缀解释，不要 \`\`\`markdown 代码块包装。`;
 
 async function translateMarkdown(env: ClawhubEnv, md: string): Promise<string | null> {
   if (!env.DEEPSEEK_API_KEY) return null;
