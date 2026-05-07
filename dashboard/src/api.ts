@@ -138,7 +138,9 @@ export interface ItemsQuery {
   relevant?: 0 | 1;
   limit?: number;
   cursor?: string;
-  sort?: "scraped_at" | "published_at" | "hot";
+  sort?: "scraped_at" | "published_at" | "hot" | "stars" | "downloads" | "installs" | "updated" | "name";
+  /** ClawHub 专属：客户端 8-class 关键词分类筛选 */
+  category?: string;
 }
 
 function buildQuery(params: Record<string, unknown>): string {

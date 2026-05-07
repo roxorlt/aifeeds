@@ -6,6 +6,7 @@ import { ThreadCard } from "./ThreadCard";
 import { GithubCard } from "./GithubCard";
 import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
+import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { SourceIcon } from "./icons";
 import {
   groupByThread,
@@ -150,6 +151,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [sortMode, setSortMode] = useState<SortMode>(
     sourceType === "github" || sourceType === "product_hunt" ? "time" : "hot",
   );
+  // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category 通过 query param 传 worker
+  const [chSort, setChSort] = useState<ClawhubSort>("stars");
+  const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
+  const isClawhub = sourceType === "clawhub";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
   const [pullY, setPullY] = useState(0);
@@ -179,7 +184,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     fetchItems({
       source_type: sourceType,
       limit: INITIAL_LIMIT,
-      sort: isHot ? "hot" : undefined,
+      sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
+      category: isClawhub && chCategory !== "all" ? chCategory : undefined,
     })
       .then((res) => {
         if (cancelled) return;
@@ -213,7 +219,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick, isHot]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -224,7 +230,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         source_type: sourceType,
         cursor: nextCursor,
         limit: LOAD_MORE_LIMIT,
-        sort: isHot ? "hot" : undefined,
+        sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
+        category: isClawhub && chCategory !== "all" ? chCategory : undefined,
       });
       consecutiveFailRef.current = 0;
       const seen = isHot ? getSeenIds(sourceType) : null;
@@ -561,7 +568,25 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {!placeholder && sourceType !== "github" && sourceType !== "product_hunt" && (
+          {!placeholder && isClawhub && (
+            <ClawhubColumnHeader
+              sort={chSort}
+              category={chCategory}
+              onSortChange={(next) => {
+                if (next !== chSort) {
+                  track(EVENTS.SORT_CHANGE, { from: chSort, to: next, source: sourceType });
+                  setChSort(next);
+                }
+              }}
+              onCategoryChange={(next) => {
+                if (next !== chCategory) {
+                  track(EVENTS.SORT_CHANGE, { from: `cat:${chCategory}`, to: `cat:${next}`, source: sourceType });
+                  setChCategory(next);
+                }
+              }}
+            />
+          )}
+          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {

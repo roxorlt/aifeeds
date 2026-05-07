@@ -847,13 +847,33 @@ function toIntOrNull(v: unknown): number | null {
 // ─── GET /api/items?source_type=clawhub ────────────────────────
 // ClawHub feed (marketplace style):
 //   - is_relevant=1, deleted_at IS NULL
-//   - ORDER BY metrics.stars DESC, id ASC
-//   - cursor: "stars|id" for pagination
-//   - hot 跟默认时间排序都走 stars 排序（marketplace 不像 X 那种流式新闻）
+//   - sort 默认 stars desc；可选 downloads/installs/updated/newest/name
+//   - category 默认 all；可选 mcp-tools/prompts/workflows/dev-tools/data/security/automation/other
+//     （extra.category 由 phase 1 cron 端按关键词派生，存在 items.extra）
+//   - cursor 格式按 sort 维度而异
+//   - hide_suspicious 默认 true（fetch 时已过滤，DB 里全是 nonSuspicious 不需要再过滤）
+
+const CLAWHUB_SORT_EXPR: Record<string, string> = {
+  stars:     `CAST(json_extract(metrics, '$.stars') AS INTEGER)`,
+  downloads: `CAST(json_extract(metrics, '$.downloads') AS INTEGER)`,
+  installs:  `CAST(json_extract(metrics, '$.installsCurrent') AS INTEGER)`,
+  updated:   `published_at`,
+  name:      `LOWER(title)`,
+};
+const CLAWHUB_SORT_DIR: Record<string, 'DESC' | 'ASC'> = {
+  stars: 'DESC', downloads: 'DESC', installs: 'DESC',
+  updated: 'DESC', name: 'ASC',
+};
+
 async function handleClawhubFeed(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
+  const sort = (url.searchParams.get('sort') || 'stars').toLowerCase();
+  const category = (url.searchParams.get('category') || 'all').toLowerCase();
+
+  const sortExpr = CLAWHUB_SORT_EXPR[sort] || CLAWHUB_SORT_EXPR.stars;
+  const sortDir = CLAWHUB_SORT_DIR[sort] || 'DESC';
 
   const conditions: string[] = [
     "source_type='clawhub'",
@@ -862,21 +882,27 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
   ];
   const params: unknown[] = [];
 
+  if (category !== 'all') {
+    conditions.push(`json_extract(extra, '$.category') = ?`);
+    params.push(category);
+  }
+
   if (cursor) {
-    const [starsStr, idStr] = cursor.split('|');
-    const stars = parseInt(starsStr, 10);
-    if (!Number.isNaN(stars) && idStr) {
-      // (stars DESC, id ASC) lexicographic:
-      //   stars < cursor.stars
-      //   OR (stars = cursor.stars AND id > cursor.id)
-      conditions.push(`(
-        CAST(json_extract(metrics, '$.stars') AS INTEGER) < ?
-        OR (
-          CAST(json_extract(metrics, '$.stars') AS INTEGER) = ?
-          AND id > ?
-        )
-      )`);
-      params.push(stars, stars, idStr);
+    const [valueStr, idStr] = cursor.split('|');
+    if (valueStr && idStr) {
+      // 按 sort dir 决定 cursor 比较运算符
+      const cmpLT = sortDir === 'DESC' ? '<' : '>';
+      const cmpGT = sortDir === 'DESC' ? '>' : '<';
+      // value 类型按 sort 维度而异：name 是 string，其他是 number / time iso string
+      const isNumeric = ['stars', 'downloads', 'installs'].includes(sort);
+      const cursorValue = isNumeric ? parseInt(valueStr, 10) : valueStr;
+      if (!isNumeric || !Number.isNaN(cursorValue as number)) {
+        conditions.push(`(
+          ${sortExpr} ${cmpLT} ?
+          OR (${sortExpr} = ? AND id ${cmpGT === '>' ? '>' : '>'} ?)
+        )`);
+        params.push(cursorValue, cursorValue, idStr);
+      }
     }
   }
 
@@ -884,7 +910,7 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
   const sql = `
     SELECT * FROM items
     WHERE ${where}
-    ORDER BY CAST(json_extract(metrics, '$.stars') AS INTEGER) DESC, id ASC
+    ORDER BY ${sortExpr} ${sortDir}, id ASC
     LIMIT ?
   `;
   params.push(limit + 1);
@@ -901,8 +927,13 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
     const lastMetrics = last.metrics as Record<string, unknown> | null;
-    const lastStars = lastMetrics && typeof lastMetrics === 'object' ? lastMetrics.stars : null;
-    nextCursor = `${lastStars ?? 0}|${last.id}`;
+    let cursorValue: string | number = '';
+    if (sort === 'stars') cursorValue = (lastMetrics?.stars as number) ?? 0;
+    else if (sort === 'downloads') cursorValue = (lastMetrics?.downloads as number) ?? 0;
+    else if (sort === 'installs') cursorValue = (lastMetrics?.installsCurrent as number) ?? 0;
+    else if (sort === 'updated') cursorValue = (last.published_at as string) ?? '';
+    else if (sort === 'name') cursorValue = ((last.title as string) ?? '').toLowerCase();
+    nextCursor = `${cursorValue}|${last.id}`;
   }
 
   return jsonResponse({
