@@ -625,36 +625,105 @@ grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut 
 **位置**：项目根 `.secrets/cf-ops.env`（已 gitignored，路径见 `.gitignore` `.secrets/` 一行）
 
 **内容**：
-- `CF_OPS_API_TOKEN` — account-owned token，权限是「创建 account-owned 子 token」（不能直接操作 Turnstile / Workers / DNS 等具体资源）
+- `CF_OPS_API_TOKEN` — account-owned master token，权限是「创建 account-owned 子 token」（**自身不带任何资源 Read / Write 权限**，连 list zones 都返回空）
 - `CF_ACCOUNT_ID` — CF account ID
+- `CF_ZONE_ID` — 默认 zone（当前指向 `ai-feeds.com`，zone ID `e7982a660d8def7a2ce5ec60f28282fc`）；如新增 zone 再补 `CF_ZONE_<NAME>` 变量
+- `CF_ZONE_AIFEEDS_COM` — `ai-feeds.com` 的具体 zone ID（覆盖所有子域 staging-api / api / www / staging / blog / mail）
 
-**用途**：让 Claude Code session 跨对话延续 CF 运维能力。session 用 master token 现场创建一个「最小权限 + 短 TTL」的子 token 去做实际操作（list widgets、推 secret、改 DNS 等），避免长期暴露高权限 token。
+**用途**：让 Claude Code session 跨对话延续 CF 运维能力。session 用 master token 现场创建一个「最小权限 + 短 TTL」的子 token 去做实际操作（看 zone settings、列 WAF rules、查 Turnstile widgets、推 secret、改 DNS 等），避免长期暴露高权限 token。
 
 **典型用法**（Bash）：
+
 ```bash
 source .secrets/cf-ops.env
 
-# Step 1: 查 permission group ID（一次性，可缓存到笔记里）
+# Step 1: 查 permission group ID（一次性，可缓存到下方表里）
 curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens/permission_groups" \
-  -H "Authorization: Bearer $CF_OPS_API_TOKEN" | jq '.result[] | select(.name | test("Turnstile"))'
+  -H "Authorization: Bearer $CF_OPS_API_TOKEN" | jq '.result[] | select(.name | test("(?i)bot|zone|waf"))'
 
-# Step 2: 用 master token 创建一个只带需要权限的子 token（24h 过期）
+# Step 2: 写 policy JSON 文件（注意 resource 写法见下方规则）
 EXPIRES=$(date -u -v+24H +"%Y-%m-%dT%H:%M:%SZ")
+cat > /tmp/cf-subtoken.json <<EOF
+{
+  "name": "ops-readonly-$(date +%s)",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": [
+        {"id": "c8fed203ed3043cba015a93ad1616f1f"},
+        {"id": "517b21aee92c4d89936c976ba6e4be55"}
+      ],
+      "resources": {"com.cloudflare.api.account.zone.${CF_ZONE_ID}": "*"}
+    }
+  ],
+  "expires_on": "${EXPIRES}"
+}
+EOF
+
+# Step 3: 创建子 token
 SUB_TOKEN=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens" \
   -H "Authorization: Bearer $CF_OPS_API_TOKEN" -H "Content-Type: application/json" \
-  --data "{\"name\":\"ops-$(date +%s)\",\"policies\":[{\"effect\":\"allow\",\"permission_groups\":[{\"id\":\"<PERMISSION_GROUP_ID>\"}],\"resources\":{\"com.cloudflare.api.account.$CF_ACCOUNT_ID\":\"*\"}}],\"expires_on\":\"$EXPIRES\"}" \
-  | jq -r '.result.value')
+  --data @/tmp/cf-subtoken.json | jq -r '.result.value')
+echo "$SUB_TOKEN" > /tmp/cf-sub.token && chmod 600 /tmp/cf-sub.token
 
-# Step 3: 用子 token 干活（示例：列 Turnstile widgets）
-curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/challenges/widgets" \
-  -H "Authorization: Bearer $SUB_TOKEN"
+# Step 4: 用子 token 干活（示例：查 zone settings）
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/bot_management" \
+  -H "Authorization: Bearer $SUB_TOKEN" | jq
 ```
 
+**⚠️ 创建子 token 的 resource 写法（踩坑笔记，2026-05-07）**：
+
+account-owned token 创建子 token 时，resource 字段对每种 scope 有不同写法。**写错就报 1001 error**：
+
+| scope | 错误写法 ❌ | 正确写法 ✅ |
+|---|---|---|
+| Account-scoped permission group（如 `Account Analytics Read`） | — | `"com.cloudflare.api.account.${CF_ACCOUNT_ID}": "*"` |
+| Zone-scoped permission group（如 `Zone Read`、`Bot Management Read`） | `"com.cloudflare.api.account.zone.*": "*"`（报 "must specify a zone for account owned tokens"）<br/>`"com.cloudflare.api.account.${CF_ACCOUNT_ID}.zone.*": "*"`（报 "is not a supported resource type"） | `"com.cloudflare.api.account.zone.${ZONE_ID}": "*"`（必须 nest 到具体 zone ID，不能通配） |
+| 同一个 policy 混合不同 scope | — | 不行。混合 scope 需写**两个独立 policies**，每个 policies 只放 scope 一致的 permission_groups |
+
+完整多 scope 模板见上面 Step 2 JSON 里的 `policies` 数组结构。
+
 **已知 permission group ID**（用过的，免去重新查）：
-| 名称 | ID |
-|---|---|
-| Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` |
-| Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` |
+
+| 名称 | ID | scope |
+|---|---|---|
+| Account Analytics Read | `b89a480218d04ceb98b4fe57ca29dc1f` | account |
+| Zone Read | `c8fed203ed3043cba015a93ad1616f1f` | zone |
+| Zone Settings Read | `517b21aee92c4d89936c976ba6e4be55` | zone |
+| Zone WAF Read | `dbc512b354774852af2b5a5f4ba3d470` | zone |
+| Zone Settings Write | `3030687196b94b638145a3953da2b699` | zone |
+| Zone WAF Write | `fb6778dc191143babbfaa57993f1d275` | zone |
+| Bot Management Read | `07bea2220b2343fa9fae15656c0d8e88` | zone |
+| Bot Management Write | `3b94c49258ec4573b06d51d99b6416c0` | zone |
+| Analytics Read | `9c88f9c5bce24ce7af9a958ba9c504db` | zone |
+| Firewall Services Read | `4ec32dfcb35641c5bb32d5ef1ab963b4` | zone |
+| Firewall Services Write | `43137f8d07884d3198dc0ee77ca6e79b` | zone |
+| Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` | account |
+| Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` | account |
+
+**常用 endpoint 速查**（用 Step 4 的子 token）：
+
+```bash
+# 看 3 个 SEO/GEO 关键开关一次性
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/settings/security_level" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result.value'      # under_attack 模式开关
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/bot_management" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result'                    # fight_mode + ai_bots_protection
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result.rules[] | {description, action, enabled}'  # WAF custom rules
+
+# Analytics 流量数据（GraphQL）
+SINCE=$(date -u -v-23H +"%Y-%m-%dT%H:%M:%SZ")  # ⚠️ 免费版 zone Adaptive 时间窗严格 < 24h，安全用 23h
+curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $SUB_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"query\":\"query { viewer { zones(filter: {zoneTag: \\\"$CF_ZONE_ID\\\"}) { httpRequestsAdaptiveGroups(limit: 30, orderBy: [count_DESC], filter: {datetime_geq: \\\"$SINCE\\\", verifiedBotCategory_neq: \\\"\\\"}) { count dimensions { clientRequestHTTPHost verifiedBotCategory } } } } }\"}" | jq
+
+# 1d Groups（最长 30 天）— 看每日总请求 / 缓存 / 威胁
+curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $SUB_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"query\":\"query { viewer { zones(filter: {zoneTag: \\\"$CF_ZONE_ID\\\"}) { httpRequests1dGroups(limit: 30, orderBy: [date_DESC]) { dimensions { date } sum { requests cachedRequests threats pageViews } uniq { uniques } } } } }\"}" | jq
+```
+
+**免费版 Plan 已知限制**（计入查询时考虑）：
+- `httpRequestsAdaptiveGroups` 单次查询时间窗严格小于 24h（用 23h 安全）
+- `botScore`、`botScoreSrc` 等高级字段无访问权限（authz 错误）
+- Page Rules endpoint **不接受 account-owned token**（报 1011），只能用 user-owned token 看
+- Bot Fight Mode（基础版）不能被 WAF custom rule `skip` action bypass（这是 BFM 自身限制，与 token 权限无关）
 
 **轮换 / 撤销**：
 - 怀疑泄露：CF Dashboard → 头像 → My Profile → API Tokens → 找到 token → Roll（生成新值）或 Delete

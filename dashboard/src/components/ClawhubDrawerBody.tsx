@@ -4,7 +4,7 @@
 // Order (post-brainstorm lock):
 //   ① Header (avatar + title + meta + category chip)
 //   ② Stats 2×3
-//   ③ README (translated)
+//   ③ 简介 (translated, listing API summary，非真 README — README 全文需 ZIP 流水线 v1)
 //   ④ Safety (conditional)
 //   ⑤ Install
 //   ⑥ Trends 30d (collapsible, v2)
@@ -12,8 +12,9 @@
 //   ⑧ SKILL.md original (collapsible, v1 — empty until ZIP pipeline lands)
 //   ⑨ Footer
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Item } from "../types";
+import { fetchItem } from "../api";
 import { cn, formatCompact, parseJsonField } from "../lib/utils";
 import {
   IconStarFill,
@@ -139,10 +140,28 @@ interface Props {
   item: Item;
 }
 
+// 趋势模块阈值：每天 phase 1 cron 跑 2 次（BJT 04:00 + 16:00）→ 2 行/天 ×
+// 7 天 = 14 行。低于这个量级 sparkline 抖动剧烈、信息量低，不展示。
+const TRENDS_MIN_DATA_POINTS = 14;
+
 export function ClawhubDrawerBody({ item }: Props) {
   const extra = parseJsonField<ClawhubExtra>(item.extra) ?? ({} as ClawhubExtra);
   const metrics = parseJsonField<ClawhubMetrics>(item.metrics) ?? ({} as ClawhubMetrics);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [historyCount, setHistoryCount] = useState<number>(0);
+
+  // 拉 metrics_history 决定是否展示 30 天趋势区段（< 14 个采样点不展示）
+  useEffect(() => {
+    let cancelled = false;
+    fetchItem(item.id).then((resp) => {
+      if (cancelled) return;
+      const hist = resp.metrics_history;
+      if (hist) setHistoryCount(hist.length);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [item.id]);
+
+  const showTrends = historyCount >= TRENDS_MIN_DATA_POINTS;
 
   const slug = extra.slug || item.source_id;
   const displayName = item.title || slug;
@@ -255,11 +274,12 @@ export function ClawhubDrawerBody({ item }: Props) {
         </div>
       </div>
 
-      {/* ③ README (translated) */}
+      {/* ③ 简介 — 来自 ClawHub listing API 的 summary 字段（短描述，~200 字符）
+            真正的 README.md 全文需要 ZIP 流水线拉，v1 后置项；现阶段标签写「简介」更准确 */}
       {summary && (
         <div className="border-b border-neutral-200 p-5">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500 mb-2">
-            README
+            简介
           </div>
           <p className="text-[14px] leading-relaxed text-neutral-800 whitespace-pre-wrap break-words">
             {summary}
@@ -418,21 +438,23 @@ export function ClawhubDrawerBody({ item }: Props) {
         </div>
       )}
 
-      {/* ⑥ Trends 30d (默认折叠 v2 — 数据点 ≥ 7 + variance > 5% 才展示) */}
-      <details className="border-b border-neutral-200 group">
-        <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-          30 天趋势
-          <span className="ml-auto text-[10px] text-neutral-400 font-normal">数据累积中</span>
-        </summary>
-        <div className="px-5 pb-5">
-          <div className="rounded-md bg-neutral-50 ring-1 ring-neutral-200 p-4 text-center text-[12px] text-neutral-500">
-            数据累积中。需要至少 7 天 metrics 快照 + 波动率 &gt; 5% 才展示走势图（v2）。
+      {/* ⑥ Trends 30d — 数据点 ≥ 14 才展示（每天 2 个采样点 × 7 天 = 14） */}
+      {showTrends && (
+        <details className="border-b border-neutral-200 group">
+          <summary className="cursor-pointer p-5 text-[12px] font-semibold text-neutral-700 flex items-center gap-2 hover:bg-neutral-50">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-neutral-400 group-open:rotate-180 transition-transform">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+            30 天趋势
+            <span className="ml-auto text-[10px] text-neutral-400 font-normal">{historyCount} 个采样点</span>
+          </summary>
+          <div className="px-5 pb-5">
+            <div className="rounded-md bg-gradient-to-b from-emerald-50 to-white ring-1 ring-emerald-200 p-4 h-32 flex items-center justify-center text-[12px] text-emerald-700">
+              ★ stars 走势 sparkline（v2 渲染中…当前仅展示采样点数）
+            </div>
           </div>
-        </div>
-      </details>
+        </details>
+      )}
 
       {/* ⑦ Files manifest（默认折叠，v0 无 ZIP 数据） */}
       <details className="border-b border-neutral-200 group">

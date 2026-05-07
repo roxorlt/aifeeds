@@ -1069,7 +1069,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     siblings = result.results.map(parseItemRow);
   }
 
-  // For GitHub items, attach metrics_history (last 30 days) so drawer can
+  // For GitHub / ClawHub items, attach metrics_history (last 30 days) so drawer can
   // render a sparkline (v2). Cheap query, ~20-60 rows per repo.
   let metricsHistory: Record<string, unknown>[] = [];
   if (parsedItem.source_type === 'github') {
@@ -1085,6 +1085,19 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
       metricsHistory = histResult.results;
     } catch (e) {
       // Table may not exist yet pre-migration — silently empty.
+    }
+  } else if (parsedItem.source_type === 'clawhub') {
+    try {
+      const thirtyDaysAgoUnix = Math.floor(Date.now() / 1000) - 30 * 86400;
+      const histResult = await env.DB.prepare(
+        `SELECT captured_at, stars, downloads, installs_current, installs_all_time
+           FROM metrics_snapshots_clawhub
+          WHERE item_id = ? AND captured_at >= ?
+       ORDER BY captured_at ASC`
+      ).bind(id, thirtyDaysAgoUnix).all();
+      metricsHistory = histResult.results;
+    } catch (e) {
+      // ignore
     }
   }
 

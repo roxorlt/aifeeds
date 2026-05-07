@@ -151,9 +151,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [sortMode, setSortMode] = useState<SortMode>(
     sourceType === "github" || sourceType === "product_hunt" ? "time" : "hot",
   );
-  // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category 通过 query param 传 worker
+  // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category + hideSuspicious 通过 query param 传 worker
   const [chSort, setChSort] = useState<ClawhubSort>("stars");
   const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
+  const [chHideSuspicious, setChHideSuspicious] = useState<boolean>(true);
   const isClawhub = sourceType === "clawhub";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
@@ -186,12 +187,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       limit: INITIAL_LIMIT,
       sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
       category: isClawhub && chCategory !== "all" ? chCategory : undefined,
+      include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
     })
       .then((res) => {
         if (cancelled) return;
         let itemsToShow = res.items;
-        if (isHot) {
+        if (isHot && !isClawhub) {
           // Filter out already-seen ids so pull-down surfaces unseen hottest.
+          // ClawHub 是 marketplace 性质，不是流式新闻，所有用户应看完整 top 而不
+          // 是被曝光过的就过滤掉 → 跳过此过滤。
           const seen = getSeenIds(sourceType);
           itemsToShow = res.items.filter((i) => !seen.has(i.id));
           markSeen(sourceType, itemsToShow.map((i) => i.id));
@@ -219,7 +223,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory, chHideSuspicious]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -232,15 +236,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         limit: LOAD_MORE_LIMIT,
         sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
         category: isClawhub && chCategory !== "all" ? chCategory : undefined,
+        include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
       });
       consecutiveFailRef.current = 0;
-      const seen = isHot ? getSeenIds(sourceType) : null;
+      const seen = (isHot && !isClawhub) ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
         const fresh = res.items.filter(
           (i) => !existing.has(i.id) && (!seen || !seen.has(i.id)),
         );
-        if (isHot) markSeen(sourceType, fresh.map((i) => i.id));
+        if (isHot && !isClawhub) markSeen(sourceType, fresh.map((i) => i.id));
         return [...prev, ...fresh];
       });
       setNextCursor(res.next_cursor);
@@ -380,9 +385,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // filtered out as "seen", items becomes empty but hasMore is still true.
   // Auto-chain into the next page so the user doesn't see a dead empty state.
   useEffect(() => {
+    // ClawHub 不走曝光过滤，所以不会出现"items 全空 hasMore=true"的死页；跳过 chain
     if (
       !placeholder &&
       isHot &&
+      !isClawhub &&
       !loading &&
       !loadingMore &&
       hasMore &&
@@ -391,7 +398,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     ) {
       loadMore();
     }
-  }, [placeholder, isHot, loading, loadingMore, hasMore, nextCursor, items.length, loadMore]);
+  }, [placeholder, isHot, isClawhub, loading, loadingMore, hasMore, nextCursor, items.length, loadMore]);
 
   // Polling for new items. In time mode we prepend to `pending` and let the
   // banner show "N 条新内容"; click prepends + scrolls to top. In hot mode the
@@ -498,7 +505,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
   }, [sourceType, placeholder, items, isHot]);
 
-  const { spotlightItem } = useDrawer();
+  const { spotlightItem, clearSpotlight } = useDrawer();
+
+  // ClawHub: 当排序/分类/隐藏可疑任一变更时，释放当前 pin 在顶部的 spotlight，
+  // 否则那条 item 会继续置顶但不符合新筛选条件。挂在 mount 后跳过首次（避免
+  // 进入页面就误清新设置的 spotlight）。
+  const filterChangeIgnoreRef = useRef(true);
+  useEffect(() => {
+    if (!isClawhub) return;
+    if (filterChangeIgnoreRef.current) {
+      filterChangeIgnoreRef.current = false;
+      return;
+    }
+    clearSpotlight();
+  }, [isClawhub, chSort, chCategory, chHideSuspicious, clearSpotlight]);
 
   // Inject the spotlight tweet (from cold-link or in-app drawer open) at the
   // top of this column's data, so closing the drawer leaves the user able to
@@ -572,6 +592,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             <ClawhubColumnHeader
               sort={chSort}
               category={chCategory}
+              hideSuspicious={chHideSuspicious}
               onSortChange={(next) => {
                 if (next !== chSort) {
                   track(EVENTS.SORT_CHANGE, { from: chSort, to: next, source: sourceType });
@@ -583,6 +604,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                   track(EVENTS.SORT_CHANGE, { from: `cat:${chCategory}`, to: `cat:${next}`, source: sourceType });
                   setChCategory(next);
                 }
+              }}
+              onHideSuspiciousChange={(next) => {
+                track(EVENTS.SORT_CHANGE, { from: `susp:${chHideSuspicious}`, to: `susp:${next}`, source: sourceType });
+                setChHideSuspicious(next);
               }}
             />
           )}

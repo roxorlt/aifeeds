@@ -141,6 +141,8 @@ export interface ItemsQuery {
   sort?: "scraped_at" | "published_at" | "hot" | "stars" | "downloads" | "installs" | "updated" | "name";
   /** ClawHub 专属：客户端 8-class 关键词分类筛选 */
   category?: string;
+  /** ClawHub 专属：true = 包含可疑 skill；undefined/false = 默认隐藏（v0：当前 DB 只有非可疑数据，flag 透传 worker 但实际 no-op）*/
+  include_suspicious?: boolean;
 }
 
 function buildQuery(params: Record<string, unknown>): string {

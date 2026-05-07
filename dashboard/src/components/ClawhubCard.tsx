@@ -100,13 +100,13 @@ export function ClawhubCard({ item }: Props) {
         )}
 
         <div className="min-w-0 flex-1">
-          {/* Title */}
+          {/* Title — text-[15px] font-bold（手册基线）*/}
           <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
             {displayName}
           </div>
 
-          {/* Second line: @handle · v · category chip */}
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-neutral-500">
+          {/* Meta line — text-[13px] 跟 GH/PH 卡片对齐 */}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
             {ownerHandle && <span className="truncate">@{ownerHandle}</span>}
             {version && (
               <>
@@ -117,7 +117,7 @@ export function ClawhubCard({ item }: Props) {
             <span className="text-neutral-400">·</span>
             <span
               className={cn(
-                "rounded-full px-1.5 text-[10px] font-medium",
+                "rounded-full px-1.5 py-0.5 text-[11px] font-medium",
                 categoryStyle,
               )}
             >
@@ -127,15 +127,15 @@ export function ClawhubCard({ item }: Props) {
         </div>
       </div>
 
-      {/* Body: README/summary translated, line-clamp-4 */}
+      {/* Body — text-[15px] leading-[1.45] line-clamp-4，跟 GH/PH 同款 */}
       {summary && (
-        <p className="mt-2 text-[13px] leading-relaxed text-neutral-700 line-clamp-4 break-words">
+        <p className="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-4">
           {summary}
         </p>
       )}
 
-      {/* Metrics: stars / downloads / active installs */}
-      <div className="mt-2.5 flex items-center gap-3 text-[12px] text-neutral-500 tabular-nums">
+      {/* Footer metrics — text-[13px]，gap-x-3 gap-y-0.5，跟 GH/PH 同款 */}
+      <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500 tabular-nums">
         <span className="inline-flex items-center gap-1" title={`${stars} 星标`}>
           <IconStarFill className="h-3.5 w-3.5 text-amber-500" />
           {formatCompact(stars)}

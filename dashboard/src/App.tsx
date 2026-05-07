@@ -34,12 +34,12 @@ interface SourceConfig {
 // show "暂无数据源" until their scrapers come online.
 const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "x_list", title: "X List" },
+  { source_type: "clawhub", title: "ClawHub" },
   { source_type: "github", title: "GitHub" },
   { source_type: "product_hunt", title: "Product Hunt" },
   { source_type: "youtube", title: "YouTube" },
   { source_type: "podcast", title: "Podcast" },
   { source_type: "arxiv", title: "arXiv" },
-  { source_type: "clawhub", title: "ClawHub" },
 ];
 
 type FilterKey = "all" | SourceType;
@@ -47,12 +47,12 @@ type FilterKey = "all" | SourceType;
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "x_list", label: "X" },
+  { key: "clawhub", label: "ClawHub" },
   { key: "github", label: "GitHub" },
   { key: "product_hunt", label: "PH" },
   { key: "youtube", label: "YouTube" },
   { key: "podcast", label: "Podcast" },
   { key: "arxiv", label: "arXiv" },
-  { key: "clawhub", label: "ClawHub" },
 ];
 
 function DashboardHome() {
@@ -65,6 +65,7 @@ function DashboardHome() {
     const p = typeof window !== "undefined" ? window.location.pathname : "/";
     if (p.startsWith("/g/")) return "github";
     if (p.startsWith("/ph/")) return "product_hunt";
+    if (p.startsWith("/c/")) return "clawhub";
     if (p.startsWith("/t/")) return "x_list";
     return "all";
   })();
@@ -384,6 +385,7 @@ function App() {
         <Route path="/t/:id" element={<DashboardHome />} />
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
         <Route path="/ph/:slug/:date" element={<DashboardHome />} />
+        <Route path="/c/:slug" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />

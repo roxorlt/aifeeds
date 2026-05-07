@@ -274,6 +274,35 @@ async function translateShort(env: ClawhubEnv, text: string): Promise<string | n
   return out || null;
 }
 
+// ─── LLM findings translation ───────────────────────────────────────────────
+// llmAnalysis 来自 ClawHub 的 LLM 分析，每条 finding 含 categoryLabel / evidence /
+// recommendation 都是英文。drawer 安全审查区段对中文用户更友好需要翻译。
+// 用 Promise.all 并行翻译每个 finding 的 4 个文本字段，单 finding ~4-5 DeepSeek 调用，
+// 多 finding 跨 finding 并行。translateShort 自带 CJK 检测幂等（已是中文则原样返回）。
+async function translateLlmFindings(env: ClawhubEnv, findings: any[]): Promise<any[]> {
+  if (!findings || findings.length === 0) return [];
+  return Promise.all(findings.map(async (f) => {
+    const [categoryLabel, evidenceExplanation, evidenceSnippet, recommendation] = await Promise.all([
+      f.categoryLabel ? translateShort(env, f.categoryLabel) : Promise.resolve(f.categoryLabel),
+      f.evidence?.explanation ? translateShort(env, f.evidence.explanation) : Promise.resolve(f.evidence?.explanation),
+      // snippet 通常是 SKILL.md 引用，含代码可能更适合保留原文（防止翻坏）。先简单 translate；
+      // 如果发现质量差，后续可改成保留原文 + 加 zh 字段两份
+      f.evidence?.snippet ? translateShort(env, f.evidence.snippet) : Promise.resolve(f.evidence?.snippet),
+      f.recommendation ? translateShort(env, f.recommendation) : Promise.resolve(f.recommendation),
+    ]);
+    return {
+      ...f,
+      categoryLabel: categoryLabel || f.categoryLabel,
+      evidence: f.evidence ? {
+        ...f.evidence,
+        explanation: evidenceExplanation || f.evidence?.explanation,
+        snippet: evidenceSnippet || f.evidence?.snippet,
+      } : undefined,
+      recommendation: recommendation || f.recommendation,
+    };
+  }));
+}
+
 // ─── Item builder ───────────────────────────────────────────────────────────
 
 interface SkillRow {
@@ -399,6 +428,12 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
            title = excluded.title,
            content = CASE WHEN excluded.content IS NOT NULL AND length(excluded.content) > 0
                           THEN excluded.content ELSE items.content END,
+           author = CASE WHEN excluded.author IS NOT NULL AND length(excluded.author) > 0
+                          THEN excluded.author ELSE items.author END,
+           handle = CASE WHEN excluded.handle IS NOT NULL AND length(excluded.handle) > 0
+                          THEN excluded.handle ELSE items.handle END,
+           url = CASE WHEN excluded.url IS NOT NULL AND length(excluded.url) > 0
+                          THEN excluded.url ELSE items.url END,
            metrics = excluded.metrics,
            published_at = excluded.published_at,
            scraped_at = excluded.scraped_at,
@@ -476,20 +511,20 @@ export async function runClawhubEnrichPending(
     return counts;
   }
 
-  for (const row of pending.results as any[]) {
+  // 并行处理 batch（fetch detail + translate 都是独立 API 调用）
+  // 顺序版每条 3-6s × 10 = 30-60s/round；并行后 ~5-6s/round（瓶颈是单条最长）
+  await Promise.all((pending.results as any[]).map(async (row) => {
     const slug = row.source_id as string;
     try {
-      // 1) Fetch rich detail (Convex direct for install + capability tags + llmAnalysis)
       const richResp = await fetchSkillDetailRich(slug);
       const rich = richResp.value;
       if (!rich || !rich.skill) {
-        // Skill removed / 404 → mark as no-pending so we don't loop
         await env.DB.prepare(
           `UPDATE items SET extra = json_set(extra, '$.ch_pending', json('false'))
             WHERE id = ?`,
         ).bind(row.id).run();
         counts.failed++;
-        continue;
+        return;
       }
 
       const lv = rich.latestVersion || {};
@@ -498,27 +533,28 @@ export async function runClawhubEnrichPending(
       const capabilityTags = lv.capabilityTags || rich.skill.capabilityTags || [];
       const llmFindings = lv.llmAnalysis?.agenticRiskFindings || [];
 
-      // 2) Translate summary (English content → Chinese, short)
       const existingExtra = JSON.parse(row.extra || "{}");
       const summaryText = (row.content || "") as string;
-      let summaryTranslated = existingExtra.summary_translated;
-      if (!summaryTranslated && summaryText) {
-        summaryTranslated = await translateShort(env, summaryText);
-      }
+      // summary + LLM finding 翻译并行启动
+      const [summaryT, translatedFindings] = await Promise.all([
+        existingExtra.summary_translated || !summaryText
+          ? Promise.resolve(existingExtra.summary_translated)
+          : translateShort(env, summaryText),
+        translateLlmFindings(env, llmFindings),
+      ]);
+      const summaryTranslated = summaryT;
 
-      // 3) Build new extra (preserve existing fields, overwrite/add the enriched ones)
       const newExtra = {
         ...existingExtra,
         ch_pending: false,
         license,
         install: installList,
         capability_tags: capabilityTags,
-        llm_analysis: llmFindings.length > 0 ? { findings: llmFindings } : undefined,
+        llm_analysis: translatedFindings.length > 0 ? { findings: translatedFindings, lang: 'zh' } : undefined,
         summary_translated: summaryTranslated || existingExtra.summary_translated,
         enriched_at: Math.floor(Date.now() / 1000),
       };
 
-      // content_translated for feed cards (mirrors GH pattern)
       await env.DB.prepare(
         `UPDATE items
             SET content_translated = COALESCE(?, content_translated),
@@ -538,7 +574,7 @@ export async function runClawhubEnrichPending(
       counts.errors.push(`${slug}: ${e?.message || e}`);
       counts.failed++;
     }
-  }
+  }));
 
   return counts;
 }
