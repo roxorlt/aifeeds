@@ -810,6 +810,174 @@ function renderPhContent(opts: {
   return { svg: logoSvg + titleSvg + rankSvg + tagSvg + bodySvg + statsSvg + mediaSvg, height: totalH };
 }
 
+// ─── ClawHub 变体 内容渲染（GH 同款骨架，差异点见 design doc § 5.5）─────────
+// 字段差异 vs GH：
+//   - metrics 改 stars / downloads / installs(current)（无 forks/watchers）
+//   - meta 行去 trophy+rank（ClawHub 无 daily rank），改成 v 版本+license（左）
+//     / N versions · 更新于 X 天前（右）
+//   - body 用 README 前 N 行（v0 用 content_translated/content fallback）
+//   - 不放媒体（skill 多数无图）
+const CH_CATEGORY_TAG_COLOR: Record<string, { soft: string; ink: string }> = {
+  'workflows':  { soft: 'rgba(124, 58, 237, 0.10)', ink: '#7c3aed' },   // violet
+  'mcp-tools':  { soft: 'rgba(37, 99, 235, 0.10)',  ink: '#2563eb' },   // blue
+  'prompts':    { soft: 'rgba(139, 92, 246, 0.10)', ink: '#8b5cf6' },   // violet 浅
+  'dev-tools':  { soft: 'rgba(82, 82, 91, 0.08)',   ink: '#3f3f46' },   // neutral
+  'data':       { soft: 'rgba(13, 148, 136, 0.10)', ink: '#0d9488' },   // teal
+  'security':   { soft: 'rgba(225, 29, 72, 0.10)',  ink: '#e11d48' },   // rose
+  'automation': { soft: 'rgba(5, 150, 105, 0.10)',  ink: '#059669' },   // emerald
+  'other':      { soft: 'rgba(82, 82, 91, 0.08)',   ink: '#3f3f46' },
+  'skill':      { soft: 'rgba(82, 82, 91, 0.08)',   ink: '#3f3f46' },
+};
+
+const CH_CATEGORY_TAG_LABEL: Record<string, string> = {
+  'workflows': 'Workflow',
+  'mcp-tools': 'MCP',
+  'prompts': 'Prompt',
+  'dev-tools': 'Dev',
+  'data': 'Data',
+  'security': 'Security',
+  'automation': '自动化',
+  'other': '其他',
+  'skill': 'skill',
+};
+
+function renderClawhubContent(opts: {
+  x: number; y: number; w: number;
+  displayName: string;
+  tag: string;          // 8 类 category slug
+  stars: number | string;
+  downloads: number | string;
+  installsCurrent: number | string;
+  versionsCount: number | string;
+  license: string;
+  latestVersion: string;
+  updatedRelative: string;
+  body: string;
+  ownerAvatarDataUri?: string;
+}): { svg: string; height: number } {
+  const padX = 36, padTop = 56;
+  const innerX = opts.x + padX;
+  const innerW = opts.w - padX * 2;
+  let cy = opts.y + padTop;
+
+  // skill 头像：圆形（owner GitHub avatar）；缺失则圆形 + 首字母 fallback
+  const logoX = innerX, logoY = cy;
+  const logoSize = 128;
+  let logoSvg: string;
+  if (opts.ownerAvatarDataUri) {
+    const clipId = `ch-owner-clip-${Math.random().toString(36).slice(2, 8)}`;
+    logoSvg = `
+      <defs><clipPath id="${clipId}"><circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}"/></clipPath></defs>
+      <circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="#f4f4f6"/>
+      <image href="${opts.ownerAvatarDataUri}" x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    // 圆形 + 首字母 fallback（用 displayName 第一个字符）
+    const initial = (opts.displayName || '?').charAt(0);
+    const bg = avatarBg(opts.displayName);
+    logoSvg = `
+      <circle cx="${logoX + logoSize / 2}" cy="${logoY + logoSize / 2}" r="${logoSize / 2}" fill="${bg}"/>
+      <text x="${logoX + logoSize / 2}" y="${logoY + logoSize / 2 + 24}" font-family='${FONT}' font-size="68" font-weight="900" fill="${C.ink}" text-anchor="middle">${esc(initial)}</text>`;
+  }
+
+  // displayName 标题（自适应字号 54-70）
+  const nameX = logoX + logoSize + 34;
+  const innerRightLimit = innerW - logoSize - 34;
+  const fitOneLine = (txt: string): number | null => {
+    for (const sz of [70, 66, 62, 58, 54]) {
+      if (estimateTextWidth(txt, sz, 0.85) <= innerRightLimit) return sz;
+    }
+    return null;
+  };
+  let titleSize: number;
+  let titleLines: string[];
+  const oneLineSize = fitOneLine(opts.displayName);
+  if (oneLineSize !== null) {
+    titleSize = oneLineSize;
+    titleLines = [opts.displayName];
+  } else {
+    // 长名字截断到一行 + …（marketplace 不像 owner/repo 有自然分割点）
+    titleSize = 54;
+    titleLines = [truncate(opts.displayName, 14)];
+  }
+  const titleLineH = titleSize * 1.08;
+  const titleSvg = titleLines
+    .map((line, i) => `<text x="${nameX}" y="${cy + titleSize + i * titleLineH}" font-family='${FONT}' font-size="${titleSize}" font-weight="900" fill="${C.ink}" letter-spacing="-3">${esc(line)}</text>`)
+    .join('');
+
+  // category tag pill (按 8 类色)
+  const tagY = cy + titleSize + titleLines.length * titleLineH - titleLineH + 20 + 28;
+  const tagText = CH_CATEGORY_TAG_LABEL[opts.tag] || opts.tag;
+  const tagW = estimateTextWidth(tagText, 28, 0.85) + 40;
+  const tagColor = CH_CATEGORY_TAG_COLOR[opts.tag] || CH_CATEGORY_TAG_COLOR.skill;
+  const tagSvg = `
+    <rect x="${nameX}" y="${tagY - 30}" width="${tagW}" height="46" rx="23" fill="${tagColor.soft}"/>
+    <text x="${nameX + tagW / 2}" y="${tagY + 1}" font-family='${FONT}' font-size="28" font-weight="850" fill="${tagColor.ink}" text-anchor="middle">${esc(tagText)}</text>`;
+
+  cy += Math.max(logoSize, titleLineH * titleLines.length + 62);
+  cy += 16;
+
+  // metrics 3 列：stars / downloads / installs(current)
+  const metRowY = cy;
+  const metricsArr = [
+    { icon: ICON.star, value: formatStat(opts.stars), label: 'Stars', viewBox: 16 },
+    { icon: ICON.fork, value: formatStat(opts.downloads), label: 'Downloads', viewBox: 16 },  // 复用 fork icon 当 download（ICON 集没有专用 download）
+    { icon: ICON.watching, value: formatStat(opts.installsCurrent), label: 'Installs', viewBox: 16 },
+  ];
+  const metColW = innerW / 3;
+  let metricsSvg = '';
+  metricsArr.forEach((m, i) => {
+    const cx = innerX + metColW * i + metColW / 2;
+    const iconSize = 30;
+    const numberSize = 34;
+    const numberValueText = m.value;
+    const numberW = estimateTextWidth(numberValueText, numberSize, 0.85);
+    const groupW = iconSize + 12 + numberW;
+    const groupX = cx - groupW / 2;
+    const iconY = metRowY + 44 - iconSize + 4;
+    metricsSvg += fillIcon(m.icon, groupX, iconY, iconSize, C.muted, m.viewBox);
+    metricsSvg += `<text x="${groupX + iconSize + 12}" y="${metRowY + 44}" font-family='${FONT}' font-size="${numberSize}" font-weight="700" fill="${C.ink}">${esc(numberValueText)}</text>`;
+    metricsSvg += `<text x="${cx}" y="${metRowY + 82}" font-family='${FONT}' font-size="24" font-weight="500" fill="${C.muted2}" text-anchor="middle">${esc(m.label)}</text>`;
+    if (i < 2) {
+      metricsSvg += `<line x1="${cx + metColW / 2}" y1="${metRowY + 8}" x2="${cx + metColW / 2}" y2="${metRowY + 88}" stroke="${C.line}" stroke-width="1"/>`;
+    }
+  });
+  metricsSvg += `<line x1="${innerX}" y1="${metRowY + 110}" x2="${innerX + innerW}" y2="${metRowY + 110}" stroke="${C.line}" stroke-width="1"/>`;
+  cy += 130;
+
+  // meta 行：v 版本 · license（左）/ N versions · 更新于 X 天前（右）+ 下分隔线
+  const metaLineY = cy + 22;
+  const leftLabel = [opts.latestVersion ? `v${opts.latestVersion}` : '', opts.license || ''].filter(Boolean).join(' · ');
+  const rightLabel = [
+    opts.versionsCount ? `${opts.versionsCount} versions` : '',
+    opts.updatedRelative ? `更新于 ${opts.updatedRelative}` : '',
+  ].filter(Boolean).join(' · ');
+  const metaLeftSvg = leftLabel
+    ? `<text x="${innerX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(leftLabel)}</text>`
+    : '';
+  let metaRightSvg = '';
+  if (rightLabel) {
+    const rightW = estimateTextWidth(rightLabel, 30);
+    const rightX = innerX + innerW - rightW;
+    metaRightSvg = `<text x="${rightX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(rightLabel)}</text>`;
+  }
+  metricsSvg += metaLeftSvg + metaRightSvg;
+  metricsSvg += `<line x1="${innerX}" y1="${metaLineY + 24}" x2="${innerX + innerW}" y2="${metaLineY + 24}" stroke="${C.line}" stroke-width="1"/>`;
+  cy = metaLineY + 44;
+
+  // body 36px / 1.48 / 5 行
+  const bodySize = 36;
+  const bodyLine = bodySize * 1.48;
+  const bodyLines = wrapText(opts.body, 24, 5);
+  const bodySvg = bodyLines
+    .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
+    .join('');
+  cy += bodyLines.length * bodyLine + 30;
+  cy += 12;
+
+  const totalH = cy - opts.y;
+  return { svg: logoSvg + titleSvg + tagSvg + metricsSvg + bodySvg, height: totalH };
+}
+
 // ─── 顶层入口：renderShareSvg ──────────────────────────────
 export interface PosterItem {
   id: string;
@@ -914,6 +1082,25 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     });
     contentSvg = r.svg;
     contentH = r.height;
+  } else if (sourceMeta.kind === 'clawhub') {
+    const m = item.metrics || {};
+    const extra = item.extra || {};
+    const r = renderClawhubContent({
+      x: cardX, y: cardY, w: cardW,
+      displayName: item.title || (item.id || '').replace(/^clawhub:/, '') || 'Skill',
+      tag: pickClawhubTag(item),
+      stars: (m.stars as number) ?? 0,
+      downloads: (m.downloads as number) ?? 0,
+      installsCurrent: (m.installsCurrent as number) ?? 0,
+      versionsCount: (extra.versions_count as number) ?? (m.versions as number) ?? 0,
+      license: (extra.license as string) || '',
+      latestVersion: (extra.latest_version as string) || '',
+      updatedRelative: relativeTimeFromMs(extra.updated_at as number | undefined),
+      body: bodyText(item),
+      ownerAvatarDataUri: item.authorAvatarDataUri,
+    });
+    contentSvg = r.svg;
+    contentH = r.height;
   } else {
     // X / X List 默认走 X 模板
     // metrics 缺失保留 undefined（不强转 0），让 formatStat 渲成 "—" 跟 dashboard 一致
@@ -966,10 +1153,28 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
 }
 
 // ─── helpers: source meta / tag / body ────────────────────
-function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph'; label: string; chipColor: string } {
+function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub'; label: string; chipColor: string } {
   if (sourceType === 'github') return { kind: 'github', label: 'GitHub', chipColor: '#c1f0d8' };
   if (sourceType === 'product_hunt' || sourceType === 'ph') return { kind: 'ph', label: 'Product Hunt', chipColor: '#ffd1c1' };
+  if (sourceType === 'clawhub') return { kind: 'clawhub', label: 'ClawHub', chipColor: '#d8c8f5' };
   return { kind: 'x', label: 'X', chipColor: '#ffffff' };
+}
+
+function pickClawhubTag(item: PosterItem): string {
+  const extra = item.extra || {};
+  // dashboard 客户端关键词分类，存在 extra.category：mcp-tools/prompts/workflows/dev-tools/data/security/automation/other
+  return (extra.category as string) || 'skill';
+}
+
+function relativeTimeFromMs(ms: number | undefined): string {
+  if (!ms) return '—';
+  const diffSec = Math.max(1, Math.floor((Date.now() - ms) / 1000));
+  if (diffSec < 60) return `${diffSec} 秒前`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  if (diffSec < 30 * 86400) return `${Math.floor(diffSec / 86400)} 天前`;
+  if (diffSec < 365 * 86400) return `${Math.floor(diffSec / (30 * 86400))} 月前`;
+  return `${Math.floor(diffSec / (365 * 86400))} 年前`;
 }
 
 function pickGithubTag(item: PosterItem): string {

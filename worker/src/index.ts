@@ -27,6 +27,12 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph';
 import {
+  runClawhubFetchList,
+  runClawhubEnrichPending,
+  refreshClawhubItem,
+  countClawhubPending,
+} from './clawhub';
+import {
   handleSmsSend,
   handleLogin,
   handleLogout,
@@ -302,15 +308,20 @@ export default {
     // 2 subrequests, doesn't conflict with X cron rotation.
     const isGithubFetchSlot = (hour === 17 || hour === 5) && minute === 0;
 
+    // ClawHub list fetch (phase 1) at BJT 04:00 + 16:00 (= UTC 20:00 + 08:00).
+    // ~10 subrequests (8 list calls + D1 batch). Doesn't conflict with GH or X.
+    const isClawhubFetchSlot = (hour === 20 || hour === 8) && minute === 0;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'list-poll-ingest' | 'classify-pending' | 'longform-via-sb';
+    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'clawhub-fetch' | 'clawhub-enrich' | 'list-poll-ingest' | 'classify-pending' | 'longform-via-sb';
     // classify-pending + fill-translations 已经走 preempt 路径（每个 tick 都查队列），
     // 不再占独立 minute 槽位；longform-via-sb 改成 5/35 之前曾占的槽（backfill-replies
     // 让到 catch-all），所有 minute 都是 */5 实际能命中的值
     if (isGithubFetchSlot) mode = 'github-fetch';
+    else if (isClawhubFetchSlot) mode = 'clawhub-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
     else if (minute === 10 || minute === 40) mode = 'longform-via-sb';
@@ -368,6 +379,15 @@ export default {
               console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
+            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 2 个 item。
+            // 单 item subrequest 预算：1 SELECT + 1 detail fetch + 1 DeepSeek + 1 UPDATE ≈ 4。
+            // 2 items/tick × 12 ticks/hour × 24 = 576 items/day enrich，足够吃掉每日新增。
+            const clawhubPending = await countClawhubPending(env);
+            if (clawhubPending > 0) {
+              const r = await runClawhubEnrichPending(env, 2);
+              console.log(`[cron] clawhub-enrich (preempt, ${clawhubPending} pending) result:`, JSON.stringify(r));
+              return;
+            }
             // classify-pending 抢占：12 ticks/hour 都可能跑（队列有就干），
             // 把"新 item NULL → 进 feed"延迟从 30 min 拉到 5 min。
             // DeepSeek QPM 不是瓶颈，唯一限制是 CF Worker subrequest 预算
@@ -398,6 +418,11 @@ export default {
           if (mode === 'github-fetch') {
             const r = await runGithubFetchTrending(env);
             console.log(`[cron] github-fetch result:`, JSON.stringify(r));
+            return;
+          }
+          if (mode === 'clawhub-fetch') {
+            const r = await runClawhubFetchList(env);
+            console.log(`[cron] clawhub-fetch result:`, JSON.stringify(r));
             return;
           }
           if (mode === 'refresh-metrics') {
@@ -685,6 +710,11 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   if (sourceType === 'github') {
     return handleGithubFeed(request, env);
   }
+  // ClawHub: marketplace style, order by stars DESC (most popular skills first).
+  // hot 模式同样走 stars 排序（marketplace 没有 X 那种 likes/RT 互动信号）。
+  if (sourceType === 'clawhub') {
+    return handleClawhubFeed(request, env);
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
@@ -814,6 +844,106 @@ function toIntOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// ─── GET /api/items?source_type=clawhub ────────────────────────
+// ClawHub feed (marketplace style):
+//   - is_relevant=1, deleted_at IS NULL
+//   - sort 默认 stars desc；可选 downloads/installs/updated/newest/name
+//   - category 默认 all；可选 mcp-tools/prompts/workflows/dev-tools/data/security/automation/other
+//     （extra.category 由 phase 1 cron 端按关键词派生，存在 items.extra）
+//   - cursor 格式按 sort 维度而异
+//   - hide_suspicious 默认 true（fetch 时已过滤，DB 里全是 nonSuspicious 不需要再过滤）
+
+const CLAWHUB_SORT_EXPR: Record<string, string> = {
+  stars:     `CAST(json_extract(metrics, '$.stars') AS INTEGER)`,
+  downloads: `CAST(json_extract(metrics, '$.downloads') AS INTEGER)`,
+  installs:  `CAST(json_extract(metrics, '$.installsCurrent') AS INTEGER)`,
+  updated:   `published_at`,
+  name:      `LOWER(title)`,
+};
+const CLAWHUB_SORT_DIR: Record<string, 'DESC' | 'ASC'> = {
+  stars: 'DESC', downloads: 'DESC', installs: 'DESC',
+  updated: 'DESC', name: 'ASC',
+};
+
+async function handleClawhubFeed(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
+  const cursor = url.searchParams.get('cursor');
+  const sort = (url.searchParams.get('sort') || 'stars').toLowerCase();
+  const category = (url.searchParams.get('category') || 'all').toLowerCase();
+
+  const sortExpr = CLAWHUB_SORT_EXPR[sort] || CLAWHUB_SORT_EXPR.stars;
+  const sortDir = CLAWHUB_SORT_DIR[sort] || 'DESC';
+
+  const conditions: string[] = [
+    "source_type='clawhub'",
+    'is_relevant=1',
+    'deleted_at IS NULL',
+  ];
+  const params: unknown[] = [];
+
+  if (category !== 'all') {
+    conditions.push(`json_extract(extra, '$.category') = ?`);
+    params.push(category);
+  }
+
+  if (cursor) {
+    const [valueStr, idStr] = cursor.split('|');
+    if (valueStr && idStr) {
+      // 按 sort dir 决定 cursor 比较运算符
+      const cmpLT = sortDir === 'DESC' ? '<' : '>';
+      const cmpGT = sortDir === 'DESC' ? '>' : '<';
+      // value 类型按 sort 维度而异：name 是 string，其他是 number / time iso string
+      const isNumeric = ['stars', 'downloads', 'installs'].includes(sort);
+      const cursorValue = isNumeric ? parseInt(valueStr, 10) : valueStr;
+      if (!isNumeric || !Number.isNaN(cursorValue as number)) {
+        conditions.push(`(
+          ${sortExpr} ${cmpLT} ?
+          OR (${sortExpr} = ? AND id ${cmpGT === '>' ? '>' : '>'} ?)
+        )`);
+        params.push(cursorValue, cursorValue, idStr);
+      }
+    }
+  }
+
+  const where = conditions.join(' AND ');
+  const sql = `
+    SELECT * FROM items
+    WHERE ${where}
+    ORDER BY ${sortExpr} ${sortDir}, id ASC
+    LIMIT ?
+  `;
+  params.push(limit + 1);
+
+  const start = Date.now();
+  const result = await env.DB.prepare(sql).bind(...params).all();
+  const queryTime = Date.now() - start;
+
+  const hasMore = result.results.length > limit;
+  const rows = hasMore ? result.results.slice(0, limit) : result.results;
+  const items = rows.map(parseItemRow);
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1] as Record<string, unknown>;
+    const lastMetrics = last.metrics as Record<string, unknown> | null;
+    let cursorValue: string | number = '';
+    if (sort === 'stars') cursorValue = (lastMetrics?.stars as number) ?? 0;
+    else if (sort === 'downloads') cursorValue = (lastMetrics?.downloads as number) ?? 0;
+    else if (sort === 'installs') cursorValue = (lastMetrics?.installsCurrent as number) ?? 0;
+    else if (sort === 'updated') cursorValue = (last.published_at as string) ?? '';
+    else if (sort === 'name') cursorValue = ((last.title as string) ?? '').toLowerCase();
+    nextCursor = `${cursorValue}|${last.id}`;
+  }
+
+  return jsonResponse({
+    items,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    query_time_ms: queryTime,
+  }, 200, request, env);
+}
+
 // ─── GET /api/items?source_type=github ─────────────────────────
 // GitHub feed (cross-day):
 //   - is_relevant=1 AND extra.sponsor=0 (admin-only sponsors not in feed)
@@ -939,7 +1069,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     siblings = result.results.map(parseItemRow);
   }
 
-  // For GitHub items, attach metrics_history (last 30 days) so drawer can
+  // For GitHub / ClawHub items, attach metrics_history (last 30 days) so drawer can
   // render a sparkline (v2). Cheap query, ~20-60 rows per repo.
   let metricsHistory: Record<string, unknown>[] = [];
   if (parsedItem.source_type === 'github') {
@@ -955,6 +1085,19 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
       metricsHistory = histResult.results;
     } catch (e) {
       // Table may not exist yet pre-migration — silently empty.
+    }
+  } else if (parsedItem.source_type === 'clawhub') {
+    try {
+      const thirtyDaysAgoUnix = Math.floor(Date.now() / 1000) - 30 * 86400;
+      const histResult = await env.DB.prepare(
+        `SELECT captured_at, stars, downloads, installs_current, installs_all_time
+           FROM metrics_snapshots_clawhub
+          WHERE item_id = ? AND captured_at >= ?
+       ORDER BY captured_at ASC`
+      ).bind(id, thirtyDaysAgoUnix).all();
+      metricsHistory = histResult.results;
+    } catch (e) {
+      // ignore
     }
   }
 
@@ -1205,6 +1348,18 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       10,
     );
     const result = await runGithubEnrichPending(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'clawhub-fetch') {
+    const result = await runClawhubFetchList(env);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'clawhub-enrich') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '2'), 1),
+      10,
+    );
+    const result = await runClawhubEnrichPending(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'github-readme-translate') {

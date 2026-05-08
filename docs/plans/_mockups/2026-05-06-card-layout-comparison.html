@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card layout 三方案对比 (PH / GH)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background: #f5f5f5; }
+  .feed-col { width: 360px; background: white; border: 1px solid #e5e5e5; }
+  .feed-col article { border-bottom: 1px solid #e5e5e5; }
+  .label { font-size: 12px; color: #888; margin-bottom: 8px; padding: 0 16px; }
+</style>
+</head>
+<body class="p-8">
+
+<h1 class="text-xl font-bold mb-6">PH / GH 卡片 layout 三方案对比</h1>
+<p class="text-sm text-neutral-600 mb-8">
+  feed 列宽 360px (桌面 3 列)。三个 case 左中右并排，看长 handle 显示 + 正文宽度。
+</p>
+
+<div class="grid grid-cols-3 gap-6">
+
+  <!-- ============================================================ -->
+  <!-- 方案 A：现状（avatar 列 + content 列右侧缩进） -->
+  <!-- ============================================================ -->
+  <div>
+    <div class="label">方案 A — 现状（content 全部缩进到 avatar 右）</div>
+    <div class="feed-col">
+      <!-- PH 案例 -->
+      <article class="px-4 py-3">
+        <div class="flex gap-3">
+          <img src="https://api.ai-feeds.com/r/ph/5a6abc1fd74361c316a0baa7f4e7011dd1a52e7228783f317aea08bb0169990a.jpg"
+               class="h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-baseline gap-1.5">
+              <span class="truncate text-[15px] font-bold leading-tight text-neutral-900">Filect</span>
+            </div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
+              <span class="tabular-nums">05-02</span>
+              <span class="text-neutral-400">·</span>
+              <span class="tabular-nums">#8</span>
+              <span class="text-neutral-400">·</span>
+              <span class="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">AI Other</span>
+            </div>
+            <p class="mt-1 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
+              Filect 使用 AI 自动将您的文件整理成清晰的文件夹结构。您可以让它自动运行，或设置自定义规则。专为创作者、程序员、设计师、视频编辑者打造。
+            </p>
+            <div class="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
+              <span class="inline-flex items-center gap-1">
+                <span>▲</span><span class="tabular-nums">120</span>
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <span>💬</span><span class="tabular-nums">8</span>
+              </span>
+              <span class="ml-auto flex min-w-0 items-center gap-1.5">
+                <span class="flex shrink-0 -space-x-1.5">
+                  <span class="h-5 w-5 rounded-full border border-white bg-rose-300"></span>
+                </span>
+                <span class="min-w-0 truncate text-[13px]">by @damianos_mallcb</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- GH 案例 -->
+      <article class="px-4 py-3">
+        <div class="flex items-start gap-3">
+          <img src="https://avatars.githubusercontent.com/forrestchang"
+               class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0 flex-1">
+                <span class="block truncate text-[15px] font-bold leading-tight text-neutral-900">forrestchang/andrej-karpathy-skills</span>
+              </div>
+            </div>
+            <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+              <span>05-06</span>·<span>1st</span>·<span class="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">tutorial</span>
+            </div>
+            <p class="mt-1 line-clamp-4 text-[14px] leading-[1.45] text-neutral-900">
+              一份 CLAUDE.md 配置文件，将 Andrej Karpathy 对 LLM 编码常见问题的观察提炼成四条核心原则，直接嵌入 Claude Code 或 Cursor 等 AI 编程工具。
+            </p>
+            <div class="mt-2 flex items-center gap-x-4 text-[12px] text-neutral-500">
+              <span>★ 114k</span>
+              <span>⑂ 11.4k</span>
+              <span>👁 608</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 方案 B：标题块跟 avatar 一行；正文 / footer 跨整张卡宽 -->
+  <!-- ============================================================ -->
+  <div>
+    <div class="label">方案 B — 标题块独占头部，正文/footer 跨满卡宽</div>
+    <div class="feed-col">
+      <!-- PH 案例 -->
+      <article class="px-4 py-3">
+        <!-- 头部块：avatar + title + meta（紧凑高度） -->
+        <div class="flex items-center gap-3">
+          <img src="https://api.ai-feeds.com/r/ph/5a6abc1fd74361c316a0baa7f4e7011dd1a52e7228783f317aea08bb0169990a.jpg"
+               class="h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-bold leading-tight text-neutral-900">Filect</div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[13px] text-neutral-500">
+              <span class="tabular-nums">05-02</span>
+              <span class="text-neutral-400">·</span>
+              <span class="tabular-nums">#8</span>
+              <span class="text-neutral-400">·</span>
+              <span class="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">AI Other</span>
+            </div>
+          </div>
+        </div>
+        <!-- 正文跨整张卡宽（不再缩进到 avatar 右） -->
+        <p class="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
+          Filect 使用 AI 自动将您的文件整理成清晰的文件夹结构。您可以让它自动运行，或设置自定义规则。专为创作者、程序员、设计师、视频编辑者打造，让您摆脱文件堆积的烦恼。
+        </p>
+        <!-- footer 跨整张卡宽 -->
+        <div class="mt-2 flex items-center gap-x-3 text-[13px] text-neutral-500">
+          <span class="inline-flex items-center gap-1">
+            <span>▲</span><span class="tabular-nums">120</span>
+          </span>
+          <span class="inline-flex items-center gap-1">
+            <span>💬</span><span class="tabular-nums">8</span>
+          </span>
+          <span class="ml-auto flex items-center gap-1.5">
+            <span class="flex shrink-0 -space-x-1.5">
+              <span class="h-5 w-5 rounded-full border border-white bg-rose-300"></span>
+            </span>
+            <span class="text-[13px]">by @damianos_mallcb</span>
+          </span>
+        </div>
+      </article>
+
+      <!-- GH 案例 -->
+      <article class="px-4 py-3">
+        <div class="flex items-center gap-3">
+          <img src="https://avatars.githubusercontent.com/forrestchang"
+               class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-bold leading-tight text-neutral-900">forrestchang/andrej-karpathy-skills</div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[13px] text-neutral-500">
+              <span>05-06</span>·<span>1st</span>·<span class="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">tutorial</span>
+            </div>
+          </div>
+        </div>
+        <p class="mt-2 line-clamp-4 text-[14px] leading-[1.45] text-neutral-900">
+          一份 CLAUDE.md 配置文件，将 Andrej Karpathy 对 LLM 编码常见问题的观察提炼成四条核心原则，直接嵌入 Claude Code 或 Cursor 等 AI 编程工具。它迫使 LLM 在编码前显式推理。
+        </p>
+        <div class="mt-2 flex items-center gap-x-4 text-[12px] text-neutral-500">
+          <span>★ 114k</span>
+          <span>⑂ 11.4k</span>
+          <span>👁 608</span>
+        </div>
+      </article>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 方案 C：方案 B + footer 数据/作者各一行（避免长 handle 被挤） -->
+  <!-- ============================================================ -->
+  <div>
+    <div class="label">方案 C — B + footer 拆两行（数据 / 作者）</div>
+    <div class="feed-col">
+      <!-- PH 案例 -->
+      <article class="px-4 py-3">
+        <div class="flex items-center gap-3">
+          <img src="https://api.ai-feeds.com/r/ph/5a6abc1fd74361c316a0baa7f4e7011dd1a52e7228783f317aea08bb0169990a.jpg"
+               class="h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-bold leading-tight text-neutral-900">Filect</div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[13px] text-neutral-500">
+              <span class="tabular-nums">05-02</span>
+              <span class="text-neutral-400">·</span>
+              <span class="tabular-nums">#8</span>
+              <span class="text-neutral-400">·</span>
+              <span class="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">AI Other</span>
+            </div>
+          </div>
+        </div>
+        <p class="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
+          Filect 使用 AI 自动将您的文件整理成清晰的文件夹结构。您可以让它自动运行，或设置自定义规则。专为创作者、程序员、设计师、视频编辑者打造，让您摆脱文件堆积的烦恼。
+        </p>
+        <!-- 数据行 -->
+        <div class="mt-2 flex items-center gap-x-4 text-[13px] text-neutral-500">
+          <span class="inline-flex items-center gap-1">
+            <span>▲</span><span class="tabular-nums">120</span>
+          </span>
+          <span class="inline-flex items-center gap-1">
+            <span>💬</span><span class="tabular-nums">8</span>
+          </span>
+        </div>
+        <!-- 作者行 -->
+        <div class="mt-1 flex items-center gap-1.5 text-[13px] text-neutral-500">
+          <span class="flex shrink-0 -space-x-1.5">
+            <span class="h-5 w-5 rounded-full border border-white bg-rose-300"></span>
+          </span>
+          <span>by @damianos_mallcb</span>
+        </div>
+      </article>
+
+      <!-- GH 案例 -->
+      <article class="px-4 py-3">
+        <div class="flex items-center gap-3">
+          <img src="https://avatars.githubusercontent.com/forrestchang"
+               class="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover" alt="">
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-bold leading-tight text-neutral-900">forrestchang/andrej-karpathy-skills</div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[13px] text-neutral-500">
+              <span>05-06</span>·<span>1st</span>·<span class="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">tutorial</span>
+            </div>
+          </div>
+        </div>
+        <p class="mt-2 line-clamp-4 text-[14px] leading-[1.45] text-neutral-900">
+          一份 CLAUDE.md 配置文件，将 Andrej Karpathy 对 LLM 编码常见问题的观察提炼成四条核心原则，直接嵌入 Claude Code 或 Cursor 等 AI 编程工具。它迫使 LLM 在编码前显式推理。
+        </p>
+        <div class="mt-2 flex items-center gap-x-4 text-[12px] text-neutral-500">
+          <span>★ 114k</span>
+          <span>⑂ 11.4k</span>
+          <span>👁 608</span>
+        </div>
+      </article>
+    </div>
+  </div>
+
+</div>
+
+<div class="mt-10 max-w-3xl text-sm text-neutral-700 space-y-2">
+  <h2 class="text-base font-bold">观察重点</h2>
+  <ol class="list-decimal pl-6 space-y-1">
+    <li>正文 / 描述区域可用宽度：A &lt; B = C（B、C 给正文多 ~52px）</li>
+    <li>长 handle <code>@damianos_mallcb</code> 完整显示：A 截断省略号 / B 仍挤（同行有 votes/comments）/ C 独占一行完整显示</li>
+    <li>头部紧凑度：A 散开 (title→meta→正文 都缩进右侧) / B 紧凑 (title+meta 一行块) / C 同 B</li>
+    <li>视觉对齐：A 严格左对齐 (X 风格) / B C 标题块 vs 正文左缘 不对齐 (YouTube 风格)</li>
+  </ol>
+  <p class="mt-3">
+    <b>建议</b>：B 是 C 的简化版（只在 makers 行长才感受不到差异）；C 在 makers 行能完整展示长 handle，付出成本是多一行高度。
+  </p>
+</div>
+
+</body>
+</html>

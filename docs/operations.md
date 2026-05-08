@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
+最后更新：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Worker 端 phase 1+2（fetchList / enrichPending），手动触发 `mode=clawhub-fetch|clawhub-enrich`；新表 `metrics_snapshots_clawhub`；新建 SVG 模板变体 `renderClawhubContent`；新增前端 `BrandClawhub` 用源站 logo PNG；详见下方「ClawHub（2026-05-07 上线）」段）
+
+历史：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
 
 历史：2026-05-06（CF Workers Paid 升级到 $5/月：subrequest 50→1000、CPU 10ms→30s、解锁 DO/Queues。后续架构决策默认按 Paid 配额算账，详见下方「CF 计划与配额」节）
 
@@ -172,7 +174,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）
+- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）/ `clawhub-fetch` / `clawhub-enrich`（ClawHub phase 1/2 手动触发）
 - `mode=backfill-replies`：回填 reply_to_id + reply_of 父推快照（用 syndication `parent` 字段，与 quote 平行）。cron 占 :05 :35 槽（2/h），历史回补主要靠本地 loop。
 - `mode=reclassify-threads`：清理错分的 thread_root_id（默认 `dry_run=1` 只统计；`dry_run=0` 真执行）。一次性，等 backfill-replies 跑完再触发。
 - `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）；detect-longform 默认 30（1-80）
@@ -185,7 +187,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发分钟数分流：`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes` |
+| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
 
 **调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
 
@@ -200,6 +202,17 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
 - **Phase 2 — `runGithubEnrichPending`**：在每个 `*/5min` cron tick 上**抢占式**运行：先查 `extra.gh_pending=1` 的待 enrich 行，有则取 1 条做 GitHub API（license/watchers/PRs/contributors）+ raw README + DeepSeek LLM 判别 → UPDATE items（`is_relevant=0/1` + `extra.ai_category/ai_summary` 等），最后 batch 重算当日 `daily_rank`。**~9 subrequests/run**，远低于 50 限额。X 模式仅在没 pending 时走。
 - **手动触发**：`POST /api/enrich/run?mode=github-fetch` / `POST /api/enrich/run?mode=github-enrich&limit=5`，都需 Bearer `INGEST_TOKEN`
+
+**ClawHub（2026-05-07 上线，全云端 — 无本地依赖）**：
+- **数据源**：`https://wry-manatee-359.convex.cloud/api/query` Convex 公开 API（无鉴权 / 无 cookie / 无 turnstile），调用 `skills:listPublicPageV4` + `skills:getBySlug`。REST V1 (`https://wry-manatee-359.convex.site/api/v1/skills`) 也支持但页面大小限 25，因此走 Convex 直连 200/页
+- **Phase 1 — `runClawhubFetchList`**：每天 UTC `08:00` + `20:00`（= BJT 16:00 + 04:00），8 list calls（top 1000 stars + top 500 updated dedup）→ upsert items（`is_relevant=1` + `extra.ch_pending=true` + `published_at = skill.updatedAt`）+ append 一行 `metrics_snapshots_clawhub`。**~10 subrequests/run**（list 低成本）
+- **Phase 2 — `runClawhubEnrichPending`**：在每个 `*/5min` cron tick **抢占式**运行：取 `extra.ch_pending=1` 的待 enrich 行（按 `metrics.stars DESC` 优先），每 tick 处理 2 条 → fetch detail（含 `parsed.clawdis.install` + `capabilityTags` + `llmAnalysis.findings`）+ DeepSeek 翻译 summary（保留代码块）→ UPDATE items（`content_translated` + `extra.{license,install,capability_tags,llm_analysis,enriched_at}`）。**~5-10 subrequests/run**
+- **不接入 LLM judge**：所有 ClawHub skill 默认 `is_relevant=1`（marketplace 已是优选，跳过 X/GH/PH 那道 AI 相关性判别）
+- **`/api/items?source_type=clawhub`** 走专用 `handleClawhubFeed`：按 `metrics.stars DESC` 排序 + cursor 分页（cursor 格式 `stars|id`），跟 X/PH 默认时间排序不同
+- **`/api/items/:id/refresh`** 加 clawhub 分支：drawer 打开主动调，refresh metrics 通过 `getBySlug`（KV throttle 60s）
+- **手动触发**：`POST /api/enrich/run?mode=clawhub-fetch` / `POST /api/enrich/run?mode=clawhub-enrich&limit=10`，都需 Bearer `INGEST_TOKEN`
+- **海报变体**：`worker/src/share/svg-template.ts` 加 `renderClawhubContent`（GH 同款骨架 + lavender 来源 chip `#d8c8f5`）+ `pickSourceMeta` 加 clawhub 分支
+- **v1 后置**：ZIP 流水线（下载 `/api/v1/download?slug=...` → 抠 SKILL.md/README.md → frontmatter+H1 strip → 全文翻译入库）当前**没接**，所以 `items.content_translated` 只是 summary 翻译；drawer 的"文件清单/SKILL.md 原文/30 天趋势"三段是空占位
 
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
@@ -246,7 +259,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **12 个表**：
+- **13 个表**：
   - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
@@ -260,6 +273,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - `sessions`（2026-05-02 PR2 新增）— cookie/bearer 双兼容 token，nanoid 32 字符 id，30 天滑动过期。详见 § 3.3
   - `sms_send_log`（2026-05-02 PR2 新增）— 短信发送日志 + 防刷计数 + 验证码 hash。`result` 枚举 success/rate_limited/turnstile_failed/sms_api_error/budget_capped。30 天 retention cron 待加。详见 § 3.4
   - `share_relations`（2026-05-04 PR5 新增）— 分享关系图。`token` (nanoid 8) UNIQUE / `from_uid` 分享人 / `item_id` 复合 id / `to_did` 落地浏览器 device_id（首次扫码补） / `to_uid` 落地用户后续注册的 user.id / `landed_at` / `registered_at` / `scan_count` / `last_scanned_at`。4 索引：token / from_uid+time / item+time / to_did。社交关系图基础数据。migration `009-share-relations.sql`
+  - `metrics_snapshots_clawhub`（2026-05-07 ClawHub 接入新增）— ClawHub skill metrics 历史。每次 phase 1 cron append 一行 (item_id, captured_at, stars, downloads, installs_current, installs_all_time)。30 天 retention（沿用 `runCleanup` 03:35 UTC 每天清理）。两个索引：`idx_msch_item_time` / `idx_msch_captured`。migration: `worker/migrations/011-metrics-snapshots-clawhub.sql`
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -611,36 +625,105 @@ grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut 
 **位置**：项目根 `.secrets/cf-ops.env`（已 gitignored，路径见 `.gitignore` `.secrets/` 一行）
 
 **内容**：
-- `CF_OPS_API_TOKEN` — account-owned token，权限是「创建 account-owned 子 token」（不能直接操作 Turnstile / Workers / DNS 等具体资源）
+- `CF_OPS_API_TOKEN` — account-owned master token，权限是「创建 account-owned 子 token」（**自身不带任何资源 Read / Write 权限**，连 list zones 都返回空）
 - `CF_ACCOUNT_ID` — CF account ID
+- `CF_ZONE_ID` — 默认 zone（当前指向 `ai-feeds.com`，zone ID `e7982a660d8def7a2ce5ec60f28282fc`）；如新增 zone 再补 `CF_ZONE_<NAME>` 变量
+- `CF_ZONE_AIFEEDS_COM` — `ai-feeds.com` 的具体 zone ID（覆盖所有子域 staging-api / api / www / staging / blog / mail）
 
-**用途**：让 Claude Code session 跨对话延续 CF 运维能力。session 用 master token 现场创建一个「最小权限 + 短 TTL」的子 token 去做实际操作（list widgets、推 secret、改 DNS 等），避免长期暴露高权限 token。
+**用途**：让 Claude Code session 跨对话延续 CF 运维能力。session 用 master token 现场创建一个「最小权限 + 短 TTL」的子 token 去做实际操作（看 zone settings、列 WAF rules、查 Turnstile widgets、推 secret、改 DNS 等），避免长期暴露高权限 token。
 
 **典型用法**（Bash）：
+
 ```bash
 source .secrets/cf-ops.env
 
-# Step 1: 查 permission group ID（一次性，可缓存到笔记里）
+# Step 1: 查 permission group ID（一次性，可缓存到下方表里）
 curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens/permission_groups" \
-  -H "Authorization: Bearer $CF_OPS_API_TOKEN" | jq '.result[] | select(.name | test("Turnstile"))'
+  -H "Authorization: Bearer $CF_OPS_API_TOKEN" | jq '.result[] | select(.name | test("(?i)bot|zone|waf"))'
 
-# Step 2: 用 master token 创建一个只带需要权限的子 token（24h 过期）
+# Step 2: 写 policy JSON 文件（注意 resource 写法见下方规则）
 EXPIRES=$(date -u -v+24H +"%Y-%m-%dT%H:%M:%SZ")
+cat > /tmp/cf-subtoken.json <<EOF
+{
+  "name": "ops-readonly-$(date +%s)",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": [
+        {"id": "c8fed203ed3043cba015a93ad1616f1f"},
+        {"id": "517b21aee92c4d89936c976ba6e4be55"}
+      ],
+      "resources": {"com.cloudflare.api.account.zone.${CF_ZONE_ID}": "*"}
+    }
+  ],
+  "expires_on": "${EXPIRES}"
+}
+EOF
+
+# Step 3: 创建子 token
 SUB_TOKEN=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens" \
   -H "Authorization: Bearer $CF_OPS_API_TOKEN" -H "Content-Type: application/json" \
-  --data "{\"name\":\"ops-$(date +%s)\",\"policies\":[{\"effect\":\"allow\",\"permission_groups\":[{\"id\":\"<PERMISSION_GROUP_ID>\"}],\"resources\":{\"com.cloudflare.api.account.$CF_ACCOUNT_ID\":\"*\"}}],\"expires_on\":\"$EXPIRES\"}" \
-  | jq -r '.result.value')
+  --data @/tmp/cf-subtoken.json | jq -r '.result.value')
+echo "$SUB_TOKEN" > /tmp/cf-sub.token && chmod 600 /tmp/cf-sub.token
 
-# Step 3: 用子 token 干活（示例：列 Turnstile widgets）
-curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/challenges/widgets" \
-  -H "Authorization: Bearer $SUB_TOKEN"
+# Step 4: 用子 token 干活（示例：查 zone settings）
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/bot_management" \
+  -H "Authorization: Bearer $SUB_TOKEN" | jq
 ```
 
+**⚠️ 创建子 token 的 resource 写法（踩坑笔记，2026-05-07）**：
+
+account-owned token 创建子 token 时，resource 字段对每种 scope 有不同写法。**写错就报 1001 error**：
+
+| scope | 错误写法 ❌ | 正确写法 ✅ |
+|---|---|---|
+| Account-scoped permission group（如 `Account Analytics Read`） | — | `"com.cloudflare.api.account.${CF_ACCOUNT_ID}": "*"` |
+| Zone-scoped permission group（如 `Zone Read`、`Bot Management Read`） | `"com.cloudflare.api.account.zone.*": "*"`（报 "must specify a zone for account owned tokens"）<br/>`"com.cloudflare.api.account.${CF_ACCOUNT_ID}.zone.*": "*"`（报 "is not a supported resource type"） | `"com.cloudflare.api.account.zone.${ZONE_ID}": "*"`（必须 nest 到具体 zone ID，不能通配） |
+| 同一个 policy 混合不同 scope | — | 不行。混合 scope 需写**两个独立 policies**，每个 policies 只放 scope 一致的 permission_groups |
+
+完整多 scope 模板见上面 Step 2 JSON 里的 `policies` 数组结构。
+
 **已知 permission group ID**（用过的，免去重新查）：
-| 名称 | ID |
-|---|---|
-| Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` |
-| Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` |
+
+| 名称 | ID | scope |
+|---|---|---|
+| Account Analytics Read | `b89a480218d04ceb98b4fe57ca29dc1f` | account |
+| Zone Read | `c8fed203ed3043cba015a93ad1616f1f` | zone |
+| Zone Settings Read | `517b21aee92c4d89936c976ba6e4be55` | zone |
+| Zone WAF Read | `dbc512b354774852af2b5a5f4ba3d470` | zone |
+| Zone Settings Write | `3030687196b94b638145a3953da2b699` | zone |
+| Zone WAF Write | `fb6778dc191143babbfaa57993f1d275` | zone |
+| Bot Management Read | `07bea2220b2343fa9fae15656c0d8e88` | zone |
+| Bot Management Write | `3b94c49258ec4573b06d51d99b6416c0` | zone |
+| Analytics Read | `9c88f9c5bce24ce7af9a958ba9c504db` | zone |
+| Firewall Services Read | `4ec32dfcb35641c5bb32d5ef1ab963b4` | zone |
+| Firewall Services Write | `43137f8d07884d3198dc0ee77ca6e79b` | zone |
+| Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` | account |
+| Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` | account |
+
+**常用 endpoint 速查**（用 Step 4 的子 token）：
+
+```bash
+# 看 3 个 SEO/GEO 关键开关一次性
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/settings/security_level" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result.value'      # under_attack 模式开关
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/bot_management" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result'                    # fight_mode + ai_bots_protection
+curl -sS "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" -H "Authorization: Bearer $SUB_TOKEN" | jq '.result.rules[] | {description, action, enabled}'  # WAF custom rules
+
+# Analytics 流量数据（GraphQL）
+SINCE=$(date -u -v-23H +"%Y-%m-%dT%H:%M:%SZ")  # ⚠️ 免费版 zone Adaptive 时间窗严格 < 24h，安全用 23h
+curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $SUB_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"query\":\"query { viewer { zones(filter: {zoneTag: \\\"$CF_ZONE_ID\\\"}) { httpRequestsAdaptiveGroups(limit: 30, orderBy: [count_DESC], filter: {datetime_geq: \\\"$SINCE\\\", verifiedBotCategory_neq: \\\"\\\"}) { count dimensions { clientRequestHTTPHost verifiedBotCategory } } } } }\"}" | jq
+
+# 1d Groups（最长 30 天）— 看每日总请求 / 缓存 / 威胁
+curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $SUB_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"query\":\"query { viewer { zones(filter: {zoneTag: \\\"$CF_ZONE_ID\\\"}) { httpRequests1dGroups(limit: 30, orderBy: [date_DESC]) { dimensions { date } sum { requests cachedRequests threats pageViews } uniq { uniques } } } } }\"}" | jq
+```
+
+**免费版 Plan 已知限制**（计入查询时考虑）：
+- `httpRequestsAdaptiveGroups` 单次查询时间窗严格小于 24h（用 23h 安全）
+- `botScore`、`botScoreSrc` 等高级字段无访问权限（authz 错误）
+- Page Rules endpoint **不接受 account-owned token**（报 1011），只能用 user-owned token 看
+- Bot Fight Mode（基础版）不能被 WAF custom rule `skip` action bypass（这是 BFM 自身限制，与 token 权限无关）
 
 **轮换 / 撤销**：
 - 怀疑泄露：CF Dashboard → 头像 → My Profile → API Tokens → 找到 token → Roll（生成新值）或 Delete

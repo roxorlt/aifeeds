@@ -306,6 +306,26 @@ async function pickAuthorAvatar(
       const logo = arr.find(x => x?.role === 'logo' && typeof x.url === 'string');
       if (logo?.url) url = logo.url;
     }
+  } else if (sourceType === 'clawhub') {
+    // owner GitHub avatar — itemId 形如 'clawhub:<slug>'，handle 在 items.handle 里。
+    // 这里没拿 handle 字段，从 itemMedia 找 avatar 不靠谱（ClawHub 多数 skill 没有 inline 媒体），
+    // 退而求其次：handlers.ts 上层调用时已经把 item.handle 写进了 PosterItem.handle 字段，
+    // 这里 itemId 不带 handle，所以用专用路径：直接根据 source_id 走 GitHub avatar
+    // 约定（owner GitHub handle === ClawHub publisher handle 在大多数 skill 上成立）。
+    // ⚠️ 兜底：实在没头像则返 undefined，svg-template 走首字母 fallback
+    const m = itemId.match(/^clawhub:(.+)$/);
+    if (m) {
+      // 通过 itemId 反查 D1 拿 handle
+      try {
+        const row = await env.DB.prepare(`SELECT handle FROM items WHERE id = ?`)
+          .bind(itemId).first<{ handle: string | null }>();
+        if (row?.handle) {
+          url = `https://github.com/${row.handle}.png?size=256`;
+        }
+      } catch {
+        // ignore — fall through to undefined
+      }
+    }
   }
   if (!url) return undefined;
   // 头像走单独路径：只需要 fetch + sniff + base64，不做 media 门控

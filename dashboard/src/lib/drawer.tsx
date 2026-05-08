@@ -33,6 +33,8 @@ interface DrawerContextValue {
   // Persists for the session — cleared only on full page reload or when
   // overwritten by a different /t/:id navigation.
   spotlightItem: Item | null;
+  /** 释放当前 spotlight（feed 列头筛选条件变了的话需要清掉，否则 pin 的 item 不符合新筛选）*/
+  clearSpotlight: () => void;
 }
 
 const DrawerContext = createContext<DrawerContextValue | null>(null);
@@ -56,6 +58,12 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const slug = decodeURIComponent(phMatch[1]);
     const date = decodeURIComponent(phMatch[2]);
     return { compositeId: `product_hunt:${slug}:${date}` };
+  }
+  // /c/:slug → clawhub:<slug>
+  const chMatch = pathname.match(/^\/c\/([^/]+)$/);
+  if (chMatch) {
+    const slug = decodeURIComponent(chMatch[1]);
+    return { compositeId: `clawhub:${slug}` };
   }
   return null;
 }
@@ -106,8 +114,11 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         if (slug && date) {
           navigate(`/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}`);
         }
+      } else if (item.source_type === "clawhub") {
+        // /c/:slug — source_id 是 skill slug（单段）
+        navigate(`/c/${encodeURIComponent(item.source_id)}`);
       }
-      // Future sources: youtube / podcast / arxiv / product_hunt — add URL forms here.
+      // Future sources: youtube / podcast / arxiv — add URL forms here.
     },
     [navigate],
   );
@@ -190,7 +201,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [state.item?.id]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem }}>
+    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem, clearSpotlight: () => setSpotlightItem(null) }}>
       {children}
     </DrawerContext.Provider>
   );
