@@ -265,13 +265,16 @@ export function ClawhubDrawerBody({ item }: Props) {
   const categoryStyle = CATEGORY_STYLE[category] || CATEGORY_STYLE.other;
   const categoryLabel = CATEGORY_LABEL[category] || category;
 
-  // v1: 优先 content_translated（README 中文译文），回退 summary 中文（短）
+  // v2: content_translated 是 ClawHub 渲染的 README/SKILL.md 中文译文（getReadme action 拿到的）
+  // 用 readme_file 字段告诉前端 ClawHub 选了哪个文件
   const readme = item.content_translated || item.content || "";
   const summaryEn = extra.summary_en || "";
   const summaryZh = extra.summary_translated || "";
-  // 「内容是 README 还是 summary fallback」判断：当 content === summary 时（v0 兼容 +
-  // ZIP 没抓到 README 的兜底），不是 README，按 plain text 渲染。否则按 markdown 渲染。
-  const isReadme = readme.length > 0
+  // readme_file 暴露在 extra 但当前 UI 未直接展示，预留给未来「依据 SKILL.md 渲染」之类的提示
+  const _readmeFile = (extra as any).readme_file as string | undefined;
+  void _readmeFile;
+  // 双门槛：> 200 字 + 跟 summary 不同 → 是真 README/SKILL.md 内容；否则按 summary 兜底
+  const isReadme = readme.length > 200
     && readme !== summaryEn
     && readme !== summaryZh;
   const fallbackSummary = summaryZh || summaryEn;

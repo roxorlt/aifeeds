@@ -56,7 +56,7 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
             onSortChange(e.target.value as ClawhubSort);
           }}
           onClick={(e) => e.stopPropagation()}
-          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 py-0.5 text-[10.5px] text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
+          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 h-[22px] text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
           title="排序"
         >
           {SORT_OPTIONS.map((opt) => (
@@ -85,7 +85,7 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
             onCategoryChange(e.target.value as ClawhubCategory);
           }}
           onClick={(e) => e.stopPropagation()}
-          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 py-0.5 text-[10.5px] text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
+          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 h-[22px] text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
           title="分类"
         >
           {CATEGORY_OPTIONS.map((opt) => (

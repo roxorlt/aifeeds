@@ -871,6 +871,7 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
   const cursor = url.searchParams.get('cursor');
   const sort = (url.searchParams.get('sort') || 'stars').toLowerCase();
   const category = (url.searchParams.get('category') || 'all').toLowerCase();
+  const includeSuspicious = url.searchParams.get('include_suspicious') === 'true';
 
   const sortExpr = CLAWHUB_SORT_EXPR[sort] || CLAWHUB_SORT_EXPR.stars;
   const sortDir = CLAWHUB_SORT_DIR[sort] || 'DESC';
@@ -885,6 +886,13 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
   if (category !== 'all') {
     conditions.push(`json_extract(extra, '$.category') = ?`);
     params.push(category);
+  }
+
+  // 默认隐藏 suspicious skill（ClawHub 自家 LLM 标记 verdict !== 'benign'）。
+  // 前端 toggle 切到「显示全部」时传 ?include_suspicious=true 解除过滤。
+  // is_suspicious 字段在 enrich 时被写入 — 还没 enrich 的新 item 视作非 suspicious。
+  if (!includeSuspicious) {
+    conditions.push(`COALESCE(json_extract(extra, '$.is_suspicious'), 0) = 0`);
   }
 
   if (cursor) {
