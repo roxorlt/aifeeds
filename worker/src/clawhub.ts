@@ -391,9 +391,9 @@ async function translateMarkdown(env: ClawhubEnv, md: string): Promise<string | 
   // 输入已是中文 → 原样返回，不调 DeepSeek
   if (isLikelyChinese(md)) return md;
 
-  // 长文档单次调用上限：DeepSeek input 64k tokens，1 字符 ~1 token，留余量按 30k chars 切
-  // 多数 skill README < 5k chars，单次足够。超长的截断到 30k 翻第一段
-  const text = md.length > 30000 ? md.slice(0, 30000) + "\n\n... (内容过长，已截断)" : md;
+  // 长文档单次调用上限：5k chars（v4.2 进一步收紧 — 8k 仍 ~5 items/min ETA 9h）。
+  // 抽屉 5k 中文已是 4-5 屏可读内容，超长部分加截断说明。
+  const text = md.length > 5000 ? md.slice(0, 5000) + "\n\n... (内容过长，已截断；完整 README 见 https://clawhub.ai)" : md;
 
   const res = await fetch(DEEPSEEK_URL, {
     method: "POST",
