@@ -21,7 +21,9 @@
 //
 // Design: docs/plans/2026-05-06-clawhub-source-design.md
 
-import { unzipSync, strFromU8 } from "fflate";
+// fflate dependency removed in v2 — switched from local ZIP unzip to ClawHub's own
+// skills:getReadme convex action which returns whichever file (README.md or SKILL.md)
+// ClawHub itself renders in the README tab.
 
 export interface ClawhubEnv {
   DB: D1Database;
@@ -113,7 +115,9 @@ async function fetchSkillList(
   const args: Record<string, unknown> = {
     sort,
     dir: "desc",
-    nonSuspiciousOnly: true,
+    // 拉全部（含 suspicious），DB 里用 extra.is_suspicious 标记，feed 端按 query
+    // param ?include_suspicious 控制是否过滤。默认 hide。
+    nonSuspiciousOnly: false,
     numItems,
   };
   if (cursor) args.cursor = cursor;
@@ -214,7 +218,12 @@ interface ConvexDetailResponse {
           recommendation?: string;
           riskBucket?: string;
         }>;
+        verdict?: string;       // 'benign' | 'suspicious' | ...
+        status?: string;        // 'clean' | 'flagged' | ...
+        confidence?: string;
+        summary?: string;
       };
+      files?: Array<{ path?: string; size?: number }>; // skill ZIP 内文件清单
     };
     owner?: any;
   };
@@ -285,57 +294,55 @@ async function translateShort(env: ClawhubEnv, text: string): Promise<string | n
   return out || null;
 }
 
-// ─── ZIP 流水线（v1）────────────────────────────────────────────────────────
-// fetch ClawHub /api/v1/download?slug=... → fflate unzip → 抠 README.md/SKILL.md
-// + 文件清单。每个 ZIP ~25KB，unzip CPU ~50ms。
+// ─── 抓 ClawHub 渲染的 README tab 内容（v2，用 convex action）─────────────
+// 跟 ClawHub 网页本身完全对齐 — 它的 SkillDetailPage 用 R.skills.getReadme({versionId})
+// 拿 {path, text}，path 表明 ClawHub 选了哪个文件（README.md 或 SKILL.md），text 是
+// 文件原文。我们用 text 当 source 翻译，path 存到 extra 供前端展示「依据 SKILL.md 渲染」
+// 之类的说明。
+//
+// 不再走自己解 ZIP — 文件挑选逻辑（README.md vs SKILL.md）让 ClawHub 自己决定。
+
+const CONVEX_ACTION = "https://wry-manatee-359.convex.cloud/api/action";
 
 interface ExtractedSkill {
-  readme: string;     // README.md 原文（已 strip frontmatter）
-  skillMd: string;    // SKILL.md 原文（不翻译）
-  files: Array<{ path: string; size: number }>; // 全部文件清单
+  readme: string;          // ClawHub 渲染的 README tab 内容（已 strip frontmatter）
+  readmeFile: string;      // ClawHub 选择的文件名（'README.md' | 'SKILL.md'）
+  files: Array<{ path: string; size: number }>; // 文件清单（来自 detail.latestVersion.files）
 }
 
-async function fetchAndExtractSkill(slug: string): Promise<ExtractedSkill | null> {
-  const url = `${CONVEX_REST}/download?slug=${encodeURIComponent(slug)}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT },
+async function fetchClawhubReadme(versionId: string): Promise<{ path: string; text: string } | null> {
+  const res = await fetch(CONVEX_ACTION, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "User-Agent": USER_AGENT },
+    body: JSON.stringify({
+      path: "skills:getReadme",
+      args: { versionId },
+      format: "json",
+    }),
     cf: { cacheTtl: 300 },
   });
   if (!res.ok) {
-    console.error(`[clawhub] ZIP fetch ${slug}: HTTP ${res.status}`);
+    console.error(`[clawhub] getReadme HTTP ${res.status} for ${versionId}`);
     return null;
   }
-  const buf = new Uint8Array(await res.arrayBuffer());
-  // size cap 防 memory 爆炸（worker 128MB 限制；正常 ZIP <100KB）
-  if (buf.length > 5 * 1024 * 1024) {
-    console.warn(`[clawhub] ZIP too large ${slug}: ${buf.length}B`);
-    return null;
-  }
+  const j = (await res.json()) as any;
+  if (j.status !== "success" || !j.value) return null;
+  const path = j.value.path as string;
+  const text = j.value.text as string;
+  if (!path || !text) return null;
+  return { path, text };
+}
 
-  let unzipped: Record<string, Uint8Array>;
-  try {
-    unzipped = unzipSync(buf, {
-      // 只解我们要的文件 + 跳过 node_modules / hidden files
-      filter: (file) =>
-        file.name === "README.md" ||
-        file.name === "SKILL.md" ||
-        (!file.name.startsWith(".") && !file.name.includes("node_modules/")),
-    });
-  } catch (e: any) {
-    console.error(`[clawhub] unzip ${slug} failed: ${e?.message || e}`);
-    return null;
-  }
-
-  const readmeBytes = unzipped["README.md"];
-  const skillMdBytes = unzipped["SKILL.md"];
-  const readme = readmeBytes ? stripFrontmatter(strFromU8(readmeBytes)) : "";
-  const skillMd = skillMdBytes ? strFromU8(skillMdBytes) : "";
-  const files = Object.entries(unzipped).map(([path, bytes]) => ({
-    path,
-    size: bytes.length,
+async function fetchAndExtractSkill(versionId: string, lvFiles: Array<any>): Promise<ExtractedSkill | null> {
+  const r = await fetchClawhubReadme(versionId);
+  if (!r) return null;
+  const readme = stripFrontmatter(r.text);
+  const files = (lvFiles || []).map((f) => ({
+    path: f.path as string,
+    size: (f.size as number) || 0,
   }));
 
-  return { readme, skillMd, files };
+  return { readme, readmeFile: r.path, files };
 }
 
 function stripFrontmatter(md: string): string {
@@ -677,6 +684,11 @@ export async function runClawhubEnrichPending(
       const installList = lv.parsed?.clawdis?.install || [];
       const capabilityTags = lv.capabilityTags || rich.skill.capabilityTags || [];
       const llmFindings = lv.llmAnalysis?.agenticRiskFindings || [];
+      // ClawHub 自家 LLM 安全审查结论：verdict='benign' + status='clean' 视为安全；
+      // 其它（malicious/suspicious/needs_review/flagged 等）当 suspicious 处理。
+      const verdict = lv.llmAnalysis?.verdict;
+      const status = lv.llmAnalysis?.status;
+      const isSuspicious = !!(verdict && verdict !== "benign") || !!(status && status !== "clean");
 
       const existingExtra = JSON.parse(row.extra || "{}");
       // 现在 row.content 在 v1 写入策略下是 README 原文（如果之前 v0 fill 过的话是 summary，
@@ -693,7 +705,8 @@ export async function runClawhubEnrichPending(
         Array.isArray(existingExtra.llm_analysis?.findings) &&
         existingExtra.llm_analysis.findings.length > 0;
 
-      // 三件并行：summary 翻译 + LLM finding 翻译 + ZIP 抓取
+      // 三件并行：summary 翻译 + LLM finding 翻译 + ClawHub 渲染的 README 抓取
+      const versionId = lv._id as string;
       const [summaryT, translatedFindings, extracted] = await Promise.all([
         summaryAlreadyZh || !summaryEnglish
           ? Promise.resolve(existingSummaryZh)
@@ -701,25 +714,25 @@ export async function runClawhubEnrichPending(
         existingFindingsZh
           ? Promise.resolve(existingExtra.llm_analysis.findings as any[])
           : translateLlmFindings(env, llmFindings),
-        fetchAndExtractSkill(slug),
+        versionId ? fetchAndExtractSkill(versionId, lv.files || []) : Promise.resolve(null),
       ]);
       const summaryTranslated = summaryT;
 
-      // README 翻译（如果 ZIP 抓到了 README.md 内容）
+      // README 翻译 — extracted.readme 是 ClawHub 自己挑出来的内容（README.md or SKILL.md）
       let readmeOriginal = "";
       let readmeTranslated: string | null = null;
-      let skillMd = "";
+      let readmeFile = "";
       let filesManifest: Array<{ path: string; size: number }> = [];
       if (extracted) {
         readmeOriginal = extracted.readme;
-        skillMd = extracted.skillMd;
+        readmeFile = extracted.readmeFile;
         filesManifest = extracted.files;
         if (readmeOriginal) {
-          // 已有合格中文译文（CJK > 20% + 长度 ≥ 200 排除短 summary 占位）→ 复用，跳过 DeepSeek。
-          // 200 阈值参考：v0 时期 content_translated 装的是 ~150-200 中文 summary，真 README 译文一般 500+。
+          // 已有合格中文译文（CJK > 20% + 长度 ≥ 500 排除短 summary 占位）→ 复用，跳过 DeepSeek。
+          // 500 阈值参考：summary 中文译文一般 100-200 字，新真 README/SKILL.md 译文一般 1k+。
           // 0.2 阈值参考：含代码块的中文 README 译文 CJK 占比通常 20-30%，0.5 太严会误判。
           const reuseExistingTranslation =
-            existingContentZh.length >= 200 && isLikelyChinese(existingContentZh, 0.2);
+            existingContentZh.length >= 500 && isLikelyChinese(existingContentZh, 0.2);
           if (reuseExistingTranslation) {
             readmeTranslated = existingContentZh;
           } else {
@@ -734,15 +747,20 @@ export async function runClawhubEnrichPending(
         license,
         install: installList,
         capability_tags: capabilityTags,
+        is_suspicious: isSuspicious,
+        llm_verdict: verdict || undefined,
+        llm_status: status || undefined,
         llm_analysis: translatedFindings.length > 0 ? { findings: translatedFindings, lang: 'zh' } : undefined,
-        // summary 单独存 — feed 卡片正文用（短）；drawer body 用 content_translated（长 README）
+        // summary 单独存 — feed 卡片正文用（短）；drawer body 用 content_translated（ClawHub 渲染的 README/SKILL.md 译文）
         summary_en: summaryEnglish || existingExtra.summary_en,
         summary_translated: summaryTranslated || existingExtra.summary_translated,
-        // ZIP 流水线产出
-        skill_md: skillMd || existingExtra.skill_md || "",
+        // ClawHub README tab 产出（可能是 README.md 或 SKILL.md，由 ClawHub 自己挑）
+        readme_file: readmeFile || existingExtra.readme_file || "",
         files_manifest: filesManifest.length > 0 ? filesManifest : existingExtra.files_manifest,
         enriched_at: Math.floor(Date.now() / 1000),
       };
+      // skill_md 字段已废弃（ZIP 流程已退役），清掉避免占空间
+      delete (newExtra as any).skill_md;
 
       // items.content / content_translated 写入策略：
       // - 抓到 README → content = README 原文，content_translated = README 中文译文
