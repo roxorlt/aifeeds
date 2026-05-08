@@ -244,13 +244,21 @@ Rules:
 - Preserve product/code names verbatim (e.g., "ClawHub", "Self-Improving Agent", "Claude").
 - Output Chinese only, no preamble. No quotes around output.`;
 
+// 已是中文判定 — CJK 占比 > threshold 视为中文。
+// - 短文本（summary、findings）默认 0.5，输入纯英文几乎一定不达标
+// - 翻译过的 markdown 含代码块/链接/英文标识符，CJK 占比通常 20-30% — 复用判定用 0.2
+function isLikelyChinese(text: string | null | undefined, threshold = 0.5): boolean {
+  if (!text || text.length === 0) return false;
+  const cjk = (text.match(/[一-鿿]/g) || []).length;
+  return cjk / text.length > threshold;
+}
+
 async function translateShort(env: ClawhubEnv, text: string): Promise<string | null> {
   if (!env.DEEPSEEK_API_KEY) return null;
   if (!text || text.trim().length === 0) return null;
 
-  // Heuristic: if text already has > 50% CJK, skip (already Chinese).
-  const cjk = (text.match(/[一-鿿]/g) || []).length;
-  if (cjk / text.length > 0.5) return text;
+  // 输入已是中文（CJK > 50%）→ 原样返回，不调 DeepSeek
+  if (isLikelyChinese(text)) return text;
 
   const res = await fetch(DEEPSEEK_URL, {
     method: "POST",
@@ -373,9 +381,8 @@ async function translateMarkdown(env: ClawhubEnv, md: string): Promise<string | 
   if (!env.DEEPSEEK_API_KEY) return null;
   if (!md || md.trim().length === 0) return null;
 
-  // CJK > 50% → 已是中文，原样返回
-  const cjk = (md.match(/[一-鿿]/g) || []).length;
-  if (md.length > 0 && cjk / md.length > 0.5) return md;
+  // 输入已是中文 → 原样返回，不调 DeepSeek
+  if (isLikelyChinese(md)) return md;
 
   // 长文档单次调用上限：DeepSeek input 64k tokens，1 字符 ~1 token，留余量按 30k chars 切
   // 多数 skill README < 5k chars，单次足够。超长的截断到 30k 翻第一段
@@ -636,7 +643,7 @@ export async function runClawhubEnrichPending(
   // 按 stars desc 优先 enrich — 热门 skill 先进入 feed，避免初次接入 staging
   // 验收时看到的都是 long tail 还没翻译的条目。
   const pending = await env.DB.prepare(
-    `SELECT id, source_id, title, content, lang, extra
+    `SELECT id, source_id, title, content, content_translated, lang, extra
        FROM items
       WHERE source_type='clawhub'
         AND deleted_at IS NULL
@@ -676,12 +683,24 @@ export async function runClawhubEnrichPending(
       // 兼容到位）。summary 单独读 extra.summary_en 优先，回退 row.content（v0 旧数据）
       const summaryEnglish = (existingExtra.summary_en as string) || (row.content || "") as string;
 
+      // 已译态判定：cost-saving — 已是中文的不再调 DeepSeek。
+      // 想用新提示词强制重译：先在 SQL 把对应字段清掉再 enrich。
+      const existingSummaryZh = existingExtra.summary_translated as string | undefined;
+      const summaryAlreadyZh = isLikelyChinese(existingSummaryZh);
+      const existingContentZh = (row.content_translated as string | null) || "";
+      const existingFindingsZh =
+        existingExtra.llm_analysis?.lang === "zh" &&
+        Array.isArray(existingExtra.llm_analysis?.findings) &&
+        existingExtra.llm_analysis.findings.length > 0;
+
       // 三件并行：summary 翻译 + LLM finding 翻译 + ZIP 抓取
       const [summaryT, translatedFindings, extracted] = await Promise.all([
-        existingExtra.summary_translated || !summaryEnglish
-          ? Promise.resolve(existingExtra.summary_translated)
+        summaryAlreadyZh || !summaryEnglish
+          ? Promise.resolve(existingSummaryZh)
           : translateShort(env, summaryEnglish),
-        translateLlmFindings(env, llmFindings),
+        existingFindingsZh
+          ? Promise.resolve(existingExtra.llm_analysis.findings as any[])
+          : translateLlmFindings(env, llmFindings),
         fetchAndExtractSkill(slug),
       ]);
       const summaryTranslated = summaryT;
@@ -696,7 +715,16 @@ export async function runClawhubEnrichPending(
         skillMd = extracted.skillMd;
         filesManifest = extracted.files;
         if (readmeOriginal) {
-          readmeTranslated = await translateMarkdown(env, readmeOriginal);
+          // 已有合格中文译文（CJK > 20% + 长度 ≥ 200 排除短 summary 占位）→ 复用，跳过 DeepSeek。
+          // 200 阈值参考：v0 时期 content_translated 装的是 ~150-200 中文 summary，真 README 译文一般 500+。
+          // 0.2 阈值参考：含代码块的中文 README 译文 CJK 占比通常 20-30%，0.5 太严会误判。
+          const reuseExistingTranslation =
+            existingContentZh.length >= 200 && isLikelyChinese(existingContentZh, 0.2);
+          if (reuseExistingTranslation) {
+            readmeTranslated = existingContentZh;
+          } else {
+            readmeTranslated = await translateMarkdown(env, readmeOriginal);
+          }
         }
       }
 

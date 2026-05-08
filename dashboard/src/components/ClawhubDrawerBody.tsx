@@ -14,10 +14,93 @@
 
 import { useState, useEffect } from "react";
 import Markdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Item } from "../types";
 import { fetchItem } from "../api";
 import { cn, formatCompact, parseJsonField } from "../lib/utils";
+
+// Markdown 渲染样式 — 跟 GithubDrawerBody 同款 token，保证 README 翻译后排版还原。
+// 各元素显式 className 而不是依赖 prose（项目没装 @tailwindcss/typography）。
+const CLAWHUB_MARKDOWN_COMPONENTS: Components = {
+  h1: ({ node: _node, ...props }) => (
+    <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
+  ),
+  h2: ({ node: _node, ...props }) => (
+    <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
+  ),
+  h3: ({ node: _node, ...props }) => (
+    <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
+  ),
+  h4: ({ node: _node, ...props }) => (
+    <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
+  ),
+  p: ({ node: _node, ...props }) => (
+    <p className="my-2 leading-relaxed text-neutral-700" {...props} />
+  ),
+  a: ({ node: _node, href, ...props }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-sky-600 hover:underline break-all"
+      onClick={(e) => e.stopPropagation()}
+      {...props}
+    />
+  ),
+  ul: ({ node: _node, ...props }) => (
+    <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
+  ),
+  ol: ({ node: _node, ...props }) => (
+    <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
+  ),
+  li: ({ node: _node, ...props }) => <li {...props} />,
+  code: ({ node: _node, className, children, ...props }) => {
+    const isInline = !className?.includes("language-");
+    if (isInline) {
+      return (
+        <code className="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800" {...props}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className={cn("font-mono text-[12px]", className)} {...props}>
+        {children}
+      </code>
+    );
+  },
+  pre: ({ node: _node, ...props }) => (
+    <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
+  ),
+  blockquote: ({ node: _node, ...props }) => (
+    <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
+  ),
+  hr: ({ node: _node, ...props }) => (
+    <hr className="my-4 border-neutral-200" {...props} />
+  ),
+  img: ({ node: _node, src, alt, ...props }) => (
+    <img
+      src={typeof src === "string" ? src : undefined}
+      alt={alt}
+      className="my-2 max-w-full rounded-md border border-neutral-200"
+      loading="lazy"
+      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+      {...props}
+    />
+  ),
+  table: ({ node: _node, ...props }) => (
+    <div className="my-3 overflow-x-auto">
+      <table className="min-w-full border-collapse text-[12px]" {...props} />
+    </div>
+  ),
+  th: ({ node: _node, ...props }) => (
+    <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
+  ),
+  td: ({ node: _node, ...props }) => (
+    <td className="border border-neutral-200 px-2 py-1" {...props} />
+  ),
+};
 import {
   IconStarFill,
   IconDownload,
@@ -297,8 +380,10 @@ export function ClawhubDrawerBody({ item }: Props) {
             {isReadme ? "README" : "简介"}
           </div>
           {isReadme ? (
-            <div className="prose prose-sm prose-neutral max-w-none text-[14px] leading-relaxed text-neutral-800 break-words">
-              <Markdown remarkPlugins={[remarkGfm]}>{readme}</Markdown>
+            <div className="text-[14px] break-words">
+              <Markdown remarkPlugins={[remarkGfm]} components={CLAWHUB_MARKDOWN_COMPONENTS}>
+                {readme}
+              </Markdown>
             </div>
           ) : (
             <p className="text-[14px] leading-relaxed text-neutral-800 whitespace-pre-wrap break-words">
