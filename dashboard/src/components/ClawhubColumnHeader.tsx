@@ -44,11 +44,21 @@ interface Props {
   onHideSuspiciousChange: (b: boolean) => void;
 }
 
+// 高度策略（修对齐）：所有控件共用 H=22px，分两层
+//   - 外层 wrapper：`inline-flex h-[22px] items-center` — 强约束高度，不依赖原生 select 渲染
+//   - 内层 select：`h-full` 撑满外层；之前直接给 select h-[22px] 在 Safari/iOS 不一定生效
+//     （native select 有 user-agent 默认 line-height/padding，h-* 偶尔被覆盖），所以下推到 h-full
+const SELECT_CLASS =
+  "h-full appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 box-border text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300";
+const CHEVRON_CLASS =
+  "absolute right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none";
+const WRAPPER_CLASS = "relative inline-flex h-[22px] items-center";
+
 export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChange, onCategoryChange, onHideSuspiciousChange }: Props) {
   return (
     <div className="flex items-center gap-1">
       {/* 排序 */}
-      <div className="relative">
+      <div className={WRAPPER_CLASS}>
         <select
           value={sort}
           onChange={(e) => {
@@ -56,7 +66,7 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
             onSortChange(e.target.value as ClawhubSort);
           }}
           onClick={(e) => e.stopPropagation()}
-          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 h-[22px] text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
+          className={SELECT_CLASS}
           title="排序"
         >
           {SORT_OPTIONS.map((opt) => (
@@ -70,14 +80,14 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
           strokeWidth="2"
           strokeLinecap="round"
           strokeLinejoin="round"
-          className="absolute right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none"
+          className={CHEVRON_CLASS}
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </div>
 
       {/* 分类 */}
-      <div className="relative">
+      <div className={WRAPPER_CLASS}>
         <select
           value={category}
           onChange={(e) => {
@@ -85,7 +95,7 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
             onCategoryChange(e.target.value as ClawhubCategory);
           }}
           onClick={(e) => e.stopPropagation()}
-          className="appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 h-[22px] text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300"
+          className={SELECT_CLASS}
           title="分类"
         >
           {CATEGORY_OPTIONS.map((opt) => (
@@ -99,21 +109,20 @@ export function ClawhubColumnHeader({ sort, category, hideSuspicious, onSortChan
           strokeWidth="2"
           strokeLinecap="round"
           strokeLinejoin="round"
-          className="absolute right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none"
+          className={CHEVRON_CLASS}
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </div>
 
-      {/* 隐藏可疑 toggle — 真正可点切换。绿色 = 启用过滤（默认），灰色 = 关闭过滤显示全部
-          高度跟 select 对齐：select 是 text-[10.5px] + py-0.5 视觉 ~22px；toggle 用 h-[22px] 同高 */}
+      {/* 隐藏可疑 toggle — 跟 select 同 h-[22px] + box-border + 同样的 inline-flex 容器规则 */}
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
           onHideSuspiciousChange(!hideSuspicious);
         }}
-        className={`inline-flex items-center justify-center h-[22px] w-[22px] rounded border transition-colors ${
+        className={`inline-flex items-center justify-center h-[22px] w-[22px] box-border rounded border transition-colors ${
           hideSuspicious
             ? "bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100"
             : "bg-neutral-50 border-neutral-200 text-neutral-400 hover:bg-neutral-100"

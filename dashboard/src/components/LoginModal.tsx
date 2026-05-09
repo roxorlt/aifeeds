@@ -17,9 +17,14 @@ declare global {
         opts: {
           sitekey: string;
           callback?: (token: string) => void;
-          'error-callback'?: () => void;
+          'error-callback'?: (code?: string) => void;
           'expired-callback'?: () => void;
           theme?: 'auto' | 'light' | 'dark';
+          size?: 'normal' | 'compact' | 'flexible';
+          appearance?: 'always' | 'execute' | 'interaction-only';
+          retry?: 'auto' | 'never';
+          'retry-interval'?: number;
+          'refresh-expired'?: 'auto' | 'manual' | 'never';
         },
       ) => string;
       reset: (widgetId?: string) => void;
@@ -94,18 +99,31 @@ export function LoginModal() {
         const id = window.turnstile.render(turnstileContainerRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           theme: 'auto',
+          // 移动端兼容（2026-05-09 修 300031）：
+          // - size:'flexible' 比 normal 在窄屏渲染更稳，避免 widget 因布局挤压触发 300031
+          // - retry:'auto' + retry-interval 短窗自动重试，挑战 token 临时拿不到时不阻塞用户
+          // - refresh-expired:'auto' token 过期自动刷新，避免用户停留过久后第一次点发送验证码就失败
+          size: 'flexible',
+          retry: 'auto',
+          'retry-interval': 8000,
+          'refresh-expired': 'auto',
           callback: (token: string) => {
             setTurnstileToken(token);
             setTurnstileError('');
           },
           'error-callback': (code?: string) => {
             setTurnstileToken(null);
-            // 600010 = sitekey 配置 / hostname 未授权；其他保留原始码，便于反馈
-            const friendly =
-              code === '600010'
-                ? '人机校验配置异常（站点 hostname 未在 Cloudflare Turnstile 授权列表内）。请联系管理员。'
-                : `人机校验失败（错误码 ${code || 'unknown'}），请刷新重试。`;
-            setTurnstileError(friendly);
+            // 错误码翻译表 — 用户看得懂的中文。完整列表见 Cloudflare Turnstile 文档
+            // https://developers.cloudflare.com/turnstile/troubleshooting/client-side-errors/
+            const c = String(code || '');
+            const map: Record<string, string> = {
+              '600010': '人机校验配置异常（域名未在 Cloudflare Turnstile 授权列表内），请联系管理员。',
+              '300010': '人机校验已超时，请刷新页面重试。',
+              '300020': '人机校验加载失败（网络受限）。如果开启了网络代理，请尝试关闭后重试。',
+              '300030': '人机校验失败，请刷新页面重试。',
+              '300031': '人机校验 token 异常，已自动重试。如果反复失败，请尝试刷新页面或更换浏览器；微信内置浏览器 / WebView 中可能不稳定。',
+            };
+            setTurnstileError(map[c] || `人机校验失败（错误码 ${c || 'unknown'}），请刷新页面重试。`);
           },
           'expired-callback': () => setTurnstileToken(null),
         });
