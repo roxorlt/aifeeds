@@ -9,6 +9,12 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widg
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// 微信内置浏览器（WeChat WKWebView）人机校验经常过不去，提前提示用户外部浏览器打开
+function isWeChatBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /MicroMessenger/i.test(navigator.userAgent);
+}
+
 declare global {
   interface Window {
     turnstile?: {
@@ -270,6 +276,28 @@ export function LoginModal() {
         </div>
         {phoneError && (
           <p className="mt-1 text-xs text-rose-600">{phoneError}</p>
+        )}
+
+        {/* WeChat 内置浏览器人机校验大概率过不去，提示用 Safari/系统浏览器 */}
+        {isWeChatBrowser() && (
+          <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <div className="font-medium mb-1">请用 Safari 或系统浏览器打开</div>
+            <div className="text-amber-800">
+              微信内置浏览器对人机校验不友好，登录大概率失败。请点击右上角「···」→ 选择
+              <span className="font-medium">「在浏览器打开」</span>，再继续登录。
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard?.writeText(window.location.href).then(() => {
+                  toast.success('链接已复制，可粘贴到 Safari 打开');
+                }).catch(() => {});
+              }}
+              className="mt-2 rounded border border-amber-400 bg-white px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100"
+            >
+              复制本页链接
+            </button>
+          </div>
         )}
 
         {/* Turnstile widget */}
