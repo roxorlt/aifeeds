@@ -26,6 +26,7 @@ import {
   countGithubR2Pending,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
+import { runPhDailyFetch } from './scrapers/ph';
 import {
   runClawhubFetchList,
   runClawhubEnrichPending,
@@ -48,6 +49,7 @@ import {
   adminUser,
   adminCleanupAccount,
   adminDailyCap,
+  checkAdminAuth,
 } from './admin';
 import {
   handleShareCreate,
@@ -280,6 +282,22 @@ export default {
         const { handlePhPoc } = await import('./scrapers/ph_poc');
         return handlePhPoc(request, env);
       }
+      // ─── PH daily fetch admin debug ────────────────────────────
+      // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
+      // HTTP Basic Auth (ADMIN_USER / ADMIN_PASS).
+      if (path === '/api/admin/ph-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const force = u.searchParams.get('force') === '1';
+        const ptDate = u.searchParams.get('pt_date') || undefined;
+        const result = await runPhDailyFetch(env, { force, ptDate });
+        return jsonResponse(result, 200, request, env);
+      }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal error';
@@ -341,6 +359,16 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
+          // ─── PH daily fetch (UTC 20:10-20:14, 1 PT day) ─────────
+          // PT yesterday is frozen ~13h+ at this point, daily_rank stable.
+          // KV sentinel keys on PT date — won't double-fire across 5min window
+          // or cross-day retries. Returns early so this tick is dedicated to PH
+          // (~30 detail queries + ingest + snapshot ≈ 60+ subreq, big block).
+          if (hour === 20 && minute >= 10 && minute < 15) {
+            const r = await runPhDailyFetch(env);
+            console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
+            return;
+          }
           // Github preempt order (each preempt drains a batch sequentially —
           // no 5-min gap between rows):
           //   1. enrich (initial API + LLM judge, ~5-10s/row)
