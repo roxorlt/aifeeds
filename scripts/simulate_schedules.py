@@ -21,7 +21,7 @@ from pathlib import Path
 from statistics import median
 
 BJT = timezone(timedelta(hours=8))
-DB = Path("/Users/roxor/brain/30-projects/xlist-scraper/data/xlist.db")
+DB = Path("/Users/roxor/brain/30-projects/aifeeds/data/xlist.db")
 LIST_ID = "1643236611378008066"
 
 TRAIN_DAYS = 14

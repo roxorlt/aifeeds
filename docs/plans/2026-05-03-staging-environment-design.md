@@ -300,7 +300,7 @@ if (cron === '0 2 * * 0') {
 ```bash
 # ~/Library/LaunchAgents/com.aifeeds.d1-backup.plist
 # 每周日 02:00 跑
-cd ~/brain/30-projects/xlist-scraper/worker
+cd ~/brain/30-projects/aifeeds/worker
 DATE=$(date +%Y%m%d)
 wrangler d1 export xlist --remote --output=/tmp/xlist-$DATE.sql
 gzip /tmp/xlist-$DATE.sql

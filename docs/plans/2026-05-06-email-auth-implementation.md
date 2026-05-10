@@ -22,7 +22,7 @@
 
 **Branch:** `feat/email-auth`（已从 main `44359c4` 出，含设计文档 commit `c968642`）
 
-**关联设计文档:** `/Users/roxor/brain/30-projects/xlist-scraper/docs/plans/2026-05-06-email-auth-design.md`
+**关联设计文档:** `/Users/roxor/brain/30-projects/aifeeds/docs/plans/2026-05-06-email-auth-design.md`
 
 ---
 
@@ -1748,7 +1748,7 @@ Expected: 返回 1 行。
 
 Claude 提示 user 跑：
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/worker
+cd /Users/roxor/brain/30-projects/aifeeds/worker
 npx wrangler secret put RESEND_API_KEY --env staging
 # 提示输入 → 粘贴 G1 拿到的 staging key
 ```
@@ -1821,7 +1821,7 @@ Expected: 「✅ ... 1 commands executed」。
 
 Claude 提示 user 跑：
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/worker
+cd /Users/roxor/brain/30-projects/aifeeds/worker
 npx wrangler secret put RESEND_API_KEY
 # 提示输入 → 粘贴 G1 拿到的 prod key（可与 staging 同 key 或独立）
 ```

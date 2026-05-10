@@ -4,7 +4,7 @@
 
 **Goal:** Build a global skill that scrapes X (Twitter) Lists, filters AI-related tweets, translates English to Chinese, and stores results in SQLite.
 
-**Architecture:** Global skill (`~/.claude/skills/xlist-scraper/`) triggers Python scripts that use browser-use Python API for scraping and DeepSeek Chat API for translation/filtering. Data persists in SQLite at `~/brain/30-projects/xlist-scraper/data/xlist.db`.
+**Architecture:** Global skill (`~/.claude/skills/xlist-scraper/`) triggers Python scripts that use browser-use Python API for scraping and DeepSeek Chat API for translation/filtering. Data persists in SQLite at `~/brain/30-projects/aifeeds/data/xlist.db`.
 
 **Tech Stack:** Python 3.13 (browser-use venv), browser-use Python API, DeepSeek Chat (OpenAI-compatible), SQLite3, Chrome cookie decryption (pbkdf2 + AES-CBC)
 
@@ -855,7 +855,7 @@ Expected: `Parse OK`
 
 **Files:**
 - Create: `~/.claude/skills/xlist-scraper/SKILL.md`
-- Create: `~/brain/30-projects/xlist-scraper/CLAUDE.md`
+- Create: `~/brain/30-projects/aifeeds/CLAUDE.md`
 
 **Step 1: Write SKILL.md**
 
@@ -889,13 +889,13 @@ If no argument is provided, use AskUserQuestion to ask for the List ID or URL.
 3. Scrolls the List timeline, extracts tweets until cursor/limit
 4. Filters AI-related tweets (keyword + DeepSeek LLM)
 5. Translates English tweets to Chinese (DeepSeek Chat)
-6. Stores everything in SQLite at `~/brain/30-projects/xlist-scraper/data/xlist.db`
-7. Exports AI-related tweets to markdown at `~/brain/30-projects/xlist-scraper/exports/`
+6. Stores everything in SQLite at `~/brain/30-projects/aifeeds/data/xlist.db`
+7. Exports AI-related tweets to markdown at `~/brain/30-projects/aifeeds/exports/`
 
 ## Data Location
 
-- Database: `~/brain/30-projects/xlist-scraper/data/xlist.db`
-- Exports: `~/brain/30-projects/xlist-scraper/exports/`
+- Database: `~/brain/30-projects/aifeeds/data/xlist.db`
+- Exports: `~/brain/30-projects/aifeeds/exports/`
 
 ## Dependencies
 
