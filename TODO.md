@@ -1,101 +1,329 @@
-# xList TODO
+# aifeeds TODO
+
+> Session 开始建议：先扫一眼"进行中"看当前要推什么，"待做"是积压队列，"已完成"按时间倒序保留方便回溯。
+>
+> 本文档与 [docs/operations.md](docs/operations.md) 双更：远端服务变更、新增 cron / endpoint / 表都同步两边。
+
+---
 
 ## 进行中
-- [ ] enricher daemon: L0-L5 分层 metrics 刷新，按热度衰减调度
-- [ ] **PR-B 对话上下文数据修复**（2026-05-01 启动）：branch `fix/conversation-context-data`，worker 已部署。
-  - 本地 loop 跑全表 36k 的 `backfill-replies`（cron `:05 :35` 兜底增量）
-  - 完成后跑 `reclassify-threads dry_run=0` 清错分（dry-run 显示 5398/6442 待清）
-  - 验证 case：t1=2048759762414674337 / t2=2048753722432360677 / Eric Cursor 3 root
-  - 触发 reclassify 真执行前要 `wrangler d1 export` 备份
-- [ ] **PR-C 对话上下文 UI**：detail 页祖先链 + 强插 dedup（无 banner）+ on-demand 拉缺失祖先
-- [ ] **ClawHub v1 后置项**（v0 已上线，2026-05-06）：
-  - **ZIP 流水线**：下载 `/api/v1/download?slug=...` → 抠 SKILL.md / README.md / 媒体图 → frontmatter+H1 strip → DeepSeek 翻译 README 全文（保留代码块）→ 落 `items.content_translated` + `extra.skill_md` + media R2 迁移 → drawer 文件清单/SKILL.md 原文实数据 + 海报 body 改用 README 前 N 行
-  - **drawer 30 天趋势**：仅当数据点 ≥ 7 + 波动率 > 5% 才展示
-  - **顶部筛选 3-dropdown**：取代 SortSelector 的"热度|时间"toggle，按 mockup 出排序+分类+隐藏可疑三件套（需要 Feed.tsx 支持 source-specific 顶 bar）
-- [ ] **CF 服务端迁移**（2026-05-06 讨论文档已落）：5 阶段 roadmap — Phase 1 Web Analytics + Workers Logs + AI Gateway（这周内，3h）→ Phase 2 Images cdn-cgi 改造 dashboard（半天）→ Phase 3 GH 链试点 Workflow（1-2 周）→ Phase 4 X 主链 Workflow 双写迁移（2-3 周，下线 6 个 cron mode）→ Phase 5 按需 Queue / Logpush / Container。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实业务量 261/天 X、ScrapeBadger batch 计费、各产品月费估算、待决策项）
+
+### 1. PR6 上线运维加固（4 项纯运维收尾）
+
+> PR5 海报反馈、抽屉刷新、PR-B/C 对话上下文等都已合 main（详见已完成段）。当前 PR6 一揽子里只剩下面 4 件**纯运维**项：
+
+- **限流参数调优** — SMS 200/天 hard cap、telemetry 限流、分享接口限流的真实流量观测后调整
+  - DeepSeek 调用限流：等 CF 阶段 1 启用 AI Gateway 后会被吸收，**这一条延后**
+  - SMS / telemetry / 分享限流：仍要在 worker 里手写
+- **admin 看板增强（业务指标部分）**
+  - 现状：admin 页只看了基础登录注册数据
+  - 要加：用户活跃曲线、收藏 / 分享 / 订阅活跃度、内容质量分布
+  - ⚠️ 不在这里做：cron 健康度 / 错误率 / 调用量 — 等 CF 阶段 1 后直接看 Workers Logs
+- **数据备份 launchd**
+  - 当前 prod D1 没有自动备份，唯一兜底是手动 `wrangler d1 export`，跨 session 丢库就丢了
+  - 临时方案：本地 launchd 每天定时拉一份到本地，30 天滚动保留
+  - 长期方案：CF 阶段 5 用 Container 跑 D1 export → R2 长期存档（Logpush），不用本地承接
+  - **建议直接走长期方案**，跳过本地 launchd 临时方案
+- **异常告警分级**
+  - 现状：所有 cron 错误一锅端走 PushDeer，半夜被低优先级吵
+  - 改：硬故障（cron 全挂）立报，软故障（单批次失败）攒批后报告
+  - 业务级告警（"scrape 0 new 持续 3 轮" / "翻译失败率 > 5%" / "metrics 覆盖率跌破 90%"）仍要自己写，CF 给不了语义
+  - 基础错误率告警等 CF 阶段 1 的 Workers Logs 接管
+
+### 2. ClawHub 30 天热度趋势 sparkline 收尾
+
+> v0 / v1 / v2 / 3-dropdown 都已上线，趋势区段的容器和阈值判断也搭好了，**只差最后一公里**：实际的 SVG 渲染。
+
+- 现状：`dashboard/src/components/ClawhubDrawerBody.tsx:562` 是占位文案 "★ stars 走势 sparkline（v2 渲染中…当前仅展示采样点数）"
+- 要做：从 `metrics_history` 拿 stars 时序数据 → 画 SVG sparkline
+- 阈值已就位：`TRENDS_MIN_DATA_POINTS = 14`（< 14 个采样点不展示，避免新 skill 一根直线丑）
+- 简单方案：手写 SVG `<polyline>`，无依赖，30 行代码搞定
+- 复杂方案：引入 visx / recharts，但只为一个 sparkline 引依赖不值
+
+### 3. 海报视频封面预抓帧（D 方案）
+
+> X / GH / PH 三种来源的视频在分享海报上现在都是黑底加播放按钮，丑。
+
+- scraper 端用 ffmpeg / headless 浏览器抽视频首帧（避开纯黑帧），传到 R2，落到 `extra.video_thumbnail`
+- 海报渲染时直接用这个字段（已经实现 isVideo + image overlay 流程，差数据源）
+- 三源策略：
+  - **X**：`scrapers/_lib` 加 video_thumbnail 抓取（fetch video first 100KB → ffmpeg pipe → JPEG）
+  - **GH**：`scrapers/github/` 解 readme `<video src>`，按相同方式抽帧
+  - **PH**：`scrapers/ph/` 已有 `video.poster` 字段（YouTube embed thumbnail），上传视频补抽帧
+- YouTube 视频特殊：直接用 `https://img.youtube.com/vi/<id>/maxres.jpg`（PH 部分已可用）
+
+### 4. CF 服务端迁移 5 阶段
+
+> 把目前散在各处的抓取流水线（本地 launchd cron / worker scheduled / 手动脚本）逐步搬到 CF 官方流水线工具上，减少本地依赖、加强可观测性。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实流量 261/天 X、ScrapeBadger 计费、各产品月费估算、待决策项）
+
+**阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
+- Web Analytics：dashboard 加 beacon，看 PV / UV / 来源
+- Workers Logs：worker 出错的 stacktrace 在 CF 后台直接搜（不再 console.log + 命令行 tail）
+- AI Gateway：DeepSeek 调用全走 AI Gateway 中转，能看每次请求的 token / 成本 / 缓存命中、统一限流
+
+**阶段 2（半天）—— 图片走边缘优化**
+- 现在头像 / 截图 / 海报直接走 R2 反代
+- 切到 cdn-cgi/image 路径，按设备和浏览器自动转 webp / avif，省带宽
+- 改 dashboard 的 `<img>` URL 模板
+
+**阶段 3（1-2 周）—— GH 链试点 Workflow**
+- GH 抓取链最简单（单源、量小），拿来试点
+- worker scheduled cron 那套 GH trending 抓取拆成 CF Workflow（CF 自家工作流编排）
+- 验证 Workflow 是否真比 cron 好用（重试 / 状态可视化 / 单步 retry）
+
+**阶段 4（2-3 周）—— X 主链双写迁移**
+- 试点 OK 后把 X 主流水线 6 个 cron mode（抓取 / longform / quote 补全 / metrics 刷新 / 翻译 / 分类）全迁到 Workflow
+- 双写期：老 cron + 新 Workflow 并行跑，稳定后下线 cron
+
+**阶段 5（按需）—— 高级能力**
+- Queue：消息总线（比如 enrich 任务排队）
+- Logpush：日志推到 R2 / S3 长期存档
+- Container：跑需要长任务 / 自定义环境的 job（D1 备份 / video 抽帧）
+
+---
 
 ## 待做
 
-> **下一阶段 Roadmap（2026-05-03 调整）**
+### 5. metrics 流水线统一改造
+
+> enricher daemon L0-L5 已上线（refresh-tiered M4），抽屉打开主动 enrich 也上线了（PR6.6）。但"什么时候刷新、谁触发、刷不到怎么办"还有 3 个口子要补：前端曝光触发、字段补全扫描、统一防抖。
+
+**已就位**：
+- refresh-tiered M4（L0-L5 + velocity 阈值 + active/inactive 双 interval）
+- `/api/items/:id/refresh`（PR6.6 抽屉触发，X / GH / ClawHub 三源都接了）
+
+**还要做**：
+- **前端曝光触发**：feed 卡片进入视口后调 `/api/items/:id/refresh`（弱触发，throttle 5 分钟内一次，避免无意义刷新）
+- **字段补全扫描**：每天一遍专门补 NULL 字段，目标全表 ≥ 95% 覆盖。重点 retweets（当前 64%）/ views（70%）/ replies（73%）
+- **分享海报触发**：海报生成前主动 enrich，避免海报数据老
+- **失败死信队列**：3 次重试失败后入死信队列告警
+
+**依赖**：建议等 CF 阶段 4 把 X cron mode 迁到 Workflow 时一起做，避免现在用 KV / Durable Object 重写一遍下个月又拆掉
+
+### 6. PR7 收藏 + 邮件订阅
+
+**收藏**：
+- 加 `favorites` 表（user_id, item_id, created_at）
+- feed 卡片右上角加收藏 icon，登录用户可点
+- 个人中心加"我的收藏"页（列表 + 移除按钮）
+
+**邮件订阅**：
+- 个人中心选频次（每日 / 每周）+ 主题（X / GH / PH / ClawHub 任选）+ 送达时间（北京时间）
+- worker scheduled job 按频次组装摘要：每源选 top N（按互动数 / 综合分排序）
+- 邮件 HTML 模板和海报视觉一致，直接在邮件里看不用回站
+- 复用现有 Resend 通道（mail.ai-feeds.com 已 verified）
+- 退订 link：每封邮件底部，token 验证一键退订（不用登录）
+- 反垃圾合规：from / reply-to / list-unsubscribe header 齐全，监控 spam 率
+
+### 7. 数据看板 `/admin/analytics`
+
+> 用户行为数据已经进了 events 表（telemetry SDK 在记），但没地方看。运营要分析"用户从哪来、看了啥、留没留下"完全没工具。
+
+- 新建 `/admin/analytics` 路由，admin 用户可见
+- 三个核心视图：
+  - **漏斗**：访问 → 看 feed → 打开抽屉 → 点分享/收藏 → 注册 → 第二日回访
+  - **留存**：D1 / D7 / D30 留存曲线
+  - **内容下钻**：按推文 / 作者 / repo / product 看互动深度（哪些内容真正吸引人留下）
+- 数据源：events 表 + users 表 + items 表 join
+- ⚠️ 来源分析（referer / 设备 / 国家）等 CF 阶段 1 后直接看 Web Analytics，不在 admin 看板做
+
+**依赖**：建议 CF 阶段 1 落地后再做（避免做完 referer 分析 CF 那边重复）
+
+### 8. Dashboard P1 视觉 / 交互迭代
+
+**A. dark mode**
+- 全站 dark theme（CSS 变量切换 + 系统偏好检测 + 用户手动 toggle）
+- 以 X 卡片黑底为基线，其他源对齐
+
+**B. keyword 噪音审核面板**
+- 现状：AI 关键词自学习（从已分类 AI 推文抽词），偶尔学到噪音（"年报""政府"之类）
+- admin 面板：列出最近 30 天学到的新词 + 词频 + 命中样本推文 → 一键 demote / 加白名单
+- 和下面 #9 关键词自学习优化一起做更顺
+
+**C. 智能正文截断**
+- 现状：卡片正文按字数截断，常断在词中间或 markdown 链接中间
+- 改成按句号 / 换行 / 标点切，避免视觉突兀
+- GH 描述 / X 长推 / PH 长描述都受益
+
+### 9. 关键词自学习优化
+
+> 现状：学习阈值 3 次（一个词在 AI 推文里出现 3 次就学进 AI 关键词库），太松。结果学到一堆通用词（"产品""推出"）和不该当 AI 词的中文专有名词（"政府""年报""券商"），反过来污染分类。
+
+- 阈值 3 → 8（要在 8 条不同 AI 推文里都出现才学）
+- 只学"句中大写"的英文词（Anthropic / Claude / OpenAI 这类专有名词通常句中大写；普通动词 "new" 句中小写不学）
+- 种子词共现校验：候选词必须和已知 AI seed 词（GPT / LLM / Anthropic / DeepMind 等）在同一推文里共现过 3+ 次才学
+- 配 #8.B 的审核面板手动清一遍历史污染词（2026-04-22 已 demote 1382 个但会再生）
+
+### 10. 引用 + 被引用 feed 去重
+
+> A 推文引用 B 推文，B 推文本身又作为独立条目出现在 feed 里。用户在 feed 里第一眼看到 A（嵌套着 B），滚两屏又看到 B（原始），同一信息看了两次。
+
+- 简单方案：feed 查询时如果一条推文是另一条的 quote 目标，不独立显示（让 quote 那条代表它）
+- 复杂方案：保留 B 独立显示但标记"已被 @xxx 引用"，点开看引用上下文
+- 取舍：简单方案省事但会"消失"信息（用户找不到 B 了）；复杂方案保留信息但 UI 复杂
+- 先看真实数据：feed 前 100 条有多少这种 case 再决定
+
+### 11. ICP 备案推进 + 微信生态接入
+
+> 详见：[`docs/memo/2026-05-04-icp-备案讨论备忘录.md`](docs/memo/2026-05-04-icp-备案讨论备忘录.md)
+
+ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已部署，备案审核中（截至 2026-05-10）。三套品牌名约定：网页「AI源信」 / 备案主体「科赞源信」 / 全球版「AI Feeds」。
+
+**备案号下来后**（按顺序）：
+- footer 替换备案号 + 链接 beian.miit.gov.cn
+- 申请免费 SSL → HTTPS（HTTP 301 → HTTPS）
+- 关 8888 防火墙端口
+- 公安备案（30 天内办）
+- 微信开放平台企业认证 + 业务域名 + 网页授权
+- 腾讯云短信签名「科赞源信」+ 模板
+
+**微信生态接入**（备案号下来后）：
+- aifeeds.cc 增加 Login Bridge 接口（`/auth/wechat`、`/auth/wechat/callback`）
+- 增加分享落地页（`/s/:token`、`/share/t/:token`）— 用预览页 + 用户主动点击，不能立即重定向（避免诱导跳转风控）
+- 增加 JS-SDK 签名接口（`/api/wx/jssdk-config`、`/api/wx/ticket`）
+- 三路径分发：PC OpenSDK（PC 浏览器）/ 海报手动分享（移动浏览器）/ JS-SDK 自定义卡片（微信内浏览器）
+
+**清理**：临时 SSH 密钥 `~/.ssh/aifeeds_temp` 备案过审 + SSL 配好后撤销
+
+### 12. 国内 SEO / GEO 镜像站
+
+> 详见：[`docs/memo/2026-05-07-seo-geo-discussion-memo.md`](docs/memo/2026-05-07-seo-geo-discussion-memo.md)
 >
-> 1. ~~**PR4 强制登录拦截**~~ ✅ 2026-05-03 上线
-> 2. ~~**staging 环境落地**~~ ✅ 2026-05-03 上线（[操作记录](docs/operations.md#staging-环境-2026-05-03-上线)）
-> 3. ~~**PR5 分享功能**~~ ✅ 2026-05-05 上线 — 5 endpoint + share_relations 表 + Noto SC 字体子集 + resvg-wasm + R2 海报缓存 + dashboard 抽屉分享按钮 + 三变体（X/GH/PH）SVG 模板 + 媒体图质量门控（aspect/density 双闸）+ 移动端 navigator.share 直存相册。**未完成 P2**：landing 回流（点过来的人 to_did/to_uid 回填）；三态分发 UI（PC 已有，移动端微信内提示待完善）。已 ship MVP，迭代留 PR6
-> 4. **PR6 上线加固 + dashboard / 海报数据增强** — landing 回流（PR5 P2）+ `feat/lazy-enrich-on-drawer`（抽屉打开主动 enrich + 落库）+ **PR5 分享海报试用反馈跟进**（GH commit 数据落库 + 抽屉展示 / GH feed 卡片正文 4 行 / PH 卡片改造 4.1-4.4 / PH 抽屉 5.1-5.2 / 视频封面预抓帧落库下方详）+ 限流参数调优 / admin 看板增强 / 数据备份 launchd / 异常告警分级
-> 5. **PR7 收藏 + newsletter** — `favorites` 表 + UI；newsletter = **邮件订阅**（每日/每周摘要发用户邮箱），需新增：user.email 字段 / 模板系统 / Resend 或 Cloudflare Email Workers 发送 / 退订 link / 反垃圾合规
-> 6. 之后：`/admin/analytics` 数据看板、dark mode、enricher daemon 调度优化
+> 配套文档：
+> - [`docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html`](docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html) — 30+ 引擎规则 + AI bot 三类法 + ICP 备案专题
+> - [`docs/plans/2026-05-08-cn-mirror-cc-domain-design.md`](docs/plans/2026-05-08-cn-mirror-cc-domain-design.md) — `.cc` 静态镜像方案、成本估算、合规加固、实施分阶段
 
-- [x] 前置 1: Dashboard URL routing — 已合 main（PR-A + PR-B），待部署 dashboard：
-  - Worker `GET /api/items/:id`（单条 + thread siblings）已上线
-  - 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）
-  - `/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）
-  - 设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
-- [x] **前置 2 + 3 合并：账号系统 + telemetry SDK**（共拆 6 个 PR + email auth 兜底，2026-05-06 主体完成；PR7 收藏 / newsletter 拆出独立项）
-  - 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md) + [`docs/plans/2026-05-06-email-auth-design.md`](docs/plans/2026-05-06-email-auth-design.md)
-  - 决策要点：手机号短信登录（个人主体起步，企业主体后置）+ Session 不走 JWT + LocalStorage device_id（合规优先）+ Turnstile + 4 层 SMS 防刷 + 200 条/天 hard cap + PushDeer 告警
-  - 实施路线：PR1 telemetry SDK ✅ → PR2 auth backend ✅ → PR3 登录 UI ✅ → PR4 强制登录拦截 ✅ → staging 环境 ✅ → PR5 分享功能 ✅ → PR6 上线后加固 ✅ → **email auth ✅（2026-05-06 上线，绕过 ICP 备案，Resend HTTPS API + disposable 黑名单 + MX DoH，SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 加回双通道）**
-  - **顺序调整（2026-05-03）**：staging 提前到 PR4 之后（替代原"PR6 一次性"），PR5/PR7 内容互换（分享功能优先于收藏订阅，因为分享不依赖写表）
-  - 微信 OAuth / 一键登录 SDK / 第三方登录：等切企业主体后再做（identities 表 schema 已预留）
-- [ ] **PR7 收藏 + newsletter**（独立项，从「前置 2+3」拆出）：`favorites` 表 + UI；newsletter = 邮件订阅（每日/每周摘要发用户邮箱），复用现有 Resend 通道（mail.ai-feeds.com 已 verified）+ 退订 link + 反垃圾合规
-- [ ] 前置 4: 数据看板 — 简单分析页 `/admin/analytics`（仅登录用户可见），基于 events 表做漏斗 / 留存 / 来源分析，按 tweet / author / referer 维度下钻
-- [ ] Dashboard P1: dark mode、keyword 噪音审核面板、smart text truncation
-- [ ] 引用 + 被引用 feed 去重策略（同一条被 quote 又独立出现）
-- [ ] 前端 on-demand metrics 刷新（Worker /api/refresh/:id + 前端曝光触发）
-- [ ] **`feat/lazy-enrich-on-drawer`：抽屉打开时主动 enrich + 落库**（PR5 试用反馈，2026-05-05 排）
-  - 现状：dashboard 抽屉打开仅 `GET /api/items/:id`（纯读 D1），缺数据字段（X 互动数、PH reviews_avg 等）显示「—」；分享后海报上同样缺
-  - 期望：抽屉打开 → worker 主动拉新值 → 写回 items 表 → 抽屉/feed 卡片/海报全部用新值
-  - 各源策略：
-    - **X**：用 syndication API（`cdn.syndication.twimg.com/tweet-result`，免费，反爬轻）补 metrics + quote_of + link_card；现有 `enrich_from_syndication.py` / worker `runRefreshMetrics` 可复用，关键是触发时机改为 on-demand
-    - **GH**：worker 加 fresh-fetch endpoint，调 GitHub REST `/repos/:owner/:repo` 拿 stars/forks/watchers/contributors_count；issue/PR 计数走 search API
-    - **PH**：PH 没有公开 API；worker 用 CF browser binding（`env.BROWSER`）实时打开 PH 页面解析（POC 已有 `worker/src/scrapers/ph_poc.ts`）；成本：browser 时间月 10h 含
-  - 频率 + 缓存（待跟用户深入聊）：
-    - 单 item KV throttle，比如 5min 内只刷一次
-    - 命中近期 fetch（< 1h）跳过
-    - syndication 全局并发限速（X 反爬触发后惩罚）
-    - PH browser fetch 慢（5-10s），抽屉打开时立即返回旧数据 + 后台 enrich，下次抽屉打开看到新值（hybrid lazy）
-  - dashboard 侧：拿到 enrich 结果后通过 zustand store 把新 metrics 同步给 feed 卡片（GithubDrawerBody 已有 `setLatestMetrics` 模式可参考）
-- [ ] **PR5 海报试用反馈跟进**（2026-05-05 排，PR6 一起做）
-  - **GH commit 数据落库 + 抽屉展示**：scraper / worker / D1 schema / GithubDrawerBody
-  - **GH feed 卡片正文加高到 4 行**：GithubCard 单文件
-  - **PH feed 卡片改造**（4 项）：
-    - 4.1 第二行排版：日期（去掉 "PT" 前缀）、#排名、分类标签 顺序固定
-    - 4.2 分类标签恢复颜色（PhCard 之前有色现在没了）
-    - 4.3 卡片正文加高到 4 行
-    - 4.4 右下角去掉重复"名次"，把"团队 & Hunter" makers 信息右对齐（`by @张三 等 3 人`，能放头像就放最多 N 个）
-  - **PH 抽屉**（5.1 顺序、5.2 标签颜色）：PhDrawerBody 单文件
-  - **海报视频封面预抓帧（D 方案，跟分享海报相关但要 scraper 改动）**：
-    - 现状：GH `<video>` / X video.twimg / PH 上传视频，海报上没封面只是黑底 + play
-    - 改：scraper 端用 ffmpeg / headless browser 抽视频首帧（避开纯色帧）落 R2 + extra.video_thumbnail
-    - 海报渲染时直接用 `extra.video_thumbnail`（已实现 isVideo+image overlay 流程，差数据源）
-    - 各源策略：
-      - X：`scrapers/_lib` 加 video_thumbnail 抓取（fetch video first 100KB → ffmpeg pipe → JPEG）
-      - GH：`scrapers/github/` 解 readme `<video src>`，按相同方式抽帧
-      - PH：`scrapers/ph/` 已经有 video.poster 字段（YouTube embed thumbnail），上传视频补抽帧
-    - YouTube video 直接用 `https://img.youtube.com/vi/<id>/maxres.jpg` URL（PH 部分已可用）
-- [ ] **metrics 数据完整性**：当前 likes/retweets/replies/views 在全表覆盖率 64-77%，导致部分卡片显示 metric 数 < 4。前端兜底已用「null → "—"」处理（见 frontend-responsive-iteration spec），后端层面要让 enrich daemon 主动回扫缺失字段（特别是 retweets 64% 最低），目标全表 ≥ 95% 覆盖。可在 enricher L0/L1 高频层增一道"补全空字段"扫描
-- [ ] 关键词自学习优化: LEARNED_MIN_HITS 3→8、mid-sentence capitalization only、seed 共现
+阻塞依赖：#11 备案号下来 + `.cc` 站点改造完成。已选 A 方案（`.cc` 启用国内主站，由 `.com` 抓取 + 翻译后生成静态页），不动手实施前先把 5 个待决策点拍板。
+
+**5 个待拍板的决策点**（开工前要定）：
+1. 境内 OSS / CDN 厂商（七牛云 / 阿里云 / 腾讯云）
+2. AI 训练 bot（GPTBot / ClaudeBot 等）在 `.cc` 上放还是禁
+3. takedown 邮箱地址定名
+4. 备案中是否已勾选「AI 服务」类目（2024 工信部新规）
+5. 媒体存储策略（图片 / 视频缩略图是否复制到境内 OSS）
+
+**P0-P5 优先级框架**（备案后展开，详见备忘录第 9 轮）：
+- **P0** 修底：SSR / prerender + robots.txt 三类法 + sitemap.xml + schema.org JSON-LD（**阻塞所有其他动作的单点瓶颈**）
+- **P1** 站长平台提交：Google / Bing / Yandex + IndexNow key + 国内五站长
+- **P2** 中国战略：本任务（`.cc` 镜像站）
+- **P3** GEO 强化：llms.txt + AI 友好结构 + AI referrer 追踪
+- **P4** 内容矩阵：知乎 / CSDN / SegmentFault / 稀土掘金 / HN / Reddit
+- **P5** 监测：GA4 / CF AI Crawl Control / crawl-to-referral 比率
+
+**关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
+
+### 13. HarmonyOS Sans SC 字体上线（R2 自托管 + cn-font-split 子集化）
+
+> 详见：[`docs/design-handoff.md`](docs/design-handoff.md) § 2
+
+把 dashboard 默认字体从 system stack 切到 HarmonyOS Sans SC，按字符 unicode-range 子集化后挂到 R2 + `fonts.ai-feeds.com` 子域，国内访问不被 Google Fonts 拦，单页实际只下载 ≈ 200KB。
+
+**6 步实施清单**：
+1. 从华为官方 / `chinese-fonts-cdn` 拿 Regular / Medium / Bold 三档 ttf-otf
+2. `bunx cn-font-split` 切成 ~50KB woff2 块（每档 ~30-50 个文件 + `result.css`）
+3. CF dashboard 新建 R2 bucket `ai-feeds-fonts`，绑 `fonts.ai-feeds.com` + CORS 允许 `ai-feeds.com`
+4. 改 `result.css` 字体路径为 R2 公网地址（或保持相对路径直接上传整目录）
+5. `dashboard/index.html` 加 preconnect + 3 个 stylesheet link
+6. 验证：devtools Network 实际只下载几个 50KB woff2 + Lighthouse LCP 不被字体阻塞
+
+**字体 stack 落地点**：`dashboard/src/index.css` 的 `:root { font-family: "HarmonyOS Sans SC", ... }`（完整 stack 见 handoff § 2）
+
+**回退**：步骤 3 之前可临时用 `chinese-fonts-cdn.deno.dev` 公共 CDN（非自托管），handoff § 2 末有 fallback link 模板
+
+**权重档位**：只引 400 / 500 / 700 三档，不要再加更多
+
+**优先级**：相对独立，不阻塞 #11 / #12，可在备案空窗期顺手做
+
+---
 
 ## 已完成
-- [x] **视频支持**（2026-05-05）：A 部分 X 视频前端渲染——`TweetCard` 用 `<video preload=metadata muted>` 代替"▶ 视频"角标拿首帧封面，点击进 `Lightbox` 用 `<video controls autoPlay>` 全屏播；`MediaItem` type 加 `poster?` + `role?` 字段。240 条已有 X video 立即可见可播。B 部分 PH 视频抓取——`scrapers/ph/parser.py` 加 `extract_videos`，正则抠 RSC stream 里 `__typename:Media + mediaType:video` 块（YouTube/Vimeo embed 居多），输出 url/platform/video_id/poster_url；`sync.py` media 加 video 块；`worker/src/ph.ts` R2 迁移按 platform 跳过 embed（不能下成二进制）；`PhDrawerBody` gallery 按 platform 选 `<iframe youtube-nocookie>` 或 `<video>`。`scripts/push_ph_from_html.py` 应对 turnstile 卡 live scrape 时复用 saved snapshot 直接 push。完整设计在 `docs/plans/2026-05-05-video-support-design.md`
-- [x] **Product Hunt 数据源接入**（2026-05-04）：`scrapers/ph/` 完整 pipeline（leaderboard + 单产品页 + DOM 抓 top-level 评论 / reviews / maker post + DeepSeek judge + 翻译）+ `worker/src/ph.ts` R2 资源迁移（logo / screenshot / video / avatar → SHA-256 R2 key + `/r/<key>` 反代）+ `dashboard/src/components/PhCard.tsx` + `PhDrawerBody.tsx`（9 段 detail）+ `/ph/:slug/:date` 路由 + launchd `com.aifeeds.ph-scraper`（PT 0:30 daily）+ `scripts/rescrape_ph_slugs.py` 单 slug 补抓脚本。架构走"抓在本地、迁在云上"——CF Browser Rendering 过不了 PH turnstile，用 browser-use Profile 1 + 持久 PHSession 解决。坑：PH 把每条评论都包在 `[data-test^="thread-"]` 里（包括 reply 嵌套 thread），review 用星标 icon 没 rating 文本，老 walk-up 拿到公共父级 → 同人重复显示；新逻辑分别按"祖先里没别的 thread"/"最深的单 handle 祖先"修齐。完整设计 + 8 步实施记录在 `docs/plans/2026-05-03-product-hunt-source-design.md` + `docs/source-integration-sop.md` + `docs/dev-log.md`
-- [x] 长推（X Premium note_tweet）抓全（2026-04-29）：CF Worker 端加 detect-longform 模式（heuristic SQL + syndication API 标 note_id）、`/api/longform/{pending,submit}` 端点、cron 接管 `:10 :50` 两个槽自动检测；本地 `enrich_longform.py` 用 browser-use 抓详情页完整正文 → POST 回 Worker，更新 D1 后置 content_translated=NULL 触发既有 fill-translations cron 重译。验证：sundarpichai 那条原内容 278→1480 字符。历史候选 ~5894 条等待 cron 慢慢扫
-- [x] ingest UPSERT 保留 Worker enrich（2026-04-29）：上一条上线后发现 Pichai 又退回 278 字符 — 根因是 `handleIngest` 的 `ON CONFLICT DO UPDATE` 无条件用 excluded 覆盖 content/extra，本地 scraper 重推同 id 时把长文 + longform 标记一起清空。修复：CASE 表达式只在新内容更长时才覆盖 content/translation，extra 通过 `json_patch` 保留 `$.longform` / `$.enriched_at`（本地永远不会设这俩字段）。
-- [x] 长推翻译流水线兜底（2026-04-29）："抓全长文却没翻译"的两个工作流漏洞一起修：(1) translateBatch 解析按 `\n` 切行，多段落原文只剩第一段（Pichai 1480 字 → "你好。你好吗？谢谢..." 16 字），改为：输入用 `⟪NL⟫` 哨兵替换 `\n`，输出用累积式解析+反替换；(2) submitLongformText 写完 `content_translated=NULL` 后只能等随机抽样的 fill-translations cron 命中（~780 候选 / 150 抽样），改为 submit 后立即调 DeepSeek 同步翻译入库，失败兜底回 cron。同时 sweep 38 条历史被旧 parser 截断的 longform，把 `content_translated` 清成 NULL 等 cron 重译。验证：新跑 1 批 20 条全部一次成功翻译，比例 ~40-46% 中：英字符比正常
-- [x] 周度自动调参（2026-04-22）：`scripts/tune_schedule.py` + 独立 launchd `com.xlist-scraper.tune`（周一 04:00 BJT）。schedule.py 解耦成读 `data/schedule_params.json`，无文件时回退 DEFAULT_PARAMS。三道护栏：最小数据 500 条、hot_interval 变化 ±30% clamp、dry-run sim 任一指标差 >20% 拒绝。审计落 `data/schedule_params_log.md`。回滚 = 删 json 文件
-- [x] 动态抓取频率切换到 C2 hybrid（2026-04-22）：回溯模拟（`scripts/simulate_schedules.py`, 14d train + 14d sim, 1892 tweets）对比 A/B/C 多个变体后选定 C2：prior≥0.15 → hot 固定 20min（比线上 30m 更新鲜），否则 target_new=10 动态（上限 60m）。模拟结果：490 runs vs 线上 672 (-27%)，zero 20.7% → 11.8%，hot 段 p50 延迟 15m → ≤10m
-- [x] 分类引入引用/thread 上下文（2026-04-22）：tweet_processor._build_judge_content 把 quote_of + reply_to 父文喂给 LLM，显式标注 [QUOTED by @x] / [REPLY TO @x]；prompt 加明确规则：父文在主题且当前是合理回应就放行，父文跑题或只是闲聊就 N
-- [x] 动态抓取频率 v1（2026-04-22）：schedule.py 按 (BJT 星期, 小时) prior + 最近 3 轮 recent 融合预测下次间隔 [10-90min]，launchd 改 5min tick + cron.sh 读 .next-scrape-at 做 gate，适配 10:1 峰谷比（当天下午切到 C2 hybrid）
-- [x] Dashboard "新内容" 提示条（2026-04-22）：点击后滚动到顶部 + 预加载；热门模式下也会轮询，点击时触发完整 re-fetch 以保留正确排序；加脉冲小圆点吸引注意力
-- [x] 关键词污染修复（2026-04-22）：扩展 _STOPWORDS + _is_acceptable_term 门控，单词抽取（禁多词短语），1382/1697 demoted，sync 到 D1，已验证目标政治推文从 feed 移除
-- [x] cron 自动补全: 抓取后在 push_to_cloud 前自动补 quote + card + 翻译（main.py run()）
-- [x] 抓取停止条件：sort-agnostic（known_ratio_high + feed_exhausted + 5min timeout），commit 9f5f003
 
-## 已完成
-- [x] Dashboard P0: 骨架屏、error retry、hashtag/URL 高亮、image lightbox、mobile 优化、thread 聚合
-- [x] 卡片 X 样式对齐: 头像 40px、15px 字号、SVG verified 徽章、metrics 图标 + hover
-- [x] Infinite scroll（IntersectionObserver + cursor 分页）
-- [x] Thread 排序修复（snowflake tiebreaker）
-- [x] 引用推文嵌套卡片（QuotedTweet 组件 + 图片去重）
-- [x] Link card 组件（LinkCard 缩略图+标题+描述）
-- [x] enrich_from_syndication.py: 6063 quote + 1989 card + 5430 翻译
-- [x] WAL mode + thread 检测校准
+### 2026-05-10 — 项目重命名 + CICD + 微信浏览器提示
+- [x] **项目重命名 xlist-scraper → aifeeds**：commit `b7e9afe` + `a33f317`，加身份卡 + 删 chrome skill 残留 + CLAUDE.md 同步
+- [x] **CICD GH Actions auto-deploy worker + dashboard + secret-scan**：commit `077f9d7`，并清掉历史 admin 凭证泄漏；后续 `8e57766` 修 wrangler 4.x Node 22 + npm ci 装依赖
+- [x] **WeChat 内置浏览器登录提示**：检测到微信浏览器时显示"请用 Safari 打开"提示，避免 X / Google OAuth 在微信内挂掉。commit `15174c0`（PR6.A 微信内分享提示尾巴完成）
+- [x] **ch 列头按钮对齐 + Turnstile 移动端 300031 改善**：commit `f6fad24`
+- [x] **运维手册同步 ClawHub v2 + prod 状态**：commit `963d9b4`
+
+### 2026-05-08 — ClawHub v2
+- [x] **ClawHub v2 抓 ClawHub 渲染的 README + suspicious 全套**：v1 用 ZIP 解压拿 README，v2 改用 ClawHub 的 getReadme action 拿渲染过的内容（含图片、链接预处理），翻译 + 列头对齐 + suspicious 标记一起完成。commit `4837328`
+- [x] **translateMarkdown 截断 30k → 5k 防 DeepSeek throttle**：commit `e3da649`
+- [x] **已是中文跳 DeepSeek + drawer markdown 显式样式**：commit `72a4ba3`
+
+### 2026-05-07 — ClawHub v1 ZIP 流水线 + 3-dropdown
+- [x] **ClawHub v1 ZIP 流水线**：从 ClawHub 下载接口（`/api/v1/download?slug=...`）拉 ZIP → 解压抠 SKILL.md / README.md / 截图 → frontmatter 头剥掉 → DeepSeek 翻译（参考 GH 中文风格 + 16 岁/母语者质量栏）→ 翻译落 `items.content_translated`，原文落 `extra.skill_md`，files manifest 落 `extra.files_manifest`。commit `0a0a01f` + `ee9818f`
+- [x] **ClawHub 顶部 3-dropdown 筛选**：替代 SortSelector「热度|时间」toggle，改成排序 + 分类 + 隐藏可疑三件套。commit `ee47e74`
+
+### 2026-05-06 — PH 4 列 KPI + GH 反馈批量 + enricher 分层 + email auth + ClawHub v0
+- [x] **enricher daemon L0-L5 分层 metrics 刷新**（TODO 进行中第一项 ✅）：`worker/src/enrich.ts` `refresh-tiered mode (M4)` — 按内容 age + 互动 velocity 双因子分 6 档（L0-L5），active / inactive 双 interval 自适应。L0 极热 10 分钟刷一次；L5 死内容不再主动刷。接 ScrapeBadger 拿回 retweets / views。commit `ec38d86`
+- [x] **ClawHub v0 接入第 4 个数据源**：commit `1aa1622`
+- [x] **PH 4 列 KPI + 海报 4 列 + parser 修 multi-launch votes 抓错**：commit `1210ae8`
+- [x] **GH/PH 卡片改 YouTube 风格**：标题块紧凑头部 + 正文 / footer 跨满。commit `5f2ac76`
+- [x] **GH contributors fallback + PH KPI/poster votes-comments-followers + PhCard ai_summary**：commit `dd7f2f5`
+- [x] **GH feed 简化 + PH drawer KPI 改 3 列对齐海报**：commit `c069b78`
+- [x] **email 验证码登录上线（绕过 ICP 备案的主路径）**：Resend HTTPS API + disposable 黑名单 + MX DoH + email-rate-limit 6 维度 + email-cap（daily/monthly + 去重告警）+ ENABLE_SMS_LOGIN flag 隐藏 SMS 通道（备案后翻 flag 加回双通道）。完整设计 `docs/plans/2026-05-06-email-auth-design.md`，merge `34525f9`
+- [x] **CF 后端服务整体迁移讨论文档**：commit `07187ad`，落地为本 TODO 的 #4 项
+
+### 2026-05-05 — PR6.x 系列大批量 + 视频支持
+- [x] **PR6.6 lazy-enrich-on-drawer / `/api/items/:id/refresh`**（TODO 进行中 lazy-enrich ✅）：抽屉打开时主动 enrich + 落库 + feed 卡片同步。X / GH / ClawHub 三源都接了。`worker/src/index.ts:1044 handleItemRefresh`。merge `03696fc` + `f84b922 fix(feed): 抽屉刷新后同步 feed 流卡片`
+- [x] **PR6.2 GH 最近 5 条 commit 落库 + 抽屉展示**（TODO PR5 反馈 ✅）：commit `4b83de1`
+- [x] **GH feed 卡片重排**（TODO PR5 反馈 GH 4 行 ✅）：rank 上提 + lang/cat 同行 + metrics 下移 + commit 文案 + 正文 line-clamp-4。commit `e192997`
+- [x] **GH drawer 对齐 feed 卡片 + 海报 rank 行加日期/去 commit**：commit `a03b726`
+- [x] **PR6 反馈 Batch A — feed/drawer/海报排版统一 + commit 折叠**：commit `4a5e197`
+- [x] **PH 卡片 4.1-4.4 layout 修正**（TODO PR5 反馈 ✅）：日期/排名/分类顺序 + 标签颜色 + makers 排版（前 3 头像 + "by @first 等 N 人"）+ 正文 line-clamp-4。commit `0692c60` + `79cb04d`
+- [x] **#6 #7 #8 三条反馈合并**：commit `cb17c36`
+- [x] **视频支持**（A 部分 X 视频前端渲染 + B 部分 PH 视频抓取）：TweetCard 用 `<video preload=metadata muted>` 拿首帧封面，点击进 Lightbox 全屏播；PH parser 加 `extract_videos` 抠 RSC stream 里 YouTube/Vimeo embed；worker R2 迁移按 platform 跳过 embed；PhDrawerBody gallery 按 platform 选 `<iframe youtube-nocookie>` 或 `<video>`。完整设计 `docs/plans/2026-05-05-video-support-design.md`
+
+### 2026-05-04 — Product Hunt 接入
+- [x] **Product Hunt 数据源接入**：完整 pipeline（leaderboard + 单产品页 + DOM 抓 top-level 评论 / reviews / maker post + DeepSeek judge + 翻译）+ worker R2 资源迁移（logo / screenshot / video / avatar → SHA-256 R2 key + `/r/<key>` 反代）+ PhCard / PhDrawerBody（9 段 detail）+ `/ph/:slug/:date` 路由 + launchd `com.aifeeds.ph-scraper`（PT 0:30 daily）+ 单 slug 补抓脚本。架构走"抓在本地、迁在云上"——CF Browser Rendering 过不了 PH turnstile，用 browser-use Profile 1 + 持久 PHSession 解决。完整设计 `docs/plans/2026-05-03-product-hunt-source-design.md` + `docs/source-integration-sop.md`
+
+### 2026-05-03 — staging 环境 + PR4 强制登录 + PR5 分享
+- [x] **PR4 强制登录拦截**
+- [x] **staging 环境落地**：staging.ai-feeds.com / staging-api.ai-feeds.com，独立 D1（xlist-staging）/ KV / R2。完整设计 `docs/plans/2026-05-03-staging-environment-design.md` + 操作记录在 [operations.md](docs/operations.md#staging-环境-2026-05-03-上线)
+- [x] **PR5 分享功能上线**（5 endpoint + share_relations 表 + Noto SC 字体子集 + resvg-wasm + R2 海报缓存 + dashboard 抽屉分享按钮 + 三变体 X/GH/PH SVG 模板 + 媒体图质量门控 + 移动端 navigator.share 直存相册）
+  - **遗留 P2**：landing 回流（点过来的人 to_did/to_uid 回填）— 后续作为 PR6.A 一部分
+  - **遗留**：移动端微信内提示（已于 2026-05-10 commit `15174c0` 完成）
+
+### 2026-05-01 — PR-B / PR-C 对话上下文
+- [x] **PR-B 对话上下文数据修复**（TODO 进行中 PR-B ✅）：本地 loop 全表 36k backfill-replies + worker cron `:05 :35` 兜底增量 + reclassify-threads 真执行（dry-run 显示 5398/6442 错分被清）。commit `0c1321e feat(enrich): backfill-replies 模式` + `81c8787 cron 接 backfill-replies + reclassify-threads` + merge `af52ad9 fix/conversation-context-data — backfill-replies + reclassify-threads + apply patch null-guard`
+- [x] **PR-C 对话上下文 UI**（TODO 进行中 PR-C ✅）：抽屉 + 卡片支持 reply 父层 inline 显示「回复 @handle」+ 大返回按钮 + swipe-to-close + reply layout reorder。commit `a3392f3 feat(card): render reply parent inline + show 回复 @handle` + `3d2654d feat(drawer/card): bigger back btn + swipe-to-close + reply layout reorder`
+
+### 2026-04-29 — 长推抓全 + ingest UPSERT + 翻译流水线
+- [x] **长推（X Premium note_tweet）抓全**：CF Worker 加 detect-longform 模式（heuristic SQL + syndication API 标 note_id）、`/api/longform/{pending,submit}` 端点、cron 接管 `:10 :50` 两个槽自动检测；本地 `enrich_longform.py` 用 browser-use 抓详情页完整正文 → POST 回 Worker，更新 D1 后置 `content_translated=NULL` 触发既有 fill-translations cron 重译。验证：sundarpichai 那条原内容 278→1480 字符
+- [x] **ingest UPSERT 保留 Worker enrich**：`handleIngest` 的 `ON CONFLICT DO UPDATE` 改成 CASE 表达式只在新内容更长时才覆盖 content/translation，extra 通过 `json_patch` 保留 `$.longform` / `$.enriched_at`
+- [x] **长推翻译流水线兜底**：(1) translateBatch 解析按 `\n` 切行多段落只剩第一段 → 用 `⟪NL⟫` 哨兵替换；(2) submitLongformText 改为同步翻译入库，失败兜底回 cron
+
+### 2026-04-22 — 周度自动调参 + C2 hybrid 调度 + 关键词污染修复
+- [x] **周度自动调参**：`scripts/tune_schedule.py` + 独立 launchd `com.xlist-scraper.tune`（周一 04:00 BJT）。三道护栏：最小数据 500 条、hot_interval 变化 ±30% clamp、dry-run sim 任一指标差 >20% 拒绝
+- [x] **动态抓取频率切换到 C2 hybrid**：回溯模拟（14d train + 14d sim, 1892 tweets）选定 C2：prior≥0.15 → hot 固定 20min，否则 target_new=10 动态（上限 60m）。模拟结果：490 runs vs 线上 672 (-27%)，zero 20.7% → 11.8%
+- [x] **分类引入引用/thread 上下文**：tweet_processor._build_judge_content 把 quote_of + reply_to 父文喂给 LLM，标注 `[QUOTED by @x]` / `[REPLY TO @x]`
+- [x] **动态抓取频率 v1**：schedule.py 按 (BJT 星期, 小时) prior + 最近 3 轮 recent 融合预测下次间隔 [10-90min]，launchd 改 5min tick + cron.sh 读 `.next-scrape-at` 做 gate
+- [x] **Dashboard "新内容" 提示条**：点击后滚动到顶部 + 预加载；热门模式下也会轮询；加脉冲小圆点
+- [x] **关键词污染修复**：扩展 _STOPWORDS + _is_acceptable_term 门控，单词抽取（禁多词短语），1382/1697 demoted
+
+### 早期里程碑
+- [x] cron 自动补全：抓取后在 push_to_cloud 前自动补 quote + card + 翻译（main.py run()）
+- [x] 抓取停止条件：sort-agnostic（known_ratio_high + feed_exhausted + 5min timeout），commit `9f5f003`
+- [x] **Dashboard P0**：骨架屏、error retry、hashtag/URL 高亮、image lightbox、mobile 优化、thread 聚合
+- [x] **卡片 X 样式对齐**：头像 40px、15px 字号、SVG verified 徽章、metrics 图标 + hover
+- [x] **Infinite scroll**（IntersectionObserver + cursor 分页）
+- [x] **Thread 排序修复**（snowflake tiebreaker）
+- [x] **引用推文嵌套卡片**（QuotedTweet 组件 + 图片去重）
+- [x] **Link card 组件**（LinkCard 缩略图 + 标题 + 描述）
+- [x] **enrich_from_syndication.py**：6063 quote + 1989 card + 5430 翻译
+- [x] **WAL mode + thread 检测校准**
+
+### 前置 1: Dashboard URL routing
+- [x] Worker `GET /api/items/:id`（单条 + thread siblings）+ 前端 `/t/:id` 路由 + drawer URL 同步 + seed-history（冷启动深链后退键回首页）。`/thread/:id` 砍掉，YAGNI（thread 由 /t/:id 自然展开）。设计文档：`docs/plans/2026-04-30-dashboard-url-routing-design.md`
+
+### 前置 2 + 3: 账号系统 + telemetry SDK
+- [x] PR1 telemetry SDK
+- [x] PR2 auth backend
+- [x] PR3 登录 UI
+- [x] PR4 强制登录拦截（2026-05-03）
+- [x] staging 环境（2026-05-03）
+- [x] PR5 分享功能（2026-05-05）
+- [x] email auth（2026-05-06，绕过 ICP 备案）
+- 完整设计：[`docs/plans/2026-05-01-auth-system-design.md`](docs/plans/2026-05-01-auth-system-design.md) + [`docs/plans/2026-05-06-email-auth-design.md`](docs/plans/2026-05-06-email-auth-design.md)
+- 决策要点：手机号短信登录（个人主体起步，企业主体后置）+ Session 不走 JWT + LocalStorage device_id（合规优先）+ Turnstile + 4 层 SMS 防刷 + 200 条/天 hard cap + PushDeer 告警
+- 微信 OAuth / 一键登录 SDK / 第三方登录：等切企业主体后再做（identities 表 schema 已预留）

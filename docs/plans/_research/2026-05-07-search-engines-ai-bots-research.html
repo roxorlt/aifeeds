@@ -1,0 +1,1819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SEO / GEO 全网调研：搜索引擎 + AI 抓取规则 + 中国备案 — ai-feeds.com</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #18181b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --card: #ffffff;
+    --good: #16a34a;
+    --warn: #d97706;
+    --bad:  #dc2626;
+    --info: #2563eb;
+    --code-bg: #f4f4f5;
+    --hl-bg: #fef3c7;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    margin: 0;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    max-width: 1280px;
+    margin: 0 auto;
+    transition: grid-template-columns .22s ease;
+  }
+  .layout.collapsed {
+    grid-template-columns: 0 1fr;
+  }
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; }
+    .layout.collapsed { grid-template-columns: 1fr; }
+    aside.toc { display: none; }
+  }
+  aside.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 60px 16px 32px 24px;
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+    font-size: 13px;
+    transition: opacity .18s ease, visibility .18s, padding .22s ease;
+  }
+  main {
+    transition: padding-left .22s ease;
+  }
+  .layout.collapsed main {
+    padding-left: 60px;
+  }
+  .layout.collapsed aside.toc {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    padding-left: 0;
+    padding-right: 0;
+    border-right: none;
+  }
+  .toc-toggle {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    z-index: 100;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    transition: background .15s, color .15s, transform .2s;
+  }
+  .toc-toggle:hover { background: var(--code-bg); color: var(--fg); }
+  .toc-toggle:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+  .layout.collapsed ~ .toc-toggle,
+  .layout:not(.collapsed) ~ .toc-toggle { /* keep visible in both states */ }
+  .toc-toggle .icon-open,
+  .toc-toggle .icon-close { display: none; }
+  .layout.collapsed ~ .toc-toggle .icon-open { display: inline; }
+  .layout:not(.collapsed) ~ .toc-toggle .icon-close { display: inline; }
+  @media (max-width: 980px) {
+    .toc-toggle { display: none; }
+  }
+  aside.toc .toc-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  aside.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: toc;
+  }
+  aside.toc li {
+    counter-increment: toc;
+    margin: 6px 0;
+  }
+  aside.toc a {
+    color: var(--fg);
+    text-decoration: none;
+    display: block;
+    padding: 4px 8px 4px 28px;
+    border-radius: 4px;
+    position: relative;
+    transition: background .15s;
+  }
+  aside.toc a::before {
+    content: counter(toc);
+    position: absolute;
+    left: 8px;
+    top: 4px;
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    width: 16px;
+    text-align: right;
+  }
+  aside.toc a:hover { background: var(--code-bg); }
+  main {
+    padding: 32px 28px 80px;
+    max-width: 1000px;
+  }
+  header.report-head {
+    margin-bottom: 32px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  header.report-head h1 {
+    font-size: 26px;
+    font-weight: 700;
+    margin: 0 0 8px;
+    line-height: 1.3;
+  }
+  header.report-head .subtitle {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  header.report-head .meta {
+    color: var(--muted);
+    font-size: 12px;
+    font-family: ui-monospace, monospace;
+    margin-top: 8px;
+  }
+  section {
+    margin: 56px 0;
+    scroll-margin-top: 12px;
+  }
+  section h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--fg);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  section h2 .num {
+    font-family: ui-monospace, monospace;
+    font-size: 14px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  section h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 28px 0 8px;
+  }
+  section h4 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 20px 0 6px;
+    color: var(--fg);
+  }
+  .tldr {
+    background: var(--card);
+    border-left: 3px solid var(--info);
+    padding: 12px 16px;
+    margin: 12px 0 18px;
+    font-size: 14px;
+    border-radius: 0 4px 4px 0;
+  }
+  .tldr strong { color: var(--info); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 12px 0 16px;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    word-break: break-all;
+  }
+  td.nowrap { white-space: nowrap; }
+  pre {
+    background: var(--code-bg);
+    padding: 12px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  p code, li code {
+    font-size: 12.5px;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: white;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .badge.good { background: var(--good); }
+  .badge.warn { background: var(--warn); }
+  .badge.bad  { background: var(--bad); }
+  .badge.info { background: var(--info); }
+  .badge.muted { background: var(--muted); }
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 9999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    margin: 0 2px;
+  }
+  .pill.good { color: var(--good); border-color: var(--good); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad  { color: var(--bad);  border-color: var(--bad); }
+  .callout {
+    border-left: 3px solid;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 6px 6px 0;
+    background: var(--card);
+  }
+  .callout.warn { border-color: var(--warn); background: #fffbeb; }
+  .callout.bad  { border-color: var(--bad);  background: #fef2f2; }
+  .callout.good { border-color: var(--good); background: #f0fdf4; }
+  .callout.info { border-color: var(--info); background: #eff6ff; }
+  .callout-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  ul, ol { margin: 8px 0 12px; padding-left: 22px; }
+  li { margin: 3px 0; }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  a { color: var(--info); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .src-list {
+    columns: 2;
+    column-gap: 24px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .src-list li { break-inside: avoid; margin: 4px 0; }
+  @media (max-width: 720px) {
+    .src-list { columns: 1; }
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  @media (max-width: 720px) {
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .stat-card .label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .stat-card .value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .stat-card .delta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  details {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 8px 0;
+  }
+  details > summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-weight: 500;
+    user-select: none;
+  }
+  details[open] > summary { border-bottom: 1px solid var(--border); }
+  details > div { padding: 8px 14px 14px; }
+  .ref {
+    font-size: 11px;
+    color: var(--muted);
+    margin-left: 4px;
+  }
+  .footnote {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+</style>
+</head>
+<body>
+<div class="layout" id="layout">
+
+<aside class="toc">
+  <div class="toc-title">目录 · TOC</div>
+  <ol>
+    <li><a href="#exec-summary">执行摘要</a></li>
+    <li><a href="#self-status">ai-feeds 自检</a></li>
+    <li><a href="#bot-taxonomy">Bot 三类法</a></li>
+    <li><a href="#intl-search">国际搜索引擎</a></li>
+    <li><a href="#cn-search">国内搜索引擎</a></li>
+    <li><a href="#ai-bots">国际 AI 抓取</a></li>
+    <li><a href="#cn-ai">国内 AI 平台</a></li>
+    <li><a href="#icp">ICP 备案专题</a></li>
+    <li><a href="#cf-audit">CF AI Audit 现状</a></li>
+    <li><a href="#js-render">JS 渲染对比</a></li>
+    <li><a href="#contradictions">矛盾 &amp; 模糊点</a></li>
+    <li><a href="#sources">来源 URL 索引</a></li>
+  </ol>
+  <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); line-height: 1.4;">
+    本报告由 4 个独立调研 agent 并行产出后整合，全部来自全网公开来源（官方文档、Cloudflare Radar、英文/中文 SEO 媒体、IETF 草案、学术论文、社区实测帖），不依赖项目内部知识库。
+  </div>
+</aside>
+
+<main>
+
+<header class="report-head">
+  <h1>搜索引擎 + AI 抓取规则 + 中国备案制度调研</h1>
+  <p class="subtitle">为 ai-feeds.com 的 SEO / GEO 决策提供事实基础。本报告只描述现状与规则，不含实施方案。</p>
+  <p class="meta">2026-05-07 · 4 个独立调研 agent 并行产出 · 覆盖 30+ 引擎 / 平台 · 仅来自全网公开来源</p>
+</header>
+
+<!-- ============================================================
+     1. EXECUTIVE SUMMARY
+     ============================================================ -->
+<section id="exec-summary">
+  <h2><span class="num">01</span> 执行摘要</h2>
+
+  <p class="tldr">一句话：<strong>对 Google / Bing / 国际 AI 引擎，ai-feeds.com 当前 Cloudflare 配置已经友好，瓶颈是 SPA 没有 SSR；对中国市场，门槛不在搜索算法，而在「ai-feeds.com 这个未备案域名能否被境内 ISP 稳定访问」。</strong></p>
+
+  <h3>核心判断</h3>
+  <ol>
+    <li>
+      <b>Cloudflare 这一侧不需要再调。</b>
+      verified bot 体系默认放行 Googlebot / Bingbot / Baiduspider 等所有搜索引擎，
+      <code>ai_bots_protection</code> 也是 disabled，GPTBot / ClaudeBot / PerplexityBot 都能进。
+      数据印证：24h 内 AI bot 抓取约 206 次（ChatGPT-User 119 / PerplexityBot 44 / GPTBot 22 / ClaudeBot 19）。
+    </li>
+    <li>
+      <b>AI bot 已经分裂成训练 / 检索 / 用户 fetch 三类，不能用一个开关一刀切。</b>
+      屏蔽 GPTBot（训练）不影响 ChatGPT search 引用——后者走 OAI-SearchBot；
+      屏蔽 OAI-SearchBot 才会从 ChatGPT 答案中消失。<a href="#bot-taxonomy">详见 §03</a>。
+    </li>
+    <li>
+      <b>OpenAI 与 Anthropic 在「用户触发的 fetch 是否守 robots.txt」上立场分裂。</b>
+      OpenAI 2025-12-09 修订文档：ChatGPT-User 不再保证遵守 robots.txt，论据是"代理用户行为相当于用户用浏览器"；
+      Anthropic 明确说三个 bot（含 Claude-User）都遵守。
+      Meta-ExternalFetcher 与 Perplexity-User 与 OpenAI 同立场。
+    </li>
+    <li>
+      <b>Cloudflare 在 2025-08 公开取消 Perplexity 的 verified bot 资格。</b>
+      取证：Cloudflare 用全新域名 + 明确 disallow PerplexityBot 的 robots.txt 设陷阱，Perplexity 仍能给出准确回答，
+      经溯源发现其使用伪装成 macOS Chrome 的通用 UA、在官方 IP 段之外的 ASN 间轮换。
+      启示：「AI 厂商声明遵守 robots」和「实际遵守」是两件事——这一逻辑同样适用于国内的 Bytespider。
+    </li>
+    <li>
+      <b>国内 AI 平台几乎没有可在 robots.txt 中定向控制的训练 bot。</b>
+      只有 3 家公开了独立 UA：字节 <code>Bytespider</code>、百度 <code>Baiduspider</code>（搜索 + AI 共用）、华为 <code>PetalBot</code>。
+      阿里 Qwen、腾讯混元、Kimi、智谱、DeepSeek、MiniMax、商汤、讯飞均未公开训练专用 UA，
+      数据通道走母公司搜索索引、Common Crawl 或私下抓取——robots.txt 对它们无效。
+    </li>
+    <li>
+      <b>Bytespider 是国内 AI 爬虫流量主力，但不严格守 robots.txt。</b>
+      HAProxy 实测它占其 AI 爬虫流量约 90%、速度为 GPTBot 的 25 倍；
+      Cloudflare 2025 评估把它列在合规度末位。要拦它得在 WAF 层做行为指纹，写 robots 不够。
+    </li>
+    <li>
+      <b>「百度不收录未备案站」是软强制，不是政策禁令。</b>
+      百度官方文档没有这条规定，但 (a) 2023-11-30 后 sitemap / 快速收录权限收归 VIP，VIP 准入硬性包含 ICP 备案；
+      (b) 境内 ISP 对解析到大陆 IP 的未备案站点在 80/443 端口拦截，Baiduspider 从大陆节点连不上。
+      结论：技术访问层的硬门槛，不是算法降权。
+    </li>
+    <li>
+      <b>ai-feeds 的 SPA 是面向所有非 Google 引擎与所有 AI bot 的结构性短板。</b>
+      Vercel 2025-12 实测：GPTBot / ChatGPT-User / ClaudeBot / PerplexityBot 等主流 AI 爬虫全部不渲染 JS。
+      Bingbot 半渲染、YandexBot 默认不渲染、Baiduspider 渲染频次远低于普通抓取、Naver / Seznam / Mojeek 完全不渲染。
+      只有 Googlebot 是 evergreen Chromium 全量渲染。
+      当前 dashboard 初始 HTML 几乎只有 <code>&lt;div id="root"&gt;</code>——除了 Googlebot 之外，所有引擎与 AI bot 看到的都是空壳。
+    </li>
+    <li>
+      <b>IndexNow 是 Bing / Yandex / Seznam / Naver 的统一推送协议，但 Google 长期拒绝接入。</b>
+      官方理由：已有 Caffeine + Indexing API、AI / spam 滥用风险、协议由 Microsoft / Yandex 主导。
+      短期不会变。协议本身没有"撤销 push"语义，错推私密 URL 只能走各 webmaster console 的 URL removal。
+    </li>
+    <li>
+      <b>Cloudflare 在 2025-07-01「Content Independence Day」之后，新域名默认 block AI crawler。</b>
+      到 2025-12 已有约 2.5M+ 站点启用 CF managed AI block，覆盖约 20% 公网。
+      OpenAI 配合最规矩，Pay-per-crawl 仍处私有 beta。<a href="#cf-audit">详见 §09</a>。
+    </li>
+  </ol>
+
+  <h3>项目侧关键数字（来自上一轮 CF API 调用）</h3>
+  <div class="grid-2">
+    <div class="stat-card">
+      <div class="label">ai-feeds.com 24h Search Engine Crawler 抓取</div>
+      <div class="value">5 次</div>
+      <div class="delta">主站 0 次，唯一 1 次落在 blog 子域 — Googlebot / Baiduspider 还没认识到这个站</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">ai-feeds.com 24h AI Bot 抓取</div>
+      <div class="value">约 206 次</div>
+      <div class="delta">ChatGPT-User 119 · PerplexityBot 44 · GPTBot 22 · ClaudeBot 19 — 完全未做 GEO 优化的自然流量</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Cloudflare Radar：ChatGPT-User 流量占比</div>
+      <div class="value">+2,825%</div>
+      <div class="delta">2024-05 至 2025-05 一年增长。同期训练类 bot 反而下降——用户主动调用占比在快速接管 AI 抓取</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">CF managed AI block 启用站点</div>
+      <div class="value">2.5M+</div>
+      <div class="delta">2025-07-01 以来约 20% 公网默认 block AI crawler · Pay-per-crawl 仍处私有 beta</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     2. AI-FEEDS SELF STATUS
+     ============================================================ -->
+<section id="self-status">
+  <h2><span class="num">02</span> ai-feeds.com 现状自检</h2>
+  <p class="tldr">同一 session 通过 Cloudflare API 直接读到的 zone 配置 + 24h 流量。仅描述现状，作为后续讨论的事实起点。</p>
+
+  <h3>三类反爬开关</h3>
+  <table>
+    <thead><tr><th>开关</th><th>API 字段</th><th>当前值</th><th>对 SEO / GEO 的含义</th></tr></thead>
+    <tbody>
+      <tr><td>Under Attack Mode</td><td><code>security_level</code></td><td><span class="pill good">medium</span></td><td>没开 5 秒盾，verified bot 不被挑战</td></tr>
+      <tr><td>Bot Fight Mode</td><td><code>fight_mode</code></td><td><span class="pill good">true</span></td><td>免费版基础反爬，默认排除 verified bot 分类</td></tr>
+      <tr><td>Block AI Bots</td><td><code>ai_bots_protection</code></td><td><span class="pill good">disabled</span></td><td>GPTBot / ClaudeBot / PerplexityBot 等可正常进入</td></tr>
+      <tr><td>Block AI Crawlers (Content)</td><td><code>content_bots_protection</code></td><td><span class="pill good">disabled</span></td><td>同上</td></tr>
+      <tr><td>Block Scraper Crawlers</td><td><code>crawler_protection</code></td><td><span class="pill good">disabled</span></td><td>同上</td></tr>
+      <tr><td>Browser Integrity Check</td><td><code>browser_check</code></td><td><span class="pill warn">on</span></td><td>只对明显异常 UA 做基础校验，对 verified bot 不触发</td></tr>
+    </tbody>
+  </table>
+
+  <h3>WAF Custom Rules</h3>
+  <table>
+    <thead><tr><th>规则</th><th>命中表达式</th><th>动作</th><th>SEO / GEO 评估</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>allow-verified-search-engines</code></td>
+        <td><code>cf.verified_bot_category in {"Search Engine Crawler"}</code></td>
+        <td><span class="badge good">SKIP</span></td>
+        <td>正向。给所有 verified 搜索引擎爬虫绕过后续 WAF</td>
+      </tr>
+      <tr>
+        <td><code>block-bad-bots</code></td>
+        <td>空 UA / MJ12bot / AhrefsBot / SemrushBot / DotBot</td>
+        <td><span class="badge bad">BLOCK</span></td>
+        <td>注意：Ahrefs / Semrush 是常用 SEO 审计工具，自家以后想用时会被自家拦</td>
+      </tr>
+      <tr>
+        <td><code>roxor-blog: block scanners</code></td>
+        <td>blog 子域专用，拦 sqlmap / nikto / nmap 等</td>
+        <td><span class="badge bad">BLOCK</span></td>
+        <td>不影响主站</td>
+      </tr>
+      <tr>
+        <td><code>roxor-blog: managed-challenge /admin/login</code></td>
+        <td>blog admin 防爆破</td>
+        <td><span class="badge warn">CHALLENGE</span></td>
+        <td>不影响主站</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>24h 流量分布（GraphQL Analytics）</h3>
+  <div class="grid-2">
+    <div>
+      <h4>verified bot 分类</h4>
+      <table>
+        <thead><tr><th>类别</th><th>次数</th><th>判读</th></tr></thead>
+        <tbody>
+          <tr><td>AI Assistant（ChatGPT-User 等）</td><td>124</td><td><span class="pill good">活跃</span></td></tr>
+          <tr><td>AI Search（Perplexity 等）</td><td>59</td><td><span class="pill good">活跃</span></td></tr>
+          <tr><td>AI Crawler（GPTBot / ClaudeBot 等）</td><td>23</td><td><span class="pill good">活跃</span></td></tr>
+          <tr><td><b>Search Engine Crawler</b></td><td><b>5</b></td><td><span class="pill bad">基本为零</span></td></tr>
+          <tr><td>Advertising &amp; Marketing</td><td>2</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h4>Top AI bot UA</h4>
+      <table>
+        <thead><tr><th>UA</th><th>24h 次数</th></tr></thead>
+        <tbody>
+          <tr><td><code>ChatGPT-User/1.0</code></td><td>119</td></tr>
+          <tr><td><code>PerplexityBot/1.0</code></td><td>44</td></tr>
+          <tr><td><code>GPTBot/1.3</code></td><td>22</td></tr>
+          <tr><td><code>ClaudeBot/1.0</code></td><td>19</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3>主域请求分布（24h）</h3>
+  <table>
+    <thead><tr><th>Host</th><th>次数</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>api.deepseek.com</code></td><td>20,179</td><td>worker 出站调用，非入站。看真实流量需先减去这部分</td></tr>
+      <tr><td><code>staging-api.ai-feeds.com</code></td><td>10,307</td><td>开发自家流量</td></tr>
+      <tr><td><code>api.ai-feeds.com</code></td><td>9,450</td><td>dashboard 调 worker</td></tr>
+      <tr><td><code>ai-feeds.com</code></td><td>1,182</td><td>主站，真实人 + bot 混合</td></tr>
+      <tr><td><code>www.ai-feeds.com</code></td><td>540</td><td>—</td></tr>
+      <tr><td><code>staging.ai-feeds.com</code></td><td>492</td><td>—</td></tr>
+      <tr><td><code>blog.ai-feeds.com</code></td><td>65</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3>国家分布（24h，剔除自家流量后）</h3>
+  <p>US 40,889（其中绝大部分是 worker → DeepSeek 出站）· <b>CN 677</b>（中国真实流量约 1.6%，含 staging 自家测试）· CA 608 · JP 64 · DE 34 · BR 34 · 其余个位数。</p>
+
+  <div class="callout info">
+    <div class="callout-title">体检结论</div>
+    <ol>
+      <li>Cloudflare 配置不阻碍 SEO 或 GEO，<code>allow-verified-search-engines</code> 是有意识为搜索引擎留的绿灯。</li>
+      <li>SEO 缺位的成因不在 Cloudflare 这一侧——主站 24h 0 次 Googlebot 抓取意味着没提交 sitemap、没外链、SPA 没 SSR。</li>
+      <li>GEO 是意外的好结果：完全没做优化，AI bot 已自然占据 verified bot 流量的 95%+。但在 SPA 不渲染的前提下，AI 抓到的内容主体是空壳。</li>
+      <li>中国流量尚未真正开始。CN 24h 仅 677 次（含开发自测），后续要做需先解决 .com 未备案 + 境内 ISP 拦截这两个上游问题。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================
+     3. BOT TAXONOMY
+     ============================================================ -->
+<section id="bot-taxonomy">
+  <h2><span class="num">03</span> Bot 三类法：训练 / 检索 / 用户 fetch</h2>
+
+  <p class="tldr">三类 bot 的语义、屏蔽后果、流量回流方式各不相同。<strong>「想被 AI 引用但不想被训练」= 禁训练 bot · 放检索 bot · 放用户 fetch bot。</strong></p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>维度</th>
+        <th>训练 bot</th>
+        <th>检索 bot</th>
+        <th>用户 fetch bot</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>用途</b></td>
+        <td>把内容写进模型权重</td>
+        <td>维护实时检索索引（类比 Googlebot 之于 Google）</td>
+        <td>用户当下提问触发，去抓一个具体 URL</td>
+      </tr>
+      <tr>
+        <td><b>触发方式</b></td>
+        <td>厂商批量自动爬</td>
+        <td>厂商批量自动爬</td>
+        <td>用户驱动，单次或少量请求</td>
+      </tr>
+      <tr>
+        <td><b>典型 UA</b></td>
+        <td>
+          GPTBot, ClaudeBot, Google-Extended (token), Applebot-Extended (token),
+          Meta-ExternalAgent, Bytespider, CCBot, cohere-ai
+        </td>
+        <td>
+          OAI-SearchBot, Claude-SearchBot, PerplexityBot, MistralAI-Index,
+          Applebot, Googlebot, Bingbot
+        </td>
+        <td>
+          ChatGPT-User, Claude-User, Perplexity-User, MistralAI-User,
+          Meta-ExternalFetcher, Amzn-User
+        </td>
+      </tr>
+      <tr>
+        <td><b>抓取频率</b></td>
+        <td>几天到几周一次大批量</td>
+        <td>每天到每小时持续刷新</td>
+        <td>用户驱动，无规律</td>
+      </tr>
+      <tr>
+        <td><b>遵守 robots.txt</b></td>
+        <td>主流厂商都遵守，Bytespider 与 DeepSeek 例外</td>
+        <td>主流厂商都遵守</td>
+        <td>立场分裂：Anthropic 守；OpenAI、Perplexity、Meta 明确"may bypass"</td>
+      </tr>
+      <tr>
+        <td><b>Block 后效果</b></td>
+        <td>未来训练不再纳入；<b>已训练数据无法移除</b></td>
+        <td><b>从 AI 答案与搜索结果中消失</b></td>
+        <td>用户当场提问无法 fetch（OpenAI 例外，绕过 block 直接抓）</td>
+      </tr>
+      <tr>
+        <td><b>是否带流量回到原站</b></td>
+        <td>否（纯下载）</td>
+        <td>间接：被引用时带 referrer</td>
+        <td>是：被引用时直接附链接</td>
+      </tr>
+      <tr>
+        <td><b>典型策略</b></td>
+        <td>"不想被训练" → Disallow</td>
+        <td>"想被 AI 引用获得曝光" → Allow</td>
+        <td>"用户问到我希望能查到" → Allow</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>「想被 AI 引用但不想被训练」robots.txt 模板</h3>
+  <pre>
+# 禁训练
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+User-agent: Meta-ExternalAgent
+User-agent: Bytespider
+User-agent: CCBot
+User-agent: cohere-ai
+User-agent: anthropic-ai
+Disallow: /
+
+# 放检索（默认放行，写出来是显式声明）
+User-agent: OAI-SearchBot
+User-agent: Claude-SearchBot
+User-agent: PerplexityBot
+User-agent: MistralAI-Index
+User-agent: Applebot
+Allow: /
+
+# 放用户 fetch
+User-agent: ChatGPT-User
+User-agent: Claude-User
+User-agent: Perplexity-User
+User-agent: MistralAI-User
+Allow: /
+
+# 默认放（Googlebot / Bingbot / Baiduspider 等搜索引擎）
+User-agent: *
+Allow: /</pre>
+
+  <div class="callout warn">
+    <div class="callout-title">写 robots 时容易忽略的 6 个细节</div>
+    <ol>
+      <li><code>ChatGPT-User</code> 自 2025-12-09 起不保证遵守 robots——你写 Disallow 它也可能照抓。</li>
+      <li><code>Meta-ExternalAgent</code> 训练 + 索引合一，无法只 block 训练。</li>
+      <li><code>Google-Extended</code> 不是独立爬虫，只是 robots token，控制 Googlebot 抓的内容是否进入 Gemini / Vertex 训练；不影响 Google 搜索排名。</li>
+      <li><code>Applebot-Extended</code> 同理，只控制 Applebot 抓到内容的"训练使用权"。</li>
+      <li><code>Bytespider</code> 名义上守 robots，社区实测在 list 形式 robots 中会忽略——单独写 block section 才有效。</li>
+      <li><code>DeepSeek</code> 没有公开 UA，robots.txt 完全无法控制，只能在 WAF 层做行为指纹。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================
+     4. INTERNATIONAL SEARCH ENGINES
+     ============================================================ -->
+<section id="intl-search">
+  <h2><span class="num">04</span> 国际搜索引擎（9 家）</h2>
+  <p class="tldr">Google 仍占绝对主导（约 90% 全球份额），Bing 是唯一第二梯队，Yandex 在俄语圈，DuckDuckGo / Brave 索引依赖 Bing。Naver / Seznam 是地域市场。<strong>只有 Googlebot 真正全量 evergreen 渲染 JS。</strong></p>
+
+  <h3>主表</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>引擎</th>
+        <th>主 UA token</th>
+        <th>IP 验证</th>
+        <th>站长入口</th>
+        <th>IndexNow</th>
+        <th>JS 渲染</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>Google / Googlebot</b></td>
+        <td><code>Googlebot/2.1</code><br>变体：Image / News / Video / AdsBot / Storebot / GoogleOther / Google-Extended (token) / Google-InspectionTool</td>
+        <td>JSON 文件 <code>googlebot.json</code> 等多个；<br>reverse DNS：<code>*.googlebot.com</code> / <code>*.google.com</code></td>
+        <td><a href="https://search.google.com/search-console" target="_blank">Search Console</a></td>
+        <td><span class="pill bad">不支持</span></td>
+        <td><span class="pill good">evergreen Chromium 全量</span><br>WRS 二阶段渲染</td>
+      </tr>
+      <tr>
+        <td><b>Bing / Bingbot</b></td>
+        <td><code>bingbot/2.0</code>（含 Edge 版本号）<br>变体：BingPreview / AdIdxBot / MicrosoftPreview</td>
+        <td>JSON：<a href="https://www.bing.com/toolbox/bingbot.json" target="_blank">bingbot.json</a><br>reverse DNS：<code>*.search.msn.com</code></td>
+        <td><a href="https://www.bing.com/webmasters" target="_blank">Bing Webmaster Tools</a></td>
+        <td><span class="pill good">支持（主推方）</span></td>
+        <td><span class="pill warn">半支持</span><br>文档明确 rich media 可能漏抓</td>
+      </tr>
+      <tr>
+        <td><b>Yandex / YandexBot</b></td>
+        <td><code>YandexBot/3.0</code><br>变体：Images / Mobile / Media / AdditionalBot（AI 训练 opt-out）</td>
+        <td>不公开 IP；AS13238 / AS208722<br>reverse DNS：<code>*.yandex.ru/com/net</code></td>
+        <td><a href="https://webmaster.yandex.com" target="_blank">Yandex Webmaster</a></td>
+        <td><span class="pill good">支持（共同发起方）</span></td>
+        <td><span class="pill warn">β 选择性</span><br>Webmaster 控制台手动开</td>
+      </tr>
+      <tr>
+        <td><b>DuckDuckGo</b></td>
+        <td><code>DuckDuckBot/1.1</code> 自爬量小<br><code>DuckAssistBot/1.2</code> 按需检索</td>
+        <td>DuckAssistBot IP 公布在 Help Pages</td>
+        <td><span class="pill bad">无独立站长面板</span><br>优化路径全部走 Bing</td>
+        <td><span class="pill warn">间接</span>（依赖 Bing index）</td>
+        <td><span class="pill bad">弱，继承 Bing</span></td>
+      </tr>
+      <tr>
+        <td><b>Brave Search</b></td>
+        <td><b>故意不暴露独特 UA</b>，避免被歧视性放行 Google 而拒绝其他</td>
+        <td>不公开 IP 列表</td>
+        <td><span class="pill bad">无站长控制台</span><br>仅删除请求表单 + WDP（Brave 浏览器用户匿名上报）</td>
+        <td><span class="pill bad">不支持</span></td>
+        <td>索引内置渲染</td>
+      </tr>
+      <tr>
+        <td><b>Naver / Yeti</b></td>
+        <td><code>Yeti/1.1</code>（含 Chrome 144）</td>
+        <td>Search Advisor robot 验证页<br>reverse DNS：<code>*.web.naver.com</code></td>
+        <td><a href="https://searchadvisor.naver.com" target="_blank">Search Advisor</a><br>需手动注册</td>
+        <td><span class="pill good">支持</span></td>
+        <td><span class="pill bad">弱</span><br>文档反对 React / Vue</td>
+      </tr>
+      <tr>
+        <td><b>Seznam</b>（捷克）</td>
+        <td><code>SeznamBot/4.0</code></td>
+        <td>不公开；reverse DNS <code>*.seznam.cz</code></td>
+        <td><span class="pill warn">仅 sitemap 提交</span></td>
+        <td><span class="pill good">支持</span></td>
+        <td><span class="pill bad">不渲染</span></td>
+      </tr>
+      <tr>
+        <td><b>Mojeek</b></td>
+        <td><code>MojeekBot</code></td>
+        <td>不公开</td>
+        <td><span class="pill bad">无站长面板</span></td>
+        <td><span class="pill bad">不支持</span></td>
+        <td><span class="pill bad">不渲染</span></td>
+      </tr>
+      <tr>
+        <td><b>Marginalia</b></td>
+        <td><code>MarginaliaSearch.com</code></td>
+        <td>不公开</td>
+        <td><span class="pill bad">无站长面板</span><br>提供 free non-commercial API key</td>
+        <td><span class="pill bad">不支持</span></td>
+        <td><span class="pill bad">不渲染</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>4 个常见疑问</h3>
+
+  <details open>
+    <summary><b>A. IndexNow 在 2026 是什么状况？</b></summary>
+    <div>
+      <p>
+        <b>答：</b>Bing / Yandex / Seznam / Naver / Yep（Ahrefs）/ Internet Archive / Amazonbot 已接入；
+        Google 长期拒绝接入，短期不会变。任何一方接收 push 后会广播到所有其他 endpoint。
+      </p>
+      <p>
+        <b>依据：</b>Google 官方理由：(1) 已有 Caffeine + Indexing API 自有体系；(2) AI / spam 滥用风险；
+        (3) crawl budget 标准要按 Google 自己的；(4) 协议由 Microsoft / Yandex 主导。
+      </p>
+      <p>
+        <b>容易忽略：</b>协议本身没有"撤销 push"语义。如果错推了私密 URL，<code>urlList</code> 里给 deleted 也只是触发 re-crawl 让引擎自己确认 404，
+        不是强制 deindex。唯一兜底是 webmaster console 的 URL removal 工具。Bing 单批最多 10000 URL。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>B. Google 的 AI Overviews / SGE 对 Googlebot 有特殊政策吗？</b></summary>
+    <div>
+      <p><b>答：</b>没有，完全复用现有 Googlebot 索引，没有独立 indexing UA。</p>
+      <p>
+        <b>依据：</b>官方文档 <code>developers.google.com/search/docs/appearance/ai-features</code> 明确说 AI Overviews / AI Mode 沿用 Search 的索引和 ranking；
+        <code>nosnippet</code>、<code>max-snippet</code>、<code>data-nosnippet</code> 等 preview controls 同时作用于 AI Overviews 和传统精选片段，证明是同一套基础设施。
+      </p>
+      <p>
+        <b>容易忽略：</b><code>Google-Extended</code> 不是独立爬虫，只是 robots token。它只控制 Googlebot 已抓内容是否进入 Gemini / Vertex 训练，
+        与 Search 索引和 AI Overviews 引用无关。2025-12 Search Engine Land 报道 Google 在讨论给 AI Overviews 单独加 opt-out 控件，但截至 2026-05 还没发布。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>C. DuckDuckGo 的索引来源 2026 还是 Bing 吗？</b></summary>
+    <div>
+      <p><b>答：</b>是。主要靠 Bing，自家 <code>DuckDuckBot</code> 小规模爬取 + 400+ 第三方源做合成。</p>
+      <p>
+        <b>依据：</b>(1) DuckDuckGo Help Pages 自述 "links and images... we largely source from Bing"；
+        (2) 2024 Bing API 中断时 DuckDuckGo SERP 短暂停摆，证实 Bing 是主体；
+        (3) DuckAssistBot 只在用户触发 DuckAssist 时按需检索 Wikipedia / Britannica 等，不重建索引。
+      </p>
+      <p><b>对站长意义：</b>优化 Bing 约等于优化 DuckDuckGo。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>D. JS 渲染对比</b></summary>
+    <div><p>详见 <a href="#js-render">§10 JS 渲染对比</a> 的专门表格。</p></div>
+  </details>
+</section>
+
+<!-- ============================================================
+     5. CHINA SEARCH ENGINES
+     ============================================================ -->
+<section id="cn-search">
+  <h2><span class="num">05</span> 国内搜索引擎（5 家）</h2>
+  <p class="tldr">百度仍是中国搜索的核心，神马是移动端（UC 系），360 / 搜狗 / 头条搜索都已边缘化。<strong>所有国内引擎都不公开 IP 段，只能 reverse DNS 验证；头条搜索的 Bytespider 已转向给字节 LLM 提供训练数据，速度为 GPTBot 的 25 倍。</strong></p>
+
+  <h3>百度 / Baiduspider</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:120px"><b>UA</b></td><td>
+        PC：<code>Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)</code><br>
+        渲染版：<code>Baiduspider-render/2.0</code>（自 2017 起独立执行 JS）<br>
+        移动：UA 内含 <code>Android 4.2.2</code> 或 <code>iPhone OS 9_1</code><br>
+        小程序：UA 末尾带 <code>Smartapp;</code>
+      </td></tr>
+      <tr><td><b>IP 验证</b></td><td>仅 reverse DNS 双向验证；hostname 后缀 <code>*.baidu.com</code> 或 <code>*.baidu.jp</code>（海外节点）；官方不公开 IP 段</td></tr>
+      <tr><td><b>robots</b></td><td>遵守</td></tr>
+      <tr><td><b>站长入口</b></td><td><a href="https://ziyuan.baidu.com/sitemap/index" target="_blank">百度搜索资源平台</a> · 普通收录全员可用 · 快速收录 / 高额配额需 VIP</td></tr>
+      <tr><td><b>备案要求</b></td><td><span class="badge warn">软强制</span> 2023-11-30 后 sitemap 与快速收录权限收归 VIP，VIP 准入硬性条件 = ICP 备案 + 实名 + 运营满 1 年 + 日均点击 ≥ 10000；未备案站日 sitemap 提交上限被压到 1</td></tr>
+      <tr><td><b>JS 渲染</b></td><td>支持，由 Baiduspider-render 单独执行；但渲染抓取频次<b>远低于</b>普通抓取，重 JS SPA 仍建议 SSR / 预渲染</td></tr>
+      <tr><td><b>2025 政策</b></td><td>2024 起可在"站点属性"填写主体备案号提升每日提交上限；ETag / SmartCard / 百度 MIP 已基本退场</td></tr>
+    </tbody>
+  </table>
+
+  <h3>360 / 360Spider</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:120px"><b>UA</b></td><td><code>360Spider</code> / <code>360Spider-Image</code> / <code>360Spider-Video</code><br>典型字符串：<code>...360Spider(compatible; HaosouSpider; http://www.haosou.com/help/help_3_2.html)</code></td></tr>
+      <tr><td><b>IP 验证</b></td><td>reverse DNS；360 自身不公开权威 IP 段</td></tr>
+      <tr><td><b>robots</b></td><td>支持，并扩展自定义指令 <code>Indexpage</code>（标记高频更新页）</td></tr>
+      <tr><td><b>站长入口</b></td><td><a href="https://zhanzhang.so.com/" target="_blank">360 站长平台</a> · sitemap 单文件 ≤ 10MB / ≤ 5 万 URL</td></tr>
+      <tr><td><b>备案要求</b></td><td><span class="badge bad">硬要求</span> 社区共识：360 基本只认备案域名，未备案站只能等自然抓取，无法在站长平台获得有效配额（官方文档无明示但实操如此）</td></tr>
+      <tr><td><b>JS 渲染</b></td><td>未明确公布，社区反馈弱于百度</td></tr>
+      <tr><td><b>抓取频次</b></td><td>综合频次远低于百度（社区统计约百度的 1/10）</td></tr>
+      <tr><td><b>2025 重心</b></td><td>整体平台维护放缓，重心偏 360 AI（纳米搜索）</td></tr>
+    </tbody>
+  </table>
+
+  <h3>搜狗 / Sogou web spider</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:120px"><b>UA</b></td><td><code>Sogou web spider/4.0</code> · 移动 <code>Sogou wap spider/4.0</code> · 资讯 <code>Sogou inst spider/4.0</code></td></tr>
+      <tr><td><b>IP 验证</b></td><td>官方明确不对外提供 spider IP 列表，仅 reverse DNS（<code>*.sogou.com</code>）</td></tr>
+      <tr><td><b>robots</b></td><td>支持；单 IP 单连接，约每秒 1 页</td></tr>
+      <tr><td><b>站长入口</b></td><td><a href="https://zhanzhang.sogou.com/" target="_blank">搜狗站长平台</a> · sitemap 提交是<b>邀请制</b>，需邮件 <code>zzpt@tencent.com</code> 申请</td></tr>
+      <tr><td><b>备案要求</b></td><td><span class="badge bad">强制</span> 官网认证强制 ICP 备案；个人 / 未备案站不支持官方认证</td></tr>
+      <tr><td><b>JS 渲染</b></td><td>偏向静态 HTML，深层动态页面可能直接放弃</td></tr>
+      <tr><td><b>归属变化</b></td><td>已被腾讯并购，逐渐被微信搜一搜 + 腾讯元宝吸收，独立产品权重明显下降</td></tr>
+    </tbody>
+  </table>
+
+  <h3>神马 / YisouSpider</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:120px"><b>UA</b></td><td>固定包含 <code>YisouSpider</code>（首字母大写 <code>Y</code>），分 PC 与移动两版，<b>移动 UA 占主</b></td></tr>
+      <tr><td><b>IP 验证</b></td><td>reverse DNS；IP 段全部来自阿里云，社区整理：<code>42.156.13x.0/24</code> · <code>42.120.16x.0/24</code> · <code>106.11.15x.0/24</code> 等</td></tr>
+      <tr><td><b>robots</b></td><td>支持，社区有少量违规屏蔽案例反馈</td></tr>
+      <tr><td><b>站长入口</b></td><td><a href="https://zhanzhang.sm.cn/" target="_blank">神马站长平台</a> · 需站点验证 + 实名制</td></tr>
+      <tr><td><b>备案要求</b></td><td><span class="badge warn">实名制</span> 实名制平台，要求中国大陆服务范围内合法合规</td></tr>
+      <tr><td><b>定位</b></td><td>主战场是手机移动 UA（依托 UC 浏览器），对 PC 内容轻视；战略向阿里夸克搜索 / AI 倾斜</td></tr>
+    </tbody>
+  </table>
+
+  <h3>头条搜索 / Bytespider</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:120px"><b>UA</b></td><td><code>Mozilla/5.0 (compatible; Bytespider; spider-feedback@bytedance.com)</code> 或 <code>...; +https://zhanzhang.toutiao.com/) ...</code>（关键字 <code>Bytespider</code> 大写 B）</td></tr>
+      <tr><td><b>IP 验证</b></td><td>建议 reverse DNS（<code>*.bytedance.com</code>），<b>未公开官方 IP 段</b></td></tr>
+      <tr><td><b>robots</b></td><td><span class="badge bad">实际不严格遵守</span> 官方声称遵守，但 Cloudflare 2025 评估列在合规度末位；HAProxy 实测占其 AI 爬虫流量约 90%；多家中文网站投诉日均百万级请求</td></tr>
+      <tr><td><b>站长入口</b></td><td><a href="https://zhanzhang.toutiao.com/" target="_blank">头条搜索站长平台</a></td></tr>
+      <tr><td><b>备案要求</b></td><td>未硬性要求，但实际收录展现侧重已备案合规站点</td></tr>
+      <tr><td><b>战略转向</b></td><td>头条搜索独立产品已边缘化，<b>Bytespider 抓取目的从搜索索引转向 LLM 训练</b>（按 Kasada 数据，速度为 GPTBot 的 25 倍、ClaudeBot 的 3000 倍）</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================================================
+     6. INTERNATIONAL AI BOTS
+     ============================================================ -->
+<section id="ai-bots">
+  <h2><span class="num">06</span> 国际 AI 抓取（11 家厂商 + Common Crawl）</h2>
+  <p class="tldr">所有主流 AI 厂商都把 bot 拆成训练 / 检索 / 用户 fetch 三类。<strong>OpenAI 配合度最高，Anthropic 三个 bot 都遵守 robots.txt，Perplexity 因伪装 UA 被 Cloudflare 撤销 verified bot 资格；Bytespider 与 DeepSeek 是合规洼地。</strong></p>
+
+  <h3>主表（按厂商）</h3>
+  <table>
+    <thead><tr><th>厂商</th><th>Bot 名 / UA</th><th>类别</th><th>守 robots</th><th>Block 后果</th></tr></thead>
+    <tbody>
+      <tr>
+        <td rowspan="4"><b>OpenAI</b></td>
+        <td><code>GPTBot/1.3</code></td><td>训练</td><td><span class="pill good">是</span></td>
+        <td>不被未来 GPT 训练；已训练保留</td>
+      </tr>
+      <tr>
+        <td><code>OAI-SearchBot/1.3</code></td><td>检索</td><td><span class="pill good">是</span></td>
+        <td>从 ChatGPT search 答案中消失</td>
+      </tr>
+      <tr>
+        <td><code>ChatGPT-User/1.0</code></td><td>用户 fetch</td><td><span class="pill bad">2025-12-09 起不再保证</span></td>
+        <td>不影响（绕过）</td>
+      </tr>
+      <tr>
+        <td><code>OAI-AdsBot/1.0</code></td><td>广告</td><td><span class="pill good">是</span></td>
+        <td>广告相关</td>
+      </tr>
+      <tr>
+        <td rowspan="3"><b>Anthropic</b></td>
+        <td><code>ClaudeBot/1.0</code></td><td>训练</td><td><span class="pill good">是</span></td>
+        <td>未来 Claude 不再训练</td>
+      </tr>
+      <tr>
+        <td><code>Claude-User/1.0</code></td><td>用户 fetch</td><td><span class="pill good">是（与 OpenAI 不同）</span></td>
+        <td>用户提问时无法 fetch</td>
+      </tr>
+      <tr>
+        <td><code>Claude-SearchBot/1.0</code></td><td>检索</td><td><span class="pill good">是</span></td>
+        <td>不被 Claude 搜索索引</td>
+      </tr>
+      <tr>
+        <td rowspan="2"><b>Perplexity</b></td>
+        <td><code>PerplexityBot/1.0</code></td><td>检索</td><td><span class="pill warn">官方说是，实际有违规取证</span></td>
+        <td>不被 Perplexity 索引</td>
+      </tr>
+      <tr>
+        <td><code>Perplexity-User/1.0</code></td><td>用户 fetch</td><td><span class="pill bad">官方说一般不遵守</span></td>
+        <td>用户提问时仍可能被 fetch</td>
+      </tr>
+      <tr>
+        <td rowspan="5"><b>Google</b></td>
+        <td><code>Googlebot/2.1</code></td><td>传统搜索</td><td><span class="pill good">是</span></td>
+        <td>从 Google Search 消失</td>
+      </tr>
+      <tr>
+        <td><code>Google-Extended</code>（token，非独立爬虫）</td><td>训练 token</td><td><span class="pill good">是</span></td>
+        <td>不影响搜索；不被 Gemini / Vertex 训练</td>
+      </tr>
+      <tr>
+        <td><code>GoogleOther</code></td><td>通用研发</td><td><span class="pill good">是</span></td>
+        <td>部分研发抓取被阻</td>
+      </tr>
+      <tr>
+        <td><code>Google-CloudVertexBot</code></td><td>Vertex AI 客户配置</td><td><span class="pill good">是</span></td>
+        <td>客户 Vertex grounding 数据源被阻</td>
+      </tr>
+      <tr>
+        <td><code>Google-Agent</code> · <code>Google-NotebookLM</code></td><td>用户触发</td><td><span class="pill warn">部分场景不遵守</span></td>
+        <td>AI 代理浏览被阻</td>
+      </tr>
+      <tr>
+        <td rowspan="2"><b>Apple</b></td>
+        <td><code>Applebot/0.1</code></td><td>搜索（Siri / Spotlight）</td><td><span class="pill good">是</span></td>
+        <td>从 Siri / Spotlight 消失</td>
+      </tr>
+      <tr>
+        <td><code>Applebot-Extended</code>（token）</td><td>训练 token</td><td><span class="pill good">是</span></td>
+        <td>不被 Apple Intelligence 训练</td>
+      </tr>
+      <tr>
+        <td rowspan="4"><b>Meta</b></td>
+        <td><code>meta-externalagent/1.1</code></td><td>训练 + 索引（合一）</td><td><span class="pill warn">名义上是</span></td>
+        <td>不被 Llama 训练</td>
+      </tr>
+      <tr>
+        <td><code>meta-externalfetcher/1.1</code></td><td>用户 fetch</td><td><span class="pill bad">官方说 may bypass</span></td>
+        <td>不影响（绕过）</td>
+      </tr>
+      <tr>
+        <td><code>facebookexternalhit/1.1</code></td><td>链接预览</td><td><span class="pill bad">安全检查时可能绕过</span></td>
+        <td>分享时缩略图丢失</td>
+      </tr>
+      <tr>
+        <td><code>FacebookBot/1.0</code></td><td>训练（旧）</td><td><span class="pill good">是</span></td>
+        <td>Meta 早期数据训练被阻</td>
+      </tr>
+      <tr>
+        <td rowspan="3"><b>Amazon</b></td>
+        <td><code>Amazonbot/0.1</code></td><td>检索 + Alexa</td><td><span class="pill good">是</span></td>
+        <td>Alexa 等无法引用</td>
+      </tr>
+      <tr>
+        <td><code>Amzn-User/0.1</code></td><td>用户 fetch</td><td><span class="pill warn">用户触发</span></td>
+        <td>Amazon 用户 agent 被阻</td>
+      </tr>
+      <tr>
+        <td><code>bedrockbot</code></td><td>Bedrock 客户</td><td><span class="pill good">是</span></td>
+        <td>客户 Bedrock 应用被阻</td>
+      </tr>
+      <tr>
+        <td><b>ByteDance</b></td>
+        <td><code>Bytespider</code></td><td>训练（豆包）+ 头条搜索</td><td><span class="pill bad">官方说是，实际严重违规</span></td>
+        <td>名义上不被豆包训练</td>
+      </tr>
+      <tr>
+        <td><b>Common Crawl</b></td>
+        <td><code>CCBot/2.0</code></td><td>开放数据集（间接喂多家 LLM）</td><td><span class="pill good">是</span></td>
+        <td>不进 CC dump，间接断 GPT / Llama / Mistral 等多家训练</td>
+      </tr>
+      <tr>
+        <td><b>Cohere</b></td>
+        <td><code>cohere-ai</code> · <code>cohere-training-data-crawler</code></td><td>训练</td><td><span class="pill good">是</span></td>
+        <td>Cohere Command / Embed 训练被阻</td>
+      </tr>
+      <tr>
+        <td rowspan="2"><b>Mistral</b></td>
+        <td><code>MistralAI-User/1.0</code></td><td>用户 fetch（Le Chat）</td><td><span class="pill good">是</span></td>
+        <td>Le Chat 用户提问不再 fetch</td>
+      </tr>
+      <tr>
+        <td><code>MistralAI-Index/1.0</code></td><td>检索</td><td><span class="pill good">是</span></td>
+        <td>不被 Le Chat 搜索索引</td>
+      </tr>
+      <tr>
+        <td><b>xAI / Grok</b></td>
+        <td><code>GrokBot/1.0</code> · <code>xAI-Grok</code> · <code>Grok-DeepSearch</code></td><td>训练 + 搜索</td><td><span class="pill warn">名义上是；实测罕见</span></td>
+        <td>报告改用 iPhone UA 规避 block</td>
+      </tr>
+      <tr>
+        <td><b>DeepSeek</b></td>
+        <td><b>未公开 UA</b></td><td>训练（推测）</td><td><span class="pill bad">无法验证</span></td>
+        <td>无法用 robots.txt 控制，只能 IP / 行为指纹</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>5 个常见疑问</h3>
+
+  <details open>
+    <summary><b>A. Block 一个 AI bot 之后究竟会怎样？以 GPTBot 为例</b></summary>
+    <div>
+      <p>
+        <b>(a) 网站会从 ChatGPT search 结果中消失吗？</b>不会。GPTBot（训练）与 OAI-SearchBot（检索）独立控制。
+        OpenAI 在 2025 文档中说："如果你两个都允许，我们可能用一次抓取数据用于两个用途，避免重复抓取。"
+        block GPTBot 不影响 ChatGPT search 可见性；要让 ChatGPT 答案不再引用你，需要 disallow OAI-SearchBot。
+      </p>
+      <p>
+        <b>(b) 之前训练已纳入的内容还会被引用吗？</b>会。一旦数据进入训练好的模型权重就<b>无法移除</b>。
+        AI 厂商的训练 cycle 通常 12-24 个月才一次，已纳入的内容会一直留到下一代模型替换它。
+      </p>
+      <p>
+        <b>(c) ChatGPT-User 是否绕过 robots？</b>会，从 2025-12-09 起。
+        OpenAI 修改文档，将合规承诺仅限于 OAI-SearchBot 与 GPTBot，明确 ChatGPT-User 不再保证遵守 robots.txt。
+        论据：用户主动让 ChatGPT 访问某 URL 时，OpenAI 视其为代理用户行为。
+        Anthropic 立场相反——三个 bot（含 Claude-User）都遵守。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>B. Cloudflare 与 Perplexity 的抓取冲突始末</b></summary>
+    <div>
+      <ul>
+        <li><b>2024 年中：</b>Wired / Forbes 揭露 Perplexity 抓取被 disallow 的网站（包括 Forbes、Wired 自己），用隐藏 UA + headless 浏览器</li>
+        <li><b>2025-07-01：</b>Cloudflare "Content Independence Day"——所有新域名默认 block AI crawler，pay-per-crawl 私有 beta 上线</li>
+        <li><b>2025-08-04：</b>Cloudflare 发布技术 blog 公开取证</li>
+        <li><b>CF CEO Matthew Prince 在 X 上：</b>把 Perplexity 类比成"北朝鲜黑客"</li>
+      </ul>
+      <p>
+        <b>取证内容：</b>(1) Cloudflare 创建从未被任何 bot 抓过的全新域名，写明 disallow PerplexityBot；
+        (2) 向 Perplexity 提问该域名内容；(3) Perplexity 仍能给出准确回答；
+        (4) 溯源发现 Perplexity 用伪装成 macOS Chrome 的通用 UA，使用未在其官方 IP 段内的 IP，多个 ASN 之间轮换；
+        (5) 规模：每天数十万域名、数百万请求。
+      </p>
+      <p>
+        <b>结局（2026-05）：</b>Cloudflare 取消 Perplexity 的 verified bot 身份，推出 ML + 网络信号指纹识别 stealth crawler。
+        Perplexity CEO 反驳称这是"代理用户行为"。
+        技术圈部分人支持 Perplexity 立场——agent 代理用户该不该受 robots 约束确有争议。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>C. 训练 / 检索 / 用户 fetch 三类 bot 对照</b></summary>
+    <div><p>详见 <a href="#bot-taxonomy">§03 Bot 三类法</a> 的专门对照表。</p></div>
+  </details>
+
+  <details>
+    <summary><b>D. Cloudflare AI Audit / Pay-per-crawl 现状</b></summary>
+    <div><p>详见 <a href="#cf-audit">§09 CF AI Audit 现状</a>。</p></div>
+  </details>
+
+  <details>
+    <summary><b>E. AI 引用之后能不能给原站带 referrer 流量？</b></summary>
+    <div>
+      <p>
+        <b>能带，但比想象中少。</b>ChatGPT、Perplexity 等 AI 答案中的链接点击会带 referrer 回原站，但很大一部分以"Direct"出现：
+        (1) ChatGPT 免费用户 / 移动 app 不发 Referer header；
+        (2) 部分 AI 工具（如 Brave AI summarizer）剥离 referrer；
+        (3) GA4 默认把 ChatGPT 等流量归到通用 "Referral" 桶里，混在普通推荐流量中。
+      </p>
+      <p>
+        <b>已知 referrer 来源域：</b><code>chatgpt.com</code> · <code>chat.openai.com</code> · <code>perplexity.ai</code> · <code>gemini.google.com</code> ·
+        <code>claude.ai</code> · <code>copilot.microsoft.com</code> · <code>chat.mistral.ai</code> · <code>grok.x.com</code> · <code>you.com</code> ·
+        <code>pi.ai</code> · <code>phind.com</code> · <code>huggingface.co</code>。
+        OpenAI 在某些场景会主动追加 <code>utm_source=chatgpt.com</code>。
+      </p>
+      <p>
+        <b>典型量级（2026 上半年公开数据）：</b>AI 推荐流量约占总流量 0.2%-2%（行业差异大），但每年增长 5-15 倍。
+        Cloudflare Radar 公开 crawl-to-referral 比率：OpenAI 1750:1（每抓 1750 页只送回 1 次访问），Anthropic 比率更糟。
+        意思是：被抓不等于被引，被引也不等于带流量回来。
+      </p>
+      <p>
+        <b>追踪手段（GA4）：</b>创建 Custom Channel Group → regex 匹配 AI 域名 → 排序到 Referral 之前 → 看 Source / Landing page 维度。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ============================================================
+     7. CHINA AI PLATFORMS
+     ============================================================ -->
+<section id="cn-ai">
+  <h2><span class="num">07</span> 国内 AI 平台（10+ 家）</h2>
+  <p class="tldr">国内 8 家主流 AI 厂商<strong>没有公开训练专用 UA</strong>（阿里 Qwen、腾讯混元、Kimi、智谱、DeepSeek、MiniMax、商汤、讯飞）。只有字节 Bytespider、百度 Baiduspider、华为 PetalBot 公开。<strong>意味着 robots.txt 对这 8 家厂商没有控制能力</strong>，要拦只能在 WAF 层做。</p>
+
+  <h3>主表（依附关系 + 是否可控）</h3>
+  <table>
+    <thead><tr><th>厂商</th><th>产品</th><th>公开训练 UA</th><th>训练数据来源</th><th>Web 检索</th><th>robots 是否可控</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>字节跳动</b></td>
+        <td>豆包、即梦、TikTok、今日头条</td>
+        <td><span class="pill good">Bytespider</span></td>
+        <td>自爬为主（HAProxy 实测占其 AI 爬虫流量约 90%、为 GPTBot 25 倍）+ 抖音 / 头条 / 西瓜内部数据</td>
+        <td>豆包内置联网搜索，引用源以 CSDN、抖音视频为主</td>
+        <td><span class="pill bad">不严格守</span></td>
+      </tr>
+      <tr>
+        <td><b>百度</b></td>
+        <td>文心一言、百度 AI 搜索、文小言</td>
+        <td><span class="pill good">Baiduspider</span>（搜索 + AI 共用）</td>
+        <td>百度搜索索引共享 + Common Crawl</td>
+        <td>深度集成百度搜索结果</td>
+        <td><span class="pill good">守（同百度搜索）</span></td>
+      </tr>
+      <tr>
+        <td><b>阿里</b></td>
+        <td>通义千问 Qwen、夸克 AI 搜索</td>
+        <td><span class="pill bad">未公开</span>（夸克用 YisouSpider 通用）</td>
+        <td>Qwen3-Max 36T tokens + 阿里云 + 夸克索引 + 电商 / 淘宝</td>
+        <td>千问 / 夸克均有联网搜索</td>
+        <td><span class="pill warn">部分</span>（YisouSpider 历史不规范）</td>
+      </tr>
+      <tr>
+        <td><b>月之暗面</b></td>
+        <td>Kimi（不属于字节，常被混淆）</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>采购数据集 + Common Crawl + Kimi 用户提交网页</td>
+        <td>调用商用搜索 API（非自爬）</td>
+        <td><span class="pill muted">不适用</span>（自家无独立爬虫）</td>
+      </tr>
+      <tr>
+        <td><b>智谱</b></td>
+        <td>ChatGLM / 智谱清言 / GLM-4.5</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>清华系学术语料 + Common Crawl + 公开数据集</td>
+        <td>调用 simple_browser 工具，引用 <code>【id†text】</code></td>
+        <td><span class="pill muted">不适用</span></td>
+      </tr>
+      <tr>
+        <td><b>腾讯</b></td>
+        <td>混元、元宝</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>微信公众号生态（独家）+ 搜狗（已被腾讯收购）+ 自有 7T tokens</td>
+        <td>接入微信搜一搜 + 搜狗搜索</td>
+        <td><span class="pill warn">部分</span>（屏蔽 Sogou 可阻断搜狗一侧）</td>
+      </tr>
+      <tr>
+        <td><b>商汤</b></td>
+        <td>商量 SenseChat</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>商汤自有视觉数据 + 公开中文语料</td>
+        <td>有限</td>
+        <td><span class="pill muted">不适用</span></td>
+      </tr>
+      <tr>
+        <td><b>讯飞</b></td>
+        <td>星火 Spark X1 / X1.5</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>教育 / 会议 / 政务自有语料 + 通用语料</td>
+        <td>V3.5 后内置</td>
+        <td><span class="pill muted">不适用</span></td>
+      </tr>
+      <tr>
+        <td><b>MiniMax</b></td>
+        <td>海螺 Hailuo、ABAB</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>采购 + 公开数据集</td>
+        <td>有，弱于豆包 / 元宝</td>
+        <td><span class="pill muted">不适用</span></td>
+      </tr>
+      <tr>
+        <td><b>DeepSeek</b></td>
+        <td>V3.2 / R1 / V4</td>
+        <td><span class="pill bad">未公开</span></td>
+        <td>Common Crawl + 公开数据集 + 自爬（规模未公开）</td>
+        <td>调用 Bing 等三方搜索 API</td>
+        <td><span class="pill bad">完全不可控</span></td>
+      </tr>
+      <tr>
+        <td><b>华为</b></td>
+        <td>盘古、Petal Search</td>
+        <td><span class="pill good">PetalBot</span>（CF verified bot #17）</td>
+        <td>华为终端 + Petal 索引 + 自有语料</td>
+        <td>Petal Search 内置</td>
+        <td><span class="pill good">守</span></td>
+      </tr>
+      <tr>
+        <td><b>360</b></td>
+        <td>智脑、纳米 AI 搜索</td>
+        <td>360Spider（搜索爬虫）</td>
+        <td>360 搜索索引 + 公开数据集</td>
+        <td>纳米 AI 调用 DeepSeek-R1 联网</td>
+        <td><span class="pill good">守</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3 个常见疑问</h3>
+
+  <details open>
+    <summary><b>A. 国内 AI 厂商有没有公开过自己的训练爬虫 UA？</b></summary>
+    <div>
+      <p><b>答：</b>只有 3 家公开了独立可识别的爬虫 UA。</p>
+      <ol>
+        <li><b>字节 <code>Bytespider</code></b>——CF verified bot ID 33563853。但实测不严格遵守 robots.txt。</li>
+        <li><b>百度 <code>Baiduspider</code></b>——CF verified bot ID 33。<b>这是百度搜索爬虫，不是"文心一言专用"</b>，文心和百度搜索共享同一套索引。</li>
+        <li><b>华为 <code>PetalBot</code></b>——CF verified bot ID 17，遵守 robots.txt。</li>
+      </ol>
+      <p><b>其他 8 家厂商均无公开训练 UA。</b>它们的训练数据靠：(1) 采购公开数据集（Common Crawl、C4、WuDao、ChineseWebText 等）；(2) 母公司自有索引；(3) 私下抓取（用未公开的 UA 或伪装成普通浏览器）。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>B. 国内 AI 厂商是否接入 Cloudflare verified bot 体系？</b></summary>
+    <div>
+      <p><b>接入的：</b>Baiduspider、Sogou web spider、Bytespider、PetalBot。</p>
+      <p><b>未接入：</b>阿里 Qwen、腾讯混元、Kimi、智谱、DeepSeek、MiniMax、商汤、讯飞——全部找不到。</p>
+      <p>
+        意味着：这些厂商如果要抓你的网站，要么走 Common Crawl 间接获取，要么走没有标识的私爬通道。
+        <b>Cloudflare 的 "Block AI Bots" 一键开关无法精准命中它们</b>。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>C. 国内 AI 平台 web 检索时，引用源怎么显示？能给原站带流量吗？</b></summary>
+    <div>
+      <p><b>答：</b>能带流量，但不如 Perplexity / OpenAI SearchGPT 积极外链。</p>
+      <table>
+        <thead><tr><th>平台</th><th>引用源呈现</th><th>流量回流</th></tr></thead>
+        <tbody>
+          <tr><td>豆包</td><td>5-10 个引用源链接，可点击</td><td>引用源质量较低（CSDN / 营销号 / 广告软件官网为主）</td></tr>
+          <tr><td>文心 / 百度 AI</td><td>同百度搜索结果</td><td>较好，与百度 SEO 直接打通</td></tr>
+          <tr><td>元宝</td><td>微信公众号链接 + 搜狗结果</td><td>公众号链接闭环在腾讯系；外站较少</td></tr>
+          <tr><td>通义 / 夸克</td><td>引用源带链接卡片</td><td>中等</td></tr>
+          <tr><td>Kimi</td><td>数字引用块 + 来源面板</td><td>较好（学术 / 长文场景引用清晰）</td></tr>
+          <tr><td>智谱</td><td><code>【id†text】</code> 格式</td><td>中等</td></tr>
+          <tr><td>DeepSeek</td><td><code>[citation:X]</code> 格式</td><td>较好（R1 联网模式引用密集）</td></tr>
+          <tr><td>纳米 AI / 秘塔</td><td>多页面综合引用 + 缩略图</td><td>好</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <b>需要注意的趋势：</b>豆包正在试水"AI + 抖音内容联动"——对话气泡末尾推抖音视频，把外站流量内部消化掉。
+        这是"内循环"的设计目标，<b>对第三方内容站不利</b>。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ============================================================
+     8. ICP FILING
+     ============================================================ -->
+<section id="icp">
+  <h2><span class="num">08</span> ICP 备案专题：流言对照事实</h2>
+  <p class="tldr">"百度对未备案站不收录"是<strong>软强制</strong>，不是政策禁令。政策上无该规定，但 (1) 境内 ISP 在 80/443 端口拦截未备案的境内 IP；(2) 百度 sitemap / 快速收录 VIP 准入硬条件含 ICP 备案。<strong>实质降权，不是算法降权。Google / Bing 完全不看备案。</strong></p>
+
+  <h3>ICP 备案规则速查（2026 最新）</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:140px"><b>法律依据</b></td><td>《互联网信息服务管理办法》（国务院令第 292 号）+ 工信部 2017 年域名实名认证全面实施令 + 2024 年《生成式人工智能服务管理暂行办法》</td></tr>
+      <tr><td><b>必须备案</b></td><td>服务器在中国大陆境内、面向公众提供 Web / APP / 小程序服务的所有网站</td></tr>
+      <tr><td><b>不用备案</b></td><td>服务器在中国境外（含香港 / 澳门 / 台湾）、个人内网、政府指定专用网络、纯工具类小程序</td></tr>
+      <tr><td><b>个人备案</b></td><td>身份证 + 手持身份证照片 + 域名实名 + 网站不得用于商业（同一身份证大多省份限 5 个网站）</td></tr>
+      <tr><td><b>企业备案</b></td><td>营业执照副本 + 法人身份证 + 网站负责人身份证 + 服务器协议 + 公章</td></tr>
+      <tr><td><b>顶级域要求</b></td><td>
+        <span class="pill good">可备</span> .com / .cn / .net / .org / .com.cn / .top<br>
+        <span class="pill bad">不可备</span> .cc / .ai / .io / .xyz / .me / .blog / .pub 等大量后缀（工信部 2018 起未批复）<br>
+        <span class="pill warn">特殊</span> .中国 域名需国家级单位
+      </td></tr>
+      <tr><td><b>主体 vs 网站</b></td><td>主体 = 备案的法律实体；网站 = 主体下的具体域名。一个主体可挂多个网站，更换接入服务商需"接入备案"</td></tr>
+      <tr><td><b>公安备案</b></td><td>ICP 备案成功 30 日内必须完成（公网安备号），独立于 ICP 备案</td></tr>
+      <tr><td><b>2025-2026 新规</b></td><td>(1) 双重核验（人脸 + 实地）；(2) AI 类网站需提供《AI 功能说明函》；(3) UGC 类需说明内容审核机制；(4) 个人备案企业站点 2026-06-30 前必须改主体；(5) 违规罚款 5000-10 万元，3 年不得再申请</td></tr>
+      <tr><td><b>审核时长</b></td><td>接入商初审 1-2 工作日 + 工信部短信核验 + 管局终审 5-20 工作日，总计 1-22 个工作日</td></tr>
+      <tr><td><b>底部展示</b></td><td>强制要求展示备案号，必须链接到工信部备案查询平台</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4 个备案侧关键问题</h3>
+
+  <details open>
+    <summary><b>D. 备案与搜索引擎收录的真实关系</b></summary>
+    <div>
+      <ol>
+        <li><b>百度：</b>官方未明文规定"未备案不收录"。但 2023-11-30 后 sitemap 与快速收录权限收归 VIP，准入硬性 = ICP 备案 + 实名 + 运营满 1 年 + 日均点击 ≥ 10000。<b>境内 ISP 在 80/443 端口拦截未备案的境内 IP——爬虫连页面都打不开</b>。</li>
+        <li><b>境外服务器 + 未备案的实测：</b>可以被百度收录，但前提是百度爬虫能访问网站。一篇外贸独立站 SEO 实战指南总结："中国市场必须本地服务器 + ICP 备案 + 结构化"。</li>
+        <li><b>Google / Bing：</b>完全不看 ICP 备案。境外搜索引擎只看：服务器响应速度、内容质量、外链权威性、HTTPS、移动端适配。</li>
+        <li><b>2024-2026 政策只增不减：</b>工信部"清朗行动"专项核查 2025Q3 已关停 2 万+ 不合规站点。新规要求愈发严格。</li>
+      </ol>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>E. 反例：境外服务器 + 未备案 + 百度收录良好的实战案例</b></summary>
+    <div>
+      <p>
+        能找到的案例<b>极少</b>。普遍情况是境外服务器在国内访问速度慢（300+ ms 延迟、间歇丢包）+ IP 被境内 ISP 周期性封锁 → 百度爬虫即便能爬，索引时效性也大幅落后。
+      </p>
+      <p>
+        技术博客实战经验显示：靠每日 API 主动提交（每天 10 条限额）<b>勉强维持收录，被动收录基本无望</b>。
+        所以"境外 + 未备案 + 百度自然收录"这条路理论上可行、实践上极小流量。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>F. ICP 备案与 CDN 的细节</b></summary>
+    <div>
+      <ol>
+        <li><b>Cloudflare Free：</b>全球节点中没有中国大陆节点，"中国境内访问"路由到香港 / 新加坡 / 日本 / 韩国就近节点。延迟 100-300 ms，受跨境带宽和 GFW 影响。</li>
+        <li><b>Cloudflare 中国合作版（百度云 / 京东云）：</b>强制要求 ICP 备案。仅企业级合同，免费版无此选项。</li>
+        <li><b>阿里云 / 腾讯云 / 华为云 / 京东云 CDN：</b>所有境内 CDN 都强制备案。"域名解析指向中国内地服务器需备案；指向香港 / 海外不需要"。</li>
+        <li><b>备案号必须显示在网站底部：</b>工信部强制要求，必须链接到备案查询平台。AI 平台索引时<b>未发现"因没显示备案号而降权"的算法依据</b>，但工信部"清朗行动"会因未展示备案号责令整改，长期不改可能注销备案 → 进入 ISP 拦截黑名单。</li>
+        <li><b>合法绕过方案：</b>境外 CDN（Cloudflare Free 全球网络）+ 境外源站，国内访问走最近的境外节点（如香港）。延迟相比境内 CDN 高 5-10 倍，但完全无需备案。</li>
+        <li><b>混合方案：</b>DNS 智能解析做"境内 / 境外分流"——境内走腾讯云 CDN（需备案），境外走 Cloudflare（无需备案）。</li>
+      </ol>
+    </div>
+  </details>
+
+  <details>
+    <summary><b>G. 境外公司 / 个人想做中国市场 SEO 的合规路径</b></summary>
+    <div>
+      <table>
+        <thead><tr><th>路径</th><th>合规</th><th>效果天花板</th></tr></thead>
+        <tbody>
+          <tr><td>找国内主体代为备案（最常见）</td><td><span class="pill good">是</span></td><td>完整中国 SEO / GEO 能力，可用境内 CDN，百度 / 360 / 搜狗 / 夸克全收录正常</td></tr>
+          <tr><td>自己在中国设立子公司或代表处后备案</td><td><span class="pill good">是</span></td><td>同上，加上完整运营自主权（成本高）</td></tr>
+          <tr><td>不备案 + 境外服务器（香港 / AWS HK）</td><td><span class="pill good">合规</span></td><td>百度受 ISP 拦截影响，访问速度差；Google / Bing 收录正常</td></tr>
+          <tr><td>不备案 + Cloudflare 海外网络</td><td><span class="pill good">合规</span></td><td>同上，体验劣于香港直连源站</td></tr>
+          <tr><td>不备案 + 国内非法 CDN（伪装绕过）</td><td><span class="pill bad">不合规</span></td><td>短期能用，工信部抽查随时下线</td></tr>
+          <tr><td>不备案，专做 AI 搜索 / GEO 投放</td><td><span class="pill warn">边缘</span></td><td>主要受内容质量 + 权威平台分发影响；备案不是直接因素</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <b>核心结论：</b>面向中国市场的 SEO 天花板在「百度爬虫能否稳定访问到你的页面 + 用户访问体验」。
+        <b>备案不是法律唯一约束，但它是技术访问性的实质门槛。</b>
+      </p>
+    </div>
+  </details>
+
+  <div class="callout warn">
+    <div class="callout-title">ai-feeds 的特殊场景</div>
+    <p>
+      项目当前架构：<b>ai-feeds.com</b>（未备案，CF Free 海外节点）是主部署；
+      <b>ai-feeds.cc</b>（已备案主体「科赞源信」、网页展示「AI源信」）是国内品牌域名，但暂未启用为主站。
+    </p>
+    <p>
+      意味着：<b>面向中国市场的 SEO 还没有合法的技术路径</b>，必须做两个决策之一：
+      (a) 启用 .cc 域名作为国内主站 + 境内 CDN / 源站（合规路径）；
+      (b) 维持 .com 主站不备案 + 接受百度长尾天花板（仅靠 Google / Bing / Yandex + AI 引擎）。
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================
+     9. CF AI AUDIT
+     ============================================================ -->
+<section id="cf-audit">
+  <h2><span class="num">09</span> Cloudflare AI Audit / Pay-per-crawl 现状</h2>
+  <p class="tldr">2025-07-01 「Content Independence Day」之后，Cloudflare 把所有新域名默认 block AI crawler。<strong>截至 2026-05，全网约 2.5M+ 站点（约 20% 公网）启用 CF managed AI block。OpenAI 配合度最高，其他厂商大多观望。</strong></p>
+
+  <h3>时间线</h3>
+  <table>
+    <thead><tr><th>日期</th><th>事件</th></tr></thead>
+    <tbody>
+      <tr><td>2024 年</td><td>Cloudflare 推出 AI Audit dashboard（免费），可视化哪些 AI bot 在抓你的站</td></tr>
+      <tr><td><b>2025-07-01</b></td><td><b>"Content Independence Day"</b>：默认 block + pay-per-crawl 私有 beta 上线</td></tr>
+      <tr><td>2025-08-04</td><td>Cloudflare 公开调查 Perplexity 使用 stealth crawler；CEO 公开 calling out</td></tr>
+      <tr><td>2025-08-28</td><td>AI Audit 改名为 <b>AI Crawl Control</b>；引入可配置的 HTTP 402 响应</td></tr>
+      <tr><td>2025-09-26</td><td>Cloudflare 推出 "AI Index"——为客户域名自动生成 AI 优化的 search index、MCP server、LLMs.txt、search API</td></tr>
+      <tr><td>2025-12</td><td>2.5M+ 网站启用 CF 管理的 robots.txt（禁止所有 AI 训练）</td></tr>
+    </tbody>
+  </table>
+
+  <h3>已签约的发布商</h3>
+  <p>Associated Press、TIME、Condé Nast、Stack Overflow、Quora、BuzzFeed</p>
+
+  <h3>2024-05 → 2025-05 AI bot 流量变化（Cloudflare Radar）</h3>
+  <table>
+    <thead><tr><th>Bot</th><th>2024-05 占比</th><th>2025-05 占比</th><th>增长</th></tr></thead>
+    <tbody>
+      <tr><td>GPTBot</td><td>2.2%</td><td>7.7%</td><td><span class="pill good">+305%</span></td></tr>
+      <tr><td>ClaudeBot</td><td>11.7%</td><td>5.4%</td><td><span class="pill warn">-46%</span></td></tr>
+      <tr><td>Bytespider</td><td>22.8%</td><td>2.9%</td><td><span class="pill bad">-85%</span></td></tr>
+      <tr><td>ChatGPT-User</td><td>0.1%</td><td>1.3%</td><td><span class="pill good">+2,825%</span></td></tr>
+      <tr><td>Meta-ExternalAgent</td><td>—</td><td>显著</td><td>新增</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <b>关键趋势：</b>训练 bot 增速放缓（站点 block 率上升），<b>用户 fetch bot 爆发增长</b>——
+    用户主动让 AI 去抓页面正在快速接管 AI 抓取的主流量。
+  </p>
+
+  <h3>Pay-per-crawl 技术机制</h3>
+  <ul>
+    <li>用 Web Bot Auth（IETF 草案，加密签名身份）防 spoofing</li>
+    <li>WAF 规则在现有 bot management 之后执行 Allow / Charge 决策</li>
+    <li>当前 beta 阶段，未公开费率范围</li>
+    <li>CF CEO 透露"考虑发行自己的 stablecoin"作为支付层</li>
+  </ul>
+</section>
+
+<!-- ============================================================
+     10. JS RENDERING
+     ============================================================ -->
+<section id="js-render">
+  <h2><span class="num">10</span> JS 渲染能力对比</h2>
+  <p class="tldr">只有 Googlebot 是真正全量 evergreen Chromium 渲染。<strong>主流 AI 爬虫全部不渲染 JS（Vercel 2025-12 实测）</strong>。任何想被 Google 之外的引擎或 AI 可靠索引的项目，SSR / SSG 是硬要求。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>引擎 / Bot</th>
+        <th>现代 SPA（Vue / React）</th>
+        <th>渲染机制</th>
+        <th>实测建议</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>Googlebot</b></td>
+        <td><span class="pill good">能</span></td>
+        <td>evergreen Chromium，WRS 二阶段：先抓 HTML → 排队渲染 → 索引</td>
+        <td>仍建议 SSR / SSG，渲染队列有延迟，cache-busting 参数会吃 crawl budget</td>
+      </tr>
+      <tr>
+        <td><b>Bingbot</b></td>
+        <td><span class="pill warn">半能</span></td>
+        <td>有渲染但能力弱于 Googlebot；文档明确 rich media 可能漏抓导航</td>
+        <td>必须 SSR + 给 down-level HTML 兜底</td>
+      </tr>
+      <tr>
+        <td><b>YandexBot</b></td>
+        <td><span class="pill warn">半能（β）</span></td>
+        <td>Webmaster 控制台手动开 "Recommend rendering" 才会强制执行</td>
+        <td>默认认为不渲染；SSR 是最稳路径</td>
+      </tr>
+      <tr>
+        <td><b>DuckDuckBot / DuckAssistBot</b></td>
+        <td><span class="pill bad">基本不能</span></td>
+        <td>继承 Bing 限制 + 自身 RAG 流不渲染</td>
+        <td>同 Bing：必须 SSR</td>
+      </tr>
+      <tr>
+        <td><b>Brave Search bot</b></td>
+        <td><span class="pill good">能</span></td>
+        <td>爬取阶段处理 JS（API 不暴露 raw HTML）</td>
+        <td>一般 SSR 就够</td>
+      </tr>
+      <tr>
+        <td><b>Yeti（Naver）</b></td>
+        <td><span class="pill bad">不能</span></td>
+        <td>文档反对 React / Vue 重 JS</td>
+        <td>必须 SSR / 静态 HTML，否则等于不被索引</td>
+      </tr>
+      <tr>
+        <td><b>SeznamBot</b></td>
+        <td><span class="pill bad">不能</span></td>
+        <td>不渲染</td>
+        <td>必须 SSR / 预渲染</td>
+      </tr>
+      <tr>
+        <td><b>MojeekBot / Marginalia</b></td>
+        <td><span class="pill bad">不能</span></td>
+        <td>不渲染</td>
+        <td>必须 raw HTML</td>
+      </tr>
+      <tr>
+        <td><b>Baiduspider</b></td>
+        <td><span class="pill warn">半能</span></td>
+        <td><code>Baiduspider-render/2.0</code> 单独执行 JS（自 2017 起），但渲染抓取频次远低于普通抓取</td>
+        <td>重 JS SPA 必须 SSR / 预渲染</td>
+      </tr>
+      <tr>
+        <td><b>360Spider / Sogou / YisouSpider</b></td>
+        <td><span class="pill bad">弱</span></td>
+        <td>未明确公布，社区反馈对 SPA 友好度低</td>
+        <td>必须 SSR / 静态 HTML</td>
+      </tr>
+      <tr>
+        <td><b>Bytespider</b></td>
+        <td><span class="pill warn">部分支持</span></td>
+        <td>对深 SPA 友好度一般</td>
+        <td>SSR 优先</td>
+      </tr>
+      <tr style="background: #fef3c7;">
+        <td><b>主流 AI bot</b><br>（GPTBot · ChatGPT-User · ClaudeBot · PerplexityBot 等）</td>
+        <td><span class="pill bad">全不渲染</span></td>
+        <td>Vercel 2025-12 实测：主流 AI crawlers 全军不渲染 JS</td>
+        <td>SSR / 静态 HTML 是唯一路径，否则 GEO 完全无效</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout bad">
+    <div class="callout-title">ai-feeds 现状对照</div>
+    <p>
+      Dashboard 是 React + Vite 纯 SPA，初始 HTML 几乎只有 <code>&lt;div id="root"&gt;&lt;/div&gt;</code>。
+      4 个内容源（X / GH / PH / ClawHub）的 item 全部靠 client-side fetch <code>/api/items</code> 才填出来。
+    </p>
+    <p>
+      意味着：除了 Googlebot 能勉强渲染（且二阶段延迟），<b>其他搜索引擎（含 Bingbot 半能）和所有 AI 爬虫看到的都是空白页</b>。
+      24h GEO 数据能跑出 200+ AI bot 抓取的唯一原因是——这些 AI bot 即使看到空白也照样抓了，
+      但<b>抓到的内容主体是空</b>，引用质量为零。
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================
+     11. CONTRADICTIONS
+     ============================================================ -->
+<section id="contradictions">
+  <h2><span class="num">11</span> 矛盾点与模糊点</h2>
+  <p class="tldr">这些是调研中没有得到一致答案的地方。诚实标注，避免后续做计划时基于错误前提。</p>
+
+  <ol>
+    <li><b>「百度对未备案站不收录」是流言还是事实？</b>百度官方文档从未直接说"未备案不收录"，但 VIP 体系硬条件就是 ICP 备案。结论取决于"如何定义不收录"：完全 0 收录 = 流言；显著降权且收录不稳定 = 事实。本调研采用后者。</li>
+    <li><b>360 与"必须备案才收录"。</b>多数 SEO 文章说"360 基本只认备案域名"，官方文档无明示——这是社区共识与政策硬规定的差距。</li>
+    <li><b>Bytespider 是否遵守 robots.txt。</b>CrawlerCheck 标注 "Respects robots.txt: Yes"，但 ai-robots-txt 开源项目、Servebolt、HAProxy 多次报告它在 list 形式 robots 中会忽略。<b>实际操作建议视作"半遵守"</b>，单独写 block section 才有效。</li>
+    <li><b>国内 AI 爬虫 UA 缺乏公开信息。</b>8 家中国主流厂商未公开训练专用爬虫 UA，无法确认它们的训练数据完全来自公开数据集还是有私下抓取。Defense News 2026-04 评论文章指出，由于 GFW 限制，中国 AI 训练数据被"修剪" + 大量 AI 生成内容回流（model collapse），但这是西方视角，国内厂商未公开回应。</li>
+    <li><b>PetalBot 归属类别。</b>Cloudflare 把它归为 "AI Crawler"，部分中文资料把它归为传统搜索爬虫。两种说法都对——PetalBot 既支持 Petal Search，也用于盘古大模型训练。</li>
+    <li><b>DeepSeek 自爬规模成谜。</b>DeepSeek 公开技术报告（V3 / R1）只披露训练数据量（14.8T tokens），未披露数据采集方式。是否大量自爬未知；其联网搜索调用第三方 API 而非自建索引。</li>
+    <li><b>「备案号未展示导致 AI 平台降权」无算法证据。</b>所有公开材料都只说工信部要求展示备案号，没有任何 AI 平台明文将备案号作为内容质量信号。但内容投放到无备案站点的 AI 收录率显著低（5-15%），这是平台权威度的间接惩罚，不是算法对备案号的直接判断。</li>
+    <li><b>Bingbot IP JSON 文件维护频率。</b>WebFetch 拉到的 JSON 缓存版本含 28 个 ipv4Prefix，但 Bing 实际持续维护。生产使用必须每天拉一次以获取增量，不能依赖一次性快照。</li>
+    <li><b>DuckDuckBot 自身爬取规模。</b>DDG 长期描述模糊。"超过 400 个源"是市场宣传话术。社区共识自家 crawler 占比可能不足 5%，但<b>没有 DDG 官方披露的具体数字</b>。</li>
+    <li><b>Brave Search 是否真的覆盖 40B 页。</b>Brave 自报数字，但<b>没有第三方独立审计</b>。</li>
+    <li><b>Yandex 在西方流量的实际重要性。</b>全球搜索市占约 2.5%，但绝大部分集中在俄罗斯及独联体。如果目标受众不含俄语市场，Yandex 优先级实际上很低。</li>
+    <li><b>IndexNow 的"撤销 / 重新提交"语义。</b>协议文档没覆盖"提交错了想撤回"。给 deleted URL 不等于强制 deindex，引擎实际上还要重 crawl 验证。如果错提交了私密 URL，<b>唯一兜底是 webmaster console 的 URL removal</b>。</li>
+    <li><b>Google AI Mode 是否会启用独立 UA。</b>2025-12 Search Engine Land 报道 Google "正在讨论"为 AI Overviews 加专门控件，但截至 2026-05 没有公开发布。<b>未来 6-12 个月可能有变化</b>。</li>
+  </ol>
+</section>
+
+<!-- ============================================================
+     12. SOURCES
+     ============================================================ -->
+<section id="sources">
+  <h2><span class="num">12</span> 来源 URL 索引</h2>
+  <p class="tldr">按主题分组，标注权威等级（S = 官方权威；A = 独立技术权威；B = 社区实战）。</p>
+
+  <h3>OpenAI / GPTBot</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://developers.openai.com/api/docs/bots" target="_blank">OpenAI Bots 官方文档</a></li>
+    <li>A · <a href="https://www.searchengineworld.com/tracking-openai-chatgpt-bots-a-fresh-guide-for-webmasters-site-owners-and-seos" target="_blank">SearchEngineWorld: tracking OpenAI bots</a></li>
+    <li>A · <a href="https://ppc.land/openai-revises-chatgpt-crawler-documentation-with-significant-policy-changes/" target="_blank">PPC Land: OpenAI 2025-12 政策修改</a></li>
+    <li>A · <a href="https://www.amicited.com/blog/gptbot-vs-oai-searchbot/" target="_blank">AmicITED: GPTBot vs OAI-SearchBot</a></li>
+  </ul>
+
+  <h3>Anthropic / ClaudeBot</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://privacy.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler" target="_blank">Anthropic 官方说明</a></li>
+    <li>A · <a href="https://searchengineland.com/anthropic-claude-bots-470171" target="_blank">SEL: Anthropic Claude bots</a></li>
+    <li>A · <a href="https://www.searchenginejournal.com/anthropics-claude-bots-make-robots-txt-decisions-more-granular/568253/" target="_blank">SEJ: Claude bots robots.txt 细化</a></li>
+  </ul>
+
+  <h3>Perplexity 与 Cloudflare 冲突</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://blog.cloudflare.com/perplexity-is-using-stealth-undeclared-crawlers-to-evade-website-no-crawl-directives/" target="_blank">CF Blog: Perplexity stealth crawlers</a></li>
+    <li>A · <a href="https://techcrunch.com/2025/08/04/perplexity-accused-of-scraping-websites-that-explicitly-blocked-ai-scraping/" target="_blank">TechCrunch: Perplexity scraping accusation</a></li>
+    <li>A · <a href="https://techcrunch.com/2025/08/05/some-people-are-defending-perplexity-after-cloudflare-named-and-shamed-it/" target="_blank">TechCrunch: 部分人为 Perplexity 辩护</a></li>
+    <li>A · <a href="https://www.businessinsider.com/ai-data-trap-catches-perplexity-impersonating-google-cloudflare-2025-8" target="_blank">BI: Perplexity 伪装 Google</a></li>
+    <li>A · <a href="https://www.pcmag.com/news/cloudflare-perplexity-ai-acts-like-north-korean-hackers-ignores-scraping" target="_blank">PCMag: CF CEO 言论</a></li>
+  </ul>
+
+  <h3>Google</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://developers.google.com/search/docs/crawling-indexing/overview-google-crawlers" target="_blank">Google crawler 总览</a></li>
+    <li>S · <a href="https://developers.google.com/crawling/docs/crawlers-fetchers/verify-google-requests" target="_blank">IP 验证 + reverse DNS</a></li>
+    <li>S · <a href="https://developers.google.com/static/search/apis/ipranges/googlebot.json" target="_blank">Googlebot IP JSON</a></li>
+    <li>S · <a href="https://developers.google.com/search/docs/appearance/ai-features" target="_blank">AI Overviews 站长指南</a></li>
+    <li>A · <a href="https://searchengineland.com/google-extended-crawler-432636" target="_blank">SEL: Google-Extended 上线</a></li>
+    <li>A · <a href="https://searchengineland.com/google-may-give-sites-a-way-to-opt-out-of-ai-search-generative-features-468063" target="_blank">SEL: 2025 AI Overviews opt-out 讨论</a></li>
+  </ul>
+
+  <h3>Bing</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://www.bing.com/webmasters/help/Verify-Bingbot-2195837f" target="_blank">验证 Bingbot</a></li>
+    <li>S · <a href="https://www.bing.com/toolbox/bingbot.json" target="_blank">官方 IP JSON</a></li>
+    <li>S · <a href="https://www.bing.com/indexnow" target="_blank">IndexNow 入口</a></li>
+    <li>S · <a href="https://blogs.bing.com/webmaster/october-2021/IndexNow-Instantly-Index-your-web-content-in-Search-Engines" target="_blank">IndexNow 发布</a></li>
+  </ul>
+
+  <h3>Yandex / DuckDuckGo / Brave / Naver / Seznam / Mojeek / Marginalia</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://yandex.com/support/webmaster/en/robot-workings/check-yandex-robots" target="_blank">Yandex bots</a></li>
+    <li>S · <a href="https://yandex.com/support/webmaster/en/yandex-indexing/rendering" target="_blank">Yandex JS 渲染</a></li>
+    <li>S · <a href="https://duckduckgo.com/duckduckgo-help-pages/results/sources/" target="_blank">DDG 结果来源</a></li>
+    <li>S · <a href="https://duckduckgo.com/duckduckgo-help-pages/results/duckassistbot" target="_blank">DuckAssistBot 文档</a></li>
+    <li>S · <a href="https://search.brave.com/help/brave-search-crawler" target="_blank">Brave Search crawler</a></li>
+    <li>S · <a href="https://searchadvisor.naver.com/" target="_blank">Naver Search Advisor</a></li>
+    <li>S · <a href="https://www.indexnow.org/searchengines" target="_blank">IndexNow 参与方列表</a></li>
+    <li>A · <a href="https://about.marginalia-search.com/article/api/" target="_blank">Marginalia API</a></li>
+  </ul>
+
+  <h3>Apple / Meta / Amazon / ByteDance / Common Crawl / Cohere / Mistral / xAI / DeepSeek</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://support.apple.com/en-us/119829" target="_blank">Applebot 官方</a></li>
+    <li>A · <a href="https://www.wired.com/story/applebot-extended-apple-ai-scraping/" target="_blank">Wired: Applebot-Extended</a></li>
+    <li>S · <a href="https://developers.facebook.com/docs/sharing/webmasters/web-crawlers/" target="_blank">Meta crawlers 官方</a></li>
+    <li>A · <a href="https://www.businessinsider.com/meta-web-crawler-bots-robots-txt-ai-2024-8" target="_blank">BI: Meta crawlers</a></li>
+    <li>S · <a href="https://developer.amazon.com/amazonbot" target="_blank">Amazonbot</a></li>
+    <li>A · <a href="https://www.haproxy.com/blog/nearly-90-of-our-ai-crawler-traffic-is-from-tiktok-parent-bytedance-lessons-learned" target="_blank">HAProxy: 90% AI 流量来自 ByteDance</a></li>
+    <li>A · <a href="https://github.com/ai-robots-txt/ai.robots.txt/issues/108" target="_blank">ai-robots-txt: Bytespider 不守 robots</a></li>
+    <li>S · <a href="https://commoncrawl.org/ccbot" target="_blank">Common Crawl CCBot</a></li>
+    <li>S · <a href="https://docs.mistral.ai/robots" target="_blank">Mistral robots</a></li>
+    <li>A · <a href="https://crawlercheck.com/directory/operators/deepseek" target="_blank">DeepSeek crawler check</a></li>
+  </ul>
+
+  <h3>Cloudflare AI Audit / Pay-per-crawl</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://blog.cloudflare.com/introducing-pay-per-crawl/" target="_blank">CF: Pay-per-crawl</a></li>
+    <li>S · <a href="https://blog.cloudflare.com/from-googlebot-to-gptbot-whos-crawling-your-site-in-2025/" target="_blank">CF: 2025 谁在爬你的站</a></li>
+    <li>S · <a href="https://developers.cloudflare.com/ai-crawl-control/reference/bots/" target="_blank">CF AI Crawl Control bot 列表</a></li>
+    <li>S · <a href="https://developers.cloudflare.com/bots/concepts/bot/verified-bots/" target="_blank">CF Verified Bots Policy</a></li>
+    <li>A · <a href="https://www.niemanlab.org/2025/07/cloudflare-will-block-ai-scraping-by-default-and-launches-new-pay-per-crawl-marketplace/" target="_blank">Nieman: 2025-07-01 Content Independence Day</a></li>
+  </ul>
+
+  <h3>百度 / 360 / 搜狗 / 神马 / 头条搜索（中国）</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://ziyuan.baidu.com/college/articleinfo?id=1002" target="_blank">百度 UA 识别</a></li>
+    <li>S · <a href="https://ziyuan.baidu.com/sitemap/index" target="_blank">百度普通收录</a></li>
+    <li>S · <a href="https://ziyuan.baidu.com/wiki/990" target="_blank">Baiduspider-render 公告</a></li>
+    <li>B · <a href="https://blog.renfei.net/posts/1626402130325676113" target="_blank">2023-11-30 权限回收实测</a></li>
+    <li>S · <a href="https://zhanzhang.so.com/" target="_blank">360 站长平台</a></li>
+    <li>S · <a href="https://www.so.com/help/help_3_2.html" target="_blank">360 robots 协议</a></li>
+    <li>S · <a href="https://www.sogou.com/docs/help/webmasters.htm" target="_blank">搜狗 webmasters</a></li>
+    <li>S · <a href="https://zhanzhang.sogou.com/index.php/help/spider" target="_blank">搜狗 spider 帮助</a></li>
+    <li>S · <a href="https://zhanzhang.sm.cn/" target="_blank">神马站长</a></li>
+    <li>S · <a href="https://zhanzhang.toutiao.com/" target="_blank">头条搜索站长</a></li>
+    <li>A · <a href="https://www.landiannews.com/archives/109642.html" target="_blank">蓝点网: CF 2025 AI 爬虫合规度评估</a></li>
+    <li>A · <a href="https://aicw.io/ai-crawler-bot/bytespider/" target="_blank">aicw.io: Bytespider 完整指南</a></li>
+    <li>B · <a href="https://www.baiyangseo.com/blog/1112.html" target="_blank">白杨 SEO: AI 平台内容来源解析</a></li>
+  </ul>
+
+  <h3>ICP 备案</h3>
+  <ul class="src-list">
+    <li>S · <a href="https://beian.miit.gov.cn" target="_blank">工信部 ICP 备案系统</a></li>
+    <li>S · <a href="https://help.aliyun.com/zh/icp-filing/basic-icp-service/support/for-the-record-process-faq" target="_blank">阿里云 ICP 备案 FAQ</a></li>
+    <li>S · <a href="https://edgeone.ai/zh/blog/details/the-ultimate-guide-to-icp-filing" target="_blank">腾讯云 EdgeOne ICP 指南</a></li>
+    <li>S · <a href="https://ai.baidu.com/ai-doc/WENXINWORKSHOP/ym9869tph" target="_blank">百度 AI 平台已备案大模型清单</a></li>
+    <li>B · <a href="https://www.netokok.com/sys-nd/165.html" target="_blank">2026 ICP 备案最新政策</a></li>
+    <li>B · <a href="https://www.miwinfo.com/news/wangzhanseoyouhua/1139.html" target="_blank">深圳米维: 未备案搜索影响</a></li>
+    <li>B · <a href="https://1991421.cn/2025/05/02/baidu-url-submission/" target="_blank">Alan H: API 提交百度收录实战</a></li>
+    <li>B · <a href="https://www.kufanyun.com/ask/7862.html" target="_blank">CF CDN 是否必须备案</a></li>
+  </ul>
+
+  <h3>JS 渲染 / 行业综述 / GEO 流量追踪 / 学术</h3>
+  <ul class="src-list">
+    <li>A · <a href="https://collaborator.pro/blog/javascript-seo-optimize-spa-sites" target="_blank">各引擎 JS 能力实测 2025-2026</a></li>
+    <li>A · <a href="https://www.searchenginejournal.com/chatgpt-googlebot-crawl-data-alliai-spa/570885/" target="_blank">SEJ: Vercel 实证 AI crawlers 不渲染</a></li>
+    <li>A · <a href="https://www.searchviu.com/en/ai-crawlers-javascript-rendering/" target="_blank">AI crawler JS 综述</a></li>
+    <li>A · <a href="https://www.tryprofound.com/resources/articles/generative-engine-optimization-geo-guide-2025" target="_blank">Profound: GEO 10-step Framework 2025</a></li>
+    <li>A · <a href="https://www.frase.io/blog/what-is-generative-engine-optimization-geo" target="_blank">Frase: GEO 完整指南 2026</a></li>
+    <li>A · <a href="https://www.orbitmedia.com/blog/track-ai-traffic-ga4/" target="_blank">Orbit: GA4 追踪 AI 流量</a></li>
+    <li>A · <a href="https://arxiv.org/html/2509.08919v1" target="_blank">arXiv: Generative Engine Optimization</a></li>
+    <li>A · <a href="https://arxiv.org/html/2411.15091v2" target="_blank">arXiv: Aggarwal et al. AI 爬虫保护</a></li>
+    <li>A · <a href="https://www.xiaojingliao.com/uploads/9/7/0/2/97024238/ccs2025_llmbot_compliance.pdf" target="_blank">CCS 2025: robots.txt 合规度测量</a></li>
+  </ul>
+
+  <p class="footnote">完整 URL 列表（去重后约 80+ 条）由 4 个并行 agent 各自调研后整合。S / A / B 权威等级仅作参考，实际引用建议交叉对照原文。</p>
+</section>
+
+<hr>
+<p style="text-align: center; color: var(--muted); font-size: 12px; margin: 40px 0 0;">
+本报告生成于 2026-05-07 · ai-feeds.com SEO / GEO 战略调研 · 仅供内部讨论<br>
+路径：<code>docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html</code>
+</p>
+</main>
+</div>
+
+<button class="toc-toggle" id="tocToggle" aria-label="切换目录" title="切换目录 (T)">
+  <span class="icon-close" aria-hidden="true">◀</span>
+  <span class="icon-open" aria-hidden="true">☰</span>
+</button>
+
+<script>
+(function() {
+  var KEY = 'ai-feeds-research-toc-collapsed';
+  var layout = document.getElementById('layout');
+  var btn = document.getElementById('tocToggle');
+  if (!layout || !btn) return;
+
+  function apply(collapsed) {
+    layout.classList.toggle('collapsed', collapsed);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+  }
+
+  // restore
+  try {
+    apply(localStorage.getItem(KEY) === '1');
+  } catch (e) { /* no storage */ }
+
+  btn.addEventListener('click', function() {
+    var collapsed = !layout.classList.contains('collapsed');
+    apply(collapsed);
+    try { localStorage.setItem(KEY, collapsed ? '1' : '0'); } catch (e) {}
+  });
+
+  // keyboard shortcut: T
+  document.addEventListener('keydown', function(e) {
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (e.key === 't' || e.key === 'T') {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      btn.click();
+      e.preventDefault();
+    }
+  });
+})();
+</script>
+</body>
+</html>

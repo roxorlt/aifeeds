@@ -178,7 +178,8 @@ scraper 的 DOM 抓取无法可靠识别引用推文（X 把 quote card 的 /sta
 
 ## 前端 UX 规范
 
-**位置**：[docs/frontend-ux-guidelines.md](docs/frontend-ux-guidelines.md)
+**组件规范**：[docs/frontend-ux-guidelines.md](docs/frontend-ux-guidelines.md)（token / variant / 错误位置 / 模态结构）
+**设计决策**：[docs/design-handoff.md](docs/design-handoff.md)（品牌色 / HarmonyOS Sans SC 字体 / lucide 图标 / Logo / AppBar / 登录弹窗等）— **做 UI 改动前先读**
 
 **基线**：以 X List 卡片（`TweetCard.tsx`）的视觉风格为整站标准。GitHub 卡片 / Drawer / 弹窗 / 设置页 / 未来源都要向它对齐。
 
