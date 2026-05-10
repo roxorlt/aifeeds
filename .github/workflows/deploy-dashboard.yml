@@ -1,0 +1,76 @@
+name: Deploy Dashboard
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/deploy-dashboard.yml'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: '部署目标环境'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install deps
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Determine target
+        id: target
+        run: |
+          # 手动触发：inputs.env；push：main→prod，staging→staging
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET="${{ inputs.env }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            TARGET="prod"
+          else
+            TARGET="staging"
+          fi
+          # 注意：staging 域名 staging.ai-feeds.com 在独立项目 xlist-dashboard-staging
+          # prod 域名 ai-feeds.com 在 xlist-dashboard 项目，default branch = main
+          if [ "$TARGET" = "prod" ]; then
+            echo "project=xlist-dashboard" >> $GITHUB_OUTPUT
+            echo "branch=main" >> $GITHUB_OUTPUT
+            echo "url=https://ai-feeds.com" >> $GITHUB_OUTPUT
+          else
+            echo "project=xlist-dashboard-staging" >> $GITHUB_OUTPUT
+            echo "branch=main" >> $GITHUB_OUTPUT
+            echo "url=https://staging.ai-feeds.com" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to ${{ steps.target.outputs.project }}
+        working-directory: dashboard
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler pages deploy dist \
+            --project-name=${{ steps.target.outputs.project }} \
+            --branch=${{ steps.target.outputs.branch }} \
+            --commit-message="${{ github.sha }}" \
+            --commit-dirty=true
+          echo "::notice::Deployed to ${{ steps.target.outputs.url }}"
