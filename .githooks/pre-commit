@@ -1,0 +1,19 @@
+#!/bin/bash
+# Pre-commit hook: gitleaks 扫 staged 改动，发现泄密 reject commit
+# 启用：git config core.hooksPath .githooks (跑一次 scripts/setup-git-hooks.sh)
+# 装 gitleaks：brew install gitleaks
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "⚠️  gitleaks not installed; skipping secret scan"
+  echo "   install: brew install gitleaks"
+  exit 0
+fi
+
+# protect 模式：只扫 staged（不动 history），快
+if ! gitleaks protect --staged --no-banner --redact; then
+  echo ""
+  echo "❌ gitleaks 检测到 staged 改动里有疑似 secret，commit 中断"
+  echo "   把可疑值挪到 .secrets/ (gitignored) 后重新 stage"
+  echo "   误报：在文件里加 # gitleaks:allow 注释，或改 .gitleaks.toml"
+  exit 1
+fi

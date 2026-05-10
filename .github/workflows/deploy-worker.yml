@@ -1,0 +1,61 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: '部署目标环境'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler@latest
+
+      - name: Determine env
+        id: env
+        run: |
+          # 手动触发：用 inputs.env
+          # push 触发：main → prod，staging → staging
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET="${{ inputs.env }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            TARGET="prod"
+          else
+            TARGET="staging"
+          fi
+          if [ "$TARGET" = "prod" ]; then
+            echo "wrangler_env=" >> $GITHUB_OUTPUT
+            echo "label=prod (xlist-api)" >> $GITHUB_OUTPUT
+          else
+            echo "wrangler_env=--env staging" >> $GITHUB_OUTPUT
+            echo "label=staging (xlist-api-staging)" >> $GITHUB_OUTPUT
+          fi
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+
+      - name: Deploy to ${{ steps.env.outputs.label }}
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy ${{ steps.env.outputs.wrangler_env }}
