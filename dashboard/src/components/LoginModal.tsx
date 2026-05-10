@@ -9,6 +9,12 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widg
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// 微信内置浏览器（WeChat WKWebView）人机校验经常过不去，提前提示用户外部浏览器打开
+function isWeChatBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /MicroMessenger/i.test(navigator.userAgent);
+}
+
 declare global {
   interface Window {
     turnstile?: {
@@ -17,9 +23,14 @@ declare global {
         opts: {
           sitekey: string;
           callback?: (token: string) => void;
-          'error-callback'?: () => void;
+          'error-callback'?: (code?: string) => void;
           'expired-callback'?: () => void;
           theme?: 'auto' | 'light' | 'dark';
+          size?: 'normal' | 'compact' | 'flexible';
+          appearance?: 'always' | 'execute' | 'interaction-only';
+          retry?: 'auto' | 'never';
+          'retry-interval'?: number;
+          'refresh-expired'?: 'auto' | 'manual' | 'never';
         },
       ) => string;
       reset: (widgetId?: string) => void;
@@ -94,18 +105,31 @@ export function LoginModal() {
         const id = window.turnstile.render(turnstileContainerRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           theme: 'auto',
+          // 移动端兼容（2026-05-09 修 300031）：
+          // - size:'flexible' 比 normal 在窄屏渲染更稳，避免 widget 因布局挤压触发 300031
+          // - retry:'auto' + retry-interval 短窗自动重试，挑战 token 临时拿不到时不阻塞用户
+          // - refresh-expired:'auto' token 过期自动刷新，避免用户停留过久后第一次点发送验证码就失败
+          size: 'flexible',
+          retry: 'auto',
+          'retry-interval': 8000,
+          'refresh-expired': 'auto',
           callback: (token: string) => {
             setTurnstileToken(token);
             setTurnstileError('');
           },
           'error-callback': (code?: string) => {
             setTurnstileToken(null);
-            // 600010 = sitekey 配置 / hostname 未授权；其他保留原始码，便于反馈
-            const friendly =
-              code === '600010'
-                ? '人机校验配置异常（站点 hostname 未在 Cloudflare Turnstile 授权列表内）。请联系管理员。'
-                : `人机校验失败（错误码 ${code || 'unknown'}），请刷新重试。`;
-            setTurnstileError(friendly);
+            // 错误码翻译表 — 用户看得懂的中文。完整列表见 Cloudflare Turnstile 文档
+            // https://developers.cloudflare.com/turnstile/troubleshooting/client-side-errors/
+            const c = String(code || '');
+            const map: Record<string, string> = {
+              '600010': '人机校验配置异常（域名未在 Cloudflare Turnstile 授权列表内），请联系管理员。',
+              '300010': '人机校验已超时，请刷新页面重试。',
+              '300020': '人机校验加载失败（网络受限）。如果开启了网络代理，请尝试关闭后重试。',
+              '300030': '人机校验失败，请刷新页面重试。',
+              '300031': '人机校验 token 异常，已自动重试。如果反复失败，请尝试刷新页面或更换浏览器；微信内置浏览器 / WebView 中可能不稳定。',
+            };
+            setTurnstileError(map[c] || `人机校验失败（错误码 ${c || 'unknown'}），请刷新页面重试。`);
           },
           'expired-callback': () => setTurnstileToken(null),
         });
@@ -252,6 +276,28 @@ export function LoginModal() {
         </div>
         {phoneError && (
           <p className="mt-1 text-xs text-rose-600">{phoneError}</p>
+        )}
+
+        {/* WeChat 内置浏览器人机校验大概率过不去，提示用 Safari/系统浏览器 */}
+        {isWeChatBrowser() && (
+          <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <div className="font-medium mb-1">请用 Safari 或系统浏览器打开</div>
+            <div className="text-amber-800">
+              微信内置浏览器对人机校验不友好，登录大概率失败。请点击右上角「···」→ 选择
+              <span className="font-medium">「在浏览器打开」</span>，再继续登录。
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard?.writeText(window.location.href).then(() => {
+                  toast.success('链接已复制，可粘贴到 Safari 打开');
+                }).catch(() => {});
+              }}
+              className="mt-2 rounded border border-amber-400 bg-white px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100"
+            >
+              复制本页链接
+            </button>
+          </div>
         )}
 
         {/* Turnstile widget */}
