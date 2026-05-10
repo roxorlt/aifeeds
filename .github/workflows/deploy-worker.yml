@@ -28,9 +28,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
 
-      - name: Install wrangler
-        run: npm install -g wrangler@latest
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
 
       - name: Determine env
         id: env
@@ -58,4 +61,5 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy ${{ steps.env.outputs.wrangler_env }}
+        # 用项目本地的 wrangler（package.json devDependency），保证版本和 lockfile 一致
+        run: npx wrangler deploy ${{ steps.env.outputs.wrangler_env }}
