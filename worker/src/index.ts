@@ -490,12 +490,18 @@ export default {
 
 // ─── POST /api/ingest ──────────────────────────────────────────
 
-interface IngestPayload {
+export interface IngestPayload {
   source?: { id?: string; cursor?: string; last_success_at?: string };
   items: ItemInput[];
 }
 
-interface ItemInput {
+export interface IngestResult {
+  inserted: number;
+  updated: number;
+  errors: { source_id: string; error: string }[];
+}
+
+export interface ItemInput {
   source_type: string;
   source_id: string;
   source_ref?: string;
@@ -515,29 +521,26 @@ interface ItemInput {
   extra?: unknown;
 }
 
-async function handleIngest(request: Request, env: Env): Promise<Response> {
-  // Auth check
-  const auth = request.headers.get('Authorization');
-  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
-    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
-  }
-
-  const body = await request.json<IngestPayload>();
-  if (!body.items || !Array.isArray(body.items)) {
-    return jsonResponse({ error: 'items array required' }, 400, request, env);
-  }
-  if (body.items.length > 500) {
-    return jsonResponse({ error: 'Max 500 items per request' }, 400, request, env);
+/**
+ * Internal ingest entry — DB write logic, callable from worker code (e.g. PH cron)
+ * without HTTP self-fetch. No auth check (caller is trusted); HTTP handler
+ * still enforces INGEST_TOKEN. Returns counters + per-item errors.
+ *
+ * Behavior identical to former handleIngest body (verbatim cut/paste, no logic
+ * change). GitHub metrics snapshot is included here so source_type='github'
+ * callers (whether via HTTP or cron) get consistent treatment.
+ */
+export async function ingestItems(env: Env, items: ItemInput[]): Promise<IngestResult> {
+  if (items.length > 500) {
+    throw new Error('Max 500 items per call');
   }
 
   let inserted = 0;
-  let updated = 0;
   const errors: { source_id: string; error: string }[] = [];
 
-  // Process in batches of 100 (D1 batch limit)
   const BATCH_SIZE = 100;
-  for (let i = 0; i < body.items.length; i += BATCH_SIZE) {
-    const batch = body.items.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const batch = items.slice(i, i + BATCH_SIZE);
     const stmts: D1PreparedStatement[] = [];
 
     for (const item of batch) {
@@ -664,7 +667,30 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Update source cursor if provided
+  // inserted counter includes both inserts and updates (D1 limitation in upsert).
+  return { inserted, updated: 0, errors };
+}
+
+async function handleIngest(request: Request, env: Env): Promise<Response> {
+  // Auth check
+  const auth = request.headers.get('Authorization');
+  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
+  }
+
+  const body = await request.json<IngestPayload>();
+  if (!body.items || !Array.isArray(body.items)) {
+    return jsonResponse({ error: 'items array required' }, 400, request, env);
+  }
+
+  let result: IngestResult;
+  try {
+    result = await ingestItems(env, body.items);
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message }, 400, request, env);
+  }
+
+  // Update source cursor if provided (HTTP-only — internal callers don't need this)
   if (body.source?.id) {
     try {
       await env.DB.prepare(`
@@ -685,9 +711,7 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Adjust counts: inserted includes both inserts and updates from upsert
-  // For accurate counts we'd need to check pre-existence, but for MVP this is fine
-  return jsonResponse({ inserted, updated: 0, errors }, 200, request, env);
+  return jsonResponse(result, 200, request, env);
 }
 
 // ─── GET /api/items ────────────────────────────────────────────
