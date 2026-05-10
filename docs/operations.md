@@ -468,6 +468,24 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 
 **完整设计文档**：[`docs/plans/2026-05-06-email-auth-design.md`](plans/2026-05-06-email-auth-design.md)
 
+### 4. 运维 Token 速查（claude session 跨设备共享用）
+
+> ⚠️ 这一节**只列 token 干啥用 / 在哪存 / 怎么再生**，绝不写 token 值。值在 `.secrets/` 目录（gitignored）。
+> 所有 token 都是**永不过期**的长期凭证，泄露/换设备时按下表「再生」步骤换。
+
+| Token | 存放路径 | 用途 | 给 claude / 工具的方式 | 再生步骤（compromised / 换设备） |
+|---|---|---|---|---|
+| **CF claude-ops** | `.secrets/cf-claude-ops.env` | wrangler 跑所有 CF 操作（部 worker / 部 pages / 改 secret / 跑 D1 / 改 KV / 改 R2） | `source .secrets/cf-claude-ops.env`，wrangler 自动认 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | CF Dashboard → 头像 → My Profile → API Tokens → 找名为「claude-ops」→ Roll/Delete → Create Token → Custom token，权限：`Workers Scripts:Edit` + `Cloudflare Pages:Edit` + `D1:Edit` + `Workers KV Storage:Edit` + `Workers R2 Storage:Edit`，资源：本账号，TTL：永不过期 |
+| **CF ops master** | `.secrets/cf-ops.env` | 管理 CF 账号本身（创建别的子 token / 看账户级元信息）— **不带具体资源 Edit 权限**，做不了 wrangler 操作 | 仅供创建子 token 时参考；日常用 claude-ops 即可 | CF Dashboard → 头像 → My Profile → API Tokens → 找现有 master token → Roll/Delete |
+| **GitHub PAT (claude-ops)** | `.secrets/gh-claude-ops.env` | 创建/管理 GitHub 私有仓 + 跑 GH Actions workflow | `source .secrets/gh-claude-ops.env`，gh cli + git + Octokit 自动认 `GITHUB_TOKEN` | github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → 找「claude-ops」→ Regenerate / Delete → Generate new token (classic)，scope：`repo` + `workflow`，过期：No expiration |
+| **prod INGEST_TOKEN** | CF Worker secret（不在本地） | scrapers / 运维脚本 push 数据到 prod worker `/api/ingest` + 触发 `/api/enrich/run` | wrangler secret 不可读取；要复制现值得去 1Password 或问用户 | wrangler 改：`echo "<NEW>" \| npx wrangler secret put INGEST_TOKEN`（注意：改这个会断所有依赖它的 scraper / 脚本，需要同步更新） |
+| **staging INGEST_TOKEN** | `.secrets/staging-ingest-token.txt` + CF staging worker secret | 同上，给 staging | 直接 `cat .secrets/staging-ingest-token.txt` 读用 | 改的话两边同步：`echo "<NEW>" \| npx wrangler secret put INGEST_TOKEN --env staging` + 改本地文件 |
+
+**约定**：
+- 任何新 token 都先存 `.secrets/`，用 env 变量名匹配工具默认（`CLOUDFLARE_API_TOKEN` / `GITHUB_TOKEN` / 等），调用方 `source` 一下即可
+- `.secrets/` 已 gitignored，不会进 git；后续接 GitHub 仓也安全
+- 文档里**只引用文件路径，不引用值**；提交 PR 时 review 务必检查无 token 字面量
+
 ### 5. Pages: `xlist-dashboard`
 
 - **公网地址**：
@@ -557,7 +575,7 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 - **输出**：写 Unix 时间戳到 `data/.next-scrape-at`
 - **触发**：每次 `main.py` 成功跑完在 `finally` 后调 `schedule_next(list_id)`
 - **参数来源**：`data/schedule_params.json`（由 `tune_schedule.py` 每周覆写，见 1b）。文件不存在或损坏时回退到 `schedule.py` 顶部 `DEFAULT_PARAMS`（threshold=0.15 / hot=1200s / target=10 / min=600 / max=3600）
-- **手动预览**：`XLIST_DATA_DIR=/Users/roxor/brain/30-projects/xlist-scraper python3 ~/.claude/skills/xlist-scraper/scripts/schedule.py <list_id>`
+- **手动预览**：`XLIST_DATA_DIR=/Users/roxor/brain/30-projects/aifeeds python3 ~/.claude/skills/xlist-scraper/scripts/schedule.py <list_id>`
 
 ### 1b. 周度自动调参（`tune_schedule.py`）
 
@@ -625,7 +643,7 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 ### 3. 本地数据目录
 
 ```
-/Users/roxor/brain/30-projects/xlist-scraper/data/
+/Users/roxor/brain/30-projects/aifeeds/data/
 ├── xlist.db                本地 SQLite（staging）
 ├── pages/                  分页抓取临时缓存（崩溃恢复）
 ├── ph/pages/               PH 抓取的产品页 HTML 快照（每个 product 一个，崩溃时复跑解析；定期人工清理）
@@ -805,10 +823,10 @@ cd worker && npx wrangler tail
 launchctl list | grep xlist-scraper
 
 # 看最近的 cron 日志（最后 30 行）
-tail -30 /Users/roxor/brain/30-projects/xlist-scraper/data/cron.log
+tail -30 /Users/roxor/brain/30-projects/aifeeds/data/cron.log
 
 # 看原始 stdout/stderr
-tail -50 /Users/roxor/brain/30-projects/xlist-scraper/data/launchd-stderr.log
+tail -50 /Users/roxor/brain/30-projects/aifeeds/data/launchd-stderr.log
 ```
 
 ---

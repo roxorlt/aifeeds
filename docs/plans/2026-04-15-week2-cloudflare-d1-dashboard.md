@@ -438,9 +438,9 @@ function useItemsFeed(sourceFilter?: string) {
   <key>StartInterval</key>
   <integer>21600</integer>  <!-- 6 小时 = 21600 秒 -->
   <key>StandardOutPath</key>
-  <string>/Users/roxor/brain/30-projects/xlist-scraper/data/youtube-cron.log</string>
+  <string>/Users/roxor/brain/30-projects/aifeeds/data/youtube-cron.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/roxor/brain/30-projects/xlist-scraper/data/youtube-cron.log</string>
+  <string>/Users/roxor/brain/30-projects/aifeeds/data/youtube-cron.log</string>
 </dict>
 </plist>
 ```

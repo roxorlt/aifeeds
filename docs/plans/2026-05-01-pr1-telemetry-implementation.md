@@ -16,9 +16,9 @@
 
 **Branch:** `feat/telemetry-and-anonymous-id`（已从 main 出，含 design doc commit `266f667`）
 
-**Worktree:** `/Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id`
+**Worktree:** `/Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id`
 
-**关联设计文档:** `/Users/roxor/brain/30-projects/xlist-scraper/docs/plans/2026-05-01-auth-system-design.md`
+**关联设计文档:** `/Users/roxor/brain/30-projects/aifeeds/docs/plans/2026-05-01-auth-system-design.md`
 
 ---
 
@@ -146,7 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at DESC);
 - [ ] **Step 3: 本地应用迁移**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --file=migrations/004-events-table.sql --local
 ```
 
@@ -171,7 +171,7 @@ npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE ty
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add worker/migrations/004-events-table.sql worker/schema.sql
 git commit -m "$(cat <<'EOF'
 feat(worker): events 表 schema (PR1 telemetry)
@@ -211,7 +211,7 @@ EOF
 - [ ] **Step 2: typecheck 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx tsc --noEmit
 ```
 
@@ -220,7 +220,7 @@ npx tsc --noEmit
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add worker/src/index.ts
 git commit -m "feat(worker): CORS 允许 X-Device-Id header
 
@@ -388,7 +388,7 @@ function jsonError(message: string, status: number, extra?: Record<string, unkno
 - [ ] **Step 2: typecheck 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx tsc --noEmit
 ```
 
@@ -397,7 +397,7 @@ npx tsc --noEmit
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add worker/src/track.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): track.ts handler 接收 telemetry 事件
@@ -447,7 +447,7 @@ import { handleTrack } from './track';
 - [ ] **Step 3: typecheck**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx tsc --noEmit
 ```
 
@@ -456,7 +456,7 @@ npx tsc --noEmit
 - [ ] **Step 4: 启动本地 wrangler dev**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler dev --local --port 8788
 ```
 
@@ -499,7 +499,7 @@ curl -i -X POST http://localhost:8788/api/track \
 - [ ] **Step 8: 验证 events 表已落数据**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, device_id, page_path, occurred_at FROM events ORDER BY id DESC LIMIT 5;" --local
 ```
 
@@ -521,7 +521,7 @@ curl -i -X POST http://localhost:8788/api/track \
 - [ ] **Step 10: 关闭 wrangler dev（如在前台），Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add worker/src/index.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): wire /api/track 路由
@@ -547,7 +547,7 @@ EOF
 - [ ] **Step 1: 安装 `nanoid` + `web-vitals`**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm install nanoid web-vitals
 ```
 
@@ -564,7 +564,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/package.json dashboard/package-lock.json
 git commit -m "chore(dashboard): 加 nanoid + web-vitals 依赖
 
@@ -651,7 +651,7 @@ export function isSessionOnlyDid(did: string): boolean {
 - [ ] **Step 2: typecheck 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -682,7 +682,7 @@ console.log('LS:', localStorage.getItem('xlist_did'));
 - [ ] **Step 4: 关 dev server，Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/device.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): device.ts — 匿名访客 ID SDK
@@ -807,7 +807,7 @@ export const EVENTS = {
 - [ ] **Step 3: 验证 build 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -816,7 +816,7 @@ npm run build
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/
 git commit -m "$(cat <<'EOF'
 feat(dashboard): telemetry types + event-types 常量
@@ -1025,7 +1025,7 @@ export function _resetForTest(): void {
 - [ ] **Step 2: 验证 build 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1034,7 +1034,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/queue.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): telemetry/queue.ts — 批量队列 + retry + 持久化
@@ -1083,7 +1083,7 @@ export function installBeacon(): void {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1092,7 +1092,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/beacon.ts
 git commit -m "feat(dashboard): telemetry/beacon.ts — pagehide flush
 
@@ -1225,7 +1225,7 @@ function simpleHash(s: string): string {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1234,7 +1234,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/session.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): telemetry/session.ts — 前端会话生命周期
@@ -1349,7 +1349,7 @@ function getPagePath(): string {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1358,7 +1358,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/index.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): telemetry/index.ts — 主 API 整合
@@ -1505,7 +1505,7 @@ export async function fetchStats(): Promise<Stats> {
 - [ ] **Step 2: build 通过**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1514,7 +1514,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/api.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): api.ts 加 fetch 拦截器
@@ -1573,7 +1573,7 @@ function report(eventType: string): (metric: Metric) => void {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1582,7 +1582,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/vitals.ts
 git commit -m "feat(dashboard): telemetry/vitals.ts — web-vitals 性能指标
 
@@ -1653,7 +1653,7 @@ function truncate(s: string, max: number): string {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1662,7 +1662,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/errors.ts
 git commit -m "feat(dashboard): telemetry/errors.ts — 全局错误捕获
 
@@ -1789,7 +1789,7 @@ export function useImpression(onFire: () => void): React.RefCallback<Element> {
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1798,7 +1798,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/lib/telemetry/impressions.ts
 git commit -m "feat(dashboard): telemetry/impressions.ts — IntersectionObserver helper
 
@@ -1857,7 +1857,7 @@ import { installErrorHandlers } from "./lib/telemetry/errors";
 - [ ] **Step 2: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -1869,13 +1869,13 @@ npm run build
 
 ```bash
 # 终端 1
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler dev --local --port 8788
 ```
 
 ```bash
 # 终端 2
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run dev
 ```
 
@@ -1884,7 +1884,7 @@ npm run dev
 - [ ] **Step 4: 验证 events 表有数据**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, page_path, occurred_at FROM events WHERE device_id NOT LIKE 'test-%' ORDER BY id DESC LIMIT 10;" --local
 ```
 
@@ -1893,7 +1893,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, page_path, occurred_
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/App.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): App.tsx wire telemetry SDK
@@ -2001,7 +2001,7 @@ import { track, EVENTS } from "../lib/telemetry";
 - [ ] **Step 5: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -2015,14 +2015,14 @@ npm run build
 3. 等有新推文进来或手动点新内容 banner → `new_content_banner_click`
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, event_payload FROM events WHERE event_type IN ('sort_change','source_filter_change','new_content_banner_click') ORDER BY id DESC LIMIT 5;" --local
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/components/Feed.tsx dashboard/src/App.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): Feed/App — 筛选/排序/新内容 banner 埋点
@@ -2049,7 +2049,7 @@ EOF
 - [ ] **Step 1: 读 TweetCard.tsx 找 handleCardClick 定义和 import 区**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 grep -n "^import\|handleCardClick\|function TweetCard\|export function TweetCard\|^export" dashboard/src/components/TweetCard.tsx | head -20
 ```
 
@@ -2140,7 +2140,7 @@ const handleCardClick = (e: React.MouseEvent) => {
 - [ ] **Step 6: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -2153,7 +2153,7 @@ npm run build
 2. 点击一张卡片 → events 应有 `item_click`
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, json_extract(event_payload, '$.item_id') as iid, COUNT(*) as n FROM events WHERE event_type IN ('item_impression','item_click') GROUP BY event_type, iid ORDER BY n DESC LIMIT 10;" --local
 ```
 
@@ -2162,7 +2162,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, json_extract(event_p
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/components/TweetCard.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): TweetCard — item_impression + item_click 埋点
@@ -2269,7 +2269,7 @@ import { track, EVENTS } from "../lib/telemetry";
 - [ ] **Step 4: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -2284,14 +2284,14 @@ npm run build
 4. 重新打开 drawer → 点 "打开X原文 ↗" → events 应有 `external_link_click`，`target_url_host = 'x.com'`
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, json_extract(event_payload, '$.dwell_ms') as dwell, json_extract(event_payload, '$.target_url_host') as host FROM events WHERE event_type IN ('item_open_drawer','item_close_drawer','external_link_click') ORDER BY id DESC LIMIT 6;" --local
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/components/TweetDrawer.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): TweetDrawer — open/close/dwell + external_link_click
@@ -2381,7 +2381,7 @@ import { track, EVENTS } from "../lib/telemetry";
 - [ ] **Step 4: build**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -2393,7 +2393,7 @@ npm run build
 1. 打开有图的卡片 → drawer → 点击图片放大 → Lightbox 打开 → events 应有 `image_lightbox_open`，含 `image_index` 和 `images_count`
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, event_payload FROM events WHERE event_type IN ('image_lightbox_open','image_load_error') ORDER BY id DESC LIMIT 5;" --local
 ```
 
@@ -2402,7 +2402,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, event_payload FROM e
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 git add dashboard/src/components/Lightbox.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): Lightbox — image_lightbox_open + image_load_error
@@ -2428,20 +2428,20 @@ EOF
 
 ```bash
 # 终端 1
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler dev --local --port 8788
 ```
 
 ```bash
 # 终端 2
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run dev
 ```
 
 - [ ] **Step 2: 清空本地 events 表（用作干净基线）**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="DELETE FROM events;" --local
 ```
 
@@ -2503,7 +2503,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, json_extract(event_p
 - [ ] **Step 1: 远端应用迁移**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --file=migrations/004-events-table.sql --remote
 ```
 
@@ -2555,7 +2555,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, device_id, occurred_
 - [ ] **Step 1: 部署前 build 验证**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/dashboard
 npm run build
 ```
 
@@ -2579,7 +2579,7 @@ npx wrangler pages deploy dist --project-name=xlist-dashboard
 - [ ] **Step 4: 远端 events 表验证**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id/worker
 npx wrangler d1 execute xlist --command="SELECT event_type, COUNT(*) FROM events WHERE ingested_at > $(($(date +%s) * 1000 - 600000)) GROUP BY event_type;" --remote
 ```
 
@@ -2619,7 +2619,7 @@ npx wrangler d1 execute xlist --command="SELECT event_type, COUNT(*) FROM events
 - [ ] **Step 3: 验证 operations.md typo / 渲染**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-telemetry-and-anonymous-id
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-telemetry-and-anonymous-id
 head -150 docs/operations.md
 ```
 

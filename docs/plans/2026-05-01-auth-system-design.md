@@ -679,7 +679,7 @@ SELECT id, code_hash, code_attempts, code_expires_at
 6. AccessKey ID / Secret 存 Worker secret
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/worker
+cd /Users/roxor/brain/30-projects/aifeeds/worker
 npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_ID
 npx wrangler secret put ALIYUN_SMS_ACCESS_KEY_SECRET
 npx wrangler secret put ALIYUN_SMS_SIGN_NAME    # 例：xList
@@ -893,7 +893,7 @@ export async function pushDeerAlert(env: Env, title: string, body: string): Prom
 ### 11.3 配置（secret，不入库不入文档）
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/worker
+cd /Users/roxor/brain/30-projects/aifeeds/worker
 npx wrangler secret put PUSHDEER_ADMIN_KEYS
 # 输入：PDU394...iPhone,PDU394...Mac   （逗号分隔）
 
@@ -1246,7 +1246,7 @@ PR3 落地登录 UI 时同步上线 `/privacy.html`，至少包含：
 
 ## 14. TODO 后置项
 
-> 写入 `/Users/roxor/brain/30-projects/xlist-scraper/TODO.md`
+> 写入 `/Users/roxor/brain/30-projects/aifeeds/TODO.md`
 
 | 项 | 触发条件 | 备注 |
 |----|---------|------|
@@ -1338,8 +1338,8 @@ D1 当前限额 5GB / 100M rows。当前 items ~36k，预计 events 表写入快
 - 设计 brainstorm 完整对话：本 session（2026-05-01）
 - xueqiuFollow 项目 PushDeer 实现参考：`/Users/roxor/brain/30-projects/xueqiuFollow/src/notifier.py`
 - xueqiuFollow PushDeer 配置参考：`/Users/roxor/brain/30-projects/xueqiuFollow/config.yaml`（admin 组的 iPhone + Mac 两个 key）
-- 当前 D1 schema：`/Users/roxor/brain/30-projects/xlist-scraper/worker/schema.sql`
-- 运维手册：`/Users/roxor/brain/30-projects/xlist-scraper/docs/operations.md`
+- 当前 D1 schema：`/Users/roxor/brain/30-projects/aifeeds/worker/schema.sql`
+- 运维手册：`/Users/roxor/brain/30-projects/aifeeds/docs/operations.md`
 - 合规相关：
   - 工信部年度通报 - 设备指纹合规：见 brainstorm session 引用
   - 《个人信息保护合规审计管理办法》（2025-05-01 生效）

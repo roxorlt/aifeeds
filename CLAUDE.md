@@ -1,4 +1,21 @@
-- [ ] # xList Scraper
+- [ ] # aifeeds（产品名）
+
+> **项目身份卡**（每次新 session 必读）
+>
+> - **项目名**：`aifeeds`（产品代号）。本地目录 `~/brain/30-projects/aifeeds/`。
+> - **公网**：`https://ai-feeds.com`（前端）/ `https://api.ai-feeds.com`（worker）
+> - **CF 资源命名**（保留历史 `xlist-` 前缀，迁移成本太高）：worker = `xlist-api` / Pages = `xlist-dashboard` / D1 = `xlist`（staging 是 `xlist-staging`）
+> - **数据源现状（4 个）**：X 走 ScrapeBadger API / GitHub trending 走 GH / Product Hunt 走 Convex / ClawHub 走 Convex
+> - **GitHub 私有仓**：`roxorlt/aifeeds`（备份用，CICD 待接）
+> - **Token 速查**：见 `docs/operations.md` § 4「运维 Token 速查」
+>
+> **不要做的事**：
+> - ❌ 不要假设 `~/.claude/skills/xlist-scraper/` 存在 — 那个 skill 已于 2026-05-10 删除（含本地目录 + GitHub 公开仓）。aifeeds 跟它没任何依赖关系，名字相似纯属历史巧合。
+> - ❌ 不要把任何 secret 值写到 docs / CLAUDE.md / 设计文档里 — 只引用文件路径（如 `.secrets/cf-claude-ops.env`）。所有 token 来源 + 再生方式见 operations.md § 4。
+> - ❌ 不要在没 review diff 的情况下 push 到 GitHub — 私有仓也要防 secret 写错。
+> - ❌ 不要混淆 prod 域名 `api.ai-feeds.com` 和 staging `staging-api.ai-feeds.com`。运维操作前确认目标环境。
+
+---
 
 X (Twitter) List 抓取工具。自动抓取 List 中的 AI 相关推文，翻译英文为中文，存入 SQLite。
 
@@ -46,7 +63,7 @@ docs/
 
 ### 本项目 git 状态
 
-- `/Users/roxor/brain/30-projects/xlist-scraper/` 已是 git 仓库（含 dashboard + worker + docs；`.gitignore` 排除 data/、node_modules/、exports/）。无 remote，本地分支管理
+- `/Users/roxor/brain/30-projects/aifeeds/` 已是 git 仓库（含 dashboard + worker + docs；`.gitignore` 排除 data/、node_modules/、exports/）。无 remote，本地分支管理
 - `/Users/roxor/.claude/skills/xlist-scraper/` 是 git 仓库（scraper 脚本）
 - 改动按"开 feature branch → 验证 → 合 main"流程走，两个仓库各自独立分支
 

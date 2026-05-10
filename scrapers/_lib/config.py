@@ -1,6 +1,6 @@
 """Shared config for ai-feeds scrapers.
 
-Reads env from .env at the project root (or ~/.claude/skills/xlist-scraper/scripts/.env
+Reads env from .env at the project root (旧 chrome skill 路径已退役 2026-05-06
 as a fallback so dev keys can be shared with the X scraper during early days).
 
 Required:

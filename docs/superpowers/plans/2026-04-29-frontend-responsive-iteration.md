@@ -8,7 +8,7 @@
 
 **Tech Stack:** React 19, Vite 8, Tailwind 4, TypeScript 6 (no test runner — verification = `npm run build` + manual browser smoke).
 
-**Worktree:** `/Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-responsive-iteration` on branch `feat/responsive-iteration`.
+**Worktree:** `/Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-responsive-iteration` on branch `feat/responsive-iteration`.
 
 **Project layout note:** All paths in this plan are relative to repo root unless specified. Dashboard subdir is `dashboard/`; tsc + vite invoked from there.
 

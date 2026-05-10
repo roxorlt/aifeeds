@@ -18,9 +18,9 @@
 
 **Branch:** `feat/auth-backend`（已从 main `fa9f08c` 出，含 PR1 telemetry 完整实现）
 
-**Worktree:** `/Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend`
+**Worktree:** `/Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend`
 
-**关联设计文档:** `/Users/roxor/brain/30-projects/xlist-scraper/docs/plans/2026-05-01-auth-system-design.md`
+**关联设计文档:** `/Users/roxor/brain/30-projects/aifeeds/docs/plans/2026-05-01-auth-system-design.md`
 
 **测试策略**：与 PR1 一致，遵循 CLAUDE.md「验证分层」— wrangler dev + curl 矩阵，**不引入 vitest**。
 
@@ -141,7 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 - [ ] **Step 3: 本地应用迁移**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler d1 execute xlist --file=migrations/006-users-identities-sessions.sql --local
 ```
 
@@ -158,7 +158,7 @@ npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE ty
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/migrations/006-users-identities-sessions.sql worker/schema.sql
 git commit -m "$(cat <<'EOF'
 feat(worker): users / identities / sessions 三表 schema (PR2)
@@ -216,7 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_sms_sent_at ON sms_send_log(sent_at DESC);
 - [ ] **Step 3: 本地应用**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler d1 execute xlist --file=migrations/007-sms-send-log.sql --local
 npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE name LIKE 'sms_%' OR name LIKE 'idx_sms_%' ORDER BY name;" --local
 ```
@@ -226,7 +226,7 @@ npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE na
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/migrations/007-sms-send-log.sql worker/schema.sql
 git commit -m "$(cat <<'EOF'
 feat(worker): sms_send_log 表 schema (PR2)
@@ -254,7 +254,7 @@ EOF
 - [ ] **Step 1: 创建远端 KV namespace**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler kv namespace create AUTH_KV
 ```
 
@@ -306,7 +306,7 @@ kill %1 2>/dev/null
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/wrangler.toml
 git commit -m "$(cat <<'EOF'
 feat(worker): 加 AUTH_KV namespace 绑定
@@ -361,7 +361,7 @@ export interface Env {
 - [ ] **Step 2: typecheck**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 ```
 
@@ -370,7 +370,7 @@ npx tsc --noEmit
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/index.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): Env interface 扩展 PR2 auth 必需的 binding 和 secret
@@ -475,10 +475,10 @@ export interface RateLimitResult {
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/types.ts
 git commit -m "feat(worker): auth/types.ts — 共享 TS 类型
 
@@ -554,10 +554,10 @@ export async function pushDeerAlert(
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/notifier.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): notifier.ts — PushDeer 告警 (PR2)
@@ -645,10 +645,10 @@ export async function verifyTurnstile(
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/turnstile.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): auth/turnstile.ts — siteverify 校验 (PR2)
@@ -985,7 +985,7 @@ export async function sendSmsViaTencent(
 - [ ] **Step 2: typecheck**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 ```
 
@@ -994,7 +994,7 @@ npx tsc --noEmit
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/sms.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): auth/sms.ts — SMS 完整防刷链路 (PR2)
@@ -1148,10 +1148,10 @@ export async function getUserById(env: Env, userId: string): Promise<UserRow | n
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/session.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): auth/session.ts — session 创建/校验/cookie (PR2)
@@ -1332,10 +1332,10 @@ export async function handleSmsSend(
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/handlers.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): /api/auth/sms/send handler (PR2)
@@ -1537,10 +1537,10 @@ export async function handleLogin(
 - [ ] **Step 2: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/handlers.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): /api/auth/login handler (PR2)
@@ -1621,10 +1621,10 @@ export async function handleLogoutAll(
 - [ ] **Step 3: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/handlers.ts
 git commit -m "feat(worker): /api/auth/logout + logout-all handlers (PR2)
 
@@ -1698,10 +1698,10 @@ export async function handleMe(
 - [ ] **Step 3: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/handlers.ts
 git commit -m "feat(worker): /api/auth/me handler (PR2)
 
@@ -1738,7 +1738,7 @@ grep "^export async function\|^export function" worker/src/auth/handlers.ts
 - [ ] **Step 2: typecheck**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 ```
 
@@ -1749,7 +1749,7 @@ npx tsc --noEmit
 如果 grep 验证已经全 export 不缺，跳过这个 task 的 commit（这是个纯检查 task）。如果发现并补加 export，则：
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/auth/handlers.ts
 git commit -m "fix(worker): 补 handler export 漏掉的 (PR2)"
 ```
@@ -1896,7 +1896,7 @@ export default {
 - [ ] **Step 4: typecheck**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx tsc --noEmit
 ```
 
@@ -1905,7 +1905,7 @@ npx tsc --noEmit
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add worker/src/index.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): wire 5 个 auth 路由 + withCors DRY (PR2)
@@ -1932,7 +1932,7 @@ EOF
 - [ ] **Step 1: 启动 wrangler dev (background)**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler dev --local --port 8788 &
 sleep 8
 ```
@@ -1966,7 +1966,7 @@ echo "=== 2. wrangler dev 终端找 code ==="
 pkill -f "wrangler dev" 2>/dev/null || true
 sleep 2
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler dev --local --port 8788 &
 sleep 8
 ```
@@ -2035,7 +2035,7 @@ curl -s -X GET http://localhost:8788/api/auth/me \
 - [ ] **Step 6: 验证 D1 落库**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 
 echo "=== sms_send_log（应有 success / rate_limited 各 1 条）==="
 npx wrangler d1 execute xlist --command="SELECT result, code_attempts FROM sms_send_log ORDER BY id DESC LIMIT 5;" --local
@@ -2152,7 +2152,7 @@ npx wrangler secret put PUSHDEER_ADMIN_KEYS  # 输入：PDU394...,PDU394...
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend
 git add docs/operations.md
 git commit -m "$(cat <<'EOF'
 docs(ops): operations.md 加 PR2 auth backend 完整运维信息
@@ -2179,7 +2179,7 @@ EOF
 - [ ] **Step 1: 应用 006 + 007 到远端**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler d1 execute xlist --file=migrations/006-users-identities-sessions.sql --remote
 npx wrangler d1 execute xlist --file=migrations/007-sms-send-log.sql --remote
 ```
@@ -2197,7 +2197,7 @@ npx wrangler d1 execute xlist --command="SELECT name FROM sqlite_master WHERE ty
 - [ ] **Step 1: 用户已搞定腾讯云 SMS / Turnstile / PushDeer 后**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npx wrangler secret put TURNSTILE_SECRET_KEY
 npx wrangler secret put TENCENT_SMS_SECRET_ID
 npx wrangler secret put TENCENT_SMS_SECRET_KEY
@@ -2222,7 +2222,7 @@ npx wrangler secret list
 - [ ] **Step 1: 部署**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-backend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-backend/worker
 npm run deploy
 ```
 

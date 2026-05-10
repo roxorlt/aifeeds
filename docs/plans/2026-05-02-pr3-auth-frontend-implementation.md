@@ -16,11 +16,11 @@
 
 **Branch:** `feat/auth-frontend`（已从 main `fc9063a` 出）
 
-**Worktree:** `/Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend`
+**Worktree:** `/Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend`
 
 **关联文档:**
-- 设计：`/Users/roxor/brain/30-projects/xlist-scraper/docs/plans/2026-05-01-auth-system-design.md`
-- PR2 plan：`/Users/roxor/brain/30-projects/xlist-scraper/docs/plans/2026-05-02-pr2-auth-backend-implementation.md`
+- 设计：`/Users/roxor/brain/30-projects/aifeeds/docs/plans/2026-05-01-auth-system-design.md`
+- PR2 plan：`/Users/roxor/brain/30-projects/aifeeds/docs/plans/2026-05-02-pr2-auth-backend-implementation.md`
 
 **测试策略**：与 PR1/PR2 一致，遵循 CLAUDE.md「验证分层」— `npm run build` + dashboard dev server 浏览器手动 smoke。**不引入 vitest**。
 
@@ -88,7 +88,7 @@ PR2 设计文档 § 6.3 把注销账号搬到 PR3 backend，本 task 实施。�
 `worker/src/auth/handlers.ts` 顶部 import 区找到 `from './sms'` 那段，确保 `hashCode` 在 import 列表里（PR2 时已有，验证下）。如果有，跳过这步。
 
 ```bash
-grep "hashCode" /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/worker/src/auth/handlers.ts | head -5
+grep "hashCode" /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/worker/src/auth/handlers.ts | head -5
 ```
 
 如缺失，把 sms import 改为含 hashCode：
@@ -208,10 +208,10 @@ import {
 - [ ] **Step 4: typecheck + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/worker
 npx tsc --noEmit
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add worker/src/auth/handlers.ts worker/src/index.ts
 git commit -m "$(cat <<'EOF'
 feat(worker): /api/auth/delete handler (PR3)
@@ -238,7 +238,7 @@ EOF
 - [ ] **Step 1: 安装**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm install zustand
 ```
 
@@ -255,7 +255,7 @@ npm run build
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/package.json dashboard/package-lock.json
 git commit -m "chore(dashboard): 加 zustand 依赖 (PR3)
 
@@ -406,10 +406,10 @@ export async function deleteAccount(phoneConfirm: string): Promise<{ ok: true }>
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/lib/auth.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): lib/auth.ts — 客户端 auth SDK (PR3)
@@ -545,10 +545,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/lib/authStore.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): lib/authStore.ts — zustand auth store (PR3)
@@ -604,10 +604,10 @@ export async function requireAuth(
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/lib/authGuard.ts
 git commit -m "feat(dashboard): lib/authGuard.ts — requireAuth 高阶函数 (PR3)
 
@@ -682,10 +682,10 @@ export function AvatarPlaceholder({ name, phoneMasked, src, size = 36, className
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/components/AvatarPlaceholder.tsx
 git commit -m "feat(dashboard): AvatarPlaceholder 首字母圆形头像 (PR3)
 
@@ -1001,10 +1001,10 @@ export function LoginModal() {
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/components/LoginModal.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): LoginModal 登录弹窗 (PR3)
@@ -1143,10 +1143,10 @@ export function UserMenu() {
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/components/UserMenu.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): UserMenu 右上角账号入口 (PR3)
@@ -1268,10 +1268,10 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/components/DeleteAccountConfirm.tsx
 git commit -m "feat(dashboard): DeleteAccountConfirm 注销账号弹窗 (PR3)
 
@@ -1292,7 +1292,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: 创建目录 + 文件**
 
 ```bash
-mkdir -p /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard/src/pages
+mkdir -p /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard/src/pages
 ```
 
 ```typescript
@@ -1418,10 +1418,10 @@ export function Settings() {
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/pages/Settings.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): Settings 设置页 (PR3)
@@ -1502,10 +1502,10 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
 - [ ] **Step 2: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/api.ts
 git commit -m "$(cat <<'EOF'
 feat(dashboard): api.ts 401 拦截器 + cookie credentials (PR3)
@@ -1616,10 +1616,10 @@ function App() {
 - [ ] **Step 4: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/src/App.tsx
 git commit -m "$(cat <<'EOF'
 feat(dashboard): App.tsx wire UserMenu + Settings 路由 (PR3)
@@ -1753,10 +1753,10 @@ EOF
 - [ ] **Step 3: build + Commit**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build  # 验证 public/ 文件被打入 dist/
 
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git add dashboard/public/privacy.html dashboard/public/terms.html
 git commit -m "$(cat <<'EOF'
 docs(dashboard): 隐私政策 + 服务条款 (PR3)
@@ -1781,13 +1781,13 @@ EOF
 
 ```bash
 # 终端 1: worker
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/worker
 npx wrangler dev --local --port 8788
 ```
 
 ```bash
 # 终端 2: dashboard
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run dev
 ```
 
@@ -1814,7 +1814,7 @@ npm run dev
 - [ ] **Step 3: D1 验证**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/worker
 npx wrangler d1 execute xlist --command="SELECT id, status, display_name FROM users ORDER BY created_at DESC LIMIT 3;" --local
 ```
 
@@ -1832,7 +1832,7 @@ pkill -f "vite"
 ### Task D2: build prod 一遍
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 ```
 
@@ -1855,10 +1855,10 @@ npm run build
 - [ ] **Step 1: rebase 到 main 最新**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend
 git fetch origin 2>/dev/null || true
 # 看 main 是否前进
-cd /Users/roxor/brain/30-projects/xlist-scraper
+cd /Users/roxor/brain/30-projects/aifeeds
 NEW_MAIN=$(git rev-parse main)
 echo "main HEAD: $NEW_MAIN"
 cd .worktrees/feat-auth-frontend
@@ -1872,14 +1872,14 @@ git rebase main 2>&1 | tail -10
 - [ ] **Step 3: deploy worker**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/worker
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/worker
 npm run deploy
 ```
 
 - [ ] **Step 4: deploy dashboard**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper/.worktrees/feat-auth-frontend/dashboard
+cd /Users/roxor/brain/30-projects/aifeeds/.worktrees/feat-auth-frontend/dashboard
 npm run build
 npx wrangler pages deploy dist --project-name=xlist-dashboard --commit-message="PR3 auth frontend" --branch=main
 ```
@@ -1908,7 +1908,7 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST https://api.ai-feeds.com/api/auth/del
 - [ ] **Step 7: merge feat → main**
 
 ```bash
-cd /Users/roxor/brain/30-projects/xlist-scraper
+cd /Users/roxor/brain/30-projects/aifeeds
 git checkout main
 git merge --ff-only feat/auth-frontend
 git worktree remove .worktrees/feat-auth-frontend

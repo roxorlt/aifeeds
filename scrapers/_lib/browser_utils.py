@@ -8,7 +8,7 @@
   4. 兜底关闭按 `--user-data-dir` pgrep 杀（kill-by-data-dir）
   5. launchd wrapper 用 PRE/POST PID diff 兜底（在 cron.sh 实现，不在这里）
 
-参考：~/.claude/skills/xlist-scraper/scripts/list_scraper.py 的对应方法
+参考：旧 chrome 抓取 skill（已退役 2026-05-06，X 已切 ScrapeBadger）
 （X scraper 已稳定跑数月）
 """
 from __future__ import annotations
