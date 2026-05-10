@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Worker 端 phase 1+2（fetchList / enrichPending），手动触发 `mode=clawhub-fetch|clawhub-enrich`；新表 `metrics_snapshots_clawhub`；新建 SVG 模板变体 `renderClawhubContent`；新增前端 `BrandClawhub` 用源站 logo PNG；详见下方「ClawHub（2026-05-07 上线）」段）
+最后更新：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
+
+历史：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Phase 1+2（fetchList / enrichPending）、`metrics_snapshots_clawhub` 表、`renderClawhubContent` SVG 模板、前端 `BrandClawhub` logo 都在这次落地）
 
 历史：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
 
@@ -203,16 +205,55 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - **Phase 2 — `runGithubEnrichPending`**：在每个 `*/5min` cron tick 上**抢占式**运行：先查 `extra.gh_pending=1` 的待 enrich 行，有则取 1 条做 GitHub API（license/watchers/PRs/contributors）+ raw README + DeepSeek LLM 判别 → UPDATE items（`is_relevant=0/1` + `extra.ai_category/ai_summary` 等），最后 batch 重算当日 `daily_rank`。**~9 subrequests/run**，远低于 50 限额。X 模式仅在没 pending 时走。
 - **手动触发**：`POST /api/enrich/run?mode=github-fetch` / `POST /api/enrich/run?mode=github-enrich&limit=5`，都需 Bearer `INGEST_TOKEN`
 
-**ClawHub（2026-05-07 上线，全云端 — 无本地依赖）**：
-- **数据源**：`https://wry-manatee-359.convex.cloud/api/query` Convex 公开 API（无鉴权 / 无 cookie / 无 turnstile），调用 `skills:listPublicPageV4` + `skills:getBySlug`。REST V1 (`https://wry-manatee-359.convex.site/api/v1/skills`) 也支持但页面大小限 25，因此走 Convex 直连 200/页
-- **Phase 1 — `runClawhubFetchList`**：每天 UTC `08:00` + `20:00`（= BJT 16:00 + 04:00），8 list calls（top 1000 stars + top 500 updated dedup）→ upsert items（`is_relevant=1` + `extra.ch_pending=true` + `published_at = skill.updatedAt`）+ append 一行 `metrics_snapshots_clawhub`。**~10 subrequests/run**（list 低成本）
-- **Phase 2 — `runClawhubEnrichPending`**：在每个 `*/5min` cron tick **抢占式**运行：取 `extra.ch_pending=1` 的待 enrich 行（按 `metrics.stars DESC` 优先），每 tick 处理 2 条 → fetch detail（含 `parsed.clawdis.install` + `capabilityTags` + `llmAnalysis.findings`）+ DeepSeek 翻译 summary（保留代码块）→ UPDATE items（`content_translated` + `extra.{license,install,capability_tags,llm_analysis,enriched_at}`）。**~5-10 subrequests/run**
+**ClawHub（2026-05-09 v2，全云端 — 无本地依赖）**：
+- **数据源**：`https://wry-manatee-359.convex.cloud/api/query` Convex 公开接口（无鉴权 / 无 cookie / 无 turnstile）。调用三个：
+  - `skills:listPublicPageV4`：列表（query 接口）
+  - `skills:getBySlug`：单个 skill 详情（query 接口）
+  - `skills:getReadme`：拿 ClawHub 网页 README 标签页的内容（**action 接口**，URL 走 `/api/action`，不是 `/api/query`）。返回 `{path, text}`，path 告诉是 README.md 还是 SKILL.md
+- **Phase 1 — `runClawhubFetchList`**：每天 UTC `08:00` + `20:00`（= BJT 16:00 + 04:00）。8 次 list 调用（top 1000 按 stars + top 500 按更新时间 dedup），**不再过滤可疑项**（`nonSuspiciousOnly=false`）→ upsert items（`is_relevant=1` + `extra.ch_pending=true` + `published_at=skill.updatedAt`）+ append 一行 `metrics_snapshots_clawhub`。**~10 调用/次**
+- **Phase 2 — `runClawhubEnrichPending`**：每个 `*/5min` cron tick **抢占式**运行：取 `extra.ch_pending=1` 的行（按 `metrics.stars DESC` 优先），每 tick 处理 2 条。每条三件并行：
+  1. **summary 翻译**（DeepSeek，跳过已是中文的）
+  2. **LLM finding 翻译**（DeepSeek，跳过已 `lang=zh` 的）
+  3. **`skills:getReadme`** 拿 ClawHub 渲染的 README 内容（`{path, text}`）
+  - 然后 `translateMarkdown` 翻译 README 文本（**截断 5000 字符**防 DeepSeek 排队 throttle，超长部分加「完整版见 https://clawhub.ai」提示）
+  - UPDATE items：`content_translated` 写翻译后 README，`extra` 写 `{license, install, capability_tags, is_suspicious, llm_verdict, llm_status, llm_analysis, readme_file, files_manifest, enriched_at, ...}`
+- **可疑 skill 处理**（v2 新增）：
+  - ClawHub 自家 LLM 给每个 skill 打 `verdict`（benign / suspicious / 等）和 `status`（clean / flagged 等）
+  - enrichPending 把这俩字段读出来，`verdict !== 'benign' || status !== 'clean'` 视为可疑，写 `extra.is_suspicious=true`
+  - `/api/items?source_type=clawhub` 默认过滤 `extra.is_suspicious=1`，前端「隐藏可疑」开关关闭时加 `?include_suspicious=true` 解除过滤
 - **不接入 LLM judge**：所有 ClawHub skill 默认 `is_relevant=1`（marketplace 已是优选，跳过 X/GH/PH 那道 AI 相关性判别）
-- **`/api/items?source_type=clawhub`** 走专用 `handleClawhubFeed`：按 `metrics.stars DESC` 排序 + cursor 分页（cursor 格式 `stars|id`），跟 X/PH 默认时间排序不同
+- **`/api/items?source_type=clawhub`** 走专用 `handleClawhubFeed`：按 `metrics.stars DESC` 排序 + cursor 分页（cursor 格式 `stars|id`），跟 X/PH 默认时间排序不同。支持的 query 参数：
+  - `sort=stars|downloads|installs|updated|name`
+  - `category=mcp-tools|prompts|workflows|dev-tools|data|security|automation|other|all`
+  - `include_suspicious=true`（默认 false）
 - **`/api/items/:id/refresh`** 加 clawhub 分支：drawer 打开主动调，refresh metrics 通过 `getBySlug`（KV throttle 60s）
 - **手动触发**：`POST /api/enrich/run?mode=clawhub-fetch` / `POST /api/enrich/run?mode=clawhub-enrich&limit=10`，都需 Bearer `INGEST_TOKEN`
 - **海报变体**：`worker/src/share/svg-template.ts` 加 `renderClawhubContent`（GH 同款骨架 + lavender 来源 chip `#d8c8f5`）+ `pickSourceMeta` 加 clawhub 分支
-- **v1 后置**：ZIP 流水线（下载 `/api/v1/download?slug=...` → 抠 SKILL.md/README.md → frontmatter+H1 strip → 全文翻译入库）当前**没接**，所以 `items.content_translated` 只是 summary 翻译；drawer 的"文件清单/SKILL.md 原文/30 天趋势"三段是空占位
+- **prod 数据规模**（2026-05-09）：2765 条 items，2676 条有真 README 翻译（97%），784 条标 suspicious（28%）。staging → prod 数据通过 D1 dump + INSERT OR REPLACE 复制（避免重复 DeepSeek 调用）
+
+**ClawHub item 的 `extra` 字段速查**：
+
+| 字段 | 类型 | 来源 | 说明 |
+|------|------|------|------|
+| `slug` | string | API | skill 的 url slug，跟 `source_id` 一致 |
+| `latest_version` | string | API | 当前最新版本号 |
+| `versions_count` | number | API | 历史版本总数 |
+| `category` | string | 关键词派生 | feed 分类标签（mcp-tools / prompts 等 8 类） |
+| `owner_image` | string | API | 作者头像 URL |
+| `summary_en` | string | API | 英文短描述（< 200 字） |
+| `summary_translated` | string | DeepSeek | summary 中文译文，feed 卡片正文用 |
+| `ch_pending` | boolean | enrichPending | 是否待 enrich，false=已处理 |
+| `enriched_at` | unix sec | enrichPending | 上次 enrich 时间 |
+| `license` | string | API | 许可证（MIT / Apache 等） |
+| `install` | array | API | 安装方式列表（claw / brew / npm 等） |
+| `capability_tags` | array | API | skill 能力标签 |
+| `is_suspicious` | boolean | enrichPending | ClawHub LLM 判可疑（v2 新增） |
+| `llm_verdict` | string | API | ClawHub LLM 判定（benign / suspicious 等，v2 新增） |
+| `llm_status` | string | API | ClawHub LLM 状态（clean / flagged 等，v2 新增） |
+| `llm_analysis` | object | enrichPending | `{findings: [...], lang: 'zh'}` 翻译后的安全审查项 |
+| `readme_file` | string | enrichPending | ClawHub 选了哪个文件渲染 README（README.md / SKILL.md，v2 新增） |
+| `files_manifest` | array | API | skill 包含的文件列表（path + size） |
+| `updated_at` | number | refresh | skill 上次更新时间（ms） |
 
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
@@ -273,7 +314,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - `sessions`（2026-05-02 PR2 新增）— cookie/bearer 双兼容 token，nanoid 32 字符 id，30 天滑动过期。详见 § 3.3
   - `sms_send_log`（2026-05-02 PR2 新增）— 短信发送日志 + 防刷计数 + 验证码 hash。`result` 枚举 success/rate_limited/turnstile_failed/sms_api_error/budget_capped。30 天 retention cron 待加。详见 § 3.4
   - `share_relations`（2026-05-04 PR5 新增）— 分享关系图。`token` (nanoid 8) UNIQUE / `from_uid` 分享人 / `item_id` 复合 id / `to_did` 落地浏览器 device_id（首次扫码补） / `to_uid` 落地用户后续注册的 user.id / `landed_at` / `registered_at` / `scan_count` / `last_scanned_at`。4 索引：token / from_uid+time / item+time / to_did。社交关系图基础数据。migration `009-share-relations.sql`
-  - `metrics_snapshots_clawhub`（2026-05-07 ClawHub 接入新增）— ClawHub skill metrics 历史。每次 phase 1 cron append 一行 (item_id, captured_at, stars, downloads, installs_current, installs_all_time)。30 天 retention（沿用 `runCleanup` 03:35 UTC 每天清理）。两个索引：`idx_msch_item_time` / `idx_msch_captured`。migration: `worker/migrations/011-metrics-snapshots-clawhub.sql`
+  - `metrics_snapshots_clawhub`（2026-05-07 ClawHub 接入新增）— ClawHub skill metrics 历史。每次 phase 1 cron append 一行 (item_id, captured_at, stars, downloads, installs_current, installs_all_time)。30 天 retention（沿用 `runCleanup` 03:35 UTC 每天清理）。两个索引：`idx_msch_item_time` / `idx_msch_captured`。migration: `worker/migrations/011-metrics-snapshots-clawhub.sql`，prod + staging 都已 apply（prod 2026-05-08 跟 ClawHub v2 一起上线）
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
