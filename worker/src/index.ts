@@ -108,6 +108,10 @@ export interface Env {
   // Set in wrangler.toml `[browser] binding = "BROWSER"`.
   // Requires Workers Paid plan (10h browser/month included).
   BROWSER?: Fetcher;
+  // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.
+  // Used by worker/src/scrapers/ph.ts (daily fetch cron).
+  PH_CLIENT_ID?: string;
+  PH_CLIENT_SECRET?: string;
 }
 
 // CORS origins allowed
