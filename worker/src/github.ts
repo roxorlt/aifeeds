@@ -211,15 +211,26 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
       today_stars: r.todayStars,
       forks: r.forks,
     };
-    // INSERT-or-bump-last_seen pattern. Existing rows just update
-    // extra.last_seen_on_trending_at; new rows get full stub.
+    // INSERT-or-bump pattern. New rows get full stub; existing rows refresh
+    // trending_date_str + last_seen + live metrics (stars / today_stars / forks)
+    // so daily_rank query (which filters by trending_date_str = today) covers
+    // every repo currently on trending, not just first-time entrants.
+    // first_trending_at stays put — it's the historical first-seen marker.
+    // Phase-2 enriched fields (watchers, open_prs, license_spdx, ai_*) are
+    // preserved by patching only the three live trending fields via json_set.
     stmts.push(
       env.DB.prepare(
         `INSERT INTO items (id, source_type, source_id, title, content, author, url,
                             metrics, scraped_at, is_relevant, extra)
          VALUES (?, 'github', ?, ?, ?, ?, ?, ?, ?, NULL, ?)
          ON CONFLICT(id) DO UPDATE SET
-           extra = json_set(items.extra, '$.last_seen_on_trending_at', ?)`,
+           extra = json_set(items.extra,
+                            '$.last_seen_on_trending_at', ?,
+                            '$.trending_date_str', ?),
+           metrics = json_set(coalesce(items.metrics, '{}'),
+                              '$.stars', json_extract(excluded.metrics, '$.stars'),
+                              '$.today_stars', json_extract(excluded.metrics, '$.today_stars'),
+                              '$.forks', json_extract(excluded.metrics, '$.forks'))`,
       ).bind(
         id,
         r.ownerRepo,
@@ -231,6 +242,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
         nowIso,
         JSON.stringify(extra),
         Math.floor(Date.now() / 1000),
+        today,
       ),
     );
     // Append a metrics_snapshots_gh row for today's snapshot
