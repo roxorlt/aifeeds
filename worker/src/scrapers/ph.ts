@@ -82,11 +82,18 @@ export async function invalidatePhAccessToken(env: Env): Promise<void> {
 // - CommentsOrder enum: NEWEST | VOTES_COUNT
 // - Comment.votesCount + Comment.parentId both exist for thread filtering
 
+// Query.posts args (verified via introspection 2026-05-11):
+//   featured (Boolean) — only featured posts (vs user submissions)
+//   postedAfter / postedBefore (DateTime) — filter by createdAt
+//   order (PostsOrder enum) — FEATURED_AT | VOTES | RANKING | NEWEST
+// No featuredAfter/featuredBefore params; postedAfter+featured covers 95%+
+// (PH posts are usually featured same-day they're posted).
 const LIST_QUERY = `
-  query PhDailyList($featuredAfter: DateTime!, $featuredBefore: DateTime!) {
+  query PhDailyList($postedAfter: DateTime!, $postedBefore: DateTime!) {
     posts(
-      featuredAfter: $featuredAfter,
-      featuredBefore: $featuredBefore,
+      postedAfter: $postedAfter,
+      postedBefore: $postedBefore,
+      featured: true,
       order: VOTES,
       first: 30
     ) {
@@ -285,13 +292,13 @@ export async function listPhDailyPosts(
   ptDateStr: string,
 ): Promise<PhListNode[]> {
   const offsetStr = ptOffsetForDate(ptDateStr);
-  const featuredAfter = `${ptDateStr}T00:00:00${offsetStr}`;
+  const postedAfter = `${ptDateStr}T00:00:00${offsetStr}`;
   const nextDay = nextPtDate(ptDateStr);
-  const featuredBefore = `${nextDay}T00:00:00${offsetStr}`;
+  const postedBefore = `${nextDay}T00:00:00${offsetStr}`;
 
   const data = await phGraphQL<ListQueryData>(env, LIST_QUERY, {
-    featuredAfter,
-    featuredBefore,
+    postedAfter,
+    postedBefore,
   });
   if (!data) return [];
   return data.posts.edges.map((e) => e.node);
@@ -551,22 +558,32 @@ async function appendMetricsSnapshots(
   items: ItemInput[],
   ptDate: string,
 ): Promise<void> {
+  // Schema (worker/migrations/008-metrics-snapshots-ph.sql):
+  //   id, item_id, captured_at, launch_date_pt,
+  //   votes, comments_count, reviews_count, reviews_avg, followers, daily_rank
+  // followers not exposed by API — always null.
   const stmts: D1PreparedStatement[] = [];
   const capturedAt = Math.floor(Date.now() / 1000);
   for (const item of items) {
     const id = `product_hunt:${item.source_id}`;
     const m = item.metrics as string;
-    let parsed: { votes?: number; comments?: number; reviews_count?: number; followers?: number };
+    let parsed: { votes?: number; comments?: number; reviews_count?: number; reviews_avg?: number };
     try {
       parsed = JSON.parse(m);
     } catch {
       continue;
     }
+    let dailyRank: number | null = null;
+    try {
+      const ex = JSON.parse(item.extra as string) as { daily_rank?: number | null };
+      dailyRank = ex?.daily_rank ?? null;
+    } catch { /* noop */ }
     stmts.push(
       env.DB.prepare(
         `INSERT INTO metrics_snapshots_ph (item_id, captured_at, launch_date_pt,
-                                           votes, comments, reviews_count, followers)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                                           votes, comments_count, reviews_count, reviews_avg,
+                                           followers, daily_rank)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         capturedAt,
@@ -574,7 +591,9 @@ async function appendMetricsSnapshots(
         parsed.votes ?? null,
         parsed.comments ?? null,
         parsed.reviews_count ?? null,
-        parsed.followers ?? null,
+        parsed.reviews_avg ?? null,
+        null, // followers — API doesn't expose
+        dailyRank,
       ),
     );
   }

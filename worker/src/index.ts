@@ -284,9 +284,13 @@ export default {
       }
       // ─── PH daily fetch admin debug ────────────────────────────
       // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
-      // HTTP Basic Auth (ADMIN_USER / ADMIN_PASS).
+      // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS) — 长期方案
+      //   或：Bearer + INGEST_TOKEN — TODO(2026-05-11): 临时兜底，便于
+      //   首次 staging 验证时不依赖 admin 凭证；合主分支前删该 fallback。
       if (path === '/api/admin/ph-fetch-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        const bearer = request.headers.get('Authorization') || '';
+        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
+        if (!checkAdminAuth(request, env) && !ingestOk) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
