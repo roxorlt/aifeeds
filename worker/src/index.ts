@@ -25,7 +25,7 @@ import {
   countGithubReadmeTranslatePending,
   countGithubR2Pending,
 } from './github';
-import { runPhR2Migrate, countPhR2Pending } from './ph';
+import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import {
   runClawhubFetchList,
   runClawhubEnrichPending,
