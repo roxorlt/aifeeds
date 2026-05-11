@@ -278,13 +278,10 @@ export default {
       // ─── PH admin debug endpoints ──────────────────────────────
       // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
       // POST /api/admin/ph-enrich-now?limit=10
-      // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS) — 长期方案
-      //   或：Bearer + INGEST_TOKEN — TODO(2026-05-11): 临时兜底，便于
-      //   首次 staging 验证时不依赖 admin 凭证；合主分支前删该 fallback。
+      // POST /api/admin/ph-r2-migrate-now?limit=N
+      // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致。
       if (path === '/api/admin/ph-fetch-now' && request.method === 'POST') {
-        const bearer = request.headers.get('Authorization') || '';
-        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
-        if (!checkAdminAuth(request, env) && !ingestOk) {
+        if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -297,9 +294,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/ph-enrich-now' && request.method === 'POST') {
-        const bearer = request.headers.get('Authorization') || '';
-        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
-        if (!checkAdminAuth(request, env) && !ingestOk) {
+        if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -311,9 +306,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/ph-r2-migrate-now' && request.method === 'POST') {
-        const bearer = request.headers.get('Authorization') || '';
-        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
-        if (!checkAdminAuth(request, env) && !ingestOk) {
+        if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
