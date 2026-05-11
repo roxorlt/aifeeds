@@ -435,12 +435,16 @@ export default {
               console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
-            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 2 个 item。
-            // 单 item subrequest 预算：1 SELECT + 1 detail fetch + 1 DeepSeek + 1 UPDATE ≈ 4。
-            // 2 items/tick × 12 ticks/hour × 24 = 576 items/day enrich，足够吃掉每日新增。
+            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 8 个 item。
+            // 内部用 Promise.all 并行，wall clock 一 tick ~6s（瓶颈最长一条）。
+            // 单 item subrequest 预算：1 detail + 1 readme + 3 LLM call + 1 UPDATE ≈ 6
+            // → 8 × 6 = 48 subreq/tick (CF Paid 1000 上限内非常宽松)。
+            // 2026-05-11 PR #2 hotfix: 从 2 提到 8，原因——484 历史积压用 2/tick
+            // 要 20 小时清完，期间 fill-translations / ph-r2-migrate 全被阻塞，
+            // PH 翻译永远等不到 cron tick。提到 8 后 1.5h 清完，PH 翻译正常跑。
             const clawhubPending = await countClawhubPending(env);
             if (clawhubPending > 0) {
-              const r = await runClawhubEnrichPending(env, 2);
+              const r = await runClawhubEnrichPending(env, 8);
               console.log(`[cron] clawhub-enrich (preempt, ${clawhubPending} pending) result:`, JSON.stringify(r));
               return;
             }
