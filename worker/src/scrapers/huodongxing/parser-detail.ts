@@ -101,7 +101,15 @@ function decodeEntities(s: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => {
+      const code = parseInt(n, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => {
+      const code = parseInt(n, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
 }
 
 function resolveCdnUrl(path: string | null | undefined): string {
@@ -308,16 +316,30 @@ export function parseDetail(html: string): DetailEnrich | null {
 }
 
 /**
- * 用 list-parser 的 city（"北京"）+ detail JSON 的 City（"朝阳"）+ Address（"三板汇..."）
- * 拼出完整 location 字符串。
+ * 用 list-parser 的 city（权威："北京"）+ detail JSON 的 City（站点字段，可能是区如 "朝阳"
+ * 也可能是市重复如 "北京"）+ Address（"三板汇..."）拼出完整 location 字符串。
+ *
+ * 去重逻辑：相邻两段（city / city_district / address）任意一段以前一段开头或与前一段相同
+ * 时去重；address 如果含完整省市前缀（"北京朝阳..."）也只显示一次。
  */
 export function combineLocation(
   cityFromList: string | null,
   detail: DetailEnrich,
 ): string | null {
-  const parts: string[] = [];
-  if (cityFromList) parts.push(cityFromList);
-  if (detail.city_district) parts.push(detail.city_district);
-  if (detail.address) parts.push(detail.address);
-  return parts.length ? parts.join(' · ') : null;
+  const segs: string[] = [];
+  if (cityFromList) segs.push(cityFromList);
+  if (detail.city_district && detail.city_district !== cityFromList) {
+    segs.push(detail.city_district);
+  }
+  if (detail.address) {
+    // 如果 address 已含上文（city / city_district）作前缀，去前缀（避免 "北京朝阳...北京朝阳建国门外..." 这种重复）
+    let addr = detail.address;
+    for (const prev of segs) {
+      if (addr.startsWith(prev)) {
+        addr = addr.slice(prev.length).trim();
+      }
+    }
+    if (addr) segs.push(addr);
+  }
+  return segs.length ? segs.join(' · ') : null;
 }

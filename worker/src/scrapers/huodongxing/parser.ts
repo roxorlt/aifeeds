@@ -26,8 +26,8 @@ export interface EventCard {
   time_raw: string;                // "05/21 周四 14:30" / "明天 14:00" / "后天 10:00"
   location_raw: string;            // "北京朝阳" / "线上活动"
   is_online: boolean;              // location_raw === "线上活动"
-  city: string | null;             // 从 location_raw 拆首 2 字（"北京朝阳" → "北京"；线上 → null）
-  district: string | null;         // 从 location_raw 拆后续（"北京朝阳" → "朝阳"；线上 → null）
+  city: string;                    // 抓取时的权威城市（参数 ?city= 透传），始终非空
+  district: string | null;         // 从 location_raw 减 city 前缀；不匹配时为 location_raw 全部
   organizer: OrganizerInfo;
 }
 
@@ -45,7 +45,17 @@ function decodeEntities(s: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    // numeric decimal entities: &#183; → · / &#8230; → … 等中文站常见
+    .replace(/&#(\d+);/g, (_, n) => {
+      const code = parseInt(n, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    })
+    // numeric hex entities: &#x00b7; etc
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => {
+      const code = parseInt(n, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
 }
 
 function clean(s: string | null | undefined): string {
@@ -89,31 +99,40 @@ function extractOrganizerId(url: string): string | null {
 }
 
 /**
- * location_raw 拆 city + district。规则：
- *   - "线上活动" → city=null, district=null, is_online=true
- *   - "北京朝阳" → city="北京", district="朝阳"
- *   - "上海浦东新区" → city="上海", district="浦东新区"
- *   - 单字段如 "北京" → city="北京", district=null
+ * 拆 location_raw → city + district + is_online。
  *
- * 中国主要城市名都是 2 字，所以前 2 字取 city 是稳的（除"重庆"等也是 2 字）。
- * design doc §2.4 验证过 sample 都是 "北京X / 上海X / 深圳X" 这种 2+N 形态。
+ * authoritativeCity 是抓取时已知的城市名（来自 ?city= query 参数），权威可靠。
+ * 站点列表里事件 location_raw 字段格式不一致（"北京朝阳" / "广东深圳" / "深圳南山"
+ * 等都有出现），用前 2 字猜会把"广东"识别成 city。所以拿权威 city 覆盖。
+ *
+ * 规则：
+ *   - "线上活动" → is_online=true, city=authoritativeCity（线上活动用 city 兜底归类）, district=null
+ *   - 以 authoritativeCity 开头 → city=authoritativeCity, district = location_raw 去前缀
+ *     例 "北京朝阳" + city="北京" → district="朝阳"
+ *   - 不以 authoritativeCity 开头 → city=authoritativeCity（保权威）, district = location_raw 全部
+ *     例 "广东深圳" + city="深圳" → district="广东深圳"（异常 fallback，前端按 city chip 筛仍准确）
  */
-function parseLocation(raw: string): {
+function parseLocation(
+  raw: string,
+  authoritativeCity: string,
+): {
   is_online: boolean;
-  city: string | null;
+  city: string;
   district: string | null;
 } {
   const trimmed = raw.trim();
   if (trimmed === '线上活动') {
-    return { is_online: true, city: null, district: null };
+    return { is_online: true, city: authoritativeCity, district: null };
   }
   if (trimmed.length === 0) {
-    return { is_online: false, city: null, district: null };
+    return { is_online: false, city: authoritativeCity, district: null };
   }
-  // 取前 2 字符为 city（中国主流地名都 2 字），剩余为 district
-  const city = trimmed.slice(0, 2);
-  const district = trimmed.slice(2).trim() || null;
-  return { is_online: false, city, district };
+  if (trimmed.startsWith(authoritativeCity)) {
+    const district = trimmed.slice(authoritativeCity.length).trim() || null;
+    return { is_online: false, city: authoritativeCity, district };
+  }
+  // location_raw 不以 authoritativeCity 开头（异常 fallback）：保留原文作 district 兜底
+  return { is_online: false, city: authoritativeCity, district: trimmed };
 }
 
 /**
@@ -222,9 +241,12 @@ function extractOrganizer(card: string): OrganizerInfo {
  * Parse a listing page HTML into structured cards + last-page signal.
  *
  * @param html the raw HTML body from /events?... fetch
+ * @param authoritativeCity 抓取时的城市参数（如 "北京"），权威可靠，用于 EventCard.city
+ *        + district 解析。location_raw 自身格式不稳（"广东深圳" / "深圳南山" 都见过），
+ *        不能用前 2 字猜。
  * @returns { cards, isLastPage }
  */
-export function parseListing(html: string): ListingParseResult {
+export function parseListing(html: string, authoritativeCity: string): ListingParseResult {
   const isLastPage = /<div\s+class="hd-empty-list"/.test(html);
   const cardBlocks = splitCards(html);
   const cards: EventCard[] = [];
@@ -233,7 +255,7 @@ export function parseListing(html: string): ListingParseResult {
     const eventId = extractEventId(block);
     if (!eventId) continue;
     const locationRaw = extractLocationRaw(block);
-    const { is_online, city, district } = parseLocation(locationRaw);
+    const { is_online, city, district } = parseLocation(locationRaw, authoritativeCity);
     cards.push({
       event_id: eventId,
       title: extractTitle(block),

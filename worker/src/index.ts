@@ -28,7 +28,15 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
-import { handleHuodongxingPoc } from './scrapers/huodongxing';
+import {
+  handleHuodongxingPoc,
+  runHuodongxingFetchList,
+  runHuodongxingDetailEnrich,
+  markStaleEventsHistorical,
+  countHuodongxingDetailPending,
+} from './scrapers/huodongxing';
+import type { HuodongxingCity } from './scrapers/huodongxing/cities';
+import { HUODONGXING_CITIES } from './scrapers/huodongxing/cities';
 import {
   runClawhubFetchList,
   runClawhubEnrichPending,
@@ -322,9 +330,66 @@ export default {
       // GET /poc/hdx?city=北京&page=1&detail=1
       // Returns parsed listing cards + (optional) first detail enrich, with
       // field-extraction stats so we can confirm parsers match real HTML.
-      // 临时无鉴权，Phase 2 落地后此 route 可删（移到 /api/admin/hdx-fetch-now）。
       if (path === '/poc/hdx' && request.method === 'GET') {
         return handleHuodongxingPoc(request, env);
+      }
+      // ─── Huodongxing admin endpoints (Phase 2) — manual fetch / enrich ──────
+      //   POST /api/admin/hdx-fetch-now?budget=40&reset=1&only_city=北京
+      //   POST /api/admin/hdx-enrich-now?limit=5
+      //   POST /api/admin/hdx-sweep-now
+      //   GET  /api/admin/hdx-status
+      // 鉴权：HTTP Basic Auth（ADMIN_USER / ADMIN_PASS）。
+      if (path === '/api/admin/hdx-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const budget = parseInt(u.searchParams.get('budget') || '40', 10);
+        const reset = u.searchParams.get('reset') === '1';
+        const onlyCityParam = u.searchParams.get('only_city');
+        const onlyCity =
+          onlyCityParam && HUODONGXING_CITIES.includes(onlyCityParam)
+            ? (onlyCityParam as HuodongxingCity)
+            : undefined;
+        const result = await runHuodongxingFetchList(env, { budget, reset, onlyCity });
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-enrich-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '3', 10), 20);
+        const result = await runHuodongxingDetailEnrich(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-sweep-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const result = await markStaleEventsHistorical(env);
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-status' && request.method === 'GET') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const pending = await countHuodongxingDetailPending(env);
+        const progressRaw = await env.AUTH_KV.get('hdx:fetch_progress');
+        const progress = progressRaw ? JSON.parse(progressRaw) : null;
+        return jsonResponse({ pending_detail_enrich: pending, fetch_progress: progress }, 200, request, env);
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
@@ -846,6 +911,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   if (sourceType === 'product_hunt') {
     return handlePhFeed(request, env);
   }
+  // Huodongxing: 状态优先（进行中 > 未开始 > 已结束）+ start_time ASC（最近发生在前）。
+  // 默认 filter 过期活动：status != 'historical' AND end_time > now（兜底 start_time + 1d）。
+  // include_historical=1 时取消 filter，用于"历史活动"页面。
+  if (sourceType === 'huodongxing') {
+    return handleHuodongxingFeed(request, env);
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
@@ -1073,6 +1144,113 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
     else if (sort === 'updated') cursorValue = (last.published_at as string) ?? '';
     else if (sort === 'name') cursorValue = ((last.title as string) ?? '').toLowerCase();
     nextCursor = `${cursorValue}|${last.id}`;
+  }
+
+  return jsonResponse({
+    items,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    query_time_ms: queryTime,
+  }, 200, request, env);
+}
+
+// ─── GET /api/items?source_type=huodongxing ─────────────────────
+// Huodongxing feed:
+//   - 默认 filter: status != 'historical' AND (end_time > now OR (end_time IS NULL AND start_time + 1d > now))
+//     `?include_historical=1` 透传时取消该 filter
+//   - 排序: 状态优先（进行中 > 未开始）+ start_time ASC
+//   - cursor: 简化用 "start_time|id"（同 X cron-tail 模式，状态分桶通过 derive_state SQL 实现）
+async function handleHuodongxingFeed(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
+  const cursor = url.searchParams.get('cursor');
+  const includeHistorical = url.searchParams.get('include_historical') === '1';
+  const nowIso = new Date().toISOString();
+
+  const conditions: string[] = [
+    "source_type='huodongxing'",
+    'is_relevant=1',
+    'deleted_at IS NULL',
+  ];
+  const params: unknown[] = [];
+
+  if (!includeHistorical) {
+    // 排除已过期：先排 status='historical'；再用时间兜底（detail 未 enrich 时 status 默认 active）
+    conditions.push(`COALESCE(json_extract(extra, '$.status'), 'active') != 'historical'`);
+    conditions.push(`(
+      json_extract(extra, '$.end_time') > ?
+      OR (json_extract(extra, '$.end_time') IS NULL
+          AND (json_extract(extra, '$.start_time') IS NULL
+               OR datetime(json_extract(extra, '$.start_time'), '+1 day') > datetime(?)))
+    )`);
+    params.push(nowIso, nowIso);
+  }
+
+  // 派生状态：0=进行中, 1=未开始, 2=已结束（用作 ORDER BY 主键）
+  const derivedState = `
+    CASE
+      WHEN json_extract(extra, '$.start_time') IS NOT NULL
+           AND json_extract(extra, '$.start_time') <= ?
+           AND (json_extract(extra, '$.end_time') IS NULL
+                OR json_extract(extra, '$.end_time') > ?)
+        THEN 0
+      WHEN json_extract(extra, '$.start_time') IS NULL
+           OR json_extract(extra, '$.start_time') > ?
+        THEN 1
+      ELSE 2
+    END
+  `;
+
+  if (cursor) {
+    // cursor: "<state>|<start_time>|<id>"
+    const [stateStr, startStr, idStr] = cursor.split('|');
+    const state = parseInt(stateStr, 10);
+    if (!Number.isNaN(state) && idStr) {
+      conditions.push(`(
+        (${derivedState}) > ?
+        OR ((${derivedState}) = ? AND (
+          COALESCE(json_extract(extra, '$.start_time'), '9999') > ?
+          OR (COALESCE(json_extract(extra, '$.start_time'), '9999') = ? AND id > ?)
+        ))
+      )`);
+      params.push(nowIso, nowIso, nowIso, state, nowIso, nowIso, nowIso, state, startStr, startStr, idStr);
+    }
+  }
+
+  const where = conditions.join(' AND ');
+  const sql = `
+    SELECT *,
+      (${derivedState}) AS _state
+      FROM items
+     WHERE ${where}
+     ORDER BY _state ASC,
+              COALESCE(json_extract(extra, '$.start_time'), '9999') ASC,
+              id ASC
+     LIMIT ?
+  `;
+  // ORDER BY 里再次引用 derivedState 时需要再 bind 3 个 now（_state 那次也要）
+  const orderParams = [nowIso, nowIso, nowIso];
+  const finalParams = [...orderParams, ...params, limit + 1];
+
+  const start = Date.now();
+  const result = await env.DB.prepare(sql).bind(...finalParams).all();
+  const queryTime = Date.now() - start;
+
+  const hasMore = result.results.length > limit;
+  const rows = hasMore ? result.results.slice(0, limit) : result.results;
+  const items = rows.map(parseItemRow);
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1] as Record<string, unknown>;
+    const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
+    const lastExtra = last.extra as Record<string, unknown> | null;
+    const lastState = lastRaw._state ?? 9;
+    const lastStart =
+      lastExtra && typeof lastExtra === 'object'
+        ? (lastExtra.start_time as string | undefined) ?? ''
+        : '';
+    nextCursor = `${lastState}|${lastStart}|${last.id}`;
   }
 
   return jsonResponse({
