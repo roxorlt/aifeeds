@@ -435,14 +435,6 @@ export default {
               console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
-            // PH 资源迁移 — 抢占同一 cron slot，单次 1 个 item，subrequest
-            // 预算：1 SELECT + 1 × (~38 GET + 1 UPDATE) = 40（接近 CF Free 50 上限）
-            const phR2Pending = await countPhR2Pending(env);
-            if (phR2Pending > 0) {
-              const r = await runPhR2Migrate(env, 1);
-              console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
             // ClawHub enrich pending — 抢占同一 cron slot，每 tick 2 个 item。
             // 单 item subrequest 预算：1 SELECT + 1 detail fetch + 1 DeepSeek + 1 UPDATE ≈ 4。
             // 2 items/tick × 12 ticks/hour × 24 = 576 items/day enrich，足够吃掉每日新增。
@@ -490,6 +482,17 @@ export default {
             if ((translatePending?.n ?? 0) > 0) {
               const r = await runFillTranslations(env, 15, 5);
               console.log(`[cron] fill-translations (preempt, ${translatePending?.n} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            // PH 资源迁移 — 优先级最低（移到所有翻译/分类之后）。
+            // 之前在 ph-enrich 后面，但 9 PH item r2 pending 会占 9 个 cron tick，
+            // fill-translations 永远等不到，prod 用户看不到中文翻译。改成 r2 在
+            // 所有翻译之后跑：用户先看到中文内容，r2 域名替换属后台过程慢慢补。
+            // 单次 1 个 item，subrequest 预算：1 SELECT + 1 × (~38 GET + 1 UPDATE) = 40。
+            const phR2Pending = await countPhR2Pending(env);
+            if (phR2Pending > 0) {
+              const r = await runPhR2Migrate(env, 1);
+              console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
               return;
             }
           }
