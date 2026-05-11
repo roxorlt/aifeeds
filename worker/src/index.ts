@@ -107,10 +107,6 @@ export interface Env {
   EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
   ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
   ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
-  // CF Browser Rendering binding — used by PH source POC + Phase 2 scraper.
-  // Set in wrangler.toml `[browser] binding = "BROWSER"`.
-  // Requires Workers Paid plan (10h browser/month included).
-  BROWSER?: Fetcher;
   // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.
   // Used by worker/src/scrapers/ph.ts (daily fetch cron).
   PH_CLIENT_ID?: string;
@@ -278,10 +274,6 @@ export default {
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
-      }
-      if (path === '/poc/ph' && request.method === 'GET') {
-        const { handlePhPoc } = await import('./scrapers/ph_poc');
-        return handlePhPoc(request, env);
       }
       // ─── PH admin debug endpoints ──────────────────────────────
       // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
