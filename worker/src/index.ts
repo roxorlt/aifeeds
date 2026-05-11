@@ -14,6 +14,7 @@ import {
   runLongformViaSb,
   runClassifyPending,
   runBackfillVideoMp4,
+  runPhEnrich,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -282,8 +283,9 @@ export default {
         const { handlePhPoc } = await import('./scrapers/ph_poc');
         return handlePhPoc(request, env);
       }
-      // ─── PH daily fetch admin debug ────────────────────────────
+      // ─── PH admin debug endpoints ──────────────────────────────
       // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
+      // POST /api/admin/ph-enrich-now?limit=10
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS) — 长期方案
       //   或：Bearer + INGEST_TOKEN — TODO(2026-05-11): 临时兜底，便于
       //   首次 staging 验证时不依赖 admin 凭证；合主分支前删该 fallback。
@@ -300,6 +302,20 @@ export default {
         const force = u.searchParams.get('force') === '1';
         const ptDate = u.searchParams.get('pt_date') || undefined;
         const result = await runPhDailyFetch(env, { force, ptDate });
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/ph-enrich-now' && request.method === 'POST') {
+        const bearer = request.headers.get('Authorization') || '';
+        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
+        if (!checkAdminAuth(request, env) && !ingestOk) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '10', 10), 30);
+        const result = await runPhEnrich(env, limit);
         return jsonResponse(result, 200, request, env);
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
@@ -405,6 +421,19 @@ export default {
             if (trPending > 0) {
               const r = await runGithubReadmeTranslate(env, 6);
               console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            // PH enrich — DeepSeek 一次性产 is_ai + ai_category + ai_summary
+            // (仿 github-enrich 模式)。先于 fill-translations 跑：is_relevant=0
+            // 的 PH item 不进翻译流程，省 DeepSeek 翻译额度。
+            // 每 tick 10 个 item，30/天 ~3 tick 完成。
+            const phEnrichPending = await env.DB.prepare(
+              `SELECT count(*) AS n FROM items
+                WHERE source_type='product_hunt' AND deleted_at IS NULL AND is_relevant IS NULL`,
+            ).first<{ n: number }>();
+            if ((phEnrichPending?.n ?? 0) > 0) {
+              const r = await runPhEnrich(env, 10);
+              console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
             // PH 资源迁移 — 抢占同一 cron slot，单次 1 个 item，subrequest

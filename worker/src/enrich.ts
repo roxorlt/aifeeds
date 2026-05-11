@@ -2944,3 +2944,176 @@ async function translateLongformContent(
     return null;
   }
 }
+
+// ─── ph-enrich：DeepSeek 一次性产 is_ai + ai_category + ai_summary ───
+//
+// 仿 github-enrich 模式（一锅端，不走 X 流程的 classify-pending），因为 PH 跟
+// GH 一样需要 ai_category；X 没有该字段所以 classify-pending 不输出。
+//
+// ai_category 7 类对齐前端 PH_CATEGORY_STYLE：
+//   ai_agent / ai_code_editor / ai_image_gen / ai_audio /
+//   ai_voice_agent / ai_data_analysis / ai_other
+
+const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
+
+输入：JSON 数组 [{idx, name, tagline, description, topics}]
+
+判断规则：
+- AI 相关：产品核心功能依赖 LLM / 图像生成 / 语音模型 / 智能体框架 / AI 工具链 / AI 基础设施
+- 不 AI 相关：纯 SaaS / 运营工具 / 没有 AI 能力的功能型软件
+
+分类（is_relevant=1 时必填一个）：
+- ai_agent: 智能体 / autonomous workflow / 多步任务自动化
+- ai_code_editor: AI 编程编辑器 / 代码补全 / IDE 插件
+- ai_image_gen: 图像生成 / 编辑 / 设计工具
+- ai_audio: 音乐 / TTS / 音频编辑
+- ai_voice_agent: 语音对话智能体 / call center bot
+- ai_data_analysis: 数据分析 / BI / SQL 助手
+- ai_other: 不在以上 6 类的 AI 产品
+
+ai_summary（is_relevant=1 时必填，中文一句话 30-60 字，说明产品是什么 + 给谁用 + 核心价值）。
+is_relevant=0 时 ai_category=null, ai_summary=""。
+
+输入：%INPUT%
+
+只返回一个 JSON 对象 { items: [{ idx, is_relevant, ai_category, ai_summary }, ...] }，不要任何其他文字。`;
+
+export interface PhEnrichResult {
+  mode: 'ph-enrich';
+  selected: number;
+  classified: number;
+  relevant: number;
+  irrelevant: number;
+  duration_ms: number;
+  error?: string;
+}
+
+interface PhEnrichRow {
+  id: string;
+  source_id: string;
+  title: string | null;
+  content: string | null;
+  extra: string | null;
+}
+
+interface PhEnrichResponse {
+  items?: Array<{
+    idx: number;
+    is_relevant: 0 | 1;
+    ai_category?: string | null;
+    ai_summary?: string;
+  }>;
+}
+
+export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichResult> {
+  const t0 = Date.now();
+  if (!env.DEEPSEEK_API_KEY) {
+    return { mode: 'ph-enrich', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: 0, error: 'no_deepseek_key' };
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, title, content, extra
+       FROM items
+      WHERE source_type = 'product_hunt'
+        AND deleted_at IS NULL
+        AND is_relevant IS NULL
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<PhEnrichRow>();
+
+  const selected = rows.results.length;
+  if (selected === 0) {
+    return { mode: 'ph-enrich', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0 };
+  }
+
+  const input = rows.results.map((r, i) => {
+    let extra: { description?: string; topics?: string[] } = {};
+    try {
+      const p = JSON.parse(r.extra || '{}');
+      if (p && typeof p === 'object') extra = p;
+    } catch { /* noop */ }
+    return {
+      idx: i,
+      name: r.title || '',
+      tagline: r.content || '',
+      description: (extra.description || '').slice(0, 400),
+      topics: (extra.topics || []).slice(0, 5),
+    };
+  });
+  const prompt = PH_ENRICH_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let res: Response;
+  try {
+    res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        max_tokens: 4000,
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'fetch_failed' };
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: `http_${res.status}` };
+  }
+
+  const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: PhEnrichResponse;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'json_parse' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [];
+  let relevant = 0;
+  let irrelevant = 0;
+  let classified = 0;
+  for (const out of parsed.items || []) {
+    const idx = out.idx;
+    if (idx == null || idx < 0 || idx >= rows.results.length) continue;
+    const row = rows.results[idx];
+    const isAi = out.is_relevant === 1 ? 1 : 0;
+    const cat = isAi ? (out.ai_category || 'ai_other') : null;
+    const summary = isAi ? (out.ai_summary || '').trim() : '';
+    classified++;
+    if (isAi) relevant++; else irrelevant++;
+    stmts.push(
+      env.DB.prepare(
+        `UPDATE items
+            SET is_relevant = ?,
+                matched_by = COALESCE(matched_by, 'ph-enrich'),
+                extra = json_set(coalesce(extra, '{}'),
+                                 '$.ai_category', ?,
+                                 '$.ai_summary', ?,
+                                 '$.classified_at', ?)
+          WHERE id = ?`,
+      ).bind(isAi, cat, summary, nowIso, row.id),
+    );
+  }
+  if (stmts.length > 0) {
+    try {
+      await env.DB.batch(stmts);
+    } catch (e) {
+      console.error('[ph-enrich] batch error:', e);
+      return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0, error: 'batch_error' };
+    }
+  }
+  return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0 };
+}
