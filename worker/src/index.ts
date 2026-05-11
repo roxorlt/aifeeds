@@ -28,6 +28,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
+import { handleHuodongxingPoc } from './scrapers/huodongxing';
 import {
   runClawhubFetchList,
   runClawhubEnrichPending,
@@ -316,6 +317,14 @@ export default {
         const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
         const result = await runPhR2Migrate(env, limit);
         return jsonResponse(result, 200, request, env);
+      }
+      // ─── Huodongxing POC (Phase 1) — no DB write, dev/QA validation only ────
+      // GET /poc/hdx?city=北京&page=1&detail=1
+      // Returns parsed listing cards + (optional) first detail enrich, with
+      // field-extraction stats so we can confirm parsers match real HTML.
+      // 临时无鉴权，Phase 2 落地后此 route 可删（移到 /api/admin/hdx-fetch-now）。
+      if (path === '/poc/hdx' && request.method === 'GET') {
+        return handleHuodongxingPoc(request, env);
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
