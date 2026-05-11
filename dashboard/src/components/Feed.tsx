@@ -156,6 +156,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
   const [chHideSuspicious, setChHideSuspicious] = useState<boolean>(true);
   const isClawhub = sourceType === "clawhub";
+  // PH 跟 ClawHub 同样：不轮询新产品（每天 04:10 cron 一次性更新）、
+  // 不显示"N 个新产品"横幅、不走曝光过滤（time 模式 + 日榜性质）。
+  const isPh = sourceType === "product_hunt";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
   const [pullY, setPullY] = useState(0);
@@ -192,10 +195,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       .then((res) => {
         if (cancelled) return;
         let itemsToShow = res.items;
-        if (isHot && !isClawhub) {
+        if (isHot && !isClawhub && !isPh) {
           // Filter out already-seen ids so pull-down surfaces unseen hottest.
-          // ClawHub 是 marketplace 性质，不是流式新闻，所有用户应看完整 top 而不
-          // 是被曝光过的就过滤掉 → 跳过此过滤。
+          // ClawHub 是 marketplace 性质、PH 是日榜性质，不是流式新闻，所有用户应
+          // 看完整 top 而不是被曝光过的就过滤掉 → 跳过此过滤。
           const seen = getSeenIds(sourceType);
           itemsToShow = res.items.filter((i) => !seen.has(i.id));
           markSeen(sourceType, itemsToShow.map((i) => i.id));
@@ -239,13 +242,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
       });
       consecutiveFailRef.current = 0;
-      const seen = (isHot && !isClawhub) ? getSeenIds(sourceType) : null;
+      const seen = (isHot && !isClawhub && !isPh) ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
         const fresh = res.items.filter(
           (i) => !existing.has(i.id) && (!seen || !seen.has(i.id)),
         );
-        if (isHot && !isClawhub) markSeen(sourceType, fresh.map((i) => i.id));
+        if (isHot && !isClawhub && !isPh) markSeen(sourceType, fresh.map((i) => i.id));
         return [...prev, ...fresh];
       });
       setNextCursor(res.next_cursor);
@@ -405,8 +408,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // sort is score-based, so newly-scraped items may not belong at the top —
   // we still count them, but clicking the banner triggers a full re-fetch with
   // fresh hot ranking instead of prepending stale positions.
+  // PH 每天 04:10 cron 一次性更新（PT 日榜性质），不需要持续 poll，节约请求。
   useEffect(() => {
-    if (placeholder) return;
+    if (placeholder || isPh) return;
     const poll = async () => {
       if (!lastScrapedAt.current) return;
       try {
@@ -427,7 +431,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [sourceType, placeholder, items, pending]);
+  }, [sourceType, placeholder, items, pending, isPh]);
 
   const showPending = () => {
     if (isHot) {
@@ -628,8 +632,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         </div>
       </header>
 
-      {/* New items banner — stacked avatars + count (Twitter-style) */}
-      {pending.length > 0 && (
+      {/* New items banner — stacked avatars + count (Twitter-style)
+          PH 跳过 banner：cron 每天 04:10 一次性更新，没有"持续新内容"语义 */}
+      {pending.length > 0 && !isPh && (
         <button
           type="button"
           onClick={() => {
@@ -641,7 +646,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           <PendingAvatars pending={pending} />
           <span>
             ↑ {pending.length}{" "}
-            {sourceType === "github" ? "个新 repo" : sourceType === "product_hunt" ? "个新产品" : "条新推文"}
+            {sourceType === "github" ? "个新 repo" : "条新推文"}
           </span>
         </button>
       )}
