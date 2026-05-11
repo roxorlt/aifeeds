@@ -107,7 +107,11 @@ export function PhDrawerBody({ item }: Props) {
   const name = item.title || "?";
   const tagline = item.content || "";
   const taglineTranslated = item.content_translated || "";
-  const dailyRank = (extra as { daily_rank?: number }).daily_rank;
+  // display_rank: 后端 ROW_NUMBER 给同日内连续编号 1,2,3...N（绕过 PH displayRank 跳号/重复）。
+  // daily_rank: PH 原始值，留 tooltip 调试。
+  const ex = extra as { daily_rank?: number; display_rank?: number };
+  const displayRank = ex.display_rank ?? ex.daily_rank;
+  const phRawRank = ex.daily_rank;
   const launchDate = extra.launch_date_pt || "";
   const phUrl = extra.ph_url || item.url || "";
   const websiteUrl = (extra.website_url as string) || "";
@@ -205,13 +209,13 @@ export function PhDrawerBody({ item }: Props) {
                 votes 回到下方 KPI 行（不再挪上来） */}
             <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
               {launchDate && <span className="tabular-nums">{launchDate}</span>}
-              {launchDate && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
-              {dailyRank !== undefined && (
-                <span className="tabular-nums" title={`PH 当日榜第 ${dailyRank} 名`}>
-                  #{dailyRank}
+              {launchDate && displayRank !== undefined && <span className="text-neutral-400">·</span>}
+              {displayRank !== undefined && (
+                <span className="tabular-nums" title={phRawRank !== undefined && phRawRank !== displayRank ? `aifeeds 排名 #${displayRank}（PH 原始 dailyRank: ${phRawRank}）` : `PH 当日榜第 ${displayRank} 名`}>
+                  #{displayRank}
                 </span>
               )}
-              {(launchDate || dailyRank !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
+              {(launchDate || displayRank !== undefined) && aiCategoryText && <span className="text-neutral-400">·</span>}
               {aiCategoryText && (
                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${phCategoryStyle(aiCategory)}`}>
                   {aiCategoryText}
@@ -490,8 +494,8 @@ export function PhDrawerBody({ item }: Props) {
                 开源
               </span>
             )}
-            {dailyRank !== undefined && (
-              <span className="ml-auto text-[11px] text-neutral-400">{ordinal(dailyRank)} on PH</span>
+            {displayRank !== undefined && (
+              <span className="ml-auto text-[11px] text-neutral-400">{ordinal(displayRank)} on PH</span>
             )}
           </div>
         )}

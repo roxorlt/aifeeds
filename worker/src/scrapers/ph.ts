@@ -583,20 +583,30 @@ export async function runPhDailyFetch(
   }
   console.log(`[ph] list query: ${listNodes.length} posts for PT ${ptDate}`);
 
-  // 2. Per-post detail (sequential — 30 small queries, ~30-60s total)
+  // 2. Per-post detail — Promise.all 并行 50 query
+  //    串行版 50×~1s=50s 超 CF HTTP 30s timeout，admin endpoint 跑不完。
+  //    并行后 wall clock ~3-5s（瓶颈最慢一条）。subrequest 50+1+2=53 << 1000 cap。
+  //    PH rate limit 6250 complexity / 15min，单次 ~2500 points 在配额内。
   const items: ItemInput[] = [];
   let fetchedOk = 0;
-  for (const node of listNodes) {
-    const detail = await fetchPhPostDetail(env, node.id);
+  const detailResults = await Promise.all(
+    listNodes.map((node) => fetchPhPostDetail(env, node.id)),
+  );
+  for (let i = 0; i < listNodes.length; i++) {
+    const detail = detailResults[i];
     if (!detail) {
-      console.warn(`[ph] detail fetch failed for ${node.slug} (${node.id})`);
+      console.warn(`[ph] detail fetch failed for ${listNodes[i].slug} (${listNodes[i].id})`);
       continue;
     }
     fetchedOk++;
     items.push(transformPostToIngestItem(detail, ptDate));
   }
 
-  // 3. Ingest via internal function call
+  // 3. Inline translate tagline + maker_post_text (短文本，60s 内完成 50 条 batch)
+  //    评论/long content 留 fill-translations cron 后台慢慢翻
+  await translatePhItemsInline(env, items);
+
+  // 4. Ingest via internal function call
   const ingestResult = await ingestItems(env, items);
   console.log(
     `[ph] ingestItems: inserted=${ingestResult.inserted} updated=${ingestResult.updated} errors=${ingestResult.errors.length}`,
@@ -673,4 +683,177 @@ async function appendMetricsSnapshots(
       console.error('[ph] metrics_snapshots_ph insert error:', e);
     }
   }
+}
+
+// ─── Inline DeepSeek translation (tagline + maker_post) ────────
+//
+// Fetch 阶段同步翻译核心两个字段（卡片 tagline + 抽屉 maker_post），原文+译文一起入库。
+// 用户感知中文延迟从 5-30min（fill-translations cron 后台接力）降到秒级。
+// 评论文本仍走 fill-translations 后台（评论是抽屉打开才看，可异步）。
+//
+// 复用 fill-translations 那套 sanity check 风格但简化（PH 全英文 + 短文本，
+// sanity 误判率低）。batch_size=20，50 条 × 2 字段 ≈ 5 个 LLM call ≈ 15-25s wall clock。
+
+const DS_URL_TR = 'https://api.deepseek.com/v1/chat/completions';
+const DS_MODEL_TR = 'deepseek-chat';
+const NL_MARK_TR = '⟪NL⟫';
+
+function cjkRatioPh(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  let total = 0;
+  for (const c of text) {
+    if (/\s/.test(c)) continue;
+    total++;
+    const code = c.charCodeAt(0);
+    if (code >= 0x4e00 && code <= 0x9fff) cjk++;
+  }
+  return total === 0 ? 0 : cjk / total;
+}
+
+function isLikelyChinesePh(text: string): boolean {
+  return !!text && cjkRatioPh(text) > 0.3;
+}
+
+interface PhTranslateTask {
+  itemIdx: number;
+  field: 'content' | 'maker_post';
+  text: string;
+}
+
+const PH_TRANSLATE_PROMPT = `把下面每条 Product Hunt 产品文案或开发者帖文翻译成自然中文。
+
+规则：
+- 专有名词、人名、品牌名、产品名、模型名（GPT-4 / Claude / Cursor 等）保留英文
+- 技术术语保留英文：fork / branch / merge / commit / PR / repo / push / pretrain / RLHF / prompt / embedding / RAG / LLM / API / SDK / CLI / IDE / CI/CD / OSS / MCP
+- 'agent' → '智能体'（不是'代理'）
+- 'token' → 'token'（不是'令牌'）
+- 'fine-tune' → '微调'
+- 代码/命令/URL/@handle 原样保留
+- 输出自然口语化中文，避免直译腔
+- 保留 ${NL_MARK_TR} 标记（代表换行）
+
+每行格式：index:translated_text
+不要加任何额外文字。
+
+输入：
+%INPUT%
+
+输出：`;
+
+async function translatePhBatch(
+  apiKey: string,
+  texts: string[],
+): Promise<Map<number, string>> {
+  const numbered = texts
+    .map((t, i) => `${i}:${t.replace(/\r\n/g, '\n').replace(/\n/g, NL_MARK_TR)}`)
+    .join('\n');
+  const prompt = PH_TRANSLATE_PROMPT.replace('%INPUT%', numbered);
+
+  const out = new Map<number, string>();
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    const resp = await fetch(DS_URL_TR, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: DS_MODEL_TR,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 4000,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) {
+      console.warn(`[ph] inline translate HTTP ${resp.status}`);
+      return out;
+    }
+    const body = (await resp.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const text = body.choices?.[0]?.message?.content || '';
+    for (const line of text.split('\n')) {
+      const m = line.match(/^(\d+):(.*)$/);
+      if (!m) continue;
+      const idx = parseInt(m[1], 10);
+      const tr = m[2].replace(new RegExp(NL_MARK_TR, 'g'), '\n').trim();
+      if (tr) out.set(idx, tr);
+    }
+  } catch (e) {
+    console.warn('[ph] inline translate error:', e instanceof Error ? e.message : String(e));
+  }
+  return out;
+}
+
+/**
+ * 批量翻译 items[].content (tagline) + extra.maker_post_text，
+ * 直接 mutate items 写入 content_translated + extra.maker_post_translated。
+ * 静默失败：DeepSeek 挂了/缺 key，items 保持原样（fill-translations cron 兜底）。
+ */
+async function translatePhItemsInline(env: Env, items: ItemInput[]): Promise<void> {
+  if (!env.DEEPSEEK_API_KEY) {
+    console.log('[ph] inline translate skipped — no DEEPSEEK_API_KEY');
+    return;
+  }
+
+  const tasks: PhTranslateTask[] = [];
+  // 同步 parse extra 一次，避免重复 JSON.parse
+  const extras = items.map((item) => {
+    try {
+      return JSON.parse(item.extra as string) as Record<string, unknown>;
+    } catch {
+      return {} as Record<string, unknown>;
+    }
+  });
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const extra = extras[i];
+    // tagline (item.content)
+    if (item.content && !isLikelyChinesePh(item.content)) {
+      tasks.push({ itemIdx: i, field: 'content', text: item.content });
+    }
+    // maker_post_text (extra.maker_post_text)
+    const mpText = extra.maker_post_text as string | undefined;
+    if (mpText && !isLikelyChinesePh(mpText)) {
+      tasks.push({ itemIdx: i, field: 'maker_post', text: mpText });
+    }
+  }
+
+  if (tasks.length === 0) {
+    console.log('[ph] inline translate: 0 tasks (all already zh or empty)');
+    return;
+  }
+
+  console.log(`[ph] inline translate: ${tasks.length} tasks across ${items.length} items`);
+  const t0 = Date.now();
+
+  // batch_size 20，50 items × 2 fields ≈ 100 tasks ÷ 20 = 5 LLM calls
+  const BATCH = 20;
+  let translated = 0;
+  for (let start = 0; start < tasks.length; start += BATCH) {
+    const batch = tasks.slice(start, start + BATCH);
+    const result = await translatePhBatch(env.DEEPSEEK_API_KEY, batch.map((t) => t.text));
+    for (let j = 0; j < batch.length; j++) {
+      const tr = result.get(j);
+      if (!tr) continue;
+      const task = batch[j];
+      const item = items[task.itemIdx];
+      if (task.field === 'content') {
+        item.content_translated = tr;
+      } else {
+        // maker_post_translated 写回 extra
+        const extra = extras[task.itemIdx];
+        extra.maker_post_translated = tr;
+        item.extra = JSON.stringify(extra);
+      }
+      translated++;
+    }
+  }
+  console.log(`[ph] inline translate done: ${translated}/${tasks.length} in ${Date.now() - t0}ms`);
 }
