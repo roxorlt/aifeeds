@@ -342,7 +342,26 @@ function userToProfileUrl(u: PhUser): string | null {
   return u.username ? `https://www.producthunt.com/@${u.username}` : null;
 }
 
-function userToMaker(u: PhUser): PhMakerDb {
+/**
+ * PH GraphQL with client_credentials auth (no user context) masks most user
+ * identities as "[REDACTED]" / id="0" — only the post.user (hunter) and
+ * the viewer's own info come through real. This is a privacy protection vs
+ * scraping; nothing to do with the user being deleted.
+ *
+ * Strategy:
+ * - makers[] array: filter out [REDACTED] (full anonymous list has no value)
+ * - comments / maker_post: KEEP, but show author as "PH 用户" placeholder —
+ *   the comment text itself is valuable (e.g. maker self-intro often there)
+ * - hunter: trust as-is (always real)
+ */
+function isRedactedUser(u: PhUser): boolean {
+  return u.name === '[REDACTED]' || u.username === '[REDACTED]';
+}
+
+const ANONYMOUS_PH_USER_LABEL = 'PH 用户';
+
+function userToMakerOrNull(u: PhUser): PhMakerDb | null {
+  if (isRedactedUser(u)) return null;
   return {
     name: u.name,
     handle: u.username,
@@ -351,12 +370,40 @@ function userToMaker(u: PhUser): PhMakerDb {
   };
 }
 
+/**
+ * Strip basic HTML tags from PH comment bodies. PH returns rich-text HTML
+ * (<p>, <br>, <img>, <a>) but our frontend uses whitespace-pre-wrap and
+ * renders tags literally. Convert to plain text with paragraph/line breaks.
+ */
+function stripHtml(html: string): string {
+  if (!html) return '';
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<p[^>]*>/gi, '')
+    .replace(/<\/p>/gi, '')
+    .replace(/<\/?(div|span|strong|b|i|em|u)[^>]*>/gi, '')
+    .replace(/<a[^>]*>(.*?)<\/a>/gi, '$1')
+    .replace(/<img[^>]*alt=["']([^"']*)["'][^>]*>/gi, '[图片:$1]')
+    .replace(/<img[^>]*>/gi, '[图片]')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function commentToDb(c: PhCommentNode): PhCommentDb {
+  const isRedacted = isRedactedUser(c.user);
   return {
-    author_name: c.user.name,
-    author_handle: c.user.username,
-    avatar_url: c.user.profileImage,
-    text: c.body,
+    author_name: isRedacted ? ANONYMOUS_PH_USER_LABEL : c.user.name,
+    author_handle: isRedacted ? null : c.user.username,
+    avatar_url: isRedacted ? null : c.user.profileImage,
+    text: stripHtml(c.body),
     upvotes: c.votesCount,
   };
 }
@@ -391,11 +438,15 @@ export function transformPostToIngestItem(
     media.push(mediaToDb(m));
   }
 
-  // Makers + Hunter
-  const makers: PhMakerDb[] = post.makers.map(userToMaker);
-  const hunter = userToMaker(post.user);
+  // Makers + Hunter — filter out [REDACTED] users (PH masks deleted/spam users)
+  const makers: PhMakerDb[] = post.makers
+    .map(userToMakerOrNull)
+    .filter((m): m is PhMakerDb => m !== null);
+  const hunter = userToMakerOrNull(post.user);
 
-  // Comments: separate maker_post (first by maker, by votes) vs top_comments
+  // Comments: separate maker_post (first by maker, by votes) vs top_comments.
+  // Keep [REDACTED] comments — text content is valuable (maker self-intros etc),
+  // commentToDb shows author as "PH 用户" placeholder.
   const makerIdSet = new Set(post.makers.map((m) => m.id));
   const sortedComments = post.comments.edges
     .map((e) => e.node)
@@ -446,8 +497,9 @@ export function transformPostToIngestItem(
     source_id: sourceId,
     title: post.name,
     content: post.tagline,
-    author: post.makers[0]?.name ?? post.user.name ?? undefined,
-    handle: post.makers[0]?.username ?? post.user.username ?? undefined,
+    // Use filtered makers/hunter (skip [REDACTED] users) for author fallback
+    author: makers[0]?.name ?? hunter?.name ?? undefined,
+    handle: makers[0]?.handle ?? hunter?.handle ?? undefined,
     url: post.url,
     media: JSON.stringify(media),
     metrics: JSON.stringify(metrics),
