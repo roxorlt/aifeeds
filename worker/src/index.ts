@@ -318,6 +318,20 @@ export default {
         const result = await runPhEnrich(env, limit);
         return jsonResponse(result, 200, request, env);
       }
+      if (path === '/api/admin/ph-r2-migrate-now' && request.method === 'POST') {
+        const bearer = request.headers.get('Authorization') || '';
+        const ingestOk = !!env.INGEST_TOKEN && bearer === `Bearer ${env.INGEST_TOKEN}`;
+        if (!checkAdminAuth(request, env) && !ingestOk) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
+        const result = await runPhR2Migrate(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal error';
@@ -467,12 +481,26 @@ export default {
             }
             // fill-translations 抢占：同样 12 ticks/hour，每批 15 个 item。
             // batchSize 5 × 3 batches = 3 LLM call/tick，subreq ~30 内可控。
+            // 包含 PH item（runFillTranslations 内部 SQL 已支持 source_type=product_hunt）。
             const translatePending = await env.DB.prepare(
               `SELECT count(*) AS n FROM items
-                 WHERE source_type='x_list' AND deleted_at IS NULL
-                   AND is_relevant=1 AND content_translated IS NULL
-                   AND lang IS NOT NULL AND lang != 'zh'
-                   AND content IS NOT NULL AND length(content) > 0`,
+                 WHERE deleted_at IS NULL AND is_relevant=1
+                   AND (
+                     (source_type='x_list' AND content_translated IS NULL
+                      AND lang IS NOT NULL AND lang != 'zh'
+                      AND content IS NOT NULL AND length(content) > 0)
+                     OR (source_type='product_hunt' AND (
+                       (content_translated IS NULL AND content IS NOT NULL)
+                       OR (json_extract(extra, '$.maker_post_text') IS NOT NULL
+                           AND json_extract(extra, '$.maker_post_translated') IS NULL)
+                       OR (json_extract(extra, '$.top_comments') IS NOT NULL
+                           AND EXISTS (
+                             SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+                             WHERE json_extract(c.value, '$.text') IS NOT NULL
+                               AND json_extract(c.value, '$.translated') IS NULL
+                           ))
+                     ))
+                   )`,
             ).first<{ n: number }>();
             if ((translatePending?.n ?? 0) > 0) {
               const r = await runFillTranslations(env, 15, 5);

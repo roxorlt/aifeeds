@@ -2173,17 +2173,22 @@ type TaskField =
   | "content"
   | "quote_of"
   | "link_card_title"
-  | "link_card_desc";
+  | "link_card_desc"
+  // PH-specific:
+  | "ph_maker_post"     // extra.maker_post_text → extra.maker_post_translated
+  | "ph_top_comment";   // extra.top_comments[i].text → extra.top_comments[i].translated
 
 interface TranslationTask {
   itemId: string;
   field: TaskField;
   text: string;
+  commentIdx?: number; // for ph_top_comment: index into extra.top_comments[]
 }
 
 interface TranslationRow {
   id: string;
   source_id: string;
+  source_type: string;
   content: string | null;
   lang: string | null;
   content_translated: string | null;
@@ -2202,27 +2207,49 @@ async function selectTranslationCandidates(
   // 优先 content 未翻译的（命中率 ~100%，没 isLikelyChinese 浪费），
   // 其次是 quote_of/link_card 边角；同优先级里 RANDOM 散布。
   const rows = await env.DB.prepare(
-    `SELECT id, source_id, content, lang, content_translated, extra
+    `SELECT id, source_id, source_type, content, lang, content_translated, extra
      FROM items
-     WHERE source_type = 'x_list'
-       AND is_relevant = 1
+     WHERE is_relevant = 1
        AND (
-         (content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL)
-         OR (
-           json_extract(extra, '$.quote_of.content') IS NOT NULL
-           AND json_extract(extra, '$.quote_of.content_translated') IS NULL
+         (
+           source_type = 'x_list'
+           AND (
+             (content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL)
+             OR (
+               json_extract(extra, '$.quote_of.content') IS NOT NULL
+               AND json_extract(extra, '$.quote_of.content_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.link_card.title') IS NOT NULL
+               AND json_extract(extra, '$.link_card.title_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.link_card.description') IS NOT NULL
+               AND json_extract(extra, '$.link_card.description_translated') IS NULL
+             )
+           )
          )
          OR (
-           json_extract(extra, '$.link_card.title') IS NOT NULL
-           AND json_extract(extra, '$.link_card.title_translated') IS NULL
-         )
-         OR (
-           json_extract(extra, '$.link_card.description') IS NOT NULL
-           AND json_extract(extra, '$.link_card.description_translated') IS NULL
+           source_type = 'product_hunt'
+           AND (
+             (content_translated IS NULL AND content IS NOT NULL)
+             OR (
+               json_extract(extra, '$.maker_post_text') IS NOT NULL
+               AND json_extract(extra, '$.maker_post_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.top_comments') IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+                 WHERE json_extract(c.value, '$.text') IS NOT NULL
+                   AND json_extract(c.value, '$.translated') IS NULL
+               )
+             )
+           )
          )
        )
      ORDER BY
-       CASE WHEN content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL THEN 0 ELSE 1 END,
+       CASE WHEN content_translated IS NULL AND content IS NOT NULL THEN 0 ELSE 1 END,
        RANDOM()
      LIMIT ?`,
   )
@@ -2276,6 +2303,29 @@ function extractTasks(row: TranslationRow): TranslationTask[] {
     const dTr = lc.description_translated as string | null | undefined;
     if (desc && !dTr && !isLikelyChinese(desc)) {
       tasks.push({ itemId: row.id, field: "link_card_desc", text: desc });
+    }
+  }
+  // PH-specific extraction
+  if (row.source_type === "product_hunt") {
+    const mpText = extra.maker_post_text as string | null | undefined;
+    const mpTr = extra.maker_post_translated as string | null | undefined;
+    if (mpText && !mpTr && !isLikelyChinese(mpText)) {
+      tasks.push({ itemId: row.id, field: "ph_maker_post", text: mpText });
+    }
+    const topComments = extra.top_comments as
+      | Array<{ text?: string; translated?: string }>
+      | undefined;
+    if (Array.isArray(topComments)) {
+      topComments.forEach((c, i) => {
+        if (c.text && !c.translated && !isLikelyChinese(c.text)) {
+          tasks.push({
+            itemId: row.id,
+            field: "ph_top_comment",
+            text: c.text,
+            commentIdx: i,
+          });
+        }
+      });
     }
   }
   return tasks;
@@ -2377,6 +2427,9 @@ interface TranslationItemPatch {
   quote_content_translated?: string;
   link_title_translated?: string;
   link_desc_translated?: string;
+  // PH-specific:
+  ph_maker_post_translated?: string;
+  ph_top_comments_translated?: Map<number, string>; // commentIdx → translated
   translation_quality?: string;
   translation_attempts?: number;
 }
@@ -2414,6 +2467,21 @@ async function applyTranslationPatch(
       }
       if (patch.link_desc_translated) {
         lc.description_translated = patch.link_desc_translated;
+      }
+    }
+  }
+  // PH: maker_post_translated → extra.maker_post_translated
+  if (patch.ph_maker_post_translated) {
+    extra.maker_post_translated = patch.ph_maker_post_translated;
+  }
+  // PH: top_comments[i].translated mutation
+  if (patch.ph_top_comments_translated && patch.ph_top_comments_translated.size > 0) {
+    const tc = extra.top_comments as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(tc)) {
+      for (const [idx, tr] of patch.ph_top_comments_translated) {
+        if (tc[idx] && typeof tc[idx] === "object") {
+          tc[idx].translated = tr;
+        }
       }
     }
   }
@@ -2558,6 +2626,12 @@ export async function runFillTranslations(
     else if (task.field === "quote_of") p.quote_content_translated = tr;
     else if (task.field === "link_card_title") p.link_title_translated = tr;
     else if (task.field === "link_card_desc") p.link_desc_translated = tr;
+    else if (task.field === "ph_maker_post") p.ph_maker_post_translated = tr;
+    else if (task.field === "ph_top_comment" && task.commentIdx !== undefined) {
+      const m = p.ph_top_comments_translated || new Map<number, string>();
+      m.set(task.commentIdx, tr);
+      p.ph_top_comments_translated = m;
+    }
     patches.set(task.itemId, p);
     if (sanityHit(task.text, tr)) suspectItemIds.add(task.itemId);
   }
