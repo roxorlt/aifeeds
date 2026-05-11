@@ -69,7 +69,11 @@ export function PhCard({ item }: Props) {
   // 作为独立 section 全文展示，卡片用它当 4 行预览。
   const aiSummary = (extra.ai_summary as string) || "";
   const tagline = aiSummary || item.content_translated || item.content || "";
-  const dailyRank = (extra as { daily_rank?: number }).daily_rank;
+  // display_rank: 后端 ROW_NUMBER 给同日内连续编号 1,2,3...N（绕过 PH 自身 displayRank 跳号/重复）。
+  // daily_rank: PH API 原始值（保留作 tooltip 调试）。优先用 display_rank 显示。
+  const ex = extra as { daily_rank?: number; display_rank?: number };
+  const displayRank = ex.display_rank ?? ex.daily_rank;
+  const phRawRank = ex.daily_rank;
   const launchDate = extra.launch_date_pt || "";
   const dateMd = launchDate ? launchDate.slice(5) : ""; // "MM-DD"，无 PT 后缀
   const aiCategoryRaw = (extra.ai_category as string) || "";
@@ -121,13 +125,13 @@ export function PhCard({ item }: Props) {
           {/* Meta（第二行）：日期 / #排名 / 分类标签（彩色 chip） */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
             {dateMd && <span className="tabular-nums">{dateMd}</span>}
-            {dateMd && dailyRank !== undefined && <span className="text-neutral-400">·</span>}
-            {dailyRank !== undefined && (
-              <span className="tabular-nums" title={`PH 当日榜第 ${dailyRank} 名`}>
-                #{dailyRank}
+            {dateMd && displayRank !== undefined && <span className="text-neutral-400">·</span>}
+            {displayRank !== undefined && (
+              <span className="tabular-nums" title={phRawRank !== undefined && phRawRank !== displayRank ? `aifeeds 排名 #${displayRank}（PH 原始 dailyRank: ${phRawRank}）` : `PH 当日榜第 ${displayRank} 名`}>
+                #{displayRank}
               </span>
             )}
-            {(dateMd || dailyRank !== undefined) && aiCategoryLabel && (
+            {(dateMd || displayRank !== undefined) && aiCategoryLabel && (
               <span className="text-neutral-400">·</span>
             )}
             {aiCategoryLabel && (

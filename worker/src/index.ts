@@ -1164,34 +1164,33 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
 //   - ORDER BY launch_date_pt DESC, daily_rank ASC, id ASC
 //   - optional ?pinned=product_hunt:<id> to bubble a shared link to the top
 //   - cursor: "launch_date|rank|id" for cross-day pagination
+//
+// display_rank: SQL ROW_NUMBER 子查询给同日内连续编号 1,2,3...N。
+// 用：PH dailyRank 实测有重复值 + 跳号（4,4 / 5,5 / 6→8→7→14...），原因
+// 不明但前端要看到连续 1,2,3 序号。前端用 extra.display_rank 显示，daily_rank
+// 仍保留供调试。子查询不带 cursor 过滤，cursor 应用在外层不影响 ROW_NUMBER。
 async function handlePhFeed(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
   const pinned = url.searchParams.get('pinned');
 
-  const conditions: string[] = [
-    "source_type='product_hunt'",
-    'is_relevant=1',
-    'deleted_at IS NULL',
-  ];
+  const cursorConditions: string[] = [];
   const params: unknown[] = [];
 
   if (cursor) {
     const [dateStr, rankStr, idStr] = cursor.split('|');
     const rank = parseInt(rankStr, 10);
     if (dateStr && !Number.isNaN(rank) && idStr) {
-      // 同 GH 的 lexicographic cursor：
-      //   date < cursor.date
-      //   OR (date = cursor.date AND (rank > cursor.rank
-      //                                OR (rank = cursor.rank AND id > cursor.id)))
-      conditions.push(`(
-        json_extract(extra, '$.launch_date_pt') < ?
+      // Lexicographic cursor on (date DESC, daily_rank ASC, id ASC) — 用
+      // sub-query 的 launch_date_pt / daily_rank / id 列名:
+      cursorConditions.push(`(
+        launch_date_pt < ?
         OR (
-          json_extract(extra, '$.launch_date_pt') = ?
+          launch_date_pt = ?
           AND (
-            CAST(json_extract(extra, '$.daily_rank') AS INTEGER) > ?
-            OR (CAST(json_extract(extra, '$.daily_rank') AS INTEGER) = ? AND id > ?)
+            daily_rank_int > ?
+            OR (daily_rank_int = ? AND id > ?)
           )
         )
       )`);
@@ -1199,17 +1198,33 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  const where = conditions.join(' AND ');
+  const cursorWhere = cursorConditions.length > 0 ? `WHERE ${cursorConditions.join(' AND ')}` : '';
   const pinExpr = pinned ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), ` : '';
   if (pinned) params.unshift(pinned);
 
+  // 子查询给每行打 display_rank（同日内连续编号，绕过 PH dailyRank 跳号）。
+  // 子查询不带 cursor 过滤，否则 ROW_NUMBER 会被分页边界破坏（同日跨页时从 1 重启）。
   const sql = `
-    SELECT * FROM items
-    WHERE ${where}
+    SELECT * FROM (
+      SELECT
+        items.*,
+        json_extract(items.extra, '$.launch_date_pt') AS launch_date_pt,
+        CAST(json_extract(items.extra, '$.daily_rank') AS INTEGER) AS daily_rank_int,
+        ROW_NUMBER() OVER (
+          PARTITION BY json_extract(items.extra, '$.launch_date_pt')
+          ORDER BY
+            CAST(json_extract(items.extra, '$.daily_rank') AS INTEGER) ASC,
+            items.id ASC
+        ) AS display_rank
+      FROM items
+      WHERE source_type = 'product_hunt'
+        AND is_relevant = 1
+        AND deleted_at IS NULL
+    ) sub
+    ${cursorWhere}
     ORDER BY ${pinExpr}
-             json_extract(extra, '$.launch_date_pt') DESC,
-             CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
-             id ASC
+             launch_date_pt DESC,
+             display_rank ASC
     LIMIT ?
   `;
   params.push(limit + 1);
@@ -1220,7 +1235,15 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map(parseItemRow);
+  const items = rows.map((row) => {
+    const item = parseItemRow(row);
+    // 把 display_rank 从 row 顶层字段塞到 extra 里供前端用
+    const displayRank = (row as Record<string, unknown>).display_rank;
+    if (displayRank !== null && displayRank !== undefined && item.extra && typeof item.extra === 'object') {
+      (item.extra as Record<string, unknown>).display_rank = displayRank;
+    }
+    return item;
+  });
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
