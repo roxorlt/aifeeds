@@ -435,23 +435,16 @@ export default {
               console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
-            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 8 个 item。
-            // 内部用 Promise.all 并行，wall clock 一 tick ~6s（瓶颈最长一条）。
-            // 单 item subrequest 预算：1 detail + 1 readme + 3 LLM call + 1 UPDATE ≈ 6
-            // → 8 × 6 = 48 subreq/tick (CF Paid 1000 上限内非常宽松)。
-            // 2026-05-11 PR #2 hotfix: 从 2 提到 8，原因——484 历史积压用 2/tick
-            // 要 20 小时清完，期间 fill-translations / ph-r2-migrate 全被阻塞，
-            // PH 翻译永远等不到 cron tick。提到 8 后 1.5h 清完，PH 翻译正常跑。
-            const clawhubPending = await countClawhubPending(env);
-            if (clawhubPending > 0) {
-              const r = await runClawhubEnrichPending(env, 8);
-              console.log(`[cron] clawhub-enrich (preempt, ${clawhubPending} pending) result:`, JSON.stringify(r));
-              return;
-            }
             // classify-pending 抢占：12 ticks/hour 都可能跑（队列有就干），
             // 把"新 item NULL → 进 feed"延迟从 30 min 拉到 5 min。
             // DeepSeek QPM 不是瓶颈，唯一限制是 CF Worker subrequest 预算
             // (15 items 1 prompt = 1 LLM call + 15 D1 update ≈ 17 subreq，OK)。
+            //
+            // 2026-05-11 PR #4 hotfix: classify + fill-translations 提到 clawhub
+            // 之前。ClawHub 484 积压用 8/tick 清完仍要 5 小时，期间 X classify /
+            // PH+X 翻译永远等不到 cron tick。ClawHub item 默认 is_relevant=1
+            // （marketplace 不走 LLM 判定），enrich 只是后台数据丰富化
+            // （license/findings），UX 不直接感知，慢一点 OK。
             const classifyPending = await env.DB.prepare(
               `SELECT count(*) AS n FROM items WHERE source_type='x_list' AND deleted_at IS NULL AND is_relevant IS NULL`,
             ).first<{ n: number }>();
@@ -486,6 +479,19 @@ export default {
             if ((translatePending?.n ?? 0) > 0) {
               const r = await runFillTranslations(env, 15, 5);
               console.log(`[cron] fill-translations (preempt, ${translatePending?.n} pending) result:`, JSON.stringify(r));
+              return;
+            }
+            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 8 个 item。
+            // 内部用 Promise.all 并行，wall clock 一 tick ~6s（瓶颈最长一条）。
+            // 单 item subrequest 预算：1 detail + 1 readme + 3 LLM call + 1 UPDATE ≈ 6
+            // → 8 × 6 = 48 subreq/tick (CF Paid 1000 上限内非常宽松)。
+            //
+            // 2026-05-11 PR #4 hotfix: 移到 X classify / 翻译之后。优先 UX 直接
+            // 感知的中文翻译，ClawHub enrich 是后台丰富化慢点 OK。
+            const clawhubPending = await countClawhubPending(env);
+            if (clawhubPending > 0) {
+              const r = await runClawhubEnrichPending(env, 8);
+              console.log(`[cron] clawhub-enrich (preempt, ${clawhubPending} pending) result:`, JSON.stringify(r));
               return;
             }
             // PH 资源迁移 — 优先级最低（移到所有翻译/分类之后）。
