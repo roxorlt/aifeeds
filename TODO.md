@@ -15,7 +15,7 @@
 - [ ] **prod 上线前去 PH dashboard regenerate API Secret**：旧 secret 在 chat 暴露过；regenerate 后告诉我新值，我重注入 prod + staging
 - [ ] **prod secret 注入**：拿到新 secret 后 `wrangler secret put PH_CLIENT_ID` + `PH_CLIENT_SECRET` 入 prod
 - [ ] **主 PR merge → CICD 自动 deploy → 监控首日 cron**（次日 北京 04:10 = UTC 20:10 自动触发）
-- [ ] **删 staging 临时 INGEST_TOKEN 兜底鉴权**：`/api/admin/ph-fetch-now` / `/ph-enrich-now` / `/ph-r2-migrate-now` 三个 endpoint 的 INGEST_TOKEN fallback 是首次 staging 验证用的，主 PR merge 前删（保留 ADMIN_USER/ADMIN_PASS 长期方案）
+- [x] ~~**删 staging 临时 INGEST_TOKEN 兜底鉴权**：三个 ph-*-now endpoint 已统一只保 Basic Auth (commit `d0b930d`)~~
 - [ ] **staging 旧 row 残留 `[REDACTED]` author/handle 修复**：现有 9 条 PH item 的 items.author/handle 是 force re-fetch 前的 [REDACTED] 值（ingestItems UPDATE SET 不刷 author/handle 字段）。一次性 SQL UPDATE 刷新即可；prod 是 fresh 不会重现。或考虑给 ingestItems UPDATE SET 加 author/handle（影响 X/GH/CH，需评估回归）
 
 ### 0.1 PH 安全期 PR（2026-05-18+，主 PR prod 稳定 ≥7 天后）
