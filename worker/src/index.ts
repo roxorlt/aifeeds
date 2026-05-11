@@ -378,12 +378,14 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          // ─── PH daily fetch (UTC 20:10-20:14, 1 PT day) ─────────
-          // PT yesterday is frozen ~13h+ at this point, daily_rank stable.
+          // ─── PH daily fetch (UTC 10:10-10:14 = 北京 18:10, 1 PT day) ─
+          // PT 切日点：PDT 北京 15:00 / PST 北京 16:00。北京 18:10 = PDT
+          // 切日后 3h10m / PST 切日后 2h10m，daily_rank 已 settle，全年通吃。
+          // 用户体验：北京晚上 6 点就能看到当天 PT 榜（原 04:10 是次日凌晨）。
           // KV sentinel keys on PT date — won't double-fire across 5min window
           // or cross-day retries. Returns early so this tick is dedicated to PH
-          // (~30 detail queries + ingest + snapshot ≈ 60+ subreq, big block).
-          if (hour === 20 && minute >= 10 && minute < 15) {
+          // (~50+ detail queries + ingest + snapshot ≈ 110+ subreq).
+          if (hour === 10 && minute >= 10 && minute < 15) {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             return;

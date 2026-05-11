@@ -189,14 +189,15 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `20:10-20:14` → `runPhDailyFetch`（PH 一日一抓）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / **PH enrich** / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
+| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `10:10-10:14` → `runPhDailyFetch`（PH 一日一抓，北京 18:10）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / **PH enrich** / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
 
 **调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
 
 **Product Hunt（2026-05-11 v2，全云端 — 迁离 browser-use 本地脚本）**：
 - **抓取在云端**：用 PH GraphQL API v2 + client_credentials OAuth（不再走本地 browser-use）。
-  - **Phase 1 — `runPhDailyFetch`**（worker/src/scrapers/ph.ts）：dispatcher UTC 20:10-14（北京次日 04:10-14）窗口触发，KV 哨兵 `ph:fetched:<PT_date>` 防一日内重跑。流程：list query 拿 PT yesterday top 30 featured posts → 每条 detail query 拿 makers/comments/media/topics → transform 成 IngestItem → 内调 `ingestItems()` 写 D1 → append `metrics_snapshots_ph` → 写 KV 哨兵
-  - 实测 PT 工作日通常 ~15-30 条 featured posts（API 上限 first:30）
+  - **Phase 1 — `runPhDailyFetch`**（worker/src/scrapers/ph.ts）：dispatcher UTC 10:10-14（北京 18:10-14）窗口触发，KV 哨兵 `ph:fetched:<PT_date>` 防一日内重跑。流程：list query cursor 翻页拿 PT yesterday 全部 featured posts → 每条 detail query 拿 makers/comments/media/topics → transform 成 IngestItem → 内调 `ingestItems()` 写 D1 → append `metrics_snapshots_ph` → 写 KV 哨兵
+  - **PH API 单页 cap 20**，必须用 `pageInfo.endCursor` 翻页（max 10 页 = 200 条保护）。实测 PT 一日 featured 通常 30-50 条，原 `first:30` 单页只拿到 20 漏过半
+  - **触发时间选 18:10 理由**：PT 切日点 = 北京 15:00 (PDT) / 16:00 (PST)；18:10 给 PH 后端 2-3 小时 settle daily_rank。原 04:10 (UTC 20:10) 太保守，用户次日凌晨才看到
 - **Phase 2 — `runPhEnrich`**（worker/src/enrich.ts）：每 cron tick 抢占（位于 ph-r2-migrate 之前）。`SELECT WHERE source_type='product_hunt' AND is_relevant IS NULL`，DeepSeek 一次性出 `{is_ai, ai_category, ai_summary}`，json_set 写回 extra。每 tick 10 条；30 个/天 ~3 tick 完成
 - **Phase 3 — `fill-translations`**：现有 X 流程扩展支持 PH 字段（tagline / maker_post / top_comments[]），`is_relevant=1` 才进队列。中文翻译写回 content_translated / extra.maker_post_translated / extra.top_comments[i].translated
 - **Phase 4 — `ph-r2-migrate`**（worker/src/ph-r2.ts，原 worker/src/ph.ts 改名）：每 cron tick 1 个 item，logo/gallery/avatar/video 抓 PH CDN → SHA-256 hash key 写 R2 → 改写 extra/media URL 到 `/r/ph/<sha>`。`is_relevant=1 AND extra.r2_migrated_at IS NULL` 才挑
