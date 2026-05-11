@@ -8,6 +8,33 @@
 
 ## 进行中
 
+### 0. PH GraphQL + worker cron 主 PR 收尾（2026-05-11）
+
+> 主 PR 已合 staging 验收完毕（设计 [docs/plans/2026-05-11-ph-graphql-cf-cron-design.md](docs/plans/2026-05-11-ph-graphql-cf-cron-design.md)、计划 [docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md](docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md)）。剩下：
+
+- [ ] **prod 上线前去 PH dashboard regenerate API Secret**：旧 secret 在 chat 暴露过；regenerate 后告诉我新值，我重注入 prod + staging
+- [ ] **prod secret 注入**：拿到新 secret 后 `wrangler secret put PH_CLIENT_ID` + `PH_CLIENT_SECRET` 入 prod
+- [ ] **主 PR merge → CICD 自动 deploy → 监控首日 cron**（次日 北京 04:10 = UTC 20:10 自动触发）
+- [ ] **删 staging 临时 INGEST_TOKEN 兜底鉴权**：`/api/admin/ph-fetch-now` / `/ph-enrich-now` / `/ph-r2-migrate-now` 三个 endpoint 的 INGEST_TOKEN fallback 是首次 staging 验证用的，主 PR merge 前删（保留 ADMIN_USER/ADMIN_PASS 长期方案）
+- [ ] **staging 旧 row 残留 `[REDACTED]` author/handle 修复**：现有 9 条 PH item 的 items.author/handle 是 force re-fetch 前的 [REDACTED] 值（ingestItems UPDATE SET 不刷 author/handle 字段）。一次性 SQL UPDATE 刷新即可；prod 是 fresh 不会重现。或考虑给 ingestItems UPDATE SET 加 author/handle（影响 X/GH/CH，需评估回归）
+
+### 0.1 PH 安全期 PR（2026-05-18+，主 PR prod 稳定 ≥7 天后）
+
+> 主 PR 不动 scrapers/ph/ + launchd PH agent，留作 prod 翻车时手动 fallback。
+
+- [ ] 删除 `scrapers/ph/` 整个目录（git 历史保留代码）
+- [ ] `launchctl unload ~/Library/LaunchAgents/com.aifeeds.ph*.plist` + 删 plist（如有）
+- [ ] 写 `docs/archive/ph-scraper-retired.md`：退役原因 / 旧实现摘要 / git history pointer
+- [ ] CLAUDE.md 数据源现状段确认 PH 描述无残留旧 launchd 引用
+
+### 0.2 PH 后续 polish（不阻塞主 PR）
+
+- [ ] **comments 作者 mask 替代方案**：PH client_credentials 隐藏所有非 hunter 用户，前端显示"PH 用户"占位。要解需切 OAuth user-token 流程（涉及登录授权 + token 刷新），工程量大，先不做
+- [ ] **lazy-enrich-on-drawer for PH**：worker/src/enrich.ts:242 的 `product_hunt: 留到下次 PR` stub 还在，drawer 打开时刷新单条 PH item 的 metrics 待补
+- [ ] **PH 评论保留富文本格式**：当前 transform 时 `stripHtml` 把 `<p><br>` 转纯文本 + 段落换行。如果未来要保留富文本（链接 / 图片），改前端 sanitize 渲染（DOMPurify + dangerouslySetInnerHTML）
+
+---
+
 ### 1. PR6 上线运维加固（4 项纯运维收尾）
 
 > PR5 海报反馈、抽屉刷新、PR-B/C 对话上下文等都已合 main（详见已完成段）。当前 PR6 一揽子里只剩下面 4 件**纯运维**项：

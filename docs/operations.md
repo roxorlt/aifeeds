@@ -189,16 +189,32 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
+| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `20:10-20:14` → `runPhDailyFetch`（PH 一日一抓）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / **PH enrich** / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
 
 **调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
 
-**Product Hunt（2026-05-04 上线）**：
-- **抓取在本地**：CF Browser Rendering 过不了 PH 的 turnstile（POC 实测 25s wait + 鼠标 + scroll 模拟都失败）；用 browser-use Profile 1 + 持久 session（PHSession）+ 5s pacing，10s/产品稳定通过。详见 `docs/dev-log.md`
-- **Worker 端**：仅 `/api/ingest` 接收本地 push（`source_type=product_hunt`，source_id 复合键 `<slug>:<launch_date_pt>`）+ `worker/src/ph.ts` 做 R2 资源迁移（logo/screenshot/video/avatar 二进制 → SHA-256 key 写 R2，extra.media URL 改写到 `/r/<key>`）+ `/r/<key>` 反代
-- **PH 数据落 D1**：items 表统一 schema，PH 专属字段全在 `items.extra` JSON：`product_slug` / `launch_date_pt` / `daily_rank` / `categories` / `pricing_type` / `is_open_source` / `makers` / `hunter` / `maker_post` / `maker_post_text` / `maker_post_translated` / `top_comments[]` / `top_reviews[]` / `ai_summary` / `ai_category` / `ph_url` / `website_url`
-- **R2 迁移幂等**：`extra.r2_migrated_at` 标记已迁移；ingest 走二次 worker 内部 fetch 触发迁移，避免 push 阻塞
-- **手动重抓**：见下方"本地服务 → PH leaderboard scraper"
+**Product Hunt（2026-05-11 v2，全云端 — 迁离 browser-use 本地脚本）**：
+- **抓取在云端**：用 PH GraphQL API v2 + client_credentials OAuth（不再走本地 browser-use）。
+  - **Phase 1 — `runPhDailyFetch`**（worker/src/scrapers/ph.ts）：dispatcher UTC 20:10-14（北京次日 04:10-14）窗口触发，KV 哨兵 `ph:fetched:<PT_date>` 防一日内重跑。流程：list query 拿 PT yesterday top 30 featured posts → 每条 detail query 拿 makers/comments/media/topics → transform 成 IngestItem → 内调 `ingestItems()` 写 D1 → append `metrics_snapshots_ph` → 写 KV 哨兵
+  - 实测 PT 工作日通常 ~15-30 条 featured posts（API 上限 first:30）
+- **Phase 2 — `runPhEnrich`**（worker/src/enrich.ts）：每 cron tick 抢占（位于 ph-r2-migrate 之前）。`SELECT WHERE source_type='product_hunt' AND is_relevant IS NULL`，DeepSeek 一次性出 `{is_ai, ai_category, ai_summary}`，json_set 写回 extra。每 tick 10 条；30 个/天 ~3 tick 完成
+- **Phase 3 — `fill-translations`**：现有 X 流程扩展支持 PH 字段（tagline / maker_post / top_comments[]），`is_relevant=1` 才进队列。中文翻译写回 content_translated / extra.maker_post_translated / extra.top_comments[i].translated
+- **Phase 4 — `ph-r2-migrate`**（worker/src/ph-r2.ts，原 worker/src/ph.ts 改名）：每 cron tick 1 个 item，logo/gallery/avatar/video 抓 PH CDN → SHA-256 hash key 写 R2 → 改写 extra/media URL 到 `/r/ph/<sha>`。`is_relevant=1 AND extra.r2_migrated_at IS NULL` 才挑
+- **PH 数据落 D1**：items 表统一 schema，PH 专属字段全在 `items.extra` JSON：`product_slug` / `launch_date_pt` / `daily_rank` / `topics` / `makers` / `hunter` / `maker_post` / `maker_post_text` / `maker_post_translated` / `top_comments[]` / `ai_summary` / `ai_category` / `ph_url` / `website_url` / `r2_migrated_at`
+- **API 限制（重要）**：client_credentials 鉴权下 PH 隐藏所有非 hunter 用户身份（name/username 返回 `[REDACTED]`，id 返回 `0`）。`makers[]` 全 [REDACTED] → 过滤为空数组；comments / maker_post 保留文本但 author 显示 "PH 用户" 占位；hunter 真实可见。这是 PH 反爬虫策略（防 app token 爬用户）。要解需切 OAuth user-token 流程（涉及登录授权）
+- **API 不暴露的字段**：`reviews` 详情（只有汇总数 `Post.reviewsCount/reviewsRating`）/ `pricing_type` / `is_open_source` / `followers` 数 — 前端按设计优雅降级（reviews 段隐藏 / pricing+open_source chip 隐藏 / followers KPI 显 "—"）
+- **凭证**：PH OAuth Application 在 https://www.producthunt.com/v2/oauth/applications 创建。Worker 端 secret：
+  - `PH_CLIENT_ID`：API Key
+  - `PH_CLIENT_SECRET`：API Secret（PH 只显示一次，丢失需 regenerate）
+  - 注入命令（staging）：`printf '<value>' | npx wrangler secret put PH_CLIENT_ID --env staging`；prod 去掉 `--env staging`
+- **手动触发**（admin debug，需 Basic Auth or `Authorization: Bearer $INGEST_TOKEN`）：
+  - `POST /api/admin/ph-fetch-now?force=1` 跳哨兵立即抓 PT yesterday
+  - `POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD` 指定日期回灌
+  - `POST /api/admin/ph-enrich-now?limit=10` 立即跑一次 ph-enrich
+  - `POST /api/admin/ph-r2-migrate-now?limit=2` 立即跑一次 r2 迁移
+  - `POST /api/enrich/run?mode=fill-translations&limit=30` 触发翻译
+- **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && hour === 20 ...)` redeploy
+- **旧 launchd PH 抓取**：已退役，仅留作 prod 翻车时人工 fallback。M8 安全期 PR（主 PR prod 稳定 ≥7 天后）执行：删 `scrapers/ph/` + launchd unload + 写 `docs/archive/ph-scraper-retired.md`
 
 **GitHub trending（2026-05-02 上线，迁自本地 launchd）**：
 - **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
