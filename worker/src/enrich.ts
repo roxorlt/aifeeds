@@ -2173,17 +2173,22 @@ type TaskField =
   | "content"
   | "quote_of"
   | "link_card_title"
-  | "link_card_desc";
+  | "link_card_desc"
+  // PH-specific:
+  | "ph_maker_post"     // extra.maker_post_text → extra.maker_post_translated
+  | "ph_top_comment";   // extra.top_comments[i].text → extra.top_comments[i].translated
 
 interface TranslationTask {
   itemId: string;
   field: TaskField;
   text: string;
+  commentIdx?: number; // for ph_top_comment: index into extra.top_comments[]
 }
 
 interface TranslationRow {
   id: string;
   source_id: string;
+  source_type: string;
   content: string | null;
   lang: string | null;
   content_translated: string | null;
@@ -2202,27 +2207,49 @@ async function selectTranslationCandidates(
   // 优先 content 未翻译的（命中率 ~100%，没 isLikelyChinese 浪费），
   // 其次是 quote_of/link_card 边角；同优先级里 RANDOM 散布。
   const rows = await env.DB.prepare(
-    `SELECT id, source_id, content, lang, content_translated, extra
+    `SELECT id, source_id, source_type, content, lang, content_translated, extra
      FROM items
-     WHERE source_type = 'x_list'
-       AND is_relevant = 1
+     WHERE is_relevant = 1
        AND (
-         (content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL)
-         OR (
-           json_extract(extra, '$.quote_of.content') IS NOT NULL
-           AND json_extract(extra, '$.quote_of.content_translated') IS NULL
+         (
+           source_type = 'x_list'
+           AND (
+             (content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL)
+             OR (
+               json_extract(extra, '$.quote_of.content') IS NOT NULL
+               AND json_extract(extra, '$.quote_of.content_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.link_card.title') IS NOT NULL
+               AND json_extract(extra, '$.link_card.title_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.link_card.description') IS NOT NULL
+               AND json_extract(extra, '$.link_card.description_translated') IS NULL
+             )
+           )
          )
          OR (
-           json_extract(extra, '$.link_card.title') IS NOT NULL
-           AND json_extract(extra, '$.link_card.title_translated') IS NULL
-         )
-         OR (
-           json_extract(extra, '$.link_card.description') IS NOT NULL
-           AND json_extract(extra, '$.link_card.description_translated') IS NULL
+           source_type = 'product_hunt'
+           AND (
+             (content_translated IS NULL AND content IS NOT NULL)
+             OR (
+               json_extract(extra, '$.maker_post_text') IS NOT NULL
+               AND json_extract(extra, '$.maker_post_translated') IS NULL
+             )
+             OR (
+               json_extract(extra, '$.top_comments') IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+                 WHERE json_extract(c.value, '$.text') IS NOT NULL
+                   AND json_extract(c.value, '$.translated') IS NULL
+               )
+             )
+           )
          )
        )
      ORDER BY
-       CASE WHEN content_translated IS NULL AND (lang IS NULL OR lang != 'zh') AND content IS NOT NULL THEN 0 ELSE 1 END,
+       CASE WHEN content_translated IS NULL AND content IS NOT NULL THEN 0 ELSE 1 END,
        RANDOM()
      LIMIT ?`,
   )
@@ -2276,6 +2303,29 @@ function extractTasks(row: TranslationRow): TranslationTask[] {
     const dTr = lc.description_translated as string | null | undefined;
     if (desc && !dTr && !isLikelyChinese(desc)) {
       tasks.push({ itemId: row.id, field: "link_card_desc", text: desc });
+    }
+  }
+  // PH-specific extraction
+  if (row.source_type === "product_hunt") {
+    const mpText = extra.maker_post_text as string | null | undefined;
+    const mpTr = extra.maker_post_translated as string | null | undefined;
+    if (mpText && !mpTr && !isLikelyChinese(mpText)) {
+      tasks.push({ itemId: row.id, field: "ph_maker_post", text: mpText });
+    }
+    const topComments = extra.top_comments as
+      | Array<{ text?: string; translated?: string }>
+      | undefined;
+    if (Array.isArray(topComments)) {
+      topComments.forEach((c, i) => {
+        if (c.text && !c.translated && !isLikelyChinese(c.text)) {
+          tasks.push({
+            itemId: row.id,
+            field: "ph_top_comment",
+            text: c.text,
+            commentIdx: i,
+          });
+        }
+      });
     }
   }
   return tasks;
@@ -2377,6 +2427,9 @@ interface TranslationItemPatch {
   quote_content_translated?: string;
   link_title_translated?: string;
   link_desc_translated?: string;
+  // PH-specific:
+  ph_maker_post_translated?: string;
+  ph_top_comments_translated?: Map<number, string>; // commentIdx → translated
   translation_quality?: string;
   translation_attempts?: number;
 }
@@ -2414,6 +2467,21 @@ async function applyTranslationPatch(
       }
       if (patch.link_desc_translated) {
         lc.description_translated = patch.link_desc_translated;
+      }
+    }
+  }
+  // PH: maker_post_translated → extra.maker_post_translated
+  if (patch.ph_maker_post_translated) {
+    extra.maker_post_translated = patch.ph_maker_post_translated;
+  }
+  // PH: top_comments[i].translated mutation
+  if (patch.ph_top_comments_translated && patch.ph_top_comments_translated.size > 0) {
+    const tc = extra.top_comments as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(tc)) {
+      for (const [idx, tr] of patch.ph_top_comments_translated) {
+        if (tc[idx] && typeof tc[idx] === "object") {
+          tc[idx].translated = tr;
+        }
       }
     }
   }
@@ -2558,6 +2626,12 @@ export async function runFillTranslations(
     else if (task.field === "quote_of") p.quote_content_translated = tr;
     else if (task.field === "link_card_title") p.link_title_translated = tr;
     else if (task.field === "link_card_desc") p.link_desc_translated = tr;
+    else if (task.field === "ph_maker_post") p.ph_maker_post_translated = tr;
+    else if (task.field === "ph_top_comment" && task.commentIdx !== undefined) {
+      const m = p.ph_top_comments_translated || new Map<number, string>();
+      m.set(task.commentIdx, tr);
+      p.ph_top_comments_translated = m;
+    }
     patches.set(task.itemId, p);
     if (sanityHit(task.text, tr)) suspectItemIds.add(task.itemId);
   }
@@ -2943,4 +3017,177 @@ async function translateLongformContent(
     );
     return null;
   }
+}
+
+// ─── ph-enrich：DeepSeek 一次性产 is_ai + ai_category + ai_summary ───
+//
+// 仿 github-enrich 模式（一锅端，不走 X 流程的 classify-pending），因为 PH 跟
+// GH 一样需要 ai_category；X 没有该字段所以 classify-pending 不输出。
+//
+// ai_category 7 类对齐前端 PH_CATEGORY_STYLE：
+//   ai_agent / ai_code_editor / ai_image_gen / ai_audio /
+//   ai_voice_agent / ai_data_analysis / ai_other
+
+const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
+
+输入：JSON 数组 [{idx, name, tagline, description, topics}]
+
+判断规则：
+- AI 相关：产品核心功能依赖 LLM / 图像生成 / 语音模型 / 智能体框架 / AI 工具链 / AI 基础设施
+- 不 AI 相关：纯 SaaS / 运营工具 / 没有 AI 能力的功能型软件
+
+分类（is_relevant=1 时必填一个）：
+- ai_agent: 智能体 / autonomous workflow / 多步任务自动化
+- ai_code_editor: AI 编程编辑器 / 代码补全 / IDE 插件
+- ai_image_gen: 图像生成 / 编辑 / 设计工具
+- ai_audio: 音乐 / TTS / 音频编辑
+- ai_voice_agent: 语音对话智能体 / call center bot
+- ai_data_analysis: 数据分析 / BI / SQL 助手
+- ai_other: 不在以上 6 类的 AI 产品
+
+ai_summary（is_relevant=1 时必填，中文一句话 30-60 字，说明产品是什么 + 给谁用 + 核心价值）。
+is_relevant=0 时 ai_category=null, ai_summary=""。
+
+输入：%INPUT%
+
+只返回一个 JSON 对象 { items: [{ idx, is_relevant, ai_category, ai_summary }, ...] }，不要任何其他文字。`;
+
+export interface PhEnrichResult {
+  mode: 'ph-enrich';
+  selected: number;
+  classified: number;
+  relevant: number;
+  irrelevant: number;
+  duration_ms: number;
+  error?: string;
+}
+
+interface PhEnrichRow {
+  id: string;
+  source_id: string;
+  title: string | null;
+  content: string | null;
+  extra: string | null;
+}
+
+interface PhEnrichResponse {
+  items?: Array<{
+    idx: number;
+    is_relevant: 0 | 1;
+    ai_category?: string | null;
+    ai_summary?: string;
+  }>;
+}
+
+export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichResult> {
+  const t0 = Date.now();
+  if (!env.DEEPSEEK_API_KEY) {
+    return { mode: 'ph-enrich', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: 0, error: 'no_deepseek_key' };
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, title, content, extra
+       FROM items
+      WHERE source_type = 'product_hunt'
+        AND deleted_at IS NULL
+        AND is_relevant IS NULL
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<PhEnrichRow>();
+
+  const selected = rows.results.length;
+  if (selected === 0) {
+    return { mode: 'ph-enrich', selected: 0, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0 };
+  }
+
+  const input = rows.results.map((r, i) => {
+    let extra: { description?: string; topics?: string[] } = {};
+    try {
+      const p = JSON.parse(r.extra || '{}');
+      if (p && typeof p === 'object') extra = p;
+    } catch { /* noop */ }
+    return {
+      idx: i,
+      name: r.title || '',
+      tagline: r.content || '',
+      description: (extra.description || '').slice(0, 400),
+      topics: (extra.topics || []).slice(0, 5),
+    };
+  });
+  const prompt = PH_ENRICH_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let res: Response;
+  try {
+    res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        max_tokens: 4000,
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'fetch_failed' };
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: `http_${res.status}` };
+  }
+
+  const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: PhEnrichResponse;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { mode: 'ph-enrich', selected, classified: 0, relevant: 0, irrelevant: 0, duration_ms: Date.now() - t0, error: 'json_parse' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [];
+  let relevant = 0;
+  let irrelevant = 0;
+  let classified = 0;
+  for (const out of parsed.items || []) {
+    const idx = out.idx;
+    if (idx == null || idx < 0 || idx >= rows.results.length) continue;
+    const row = rows.results[idx];
+    const isAi = out.is_relevant === 1 ? 1 : 0;
+    const cat = isAi ? (out.ai_category || 'ai_other') : null;
+    const summary = isAi ? (out.ai_summary || '').trim() : '';
+    classified++;
+    if (isAi) relevant++; else irrelevant++;
+    stmts.push(
+      env.DB.prepare(
+        `UPDATE items
+            SET is_relevant = ?,
+                matched_by = COALESCE(matched_by, 'ph-enrich'),
+                extra = json_set(coalesce(extra, '{}'),
+                                 '$.ai_category', ?,
+                                 '$.ai_summary', ?,
+                                 '$.classified_at', ?)
+          WHERE id = ?`,
+      ).bind(isAi, cat, summary, nowIso, row.id),
+    );
+  }
+  if (stmts.length > 0) {
+    try {
+      await env.DB.batch(stmts);
+    } catch (e) {
+      console.error('[ph-enrich] batch error:', e);
+      return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0, error: 'batch_error' };
+    }
+  }
+  return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0 };
 }

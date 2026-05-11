@@ -1,7 +1,10 @@
 # Product Hunt 源接入设计
 
+> ⚠️ **此设计已被 [2026-05-11-ph-graphql-cf-cron-design.md](2026-05-11-ph-graphql-cf-cron-design.md) 替代**。
+> 本文档保留作历史参考——本地 browser-use 抓取方案已退役（M8 安全期 PR 后将删 scrapers/ph/），PH 全量改走 GraphQL API + CF Worker cron。
+>
 > 日期：2026-05-03
-> 状态：设计稿（待 Phase 0 用户 sign-off → Phase 1 实施）
+> 状态：~~设计稿~~ 已实施 + 2026-05-11 退役
 > 对应 SOP：[docs/source-integration-sop.md](../source-integration-sop.md)
 > Mockup：[_mockups/2026-05-03-ph-drawer-mockup.html](_mockups/2026-05-03-ph-drawer-mockup.html)
 

@@ -28,11 +28,6 @@ binding = "AUTH_KV"
 id = "07d666433fef483a9457146f7d5a62d5"
 preview_id = "78f0a9567d434d8b87c71cc29eea88f9"
 
-# CF Browser Rendering — used by PH source scraper (POC + Phase 2).
-# Workers Paid Plan 月含 10h 浏览器时间，PH 抓取月度预估 ~5h。
-[browser]
-binding = "BROWSER"
-
 [vars]
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）
 EMAIL_DAILY_CAP = "100"
@@ -64,9 +59,6 @@ bucket_name = "xlist-readme-assets-staging"
 binding = "AUTH_KV"
 id = "76f7a326a94c4b8685668e39a23b3fe9"
 preview_id = "f187810317a845eca4b20f6e7b357a79"
-
-[env.staging.browser]
-binding = "BROWSER"
 
 [env.staging.vars]
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）

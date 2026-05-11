@@ -5,7 +5,7 @@
 > - **项目名**：`aifeeds`（产品代号）。本地目录 `~/brain/30-projects/aifeeds/`。
 > - **公网**：`https://ai-feeds.com`（前端）/ `https://api.ai-feeds.com`（worker）
 > - **CF 资源命名**（保留历史 `xlist-` 前缀，迁移成本太高）：worker = `xlist-api` / Pages = `xlist-dashboard` / D1 = `xlist`（staging 是 `xlist-staging`）
-> - **数据源现状（4 个）**：X 走 ScrapeBadger API / GitHub trending 走 GH / Product Hunt 走 Convex / ClawHub 走 Convex
+> - **数据源现状（4 个）**：X 走 ScrapeBadger API / GitHub trending 走 GH API / Product Hunt 走 PH GraphQL API + worker cron / ClawHub 走 Convex
 > - **GitHub 私有仓**：`roxorlt/aifeeds`（备份用，CICD 待接）
 > - **Token 速查**：见 `docs/operations.md` § 4「运维 Token 速查」
 >
@@ -150,11 +150,12 @@ X 抓取已全量切到 ScrapeBadger API，本地 launchd（`com.xlist-scraper.c
 ```
 [X List]            → list_scraper.py (browser-use)            ─┐
 [GitHub trending]   → CF Worker runGithubFetchTrending           ├→ /api/ingest → D1 (items 表统一 schema)
-[Product Hunt]      → scrapers/ph/scraper.py (browser-use)      ─┘                    ↓
-                                                                          (源专属字段全在 extra JSON)
+[Product Hunt]      → CF Worker runPhDailyFetch (GraphQL API)   ─┤                    ↓
+[ClawHub]           → CF Worker runClawhubFetchList             ─┘    (源专属字段全在 extra JSON)
                                                                                        ↓
 X 增量补全：worker cron */5 → backfill-quotes / refresh-metrics / fill-translations / detect-longform
-PH 资源迁移：worker/src/ph.ts → R2 (logo/screenshot/video/avatar) + /r/<key> 反代
+PH 增量加工：worker cron */5 → ph-enrich (DeepSeek) → fill-translations → ph-r2-migrate
+PH 资源迁移：worker/src/ph-r2.ts → R2 (logo/screenshot/video/avatar) + /r/<key> 反代
                                                                                        ↓
                                                               Dashboard (React + Vite + Tailwind) → CF Pages
 

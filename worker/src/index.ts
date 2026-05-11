@@ -14,6 +14,7 @@ import {
   runLongformViaSb,
   runClassifyPending,
   runBackfillVideoMp4,
+  runPhEnrich,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -25,7 +26,8 @@ import {
   countGithubReadmeTranslatePending,
   countGithubR2Pending,
 } from './github';
-import { runPhR2Migrate, countPhR2Pending } from './ph';
+import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
+import { runPhDailyFetch } from './scrapers/ph';
 import {
   runClawhubFetchList,
   runClawhubEnrichPending,
@@ -48,6 +50,7 @@ import {
   adminUser,
   adminCleanupAccount,
   adminDailyCap,
+  checkAdminAuth,
 } from './admin';
 import {
   handleShareCreate,
@@ -104,10 +107,10 @@ export interface Env {
   EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
   ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
   ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
-  // CF Browser Rendering binding — used by PH source POC + Phase 2 scraper.
-  // Set in wrangler.toml `[browser] binding = "BROWSER"`.
-  // Requires Workers Paid plan (10h browser/month included).
-  BROWSER?: Fetcher;
+  // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.
+  // Used by worker/src/scrapers/ph.ts (daily fetch cron).
+  PH_CLIENT_ID?: string;
+  PH_CLIENT_SECRET?: string;
 }
 
 // CORS origins allowed
@@ -272,9 +275,47 @@ export default {
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
       }
-      if (path === '/poc/ph' && request.method === 'GET') {
-        const { handlePhPoc } = await import('./scrapers/ph_poc');
-        return handlePhPoc(request, env);
+      // ─── PH admin debug endpoints ──────────────────────────────
+      // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
+      // POST /api/admin/ph-enrich-now?limit=10
+      // POST /api/admin/ph-r2-migrate-now?limit=N
+      // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致。
+      if (path === '/api/admin/ph-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const force = u.searchParams.get('force') === '1';
+        const ptDate = u.searchParams.get('pt_date') || undefined;
+        const result = await runPhDailyFetch(env, { force, ptDate });
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/ph-enrich-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '10', 10), 30);
+        const result = await runPhEnrich(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/ph-r2-migrate-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
+        const result = await runPhR2Migrate(env, limit);
+        return jsonResponse(result, 200, request, env);
       }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
@@ -337,6 +378,16 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
+          // ─── PH daily fetch (UTC 20:10-20:14, 1 PT day) ─────────
+          // PT yesterday is frozen ~13h+ at this point, daily_rank stable.
+          // KV sentinel keys on PT date — won't double-fire across 5min window
+          // or cross-day retries. Returns early so this tick is dedicated to PH
+          // (~30 detail queries + ingest + snapshot ≈ 60+ subreq, big block).
+          if (hour === 20 && minute >= 10 && minute < 15) {
+            const r = await runPhDailyFetch(env);
+            console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
+            return;
+          }
           // Github preempt order (each preempt drains a batch sequentially —
           // no 5-min gap between rows):
           //   1. enrich (initial API + LLM judge, ~5-10s/row)
@@ -371,6 +422,19 @@ export default {
               console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
               return;
             }
+            // PH enrich — DeepSeek 一次性产 is_ai + ai_category + ai_summary
+            // (仿 github-enrich 模式)。先于 fill-translations 跑：is_relevant=0
+            // 的 PH item 不进翻译流程，省 DeepSeek 翻译额度。
+            // 每 tick 10 个 item，30/天 ~3 tick 完成。
+            const phEnrichPending = await env.DB.prepare(
+              `SELECT count(*) AS n FROM items
+                WHERE source_type='product_hunt' AND deleted_at IS NULL AND is_relevant IS NULL`,
+            ).first<{ n: number }>();
+            if ((phEnrichPending?.n ?? 0) > 0) {
+              const r = await runPhEnrich(env, 10);
+              console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
+              return;
+            }
             // PH 资源迁移 — 抢占同一 cron slot，单次 1 个 item，subrequest
             // 预算：1 SELECT + 1 × (~38 GET + 1 UPDATE) = 40（接近 CF Free 50 上限）
             const phR2Pending = await countPhR2Pending(env);
@@ -402,12 +466,26 @@ export default {
             }
             // fill-translations 抢占：同样 12 ticks/hour，每批 15 个 item。
             // batchSize 5 × 3 batches = 3 LLM call/tick，subreq ~30 内可控。
+            // 包含 PH item（runFillTranslations 内部 SQL 已支持 source_type=product_hunt）。
             const translatePending = await env.DB.prepare(
               `SELECT count(*) AS n FROM items
-                 WHERE source_type='x_list' AND deleted_at IS NULL
-                   AND is_relevant=1 AND content_translated IS NULL
-                   AND lang IS NOT NULL AND lang != 'zh'
-                   AND content IS NOT NULL AND length(content) > 0`,
+                 WHERE deleted_at IS NULL AND is_relevant=1
+                   AND (
+                     (source_type='x_list' AND content_translated IS NULL
+                      AND lang IS NOT NULL AND lang != 'zh'
+                      AND content IS NOT NULL AND length(content) > 0)
+                     OR (source_type='product_hunt' AND (
+                       (content_translated IS NULL AND content IS NOT NULL)
+                       OR (json_extract(extra, '$.maker_post_text') IS NOT NULL
+                           AND json_extract(extra, '$.maker_post_translated') IS NULL)
+                       OR (json_extract(extra, '$.top_comments') IS NOT NULL
+                           AND EXISTS (
+                             SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+                             WHERE json_extract(c.value, '$.text') IS NOT NULL
+                               AND json_extract(c.value, '$.translated') IS NULL
+                           ))
+                     ))
+                   )`,
             ).first<{ n: number }>();
             if ((translatePending?.n ?? 0) > 0) {
               const r = await runFillTranslations(env, 15, 5);
@@ -490,12 +568,18 @@ export default {
 
 // ─── POST /api/ingest ──────────────────────────────────────────
 
-interface IngestPayload {
+export interface IngestPayload {
   source?: { id?: string; cursor?: string; last_success_at?: string };
   items: ItemInput[];
 }
 
-interface ItemInput {
+export interface IngestResult {
+  inserted: number;
+  updated: number;
+  errors: { source_id: string; error: string }[];
+}
+
+export interface ItemInput {
   source_type: string;
   source_id: string;
   source_ref?: string;
@@ -515,29 +599,26 @@ interface ItemInput {
   extra?: unknown;
 }
 
-async function handleIngest(request: Request, env: Env): Promise<Response> {
-  // Auth check
-  const auth = request.headers.get('Authorization');
-  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
-    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
-  }
-
-  const body = await request.json<IngestPayload>();
-  if (!body.items || !Array.isArray(body.items)) {
-    return jsonResponse({ error: 'items array required' }, 400, request, env);
-  }
-  if (body.items.length > 500) {
-    return jsonResponse({ error: 'Max 500 items per request' }, 400, request, env);
+/**
+ * Internal ingest entry — DB write logic, callable from worker code (e.g. PH cron)
+ * without HTTP self-fetch. No auth check (caller is trusted); HTTP handler
+ * still enforces INGEST_TOKEN. Returns counters + per-item errors.
+ *
+ * Behavior identical to former handleIngest body (verbatim cut/paste, no logic
+ * change). GitHub metrics snapshot is included here so source_type='github'
+ * callers (whether via HTTP or cron) get consistent treatment.
+ */
+export async function ingestItems(env: Env, items: ItemInput[]): Promise<IngestResult> {
+  if (items.length > 500) {
+    throw new Error('Max 500 items per call');
   }
 
   let inserted = 0;
-  let updated = 0;
   const errors: { source_id: string; error: string }[] = [];
 
-  // Process in batches of 100 (D1 batch limit)
   const BATCH_SIZE = 100;
-  for (let i = 0; i < body.items.length; i += BATCH_SIZE) {
-    const batch = body.items.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const batch = items.slice(i, i + BATCH_SIZE);
     const stmts: D1PreparedStatement[] = [];
 
     for (const item of batch) {
@@ -664,7 +745,30 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Update source cursor if provided
+  // inserted counter includes both inserts and updates (D1 limitation in upsert).
+  return { inserted, updated: 0, errors };
+}
+
+async function handleIngest(request: Request, env: Env): Promise<Response> {
+  // Auth check
+  const auth = request.headers.get('Authorization');
+  if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
+    return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
+  }
+
+  const body = await request.json<IngestPayload>();
+  if (!body.items || !Array.isArray(body.items)) {
+    return jsonResponse({ error: 'items array required' }, 400, request, env);
+  }
+
+  let result: IngestResult;
+  try {
+    result = await ingestItems(env, body.items);
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message }, 400, request, env);
+  }
+
+  // Update source cursor if provided (HTTP-only — internal callers don't need this)
   if (body.source?.id) {
     try {
       await env.DB.prepare(`
@@ -685,9 +789,7 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Adjust counts: inserted includes both inserts and updates from upsert
-  // For accurate counts we'd need to check pre-existence, but for MVP this is fine
-  return jsonResponse({ inserted, updated: 0, errors }, 200, request, env);
+  return jsonResponse(result, 200, request, env);
 }
 
 // ─── GET /api/items ────────────────────────────────────────────
