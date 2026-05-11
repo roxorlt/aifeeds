@@ -378,12 +378,14 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
-          // ─── PH daily fetch (UTC 20:10-20:14, 1 PT day) ─────────
-          // PT yesterday is frozen ~13h+ at this point, daily_rank stable.
+          // ─── PH daily fetch (UTC 10:10-10:14 = 北京 18:10, 1 PT day) ─
+          // PT 切日点：PDT 北京 15:00 / PST 北京 16:00。北京 18:10 = PDT
+          // 切日后 3h10m / PST 切日后 2h10m，daily_rank 已 settle，全年通吃。
+          // 用户体验：北京晚上 6 点就能看到当天 PT 榜（原 04:10 是次日凌晨）。
           // KV sentinel keys on PT date — won't double-fire across 5min window
           // or cross-day retries. Returns early so this tick is dedicated to PH
-          // (~30 detail queries + ingest + snapshot ≈ 60+ subreq, big block).
-          if (hour === 20 && minute >= 10 && minute < 15) {
+          // (~50+ detail queries + ingest + snapshot ≈ 110+ subreq).
+          if (hour === 10 && minute >= 10 && minute < 15) {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             return;
@@ -830,6 +832,11 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   if (sourceType === 'clawhub') {
     return handleClawhubFeed(request, env);
   }
+  // Product Hunt: 跟 GH 同样的 (launch_date_pt DESC, daily_rank ASC) 排序。
+  // 用户期望：日间倒序（最新日子在上）+ 日内排名升序（#1 在 #2 上面）。
+  if (sourceType === 'product_hunt') {
+    return handlePhFeed(request, env);
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
@@ -1139,6 +1146,87 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
     const last = items[items.length - 1] as Record<string, unknown>;
     const lastExtra = last.extra as Record<string, unknown> | null;
     const lastDate = lastExtra && typeof lastExtra === 'object' ? lastExtra.trending_date_str : null;
+    const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
+    nextCursor = `${lastDate ?? ''}|${lastRank ?? 'null'}|${last.id}`;
+  }
+
+  return jsonResponse({
+    items,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    query_time_ms: queryTime,
+  }, 200, request, env);
+}
+
+// ─── Product Hunt feed ────────────────────────────────────────
+// 仿 GH feed 的 (date DESC, daily_rank ASC) 模式：
+//   - SELECT source_type='product_hunt' AND is_relevant=1 AND deleted_at IS NULL
+//   - ORDER BY launch_date_pt DESC, daily_rank ASC, id ASC
+//   - optional ?pinned=product_hunt:<id> to bubble a shared link to the top
+//   - cursor: "launch_date|rank|id" for cross-day pagination
+async function handlePhFeed(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
+  const cursor = url.searchParams.get('cursor');
+  const pinned = url.searchParams.get('pinned');
+
+  const conditions: string[] = [
+    "source_type='product_hunt'",
+    'is_relevant=1',
+    'deleted_at IS NULL',
+  ];
+  const params: unknown[] = [];
+
+  if (cursor) {
+    const [dateStr, rankStr, idStr] = cursor.split('|');
+    const rank = parseInt(rankStr, 10);
+    if (dateStr && !Number.isNaN(rank) && idStr) {
+      // 同 GH 的 lexicographic cursor：
+      //   date < cursor.date
+      //   OR (date = cursor.date AND (rank > cursor.rank
+      //                                OR (rank = cursor.rank AND id > cursor.id)))
+      conditions.push(`(
+        json_extract(extra, '$.launch_date_pt') < ?
+        OR (
+          json_extract(extra, '$.launch_date_pt') = ?
+          AND (
+            CAST(json_extract(extra, '$.daily_rank') AS INTEGER) > ?
+            OR (CAST(json_extract(extra, '$.daily_rank') AS INTEGER) = ? AND id > ?)
+          )
+        )
+      )`);
+      params.push(dateStr, dateStr, rank, rank, idStr);
+    }
+  }
+
+  const where = conditions.join(' AND ');
+  const pinExpr = pinned ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), ` : '';
+  if (pinned) params.unshift(pinned);
+
+  const sql = `
+    SELECT * FROM items
+    WHERE ${where}
+    ORDER BY ${pinExpr}
+             json_extract(extra, '$.launch_date_pt') DESC,
+             CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
+             id ASC
+    LIMIT ?
+  `;
+  params.push(limit + 1);
+
+  const start = Date.now();
+  const result = await env.DB.prepare(sql).bind(...params).all();
+  const queryTime = Date.now() - start;
+
+  const hasMore = result.results.length > limit;
+  const rows = hasMore ? result.results.slice(0, limit) : result.results;
+  const items = rows.map(parseItemRow);
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1] as Record<string, unknown>;
+    const lastExtra = last.extra as Record<string, unknown> | null;
+    const lastDate = lastExtra && typeof lastExtra === 'object' ? lastExtra.launch_date_pt : null;
     const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
     nextCursor = `${lastDate ?? ''}|${lastRank ?? 'null'}|${last.id}`;
   }

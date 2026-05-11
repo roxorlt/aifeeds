@@ -88,18 +88,22 @@ export async function invalidatePhAccessToken(env: Env): Promise<void> {
 //   order (PostsOrder enum) — FEATURED_AT | VOTES | RANKING | NEWEST
 // No featuredAfter/featuredBefore params; postedAfter+featured covers 95%+
 // (PH posts are usually featured same-day they're posted).
+// PH API 每页最多返回 20 个 post，要拿全要走 cursor 翻页（pageInfo.hasNextPage）。
+// PT 一日 featured 总数实测可达 50+，原 first:30 单页只拿到 20 漏掉一大半。
 const LIST_QUERY = `
-  query PhDailyList($postedAfter: DateTime!, $postedBefore: DateTime!) {
+  query PhDailyList($postedAfter: DateTime!, $postedBefore: DateTime!, $after: String) {
     posts(
       postedAfter: $postedAfter,
       postedBefore: $postedBefore,
       featured: true,
       order: VOTES,
-      first: 30
+      first: 20,
+      after: $after
     ) {
       edges {
         node { id slug name votesCount featuredAt dailyRank }
       }
+      pageInfo { hasNextPage endCursor }
     }
   }
 `;
@@ -234,7 +238,10 @@ export interface PhPostDetail {
 }
 
 interface ListQueryData {
-  posts: { edges: Array<{ node: PhListNode }> };
+  posts: {
+    edges: Array<{ node: PhListNode }>;
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
 }
 
 interface DetailQueryData {
@@ -296,12 +303,22 @@ export async function listPhDailyPosts(
   const nextDay = nextPtDate(ptDateStr);
   const postedBefore = `${nextDay}T00:00:00${offsetStr}`;
 
-  const data = await phGraphQL<ListQueryData>(env, LIST_QUERY, {
-    postedAfter,
-    postedBefore,
-  });
-  if (!data) return [];
-  return data.posts.edges.map((e) => e.node);
+  // Cursor 翻页直到 hasNextPage=false。PH 每页 20 条，日 featured 50+ 时
+  // 需要 3 页才能拿全。保护：max 10 页（200 条），防 API 抖动死循环。
+  const all: PhListNode[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < 10; page++) {
+    const data: ListQueryData | null = await phGraphQL<ListQueryData>(env, LIST_QUERY, {
+      postedAfter,
+      postedBefore,
+      after,
+    });
+    if (!data) break;
+    all.push(...data.posts.edges.map((e: { node: PhListNode }) => e.node));
+    if (!data.posts.pageInfo.hasNextPage || !data.posts.pageInfo.endCursor) break;
+    after = data.posts.pageInfo.endCursor;
+  }
+  return all;
 }
 
 export async function fetchPhPostDetail(
