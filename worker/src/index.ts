@@ -427,6 +427,23 @@ export default {
     // ~10 subrequests (8 list calls + D1 batch). Doesn't conflict with GH or X.
     const isClawhubFetchSlot = (hour === 20 || hour === 8) && minute === 0;
 
+    // Huodongxing list-fetch state-machine triggers (Phase 3):
+    //   起跑：BJT 04:30 + 16:30 (= UTC 20:30 + 08:30) reset KV 进度
+    //   接力：之后 7 个 tick (UTC 20:35-21:05 / 08:35-09:05) 接着抓未完成的城市
+    //   单 tick budget=40 subreq，节流间隔 2s/page。24 城 × ~5 page ≈ 120 fetch → 3-4 tick 拼齐。
+    const isHdxFetchStartSlot = (hour === 20 || hour === 8) && minute === 30;
+    const isHdxFetchContinueSlot =
+      ((hour === 20 || hour === 8) && minute >= 35) ||
+      ((hour === 21 || hour === 9) && minute <= 5);
+
+    // Huodongxing detail-enrich slots: minute=20/50（2 tick/h，1/6 cycle 占用率）
+    // 单 tick batch=3 + 5s/detail 节流 = 15-24s 内于 worker 30s wall。
+    // 全天 48 tick × 3 = 144 detail/天，覆盖每天 ~150 新 event 增量。
+    const isHdxEnrichSlot = minute === 20 || minute === 50;
+
+    // Huodongxing 历史活动 sweep：BJT 03:00 (UTC 19:00)，每日清扫一次
+    const isHdxSweepSlot = hour === 19 && minute === 0;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
@@ -463,6 +480,46 @@ export default {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             return;
+          }
+          // ─── Huodongxing scheduling (Phase 3) ─────────────────────────
+          //   起跑：BJT 04:30/16:30 reset state，开抓
+          //   接力：状态机 KV 有 cities_pending 时继续
+          //   enrich：minute=20/50 跑 batch=3 detail（节流后 15-24s 单 tick）
+          //   sweep：BJT 03:00 标过期
+          if (isHdxFetchStartSlot) {
+            const r = await runHuodongxingFetchList(env, { budget: 40, reset: true });
+            console.log(`[cron] hdx-fetch (start) result:`, JSON.stringify(r));
+            return;
+          }
+          if (isHdxFetchContinueSlot) {
+            // 仅当 KV 还有未完成时跑（否则让 X cron 拿这个 slot）
+            const progressRaw = await env.AUTH_KV.get('hdx:fetch_progress');
+            if (progressRaw) {
+              try {
+                const p = JSON.parse(progressRaw) as { cities_pending?: string[] };
+                if (p.cities_pending && p.cities_pending.length > 0) {
+                  const r = await runHuodongxingFetchList(env, { budget: 40 });
+                  console.log(`[cron] hdx-fetch (continue) result:`, JSON.stringify(r));
+                  return;
+                }
+              } catch {
+                // 解析失败 → 清掉 KV 让下次 start tick 重置
+                await env.AUTH_KV.delete('hdx:fetch_progress');
+              }
+            }
+          }
+          if (isHdxSweepSlot) {
+            const r = await markStaleEventsHistorical(env);
+            console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
+            return;
+          }
+          if (isHdxEnrichSlot) {
+            const pending = await countHuodongxingDetailPending(env);
+            if (pending > 0) {
+              const r = await runHuodongxingDetailEnrich(env, 3);
+              console.log(`[cron] hdx-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
           }
           // Github preempt order (each preempt drains a batch sequentially —
           // no 5-min gap between rows):
