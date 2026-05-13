@@ -29,6 +29,15 @@ import {
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
 import {
+  handleHuodongxingPoc,
+  runHuodongxingFetchList,
+  runHuodongxingDetailEnrich,
+  markStaleEventsHistorical,
+  countHuodongxingDetailPending,
+} from './scrapers/huodongxing';
+import type { HuodongxingCity } from './scrapers/huodongxing/cities';
+import { HUODONGXING_CITIES } from './scrapers/huodongxing/cities';
+import {
   runClawhubFetchList,
   runClawhubEnrichPending,
   refreshClawhubItem,
@@ -317,6 +326,71 @@ export default {
         const result = await runPhR2Migrate(env, limit);
         return jsonResponse(result, 200, request, env);
       }
+      // ─── Huodongxing POC (Phase 1) — no DB write, dev/QA validation only ────
+      // GET /poc/hdx?city=北京&page=1&detail=1
+      // Returns parsed listing cards + (optional) first detail enrich, with
+      // field-extraction stats so we can confirm parsers match real HTML.
+      if (path === '/poc/hdx' && request.method === 'GET') {
+        return handleHuodongxingPoc(request, env);
+      }
+      // ─── Huodongxing admin endpoints (Phase 2) — manual fetch / enrich ──────
+      //   POST /api/admin/hdx-fetch-now?budget=40&reset=1&only_city=北京
+      //   POST /api/admin/hdx-enrich-now?limit=5
+      //   POST /api/admin/hdx-sweep-now
+      //   GET  /api/admin/hdx-status
+      // 鉴权：HTTP Basic Auth（ADMIN_USER / ADMIN_PASS）。
+      if (path === '/api/admin/hdx-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const budget = parseInt(u.searchParams.get('budget') || '40', 10);
+        const reset = u.searchParams.get('reset') === '1';
+        const onlyCityParam = u.searchParams.get('only_city');
+        const onlyCity =
+          onlyCityParam && HUODONGXING_CITIES.includes(onlyCityParam)
+            ? (onlyCityParam as HuodongxingCity)
+            : undefined;
+        const result = await runHuodongxingFetchList(env, { budget, reset, onlyCity });
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-enrich-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '3', 10), 20);
+        const result = await runHuodongxingDetailEnrich(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-sweep-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const result = await markStaleEventsHistorical(env);
+        return jsonResponse(result, 200, request, env);
+      }
+      if (path === '/api/admin/hdx-status' && request.method === 'GET') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const pending = await countHuodongxingDetailPending(env);
+        const progressRaw = await env.AUTH_KV.get('hdx:fetch_progress');
+        const progress = progressRaw ? JSON.parse(progressRaw) : null;
+        return jsonResponse({ pending_detail_enrich: pending, fetch_progress: progress }, 200, request, env);
+      }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal error';
@@ -352,6 +426,23 @@ export default {
     // ClawHub list fetch (phase 1) at BJT 04:00 + 16:00 (= UTC 20:00 + 08:00).
     // ~10 subrequests (8 list calls + D1 batch). Doesn't conflict with GH or X.
     const isClawhubFetchSlot = (hour === 20 || hour === 8) && minute === 0;
+
+    // Huodongxing list-fetch state-machine triggers (Phase 3):
+    //   起跑：BJT 04:30 + 16:30 (= UTC 20:30 + 08:30) reset KV 进度
+    //   接力：之后 7 个 tick (UTC 20:35-21:05 / 08:35-09:05) 接着抓未完成的城市
+    //   单 tick budget=40 subreq，节流间隔 2s/page。24 城 × ~5 page ≈ 120 fetch → 3-4 tick 拼齐。
+    const isHdxFetchStartSlot = (hour === 20 || hour === 8) && minute === 30;
+    const isHdxFetchContinueSlot =
+      ((hour === 20 || hour === 8) && minute >= 35) ||
+      ((hour === 21 || hour === 9) && minute <= 5);
+
+    // Huodongxing detail-enrich slots: minute=20/50（2 tick/h，1/6 cycle 占用率）
+    // 单 tick batch=3 + 5s/detail 节流 = 15-24s 内于 worker 30s wall。
+    // 全天 48 tick × 3 = 144 detail/天，覆盖每天 ~150 新 event 增量。
+    const isHdxEnrichSlot = minute === 20 || minute === 50;
+
+    // Huodongxing 历史活动 sweep：BJT 03:00 (UTC 19:00)，每日清扫一次
+    const isHdxSweepSlot = hour === 19 && minute === 0;
 
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
@@ -389,6 +480,46 @@ export default {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             return;
+          }
+          // ─── Huodongxing scheduling (Phase 3) ─────────────────────────
+          //   起跑：BJT 04:30/16:30 reset state，开抓
+          //   接力：状态机 KV 有 cities_pending 时继续
+          //   enrich：minute=20/50 跑 batch=3 detail（节流后 15-24s 单 tick）
+          //   sweep：BJT 03:00 标过期
+          if (isHdxFetchStartSlot) {
+            const r = await runHuodongxingFetchList(env, { budget: 40, reset: true });
+            console.log(`[cron] hdx-fetch (start) result:`, JSON.stringify(r));
+            return;
+          }
+          if (isHdxFetchContinueSlot) {
+            // 仅当 KV 还有未完成时跑（否则让 X cron 拿这个 slot）
+            const progressRaw = await env.AUTH_KV.get('hdx:fetch_progress');
+            if (progressRaw) {
+              try {
+                const p = JSON.parse(progressRaw) as { cities_pending?: string[] };
+                if (p.cities_pending && p.cities_pending.length > 0) {
+                  const r = await runHuodongxingFetchList(env, { budget: 40 });
+                  console.log(`[cron] hdx-fetch (continue) result:`, JSON.stringify(r));
+                  return;
+                }
+              } catch {
+                // 解析失败 → 清掉 KV 让下次 start tick 重置
+                await env.AUTH_KV.delete('hdx:fetch_progress');
+              }
+            }
+          }
+          if (isHdxSweepSlot) {
+            const r = await markStaleEventsHistorical(env);
+            console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
+            return;
+          }
+          if (isHdxEnrichSlot) {
+            const pending = await countHuodongxingDetailPending(env);
+            if (pending > 0) {
+              const r = await runHuodongxingDetailEnrich(env, 3);
+              console.log(`[cron] hdx-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
+              return;
+            }
           }
           // Github preempt order (each preempt drains a batch sequentially —
           // no 5-min gap between rows):
@@ -837,6 +968,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   if (sourceType === 'product_hunt') {
     return handlePhFeed(request, env);
   }
+  // Huodongxing: 状态优先（进行中 > 未开始 > 已结束）+ start_time ASC（最近发生在前）。
+  // 默认 filter 过期活动：status != 'historical' AND end_time > now（兜底 start_time + 1d）。
+  // include_historical=1 时取消 filter，用于"历史活动"页面。
+  if (sourceType === 'huodongxing') {
+    return handleHuodongxingFeed(request, env);
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
@@ -1064,6 +1201,186 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
     else if (sort === 'updated') cursorValue = (last.published_at as string) ?? '';
     else if (sort === 'name') cursorValue = ((last.title as string) ?? '').toLowerCase();
     nextCursor = `${cursorValue}|${last.id}`;
+  }
+
+  return jsonResponse({
+    items,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    query_time_ms: queryTime,
+  }, 200, request, env);
+}
+
+// ─── GET /api/items?source_type=huodongxing ─────────────────────
+// Huodongxing feed:
+//   - 默认 filter: status != 'historical' AND (end_time > now OR (end_time IS NULL AND start_time + 1d > now))
+//     `?include_historical=1` 透传时取消该 filter
+//   - 排序: 状态优先（进行中 > 未开始）+ start_time ASC
+//   - cursor: 简化用 "start_time|id"（同 X cron-tail 模式，状态分桶通过 derive_state SQL 实现）
+//   - v2 query params: city / when / form（FE 列头筛选 chip 用）
+
+/**
+ * BJT 视角下计算 ISO 字符串区间。返回 [startIso, endIso) 半开区间。
+ * 所有 huodongxing 入库的 start_time 都是 "+08:00" 格式（parser-detail.ts 强制），
+ * ISO 字符串字典序比较等价于时间比较。
+ */
+function computeWhenRange(when: string): { startIso: string; endIso: string } | null {
+  const nowMs = Date.now();
+  // bjtNow: 同时刻的 UTC 视角下 +8h，组件值即 BJT 实际时刻
+  const bjtNow = new Date(nowMs + 8 * 3600 * 1000);
+  const bjtDay = bjtNow.getUTCDay(); // 0=Sun..6=Sat
+  const daysFromMonday = bjtDay === 0 ? 6 : bjtDay - 1;
+  const bjtMonday = new Date(bjtNow);
+  bjtMonday.setUTCDate(bjtNow.getUTCDate() - daysFromMonday);
+  bjtMonday.setUTCHours(0, 0, 0, 0);
+
+  const toBjtIso = (d: Date): string => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+      `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+      `T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}+08:00`
+    );
+  };
+
+  if (when === 'this') {
+    const endBjt = new Date(bjtMonday);
+    endBjt.setUTCDate(bjtMonday.getUTCDate() + 7);
+    return { startIso: toBjtIso(bjtMonday), endIso: toBjtIso(endBjt) };
+  }
+  if (when === 'weekend') {
+    const startBjt = new Date(bjtMonday);
+    startBjt.setUTCDate(bjtMonday.getUTCDate() + 5); // 周六 00:00 BJT
+    const endBjt = new Date(bjtMonday);
+    endBjt.setUTCDate(bjtMonday.getUTCDate() + 7);   // 下周一 00:00 = 周日 24:00
+    return { startIso: toBjtIso(startBjt), endIso: toBjtIso(endBjt) };
+  }
+  if (when === 'month') {
+    const endBjt = new Date(bjtNow);
+    endBjt.setUTCDate(bjtNow.getUTCDate() + 30);
+    return { startIso: toBjtIso(bjtNow), endIso: toBjtIso(endBjt) };
+  }
+  return null;
+}
+
+async function handleHuodongxingFeed(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
+  const cursor = url.searchParams.get('cursor');
+  const includeHistorical = url.searchParams.get('include_historical') === '1';
+  const nowIso = new Date().toISOString();
+
+  // v2 列头筛选：city / when / form 三个 optional query params，AND 组合
+  const cityFilter = url.searchParams.get('city') || '';
+  const whenFilter = url.searchParams.get('when') || '';
+  const formFilter = url.searchParams.get('form') || '';
+
+  const conditions: string[] = [
+    "source_type='huodongxing'",
+    'is_relevant=1',
+    'deleted_at IS NULL',
+  ];
+  const params: unknown[] = [];
+
+  if (!includeHistorical) {
+    // 排除已过期：先排 status='historical'；再用时间兜底（detail 未 enrich 时 status 默认 active）
+    conditions.push(`COALESCE(json_extract(extra, '$.status'), 'active') != 'historical'`);
+    conditions.push(`(
+      json_extract(extra, '$.end_time') > ?
+      OR (json_extract(extra, '$.end_time') IS NULL
+          AND (json_extract(extra, '$.start_time') IS NULL
+               OR datetime(json_extract(extra, '$.start_time'), '+1 day') > datetime(?)))
+    )`);
+    params.push(nowIso, nowIso);
+  }
+
+  // v2 city filter — 严格 equal 匹配 extra.city（24 城市枚举之一）
+  if (cityFilter) {
+    conditions.push(`json_extract(extra, '$.city') = ?`);
+    params.push(cityFilter);
+  }
+
+  // v2 when filter — 按 BJT 周一/周六/月内边界过滤 start_time（ISO+08:00 字串字典序比较即可）
+  if (whenFilter) {
+    const range = computeWhenRange(whenFilter);
+    if (range) {
+      conditions.push(`json_extract(extra, '$.start_time') >= ?`);
+      conditions.push(`json_extract(extra, '$.start_time') < ?`);
+      params.push(range.startIso, range.endIso);
+    }
+  }
+
+  // v2 form filter — online: is_online=true；offline: false 或 null（detail 未 enrich 时按 listing 字段判断也成立）
+  if (formFilter === 'online') {
+    conditions.push(`json_extract(extra, '$.is_online') = 1`);
+  } else if (formFilter === 'offline') {
+    conditions.push(`(json_extract(extra, '$.is_online') = 0 OR json_extract(extra, '$.is_online') IS NULL)`);
+  }
+
+  // 派生状态：0=进行中, 1=未开始, 2=已结束（用作 ORDER BY 主键）
+  const derivedState = `
+    CASE
+      WHEN json_extract(extra, '$.start_time') IS NOT NULL
+           AND json_extract(extra, '$.start_time') <= ?
+           AND (json_extract(extra, '$.end_time') IS NULL
+                OR json_extract(extra, '$.end_time') > ?)
+        THEN 0
+      WHEN json_extract(extra, '$.start_time') IS NULL
+           OR json_extract(extra, '$.start_time') > ?
+        THEN 1
+      ELSE 2
+    END
+  `;
+
+  if (cursor) {
+    // cursor: "<state>|<start_time>|<id>"
+    const [stateStr, startStr, idStr] = cursor.split('|');
+    const state = parseInt(stateStr, 10);
+    if (!Number.isNaN(state) && idStr) {
+      conditions.push(`(
+        (${derivedState}) > ?
+        OR ((${derivedState}) = ? AND (
+          COALESCE(json_extract(extra, '$.start_time'), '9999') > ?
+          OR (COALESCE(json_extract(extra, '$.start_time'), '9999') = ? AND id > ?)
+        ))
+      )`);
+      params.push(nowIso, nowIso, nowIso, state, nowIso, nowIso, nowIso, state, startStr, startStr, idStr);
+    }
+  }
+
+  const where = conditions.join(' AND ');
+  const sql = `
+    SELECT *,
+      (${derivedState}) AS _state
+      FROM items
+     WHERE ${where}
+     ORDER BY _state ASC,
+              COALESCE(json_extract(extra, '$.start_time'), '9999') ASC,
+              id ASC
+     LIMIT ?
+  `;
+  // ORDER BY 里再次引用 derivedState 时需要再 bind 3 个 now（_state 那次也要）
+  const orderParams = [nowIso, nowIso, nowIso];
+  const finalParams = [...orderParams, ...params, limit + 1];
+
+  const start = Date.now();
+  const result = await env.DB.prepare(sql).bind(...finalParams).all();
+  const queryTime = Date.now() - start;
+
+  const hasMore = result.results.length > limit;
+  const rows = hasMore ? result.results.slice(0, limit) : result.results;
+  const items = rows.map(parseItemRow);
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1] as Record<string, unknown>;
+    const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
+    const lastExtra = last.extra as Record<string, unknown> | null;
+    const lastState = lastRaw._state ?? 9;
+    const lastStart =
+      lastExtra && typeof lastExtra === 'object'
+        ? (lastExtra.start_time as string | undefined) ?? ''
+        : '';
+    nextCursor = `${lastState}|${lastStart}|${last.id}`;
   }
 
   return jsonResponse({

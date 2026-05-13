@@ -272,6 +272,30 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `files_manifest` | array | API | skill 包含的文件列表（path + size） |
 | `updated_at` | number | refresh | skill 上次更新时间（ms） |
 
+**活动行 huodongxing（2026-05-13 上线，纯云端 HTML 抓取）**：
+- **数据源**：`https://www.huodongxing.com/events?tag=AI&city=<city>&orderby=o&page=<N>` SSR HTML（无 turnstile/captcha，robots.txt allow `/events`）。详情页 `/event/<id>` 走 inline 88KB JSON（ASP.NET DataContractJsonSerializer 输出）。
+- **24 城市枚举**：`worker/src/scrapers/huodongxing/cities.ts`。6 核心（北京/上海/广州/深圳/杭州/成都）+ 18 次级。`?city=北京` 形式统一（不用 bj.huodongxing.com 子域名）。
+- **Phase 1 — `runHuodongxingFetchList`**：起跑 BJT 04:30/16:30（UTC 20:30 + 08:30），KV 状态机（key `hdx:fetch_progress`）跟踪 cities_pending。接力 tick：UTC 20:35-21:05 + 08:35-09:05 共 7 个 5min slot，每 tick budget=40 subreq，节流 page 间 2s。24 城 × ~5 page ≈ 120 fetch / ~3-4 tick 拼齐。
+- **Phase 2 — `runHuodongxingDetailEnrich`**：每个 tick 在 minute=20/50 抢占（2 tick/h），batch=3 + 节流 detail 间 5s = 15-24s 单 tick。每天 48 tick × 3 = 144 detail，覆盖每日 ~150 新 event。
+  - **风控阈值**（实测）：detail 路径 ~15 fetch/min 持续 4 分钟触发 WAF（200 + 6KB challenge stub body）；list 路径 30+/min 安全。节流取 detail 12/min 保守值。Cookie warm-up 自带（每批先 fetch list 拿 HDXWAFID + ASP.NET SessionId 共用）。
+- **Phase 3 — `markStaleEventsHistorical`**：BJT 03:00（UTC 19:00）每天一次。end_time 已过 或 (end_time IS NULL AND start_time + 1d 已过) 的 active event 标 status=historical。
+- **数据落 D1**：items 表统一 schema，huodongxing 字段全在 `items.extra` JSON：
+  - listing 阶段：`city / district / is_online / time_raw / location_raw / first_seen_at / last_seen_at / status / organizer.{name,slug,org_id,url,avatar_url,fans,is_certified_company,is_vip_gold}`
+  - detail enrich 后：`detail_enriched_at / start_time / end_time / start_short / end_short / address / location_full / category / tags[] / is_free / ticket_tiers[] / guests[] / contact / og_image / thumbnail_full`
+  - metrics 列：`organizer_fans / max_instance / registered_count / follows / visit_number`
+- **`/api/items?source_type=huodongxing`** 走专用 `handleHuodongxingFeed`：
+  - 默认 filter `status != 'historical' AND (end_time > now OR (end_time IS NULL AND start_time + 1d > now))`，`?include_historical=1` 取消
+  - 排序：状态优先（进行中 > 未开始） + start_time ASC
+  - cursor 格式：`<state>|<start_time>|<id>`
+  - v2 query params: `?city=<encoded>` / `?when=this|weekend|month` / `?form=online|offline`，互相 AND
+- **手动触发**（admin debug，HTTP Basic Auth `ADMIN_USER/PASS`）：
+  - `POST /api/admin/hdx-fetch-now?budget=40&reset=1&only_city=北京` 触发 list 抓取（reset=1 清 KV 重新跑，only_city= 跳过 KV 单城抓）
+  - `POST /api/admin/hdx-enrich-now?limit=3` 立即跑一批 detail enrich
+  - `POST /api/admin/hdx-sweep-now` 立即清扫过期 → historical
+  - `GET /api/admin/hdx-status` 看 detail_pending 数 + 当前 fetch_progress KV 状态
+- **POC endpoint**（无鉴权）：`GET /poc/hdx?city=北京&page=1&detail=1` 不入库，返 parse 结果 + 字段统计，FE 可当 mock 数据源
+- **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && (hour === 20 || hour === 8) ...)` redeploy
+
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
 - `REFRESH_TIER_MAX` env var：tiered 模式下只刷 `tier <= N` 的 item（默认 1 = 灰度只刷 L0+L1；调到 4 = 全量 L0-L4）
@@ -521,8 +545,41 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 | CNAME | `ai-feeds.com`（@） | `xlist-dashboard.pages.dev` | ✅ Proxied | 主站 |
 | CNAME | `www` | `xlist-dashboard.pages.dev` | ✅ Proxied | www 别名 |
 | Worker Route | `api.ai-feeds.com` | Worker `xlist-api` | ✅ Proxied | API 子域 |
+| R2 Custom Domain | `fonts.ai-feeds.com` | R2 bucket `ai-feeds-fonts` | ✅ Proxied | HarmonyOS Sans SC 自托管字体 |
 
 **DNS proxy 必须全开橙云**（CF WAF / 缓存 / DDoS 保护依赖此）。
+
+### 6a. R2 bucket: `ai-feeds-fonts`（2026-05-11 上线）
+
+- **挂载域**：`fonts.ai-feeds.com`（R2 → Custom Domains 绑定，min-TLS 1.2）
+- **CORS**：允许 `https://ai-feeds.com` / `https://staging.ai-feeds.com` / `http://localhost:5173` / `http://localhost:4173` 的 GET / HEAD；Max-Age 86400
+- **内容**：HarmonyOS Sans SC Regular(400) / Medium(500) / Bold(700) 三档，每档用 `cn-font-split@5.0.0` 按 unicode-range 子集化为 ~87 个 woff2 + 一份 result.css。共 263 个文件，bucket 总大小 ~15 MB。单页实际只下 ≈ 200 KB
+- **目录结构**：`hmos-regular/` + `hmos-medium/` + `hmos-bold/`，CSS 用相对路径 `url("./xxx.woff2")` 引用同目录 woff2
+- **CSS 引入**：dashboard 通过 `<link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-{regular,medium,bold}/result.css">` 三次引入
+- **重新生成字体子集化**（升级华为字体 / 调整子集策略时用）：
+  ```bash
+  # 原始 ttf 来源（华为官方需登录，社区镜像有现成）
+  curl -L -o HarmonyOS_SansSC_<Weight>.ttf \
+    "https://raw.githubusercontent.com/SunsetMkt/HarmonyOS_Sans_SC_Webfont_Splitted/main/HarmonyOS_Sans_SC/HarmonyOS_SansSC_<Weight>.ttf"
+  # Weight ∈ {Regular, Medium, Bold}
+
+  # cn-font-split 7.x 在 Node 25 因 koffi FFI 挂；用 5.0.0（pure napi，稳）
+  npx -y cn-font-split@5.0.0 -i "$(pwd)/HarmonyOS_SansSC_Regular.ttf" -o "$(pwd)/hmos-regular"
+  # Medium 输出的 css family 名带 "Medium" 后缀且 weight=400，需 sed 修：
+  sed -i.bak 's|"HarmonyOS Sans SC Medium"|"HarmonyOS Sans SC"|g; s|font-weight: 400|font-weight: 500|g; ' hmos-medium/result.css
+  # local() 改回精确名（保护本地 Medium 字体优先）：
+  sed -i.bak 's|src:local("HarmonyOS Sans SC"),|src:local("HarmonyOS Sans SC Medium"),|g' hmos-medium/result.css
+
+  # 上传（wrangler 4.x 默认走 local R2 stub，必须加 --remote）
+  source .secrets/cf-claude-ops.env
+  find hmos-regular hmos-medium hmos-bold -name '*.woff2' | xargs -n 1 -P 8 -I {} \
+    wrangler r2 object put "ai-feeds-fonts/{}" --file {} --content-type "font/woff2" --remote
+  for d in hmos-regular hmos-medium hmos-bold; do
+    wrangler r2 object put "ai-feeds-fonts/$d/result.css" --file $d/result.css \
+      --content-type "text/css; charset=utf-8" --remote
+  done
+  ```
+- **CORS 调整**：编辑 `cors.json`（rules → allowed.origins / methods / headers），`wrangler r2 bucket cors set ai-feeds-fonts --file cors.json`
 
 ### 7. CF 安全配置
 

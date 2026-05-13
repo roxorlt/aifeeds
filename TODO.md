@@ -255,7 +255,20 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 
 **字体 stack 落地点**：`dashboard/src/index.css` 的 `:root { font-family: "HarmonyOS Sans SC", ... }`（完整 stack 见 handoff § 2）
 
-**回退**：步骤 3 之前可临时用 `chinese-fonts-cdn.deno.dev` 公共 CDN（非自托管），handoff § 2 末有 fallback link 模板
+**session 分工**（**ops + 前端两路，backend 不参与**）：
+
+| 步骤 | 谁干 | 说明 |
+|------|------|------|
+| 1. 下字体 | 任一 session（机器操作） | 文件落到 `~/Downloads/` 或临时目录即可 |
+| 2. cn-font-split 切块 | 任一 session（npm 命令） | 输出到 `dashboard/public/fonts/` 或临时目录 |
+| 3. R2 bucket + 绑子域 + CORS | **ops** | CF 控制台操作 + DNS 解析 `fonts.ai-feeds.com`；CORS 必须允许 `https://ai-feeds.com` + `https://staging.ai-feeds.com` 两个 origin |
+| 4. 上传 woff2 + result.css | **ops**（或前端用 `wrangler r2 object put`） | 整目录传上去，相对路径仍然有效 |
+| 5. `dashboard/index.html` 加 preconnect + stylesheet link | **前端** | 加完跑 `npm run build` 看 vite 没报错；`vite dev` 看 network 实际命中 woff2 |
+| 6. `dashboard/src/index.css` 改 font-family + 验证 | **前端** | Chrome devtools Network 过滤 Font，应只看到几个 50KB 包；Lighthouse 跑一次 LCP |
+
+**backend 不动的原因**：worker 不渲染前端、不返字体；字体文件挂在独立子域 + R2 bucket，跟 `api.ai-feeds.com` worker 没耦合。
+
+**回退**：步骤 3 之前可临时用 `chinese-fonts-cdn.deno.dev` 公共 CDN（非自托管），handoff § 2 末有 fallback link 模板。前端 session 可以先用 fallback link 把视觉切过去看效果，等 ops 把 R2 + 子域准备好再换 self-host 链接
 
 **权重档位**：只引 400 / 500 / 700 三档，不要再加更多
 

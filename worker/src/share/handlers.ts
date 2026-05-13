@@ -112,7 +112,11 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
       id: 0,
       token,
       from_uid: 'usr_fake',
-      item_id: fake === 'github' ? 'github:TauricResearch/TradingAgents' : fake === 'ph' ? 'product_hunt:manus' : 'x_list:fake',
+      item_id:
+        fake === 'github' ? 'github:TauricResearch/TradingAgents'
+        : fake === 'ph' ? 'product_hunt:manus'
+        : fake === 'hdx' ? 'huodongxing:6854850974100'
+        : 'x_list:fake',
       shared_at: Date.now(),
       to_did: null,
       to_uid: null,
@@ -152,6 +156,47 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
       metrics: JSON.stringify({ replies: 444, retweets: 2300, likes: 1, views: 262 }),
       extra: null,
     };
+  } else if (fake === 'hdx') {
+    item = {
+      id: rel.item_id, source_type: 'huodongxing', title: '2026 中国出海企业家领袖峰会 · 北京站',
+      author: '出海企业家俱乐部',
+      handle: 'chuhai-club',
+      content: '面向已经出海或正在准备出海的 AI 创业团队、产品经理、市场负责人。本期闭门讨论东南亚六国当前的真实落地难点：本地化工具链选型、支付清算、推广渠道与雇主合规。每位嘉宾 12 分钟分享 + 圆桌追问 + 现场 1v1 撮合。',
+      content_translated: null,
+      metrics: JSON.stringify({
+        registered_count: 351,
+        max_instance: 2000,
+        organizer_fans: 463,
+        follows: 28,
+        visit_number: 14200,
+      }),
+      extra: JSON.stringify({
+        city: '北京',
+        district: '朝阳',
+        is_online: false,
+        is_free: true,
+        start_short: '06/13 周六 09:00',
+        start_time: '2026-06-13T09:00:00+08:00',
+        end_time: '2026-06-13T18:00:00+08:00',
+        tags: ['出海企业家', '全球化', '海外市场拓展', '东南亚'],
+        ticket_tiers: [
+          { sn: 1, name: '企业家票', price: 0, price_str: '免费' },
+          { sn: 2, name: '投资人/服务商票', price: 0, price_str: '免费' },
+        ],
+        organizer: {
+          name: '出海企业家俱乐部',
+          slug: 'chuhai-club',
+          url: 'https://chuhai-club.huodongxing.com',
+          avatar_url: null,
+          fans: 463,
+          is_certified_company: true,
+          is_vip_gold: false,
+        },
+        detail_enriched_at: Math.floor(Date.now() / 1000),
+        status: 'active',
+      }),
+      media: null,
+    };
   } else {
     item = await env.DB.prepare(`SELECT * FROM items WHERE id = ?`).bind(rel.item_id).first<Record<string, unknown>>();
     if (!item) {
@@ -169,7 +214,7 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   // GH/PH/X 抽第一张可用图作为海报媒体（fetch + base64 嵌 SVG）
   const mediaInfo = await pickPosterMedia(sourceType, itemExtra, itemMedia, request, env);
   // GH owner 头像 / PH 产品 logo（X 暂不抓推文作者头像 — scraper 没存）
-  const authorAvatarDataUri = await pickAuthorAvatar(sourceType, rel.item_id, itemMedia, request, env);
+  const authorAvatarDataUri = await pickAuthorAvatar(sourceType, rel.item_id, itemMedia, itemExtra, request, env);
   const posterItem = {
     id: rel.item_id,
     source_type: String(item.source_type || ''),
@@ -286,10 +331,12 @@ function defaultAvatarPath(userId: string): string {
 // - GH = `https://github.com/<owner>.png`（GitHub 公开 endpoint，免登录）
 // - PH = media JSON 中 role=logo 那张
 // - X = 没数据，返回 undefined（落 hash 色块 + 首字母 fallback）
+// - HDX (huodongxing) = extra.og_image / extra.thumbnail_full（活动 cover）
 async function pickAuthorAvatar(
   sourceType: string,
   itemId: string,
   media: unknown,
+  extra: Record<string, unknown> | null,
   request: Request,
   env: Env,
 ): Promise<string | undefined> {
@@ -306,6 +353,13 @@ async function pickAuthorAvatar(
       const logo = arr.find(x => x?.role === 'logo' && typeof x.url === 'string');
       if (logo?.url) url = logo.url;
     }
+  } else if (sourceType === 'huodongxing') {
+    // 海报 128×128 cover 位 — 优先 thumbnail_full（站点已是方图），其次 og_image（banner，居中裁切）
+    // og_image / thumbnail_full 可能是 cdn.huodongxing.com 原 URL 或 /r/hdx/<sha> R2 路径，
+    // 都交给 fetchAvatarOnly 处理
+    const thumb = typeof extra?.thumbnail_full === 'string' ? extra.thumbnail_full : '';
+    const og = typeof extra?.og_image === 'string' ? extra.og_image : '';
+    url = thumb || og || undefined;
   } else if (sourceType === 'clawhub') {
     // owner GitHub avatar — itemId 形如 'clawhub:<slug>'，handle 在 items.handle 里。
     // 这里没拿 handle 字段，从 itemMedia 找 avatar 不靠谱（ClawHub 多数 skill 没有 inline 媒体），

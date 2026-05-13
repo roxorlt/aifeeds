@@ -6,6 +6,7 @@ import { ThreadCard } from "./ThreadCard";
 import { GithubCard } from "./GithubCard";
 import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
+import { HuodongxingCard } from "./HuodongxingCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { SourceIcon } from "./icons";
 import {
@@ -149,7 +150,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
   // Default for other sources stays "hot" (existing X behavior).
   const [sortMode, setSortMode] = useState<SortMode>(
-    sourceType === "github" || sourceType === "product_hunt" ? "time" : "hot",
+    sourceType === "github" || sourceType === "product_hunt" || sourceType === "huodongxing"
+      ? "time"
+      : "hot",
   );
   // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category + hideSuspicious 通过 query param 传 worker
   const [chSort, setChSort] = useState<ClawhubSort>("stars");
@@ -159,6 +162,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // PH 跟 ClawHub 同样：不轮询新产品（每天 04:10 cron 一次性更新）、
   // 不显示"N 个新产品"横幅、不走曝光过滤（time 模式 + 日榜性质）。
   const isPh = sourceType === "product_hunt";
+  // huodongxing 同：BJT 04:30 + 16:30 cron 抓全部，新内容是离散的活动条目，
+  // 不需要轮询 / 曝光过滤；worker 已经按"状态优先 + start_time ASC"排好。
+  const isHdx = sourceType === "huodongxing";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
   const [pullY, setPullY] = useState(0);
@@ -195,10 +201,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       .then((res) => {
         if (cancelled) return;
         let itemsToShow = res.items;
-        if (isHot && !isClawhub && !isPh) {
+        if (isHot && !isClawhub && !isPh && !isHdx) {
           // Filter out already-seen ids so pull-down surfaces unseen hottest.
-          // ClawHub 是 marketplace 性质、PH 是日榜性质，不是流式新闻，所有用户应
-          // 看完整 top 而不是被曝光过的就过滤掉 → 跳过此过滤。
+          // ClawHub 是 marketplace 性质、PH 是日榜、huodongxing 是活动列表，
+          // 都不是流式新闻 → 跳过曝光过滤，用户应看完整 top。
           const seen = getSeenIds(sourceType);
           itemsToShow = res.items.filter((i) => !seen.has(i.id));
           markSeen(sourceType, itemsToShow.map((i) => i.id));
@@ -242,13 +248,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
       });
       consecutiveFailRef.current = 0;
-      const seen = (isHot && !isClawhub && !isPh) ? getSeenIds(sourceType) : null;
+      const seen = (isHot && !isClawhub && !isPh && !isHdx) ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
         const fresh = res.items.filter(
           (i) => !existing.has(i.id) && (!seen || !seen.has(i.id)),
         );
-        if (isHot && !isClawhub && !isPh) markSeen(sourceType, fresh.map((i) => i.id));
+        if (isHot && !isClawhub && !isPh && !isHdx) markSeen(sourceType, fresh.map((i) => i.id));
         return [...prev, ...fresh];
       });
       setNextCursor(res.next_cursor);
@@ -408,9 +414,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // sort is score-based, so newly-scraped items may not belong at the top —
   // we still count them, but clicking the banner triggers a full re-fetch with
   // fresh hot ranking instead of prepending stale positions.
-  // PH 每天 04:10 cron 一次性更新（PT 日榜性质），不需要持续 poll，节约请求。
+  // PH 每天 04:10 cron 一次性更新（PT 日榜性质）；huodongxing BJT 04:30/16:30
+  // 两次 cron 抓全 24 城市。两者都不需要持续 poll，节约请求。
   useEffect(() => {
-    if (placeholder || isPh) return;
+    if (placeholder || isPh || isHdx) return;
     const poll = async () => {
       if (!lastScrapedAt.current) return;
       try {
@@ -615,7 +622,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               }}
             />
           )}
-          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && (
+          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {
@@ -633,8 +640,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       </header>
 
       {/* New items banner — stacked avatars + count (Twitter-style)
-          PH 跳过 banner：cron 每天 04:10 一次性更新，没有"持续新内容"语义 */}
-      {pending.length > 0 && !isPh && (
+          PH / huodongxing 跳过 banner：cron 是日榜 / 活动批次性更新，
+          没有"持续新内容"流式语义 */}
+      {pending.length > 0 && !isPh && !isHdx && (
         <button
           type="button"
           onClick={() => {
@@ -738,6 +746,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                     <PhCard key={row.item.id} item={row.item} />
                   ) : row.item.source_type === "clawhub" ? (
                     <ClawhubCard key={row.item.id} item={row.item} />
+                  ) : row.item.source_type === "huodongxing" ? (
+                    <HuodongxingCard key={row.item.id} item={row.item} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

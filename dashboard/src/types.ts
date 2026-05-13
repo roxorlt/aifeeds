@@ -3,6 +3,7 @@ export type SourceType =
   | "youtube"
   | "podcast"
   | "product_hunt"
+  | "huodongxing"
   | "github"
   | "arxiv"
   | "clawhub";
@@ -122,7 +123,91 @@ export interface ItemExtra {
   top_reviews?: PhReview[];
   r2_migrated_at?: string | null;
 
+  // Huodongxing-source specific fields (source_type = 'huodongxing')
+  // KPI 数值（max_instance / registered_count / follows / visit_number /
+  // organizer_fans）不在这里，在顶层 Item.metrics 列，类型见 HuodongxingMetrics。
+  // 见 docs/plans/2026-05-11-huodongxing-frontend-handoff.md
+  //
+  // Listing 阶段就有（worker 入库 D1 即写入）：
+  city?: string;                              // "北京"；线上活动也填 city（抓取参数）
+  district?: string | null;                   // "朝阳"；跟 city 同名或线上活动时为 null
+  is_online?: boolean;                        // location_raw === "线上活动" → true
+  time_raw?: string;                          // "05/21 周四 14:30"，detail 未 enrich 时卡片显示用
+  location_raw?: string;                      // "北京朝阳"，detail 未 enrich 时卡片显示用
+  first_seen_at?: number;                     // unix sec
+  last_seen_at?: number;                      // unix sec
+  detail_enriched_at?: number | null;         // unix sec；null = 未 enrich，下方 detail 字段不可信
+  organizer?: HuodongxingOrganizer;
+
+  // Detail enrich 后才有（detail_enriched_at != null 才可信）：
+  start_time?: string | null;                 // ISO+08:00；站点偶尔不给
+  end_time?: string | null;                   // ISO+08:00；更常 null
+  start_short?: string | null;                // "05/21 14:30" 站点 SSR 短文本
+  end_short?: string | null;                  // "05/21 17:00"
+  address?: string | null;                    // "三板汇茶咖空间发布厅"，仅场所名
+  location_full?: string | null;              // "北京 · 朝阳 · xxx 发布厅"，已拼接 + 相邻段去重
+  category?: number | null;                   // 活动行平台分类码
+  tags?: string[];                            // ["硬科技路演", "投融资对接"]
+  is_free?: boolean;
+  is_private?: boolean;                       // 私密活动
+  ticket_tiers?: HuodongxingTicketTier[];     // 前端取 .length / .slice(0, N) 自己算 count / preview
+  guests?: HuodongxingGuest[];                // 同上
+  contact?: HuodongxingContact;
+  thumbnail_full?: string | null;             // 大图原 URL（可能尚未迁 R2）
+  og_image?: string | null;                   // 主图 og:image
+  organizer_ids?: number[];                   // 主办方数字 ID 数组（备用）
+  create_date?: string | null;                // 活动创建日期
+  update_date?: string | null;                // 活动更新日期
+
+  // Status 字段说明：worker 入库 extra.status 是字符串 "active" | "historical"
+  // POC parsed.status 是站点原 status code（数字），两者不要混。
+  // 这里只声明前端会看到的最终入库形态。worker /api/items 默认 filter
+  // status != 'historical'，需要历史活动加 ?include_historical=1。
+  status?: "active" | "historical";
+
   [k: string]: unknown;
+}
+
+export interface HuodongxingOrganizer {
+  name: string;
+  url: string;                                // 始终 absolute（worker 补成 https://www.huodongxing.com/org/<id>）
+  slug?: string | null;                       // 自定义子域名形式才有，否则 null
+  org_id?: number | null;                     // /org/<numeric_id> 形式才有，slug + org_id 至少一个非 null
+  avatar_url?: string | null;
+  fans?: number;
+  is_certified_company?: boolean;
+  is_vip_gold?: boolean;
+}
+
+export interface HuodongxingTicketTier {
+  sn: number;
+  name: string;
+  description?: string;
+  price: number;
+  price_str: string;                          // "免费" / "¥199"
+  src_price_str?: string | null;
+  currency?: string | null;
+  quantity?: number;                          // 总票数（0 = 不限）
+  sold_number?: number;
+  book_number?: number;
+  status_str?: string;                        // "报名中" / "热销中" / "已结束"
+  need_apply?: boolean;
+}
+
+export interface HuodongxingGuest {
+  name: string;
+  titles?: string[];                          // ["秘书长"]，注意是数组
+  company?: string;
+  description?: string;                       // 完整 bio
+  avatar_url?: string | null;
+  sort?: number;
+}
+
+export interface HuodongxingContact {
+  org_phone?: string | null;
+  org_email?: string | null;
+  org_qr_code?: string | null;                // 客服微信二维码
+  org_description?: string | null;
 }
 
 export interface PhComment {
@@ -162,6 +247,15 @@ export interface GithubMetrics {
   watchers?: number;
   open_issues?: number;
   open_prs?: number;
+  [k: string]: number | undefined;
+}
+
+export interface HuodongxingMetrics {
+  organizer_fans?: number;     // 主办方粉丝数（drawer organizer block）
+  max_instance?: number;       // 活动总容量
+  registered_count?: number;   // 已报名（drawer KPI 核心数）
+  follows?: number;            // 活动 follow 数
+  visit_number?: number;       // 浏览数
   [k: string]: number | undefined;
 }
 

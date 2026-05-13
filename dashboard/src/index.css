@@ -1,8 +1,14 @@
 @import "tailwindcss";
 
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  /* HarmonyOS Sans SC 自托管 R2（fonts.ai-feeds.com）+ unicode-range 子集化分包，
+     单页实际只下 ~200KB。"HarmonyOS_Sans_SC_Regular" 是 cn-font-split 在 @font-face
+     src 里加的 local() 名，stack 里留它做兜底（用户本地已装 HarmonyOS 时直接命中）。
+     Medium 字重已在 R2 CSS 里 sed 修正：family 统一 "HarmonyOS Sans SC"、weight=500
+     精确匹配，前端只用一个 family 名 + font-weight 400/500/700 三档即可。 */
+  font-family: "HarmonyOS Sans SC", "HarmonyOS_Sans_SC_Regular", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
   color-scheme: light;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
