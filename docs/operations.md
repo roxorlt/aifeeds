@@ -521,8 +521,41 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 | CNAME | `ai-feeds.com`（@） | `xlist-dashboard.pages.dev` | ✅ Proxied | 主站 |
 | CNAME | `www` | `xlist-dashboard.pages.dev` | ✅ Proxied | www 别名 |
 | Worker Route | `api.ai-feeds.com` | Worker `xlist-api` | ✅ Proxied | API 子域 |
+| R2 Custom Domain | `fonts.ai-feeds.com` | R2 bucket `ai-feeds-fonts` | ✅ Proxied | HarmonyOS Sans SC 自托管字体 |
 
 **DNS proxy 必须全开橙云**（CF WAF / 缓存 / DDoS 保护依赖此）。
+
+### 6a. R2 bucket: `ai-feeds-fonts`（2026-05-11 上线）
+
+- **挂载域**：`fonts.ai-feeds.com`（R2 → Custom Domains 绑定，min-TLS 1.2）
+- **CORS**：允许 `https://ai-feeds.com` / `https://staging.ai-feeds.com` / `http://localhost:5173` / `http://localhost:4173` 的 GET / HEAD；Max-Age 86400
+- **内容**：HarmonyOS Sans SC Regular(400) / Medium(500) / Bold(700) 三档，每档用 `cn-font-split@5.0.0` 按 unicode-range 子集化为 ~87 个 woff2 + 一份 result.css。共 263 个文件，bucket 总大小 ~15 MB。单页实际只下 ≈ 200 KB
+- **目录结构**：`hmos-regular/` + `hmos-medium/` + `hmos-bold/`，CSS 用相对路径 `url("./xxx.woff2")` 引用同目录 woff2
+- **CSS 引入**：dashboard 通过 `<link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-{regular,medium,bold}/result.css">` 三次引入
+- **重新生成字体子集化**（升级华为字体 / 调整子集策略时用）：
+  ```bash
+  # 原始 ttf 来源（华为官方需登录，社区镜像有现成）
+  curl -L -o HarmonyOS_SansSC_<Weight>.ttf \
+    "https://raw.githubusercontent.com/SunsetMkt/HarmonyOS_Sans_SC_Webfont_Splitted/main/HarmonyOS_Sans_SC/HarmonyOS_SansSC_<Weight>.ttf"
+  # Weight ∈ {Regular, Medium, Bold}
+
+  # cn-font-split 7.x 在 Node 25 因 koffi FFI 挂；用 5.0.0（pure napi，稳）
+  npx -y cn-font-split@5.0.0 -i "$(pwd)/HarmonyOS_SansSC_Regular.ttf" -o "$(pwd)/hmos-regular"
+  # Medium 输出的 css family 名带 "Medium" 后缀且 weight=400，需 sed 修：
+  sed -i.bak 's|"HarmonyOS Sans SC Medium"|"HarmonyOS Sans SC"|g; s|font-weight: 400|font-weight: 500|g; ' hmos-medium/result.css
+  # local() 改回精确名（保护本地 Medium 字体优先）：
+  sed -i.bak 's|src:local("HarmonyOS Sans SC"),|src:local("HarmonyOS Sans SC Medium"),|g' hmos-medium/result.css
+
+  # 上传（wrangler 4.x 默认走 local R2 stub，必须加 --remote）
+  source .secrets/cf-claude-ops.env
+  find hmos-regular hmos-medium hmos-bold -name '*.woff2' | xargs -n 1 -P 8 -I {} \
+    wrangler r2 object put "ai-feeds-fonts/{}" --file {} --content-type "font/woff2" --remote
+  for d in hmos-regular hmos-medium hmos-bold; do
+    wrangler r2 object put "ai-feeds-fonts/$d/result.css" --file $d/result.css \
+      --content-type "text/css; charset=utf-8" --remote
+  done
+  ```
+- **CORS 调整**：编辑 `cors.json`（rules → allowed.origins / methods / headers），`wrangler r2 bucket cors set ai-feeds-fonts --file cors.json`
 
 ### 7. CF 安全配置
 
