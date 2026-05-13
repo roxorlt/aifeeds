@@ -978,6 +978,165 @@ function renderClawhubContent(opts: {
   return { svg: logoSvg + titleSvg + tagSvg + metricsSvg + bodySvg, height: totalH };
 }
 
+// ─── Huodongxing (活动行) 变体 ─────────────────────────────
+// 设计：docs/plans/_mockups（23-event-poster.html）
+// 跟 PH 同款骨架（cover-logo 128 + title + tag pill + 3 列 metrics + body）+
+// 在 metrics 行下加 organizer/日期·城市 meta 行 + 末尾 tags chip 行。
+// 活动行专色：rose-400 (#fb7185) hero chip；线下/线上 tag 用 rose / blue 软底。
+//
+// 字段映射：
+//   cover = extra.og_image / extra.thumbnail_full（已通过 pickAuthorAvatar 取回）
+//   title = item.title
+//   tag   = extra.is_online ? "线上活动" : "线下活动"
+//   metrics 3 列 = metrics.registered_count / max_instance / 价格（is_free 或 min tier）
+//   organizer = extra.organizer.name + 首字 fallback avatar
+//   start_label = extra.start_short 或 ISO 派生
+//   city_label  = extra.city + (district 不同名时拼上)
+//   body = item.content（backend 写入 og:description 或正文首段 100 字）
+//   tags = extra.tags[].slice(0, 4)
+function renderHuodongxingContent(opts: {
+  x: number; y: number; w: number;
+  title: string;
+  isOnline: boolean;
+  registered: number | string | undefined;
+  maxInstance: number | string | undefined;
+  priceLabel: string;
+  organizerName: string;
+  organizerInitial: string;
+  startLabel: string;
+  cityLabel: string;
+  body: string;
+  tags: string[];
+  coverDataUri?: string;
+}): { svg: string; height: number } {
+  const padX = 36, padTop = 56;
+  const innerX = opts.x + padX;
+  const innerW = opts.w - padX * 2;
+  let cy = opts.y + padTop;
+
+  // ─── Header：cover-logo 128 + title + tag ───
+  const logoSize = 128;
+  const logoX = innerX, logoY = cy;
+  let logoSvg: string;
+  if (opts.coverDataUri) {
+    const clipId = `hdx-cover-clip-${Math.random().toString(36).slice(2, 8)}`;
+    logoSvg = `
+      <defs><clipPath id="${clipId}"><rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30"/></clipPath></defs>
+      <rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30" fill="#fbfbfc" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>
+      <image href="${opts.coverDataUri}" x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    // fallback：rose→amber 渐变方块 + 主办方首字
+    const gradId = `hdx-logo-grad-${Math.random().toString(36).slice(2, 6)}`;
+    logoSvg = `
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#fb7185"/>
+          <stop offset="100%" stop-color="#f59e0b"/>
+        </linearGradient>
+      </defs>
+      <rect x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" rx="30" fill="url(#${gradId})" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>
+      <text x="${logoX + logoSize / 2}" y="${logoY + logoSize / 2 + 24}" font-family='${FONT}' font-size="68" font-weight="900" fill="#fff" text-anchor="middle">${esc(opts.organizerInitial || '?')}</text>`;
+  }
+
+  // Title：56px / 2 行 clamp（活动名常 16-30 字，比 PH 产品名长）
+  const nameX = logoX + logoSize + 34;
+  const innerRightLimit = innerW - logoSize - 34;
+  // 56px 中文一字 ≈ 56px wide，innerRightLimit ≈ 734 → ~13 chars/line
+  const titleMaxChars = Math.floor(innerRightLimit / 56);
+  const titleSize = 56;
+  const titleLines = wrapText(opts.title, titleMaxChars, 2);
+  const titleLineH = titleSize * 1.12;
+  const titleSvg = titleLines
+    .map((line, i) => `<text x="${nameX}" y="${cy + titleSize + i * titleLineH}" font-family='${FONT}' font-size="${titleSize}" font-weight="900" fill="${C.ink}" letter-spacing="-2.5">${esc(line)}</text>`)
+    .join('');
+
+  // Tag pill：线下/线上活动（rose / blue 软底）
+  const tagText = opts.isOnline ? '线上活动' : '线下活动';
+  const tagColors = opts.isOnline
+    ? { soft: 'rgba(37,99,235,0.10)', ink: '#2563eb' }
+    : { soft: 'rgba(244,63,94,0.10)', ink: '#e11d48' };
+  const tagY = cy + titleSize + titleLines.length * titleLineH - titleLineH + 20 + 28;
+  const tagW = estimateTextWidth(tagText, 28, 0.85) + 40;
+  const tagSvg = `
+    <rect x="${nameX}" y="${tagY - 30}" width="${tagW}" height="46" rx="23" fill="${tagColors.soft}"/>
+    <text x="${nameX + tagW / 2}" y="${tagY + 1}" font-family='${FONT}' font-size="28" font-weight="850" fill="${tagColors.ink}" text-anchor="middle">${esc(tagText)}</text>`;
+
+  cy += Math.max(logoSize, titleLineH * titleLines.length + 64);
+  cy += 18;
+
+  // ─── Metrics 3 列：已报名 / 容量 / 价格 ───
+  const metRowY = cy;
+  const metricsArr = [
+    { value: formatStat(opts.registered), label: '已报名' },
+    { value: formatStat(opts.maxInstance), label: '容量' },
+    { value: opts.priceLabel || '—', label: '价格' },
+  ];
+  const metColW = innerW / 3;
+  let blockSvg = '';
+  blockSvg += `<line x1="${innerX}" y1="${metRowY}" x2="${innerX + innerW}" y2="${metRowY}" stroke="${C.line}" stroke-width="1"/>`;
+  metricsArr.forEach((m, i) => {
+    const cx = innerX + metColW * i + metColW / 2;
+    blockSvg += `<text x="${cx}" y="${metRowY + 56}" font-family='${FONT}' font-size="34" font-weight="700" fill="${C.ink}" text-anchor="middle">${esc(m.value)}</text>`;
+    blockSvg += `<text x="${cx}" y="${metRowY + 92}" font-family='${FONT}' font-size="24" font-weight="500" fill="${C.muted2}" text-anchor="middle">${esc(m.label)}</text>`;
+    if (i < 2) {
+      blockSvg += `<line x1="${cx + metColW / 2}" y1="${metRowY + 14}" x2="${cx + metColW / 2}" y2="${metRowY + 104}" stroke="${C.line}" stroke-width="1"/>`;
+    }
+  });
+  blockSvg += `<line x1="${innerX}" y1="${metRowY + 116}" x2="${innerX + innerW}" y2="${metRowY + 116}" stroke="${C.line}" stroke-width="1"/>`;
+  cy = metRowY + 132;
+
+  // ─── Meta 行：左 organizer（圆头像 40 + 名称 · 主办）/ 右 start · city ───
+  const metaLineY = cy + 22;
+  const avatarSize = 44;
+  const avatarCY = metaLineY - 6; // baseline 微调到 avatar 视觉居中
+  blockSvg += `
+    <circle cx="${innerX + avatarSize / 2}" cy="${avatarCY}" r="${avatarSize / 2}" fill="#fb7185"/>
+    <text x="${innerX + avatarSize / 2}" y="${avatarCY + 8}" font-family='${FONT}' font-size="22" font-weight="700" fill="#fff" text-anchor="middle">${esc(opts.organizerInitial || '?')}</text>
+    <text x="${innerX + avatarSize + 14}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(truncate(opts.organizerName, 14))} · 主办</text>`;
+  const rightText = [opts.startLabel, opts.cityLabel].filter(Boolean).join('  ·  ');
+  if (rightText) {
+    const rightW = estimateTextWidth(rightText, 30);
+    const rightX = innerX + innerW - rightW;
+    blockSvg += `<text x="${rightX}" y="${metaLineY}" font-family='${FONT}' font-size="30" fill="${C.muted}">${esc(rightText)}</text>`;
+  }
+  blockSvg += `<line x1="${innerX}" y1="${metaLineY + 30}" x2="${innerX + innerW}" y2="${metaLineY + 30}" stroke="${C.line}" stroke-width="1"/>`;
+  cy = metaLineY + 50;
+
+  // ─── Body 36 / 1.48 / 5 行 ───
+  const bodySize = 36;
+  const bodyLine = bodySize * 1.48;
+  const bodyLines = wrapText(opts.body, 24, 5);
+  const bodySvg = bodyLines
+    .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
+    .join('');
+  cy += bodyLines.length * bodyLine + 30;
+
+  // ─── Tags chip row（最多 4 个 rose-soft）───
+  let tagsSvg = '';
+  const visibleTags = (opts.tags || []).filter(Boolean).slice(0, 4);
+  if (visibleTags.length > 0) {
+    tagsSvg += `<line x1="${innerX}" y1="${cy + 6}" x2="${innerX + innerW}" y2="${cy + 6}" stroke="${C.line}" stroke-width="1"/>`;
+    cy += 24;
+    let tagX = innerX;
+    const tagChipH = 50;
+    const tagFontSize = 26;
+    for (const t of visibleTags) {
+      const text = `#${t}`;
+      const w = estimateTextWidth(text, tagFontSize, 0.85) + 44;
+      if (tagX + w > innerX + innerW) break;
+      tagsSvg += `
+        <rect x="${tagX}" y="${cy}" width="${w}" height="${tagChipH}" rx="25" fill="rgba(244,63,94,0.10)"/>
+        <text x="${tagX + w / 2}" y="${cy + tagChipH / 2 + 9}" font-family='${FONT}' font-size="${tagFontSize}" font-weight="600" fill="#e11d48" text-anchor="middle">${esc(text)}</text>`;
+      tagX += w + 14;
+    }
+    cy += tagChipH + 16;
+  }
+  cy += 12;
+
+  const totalH = cy - opts.y;
+  return { svg: logoSvg + titleSvg + tagSvg + blockSvg + bodySvg + tagsSvg, height: totalH };
+}
+
 // ─── 顶层入口：renderShareSvg ──────────────────────────────
 export interface PosterItem {
   id: string;
@@ -1101,6 +1260,54 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     });
     contentSvg = r.svg;
     contentH = r.height;
+  } else if (sourceMeta.kind === 'hdx') {
+    const m = item.metrics || {};
+    const extra = item.extra || {};
+    const organizer = (extra.organizer || {}) as { name?: string; avatar_url?: string };
+    const organizerName = organizer.name || item.author || '';
+    const organizerInitial = organizerName.charAt(0) || '?';
+    const isOnline = Boolean(extra.is_online);
+    const cityParts: string[] = [];
+    if (typeof extra.city === 'string') cityParts.push(extra.city);
+    if (typeof extra.district === 'string' && extra.district && extra.district !== extra.city) {
+      cityParts.push(extra.district as string);
+    }
+    const cityLabel = cityParts.join(' · ');
+    const startLabel =
+      (typeof extra.start_short === 'string' && extra.start_short) ||
+      (typeof extra.time_raw === 'string' && extra.time_raw) ||
+      '';
+    // 价格：is_free → "免费"；ticket_tiers 最低价 → "¥N 起"（多档加"起"）
+    const tiers = Array.isArray(extra.ticket_tiers) ? (extra.ticket_tiers as Array<{ price?: number; price_str?: string }>) : [];
+    let priceLabel = '';
+    if (extra.is_free === true) {
+      priceLabel = '免费';
+    } else if (tiers.length > 0) {
+      const prices = tiers.map(t => (typeof t.price === 'number' ? t.price : NaN)).filter(p => Number.isFinite(p));
+      if (prices.length > 0) {
+        const min = Math.min(...prices);
+        priceLabel = min === 0 ? '免费' : `¥${min}${prices.length > 1 ? ' 起' : ''}`;
+      } else if (tiers[0]?.price_str) {
+        priceLabel = tiers[0].price_str;
+      }
+    }
+    const r = renderHuodongxingContent({
+      x: cardX, y: cardY, w: cardW,
+      title: item.title || '活动',
+      isOnline,
+      registered: m.registered_count as number | undefined,
+      maxInstance: m.max_instance as number | undefined,
+      priceLabel,
+      organizerName,
+      organizerInitial,
+      startLabel,
+      cityLabel,
+      body: bodyText(item),
+      tags: Array.isArray(extra.tags) ? (extra.tags as string[]) : [],
+      coverDataUri: item.authorAvatarDataUri,
+    });
+    contentSvg = r.svg;
+    contentH = r.height;
   } else {
     // X / X List 默认走 X 模板
     // metrics 缺失保留 undefined（不强转 0），让 formatStat 渲成 "—" 跟 dashboard 一致
@@ -1153,10 +1360,11 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
 }
 
 // ─── helpers: source meta / tag / body ────────────────────
-function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub'; label: string; chipColor: string } {
+function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub' | 'hdx'; label: string; chipColor: string } {
   if (sourceType === 'github') return { kind: 'github', label: 'GitHub', chipColor: '#c1f0d8' };
   if (sourceType === 'product_hunt' || sourceType === 'ph') return { kind: 'ph', label: 'Product Hunt', chipColor: '#ffd1c1' };
   if (sourceType === 'clawhub') return { kind: 'clawhub', label: 'ClawHub', chipColor: '#d8c8f5' };
+  if (sourceType === 'huodongxing') return { kind: 'hdx', label: '活动行', chipColor: '#fb7185' };
   return { kind: 'x', label: 'X', chipColor: '#ffffff' };
 }
 
