@@ -143,6 +143,12 @@ export interface ItemsQuery {
   category?: string;
   /** ClawHub 专属：true = 包含可疑 skill；undefined/false = 默认隐藏（v0：当前 DB 只有非可疑数据，flag 透传 worker 但实际 no-op）*/
   include_suspicious?: boolean;
+  /** 活动行专属：城市筛选（24 城之一，HUODONGXING_CITIES） */
+  city?: string;
+  /** 活动行专属：时段筛选（this=本周 / weekend=本周末 / month=30 天内） */
+  when?: "this" | "weekend" | "month";
+  /** 活动行专属：形式筛选（online=线上 / offline=线下） */
+  form?: "online" | "offline";
 }
 
 function buildQuery(params: Record<string, unknown>): string {
