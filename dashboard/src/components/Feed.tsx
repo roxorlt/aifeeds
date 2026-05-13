@@ -160,10 +160,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
   const [chHideSuspicious, setChHideSuspicious] = useState<boolean>(true);
   const isClawhub = sourceType === "clawhub";
-  // 活动行专属筛选：city / when / form 三个 query param 透传 worker（空字符串 = 不传）
-  const [hdxCity, setHdxCity] = useState<HdxCity>("");
-  const [hdxWhen, setHdxWhen] = useState<HdxWhen>("");
-  const [hdxForm, setHdxForm] = useState<HdxForm>("");
+  // 活动行专属筛选：city / when / form 三个 query param 透传 worker
+  // 默认值：北京 / 本周 / 线下 — 大多数用户最常看的组合（按 2026-05-13 review 反馈）
+  const [hdxCity, setHdxCity] = useState<HdxCity>(sourceType === "huodongxing" ? "北京" : "");
+  const [hdxWhen, setHdxWhen] = useState<HdxWhen>(sourceType === "huodongxing" ? "this" : "");
+  const [hdxForm, setHdxForm] = useState<HdxForm>(sourceType === "huodongxing" ? "offline" : "");
   // PH 跟 ClawHub 同样：不轮询新产品（每天 04:10 cron 一次性更新）、
   // 不显示"N 个新产品"横幅、不走曝光过滤（time 模式 + 日榜性质）。
   const isPh = sourceType === "product_hunt";

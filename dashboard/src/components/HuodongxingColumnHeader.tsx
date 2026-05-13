@@ -110,9 +110,11 @@ export function HuodongxingColumnHeader({
   const cityActive = !!city;
 
   return (
-    <div className="flex items-center gap-1">
+    // root container 自身 relative，让 popover 锚到整组控件而不是按钮 wrapper —
+    // 否则 24-城 popover 会顺着按钮位置向右溢出 column 边界
+    <div className="relative flex items-center gap-1" ref={popRef}>
       {/* 城市 — button + popover */}
-      <div className={WRAPPER_CLASS} ref={popRef}>
+      <div className={WRAPPER_CLASS}>
         <button
           type="button"
           onClick={(e) => {
@@ -137,14 +139,17 @@ export function HuodongxingColumnHeader({
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
+      </div>
 
-        {open && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute left-0 top-full z-40 mt-1 w-[min(20rem,80vw)] rounded-lg border border-neutral-200 bg-white p-2 shadow-lg"
-            role="dialog"
-            aria-label="选择城市"
-          >
+      {open && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          // right-0 锚到根容器右边（= column header 右 padding），向左展开
+          // max-w 兜底，避免列宽极窄时（移动端单列）继续溢出
+          className="absolute right-0 top-full z-40 mt-1 w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-lg border border-neutral-200 bg-white p-2 shadow-lg"
+          role="dialog"
+          aria-label="选择城市"
+        >
             {/* 全部 / 主城 6 chip */}
             <div className="flex flex-wrap items-center gap-1">
               <button
@@ -202,7 +207,6 @@ export function HuodongxingColumnHeader({
             </div>
           </div>
         )}
-      </div>
 
       {/* 时段 */}
       <div className={WRAPPER_CLASS}>
