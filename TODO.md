@@ -18,14 +18,15 @@
 - [x] ~~**删 staging 临时 INGEST_TOKEN 兜底鉴权**：三个 ph-*-now endpoint 已统一只保 Basic Auth (commit `d0b930d`)~~
 - [ ] **staging 旧 row 残留 `[REDACTED]` author/handle 修复**：现有 9 条 PH item 的 items.author/handle 是 force re-fetch 前的 [REDACTED] 值（ingestItems UPDATE SET 不刷 author/handle 字段）。一次性 SQL UPDATE 刷新即可；prod 是 fresh 不会重现。或考虑给 ingestItems UPDATE SET 加 author/handle（影响 X/GH/CH，需评估回归）
 
-### 0.1 PH 安全期 PR（2026-05-18+，主 PR prod 稳定 ≥7 天后）
+### 0.1 PH 安全期 PR ✅ 全部完成（2026-05-13，提前于原计划 5/18）
 
-> 主 PR 不动 scrapers/ph/ + launchd PH agent，留作 prod 翻车时手动 fallback。
+> 用户判断 prod 稳定 2 天足以提前清理（风险可控：launchd 早已 unload + git 历史保留代码可随时回滚）。
 
-- [ ] 删除 `scrapers/ph/` 整个目录（git 历史保留代码）
-- [ ] `launchctl unload ~/Library/LaunchAgents/com.aifeeds.ph*.plist` + 删 plist（如有）
-- [ ] 写 `docs/archive/ph-scraper-retired.md`：退役原因 / 旧实现摘要 / git history pointer
-- [ ] CLAUDE.md 数据源现状段确认 PH 描述无残留旧 launchd 引用
+- [x] ~~删除 `scrapers/ph/` 整个目录~~ — `git rm` 10 个文件（commit `246eab4`，git 历史保留）
+- [x] ~~`launchctl unload` + 删 plist~~ — 本地 LaunchAgents 实际从未安装过 PH plist；仓库内 `launchd/com.aifeeds.ph-scraper.plist` 同步 `git rm`
+- [x] ~~写 `docs/archive/ph-scraper-retired.md`~~ — 含旧实现摘要 + 退役原因表 + 短期救火 + 长期回滚步骤（commit hash 指针）
+- [x] ~~CLAUDE.md 数据源现状段确认无残留旧 launchd 引用~~ — L8 已正确写成 "PH GraphQL API + worker cron"，无需改
+- [x] **额外**：`docs/operations.md` 三处同步清理（架构图 / L218 引用 / §1d 整段改为退役声明）
 
 ### 0.2 PH 后续 polish（不阻塞主 PR）
 
