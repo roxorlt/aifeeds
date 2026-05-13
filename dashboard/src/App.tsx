@@ -37,6 +37,7 @@ const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "clawhub", title: "ClawHub" },
   { source_type: "github", title: "GitHub" },
   { source_type: "product_hunt", title: "Product Hunt" },
+  { source_type: "huodongxing", title: "活动" },
   { source_type: "youtube", title: "YouTube" },
   { source_type: "podcast", title: "Podcast" },
   { source_type: "arxiv", title: "arXiv" },
@@ -50,6 +51,7 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "clawhub", label: "ClawHub" },
   { key: "github", label: "GitHub" },
   { key: "product_hunt", label: "PH" },
+  { key: "huodongxing", label: "活动" },
   { key: "youtube", label: "YouTube" },
   { key: "podcast", label: "Podcast" },
   { key: "arxiv", label: "arXiv" },
@@ -66,6 +68,7 @@ function DashboardHome() {
     if (p.startsWith("/g/")) return "github";
     if (p.startsWith("/ph/")) return "product_hunt";
     if (p.startsWith("/c/")) return "clawhub";
+    if (p.startsWith("/e/")) return "huodongxing";
     if (p.startsWith("/t/")) return "x_list";
     return "all";
   })();
@@ -386,6 +389,7 @@ function App() {
         <Route path="/g/:owner/:repo" element={<DashboardHome />} />
         <Route path="/ph/:slug/:date" element={<DashboardHome />} />
         <Route path="/c/:slug" element={<DashboardHome />} />
+        <Route path="/e/:eventId" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />

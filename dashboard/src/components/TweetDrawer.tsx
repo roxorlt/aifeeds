@@ -5,6 +5,7 @@ import { TweetCard } from "./TweetCard";
 import { GithubDrawerBody } from "./GithubDrawerBody";
 import { PhDrawerBody } from "./PhDrawerBody";
 import { ClawhubDrawerBody } from "./ClawhubDrawerBody";
+import { HuodongxingDrawerBody } from "./HuodongxingDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import { smoothScrollToTop } from "../lib/scroll";
@@ -254,16 +255,20 @@ export function TweetDrawer() {
   const isGithub = item?.source_type === "github";
   const isPh = item?.source_type === "product_hunt";
   const isClawhub = item?.source_type === "clawhub";
-  const threadMembers = item && !isGithub && !isPh && !isClawhub ? resolveThreadMembers(item, siblings) : [];
+  const isHdx = item?.source_type === "huodongxing";
+  const threadMembers =
+    item && !isGithub && !isPh && !isClawhub && !isHdx ? resolveThreadMembers(item, siblings) : [];
   const githubOwnerRepo = isGithub ? (item?.title || item?.source_id || "") : "";
   const phName = isPh ? (item?.title || "") : "";
   const clawhubName = isClawhub ? (item?.title || item?.source_id || "") : "";
+  const hdxName = isHdx ? (item?.title || "") : "";
   // Default title is generic ("项目详情" / "推文详情" / etc.). Once the body's
   // own title element scrolls past the top, the header takes over and
   // displays the actual identifier (owner/repo for GH, name for PH).
   const defaultGithubTitle = "项目详情";
   const defaultPhTitle = "产品详情";
   const defaultClawhubTitle = "Skill 详情";
+  const defaultHdxTitle = "活动详情";
   const headerTitle = item
     ? isGithub
       ? titleHidden
@@ -277,9 +282,13 @@ export function TweetDrawer() {
           ? titleHidden
             ? clawhubName || defaultClawhubTitle
             : defaultClawhubTitle
-          : threadMembers.length > 1
-            ? `Thread · ${threadMembers.length} 条`
-            : "推文详情"
+          : isHdx
+            ? titleHidden
+              ? hdxName || defaultHdxTitle
+              : defaultHdxTitle
+            : threadMembers.length > 1
+              ? `Thread · ${threadMembers.length} 条`
+              : "推文详情"
     : loading
       ? "加载中…"
       : error === "not_found"
@@ -291,14 +300,18 @@ export function TweetDrawer() {
       ? "在 PH 打开 ↗"
       : isClawhub
         ? "在 ClawHub 打开 ↗"
-        : "打开X原文 ↗";
+        : isHdx
+          ? "在活动行查看完整详情 ↗"
+          : "打开X原文 ↗";
   const externalLinkTitle = isGithub
     ? "在 GitHub 打开"
     : isPh
       ? "在 Product Hunt 打开"
       : isClawhub
         ? "在 ClawHub 打开"
-        : "在 x.com 打开";
+        : isHdx
+          ? "在活动行打开"
+          : "在 x.com 打开";
 
   // Double-tap on the title bar (excluding the back / external-link buttons)
   // scrolls the drawer body to top via 300ms ease-out (smoothScrollToTop).
@@ -371,6 +384,8 @@ export function TweetDrawer() {
                 <PhDrawerBody item={item} />
               ) : isClawhub ? (
                 <ClawhubDrawerBody item={item} />
+              ) : isHdx ? (
+                <HuodongxingDrawerBody item={item} />
               ) : (
                 threadMembers.map((it) => {
                   const isTarget = it.id === item.id && threadMembers.length > 1;

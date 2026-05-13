@@ -154,6 +154,20 @@ export function BrandProductHunt({ className }: IconProps) {
   );
 }
 
+// Events — calendar with center AI spark, reversed-out. 通用「活动」标识，
+// 当前用于活动行（huodongxing）source；未来如接入其他活动源也可复用。
+export function BrandEvents({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || BRAND_CLASS} aria-label="活动" fill="currentColor">
+      <rect x="7" y="1.5" width="1.6" height="4" rx=".5" />
+      <rect x="15.4" y="1.5" width="1.6" height="4" rx=".5" />
+      <path d="M3.5 4.5h17a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1h-17a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z" />
+      <rect x="2.5" y="8" width="19" height="1.2" fill="#fff" />
+      <path d="M12 11.5l1.1 2.6 2.6 1.1-2.6 1.1-1.1 2.6-1.1-2.6-2.6-1.1 2.6-1.1z" fill="#fff" />
+    </svg>
+  );
+}
+
 // arXiv official χ-style logo from Simple Icons (CC0).
 export function BrandArxiv({ className }: IconProps) {
   return (
@@ -172,16 +186,28 @@ export function BrandPodcast({ className }: IconProps) {
   );
 }
 
-// ClawHub brand mark — 用源站官方 logo（dashboard/public/clawhub-icon.png，
-// 192×192，~48KB）。SourceIcon 在 column header 渲染时尺寸 16-24px，浏览器
-// 自然下采样。源站 favicon 是 ico 格式不适合 SVG sizing，logo192.png 是次小可用版本。
+// ClawHub brand mark — 龙虾 silhouette（emoji 风格）。currentColor fill 配合
+// SourceIcon 父级 className 控制颜色，避免和 column header 主色冲突。眼睛点用
+// #fff 在着色身体上形成对比，浅色背景下身体本身的填色仍然可读。
 export function BrandClawhub({ className }: IconProps) {
   return (
-    <img
-      src="/clawhub-icon.png"
-      alt="ClawHub"
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
       className={className || BRAND_CLASS}
-    />
+      aria-label="ClawHub"
+    >
+      <path d="M9 3.5c-1 .5-1.8 1.4-2.2 2.5" stroke="currentColor" strokeWidth="1.1" fill="none" strokeLinecap="round" />
+      <path d="M15 3.5c1 .5 1.8 1.4 2.2 2.5" stroke="currentColor" strokeWidth="1.1" fill="none" strokeLinecap="round" />
+      <path d="M3.5 9.5c0-1.4 1.1-2.5 2.5-2.5s2.5 1.1 2.5 2.5L7 11l1.5 1L7.2 13.4 5.5 12c-1.1-.2-2-1.2-2-2.5z" />
+      <circle cx="5.7" cy="9.3" r=".5" fill="#fff" />
+      <path d="M20.5 9.5c0-1.4-1.1-2.5-2.5-2.5s-2.5 1.1-2.5 2.5L17 11l-1.5 1 1.3 1.4L18.5 12c1.1-.2 2-1.2 2-2.5z" />
+      <circle cx="18.3" cy="9.3" r=".5" fill="#fff" />
+      <path d="M9 11h6l-.5 2h-5z" />
+      <path d="M9 14h6l-.5 2h-5z" />
+      <path d="M9.5 17h5l-.5 2h-4z" />
+      <path d="M10 19.5l-1.5 2.5 1.5-.6L12 22l2-.6 1.5.6-1.5-2.5z" />
+    </svg>
   );
 }
 
@@ -254,6 +280,8 @@ export function SourceIcon({ source_type, className }: IconProps & { source_type
       return <BrandPodcast className={className} />;
     case "product_hunt":
       return <BrandProductHunt className={className} />;
+    case "huodongxing":
+      return <BrandEvents className={className} />;
     case "arxiv":
       return <BrandArxiv className={className} />;
     case "clawhub":
