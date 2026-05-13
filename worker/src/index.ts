@@ -481,6 +481,31 @@ export default {
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             return;
           }
+          // ─── X list-poll-ingest (minute=25 / 55, 30 min cadence) ──
+          // ScrapeBadger 替代本地 chrome list 抓取。
+          // 提到 preempt 之前：之前在 preempt 之后，fill-translations 等
+          // pending 长尾 hijack tick，X 30h+ 没新数据（2026-05-13 实测）。
+          // 现在跟 PH daily fetch 同级，:25 / :55 时直接跑 + return。
+          if (mode === 'list-poll-ingest') {
+            const listId = env.LIST_POLL_LIST_ID || '1643236611378008066';
+            const r = await runListPollIngest(env, listId, 3);
+            try {
+              await env.DB.prepare(
+                `INSERT INTO refresh_log (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
+                 VALUES (?, 99, ?, ?, ?, ?)`,
+              ).bind(
+                Math.floor(Date.now() / 1000),
+                r.tweets_seen,
+                r.credits_used,
+                r.duration_ms,
+                r.error ? 1 : 0,
+              ).run();
+            } catch (e) {
+              console.error('[list-poll-ingest] log insert failed:', e);
+            }
+            console.log(`[cron] list-poll-ingest result:`, JSON.stringify(r));
+            return;
+          }
           // ─── Huodongxing scheduling (Phase 3) ─────────────────────────
           //   起跑：BJT 04:30/16:30 reset state，开抓
           //   接力：状态机 KV 有 cities_pending 时继续
@@ -670,29 +695,6 @@ export default {
             // 18/48 各 1 批 = 480 条/天，drain 当前 414 backlog ~20h。
             const result = await runLongformViaSb(env, 10);
             console.log(`[cron] longform-via-sb result:`, JSON.stringify(result));
-            return;
-          }
-          if (mode === 'list-poll-ingest') {
-            // ScrapeBadger 替代本地 chrome list 抓取：30 min 一次（minute=25/55），
-            // upsert items 表（is_relevant=1，trust 列表 curation；RT 也进 feed）。
-            // refresh_log tier=99 跟踪 credits 消耗便于运维。
-            const listId = env.LIST_POLL_LIST_ID || '1643236611378008066';
-            const r = await runListPollIngest(env, listId, 3);
-            try {
-              await env.DB.prepare(
-                `INSERT INTO refresh_log (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
-                 VALUES (?, 99, ?, ?, ?, ?)`,
-              ).bind(
-                Math.floor(Date.now() / 1000),
-                r.tweets_seen,
-                r.credits_used,
-                r.duration_ms,
-                r.error ? 1 : 0,
-              ).run();
-            } catch (e) {
-              console.error('[list-poll-ingest] log insert failed:', e);
-            }
-            console.log(`[cron] list-poll-ingest result:`, JSON.stringify(r));
             return;
           }
           const result =

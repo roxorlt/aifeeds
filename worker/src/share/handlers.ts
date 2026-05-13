@@ -912,12 +912,33 @@ function extractDeviceIdFromCookie(request: Request): string | null {
 }
 
 function buildDetailPath(itemId: string): string {
-  // X / podcast / arxiv / 等 → /t/<full_id>
-  // GitHub → /g/<owner>/<repo>
+  // 各 source 详情页路由必须跟 dashboard drawer.tsx parseDeepLinkFromPath 对齐，
+  // 否则扫码 redirect 过去会被当 X 推文 query 失败显示"推文不存在"。
+  //
+  //   X / podcast / arxiv / fallback → /t/<source_id>
+  //   GitHub        → /g/<owner>/<repo>
+  //   Product Hunt  → /ph/<slug>/<date>
+  //   ClawHub       → /c/<slug>
+  //   Huodongxing   → /e/<event_id>
   if (itemId.startsWith('github:')) {
     const repo = itemId.slice('github:'.length); // 形如 'owner/repo'
     return `/g/${repo}`;
   }
-  // 其他 source 走通用详情页 /t/<id>
+  if (itemId.startsWith('product_hunt:')) {
+    // composite source_id 'slug:date'
+    const parts = itemId.slice('product_hunt:'.length).split(':');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      return `/ph/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+    }
+  }
+  if (itemId.startsWith('clawhub:')) {
+    const slug = itemId.slice('clawhub:'.length);
+    if (slug) return `/c/${encodeURIComponent(slug)}`;
+  }
+  if (itemId.startsWith('huodongxing:')) {
+    const eid = itemId.slice('huodongxing:'.length);
+    if (eid) return `/e/${encodeURIComponent(eid)}`;
+  }
+  // X list / 未知 source → /t/<full_id> 兜底（保持 PR5 既有行为，不冒回归风险）
   return `/t/${encodeURIComponent(itemId)}`;
 }

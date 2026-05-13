@@ -201,7 +201,7 @@ export function HuodongxingCard({ item }: Props) {
           {/* Title row：标题 + 状态徽章 */}
           <div className="flex flex-wrap items-start gap-1.5">
             <h3
-              className={`min-w-0 flex-1 break-words text-[15px] font-bold leading-[1.25] ${
+              className={`min-w-0 flex-1 break-words text-[15px] font-medium leading-[1.3] ${
                 isEnded ? "text-neutral-500" : "text-neutral-900"
               }`}
             >
