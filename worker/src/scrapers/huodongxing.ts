@@ -41,6 +41,18 @@ const KV_PROGRESS_KEY = 'hdx:fetch_progress';
 const KV_PROGRESS_TTL = 60 * 60 * 6;      // 6 小时（远超单次完整轮转所需时长）
 const SUBREQUEST_BUDGET = 40;             // 单 tick 抓取上限（CF Free 50，留 10 给 D1 batch）
 
+// ─── Throttling (站点反爬阈值实测后设定) ─────────────────────────
+// 实测：detail 路径 ~15 fetch/min 持续 4 分钟会触发风控（200 + challenge stub body）。
+// listing 路径 30+ fetch/min 安全。我们取 detail 安全频率一半作保守值。
+const LIST_FETCH_INTERVAL_MS = 2_000;     // page 间隔 2s（list 风控宽松）
+const DETAIL_FETCH_INTERVAL_MS = 5_000;   // detail 间隔 5s = 12 detail/min（< 安全阈值 15/min）
+const DEFAULT_ENRICH_BATCH = 3;           // 单 tick max 3 detail（3 × 5s = 15s + fetch ~3s × 3 = 24s，留 6s buffer 内于 worker 30s wall）
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((r) => setTimeout(r, ms));
+}
+
 // ─── HTTP helper ───────────────────────────────────────────────
 // CF Worker IP 段被 huodongxing detail page 风控（本地 IP 全 200，worker 全 403）。
 // 完整浏览器 header（含 Referer / sec-fetch-* / Accept-Encoding gzip / 等）配合
@@ -365,6 +377,8 @@ export async function runHuodongxingFetchList(
     let cardsForCity = 0;
     for (let page = 1; page <= maxPagesPerCity; page++) {
       if (budgetUsed >= budget) break;
+      // 节流：page 间 sleep，避免站点 WAF burst 检测。第 1 page 不 sleep。
+      if (page > 1) await sleep(LIST_FETCH_INTERVAL_MS);
       const url = listingUrl(city, page);
       const res = await fetchText(url);
       budgetUsed++;
@@ -441,7 +455,7 @@ export interface EnrichResult {
 
 export async function runHuodongxingDetailEnrich(
   env: Env,
-  limit: number = 3,
+  limit: number = DEFAULT_ENRICH_BATCH,
 ): Promise<EnrichResult> {
   const t0 = Date.now();
   const out: EnrichResult = {
@@ -497,7 +511,12 @@ export async function runHuodongxingDetailEnrich(
     console.warn(`[hdx-enrich] warmup did not return cookies (status=${warmup.status})`);
   }
 
+  let processedCount = 0;
   for (const row of rows.results) {
+    // 节流：每 detail 间 5s（除第 1 个）。实测 ~15 detail/min 触发风控，5s = 12/min。
+    if (processedCount > 0) await sleep(DETAIL_FETCH_INTERVAL_MS);
+    processedCount++;
+
     const eventId = row.source_id;
     const oldExtra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {};
     const cityFromList = (oldExtra.city as string | null) ?? null;

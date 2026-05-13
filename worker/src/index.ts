@@ -1160,12 +1160,62 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
 //     `?include_historical=1` 透传时取消该 filter
 //   - 排序: 状态优先（进行中 > 未开始）+ start_time ASC
 //   - cursor: 简化用 "start_time|id"（同 X cron-tail 模式，状态分桶通过 derive_state SQL 实现）
+//   - v2 query params: city / when / form（FE 列头筛选 chip 用）
+
+/**
+ * BJT 视角下计算 ISO 字符串区间。返回 [startIso, endIso) 半开区间。
+ * 所有 huodongxing 入库的 start_time 都是 "+08:00" 格式（parser-detail.ts 强制），
+ * ISO 字符串字典序比较等价于时间比较。
+ */
+function computeWhenRange(when: string): { startIso: string; endIso: string } | null {
+  const nowMs = Date.now();
+  // bjtNow: 同时刻的 UTC 视角下 +8h，组件值即 BJT 实际时刻
+  const bjtNow = new Date(nowMs + 8 * 3600 * 1000);
+  const bjtDay = bjtNow.getUTCDay(); // 0=Sun..6=Sat
+  const daysFromMonday = bjtDay === 0 ? 6 : bjtDay - 1;
+  const bjtMonday = new Date(bjtNow);
+  bjtMonday.setUTCDate(bjtNow.getUTCDate() - daysFromMonday);
+  bjtMonday.setUTCHours(0, 0, 0, 0);
+
+  const toBjtIso = (d: Date): string => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+      `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+      `T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}+08:00`
+    );
+  };
+
+  if (when === 'this') {
+    const endBjt = new Date(bjtMonday);
+    endBjt.setUTCDate(bjtMonday.getUTCDate() + 7);
+    return { startIso: toBjtIso(bjtMonday), endIso: toBjtIso(endBjt) };
+  }
+  if (when === 'weekend') {
+    const startBjt = new Date(bjtMonday);
+    startBjt.setUTCDate(bjtMonday.getUTCDate() + 5); // 周六 00:00 BJT
+    const endBjt = new Date(bjtMonday);
+    endBjt.setUTCDate(bjtMonday.getUTCDate() + 7);   // 下周一 00:00 = 周日 24:00
+    return { startIso: toBjtIso(startBjt), endIso: toBjtIso(endBjt) };
+  }
+  if (when === 'month') {
+    const endBjt = new Date(bjtNow);
+    endBjt.setUTCDate(bjtNow.getUTCDate() + 30);
+    return { startIso: toBjtIso(bjtNow), endIso: toBjtIso(endBjt) };
+  }
+  return null;
+}
+
 async function handleHuodongxingFeed(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
   const includeHistorical = url.searchParams.get('include_historical') === '1';
   const nowIso = new Date().toISOString();
+
+  // v2 列头筛选：city / when / form 三个 optional query params，AND 组合
+  const cityFilter = url.searchParams.get('city') || '';
+  const whenFilter = url.searchParams.get('when') || '';
+  const formFilter = url.searchParams.get('form') || '';
 
   const conditions: string[] = [
     "source_type='huodongxing'",
@@ -1184,6 +1234,29 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
                OR datetime(json_extract(extra, '$.start_time'), '+1 day') > datetime(?)))
     )`);
     params.push(nowIso, nowIso);
+  }
+
+  // v2 city filter — 严格 equal 匹配 extra.city（24 城市枚举之一）
+  if (cityFilter) {
+    conditions.push(`json_extract(extra, '$.city') = ?`);
+    params.push(cityFilter);
+  }
+
+  // v2 when filter — 按 BJT 周一/周六/月内边界过滤 start_time（ISO+08:00 字串字典序比较即可）
+  if (whenFilter) {
+    const range = computeWhenRange(whenFilter);
+    if (range) {
+      conditions.push(`json_extract(extra, '$.start_time') >= ?`);
+      conditions.push(`json_extract(extra, '$.start_time') < ?`);
+      params.push(range.startIso, range.endIso);
+    }
+  }
+
+  // v2 form filter — online: is_online=true；offline: false 或 null（detail 未 enrich 时按 listing 字段判断也成立）
+  if (formFilter === 'online') {
+    conditions.push(`json_extract(extra, '$.is_online') = 1`);
+  } else if (formFilter === 'offline') {
+    conditions.push(`(json_extract(extra, '$.is_online') = 0 OR json_extract(extra, '$.is_online') IS NULL)`);
   }
 
   // 派生状态：0=进行中, 1=未开始, 2=已结束（用作 ORDER BY 主键）
