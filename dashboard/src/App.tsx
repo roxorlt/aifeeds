@@ -34,10 +34,10 @@ interface SourceConfig {
 // show "暂无数据源" until their scrapers come online.
 const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "x_list", title: "动态" },
-  { source_type: "huodongxing", title: "活动" },
-  { source_type: "clawhub", title: "龙虾技能" },
-  { source_type: "github", title: "开源项目" },
   { source_type: "product_hunt", title: "热门产品" },
+  { source_type: "huodongxing", title: "活动" },
+  { source_type: "github", title: "开源项目" },
+  { source_type: "clawhub", title: "龙虾技能" },
   { source_type: "youtube", title: "YouTube" },
   { source_type: "podcast", title: "Podcast" },
   { source_type: "arxiv", title: "arXiv" },
@@ -48,10 +48,10 @@ type FilterKey = "all" | SourceType;
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "x_list", label: "动态" },
-  { key: "huodongxing", label: "活动" },
-  { key: "clawhub", label: "龙虾技能" },
-  { key: "github", label: "开源项目" },
   { key: "product_hunt", label: "热门产品" },
+  { key: "huodongxing", label: "活动" },
+  { key: "github", label: "开源项目" },
+  { key: "clawhub", label: "龙虾技能" },
   { key: "youtube", label: "YouTube" },
   { key: "podcast", label: "Podcast" },
   { key: "arxiv", label: "arXiv" },
