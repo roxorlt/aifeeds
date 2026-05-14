@@ -23,14 +23,14 @@ const SECONDARY_CITIES = [
 ] as const;
 
 const WHEN_OPTIONS: { value: HdxWhen; label: string }[] = [
-  { value: "", label: "全部时段" },
+  { value: "", label: "全部" },
   { value: "this", label: "本周" },
   { value: "weekend", label: "本周末" },
-  { value: "month", label: "30 天内" },
+  { value: "month", label: "1个月" },
 ];
 
 const FORM_OPTIONS: { value: HdxForm; label: string }[] = [
-  { value: "", label: "全部形式" },
+  { value: "", label: "全部" },
   { value: "offline", label: "线下" },
   { value: "online", label: "线上" },
 ];
@@ -44,16 +44,17 @@ interface Props {
   onFormChange: (f: HdxForm) => void;
 }
 
-// 跟 ClawhubColumnHeader 完全同款（行高对齐、视觉一致）
+// 跟 ClawhubColumnHeader 同行高（22px）+ 同字号，但 padding 收紧（pl-1 pr-3）
+// 让活动行 3 控件能塞进 column 而不被截断（review 反馈：宽度继续收窄）
 const SELECT_CLASS =
-  "h-full appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 box-border text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300";
+  "h-full appearance-none rounded border border-neutral-300 bg-white pl-1 pr-3 box-border text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300";
 const CHEVRON_CLASS =
-  "absolute right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none";
+  "absolute right-0.5 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none";
 const WRAPPER_CLASS = "relative inline-flex h-[22px] items-center";
 
 // 城市 button：与 select 视觉一致；选中态时加深背景
 const CITY_BTN_BASE =
-  "h-full inline-flex items-center rounded border box-border pl-1.5 pr-4 text-[10.5px] leading-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-neutral-300 relative";
+  "h-full inline-flex items-center rounded border box-border pl-1 pr-3 text-[10.5px] leading-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-neutral-300 relative";
 const CITY_BTN_IDLE =
   "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-400";
 const CITY_BTN_ACTIVE =
@@ -106,7 +107,7 @@ export function HuodongxingColumnHeader({
     };
   }, [open]);
 
-  const cityLabel = city || "全部城市";
+  const cityLabel = city || "全部";
   const cityActive = !!city;
 
   return (
