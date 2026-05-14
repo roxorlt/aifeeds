@@ -404,14 +404,14 @@ export function TweetDrawer() {
                     <div
                       key={it.id}
                       ref={isTarget ? targetRef : undefined}
+                      // B3+3.1: 蓝色目标高亮用 inset box-shadow 不占布局空间，
+                      // 避免 border-l-2 把 TweetCard 整体向右挤 2px 导致
+                      // connector line 错位（用户验收 issue 3.1）
                       className={cn(
-                        isTarget &&
-                          "border-l-2 border-sky-500 bg-sky-50/40",
+                        "relative",
+                        isTarget && "shadow-[inset_2px_0_0_#0ea5e9] bg-sky-50/40",
                       )}
                     >
-                      {/* B3: 抽屉里多楼 thread 之间画 connector line —— 之前没
-                          传 hasThreadAbove/Below，默认 false 导致 connector
-                          不画。首楼无 above，末楼无 below。 */}
                       <TweetCard
                         item={it}
                         embedded

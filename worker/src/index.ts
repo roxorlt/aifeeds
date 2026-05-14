@@ -344,6 +344,21 @@ export default {
         const result = await runBackfillRetweets(env, limit, rateSleepMs);
         return jsonResponse(result, 200, request, env);
       }
+      // 手动触发 quote 父推回填（ADMIN basic auth wrapper），用户验收 issue 4：
+      // 测试 quote 占位 banner 在 backfill 后变成完整嵌套小卡的效果
+      if (path === '/api/admin/backfill-quotes-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
+        const result = await runBackfillQuotes(env, limit, rateSleepMs);
+        return jsonResponse(result, 200, request, env);
+      }
       // F5: 一次性反向重建 thread_root_id（针对 reply 链 self-thread 但 root 空）
       // ADMIN basic auth wrapper. 默认 dry_run=1 看效果，?dry_run=0 真正写入
       if (path === '/api/admin/reconstruct-threads-now' && request.method === 'POST') {
