@@ -1,4 +1,22 @@
 /**
+ * 数据源（如 ClawHub API）有时把 summary 直接按字节截到固定长度，
+ * 末尾常是 "中文Eng..." 这种半英文词形态（"用户纠正Clau..." = Claude 被切半）。
+ * 这里把末尾的 ellipsis + 紧跟在中文后的短英文残段（≤ 6 字母）剥掉，
+ * 让收尾落在中文字符末，恢复体面的省略号。
+ *
+ * 没 ellipsis 的字符串原样返回（不动）。
+ */
+export function cleanTruncatedSummary(text: string, ellipsis = "…"): string {
+  if (!text) return "";
+  const stripped = text.replace(/\s*[.。…]+\s*$/, "");
+  if (stripped === text) return text; // 末尾没省略号 → 不是被截过的，原样返回
+  // 中文 + 1-6 个 ASCII 字母收尾 = 半词
+  const m = stripped.match(/([一-龥])([a-zA-Z]{1,6})$/);
+  const cleaned = m ? stripped.slice(0, stripped.length - m[2].length) : stripped;
+  return cleaned + ellipsis;
+}
+
+/**
  * 智能字符串截断 — 优先在"自然停顿处"切，避免难看的 ellipsis 位置。
  *
  * 优先级（从最优到兜底）：
