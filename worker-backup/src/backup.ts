@@ -24,13 +24,26 @@ interface BackupEnv {
   D1_DATABASE_ID: string;
 }
 
+// CF API 响应结构（实测 2026-05-14）：
+//   { result: { status: "active"|"complete", at_bookmark, messages,
+//               result?: { signed_url, filename }   ← 嵌套两层！status="complete" 才出现
+//             },
+//     success, messages, errors }
+//
+// 关键约束：bookmark 一次性消耗。一旦某次 poll 拿到 signed_url，下次再用同 bookmark
+// 立即返回 "Not currently exporting anything." 报错。所以 step.do 必须在第一次拿到
+// signed_url 时就完成下载 + 写 R2，绝不能 throw 触发 retry。
 interface CFD1ExportResult {
   result?: {
     at_bookmark?: string;
-    signed_url?: string;
-    filename?: string;
+    status?: 'active' | 'complete' | string;
     messages?: string[];
+    result?: {
+      signed_url?: string;
+      filename?: string;
+    };
     success?: boolean;
+    error?: string;
   };
   errors?: Array<{ code: number; message: string }>;
   success?: boolean;
@@ -82,20 +95,31 @@ export class D1BackupWorkflow extends WorkflowEntrypoint<BackupEnv, BackupParams
         timeout: '15 minutes',
       },
       async () => {
-        // 2a. Poll
+        // 2a. Poll — output_format 是 required field（API doc 没写但实际 7400 报错）
         const res = await fetch(exportUrl, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ current_bookmark: bookmark }),
+          body: JSON.stringify({ output_format: 'polling', current_bookmark: bookmark }),
         });
         const data = (await res.json()) as CFD1ExportResult;
         if (!res.ok) {
           throw new Error(`D1 export poll failed: HTTP ${res.status} body=${JSON.stringify(data)}`);
         }
-        const signedUrl = data.result?.signed_url;
-        if (!signedUrl) {
-          // CF 还在生成 dump — throw 触发 step.do 按 delay 重试
-          throw new Error(`D1 export not ready, retrying (messages=${JSON.stringify(data.result?.messages ?? [])})`);
+
+        // 一旦 status === 'complete' 且 result.result.signed_url 出现，必须当次走完下载 +
+        // R2.put — 因为 bookmark 一次性消耗，下次 poll 用同 bookmark 立即报
+        // "Not currently exporting anything."（实测 2026-05-14）
+        const exportStatus = data.result?.status;
+        const innerResult = data.result?.result;
+        const signedUrl = innerResult?.signed_url;
+
+        if (exportStatus === 'active') {
+          // 还在生成，throw 触发 step.do 按 20s 间隔重试（bookmark 此时仍有效）
+          throw new Error(`D1 export still active, messages=${JSON.stringify(data.result?.messages ?? [])}`);
+        }
+        if (exportStatus !== 'complete' || !signedUrl) {
+          // 不预期状态（包含 bookmark 失效后的 "Not currently exporting anything."）
+          throw new Error(`D1 export bad state: status=${exportStatus} body=${JSON.stringify(data)}`);
         }
 
         // 2b. Download dump
@@ -104,7 +128,7 @@ export class D1BackupWorkflow extends WorkflowEntrypoint<BackupEnv, BackupParams
           throw new Error(`Failed to fetch signed_url: HTTP ${dumpRes.status}`);
         }
 
-        // 2c. Write R2 (按 BJT 日期命名，保证一天一份；同日多次触发会覆盖)
+        // 2c. Write R2 (按 BJT 日期命名，一天一份；同日多次触发会覆盖)
         const key = `daily/${bjtDateStr()}.sql`;
         const putResult = await this.env.BACKUP_BUCKET.put(key, dumpRes.body, {
           httpMetadata: { contentType: 'application/sql' },
@@ -112,7 +136,7 @@ export class D1BackupWorkflow extends WorkflowEntrypoint<BackupEnv, BackupParams
             bookmark,
             captured_at: new Date().toISOString(),
             d1_database_id: this.env.D1_DATABASE_ID,
-            cf_filename: data.result?.filename ?? '',
+            cf_filename: innerResult?.filename ?? '',
           },
         });
 
