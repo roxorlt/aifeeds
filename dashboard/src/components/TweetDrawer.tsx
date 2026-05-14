@@ -396,8 +396,10 @@ export function TweetDrawer() {
               ) : isHdx ? (
                 <HuodongxingDrawerBody item={item} />
               ) : (
-                threadMembers.map((it) => {
+                threadMembers.map((it, idx) => {
                   const isTarget = it.id === item.id && threadMembers.length > 1;
+                  const isFirst = idx === 0;
+                  const isLast = idx === threadMembers.length - 1;
                   return (
                     <div
                       key={it.id}
@@ -407,7 +409,16 @@ export function TweetDrawer() {
                           "border-l-2 border-sky-500 bg-sky-50/40",
                       )}
                     >
-                      <TweetCard item={it} embedded hideThreadBanner />
+                      {/* B3: 抽屉里多楼 thread 之间画 connector line —— 之前没
+                          传 hasThreadAbove/Below，默认 false 导致 connector
+                          不画。首楼无 above，末楼无 below。 */}
+                      <TweetCard
+                        item={it}
+                        embedded
+                        hideThreadBanner
+                        hasThreadAbove={threadMembers.length > 1 && !isFirst}
+                        hasThreadBelow={threadMembers.length > 1 && !isLast}
+                      />
                     </div>
                   );
                 })

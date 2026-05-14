@@ -1239,6 +1239,43 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
       : `${last[sort]}|${last.id}`;
   }
 
+  // B5: Thread completeness — 对 parsed 里 thread_root_id 非空的 item，
+  // 把同 root 的其他楼也带上（即使 scraped_at 在 limit 之外）。这样前端
+  // groupByThread 能完整分组成 ThreadCard 渲染 + click 时 siblings 完整。
+  // 仅 x_list（其他 source 没 thread）。
+  const isXList = !sourceType || sourceType === 'x_list' || sourceType.includes('x_list');
+  if (isXList && parsed.length > 0) {
+    const seenIds = new Set(parsed.map((p) => p.id as string));
+    const threadRoots = new Set<string>();
+    for (const item of parsed) {
+      const ext = item.extra as { thread_root_id?: string } | null;
+      const root = ext?.thread_root_id;
+      if (root && !seenIds.has(`x_list:${root}`)) threadRoots.add(root);
+      // root 本身已在 seen 时也加（确保根本身能拉同 root 的其他楼）
+      else if (root) threadRoots.add(root);
+    }
+    if (threadRoots.size > 0) {
+      const rootsArr = [...threadRoots];
+      const rootsPh = rootsArr.map(() => '?').join(',');
+      const seenArr = [...seenIds];
+      const seenPh = seenArr.map(() => '?').join(',');
+      const extraRows = await env.DB.prepare(
+        `SELECT * FROM items
+         WHERE source_type = 'x_list'
+           AND deleted_at IS NULL
+           AND extra ->> '$.thread_root_id' IN (${rootsPh})
+           AND id NOT IN (${seenPh})
+         ORDER BY ${sort} DESC
+         LIMIT 200`,
+      )
+        .bind(...rootsArr, ...seenArr)
+        .all();
+      for (const r of extraRows.results) {
+        parsed.push(parseItemRow(r as Record<string, unknown>));
+      }
+    }
+  }
+
   return jsonResponse({
     items: parsed,
     next_cursor: nextCursor,

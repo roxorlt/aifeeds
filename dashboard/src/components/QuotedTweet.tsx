@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { QuoteOf } from "../types";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { VerifiedBadge } from "./icons";
 
 interface Props {
   quote: QuoteOf;
+  /** B1: 嵌套小卡在 drawer 内（embedded=true）才允许点击跳 X；feed 流内点击
+   *  应该让外层主卡 click 处理（先开抽屉），不直接跳出站。 */
+  embedded?: boolean;
 }
 
-export function QuotedTweet({ quote }: Props) {
+export function QuotedTweet({ quote, embedded }: Props) {
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
   const handle = quote.handle || "";
@@ -17,13 +20,23 @@ export function QuotedTweet({ quote }: Props) {
   const images = (quote.media || []).filter((m) => m.type === "image");
   const firstImage = images[0];
 
-  return (
-    <div
-      className="mt-2.5 cursor-pointer overflow-hidden rounded-2xl border border-neutral-200 bg-white transition-colors hover:bg-neutral-50"
-      onClick={(e) => {
+  // B1: drawer 内（embedded）才允许跳 X；feed 流内不阻止 propagation，
+  // 让事件冒泡到外层 article 触发 openTweet。
+  const handleClick = embedded
+    ? (e: ReactMouseEvent) => {
         e.stopPropagation();
         if (url) window.open(url, "_blank");
-      }}
+      }
+    : undefined;
+
+  return (
+    <div
+      className={
+        embedded
+          ? "mt-2.5 cursor-pointer overflow-hidden rounded-2xl border border-neutral-200 bg-white transition-colors hover:bg-neutral-50"
+          : "mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-white"
+      }
+      onClick={handleClick}
     >
       <div className="p-3">
         {/* Compact header: avatar + name + verified + @handle · time */}
