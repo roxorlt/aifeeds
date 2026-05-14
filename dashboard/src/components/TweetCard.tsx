@@ -396,11 +396,66 @@ export function TweetCard({
       {hasThreadBelow && (
         <div className="pointer-events-none absolute left-[35px] top-[52px] bottom-0 w-[2px] bg-neutral-200" />
       )}
-      {/* F2: Quote/Reply 头像下方 connector stub —— 跟 X 详情页一致：主推 avatar
-          下方一根短灰线（12px），暗示"下方有上下文卡片"。仅 quote_of / replyOf
-          完整数据存在时显示。isThread 已有连续 line 不重复画；embedded 卡片不画。 */}
-      {!isThread && !embedded && !hasThreadBelow && (quoteOf || replyOf) && (
+      {/* F2: Quote 头像下方 connector stub —— 跟 X 详情页一致：主推 avatar
+          下方一根短灰线（12px），暗示"下方有引用卡"。仅 quote_of 完整数据
+          存在时显示。isThread / replyOf 有专门 connector，不重复画；embedded 卡片不画。 */}
+      {!isThread && !embedded && !hasThreadBelow && !replyOf && quoteOf && (
         <div className="pointer-events-none absolute left-[35px] top-[52px] h-3 w-[2px] bg-neutral-200" />
+      )}
+
+      {/* F3: Reply 父推渲染（thread 视觉语言）。X 详情页 reply 链是父推→
+          connector line→当前推连续显示，aifeeds 之前用 quote 嵌套小卡视觉
+          不一致。父推渲染成独立 row + avatar 同列 connector line 连主推。
+          抽屉（embedded=true）+ 流内（embedded=false）都展示。仅 isThread
+          已经有 thread connector 时跳过，不重复画。 */}
+      {!isThread && replyOf && (
+        <div className="relative mb-3">
+          <div className="pointer-events-none absolute left-[35px] top-[52px] bottom-[-12px] w-[2px] bg-neutral-200" />
+          <div className="flex gap-3">
+            {replyOf.profile_image_url ? (
+              <img
+                src={proxyImg(replyOf.profile_image_url)}
+                alt=""
+                loading="lazy"
+                className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
+              />
+            ) : (
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-200 text-[13px] font-semibold text-neutral-500">
+                {(replyOf.author || replyOf.handle || "?").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
+                <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
+                  {replyOf.author || replyOf.handle}
+                </span>
+                {Boolean(replyOf.is_verified) && (
+                  <span className="shrink-0 self-center">
+                    <VerifiedBadge />
+                  </span>
+                )}
+                {replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
+                {replyOf.published_at && (
+                  <>
+                    <span className="shrink-0 text-neutral-400">·</span>
+                    <span className="shrink-0">{timeAgo(replyOf.published_at)}</span>
+                  </>
+                )}
+              </div>
+              <div className="mt-1 line-clamp-4 break-words whitespace-pre-wrap text-[15px] leading-[1.45] text-neutral-800">
+                {replyOf.content_translated || replyOf.content || ""}
+              </div>
+              {replyOf.media && replyOf.media[0] && replyOf.media[0].type === "image" && replyOf.media[0].url && (
+                <img
+                  src={proxyImg(replyOf.media[0].url)}
+                  alt=""
+                  loading="lazy"
+                  className="mt-2.5 max-h-60 w-full rounded-2xl border border-neutral-200 object-cover"
+                />
+              )}
+            </div>
+          </div>
+        </div>
       )}
       {/* Thread / quote-placeholder banner (kept outside avatar block — rare cases).
           Reply banner moves into the content column, below the header (see further down). */}
@@ -475,15 +530,12 @@ export function TweetCard({
             )}
           </div>
 
-          {/* Reply banner (a): under header, above body */}
-          {(replyOf || hasReplyPlaceholder) && !isThread && (
+          {/* F3: Reply 占位提示（仅 replyOf 数据未回填时显示，X 详情页里完整 reply
+              用 thread 视觉语言把父推渲染在主推上方；只有兜底的 placeholder 才保留小字）*/}
+          {hasReplyPlaceholder && !isThread && (
             <div className="mt-0.5 flex items-center gap-1 text-[12px] text-neutral-500">
               <span>↩</span>
-              <span>
-                {replyOf
-                  ? `回复 @${replyOf.handle || "?"}`
-                  : "回复"}
-              </span>
+              <span>回复</span>
             </div>
           )}
 
@@ -571,8 +623,9 @@ export function TweetCard({
             </button>
           )}
 
-          {/* Reply parent (d) — show below A 自身 media，作为上下文脚注 */}
-          {replyOf && <QuotedTweet quote={replyOf} />}
+          {/* F3: Reply parent 不再嵌套在 main media 之后（旧的 quote 视觉语言）。
+              X 详情页用 thread 视觉语言：父推上移到主推**上方**，用 connector
+              line 连接。父推渲染移到 article 顶部见下方 ReplyParentRow 块。 */}
 
           {/* Quoted tweet (nested card) */}
           {quoteOf && <QuotedTweet quote={quoteOf} />}
