@@ -73,68 +73,104 @@ export async function notifyCronSummary(
 
   const title = `aifeeds 抓取 | ${taskName}`;
 
-  // 字段名 i18n 映射（5 个 fetch handler 的 result 字段全覆盖）
+  // 字段名 i18n 映射。对照 5 个 fetch handler 的真实 return 字段（一一核对过）：
+  // - PH:      worker/src/scrapers/ph.ts runPhDailyFetch
+  // - X:       worker/src/enrich.ts runListPollIngest（ListPollIngestResult）
+  // - GH:      worker/src/github.ts runGithubFetchTrending
+  // - ClawHub: worker/src/clawhub.ts runClawhubFetchList
+  // - 活动行:  worker/src/scrapers/huodongxing.ts runHuodongxingFetchList
   const FIELD_LABELS: Record<string, string> = {
     // 通用
     mode: '任务',
     error: '错误',
-    errors: '错误数',
-    skipped: '跳过原因',
     duration_ms: '耗时(毫秒)',
-    success: '成功',
-    // PH
+
+    // PH（runPhDailyFetch）
     pt_date: 'PT 日期',
     list_size: '榜单大小',
     fetched: '抓取数',
     ingested: '入库结果',
     inserted: '新增',
     updated: '更新',
-    // X list-poll
-    tweets_seen: '推文总数',
-    new_inserted: '新增入库',
-    credits_used: 'SB 配额消耗',
-    rate_limit_remaining: 'SB 配额余量',
-    early_stop: '提前停止',
-    // GH trending
-    repos_seen: '仓库数',
-    new_repos: '新增仓库',
-    // ClawHub
-    skills_seen: '技能数',
-    new_skills: '新增技能',
-    suspicious_count: '可疑数',
-    // 活动行
-    cities_done: '已完成城市',
-    cities_pending: '待处理城市',
-    events_seen: '活动数',
-    new_events: '新增活动',
-    enriched: '已丰富化',
-  };
-  const labelOf = (k: string): string => FIELD_LABELS[k] ?? k;
 
-  // 把跳过原因也翻译
+    // X list-poll（runListPollIngest，ScrapeBadger API）
+    // 注意 credits_used / rate_limit_remaining 的语义（容易被误读）：
+    //   - credits_used 是本次调用的成本（≈抓回条数），不是账户总配额消耗
+    //   - rate_limit_remaining 是短时限流窗口剩余请求数（如 60/min），
+    //     不是账户总余额（账户余额要另外查 ScrapeBadger 后台）
+    list_id: 'List ID',
+    pages: '翻页数',
+    tweets_seen: '本轮抓到推文数',
+    inserted_or_updated: '新增或覆盖数',
+    newly_inserted: '新增入库数',
+    credits_used: '本轮消耗 credits',
+    rate_limit_remaining: '短时限流余量',
+    early_stop: '提前停止',
+
+    // GH trending（runGithubFetchTrending）
+    parsed: '解析仓库数',
+    updated_seen: '已存在覆盖数',
+    // inserted / errors 复用上方
+
+    // ClawHub（runClawhubFetchList）
+    total_unique: '去重后总数',
+    // inserted / updated / skipped / errors 视语义动态翻译（见下）
+
+    // 活动行（runHuodongxingFetchList）
+    cities_processed: '本轮处理城市数',
+    cities_remaining: '剩余待处理城市数',
+    pages_fetched: '抓取页数',
+    cards_inserted_or_updated: '入库或更新活动数',
+    budget_consumed: '本轮 CF 子请求数', // CF Workers subrequest 计数（默认 40/tick）
+    finished: '是否全部完成',
+  };
+
+  // skipped / errors 在不同源里语义不一样：
+  //   PH: skipped 是 string（"sentinel" / "no_credentials" / "list_empty"），errors 是 number
+  //   ClawHub: skipped 是 number（被跳过条数），errors 是 string[]（错误信息列表）
+  //   GH: errors 是 number
+  //   活动行: errors 是 string[]（错误信息列表）
+  // 这里按 value 类型动态翻译 key，避免歧义。
+  const labelOf = (k: string, v: unknown): string => {
+    if (k === 'skipped') {
+      return typeof v === 'string' ? '跳过原因' : '跳过条数';
+    }
+    if (k === 'errors') {
+      return Array.isArray(v) ? '错误明细' : '错误数';
+    }
+    return FIELD_LABELS[k] ?? k;
+  };
+
+  // skip reason 字符串翻译（PH 用）
   const SKIP_REASON_CN: Record<string, string> = {
     sentinel: '已抓过（哨兵命中）',
     no_credentials: '凭证未配置',
     list_empty: '列表为空',
   };
 
-  // 格式化 result 为 markdown bullet list。nested 对象（如 ingested）展开。
-  const formatVal = (v: unknown): string => {
+  // 格式化 value：nested 对象展开为 "子key=value / 子key=value"；数组用分号连接
+  const formatVal = (k: string, v: unknown): string => {
     if (v === null || v === undefined) return '—';
+    if (Array.isArray(v)) {
+      if (v.length === 0) return '无';
+      return v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join('；');
+    }
     if (typeof v === 'object') {
-      // nested object 展开为 子-key=value 形式
       const entries = Object.entries(v as Record<string, unknown>)
-        .map(([sk, sv]) => `${labelOf(sk)}=${sv === null || sv === undefined ? '—' : sv}`)
+        .map(([sk, sv]) => `${labelOf(sk, sv)}=${sv === null || sv === undefined ? '—' : sv}`)
         .join(' / ');
       return entries || '{}';
     }
-    if (typeof v === 'string' && v in SKIP_REASON_CN) return SKIP_REASON_CN[v];
+    if (k === 'skipped' && typeof v === 'string' && v in SKIP_REASON_CN) {
+      return SKIP_REASON_CN[v];
+    }
+    if (typeof v === 'boolean') return v ? '是' : '否';
     return String(v);
   };
 
   const lines: string[] = [];
   for (const [k, v] of Object.entries(result)) {
-    lines.push(`- **${labelOf(k)}**：${formatVal(v)}`);
+    lines.push(`- **${labelOf(k, v)}**：${formatVal(k, v)}`);
   }
   // 加时间戳（北京时间）
   const bjt = new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
