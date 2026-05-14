@@ -365,6 +365,12 @@ export function TweetCard({
       {hasThreadBelow && (
         <div className="pointer-events-none absolute left-[35px] top-[52px] bottom-0 w-[2px] bg-neutral-200" />
       )}
+      {/* F2: Quote/Reply 头像下方 connector stub —— 跟 X 详情页一致：主推 avatar
+          下方一根短灰线（12px），暗示"下方有上下文卡片"。仅 quote_of / replyOf
+          完整数据存在时显示。isThread 已有连续 line 不重复画；embedded 卡片不画。 */}
+      {!isThread && !embedded && !hasThreadBelow && (quoteOf || replyOf) && (
+        <div className="pointer-events-none absolute left-[35px] top-[52px] h-3 w-[2px] bg-neutral-200" />
+      )}
       {/* Thread / quote-placeholder banner (kept outside avatar block — rare cases).
           Reply banner moves into the content column, below the header (see further down). */}
       {((isThread && !hideThreadBanner) || hasQuotePlaceholder) && (

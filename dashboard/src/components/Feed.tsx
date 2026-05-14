@@ -563,13 +563,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   // Inject the spotlight tweet (from cold-link or in-app drawer open) at the
   // top of this column's data, so closing the drawer leaves the user able to
-  // find it. Only applies to columns matching the spotlight's source_type;
-  // skipped if it's already in the loaded feed.
+  // find it. Only applies to columns matching the spotlight's source_type.
+  //
+  // F4: 即使 spotlight 已在 feed 里（按时间倒序中某位置），也强制提到顶部 —
+  // 用户刚关上的抽屉对应的卡片应当在 feed 第一位 (旧的 dedup 逻辑会让
+  // spotlight 沉到原位置，用户看不到"假写"效果，等同于功能丢失)。
   const itemsWithSpotlight = useMemo(() => {
     if (!spotlightItem) return items;
     if (spotlightItem.source_type !== sourceType) return items;
-    if (items.find((i) => i.id === spotlightItem.id)) return items;
-    return [spotlightItem, ...items];
+    const filtered = items.filter((i) => i.id !== spotlightItem.id);
+    return [spotlightItem, ...filtered];
   }, [items, spotlightItem, sourceType]);
 
   const rows = useMemo(() => groupByThread(itemsWithSpotlight), [itemsWithSpotlight]);
