@@ -109,6 +109,12 @@ const LIST_QUERY = `
 `;
 
 // 共享 Post 字段串。两个 query（by id / by slug）都用这一份，避免双份维护。
+//
+// ⚠️ PH GraphQL Post 不暴露 reviews 列表 — 只有 reviewsCount / reviewsRating
+// 两个数字摘要（实测 2026-05-14：PH 报 "Field 'reviews' doesn't exist on type
+// 'Post' (Did you mean reviewsCount?)"）。老 scraper 的 extra.top_reviews 是 DOM
+// 抠 PH 网页的"评测页"，GraphQL 没对应 endpoint。如果未来要补 review 列表，要么
+// 等 PH 开放（不大可能），要么回到 DOM 抓（Browser binding / 本地 scraper 重型）。
 const POST_DETAIL_FIELDS = `
   id slug name tagline description url website
   featuredAt createdAt dailyRank
@@ -540,6 +546,8 @@ export function transformPostToIngestItem(
     r2_migrated_at: null, // ph-r2-migrate cron will set
     // ai_summary / ai_category filled by ph-enrich cron
     // pricing_type / is_open_source: API doesn't expose — front-end hides chips
+    // top_reviews: PH GraphQL 不暴露 reviews 列表，老 scraper DOM 抠的字段 worker
+    //   流程下永远为空。前端 ReviewItem 仍能渲染，只是数据源缺失。
   };
 
   return {
