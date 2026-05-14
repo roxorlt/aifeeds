@@ -233,23 +233,100 @@ interface Props {
 // 7 天 = 14 行。低于这个量级 sparkline 抖动剧烈、信息量低，不展示。
 const TRENDS_MIN_DATA_POINTS = 14;
 
+// metrics_snapshots_clawhub 的真实字段（worker/src/index.ts:1754）
+interface ClawhubMetricsSnapshot {
+  captured_at: number;
+  stars: number | null;
+  downloads: number | null;
+  installs_current: number | null;
+  installs_all_time: number | null;
+}
+
+// 30 天 stars 走势小图。手写 SVG polyline，无图表库依赖。
+// 显示首尾 stars 数字 + 涨跌幅 + 起止日期，让用户一眼看出"稳步增长 / 爆发 / 停滞"。
+function StarsSparkline({ data }: { data: ClawhubMetricsSnapshot[] }) {
+  const points = data
+    .filter((d) => d.stars != null && d.stars >= 0)
+    .map((d) => ({ t: d.captured_at, v: d.stars as number }));
+  if (points.length < 2) return null;
+
+  const values = points.map((p) => p.v);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(max - min, 1);
+  const W = 100;
+  const H = 40;
+  const stepX = W / (points.length - 1);
+  const coords = points.map(
+    (p, i) => `${(i * stepX).toFixed(2)},${(H - ((p.v - min) / range) * H).toFixed(2)}`,
+  );
+  const polylineStr = coords.join(" ");
+  const polygonStr = `0,${H} ${polylineStr} ${W.toFixed(2)},${H}`;
+
+  const first = points[0].v;
+  const last = points[points.length - 1].v;
+  const delta = last - first;
+  const deltaPct = first > 0 ? ((delta / first) * 100).toFixed(1) : "—";
+  const isUp = delta >= 0;
+
+  const fmtDate = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  return (
+    <div className="rounded-md bg-gradient-to-b from-emerald-50 to-white ring-1 ring-emerald-200 p-4">
+      <div className="mb-2 flex items-baseline justify-between text-[11px] tabular-nums">
+        <span className="text-emerald-800">{first.toLocaleString()} ★</span>
+        <span className={isUp ? "font-medium text-emerald-700" : "font-medium text-rose-600"}>
+          {isUp ? "+" : ""}{delta.toLocaleString()}
+          {first > 0 && <span className="ml-1 text-[10px] opacity-70">({isUp ? "+" : ""}{deltaPct}%)</span>}
+        </span>
+        <span className="text-emerald-800">{last.toLocaleString()} ★</span>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        className="h-16 w-full"
+        aria-label={`30 天 stars 走势：${first.toLocaleString()} 到 ${last.toLocaleString()}`}
+      >
+        <polygon points={polygonStr} fill="rgb(167 243 208 / 0.45)" />
+        <polyline
+          points={polylineStr}
+          fill="none"
+          stroke="rgb(5 150 105)"
+          strokeWidth="0.6"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      <div className="mt-2 flex items-baseline justify-between text-[10px] text-neutral-400 tabular-nums">
+        <span>{fmtDate(points[0].t)}</span>
+        <span>{fmtDate(points[points.length - 1].t)}</span>
+      </div>
+    </div>
+  );
+}
+
 export function ClawhubDrawerBody({ item }: Props) {
   const extra = parseJsonField<ClawhubExtra>(item.extra) ?? ({} as ClawhubExtra);
   const metrics = parseJsonField<ClawhubMetrics>(item.metrics) ?? ({} as ClawhubMetrics);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-  const [historyCount, setHistoryCount] = useState<number>(0);
+  const [history, setHistory] = useState<ClawhubMetricsSnapshot[]>([]);
 
   // 拉 metrics_history 决定是否展示 30 天趋势区段（< 14 个采样点不展示）
   useEffect(() => {
     let cancelled = false;
     fetchItem(item.id).then((resp) => {
       if (cancelled) return;
-      const hist = resp.metrics_history;
-      if (hist) setHistoryCount(hist.length);
+      const hist = resp.metrics_history as unknown as ClawhubMetricsSnapshot[] | undefined;
+      if (hist) setHistory(hist);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [item.id]);
 
+  const historyCount = history.length;
   const showTrends = historyCount >= TRENDS_MIN_DATA_POINTS;
 
   const slug = extra.slug || item.source_id;
@@ -558,9 +635,7 @@ export function ClawhubDrawerBody({ item }: Props) {
             <span className="ml-auto text-[10px] text-neutral-400 font-normal">{historyCount} 个采样点</span>
           </summary>
           <div className="px-5 pb-5">
-            <div className="rounded-md bg-gradient-to-b from-emerald-50 to-white ring-1 ring-emerald-200 p-4 h-32 flex items-center justify-center text-[12px] text-emerald-700">
-              ★ stars 走势 sparkline（v2 渲染中…当前仅展示采样点数）
-            </div>
+            <StarsSparkline data={history} />
           </div>
         </details>
       )}
