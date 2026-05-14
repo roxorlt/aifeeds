@@ -108,26 +108,42 @@ const LIST_QUERY = `
   }
 `;
 
+// 共享 Post 字段串。两个 query（by id / by slug）都用这一份，避免双份维护。
+const POST_DETAIL_FIELDS = `
+  id slug name tagline description url website
+  featuredAt createdAt dailyRank
+  votesCount commentsCount reviewsCount reviewsRating
+  thumbnail { url type videoUrl }
+  media { url type videoUrl }
+  user { id name username headline profileImage }
+  makers { id name username headline profileImage }
+  topics(first: 5) { edges { node { name slug } } }
+  comments(order: VOTES_COUNT, first: 10) {
+    edges {
+      node {
+        id body votesCount createdAt parentId
+        user { id name username profileImage }
+      }
+    }
+  }
+  productLinks { type url }
+`;
+
 const DETAIL_QUERY = `
   query PhPostDetail($id: ID!) {
     post(id: $id) {
-      id slug name tagline description url website
-      featuredAt createdAt dailyRank
-      votesCount commentsCount reviewsCount reviewsRating
-      thumbnail { url type videoUrl }
-      media { url type videoUrl }
-      user { id name username headline profileImage }
-      makers { id name username headline profileImage }
-      topics(first: 5) { edges { node { name slug } } }
-      comments(order: VOTES_COUNT, first: 10) {
-        edges {
-          node {
-            id body votesCount createdAt parentId
-            user { id name username profileImage }
-          }
-        }
-      }
-      productLinks { type url }
+      ${POST_DETAIL_FIELDS}
+    }
+  }
+`;
+
+// PH GraphQL Query.post(slug: String) 与 post(id: ID) 同源，二选一参数。
+// refreshPhItem 用 by-slug：items.source_id 形如 "<slug>:<launch_date>"，
+// 没存 PH 内部 post.id（旧数据兼容性 + transform 时 sourceId 用 slug 派生）。
+const DETAIL_QUERY_BY_SLUG = `
+  query PhPostDetailBySlug($slug: String!) {
+    post(slug: $slug) {
+      ${POST_DETAIL_FIELDS}
     }
   }
 `;
@@ -326,6 +342,19 @@ export async function fetchPhPostDetail(
   postId: string,
 ): Promise<PhPostDetail | null> {
   const data = await phGraphQL<DetailQueryData>(env, DETAIL_QUERY, { id: postId });
+  return data?.post ?? null;
+}
+
+/**
+ * Same as fetchPhPostDetail but keyed by slug (URL-friendly id), used by
+ * lazy-enrich-on-drawer where items.source_id 形如 "<slug>:<launch_date>"
+ * 没保留 PH 内部 post.id。
+ */
+export async function fetchPhPostDetailBySlug(
+  env: Env,
+  slug: string,
+): Promise<PhPostDetail | null> {
+  const data = await phGraphQL<DetailQueryData>(env, DETAIL_QUERY_BY_SLUG, { slug });
   return data?.post ?? null;
 }
 
@@ -530,6 +559,121 @@ export function transformPostToIngestItem(
     lang: 'en',
     extra: JSON.stringify(extra),
   };
+}
+
+// ─── Lazy enrich (drawer 打开时调一次) ─────────────────────────
+//
+// 仿 github.refreshGithubItem / clawhub.refreshClawhubItem 模式：用户打开抽屉
+// 时由 enrich.refreshSingleItem 分发过来，主动 fetch 一次单 product 拿最新
+// votes / commentsCount / reviews / makers / comments，写回 D1 + append snapshot。
+//
+// 字段保留策略（merge 而非覆盖）：
+// - metrics: 直接覆盖（votes/comments/reviews 都是计数随时间变）
+// - extra: 拿新 fetch 的全套，再用 oldExtra 覆盖 enrich-only 字段
+//   （ai_summary / ai_category / classified_at / r2_migrated_at / *_translated）
+//   避免 enrich 结果被擦掉。
+
+const ENRICH_ONLY_EXTRA_KEYS = [
+  'ai_category',
+  'ai_summary',
+  'classified_at',
+  'r2_migrated_at',
+  'maker_post_translated',
+  'maker_post_text_translated',
+] as const;
+
+export interface PhRefreshResult {
+  refreshed: boolean;
+  reason: 'success' | 'not_found' | 'fetch_failed' | 'invalid_source_id';
+  metrics?: Record<string, number | null>;
+}
+
+// Narrow env shape for refreshPhItem — 仿 GithubEnv / ClawhubEnv 模式，避免要求
+// caller 传完整 Env（refreshSingleItem 在 enrich.ts 用的是 EnrichEnv 派生类型）。
+export interface PhRefreshEnv {
+  DB: D1Database;
+  AUTH_KV: KVNamespace;
+  PH_CLIENT_ID?: string;
+  PH_CLIENT_SECRET?: string;
+}
+
+export async function refreshPhItem(
+  env: PhRefreshEnv,
+  itemId: string,
+  sourceId: string, // 形如 "<slug>:<launch_date>" 例如 "staff-rip:2026-05-09"
+): Promise<PhRefreshResult> {
+  // 1. 拆 sourceId 拿 slug + ptLaunchDate
+  //    slug 可含 "-" 但不含 ":"，date 是 "YYYY-MM-DD" → 用最后一个 ":" 作分隔
+  const lastColon = sourceId.lastIndexOf(':');
+  if (lastColon < 1 || lastColon === sourceId.length - 1) {
+    return { refreshed: false, reason: 'invalid_source_id' };
+  }
+  const slug = sourceId.slice(0, lastColon);
+  const ptLaunchDate = sourceId.slice(lastColon + 1);
+
+  // 2. PH GraphQL by slug
+  // PhRefreshEnv 是 Env 的 structural subset（DB/AUTH_KV/PH_CLIENT_*），
+  // fetchPhPostDetailBySlug + 链路上的 phGraphQL/getPhAccessToken 实际只用到这几个字段。
+  // widening cast 在 runtime 安全；type system 缺乏精度因为现有 PH 函数签名都用 Env。
+  let post: PhPostDetail | null;
+  try {
+    post = await fetchPhPostDetailBySlug(env as unknown as Env, slug);
+  } catch (e) {
+    console.error(`[ph-refresh] fetch error for slug=${slug}:`, e);
+    return { refreshed: false, reason: 'fetch_failed' };
+  }
+  if (!post) {
+    return { refreshed: false, reason: 'not_found' };
+  }
+
+  // 3. 复用 transform 拿新 metrics + extra（含 makers/comments/maker_post 全套）
+  const fresh = transformPostToIngestItem(post, ptLaunchDate);
+  const newMetrics = JSON.parse(fresh.metrics as string) as Record<string, number>;
+  const freshExtra = JSON.parse(fresh.extra as string) as Record<string, unknown>;
+
+  // 4. 读旧 extra，merge：fresh 覆盖大部分，enrich-only 字段保留旧值
+  const row = await env.DB.prepare(
+    `SELECT extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ extra: string | null }>();
+  let oldExtra: Record<string, unknown> = {};
+  if (row?.extra) {
+    try {
+      const parsed = JSON.parse(row.extra);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        oldExtra = parsed as Record<string, unknown>;
+      }
+    } catch { /* ignore — treat as empty */ }
+  }
+  const mergedExtra: Record<string, unknown> = { ...freshExtra };
+  for (const k of ENRICH_ONLY_EXTRA_KEYS) {
+    if (oldExtra[k] !== undefined) mergedExtra[k] = oldExtra[k];
+  }
+
+  // 5. UPDATE items + append metrics_snapshots_ph（atomic batch）
+  const capturedAt = Math.floor(Date.now() / 1000);
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE items SET metrics = ?, extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newMetrics), JSON.stringify(mergedExtra), itemId),
+    env.DB.prepare(
+      `INSERT INTO metrics_snapshots_ph
+         (item_id, captured_at, launch_date_pt,
+          votes, comments_count, reviews_count, reviews_avg, followers, daily_rank)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      itemId,
+      capturedAt,
+      ptLaunchDate,
+      newMetrics.votes ?? null,
+      newMetrics.comments ?? null,
+      newMetrics.reviews_count ?? null,
+      newMetrics.reviews_avg ?? null,
+      null, // followers — API 不暴露
+      (freshExtra.daily_rank as number | null) ?? null,
+    ),
+  ]);
+
+  return { refreshed: true, reason: 'success', metrics: newMetrics };
 }
 
 // ─── Orchestrator ──────────────────────────────────────────────

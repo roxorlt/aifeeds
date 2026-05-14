@@ -236,10 +236,11 @@ export function apiToMetrics(data: Record<string, unknown>): Metrics {
 
 // ─── 单 item on-demand refresh（drawer 打开时调用） ─────────────
 // PR6.6 lazy-enrich-on-drawer：不是 cron 全表轮询，而是用户点开抽屉时立即刷新这一条。
-// 三源策略：
+// 四源策略：
 //   - x_list：syndication API 拉 metrics + quote_of + link_card（1-3s）
 //   - github：GitHub REST API 拉 stars/forks/watchers/issues/PRs/contributors（<1s）
-//   - product_hunt：留到下次 PR（CF Browser binding 5-10s）
+//   - clawhub：Convex skills:getBySlug 拉 stars/downloads/installs/comments（<1s）
+//   - product_hunt：PH GraphQL by-slug 拉 votes/comments/reviews/makers/comments（1-2s）
 //
 // 节流：KV 存 last_refreshed_at，60s 内同 item 只刷一次（短到允许"关掉再开"，
 // 长到避免单条疯狂刷）。
@@ -266,7 +267,12 @@ function prunedNonUndefined<T extends Record<string, unknown>>(o: T): Partial<T>
 }
 
 export async function refreshSingleItem(
-  env: EnrichEnv & { AUTH_KV?: KVNamespace; GITHUB_TOKEN?: string },
+  env: EnrichEnv & {
+    AUTH_KV?: KVNamespace;
+    GITHUB_TOKEN?: string;
+    PH_CLIENT_ID?: string;
+    PH_CLIENT_SECRET?: string;
+  },
   itemId: string,
 ): Promise<SingleItemRefreshResult> {
   // 1. throttle check（KV，5min 内不重刷）
@@ -370,7 +376,34 @@ export async function refreshSingleItem(
     return { refreshed: true, source_type: 'clawhub', reason: 'success', metrics: r.metrics };
   }
 
-  // PH 暂留下个 PR（需要 CF Browser binding）
+  if (item.source_type === 'product_hunt') {
+    // refreshPhItem 必须有 AUTH_KV（getPhAccessToken 用 KV 缓存 token）
+    if (!env.AUTH_KV) {
+      return { refreshed: false, source_type: 'product_hunt', reason: 'fetch_failed' };
+    }
+    const { refreshPhItem } = await import('./scrapers/ph');
+    const r = await refreshPhItem(
+      {
+        DB: env.DB,
+        AUTH_KV: env.AUTH_KV,
+        PH_CLIENT_ID: env.PH_CLIENT_ID,
+        PH_CLIENT_SECRET: env.PH_CLIENT_SECRET,
+      },
+      item.id,
+      item.source_id,
+    );
+    if (!r.refreshed) {
+      const reason: SingleItemRefreshResult['reason'] = r.reason === 'not_found'
+        ? 'item_not_found'
+        : 'fetch_failed';
+      return { refreshed: false, source_type: 'product_hunt', reason };
+    }
+    await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+      expirationTtl: REFRESH_THROTTLE_TTL,
+    });
+    return { refreshed: true, source_type: 'product_hunt', reason: 'success', metrics: r.metrics };
+  }
+
   return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
 }
 
