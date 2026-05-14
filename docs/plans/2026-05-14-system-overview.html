@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aifeeds 系统概览 · 2026-05-14</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --high: #dc2626;
+    --high-soft: #fee2e2;
+    --mid: #d97706;
+    --mid-soft: #fef3c7;
+    --low: #16a34a;
+    --low-soft: #dcfce7;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 24px 0;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    font-weight: 600;
+  }
+  header .meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 14px;
+  }
+  nav {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+  }
+  nav button {
+    background: transparent;
+    border: none;
+    padding: 10px 14px;
+    font-size: 14px;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 500;
+  }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+  h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 28px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  h2:first-child { margin-top: 0; }
+  h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 18px 0 8px;
+    color: var(--text);
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 12px 0;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 700px) {
+    .grid-2, .grid-4 { grid-template-columns: 1fr; }
+  }
+  .metric {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .metric .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .metric .value { font-size: 26px; font-weight: 600; margin: 4px 0 2px; font-family: var(--mono); }
+  .metric .desc { font-size: 12px; color: var(--muted); }
+  .metric.good .value { color: var(--low); }
+  .metric.warn .value { color: var(--mid); }
+  .metric.bad .value { color: var(--high); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { background: var(--bg); font-weight: 600; }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+  .tag.high { background: var(--high-soft); color: var(--high); }
+  .tag.mid { background: var(--mid-soft); color: var(--mid); }
+  .tag.low { background: var(--low-soft); color: var(--low); }
+  .tag.muted { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+  details {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 8px 0;
+    padding: 0;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 10px 14px;
+    font-weight: 500;
+    list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▸ '; color: var(--muted); }
+  details[open] summary::before { content: '▾ '; }
+  details > *:not(summary) { padding: 0 14px 12px; }
+  .source-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 12px 0;
+    flex-wrap: wrap;
+  }
+  .source-tabs button {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 16px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--text);
+  }
+  .source-tabs button.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .source-panel { display: none; }
+  .source-panel.active { display: block; }
+  .mermaid {
+    text-align: center;
+    margin: 12px 0;
+    padding: 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+    min-height: 200px;
+  }
+  .mermaid svg { max-width: 100%; height: auto; }
+  /* 各源流程图：subgraph 加大字号、加底色 */
+  .source-panel .mermaid { padding: 24px; }
+  .source-panel .mermaid .cluster rect {
+    rx: 8;
+    stroke-width: 1.5;
+  }
+  .source-panel .mermaid .cluster-label .nodeLabel {
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .source-panel .mermaid .nodeLabel {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .chunk-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 13px; }
+  .chunk-bar .name { width: 160px; font-family: var(--mono); font-size: 12px; }
+  .chunk-bar .bar-track { flex: 1; background: var(--bg); height: 18px; border-radius: 9px; overflow: hidden; }
+  .chunk-bar .bar-fill { height: 100%; background: var(--accent); border-radius: 9px; }
+  .chunk-bar .bar-fill.lazy { background: var(--mid); }
+  .chunk-bar .size { width: 70px; text-align: right; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 10px 14px;
+    margin: 12px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 14px;
+  }
+  .callout.high { border-color: var(--high); background: var(--high-soft); }
+  .callout.mid { border-color: var(--mid); background: var(--mid-soft); }
+  .callout.low { border-color: var(--low); background: var(--low-soft); }
+  .callout strong { display: block; margin-bottom: 4px; }
+  .footer {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 24px 0;
+    margin-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+
+  /* LCP 堆叠条形图 */
+  .lcp-stack {
+    display: flex;
+    height: 80px;
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 12px 0 6px;
+    border: 1px solid var(--border);
+  }
+  .lcp-seg {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    font-size: 12px;
+    padding: 4px 8px;
+    text-align: center;
+    line-height: 1.3;
+    overflow: hidden;
+  }
+  .lcp-seg-label { font-size: 11px; opacity: 0.92; }
+  .lcp-seg-value { font-weight: 600; font-family: var(--mono); font-size: 14px; margin-top: 2px; }
+  .lcp-seg-pct { font-size: 10px; opacity: 0.85; }
+  .lcp-seg.lcp-good { background: var(--low); }
+  .lcp-seg.lcp-bad  { background: var(--high); }
+
+  /* 网络瀑布图 */
+  .waterfall {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 14px 14px;
+    margin: 10px 0 0;
+  }
+  .wf-row {
+    display: flex;
+    align-items: center;
+    height: 22px;
+    position: relative;
+    margin-bottom: 5px;
+  }
+  .wf-label {
+    width: 180px;
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--text);
+    padding-right: 10px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .wf-track {
+    flex: 1;
+    position: relative;
+    height: 16px;
+    background: var(--bg);
+    border-radius: 3px;
+  }
+  .wf-bar {
+    position: absolute;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    min-width: 4px;
+    top: 0;
+  }
+  .wf-bar.wf-good { background: var(--low); }
+  .wf-bar.wf-warn { background: var(--mid); }
+  .wf-bar.wf-bad  { background: var(--high); }
+  .wf-bar-note {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    color: white;
+    padding: 0 6px;
+    white-space: nowrap;
+    font-family: var(--mono);
+  }
+  .wf-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    padding-left: 190px;
+    padding-right: 8px;
+    margin-top: 8px;
+    font-family: var(--mono);
+    border-top: 1px dashed var(--border);
+    padding-top: 6px;
+  }
+  .wf-lcp-marker {
+    position: absolute;
+    top: 14px;
+    bottom: 14px;
+    width: 2px;
+    background: var(--high);
+    right: 14px;
+  }
+  .wf-lcp-label {
+    position: absolute;
+    top: 14px;
+    right: 18px;
+    font-size: 11px;
+    color: var(--high);
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+
+  /* 现状 vs 优化柱状对比 */
+  .stack-bar {
+    display: flex;
+    height: 32px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .stack-bar .stack-seg {
+    font-size: 11px;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    border-right: 1px solid rgba(255,255,255,0.25);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .stack-bar .stack-seg:last-child { border-right: none; }
+  .stack-seg.s-keep { background: var(--accent); }
+  .stack-seg.s-lazy { background: var(--mid); }
+  .stack-legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .stack-legend .dot { display: inline-block; width: 10px; height: 10px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>aifeeds 抓取系统概览</h1>
+  <div class="meta">基于 2026-05-14 架构分析 + 移动端性能实测。来源：架构设计 md + 性能诊断 md（合并可视化）。</div>
+  <nav>
+    <button class="active" data-tab="overview">架构总览</button>
+    <button data-tab="sources">5 个数据源流程</button>
+    <button data-tab="problems">现状问题</button>
+    <button data-tab="perf">移动端性能</button>
+    <button data-tab="action">行动建议</button>
+    <button data-tab="compare">现状 vs 迁移后</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- =========== 架构总览 ============ -->
+<section class="tab active" data-content="overview">
+  <h2>6 层架构</h2>
+  <p>整套抓取业务可以从「数据从哪来」一路拆到「问题怎么暴露给人」，共 6 层。下图展示各层关系（实线=数据流，虚线=日志/告警链）。</p>
+
+  <div class="callout">
+    <strong>关于 L3 入库层 在 L4 加工层 之前的设计原理</strong>
+    aifeeds 走的是 <strong>ELT（Extract-Load-Transform）</strong>而不是传统 <strong>ETL（Extract-Transform-Load）</strong>：
+    抓到的数据**先入库（写入原始字段 + 占位 NULL）**，然后后台 cron 异步补字段。
+    原因：DeepSeek 翻译 / 分类单次 4-10s，同步加工 5 分钟 cron 一定 timeout；分开后失败可重试、可分层刷新（L0-L5 只刷热门）、抓取链和加工链解耦。
+    所以入库时 <code>is_relevant=NULL</code> / <code>content_translated=NULL</code> / <code>extra.gh_pending=1</code> 都是占位，等 L4 的 cron 来补。
+  </div>
+
+  <div class="mermaid">
+flowchart TB
+    subgraph L1["L1 数据源层（5 个上游）"]
+        S1["X List\n推文流"]
+        S2["GitHub Trending"]
+        S3["Product Hunt"]
+        S4["ClawHub"]
+        S5["活动行 huodongxing"]
+    end
+    subgraph L2["L2 抓取层"]
+        T1["ScrapeBadger API\nX 推文 30 min"]
+        T2["CF Worker scheduled\nGH / PH / CH / HDX"]
+        T3["本地 launchd\n仅留 X 长推 fallback\nPH 已删 PR #14"]
+        T4["手动 admin endpoint"]
+    end
+    subgraph L3["L3 入库层（原始数据 + 占位 NULL）"]
+        I1["POST /api/ingest"]
+        I2["内调 ingestItems()"]
+    end
+    subgraph L4["L4 增量加工层（异步补字段 · 抢占式 cron）"]
+        E1["X classify / translate /\nbackfill-quotes / replies /\nlongform / refresh-tiered"]
+        E2["GH enrich / r2-migrate /\nreadme-translate"]
+        E3["PH enrich / r2-migrate"]
+        E4["ClawHub enrich"]
+        E5["HDX detail-enrich /\nsweep"]
+    end
+    subgraph L5["L5 展示层"]
+        D1["Dashboard Feed"]
+        D2["Drawer 详情\nlazy enrich on open"]
+        D3["分享海报\nresvg-wasm"]
+    end
+    subgraph L6["L6 观测层"]
+        O1["PushDeer\n仅 auth/SMS 配额"]
+        O2["wrangler tail\n3 天 retention"]
+        O3["D1 直查"]
+        O4["业务告警 缺失"]
+    end
+    S1 --> T1
+    S2 --> T2
+    S3 --> T2
+    S4 --> T2
+    S5 --> T2
+    T1 --> I1
+    T2 --> I2
+    T3 --> I1
+    T4 --> I1
+    T4 --> I2
+    I1 --> L4
+    I2 --> L4
+    L4 --> D1
+    D1 --> D2
+    D2 --> D3
+    L2 -.->|出错落日志| O2
+    L3 -.->|出错落日志| O2
+    L4 -.->|出错落日志| O2
+    O2 -.->|要看就查| O3
+  </div>
+
+  <div class="callout high">
+    <strong>关键发现 · L6 观测层是最薄的一层</strong>
+    PushDeer 告警当前只覆盖 SMS / Email 配额。所有抓取链路 0 告警 —— 出问题只能通过用户反馈或事后查 D1 才知道。
+  </div>
+
+  <h2>名词速查</h2>
+  <div class="grid-2">
+    <div class="card">
+      <h3>基础设施</h3>
+      <table>
+        <tr><td><code>Cloudflare</code></td><td>aifeeds 的网站 / 后端 / DB 都跑在 CF 上</td></tr>
+        <tr><td><code>Worker</code></td><td>CF 的后端运行环境，aifeeds 的 <code>xlist-api</code> 就是 Worker</td></tr>
+        <tr><td><code>D1</code></td><td>CF 的 SQLite 数据库，所有内容存这</td></tr>
+        <tr><td><code>R2</code></td><td>CF 的对象存储（类 S3），存图片 / 视频 / 海报</td></tr>
+        <tr><td><code>KV</code></td><td>CF 的键值缓存（类 Redis），做去重哨兵 / 限流</td></tr>
+        <tr><td><code>Pages</code></td><td>CF 的静态网站托管，dashboard 在这</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>抓取相关</h3>
+      <table>
+        <tr><td><code>cron</code></td><td>定时任务</td></tr>
+        <tr><td><code>scheduled cron</code></td><td>Worker 自带的定时器，CF 按时间表触发代码</td></tr>
+        <tr><td><code>launchd</code></td><td>Mac 自带的定时任务管家</td></tr>
+        <tr><td><code>抢占式 cron</code></td><td>每 5 分钟检查哪个队列有积压就先干哪个</td></tr>
+        <tr><td><code>ingest</code></td><td>数据入库到 D1</td></tr>
+        <tr><td><code>enrich</code></td><td>入库后后台跑流程补字段（翻译/分类/补元数据）</td></tr>
+        <tr><td><code>ScrapeBadger</code></td><td>第三方 X 抓取 API</td></tr>
+        <tr><td><code>DeepSeek</code></td><td>用于翻译 + AI 相关性判别的国产大模型</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>D1 items 表（统一收口）</h2>
+  <p>5 个源最终都落到 <code>items</code> 表，源专属字段塞 <code>extra</code> JSON 里：</p>
+  <div class="card">
+<pre style="font-family: var(--mono); font-size: 12px; margin: 0; overflow-x: auto;">items
+├─ id              composite，x_list:1234... / github:owner/repo / ...
+├─ source_type     x_list | github | product_hunt | clawhub | huodongxing
+├─ source_id       源内部 ID
+├─ title / content / content_translated
+├─ author / handle / created_at / scraped_at
+├─ media / metrics / lang
+├─ is_relevant     0/1/NULL（AI 相关性，NULL 待判别）
+├─ tier / next_refresh_at / last_velocity  ← metrics 分层
+└─ extra (JSON)    源专属字段</pre>
+  </div>
+</section>
+
+<!-- =========== 5 个数据源 ============ -->
+<section class="tab" data-content="sources">
+  <h2>5 个源对照</h2>
+  <table>
+    <thead><tr><th>维度</th><th>X List</th><th>GitHub</th><th>Product Hunt</th><th>ClawHub</th><th>huodongxing</th></tr></thead>
+    <tbody>
+      <tr><td>抓取频率</td><td>30 min</td><td>12 h</td><td>24 h</td><td>12 h</td><td>12 h + 接力</td></tr>
+      <tr><td>抓取方式</td><td>SB API</td><td>HTML + REST</td><td>GraphQL</td><td>Convex</td><td>SSR HTML</td></tr>
+      <tr><td>量级</td><td>~261/天</td><td>~1-3 新/天</td><td>30-50/天</td><td>top 1500 dedup</td><td>~150/天×24 城</td></tr>
+      <tr><td>AI 判别</td><td>必做</td><td>必做</td><td>必做</td><td>跳过</td><td>暂无</td></tr>
+      <tr><td>metrics 刷新</td><td>tiered L0-L5</td><td>入库+drawer</td><td>入库+drawer</td><td>入库+drawer</td><td>入库一次</td></tr>
+      <tr><td>R2 资源迁移</td><td>仅图片代理</td><td>readme 图</td><td>logo/截图/视频/头像</td><td>无</td><td>无</td></tr>
+      <tr><td>失败告警</td><td><span class="tag high">无</span></td><td><span class="tag high">无</span></td><td><span class="tag high">无</span></td><td><span class="tag high">无</span></td><td><span class="tag high">无</span></td></tr>
+      <tr><td>drawer lazy refresh</td><td>有</td><td>有</td><td><span class="tag mid">stub</span></td><td>有</td><td><span class="tag high">无</span></td></tr>
+      <tr><td>海报变体</td><td>有</td><td>有</td><td>有</td><td>有</td><td><span class="tag high">缺</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>各源端到端流程</h2>
+  <div class="source-tabs">
+    <button class="active" data-source="x">X List</button>
+    <button data-source="gh">GitHub</button>
+    <button data-source="ph">Product Hunt</button>
+    <button data-source="ch">ClawHub</button>
+    <button data-source="hdx">huodongxing</button>
+  </div>
+
+  <div class="source-panel active" data-source-content="x">
+    <h3>X List · 主链路</h3>
+    <p style="color: var(--muted); font-size: 13px;">推文流，每天 ~261 条。每 30 分钟从 ScrapeBadger 拉一次，入库后由 6 个加工任务异步补字段。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1["① 触发 · 每 5 分钟 1 次"]
+        A["cron tick 到点\n判断当前是否到抓取槽"]
+    end
+
+    subgraph S2["② 抓取 · 调用第三方 API"]
+        F["ScrapeBadger API\n(第三方 X 抓取服务)\n拿回最新约 55 条推文"]
+    end
+
+    subgraph S3["③ 入库到 D1 · 先存原始 + 占位"]
+        I["UPSERT items 表\n──────────────\n原始字段：正文 / 作者 / 互动数\n占位字段：是否 AI 相关 = 待判别\n占位字段：中文译文 = 待翻译"]
+    end
+
+    subgraph S4["④ 加工链 · 其他 tick 抢占式异步跑"]
+        direction TB
+        E1["❶ AI 相关性判别\nDeepSeek 一次判定 是否 AI + 分类"]
+        E2["❷ 中文翻译\n只翻 AI 相关的"]
+        E3["❸ 补引用推 + 链接预览卡\n调 syndication API"]
+        E4["❹ 补回复父推快照"]
+        E5["❺ 长推全文补全\n检测截断 → SB 批量拉全文"]
+        E6["❻ 刷新互动数\n按热度分 6 层（L0 热门多刷，L5 冷门不刷）"]
+        E1 --> E2 --> E3 --> E4 --> E5 --> E6
+    end
+
+    subgraph S5["⑤ 展示"]
+        Show["前端 feed 卡片\n+ drawer 详情\n+ 分享海报"]
+    end
+
+    A -->|minute=25 或 55| F
+    F --> I
+    I -.->|等下个 tick| E1
+    E6 --> Show
+    </div>
+    <h3>死角清单</h3>
+    <table>
+      <tr><th>环节</th><th>问题</th></tr>
+      <tr><td>list-poll-ingest</td><td><span class="tag high">高</span> 持续 0 new 没告警（2026-05-13 因 preempt hijack 30h 漏抓，靠用户发现）</td></tr>
+      <tr><td>classify-pending</td><td><span class="tag mid">中</span> DeepSeek 持续失败没告警，item 卡 NULL 用户看不到</td></tr>
+      <tr><td>fill-translations</td><td><span class="tag mid">中</span> suspect 翻译标了没人处理</td></tr>
+      <tr><td>backfill-quotes</td><td><span class="tag mid">中</span> enriched_at 设了就不重跑（含空结果），第一次没拿到的永远拿不到</td></tr>
+      <tr><td>longform-via-sb</td><td><span class="tag mid">中</span> 3 次重试后悄悄放弃，item 永远残缺</td></tr>
+      <tr><td>refresh-tiered</td><td><span class="tag low">低</span> L5 不再刷（设计如此）</td></tr>
+    </table>
+  </div>
+
+  <div class="source-panel" data-source-content="gh">
+    <h3>GitHub · 每天 2 次（北京时间 01:00 / 13:00）</h3>
+    <p style="color: var(--muted); font-size: 13px;">trending 热门仓库榜单，每次抓 ~25 条 repo，新增 1-3 条/天。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1["① 触发 · 每天 2 次"]
+        A["cron tick 到点\n每天北京时间 01:00 / 13:00 触发"]
+    end
+
+    subgraph S2["② 抓取 · 解析 HTML"]
+        F["GET github.com/trending\n正则解析 HTML\n拿到约 25 条 repo"]
+    end
+
+    subgraph S3["③ 入库到 D1 · 先标待加工"]
+        I["INSERT items 表\n──────────────\n原始字段：repo 名 / 描述 / star 数\n占位字段：gh_pending = 1（标记待加工）"]
+    end
+
+    subgraph S4["④ 加工链 · 其他 tick 抢占式异步跑"]
+        direction TB
+        E1["❶ 元数据补全 + AI 判别\n调 GitHub REST 拿 license / PR / 贡献者\n+ 抓 raw README\n+ DeepSeek 判 是否 AI 相关 + 分类\n每 tick 处理 3 个 repo"]
+        E2["❷ README 图片迁 R2\nreadme 里的图片下载到 R2\n每 tick 处理 1 个 repo（最多 20 张）"]
+        E3["❸ README 中文翻译\nDeepSeek 翻译 README 摘要\n每 tick 处理 6 个 repo"]
+        E1 --> E2 --> E3
+    end
+
+    subgraph S5["⑤ 展示"]
+        Show["前端 feed 卡片\n+ drawer 详情\n+ 分享海报"]
+    end
+
+    A --> F
+    F --> I
+    I -.->|等下个 tick| E1
+    E3 --> Show
+    </div>
+    <ul>
+      <li><span class="tag high">高</span> trending HTML 改版没告警，解析挂了 24h 才再试</li>
+      <li><span class="tag mid">中</span> gh_pending 长期 &gt; 0 没告警（DeepSeek 挂 / GH API rate limit 都可能卡）</li>
+    </ul>
+  </div>
+
+  <div class="source-panel" data-source-content="ph">
+    <h3>Product Hunt · 每天 1 次（北京时间 18:10-18:14）</h3>
+    <p style="color: var(--muted); font-size: 13px;">PH 每日新品榜，单次窗口仅 5 分钟。抓回的 logo / 截图 / 视频 / 头像统一迁到 R2。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1["① 触发 · 每天 1 次（窗口仅 5 分钟）"]
+        A["cron tick 到点\nUTC 10:10-10:14 = 北京 18:10-18:14"]
+        Q{"KV 哨兵\n当天已抓过吗？"}
+        A --> Q
+    end
+
+    subgraph S2["② 抓取 · OAuth + GraphQL"]
+        O["OAuth client_credentials\n拿 access_token"]
+        L["GraphQL list query\ncursor 翻页拿当天全榜"]
+        D["每条 detail query\n拿 makers / 评论 / 截图 / 视频"]
+        O --> L --> D
+    end
+
+    subgraph S3["③ 入库到 D1"]
+        I["UPSERT items 表\n──────────────\n原始字段：产品名 / tagline / 投票数\n占位字段：是否 AI 相关 = 待判别\n占位字段：is_relevant = NULL"]
+        K["写 KV 哨兵\n标记当天已抓"]
+        I --> K
+    end
+
+    subgraph S4["④ 加工链 · 其他 tick 抢占式异步跑"]
+        direction TB
+        E1["❶ AI 判别 + 摘要\nDeepSeek 一次产出 是否 AI + 分类 + 摘要\n每 tick 处理 10 个产品"]
+        E2["❷ 中文翻译\n翻 tagline / maker 长文 / 高赞评论"]
+        E3["❸ 资源迁 R2\nlogo / 截图 / 视频 / 头像 全部下载到 R2\n每 tick 处理 1 个产品"]
+        E1 --> E2 --> E3
+    end
+
+    subgraph S5["⑤ 展示"]
+        Show["前端 feed 卡片\n+ drawer 详情\n+ 分享海报"]
+    end
+
+    Q -->|未抓| O
+    Q -->|已抓| Skip["跳过"]
+    D --> I
+    K -.->|等下个 tick| E1
+    E3 --> Show
+    </div>
+    <div class="callout high">
+      <strong>最严重的告警盲点</strong>
+      18:10 那 5 分钟窗口挂了 = 全天漏抓。KV 哨兵不知道是失败还是 OK，第二天才有下次机会。
+    </div>
+    <ul>
+      <li><span class="tag mid">中</span> drawer lazy enrich 是 stub（<code>worker/src/enrich.ts:242</code>），打开 PH item 不会主动刷</li>
+      <li><span class="tag mid">中</span> ph-r2-migrate 失败标 migrated_at，用户看 broken image</li>
+    </ul>
+  </div>
+
+  <div class="source-panel" data-source-content="ch">
+    <h3>ClawHub · 每天 2 次（北京时间 04:00 / 16:00）</h3>
+    <p style="color: var(--muted); font-size: 13px;">Claude skill 市场，每次去重抓 top 1500 个 skill。本身就是 AI 内容，跳过 AI 判别。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1["① 触发 · 每天 2 次"]
+        A["cron tick 到点\n每天北京时间 04:00 / 16:00 触发"]
+    end
+
+    subgraph S2["② 抓取 · 调 Convex 公开接口"]
+        F["8 次 Convex query 调用\n──────────────\ntop 1000 按 star 排序\n+ top 500 按 updated 排序"]
+    end
+
+    subgraph S3["③ 入库到 D1 · 去重 + 标待加工"]
+        I["dedup（去重）+ UPSERT items\n──────────────\n原始字段：skill 名 / 描述 / star / 截图\n直接标 is_relevant = 1（市场本身即 AI 内容）\n占位字段：ch_pending = 1（标记待加工）"]
+    end
+
+    subgraph S4["④ 加工链 · 其他 tick 抢占式异步跑"]
+        direction TB
+        E1["clawhub-enrich · 每 tick 处理 8 条\n并行 3 件事："]
+        E2["① 翻译 skill summary"]
+        E3["② 翻译 LLM 安全审查结论"]
+        E4["③ 调 skills:getReadme action\n拿渲染后的 README"]
+        E1 --> E2
+        E1 --> E3
+        E1 --> E4
+    end
+
+    subgraph S5["⑤ 展示"]
+        Show["前端 feed 卡片\n+ drawer 详情\n+ 分享海报"]
+    end
+
+    A --> F
+    F --> I
+    I -.->|等下个 tick| E1
+    E2 --> Show
+    E3 --> Show
+    E4 --> Show
+    </div>
+    <ul>
+      <li><span class="tag mid">中</span> Convex 接口改了没告警；翻车了次日才知道（v0 → v2 改过两次）</li>
+    </ul>
+  </div>
+
+  <div class="source-panel" data-source-content="hdx">
+    <h3>活动行 huodongxing · 最复杂的状态机</h3>
+    <p style="color: var(--muted); font-size: 13px;">AI 线下活动，每天 24 城 × ~5 页要爬，单 tick 跑不完 → 用 KV 状态机分 7 个 tick 接力。</p>
+    <div class="mermaid">
+flowchart TB
+    subgraph S1["① 触发 · 每天 2 次起跑 + 之后 7 个 tick 接力"]
+        A1["cron tick\n北京时间 04:30 / 16:30 起跑\nreset 状态机"]
+        A2["之后每 5 分钟\n接力一次\n共 7 个 tick 拼齐"]
+    end
+
+    subgraph S2["② 抓取 · 列表分批接力"]
+        F1["第一棒：跑前几页\n预算上限 40 子请求 / tick\n每页节流 2 秒"]
+        F2["KV cities_pending\n状态机记录哪些城市还没抓"]
+        F3["接力 tick：继续抓未完成城市\n3-4 个 tick 拼齐全部 120 次拉取"]
+        F1 --> F2 --> F3
+    end
+
+    subgraph S3["③ 入库到 D1"]
+        I["UPSERT items 表\n──────────────\n原始字段：活动名 / 城市 / 时间 / 主办方\n占位字段：详情未补"]
+    end
+
+    subgraph S4["④ 加工链"]
+        D1["详情补全 detail-enrich\n每 tick 抢占（minute=20 / 50）\nbatch=3 个活动 + 每个 5 秒节流"]
+        D2["补字段：start_time / end_time / 地址 / 嘉宾 / 票档"]
+        D1 --> D2
+    end
+
+    subgraph S5["⑤ 定期清理"]
+        SW["每天 03:00 BJT sweep\n将过期活动标记为 historical"]
+    end
+
+    subgraph S6["⑥ 展示"]
+        Show["前端 feed 卡片\n+ drawer 详情"]
+    end
+
+    A1 --> F1
+    A2 --> F3
+    F3 --> I
+    I -.->|等下个 tick| D1
+    D2 --> Show
+    D2 -.->|每天一次| SW
+    </div>
+    <ul>
+      <li><span class="tag mid">中</span> WAF 风控触发（detail 15/min 持续 4 分钟）只在日志见，无告警</li>
+      <li><span class="tag high">高</span> drawer lazy refresh + 海报变体都未做</li>
+    </ul>
+  </div>
+</section>
+
+<!-- =========== 现状问题 ============ -->
+<section class="tab" data-content="problems">
+  <h2>「记录抓了但详情页没更新」根因</h2>
+  <p>架构失效层：<strong>L4 加工层</strong>。所有加工任务都是「队列驱动 + silent fail」—— 没有任何机制告诉你「某条 item 反复 enrich 失败」或「某个字段全表覆盖率掉下来了」。</p>
+
+  <table>
+    <thead><tr><th>失效场景</th><th>触发条件</th><th>覆盖情况</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>A · metrics 显示老数据</td>
+        <td>item 太老（L5）→ refresh-tiered 不再主动刷</td>
+        <td>仅当用户点开 drawer 才主动 refresh；feed 卡片还是老的</td>
+      </tr>
+      <tr>
+        <td>B · 翻译缺失</td>
+        <td>DeepSeek 持续失败 → attempts 不超 3 → 标 suspect 不抛弃</td>
+        <td><span class="tag mid">长尾失败永远缺翻译</span></td>
+      </tr>
+      <tr>
+        <td>C · quote / link_card 缺失</td>
+        <td><code>enriched_at</code> 设了即跳过，syndication 不返时 silent 跳过</td>
+        <td><span class="tag mid">第一次没拿到永远拿不到（哨兵已设）</span></td>
+      </tr>
+      <tr>
+        <td>D · 长推内容被截断</td>
+        <td>detect-longform 标了 note_id 但 longform-via-sb 没消费，或 3 次重试后放弃</td>
+        <td><span class="tag mid">3 次失败后悄悄放弃</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>业务级告警缺失（按严重程度）</h2>
+  <table>
+    <thead><tr><th>缺失场景</th><th>严重</th><th>当前怎么发现</th><th>应该怎么知道</th></tr></thead>
+    <tbody>
+      <tr><td>X scrape 持续 0 new 多轮</td><td><span class="tag high">高</span></td><td>用户投诉</td><td>refresh_log 连 N 轮 tweets_seen=0 → PushDeer</td></tr>
+      <tr><td>PH 18:10 窗口挂了 全天漏抓</td><td><span class="tag high">高</span></td><td>第二天发现缺日榜</td><td>BJT 19:00 看 KV 哨兵存不存在</td></tr>
+      <tr><td>D1 写入持续失败</td><td><span class="tag high">高</span></td><td>看不见新数据</td><td>Workers Logs 错误率告警</td></tr>
+      <tr><td>GH trending 解析改版挂了</td><td><span class="tag mid">中</span></td><td>几天后发现没新 repo</td><td>items_seen 连两天 &lt; 3 → 告警</td></tr>
+      <tr><td>DeepSeek 失败率飙升</td><td><span class="tag mid">中</span></td><td>翻译堆积</td><td>每 tick 失败 / 总 &gt; 阈值</td></tr>
+      <tr><td>某条 item 反复 enrich 失败</td><td><span class="tag mid">中</span></td><td>用户报特定卡片</td><td>attempts ≥ 3 累计计数</td></tr>
+      <tr><td>CF Worker subrequest 配额接近上限</td><td><span class="tag mid">中</span></td><td>CF 账单 / 服务降级</td><td>Workers Logs duration_ms 异常</td></tr>
+      <tr><td>某 cron mode 连续 N 次 0 处理</td><td><span class="tag mid">中</span></td><td>队列堆很久</td><td>各 pending count 阈值</td></tr>
+      <tr><td>metrics 字段覆盖率跌破阈值</td><td><span class="tag low">低</span></td><td>不会发现，全表 SQL</td><td>每日跑覆盖率扫描</td></tr>
+      <tr><td>R2 资源 broken（图片 404）</td><td><span class="tag low">低</span></td><td>看到 broken image</td><td>telemetry 已采但无看板</td></tr>
+    </tbody>
+  </table>
+
+  <h2>可观测性盲区</h2>
+  <details>
+    <summary>展开 9 个只能事后查 D1 的盲区</summary>
+    <table>
+      <tr><th>盲区</th><th>当前查法</th></tr>
+      <tr><td>每条 item 的 lifecycle trace</td><td>反推字段是否为空</td></tr>
+      <tr><td>单次 cron tick 执行明细</td><td>wrangler tail 实时 + console.log（3 天）</td></tr>
+      <tr><td>DeepSeek 调用成本 / token / 失败率</td><td>无（直接打 API）</td></tr>
+      <tr><td>ScrapeBadger credit 用量</td><td>refresh_log 有 credits_used 字段，无看板</td></tr>
+      <tr><td>每源每日入库量趋势</td><td>SQL group by date</td></tr>
+      <tr><td>每个 enrich queue 当前积压</td><td>分散的 count helper，不暴露</td></tr>
+      <tr><td>「item 反复 enrich 失败」统计</td><td><code>extra.longform.attempts</code> 字段查</td></tr>
+      <tr><td>翻译 suspect 总量</td><td>SQL where translation_quality='suspect'</td></tr>
+      <tr><td>业务关键 funnel</td><td>events 表 SQL 自查（TODO #7 计划做）</td></tr>
+    </table>
+  </details>
+</section>
+
+<!-- =========== 移动端性能 ============ -->
+<section class="tab" data-content="perf">
+  <h2>核心指标（mobile + Slow 4G + CPU 4x throttle）</h2>
+  <div class="grid-4">
+    <div class="metric warn">
+      <div class="label">LCP 最大内容渲染</div>
+      <div class="value">2160ms</div>
+      <div class="desc">边界值（Good ≤ 2500ms）</div>
+    </div>
+    <div class="metric good">
+      <div class="label">TTFB 首字节</div>
+      <div class="value">246ms</div>
+      <div class="desc">服务器响应快，不是瓶颈</div>
+    </div>
+    <div class="metric bad">
+      <div class="label">Load delay</div>
+      <div class="value">1884ms</div>
+      <div class="desc">占 LCP 87%，JS 解析 + 图片排队</div>
+    </div>
+    <div class="metric good">
+      <div class="label">CLS 布局抖动</div>
+      <div class="value">0.01</div>
+      <div class="desc">优秀，视觉稳定</div>
+    </div>
+  </div>
+
+  <h2>LCP 时间拆解</h2>
+  <p>2160ms 总时长拆开看，服务器响应只占 11%，剩下 87% 是「拿到 HTML 之后到看见主要内容」的等待。</p>
+  <div class="lcp-stack">
+    <div class="lcp-seg lcp-good" style="width: 11.4%">
+      <div class="lcp-seg-label">TTFB</div>
+      <div class="lcp-seg-value">246ms</div>
+      <div class="lcp-seg-pct">11%</div>
+    </div>
+    <div class="lcp-seg lcp-bad" style="width: 87.2%">
+      <div class="lcp-seg-label">Load delay（瓶颈集中在这里）</div>
+      <div class="lcp-seg-value">1884ms</div>
+      <div class="lcp-seg-pct">87%</div>
+    </div>
+    <div class="lcp-seg lcp-good" style="width: 1.4%" title="Render delay 29ms"></div>
+  </div>
+  <p style="font-size: 13px; color: var(--muted); margin-top: 4px;">
+    服务器（TTFB 246ms）+ 最后渲染（29ms）都很快。问题在中间那 1884ms：JS 解析 + 图片下载排队 + API 串行 preflight 全堆在这。
+  </p>
+
+  <h2>关键请求时间瀑布</h2>
+  <p>首字节到 LCP 触发（2160ms）之间的关键请求时间分布：</p>
+  <div class="waterfall">
+    <div class="wf-row">
+      <div class="wf-label">HTML 文档</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-good" style="left: 0%; width: 11.4%;">
+          <span class="wf-bar-note">246ms</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">index.js · 78kb</div>
+      <div class="wf-track">
+        <div class="wf-bar" style="left: 12%; width: 12%;">
+          <span class="wf-bar-note">~260ms</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">TweetDrawer.js · 114kb</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-bad" style="left: 12%; width: 19%;">
+          <span class="wf-bar-note">~410ms 首屏浪费</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">index.css · 10kb</div>
+      <div class="wf-track">
+        <div class="wf-bar" style="left: 12%; width: 6%;"></div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">字体 woff2 × 30+</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-warn" style="left: 24%; width: 14%;">
+          <span class="wf-bar-note">cn-font-split 切太碎</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">5 个源 API · OPTIONS+GET</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-bad" style="left: 28%; width: 28%;">
+          <span class="wf-bar-note">10 个 round trip</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">PH 30 张图 · imgix 直连</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-bad" style="left: 42%; width: 58%;">
+          <span class="wf-bar-note">没走 R2 反代 · 跨境排队</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-row">
+      <div class="wf-label">GH 40+ 头像 · 直连</div>
+      <div class="wf-track">
+        <div class="wf-bar wf-warn" style="left: 42%; width: 55%;">
+          <span class="wf-bar-note">国内偶发慢</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-lcp-marker"></div>
+    <div class="wf-lcp-label">LCP 2160ms</div>
+    <div class="wf-axis">
+      <span>0ms</span>
+      <span>500ms</span>
+      <span>1000ms</span>
+      <span>1500ms</span>
+      <span>2160ms</span>
+    </div>
+  </div>
+  <p style="font-size: 13px; color: var(--muted); margin-top: 8px;">
+    红色 = 主要瓶颈（首屏不该 eager 加载 / 不该跨境直连）；橙色 = 中等问题；蓝色 = 必要资源。
+  </p>
+
+  <h2>首屏 JS chunk 现状 vs 优化后</h2>
+  <p>按等比缩放显示（同一基准 = 229 KB 撑满）：</p>
+  <div class="card">
+    <div style="margin-bottom: 10px;">
+      <strong>现状 · 229 KB（br 压缩后）</strong>
+      <span class="tag mid" style="margin-left: 8px;">drawer / toast / share 都 eager 加载</span>
+    </div>
+    <div class="stack-bar">
+      <div class="stack-seg s-keep" style="flex: 78">index.js 78</div>
+      <div class="stack-seg s-lazy" style="flex: 114">TweetDrawer 114</div>
+      <div class="stack-seg s-lazy" style="flex: 28">toast 28</div>
+      <div class="stack-seg s-keep" style="flex: 8">api</div>
+      <div class="stack-seg s-keep" style="flex: 1; min-width: 6px;" title="css 10kb + share 0.5kb + device 0.3kb"></div>
+    </div>
+
+    <div style="margin: 18px 0 10px;">
+      <strong>优化后 · 86 KB（br 压缩后）</strong>
+      <span class="tag low" style="margin-left: 8px;">减 62% · 预期 LCP -400~800ms</span>
+    </div>
+    <div class="stack-bar" style="width: 37.6%;">
+      <div class="stack-seg s-keep" style="flex: 78">index.js 78</div>
+      <div class="stack-seg s-keep" style="flex: 8">api</div>
+      <div class="stack-seg s-keep" style="flex: 1; min-width: 6px;"></div>
+    </div>
+
+    <div class="stack-legend">
+      <div><span class="dot" style="background: var(--accent);"></span>首屏必需</div>
+      <div><span class="dot" style="background: var(--mid);"></span>可 lazy split（点击交互才需要）</div>
+    </div>
+  </div>
+
+  <h2>主要瓶颈（按贡献度）</h2>
+
+  <details open>
+    <summary><span class="tag high">疑似 bug</span> 1. PH 30 张图片直连 imgix CDN，没走 R2 反代</summary>
+    <p>首屏并行加载了 30+ 张 <code>ph-files.imgix.net/...png</code>，全部直连 Product Hunt 自家 CDN：</p>
+    <ul>
+      <li>imgix 在美东，国内 200-400ms 延迟 + 弱网下排队严重</li>
+      <li><strong>违反设计</strong>：CLAUDE.md 架构概览说 PH 资源应该已经迁到 R2 + <code>/r/&lt;key&gt;</code> 反代</li>
+      <li>查证：D1 prod 库看 <code>items WHERE source_type='product_hunt'</code> 的 <code>extra.logo_url</code> 是 <code>/r/&lt;key&gt;</code> 还是原始 imgix URL</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>2. GitHub 40+ 头像直连 githubusercontent.com</summary>
+    <p>首屏拉了 40+ 张 <code>avatars.githubusercontent.com/u/&lt;id&gt;?v=4</code>：</p>
+    <ul>
+      <li>GitHub 在国内偶发慢 / 被劫持到 camo</li>
+      <li>单张延迟 100-500ms</li>
+      <li>修复：和 X 头像一样走 worker <code>/img?url=...</code> 反代</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>3. TweetDrawer.js 114 KB 首屏 eager 加载</summary>
+    <p>各 JS chunk 实际大小（br 压缩后）：</p>
+    <div class="card">
+      <div class="chunk-bar"><span class="name">index.js</span><span class="bar-track"><span class="bar-fill" style="width: 68%"></span></span><span class="size">78 KB</span></div>
+      <div class="chunk-bar"><span class="name">TweetDrawer.js</span><span class="bar-track"><span class="bar-fill lazy" style="width: 100%"></span></span><span class="size">114 KB</span></div>
+      <div class="chunk-bar"><span class="name">toast.js</span><span class="bar-track"><span class="bar-fill lazy" style="width: 24%"></span></span><span class="size">28 KB</span></div>
+      <div class="chunk-bar"><span class="name">index.css</span><span class="bar-track"><span class="bar-fill" style="width: 9%"></span></span><span class="size">10 KB</span></div>
+      <div class="chunk-bar"><span class="name">api.js</span><span class="bar-track"><span class="bar-fill" style="width: 7%"></span></span><span class="size">8 KB</span></div>
+      <div class="chunk-bar"><span class="name">share.js</span><span class="bar-track"><span class="bar-fill lazy" style="width: 1%"></span></span><span class="size">0.5 KB</span></div>
+      <div class="chunk-bar"><span class="name">device.js</span><span class="bar-track"><span class="bar-fill" style="width: 0.5%"></span></span><span class="size">0.3 KB</span></div>
+      <div style="margin-top: 8px; font-size: 12px; color: var(--muted);">
+        <span style="display: inline-block; width: 10px; height: 10px; background: var(--accent); vertical-align: middle;"></span> 首屏需要
+        &nbsp;&nbsp;
+        <span style="display: inline-block; width: 10px; height: 10px; background: var(--mid); vertical-align: middle;"></span> 可 lazy（点击交互才需要）
+      </div>
+    </div>
+    <p><strong>首屏总计 229 KB（br）</strong>。把 TweetDrawer / toast / share lazy split 后理想 86 KB，减 62%。改造工作量 ~半天，预期 LCP 减 400-800ms。</p>
+  </details>
+
+  <details>
+    <summary>4. 首页同时拉 5 个源 items + 每个 CORS preflight</summary>
+    <p>首屏发起 <code>sources</code> + <code>stats</code> + <code>auth/me</code> + 5 个 <code>/api/items?source_type=...</code>，每个跨域请求多 1 个 OPTIONS preflight：</p>
+    <ul>
+      <li>10 个 API round trip，Slow 4G 下光 preflight 吃 500-1000ms</li>
+      <li>方案 A：API 合并 <code>/api/feed/home?sources=x,gh,ph,ch,hx</code>，一次拉所有</li>
+      <li>方案 B：让 worker 走 same-origin（<code>ai-feeds.com/api/...</code> 反代）消除 CORS</li>
+      <li>方案 C：首屏只渲染 1-2 个 tab</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>5. 字体 30+ 个 woff2 子集</summary>
+    <p>cn-font-split 切包过细，命中过多导致首次访问大量下载。这次实测 304 缓存命中实际带宽为零，但首次访问体感慢。<strong>调粗粒度</strong>（单包 50 KB 上限）。</p>
+  </details>
+
+  <details>
+    <summary>6. 国内 CF 节点延迟（结构性，不可消除）</summary>
+    <p>ai-feeds.com 在 Cloudflare，国内访问通常走香港 / 日本节点：</p>
+    <ul>
+      <li>联通 / 移动 → 香港 50-150ms</li>
+      <li>电信 → 美西 200-400ms</li>
+      <li><strong>唯一解</strong>：TODO #11 ICP 备案 + #12 <code>.cc</code> 国内镜像站</li>
+    </ul>
+  </details>
+</section>
+
+<!-- =========== 行动建议 ============ -->
+<section class="tab" data-content="action">
+  <h2>性能优化 ROI 排序</h2>
+  <table>
+    <thead><tr><th>#</th><th>优化项</th><th>工作量</th><th>LCP 收益</th><th>已在 TODO 里?</th></tr></thead>
+    <tbody>
+      <tr><td>A</td><td>查 PH 图片为什么没走 R2，修前端 / 迁移流水线</td><td>0.5 天</td><td><strong>-300~600 ms</strong></td><td><span class="tag high">未列</span></td></tr>
+      <tr><td>B</td><td>TweetDrawer / toast / share lazy split</td><td>0.5 天</td><td><strong>-400~800 ms</strong></td><td><span class="tag high">未列</span></td></tr>
+      <tr><td>C</td><td>GH 头像走 worker <code>/img</code> 反代</td><td>0.5 天</td><td>-100~300 ms</td><td><span class="tag high">未列</span></td></tr>
+      <tr><td>D</td><td>API 合并 + 消除 OPTIONS preflight</td><td>1 天</td><td>-300~600 ms</td><td><span class="tag high">未列</span></td></tr>
+      <tr><td>E</td><td>图片走 cdn-cgi/image webp/avif</td><td>0.5 天</td><td>-100~200 ms</td><td><span class="tag low">#4 阶段 2</span></td></tr>
+      <tr><td>F</td><td>字体 cn-font-split 调粗粒度</td><td>0.5 天</td><td>首次 -100~300 ms</td><td><span class="tag mid">#13 部分</span></td></tr>
+      <tr><td>G</td><td>ICP 备案 + 国内镜像</td><td>1-3 月</td><td>-500~1500 ms 结构性</td><td><span class="tag low">#11 / #12</span></td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <strong>前 4 项预算 2.5 天，预期 LCP 砍到 1000ms 左右</strong>，跨过 Google "Good" 门槛。
+  </div>
+
+  <h2>架构整体 ROI 排序（建议 4 周内做的）</h2>
+  <ol>
+    <li><strong>本周（零成本快赢）</strong> — TODO #4 阶段 1 全开：Web Analytics + Workers Logs + AI Gateway</li>
+    <li><strong>本周</strong> — 加 4 类业务级 PushDeer 告警最小集</li>
+    <li><strong>下周</strong> — TODO #4 阶段 2 Images cdn-cgi（合并性能 E）</li>
+    <li><strong>2-3 周</strong> — TODO #4 阶段 3 GH Workflow 试点</li>
+    <li><strong>3-4 周</strong> — TODO #4 阶段 4 X 主链 Workflow 迁移（合并 #5 metrics 流水线三个口子）</li>
+  </ol>
+
+  <h2>立刻可补的 4 类告警（最小可行集）</h2>
+  <div class="card">
+<pre style="font-family: var(--mono); font-size: 13px; margin: 0; overflow-x: auto;">1. scrape 0-new 连续 ≥ 3 轮（每源独立）
+   → list-poll-ingest / gh-fetch / ph-fetch / clawhub-fetch / hdx-fetch 都加
+
+2. PH 日窗口未触发
+   → 每天 BJT 19:00 看 KV ph:fetched:&lt;PT_yesterday&gt; 是否存在；不存在 → PushDeer
+
+3. enrich queue 持续积压 > 阈值
+   → countGithubPending / countClawhubPending / countHuodongxingDetailPending /
+     classify-pending count / fill-translations count 各 > N 持续 M tick
+
+4. DeepSeek 调用失败率 > 5%（滚动 1h 窗口）
+   → 每次调 DeepSeek 在 KV 累加 success / failure，每 tick 检查比率</pre>
+  </div>
+  <div class="callout">
+    <strong>这套补完后 80% 的「我怎么不知道这都坏了」事故能在 5-15 分钟内主动告警。</strong>
+  </div>
+
+  <h2>跨源应该统一的 7 项</h2>
+  <ul>
+    <li><strong>pending 队列 count helper</strong>：全部叫 <code>count&lt;Src&gt;Pending(env)</code> 统一接口</li>
+    <li><strong>错误日志格式</strong>：结构化 JSON <code>{ source, mode, items, errors, duration_ms }</code></li>
+    <li><strong>失败告警 schema</strong>：<code>&lt;src&gt; &lt;mode&gt; &lt;metric&gt; over threshold</code></li>
+    <li><strong>drawer lazy refresh</strong>：PH stub + HDX 补上，全 5 源都接 <code>/api/items/:id/refresh</code></li>
+    <li><strong>海报变体</strong>：补 <code>renderHdxContent</code></li>
+    <li><strong>死信队列</strong>：统一字段 <code>extra.&lt;mode&gt;.attempts >= 3</code> 触发</li>
+    <li><strong>enrich queue 暴露给 admin</strong>：<code>GET /api/admin/queues</code> 一次返回 5 源各 mode 积压</li>
+  </ul>
+
+  <h2>一句话总结</h2>
+  <div class="callout high" style="font-size: 15px;">
+    <strong>如果只能做一件事让系统健壮一个档次：</strong>
+    把 TODO #4 阶段 1（Workers Logs + Web Analytics + AI Gateway） + 4 类业务级 PushDeer 告警一起在本周做掉。零业务代码改动，2-3 小时工时，把「事故了才知道」变成「事故了 5 分钟内知道」—— 所有后续架构演进（Workflow 迁移、性能改造、镜像站）的前置可观测性基础。
+  </div>
+</section>
+
+<!-- =========== 现状 vs 迁移后 ============ -->
+<section class="tab" data-content="compare">
+  <h2>架构师视角 · 5 项行业最佳实践 gap</h2>
+  <p>不懂代码也不做 OPS 的 PM 视角，你应该知道的 5 件事 —— 行业头部内容系统标配，aifeeds 现在 <strong>0 个落地</strong>。</p>
+  <table>
+    <thead><tr><th>#</th><th>最佳实践</th><th>行业头部怎么做</th><th>aifeeds 现状</th><th>严重</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><strong>SLO 业务承诺</strong><br><span style="color: var(--muted); font-size: 12px;">例：「item 入库 1 小时内 99% 翻译完」</span></td>
+        <td>先定 SLO 再做告警；违约才响</td>
+        <td>没有任何 SLO，没人知道几分钟没翻算正常还是异常</td>
+        <td><span class="tag high">高</span></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>业务级告警</strong><br><span style="color: var(--muted); font-size: 12px;">scrape 持续 0 new / 翻译失败率 ≥ 5%</span></td>
+        <td>告警挂在 SLO 上，违约自动通知</td>
+        <td>仅 SMS / Email 配额告警，业务链 0 告警</td>
+        <td><span class="tag high">高</span></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>消息队列 + 死信队列</strong><br><span style="color: var(--muted); font-size: 12px;">失败 N 次自动入 DLQ 不丢</span></td>
+        <td>CF Queue / SQS / Kafka</td>
+        <td>抢占式 cron + 3 次失败 silent 抛弃（业内反模式）</td>
+        <td><span class="tag high">高</span></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>优雅降级</strong><br><span style="color: var(--muted); font-size: 12px;">主模型挂 → 备用模型 → 文案兜底</span></td>
+        <td>AI Gateway 内置 fallback chain</td>
+        <td>DeepSeek 挂 → 永远 NULL → 用户看英文</td>
+        <td><span class="tag mid">中</span></td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><strong>可观测性三件套</strong><br><span style="color: var(--muted); font-size: 12px;">Metrics + Logs + Traces</span></td>
+        <td>Datadog / Honeycomb / Grafana / CF Workers Logs</td>
+        <td><code>console.log</code> + 命令行 tail，3 天 retention</td>
+        <td><span class="tag high">高</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>核心场景 walkthrough · 「英文久未翻译」</h2>
+  <p>同一条 X 推文从抓回到翻译完成入 feed，两种架构走一遍：</p>
+
+  <div class="grid-2">
+
+    <div class="card" style="border-left: 4px solid var(--high);">
+      <h3 style="color: var(--high); margin-top: 0;">现状（抢占式 cron）</h3>
+      <table>
+        <tr><td><code>T+0:00</code></td><td>X 推文抓回 → 入库 D1<br><span style="color: var(--muted); font-size: 12px;">is_relevant=NULL, content_translated=NULL</span></td></tr>
+        <tr><td><code>T+0:05</code></td><td>下个 cron tick<br><span class="tag muted">可能被 github-enrich 抢占</span></td></tr>
+        <tr><td><code>T+0:10</code></td><td>又一个 tick<br>classify-pending 终于抢到 → DeepSeek 判 AI 1-2 秒<br>→ is_relevant=1</td></tr>
+        <tr><td><code>T+0:15</code></td><td>下个 tick<br><span class="tag muted">可能被 ph-enrich 抢占</span></td></tr>
+        <tr><td><code>T+0:20</code></td><td>又一个 tick<br>fill-translations 终于轮到 → DeepSeek 翻译 4-10 秒</td></tr>
+        <tr><td><code>T+0:21</code></td><td>翻译入库 → 前端能看到中文</td></tr>
+      </table>
+      <div class="callout high" style="margin: 12px 0 0;">
+        <strong>总耗时：约 21 分钟</strong>
+        最坏情况：1 小时+（被多个队列轮流抢占）。失败重试 3 次后 silent 抛弃 → 用户永远看英文。
+      </div>
+    </div>
+
+    <div class="card" style="border-left: 4px solid var(--low);">
+      <h3 style="color: var(--low); margin-top: 0;">迁移后（Queue + Workflow + 多 worker 并发）</h3>
+      <table>
+        <tr><td><code>T+0:00</code></td><td>X 推文抓回 → 入库 D1<br>同时 enqueue classify 任务到 Queue</td></tr>
+        <tr><td><code>T+0:01</code></td><td>classify worker 拿任务<br><span style="color: var(--muted); font-size: 12px;">10 个 worker 并发处理 10 条推文</span><br>DeepSeek 判 is_ai 1-2 秒</td></tr>
+        <tr><td><code>T+0:02</code></td><td><strong>分支判断</strong>：<br>• is_ai = 0 → 结束（跳过翻译）<br>• is_ai = 1 → enqueue translate 任务</td></tr>
+        <tr><td><code>T+0:03</code></td><td>translate worker 拿任务<br><span style="color: var(--muted); font-size: 12px;">同样多 worker 并发</span><br>DeepSeek 翻译 4-10 秒</td></tr>
+        <tr><td><code>T+0:13</code></td><td>翻译入库 → 前端看到中文</td></tr>
+      </table>
+      <div class="callout low" style="margin: 12px 0 0;">
+        <strong>总耗时：约 13 秒</strong>（is_ai=1 路径） <strong>/ 约 2 秒</strong>（is_ai=0 直接跳过翻译）<br>
+        失败自动 retry + 进死信队列告警 → 不再 silent 死。
+      </div>
+    </div>
+
+  </div>
+
+  <div class="callout">
+    <strong>两个真正的优化（注意：classify 和 translate 必须<u>串行</u>，因为 translate 依赖 is_ai=1 的判定结果）：</strong>
+    ① <strong>入库即 enqueue</strong> —— 消除 cron 5 分钟 tick 等待。入库后立刻把 classify 任务塞进 Queue，worker 秒级拿任务。<br>
+    ② <strong>每一步内部多 worker 并发</strong> —— 同一队列多个 worker 同时拉任务（10 条推文同时被 classify 处理，不再排队）。<br>
+    任务之间是依赖关系（A → B 串行），但同一类任务的多条数据可以并发。
+  </div>
+
+  <div class="callout mid">
+    <strong>进阶优化（可选合并）：一次 LLM 调用同时判别 + 翻译</strong><br>
+    改 DeepSeek prompt：让模型一次返 <code>{is_ai, content_translated}</code>。从「2 次串行 LLM 调用」变「1 次合并调用」—— 单次成本约降一半，时间从 5-12s 压到 4-8s。代价：浪费翻译 token 在 is_ai=0 的推文上（X 流大约 60% 不是 AI 相关）。<br>
+    取舍：高峰期开启，平峰期关闭（按 token 成本曲线决定）。
+  </div>
+
+  <h2>三种改造层次对比</h2>
+  <table>
+    <thead><tr><th>层次</th><th>做什么</th><th>翻译空窗期</th><th>工作量</th><th>风险</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>A · 只启观测</strong><br><span style="color: var(--muted); font-size: 12px;">TODO #4 阶段 1</span></td>
+        <td>Workers Logs + Web Analytics + AI Gateway</td>
+        <td><span class="tag muted">不变 5-60 min</span></td>
+        <td>3 小时</td>
+        <td><span class="tag low">极低</span> 不动业务代码</td>
+      </tr>
+      <tr>
+        <td><strong>B · Workflow 替换 cron</strong><br><span style="color: var(--muted); font-size: 12px;">阶段 3-4</span></td>
+        <td>cron mode 拆到 Workflow，入库即 enqueue 任务</td>
+        <td><span class="tag mid">~30 秒-3 分钟</span></td>
+        <td>2-4 周</td>
+        <td><span class="tag mid">中</span> 双写期需观察</td>
+      </tr>
+      <tr>
+        <td><strong>C · B + 业务流程改造</strong><br><span style="color: var(--muted); font-size: 12px;">classify / translate 并行</span></td>
+        <td>判别 + 翻译并行执行（或合并一次 LLM 调用）</td>
+        <td><span class="tag low">~5-15 秒</span></td>
+        <td>+1 周</td>
+        <td><span class="tag low">低</span> Workflow 已建好</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>现状 vs 迁移后 · 8 维度对比</h2>
+  <table>
+    <thead><tr><th>维度</th><th>现状</th><th>迁移后</th></tr></thead>
+    <tbody>
+      <tr><td>失败处理</td><td>3 次重试 → silent 抛弃</td><td>Workflow 自动 retry + 死信队列 + 单步可手动 retry</td></tr>
+      <tr><td>任务优先级</td><td>12 个 mode 固定抢占顺序</td><td>Workflow + Queue 多级优先级</td></tr>
+      <tr><td>故障可见性</td><td><code>wrangler tail</code> + 手写 SQL</td><td>CF Dashboard 实时看 stacktrace + 错误率</td></tr>
+      <tr><td>LLM 成本</td><td>不知道 token 用量</td><td>AI Gateway 看 token / cost / cache 命中</td></tr>
+      <tr><td>业务告警</td><td>无</td><td>挂 SLO 自动告警</td></tr>
+      <tr><td>国内访问性能</td><td>不知道真实 LCP</td><td>Web Analytics 真实用户数据</td></tr>
+      <tr><td>学习成本</td><td>/</td><td>Workflow 是新概念，2-4 周磨合</td></tr>
+      <tr><td>月费增加</td><td>/</td><td>约 $20-50（AI Gateway + Workflow + Queue）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>一句话决策</h2>
+  <div class="callout high" style="font-size: 15px;">
+    <strong>不要一步迁完。</strong>先做 A（3 小时启用观测）拿到真实数据，看见空窗期实际分布。然后视数据决定要不要 B + C。<br>
+    实际优先级：先把「看见问题」这一关过了，再决策「怎么解决」。否则就是闭眼飞行。
+  </div>
+</section>
+
+<div class="footer">
+  原始 md：<code>docs/plans/2026-05-14-architecture-design.md</code> · <code>docs/plans/2026-05-14-perf-mobile-diagnosis.md</code>（worktree 内）
+</div>
+
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "default",
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: "basis" }
+  });
+
+  // 备份每个 .mermaid 节点的原始代码 —— display:none 时 mermaid 渲染失败，需要能从源头重渲
+  document.querySelectorAll('.mermaid').forEach(n => {
+    n.dataset.mermaidSrc = n.textContent.trim();
+  });
+
+  const renderVisible = async () => {
+    const nodes = Array.from(document.querySelectorAll('.mermaid')).filter(n => {
+      if (!n.dataset.mermaidSrc) return false;
+      // 父级 tab 必须 active
+      const tab = n.closest('section.tab');
+      if (tab && !tab.classList.contains('active')) return false;
+      // 父级 source-panel 必须 active（如果在 source-panel 内）
+      const sp = n.closest('.source-panel');
+      if (sp && !sp.classList.contains('active')) return false;
+      // 已渲染好的（svg 宽度 ≥ 50px）跳过
+      const svg = n.querySelector('svg');
+      if (svg && svg.getBoundingClientRect().width >= 50) return false;
+      return true;
+    });
+    if (nodes.length === 0) return;
+    // 逐个 render，避免某个失败影响整批
+    let i = 0;
+    for (const node of nodes) {
+      try {
+        const { svg } = await mermaid.render(`m-${Date.now()}-${i++}`, node.dataset.mermaidSrc);
+        node.innerHTML = svg;
+        node.setAttribute('data-processed', 'true');
+      } catch (e) {
+        console.error('mermaid render error', e);
+      }
+    }
+  };
+  window.__renderVisibleMermaid = renderVisible;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderVisible);
+  } else {
+    renderVisible();
+  }
+</script>
+
+<script>
+  // tab 切换
+  document.querySelectorAll('nav button[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = btn.dataset.tab;
+      document.querySelectorAll('nav button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
+      document.querySelectorAll('section.tab').forEach(s => s.classList.toggle('active', s.dataset.content === t));
+      window.scrollTo({top: 0, behavior: 'instant'});
+      if (window.__renderVisibleMermaid) window.__renderVisibleMermaid();
+    });
+  });
+  // source 子 tab
+  document.querySelectorAll('.source-tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const s = btn.dataset.source;
+      document.querySelectorAll('.source-tabs button').forEach(b => b.classList.toggle('active', b.dataset.source === s));
+      document.querySelectorAll('.source-panel').forEach(p => p.classList.toggle('active', p.dataset.sourceContent === s));
+      if (window.__renderVisibleMermaid) window.__renderVisibleMermaid();
+    });
+  });
+</script>
+
+</body>
+</html>
