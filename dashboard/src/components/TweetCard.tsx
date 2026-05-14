@@ -3,6 +3,7 @@ import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, MediaItem, Metrics } from "../types";
 import { cn, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
@@ -267,15 +268,21 @@ export function TweetCard({
 
   const canToggleOriginal = hasTranslation && content && translated !== content;
 
-  // Only show the expand button when the clamped body actually overflows.
-  // We can only measure this when clamped (expanded=false). Once measured as
-  // overflowing, we keep the button visible across expand/collapse toggles.
+  // 接入 smartTruncate 后，"是否需要展开"取决于原文是否被 truncate 截短了。
+  // truncated 比原文短 → 一定有截断 → 显示展开按钮。
+  // 兜底：truncated 没短但 line-clamp-4 仍触发（极短文本 + 多行 emoji 等），
+  // 用 scrollHeight > clientHeight 双保险。
+  const truncatedDisplayLen = smartTruncate(displayText, 280).length;
   useLayoutEffect(() => {
+    if (truncatedDisplayLen < displayText.length) {
+      setCanExpand(true);
+      return;
+    }
     if (expanded) return;
     const el = bodyRef.current;
     if (!el) return;
     setCanExpand(el.scrollHeight > el.clientHeight + 1);
-  }, [displayText, expanded]);
+  }, [displayText, expanded, truncatedDisplayLen]);
 
   const handle = item.handle || "";
   const author = item.author || handle;
@@ -445,7 +452,7 @@ export function TweetCard({
               !expanded && "line-clamp-4",
             )}
           >
-            {renderRichText(displayText)}
+            {renderRichText(expanded ? displayText : smartTruncate(displayText, 280))}
           </div>
 
           {/* "展开"/"收起" inline right after body (Twitter-style blue link) */}

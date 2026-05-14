@@ -1,5 +1,6 @@
 import type { Item } from "../types";
 import { cn, formatCompact, parseJsonField } from "../lib/utils";
+import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import {
   IconStarFill,
@@ -133,7 +134,7 @@ export function ClawhubCard({ item }: Props) {
       {/* Body — text-[15px] leading-[1.45] line-clamp-4，跟 GH/PH 同款 */}
       {summary && (
         <p className="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-4">
-          {summary}
+          {smartTruncate(summary, 280)}
         </p>
       )}
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { langDotClass } from "../lib/githubLang";
 import {
@@ -141,7 +142,7 @@ export function GithubCard({ item }: Props) {
               !expanded && "line-clamp-4",
             )}
           >
-            {summary}
+            {expanded ? summary : smartTruncate(summary, 280)}
           </p>
           {!expanded && (
             <button
