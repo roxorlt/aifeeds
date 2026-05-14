@@ -1,0 +1,17 @@
+{
+  "name": "aifeeds-d1-backup",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "tail": "wrangler tail",
+    "trigger": "curl -X POST https://aifeeds-d1-backup.0d13b65d05d5d29fe06998141f3b0f9a.workers.dev/trigger"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  }
+}
