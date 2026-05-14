@@ -82,6 +82,11 @@ export interface ItemExtra {
   quote_of?: QuoteOf;
   reply_of_id?: string | null;
   reply_of?: QuoteOf | null;
+  // F1: 转推父推快照。is_retweet=1 时前端用 retweet_of 翻转主体（被转推者
+  // 当主卡），content 剥离 "RT @xxx: " 前缀，顶部加 "♻ 转推者 已转帖" 小字。
+  is_retweet?: boolean;
+  retweeted_status_id?: string;
+  retweet_of?: QuoteOf | null;
   link_card?: LinkCard;
   thread_root_id?: string;
   hashtags?: string[];

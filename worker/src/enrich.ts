@@ -516,6 +516,12 @@ interface Patch {
   reply_to_screen_name?: string | null;
   // Sentinel that backfill-replies has examined this item (idempotent skip).
   reply_enriched?: boolean;
+  // F1: retweet 父推完整快照（被转推作者头像/名字/handle/✓/published_at/content）
+  // SB API 给的是 retweeted_status_id (extra.retweeted_status_id)，
+  // 内容需要通过 syndication API on-demand 拉。retweet_of 是回填字段，
+  // 跟 quote_of 共用 QuoteOf 形状，前端识别 is_retweet=1 时优先用它当主卡。
+  retweet_of?: QuoteOf | null;
+  retweet_enriched?: boolean;
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
@@ -553,6 +559,10 @@ async function applyPatch(
   }
   if (patch.reply_enriched) {
     extra.reply_enriched_at = new Date().toISOString();
+  }
+  if (patch.retweet_of !== undefined) extra.retweet_of = patch.retweet_of;
+  if (patch.retweet_enriched) {
+    extra.retweet_enriched_at = new Date().toISOString();
   }
   extra.enriched_at = new Date().toISOString();
 
@@ -796,6 +806,135 @@ export async function runBackfillReplies(
     with_quote: counts.with_reply,
     with_card: 0,
     empty: counts.no_reply,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── backfill-retweets mode ────────────────────────────────────
+// F1: 抓 is_retweet=1 推的被转推者完整快照（头像/名字/handle/✓/内容）。
+// SB API 不返回被转推的 user 对象，只给 retweeted_status_id。需要拿这个
+// id 去 syndication API 拉原推。
+//
+// 跟 backfill-quotes 关键区别：candidates 里的 tid 是转推者的 status id，
+// 但 fetchTweet 用的是 retweeted_status_id（即被转推那条），把那条的 user/
+// content 当 retweet_of 快照写回到转推者 item 上。
+
+interface RetweetCandidate extends CandidateRow {
+  retweeted_status_id: string;
+}
+
+async function selectRetweetBackfillCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+): Promise<RetweetCandidate[]> {
+  const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND json_extract(extra, '$.is_retweet') = 1
+       AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
+       AND (extra NOT LIKE '%"retweet_enriched_at"%' AND extra NOT LIKE '%"retweet_of"%')
+     ORDER BY scraped_at DESC
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<CandidateRow>();
+
+  const out: RetweetCandidate[] = [];
+  for (const r of rows.results) {
+    if (done.has(r.source_id)) continue;
+    let rtsId: string | null = null;
+    try {
+      const ex = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+      if (typeof ex.retweeted_status_id === 'string') {
+        rtsId = ex.retweeted_status_id;
+      }
+    } catch {
+      // skip 解析失败的
+    }
+    if (!rtsId) continue;
+    out.push({ ...r, retweeted_status_id: rtsId });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+export async function runBackfillRetweets(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+): Promise<RunResult> {
+  const mode = 'backfill-retweets';
+  const t0 = Date.now();
+  const state = await loadState(env, mode);
+  const done = new Set<string>([
+    ...state.processed_ids,
+    ...state.not_found_ids,
+  ]);
+
+  const candidates = await selectRetweetBackfillCandidates(env, done, limit);
+  const counts = {
+    processed: 0,
+    with_retweet: 0,
+    not_found: 0,
+    failed: 0,
+  };
+
+  for (const row of candidates) {
+    // 注意：fetchTweet 用 retweeted_status_id（被转推那条），不是 row.source_id
+    const targetId = row.retweeted_status_id;
+    const res = await fetchTweet(targetId);
+    if (res === null) {
+      state.failed_ids.push(row.source_id);
+      counts.failed++;
+    } else if (res.notFound) {
+      // 原推被删 / 账号被封 / 私密 → 记 not_found 标记 sentinel 避免反复重试
+      state.not_found_ids.push(row.source_id);
+      counts.not_found++;
+      try {
+        await applyPatch(env, row, { retweet_enriched: true, retweet_of: null });
+        state.processed_ids.push(row.source_id);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-retweets] applyPatch (notFound sentinel) failed for ${row.source_id}:`, e);
+      }
+    } else if (res.data) {
+      const patch: Patch = {
+        retweet_enriched: true,
+        retweet_of: apiToQuoteOf(res.data as unknown as Record<string, unknown>),
+      };
+      counts.with_retweet++;
+      try {
+        await applyPatch(env, row, patch);
+        state.processed_ids.push(row.source_id);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-retweets] applyPatch failed for ${row.source_id}:`, e);
+        state.failed_ids.push(row.source_id);
+        counts.failed++;
+      }
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    with_quote: counts.with_retweet, // 复用 RunResult 字段：with_quote → with_retweet
+    with_card: 0,
+    empty: 0,
     not_found: counts.not_found,
     failed: counts.failed,
     elapsed_ms: Date.now() - t0,

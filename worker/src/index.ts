@@ -1,6 +1,7 @@
 import {
   runBackfillQuotes,
   runBackfillReplies,
+  runBackfillRetweets,
   runReclassifyThreads,
   runCleanup,
   runRefreshMetrics,
@@ -325,6 +326,21 @@ export default {
         const u = new URL(request.url);
         const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
         const result = await runPhR2Migrate(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      // F1: 手动触发 retweet 父推回填（ADMIN basic auth wrapper）
+      // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400
+      if (path === '/api/admin/backfill-retweets-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
+        const result = await runBackfillRetweets(env, limit, rateSleepMs);
         return jsonResponse(result, 200, request, env);
       }
       // 运维：手动触发一条测试推送，验证 PUSHDEER 配置 + body 中文化效果
@@ -1949,6 +1965,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillReplies(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-retweets') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillRetweets(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'reclassify-threads') {
