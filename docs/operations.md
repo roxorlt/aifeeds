@@ -28,15 +28,15 @@
 │                                                   │     │                                      │
 │  launchd.cron  (5min tick + C2 hybrid gate) — X   │     │  Worker: xlist-api                   │
 │  launchd.tune  (周一 04:00 重算 params.json)      │     │                                      │
-│  launchd.ph    (PT 0:30 daily) — Product Hunt     │     │    - POST /api/ingest   (接收本地)  │
+│                                                   │     │    - POST /api/ingest   (接收本地)  │
 │    └→ cron.sh                                     │     │    - GET  /api/items    (dashboard) │
 │         ├→ list_scraper.py  (browser-use 抓 X)   │     │    - GET  /api/sources  (dashboard) │
 │         ├→ tweet_processor.py (DeepSeek 分类+翻译)│─push│    - GET  /api/stats    (dashboard) │
 │         └→ output.py push_to_cloud ───────────────┼────→│    - POST /api/enrich/run (手动)    │
-│    └→ scrapers/ph/scraper.py (PH leaderboard)─────┼─push│    - GET  /r/<key>     (R2 反代)    │
+│                                                   │     │    - GET  /r/<key>     (R2 反代)    │
 │                                                   │     │    - scheduled() + cron */5 * * * * │
 │  本地 SQLite: data/xlist.db (staging)             │     │      ├→ runBackfillQuotes           │
-│  本地 R2 mirror: data/ph/pages/                   │     │      ├→ runRefreshMetrics           │
+│                                                   │     │      ├→ runRefreshMetrics           │
 │                                                   │     │      └→ runFillTranslations         │
 └───────────────────────────────────────────────────┘     │                                      │
                                                           │  D1: xlist                           │
@@ -215,7 +215,7 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - `POST /api/admin/ph-r2-migrate-now?limit=2` 立即跑一次 r2 迁移
   - `POST /api/enrich/run?mode=fill-translations&limit=30` 触发翻译
 - **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && hour === 20 ...)` redeploy
-- **旧 launchd PH 抓取**：已退役，仅留作 prod 翻车时人工 fallback。M8 安全期 PR（主 PR prod 稳定 ≥7 天后）执行：删 `scrapers/ph/` + launchd unload + 写 `docs/archive/ph-scraper-retired.md`
+- **旧 launchd PH 抓取**：已退役并清理（2026-05-13），代码归档见 [`docs/archive/ph-scraper-retired.md`](archive/ph-scraper-retired.md)（含 fallback 恢复步骤）
 
 **GitHub trending（2026-05-02 上线，迁自本地 launchd）**：
 - **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
@@ -672,19 +672,12 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
   - `XLIST_DATA_DIR=... python3 scripts/tune_schedule.py --dry-run`（只预览不写盘）
 - **回滚**：删除 `data/schedule_params.json` 即可回到硬编码 defaults。不改代码、不重启 launchd
 
-### 1d. launchd: `com.aifeeds.ph-scraper`（PH leaderboard，2026-05-04 上线）
+### 1d. ~~launchd: `com.aifeeds.ph-scraper`~~（已退役，迁移到 CF 端）
 
-- **plist**：`launchd/com.aifeeds.ph-scraper.plist`（项目内，部署时 symlink 到 `~/Library/LaunchAgents/`）
-- **wrapper**：`scrapers/ph/cron.sh`（PRE/POST PID diff 兜底 kill-by-data-dir，跟 X scraper 同一套防 Chrome 孤儿 pattern）
-- **频率**：BJT 16:30 起跑（plist `Hour=16 Minute=30`）。⚠️ launchd 不支持时区，用 BJT 时间硬编码——PDT 期间对应 PT 00:30 / UTC 07:30，PST（冬令时）期间会比 PT 0:30 早一个钟，要手动把 plist Hour 改成 17 重 load
-- **抓什么**：PT 前一天的 leaderboard URL `/leaderboard/daily/Y/M/D` → 全榜 ~21 条产品（默认排序，PH bot UA 给的是 LLM-friendly markdown 格式，scraper 双格式兼容）
-- **pipeline 单产品**：navigate → JSON-LD parse → DOM extract（top-level threads only / single-handle review root）→ DeepSeek judge（is_ai + ai_category + ai_summary）→ DeepSeek translate（仅 is_ai=1）→ `sync.push_to_d1`
-- **限速**：单 PHSession 跑全榜，5s/产品 pace；rank 14+ 偶有 turnstile 失败（"Starting agent..."），用下面的补抓脚本兜底
-- **日志**：`data/logs/ph-cron-YYYYMMDD.log`（cron.sh，按天分文件）+ stdout/stderr → launchd 默认 std 输出（plist 没显式定向，看 `~/Library/Logs/com.aifeeds.ph-scraper.*` 或追溯到 cron.sh 自记日志）
-- **手动触发**：
-  - 整天：`~/.browser-use-env/bin/python3 -m scrapers.ph.scraper --leaderboard YYYY-MM-DD --push --log-level INFO`
-  - 特定 slug（应对 turnstile 漏抓）：`~/.browser-use-env/bin/python3 -m scripts.rescrape_ph_slugs --date YYYY-MM-DD --slugs slug1,slug2,slug3 --pace-sec 15`
-- **退役**：`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aifeeds.ph-scraper.plist`
+> **已迁移到 CF Worker**（2026-05-11 上线 prod，2026-05-13 清理本地 fallback）。
+> `launchd/com.aifeeds.ph-scraper.plist` + `scrapers/ph/*.py` 已从仓库删除（git 历史保留代码）。新的远端实现见
+> 上方「CF Worker → 1.1 Product Hunt」章节。
+> 完整旧实现摘要 + fallback 恢复步骤（含 commit hash）见 [`docs/archive/ph-scraper-retired.md`](archive/ph-scraper-retired.md)。
 
 ### 1c. ~~launchd: `com.aifeeds.github-scraper`~~（已退役，迁移到 CF 端）
 
