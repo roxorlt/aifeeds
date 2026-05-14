@@ -31,7 +31,7 @@
 ### 0.2 PH 后续 polish（不阻塞主 PR）
 
 - [ ] **comments 作者 mask 替代方案**：PH client_credentials 隐藏所有非 hunter 用户，前端显示"PH 用户"占位。要解需切 OAuth user-token 流程（涉及登录授权 + token 刷新），工程量大，先不做
-- [ ] **lazy-enrich-on-drawer for PH**：worker/src/enrich.ts:242 的 `product_hunt: 留到下次 PR` stub 还在，drawer 打开时刷新单条 PH item 的 metrics 待补
+- [x] ~~**lazy-enrich-on-drawer for PH**~~ — PR #12 已 merged (2026-05-14)，PH 抽屉打开主动调 PH GraphQL by-slug 拿最新 votes/comments/makers/comments，写回 D1 + append snapshot。staging 验证 votes 77→84 / comments 6→9 OK
 - [ ] **PH 评论保留富文本格式**：当前 transform 时 `stripHtml` 把 `<p><br>` 转纯文本 + 段落换行。如果未来要保留富文本（链接 / 图片），改前端 sanitize 渲染（DOMPurify + dangerouslySetInnerHTML）
 
 ---
@@ -47,11 +47,7 @@
   - 现状：admin 页只看了基础登录注册数据
   - 要加：用户活跃曲线、收藏 / 分享 / 订阅活跃度、内容质量分布
   - ⚠️ 不在这里做：cron 健康度 / 错误率 / 调用量 — 等 CF 阶段 1 后直接看 Workers Logs
-- **数据备份 launchd**
-  - 当前 prod D1 没有自动备份，唯一兜底是手动 `wrangler d1 export`，跨 session 丢库就丢了
-  - 临时方案：本地 launchd 每天定时拉一份到本地，30 天滚动保留
-  - 长期方案：CF 阶段 5 用 Container 跑 D1 export → R2 长期存档（Logpush），不用本地承接
-  - **建议直接走长期方案**，跳过本地 launchd 临时方案
+- [x] ~~**数据备份**~~ — 2026-05-14 完成，用 **CF Workflows（不是 Container）** + R2 实现，更简单。新建独立 worker `aifeeds-d1-backup`，每天 BJT 12:30 跑 D1 REST export → 写 R2 `aifeeds-d1-backups/daily/<BJT-date>.sql`，30 天滚动（R2 lifecycle rule 自动清理）。月成本 $0（在 Workers Paid 含量内）。设计 `docs/plans/2026-05-14-d1-backup-workflows-design.md`，运维 `docs/operations.md` §9。Schema 改动无需修改备份代码（D1 export 是整库 dump 自动反映）
 - **异常告警分级**
   - 现状：所有 cron 错误一锅端走 PushDeer，半夜被低优先级吵
   - 改：硬故障（cron 全挂）立报，软故障（单批次失败）攒批后报告

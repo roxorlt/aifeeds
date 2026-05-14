@@ -605,6 +605,111 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 
 - Pages: `yt-dubbing-privacy` — 另一个项目，别误删
 
+### 9. Worker: `aifeeds-d1-backup`（D1 自动备份，2026-05-14 上线）
+
+> 设计：[`plans/2026-05-14-d1-backup-workflows-design.md`](plans/2026-05-14-d1-backup-workflows-design.md)
+> 跟主业务 worker `xlist-api` **完全独立** — 别混淆。
+
+- **源码**：`worker-backup/src/` (`index.ts` + `backup.ts`)
+- **配置**：`worker-backup/wrangler.toml`
+- **公网地址**：`https://aifeeds-d1-backup.0d13b65d05d5d29fe06998141f3b0f9a.workers.dev`（默认 workers.dev 子域，无自定义域）
+- **部署命令**：`cd worker-backup && npm run deploy`（staging：`npm run deploy:staging`）
+- **Cron**：每天 BJT 12:30 (UTC `30 4 * * *`) 自动触发
+- **架构**：scheduled() / `/trigger` 触发 → CF Workflows `D1BackupWorkflow` → 调 D1 REST export API（polling pattern）→ fetch signed_url → `R2.put(daily/<BJT-date>.sql)`
+
+**端点清单**：
+
+| 路径 | 方法 | 用途 | 鉴权 |
+|------|------|------|------|
+| `/trigger` | POST | 立即触发一次备份（手动测 / cron 漏跑补） | 无（仅 workers.dev 子域可达，未来绑自定义域需加 token） |
+| `/status/<instance_id>` | GET | 查 workflow instance 状态（pending / running / errored / complete） | 无 |
+| `/` | GET | 帮助页 | 无 |
+
+**资源清单**：
+
+| 资源 | 名称 | 用途 |
+|---|---|---|
+| Worker | `aifeeds-d1-backup` (prod) / `aifeeds-d1-backup-staging` | Workflow 触发 + 入口 |
+| R2 bucket | `aifeeds-d1-backups` (prod) / `aifeeds-d1-backups-staging` | SQL dump 落盘，路径 `daily/<BJT-date>.sql` |
+| R2 lifecycle rule | `delete-daily-after-30d` | `daily/` 前缀对象 30 天后自动删，零代码维护 |
+| Workflow class | `D1BackupWorkflow` | 2 个 step.do（启动 + 轮询/下载/写 R2），自带 retry |
+| Secret | `D1_BACKUP_API_TOKEN` | CF API token，权限 `D1:Edit`（足够 export）。当前复用 `CF claude-ops` token 值；最小权限子 token 待办 |
+| 公开 vars | `CF_ACCOUNT_ID` + `D1_DATABASE_ID` | wrangler.toml `[vars]`，非 secret |
+
+**首次部署 / 一次性 ops 步骤**（已记录，不需要重做）：
+
+```bash
+source .secrets/cf-claude-ops.env
+
+# 1. 创建 R2 bucket
+wrangler r2 bucket create aifeeds-d1-backups
+wrangler r2 bucket create aifeeds-d1-backups-staging  # 可选，仅 staging 备份用
+
+# 2. 配 lifecycle rule（dashboard：R2 → bucket → Settings → Object lifecycle）
+#   或 CLI（wrangler 4.x 支持）：
+wrangler r2 bucket lifecycle add aifeeds-d1-backups \
+  --id "delete-daily-after-30d" \
+  --prefix "daily/" \
+  --expire-days 30
+
+# 3. 注入 API token (复用 claude-ops，未来按需换最小权限子 token)
+echo "$CLOUDFLARE_API_TOKEN" | wrangler secret put D1_BACKUP_API_TOKEN
+echo "$CLOUDFLARE_API_TOKEN" | wrangler secret put D1_BACKUP_API_TOKEN --env staging
+
+# 4. 部署
+cd worker-backup && npm run deploy
+npm run deploy:staging  # 可选
+
+# 5. 立即触发一次验证
+curl -X POST https://aifeeds-d1-backup.0d13b65d05d5d29fe06998141f3b0f9a.workers.dev/trigger
+# → 拿到 instance_id，30s-2min 后看 R2 是否有 daily/<today>.sql
+wrangler r2 object list aifeeds-d1-backups --prefix daily/
+```
+
+**日常运维命令**：
+
+```bash
+# 看最近 7 天备份状态
+wrangler r2 object list aifeeds-d1-backups --prefix daily/
+
+# 看某天备份元数据（含 captured_at / bookmark）
+wrangler r2 object get aifeeds-d1-backups/daily/2026-05-14.sql --pipe | head -20  # 看 SQL 头几行
+# Web 控制台看 customMetadata：dashboard → R2 → bucket → object → Properties
+
+# 手动补一次（如 cron 漏跑）
+curl -X POST https://aifeeds-d1-backup.0d13b65d05d5d29fe06998141f3b0f9a.workers.dev/trigger
+
+# 查 workflow instance 状态
+curl https://aifeeds-d1-backup.0d13b65d05d5d29fe06998141f3b0f9a.workers.dev/status/<instance_id>
+# 或 dashboard：Workers & Pages → aifeeds-d1-backup → Workflows tab → instance 列表
+
+# Tail 实时日志（看 cron 触发 / Workflow step 完成）
+cd worker-backup && wrangler tail
+```
+
+**从备份恢复 prod D1**（灾难恢复场景，DRY-RUN 优先）：
+
+```bash
+# 1. 下载需要恢复的 SQL 文件
+wrangler r2 object get aifeeds-d1-backups/daily/2026-05-14.sql --pipe > backup.sql
+
+# 2. ⚠️ 强烈建议先在 staging 演练（不要直接覆盖 prod）
+wrangler d1 execute xlist-staging --env staging --remote --file=backup.sql
+
+# 3. staging 验证 OK 后再 prod。注意：D1 export 是 CREATE TABLE + INSERT 全量，
+#    需要先 drop 现有表（或新建空 D1，把 connection 切过去再切回）。
+#    具体灾难恢复 SOP 见 ../plans/2026-05-14-d1-backup-workflows-design.md
+```
+
+**Schema 改动会影响这个备份吗**：**不会**。D1 export 是整库 dump，自动反映当前 schema + 数据。新加表 / 加列后下次 cron 跑出的 SQL 文件自然包含新结构。备份代码本身不需要改。
+
+**月成本**：$0（在 Workers Paid $5/月 含量内 — Workflow 调用 / CPU-ms / R2 存储 / R2 PUT 都远低于免费配额，详见设计文档算账表）
+
+**已知限制**：
+- D1 export 是全量 dump，无增量备份选项（CF 不支持）
+- Workflow instance state 保留 30 天（Workers Paid），失败 instance 30 天内可在 dashboard 排查
+- 当前**无失败告警** — Workflow 失败只能在 CF dashboard 看，未来加 PushDeer 推送（v2）
+
 ---
 
 ## 本地服务（MacBook）
