@@ -148,18 +148,25 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const LOAD_MORE_FAIL_THRESHOLD = 3;
   const consecutiveFailRef = useRef(0);
   const [loadMoreCoolingDown, setLoadMoreCoolingDown] = useState(false);
-  // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
-  // Default for other sources stays "hot" (existing X behavior).
-  const [sortMode, setSortMode] = useState<SortMode>(
-    sourceType === "github" || sourceType === "product_hunt" || sourceType === "huodongxing"
-      ? "time"
-      : "hot",
-  );
+  // 所有源默认按时间倒序起步（review 反馈：X 默认也用「时间」）。X 仍可通过
+  // SortSelector 切到 hot；GitHub / PH / 活动行的 sort 由各自列头自管，sortMode
+  // 在它们身上 effectively no-op。
+  const [sortMode, setSortMode] = useState<SortMode>("time");
   // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category + hideSuspicious 通过 query param 传 worker
   const [chSort, setChSort] = useState<ClawhubSort>("stars");
-  const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
+  // category 默认每次 mount 随机选一个非 all 类（review 反馈：默认随机一个分类，
+  // 让首屏不每次都看全部，鼓励"今天看点别的"）。useState lazy init 保证只随机一次。
+  const [chCategory, setChCategory] = useState<ClawhubCategory>(() => {
+    if (sourceType !== "clawhub") return "all";
+    const opts: ClawhubCategory[] = [
+      "mcp-tools", "prompts", "workflows", "dev-tools",
+      "data", "security", "automation", "other",
+    ];
+    return opts[Math.floor(Math.random() * opts.length)];
+  });
   const [chHideSuspicious, setChHideSuspicious] = useState<boolean>(true);
   const isClawhub = sourceType === "clawhub";
+  const isGh = sourceType === "github";
   // 活动行专属筛选：city / when / form 三个 query param 透传 worker
   // 默认值：北京 / 本周 / 线下 — 大多数用户最常看的组合（按 2026-05-13 review 反馈）
   const [hdxCity, setHdxCity] = useState<HdxCity>(sourceType === "huodongxing" ? "北京" : "");
@@ -688,9 +695,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       </header>
 
       {/* New items banner — stacked avatars + count (Twitter-style)
-          PH / huodongxing 跳过 banner：cron 是日榜 / 活动批次性更新，
-          没有"持续新内容"流式语义 */}
-      {pending.length > 0 && !isPh && !isHdx && (
+          只有 X 列展示该 banner；其它源都不展示（review 反馈）：
+          - PH 是日榜、huodongxing 活动批次性更新 — 没有持续流式语义
+          - clawhub / github 也是离散更新（marketplace / trending），banner 噪声大于价值 */}
+      {pending.length > 0 && !isPh && !isHdx && !isClawhub && !isGh && (
         <button
           type="button"
           onClick={() => {
@@ -700,10 +708,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           className="flex items-center justify-center gap-2 border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
         >
           <PendingAvatars pending={pending} />
-          <span>
-            ↑ {pending.length}{" "}
-            {sourceType === "github" ? "个新 repo" : "条新推文"}
-          </span>
+          <span>↑ {pending.length} 条新推文</span>
         </button>
       )}
 

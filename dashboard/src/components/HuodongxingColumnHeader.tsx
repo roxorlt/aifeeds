@@ -44,21 +44,18 @@ interface Props {
   onFormChange: (f: HdxForm) => void;
 }
 
-// 跟 ClawhubColumnHeader 同行高（22px）+ 同字号，但 padding 收紧（pl-1 pr-3）
-// 让活动行 3 控件能塞进 column 而不被截断（review 反馈：宽度继续收窄）
+// 跟 ClawhubColumnHeader 完全同款（视觉对齐：padding / border / chevron 完全一致）
 const SELECT_CLASS =
-  "h-full appearance-none rounded border border-neutral-300 bg-white pl-1 pr-3 box-border text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300";
+  "h-full appearance-none rounded border border-neutral-300 bg-white pl-1.5 pr-4 box-border text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300";
 const CHEVRON_CLASS =
-  "absolute right-0.5 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none";
+  "absolute right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 text-neutral-400 pointer-events-none";
 const WRAPPER_CLASS = "relative inline-flex h-[22px] items-center";
 
-// 城市 button：与 select 视觉一致；选中态时加深背景
-const CITY_BTN_BASE =
-  "h-full inline-flex items-center rounded border box-border pl-1 pr-3 text-[10.5px] leading-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-neutral-300 relative";
-const CITY_BTN_IDLE =
-  "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-400";
-const CITY_BTN_ACTIVE =
-  "border-neutral-700 bg-neutral-900 text-white hover:bg-neutral-800";
+// 城市 button：跟 select 完全同款外观（无 active 态背景反差）；
+// 选中时通过显示具体城市名（"北京" 替代 "全部"）告诉用户已筛 — 不再黑底白字反差，
+// 跟 select 选中态保持统一（review 反馈：组件样式要统一）
+const CITY_BTN_CLASS =
+  "h-full inline-flex items-center rounded border border-neutral-300 bg-white box-border pl-1.5 pr-4 text-[10.5px] leading-none text-neutral-700 cursor-pointer hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-300 relative";
 
 // popover 内 chip
 const CHIP_BASE =
@@ -108,7 +105,6 @@ export function HuodongxingColumnHeader({
   }, [open]);
 
   const cityLabel = city || "全部";
-  const cityActive = !!city;
 
   return (
     // root container 自身 relative，让 popover 锚到整组控件而不是按钮 wrapper —
@@ -122,7 +118,7 @@ export function HuodongxingColumnHeader({
             e.stopPropagation();
             setOpen((v) => !v);
           }}
-          className={`${CITY_BTN_BASE} ${cityActive ? CITY_BTN_ACTIVE : CITY_BTN_IDLE}`}
+          className={CITY_BTN_CLASS}
           title="城市筛选"
           aria-haspopup="dialog"
           aria-expanded={open}
