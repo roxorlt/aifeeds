@@ -328,6 +328,10 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       // 运维：手动触发一条测试推送，验证 PUSHDEER 配置 + body 中文化效果
+      // POST /api/admin/notify-test
+      //   ?source=ph|x|gh|clawhub|hdx|hdx-skip|all
+      //   不传或 source=all 时一次性推 5 条（覆盖所有 5 个 fetch 的字段结构 + 1 条 PH skip 路径）
+      // 用模拟数据验证 notifyCronSummary i18n 是否覆盖了真实字段，不真的去抓数据。
       if (path === '/api/admin/notify-test' && request.method === 'POST') {
         if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
@@ -335,15 +339,94 @@ export default {
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
           });
         }
+        const u = new URL(request.url);
+        const source = u.searchParams.get('source') || 'all';
         const hasKey = !!env.PUSHDEER_ADMIN_KEYS;
         const keyCount = hasKey ? env.PUSHDEER_ADMIN_KEYS!.split(',').filter((k) => k.trim()).length : 0;
-        await notifyCronSummary(env, '推送测试', {
-          mode: 'notify-test',
-          fetched: 0,
-          ingested: { inserted: 0, updated: 0 },
-          duration_ms: 0,
-        });
-        return jsonResponse({ pushed: hasKey, key_count: keyCount }, 200, request, env);
+
+        // 各 source 的模拟 result。**字段结构与 runXxxFetch 真实 return 完全一致**，
+        // 验证 i18n 是否对得上：
+        const samples: Record<string, { name: string; result: Record<string, unknown> }> = {
+          ph: {
+            name: 'PH 每日抓取',
+            result: {
+              mode: 'ph-daily-fetch',
+              pt_date: '2026-05-13',
+              list_size: 50,
+              fetched: 50,
+              ingested: { inserted: 47, updated: 3, errors: 0 },
+              duration_ms: 128456,
+            },
+          },
+          'ph-skip': {
+            name: 'PH 每日抓取（跳过）',
+            result: {
+              mode: 'ph-daily-fetch',
+              pt_date: '2026-05-13',
+              skipped: 'sentinel',
+              duration_ms: 5,
+            },
+          },
+          x: {
+            name: 'X List 抓取',
+            result: {
+              mode: 'list-poll-ingest',
+              list_id: '1643236611378008066',
+              pages: 3,
+              tweets_seen: 147,
+              inserted_or_updated: 147,
+              newly_inserted: 12,
+              credits_used: 150,
+              rate_limit_remaining: 4823,
+              duration_ms: 13691,
+              early_stop: false,
+            },
+          },
+          gh: {
+            name: 'GitHub Trending 抓取',
+            result: {
+              parsed: 25,
+              inserted: 3,
+              updated_seen: 22,
+              errors: 0,
+            },
+          },
+          clawhub: {
+            name: 'ClawHub 列表抓取',
+            result: {
+              total_unique: 1234,
+              inserted: 48,
+              updated: 1186,
+              skipped: 0,
+              errors: [],
+            },
+          },
+          hdx: {
+            name: '活动行抓取',
+            result: {
+              cities_processed: 3,
+              cities_remaining: 0,
+              pages_fetched: 18,
+              cards_inserted_or_updated: 217,
+              errors: [],
+              budget_consumed: 18,
+              finished: true,
+              duration_ms: 24830,
+            },
+          },
+        };
+
+        const toPush = source === 'all'
+          ? ['ph', 'ph-skip', 'x', 'gh', 'clawhub', 'hdx']
+          : [source];
+        const pushed: string[] = [];
+        for (const s of toPush) {
+          const sample = samples[s];
+          if (!sample) continue;
+          await notifyCronSummary(env, sample.name, sample.result);
+          pushed.push(s);
+        }
+        return jsonResponse({ pushed_sources: pushed, key_count: keyCount }, 200, request, env);
       }
       // ─── Huodongxing POC (Phase 1) — no DB write, dev/QA validation only ────
       // GET /poc/hdx?city=北京&page=1&detail=1
