@@ -8,6 +8,7 @@ import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
+import { HuodongxingColumnHeader, type HdxCity, type HdxWhen, type HdxForm } from "./HuodongxingColumnHeader";
 import { SourceIcon } from "./icons";
 import {
   groupByThread,
@@ -147,18 +148,30 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const LOAD_MORE_FAIL_THRESHOLD = 3;
   const consecutiveFailRef = useRef(0);
   const [loadMoreCoolingDown, setLoadMoreCoolingDown] = useState(false);
-  // GitHub feed has its own sort (date desc, daily_rank asc) — never hot mode.
-  // Default for other sources stays "hot" (existing X behavior).
-  const [sortMode, setSortMode] = useState<SortMode>(
-    sourceType === "github" || sourceType === "product_hunt" || sourceType === "huodongxing"
-      ? "time"
-      : "hot",
-  );
+  // 所有源默认按时间倒序起步（review 反馈：X 默认也用「时间」）。X 仍可通过
+  // SortSelector 切到 hot；GitHub / PH / 活动行的 sort 由各自列头自管，sortMode
+  // 在它们身上 effectively no-op。
+  const [sortMode, setSortMode] = useState<SortMode>("time");
   // ClawHub 专属筛选维度（覆盖 sortMode）：sort + category + hideSuspicious 通过 query param 传 worker
   const [chSort, setChSort] = useState<ClawhubSort>("stars");
-  const [chCategory, setChCategory] = useState<ClawhubCategory>("all");
+  // category 默认每次 mount 随机选一个非 all 类（review 反馈：默认随机一个分类，
+  // 让首屏不每次都看全部，鼓励"今天看点别的"）。useState lazy init 保证只随机一次。
+  const [chCategory, setChCategory] = useState<ClawhubCategory>(() => {
+    if (sourceType !== "clawhub") return "all";
+    const opts: ClawhubCategory[] = [
+      "mcp-tools", "prompts", "workflows", "dev-tools",
+      "data", "security", "automation", "other",
+    ];
+    return opts[Math.floor(Math.random() * opts.length)];
+  });
   const [chHideSuspicious, setChHideSuspicious] = useState<boolean>(true);
   const isClawhub = sourceType === "clawhub";
+  const isGh = sourceType === "github";
+  // 活动行专属筛选：city / when / form 三个 query param 透传 worker
+  // 默认值：北京 / 本周 / 线下 — 大多数用户最常看的组合（按 2026-05-13 review 反馈）
+  const [hdxCity, setHdxCity] = useState<HdxCity>(sourceType === "huodongxing" ? "北京" : "");
+  const [hdxWhen, setHdxWhen] = useState<HdxWhen>(sourceType === "huodongxing" ? "this" : "");
+  const [hdxForm, setHdxForm] = useState<HdxForm>(sourceType === "huodongxing" ? "offline" : "");
   // PH 跟 ClawHub 同样：不轮询新产品（每天 04:10 cron 一次性更新）、
   // 不显示"N 个新产品"横幅、不走曝光过滤（time 模式 + 日榜性质）。
   const isPh = sourceType === "product_hunt";
@@ -197,6 +210,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
       category: isClawhub && chCategory !== "all" ? chCategory : undefined,
       include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
+      city: isHdx && hdxCity ? hdxCity : undefined,
+      when: isHdx && hdxWhen ? hdxWhen : undefined,
+      form: isHdx && hdxForm ? hdxForm : undefined,
     })
       .then((res) => {
         if (cancelled) return;
@@ -232,7 +248,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory, chHideSuspicious]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory, chHideSuspicious, hdxCity, hdxWhen, hdxForm]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -246,6 +262,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
         category: isClawhub && chCategory !== "all" ? chCategory : undefined,
         include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
+        city: isHdx && hdxCity ? hdxCity : undefined,
+        when: isHdx && hdxWhen ? hdxWhen : undefined,
+        form: isHdx && hdxForm ? hdxForm : undefined,
       });
       consecutiveFailRef.current = 0;
       const seen = (isHot && !isClawhub && !isPh && !isHdx) ? getSeenIds(sourceType) : null;
@@ -276,7 +295,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     } finally {
       setLoadingMore(false);
     }
-  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot]);
+  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot, isHdx, hdxCity, hdxWhen, hdxForm]);
 
   const retryLoadMore = useCallback(() => {
     consecutiveFailRef.current = 0;
@@ -531,6 +550,17 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     clearSpotlight();
   }, [isClawhub, chSort, chCategory, chHideSuspicious, clearSpotlight]);
 
+  // 同上 — 活动行的 city / when / form 筛选变更时也释放 spotlight
+  const hdxFilterChangeIgnoreRef = useRef(true);
+  useEffect(() => {
+    if (!isHdx) return;
+    if (hdxFilterChangeIgnoreRef.current) {
+      hdxFilterChangeIgnoreRef.current = false;
+      return;
+    }
+    clearSpotlight();
+  }, [isHdx, hdxCity, hdxWhen, hdxForm, clearSpotlight]);
+
   // Inject the spotlight tweet (from cold-link or in-app drawer open) at the
   // top of this column's data, so closing the drawer leaves the user able to
   // find it. Only applies to columns matching the spotlight's source_type;
@@ -622,6 +652,31 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               }}
             />
           )}
+          {!placeholder && isHdx && (
+            <HuodongxingColumnHeader
+              city={hdxCity}
+              when={hdxWhen}
+              form={hdxForm}
+              onCityChange={(next) => {
+                if (next !== hdxCity) {
+                  track(EVENTS.SORT_CHANGE, { from: `city:${hdxCity || "all"}`, to: `city:${next || "all"}`, source: sourceType });
+                  setHdxCity(next);
+                }
+              }}
+              onWhenChange={(next) => {
+                if (next !== hdxWhen) {
+                  track(EVENTS.SORT_CHANGE, { from: `when:${hdxWhen || "all"}`, to: `when:${next || "all"}`, source: sourceType });
+                  setHdxWhen(next);
+                }
+              }}
+              onFormChange={(next) => {
+                if (next !== hdxForm) {
+                  track(EVENTS.SORT_CHANGE, { from: `form:${hdxForm || "all"}`, to: `form:${next || "all"}`, source: sourceType });
+                  setHdxForm(next);
+                }
+              }}
+            />
+          )}
           {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && (
             <SortSelector
               value={sortMode}
@@ -640,9 +695,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       </header>
 
       {/* New items banner — stacked avatars + count (Twitter-style)
-          PH / huodongxing 跳过 banner：cron 是日榜 / 活动批次性更新，
-          没有"持续新内容"流式语义 */}
-      {pending.length > 0 && !isPh && !isHdx && (
+          只有 X 列展示该 banner；其它源都不展示（review 反馈）：
+          - PH 是日榜、huodongxing 活动批次性更新 — 没有持续流式语义
+          - clawhub / github 也是离散更新（marketplace / trending），banner 噪声大于价值 */}
+      {pending.length > 0 && !isPh && !isHdx && !isClawhub && !isGh && (
         <button
           type="button"
           onClick={() => {
@@ -652,10 +708,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           className="flex items-center justify-center gap-2 border-b border-neutral-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100"
         >
           <PendingAvatars pending={pending} />
-          <span>
-            ↑ {pending.length}{" "}
-            {sourceType === "github" ? "个新 repo" : "条新推文"}
-          </span>
+          <span>↑ {pending.length} 条新推文</span>
         </button>
       )}
 
@@ -714,7 +767,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </>
         ) : items.length === 0 ? (
           <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
-            {isHot ? "热门内容已看完，试试时间倒序" : "暂无内容"}
+            {isHdx && (hdxWhen || hdxCity || hdxForm)
+              ? hdxWhen
+                ? "该时段暂无活动"
+                : hdxCity
+                  ? `${hdxCity}暂无相关活动`
+                  : "暂无相关活动"
+              : isHot
+                ? "热门内容已看完，试试时间倒序"
+                : "暂无内容"}
           </div>
         ) : (
           <>
