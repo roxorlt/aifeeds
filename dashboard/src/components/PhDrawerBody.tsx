@@ -20,10 +20,27 @@
 //   9. 更多 (论坛 / 类似产品出链 + Pricing chips)
 
 import { useMemo, useState } from "react";
+import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
+
+// 外链强制 target="_blank" + rel="noopener noreferrer" — DOMPurify hook 一次注册
+// 终生生效；放在模块顶层（非组件内）避免重复 add hook。
+if (typeof window !== "undefined") {
+  DOMPurify.addHook("afterSanitizeAttributes", (node: Element) => {
+    if (node.tagName === "A") {
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
+    }
+  });
+}
+
+const PH_COMMENT_SANITIZE_CONFIG = {
+  ALLOWED_TAGS: ["p", "br", "a", "strong", "em", "b", "i", "u", "code", "pre", "blockquote", "ul", "ol", "li", "img", "span"],
+  ALLOWED_ATTR: ["href", "src", "alt", "title", "class"],
+};
 
 function parseMedia(raw: Item["media"]): MediaItem[] {
   if (!raw) return [];
@@ -612,7 +629,16 @@ function CommentItem({
   tab: TabState;
   makerHandles: Set<string>;
 }) {
-  const body = tab === "translated" && comment.translated ? comment.translated : comment.text || "";
+  // 渲染选择：
+  //   - 翻译态（中文）→ 翻译来自 DeepSeek 是纯文本，用 whitespace-pre-wrap
+  //   - 原文态：优先 body_html（新 row，DOMPurify 渲染保留链接 / 图片 / 段落）
+  //                  fallback text 字段（旧 row 是已 stripped 的纯文本，pre-wrap 维持当前观感）
+  const showTranslated = tab === "translated" && !!comment.translated;
+  const useHtml = !showTranslated && !!comment.body_html;
+  const sanitized = useHtml
+    ? DOMPurify.sanitize(comment.body_html as string, PH_COMMENT_SANITIZE_CONFIG)
+    : "";
+  const plainBody = showTranslated ? (comment.translated as string) : (comment.text || "");
   const isMaker = !!comment.author_handle && makerHandles.has(comment.author_handle);
   const avatar = comment.avatar_url ? resolveAssetUrl(comment.avatar_url) : "";
   return (
@@ -633,7 +659,14 @@ function CommentItem({
           </span>
         )}
       </div>
-      <p className="ml-9 whitespace-pre-wrap text-[15px] leading-[1.55] text-neutral-800">{body}</p>
+      {useHtml ? (
+        <div
+          className="ml-9 ph-comment-html text-[15px] leading-[1.55] text-neutral-800"
+          dangerouslySetInnerHTML={{ __html: sanitized }}
+        />
+      ) : (
+        <p className="ml-9 whitespace-pre-wrap text-[15px] leading-[1.55] text-neutral-800">{plainBody}</p>
+      )}
       {comment.upvotes !== undefined && comment.upvotes !== null && (
         <div className="ml-9 mt-1 inline-flex items-center gap-1 text-[12px] text-neutral-500">
           <IconUpvote className="h-3 w-3" />

@@ -10,6 +10,7 @@
 
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
 import { formatCompact, parseJsonField } from "../lib/utils";
+import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { resolveAssetUrl } from "../lib/asset";
 
@@ -146,7 +147,7 @@ export function PhCard({ item }: Props) {
       {/* Tagline 正文 — 跨整张卡宽，4 行 */}
       {tagline && (
         <p className="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
-          {tagline}
+          {smartTruncate(tagline, 280)}
         </p>
       )}
 

@@ -17,6 +17,7 @@
 
 import type { HuodongxingMetrics, HuodongxingOrganizer, Item, ItemExtra, MediaItem } from "../types";
 import { parseJsonField } from "../lib/utils";
+import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { resolveAssetUrl } from "../lib/asset";
 import {
@@ -258,7 +259,7 @@ export function HuodongxingCard({ item }: Props) {
             isEnded ? "text-neutral-500" : "text-neutral-900"
           }`}
         >
-          {body}
+          {smartTruncate(body, 200)}
         </p>
       ) : null}
 
