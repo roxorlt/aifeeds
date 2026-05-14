@@ -284,15 +284,22 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - detail enrich 后：`detail_enriched_at / start_time / end_time / start_short / end_short / address / location_full / category / tags[] / is_free / ticket_tiers[] / guests[] / contact / og_image / thumbnail_full`
   - metrics 列：`organizer_fans / max_instance / registered_count / follows / visit_number`
 - **`/api/items?source_type=huodongxing`** 走专用 `handleHuodongxingFeed`：
-  - 默认 filter `status != 'historical' AND (end_time > now OR (end_time IS NULL AND start_time + 1d > now))`，`?include_historical=1` 取消
-  - 排序：状态优先（进行中 > 未开始） + start_time ASC
+  - 默认 filter `status != 'historical' AND (end_time > 今天 BJT 00:00 OR (end_time IS NULL AND start_time + 1d > 今天 BJT 00:00))`，`?include_historical=1` 取消
+    - 边界用"今天 BJT 00:00"而不是当前时刻 — 今天结束的活动**全天可见**，BJT 隔天 00:00 后才剔除（用户期望"BJT 自然日"语义）
+  - 排序：状态优先（进行中 > 未开始） + start_time ASC（派生状态 _state 用真实 BJT 时刻判断）
   - cursor 格式：`<state>|<start_time>|<id>`
   - v2 query params: `?city=<encoded>` / `?when=this|weekend|month` / `?form=online|offline`，互相 AND
+    - `when` 用**区间重叠语义**：活动期 `[start_time, end_time]` 与过滤区间 `[startIso, endIso)` 重叠即命中（不再要求 start_time 必须落在区间内）
+    - `start_time IS NULL`（detail 未 enrich）的卡片也允许放进 `when` 过滤结果，等 enrich 后自动归位 — 避免 list 阶段刚抓回的卡片对用户不可见
 - **手动触发**（admin debug，HTTP Basic Auth `ADMIN_USER/PASS`）：
   - `POST /api/admin/hdx-fetch-now?budget=40&reset=1&only_city=北京` 触发 list 抓取（reset=1 清 KV 重新跑，only_city= 跳过 KV 单城抓）
   - `POST /api/admin/hdx-enrich-now?limit=3` 立即跑一批 detail enrich
   - `POST /api/admin/hdx-sweep-now` 立即清扫过期 → historical
   - `GET /api/admin/hdx-status` 看 detail_pending 数 + 当前 fetch_progress KV 状态
+- **手动批量补翻译**（admin debug，HTTP Basic Auth `ADMIN_USER/PASS`）：
+  - `POST /api/admin/fill-translations-now?limit=30&batch_size=8` 立即跑一轮 fill-translations（X content / quote_of / link_card + PH content / maker / comments）
+  - 默认 limit=30 batch_size=8，上限 limit=100 batch_size=20。用于清积压或验证 prompt 效果
+  - 区别于 `POST /api/enrich/run?mode=fill-translations`（需 Bearer `INGEST_TOKEN`，不在本地）
 - **POC endpoint**（无鉴权）：`GET /poc/hdx?city=北京&page=1&detail=1` 不入库，返 parse 结果 + 字段统计，FE 可当 mock 数据源
 - **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && (hour === 20 || hour === 8) ...)` redeploy
 

@@ -493,6 +493,28 @@ export default {
         const progress = progressRaw ? JSON.parse(progressRaw) : null;
         return jsonResponse({ pending_detail_enrich: pending, fetch_progress: progress }, 200, request, env);
       }
+      // POST /api/admin/fill-translations-now?limit=30&batch_size=8
+      // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致
+      // 用途：手动批量补翻积压（X content / quote_of / link_card + PH content / maker / comments）
+      if (path === '/api/admin/fill-translations-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(
+          Math.max(parseInt(u.searchParams.get('limit') || '30', 10), 1),
+          100,
+        );
+        const batchSize = Math.min(
+          Math.max(parseInt(u.searchParams.get('batch_size') || '8', 10), 1),
+          20,
+        );
+        const result = await runFillTranslations(env, limit, batchSize);
+        return jsonResponse(result, 200, request, env);
+      }
       return jsonResponse({ error: 'Not found' }, 404, request, env);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal error';
@@ -1323,11 +1345,42 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
 
 // ─── GET /api/items?source_type=huodongxing ─────────────────────
 // Huodongxing feed:
-//   - 默认 filter: status != 'historical' AND (end_time > now OR (end_time IS NULL AND start_time + 1d > now))
+//   - 默认 filter: status != 'historical' AND (end_time > 今天 BJT 00:00 OR
+//                                              (end_time IS NULL AND start_time + 1d > 今天 BJT 00:00))
+//     即：今天结束的活动全天可见，BJT 隔天 00:00 才剔除
 //     `?include_historical=1` 透传时取消该 filter
 //   - 排序: 状态优先（进行中 > 未开始）+ start_time ASC
 //   - cursor: 简化用 "start_time|id"（同 X cron-tail 模式，状态分桶通过 derive_state SQL 实现）
 //   - v2 query params: city / when / form（FE 列头筛选 chip 用）
+//   - when 用"区间重叠"语义：活动期跨过滤区间即命中；start_time IS NULL（detail 未 enrich）
+//     的卡片也允许放进结果，等 enrich 后自动归位
+
+/**
+ * 当前真实时刻的 BJT ISO 字串（含 +08:00 后缀），用于派生状态判断（进行中/未开始/已结束）。
+ * 字典序比较等价于时间比较（所有 huodongxing 入库时间都是 +08:00 格式）。
+ */
+function bjtNowIso(): string {
+  const bjtNow = new Date(Date.now() + 8 * 3600 * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${bjtNow.getUTCFullYear()}-${pad(bjtNow.getUTCMonth() + 1)}-${pad(bjtNow.getUTCDate())}` +
+    `T${pad(bjtNow.getUTCHours())}:${pad(bjtNow.getUTCMinutes())}:${pad(bjtNow.getUTCSeconds())}+08:00`
+  );
+}
+
+/**
+ * 今天 BJT 00:00 的 ISO 字串，用于"按自然日剔除过期活动"边界。
+ * 例如 BJT 14日全天 → "2026-05-14T00:00:00+08:00"，14日结束的活动 end_time
+ * (如 18:00+08:00) 字典序仍 > 00:00+08:00，全天保留可见；隔天 0:00 后才剔除。
+ */
+function bjtTodayStartIso(): string {
+  const bjtNow = new Date(Date.now() + 8 * 3600 * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${bjtNow.getUTCFullYear()}-${pad(bjtNow.getUTCMonth() + 1)}-${pad(bjtNow.getUTCDate())}` +
+    `T00:00:00+08:00`
+  );
+}
 
 /**
  * BJT 视角下计算 ISO 字符串区间。返回 [startIso, endIso) 半开区间。
@@ -1377,7 +1430,9 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
   const includeHistorical = url.searchParams.get('include_historical') === '1';
-  const nowIso = new Date().toISOString();
+  // BJT 视角的两个时间基准：今天 00:00 用于"按自然日剔除过期"，真实时刻用于派生状态判断
+  const todayStartIso = bjtTodayStartIso();
+  const nowIso = bjtNowIso();
 
   // v2 列头筛选：city / when / form 三个 optional query params，AND 组合
   const cityFilter = url.searchParams.get('city') || '';
@@ -1393,6 +1448,7 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
 
   if (!includeHistorical) {
     // 排除已过期：先排 status='historical'；再用时间兜底（detail 未 enrich 时 status 默认 active）
+    // 边界用今天 BJT 00:00，今天结束的活动全天保留可见，BJT 隔天 00:00 后才隐藏
     conditions.push(`COALESCE(json_extract(extra, '$.status'), 'active') != 'historical'`);
     conditions.push(`(
       json_extract(extra, '$.end_time') > ?
@@ -1400,7 +1456,7 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
           AND (json_extract(extra, '$.start_time') IS NULL
                OR datetime(json_extract(extra, '$.start_time'), '+1 day') > datetime(?)))
     )`);
-    params.push(nowIso, nowIso);
+    params.push(todayStartIso, todayStartIso);
   }
 
   // v2 city filter — 严格 equal 匹配 extra.city（24 城市枚举之一）
@@ -1409,13 +1465,18 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
     params.push(cityFilter);
   }
 
-  // v2 when filter — 按 BJT 周一/周六/月内边界过滤 start_time（ISO+08:00 字串字典序比较即可）
+  // v2 when filter — 区间重叠语义：活动期 [start, end] 与过滤区间 [startIso, endIso) 重叠即命中
+  // start_time IS NULL（detail 未 enrich）的卡片也放进结果，等 enrich 后自动归位
   if (whenFilter) {
     const range = computeWhenRange(whenFilter);
     if (range) {
-      conditions.push(`json_extract(extra, '$.start_time') >= ?`);
-      conditions.push(`json_extract(extra, '$.start_time') < ?`);
-      params.push(range.startIso, range.endIso);
+      conditions.push(
+        `(json_extract(extra, '$.start_time') IS NULL OR json_extract(extra, '$.start_time') < ?)`,
+      );
+      conditions.push(
+        `(json_extract(extra, '$.end_time') IS NULL OR json_extract(extra, '$.end_time') >= ?)`,
+      );
+      params.push(range.endIso, range.startIso);
     }
   }
 
