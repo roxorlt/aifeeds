@@ -329,7 +329,13 @@ export function TweetDrawer() {
       {/* Panel */}
       <aside
         ref={asideRef}
-        className="absolute inset-y-0 right-0 flex w-full max-w-[600px] flex-col bg-white shadow-xl sm:w-[560px]"
+        // overflow-x-hidden + min-w-0 防御：
+        //   - PC trackpad 双指横滑 / drawer 内某宽元素（长 URL、未处理的富文本图）
+        //     会撑出 panel 宽 + 触发 horizontal scroll，视觉上 drawer 被拖偏。
+        //   - 加 overflow-x-hidden 横向 clip 杜绝 panel 自身被横滑。
+        //   - min-w-0 在 panel 作为 flex item 嵌套时防被子内容撑大（这里 absolute
+        //     不是 flex item，但保留无害且一致性更好）。
+        className="absolute inset-y-0 right-0 flex w-full max-w-[600px] min-w-0 flex-col overflow-x-hidden bg-white shadow-xl sm:w-[560px]"
         style={{
           transform: dragX > 0 ? `translateX(${dragX}px)` : undefined,
           transition: isDragging ? "none" : "transform 200ms ease-out",
@@ -373,7 +379,10 @@ export function TweetDrawer() {
         </header>
         <div
           ref={bodyScrollRef}
-          className="flex-1 min-h-0 overflow-y-scroll overscroll-none touch-pan-y"
+          // overflow-x-hidden：drawer body 内任何宽过 panel 的内容（评论富文本里的
+          // 长 URL、原文 wide pre block、宽截图等）都被横向 clip 而不是让 body 横滑。
+          // 配合 panel 自身的 overflow-x-hidden 双保险。
+          className="flex-1 min-h-0 overflow-y-scroll overflow-x-hidden overscroll-none touch-pan-y"
           style={{ WebkitOverflowScrolling: "touch" }}
         >
           {item ? (

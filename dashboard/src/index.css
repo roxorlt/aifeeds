@@ -67,6 +67,11 @@ body {
 
 /* PH 评论富文本渲染（DOMPurify 清洗后输出的 HTML）
    段落 / 链接 / 列表 / 图片基础排版，保持跟纯文本评论同一视觉密度 */
+.ph-comment-html {
+  /* 长 URL / 长英文连续字符串自动折行，避免撑出 drawer 宽 */
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
 .ph-comment-html p {
   margin-block: 0.4em;
 }
