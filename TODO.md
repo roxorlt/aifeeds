@@ -81,6 +81,14 @@
 
 > 把目前散在各处的抓取流水线（本地 launchd cron / worker scheduled / 手动脚本）逐步搬到 CF 官方流水线工具上，减少本地依赖、加强可观测性。讨论文档：[`docs/plans/2026-05-06-cf-backend-migration-discussion.md`](docs/plans/2026-05-06-cf-backend-migration-discussion.md)（含真实流量 261/天 X、ScrapeBadger 计费、各产品月费估算、待决策项）
 
+**做完会吸收 / 合并 / 砍掉的 TODO**（依赖收割表 · 2026-05-15 整理）：
+
+| 阶段 | 砍 | 移交 | 合并 |
+|------|-----|------|------|
+| 阶段 1 | #1 DeepSeek 调用限流（AI Gateway 吸收） | #1 admin 看板 cron 健康度 / 错误率 → Workers Logs；#1 异常告警基础错误率部分 → Workers Logs；#7 来源分析（referer / 设备 / 国家） → Web Analytics | — |
+| 阶段 4 | #5 失败死信队列（Workflow 自带重试 + 单步 retry） | — | #5 字段补全扫描 / 前端曝光触发 / 海报触发 三个口子并入 Workflow 一起写（避免 KV / Durable Object 临时方案） |
+| 阶段 5 | #1 数据备份 launchd 本地临时方案（PR #16 已用 D1 → R2 Workflow 实现） | — | #3 视频抽帧跑在 Container 里 |
+
 **阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
 - Web Analytics：dashboard 加 beacon，看 PV / UV / 来源
 - Workers Logs：worker 出错的 stacktrace 在 CF 后台直接搜（不再 console.log + 命令行 tail）

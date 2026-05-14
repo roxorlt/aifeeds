@@ -1,5 +1,7 @@
 # ai-feeds.com 移动端性能实测诊断（2026-05-14）
 
+> **⚠️ 快照说明（2026-05-15 补）**：本文档是 2026-05-14 实测数据快照。具体瓶颈（PH 30 张图直连 imgix / TweetDrawer.js 114KB eager / 5 源 API 串行 OPTIONS）截至 2026-05-15 暂未变化，但建议二次实测对照看真实改进幅度。
+
 > 朋友反馈手机访问慢，跑一次 chrome-devtools MCP 实测看到底卡在哪。
 > 实测条件：viewport 390x844x3 mobile + Slow 4G + CPU 4x throttle（模拟中端国产手机 + 普通 4G 网络）。
 > 测试路径：`https://ai-feeds.com/` 首屏冷加载。
