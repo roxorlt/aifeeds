@@ -351,7 +351,10 @@ interface PhCommentDb {
   author_name: string | null;
   author_handle: string | null;
   avatar_url: string | null;
+  /** Stripped plain text — 旧字段，保留给旧 row + 翻译 fallback */
   text: string;
+  /** 原始 HTML — 前端用 DOMPurify 清洗后渲染，保留链接 / 段落 / 图片 */
+  body_html: string;
   upvotes: number;
 }
 
@@ -421,6 +424,7 @@ function commentToDb(c: PhCommentNode): PhCommentDb {
     author_handle: isRedacted ? null : c.user.username,
     avatar_url: isRedacted ? null : c.user.profileImage,
     text: stripHtml(c.body),
+    body_html: c.body || '',
     upvotes: c.votesCount,
   };
 }

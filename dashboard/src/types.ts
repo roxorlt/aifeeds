@@ -214,7 +214,10 @@ export interface PhComment {
   author_name?: string;
   author_handle?: string;
   avatar_url?: string;
+  /** stripped 纯文本 — 旧字段，新 row + 翻译 fallback 仍用 */
   text?: string;
+  /** 原始 HTML — 新字段（2026-05-14 起），前端 DOMPurify 渲染保留链接/段落 */
+  body_html?: string;
   translated?: string;
   upvotes?: number | null;
   posted_at?: string;
