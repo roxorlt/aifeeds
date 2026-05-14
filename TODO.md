@@ -30,7 +30,7 @@
 
 ### 0.2 PH 后续 polish（不阻塞主 PR）
 
-- [ ] **comments 作者 mask 替代方案**：PH client_credentials 隐藏所有非 hunter 用户，前端显示"PH 用户"占位。要解需切 OAuth user-token 流程（涉及登录授权 + token 刷新），工程量大，先不做
+- ⛔ ~~**comments 作者 mask 替代方案**~~ — 2026-05-14 OAuth user-token probe 验证（staging probe endpoint）：user-token 拿到的 makers / comments[].user 也是 `[REDACTED]` / `id=0`，**跟 client_credentials 完全一致**。PH 对 makers / comments 用户身份的 mask 是**全局隐私策略**，跟 token 类型无关。只有 hunter 字段是 public attribution 不被 mask。**OAuth 方案彻底废弃**。如未来要拿真名只剩 DOM scrape PH 网页一条路（CF Browser binding 月费 + 跟 §0.1 决策矛盾，不建议）
 - [x] ~~**lazy-enrich-on-drawer for PH**~~ — PR #12 已 merged (2026-05-14)，PH 抽屉打开主动调 PH GraphQL by-slug 拿最新 votes/comments/makers/comments，写回 D1 + append snapshot。staging 验证 votes 77→84 / comments 6→9 OK
 - [ ] **PH 评论保留富文本格式**：当前 transform 时 `stripHtml` 把 `<p><br>` 转纯文本 + 段落换行。如果未来要保留富文本（链接 / 图片），改前端 sanitize 渲染（DOMPurify + dangerouslySetInnerHTML）
 - ⛔ ~~**PH reviews 列表补全**~~ — 2026-05-14 验证：PH GraphQL Post 类型**不暴露 reviews 字段**（只有 `reviewsCount` / `reviewsRating` 数字摘要），实测报 `Field 'reviews' doesn't exist on type 'Post' (Did you mean reviewsCount?)`。老 scraper 的 `extra.top_reviews` 是 DOM 抠 PH 网页的，GraphQL 没对应 endpoint。**决议接受现状**：前端 ReviewItem 仍能渲染，没数据时空白；如未来要补需要 CF Browser binding (月费) 或重启本地 scraper (跟 §0.1 决策矛盾)，ROI 低不做
