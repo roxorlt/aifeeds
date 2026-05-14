@@ -28,6 +28,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
+import { notifyCronSummary } from './notifier';
 import {
   handleHuodongxingPoc,
   runHuodongxingFetchList,
@@ -326,6 +327,24 @@ export default {
         const result = await runPhR2Migrate(env, limit);
         return jsonResponse(result, 200, request, env);
       }
+      // 运维：手动触发一条测试推送，验证 PUSHDEER 配置 + body 中文化效果
+      if (path === '/api/admin/notify-test' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const hasKey = !!env.PUSHDEER_ADMIN_KEYS;
+        const keyCount = hasKey ? env.PUSHDEER_ADMIN_KEYS!.split(',').filter((k) => k.trim()).length : 0;
+        await notifyCronSummary(env, '推送测试', {
+          mode: 'notify-test',
+          fetched: 0,
+          ingested: { inserted: 0, updated: 0 },
+          duration_ms: 0,
+        });
+        return jsonResponse({ pushed: hasKey, key_count: keyCount }, 200, request, env);
+      }
       // ─── Huodongxing POC (Phase 1) — no DB write, dev/QA validation only ────
       // GET /poc/hdx?city=北京&page=1&detail=1
       // Returns parsed listing cards + (optional) first detail enrich, with
@@ -479,6 +498,7 @@ export default {
           if (hour === 10 && minute >= 10 && minute < 15) {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'PH 每日抓取', r as unknown as Record<string, unknown>);
             return;
           }
           // ─── X list-poll-ingest (minute=25 / 55, 30 min cadence) ──
@@ -504,6 +524,7 @@ export default {
               console.error('[list-poll-ingest] log insert failed:', e);
             }
             console.log(`[cron] list-poll-ingest result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'X List 抓取', r as unknown as Record<string, unknown>);
             return;
           }
           // ─── Huodongxing scheduling (Phase 3) ─────────────────────────
@@ -514,6 +535,7 @@ export default {
           if (isHdxFetchStartSlot) {
             const r = await runHuodongxingFetchList(env, { budget: 40, reset: true });
             console.log(`[cron] hdx-fetch (start) result:`, JSON.stringify(r));
+            await notifyCronSummary(env, '活动行抓取 (start)', r as unknown as Record<string, unknown>);
             return;
           }
           if (isHdxFetchContinueSlot) {
@@ -525,6 +547,7 @@ export default {
                 if (p.cities_pending && p.cities_pending.length > 0) {
                   const r = await runHuodongxingFetchList(env, { budget: 40 });
                   console.log(`[cron] hdx-fetch (continue) result:`, JSON.stringify(r));
+                  await notifyCronSummary(env, '活动行抓取 (continue)', r as unknown as Record<string, unknown>);
                   return;
                 }
               } catch {
@@ -667,11 +690,13 @@ export default {
           if (mode === 'github-fetch') {
             const r = await runGithubFetchTrending(env);
             console.log(`[cron] github-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'GitHub Trending 抓取', r as unknown as Record<string, unknown>);
             return;
           }
           if (mode === 'clawhub-fetch') {
             const r = await runClawhubFetchList(env);
             console.log(`[cron] clawhub-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'ClawHub 列表抓取', r as unknown as Record<string, unknown>);
             return;
           }
           if (mode === 'refresh-metrics') {
