@@ -474,22 +474,33 @@ async function selectBackfillCandidates(
   env: EnrichEnv,
   done: Set<string>,
   limit: number,
+  recover = false,
 ): Promise<CandidateRow[]> {
   const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT id, source_id, extra
-     FROM items
-     WHERE source_type = 'x_list'
-       AND is_relevant = 1
-       AND (extra IS NULL
-            OR (extra NOT LIKE '%"enriched_at"%'
-                AND extra NOT LIKE '%"quote_of"%'
-                AND extra NOT LIKE '%"link_card"%'))
-     ORDER BY scraped_at DESC
-     LIMIT ?`,
-  )
-    .bind(fetchBatch)
-    .all<CandidateRow>();
+  // recover=true: 选 "quote_of_id 有但 quote_of 没" 的 row（被 list-poll
+  // UPSERT 洗过 quote_of 但 quote_of_id 仍在）。绕开 enriched_at sentinel —
+  // 那些 row 之前 backfill 跑过留 enriched_at，被洗后老 SQL 不再选回。
+  // 默认 recover=false：选未跑过 backfill 的 row（首次回填）。
+  const sql = recover
+    ? `SELECT id, source_id, extra
+       FROM items
+       WHERE source_type = 'x_list'
+         AND deleted_at IS NULL
+         AND extra ->> '$.quote_of_id' IS NOT NULL
+         AND extra ->> '$.quote_of' IS NULL
+       ORDER BY scraped_at DESC
+       LIMIT ?`
+    : `SELECT id, source_id, extra
+       FROM items
+       WHERE source_type = 'x_list'
+         AND is_relevant = 1
+         AND (extra IS NULL
+              OR (extra NOT LIKE '%"enriched_at"%'
+                  AND extra NOT LIKE '%"quote_of"%'
+                  AND extra NOT LIKE '%"link_card"%'))
+       ORDER BY scraped_at DESC
+       LIMIT ?`;
+  const rows = await env.DB.prepare(sql).bind(fetchBatch).all<CandidateRow>();
 
   const out: CandidateRow[] = [];
   for (const r of rows.results) {
@@ -604,16 +615,20 @@ export async function runBackfillQuotes(
   env: EnrichEnv,
   limit = 20,
   rateSleepMs = 400,
+  recover = false,
 ): Promise<RunResult> {
   const mode = "backfill-quotes";
   const t0 = Date.now();
-  const state = await loadState(env, mode);
-  const done = new Set<string>([
+  // recover=true 时不读 state KV（绕开 sentinel），不写 processed_ids
+  const state: EnrichState = recover
+    ? { processed_ids: [], not_found_ids: [], failed_ids: [], started_at: new Date().toISOString(), last_update: null }
+    : await loadState(env, mode);
+  const done = new Set<string>(recover ? [] : [
     ...state.processed_ids,
     ...state.not_found_ids,
   ]);
 
-  const candidates = await selectBackfillCandidates(env, done, limit);
+  const candidates = await selectBackfillCandidates(env, done, limit, recover);
   const counts = {
     processed: 0,
     with_quote: 0,
@@ -666,13 +681,13 @@ export async function runBackfillQuotes(
 
     if (rateSleepMs > 0) await sleep(rateSleepMs);
 
-    // Save state every 25 items to survive cron timeout
-    if (counts.processed % 25 === 0 && counts.processed > 0) {
+    // Save state every 25 items to survive cron timeout (recover 模式不写 state)
+    if (!recover && counts.processed % 25 === 0 && counts.processed > 0) {
       await saveState(env, mode, state);
     }
   }
 
-  await saveState(env, mode, state);
+  if (!recover) await saveState(env, mode, state);
 
   return {
     mode,
@@ -835,17 +850,22 @@ async function selectRetweetBackfillCandidates(
   env: EnrichEnv,
   done: Set<string>,
   limit: number,
+  recover = false,
 ): Promise<RetweetCandidate[]> {
   const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT id, source_id, extra
-     FROM items
-     WHERE source_type = 'x_list'
-       AND json_extract(extra, '$.is_retweet') = 1
+  // recover=true 时只看 is_retweet + retweet_of IS NULL（去掉 retweet_enriched_at
+  // 哨兵），覆盖被 list-poll 洗过的 row。
+  const conditions = recover
+    ? `json_extract(extra, '$.is_retweet') = 1
        AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
-       AND (extra NOT LIKE '%"retweet_enriched_at"%' AND extra NOT LIKE '%"retweet_of"%')
-     ORDER BY scraped_at DESC
-     LIMIT ?`,
+       AND extra ->> '$.retweet_of' IS NULL`
+    : `json_extract(extra, '$.is_retweet') = 1
+       AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
+       AND (extra NOT LIKE '%"retweet_enriched_at"%' AND extra NOT LIKE '%"retweet_of"%')`;
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items
+     WHERE source_type = 'x_list' AND ${conditions}
+     ORDER BY scraped_at DESC LIMIT ?`,
   )
     .bind(fetchBatch)
     .all<CandidateRow>();
@@ -873,16 +893,19 @@ export async function runBackfillRetweets(
   env: EnrichEnv,
   limit = 20,
   rateSleepMs = 400,
+  recover = false,
 ): Promise<RunResult> {
   const mode = 'backfill-retweets';
   const t0 = Date.now();
-  const state = await loadState(env, mode);
-  const done = new Set<string>([
+  const state: EnrichState = recover
+    ? { processed_ids: [], not_found_ids: [], failed_ids: [], started_at: new Date().toISOString(), last_update: null }
+    : await loadState(env, mode);
+  const done = new Set<string>(recover ? [] : [
     ...state.processed_ids,
     ...state.not_found_ids,
   ]);
 
-  const candidates = await selectRetweetBackfillCandidates(env, done, limit);
+  const candidates = await selectRetweetBackfillCandidates(env, done, limit, recover);
   const counts = {
     processed: 0,
     with_retweet: 0,
@@ -927,12 +950,12 @@ export async function runBackfillRetweets(
 
     if (rateSleepMs > 0) await sleep(rateSleepMs);
 
-    if (counts.processed % 25 === 0 && counts.processed > 0) {
+    if (!recover && counts.processed % 25 === 0 && counts.processed > 0) {
       await saveState(env, mode, state);
     }
   }
 
-  await saveState(env, mode, state);
+  if (!recover) await saveState(env, mode, state);
 
   return {
     mode,
