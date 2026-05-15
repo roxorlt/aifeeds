@@ -1190,24 +1190,37 @@ export async function runDedupeQuoteContent(
   limit = 500,
 ): Promise<DedupeResult> {
   const t0 = Date.now();
-  // 选 row 条件（识别脏数据）：
-  // 1. content 跟 quote_of.content 前 100 字符完全相同（强信号是同源）
-  // 2. 长度差不超过 50（兼容末尾 t.co/x.com URL 缩短差异）
-  // 3. content 长度 > 80（避免短文 false positive）
-  // 4. 未备份过 original_content（避免二次跑覆盖备份）
+  // D5 v2: 同时识别两种脏数据 case：
+  // Case A (新)：content 跟 quote_of.content 前 100 字符相同 + 长度差<50
+  //   → 备份 content + content_translated 都到 extra → 清空两者
+  // Case B (已 dedupe v1 跑过但漏清 translated)：content='' + extra.original_content
+  //   有 + content_translated 还在 + 未备份 translated
+  //   → 仅备份 + 清 translated
+  // 两种 case 都用 OR 选回，更新逻辑 SQL 端用 json_set 智能处理（coalesce 保留
+  // 已有备份，不二次覆盖）。
   const rows = await env.DB.prepare(
-    `SELECT id, content
+    `SELECT id, content, content_translated
      FROM items
      WHERE source_type = 'x_list'
        AND deleted_at IS NULL
-       AND content IS NOT NULL
-       AND length(content) > 80
-       AND json_extract(extra, '$.quote_of.content') IS NOT NULL
-       AND substr(content, 1, 100) = substr(json_extract(extra, '$.quote_of.content'), 1, 100)
-       AND abs(length(content) - length(json_extract(extra, '$.quote_of.content'))) < 50
-       AND json_extract(extra, '$.original_content') IS NULL
+       AND (
+         -- Case A: 新发现的脏 row
+         (length(content) > 80
+          AND content IS NOT NULL
+          AND json_extract(extra, '$.quote_of.content') IS NOT NULL
+          AND substr(content, 1, 100) = substr(json_extract(extra, '$.quote_of.content'), 1, 100)
+          AND abs(length(content) - length(json_extract(extra, '$.quote_of.content'))) < 50
+          AND json_extract(extra, '$.original_content') IS NULL)
+         OR
+         -- Case B: 之前 dedupe v1 已处理 content 但 content_translated 漏清
+         (content = ''
+          AND json_extract(extra, '$.original_content') IS NOT NULL
+          AND content_translated IS NOT NULL
+          AND content_translated != ''
+          AND json_extract(extra, '$.original_content_translated') IS NULL)
+       )
      LIMIT ?`,
-  ).bind(limit).all<{ id: string; content: string }>();
+  ).bind(limit).all<{ id: string; content: string; content_translated: string | null }>();
 
   const candidates = rows.results;
   let updated = 0;
@@ -1215,13 +1228,24 @@ export async function runDedupeQuoteContent(
   if (!dryRun && candidates.length > 0) {
     const stmts: D1PreparedStatement[] = [];
     for (const r of candidates) {
+      // 用 json_set 双层嵌套：第一层备份 original_content（保留已有），第二层
+      // 备份 original_content_translated（保留已有）。SQL 端 coalesce 防覆盖。
       stmts.push(
         env.DB.prepare(
           `UPDATE items
            SET content = '',
-               extra = json_set(coalesce(extra, '{}'), '$.original_content', ?)
+               content_translated = '',
+               extra = json_set(
+                 json_set(
+                   coalesce(extra, '{}'),
+                   '$.original_content',
+                   coalesce(json_extract(coalesce(extra, '{}'), '$.original_content'), ?)
+                 ),
+                 '$.original_content_translated',
+                 coalesce(json_extract(coalesce(extra, '{}'), '$.original_content_translated'), ?)
+               )
            WHERE id = ?`,
-        ).bind(r.content, r.id),
+        ).bind(r.content, r.content_translated || '', r.id),
       );
     }
     const BATCH = 50;
@@ -1259,8 +1283,8 @@ export async function runLongformFetchOne(
   itemId: string,
 ): Promise<LongformFetchResult> {
   const item = await env.DB.prepare(
-    `SELECT id, source_id, content FROM items WHERE id = ?`,
-  ).bind(itemId).first<{ id: string; source_id: string; content: string | null }>();
+    `SELECT id, source_id, content, content_translated FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null; content_translated: string | null }>();
   if (!item) return { itemId, before_len: 0, after_len: 0, updated: false, reason: 'item_not_found' };
 
   const res = await fetchTweet(item.source_id);
@@ -1271,17 +1295,28 @@ export async function runLongformFetchOne(
   if (!newText) {
     return { itemId, before_len: (item.content || '').length, after_len: 0, updated: false, reason: 'empty_text' };
   }
-  // 仅当新 text 比旧 content 长时才更新（保护现有更长的 backfilled 数据）
   if (newText.length <= (item.content || '').length) {
     return { itemId, before_len: (item.content || '').length, after_len: newText.length, updated: false, reason: 'no_longer_content' };
   }
 
+  // D5: 同步清 content_translated（备份到 extra.original_truncated_content_translated）
+  // 旧 translated 是基于截断 content 翻译的，新 content 长度变化后必须重译
+  // (fill-translations cron 会扫 content_translated IS NULL 自动重译)
   await env.DB.prepare(
     `UPDATE items
      SET content = ?,
-         extra = json_set(coalesce(extra, '{}'), '$.original_truncated_content', ?)
+         content_translated = NULL,
+         extra = json_set(
+           json_set(
+             coalesce(extra, '{}'),
+             '$.original_truncated_content',
+             coalesce(json_extract(coalesce(extra, '{}'), '$.original_truncated_content'), ?)
+           ),
+           '$.original_truncated_content_translated',
+           coalesce(json_extract(coalesce(extra, '{}'), '$.original_truncated_content_translated'), ?)
+         )
      WHERE id = ?`,
-  ).bind(newText, item.content, item.id).run();
+  ).bind(newText, item.content, item.content_translated || '', item.id).run();
 
   return { itemId, before_len: (item.content || '').length, after_len: newText.length, updated: true };
 }
