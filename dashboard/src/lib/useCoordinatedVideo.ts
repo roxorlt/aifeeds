@@ -79,24 +79,16 @@ export function useCoordinatedVideo({
     return () => unregister(scopedId);
   }, [scopedId, columnId, register, unregister, videoRef]);
 
-  // active 变化 → play / pause；变 active 时同时 sync 跨 element 进度
+  // active 变化 → play / pause
+  // 进度同步只在 mount loadedmetadata 时做一次（feed → drawer 单向续播）。
+  // 不在这里 set currentTime — 否则 user 拖完进度条后，store 里某个状态变化
+  // 触发 useEffect re-run 时会强制把 ct 覆盖回 progress map 里的旧值，
+  // user seek 等于白做（review 反馈：切换进度后又被识别成 pause）。
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     if (isActive) {
       el.muted = globalMuted;
-      // 关键：从 progressMap 读最新进度（覆盖 feed/drawer 关闭前的对方播放位置）
-      // pause 时另一边已 saveProgress；本 element 之前 paused 没推进 currentTime
-      // 但 progress 里可能比本 currentTime 新，要同步过来。
-      const saved = getProgress(videoId);
-      if (saved !== undefined && Math.abs(el.currentTime - saved) > 0.3) {
-        try {
-          el.currentTime = saved;
-          log("progress-sync-on-active", { videoId, t: saved });
-        } catch {
-          // seek 失败静默
-        }
-      }
       log("play", { videoId: scopedId, muted: el.muted });
       const p = el.play();
       if (p && typeof p.catch === "function") {
