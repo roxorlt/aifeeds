@@ -230,19 +230,27 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
           return;
         }
 
-        // 收集 eligible candidates（live bbox + hot zone 判定）
+        // 收集 eligible candidates
+        // drawer mode：抽屉是用户主动打开的明确意图，跳过 hot zone 判定 —
+        //   所有 columnId='drawer' 的 video 都候选（X / GH / CH 抽屉典型 1 个 video
+        //   → 自动播；PH gallery 多 video 时取 DOM top 最早的）
+        // feed mode：按 hot zone 判定 video 中心是否在中部
         const eligible: Array<{ id: string; columnId: string; top: number }> = [];
         for (const [id, c] of s.videos) {
           if (c.userPaused) continue;
           if (s.mode === "drawer" && c.columnId !== "drawer") continue;
           if (s.mode === "feed" && c.columnId === "drawer") continue;
 
-          const colRoot = s.columnRoots.get(c.columnId);
-          // 没注册 root 视为可见性退化到 viewport
-          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
-          const ratio = colRoot?.hotZoneRatio ?? 0.5;
           const targetRect = c.el.getBoundingClientRect();
 
+          if (s.mode === "drawer") {
+            eligible.push({ id, columnId: c.columnId, top: targetRect.top });
+            continue;
+          }
+
+          const colRoot = s.columnRoots.get(c.columnId);
+          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
+          const ratio = colRoot?.hotZoneRatio ?? 0.5;
           if (inHotZone(targetRect, rootRect, ratio)) {
             eligible.push({ id, columnId: c.columnId, top: targetRect.top });
           }

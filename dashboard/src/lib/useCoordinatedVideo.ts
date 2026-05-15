@@ -10,6 +10,7 @@
 import { useEffect, useRef } from "react";
 import { useVideoCoordinator } from "./videoCoordinator";
 import { useVideoColumn } from "./videoColumnContext";
+import { getProgress, saveProgress } from "./videoProgress";
 
 export interface UseCoordinatedVideoOptions {
   videoId: string;
@@ -58,12 +59,24 @@ export function useCoordinatedVideo({
     return () => unregister(scopedId);
   }, [scopedId, columnId, register, unregister, videoRef]);
 
-  // active 变化 → play / pause
+  // active 变化 → play / pause；变 active 时同时 sync 跨 element 进度
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     if (isActive) {
       el.muted = globalMuted;
+      // 关键：从 progressMap 读最新进度（覆盖 feed/drawer 关闭前的对方播放位置）
+      // pause 时另一边已 saveProgress；本 element 之前 paused 没推进 currentTime
+      // 但 progress 里可能比本 currentTime 新，要同步过来。
+      const saved = getProgress(videoId);
+      if (saved !== undefined && Math.abs(el.currentTime - saved) > 0.3) {
+        try {
+          el.currentTime = saved;
+          log("progress-sync-on-active", { videoId, t: saved });
+        } catch {
+          // seek 失败静默
+        }
+      }
       log("play", { videoId: scopedId });
       const p = el.play();
       if (p && typeof p.catch === "function") {
@@ -78,7 +91,7 @@ export function useCoordinatedVideo({
         el.pause();
       }
     }
-  }, [isActive, globalMuted, videoRef, videoId]);
+  }, [isActive, globalMuted, videoRef, videoId, scopedId]);
 
   // mute 跟 globalMuted 同步
   useEffect(() => {
@@ -87,14 +100,43 @@ export function useCoordinatedVideo({
     el.muted = globalMuted;
   }, [globalMuted, videoRef]);
 
-  // 用户事件追踪
+  // 用户事件追踪 + 跨 element 进度同步
+  // progress key 用原始 videoId（不带 columnId 前缀）→ feed 和 drawer 内的同 item
+  //   video 共享 progress（一边播一边写，另一边 mount 时读）
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
+
+    // mount / src 变化时：拿到 metadata 后从 progressMap 续播
+    const restoreProgress = () => {
+      const saved = getProgress(videoId);
+      if (saved !== undefined && Math.abs(el.currentTime - saved) > 0.3) {
+        try {
+          el.currentTime = saved;
+          log("progress-restore", { videoId, t: saved });
+        } catch {
+          // 某些视频 source 不支持 seek，静默
+        }
+      }
+    };
+    if (el.readyState >= 1) restoreProgress();
+    el.addEventListener("loadedmetadata", restoreProgress);
+
+    // timeupdate 节流写：每 800ms 最多一次
+    let lastSave = 0;
+    const onTimeUpdate = () => {
+      const now = Date.now();
+      if (now - lastSave < 800) return;
+      lastSave = now;
+      saveProgress(videoId, el.currentTime);
+    };
+
     const onPause = () => {
+      // 立即写进度（关抽屉、切换 active 前的最后机会）
+      saveProgress(videoId, el.currentTime);
       if (coordPausingRef.current) {
         coordPausingRef.current = false;
-        return; // coordinator 自己调的 pause，不是 user 主动
+        return;
       }
       log("user-pause", { videoId: scopedId });
       markUserPaused(scopedId, true);
@@ -108,15 +150,21 @@ export function useCoordinatedVideo({
       if (!el.muted && s.globalMuted) setGlobalMuted(false);
       else if (el.muted && !s.globalMuted) setGlobalMuted(true);
     };
+
+    el.addEventListener("timeupdate", onTimeUpdate);
     el.addEventListener("pause", onPause);
     el.addEventListener("play", onPlay);
     el.addEventListener("volumechange", onVolumeChange);
     return () => {
+      // unmount 也存一次（保证关抽屉时 feed video 拿到最新）
+      saveProgress(videoId, el.currentTime);
+      el.removeEventListener("loadedmetadata", restoreProgress);
+      el.removeEventListener("timeupdate", onTimeUpdate);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("play", onPlay);
       el.removeEventListener("volumechange", onVolumeChange);
     };
-  }, [videoId, videoRef, markUserPaused, setGlobalMuted]);
+  }, [videoId, scopedId, videoRef, markUserPaused, setGlobalMuted]);
 
   return { isActive, muted: globalMuted };
 }
