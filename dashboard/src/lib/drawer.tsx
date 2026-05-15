@@ -204,7 +204,32 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         if (cancelled || activeIdRef.current !== id) return;
         const fresh = await fetchItem(id);
         if (cancelled || activeIdRef.current !== id) return;
-        setState({ item: fresh.item, siblings: fresh.siblings, loading: false, error: null });
+        // C3: 智能 merge —— fresh 是 enrich 后从 worker 拉的最新版，但
+        // 如果某些字段在前端先到（比如 fetchItems 列表 endpoint 缓存了
+        // 含 quote_of 完整快照的数据），而 fresh 因数据 race 拿到的是
+        // 部分字段，单纯替换会导致 UI "倒退"（嵌套小卡突然消失等）。
+        // 用 setState functional form 合并：fresh 字段优先（含 metrics），
+        // 但 prev.extra 里 fresh 没填的字段保留（safeguard）。
+        setState((prev) => {
+          if (!prev.item) {
+            return { item: fresh.item, siblings: fresh.siblings, loading: false, error: null };
+          }
+          const prevExtra = (prev.item.extra && typeof prev.item.extra === 'object') ? prev.item.extra : {};
+          const freshExtra = (fresh.item.extra && typeof fresh.item.extra === 'object') ? fresh.item.extra : {};
+          const mergedExtra = { ...prevExtra, ...freshExtra };
+          // 但如果 fresh 把某字段显式置为 null/undefined，prev 有值时保留 prev 的
+          for (const k of Object.keys(prevExtra)) {
+            if ((freshExtra as Record<string, unknown>)[k] == null && (prevExtra as Record<string, unknown>)[k] != null) {
+              (mergedExtra as Record<string, unknown>)[k] = (prevExtra as Record<string, unknown>)[k];
+            }
+          }
+          return {
+            item: { ...fresh.item, extra: mergedExtra },
+            siblings: fresh.siblings,
+            loading: false,
+            error: null,
+          };
+        });
         // B2: 只在已有 spotlight 时刷新（URL 直接访问场景）。流内点击不强插。
         setSpotlightItem((prev) => (prev ? fresh.item : null));
         // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）

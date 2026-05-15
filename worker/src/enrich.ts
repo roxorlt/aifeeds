@@ -1845,17 +1845,18 @@ export async function runListPollIngest(
             END,
             media = excluded.media,
             metrics = excluded.metrics,
+            -- extra merge：以 items.extra（旧）为基础，excluded.extra（新 SB
+            -- 抓取）覆盖同名字段。旧 extra 里 backfill 写入的字段（quote_of,
+            -- reply_of, retweet_of, link_card, thread_root_id, longform,
+            -- enriched_at, reply_enriched_at, retweet_enriched_at 等）会被
+            -- 完整保留，不再被新 SB 数据洗掉。
+            -- 之前的实现只保留 longform/enriched_at 两个字段，导致每次
+            -- list-poll 重抓同一推都把 backfill 的嵌套数据擦掉（用户报
+            -- /t/2055058976530919843 quote_of 丢失的根因）。
             extra = CASE
-              WHEN (items.extra -> '$.longform') IS NOT NULL
-                   OR (items.extra -> '$.enriched_at') IS NOT NULL
-                THEN json_patch(
-                  coalesce(excluded.extra, '{}'),
-                  json_object(
-                    'longform',    items.extra -> '$.longform',
-                    'enriched_at', items.extra -> '$.enriched_at'
-                  )
-                )
-              ELSE excluded.extra
+              WHEN items.extra IS NULL THEN excluded.extra
+              WHEN excluded.extra IS NULL THEN items.extra
+              ELSE json_patch(items.extra, excluded.extra)
             END
         `).bind(
           id,
