@@ -46,7 +46,8 @@ interface VideoCoordinatorState {
   columnOrder: string[];
   mode: VideoMode;
   lastClickedColumnId: string | null;
-  globalMuted: boolean;
+  /** 单一来源：是否静音读这里 = prefs.muted；user 在 video 上 unmute 时
+   *  也写到 prefs.muted（持久化），避免开关跟实际状态不同步 */
   prefs: VideoPrefs;
   /** 输出：当前应播的 videoId（subscriber 用 selector 监听） */
   activeId: string | null;
@@ -59,6 +60,8 @@ interface VideoCoordinatorState {
   setMode: (mode: VideoMode) => void;
   markColumnClick: (columnId: string) => void;
   markUserPaused: (videoId: string, paused: boolean) => void;
+  /** 兼容旧 API：实际调 setPrefs({muted})；user 在 video controls 上 mute/unmute
+   *  时被调用，确保 prefs.muted 跟 video 元素同步 */
   setGlobalMuted: (muted: boolean) => void;
   setPrefs: (patch: Partial<VideoPrefs>) => void;
 
@@ -123,7 +126,6 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
       columnOrder: [],
       mode: "feed",
       lastClickedColumnId: null,
-      globalMuted: true,
       prefs: DEFAULT_PREFS,
       activeId: null,
 
@@ -200,16 +202,17 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
       },
 
       setGlobalMuted: (muted) => {
-        set({ globalMuted: muted });
-        log("setGlobalMuted", { muted });
-        // mute 不影响 active 选取，不需要 recompute
+        // alias 到 setPrefs({muted})，单一来源
+        if (get().prefs.muted === muted) return;
+        set((s) => ({ prefs: { ...s.prefs, muted } }));
+        log("setGlobalMuted->setPrefs", { muted });
       },
 
       setPrefs: (patch) => {
         set((s) => ({ prefs: { ...s.prefs, ...patch } }));
-        if (patch.muted !== undefined) set({ globalMuted: patch.muted });
         log("setPrefs", patch);
-        get().recompute();
+        // autoplay 变化要 recompute；muted 不影响 active 选取
+        if (patch.autoplay !== undefined) get().recompute();
       },
 
       recompute: () => {

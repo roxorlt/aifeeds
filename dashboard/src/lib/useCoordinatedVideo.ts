@@ -42,7 +42,10 @@ export function useCoordinatedVideo({
   const scopedId = `${columnId}::${videoId}`;
 
   const isActive = useVideoCoordinator((s) => s.activeId === scopedId);
-  const globalMuted = useVideoCoordinator((s) => s.globalMuted);
+  // 单一来源：muted 状态读 prefs.muted（持久化）。volumechange 时通过
+  // setGlobalMuted 写回 prefs。避免之前 globalMuted / prefs.muted 双轨导致
+  // rehydrate 后视频被强制静音、开关跟实际状态不同步的 bug。
+  const globalMuted = useVideoCoordinator((s) => s.prefs.muted);
   const register = useVideoCoordinator((s) => s.register);
   const unregister = useVideoCoordinator((s) => s.unregister);
   const markUserPaused = useVideoCoordinator((s) => s.markUserPaused);
@@ -160,8 +163,8 @@ export function useCoordinatedVideo({
     const onSeeked = () => { seekingRef.current = false; };
     const onVolumeChange = () => {
       const s = useVideoCoordinator.getState();
-      if (!el.muted && s.globalMuted) setGlobalMuted(false);
-      else if (el.muted && !s.globalMuted) setGlobalMuted(true);
+      if (!el.muted && s.prefs.muted) setGlobalMuted(false);
+      else if (el.muted && !s.prefs.muted) setGlobalMuted(true);
     };
 
     el.addEventListener("timeupdate", onTimeUpdate);
