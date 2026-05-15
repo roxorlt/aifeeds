@@ -1,6 +1,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { fetchItems } from "../api";
 import type { Item, SourceType } from "../types";
+import { VideoColumnProvider } from "../lib/videoColumnContext";
+import { useIsNarrow } from "../lib/breakpoint";
 import { TweetCard } from "./TweetCard";
 import { ThreadCard } from "./ThreadCard";
 import { GithubCard } from "./GithubCard";
@@ -180,6 +182,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const isHdx = sourceType === "huodongxing";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
+  const isNarrowFeed = useIsNarrow();
   const [pullY, setPullY] = useState(0);
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
   const pullStartY = useRef<number | null>(null);
@@ -603,6 +606,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   }));
 
   return (
+    <VideoColumnProvider
+      columnId={sourceType}
+      // PC：每列独立 scroll container（feed-body）→ IO root 是它
+      // mobile：单列文档流滚 → root=null = viewport
+      scrollRoot={isNarrowFeed ? null : feedBodyRef}
+      hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
+    >
     <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
@@ -859,5 +869,6 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         )}
       </div>
     </div>
+    </VideoColumnProvider>
   );
 });

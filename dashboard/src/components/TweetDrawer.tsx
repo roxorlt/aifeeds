@@ -12,6 +12,7 @@ import { smoothScrollToTop } from "../lib/scroll";
 import { IconShare } from "./icons";
 import { ShareDialog } from "./ShareDialog";
 import { useAuthStore } from "../lib/authStore";
+import { VideoColumnProvider } from "../lib/videoColumnContext";
 import type { CreateShareResponse } from "../lib/share";
 import type { Item, ItemExtra } from "../types";
 
@@ -385,6 +386,8 @@ export function TweetDrawer() {
           className="flex-1 min-h-0 overflow-y-scroll overflow-x-hidden overscroll-none touch-pan-y"
           style={{ WebkitOverflowScrolling: "touch" }}
         >
+          {/* 抽屉内所有 video 自动归 columnId='drawer'，scroll root = 抽屉 body */}
+          <VideoColumnProvider columnId="drawer" scrollRoot={bodyScrollRef} hotZoneRatio={0.6}>
           {item ? (
             <>
               {isGithub ? (
@@ -450,6 +453,7 @@ export function TweetDrawer() {
           ) : (
             <DrawerError code={error} onClose={close} />
           )}
+          </VideoColumnProvider>
         </div>
       </aside>
       {item && (

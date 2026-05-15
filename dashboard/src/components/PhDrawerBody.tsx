@@ -28,7 +28,7 @@ import { resolveAssetUrl } from "../lib/asset";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
 
 // 抽屉 gallery 内单个直链 mp4 视频 — hook 接 VideoCoordinator
-// 跟 feed 流的视频共享全局优先级（drawer mode 下只有抽屉内 video 候选）
+// columnId 由父级 <VideoColumnProvider value="drawer"> 自动 inject，组件本身不写
 function PhGalleryVideo({
   src,
   itemId,
@@ -41,7 +41,6 @@ function PhGalleryVideo({
   const ref = useRef<HTMLVideoElement>(null);
   const { muted } = useCoordinatedVideo({
     videoId: `product_hunt:${itemId}:gallery:${slot}`,
-    columnId: "drawer",
     videoRef: ref,
   });
   return (

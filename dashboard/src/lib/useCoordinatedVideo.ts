@@ -1,53 +1,60 @@
 // useCoordinatedVideo — video element 接 VideoCoordinator 的 React hook。
 //
-// 职责（全部自动，组件只需提供 ref + 看 isActive）：
-//   - mount: register；unmount: unregister
-//   - IntersectionObserver 监听元素：阈值 0/0.33/0.67/1，可见 ≥ 67% + 持续 200ms
-//     置 isVisible=true；< 67% 立即 false
-//   - 同步 top 坐标到 store（用于优先级算法"同列取最上"）
-//   - 监听 store.activeId：== 自己 → video.play()；!= → video.pause()
-//   - mute 状态跟 store.globalMuted 同步
-//   - 监听 video element 的 pause/play/volumechange 事件：
-//     · pause 时若 store 仍认为是 active → 用户主动暂停 → markUserPaused(true)
-//     · play 时 → markUserPaused(false)
-//     · volumechange 时若 video unmute 但 store muted → setGlobalMuted(false) sticky
+// 视频可见性判断：hot zone 模型（设计文档 §2.1 + 2026-05-15 review 升级）。
+//   feed scroll container 中央留一条"播放热区"（高度 = container.h × hotZoneRatio，
+//   居中），视频完整落在该热区内 → 候选。
+//   兜底：视频本身比热区高 → 视频中心穿过热区中心线即候选（覆盖未来竖版长视频）。
 //
-// 使用：
-//   const ref = useRef<HTMLVideoElement>(null);
-//   const { isActive, muted } = useCoordinatedVideo({
-//     videoId: `x_list:${item.id}`,
-//     columnId: item.source_type,
-//     videoRef: ref,
-//   });
-//   return <video ref={ref} muted={muted} ... />
+// columnId / scrollRoot / hotZoneRatio 都从最近的 <VideoColumnProvider> 取，
+// 调用方只关心自己的 videoId + ref。
+//
+// 自动事件：mount register / unmount unregister / play / pause / 用户暂停 sticky /
+//   unmute 全局 sticky / 200ms 防抖。
 
 import { useEffect, useRef } from "react";
 import { useVideoCoordinator } from "./videoCoordinator";
+import { useVideoColumn } from "./videoColumnContext";
 
-const VISIBILITY_THRESHOLD = 0.67;
 const VISIBILITY_DEBOUNCE_MS = 200;
+// IntersectionObserver 的 threshold 多档（每 5% 一档），保证滚动过程中频繁触发，
+// 让 hot zone 判定能跟上视频在 root 内的位置变化。
+const IO_THRESHOLDS = [
+  0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1,
+];
 
 export interface UseCoordinatedVideoOptions {
-  /** 全局唯一 id，建议 `${source_type}:${item.id}[:slot]` 形式 */
   videoId: string;
-  /** 列 id（feed 列用 source_type，抽屉用 'drawer'） */
-  columnId: string;
-  /** caller 持有的 ref，hook 内部读 .current */
   videoRef: React.RefObject<HTMLVideoElement | null>;
 }
 
 export interface UseCoordinatedVideoResult {
-  /** 当前是否被 coordinator 选为 active */
   isActive: boolean;
-  /** 当前应显示的静音状态（受 store.globalMuted 控制） */
   muted: boolean;
+}
+
+/**
+ * hot zone 命中判断：
+ *   if (video.h <= hotZone.h) → 要求 video 完整在 hotZone 内
+ *   else (video 比 hotZone 还高) → 要求 video 中心点在 hotZone 内（视频盖住中心线即可）
+ */
+function inHotZone(targetRect: DOMRectReadOnly, rootRect: DOMRectReadOnly, ratio: number): boolean {
+  const hotH = rootRect.height * ratio;
+  const hotTop = rootRect.top + (rootRect.height - hotH) / 2;
+  const hotBottom = hotTop + hotH;
+  if (targetRect.height <= hotH) {
+    return targetRect.top >= hotTop && targetRect.bottom <= hotBottom;
+  }
+  // 视频比热区还大 → 用视频中心点判断
+  const targetCenter = targetRect.top + targetRect.height / 2;
+  return targetCenter >= hotTop && targetCenter <= hotBottom;
 }
 
 export function useCoordinatedVideo({
   videoId,
-  columnId,
   videoRef,
 }: UseCoordinatedVideoOptions): UseCoordinatedVideoResult {
+  const { columnId, scrollRoot, hotZoneRatio } = useVideoColumn();
+
   const isActive = useVideoCoordinator((s) => s.activeId === videoId);
   const globalMuted = useVideoCoordinator((s) => s.globalMuted);
   const register = useVideoCoordinator((s) => s.register);
@@ -58,7 +65,7 @@ export function useCoordinatedVideo({
 
   const showTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // mount/unmount register
+  // mount/unmount register；columnId 变化时重新注册（drawer↔feed 切换时也走一次）
   useEffect(() => {
     register(videoId, columnId);
     return () => {
@@ -67,38 +74,50 @@ export function useCoordinatedVideo({
     };
   }, [videoId, columnId, register, unregister]);
 
-  // IntersectionObserver — 阈值多档防漏触发；67% + 200ms 防抖
+  // IntersectionObserver — root 是 scroll container（PC 列）或 null（mobile / 默认）
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
+    const root = scrollRoot?.current ?? null;
     const io = new IntersectionObserver(
       (entries) => {
         const e = entries[0];
         if (!e) return;
-        const ratio = e.intersectionRatio;
+        const rootRect =
+          e.rootBounds ??
+          (root
+            ? root.getBoundingClientRect()
+            : ({
+                top: 0,
+                left: 0,
+                right: window.innerWidth,
+                bottom: window.innerHeight,
+                width: window.innerWidth,
+                height: window.innerHeight,
+              } as DOMRectReadOnly));
+        const meets = inHotZone(e.boundingClientRect, rootRect, hotZoneRatio);
         const top = e.boundingClientRect.top;
-        const meets = ratio >= VISIBILITY_THRESHOLD;
 
         if (meets) {
           if (showTimerRef.current) clearTimeout(showTimerRef.current);
           showTimerRef.current = setTimeout(() => {
-            setVisibility(videoId, ratio, true, top);
+            setVisibility(videoId, e.intersectionRatio, true, top);
           }, VISIBILITY_DEBOUNCE_MS);
-          // 同时 sync 当前 top（不变 isVisible 标志位）
-          setVisibility(videoId, ratio, false, top);
+          // 同时同步 top（不变 isVisible 标志）
+          setVisibility(videoId, e.intersectionRatio, false, top);
         } else {
           if (showTimerRef.current) {
             clearTimeout(showTimerRef.current);
             showTimerRef.current = null;
           }
-          setVisibility(videoId, ratio, false, top);
+          setVisibility(videoId, e.intersectionRatio, false, top);
         }
       },
-      { threshold: [0, 0.33, 0.67, 1] },
+      { root, threshold: IO_THRESHOLDS },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [videoId, videoRef, setVisibility]);
+  }, [videoId, videoRef, setVisibility, scrollRoot, hotZoneRatio]);
 
   // active 变化 → play/pause（处理 Promise reject + 静默 fallback）
   useEffect(() => {
@@ -117,7 +136,7 @@ export function useCoordinatedVideo({
     }
   }, [isActive, globalMuted, videoRef]);
 
-  // mute 跟 globalMuted 同步（即使不 active 也同步，防下次 active 时状态错位）
+  // mute 跟 globalMuted 同步
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
@@ -128,29 +147,17 @@ export function useCoordinatedVideo({
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-
     const onPause = () => {
-      // 如果 store 仍认为 active=自己，那 pause 是用户主动（点 controls 上 pause）
-      // 否则是 coordinator 主动调的 pause（不算 user）
       const stillActive =
         useVideoCoordinator.getState().activeId === videoId;
       if (stillActive) markUserPaused(videoId, true);
     };
-    const onPlay = () => {
-      // 用户在 controls 上点 play → 撤销 userPaused 标记
-      markUserPaused(videoId, false);
-    };
+    const onPlay = () => markUserPaused(videoId, false);
     const onVolumeChange = () => {
-      // 用户 unmute → globalMuted sticky 变 false
       const s = useVideoCoordinator.getState();
-      if (!el.muted && s.globalMuted) {
-        setGlobalMuted(false);
-      } else if (el.muted && !s.globalMuted) {
-        // 用户 mute 也 sticky（让 globalMuted=true）
-        setGlobalMuted(true);
-      }
+      if (!el.muted && s.globalMuted) setGlobalMuted(false);
+      else if (el.muted && !s.globalMuted) setGlobalMuted(true);
     };
-
     el.addEventListener("pause", onPause);
     el.addEventListener("play", onPlay);
     el.addEventListener("volumechange", onVolumeChange);

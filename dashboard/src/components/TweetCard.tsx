@@ -43,7 +43,6 @@ function VideoPlayer({
 
   const { isActive, muted } = useCoordinatedVideo({
     videoId: `${sourceType}:${itemId}`,
-    columnId: sourceType,
     videoRef,
   });
 
