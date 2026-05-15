@@ -231,10 +231,12 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
         }
 
         // 收集 eligible candidates
-        // drawer mode：抽屉是用户主动打开的明确意图，跳过 hot zone 判定 —
-        //   所有 columnId='drawer' 的 video 都候选（X / GH / CH 抽屉典型 1 个 video
-        //   → 自动播；PH gallery 多 video 时取 DOM top 最早的）
-        // feed mode：按 hot zone 判定 video 中心是否在中部
+        // drawer mode：抽屉里 video 中心进入 drawer body 视口即候选（用整个
+        //   drawer body 作 hot zone，不细分中部/边缘）。这样：
+        //     - 短内容抽屉 video 在顶部刚打开就播 ✅
+        //     - 长文抽屉 video 在底部，user 滚到才播 ✅
+        //     - 多 video 抽屉（PH gallery）取 DOM 顺序最早 ✅
+        // feed mode：按 hot zone 中部判定（避免多列时多视频抢播）
         const eligible: Array<{ id: string; columnId: string; top: number }> = [];
         for (const [id, c] of s.videos) {
           if (c.userPaused) continue;
@@ -242,14 +244,19 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
           if (s.mode === "feed" && c.columnId === "drawer") continue;
 
           const targetRect = c.el.getBoundingClientRect();
+          const colRoot = s.columnRoots.get(c.columnId);
+          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
 
           if (s.mode === "drawer") {
-            eligible.push({ id, columnId: c.columnId, top: targetRect.top });
+            // drawer：video 中心进 drawer body viewport 即可（全 drawer 都是 hot zone）
+            const center = targetRect.top + targetRect.height / 2;
+            if (center >= rootRect.top && center <= rootRect.bottom) {
+              eligible.push({ id, columnId: c.columnId, top: targetRect.top });
+            }
             continue;
           }
 
-          const colRoot = s.columnRoots.get(c.columnId);
-          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
+          // feed mode：hot zone 中部判定
           const ratio = colRoot?.hotZoneRatio ?? 0.5;
           if (inHotZone(targetRect, rootRect, ratio)) {
             eligible.push({ id, columnId: c.columnId, top: targetRect.top });
