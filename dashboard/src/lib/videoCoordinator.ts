@@ -34,6 +34,10 @@ interface ColumnRoot {
 
 export interface VideoPrefs {
   autoplay: boolean;
+  /** @deprecated 浏览器 autoplay policy 强制 muted autoplay，user 偏好失效。
+   *  字段保留是为了向后兼容 localStorage 旧值；hook 不再读它，改用 session-only
+   *  globalMuted state（user 在 native controls 上 unmute 后当前 session sticky）。
+   *  下一版可彻底删除该字段并清 localStorage。 */
   muted: boolean;
 }
 
@@ -46,8 +50,12 @@ interface VideoCoordinatorState {
   columnOrder: string[];
   mode: VideoMode;
   lastClickedColumnId: string | null;
-  /** 单一来源：是否静音读这里 = prefs.muted；user 在 video 上 unmute 时
-   *  也写到 prefs.muted（持久化），避免开关跟实际状态不同步 */
+  /** 当前 session 静音状态（不持久化）。
+   *  - 默认 true（业界统一：muted autoplay 是浏览器允许的）
+   *  - user 在 video native controls 上 unmute → setGlobalMuted(false)
+   *  - 当前 session 内后续视频继承（X / Instagram 一样做法）
+   *  - 刷新或关 tab 重置回 true（浏览器 autoplay policy 也会强制） */
+  globalMuted: boolean;
   prefs: VideoPrefs;
   /** 输出：当前应播的 videoId（subscriber 用 selector 监听） */
   activeId: string | null;
@@ -135,6 +143,7 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
       columnOrder: [],
       mode: "feed",
       lastClickedColumnId: null,
+      globalMuted: true,
       prefs: DEFAULT_PREFS,
       activeId: null,
 
@@ -211,10 +220,9 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
       },
 
       setGlobalMuted: (muted) => {
-        // alias 到 setPrefs({muted})，单一来源
-        if (get().prefs.muted === muted) return;
-        set((s) => ({ prefs: { ...s.prefs, muted } }));
-        log("setGlobalMuted->setPrefs", { muted });
+        if (get().globalMuted === muted) return;
+        set({ globalMuted: muted });
+        log("setGlobalMuted", { muted });
       },
 
       setPrefs: (patch) => {

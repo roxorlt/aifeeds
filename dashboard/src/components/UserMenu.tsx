@@ -131,11 +131,11 @@ export function UserMenu() {
               onChange={(v) => setPrefs({ autoplay: v })}
               label="自动播放视频"
             />
-            <Switch
-              checked={prefs.muted}
-              onChange={(v) => setPrefs({ muted: v })}
-              label="默认静音"
-            />
+            {/* "默认静音"开关已删除（2026-05-15）：浏览器自动播放策略
+                强制 muted autoplay，user 显式设 muted=false 也会被浏览器
+                内核覆盖。设置项给不了实际控制，反而误导。
+                业界做法（X / Instagram）：永远默认静音，user 在 video
+                native controls 上点 unmute 后当前 session 内 sticky。 */}
           </div>
 
           {user && (

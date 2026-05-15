@@ -51,10 +51,12 @@ export function useCoordinatedVideo({
   const scopedId = `${columnId}::${videoId}`;
 
   const isActive = useVideoCoordinator((s) => s.activeId === scopedId);
-  // 单一来源：muted 状态读 prefs.muted（持久化）。volumechange 时通过
-  // setGlobalMuted 写回 prefs。避免之前 globalMuted / prefs.muted 双轨导致
-  // rehydrate 后视频被强制静音、开关跟实际状态不同步的 bug。
-  const globalMuted = useVideoCoordinator((s) => s.prefs.muted);
+  // muted 状态读 session-only globalMuted（不持久化）：
+  //   - 默认 true（业界做法，muted autoplay 是浏览器允许的）
+  //   - user 在 video native controls 上 unmute → onVolumeChange 同步 setGlobalMuted(false)
+  //   - 当前 session 内后续视频继承（user 不用每个视频重新 unmute）
+  //   - 刷新重置回 true，跟浏览器 autoplay policy 一致
+  const globalMuted = useVideoCoordinator((s) => s.globalMuted);
   const register = useVideoCoordinator((s) => s.register);
   const unregister = useVideoCoordinator((s) => s.unregister);
   const markUserPaused = useVideoCoordinator((s) => s.markUserPaused);
@@ -190,8 +192,8 @@ export function useCoordinatedVideo({
         return;
       }
       const s = useVideoCoordinator.getState();
-      if (!el.muted && s.prefs.muted) setGlobalMuted(false);
-      else if (el.muted && !s.prefs.muted) setGlobalMuted(true);
+      if (!el.muted && s.globalMuted) setGlobalMuted(false);
+      else if (el.muted && !s.globalMuted) setGlobalMuted(true);
     };
 
     el.addEventListener("timeupdate", onTimeUpdate);
