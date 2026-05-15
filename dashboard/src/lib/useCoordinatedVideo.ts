@@ -74,6 +74,10 @@ export function useCoordinatedVideo({
   // hook 内部主动改 el.muted（autoplay policy fallback 静音重试）— 期间触发的
   // volumechange 不应回写 prefs.muted，否则会污染 user 的"默认静音"偏好
   const hookMutingRef = useRef(false);
+  // 记录上一次 isActive 状态，用于检测 false→true 的边沿。
+  // 进度同步只在边沿做一次（drawer 关闭、feed video 重新接管时把进度跳到新位置），
+  // 不在每次 useEffect re-run 时做 — 否则 globalMuted 变化等触发 re-run 会覆盖 user 刚 seek 的位置。
+  const prevActiveRef = useRef(false);
 
   // mount: register；unmount: unregister
   useEffect(() => {
@@ -84,14 +88,29 @@ export function useCoordinatedVideo({
   }, [scopedId, columnId, register, unregister, videoRef]);
 
   // active 变化 → play / pause
-  // 进度同步只在 mount loadedmetadata 时做一次（feed → drawer 单向续播）。
-  // 不在这里 set currentTime — 否则 user 拖完进度条后，store 里某个状态变化
-  // 触发 useEffect re-run 时会强制把 ct 覆盖回 progress map 里的旧值，
-  // user seek 等于白做（review 反馈：切换进度后又被识别成 pause）。
+  // 进度同步只在 false→true 的边沿做一次（用 prevActiveRef 检测）。
+  // useEffect re-run 时（如 globalMuted 变化）不再读 progress —— 否则会覆盖 user 刚 seek 的位置。
+  // 边沿同步覆盖场景：
+  //   drawer 关闭 → drawer video unmount cleanup 写最新 progress →
+  //   coord 把 feed video 切回 active → feed video 收到 isActive=true 的边沿 → 读 progress 跳过去
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = isActive;
     if (isActive) {
+      // 只在 false→true 边沿同步进度，避免 useEffect re-run 时覆盖 user seek
+      if (!wasActive) {
+        const saved = getProgress(videoId);
+        if (saved !== undefined && Math.abs(el.currentTime - saved) > 1) {
+          try {
+            el.currentTime = saved;
+            log("progress-sync-on-activate", { videoId: scopedId, t: saved });
+          } catch {
+            // 某些 source 不支持 seek，静默
+          }
+        }
+      }
       el.muted = globalMuted;
       log("play", { videoId: scopedId, muted: el.muted });
       const p = el.play();
