@@ -1,48 +1,52 @@
-// VideoColumnContext — 让视频组件不必关心自己在哪个列 / 哪个抽屉。
+// VideoColumnProvider —— 把"我属于哪个列"的语义注入子树。
 //
-// 设计动机（设计文档 §3.4 + 2026-05-15 review 反馈）：
-//   - 之前 TweetCard / PhGalleryVideo 都要传 columnId='x_list' / 'drawer'，每接入新源
-//     都要复制粘贴。这违反"模板可复用"原则。
-//   - 现在统一：组件树里 wrap 一层 <VideoColumnProvider>，子树里所有 video 自动归
-//     该 column。同一个 TweetCard 放 feed 列和放抽屉里行为不同（columnId 不一样）。
-//
-// 提供：
-//   - columnId：列 / context 标识（feed 列 = source_type，抽屉 = 'drawer'）
-//   - scrollRoot：IntersectionObserver root；null = viewport
-//   - hotZoneRatio：feed 中央"播放热区"占 scroll container 高度的比例（0..1）
-//
-// 用法：
+// 用法（feed / drawer 都一样）：
 //   <VideoColumnProvider columnId="x_list" scrollRoot={feedBodyRef} hotZoneRatio={0.5}>
 //     <TweetCard ... />
 //   </VideoColumnProvider>
+//
+// 内部：
+//   - context 暴露 columnId 给 useCoordinatedVideo 取
+//   - mount 时调 store.setColumnRoot(columnId, ref.current, hotZoneRatio)
+//   - unmount 时调 store.setColumnRoot(columnId, null, 0)（清 listener）
+//
+// 这样组件树里 video 不需要关心自己在哪——columnId 由 Provider 自动注入；
+// scroll listener 由 store 中心化管理（每 root 一个，不是每 video 一个）。
 
-import { createContext, useContext, type ReactNode, type RefObject } from "react";
+import { createContext, useContext, useEffect, type ReactNode, type RefObject } from "react";
+import { useVideoCoordinator } from "./videoCoordinator";
 
-export interface VideoColumnContextValue {
+interface VideoColumnContextValue {
   columnId: string;
-  /** scroll container ref；null = viewport scroll（mobile 单列 / 抽屉某些场景） */
-  scrollRoot: RefObject<HTMLElement | null> | null;
-  /** hot zone 占 scroll container 高度的比例 — 视频完整在该高度内才候选 */
-  hotZoneRatio: number;
 }
 
-// 默认值给个 fallback，确保组件直接渲染（不在 provider 内）也不崩
-const DEFAULT: VideoColumnContextValue = {
-  columnId: "default",
-  scrollRoot: null,
-  hotZoneRatio: 0.5,
-};
-
+const DEFAULT: VideoColumnContextValue = { columnId: "default" };
 const VideoColumnContext = createContext<VideoColumnContextValue>(DEFAULT);
+
+interface ProviderProps {
+  columnId: string;
+  scrollRoot: RefObject<HTMLElement | null> | null;
+  hotZoneRatio: number;
+  children: ReactNode;
+}
 
 export function VideoColumnProvider({
   columnId,
   scrollRoot,
   hotZoneRatio,
   children,
-}: VideoColumnContextValue & { children: ReactNode }) {
+}: ProviderProps) {
+  // 注册 scroll root 到 store；ref 在 mount 完成后 .current 才有值
+  useEffect(() => {
+    const el = scrollRoot?.current ?? null;
+    useVideoCoordinator.getState().setColumnRoot(columnId, el, hotZoneRatio);
+    return () => {
+      useVideoCoordinator.getState().setColumnRoot(columnId, null, 0);
+    };
+  }, [columnId, scrollRoot, hotZoneRatio]);
+
   return (
-    <VideoColumnContext.Provider value={{ columnId, scrollRoot, hotZoneRatio }}>
+    <VideoColumnContext.Provider value={{ columnId }}>
       {children}
     </VideoColumnContext.Provider>
   );

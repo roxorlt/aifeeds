@@ -1,16 +1,19 @@
-// VideoCoordinator — 全局单视频播放协调器。
+// VideoCoordinator —— 中心化全局视频播放协调器（B 重构）。
 //
-// 详见设计文档：docs/plans/2026-05-15-video-playback-coordinator-design.md
+// 设计文档：docs/plans/2026-05-15-video-playback-coordinator-design.md
+// 重构原因（review 2026-05-15）：第一版分布式架构（每个 video hook 自己跑
+// IO + scroll + 写 store）出现多重 race（mode 切换跟 visibility 写入时序错位、
+// 抽屉打开 / 关闭后 stale 状态等）。此版改为：
 //
-// 核心规则（v1）：
-// - 视频 ≥ 67% 可见 + 持续 ≥ 200ms → 候选
-// - 同列多候选取最上面
-// - 跨列 → 最近 click 过的列优先；都没 click → 从左到右、从上到下
-// - 抽屉打开期间，feed 视频全停；抽屉内独立轮换
-// - 用户主动暂停 sticky；用户 unmute 全局 sticky
-// - 切 tab / 浏览器 hidden → 全停
+//   - 中心 store 持有所有 video element refs + 每个 column 的 scroll root
+//   - 每个 root 一个统一 scroll listener（RAF throttle），任何信号变化都跑
+//     同一个 recompute() 入口
+//   - recompute() 读 live DOM bbox（不依赖 store 里的 stale top 字段），算
+//     hot zone 命中 + 优先级 → 选 activeId → broadcast
+//   - video 组件零决策：只 register el / subscribe activeId / play+pause
 //
-// candidates 是运行态（不持久化）；prefs（autoplay / muted）持久化到 localStorage。
+// telemetry：dev console log（import.meta.env.DEV）追踪 register / mode-change /
+// recompute / pick 等关键事件，方便我自己跑 playwright 验证。
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
@@ -18,248 +21,346 @@ import { persist, createJSONStorage } from "zustand/middleware";
 export type VideoMode = "feed" | "drawer" | "hidden";
 
 interface VideoCandidate {
-  /** 列 / context id：feed 列用 source_type，抽屉用 'drawer' */
+  el: HTMLVideoElement;
   columnId: string;
-  /** 0..1，最近一次 IntersectionObserver 报告的可见比例 */
-  visibleRatio: number;
-  /** ≥ 67% 持续 ≥ 200ms 后由 hook 置 true */
-  isVisible: boolean;
-  /** video element 当前 viewport top（每次可见性变化由 hook 顺带更新）。
-   *  优先级算法用它做"同列取最上"决策。 */
-  top: number;
-  /** 用户主动暂停过 → 本 session 不再被自动播 */
   userPaused: boolean;
 }
 
+interface ColumnRoot {
+  /** scroll container element；null = 跟 viewport 关联 */
+  el: HTMLElement | null;
+  hotZoneRatio: number;
+}
+
 export interface VideoPrefs {
-  /** 关掉则所有视频都不自动播，只显示首帧 */
   autoplay: boolean;
-  /** 默认静音播放（浏览器 autoplay policy 要求） */
   muted: boolean;
 }
 
-interface VideoCoordinatorState {
-  candidates: Map<string, VideoCandidate>;
-  activeId: string | null;
-  mode: VideoMode;
-  /** PC 多列时记录最近被 click 的列，用于跨列优先级 */
-  lastClickedColumnId: string | null;
-  /** 用户在某视频 unmute 后 sticky 到 session 结束 */
-  globalMuted: boolean;
-  /** 列在 DOM 中从左到右的顺序，由 App.tsx 写入 */
-  columnOrder: string[];
-  prefs: VideoPrefs;
+const DEFAULT_PREFS: VideoPrefs = { autoplay: true, muted: true };
 
-  // ─── actions ──────────────────────────────────────────────
-  register: (videoId: string, columnId: string) => void;
+interface VideoCoordinatorState {
+  // ─── live state ──────────────────────────────────────────
+  videos: Map<string, VideoCandidate>;
+  columnRoots: Map<string, ColumnRoot>;
+  columnOrder: string[];
+  mode: VideoMode;
+  lastClickedColumnId: string | null;
+  globalMuted: boolean;
+  prefs: VideoPrefs;
+  /** 输出：当前应播的 videoId（subscriber 用 selector 监听） */
+  activeId: string | null;
+
+  // ─── actions（外部调用） ─────────────────────────────────
+  register: (videoId: string, el: HTMLVideoElement, columnId: string) => void;
   unregister: (videoId: string) => void;
-  setVisibility: (videoId: string, ratio: number, isVisible: boolean, top: number) => void;
-  markUserPaused: (videoId: string, paused: boolean) => void;
-  markColumnClick: (columnId: string) => void;
-  setMode: (mode: VideoMode) => void;
-  setGlobalMuted: (muted: boolean) => void;
+  setColumnRoot: (columnId: string, el: HTMLElement | null, hotZoneRatio: number) => void;
   setColumnOrder: (order: string[]) => void;
+  setMode: (mode: VideoMode) => void;
+  markColumnClick: (columnId: string) => void;
+  markUserPaused: (videoId: string, paused: boolean) => void;
+  setGlobalMuted: (muted: boolean) => void;
   setPrefs: (patch: Partial<VideoPrefs>) => void;
-  /** 内部：根据当前 candidates / mode / 优先级算出 active id */
-  selectActive: () => void;
+
+  // ─── 内部唯一决策入口 ────────────────────────────────────
+  recompute: () => void;
 }
 
-const DEFAULT_PREFS: VideoPrefs = {
-  autoplay: true,
-  muted: true,
-};
+// ─── 工具函数 ─────────────────────────────────────────────
+
+function viewportRect(): DOMRectReadOnly {
+  return {
+    top: 0,
+    left: 0,
+    right: window.innerWidth,
+    bottom: window.innerHeight,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  } as DOMRectReadOnly;
+}
 
 /**
- * 优先级算法 — 按设计文档 §2.2：
- *   feed mode：
- *     1. 同列内 → 最上的（domOrder 最小）
- *     2. 跨列 → 最近 click 过的列优先；都没 → 按 columnOrder 从左到右
- *   drawer mode：
- *     仅考虑 columnId === 'drawer' 的候选；同样取最上的
- *   hidden mode：
- *     active = null
+ * hot zone 命中判断：
+ *   - video.h <= hotZone.h → 要求 video 完整在 hotZone 内
+ *   - video > hotZone（未来竖版长视频）→ 视频中心点穿过 hotZone 中心线即可
  */
-function computeActive(
-  candidates: Map<string, VideoCandidate>,
-  mode: VideoMode,
-  lastClickedColumnId: string | null,
-  columnOrder: string[],
-): string | null {
-  if (mode === "hidden") return null;
-
-  // 收集所有 isVisible && !userPaused 的候选
-  const eligible: Array<[string, VideoCandidate]> = [];
-  for (const [id, c] of candidates) {
-    if (!c.isVisible || c.userPaused) continue;
-    if (mode === "drawer" && c.columnId !== "drawer") continue;
-    if (mode === "feed" && c.columnId === "drawer") continue;
-    eligible.push([id, c]);
+function inHotZone(target: DOMRect, root: DOMRectReadOnly, ratio: number): boolean {
+  const hotH = root.height * ratio;
+  const hotTop = root.top + (root.height - hotH) / 2;
+  const hotBottom = hotTop + hotH;
+  if (target.height <= hotH) {
+    return target.top >= hotTop && target.bottom <= hotBottom;
   }
-  if (eligible.length === 0) return null;
-
-  // 按列分组
-  const byColumn = new Map<string, Array<[string, VideoCandidate]>>();
-  for (const entry of eligible) {
-    const col = entry[1].columnId;
-    if (!byColumn.has(col)) byColumn.set(col, []);
-    byColumn.get(col)!.push(entry);
-  }
-
-  // 决定优先列：
-  // - drawer mode 只有一个 'drawer' 列
-  // - feed mode 优先 lastClickedColumnId（如该列还有候选）
-  // - 否则按 columnOrder
-  let preferredCol: string | null = null;
-  if (mode === "drawer") {
-    preferredCol = "drawer";
-  } else if (lastClickedColumnId && byColumn.has(lastClickedColumnId)) {
-    preferredCol = lastClickedColumnId;
-  } else {
-    for (const col of columnOrder) {
-      if (byColumn.has(col)) {
-        preferredCol = col;
-        break;
-      }
-    }
-    // 兜底：columnOrder 没覆盖到的列，取 byColumn 第一个 key
-    if (!preferredCol) preferredCol = byColumn.keys().next().value ?? null;
-  }
-  if (!preferredCol) return null;
-
-  // 优先列内取 top 最小的（最靠 viewport 上方）
-  const inCol = byColumn.get(preferredCol)!;
-  inCol.sort((a, b) => a[1].top - b[1].top);
-  return inCol[0][0];
+  const center = target.top + target.height / 2;
+  return center >= hotTop && center <= hotBottom;
 }
+
+const isDev = (() => {
+  try {
+    return import.meta.env?.DEV === true;
+  } catch {
+    return false;
+  }
+})();
+
+function log(event: string, payload?: Record<string, unknown>): void {
+  if (!isDev) return;
+  // 编码到一行，方便 console 抓取
+  const safe = payload ? JSON.stringify(payload) : "";
+  // eslint-disable-next-line no-console
+  console.log(`[VC] ${event} ${safe}`);
+}
+
+// ─── store ────────────────────────────────────────────────
 
 export const useVideoCoordinator = create<VideoCoordinatorState>()(
   persist(
     (set, get) => ({
-      candidates: new Map(),
-      activeId: null,
+      videos: new Map(),
+      columnRoots: new Map(),
+      columnOrder: [],
       mode: "feed",
       lastClickedColumnId: null,
       globalMuted: true,
-      columnOrder: [],
       prefs: DEFAULT_PREFS,
+      activeId: null,
 
-      register: (videoId, columnId) => {
-        set((state) => {
-          const next = new Map(state.candidates);
-          const existing = next.get(videoId);
-          next.set(videoId, {
-            columnId,
-            top: existing?.top ?? Infinity,
-            visibleRatio: existing?.visibleRatio ?? 0,
-            isVisible: existing?.isVisible ?? false,
-            userPaused: existing?.userPaused ?? false,
-          });
-          return { candidates: next };
+      register: (videoId, el, columnId) => {
+        const next = new Map(get().videos);
+        const existing = next.get(videoId);
+        next.set(videoId, {
+          el,
+          columnId,
+          userPaused: existing?.userPaused ?? false,
         });
-        get().selectActive();
+        set({ videos: next });
+        log("register", { videoId, columnId, total: next.size });
+        get().recompute();
       },
 
       unregister: (videoId) => {
-        set((state) => {
-          if (!state.candidates.has(videoId)) return state;
-          const next = new Map(state.candidates);
-          next.delete(videoId);
-          const nextActive = state.activeId === videoId ? null : state.activeId;
-          return { candidates: next, activeId: nextActive };
-        });
-        get().selectActive();
+        const next = new Map(get().videos);
+        if (!next.delete(videoId)) return;
+        set({ videos: next });
+        log("unregister", { videoId, total: next.size });
+        if (get().activeId === videoId) set({ activeId: null });
+        get().recompute();
       },
 
-      setVisibility: (videoId, ratio, isVisible, top) => {
-        set((state) => {
-          const c = state.candidates.get(videoId);
-          if (!c) return state;
-          if (c.visibleRatio === ratio && c.isVisible === isVisible && c.top === top) return state;
-          const next = new Map(state.candidates);
-          next.set(videoId, { ...c, visibleRatio: ratio, isVisible, top });
-          return { candidates: next };
-        });
-        get().selectActive();
+      setColumnRoot: (columnId, el, hotZoneRatio) => {
+        // 清旧 listener / attach 新
+        const cleanups = listenerRegistry.get(columnId);
+        if (cleanups) {
+          cleanups();
+          listenerRegistry.delete(columnId);
+        }
+
+        const next = new Map(get().columnRoots);
+        if (el) {
+          next.set(columnId, { el, hotZoneRatio });
+          attachScrollListener(columnId, el);
+        } else {
+          next.delete(columnId);
+        }
+        set({ columnRoots: next });
+        log("setColumnRoot", { columnId, hasEl: !!el, hotZoneRatio });
+        get().recompute();
       },
 
-      markUserPaused: (videoId, paused) => {
-        set((state) => {
-          const c = state.candidates.get(videoId);
-          if (!c) return state;
-          const next = new Map(state.candidates);
-          next.set(videoId, { ...c, userPaused: paused });
-          return { candidates: next };
-        });
-        get().selectActive();
+      setColumnOrder: (order) => {
+        set({ columnOrder: order });
+        get().recompute();
+      },
+
+      setMode: (mode) => {
+        if (get().mode === mode) return;
+        const from = get().mode;
+        set({ mode });
+        log("setMode", { from, to: mode });
+        get().recompute();
       },
 
       markColumnClick: (columnId) => {
         if (get().lastClickedColumnId === columnId) return;
         set({ lastClickedColumnId: columnId });
-        get().selectActive();
+        log("markColumnClick", { columnId });
+        get().recompute();
       },
 
-      setMode: (mode) => {
-        if (get().mode === mode) return;
-        set({ mode });
-        get().selectActive();
+      markUserPaused: (videoId, paused) => {
+        const next = new Map(get().videos);
+        const c = next.get(videoId);
+        if (!c || c.userPaused === paused) return;
+        next.set(videoId, { ...c, userPaused: paused });
+        set({ videos: next });
+        log("markUserPaused", { videoId, paused });
+        get().recompute();
       },
 
       setGlobalMuted: (muted) => {
         set({ globalMuted: muted });
-      },
-
-      setColumnOrder: (order) => {
-        set({ columnOrder: order });
-        get().selectActive();
+        log("setGlobalMuted", { muted });
+        // mute 不影响 active 选取，不需要 recompute
       },
 
       setPrefs: (patch) => {
-        set((state) => ({ prefs: { ...state.prefs, ...patch } }));
-        // muted pref 改变时同步 globalMuted（用户调设置 = 主动意图）
+        set((s) => ({ prefs: { ...s.prefs, ...patch } }));
         if (patch.muted !== undefined) set({ globalMuted: patch.muted });
-        get().selectActive();
+        log("setPrefs", patch);
+        get().recompute();
       },
 
-      selectActive: () => {
+      recompute: () => {
         const s = get();
-        // autoplay pref 关 → 永不自动选 active（视频显示 thumbnail + 手动 play）
+        // 关闭 autoplay → activeId 强制 null
         if (!s.prefs.autoplay) {
-          if (s.activeId !== null) set({ activeId: null });
+          if (s.activeId !== null) {
+            set({ activeId: null });
+            log("pick", { mode: s.mode, picked: null, reason: "autoplay-off" });
+          }
           return;
         }
-        const next = computeActive(
-          s.candidates,
-          s.mode,
-          s.lastClickedColumnId,
-          s.columnOrder,
-        );
-        if (next !== s.activeId) set({ activeId: next });
+        if (s.mode === "hidden") {
+          if (s.activeId !== null) {
+            set({ activeId: null });
+            log("pick", { mode: s.mode, picked: null, reason: "tab-hidden" });
+          }
+          return;
+        }
+
+        // 收集 eligible candidates（live bbox + hot zone 判定）
+        const eligible: Array<{ id: string; columnId: string; top: number }> = [];
+        for (const [id, c] of s.videos) {
+          if (c.userPaused) continue;
+          if (s.mode === "drawer" && c.columnId !== "drawer") continue;
+          if (s.mode === "feed" && c.columnId === "drawer") continue;
+
+          const colRoot = s.columnRoots.get(c.columnId);
+          // 没注册 root 视为可见性退化到 viewport
+          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
+          const ratio = colRoot?.hotZoneRatio ?? 0.5;
+          const targetRect = c.el.getBoundingClientRect();
+
+          if (inHotZone(targetRect, rootRect, ratio)) {
+            eligible.push({ id, columnId: c.columnId, top: targetRect.top });
+          }
+        }
+
+        if (eligible.length === 0) {
+          if (s.activeId !== null) {
+            set({ activeId: null });
+            log("pick", { mode: s.mode, picked: null, reason: "no-eligible" });
+          }
+          return;
+        }
+
+        // 跨列优先级
+        let preferredCol: string | null = null;
+        if (s.mode === "drawer") {
+          preferredCol = "drawer";
+        } else if (
+          s.lastClickedColumnId &&
+          eligible.some((e) => e.columnId === s.lastClickedColumnId)
+        ) {
+          preferredCol = s.lastClickedColumnId;
+        } else {
+          for (const col of s.columnOrder) {
+            if (eligible.some((e) => e.columnId === col)) {
+              preferredCol = col;
+              break;
+            }
+          }
+          if (!preferredCol) preferredCol = eligible[0].columnId;
+        }
+
+        // 列内取 top 最小
+        const inCol = eligible.filter((e) => e.columnId === preferredCol);
+        inCol.sort((a, b) => a.top - b.top);
+        const picked = inCol[0]?.id ?? null;
+
+        if (picked !== s.activeId) {
+          set({ activeId: picked });
+          log("pick", {
+            mode: s.mode,
+            picked,
+            preferredCol,
+            eligibleCount: eligible.length,
+            lastClicked: s.lastClickedColumnId,
+          });
+        }
       },
     }),
     {
       name: "ai-feeds-video-prefs",
       storage: createJSONStorage(() => localStorage),
-      // 只持久化 prefs；运行态（candidates / activeId / mode / globalMuted 等）不写盘
       partialize: (s) => ({ prefs: s.prefs }),
     },
   ),
 );
 
-/**
- * 顶层挂载一次：监听 document.visibilitychange，hidden 时全停。
- * 由 App.tsx 调用，返回 cleanup 函数。
- */
-export function attachVisibilityListener(): () => void {
-  const onChange = () => {
+// ─── scroll listener 注册表（外部 module-level）──────────────
+// 每个 columnRoot 一个 listener，setColumnRoot 时增删。
+const listenerRegistry = new Map<string, () => void>();
+
+function attachScrollListener(columnId: string, el: HTMLElement): void {
+  let rafId: number | null = null;
+  const onScroll = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      useVideoCoordinator.getState().recompute();
+    });
+  };
+  el.addEventListener("scroll", onScroll, { passive: true });
+  listenerRegistry.set(columnId, () => {
+    el.removeEventListener("scroll", onScroll);
+    if (rafId !== null) cancelAnimationFrame(rafId);
+  });
+  log("attachScrollListener", { columnId });
+}
+
+// ─── 全局 listeners（mount 一次） ─────────────────────────
+
+let globalAttached = false;
+
+/** App.tsx 顶层调一次：window scroll + visibilitychange + window resize */
+export function attachGlobalVideoListeners(): () => void {
+  if (globalAttached) return () => {};
+  globalAttached = true;
+
+  let rafId: number | null = null;
+  const onWindowScroll = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      useVideoCoordinator.getState().recompute();
+    });
+  };
+  window.addEventListener("scroll", onWindowScroll, { passive: true });
+  window.addEventListener("resize", onWindowScroll, { passive: true });
+
+  const onVis = () => {
     if (document.hidden) {
       useVideoCoordinator.getState().setMode("hidden");
     } else {
-      // 不直接恢复 'feed' — 由抽屉状态决定（drawer 同步会更新 mode）
-      // 这里恢复 feed 是兜底；如果抽屉是开的，drawer 同步会立即覆盖
       useVideoCoordinator.getState().setMode("feed");
     }
   };
-  document.addEventListener("visibilitychange", onChange);
-  return () => document.removeEventListener("visibilitychange", onChange);
+  document.addEventListener("visibilitychange", onVis);
+
+  return () => {
+    window.removeEventListener("scroll", onWindowScroll);
+    window.removeEventListener("resize", onWindowScroll);
+    document.removeEventListener("visibilitychange", onVis);
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    globalAttached = false;
+  };
+}
+
+// 老 export 名兼容（attachVisibilityListener）— 保留让 App.tsx 引用不破
+export const attachVisibilityListener = attachGlobalVideoListeners;
+
+// dev 环境暴露 store 到 window.__VC 给 playwright 自测用；prod 不暴露
+if (isDev && typeof window !== "undefined") {
+  (window as unknown as { __VC?: unknown }).__VC = useVideoCoordinator;
 }
