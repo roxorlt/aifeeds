@@ -1163,6 +1163,129 @@ export async function runReconstructThreads(
   };
 }
 
+// ─── dedupe-quote-content mode ─────────────────────────────────
+// D2: 老 chrome scraper (matched_by=keyword/null) 抓 X 网页 DOM 时没排除
+// nested quoted preview 的 tweetText，把被引用推内容也包进主推 content。
+// 这条扫所有 row，识别 main.content == extra.quote_of.content 完全相同的
+// （脏数据），把原 content 备份到 extra.original_content（避免覆盖已备份）
+// + 把 main.content 改为空（前端会渲染嵌套小卡作为正文上下文）。
+//
+// 安全：dry_run 默认 + 备份用 extra.original_content 单条可逆。
+// 还原命令: UPDATE items SET content = extra->>'$.original_content',
+//   extra = json_remove(extra, '$.original_content')
+//   WHERE extra->>'$.original_content' IS NOT NULL
+
+export interface DedupeResult {
+  mode: 'dedupe-quote-content';
+  candidates_total: number;
+  updated: number;
+  skipped_already_backed_up: number;
+  dry_run: boolean;
+  elapsed_ms: number;
+}
+
+export async function runDedupeQuoteContent(
+  env: EnrichEnv,
+  dryRun = true,
+  limit = 500,
+): Promise<DedupeResult> {
+  const t0 = Date.now();
+  // 选 row 条件（识别脏数据）：
+  // 1. content 跟 quote_of.content 前 100 字符完全相同（强信号是同源）
+  // 2. 长度差不超过 50（兼容末尾 t.co/x.com URL 缩短差异）
+  // 3. content 长度 > 80（避免短文 false positive）
+  // 4. 未备份过 original_content（避免二次跑覆盖备份）
+  const rows = await env.DB.prepare(
+    `SELECT id, content
+     FROM items
+     WHERE source_type = 'x_list'
+       AND deleted_at IS NULL
+       AND content IS NOT NULL
+       AND length(content) > 80
+       AND json_extract(extra, '$.quote_of.content') IS NOT NULL
+       AND substr(content, 1, 100) = substr(json_extract(extra, '$.quote_of.content'), 1, 100)
+       AND abs(length(content) - length(json_extract(extra, '$.quote_of.content'))) < 50
+       AND json_extract(extra, '$.original_content') IS NULL
+     LIMIT ?`,
+  ).bind(limit).all<{ id: string; content: string }>();
+
+  const candidates = rows.results;
+  let updated = 0;
+
+  if (!dryRun && candidates.length > 0) {
+    const stmts: D1PreparedStatement[] = [];
+    for (const r of candidates) {
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE items
+           SET content = '',
+               extra = json_set(coalesce(extra, '{}'), '$.original_content', ?)
+           WHERE id = ?`,
+        ).bind(r.content, r.id),
+      );
+    }
+    const BATCH = 50;
+    for (let i = 0; i < stmts.length; i += BATCH) {
+      await env.DB.batch(stmts.slice(i, i + BATCH));
+    }
+    updated = candidates.length;
+  }
+
+  return {
+    mode: 'dedupe-quote-content',
+    candidates_total: candidates.length,
+    updated,
+    skipped_already_backed_up: 0,
+    dry_run: dryRun,
+    elapsed_ms: Date.now() - t0,
+  };
+}
+
+// ─── longform-fetch-now: 单条强制重抓全文 ──────────────────────
+// D3: SB API truncate 长推到 ~140 字符。这条调 syndication API 拿 self.text
+// 全文，覆盖 D1 main.content。同时也备份原 truncated content 到 extra.
+// 用户报 NousResearch /t/2055111083396899326 全文被截。
+
+export interface LongformFetchResult {
+  itemId: string;
+  before_len: number;
+  after_len: number;
+  updated: boolean;
+  reason?: string;
+}
+
+export async function runLongformFetchOne(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<LongformFetchResult> {
+  const item = await env.DB.prepare(
+    `SELECT id, source_id, content FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null }>();
+  if (!item) return { itemId, before_len: 0, after_len: 0, updated: false, reason: 'item_not_found' };
+
+  const res = await fetchTweet(item.source_id);
+  if (!res || res.notFound || !res.data) {
+    return { itemId, before_len: (item.content || '').length, after_len: 0, updated: false, reason: 'syndication_fetch_failed' };
+  }
+  const newText = (res.data.text as string) || '';
+  if (!newText) {
+    return { itemId, before_len: (item.content || '').length, after_len: 0, updated: false, reason: 'empty_text' };
+  }
+  // 仅当新 text 比旧 content 长时才更新（保护现有更长的 backfilled 数据）
+  if (newText.length <= (item.content || '').length) {
+    return { itemId, before_len: (item.content || '').length, after_len: newText.length, updated: false, reason: 'no_longer_content' };
+  }
+
+  await env.DB.prepare(
+    `UPDATE items
+     SET content = ?,
+         extra = json_set(coalesce(extra, '{}'), '$.original_truncated_content', ?)
+     WHERE id = ?`,
+  ).bind(newText, item.content, item.id).run();
+
+  return { itemId, before_len: (item.content || '').length, after_len: newText.length, updated: true };
+}
+
 // ─── reclassify-threads mode ───────────────────────────────────
 // PR-B step 2: clear thread_root_id from items that are NOT part of a real
 // self-thread. Definition of self-thread: a chain of same-author tweets where
