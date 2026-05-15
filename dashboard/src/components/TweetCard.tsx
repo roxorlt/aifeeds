@@ -398,8 +398,10 @@ export function TweetCard({
       )}
       {/* F2: Quote 头像下方 connector stub —— 跟 X 详情页一致：主推 avatar
           下方一根短灰线（12px），暗示"下方有引用卡"。仅 quote_of 完整数据
-          存在时显示。isThread / replyOf 有专门 connector，不重复画；embedded 卡片不画。 */}
-      {!isThread && !embedded && !hasThreadBelow && !replyOf && quoteOf && (
+          存在时显示。isThread / replyOf 有专门 connector，不重复画；embedded 卡片不画。
+          额外：主推 displayText 为空（dedupe 后 content+translated 都空）时
+          不画 stub —— 视觉上 stub 跟嵌套小卡之间没正文可连，反而突兀。 */}
+      {!isThread && !embedded && !hasThreadBelow && !replyOf && quoteOf && displayText.trim().length > 0 && (
         <div className="pointer-events-none absolute left-[35px] top-[52px] h-3 w-[2px] bg-neutral-200" />
       )}
 
