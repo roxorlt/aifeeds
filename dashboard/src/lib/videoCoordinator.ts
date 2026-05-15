@@ -34,6 +34,10 @@ interface ColumnRoot {
 
 export interface VideoPrefs {
   autoplay: boolean;
+  /** @deprecated 浏览器 autoplay policy 强制 muted autoplay，user 偏好失效。
+   *  字段保留是为了向后兼容 localStorage 旧值；hook 不再读它，改用 session-only
+   *  globalMuted state（user 在 native controls 上 unmute 后当前 session sticky）。
+   *  下一版可彻底删除该字段并清 localStorage。 */
   muted: boolean;
 }
 
@@ -46,6 +50,11 @@ interface VideoCoordinatorState {
   columnOrder: string[];
   mode: VideoMode;
   lastClickedColumnId: string | null;
+  /** 当前 session 静音状态（不持久化）。
+   *  - 默认 true（业界统一：muted autoplay 是浏览器允许的）
+   *  - user 在 video native controls 上 unmute → setGlobalMuted(false)
+   *  - 当前 session 内后续视频继承（X / Instagram 一样做法）
+   *  - 刷新或关 tab 重置回 true（浏览器 autoplay policy 也会强制） */
   globalMuted: boolean;
   prefs: VideoPrefs;
   /** 输出：当前应播的 videoId（subscriber 用 selector 监听） */
@@ -59,6 +68,8 @@ interface VideoCoordinatorState {
   setMode: (mode: VideoMode) => void;
   markColumnClick: (columnId: string) => void;
   markUserPaused: (videoId: string, paused: boolean) => void;
+  /** 兼容旧 API：实际调 setPrefs({muted})；user 在 video controls 上 mute/unmute
+   *  时被调用，确保 prefs.muted 跟 video 元素同步 */
   setGlobalMuted: (muted: boolean) => void;
   setPrefs: (patch: Partial<VideoPrefs>) => void;
 
@@ -97,9 +108,18 @@ function inHotZone(target: DOMRect, root: DOMRectReadOnly, ratio: number): boole
   return center >= hotTop && center <= hotBottom;
 }
 
+// staging / localhost / pages.dev preview 都开 debug log + 暴露 window.__VC
+// prod (ai-feeds.com) 不开
 const isDev = (() => {
   try {
-    return import.meta.env?.DEV === true;
+    if (import.meta.env?.DEV) return true;
+    if (typeof window !== "undefined") {
+      const h = window.location.hostname;
+      if (h === "localhost" || h === "127.0.0.1") return true;
+      if (h.endsWith(".pages.dev")) return true;
+      if (h.startsWith("staging.")) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -200,16 +220,16 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
       },
 
       setGlobalMuted: (muted) => {
+        if (get().globalMuted === muted) return;
         set({ globalMuted: muted });
         log("setGlobalMuted", { muted });
-        // mute 不影响 active 选取，不需要 recompute
       },
 
       setPrefs: (patch) => {
         set((s) => ({ prefs: { ...s.prefs, ...patch } }));
-        if (patch.muted !== undefined) set({ globalMuted: patch.muted });
         log("setPrefs", patch);
-        get().recompute();
+        // autoplay 变化要 recompute；muted 不影响 active 选取
+        if (patch.autoplay !== undefined) get().recompute();
       },
 
       recompute: () => {
@@ -230,19 +250,34 @@ export const useVideoCoordinator = create<VideoCoordinatorState>()(
           return;
         }
 
-        // 收集 eligible candidates（live bbox + hot zone 判定）
+        // 收集 eligible candidates
+        // drawer mode：抽屉里 video 中心进入 drawer body 视口即候选（用整个
+        //   drawer body 作 hot zone，不细分中部/边缘）。这样：
+        //     - 短内容抽屉 video 在顶部刚打开就播 ✅
+        //     - 长文抽屉 video 在底部，user 滚到才播 ✅
+        //     - 多 video 抽屉（PH gallery）取 DOM 顺序最早 ✅
+        // feed mode：按 hot zone 中部判定（避免多列时多视频抢播）
         const eligible: Array<{ id: string; columnId: string; top: number }> = [];
         for (const [id, c] of s.videos) {
           if (c.userPaused) continue;
           if (s.mode === "drawer" && c.columnId !== "drawer") continue;
           if (s.mode === "feed" && c.columnId === "drawer") continue;
 
-          const colRoot = s.columnRoots.get(c.columnId);
-          // 没注册 root 视为可见性退化到 viewport
-          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
-          const ratio = colRoot?.hotZoneRatio ?? 0.5;
           const targetRect = c.el.getBoundingClientRect();
+          const colRoot = s.columnRoots.get(c.columnId);
+          const rootRect = colRoot?.el ? colRoot.el.getBoundingClientRect() : viewportRect();
 
+          if (s.mode === "drawer") {
+            // drawer：video 中心进 drawer body viewport 即可（全 drawer 都是 hot zone）
+            const center = targetRect.top + targetRect.height / 2;
+            if (center >= rootRect.top && center <= rootRect.bottom) {
+              eligible.push({ id, columnId: c.columnId, top: targetRect.top });
+            }
+            continue;
+          }
+
+          // feed mode：hot zone 中部判定
+          const ratio = colRoot?.hotZoneRatio ?? 0.5;
           if (inHotZone(targetRect, rootRect, ratio)) {
             eligible.push({ id, columnId: c.columnId, top: targetRect.top });
           }

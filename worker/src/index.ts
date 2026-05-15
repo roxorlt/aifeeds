@@ -2332,23 +2332,54 @@ async function handleImageProxy(request: Request): Promise<Response> {
     return new Response('host not allowed', { status: 403 });
   }
 
+  // 转发 Range header 给上游 — video seek 必需。
+  // video.twimg.com / pbs.twimg.com 都支持 Range request；浏览器 <video>
+  // 在 seek 时会发 Range: bytes=N- 请求拿对应字节区间。代理之前没转发 Range，
+  // 上游永远返完整流，浏览器认为该 source 不支持 seek → 拖进度条无效。
+  const upstreamHeaders: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (compatible; ai-feeds-img-proxy/1.0)',
+  };
+  const rangeHeader = request.headers.get('range');
+  if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+  // video 类型不走 CF cache — 因为 Range request 跟全量请求会污染同一 cache key，
+  // 长视频 seek 时拿到完整流又不能 partial 响应。图片（pbs.twimg.com）继续 cache。
+  const isVideo = targetUrl.hostname === 'video.twimg.com';
+  const cfOptions = isVideo
+    ? {}
+    : { cf: { cacheTtl: 86400, cacheEverything: true } };
+
   const upstream = await fetch(targetUrl.toString(), {
-    cf: { cacheTtl: 86400, cacheEverything: true },
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ai-feeds-img-proxy/1.0)' },
+    ...cfOptions,
+    headers: upstreamHeaders,
   });
 
-  if (!upstream.ok) {
+  // 200 OK（无 Range 请求）或 206 Partial Content（有 Range 请求）都算成功
+  if (!upstream.ok && upstream.status !== 206) {
     return new Response('upstream failed', { status: upstream.status });
   }
 
   const headers = new Headers();
   const ct = upstream.headers.get('content-type');
   if (ct) headers.set('Content-Type', ct);
-  headers.set('Cache-Control', 'public, max-age=604800, immutable');
+  // 透传 Range 相关响应头 — 让 <video> 知道源支持 seek
+  const acceptRanges = upstream.headers.get('accept-ranges');
+  if (acceptRanges) headers.set('Accept-Ranges', acceptRanges);
+  const contentLength = upstream.headers.get('content-length');
+  if (contentLength) headers.set('Content-Length', contentLength);
+  const contentRange = upstream.headers.get('content-range');
+  if (contentRange) headers.set('Content-Range', contentRange);
+  // 图片可长期 cache；video 不设 immutable（避免浏览器把"无 Range"的完整流
+  // 当成 immutable 缓存住，后续 Range 请求拿不到 partial 响应）
+  if (isVideo) {
+    headers.set('Cache-Control', 'no-store');
+  } else {
+    headers.set('Cache-Control', 'public, max-age=604800, immutable');
+  }
   headers.set('Access-Control-Allow-Origin', '*');
 
   return new Response(upstream.body, {
-    status: 200,
+    status: upstream.status, // 转发 200 或 206
     headers,
   });
 }
