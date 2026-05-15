@@ -100,9 +100,18 @@ function inHotZone(target: DOMRect, root: DOMRectReadOnly, ratio: number): boole
   return center >= hotTop && center <= hotBottom;
 }
 
+// staging / localhost / pages.dev preview 都开 debug log + 暴露 window.__VC
+// prod (ai-feeds.com) 不开
 const isDev = (() => {
   try {
-    return import.meta.env?.DEV === true;
+    if (import.meta.env?.DEV) return true;
+    if (typeof window !== "undefined") {
+      const h = window.location.hostname;
+      if (h === "localhost" || h === "127.0.0.1") return true;
+      if (h.endsWith(".pages.dev")) return true;
+      if (h.startsWith("staging.")) return true;
+    }
+    return false;
   } catch {
     return false;
   }

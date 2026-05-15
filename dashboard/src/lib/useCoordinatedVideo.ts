@@ -23,7 +23,16 @@ export interface UseCoordinatedVideoResult {
 }
 
 const isDev = (() => {
-  try { return import.meta.env?.DEV === true; } catch { return false; }
+  try {
+    if (import.meta.env?.DEV) return true;
+    if (typeof window !== "undefined") {
+      const h = window.location.hostname;
+      if (h === "localhost" || h === "127.0.0.1") return true;
+      if (h.endsWith(".pages.dev")) return true;
+      if (h.startsWith("staging.")) return true;
+    }
+    return false;
+  } catch { return false; }
 })();
 
 function log(event: string, payload?: Record<string, unknown>): void {
@@ -56,6 +65,9 @@ export function useCoordinatedVideo({
   // 拖动进度条期间，video 也会 fire pause/playing 事件 — 这种不算 user action，
   // 不应触发 markUserPaused（不然 drag 后 video 被 sticky 暂停）
   const seekingRef = useRef(false);
+  // hook 内部主动改 el.muted（autoplay policy fallback 静音重试）— 期间触发的
+  // volumechange 不应回写 prefs.muted，否则会污染 user 的"默认静音"偏好
+  const hookMutingRef = useRef(false);
 
   // mount: register；unmount: unregister
   useEffect(() => {
@@ -83,11 +95,21 @@ export function useCoordinatedVideo({
           // seek 失败静默
         }
       }
-      log("play", { videoId: scopedId });
+      log("play", { videoId: scopedId, muted: el.muted });
       const p = el.play();
       if (p && typeof p.catch === "function") {
         p.catch(() => {
-          log("play-rejected", { videoId: scopedId });
+          // 浏览器 autoplay policy 拒（user 没 interact 前不允许带声 autoplay）
+          // fallback：临时 muted=true 重试 — 保证视频能播；prefs.muted 不动
+          // （user 偏好仍是"不静音"，等用户 click 后再带声切换）
+          log("play-rejected", { videoId: scopedId, muted: el.muted });
+          if (!el.muted) {
+            hookMutingRef.current = true;
+            el.muted = true;
+            el.play().catch(() => {
+              log("play-rejected-twice", { videoId: scopedId });
+            });
+          }
         });
       }
     } else {
@@ -162,6 +184,11 @@ export function useCoordinatedVideo({
     const onSeeking = () => { seekingRef.current = true; };
     const onSeeked = () => { seekingRef.current = false; };
     const onVolumeChange = () => {
+      // 跳过 hook 内部 muted=true fallback 触发的 volumechange（不算 user action）
+      if (hookMutingRef.current) {
+        hookMutingRef.current = false;
+        return;
+      }
       const s = useVideoCoordinator.getState();
       if (!el.muted && s.prefs.muted) setGlobalMuted(false);
       else if (el.muted && !s.prefs.muted) setGlobalMuted(true);
