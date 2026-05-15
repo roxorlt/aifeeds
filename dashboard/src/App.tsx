@@ -12,6 +12,8 @@ import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
+import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordinator";
+import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
@@ -28,6 +30,16 @@ import { useAuthStore } from "./lib/authStore";
 interface SourceConfig {
   source_type: SourceType;
   title: string;
+}
+
+// 抽屉打开 / 关闭时同步 VideoCoordinator 的 mode（feed ↔ drawer）。
+// 必须在 DrawerProvider 内部渲染才能用 useDrawer。无 UI 输出。
+function DrawerModeSync() {
+  const drawerItem = useDrawer().state.item;
+  useEffect(() => {
+    useVideoCoordinator.getState().setMode(drawerItem ? "drawer" : "feed");
+  }, [drawerItem]);
+  return null;
 }
 
 // Column layout — X is always first, then others. Placeholder sources
@@ -199,6 +211,14 @@ function DashboardHome() {
     return col.source_type === filter;
   });
 
+  // VideoCoordinator wiring：列顺序变化时同步 + tab 切换时全停（mount 一次）
+  // drawer mode 切换需要 useDrawer，放在 DrawerProvider 内的 <DrawerModeSync /> 里
+  const columnOrderKey = visibleColumns.map((c) => c.source_type).join("|");
+  useEffect(() => {
+    useVideoCoordinator.getState().setColumnOrder(columnOrderKey.split("|"));
+  }, [columnOrderKey]);
+  useEffect(() => attachVisibilityListener(), []);
+
   const getTitleForColumn = (col: SourceConfig): string => {
     if (col.source_type === "x_list") {
       const xSource = sources.find((s) => s.source_type === "x_list");
@@ -221,6 +241,7 @@ function DashboardHome() {
 
   return (
     <DrawerProvider>
+    <DrawerModeSync />
     <div className="min-h-screen bg-neutral-50">
       {/* Top bar */}
       <header
@@ -309,17 +330,26 @@ function DashboardHome() {
           {visibleColumns.map((col) => {
             const isPlaceholder = !liveSourceTypes.has(col.source_type);
             return (
-              <Feed
+              // 列内任意 click 都标记该列为 lastClickedColumnId，让 VideoCoordinator
+              // 在多列同时有视频候选时优先选这列（设计文档 §2.2）。capture 阶段抓
+              // bubble 之前所有 click，包含 video element / chip / 卡片自身。
+              <div
                 key={col.source_type}
-                ref={(h) => {
-                  if (h) feedRefs.current.set(col.source_type, h);
-                  else feedRefs.current.delete(col.source_type);
-                }}
-                sourceType={col.source_type}
-                title={getTitleForColumn(col)}
-                placeholder={isPlaceholder}
-                refreshTick={refreshTick}
-              />
+                onClickCapture={() =>
+                  useVideoCoordinator.getState().markColumnClick(col.source_type)
+                }
+              >
+                <Feed
+                  ref={(h) => {
+                    if (h) feedRefs.current.set(col.source_type, h);
+                    else feedRefs.current.delete(col.source_type);
+                  }}
+                  sourceType={col.source_type}
+                  title={getTitleForColumn(col)}
+                  placeholder={isPlaceholder}
+                  refreshTick={refreshTick}
+                />
+              </div>
             );
           })}
         </div>

@@ -19,12 +19,44 @@
 //   8. Top 评论 (10，maker reply 嵌套)
 //   9. 更多 (论坛 / 类似产品出链 + Pricing chips)
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
+import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
+
+// 抽屉 gallery 内单个直链 mp4 视频 — hook 接 VideoCoordinator
+// 跟 feed 流的视频共享全局优先级（drawer mode 下只有抽屉内 video 候选）
+function PhGalleryVideo({
+  src,
+  itemId,
+  slot,
+}: {
+  src: string;
+  itemId: string;
+  slot: number;
+}) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const { muted } = useCoordinatedVideo({
+    videoId: `product_hunt:${itemId}:gallery:${slot}`,
+    columnId: "drawer",
+    videoRef: ref,
+  });
+  return (
+    <video
+      ref={ref}
+      src={src}
+      className="h-44 w-72 shrink-0 snap-start rounded-md bg-neutral-200 object-cover"
+      controls
+      muted={muted}
+      preload="metadata"
+      playsInline
+      loop
+    />
+  );
+}
 
 // 外链强制 target="_blank" + rel="noopener noreferrer" — DOMPurify hook 一次注册
 // 终生生效；放在模块顶层（非组件内）避免重复 add hook。
@@ -331,13 +363,7 @@ export function PhDrawerBody({ item }: Props) {
                   );
                 }
                 return m.type === "video" ? (
-                  <video
-                    key={i}
-                    src={url}
-                    className="h-44 w-72 shrink-0 snap-start rounded-md bg-neutral-200 object-cover"
-                    controls
-                    preload="metadata"
-                  />
+                  <PhGalleryVideo key={i} src={url} itemId={item.id} slot={i} />
                 ) : (
                   <img
                     key={i}

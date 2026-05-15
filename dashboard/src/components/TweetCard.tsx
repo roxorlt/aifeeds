@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, MediaItem, Metrics } from "../types";
 import { cn, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
+import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
 import { useDrawer } from "../lib/drawer";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
@@ -20,72 +21,31 @@ import {
 const RICH_PATTERN =
   /(https?:\/\/[^\s<>"']+)|(#[\u4e00-\u9fa5\u3040-\u30ffA-Za-z0-9_]+)|(@[A-Za-z0-9_]{1,20})/g;
 
-// 决定是否 autoplay video。
-// 浏览器现状（隐私收紧）：除 Chrome 外几乎都不暴露 navigator.connection；
-// 即便暴露的，conn.type 也基本永远是 undefined，只有 effectiveType（"网速估计"
-// 而非物理类型，wifi 和蜂窝都可能是 '4g'）。所以"严格 wifi-only autoplay"
-// 在浏览器层做不到。务实做法：默认 autoplay（含 Safari/手机 wifi/Chrome），
-// 只在两种明确"省流"信号下关掉：用户主动开 Data Saver（saveData=true）
-// 或网络慢到 2g 级别（effectiveType in {'2g','slow-2g'}）。这样 mobile 4G
-// 也会 autoplay — 是已知 trade-off，换 mobile wifi 体验对齐 PC。
-function detectWifiAutoplay(): boolean {
-  const conn = (navigator as unknown as { connection?: { type?: string; effectiveType?: string; saveData?: boolean } }).connection;
-  if (!conn) return true; // Safari 等无 NetworkInformation：默认 autoplay
-  if (conn.saveData) return false;
-  if (conn.effectiveType === 'slow-2g' || conn.effectiveType === '2g') return false;
-  return true;
-}
-
-// 视频起播：HTML5 `autoPlay` 属性在 mobile WebView/微信里时序经常不稳，src
-// 还没 ready 就触发 → silently fail。改用 ref + useEffect 显式调 video.play()，
-// 拿 promise rejection 反馈 + 埋点上报，定位为什么不 autoplay。
+// 视频播放：接 VideoCoordinator（dashboard/src/lib/videoCoordinator.ts）
+// 全局只 1 个视频在播；可见性 / 优先级 / mute 全由 hook 自动处理。
+// 设计文档：docs/plans/2026-05-15-video-playback-coordinator-design.md
 function VideoPlayer({
   src,
   poster,
-  autoplay,
   itemId,
   sourceType,
   onError,
 }: {
   src: string;
   poster?: string;
-  autoplay: boolean;
   itemId: string;
   sourceType: string;
   onError: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playStartedRef = useRef(false);
-  // autoplay 静默播时不显示 controls 蒙层；用户点一下才出 controls（暂停、
-  // 静音切换、全屏等）。一旦显示就不再自动隐藏（toggle 隐藏会跟 controls
-  // 上的按钮 click bubble 打架，简化处理）。
   const [showControls, setShowControls] = useState(false);
 
-  useEffect(() => {
-    if (!autoplay) return;
-    const video = videoRef.current;
-    if (!video) return;
-    const conn = (navigator as unknown as { connection?: { type?: string; effectiveType?: string; saveData?: boolean } }).connection;
-    const networkInfo = {
-      effective_type: conn?.effectiveType ?? "unknown",
-      save_data: conn?.saveData ?? false,
-      conn_type: conn?.type ?? "unknown",
-    };
-    track(EVENTS.VIDEO_AUTOPLAY_ATTEMPT, {
-      item_id: itemId,
-      source: sourceType,
-      ...networkInfo,
-    });
-    video.play().catch((err: Error) => {
-      track(EVENTS.VIDEO_AUTOPLAY_BLOCKED, {
-        item_id: itemId,
-        source: sourceType,
-        error_name: err.name,
-        error_message: (err.message || "").slice(0, 120),
-        ...networkInfo,
-      });
-    });
-  }, [autoplay, itemId, sourceType]);
+  const { isActive, muted } = useCoordinatedVideo({
+    videoId: `${sourceType}:${itemId}`,
+    columnId: sourceType,
+    videoRef,
+  });
 
   const handlePlay = () => {
     if (playStartedRef.current) return;
@@ -93,7 +53,7 @@ function VideoPlayer({
     track(EVENTS.VIDEO_PLAY_START, {
       item_id: itemId,
       source: sourceType,
-      triggered: autoplay ? "auto" : "user",
+      triggered: isActive ? "auto" : "user",
     });
   };
 
@@ -104,8 +64,8 @@ function VideoPlayer({
       poster={poster}
       preload="metadata"
       controls={showControls}
-      muted={autoplay}
-      loop={autoplay}
+      muted={muted}
+      loop
       playsInline
       className="aspect-[16/9] w-full bg-black object-cover"
       onClick={() => setShowControls(true)}
@@ -241,14 +201,6 @@ export function TweetCard({
   const [showOriginal, setShowOriginal] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [mediaFailed, setMediaFailed] = useState(false);
-  const [autoplayVideo, setAutoplayVideo] = useState<boolean>(() => detectWifiAutoplay());
-  useEffect(() => {
-    const conn = (navigator as unknown as { connection?: EventTarget }).connection;
-    if (!conn) return;
-    const handler = () => setAutoplayVideo(detectWifiAutoplay());
-    conn.addEventListener('change', handler);
-    return () => conn.removeEventListener('change', handler);
-  }, []);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [canExpand, setCanExpand] = useState(false);
@@ -581,7 +533,6 @@ export function TweetCard({
               <VideoPlayer
                 src={proxyImg(firstMedia.url)}
                 poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
-                autoplay={autoplayVideo}
                 itemId={item.id}
                 sourceType={item.source_type}
                 onError={() => setMediaFailed(true)}
