@@ -74,49 +74,79 @@ export function useCoordinatedVideo({
     };
   }, [videoId, columnId, register, unregister]);
 
-  // IntersectionObserver — root 是 scroll container（PC 列）或 null（mobile / 默认）
+  // 可见性追踪：IntersectionObserver + scroll listener 双管齐下
+  //   - IO 给"进入/离开 root + ratio 变化"的信号
+  //   - scroll listener 给"已在 root 内但位置移动" 的信号（IO 在 ratio 不变时不 fire，
+  //     视频完全在 root 内但还没进/出 hot zone 时拿不到回调；scroll 补这个 gap）
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     const root = scrollRoot?.current ?? null;
+
+    const getRootRect = (): DOMRectReadOnly => {
+      if (root) return root.getBoundingClientRect();
+      return {
+        top: 0,
+        left: 0,
+        right: window.innerWidth,
+        bottom: window.innerHeight,
+        width: window.innerWidth,
+        height: window.innerHeight,
+      } as DOMRectReadOnly;
+    };
+
+    const apply = (targetRect: DOMRectReadOnly, rootRect: DOMRectReadOnly, ratio: number) => {
+      const meets = inHotZone(targetRect, rootRect, hotZoneRatio);
+      const top = targetRect.top;
+      if (meets) {
+        if (showTimerRef.current) clearTimeout(showTimerRef.current);
+        showTimerRef.current = setTimeout(() => {
+          setVisibility(videoId, ratio, true, top);
+        }, VISIBILITY_DEBOUNCE_MS);
+        setVisibility(videoId, ratio, false, top); // sync top + 当前 ratio
+      } else {
+        if (showTimerRef.current) {
+          clearTimeout(showTimerRef.current);
+          showTimerRef.current = null;
+        }
+        setVisibility(videoId, ratio, false, top);
+      }
+    };
+
+    // 当前 ratio 缓存（scroll listener 不会带 ratio，复用 IO 给的最近值）
+    let lastRatio = 0;
+
     const io = new IntersectionObserver(
       (entries) => {
         const e = entries[0];
         if (!e) return;
-        const rootRect =
-          e.rootBounds ??
-          (root
-            ? root.getBoundingClientRect()
-            : ({
-                top: 0,
-                left: 0,
-                right: window.innerWidth,
-                bottom: window.innerHeight,
-                width: window.innerWidth,
-                height: window.innerHeight,
-              } as DOMRectReadOnly));
-        const meets = inHotZone(e.boundingClientRect, rootRect, hotZoneRatio);
-        const top = e.boundingClientRect.top;
-
-        if (meets) {
-          if (showTimerRef.current) clearTimeout(showTimerRef.current);
-          showTimerRef.current = setTimeout(() => {
-            setVisibility(videoId, e.intersectionRatio, true, top);
-          }, VISIBILITY_DEBOUNCE_MS);
-          // 同时同步 top（不变 isVisible 标志）
-          setVisibility(videoId, e.intersectionRatio, false, top);
-        } else {
-          if (showTimerRef.current) {
-            clearTimeout(showTimerRef.current);
-            showTimerRef.current = null;
-          }
-          setVisibility(videoId, e.intersectionRatio, false, top);
-        }
+        lastRatio = e.intersectionRatio;
+        const rootRect = e.rootBounds ?? getRootRect();
+        apply(e.boundingClientRect, rootRect, e.intersectionRatio);
       },
       { root, threshold: IO_THRESHOLDS },
     );
     io.observe(el);
-    return () => io.disconnect();
+
+    // scroll listener — RAF throttle，避免每帧重算
+    let rafId: number | null = null;
+    const onScroll = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const targetRect = el.getBoundingClientRect();
+        const rootRect = getRootRect();
+        apply(targetRect, rootRect, lastRatio);
+      });
+    };
+    const scrollTarget: HTMLElement | Window = root ?? window;
+    scrollTarget.addEventListener("scroll", onScroll, { passive: true });
+
+    return () => {
+      io.disconnect();
+      scrollTarget.removeEventListener("scroll", onScroll);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [videoId, videoRef, setVisibility, scrollRoot, hotZoneRatio]);
 
   // active 变化 → play/pause（处理 Promise reject + 静默 fallback）
