@@ -80,17 +80,19 @@ function viewportRect(): DOMRectReadOnly {
 }
 
 /**
- * hot zone 命中判断：
- *   - video.h <= hotZone.h → 要求 video 完整在 hotZone 内
- *   - video > hotZone（未来竖版长视频）→ 视频中心点穿过 hotZone 中心线即可
+ * hot zone 命中判断 —— 使用"视频中心点在 hot zone 内"作为唯一判定（loose）。
+ *
+ * 历史：v1 用"完整在 hot zone 内"严格判定，但 video 高 ~144 hot zone 高 ~231
+ * 时滑动 50px 就出严格判定 → 即使视觉中心仍在中央也判暂停（review bug 1）。
+ * loose 判定保证：
+ *   - first mount 视频在中部 → 立即起播（review bug 3）
+ *   - 滑动 ±(hotZone.h/2 - video.h/2) 范围内 active 不变（消除边界抖动）
+ *   - 视频比 hot zone 大（未来竖版长视频）天然兼容
  */
 function inHotZone(target: DOMRect, root: DOMRectReadOnly, ratio: number): boolean {
   const hotH = root.height * ratio;
   const hotTop = root.top + (root.height - hotH) / 2;
   const hotBottom = hotTop + hotH;
-  if (target.height <= hotH) {
-    return target.top >= hotTop && target.bottom <= hotBottom;
-  }
   const center = target.top + target.height / 2;
   return center >= hotTop && center <= hotBottom;
 }
