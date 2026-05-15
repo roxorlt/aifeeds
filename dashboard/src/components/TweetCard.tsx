@@ -527,7 +527,13 @@ export function TweetCard({
           {firstMedia && !mediaFailed && firstMedia.type === "video" && (
             <div
               className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
+              // 全方位阻断冒泡：video native controls（play/pause/mute/seek bar/全屏）
+              // 都在 shadow DOM 里，主 DOM 看到的 target 仍是 <video> 元素本身。
+              // 仅 onClick 不够 — pointerdown/mousedown 不阻断的话 article 仍记到
+              // downPos，drag 判断后可能仍走 openTweet。一并截掉避免穿透。
               onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
             >
               <VideoPlayer
                 src={proxyImg(firstMedia.url)}

@@ -1,11 +1,16 @@
-// useCoordinatedVideo —— video 组件接 VideoCoordinator 的 React hook（B 重构版）。
+// useCoordinatedVideo —— video 组件接 VideoCoordinator 的 React hook。
 //
-// 职责仅 3 件：
-//   1. mount 时把 video element 注册到中心 store；unmount 时反注册
-//   2. subscribe activeId === videoId → play / pause（Promise reject 静默 fallback）
-//   3. 监听 video 的 pause / play / volumechange → 把"用户主动操作"信号回报给 store
+// 职责：
+//   1. mount 注册 / unmount 反注册到中心 store
+//   2. 订阅 activeId === scopedId → 自动 play / pause（autoplay policy fallback：静音重试）
+//   3. mute 跟 globalMuted 双向同步（video controls unmute → store；store 变化 → el.muted）
+//   4. 跨 element 进度续播（videoProgress map）：feed → drawer / drawer → feed
 //
-// hot zone 命中、scroll 重算、跨列优先级、mode 切换全归 store，hook 不参与决策。
+// 不做：
+//   - 不再 markUserPaused (sticky 暂停) — 浏览器在 mute 切换 / autoplay policy 等场景下
+//     fire 的 pause event 很难跟"真 user pause"区分。错把它当成 user-pause 会导致
+//     mute / unmute 后视频卡住。Twitter / Instagram 都不做 sticky，本项目同步去掉。
+//   - hot zone 命中、scroll 重算、跨列优先级、mode 切换全归 store，hook 不参与决策
 
 import { useEffect, useRef } from "react";
 import { useVideoCoordinator } from "./videoCoordinator";
@@ -59,7 +64,6 @@ export function useCoordinatedVideo({
   const globalMuted = useVideoCoordinator((s) => s.globalMuted);
   const register = useVideoCoordinator((s) => s.register);
   const unregister = useVideoCoordinator((s) => s.unregister);
-  const markUserPaused = useVideoCoordinator((s) => s.markUserPaused);
   const setGlobalMuted = useVideoCoordinator((s) => s.setGlobalMuted);
 
   // 标记 hook 内部 pause 是 coordinator 主动调（而不是 user 在 controls 上点）
@@ -154,27 +158,18 @@ export function useCoordinatedVideo({
     };
 
     const onPause = () => {
-      // 立即写进度（关抽屉、切换 active 前的最后机会）
+      // 关抽屉 / 切换 active 前的最后机会保存进度
       saveProgress(videoId, el.currentTime);
-      if (coordPausingRef.current) {
-        coordPausingRef.current = false;
-        return;
-      }
-      if (seekingRef.current) {
-        // 拖动进度条期间 video 自动 pause，不算 user 主动暂停
-        return;
-      }
-      log("user-pause", { videoId: scopedId });
-      markUserPaused(scopedId, true);
+      // 注：不再调 markUserPaused(true)，原因：
+      //   user 点 mute / unmute / 拖进度条 / 浏览器 autoplay policy 等
+      //   场景下 video 都会 fire pause event，难以可靠区分"真用户暂停"vs
+      //   "浏览器/浏览器引擎自动 pause"。误判会把视频 sticky 暂停。
+      //   Twitter / Instagram 都不做 user-pause sticky，本项目同样去掉。
+      //   视觉体验：user 点 pause 后视频确实暂停（video element 原生行为），
+      //   滚走再滚回视口时 coord 重选 active 自动恢复 play。
     };
-    const onPlay = () => {
-      if (seekingRef.current) {
-        // seek 完成后 video 自动 resume 也不算 user 主动 play
-        return;
-      }
-      log("user-play", { videoId: scopedId });
-      markUserPaused(scopedId, false);
-    };
+    // onPlay handler 删除：sticky 撤销逻辑跟 sticky 标记是一组，没了 sticky
+    //   就不需要撤销。video 自身的 play / replay 由 coord 调度处理。
     const onSeeking = () => { seekingRef.current = true; };
     const onSeeked = () => { seekingRef.current = false; };
     const onVolumeChange = () => {
@@ -190,7 +185,6 @@ export function useCoordinatedVideo({
 
     el.addEventListener("timeupdate", onTimeUpdate);
     el.addEventListener("pause", onPause);
-    el.addEventListener("play", onPlay);
     el.addEventListener("seeking", onSeeking);
     el.addEventListener("seeked", onSeeked);
     el.addEventListener("volumechange", onVolumeChange);
@@ -200,12 +194,11 @@ export function useCoordinatedVideo({
       el.removeEventListener("loadedmetadata", restoreProgress);
       el.removeEventListener("timeupdate", onTimeUpdate);
       el.removeEventListener("pause", onPause);
-      el.removeEventListener("play", onPlay);
       el.removeEventListener("seeking", onSeeking);
       el.removeEventListener("seeked", onSeeked);
       el.removeEventListener("volumechange", onVolumeChange);
     };
-  }, [videoId, scopedId, videoRef, markUserPaused, setGlobalMuted]);
+  }, [videoId, videoRef, setGlobalMuted]);
 
   return { isActive, muted: globalMuted };
 }
