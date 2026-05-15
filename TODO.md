@@ -199,7 +199,7 @@
 
 ### 11. ICP 备案推进 + 微信生态接入
 
-> 详见：[`docs/memo/2026-05-04-icp-备案讨论备忘录.md`](docs/memo/2026-05-04-icp-备案讨论备忘录.md) / [`docs/beian/README.md`](docs/beian/README.md)（备案号 + footer 标准片段 + 部署 SOP）
+> 详见：[`docs/memo/2026-05-04-icp-备案讨论备忘录.md`](docs/memo/2026-05-04-icp-备案讨论备忘录.md) / [`docs/beian/README.md`](docs/beian/README.md)（备案号 + footer 标准片段 + 部署 SOP）/ [`docs/wechat/architecture.md`](docs/wechat/architecture.md)（微信登录架构 + state HMAC + bridge HMAC + 实施清单）
 
 ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已部署。2026-05-13 ICP 备案 + 公安备案号已下证（**京ICP备2025123594号-2** / **京公网安备11010802048455号**）。三套品牌名约定：网页「AI源信」 / 备案主体「科赞源信」 / 全球版「AI Feeds」。
 
@@ -208,13 +208,21 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - [x] 申请免费 SSL → HTTPS（2026-05-13 完成，Let's Encrypt 证书 2026-08-11 到期；HSTS 1 年；apex + www + HTTP→HTTPS 301 全部 OK；宝塔自动续签）
 - [x] 关 8888 防火墙端口（2026-05-13 完成，腾讯云后台删除）
 - [x] 公安备案下证（2026-05-13）
-- [ ] 微信开放平台企业认证 + 业务域名 + 网页授权
+- [x] `www.ai-feeds.cc` → apex 301 重定向（2026-05-14 宝塔域名重定向，保留路径 + curl 验证）
+- [x] 微信开放平台企业认证（2026-05-14）
+- [x] 微信开放平台「网站应用」创建 + 提审（2026-05-14 提交，授权回调域名 `ai-feeds.cc`，等审核结果约 7 工作日）
+- [ ] 拿到 AppID + AppSecret 后落盘到 `.secrets/wechat-open-platform.env` + worker secrets
 - [ ] 腾讯云短信签名「科赞源信」+ 模板
 
-**微信生态接入**（备案号下来后）：
-- aifeeds.cc 增加 Login Bridge 接口（`/auth/wechat`、`/auth/wechat/callback`）
-- 增加分享落地页（`/s/:token`、`/share/t/:token`）— 用预览页 + 用户主动点击，不能立即重定向（避免诱导跳转风控）
-- 增加 JS-SDK 签名接口（`/api/wx/jssdk-config`、`/api/wx/ticket`）
+**微信生态接入**（设计已拍板，等 AppID 下来开工）：
+- 微信扫码登录（高优）— 设计见 [`docs/wechat/architecture.md`](docs/wechat/architecture.md) §9 实施清单
+  - worker：`POST /api/auth/wechat/exchange`（30s replay 窗 + bridge HMAC + 建 user/identity + 签 session_token）
+  - `.cc`：宝塔 + Node + Express + PM2 + nginx 反代，2 个 endpoint（start / callback），state HMAC 无状态
+  - dashboard：登录弹窗加微信按钮 + `/auth/callback` 路由 + `/login?error=...` 错误提示
+- 分享落地页（中优，后置）
+  - `.cc` 增加 `/s/:token` / `/share/t/:token` — 用预览页 + 用户主动点击，不能立即重定向（避免诱导跳转风控）
+  - `.cc` 增加 JS-SDK 签名接口（`/api/wx/jssdk-config`、`/api/wx/ticket`）
+- 三路径分发：PC OpenSDK（PC 浏览器）/ 海报手动分享（移动浏览器）/ JS-SDK 自定义卡片（微信内浏览器）
 - 三路径分发：PC OpenSDK（PC 浏览器）/ 海报手动分享（移动浏览器）/ JS-SDK 自定义卡片（微信内浏览器）
 
 **清理**：临时 SSH 密钥 `~/.ssh/aifeeds_temp` 备案过审 + SSL 配好后撤销
