@@ -2,6 +2,8 @@ import {
   runBackfillQuotes,
   runBackfillReplies,
   runBackfillRetweets,
+  runDedupeQuoteContent,
+  runLongformFetchOne,
   runReclassifyThreads,
   runReconstructThreads,
   runCleanup,
@@ -330,7 +332,9 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       // F1: 手动触发 retweet 父推回填（ADMIN basic auth wrapper）
-      // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400
+      // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400, ?recover=1
+      // recover=1 时绕开 state KV sentinel + 选 "is_retweet=1 + retweet_of NULL"
+      // 的 row（覆盖被 list-poll UPSERT 洗过的历史数据）
       if (path === '/api/admin/backfill-retweets-now' && request.method === 'POST') {
         if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
@@ -341,11 +345,13 @@ export default {
         const u = new URL(request.url);
         const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
         const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
-        const result = await runBackfillRetweets(env, limit, rateSleepMs);
+        const recover = u.searchParams.get('recover') === '1';
+        const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
         return jsonResponse(result, 200, request, env);
       }
-      // 手动触发 quote 父推回填（ADMIN basic auth wrapper），用户验收 issue 4：
-      // 测试 quote 占位 banner 在 backfill 后变成完整嵌套小卡的效果
+      // 手动触发 quote 父推回填（ADMIN basic auth wrapper）
+      // ?recover=1 时选 "quote_of_id 有 + quote_of 空" 的 row（覆盖被 list-poll
+      // UPSERT 洗过的历史数据），绕开 enriched_at sentinel + state KV
       if (path === '/api/admin/backfill-quotes-now' && request.method === 'POST') {
         if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
@@ -356,7 +362,40 @@ export default {
         const u = new URL(request.url);
         const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
         const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
-        const result = await runBackfillQuotes(env, limit, rateSleepMs);
+        const recover = u.searchParams.get('recover') === '1';
+        const result = await runBackfillQuotes(env, limit, rateSleepMs, recover);
+        return jsonResponse(result, 200, request, env);
+      }
+      // D2: 一次性清掉历史脏数据 — 老 chrome scraper 抓时把 quoted preview
+      // text 也包进主推 content，导致 main.content == quote_of.content 完全相同。
+      // 备份 main.content 到 extra.original_content + 把 main.content 清空。
+      // ?dry_run=0 真写 / ?limit=N (默认 500)
+      if (path === '/api/admin/dedupe-quote-content-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const dryRun = u.searchParams.get('dry_run') !== '0';
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '500', 10), 1), 5000);
+        const result = await runDedupeQuoteContent(env, dryRun, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      // D3: 强制单条重抓 self.text 全文（覆盖 SB API truncate 的内容）
+      // ?id=x_list:xxx 必填
+      if (path === '/api/admin/longform-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const id = u.searchParams.get('id');
+        if (!id) return jsonResponse({ error: 'id required' }, 400, request, env);
+        const result = await runLongformFetchOne(env, id);
         return jsonResponse(result, 200, request, env);
       }
       // F5: 一次性反向重建 thread_root_id（针对 reply 链 self-thread 但 root 空）
