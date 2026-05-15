@@ -1,7 +1,9 @@
 import {
   runBackfillQuotes,
   runBackfillReplies,
+  runBackfillRetweets,
   runReclassifyThreads,
+  runReconstructThreads,
   runCleanup,
   runRefreshMetrics,
   runRefreshTiered,
@@ -325,6 +327,51 @@ export default {
         const u = new URL(request.url);
         const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
         const result = await runPhR2Migrate(env, limit);
+        return jsonResponse(result, 200, request, env);
+      }
+      // F1: 手动触发 retweet 父推回填（ADMIN basic auth wrapper）
+      // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400
+      if (path === '/api/admin/backfill-retweets-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
+        const result = await runBackfillRetweets(env, limit, rateSleepMs);
+        return jsonResponse(result, 200, request, env);
+      }
+      // 手动触发 quote 父推回填（ADMIN basic auth wrapper），用户验收 issue 4：
+      // 测试 quote 占位 banner 在 backfill 后变成完整嵌套小卡的效果
+      if (path === '/api/admin/backfill-quotes-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
+        const result = await runBackfillQuotes(env, limit, rateSleepMs);
+        return jsonResponse(result, 200, request, env);
+      }
+      // F5: 一次性反向重建 thread_root_id（针对 reply 链 self-thread 但 root 空）
+      // ADMIN basic auth wrapper. 默认 dry_run=1 看效果，?dry_run=0 真正写入
+      if (path === '/api/admin/reconstruct-threads-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const dryRun = u.searchParams.get('dry_run') !== '0';
+        const maxPasses = Math.min(Math.max(parseInt(u.searchParams.get('max_passes') || '5', 10), 1), 20);
+        const result = await runReconstructThreads(env, dryRun, maxPasses);
         return jsonResponse(result, 200, request, env);
       }
       // 运维：手动触发一条测试推送，验证 PUSHDEER 配置 + body 中文化效果
@@ -1207,6 +1254,43 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
       : `${last[sort]}|${last.id}`;
   }
 
+  // B5: Thread completeness — 对 parsed 里 thread_root_id 非空的 item，
+  // 把同 root 的其他楼也带上（即使 scraped_at 在 limit 之外）。这样前端
+  // groupByThread 能完整分组成 ThreadCard 渲染 + click 时 siblings 完整。
+  // 仅 x_list（其他 source 没 thread）。
+  const isXList = !sourceType || sourceType === 'x_list' || sourceType.includes('x_list');
+  if (isXList && parsed.length > 0) {
+    const seenIds = new Set(parsed.map((p) => p.id as string));
+    const threadRoots = new Set<string>();
+    for (const item of parsed) {
+      const ext = item.extra as { thread_root_id?: string } | null;
+      const root = ext?.thread_root_id;
+      if (root && !seenIds.has(`x_list:${root}`)) threadRoots.add(root);
+      // root 本身已在 seen 时也加（确保根本身能拉同 root 的其他楼）
+      else if (root) threadRoots.add(root);
+    }
+    if (threadRoots.size > 0) {
+      const rootsArr = [...threadRoots];
+      const rootsPh = rootsArr.map(() => '?').join(',');
+      const seenArr = [...seenIds];
+      const seenPh = seenArr.map(() => '?').join(',');
+      const extraRows = await env.DB.prepare(
+        `SELECT * FROM items
+         WHERE source_type = 'x_list'
+           AND deleted_at IS NULL
+           AND extra ->> '$.thread_root_id' IN (${rootsPh})
+           AND id NOT IN (${seenPh})
+         ORDER BY ${sort} DESC
+         LIMIT 200`,
+      )
+        .bind(...rootsArr, ...seenArr)
+        .all();
+      for (const r of extraRows.results) {
+        parsed.push(parseItemRow(r as Record<string, unknown>));
+      }
+    }
+  }
+
   return jsonResponse({
     items: parsed,
     next_cursor: nextCursor,
@@ -1949,6 +2033,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillReplies(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-retweets') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillRetweets(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'reclassify-threads') {

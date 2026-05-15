@@ -82,6 +82,11 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     error: null,
   });
   const [spotlightItem, setSpotlightItem] = useState<Item | null>(null);
+  // F4: clearSpotlight 必须稳定，否则 Feed.tsx 里依赖了它的 useEffect 会
+  // 因为每次 DrawerProvider re-render 都拿到新函数引用而重跑（之前 bug 就是这个 —
+  // 重跑后第二次起 filterChangeIgnoreRef 已是 false，clearSpotlight 真被调，
+  // 立刻把刚 fetchItem 设上去的 spotlight 清掉，导致 feed 顶部假写失效）。
+  const clearSpotlight = useCallback(() => setSpotlightItem(null), []);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -93,7 +98,8 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     (item: Item, siblings: Item[] = []) => {
       // Optimistic open: set state first so the URL effect sees the cache hit.
       setState({ item, siblings, loading: false, error: null });
-      setSpotlightItem(item);
+      // B2: 流内点击不强插 spotlight（卡片本来就在原位置，关抽屉用户回到原
+      // 位置即可）。强插 spotlight 只发生在 URL 直接访问场景（见 URL useEffect）。
       activeIdRef.current = item.id;
       navigate(`/t/${encodeURIComponent(item.source_id)}`);
     },
@@ -104,7 +110,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     (item: Item, siblings: Item[] = []) => {
       // Optimistic open: set state first so URL effect sees cache hit.
       setState({ item, siblings, loading: false, error: null });
-      setSpotlightItem(item);
+      // B2: 同 openTweet 不强插 spotlight
       activeIdRef.current = item.id;
       if (item.source_type === "x_list") {
         navigate(`/t/${encodeURIComponent(item.source_id)}`);
@@ -199,7 +205,8 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         const fresh = await fetchItem(id);
         if (cancelled || activeIdRef.current !== id) return;
         setState({ item: fresh.item, siblings: fresh.siblings, loading: false, error: null });
-        setSpotlightItem(fresh.item);
+        // B2: 只在已有 spotlight 时刷新（URL 直接访问场景）。流内点击不强插。
+        setSpotlightItem((prev) => (prev ? fresh.item : null));
         // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）
         dispatchItemUpdate(fresh.item);
       } catch {
@@ -210,7 +217,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [state.item?.id]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem, clearSpotlight: () => setSpotlightItem(null) }}>
+    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem, clearSpotlight }}>
       {children}
     </DrawerContext.Provider>
   );

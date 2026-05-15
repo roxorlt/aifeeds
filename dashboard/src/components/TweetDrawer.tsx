@@ -396,18 +396,29 @@ export function TweetDrawer() {
               ) : isHdx ? (
                 <HuodongxingDrawerBody item={item} />
               ) : (
-                threadMembers.map((it) => {
+                threadMembers.map((it, idx) => {
                   const isTarget = it.id === item.id && threadMembers.length > 1;
+                  const isFirst = idx === 0;
+                  const isLast = idx === threadMembers.length - 1;
                   return (
                     <div
                       key={it.id}
                       ref={isTarget ? targetRef : undefined}
+                      // B3+3.1: 蓝色目标高亮用 inset box-shadow 不占布局空间，
+                      // 避免 border-l-2 把 TweetCard 整体向右挤 2px 导致
+                      // connector line 错位（用户验收 issue 3.1）
                       className={cn(
-                        isTarget &&
-                          "border-l-2 border-sky-500 bg-sky-50/40",
+                        "relative",
+                        isTarget && "shadow-[inset_2px_0_0_#0ea5e9] bg-sky-50/40",
                       )}
                     >
-                      <TweetCard item={it} embedded hideThreadBanner />
+                      <TweetCard
+                        item={it}
+                        embedded
+                        hideThreadBanner
+                        hasThreadAbove={threadMembers.length > 1 && !isFirst}
+                        hasThreadBelow={threadMembers.length > 1 && !isLast}
+                      />
                     </div>
                   );
                 })

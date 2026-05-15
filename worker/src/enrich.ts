@@ -516,6 +516,16 @@ interface Patch {
   reply_to_screen_name?: string | null;
   // Sentinel that backfill-replies has examined this item (idempotent skip).
   reply_enriched?: boolean;
+  // F1: retweet 父推完整快照（被转推作者头像/名字/handle/✓/published_at/content）
+  // SB API 给的是 retweeted_status_id (extra.retweeted_status_id)，
+  // 内容需要通过 syndication API on-demand 拉。retweet_of 是回填字段，
+  // 跟 quote_of 共用 QuoteOf 形状，前端识别 is_retweet=1 时优先用它当主卡。
+  retweet_of?: QuoteOf | null;
+  retweet_enriched?: boolean;
+  // F5: 反向 — set extra.thread_root_id 为 reply chain root（同作者 self-reply
+  // 链）。配合 clearThreadRoot：set_thread_root_id 设值；clearThreadRoot 删字段。
+  // 同时存在时 set_thread_root_id 胜出（先 clear 再 set 等价直接 set）。
+  set_thread_root_id?: string;
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
@@ -554,6 +564,11 @@ async function applyPatch(
   if (patch.reply_enriched) {
     extra.reply_enriched_at = new Date().toISOString();
   }
+  if (patch.retweet_of !== undefined) extra.retweet_of = patch.retweet_of;
+  if (patch.retweet_enriched) {
+    extra.retweet_enriched_at = new Date().toISOString();
+  }
+  if (patch.set_thread_root_id) extra.thread_root_id = patch.set_thread_root_id;
   extra.enriched_at = new Date().toISOString();
 
   const updates: string[] = ["extra = ?"];
@@ -800,6 +815,328 @@ export async function runBackfillReplies(
     failed: counts.failed,
     elapsed_ms: Date.now() - t0,
     remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── backfill-retweets mode ────────────────────────────────────
+// F1: 抓 is_retweet=1 推的被转推者完整快照（头像/名字/handle/✓/内容）。
+// SB API 不返回被转推的 user 对象，只给 retweeted_status_id。需要拿这个
+// id 去 syndication API 拉原推。
+//
+// 跟 backfill-quotes 关键区别：candidates 里的 tid 是转推者的 status id，
+// 但 fetchTweet 用的是 retweeted_status_id（即被转推那条），把那条的 user/
+// content 当 retweet_of 快照写回到转推者 item 上。
+
+interface RetweetCandidate extends CandidateRow {
+  retweeted_status_id: string;
+}
+
+async function selectRetweetBackfillCandidates(
+  env: EnrichEnv,
+  done: Set<string>,
+  limit: number,
+): Promise<RetweetCandidate[]> {
+  const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, source_id, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND json_extract(extra, '$.is_retweet') = 1
+       AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
+       AND (extra NOT LIKE '%"retweet_enriched_at"%' AND extra NOT LIKE '%"retweet_of"%')
+     ORDER BY scraped_at DESC
+     LIMIT ?`,
+  )
+    .bind(fetchBatch)
+    .all<CandidateRow>();
+
+  const out: RetweetCandidate[] = [];
+  for (const r of rows.results) {
+    if (done.has(r.source_id)) continue;
+    let rtsId: string | null = null;
+    try {
+      const ex = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+      if (typeof ex.retweeted_status_id === 'string') {
+        rtsId = ex.retweeted_status_id;
+      }
+    } catch {
+      // skip 解析失败的
+    }
+    if (!rtsId) continue;
+    out.push({ ...r, retweeted_status_id: rtsId });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+export async function runBackfillRetweets(
+  env: EnrichEnv,
+  limit = 20,
+  rateSleepMs = 400,
+): Promise<RunResult> {
+  const mode = 'backfill-retweets';
+  const t0 = Date.now();
+  const state = await loadState(env, mode);
+  const done = new Set<string>([
+    ...state.processed_ids,
+    ...state.not_found_ids,
+  ]);
+
+  const candidates = await selectRetweetBackfillCandidates(env, done, limit);
+  const counts = {
+    processed: 0,
+    with_retweet: 0,
+    not_found: 0,
+    failed: 0,
+  };
+
+  for (const row of candidates) {
+    // 注意：fetchTweet 用 retweeted_status_id（被转推那条），不是 row.source_id
+    const targetId = row.retweeted_status_id;
+    const res = await fetchTweet(targetId);
+    if (res === null) {
+      state.failed_ids.push(row.source_id);
+      counts.failed++;
+    } else if (res.notFound) {
+      // 原推被删 / 账号被封 / 私密 → 记 not_found 标记 sentinel 避免反复重试
+      state.not_found_ids.push(row.source_id);
+      counts.not_found++;
+      try {
+        await applyPatch(env, row, { retweet_enriched: true, retweet_of: null });
+        state.processed_ids.push(row.source_id);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-retweets] applyPatch (notFound sentinel) failed for ${row.source_id}:`, e);
+      }
+    } else if (res.data) {
+      const patch: Patch = {
+        retweet_enriched: true,
+        retweet_of: apiToQuoteOf(res.data as unknown as Record<string, unknown>),
+      };
+      counts.with_retweet++;
+      try {
+        await applyPatch(env, row, patch);
+        state.processed_ids.push(row.source_id);
+        counts.processed++;
+      } catch (e) {
+        console.error(`[backfill-retweets] applyPatch failed for ${row.source_id}:`, e);
+        state.failed_ids.push(row.source_id);
+        counts.failed++;
+      }
+    }
+
+    if (rateSleepMs > 0) await sleep(rateSleepMs);
+
+    if (counts.processed % 25 === 0 && counts.processed > 0) {
+      await saveState(env, mode, state);
+    }
+  }
+
+  await saveState(env, mode, state);
+
+  return {
+    mode,
+    processed: counts.processed,
+    with_quote: counts.with_retweet, // 复用 RunResult 字段：with_quote → with_retweet
+    with_card: 0,
+    empty: 0,
+    not_found: counts.not_found,
+    failed: counts.failed,
+    elapsed_ms: Date.now() - t0,
+    remaining_hint: Math.max(0, candidates.length - counts.processed),
+  };
+}
+
+// ─── reconstruct-threads mode ──────────────────────────────────
+// F5: 反向于 reclassify-threads（清错的 thread root）。这个 mode 给那些
+// 自回复 chain (handle == reply_to_handle) 但 thread_root_id 为 null 的
+// items 反向设上 thread_root_id。
+//
+// 触发场景：当前 SB scraper 抓取根本不写 extra.thread_root_id（只有老
+// chrome scraper 时代写过）。1043 条复合关系数据（含 quote_of_id +
+// reply_to_id + thread_root_id null）由这个 mode 一次性回填。
+//
+// 算法：multi-pass 扫描。每 pass 处理所有 candidate（reply_to_id IS NOT
+// NULL AND thread_root_id IS NULL），查父推：
+//   - 父推不存在 D1 / handle 不同 → 不是 self-thread，skip（不动）
+//   - 父推存在 + handle 相同：
+//       * 父推 thread_root_id 已经有 → 设当前 = 父推 root（chain 延长）
+//       * 父推 thread_root_id 空但父推也是 self-reply → 等下一 pass
+//       * 父推 thread_root_id 空且父推无 reply_to_id（=chain root）→
+//         设当前 thread_root_id = 父推 source_id
+// 迭代直到一 pass 没新填，或达 max_passes（默认 5，覆盖普通 thread 链长）。
+
+interface ReconstructResult {
+  mode: 'reconstruct-threads';
+  candidates_total: number;
+  filled: number;
+  not_self_reply: number;
+  parent_missing: number;
+  passes: number;
+  dry_run: boolean;
+  elapsed_ms: number;
+}
+
+interface ThreadCandidateRow {
+  id: string;
+  source_id: string;
+  handle: string | null;
+  extra: string | null;
+}
+
+export async function runReconstructThreads(
+  env: EnrichEnv,
+  dryRun = true,
+  maxPasses = 5,
+): Promise<ReconstructResult> {
+  const t0 = Date.now();
+  // 拉所有 candidate：reply_to_id 有 + thread_root_id 空
+  const cands = await env.DB.prepare(
+    `SELECT id, source_id, handle, extra
+     FROM items
+     WHERE source_type = 'x_list'
+       AND extra ->> '$.reply_to_id' IS NOT NULL
+       AND extra ->> '$.thread_root_id' IS NULL`,
+  ).all<ThreadCandidateRow>();
+
+  const candTotal = cands.results.length;
+
+  // 拿这些 candidate reply_to_id 指向的父推一次性查回来（lookup map）
+  const parentIds = new Set<string>();
+  const candParsed: Array<{ row: ThreadCandidateRow; extra: Record<string, unknown>; replyToId: string }> = [];
+  for (const r of cands.results) {
+    try {
+      const ex = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+      const replyToId = ex.reply_to_id as string | undefined;
+      if (!replyToId) continue;
+      parentIds.add(replyToId);
+      candParsed.push({ row: r, extra: ex, replyToId });
+    } catch {
+      // skip 解析失败
+    }
+  }
+
+  // 父推 lookup map：source_id → { handle, thread_root_id, has_reply_to_id, exists }
+  // 分批查（D1 IN list 长度限制）。exists=false 表示父推不在 D1（可能在 list 外
+  // 或被删），fallback 用 candidate.extra.reply_to_handle 判定是否 self-reply。
+  const parentMap = new Map<string, { handle: string | null; threadRoot: string | null; hasReplyTo: boolean; exists: boolean }>();
+  const parentArr = [...parentIds];
+  const CHUNK = 100;
+  for (let i = 0; i < parentArr.length; i += CHUNK) {
+    const chunk = parentArr.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = await env.DB.prepare(
+      `SELECT source_id, handle, extra FROM items WHERE source_type='x_list' AND source_id IN (${placeholders})`,
+    ).bind(...chunk).all<{ source_id: string; handle: string | null; extra: string | null }>();
+    for (const r of rows.results) {
+      try {
+        const ex = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+        parentMap.set(r.source_id, {
+          handle: r.handle,
+          threadRoot: (ex.thread_root_id as string | undefined) ?? null,
+          hasReplyTo: Boolean(ex.reply_to_id),
+          exists: true,
+        });
+      } catch {
+        parentMap.set(r.source_id, { handle: r.handle, threadRoot: null, hasReplyTo: false, exists: true });
+      }
+    }
+  }
+
+  let filled = 0;
+  let notSelfReply = 0;
+  let parentMissing = 0;
+  const updates: Array<{ id: string; rootId: string }> = [];
+
+  // Multi-pass：未填的 candidate 等父推 thread_root 填好后下一 pass 再尝试
+  const resolved = new Set<string>(); // candidate source_id 已 resolve（filled 或 skip）
+
+  let pass = 0;
+  for (pass = 0; pass < maxPasses; pass++) {
+    let changed = false;
+    for (const c of candParsed) {
+      if (resolved.has(c.row.source_id)) continue;
+      const parent = parentMap.get(c.replyToId);
+      // 父推不在 D1 时，看 extra.reply_to_handle / reply_to_screen_name
+      // 是否等于自己 handle（self-reply 判定不依赖父推数据）
+      const replyToHandle = (c.extra.reply_to_handle || c.extra.reply_to_screen_name) as string | undefined;
+      if (!parent || !parent.exists) {
+        if (replyToHandle && c.row.handle && replyToHandle === c.row.handle) {
+          // self-reply 但父推不在 D1（list 外 / 被删 / 私密）→ 用 replyToId
+          // 当虚拟 root（链断在这）
+          updates.push({ id: c.row.id, rootId: c.replyToId });
+          resolved.add(c.row.source_id);
+          parentMap.set(c.row.source_id, {
+            handle: c.row.handle,
+            threadRoot: c.replyToId,
+            hasReplyTo: true,
+            exists: true,
+          });
+          filled++;
+          changed = true;
+        } else {
+          // 父推不在 D1 + reply_to_handle 不一致（或缺失）→ 真的判不了
+          resolved.add(c.row.source_id);
+          parentMissing++;
+        }
+        continue;
+      }
+      if (parent.handle !== c.row.handle) {
+        resolved.add(c.row.source_id);
+        notSelfReply++;
+        continue;
+      }
+      // self-reply + 父推在 D1。决定 thread_root：
+      let rootId: string | null = null;
+      if (parent.threadRoot) {
+        rootId = parent.threadRoot;
+      } else if (!parent.hasReplyTo) {
+        // 父推自己是 chain 根
+        rootId = c.replyToId;
+      } else {
+        // 父推也是 self-reply 但还没填 root → 等下一 pass
+        continue;
+      }
+      updates.push({ id: c.row.id, rootId });
+      resolved.add(c.row.source_id);
+      parentMap.set(c.row.source_id, {
+        handle: c.row.handle,
+        threadRoot: rootId,
+        hasReplyTo: true,
+        exists: true,
+      });
+      filled++;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  if (!dryRun && updates.length > 0) {
+    // batch update — D1 不支持单条 prepared 多 binding 高效 batch，逐条 UPDATE
+    // 但用 batch API 走一个 transaction 减少 RTT
+    const stmts: D1PreparedStatement[] = [];
+    for (const u of updates) {
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.thread_root_id', ?) WHERE id = ?`,
+        ).bind(u.rootId, u.id),
+      );
+    }
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < stmts.length; i += BATCH_SIZE) {
+      await env.DB.batch(stmts.slice(i, i + BATCH_SIZE));
+    }
+  }
+
+  return {
+    mode: 'reconstruct-threads',
+    candidates_total: candTotal,
+    filled,
+    not_self_reply: notSelfReply,
+    parent_missing: parentMissing,
+    passes: pass,
+    dry_run: dryRun,
+    elapsed_ms: Date.now() - t0,
   };
 }
 
