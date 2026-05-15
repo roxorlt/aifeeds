@@ -27,6 +27,9 @@ export interface User {
   identity_provider?: string | null;
   // 老字段保留兼容
   phone_masked?: string | null;
+  /** 跨设备同步设置；schema 形如 {"video": {"autoplay": bool, "muted": bool}}。
+   *  未登录用户 undefined / null（走 localStorage） */
+  preferences?: Record<string, unknown> | null;
 }
 
 export interface LoginResponse {
