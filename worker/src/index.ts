@@ -52,6 +52,7 @@ import {
   handleLogout,
   handleLogoutAll,
   handleMe,
+  handlePutPreferences,
   handleDelete,
 } from './auth/handlers';
 import { handleEmailSend } from './auth/email-handlers';
@@ -239,6 +240,9 @@ export default {
       }
       if (path === '/api/auth/me' && request.method === 'GET') {
         return withCors(await handleMe(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/preferences' && request.method === 'PUT') {
+        return withCors(await handlePutPreferences(request, env, ctx), request, env);
       }
       if (path === '/api/auth/delete' && request.method === 'POST') {
         return withCors(await handleDelete(request, env, ctx), request, env);

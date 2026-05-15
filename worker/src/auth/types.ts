@@ -10,6 +10,9 @@ export interface UserRow {
   status: 'active' | 'banned' | 'self_deleted';
   banned_reason: string | null;
   metadata: string | null;
+  /** JSON 字符串：{"video": {"autoplay": bool, "muted": bool}, ...}
+   *  跨设备同步前端设置；migration 013 加。新用户为 NULL */
+  preferences: string | null;
 }
 
 export interface IdentityRow {

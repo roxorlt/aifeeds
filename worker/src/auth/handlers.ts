@@ -389,6 +389,16 @@ export async function handleMe(
     }
   }
 
+  // preferences：JSON 字符串解析后返；坏 JSON 当 null
+  let preferences: Record<string, unknown> | null = null;
+  if (user.preferences) {
+    try {
+      preferences = JSON.parse(user.preferences);
+    } catch {
+      preferences = null;
+    }
+  }
+
   return jsonOk({
     user: {
       id: user.id,
@@ -399,8 +409,42 @@ export async function handleMe(
       identity_provider: identityProvider,
       // 老字段保留兼容（dashboard 全量切到 identity_masked 后下线）
       phone_masked: ident?.provider === 'phone' ? identityMasked : null,
+      preferences,
     },
   });
+}
+
+// ─── PUT /api/auth/me/preferences ────────────────────────
+// 同步前端设置（首批：video coordinator 的 autoplay / muted）。
+// body 是任意 JSON 对象 → JSON.stringify 落 users.preferences 列。
+// 服务端不校验 schema（schema 由前端定义），只做大小限制（≤ 4KB 防误用）。
+export async function handlePutPreferences(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') return jsonErr('not authenticated', 401);
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonErr('invalid json', 400);
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return jsonErr('preferences must be a JSON object', 400);
+  }
+  const serialized = JSON.stringify(body);
+  if (serialized.length > 4096) {
+    return jsonErr('preferences too large (>4KB)', 413);
+  }
+
+  await env.DB.prepare(
+    `UPDATE users SET preferences = ? WHERE id = ?`,
+  ).bind(serialized, auth.userId).run();
+
+  return jsonOk({ ok: true });
 }
 
 // ─── POST /api/auth/delete ───────────────────────────────

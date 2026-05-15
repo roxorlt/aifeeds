@@ -13,6 +13,7 @@ import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
 import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordinator";
+import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
 import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
@@ -218,6 +219,8 @@ function DashboardHome() {
     useVideoCoordinator.getState().setColumnOrder(columnOrderKey.split("|"));
   }, [columnOrderKey]);
   useEffect(() => attachVisibilityListener(), []);
+  // 登录态 ↔ coordinator prefs 双向 sync（cloud authoritative）
+  useEffect(() => attachVideoPrefsSync(), []);
 
   const getTitleForColumn = (col: SourceConfig): string => {
     if (col.source_type === "x_list") {
