@@ -67,6 +67,9 @@ function VideoPlayer({
       loop
       playsInline
       className="aspect-[16/9] w-full bg-black object-cover"
+      // PC hover 显示播控浮层；mobile / touch 上 hover 不触发，仍靠 click toggle
+      onMouseEnter={() => setShowControls(true)}
+      onMouseLeave={() => setShowControls(false)}
       onClick={() => setShowControls(true)}
       onPlay={handlePlay}
       onError={onError}

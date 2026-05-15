@@ -50,6 +50,9 @@ export function useCoordinatedVideo({
 
   // 标记 hook 内部 pause 是 coordinator 主动调（而不是 user 在 controls 上点）
   const coordPausingRef = useRef(false);
+  // 拖动进度条期间，video 也会 fire pause/playing 事件 — 这种不算 user action，
+  // 不应触发 markUserPaused（不然 drag 后 video 被 sticky 暂停）
+  const seekingRef = useRef(false);
 
   // mount: register；unmount: unregister
   useEffect(() => {
@@ -138,13 +141,23 @@ export function useCoordinatedVideo({
         coordPausingRef.current = false;
         return;
       }
+      if (seekingRef.current) {
+        // 拖动进度条期间 video 自动 pause，不算 user 主动暂停
+        return;
+      }
       log("user-pause", { videoId: scopedId });
       markUserPaused(scopedId, true);
     };
     const onPlay = () => {
+      if (seekingRef.current) {
+        // seek 完成后 video 自动 resume 也不算 user 主动 play
+        return;
+      }
       log("user-play", { videoId: scopedId });
       markUserPaused(scopedId, false);
     };
+    const onSeeking = () => { seekingRef.current = true; };
+    const onSeeked = () => { seekingRef.current = false; };
     const onVolumeChange = () => {
       const s = useVideoCoordinator.getState();
       if (!el.muted && s.globalMuted) setGlobalMuted(false);
@@ -154,6 +167,8 @@ export function useCoordinatedVideo({
     el.addEventListener("timeupdate", onTimeUpdate);
     el.addEventListener("pause", onPause);
     el.addEventListener("play", onPlay);
+    el.addEventListener("seeking", onSeeking);
+    el.addEventListener("seeked", onSeeked);
     el.addEventListener("volumechange", onVolumeChange);
     return () => {
       // unmount 也存一次（保证关抽屉时 feed video 拿到最新）
@@ -162,6 +177,8 @@ export function useCoordinatedVideo({
       el.removeEventListener("timeupdate", onTimeUpdate);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("play", onPlay);
+      el.removeEventListener("seeking", onSeeking);
+      el.removeEventListener("seeked", onSeeked);
       el.removeEventListener("volumechange", onVolumeChange);
     };
   }, [videoId, scopedId, videoRef, markUserPaused, setGlobalMuted]);
