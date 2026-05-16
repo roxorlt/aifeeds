@@ -158,11 +158,11 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/api/share/poster/:token` | GET | 海报 PNG（首次 SVG → resvg → R2 缓存；后续 R2 HIT 1.4s 内返回） | 无（CORS `*`） |
 | `/s/:token` | GET | 扫码落地：写 to_did + landed_at，302 redirect 到详情页 | 无 |
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
-| `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | HTTP Basic Auth (`ADMIN_USER`/`PASS`) |
-| `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | — (302 后续端点鉴权) |
-| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、留存矩阵、事件类型分布（中文标签）、错误明细、重度设备表。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | HTTP Basic Auth |
-| `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | HTTP Basic Auth |
-| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | HTTP Basic Auth |
+| `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | CF Access JWT（Basic Auth fallback，见 § 7a） |
+| `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | CF Access JWT（边缘拦截，见 § 7a） |
+| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、留存矩阵、事件类型分布（中文标签）、错误明细、重度设备表。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 
@@ -623,7 +623,8 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 | `GITHUB_TOKEN` (GitHub PAT claude-ops) | 创建/管理 GitHub 私有仓 + 跑 GH Actions workflow + worker 调 GH trending API | github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → 找「claude-ops」→ Regenerate / Delete → Generate new token (classic)，scope：`repo` + `workflow`，过期：No expiration。Roll 后同步 `aifeeds-prod.env` + `aifeeds-staging.env` |
 | `INGEST_TOKEN` (prod worker `/api/ingest` + `/api/admin/*` 鉴权) | scrapers / 运维脚本 push 数据到 prod worker / 触发 admin endpoint | wrangler 改：`source .secrets/aifeeds-prod.env && printf '%s' "$INGEST_TOKEN" \| (cd worker && npx wrangler secret put INGEST_TOKEN)`（生成新值用 `openssl rand -hex 32`，**同时**改 `aifeeds-prod.env` 字段值；改这个会断所有依赖它的 scraper / 脚本，需要同步更新） |
 | `INGEST_TOKEN` (staging) | 同上，给 staging | wrangler 改：`source .secrets/aifeeds-staging.env && printf '%s' "$INGEST_TOKEN" \| (cd worker && npx wrangler secret put INGEST_TOKEN --env staging)`，**同时**改 `aifeeds-staging.env` 字段值 |
-| `ADMIN_USER` + `ADMIN_PASS` (prod web `/api/admin/*` HTTP Basic Auth) | curl admin endpoint / web 登录 admin 看板 | 改：`source aifeeds-prod.env && printf '%s' "$ADMIN_PASS" \| (cd worker && npx wrangler secret put ADMIN_PASS)`；同时更新 `aifeeds-prod.env` + `aifeeds-staging.env`（prod / staging 共用同值） |
+| `ADMIN_USER` + `ADMIN_PASS` (admin Basic Auth **fallback**，CF Access 上线后非主路径) | 应急通道：删 `CF_ACCESS_AUD` secret 后 worker 自动回落到 Basic Auth；正常场景由 CF Access JWT 接管 | 改：`source aifeeds-prod.env && printf '%s' "$ADMIN_PASS" \| (cd worker && npx wrangler secret put ADMIN_PASS)`；同时更新 `aifeeds-prod.env` + `aifeeds-staging.env`（prod / staging 共用同值）。**CF Access 稳定 1 周后可考虑删除这对 secret + 删 fallback 代码** |
+| `CF_ACCESS_AUD` (CF Access Application Audience tag，每环境独立) | admin 入口主鉴权。worker 通过 `Cf-Access-Jwt-Assertion` 头校验 JWT 的 `aud` 字段匹配此值 | CF Dashboard → Zero Trust → Access → Applications → 选 app → Additional settings → AUD tag → Revoke existing tokens（旧 token 全失效）→ 复制新 AUD → `npx wrangler secret put CF_ACCESS_AUD [--env staging]` |
 | `DEEPSEEK_API_KEY` | DeepSeek LLM 调用（分类 / 翻译 / AI 摘要） | https://platform.deepseek.com/api_keys → 删旧 key → 新建 → 同步 `aifeeds-prod.env` + `aifeeds-staging.env` |
 | `SCRAPEBADGER_API_KEY` | X 抓取 + refresh-metrics | https://scrapebadger.com 后台 → rotate → 同步两份 .env |
 | `TURNSTILE_SECRET_KEY` | 前端验证码后端校验 | CF Dashboard → Turnstile → ai-feeds.com site → Rotate secret → 同步两份 .env |
@@ -717,6 +718,74 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 
 **可选加固**（未配置，见本项目 TODO）：
 - 第一优先级加一条 Skip 规则：`cf.verified_bot_category in {"Search Engine Crawler"}` → Skip all rules，保证搜索引擎 100% 不被误杀
+
+### 7a. Admin 鉴权：Cloudflare Access（2026-05-17 上线 staging）
+
+> **背景**：原 `/admin` + `/api/admin/*` 走 HTTP Basic Auth（`ADMIN_USER` / `ADMIN_PASS`），单因素、可爆破、密码存在 Secret 里万一泄露就完蛋。2026-05-17 起切换到 **CF Access（Zero Trust）** —— 边缘节点先拦截 + 邮箱 OTP 登录 + worker 二次校验 JWT。
+
+**架构**：
+
+```
+浏览器 → staging-api.ai-feeds.com/admin
+         ↓
+       CF Access 边缘拦截（未登录 → 跳 aifeeds.cloudflareaccess.com）
+         ↓ Email OTP 登录（ltsms86@gmail.com）
+       浏览器拿 CF_Authorization cookie（含 JWT）
+         ↓ 后续请求 CF 自动注入 Cf-Access-Jwt-Assertion 头
+       worker.checkAdminAuth() → jose.jwtVerify 校验 issuer + audience + 签名 + exp
+         ↓
+       放行
+```
+
+**Team domain**：`aifeeds.cloudflareaccess.com`（创建时定，不可改）。
+
+**Access Applications**（每个环境一个）：
+
+| App name | Destinations | Policy |
+|---|---|---|
+| `aifeeds-admin-staging` | `staging-api.ai-feeds.com/admin*` + `staging-api.ai-feeds.com/api/admin/*` | Allow Emails = `ltsms86@gmail.com` |
+| `aifeeds-admin-prod` | `api.ai-feeds.com/admin*` + `api.ai-feeds.com/api/admin/*` | 同上（待创建） |
+
+**Worker 校验逻辑**（`worker/src/admin.ts`）：
+
+- 优先：CF Access JWT（配齐 `CF_ACCESS_AUD` + `CF_ACCESS_TEAM_DOMAIN` 即启用）
+- Fallback：Basic Auth（仅在 CF Access 未配置时启用 —— 应急通道）
+- **严格模式**：一旦启用 CF Access，JWT 校验失败直接 401，不回落 Basic Auth
+
+**Secrets**：
+
+| Secret | 配置方式 | 当前状态 |
+|---|---|---|
+| `CF_ACCESS_TEAM_DOMAIN` | wrangler.toml `[vars]` + `[env.staging.vars]` 明文（非敏感）| ✅ prod + staging |
+| `CF_ACCESS_AUD` | `wrangler secret put CF_ACCESS_AUD [--env staging]`（每环境对应一个 App 的 AUD tag） | ✅ staging / ⏳ prod 待配 |
+| `ADMIN_USER` / `ADMIN_PASS` | wrangler secret（保留作 fallback） | ✅ prod + staging（CF Access 稳定 1 周后可删） |
+
+**部署**：
+
+```bash
+# Staging（已上线）
+cd worker
+npx wrangler secret put CF_ACCESS_AUD --env staging
+# 粘贴 staging app 的 AUD（CF Dashboard → Zero Trust → Access → Applications → aifeeds-admin-staging → Additional settings → AUD tag）
+npx wrangler deploy --env staging
+
+# Prod（待执行）
+npx wrangler secret put CF_ACCESS_AUD
+# 粘贴 prod app 的 AUD
+npx wrangler deploy
+```
+
+**应急回滚（被 CF Access 锁外）**：
+
+1. **删 secret 回落 Basic Auth**（最快）：
+   ```bash
+   npx wrangler secret delete CF_ACCESS_AUD [--env staging]
+   # admin.ts 检测到 AUD 缺失，自动回落 Basic Auth 路径
+   ```
+2. **CF Dashboard 改 Policy**：把 Access Application 的 Policy Action 临时改 `Allow everyone`，全开
+3. **wrangler rollback**：`npx wrangler rollback [--env staging]` 回到 Basic Auth 时代的 worker 版本
+
+**为啥不裸用 Basic Auth**：单因素 + 可爆破 + 密码会泄露。CF Access = 边缘拦截 + 邮箱 OTP（"something you have"）+ JWT 签名校验（CF Access 私钥永不出 CF），攻击面缩到最小。
 
 ### 8. CF 账户其他项目（非本项目）
 
@@ -1255,7 +1324,7 @@ cd worker && npm run db:init:local  # 推本地（wrangler dev 用）
 2. `wrangler secret list --name xlist-api` 验证 secrets 是否还在（返回 `[]` = 全擦了）
 3. 如果擦了 → 按 [§3 Secrets 节「事故恢复一键 restore」](#3-secrets统一-source-模式2026-05-16-改造) 跑那段 for 循环，从 `.secrets/aifeeds-prod.env` 12 个 worker secret 全部 restore
 4. 验证：`wrangler secret list --name xlist-api` 含 12 个 secret
-5. 业务侧 smoke：`source .secrets/aifeeds-prod.env && curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST 'https://api.ai-feeds.com/api/admin/sms-status'` 应 200
+5. 业务侧 smoke：浏览器打开 `https://api.ai-feeds.com/admin` → CF Access 拦截 → 邮箱 OTP 登录 → 看到管理面板。⚠️ **CF Access 上线后 curl + Basic Auth 不再生效**（除非删 `CF_ACCESS_AUD` secret 回落到 fallback 模式）；curl 测试需先在 CF Dashboard 创建 Service Token 用 `CF-Access-Client-Id` + `CF-Access-Client-Secret` 头，或临时回落 Basic Auth
 
 ### 停启本地 cron
 
