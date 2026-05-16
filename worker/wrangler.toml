@@ -41,9 +41,14 @@ crons = ["*/5 * * * *"]
 
 # Workers Logs（CF Dashboard → Workers → xlist-api → Logs）。
 # 启用后可搜近 3 天的 console.log / 异常堆栈 / 请求 metadata，按 rayId / status / 时间过滤。
+# invocation_logs = true 让每次 invocation 都有日志（含 path / status / duration），
+# 不依赖业务代码主动 console.log。
 [observability]
 enabled = true
-head_sampling_rate = 1
+head_sampling_rate = 1.0
+
+[observability.logs]
+invocation_logs = true
 
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
@@ -81,7 +86,10 @@ crons = []
 # Workers Logs（同 prod 启用）
 [env.staging.observability]
 enabled = true
-head_sampling_rate = 1
+head_sampling_rate = 1.0
+
+[env.staging.observability.logs]
+invocation_logs = true
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。
