@@ -90,9 +90,9 @@
 | 阶段 5 | #1 数据备份 launchd 本地临时方案（PR #16 已用 D1 → R2 Workflow 实现） | — | #3 视频抽帧跑在 Container 里 |
 
 **阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
-- Web Analytics：dashboard 加 beacon，看 PV / UV / 来源
-- Workers Logs：worker 出错的 stacktrace 在 CF 后台直接搜（不再 console.log + 命令行 tail）
-- AI Gateway：DeepSeek 调用全走 AI Gateway 中转，能看每次请求的 token / 成本 / 缓存命中、统一限流
+- [x] **AI Gateway** — OPS 2026-05-16 已建 `aifeeds-deepseek` gateway（详见 [operations.md §10](docs/operations.md)）；BE 待办：worker 把 DeepSeek 调用 base URL 切到 `https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek`，is_relevant 等可缓存请求加 `cf-aig-cache-ttl: 3600` header
+- [x] **Web Analytics** — OPS 2026-05-16 已建 prod + staging 两个 site（详见 [operations.md §11](docs/operations.md)）；FE 待办：`dashboard/index.html` 加 beacon snippet（prod token `857fab92…`，staging token `9e6f987f…`，按构建 target 切）
+- [ ] **Workers Logs** — BE 在 `worker/wrangler.toml` 加 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`，redeploy 即可。OPS 知情；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
 
 **阶段 2（半天）—— 图片走边缘优化**
 - 现在头像 / 截图 / 海报直接走 R2 反代
