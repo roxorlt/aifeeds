@@ -2643,9 +2643,18 @@ async function handleImageProxy(request: Request): Promise<Response> {
 
   // video 类型不走 CF cache — 因为 Range request 跟全量请求会污染同一 cache key，
   // 长视频 seek 时拿到完整流又不能 partial 响应。图片（pbs.twimg.com）继续 cache。
-  // 图片额外走 cf.image 边缘转换（format=auto 自动 webp/avif；w/q 可选 resize/compress）。
-  // 用 cf.image 而非 /cdn-cgi/image URL：从 worker 内部触发不受 zone "Allow external source" 限制，
-  // 且 worker 已经做过 host 白名单验证（line 2597-2599）— CF 信任此处的 source。
+  // 图片额外走 cf.image 边缘转换（format / w / q）。用 cf.image 而非 /cdn-cgi/image URL：
+  // 从 worker 内部触发不受 zone "Allow external source" 限制，且 worker 已做过 host
+  // 白名单验证（line 2627-2629）— CF 信任此处的 source。
+  //
+  // format 选择：cf.image format='auto' 在 worker fetch 上下文里实测不可靠（不论
+  // Accept header 传啥都返原 mime，无 Vary）。直接 parse incoming request Accept 自己 pick：
+  //   - Accept 含 image/avif → avif（Chrome 85+ / Firefox 93+）
+  //   - 含 image/webp → webp（含 Safari 14+ / iOS 14+）
+  //   - 都不含 → 不设 format，passthrough 原 mime
+  // cacheKey 编入 format，防止跨 client 互污染（worker cache 是 binary blob，混 webp/jpeg
+  // 会让老 Safari 拿到 webp cache 解码失败）。Response Vary: Accept 让 client / CDN
+  // 知道按 Accept 分缓存。
   const isVideo = targetUrl.hostname === 'video.twimg.com';
   let cfOptions: { cf?: Record<string, unknown> };
   if (isVideo) {
@@ -2653,16 +2662,20 @@ async function handleImageProxy(request: Request): Promise<Response> {
   } else {
     const w = url.searchParams.get('w');
     const q = parseInt(url.searchParams.get('q') || '85', 10);
-    const imageOpts: Record<string, unknown> = {
-      quality: q,
-      format: 'auto',
-    };
+    const accept = request.headers.get('accept') || '';
+    let format: 'avif' | 'webp' | null = null;
+    if (/image\/avif/i.test(accept)) format = 'avif';
+    else if (/image\/webp/i.test(accept)) format = 'webp';
+    const imageOpts: Record<string, unknown> = { quality: q };
+    if (format) imageOpts.format = format;
     if (w) imageOpts.width = parseInt(w, 10);
+    const cacheKey = `${url.origin}${url.pathname}${url.search}&_fmt=${format ?? 'orig'}`;
     cfOptions = {
       cf: {
         image: imageOpts,
         cacheTtl: 86400,
         cacheEverything: true,
+        cacheKey,
       },
     };
   }
@@ -2693,6 +2706,9 @@ async function handleImageProxy(request: Request): Promise<Response> {
     headers.set('Cache-Control', 'no-store');
   } else {
     headers.set('Cache-Control', 'public, max-age=604800, immutable');
+    // 让 client / 中间 CDN 知道按 Accept 不同 cache（worker cacheKey 已按 format
+    // 分桶，但 client 端 cache 也得有 Vary 提示，否则切浏览器会拿错格式）
+    headers.set('Vary', 'Accept');
   }
   headers.set('Access-Control-Allow-Origin', '*');
 
