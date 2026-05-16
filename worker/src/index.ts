@@ -142,12 +142,23 @@ export interface Env {
   // instance。替换原 isHdxEnrichSlot preempt cron。
   // 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
   HUODONGXING_DETAIL_WORKFLOW: Workflow;
+  // CF Workflow binding for Product Hunt (worker/src/workflows/ph-pipeline.ts)。
+  // runPhDailyFetch 后对每条新 post create instance。替换 ph-enrich +
+  // ph-r2-migrate + fill-translations PH 字段 3 个 preempt cron。
+  // 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+  PH_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for ClawHub (worker/src/workflows/clawhub-pipeline.ts)。
+  // runClawhubFetchList 后对每条新 skill create instance。替换
+  // clawhub-enrich preempt cron。设计同上。
+  CH_PIPELINE_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
 export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
 export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
+export { PhPipelineWorkflow } from './workflows/ph-pipeline';
+export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [

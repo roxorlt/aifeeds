@@ -1015,3 +1015,66 @@ async function translatePhItemsInline(env: Env, items: ItemInput[]): Promise<voi
   }
   console.log(`[ph] inline translate done: ${translated}/${tasks.length} in ${Date.now() - t0}ms`);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 6 PH workflow 单 itemId 函数 (STUB — 实施 turn 2 填充真实 body)
+//
+// 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function classifyPhItemWithLlm(
+  _env: Env,
+  itemId: string,
+): Promise<{ is_relevant: 0 | 1 }> {
+  console.log(`[ph-workflow:step1 STUB] ${itemId}`);
+  // TODO: 复用 runPhEnrich loop body → 1 item DeepSeek classify
+  return { is_relevant: 1 };
+}
+
+export async function r2MigratePhItemById(
+  _env: Env,
+  itemId: string,
+): Promise<{ assets_migrated: number }> {
+  console.log(`[ph-workflow:step2 STUB] ${itemId}`);
+  // TODO: 复用 runPhR2Migrate (ph-r2.ts) loop body → 1 item logo/gallery/video → R2
+  return { assets_migrated: 0 };
+}
+
+export async function translatePhFieldsForItem(
+  _env: Env,
+  itemId: string,
+): Promise<{ fields_translated: number }> {
+  console.log(`[ph-workflow:step3 STUB] ${itemId}`);
+  // TODO: tagline + maker_post + top_comments[] DeepSeek translate
+  return { fields_translated: 0 };
+}
+
+/**
+ * 治本幂等：写 marker + create PH workflow instance。
+ * 调用方：drain endpoint + Phase 1 runPhDailyFetch + drawer refreshSingleItem。
+ */
+export async function triggerPhWorkflowForItem(
+  env: { DB: D1Database; PH_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.PH_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[ph-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `ph-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.PH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) return 'already_exists';
+    console.error(`[ph-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
+}

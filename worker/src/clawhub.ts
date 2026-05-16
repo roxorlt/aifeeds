@@ -864,3 +864,67 @@ export async function countClawhubPending(env: ClawhubEnv): Promise<number> {
   ).first<{ n: number }>();
   return r?.n || 0;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 6 CH workflow 单 itemId 函数 (STUB — 实施 turn 2 填充真实 body)
+//
+// 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface ChEnrichResult {
+  summary_translated?: string;
+  llm_findings_translated?: Array<Record<string, string | number | null>>;  // serializable
+  readme_text?: string;
+  readme_translated?: string;
+  readme_file?: 'README.md' | 'SKILL.md';
+}
+
+export async function enrichAndTranslateChItem(
+  _env: ClawhubEnv,
+  itemId: string,
+): Promise<ChEnrichResult> {
+  console.log(`[ch-workflow:step1 STUB] ${itemId}`);
+  // TODO: 复用 runClawhubEnrichPending loop body 单 item Promise.all 3 件
+  // (summary translate + LLM finding translate + readme fetch+translate)
+  return {};
+}
+
+export async function persistChEnrichResult(
+  _env: ClawhubEnv,
+  itemId: string,
+  _result: ChEnrichResult,
+): Promise<void> {
+  console.log(`[ch-workflow:step2 STUB] ${itemId}`);
+  // TODO: UPDATE items SET content_translated = readme_translated,
+  //       extra = json_patch(extra, {summary_translated, llm_findings_translated, ...})
+}
+
+/**
+ * 治本幂等：写 marker + create CH workflow instance。
+ * 调用方：drain endpoint + Phase 1 runClawhubFetchList + drawer refreshSingleItem。
+ */
+export async function triggerChWorkflowForItem(
+  env: { DB: D1Database; CH_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.CH_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[ch-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `ch-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.CH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) return 'already_exists';
+    console.error(`[ch-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
+}
