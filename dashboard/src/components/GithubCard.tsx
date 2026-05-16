@@ -82,6 +82,9 @@ interface Props {
 export function GithubCard({ item }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
+  // onLoad 后检测真实 natural dims，aspect 极端 / 太小（banner / badge / repo icon）
+  // 视为低信息密度图，不当流内 cover。同 worker share/handlers.ts:701 同款门控。
+  const [coverRejected, setCoverRejected] = useState(false);
   const drawer = useDrawer();
 
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
@@ -210,14 +213,23 @@ export function GithubCard({ item }: Props) {
 
       {/* Cover image（README 第一张可用图）— 放 summary 后 footer 前，
           跟分享海报用同一张图源（worker share/handlers.ts 同款提取策略）。
-          onError 兜底：图挂了直接隐藏，不挤占空间 */}
-      {coverImage && !coverFailed && (
+          onError 兜底：图挂了直接隐藏；onLoad 后做 aspect/size 质量门控，
+          banner / badge / 小 icon 等低信息密度图视为不合格隐藏 */}
+      {coverImage && !coverFailed && !coverRejected && (
         <img
           src={proxyImg(coverImage, 400)}
           alt=""
           loading="lazy"
           className="mt-2.5 aspect-[16/9] w-full rounded-2xl border border-neutral-200 bg-neutral-100 object-cover"
           onError={() => setCoverFailed(true)}
+          onLoad={(e) => {
+            const w = e.currentTarget.naturalWidth;
+            const h = e.currentTarget.naturalHeight;
+            if (!w || !h) return;
+            const ar = w / h;
+            const maxDim = Math.max(w, h);
+            if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
+          }}
         />
       )}
 
