@@ -565,7 +565,7 @@ export async function runHuodongxingDetailEnrich(
   return out;
 }
 
-async function applyDetailUpdate(
+export async function applyDetailUpdate(
   env: Env,
   id: string,
   d: DetailEnrich,
@@ -807,4 +807,115 @@ function json(data: unknown, status = 200): Response {
       'Cache-Control': 'no-store',
     },
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 5 huodongxing Workflow 单 itemId 函数
+//
+// 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
+// 给 worker/src/workflows/huodongxing-detail.ts 的 step.do 调用。
+//
+// site 反爬约束：
+//   - cookie warm-up 必须（无之 detail 成功率 95% → 40%）
+//   - 5s/detail 节流（站点 rate limit ~12/min）
+//
+// 应对：
+//   - ensureHdxSessionCookies 用 KV cache（10min TTL）跨 instance 共享 cookie
+//   - workflow 用 step.sleep(throttleSec) 跨 instance 错开 detail 请求
+//
+// 老 batch runHuodongxingDetailEnrich 保留作 admin fallback。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+const HDX_COOKIE_KV_KEY = 'hdx:session_cookies';
+const HDX_COOKIE_TTL_SEC = 600;  // 10 min（cookies 实际有效期更长，10min 平衡 KV 写频率）
+
+/**
+ * Workflow Step 1: KV 缓存 hdx session cookies 跨 instance 复用。
+ * 缺失时 fetch listing warm-up（北京 city 的 AI tag 列表）拿 cookies 存回 KV。
+ */
+export async function ensureHdxSessionCookies(env: Env): Promise<string> {
+  const cached = await env.AUTH_KV.get(HDX_COOKIE_KV_KEY);
+  if (cached) return cached;
+  const warmupUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent('北京')}&orderby=o`;
+  const r = await fetchText(warmupUrl, { retries: 0 });
+  const cookies = r.cookies || '';
+  if (cookies) {
+    await env.AUTH_KV.put(HDX_COOKIE_KV_KEY, cookies, { expirationTtl: HDX_COOKIE_TTL_SEC });
+    console.log(`[hdx-workflow:cookies] warmed up ${cookies.length}b from ${r.status}`);
+  } else {
+    console.warn(`[hdx-workflow:cookies] warmup failed status=${r.status}`);
+  }
+  return cookies;
+}
+
+/**
+ * Workflow Step 2: 拉 detail page + parse。返回 DetailEnrich 或 null（parse 失败）。
+ * 失败 throw 让 workflow retry。404 / 已删 视为 parse_failed (return null) 不 retry。
+ */
+export async function fetchAndParseHdxDetail(
+  env: Env,
+  itemId: string,
+  cookies: string,
+): Promise<DetailEnrich | null> {
+  // SELECT row 拿 city hint 做 referer
+  const row = await env.DB.prepare(
+    `SELECT source_id, extra FROM items WHERE id = ? AND source_type='huodongxing'`,
+  ).bind(itemId).first<{ source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`fetchAndParseHdxDetail: item not found ${itemId}`);
+
+  const oldExtra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+  const cityHint = (oldExtra.city as string | undefined) ?? '北京';
+  const refererUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent(cityHint)}&orderby=o`;
+
+  const detailRes = await fetchText(detailUrl(row.source_id), {
+    referer: refererUrl,
+    cookies,
+  });
+  if (!detailRes.ok) {
+    if (detailRes.status === 404 || detailRes.status === 410) {
+      console.warn(`[hdx-workflow:fetch] ${itemId}: ${detailRes.status} not found, skip`);
+      return null;
+    }
+    throw new Error(`fetchAndParseHdxDetail: HTTP ${detailRes.status} for ${row.source_id}`);
+  }
+
+  const parsed = parseDetail(detailRes.body);
+  if (!parsed) {
+    console.error(`[hdx-workflow:fetch] ${itemId}: parseDetail returned null`);
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * Workflow Step 3: 把 parseDetail 结果写 D1。判 historical 状态后调 applyDetailUpdate。
+ */
+export async function persistHdxDetail(
+  env: Env,
+  itemId: string,
+  parsed: DetailEnrich,
+): Promise<{ status: 'active' | 'historical' }> {
+  // 拿 cityFromList 信号（applyDetailUpdate 内部用来覆盖 district）
+  const row = await env.DB.prepare(
+    `SELECT extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ extra: string | null }>();
+  if (!row) throw new Error(`persistHdxDetail: item disappeared ${itemId}`);
+  const extra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+  const cityFromList = (extra.city as string | null) ?? null;
+
+  // 判 historical（同老 runHuodongxingDetailEnrich 逻辑）
+  const nowMs = Date.now();
+  const endMs = parsed.end_time ? Date.parse(parsed.end_time) : NaN;
+  const startMs = parsed.start_time ? Date.parse(parsed.start_time) : NaN;
+  const isHistorical =
+    (Number.isFinite(endMs) && endMs < nowMs) ||
+    (!Number.isFinite(endMs) && Number.isFinite(startMs) && startMs + 24 * 3600 * 1000 < nowMs);
+  const status = isHistorical ? 'historical' : 'active';
+
+  const nowUnix = Math.floor(Date.now() / 1000);
+  await applyDetailUpdate(env, itemId, parsed, cityFromList, nowUnix, status);
+  console.log(`[hdx-workflow:persist] ${itemId}: ${status}`);
+  return { status };
 }

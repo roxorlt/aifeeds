@@ -134,11 +134,17 @@ export interface Env {
   // backfill-quotes / backfill-replies / detect-longform / longform-via-sb)。
   // 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
   X_TWEET_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for huodongxing detail enrich (worker/src/workflows/
+  // huodongxing-detail.ts)。runHuodongxingFetchList 后对每条新事件 create
+  // instance。替换原 isHdxEnrichSlot preempt cron。
+  // 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
+  HUODONGXING_DETAIL_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
 export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
+export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
