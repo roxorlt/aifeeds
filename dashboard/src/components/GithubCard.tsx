@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
-import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import { cn, formatCompact, ordinal, parseJsonField, proxyImg } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { langDotClass } from "../lib/githubLang";
@@ -79,7 +79,7 @@ export function GithubCard({ item }: Props) {
     >
       <div className="flex items-start gap-3">
         <img
-          src={ownerAvatar}
+          src={proxyImg(ownerAvatar)}
           alt={owner}
           className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -189,7 +189,7 @@ export function GithubCard({ item }: Props) {
                   {contributorsInline.slice(0, 3).map((c) => (
                     <img
                       key={c.login}
-                      src={c.avatar_url}
+                      src={proxyImg(c.avatar_url)}
                       alt={c.login}
                       className="h-5 w-5 rounded-full border border-white bg-neutral-200"
                       onError={(e) => (e.currentTarget.style.visibility = "hidden")}
