@@ -128,10 +128,17 @@ export interface Env {
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
   // github-readme-translate)。设计：docs/plans/2026-05-16-github-pipeline-workflows-design.md
   GITHUB_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for X 主链 (worker/src/workflows/x-tweet-pipeline.ts)。
+  // runListPollIngest 拉 list 后对每条新 tweet create 一个 instance。
+  // 替换 6 个 preempt cron mode (classify-pending / fill-translations /
+  // backfill-quotes / backfill-replies / detect-longform / longform-via-sb)。
+  // 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+  X_TWEET_PIPELINE_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
+export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -404,6 +411,137 @@ export default {
           }
         }
         return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+      }
+      // ─── X Phase 1 手动触发（staging E2E + admin debug） ─────────
+      // POST /api/admin/x-list-poll-now?list_id=...&pages=N
+      // 触发 runListPollIngest 拉新 tweet → 写 D1 + create workflow instance per new。
+      if (path === '/api/admin/x-list-poll-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const listId = u.searchParams.get('list_id') || env.LIST_POLL_LIST_ID || '1643236611378008066';
+        const pages = Math.min(parseInt(u.searchParams.get('pages') || '3', 10), 10);
+        const result = await runListPollIngest(env, listId, pages);
+        return jsonResponse(result, 200, request, env);
+      }
+      // ─── X Workflow 一次性 drain pending（cutover 后兜底） ────────
+      // POST /api/admin/x-trigger-pending-workflows-now?limit=N
+      // 扫 X tweet 里仍 is_relevant IS NULL（未分类，老 preempt 卡死）的 item，
+      // 每条 create workflow instance 重新走完 pipeline。
+      // 同 itemId 已存在 instance 自动跳过（workflow 幂等）。
+      if (path === '/api/admin/x-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 200);
+        if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id, extra FROM items
+            WHERE source_type='x_list'
+              AND deleted_at IS NULL
+              AND is_relevant IS NULL
+            ORDER BY scraped_at DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string; extra: string | null }>();
+        let triggered = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const r of pending.results) {
+          let extraObj: Record<string, unknown> = {};
+          try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+          const params = {
+            itemId: r.id,
+            hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+            hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+            hasLinkCard: !!extraObj.link_card,
+            hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+            lang: 'zh' as const,
+          };
+          const instanceId = `x-${r.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+          try {
+            await env.X_TWEET_PIPELINE_WORKFLOW.create({ id: instanceId, params });
+            triggered++;
+          } catch (e) {
+            if (String(e).toLowerCase().includes('already exists')) {
+              skipped++;
+            } else {
+              failed++;
+              console.error(`[x-trigger-pending] failed for ${r.id}:`, e);
+            }
+          }
+        }
+        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+      }
+      // ─── X Workflow 手动触发单 itemId（staging E2E + 阶段 4 cutover 前测试用） ───
+      // POST /api/admin/x-workflow-trigger-now?itemId=x_list:1234567890
+      //
+      // 触发 1 个 instance 走完 5 step pipeline。signals (hasQuoteRef 等) 自动
+      // 从 D1 extra 推导（生产路径 runListPollIngest 改造后会从 SB API 信号
+      // 直接传入，避免 SELECT）。
+      if (path === '/api/admin/x-workflow-trigger-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const itemId = u.searchParams.get('itemId');
+        if (!itemId) {
+          return jsonResponse({ error: 'itemId param required' }, 400, request, env);
+        }
+        if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        // 从 extra 推导信号
+        const row = await env.DB.prepare(
+          `SELECT extra FROM items WHERE id = ? AND source_type='x_list'`,
+        ).bind(itemId).first<{ extra: string | null }>();
+        if (!row) {
+          return jsonResponse({ error: `item not found: ${itemId}` }, 404, request, env);
+        }
+        const extra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+        const params = {
+          itemId,
+          hasQuoteRef: !!(extra.quote_of || extra.quote_of_id),
+          hasReplyRef: !!(extra.reply_of_id || extra.reply_to_id),
+          hasLinkCard: !!extra.link_card,
+          hasRetweetRef: !!(extra.retweet_of || extra.retweet_of_id),
+          lang: 'zh' as const,
+        };
+        const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+        try {
+          const instance = await env.X_TWEET_PIPELINE_WORKFLOW.create({ id: instanceId, params });
+          return jsonResponse({
+            ok: true,
+            instance_id: instance.id,
+            status: await instance.status(),
+            params,
+          }, 200, request, env);
+        } catch (e) {
+          const msg = String(e);
+          if (msg.toLowerCase().includes('already exists')) {
+            // 已存在 → 拉现有 instance 状态
+            const existing = await env.X_TWEET_PIPELINE_WORKFLOW.get(instanceId);
+            return jsonResponse({
+              ok: true,
+              instance_id: instanceId,
+              already_exists: true,
+              status: await existing.status(),
+            }, 200, request, env);
+          }
+          return jsonResponse({ error: msg }, 500, request, env);
+        }
       }
       // F1: 手动触发 retweet 父推回填（ADMIN basic auth wrapper）
       // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400, ?recover=1
@@ -732,19 +870,19 @@ export default {
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
     // 20 X cron slots stolen, ~7% of 288/day.
-    let mode: 'refresh-metrics' | 'fill-translations' | 'backfill-quotes' | 'backfill-replies' | 'cleanup' | 'detect-longform' | 'github-fetch' | 'github-enrich' | 'clawhub-fetch' | 'clawhub-enrich' | 'list-poll-ingest' | 'classify-pending' | 'longform-via-sb';
-    // classify-pending + fill-translations 已经走 preempt 路径（每个 tick 都查队列），
-    // 不再占独立 minute 槽位；longform-via-sb 改成 5/35 之前曾占的槽（backfill-replies
-    // 让到 catch-all），所有 minute 都是 */5 实际能命中的值
+    // X 主链 classify-pending / fill-translations / backfill-quotes / backfill-replies /
+    // detect-longform / longform-via-sb 6 个 cron mode 已迁 CF Workflow（阶段 4 cutover
+    // 2026-05-16）。每条新 tweet 由 runListPollIngest 触发 Workflow instance 跑 5 step
+    // pipeline。剩下的固定槽位 cron 只跑：list-poll-ingest（拉新）/ refresh-metrics
+    // (ScrapeBadger batch metric 刷新) / cleanup / GH+ClawHub fetch / HDX。其余 tick
+    // 走 'noop' catch-all（preempt 块 PH/Clawhub/PH-R2 仍跑）。
+    let mode: 'refresh-metrics' | 'cleanup' | 'github-fetch' | 'clawhub-fetch' | 'list-poll-ingest' | 'noop';
     if (isGithubFetchSlot) mode = 'github-fetch';
     else if (isClawhubFetchSlot) mode = 'clawhub-fetch';
     else if (hour === 3 && minute === 35) mode = 'cleanup';
     else if (minute === 0 || minute === 30) mode = 'refresh-metrics';
-    else if (minute === 10 || minute === 40) mode = 'longform-via-sb';
-    else if (minute === 15 || minute === 45) mode = 'detect-longform';
     else if (minute === 25 || minute === 55) mode = 'list-poll-ingest';
-    else if (minute === 5 || minute === 35) mode = 'backfill-replies';
-    else mode = 'backfill-quotes';
+    else mode = 'noop';
     const refreshMode = (env.REFRESH_MODE || 'legacy').toLowerCase();
     const maxTier = Math.min(
       Math.max(parseInt(env.REFRESH_TIER_MAX || '1', 10) || 1, 0),
@@ -856,50 +994,33 @@ export default {
               console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
-            // classify-pending 抢占：12 ticks/hour 都可能跑（队列有就干），
-            // 把"新 item NULL → 进 feed"延迟从 30 min 拉到 5 min。
-            // DeepSeek QPM 不是瓶颈，唯一限制是 CF Worker subrequest 预算
-            // (15 items 1 prompt = 1 LLM call + 15 D1 update ≈ 17 subreq，OK)。
+            // X 主链 classify + fill-translations 已迁 CF Workflow (阶段 4 cutover
+            // 2026-05-16)。每条新 tweet 由 runListPollIngest 触发 instance，跑 5 step
+            // pipeline 含 classify + 翻译。preempt cron 删了，老 batch 函数保留作
+            // /api/enrich/run?mode=classify-pending|fill-translations 兜底（Bearer
+            // INGEST_TOKEN）+ /api/admin/x-trigger-pending-workflows-now 手动 drain。
             //
-            // 2026-05-11 PR #4 hotfix: classify + fill-translations 提到 clawhub
-            // 之前。ClawHub 484 积压用 8/tick 清完仍要 5 小时，期间 X classify /
-            // PH+X 翻译永远等不到 cron tick。ClawHub item 默认 is_relevant=1
-            // （marketplace 不走 LLM 判定），enrich 只是后台数据丰富化
-            // （license/findings），UX 不直接感知，慢一点 OK。
-            const classifyPending = await env.DB.prepare(
-              `SELECT count(*) AS n FROM items WHERE source_type='x_list' AND deleted_at IS NULL AND is_relevant IS NULL`,
-            ).first<{ n: number }>();
-            if ((classifyPending?.n ?? 0) > 0) {
-              const r = await runClassifyPending(env, 15);
-              console.log(`[cron] classify-pending (preempt, ${classifyPending?.n} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            // fill-translations 抢占：同样 12 ticks/hour，每批 15 个 item。
-            // batchSize 5 × 3 batches = 3 LLM call/tick，subreq ~30 内可控。
-            // 包含 PH item（runFillTranslations 内部 SQL 已支持 source_type=product_hunt）。
-            const translatePending = await env.DB.prepare(
+            // PH fill-translations 仍走 preempt 而非 workflow（PH 量小、跟 X 流水
+            // 解耦），但走的是同一个 runFillTranslations batch 函数 — 这里改 SQL
+            // 范围只保留 PH，X 的翻译完全交给 workflow。
+            const phTranslatePending = await env.DB.prepare(
               `SELECT count(*) AS n FROM items
                  WHERE deleted_at IS NULL AND is_relevant=1
-                   AND (
-                     (source_type='x_list' AND content_translated IS NULL
-                      AND lang IS NOT NULL AND lang != 'zh'
-                      AND content IS NOT NULL AND length(content) > 0)
-                     OR (source_type='product_hunt' AND (
-                       (content_translated IS NULL AND content IS NOT NULL)
-                       OR (json_extract(extra, '$.maker_post_text') IS NOT NULL
-                           AND json_extract(extra, '$.maker_post_translated') IS NULL)
-                       OR (json_extract(extra, '$.top_comments') IS NOT NULL
-                           AND EXISTS (
-                             SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
-                             WHERE json_extract(c.value, '$.text') IS NOT NULL
-                               AND json_extract(c.value, '$.translated') IS NULL
-                           ))
-                     ))
+                   AND source_type='product_hunt' AND (
+                     (content_translated IS NULL AND content IS NOT NULL)
+                     OR (json_extract(extra, '$.maker_post_text') IS NOT NULL
+                         AND json_extract(extra, '$.maker_post_translated') IS NULL)
+                     OR (json_extract(extra, '$.top_comments') IS NOT NULL
+                         AND EXISTS (
+                           SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+                           WHERE json_extract(c.value, '$.text') IS NOT NULL
+                             AND json_extract(c.value, '$.translated') IS NULL
+                         ))
                    )`,
             ).first<{ n: number }>();
-            if ((translatePending?.n ?? 0) > 0) {
+            if ((phTranslatePending?.n ?? 0) > 0) {
               const r = await runFillTranslations(env, 15, 5);
-              console.log(`[cron] fill-translations (preempt, ${translatePending?.n} pending) result:`, JSON.stringify(r));
+              console.log(`[cron] fill-translations PH (preempt, ${phTranslatePending?.n} pending) result:`, JSON.stringify(r));
               return;
             }
             // ClawHub enrich pending — 抢占同一 cron slot，每 tick 8 个 item。
@@ -954,23 +1075,15 @@ export default {
             );
             return;
           }
-          if (mode === 'longform-via-sb') {
-            // 替代本地 .longform launchd：批量从 SB 拉 full_text 写回 items.content。
-            // SB by-ids 单次 ≥20 IDs 容易超 CF worker 30s 墙时，limit=10 实测稳定（~18s/批）。
-            // 18/48 各 1 批 = 480 条/天，drain 当前 414 backlog ~20h。
-            const result = await runLongformViaSb(env, 10);
-            console.log(`[cron] longform-via-sb result:`, JSON.stringify(result));
-            return;
+          // X 主链 longform-via-sb / detect-longform / backfill-replies /
+          // backfill-quotes 4 mode 已迁 Workflow（阶段 4）。catch-all (mode='noop')
+          // 让 cron tick 空转 — 等下次 list-poll-ingest / refresh-metrics /
+          // cleanup 等固定槽位再触发。老 batch 函数保留作 /api/enrich/run?mode=X
+          // 兜底（Bearer INGEST_TOKEN）。
+          if (mode === 'cleanup') {
+            const result = await runCleanup(env);
+            console.log(`[cron] cleanup result:`, JSON.stringify(result));
           }
-          const result =
-            mode === 'cleanup'
-              ? await runCleanup(env)
-              : mode === 'detect-longform'
-                ? await runDetectLongform(env, 25, 400)
-                : mode === 'backfill-replies'
-                  ? await runBackfillReplies(env, 40, 200)
-                  : await runBackfillQuotes(env);
-          console.log(`[cron] ${mode} result:`, JSON.stringify(result));
         } catch (e) {
           console.error(`[cron] ${mode} error:`, e);
         }
@@ -1316,9 +1429,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   // Fetch limit+1 to determine has_more
+  // task #8 C 端展示策略：非 hot 模式下，已翻译 item 优先（content_translated IS
+  // NOT NULL）。同时间戳内，已翻译靠前。降低用户「刷到一条英文 wait 翻译」体验。
+  // hot 模式仍按 engagement score 排（翻译先后跟 hot score 无关）。
   const orderBy = isHot
     ? `${HOT_EXPR} DESC, id DESC`
-    : `${sort} DESC, id DESC`;
+    : `(content_translated IS NULL) ASC, ${sort} DESC, id DESC`;
   const selectHotScore = isHot ? `, ${HOT_EXPR} AS hot_score` : '';
   const sql = `SELECT *${selectHotScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
   params.push(limit + 1);

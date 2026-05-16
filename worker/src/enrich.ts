@@ -10,6 +10,10 @@ export interface EnrichEnv {
   // 可选：配置后 refresh-metrics 优先走 ScrapeBadger 批量（覆盖 syndication
   // 不返 retweet_count/view_count 的死角），失败/未命中再回落到 syndication。
   SCRAPEBADGER_API_KEY?: string;
+  // 可选：阶段 4 X 主链 Workflow binding。runListPollIngest 拉完 list 后
+  // 对每条新 tweet 触发 instance；缺失时降级到「写 D1 + 等老 preempt cron」
+  // 兜底（不会破坏老路径）。设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+  X_TWEET_PIPELINE_WORKFLOW?: Workflow;
 }
 
 const SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result";
@@ -540,7 +544,7 @@ interface Patch {
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
-async function applyPatch(
+export async function applyPatch(
   env: EnrichEnv,
   row: CandidateRow,
   patch: Patch,
@@ -2008,6 +2012,13 @@ export async function runListPollIngest(
 
     // upsert 整页（已存在的也走，让 metrics 跟着 SB 实时刷新）
     const stmts: D1PreparedStatement[] = [];
+    const newItemsForWorkflow: Array<{
+      itemId: string;
+      hasQuoteRef: boolean;
+      hasReplyRef: boolean;
+      hasLinkCard: boolean;
+      hasRetweetRef: boolean;
+    }> = [];
     for (const t of r.tweets) {
       const item = sbTweetToIngestItem(t, videoMp4Map);
       if (!item) continue;
@@ -2059,8 +2070,23 @@ export async function runListPollIngest(
           item.extra,
         ),
       );
-      if (!existingSet.has(id)) newCount++;
-      else inserted++; // 实际是 update
+      if (!existingSet.has(id)) {
+        newCount++;
+        // 解析 item.extra 拿 workflow signals（quote / reply / link_card / retweet）
+        let extraObj: Record<string, unknown> = {};
+        try {
+          extraObj = JSON.parse(item.extra || '{}') as Record<string, unknown>;
+        } catch { /* ignore */ }
+        newItemsForWorkflow.push({
+          itemId: id,
+          hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+          hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+          hasLinkCard: !!extraObj.link_card,
+          hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+        });
+      } else {
+        inserted++; // 实际是 update
+      }
     }
 
     if (stmts.length > 0) {
@@ -2070,6 +2096,32 @@ export async function runListPollIngest(
         console.error('[list-poll-ingest] batch error:', e);
         firstError = e instanceof Error ? e.message : 'batch_error';
         break;
+      }
+    }
+
+    // 阶段 4 cutover：D1 batch 成功后，对每条新 tweet 触发 XTweetPipelineWorkflow
+    // instance。binding 缺失时（如未来回滚或本地测试）静默跳过，不破坏 D1 ingest。
+    if (env.X_TWEET_PIPELINE_WORKFLOW && newItemsForWorkflow.length > 0) {
+      for (const n of newItemsForWorkflow) {
+        const instanceId = `x-${n.itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+        try {
+          await env.X_TWEET_PIPELINE_WORKFLOW.create({
+            id: instanceId,
+            params: {
+              itemId: n.itemId,
+              hasQuoteRef: n.hasQuoteRef,
+              hasReplyRef: n.hasReplyRef,
+              hasLinkCard: n.hasLinkCard,
+              hasRetweetRef: n.hasRetweetRef,
+              lang: 'zh',
+            },
+          });
+        } catch (e) {
+          const msg = String(e);
+          if (!msg.toLowerCase().includes('already exists')) {
+            console.error(`[list-poll-ingest] workflow create failed for ${n.itemId}:`, e);
+          }
+        }
       }
     }
 
@@ -3252,7 +3304,7 @@ const SENTENCE_END_CHARS = new Set([
   ' ', '\n', '\t',
 ]);
 
-function noteIdFromTweet(data: Record<string, unknown>): string | null {
+export function noteIdFromTweet(data: Record<string, unknown>): string | null {
   const nt = data.note_tweet as Record<string, unknown> | undefined;
   if (!nt) return null;
   const id = nt.id;
@@ -3271,7 +3323,7 @@ function readLongform(extra: string | null): LongformDetection | null {
   }
 }
 
-async function writeLongform(
+export async function writeLongform(
   env: EnrichEnv,
   itemId: string,
   rowExtra: string | null,
@@ -3744,4 +3796,452 @@ export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichR
     }
   }
   return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0 };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 4 X 主链 Workflow 单 itemId 函数
+//
+// 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+// 给 worker/src/workflows/x-tweet-pipeline.ts 的 step.do 调用。
+//
+// 每个函数完成一个 Workflow step 的工作 —— SELECT row by id → do work → UPDATE。
+// 失败 throw（让 step.do 按 retry config 重试）。
+//
+// 老 batch 函数（runClassifyPending / runFillTranslations / runBackfillQuotes /
+// runBackfillReplies / runDetectLongform / runLongformViaSb）保留，给 admin
+// endpoint 兜底用（backfill 老数据 / Workflow 出问题时手动批量补救）。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Workflow Step 1: DeepSeek LLM 判断 is_relevant + 生成 ai_summary。
+ * 单条调 LLM（vs batch 模式 N 条 1 call）。系统 prompt 重复成本可忽略。
+ */
+export async function classifyXTweetWithLlm(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ is_relevant: 0 | 1; ai_summary: string }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('classifyXTweetWithLlm: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, handle
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; content: string | null; handle: string | null }>();
+
+  if (!row) {
+    throw new Error(`classifyXTweetWithLlm: item not found ${itemId}`);
+  }
+
+  const input = [{
+    idx: 0,
+    handle: row.handle || '',
+    text: (row.content || '').slice(0, 600),
+  }];
+  const prompt = CLASSIFY_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      max_tokens: 500,  // 单条不需要 4000
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`classifyXTweetWithLlm: HTTP ${res.status} for ${itemId}`);
+  }
+
+  const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: ClassifyResponse;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`classifyXTweetWithLlm: JSON parse failed for ${itemId}`);
+  }
+
+  const item = (parsed.items || [])[0];
+  if (!item) {
+    throw new Error(`classifyXTweetWithLlm: empty items array for ${itemId}`);
+  }
+
+  const isRel = item.is_relevant === 1 ? 1 : 0;
+  const summary = (item.ai_summary || '').trim();
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET is_relevant = ?,
+            matched_by = COALESCE(matched_by, 'workflow-classify'),
+            extra = json_set(coalesce(extra, '{}'),
+                             '$.ai_summary', ?,
+                             '$.classified_at', ?)
+      WHERE id = ?`,
+  ).bind(isRel, summary, new Date().toISOString(), itemId).run();
+
+  console.log(`[x-workflow:step1] ${itemId}: is_relevant=${isRel}`);
+  return { is_relevant: isRel, ai_summary: summary };
+}
+
+/**
+ * Workflow Step 2a: 通过 syndication API 回填 quote_of / link_card。
+ * 跟老 runBackfillQuotes 一条 loop body 同逻辑，去掉 state KV bookkeeping。
+ */
+export async function backfillQuoteForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ has_quote: boolean; has_link_card: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`backfillQuoteForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  if (res === null) {
+    throw new Error(`backfillQuoteForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound || !res.data) {
+    console.log(`[x-workflow:step2a] ${itemId}: tweet not found via syndication`);
+    return { has_quote: false, has_link_card: false };
+  }
+
+  const qt = res.data.quoted_tweet as Record<string, unknown> | undefined;
+  const card = apiToLinkCard(res.data);
+  const apiReplyTo = res.data.in_reply_to_status_id_str as string | undefined;
+
+  const patch: Patch = {};
+  let hasQuote = false;
+  let hasLinkCard = false;
+  if (qt && qt.id_str) {
+    patch.quote_of_id = qt.id_str as string;
+    patch.quote_of = apiToQuoteOf(qt);
+    hasQuote = true;
+  }
+  if (card) {
+    patch.link_card = card;
+    hasLinkCard = true;
+  }
+  if (!apiReplyTo) patch.clearThreadRoot = true;
+
+  await applyPatch(env, row as CandidateRow, patch);
+  console.log(`[x-workflow:step2a] ${itemId}: quote=${hasQuote} link_card=${hasLinkCard}`);
+  return { has_quote: hasQuote, has_link_card: hasLinkCard };
+}
+
+/**
+ * Workflow Step 2b: 通过 syndication API 回填 reply_of_id / reply_of snapshot。
+ * 跟老 runBackfillReplies 一条 loop body 同逻辑。
+ */
+export async function backfillReplyForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ has_reply: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`backfillReplyForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  if (res === null) {
+    throw new Error(`backfillReplyForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound || !res.data) {
+    console.log(`[x-workflow:step2b] ${itemId}: tweet not found via syndication`);
+    return { has_reply: false };
+  }
+
+  const apiReplyToId = res.data.in_reply_to_status_id_str as string | undefined;
+  const apiReplyToHandle = res.data.in_reply_to_screen_name as string | undefined;
+  const parent = res.data.parent as Record<string, unknown> | undefined;
+
+  const patch: Patch = { reply_enriched: true };
+  let hasReply = false;
+  if (apiReplyToId) {
+    patch.reply_of_id = apiReplyToId;
+    patch.reply_to_screen_name = apiReplyToHandle ?? null;
+    if (parent && parent.id_str) {
+      patch.reply_of = apiToQuoteOf(parent);
+    } else {
+      // Parent suppressed (deleted/protected) — keep id+handle 但 reply_of null
+      patch.reply_of = null;
+    }
+    hasReply = true;
+  }
+
+  await applyPatch(env, row as CandidateRow, patch);
+  console.log(`[x-workflow:step2b] ${itemId}: reply=${hasReply}`);
+  return { has_reply: hasReply };
+}
+
+/**
+ * Workflow Step 2c: 检测 longform 标记（note_tweet.id 有则是长推待 fetch）。
+ * 跟老 runDetectLongform 一条 loop body 同逻辑。
+ */
+export async function checkLongformForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ is_longform: boolean; note_id: string | null }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`checkLongformForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  const nowIso = new Date().toISOString();
+
+  if (res === null) {
+    throw new Error(`checkLongformForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound) {
+    await writeLongform(env, row.id, row.extra, {
+      detected_at: nowIso,
+      fetch_error: 'syndication_404',
+    });
+    return { is_longform: false, note_id: null };
+  }
+  if (!res.data) {
+    return { is_longform: false, note_id: null };
+  }
+
+  const noteId = noteIdFromTweet(res.data);
+  const det: LongformDetection = { detected_at: nowIso };
+  if (noteId) det.note_id = noteId;
+  await writeLongform(env, row.id, row.extra, det);
+
+  console.log(`[x-workflow:step2c] ${itemId}: longform=${!!noteId}`);
+  return { is_longform: !!noteId, note_id: noteId };
+}
+
+/**
+ * Workflow Step 3: ScrapeBadger 拉长推完整文本，写 content。
+ * 老 runLongformViaSb 是 batch N 条 1 call（省 credits），单 itemId 是 2 credits/条。
+ * 长推占比 < 1% (80 条/天约 1 条)，单 itemId 额外 cost <$0.0005/月，可忽略。
+ */
+export async function fetchLongformViaScrapeBadger(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  itemId: string,
+): Promise<{ updated: boolean; full_text_len: number }> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    throw new Error('fetchLongformViaScrapeBadger: SCRAPEBADGER_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, content, extra
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`fetchLongformViaScrapeBadger: item not found ${itemId}`);
+
+  // 直接 SB raw endpoint 拿 full_text（同老 runLongformViaSb 的简化版）
+  const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${row.source_id}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+  });
+  if (!res.ok) {
+    throw new Error(`fetchLongformViaScrapeBadger: SB HTTP ${res.status} for ${row.source_id}`);
+  }
+  const body = (await res.json()) as { data?: Array<{ id?: string; full_text?: string; text?: string }> };
+  const ft = body.data?.[0]?.full_text || body.data?.[0]?.text || '';
+
+  const nowIso = new Date().toISOString();
+  if (!ft) {
+    // SB 没返（已删/私密/受限）→ 记 fetch_error 避免下次再选
+    await env.DB.prepare(
+      `UPDATE items
+          SET extra = json_set(coalesce(extra, '{}'),
+                               '$.longform.fetch_error', ?,
+                               '$.longform.fetched_at', ?)
+        WHERE id = ?`,
+    ).bind('not_returned_by_sb', nowIso, row.id).run();
+    console.log(`[x-workflow:step3] ${itemId}: SB no full_text returned`);
+    return { updated: false, full_text_len: 0 };
+  }
+
+  // 仅在 SB 给的更长时才覆盖（monotonic 规则同 ingest）
+  await env.DB.prepare(
+    `UPDATE items
+        SET content = CASE
+              WHEN content IS NULL OR length(?) >= length(content) THEN ?
+              ELSE content
+            END,
+            extra = json_set(coalesce(extra, '{}'), '$.longform.fetched_at', ?)
+      WHERE id = ?`,
+  ).bind(ft, ft, nowIso, row.id).run();
+  console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c`);
+  return { updated: true, full_text_len: ft.length };
+}
+
+/**
+ * Workflow Step 4 (任一字段): 通用单字段翻译 dispatch。
+ * 6 个 field 类型对应 fan-out 6 个独立 step.do。每个 step 独立 retry，
+ * 任一失败不影响其他字段。
+ *
+ * task #7 i18n 友好：opts.lang 参数预留多语言扩展，当前只支持 'zh'。
+ * 未来扩 en/ja/etc 时改这里的 prompt 模板，不动 schema。
+ *
+ * task #6 reply/retweet 覆盖：把老 fill-translations 不扫的 reply_of.content
+ * 和 retweet_of.content 加进 dispatch，跟 Phase 1 ingest 信号联动跑。
+ */
+export type XTweetTranslateField =
+  | 'content'
+  | 'quote_of.content'
+  | 'link_card.title'
+  | 'link_card.description'
+  | 'reply_of.content'
+  | 'retweet_of.content';
+
+export async function translateXTweetField(
+  env: EnrichEnv,
+  itemId: string,
+  field: XTweetTranslateField,
+  opts: { lang: 'zh' | 'en' | 'ja' } = { lang: 'zh' },
+): Promise<{ translated: boolean; chars: number }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('translateXTweetField: DEEPSEEK_API_KEY missing');
+  }
+  if (opts.lang !== 'zh') {
+    // task #7 接口预留 lang 参数，当前 prompt 模板只支持 zh
+    throw new Error(`translateXTweetField: lang=${opts.lang} not yet supported (only 'zh')`);
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, content_translated, lang, extra
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{
+    id: string;
+    content: string | null;
+    content_translated: string | null;
+    lang: string | null;
+    extra: string | null;
+  }>();
+  if (!row) throw new Error(`translateXTweetField: item not found ${itemId}`);
+
+  const extra: Record<string, unknown> = row.extra
+    ? (JSON.parse(row.extra) as Record<string, unknown>)
+    : {};
+
+  // ── 取 source text + 判断是否需要翻译 ─────────────────────────
+  let sourceText: string;
+  let alreadyDone: boolean;
+  let isAlreadyZh = false;
+
+  if (field === 'content') {
+    if (!row.content) return { translated: false, chars: 0 };
+    sourceText = row.content;
+    alreadyDone = !!row.content_translated;
+    isAlreadyZh = row.lang === 'zh' || row.lang === 'zh-cn' || row.lang === 'zh-tw';
+  } else if (field === 'quote_of.content') {
+    const qo = extra.quote_of as { content?: string; content_translated?: string } | undefined;
+    if (!qo?.content) return { translated: false, chars: 0 };
+    sourceText = qo.content;
+    alreadyDone = !!qo.content_translated;
+  } else if (field === 'link_card.title') {
+    const lc = extra.link_card as { title?: string; title_translated?: string } | undefined;
+    if (!lc?.title) return { translated: false, chars: 0 };
+    sourceText = lc.title;
+    alreadyDone = !!lc.title_translated;
+  } else if (field === 'link_card.description') {
+    const lc = extra.link_card as { description?: string; description_translated?: string } | undefined;
+    if (!lc?.description) return { translated: false, chars: 0 };
+    sourceText = lc.description;
+    alreadyDone = !!lc.description_translated;
+  } else if (field === 'reply_of.content') {
+    const ro = extra.reply_of as { content?: string; content_translated?: string } | undefined;
+    if (!ro?.content) return { translated: false, chars: 0 };
+    sourceText = ro.content;
+    alreadyDone = !!ro.content_translated;
+  } else if (field === 'retweet_of.content') {
+    const rto = extra.retweet_of as { content?: string; content_translated?: string } | undefined;
+    if (!rto?.content) return { translated: false, chars: 0 };
+    sourceText = rto.content;
+    alreadyDone = !!rto.content_translated;
+  } else {
+    throw new Error(`translateXTweetField: unknown field ${field}`);
+  }
+
+  if (alreadyDone) {
+    console.log(`[x-workflow:step4:${field}] ${itemId}: already translated, skip`);
+    return { translated: false, chars: 0 };
+  }
+  if (isAlreadyZh) {
+    console.log(`[x-workflow:step4:${field}] ${itemId}: source already zh, skip`);
+    return { translated: false, chars: 0 };
+  }
+  if (!sourceText.trim()) return { translated: false, chars: 0 };
+
+  // ── 翻译（复用现有 translateBatch，单 text 包成 1 元素数组）──
+  const result = await translateBatch(env.DEEPSEEK_API_KEY, [sourceText]);
+  const translated = result.get(0);
+  if (!translated) {
+    throw new Error(`translateXTweetField: empty translation for ${itemId} ${field}`);
+  }
+
+  // sanity check（suspect 时单次 retry，仍 suspect 留 suspect 标记）
+  let finalText = translated;
+  let attempts = 1;
+  let quality: 'ok' | 'suspect' = sanityHit(sourceText, translated) ? 'suspect' : 'ok';
+  if (quality === 'suspect') {
+    const retry = await translateBatch(env.DEEPSEEK_API_KEY, [sourceText]);
+    const retryTr = retry.get(0);
+    if (retryTr) {
+      attempts = 2;
+      if (!sanityHit(sourceText, retryTr)) {
+        finalText = retryTr;
+        quality = 'ok';
+      } else {
+        finalText = retryTr; // 保留 retry 结果，仍 suspect 由人工 review
+      }
+    }
+  }
+
+  // ── 写回（按 field 类型分支写到 D1 column 或 extra JSON 路径）──
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (field === 'content') {
+    // task #8: 写 translated_at 给 C 端「N 条新译文可加载」横条用
+    await env.DB.prepare(
+      `UPDATE items
+          SET content_translated = ?,
+              translation_quality = ?,
+              translation_attempts = COALESCE(translation_attempts, 0) + ?,
+              translated_at = ?
+        WHERE id = ?`,
+    ).bind(finalText, quality, attempts, nowTs, itemId).run();
+  } else {
+    // 写到 extra JSON 子路径
+    const newExtra = { ...extra } as Record<string, unknown>;
+    if (field === 'quote_of.content') {
+      const qo = (newExtra.quote_of || {}) as Record<string, unknown>;
+      newExtra.quote_of = { ...qo, content_translated: finalText, translated_at: nowTs };
+    } else if (field === 'link_card.title') {
+      const lc = (newExtra.link_card || {}) as Record<string, unknown>;
+      newExtra.link_card = { ...lc, title_translated: finalText };
+    } else if (field === 'link_card.description') {
+      const lc = (newExtra.link_card || {}) as Record<string, unknown>;
+      newExtra.link_card = { ...lc, description_translated: finalText };
+    } else if (field === 'reply_of.content') {
+      const ro = (newExtra.reply_of || {}) as Record<string, unknown>;
+      newExtra.reply_of = { ...ro, content_translated: finalText, translated_at: nowTs };
+    } else if (field === 'retweet_of.content') {
+      const rto = (newExtra.retweet_of || {}) as Record<string, unknown>;
+      newExtra.retweet_of = { ...rto, content_translated: finalText, translated_at: nowTs };
+    }
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newExtra), itemId).run();
+  }
+
+  console.log(`[x-workflow:step4:${field}] ${itemId}: translated ${finalText.length}c quality=${quality}`);
+  return { translated: true, chars: finalText.length };
 }
