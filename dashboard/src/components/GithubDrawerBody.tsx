@@ -8,7 +8,6 @@ import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
 import { cn, formatCompact, ordinal, parseJsonField, proxyImg, timeAgo, timeAgoOrDate } from "../lib/utils";
 import { langDotClass } from "../lib/githubLang";
-import { extractFirstReadmeImage } from "./GithubCard";
 import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
@@ -17,13 +16,16 @@ import {
   IconWatching,
 } from "./icons";
 
-// Resolve relative URLs in README to absolute GitHub URLs.
-//   - "/r/..." (worker R2 proxy path written by v2.3 r2-migrate) → leave as
-//     same-origin path so browser hits ai-feeds.com/r/<key>. Without this
-//     the URL got mangled to raw.githubusercontent.com/.../r/gh/... → 404 →
-//     onError display:none → user thought "image link is github" because
-//     they only saw non-migrated images (badges/external).
-//   - relative path "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
+// dashboard origin（CF Pages）≠ worker origin（api.ai-feeds.com）；
+// /r/<key> R2 反代在 worker 那边，dashboard 端访问要走 worker base。
+// 之前老注释说"leave as same-origin"是 dashboard 和 worker 同源时代的逻辑
+// (dashboard 部署在 ai-feeds.com 时假设 worker /r/ 也走 same-origin 反代)，
+// CF Pages 拆开后失效 — README 里所有 /r/ 图片在抽屉里都 404。
+const API_BASE = import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
+
+// Resolve relative URLs in README to absolute URLs.
+//   - "/r/..." (worker R2 proxy) → prefix API_BASE so request hits worker origin
+//   - relative "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
 //   - root-relative "/foo" (other than /r/) → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
 //   - absolute http(s):/data:/blob:/mailto:/anchor → untouched
 function resolveRelative(
@@ -35,8 +37,8 @@ function resolveRelative(
 ): string | undefined {
   if (!src) return src;
   if (/^(https?:|data:|blob:|mailto:|#)/i.test(src)) return src;
-  // R2 proxy path (server-side rewrite of v2.3) — leave as-is for same origin
-  if (src.startsWith("/r/")) return src;
+  // R2 proxy path (worker /r/<key>) — 必须 prefix worker base，dashboard origin 没这路由
+  if (src.startsWith("/r/")) return `${API_BASE}${src}`;
   const base =
     type === "raw"
       ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`
@@ -270,15 +272,6 @@ export function GithubDrawerBody({ item }: Props) {
     () => extractReadmeImages(readmeToShow || readmeRaw || "", owner, repoName, defaultBranch),
     [readmeToShow, readmeRaw, owner, repoName, defaultBranch],
   );
-
-  // Hero cover image：跟流内 GithubCard / 分享海报用同一张图源（README
-  // 第一张 <img>），保证从 feed 点进抽屉后顶部 hero 视觉延续
-  const heroCover = useMemo(() => {
-    const readme = (extra as Record<string, unknown>).readme_excerpt;
-    if (typeof readme !== "string" || !owner || !repoName) return null;
-    return extractFirstReadmeImage(readme, owner, repoName, defaultBranch);
-  }, [extra, owner, repoName, defaultBranch]);
-  const [heroCoverFailed, setHeroCoverFailed] = useState(false);
   const markdownComponents = useMemo(
     () =>
       makeMarkdownComponents(owner, repoName, defaultBranch, (resolvedSrc) => {
@@ -459,23 +452,6 @@ export function GithubDrawerBody({ item }: Props) {
           </div>
         )}
       </div>
-
-      {/* Hero cover image — 跟流内 GithubCard / 分享海报用同一张图源（README
-          第一张 <img>），保持视觉延续：用户从 feed 点进抽屉，顶部第一眼仍是
-          同一张 cover，再往下是 summary + README。w=800 因为抽屉宽度比流内
-          卡片大约 2 倍，物理像素更高保证清晰度 */}
-      {heroCover && !heroCoverFailed && (
-        <div className="border-b border-neutral-100">
-          <img
-            src={proxyImg(heroCover, 800)}
-            alt=""
-            loading="lazy"
-            className="w-full bg-neutral-100 object-cover"
-            style={{ aspectRatio: "16/9" }}
-            onError={() => setHeroCoverFailed(true)}
-          />
-        </div>
-      )}
 
       {/* AI summary */}
       {summary && (
