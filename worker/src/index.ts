@@ -2315,6 +2315,8 @@ const ALLOWED_IMG_HOSTS = new Set([
   'pbs.twimg.com',
   'abs.twimg.com',
   'video.twimg.com',
+  // GH 头像国内访问偶发慢 / 302 重定向到 camo；前端 proxyImg() 同步加白
+  'avatars.githubusercontent.com',
 ]);
 
 async function handleImageProxy(request: Request): Promise<Response> {
