@@ -115,10 +115,16 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
       lastErr = e;
       // Last attempt — give up
       if (attempt >= RETRY_BACKOFFS_MS.length) {
+        // Every fetch attempt is wrapped in its own AbortController with a
+        // FETCH_TIMEOUT_MS timeout, so AbortError almost always means "timeout"
+        // rather than user cancellation. Normalize to a stable string so the
+        // admin dashboard can bucket timeouts separately from real errors.
+        const rawMsg = e instanceof Error ? e.message : String(e);
+        const isAbort = e instanceof Error && (e.name === 'AbortError' || /aborted|abort/i.test(rawMsg));
         track(EVENTS.API_ERROR, {
           endpoint: path,
           status: 0,
-          error_msg: e instanceof Error ? e.message : String(e),
+          error_msg: isAbort ? `timeout_${FETCH_TIMEOUT_MS}ms` : rawMsg,
           attempts: attempt + 1,
         });
         throw e;

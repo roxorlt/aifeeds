@@ -224,6 +224,25 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
     }
 
+    // Bot UA gate: cheap UA-string match to drop obvious scrapers/AI-training crawlers
+    // before they hit D1/R2. Search engine bots + social previewers stay on the allowlist
+    // since they drive SEO + share-card value. /api/ingest and /api/track are exempt:
+    // ingest is python-requests from our own scrapers; track must accept anything posted
+    // by browsers (already device-token gated). Empty UA is suspicious but we allow it —
+    // some monitoring tools and curl-style health checks omit UA.
+    if (path !== '/api/ingest' && path !== '/api/track') {
+      const ua = request.headers.get('User-Agent') || '';
+      if (ua && isBlockedBot(ua)) {
+        return new Response('Forbidden', {
+          status: 403,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      }
+    }
+
     try {
       if (path === '/api/ingest' && request.method === 'POST') {
         return handleIngest(request, env);
@@ -2672,6 +2691,44 @@ async function handleImageProxy(request: Request): Promise<Response> {
   });
 }
 
+// ─── Bot UA + hot-link defense ─────────────────────────────────
+// Two cheap string matches that run before D1/R2 access:
+//   1. isBlockedBot — catches AI-training crawlers + scripted scrapers
+//      (GPTBot/ClaudeBot/python-requests/curl/scanners). Verified search-engine
+//      bots (Googlebot/Bingbot/Baiduspider/Sogou) and social previewers
+//      (Twitterbot/facebookexternalhit/Slackbot) intentionally NOT blocked
+//      since they drive SEO + share-card previews.
+//   2. R2_REFERER_WHITELIST — blocks hot-linking of /r/<key> images/videos
+//      from third-party sites. Empty referer (direct hit / poster renderer)
+//      always allowed; otherwise must come from our own domains or known
+//      social media that strip referer naturally.
+const BLOCKED_BOT_RE = /\b(gptbot|claudebot|claude-web|anthropic-ai|ccbot|perplexitybot|bytespider|meta-externalagent|amazonbot|cohere-training|google-extended|youbot|diffbot|ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|seznambot|blexbot|magpie-crawler|datanyze|barkrowler|scrapy|httpie|python-requests|go-http-client|java-http-client|apache-httpclient|okhttp|libwww-perl|nikto|sqlmap|nmap|masscan|wfuzz|dirbuster|gobuster|nuclei|wpscan|acunetix|nessus|burp|zgrab|censys|shodan|headlesschrome|phantomjs|puppeteer|playwright)\b/i;
+const CURL_WGET_RE = /^(curl|wget)\//i;
+function isBlockedBot(ua: string): boolean {
+  return BLOCKED_BOT_RE.test(ua) || CURL_WGET_RE.test(ua);
+}
+
+const R2_REFERER_ALLOW = new Set<string>([
+  'ai-feeds.com', 'www.ai-feeds.com', 'api.ai-feeds.com',
+  'staging.ai-feeds.com', 'staging-api.ai-feeds.com',
+  'twitter.com', 'x.com', 'mobile.twitter.com', 'mobile.x.com', 't.co',
+  'producthunt.com', 'www.producthunt.com',
+  'github.com', 'www.github.com',
+  'localhost', '127.0.0.1',
+]);
+function isAllowedR2Referer(referer: string): boolean {
+  if (!referer) return true; // empty = direct hit, allow
+  try {
+    const host = new URL(referer).hostname;
+    if (R2_REFERER_ALLOW.has(host)) return true;
+    if (host.endsWith('.pages.dev')) return true; // CF Pages preview deploys
+    if (host.endsWith('.localhost')) return true;
+    return false;
+  } catch {
+    return false; // malformed referer → suspicious, block
+  }
+}
+
 // ─── GET /r/:key ───────────────────────────────────────────────
 // Serve migrated README assets from R2 with long cache + CORS.
 // Key shape: gh/<owner>/<repo>/<sha256>.<ext>
@@ -2679,6 +2736,16 @@ async function handleImageProxy(request: Request): Promise<Response> {
 async function handleR2Asset(request: Request, env: Env, key: string): Promise<Response> {
   if (!env.READMES) return new Response('R2 not configured', { status: 503 });
   if (!key) return new Response('missing key', { status: 400 });
+
+  if (!isAllowedR2Referer(request.headers.get('Referer') || '')) {
+    return new Response('Forbidden (hotlink)', {
+      status: 403,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    });
+  }
 
   const obj = await env.READMES.get(key);
   if (!obj) return new Response('not found', { status: 404 });
