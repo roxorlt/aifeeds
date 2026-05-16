@@ -26,9 +26,6 @@ import {
   runGithubEnrichPending,
   runGithubReadmeTranslate,
   runGithubR2Migrate,
-  countGithubPending,
-  countGithubReadmeTranslatePending,
-  countGithubR2Pending,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
@@ -126,7 +123,15 @@ export interface Env {
   // Used by worker/src/scrapers/ph.ts (daily fetch cron).
   PH_CLIENT_ID?: string;
   PH_CLIENT_SECRET?: string;
+  // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
+  // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
+  // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
+  // github-readme-translate)。设计：docs/plans/2026-05-16-github-pipeline-workflows-design.md
+  GITHUB_PIPELINE_WORKFLOW: Workflow;
 }
+
+// re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
+export { GithubPipelineWorkflow } from './workflows/github-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -334,6 +339,71 @@ export default {
         const limit = Math.min(parseInt(u.searchParams.get('limit') || '1', 10), 5);
         const result = await runPhR2Migrate(env, limit);
         return jsonResponse(result, 200, request, env);
+      }
+      // ─── GH Phase 1 手动触发（admin debug + staging 端到端测试用） ─
+      // POST /api/admin/gh-fetch-now
+      // 拉 trending HTML → 写 stub 行 → trigger Workflow for new repos
+      if (path === '/api/admin/gh-fetch-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const result = await runGithubFetchTrending(env);
+        return jsonResponse(result, 200, request, env);
+      }
+      // ─── GH Workflow 一次性 drain pending（迁移后兜底） ───────────
+      // POST /api/admin/gh-trigger-pending-workflows-now?limit=N
+      //
+      // 扫两类 item：
+      //   (a) extra.gh_pending=true — Phase 1 写完 stub 但还没跑 Workflow（正常 pending）
+      //   (b) is_relevant IS NULL — 已 enrich 但 LLM 判别失败的「卡死」item
+      //       (老 preempt 流程下，LLM 失败时 gh_pending 被清成 0，留下 NULL is_relevant)
+      //
+      // Workflow 完全幂等：step 1 重写 metadata、step 2 重新 LLM、step 3/4 幂等。
+      // 已存在 instance ID 自动跳过（同 itemId 不会被多次创建实例）。
+      if (path === '/api/admin/gh-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 100);
+        if (!env.GITHUB_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'GITHUB_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='github'
+              AND deleted_at IS NULL
+              AND (
+                COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')
+                OR is_relevant IS NULL
+              )
+            ORDER BY scraped_at ASC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string }>();
+        let triggered = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const r of pending.results) {
+          const instanceId = `gh-${r.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+          try {
+            await env.GITHUB_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId: r.id } });
+            triggered++;
+          } catch (e) {
+            if (String(e).toLowerCase().includes('already exists')) {
+              skipped++;
+            } else {
+              failed++;
+              console.error(`[gh-trigger-pending] failed for ${r.id}:`, e);
+            }
+          }
+        }
+        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
       }
       // F1: 手动触发 retweet 父推回填（ADMIN basic auth wrapper）
       // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=400, ?recover=1
@@ -764,40 +834,15 @@ export default {
               return;
             }
           }
-          // Github preempt order (each preempt drains a batch sequentially —
-          // no 5-min gap between rows):
-          //   1. enrich (initial API + LLM judge, ~5-10s/row)
-          //   2. r2-migrate (download + upload assets, ~5-15s/row capped 8 assets)
-          //   3. readme-translate (DeepSeek translate, ~3-5s/row)
-          //   ↓ if no github work, fall through to X cron rotation.
-          // github-fetch slot itself never gets preempted (it's the only window
-          // for fresh trending data).
+          // GH 抓取链已迁 CF Workflow (worker/src/workflows/github-pipeline.ts)。
+          // Phase 1 (github-fetch slot) 写 stub 行 + 立刻 create Workflow instance，
+          // instance 自己跑 enrich / classify / r2-migrate / readme-translate。
+          // 之前的 3 个 preempt 分支 (github-enrich / github-r2-migrate /
+          // github-readme-translate) 已移除。设计：docs/plans/2026-05-16-github-pipeline-workflows-design.md
           //
-          // Per-tick batch sizes sized to fit ~30s of wall time — drain queue
-          // fast without bumping CF Worker time limit. translate is the
-          // cheapest so largest batch.
+          // 老 pending item 兜底：用 /api/admin/gh-trigger-pending-workflows-now
+          // 手动 drain（迁移后一次性即可，未来正常流程不会再产生 pending）。
           if (mode !== 'github-fetch') {
-            const pending = await countGithubPending(env);
-            if (pending > 0) {
-              const r = await runGithubEnrichPending(env, 3);
-              console.log(`[cron] github-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            const r2Pending = await countGithubR2Pending(env);
-            if (r2Pending > 0) {
-              // Bumped per-repo cap to 20; lower batch size to 1 so each tick
-              // does one repo fully (vs 2 partial repos). Subrequest budget:
-              // 1 SELECT + 1 × (20 GET + 1 UPDATE) = 22 (CF Free 50 OK).
-              const r = await runGithubR2Migrate(env, 1);
-              console.log(`[cron] github-r2-migrate (preempt, ${r2Pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            const trPending = await countGithubReadmeTranslatePending(env);
-            if (trPending > 0) {
-              const r = await runGithubReadmeTranslate(env, 6);
-              console.log(`[cron] github-readme-translate (preempt, ${trPending} pending) result:`, JSON.stringify(r));
-              return;
-            }
             // PH enrich — DeepSeek 一次性产 is_ai + ai_category + ai_summary
             // (仿 github-enrich 模式)。先于 fill-translations 跑：is_relevant=0
             // 的 PH item 不进翻译流程，省 DeepSeek 翻译额度。
