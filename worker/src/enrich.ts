@@ -438,6 +438,15 @@ export async function refreshSingleItem(
         expirationTtl: REFRESH_THROTTLE_TTL,
       });
     }
+    // 治本 C 阶段 6：drawer 检测 CH stuck (ch_pending=true) → trigger workflow
+    const chStuck = await env.DB.prepare(
+      `SELECT 1 FROM items WHERE id = ? AND source_type='clawhub'
+        AND json_extract(extra, '$.ch_pending') = 1`,
+    ).bind(itemId).first();
+    if (chStuck && (env as { CH_PIPELINE_WORKFLOW?: Workflow }).CH_PIPELINE_WORKFLOW) {
+      const { triggerChWorkflowForItem } = await import('./clawhub');
+      await triggerChWorkflowForItem(env as { DB: D1Database; CH_PIPELINE_WORKFLOW?: Workflow }, itemId);
+    }
     return { refreshed: true, source_type: 'clawhub', reason: 'success', metrics: r.metrics };
   }
 
@@ -466,6 +475,19 @@ export async function refreshSingleItem(
     await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
       expirationTtl: REFRESH_THROTTLE_TTL,
     });
+    // 治本 C 阶段 6：drawer 检测 PH stuck → trigger workflow
+    const phStuck = await env.DB.prepare(
+      `SELECT 1 FROM items WHERE id = ? AND source_type='product_hunt'
+        AND (
+          is_relevant IS NULL
+          OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL)
+          OR (is_relevant=1 AND content IS NOT NULL AND content_translated IS NULL)
+        )`,
+    ).bind(itemId).first();
+    if (phStuck && (env as { PH_PIPELINE_WORKFLOW?: Workflow }).PH_PIPELINE_WORKFLOW) {
+      const { triggerPhWorkflowForItem } = await import('./scrapers/ph');
+      await triggerPhWorkflowForItem(env as { DB: D1Database; PH_PIPELINE_WORKFLOW?: Workflow }, itemId);
+    }
     return { refreshed: true, source_type: 'product_hunt', reason: 'success', metrics: r.metrics };
   }
 

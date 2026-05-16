@@ -29,6 +29,8 @@ export interface ClawhubEnv {
   DB: D1Database;
   DEEPSEEK_API_KEY?: string;
   READMES?: R2Bucket;
+  // 阶段 6: optional CH workflow binding，缺失时 Phase 1 静默跳过 trigger
+  CH_PIPELINE_WORKFLOW?: Workflow;
 }
 
 const CONVEX_REST = "https://wry-manatee-359.convex.site/api/v1";
@@ -634,6 +636,36 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
       }
     } catch (e: any) {
       counts.errors.push(`batch ${i / CHUNK}: ${e?.message || e}`);
+    }
+  }
+
+  // 阶段 6 cutover: 对每条新 skill (ch_pending=true) 触发 CH workflow。
+  // 老 enriched skill ch_pending=false 不重触发。helper 内置 marker 防重。
+  // CF Worker subreq cap 1000，每个 trigger 2 subreq → 限 N=400 上限。
+  if (env.CH_PIPELINE_WORKFLOW) {
+    const slugs = Array.from(allBySort.keys());
+    if (slugs.length > 0) {
+      // 拆 chunks 查 — 单次 IN(...) 太多 params D1 限制；250 一批安全
+      const SLUG_CHUNK = 250;
+      const newSlugIds: string[] = [];
+      for (let i = 0; i < slugs.length; i += SLUG_CHUNK) {
+        const chunk = slugs.slice(i, i + SLUG_CHUNK);
+        const ph = chunk.map(() => '?').join(',');
+        const newRows = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='clawhub'
+              AND source_id IN (${ph})
+              AND json_extract(extra, '$.ch_pending') = 1`,
+        ).bind(...chunk).all<{ id: string }>();
+        for (const row of newRows.results) newSlugIds.push(row.id);
+      }
+      // 单批 Phase 1 触发 cap 400（subreq 限制）。超过的话下次 cron 接力或 drain admin
+      let triggered = 0;
+      for (const id of newSlugIds.slice(0, 400)) {
+        const res = await triggerChWorkflowForItem(env, id);
+        if (res === 'triggered') triggered++;
+      }
+      console.log(`[clawhub-fetch] workflows_triggered=${triggered}/${newSlugIds.length} (capped at 400 if more)`);
     }
   }
 

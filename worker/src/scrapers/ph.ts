@@ -769,6 +769,26 @@ export async function runPhDailyFetch(
     `[ph] ingestItems: inserted=${ingestResult.inserted} updated=${ingestResult.updated} errors=${ingestResult.errors.length}`,
   );
 
+  // 阶段 6 cutover: 对每条新 post (is_relevant=NULL) 触发 PH workflow
+  if (env.PH_PIPELINE_WORKFLOW) {
+    const sourceIds = items.map((i) => i.source_id);
+    if (sourceIds.length > 0) {
+      const placeholders = sourceIds.map(() => '?').join(',');
+      const needsWorkflow = await env.DB.prepare(
+        `SELECT id FROM items
+          WHERE source_type='product_hunt'
+            AND source_id IN (${placeholders})
+            AND is_relevant IS NULL`,
+      ).bind(...sourceIds).all<{ id: string }>();
+      let triggered = 0;
+      for (const r of needsWorkflow.results) {
+        const res = await triggerPhWorkflowForItem(env, r.id);
+        if (res === 'triggered') triggered++;
+      }
+      console.log(`[ph] workflows_triggered=${triggered}/${needsWorkflow.results.length}`);
+    }
+  }
+
   // 4. Append metrics_snapshots_ph
   await appendMetricsSnapshots(env, items, ptDate);
 
@@ -1103,22 +1123,100 @@ export async function classifyPhItemWithLlm(
   return { is_relevant: isRel };
 }
 
-export async function r2MigratePhItemById(
-  _env: Env,
-  itemId: string,
-): Promise<{ assets_migrated: number }> {
-  console.log(`[ph-workflow:step2 STUB] ${itemId}`);
-  // TODO: 复用 runPhR2Migrate (ph-r2.ts) loop body → 1 item logo/gallery/video → R2
-  return { assets_migrated: 0 };
-}
+// r2MigratePhItemById 移到 ph-r2.ts (跟 runPhR2Migrate 同文件共享 helpers)
+// workflow class import 从 '../ph-r2' 而不是 '../scrapers/ph'
 
+/**
+ * Workflow Step 3: 翻译 tagline (item.content) + maker_post (extra.maker_post_text)
+ * + top_comments[].text (extra.top_comments[i].text)，写回 content_translated +
+ * extra.maker_post_translated + extra.top_comments[i].translated。
+ *
+ * task #8: 写 translated_at 给 C 端「N 条新译文」横条用
+ */
 export async function translatePhFieldsForItem(
-  _env: Env,
+  env: Env,
   itemId: string,
 ): Promise<{ fields_translated: number }> {
-  console.log(`[ph-workflow:step3 STUB] ${itemId}`);
-  // TODO: tagline + maker_post + top_comments[] DeepSeek translate
-  return { fields_translated: 0 };
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('translatePhFieldsForItem: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, content_translated, extra FROM items
+      WHERE id = ? AND source_type='product_hunt'`,
+  ).bind(itemId).first<{
+    id: string; content: string | null;
+    content_translated: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`translatePhFieldsForItem: item not found ${itemId}`);
+
+  const extra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+
+  // 收集需要翻译的 task（field 名 + text）
+  type Task = { field: 'content' | 'maker_post' | string; text: string; commentIdx?: number };
+  const tasks: Task[] = [];
+
+  // tagline
+  if (row.content && !row.content_translated && !isLikelyChinesePh(row.content)) {
+    tasks.push({ field: 'content', text: row.content });
+  }
+  // maker_post
+  const mpText = extra.maker_post_text as string | undefined;
+  const mpTranslated = extra.maker_post_translated as string | undefined;
+  if (mpText && !mpTranslated && !isLikelyChinesePh(mpText)) {
+    tasks.push({ field: 'maker_post', text: mpText });
+  }
+  // top_comments[]
+  const topComments = extra.top_comments as Array<{ text?: string; translated?: string }> | undefined;
+  if (Array.isArray(topComments)) {
+    topComments.forEach((c, idx) => {
+      if (c?.text && !c.translated && !isLikelyChinesePh(c.text)) {
+        tasks.push({ field: 'top_comment', text: c.text, commentIdx: idx });
+      }
+    });
+  }
+
+  if (tasks.length === 0) {
+    console.log(`[ph-workflow:step3] ${itemId}: 0 tasks (all already translated)`);
+    return { fields_translated: 0 };
+  }
+
+  const result = await translatePhBatch(env.DEEPSEEK_API_KEY, tasks.map((t) => t.text));
+  let translated = 0;
+  let contentTranslated: string | null = null;
+  for (let i = 0; i < tasks.length; i++) {
+    const tr = result.get(i);
+    if (!tr) continue;
+    const task = tasks[i];
+    if (task.field === 'content') {
+      contentTranslated = tr;
+    } else if (task.field === 'maker_post') {
+      extra.maker_post_translated = tr;
+    } else if (task.field === 'top_comment' && task.commentIdx !== undefined) {
+      const arr = (extra.top_comments as Array<{ text?: string; translated?: string }>);
+      arr[task.commentIdx] = { ...arr[task.commentIdx], translated: tr };
+    }
+    translated++;
+  }
+
+  // 写回 D1: content_translated 列（task #8 同步设 translated_at）+ extra
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (contentTranslated) {
+    await env.DB.prepare(
+      `UPDATE items
+          SET content_translated = ?,
+              translated_at = ?,
+              extra = ?
+        WHERE id = ?`,
+    ).bind(contentTranslated, nowTs, JSON.stringify(extra), itemId).run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(extra), itemId).run();
+  }
+
+  console.log(`[ph-workflow:step3] ${itemId}: translated ${translated}/${tasks.length} fields`);
+  return { fields_translated: translated };
 }
 
 /**

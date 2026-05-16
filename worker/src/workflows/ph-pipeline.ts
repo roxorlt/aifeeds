@@ -14,9 +14,9 @@ import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:work
 import type { Env } from '../index';
 import {
   classifyPhItemWithLlm,
-  r2MigratePhItemById,
   translatePhFieldsForItem,
 } from '../scrapers/ph';
+import { r2MigratePhItemById } from '../ph-r2';
 
 interface PhPipelineParams {
   itemId: string;
