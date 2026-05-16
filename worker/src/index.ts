@@ -128,10 +128,17 @@ export interface Env {
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
   // github-readme-translate)。设计：docs/plans/2026-05-16-github-pipeline-workflows-design.md
   GITHUB_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for X 主链 (worker/src/workflows/x-tweet-pipeline.ts)。
+  // runListPollIngest 拉 list 后对每条新 tweet create 一个 instance。
+  // 替换 6 个 preempt cron mode (classify-pending / fill-translations /
+  // backfill-quotes / backfill-replies / detect-longform / longform-via-sb)。
+  // 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+  X_TWEET_PIPELINE_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
+export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [

@@ -58,6 +58,15 @@ name = "github-pipeline-workflow"
 binding = "GITHUB_PIPELINE_WORKFLOW"
 class_name = "GithubPipelineWorkflow"
 
+# CF Workflow: X 主链。runListPollIngest 拉 list 后对每条新 tweet create
+# 1 个 instance。Step 1 classify → step 2 fan-out (backfill quote/reply + check
+# longform) → step 3 longform-via-sb (条件) → step 4 fan-out (翻译多字段)。
+# 设计文档：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+[[workflows]]
+name = "x-tweet-pipeline-workflow"
+binding = "X_TWEET_PIPELINE_WORKFLOW"
+class_name = "XTweetPipelineWorkflow"
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -104,6 +113,11 @@ invocation_logs = true
 name = "github-pipeline-workflow-staging"
 binding = "GITHUB_PIPELINE_WORKFLOW"
 class_name = "GithubPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "x-tweet-pipeline-workflow-staging"
+binding = "X_TWEET_PIPELINE_WORKFLOW"
+class_name = "XTweetPipelineWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。

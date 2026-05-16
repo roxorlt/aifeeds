@@ -3745,3 +3745,98 @@ export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichR
   }
   return { mode: 'ph-enrich', selected, classified, relevant, irrelevant, duration_ms: Date.now() - t0 };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 4 X 主链 Workflow 单 itemId 函数
+//
+// 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+// 给 worker/src/workflows/x-tweet-pipeline.ts 的 step.do 调用。
+//
+// 每个函数完成一个 Workflow step 的工作 —— SELECT row by id → do work → UPDATE。
+// 失败 throw（让 step.do 按 retry config 重试）。
+//
+// 老 batch 函数（runClassifyPending / runFillTranslations / runBackfillQuotes /
+// runBackfillReplies / runDetectLongform / runLongformViaSb）保留，给 admin
+// endpoint 兜底用（backfill 老数据 / Workflow 出问题时手动批量补救）。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Workflow Step 1: DeepSeek LLM 判断 is_relevant + 生成 ai_summary。
+ * 单条调 LLM（vs batch 模式 N 条 1 call）。系统 prompt 重复成本可忽略。
+ */
+export async function classifyXTweetWithLlm(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ is_relevant: 0 | 1; ai_summary: string }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('classifyXTweetWithLlm: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, handle
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; content: string | null; handle: string | null }>();
+
+  if (!row) {
+    throw new Error(`classifyXTweetWithLlm: item not found ${itemId}`);
+  }
+
+  const input = [{
+    idx: 0,
+    handle: row.handle || '',
+    text: (row.content || '').slice(0, 600),
+  }];
+  const prompt = CLASSIFY_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      max_tokens: 500,  // 单条不需要 4000
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`classifyXTweetWithLlm: HTTP ${res.status} for ${itemId}`);
+  }
+
+  const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: ClassifyResponse;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`classifyXTweetWithLlm: JSON parse failed for ${itemId}`);
+  }
+
+  const item = (parsed.items || [])[0];
+  if (!item) {
+    throw new Error(`classifyXTweetWithLlm: empty items array for ${itemId}`);
+  }
+
+  const isRel = item.is_relevant === 1 ? 1 : 0;
+  const summary = (item.ai_summary || '').trim();
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET is_relevant = ?,
+            matched_by = COALESCE(matched_by, 'workflow-classify'),
+            extra = json_set(coalesce(extra, '{}'),
+                             '$.ai_summary', ?,
+                             '$.classified_at', ?)
+      WHERE id = ?`,
+  ).bind(isRel, summary, new Date().toISOString(), itemId).run();
+
+  console.log(`[x-workflow:step1] ${itemId}: is_relevant=${isRel}`);
+  return { is_relevant: isRel, ai_summary: summary };
+}
