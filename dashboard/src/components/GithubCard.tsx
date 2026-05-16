@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField, proxyImg } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
@@ -10,6 +10,44 @@ import {
   IconStarFill,
   IconWatching,
 } from "./icons";
+
+// dashboard origin（CF Pages） != worker origin（api.ai-feeds.com）；
+// /r/<key> R2 反代在 worker 那边，dashboard 端不能用相对路径访问。
+const API_BASE = import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
+
+// 从 README excerpt 抽第一张可用 cover image。逻辑同 worker
+// share/handlers.ts (line 471-491)：那边给分享海报选 cover，dashboard
+// 这边给 feed 卡片选 cover，挑同一张，保证用户看到的卡片预览跟分享出去的海报一致。
+//
+// 排除 SVG（大部分是 shields/badges）+ 已知 badge host。相对路径 resolve 到
+// raw.githubusercontent.com；/r/ 路径拼 worker API base（worker 才有 /r/ 路由）。
+function extractFirstReadmeImage(
+  readme: string,
+  owner: string,
+  repo: string,
+  branch: string,
+): string | null {
+  const urls: string[] = [];
+  // Markdown ![alt](url)
+  const mdRe = /!\[[^\]]*\]\(([^)\s]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = mdRe.exec(readme)) !== null) urls.push(m[1]);
+  // HTML <img src="url">
+  const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  while ((m = htmlRe.exec(readme)) !== null) urls.push(m[1]);
+  if (urls.length === 0) return null;
+  const isBadge = (u: string): boolean =>
+    /\.svg(\?|$)/i.test(u) ||
+    /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(u);
+  const picked = urls.find((u) => !isBadge(u)) || urls[0];
+  if (!picked) return null;
+  if (/^(https?:|data:|blob:)/i.test(picked)) return picked;
+  // /r/<key> 是 worker R2 反代路由（不在 dashboard origin）→ 拼 API base
+  if (picked.startsWith("/r/")) return `${API_BASE}${picked}`;
+  const base = `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`;
+  if (picked.startsWith("/")) return `${base}${picked}`;
+  return `${base}/${picked.replace(/^\.\//, "")}`;
+}
 
 const CATEGORY_STYLE: Record<string, string> = {
   agent: "bg-violet-100 text-violet-700",
@@ -43,6 +81,7 @@ interface Props {
 
 export function GithubCard({ item }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [coverFailed, setCoverFailed] = useState(false);
   const drawer = useDrawer();
 
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
@@ -50,7 +89,17 @@ export function GithubCard({ item }: Props) {
 
   const ownerRepo = item.title || item.source_id || "";
   const owner = item.author || ownerRepo.split("/")[0] || "";
+  const repo = ownerRepo.split("/")[1] || "";
+  const branch = (extra as Record<string, unknown>).default_branch as string | undefined;
   const ownerAvatar = `https://avatars.githubusercontent.com/${owner}`;
+
+  // README 第一张 cover image — 跟 worker 分享海报用同一张图源（README excerpt 里的 <img>），
+  // 保证用户在 feed 看到的卡片预览和分享出去的海报封面一致。
+  const coverImage = useMemo(() => {
+    const readme = (extra as Record<string, unknown>).readme_excerpt;
+    if (typeof readme !== "string" || !owner || !repo) return null;
+    return extractFirstReadmeImage(readme, owner, repo, branch || "main");
+  }, [extra, owner, repo, branch]);
 
   const language = (metrics as Record<string, unknown>).language as string | undefined
     || (extra as Record<string, unknown>).language as string | undefined
@@ -157,6 +206,19 @@ export function GithubCard({ item }: Props) {
             </button>
           )}
         </>
+      )}
+
+      {/* Cover image（README 第一张可用图）— 放 summary 后 footer 前，
+          跟分享海报用同一张图源（worker share/handlers.ts 同款提取策略）。
+          onError 兜底：图挂了直接隐藏，不挤占空间 */}
+      {coverImage && !coverFailed && (
+        <img
+          src={proxyImg(coverImage, 400)}
+          alt=""
+          loading="lazy"
+          className="mt-2.5 aspect-[16/9] w-full rounded-2xl border border-neutral-200 bg-neutral-100 object-cover"
+          onError={() => setCoverFailed(true)}
+        />
       )}
 
       {/* Footer 跨整张卡宽：左 stars/forks/watchers（跟 PH 卡片 vote/comments

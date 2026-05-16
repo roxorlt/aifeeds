@@ -16,13 +16,16 @@ import {
   IconWatching,
 } from "./icons";
 
-// Resolve relative URLs in README to absolute GitHub URLs.
-//   - "/r/..." (worker R2 proxy path written by v2.3 r2-migrate) → leave as
-//     same-origin path so browser hits ai-feeds.com/r/<key>. Without this
-//     the URL got mangled to raw.githubusercontent.com/.../r/gh/... → 404 →
-//     onError display:none → user thought "image link is github" because
-//     they only saw non-migrated images (badges/external).
-//   - relative path "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
+// dashboard origin（CF Pages）≠ worker origin（api.ai-feeds.com）；
+// /r/<key> R2 反代在 worker 那边，dashboard 端访问要走 worker base。
+// 之前老注释说"leave as same-origin"是 dashboard 和 worker 同源时代的逻辑
+// (dashboard 部署在 ai-feeds.com 时假设 worker /r/ 也走 same-origin 反代)，
+// CF Pages 拆开后失效 — README 里所有 /r/ 图片在抽屉里都 404。
+const API_BASE = import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
+
+// Resolve relative URLs in README to absolute URLs.
+//   - "/r/..." (worker R2 proxy) → prefix API_BASE so request hits worker origin
+//   - relative "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
 //   - root-relative "/foo" (other than /r/) → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
 //   - absolute http(s):/data:/blob:/mailto:/anchor → untouched
 function resolveRelative(
@@ -34,8 +37,8 @@ function resolveRelative(
 ): string | undefined {
   if (!src) return src;
   if (/^(https?:|data:|blob:|mailto:|#)/i.test(src)) return src;
-  // R2 proxy path (server-side rewrite of v2.3) — leave as-is for same origin
-  if (src.startsWith("/r/")) return src;
+  // R2 proxy path (worker /r/<key>) — 必须 prefix worker base，dashboard origin 没这路由
+  if (src.startsWith("/r/")) return `${API_BASE}${src}`;
   const base =
     type === "raw"
       ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`
