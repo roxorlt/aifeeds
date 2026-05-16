@@ -13,6 +13,7 @@
 
 import type { Env, ItemInput } from '../index';
 import { ingestItems } from '../index';
+import { PH_ENRICH_PROMPT, DEEPSEEK_URL } from '../enrich';
 
 // ─── Constants ─────────────────────────────────────────────────
 
@@ -853,7 +854,7 @@ async function appendMetricsSnapshots(
 // 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
 // 回滚直连：改回 'https://api.deepseek.com/v1/chat/completions'。
 const DS_URL_TR = 'https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions';
-const DS_MODEL_TR = 'deepseek-chat';
+const DS_MODEL_TR = 'deepseek-v4-flash';
 const NL_MARK_TR = '⟪NL⟫';
 
 function cjkRatioPh(text: string): number {
@@ -1025,12 +1026,81 @@ async function translatePhItemsInline(env: Env, items: ItemInput[]): Promise<voi
 // ═══════════════════════════════════════════════════════════════════════════
 
 export async function classifyPhItemWithLlm(
-  _env: Env,
+  env: Env,
   itemId: string,
 ): Promise<{ is_relevant: 0 | 1 }> {
-  console.log(`[ph-workflow:step1 STUB] ${itemId}`);
-  // TODO: 复用 runPhEnrich loop body → 1 item DeepSeek classify
-  return { is_relevant: 1 };
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('classifyPhItemWithLlm: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, title, content, extra
+       FROM items
+      WHERE id = ? AND source_type = 'product_hunt'`,
+  ).bind(itemId).first<{
+    id: string; source_id: string; title: string | null;
+    content: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`classifyPhItemWithLlm: item not found ${itemId}`);
+
+  let extra: { description?: string; topics?: string[] } = {};
+  try {
+    const p = JSON.parse(row.extra || '{}');
+    if (p && typeof p === 'object') extra = p;
+  } catch { /* noop */ }
+
+  const input = [{
+    idx: 0,
+    name: row.title || '',
+    tagline: row.content || '',
+    description: (extra.description || '').slice(0, 400),
+    topics: (extra.topics || []).slice(0, 5),
+  }];
+  const prompt = PH_ENRICH_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      max_tokens: 500,
+    }),
+  });
+  if (!res.ok) throw new Error(`classifyPhItemWithLlm: HTTP ${res.status} for ${itemId}`);
+  const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: { items?: Array<{ idx: number; is_relevant: 0 | 1; ai_category?: string; ai_summary?: string }> };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`classifyPhItemWithLlm: JSON parse failed for ${itemId}`);
+  }
+  const item = (parsed.items || [])[0];
+  if (!item) throw new Error(`classifyPhItemWithLlm: empty items for ${itemId}`);
+
+  const isRel = item.is_relevant === 1 ? 1 : 0;
+  const cat = isRel ? (item.ai_category || 'ai_other') : null;
+  const summary = isRel ? (item.ai_summary || '').trim() : '';
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET is_relevant = ?,
+            matched_by = COALESCE(matched_by, 'ph-workflow'),
+            extra = json_set(coalesce(extra, '{}'),
+                             '$.ai_category', ?,
+                             '$.ai_summary', ?,
+                             '$.classified_at', ?)
+      WHERE id = ?`,
+  ).bind(isRel, cat, summary, new Date().toISOString(), itemId).run();
+
+  console.log(`[ph-workflow:step1] ${itemId}: is_relevant=${isRel} cat=${cat}`);
+  return { is_relevant: isRel };
 }
 
 export async function r2MigratePhItemById(

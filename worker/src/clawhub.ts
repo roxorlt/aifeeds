@@ -873,33 +873,133 @@ export async function countClawhubPending(env: ClawhubEnv): Promise<number> {
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
-export interface ChEnrichResult {
-  summary_translated?: string;
-  llm_findings_translated?: Array<Record<string, string | number | null>>;  // serializable
-  readme_text?: string;
-  readme_translated?: string;
-  readme_file?: 'README.md' | 'SKILL.md';
-}
-
+/**
+ * Workflow Step 1 (combined fetch + translate + persist 单 step)：复用
+ * runClawhubEnrichPending 的 loop body 逻辑给单 itemId。CH 没有条件分支，3 件
+ * 并行做完一起 UPDATE D1，所以 workflow 简化成 1 step。
+ */
 export async function enrichAndTranslateChItem(
-  _env: ClawhubEnv,
+  env: ClawhubEnv,
   itemId: string,
-): Promise<ChEnrichResult> {
-  console.log(`[ch-workflow:step1 STUB] ${itemId}`);
-  // TODO: 复用 runClawhubEnrichPending loop body 单 item Promise.all 3 件
-  // (summary translate + LLM finding translate + readme fetch+translate)
-  return {};
+): Promise<{ ok: boolean; reason?: string }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, title, content, content_translated, lang, extra
+       FROM items
+      WHERE id = ? AND source_type='clawhub'`,
+  ).bind(itemId).first<{
+    id: string; source_id: string; title: string | null;
+    content: string | null; content_translated: string | null;
+    lang: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`enrichAndTranslateChItem: item not found ${itemId}`);
+
+  const slug = row.source_id;
+  const richResp = await fetchSkillDetailRich(slug);
+  const rich = richResp.value;
+  if (!rich || !rich.skill) {
+    // 清 ch_pending 标记避免下次再选
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(extra, '$.ch_pending', json('false')) WHERE id = ?`,
+    ).bind(itemId).run();
+    return { ok: false, reason: 'skill_not_found' };
+  }
+
+  const lv = rich.latestVersion || {};
+  const license = lv.parsed?.license || '';
+  const installList = lv.parsed?.clawdis?.install || [];
+  const capabilityTags = lv.capabilityTags || rich.skill.capabilityTags || [];
+  const llmFindings = lv.llmAnalysis?.agenticRiskFindings || [];
+  const verdict = lv.llmAnalysis?.verdict;
+  const status = lv.llmAnalysis?.status;
+  const isSuspicious = !!(verdict && verdict !== 'benign') || !!(status && status !== 'clean');
+
+  const existingExtra = JSON.parse(row.extra || '{}') as Record<string, unknown>;
+  const summaryEnglish = (existingExtra.summary_en as string) || (row.content || '');
+  const existingSummaryZh = existingExtra.summary_translated as string | undefined;
+  const summaryAlreadyZh = isLikelyChinese(existingSummaryZh);
+  const existingContentZh = row.content_translated || '';
+  const llmAnalysisObj = existingExtra.llm_analysis as { lang?: string; findings?: unknown[] } | undefined;
+  const existingFindingsZh =
+    llmAnalysisObj?.lang === 'zh' &&
+    Array.isArray(llmAnalysisObj?.findings) &&
+    (llmAnalysisObj?.findings.length ?? 0) > 0;
+
+  // 三件并行：summary 翻译 + LLM finding 翻译 + README 抓取
+  const versionId = lv._id as string;
+  const [summaryT, translatedFindings, extracted] = await Promise.all([
+    summaryAlreadyZh || !summaryEnglish
+      ? Promise.resolve(existingSummaryZh)
+      : translateShort(env, summaryEnglish),
+    existingFindingsZh
+      ? Promise.resolve(llmAnalysisObj!.findings as unknown[])
+      : translateLlmFindings(env, llmFindings),
+    versionId ? fetchAndExtractSkill(versionId, lv.files || []) : Promise.resolve(null),
+  ]);
+
+  let readmeOriginal = '';
+  let readmeTranslated: string | null = null;
+  let readmeFile = '';
+  let filesManifest: Array<{ path: string; size: number }> = [];
+  if (extracted) {
+    readmeOriginal = extracted.readme;
+    readmeFile = extracted.readmeFile;
+    filesManifest = extracted.files;
+    if (readmeOriginal) {
+      const reuseExistingTranslation =
+        existingContentZh.length >= 500 && isLikelyChinese(existingContentZh, 0.2);
+      if (reuseExistingTranslation) {
+        readmeTranslated = existingContentZh;
+      } else {
+        readmeTranslated = await translateMarkdown(env, readmeOriginal);
+      }
+    }
+  }
+
+  const newExtra = {
+    ...existingExtra,
+    ch_pending: false,
+    license,
+    install: installList,
+    capability_tags: capabilityTags,
+    is_suspicious: isSuspicious,
+    llm_verdict: verdict || undefined,
+    llm_status: status || undefined,
+    llm_analysis: translatedFindings.length > 0
+      ? { findings: translatedFindings, lang: 'zh' }
+      : undefined,
+    summary_en: summaryEnglish || existingExtra.summary_en,
+    summary_translated: summaryT || existingExtra.summary_translated,
+    readme_file: readmeFile || existingExtra.readme_file || '',
+    files_manifest: filesManifest.length > 0 ? filesManifest : existingExtra.files_manifest,
+    enriched_at: Math.floor(Date.now() / 1000),
+  } as Record<string, unknown>;
+  delete (newExtra as Record<string, unknown>).skill_md;
+
+  const finalContent = readmeOriginal || summaryEnglish;
+  const finalContentTranslated = readmeTranslated || summaryT;
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET content = COALESCE(?, content),
+            content_translated = COALESCE(?, content_translated),
+            lang = ?,
+            extra = ?,
+            translation_attempts = COALESCE(translation_attempts, 0) + 1
+      WHERE id = ?`,
+  ).bind(
+    finalContent || null,
+    finalContentTranslated || null,
+    existingExtra.lang === 'zh' ? 'zh' : 'en',
+    JSON.stringify(newExtra),
+    itemId,
+  ).run();
+
+  console.log(`[ch-workflow] ${itemId}: enriched (readme=${readmeOriginal.length}c translated=${(finalContentTranslated || '').length}c)`);
+  return { ok: true };
 }
 
-export async function persistChEnrichResult(
-  _env: ClawhubEnv,
-  itemId: string,
-  _result: ChEnrichResult,
-): Promise<void> {
-  console.log(`[ch-workflow:step2 STUB] ${itemId}`);
-  // TODO: UPDATE items SET content_translated = readme_translated,
-  //       extra = json_patch(extra, {summary_translated, llm_findings_translated, ...})
-}
+// persistChEnrichResult REMOVED — enrichAndTranslateChItem 内部已经 UPDATE D1。
+// workflow 从 2 step 简化到 1 step。
 
 /**
  * 治本幂等：写 marker + create CH workflow instance。

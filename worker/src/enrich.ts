@@ -2272,7 +2272,7 @@ export async function runClassifyPending(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -2769,8 +2769,8 @@ export async function runCleanup(
 
 // 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
 // 回滚直连：改回 "https://api.deepseek.com/v1/chat/completions"。
-const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions";
-const DEEPSEEK_MODEL = "deepseek-chat";
+export const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions";
+const DEEPSEEK_MODEL = "deepseek-v4-flash";
 
 const TRANSLATION_PROMPT_HEADER =
   "Translate each numbered tweet below from English to Chinese for an AI news feed.\n" +
@@ -3682,7 +3682,7 @@ async function translateLongformContent(
 //   ai_agent / ai_code_editor / ai_image_gen / ai_audio /
 //   ai_voice_agent / ai_data_analysis / ai_other
 
-const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
+export const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
 
 输入：JSON 数组 [{idx, name, tagline, description, topics}]
 
@@ -3781,7 +3781,7 @@ export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichR
         Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -3898,7 +3898,7 @@ export async function classifyXTweetWithLlm(
       Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'deepseek-chat',
+      model: 'deepseek-v4-flash',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
       response_format: { type: 'json_object' },
