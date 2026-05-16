@@ -39,6 +39,12 @@ ENABLE_EMAIL_LOGIN = "true"
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Workers Logs（CF Dashboard → Workers → xlist-api → Logs）。
+# 启用后可搜近 3 天的 console.log / 异常堆栈 / 请求 metadata，按 rayId / status / 时间过滤。
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -71,6 +77,11 @@ ENABLE_EMAIL_LOGIN = "true"
 # Staging cron 默认全关，要手动测时再放开
 [env.staging.triggers]
 crons = []
+
+# Workers Logs（同 prod 启用）
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。
