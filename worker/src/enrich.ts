@@ -276,6 +276,9 @@ export async function refreshSingleItem(
     GITHUB_TOKEN?: string;
     PH_CLIENT_ID?: string;
     PH_CLIENT_SECRET?: string;
+    GITHUB_PIPELINE_WORKFLOW?: Workflow;
+    HUODONGXING_DETAIL_WORKFLOW?: Workflow;
+    READMES?: R2Bucket;
   },
   itemId: string,
 ): Promise<SingleItemRefreshResult> {
@@ -338,6 +341,28 @@ export async function refreshSingleItem(
         expirationTtl: REFRESH_THROTTLE_TTL,
       });
     }
+    // 治本 C：drawer 打开时如果检测到 stuck（未分类 / 未翻译 / 长推没拉 / 引用没回填），
+    // trigger workflow 补全（helper 内部有 marker 30min 防重）。不 block refresh 响应。
+    const xStuck = await env.DB.prepare(
+      `SELECT extra FROM items WHERE id = ?
+        AND source_type='x_list'
+        AND (
+          is_relevant IS NULL
+          OR (is_relevant=1 AND content_translated IS NULL AND lang IS NOT NULL AND lang != 'zh' AND content IS NOT NULL AND length(content) > 0)
+          OR (json_extract(extra,'$.longform.note_id') IS NOT NULL AND json_extract(extra,'$.longform.fetched_at') IS NULL)
+          OR (json_extract(extra,'$.quote_of_id') IS NOT NULL AND json_extract(extra,'$.quote_of') IS NULL)
+          OR (json_extract(extra,'$.reply_to_id') IS NOT NULL AND json_extract(extra,'$.reply_of') IS NULL)
+        )`,
+    ).bind(itemId).first<{ extra: string | null }>();
+    if (xStuck) {
+      const extraObj = xStuck.extra ? JSON.parse(xStuck.extra) as Record<string, unknown> : {};
+      await triggerXWorkflowForItem(env, itemId, {
+        hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+        hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+        hasLinkCard: !!extraObj.link_card,
+        hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+      });
+    }
     return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: merged };
   }
 
@@ -352,7 +377,43 @@ export async function refreshSingleItem(
         expirationTtl: REFRESH_THROTTLE_TTL,
       });
     }
+    // 治本 C：drawer 检测 GH stuck（未分类 / README 没译 / R2 没迁），trigger workflow
+    const ghStuck = await env.DB.prepare(
+      `SELECT 1 FROM items WHERE id = ?
+        AND source_type='github'
+        AND (
+          COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')
+          OR is_relevant IS NULL
+          OR (is_relevant=1 AND json_extract(extra, '$.readme_translated') IS NULL
+              AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'
+              AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)
+          OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL
+              AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)
+        )`,
+    ).bind(itemId).first();
+    if (ghStuck) {
+      const { triggerGhWorkflowForItem: triggerGh } = await import('./github');
+      await triggerGh(env, itemId);
+    }
     return { refreshed: true, source_type: 'github', reason: 'success', metrics: r.metrics };
+  }
+
+  if (item.source_type === 'huodongxing') {
+    // 治本 C：drawer 触发 hdx workflow（throttleSec=0 用户优先，无 metrics refresh）
+    if (env.HUODONGXING_DETAIL_WORKFLOW) {
+      const hdxStuck = await env.DB.prepare(
+        `SELECT 1 FROM items WHERE id = ?
+          AND source_type='huodongxing'
+          AND json_extract(extra, '$.detail_enriched_at') IS NULL`,
+      ).bind(itemId).first();
+      if (hdxStuck) {
+        const { triggerHdxWorkflowForItem } = await import('./scrapers/huodongxing');
+        await triggerHdxWorkflowForItem(env, itemId, 0);  // 0 throttle = 立即 fetch
+        return { refreshed: true, source_type: 'huodongxing', reason: 'success' };
+      }
+    }
+    // 已 enriched 或 binding 缺失 — drawer 不做事
+    return { refreshed: false, source_type: 'huodongxing', reason: 'throttled' };
   }
 
   if (item.source_type === 'clawhub') {
@@ -2100,28 +2161,15 @@ export async function runListPollIngest(
     }
 
     // 阶段 4 cutover：D1 batch 成功后，对每条新 tweet 触发 XTweetPipelineWorkflow
-    // instance。binding 缺失时（如未来回滚或本地测试）静默跳过，不破坏 D1 ingest。
+    // instance（helper 写 marker + create）。
     if (env.X_TWEET_PIPELINE_WORKFLOW && newItemsForWorkflow.length > 0) {
       for (const n of newItemsForWorkflow) {
-        const instanceId = `x-${n.itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-        try {
-          await env.X_TWEET_PIPELINE_WORKFLOW.create({
-            id: instanceId,
-            params: {
-              itemId: n.itemId,
-              hasQuoteRef: n.hasQuoteRef,
-              hasReplyRef: n.hasReplyRef,
-              hasLinkCard: n.hasLinkCard,
-              hasRetweetRef: n.hasRetweetRef,
-              lang: 'zh',
-            },
-          });
-        } catch (e) {
-          const msg = String(e);
-          if (!msg.toLowerCase().includes('already exists')) {
-            console.error(`[list-poll-ingest] workflow create failed for ${n.itemId}:`, e);
-          }
-        }
+        await triggerXWorkflowForItem(env, n.itemId, {
+          hasQuoteRef: n.hasQuoteRef,
+          hasReplyRef: n.hasReplyRef,
+          hasLinkCard: n.hasLinkCard,
+          hasRetweetRef: n.hasRetweetRef,
+        });
       }
     }
 
@@ -4244,4 +4292,45 @@ export async function translateXTweetField(
 
   console.log(`[x-workflow:step4:${field}] ${itemId}: translated ${finalText.length}c quality=${quality}`);
   return { translated: true, chars: finalText.length };
+}
+
+/**
+ * 治本幂等：写 extra.workflow_triggered_at + create X workflow instance。
+ * 调用方：drain endpoint + Phase 1 runListPollIngest + drawer refreshSingleItem。
+ */
+export interface XWorkflowSignals {
+  hasQuoteRef: boolean;
+  hasReplyRef: boolean;
+  hasLinkCard: boolean;
+  hasRetweetRef: boolean;
+}
+
+export async function triggerXWorkflowForItem(
+  env: { DB: D1Database; X_TWEET_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+  signals: XWorkflowSignals,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.X_TWEET_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[x-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.X_TWEET_PIPELINE_WORKFLOW.create({
+      id: instanceId,
+      params: { itemId, ...signals, lang: 'zh' as const },
+    });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) {
+      return 'already_exists';
+    }
+    console.error(`[x-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
 }

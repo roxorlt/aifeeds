@@ -300,6 +300,7 @@ export interface FetchListResult {
   cities_remaining: number;
   pages_fetched: number;
   cards_inserted_or_updated: number;
+  workflows_triggered: number;   // 阶段 5: 触发 HuodongxingDetailWorkflow 数（新事件数）
   errors: number;
   budget_consumed: number;
   finished: boolean;             // 24 城全部跑完 → KV 状态清掉
@@ -367,6 +368,10 @@ export async function runHuodongxingFetchList(
   let pagesThisTick = 0;
   let cardsThisTick = 0;
   let errorsThisTick = 0;
+  // 阶段 5 workflow trigger 累计 — 跨 page/city 累加 throttleSec 让所有新事件
+  // 跨 instance 错开 5s 一个，避免 site rate limit
+  let workflowsTriggered = 0;
+  let throttleIndex = 0;
 
   // 处理城市直到预算用完
   while (progress.cities_pending.length > 0) {
@@ -391,11 +396,41 @@ export async function runHuodongxingFetchList(
       }
       const parsed = parseListing(res.body, city);
       if (parsed.cards.length === 0) break;
+
+      // 阶段 5 workflow trigger：upsert 前先查哪些 id 是新的，仅给新事件 trigger
+      // workflow（已存在的事件不重复 enrich detail，老 batch fallback 可处理过期事件）
+      let newIdsThisPage: string[] = [];
+      if (env.HUODONGXING_DETAIL_WORKFLOW) {
+        const allIds = parsed.cards.map((c) => itemId(c.event_id));
+        const placeholders = allIds.map(() => '?').join(',');
+        const existingRows = await env.DB.prepare(
+          `SELECT id FROM items WHERE id IN (${placeholders})`,
+        ).bind(...allIds).all<{ id: string }>();
+        const existingSet = new Set(existingRows.results.map((row) => row.id));
+        newIdsThisPage = parsed.cards
+          .map((c) => itemId(c.event_id))
+          .filter((id) => !existingSet.has(id));
+        budgetUsed++;  // SELECT counts as 1
+      }
+
       const upsertRes = await upsertCards(env, parsed.cards, scrapedAt);
       budgetUsed++;  // D1 batch counts as 1 subrequest
       cardsThisTick += upsertRes.rows_changed;
       cardsForCity += upsertRes.rows_changed;
       errorsThisTick += upsertRes.errors;
+
+      // upsert 成功后对每条新事件 trigger workflow（helper 写 marker + create）
+      if (env.HUODONGXING_DETAIL_WORKFLOW && newIdsThisPage.length > 0) {
+        for (const id of newIdsThisPage) {
+          const result = await triggerHdxWorkflowForItem(env, id, throttleIndex * 5);
+          if (result === 'triggered') {
+            workflowsTriggered++;
+            throttleIndex++;
+          }
+          // already_exists / failed: 不增 counter，不阻塞下一条
+        }
+      }
+
       if (parsed.isLastPage) break;
     }
 
@@ -431,6 +466,7 @@ export async function runHuodongxingFetchList(
     cities_remaining: progress.cities_pending.length,
     pages_fetched: pagesThisTick,
     cards_inserted_or_updated: cardsThisTick,
+    workflows_triggered: workflowsTriggered,
     errors: errorsThisTick,
     budget_consumed: budgetUsed,
     finished,
@@ -565,7 +601,7 @@ export async function runHuodongxingDetailEnrich(
   return out;
 }
 
-async function applyDetailUpdate(
+export async function applyDetailUpdate(
   env: Env,
   id: string,
   d: DetailEnrich,
@@ -807,4 +843,144 @@ function json(data: unknown, status = 200): Response {
       'Cache-Control': 'no-store',
     },
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 5 huodongxing Workflow 单 itemId 函数
+//
+// 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
+// 给 worker/src/workflows/huodongxing-detail.ts 的 step.do 调用。
+//
+// site 反爬约束：
+//   - cookie warm-up 必须（无之 detail 成功率 95% → 40%）
+//   - 5s/detail 节流（站点 rate limit ~12/min）
+//
+// 应对：
+//   - ensureHdxSessionCookies 用 KV cache（10min TTL）跨 instance 共享 cookie
+//   - workflow 用 step.sleep(throttleSec) 跨 instance 错开 detail 请求
+//
+// 老 batch runHuodongxingDetailEnrich 保留作 admin fallback。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 治本幂等：write extra.workflow_triggered_at marker + create instance。
+ * drain SELECT 看到 marker < 30min 内的会 skip，避免 batch 跨调 SELECT 重复触发
+ * 已 in-flight 的同 item。30min 后视为 stuck，可重新触发。
+ *
+ * 调用方：drain endpoint + Phase 1 runHuodongxingFetchList + drawer refreshSingleItem
+ */
+export async function triggerHdxWorkflowForItem(
+  env: { DB: D1Database; HUODONGXING_DETAIL_WORKFLOW?: Workflow },
+  itemId: string,
+  throttleSec: number,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.HUODONGXING_DETAIL_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[hdx-trigger] mark failed for ${itemId}:`, e);
+  }
+  const eventId = itemId.replace(/^huodongxing:/, '');
+  const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.HUODONGXING_DETAIL_WORKFLOW.create({
+      id: instanceId,
+      params: { itemId, throttleSec },
+    });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) {
+      return 'already_exists';
+    }
+    console.error(`[hdx-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
+}
+
+/**
+ * Workflow Step 1 (合并 warm-up + fetch detail 在同 worker invocation 内)：
+ *
+ * 修 403 bug — KV 共享 cookies 跨 instance 不行：cookie 是 IP-bound，多 instance
+ * 跑在 CF 全球不同节点用同 cookie 时 WAF 判定异常 → 403。
+ *
+ * 改成每个 instance 自己 warm-up + detail 在同一 step.do 里跑，两个请求从
+ * 同一 worker invocation = 同一 CF 节点 IP 发出，看起来像正常用户浏览
+ * (listing → detail) 流程。
+ */
+export async function fetchHdxDetailWithWarmup(
+  env: Env,
+  itemId: string,
+): Promise<DetailEnrich | null> {
+  // SELECT row 拿 source_id + city hint 做 referer / warm-up
+  const row = await env.DB.prepare(
+    `SELECT source_id, extra FROM items WHERE id = ? AND source_type='huodongxing'`,
+  ).bind(itemId).first<{ source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`fetchHdxDetailWithWarmup: item not found ${itemId}`);
+
+  const oldExtra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+  const cityHint = (oldExtra.city as string | undefined) ?? '北京';
+  const warmupUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent(cityHint)}&orderby=o`;
+
+  // 1. Warm-up: fetch listing page，site 颁发 HDXWAFID + route + Session cookies
+  const warmupRes = await fetchText(warmupUrl, { retries: 0 });
+  const cookies = warmupRes.cookies || '';
+  if (!cookies) {
+    console.warn(`[hdx-workflow] ${itemId}: warmup no cookies (status=${warmupRes.status})`);
+  }
+
+  // 2. Fetch detail with same-IP cookies
+  const detailRes = await fetchText(detailUrl(row.source_id), {
+    referer: warmupUrl,
+    cookies,
+  });
+  if (!detailRes.ok) {
+    if (detailRes.status === 404 || detailRes.status === 410) {
+      console.warn(`[hdx-workflow] ${itemId}: ${detailRes.status} not found, skip`);
+      return null;
+    }
+    throw new Error(`fetchHdxDetailWithWarmup: HTTP ${detailRes.status} for ${row.source_id}`);
+  }
+
+  const parsed = parseDetail(detailRes.body);
+  if (!parsed) {
+    console.error(`[hdx-workflow] ${itemId}: parseDetail returned null`);
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * Workflow Step 3: 把 parseDetail 结果写 D1。判 historical 状态后调 applyDetailUpdate。
+ */
+export async function persistHdxDetail(
+  env: Env,
+  itemId: string,
+  parsed: DetailEnrich,
+): Promise<{ status: 'active' | 'historical' }> {
+  // 拿 cityFromList 信号（applyDetailUpdate 内部用来覆盖 district）
+  const row = await env.DB.prepare(
+    `SELECT extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ extra: string | null }>();
+  if (!row) throw new Error(`persistHdxDetail: item disappeared ${itemId}`);
+  const extra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+  const cityFromList = (extra.city as string | null) ?? null;
+
+  // 判 historical（同老 runHuodongxingDetailEnrich 逻辑）
+  const nowMs = Date.now();
+  const endMs = parsed.end_time ? Date.parse(parsed.end_time) : NaN;
+  const startMs = parsed.start_time ? Date.parse(parsed.start_time) : NaN;
+  const isHistorical =
+    (Number.isFinite(endMs) && endMs < nowMs) ||
+    (!Number.isFinite(endMs) && Number.isFinite(startMs) && startMs + 24 * 3600 * 1000 < nowMs);
+  const status = isHistorical ? 'historical' : 'active';
+
+  const nowUnix = Math.floor(Date.now() / 1000);
+  await applyDetailUpdate(env, itemId, parsed, cityFromList, nowUnix, status);
+  console.log(`[hdx-workflow:persist] ${itemId}: ${status}`);
+  return { status };
 }

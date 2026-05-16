@@ -67,6 +67,15 @@ name = "x-tweet-pipeline-workflow"
 binding = "X_TWEET_PIPELINE_WORKFLOW"
 class_name = "XTweetPipelineWorkflow"
 
+# CF Workflow: 活动行 (huodongxing) detail 抓取。runHuodongxingFetchList 后对
+# 每条新事件 create 1 个 instance，跑 4 step pipeline: throttle sleep →
+# ensure-cookies → fetch-and-parse-detail → persist。
+# 设计文档：docs/plans/2026-05-16-huodongxing-workflow-design.md
+[[workflows]]
+name = "huodongxing-detail-workflow"
+binding = "HUODONGXING_DETAIL_WORKFLOW"
+class_name = "HuodongxingDetailWorkflow"
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -118,6 +127,11 @@ class_name = "GithubPipelineWorkflow"
 name = "x-tweet-pipeline-workflow-staging"
 binding = "X_TWEET_PIPELINE_WORKFLOW"
 class_name = "XTweetPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "huodongxing-detail-workflow-staging"
+binding = "HUODONGXING_DETAIL_WORKFLOW"
+class_name = "HuodongxingDetailWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。

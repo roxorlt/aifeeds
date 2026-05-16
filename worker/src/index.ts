@@ -19,6 +19,7 @@ import {
   runClassifyPending,
   runBackfillVideoMp4,
   runPhEnrich,
+  triggerXWorkflowForItem,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -26,6 +27,7 @@ import {
   runGithubEnrichPending,
   runGithubReadmeTranslate,
   runGithubR2Migrate,
+  triggerGhWorkflowForItem,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch } from './scrapers/ph';
@@ -36,6 +38,7 @@ import {
   runHuodongxingDetailEnrich,
   markStaleEventsHistorical,
   countHuodongxingDetailPending,
+  triggerHdxWorkflowForItem,
 } from './scrapers/huodongxing';
 import type { HuodongxingCity } from './scrapers/huodongxing/cities';
 import { HUODONGXING_CITIES } from './scrapers/huodongxing/cities';
@@ -134,11 +137,17 @@ export interface Env {
   // backfill-quotes / backfill-replies / detect-longform / longform-via-sb)。
   // 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
   X_TWEET_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for huodongxing detail enrich (worker/src/workflows/
+  // huodongxing-detail.ts)。runHuodongxingFetchList 后对每条新事件 create
+  // instance。替换原 isHdxEnrichSlot preempt cron。
+  // 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
+  HUODONGXING_DETAIL_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
 export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
+export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -378,17 +387,28 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 100);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
         if (!env.GITHUB_PIPELINE_WORKFLOW) {
           return jsonResponse({ error: 'GITHUB_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
         }
+        // 扩 drain SQL：覆盖 4 种 stuck（pending / 未分类 / README 没译 / R2 没迁）
+        // + marker filter (30min 内已触发的 skip)
         const pending = await env.DB.prepare(
           `SELECT id FROM items
             WHERE source_type='github'
               AND deleted_at IS NULL
               AND (
-                COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')
-                OR is_relevant IS NULL
+                COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')               -- 初始 pending
+                OR is_relevant IS NULL                                                          -- 未分类
+                OR (is_relevant=1 AND json_extract(extra, '$.readme_translated') IS NULL
+                    AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'
+                    AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)                    -- README 没翻译
+                OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL
+                    AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)                    -- R2 资源没迁
+              )
+              AND (
+                json_extract(extra, '$.workflow_triggered_at') IS NULL
+                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
               )
             ORDER BY scraped_at ASC
             LIMIT ?`,
@@ -397,18 +417,10 @@ export default {
         let skipped = 0;
         let failed = 0;
         for (const r of pending.results) {
-          const instanceId = `gh-${r.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-          try {
-            await env.GITHUB_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId: r.id } });
-            triggered++;
-          } catch (e) {
-            if (String(e).toLowerCase().includes('already exists')) {
-              skipped++;
-            } else {
-              failed++;
-              console.error(`[gh-trigger-pending] failed for ${r.id}:`, e);
-            }
-          }
+          const result = await triggerGhWorkflowForItem(env, r.id);
+          if (result === 'triggered') triggered++;
+          else if (result === 'already_exists') skipped++;
+          else failed++;
         }
         return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
       }
@@ -441,15 +453,32 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 200);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
         if (!env.X_TWEET_PIPELINE_WORKFLOW) {
           return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
         }
+        // 扩 drain SQL：覆盖 4 种 stuck（未分类 / 未翻译 / 长推没拉 / quote 没回填）
+        // + marker filter (30min 内已触发的 skip)
         const pending = await env.DB.prepare(
           `SELECT id, extra FROM items
             WHERE source_type='x_list'
               AND deleted_at IS NULL
-              AND is_relevant IS NULL
+              AND (
+                is_relevant IS NULL                                                              -- 未分类
+                OR (is_relevant=1 AND content_translated IS NULL
+                    AND lang IS NOT NULL AND lang != 'zh'
+                    AND content IS NOT NULL AND length(content) > 0)                              -- 未翻译
+                OR (is_relevant=1 AND json_extract(extra, '$.longform.note_id') IS NOT NULL
+                    AND json_extract(extra, '$.longform.fetched_at') IS NULL)                     -- 长推没拉
+                OR (is_relevant=1 AND json_extract(extra, '$.quote_of_id') IS NOT NULL
+                    AND json_extract(extra, '$.quote_of') IS NULL)                                -- quote 没回填
+                OR (is_relevant=1 AND json_extract(extra, '$.reply_to_id') IS NOT NULL
+                    AND json_extract(extra, '$.reply_of') IS NULL)                                -- reply 没回填
+              )
+              AND (
+                json_extract(extra, '$.workflow_triggered_at') IS NULL
+                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+              )
             ORDER BY scraped_at DESC
             LIMIT ?`,
         ).bind(limit).all<{ id: string; extra: string | null }>();
@@ -459,26 +488,16 @@ export default {
         for (const r of pending.results) {
           let extraObj: Record<string, unknown> = {};
           try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
-          const params = {
-            itemId: r.id,
+          const signals = {
             hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
             hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
             hasLinkCard: !!extraObj.link_card,
             hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
-            lang: 'zh' as const,
           };
-          const instanceId = `x-${r.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-          try {
-            await env.X_TWEET_PIPELINE_WORKFLOW.create({ id: instanceId, params });
-            triggered++;
-          } catch (e) {
-            if (String(e).toLowerCase().includes('already exists')) {
-              skipped++;
-            } else {
-              failed++;
-              console.error(`[x-trigger-pending] failed for ${r.id}:`, e);
-            }
-          }
+          const result = await triggerXWorkflowForItem(env, r.id, signals);
+          if (result === 'triggered') triggered++;
+          else if (result === 'already_exists') skipped++;
+          else failed++;
         }
         return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
       }
@@ -791,6 +810,62 @@ export default {
         const progress = progressRaw ? JSON.parse(progressRaw) : null;
         return jsonResponse({ pending_detail_enrich: pending, fetch_progress: progress }, 200, request, env);
       }
+      // ─── 阶段 5: hdx workflow drain pending（cutover 后兜底 / 老 backlog 清）
+      // POST /api/admin/hdx-trigger-pending-workflows-now?limit=N
+      //
+      // 扫所有 detail_enriched_at IS NULL 的 hdx 事件，按 last_seen_at DESC 排序，
+      // 用 throttleSec spacing 5s 错开 trigger workflow instance。
+      // 默认 limit=100，N 个 instance 跨 5N 秒 wall time 处理。
+      // 860 backlog → 9 批 limit=100 跑完。
+      if (path === '/api/admin/hdx-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '100', 10), 400);
+        if (!env.HUODONGXING_DETAIL_WORKFLOW) {
+          return jsonResponse({ error: 'HUODONGXING_DETAIL_WORKFLOW binding missing' }, 500, request, env);
+        }
+        // 治本 marker filter：30 min 内已触发的跳过（避免重复 trigger 已 in-flight）
+        // 30 min 后视为 stuck，可重新触发
+        const pending = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='huodongxing'
+              AND deleted_at IS NULL
+              AND json_extract(extra, '$.detail_enriched_at') IS NULL
+              AND (
+                json_extract(extra, '$.workflow_triggered_at') IS NULL
+                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+              )
+            ORDER BY json_extract(extra, '$.last_seen_at') DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string }>();
+        let triggered = 0;
+        let skipped = 0;
+        let failed = 0;
+        let throttleIndex = 0;
+        for (const r of pending.results) {
+          const result = await triggerHdxWorkflowForItem(env, r.id, throttleIndex * 5);
+          if (result === 'triggered') {
+            triggered++;
+            throttleIndex++;
+          } else if (result === 'already_exists') {
+            skipped++;
+          } else {
+            failed++;
+          }
+        }
+        return jsonResponse({
+          found: pending.results.length,
+          triggered,
+          skipped,
+          failed,
+          drain_wall_time_estimate_min: Math.round((throttleIndex * 5) / 60),
+        }, 200, request, env);
+      }
       // POST /api/admin/fill-translations-now?limit=30&batch_size=8
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致
       // 用途：手动批量补翻积压（X content / quote_of / link_card + PH content / maker / comments）
@@ -964,14 +1039,11 @@ export default {
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
-          if (isHdxEnrichSlot) {
-            const pending = await countHuodongxingDetailPending(env);
-            if (pending > 0) {
-              const r = await runHuodongxingDetailEnrich(env, 3);
-              console.log(`[cron] hdx-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-          }
+          // 阶段 5 (2026-05-16): huodongxing detail enrich 迁 CF Workflow
+          // (HuodongxingDetailWorkflow)。runHuodongxingFetchList 对每条新事件
+          // 触发 instance，5s/instance throttleSec 错开避免 site rate limit。
+          // isHdxEnrichSlot preempt 已删。老 batch runHuodongxingDetailEnrich
+          // 保留作 admin fallback (/api/admin/hdx-enrich-now)。
           // GH 抓取链已迁 CF Workflow (worker/src/workflows/github-pipeline.ts)。
           // Phase 1 (github-fetch slot) 写 stub 行 + 立刻 create Workflow instance，
           // instance 自己跑 enrich / classify / r2-migrate / readme-translate。

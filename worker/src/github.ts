@@ -292,26 +292,12 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
     counts.errors++;
   }
 
-  // 触发 Workflow 给每个新 repo（不在已存在集合里的）。
-  // 失败不影响主流程 — 下次 cron 会再 batch insert（UPSERT 不重复）+ 重试 trigger。
+  // 触发 Workflow 给每个新 repo（helper 写 marker + create）
   if (env.GITHUB_PIPELINE_WORKFLOW) {
     const newItemIds = allRepoIds.filter((id) => !existingIds.has(id));
     for (const itemId of newItemIds) {
-      // CF Workflow instance ID 限制 [a-zA-Z0-9_-]，把 itemId 里的 ':' '/' '.' 等转 '-'。
-      // 用 itemId 做 instance ID 一举两得：防同 repo 重复触发 + dashboard 可由 ID 反查。
-      const instanceId = `gh-${itemId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
-      try {
-        await env.GITHUB_PIPELINE_WORKFLOW.create({
-          id: instanceId,
-          params: { itemId },
-        });
-        counts.workflows_triggered++;
-      } catch (e) {
-        // "already exists" = 上次 cron 触发过同 ID instance，跳过即可
-        if (!String(e).toLowerCase().includes("already exists")) {
-          console.error(`[github-fetch] workflow create failed for ${itemId}:`, e);
-        }
-      }
+      const result = await triggerGhWorkflowForItem(env, itemId);
+      if (result === 'triggered') counts.workflows_triggered++;
     }
   } else {
     console.warn("[github-fetch] GITHUB_PIPELINE_WORKFLOW binding missing — stub rows written but not enriched");
@@ -1569,4 +1555,37 @@ export async function recomputeGithubDailyRank(
   }
 
   return { ranked: rankRows.results.length };
+}
+
+/**
+ * 治本幂等：写 extra.workflow_triggered_at + create GH workflow instance。
+ * 调用方：drain endpoint + Phase 1 runGithubFetchTrending + drawer refreshSingleItem。
+ */
+export async function triggerGhWorkflowForItem(
+  env: { DB: D1Database; GITHUB_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.GITHUB_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[gh-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `gh-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.GITHUB_PIPELINE_WORKFLOW.create({
+      id: instanceId,
+      params: { itemId },
+    });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) {
+      return 'already_exists';
+    }
+    console.error(`[gh-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
 }

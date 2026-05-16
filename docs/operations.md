@@ -311,8 +311,12 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - **数据源**：`https://www.huodongxing.com/events?tag=AI&city=<city>&orderby=o&page=<N>` SSR HTML（无 turnstile/captcha，robots.txt allow `/events`）。详情页 `/event/<id>` 走 inline 88KB JSON（ASP.NET DataContractJsonSerializer 输出）。
 - **24 城市枚举**：`worker/src/scrapers/huodongxing/cities.ts`。6 核心（北京/上海/广州/深圳/杭州/成都）+ 18 次级。`?city=北京` 形式统一（不用 bj.huodongxing.com 子域名）。
 - **Phase 1 — `runHuodongxingFetchList`**：起跑 BJT 04:30/16:30（UTC 20:30 + 08:30），KV 状态机（key `hdx:fetch_progress`）跟踪 cities_pending。接力 tick：UTC 20:35-21:05 + 08:35-09:05 共 7 个 5min slot，每 tick budget=40 subreq，节流 page 间 2s。24 城 × ~5 page ≈ 120 fetch / ~3-4 tick 拼齐。
-- **Phase 2 — `runHuodongxingDetailEnrich`**：每个 tick 在 minute=20/50 抢占（2 tick/h），batch=3 + 节流 detail 间 5s = 15-24s 单 tick。每天 48 tick × 3 = 144 detail，覆盖每日 ~150 新 event。
-  - **风控阈值**（实测）：detail 路径 ~15 fetch/min 持续 4 分钟触发 WAF（200 + 6KB challenge stub body）；list 路径 30+/min 安全。节流取 detail 12/min 保守值。Cookie warm-up 自带（每批先 fetch list 拿 HDXWAFID + ASP.NET SessionId 共用）。
+- **Phase 2 — `HuodongxingDetailWorkflow`**（2026-05-16 阶段 5 cutover，原 isHdxEnrichSlot preempt cron 已删）：runHuodongxingFetchList 拉完 list 后对每条新事件 create instance，throttleSec=index×5 错开避免 site WAF。每个 instance 3 step：
+  1. step.sleep(throttleSec) — 跨 instance 节流（替代老 batch 内 5s sleep）
+  2. `warmup-and-fetch-detail` — **同 worker invocation 内 warm-up + detail**（避开 KV 缓存 cookies 跨节点 IP 触发 403 WAF 的根因 bug）
+  3. `persist` — UPDATE D1 (含 active/historical 判断)
+  - **风控阈值**（实测）：detail 路径 ~15 fetch/min 持续 4 分钟触发 WAF（200 + 6KB challenge stub body）；list 路径 30+/min 安全。throttleSec=5s 控 12/min。
+- **Phase 2.5 — `runHuodongxingDetailEnrich`**（保留作 admin fallback，cron 不再调）：老 batch 模式，admin endpoint /api/admin/hdx-enrich-now 仍可手动触发兜底。
 - **Phase 3 — `markStaleEventsHistorical`**：BJT 03:00（UTC 19:00）每天一次。end_time 已过 或 (end_time IS NULL AND start_time + 1d 已过) 的 active event 标 status=historical。
 - **数据落 D1**：items 表统一 schema，huodongxing 字段全在 `items.extra` JSON：
   - listing 阶段：`city / district / is_online / time_raw / location_raw / first_seen_at / last_seen_at / status / organizer.{name,slug,org_id,url,avatar_url,fans,is_certified_company,is_vip_gold}`
@@ -328,7 +332,8 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
     - `start_time IS NULL`（detail 未 enrich）的卡片也允许放进 `when` 过滤结果，等 enrich 后自动归位 — 避免 list 阶段刚抓回的卡片对用户不可见
 - **手动触发**（admin debug，HTTP Basic Auth `ADMIN_USER/PASS`）：
   - `POST /api/admin/hdx-fetch-now?budget=40&reset=1&only_city=北京` 触发 list 抓取（reset=1 清 KV 重新跑，only_city= 跳过 KV 单城抓）
-  - `POST /api/admin/hdx-enrich-now?limit=3` 立即跑一批 detail enrich
+  - `POST /api/admin/hdx-enrich-now?limit=3` 立即跑一批 detail enrich (老 batch fallback)
+  - `POST /api/admin/hdx-trigger-pending-workflows-now?limit=400` 阶段 5 治本 drain — 扫 detail_enriched_at IS NULL + workflow_triggered_at 30min 之外的 item 触发 workflow。**limit 上限 400**（CF Worker 单次 1000 subreq 限制），需要 drain 多批分多次跑
   - `POST /api/admin/hdx-sweep-now` 立即清扫过期 → historical
   - `GET /api/admin/hdx-status` 看 detail_pending 数 + 当前 fetch_progress KV 状态
 - **手动批量补翻译**（admin debug，HTTP Basic Auth `ADMIN_USER/PASS`）：
@@ -1195,6 +1200,21 @@ cd dashboard && npm run build && npx wrangler pages deploy dist --project-name=x
 cd worker && npm run db:init        # 推远程
 cd worker && npm run db:init:local  # 推本地（wrangler dev 用）
 ```
+
+#### 阶段 5 治本：workflow 幂等 marker + drain SQL 扩展 + drawer 触发（2026-05-16）
+
+3 个抓取链 workflow (GH / X / hdx) 的 drain endpoint + Phase 1 + drawer refresh 统一改造：
+
+1. **幂等 marker**：`triggerXxxWorkflowForItem` helper 写 `extra.workflow_triggered_at` (unix sec) → drain SQL 加 `AND (workflow_triggered_at IS NULL OR < strftime('%s','now','-30 minutes'))` 过滤 30min 内已触发的 item，避免 drain 反复试已 in-flight 的 instance。30min 后视为 stuck 可重新触发。
+2. **drain SQL 扩展**：从「只扫未分类」扩到覆盖所有 stuck 类型（X：未分类/未翻译/长推没拉/quote+reply 没回填；GH：pending/未分类/README 没译/R2 没迁；hdx：detail 没拉）。
+3. **drawer 触发**：`refreshSingleItem` 检测到 item stuck 时（drawer 打开时）自动 trigger workflow 补全（marker 30min 防重）。X/GH/hdx 三个分支都加。
+
+**limit 上限**：所有 drain endpoint 上限 **400/批**（CF Worker 单次 1000 subreq 限制，1 item = 2 subreq UPDATE+create + 1 SELECT 余量 = 单 batch 安全 ~400）。drain 大 backlog 时分多批跑。
+
+**触发链路总览**：
+- 新 item 入库 → Phase 1 自动 trigger workflow（写 marker + create）
+- 老 stuck → drain endpoint 扫库 + trigger（写 marker + create，marker 防重）
+- 用户打开 drawer → refreshSingleItem 检测 stuck + trigger（marker 防重）
 
 #### ⚠️ wrangler 4.x 部署陷阱（2026-05-16 踩过一次，prod 30 秒断线 + 14 个 secrets 全擦）
 
