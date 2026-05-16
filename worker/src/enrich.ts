@@ -540,7 +540,7 @@ interface Patch {
 }
 
 /** Apply patch to an item: merge into extra JSON + update metrics column. */
-async function applyPatch(
+export async function applyPatch(
   env: EnrichEnv,
   row: CandidateRow,
   patch: Patch,
@@ -3252,7 +3252,7 @@ const SENTENCE_END_CHARS = new Set([
   ' ', '\n', '\t',
 ]);
 
-function noteIdFromTweet(data: Record<string, unknown>): string | null {
+export function noteIdFromTweet(data: Record<string, unknown>): string | null {
   const nt = data.note_tweet as Record<string, unknown> | undefined;
   if (!nt) return null;
   const id = nt.id;
@@ -3271,7 +3271,7 @@ function readLongform(extra: string | null): LongformDetection | null {
   }
 }
 
-async function writeLongform(
+export async function writeLongform(
   env: EnrichEnv,
   itemId: string,
   rowExtra: string | null,
@@ -3839,4 +3839,133 @@ export async function classifyXTweetWithLlm(
 
   console.log(`[x-workflow:step1] ${itemId}: is_relevant=${isRel}`);
   return { is_relevant: isRel, ai_summary: summary };
+}
+
+/**
+ * Workflow Step 2a: 通过 syndication API 回填 quote_of / link_card。
+ * 跟老 runBackfillQuotes 一条 loop body 同逻辑，去掉 state KV bookkeeping。
+ */
+export async function backfillQuoteForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ has_quote: boolean; has_link_card: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`backfillQuoteForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  if (res === null) {
+    throw new Error(`backfillQuoteForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound || !res.data) {
+    console.log(`[x-workflow:step2a] ${itemId}: tweet not found via syndication`);
+    return { has_quote: false, has_link_card: false };
+  }
+
+  const qt = res.data.quoted_tweet as Record<string, unknown> | undefined;
+  const card = apiToLinkCard(res.data);
+  const apiReplyTo = res.data.in_reply_to_status_id_str as string | undefined;
+
+  const patch: Patch = {};
+  let hasQuote = false;
+  let hasLinkCard = false;
+  if (qt && qt.id_str) {
+    patch.quote_of_id = qt.id_str as string;
+    patch.quote_of = apiToQuoteOf(qt);
+    hasQuote = true;
+  }
+  if (card) {
+    patch.link_card = card;
+    hasLinkCard = true;
+  }
+  if (!apiReplyTo) patch.clearThreadRoot = true;
+
+  await applyPatch(env, row as CandidateRow, patch);
+  console.log(`[x-workflow:step2a] ${itemId}: quote=${hasQuote} link_card=${hasLinkCard}`);
+  return { has_quote: hasQuote, has_link_card: hasLinkCard };
+}
+
+/**
+ * Workflow Step 2b: 通过 syndication API 回填 reply_of_id / reply_of snapshot。
+ * 跟老 runBackfillReplies 一条 loop body 同逻辑。
+ */
+export async function backfillReplyForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ has_reply: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`backfillReplyForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  if (res === null) {
+    throw new Error(`backfillReplyForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound || !res.data) {
+    console.log(`[x-workflow:step2b] ${itemId}: tweet not found via syndication`);
+    return { has_reply: false };
+  }
+
+  const apiReplyToId = res.data.in_reply_to_status_id_str as string | undefined;
+  const apiReplyToHandle = res.data.in_reply_to_screen_name as string | undefined;
+  const parent = res.data.parent as Record<string, unknown> | undefined;
+
+  const patch: Patch = { reply_enriched: true };
+  let hasReply = false;
+  if (apiReplyToId) {
+    patch.reply_of_id = apiReplyToId;
+    patch.reply_to_screen_name = apiReplyToHandle ?? null;
+    if (parent && parent.id_str) {
+      patch.reply_of = apiToQuoteOf(parent);
+    } else {
+      // Parent suppressed (deleted/protected) — keep id+handle 但 reply_of null
+      patch.reply_of = null;
+    }
+    hasReply = true;
+  }
+
+  await applyPatch(env, row as CandidateRow, patch);
+  console.log(`[x-workflow:step2b] ${itemId}: reply=${hasReply}`);
+  return { has_reply: hasReply };
+}
+
+/**
+ * Workflow Step 2c: 检测 longform 标记（note_tweet.id 有则是长推待 fetch）。
+ * 跟老 runDetectLongform 一条 loop body 同逻辑。
+ */
+export async function checkLongformForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ is_longform: boolean; note_id: string | null }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`checkLongformForXTweet: item not found ${itemId}`);
+
+  const res = await fetchTweet(row.source_id);
+  const nowIso = new Date().toISOString();
+
+  if (res === null) {
+    throw new Error(`checkLongformForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound) {
+    await writeLongform(env, row.id, row.extra, {
+      detected_at: nowIso,
+      fetch_error: 'syndication_404',
+    });
+    return { is_longform: false, note_id: null };
+  }
+  if (!res.data) {
+    return { is_longform: false, note_id: null };
+  }
+
+  const noteId = noteIdFromTweet(res.data);
+  const det: LongformDetection = { detected_at: nowIso };
+  if (noteId) det.note_id = noteId;
+  await writeLongform(env, row.id, row.extra, det);
+
+  console.log(`[x-workflow:step2c] ${itemId}: longform=${!!noteId}`);
+  return { is_longform: !!noteId, note_id: noteId };
 }

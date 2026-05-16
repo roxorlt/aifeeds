@@ -21,7 +21,12 @@
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
-import { classifyXTweetWithLlm } from '../enrich';
+import {
+  classifyXTweetWithLlm,
+  backfillQuoteForXTweet,
+  backfillReplyForXTweet,
+  checkLongformForXTweet,
+} from '../enrich';
 
 interface XTweetParams {
   itemId: string;
@@ -55,11 +60,26 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       return { itemId, classified: 'irrelevant' as const };
     }
 
-    // ⏳ TODO step 2 fan-out（backfill-quote / backfill-reply / check-longform）
-    // ⏳ TODO step 3 longform-via-sb (条件)
+    const { hasQuoteRef, hasReplyRef } = event.payload;
+
+    // ─── Step 2 fan-out (并行)：backfill quote / reply + check longform ──
+    // backfillQuote 同时会写 link_card（syndication API 同 response 顺便拿到）。
+    // hasQuoteRef / hasReplyRef 是 Phase 1 ingest 时的 SB API 信号；hasQuoteRef
+    // 为 false 时跳过 syndication 调用，避免无谓 traffic。check-longform 始终跑。
+    const [, , longform] = await Promise.all([
+      hasQuoteRef
+        ? step.do('backfill-quote', RETRY, () => backfillQuoteForXTweet(this.env, itemId))
+        : Promise.resolve(null),
+      hasReplyRef
+        ? step.do('backfill-reply', RETRY, () => backfillReplyForXTweet(this.env, itemId))
+        : Promise.resolve(null),
+      step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
+    ]);
+
+    // ⏳ TODO step 3 longform-via-sb (条件：longform.is_longform)
     // ⏳ TODO step 4 fan-out (translate content / quote / link_card / reply / retweet)
-    // 接下来几个 PR turn 增量补全。当前只实现 step 1，部 staging 验证 workflow
-    // 触发 + classify 端到端通畅。
+    // 当前只实现 step 1-2，部 staging 验证 fan-out 并行。
+    void longform; // suppress unused 警告，下个 turn 加 step 3 时会用
 
     return { itemId, classified: 'relevant' as const };
   }
