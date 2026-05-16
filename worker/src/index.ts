@@ -1082,8 +1082,13 @@ export default {
       ((hour === 21 || hour === 9) && minute <= 5);
 
     // Huodongxing detail-enrich slots: minute=20/50（2 tick/h，1/6 cycle 占用率）
-    // 单 tick batch=3 + 5s/detail 节流 = 15-24s 内于 worker 30s wall。
-    // 全天 48 tick × 3 = 144 detail/天，覆盖每天 ~150 新 event 增量。
+    // 阶段 5 cutover (2026-05-16) 把这里改成 workflow auto-drain：
+    //   - 之前是 legacy batch（runHuodongxingDetailEnrich），单 tick batch=3 + 5s 节流
+    //   - 阶段 5 改 workflow 后 cutover 漏了 cron 自动 drain，老 backlog 卡 loading
+    //   - 2026-05-17 补：cron tick 触发 25 个 pending workflow instance（throttleSec
+    //     3s 错开 0/3/6...72s 启动 detail fetch 避免 site WAF），48 tick × 25 = 1200/day
+    //     容量，存量 600+ 半天清完，增量 +150/天稳跑赢。
+    //   - 治本 marker filter 跟 admin endpoint 共用（30min 窗口内已触发的跳过）
     const isHdxEnrichSlot = minute === 20 || minute === 50;
 
     // Huodongxing 历史活动 sweep：BJT 03:00 (UTC 19:00)，每日清扫一次
@@ -1190,8 +1195,38 @@ export default {
           // 阶段 5 (2026-05-16): huodongxing detail enrich 迁 CF Workflow
           // (HuodongxingDetailWorkflow)。runHuodongxingFetchList 对每条新事件
           // 触发 instance，5s/instance throttleSec 错开避免 site rate limit。
-          // isHdxEnrichSlot preempt 已删。老 batch runHuodongxingDetailEnrich
-          // 保留作 admin fallback (/api/admin/hdx-enrich-now)。
+          // 2026-05-17 补：cron auto-drain 处理 cutover 前 backlog + 触发失败的 retry。
+          // SQL 跟 admin /api/admin/hdx-trigger-pending-workflows-now 共用（marker
+          // 30min 窗口 filter），单 tick limit 25 → 48 tick × 25 = 1200/天 capacity。
+          if (isHdxEnrichSlot && env.HUODONGXING_DETAIL_WORKFLOW) {
+            const pending = await env.DB.prepare(
+              `SELECT id FROM items
+                WHERE source_type='huodongxing'
+                  AND deleted_at IS NULL
+                  AND json_extract(extra, '$.detail_enriched_at') IS NULL
+                  AND (
+                    json_extract(extra, '$.workflow_triggered_at') IS NULL
+                    OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+                  )
+                ORDER BY json_extract(extra, '$.last_seen_at') DESC
+                LIMIT 25`,
+            ).all<{ id: string }>();
+            let triggered = 0;
+            let throttleIndex = 0;
+            for (const r of pending.results) {
+              const result = await triggerHdxWorkflowForItem(env, r.id, throttleIndex * 3);
+              if (result === 'triggered') {
+                triggered++;
+                throttleIndex++;
+              }
+            }
+            console.log(
+              `[cron] hdx-auto-drain triggered=${triggered} / candidates=${pending.results.length}`,
+            );
+            return;
+          }
+          // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
+          // (/api/admin/hdx-enrich-now)，不在 cron 跑。
           // GH 抓取链已迁 CF Workflow (worker/src/workflows/github-pipeline.ts)。
           // Phase 1 (github-fetch slot) 写 stub 行 + 立刻 create Workflow instance，
           // instance 自己跑 enrich / classify / r2-migrate / readme-translate。
