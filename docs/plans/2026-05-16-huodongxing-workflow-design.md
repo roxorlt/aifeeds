@@ -2,8 +2,10 @@
 
 > 2026-05-16。落地：`worker/src/workflows/huodongxing-detail.ts`（待实施）。
 >
-> 闭合阶段 5（CF 迁移收尾的最后一个抓取链）。
+> 闭合阶段 5：活动行（用户感知最强的 backlog 痛点）。
 > 上游：[`2026-05-16-x-main-pipeline-workflows-design.md`](2026-05-16-x-main-pipeline-workflows-design.md) / [`2026-05-16-github-pipeline-workflows-design.md`](2026-05-16-github-pipeline-workflows-design.md) 同模式。
+>
+> **范围澄清**：PH (197 r2_pending) + ClawHub (196 enrich_pending) 也有 preempt 模型的同问题，但 backlog 严重度低于 hdx（66%），列**阶段 6** 单独迁。同步推 3 个抓取链会让 PR 太大风险高，按 hdx → PH+CH 分两步走更稳。
 
 ## 背景
 
