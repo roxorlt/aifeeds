@@ -108,6 +108,7 @@
 - 试点 OK 后把 X 主流水线 6 个 cron mode（抓取 / longform / quote 补全 / metrics 刷新 / 翻译 / 分类）全迁到 Workflow
 - 双写期：老 cron + 新 Workflow 并行跑，稳定后下线 cron
 - **翻译模式重写候选 SQL**（2026-05-14 留）：现在 `selectTranslationCandidates`（`worker/src/enrich.ts:2198`）用 `RANDOM()` 在大池子（X 4000+ 条 content_translated IS NULL 但实际中文）里抽 150，命中 quote_of / link_card 边角的概率 ~1%，单轮 limit=50 实际只翻 1 条 task。导致 X feed 上 quote_of 引用推文 / link_card 链接卡长期 47 条左右积压（cron 也清不动）；2026-05-14 加的 `POST /api/admin/fill-translations-now` admin endpoint 同样卡这个瓶颈。Workflow 改造时按 task 类型分独立队列（content / quote / link_card 各一），扁平消费，根治此问题。
+- **顺便加 reply / retweet 父推 snapshot 翻译覆盖**（2026-05-16 留）：当前 `selectTranslationCandidates` 不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上展示的「回复 @父推作者」/「转推 @某人」对应 snapshot 内容是英文（backfill-quotes / backfill-replies 抓回来塞进 extra 但翻译流程不扫）。阶段 4 重写 SQL 时顺便加这两个 task 类型独立队列（边际 0.5 天），新功能从第一天享受 Workflow 秒级 + 死信兜底，避免「先做半成品再升级」。
 
 **阶段 5（按需）—— 高级能力**
 - Queue：消息总线（比如 enrich 任务排队）
