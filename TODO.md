@@ -92,7 +92,7 @@
 **阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
 - [x] **AI Gateway** — OPS 2026-05-16 已建 `aifeeds-deepseek` gateway（详见 [operations.md §10](docs/operations.md)）；BE 待办：worker 把 DeepSeek 调用 base URL 切到 `https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek`，is_relevant 等可缓存请求加 `cf-aig-cache-ttl: 3600` header
 - [x] **Web Analytics** — OPS 2026-05-16 已建 prod + staging 两个 site（详见 [operations.md §11](docs/operations.md)）；FE 待办：`dashboard/index.html` 加 beacon snippet（prod token `857fab92…`，staging token `9e6f987f…`，按构建 target 切）
-- [ ] **Workers Logs** — BE 在 `worker/wrangler.toml` 加 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`，redeploy 即可。OPS 知情；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
+- [x] **Workers Logs** — BE 2026-05-16 已加（PR #34），`worker/wrangler.toml` 含 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
 
 **阶段 2（半天）—— 图片走边缘优化**
 - 现在头像 / 截图 / 海报直接走 R2 反代
