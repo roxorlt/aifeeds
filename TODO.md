@@ -94,8 +94,8 @@
 **阶段 2（半天）—— 图片走边缘优化**
 - [x] **OPS 2026-05-16** zone `image_resizing` toggle on
 - [x] **BE 2026-05-16**（PR #49）worker `/img` 加 `cf.image` option（format=auto + ?w= resize + ?q= quality），video 分支保持原反代。prod 验证：avatar 28573B→2532B（w=80，省 91%）/ →18074B（w=400，省 37%）
-- [ ] **FE 待办**：`dashboard/src/lib/utils.ts` `proxyImg()` 增可选 width 参数，按场景传：GH 头像 80 / 卡片 400 / 详情 800（裸 `/img?url=` 不传 w 时 worker passthrough 原图，省带宽要 FE 显式传 w）
-- ⚠️ format=auto 在 prod 实测未强转 webp（仍返 jpeg），可能 CF cf.image 默认行为，后续视效果调整（resize 主路径已通，省带宽 80%+ 已实现）
+- [x] **FE 2026-05-16**（PR #51）`proxyImg(url, width)` per-call-site：14 处 img 调用按场景传 80 / 400 / 不传，GH avatar 28KB → 1.5-3KB
+- [x] **BE/FE 2026-05-16**（PR #54）format=auto 在 worker fetch 上下文不可靠（curl + chrome devtools 都验证 3 种 Accept 都返原 jpeg / 无 Vary）；worker 改成自己 parse Accept header 主动设 `cf.image.format = 'avif' | 'webp' | (omit)`，cacheKey 编入 format 防跨 client 污染。Prod 实测 ruvnet 头像：jpeg 4970B → avif 3188B（再省 36% on top of resize）
 
 **阶段 3（1-2 周）—— GH 链试点 Workflow**
 - GH 抓取链最简单（单源、量小），拿来试点

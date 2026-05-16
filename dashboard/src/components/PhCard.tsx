@@ -86,6 +86,8 @@ interface Props {
 export function PhCard({ item }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  // onLoad 后检测真实 natural dims（同 GithubCard / worker share/handlers.ts 门控）
+  const [coverRejected, setCoverRejected] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<PhMetrics>(item.metrics) ?? ({} as PhMetrics);
   const media = parseMedia(item.media);
@@ -182,7 +184,7 @@ export function PhCard({ item }: Props) {
           screenshot 但流内之前只展示 logo (40×40)，hero shot 完全没看到。
           这里跟分享海报 cover 用同一张图源 (worker share/handlers.ts:492-515)。
           视频用同样静态 poster，点 cover 打开抽屉看完整 gallery + 视频播放。 */}
-      {cover && !coverFailed && (
+      {cover && !coverFailed && !coverRejected && (
         <div className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100">
           <img
             src={proxyImg(resolveAssetUrl(cover.url) || cover.url, 400)}
@@ -190,6 +192,14 @@ export function PhCard({ item }: Props) {
             loading="lazy"
             className="aspect-[16/9] w-full object-cover"
             onError={() => setCoverFailed(true)}
+            onLoad={(e) => {
+              const w = e.currentTarget.naturalWidth;
+              const h = e.currentTarget.naturalHeight;
+              if (!w || !h) return;
+              const ar = w / h;
+              const maxDim = Math.max(w, h);
+              if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
+            }}
           />
           {cover.isVideo && (
             <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
