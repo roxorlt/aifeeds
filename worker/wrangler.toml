@@ -67,6 +67,21 @@ name = "x-tweet-pipeline-workflow"
 binding = "X_TWEET_PIPELINE_WORKFLOW"
 class_name = "XTweetPipelineWorkflow"
 
+# CF Workflow: Product Hunt 抓取链。runPhDailyFetch 后对每条新 post create instance。
+# 3 step: classify-with-llm → r2-migrate → translate-fields。
+# 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+[[workflows]]
+name = "ph-pipeline-workflow"
+binding = "PH_PIPELINE_WORKFLOW"
+class_name = "PhPipelineWorkflow"
+
+# CF Workflow: ClawHub 抓取链。runClawhubFetchList 后对每条新 skill create instance。
+# 2 step: enrich-and-translate (Promise.all 内 3 件并行) → persist。
+[[workflows]]
+name = "clawhub-pipeline-workflow"
+binding = "CH_PIPELINE_WORKFLOW"
+class_name = "ClawhubPipelineWorkflow"
+
 # CF Workflow: 活动行 (huodongxing) detail 抓取。runHuodongxingFetchList 后对
 # 每条新事件 create 1 个 instance，跑 4 step pipeline: throttle sleep →
 # ensure-cookies → fetch-and-parse-detail → persist。
@@ -132,6 +147,16 @@ class_name = "XTweetPipelineWorkflow"
 name = "huodongxing-detail-workflow-staging"
 binding = "HUODONGXING_DETAIL_WORKFLOW"
 class_name = "HuodongxingDetailWorkflow"
+
+[[env.staging.workflows]]
+name = "ph-pipeline-workflow-staging"
+binding = "PH_PIPELINE_WORKFLOW"
+class_name = "PhPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "clawhub-pipeline-workflow-staging"
+binding = "CH_PIPELINE_WORKFLOW"
+class_name = "ClawhubPipelineWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。

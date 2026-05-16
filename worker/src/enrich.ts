@@ -438,6 +438,15 @@ export async function refreshSingleItem(
         expirationTtl: REFRESH_THROTTLE_TTL,
       });
     }
+    // 治本 C 阶段 6：drawer 检测 CH stuck (ch_pending=true) → trigger workflow
+    const chStuck = await env.DB.prepare(
+      `SELECT 1 FROM items WHERE id = ? AND source_type='clawhub'
+        AND json_extract(extra, '$.ch_pending') = 1`,
+    ).bind(itemId).first();
+    if (chStuck && (env as { CH_PIPELINE_WORKFLOW?: Workflow }).CH_PIPELINE_WORKFLOW) {
+      const { triggerChWorkflowForItem } = await import('./clawhub');
+      await triggerChWorkflowForItem(env as { DB: D1Database; CH_PIPELINE_WORKFLOW?: Workflow }, itemId);
+    }
     return { refreshed: true, source_type: 'clawhub', reason: 'success', metrics: r.metrics };
   }
 
@@ -466,6 +475,19 @@ export async function refreshSingleItem(
     await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
       expirationTtl: REFRESH_THROTTLE_TTL,
     });
+    // 治本 C 阶段 6：drawer 检测 PH stuck → trigger workflow
+    const phStuck = await env.DB.prepare(
+      `SELECT 1 FROM items WHERE id = ? AND source_type='product_hunt'
+        AND (
+          is_relevant IS NULL
+          OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL)
+          OR (is_relevant=1 AND content IS NOT NULL AND content_translated IS NULL)
+        )`,
+    ).bind(itemId).first();
+    if (phStuck && (env as { PH_PIPELINE_WORKFLOW?: Workflow }).PH_PIPELINE_WORKFLOW) {
+      const { triggerPhWorkflowForItem } = await import('./scrapers/ph');
+      await triggerPhWorkflowForItem(env as { DB: D1Database; PH_PIPELINE_WORKFLOW?: Workflow }, itemId);
+    }
     return { refreshed: true, source_type: 'product_hunt', reason: 'success', metrics: r.metrics };
   }
 
@@ -2272,7 +2294,7 @@ export async function runClassifyPending(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -2769,8 +2791,8 @@ export async function runCleanup(
 
 // 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
 // 回滚直连：改回 "https://api.deepseek.com/v1/chat/completions"。
-const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions";
-const DEEPSEEK_MODEL = "deepseek-chat";
+export const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions";
+const DEEPSEEK_MODEL = "deepseek-v4-flash";
 
 const TRANSLATION_PROMPT_HEADER =
   "Translate each numbered tweet below from English to Chinese for an AI news feed.\n" +
@@ -3682,7 +3704,7 @@ async function translateLongformContent(
 //   ai_agent / ai_code_editor / ai_image_gen / ai_audio /
 //   ai_voice_agent / ai_data_analysis / ai_other
 
-const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
+export const PH_ENRICH_PROMPT = `你是 AI 产品分类员。判断每个 Product Hunt 产品是否 AI 相关，是 AI 相关时给出分类和一句中文解读。
 
 输入：JSON 数组 [{idx, name, tagline, description, topics}]
 
@@ -3781,7 +3803,7 @@ export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichR
         Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -3898,7 +3920,7 @@ export async function classifyXTweetWithLlm(
       Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'deepseek-chat',
+      model: 'deepseek-v4-flash',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
       response_format: { type: 'json_object' },

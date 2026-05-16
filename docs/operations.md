@@ -200,9 +200,12 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - **Phase 1 — `runPhDailyFetch`**（worker/src/scrapers/ph.ts）：dispatcher UTC 10:10-14（北京 18:10-14）窗口触发，KV 哨兵 `ph:fetched:<PT_date>` 防一日内重跑。流程：list query cursor 翻页拿 PT yesterday 全部 featured posts → 每条 detail query 拿 makers/comments/media/topics → transform 成 IngestItem → 内调 `ingestItems()` 写 D1 → append `metrics_snapshots_ph` → 写 KV 哨兵
   - **PH API 单页 cap 20**，必须用 `pageInfo.endCursor` 翻页（max 10 页 = 200 条保护）。实测 PT 一日 featured 通常 30-50 条，原 `first:30` 单页只拿到 20 漏过半
   - **触发时间选 18:10 理由**：PT 切日点 = 北京 15:00 (PDT) / 16:00 (PST)；18:10 给 PH 后端 2-3 小时 settle daily_rank。原 04:10 (UTC 20:10) 太保守，用户次日凌晨才看到
-- **Phase 2 — `runPhEnrich`**（worker/src/enrich.ts）：每 cron tick 抢占（位于 ph-r2-migrate 之前）。`SELECT WHERE source_type='product_hunt' AND is_relevant IS NULL`，DeepSeek 一次性出 `{is_ai, ai_category, ai_summary}`，json_set 写回 extra。每 tick 10 条；30 个/天 ~3 tick 完成
-- **Phase 3 — `fill-translations`**：现有 X 流程扩展支持 PH 字段（tagline / maker_post / top_comments[]），`is_relevant=1` 才进队列。中文翻译写回 content_translated / extra.maker_post_translated / extra.top_comments[i].translated
-- **Phase 4 — `ph-r2-migrate`**（worker/src/ph-r2.ts，原 worker/src/ph.ts 改名）：每 cron tick 1 个 item，logo/gallery/avatar/video 抓 PH CDN → SHA-256 hash key 写 R2 → 改写 extra/media URL 到 `/r/ph/<sha>`。`is_relevant=1 AND extra.r2_migrated_at IS NULL` 才挑
+- **Phase 2 — `PhPipelineWorkflow`**（2026-05-16 阶段 6 cutover，原 ph-enrich + ph-r2-migrate + fill-translations PH 分支 3 个 preempt 已删）：runPhDailyFetch 后对每条新 post create instance，3 step pipeline：
+  1. `classify-with-llm` — DeepSeek 判 is_relevant + ai_category + ai_summary
+  2. `r2-migrate` — logo/gallery/avatar/video → R2（仅 is_relevant=1 跑）
+  3. `translate-fields` — tagline + maker_post + top_comments[] 翻译（task #8 写 translated_at）
+- **手动 drain**：`POST /api/admin/ph-trigger-pending-workflows-now?limit=400`（Basic Auth）扫 stuck（未分类 / r2 没迁 / 翻译没补）+ marker 30min 防重 — 1 批清完 PH 全部 stuck
+- **旧 batch fallback**：runPhEnrich / runPhR2Migrate / fill-translations PH 分支保留作 admin endpoint 兜底（/api/admin/ph-enrich-now / ph-r2-migrate-now / fill-translations-now）
 - **PH 数据落 D1**：items 表统一 schema，PH 专属字段全在 `items.extra` JSON：`product_slug` / `launch_date_pt` / `daily_rank` / `topics` / `makers` / `hunter` / `maker_post` / `maker_post_text` / `maker_post_translated` / `top_comments[]` / `ai_summary` / `ai_category` / `ph_url` / `website_url` / `r2_migrated_at`
 - **API 限制（重要）**：client_credentials 鉴权下 PH 隐藏所有非 hunter 用户身份（name/username 返回 `[REDACTED]`，id 返回 `0`）。`makers[]` 全 [REDACTED] → 过滤为空数组；comments / maker_post 保留文本但 author 显示 "PH 用户" 占位；hunter 真实可见。这是 PH 反爬虫策略（防 app token 爬用户）。要解需切 OAuth user-token 流程（涉及登录授权）
 - **API 不暴露的字段**：`reviews` 详情（只有汇总数 `Post.reviewsCount/reviewsRating`）/ `pricing_type` / `is_open_source` / `followers` 数 — 前端按设计优雅降级（reviews 段隐藏 / pricing+open_source chip 隐藏 / followers KPI 显 "—"）
@@ -263,7 +266,10 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - `skills:getBySlug`：单个 skill 详情（query 接口）
   - `skills:getReadme`：拿 ClawHub 网页 README 标签页的内容（**action 接口**，URL 走 `/api/action`，不是 `/api/query`）。返回 `{path, text}`，path 告诉是 README.md 还是 SKILL.md
 - **Phase 1 — `runClawhubFetchList`**：每天 UTC `08:00` + `20:00`（= BJT 16:00 + 04:00）。8 次 list 调用（top 1000 按 stars + top 500 按更新时间 dedup），**不再过滤可疑项**（`nonSuspiciousOnly=false`）→ upsert items（`is_relevant=1` + `extra.ch_pending=true` + `published_at=skill.updatedAt`）+ append 一行 `metrics_snapshots_clawhub`。**~10 调用/次**
-- **Phase 2 — `runClawhubEnrichPending`**：每个 `*/5min` cron tick **抢占式**运行：取 `extra.ch_pending=1` 的行（按 `metrics.stars DESC` 优先），每 tick 处理 2 条。每条三件并行：
+- **Phase 2 — `ClawhubPipelineWorkflow`**（2026-05-16 阶段 6 cutover，原 clawhub-enrich preempt cron 已删）：runClawhubFetchList 后对每条新 skill (ch_pending=true) create instance，1 step (CH 无条件分支)：
+  1. `enrich-and-translate` — Promise.all 内 3 件并行 (summary translate + LLM finding translate + readme fetch+translate) + 最终 UPDATE D1
+- **手动 drain**：`POST /api/admin/ch-trigger-pending-workflows-now?limit=400`（Basic Auth）扫 ch_pending=true + marker 30min 防重
+- **旧 batch fallback** runClawhubEnrichPending 保留：每个 `*/5min` cron tick **原抢占式**取 `extra.ch_pending=1` 的行（按 `metrics.stars DESC` 优先），每 tick 处理 2 条。每条三件并行：
   1. **summary 翻译**（DeepSeek，跳过已是中文的）
   2. **LLM finding 翻译**（DeepSeek，跳过已 `lang=zh` 的）
   3. **`skills:getReadme`** 拿 ClawHub 渲染的 README 内容（`{path, text}`）

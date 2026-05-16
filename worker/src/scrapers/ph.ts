@@ -13,6 +13,7 @@
 
 import type { Env, ItemInput } from '../index';
 import { ingestItems } from '../index';
+import { PH_ENRICH_PROMPT, DEEPSEEK_URL } from '../enrich';
 
 // ─── Constants ─────────────────────────────────────────────────
 
@@ -768,6 +769,26 @@ export async function runPhDailyFetch(
     `[ph] ingestItems: inserted=${ingestResult.inserted} updated=${ingestResult.updated} errors=${ingestResult.errors.length}`,
   );
 
+  // 阶段 6 cutover: 对每条新 post (is_relevant=NULL) 触发 PH workflow
+  if (env.PH_PIPELINE_WORKFLOW) {
+    const sourceIds = items.map((i) => i.source_id);
+    if (sourceIds.length > 0) {
+      const placeholders = sourceIds.map(() => '?').join(',');
+      const needsWorkflow = await env.DB.prepare(
+        `SELECT id FROM items
+          WHERE source_type='product_hunt'
+            AND source_id IN (${placeholders})
+            AND is_relevant IS NULL`,
+      ).bind(...sourceIds).all<{ id: string }>();
+      let triggered = 0;
+      for (const r of needsWorkflow.results) {
+        const res = await triggerPhWorkflowForItem(env, r.id);
+        if (res === 'triggered') triggered++;
+      }
+      console.log(`[ph] workflows_triggered=${triggered}/${needsWorkflow.results.length}`);
+    }
+  }
+
   // 4. Append metrics_snapshots_ph
   await appendMetricsSnapshots(env, items, ptDate);
 
@@ -853,7 +874,7 @@ async function appendMetricsSnapshots(
 // 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
 // 回滚直连：改回 'https://api.deepseek.com/v1/chat/completions'。
 const DS_URL_TR = 'https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions';
-const DS_MODEL_TR = 'deepseek-chat';
+const DS_MODEL_TR = 'deepseek-v4-flash';
 const NL_MARK_TR = '⟪NL⟫';
 
 function cjkRatioPh(text: string): number {
@@ -1014,4 +1035,214 @@ async function translatePhItemsInline(env: Env, items: ItemInput[]): Promise<voi
     }
   }
   console.log(`[ph] inline translate done: ${translated}/${tasks.length} in ${Date.now() - t0}ms`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 6 PH workflow 单 itemId 函数 (STUB — 实施 turn 2 填充真实 body)
+//
+// 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function classifyPhItemWithLlm(
+  env: Env,
+  itemId: string,
+): Promise<{ is_relevant: 0 | 1 }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('classifyPhItemWithLlm: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, title, content, extra
+       FROM items
+      WHERE id = ? AND source_type = 'product_hunt'`,
+  ).bind(itemId).first<{
+    id: string; source_id: string; title: string | null;
+    content: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`classifyPhItemWithLlm: item not found ${itemId}`);
+
+  let extra: { description?: string; topics?: string[] } = {};
+  try {
+    const p = JSON.parse(row.extra || '{}');
+    if (p && typeof p === 'object') extra = p;
+  } catch { /* noop */ }
+
+  const input = [{
+    idx: 0,
+    name: row.title || '',
+    tagline: row.content || '',
+    description: (extra.description || '').slice(0, 400),
+    topics: (extra.topics || []).slice(0, 5),
+  }];
+  const prompt = PH_ENRICH_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      max_tokens: 500,
+    }),
+  });
+  if (!res.ok) throw new Error(`classifyPhItemWithLlm: HTTP ${res.status} for ${itemId}`);
+  const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const raw = body.choices?.[0]?.message?.content || '';
+  let parsed: { items?: Array<{ idx: number; is_relevant: 0 | 1; ai_category?: string; ai_summary?: string }> };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`classifyPhItemWithLlm: JSON parse failed for ${itemId}`);
+  }
+  const item = (parsed.items || [])[0];
+  if (!item) throw new Error(`classifyPhItemWithLlm: empty items for ${itemId}`);
+
+  const isRel = item.is_relevant === 1 ? 1 : 0;
+  const cat = isRel ? (item.ai_category || 'ai_other') : null;
+  const summary = isRel ? (item.ai_summary || '').trim() : '';
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET is_relevant = ?,
+            matched_by = COALESCE(matched_by, 'ph-workflow'),
+            extra = json_set(coalesce(extra, '{}'),
+                             '$.ai_category', ?,
+                             '$.ai_summary', ?,
+                             '$.classified_at', ?)
+      WHERE id = ?`,
+  ).bind(isRel, cat, summary, new Date().toISOString(), itemId).run();
+
+  console.log(`[ph-workflow:step1] ${itemId}: is_relevant=${isRel} cat=${cat}`);
+  return { is_relevant: isRel };
+}
+
+// r2MigratePhItemById 移到 ph-r2.ts (跟 runPhR2Migrate 同文件共享 helpers)
+// workflow class import 从 '../ph-r2' 而不是 '../scrapers/ph'
+
+/**
+ * Workflow Step 3: 翻译 tagline (item.content) + maker_post (extra.maker_post_text)
+ * + top_comments[].text (extra.top_comments[i].text)，写回 content_translated +
+ * extra.maker_post_translated + extra.top_comments[i].translated。
+ *
+ * task #8: 写 translated_at 给 C 端「N 条新译文」横条用
+ */
+export async function translatePhFieldsForItem(
+  env: Env,
+  itemId: string,
+): Promise<{ fields_translated: number }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('translatePhFieldsForItem: DEEPSEEK_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, content_translated, extra FROM items
+      WHERE id = ? AND source_type='product_hunt'`,
+  ).bind(itemId).first<{
+    id: string; content: string | null;
+    content_translated: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`translatePhFieldsForItem: item not found ${itemId}`);
+
+  const extra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
+
+  // 收集需要翻译的 task（field 名 + text）
+  type Task = { field: 'content' | 'maker_post' | string; text: string; commentIdx?: number };
+  const tasks: Task[] = [];
+
+  // tagline
+  if (row.content && !row.content_translated && !isLikelyChinesePh(row.content)) {
+    tasks.push({ field: 'content', text: row.content });
+  }
+  // maker_post
+  const mpText = extra.maker_post_text as string | undefined;
+  const mpTranslated = extra.maker_post_translated as string | undefined;
+  if (mpText && !mpTranslated && !isLikelyChinesePh(mpText)) {
+    tasks.push({ field: 'maker_post', text: mpText });
+  }
+  // top_comments[]
+  const topComments = extra.top_comments as Array<{ text?: string; translated?: string }> | undefined;
+  if (Array.isArray(topComments)) {
+    topComments.forEach((c, idx) => {
+      if (c?.text && !c.translated && !isLikelyChinesePh(c.text)) {
+        tasks.push({ field: 'top_comment', text: c.text, commentIdx: idx });
+      }
+    });
+  }
+
+  if (tasks.length === 0) {
+    console.log(`[ph-workflow:step3] ${itemId}: 0 tasks (all already translated)`);
+    return { fields_translated: 0 };
+  }
+
+  const result = await translatePhBatch(env.DEEPSEEK_API_KEY, tasks.map((t) => t.text));
+  let translated = 0;
+  let contentTranslated: string | null = null;
+  for (let i = 0; i < tasks.length; i++) {
+    const tr = result.get(i);
+    if (!tr) continue;
+    const task = tasks[i];
+    if (task.field === 'content') {
+      contentTranslated = tr;
+    } else if (task.field === 'maker_post') {
+      extra.maker_post_translated = tr;
+    } else if (task.field === 'top_comment' && task.commentIdx !== undefined) {
+      const arr = (extra.top_comments as Array<{ text?: string; translated?: string }>);
+      arr[task.commentIdx] = { ...arr[task.commentIdx], translated: tr };
+    }
+    translated++;
+  }
+
+  // 写回 D1: content_translated 列（task #8 同步设 translated_at）+ extra
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (contentTranslated) {
+    await env.DB.prepare(
+      `UPDATE items
+          SET content_translated = ?,
+              translated_at = ?,
+              extra = ?
+        WHERE id = ?`,
+    ).bind(contentTranslated, nowTs, JSON.stringify(extra), itemId).run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(extra), itemId).run();
+  }
+
+  console.log(`[ph-workflow:step3] ${itemId}: translated ${translated}/${tasks.length} fields`);
+  return { fields_translated: translated };
+}
+
+/**
+ * 治本幂等：写 marker + create PH workflow instance。
+ * 调用方：drain endpoint + Phase 1 runPhDailyFetch + drawer refreshSingleItem。
+ */
+export async function triggerPhWorkflowForItem(
+  env: { DB: D1Database; PH_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.PH_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[ph-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `ph-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.PH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) return 'already_exists';
+    console.error(`[ph-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
 }

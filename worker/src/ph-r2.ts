@@ -308,6 +308,61 @@ export async function runPhR2Migrate(
 // COUNT helper — scheduled() 抢占决策用
 // ---------------------------------------------------------------------------
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 阶段 6 PH workflow step 2 — 单 itemId R2 迁移（复用 runPhR2Migrate loop body）
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function r2MigratePhItemById(
+  env: Env,
+  itemId: string,
+): Promise<{ assets_migrated: number; assets_failed: number }> {
+  if (!env.READMES) {
+    console.warn(`[ph-workflow:step2] ${itemId}: R2 binding missing, skip`);
+    return { assets_migrated: 0, assets_failed: 0 };
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, media as media_raw, extra as extra_raw
+       FROM items
+      WHERE id = ? AND source_type='product_hunt'`,
+  ).bind(itemId).first<ItemForMigrate>();
+  if (!row) throw new Error(`r2MigratePhItemById: item not found ${itemId}`);
+
+  const media: MediaItem[] = row.media_raw ? JSON.parse(row.media_raw) : [];
+  const extra: PhExtra = row.extra_raw ? JSON.parse(row.extra_raw) : {};
+
+  // 已迁过的早退
+  if (extra.r2_migrated_at) {
+    return { assets_migrated: 0, assets_failed: 0 };
+  }
+
+  const { logos, galleryImages, videos, avatars } = collectAssets(media, extra);
+  const all: AssetRequest[] = [...logos, ...galleryImages, ...videos, ...avatars];
+
+  const mapping = new Map<string, string>();
+  let migrated = 0;
+  let failed = 0;
+  for (const asset of all) {
+    const newUrl = await migrateOne(env, asset);
+    if (newUrl) {
+      mapping.set(asset.url, newUrl);
+      migrated++;
+    } else {
+      failed++;
+    }
+  }
+
+  const { media: newMedia, extra: rewrittenExtra } = rewriteAllUrls(media, extra, mapping);
+  const newExtra: PhExtra = { ...rewrittenExtra, r2_migrated_at: new Date().toISOString() };
+
+  await env.DB.prepare(
+    `UPDATE items SET media = ?, extra = ? WHERE id = ?`,
+  ).bind(JSON.stringify(newMedia), JSON.stringify(newExtra), itemId).run();
+
+  console.log(`[ph-workflow:step2] ${itemId}: ${migrated}/${all.length} assets migrated`);
+  return { assets_migrated: migrated, assets_failed: failed };
+}
+
 export async function countPhR2Pending(env: Env): Promise<number> {
   const r = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items

@@ -29,6 +29,8 @@ export interface ClawhubEnv {
   DB: D1Database;
   DEEPSEEK_API_KEY?: string;
   READMES?: R2Bucket;
+  // 阶段 6: optional CH workflow binding，缺失时 Phase 1 静默跳过 trigger
+  CH_PIPELINE_WORKFLOW?: Workflow;
 }
 
 const CONVEX_REST = "https://wry-manatee-359.convex.site/api/v1";
@@ -637,6 +639,36 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
     }
   }
 
+  // 阶段 6 cutover: 对每条新 skill (ch_pending=true) 触发 CH workflow。
+  // 老 enriched skill ch_pending=false 不重触发。helper 内置 marker 防重。
+  // CF Worker subreq cap 1000，每个 trigger 2 subreq → 限 N=400 上限。
+  if (env.CH_PIPELINE_WORKFLOW) {
+    const slugs = Array.from(allBySort.keys());
+    if (slugs.length > 0) {
+      // 拆 chunks 查 — 单次 IN(...) 太多 params D1 限制；250 一批安全
+      const SLUG_CHUNK = 250;
+      const newSlugIds: string[] = [];
+      for (let i = 0; i < slugs.length; i += SLUG_CHUNK) {
+        const chunk = slugs.slice(i, i + SLUG_CHUNK);
+        const ph = chunk.map(() => '?').join(',');
+        const newRows = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='clawhub'
+              AND source_id IN (${ph})
+              AND json_extract(extra, '$.ch_pending') = 1`,
+        ).bind(...chunk).all<{ id: string }>();
+        for (const row of newRows.results) newSlugIds.push(row.id);
+      }
+      // 单批 Phase 1 触发 cap 400（subreq 限制）。超过的话下次 cron 接力或 drain admin
+      let triggered = 0;
+      for (const id of newSlugIds.slice(0, 400)) {
+        const res = await triggerChWorkflowForItem(env, id);
+        if (res === 'triggered') triggered++;
+      }
+      console.log(`[clawhub-fetch] workflows_triggered=${triggered}/${newSlugIds.length} (capped at 400 if more)`);
+    }
+  }
+
   return counts;
 }
 
@@ -863,4 +895,168 @@ export async function countClawhubPending(env: ClawhubEnv): Promise<number> {
         AND json_extract(extra, '$.ch_pending') = 1`,
   ).first<{ n: number }>();
   return r?.n || 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 阶段 6 CH workflow 单 itemId 函数 (STUB — 实施 turn 2 填充真实 body)
+//
+// 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Workflow Step 1 (combined fetch + translate + persist 单 step)：复用
+ * runClawhubEnrichPending 的 loop body 逻辑给单 itemId。CH 没有条件分支，3 件
+ * 并行做完一起 UPDATE D1，所以 workflow 简化成 1 step。
+ */
+export async function enrichAndTranslateChItem(
+  env: ClawhubEnv,
+  itemId: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, title, content, content_translated, lang, extra
+       FROM items
+      WHERE id = ? AND source_type='clawhub'`,
+  ).bind(itemId).first<{
+    id: string; source_id: string; title: string | null;
+    content: string | null; content_translated: string | null;
+    lang: string | null; extra: string | null;
+  }>();
+  if (!row) throw new Error(`enrichAndTranslateChItem: item not found ${itemId}`);
+
+  const slug = row.source_id;
+  const richResp = await fetchSkillDetailRich(slug);
+  const rich = richResp.value;
+  if (!rich || !rich.skill) {
+    // 清 ch_pending 标记避免下次再选
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(extra, '$.ch_pending', json('false')) WHERE id = ?`,
+    ).bind(itemId).run();
+    return { ok: false, reason: 'skill_not_found' };
+  }
+
+  const lv = rich.latestVersion || {};
+  const license = lv.parsed?.license || '';
+  const installList = lv.parsed?.clawdis?.install || [];
+  const capabilityTags = lv.capabilityTags || rich.skill.capabilityTags || [];
+  const llmFindings = lv.llmAnalysis?.agenticRiskFindings || [];
+  const verdict = lv.llmAnalysis?.verdict;
+  const status = lv.llmAnalysis?.status;
+  const isSuspicious = !!(verdict && verdict !== 'benign') || !!(status && status !== 'clean');
+
+  const existingExtra = JSON.parse(row.extra || '{}') as Record<string, unknown>;
+  const summaryEnglish = (existingExtra.summary_en as string) || (row.content || '');
+  const existingSummaryZh = existingExtra.summary_translated as string | undefined;
+  const summaryAlreadyZh = isLikelyChinese(existingSummaryZh);
+  const existingContentZh = row.content_translated || '';
+  const llmAnalysisObj = existingExtra.llm_analysis as { lang?: string; findings?: unknown[] } | undefined;
+  const existingFindingsZh =
+    llmAnalysisObj?.lang === 'zh' &&
+    Array.isArray(llmAnalysisObj?.findings) &&
+    (llmAnalysisObj?.findings.length ?? 0) > 0;
+
+  // 三件并行：summary 翻译 + LLM finding 翻译 + README 抓取
+  const versionId = lv._id as string;
+  const [summaryT, translatedFindings, extracted] = await Promise.all([
+    summaryAlreadyZh || !summaryEnglish
+      ? Promise.resolve(existingSummaryZh)
+      : translateShort(env, summaryEnglish),
+    existingFindingsZh
+      ? Promise.resolve(llmAnalysisObj!.findings as unknown[])
+      : translateLlmFindings(env, llmFindings),
+    versionId ? fetchAndExtractSkill(versionId, lv.files || []) : Promise.resolve(null),
+  ]);
+
+  let readmeOriginal = '';
+  let readmeTranslated: string | null = null;
+  let readmeFile = '';
+  let filesManifest: Array<{ path: string; size: number }> = [];
+  if (extracted) {
+    readmeOriginal = extracted.readme;
+    readmeFile = extracted.readmeFile;
+    filesManifest = extracted.files;
+    if (readmeOriginal) {
+      const reuseExistingTranslation =
+        existingContentZh.length >= 500 && isLikelyChinese(existingContentZh, 0.2);
+      if (reuseExistingTranslation) {
+        readmeTranslated = existingContentZh;
+      } else {
+        readmeTranslated = await translateMarkdown(env, readmeOriginal);
+      }
+    }
+  }
+
+  const newExtra = {
+    ...existingExtra,
+    ch_pending: false,
+    license,
+    install: installList,
+    capability_tags: capabilityTags,
+    is_suspicious: isSuspicious,
+    llm_verdict: verdict || undefined,
+    llm_status: status || undefined,
+    llm_analysis: translatedFindings.length > 0
+      ? { findings: translatedFindings, lang: 'zh' }
+      : undefined,
+    summary_en: summaryEnglish || existingExtra.summary_en,
+    summary_translated: summaryT || existingExtra.summary_translated,
+    readme_file: readmeFile || existingExtra.readme_file || '',
+    files_manifest: filesManifest.length > 0 ? filesManifest : existingExtra.files_manifest,
+    enriched_at: Math.floor(Date.now() / 1000),
+  } as Record<string, unknown>;
+  delete (newExtra as Record<string, unknown>).skill_md;
+
+  const finalContent = readmeOriginal || summaryEnglish;
+  const finalContentTranslated = readmeTranslated || summaryT;
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET content = COALESCE(?, content),
+            content_translated = COALESCE(?, content_translated),
+            lang = ?,
+            extra = ?,
+            translation_attempts = COALESCE(translation_attempts, 0) + 1
+      WHERE id = ?`,
+  ).bind(
+    finalContent || null,
+    finalContentTranslated || null,
+    existingExtra.lang === 'zh' ? 'zh' : 'en',
+    JSON.stringify(newExtra),
+    itemId,
+  ).run();
+
+  console.log(`[ch-workflow] ${itemId}: enriched (readme=${readmeOriginal.length}c translated=${(finalContentTranslated || '').length}c)`);
+  return { ok: true };
+}
+
+// persistChEnrichResult REMOVED — enrichAndTranslateChItem 内部已经 UPDATE D1。
+// workflow 从 2 step 简化到 1 step。
+
+/**
+ * 治本幂等：写 marker + create CH workflow instance。
+ * 调用方：drain endpoint + Phase 1 runClawhubFetchList + drawer refreshSingleItem。
+ */
+export async function triggerChWorkflowForItem(
+  env: { DB: D1Database; CH_PIPELINE_WORKFLOW?: Workflow },
+  itemId: string,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.CH_PIPELINE_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[ch-trigger] mark failed for ${itemId}:`, e);
+  }
+  const instanceId = `ch-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.CH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) return 'already_exists';
+    console.error(`[ch-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
 }

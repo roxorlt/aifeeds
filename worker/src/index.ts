@@ -30,7 +30,7 @@ import {
   triggerGhWorkflowForItem,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
-import { runPhDailyFetch } from './scrapers/ph';
+import { runPhDailyFetch, triggerPhWorkflowForItem } from './scrapers/ph';
 import { notifyCronSummary } from './notifier';
 import {
   handleHuodongxingPoc,
@@ -47,6 +47,7 @@ import {
   runClawhubEnrichPending,
   refreshClawhubItem,
   countClawhubPending,
+  triggerChWorkflowForItem,
 } from './clawhub';
 import {
   handleSmsSend,
@@ -142,12 +143,23 @@ export interface Env {
   // instance。替换原 isHdxEnrichSlot preempt cron。
   // 设计：docs/plans/2026-05-16-huodongxing-workflow-design.md
   HUODONGXING_DETAIL_WORKFLOW: Workflow;
+  // CF Workflow binding for Product Hunt (worker/src/workflows/ph-pipeline.ts)。
+  // runPhDailyFetch 后对每条新 post create instance。替换 ph-enrich +
+  // ph-r2-migrate + fill-translations PH 字段 3 个 preempt cron。
+  // 设计：docs/plans/2026-05-16-ph-clawhub-workflow-design.md
+  PH_PIPELINE_WORKFLOW: Workflow;
+  // CF Workflow binding for ClawHub (worker/src/workflows/clawhub-pipeline.ts)。
+  // runClawhubFetchList 后对每条新 skill create instance。替换
+  // clawhub-enrich preempt cron。设计同上。
+  CH_PIPELINE_WORKFLOW: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
 export { GithubPipelineWorkflow } from './workflows/github-pipeline';
 export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
 export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
+export { PhPipelineWorkflow } from './workflows/ph-pipeline';
+export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -420,6 +432,83 @@ export default {
           const result = await triggerGhWorkflowForItem(env, r.id);
           if (result === 'triggered') triggered++;
           else if (result === 'already_exists') skipped++;
+          else failed++;
+        }
+        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+      }
+      // ─── 阶段 6 PH workflow drain ──────────────────────────────
+      // POST /api/admin/ph-trigger-pending-workflows-now?limit=N (上限 400)
+      // 扫所有 stuck PH：未分类 / R2 没迁 / 翻译没补 — workflow 内部 step 1-3
+      // 会按需做完整 pipeline 或早退。
+      if (path === '/api/admin/ph-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
+        if (!env.PH_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'PH_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='product_hunt' AND deleted_at IS NULL
+              AND (
+                is_relevant IS NULL                                                  -- 未分类
+                OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL) -- R2 没迁
+                OR (is_relevant=1 AND content IS NOT NULL AND content_translated IS NULL)
+                OR (is_relevant=1 AND json_extract(extra, '$.maker_post_text') IS NOT NULL
+                    AND json_extract(extra, '$.maker_post_translated') IS NULL)
+              )
+              AND (
+                json_extract(extra, '$.workflow_triggered_at') IS NULL
+                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+              )
+            ORDER BY scraped_at DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string }>();
+        let triggered = 0, skipped = 0, failed = 0;
+        for (const r of pending.results) {
+          const res = await triggerPhWorkflowForItem(env, r.id);
+          if (res === 'triggered') triggered++;
+          else if (res === 'already_exists') skipped++;
+          else failed++;
+        }
+        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+      }
+      // ─── 阶段 6 CH workflow drain ──────────────────────────────
+      // POST /api/admin/ch-trigger-pending-workflows-now?limit=N (上限 400)
+      // 扫 ch_pending=true 的 skill 触发 workflow。
+      if (path === '/api/admin/ch-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
+        if (!env.CH_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'CH_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='clawhub' AND deleted_at IS NULL
+              AND json_extract(extra, '$.ch_pending') = 1
+              AND (
+                json_extract(extra, '$.workflow_triggered_at') IS NULL
+                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+              )
+            ORDER BY CAST(json_extract(metrics, '$.stars') AS INTEGER) DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string }>();
+        let triggered = 0, skipped = 0, failed = 0;
+        for (const r of pending.results) {
+          const res = await triggerChWorkflowForItem(env, r.id);
+          if (res === 'triggered') triggered++;
+          else if (res === 'already_exists') skipped++;
           else failed++;
         }
         return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
@@ -1052,74 +1141,16 @@ export default {
           //
           // 老 pending item 兜底：用 /api/admin/gh-trigger-pending-workflows-now
           // 手动 drain（迁移后一次性即可，未来正常流程不会再产生 pending）。
-          if (mode !== 'github-fetch') {
-            // PH enrich — DeepSeek 一次性产 is_ai + ai_category + ai_summary
-            // (仿 github-enrich 模式)。先于 fill-translations 跑：is_relevant=0
-            // 的 PH item 不进翻译流程，省 DeepSeek 翻译额度。
-            // 每 tick 10 个 item，30/天 ~3 tick 完成。
-            const phEnrichPending = await env.DB.prepare(
-              `SELECT count(*) AS n FROM items
-                WHERE source_type='product_hunt' AND deleted_at IS NULL AND is_relevant IS NULL`,
-            ).first<{ n: number }>();
-            if ((phEnrichPending?.n ?? 0) > 0) {
-              const r = await runPhEnrich(env, 10);
-              console.log(`[cron] ph-enrich (preempt, ${phEnrichPending?.n} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            // X 主链 classify + fill-translations 已迁 CF Workflow (阶段 4 cutover
-            // 2026-05-16)。每条新 tweet 由 runListPollIngest 触发 instance，跑 5 step
-            // pipeline 含 classify + 翻译。preempt cron 删了，老 batch 函数保留作
-            // /api/enrich/run?mode=classify-pending|fill-translations 兜底（Bearer
-            // INGEST_TOKEN）+ /api/admin/x-trigger-pending-workflows-now 手动 drain。
-            //
-            // PH fill-translations 仍走 preempt 而非 workflow（PH 量小、跟 X 流水
-            // 解耦），但走的是同一个 runFillTranslations batch 函数 — 这里改 SQL
-            // 范围只保留 PH，X 的翻译完全交给 workflow。
-            const phTranslatePending = await env.DB.prepare(
-              `SELECT count(*) AS n FROM items
-                 WHERE deleted_at IS NULL AND is_relevant=1
-                   AND source_type='product_hunt' AND (
-                     (content_translated IS NULL AND content IS NOT NULL)
-                     OR (json_extract(extra, '$.maker_post_text') IS NOT NULL
-                         AND json_extract(extra, '$.maker_post_translated') IS NULL)
-                     OR (json_extract(extra, '$.top_comments') IS NOT NULL
-                         AND EXISTS (
-                           SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
-                           WHERE json_extract(c.value, '$.text') IS NOT NULL
-                             AND json_extract(c.value, '$.translated') IS NULL
-                         ))
-                   )`,
-            ).first<{ n: number }>();
-            if ((phTranslatePending?.n ?? 0) > 0) {
-              const r = await runFillTranslations(env, 15, 5);
-              console.log(`[cron] fill-translations PH (preempt, ${phTranslatePending?.n} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            // ClawHub enrich pending — 抢占同一 cron slot，每 tick 8 个 item。
-            // 内部用 Promise.all 并行，wall clock 一 tick ~6s（瓶颈最长一条）。
-            // 单 item subrequest 预算：1 detail + 1 readme + 3 LLM call + 1 UPDATE ≈ 6
-            // → 8 × 6 = 48 subreq/tick (CF Paid 1000 上限内非常宽松)。
-            //
-            // 2026-05-11 PR #4 hotfix: 移到 X classify / 翻译之后。优先 UX 直接
-            // 感知的中文翻译，ClawHub enrich 是后台丰富化慢点 OK。
-            const clawhubPending = await countClawhubPending(env);
-            if (clawhubPending > 0) {
-              const r = await runClawhubEnrichPending(env, 8);
-              console.log(`[cron] clawhub-enrich (preempt, ${clawhubPending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-            // PH 资源迁移 — 优先级最低（移到所有翻译/分类之后）。
-            // 之前在 ph-enrich 后面，但 9 PH item r2 pending 会占 9 个 cron tick，
-            // fill-translations 永远等不到，prod 用户看不到中文翻译。改成 r2 在
-            // 所有翻译之后跑：用户先看到中文内容，r2 域名替换属后台过程慢慢补。
-            // 单次 1 个 item，subrequest 预算：1 SELECT + 1 × (~38 GET + 1 UPDATE) = 40。
-            const phR2Pending = await countPhR2Pending(env);
-            if (phR2Pending > 0) {
-              const r = await runPhR2Migrate(env, 1);
-              console.log(`[cron] ph-r2-migrate (preempt, ${phR2Pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-          }
+          // 阶段 6 cutover (2026-05-16): PH 链 (ph-enrich + ph-r2-migrate +
+          // fill-translations PH 分支) + CH 链 (clawhub-enrich) 全迁 workflow，
+          // 上述 4 个 preempt 块已删。Phase 1 (runPhDailyFetch + runClawhubFetchList)
+          // 直接 trigger workflow。老 batch 函数保留作 /api/admin/*-now + /api/enrich/run
+          // 兜底用。catch-all (mode !== github-fetch) tick 现在空转，等下次固定槽位
+          // (github-fetch / clawhub-fetch / list-poll-ingest / refresh-metrics / cleanup)
+          // 触发即可。
+          //
+          // 唯一保留的「PH 翻译 fallback」: 老 runFillTranslations admin endpoint
+          // 仍能跑（/api/admin/fill-translations-now）。
           if (mode === 'github-fetch') {
             const r = await runGithubFetchTrending(env);
             console.log(`[cron] github-fetch result:`, JSON.stringify(r));
