@@ -763,43 +763,41 @@ wrangler d1 execute xlist-staging --env staging --remote --file=backup.sql
   ```
 - **月成本**：$0（Workers Paid 含 AI Gateway 免费层，日均调用量远低于免费配额）
 
-### 11. Web Analytics（RUM，前端 PV/UV/Web Vitals，2026-05-16 上线）
+### 11. Web Analytics（RUM，前端 PV/UV/Web Vitals）
 
 > CF 后端迁移 阶段 1 第 2 件（[`plans/2026-05-06-cf-backend-migration-discussion.md`](plans/2026-05-06-cf-backend-migration-discussion.md) §4.4）。
 > 跟 dashboard 自家 telemetry SDK 互补 — WA 管「平台聚合」（流量 / 设备 / Web Vitals 分位数 / 地理），telemetry 管「业务事件」（item_click / login_success / share 漏斗 / device↔user 关联）。
 
-- **两个 site**（standalone mode，CF 不绑 zone — beacon 自己上报）：
+> **2026-05-16 走过的坑（记下来防再踩）**：手动通过 `POST /rum/site_info` 创建 standalone site 给每个 host 一个独立 site_tag —— 实际**收不到数据**。CF 真正在用的是 **zone-level auto-inject**：zone `ai-feeds.com` 早就启用了 Web Analytics auto-injection，CF 边缘按 `User-Agent` 判断是浏览器时自动注入 beacon snippet（curl 不带 chrome UA 看不到），数据**统一进 zone 关联的 site_tag**，跟 HTML 里 manual snippet 写的 token **无关**。后果：手动建的 2 个 standalone site 永远 0 数据，FE 手动注入 beacon snippet 也是冗余的。最后清理删了那 2 个 standalone site + FE 撤销手动注入代码。
 
-  | host | site_tag | 备注 |
-  |---|---|---|
-  | `ai-feeds.com` | `857fab927a70440bb19c685c8f85094f` | prod |
-  | `staging.ai-feeds.com` | `9e6f987fd43d45d8ae74c134ad8a0e4e` | staging（分开统计，避免噪音污染 prod 数据） |
-
-- **dashboard 查看**：CF Dashboard → Analytics → Web Analytics → 选 site
-- **beacon snippet**（FE 在 `dashboard/index.html` `<head>` 末加，按构建 target 切 site_tag）：
-  ```html
-  <!-- prod build -->
-  <script defer src="https://static.cloudflareinsights.com/beacon.min.js"
-          data-cf-beacon='{"token": "857fab927a70440bb19c685c8f85094f"}'></script>
-
-  <!-- staging build -->
-  <script defer src="https://static.cloudflareinsights.com/beacon.min.js"
-          data-cf-beacon='{"token": "9e6f987fd43d45d8ae74c134ad8a0e4e"}'></script>
-  ```
-  > site_tag 是公开 token，会出现在浏览器源码里，**不是 secret**（CF 设计如此）。两个 token 都可以提交进 dashboard 仓库。
-- **SPA 支持**：CF beacon 默认监听 `history.pushState` / `popstate`，单页应用切路由会自动算 pageview，无需额外配置
-- **不收集 PII**：CF Web Analytics 不存 IP / 不种 cookie / 不 fingerprint，符合 GDPR / 国内合规
-- **变更命令**（permission group `Account Settings Write` 覆盖 RUM 端点）：
-  ```bash
-  source .secrets/cf-ops.env
-  # 列出所有 RUM site
-  curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/rum/site_info/list" \
-    -H "Authorization: Bearer <sub_token>" | jq '.result'
-  # 删一个（注意 path 用 id_please_delete 数值，不是 site_tag）
-  curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/rum/site_info/<id>" \
-    -H "Authorization: Bearer <sub_token>"
-  ```
+- **真正在用的 site**：CF zone-level auto-inject（由 zone `ai-feeds.com` 关联），site_tag `5592aea179004b3ea71115e546649ff1`
+  - 覆盖范围：所有 zone 下子域（`ai-feeds.com` / `www.ai-feeds.com` / `staging.ai-feeds.com` 等），统一一个 site 看
+  - 24h 实测数据示例：staging 149 / prod 22 / www 21 pageviews（zone-auto 一直在工作）
+- **dashboard 查看**：CF Dashboard → Analytics → Web Analytics → 找 site_tag `5592aea179004b3ea71115e546649ff1` 对应的 site
+- **beacon snippet**：**不需要**前端手动注入。CF 边缘看到浏览器 UA 时自动 inject，普通 curl 看不到（实测 `curl -H "User-Agent: Mozilla/5.0 ... Chrome/..." https://www.ai-feeds.com/` 可看到注入的 `<script>`，对外暴露的 token 跟 zone 的 site_tag 不一致，CF 内部 mapping）
+- **SPA 支持**：zone-auto 注入的 beacon 默认监听 `history.pushState` / `popstate`，跟 manual snippet 行为一致
+- **不收集 PII**：不存 IP / 不种 cookie / 不 fingerprint
+- **zone 设置开关**：CF Dashboard → ai-feeds.com zone → Analytics & Logs → Web Analytics → toggle Enable/Disable（开关 zone-auto inject）
 - **月成本**：$0（CF Web Analytics 完全免费，30 天 retention）
+
+**API 操作的踩坑笔记**（用 cf-ops.env master token 创建子 token 时）：
+- `POST /accounts/:id/rum/site_info` 创建 site：**可以**用 account-owned 子 token（permission group `Account Settings Write` = `1af1fa2adc104452b74a9a3364202f20`）
+- `GET /accounts/:id/rum/site_info/list` / `GET /accounts/:id/rum/site_info/:id` / `DELETE /accounts/:id/rum/site_info/:id`：**不接受**account-owned token（返 10405 `Method not allowed for this authentication scheme`），需要 **user-owned token** 或 **CF Dashboard UI 手动操作**
+- 也就是说 standalone site **建得了但 list / delete 不了**。如果要清理只能去 Dashboard 手动删（路径见下）
+- Dashboard 删 site 路径：CF Dashboard → Analytics → Web Analytics → 选 site → 右上角 ⋯ → Delete
+
+**查 RUM 数据（GraphQL，account-owned 子 token 可用，permission group `Account Analytics Read` = `b89a480218d04ceb98b4fe57ca29dc1f`）**：
+```bash
+source .secrets/cf-ops.env
+# 建 sub-token 步骤见 §4 cf-ops.env 段（permission_groups 用 b89a48... 那个）
+SUB=<sub_token>
+SINCE=$(date -u -v-24H +"%Y-%m-%dT%H:%M:%SZ")
+curl -sS https://api.cloudflare.com/client/v4/graphql \
+  -H "Authorization: Bearer $SUB" -H "Content-Type: application/json" \
+  --data "{\"query\":\"query { viewer { accounts(filter: {accountTag: \\\"$CF_ACCOUNT_ID\\\"}) { rumPageloadEventsAdaptiveGroups(limit: 20, filter: {datetime_geq: \\\"$SINCE\\\"}, orderBy: [count_DESC]) { count dimensions { siteTag requestHost requestPath countryName userAgentBrowser } } } } }\"}" | jq
+```
+
+GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHost` / `requestPath` / `refererHost` / `refererPath` / `countryName` / `deviceType` / `userAgentBrowser` / `userAgentOS` / `date` / `datetimeMinute` / `datetimeFiveMinutes` / `datetimeFifteenMinutes` / `datetimeHalfOfHour` / `datetimeHour` / `bot` / `navigationType` / `deliveryType` / `requestScheme` / `refererScheme` / `customTagInternalSxg`
 
 ---
 

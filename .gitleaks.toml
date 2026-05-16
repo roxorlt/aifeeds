@@ -1,17 +1,28 @@
 # gitleaks 配置 — 项目允许的"看似 secret 实为公开 token"白名单
 #
-# 规则：CF Web Analytics 的 site_tag 是 32 字符 hex，会被 build 进前端 bundle
-# 公开发到浏览器，符合 CF 设计（不是 secret）。但触发 gitleaks generic-api-key
-# 规则（entropy ≥ 3.5）。在这里精确白名单两个 site_tag 字面量，避免 CI 阻塞。
+# 当前 working tree 不再包含这两个 token（2026-05-16 清理移除），
+# 但 git 历史 commit 4ef9f890 (docs/operations.md 旧版本) 里还有。
+# gitleaks detect 扫历史会再报 → 需要 regex allowlist 精确压。
 #
-# 维护：未来在 CF 后台新建 RUM site 时同步更新此文件 + docs/operations.md §11。
+# 2026-05-16 历史：曾经手动创建 CF Web Analytics standalone site 给每个
+# host 一个 site_tag，FE 把 token hardcode 进 vite.config.ts，gitleaks
+# 把 32-char hex 当 generic-api-key 误报。后来发现 CF zone-level
+# auto-inject 已经覆盖所有子域（详见 docs/operations.md §11 的
+# "2026-05-16 走过的坑"段），manual standalone site + 前端注入全删，
+# 但 git 历史里还有这两个 token 的引用，需要 allowlist 永久压住。
 #
-# gitleaks 默认规则继承 — `useDefault = true`（必须显式声明，不然 default 规则不加载）。
+# 这两个 site 已经在 CF 后台 DELETE，token 失效，即便外泄也无安全风险
+# （CF Web Analytics site_tag 本来就是浏览器端公开 token，且对应 site
+# 已删，CF endpoint 直接拒收）。
+#
+# 未来如果又要白名单某个 working-tree 公开 token，加新 regex 到 regexes 数组。
+#
+# gitleaks 默认规则继承（必须显式声明，不然 default 规则不加载）。
 [extend]
 useDefault = true
 
 [allowlist]
-description = "CF Web Analytics site_tag (public, embedded in browser bundle). See docs/operations.md §11."
+description = "Historical CF Web Analytics site_tag in commit 4ef9f890 (since removed from working tree, sites deleted from CF, no security risk)."
 regexes = [
   '''857fab927a70440bb19c685c8f85094f''',
   '''9e6f987fd43d45d8ae74c134ad8a0e4e''',
