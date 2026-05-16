@@ -43,7 +43,7 @@ export function QuotedTweet({ quote, embedded }: Props) {
         <div className="flex items-center gap-1.5 text-[13px]">
           {quote.profile_image_url && !avatarFailed ? (
             <img
-              src={proxyImg(quote.profile_image_url)}
+              src={proxyImg(quote.profile_image_url, 80)}
               alt=""
               loading="lazy"
               className="h-5 w-5 shrink-0 rounded-full bg-neutral-200 object-cover"
@@ -80,7 +80,7 @@ export function QuotedTweet({ quote, embedded }: Props) {
       {/* Inline image */}
       {firstImage && !imageFailed && (
         <img
-          src={proxyImg(firstImage.url)}
+          src={proxyImg(firstImage.url, 400)}
           alt={firstImage.alt || ""}
           loading="lazy"
           className="max-h-60 w-full border-t border-neutral-200 object-cover"

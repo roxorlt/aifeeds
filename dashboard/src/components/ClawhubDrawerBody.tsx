@@ -387,7 +387,7 @@ export function ClawhubDrawerBody({ item }: Props) {
         <div className="flex items-start gap-3">
           {avatar ? (
             <img
-              src={proxyImg(avatar)}
+              src={proxyImg(avatar, 80)}
               alt={handle}
               className="h-14 w-14 shrink-0 rounded-2xl bg-neutral-200 object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}

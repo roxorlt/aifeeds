@@ -87,12 +87,22 @@ const PROXY_HOSTS = new Set([
 const PROXY_BASE =
   import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
 
-export function proxyImg(url: string | null | undefined): string {
+// width: 物理像素 hint。worker 后端走 CF cdn-cgi/image 缩到该宽度，
+// 高度按比例。GH 头像 460×460 jpeg 实测：?w=80 → 2.5KB（省 91%）/
+// ?w=400 → 18KB（省 37%）/ 不传 → passthrough 原图。
+// 物理像素而非 CSS 像素：所有 DPR 共享同一 CF cache entry，命中率最高。
+// 调用方按场景档位传：头像 80 / 卡片缩略图 400 / 详情大图 800。
+// video.twimg.com 不要传 width（worker /img 会 short-circuit 跳过 cf.image）。
+export function proxyImg(url: string | null | undefined, width?: number): string {
   if (!url) return "";
   try {
     const u = new URL(url);
     if (PROXY_HOSTS.has(u.hostname)) {
-      return `${PROXY_BASE}/img?url=${encodeURIComponent(url)}`;
+      const params = new URLSearchParams({ url });
+      if (width && u.hostname !== "video.twimg.com") {
+        params.set("w", String(width));
+      }
+      return `${PROXY_BASE}/img?${params.toString()}`;
     }
   } catch {
     // malformed URL — leave as-is and let <img> onError handle it

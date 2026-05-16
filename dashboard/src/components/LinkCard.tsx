@@ -25,7 +25,7 @@ export function LinkCard({ card }: Props) {
     >
       {card.image_url && !imageFailed && (
         <img
-          src={proxyImg(card.image_url)}
+          src={proxyImg(card.image_url, 400)}
           alt=""
           loading="lazy"
           className="aspect-[1.91/1] w-full object-cover"

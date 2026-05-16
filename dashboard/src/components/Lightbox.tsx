@@ -96,7 +96,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
         <video
           key={current.url}
           src={proxyImg(current.url)}
-          poster={current.poster ? proxyImg(current.poster) : undefined}
+          poster={current.poster ? proxyImg(current.poster, 400) : undefined}
           className="max-h-[90vh] max-w-[92vw]"
           controls
           autoPlay

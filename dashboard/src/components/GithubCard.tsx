@@ -79,7 +79,7 @@ export function GithubCard({ item }: Props) {
     >
       <div className="flex items-start gap-3">
         <img
-          src={proxyImg(ownerAvatar)}
+          src={proxyImg(ownerAvatar, 80)}
           alt={owner}
           className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -189,7 +189,7 @@ export function GithubCard({ item }: Props) {
                   {contributorsInline.slice(0, 3).map((c) => (
                     <img
                       key={c.login}
-                      src={proxyImg(c.avatar_url)}
+                      src={proxyImg(c.avatar_url, 80)}
                       alt={c.login}
                       className="h-5 w-5 rounded-full border border-white bg-neutral-200"
                       onError={(e) => (e.currentTarget.style.visibility = "hidden")}
