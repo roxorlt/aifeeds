@@ -3969,3 +3969,63 @@ export async function checkLongformForXTweet(
   console.log(`[x-workflow:step2c] ${itemId}: longform=${!!noteId}`);
   return { is_longform: !!noteId, note_id: noteId };
 }
+
+/**
+ * Workflow Step 3: ScrapeBadger 拉长推完整文本，写 content。
+ * 老 runLongformViaSb 是 batch N 条 1 call（省 credits），单 itemId 是 2 credits/条。
+ * 长推占比 < 1% (80 条/天约 1 条)，单 itemId 额外 cost <$0.0005/月，可忽略。
+ */
+export async function fetchLongformViaScrapeBadger(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  itemId: string,
+): Promise<{ updated: boolean; full_text_len: number }> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    throw new Error('fetchLongformViaScrapeBadger: SCRAPEBADGER_API_KEY missing');
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, content, extra
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`fetchLongformViaScrapeBadger: item not found ${itemId}`);
+
+  // 直接 SB raw endpoint 拿 full_text（同老 runLongformViaSb 的简化版）
+  const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${row.source_id}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+  });
+  if (!res.ok) {
+    throw new Error(`fetchLongformViaScrapeBadger: SB HTTP ${res.status} for ${row.source_id}`);
+  }
+  const body = (await res.json()) as { data?: Array<{ id?: string; full_text?: string; text?: string }> };
+  const ft = body.data?.[0]?.full_text || body.data?.[0]?.text || '';
+
+  const nowIso = new Date().toISOString();
+  if (!ft) {
+    // SB 没返（已删/私密/受限）→ 记 fetch_error 避免下次再选
+    await env.DB.prepare(
+      `UPDATE items
+          SET extra = json_set(coalesce(extra, '{}'),
+                               '$.longform.fetch_error', ?,
+                               '$.longform.fetched_at', ?)
+        WHERE id = ?`,
+    ).bind('not_returned_by_sb', nowIso, row.id).run();
+    console.log(`[x-workflow:step3] ${itemId}: SB no full_text returned`);
+    return { updated: false, full_text_len: 0 };
+  }
+
+  // 仅在 SB 给的更长时才覆盖（monotonic 规则同 ingest）
+  await env.DB.prepare(
+    `UPDATE items
+        SET content = CASE
+              WHEN content IS NULL OR length(?) >= length(content) THEN ?
+              ELSE content
+            END,
+            extra = json_set(coalesce(extra, '{}'), '$.longform.fetched_at', ?)
+      WHERE id = ?`,
+  ).bind(ft, ft, nowIso, row.id).run();
+  console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c`);
+  return { updated: true, full_text_len: ft.length };
+}

@@ -26,6 +26,7 @@ import {
   backfillQuoteForXTweet,
   backfillReplyForXTweet,
   checkLongformForXTweet,
+  fetchLongformViaScrapeBadger,
 } from '../enrich';
 
 interface XTweetParams {
@@ -76,10 +77,15 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
     ]);
 
-    // ⏳ TODO step 3 longform-via-sb (条件：longform.is_longform)
+    // ─── Step 3: longform fetch via ScrapeBadger (条件) ──────────
+    if (longform && longform.is_longform) {
+      await step.do('longform-via-sb', RETRY, () =>
+        fetchLongformViaScrapeBadger(this.env, itemId),
+      );
+    }
+
     // ⏳ TODO step 4 fan-out (translate content / quote / link_card / reply / retweet)
-    // 当前只实现 step 1-2，部 staging 验证 fan-out 并行。
-    void longform; // suppress unused 警告，下个 turn 加 step 3 时会用
+    // 当前只实现 step 1-3，部 staging 验证 longform 条件路径。
 
     return { itemId, classified: 'relevant' as const };
   }
