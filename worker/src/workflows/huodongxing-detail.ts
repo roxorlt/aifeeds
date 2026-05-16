@@ -8,17 +8,19 @@
 // throttleSec = 同 batch 内 index × 5 秒，用 step.sleep 跨 instance 错开 detail
 // 请求避免触发 site rate limit (~12 detail/min 阈值)。
 //
-// 流程（按设计 doc）：
-//   step 0: step.sleep(throttleSec)        — 跨 instance 节流
-//   step 1: ensure-cookies                  — KV cache (10min TTL) + warm-up if missing
-//   step 2: fetch-and-parse-detail          — HTTP GET detail page + parseDetail
-//   step 3: persist                         — UPDATE D1 (active/historical 判断)
+// 流程（403 修复后简化）：
+//   step 0: step.sleep(throttleSec)              — 跨 instance 节流
+//   step 1: warmup-and-fetch-and-parse-detail    — 同节点 warm-up + detail + parse
+//   step 2: persist                              — UPDATE D1 (active/historical 判断)
+//
+// 设计修订（2026-05-16）：原 ensure-cookies KV cache 模式遭遇 site WAF 403 (cookies
+// 跨 IP 不匹配)。改成 warm-up 跟 detail 在同 step.do 跑（同 worker invocation
+// = 同节点 IP），看起来像正常用户浏览 (listing → detail) 流程。
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
 import {
-  ensureHdxSessionCookies,
-  fetchAndParseHdxDetail,
+  fetchHdxDetailWithWarmup,
   persistHdxDetail,
 } from '../scrapers/huodongxing';
 
@@ -41,21 +43,16 @@ export class HuodongxingDetailWorkflow extends WorkflowEntrypoint<Env, HdxDetail
       await step.sleep('throttle', `${throttleSec} seconds`);
     }
 
-    // Step 1: 拿 cookies（KV cache 10min TTL）
-    const cookies = await step.do('ensure-cookies', RETRY, () =>
-      ensureHdxSessionCookies(this.env),
-    );
-
-    // Step 2: fetch detail + parse
-    const parsed = await step.do('fetch-and-parse-detail', RETRY, () =>
-      fetchAndParseHdxDetail(this.env, itemId, cookies),
+    // Step 1: warm-up + detail fetch + parse 合并（同节点 IP 同时发出 2 请求）
+    const parsed = await step.do('warmup-and-fetch-detail', RETRY, () =>
+      fetchHdxDetailWithWarmup(this.env, itemId),
     );
     if (!parsed) {
       // 404 / 已删 / parse 失败 — 不 retry，返回 parse-failed
       return { itemId, status: 'parse-failed' as const };
     }
 
-    // Step 3: 写 D1（含 historical 判断）
+    // Step 2: 写 D1（含 historical 判断）
     const result = await step.do('persist', RETRY, () =>
       persistHdxDetail(this.env, itemId, parsed),
     );

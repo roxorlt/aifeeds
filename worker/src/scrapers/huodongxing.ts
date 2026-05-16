@@ -419,23 +419,15 @@ export async function runHuodongxingFetchList(
       cardsForCity += upsertRes.rows_changed;
       errorsThisTick += upsertRes.errors;
 
-      // upsert 成功后对每条新事件 trigger workflow，throttleSec 跨 instance 错开 5s
+      // upsert 成功后对每条新事件 trigger workflow（helper 写 marker + create）
       if (env.HUODONGXING_DETAIL_WORKFLOW && newIdsThisPage.length > 0) {
         for (const id of newIdsThisPage) {
-          const eventId = id.replace(/^huodongxing:/, '');
-          const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-          try {
-            await env.HUODONGXING_DETAIL_WORKFLOW.create({
-              id: instanceId,
-              params: { itemId: id, throttleSec: throttleIndex * 5 },
-            });
+          const result = await triggerHdxWorkflowForItem(env, id, throttleIndex * 5);
+          if (result === 'triggered') {
             workflowsTriggered++;
             throttleIndex++;
-          } catch (e) {
-            if (!String(e).toLowerCase().includes('already exists')) {
-              console.error(`[hdx-fetch] workflow create failed for ${id}:`, e);
-            }
           }
+          // already_exists / failed: 不增 counter，不阻塞下一条
         }
       }
 
@@ -872,62 +864,91 @@ function json(data: unknown, status = 200): Response {
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
-const HDX_COOKIE_KV_KEY = 'hdx:session_cookies';
-const HDX_COOKIE_TTL_SEC = 600;  // 10 min（cookies 实际有效期更长，10min 平衡 KV 写频率）
-
 /**
- * Workflow Step 1: KV 缓存 hdx session cookies 跨 instance 复用。
- * 缺失时 fetch listing warm-up（北京 city 的 AI tag 列表）拿 cookies 存回 KV。
+ * 治本幂等：write extra.workflow_triggered_at marker + create instance。
+ * drain SELECT 看到 marker < 30min 内的会 skip，避免 batch 跨调 SELECT 重复触发
+ * 已 in-flight 的同 item。30min 后视为 stuck，可重新触发。
+ *
+ * 调用方：drain endpoint + Phase 1 runHuodongxingFetchList + drawer refreshSingleItem
  */
-export async function ensureHdxSessionCookies(env: Env): Promise<string> {
-  const cached = await env.AUTH_KV.get(HDX_COOKIE_KV_KEY);
-  if (cached) return cached;
-  const warmupUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent('北京')}&orderby=o`;
-  const r = await fetchText(warmupUrl, { retries: 0 });
-  const cookies = r.cookies || '';
-  if (cookies) {
-    await env.AUTH_KV.put(HDX_COOKIE_KV_KEY, cookies, { expirationTtl: HDX_COOKIE_TTL_SEC });
-    console.log(`[hdx-workflow:cookies] warmed up ${cookies.length}b from ${r.status}`);
-  } else {
-    console.warn(`[hdx-workflow:cookies] warmup failed status=${r.status}`);
+export async function triggerHdxWorkflowForItem(
+  env: { DB: D1Database; HUODONGXING_DETAIL_WORKFLOW?: Workflow },
+  itemId: string,
+  throttleSec: number,
+): Promise<'triggered' | 'already_exists' | 'binding_missing' | 'failed'> {
+  if (!env.HUODONGXING_DETAIL_WORKFLOW) return 'binding_missing';
+  const nowUnix = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.workflow_triggered_at', ?) WHERE id = ?`,
+    ).bind(nowUnix, itemId).run();
+  } catch (e) {
+    console.error(`[hdx-trigger] mark failed for ${itemId}:`, e);
   }
-  return cookies;
+  const eventId = itemId.replace(/^huodongxing:/, '');
+  const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  try {
+    await env.HUODONGXING_DETAIL_WORKFLOW.create({
+      id: instanceId,
+      params: { itemId, throttleSec },
+    });
+    return 'triggered';
+  } catch (e) {
+    if (String(e).toLowerCase().includes('already exists')) {
+      return 'already_exists';
+    }
+    console.error(`[hdx-trigger] create failed for ${itemId}:`, e);
+    return 'failed';
+  }
 }
 
 /**
- * Workflow Step 2: 拉 detail page + parse。返回 DetailEnrich 或 null（parse 失败）。
- * 失败 throw 让 workflow retry。404 / 已删 视为 parse_failed (return null) 不 retry。
+ * Workflow Step 1 (合并 warm-up + fetch detail 在同 worker invocation 内)：
+ *
+ * 修 403 bug — KV 共享 cookies 跨 instance 不行：cookie 是 IP-bound，多 instance
+ * 跑在 CF 全球不同节点用同 cookie 时 WAF 判定异常 → 403。
+ *
+ * 改成每个 instance 自己 warm-up + detail 在同一 step.do 里跑，两个请求从
+ * 同一 worker invocation = 同一 CF 节点 IP 发出，看起来像正常用户浏览
+ * (listing → detail) 流程。
  */
-export async function fetchAndParseHdxDetail(
+export async function fetchHdxDetailWithWarmup(
   env: Env,
   itemId: string,
-  cookies: string,
 ): Promise<DetailEnrich | null> {
-  // SELECT row 拿 city hint 做 referer
+  // SELECT row 拿 source_id + city hint 做 referer / warm-up
   const row = await env.DB.prepare(
     `SELECT source_id, extra FROM items WHERE id = ? AND source_type='huodongxing'`,
   ).bind(itemId).first<{ source_id: string; extra: string | null }>();
-  if (!row) throw new Error(`fetchAndParseHdxDetail: item not found ${itemId}`);
+  if (!row) throw new Error(`fetchHdxDetailWithWarmup: item not found ${itemId}`);
 
   const oldExtra = row.extra ? JSON.parse(row.extra) as Record<string, unknown> : {};
   const cityHint = (oldExtra.city as string | undefined) ?? '北京';
-  const refererUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent(cityHint)}&orderby=o`;
+  const warmupUrl = `https://www.huodongxing.com/events?tag=AI&city=${encodeURIComponent(cityHint)}&orderby=o`;
 
+  // 1. Warm-up: fetch listing page，site 颁发 HDXWAFID + route + Session cookies
+  const warmupRes = await fetchText(warmupUrl, { retries: 0 });
+  const cookies = warmupRes.cookies || '';
+  if (!cookies) {
+    console.warn(`[hdx-workflow] ${itemId}: warmup no cookies (status=${warmupRes.status})`);
+  }
+
+  // 2. Fetch detail with same-IP cookies
   const detailRes = await fetchText(detailUrl(row.source_id), {
-    referer: refererUrl,
+    referer: warmupUrl,
     cookies,
   });
   if (!detailRes.ok) {
     if (detailRes.status === 404 || detailRes.status === 410) {
-      console.warn(`[hdx-workflow:fetch] ${itemId}: ${detailRes.status} not found, skip`);
+      console.warn(`[hdx-workflow] ${itemId}: ${detailRes.status} not found, skip`);
       return null;
     }
-    throw new Error(`fetchAndParseHdxDetail: HTTP ${detailRes.status} for ${row.source_id}`);
+    throw new Error(`fetchHdxDetailWithWarmup: HTTP ${detailRes.status} for ${row.source_id}`);
   }
 
   const parsed = parseDetail(detailRes.body);
   if (!parsed) {
-    console.error(`[hdx-workflow:fetch] ${itemId}: parseDetail returned null`);
+    console.error(`[hdx-workflow] ${itemId}: parseDetail returned null`);
     return null;
   }
   return parsed;
