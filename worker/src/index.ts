@@ -114,7 +114,14 @@ export interface Env {
   // PR2 配置
   SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
   SMS_PROVIDER?: string;                // 'tencent'（默认）/ 'pushdeer'（dev/staging 走 PushDeer 推到 admin）
-  // Admin panel 凭据（HTTP Basic Auth）。用 wrangler secret put 注入，git 不留痕。
+  // Admin panel 凭据。优先级：CF Access JWT > Basic Auth fallback。
+  // CF Access（推荐）：边缘节点 Access 拦截 + worker 校验 Cf-Access-Jwt-Assertion JWT。
+  //   CF_ACCESS_TEAM_DOMAIN: wrangler.toml vars 明文配置（如 https://aifeeds.cloudflareaccess.com）
+  //   CF_ACCESS_AUD: wrangler secret put（每个 Access Application 的 AUD tag）
+  // Basic Auth（fallback / 应急通道）：CF Access 未配置时启用。
+  //   ADMIN_USER / ADMIN_PASS: wrangler secret put 注入。
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
   ADMIN_USER?: string;
   ADMIN_PASS?: string;
   // PR-EmailAuth：Resend + email 风控配置
@@ -362,7 +369,7 @@ export default {
       // POST /api/admin/ph-r2-migrate-now?limit=N
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致。
       if (path === '/api/admin/ph-fetch-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -375,7 +382,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/ph-enrich-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -387,7 +394,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/ph-r2-migrate-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -402,7 +409,7 @@ export default {
       // POST /api/admin/gh-fetch-now
       // 拉 trending HTML → 写 stub 行 → trigger Workflow for new repos
       if (path === '/api/admin/gh-fetch-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -422,7 +429,7 @@ export default {
       // Workflow 完全幂等：step 1 重写 metadata、step 2 重新 LLM、step 3/4 幂等。
       // 已存在 instance ID 自动跳过（同 itemId 不会被多次创建实例）。
       if (path === '/api/admin/gh-trigger-pending-workflows-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -471,7 +478,7 @@ export default {
       // 扫所有 stuck PH：未分类 / R2 没迁 / 翻译没补 — workflow 内部 step 1-3
       // 会按需做完整 pipeline 或早退。
       if (path === '/api/admin/ph-trigger-pending-workflows-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -512,7 +519,7 @@ export default {
       // POST /api/admin/ch-trigger-pending-workflows-now?limit=N (上限 400)
       // 扫 ch_pending=true 的 skill 触发 workflow。
       if (path === '/api/admin/ch-trigger-pending-workflows-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -547,7 +554,7 @@ export default {
       // POST /api/admin/x-list-poll-now?list_id=...&pages=N
       // 触发 runListPollIngest 拉新 tweet → 写 D1 + create workflow instance per new。
       if (path === '/api/admin/x-list-poll-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -565,7 +572,7 @@ export default {
       // 每条 create workflow instance 重新走完 pipeline。
       // 同 itemId 已存在 instance 自动跳过（workflow 幂等）。
       if (path === '/api/admin/x-trigger-pending-workflows-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -627,7 +634,7 @@ export default {
       // 从 D1 extra 推导（生产路径 runListPollIngest 改造后会从 SB API 信号
       // 直接传入，避免 SELECT）。
       if (path === '/api/admin/x-workflow-trigger-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -686,7 +693,7 @@ export default {
       // recover=1 时绕开 state KV sentinel + 选 "is_retweet=1 + retweet_of NULL"
       // 的 row（覆盖被 list-poll UPSERT 洗过的历史数据）
       if (path === '/api/admin/backfill-retweets-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -703,7 +710,7 @@ export default {
       // ?recover=1 时选 "quote_of_id 有 + quote_of 空" 的 row（覆盖被 list-poll
       // UPSERT 洗过的历史数据），绕开 enriched_at sentinel + state KV
       if (path === '/api/admin/backfill-quotes-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -721,7 +728,7 @@ export default {
       // 备份 main.content 到 extra.original_content + 把 main.content 清空。
       // ?dry_run=0 真写 / ?limit=N (默认 500)
       if (path === '/api/admin/dedupe-quote-content-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -736,7 +743,7 @@ export default {
       // D3: 强制单条重抓 self.text 全文（覆盖 SB API truncate 的内容）
       // ?id=x_list:xxx 必填
       if (path === '/api/admin/longform-fetch-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -751,7 +758,7 @@ export default {
       // F5: 一次性反向重建 thread_root_id（针对 reply 链 self-thread 但 root 空）
       // ADMIN basic auth wrapper. 默认 dry_run=1 看效果，?dry_run=0 真正写入
       if (path === '/api/admin/reconstruct-threads-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -769,7 +776,7 @@ export default {
       //   不传或 source=all 时一次性推 5 条（覆盖所有 5 个 fetch 的字段结构 + 1 条 PH skip 路径）
       // 用模拟数据验证 notifyCronSummary i18n 是否覆盖了真实字段，不真的去抓数据。
       if (path === '/api/admin/notify-test' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -878,7 +885,7 @@ export default {
       //   GET  /api/admin/hdx-status
       // 鉴权：HTTP Basic Auth（ADMIN_USER / ADMIN_PASS）。
       if (path === '/api/admin/hdx-fetch-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -896,7 +903,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/hdx-enrich-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -908,7 +915,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/hdx-sweep-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -918,7 +925,7 @@ export default {
         return jsonResponse(result, 200, request, env);
       }
       if (path === '/api/admin/hdx-status' && request.method === 'GET') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -937,7 +944,7 @@ export default {
       // 默认 limit=100，N 个 instance 跨 5N 秒 wall time 处理。
       // 860 backlog → 9 批 limit=100 跑完。
       if (path === '/api/admin/hdx-trigger-pending-workflows-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
@@ -989,7 +996,7 @@ export default {
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致
       // 用途：手动批量补翻积压（X content / quote_of / link_card + PH content / maker / comments）
       if (path === '/api/admin/fill-translations-now' && request.method === 'POST') {
-        if (!checkAdminAuth(request, env)) {
+        if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
             status: 401,
             headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },

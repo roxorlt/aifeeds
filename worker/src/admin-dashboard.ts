@@ -1,13 +1,13 @@
 // /admin/dashboard 仪表盘：基于 events 表算 DAU/WAU/MAU、留存、漏斗、会话时长、错误分桶等。
 // JSON endpoint 在 /api/admin/analytics?metric=<name>，HTML 在 serveAdminDashboardHtml。
-// 鉴权同其他 /api/admin/* — Basic Auth。
+// 鉴权同其他 /api/admin/* — Cloudflare Access JWT（Basic Auth fallback，见 admin.ts checkAdminAuth）。
 
 import type { Env } from './index';
 import { ADMIN_SHARED_CSS, adminNavHtml, requireAuth, jsonRes } from './admin';
 
 // ─── /api/admin/analytics?metric=<name> ─────────────────────────
 export async function handleAdminAnalytics(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
 
   const url = new URL(request.url);
@@ -229,8 +229,8 @@ async function metricTopDevices(env: Env) {
 }
 
 // ─── /admin/dashboard → 仪表盘 HTML ──────────────────────────────
-export function serveAdminDashboardHtml(request: Request, env: Env): Response {
-  const guard = requireAuth(request, env);
+export async function serveAdminDashboardHtml(request: Request, env: Env): Promise<Response> {
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   return new Response(DASHBOARD_HTML, {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },

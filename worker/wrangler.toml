@@ -35,6 +35,9 @@ EMAIL_MONTHLY_CAP = "3000"
 EMAIL_FROM = "AI Feeds <noreply@mail.ai-feeds.com>"
 ENABLE_SMS_LOGIN = "false"       # 备案后翻 true
 ENABLE_EMAIL_LOGIN = "true"
+# CF Access JWT 校验（admin 入口）。AUD 走 wrangler secret put（每环境不同 app）。
+# 缺 AUD secret 时 admin.checkAdminAuth 自动回落到 ADMIN_USER/PASS Basic Auth。
+CF_ACCESS_TEAM_DOMAIN = "https://aifeeds.cloudflareaccess.com"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -119,6 +122,8 @@ EMAIL_MONTHLY_CAP = "3000"
 EMAIL_FROM = "AI Feeds <noreply@mail.ai-feeds.com>"
 ENABLE_SMS_LOGIN = "false"       # 备案后翻 true
 ENABLE_EMAIL_LOGIN = "true"
+# CF Access JWT 校验（admin 入口）。AUD 走 wrangler secret put（每环境不同 app）。
+CF_ACCESS_TEAM_DOMAIN = "https://aifeeds.cloudflareaccess.com"
 
 # Staging cron 默认全关，要手动测时再放开
 [env.staging.triggers]
