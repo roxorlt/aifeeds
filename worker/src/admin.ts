@@ -3,7 +3,9 @@
 // 浏览器原生弹窗，无需自建登录页。
 //
 // 路径：
-//   GET  /admin                   → admin.html（Basic Auth 保护）
+//   GET  /admin                   → 302 → /admin/dashboard
+//   GET  /admin/dashboard         → 仪表盘（见 admin-dashboard.ts）
+//   GET  /admin/tools             → 运维工具 HTML（本文件 TOOLS_HTML）
 //   GET  /api/admin/sms-status    ?phone=...
 //   POST /api/admin/unlock-sms    {phone}
 //   GET  /api/admin/user          ?phone=...
@@ -13,6 +15,36 @@
 import type { Env } from './index';
 
 const REALM = 'ai-feeds admin';
+
+// Shared CSS + top nav reused by both /admin/dashboard and /admin/tools so the
+// visual style stays in sync. Dashboard adds its own KPI/chart CSS on top.
+export const ADMIN_SHARED_CSS = `
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; font-family: -apple-system, system-ui, "PingFang SC", sans-serif;
+         background: #0b0e14; color: #e6e8eb; line-height: 1.5; }
+  .topnav { display: flex; align-items: center; gap: 4px; padding: 12px 24px;
+            background: #11161f; border-bottom: 1px solid #1f2937; position: sticky; top: 0; z-index: 10; }
+  .topnav .brand { font-size: 14px; font-weight: 600; color: #e6e8eb; margin-right: 16px; }
+  .topnav .brand span { color: #6b7280; font-weight: 400; }
+  .topnav a { padding: 6px 12px; border-radius: 6px; color: #9ca3af; text-decoration: none;
+              font-size: 13px; font-weight: 500; transition: background .15s, color .15s; }
+  .topnav a:hover { background: #1f2937; color: #e6e8eb; }
+  .topnav a.active { background: #1f2937; color: #e6e8eb; }
+  .topnav .meta { margin-left: auto; font-size: 12px; color: #6b7280; font-family: ui-monospace, monospace; }
+  main { padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 24px; color: #9ca3af; font-weight: 500; }
+  h1 b { color: #e6e8eb; font-weight: 600; }
+`;
+
+export function adminNavHtml(active: 'dashboard' | 'tools'): string {
+  const cls = (k: string) => (k === active ? 'active' : '');
+  return `<nav class="topnav">
+    <span class="brand">ai-feeds <span>admin</span></span>
+    <a class="${cls('dashboard')}" href="/admin/dashboard">📊 仪表盘</a>
+    <a class="${cls('tools')}" href="/admin/tools">🔧 运维工具</a>
+    <span class="meta" id="metaText"></span>
+  </nav>`;
+}
 
 function unauthorized(): Response {
   return new Response('Authentication required', {
@@ -38,12 +70,12 @@ export function checkAdminAuth(request: Request, env: Env): boolean {
   }
 }
 
-function requireAuth(request: Request, env: Env): Response | null {
+export function requireAuth(request: Request, env: Env): Response | null {
   if (!checkAdminAuth(request, env)) return unauthorized();
   return null;
 }
 
-function jsonRes(data: unknown, status = 200): Response {
+export function jsonRes(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
@@ -215,27 +247,23 @@ export async function adminDailyCap(request: Request, env: Env): Promise<Respons
   });
 }
 
-// ─── /admin → admin.html ───
-export function serveAdminHtml(request: Request, env: Env): Response {
+// ─── /admin/tools → 运维工具 HTML ───
+export function serveAdminToolsHtml(request: Request, env: Env): Response {
   const guard = requireAuth(request, env);
   if (guard) return guard;
-  return new Response(ADMIN_HTML, {
+  return new Response(TOOLS_HTML, {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   });
 }
 
-const ADMIN_HTML = `<!doctype html>
+const TOOLS_HTML = `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ai-feeds admin</title>
+<title>ai-feeds admin · 运维工具</title>
 <style>
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; font-family: -apple-system, system-ui, "PingFang SC", sans-serif;
-         background: #0b0e14; color: #e6e8eb; line-height: 1.5; }
-  h1 { font-size: 18px; margin: 0 0 24px; color: #9ca3af; font-weight: 500; }
-  h1 b { color: #e6e8eb; font-weight: 600; }
+${ADMIN_SHARED_CSS}
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
   .card { background: #11161f; border: 1px solid #1f2937; border-radius: 8px; padding: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: #d1d5db; }
@@ -256,8 +284,6 @@ const ADMIN_HTML = `<!doctype html>
   pre { background: #0b0e14; border: 1px solid #1f2937; border-radius: 6px; padding: 12px;
         margin: 12px 0 0; font-size: 12px; max-height: 360px; overflow: auto; color: #d1d5db; }
   pre.error { border-color: #7f1d1d; color: #fca5a5; }
-  .status-bar { display: flex; justify-content: space-between; align-items: center; margin: 16px 0; }
-  .status-bar .meta { font-size: 12px; color: #6b7280; font-family: ui-monospace, monospace; }
   .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
   .badge.ok { background: #064e3b; color: #6ee7b7; }
   .badge.warn { background: #7c2d12; color: #fdba74; }
@@ -265,8 +291,8 @@ const ADMIN_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<h1><b>ai-feeds</b> admin · <span id="metaText" class="meta"></span></h1>
-
+${adminNavHtml('tools')}
+<main>
 <div class="grid">
 
   <div class="card">
@@ -309,6 +335,7 @@ const ADMIN_HTML = `<!doctype html>
   </div>
 
 </div>
+</main>
 
 <script>
 function val(id) { return document.getElementById(id).value.trim(); }

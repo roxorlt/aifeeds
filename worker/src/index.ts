@@ -60,7 +60,7 @@ import {
 } from './auth/handlers';
 import { handleEmailSend } from './auth/email-handlers';
 import {
-  serveAdminHtml,
+  serveAdminToolsHtml,
   adminSmsStatus,
   adminUnlockSms,
   adminUser,
@@ -68,6 +68,7 @@ import {
   adminDailyCap,
   checkAdminAuth,
 } from './admin';
+import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -302,8 +303,18 @@ export default {
         return withCors(await handleDelete(request, env, ctx), request, env);
       }
       // Admin panel（HTTP Basic Auth；不走 corsHeaders，同源访问）
+      // /admin 默认进仪表盘；/admin/tools 是原运维工具页；两页共享顶部导航。
       if (path === '/admin' || path === '/admin/') {
-        return serveAdminHtml(request, env);
+        return Response.redirect(new URL('/admin/dashboard', request.url).toString(), 302);
+      }
+      if (path === '/admin/dashboard' && request.method === 'GET') {
+        return serveAdminDashboardHtml(request, env);
+      }
+      if (path === '/admin/tools' && request.method === 'GET') {
+        return serveAdminToolsHtml(request, env);
+      }
+      if (path === '/api/admin/analytics' && request.method === 'GET') {
+        return handleAdminAnalytics(request, env);
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);
