@@ -44,10 +44,7 @@
 - **限流参数调优** — SMS 200/天 hard cap、telemetry 限流、分享接口限流的真实流量观测后调整
   - DeepSeek 调用限流：等 CF 阶段 1 启用 AI Gateway 后会被吸收，**这一条延后**
   - SMS / telemetry / 分享限流：仍要在 worker 里手写
-- **admin 看板增强（业务指标部分）**
-  - 现状：admin 页只看了基础登录注册数据
-  - 要加：用户活跃曲线、收藏 / 分享 / 订阅活跃度、内容质量分布
-  - ⚠️ 不在这里做：cron 健康度 / 错误率 / 调用量 — 等 CF 阶段 1 后直接看 Workers Logs
+- [x] ~~**admin 看板增强（业务指标部分）**~~ — 2026-05-17 PR #52 完成。`/admin` 默认进 `/admin/dashboard`（仪表盘）+ `/admin/tools` 拆出原 SMS 工具。仪表盘含：DAU/WAU/MAU、30 天 DAU 趋势、4 步行为漏斗（启动→看到内容→点击→深度互动）、7 天会话时长直方图、cohort × N+1 日留存矩阵、事件类型分布（中文标签）、错误明细分桶、Top 重度设备。SQL 走 events 表。详见 [`docs/operations.md` §1 端点清单](docs/operations.md)。**收藏 / 订阅活跃度** 等待 PR5/6 落地后补查询 metric。**cron 健康度 / 错误率** 仍按原计划走 Workers Logs，不在这看板做
 - [x] ~~**数据备份**~~ — 2026-05-14 完成，用 **CF Workflows（不是 Container）** + R2 实现，更简单。新建独立 worker `aifeeds-d1-backup`，每天 BJT 12:30 跑 D1 REST export → 写 R2 `aifeeds-d1-backups/daily/<BJT-date>.sql`，30 天滚动（R2 lifecycle rule 自动清理）。月成本 $0（在 Workers Paid 含量内）。设计 `docs/plans/2026-05-14-d1-backup-workflows-design.md`，运维 `docs/operations.md` §9。Schema 改动无需修改备份代码（D1 export 是整库 dump 自动反映）
 - **异常告警分级**
   - 现状：所有 cron 错误一锅端走 PushDeer，半夜被低优先级吵
@@ -163,19 +160,19 @@
 - 退订 link：每封邮件底部，token 验证一键退订（不用登录）
 - 反垃圾合规：from / reply-to / list-unsubscribe header 齐全，监控 spam 率
 
-### 7. 数据看板 `/admin/analytics`
+### 7. ~~数据看板 `/admin/analytics`~~ → **已落地为 `/admin/dashboard`**（2026-05-17 PR #52）
 
-> 用户行为数据已经进了 events 表（telemetry SDK 在记），但没地方看。运营要分析"用户从哪来、看了啥、留没留下"完全没工具。
+- [x] ~~路由~~ — 实现成 `/admin` → 302 → `/admin/dashboard`（默认页）+ `/admin/tools`（原 SMS 工具），HTTP Basic Auth，不挂 admin 用户体系（凭据走 `.secrets/aifeeds-prod.env` 的 `ADMIN_USER/PASS`）
+- [x] ~~漏斗~~ — 4 步：启动（app_open/page_view）→ 看到内容（item_impression/item_open_drawer）→ 点击（item_click/external_link_click）→ 深度互动（share_click/favorite_toggle/login_success），每步算独立 device 数 + 上一步保留率
+- [x] ~~留存~~ — cohort 矩阵（首次访问日期 × +1d / +3d / +7d 留存率，最近 30 天 cohort）
+- [ ] **内容下钻**：按推文 / 作者 / repo / product 看互动深度（haven't done — 需要 join items 表，等真有流量后再加 metric）
+- ⚠️ 来源分析（referer / 设备 / 国家）等 CF 阶段 1 后直接看 Web Analytics，不在 admin 看板做（CF Web Analytics OPS 已建，FE beacon 未装 — 见 line 94）
 
-- 新建 `/admin/analytics` 路由，admin 用户可见
-- 三个核心视图：
-  - **漏斗**：访问 → 看 feed → 打开抽屉 → 点分享/收藏 → 注册 → 第二日回访
-  - **留存**：D1 / D7 / D30 留存曲线
-  - **内容下钻**：按推文 / 作者 / repo / product 看互动深度（哪些内容真正吸引人留下）
-- 数据源：events 表 + users 表 + items 表 join
-- ⚠️ 来源分析（referer / 设备 / 国家）等 CF 阶段 1 后直接看 Web Analytics，不在 admin 看板做
+**已落地 8 个 `?metric=` endpoint**：overview / dau-trend / retention / event-distribution / funnel / session-duration / errors / top-devices（详见 [operations.md §1](docs/operations.md)）。SQL 实现在 `worker/src/admin-dashboard.ts`。
 
-**依赖**：建议 CF 阶段 1 落地后再做（避免做完 referer 分析 CF 那边重复）
+**PR #52 附带的两个 worker 层 bot 防御**（运维加固）：
+- [x] worker 入口 bot UA gate：拦 AI 训练爬虫 + 脚本扫描器（GPTBot/python-requests/curl/nikto 等），搜索引擎和社交预览 bot 留白名单
+- [x] `/r/<key>` referer 白名单：防 R2 图片视频被第三方站点热链
 
 ### 8. Dashboard P1 视觉 / 交互迭代
 
