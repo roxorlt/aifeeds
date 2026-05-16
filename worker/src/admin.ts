@@ -1,6 +1,8 @@
 // Admin panel handlers + 嵌入式 HTML。
-// 鉴权：HTTP Basic Auth，凭据从 env.ADMIN_USER / ADMIN_PASS（wrangler secret 注入）
-// 浏览器原生弹窗，无需自建登录页。
+// 鉴权（优先级从高到低）：
+//   1. Cloudflare Access JWT（推荐）：边缘节点 Access 拦截 + worker 校验 Cf-Access-Jwt-Assertion
+//      启用条件：env.CF_ACCESS_AUD + env.CF_ACCESS_TEAM_DOMAIN 都已设置
+//   2. HTTP Basic Auth（fallback）：env.ADMIN_USER / ADMIN_PASS（仅在 CF Access 未配置时启用）
 //
 // 路径：
 //   GET  /admin                   → 302 → /admin/dashboard
@@ -12,6 +14,7 @@
 //   POST /api/admin/cleanup-account {phone}
 //   GET  /api/admin/daily-cap
 
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { Env } from './index';
 
 const REALM = 'ai-feeds admin';
@@ -46,7 +49,26 @@ export function adminNavHtml(active: 'dashboard' | 'tools'): string {
   </nav>`;
 }
 
-function unauthorized(): Response {
+// 模块级缓存 JWKS（公钥集），避免每次请求都拉一次 CF certs endpoint。
+// jose 的 createRemoteJWKSet 内部已有 5min cache + key rotation 处理。
+let jwksCache: ReturnType<typeof createRemoteJWKSet> | null = null;
+let jwksCachedFor: string | null = null;
+function getJWKS(teamDomain: string) {
+  if (jwksCache && jwksCachedFor === teamDomain) return jwksCache;
+  jwksCache = createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`));
+  jwksCachedFor = teamDomain;
+  return jwksCache;
+}
+
+function unauthorized(env: Env): Response {
+  // CF Access 模式下不返回 WWW-Authenticate（避免浏览器弹原生 Basic Auth 框 —— CF
+  // 边缘理论上已经拦下来不该到这里；万一到了，返回纯 401 让用户知道是 token 问题）
+  if (env.CF_ACCESS_AUD && env.CF_ACCESS_TEAM_DOMAIN) {
+    return new Response('Unauthorized: missing or invalid Cf-Access JWT', {
+      status: 401,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
   return new Response('Authentication required', {
     status: 401,
     headers: {
@@ -56,8 +78,24 @@ function unauthorized(): Response {
   });
 }
 
-export function checkAdminAuth(request: Request, env: Env): boolean {
-  if (!env.ADMIN_USER || !env.ADMIN_PASS) return false; // secrets 没设 = 一律拒
+export async function checkAdminAuth(request: Request, env: Env): Promise<boolean> {
+  // 优先：CF Access JWT 校验。配齐 CF_ACCESS_AUD + CF_ACCESS_TEAM_DOMAIN 即启用，
+  // 启用后严格模式：JWT 校验失败直接拒绝，不回落到 Basic Auth。
+  if (env.CF_ACCESS_AUD && env.CF_ACCESS_TEAM_DOMAIN) {
+    const token = request.headers.get('Cf-Access-Jwt-Assertion');
+    if (!token) return false;
+    try {
+      await jwtVerify(token, getJWKS(env.CF_ACCESS_TEAM_DOMAIN), {
+        issuer: env.CF_ACCESS_TEAM_DOMAIN,
+        audience: env.CF_ACCESS_AUD,
+      });
+      return true; // jose 自动校验 exp / 签名 / issuer / audience
+    } catch {
+      return false;
+    }
+  }
+  // Fallback：Basic Auth。仅在 CF Access 未配置时使用（迁移期 / 应急通道）。
+  if (!env.ADMIN_USER || !env.ADMIN_PASS) return false;
   const header = request.headers.get('Authorization') || '';
   if (!header.startsWith('Basic ')) return false;
   try {
@@ -70,8 +108,8 @@ export function checkAdminAuth(request: Request, env: Env): boolean {
   }
 }
 
-export function requireAuth(request: Request, env: Env): Response | null {
-  if (!checkAdminAuth(request, env)) return unauthorized();
+export async function requireAuth(request: Request, env: Env): Promise<Response | null> {
+  if (!(await checkAdminAuth(request, env))) return unauthorized(env);
   return null;
 }
 
@@ -84,7 +122,7 @@ export function jsonRes(data: unknown, status = 200): Response {
 
 // ─── /api/admin/sms-status?phone=... ───
 export async function adminSmsStatus(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   const phone = new URL(request.url).searchParams.get('phone');
   if (!phone) return jsonRes({ error: 'phone required' }, 400);
@@ -128,7 +166,7 @@ export async function adminSmsStatus(request: Request, env: Env): Promise<Respon
 
 // ─── POST /api/admin/unlock-sms ───
 export async function adminUnlockSms(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   let body: { phone?: string };
   try {
@@ -152,7 +190,7 @@ export async function adminUnlockSms(request: Request, env: Env): Promise<Respon
 
 // ─── /api/admin/user?phone=... ───
 export async function adminUser(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   const phone = new URL(request.url).searchParams.get('phone');
   if (!phone) return jsonRes({ error: 'phone required' }, 400);
@@ -186,7 +224,7 @@ export async function adminUser(request: Request, env: Env): Promise<Response> {
 
 // ─── POST /api/admin/cleanup-account ───
 export async function adminCleanupAccount(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   let body: { phone?: string };
   try {
@@ -224,7 +262,7 @@ export async function adminCleanupAccount(request: Request, env: Env): Promise<R
 
 // ─── /api/admin/daily-cap ───
 export async function adminDailyCap(request: Request, env: Env): Promise<Response> {
-  const guard = requireAuth(request, env);
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
 
   const cap = parseInt(env.SMS_DAILY_CAP || '200', 10);
@@ -248,8 +286,8 @@ export async function adminDailyCap(request: Request, env: Env): Promise<Respons
 }
 
 // ─── /admin/tools → 运维工具 HTML ───
-export function serveAdminToolsHtml(request: Request, env: Env): Response {
-  const guard = requireAuth(request, env);
+export async function serveAdminToolsHtml(request: Request, env: Env): Promise<Response> {
+  const guard = await requireAuth(request, env);
   if (guard) return guard;
   return new Response(TOOLS_HTML, {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },

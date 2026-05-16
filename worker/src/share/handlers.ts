@@ -888,9 +888,9 @@ export async function handleShareLanding(request: Request, env: Env): Promise<Re
 // admin 工具，看一个 token 的扫码统计
 
 export async function handleAdminShareStats(request: Request, env: Env, token: string): Promise<Response> {
-  // checkAdminAuth 在 admin.ts，复用
+  // checkAdminAuth 在 admin.ts，复用（CF Access JWT 优先，Basic Auth fallback）
   const { checkAdminAuth } = await import('../admin');
-  if (!checkAdminAuth(request, env)) {
+  if (!(await checkAdminAuth(request, env))) {
     return new Response('Authentication required', {
       status: 401,
       headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
