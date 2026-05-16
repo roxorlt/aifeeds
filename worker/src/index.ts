@@ -124,6 +124,14 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   ADMIN_USER?: string;
   ADMIN_PASS?: string;
+  // Dev/OPS CLI bypass token for the bot UA gate (see isBotGateExempt + bot gate
+  // in default fetch handler). BE/OPS smoke scripts add `X-Dev-Token: $DEV_TOKEN`
+  // to curl/python-requests calls to admin/write endpoints, otherwise their
+  // default UA gets 403'd by the bot filter. Stored in
+  // .secrets/aifeeds-{prod,staging}.env, injected via wrangler secret put.
+  // Note: this does NOT bypass CF Access JWT on /admin* — that needs a separate
+  // CF Access Service Token (see docs/operations.md § 7a).
+  DEV_TOKEN?: string;
   // PR-EmailAuth：Resend + email 风控配置
   RESEND_API_KEY?: string;              // wrangler secret put 设置（不入 git）
   EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
@@ -234,20 +242,34 @@ export default {
 
     // Bot UA gate: cheap UA-string match to drop obvious scrapers/AI-training crawlers
     // before they hit D1/R2. Search engine bots + social previewers stay on the allowlist
-    // since they drive SEO + share-card value. /api/ingest and /api/track are exempt:
-    // ingest is python-requests from our own scrapers; track must accept anything posted
-    // by browsers (already device-token gated). Empty UA is suspicious but we allow it —
-    // some monitoring tools and curl-style health checks omit UA.
-    if (path !== '/api/ingest' && path !== '/api/track') {
-      const ua = request.headers.get('User-Agent') || '';
-      if (ua && isBlockedBot(ua)) {
-        return new Response('Forbidden', {
-          status: 403,
-          headers: {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Cache-Control': 'public, max-age=86400',
-          },
-        });
+    // since they drive SEO + share-card value.
+    //
+    // Three layers of exemption (see isBotGateExempt + DEV_TOKEN check below):
+    //   1. /api/ingest /api/track — never UA-checked (own scrapers + browser analytics)
+    //   2. Public read-only endpoints (/api/items GET, /img, /r/*, ...) — content is
+    //      publicly crawlable anyway; UA filter here breaks BE/OPS curl smoke tests
+    //      without any security benefit. Bot still hits D1, but these are cached + cheap.
+    //   3. X-Dev-Token = DEV_TOKEN header bypass — for BE/OPS CLI smoke against
+    //      admin/write endpoints (POST /api/admin/*, etc.) without changing UA.
+    //
+    // Empty UA is suspicious but we allow it — some monitoring tools and curl-style
+    // health checks omit UA.
+    if (!isBotGateExempt(path, request.method)) {
+      const hasDevBypass =
+        !!env.DEV_TOKEN && request.headers.get('X-Dev-Token') === env.DEV_TOKEN;
+      if (!hasDevBypass) {
+        const ua = request.headers.get('User-Agent') || '';
+        if (ua && isBlockedBot(ua)) {
+          return new Response('Forbidden', {
+            status: 403,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              // No edge cache — earlier `public, max-age=86400` cached 403 for 24h,
+              // which made debugging (and any rollback) painful.
+              'Cache-Control': 'private, no-store',
+            },
+          });
+        }
       }
     }
 
@@ -2740,6 +2762,22 @@ const BLOCKED_BOT_RE = /\b(gptbot|claudebot|claude-web|anthropic-ai|ccbot|perple
 const CURL_WGET_RE = /^(curl|wget)\//i;
 function isBlockedBot(ua: string): boolean {
   return BLOCKED_BOT_RE.test(ua) || CURL_WGET_RE.test(ua);
+}
+
+// Bot gate exemption: paths that always skip UA filter regardless of caller.
+// Two groups:
+//   1. Internal ingestion endpoints — already device/token-gated downstream
+//      (/api/ingest from scrapers, /api/track from browser analytics).
+//   2. Public read-only endpoints used by dashboard + open visitors.
+//      Content is publicly crawlable anyway, so blocking curl/python-requests
+//      here breaks BE/OPS smoke tests without any security benefit.
+function isBotGateExempt(path: string, method: string): boolean {
+  if (path === '/api/ingest' || path === '/api/track') return true;
+  if (method === 'GET' || method === 'HEAD') {
+    if (path === '/api/items' || path === '/api/sources' || path === '/api/stats') return true;
+    if (path === '/img' || path.startsWith('/r/')) return true;
+  }
+  return false;
 }
 
 const R2_REFERER_ALLOW = new Set<string>([

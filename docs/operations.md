@@ -625,6 +625,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 | `INGEST_TOKEN` (staging) | 同上，给 staging | wrangler 改：`source .secrets/aifeeds-staging.env && printf '%s' "$INGEST_TOKEN" \| (cd worker && npx wrangler secret put INGEST_TOKEN --env staging)`，**同时**改 `aifeeds-staging.env` 字段值 |
 | `ADMIN_USER` + `ADMIN_PASS` (admin Basic Auth **fallback**，CF Access 上线后非主路径) | 应急通道：删 `CF_ACCESS_AUD` secret 后 worker 自动回落到 Basic Auth；正常场景由 CF Access JWT 接管 | 改：`source aifeeds-prod.env && printf '%s' "$ADMIN_PASS" \| (cd worker && npx wrangler secret put ADMIN_PASS)`；同时更新 `aifeeds-prod.env` + `aifeeds-staging.env`（prod / staging 共用同值）。**CF Access 稳定 1 周后可考虑删除这对 secret + 删 fallback 代码** |
 | `CF_ACCESS_AUD` (CF Access Application Audience tag，每环境独立) | admin 入口主鉴权。worker 通过 `Cf-Access-Jwt-Assertion` 头校验 JWT 的 `aud` 字段匹配此值 | CF Dashboard → Zero Trust → Access → Applications → 选 app → Additional settings → AUD tag → Revoke existing tokens（旧 token 全失效）→ 复制新 AUD → `npx wrangler secret put CF_ACCESS_AUD [--env staging]` |
+| `DEV_TOKEN` (worker bot UA gate 的 BE/OPS CLI bypass header，prod / staging 各独立) | BE/OPS curl smoke 测 admin/write endpoint 时绕 PR #52 bot gate（curl/python-requests UA 默认被拦） | `openssl rand -hex 32` → 同步更新 `.secrets/aifeeds-{prod,staging}.env` 的 `DEV_TOKEN` → `source` 后 `printf '%s' "$DEV_TOKEN" \| (cd worker && npx wrangler secret put DEV_TOKEN [--env staging])` |
 | `DEEPSEEK_API_KEY` | DeepSeek LLM 调用（分类 / 翻译 / AI 摘要） | https://platform.deepseek.com/api_keys → 删旧 key → 新建 → 同步 `aifeeds-prod.env` + `aifeeds-staging.env` |
 | `SCRAPEBADGER_API_KEY` | X 抓取 + refresh-metrics | https://scrapebadger.com 后台 → rotate → 同步两份 .env |
 | `TURNSTILE_SECRET_KEY` | 前端验证码后端校验 | CF Dashboard → Turnstile → ai-feeds.com site → Rotate secret → 同步两份 .env |
@@ -712,9 +713,25 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 - 已验证不影响 SEO：Googlebot / Bingbot / Baiduspider / YandexBot 不在此名单
 
 **Worker 层 bot/referer 防御**（2026-05-17，PR #52 加入；跟 zone 层规则互补）：
-- **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: max-age=86400`，不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**例外路径**：`/api/ingest`（自家 scrapers 是 python-requests UA）+ `/api/track`（device-token 已防滥用）不走 UA gate
+- **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot` + `isBotGateExempt`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: private, no-store`（2026-05-17 改，原 `max-age=86400` 把 403 缓存了 24h，开发期反复试错痛苦），不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**豁免路径**（`isBotGateExempt`）：`/api/ingest`（自家 scrapers）+ `/api/track`（device-token 已防滥用）+ 公开只读 endpoint（`/api/items` GET / `/api/sources` GET / `/api/stats` GET / `/img` / `/r/*`）—— 后一组是 dashboard 给所有 visitor 用的，拦 curl 没意义反而误伤 OPS smoke
 - **`/r/<key>` referer 白名单**（`worker/src/index.ts` 的 `isAllowedR2Referer`，R2 fetch 前）：空 referer（直接打开 / poster renderer）放行；其他 referer 必须来自 `*.ai-feeds.com` / `twitter.com|x.com|t.co|mobile.*` / `producthunt.com` / `github.com` / `*.pages.dev` / `localhost`，否则 403 防图片视频被第三方站点热链
 - **AbortError 错误归一化**（`dashboard/src/api.ts`）：fetch 5s 超时触发的 AbortError 在 `/api/track` 上报时 `error_msg` 标记成 `timeout_5000ms`，方便 `/admin/dashboard` 错误分桶（之前都是 `signal is aborted without reason` 看不懂）
+
+**BE/OPS CLI bypass — `X-Dev-Token` header**（2026-05-17 上线）：
+
+> **背景**：PR #52 bot UA gate 把 `curl/8.x` / `python-requests` 默认 UA 全拦了，但 BE/OPS 的 prod smoke 日常就是 `curl -I /api/admin/...`，今天调 cf.image 实际效果时整个 worker 全 403 调了半天。
+
+- **生效场景**：worker bot UA gate 检查阶段。请求带 `X-Dev-Token: $DEV_TOKEN`（值匹配 `env.DEV_TOKEN` secret）→ 跳过 UA 黑名单检查 → 直接放行到路由分发。
+- **不影响**：CF Access JWT 校验（`/admin*` + `/api/admin/*`，CF 边缘那一层）—— 那需要 CF Access Service Token（另一套机制）。
+- **CLI 用法**：
+  ```bash
+  source .secrets/aifeeds-prod.env    # 或 aifeeds-staging.env
+  curl -H "X-Dev-Token: $DEV_TOKEN" https://api.ai-feeds.com/api/auth/send-otp
+  # python-requests / postman / CI 同样加 header 即可
+  ```
+- **不需要加 header 的场景**：公开只读 endpoint（`/api/items` / `/api/sources` / `/api/stats` / `/img` / `/r/*`），因为它们已经在 `isBotGateExempt` 白名单里。CLI 测公开 endpoint 直接 curl 就行。
+- **Token rotation**：`openssl rand -hex 32` → 同步更新 `.secrets/aifeeds-{prod,staging}.env` 的 `DEV_TOKEN` + `wrangler secret put DEV_TOKEN [--env staging]`。prod / staging 用**不同 token**（staging 泄露不污染 prod）。
+- **被 403 后的诊断**（`X-Dev-Token` 是否生效）：response body 是 `Forbidden`（纯文本，无 cache）说明被 worker bot gate 拦，应该带 token 重试；body 是 HTML 含 `Cloudflare-Access` 说明是 CF Access 那层（admin 才会到），跟这个 token 无关。
 
 **可选加固**（未配置，见本项目 TODO）：
 - 第一优先级加一条 Skip 规则：`cf.verified_bot_category in {"Search Engine Crawler"}` → Skip all rules，保证搜索引擎 100% 不被误杀
