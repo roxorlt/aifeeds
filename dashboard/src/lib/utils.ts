@@ -75,9 +75,15 @@ export function ordinal(n: number | null | undefined): string {
   return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
 }
 
-// pbs.twimg.com / abs.twimg.com / video.twimg.com are blocked on CN networks.
-// Route them through our own worker proxy to restore image loading.
-const PROXY_HOSTS = new Set(["pbs.twimg.com", "abs.twimg.com", "video.twimg.com"]);
+// Hosts that need worker /img proxy to load reliably on CN networks:
+//   - pbs.twimg.com / abs.twimg.com / video.twimg.com: GFW blocks
+//   - avatars.githubusercontent.com: GH 头像国内访问偶发慢/302 重定向到 camo
+const PROXY_HOSTS = new Set([
+  "pbs.twimg.com",
+  "abs.twimg.com",
+  "video.twimg.com",
+  "avatars.githubusercontent.com",
+]);
 const PROXY_BASE =
   import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
 

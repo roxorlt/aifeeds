@@ -6,7 +6,7 @@ import type { Components } from "react-markdown";
 import type { GithubMetrics, Item, ItemExtra, MediaItem } from "../types";
 import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
-import { cn, formatCompact, ordinal, parseJsonField, timeAgo, timeAgoOrDate } from "../lib/utils";
+import { cn, formatCompact, ordinal, parseJsonField, proxyImg, timeAgo, timeAgoOrDate } from "../lib/utils";
 import { langDotClass } from "../lib/githubLang";
 import { Lightbox } from "./Lightbox";
 import {
@@ -284,7 +284,7 @@ export function GithubDrawerBody({ item }: Props) {
       <div className="border-b border-neutral-100 p-5">
         <div className="flex items-start gap-3">
           <img
-            src={ownerAvatar}
+            src={proxyImg(ownerAvatar)}
             alt={owner}
             className="h-12 w-12 shrink-0 rounded-full bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -397,7 +397,7 @@ export function GithubDrawerBody({ item }: Props) {
               <li key={c.sha} className="flex items-start gap-2 text-[12px]">
                 {c.avatar ? (
                   <img
-                    src={c.avatar}
+                    src={proxyImg(c.avatar)}
                     alt={c.author}
                     className="mt-0.5 h-4 w-4 shrink-0 rounded-full bg-neutral-200 object-cover"
                     onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -435,7 +435,7 @@ export function GithubDrawerBody({ item }: Props) {
                 {contributorsInline.slice(0, 5).map((c) => (
                   <img
                     key={c.login}
-                    src={c.avatar_url}
+                    src={proxyImg(c.avatar_url)}
                     alt={c.login}
                     className="h-5 w-5 rounded-full border-2 border-white bg-neutral-200"
                     onError={(e) => (e.currentTarget.style.visibility = "hidden")}

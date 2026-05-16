@@ -18,7 +18,7 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Item } from "../types";
 import { fetchItem } from "../api";
-import { cn, formatCompact, parseJsonField } from "../lib/utils";
+import { cn, formatCompact, parseJsonField, proxyImg } from "../lib/utils";
 
 // Markdown 渲染样式 — 跟 GithubDrawerBody 同款 token，保证 README 翻译后排版还原。
 // 各元素显式 className 而不是依赖 prose（项目没装 @tailwindcss/typography）。
@@ -387,7 +387,7 @@ export function ClawhubDrawerBody({ item }: Props) {
         <div className="flex items-start gap-3">
           {avatar ? (
             <img
-              src={avatar}
+              src={proxyImg(avatar)}
               alt={handle}
               className="h-14 w-14 shrink-0 rounded-2xl bg-neutral-200 object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
