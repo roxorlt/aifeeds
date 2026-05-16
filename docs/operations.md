@@ -159,8 +159,12 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/s/:token` | GET | 扫码落地：写 to_did + landed_at，302 redirect 到详情页 | 无 |
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
 | `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | HTTP Basic Auth (`ADMIN_USER`/`PASS`) |
+| `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | — (302 后续端点鉴权) |
+| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、留存矩阵、事件类型分布（中文标签）、错误明细、重度设备表。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | HTTP Basic Auth |
+| `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | HTTP Basic Auth |
+| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | HTTP Basic Auth |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
-| `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存 | 无（R2 私有，仅 worker 暴露） |
+| `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 
 **`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
@@ -705,6 +709,11 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 **Custom Rules**（Free tier 限 5 条）：
 - **Block bad bots**：UA 含 `MJ12bot|AhrefsBot|SemrushBot|DotBot`（SEO 分析爬虫，不是搜索引擎）→ Block
 - 已验证不影响 SEO：Googlebot / Bingbot / Baiduspider / YandexBot 不在此名单
+
+**Worker 层 bot/referer 防御**（2026-05-17，PR #52 加入；跟 zone 层规则互补）：
+- **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: max-age=86400`，不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**例外路径**：`/api/ingest`（自家 scrapers 是 python-requests UA）+ `/api/track`（device-token 已防滥用）不走 UA gate
+- **`/r/<key>` referer 白名单**（`worker/src/index.ts` 的 `isAllowedR2Referer`，R2 fetch 前）：空 referer（直接打开 / poster renderer）放行；其他 referer 必须来自 `*.ai-feeds.com` / `twitter.com|x.com|t.co|mobile.*` / `producthunt.com` / `github.com` / `*.pages.dev` / `localhost`，否则 403 防图片视频被第三方站点热链
+- **AbortError 错误归一化**（`dashboard/src/api.ts`）：fetch 5s 超时触发的 AbortError 在 `/api/track` 上报时 `error_msg` 标记成 `timeout_5000ms`，方便 `/admin/dashboard` 错误分桶（之前都是 `signal is aborted without reason` 看不懂）
 
 **可选加固**（未配置，见本项目 TODO）：
 - 第一优先级加一条 Skip 规则：`cf.verified_bot_category in {"Search Engine Crawler"}` → Skip all rules，保证搜索引擎 100% 不被误杀
