@@ -21,12 +21,43 @@ import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
 import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
-import { LoginModal } from "./components/LoginModal";
-import { Toast } from "./components/Toast";
 import { RequireAuth } from "./components/RequireAuth";
 import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
 import { useAuthStore } from "./lib/authStore";
+import { useToastStore } from "./lib/toast";
+
+// LoginModal 拖入 Turnstile 校验 + auth 表单逻辑。99% 已登录用户首屏永远
+// 不会触发它 → lazy + Gate：loginModalOpen === false 时根本不挂 lazy 组件，
+// chunk 完全不下载（lazy 不加 Gate 的话 React 会无脑触发 import）。
+const LoginModal = lazy(() =>
+  import("./components/LoginModal").then((m) => ({ default: m.LoginModal })),
+);
+function LoginModalGate() {
+  const open = useAuthStore((s) => s.loginModalOpen);
+  if (!open) return null;
+  return (
+    <Suspense fallback={null}>
+      <LoginModal />
+    </Suspense>
+  );
+}
+
+// Toast 触发是事件驱动。首屏无 toast 时 chunk 不下载；首次 push 时短暂
+// 延迟（chunk 下载时间）后显示，在 toast 场景可接受。
+// 注：useToastStore (lib/toast.ts) 必须 eager — push() 触发时 store 得在内存。
+const Toast = lazy(() =>
+  import("./components/Toast").then((m) => ({ default: m.Toast })),
+);
+function ToastGate() {
+  const hasItems = useToastStore((s) => s.items.length > 0);
+  if (!hasItems) return null;
+  return (
+    <Suspense fallback={null}>
+      <Toast />
+    </Suspense>
+  );
+}
 
 interface SourceConfig {
   source_type: SourceType;
@@ -427,8 +458,8 @@ function App() {
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
       </Routes>
-      <LoginModal />
-      <Toast />
+      <LoginModalGate />
+      <ToastGate />
     </>
   );
 }
