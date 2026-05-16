@@ -717,6 +717,90 @@ wrangler d1 execute xlist-staging --env staging --remote --file=backup.sql
 - Workflow instance state 保留 30 天（Workers Paid），失败 instance 30 天内可在 dashboard 排查
 - 当前**无失败告警** — Workflow 失败只能在 CF dashboard 看，未来加 PushDeer 推送（v2）
 
+### 10. AI Gateway: `aifeeds-deepseek`（DeepSeek 调用观测层，2026-05-16 上线）
+
+> CF 后端迁移 阶段 1 第 1 件（[`plans/2026-05-06-cf-backend-migration-discussion.md`](plans/2026-05-06-cf-backend-migration-discussion.md) §4.6）。
+> 所有 worker / scraper 的 DeepSeek 调用 base URL 切到这个 gateway，统一拿 token / cost / cache hit / 错误率观测。
+
+- **gateway slug**：`aifeeds-deepseek`（account 级唯一）
+- **dashboard URL**：CF Dashboard → AI → AI Gateway → aifeeds-deepseek
+- **DeepSeek endpoint URL**（worker / scraper 改 base_url 用这个）：
+  ```
+  https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek
+  ```
+- **初始配置**（创建时的值）：
+  - `cache_ttl=0` — 关全局缓存（按请求 header 局部加，避免误缓存 translation 这种每条独特的请求）
+  - `collect_logs=true` — 收集 prompt / response 用于 dashboard 可视
+  - `authentication=false` — 不要求 worker 端再带 gateway 自己的 token，DeepSeek API key 走原路
+  - `log_management=100000 条 + DELETE_OLDEST` — free-tier 上限，老日志自动清
+  - `rate_limiting` 关闭 — 限流由 worker 自己控
+- **worker 接入用法**（OpenAI SDK 兼容，DeepSeek 用 OpenAI 协议）：
+  ```typescript
+  const client = new OpenAI({
+    apiKey: env.DEEPSEEK_API_KEY,
+    baseURL: 'https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek',
+  });
+  // is_relevant 二分类这种「同 prompt 几小时内可能重复」的请求按需加 cache header：
+  // 通过 OpenAI SDK 加自定义 header（v4+）：
+  await client.chat.completions.create({...}, {
+    headers: { 'cf-aig-cache-ttl': '3600' }   // 1h 缓存命中直接返回
+  });
+  ```
+- **dashboard 查看**：
+  - Logs tab：每次请求的 prompt / response / token / cost / cache hit / latency
+  - Analytics tab：总调用量 / 总 cost / cache hit rate / 错误率 / P50/P95 latency / 按 model 分布
+- **变更命令**（用 `.secrets/cf-ops.env` master token 现场建子 token，permission group `AI Gateway Write`）：
+  ```bash
+  source .secrets/cf-ops.env
+  # 用上面 §4 cf-ops.env 段的子 token 创建步骤，permission_groups = [{"id": "6c8a3737f07f46369c1ea1f22138daaf"}]
+  # 然后例如调 cache_ttl 默认到 1h：
+  curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/ai-gateway/gateways/aifeeds-deepseek" \
+    -H "Authorization: Bearer <sub_token>" -H "Content-Type: application/json" \
+    --data '{"cache_ttl":3600}'
+  # 查当前配置：
+  curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/ai-gateway/gateways/aifeeds-deepseek" \
+    -H "Authorization: Bearer <sub_token>" | jq '.result'
+  ```
+- **月成本**：$0（Workers Paid 含 AI Gateway 免费层，日均调用量远低于免费配额）
+
+### 11. Web Analytics（RUM，前端 PV/UV/Web Vitals，2026-05-16 上线）
+
+> CF 后端迁移 阶段 1 第 2 件（[`plans/2026-05-06-cf-backend-migration-discussion.md`](plans/2026-05-06-cf-backend-migration-discussion.md) §4.4）。
+> 跟 dashboard 自家 telemetry SDK 互补 — WA 管「平台聚合」（流量 / 设备 / Web Vitals 分位数 / 地理），telemetry 管「业务事件」（item_click / login_success / share 漏斗 / device↔user 关联）。
+
+- **两个 site**（standalone mode，CF 不绑 zone — beacon 自己上报）：
+
+  | host | site_tag | 备注 |
+  |---|---|---|
+  | `ai-feeds.com` | `857fab927a70440bb19c685c8f85094f` | prod |
+  | `staging.ai-feeds.com` | `9e6f987fd43d45d8ae74c134ad8a0e4e` | staging（分开统计，避免噪音污染 prod 数据） |
+
+- **dashboard 查看**：CF Dashboard → Analytics → Web Analytics → 选 site
+- **beacon snippet**（FE 在 `dashboard/index.html` `<head>` 末加，按构建 target 切 site_tag）：
+  ```html
+  <!-- prod build -->
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js"
+          data-cf-beacon='{"token": "857fab927a70440bb19c685c8f85094f"}'></script>
+
+  <!-- staging build -->
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js"
+          data-cf-beacon='{"token": "9e6f987fd43d45d8ae74c134ad8a0e4e"}'></script>
+  ```
+  > site_tag 是公开 token，会出现在浏览器源码里，**不是 secret**（CF 设计如此）。两个 token 都可以提交进 dashboard 仓库。
+- **SPA 支持**：CF beacon 默认监听 `history.pushState` / `popstate`，单页应用切路由会自动算 pageview，无需额外配置
+- **不收集 PII**：CF Web Analytics 不存 IP / 不种 cookie / 不 fingerprint，符合 GDPR / 国内合规
+- **变更命令**（permission group `Account Settings Write` 覆盖 RUM 端点）：
+  ```bash
+  source .secrets/cf-ops.env
+  # 列出所有 RUM site
+  curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/rum/site_info/list" \
+    -H "Authorization: Bearer <sub_token>" | jq '.result'
+  # 删一个（注意 path 用 id_please_delete 数值，不是 site_tag）
+  curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/rum/site_info/<id>" \
+    -H "Authorization: Bearer <sub_token>"
+  ```
+- **月成本**：$0（CF Web Analytics 完全免费，30 天 retention）
+
 ---
 
 ## 本地服务（MacBook）
@@ -938,6 +1022,9 @@ account-owned token 创建子 token 时，resource 字段对每种 scope 有不�
 | Firewall Services Write | `43137f8d07884d3198dc0ee77ca6e79b` | zone |
 | Turnstile Sites Read | `5d78fd7895974fd0bdbbbb079482721b` | account |
 | Turnstile Sites Write | `755c05aa014b4f9ab263aa80b8167bd8` | account |
+| AI Gateway Write | `6c8a3737f07f46369c1ea1f22138daaf` | account |
+| Account Settings Write（覆盖 RUM / Web Analytics 端点 `/accounts/:id/rum/site_info`） | `1af1fa2adc104452b74a9a3364202f20` | account |
+| Workers Observability Write | `82c075da3f4647a2a03becd0fe240f8a` | account |
 
 **常用 endpoint 速查**（用 Step 4 的子 token）：
 
