@@ -383,27 +383,58 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 **推 schema**：`cd worker && npm run db:init`（推远程）/ `npm run db:init:local`（本地）。
 
-### 3. Secrets（PR2 上线必备）
+### 3. Secrets（统一 source 模式，2026-05-16 改造）
+
+> **唯一源**（aifeeds CLAUDE.md「身份卡」强制约定）：所有 prod / staging secret 集中在 2 个本地文件 —
+> - `.secrets/aifeeds-prod.env` — prod 全部 secret（worker + wrangler deploy + CF API ops）
+> - `.secrets/aifeeds-staging.env` — staging 全部 secret（INGEST_TOKEN 独立，其他跟 prod 共享值）
+>
+> **历史散文件全部删除**（admin-prod / cf-claude-ops / cf-ops / gh-claude-ops / ph-oauth-prod / staging-ingest-token），值合并到统一文件。详见 `.secrets/README.md`。
+
+**OPS 一键 source 模式**：
+
+```bash
+# prod
+source .secrets/aifeeds-prod.env
+# 之后 $INGEST_TOKEN / $DEEPSEEK_API_KEY / $ADMIN_USER / $CLOUDFLARE_API_TOKEN / $CF_OPS_API_TOKEN / 等 18 个 var 全部就位
+
+# staging
+source .secrets/aifeeds-staging.env
+```
+
+**事故恢复**（prod worker secret 被擦时一键 restore 12 个 worker secret）：
+
+```bash
+cd /Users/roxor/brain/30-projects/aifeeds
+set -a; . .secrets/aifeeds-prod.env; set +a
+cd worker
+for k in INGEST_TOKEN DEEPSEEK_API_KEY GITHUB_TOKEN SCRAPEBADGER_API_KEY \
+         TURNSTILE_SECRET_KEY PUSHDEER_ADMIN_KEYS RESEND_API_KEY \
+         ADMIN_USER ADMIN_PASS PH_CLIENT_ID PH_CLIENT_SECRET \
+         SMS_PROVIDER; do
+  printf '%s' "${!k}" | tr -d '\n\r' | npx wrangler secret put "$k"
+done
+npx wrangler secret list   # 验证 12 个全在
+```
+
+**单个 secret 手动注入**（少数情况，比如 rotate 单把 key）：
 
 ```bash
 cd worker
-
-# Turnstile（CF Dashboard - Turnstile - Add widget 后给）
-npx wrangler secret put TURNSTILE_SECRET_KEY
-
-# 腾讯云 SMS V3（API V3 凭证 + 应用/签名/模板 ID）
-npx wrangler secret put TENCENT_SMS_SECRET_ID         # AKID 开头 36 字符
-npx wrangler secret put TENCENT_SMS_SECRET_KEY        # 32 字符
-npx wrangler secret put TENCENT_SMS_SDK_APP_ID        # 短信应用 ID，1400 开头 7 位
-npx wrangler secret put TENCENT_SMS_SIGN_NAME         # 已审签名，例：xList
-npx wrangler secret put TENCENT_SMS_TEMPLATE_ID       # 已审模板 ID，例：1234567
-
-# PushDeer 风控告警（xueqiuFollow admin 组：iPhone + Mac）
-npx wrangler secret put PUSHDEER_ADMIN_KEYS  # 输入：PDU394...,PDU394...
+# 例：rotate TURNSTILE
+source ../.secrets/aifeeds-prod.env
+printf '%s' "$TURNSTILE_SECRET_KEY" | npx wrangler secret put TURNSTILE_SECRET_KEY
 ```
+
+**新增 secret 流程**：
+1. 加值到 `.secrets/aifeeds-prod.env`（同步 staging 文件如需）
+2. `printf '%s' "$NEW_KEY" | npx wrangler secret put NEW_KEY`
+3. 提交 1Password / 密码管理器副本
+4. **禁止**新建散落 `.env` 文件存这个 secret（违反 CLAUDE.md「身份卡」约定）
 
 **Kill switch**：`SMS_DAILY_CAP=0` 立刻停发短信（不动代码）。
 **回滚 secret**：`wrangler secret put X` 输入新值即覆盖；删除用 `wrangler secret delete X`。
+**TENCENT_SMS_* 5 个**（备案后启用 SMS 真通道才需要）：当前 prod `SMS_PROVIDER=pushdeer`，备案前不在 `aifeeds-prod.env` 字段清单；启用时按 § 3.4 命令注入 + 同时加入 `aifeeds-prod.env`。
 
 ### 3.4. SMS Provider 切换（dev / staging / 冷启动期手动通道）
 
@@ -530,21 +561,38 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 
 ### 4. 运维 Token 速查（claude session 跨设备共享用）
 
-> ⚠️ 这一节**只列 token 干啥用 / 在哪存 / 怎么再生**，绝不写 token 值。值在 `.secrets/` 目录（gitignored）。
-> 所有 token 都是**永不过期**的长期凭证，泄露/换设备时按下表「再生」步骤换。
+> ⚠️ 这一节**只列 token 干啥用 / 字段名是什么 / 怎么再生**，绝不写 token 值。值在 `.secrets/aifeeds-prod.env` / `.secrets/aifeeds-staging.env`（gitignored）。
+> 所有 token 都是**永不过期**的长期凭证，泄露/换设备时按下表「再生」步骤换 + 同步更新统一 `.env` 文件。
 
-| Token | 存放路径 | 用途 | 给 claude / 工具的方式 | 再生步骤（compromised / 换设备） |
-|---|---|---|---|---|
-| **CF claude-ops** | `.secrets/cf-claude-ops.env` | wrangler 跑所有 CF 操作（部 worker / 部 pages / 改 secret / 跑 D1 / 改 KV / 改 R2） | `source .secrets/cf-claude-ops.env`，wrangler 自动认 `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | CF Dashboard → 头像 → My Profile → API Tokens → 找名为「claude-ops」→ Roll/Delete → Create Token → Custom token，权限：`Workers Scripts:Edit` + `Cloudflare Pages:Edit` + `D1:Edit` + `Workers KV Storage:Edit` + `Workers R2 Storage:Edit`，资源：本账号，TTL：永不过期 |
-| **CF ops master** | `.secrets/cf-ops.env` | 管理 CF 账号本身（创建别的子 token / 看账户级元信息）— **不带具体资源 Edit 权限**，做不了 wrangler 操作 | 仅供创建子 token 时参考；日常用 claude-ops 即可 | CF Dashboard → 头像 → My Profile → API Tokens → 找现有 master token → Roll/Delete |
-| **GitHub PAT (claude-ops)** | `.secrets/gh-claude-ops.env` | 创建/管理 GitHub 私有仓 + 跑 GH Actions workflow | `source .secrets/gh-claude-ops.env`，gh cli + git + Octokit 自动认 `GITHUB_TOKEN` | github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → 找「claude-ops」→ Regenerate / Delete → Generate new token (classic)，scope：`repo` + `workflow`，过期：No expiration |
-| **prod INGEST_TOKEN** | CF Worker secret（不在本地） | scrapers / 运维脚本 push 数据到 prod worker `/api/ingest` + 触发 `/api/enrich/run` | wrangler secret 不可读取；要复制现值得去 1Password 或问用户 | wrangler 改：`echo "<NEW>" \| npx wrangler secret put INGEST_TOKEN`（注意：改这个会断所有依赖它的 scraper / 脚本，需要同步更新） |
-| **staging INGEST_TOKEN** | `.secrets/staging-ingest-token.txt` + CF staging worker secret | 同上，给 staging | 直接 `cat .secrets/staging-ingest-token.txt` 读用 | 改的话两边同步：`echo "<NEW>" \| npx wrangler secret put INGEST_TOKEN --env staging` + 改本地文件 |
+**统一 source 模式**（2026-05-16 改造后，详见 §3）：
+
+```bash
+source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
+# 之后下表所有 token 的 env var 全部就位，wrangler / curl / gh cli 直接用
+```
+
+| Token (env var 名) | 用途 | 再生步骤（compromised / 换设备） |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` (CF claude-ops 部署 token) | wrangler 跑所有 CF 操作（部 worker / 部 pages / 改 secret / 跑 D1 / 改 KV / 改 R2） | CF Dashboard → 头像 → My Profile → API Tokens → 找名为「claude-ops」→ Roll/Delete → Create Token → Custom token，权限：`Workers Scripts:Edit` + `Cloudflare Pages:Edit` + `D1:Edit` + `Workers KV Storage:Edit` + `Workers R2 Storage:Edit`，资源：本账号，TTL：永不过期。Roll 后同步更新 `aifeeds-prod.env` + `aifeeds-staging.env` 的 `CLOUDFLARE_API_TOKEN` 字段 |
+| `CF_OPS_API_TOKEN` + `CF_ACCOUNT_ID` + `CF_ZONE_ID` + `CF_ZONE_AIFEEDS_COM` (CF master) | 管理 CF 账号本身（创建别的子 token / 看账户级元信息）— **不带具体资源 Edit 权限**，做不了 wrangler 操作。日常 RUM / AI Gateway / WAF / Bot Mgmt 等 API 操作的子 token 都从这里创建 | CF Dashboard → 头像 → My Profile → API Tokens → 找现有 master token → Roll/Delete。Roll 后同步 `aifeeds-prod.env` 的 `CF_OPS_API_TOKEN` 字段（staging 文件不含此字段） |
+| `GITHUB_TOKEN` (GitHub PAT claude-ops) | 创建/管理 GitHub 私有仓 + 跑 GH Actions workflow + worker 调 GH trending API | github.com → Settings → Developer settings → Personal access tokens → Tokens (classic) → 找「claude-ops」→ Regenerate / Delete → Generate new token (classic)，scope：`repo` + `workflow`，过期：No expiration。Roll 后同步 `aifeeds-prod.env` + `aifeeds-staging.env` |
+| `INGEST_TOKEN` (prod worker `/api/ingest` + `/api/admin/*` 鉴权) | scrapers / 运维脚本 push 数据到 prod worker / 触发 admin endpoint | wrangler 改：`source .secrets/aifeeds-prod.env && printf '%s' "$INGEST_TOKEN" \| (cd worker && npx wrangler secret put INGEST_TOKEN)`（生成新值用 `openssl rand -hex 32`，**同时**改 `aifeeds-prod.env` 字段值；改这个会断所有依赖它的 scraper / 脚本，需要同步更新） |
+| `INGEST_TOKEN` (staging) | 同上，给 staging | wrangler 改：`source .secrets/aifeeds-staging.env && printf '%s' "$INGEST_TOKEN" \| (cd worker && npx wrangler secret put INGEST_TOKEN --env staging)`，**同时**改 `aifeeds-staging.env` 字段值 |
+| `ADMIN_USER` + `ADMIN_PASS` (prod web `/api/admin/*` HTTP Basic Auth) | curl admin endpoint / web 登录 admin 看板 | 改：`source aifeeds-prod.env && printf '%s' "$ADMIN_PASS" \| (cd worker && npx wrangler secret put ADMIN_PASS)`；同时更新 `aifeeds-prod.env` + `aifeeds-staging.env`（prod / staging 共用同值） |
+| `DEEPSEEK_API_KEY` | DeepSeek LLM 调用（分类 / 翻译 / AI 摘要） | https://platform.deepseek.com/api_keys → 删旧 key → 新建 → 同步 `aifeeds-prod.env` + `aifeeds-staging.env` |
+| `SCRAPEBADGER_API_KEY` | X 抓取 + refresh-metrics | https://scrapebadger.com 后台 → rotate → 同步两份 .env |
+| `TURNSTILE_SECRET_KEY` | 前端验证码后端校验 | CF Dashboard → Turnstile → ai-feeds.com site → Rotate secret → 同步两份 .env |
+| `PUSHDEER_ADMIN_KEYS` | 告警推送（多个 key 逗号分隔） | PushDeer app → 设备页 → device key → 同步两份 .env |
+| `RESEND_API_KEY` | Email 验证码 sender | https://resend.com/api-keys → Revoke + Create → 同步两份 .env |
+| `PH_CLIENT_ID` + `PH_CLIENT_SECRET` | Product Hunt GraphQL OAuth | https://www.producthunt.com/v2/oauth/applications → Regenerate Secret（client_id 不变）→ 同步两份 .env |
+| `SMS_PROVIDER` | SMS 通道选择，字面量 `pushdeer` 或 `tencent` | 备案前固定 `pushdeer`；备案后切 `tencent` + 加 5 个 `TENCENT_SMS_*` |
 
 **约定**：
-- 任何新 token 都先存 `.secrets/`，用 env 变量名匹配工具默认（`CLOUDFLARE_API_TOKEN` / `GITHUB_TOKEN` / 等），调用方 `source` 一下即可
-- `.secrets/` 已 gitignored，不会进 git；后续接 GitHub 仓也安全
-- 文档里**只引用文件路径，不引用值**；提交 PR 时 review 务必检查无 token 字面量
+- 任何**新增 secret** 加到 `.secrets/aifeeds-prod.env` + `.secrets/aifeeds-staging.env`（如 staging 也用），用 env 变量名匹配工具默认（`CLOUDFLARE_API_TOKEN` / `GITHUB_TOKEN` 等），调用方 `source` 一下即可
+- **禁止**再建散落 `.env` 文件存 secret（aifeeds CLAUDE.md「身份卡」强制约定）
+- `.secrets/` 已 gitignored，不会进 git；CI 跑 gitleaks 把关
+- 文档里**只引用文件路径 + env var 名，不引用值**；提交 PR 时 review 务必检查无 token 字面量
+- rotation 三处同步：`.secrets/aifeeds-{prod,staging}.env` + 远端 wrangler secret + 1Password / 密码管理器
 
 ### 5. Pages: `xlist-dashboard`
 
@@ -590,7 +638,7 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
   sed -i.bak 's|src:local("HarmonyOS Sans SC"),|src:local("HarmonyOS Sans SC Medium"),|g' hmos-medium/result.css
 
   # 上传（wrangler 4.x 默认走 local R2 stub，必须加 --remote）
-  source .secrets/cf-claude-ops.env
+  source .secrets/aifeeds-prod.env
   find hmos-regular hmos-medium hmos-bold -name '*.woff2' | xargs -n 1 -P 8 -I {} \
     wrangler r2 object put "ai-feeds-fonts/{}" --file {} --content-type "font/woff2" --remote
   for d in hmos-regular hmos-medium hmos-bold; do
@@ -658,7 +706,7 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 **首次部署 / 一次性 ops 步骤**（已记录，不需要重做）：
 
 ```bash
-source .secrets/cf-claude-ops.env
+source .secrets/aifeeds-prod.env
 
 # 1. 创建 R2 bucket
 wrangler r2 bucket create aifeeds-d1-backups
@@ -761,9 +809,9 @@ wrangler d1 execute xlist-staging --env staging --remote --file=backup.sql
 - **dashboard 查看**：
   - Logs tab：每次请求的 prompt / response / token / cost / cache hit / latency
   - Analytics tab：总调用量 / 总 cost / cache hit rate / 错误率 / P50/P95 latency / 按 model 分布
-- **变更命令**（用 `.secrets/cf-ops.env` master token 现场建子 token，permission group `AI Gateway Write`）：
+- **变更命令**（用 `.secrets/aifeeds-prod.env` master token 现场建子 token，permission group `AI Gateway Write`）：
   ```bash
-  source .secrets/cf-ops.env
+  source .secrets/aifeeds-prod.env
   # 用上面 §4 cf-ops.env 段的子 token 创建步骤，permission_groups = [{"id": "6c8a3737f07f46369c1ea1f22138daaf"}]
   # 然后例如调 cache_ttl 默认到 1h：
   curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/ai-gateway/gateways/aifeeds-deepseek" \
@@ -800,7 +848,7 @@ wrangler d1 execute xlist-staging --env staging --remote --file=backup.sql
 
 **查 RUM 数据（GraphQL，account-owned 子 token 可用，permission group `Account Analytics Read` = `b89a480218d04ceb98b4fe57ca29dc1f`）**：
 ```bash
-source .secrets/cf-ops.env
+source .secrets/aifeeds-prod.env
 # 建 sub-token 步骤见 §4 cf-ops.env 段（permission_groups 用 b89a48... 那个）
 SUB=<sub_token>
 SINCE=$(date -u -v-24H +"%Y-%m-%dT%H:%M:%SZ")
@@ -954,7 +1002,7 @@ grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut 
 
 ### Cloudflare 运维 token（跨 session 共享）
 
-**位置**：项目根 `.secrets/cf-ops.env`（已 gitignored，路径见 `.gitignore` `.secrets/` 一行）
+**位置**：项目根 `.secrets/aifeeds-prod.env`（已 gitignored，路径见 `.gitignore` `.secrets/` 一行）
 
 **内容**：
 - `CF_OPS_API_TOKEN` — account-owned master token，权限是「创建 account-owned 子 token」（**自身不带任何资源 Read / Write 权限**，连 list zones 都返回空）
@@ -967,7 +1015,7 @@ grep -m1 '^DEEPSEEK_API_KEY=' ~/.claude/skills/xlist-scraper/scripts/.env | cut 
 **典型用法**（Bash）：
 
 ```bash
-source .secrets/cf-ops.env
+source .secrets/aifeeds-prod.env
 
 # Step 1: 查 permission group ID（一次性，可缓存到下方表里）
 curl -sS "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens/permission_groups" \
@@ -1062,7 +1110,7 @@ curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer 
 
 **轮换 / 撤销**：
 - 怀疑泄露：CF Dashboard → 头像 → My Profile → API Tokens → 找到 token → Roll（生成新值）或 Delete
-- Roll 后把新值覆盖写回 `.secrets/cf-ops.env`
+- Roll 后把新值覆盖写回 `.secrets/aifeeds-prod.env`
 - master token 本身权限低（只能创建子 token），泄露风险有限，但**仍建议每 6-12 个月主动 roll 一次**
 
 **安全约定**：
