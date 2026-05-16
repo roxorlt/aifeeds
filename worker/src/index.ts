@@ -387,7 +387,7 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 1500);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
         if (!env.GITHUB_PIPELINE_WORKFLOW) {
           return jsonResponse({ error: 'GITHUB_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
         }
@@ -453,7 +453,7 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 1500);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
         if (!env.X_TWEET_PIPELINE_WORKFLOW) {
           return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
         }
@@ -825,7 +825,7 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '100', 10), 1500);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '100', 10), 400);
         if (!env.HUODONGXING_DETAIL_WORKFLOW) {
           return jsonResponse({ error: 'HUODONGXING_DETAIL_WORKFLOW binding missing' }, 500, request, env);
         }
