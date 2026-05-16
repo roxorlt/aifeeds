@@ -159,14 +159,21 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 | `/s/:token` | GET | 扫码落地：写 to_did + landed_at，302 redirect 到详情页 | 无 |
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
 | `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | HTTP Basic Auth (`ADMIN_USER`/`PASS`) |
-| `/img` | GET | twimg 图片反代（绕 GFW，CF 边缘缓存 7 天） | 无（host 白名单限 pbs/abs/video.twimg.com） |
+| `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存 | 无（R2 私有，仅 worker 暴露） |
 
-**`/img` 图片代理**（2026-04-20 上线）：
-- 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由 twimg 域名到此端点
+**`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
+- 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
+- 白名单：`pbs.twimg.com` / `abs.twimg.com` / `video.twimg.com` / `avatars.githubusercontent.com`（防被当开放代理滥用）
 - CDN 边缘缓存：`cacheTtl=86400` + `Cache-Control: max-age=604800, immutable`
-- 白名单：`pbs.twimg.com` / `abs.twimg.com` / `video.twimg.com`（防被当开放代理滥用）
 - 命中 GFW 封锁的 CN 用户借此恢复图片加载
+- **2026-05-16 边缘 transform**（CF 迁移阶段 2）：
+  - 图片走 `cf.image` option（worker fetch 内嵌触发，不受 zone "Allow external source" toggle 限制）
+  - 查询参数：`?w=` resize 宽度（可选）/ `?q=` quality（默认 85）/ format=auto（按 Accept 自动 webp/avif）
+  - prod 实测：avatar 28573B (460x460 jpeg) → 2532B (80x80, w=80) 省 91%；→ 18074B (400x400, w=400) 省 37%
+  - ⚠️ format=auto 实测未强转 webp（仍返 jpeg），可能 CF cf.image 默认行为，后续视效果调整
+  - video（`video.twimg.com`）保持原反代 + Range 转发，不走 cf.image（CF 只支持图片 transform）
+  - zone toggle：OPS 2026-05-16 已 enable `image_resizing`（PATCH `/zones/{zone_id}/settings/image_resizing`）
 
 **`/api/items` 热度排序**（2026-04-21 上线）：
 - 加 `sort=hot` 参数时按 HN 风格重力衰减分数排序：

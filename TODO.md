@@ -95,9 +95,10 @@
 - [x] **Workers Logs** — BE 2026-05-16 已加（PR #34），`worker/wrangler.toml` 含 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
 
 **阶段 2（半天）—— 图片走边缘优化**
-- 现在头像 / 截图 / 海报直接走 R2 反代
-- 切到 cdn-cgi/image 路径，按设备和浏览器自动转 webp / avif，省带宽
-- 改 dashboard 的 `<img>` URL 模板
+- [x] **OPS 2026-05-16** zone `image_resizing` toggle on
+- [x] **BE 2026-05-16**（PR #49）worker `/img` 加 `cf.image` option（format=auto + ?w= resize + ?q= quality），video 分支保持原反代。prod 验证：avatar 28573B→2532B（w=80，省 91%）/ →18074B（w=400，省 37%）
+- [ ] **FE 待办**：`dashboard/src/lib/utils.ts` `proxyImg()` 增可选 width 参数，按场景传：GH 头像 80 / 卡片 400 / 详情 800（裸 `/img?url=` 不传 w 时 worker passthrough 原图，省带宽要 FE 显式传 w）
+- ⚠️ format=auto 在 prod 实测未强转 webp（仍返 jpeg），可能 CF cf.image 默认行为，后续视效果调整（resize 主路径已通，省带宽 80%+ 已实现）
 
 **阶段 3（1-2 周）—— GH 链试点 Workflow**
 - GH 抓取链最简单（单源、量小），拿来试点
