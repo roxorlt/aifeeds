@@ -9,9 +9,17 @@
 > - **GitHub 私有仓**：`roxorlt/aifeeds`（备份用，CICD 待接）
 > - **Token 速查**：见 `docs/operations.md` § 4「运维 Token 速查」
 >
+> **🔐 Secret 管理（强制约定，2026-05-16 OPS 事故后统一改造）**：
+> - **唯一源**：本项目所有 secret 只在 2 个文件 — `.secrets/aifeeds-prod.env`（prod）/ `.secrets/aifeeds-staging.env`（staging）
+> - **禁止再建散落 .env 文件**（admin-prod / cf-claude-ops / cf-ops / gh-claude-ops / ph-oauth-prod / staging-ingest-token 等历史散文件 2026-05-16 已合并 + 全部删除）
+> - **新增 secret** 时加到上面对应文件，OPS 部署 / 注入 / 验证 / 恢复脚本一律 `source .secrets/aifeeds-{prod,staging}.env`
+> - **跨项目共享 token**（CF master / GH PAT 等）也在本项目文件保留副本 — aifeeds 用到啥就有啥，简单 > DRY
+> - 详见 `.secrets/README.md`（文件结构 + 维护规则 + OPS 常用 source 模式）+ `docs/operations.md` §3「Secrets」
+>
 > **不要做的事**：
 > - ❌ 不要假设 `~/.claude/skills/xlist-scraper/` 存在 — 那个 skill 已于 2026-05-10 删除（含本地目录 + GitHub 公开仓）。aifeeds 跟它没任何依赖关系，名字相似纯属历史巧合。
-> - ❌ 不要把任何 secret 值写到 docs / CLAUDE.md / 设计文档里 — 只引用文件路径（如 `.secrets/cf-claude-ops.env`）。所有 token 来源 + 再生方式见 operations.md § 4。
+> - ❌ 不要把任何 secret 值写到 docs / CLAUDE.md / 设计文档里 — 只引用文件路径（`.secrets/aifeeds-prod.env` / `.secrets/aifeeds-staging.env`）。所有 token 来源 + 再生方式见 operations.md § 3 / § 4。
+> - ❌ 不要新建散落 `.env` 文件存 secret（违反上方强制约定）；新增 secret 加到统一文件
 > - ❌ 不要在没 review diff 的情况下 push 到 GitHub — 私有仓也要防 secret 写错。
 > - ❌ 不要混淆 prod 域名 `api.ai-feeds.com` 和 staging `staging-api.ai-feeds.com`。运维操作前确认目标环境。
 

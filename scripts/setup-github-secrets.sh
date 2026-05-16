@@ -7,8 +7,8 @@ set -e
 cd "$(dirname "$0")/.."
 
 # 读本地 token
-source .secrets/cf-claude-ops.env
-source .secrets/gh-claude-ops.env
+source .secrets/aifeeds-prod.env
+source .secrets/aifeeds-prod.env
 
 # gh cli 用 GITHUB_TOKEN env 自动认证
 echo "── 设 CLOUDFLARE_API_TOKEN ──"
