@@ -850,7 +850,9 @@ async function appendMetricsSnapshots(
 // 复用 fill-translations 那套 sanity check 风格但简化（PH 全英文 + 短文本，
 // sanity 误判率低）。batch_size=20，50 条 × 2 字段 ≈ 5 个 LLM call ≈ 15-25s wall clock。
 
-const DS_URL_TR = 'https://api.deepseek.com/v1/chat/completions';
+// 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
+// 回滚直连：改回 'https://api.deepseek.com/v1/chat/completions'。
+const DS_URL_TR = 'https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions';
 const DS_MODEL_TR = 'deepseek-chat';
 const NL_MARK_TR = '⟪NL⟫';
 
