@@ -150,15 +150,17 @@ class_name = "GithubPipelineWorkflow"
 
 ## 容量预算
 
-- GH 入库量：~1 条/天（启动期，未来扩展再算）
+- GH 入库量：**6.2 条/天**（prod D1 实测 2026-05-01 至 2026-05-15，14 天 87 条，最高 11/天 / 最低 2/天）
 - 平均 step/instance：
   - `is_relevant=1` 时 4 step
   - `is_relevant=0` 时 2 step（早退）
   - 平均按 67% relevant ≈ 3.3 step/instance
-- 月 step = 30 × 3.3 ≈ 100 step/月
+- 月 step = 30 × 6.2 × 3.3 ≈ **615 step/月**
 - CF 免费额度：100,000 step/月
-- 利用率：< 0.1%
+- 利用率：**0.6%**
 - **月成本：$0**（Workers Paid `$5/月`含量已覆盖）
+
+> 即使未来 GH trending 量翻 10 倍到 60 条/天，月 step ≈ 6,150，利用率仍 < 7%，预算无压力。
 
 ## 测试计划
 
