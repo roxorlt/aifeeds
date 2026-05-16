@@ -109,6 +109,18 @@
 - 双写期：老 cron + 新 Workflow 并行跑，稳定后下线 cron
 - **翻译模式重写候选 SQL**（2026-05-14 留）：现在 `selectTranslationCandidates`（`worker/src/enrich.ts:2198`）用 `RANDOM()` 在大池子（X 4000+ 条 content_translated IS NULL 但实际中文）里抽 150，命中 quote_of / link_card 边角的概率 ~1%，单轮 limit=50 实际只翻 1 条 task。导致 X feed 上 quote_of 引用推文 / link_card 链接卡长期 47 条左右积压（cron 也清不动）；2026-05-14 加的 `POST /api/admin/fill-translations-now` admin endpoint 同样卡这个瓶颈。Workflow 改造时按 task 类型分独立队列（content / quote / link_card 各一），扁平消费，根治此问题。
 - **顺便加 reply / retweet 父推 snapshot 翻译覆盖**（2026-05-16 留）：当前 `selectTranslationCandidates` 不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上展示的「回复 @父推作者」/「转推 @某人」对应 snapshot 内容是英文（backfill-quotes / backfill-replies 抓回来塞进 extra 但翻译流程不扫）。阶段 4 重写 SQL 时顺便加这两个 task 类型独立队列（边际 0.5 天），新功能从第一天享受 Workflow 秒级 + 死信兜底，避免「先做半成品再升级」。
+- **翻译流水线 i18n 友好接口**（2026-05-16 留，为未来多语言铺路，边际成本约 0.5-1 天）：
+  - Task 类型加 `lang` 字段（暂硬编码 `'zh'`），未来支持 `ja` / `es` 时只需在 task 生成器循环 langs 列表，不重写核心逻辑
+  - Workflow 队列命名带 lang 后缀（`translate:zh:content`、`translate:zh:quote_of` 等），未来加新语言队列不影响 zh 队列性能
+  - DeepSeek prompt 模板参数化（`source_lang` / `target_lang`），不再硬编码「翻译成中文」
+  - **DB schema 暂不改**（保留 `items.content_translated` 列），未来真正多语言时再迁 `translations` 表（item_id, field, lang, translated_text, quality, attempts, translated_at, model 主键 item_id+field+lang）— schema 设计落 `docs/plans/2026-05-16-i18n-design.md`（未来需要时启用 migration）
+  - **API lang 参数暂不加**（前端没多语言 UI），等真正多语言 UI 时一起做
+- **C 端用户已浏览英文时翻译完成的展示策略**（2026-05-16 留，迁移完后顺便加）：
+  - API 下发按「已翻译优先」排序（`ORDER BY (content_translated IS NULL) ASC` 优先级），未翻译的不过滤但放后面
+  - 翻译完的 item 标新（`translated_at > last_user_fetch_at`），前端 feed 顶部「N 条新内容可加载」横条扩展到「N 条新译文可刷新」
+  - drawer lazy enrich on open 已有（PR6.6），保留
+  - 不做实时推送（WebSocket / SSE 复杂度过高且阅读中突变体验奇怪）
+  - 不做严格服务端过滤未翻译的不下发（会让 feed 数量缩水 + 热点新推文延迟出现）
 
 **阶段 5（按需）—— 高级能力**
 - Queue：消息总线（比如 enrich 任务排队）
