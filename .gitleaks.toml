@@ -1,0 +1,18 @@
+# gitleaks 配置 — 项目允许的"看似 secret 实为公开 token"白名单
+#
+# 规则：CF Web Analytics 的 site_tag 是 32 字符 hex，会被 build 进前端 bundle
+# 公开发到浏览器，符合 CF 设计（不是 secret）。但触发 gitleaks generic-api-key
+# 规则（entropy ≥ 3.5）。在这里精确白名单两个 site_tag 字面量，避免 CI 阻塞。
+#
+# 维护：未来在 CF 后台新建 RUM site 时同步更新此文件 + docs/operations.md §11。
+#
+# gitleaks 默认规则继承 — `useDefault = true`（必须显式声明，不然 default 规则不加载）。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "CF Web Analytics site_tag (public, embedded in browser bundle). See docs/operations.md §11."
+regexes = [
+  '''857fab927a70440bb19c685c8f85094f''',
+  '''9e6f987fd43d45d8ae74c134ad8a0e4e''',
+]
