@@ -27,6 +27,7 @@ import {
   backfillReplyForXTweet,
   checkLongformForXTweet,
   fetchLongformViaScrapeBadger,
+  translateXTweetField,
 } from '../enrich';
 
 interface XTweetParams {
@@ -35,6 +36,7 @@ interface XTweetParams {
   hasQuoteRef: boolean;
   hasReplyRef: boolean;
   hasLinkCard: boolean;
+  hasRetweetRef: boolean;  // task #6 retweet snapshot 翻译覆盖
   // i18n 友好（task #7）：暂硬编码 'zh'，未来扩多语言时不改 schema
   lang: 'zh' | 'en' | 'ja';
 }
@@ -84,8 +86,48 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       );
     }
 
-    // ⏳ TODO step 4 fan-out (translate content / quote / link_card / reply / retweet)
-    // 当前只实现 step 1-3，部 staging 验证 longform 条件路径。
+    // ─── Step 4 fan-out (并行): 翻译多字段 ──────────────────────
+    // 6 个字段 dispatch，hasXxxRef 信号控制条件跑（不跑省一次 SELECT + skip 逻辑）。
+    // task #6: reply_of + retweet_of 翻译覆盖
+    // task #7: lang 参数 i18n 友好（当前硬编码 'zh'）
+    const { hasLinkCard, hasRetweetRef, lang } = event.payload;
+    const translateTasks: Promise<unknown>[] = [
+      step.do('translate-content', RETRY, () =>
+        translateXTweetField(this.env, itemId, 'content', { lang }),
+      ),
+    ];
+    if (hasQuoteRef) {
+      translateTasks.push(
+        step.do('translate-quote', RETRY, () =>
+          translateXTweetField(this.env, itemId, 'quote_of.content', { lang }),
+        ),
+      );
+    }
+    if (hasLinkCard) {
+      translateTasks.push(
+        step.do('translate-link-title', RETRY, () =>
+          translateXTweetField(this.env, itemId, 'link_card.title', { lang }),
+        ),
+        step.do('translate-link-desc', RETRY, () =>
+          translateXTweetField(this.env, itemId, 'link_card.description', { lang }),
+        ),
+      );
+    }
+    if (hasReplyRef) {
+      translateTasks.push(
+        step.do('translate-reply', RETRY, () =>
+          translateXTweetField(this.env, itemId, 'reply_of.content', { lang }),
+        ),
+      );
+    }
+    if (hasRetweetRef) {
+      translateTasks.push(
+        step.do('translate-retweet', RETRY, () =>
+          translateXTweetField(this.env, itemId, 'retweet_of.content', { lang }),
+        ),
+      );
+    }
+    await Promise.all(translateTasks);
 
     return { itemId, classified: 'relevant' as const };
   }

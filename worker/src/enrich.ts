@@ -4029,3 +4029,165 @@ export async function fetchLongformViaScrapeBadger(
   console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c`);
   return { updated: true, full_text_len: ft.length };
 }
+
+/**
+ * Workflow Step 4 (任一字段): 通用单字段翻译 dispatch。
+ * 6 个 field 类型对应 fan-out 6 个独立 step.do。每个 step 独立 retry，
+ * 任一失败不影响其他字段。
+ *
+ * task #7 i18n 友好：opts.lang 参数预留多语言扩展，当前只支持 'zh'。
+ * 未来扩 en/ja/etc 时改这里的 prompt 模板，不动 schema。
+ *
+ * task #6 reply/retweet 覆盖：把老 fill-translations 不扫的 reply_of.content
+ * 和 retweet_of.content 加进 dispatch，跟 Phase 1 ingest 信号联动跑。
+ */
+export type XTweetTranslateField =
+  | 'content'
+  | 'quote_of.content'
+  | 'link_card.title'
+  | 'link_card.description'
+  | 'reply_of.content'
+  | 'retweet_of.content';
+
+export async function translateXTweetField(
+  env: EnrichEnv,
+  itemId: string,
+  field: XTweetTranslateField,
+  opts: { lang: 'zh' | 'en' | 'ja' } = { lang: 'zh' },
+): Promise<{ translated: boolean; chars: number }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('translateXTweetField: DEEPSEEK_API_KEY missing');
+  }
+  if (opts.lang !== 'zh') {
+    // task #7 接口预留 lang 参数，当前 prompt 模板只支持 zh
+    throw new Error(`translateXTweetField: lang=${opts.lang} not yet supported (only 'zh')`);
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, content_translated, lang, extra
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{
+    id: string;
+    content: string | null;
+    content_translated: string | null;
+    lang: string | null;
+    extra: string | null;
+  }>();
+  if (!row) throw new Error(`translateXTweetField: item not found ${itemId}`);
+
+  const extra: Record<string, unknown> = row.extra
+    ? (JSON.parse(row.extra) as Record<string, unknown>)
+    : {};
+
+  // ── 取 source text + 判断是否需要翻译 ─────────────────────────
+  let sourceText: string;
+  let alreadyDone: boolean;
+  let isAlreadyZh = false;
+
+  if (field === 'content') {
+    if (!row.content) return { translated: false, chars: 0 };
+    sourceText = row.content;
+    alreadyDone = !!row.content_translated;
+    isAlreadyZh = row.lang === 'zh' || row.lang === 'zh-cn' || row.lang === 'zh-tw';
+  } else if (field === 'quote_of.content') {
+    const qo = extra.quote_of as { content?: string; content_translated?: string } | undefined;
+    if (!qo?.content) return { translated: false, chars: 0 };
+    sourceText = qo.content;
+    alreadyDone = !!qo.content_translated;
+  } else if (field === 'link_card.title') {
+    const lc = extra.link_card as { title?: string; title_translated?: string } | undefined;
+    if (!lc?.title) return { translated: false, chars: 0 };
+    sourceText = lc.title;
+    alreadyDone = !!lc.title_translated;
+  } else if (field === 'link_card.description') {
+    const lc = extra.link_card as { description?: string; description_translated?: string } | undefined;
+    if (!lc?.description) return { translated: false, chars: 0 };
+    sourceText = lc.description;
+    alreadyDone = !!lc.description_translated;
+  } else if (field === 'reply_of.content') {
+    const ro = extra.reply_of as { content?: string; content_translated?: string } | undefined;
+    if (!ro?.content) return { translated: false, chars: 0 };
+    sourceText = ro.content;
+    alreadyDone = !!ro.content_translated;
+  } else if (field === 'retweet_of.content') {
+    const rto = extra.retweet_of as { content?: string; content_translated?: string } | undefined;
+    if (!rto?.content) return { translated: false, chars: 0 };
+    sourceText = rto.content;
+    alreadyDone = !!rto.content_translated;
+  } else {
+    throw new Error(`translateXTweetField: unknown field ${field}`);
+  }
+
+  if (alreadyDone) {
+    console.log(`[x-workflow:step4:${field}] ${itemId}: already translated, skip`);
+    return { translated: false, chars: 0 };
+  }
+  if (isAlreadyZh) {
+    console.log(`[x-workflow:step4:${field}] ${itemId}: source already zh, skip`);
+    return { translated: false, chars: 0 };
+  }
+  if (!sourceText.trim()) return { translated: false, chars: 0 };
+
+  // ── 翻译（复用现有 translateBatch，单 text 包成 1 元素数组）──
+  const result = await translateBatch(env.DEEPSEEK_API_KEY, [sourceText]);
+  const translated = result.get(0);
+  if (!translated) {
+    throw new Error(`translateXTweetField: empty translation for ${itemId} ${field}`);
+  }
+
+  // sanity check（suspect 时单次 retry，仍 suspect 留 suspect 标记）
+  let finalText = translated;
+  let attempts = 1;
+  let quality: 'ok' | 'suspect' = sanityHit(sourceText, translated) ? 'suspect' : 'ok';
+  if (quality === 'suspect') {
+    const retry = await translateBatch(env.DEEPSEEK_API_KEY, [sourceText]);
+    const retryTr = retry.get(0);
+    if (retryTr) {
+      attempts = 2;
+      if (!sanityHit(sourceText, retryTr)) {
+        finalText = retryTr;
+        quality = 'ok';
+      } else {
+        finalText = retryTr; // 保留 retry 结果，仍 suspect 由人工 review
+      }
+    }
+  }
+
+  // ── 写回（按 field 类型分支写到 D1 column 或 extra JSON 路径）──
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (field === 'content') {
+    await env.DB.prepare(
+      `UPDATE items
+          SET content_translated = ?,
+              translation_quality = ?,
+              translation_attempts = COALESCE(translation_attempts, 0) + ?
+        WHERE id = ?`,
+    ).bind(finalText, quality, attempts, itemId).run();
+  } else {
+    // 写到 extra JSON 子路径
+    const newExtra = { ...extra } as Record<string, unknown>;
+    if (field === 'quote_of.content') {
+      const qo = (newExtra.quote_of || {}) as Record<string, unknown>;
+      newExtra.quote_of = { ...qo, content_translated: finalText, translated_at: nowTs };
+    } else if (field === 'link_card.title') {
+      const lc = (newExtra.link_card || {}) as Record<string, unknown>;
+      newExtra.link_card = { ...lc, title_translated: finalText };
+    } else if (field === 'link_card.description') {
+      const lc = (newExtra.link_card || {}) as Record<string, unknown>;
+      newExtra.link_card = { ...lc, description_translated: finalText };
+    } else if (field === 'reply_of.content') {
+      const ro = (newExtra.reply_of || {}) as Record<string, unknown>;
+      newExtra.reply_of = { ...ro, content_translated: finalText, translated_at: nowTs };
+    } else if (field === 'retweet_of.content') {
+      const rto = (newExtra.retweet_of || {}) as Record<string, unknown>;
+      newExtra.retweet_of = { ...rto, content_translated: finalText, translated_at: nowTs };
+    }
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newExtra), itemId).run();
+  }
+
+  console.log(`[x-workflow:step4:${field}] ${itemId}: translated ${finalText.length}c quality=${quality}`);
+  return { translated: true, chars: finalText.length };
+}
