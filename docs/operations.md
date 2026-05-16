@@ -1112,8 +1112,10 @@ tail -50 /Users/roxor/brain/30-projects/aifeeds/data/launchd-stderr.log
 ### 部署更新
 
 ```bash
-# Worker
-cd worker && npm run deploy
+# Worker —— ⚠️ 必须 cd worker/，不能从仓库根 deploy
+cd worker
+rm -f ../wrangler.jsonc  # 防 wrangler 4.x bug（见下方陷阱）
+npm run deploy           # 或 npx wrangler deploy
 
 # Dashboard（前端）
 cd dashboard && npm run build && npx wrangler pages deploy dist --project-name=xlist-dashboard
@@ -1122,6 +1124,34 @@ cd dashboard && npm run build && npx wrangler pages deploy dist --project-name=x
 cd worker && npm run db:init        # 推远程
 cd worker && npm run db:init:local  # 推本地（wrangler dev 用）
 ```
+
+#### ⚠️ wrangler 4.x 部署陷阱（2026-05-16 踩过一次，prod 30 秒断线 + 14 个 secrets 全擦）
+
+**陷阱**：wrangler 4.x 在某些情况下会在**仓库根目录**自动生成 `wrangler.jsonc`（指向 `cc-site/` 静态目录，name = 分支名），优先级高于 `worker/wrangler.toml`。
+
+**后果**：从仓库根跑 `wrangler deploy` 会把 cc-site 静态站当成 worker 部署到 xlist-api，把整个 worker bindings 含 14 个 secrets 全擦掉（rollback 只还原 code 不还原 secrets，需要 OPS 手工重置全部 secrets）。
+
+**防御**（每次部 worker 都做）：
+1. **必须** `cd worker/` 进 worker 目录再部署，不要在仓库根跑 wrangler
+2. 部之前先 `rm -f ../wrangler.jsonc` 清掉 rogue file（已 gitignored，但 wrangler 跑完会再生）
+3. 部之后看 wrangler 输出 `Uploaded xlist-api` 而不是别的名字（如 `be-xxx-yyy`），别的名字 = 走错配置立刻 Ctrl+C
+4. 永远不要用 `--name xlist-api` flag 试图覆盖，那会用别的 wrangler.toml 但保留 `xlist-api` 名字 → 更糟
+
+**事故恢复**（万一又踩坑）：
+1. `npx wrangler rollback --name xlist-api`（30 秒内回到上一版 code，但 secrets 不会还原）
+2. 用 `wrangler secret list --name xlist-api` 验证 secrets 是否还在（返回 `[]` = 全擦了）
+3. 如果擦了，从 `.secrets/worker-prod-secrets.env` 批量恢复（OPS 那边维护这个文件，里面是所有 14 个 secret 的当前值）：
+   ```bash
+   # 14 个 secret 名 + 值都在 worker-prod-secrets.env 里，按行 wrangler secret put
+   source .secrets/worker-prod-secrets.env
+   for key in ADMIN_USER ADMIN_PASS INGEST_TOKEN DEEPSEEK_API_KEY GITHUB_TOKEN \
+              PH_CLIENT_ID PH_CLIENT_SECRET PUSHDEER_ADMIN_KEYS RESEND_API_KEY \
+              SCRAPEBADGER_API_KEY SMS_PROVIDER TURNSTILE_SECRET_KEY; do
+     echo "${!key}" | npx wrangler secret put $key --name xlist-api
+   done
+   ```
+4. 验证 `wrangler secret list --name xlist-api` 含 12-14 个 secret
+5. 业务侧 smoke：`curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST 'https://api.ai-feeds.com/api/admin/sms-status'` 应 200
 
 ### 停启本地 cron
 

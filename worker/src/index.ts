@@ -355,9 +355,14 @@ export default {
       }
       // ─── GH Workflow 一次性 drain pending（迁移后兜底） ───────────
       // POST /api/admin/gh-trigger-pending-workflows-now?limit=N
-      // 查 gh_pending=true 的 item，对每个 create Workflow instance。
-      // Instance ID 跟 Phase 1 一样（gh-${itemId 转义}），已存在自动跳过。
-      // 迁移完成后这个端点基本用不到 — 留作 Workflow 出问题人工兜底用。
+      //
+      // 扫两类 item：
+      //   (a) extra.gh_pending=true — Phase 1 写完 stub 但还没跑 Workflow（正常 pending）
+      //   (b) is_relevant IS NULL — 已 enrich 但 LLM 判别失败的「卡死」item
+      //       (老 preempt 流程下，LLM 失败时 gh_pending 被清成 0，留下 NULL is_relevant)
+      //
+      // Workflow 完全幂等：step 1 重写 metadata、step 2 重新 LLM、step 3/4 幂等。
+      // 已存在 instance ID 自动跳过（同 itemId 不会被多次创建实例）。
       if (path === '/api/admin/gh-trigger-pending-workflows-now' && request.method === 'POST') {
         if (!checkAdminAuth(request, env)) {
           return new Response('Unauthorized', {
@@ -373,7 +378,11 @@ export default {
         const pending = await env.DB.prepare(
           `SELECT id FROM items
             WHERE source_type='github'
-              AND COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')
+              AND deleted_at IS NULL
+              AND (
+                COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')
+                OR is_relevant IS NULL
+              )
             ORDER BY scraped_at ASC
             LIMIT ?`,
         ).bind(limit).all<{ id: string }>();
