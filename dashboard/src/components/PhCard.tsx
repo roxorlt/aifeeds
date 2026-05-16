@@ -8,11 +8,36 @@
 //   - meta（第二行）：日期(无 PT 后缀) / #排名 / 分类标签（彩色 chip）
 //   - footer：互动数据 + makers 头像（最多 3）+ "by @first 等 N 人"
 
+import { useState } from "react";
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { formatCompact, parseJsonField } from "../lib/utils";
+import { formatCompact, parseJsonField, proxyImg } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { resolveAssetUrl } from "../lib/asset";
+
+// 选 PH cover：第一张非 logo 的 image，没有就用 video poster（YouTube 推 maxresdefault）。
+// 同 worker share/handlers.ts:492-515 的选取逻辑，保证流内 cover 跟分享海报 cover 一致。
+function selectPhCover(media: MediaItem[]): { url: string; isVideo: boolean } | null {
+  // 先 image (排除 logo)
+  for (const m of media) {
+    const role = (m as MediaItem & { role?: string }).role;
+    if (m && m.type === "image" && role !== "logo" && typeof m.url === "string") {
+      return { url: m.url, isVideo: false };
+    }
+  }
+  // 再 video poster
+  for (const m of media) {
+    if (m && m.type === "video") {
+      const mm = m as MediaItem & { poster?: string; video_id?: string; platform?: string };
+      let poster = typeof mm.poster === "string" ? mm.poster : "";
+      if (!poster && mm.platform === "youtube" && mm.video_id) {
+        poster = `https://img.youtube.com/vi/${mm.video_id}/maxresdefault.jpg`;
+      }
+      if (poster) return { url: poster, isVideo: true };
+    }
+  }
+  return null;
+}
 
 // PH 分类彩色 chip 风格，跟 GithubCard 同款语义（同色系区分品类）
 const PH_CATEGORY_STYLE: Record<string, string> = {
@@ -60,9 +85,11 @@ interface Props {
 
 export function PhCard({ item }: Props) {
   const drawer = useDrawer();
+  const [coverFailed, setCoverFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<PhMetrics>(item.metrics) ?? ({} as PhMetrics);
   const media = parseMedia(item.media);
+  const cover = selectPhCover(media);
 
   const name = item.title || "?";
   // 正文优先用 AI 解读（跟 GithubCard 一致 — feed 卡片用 ai_summary 信息
@@ -149,6 +176,29 @@ export function PhCard({ item }: Props) {
         <p className="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
           {smartTruncate(tagline, 280)}
         </p>
+      )}
+
+      {/* Cover image — screenshot / video poster。100% PH items 都有 media
+          screenshot 但流内之前只展示 logo (40×40)，hero shot 完全没看到。
+          这里跟分享海报 cover 用同一张图源 (worker share/handlers.ts:492-515)。
+          视频用同样静态 poster，点 cover 打开抽屉看完整 gallery + 视频播放。 */}
+      {cover && !coverFailed && (
+        <div className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100">
+          <img
+            src={proxyImg(resolveAssetUrl(cover.url) || cover.url, 400)}
+            alt=""
+            loading="lazy"
+            className="aspect-[16/9] w-full object-cover"
+            onError={() => setCoverFailed(true)}
+          />
+          {cover.isVideo && (
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-black/55 text-white">
+                <svg className="ml-0.5 h-5 w-5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+            </span>
+          )}
+        </div>
       )}
 
       {/* Footer：左 votes/comments，右 makers 头像 + by @xxx 等 N 人。
