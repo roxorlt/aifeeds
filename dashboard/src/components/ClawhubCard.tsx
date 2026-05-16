@@ -94,7 +94,7 @@ export function ClawhubCard({ item }: Props) {
       <div className="flex items-start gap-3">
         {ownerAvatar ? (
           <img
-            src={proxyImg(ownerAvatar)}
+            src={proxyImg(ownerAvatar, 80)}
             alt={ownerHandle}
             className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}

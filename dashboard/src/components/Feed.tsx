@@ -94,7 +94,7 @@ function PendingAvatars({ pending }: { pending: Item[] }) {
       {avatars.map((a, i) => (
         <img
           key={a.handle}
-          src={proxyImg(a.url)}
+          src={proxyImg(a.url, 80)}
           alt={a.handle}
           className="h-5 w-5 rounded-full ring-2 ring-blue-50 object-cover"
           style={{ zIndex: avatars.length - i }}

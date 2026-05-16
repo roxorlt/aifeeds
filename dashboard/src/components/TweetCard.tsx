@@ -365,7 +365,7 @@ export function TweetCard({
           <div className="flex gap-3">
             {replyOf.profile_image_url ? (
               <img
-                src={proxyImg(replyOf.profile_image_url)}
+                src={proxyImg(replyOf.profile_image_url, 80)}
                 alt=""
                 loading="lazy"
                 className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
@@ -398,7 +398,7 @@ export function TweetCard({
               </div>
               {replyOf.media && replyOf.media[0] && replyOf.media[0].type === "image" && replyOf.media[0].url && (
                 <img
-                  src={proxyImg(replyOf.media[0].url)}
+                  src={proxyImg(replyOf.media[0].url, 400)}
                   alt=""
                   loading="lazy"
                   className="mt-2.5 max-h-60 w-full rounded-2xl border border-neutral-200 object-cover"
@@ -438,7 +438,7 @@ export function TweetCard({
         {/* Avatar */}
         {avatarUrl && !avatarFailed ? (
           <img
-            src={proxyImg(avatarUrl)}
+            src={proxyImg(avatarUrl, 80)}
             alt=""
             loading="lazy"
             className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
@@ -537,7 +537,7 @@ export function TweetCard({
             >
               <VideoPlayer
                 src={proxyImg(firstMedia.url)}
-                poster={firstMedia.poster ? proxyImg(firstMedia.poster) : undefined}
+                poster={firstMedia.poster ? proxyImg(firstMedia.poster, 400) : undefined}
                 itemId={item.id}
                 sourceType={item.source_type}
                 onError={() => setMediaFailed(true)}
@@ -559,7 +559,7 @@ export function TweetCard({
               className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
             >
               <img
-                src={proxyImg(firstMedia.url)}
+                src={proxyImg(firstMedia.url, 400)}
                 alt={firstMedia.alt || ""}
                 loading="lazy"
                 className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
