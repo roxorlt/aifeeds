@@ -797,6 +797,64 @@ export default {
         const progress = progressRaw ? JSON.parse(progressRaw) : null;
         return jsonResponse({ pending_detail_enrich: pending, fetch_progress: progress }, 200, request, env);
       }
+      // ─── 阶段 5: hdx workflow drain pending（cutover 后兜底 / 老 backlog 清）
+      // POST /api/admin/hdx-trigger-pending-workflows-now?limit=N
+      //
+      // 扫所有 detail_enriched_at IS NULL 的 hdx 事件，按 last_seen_at DESC 排序，
+      // 用 throttleSec spacing 5s 错开 trigger workflow instance。
+      // 默认 limit=100，N 个 instance 跨 5N 秒 wall time 处理。
+      // 860 backlog → 9 批 limit=100 跑完。
+      if (path === '/api/admin/hdx-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '100', 10), 200);
+        if (!env.HUODONGXING_DETAIL_WORKFLOW) {
+          return jsonResponse({ error: 'HUODONGXING_DETAIL_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id FROM items
+            WHERE source_type='huodongxing'
+              AND deleted_at IS NULL
+              AND json_extract(extra, '$.detail_enriched_at') IS NULL
+            ORDER BY json_extract(extra, '$.last_seen_at') DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string }>();
+        let triggered = 0;
+        let skipped = 0;
+        let failed = 0;
+        let throttleIndex = 0;
+        for (const r of pending.results) {
+          const eventId = r.id.replace(/^huodongxing:/, '');
+          const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+          try {
+            await env.HUODONGXING_DETAIL_WORKFLOW.create({
+              id: instanceId,
+              params: { itemId: r.id, throttleSec: throttleIndex * 5 },
+            });
+            triggered++;
+            throttleIndex++;
+          } catch (e) {
+            if (String(e).toLowerCase().includes('already exists')) {
+              skipped++;
+            } else {
+              failed++;
+              console.error(`[hdx-trigger-pending] failed for ${r.id}:`, e);
+            }
+          }
+        }
+        return jsonResponse({
+          found: pending.results.length,
+          triggered,
+          skipped,
+          failed,
+          drain_wall_time_estimate_min: Math.round((throttleIndex * 5) / 60),
+        }, 200, request, env);
+      }
       // POST /api/admin/fill-translations-now?limit=30&batch_size=8
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致
       // 用途：手动批量补翻积压（X content / quote_of / link_card + PH content / maker / comments）
@@ -970,14 +1028,11 @@ export default {
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
-          if (isHdxEnrichSlot) {
-            const pending = await countHuodongxingDetailPending(env);
-            if (pending > 0) {
-              const r = await runHuodongxingDetailEnrich(env, 3);
-              console.log(`[cron] hdx-enrich (preempt, ${pending} pending) result:`, JSON.stringify(r));
-              return;
-            }
-          }
+          // 阶段 5 (2026-05-16): huodongxing detail enrich 迁 CF Workflow
+          // (HuodongxingDetailWorkflow)。runHuodongxingFetchList 对每条新事件
+          // 触发 instance，5s/instance throttleSec 错开避免 site rate limit。
+          // isHdxEnrichSlot preempt 已删。老 batch runHuodongxingDetailEnrich
+          // 保留作 admin fallback (/api/admin/hdx-enrich-now)。
           // GH 抓取链已迁 CF Workflow (worker/src/workflows/github-pipeline.ts)。
           // Phase 1 (github-fetch slot) 写 stub 行 + 立刻 create Workflow instance，
           // instance 自己跑 enrich / classify / r2-migrate / readme-translate。

@@ -300,6 +300,7 @@ export interface FetchListResult {
   cities_remaining: number;
   pages_fetched: number;
   cards_inserted_or_updated: number;
+  workflows_triggered: number;   // 阶段 5: 触发 HuodongxingDetailWorkflow 数（新事件数）
   errors: number;
   budget_consumed: number;
   finished: boolean;             // 24 城全部跑完 → KV 状态清掉
@@ -367,6 +368,10 @@ export async function runHuodongxingFetchList(
   let pagesThisTick = 0;
   let cardsThisTick = 0;
   let errorsThisTick = 0;
+  // 阶段 5 workflow trigger 累计 — 跨 page/city 累加 throttleSec 让所有新事件
+  // 跨 instance 错开 5s 一个，避免 site rate limit
+  let workflowsTriggered = 0;
+  let throttleIndex = 0;
 
   // 处理城市直到预算用完
   while (progress.cities_pending.length > 0) {
@@ -391,11 +396,49 @@ export async function runHuodongxingFetchList(
       }
       const parsed = parseListing(res.body, city);
       if (parsed.cards.length === 0) break;
+
+      // 阶段 5 workflow trigger：upsert 前先查哪些 id 是新的，仅给新事件 trigger
+      // workflow（已存在的事件不重复 enrich detail，老 batch fallback 可处理过期事件）
+      let newIdsThisPage: string[] = [];
+      if (env.HUODONGXING_DETAIL_WORKFLOW) {
+        const allIds = parsed.cards.map((c) => itemId(c.event_id));
+        const placeholders = allIds.map(() => '?').join(',');
+        const existingRows = await env.DB.prepare(
+          `SELECT id FROM items WHERE id IN (${placeholders})`,
+        ).bind(...allIds).all<{ id: string }>();
+        const existingSet = new Set(existingRows.results.map((row) => row.id));
+        newIdsThisPage = parsed.cards
+          .map((c) => itemId(c.event_id))
+          .filter((id) => !existingSet.has(id));
+        budgetUsed++;  // SELECT counts as 1
+      }
+
       const upsertRes = await upsertCards(env, parsed.cards, scrapedAt);
       budgetUsed++;  // D1 batch counts as 1 subrequest
       cardsThisTick += upsertRes.rows_changed;
       cardsForCity += upsertRes.rows_changed;
       errorsThisTick += upsertRes.errors;
+
+      // upsert 成功后对每条新事件 trigger workflow，throttleSec 跨 instance 错开 5s
+      if (env.HUODONGXING_DETAIL_WORKFLOW && newIdsThisPage.length > 0) {
+        for (const id of newIdsThisPage) {
+          const eventId = id.replace(/^huodongxing:/, '');
+          const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+          try {
+            await env.HUODONGXING_DETAIL_WORKFLOW.create({
+              id: instanceId,
+              params: { itemId: id, throttleSec: throttleIndex * 5 },
+            });
+            workflowsTriggered++;
+            throttleIndex++;
+          } catch (e) {
+            if (!String(e).toLowerCase().includes('already exists')) {
+              console.error(`[hdx-fetch] workflow create failed for ${id}:`, e);
+            }
+          }
+        }
+      }
+
       if (parsed.isLastPage) break;
     }
 
@@ -431,6 +474,7 @@ export async function runHuodongxingFetchList(
     cities_remaining: progress.cities_pending.length,
     pages_fetched: pagesThisTick,
     cards_inserted_or_updated: cardsThisTick,
+    workflows_triggered: workflowsTriggered,
     errors: errorsThisTick,
     budget_consumed: budgetUsed,
     finished,
