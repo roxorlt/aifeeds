@@ -263,6 +263,7 @@ ${ADMIN_SHARED_CSS}
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   thead th { text-align: left; padding: 6px 8px; color: #9ca3af; font-weight: 500;
              border-bottom: 1px solid #1f2937; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  thead th.num { text-align: right; }
   tbody td { padding: 6px 8px; border-bottom: 1px solid #1f2937; color: #d1d5db; font-family: ui-monospace, monospace; }
   tbody tr:hover { background: #161b24; }
   td.num { text-align: right; }
