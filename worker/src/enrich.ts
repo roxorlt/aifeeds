@@ -2168,7 +2168,7 @@ export async function runClassifyPending(
   const timer = setTimeout(() => ctrl.abort(), 60000);
   let res: Response;
   try {
-    res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    res = await fetch('https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
       body: JSON.stringify({
@@ -2667,7 +2667,9 @@ export async function runCleanup(
 // Uses DeepSeek chat (OpenAI-compatible). SQL broadly selects candidates,
 // then code filters to texts actually needing translation.
 
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+// 走 CF AI Gateway（slug：aifeeds-deepseek），dashboard 看 token / cost / 缓存命中。
+// 回滚直连：改回 "https://api.deepseek.com/v1/chat/completions"。
+const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions";
 const DEEPSEEK_MODEL = "deepseek-chat";
 
 const TRANSLATION_PROMPT_HEADER =
@@ -3672,7 +3674,7 @@ export async function runPhEnrich(env: EnrichEnv, limit = 10): Promise<PhEnrichR
   const timer = setTimeout(() => ctrl.abort(), 60000);
   let res: Response;
   try {
-    res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    res = await fetch('https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
