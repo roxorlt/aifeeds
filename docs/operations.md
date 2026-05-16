@@ -217,10 +217,22 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 - **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && hour === 20 ...)` redeploy
 - **旧 launchd PH 抓取**：已退役并清理（2026-05-13），代码归档见 [`docs/archive/ph-scraper-retired.md`](archive/ph-scraper-retired.md)（含 fallback 恢复步骤）
 
-**GitHub trending（2026-05-02 上线，迁自本地 launchd）**：
-- **Phase 1 — `runGithubFetchTrending`**：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh`。**~2 subrequests/run**
-- **Phase 2 — `runGithubEnrichPending`**：在每个 `*/5min` cron tick 上**抢占式**运行：先查 `extra.gh_pending=1` 的待 enrich 行，有则取 1 条做 GitHub API（license/watchers/PRs/contributors）+ raw README + DeepSeek LLM 判别 → UPDATE items（`is_relevant=0/1` + `extra.ai_category/ai_summary` 等），最后 batch 重算当日 `daily_rank`。**~9 subrequests/run**，远低于 50 限额。X 模式仅在没 pending 时走。
-- **手动触发**：`POST /api/enrich/run?mode=github-fetch` / `POST /api/enrich/run?mode=github-enrich&limit=5`，都需 Bearer `INGEST_TOKEN`
+**GitHub trending（2026-05-02 上线 / 2026-05-16 迁 CF Workflow）**：
+- **Phase 1 — `runGithubFetchTrending`**（worker/src/github.ts）：每天 UTC `17:00` + `05:00`（= BJT 01:00 + 13:00），fetch trending HTML → 正则解析 ~25 条 → INSERT items 表（`is_relevant=NULL` + `extra.gh_pending=true`）+ 一行 `metrics_snapshots_gh` + **对每条新 row 调 `env.GITHUB_PIPELINE_WORKFLOW.create(...)` 触发 Workflow instance**。**~2 + N subrequests/run**（N = 新 repo 数）
+- **Phase 2 — `GithubPipelineWorkflow`**（worker/src/workflows/github-pipeline.ts）：每个 instance 跑 5 step，每步 retry 3 × 10s 指数 backoff，`is_relevant=0` 早退跳过 step 3-5：
+  1. `enrich-metadata` — GH API: repo meta + license + watchers + open_prs + contributors + recent commits + README
+  2. `classify-with-llm` — DeepSeek 判 `is_relevant` + `ai_category` + `ai_summary`
+  3. `r2-migrate-assets` — README 内 inline 图/视频迁 R2，rewrite URLs 到 `/r/<key>`
+  4. `translate-readme` — DeepSeek 翻译 README 到中文（仅 `readme_lang != 'zh'`）
+  5. `recompute-daily-rank` — 重算当日 `daily_rank` D1 batch（幂等，并发安全）
+- **CF Dashboard 路径**：Workers & Pages → Workflows → `github-pipeline-workflow` (prod) / `github-pipeline-workflow-staging`（staging）。看 instance 列表（ID 形如 `gh-github-owner-repo`）+ 单 instance 各 step 状态。任一 step `errored` 可在 UI "Retry from step" 单步重试
+- **容量预算**：6.2 repo/天 × 平均 3.3 step/instance × 30 = ~615 step/月（利用率 0.6%，免费额度 100k）。**月成本 $0**
+- **手动触发**：
+  - Phase 1（拉 trending 立即跑）：`POST /api/admin/gh-fetch-now`（Basic Auth）
+  - 一次性 drain pending（迁移后兜底）：`POST /api/admin/gh-trigger-pending-workflows-now?limit=N`（Basic Auth）— 查 `gh_pending=true` 的 item，每条 create workflow instance
+  - 旧 batch fallback（仍可用，正常不需要）：`POST /api/enrich/run?mode=github-fetch | github-enrich | github-r2-migrate | github-readme-translate`（Bearer INGEST_TOKEN）
+- **回滚到旧 preempt cron 模式**：revert 实施 PR + `npx wrangler deploy`。Workflow instance 已跑完不重复，未跑完 errored（数据不损失）。Phase 1 自动回到「写 pending row + 等 preempt」模式
+- **设计文档**：[`plans/2026-05-16-github-pipeline-workflows-design.md`](plans/2026-05-16-github-pipeline-workflows-design.md)
 
 **ClawHub（2026-05-09 v2，全云端 — 无本地依赖）**：
 - **数据源**：`https://wry-manatee-359.convex.cloud/api/query` Convex 公开接口（无鉴权 / 无 cookie / 无 turnstile）。调用三个：

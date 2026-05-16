@@ -22,6 +22,11 @@ export interface GithubEnv {
   // means R2 migration is skipped and original GitHub raw URLs stay in the
   // readme markdown.
   READMES?: R2Bucket;
+  // CF Workflow binding for GH pipeline (worker/src/workflows/github-pipeline.ts).
+  // runGithubFetchTrending() 解析 trending 后对每个新 repo 触发 instance。
+  // 暂留 optional 是为了 admin endpoint runGithubFetchTrending(env) 在
+  // workflow 未绑定时仍能写 stub 行（如果哪天独立测 Phase 1）。
+  GITHUB_PIPELINE_WORKFLOW?: Workflow;
 }
 
 const TRENDING_URL = "https://github.com/trending?since=daily";
@@ -171,8 +176,9 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   inserted: number;
   updated_seen: number;
   errors: number;
+  workflows_triggered: number;
 }> {
-  const counts = { parsed: 0, inserted: 0, updated_seen: 0, errors: 0 };
+  const counts = { parsed: 0, inserted: 0, updated_seen: 0, errors: 0, workflows_triggered: 0 };
 
   let html: string;
   try {
@@ -192,6 +198,18 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   const repos = parseTrendingHtml(html);
   counts.parsed = repos.length;
   if (repos.length === 0) return counts;
+
+  // 先查哪些 ID 已存在 → 用于判断哪些是新行（INSERT 而非 UPDATE），
+  // 仅对新行 trigger Workflow（避免对已 enriched 的 repo 重复 enrich）。
+  const allRepoIds = repos.map((r) => `github:${r.ownerRepo}`);
+  const existingIds = new Set<string>();
+  if (allRepoIds.length > 0) {
+    const placeholders = allRepoIds.map(() => "?").join(",");
+    const existingRows = await env.DB.prepare(
+      `SELECT id FROM items WHERE id IN (${placeholders})`,
+    ).bind(...allRepoIds).all<{ id: string }>();
+    for (const r of existingRows.results) existingIds.add(r.id);
+  }
 
   const nowIso = new Date().toISOString();
   const today = bjtDateStr();
@@ -272,6 +290,31 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   } catch (e) {
     console.error("[github-fetch] D1 batch error:", e);
     counts.errors++;
+  }
+
+  // 触发 Workflow 给每个新 repo（不在已存在集合里的）。
+  // 失败不影响主流程 — 下次 cron 会再 batch insert（UPSERT 不重复）+ 重试 trigger。
+  if (env.GITHUB_PIPELINE_WORKFLOW) {
+    const newItemIds = allRepoIds.filter((id) => !existingIds.has(id));
+    for (const itemId of newItemIds) {
+      // CF Workflow instance ID 限制 [a-zA-Z0-9_-]，把 itemId 里的 ':' '/' '.' 等转 '-'。
+      // 用 itemId 做 instance ID 一举两得：防同 repo 重复触发 + dashboard 可由 ID 反查。
+      const instanceId = `gh-${itemId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+      try {
+        await env.GITHUB_PIPELINE_WORKFLOW.create({
+          id: instanceId,
+          params: { itemId },
+        });
+        counts.workflows_triggered++;
+      } catch (e) {
+        // "already exists" = 上次 cron 触发过同 ID instance，跳过即可
+        if (!String(e).toLowerCase().includes("already exists")) {
+          console.error(`[github-fetch] workflow create failed for ${itemId}:`, e);
+        }
+      }
+    }
+  } else {
+    console.warn("[github-fetch] GITHUB_PIPELINE_WORKFLOW binding missing — stub rows written but not enriched");
   }
 
   console.log(`[github-fetch] ${JSON.stringify(counts)}`);
@@ -1181,4 +1224,349 @@ export async function countGithubR2Pending(env: GithubEnv): Promise<number> {
         AND json_extract(extra, '$.r2_migrated_at') IS NULL`,
   ).first<{ n: number }>();
   return r?.n ?? 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 单 itemId 版本函数 — 给 CF Workflow (worker/src/workflows/github-pipeline.ts) 用
+//
+// 设计：每个函数完成一个 Workflow step 的工作。step 间通过返回值传递必需上下文
+// （减少 D1 re-read），D1 写入仍然每步立即落库（保留 dashboard 看部分进度的 UX）。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface GithubMetadataResult {
+  ownerRepo: string;
+  owner: string;
+  repo: string;
+  description: string | null;
+  language: string | null;
+  totalStars: number | null;
+  todayStars: number | null;
+  readme: string;
+  defaultBranch: string;
+}
+
+/**
+ * Workflow Step 1: 拉 GH API metadata + README，写到 D1（不调 LLM）。
+ * 写入 metrics（watchers/open_issues/open_prs/license_spdx）+ extra
+ * （default_branch/contributors_count/recent_commits/readme_excerpt/readme_lang）。
+ * is_relevant + ai_* 留给 Step 2 写。gh_pending 不在这里清，等 Step 2 完成才清。
+ */
+export async function fetchAndPersistGithubMetadata(
+  env: GithubEnv,
+  itemId: string,
+): Promise<GithubMetadataResult> {
+  const row = await env.DB.prepare(
+    `SELECT source_id, content, metrics, extra
+       FROM items
+      WHERE id = ? AND source_type='github'`,
+  ).bind(itemId).first<{
+    source_id: string;
+    content: string | null;
+    metrics: string | null;
+    extra: string | null;
+  }>();
+
+  if (!row) throw new Error(`gh-workflow: item not found ${itemId}`);
+
+  const [owner, repoName] = (row.source_id || "").split("/");
+  if (!owner || !repoName) {
+    throw new Error(`gh-workflow: invalid source_id ${row.source_id}`);
+  }
+
+  const metrics = row.metrics ? JSON.parse(row.metrics) : {};
+  const extra = row.extra ? JSON.parse(row.extra) : {};
+
+  // 1. /repos/:owner/:repo
+  const meta = await fetchRepoMeta(env, owner, repoName);
+  const license = (meta?.license as { spdx_id?: string } | null)?.spdx_id ?? null;
+  const defaultBranch = (meta?.default_branch as string | undefined) ?? null;
+  const watchers = (meta?.subscribers_count as number | undefined) ?? null;
+  const openIssues = (meta?.open_issues_count as number | undefined) ?? null;
+
+  // 2. open PRs / contributors / recent commits
+  const openPrs = await fetchOpenPrs(env, owner, repoName);
+  const contributorsCount = await fetchContributorsCount(env, owner, repoName);
+  const recentCommits = await fetchRecentCommits(env, owner, repoName);
+
+  // 3. README
+  const { content: readme, branch: branchUsed } = await fetchReadme(owner, repoName, defaultBranch);
+  const language = extra.language ?? (meta?.language as string | undefined) ?? null;
+  const finalBranch = defaultBranch || branchUsed || extra.default_branch || "main";
+  const readmeLang = detectReadmeLang(readme);
+
+  const newMetrics = {
+    ...metrics,
+    watchers: metrics.watchers ?? watchers,
+    open_issues: openIssues,
+    open_prs: openPrs,
+    license_spdx: license,
+  };
+  const newExtra = {
+    ...extra,
+    readme_excerpt: readme,
+    readme_lang: readmeLang,
+    default_branch: finalBranch,
+    license_spdx: license,
+    contributors_count: contributorsCount,
+    language,
+    recent_commits: recentCommits ?? extra.recent_commits ?? null,
+  };
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET metrics = ?,
+            extra = ?,
+            lang = ?
+      WHERE id = ?`,
+  ).bind(
+    JSON.stringify(newMetrics),
+    JSON.stringify(newExtra),
+    readmeLang,
+    itemId,
+  ).run();
+
+  console.log(`[gh-workflow:step1] ${itemId}: metadata persisted, readme=${readme.length}c lang=${readmeLang}`);
+
+  return {
+    ownerRepo: row.source_id,
+    owner,
+    repo: repoName,
+    description: row.content,
+    language,
+    totalStars: metrics.stars ?? null,
+    todayStars: metrics.today_stars ?? null,
+    readme,
+    defaultBranch: finalBranch,
+  };
+}
+
+/**
+ * Workflow Step 2: 调 DeepSeek LLM 做分类（is_relevant/ai_category/ai_summary），
+ * 写到 D1。同时清 gh_pending（标志主流程结束）。Step 1 的 meta 通过参数传入避免 re-read。
+ */
+export async function classifyGithubItemWithLlm(
+  env: GithubEnv,
+  itemId: string,
+  meta: GithubMetadataResult,
+): Promise<{ is_relevant: 0 | 1 | null }> {
+  const trending: TrendingRepo & { readme: string } = {
+    owner: meta.owner,
+    repo: meta.repo,
+    ownerRepo: meta.ownerRepo,
+    url: `https://github.com/${meta.ownerRepo}`,
+    description: meta.description,
+    language: meta.language,
+    totalStars: meta.totalStars,
+    todayStars: meta.todayStars,
+    forks: null,
+    sponsor: 0,
+    contributorsInline: [],
+    readme: meta.readme,
+  };
+
+  const llm = await callLlm(env, trending);
+
+  // 读当前 extra 做 merge（其他字段保持不变）
+  const row = await env.DB.prepare(
+    `SELECT extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ extra: string | null }>();
+  if (!row) throw new Error(`gh-workflow: item disappeared ${itemId}`);
+  const extra = row.extra ? JSON.parse(row.extra) : {};
+
+  const newExtra = {
+    ...extra,
+    gh_pending: false,
+    ai_category: llm.ai_category,
+    ai_summary: llm.ai_summary,
+    llm_model: DEEPSEEK_MODEL,
+    llm_called_at: Math.floor(Date.now() / 1000),
+  };
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET is_relevant = ?,
+            extra = ?
+      WHERE id = ?`,
+  ).bind(
+    llm.is_ai,
+    JSON.stringify(newExtra),
+    itemId,
+  ).run();
+
+  console.log(
+    `[gh-workflow:step2] ${itemId}: is_ai=${llm.is_ai} cat=${llm.ai_category}`,
+  );
+
+  return { is_relevant: llm.is_ai };
+}
+
+/**
+ * Workflow Step 3: README 内 inline 图/视频迁 R2，rewrite URLs 到 /r/<key>。
+ * 仅 is_relevant=1 时调用（caller 保证）。
+ */
+export async function r2MigrateGithubItemById(
+  env: GithubEnv,
+  itemId: string,
+): Promise<{ ok: boolean; assets_migrated: number; assets_failed: number }> {
+  if (!env.READMES) {
+    console.warn(`[gh-workflow:step3] ${itemId}: R2 binding not configured, skipping`);
+    return { ok: true, assets_migrated: 0, assets_failed: 0 };
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT source_id,
+            json_extract(extra, '$.readme_excerpt')   AS readme,
+            json_extract(extra, '$.readme_translated') AS translated,
+            json_extract(extra, '$.default_branch')   AS branch
+       FROM items
+      WHERE id = ?`,
+  ).bind(itemId).first<{
+    source_id: string;
+    readme: string | null;
+    translated: string | null;
+    branch: string | null;
+  }>();
+
+  if (!row || !row.readme) {
+    return { ok: true, assets_migrated: 0, assets_failed: 0 };
+  }
+
+  const [owner, repo] = (row.source_id || "").split("/");
+  const branch = row.branch || "main";
+  const hits = extractAssetUrls(row.readme, owner, repo, branch);
+  const mapping = new Map<string, string>();
+  let migrated = 0;
+  let failed = 0;
+
+  for (let i = 0; i < Math.min(hits.length, R2_MAX_ASSETS_PER_REPO); i++) {
+    const r2Path = await migrateOneAsset(env, owner, repo, hits[i].resolvedUrl);
+    if (r2Path) {
+      mapping.set(hits[i].matchedSrc, r2Path);
+      migrated++;
+    } else {
+      failed++;
+    }
+  }
+
+  const newReadme = mapping.size > 0 ? rewriteUrls(row.readme, mapping) : row.readme;
+  const newTranslated = row.translated && mapping.size > 0
+    ? rewriteUrls(row.translated, mapping)
+    : row.translated;
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET extra = json_set(extra,
+                             '$.readme_excerpt', ?,
+                             '$.readme_translated', ?,
+                             '$.r2_migrated_at', ?,
+                             '$.r2_assets_count', ?)
+      WHERE id = ?`,
+  ).bind(
+    newReadme,
+    newTranslated,
+    Math.floor(Date.now() / 1000),
+    mapping.size,
+    itemId,
+  ).run();
+
+  console.log(`[gh-workflow:step3] ${itemId}: ${migrated}/${hits.length} assets migrated`);
+  return { ok: true, assets_migrated: migrated, assets_failed: failed };
+}
+
+/**
+ * Workflow Step 4: DeepSeek 翻译 README 到中文。仅 readme_lang != 'zh' 且
+ * readme_excerpt 存在时实际跑。is_relevant=1 由 caller 保证。
+ */
+export async function translateGithubReadmeForItem(
+  env: GithubEnv,
+  itemId: string,
+): Promise<{ translated: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT json_extract(extra, '$.readme_excerpt') AS readme,
+            json_extract(extra, '$.readme_lang')   AS lang,
+            json_extract(extra, '$.readme_translated') AS already
+       FROM items
+      WHERE id = ?`,
+  ).bind(itemId).first<{ readme: string | null; lang: string | null; already: string | null }>();
+
+  if (!row || !row.readme) {
+    console.log(`[gh-workflow:step4] ${itemId}: no readme, skipping`);
+    return { translated: false };
+  }
+  if (row.lang === 'zh') {
+    console.log(`[gh-workflow:step4] ${itemId}: readme already zh, skipping`);
+    return { translated: false };
+  }
+  if (row.already) {
+    console.log(`[gh-workflow:step4] ${itemId}: already translated, skipping`);
+    return { translated: false };
+  }
+
+  const translated = await callTranslateLlm(env, row.readme);
+  if (!translated) {
+    throw new Error(`gh-workflow:step4 ${itemId}: empty translation`);
+  }
+
+  await env.DB.prepare(
+    `UPDATE items
+        SET extra = json_set(extra,
+                             '$.readme_translated', ?,
+                             '$.readme_translated_at', ?)
+      WHERE id = ?`,
+  ).bind(translated, Math.floor(Date.now() / 1000), itemId).run();
+
+  console.log(`[gh-workflow:step4] ${itemId}: translated ${translated.length}c`);
+  return { translated: true };
+}
+
+/**
+ * Workflow Step 5: 重算当天所有 is_relevant=1 / 非 sponsor GH item 的 daily_rank。
+ * 从 runGithubEnrichPending() 末尾抽出，并发安全（多 instance 同时跑同结果，
+ * last write wins）。
+ */
+export async function recomputeGithubDailyRank(
+  env: GithubEnv,
+): Promise<{ ranked: number }> {
+  const today = bjtDateStr();
+  const rankRows = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='github'
+        AND is_relevant=1
+        AND COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0
+        AND deleted_at IS NULL
+        AND json_extract(extra, '$.trending_date_str') = ?
+      ORDER BY CAST(json_extract(metrics, '$.today_stars') AS INTEGER) DESC,
+               CAST(json_extract(metrics, '$.stars') AS INTEGER) DESC`,
+  ).bind(today).all<{ id: string }>();
+
+  const updates: D1PreparedStatement[] = [];
+  rankRows.results.forEach((r, idx) => {
+    updates.push(
+      env.DB.prepare(
+        `UPDATE items SET extra = json_set(extra, '$.daily_rank', ?) WHERE id = ?`,
+      ).bind(idx + 1, r.id),
+    );
+  });
+  updates.push(
+    env.DB.prepare(
+      `UPDATE items
+          SET extra = json_remove(extra, '$.daily_rank')
+        WHERE source_type='github'
+          AND json_extract(extra, '$.trending_date_str') = ?
+          AND (is_relevant != 1 OR COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 1)`,
+    ).bind(today),
+  );
+
+  if (updates.length > 0) {
+    try {
+      await env.DB.batch(updates);
+    } catch (e) {
+      console.error("[gh-workflow:step5] daily_rank batch error:", e);
+      throw e;  // let workflow retry
+    }
+  }
+
+  return { ranked: rankRows.results.length };
 }
