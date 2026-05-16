@@ -369,6 +369,49 @@ function fmtDuration(sec) {
   return (sec/3600).toFixed(1) + 'h';
 }
 
+// event_type 中文标签 — 与 dashboard/src/lib/telemetry/event-types.ts 和
+// worker/src/track.ts 的 EVENT_TYPE_WHITELIST 对齐。新增事件类型时这里要补一条。
+const EVENT_LABELS = {
+  'app_open': '应用启动',
+  'page_view': '页面浏览',
+  'session_start': '会话开始',
+  'session_end': '会话结束',
+  'item_impression': '内容曝光',
+  'item_click': '内容点击',
+  'item_open_drawer': '打开详情',
+  'item_close_drawer': '关闭详情',
+  'thread_expand': '展开 thread',
+  'image_lightbox_open': '查看大图',
+  'external_link_click': '外链点击',
+  'source_filter_change': '切换信息源',
+  'sort_change': '切换排序',
+  'new_content_banner_click': '点新内容提示',
+  'share_click': '点分享',
+  'share_landing': '分享落地访问',
+  'login_modal_open': '打开登录弹窗',
+  'sms_send_attempt': '尝试发验证码',
+  'sms_send_success': '验证码发送成功',
+  'code_verify_attempt': '尝试验证码',
+  'login_success': '登录成功',
+  'logout': '登出',
+  'account_delete': '删除账号',
+  'favorite_toggle': '收藏 / 取消',
+  'subscribe_toggle': '订阅 / 取消',
+  'video_autoplay_attempt': '视频自动播放尝试',
+  'video_autoplay_blocked': '自动播放被拦截',
+  'video_play_start': '视频播放',
+  'perf_lcp': '性能 · LCP',
+  'perf_inp': '性能 · INP',
+  'perf_cls': '性能 · CLS',
+  'perf_ttfb': '性能 · TTFB',
+  'js_error': 'JS 错误',
+  'unhandled_promise': 'Promise 错误',
+  'api_error': 'API 错误',
+  'image_load_error': '图片加载失败',
+  'feed_load_error': 'Feed 加载失败',
+};
+function evtZh(type) { return EVENT_LABELS[type] || type; }
+
 const COLORS = ['#6ee7b7','#93c5fd','#fcd34d','#fca5a5','#c4b5fd','#fdba74','#a7f3d0','#bfdbfe'];
 
 async function loadOverview() {
@@ -465,19 +508,30 @@ async function loadEvents() {
   const chart = echarts.init(document.getElementById('ch-events'), 'dark', { renderer: 'canvas' });
   try {
     const d = await getJson('/api/admin/analytics?metric=event-distribution');
-    const names = d.events.map(r => r.event_type).reverse();
-    const evs = d.events.map(r => r.events).reverse();
-    const devs = d.events.map(r => r.devices).reverse();
+    const rows = d.events.slice().reverse();
+    const names = rows.map(r => evtZh(r.event_type));
+    const rawTypes = rows.map(r => r.event_type);
+    const evs = rows.map(r => r.events);
+    const devs = rows.map(r => r.devices);
     chart.setOption({
       backgroundColor: 'transparent',
       grid: { left: 170, right: 30, top: 30, bottom: 30 },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { data: ['events', 'devices'], textStyle: { color: '#9ca3af' } },
+      tooltip: {
+        trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: (params) => {
+          const i = params[0].dataIndex;
+          const raw = rawTypes[i];
+          return '<b>' + names[i] + '</b><br/>'
+            + '<span style="color:#6b7280;font-family:monospace;font-size:11px">' + raw + '</span><br/>'
+            + params.map(p => p.marker + p.seriesName + ': <b>' + fmt(p.value) + '</b>').join('<br/>');
+        },
+      },
+      legend: { data: ['事件数', '设备数'], textStyle: { color: '#9ca3af' } },
       xAxis: { type: 'value', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
       yAxis: { type: 'category', data: names, axisLabel: { color: '#d1d5db', fontSize: 11 } },
       series: [
-        { name: 'events', type: 'bar', data: evs, itemStyle: { color: COLORS[1] } },
-        { name: 'devices', type: 'bar', data: devs, itemStyle: { color: COLORS[0] } },
+        { name: '事件数', type: 'bar', data: evs, itemStyle: { color: COLORS[1] } },
+        { name: '设备数', type: 'bar', data: devs, itemStyle: { color: COLORS[0] } },
       ],
     });
   } catch (e) { document.getElementById('ch-events').innerHTML = '<div class="err">' + e.message + '</div>'; }
@@ -489,7 +543,7 @@ async function loadErrors() {
     const d = await getJson('/api/admin/analytics?metric=errors');
     if (!d.by_msg.length) { tb.innerHTML = '<tr><td colspan="4" class="muted">无错误</td></tr>'; return; }
     tb.innerHTML = d.by_msg.map(r =>
-      '<tr><td>' + r.event_type + '</td>'
+      '<tr><td title="' + r.event_type + '">' + evtZh(r.event_type) + '</td>'
       + '<td>' + (r.error_msg || '—') + '</td>'
       + '<td class="num">' + fmt(r.errors) + '</td>'
       + '<td class="num">' + fmt(r.devices) + '</td></tr>'
