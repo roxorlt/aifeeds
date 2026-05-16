@@ -412,7 +412,77 @@ export default {
         }
         return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
       }
-      // ─── X Workflow 手动触发（staging E2E + 阶段 4 cutover 前测试用） ───
+      // ─── X Phase 1 手动触发（staging E2E + admin debug） ─────────
+      // POST /api/admin/x-list-poll-now?list_id=...&pages=N
+      // 触发 runListPollIngest 拉新 tweet → 写 D1 + create workflow instance per new。
+      if (path === '/api/admin/x-list-poll-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const listId = u.searchParams.get('list_id') || env.LIST_POLL_LIST_ID || '1643236611378008066';
+        const pages = Math.min(parseInt(u.searchParams.get('pages') || '3', 10), 10);
+        const result = await runListPollIngest(env, listId, pages);
+        return jsonResponse(result, 200, request, env);
+      }
+      // ─── X Workflow 一次性 drain pending（cutover 后兜底） ────────
+      // POST /api/admin/x-trigger-pending-workflows-now?limit=N
+      // 扫 X tweet 里仍 is_relevant IS NULL（未分类，老 preempt 卡死）的 item，
+      // 每条 create workflow instance 重新走完 pipeline。
+      // 同 itemId 已存在 instance 自动跳过（workflow 幂等）。
+      if (path === '/api/admin/x-trigger-pending-workflows-now' && request.method === 'POST') {
+        if (!checkAdminAuth(request, env)) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 200);
+        if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+          return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+        }
+        const pending = await env.DB.prepare(
+          `SELECT id, extra FROM items
+            WHERE source_type='x_list'
+              AND deleted_at IS NULL
+              AND is_relevant IS NULL
+            ORDER BY scraped_at DESC
+            LIMIT ?`,
+        ).bind(limit).all<{ id: string; extra: string | null }>();
+        let triggered = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const r of pending.results) {
+          let extraObj: Record<string, unknown> = {};
+          try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+          const params = {
+            itemId: r.id,
+            hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+            hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+            hasLinkCard: !!extraObj.link_card,
+            hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+            lang: 'zh' as const,
+          };
+          const instanceId = `x-${r.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+          try {
+            await env.X_TWEET_PIPELINE_WORKFLOW.create({ id: instanceId, params });
+            triggered++;
+          } catch (e) {
+            if (String(e).toLowerCase().includes('already exists')) {
+              skipped++;
+            } else {
+              failed++;
+              console.error(`[x-trigger-pending] failed for ${r.id}:`, e);
+            }
+          }
+        }
+        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+      }
+      // ─── X Workflow 手动触发单 itemId（staging E2E + 阶段 4 cutover 前测试用） ───
       // POST /api/admin/x-workflow-trigger-now?itemId=x_list:1234567890
       //
       // 触发 1 个 instance 走完 5 step pipeline。signals (hasQuoteRef 等) 自动
@@ -1359,9 +1429,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   // Fetch limit+1 to determine has_more
+  // task #8 C 端展示策略：非 hot 模式下，已翻译 item 优先（content_translated IS
+  // NOT NULL）。同时间戳内，已翻译靠前。降低用户「刷到一条英文 wait 翻译」体验。
+  // hot 模式仍按 engagement score 排（翻译先后跟 hot score 无关）。
   const orderBy = isHot
     ? `${HOT_EXPR} DESC, id DESC`
-    : `${sort} DESC, id DESC`;
+    : `(content_translated IS NULL) ASC, ${sort} DESC, id DESC`;
   const selectHotScore = isHot ? `, ${HOT_EXPR} AS hot_score` : '';
   const sql = `SELECT *${selectHotScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
   params.push(limit + 1);

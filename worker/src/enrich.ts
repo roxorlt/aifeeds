@@ -4209,13 +4209,15 @@ export async function translateXTweetField(
   // ── 写回（按 field 类型分支写到 D1 column 或 extra JSON 路径）──
   const nowTs = Math.floor(Date.now() / 1000);
   if (field === 'content') {
+    // task #8: 写 translated_at 给 C 端「N 条新译文可加载」横条用
     await env.DB.prepare(
       `UPDATE items
           SET content_translated = ?,
               translation_quality = ?,
-              translation_attempts = COALESCE(translation_attempts, 0) + ?
+              translation_attempts = COALESCE(translation_attempts, 0) + ?,
+              translated_at = ?
         WHERE id = ?`,
-    ).bind(finalText, quality, attempts, itemId).run();
+    ).bind(finalText, quality, attempts, nowTs, itemId).run();
   } else {
     // 写到 extra JSON 子路径
     const newExtra = { ...extra } as Record<string, unknown>;
