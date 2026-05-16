@@ -8,7 +8,6 @@ import type { MetricsSnapshotGh } from "../api";
 import { fetchItem } from "../api";
 import { cn, formatCompact, ordinal, parseJsonField, proxyImg, timeAgo, timeAgoOrDate } from "../lib/utils";
 import { langDotClass } from "../lib/githubLang";
-import { extractFirstReadmeImage } from "./GithubCard";
 import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
@@ -273,15 +272,6 @@ export function GithubDrawerBody({ item }: Props) {
     () => extractReadmeImages(readmeToShow || readmeRaw || "", owner, repoName, defaultBranch),
     [readmeToShow, readmeRaw, owner, repoName, defaultBranch],
   );
-
-  // Hero cover image：跟流内 GithubCard / 分享海报用同一张图源（README
-  // 第一张 <img>），保证从 feed 点进抽屉后顶部 hero 视觉延续
-  const heroCover = useMemo(() => {
-    const readme = (extra as Record<string, unknown>).readme_excerpt;
-    if (typeof readme !== "string" || !owner || !repoName) return null;
-    return extractFirstReadmeImage(readme, owner, repoName, defaultBranch);
-  }, [extra, owner, repoName, defaultBranch]);
-  const [heroCoverFailed, setHeroCoverFailed] = useState(false);
   const markdownComponents = useMemo(
     () =>
       makeMarkdownComponents(owner, repoName, defaultBranch, (resolvedSrc) => {
@@ -462,23 +452,6 @@ export function GithubDrawerBody({ item }: Props) {
           </div>
         )}
       </div>
-
-      {/* Hero cover image — 跟流内 GithubCard / 分享海报用同一张图源（README
-          第一张 <img>），保持视觉延续：用户从 feed 点进抽屉，顶部第一眼仍是
-          同一张 cover，再往下是 summary + README。w=800 因为抽屉宽度比流内
-          卡片大约 2 倍，物理像素更高保证清晰度 */}
-      {heroCover && !heroCoverFailed && (
-        <div className="border-b border-neutral-100">
-          <img
-            src={proxyImg(heroCover, 800)}
-            alt=""
-            loading="lazy"
-            className="w-full bg-neutral-100 object-cover"
-            style={{ aspectRatio: "16/9" }}
-            onError={() => setHeroCoverFailed(true)}
-          />
-        </div>
-      )}
 
       {/* AI summary */}
       {summary && (

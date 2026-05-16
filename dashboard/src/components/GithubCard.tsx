@@ -21,7 +21,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
 //
 // 排除 SVG（大部分是 shields/badges）+ 已知 badge host。相对路径 resolve 到
 // raw.githubusercontent.com；/r/ 路径拼 worker API base（worker 才有 /r/ 路由）。
-export function extractFirstReadmeImage(
+function extractFirstReadmeImage(
   readme: string,
   owner: string,
   repo: string,
