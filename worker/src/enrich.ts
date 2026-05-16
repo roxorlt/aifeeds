@@ -10,6 +10,10 @@ export interface EnrichEnv {
   // 可选：配置后 refresh-metrics 优先走 ScrapeBadger 批量（覆盖 syndication
   // 不返 retweet_count/view_count 的死角），失败/未命中再回落到 syndication。
   SCRAPEBADGER_API_KEY?: string;
+  // 可选：阶段 4 X 主链 Workflow binding。runListPollIngest 拉完 list 后
+  // 对每条新 tweet 触发 instance；缺失时降级到「写 D1 + 等老 preempt cron」
+  // 兜底（不会破坏老路径）。设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
+  X_TWEET_PIPELINE_WORKFLOW?: Workflow;
 }
 
 const SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result";
@@ -2008,6 +2012,13 @@ export async function runListPollIngest(
 
     // upsert 整页（已存在的也走，让 metrics 跟着 SB 实时刷新）
     const stmts: D1PreparedStatement[] = [];
+    const newItemsForWorkflow: Array<{
+      itemId: string;
+      hasQuoteRef: boolean;
+      hasReplyRef: boolean;
+      hasLinkCard: boolean;
+      hasRetweetRef: boolean;
+    }> = [];
     for (const t of r.tweets) {
       const item = sbTweetToIngestItem(t, videoMp4Map);
       if (!item) continue;
@@ -2059,8 +2070,23 @@ export async function runListPollIngest(
           item.extra,
         ),
       );
-      if (!existingSet.has(id)) newCount++;
-      else inserted++; // 实际是 update
+      if (!existingSet.has(id)) {
+        newCount++;
+        // 解析 item.extra 拿 workflow signals（quote / reply / link_card / retweet）
+        let extraObj: Record<string, unknown> = {};
+        try {
+          extraObj = JSON.parse(item.extra || '{}') as Record<string, unknown>;
+        } catch { /* ignore */ }
+        newItemsForWorkflow.push({
+          itemId: id,
+          hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+          hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+          hasLinkCard: !!extraObj.link_card,
+          hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+        });
+      } else {
+        inserted++; // 实际是 update
+      }
     }
 
     if (stmts.length > 0) {
@@ -2070,6 +2096,32 @@ export async function runListPollIngest(
         console.error('[list-poll-ingest] batch error:', e);
         firstError = e instanceof Error ? e.message : 'batch_error';
         break;
+      }
+    }
+
+    // 阶段 4 cutover：D1 batch 成功后，对每条新 tweet 触发 XTweetPipelineWorkflow
+    // instance。binding 缺失时（如未来回滚或本地测试）静默跳过，不破坏 D1 ingest。
+    if (env.X_TWEET_PIPELINE_WORKFLOW && newItemsForWorkflow.length > 0) {
+      for (const n of newItemsForWorkflow) {
+        const instanceId = `x-${n.itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+        try {
+          await env.X_TWEET_PIPELINE_WORKFLOW.create({
+            id: instanceId,
+            params: {
+              itemId: n.itemId,
+              hasQuoteRef: n.hasQuoteRef,
+              hasReplyRef: n.hasReplyRef,
+              hasLinkCard: n.hasLinkCard,
+              hasRetweetRef: n.hasRetweetRef,
+              lang: 'zh',
+            },
+          });
+        } catch (e) {
+          const msg = String(e);
+          if (!msg.toLowerCase().includes('already exists')) {
+            console.error(`[list-poll-ingest] workflow create failed for ${n.itemId}:`, e);
+          }
+        }
       }
     }
 
