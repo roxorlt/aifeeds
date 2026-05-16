@@ -189,9 +189,11 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `10:10-10:14` → `runPhDailyFetch`（PH 一日一抓，北京 18:10）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`；`:15` `:45` → `runFillTranslations`；`:10` `:50` → `runDetectLongform`（标记长推候选）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）；其他 → `runBackfillQuotes`。**抢占路径**（任意 tick 在分发前先查 pending 队列）：GH enrich / GH r2-migrate / GH readme-translate / **PH enrich** / PH r2-migrate / **ClawHub enrich** / X classify-pending / X fill-translations，pending 非零就走 preempt 不走 X 模式 |
+| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1，触发 GithubPipelineWorkflow）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `10:10-10:14` → `runPhDailyFetch`（PH 一日一抓，北京 18:10）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`（X metrics 刷新，**不是 workflow**）；`:25` `:55` → `runListPollIngest`（X phase 1，触发 XTweetPipelineWorkflow per new tweet）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）。**抢占路径**（catch-all tick 在分发前先查 pending 队列）：**PH enrich** / PH r2-migrate / **ClawHub enrich** + PH 字段 fill-translations，pending 非零就走 preempt |
 
-**调度节奏**（2026-05-01 加入 backfill-replies）：每小时 2 次 refresh-metrics（`:00` `:30`）+ 2 次 fill-translations（`:15` `:45`）+ 2 次 detect-longform（`:10` `:50`）+ 2 次 backfill-replies（`:05` `:35`）+ 4 次 backfill-quotes（`:20 :25 :40 :55`）。每天 03:35 UTC（11:35 北京时间）抢用 1 个 backfill-replies 槽跑 cleanup。
+**调度节奏（2026-05-16 阶段 4 cutover 后）**：每小时 2 次 refresh-metrics（`:00` `:30`，ScrapeBadger batch 刷新现有 tweet 互动数据）+ 2 次 list-poll-ingest（`:25` `:55`，拉新 tweet 触发 workflow）。每天 03:35 UTC（11:35 BJT）cleanup。其余 tick 走 catch-all preempt（PH/ClawHub 链）。
+
+**X 主链已迁 CF Workflow**（2026-05-16）：原 6 个 cron mode（classify-pending / fill-translations / backfill-quotes / backfill-replies / detect-longform / longform-via-sb）全部走 `XTweetPipelineWorkflow` 5 step pipeline，每条新 tweet 1 个 instance。详见下方「X 流水线 (Workflow)」节。
 
 **Product Hunt（2026-05-11 v2，全云端 — 迁离 browser-use 本地脚本）**：
 - **抓取在云端**：用 PH GraphQL API v2 + client_credentials OAuth（不再走本地 browser-use）。
@@ -233,6 +235,27 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
   - 旧 batch fallback（仍可用，正常不需要）：`POST /api/enrich/run?mode=github-fetch | github-enrich | github-r2-migrate | github-readme-translate`（Bearer INGEST_TOKEN）
 - **回滚到旧 preempt cron 模式**：revert 实施 PR + `npx wrangler deploy`。Workflow instance 已跑完不重复，未跑完 errored（数据不损失）。Phase 1 自动回到「写 pending row + 等 preempt」模式
 - **设计文档**：[`plans/2026-05-16-github-pipeline-workflows-design.md`](plans/2026-05-16-github-pipeline-workflows-design.md)
+
+**X 流水线（Workflow）— 2026-05-16 阶段 4 cutover**：
+- **Phase 1 — `runListPollIngest`**（worker/src/enrich.ts）：每 30 min（`:25` `:55`）触发，ScrapeBadger 拉 list page → upsert items → **对每条新 tweet 解析 extra 拿 hasQuoteRef/hasReplyRef/hasLinkCard/hasRetweetRef 信号 + 调 `env.X_TWEET_PIPELINE_WORKFLOW.create({ id: 'x-{tweet_id 转义}', params })`**。**SB ~57 credits/page + 1 SB credit/video（补 mp4）+ workflow create N 个**
+- **Phase 2 — `XTweetPipelineWorkflow`**（worker/src/workflows/x-tweet-pipeline.ts）：每个 instance 5 step pipeline，每步 retry 3 × 10s 指数 backoff，`is_relevant=0` 早退跳过 step 2-4：
+  1. `classify-with-llm` — DeepSeek 判 `is_relevant` + `ai_summary`
+  2. **fan-out (Promise.all)**: `backfill-quote` (syndication，hasQuoteRef 时) + `backfill-reply` (syndication，hasReplyRef 时) + `check-longform` (always)
+  3. `longform-via-sb` — 条件：step 2c 检测到长推，ScrapeBadger 拉全文
+  4. **fan-out (Promise.all)**: `translate-content` (always) + `translate-quote` (hasQuoteRef) + `translate-link-title` + `translate-link-desc` (hasLinkCard) + `translate-reply` (hasReplyRef) + `translate-retweet` (hasRetweetRef)
+- **CF Dashboard 路径**：Workers & Pages → Workflows → `x-tweet-pipeline-workflow` (prod) / `x-tweet-pipeline-workflow-staging`（staging）。看 instance 列表（ID 形如 `x-x-list-2055570810513850777`）+ 各 step 状态
+- **容量预算**：80 tweet/天 × 平均 3.5 step/instance × 30 = ~8,400 step/月（利用率 8.4%，免费额度 100k）。峰值 148 tweet/天 × 5 step × 30 = ~22k/月仍 22%。**月成本 $0**
+- **手动触发**：
+  - Phase 1（拉 list 立即跑）：`POST /api/admin/x-list-poll-now?pages=N`（Basic Auth）
+  - 单 itemId 重跑 workflow：`POST /api/admin/x-workflow-trigger-now?itemId=x_list:...`（Basic Auth）
+  - 一次性 drain 老 pending：`POST /api/admin/x-trigger-pending-workflows-now?limit=N`（Basic Auth）— 查 `is_relevant IS NULL` 的 X tweet，每条 create instance
+  - 旧 batch fallback（仍可用，正常不需要）：`POST /api/enrich/run?mode=classify-pending | fill-translations | backfill-quotes | backfill-replies | detect-longform | longform-via-sb`（Bearer INGEST_TOKEN）
+- **API ORDER BY 已翻译优先**（task #8）：非 hot 模式 `/api/items` 排序为 `(content_translated IS NULL) ASC, scraped_at DESC, id DESC`。已翻译 tweet 优先展示，新拉的未翻译靠后（workflow 跑完后下次刷新自动浮上来）
+- **translated_at 字段**（task #8）：`items.translated_at` (INTEGER unix ts) 在 step 4 translate-content 完成时写入。给前端「N 条新译文可加载」横条用（translated_at > last_user_fetch_at）
+- **i18n 友好接口**（task #7）：`XTweetParams.lang` + `translateXTweetField(env, itemId, field, { lang })` 参数预留多语言。当前硬编码 `'zh'`，未来扩 en/ja 改 prompt 模板不动 schema
+- **reply / retweet 翻译覆盖**（task #6）：step 4 fan-out 含 `translate-reply` + `translate-retweet`，替代老 fill-translations 不扫的盲区
+- **回滚到旧 preempt cron 模式**：revert 实施 PR + `cd worker && rm -f ../wrangler.jsonc && npx wrangler deploy`。Phase 1 自动回到「INSERT tweet + 等 preempt」模式
+- **设计文档**：[`plans/2026-05-16-x-main-pipeline-workflows-design.md`](plans/2026-05-16-x-main-pipeline-workflows-design.md)
 
 **ClawHub（2026-05-09 v2，全云端 — 无本地依赖）**：
 - **数据源**：`https://wry-manatee-359.convex.cloud/api/query` Convex 公开接口（无鉴权 / 无 cookie / 无 turnstile）。调用三个：
@@ -1187,19 +1210,10 @@ cd worker && npm run db:init:local  # 推本地（wrangler dev 用）
 
 **事故恢复**（万一又踩坑）：
 1. `npx wrangler rollback --name xlist-api`（30 秒内回到上一版 code，但 secrets 不会还原）
-2. 用 `wrangler secret list --name xlist-api` 验证 secrets 是否还在（返回 `[]` = 全擦了）
-3. 如果擦了，从 `.secrets/worker-prod-secrets.env` 批量恢复（OPS 那边维护这个文件，里面是所有 14 个 secret 的当前值）：
-   ```bash
-   # 14 个 secret 名 + 值都在 worker-prod-secrets.env 里，按行 wrangler secret put
-   source .secrets/worker-prod-secrets.env
-   for key in ADMIN_USER ADMIN_PASS INGEST_TOKEN DEEPSEEK_API_KEY GITHUB_TOKEN \
-              PH_CLIENT_ID PH_CLIENT_SECRET PUSHDEER_ADMIN_KEYS RESEND_API_KEY \
-              SCRAPEBADGER_API_KEY SMS_PROVIDER TURNSTILE_SECRET_KEY; do
-     echo "${!key}" | npx wrangler secret put $key --name xlist-api
-   done
-   ```
-4. 验证 `wrangler secret list --name xlist-api` 含 12-14 个 secret
-5. 业务侧 smoke：`curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST 'https://api.ai-feeds.com/api/admin/sms-status'` 应 200
+2. `wrangler secret list --name xlist-api` 验证 secrets 是否还在（返回 `[]` = 全擦了）
+3. 如果擦了 → 按 [§3 Secrets 节「事故恢复一键 restore」](#3-secrets统一-source-模式2026-05-16-改造) 跑那段 for 循环，从 `.secrets/aifeeds-prod.env` 12 个 worker secret 全部 restore
+4. 验证：`wrangler secret list --name xlist-api` 含 12 个 secret
+5. 业务侧 smoke：`source .secrets/aifeeds-prod.env && curl -u "$ADMIN_USER:$ADMIN_PASS" -X POST 'https://api.ai-feeds.com/api/admin/sms-status'` 应 200
 
 ### 停启本地 cron
 
