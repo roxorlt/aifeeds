@@ -2607,13 +2607,35 @@ async function handleImageProxy(request: Request): Promise<Response> {
   };
   const rangeHeader = request.headers.get('range');
   if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+  // 透传客户端 Accept — cf.image format=auto 需要靠 Accept 决定输出 webp/avif
+  const acceptHeader = request.headers.get('accept');
+  if (acceptHeader) upstreamHeaders['Accept'] = acceptHeader;
 
   // video 类型不走 CF cache — 因为 Range request 跟全量请求会污染同一 cache key，
   // 长视频 seek 时拿到完整流又不能 partial 响应。图片（pbs.twimg.com）继续 cache。
+  // 图片额外走 cf.image 边缘转换（format=auto 自动 webp/avif；w/q 可选 resize/compress）。
+  // 用 cf.image 而非 /cdn-cgi/image URL：从 worker 内部触发不受 zone "Allow external source" 限制，
+  // 且 worker 已经做过 host 白名单验证（line 2597-2599）— CF 信任此处的 source。
   const isVideo = targetUrl.hostname === 'video.twimg.com';
-  const cfOptions = isVideo
-    ? {}
-    : { cf: { cacheTtl: 86400, cacheEverything: true } };
+  let cfOptions: { cf?: Record<string, unknown> };
+  if (isVideo) {
+    cfOptions = {};
+  } else {
+    const w = url.searchParams.get('w');
+    const q = parseInt(url.searchParams.get('q') || '85', 10);
+    const imageOpts: Record<string, unknown> = {
+      quality: q,
+      format: 'auto',
+    };
+    if (w) imageOpts.width = parseInt(w, 10);
+    cfOptions = {
+      cf: {
+        image: imageOpts,
+        cacheTtl: 86400,
+        cacheEverything: true,
+      },
+    };
+  }
 
   const upstream = await fetch(targetUrl.toString(), {
     ...cfOptions,
