@@ -21,7 +21,9 @@ import {
   runPhEnrich,
   triggerXWorkflowForItem,
   runBackfillTruncatedFromSyndication,
+  classifyAndTranslateForXTweet,
 } from './enrich';
+import { authenticate } from './auth/session';
 import { handleTrack } from './track';
 import {
   runGithubFetchTrending,
@@ -290,6 +292,12 @@ export default {
       const itemRefreshMatch = path.match(/^\/api\/items\/(.+)\/refresh$/);
       if (itemRefreshMatch && request.method === 'POST') {
         return withCors(await handleItemRefresh(request, env, decodeURIComponent(itemRefreshMatch[1])), request, env);
+      }
+      // POST /api/items/:id/translate-now — 用户点译文按钮触发即时翻译(批 1.5)
+      // cookie auth + per-user-per-item 60s 冷却 + per-user 每日 20 次上限
+      const itemTranslateMatch = path.match(/^\/api\/items\/(.+)\/translate-now$/);
+      if (itemTranslateMatch && request.method === 'POST') {
+        return withCors(await handleItemTranslateNow(request, env, ctx, decodeURIComponent(itemTranslateMatch[1])), request, env);
       }
       const itemByIdMatch = path.match(/^\/api\/items\/(.+)$/);
       if (itemByIdMatch && request.method === 'GET') {
@@ -2213,6 +2221,143 @@ async function handleItemRefresh(request: Request, env: Env, id: string): Promis
   // 节流：worker 内部 KV throttle 5min；前端调用时 anti-burst 自己也加防抖
   const r = await refreshSingleItem(env, id);
   return jsonResponse(r, 200, request, env);
+}
+
+// ─── POST /api/items/:id/translate-now ────────────────────────
+// 2026-05-17 批 1.5:用户点译文按钮 / 抽屉里的字段是 NULL 时,触发即时翻译。
+// 走 cookie auth(同 /api/share/create 模式) + per-user-per-item 60s 冷却 +
+// per-user 每日 20 次上限(KV-based,跟 REFRESH_THROTTLE 同模式)。
+// 单条调 classifyAndTranslateForXTweet(批 1 合并调用函数),走完所有字段翻译 +
+// 写回 D1 + 返回 JSON 给 FE 实时刷新。
+//
+// 错误码契约(plan 第九节 ④):
+// - 200: 成功(或字段已有译文,直接读 D1 返回)
+// - 401: cookie session 未登录
+// - 404: item 不存在
+// - 400: 不支持的 source_type(只支持 x_list)
+// - 429: 限流(60s 冷却 / 每日 >20 次)
+// - 5xx: 翻译失败
+
+const TRANSLATE_NOW_THROTTLE_KEY = 'translate-now-throttle';
+const TRANSLATE_NOW_THROTTLE_TTL = 60; // 60s per user per item
+const TRANSLATE_NOW_DAILY_KEY = 'translate-now-daily';
+const TRANSLATE_NOW_DAILY_CAP = 20;
+const TRANSLATE_NOW_DAILY_TTL = 86400;
+
+async function handleItemTranslateNow(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  id: string,
+): Promise<Response> {
+  // 1. cookie auth
+  const auth = await authenticate(request, env, ctx);
+  if (auth.kind !== 'authenticated') {
+    return jsonResponse({ error: 'unauthorized' }, 401, request, env);
+  }
+
+  // 2. per-user-per-item 60s 冷却
+  const throttleKey = `${TRANSLATE_NOW_THROTTLE_KEY}:${auth.userId}:${id}`;
+  if (env.AUTH_KV) {
+    const throttled = await env.AUTH_KV.get(throttleKey);
+    if (throttled) {
+      return jsonResponse(
+        { error: 'rate_limited', retry_after_sec: TRANSLATE_NOW_THROTTLE_TTL },
+        429,
+        request,
+        env,
+      );
+    }
+  }
+
+  // 3. per-user 每日 20 次上限
+  const today = new Date().toISOString().slice(0, 10);
+  const dailyKey = `${TRANSLATE_NOW_DAILY_KEY}:${auth.userId}:${today}`;
+  let dailyCount = 0;
+  if (env.AUTH_KV) {
+    const dailyRaw = await env.AUTH_KV.get(dailyKey);
+    dailyCount = parseInt(dailyRaw || '0', 10);
+    if (dailyCount >= TRANSLATE_NOW_DAILY_CAP) {
+      return jsonResponse(
+        { error: 'daily_cap_exceeded', cap: TRANSLATE_NOW_DAILY_CAP, used: dailyCount },
+        429,
+        request,
+        env,
+      );
+    }
+  }
+
+  // 4. 校验 item 存在 + 只支持 X
+  const item = await env.DB.prepare(
+    `SELECT id, source_type FROM items WHERE id = ? AND deleted_at IS NULL`,
+  ).bind(id).first<{ id: string; source_type: string }>();
+  if (!item) return jsonResponse({ error: 'not_found' }, 404, request, env);
+  if (item.source_type !== 'x_list') {
+    return jsonResponse(
+      { error: 'unsupported_source', source_type: item.source_type },
+      400,
+      request,
+      env,
+    );
+  }
+
+  // 5. 调合并函数(批 1 已落) — 失败函数内 retry 1 次,仍失败标 translation_failed_at + 返回 failed 字段(不 throw)
+  let result;
+  try {
+    result = await classifyAndTranslateForXTweet(env, id, { lang: 'zh' });
+  } catch (err) {
+    console.error(`[translate-now] ${id} ${auth.userId}: exception`, err);
+    return jsonResponse({ error: 'translation_failed', detail: String(err) }, 500, request, env);
+  }
+  // 5b. 函数 graceful 失败(返回 failed 字段非 throw):按 plan 第九节 ④ 错误码契约返 5xx
+  // FE 收到 5xx 即可统一走"翻译失败"分支(toast + 按钮恢复重试),不需要看 result_summary.failed
+  if (result.failed) {
+    console.warn(`[translate-now] ${id} ${auth.userId}: graceful failure reason=${result.failed} attempts=${result.attempts}`);
+    return jsonResponse(
+      { error: 'translation_failed', reason: result.failed, attempts: result.attempts },
+      503,
+      request,
+      env,
+    );
+  }
+
+  // 6. 写 throttle markers(成功后才写,失败不计 quota)
+  if (env.AUTH_KV) {
+    await env.AUTH_KV.put(throttleKey, '1', { expirationTtl: TRANSLATE_NOW_THROTTLE_TTL });
+    await env.AUTH_KV.put(dailyKey, String(dailyCount + 1), { expirationTtl: TRANSLATE_NOW_DAILY_TTL });
+  }
+
+  // 7. SELECT 翻译后的字段返回(FE 直接拿值刷新流卡 + 抽屉)
+  const row = await env.DB.prepare(
+    `SELECT content_translated, extra, translated_at FROM items WHERE id = ?`,
+  ).bind(id).first<{ content_translated: string | null; extra: string | null; translated_at: number | null }>();
+
+  const extra: Record<string, unknown> = row?.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {};
+  const qo = extra.quote_of as { content_translated?: string } | undefined;
+  const ro = extra.reply_of as { content_translated?: string } | undefined;
+  const rto = extra.retweet_of as { content_translated?: string } | undefined;
+  const lc = extra.link_card as { title_translated?: string; description_translated?: string } | undefined;
+
+  return jsonResponse(
+    {
+      content_zh: row?.content_translated || null,
+      quote_of_zh: qo?.content_translated || null,
+      reply_of_zh: ro?.content_translated || null,
+      retweet_of_zh: rto?.content_translated || null,
+      link_card_title_zh: lc?.title_translated || null,
+      link_card_desc_zh: lc?.description_translated || null,
+      translated_at: row?.translated_at ? new Date(row.translated_at * 1000).toISOString() : null,
+      result_summary: {
+        is_relevant: result.is_relevant,
+        fields_translated: result.fields_translated,
+        attempts: result.attempts,
+        failed: result.failed,
+      },
+    },
+    200,
+    request,
+    env,
+  );
 }
 
 // ─── GET /api/items/:id ────────────────────────────────────────
