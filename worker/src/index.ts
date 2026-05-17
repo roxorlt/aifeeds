@@ -654,7 +654,7 @@ export default {
             hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
             hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
             hasLinkCard: !!extraObj.link_card,
-            hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+            hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
           };
           const result = await triggerXWorkflowForItem(env, r.id, signals);
           if (result === 'triggered') triggered++;
@@ -697,7 +697,7 @@ export default {
           hasQuoteRef: !!(extra.quote_of || extra.quote_of_id),
           hasReplyRef: !!(extra.reply_of_id || extra.reply_to_id),
           hasLinkCard: !!extra.link_card,
-          hasRetweetRef: !!(extra.retweet_of || extra.retweet_of_id),
+          hasRetweetRef: !!(extra.is_retweet || extra.retweeted_status_id || extra.retweet_of || extra.retweet_of_id),
           lang: 'zh' as const,
         };
         const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
@@ -1250,7 +1250,7 @@ export default {
                 hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
                 hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
                 hasLinkCard: !!extraObj.link_card,
-                hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+                hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
               };
               const result = await triggerXWorkflowForItem(env, r.id, signals);
               if (result === 'triggered') triggered++;
@@ -2681,7 +2681,7 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
         hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
         hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
         hasLinkCard: !!extraObj.link_card,
-        hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+        hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
       };
       const result = await triggerXWorkflowForItem(env, r.id, signals);
       if (result === 'triggered') triggered++;
