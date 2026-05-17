@@ -1050,7 +1050,9 @@ export async function triggerChWorkflowForItem(
   } catch (e) {
     console.error(`[ch-trigger] mark failed for ${itemId}:`, e);
   }
-  const instanceId = `ch-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  // 2026-05-17 fix workflow instance reuse:hour-bucket suffix
+  const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-');
+  const instanceId = `ch-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
   try {
     await env.CH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
     return 'triggered';

@@ -1236,7 +1236,9 @@ export async function triggerPhWorkflowForItem(
   } catch (e) {
     console.error(`[ph-trigger] mark failed for ${itemId}:`, e);
   }
-  const instanceId = `ph-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  // 2026-05-17 fix workflow instance reuse:hour-bucket suffix
+  const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-');
+  const instanceId = `ph-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
   try {
     await env.PH_PIPELINE_WORKFLOW.create({ id: instanceId, params: { itemId } });
     return 'triggered';
