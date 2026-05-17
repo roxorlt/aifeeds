@@ -1078,6 +1078,14 @@ export default {
     // 48 tick × 30 = 1440 / day capacity，500 存量 < 1 天清完。
     const isXBackfillTruncatedSlot = minute === 15 || minute === 45;
 
+    // X workflow_completed_at backfill 兜底（2026-05-17 批 4）:批 1 改造之前
+    // ingest 的老数据 workflow_completed_at IS NULL,filter 打开后会被筛掉。
+    // :10 / :40 (30min cadence) 自动 re-trigger workflow,每 tick 20 条 + 3s
+    // throttle = 60s wall + DeepSeek 调用。48 tick × 20 = 960/day capacity,
+    // prod 6000+ 老数据 ~7 天 backfill 完。OPS 一次性跑批可走
+    // POST /api/enrich/run?mode=backfill-x-workflow&limit=200 加速。
+    const isXBackfillWorkflowSlot = minute === 10 || minute === 40;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
@@ -1192,6 +1200,58 @@ export default {
           if (isXBackfillTruncatedSlot) {
             const r = await runBackfillTruncatedFromSyndication(env, 30, 400);
             console.log(`[cron] x-backfill-truncated result:`, JSON.stringify(r));
+            return;
+          }
+          // X workflow backfill 兜底（2026-05-17 批 4）:扫 workflow_completed_at IS NULL
+          // 老数据 → re-trigger workflow → 写完整性标记 + 翻译。inline 跟 admin endpoint
+          // 同逻辑(/api/enrich/run?mode=backfill-x-workflow)用一份代码不抽 helper。
+          if (isXBackfillWorkflowSlot) {
+            if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+              console.warn('[cron] x-backfill-workflow: X_TWEET_PIPELINE_WORKFLOW binding missing');
+              return;
+            }
+            const t0 = Date.now();
+            const pending = await env.DB.prepare(
+              `SELECT id, extra FROM items
+                WHERE source_type='x_list'
+                  AND deleted_at IS NULL
+                  AND json_extract(extra, '$.workflow_completed_at') IS NULL
+                  AND (
+                    json_extract(extra, '$.workflow_triggered_at') IS NULL
+                    OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+                  )
+                ORDER BY published_at DESC
+                LIMIT 20`,
+            ).all<{ id: string; extra: string | null }>();
+            let triggered = 0;
+            let skipped = 0;
+            let failed = 0;
+            for (let i = 0; i < pending.results.length; i++) {
+              const r = pending.results[i];
+              let extraObj: Record<string, unknown> = {};
+              try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+              const signals = {
+                hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+                hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+                hasLinkCard: !!extraObj.link_card,
+                hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+              };
+              const result = await triggerXWorkflowForItem(env, r.id, signals);
+              if (result === 'triggered') triggered++;
+              else if (result === 'already_exists') skipped++;
+              else failed++;
+              // throttle 3s/instance 避免 SB / syndication burst
+              if (i < pending.results.length - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+              }
+            }
+            console.log(`[cron] x-backfill-workflow result:`, JSON.stringify({
+              found: pending.results.length,
+              triggered,
+              skipped,
+              failed,
+              elapsed_ms: Date.now() - t0,
+            }));
             return;
           }
           // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
@@ -2563,6 +2623,68 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     );
     const result = await runBackfillRetweets(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-x-workflow') {
+    // 批 4(2026-05-17):扫老 X 推文 extra.workflow_completed_at IS NULL,
+    // 重 trigger 新 workflow → 写入 workflow_completed_at + 翻译(走批 1 合并调用)。
+    // 30min marker filter 防重复 trigger;按 published_at DESC 优先最新 7 天。
+    // throttle 5s/instance 避免 syndication / SB rate limit。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '50'), 1),
+      200,
+    );
+    const throttleMs = Math.max(
+      parseInt(url.searchParams.get('throttle_ms') || '5000'),
+      0,
+    );
+    if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id, extra FROM items
+        WHERE source_type='x_list'
+          AND deleted_at IS NULL
+          AND json_extract(extra, '$.workflow_completed_at') IS NULL
+          AND (
+            json_extract(extra, '$.workflow_triggered_at') IS NULL
+            OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+          )
+        ORDER BY published_at DESC
+        LIMIT ?`,
+    ).bind(limit).all<{ id: string; extra: string | null }>();
+
+    let triggered = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (let i = 0; i < pending.results.length; i++) {
+      const r = pending.results[i];
+      let extraObj: Record<string, unknown> = {};
+      try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+      const signals = {
+        hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+        hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+        hasLinkCard: !!extraObj.link_card,
+        hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+      };
+      const result = await triggerXWorkflowForItem(env, r.id, signals);
+      if (result === 'triggered') triggered++;
+      else if (result === 'already_exists') skipped++;
+      else failed++;
+      // throttle 避免 syndication / SB rate limit;最后一条不 sleep
+      if (throttleMs > 0 && i < pending.results.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, throttleMs));
+      }
+    }
+    return jsonResponse({
+      mode: 'backfill-x-workflow',
+      found: pending.results.length,
+      triggered,
+      skipped,
+      failed,
+      elapsed_ms: Date.now() - t0,
+      estimated_workflow_completion_min: Math.ceil((triggered * 20) / 60),
+    }, 200, request, env);
   }
   if (mode === 'reclassify-threads') {
     const dryRun = url.searchParams.get('dry_run') !== '0';
