@@ -124,6 +124,9 @@ ENABLE_SMS_LOGIN = "false"       # 备案后翻 true
 ENABLE_EMAIL_LOGIN = "true"
 # CF Access JWT 校验（admin 入口）。AUD 走 wrangler secret put（每环境不同 app）。
 CF_ACCESS_TEAM_DOMAIN = "https://aifeeds.cloudflareaccess.com"
+# 2026-05-17 X workflow 重构:启用完整性 gate filter,筛掉 workflow_completed_at IS NULL 的 X 数据
+# prod 默认关(等批 4 backfill 老数据完成后再开,见 docs/plans/2026-05-17-x-workflow-rollout-plan.md)
+WORKFLOW_COMPLETED_FILTER = "true"
 
 # Staging cron 默认全关，要手动测时再放开
 [env.staging.triggers]
