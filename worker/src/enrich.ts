@@ -5009,7 +5009,10 @@ export async function triggerXWorkflowForItem(
   } catch (e) {
     console.error(`[x-trigger] mark failed for ${itemId}:`, e);
   }
-  const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  // 2026-05-17 fix workflow instance reuse:加 hour-bucket suffix,每小时同 item 可重 trigger 新 instance。
+  // 之前 instance ID deterministic 导致 stuck old instance 永远阻塞新 trigger(retweet bug + hdx 卡死同病)。
+  const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-'); // YYYY-MM-DD-HH
+  const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
   try {
     await env.X_TWEET_PIPELINE_WORKFLOW.create({
       id: instanceId,

@@ -701,7 +701,9 @@ export default {
           hasRetweetRef: !!(extra.is_retweet || extra.retweeted_status_id || extra.retweet_of || extra.retweet_of_id),
           lang: 'zh' as const,
         };
-        const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+        // 2026-05-17 fix workflow instance reuse:hour-bucket suffix
+        const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-');
+        const instanceId = `x-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
         try {
           const instance = await env.X_TWEET_PIPELINE_WORKFLOW.create({ id: instanceId, params });
           return jsonResponse({

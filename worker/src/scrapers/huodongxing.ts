@@ -949,7 +949,9 @@ export async function triggerHdxWorkflowForItem(
     console.error(`[hdx-trigger] mark failed for ${itemId}:`, e);
   }
   const eventId = itemId.replace(/^huodongxing:/, '');
-  const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  // 2026-05-17 fix workflow instance reuse:hour-bucket suffix
+  const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-');
+  const instanceId = `hdx-${eventId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
   try {
     await env.HUODONGXING_DETAIL_WORKFLOW.create({
       id: instanceId,

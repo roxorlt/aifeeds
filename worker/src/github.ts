@@ -1574,7 +1574,9 @@ export async function triggerGhWorkflowForItem(
   } catch (e) {
     console.error(`[gh-trigger] mark failed for ${itemId}:`, e);
   }
-  const instanceId = `gh-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  // 2026-05-17 fix workflow instance reuse:hour-bucket suffix
+  const hourBucket = new Date().toISOString().slice(0, 13).replace('T', '-');
+  const instanceId = `gh-${itemId.replace(/[^a-zA-Z0-9-]/g, '-')}-${hourBucket}`;
   try {
     await env.GITHUB_PIPELINE_WORKFLOW.create({
       id: instanceId,
