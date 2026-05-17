@@ -12,8 +12,10 @@ import { QuotedTweet } from "./QuotedTweet";
 import {
   IconEye,
   IconHeart,
+  IconQuote,
   IconReply,
   IconRetweet,
+  IconThread,
   VerifiedBadge,
 } from "./icons";
 
@@ -414,19 +416,19 @@ export function TweetCard({
         <div className="mb-1.5 ml-[52px] flex items-center gap-1.5 text-[12px] text-neutral-500">
           {isThread && !hideThreadBanner && (
             <span className="flex items-center gap-1">
-              <span className="text-sky-500">🧵</span>
+              <IconThread className="h-3.5 w-3.5 fill-current text-sky-500" />
               <span>Thread</span>
             </span>
           )}
           {hasQuotePlaceholder && (
             <span className="flex items-center gap-1">
-              <span>❝</span>
+              <IconQuote className="h-3.5 w-3.5 fill-current text-neutral-400" />
               <span>引用推文</span>
             </span>
           )}
           {isRetweet && (
             <span className="flex items-center gap-1">
-              <span className="text-sky-500">🔁</span>
+              <IconRetweet className="h-3.5 w-3.5 fill-current text-sky-500" />
               <span>{retweeterAuthor || `@${retweeterHandle}`} 已转帖</span>
             </span>
           )}

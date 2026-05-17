@@ -35,6 +35,24 @@ export function IconRetweet({ className }: IconProps) {
   );
 }
 
+// IconThread: 两个 chat bubble 叠加，表示推文串
+export function IconThread({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || "h-[18px] w-[18px] fill-current"}>
+      <path d="M13 3H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h1v3l3-3h5a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm7 6h-3v2a4 4 0 0 1-4 4H9v.5a2 2 0 0 0 2 2h5l3 3V19h1a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2z" />
+    </svg>
+  );
+}
+
+// IconQuote: 经典 typography 双引号占位
+export function IconQuote({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || "h-[18px] w-[18px] fill-current"}>
+      <path d="M6.5 17H10l2-4V7H5v6h3.5l-2 4zm9 0H19l2-4V7h-7v6h3.5l-2 4z" />
+    </svg>
+  );
+}
+
 export function IconHeart({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" className={className || "h-[18px] w-[18px] fill-current"}>
