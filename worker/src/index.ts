@@ -39,6 +39,7 @@ import {
   markStaleEventsHistorical,
   countHuodongxingDetailPending,
   triggerHdxWorkflowForItem,
+  drainHdxPendingWorkflows,
 } from './scrapers/huodongxing';
 import type { HuodongxingCity } from './scrapers/huodongxing/cities';
 import { HUODONGXING_CITIES } from './scrapers/huodongxing/cities';
@@ -974,45 +975,8 @@ export default {
         }
         const u = new URL(request.url);
         const limit = Math.min(parseInt(u.searchParams.get('limit') || '100', 10), 400);
-        if (!env.HUODONGXING_DETAIL_WORKFLOW) {
-          return jsonResponse({ error: 'HUODONGXING_DETAIL_WORKFLOW binding missing' }, 500, request, env);
-        }
-        // 治本 marker filter：30 min 内已触发的跳过（避免重复 trigger 已 in-flight）
-        // 30 min 后视为 stuck，可重新触发
-        const pending = await env.DB.prepare(
-          `SELECT id FROM items
-            WHERE source_type='huodongxing'
-              AND deleted_at IS NULL
-              AND json_extract(extra, '$.detail_enriched_at') IS NULL
-              AND (
-                json_extract(extra, '$.workflow_triggered_at') IS NULL
-                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
-              )
-            ORDER BY json_extract(extra, '$.last_seen_at') DESC
-            LIMIT ?`,
-        ).bind(limit).all<{ id: string }>();
-        let triggered = 0;
-        let skipped = 0;
-        let failed = 0;
-        let throttleIndex = 0;
-        for (const r of pending.results) {
-          const result = await triggerHdxWorkflowForItem(env, r.id, throttleIndex * 5);
-          if (result === 'triggered') {
-            triggered++;
-            throttleIndex++;
-          } else if (result === 'already_exists') {
-            skipped++;
-          } else {
-            failed++;
-          }
-        }
-        return jsonResponse({
-          found: pending.results.length,
-          triggered,
-          skipped,
-          failed,
-          drain_wall_time_estimate_min: Math.round((throttleIndex * 5) / 60),
-        }, 200, request, env);
+        const result = await drainHdxPendingWorkflows(env, limit, 5);
+        return jsonResponse(result, 200, request, env);
       }
       // POST /api/admin/fill-translations-now?limit=30&batch_size=8
       // 鉴权：HTTP Basic Auth (ADMIN_USER / ADMIN_PASS)，与其他 /api/admin/* 一致
@@ -1199,30 +1163,8 @@ export default {
           // SQL 跟 admin /api/admin/hdx-trigger-pending-workflows-now 共用（marker
           // 30min 窗口 filter），单 tick limit 25 → 48 tick × 25 = 1200/天 capacity。
           if (isHdxEnrichSlot && env.HUODONGXING_DETAIL_WORKFLOW) {
-            const pending = await env.DB.prepare(
-              `SELECT id FROM items
-                WHERE source_type='huodongxing'
-                  AND deleted_at IS NULL
-                  AND json_extract(extra, '$.detail_enriched_at') IS NULL
-                  AND (
-                    json_extract(extra, '$.workflow_triggered_at') IS NULL
-                    OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
-                  )
-                ORDER BY json_extract(extra, '$.last_seen_at') DESC
-                LIMIT 25`,
-            ).all<{ id: string }>();
-            let triggered = 0;
-            let throttleIndex = 0;
-            for (const r of pending.results) {
-              const result = await triggerHdxWorkflowForItem(env, r.id, throttleIndex * 3);
-              if (result === 'triggered') {
-                triggered++;
-                throttleIndex++;
-              }
-            }
-            console.log(
-              `[cron] hdx-auto-drain triggered=${triggered} / candidates=${pending.results.length}`,
-            );
+            const r = await drainHdxPendingWorkflows(env, 25, 3);
+            console.log(`[cron] hdx-auto-drain result:`, JSON.stringify(r));
             return;
           }
           // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
@@ -2591,6 +2533,22 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       10,
     );
     const result = await runGithubR2Migrate(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  // hdx-drain-workflow：CLI 一次性触发 huodongxing pending workflow。
+  // 跟 cron isHdxEnrichSlot + admin /api/admin/hdx-trigger-pending-workflows-now
+  // 共用 drainHdxPendingWorkflows。Bearer INGEST_TOKEN 走 /api/enrich/run 跳过 CF Access。
+  // limit ≤ 400（单 trigger ~2 subreq，400 = 800 subreq < 1000 cap）。
+  if (mode === 'hdx-drain-workflow') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '100'), 1),
+      400,
+    );
+    const throttleSec = Math.min(
+      Math.max(parseInt(url.searchParams.get('throttle_sec') || '3'), 1),
+      10,
+    );
+    const result = await drainHdxPendingWorkflows(env, limit, throttleSec);
     return jsonResponse(result, 200, request, env);
   }
   return jsonResponse({ error: `Unknown mode: ${mode}` }, 400, request, env);

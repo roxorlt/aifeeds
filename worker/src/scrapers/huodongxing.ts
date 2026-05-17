@@ -871,6 +871,69 @@ function json(data: unknown, status = 200): Response {
  *
  * 调用方：drain endpoint + Phase 1 runHuodongxingFetchList + drawer refreshSingleItem
  */
+/**
+ * 共用 drain 逻辑：扫 detail_enriched_at IS NULL 的 hdx items 触发 workflow instance。
+ *
+ * 治本 marker filter：`extra.workflow_triggered_at` 30 min 窗口内已触发的跳过
+ * （避免重复 trigger 已 in-flight instance）。
+ *
+ * 调用方：
+ *   - scheduled cron isHdxEnrichSlot (minute=20/50, limit=25, throttleSec=3)
+ *   - admin POST /api/admin/hdx-trigger-pending-workflows-now (limit ≤ 400, throttleSec=5)
+ *   - enrich POST /api/enrich/run?mode=hdx-drain-workflow (Bearer, limit ≤ 400, throttleSec=3)
+ *
+ * 单 trigger ~2 subreq (1 UPDATE marker + 1 workflow.create)，limit=400 = 800 subreq < 1000 cap。
+ */
+export async function drainHdxPendingWorkflows(
+  env: { DB: D1Database; HUODONGXING_DETAIL_WORKFLOW?: Workflow },
+  limit: number,
+  throttleSec: number,
+): Promise<{
+  found: number;
+  triggered: number;
+  skipped: number;
+  failed: number;
+  drain_wall_time_estimate_min: number;
+}> {
+  if (!env.HUODONGXING_DETAIL_WORKFLOW) {
+    return { found: 0, triggered: 0, skipped: 0, failed: 0, drain_wall_time_estimate_min: 0 };
+  }
+  const pending = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='huodongxing'
+        AND deleted_at IS NULL
+        AND json_extract(extra, '$.detail_enriched_at') IS NULL
+        AND (
+          json_extract(extra, '$.workflow_triggered_at') IS NULL
+          OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
+        )
+      ORDER BY json_extract(extra, '$.last_seen_at') DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+  let triggered = 0;
+  let skipped = 0;
+  let failed = 0;
+  let throttleIndex = 0;
+  for (const r of pending.results) {
+    const result = await triggerHdxWorkflowForItem(env, r.id, throttleIndex * throttleSec);
+    if (result === 'triggered') {
+      triggered++;
+      throttleIndex++;
+    } else if (result === 'already_exists') {
+      skipped++;
+    } else {
+      failed++;
+    }
+  }
+  return {
+    found: pending.results.length,
+    triggered,
+    skipped,
+    failed,
+    drain_wall_time_estimate_min: Math.round((throttleIndex * throttleSec) / 60),
+  };
+}
+
 export async function triggerHdxWorkflowForItem(
   env: { DB: D1Database; HUODONGXING_DETAIL_WORKFLOW?: Workflow },
   itemId: string,
