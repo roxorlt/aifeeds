@@ -22,7 +22,7 @@ const SWIPE_ANIM_MS = 200;
 
 export function TweetDrawer() {
   const { state, close } = useDrawer();
-  const { item, siblings, loading, error } = state;
+  const { item, siblings, siblings_has_more, loading, error } = state;
   const open = Boolean(item) || loading || Boolean(error);
   const isNarrow = useIsNarrow();
   const targetRef = useRef<HTMLDivElement | null>(null);
@@ -399,32 +399,43 @@ export function TweetDrawer() {
               ) : isHdx ? (
                 <HuodongxingDrawerBody item={item} />
               ) : (
-                threadMembers.map((it, idx) => {
-                  const isTarget = it.id === item.id && threadMembers.length > 1;
-                  const isFirst = idx === 0;
-                  const isLast = idx === threadMembers.length - 1;
-                  return (
-                    <div
-                      key={it.id}
-                      ref={isTarget ? targetRef : undefined}
-                      // B3+3.1: 蓝色目标高亮用 inset box-shadow 不占布局空间，
-                      // 避免 border-l-2 把 TweetCard 整体向右挤 2px 导致
-                      // connector line 错位（用户验收 issue 3.1）
-                      className={cn(
-                        "relative",
-                        isTarget && "shadow-[inset_2px_0_0_#0ea5e9] bg-sky-50/40",
-                      )}
-                    >
-                      <TweetCard
-                        item={it}
-                        embedded
-                        hideThreadBanner
-                        hasThreadAbove={threadMembers.length > 1 && !isFirst}
-                        hasThreadBelow={threadMembers.length > 1 && !isLast}
-                      />
+                <>
+                  {threadMembers.map((it, idx) => {
+                    const isTarget = it.id === item.id && threadMembers.length > 1;
+                    const isFirst = idx === 0;
+                    const isLast = idx === threadMembers.length - 1;
+                    // 截断时最后一条 thread 仍画 connector below，连到截断提示
+                    const truncationFollows = isLast && Boolean(siblings_has_more) && threadMembers.length > 1;
+                    return (
+                      <div
+                        key={it.id}
+                        ref={isTarget ? targetRef : undefined}
+                        // B3+3.1: 蓝色目标高亮用 inset box-shadow 不占布局空间，
+                        // 避免 border-l-2 把 TweetCard 整体向右挤 2px 导致
+                        // connector line 错位（用户验收 issue 3.1）
+                        className={cn(
+                          "relative",
+                          isTarget && "shadow-[inset_2px_0_0_#0ea5e9] bg-sky-50/40",
+                        )}
+                      >
+                        <TweetCard
+                          item={it}
+                          embedded
+                          hideThreadBanner
+                          hasThreadAbove={threadMembers.length > 1 && !isFirst}
+                          hasThreadBelow={threadMembers.length > 1 && (!isLast || truncationFollows)}
+                        />
+                      </div>
+                    );
+                  })}
+                  {siblings_has_more && threadMembers.length > 1 && (
+                    <div className="border-b border-neutral-200 px-4 py-3 text-[13px] text-neutral-500">
+                      <span className="ml-[52px]">
+                        以下推文已截断（仅显示前 {threadMembers.length} 条）
+                      </span>
                     </div>
-                  );
-                })
+                  )}
+                </>
               )}
               {item.url && (
                 <div className="flex justify-center border-t border-neutral-100 px-4 py-5">

@@ -1,11 +1,15 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
-import type { Item, ItemExtra, MediaItem, Metrics } from "../types";
+import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
 import { cn, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
 import { useDrawer } from "../lib/drawer";
+import { translateNowItem, TranslateNowError } from "../api";
+import { dispatchItemUpdate } from "../lib/itemUpdateBus";
+import { toast } from "../lib/toast";
+import { useAuthStore } from "../lib/authStore";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
 import { QuotedTweet } from "./QuotedTweet";
@@ -169,6 +173,115 @@ function Metric({
   );
 }
 
+// MetricsRow: X 推文 4 字段（回复/转推/喜欢/查看）。
+// 主推 + 父推 row + thread sibling 共用。
+function MetricsRow({ metrics }: { metrics: Metrics }) {
+  return (
+    <div className="mt-2 flex items-center gap-4">
+      <Metric
+        icon={<IconReply className="h-[14px] w-[14px] fill-current" />}
+        label="回复"
+        count={metrics.replies}
+      />
+      <Metric
+        icon={<IconRetweet className="h-[14px] w-[14px] fill-current" />}
+        label="转推"
+        count={metrics.retweets}
+      />
+      <Metric
+        icon={<IconHeart className="h-[14px] w-[14px] fill-current" />}
+        label="喜欢"
+        count={metrics.likes}
+      />
+      <Metric
+        icon={<IconEye className="h-[14px] w-[14px] fill-current" />}
+        label="查看"
+        count={metrics.views}
+      />
+    </div>
+  );
+}
+
+// TweetMediaTile: 单图 / 单视频 + 多 media 时角标 (+N) 提示。
+// 视频 inline 播放（VideoCoordinator 协调），图片点击触发 onClickImage(idx)。
+// videoIdSuffix 用来在同一 article 内区分主推 / 父推 / sibling 的 video coordinator id。
+function TweetMediaTile({
+  media,
+  itemId,
+  sourceType,
+  videoIdSuffix = "",
+  onClickImage,
+}: {
+  media: MediaItem[];
+  itemId: string;
+  sourceType: string;
+  videoIdSuffix?: string;
+  onClickImage: (idx: number) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed || media.length === 0) return null;
+  const first = media[0];
+  const mediaCount = media.length;
+  const hasVideo = media.some((m) => m.type === "video");
+
+  if (first.type === "video") {
+    return (
+      <div
+        className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <VideoPlayer
+          src={proxyImg(first.url)}
+          poster={first.poster ? proxyImg(first.poster, 400) : undefined}
+          itemId={`${itemId}${videoIdSuffix}`}
+          sourceType={sourceType}
+          onError={() => setFailed(true)}
+        />
+        {mediaCount > 1 && (
+          <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+            +{mediaCount - 1}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  if (first.type === "image") {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClickImage(0);
+        }}
+        className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
+      >
+        <img
+          src={proxyImg(first.url, 400)}
+          alt={first.alt || ""}
+          loading="lazy"
+          className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
+          onError={() => setFailed(true)}
+        />
+        {mediaCount > 1 && (
+          <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+            +{mediaCount - 1}
+          </span>
+        )}
+        {hasVideo && (
+          <span className="absolute left-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+            ▶ 视频
+          </span>
+        )}
+      </button>
+    );
+  }
+
+  return null;
+}
+
 interface Props {
   item: Item;
   hideThreadBanner?: boolean;
@@ -203,8 +316,9 @@ export function TweetCard({
   });
   const [expanded, setExpanded] = useState(Boolean(embedded));
   const [showOriginal, setShowOriginal] = useState(false);
+  const [translating, setTranslating] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [mediaFailed, setMediaFailed] = useState(false);
+  const [replyLightboxIndex, setReplyLightboxIndex] = useState<number | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [canExpand, setCanExpand] = useState(false);
@@ -251,6 +365,83 @@ export function TweetCard({
       : content;
 
   const canToggleOriginal = hasTranslation && content && translated !== content;
+
+  // 译文按钮即时翻译：x_list 源 + 主推未翻译时显示「译文」按钮，点击触发
+  // POST /api/items/:id/translate-now（cookie auth），BE 一次性翻完所有 NULL 的 _zh 字段。
+  // 非 x_list 源不显示按钮（防止误调，BE 400 unsupported_source 兜底）。
+  const isXList = item.source_type === "x_list";
+  const needsTranslation = isXList && !item.content_translated;
+  const showLangButton = canToggleOriginal || needsTranslation;
+
+  const handleLangButtonClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (canToggleOriginal) {
+      setShowOriginal((v) => !v);
+      return;
+    }
+    if (!needsTranslation || translating) return;
+    setTranslating(true);
+    try {
+      const result = await translateNowItem(item.id);
+      const prevExtra = parseJsonField<ItemExtra>(item.extra) || {};
+      const nextExtra: ItemExtra = { ...prevExtra };
+      if (prevExtra.reply_of && result.reply_of_zh) {
+        nextExtra.reply_of = { ...prevExtra.reply_of, content_translated: result.reply_of_zh } as QuoteOf;
+      }
+      if (prevExtra.quote_of && result.quote_of_zh) {
+        nextExtra.quote_of = { ...prevExtra.quote_of, content_translated: result.quote_of_zh } as QuoteOf;
+      }
+      if (prevExtra.retweet_of && result.retweet_of_zh) {
+        nextExtra.retweet_of = { ...prevExtra.retweet_of, content_translated: result.retweet_of_zh } as QuoteOf;
+      }
+      if (prevExtra.link_card && (result.link_card_title_zh || result.link_card_desc_zh)) {
+        nextExtra.link_card = {
+          ...prevExtra.link_card,
+          title_translated: result.link_card_title_zh ?? prevExtra.link_card.title_translated,
+          description_translated: result.link_card_desc_zh ?? prevExtra.link_card.description_translated,
+        } as LinkCardType;
+      }
+      const updatedItem: Item = {
+        ...item,
+        content_translated: result.content_zh ?? item.content_translated,
+        extra: nextExtra,
+      };
+      dispatchItemUpdate(updatedItem);
+      toast.success("翻译完成");
+    } catch (err) {
+      if (err instanceof TranslateNowError) {
+        switch (err.code) {
+          case "unauthorized":
+            toast.error("登录态已过期，请重新登录");
+            useAuthStore.getState().openLoginModal("api_401");
+            break;
+          case "not_found":
+            // 静默回退（item 已不存在）
+            break;
+          case "unsupported_source":
+            toast.error(`${err.details.source_type || "该源"}不支持翻译`);
+            break;
+          case "rate_limited":
+            toast.info(`翻译冷却中，${err.details.retry_after_sec ?? 60}s 后可重试`);
+            break;
+          case "daily_cap_exceeded":
+            toast.error(
+              `今日翻译额度已用完（${err.details.used ?? 20}/${err.details.cap ?? 20}），请明日再试`,
+            );
+            break;
+          case "translation_failed":
+            toast.error("翻译失败，请稍后重试");
+            break;
+          default:
+            toast.error("翻译失败");
+        }
+      } else {
+        toast.error("翻译失败");
+      }
+    } finally {
+      setTranslating(false);
+    }
+  };
 
   // 接入 smartTruncate 后，"是否需要展开"取决于原文是否被 truncate 截短了。
   // truncated 比原文短 → 一定有截断 → 显示展开按钮。
@@ -330,9 +521,9 @@ export function TweetCard({
       (m.type === "image" || m.type === "video") &&
       !(m.type === "image" && quotedImageIds.has(pbsMediaId(m.url))),
   );
-  const firstMedia = lightboxMedia[0];
-  const mediaCount = lightboxMedia.length;
-  const hasVideo = lightboxMedia.some((m) => m.type === "video");
+  const replyLightboxMedia = (replyOf?.media || []).filter(
+    (m) => m.type === "image" || m.type === "video",
+  );
 
   return (
     <article
@@ -398,14 +589,14 @@ export function TweetCard({
               <div className="mt-1 line-clamp-4 break-words whitespace-pre-wrap text-[15px] leading-[1.45] text-neutral-800">
                 {replyOf.content_translated || replyOf.content || ""}
               </div>
-              {replyOf.media && replyOf.media[0] && replyOf.media[0].type === "image" && replyOf.media[0].url && (
-                <img
-                  src={proxyImg(replyOf.media[0].url, 400)}
-                  alt=""
-                  loading="lazy"
-                  className="mt-2.5 max-h-60 w-full rounded-2xl border border-neutral-200 object-cover"
-                />
-              )}
+              <TweetMediaTile
+                media={replyLightboxMedia}
+                itemId={replyOf.id || `${item.id}-replyOf`}
+                sourceType={item.source_type}
+                videoIdSuffix="-replyOf"
+                onClickImage={(idx) => setReplyLightboxIndex(idx)}
+              />
+              {replyOf.metrics && <MetricsRow metrics={replyOf.metrics} />}
             </div>
           </div>
         </div>
@@ -469,16 +660,20 @@ export function TweetCard({
             <span className="shrink-0">
               {timeAgo(displayTime)}
             </span>
-            {canToggleOriginal && (
+            {showLangButton && (
               <button
                 type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowOriginal((v) => !v);
-                }}
-                className="shrink-0 hover:text-neutral-900"
+                disabled={translating}
+                onClick={handleLangButtonClick}
+                className="shrink-0 hover:text-neutral-900 disabled:cursor-default disabled:text-neutral-300"
               >
-                {showOriginal ? "译文" : "原文"}
+                {translating
+                  ? "翻译中…"
+                  : canToggleOriginal
+                    ? showOriginal
+                      ? "译文"
+                      : "原文"
+                    : "译文"}
               </button>
             )}
           </div>
@@ -521,65 +716,13 @@ export function TweetCard({
               当 A 回复 B 或 C 引用 D 且 A/C 自带图片时，图片应贴在 A/C 正文下方，
               而不是钻到 B/D 引用块下面。无 reply/quote 时这个顺序也不影响普通推文。 */}
 
-          {/* Media —
-              视频：流内 inline 播放，HTML5 controls（含原生全屏按钮）。wifi
-              autoplay/muted/loop，非 wifi 不 autoplay 让用户主动点。卡片其它
-              位置点击仍可开 drawer，video 自身 onClick 阻止冒泡避免误触。
-              图片：保留点击进 Lightbox 大图查看的旧行为。 */}
-          {firstMedia && !mediaFailed && firstMedia.type === "video" && (
-            <div
-              className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
-              // 全方位阻断冒泡：video native controls（play/pause/mute/seek bar/全屏）
-              // 都在 shadow DOM 里，主 DOM 看到的 target 仍是 <video> 元素本身。
-              // 仅 onClick 不够 — pointerdown/mousedown 不阻断的话 article 仍记到
-              // downPos，drag 判断后可能仍走 openTweet。一并截掉避免穿透。
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <VideoPlayer
-                src={proxyImg(firstMedia.url)}
-                poster={firstMedia.poster ? proxyImg(firstMedia.poster, 400) : undefined}
-                itemId={item.id}
-                sourceType={item.source_type}
-                onError={() => setMediaFailed(true)}
-              />
-              {mediaCount > 1 && (
-                <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
-                  +{mediaCount - 1}
-                </span>
-              )}
-            </div>
-          )}
-          {firstMedia && !mediaFailed && firstMedia.type === "image" && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setLightboxIndex(0);
-              }}
-              className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
-            >
-              <img
-                src={proxyImg(firstMedia.url, 400)}
-                alt={firstMedia.alt || ""}
-                loading="lazy"
-                className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
-                onError={() => setMediaFailed(true)}
-              />
-              {mediaCount > 1 && (
-                <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
-                  +{mediaCount - 1}
-                </span>
-              )}
-              {/* 顶部角标只在 first 是图但里面有 video 时显示（提醒"还有视频"） */}
-              {hasVideo && (
-                <span className="absolute left-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
-                  ▶ 视频
-                </span>
-              )}
-            </button>
-          )}
+          {/* Media — 视频 inline 播放（VideoCoordinator 协调），图片点击进 Lightbox。 */}
+          <TweetMediaTile
+            media={lightboxMedia}
+            itemId={item.id}
+            sourceType={item.source_type}
+            onClickImage={(idx) => setLightboxIndex(idx)}
+          />
 
           {/* F3: Reply parent 不再嵌套在 main media 之后（旧的 quote 视觉语言）。
               X 详情页用 thread 视觉语言：父推上移到主推**上方**，用 connector
@@ -592,28 +735,7 @@ export function TweetCard({
           {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}
 
           {/* Metrics bar (read-only X-platform data, not interactive) */}
-          <div className="mt-2 flex items-center gap-4">
-            <Metric
-              icon={<IconReply className="h-[14px] w-[14px] fill-current" />}
-              label="回复"
-              count={metrics.replies}
-            />
-            <Metric
-              icon={<IconRetweet className="h-[14px] w-[14px] fill-current" />}
-              label="转推"
-              count={metrics.retweets}
-            />
-            <Metric
-              icon={<IconHeart className="h-[14px] w-[14px] fill-current" />}
-              label="喜欢"
-              count={metrics.likes}
-            />
-            <Metric
-              icon={<IconEye className="h-[14px] w-[14px] fill-current" />}
-              label="查看"
-              count={metrics.views}
-            />
-          </div>
+          <MetricsRow metrics={metrics} />
         </div>
       </div>
 
@@ -622,6 +744,13 @@ export function TweetCard({
           media={lightboxMedia}
           startIndex={lightboxIndex}
           onClose={() => setLightboxIndex(null)}
+        />
+      )}
+      {replyLightboxIndex !== null && replyLightboxMedia.length > 0 && (
+        <Lightbox
+          media={replyLightboxMedia}
+          startIndex={replyLightboxIndex}
+          onClose={() => setReplyLightboxIndex(null)}
         />
       )}
     </article>
