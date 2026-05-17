@@ -124,14 +124,17 @@ interface QuoteOf {
   media: Array<{ type: string; url: string; width?: number; height?: number }>;
   published_at: string | null;
   content_translated?: string | null;
-  // 2026-05-17 批 4:FE 反馈 reply_of/quote_of/retweet_of 缺 metrics,FE 已实现
-  // metrics row 但无数据不显示。从 syndication API 提取(view_count X 收紧后不一定返)。
   metrics?: {
     replies?: number;
     retweets?: number;
     likes?: number;
     views?: number;
   };
+  // 2026-05-17 嵌套引用:原推自身可能引用了另一条推。
+  // quote_of_id 是嵌套引用的 ID,quote_of 是 inline 嵌套对象(syndication 偶发返)。
+  // FE 看到 quote_of_id 但 quote_of 缺时可以显示"引用了另一推"占位 + link to view。
+  quote_of_id?: string | null;
+  quote_of?: QuoteOf | null;
 }
 
 // 从 syndication API tweet data 提取 media 数组(photo + video + animated_gif),
@@ -201,6 +204,15 @@ export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
       height: oi.height as number | undefined,
     });
   }
+  // 2026-05-17 嵌套引用:syndication API 返的 tweet 内部可能含 quoted_status_id_str
+  // (X 原推自身又引用了另一条推)。之前 apiToQuoteOf 漏解析,导致 retweet_of / quote_of 内
+  // 嵌套引用丢失(user sample 2055856657389785210:Peter 转 Blake,Blake 推可能含嵌套)。
+  // 同时尝试取 inline quoted_tweet 对象(X API 有时直接返一层 inline)。
+  const nestedQuoteId =
+    (qt.quoted_status_id_str as string) ||
+    (qt.quoted_status_id as string) ||
+    null;
+  const inlineQuotedTweet = qt.quoted_tweet as Record<string, unknown> | undefined;
   const verified =
     (user.verified as boolean) || (user.is_blue_verified as boolean);
   // metrics:任一字段有值就返 metrics object,全无就 undefined(FE 不显示 row)
@@ -220,6 +232,9 @@ export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
     media,
     published_at: (qt.created_at as string) || null,
     ...(hasMetrics ? { metrics } : {}),
+    // 嵌套引用:有 ID 就写;有 inline 对象 recursive parse
+    ...(nestedQuoteId ? { quote_of_id: nestedQuoteId } : {}),
+    ...(inlineQuotedTweet ? { quote_of: apiToQuoteOf(inlineQuotedTweet) } : {}),
   };
 }
 
@@ -4220,6 +4235,176 @@ export async function backfillMediaForXTweet(
     `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.media_backfilled_at', ?) WHERE id = ?`,
   ).bind(nowIso, itemId).run();
   return { updated: false, before_count: beforeCount, after_count: afterCount, reason: 'no_improvement' };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// backfillLinkCardForXTweet — 2026-05-17 user 反馈 dotey 推文 t.co 链接没卡片
+//
+// 根因:syndication API 对纯外链推文返 card=null + entities.urls=[],我们没数据。
+// 但 X 网页端会自动抓外链 OG meta 渲染 link preview card。
+// 解决:scan content 内 t.co URL → 跟随跳转 → 抓 HTML 解析 OG meta → 写 link_card。
+//
+// 行为:
+// - 检查 extra.link_card_backfilled_at(防重复)+ 已有 link_card 跳过
+// - regex 匹配 https://t.co/XXX,取最后一个(X 通常显示最后 URL 的预览)
+// - HEAD t.co 拿 Location header redirect URL
+// - GET redirect URL HTML(200KB 上限,8s timeout)
+// - 正则解析 og:title / og:description / og:image / og:url
+// - 写 extra.link_card = { url, display_url, title, description, domain, image_url }
+// - 任何失败都标 backfilled_at 防 cron 重试
+// ═══════════════════════════════════════════════════════════════════════════
+
+function parseOgMeta(html: string): {
+  title?: string;
+  description?: string;
+  image?: string;
+  url?: string;
+} {
+  const get = (prop: string): string | undefined => {
+    // <meta property="og:image" content="...">
+    const m1 = html.match(
+      new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i'),
+    );
+    if (m1) return m1[1];
+    // content 在 property 之前的变体
+    const m2 = html.match(
+      new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, 'i'),
+    );
+    if (m2) return m2[1];
+    return undefined;
+  };
+  return {
+    title: get('og:title') || get('twitter:title'),
+    description: get('og:description') || get('twitter:description'),
+    image: get('og:image') || get('twitter:image'),
+    url: get('og:url'),
+  };
+}
+
+export async function backfillLinkCardForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{
+  updated: boolean;
+  reason?:
+    | 'already_attempted'
+    | 'no_url'
+    | 'redirect_failed'
+    | 'html_fetch_failed'
+    | 'no_og_meta'
+    | 'success';
+}> {
+  const row = await env.DB.prepare(
+    `SELECT id, content, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`backfillLinkCardForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  // 已尝试过 → 跳过
+  if (extra.link_card_backfilled_at) {
+    return { updated: false, reason: 'already_attempted' };
+  }
+
+  // 已有 link_card → 标记防 cron 重跑
+  if (extra.link_card) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.link_card_backfilled_at', ?) WHERE id = ?`,
+    ).bind(new Date().toISOString(), itemId).run();
+    return { updated: false, reason: 'already_attempted' };
+  }
+
+  const content = row.content || '';
+  const tcoUrls = content.match(/https:\/\/t\.co\/\w+/g) || [];
+  const nowIso = new Date().toISOString();
+
+  if (tcoUrls.length === 0) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.link_card_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, reason: 'no_url' };
+  }
+
+  // X 通常 link preview 取最后一个 URL
+  const tcoUrl = tcoUrls[tcoUrls.length - 1];
+
+  // 1. HEAD t.co 拿 redirect URL
+  let redirectUrl: string | null = null;
+  try {
+    const headRes = await fetch(tcoUrl, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
+    });
+    redirectUrl = headRes.headers.get('location') || null;
+  } catch (e) {
+    console.warn(`[backfill-link-card] HEAD ${tcoUrl} failed: ${String(e)}`);
+  }
+
+  if (!redirectUrl) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.link_card_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, reason: 'redirect_failed' };
+  }
+
+  // 2. GET HTML(200KB 上限)
+  let html: string | null = null;
+  try {
+    const htmlRes = await fetch(redirectUrl, {
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AifeedsLinkBot/1.0)' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (htmlRes.ok) {
+      const buf = await htmlRes.arrayBuffer();
+      const slice = buf.slice(0, 200 * 1024); // 200KB
+      html = new TextDecoder('utf-8').decode(slice);
+    }
+  } catch (e) {
+    console.warn(`[backfill-link-card] GET ${redirectUrl} failed: ${String(e)}`);
+  }
+
+  if (!html) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.link_card_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, reason: 'html_fetch_failed' };
+  }
+
+  // 3. parse OG meta
+  const og = parseOgMeta(html);
+  if (!og.title && !og.image) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.link_card_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, reason: 'no_og_meta' };
+  }
+
+  // 4. domain
+  let domain: string | null = null;
+  try {
+    const u = new URL(redirectUrl);
+    domain = u.hostname.replace(/^www\./, '');
+  } catch { /* ignore */ }
+
+  const linkCard = {
+    url: og.url || redirectUrl,
+    display_url: domain || redirectUrl,
+    title: og.title || null,
+    description: og.description || null,
+    domain,
+    image_url: og.image || null,
+  };
+
+  // 5. 写 extra.link_card
+  const newExtra = { ...extra, link_card: linkCard, link_card_backfilled_at: nowIso };
+  await env.DB.prepare(
+    `UPDATE items SET extra = ? WHERE id = ?`,
+  ).bind(JSON.stringify(newExtra), itemId).run();
+  console.log(`[backfill-link-card] ${itemId}: ${redirectUrl} → og.title=${og.title?.slice(0, 30) || ''} og.image=${og.image ? 'yes' : 'no'}`);
+  return { updated: true, reason: 'success' };
 }
 
 export interface BackfillTruncatedResult {

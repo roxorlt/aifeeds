@@ -23,6 +23,7 @@ import {
   runBackfillTruncatedFromSyndication,
   classifyAndTranslateForXTweet,
   backfillMediaForXTweet,
+  backfillLinkCardForXTweet,
 } from './enrich';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
@@ -2658,6 +2659,65 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const recover = url.searchParams.get('recover') === '1';
     const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-link-card') {
+    // 2026-05-17:扫 content 内有 t.co URL 但 link_card 为空的 X 推文,
+    // resolve 跳转 + 抓 OG meta 写 link_card。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '50'), 1),
+      300,
+    );
+    const throttleMs = Math.max(
+      parseInt(url.searchParams.get('throttle_ms') || '1000'),
+      0,
+    );
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id FROM items
+        WHERE source_type='x_list'
+          AND deleted_at IS NULL
+          AND content LIKE '%https://t.co/%'
+          AND json_extract(extra, '$.link_card') IS NULL
+          AND json_extract(extra, '$.link_card_backfilled_at') IS NULL
+        ORDER BY scraped_at DESC
+        LIMIT ?`,
+    ).bind(limit).all<{ id: string }>();
+    let updated = 0;
+    let no_url = 0;
+    let redirect_failed = 0;
+    let html_fetch_failed = 0;
+    let no_og_meta = 0;
+    let already = 0;
+    let failed = 0;
+    for (let i = 0; i < pending.results.length; i++) {
+      try {
+        const r = await backfillLinkCardForXTweet(env, pending.results[i].id);
+        if (r.updated) updated++;
+        else if (r.reason === 'already_attempted') already++;
+        else if (r.reason === 'no_url') no_url++;
+        else if (r.reason === 'redirect_failed') redirect_failed++;
+        else if (r.reason === 'html_fetch_failed') html_fetch_failed++;
+        else if (r.reason === 'no_og_meta') no_og_meta++;
+      } catch (e) {
+        console.error(`[backfill-link-card] ${pending.results[i].id}:`, e);
+        failed++;
+      }
+      if (throttleMs > 0 && i < pending.results.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, throttleMs));
+      }
+    }
+    return jsonResponse({
+      mode: 'backfill-link-card',
+      found: pending.results.length,
+      updated,
+      already_attempted: already,
+      no_url,
+      redirect_failed,
+      html_fetch_failed,
+      no_og_meta,
+      failed,
+      elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
   }
   if (mode === 'backfill-media') {
     // 2026-05-17 user 反馈 X 有图片/视频但 aifeeds media=[]。
