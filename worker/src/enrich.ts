@@ -376,7 +376,7 @@ export async function refreshSingleItem(
         hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
         hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
         hasLinkCard: !!extraObj.link_card,
-        hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+        hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
       });
     }
     return { refreshed: true, source_type: 'x_list', reason: 'success', metrics: merged };
@@ -2194,7 +2194,7 @@ export async function runListPollIngest(
           hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
           hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
           hasLinkCard: !!extraObj.link_card,
-          hasRetweetRef: !!(extraObj.retweet_of_id || extraObj.retweet_of),
+          hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
         });
       } else {
         inserted++; // 实际是 update
