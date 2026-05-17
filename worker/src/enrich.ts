@@ -124,6 +124,14 @@ interface QuoteOf {
   media: Array<{ type: string; url: string; width?: number; height?: number }>;
   published_at: string | null;
   content_translated?: string | null;
+  // 2026-05-17 批 4:FE 反馈 reply_of/quote_of/retweet_of 缺 metrics,FE 已实现
+  // metrics row 但无数据不显示。从 syndication API 提取(view_count X 收紧后不一定返)。
+  metrics?: {
+    replies?: number;
+    retweets?: number;
+    likes?: number;
+    views?: number;
+  };
 }
 
 export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
@@ -146,6 +154,13 @@ export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
   }
   const verified =
     (user.verified as boolean) || (user.is_blue_verified as boolean);
+  // metrics:任一字段有值就返 metrics object,全无就 undefined(FE 不显示 row)
+  const metrics: NonNullable<QuoteOf["metrics"]> = {};
+  if (typeof qt.conversation_count === "number") metrics.replies = qt.conversation_count;
+  if (typeof qt.retweet_count === "number") metrics.retweets = qt.retweet_count;
+  if (typeof qt.favorite_count === "number") metrics.likes = qt.favorite_count;
+  if (typeof qt.view_count === "number") metrics.views = qt.view_count;
+  const hasMetrics = Object.keys(metrics).length > 0;
   return {
     id: (qt.id_str as string) || null,
     author: (user.name as string) || null,
@@ -155,6 +170,7 @@ export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
     is_verified: verified ? 1 : 0,
     media,
     published_at: (qt.created_at as string) || null,
+    ...(hasMetrics ? { metrics } : {}),
   };
 }
 
