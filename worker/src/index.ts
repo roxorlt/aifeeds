@@ -156,6 +156,10 @@ export interface Env {
   // backfill-quotes / backfill-replies / detect-longform / longform-via-sb)。
   // 设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
   X_TWEET_PIPELINE_WORKFLOW: Workflow;
+  // 2026-05-17 重构:X workflow 完整性 gate filter 开关。'true' = 启用,筛掉
+  // X 推文 workflow_completed_at IS NULL 的数据(翻译失败 / workflow 未完成)。
+  // staging 先开 prod 等批 4 backfill 老数据完成后再开。详见 docs/plans/2026-05-17-x-workflow-rollout-plan.md
+  WORKFLOW_COMPLETED_FILTER?: string;
   // CF Workflow binding for huodongxing detail enrich (worker/src/workflows/
   // huodongxing-detail.ts)。runHuodongxingFetchList 后对每条新事件 create
   // instance。替换原 isHdxEnrichSlot preempt cron。
@@ -1536,6 +1540,13 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  // X workflow 完整性 gate(2026-05-17 重构):env.WORKFLOW_COMPLETED_FILTER='true' 时启用。
+  // 启用后 X 数据必须有 workflow_completed_at 才返回 — 筛掉翻译失败 / workflow 未完成的项。
+  // 老数据(批 4 backfill 前)workflow_completed_at IS NULL 会被筛掉,staging 先开 prod 等批 4 完成再开。
+  if (env.WORKFLOW_COMPLETED_FILTER === 'true') {
+    conditions.push("(source_type != 'x_list' OR json_extract(extra, '$.workflow_completed_at') IS NOT NULL)");
+  }
+
   // Relevance filter
   if (relevant === '1') {
     conditions.push('is_relevant = 1');
@@ -2222,15 +2233,21 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
   const extra = parsedItem.extra as { thread_root_id?: string } | null | undefined;
   const threadRootId = extra && typeof extra === 'object' ? extra.thread_root_id : undefined;
 
+  // 2026-05-17 重构:thread members 上限保护(覆盖 99% thread)。超 50 标 has_more flag,
+  // FE 可显示「以下推文已截断」提示。不做 lazy load(产品低优先级)。
   let siblings: Record<string, unknown>[] = [];
+  let siblingsHasMore = false;
   if (threadRootId) {
+    const SIBLINGS_MAX = 50;
     const result = await env.DB.prepare(
       `SELECT * FROM items
        WHERE source_type = ?
          AND extra ->> '$.thread_root_id' = ?
-       ORDER BY published_at ASC, id ASC`
-    ).bind(parsedItem.source_type, threadRootId).all();
-    siblings = result.results.map(parseItemRow);
+       ORDER BY published_at ASC, id ASC
+       LIMIT ?`
+    ).bind(parsedItem.source_type, threadRootId, SIBLINGS_MAX + 1).all();
+    siblingsHasMore = result.results.length > SIBLINGS_MAX;
+    siblings = result.results.slice(0, SIBLINGS_MAX).map(parseItemRow);
   }
 
   // For GitHub / ClawHub items, attach metrics_history (last 30 days) so drawer can
@@ -2268,6 +2285,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
   return jsonResponse({
     item: parsedItem,
     siblings,
+    siblings_has_more: siblingsHasMore,
     metrics_history: metricsHistory,
   }, 200, request, env);
 }

@@ -4214,7 +4214,57 @@ export async function backfillReplyForXTweet(
 }
 
 /**
- * Workflow Step 2c: 检测 longform 标记（note_tweet.id 有则是长推待 fetch）。
+ * Workflow Step 2c: 通过 syndication API 回填 retweet_of snapshot。
+ * 跟老 runBackfillRetweets 一条 loop body 同逻辑。
+ *
+ * 2026-05-17 bug fix：阶段 4 X workflow cutover 漏写本 step，导致 retweet 推文
+ * 的 retweet_of 永远 null → frontend TweetCard 翻转逻辑 fallback 显示转推者
+ * （Peter）而不是原推作者（Christoph）。
+ *
+ * 跟 backfillQuoteForXTweet 平行，用 extra.retweeted_status_id 调 syndication
+ * 拿原推 snapshot（content / author / handle / published_at / profile_image_url）
+ * 写入 extra.retweet_of。frontend 看到 retweet_of 完整数据后翻转主卡作者。
+ */
+export async function backfillRetweetForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ has_retweet: boolean; not_found: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`backfillRetweetForXTweet: item not found ${itemId}`);
+
+  let extraObj: Record<string, unknown> = {};
+  if (row.extra) {
+    try { extraObj = JSON.parse(row.extra); } catch { /* fallthrough */ }
+  }
+  const targetId = extraObj.retweeted_status_id;
+  if (typeof targetId !== 'string' || !targetId) {
+    // 不是 retweet（或 extra 缺 retweeted_status_id）— hasRetweetRef 信号假阳
+    return { has_retweet: false, not_found: false };
+  }
+
+  const res = await fetchTweet(targetId);
+  if (res === null) {
+    throw new Error(`backfillRetweetForXTweet: fetchTweet failed ${targetId}`);
+  }
+  if (res.notFound || !res.data) {
+    // 原推被删 / 账号封 / 私密 → sentinel 标 retweet_of=null + retweet_enriched=true 防重试
+    await applyPatch(env, row as CandidateRow, { retweet_enriched: true, retweet_of: null });
+    console.log(`[x-workflow:step2c] ${itemId}: retweet origin ${targetId} not found`);
+    return { has_retweet: false, not_found: true };
+  }
+
+  await applyPatch(env, row as CandidateRow, {
+    retweet_enriched: true,
+    retweet_of: apiToQuoteOf(res.data as unknown as Record<string, unknown>),
+  });
+  console.log(`[x-workflow:step2c] ${itemId}: retweet_of filled from ${targetId}`);
+  return { has_retweet: true, not_found: false };
+}
+
+/**
+ * Workflow Step 2d: 检测 longform 标记（note_tweet.id 有则是长推待 fetch）。
  * 跟老 runDetectLongform 一条 loop body 同逻辑。
  */
 export async function checkLongformForXTweet(
@@ -4474,6 +4524,296 @@ export async function translateXTweetField(
 
   console.log(`[x-workflow:step4:${field}] ${itemId}: translated ${finalText.length}c quality=${quality}`);
   return { translated: true, chars: finalText.length };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// classifyAndTranslateForXTweet — 2026-05-17 重构:1 次 DeepSeek JSON Mode 调用
+// 合并 classify + translate 6 字段(原 classifyXTweetWithLlm + translateXTweetField × 6
+// 共 7 次调用 → 1 次合并),降本 ~87%。
+//
+// 调用方:x-tweet-pipeline.ts 新 step 3(关联数据回填后)。
+// 老函数 classifyXTweetWithLlm / translateXTweetField 保留给 /api/items/:id/translate-now
+// + admin 兜底 endpoint 用。
+//
+// 失败兜底:JSON parse / 必字段 missing → retry 1 次 → 仍失败标
+// extra.translation_failed_at + is_relevant=0,workflow 继续到 step 4 完整性 gate。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CLASSIFY_TRANSLATE_PROMPT = `你是 AI 资讯整理助手,对推文做两件事:
+1. 判断 is_relevant(0 或 1):推文是否属于 AI / LLM / agent / 产品 / 工程 / 创业 / dev tooling 等技术议题
+2. is_relevant=1 时,把英文字段翻译成中文(纯英文 → 中文;中文 / 中英混合 / 已经是中文的字段返回 null)
+
+输入字段(JSON):
+- main.text:主推正文(必给)
+- main.handle:作者 handle
+- quote_of.content:引用的推文正文(可能没有)
+- reply_of.content:回复的父推正文(可能没有)
+- retweet_of.content:转推原文(可能没有)
+- link_card.title / .description:外链卡(可能没有)
+
+返回 JSON 对象(只返回一个 JSON 对象,不要其他文字):
+{
+  "is_relevant": 0 或 1,
+  "reason": "一句话给出 is_relevant 判断的依据(≤ 30 字)",
+  "ai_summary": "主推 1 行中文摘要(≤ 40 字,仅 is_relevant=1 时给,否则空字符串)",
+  "content_zh": "主推中文翻译" 或 null,
+  "quote_of_zh": "引用推中文翻译" 或 null,
+  "reply_of_zh": "父推中文翻译" 或 null,
+  "retweet_of_zh": "转推原文中文翻译" 或 null,
+  "link_card_title_zh": "外链标题中文" 或 null,
+  "link_card_desc_zh": "外链描述中文" 或 null
+}
+
+is_relevant 判断标准:
+- 1:AI / LLM / agent / 产品设计 / 软件工程 / 创业 / dev tooling 相关
+- 0:纯个人生活 / 政治 / 广告 / 不相干吐槽
+
+翻译规则:
+- 专有名词保留原文(API / OpenAI / Transformer / RAG / Cloudflare 等)
+- 链接 URL 保留不翻译
+- 中文 / 中英混合字段直接返回 null(不需翻译)
+- is_relevant=0 时所有 _zh 字段返回 null
+- 输入字段不存在时对应 _zh 字段返回 null
+- 翻译要流畅,符合中文表达习惯
+
+输入:
+%INPUT%`;
+
+interface ClassifyTranslateInput {
+  main: { handle: string; text: string };
+  quote_of?: { content: string };
+  reply_of?: { content: string };
+  retweet_of?: { content: string };
+  link_card?: { title?: string; description?: string };
+}
+
+interface ClassifyTranslateResponse {
+  is_relevant: 0 | 1;
+  reason?: string;
+  ai_summary?: string;
+  content_zh?: string | null;
+  quote_of_zh?: string | null;
+  reply_of_zh?: string | null;
+  retweet_of_zh?: string | null;
+  link_card_title_zh?: string | null;
+  link_card_desc_zh?: string | null;
+}
+
+export interface ClassifyTranslateResult {
+  is_relevant: 0 | 1;
+  fields_translated: string[];
+  attempts: number;
+  failed?: 'json_parse' | 'missing_fields' | 'http' | 'no_content';
+}
+
+export async function classifyAndTranslateForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+  opts: { lang: 'zh' | 'en' | 'ja' } = { lang: 'zh' },
+): Promise<ClassifyTranslateResult> {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error('classifyAndTranslateForXTweet: DEEPSEEK_API_KEY missing');
+  }
+  if (opts.lang !== 'zh') {
+    throw new Error(`classifyAndTranslateForXTweet: lang=${opts.lang} not yet supported`);
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, content, handle, lang, extra
+       FROM items
+      WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{
+    id: string;
+    content: string | null;
+    handle: string | null;
+    lang: string | null;
+    extra: string | null;
+  }>();
+
+  if (!row) throw new Error(`classifyAndTranslateForXTweet: item not found ${itemId}`);
+  if (!row.content) {
+    return { is_relevant: 0, fields_translated: [], attempts: 0, failed: 'no_content' };
+  }
+
+  const extra: Record<string, unknown> = row.extra
+    ? (JSON.parse(row.extra) as Record<string, unknown>)
+    : {};
+
+  // 构建合并输入(只传有值的字段,节省 prompt tokens)
+  const input: ClassifyTranslateInput = {
+    main: {
+      handle: row.handle || '',
+      text: row.content.slice(0, 4000), // 长推已 step 0 backfill,但截断防 prompt 过长
+    },
+  };
+
+  const qo = extra.quote_of as { content?: string } | undefined;
+  if (qo?.content) input.quote_of = { content: qo.content.slice(0, 1000) };
+
+  const ro = extra.reply_of as { content?: string } | undefined;
+  if (ro?.content) input.reply_of = { content: ro.content.slice(0, 1000) };
+
+  const rto = extra.retweet_of as { content?: string } | undefined;
+  if (rto?.content) input.retweet_of = { content: rto.content.slice(0, 1000) };
+
+  const lc = extra.link_card as { title?: string; description?: string } | undefined;
+  if (lc?.title || lc?.description) {
+    input.link_card = {
+      title: lc.title?.slice(0, 200),
+      description: lc.description?.slice(0, 500),
+    };
+  }
+
+  const isMainZh = row.lang === 'zh' || row.lang === 'zh-cn' || row.lang === 'zh-tw';
+
+  // ── 调 DeepSeek JSON Mode(retry 1 次) ──────────────────────
+  let parsed: ClassifyTranslateResponse | null = null;
+  let attempts = 0;
+  let lastError: ClassifyTranslateResult['failed'] | undefined;
+
+  for (let i = 0; i < 2; i++) {
+    attempts++;
+    const prompt = CLASSIFY_TRANSLATE_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+    let res: Response;
+    try {
+      res = await fetch(DEEPSEEK_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'deepseek-v4-flash',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          max_tokens: 4000,
+        }),
+      });
+    } catch {
+      lastError = 'http';
+      continue;
+    }
+
+    if (!res.ok) {
+      lastError = 'http';
+      continue;
+    }
+
+    const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const raw = body.choices?.[0]?.message?.content || '';
+
+    let candidate: ClassifyTranslateResponse;
+    try {
+      candidate = JSON.parse(raw);
+    } catch {
+      lastError = 'json_parse';
+      continue;
+    }
+
+    // 必字段 check:is_relevant 必有且为 0|1
+    if (candidate.is_relevant !== 0 && candidate.is_relevant !== 1) {
+      lastError = 'missing_fields';
+      continue;
+    }
+    // is_relevant=1 + 主推是英文 → content_zh 必须有
+    if (candidate.is_relevant === 1 && !isMainZh && !candidate.content_zh) {
+      lastError = 'missing_fields';
+      continue;
+    }
+
+    parsed = candidate;
+    lastError = undefined;
+    break;
+  }
+
+  if (!parsed) {
+    // 仍失败:标 translation_failed_at,is_relevant 默认 0,workflow 继续
+    const nowIsoFail = new Date().toISOString();
+    await env.DB.prepare(
+      `UPDATE items
+          SET is_relevant = 0,
+              matched_by = COALESCE(matched_by, 'workflow-classify-translate'),
+              extra = json_set(coalesce(extra, '{}'),
+                               '$.translation_failed_at', ?,
+                               '$.translation_failed_reason', ?)
+        WHERE id = ?`,
+    ).bind(nowIsoFail, lastError || 'unknown', itemId).run();
+    console.log(`[x-workflow:step3] ${itemId}: classify+translate failed after ${attempts} attempts, reason=${lastError}`);
+    return { is_relevant: 0, fields_translated: [], attempts, failed: lastError || 'http' };
+  }
+
+  // ── 写回 D1 ────────────────────────────────────────────────
+  const isRel = parsed.is_relevant;
+  const summary = (parsed.ai_summary || '').trim();
+  const fieldsTranslated: string[] = [];
+  const nowTs = Math.floor(Date.now() / 1000);
+  const nowIso = new Date().toISOString();
+
+  // 构建新 extra(增量更新关联字段的翻译)
+  const newExtra: Record<string, unknown> = { ...extra };
+  newExtra.ai_summary = summary;
+  newExtra.classified_at = nowIso;
+
+  if (isRel === 1) {
+    if (parsed.quote_of_zh && extra.quote_of) {
+      const qoObj = (extra.quote_of || {}) as Record<string, unknown>;
+      newExtra.quote_of = { ...qoObj, content_translated: parsed.quote_of_zh, translated_at: nowTs };
+      fieldsTranslated.push('quote_of.content');
+    }
+    if (parsed.reply_of_zh && extra.reply_of) {
+      const roObj = (extra.reply_of || {}) as Record<string, unknown>;
+      newExtra.reply_of = { ...roObj, content_translated: parsed.reply_of_zh, translated_at: nowTs };
+      fieldsTranslated.push('reply_of.content');
+    }
+    if (parsed.retweet_of_zh && extra.retweet_of) {
+      const rtoObj = (extra.retweet_of || {}) as Record<string, unknown>;
+      newExtra.retweet_of = { ...rtoObj, content_translated: parsed.retweet_of_zh, translated_at: nowTs };
+      fieldsTranslated.push('retweet_of.content');
+    }
+    if ((parsed.link_card_title_zh || parsed.link_card_desc_zh) && extra.link_card) {
+      const lcObj = (extra.link_card || {}) as Record<string, unknown>;
+      const lcNew: Record<string, unknown> = { ...lcObj };
+      if (parsed.link_card_title_zh) {
+        lcNew.title_translated = parsed.link_card_title_zh;
+        fieldsTranslated.push('link_card.title');
+      }
+      if (parsed.link_card_desc_zh) {
+        lcNew.description_translated = parsed.link_card_desc_zh;
+        fieldsTranslated.push('link_card.description');
+      }
+      newExtra.link_card = lcNew;
+    }
+  }
+
+  const contentTranslated = isRel === 1 && !isMainZh ? parsed.content_zh : null;
+  if (contentTranslated) {
+    fieldsTranslated.push('content');
+    await env.DB.prepare(
+      `UPDATE items
+          SET is_relevant = ?,
+              matched_by = COALESCE(matched_by, 'workflow-classify-translate'),
+              content_translated = ?,
+              translation_quality = 'ok',
+              translation_attempts = COALESCE(translation_attempts, 0) + ?,
+              translated_at = ?,
+              extra = ?
+        WHERE id = ?`,
+    ).bind(isRel, contentTranslated, attempts, nowTs, JSON.stringify(newExtra), itemId).run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE items
+          SET is_relevant = ?,
+              matched_by = COALESCE(matched_by, 'workflow-classify-translate'),
+              translation_attempts = COALESCE(translation_attempts, 0) + ?,
+              extra = ?
+        WHERE id = ?`,
+    ).bind(isRel, attempts, JSON.stringify(newExtra), itemId).run();
+  }
+
+  console.log(`[x-workflow:step3] ${itemId}: is_relevant=${isRel} fields=[${fieldsTranslated.join(',')}] attempts=${attempts}`);
+  return { is_relevant: isRel, fields_translated: fieldsTranslated, attempts };
 }
 
 /**

@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>X 抓取管道梳理 · aifeeds</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    .pill-active { background: #dcfce7; color: #166534; border: 1px solid #16a34a; }
+    .pill-skipped { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+
+    .node-active rect, .node-active ellipse, .node-active polygon { fill: #dcfce7; stroke: #16a34a; stroke-width: 2; }
+    .node-active text { fill: #166534; font-weight: 600; }
+    .node-skipped rect, .node-skipped ellipse, .node-skipped polygon { fill: #f9fafb; stroke: #d1d5db; stroke-width: 1; stroke-dasharray: 4 4; }
+    .node-skipped text { fill: #9ca3af; }
+
+    .edge-active { stroke: #16a34a; stroke-width: 2; fill: none; }
+    .edge-skipped { stroke: #d1d5db; stroke-width: 1; stroke-dasharray: 4 4; fill: none; }
+
+    .tweet-card { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; margin-bottom: 8px; }
+    .quote-embed { border: 1px solid #e5e7eb; border-radius: 12px; padding: 8px; margin-top: 8px; background: #fafafa; }
+    .thread-line { width: 2px; background: #cbd5e1; margin-left: 20px; height: 16px; }
+
+    .scenario-active { background: #dcfce7; border-left: 4px solid #16a34a; padding: 8px 12px; margin-bottom: 12px; border-radius: 4px; font-size: 13px; color: #166534; }
+    .accept-row { padding: 12px; border-bottom: 1px solid #e2e8f0; }
+    .accept-row:last-child { border-bottom: none; }
+    .accept-label { font-weight: 700; color: #1e293b; display: block; margin-bottom: 4px; font-size: 13px; }
+    .accept-text { color: #475569; font-size: 13px; }
+    .accept-text code { background: #f1f5f9; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<header class="bg-white border-b border-slate-200 px-6 py-3 sticky top-0 z-50">
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-bold text-slate-900">X 抓取管道梳理 · 重新设计稿（v3）</h1>
+      <p class="text-xs text-slate-500">2026-05-17 · 合并长推标记 / 合并判定+翻译 / 详情页样式修正 / 加验收标准</p>
+    </div>
+    <div class="flex gap-2 text-xs">
+      <span class="pill-active px-2 py-1 rounded">本次走的步骤</span>
+      <span class="pill-skipped px-2 py-1 rounded">本次不走的步骤</span>
+    </div>
+  </div>
+</header>
+
+<section class="bg-amber-50 border-b border-amber-200 px-6 py-3">
+  <p class="text-sm text-slate-700">
+    <strong>用法</strong>：左侧勾选一条推文的特征，中间流程图把它经过的每一步绿色高亮（不经过的灰色虚线），右侧画出这条推文在 X 上的原貌 和 aifeeds 重构后的效果（目标是跟 X 对齐）。
+  </p>
+</section>
+
+<main class="grid gap-4 p-4" style="grid-template-columns: 280px 1fr 480px;">
+
+<aside class="bg-white rounded-lg shadow-sm border border-slate-200 p-4 sticky top-20 self-start" style="max-height: calc(100vh - 100px); overflow-y: auto;">
+  <h2 class="font-bold text-base mb-3 text-slate-900">推文特征</h2>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">推文类型（单选）</h3>
+    <div class="space-y-1.5">
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="type" value="original" checked />
+        <span>原创发帖</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="type" value="quote" />
+        <span>引用别人推文</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="type" value="reply" />
+        <span>回复某条推文</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="type" value="retweet" />
+        <span>转发别人推文</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="type" value="thread" />
+        <span>自连回复（楼主自己回自己的连续帖）</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">是否长推</h3>
+    <label class="flex items-center gap-2 text-sm cursor-pointer">
+      <input type="checkbox" name="longform" value="1" />
+      <span>是长推（超过 280 字）</span>
+    </label>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">附件（多选）</h3>
+    <div class="space-y-1.5">
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="attach" value="image" />
+        <span>图片（1 到 4 张）</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="attach" value="video" />
+        <span>视频</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="attach" value="gif" />
+        <span>动图</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="attach" value="link_card" />
+        <span>嵌入网页卡片（链接预览）</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="attach" value="poll" />
+        <span>投票（暂不支持）</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">原文语言</h3>
+    <div class="space-y-1.5">
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="lang" value="en" checked />
+        <span>英文（需要翻译）</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="lang" value="zh" />
+        <span>中文（不用翻译）</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="lang" value="ja" />
+        <span>日文（需要翻译）</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">作者认证</h3>
+    <div class="space-y-1.5">
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="verified" value="yes" checked />
+        <span>蓝标认证</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="radio" name="verified" value="no" />
+        <span>普通账号</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">真实案例快速选</h3>
+    <button type="button" class="text-xs underline text-blue-700 block mb-1 case-btn"
+            data-type="quote" data-lang="en">
+      Greg Brockman 引用案例
+    </button>
+    <button type="button" class="text-xs underline text-blue-700 block mb-1 case-btn"
+            data-type="retweet" data-lang="en" data-longform="0">
+      Peter 转 Christoph 案例
+    </button>
+    <button type="button" class="text-xs underline text-blue-700 block mb-1 case-btn"
+            data-type="original" data-lang="en" data-longform="1">
+      长推案例
+    </button>
+    <button type="button" class="text-xs underline text-blue-700 block mb-1 case-btn"
+            data-type="reply" data-lang="en">
+      回复案例（看父推上方展示）
+    </button>
+    <button type="button" class="text-xs underline text-blue-700 block mb-1 case-btn"
+            data-type="thread" data-lang="en">
+      Thread 案例（看详情页展开）
+    </button>
+  </div>
+
+  <button id="reset-btn" type="button" class="w-full bg-slate-200 hover:bg-slate-300 text-sm py-1.5 rounded">重置选项</button>
+</aside>
+
+<section class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+
+  <div class="mb-3 flex items-center justify-between">
+    <h2 class="font-bold text-base text-slate-900">数据加工流程（按当前选项高亮）</h2>
+    <div id="config-summary" class="text-xs text-slate-600 bg-slate-100 px-2 py-1 rounded"></div>
+  </div>
+
+  <svg viewBox="0 0 1000 1050" class="w-full" xmlns="http://www.w3.org/2000/svg">
+
+    <defs>
+      <marker id="arrow-active" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,6 L9,3 z" fill="#16a34a" />
+      </marker>
+    </defs>
+
+    <!-- 第 1 步 -->
+    <g class="node-active">
+      <rect x="380" y="20" width="240" height="50" rx="25" />
+      <text x="500" y="42" text-anchor="middle" font-size="13">第 1 步：拉新推文</text>
+      <text x="500" y="58" text-anchor="middle" font-size="10" fill="#6b7280">每 30 分钟一次</text>
+    </g>
+    <line class="edge-active" x1="500" y1="70" x2="500" y2="100" marker-end="url(#arrow-active)" />
+
+    <!-- 第 2 步 -->
+    <g class="node-active">
+      <rect x="350" y="100" width="300" height="60" rx="8" />
+      <text x="500" y="125" text-anchor="middle" font-size="13">第 2 步：入库</text>
+      <text x="500" y="143" text-anchor="middle" font-size="10" fill="#6b7280">写入正文、互动数、附件、关联标识</text>
+    </g>
+    <line class="edge-active" x1="500" y1="160" x2="500" y2="195" marker-end="url(#arrow-active)" />
+
+    <!-- 第 3 步：数据补全（吸收原 4d 长推标记） -->
+    <g id="node-step3" class="node-active">
+      <rect x="280" y="195" width="440" height="110" rx="8" />
+      <text x="500" y="220" text-anchor="middle" font-size="13" font-weight="700">第 3 步：数据补全</text>
+      <text x="500" y="240" text-anchor="middle" font-size="10">一次接口调用同时干 3 件事：</text>
+      <text x="500" y="256" text-anchor="middle" font-size="10">· 正文截断 → 拿完整版替换</text>
+      <text x="500" y="271" text-anchor="middle" font-size="10">· 视频缺播放地址 → 拿视频链接</text>
+      <text x="500" y="286" text-anchor="middle" font-size="10">· 看返回字段是否有长推标识 → 标记下来给第 5 步用</text>
+    </g>
+    <line class="edge-active" x1="500" y1="305" x2="500" y2="335" marker-end="url(#arrow-active)" />
+
+    <!-- 第 4 步：关联数据回填（3 分支并行） -->
+    <g>
+      <rect x="200" y="335" width="600" height="32" rx="6" fill="#f1f5f9" stroke="#cbd5e1" />
+      <text x="500" y="357" text-anchor="middle" font-size="12" font-weight="700">第 4 步：关联数据回填（3 个分支并行）</text>
+    </g>
+
+    <g id="node-step4a" class="node-active">
+      <rect x="170" y="385" width="200" height="85" rx="8" />
+      <text x="270" y="408" text-anchor="middle" font-size="12" font-weight="600">4a 回填引用原推</text>
+      <text x="270" y="425" text-anchor="middle" font-size="9">抓被引用那条推文</text>
+      <text x="270" y="439" text-anchor="middle" font-size="9">写入：作者、正文、附件</text>
+      <text x="270" y="455" text-anchor="middle" font-size="9" fill="#6b7280">条件：本条是引用</text>
+    </g>
+
+    <g id="node-step4b" class="node-active">
+      <rect x="400" y="385" width="200" height="85" rx="8" />
+      <text x="500" y="408" text-anchor="middle" font-size="12" font-weight="600">4b 回填回复父推</text>
+      <text x="500" y="425" text-anchor="middle" font-size="9">抓被回复那条推文</text>
+      <text x="500" y="439" text-anchor="middle" font-size="9">写入：作者、正文</text>
+      <text x="500" y="455" text-anchor="middle" font-size="9" fill="#6b7280">条件：本条是回复</text>
+    </g>
+
+    <g id="node-step4c" class="node-active">
+      <rect x="630" y="385" width="200" height="85" rx="8" />
+      <text x="730" y="408" text-anchor="middle" font-size="12" font-weight="600">4c 回填转发原推</text>
+      <text x="730" y="425" text-anchor="middle" font-size="9">抓被转发那条推文</text>
+      <text x="730" y="439" text-anchor="middle" font-size="9">写入：作者、正文、附件</text>
+      <text x="730" y="455" text-anchor="middle" font-size="9" fill="#6b7280">条件：本条是转发</text>
+    </g>
+
+    <line class="edge-active" x1="270" y1="470" x2="270" y2="510" marker-end="url(#arrow-active)" />
+    <line class="edge-active" x1="500" y1="470" x2="500" y2="510" marker-end="url(#arrow-active)" />
+    <line class="edge-active" x1="730" y1="470" x2="730" y2="510" marker-end="url(#arrow-active)" />
+
+    <line class="edge-active" x1="270" y1="510" x2="730" y2="510" />
+    <line class="edge-active" x1="500" y1="510" x2="500" y2="545" marker-end="url(#arrow-active)" />
+
+    <!-- 第 5 步：长推全文抓取（条件） -->
+    <g id="node-step5" class="node-active">
+      <polygon points="380,545 620,545 580,605 420,605" />
+      <text x="500" y="573" text-anchor="middle" font-size="11" font-weight="700">第 5 步：长推全文抓取</text>
+      <text x="500" y="591" text-anchor="middle" font-size="9">仅长推才走 · 走另一个接口拿 25k 字符的全文</text>
+    </g>
+    <line class="edge-active" x1="500" y1="605" x2="500" y2="640" marker-end="url(#arrow-active)" />
+
+    <!-- 第 6 步：相关性判定 + 翻译（合并） -->
+    <g id="node-step6" class="node-active">
+      <rect x="180" y="640" width="640" height="130" rx="8" />
+      <text x="500" y="666" text-anchor="middle" font-size="13" font-weight="700">第 6 步：相关性判定 + 翻译（一次大模型调用同时完成）</text>
+      <text x="500" y="688" text-anchor="middle" font-size="10">输入：主推 + 引用原推 + 回复父推 + 转发原推 + 网页卡片 合并</text>
+      <text x="500" y="704" text-anchor="middle" font-size="10">输出 JSON：是否相关、判定理由、各字段中文翻译</text>
+      <text x="500" y="722" text-anchor="middle" font-size="10" fill="#6b7280">不相关时大模型只返回是否相关 + 理由，省下翻译开销</text>
+      <text x="500" y="737" text-anchor="middle" font-size="10" fill="#6b7280">相关时一次性返回所有非空字段的翻译</text>
+      <text x="500" y="755" text-anchor="middle" font-size="10" fill="#16a34a" font-weight="600">省 4-5 次大模型调用 · 大模型基于整体上下文判定，准确率更高</text>
+    </g>
+
+    <line class="edge-active" x1="180" y1="705" x2="80" y2="705" />
+    <line class="edge-active" x1="80" y1="705" x2="80" y2="800" marker-end="url(#arrow-active)" />
+    <text x="80" y="697" text-anchor="middle" font-size="10" fill="#dc2626">不相关</text>
+    <g class="node-skipped">
+      <ellipse cx="80" cy="825" rx="70" ry="22" />
+      <text x="80" y="829" text-anchor="middle" font-size="11">丢弃</text>
+    </g>
+
+    <line class="edge-active" x1="500" y1="770" x2="500" y2="810" marker-end="url(#arrow-active)" />
+    <text x="510" y="795" font-size="10" fill="#16a34a">相关</text>
+
+    <!-- 第 7 步：完整性检查 -->
+    <g id="node-step7" class="node-active">
+      <rect x="280" y="810" width="440" height="60" rx="8" />
+      <text x="500" y="835" text-anchor="middle" font-size="13" font-weight="700">第 7 步：完整性检查</text>
+      <text x="500" y="853" text-anchor="middle" font-size="10">前面所有步骤都通过后，盖一个「数据完整」时间戳</text>
+    </g>
+    <line class="edge-active" x1="500" y1="870" x2="500" y2="910" marker-end="url(#arrow-active)" />
+
+    <!-- 第 8 步：前端展示 -->
+    <g id="node-step8" class="node-active">
+      <rect x="280" y="910" width="440" height="80" rx="12" />
+      <text x="500" y="935" text-anchor="middle" font-size="13" font-weight="700">第 8 步：前端展示</text>
+      <text x="500" y="955" text-anchor="middle" font-size="10">只展示带「数据完整」时间戳的推文</text>
+      <text x="500" y="973" text-anchor="middle" font-size="10" fill="#6b7280">未完整的不进 feed，由兜底机制慢慢补</text>
+    </g>
+
+  </svg>
+
+  <div class="mt-4 grid grid-cols-2 gap-3 text-sm">
+    <div class="p-3 bg-blue-50 border border-blue-200 rounded">
+      <strong class="text-blue-900">为什么第 3 步合并了长推标记？</strong>
+      <p class="text-slate-700 mt-1 text-xs">同一个接口（cdn.syndication.twimg.com）一次调用可以同时返回：完整正文、视频地址、长推标识。原来分开两步调两次是浪费。</p>
+    </div>
+    <div class="p-3 bg-blue-50 border border-blue-200 rounded">
+      <strong class="text-blue-900">为什么第 6 步合并了判定 + 翻译？</strong>
+      <p class="text-slate-700 mt-1 text-xs">大模型一次调用就能在判定时同时翻译。不相关的直接省整组翻译，相关的也比之前的「判一次 + 翻 5 次」省 4 次调用。详细验收标准见下方。</p>
+    </div>
+  </div>
+</section>
+
+<aside class="space-y-4">
+
+  <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+    <h2 class="font-bold text-base text-slate-900 mb-2">X 平台原貌</h2>
+
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-1">流内看到的样子</h3>
+    <div id="twitter-feed-card"></div>
+
+    <h3 class="text-xs font-bold text-slate-500 uppercase mt-3 mb-1">详情页看到的样子</h3>
+    <div id="twitter-detail-card"></div>
+  </div>
+
+  <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+    <h2 class="font-bold text-base text-slate-900 mb-2">aifeeds 重构后效果</h2>
+    <div class="scenario-active">
+      ✅ 目标：跟 X 平台原貌完全对齐。第 7 步「完整性检查」保证只有完整数据进 feed，不再展示半成品。
+    </div>
+
+    <h3 class="text-xs font-bold text-slate-500 uppercase mb-1">流内卡片</h3>
+    <div id="aifeeds-feed-card"></div>
+
+    <h3 class="text-xs font-bold text-slate-500 uppercase mt-3 mb-1">点开抽屉详情</h3>
+    <div id="aifeeds-drawer-card"></div>
+
+    <div class="mt-3 text-xs text-slate-600">
+      <p>抽屉跟 X 详情页同样布局：父推 / 引用 / 转发原推作为完整卡片在上下文中展示，靠 thread line 视觉连接。「原文/译文」按钮在发文时间后单击切换（保持 aifeeds 线上现有交互）。</p>
+    </div>
+  </div>
+</aside>
+
+</main>
+
+<!-- 当前问题 -->
+<section class="max-w-7xl mx-auto px-6 mt-6">
+  <div class="bg-white rounded-lg shadow-sm border border-red-200 p-6">
+    <h2 class="font-bold text-lg text-red-900 mb-3">当前 7 类已知问题</h2>
+    <p class="text-sm text-slate-600 mb-3">这些是前端不停发现要打补丁的根源。同一个底层原因（流程没设计完整 + 没数据闭环），每一项都在影响 feed 阅读体验。</p>
+    <table class="w-full text-sm">
+      <thead class="bg-red-50">
+        <tr>
+          <th class="text-left py-2 px-3 border-b border-red-200">编号</th>
+          <th class="text-left py-2 px-3 border-b border-red-200">现象</th>
+          <th class="text-left py-2 px-3 border-b border-red-200">原因</th>
+          <th class="text-left py-2 px-3 border-b border-red-200">影响范围</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">1</td>
+          <td class="py-2 px-3">正文末尾 …，只看到 140 字</td>
+          <td class="py-2 px-3">入库时拿的是列表页截断版，没补全</td>
+          <td class="py-2 px-3">入库阶段所有英文长推</td>
+        </tr>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">2</td>
+          <td class="py-2 px-3">转发的推文，显示的是转发者，不是原作者</td>
+          <td class="py-2 px-3">第 4c 步「回填转发原推」漏写了</td>
+          <td class="py-2 px-3">所有转发类型推文</td>
+        </tr>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">3</td>
+          <td class="py-2 px-3">中文翻译还是老的截断版</td>
+          <td class="py-2 px-3">补全正文后没清旧翻译，翻译永远停在第一版</td>
+          <td class="py-2 px-3">所有被补全过正文的英文推文</td>
+        </tr>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">4</td>
+          <td class="py-2 px-3">引用别人推文，只看到自己一句话，看不到被引用的内容</td>
+          <td class="py-2 px-3">第 4a 步「回填引用原推」失败没重试 / 老数据没跑过</td>
+          <td class="py-2 px-3">部分引用类型推文</td>
+        </tr>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">5</td>
+          <td class="py-2 px-3">转发 / 引用推文里的视频不能播</td>
+          <td class="py-2 px-3">拿回来的是封面图，不是视频播放地址</td>
+          <td class="py-2 px-3">所有转发 / 引用里带视频的</td>
+        </tr>
+        <tr class="border-b border-red-100">
+          <td class="py-2 px-3">6</td>
+          <td class="py-2 px-3">英文推文长时间没翻译</td>
+          <td class="py-2 px-3">翻译用的是另一套定时任务随机抽选，跑不赢新增量</td>
+          <td class="py-2 px-3">部分英文推文翻译滞后几小时到几天</td>
+        </tr>
+        <tr>
+          <td class="py-2 px-3">7</td>
+          <td class="py-2 px-3">主推一句话「+1」+ 引用原推是 OpenAI 新闻 → 被误判不相关丢弃</td>
+          <td class="py-2 px-3">相关性判定在关联数据回填之前，只看主推就判</td>
+          <td class="py-2 px-3">所有「评论性引用 / 回复」的相关推文</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="text-xs text-slate-600 mt-3">
+      <strong>共同原因</strong>：之前的流程是「先做一部分上线，剩下的边发现边补」的增量模式，没有一个统一的「数据完整」标准。前端拿到的有时是半成品，所以一直在打补丁。
+    </p>
+  </div>
+</section>
+
+<!-- 第 6 步合并调用验收标准 -->
+<section class="max-w-7xl mx-auto px-6 mt-6">
+  <div class="bg-white rounded-lg shadow-sm border border-emerald-200 p-6">
+    <h2 class="font-bold text-lg text-emerald-900 mb-2">第 6 步「相关性判定 + 翻译」验收标准</h2>
+    <p class="text-sm text-slate-600 mb-4">改代码前先把验收标准定下来。开工后测试阶段对照这里逐项验，不达标不上线。</p>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div class="border border-slate-200 rounded">
+        <div class="accept-row bg-slate-50">
+          <span class="accept-label">① 输出 JSON 结构正确</span>
+          <span class="accept-text">
+            必填字段：<code>is_relevant</code>（值 0 或 1）、<code>reason</code>（≥ 5 个字符）<br>
+            条件必填：<code>is_relevant=1</code> 且对应原文非空时，对应翻译字段必填。<br>
+            字段名约定：<code>content_zh / quote_of_zh / reply_of_zh / retweet_of_zh / link_card_title_zh / link_card_desc_zh</code>
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">② 字段完整性</span>
+          <span class="accept-text">
+            用 DeepSeek JSON Mode（强制 schema），返回缺字段或类型不对一律视为失败。<br>
+            <strong>验收方法</strong>：跑 100 条样本，字段完整率 ≥ 99%。
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">③ 翻译质量</span>
+          <span class="accept-text">
+            · 中文流畅，无明显机翻 / 英文残留<br>
+            · 保留 URL / @mention / hashtag 原文不翻<br>
+            · 翻译长度 0.5 到 1.5 倍原文（防截断或胡乱扩展）<br>
+            <strong>验收方法</strong>：随机抽 20 条人工评，≥ 16 条可接受
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">④ 相关性判定准确率</span>
+          <span class="accept-text">
+            拿已标注的 100 条历史样本对比旧逻辑 vs 新合并调用，判定一致率 ≥ 90%。<br>
+            <strong>额外</strong>：用户翻 feed 时连续 50 条没明显不相关混入。
+          </span>
+        </div>
+      </div>
+
+      <div class="border border-slate-200 rounded">
+        <div class="accept-row bg-slate-50">
+          <span class="accept-label">⑤ 响应时间</span>
+          <span class="accept-text">
+            单次调用 P95 &lt; 5 秒（v4-flash 标准）<br>
+            <strong>验收方法</strong>：连续跑 200 次取分布，P95 不超标
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">⑥ 失败率与兜底</span>
+          <span class="accept-text">
+            整体失败率（含超时 / JSON 解析失败）&lt; 1%<br>
+            失败时回落到「分开调用」老逻辑（判定一次 + 翻译多次），不阻塞流程<br>
+            <strong>验收方法</strong>：模拟 50 次故意制造长 prompt 触发超时，回落机制 100% 触发
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">⑦ 成本下降</span>
+          <span class="accept-text">
+            单条推文大模型调用次数从原来的 5 到 6 次 → 1 次<br>
+            月度账单与旧逻辑对比下降 ≥ 70%<br>
+            <strong>验收方法</strong>：上线 7 天后对比成本数据
+          </span>
+        </div>
+        <div class="accept-row">
+          <span class="accept-label">⑧ 边缘 case 覆盖</span>
+          <span class="accept-text">
+            7 种组合每种至少 3 条样本必须通过：<br>
+            · 主推一字（"+1"）+ 引用是 AI 内容<br>
+            · 长推 25k 字符<br>
+            · 含 emoji / 全 emoji<br>
+            · 多语言混合（英 + 中 + 日）<br>
+            · 引用 + 回复 + 转发同时存在<br>
+            · 全部关联字段缺失（纯原创）<br>
+            · 长 URL / hashtag 密集
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded text-sm">
+      <strong>测试流程</strong>：写完代码 → 跑 100 条样本对比旧逻辑（自动）→ 抽 20 条人工评翻译质量 → 7 种边缘 case 跑通 → 故意制造 50 次失败验证回落 → 上线观察一周看成本和用户反馈。
+    </div>
+  </div>
+</section>
+
+<!-- 决策点 -->
+<section class="max-w-7xl mx-auto p-6 mt-2">
+  <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+    <h2 class="font-bold text-lg text-slate-900 mb-3">需要你决定的关键点</h2>
+
+    <div class="space-y-4 text-sm">
+
+      <div>
+        <h3 class="font-bold text-slate-800 mb-1">① 要不要加「完整性检查」这一步？</h3>
+        <p class="text-slate-700 mb-2">建议：所有步骤都跑完后，给数据盖一个时间戳。前端只展示带这个戳的推文。</p>
+        <p class="text-slate-600 text-xs"><strong>好处</strong>：前端永远拿到完整数据，不用再做兜底显示。<strong>代价</strong>：新数据要等流程跑完（约 1 到 3 分钟）才上 feed。</p>
+      </div>
+
+      <div>
+        <h3 class="font-bold text-slate-800 mb-1">② 已经积累的 3 万多条老数据怎么处理？</h3>
+        <p class="text-slate-700 mb-2">
+          方案 A：跑一次性补全，全部走一遍新流程（估计 4 到 6 小时）<br>
+          方案 B：分等级处理，最近 7 天的优先补全，更老的让兜底机制慢慢补<br>
+          方案 C：老数据保留显示，但加一个「早期数据可能不完整」的标识
+        </p>
+        <p class="text-slate-600 text-xs">我倾向 B 方案 — 用户主要看最近 7 天的，先把这部分救出来，老的让兜底机制 1 周内消化。</p>
+      </div>
+
+      <div>
+        <h3 class="font-bold text-slate-800 mb-1">③ 翻译失败的推文要不要展示？</h3>
+        <p class="text-slate-700 mb-2">
+          方案 A：不展示，等翻译成功 — 严格但可能漏掉重要内容<br>
+          方案 B：展示英文原文，旁边标「等待翻译」<br>
+          方案 C：中文用户看到「翻译失败，点击跳到原推」按钮
+        </p>
+      </div>
+
+      <div>
+        <h3 class="font-bold text-slate-800 mb-1">④ 实施顺序</h3>
+        <p class="text-slate-700">建议先写一份正式设计文档，跑工程评审之后再分批做。重构涉及 4 批改动：</p>
+        <ol class="list-decimal list-inside text-slate-600 mt-1 ml-4 space-y-0.5">
+          <li>主流程补齐第 3 / 4c / 6 / 7 步 + 第 6 步合并调用 + 提示词重写</li>
+          <li>数据失效级联（原文改了清翻译）</li>
+          <li>前端加完整性筛选</li>
+          <li>一次性补全老数据 + 兜底定时任务</li>
+        </ol>
+      </div>
+
+    </div>
+
+    <div class="mt-6 p-3 bg-green-50 border-l-4 border-green-500 text-sm rounded">
+      ✅ 已采纳：长推标记合并到第 3 步 · 判定 + 翻译合并到第 6 步 · 验收标准已列<br>
+      待你拍板：①–④ 决策点 · 详情页 mockup 是否再调整
+    </div>
+  </div>
+</section>
+
+<!-- 下一步：其他源 -->
+<section class="max-w-7xl mx-auto px-6 mt-2 mb-8">
+  <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+    <h2 class="font-bold text-lg text-slate-900 mb-3">下一步：其他源也按这个模式梳理</h2>
+    <p class="text-sm text-slate-600 mb-3">X 这套梳理完成后，剩余 3 个源都按相同方法画一遍：左侧选特征 + 中间工作流可视化 + 右侧重构后效果 + 已知问题清单 + 验收标准。</p>
+
+    <div class="grid grid-cols-3 gap-3 text-sm">
+      <div class="border border-slate-200 rounded p-3">
+        <div class="font-bold text-slate-800">活动行（huodongxing）</div>
+        <div class="text-xs text-slate-600 mt-1">已知问题：详情页 loading 状态时间长，feed 上很多卡片卡在「获取活动详情」</div>
+        <div class="text-xs text-slate-500 mt-1">目录待建：<code>docs/plans/2026-05-XX-hdx-workflow-redesign.html</code></div>
+      </div>
+
+      <div class="border border-slate-200 rounded p-3">
+        <div class="font-bold text-slate-800">Product Hunt</div>
+        <div class="text-xs text-slate-600 mt-1">已知问题：作者 / 制作者头像缺失；可能其他字段也有遗漏</div>
+        <div class="text-xs text-slate-500 mt-1">目录待建：<code>docs/plans/2026-05-XX-ph-workflow-redesign.html</code></div>
+      </div>
+
+      <div class="border border-slate-200 rounded p-3">
+        <div class="font-bold text-slate-800">GitHub Trending</div>
+        <div class="text-xs text-slate-600 mt-1">已知问题：暂未集中梳理，可能有 README 截图 / 多语言翻译 / 老仓库标签等问题</div>
+        <div class="text-xs text-slate-500 mt-1">目录待建：<code>docs/plans/2026-05-XX-gh-workflow-redesign.html</code></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
+
+function getConfig() {
+  return {
+    type: $('input[name="type"]:checked')?.value || 'original',
+    longform: $('input[name="longform"]:checked') ? true : false,
+    attach: $$('input[name="attach"]:checked').map(i => i.value),
+    lang: $('input[name="lang"]:checked')?.value || 'en',
+    verified: $('input[name="verified"]:checked')?.value || 'yes',
+  };
+}
+
+function renderWorkflow(cfg) {
+  setNode('step3', 'active');  // 始终跑（同时干 3 件事）
+  setNode('step6', 'active');  // 始终跑
+  setNode('step7', 'active');  // 始终跑
+
+  // 第 4 步分支
+  setNode('step4a', cfg.type === 'quote' ? 'active' : 'skipped');
+  setNode('step4b', cfg.type === 'reply' ? 'active' : 'skipped');
+  setNode('step4c', cfg.type === 'retweet' ? 'active' : 'skipped');
+
+  // 第 5 步长推（仅长推走）
+  setNode('step5', cfg.longform ? 'active' : 'skipped');
+
+  updateConfigSummary(cfg);
+  renderCards(cfg);
+}
+
+function setNode(id, state) {
+  const el = $('#node-' + id);
+  if (!el) return;
+  el.classList.remove('node-active', 'node-skipped');
+  el.classList.add('node-' + state);
+}
+
+function updateConfigSummary(cfg) {
+  const parts = [];
+  parts.push({
+    original: '原创发帖', quote: '引用', reply: '回复', retweet: '转发', thread: '自连回复',
+  }[cfg.type]);
+  if (cfg.longform) parts.push('长推');
+  if (cfg.attach.length) parts.push('含 ' + cfg.attach.map(a => ({image:'图', video:'视频', gif:'动图', link_card:'网页卡片', poll:'投票'}[a])).join('+'));
+  parts.push({en: '英文', zh: '中文', ja: '日文'}[cfg.lang]);
+  parts.push(cfg.verified === 'yes' ? '蓝标' : '普通号');
+  $('#config-summary').textContent = parts.join(' · ');
+}
+
+function renderCards(cfg) {
+  const data = buildSampleData(cfg);
+  $('#twitter-feed-card').innerHTML = renderTwitterFeed(data);
+  $('#twitter-detail-card').innerHTML = renderTwitterDetail(data);
+  $('#aifeeds-feed-card').innerHTML = renderAifeedsFeed(data, cfg);
+  $('#aifeeds-drawer-card').innerHTML = renderAifeedsDrawer(data, cfg);
+}
+
+function buildSampleData(cfg) {
+  const author = cfg.verified === 'yes' ? '张三 ✓' : '张三';
+  const handle = '@zhangsan';
+  const fullText = cfg.lang === 'en'
+    ? 'Just shipped a new feature for our agent framework. The async event loop now supports 10x more concurrent workflows with the new scheduler. Full design doc: https://t.co/abc123'
+    : cfg.lang === 'ja'
+    ? '新機能をリリースしました。エージェントフレームワークの非同期イベントループが新しいスケジューラで 10 倍速くなりました。'
+    : '刚发布了 agent 框架的新功能，异步事件循环用上了新调度器，并发能力提升 10 倍。设计文档：https://t.co/abc123';
+  const trText = '刚发布了 agent 框架的新功能，异步事件循环用上了新调度器，并发能力提升 10 倍。设计文档：https://t.co/abc123';
+  const longformBody = cfg.longform
+    ? '\n\n详细背景：\n- 老调度器是轮询，单个任务会占满整个时间片\n- 新调度器用优先队列，长尾任务不会饿死\n- benchmark：100 并发提升 10 倍\n- 升级建议：直接替换 import 路径'
+    : '';
+
+  return {
+    author, handle,
+    avatar: cfg.verified === 'yes' ? '🦞' : '👤',
+    fullText: fullText + longformBody,
+    trText: trText + (longformBody ? '\n\n详细背景：\n- 老调度器是轮询...' : ''),
+    media: cfg.attach.includes('image') ? [{ type: 'image', emoji: '🖼️' }]
+         : cfg.attach.includes('video') ? [{ type: 'video', emoji: '🎥' }]
+         : cfg.attach.includes('gif') ? [{ type: 'gif', emoji: '🎬' }]
+         : [],
+    linkCard: cfg.attach.includes('link_card') ? {
+      title: '新版异步事件循环调度器',
+      desc: '深入解读新调度器的设计与性能数据。',
+      domain: 'example.com',
+    } : null,
+    quoteOf: cfg.type === 'quote' ? {
+      author: '李四', handle: '@lisi', avatar: '👩',
+      content: '我们的 agent 框架是栈里最慢的一环，有人遇到同样问题吗？想找些 benchmark 数据。',
+      media: cfg.attach.includes('video') ? [{ type: 'video', emoji: '🎥' }] : [],
+      metrics: '12 回复 · 45 转发 · 230 喜欢',
+      time: '3 小时前',
+    } : null,
+    replyOf: cfg.type === 'reply' ? {
+      author: '王五', handle: '@wangwu', avatar: '👨',
+      content: '你们 agent 框架里长跑任务怎么处理？我们卡在 timeout 重试这部分已经一周了。',
+      metrics: '8 回复 · 12 转发 · 89 喜欢',
+      time: '4 小时前',
+    } : null,
+    retweetOf: cfg.type === 'retweet' ? {
+      author: '李四', handle: '@lisi', avatar: '👩',
+      content: fullText,
+      media: cfg.attach.includes('video') ? [{ type: 'video', emoji: '🎥' }] : [],
+      time: '5 小时前',
+    } : null,
+    threadCount: cfg.type === 'thread' ? 2 : 0,
+  };
+}
+
+function renderTweetCardBody(d, contentOverride) {
+  // 通用推文卡片正文（不含外层 .tweet-card 容器）
+  return `
+    <div class="flex gap-2">
+      <div class="text-2xl">${d.avatar || '👤'}</div>
+      <div class="flex-1">
+        <div class="font-bold text-sm">${d.author}</div>
+        <div class="text-xs text-slate-500">${d.handle} · ${d.time || '2 小时前'}</div>
+        <div class="text-sm mt-1 whitespace-pre-wrap">${contentOverride || d.content || ''}</div>
+        ${(d.media || []).length ? renderMedia(d.media) : ''}
+        ${d.metrics ? `<div class="text-xs text-slate-400 mt-2">${d.metrics}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderTwitterFeed(d) {
+  // 流内卡片：reply 只显示 ↩ 单行；retweet 显示原推；其他显示主推
+  const isRT = !!d.retweetOf;
+  const mainAuthor = isRT ? d.retweetOf : d;
+  const mainContent = isRT ? d.retweetOf.content : d.fullText;
+
+  return `
+    <div class="tweet-card">
+      ${isRT ? `<div class="text-xs text-slate-500 mb-1">🔁 ${d.author} 转发了</div>` : ''}
+      ${d.replyOf ? `<div class="text-xs text-slate-500 mb-1">↩ 回复 ${d.replyOf.handle}</div>` : ''}
+      <div class="flex gap-2">
+        <div class="text-2xl">${mainAuthor.avatar || '👤'}</div>
+        <div class="flex-1">
+          <div class="font-bold text-sm">${mainAuthor.author}</div>
+          <div class="text-xs text-slate-500">${mainAuthor.handle} · 2 小时前</div>
+          <div class="text-sm mt-1 whitespace-pre-wrap">${mainContent}</div>
+          ${(mainAuthor.media || d.media).length ? renderMedia(mainAuthor.media || d.media) : ''}
+          ${d.quoteOf ? renderQuoteEmbed(d.quoteOf) : ''}
+          ${d.linkCard ? renderLinkCard(d.linkCard) : ''}
+          ${d.threadCount ? `<div class="text-xs text-blue-600 mt-1">显示该会话（共 ${d.threadCount + 1} 条）</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTwitterDetail(d) {
+  // 详情页：
+  // - reply 类型：父推完整卡 + thread line + 主推
+  // - thread 类型：主推 + 后续多条按时间顺序排
+  // - 其他：跟 feed 一样
+  let html = '';
+
+  if (d.replyOf) {
+    html += `<div class="tweet-card">${renderTweetCardBody(d.replyOf, d.replyOf.content)}</div>`;
+    html += `<div class="thread-line"></div>`;
+  }
+
+  // 主推
+  const isRT = !!d.retweetOf;
+  const mainAuthor = isRT ? d.retweetOf : d;
+  const mainContent = isRT ? d.retweetOf.content : d.fullText;
+  html += `
+    <div class="tweet-card">
+      ${isRT ? `<div class="text-xs text-slate-500 mb-1">🔁 ${d.author} 转发了</div>` : ''}
+      <div class="flex gap-2">
+        <div class="text-2xl">${mainAuthor.avatar || '👤'}</div>
+        <div class="flex-1">
+          <div class="font-bold text-sm">${mainAuthor.author}</div>
+          <div class="text-xs text-slate-500">${mainAuthor.handle} · 2 小时前</div>
+          <div class="text-sm mt-1 whitespace-pre-wrap">${mainContent}</div>
+          ${(mainAuthor.media || d.media).length ? renderMedia(mainAuthor.media || d.media) : ''}
+          ${d.quoteOf ? renderQuoteEmbed(d.quoteOf) : ''}
+          ${d.linkCard ? renderLinkCard(d.linkCard) : ''}
+          <div class="text-xs text-slate-400 mt-2">123 回复 · 456 转发 · 2.3k 喜欢</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // thread：展开后续多条
+  if (d.threadCount > 0) {
+    for (let i = 1; i <= d.threadCount; i++) {
+      html += `<div class="thread-line"></div>`;
+      html += `<div class="tweet-card">
+        <div class="flex gap-2">
+          <div class="text-2xl">${d.avatar}</div>
+          <div class="flex-1">
+            <div class="font-bold text-sm">${d.author}</div>
+            <div class="text-xs text-slate-500">${d.handle} · ${2 - i} 小时前</div>
+            <div class="text-sm mt-1">${i === 1 ? '第 2 条：补充一个细节，新调度器的优先队列实现参考了 Linux CFS 的思路…' : '第 3 条：感兴趣的可以看 PR 里的 benchmark 脚本，欢迎提 issue。'}</div>
+          </div>
+        </div>
+      </div>`;
+    }
+  }
+
+  return html;
+}
+
+function renderAifeedsFeed(d, cfg) {
+  // 重构后流内卡片：跟 X 流内布局一致 + 加"原文/译文"按钮在发文时间后（aifeeds 线上现有交互）
+  const needTrans = cfg.lang !== 'zh';
+  const isRT = !!d.retweetOf;
+  const mainAuthor = isRT ? d.retweetOf : d;
+  const mainContent = isRT ? d.retweetOf.content : d.trText;
+  const enContent = isRT ? d.retweetOf.content : d.fullText;
+  const id = 'feed-tw-' + Math.random().toString(36).slice(2, 9);
+  const showToggle = needTrans && !isRT;
+
+  return `
+    <div class="tweet-card">
+      ${isRT ? `<div class="text-xs text-slate-500 mb-1">🔁 ${d.author} 转发了</div>` : ''}
+      ${d.replyOf ? `<div class="text-xs text-slate-500 mb-1">↩ 回复 ${d.replyOf.handle}</div>` : ''}
+      <div class="flex gap-2">
+        <div class="text-2xl">${mainAuthor.avatar || '👤'}</div>
+        <div class="flex-1">
+          <div class="font-bold text-sm">${mainAuthor.author}</div>
+          <div class="text-xs text-slate-500">${mainAuthor.handle} · 2 小时前${showToggle ? ` · <button class="lang-toggle text-blue-700 underline" data-target="${id}" data-state="zh">原文</button>` : ''}</div>
+          <div class="text-sm mt-1 whitespace-pre-wrap lang-zh-${id}">${mainContent}</div>
+          ${showToggle ? `<div class="text-sm mt-1 whitespace-pre-wrap lang-en-${id}" style="display:none">${enContent}</div>` : ''}
+          ${(mainAuthor.media || d.media).length ? renderMedia(mainAuthor.media || d.media) : ''}
+          ${d.quoteOf ? renderQuoteEmbed(d.quoteOf) : ''}
+          ${d.linkCard ? renderLinkCard(d.linkCard) : ''}
+          ${d.threadCount ? `<div class="text-xs text-blue-600 mt-1">显示该会话（共 ${d.threadCount + 1} 条）</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAifeedsDrawer(d, cfg) {
+  // 抽屉：跟 X 详情页布局一致 + 加小标题分块帮用户分清关联关系 + 中英对照
+  const needTrans = cfg.lang !== 'zh';
+  const isRT = !!d.retweetOf;
+  const mainAuthor = isRT ? d.retweetOf : d;
+  const mainContent = isRT ? d.retweetOf.content : (needTrans ? d.trText : d.fullText);
+
+  let html = '';
+
+  // reply 类型：父推完整卡在上方（跟 X 详情页一致，靠 thread line 视觉连接，不加文字标题）
+  if (d.replyOf) {
+    html += `<div class="tweet-card">${renderTweetCardBody(d.replyOf, d.replyOf.content)}</div>`;
+    html += `<div class="thread-line"></div>`;
+  }
+
+  // 主推（含"原文/译文"切换按钮在发文时间后，跟 aifeeds 线上现有交互一致）
+  const id = 'drawer-tw-' + Math.random().toString(36).slice(2, 9);
+  const showToggle = needTrans && !isRT;
+  html += `
+    <div class="tweet-card">
+      ${isRT ? `<div class="text-xs text-slate-500 mb-1">🔁 ${d.author} 转发了</div>` : ''}
+      <div class="flex gap-2">
+        <div class="text-2xl">${mainAuthor.avatar || '👤'}</div>
+        <div class="flex-1">
+          <div class="font-bold text-sm">${mainAuthor.author}</div>
+          <div class="text-xs text-slate-500">${mainAuthor.handle} · 2 小时前${showToggle ? ` · <button class="lang-toggle text-blue-700 underline" data-target="${id}" data-state="zh">原文</button>` : ''}</div>
+          <div class="text-sm mt-2 whitespace-pre-wrap lang-zh-${id}">${mainContent}</div>
+          ${showToggle ? `<div class="text-sm mt-2 whitespace-pre-wrap lang-en-${id}" style="display:none">${d.fullText}</div>` : ''}
+          ${(mainAuthor.media || d.media).length ? renderMedia(mainAuthor.media || d.media) : ''}
+          ${d.quoteOf ? renderQuoteEmbed(d.quoteOf) : ''}
+          ${d.linkCard ? renderLinkCard(d.linkCard) : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // thread：展开后续多条（跟 X 详情页一致，靠 thread line 视觉连接，不加文字标题）
+  if (d.threadCount > 0) {
+    for (let i = 1; i <= d.threadCount; i++) {
+      html += `<div class="thread-line"></div>`;
+      html += `<div class="tweet-card">
+        <div class="flex gap-2">
+          <div class="text-2xl">${d.avatar}</div>
+          <div class="flex-1">
+            <div class="font-bold text-sm">${d.author}</div>
+            <div class="text-xs text-slate-500">${d.handle} · ${2 - i} 小时前</div>
+            <div class="text-sm mt-1">${i === 1 ? '第 2 条：补充细节...' : '第 3 条：欢迎提 issue。'}</div>
+          </div>
+        </div>
+      </div>`;
+    }
+  }
+
+  return html;
+}
+
+function renderQuoteEmbed(q) {
+  return `<div class="quote-embed text-xs">
+    <div class="flex items-center gap-1">
+      <span>${q.avatar || '👤'}</span>
+      <span class="font-bold">${q.author}</span>
+      <span class="text-slate-500 font-normal">${q.handle} · ${q.time || ''}</span>
+    </div>
+    <div class="mt-1">${q.content}</div>
+    ${q.media?.length ? renderMedia(q.media) : ''}
+  </div>`;
+}
+
+function renderMedia(media) {
+  return media.map(m => `
+    <div class="mt-2 border border-slate-200 rounded overflow-hidden">
+      <div class="bg-slate-100 p-4 text-center text-3xl">${m.emoji}</div>
+    </div>
+  `).join('');
+}
+
+function renderLinkCard(card) {
+  return `
+    <div class="mt-2 border border-slate-200 rounded p-2 text-xs">
+      <div class="text-slate-400 text-[10px]">${card.domain}</div>
+      <div class="font-bold mt-0.5">${card.title}</div>
+      <div class="text-slate-600 mt-0.5">${card.desc}</div>
+    </div>
+  `;
+}
+
+// "原文/译文" 按钮切换（事件委托，每次 render 后新按钮也生效）
+document.addEventListener('click', function(e) {
+  if (!e.target.matches('.lang-toggle')) return;
+  const btn = e.target;
+  const id = btn.dataset.target;
+  const zhEl = document.querySelector('.lang-zh-' + id);
+  const enEl = document.querySelector('.lang-en-' + id);
+  if (!zhEl || !enEl) return;
+  if (btn.dataset.state === 'zh') {
+    zhEl.style.display = 'none';
+    enEl.style.display = '';
+    btn.textContent = '译文';
+    btn.dataset.state = 'en';
+  } else {
+    zhEl.style.display = '';
+    enEl.style.display = 'none';
+    btn.textContent = '原文';
+    btn.dataset.state = 'zh';
+  }
+});
+
+function init() {
+  $$('input[type="radio"], input[type="checkbox"]').forEach(el => {
+    el.addEventListener('change', () => renderWorkflow(getConfig()));
+  });
+  $('#reset-btn').addEventListener('click', () => {
+    $$('input[type="radio"]').forEach(el => { el.checked = el.defaultChecked; });
+    $$('input[type="checkbox"]').forEach(el => { el.checked = false; });
+    renderWorkflow(getConfig());
+  });
+  $$('.case-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = btn.dataset.type;
+      const l = btn.dataset.lang;
+      const lf = btn.dataset.longform === '1';
+      $(`input[name="type"][value="${t}"]`).checked = true;
+      $(`input[name="lang"][value="${l}"]`).checked = true;
+      $(`input[name="longform"]`).checked = lf;
+      renderWorkflow(getConfig());
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+  renderWorkflow(getConfig());
+}
+
+init();
+</script>
+
+</body>
+</html>

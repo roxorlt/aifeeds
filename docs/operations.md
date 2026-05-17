@@ -122,6 +122,27 @@ npx wrangler d1 execute xlist --remote --file=migrations/0NN-xxx.sql
 
 **Dev 默认连 staging**：`vite.config.ts` proxy 默认 target 已切到 `staging-api.ai-feeds.com`。临时连 prod：`VITE_API_PROXY=https://api.ai-feeds.com npm run dev`。
 
+### 2026-05-17 新增:X workflow 完整性 gate filter
+
+**Env var**:`WORKFLOW_COMPLETED_FILTER`(wrangler.toml `[env.staging.vars]` / `[vars]`)
+
+- **staging**:`'true'`(已启用)— `/api/items` SQL 加 `WHERE source_type != 'x_list' OR json_extract(extra, '$.workflow_completed_at') IS NOT NULL` 筛掉 workflow 未完成的 X 数据
+- **prod**:默认未设(='false' / no-op)— 等批 4 backfill 老数据完成后再开,避免 feed 突然变空
+
+**开 prod filter 操作**:
+```bash
+cd worker
+# wrangler.toml [vars] 加 WORKFLOW_COMPLETED_FILTER = "true"
+rm -f ../wrangler.jsonc
+npx wrangler deploy
+```
+
+**回滚**:把 `WORKFLOW_COMPLETED_FILTER` 改回 `'false'` 或删行 → redeploy。
+
+**设计 / 落地**:
+- [`docs/plans/2026-05-17-x-workflow-redesign.html`](plans/2026-05-17-x-workflow-redesign.html)
+- [`docs/plans/2026-05-17-x-workflow-rollout-plan.md`](plans/2026-05-17-x-workflow-rollout-plan.md)
+
 ---
 
 ## 远端服务（Cloudflare）
