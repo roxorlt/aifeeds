@@ -60,6 +60,7 @@ export interface QuoteOf {
   is_verified?: number | boolean | null;
   media?: MediaItem[] | null;
   published_at?: string | null;
+  metrics?: Metrics | null;
 }
 
 export interface LinkCard {

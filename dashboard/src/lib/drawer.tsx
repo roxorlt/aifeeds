@@ -10,11 +10,12 @@ import {
 import { useLocation, useNavigate } from "react-router";
 import type { Item } from "../types";
 import { fetchItem, ItemNotFoundError } from "../api";
-import { dispatchItemUpdate } from "./itemUpdateBus";
+import { dispatchItemUpdate, subscribeItemUpdate } from "./itemUpdateBus";
 
 interface DrawerState {
   item: Item | null;
   siblings: Item[];
+  siblings_has_more?: boolean;
   loading: boolean;
   error: "not_found" | "network" | null;
 }
@@ -171,9 +172,9 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     // valid fetches under StrictMode's double-effect remount. Ref-equality
     // already covers both unmount and URL-changed-mid-fetch cases.
     fetchItem(compositeId)
-      .then(({ item, siblings }) => {
+      .then(({ item, siblings, siblings_has_more }) => {
         if (activeIdRef.current !== compositeId) return;
-        setState({ item, siblings, loading: false, error: null });
+        setState({ item, siblings, siblings_has_more, loading: false, error: null });
         setSpotlightItem(item);
       })
       .catch((err: unknown) => {
@@ -182,6 +183,17 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         setState({ item: null, siblings: [], loading: false, error: code });
       });
   }, [location.pathname]);
+
+  // itemUpdateBus 订阅：外部（如 TweetCard 译文按钮触发 translate-now）更新某 item
+  // 后 dispatch，drawer 内若当前正显示该 item 则同步更新 state.item，保证抽屉视图实时刷新。
+  useEffect(() => {
+    return subscribeItemUpdate((updated) => {
+      setState((prev) => {
+        if (!prev.item || prev.item.id !== updated.id) return prev;
+        return { ...prev, item: updated };
+      });
+    });
+  }, []);
 
   // PR6.6 lazy enrich：drawer 上的 item 变化时立即触发 on-demand refresh（X syndication）
   // 用单独的 useEffect 监听 state.item?.id，覆盖三种打开方式：
@@ -212,7 +224,13 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         // 但 prev.extra 里 fresh 没填的字段保留（safeguard）。
         setState((prev) => {
           if (!prev.item) {
-            return { item: fresh.item, siblings: fresh.siblings, loading: false, error: null };
+            return {
+              item: fresh.item,
+              siblings: fresh.siblings,
+              siblings_has_more: fresh.siblings_has_more,
+              loading: false,
+              error: null,
+            };
           }
           const prevExtra = (prev.item.extra && typeof prev.item.extra === 'object') ? prev.item.extra : {};
           const freshExtra = (fresh.item.extra && typeof fresh.item.extra === 'object') ? fresh.item.extra : {};
@@ -226,6 +244,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
           return {
             item: { ...fresh.item, extra: mergedExtra },
             siblings: fresh.siblings,
+            siblings_has_more: fresh.siblings_has_more,
             loading: false,
             error: null,
           };

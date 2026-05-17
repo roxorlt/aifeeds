@@ -17,6 +17,7 @@ export interface MetricsSnapshotGh {
 export interface ItemDetailResponse {
   item: Item;
   siblings: Item[];
+  siblings_has_more?: boolean;
   metrics_history?: MetricsSnapshotGh[];
 }
 
@@ -207,6 +208,73 @@ export async function refreshItem(id: string): Promise<RefreshItemResponse> {
   const res = await apiFetch(path, { method: 'POST' });
   if (!res.ok) return { refreshed: false, source_type: 'unknown', reason: 'fetch_failed' };
   return res.json();
+}
+
+// translate-now: 即时翻译 endpoint。x_list 推文翻译失败时用户点「译文」按钮触发。
+// 6 档错误码契约（BE 对齐 plan 第九节 ④）：200 / 401 / 404 / 400 / 429 ×2 / 503
+export interface TranslateNowResponse {
+  content_zh: string | null;
+  quote_of_zh: string | null;
+  reply_of_zh: string | null;
+  retweet_of_zh: string | null;
+  link_card_title_zh: string | null;
+  link_card_desc_zh: string | null;
+  translated_at: string | null;
+}
+
+export type TranslateNowErrorCode =
+  | 'unauthorized'
+  | 'not_found'
+  | 'unsupported_source'
+  | 'rate_limited'
+  | 'daily_cap_exceeded'
+  | 'translation_failed'
+  | 'unknown';
+
+export interface TranslateNowErrorDetails {
+  source_type?: string;
+  retry_after_sec?: number;
+  cap?: number;
+  used?: number;
+  reason?: string;
+}
+
+export class TranslateNowError extends Error {
+  code: TranslateNowErrorCode;
+  details: TranslateNowErrorDetails;
+  constructor(code: TranslateNowErrorCode, details: TranslateNowErrorDetails = {}) {
+    super(`translate-now failed: ${code}`);
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export async function translateNowItem(id: string): Promise<TranslateNowResponse> {
+  const path = `/api/items/${encodeURIComponent(id)}/translate-now`;
+  const res = await apiFetch(path, { method: 'POST' });
+  if (res.ok) return res.json();
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // body 不是 JSON / 解析失败 — 走默认 unknown code
+  }
+  const rawError = typeof body.error === 'string' ? body.error : '';
+  let code: TranslateNowErrorCode;
+  if (rawError === 'unauthorized' || res.status === 401) code = 'unauthorized';
+  else if (rawError === 'not_found' || res.status === 404) code = 'not_found';
+  else if (rawError === 'unsupported_source') code = 'unsupported_source';
+  else if (rawError === 'rate_limited') code = 'rate_limited';
+  else if (rawError === 'daily_cap_exceeded') code = 'daily_cap_exceeded';
+  else if (rawError === 'translation_failed' || res.status === 503) code = 'translation_failed';
+  else code = 'unknown';
+  throw new TranslateNowError(code, {
+    source_type: typeof body.source_type === 'string' ? body.source_type : undefined,
+    retry_after_sec: typeof body.retry_after_sec === 'number' ? body.retry_after_sec : undefined,
+    cap: typeof body.cap === 'number' ? body.cap : undefined,
+    used: typeof body.used === 'number' ? body.used : undefined,
+    reason: typeof body.reason === 'string' ? body.reason : undefined,
+  });
 }
 
 export async function fetchStats(): Promise<Stats> {
