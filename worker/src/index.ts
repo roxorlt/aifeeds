@@ -1227,6 +1227,11 @@ export default {
               return;
             }
             const t0 = Date.now();
+            // 2026-05-17 加速 + prioritize:
+            // - LIMIT 100(原 20)→ 每 30min 100 条 = 4800/day,prod 25k 老数据 ~5 天完成
+            // - ORDER BY priority:retweet_pending(0)/ quote_pending(1)/ reply_pending(2)/ 其他(9)
+            //   stuck 类型先 backfill,user 体验更快(retweet bug 等问题立即修)
+            // - throttle 2s(原 3s)→ 100 条 × 2s = 200s wall + workflow async
             const pending = await env.DB.prepare(
               `SELECT id, extra FROM items
                 WHERE source_type='x_list'
@@ -1236,8 +1241,15 @@ export default {
                     json_extract(extra, '$.workflow_triggered_at') IS NULL
                     OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
                   )
-                ORDER BY published_at DESC
-                LIMIT 20`,
+                ORDER BY
+                  (CASE
+                    WHEN json_extract(extra,'$.is_retweet')=1 AND json_extract(extra,'$.retweet_of') IS NULL THEN 0
+                    WHEN json_extract(extra,'$.quote_of_id') IS NOT NULL AND json_extract(extra,'$.quote_of') IS NULL THEN 1
+                    WHEN json_extract(extra,'$.reply_to_id') IS NOT NULL AND json_extract(extra,'$.reply_of') IS NULL THEN 2
+                    ELSE 9
+                  END),
+                  published_at DESC
+                LIMIT 100`,
             ).all<{ id: string; extra: string | null }>();
             let triggered = 0;
             let skipped = 0;
@@ -1256,9 +1268,9 @@ export default {
               if (result === 'triggered') triggered++;
               else if (result === 'already_exists') skipped++;
               else failed++;
-              // throttle 3s/instance 避免 SB / syndication burst
+              // throttle 2s/instance 避免 SB / syndication burst
               if (i < pending.results.length - 1) {
-                await new Promise((resolve) => setTimeout(resolve, 3000));
+                await new Promise((resolve) => setTimeout(resolve, 2000));
               }
             }
             console.log(`[cron] x-backfill-workflow result:`, JSON.stringify({
@@ -2657,6 +2669,9 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ error: 'X_TWEET_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
     }
     const t0 = Date.now();
+    // 2026-05-17 prioritize:stuck 类型先 backfill(retweet/quote/reply pending),
+    // 其他按 published_at DESC。这样 OPS 大批 trigger 时 user 关心的 retweet bug
+    // 等问题立即被 backfill,而不是被新 published 但已完整的推文挤掉。
     const pending = await env.DB.prepare(
       `SELECT id, extra FROM items
         WHERE source_type='x_list'
@@ -2666,7 +2681,14 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
             json_extract(extra, '$.workflow_triggered_at') IS NULL
             OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
           )
-        ORDER BY published_at DESC
+        ORDER BY
+          (CASE
+            WHEN json_extract(extra,'$.is_retweet')=1 AND json_extract(extra,'$.retweet_of') IS NULL THEN 0
+            WHEN json_extract(extra,'$.quote_of_id') IS NOT NULL AND json_extract(extra,'$.quote_of') IS NULL THEN 1
+            WHEN json_extract(extra,'$.reply_to_id') IS NOT NULL AND json_extract(extra,'$.reply_of') IS NULL THEN 2
+            ELSE 9
+          END),
+          published_at DESC
         LIMIT ?`,
     ).bind(limit).all<{ id: string; extra: string | null }>();
 
