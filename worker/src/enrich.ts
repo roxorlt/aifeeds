@@ -134,6 +134,55 @@ interface QuoteOf {
   };
 }
 
+// 从 syndication API tweet data 提取 media 数组(photo + video + animated_gif),
+// 跟 apiToQuoteOf 内部 media 解析同逻辑,抽出来给 backfillMediaForXTweet 共用。
+// video 优先用 video_info.variants[mp4 最高码率] url,fallback 用 thumbnail。
+export function mediaFromSyndicationData(data: Record<string, unknown>): Array<{
+  type: string;
+  url: string;
+  width?: number;
+  height?: number;
+  poster?: string;
+  alt?: null;
+}> {
+  const mediaDetails = (data.mediaDetails as Array<Record<string, unknown>>) || [];
+  const result: Array<{ type: string; url: string; width?: number; height?: number; poster?: string; alt?: null }> = [];
+  for (const m of mediaDetails) {
+    const rawUrl = (m.media_url_https as string) || "";
+    if (!rawUrl) continue;
+    const oi = (m.original_info as Record<string, unknown>) || {};
+    const mediaType =
+      m.type === "photo"
+        ? "image"
+        : m.type === "video" || m.type === "animated_gif"
+          ? "video"
+          : ((m.type as string) || "image");
+    let url = normalizeMediaUrl(rawUrl);
+    let poster: string | undefined;
+    if (mediaType === "video") {
+      // 取 video_info.variants 里 mp4 最高码率
+      const videoInfo = m.video_info as { variants?: Array<{ content_type?: string; url?: string; bitrate?: number }> } | undefined;
+      const variants = videoInfo?.variants || [];
+      const mp4Variants = variants
+        .filter((v) => v.content_type === "video/mp4" && typeof v.url === "string")
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (mp4Variants.length > 0 && mp4Variants[0].url) {
+        url = mp4Variants[0].url;
+      }
+      poster = rawUrl; // thumbnail 当封面
+    }
+    result.push({
+      type: mediaType,
+      url,
+      width: oi.width as number | undefined,
+      height: oi.height as number | undefined,
+      alt: null,
+      ...(poster ? { poster } : {}),
+    });
+  }
+  return result;
+}
+
 export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
   const user = (qt.user as Record<string, unknown>) || {};
   const mediaDetails = (qt.mediaDetails as Array<Record<string, unknown>>) || [];
@@ -4095,6 +4144,82 @@ export async function backfillTruncatedTextForXTweet(
   ).bind(fullText, new Date().toISOString(), source, itemId).run();
   console.log(`[x-workflow:step0] ${itemId}: ${content.length} → ${fullText.length} chars (${source}) + cleared translation`);
   return { updated: true, from_chars: content.length, to_chars: fullText.length, source };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// backfillMediaForXTweet — 2026-05-17 用户反馈"X 有图片/视频但 aifeeds media=[]"
+//
+// 根因:SB scraper sbTweetToIngestItem ingest 时 t.media 可能为空(SB API 偶发漏返
+// 或某些 tweet 的 mediaDetails 在 SB 那边不全),mapMedia 返 [],workflow 不补 media。
+// 解决:workflow step + cron 兜底用 syndication API 拉完整 mediaDetails 重填 media。
+//
+// 行为:
+// - 调 fetchTweet(syndication API)拿完整 data
+// - 提取 mediaDetails(photo / video / animated_gif)+ video mp4 url
+// - 跟 D1 当前 media 比较,新提取的 >= 当前才覆盖(避免误删)
+// - 标 extra.media_backfilled_at(成功 / 失败都标,防 cron 重复跑)
+// - 失败兜底 — syndication 404 也标记 attempted,不阻塞 workflow
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function backfillMediaForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{
+  updated: boolean;
+  before_count: number;
+  after_count: number;
+  reason?: 'already_attempted' | 'syndication_not_found' | 'no_media' | 'no_improvement';
+}> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, media, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; media: string | null; extra: string | null }>();
+  if (!row) throw new Error(`backfillMediaForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+  if (extra.media_backfilled_at) {
+    return { updated: false, before_count: 0, after_count: 0, reason: 'already_attempted' };
+  }
+
+  let currentMedia: Array<unknown> = [];
+  try { currentMedia = row.media ? JSON.parse(row.media) : []; } catch { /* ignore */ }
+  const beforeCount = currentMedia.length;
+
+  const nowIso = new Date().toISOString();
+  const res = await fetchTweet(row.source_id);
+  if (!res || res.notFound || !res.data) {
+    // syndication 404 / 网络失败 — 标 attempted 避免 cron 重复跑
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.media_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, before_count: beforeCount, after_count: beforeCount, reason: 'syndication_not_found' };
+  }
+
+  const newMedia = mediaFromSyndicationData(res.data as Record<string, unknown>);
+  const afterCount = newMedia.length;
+
+  // syndication 也没 media — 标 attempted 不重试(可能是纯文本推或 mediaDetails 缺)
+  if (afterCount === 0) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.media_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, before_count: beforeCount, after_count: 0, reason: 'no_media' };
+  }
+
+  // syndication 更全(或当前空)→ 覆盖 + 标 attempted
+  if (afterCount > beforeCount || beforeCount === 0) {
+    await env.DB.prepare(
+      `UPDATE items SET media = ?, extra = json_set(coalesce(extra,'{}'), '$.media_backfilled_at', ?) WHERE id = ?`,
+    ).bind(JSON.stringify(newMedia), nowIso, itemId).run();
+    console.log(`[x-workflow:backfill-media] ${itemId}: ${beforeCount} → ${afterCount} media items`);
+    return { updated: true, before_count: beforeCount, after_count: afterCount };
+  }
+
+  // 当前 media 已 >= syndication,不动 — 标 attempted
+  await env.DB.prepare(
+    `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.media_backfilled_at', ?) WHERE id = ?`,
+  ).bind(nowIso, itemId).run();
+  return { updated: false, before_count: beforeCount, after_count: afterCount, reason: 'no_improvement' };
 }
 
 export interface BackfillTruncatedResult {
