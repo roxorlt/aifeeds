@@ -1086,6 +1086,14 @@ export default {
     // POST /api/enrich/run?mode=backfill-x-workflow&limit=200 加速。
     const isXBackfillWorkflowSlot = minute === 10 || minute === 40;
 
+    // X thread_root_id 反向重建（2026-05-17 task #34）:2026-05-06 切 ScrapeBadger
+    // 后 ingest 不再写 extra.thread_root_id(SB API 不返 thread 关系),导致 prod
+    // 5/7 之后 0 条新 thread → FE 详情页 thread 多卡渲染样本空。
+    // runReconstructThreads helper 已有(enrich.ts L1126,multi-pass scan
+    // self-reply chain 反向填 thread_root_id),每天 1 次跑足够(reconstruct 是
+    // backfill 性质,不需实时)。UTC 04:05 = BJT 12:05 中午闲时段。
+    const isXReconstructThreadsSlot = hour === 4 && minute === 5;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
@@ -1200,6 +1208,14 @@ export default {
           if (isXBackfillTruncatedSlot) {
             const r = await runBackfillTruncatedFromSyndication(env, 30, 400);
             console.log(`[cron] x-backfill-truncated result:`, JSON.stringify(r));
+            return;
+          }
+          // X thread_root_id 反向重建（2026-05-17 task #34）:每天 1 次跑
+          // runReconstructThreads,从 self-reply chain 反向填 thread_root_id。
+          // dryRun=false 真跑,maxPasses=5 覆盖普通 thread 链长。
+          if (isXReconstructThreadsSlot) {
+            const r = await runReconstructThreads(env, false, 5);
+            console.log(`[cron] x-reconstruct-threads result:`, JSON.stringify(r));
             return;
           }
           // X workflow backfill 兜底（2026-05-17 批 4）:扫 workflow_completed_at IS NULL
