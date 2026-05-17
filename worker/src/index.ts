@@ -20,6 +20,7 @@ import {
   runBackfillVideoMp4,
   runPhEnrich,
   triggerXWorkflowForItem,
+  runBackfillTruncatedFromSyndication,
 } from './enrich';
 import { handleTrack } from './track';
 import {
@@ -1058,6 +1059,13 @@ export default {
     // Huodongxing 历史活动 sweep：BJT 03:00 (UTC 19:00)，每日清扫一次
     const isHdxSweepSlot = hour === 19 && minute === 0;
 
+    // X tweets 截断 backfill 兜底（2026-05-17）：workflow step 0 治本但旧
+    // workflow instance 已过去；新 ingest 走 workflow step 0，老的 5% truncated
+    // 存量靠这个 cron tick 慢慢消化。:15 / :45 (30min cadence)，limit=30 +
+    // 400ms rateSleep ≈ 12s + syndication latency 内于 30s wall。
+    // 48 tick × 30 = 1440 / day capacity，500 存量 < 1 天清完。
+    const isXBackfillTruncatedSlot = minute === 15 || minute === 45;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
@@ -1165,6 +1173,13 @@ export default {
           if (isHdxEnrichSlot && env.HUODONGXING_DETAIL_WORKFLOW) {
             const r = await drainHdxPendingWorkflows(env, 25, 3);
             console.log(`[cron] hdx-auto-drain result:`, JSON.stringify(r));
+            return;
+          }
+          // X tweets 截断 backfill 兜底（2026-05-17）：workflow step 0 治本但旧
+          // ingest 漏检的 ~500 条靠这个 cron tick 慢慢消化（也覆盖 workflow trigger 失败的 case）。
+          if (isXBackfillTruncatedSlot) {
+            const r = await runBackfillTruncatedFromSyndication(env, 30, 400);
+            console.log(`[cron] x-backfill-truncated result:`, JSON.stringify(r));
             return;
           }
           // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
@@ -2533,6 +2548,17 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       10,
     );
     const result = await runGithubR2Migrate(env, limit);
+    return jsonResponse(result, 200, request, env);
+  }
+  // backfill-truncated-text：扫 X tweets 截断的 (content 末尾 … + length 130-150)，
+  // 调 syndication API 补全。给一次性救存量 + cron 兜底用，跟 workflow step 0
+  // (backfillTruncatedTextForXTweet) 共用单 item 逻辑。
+  if (mode === 'backfill-truncated-text') {
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '30'), 1),
+      200,
+    );
+    const result = await runBackfillTruncatedFromSyndication(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   // hdx-drain-workflow：CLI 一次性触发 huodongxing pending workflow。

@@ -28,6 +28,7 @@ import {
   checkLongformForXTweet,
   fetchLongformViaScrapeBadger,
   translateXTweetField,
+  backfillTruncatedTextForXTweet,
 } from '../enrich';
 
 interface XTweetParams {
@@ -53,6 +54,17 @@ const RETRY = {
 export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams> {
   async run(event: WorkflowEvent<XTweetParams>, step: WorkflowStep) {
     const { itemId } = event.payload;
+
+    // ─── Step 0: backfill truncated text via syndication ─────────
+    // 2026-05-17 治本：SB list-poll mode 不返 full_text，ingest 时拿到 X list 页
+    // DOM 140 字截断版（末尾 …）。classify / translate 看到截断内容时质量差，
+    // feed 显示也是截断。在 classify 之前调 syndication API 补全完整 text，
+    // downstream step 看到的就是 full content。
+    // 异常（fetchTweet network 失败 etc）走 RETRY 兜底；syndication 404 标
+    // fetch_error 不阻塞 pipeline（继续跑 classify 截断版聊胜于无）。
+    await step.do('backfill-truncated-text', RETRY, () =>
+      backfillTruncatedTextForXTweet(this.env, itemId),
+    );
 
     // ─── Step 1: classify ────────────────────────────────────────
     const cls = await step.do('classify-with-llm', RETRY, async () => {
