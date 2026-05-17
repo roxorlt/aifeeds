@@ -675,6 +675,19 @@ export async function applyPatch(
     updates.push("metrics = ?");
     vals.push(JSON.stringify(patch.metrics));
   }
+  // 数据失效级联(2026-05-17 批 2):关联字段(quote/reply/retweet/link_card)更新时,
+  // 清掉 main content_translated + translated_at,让 stuck 检测命中 → workflow trigger → 重翻所有字段。
+  // 关联字段自身的 content_translated 已经被 extra.quote_of = patch.quote_of 等"整体覆盖"隐式清掉。
+  // 不动 stuck 检测条件,完全依赖 main content_translated NULL 作为触发信号。
+  const hasContentChange =
+    patch.quote_of !== undefined ||
+    patch.reply_of !== undefined ||
+    patch.retweet_of !== undefined ||
+    patch.link_card !== undefined;
+  if (hasContentChange) {
+    updates.push("content_translated = NULL");
+    updates.push("translated_at = NULL");
+  }
   vals.push(row.id);
   await env.DB.prepare(
     `UPDATE items SET ${updates.join(", ")} WHERE id = ?`,
@@ -4052,15 +4065,19 @@ export async function backfillTruncatedTextForXTweet(
     return { updated: false, from_chars: content.length, to_chars: content.length, source: 'skipped' };
   }
 
+  // 数据失效级联(2026-05-17 批 2):content 改了(短截断 → 完整长版),
+  // 旧 content_translated 基于截断版翻译失效,清掉让 workflow 重翻。
   await env.DB.prepare(
     `UPDATE items
        SET content = ?,
+           content_translated = NULL,
+           translated_at = NULL,
            extra = json_set(coalesce(extra,'{}'),
                             '$.longform.fetched_at', ?,
                             '$.longform.backfill_source', ?)
        WHERE id = ?`,
   ).bind(fullText, new Date().toISOString(), source, itemId).run();
-  console.log(`[x-workflow:step0] ${itemId}: ${content.length} → ${fullText.length} chars (${source})`);
+  console.log(`[x-workflow:step0] ${itemId}: ${content.length} → ${fullText.length} chars (${source}) + cleared translation`);
   return { updated: true, from_chars: content.length, to_chars: fullText.length, source };
 }
 
@@ -4349,16 +4366,26 @@ export async function fetchLongformViaScrapeBadger(
   }
 
   // 仅在 SB 给的更长时才覆盖（monotonic 规则同 ingest）
+  // 数据失效级联(2026-05-17 批 2):content 真正更新时(CASE WHEN 命中),
+  // 同步清 content_translated + translated_at 让 workflow 重翻。
   await env.DB.prepare(
     `UPDATE items
         SET content = CASE
               WHEN content IS NULL OR length(?) >= length(content) THEN ?
               ELSE content
             END,
+            content_translated = CASE
+              WHEN content IS NULL OR length(?) >= length(content) THEN NULL
+              ELSE content_translated
+            END,
+            translated_at = CASE
+              WHEN content IS NULL OR length(?) >= length(content) THEN NULL
+              ELSE translated_at
+            END,
             extra = json_set(coalesce(extra, '{}'), '$.longform.fetched_at', ?)
       WHERE id = ?`,
-  ).bind(ft, ft, nowIso, row.id).run();
-  console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c`);
+  ).bind(ft, ft, ft, ft, nowIso, row.id).run();
+  console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c (cascade-clear if updated)`);
   return { updated: true, full_text_len: ft.length };
 }
 
