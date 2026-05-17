@@ -2649,7 +2649,11 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
       100,
     );
-    const result = await runBackfillRetweets(env, limit, rateSleepMs);
+    // 2026-05-17 加 recover param:recover=1 绕开 state KV sentinel + 选
+    // is_retweet=1 AND retweet_of NULL 行,覆盖被 workflow instance 复用旧代码
+    // 跳过 backfill-retweet 的历史数据(P0 fix 后无法通过 workflow 路径修)。
+    const recover = url.searchParams.get('recover') === '1';
+    const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-x-workflow') {
