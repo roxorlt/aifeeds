@@ -22,6 +22,7 @@ import {
   triggerXWorkflowForItem,
   runBackfillTruncatedFromSyndication,
   classifyAndTranslateForXTweet,
+  backfillMediaForXTweet,
 } from './enrich';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
@@ -2655,6 +2656,59 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const recover = url.searchParams.get('recover') === '1';
     const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-media') {
+    // 2026-05-17 user 反馈 X 有图片/视频但 aifeeds media=[]。
+    // 直接调 backfillMediaForXTweet,绕过 workflow instance 复用问题(老 instance
+    // 跑旧代码没 backfill-media step)。SQL select media 为空 + 未 backfilled 的。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '100'), 1),
+      500,
+    );
+    const throttleMs = Math.max(
+      parseInt(url.searchParams.get('throttle_ms') || '2000'),
+      0,
+    );
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id FROM items
+        WHERE source_type='x_list'
+          AND deleted_at IS NULL
+          AND (media IS NULL OR media = '[]' OR length(media) <= 2)
+          AND json_extract(extra, '$.media_backfilled_at') IS NULL
+        ORDER BY scraped_at DESC
+        LIMIT ?`,
+    ).bind(limit).all<{ id: string }>();
+    let updated = 0;
+    let already = 0;
+    let no_media = 0;
+    let not_found = 0;
+    let failed = 0;
+    for (let i = 0; i < pending.results.length; i++) {
+      try {
+        const r = await backfillMediaForXTweet(env, pending.results[i].id);
+        if (r.updated) updated++;
+        else if (r.reason === 'already_attempted' || r.reason === 'no_improvement') already++;
+        else if (r.reason === 'no_media') no_media++;
+        else if (r.reason === 'syndication_not_found') not_found++;
+      } catch (e) {
+        console.error(`[backfill-media] ${pending.results[i].id}:`, e);
+        failed++;
+      }
+      if (throttleMs > 0 && i < pending.results.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, throttleMs));
+      }
+    }
+    return jsonResponse({
+      mode: 'backfill-media',
+      found: pending.results.length,
+      updated,
+      no_media,
+      not_found,
+      already_attempted: already,
+      failed,
+      elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
   }
   if (mode === 'backfill-x-workflow') {
     // 批 4(2026-05-17):扫老 X 推文 extra.workflow_completed_at IS NULL,

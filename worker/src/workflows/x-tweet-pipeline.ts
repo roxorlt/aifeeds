@@ -31,6 +31,7 @@ import {
   checkLongformForXTweet,
   fetchLongformViaScrapeBadger,
   backfillTruncatedTextForXTweet,
+  backfillMediaForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
 
@@ -77,7 +78,10 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // hasXxxRef 信号控制条件跑,避免无谓 syndication traffic。
     // backfillQuote 同时会写 link_card(syndication API 同 response 顺便拿到)。
     // 新加 backfill-retweet:之前缺失导致 retweet 显示转发者而非原作者(2026-05-17 retweet bug 根源)。
-    const [, , , longform] = await Promise.all([
+    // 2026-05-17 加 backfill-media 第 5 并行 step:user 反馈 X 有图片/视频但 aifeeds
+    // media=[],SB ingest 偶发漏返导致。无条件每条都跑(标 media_backfilled_at 防重复),
+    // syndication API 返完整 mediaDetails(photo + video mp4)+ 覆盖 D1 media 字段。
+    const [, , , , longform] = await Promise.all([
       hasQuoteRef
         ? step.do('backfill-quote', RETRY, () => backfillQuoteForXTweet(this.env, itemId))
         : Promise.resolve(null),
@@ -87,6 +91,7 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       hasRetweetRef
         ? step.do('backfill-retweet', RETRY, () => backfillRetweetForXTweet(this.env, itemId))
         : Promise.resolve(null),
+      step.do('backfill-media', RETRY, () => backfillMediaForXTweet(this.env, itemId)),
       step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
     ]);
 
