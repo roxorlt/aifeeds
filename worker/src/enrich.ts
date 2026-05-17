@@ -3967,6 +3967,166 @@ export async function classifyXTweetWithLlm(
  * Workflow Step 2a: 通过 syndication API 回填 quote_of / link_card。
  * 跟老 runBackfillQuotes 一条 loop body 同逻辑，去掉 state KV bookkeeping。
  */
+/**
+ * Workflow Step 0: 检测 X scraper DOM 截断，从 syndication API 补全 content。
+ *
+ * 根因（2026-05-17）：SB list-poll mode 不返 full_text 字段，scrapebadger.ts
+ * sbTweetToIngestItem fallback 到 t.text（X list 页 DOM 显示的 ~140 字符 "Show
+ * more" 前内容）。导致 ~5% X tweets 入库时 content 末尾 …，下游 classify /
+ * translate / feed 显示都是截断版。
+ *
+ * 治本：每条新 tweet 进 workflow 时 step 0 检查截断，调 syndication API
+ * (cdn.syndication.twimg.com，免费 + 对老 tweet 仍有效) 拿完整 text，UPDATE content。
+ * note_tweet 长推优先用 note_tweet.text（最长 25k）。
+ *
+ * 副作用：标 extra.longform.fetched_at (避免后续 backfill 重抓) +
+ *         extra.longform.backfill_source ('note_tweet' | 'syndication')。
+ *
+ * 失败兜底：syndication 找不到（404）→ 标 fetch_error='syndication_404' 不再重试。
+ * 异常（network etc）→ throw，让 workflow step retry 兜底。
+ */
+export async function backfillTruncatedTextForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{
+  updated: boolean;
+  from_chars: number;
+  to_chars: number;
+  source: 'note_tweet' | 'syndication' | 'skipped' | 'not_found';
+}> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, content, extra FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`backfillTruncatedTextForXTweet: item not found ${itemId}`);
+
+  const content = row.content || '';
+  // 截断判定：末尾 unicode … (U+2026) + 长度 100-200（X list page DOM 截断区间，
+  // 多数 140 字符，留一些容差给 emoji / 引号包围导致的 ±20 chars 偏差）。
+  if (!content.endsWith('…') || content.length < 100 || content.length > 200) {
+    return { updated: false, from_chars: content.length, to_chars: content.length, source: 'skipped' };
+  }
+
+  const res = await fetchTweet(row.source_id);
+  if (res === null) {
+    throw new Error(`backfillTruncatedTextForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  if (res.notFound || !res.data) {
+    // tweet 删了 / 私密 / 受限 — 标 fetch_error 避免后续 backfill cron 重抓
+    await env.DB.prepare(
+      `UPDATE items
+         SET extra = json_set(coalesce(extra,'{}'),
+                              '$.longform.fetch_error', 'syndication_404',
+                              '$.longform.fetched_at', ?)
+         WHERE id = ?`,
+    ).bind(new Date().toISOString(), itemId).run();
+    return { updated: false, from_chars: content.length, to_chars: content.length, source: 'not_found' };
+  }
+
+  // 优先 note_tweet.text（X Premium 长推，最长 25k），fallback 普通 text（280 字 max）
+  const nt = res.data.note_tweet as Record<string, unknown> | undefined;
+  let fullText: string;
+  let source: 'note_tweet' | 'syndication';
+  if (nt) {
+    const ntText = (nt.text as string) || '';
+    if (ntText.length > content.length) {
+      fullText = ntText;
+      source = 'note_tweet';
+    } else {
+      fullText = (res.data.text as string) || '';
+      source = 'syndication';
+    }
+  } else {
+    fullText = (res.data.text as string) || '';
+    source = 'syndication';
+  }
+
+  // 长度未增加 → 不更新（syndication 也返截断的退化场景；标 fetched_at 防重试）
+  if (fullText.length <= content.length) {
+    await env.DB.prepare(
+      `UPDATE items
+         SET extra = json_set(coalesce(extra,'{}'),
+                              '$.longform.fetched_at', ?,
+                              '$.longform.backfill_source', 'syndication_same_length')
+         WHERE id = ?`,
+    ).bind(new Date().toISOString(), itemId).run();
+    return { updated: false, from_chars: content.length, to_chars: content.length, source: 'skipped' };
+  }
+
+  await env.DB.prepare(
+    `UPDATE items
+       SET content = ?,
+           extra = json_set(coalesce(extra,'{}'),
+                            '$.longform.fetched_at', ?,
+                            '$.longform.backfill_source', ?)
+       WHERE id = ?`,
+  ).bind(fullText, new Date().toISOString(), source, itemId).run();
+  console.log(`[x-workflow:step0] ${itemId}: ${content.length} → ${fullText.length} chars (${source})`);
+  return { updated: true, from_chars: content.length, to_chars: fullText.length, source };
+}
+
+export interface BackfillTruncatedResult {
+  mode: string;
+  selected: number;
+  updated: number;
+  not_found: number;
+  skipped: number;
+  failed: number;
+  duration_ms: number;
+}
+
+/**
+ * Batch backfill：扫所有截断 + 未 fetched 的 X tweets，逐个走 syndication 补全。
+ * 给 enrich/run?mode=backfill-truncated-text + cron 兜底用。单 item 调
+ * backfillTruncatedTextForXTweet 共用逻辑。
+ *
+ * SQL filter：content 末尾 … + 长度 130-150 + 未 fetched 也未 errored。
+ * rateSleepMs 400 → syndication ~2.5 qps 避免被限流（X public endpoint）。
+ */
+export async function runBackfillTruncatedFromSyndication(
+  env: EnrichEnv,
+  limit: number,
+  rateSleepMs: number = 400,
+): Promise<BackfillTruncatedResult> {
+  const t0 = Date.now();
+  const rows = await env.DB.prepare(
+    `SELECT id FROM items
+       WHERE source_type = 'x_list'
+         AND content LIKE '%…'
+         AND length(content) BETWEEN 130 AND 150
+         AND (extra IS NULL
+              OR (json_extract(extra, '$.longform.fetched_at') IS NULL
+                  AND json_extract(extra, '$.longform.fetch_error') IS NULL))
+       ORDER BY scraped_at DESC
+       LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+  const selected = rows.results.length;
+  let updated = 0;
+  let notFound = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const r of rows.results) {
+    try {
+      const res = await backfillTruncatedTextForXTweet(env, r.id);
+      if (res.updated) updated++;
+      else if (res.source === 'not_found') notFound++;
+      else skipped++;
+    } catch (e) {
+      console.error(`[backfill-truncated-text] ${r.id} failed:`, e);
+      failed++;
+    }
+    if (rateSleepMs > 0) await new Promise((res) => setTimeout(res, rateSleepMs));
+  }
+  return {
+    mode: 'backfill-truncated-text',
+    selected,
+    updated,
+    not_found: notFound,
+    skipped,
+    failed,
+    duration_ms: Date.now() - t0,
+  };
+}
+
 export async function backfillQuoteForXTweet(
   env: EnrichEnv,
   itemId: string,
