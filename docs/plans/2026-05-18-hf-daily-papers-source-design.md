@@ -31,7 +31,7 @@
 | 排序 | `paper.upvotes` desc(HF 自己的热度排序)|
 | 筛选 | **#2 列头 dropdown 按 `extra.arxiv_categories[0]` (primary) 服务端 filter**(`GET /api/items?source_type=hf_paper&category=cs.LG`) |
 | 通知 | Phase 8 标准模式,1 次/天 cron summary 推 PushDeer |
-| 月度 LLM 成本 | C 方案 ¥15-50/月(deep_analysis 7 次 pro reasoning + 评论/翻译 flash)。OPS budget alert 阈值建议 **从 ¥10 → ¥60**,Phase 4 第一轮 10 条采样精准校准 |
+| 月度 LLM 成本 | C 方案 ¥17-42/月(deep_analysis 7 次 pro reasoning + 评论/翻译 flash)。**user 2026-05-18:DeepSeek 预算无上限,目前 ¥500 余额可追加**。OPS 在 > ¥60/月 时 `pushDeerAlert` 提醒追加余额,不阻断 workflow |
 
 ---
 
@@ -136,7 +136,7 @@ HF discussion API 未公开。Web URL `/papers/{id}/discussions/1` 返 401(需�
 
 | 列 | HF 值 |
 |----|------|
-| `id` | `hf:<arxiv_id>` 复合(如 `hf:2605.13301`) |
+| `id` | `hf_paper:<arxiv_id>` 复合(如 `hf_paper:2605.13301`)— 跟其他源 composite 一致(`x_list:` / `github:` / `product_hunt:` / `clawhub:` / `huodongxing:`),FE composite ID 才能直接跟 D1 主键比较 |
 | `source_type` | `'hf_paper'` |
 | `source_id` | `<arxiv_id>`(如 `2605.13301`) |
 | `title` | `paper.title` |
@@ -900,16 +900,34 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 - [ ] scheduled handler 加兜底 cron slot(`minute=20/50` 每 30min,limit=20 / throttle=3s)
 - [ ] **NEW #4 校准**:第一轮 backfill 跑 **10 条采样**,精准看 8 段 deep_analysis 实际 `total_tokens`(含 reasoning)累计 → 估算月度成本 → 写 OPS 报告 → 决定 budget alert 阈值是否调整 / 是否降级到 B 2-group
 
-### Phase 5:Dashboard UI(2.5 天,原 2 天 +0.5 天 NEW #2 dropdown)
+### Phase 5:Dashboard UI(BE 0 工作,**全部 FE 范围,跟 BE Phase 1-7 并行**)
 
-- [ ] `HfPaperCard.tsx`(已 PR #83,字段已对齐)
-- [ ] `HfPaperDrawerBody.tsx`(已 PR #83,字段已对齐,含评论 section placeholder)
-- [ ] `IconHfPaper`(HF logo 简化 SVG,严禁 emoji)
-- [ ] `Feed.tsx` 路由 `source_type === 'hf_paper'`
-- [ ] `TweetDrawer.tsx` 路由 `isHfPaper`
-- [ ] `/h/:arxiv_id` URL routing
-- [ ] **NEW #2**:`Feed.tsx` 加列头 dropdown(聚合当前可见 paper 的 `arxiv_categories[0]`,onChange 触发 `?category=<cat>` query)
-- [ ] 分享海报 SVG 模板加 `renderHfPaperContent`(`worker/src/share/svg-template.ts`)
+> **2026-05-18 FE 序列已锁**:B → A → F+G → E → D → C → H,2.5-4 天完成,跟 BE 12.75 天 calendar 重叠不延长 timeline。
+
+| FE 任务 | 状态 | 备注 |
+|---------|------|------|
+| `HfPaperCard.tsx` | ✅ done PR #83 | 字段已对齐 |
+| `HfPaperDrawerBody.tsx`(8 段 + 元信息 + 作者 + keywords + abstract + 外跳)| ✅ done PR #83 | 评论 section v1 需新加,见下 |
+| `IconHfPaper` | ✅ done PR #83 | |
+| `Feed.tsx` + `TweetDrawer.tsx` discriminator + render switch | ✅ done PR #83 | |
+| `/h/:arxiv_id` URL routing + `App.tsx` 原 arxiv 列 rename | ✅ done PR #83 | |
+| `share/svg-template.ts` chipColor `#ffd9a8` + bodyText 扩展点 | ✅ done PR #83 | |
+| **A. 分享海报 SVG body 完整渲染**(thumbnail / 标题中译 64px / TL;DR 36px / metrics 1 行 / by @ · HF Daily) | ⚠️ FE 待做 | worker `share/svg-template.ts` 加 `renderHfPaperContent`,跟 GH/PH/CH/HDX poster body 风格一致 |
+| **B. drawer 评论 section UI**(原文 + 译文 toggle) | ⚠️ FE 待做 | PR #83 mockup 限制写"discussion 不展示",v1 必含 |
+| **C. 列头 dropdown UI**(聚合 `arxiv_categories[0]` + onChange 触发 `?category=`) | ⚠️ FE 待做 | NEW #2 PM 需求 |
+| **D. 真实数据集成 + 联调**(`/img` 反代 + auth + 真实 deep_analysis 长文本) | ⚠️ FE 待做 | BE staging 后 |
+| **E. deep_analysis 200-500 字视觉微调**(若需要) | ⚠️ FE 待做 | 联调时同步 |
+| **F. `HfPaperMockupPage.tsx` + `mockData/hfPapers.ts` 清理** | ⚠️ FE 待做 | BE Phase 7 上线后 |
+| **G. `items.id` 命名统一**(`hf:` → `hf_paper:`) | ⚠️ BE Phase 1 + FE 同步 | FE PR #83 待 PM 确认时提出,采纳 |
+| **H. 真机验收**(iOS + 安卓 main 域)| ⚠️ FE + BE 联合 | Phase 7 一起 |
+
+**FE 待 BE ping 的 3 个集成节点**:
+
+1. BE Phase 1 完成 `extra.arxiv_categories` 入库 staging → FE 接 dropdown 真数据(任务 C)
+2. BE Phase 3 完成 `extra.discussion_comments` 入库 staging → FE 接评论真数据(任务 B)
+3. BE Phase 4 staging 整套跑通 → FE 联调 + 视觉微调 + mock 清理(任务 D/E/F)
+
+期间 FE 不阻塞 BE,所有 A/B/C/E/F/G 用现有 mock 数据本地做,PR #83 增量推过来,BE 不需要 review,只在 Phase 4 联调时一起看最终态。
 
 ### Phase 6:R2 资源迁移(含在 Phase 3,不单独)
 
@@ -976,6 +994,8 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 | ar5iv 全文超长(>1MB)爆 D1 行 | 中 | 中 | 选项 B:存 R2 `hf-paper-ar5iv/<arxiv_id>.json`,extra 只记 `ar5iv_paragraphs_count` |
 | HF Daily 改版导致 listing schema 变 | 低 | 高 | fetch handler 加 fail-safe(缺字段 log + 保留可用部分);`pushDeerAlert` 告警 |
 | **NEW**:CF Workflow step 上限 / fan-out 8 段触发限制 | 低 | 中 | CF Workflows 实测 fan-out 多 step OK;若 timeout 频发(单段 pro reasoning > 10min),Phase 3 把 8 段串行(代价:wall-clock 8x,但不影响成功率) |
+| **NEW**:CF Workflows invocations 配额超 Paid plan(8 段 fan-out 放大 8x) | 中 | 中 | 50 paper × 30 天 × 8 段 + 其他 step ≈ 20-30K invocations/月。Paid plan 默认 100K/day 应该够,但 OPS Phase 1 启动前 verify(§11 #4)|
+| **NEW**:CF Workers IP 段被 arxiv.org 频繁请求 ban | 低 | 中 | arxiv.org API 1 次/天 × 50 个 batch,远低于 IP-level rate limit;如出现 503 → OPS 协助换 IP 或上代理(§11 #6 持续监控)|
 
 ---
 
@@ -987,18 +1007,25 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 - [x] **DeepSeek v4-pro 配额**:可调,model `deepseek-v4-pro` 返 chat.completion 正常。**⚠️ 注意**:pro 是 reasoning model,reasoning_tokens 开销显著(测试 reasoning 占 completion 93%)。当前余额 ¥205。
 - [x] **PUSHDEER_ADMIN_KEYS**:已用于 cron summary 通知,2 个 admin token 各推一条 preflight 测试,返 `{"code":0,"counts":1,"success":"ok"}`,送达确认。
 
-### Phase 1+ 待处理(随实施推进)
+### Phase 1+ 待处理(完整版,~1.5-2h 一次性 + 持续监控)
 
-- [ ] **Budget alert 阈值调整**:从 ¥10/月 → **¥60/月**(C 方案 7 次 pro reasoning + 评论翻译累加,估 ¥17-42/月,留 50% buffer)。Phase 4 第一轮 10 条采样后精准校准,实际 > ¥60 → 触发 `pushDeerAlert` + OPS 决定是否充值 / 降级方案
-- [ ] **CF Browser Rendering 绑定**(若 Phase 0.5 reconnaissance 失败,#3 必须 puppeteer):`wrangler.toml` 加 `[browser] binding = "BROWSER"` + Workers Paid plan 自带 10h/月配额。HF discussion 抓取月度估算 ~2h(50 paper × 5 sec × 30 天),容量充足
-- [ ] **R2 bucket cap 监控**:论文 figure 全量迁(NEW #1),50 paper × 30 天 × ~200KB/figure = ~300MB/月。`xlist-readme-assets` bucket 当前总量(待 OPS 报)+ 此项增量是否需要扩容
-- [ ] **DeepSeek 月度成本监控**:Phase 7 上线后 1 个月观察实际成本,超 ¥60 → OPS 决定续费节奏 / 调阈值 / 降级方案
+| # | 项 | 类型 | 估时 | 触发时机 |
+|---|----|------|------|---------|
+| 1 | **Budget alert 阈值调整**:¥10/月 → **不设上限**(user 2026-05-18:DeepSeek 预算无上限,目前 ¥500 余额可追加)。仍保留 `pushDeerAlert` 在月度 > ¥60 时提醒 OPS 决定何时追加,不阻断 workflow | 配置改动 | 5 min | Phase 1 启动前 |
+| 2 | **Verify CF Browser Rendering 在当前 Paid plan 可用**(若 Phase 0.5 reconnaissance 走 puppeteer 路径) | 验证 | 15 min | Phase 0.5 之后 |
+| 3 | **R2 bucket cap 监控**:论文 figure 全量迁(NEW #1)+ 评论者 avatar(NEW #3),50 paper × 30 天 × ~250KB/paper(figure + N avatars)= ~380MB/月。`xlist-readme-assets` bucket 当前总量(待 OPS 报)+ 决定 Phase 7 上线前是否扩容 / 加 retention policy | 调研 | 30 min | Phase 1 启动前 |
+| 4 | **CF Workflows 配额 verify**:`HF_PAPER_PIPELINE_WORKFLOW` 是新 binding,Step 3 fan-out **8 段** 直接把 instance 数放大 8 倍。50 paper × 30 天 × 8 段 ≈ **12,000 step invocations / 月**(再加 step 0/1/2/4 + 评论 + ar5iv 翻译,总 ~20-30K/月)。确认 Paid plan 配额够用(默认 100K invocations/day) | 验证 | 15 min | Phase 1 启动前 |
+| 5 | **DeepSeek 月度成本监控**:Phase 7 上线后 1 个月观察实际消耗 vs 估算 ¥17-42/月。超 ¥60 → `pushDeerAlert` 提醒 OPS 追加余额(不降级方案,user 决策"按最佳质量") | 持续 | 1 月/期 | Phase 7 上线后 |
+| 6 | (可选)**arxiv.org API 监控**:Phase 7 后看是否有 503 / CF Workers IP 段被 ban,需 OPS 协助换 IP / 上代理 | 持续 | 1 月/期 | Phase 7 上线后 |
 
 ---
 
-## 12. FE 接触点(✅ PR #83 mockup done + 4 项变更 PM 已 sign-off)
+## 12. FE 接触点(✅ PR #83 production 组件 done + FE 序列已锁 2.5-4 天并行)
 
-- **FE mockup PR**:`#83`,branch `worktree-feat+hf-paper-mockup`(draft)
+- **FE PR**:`#83`,branch `worktree-feat+hf-paper-mockup`(draft → 增量推 production 化)
+- **FE 开工序列**(2026-05-18 PM 拍板):**B → A → F+G → E → D → C → H**,2.5-4 天,跟 BE 12.75 天 calendar 重叠不延长 timeline
+  - B 评论 section / A 海报 SVG body / F mock 清理 / G `items.id` 统一 / E 长文本微调 / D 真实数据集成 / C dropdown / H 真机验收
+  - 见 §9 Phase 5 任务清单
 - **真实数据 sample**:`docs/plans/_research/2026-05-18-hf-daily-papers-sample/`
   - `daily_papers.json` — 50 条今日 listing(原 API response)
   - `paper_detail_2605.13301.json` — 高 upvote(140)+ 有 GH(70 stars)
@@ -1010,13 +1037,14 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 - **BE 字段 schema**:本文档 §3
 - **FE 5 问答**:本文档 §6
 - **FE handoff 详文档**:`docs/plans/2026-05-18-hf-daily-papers-frontend-handoff.md`
-- **三件套**:feed 卡片(列宽 ~380px / 简介 4 行 / metrics + by 同行)+ drawer(常驻区上移 / TL;DR 默认 callout / 评论 section placeholder)+ 1080×1350 海报
+- **三件套**:feed 卡片(列宽 ~380px / 简介 4 行 / metrics + by 同行)+ drawer(常驻区上移 / TL;DR 默认 callout / 评论 section v1 必含)+ 1080×1350 海报
 - **chipColor**:`#ffd9a8`(暖橙色)
-- **PM 4 项变更已整合**(2026-05-18):
+- **PM 4 项变更整合**(2026-05-18):
   - #1 论文首图:BE Phase 2 抓 ar5iv 时解析 figure + R2 迁,FE 字段不变(media[0]),~70% 命中率(部分 reasoning 类论文无 figure 时 fallback HF thumbnail)
-  - #2 arxiv_categories:BE Phase 1 抓 arxiv.org Atom API 入库,FE Phase 5 加列头 dropdown
-  - #3 评论 v1 必含:BE Phase 0.5 reconnaissance 决定 internal API / puppeteer,FE 字段已预留(`extra.discussion_comments`)
+  - #2 arxiv_categories:BE Phase 1 抓 arxiv.org Atom API 入库,FE 任务 C 加列头 dropdown
+  - #3 评论 v1 必含:BE Phase 0.5 reconnaissance 决定 internal API / puppeteer,FE 任务 B 加评论 section
   - #4 deep_analysis 200-500 字:BE 走 C 方案 7 次独立 pro reasoning,FE 视觉已预留 leading-[1.7] + whitespace-pre-wrap
+- **`items.id` 命名统一**(FE PR #83 body 末尾 PM 决策):统一用 `hf_paper:<arxiv_id>` 跟其他源 composite 一致,BE Phase 1 schema 阶段统一改
 
 ---
 
