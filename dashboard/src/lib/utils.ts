@@ -93,11 +93,18 @@ const PROXY_BASE =
 // 物理像素而非 CSS 像素：所有 DPR 共享同一 CF cache entry，命中率最高。
 // 调用方按场景档位传：头像 80 / 卡片缩略图 400 / 详情大图 800。
 // video.twimg.com 不要传 width（worker /img 会 short-circuit 跳过 cf.image）。
-export function proxyImg(url: string | null | undefined, width?: number): string {
+// force: 默认只对 PROXY_HOSTS allowlist 域名走代理（GFW / 不稳定源用）；
+// LinkCard 等 og:image 任意外链场景传 force=true，让所有域都走 cf.image
+// + R2 缓存（避免 CN 网络直拉外链慢导致滑动卡顿）。
+export function proxyImg(
+  url: string | null | undefined,
+  width?: number,
+  opts: { force?: boolean } = {},
+): string {
   if (!url) return "";
   try {
     const u = new URL(url);
-    if (PROXY_HOSTS.has(u.hostname)) {
+    if (opts.force || PROXY_HOSTS.has(u.hostname)) {
       const params = new URLSearchParams({ url });
       if (width && u.hostname !== "video.twimg.com") {
         params.set("w", String(width));

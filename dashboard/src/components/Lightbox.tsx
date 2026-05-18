@@ -49,17 +49,29 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
     setIndex((i) => Math.max(0, Math.min(media.length - 1, i + delta)));
   };
 
+  // 蒙层 / 关闭按钮的 click + pointer/mouse down 全部 stopPropagation +
+  // preventDefault。Lightbox 渲染在 TweetCard <article> 子树内，未阻断
+  // 冒泡会触发 article 的 onPointerDown 记录 downPos 并被 click handler
+  // 当成卡片点击，弹出抽屉穿透 bug。
+  const stopBubble = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  const onOverlayClick = (e: React.MouseEvent) => {
+    stopBubble(e);
+    onClose();
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
-      onClick={onClose}
+      onClick={onOverlayClick}
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onClose();
-        }}
+        onClick={onOverlayClick}
         className="absolute right-4 top-4 text-2xl text-white/70 hover:text-white"
         aria-label="关闭"
       >

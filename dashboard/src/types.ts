@@ -72,6 +72,9 @@ export interface LinkCard {
   description_translated?: string | null;
   domain?: string | null;
   image_url?: string | null;
+  // YouTube / Vimeo / 其他视频站的播放地址（BE PR #77 起返回）。
+  // 有值时 LinkCard 用 <video> 渲染；播放失败时 fallback 到 image_url。
+  video_url?: string | null;
 }
 
 export interface ItemExtra {
