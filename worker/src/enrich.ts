@@ -4259,6 +4259,7 @@ function parseOgMeta(html: string): {
   description?: string;
   image?: string;
   url?: string;
+  video?: string;
 } {
   const get = (prop: string): string | undefined => {
     // <meta property="og:image" content="...">
@@ -4278,6 +4279,13 @@ function parseOgMeta(html: string): {
     description: get('og:description') || get('twitter:description'),
     image: get('og:image') || get('twitter:image'),
     url: get('og:url'),
+    // 2026-05-18 加视频字段:外链是 YouTube / 视频站时,og:video 给可播放 URL
+    video:
+      get('og:video') ||
+      get('og:video:url') ||
+      get('og:video:secure_url') ||
+      get('twitter:player:stream') ||
+      get('twitter:player'),
   };
 }
 
@@ -4389,7 +4397,7 @@ export async function backfillLinkCardForXTweet(
     domain = u.hostname.replace(/^www\./, '');
   } catch { /* ignore */ }
 
-  const linkCard = {
+  const linkCard: Record<string, unknown> = {
     url: og.url || redirectUrl,
     display_url: domain || redirectUrl,
     title: og.title || null,
@@ -4397,6 +4405,10 @@ export async function backfillLinkCardForXTweet(
     domain,
     image_url: og.image || null,
   };
+  // 2026-05-18 加视频地址:有 og:video 时 FE 用视频组件渲染(YouTube / Vimeo / 其他视频站)
+  if (og.video) {
+    linkCard.video_url = og.video;
+  }
 
   // 5. 写 extra.link_card
   const newExtra = { ...extra, link_card: linkCard, link_card_backfilled_at: nowIso };
@@ -4405,6 +4417,121 @@ export async function backfillLinkCardForXTweet(
   ).bind(JSON.stringify(newExtra), itemId).run();
   console.log(`[backfill-link-card] ${itemId}: ${redirectUrl} → og.title=${og.title?.slice(0, 30) || ''} og.image=${og.image ? 'yes' : 'no'}`);
   return { updated: true, reason: 'success' };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// backfillNestedXQuoteForXTweet — 2026-05-18 user 反馈 sample 2055798529327825294
+//
+// 根因:推文正文里嵌 x.com/.../status/(\d+) URL,X 原页面渲染成 quote tweet preview
+// (完整原推 + 视频),但 SB ingest 时没识别这种"内嵌 X URL"为 quote → quote_of_id 空
+// → 走外链卡片路径只抓到 og 截断(文案少 + 视频缺)。
+//
+// 修:scan content 找 x.com URL → 提取 status_id → 写 quote_of_id → inline 调
+// backfillQuoteForXTweet 拉完整原推数据(含 media + 翻译)。
+//
+// 行为:
+// - extra.quote_of_id 已存在 / extra.nested_x_quote_backfilled_at 已存在 → 跳过
+// - 优先扫直接 x.com / twitter.com URL
+// - fallback 扫 t.co URL → HEAD 跟随跳转 → match x.com pattern
+// - 找到 status_id → 写 extra.quote_of_id + 立即调 backfillQuoteForXTweet
+// - 任何情况都标 nested_x_quote_backfilled_at 防 cron 重试
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function backfillNestedXQuoteForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{
+  updated: boolean;
+  found_quote_id?: string;
+  reason?:
+    | 'already_attempted'
+    | 'no_url'
+    | 'no_x_url'
+    | 'quote_filled'
+    | 'quote_backfill_failed';
+}> {
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, content, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`backfillNestedXQuoteForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  // 已尝试 → 跳过
+  if (extra.nested_x_quote_backfilled_at) {
+    return { updated: false, reason: 'already_attempted' };
+  }
+  // 已有 quote_of_id → 标记不重试(已通过其他路径写过)
+  if (extra.quote_of_id) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.nested_x_quote_backfilled_at', ?) WHERE id = ?`,
+    ).bind(new Date().toISOString(), itemId).run();
+    return { updated: false, reason: 'already_attempted' };
+  }
+
+  const content = row.content || '';
+  const nowIso = new Date().toISOString();
+
+  // 1. 优先扫直接 x.com / twitter.com URL
+  const directXMatch = content.match(/https?:\/\/(?:x|twitter)\.com\/[^\s\/]+\/status\/(\d+)/i);
+  let foundStatusId: string | null = directXMatch ? directXMatch[1] : null;
+
+  // 2. fallback 扫 t.co URL → HEAD redirect → match x.com pattern
+  if (!foundStatusId) {
+    const tcoUrls = content.match(/https:\/\/t\.co\/\w+/g) || [];
+    for (const tcoUrl of tcoUrls) {
+      try {
+        const headRes = await fetch(tcoUrl, {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal: AbortSignal.timeout(5000),
+        });
+        const location = headRes.headers.get('location');
+        if (location) {
+          const m = location.match(/^https?:\/\/(?:x|twitter)\.com\/[^\/]+\/status\/(\d+)/i);
+          if (m) {
+            foundStatusId = m[1];
+            break;
+          }
+        }
+      } catch (e) {
+        console.warn(`[nested-x-quote] HEAD ${tcoUrl} failed: ${String(e)}`);
+      }
+    }
+    if (!foundStatusId && tcoUrls.length === 0) {
+      // 完全没 URL
+      await env.DB.prepare(
+        `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.nested_x_quote_backfilled_at', ?) WHERE id = ?`,
+      ).bind(nowIso, itemId).run();
+      return { updated: false, reason: 'no_url' };
+    }
+  }
+
+  if (!foundStatusId) {
+    // 有 URL 但不是 x.com → 标 attempted 让 link_card 路径处理
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.nested_x_quote_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    return { updated: false, reason: 'no_x_url' };
+  }
+
+  // 3. 找到嵌 X URL → 写 quote_of_id + 标 attempted
+  const newExtra = { ...extra, quote_of_id: foundStatusId, nested_x_quote_backfilled_at: nowIso };
+  await env.DB.prepare(
+    `UPDATE items SET extra = ? WHERE id = ?`,
+  ).bind(JSON.stringify(newExtra), itemId).run();
+
+  // 4. 立即 inline 调 backfillQuoteForXTweet 拉完整原推数据(media + 翻译走 step 3)
+  try {
+    await backfillQuoteForXTweet(env, itemId);
+  } catch (e) {
+    console.warn(`[nested-x-quote] ${itemId}: backfillQuote failed: ${String(e)}`);
+    return { updated: true, found_quote_id: foundStatusId, reason: 'quote_backfill_failed' };
+  }
+
+  console.log(`[nested-x-quote] ${itemId}: found X quote ${foundStatusId} + backfilled`);
+  return { updated: true, found_quote_id: foundStatusId, reason: 'quote_filled' };
 }
 
 export interface BackfillTruncatedResult {
