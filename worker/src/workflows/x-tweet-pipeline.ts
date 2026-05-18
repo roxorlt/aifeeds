@@ -57,6 +57,23 @@ const RETRY = {
   timeout: '5 minutes',
 } as const;
 
+// 2026-05-18 step callback wrapper:永不 throw,避免 CF runtime 标 outcome=exception。
+// step.do RETRY 内 callback throw → CF 报 worker outcome=exception(每 retry attempt 一次)。
+// 即使 caller Promise.allSettled wrap,attempt-level exception 仍计入 OPS 错误率。
+// safeStep 让 callback return null on error,step.do 拿到 success → 永不 throw。
+async function safeStep<T>(
+  name: string,
+  itemId: string,
+  fn: () => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await fn();
+  } catch (e) {
+    console.warn(`[step-safe:${name}] ${itemId}: caught ${String(e).slice(0, 200)}`);
+    return null;
+  }
+}
+
 export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams> {
   async run(event: WorkflowEvent<XTweetParams>, step: WorkflowStep) {
     const { itemId } = event.payload;
@@ -90,7 +107,7 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // 异常（fetchTweet network 失败 etc）走 RETRY 兜底；syndication 404 标
     // fetch_error 不阻塞 pipeline（继续跑 classify 截断版聊胜于无）。
     await step.do('backfill-truncated-text', RETRY, () =>
-      backfillTruncatedTextForXTweet(this.env, itemId),
+      safeStep('backfill-truncated-text', itemId, () => backfillTruncatedTextForXTweet(this.env, itemId)),
     );
 
     const { hasQuoteRef, hasReplyRef, hasRetweetRef, lang } = event.payload;
@@ -115,18 +132,18 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // allSettled 让每个 step 独立结果,某个 fail 不影响其他 + 不阻塞 workflow 整体 completion。
     const results = await Promise.allSettled([
       hasQuoteRef
-        ? step.do('backfill-quote', RETRY, () => backfillQuoteForXTweet(this.env, itemId))
+        ? step.do('backfill-quote', RETRY, () => safeStep('backfill-quote', itemId, () => backfillQuoteForXTweet(this.env, itemId)))
         : Promise.resolve(null),
       hasReplyRef
-        ? step.do('backfill-reply', RETRY, () => backfillReplyForXTweet(this.env, itemId))
+        ? step.do('backfill-reply', RETRY, () => safeStep('backfill-reply', itemId, () => backfillReplyForXTweet(this.env, itemId)))
         : Promise.resolve(null),
       hasRetweetRef
-        ? step.do('backfill-retweet', RETRY, () => backfillRetweetForXTweet(this.env, itemId))
+        ? step.do('backfill-retweet', RETRY, () => safeStep('backfill-retweet', itemId, () => backfillRetweetForXTweet(this.env, itemId)))
         : Promise.resolve(null),
-      step.do('backfill-media', RETRY, () => backfillMediaForXTweet(this.env, itemId)),
-      step.do('backfill-link-card', RETRY, () => backfillLinkCardForXTweet(this.env, itemId)),
-      step.do('backfill-nested-x-quote', RETRY, () => backfillNestedXQuoteForXTweet(this.env, itemId)),
-      step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
+      step.do('backfill-media', RETRY, () => safeStep('backfill-media', itemId, () => backfillMediaForXTweet(this.env, itemId))),
+      step.do('backfill-link-card', RETRY, () => safeStep('backfill-link-card', itemId, () => backfillLinkCardForXTweet(this.env, itemId))),
+      step.do('backfill-nested-x-quote', RETRY, () => safeStep('backfill-nested-x-quote', itemId, () => backfillNestedXQuoteForXTweet(this.env, itemId))),
+      step.do('check-longform', RETRY, () => safeStep('check-longform', itemId, () => checkLongformForXTweet(this.env, itemId))),
     ]);
     // log fail step 便于排查,但不阻塞继续
     for (const [idx, r] of results.entries()) {
@@ -142,13 +159,9 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // ─── Step 2: longform fetch via ScrapeBadger (条件) ──────────
     // 2026-05-18 fix:longform fetch 也包 try 防 throw 阻塞 step 3
     if (longform && (longform as { is_longform: boolean }).is_longform) {
-      try {
-        await step.do('longform-via-sb', RETRY, () =>
-          fetchLongformViaScrapeBadger(this.env, itemId),
-        );
-      } catch (e) {
-        console.warn(`[x-workflow:step2] ${itemId}: longform-via-sb rejected: ${String(e).slice(0, 200)}`);
-      }
+      await step.do('longform-via-sb', RETRY, () =>
+        safeStep('longform-via-sb', itemId, () => fetchLongformViaScrapeBadger(this.env, itemId)),
+      );
     }
 
     // ─── Step 3: classify + translate 合并调用 (JSON Mode 1 次) ──
@@ -156,15 +169,11 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // is_relevant=0 时 DeepSeek 内部判断不返翻译,output token 节省。
     // 失败时函数内 retry 1 次,仍失败标 extra.translation_failed_at,不阻塞 workflow。
     // 2026-05-18 fix:外层 try wrap 防 step.do RETRY 用完 throw 阻塞 step 4
-    let classifyTrans: { is_relevant: 0 | 1; fields_translated: string[]; attempts: number; failed?: string };
-    try {
-      classifyTrans = await step.do('classify-translate', RETRY, () =>
-        classifyAndTranslateForXTweet(this.env, itemId, { lang }),
-      );
-    } catch (e) {
-      console.warn(`[x-workflow:step3] ${itemId}: classify-translate rejected: ${String(e).slice(0, 200)}`);
-      classifyTrans = { is_relevant: 0, fields_translated: [], attempts: 0, failed: 'http' };
-    }
+    const classifyTransResult = await step.do('classify-translate', RETRY, () =>
+      safeStep('classify-translate', itemId, () => classifyAndTranslateForXTweet(this.env, itemId, { lang })),
+    );
+    const classifyTrans: { is_relevant: 0 | 1; fields_translated: string[]; attempts: number; failed?: string } =
+      classifyTransResult || { is_relevant: 0, fields_translated: [], attempts: 0, failed: 'http' };
 
     // ─── Step 4: 完整性 gate ─────────────────────────────────────
     // 通过条件:classify-translate 未 failed(代表 is_relevant 已写入 +
@@ -174,17 +183,15 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // 2026-05-18 fix:mark-completed 也 try 防 D1 偶发 throw 阻塞 return
     if (!classifyTrans.failed) {
       const nowIso = new Date().toISOString();
-      try {
-        await step.do('mark-completed', RETRY, async () => {
+      await step.do('mark-completed', RETRY, () =>
+        safeStep('mark-completed', itemId, async () => {
           await this.env.DB.prepare(
             `UPDATE items
                 SET extra = json_set(coalesce(extra, '{}'), '$.workflow_completed_at', ?)
               WHERE id = ?`,
           ).bind(nowIso, itemId).run();
-        });
-      } catch (e) {
-        console.warn(`[x-workflow:step4] ${itemId}: mark-completed rejected: ${String(e).slice(0, 200)}`);
-      }
+        }),
+      );
     }
 
     return {
