@@ -33,6 +33,7 @@ import {
   backfillTruncatedTextForXTweet,
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
+  backfillNestedXQuoteForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
 
@@ -84,7 +85,10 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // - backfill-media:syndication API 返完整 mediaDetails(photo + video mp4)
     // - backfill-link-card:扫 content 内 t.co URL → redirect → 抓 OG meta 写 link_card
     // 两个 step 都无条件每条跑(各自标记防重复)。
-    const [, , , , , longform] = await Promise.all([
+    // 2026-05-18 加 backfill-nested-x-quote 第 7 并行 step:
+    // 当正文里嵌 x.com URL(SB ingest 没识别为 quote)时,提取 status_id 写 quote_of_id
+    // + inline 调 backfillQuote 拉完整原推数据(含 media + 翻译走 step 3)。
+    const [, , , , , , longform] = await Promise.all([
       hasQuoteRef
         ? step.do('backfill-quote', RETRY, () => backfillQuoteForXTweet(this.env, itemId))
         : Promise.resolve(null),
@@ -96,6 +100,7 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
         : Promise.resolve(null),
       step.do('backfill-media', RETRY, () => backfillMediaForXTweet(this.env, itemId)),
       step.do('backfill-link-card', RETRY, () => backfillLinkCardForXTweet(this.env, itemId)),
+      step.do('backfill-nested-x-quote', RETRY, () => backfillNestedXQuoteForXTweet(this.env, itemId)),
       step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
     ]);
 
