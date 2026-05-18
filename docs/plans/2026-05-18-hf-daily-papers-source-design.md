@@ -13,7 +13,7 @@
 
 | 维度 | 决策 |
 |------|------|
-| 数据来源 | HF 官方 `GET /api/daily_papers`(返 50 条/天) + `GET /api/papers/{arxiv_id}` 详情 + `arxiv.org Atom API`(补 categories) + `ar5iv.labs.arxiv.org`(全文 + 论文首图) + HF web page 抓评论(puppeteer / internal API)|
+| 数据来源 | HF 官方 `GET /api/daily_papers`(返 50 条/天) + `GET /api/papers/{arxiv_id}` 详情 + `arxiv.org Atom API`(补 categories) + `ar5iv.labs.arxiv.org`(全文 + 论文首图) + **HF web page SSR data-props 解析**(评论,Phase 0.5 确认无需 puppeteer)|
 | 鉴权 | `Authorization: Bearer <HF_READ>`,token 已配 prod env + staging(OPS 2026-05-18 verify) |
 | 拉取频率 | 每天 1 次 cron(BJT 08:00 = UTC 00:00,HF Daily 出榜后)|
 | Item 映射 | `id = hf:<arxiv_id>` / `source_id = <arxiv_id>` / `title = paper.title` / `content = paper.summary` / `author = paper.authors[0].name` |
@@ -174,23 +174,35 @@ HF discussion API 未公开。Web URL `/papers/{id}/discussions/1` 返 401(需�
   "arxiv_categories": ["cs.LG", "cs.CL"],   // NEW #2:arxiv.org Atom API 抓,primary 在 [0]
   "is_author_participating": false,
 
-  // NEW #3:HF 评论(Phase 2/3 puppeteer 或 internal API 抓)
+  // NEW #3:HF 评论(Phase 0.5 确认走 HF web page SSR data-props 解析)
+  // 详见 docs/plans/_research/2026-05-18-hf-discussion-internal-data-recon.md
   "discussion_comments": [
     {
-      "id": "...",                            // HF 内部 comment ID
-      "author_name": "Jane Doe",
-      "author_handle": "janedoe",
-      "author_avatar_url": "/r/hf/<sha>",     // R2 迁移
-      "content": "Great work, but...",        // 英文原文
-      "content_zh": "好工作,但是...",          // flash 翻译
-      "posted_at": "2026-05-18T03:20:00.000Z",
-      "likes": 5,
-      "is_author_reply": false                // paper 作者回复 flag
+      "id": "6a06826789940d9a9d9878c8",       // HF 内部 comment ID
+      "author_name": "Yafu Li",                // comment.author.fullname
+      "author_handle": "yaful",                // comment.author.name
+      "author_avatar_url": "/r/hf/<sha>",      // R2 迁移
+      "raw_author_avatar_url": "https://cdn-avatars.huggingface.co/...",  // 原 URL 备份
+      "is_pro": false,
+      "is_hf_admin": false,
+      "content": "We have open-sourced...",    // markdown 原文
+      "content_html": "<p>We have...</p>",     // rendered HTML(FE 直渲)
+      "content_zh": "我们已经开源...",          // flash 翻译,zh 评论跳过
+      "posted_at": "2026-05-15T02:18:15.000Z",
+      "updated_at": "2026-05-15T02:34:45.161Z",
+      "edited": true,
+      "is_author_reply": true,                 // BE 推算:comment.author._id === paper.submittedOnDailyBy._id
+      "language": "en",                        // comment.data.identifiedLanguage.language(zh 时跳翻译)
+      "reactions": [                           // 简化(去 users[])
+        { "emoji": "👍", "count": 10 },
+        { "emoji": "🔥", "count": 6 }
+      ],
+      "like_count": 10                         // 👍 count 兜底字段,FE 用这个显主 like 数
     }
-    // 最多前 10 条 top-rated 评论(参考 PH top_comments 模式)
+    // 全部评论(无 top-N 截断,paper 评论数一般 < 20 条,实测 4 条/篇)
   ],
   "discussion_fetched_at": "2026-05-18T05:25:00.000Z",
-  "discussion_fetch_method": "internal_api",  // internal_api | puppeteer (Phase 0.5 reconnaissance 决定)
+  "discussion_fetch_method": "svelte_ssr",     // 唯一值(Phase 0.5 验证)
 
   // BE workflow 跑完后填的字段
   "title_zh": "...",                 // title 中译
@@ -371,10 +383,12 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
       step.do('fetch-ar5iv-with-figure', RETRY, () =>
         fetchAr5ivAndExtractFigureForHf(this.env, itemId, arxivId),  // NEW #1
       ),
-      // 评论抓取(NEW #3,Phase 0.5 reconnaissance 决定走 internal API 还是 puppeteer)
+      // 评论抓取(NEW #3,Phase 0.5 确认走 HF web page SSR data-props 解析)
+      // fetch html → regex 提取 <div data-target="PaperContent" data-props="..."> → JSON parse
+      // 详见 docs/plans/_research/2026-05-18-hf-discussion-internal-data-recon.md
       hasDiscussionId
         ? step.do('fetch-discussion', RETRY, () =>
-            fetchDiscussionForHfPaper(this.env, itemId, arxivId),  // NEW #3
+            fetchDiscussionForHfPaper(this.env, itemId, arxivId),  // NEW #3,svelte_ssr 模式
           )
         : Promise.resolve(null),
     ]);
@@ -850,14 +864,18 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 - [x] PM 4 项变更整合到设计文档(本节)
 - [x] PM sign-off 延期到 12.75 天 + #3 评论原文+译文 + #4 C 方案最佳质量
 
-### Phase 0.5:Reconnaissance(NEW #3,0.5 天)
+### Phase 0.5:Reconnaissance(NEW #3,✅ 2026-05-18 done,0.5 天)
 
-> 启动 Phase 1 前必跑。决定 #3 评论抓取走哪条路径,影响 Phase 3 工时上限。
+- [x] 深挖 HF paper page HTML
+- [x] 试探所有 internal API endpoints(全 404)
+- [x] 找到 **Svelte SSR `data-target="PaperContent" data-props="..."`** 直接嵌入 comments + paper + upvoters 全部数据
+- [x] **匿名 fetch 即可**,无需 Authorization / cookie / puppeteer
+- [x] 多 paper 兼容性验证(高 upvote 140 / 低 upvote 3 / 0 comments paper 全 OK)
+- [x] 字段完整性 verify(content / content_html / reactions / language / is_author_reply 推算)
 
-- [ ] 深挖 HF paper page HTML(199KB),找 SSR 嵌入的 discussion / community 数据
-- [ ] 试探 internal API:`/api/papers/{id}.json` / `?community=true` / `/api/papers/{id}/comments` / `/api/repos/papers/{id}/discussions` / paper page 的 `__APP_DATA__` 等
-- [ ] 试 web URL `/papers/{id}/discussions/{num}` cookie-only fallback(用 HF_READ token 当 cookie?)
-- [ ] 报告:**找到 internal API** → Phase 3 节省 1 天 → 总工时 11.75 天;**只能 puppeteer** → Phase 3 +2 天 → 总工时 12.75 天
+**结论**:**走 svelte_ssr 路径,Phase 3 工时 +1 天(乐观值实现),总工时 11.75 天**。
+
+详细报告:[`docs/plans/_research/2026-05-18-hf-discussion-internal-data-recon.md`](_research/2026-05-18-hf-discussion-internal-data-recon.md)
 
 ### Phase 1:Schema + 配置(1 天,原 0.5 天 +0.5 天 NEW #2)
 
@@ -879,14 +897,14 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 - [ ] INSERT stub + `triggerHfPaperWorkflowForItem`(带 hour-bucket suffix,signals 含 `hasDiscussionId`)
 - [ ] dry-run / `--limit 5` 验证(含 categories 入库)
 
-### Phase 3:Workflow 实现(4-5 天,原 2 天 +1.25 天 #1+#3+#4 / +2.75 天悲观)
+### Phase 3:Workflow 实现(4 天,Phase 0.5 确认乐观值实现,#3 svelte_ssr 路径无需 puppeteer)
 
 - [ ] `worker/src/workflows/hf-paper-pipeline.ts`(参考 §4 新版,含 8 段 fan-out)
 - [ ] `worker/src/hf-paper/refresh-paper-detail.ts`(step 0)
 - [ ] `worker/src/hf-paper/backfill-media-r2.ts`(step 1,HF thumbnail + avatar 兜底)
 - [ ] **NEW #1**:`worker/src/hf-paper/fetch-ar5iv-and-extract-figure.ts`(step 1)— ar5iv HTML 抓 + img 解析 + 质量 gate(arxiv chrome 排除 / dimensions ≥ 300×200 / aspect ratio 1:4~4:1)+ R2 迁移 + 写 `media[0]`
 - [ ] `worker/src/hf-paper/refresh-gh-star.ts`(step 1)
-- [ ] **NEW #3**:`worker/src/hf-paper/fetch-discussion.ts`(step 1)— 按 Phase 0.5 结果走 internal API 或 puppeteer。puppeteer 路径需 `wrangler.toml` 加 `[browser] binding = "BROWSER"`,参考 PH POC 模板
+- [ ] **NEW #3**:`worker/src/hf-paper/fetch-discussion.ts`(step 1)— **Phase 0.5 已确认走 svelte_ssr 模式**:fetch `https://huggingface.co/papers/{arxiv_id}` web page → regex 提 `<div data-target="PaperContent" data-props="...">` → HTML decode + JSON parse → 取 `comments[]` 字段映射写 `extra.discussion_comments`。详见 `_research/2026-05-18-hf-discussion-internal-data-recon.md` §4.1 伪代码
 - [ ] `worker/src/hf-paper/translate-ar5iv.ts`(step 2)
 - [ ] **NEW #3**:`worker/src/hf-paper/translate-discussion-comments.ts`(step 2,flash 批量)
 - [ ] `worker/src/hf-paper/translate-title-summary.ts`(step 3,flash JSON Mode)
@@ -969,9 +987,8 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
   - **NEW #4**:`avg_deep_analysis_tokens` → 平均 deep_analysis token 消耗(校准用)
 - 验证 prod 第一轮 cron 跑完 PushDeer 收到通知
 
-**总估时:12.75 天**(BE 11 + FE 1.75 重叠,FE PR #83 mockup 已 done)
-- 乐观(Phase 0.5 找到 internal API):**11.75 天**
-- 悲观(Phase 0.5 必须 puppeteer + 校准发现要降级方案):**13.75 天**
+**总估时:11.75 天**(Phase 0.5 ✅ 已确认乐观值实现,svelte_ssr 路径无需 puppeteer,Phase 3 +1 天而非 +2 天)
+- 悲观余地(若校准发现要降级 deep_analysis 方案):+1 天至 12.75 天
 
 ---
 
@@ -985,7 +1002,8 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 | **NEW #1**:论文首图找不到(reasoning 类 / 短论文 / theory 类论文 ar5iv 无 figure) | 高 | 低 | sample 验证 `2605.13301` 全 HTML 7 个 img 全是 arXiv chrome 0 figure;**默认行为**:找不到合格图 → fallback HF social-thumbnail。**告知 PM ~30% 论文无法显示论文 figure** |
 | ar5iv 抓不到(新论文未 mirror) | 中 | 中 | step 1 fail-safe 返 null 不阻断 workflow;影响:**method/experiments 维度质量下滑**(prompt 依赖 ar5iv_excerpt);后续 cron 重试 |
 | **NEW #2**:arxiv.org Atom API rate limit / 偶发 timeout | 低 | 低 | 3 sec throttle + retry 2 次;失败 paper 标 `extra.arxiv_categories: []`,列表 dropdown 不会聚合该 paper |
-| **NEW #3**:HF discussion API 全 404 → 必须 puppeteer | 中 | 中 | Phase 0.5 reconnaissance 先探;puppeteer 路径 +1.5 天 + CF Browser Rendering 月度 10h 配额够用(50 paper × 5sec = ~2h/月);抓失败 fail-safe → drawer 评论 section 显"暂无评论" |
+| **NEW #3**:HF 改版 PaperContent data-props 结构变 | 中 | 中 | Phase 0.5 ✅ 确认走 svelte_ssr 解析(无需 puppeteer);regex 不匹配时 fail-safe + `pushDeerAlert` 告警 + 抓失败 drawer 评论 section 显"暂无评论"。Phase 0.5 报告可作下次 re-reconnaissance 参考 |
+| **NEW #3.b**:HF web page rate limit | 低 | 低 | 1 次/天 × 50 paper 远低于 IP-level rate limit;实测未触发 |
 | **NEW #4**:C 方案某段失焦或 JSON 校验失败 | 中 | 中 | 每段独立 retry 2 次,失败标 `extra.deep_analysis.<dim>_failed_at`,UI 显"本段解读暂未生成";整 paper 至少 6/8 段成才算完整(`workflow_completed_at` 写入条件可放宽,Phase 3 时定) |
 | HF Daily 内容偶发非 AI(误策展) | 极低 | 低 | 默认 `is_relevant=1`,管理员看到误判 UI 加 hide 按钮(v2) |
 | deep_analysis JSON 校验失败 | 中 | 中 | JSON Mode + 每段独立 retry 2 次 + 标 `<dim>_failed_at`,`/api/items` filter 严格度可调 |
@@ -1012,7 +1030,7 @@ Phase 2 workflow(每 paper 1 instance,异步并行)
 | # | 项 | 类型 | 估时 | 触发时机 |
 |---|----|------|------|---------|
 | 1 | **Budget alert 阈值调整**:¥10/月 → **不设上限**(user 2026-05-18:DeepSeek 预算无上限,目前 ¥500 余额可追加)。仍保留 `pushDeerAlert` 在月度 > ¥60 时提醒 OPS 决定何时追加,不阻断 workflow | 配置改动 | 5 min | Phase 1 启动前 |
-| 2 | **Verify CF Browser Rendering 在当前 Paid plan 可用**(若 Phase 0.5 reconnaissance 走 puppeteer 路径) | 验证 | 15 min | Phase 0.5 之后 |
+| 2 | ~~Verify CF Browser Rendering 在当前 Paid plan 可用~~ — **不需要做了 ✅**(Phase 0.5 2026-05-18 确认走 svelte_ssr 路径,不需要 puppeteer)| - | - | - |
 | 3 | **R2 bucket cap 监控**:论文 figure 全量迁(NEW #1)+ 评论者 avatar(NEW #3),50 paper × 30 天 × ~250KB/paper(figure + N avatars)= ~380MB/月。`xlist-readme-assets` bucket 当前总量(待 OPS 报)+ 决定 Phase 7 上线前是否扩容 / 加 retention policy | 调研 | 30 min | Phase 1 启动前 |
 | 4 | **CF Workflows 配额 verify**:`HF_PAPER_PIPELINE_WORKFLOW` 是新 binding,Step 3 fan-out **8 段** 直接把 instance 数放大 8 倍。50 paper × 30 天 × 8 段 ≈ **12,000 step invocations / 月**(再加 step 0/1/2/4 + 评论 + ar5iv 翻译,总 ~20-30K/月)。确认 Paid plan 配额够用(默认 100K invocations/day) | 验证 | 15 min | Phase 1 启动前 |
 | 5 | **DeepSeek 月度成本监控**:Phase 7 上线后 1 个月观察实际消耗 vs 估算 ¥17-42/月。超 ¥60 → `pushDeerAlert` 提醒 OPS 追加余额(不降级方案,user 决策"按最佳质量") | 持续 | 1 月/期 | Phase 7 上线后 |

@@ -1,0 +1,72 @@
+{
+  "paper": {
+    "id": "2605.15320",
+    "authors": [
+      {
+        "_id": "6a0a757975184a0d71e025fc",
+        "name": "Thuan Hoang Nguyen",
+        "hidden": false
+      },
+      {
+        "_id": "6a0a757975184a0d71e025fd",
+        "name": "Jiahao Luo",
+        "hidden": false
+      },
+      {
+        "_id": "6a0a757975184a0d71e025fe",
+        "name": "Yinyu Nie",
+        "hidden": false
+      },
+      {
+        "_id": "6a0a757975184a0d71e025ff",
+        "name": "Hao Li",
+        "hidden": false
+      },
+      {
+        "_id": "6a0a757975184a0d71e02600",
+        "name": "Gordon Guocheng Qian",
+        "hidden": false
+      },
+      {
+        "_id": "6a0a757975184a0d71e02601",
+        "name": "Jian Wang",
+        "hidden": false
+      }
+    ],
+    "publishedAt": "2026-05-14T00:00:00.000Z",
+    "submittedOnDailyAt": "2026-05-18T00:00:00.000Z",
+    "title": "FFAvatar: Few-Shot, Feed-Forward, and Generalizable Avatar Reconstruction",
+    "submittedOnDailyBy": {
+      "_id": "6039478ab3ecf716b1a5fd4d",
+      "avatarUrl": "https://cdn-avatars.huggingface.co/v1/production/uploads/6039478ab3ecf716b1a5fd4d/_Thy4E7taiSYBLKxEKJbT.jpeg",
+      "isPro": true,
+      "fullname": "taesiri",
+      "user": "taesiri",
+      "type": "user",
+      "name": "taesiri"
+    },
+    "summary": "Avatar reconstruction has traditionally relied on per-subject optimization that requires hours of computation or on expensive preprocessing that limits scalability. We introduce FFAvatar, a generalizable feed-forward framework that reconstructs high-quality, animatable 3D Gaussian head avatars from few-shot unposed portrait images in seconds. FFAvatar fuses information from multiple source images into a unified canonical Gaussian representation through Multi-View Query-Former, which is animated via FLAME parameters predicted end-to-end directly from pixels, eliminating the overhead of offline FLAME extraction. We further propose a three-stage training curriculum that achieves both broad generalization and high-fidelity reconstruction: (i) scalable pretraining on extensive monocular video data with over 1M identities to learn strong generalizable priors; (ii) multi-view fine-tuning on a small but high-quality dataset of 360-degree captures to enhance geometric fidelity and extreme-view awareness; and (iii) optional personalization that adapts to specific identities for maximum fidelity within 500 optimization steps. Extensive experiments demonstrate that FFAvatar sets a new standard for identity preservation, geometric consistency, and animation fidelity. On the NeRSemble benchmark, it outperforms the state-of-the-art LAM by a substantial 5.5 PSNR gain. Furthermore, FFAvatar enables real-time deployment, reconstructing avatars in 2 seconds without personalization and 10 seconds with personalization, while supporting 49 FPS animation on a single NVIDIA A100 GPU.",
+    "upvotes": 3,
+    "discussionId": "6a0a757a75184a0d71e02602",
+    "projectPage": "https://ffavatar.github.io/",
+    "ai_summary": "FFAvatar enables fast, high-quality 3D head avatar reconstruction from few unposed images using a feed-forward approach with multi-view fusion and end-to-end FLAME parameter prediction.",
+    "ai_keywords": [
+      "feed-forward framework",
+      "3D Gaussian head avatars",
+      "Multi-View Query-Former",
+      "FLAME parameters",
+      "three-stage training curriculum",
+      "scalable pretraining",
+      "multi-view fine-tuning",
+      "optional personalization",
+      "NeRSemble benchmark",
+      "LAM",
+      "real-time deployment",
+      "NVIDIA A100 GPU"
+    ]
+  },
+  "comments": [],
+  "upvoters_count": 3,
+  "dailyPaperRank": 0,
+  "markdownContentUrl": "https://huggingface.co/buckets/huggingchat/papers-content/resolve/2605/2605.15320.md"
+}
