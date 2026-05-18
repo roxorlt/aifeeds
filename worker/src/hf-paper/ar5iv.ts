@@ -195,10 +195,21 @@ function extractFigureCandidates(html: string, arxivId: string): string[] {
   return candidates;
 }
 
+/**
+ * 质量门控 + R2 迁移
+ *
+ * 双门控(抄 GH 分享海报 worker/src/share/handlers.ts:validateAndEncode):
+ *   1. aspect ratio:0.25 < ar < 4(排除 banner / 长条 / 极扁高)
+ *   2. byte density(file_size / pixel_count)≥ 0.05(排除大块纯色 placeholder / 标题卡)
+ *   3. max dim ≥ 300(排除 icon / button)
+ *
+ * 关键:**通过 magic bytes parse PNG/JPEG/GIF 自己读 dimensions**,
+ *      不依赖 CF Workers 不存在的 image decode API。
+ */
 async function migrateFigureToR2(
   env: Env,
   url: string,
-): Promise<{ r2_url: string; width?: number; height?: number } | null> {
+): Promise<{ r2_url: string; width: number; height: number } | null> {
   if (!env.READMES) return null;
   try {
     const r = await fetch(url, {
@@ -210,9 +221,29 @@ async function migrateFigureToR2(
     if (!ALLOWED_IMG_TYPES.has(ctLower)) return null;
     const buf = await r.arrayBuffer();
     if (buf.byteLength > FIGURE_MAX_BYTES) return null;
-    // 注意:CF Workers 没有原生 image decode API,无法 check dimensions
-    // 这里只用 file size 作启发(< 5KB 通常是 icon/badge)
-    if (buf.byteLength < 5 * 1024) return null;
+
+    // ─── 质量门控:aspect ratio + density + max dim ───
+    const dim = probeImageDimensions(buf);
+    if (!dim) {
+      console.warn(`[hf-paper:figure-migrate] ${url} 无法 probe dimensions(可能是 webp 或损坏文件)`);
+      return null;
+    }
+    const ar = dim.width / dim.height;
+    if (ar > 4 || ar < 0.25) {
+      console.log(`[hf-paper:figure-migrate] reject ${url}: aspect ${ar.toFixed(2)} (${dim.width}x${dim.height})`);
+      return null;
+    }
+    const density = buf.byteLength / (dim.width * dim.height);
+    if (density < 0.05) {
+      console.log(`[hf-paper:figure-migrate] reject ${url}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`);
+      return null;
+    }
+    const maxDim = Math.max(dim.width, dim.height);
+    if (maxDim < 300) {
+      console.log(`[hf-paper:figure-migrate] reject ${url}: too small ${dim.width}x${dim.height}`);
+      return null;
+    }
+    // ─── 通过门控,迁 R2 ───
 
     const hash = await sha256Hex(buf);
     const ext = ctLower === 'image/jpeg' ? 'jpg' :
@@ -225,11 +256,61 @@ async function migrateFigureToR2(
       httpMetadata: { contentType: ctLower },
       customMetadata: { 'src-url': url, 'source': 'hf-figure' },
     });
-    return { r2_url: `/r/${key}` };
+    return { r2_url: `/r/${key}`, width: dim.width, height: dim.height };
   } catch (e) {
     console.error(`[hf-paper:figure-migrate] ${url}`, e);
     return null;
   }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 图片 magic bytes 解析(PNG/JPEG/GIF),抄自 worker/src/share/handlers.ts
+// CF Workers 无原生 image decode API,只能自己 parse binary header 读 dimensions
+// ────────────────────────────────────────────────────────────────────
+
+function probeImageDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
+  const png = probePngDimensions(buf);
+  if (png) return png;
+  if (buf.byteLength < 4) return undefined;
+  const v = new DataView(buf);
+  // JPEG: walk segments (FF Mn LL LL ...) 找 SOF (C0-CF except C4/C8/CC)
+  if (v.getUint8(0) === 0xFF && v.getUint8(1) === 0xD8) {
+    let i = 2;
+    while (i < buf.byteLength - 1) {
+      if (v.getUint8(i) !== 0xFF) return undefined;
+      const marker = v.getUint8(i + 1);
+      i += 2;
+      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+        if (i + 7 > buf.byteLength) return undefined;
+        const height = v.getUint16(i + 3);
+        const width = v.getUint16(i + 5);
+        if (!width || !height) return undefined;
+        return { width, height };
+      }
+      if (i + 2 > buf.byteLength) return undefined;
+      const segLen = v.getUint16(i);
+      i += segLen;
+    }
+    return undefined;
+  }
+  // GIF: 47 49 46 38 ... 6,7=width(LE) 8,9=height(LE)
+  if (v.getUint32(0) === 0x47494638 && buf.byteLength >= 10) {
+    return { width: v.getUint16(6, true), height: v.getUint16(8, true) };
+  }
+  return undefined;
+}
+
+function probePngDimensions(buf: ArrayBuffer): { width: number; height: number } | undefined {
+  // PNG: 89 50 4E 47 0D 0A 1A 0A,IHDR chunk @ offset 16: width (BE) + height (BE)
+  if (buf.byteLength < 24) return undefined;
+  const v = new DataView(buf);
+  if (v.getUint8(0) !== 0x89 || v.getUint8(1) !== 0x50 || v.getUint8(2) !== 0x4E || v.getUint8(3) !== 0x47) {
+    return undefined;
+  }
+  const width = v.getUint32(16);
+  const height = v.getUint32(20);
+  if (!width || !height) return undefined;
+  return { width, height };
 }
 
 async function sha256Hex(buf: ArrayBuffer): Promise<string> {
