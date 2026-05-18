@@ -200,6 +200,7 @@ export { XTweetPipelineWorkflow } from './workflows/x-tweet-pipeline';
 export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 export { PhPipelineWorkflow } from './workflows/ph-pipeline';
 export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
+export { HfPaperPipelineWorkflow } from './workflows/hf-paper-pipeline';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [

@@ -94,9 +94,21 @@ name = "huodongxing-detail-workflow"
 binding = "HUODONGXING_DETAIL_WORKFLOW"
 class_name = "HuodongxingDetailWorkflow"
 
-# HF_PAPER_PIPELINE_WORKFLOW binding 在 Phase 3 跟 HfPaperPipelineWorkflow class
-# 一起加(wrangler deploy 时校验 class 存在,split commit 会 fail)
-# 设计文档:docs/plans/2026-05-18-hf-daily-papers-source-design.md §4 / §9 Phase 3
+# CF Workflow: HuggingFace Daily Papers 抓取链(worker/src/workflows/hf-paper-pipeline.ts)。
+# runHfDailyFetch(daily cron BJT 08:00)后对每条 new paper create 1 个 instance,
+# 跑 8-step fan-out pipeline:
+#   step 0  refresh-paper-detail + fetch-arxiv-categories
+#   step 1  fan-out(backfill-media-r2 + refresh-gh-star + fetch-ar5iv-and-extract-figure
+#                   + fetch-discussion[svelte_ssr])
+#   step 2  translate-ar5iv + translate-discussion-comments(flash 批量)
+#   step 3  fan-out(8 段 deep_analysis pro reasoning + 1 次 flash translate-title-summary
+#                   + merge-deep-analysis)
+#   step 4  完整性 gate(workflow_completed_at,允许 ≤2 段 failed)
+# 设计文档:docs/plans/2026-05-18-hf-daily-papers-source-design.md §4
+[[workflows]]
+name = "hf-paper-pipeline-workflow"
+binding = "HF_PAPER_PIPELINE_WORKFLOW"
+class_name = "HfPaperPipelineWorkflow"
 
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
@@ -170,7 +182,10 @@ name = "clawhub-pipeline-workflow-staging"
 binding = "CH_PIPELINE_WORKFLOW"
 class_name = "ClawhubPipelineWorkflow"
 
-# hf-paper-pipeline-workflow-staging binding 同 prod,Phase 3 一起加
+[[env.staging.workflows]]
+name = "hf-paper-pipeline-workflow-staging"
+binding = "HF_PAPER_PIPELINE_WORKFLOW"
+class_name = "HfPaperPipelineWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。
