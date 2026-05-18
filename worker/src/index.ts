@@ -36,6 +36,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch, triggerPhWorkflowForItem } from './scrapers/ph';
+import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary } from './notifier';
 import {
   handleHuodongxingPoc,
@@ -178,6 +179,19 @@ export interface Env {
   // runClawhubFetchList 后对每条新 skill create instance。替换
   // clawhub-enrich preempt cron。设计同上。
   CH_PIPELINE_WORKFLOW: Workflow;
+  // HuggingFace Daily Papers token(read scope)— worker/src/scrapers/hf-paper.ts
+  // 通过 Authorization: Bearer 调 GET /api/daily_papers + GET /api/papers/:id。
+  // 2026-05-18 OPS verify staging + prod 均已配。
+  HF_READ?: string;
+  // CF Workflow binding for HF Daily Papers(worker/src/workflows/hf-paper-pipeline.ts,Phase 3 实现)。
+  // runHfDailyFetch 后对每条 new paper create 1 个 instance,跑 8-step fan-out pipeline
+  // (refresh-paper-detail / backfill-media-r2 / fetch-ar5iv-and-extract-figure /
+  // fetch-discussion[svelte_ssr] / translate-ar5iv / translate-discussion-comments /
+  // 7 段 deep_analysis pro reasoning + flash translate-title-summary / merge / gate)。
+  // 设计:docs/plans/2026-05-18-hf-daily-papers-source-design.md §4
+  // Phase 2 阶段 wrangler.toml binding 尚未加(等 Phase 3 写 class 一起 commit),
+  // 故 optional。triggerHfPaperWorkflowForItem 内置 binding-missing fallback。
+  HF_PAPER_PIPELINE_WORKFLOW?: Workflow;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
@@ -454,6 +468,25 @@ export default {
           });
         }
         const result = await runGithubFetchTrending(env);
+        return jsonResponse(result, 200, request, env);
+      }
+      // ─── HF Daily Papers 手动触发(admin debug + staging 端到端测试用)─
+      // POST /api/admin/hf-fetch-now?force=1&date=YYYY-MM-DD
+      //   - force=1:跳过 sentinel(允许同日多次跑)
+      //   - date=YYYY-MM-DD:指定 BJT 日期(默认今天)
+      // 跑 runHfDailyFetch:拉 daily_papers(50)+ paper detail × 50 + arxiv categories batch
+      //   → INSERT items stub → trigger workflow(Phase 3 加 class 后生效,在那之前 triggered=0)
+      if (path === '/api/admin/hf-fetch-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const force = u.searchParams.get('force') === '1';
+        const date = u.searchParams.get('date') || undefined;
+        const result = await runHfDailyFetch(env, { force, date });
         return jsonResponse(result, 200, request, env);
       }
       // ─── GH Workflow 一次性 drain pending（迁移后兜底） ───────────
@@ -1134,6 +1167,20 @@ export default {
             const r = await runPhDailyFetch(env);
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'PH 每日抓取', r as unknown as Record<string, unknown>);
+            return;
+          }
+          // ─── HF Daily Papers fetch (UTC 00:00 = BJT 08:00, 1 BJT day) ───
+          // HF Daily 在 UTC 00:00 出新榜,北京 08:00 早上看就有当天 papers。
+          // KV sentinel on BJT date — 防 cron 同日重复跑(force=1 admin endpoint 覆盖)。
+          // 单次 ~50 details + 1 arxiv batch + 50 ingest + 50 trigger ≈ 110 subreq,
+          // 在 paid 1000/invocation cap 内宽松。
+          // 8 段 deep_analysis pro reasoning 在 workflow 异步跑,不阻塞 cron tick。
+          // Phase 8 通知:result 含 list_size / fetched_details / fetched_categories /
+          // ingested / triggered / duration_ms,notifyCronSummary 自动展开成 markdown。
+          if (hour === 0 && minute >= 0 && minute < 5) {
+            const r = await runHfDailyFetch(env);
+            console.log(`[cron] hf-daily-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'HF Daily Papers 每日抓取', r as unknown as Record<string, unknown>);
             return;
           }
           // ─── X list-poll-ingest (minute=25 / 55, 30 min cadence) ──
