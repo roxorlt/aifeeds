@@ -3164,11 +3164,15 @@ const ALLOWED_IMG_HOSTS = new Set([
   //   - cdn-thumbnails.huggingface.co: paper social-thumbnail(1200×630 兜底卡片图)
   //   - cdn-uploads.huggingface.co: 用户自传头像变体
   //   - huggingface.co: 评论 author.avatarUrl 相对路径(/avatars/xxx.svg)的绝对化
-  //   - ar5iv.labs.arxiv.org: 论文首张 figure(extract-first-figure step,NEW #1)
+  //   - arxiv.org: 论文首张 figure(extract-first-figure step,NEW #1)
+  //     2026-05-18 从 ar5iv.labs.arxiv.org 切到 arxiv.org/html(arxiv 官方 HTML 服务,
+  //     实时渲染,5 月新论文都有完整 HTML + figure;ar5iv 社区项目滞后几周)
+  //   - ar5iv.labs.arxiv.org: 保留作 fallback(老 paper 兼容)
   'cdn-avatars.huggingface.co',
   'cdn-thumbnails.huggingface.co',
   'cdn-uploads.huggingface.co',
   'huggingface.co',
+  'arxiv.org',
   'ar5iv.labs.arxiv.org',
 ]);
 

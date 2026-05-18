@@ -5,6 +5,18 @@
 //
 // 设计文档 §5.1 C 方案:每段独立 reasoning chain 保最佳质量。
 // User 决策(2026-05-18):"按最佳质量来设计方案,成本不考虑"
+//
+// **Idempotency 设计(2026-05-18 fix)**:
+//   每次 step 跑前算 input hash = sha256(title|summary|ai_summary_en|ar5iv_excerpt[:3000])
+//   跟 D1 stored extra.deep_analysis_input_hash 对比:
+//     - hash 相同 && dim 已存在 → skip pro/flash 调用,return cached data
+//     - hash 不同(或 stored hash 缺失)→ input 有变化,跑新调用
+//   merge step 写入 new hash。
+//   场景:
+//     - 首轮 trigger:必跑(无 stored hash)
+//     - backfill 重跑(input 未变):skip 8 段 pro + flash translate,0 LLM 成本
+//     - ar5iv mirror 出来后 input 加 3000 字 ar5iv_excerpt:hash 变 → 重跑刷新质量
+//     - HF 修改 abstract:hash 变 → 重跑
 
 import type { Env } from '../index';
 import { callDeepSeekJson, DEEPSEEK_FLASH, DEEPSEEK_PRO, type DeepSeekUsage } from './llm';
@@ -15,6 +27,76 @@ import {
   type DimensionKey,
   type DeepAnalyzeContext,
 } from './prompts';
+
+// ────────────────────────────────────────────────────────────────────
+// Idempotency: input hash + cache check
+// ────────────────────────────────────────────────────────────────────
+
+async function computeAnalysisInputHash(ctx: DeepAnalyzeContext): Promise<string> {
+  // 决定 deep_analysis 输出的关键 input:title + summary + ai_summary_en + ar5iv 前 3000 字
+  // ai_keywords / arxiv_categories / github_* / project_page 不算 input(变了不重跑)
+  const parts = [
+    ctx.title,
+    ctx.summary,
+    ctx.ai_summary_en || '',
+    (ctx.ar5iv_excerpt || '').slice(0, 3000),
+  ];
+  const text = parts.join('\n---\n');
+  const buf = new TextEncoder().encode(text);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  const bytes = new Uint8Array(hash);
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+
+interface CachedAnalysis {
+  storedHash: string | null;
+  deep: Record<string, unknown> | null;
+  titleSummary: { title_zh?: string; summary_zh?: string; ai_summary_zh?: string } | null;
+}
+
+async function loadCachedAnalysis(env: Env, itemId: string): Promise<CachedAnalysis> {
+  const row = await env.DB.prepare(
+    `SELECT
+      json_extract(extra, '$.deep_analysis_input_hash') AS stored_hash,
+      json_extract(extra, '$.deep_analysis') AS deep,
+      json_extract(extra, '$.title_zh') AS title_zh,
+      json_extract(extra, '$.summary_zh') AS summary_zh,
+      json_extract(extra, '$.ai_summary_zh') AS ai_summary_zh
+    FROM items WHERE id = ?`,
+  ).bind(itemId).first<{
+    stored_hash: string | null;
+    deep: string | null;
+    title_zh: string | null;
+    summary_zh: string | null;
+    ai_summary_zh: string | null;
+  }>();
+  if (!row) return { storedHash: null, deep: null, titleSummary: null };
+  let deep: Record<string, unknown> | null = null;
+  try {
+    deep = row.deep ? JSON.parse(row.deep) : null;
+  } catch {
+    deep = null;
+  }
+  const titleSummary = (row.title_zh || row.summary_zh || row.ai_summary_zh)
+    ? {
+        title_zh: row.title_zh || undefined,
+        summary_zh: row.summary_zh || undefined,
+        ai_summary_zh: row.ai_summary_zh || undefined,
+      }
+    : null;
+  return { storedHash: row.stored_hash, deep, titleSummary };
+}
+
+/**
+ * Map dimension → 它在 deep_analysis JSON 里写哪些 key
+ * limitations_and_novelty 写 limitations + novelty_rating 两个 key
+ */
+function dimensionOutputKeys(dim: DimensionKey): string[] {
+  if (dim === 'limitations_and_novelty') return ['limitations', 'novelty_rating'];
+  return [dim];
+}
 
 // ────────────────────────────────────────────────────────────────────
 // Helpers: context loader
@@ -102,7 +184,7 @@ export async function analyzeDimensionForHfPaper(
   itemId: string,
   arxivId: string,
   dimension: DimensionKey,
-): Promise<DimensionResult> {
+): Promise<DimensionResult & { cached?: boolean }> {
   if (!env.DEEPSEEK_API_KEY) {
     return { dimension, data: null, failed: true, error: 'no_deepseek_key' };
   }
@@ -110,8 +192,26 @@ export async function analyzeDimensionForHfPaper(
   if (!ctx) {
     return { dimension, data: null, failed: true, error: 'context_load_fail' };
   }
-  const { prompt, maxTokens } = buildDimensionPrompt(dimension, ctx);
 
+  // Idempotency check:input hash 一致 + 该 dim 所有 key 已存在 → skip LLM
+  const newHash = await computeAnalysisInputHash(ctx);
+  const cached = await loadCachedAnalysis(env, itemId);
+  if (cached.storedHash === newHash && cached.deep) {
+    const requiredKeys = dimensionOutputKeys(dimension);
+    const allPresent = requiredKeys.every((k) => k in cached.deep!);
+    if (allPresent) {
+      // 重建该 dim 的 data 部分(merge step 期望 data 含本 dim 输出 keys + version)
+      const cachedData: Record<string, unknown> = { version: 'v1' };
+      for (const k of requiredKeys) {
+        cachedData[k] = cached.deep[k];
+      }
+      console.log(`[hf-paper:analyze] ${itemId}/${dimension} cached(hash match)`);
+      return { dimension, data: cachedData, failed: false, cached: true };
+    }
+  }
+
+  // input 有变化 OR 该 dim 缺失 → 跑 pro
+  const { prompt, maxTokens } = buildDimensionPrompt(dimension, ctx);
   const result = await callDeepSeekJson<Record<string, unknown>>(
     env.DEEPSEEK_API_KEY,
     DEEPSEEK_PRO,
@@ -119,21 +219,12 @@ export async function analyzeDimensionForHfPaper(
     { maxTokens, timeoutMs: 300_000, retries: 1 },     // pro reasoning 可能 > 60s
   );
   if (!result.data) {
-    // 失败时标 *_failed_at(merge step 之后会写入 extra)
     return {
-      dimension,
-      data: null,
-      failed: true,
-      usage: result.usage,
-      error: result.error || 'no_data',
+      dimension, data: null, failed: true,
+      usage: result.usage, error: result.error || 'no_data',
     };
   }
-  return {
-    dimension,
-    data: result.data,
-    failed: false,
-    usage: result.usage,
-  };
+  return { dimension, data: result.data, failed: false, usage: result.usage };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -149,23 +240,31 @@ interface TitleSummaryResult {
 export async function translateTitleSummaryForHfPaper(
   env: Env,
   itemId: string,
-): Promise<{ data: TitleSummaryResult | null; failed: boolean; error?: string }> {
+  arxivId: string,
+): Promise<{ data: TitleSummaryResult | null; failed: boolean; cached?: boolean; error?: string }> {
   if (!env.DEEPSEEK_API_KEY) {
     return { data: null, failed: true, error: 'no_deepseek_key' };
   }
-  const row = await env.DB.prepare(
-    `SELECT title, content, extra FROM items WHERE id = ?`,
-  ).bind(itemId).first<ItemContextRow>();
-  if (!row?.title || !row?.content) {
+
+  // 用 loadAnalyzeContext 跟 deep_analysis 共享 input hash 概念
+  const ctx = await loadAnalyzeContext(env, itemId, arxivId);
+  if (!ctx) {
     return { data: null, failed: true, error: 'context_load_fail' };
   }
-  const extra: HfExtra = row.extra ? JSON.parse(row.extra) : {};
+
+  // Idempotency check
+  const newHash = await computeAnalysisInputHash(ctx);
+  const cached = await loadCachedAnalysis(env, itemId);
+  if (cached.storedHash === newHash && cached.titleSummary?.title_zh) {
+    console.log(`[hf-paper:translate-title-summary] ${itemId} cached`);
+    return { data: cached.titleSummary, failed: false, cached: true };
+  }
 
   const prompt = buildTitleSummaryPrompt({
-    title: row.title,
-    summary: row.content,
-    ai_summary_en: extra.ai_summary_en || undefined,
-    ai_keywords: extra.ai_keywords || undefined,
+    title: ctx.title,
+    summary: ctx.summary,
+    ai_summary_en: ctx.ai_summary_en || undefined,
+    ai_keywords: ctx.ai_keywords || undefined,
   });
 
   const result = await callDeepSeekJson<TitleSummaryResult>(
@@ -192,8 +291,9 @@ export interface MergePayload {
 export async function mergeDeepAnalysisForHfPaper(
   env: Env,
   itemId: string,
+  arxivId: string,
   payload: MergePayload,
-): Promise<{ written: boolean; failed_dimensions: DimensionKey[] }> {
+): Promise<{ written: boolean; failed_dimensions: DimensionKey[]; input_hash?: string }> {
   // 合并 8 段成 deep_analysis JSON(参考 §3.3 schema)
   const deep: Record<string, unknown> = { version: 'v1' };
   const failedDims: DimensionKey[] = [];
@@ -241,6 +341,15 @@ export async function mergeDeepAnalysisForHfPaper(
   setExprs.push(`'$.deep_analysis_model'`, `?`);
   bindings.push(DEEPSEEK_PRO);
 
+  // input hash:用于 backfill 重 trigger 时 idempotency check(skip 不变 input 的 LLM 调用)
+  let inputHash: string | undefined;
+  const ctx = await loadAnalyzeContext(env, itemId, arxivId);
+  if (ctx) {
+    inputHash = await computeAnalysisInputHash(ctx);
+    setExprs.push(`'$.deep_analysis_input_hash'`, `?`);
+    bindings.push(inputHash);
+  }
+
   // title/summary 翻译写入顶层 extra
   if (payload.titleSummary) {
     if (payload.titleSummary.title_zh) {
@@ -267,8 +376,8 @@ export async function mergeDeepAnalysisForHfPaper(
     return { written: false, failed_dimensions: failedDims };
   }
 
-  console.log(`[hf-paper:merge] ${itemId} written, ${failedDims.length}/${DIMENSION_LIST.length} failed dimensions`);
-  return { written: true, failed_dimensions: failedDims };
+  console.log(`[hf-paper:merge] ${itemId} written, ${failedDims.length}/${DIMENSION_LIST.length} failed dimensions, hash=${inputHash?.slice(0, 8) || 'none'}`);
+  return { written: true, failed_dimensions: failedDims, input_hash: inputHash };
 }
 
 const DIMENSION_LIST: DimensionKey[] = [

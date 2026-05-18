@@ -170,7 +170,7 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
         analyzeDimensionForHfPaper(this.env, itemId, arxivId, 'limitations_and_novelty'),
       ),
       step.do('translate-title-summary', RETRY, () =>
-        translateTitleSummaryForHfPaper(this.env, itemId),
+        translateTitleSummaryForHfPaper(this.env, itemId, arxivId),
       ),
     ]);
 
@@ -183,7 +183,7 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
     // Step 3 合并:写入 extra.deep_analysis + title_zh/summary_zh/ai_summary_zh
     // ────────────────────────────────────────────────────────────────
     const mergeResult = await step.do('merge-deep-analysis', RETRY, () =>
-      mergeDeepAnalysisForHfPaper(this.env, itemId, {
+      mergeDeepAnalysisForHfPaper(this.env, itemId, arxivId, {
         dimensions: allDimensions,
         titleSummary: titleSummaryResult.data,
       }),
