@@ -88,7 +88,11 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // 2026-05-18 加 backfill-nested-x-quote 第 7 并行 step:
     // 当正文里嵌 x.com URL(SB ingest 没识别为 quote)时,提取 status_id 写 quote_of_id
     // + inline 调 backfillQuote 拉完整原推数据(含 media + 翻译走 step 3)。
-    const [, , , , , , longform] = await Promise.all([
+    // 2026-05-18 fix uncaught exception:Promise.all → Promise.allSettled
+    // 之前任一 step throw → Promise.all reject → workflow run() uncaught exception
+    // → CF 报 scriptThrewException(67% error rate)。
+    // allSettled 让每个 step 独立结果,某个 fail 不影响其他 + 不阻塞 workflow 整体 completion。
+    const results = await Promise.allSettled([
       hasQuoteRef
         ? step.do('backfill-quote', RETRY, () => backfillQuoteForXTweet(this.env, itemId))
         : Promise.resolve(null),
@@ -103,36 +107,63 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       step.do('backfill-nested-x-quote', RETRY, () => backfillNestedXQuoteForXTweet(this.env, itemId)),
       step.do('check-longform', RETRY, () => checkLongformForXTweet(this.env, itemId)),
     ]);
+    // log fail step 便于排查,但不阻塞继续
+    for (const [idx, r] of results.entries()) {
+      if (r.status === 'rejected') {
+        const stepNames = ['backfill-quote', 'backfill-reply', 'backfill-retweet', 'backfill-media', 'backfill-link-card', 'backfill-nested-x-quote', 'check-longform'];
+        console.warn(`[x-workflow:${stepNames[idx]}] ${itemId}: step rejected after RETRY: ${String(r.reason).slice(0, 200)}`);
+      }
+    }
+    // check-longform 是 index 6,只在它 fulfilled 时取值
+    const longformResult = results[6];
+    const longform = longformResult.status === 'fulfilled' ? longformResult.value : null;
 
     // ─── Step 2: longform fetch via ScrapeBadger (条件) ──────────
+    // 2026-05-18 fix:longform fetch 也包 try 防 throw 阻塞 step 3
     if (longform && (longform as { is_longform: boolean }).is_longform) {
-      await step.do('longform-via-sb', RETRY, () =>
-        fetchLongformViaScrapeBadger(this.env, itemId),
-      );
+      try {
+        await step.do('longform-via-sb', RETRY, () =>
+          fetchLongformViaScrapeBadger(this.env, itemId),
+        );
+      } catch (e) {
+        console.warn(`[x-workflow:step2] ${itemId}: longform-via-sb rejected: ${String(e).slice(0, 200)}`);
+      }
     }
 
     // ─── Step 3: classify + translate 合并调用 (JSON Mode 1 次) ──
     // 2026-05-17 重构:合并 classifyXTweetWithLlm + translateXTweetField × 6 = 7 次调用 → 1 次。
     // is_relevant=0 时 DeepSeek 内部判断不返翻译,output token 节省。
     // 失败时函数内 retry 1 次,仍失败标 extra.translation_failed_at,不阻塞 workflow。
-    const classifyTrans = await step.do('classify-translate', RETRY, () =>
-      classifyAndTranslateForXTweet(this.env, itemId, { lang }),
-    );
+    // 2026-05-18 fix:外层 try wrap 防 step.do RETRY 用完 throw 阻塞 step 4
+    let classifyTrans: { is_relevant: 0 | 1; fields_translated: string[]; attempts: number; failed?: string };
+    try {
+      classifyTrans = await step.do('classify-translate', RETRY, () =>
+        classifyAndTranslateForXTweet(this.env, itemId, { lang }),
+      );
+    } catch (e) {
+      console.warn(`[x-workflow:step3] ${itemId}: classify-translate rejected: ${String(e).slice(0, 200)}`);
+      classifyTrans = { is_relevant: 0, fields_translated: [], attempts: 0, failed: 'http' };
+    }
 
     // ─── Step 4: 完整性 gate ─────────────────────────────────────
     // 通过条件:classify-translate 未 failed(代表 is_relevant 已写入 +
     // 翻译已完成或源是中文 + 关联字段已 backfill)。failed=true 时不标 completed,
     // /api/items 默认 SQL filter `workflow_completed_at IS NOT NULL` 会过滤掉,
     // 等下次 retry(用户也可以点译文按钮触发 /api/items/:id/translate-now)。
+    // 2026-05-18 fix:mark-completed 也 try 防 D1 偶发 throw 阻塞 return
     if (!classifyTrans.failed) {
       const nowIso = new Date().toISOString();
-      await step.do('mark-completed', RETRY, async () => {
-        await this.env.DB.prepare(
-          `UPDATE items
-              SET extra = json_set(coalesce(extra, '{}'), '$.workflow_completed_at', ?)
-            WHERE id = ?`,
-        ).bind(nowIso, itemId).run();
-      });
+      try {
+        await step.do('mark-completed', RETRY, async () => {
+          await this.env.DB.prepare(
+            `UPDATE items
+                SET extra = json_set(coalesce(extra, '{}'), '$.workflow_completed_at', ?)
+              WHERE id = ?`,
+          ).bind(nowIso, itemId).run();
+        });
+      } catch (e) {
+        console.warn(`[x-workflow:step4] ${itemId}: mark-completed rejected: ${String(e).slice(0, 200)}`);
+      }
     }
 
     return {
