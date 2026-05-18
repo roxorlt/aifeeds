@@ -243,19 +243,30 @@ export interface HfExperiments {
     vs_baseline: string;
   }>;                                         // ≤5，2-3 列 grid/table
   compute: string;                            // ≤20 字，monospace
+  narrative?: string;                         // BE pro reasoning 的实验叙事长文(可选,2026-05-18 staging 起返回)
+}
+
+// code_status 是结构化对象(2026-05-18 staging 起):github / star / license / 可复现度 + 叙事
+export interface HfCodeStatus {
+  github_url?: string | null;                 // GH URL,null = 未开源
+  star_count?: number | null;                 // GH star 数
+  license?: string;                           // "MIT" / "Apache 2.0" / "unknown" / ...
+  reproducibility?: "easy" | "medium" | "hard" | string;  // 复现难度
+  narrative?: string;                         // 复现指引长文
 }
 
 // 8 维度 + 1 meta 评分
 // novelty_rating 不在 drawer 8 维度列表里显示，单独作为 ★ 5 星条
 export interface HfDeepAnalysis {
+  version?: string;                           // 'v1' / 'v2',BE schema 版本
   tldr: string;                               // TL;DR 区
   problem: string;                            // 维度 1
-  key_insight: string;                        // 维度 2
+  key_insight: string[];                      // 维度 2 — BE 实际返 1-3 条 list,FE 渲为 ul
   method: string;                             // 维度 3
   experiments: HfExperiments;                 // 维度 4
   industry_impact: string;                    // 维度 5
-  code_status: string;                        // 维度 6
-  limitations: string;                        // 维度 7
+  code_status: HfCodeStatus;                  // 维度 6 — 2026-05-18 staging 起为结构化对象(github_url/star_count/license/reproducibility/narrative)
+  limitations: string[];                      // 维度 7 — BE 实际返 list(典型 3 条,每条 200-500 字)
   novelty_rating: number;                     // 1-5 整数，meta 评分
 }
 

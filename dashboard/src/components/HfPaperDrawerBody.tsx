@@ -24,6 +24,7 @@ import remarkGfm from "remark-gfm";
 import DOMPurify from "dompurify";
 import type { Components } from "react-markdown";
 import type {
+  HfCodeStatus,
   HfDiscussionComment,
   HfPaperMetrics,
   Item,
@@ -255,7 +256,7 @@ function DimensionBlock({
   label: string;
   /** 自定义 ReactNode(experiments 用) */
   children?: React.ReactNode;
-  /** 长文字符串,会用 react-markdown 渲染(7 维度文本字段用) */
+  /** 长文字符串,会用 react-markdown 渲染(单段维度用,如 problem/method) */
   source?: string;
 }) {
   // BE Phase 4 prompt 改造后每段允许 200-500 字深度长文,DeepSeek pro 输出
@@ -266,6 +267,102 @@ function DimensionBlock({
       <div className="text-[15px] leading-[1.7] text-neutral-800">
         {source !== undefined ? <MdContent source={source} /> : children}
       </div>
+    </section>
+  );
+}
+
+// 代码状态块(code_status 用):BE 返回 object {github_url/star_count/license/reproducibility/narrative}。
+// 渲染:meta 行 chips(repo / stars / license / 复现难度)+ narrative 长文。
+function CodeStatusBlock({ status }: { status: HfCodeStatus | undefined }) {
+  if (!status) return null;
+  const hasMeta =
+    status.github_url || status.license || status.reproducibility !== undefined;
+  if (!hasMeta && !status.narrative) return null;
+
+  // 复现难度中文 + 配色
+  const reproZh: Record<string, { label: string; cls: string }> = {
+    easy: { label: "易复现", cls: "bg-emerald-100 text-emerald-700" },
+    medium: { label: "中等难度", cls: "bg-amber-100 text-amber-700" },
+    hard: { label: "复现困难", cls: "bg-rose-100 text-rose-700" },
+  };
+  const repro = status.reproducibility ? reproZh[status.reproducibility] : null;
+
+  return (
+    <section className="border-t border-neutral-200 pt-5">
+      <h4 className="mb-3 text-[14px] font-semibold text-neutral-900">代码状态 Code Status</h4>
+
+      {/* meta chip 行 */}
+      {hasMeta && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {status.github_url ? (
+            <a
+              href={status.github_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2 py-1 text-[12px] font-medium text-neutral-700 hover:bg-neutral-50 hover:text-neutral-900"
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z" />
+              </svg>
+              GitHub
+              {status.star_count !== null && status.star_count !== undefined && (
+                <span className="text-neutral-500">· ★ {status.star_count}</span>
+              )}
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-neutral-300 px-2 py-1 text-[12px] text-neutral-500">
+              未开源
+            </span>
+          )}
+          {status.license && status.license !== "unknown" && (
+            <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+              {status.license}
+            </span>
+          )}
+          {repro && (
+            <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${repro.cls}`}>
+              {repro.label}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* narrative 长文 */}
+      {status.narrative && (
+        <div className="text-[15px] leading-[1.7] text-neutral-800">
+          <MdContent source={status.narrative} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+// 分条维度块(key_insight / limitations 用):BE 返回 string[],每条 200-500 字 markdown。
+// 每条之间加分隔符 + 序号,避免视觉糊成一团。
+function DimensionListBlock({
+  label,
+  sources,
+}: {
+  label: string;
+  sources: string[];
+}) {
+  if (!sources || sources.length === 0) return null;
+  return (
+    <section className="border-t border-neutral-200 pt-5 first:border-t-0 first:pt-0">
+      <h4 className="mb-3 text-[14px] font-semibold text-neutral-900">{label}</h4>
+      <ol className="space-y-4">
+        {sources.map((s, i) => (
+          <li key={i} className="flex gap-3">
+            <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-[12px] font-bold text-neutral-600 tabular-nums">
+              {i + 1}
+            </span>
+            <div className="min-w-0 flex-1 text-[15px] leading-[1.7] text-neutral-800">
+              <MdContent source={s} />
+            </div>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -923,7 +1020,7 @@ function AnalysisTab({ dna }: { dna: ItemExtra["deep_analysis"] }) {
       {/* 7 个维度 — 大段长文。当前 mock 数据每段较短(BE Phase 4 改 prompt 后输出 200-500 字深度内容) */}
       <div className="space-y-6">
         <DimensionBlock label="问题 Problem" source={dna.problem} />
-        <DimensionBlock label="核心创新 Key Insight" source={dna.key_insight} />
+        <DimensionListBlock label="核心创新 Key Insight" sources={dna.key_insight} />
         <DimensionBlock label="方法 Method" source={dna.method} />
 
         {/* 实验 — 结构化 datasets / metrics / compute */}
@@ -978,13 +1075,20 @@ function AnalysisTab({ dna }: { dna: ItemExtra["deep_analysis"] }) {
                   <span className="font-mono text-neutral-600">{dna.experiments.compute}</span>
                 </div>
               )}
+              {/* narrative 实验叙事(BE pro reasoning 输出,2026-05-18 起返回)
+                  比 datasets/metrics 信息密度更大,放最后用 MdContent 完整渲 */}
+              {dna.experiments.narrative && (
+                <div className="rounded-md border border-neutral-200 bg-neutral-50/40 p-3 text-[14px] leading-[1.7] text-neutral-700">
+                  <MdContent source={dna.experiments.narrative} />
+                </div>
+              )}
             </div>
           )}
         </section>
 
         <DimensionBlock label="工业影响 Industry Impact" source={dna.industry_impact} />
-        <DimensionBlock label="代码状态 Code Status" source={dna.code_status} />
-        <DimensionBlock label="局限 Limitations" source={dna.limitations} />
+        <CodeStatusBlock status={dna.code_status} />
+        <DimensionListBlock label="局限 Limitations" sources={dna.limitations} />
       </div>
 
       {/* 占位提醒(mockup 阶段) — PM v2 要求拆解长度有深度,需 BE 改 prompt */}
