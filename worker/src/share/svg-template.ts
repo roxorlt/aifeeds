@@ -1179,6 +1179,115 @@ export interface PosterShareCtx {
   sharerSeed: string;
 }
 
+// ─── HF Paper 海报 content rendering ─────────────────────────────────────────
+// 设计稿 handoff §6.7：
+//   - thumbnail 顶部(占 innerW,16:9 / 1200x630 比例,HF social-thumbnail 或论文 figure)
+//   - 标题中译(64-72px,2 行 cap)
+//   - TL;DR 中译(36px,4 行 cap,DeepSeek pro 拆解第一段)
+//   - 一行 stats:▲ upvotes · 💬 comments · ⭐ GH stars
+//   - 一行 byline:submitter 头像 + by @xxx 等 N 位 · HF Daily
+function renderHfContent(opts: {
+  x: number; y: number; w: number;
+  titleZh: string;
+  tldr: string;
+  submitterHandle: string;
+  authorsCount: number;
+  upvotes?: number;
+  numComments?: number;
+  githubStars?: number;
+  mediaImageDataUri?: string;
+  mediaAspectRatio?: number;
+  submitterAvatarDataUri?: string;
+}): { svg: string; height: number } {
+  const padX = 36, padTop = 0;
+  const innerX = opts.x + padX;
+  const innerW = opts.w - padX * 2;
+  let cy = opts.y + padTop;
+
+  // 1. Hero thumbnail block — 占满 innerW,1200×630(1.91:1)默认。
+  //    论文 social-thumbnail 是 1200×630;BE Phase 2 抓的 figure 可能比例不同。
+  let mediaSvg = '';
+  if (opts.mediaImageDataUri) {
+    const heroAr = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 1200 / 630;
+    mediaSvg = renderMediaBlock(opts.mediaImageDataUri, heroAr, false, innerX, innerW, cy, 'hf-hero');
+    const mediaH = Math.min(innerW / heroAr, 520);
+    cy += mediaH + 36;
+  } else {
+    cy += 28; // 无 thumbnail 时留点上 padding
+  }
+
+  // 2. 标题中译 — 64px,2 行 cap
+  const titleSize = 64;
+  const titleLine = titleSize * 1.25;
+  const titleLines = wrapText(opts.titleZh || '论文', 18, 2);
+  const titleSvg = titleLines
+    .map((line, i) => `<text x="${innerX}" y="${cy + titleSize + i * titleLine}" font-family='${FONT}' font-size="${titleSize}" font-weight="900" fill="${C.ink}" letter-spacing="-2">${esc(line)}</text>`)
+    .join('');
+  cy += titleLines.length * titleLine + 24;
+
+  // 3. TL;DR 中译 — 36px,4 行 cap(deep_analysis.tldr 是 DeepSeek 第一段)
+  const tldrSize = 36;
+  const tldrLine = tldrSize * 1.45;
+  const tldrLines = wrapText(opts.tldr || '', 24, 4);
+  const tldrSvg = tldrLines
+    .map((line, i) => `<text x="${innerX}" y="${cy + tldrSize + i * tldrLine}" font-family='${FONT}' font-size="${tldrSize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
+    .join('');
+  cy += tldrLines.length * tldrLine + 36;
+
+  // 4. Stats 行 — ▲ upvotes · 💬 comments · ⭐ GH stars(inline,无 KPI grid)
+  //    不显示则整段省略(避免 — 占位污染)
+  const statRowH = 80;
+  const statRowY = cy;
+  let statsSvg = `<line x1="${innerX}" y1="${statRowY}" x2="${innerX + innerW}" y2="${statRowY}" stroke="${C.line}" stroke-width="1"/>`;
+  const statItems: Array<{ icon: string; value: string; label: string }> = [];
+  if (opts.upvotes !== undefined && opts.upvotes !== null) {
+    statItems.push({ icon: '▲', value: formatStat(opts.upvotes), label: 'upvotes' });
+  }
+  if (opts.numComments !== undefined && opts.numComments !== null) {
+    statItems.push({ icon: '●', value: formatStat(opts.numComments), label: 'comments' });
+  }
+  if (opts.githubStars !== undefined && opts.githubStars !== null) {
+    statItems.push({ icon: '★', value: formatStat(opts.githubStars), label: 'stars' });
+  }
+  if (statItems.length > 0) {
+    const colW = innerW / statItems.length;
+    statItems.forEach((s, i) => {
+      const cx = innerX + colW * i + colW / 2;
+      // icon + value 行(40px),label 行(22px)
+      statsSvg += `<text x="${cx}" y="${statRowY + 46}" font-family='${FONT}' font-size="36" font-weight="800" fill="${C.ink}" text-anchor="middle"><tspan fill="${C.muted}" font-size="32">${s.icon}</tspan> <tspan>${esc(s.value)}</tspan></text>`;
+      statsSvg += `<text x="${cx}" y="${statRowY + 72}" font-family='${FONT}' font-size="20" font-weight="500" fill="${C.muted2}" text-anchor="middle">${esc(s.label)}</text>`;
+    });
+  }
+  cy = statRowY + statRowH + 24;
+
+  // 5. Byline 行 — submitter 头像 + by @xxx 等 N 位 · HF Daily
+  //    avatar 48x48 圆形,文字 28px,基线对齐 avatar 中线下方 8px
+  const avatarSize = 48;
+  const avatarX = innerX;
+  const avatarY = cy;
+  let avatarSvg = '';
+  if (opts.submitterAvatarDataUri) {
+    const clipId = `hf-byline-clip-${Math.random().toString(36).slice(2, 8)}`;
+    avatarSvg = `
+      <defs><clipPath id="${clipId}"><circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}"/></clipPath></defs>
+      <circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="#fbfbfc" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>
+      <image href="${opts.submitterAvatarDataUri}" x="${avatarX}" y="${avatarY}" width="${avatarSize}" height="${avatarSize}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  } else {
+    avatarSvg = `<circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="${C.line}"/>`;
+  }
+  const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位` : ''} · HF Daily`;
+  const bylineX = avatarX + avatarSize + 16;
+  const bylineY = avatarY + avatarSize / 2 + 10;
+  const bylineSvg = `<text x="${bylineX}" y="${bylineY}" font-family='${FONT}' font-size="28" font-weight="600" fill="${C.muted}">${esc(bylineText)}</text>`;
+  cy += avatarSize + 28;
+
+  const totalH = cy - opts.y;
+  return {
+    svg: mediaSvg + titleSvg + tldrSvg + statsSvg + avatarSvg + bylineSvg,
+    height: totalH,
+  };
+}
+
 export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Promise<string> {
   const sourceMeta = pickSourceMeta(item.source_type);
   const cardX = 56, cardW = 1080 - 56 * 2;
@@ -1305,6 +1414,29 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       body: bodyText(item),
       tags: Array.isArray(extra.tags) ? (extra.tags as string[]) : [],
       coverDataUri: item.authorAvatarDataUri,
+    });
+    contentSvg = r.svg;
+    contentH = r.height;
+  } else if (sourceMeta.kind === 'hf') {
+    // HF Paper 海报:thumbnail + 标题中译 + TL;DR + stats + byline
+    // BE Phase 4 后 mediaImageDataUri = R2 迁过的 hf social-thumbnail 或论文 figure
+    const m = item.metrics || {};
+    const extra = item.extra || {};
+    const dna = (extra.deep_analysis || {}) as { tldr?: string };
+    const submitter = (extra.submitted_by || {}) as { user?: string; avatar_url?: string };
+    const authors = Array.isArray(extra.paper_authors) ? (extra.paper_authors as Array<unknown>) : [];
+    const r = renderHfContent({
+      x: cardX, y: cardY, w: cardW,
+      titleZh: (extra.title_zh as string) || item.title || '论文',
+      tldr: dna.tldr || (extra.ai_summary_zh as string) || '',
+      submitterHandle: submitter.user || item.handle || 'unknown',
+      authorsCount: authors.length,
+      upvotes: m.upvotes as number | undefined,
+      numComments: m.num_comments as number | undefined,
+      githubStars: (m.github_stars as number | undefined) ?? (extra.github_stars as number | undefined),
+      mediaImageDataUri: item.mediaImageDataUri,
+      mediaAspectRatio: item.mediaAspectRatio,
+      submitterAvatarDataUri: item.authorAvatarDataUri,
     });
     contentSvg = r.svg;
     contentH = r.height;

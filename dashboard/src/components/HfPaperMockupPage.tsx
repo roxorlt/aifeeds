@@ -13,11 +13,21 @@
 //   - 不嵌套真实 DrawerProvider，因此关掉 drawer 不会污染 URL
 
 import { useMemo, useState } from "react";
-import type { Item } from "../types";
+import type { Item, ItemExtra } from "../types";
+import { parseJsonField } from "../lib/utils";
 import { DrawerContext } from "../lib/drawer";
 import { MOCK_HF_PAPERS } from "../mockData/hfPapers";
+import {
+  aggregatePrimaryCategories,
+  arxivCategoryOptionLabel,
+} from "../lib/arxivCategories";
 import { HfPaperCard } from "./HfPaperCard";
 import { HfPaperDrawerBody } from "./HfPaperDrawerBody";
+
+function paperCategories(item: Item): string[] {
+  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
+  return (extra.arxiv_categories as string[] | undefined) ?? [];
+}
 
 function CloseIcon({ className }: { className?: string }) {
   return (
@@ -37,6 +47,29 @@ function CloseIcon({ className }: { className?: string }) {
 export function HfPaperMockupPage() {
   const [selectedId, setSelectedId] = useState<string | null>(
     MOCK_HF_PAPERS[0]?.id ?? null,
+  );
+  // 分类筛选 — "" = 全部,非空 = 仅显示 primary category 匹配的卡片
+  const [categoryFilter, setCategoryFilter] = useState<string>("");
+
+  // 聚合 mock data 里出现的 primary categories 作下拉 options(线上是
+  // 服务端聚合,这里前端聚合 mock 演示)
+  const availableCategories = useMemo(
+    () =>
+      aggregatePrimaryCategories(
+        MOCK_HF_PAPERS.map((p) => ({
+          arxiv_categories: paperCategories(p),
+        })),
+      ),
+    [],
+  );
+
+  // 按 categoryFilter 过滤
+  const visiblePapers = useMemo(
+    () =>
+      categoryFilter === ""
+        ? MOCK_HF_PAPERS
+        : MOCK_HF_PAPERS.filter((p) => paperCategories(p)[0] === categoryFilter),
+    [categoryFilter],
   );
 
   const selected = useMemo(
@@ -90,25 +123,48 @@ export function HfPaperMockupPage() {
           </div>
         </header>
 
-        {/* 主区：左 cards 流，右 drawer 详情 */}
-        <div className="mx-auto flex max-w-7xl gap-0 px-0 lg:px-5">
-          {/* 左列：5 张卡片 */}
-          <div className="w-full max-w-xl border-x border-neutral-200 bg-white lg:border-l-0">
-            <div className="border-b border-neutral-200 bg-neutral-50/60 px-4 py-2 text-[12px] font-medium text-neutral-500">
-              卡片视图 · {MOCK_HF_PAPERS.length} 条
-            </div>
-            {MOCK_HF_PAPERS.map((item) => (
-              <div
-                key={item.id}
-                className={
-                  selectedId === item.id
-                    ? "bg-sky-50/40 ring-1 ring-inset ring-sky-200"
-                    : ""
-                }
+        {/* 主区：左 cards 流（按线上 lg 屏 3-col 单列约 380px），右 drawer 详情 */}
+        <div className="mx-auto flex max-w-[1280px] gap-0 px-0 lg:px-5">
+          {/* 左列：5 张卡片 — 对齐线上 max-w-[1280px] / 3-col / gap-4 的单列约 380px */}
+          <div className="w-full max-w-[400px] shrink-0 border-x border-neutral-200 bg-white lg:border-l-0">
+            <div className="flex items-center justify-between gap-2 border-b border-neutral-200 bg-neutral-50/60 px-4 py-2 text-[12px] font-medium text-neutral-500">
+              <span>
+                卡片视图 · {visiblePapers.length} / {MOCK_HF_PAPERS.length} 条
+              </span>
+              {/* arxiv categories 真实下拉筛选(本 mockup 前端 filter;线上由
+                  BE API 加 ?category= 参数做服务端筛选,handoff §6 决议 #2) */}
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="rounded-md border border-neutral-300 bg-white px-2 py-0.5 text-[11px] text-neutral-700 hover:border-neutral-400 focus:border-sky-500 focus:outline-none"
+                title="按论文 arxiv primary category 筛选"
               >
-                <HfPaperCard item={item} />
+                <option value="">全部分类</option>
+                {availableCategories.map(({ code, count }) => (
+                  <option key={code} value={code}>
+                    {arxivCategoryOptionLabel(code)} · {count}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {visiblePapers.length === 0 ? (
+              <div className="px-4 py-10 text-center text-[13px] text-neutral-400">
+                当前分类下无论文 — 清空筛选看全部
               </div>
-            ))}
+            ) : (
+              visiblePapers.map((item) => (
+                <div
+                  key={item.id}
+                  className={
+                    selectedId === item.id
+                      ? "bg-sky-50/40 ring-1 ring-inset ring-sky-200"
+                      : ""
+                  }
+                >
+                  <HfPaperCard item={item} />
+                </div>
+              ))
+            )}
           </div>
 
           {/* 右列：选中卡片的 drawer body，sticky 跟左列滚动 */}

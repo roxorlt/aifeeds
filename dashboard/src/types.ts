@@ -178,6 +178,7 @@ export interface ItemExtra {
   // HF Paper-source specific fields (source_type = 'hf_paper')
   // 见 docs/plans/2026-05-18-hf-daily-papers-frontend-handoff.md
   arxiv_id?: string;                          // "2605.13301"
+  arxiv_categories?: string[];                // arxiv 分类(BE Phase 1 抓 arxiv.org Atom API),primary 在 [0],卡片右上角下拉筛选用
   title_zh?: string;                          // 标题中译
   summary_zh?: string;                        // arxiv abstract 中译
   ai_summary_zh?: string;                     // HF AI summary 中译
@@ -192,6 +193,8 @@ export interface ItemExtra {
   ar5iv_html_url?: string;                    // ar5iv.org/abs/{id}
   paper_authors?: HfAuthor[];                 // 完整作者列表(避免和顶层 author 冲突重命名)
   discussion_id?: string;
+  discussion_comments?: HfDiscussionComment[];  // HF discussion 顶级评论(Phase 2/3 抓)
+  discussion_fetched_at?: string | null;        // ISO,null = 未抓 → 显示「加载中」
   full_text_zh?: string | null;               // ar5iv markdown 翻译(Phase 2)
   deep_analysis?: HfDeepAnalysis;             // 8 维度 + novelty meta 评分
   workflow_completed_at?: string;
@@ -210,6 +213,18 @@ export interface HfSubmitter {
 export interface HfAuthor {
   name: string;
   hidden?: boolean;
+}
+
+export interface HfDiscussionComment {
+  author_name: string;
+  author_handle?: string;
+  author_avatar?: string;
+  content: string;                            // 英文原文
+  content_zh?: string;                        // DeepSeek flash 翻译
+  posted_at: string;                          // ISO8601
+  likes?: number;
+  is_reply?: boolean;                         // 是否回复（嵌套），handoff §3.2 字段
+  reply_to_author?: string;                   // 回复对象（is_reply=true 时填）
 }
 
 export interface HfExperiments {

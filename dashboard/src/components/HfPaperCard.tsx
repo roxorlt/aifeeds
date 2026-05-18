@@ -67,22 +67,6 @@ function IconStarHollow({ className }: { className?: string }) {
   );
 }
 
-function IconArrowOut({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M5 3h8v8M13 3L5 11" />
-    </svg>
-  );
-}
-
 export function NoveltyStars({
   rating,
   size = "sm",
@@ -119,7 +103,6 @@ export function HfPaperCard({ item }: Props) {
   const title = extra.title_zh || item.title || "";
   const aiSummaryZh = extra.ai_summary_zh || "";
   const keywords = (extra.ai_keywords || []).slice(0, 3);
-  const novelty = extra.deep_analysis?.novelty_rating;
 
   // thumbnail：HF 提供 1200×630 social-thumbnail（cdn-thumbnails.huggingface.co）
   // Phase 1 BE 会把 cdn-thumbnails / cdn-avatars 加进 worker /img PROXY_HOSTS
@@ -128,9 +111,12 @@ export function HfPaperCard({ item }: Props) {
   const cover = media.find((m) => m.type === "image");
 
   // submitter：HF 用户名（@xxx）+ 头像 + 提交日期相对时间
+  // PM v3: 多作者时显示 "by @xxx 等 N 位"（N = 论文 paper_authors 总数）。
+  // submitter ≠ 一定是 author,但 PM 想在卡片暴露作者规模信息,文案做条件式。
   const submitter = extra.submitted_by;
   const submittedAt = extra.submitted_on_daily_at || item.published_at;
   const relTime = timeAgo(submittedAt);
+  const authorsCount = (extra.paper_authors || []).length;
 
   const upvotes = metrics.upvotes;
   const numComments = metrics.num_comments;
@@ -165,9 +151,9 @@ export function HfPaperCard({ item }: Props) {
         {title}
       </h3>
 
-      {/* HF AI 一句话摘要（中译）— 单行 truncate，跟标题区分用 neutral-600 + smaller */}
+      {/* HF AI 一句话摘要（中译）— 最多 4 行 clamp，超出 ……。跟标题区分用 neutral-600 + smaller */}
       {aiSummaryZh && (
-        <p className="mt-1 line-clamp-1 text-[13px] text-neutral-600 break-words">
+        <p className="mt-1 line-clamp-4 text-[13px] leading-[1.5] text-neutral-600 break-words">
           {aiSummaryZh}
         </p>
       )}
@@ -186,10 +172,11 @@ export function HfPaperCard({ item }: Props) {
         </div>
       )}
 
-      {/* Metrics 行 — ▲ upvotes · 💬 comments · ⭐ GH stars。无值的指标整列省略。
-          跟 PhCard 同款 inline-flex + gap-1 + tabular-nums 排版。 */}
-      {(upvotes !== undefined || numComments !== undefined || githubStars !== undefined) && (
-        <div className="mt-2 flex items-center gap-x-3 text-[13px] text-neutral-500">
+      {/* Footer 行 — 左：metrics(▲ upvotes · 💬 comments · ⭐ GH stars)；右：submitter avatar + by @handle · 相对时间。
+          单行排布,左右对齐(PM v2 反馈:合并到同一行;砍掉 ★ novelty 与「拆解阅读」CTA)。 */}
+      <div className="mt-2.5 flex items-center justify-between gap-3 text-[13px] text-neutral-500">
+        {/* 左:metrics */}
+        <div className="flex shrink-0 items-center gap-x-3">
           {upvotes !== undefined && (
             <span className="inline-flex items-center gap-1" aria-label="upvotes">
               <IconUpvoteTri className="h-3.5 w-3.5" />
@@ -209,12 +196,8 @@ export function HfPaperCard({ item }: Props) {
             </span>
           )}
         </div>
-      )}
-
-      {/* Submitter 行 — 左：avatar + @handle + 相对时间；右：novelty 星条。
-          ★ 评分独立显示在卡片右下角（handoff §6.1 决定不进 8 维度列表）。 */}
-      <div className="mt-2 flex items-center justify-between gap-3 text-[13px] text-neutral-500">
-        <div className="flex min-w-0 items-center gap-1.5">
+        {/* 右:submitter avatar + @handle · 时间。flex-1 + min-w-0 + justify-end 让长 handle 也会优先 truncate */}
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
           {submitter?.avatar_url ? (
             <img
               src={submitter.avatar_url}
@@ -228,6 +211,9 @@ export function HfPaperCard({ item }: Props) {
           {submitter?.user && (
             <span className="truncate">
               by <span className="text-neutral-700">@{submitter.user}</span>
+              {authorsCount > 1 && (
+                <span className="text-neutral-500"> 等 {authorsCount} 位</span>
+              )}
               {relTime && (
                 <>
                   <span className="mx-1 text-neutral-400">·</span>
@@ -237,26 +223,6 @@ export function HfPaperCard({ item }: Props) {
             </span>
           )}
         </div>
-        {novelty !== undefined && novelty !== null && (
-          <NoveltyStars rating={novelty} />
-        )}
-      </div>
-
-      {/* CTA 「拆解阅读」 — 整张卡片本身 clickable（onClick=open），CTA 主要做
-          视觉 affordance 提示用户"还有深度内容"。click 也走 open。
-          stopPropagation 避免双触发（虽然结果一致，行为更明确）。 */}
-      <div className="mt-3 flex justify-end">
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            open();
-          }}
-          className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-[12px] font-medium text-neutral-700 transition-colors hover:bg-neutral-50 hover:text-neutral-900"
-        >
-          拆解阅读
-          <IconArrowOut className="h-3 w-3" />
-        </button>
       </div>
     </article>
   );
