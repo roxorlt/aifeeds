@@ -220,3 +220,17 @@ CREATE TABLE IF NOT EXISTS email_send_log (
 CREATE INDEX IF NOT EXISTS idx_email_send_log_email_sent ON email_send_log(email, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_send_log_ip_sent ON email_send_log(ip, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_send_log_device_sent ON email_send_log(device_id, sent_at DESC);
+
+-- M15: metrics_snapshots_hf_paper — HuggingFace Daily Papers 时间序列指标
+-- 设计文档：docs/plans/2026-05-18-hf-daily-papers-source-design.md §3.4
+-- 跟 GH/PH 同款独立表(字段维度差异)。50 paper/day × 30 day 保留 ≈ 1.5k 行。
+
+CREATE TABLE IF NOT EXISTS metrics_snapshots_hf_paper (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,                 -- 'hf_paper:<arxiv_id>'
+  captured_at INTEGER NOT NULL,          -- unix seconds
+  upvotes INTEGER,
+  num_comments INTEGER,
+  github_stars INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mshf_item_time ON metrics_snapshots_hf_paper(item_id, captured_at);

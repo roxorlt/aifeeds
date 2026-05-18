@@ -3102,6 +3102,17 @@ const ALLOWED_IMG_HOSTS = new Set([
   'video.twimg.com',
   // GH 头像国内访问偶发慢 / 302 重定向到 camo；前端 proxyImg() 同步加白
   'avatars.githubusercontent.com',
+  // HF Daily Papers 接入(2026-05-18):
+  //   - cdn-avatars.huggingface.co: 用户头像(评论者 / submitter)
+  //   - cdn-thumbnails.huggingface.co: paper social-thumbnail(1200×630 兜底卡片图)
+  //   - cdn-uploads.huggingface.co: 用户自传头像变体
+  //   - huggingface.co: 评论 author.avatarUrl 相对路径(/avatars/xxx.svg)的绝对化
+  //   - ar5iv.labs.arxiv.org: 论文首张 figure(extract-first-figure step,NEW #1)
+  'cdn-avatars.huggingface.co',
+  'cdn-thumbnails.huggingface.co',
+  'cdn-uploads.huggingface.co',
+  'huggingface.co',
+  'ar5iv.labs.arxiv.org',
 ]);
 
 async function handleImageProxy(request: Request): Promise<Response> {
