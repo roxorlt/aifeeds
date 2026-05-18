@@ -265,18 +265,34 @@ async function fetchArxivCategoriesBatch(
   const result = new Map<string, string[]>();
   if (arxivIds.length === 0) return result;
 
+  // ⚠️ 2026-05-18 Phase 2 staging verify:CF Workers IP 段被 arxiv.org WAF 拦
+  // (3 次 retry 全 HTTP 429,retry-after=0 即直接 ban,跟 §10 风险 #6 一致)。
+  // Batch 50 个 1 次拿在 CF 侧不可行。
+  //
+  // 解决路径:Phase 3 workflow step 0 改 **per-paper 单独 fetch**,
+  // 50 paper 分散到 wall-clock 几小时间隔(workflow fan-out instance 跨节点 +
+  // CF schedule jitter 自然降 RPS),触发 ban 风险低。
+  //
+  // Phase 2 暂行:1 attempt + 失败 fallback 返空 Map,不阻断 ingest;Phase 3 上线
+  // 后 categories 字段会逐步填上。FE 列头 dropdown 暂时显有限 categories(已抓到的)。
+  const idList = arxivIds.join(',');
+  const url = `${ARXIV_API_BASE}?id_list=${idList}&max_results=${arxivIds.length}`;
+
   try {
-    const idList = arxivIds.join(',');
-    const url = `${ARXIV_API_BASE}?id_list=${idList}&max_results=${arxivIds.length}`;
     const r = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
     });
+    if (r.status === 429) {
+      console.warn(`[hf-paper] arxiv categories HTTP 429(CF IP banned by arxiv WAF),Phase 3 step 0 兜底`);
+      return result;
+    }
     if (!r.ok) {
       console.error(`[hf-paper] arxiv categories HTTP ${r.status}`);
       return result;
     }
     const xml = await r.text();
     parseArxivCategoriesXml(xml, result);
+    console.log(`[hf-paper] arxiv categories OK: ${result.size}/${arxivIds.length}`);
   } catch (e) {
     console.error('[hf-paper] arxiv categories fetch exception', e);
   }

@@ -2679,6 +2679,15 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const result = await runCleanup(env, retentionDays);
     return jsonResponse(result, 200, request, env);
   }
+  // mode='hf-daily-fetch' — HF Daily Papers 抓取(Bearer INGEST_TOKEN 绕 CF Access)
+  // 跟 /api/admin/hf-fetch-now 等价,但走 enrich/run 路径方便 OPS 跑批
+  // query params:force=1 跳 sentinel / date=YYYY-MM-DD 指定 BJT 日期
+  if (mode === 'hf-daily-fetch') {
+    const force = url.searchParams.get('force') === '1';
+    const date = url.searchParams.get('date') || undefined;
+    const result = await runHfDailyFetch(env, { force, date });
+    return jsonResponse(result, 200, request, env);
+  }
   if (mode === 'backfill-quotes') {
     const limit = Math.min(
       Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
