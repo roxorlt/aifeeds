@@ -61,6 +61,27 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
   async run(event: WorkflowEvent<XTweetParams>, step: WorkflowStep) {
     const { itemId } = event.payload;
 
+    // 2026-05-18 outer try wrap whole run() body:终极兜底防 CF 标 instance "exception"。
+    // 任何内部 step 即使 RETRY 用尽 throw,outer catch 后 return 成功 result,
+    // CF Workflow instance outcome = "ok",worker scriptThrewException 不计入。
+    // 该失败的字段已经被各 backfill 函数 + try wrap 内 log + 跳过,数据缺失不阻塞 workflow。
+    try {
+      return await this.runInner(event, step);
+    } catch (e) {
+      console.error(`[x-workflow] uncaught at run() level for ${itemId}: ${String(e).slice(0, 500)}`);
+      return {
+        itemId,
+        is_relevant: 0 as const,
+        fields_translated: [] as string[],
+        completed: false,
+        uncaught_error: String(e).slice(0, 200),
+      };
+    }
+  }
+
+  async runInner(event: WorkflowEvent<XTweetParams>, step: WorkflowStep) {
+    const { itemId } = event.payload;
+
     // ─── Step 0: backfill truncated text via syndication ─────────
     // 2026-05-17 治本：SB list-poll mode 不返 full_text，ingest 时拿到 X list 页
     // DOM 140 字截断版（末尾 …）。classify / translate 看到截断内容时质量差，
