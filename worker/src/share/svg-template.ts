@@ -1360,11 +1360,14 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
 }
 
 // ─── helpers: source meta / tag / body ────────────────────
-function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub' | 'hdx'; label: string; chipColor: string } {
+function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub' | 'hdx' | 'hf'; label: string; chipColor: string } {
   if (sourceType === 'github') return { kind: 'github', label: 'GitHub', chipColor: '#c1f0d8' };
   if (sourceType === 'product_hunt' || sourceType === 'ph') return { kind: 'ph', label: 'Product Hunt', chipColor: '#ffd1c1' };
   if (sourceType === 'clawhub') return { kind: 'clawhub', label: 'ClawHub', chipColor: '#d8c8f5' };
   if (sourceType === 'huodongxing') return { kind: 'hdx', label: '活动行', chipColor: '#fb7185' };
+  // HF Daily Papers — chipColor #ffd9a8 暖橙，跟 PH 的 peach(#ffd1c1) 区分（HF 偏黄）。
+  // BE Phase 5 上线 hf_paper source 后该分支自动生效。
+  if (sourceType === 'hf_paper') return { kind: 'hf', label: 'HF Daily', chipColor: '#ffd9a8' };
   return { kind: 'x', label: 'X', chipColor: '#ffffff' };
 }
 
@@ -1404,11 +1407,18 @@ function pickPhTag(item: PosterItem): string {
 
 function bodyText(item: PosterItem): string {
   // GH / PH 优先用 extra.ai_summary（dashboard 抽屉「AI 解读亮点」即此字段）；
+  // HF Paper 用 deep_analysis.tldr（一句话穿透）→ fallback ai_summary_zh → fallback abstract；
   // X 走 content_translated || content（推文正文本身就是要展示的主体）。
   const extra = item.extra || {};
   const aiSummary = typeof extra.ai_summary === 'string' ? extra.ai_summary.trim() : '';
   if ((item.source_type === 'github' || item.source_type === 'product_hunt') && aiSummary) {
     return aiSummary;
+  }
+  if (item.source_type === 'hf_paper') {
+    const dna = extra.deep_analysis as { tldr?: string } | undefined;
+    const tldr = typeof dna?.tldr === 'string' ? dna.tldr.trim() : '';
+    const aiSummaryZh = typeof extra.ai_summary_zh === 'string' ? extra.ai_summary_zh.trim() : '';
+    return tldr || aiSummaryZh || item.content_translated || item.content || item.title || '';
   }
   return item.content_translated || item.content || aiSummary || item.title || '';
 }

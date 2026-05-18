@@ -8,6 +8,12 @@ import { DrawerProvider } from "./lib/drawer";
 const TweetDrawer = lazy(() =>
   import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
 );
+
+// HF Phase 0 mockup 页（/mockup/hf）— lazy load 避免污染主 bundle，
+// 上线 BE Phase 1-7 真接口后整体删除。
+const HfPaperMockupPage = lazy(() =>
+  import("./components/HfPaperMockupPage").then((m) => ({ default: m.HfPaperMockupPage })),
+);
 import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
@@ -84,7 +90,10 @@ const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "clawhub", title: "龙虾技能" },
   { source_type: "youtube", title: "YouTube" },
   { source_type: "podcast", title: "Podcast" },
-  { source_type: "arxiv", title: "arXiv" },
+  // 2026-05-18：原 arxiv 列重命名为「论文」，source_type 切换到 hf_paper。
+  // 后续 BE Phase 1-7 上线后，HF Daily Papers 自动填充这列；arxiv source_type
+  // 保留在 types.ts 备用（未来如接入非 HF arxiv 源可再加回 COLUMNS）。
+  { source_type: "hf_paper", title: "论文" },
 ];
 
 type FilterKey = "all" | SourceType;
@@ -98,7 +107,7 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "clawhub", label: "龙虾技能" },
   { key: "youtube", label: "YouTube" },
   { key: "podcast", label: "Podcast" },
-  { key: "arxiv", label: "arXiv" },
+  { key: "hf_paper", label: "论文" },
 ];
 
 function DashboardHome() {
@@ -454,9 +463,19 @@ function App() {
         <Route path="/ph/:slug/:date" element={<DashboardHome />} />
         <Route path="/c/:slug" element={<DashboardHome />} />
         <Route path="/e/:eventId" element={<DashboardHome />} />
+        <Route path="/h/:arxivId" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
+        {/* Phase 0 mockup 临时路由（BE Phase 1-7 上线后删除） */}
+        <Route
+          path="/mockup/hf"
+          element={
+            <Suspense fallback={<div className="p-10 text-center text-sm text-neutral-500">mockup 加载中…</div>}>
+              <HfPaperMockupPage />
+            </Suspense>
+          }
+        />
       </Routes>
       <LoginModalGate />
       <ToastGate />

@@ -9,6 +9,7 @@ import { GithubCard } from "./GithubCard";
 import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
+import { HfPaperCard } from "./HfPaperCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { HuodongxingColumnHeader, type HdxCity, type HdxWhen, type HdxForm } from "./HuodongxingColumnHeader";
 import { SourceIcon } from "./icons";
@@ -822,6 +823,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                     <ClawhubCard key={row.item.id} item={row.item} />
                   ) : row.item.source_type === "huodongxing" ? (
                     <HuodongxingCard key={row.item.id} item={row.item} />
+                  ) : row.item.source_type === "hf_paper" ? (
+                    <HfPaperCard key={row.item.id} item={row.item} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

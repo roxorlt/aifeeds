@@ -6,7 +6,8 @@ export type SourceType =
   | "huodongxing"
   | "github"
   | "arxiv"
-  | "clawhub";
+  | "clawhub"
+  | "hf_paper";
 
 export interface MediaItem {
   type: "image" | "video" | string;
@@ -174,7 +175,72 @@ export interface ItemExtra {
   // status != 'historical'，需要历史活动加 ?include_historical=1。
   status?: "active" | "historical";
 
+  // HF Paper-source specific fields (source_type = 'hf_paper')
+  // 见 docs/plans/2026-05-18-hf-daily-papers-frontend-handoff.md
+  arxiv_id?: string;                          // "2605.13301"
+  title_zh?: string;                          // 标题中译
+  summary_zh?: string;                        // arxiv abstract 中译
+  ai_summary_zh?: string;                     // HF AI summary 中译
+  ai_keywords?: string[];                     // HF 自带关键词（卡片显前 3）
+  submitted_by?: HfSubmitter;                 // 提交人
+  submitted_on_daily_at?: string;             // ISO8601
+  project_page?: string | null;               // 项目主页 URL
+  github_repo?: string | null;                // GH 链接
+  github_url?: string | null;                 // 同义,兼容 BE 字段命名
+  github_stars?: number | null;
+  arxiv_pdf_url?: string;                     // arxiv.org/pdf/{id}.pdf
+  ar5iv_html_url?: string;                    // ar5iv.org/abs/{id}
+  paper_authors?: HfAuthor[];                 // 完整作者列表(避免和顶层 author 冲突重命名)
+  discussion_id?: string;
+  full_text_zh?: string | null;               // ar5iv markdown 翻译(Phase 2)
+  deep_analysis?: HfDeepAnalysis;             // 8 维度 + novelty meta 评分
+  workflow_completed_at?: string;
+
   [k: string]: unknown;
+}
+
+export interface HfSubmitter {
+  user: string;                               // HF username（@xxx）
+  name?: string;                              // 显示名
+  fullname?: string;
+  avatar_url: string;                         // 走 /img 反代
+  is_pro?: boolean;
+}
+
+export interface HfAuthor {
+  name: string;
+  hidden?: boolean;
+}
+
+export interface HfExperiments {
+  datasets: string[];                         // ≤5，chip 行
+  key_metrics: Array<{
+    name: string;
+    value: string;
+    vs_baseline: string;
+  }>;                                         // ≤5，2-3 列 grid/table
+  compute: string;                            // ≤20 字，monospace
+}
+
+// 8 维度 + 1 meta 评分
+// novelty_rating 不在 drawer 8 维度列表里显示，单独作为 ★ 5 星条
+export interface HfDeepAnalysis {
+  tldr: string;                               // TL;DR 区
+  problem: string;                            // 维度 1
+  key_insight: string;                        // 维度 2
+  method: string;                             // 维度 3
+  experiments: HfExperiments;                 // 维度 4
+  industry_impact: string;                    // 维度 5
+  code_status: string;                        // 维度 6
+  limitations: string;                        // 维度 7
+  novelty_rating: number;                     // 1-5 整数，meta 评分
+}
+
+export interface HfPaperMetrics {
+  upvotes?: number;
+  num_comments?: number;
+  github_stars?: number;
+  [k: string]: number | undefined;
 }
 
 export interface HuodongxingOrganizer {
