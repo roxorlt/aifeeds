@@ -192,6 +192,10 @@ export interface Env {
   // Phase 2 阶段 wrangler.toml binding 尚未加(等 Phase 3 写 class 一起 commit),
   // 故 optional。triggerHfPaperWorkflowForItem 内置 binding-missing fallback。
   HF_PAPER_PIPELINE_WORKFLOW?: Workflow;
+  // CF Browser Rendering binding(2026-05-18 Phase 3+ 加,HF figure 提取用)。
+  // 类型来自 @cloudflare/puppeteer(BrowserWorker);Worker bundle 占 ~几 MB。
+  // 月度配额 10h(Paid plan 自带),HF 50 paper × ~5s × 30 = 2h/月,充足。
+  BROWSER?: Fetcher;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到

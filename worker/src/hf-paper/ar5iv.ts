@@ -17,6 +17,7 @@
 import type { Env } from '../index';
 import { callDeepSeek, DEEPSEEK_FLASH } from './llm';
 import { buildAr5ivParagraphPrompt } from './prompts';
+import { fetchFiguresViaPuppeteer } from './figure-puppeteer';
 
 const ARXIV_HTML_BASE = 'https://arxiv.org/html';
 const AR5IV_BASE = 'https://ar5iv.labs.arxiv.org/html';   // fallback for figure(CF IP ban arxiv.org img)
@@ -84,11 +85,17 @@ export async function fetchAr5ivAndExtractFigureForHf(
   }
 
   // 2. extract first qualifying figure
-  //    arxiv.org/html 在 CF Workers 上 img src 全替换 placeholder data: URL,
-  //    extract 后多半 0 个 candidate。这时 fallback 拿 ar5iv 真实 figure URL。
+  //    fallback 链(arxiv.org/html CF IP 拿到 placeholder data: URL,需要绕):
+  //      a. direct fetch HTML extract(0 candidate 时回落)
+  //      b. CF Browser Rendering puppeteer fetch(真 chromium,绕 IP ban)
+  //      c. ar5iv.labs.arxiv.org fetch(社区项目,老 paper 兼容)
   let figureUrls = extractFigureCandidates(html, finalUrl);
   if (figureUrls.length === 0) {
-    console.log(`[hf-paper:arxiv-html] ${arxivId} arxiv.org 0 figure candidate(CF IP placeholder?), fallback ar5iv`);
+    console.log(`[hf-paper:arxiv-html] ${arxivId} direct fetch 0 figure(CF IP placeholder?), try puppeteer`);
+    figureUrls = await fetchFiguresViaPuppeteer(env, arxivId);
+  }
+  if (figureUrls.length === 0) {
+    console.log(`[hf-paper:arxiv-html] ${arxivId} puppeteer 0 figure, fallback ar5iv`);
     figureUrls = await fetchFigureCandidatesFromAr5iv(arxivId);
   }
   let figureInfo: FigureInfo = {

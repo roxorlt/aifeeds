@@ -9,7 +9,6 @@
     "db:init:local": "wrangler d1 execute xlist --file=schema.sql --local"
   },
   "devDependencies": {
-    "@cloudflare/puppeteer": "^1.1.0",
     "@cloudflare/workers-types": "^4.20241218.0",
     "@types/qrcode": "^1.5.6",
     "typescript": "^5.7.0",
@@ -21,6 +20,7 @@
     "fflate": "^0.8.2",
     "jose": "^5.10.0",
     "nanoid": "^5.1.11",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "@cloudflare/puppeteer": "^1.1.0"
   }
 }
