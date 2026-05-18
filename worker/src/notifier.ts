@@ -123,6 +123,18 @@ export async function notifyCronSummary(
     cards_inserted_or_updated: '入库或更新活动数',
     budget_consumed: '本轮 CF 子请求数', // CF Workers subrequest 计数（默认 40/tick）
     finished: '是否全部完成',
+
+    // HF Daily Papers(runHfDailyFetch + backfill-hf-paper-workflow)
+    date: '日期',
+    fetched_details: 'paper 详情抓取数',
+    fetched_categories: 'arxiv 分类抓取数',
+    triggered: '触发 workflow 数',
+    workflow_completed_24h: '24 小时内 workflow 完成数',
+    workflow_pending_24h: '24 小时内 workflow 待完成数',
+    sampled_completed_paper: '已完成采样 paper 数',
+    found: '待回填条数',
+    elapsed_ms: '耗时(毫秒)',
+    estimated_workflow_completion_min: '预估 workflow 完成时间(分钟)',
   };
 
   // skipped / errors 在不同源里语义不一样：

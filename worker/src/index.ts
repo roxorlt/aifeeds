@@ -1124,6 +1124,13 @@ export default {
     // POST /api/enrich/run?mode=backfill-x-workflow&limit=200 加速。
     const isXBackfillWorkflowSlot = minute === 10 || minute === 40;
 
+    // HF Paper backfill 兜底(2026-05-19 Phase 4):
+    // :20 / :50 (30min cadence) 扫 stuck items 重 trigger workflow,limit=20 + 3s throttle
+    // = ~60s wall。48 tick × 20 = 960/day capacity。HF daily 50/天,容量充足。
+    // input-hash idempotency 保证 deep_analysis pro 不重跑(figure / ar5iv / discussion
+    // fetch step 仍跑,免费)。OPS 跑批走 /api/enrich/run?mode=backfill-hf-paper-workflow&limit=200
+    const isHfBackfillWorkflowSlot = minute === 20 || minute === 50;
+
     // X thread_root_id 反向重建（2026-05-17 task #34）:2026-05-06 切 ScrapeBadger
     // 后 ingest 不再写 extra.thread_root_id(SB API 不返 thread 关系),导致 prod
     // 5/7 之后 0 条新 thread → FE 详情页 thread 多卡渲染样本空。
@@ -1330,6 +1337,53 @@ export default {
               triggered,
               skipped,
               failed,
+              elapsed_ms: Date.now() - t0,
+            }));
+            return;
+          }
+          // HF Paper backfill 兜底(2026-05-19 Phase 4)
+          // :20 / :50 30min cadence 扫 stuck items 重 trigger workflow,
+          // input-hash idempotency 保证 deep_analysis pro 不重跑(figure / discussion fetch
+          // 仍跑免费),只补缺失。inline 跟 /api/enrich/run?mode=backfill-hf-paper-workflow 一份逻辑
+          if (isHfBackfillWorkflowSlot) {
+            if (!env.HF_PAPER_PIPELINE_WORKFLOW) {
+              console.warn('[cron] hf-backfill-workflow: HF_PAPER_PIPELINE_WORKFLOW binding missing');
+              return;
+            }
+            const t0 = Date.now();
+            const pending = await env.DB.prepare(
+              `SELECT id, extra FROM items
+                WHERE source_type='hf_paper'
+                  AND deleted_at IS NULL
+                  AND json_extract(extra, '$.workflow_completed_at') IS NULL
+                  AND (
+                    json_extract(extra, '$.workflow_triggered_at') IS NULL
+                    OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+                  )
+                ORDER BY published_at DESC
+                LIMIT 20`,
+            ).all<{ id: string; extra: string | null }>();
+            let triggered = 0, skipped = 0, failed = 0;
+            for (let i = 0; i < pending.results.length; i++) {
+              const r = pending.results[i];
+              let extraObj: Record<string, unknown> = {};
+              try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+              const arxivId = String(r.id).replace(/^hf_paper:/, '');
+              const result = await triggerHfPaperWorkflowForItem(env, r.id, arxivId, {
+                hasGhRepo: !!extraObj.github_repo,
+                hasProjectPage: !!extraObj.project_page,
+                hasDiscussionId: !!extraObj.discussion_id,
+              });
+              if (result === 'triggered') triggered++;
+              else if (result === 'already_exists') skipped++;
+              else failed++;
+              if (i < pending.results.length - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+              }
+            }
+            console.log(`[cron] hf-backfill-workflow result:`, JSON.stringify({
+              found: pending.results.length,
+              triggered, skipped, failed,
               elapsed_ms: Date.now() - t0,
             }));
             return;
@@ -2689,7 +2743,71 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const result = await runHfDailyFetch(env, { force, date });
     return jsonResponse(result, 200, request, env);
   }
-  // (hf-debug-pdf-fetch 删除 — verify 完成,CF Workers 能拿 arxiv PDF 已确认)
+  // Phase 4:HF Paper backfill — 扫 stuck items 重 trigger workflow
+  // SOP §1.6 模板;按 published_at DESC 优先最新 paper
+  // 30min triggered marker filter 防重复;input-hash idempotency 在 workflow step 内
+  // 防重跑 deep_analysis pro(figure / discussion / ar5iv fetch 仍跑,免费)
+  if (mode === 'backfill-hf-paper-workflow') {
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200);
+    const throttleMs = Math.max(parseInt(url.searchParams.get('throttle_ms') || '3000'), 0);
+    if (!env.HF_PAPER_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'HF_PAPER_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id, extra FROM items
+        WHERE source_type='hf_paper'
+          AND deleted_at IS NULL
+          AND json_extract(extra, '$.workflow_completed_at') IS NULL
+          AND (
+            json_extract(extra, '$.workflow_triggered_at') IS NULL
+            OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+          )
+        ORDER BY published_at DESC
+        LIMIT ?`,
+    ).bind(limit).all<{ id: string; extra: string | null }>();
+
+    let triggered = 0, skipped = 0, failed = 0;
+    let totalAnalysisTokens = 0;
+    let sampledTokens = 0;
+    for (let i = 0; i < pending.results.length; i++) {
+      const r = pending.results[i];
+      let extraObj: Record<string, unknown> = {};
+      try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+      const arxivId = String(r.id).replace(/^hf_paper:/, '');
+      const result = await triggerHfPaperWorkflowForItem(env, r.id, arxivId, {
+        hasGhRepo: !!extraObj.github_repo,
+        hasProjectPage: !!extraObj.project_page,
+        hasDiscussionId: !!extraObj.discussion_id,
+      });
+      if (result === 'triggered') triggered++;
+      else if (result === 'already_exists') skipped++;
+      else failed++;
+      if (throttleMs > 0 && i < pending.results.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, throttleMs));
+      }
+    }
+    // sample deep_analysis token usage 给 OPS 月度成本校准
+    // 拿最近 24h workflow_completed 的 N 条,看 deep_analysis 总 token 估算
+    const tokenSample = await env.DB.prepare(
+      `SELECT json_extract(extra, '$.deep_analysis_input_hash') AS hash
+        FROM items WHERE source_type='hf_paper'
+          AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+          AND json_extract(extra, '$.deep_analysis_input_hash') IS NOT NULL
+        ORDER BY scraped_at DESC LIMIT 10`,
+    ).all<{ hash: string | null }>();
+    sampledTokens = tokenSample.results.length;
+    // 注:实际 token usage 由 CF AI Gateway 统计;这里 placeholder count 已 hash 数
+
+    return jsonResponse({
+      mode: 'backfill-hf-paper-workflow',
+      found: pending.results.length,
+      triggered, skipped, failed,
+      sampled_completed_paper: sampledTokens,
+      elapsed_ms: Date.now() - t0,
+      estimated_workflow_completion_min: Math.ceil((triggered * 60) / 60),  // ~60s/paper serial step
+    }, 200, request, env);
+  }
   if (mode === 'backfill-quotes') {
     const limit = Math.min(
       Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
