@@ -17,7 +17,7 @@
 import type { Env } from '../index';
 import { callDeepSeek, DEEPSEEK_FLASH } from './llm';
 import { buildAr5ivParagraphPrompt } from './prompts';
-import { fetchFiguresViaPuppeteer } from './figure-puppeteer';
+import { extractImagesFromPdf } from './figure-pdf';
 
 const ARXIV_HTML_BASE = 'https://arxiv.org/html';
 const AR5IV_BASE = 'https://ar5iv.labs.arxiv.org/html';   // fallback for figure(CF IP ban arxiv.org img)
@@ -53,12 +53,99 @@ interface MediaItem {
 }
 
 interface FigureInfo {
-  source: 'ar5iv' | 'hf_thumbnail' | 'none';
+  source: 'ar5iv' | 'pdf' | 'hf_thumbnail' | 'none';
   raw_url?: string;
   r2_url?: string;
   width?: number;
   height?: number;
+  codec?: string;             // PDF 来源时记 DCTDecode / FlateDecode
+  obj_id?: string;            // PDF 来源时记 obj 号(debug 用)
   extracted_at: string;
+}
+
+/**
+ * fetch arxiv.org/pdf + extract first qualifying image XObject(B 主路径)
+ * eval 2026-05-18 测 90 paper:92.9% per-paper / 97.6% per-image 命中率
+ */
+async function extractFirstFigureFromPdf(env: Env, arxivId: string): Promise<FigureInfo | null> {
+  if (!env.READMES) return null;
+
+  // 1. fetch PDF binary
+  let pdfBytes: Uint8Array;
+  try {
+    const r = await fetch(`https://arxiv.org/pdf/${arxivId}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
+    });
+    if (!r.ok) {
+      console.warn(`[hf-paper:figure-pdf] ${arxivId} PDF HTTP ${r.status}`);
+      return null;
+    }
+    const lenStr = r.headers.get('content-length');
+    if (lenStr && parseInt(lenStr, 10) > 50 * 1024 * 1024) {
+      console.warn(`[hf-paper:figure-pdf] ${arxivId} PDF too large ${lenStr}, skip`);
+      return null;
+    }
+    pdfBytes = new Uint8Array(await r.arrayBuffer());
+  } catch (e) {
+    console.error(`[hf-paper:figure-pdf] ${arxivId} fetch exception`, e);
+    return null;
+  }
+
+  // 2. extract image XObject(max 30 candidates,quality gate 之前先 cap)
+  const { images, stats } = extractImagesFromPdf(pdfBytes, { max: 30 });
+  if (images.length === 0) {
+    console.log(`[hf-paper:figure-pdf] ${arxivId} 0/${stats.total_image_xobjects} extracted`);
+    return null;
+  }
+
+  // 3. quality gate + 找第一张合格 figure 迁 R2
+  //    PDF extract 出的 image bytes 已可用,用 width/height aspect / size 双门控
+  for (const img of images) {
+    if (img.width < 300 || img.height < 200) continue;
+    const ar = img.width / img.height;
+    if (ar > 4 || ar < 0.25) continue;
+    if (img.bytes.length < 5 * 1024) continue;            // < 5KB 可能是 mask / thumbnail
+    if (img.bytes.length > 5 * 1024 * 1024) continue;     // > 5MB 跳过(R2 上限)
+
+    // 通过门控 → 迁 R2
+    const hash = await sha256OfBytes(img.bytes);
+    const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.${img.ext}`;
+    try {
+      await env.READMES.put(key, img.bytes, {
+        httpMetadata: { contentType: img.mime },
+        customMetadata: {
+          'src-arxiv-id': arxivId,
+          'source': 'hf-figure-pdf',
+          'codec': img.codec,
+          'obj-id': img.obj_id,
+        },
+      });
+    } catch (e) {
+      console.error(`[hf-paper:figure-pdf] R2 put fail ${key}`, e);
+      continue;
+    }
+    console.log(`[hf-paper:figure-pdf] ${arxivId} extracted obj ${img.obj_id} ${img.codec} ${img.width}x${img.height} → ${key}`);
+    return {
+      source: 'pdf',
+      raw_url: `https://arxiv.org/pdf/${arxivId}#obj=${img.obj_id}`,
+      r2_url: `/r/${key}`,
+      width: img.width,
+      height: img.height,
+      codec: img.codec,
+      obj_id: img.obj_id,
+      extracted_at: new Date().toISOString(),
+    };
+  }
+  console.log(`[hf-paper:figure-pdf] ${arxivId} ${images.length} candidates all rejected by quality gate`);
+  return null;
+}
+
+async function sha256OfBytes(buf: Uint8Array): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  const bytes = new Uint8Array(hash);
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
 }
 
 export async function fetchAr5ivAndExtractFigureForHf(
@@ -85,23 +172,19 @@ export async function fetchAr5ivAndExtractFigureForHf(
   }
 
   // 2. extract first qualifying figure
-  //    fallback 链(arxiv.org/html CF IP 拿到 placeholder data: URL,需要绕):
-  //      a. direct fetch HTML extract(0 candidate 时回落)
-  //      b. CF Browser Rendering puppeteer fetch(真 chromium,绕 IP ban)
-  //      c. ar5iv.labs.arxiv.org fetch(社区项目,老 paper 兼容)
-  let figureUrls = extractFigureCandidates(html, finalUrl);
-  if (figureUrls.length === 0) {
-    console.log(`[hf-paper:arxiv-html] ${arxivId} direct fetch 0 figure(CF IP placeholder?), try puppeteer`);
-    figureUrls = await fetchFiguresViaPuppeteer(env, arxivId);
-  }
-  if (figureUrls.length === 0) {
-    console.log(`[hf-paper:arxiv-html] ${arxivId} puppeteer 0 figure, fallback ar5iv`);
-    figureUrls = await fetchFigureCandidatesFromAr5iv(arxivId);
-  }
+  //    fallback 链:
+  //      a. arxiv.org/html direct fetch + extract img URLs(arxiv 对 CF IP 替换 placeholder
+  //         多数 0 candidate,极少数 paper 才能直接拿到)
+  //      b. **arxiv.org/pdf 下载 + PDF extract image XObject**(B 方案,2026-05-18 eval 92.9%
+  //         per-paper 命中率)— 这是主路径
+  //      c. ar5iv.labs.arxiv.org 兜底(社区项目,老 paper 兼容)
   let figureInfo: FigureInfo = {
     source: 'none',
     extracted_at: new Date().toISOString(),
   };
+
+  // a. arxiv.org HTML 直接 candidate(罕见 work)
+  let figureUrls = extractFigureCandidates(html, finalUrl);
   for (const candidate of figureUrls) {
     const migrated = await migrateFigureToR2(env, candidate);
     if (migrated) {
@@ -114,6 +197,31 @@ export async function fetchAr5ivAndExtractFigureForHf(
         extracted_at: new Date().toISOString(),
       };
       break;
+    }
+  }
+
+  // b. PDF extract(主路径)— arxiv.org/pdf CF Workers 可拿
+  if (figureInfo.source === 'none') {
+    const pdfFig = await extractFirstFigureFromPdf(env, arxivId);
+    if (pdfFig) figureInfo = pdfFig;
+  }
+
+  // c. ar5iv 兜底(老 paper / 罕见情况)
+  if (figureInfo.source === 'none') {
+    figureUrls = await fetchFigureCandidatesFromAr5iv(arxivId);
+    for (const candidate of figureUrls) {
+      const migrated = await migrateFigureToR2(env, candidate);
+      if (migrated) {
+        figureInfo = {
+          source: 'ar5iv',
+          raw_url: candidate,
+          r2_url: migrated.r2_url,
+          width: migrated.width,
+          height: migrated.height,
+          extracted_at: new Date().toISOString(),
+        };
+        break;
+      }
     }
   }
 

@@ -20,7 +20,6 @@
     "fflate": "^0.8.2",
     "jose": "^5.10.0",
     "nanoid": "^5.1.11",
-    "qrcode": "^1.5.4",
-    "@cloudflare/puppeteer": "^1.1.0"
+    "qrcode": "^1.5.4"
   }
 }
