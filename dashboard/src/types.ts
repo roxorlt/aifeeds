@@ -216,15 +216,23 @@ export interface HfAuthor {
 }
 
 export interface HfDiscussionComment {
-  author_name: string;
-  author_handle?: string;
-  author_avatar?: string;
-  content: string;                            // 英文原文
-  content_zh?: string;                        // DeepSeek flash 翻译
-  posted_at: string;                          // ISO8601
-  likes?: number;
-  is_reply?: boolean;                         // 是否回复（嵌套），handoff §3.2 字段
-  reply_to_author?: string;                   // 回复对象（is_reply=true 时填）
+  id: string;                                 // HF 内部 comment ID
+  author_name: string;                        // fullname
+  author_handle: string;                      // @handle
+  author_avatar_url: string;                  // R2 迁移后路径
+  raw_author_avatar_url?: string;             // 原 HF CDN URL 备份
+  is_pro: boolean;                            // HF PRO 标识
+  is_hf_admin: boolean;                       // HF 官方 admin
+  content: string;                            // markdown 原文
+  content_html: string;                       // BE rendered HTML(FE 直渲,跳 markdown 解析)
+  content_zh?: string;                        // DeepSeek flash 翻译(language='zh' 时跳)
+  posted_at: string;                          // ISO8601 createdAt
+  updated_at?: string;                        // 编辑过的最后 update 时间
+  edited?: boolean;                           // 是否编辑过
+  is_author_reply: boolean;                   // BE 推算:comment.author._id === paper.submittedOnDailyBy._id
+  language: string;                           // 'en' / 'zh' / etc(BE 抽 identifiedLanguage)
+  reactions: Array<{ emoji: string; count: number }>;  // 简化版,去 users[]
+  like_count: number;                         // 👍 reaction count 兜底字段
 }
 
 export interface HfExperiments {

@@ -21,6 +21,7 @@
 import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import DOMPurify from "dompurify";
 import type { Components } from "react-markdown";
 import type {
   HfDiscussionComment,
@@ -29,6 +30,27 @@ import type {
   ItemExtra,
 } from "../types";
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
+
+// 评论 HTML 渲染走 DOMPurify sanitize(BE 给的 content_html 来自 HF 用户输入,
+// XSS 风险必须过滤)。afterSanitizeAttributes hook 强制所有 <a> 加 target=_blank。
+// hook 是 idempotent 的(setAttribute 重复无害);PhDrawerBody 也注册一遍走同款。
+if (typeof window !== "undefined") {
+  DOMPurify.addHook("afterSanitizeAttributes", (node: Element) => {
+    if (node.tagName === "A") {
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
+    }
+  });
+}
+
+const HF_COMMENT_SANITIZE_CONFIG = {
+  ALLOWED_TAGS: [
+    "p", "br", "a", "strong", "em", "b", "i", "u", "code", "pre",
+    "blockquote", "ul", "ol", "li", "img", "span", "h1", "h2", "h3",
+    "h4", "h5", "h6", "hr", "table", "thead", "tbody", "tr", "th", "td",
+  ],
+  ALLOWED_ATTR: ["href", "src", "alt", "title", "class", "rel"],
+};
 
 interface Props {
   item: Item;
@@ -769,15 +791,30 @@ function CommentItem({
   comment: HfDiscussionComment;
   tab: "translated" | "original";
 }) {
-  const text =
-    tab === "translated" && comment.content_zh ? comment.content_zh : comment.content;
-  const indentCls = comment.is_reply ? "ml-6 border-l-2 border-neutral-200 pl-3" : "";
+  // language=zh 的评论本身就是中文,不需要 toggle,直接显原 content。
+  // 其他语言:translated tab 优先 content_zh,fallback 原文;original tab 强制原文。
+  const showZh = comment.language !== "zh" && tab === "translated" && !!comment.content_zh;
+
+  // 渲染策略:
+  // - 翻译态:DeepSeek 输出纯文本(可能含轻量 markdown),用 MdContent
+  // - 原文态:优先 BE 已 render 的 content_html(DOMPurify sanitize),
+  //          fallback markdown(content)
+  const useHtml = !showZh && !!comment.content_html;
+  const sanitized = useHtml
+    ? DOMPurify.sanitize(comment.content_html, HF_COMMENT_SANITIZE_CONFIG)
+    : "";
+  const plainBody = showZh ? (comment.content_zh as string) : comment.content;
+
+  // 作者本人回复缩进显示(BE 推算的 is_author_reply,精确替代之前的字符串 reply_to_author)
+  const indentCls = comment.is_author_reply
+    ? "ml-6 border-l-2 border-amber-200 pl-3"
+    : "";
   return (
     <div className={indentCls}>
-      <div className="mb-1 flex items-center gap-2">
-        {comment.author_avatar ? (
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+        {comment.author_avatar_url ? (
           <img
-            src={comment.author_avatar}
+            src={comment.author_avatar_url}
             alt={comment.author_name}
             className="h-7 w-7 rounded-full bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -793,24 +830,63 @@ function CommentItem({
         {comment.author_handle && (
           <span className="text-[11px] text-neutral-500">@{comment.author_handle}</span>
         )}
-        {comment.is_reply && comment.reply_to_author && (
-          <span className="text-[11px] text-neutral-400">
-            ↪ @{comment.reply_to_author}
+        {/* 作者本人(论文 submitter)回复 badge —— amber 突出 */}
+        {comment.is_author_reply && (
+          <span className="rounded-full bg-amber-100 px-1.5 py-0 text-[10px] font-semibold text-amber-800">
+            作者
           </span>
         )}
-        <span className="ml-auto text-[11px] text-neutral-400">
+        {comment.is_hf_admin && (
+          <span className="rounded-full bg-rose-100 px-1.5 py-0 text-[10px] font-semibold text-rose-800">
+            HF 官方
+          </span>
+        )}
+        {comment.is_pro && !comment.is_hf_admin && (
+          <span className="rounded-full bg-neutral-100 px-1.5 py-0 text-[10px] font-medium text-neutral-700">
+            PRO
+          </span>
+        )}
+        <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-neutral-400">
           {timeAgo(comment.posted_at)}
+          {comment.edited && (
+            <span className="text-neutral-400" title="此评论被编辑过">
+              · 已编辑
+            </span>
+          )}
         </span>
       </div>
-      <div className="ml-9 text-[14px] leading-[1.6] text-neutral-800">
-        <MdContent source={text} />
-      </div>
-      {comment.likes !== undefined && comment.likes > 0 && (
-        <div className="ml-9 mt-1 inline-flex items-center gap-1 text-[12px] text-neutral-500">
-          <svg viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
-            <path d="M8 2.5l5.5 7H2.5l5.5-7z" />
-          </svg>
-          {comment.likes}
+
+      {/* 评论正文 — content_html 优先(BE rendered + DOMPurify),fallback markdown */}
+      {useHtml ? (
+        <div
+          className="ml-9 hf-comment-html text-[14px] leading-[1.6] text-neutral-800"
+          dangerouslySetInnerHTML={{ __html: sanitized }}
+        />
+      ) : (
+        <div className="ml-9 text-[14px] leading-[1.6] text-neutral-800">
+          <MdContent source={plainBody} />
+        </div>
+      )}
+
+      {/* Reactions 行 — 多 emoji 反应,👍 like_count 兜底优先显示 */}
+      {(comment.reactions?.length > 0 || comment.like_count > 0) && (
+        <div className="ml-9 mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px]">
+          {comment.reactions && comment.reactions.length > 0 ? (
+            comment.reactions.map((r, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-0.5 rounded-full bg-neutral-100 px-1.5 py-0.5 text-neutral-600"
+              >
+                <span className="text-[12px]">{r.emoji}</span>
+                <span className="tabular-nums text-[11px]">{r.count}</span>
+              </span>
+            ))
+          ) : (
+            <span className="inline-flex items-center gap-0.5 rounded-full bg-neutral-100 px-1.5 py-0.5 text-neutral-600">
+              <span>👍</span>
+              <span className="tabular-nums text-[11px]">{comment.like_count}</span>
+            </span>
+          )}
         </div>
       )}
     </div>
