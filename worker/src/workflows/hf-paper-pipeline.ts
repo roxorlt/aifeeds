@@ -68,30 +68,47 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
     );
 
     // ────────────────────────────────────────────────────────────────
-    // Step 1:fan-out 并行(4 项)
+    // Step 1:**串行写 D1**(避免 fan-out 并行 write extra 互相覆盖 lost update)
+    //
+    // 历史教训(2026-05-18 Phase 3 staging verify):
+    //   - backfill-media-r2 read-modify-write 整个 extra(改 media[].url R2 rewrite)
+    //   - fetch-ar5iv 同样 write 整个 extra(加 figure_image + ar5iv_*)
+    //   - fetch-discussion 用 json_set 只动 discussion_* 字段
+    //   - 并行跑时,前两个 step 后写覆盖 fetch-discussion 的 json_set 结果
+    // 结果:50 paper workflow_completed_at 全写入,但 discussion_comments / figure_image
+    //      / ar5iv_fetched_at 互相覆盖,留下 null 字段。
+    //
+    // 解法:串行跑,每 step 读最新 extra 写一次。代价 wall-clock 慢 ~3x(8s vs 3s),
+    //      但 8s 在 workflow timeout 5min 范围内宽松。
+    //
+    // refresh-gh-star 可保留 fan-out(用 json_set 增量,无冲突),
+    // 但简化起见也串行(一致性 > 微秒优化)。
     // ────────────────────────────────────────────────────────────────
-    const [, , ar5ivResult, discussionResult] = await Promise.all([
-      // 媒体迁移(thumbnail + submitter avatar 兜底)
-      step.do('backfill-media-r2', RETRY, () =>
-        backfillMediaForHfPaper(this.env, itemId),
-      ),
-      // GH star refresh(若 hasGhRepo)
-      hasGhRepo
-        ? step.do('refresh-gh-star', RETRY, () =>
-            refreshGhStarForHfPaper(this.env, itemId),
-          )
-        : Promise.resolve(null),
-      // ar5iv 全文抓取 + 论文首图提取 + R2 迁移(NEW #1)
-      step.do('fetch-ar5iv-and-extract-figure', RETRY, () =>
-        fetchAr5ivAndExtractFigureForHf(this.env, itemId, arxivId),
-      ),
-      // 评论抓取(svelte_ssr,Phase 0.5 验证)
-      hasDiscussionId
-        ? step.do('fetch-discussion', RETRY, () =>
-            fetchDiscussionForHfPaper(this.env, itemId, arxivId),
-          )
-        : Promise.resolve(null),
-    ]);
+
+    // ar5iv 全文抓取 + 论文首图提取 + R2 迁移(NEW #1,write 整个 extra/media)
+    const ar5ivResult = await step.do('fetch-ar5iv-and-extract-figure', RETRY, () =>
+      fetchAr5ivAndExtractFigureForHf(this.env, itemId, arxivId),
+    );
+
+    // 评论抓取(svelte_ssr,Phase 0.5 验证;json_set 增量写)
+    const discussionResult = hasDiscussionId
+      ? await step.do('fetch-discussion', RETRY, () =>
+          fetchDiscussionForHfPaper(this.env, itemId, arxivId),
+        )
+      : null;
+
+    // GH star refresh(若 hasGhRepo,json_set 增量写)
+    if (hasGhRepo) {
+      await step.do('refresh-gh-star', RETRY, () =>
+        refreshGhStarForHfPaper(this.env, itemId),
+      );
+    }
+
+    // 媒体迁移(thumbnail + submitter avatar + 评论者 avatar 全量迁 R2)
+    // **必须最后跑** — 它读最新 extra(含 discussion_comments)写全部 mapping
+    await step.do('backfill-media-r2', RETRY, () =>
+      backfillMediaForHfPaper(this.env, itemId),
+    );
 
     // ────────────────────────────────────────────────────────────────
     // Step 2:翻译 ar5iv 段落 + 评论翻译(flash,跟 Step 3 fan-out 并行不必要,因为
@@ -109,13 +126,9 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
       );
     }
 
-    // 在 Step 2 后再跑一次 backfill-media-r2(评论已抓到,评论者 avatar 迁 R2)
-    // 第一次跑没评论数据,这次跑会 patch in
-    if (discussionResult?.fetched && (discussionResult.comments_count ?? 0) > 0) {
-      await step.do('backfill-comment-avatars-r2', RETRY, () =>
-        backfillMediaForHfPaper(this.env, itemId),
-      );
-    }
+    // 注:之前在此跑 backfill-comment-avatars-r2 重抓评论者头像 R2,
+    // 现在 Step 1 已串行(backfill-media-r2 最后跑,能读到 discussion_comments),
+    // 这里不需要二次 backfill。
 
     // ────────────────────────────────────────────────────────────────
     // Step 3:C 方案 — 8 段独立 pro reasoning fan-out + 1 次 flash translate
