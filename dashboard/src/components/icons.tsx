@@ -322,11 +322,12 @@ export function SourceIcon({ source_type, className }: IconProps & { source_type
     case "huodongxing":
       return <BrandEvents className={className} />;
     case "arxiv":
+    case "hf_paper":
+      // PM 2026-05-19: 论文流 title 左侧 icon 用 arxiv 标志(论文实际来自 arxiv,
+      // HF 只是发现/聚合渠道)。BrandHF 暂保留在文件里,如未来需要区分场景再启用
       return <BrandArxiv className={className} />;
     case "clawhub":
       return <BrandClawhub className={className} />;
-    case "hf_paper":
-      return <BrandHF className={className} />;
     default:
       return null;
   }

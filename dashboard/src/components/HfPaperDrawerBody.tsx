@@ -403,23 +403,25 @@ export function HfPaperDrawerBody({ item }: Props) {
   const cover = media.find((m) => m.type === "image");
 
   // BE 2026-05-19: figure_image 元数据 — width/height 用来算 hero 容器 aspect-ratio。
-  // 纵向 figure(GUI/screenshot 类 paper,如 2605.15138)在 16:9 容器内 letterbox
-  // 会补白巨大,改成跟 figure aspect 分档自适应,letterbox 仍保留(object-contain)
+  // PM 决策(2026-05-19 v6.8):只有横向 figure(aspect >= 1.0)才适合做 hero;
+  // 方形 / 纵向(< 1.0,GUI/screenshot 类)即便 BE 经 lookahead 给出最佳 figure,
+  // 强撑出来视觉也是"中间一小条 + 两侧大补白"或"接近方形像被裁的 GUI",
+  // 当无 hero 隐藏更干净(用户可以去 figures tab 看完整真实图)
   const figureImage = extra.figure_image;
   const heroAspect =
     figureImage?.width && figureImage?.height
       ? figureImage.width / figureImage.height
       : null;
+  // 渲染门控:有 cover + (无 figure 元数据兜底 OR figure 横向)
+  const shouldRenderHero =
+    !!cover && (heroAspect == null || heroAspect >= 1.0);
+  // 容器 aspect 分档:wide / 横向偏方两档,纵向已隐藏不需要
   const heroContainerAspect =
     heroAspect == null
-      ? "1200 / 630"           // 没 figure 元数据:回退原 16:9 hero(cover/og-image)
+      ? "1200 / 630"          // 兜底:无 figure 元数据(og-image fallback 等),走原 16:9
       : heroAspect >= 1.5
-        ? "16 / 9"             // 横向 wide(大多数 paper figure 命中)
-        : heroAspect >= 1.0
-          ? "4 / 3"             // 横向方形偏宽
-          : heroAspect >= 0.7
-            ? "1 / 1"           // 方形
-            : "4 / 5";           // 纵向(GUI / screenshot / mobile UI 类)
+        ? "16 / 9"             // 横向 wide
+        : "4 / 3";              // 横向偏方(1.0 - 1.5)
 
   // tab + 内部状态
   const [activeTab, setActiveTab] = useState<TabKey>("raw");
@@ -437,7 +439,7 @@ export function HfPaperDrawerBody({ item }: Props) {
     <div className="text-neutral-900">
       {/* ─── Hero: thumbnail + 标题中英 + by @xxx 等 N 位提交 ─────────── */}
       <div className="border-b border-neutral-200" data-drawer-title-anchor>
-        {cover && (
+        {shouldRenderHero && cover && (
           // hero 容器:aspectRatio inline 跟 figure 形状走,letterbox 用 object-contain
           // (figure 真实比例完整露出),max-h 60vh 防纵向 figure 在小屏占满全屏
           <div
@@ -695,8 +697,16 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
       )}
 
       {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton。
-          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5) */}
-      <div className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50">
+          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5)
+          PM 2026-05-19 #5: 容器 + iframe 都 touch-action: pan-y,
+          只允许垂直滚动,禁水平 pan + pinch zoom。注意:iframe 内
+          cross-origin 跨域 pinch 来自 iframe 内 arxiv.org 自身 viewport,
+          FE 端无法跨域注入样式;此处控制的是外层容器手势识别,iframe
+          内部 webview 默认手势若用户触发 pinch 仍可能生效 */}
+      <div
+        className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50"
+        style={{ touchAction: "pan-y" }}
+      >
         {!loaded && !iframeError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
             <div className="mb-2 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-500" />
@@ -710,7 +720,7 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
             loading="lazy"
             referrerPolicy="no-referrer"
             className="h-[600px] w-full overflow-x-hidden"
-            style={{ overflowX: "hidden" }}
+            style={{ overflowX: "hidden", touchAction: "pan-y" }}
             scrolling="auto"
             title={`arxiv ${arxivId} LaTeXML 全文`}
             onLoad={() => setLoaded(true)}
@@ -934,8 +944,10 @@ function CommentItem({
   const plainBody = showZh ? (comment.content_zh as string) : comment.content;
 
   // 作者本人回复缩进显示(BE 推算的 is_author_reply,精确替代之前的字符串 reply_to_author)
+  // PM 2026-05-19: 去掉左侧 amber 竖线,只保留缩进 + padding;
+  // 作者身份的视觉区分由头部那枚 amber "作者" badge 承担,不再要双重强调
   const indentCls = comment.is_author_reply
-    ? "ml-6 border-l-2 border-amber-200 pl-3"
+    ? "ml-6 pl-3"
     : "";
   return (
     <div className={indentCls}>

@@ -360,8 +360,13 @@ export function TweetDrawer() {
           transition: isDragging ? "none" : "transform 200ms ease-out",
         }}
       >
+        {/* PM 2026-05-19: mobile 长 title 跟「分享」按钮 overlap。
+            原 grid-cols-3 三列等宽,middle cell 在 360 屏 ≈ 120px 装不下长 title,
+            justify-self-center + truncate 在窄 cell 内仍 by-content 撑出。
+            改 grid-cols-[auto_1fr_auto]:左右 button by-content,中间 1fr 占剩余 +
+            min-w-0 让 truncate 真正生效。配合 px-2 内边距防 ellipsis 紧贴按钮 */}
         <header
-          className="grid grid-cols-3 items-center border-b border-neutral-200 px-2 py-1.5 sm:px-3"
+          className="grid grid-cols-[auto_1fr_auto] items-center border-b border-neutral-200 px-2 py-1.5 sm:px-3"
           onDoubleClick={onHeaderDoubleClick}
         >
           <div className="justify-self-start">
@@ -378,7 +383,7 @@ export function TweetDrawer() {
               )}
             </button>
           </div>
-          <div className="justify-self-center truncate text-sm font-semibold text-neutral-900">
+          <div className="min-w-0 truncate px-2 text-center text-sm font-semibold text-neutral-900">
             {headerTitle}
           </div>
           <div className="justify-self-end">

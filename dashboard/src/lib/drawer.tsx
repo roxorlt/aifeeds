@@ -215,9 +215,51 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     const id = state.item?.id;
     if (!id) return;
     let cancelled = false;
+    // C3: 智能 merge —— fresh 是 enrich 后从 worker 拉的最新版，但
+    // 如果某些字段在前端先到（比如 fetchItems 列表 endpoint 缓存了
+    // 含 quote_of 完整快照的数据），而 fresh 因数据 race 拿到的是
+    // 部分字段，单纯替换会导致 UI "倒退"（嵌套小卡突然消失等）。
+    // 用 setState functional form 合并：fresh 字段优先（含 metrics），
+    // 但 prev.extra 里 fresh 没填的字段保留（safeguard）。
+    // BE 2026-05-19: hf_paper discussion refresh 完成后也走同样 merge 路径,
+    // 抽成 applyFresh 闭包共用
+    const applyFresh = (fresh: Awaited<ReturnType<typeof fetchItem>>) => {
+      setState((prev) => {
+        if (!prev.item) {
+          return {
+            item: fresh.item,
+            siblings: fresh.siblings,
+            siblings_has_more: fresh.siblings_has_more,
+            loading: false,
+            error: null,
+          };
+        }
+        const prevExtra = (prev.item.extra && typeof prev.item.extra === 'object') ? prev.item.extra : {};
+        const freshExtra = (fresh.item.extra && typeof fresh.item.extra === 'object') ? fresh.item.extra : {};
+        const mergedExtra = { ...prevExtra, ...freshExtra };
+        // 但如果 fresh 把某字段显式置为 null/undefined，prev 有值时保留 prev 的
+        for (const k of Object.keys(prevExtra)) {
+          if ((freshExtra as Record<string, unknown>)[k] == null && (prevExtra as Record<string, unknown>)[k] != null) {
+            (mergedExtra as Record<string, unknown>)[k] = (prevExtra as Record<string, unknown>)[k];
+          }
+        }
+        return {
+          item: { ...fresh.item, extra: mergedExtra },
+          siblings: fresh.siblings,
+          siblings_has_more: fresh.siblings_has_more,
+          loading: false,
+          error: null,
+        };
+      });
+      // B2: 只在已有 spotlight 时刷新（URL 直接访问场景）。流内点击不强插。
+      setSpotlightItem((prev) => (prev ? fresh.item : null));
+      // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）
+      dispatchItemUpdate(fresh.item);
+    };
+
     (async () => {
       try {
-        const { refreshItem } = await import("../api");
+        const { refreshItem, refreshHfDiscussion } = await import("../api");
         const r = await refreshItem(id);
         if (cancelled || !r.refreshed) return;
         // 等 worker 写完 D1（~100ms），再拉新数据
@@ -225,43 +267,24 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         if (cancelled || activeIdRef.current !== id) return;
         const fresh = await fetchItem(id);
         if (cancelled || activeIdRef.current !== id) return;
-        // C3: 智能 merge —— fresh 是 enrich 后从 worker 拉的最新版，但
-        // 如果某些字段在前端先到（比如 fetchItems 列表 endpoint 缓存了
-        // 含 quote_of 完整快照的数据），而 fresh 因数据 race 拿到的是
-        // 部分字段，单纯替换会导致 UI "倒退"（嵌套小卡突然消失等）。
-        // 用 setState functional form 合并：fresh 字段优先（含 metrics），
-        // 但 prev.extra 里 fresh 没填的字段保留（safeguard）。
-        setState((prev) => {
-          if (!prev.item) {
-            return {
-              item: fresh.item,
-              siblings: fresh.siblings,
-              siblings_has_more: fresh.siblings_has_more,
-              loading: false,
-              error: null,
-            };
-          }
-          const prevExtra = (prev.item.extra && typeof prev.item.extra === 'object') ? prev.item.extra : {};
-          const freshExtra = (fresh.item.extra && typeof fresh.item.extra === 'object') ? fresh.item.extra : {};
-          const mergedExtra = { ...prevExtra, ...freshExtra };
-          // 但如果 fresh 把某字段显式置为 null/undefined，prev 有值时保留 prev 的
-          for (const k of Object.keys(prevExtra)) {
-            if ((freshExtra as Record<string, unknown>)[k] == null && (prevExtra as Record<string, unknown>)[k] != null) {
-              (mergedExtra as Record<string, unknown>)[k] = (prevExtra as Record<string, unknown>)[k];
-            }
-          }
-          return {
-            item: { ...fresh.item, extra: mergedExtra },
-            siblings: fresh.siblings,
-            siblings_has_more: fresh.siblings_has_more,
-            loading: false,
-            error: null,
-          };
-        });
-        // B2: 只在已有 spotlight 时刷新（URL 直接访问场景）。流内点击不强插。
-        setSpotlightItem((prev) => (prev ? fresh.item : null));
-        // 同步 feed 流里那张卡片，避免「抽屉新、feed 老」（6.6.2 / 6.6.3）
-        dispatchItemUpdate(fresh.item);
+        applyFresh(fresh);
+
+        // BE 2026-05-19: hf_paper 额外异步刷评论(独立 endpoint 15s timeout,
+        // 不阻塞 metrics UI)。原 refresh 已 split 砍掉 discussion,改这里
+        // fire-and-forget 等 5-10s 返了再 refetch 一次拿评论 + R2 mirror img
+        if (r.source_type === 'hf_paper') {
+          refreshHfDiscussion(id)
+            .then(async (dr) => {
+              if (cancelled || !dr.refreshed || activeIdRef.current !== id) return;
+              const fresh2 = await fetchItem(id);
+              if (cancelled || activeIdRef.current !== id) return;
+              applyFresh(fresh2);
+            })
+            .catch((err) => {
+              // 静默,不阻塞 main flow;主 refresh 已经更过 metrics
+              console.warn('hf_paper discussion refresh failed', err);
+            });
+        }
       } catch {
         // 静默失败
       }

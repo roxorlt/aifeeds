@@ -78,11 +78,20 @@ export function ordinal(n: number | null | undefined): string {
 // Hosts that need worker /img proxy to load reliably on CN networks:
 //   - pbs.twimg.com / abs.twimg.com / video.twimg.com: GFW blocks
 //   - avatars.githubusercontent.com: GH 头像国内访问偶发慢/302 重定向到 camo
+//   - cdn-*.huggingface.co + huggingface.co: CN 网络对 HF 偶发慢,
+//     R2 mirror 之外的直链(HF social-thumbnail / identicon)需要反代加速
+//   - arxiv.org: arxiv html/pdf 全文内嵌图直链(figures、equation 渲染等)
+// BE 2026-05-19: worker /img ALLOWED_IMG_HOSTS 已支持以上域,FE 同步扩 allowlist
 const PROXY_HOSTS = new Set([
   "pbs.twimg.com",
   "abs.twimg.com",
   "video.twimg.com",
   "avatars.githubusercontent.com",
+  "cdn-avatars.huggingface.co",
+  "cdn-thumbnails.huggingface.co",
+  "cdn-uploads.huggingface.co",
+  "huggingface.co",
+  "arxiv.org",
 ]);
 const PROXY_BASE =
   import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
