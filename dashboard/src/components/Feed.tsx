@@ -9,6 +9,7 @@ import { GithubCard } from "./GithubCard";
 import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
+import { HfPaperCard } from "./HfPaperCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { HuodongxingColumnHeader, type HdxCity, type HdxWhen, type HdxForm } from "./HuodongxingColumnHeader";
 import { SourceIcon } from "./icons";
@@ -690,7 +691,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               }}
             />
           )}
-          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && (
+          {/* hf_paper 默认按时间倒序,不需要 sort toggle(PM v5 反馈) */}
+          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && sourceType !== "hf_paper" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {
@@ -822,6 +824,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                     <ClawhubCard key={row.item.id} item={row.item} />
                   ) : row.item.source_type === "huodongxing" ? (
                     <HuodongxingCard key={row.item.id} item={row.item} />
+                  ) : row.item.source_type === "hf_paper" ? (
+                    <HfPaperCard key={row.item.id} item={row.item} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

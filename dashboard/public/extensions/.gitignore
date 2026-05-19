@@ -1,0 +1,3 @@
+# crx 安装包不进 git(MB 级二进制),由 PM 手动放进 CF Pages public
+*.crx
+*.zip

@@ -72,6 +72,12 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const eventId = decodeURIComponent(hdxMatch[1]);
     return { compositeId: `huodongxing:${eventId}` };
   }
+  // /h/:arxiv_id → hf_paper:<arxiv_id>（HF Daily Papers，arxiv_id 如 2605.13301）
+  const hfMatch = pathname.match(/^\/h\/([^/]+)$/);
+  if (hfMatch) {
+    const arxivId = decodeURIComponent(hfMatch[1]);
+    return { compositeId: `hf_paper:${arxivId}` };
+  }
   return null;
 }
 
@@ -133,6 +139,9 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       } else if (item.source_type === "huodongxing") {
         // /e/:event_id — source_id 是站点原始数字 ID（如 5859894940100）
         navigate(`/e/${encodeURIComponent(item.source_id)}`);
+      } else if (item.source_type === "hf_paper") {
+        // /h/:arxiv_id — source_id 是 arxiv id（如 2605.13301）
+        navigate(`/h/${encodeURIComponent(item.source_id)}`);
       }
       // Future sources: youtube / podcast / arxiv — add URL forms here.
     },

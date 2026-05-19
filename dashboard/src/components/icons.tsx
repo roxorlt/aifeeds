@@ -286,6 +286,27 @@ export function IconCopy({ className }: IconProps) {
   );
 }
 
+// HuggingFace 标志风格 logo — 黄色「拥抱脸」笑脸 + 双手举起。
+// 简化版纯几何形:头(圆) + 两眼(椭圆) + 嘴(弧) + 两手(圆角矩形)。
+// HF 品牌色 #FFD21E,但 SourceIcon 通常受父级 className 控制颜色,这里走 currentColor
+// 让颜色跟着 source filter chip 主色变化(选中时高亮)。
+export function BrandHF({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || BRAND_CLASS} aria-label="HuggingFace" fill="currentColor">
+      {/* 头(圆形 face) */}
+      <circle cx="12" cy="11" r="6.5" />
+      {/* 两眼(白色椭圆) */}
+      <ellipse cx="9.6" cy="10.3" rx="0.8" ry="1.1" fill="#fff" />
+      <ellipse cx="14.4" cy="10.3" rx="0.8" ry="1.1" fill="#fff" />
+      {/* 嘴(向上弧线 = 笑) */}
+      <path d="M9.5 12.8 Q12 14.6 14.5 12.8" stroke="#fff" strokeWidth="0.8" fill="none" strokeLinecap="round" />
+      {/* 两手(举起拥抱姿势,左右各一) */}
+      <rect x="3.5" y="13.5" width="3.5" height="2.2" rx="1.1" />
+      <rect x="17" y="13.5" width="3.5" height="2.2" rx="1.1" />
+    </svg>
+  );
+}
+
 export function SourceIcon({ source_type, className }: IconProps & { source_type: string }) {
   switch (source_type) {
     case "x_list":
@@ -304,6 +325,8 @@ export function SourceIcon({ source_type, className }: IconProps & { source_type
       return <BrandArxiv className={className} />;
     case "clawhub":
       return <BrandClawhub className={className} />;
+    case "hf_paper":
+      return <BrandHF className={className} />;
     default:
       return null;
   }
