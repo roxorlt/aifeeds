@@ -382,13 +382,19 @@ async function pickAuthorAvatar(
     }
   } else if (sourceType === 'hf_paper') {
     // HF Paper: submitter 头像 = extra.submitted_by.avatar_url(R2 path /r/hf/<sha>.svg)
-    // 或 raw_avatar_url(HF identicon /avatars/<hash>.svg)兜底
+    // 或 raw_avatar_url(HF identicon /avatars/<hash>.svg)兜底。
+    // PM v6.5: 当 R2 SVG 转 PNG 失败时(HF SSR 渲染的 svg 含 Vue hydration 注释,
+    // resvg 偶发解析不动),走 raw_avatar_url 重试一次,避免头像直接缺失。
     const sb = extra?.submitted_by as { avatar_url?: string; raw_avatar_url?: string } | undefined;
-    url = sb?.avatar_url || sb?.raw_avatar_url || undefined;
-    // /avatars/ 是 HF identicon 相对路径,拼 huggingface.co host
-    if (url && url.startsWith('/avatars/')) {
-      url = `https://huggingface.co${url}`;
+    const candidates: string[] = [];
+    if (sb?.avatar_url) candidates.push(sb.avatar_url);
+    if (sb?.raw_avatar_url && sb.raw_avatar_url !== sb.avatar_url) candidates.push(sb.raw_avatar_url);
+    for (let candidate of candidates) {
+      if (candidate.startsWith('/avatars/')) candidate = `https://huggingface.co${candidate}`;
+      const dataUri = await fetchAvatarOnly(candidate, env);
+      if (dataUri) return dataUri;
     }
+    return undefined;
   }
   if (!url) return undefined;
   // 头像走单独路径：只需要 fetch + sniff + base64，不做 media 门控
@@ -408,11 +414,23 @@ async function fetchAvatarOnly(rawUrl: string, env: Env): Promise<string | undef
       const sniffed = sniffImageType(buf);
       const ct = sniffed ? mimeFor(sniffed) : (obj.httpMetadata?.contentType || 'image/png');
       if (sniffed === 'svg') {
-        // SVG → PNG via resvg
-        const svgText = new TextDecoder().decode(new Uint8Array(buf));
-        const { renderSvgToPng } = await import('./poster');
-        const png = new Uint8Array(await renderSvgToPng(svgText));
-        return `data:image/png;base64,${arrayBufferToBase64(png.buffer)}`;
+        // SVG → PNG via resvg。
+        // PM v6.5: HF identicon SVG 由 Vue SSR 渲染,外层包了 hydration 注释
+        // (<!--[--><!--[0-->…<!--]--><!--]-->),resvg-wasm 偶发解析失败。
+        // 提取纯 <svg>…</svg> 主体兜底,确保识别成功。
+        let svgText = new TextDecoder().decode(new Uint8Array(buf));
+        const svgMatch = svgText.match(/<svg[\s\S]*<\/svg>/i);
+        if (svgMatch) svgText = svgMatch[0];
+        try {
+          const { renderSvgToPng } = await import('./poster');
+          const pngRaw = await renderSvgToPng(svgText);
+          // wasm memory view → copy to fresh buffer(否则 base64 会带上整块 wasm memory)
+          const pngCopy = new Uint8Array(pngRaw);
+          return `data:image/png;base64,${arrayBufferToBase64(pngCopy.buffer)}`;
+        } catch (e) {
+          console.error('[share-poster] avatar svg→png failed:', rawUrl, e);
+          return undefined;
+        }
       }
       // 维度检查：太小（< 64）的 logo 拉伸到 128 会糊，让上层走首字母 fallback
       const dim = probeImageDimensions(buf);

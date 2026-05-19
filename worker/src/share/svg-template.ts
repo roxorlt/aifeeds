@@ -1281,7 +1281,8 @@ function renderHfContent(opts: {
   } else {
     avatarSvg = `<circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="${C.line}"/>`;
   }
-  const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位` : ''}`;
+  // PM v6.5: 1 人 "by @x";N>1 人 "by @x 等 N 位作者"(加"作者"二字明确语义)
+  const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位作者` : ''}`;
   const bylineX = avatarX + avatarSize + 14;
   const bylineY = avatarY + avatarSize / 2 + 9;
   const bylineSvg = `<text x="${bylineX}" y="${bylineY}" font-family='${FONT}' font-size="26" font-weight="500" fill="${C.muted}">${esc(bylineText)}</text>`;
@@ -1505,8 +1506,9 @@ function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'cl
   if (sourceType === 'clawhub') return { kind: 'clawhub', label: 'ClawHub', chipColor: '#d8c8f5' };
   if (sourceType === 'huodongxing') return { kind: 'hdx', label: '活动行', chipColor: '#fb7185' };
   // HF Daily Papers — chipColor #ffd9a8 暖橙，跟 PH 的 peach(#ffd1c1) 区分（HF 偏黄）。
-  // BE Phase 5 上线 hf_paper source 后该分支自动生效。
-  if (sourceType === 'hf_paper') return { kind: 'hf', label: 'HF Daily', chipColor: '#ffd9a8' };
+  // PM v6.5: chip label 用 'arxiv'(论文实际来源),不写 HF
+  // (HF 只是 paper 发现渠道,论文本体在 arxiv.org)
+  if (sourceType === 'hf_paper') return { kind: 'hf', label: 'arxiv', chipColor: '#ffd9a8' };
   return { kind: 'x', label: 'X', chipColor: '#ffffff' };
 }
 
