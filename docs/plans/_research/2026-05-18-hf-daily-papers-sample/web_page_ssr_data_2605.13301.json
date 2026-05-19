@@ -1,0 +1,438 @@
+{
+  "paper": {
+    "id": "2605.13301",
+    "authors": [
+      {
+        "_id": "6a05351eb1a8cbabc9f0872f",
+        "name": "Yafu Li",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08730",
+        "name": "Runzhe Zhan",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08731",
+        "name": "Haoran Zhang",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08732",
+        "name": "Shunkai Zhang",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08733",
+        "name": "Yizhuo Li",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08734",
+        "name": "Zhilin Wang",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08735",
+        "name": "Jiacheng Chen",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08736",
+        "name": "Futing Wang",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08737",
+        "name": "Xuyang Hu",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08738",
+        "name": "Yuchen Fan",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08739",
+        "name": "Bangjie Xu",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873a",
+        "name": "Yucheng Su",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873b",
+        "name": "Xinmiao Han",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873c",
+        "name": "Chenxi Li",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873d",
+        "name": "Haodi Lei",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873e",
+        "name": "Yufeng Zhao",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0873f",
+        "name": "Zejin Lin",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08740",
+        "name": "Qianjia Cheng",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08741",
+        "name": "Tong Zhu",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08742",
+        "name": "Xiaoye Qu",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08743",
+        "name": "Ganqu Cui",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08744",
+        "name": "Peng Ye",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08745",
+        "name": "Yun Luo",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08746",
+        "name": "Zhouchen Lin",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08747",
+        "name": "Yu Qiao",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08748",
+        "name": "Bowen Zhou",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f08749",
+        "name": "Ning Ding",
+        "hidden": false
+      },
+      {
+        "_id": "6a05351eb1a8cbabc9f0874a",
+        "name": "Yu Cheng",
+        "hidden": false
+      }
+    ],
+    "publishedAt": "2026-05-13T00:00:00.000Z",
+    "submittedOnDailyAt": "2026-05-15T00:00:00.000Z",
+    "title": "Achieving Gold-Medal-Level Olympiad Reasoning via Simple and Unified Scaling",
+    "submittedOnDailyBy": {
+      "_id": "63f3502a520c14618925825a",
+      "avatarUrl": "/avatars/e986a2a6625e7be6890616a417f908d2.svg",
+      "isPro": false,
+      "fullname": "Yafu Li",
+      "user": "yaful",
+      "type": "user",
+      "name": "yaful"
+    },
+    "summary": "Recent progress in reasoning models has substantially advanced long-horizon mathematical and scientific problem solving, with several systems now reaching gold-medal-level performance on International Mathematical Olympiad (IMO) and International Physics Olympiad (IPhO) problems. In this paper, we introduce a simple and unified recipe for converting a post-trained reasoning backbone into a rigorous olympiad-level solver. The recipe first uses a reverse-perplexity curriculum for SFT to instill rigorous proof-search and self-checking behaviors, then scales these behaviors through a two-stage RL pipeline that progresses from RL with verifiable rewards to more delicate proof-level RL, and finally boosts solving performance with test-time scaling. Applying this recipe, we train a 30B-A3B backbone with SFT on around 340K sub-8K-token trajectories followed by 200 RL steps. The resulting model, SU-01, supports stable reasoning on difficult problems with trajectories exceeding 100K tokens, while achieving gold-medal-level performance on mathematical and physical olympiad competitions, including IMO 2025/USAMO 2026 and IPhO 2024/2025. It also demonstrates strong generalization of scientific reasoning to domains beyond mathematics and physics.",
+    "upvotes": 144,
+    "discussionId": "6a05351fb1a8cbabc9f0874b",
+    "projectPage": "https://simplified-reasoning.github.io/SU-01",
+    "githubRepo": "https://github.com/Simplified-Reasoning/SU-01",
+    "githubRepoAddedBy": "user",
+    "ai_summary": "A systematic approach transforms post-trained reasoning models into rigorous olympiad-level solvers through reverse-perplexity curriculum, two-stage reinforcement learning, and test-time scaling, achieving gold-medal performance on mathematical and physics competitions.",
+    "ai_keywords": [
+      "reasoning models",
+      "mathematical problem solving",
+      "scientific problem solving",
+      "International Mathematical Olympiad",
+      "International Physics Olympiad",
+      "reverse-perplexity curriculum",
+      "supervised fine-tuning",
+      "proof-search",
+      "self-checking behaviors",
+      "reinforcement learning",
+      "verifiable rewards",
+      "proof-level RL",
+      "test-time scaling",
+      "trajectory",
+      "token",
+      "backbone",
+      "SFT",
+      "RL"
+    ],
+    "githubStars": 72
+  },
+  "comments": [
+    {
+      "id": "6a06826789940d9a9d9878c8",
+      "author": {
+        "_id": "63f3502a520c14618925825a",
+        "avatarUrl": "/avatars/e986a2a6625e7be6890616a417f908d2.svg",
+        "fullname": "Yafu Li",
+        "name": "yaful",
+        "type": "user",
+        "isPro": false,
+        "isHf": false,
+        "isHfAdmin": false,
+        "isMod": false,
+        "followerCount": 9,
+        "isUserFollowing": false
+      },
+      "createdAt": "2026-05-15T02:18:15.000Z",
+      "type": "comment",
+      "data": {
+        "edited": true,
+        "hidden": false,
+        "latest": {
+          "raw": "We have open-sourced our code and model. Please check out our project page and GitHub repository:\n\nhttps://simplified-reasoning.github.io/SU-01/\nhttps://github.com/Simplified-Reasoning/SU-01",
+          "html": "<p>We have open-sourced our code and model. Please check out our project page and GitHub repository:</p>\n<p><a href=\"https://simplified-reasoning.github.io/SU-01/\" rel=\"nofollow\">https://simplified-reasoning.github.io/SU-01/</a><br><a href=\"https://github.com/Simplified-Reasoning/SU-01\" rel=\"nofollow\">https://github.com/Simplified-Reasoning/SU-01</a></p>\n",
+          "updatedAt": "2026-05-15T02:34:45.161Z",
+          "author": {
+            "_id": "63f3502a520c14618925825a",
+            "avatarUrl": "/avatars/e986a2a6625e7be6890616a417f908d2.svg",
+            "fullname": "Yafu Li",
+            "name": "yaful",
+            "type": "user",
+            "isPro": false,
+            "isHf": false,
+            "isHfAdmin": false,
+            "isMod": false,
+            "followerCount": 9,
+            "isUserFollowing": false
+          }
+        },
+        "numEdits": 1,
+        "identifiedLanguage": {
+          "language": "en",
+          "probability": 0.8878379464149475
+        },
+        "editors": [
+          "yaful"
+        ],
+        "editorAvatarUrls": [
+          "/avatars/e986a2a6625e7be6890616a417f908d2.svg"
+        ],
+        "reactions": [
+          {
+            "reaction": "👍",
+            "users": [
+              "Xiaoye08",
+              "pilgrim02",
+              "zzzhr97",
+              "Minlee1",
+              "rzzhan",
+              "yizhuoli",
+              "idforecasting",
+              "loretoparisi",
+              "Jiaqi4399",
+              "astrid01052"
+            ],
+            "count": 10
+          },
+          {
+            "reaction": "🔥",
+            "users": [
+              "Tressuras",
+              "trxcc2002",
+              "jcl9",
+              "loretoparisi",
+              "yaful",
+              "Abhaykoul"
+            ],
+            "count": 6
+          },
+          {
+            "reaction": "➕",
+            "users": [
+              "loretoparisi"
+            ],
+            "count": 1
+          }
+        ],
+        "isReport": false
+      }
+    },
+    {
+      "id": "6a07d9dacf994f4c0f1a51e6",
+      "author": {
+        "_id": "661ab1f1fa3b144a381fa454",
+        "avatarUrl": "https://cdn-avatars.huggingface.co/v1/production/uploads/661ab1f1fa3b144a381fa454/IlpZBb9NCjo7ntFwMIH53.png",
+        "fullname": "Urro",
+        "name": "urroxyz",
+        "type": "user",
+        "isPro": true,
+        "isHf": false,
+        "isHfAdmin": false,
+        "isMod": false,
+        "followerCount": 11,
+        "isUserFollowing": false
+      },
+      "createdAt": "2026-05-16T02:43:38.000Z",
+      "type": "comment",
+      "data": {
+        "edited": false,
+        "hidden": false,
+        "latest": {
+          "raw": "This paper makes me feel fuzzy inside.",
+          "html": "<p>This paper makes me feel fuzzy inside.</p>\n",
+          "updatedAt": "2026-05-16T02:43:38.353Z",
+          "author": {
+            "_id": "661ab1f1fa3b144a381fa454",
+            "avatarUrl": "https://cdn-avatars.huggingface.co/v1/production/uploads/661ab1f1fa3b144a381fa454/IlpZBb9NCjo7ntFwMIH53.png",
+            "fullname": "Urro",
+            "name": "urroxyz",
+            "type": "user",
+            "isPro": true,
+            "isHf": false,
+            "isHfAdmin": false,
+            "isMod": false,
+            "followerCount": 11,
+            "isUserFollowing": false
+          }
+        },
+        "numEdits": 0,
+        "identifiedLanguage": {
+          "language": "en",
+          "probability": 0.9261904954910278
+        },
+        "editors": [
+          "urroxyz"
+        ],
+        "editorAvatarUrls": [
+          "https://cdn-avatars.huggingface.co/v1/production/uploads/661ab1f1fa3b144a381fa454/IlpZBb9NCjo7ntFwMIH53.png"
+        ],
+        "reactions": [],
+        "isReport": false
+      }
+    },
+    {
+      "id": "6a09c4672a5645643d050159",
+      "author": {
+        "_id": "6a09c427a5d71a478e855aae",
+        "avatarUrl": "/avatars/ff758a8627f413a923a05fed0afc6509.svg",
+        "fullname": "Melissa Allen",
+        "name": "Paultho",
+        "type": "user",
+        "isPro": false,
+        "isHf": false,
+        "isHfAdmin": false,
+        "isMod": false,
+        "isUserFollowing": false
+      },
+      "createdAt": "2026-05-17T13:36:39.000Z",
+      "type": "comment",
+      "data": {
+        "edited": false,
+        "hidden": false,
+        "latest": {
+          "raw": "This is interesting because the paper focuses less on building a completely new model and more on improving reasoning through better training and scaling methods.\n\nThe idea of combining curriculum learning, reinforcement learning, and long-chain reasoning seems to be what helped the model reach olympiad-level performance on difficult math and physics problems. The ability to handle reasoning paths over 100K tokens is especially impressive because many models struggle with consistency during very long problem solving.\n\nI also found the “self-checking” and proof-search behavior important since olympiad problems are not just about getting answers, but showing rigorous logical steps.\n\nI was reading some AI and reasoning model discussions on https://8171-web-portals.pk/ where people were talking about how future AI progress may depend more on reasoning quality and training methods than simply increasing model size.\n\nOverall, the paper shows how structured reasoning training can push models much closer to expert-level scientific and mathematical problem solving.\n",
+          "html": "<p>This is interesting because the paper focuses less on building a completely new model and more on improving reasoning through better training and scaling methods.</p>\n<p>The idea of combining curriculum learning, reinforcement learning, and long-chain reasoning seems to be what helped the model reach olympiad-level performance on difficult math and physics problems. The ability to handle reasoning paths over 100K tokens is especially impressive because many models struggle with consistency during very long problem solving.</p>\n<p>I also found the “self-checking” and proof-search behavior important since olympiad problems are not just about getting answers, but showing rigorous logical steps.</p>\n<p>I was reading some AI and reasoning model discussions on <a href=\"https://8171-web-portals.pk/\" rel=\"nofollow\">https://8171-web-portals.pk/</a> where people were talking about how future AI progress may depend more on reasoning quality and training methods than simply increasing model size.</p>\n<p>Overall, the paper shows how structured reasoning training can push models much closer to expert-level scientific and mathematical problem solving.</p>\n",
+          "updatedAt": "2026-05-17T13:36:39.752Z",
+          "author": {
+            "_id": "6a09c427a5d71a478e855aae",
+            "avatarUrl": "/avatars/ff758a8627f413a923a05fed0afc6509.svg",
+            "fullname": "Melissa Allen",
+            "name": "Paultho",
+            "type": "user",
+            "isPro": false,
+            "isHf": false,
+            "isHfAdmin": false,
+            "isMod": false,
+            "isUserFollowing": false
+          }
+        },
+        "numEdits": 0,
+        "identifiedLanguage": {
+          "language": "en",
+          "probability": 0.9713014364242554
+        },
+        "editors": [
+          "Paultho"
+        ],
+        "editorAvatarUrls": [
+          "/avatars/ff758a8627f413a923a05fed0afc6509.svg"
+        ],
+        "reactions": [],
+        "isReport": false
+      }
+    },
+    {
+      "id": "6a0a70a7e6774450bacdbd28",
+      "author": {
+        "_id": "63d3e0e8ff1384ce6c5dd17d",
+        "avatarUrl": "https://cdn-avatars.huggingface.co/v1/production/uploads/1674830754237-63d3e0e8ff1384ce6c5dd17d.jpeg",
+        "fullname": "Librarian Bot (Bot)",
+        "name": "librarian-bot",
+        "type": "user",
+        "isPro": false,
+        "isHf": false,
+        "isHfAdmin": false,
+        "isMod": false,
+        "followerCount": 356,
+        "isUserFollowing": false
+      },
+      "createdAt": "2026-05-18T01:51:35.000Z",
+      "type": "comment",
+      "data": {
+        "edited": false,
+        "hidden": false,
+        "latest": {
+          "raw": "This is an automated message from the [Librarian Bot](https://huggingface.co/librarian-bots). I found the following papers similar to this paper. \n\nThe following papers were recommended by the Semantic Scholar API \n\n* [QED-Nano: Teaching a Tiny Model to Prove Hard Theorems](https://huggingface.co/papers/2604.04898) (2026)\n* [Fine-Tuning Small Reasoning Models for Quantum Field Theory](https://huggingface.co/papers/2604.18936) (2026)\n* [Riemann-Bench: A Benchmark for Moonshot Mathematics](https://huggingface.co/papers/2604.06802) (2026)\n* [OpenSeeker-v2: Pushing the Limits of Search Agents with Informative and High-Difficulty Trajectories](https://huggingface.co/papers/2605.04036) (2026)\n* [Hint Tuning: Less Data Makes Better Reasoners](https://huggingface.co/papers/2605.08665) (2026)\n* [Solving Physics Olympiad via Reinforcement Learning on Physics Simulators](https://huggingface.co/papers/2604.11805) (2026)\n* [Scaling Reasoning Tokens via RL and Parallel Thinking: Evidence From Competitive Programming](https://huggingface.co/papers/2604.01302) (2026)\n\n\n Please give a thumbs up to this comment if you found it helpful!\n\n If you want recommendations for any Paper on Hugging Face checkout [this](https://huggingface.co/spaces/librarian-bots/recommend_similar_papers) Space\n\n You can directly ask Librarian Bot for paper recommendations by tagging it in a comment: `@librarian-bot recommend`",
+          "html": "<p>This is an automated message from the <a href=\"https://huggingface.co/librarian-bots\">Librarian Bot</a>. I found the following papers similar to this paper. </p>\n<p>The following papers were recommended by the Semantic Scholar API </p>\n<ul>\n<li><a href=\"https://huggingface.co/papers/2604.04898\">QED-Nano: Teaching a Tiny Model to Prove Hard Theorems</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2604.18936\">Fine-Tuning Small Reasoning Models for Quantum Field Theory</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2604.06802\">Riemann-Bench: A Benchmark for Moonshot Mathematics</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2605.04036\">OpenSeeker-v2: Pushing the Limits of Search Agents with Informative and High-Difficulty Trajectories</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2605.08665\">Hint Tuning: Less Data Makes Better Reasoners</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2604.11805\">Solving Physics Olympiad via Reinforcement Learning on Physics Simulators</a> (2026)</li>\n<li><a href=\"https://huggingface.co/papers/2604.01302\">Scaling Reasoning Tokens via RL and Parallel Thinking: Evidence From Competitive Programming</a> (2026)</li>\n</ul>\n<p> Please give a thumbs up to this comment if you found it helpful!</p>\n<p> If you want recommendations for any Paper on Hugging Face checkout <a href=\"https://huggingface.co/spaces/librarian-bots/recommend_similar_papers\">this</a> Space</p>\n<p> You can directly ask Librarian Bot for paper recommendations by tagging it in a comment: <code><span class=\"SVELTE_PARTIAL_HYDRATER contents\" data-target=\"UserMention\" data-props=\"{&quot;user&quot;:&quot;librarian-bot&quot;}\"><span class=\"inline-block\"><span class=\"contents\"><a href=\"/librarian-bot\">@<span class=\"underline\">librarian-bot</span></a></span> </span></span> recommend</code></p>\n",
+          "updatedAt": "2026-05-18T01:51:35.399Z",
+          "author": {
+            "_id": "63d3e0e8ff1384ce6c5dd17d",
+            "avatarUrl": "https://cdn-avatars.huggingface.co/v1/production/uploads/1674830754237-63d3e0e8ff1384ce6c5dd17d.jpeg",
+            "fullname": "Librarian Bot (Bot)",
+            "name": "librarian-bot",
+            "type": "user",
+            "isPro": false,
+            "isHf": false,
+            "isHfAdmin": false,
+            "isMod": false,
+            "followerCount": 356,
+            "isUserFollowing": false
+          }
+        },
+        "numEdits": 0,
+        "identifiedLanguage": {
+          "language": "en",
+          "probability": 0.7224394083023071
+        },
+        "editors": [
+          "librarian-bot"
+        ],
+        "editorAvatarUrls": [
+          "https://cdn-avatars.huggingface.co/v1/production/uploads/1674830754237-63d3e0e8ff1384ce6c5dd17d.jpeg"
+        ],
+        "reactions": [],
+        "isReport": false
+      }
+    }
+  ],
+  "upvoters_count": 12,
+  "dailyPaperRank": 1,
+  "markdownContentUrl": "https://huggingface.co/buckets/huggingchat/papers-content/resolve/2605/2605.13301.md"
+}

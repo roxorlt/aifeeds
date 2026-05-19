@@ -381,6 +381,49 @@ npx wrangler deploy
 - **POC endpoint**（无鉴权）：`GET /poc/hdx?city=北京&page=1&detail=1` 不入库，返 parse 结果 + 字段统计，FE 可当 mock 数据源
 - **临时关停**：`worker/src/index.ts` dispatcher 改 `if (false && (hour === 20 || hour === 8) ...)` redeploy
 
+**HuggingFace Daily Papers（2026-05-19 上线,纯云端 — 走 HF API + arxiv + svelte_ssr 评论解析）**：
+
+- **数据源**:
+  - HF API `GET /api/daily_papers` listing(50/day,UTC 00:00 出榜)+ `GET /api/papers/{arxiv_id}` 详情(走 HF_READ token)
+  - arxiv.org Atom API `?id_list=<arxiv_id>` 补 categories(CF IP 时段性 429,Phase 3 step 0 兜底)
+  - arxiv.org/pdf/<arxiv_id> 抽 figure(自己写 XRef parser,`worker/src/hf-paper/figure-pdf.ts`,**关键**:`fflate.unzlibSync` 不是 inflateSync)
+  - HF web page SSR `<div data-target="PaperContent" data-props="...">` 抽 discussion(匿名 fetch,无需 puppeteer)
+
+- **Phase 1 — `runHfDailyFetch`**(`worker/src/scrapers/hf-paper.ts`):cron UTC 00:00-04 触发,KV 哨兵 `hf:fetched:<BJT_date>` 防同日重跑。流程:listing → 50 detail(并发拉)→ batch arxiv categories → INSERT items(`id = hf_paper:<arxiv_id>`,is_relevant=1,无 LLM judge — HF Daily 已策展)→ trigger `HfPaperPipelineWorkflow` per new paper → append `metrics_snapshots_hf_paper`
+
+- **Phase 2 — `HfPaperPipelineWorkflow`**(`worker/src/workflows/hf-paper-pipeline.ts`):每个 paper 1 instance,instance ID 含 hour-bucket 防 already_exists,4 step:
+  1. **Step 0**(串行):refresh-paper-detail + fetch-arxiv-categories(per-paper 兜底)
+  2. **Step 1**(**必须串行,不要 fan-out**):fetch-ar5iv-and-extract-figure → fetch-discussion → refresh-gh-star → backfill-media-r2(最后跑,读最新 extra)。fan-out 会导致 read-modify-write 互相覆盖 extra,lost update。
+  3. **Step 2**:translate-discussion-comments(flash)。**ar5iv 段落级翻译已弃用**(2026-05-19 方案 E,FE drawer iframe arxiv.org/html + 浏览器翻译插件)
+  4. **Step 3**(fan-out):8 段独立 pro reasoning(tldr / problem / key_insight / method / experiments / industry_impact / code_status / limitations_and_novelty)+ 1 次 flash translate(title + summary + ai_summary)→ merge → mark-completed
+  - **deep_analysis idempotency**:`extra.deep_analysis_input_hash = sha256(title|summary|ai_summary_en|ar5iv_excerpt[:3000])`,backfill 命中 hash 跳 pro 调用(prompt 没改的话省 token)
+  - **完整性 gate**:允许 8 段 ≤2 段失败,title_summary 必须成。失败不写 workflow_completed_at,backfill cron 重 trigger
+
+- **手动触发**(admin debug,Basic Auth `ADMIN_USER/PASS` 或 `Bearer $INGEST_TOKEN`):
+  - `POST /api/admin/hf-fetch-now?force=1&date=YYYY-MM-DD` 立即跑 daily fetch(`force=1` 跳哨兵)
+  - `POST /api/enrich/run?mode=backfill-hf-paper-workflow&limit=200&throttle_ms=3000` 扫未 completed paper batch trigger(filter `workflow_completed_at IS NULL`)
+  - `POST /api/enrich/run?mode=hf-rerun-paper&arxiv_id=<id>` 单 paper 重跑(reset hash + 强制 hour-minute-random suffix instance ID),prompt 调优用
+  - `POST /api/admin/hf-r2-migrate-from-staging` 一次性 staging R2 → prod R2 搬运(只 prod 用,body `{keys: ["hf/abc.png"], source_origin: "https://staging-api.ai-feeds.com"}`,`force=1` 覆盖,`dry_run=1` 只查不写,batch ≤200/次)
+
+- **prod 上线日数据搬运**(staging → prod 一次性,免 prod 重跑 pro 浪费 token):
+  - `source .secrets/aifeeds-prod.env && cd worker && npx tsx scripts/migrate-hf-staging-to-prod.ts`
+  - 脚本:wrangler d1 SELECT staging hf_paper rows → 生成 INSERT OR REPLACE SQL → wrangler d1 execute prod;同 `metrics_snapshots_hf_paper`;从 items 抽 R2 keys(`media[].url` + `extra.figure_image.r2_url` + `extra.submitter_avatar` + `extra.discussion_comments[].author_avatar`)→ batch POST `/api/admin/hf-r2-migrate-from-staging`(prod worker 跨网 fetch staging /r/<key> → 写本地 R2)
+  - 选项:`--dry-run` / `--d1-only` / `--r2-only` / `--force`(prod 已有 hf_paper 时显式覆盖)
+
+- **HF 数据落 D1**:items 表统一 schema,HF 专属字段全在 `items.extra` JSON:
+  - 来自 HF API:`upvotes / num_comments / discussion_id / project_page / github_repo / github_stars / github_repo_added_by / ai_summary_en / ai_summary_zh / ai_keywords / paper_authors[] / submitter_avatar / submitter / arxiv_categories[]`
+  - 来自 ar5iv 抓取:`ar5iv_excerpt`(英文前 3000 字给 deep_analysis 用)/ `ar5iv_paragraphs_count`(120 ~ 段)/ `ar5iv_fetched_at` / `figure_image`(source:pdf/ar5iv/hf_thumbnail/none + r2_url + width + height + codec)
+  - 来自 svelte_ssr 抓取:`discussion_comments[]`(id / author / author_avatar / content_html / reactions / is_author_reply)/ `discussion_fetch_method:"svelte_ssr"`
+  - 来自 deep_analysis:`title_zh / summary_zh / deep_analysis.{tldr,problem,key_insight,method,experiments,industry_impact,code_status,limitations,novelty_rating} / deep_analysis_input_hash / deep_analysis_at / deep_analysis_model / workflow_completed_at`
+
+- **凭证**:HF API 走 `HF_READ` token(读取 daily_papers + papers detail,2026-05-18 prod + staging 都 put);DeepSeek 走 `DEEPSEEK_API_KEY`(8 段 pro + flash 共用)
+
+- **CF Dashboard 路径**:Workers & Pages → Workflows → `hf-paper-pipeline-workflow` (prod) / `hf-paper-pipeline-workflow-staging`(staging)。看 instance 列表(ID 形如 `hf-paper-2604-09839-<hour>`)+ 各 step 状态
+
+- **容量预算**:50 paper/天 × 12 step(8 pro + 4 杂)× 30 = 18k step/月(利用率 18%,免费额度 100k)。**月成本估算**:DeepSeek ¥3-8/月(8 段 pro reasoning 是大头,每 paper ¥0.02-0.05;flash 翻译 ~¥0.5/月)
+
+- **临时关停**:`worker/src/index.ts` dispatcher 改 `if (false && hour === 0 && minute >= 0 && minute < 5)` redeploy
+
 **M4 refresh-metrics 模式切换**（2026-04-29 上线）：
 - `REFRESH_MODE` env var：`legacy`（默认，runRefreshMetrics round-robin）/ `tiered`（runRefreshTiered 按 tier+velocity）/ `off`（跳过 refresh 模式槽）
 - `REFRESH_TIER_MAX` env var：tiered 模式下只刷 `tier <= N` 的 item（默认 1 = 灰度只刷 L0+L1；调到 4 = 全量 L0-L4）

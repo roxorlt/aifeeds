@@ -17,6 +17,8 @@
 □ Phase 5  Dashboard 渲染(<Src>Card + <Src>DrawerBody + SourceIcon + 在 Feed/Drawer 注册)
 □ Phase 6  R2 资源迁移(如有图/视频,放进 workflow 内某个 step)
 □ Phase 7  真机验收 + operations.md 同步更新
+□ Phase 8  跑批通知接管理员(fetch handler 完成后 ctx.waitUntil(notifyCronSummary),
+            带 workflow 完成度统计,1 次 cron 1 次推送 PushDeer)
 ```
 
 ## 1. 已搭好的复用资产(不要重建)
@@ -302,7 +304,7 @@ done &
 | Drawer 内容 | 抽屉里要展示什么? | repo header + summary + readme(markdown 渲染) |
 | 排序 | 默认热度 vs 时间?hot 算法? | time desc + daily_rank asc |
 
-## 3. 八个 Phase 详解
+## 3. 九个 Phase 详解
 
 ### Phase 0:设计 + Mockup(1 天)
 
@@ -454,6 +456,74 @@ UI 验收用 mockup 做对照,PC + 移动都要测。
 - 新增 R2 bucket / KV namespace(如有)
 - 新增 secrets
 - backfill endpoint 跑批方法 + 兜底 cron 节奏
+
+### Phase 8:跑批通知接管理员(0.5 天)
+
+> 让管理员能感知到新源是不是"活的"。复用 `worker/src/notifier.ts` 的 `notifyCronSummary`,fetch handler 完成后 `ctx.waitUntil` 异步推 PushDeer。**1 次 cron 1 次推送**,不要按 workflow instance 级别推(50 条 paper / 25 条 repo 会刷屏)。
+
+**1. 复用现有 helper(不要新建模块)**
+
+```typescript
+import { notifyCronSummary } from './notifier';
+
+// scheduled handler 末尾
+ctx.waitUntil(
+  notifyCronSummary(env, 'HF Daily Papers fetch', {
+    mode: 'hf-daily-fetch',
+    list_size: papers.length,        // API 返了多少
+    inserted: result.inserted,        // 本轮新入库
+    updated: result.updated,          // 本轮更新(metric refresh 等)
+    triggered: result.triggered,      // 触发 workflow 数
+    skipped: result.skipped,          // already_exists 等
+    workflow_completed_24h: stats.completed,  // 可选:近 24h workflow_completed_at NOT NULL 计数
+    workflow_pending_24h: stats.pending,      // 可选:24h 内 trigger 了但 workflow_completed_at IS NULL
+    errors: result.errors,
+    duration_ms: Date.now() - t0,
+  }),
+);
+```
+
+**2. `notifyCronSummary` 已做的事**(不要重复造):
+- 字段名自动中文化(`mode → 任务`,`list_size → 榜单大小`,`inserted → 新增`,新字段加进 `FIELD_LABELS` 即可)
+- nested 对象自动展开为 `子key=value / 子key=value`
+- 数组用 `;` 连接
+- 自带北京时间戳行
+- `PUSHDEER_ADMIN_KEYS` 未配置时静默跳过(staging 默认无 key,不会刷屏)
+- `Promise.allSettled` 包裹,单 key 失败不影响其他 key
+
+**3. workflow 完成度统计 SQL**(可选,加在 fetch handler 末尾):
+
+```sql
+SELECT
+  COUNT(*) FILTER (
+    WHERE json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+  ) AS completed,
+  COUNT(*) FILTER (
+    WHERE json_extract(extra, '$.workflow_triggered_at') IS NOT NULL
+      AND json_extract(extra, '$.workflow_completed_at') IS NULL
+      AND CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) > strftime('%s','now','-24 hours')
+  ) AS pending
+FROM items
+WHERE source_type = '<src>'
+  AND deleted_at IS NULL
+  AND scraped_at > strftime('%s','now','-24 hours') * 1000;
+```
+
+完成率 < 80% 持续 N 轮 → 管理员看 PushDeer 立刻知道有什么 stuck。
+
+**4. 通知频率约束**
+
+- **拉取节奏决定推送节奏**:HF daily 1 推 / 天,X cron `*/5` 12 推 / 小时(太频繁 → 把 X 推送降级到只在 inserted > 0 时推,或 batch 到 hourly summary)
+- **backfill endpoint 不强推**:OPS 跑批 forever loop 已经在 terminal 实时看 stats,backfill 完成不必额外 PushDeer(除非是大批量历史回填 + 跑完后人不在 terminal 前)
+- **告警走 `pushDeerAlert` 而非 `notifyCronSummary`**:LLM 失败 / fetch HTTP 500 / parse 失败等"出问题"用前者(标题 "xList告警 | ..."),日常运行 summary 用后者(标题 "aifeeds 抓取 | ...")
+
+**5. 验证清单**
+
+- [ ] `PUSHDEER_ADMIN_KEYS` 已配 prod env(staging 不强求)
+- [ ] fetch handler 第一次 cron 跑完后 PushDeer 收到通知(标题 "aifeeds 抓取 | <Src> fetch")
+- [ ] 字段中文化在 `FIELD_LABELS` 里加齐(新字段不加会显示英文 key)
+- [ ] workflow 完成度统计 SQL 在 prod D1 实测 < 100ms(数据多了可能要加 index)
+- [ ] LLM 失败 / fetch 异常时走 `pushDeerAlert` 推告警(独立 channel,不跟 summary 混)
 
 ## 4. 故障案例库(踩过的坑)
 

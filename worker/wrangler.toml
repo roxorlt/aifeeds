@@ -28,6 +28,9 @@ binding = "AUTH_KV"
 id = "07d666433fef483a9457146f7d5a62d5"
 preview_id = "78f0a9567d434d8b87c71cc29eea88f9"
 
+# CF Browser Rendering 试过(2026-05-18)再 verified arxiv 对 headless 也 detect,
+# 改走 PDF parse(figure-pdf.ts,unzlibSync 修复后 92.9% per-paper 命中率)。binding 移除。
+
 [vars]
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）
 EMAIL_DAILY_CAP = "100"
@@ -94,6 +97,22 @@ name = "huodongxing-detail-workflow"
 binding = "HUODONGXING_DETAIL_WORKFLOW"
 class_name = "HuodongxingDetailWorkflow"
 
+# CF Workflow: HuggingFace Daily Papers 抓取链(worker/src/workflows/hf-paper-pipeline.ts)。
+# runHfDailyFetch(daily cron BJT 08:00)后对每条 new paper create 1 个 instance,
+# 跑 8-step fan-out pipeline:
+#   step 0  refresh-paper-detail + fetch-arxiv-categories
+#   step 1  fan-out(backfill-media-r2 + refresh-gh-star + fetch-ar5iv-and-extract-figure
+#                   + fetch-discussion[svelte_ssr])
+#   step 2  translate-ar5iv + translate-discussion-comments(flash 批量)
+#   step 3  fan-out(8 段 deep_analysis pro reasoning + 1 次 flash translate-title-summary
+#                   + merge-deep-analysis)
+#   step 4  完整性 gate(workflow_completed_at,允许 ≤2 段 failed)
+# 设计文档:docs/plans/2026-05-18-hf-daily-papers-source-design.md §4
+[[workflows]]
+name = "hf-paper-pipeline-workflow"
+binding = "HF_PAPER_PIPELINE_WORKFLOW"
+class_name = "HfPaperPipelineWorkflow"
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -114,6 +133,8 @@ bucket_name = "xlist-readme-assets-staging"
 binding = "AUTH_KV"
 id = "76f7a326a94c4b8685668e39a23b3fe9"
 preview_id = "f187810317a845eca4b20f6e7b357a79"
+
+# browser binding 移除(走 PDF parse 替代)
 
 [env.staging.vars]
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）
@@ -165,6 +186,11 @@ class_name = "PhPipelineWorkflow"
 name = "clawhub-pipeline-workflow-staging"
 binding = "CH_PIPELINE_WORKFLOW"
 class_name = "ClawhubPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "hf-paper-pipeline-workflow-staging"
+binding = "HF_PAPER_PIPELINE_WORKFLOW"
+class_name = "HfPaperPipelineWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。
