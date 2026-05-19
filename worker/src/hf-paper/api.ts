@@ -17,6 +17,7 @@ const ARXIV_API_BASE = 'https://export.arxiv.org/api/query';
 
 interface HfPaperDetail {
   id: string;
+  authors?: Array<{ name: string; hidden?: boolean }>;
   upvotes?: number;
   discussionId?: string;
   projectPage?: string | null;
@@ -59,6 +60,9 @@ export async function refreshPaperDetailForHf(
       github_repo_added_by: detail.githubRepoAddedBy ?? null,
       ai_summary_en: detail.ai_summary ?? null,
       ai_keywords: detail.ai_keywords ?? [],
+      // FE 联调 #2 fix(2026-05-19):paper_authors 在 workflow Step 0 backfill
+      //   原 fetch handler 只写新 INSERT,已存在 paper 缺;改这里跑 backfill / rerun 都补
+      paper_authors: (detail.authors || []).map((a) => ({ name: a.name })),
     };
 
     // metrics 也刷:upvotes 可能涨了

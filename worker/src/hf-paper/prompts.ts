@@ -66,6 +66,14 @@ const SHARED_RULES = `【翻译规则】
 - 外部链接 [文字](url) 引用 GH / 项目主页 / 论文 / blog
 - ⚠️ 不要包整段在 \`\`\`markdown\`\`\` block 内,直接输出原始 markdown
 
+【⚠️ markdown 中文边界规则】(react-markdown / CommonMark flanking 解析限制):
+- **粗体后必须接空格或全角标点**(不能直接接中文字)
+  - ✅ \`**激活操控** 是一种...\` / \`**激活操控**(activation steering)\` / \`**激活操控**,xxx\`
+  - ❌ \`**激活操控**是一种...\`(中文紧贴会让 ** 不解析为粗体)
+- 行内 code 同样规则:\`\`identifier\` 后接空格 / 标点 / 换行
+- 全角括号 \`(...)\` 内可放粗体,但右括号 \`)\` 后还是要空格或标点接中文
+- 链接 [文字](url) 同样后空格或标点
+
 只输出 JSON,JSON 内的 string 值是 markdown 文本。不要 markdown 代码块包裹整个 JSON。不要解释。`;
 
 // ────────────────────────────────────────────────────────────────────
@@ -241,6 +249,12 @@ ${ctx.ai_keywords && ctx.ai_keywords.length > 0 ? `- paper_keywords: ${ctx.ai_ke
 - 段落之间空行分隔
 - 不用 # 标题(summary 篇幅短,标题反而碎)
 - 行内代码 \`identifier\`(变量名 / 函数名 / 配置项)
+
+【⚠️ markdown 中文边界规则】(react-markdown / CommonMark flanking 解析限制):
+- **粗体后必须接空格或全角标点**(不能直接接中文字),否则 ** 不被解析为粗体
+  - ✅ \`**激活操控** 是一种...\` / \`**激活操控**(steering)\` / \`**激活操控**,xxx\`
+  - ❌ \`**激活操控**是一种...\`(中文「是」紧贴会让 ** 不解析为粗体)
+- 行内 code 同样规则:\`\`code\` 后接空格 / 标点 / 换行
 
 只输出 JSON,不要 markdown 代码块包裹整个 JSON。`;
 }
