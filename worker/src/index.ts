@@ -2743,6 +2743,70 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     const result = await runHfDailyFetch(env, { force, date });
     return jsonResponse(result, 200, request, env);
   }
+  // Phase 4+ prompt 调优:单 paper rerun workflow(reset hash + 强制新 instance ID)
+  // 用法:POST /api/enrich/run?mode=hf-rerun-paper&arxiv_id=2604.09839
+  // 跑前清:workflow_completed_at / workflow_triggered_at / deep_analysis_input_hash /
+  //         deep_analysis / title_zh / summary_zh / ai_summary_zh
+  //         → 让 idempotency cache miss,workflow 重跑 8 段 pro + flash translate
+  // figure / ar5iv / discussion / R2 迁移字段保留(那些 step 内是 idempotent,
+  //   重跑 figure step 不会重抓 PDF 重迁 R2,只检查后跳过)
+  // instance ID 用 hour-bucket + minute(防同小时反复 trigger 撞 already_exists)
+  if (mode === 'hf-rerun-paper') {
+    const arxivId = url.searchParams.get('arxiv_id');
+    if (!arxivId) return jsonResponse({ error: 'missing arxiv_id query param' }, 400, request, env);
+    if (!env.HF_PAPER_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'HF_PAPER_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const itemId = `hf_paper:${arxivId}`;
+    // 1. reset hash + analysis 字段 → idempotency cache miss
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_remove(extra,
+        '$.workflow_completed_at', '$.workflow_triggered_at',
+        '$.deep_analysis_input_hash', '$.deep_analysis',
+        '$.deep_analysis_at', '$.deep_analysis_model',
+        '$.title_zh', '$.summary_zh', '$.ai_summary_zh')
+        WHERE id = ?`,
+    ).bind(itemId).run();
+    // 2. 读 extra signals
+    const row = await env.DB.prepare(
+      `SELECT extra FROM items WHERE id = ?`,
+    ).bind(itemId).first<{ extra: string | null }>();
+    if (!row) return jsonResponse({ error: `paper not found: ${itemId}` }, 404, request, env);
+    const extraObj = row.extra ? JSON.parse(row.extra) : {};
+    // 3. trigger workflow with hour+minute+random suffix(防 already_exists)
+    const now = new Date();
+    const hourBucket = now.toISOString().slice(0, 13).replace('T', '-');  // YYYY-MM-DD-HH
+    const minute = String(now.getUTCMinutes()).padStart(2, '0');
+    const rand = Math.random().toString(36).slice(2, 6);
+    const safeArxiv = arxivId.replace(/[^a-zA-Z0-9-]/g, '-');
+    const instanceId = `hf-paper-${safeArxiv}-${hourBucket}-${minute}-${rand}`;
+    try {
+      await env.HF_PAPER_PIPELINE_WORKFLOW.create({
+        id: instanceId,
+        params: {
+          itemId, arxivId,
+          hasGhRepo: !!extraObj.github_repo,
+          hasProjectPage: !!extraObj.project_page,
+          hasDiscussionId: !!extraObj.discussion_id,
+          lang: 'zh' as const,
+        },
+      });
+      return jsonResponse({
+        mode: 'hf-rerun-paper',
+        arxiv_id: arxivId,
+        item_id: itemId,
+        instance_id: instanceId,
+        message: '已 reset + trigger;workflow 跑 ~2-3 min(8 段 pro reasoning fan-out)。' +
+                 '看 D1 字段 deep_analysis.* / workflow_completed_at 变化即知是否跑完。',
+      }, 200, request, env);
+    } catch (e) {
+      return jsonResponse({
+        error: 'workflow create fail',
+        detail: String(e).slice(0, 200),
+        instance_id: instanceId,
+      }, 500, request, env);
+    }
+  }
   // Phase 4:HF Paper backfill — 扫 stuck items 重 trigger workflow
   // SOP §1.6 模板;按 published_at DESC 优先最新 paper
   // 30min triggered marker filter 防重复;input-hash idempotency 在 workflow step 内

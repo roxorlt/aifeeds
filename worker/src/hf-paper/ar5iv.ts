@@ -15,8 +15,6 @@
 //   (避免 D1 行爆 1MB cap)→ flash 批量翻译
 
 import type { Env } from '../index';
-import { callDeepSeek, DEEPSEEK_FLASH } from './llm';
-import { buildAr5ivParagraphPrompt } from './prompts';
 import { extractImagesFromPdf } from './figure-pdf';
 
 const ARXIV_HTML_BASE = 'https://arxiv.org/html';
@@ -559,77 +557,6 @@ function extractParagraphs(html: string): string[] {
   return result;
 }
 
-// ────────────────────────────────────────────────────────────────────
-// translate-ar5iv: 段落级 flash 批量翻译,写回 R2 JSON
-// ────────────────────────────────────────────────────────────────────
-
-export async function translateAr5ivForHfPaper(
-  env: Env,
-  itemId: string,
-  arxivId: string,
-  opts: { lang?: string } = {},
-): Promise<{ translated: number; failed: number; skipped?: string }> {
-  if (!env.READMES || !env.DEEPSEEK_API_KEY) {
-    return { translated: 0, failed: 0, skipped: 'missing_deps' };
-  }
-  const key = `${R2_KEY_PREFIX_AR5IV}/${arxivId}.json`;
-  const obj = await env.READMES.get(key);
-  if (!obj) return { translated: 0, failed: 0, skipped: 'r2_not_found' };
-
-  const data = (await obj.json()) as {
-    paragraphs: Array<{ segment_id: string; en: string; zh: string | null; failed_at: string | null }>;
-    arxiv_id: string;
-    total_paragraphs: number;
-    fetched_at: string;
-  };
-
-  // 拿 paper title + keywords(给 prompt 用)
-  const row = await env.DB.prepare(
-    `SELECT title, json_extract(extra, '$.ai_keywords') AS kw FROM items WHERE id = ?`,
-  ).bind(itemId).first<{ title: string | null; kw: string | null }>();
-  const paperTitle = row?.title || '';
-  const paperKeywords = row?.kw ? (JSON.parse(row.kw) as string[]) : [];
-
-  // 只翻未翻的(zh IS NULL)+ 不超 200 段(防超长论文耗费)
-  // 串行调(并行可能触发 DeepSeek rate limit)
-  let translated = 0;
-  let failed = 0;
-  for (const p of data.paragraphs.slice(0, 200)) {
-    if (p.zh !== null) continue;
-    const prompt = buildAr5ivParagraphPrompt({
-      segment_text: p.en,
-      paper_title: paperTitle,
-      paper_keywords: paperKeywords,
-    });
-    const r = await callDeepSeek(env.DEEPSEEK_API_KEY, DEEPSEEK_FLASH, prompt, {
-      maxTokens: 2000,
-      temperature: 0.2,
-      timeoutMs: 60_000,
-    });
-    if (r.text) {
-      p.zh = r.text;
-      translated++;
-    } else {
-      p.failed_at = new Date().toISOString();
-      failed++;
-    }
-  }
-
-  // 写回 R2
-  try {
-    await env.READMES.put(key, JSON.stringify(data), {
-      httpMetadata: { contentType: 'application/json; charset=utf-8' },
-      customMetadata: { 'arxiv-id': arxivId, 'source': 'hf' },
-    });
-  } catch (e) {
-    console.error(`[hf-paper:ar5iv-translate] ${arxivId} R2 write fail`, e);
-  }
-
-  // 更新 items.extra.ar5iv_translated_at
-  await env.DB.prepare(
-    `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.ar5iv_translated_at', ?) WHERE id = ?`,
-  ).bind(new Date().toISOString(), itemId).run();
-
-  console.log(`[hf-paper:ar5iv-translate] ${arxivId} translated=${translated} failed=${failed}`);
-  return { translated, failed };
-}
+// ar5iv 段落级翻译已弃用(2026-05-19 PM 决策方案 E):FE drawer iframe
+// arxiv.org/html 让用户用浏览器翻译插件(沉浸式翻译等)实时翻。BE 不再做。
+// extractParagraphs 仍保留(给 deep_analysis prompt 的 ar5iv_excerpt 用,英文 raw)

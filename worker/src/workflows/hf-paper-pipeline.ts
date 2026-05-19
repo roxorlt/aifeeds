@@ -19,7 +19,6 @@ import {
 } from '../hf-paper/media';
 import {
   fetchAr5ivAndExtractFigureForHf,
-  translateAr5ivForHfPaper,
 } from '../hf-paper/ar5iv';
 import {
   fetchDiscussionForHfPaper,
@@ -111,24 +110,18 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
     );
 
     // ────────────────────────────────────────────────────────────────
-    // Step 2:翻译 ar5iv 段落 + 评论翻译(flash,跟 Step 3 fan-out 并行不必要,因为
-    // 都不阻塞 Step 3 — 但 deep_analysis 的 ar5iv_excerpt 用 EN 原文不用译,
-    // 所以 Step 2 真的可以跟 Step 3 并行。这里串行只是为了 wall-clock 可观察)
+    // Step 2:评论翻译(flash)
+    //   ar5iv 段落级翻译已弃用(2026-05-19 PM 决策方案 E):FE drawer 嵌
+    //   <iframe src="arxiv.org/html/<arxiv_id>"> 看原版 HTML,用户用
+    //   浏览器翻译插件(沉浸式翻译等)实时翻;BE 不再做全文段落翻译。
+    //   省 5-10 min wall-clock per paper + 月度 ¥3-5 flash 调用成本。
+    //   ar5iv_excerpt(英文,前 3000 字)仍存 R2 给 deep_analysis prompt 用。
     // ────────────────────────────────────────────────────────────────
-    if (ar5ivResult?.fetched && (ar5ivResult.paragraphs_count ?? 0) > 0) {
-      await step.do('translate-ar5iv', RETRY, () =>
-        translateAr5ivForHfPaper(this.env, itemId, arxivId, { lang }),
-      );
-    }
     if (discussionResult?.fetched && (discussionResult.comments_count ?? 0) > 0) {
       await step.do('translate-discussion-comments', RETRY, () =>
         translateDiscussionCommentsForHfPaper(this.env, itemId),
       );
     }
-
-    // 注:之前在此跑 backfill-comment-avatars-r2 重抓评论者头像 R2,
-    // 现在 Step 1 已串行(backfill-media-r2 最后跑,能读到 discussion_comments),
-    // 这里不需要二次 backfill。
 
     // ────────────────────────────────────────────────────────────────
     // Step 3:C 方案 — 8 段独立 pro reasoning fan-out + 1 次 flash translate

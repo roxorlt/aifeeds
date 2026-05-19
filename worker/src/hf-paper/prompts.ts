@@ -245,33 +245,8 @@ ${ctx.ai_keywords && ctx.ai_keywords.length > 0 ? `- paper_keywords: ${ctx.ai_ke
 只输出 JSON,不要 markdown 代码块包裹整个 JSON。`;
 }
 
-// ────────────────────────────────────────────────────────────────────
-// ar5iv 段落级翻译 prompt(flash,简单批量)
-// ────────────────────────────────────────────────────────────────────
-
-export function buildAr5ivParagraphPrompt(opts: {
-  segment_text: string;
-  paper_title: string;
-  paper_keywords?: string[];
-}): string {
-  return `你是论文全文翻译助手。
-
-【输入】
-- segment_text: ${opts.segment_text}
-- paper_title: ${opts.paper_title}
-${opts.paper_keywords && opts.paper_keywords.length > 0 ? `- paper_keywords: ${opts.paper_keywords.slice(0, 20).join(', ')}(术语词典)` : ''}
-
-【任务】翻译为简体中文,保留:
-- 专有名词英文(模型 / 数据集 / 方法名,对照 paper_keywords)
-- 行内公式 $...$ 原文不译
-- 代码块 \`\`\` \`\`\` 原文不译
-- 表格 / 图表 caption 翻译,但保留 "Figure N:" / "Table N:" 前缀
-- 引用标号 [1] [2] 保留
-
-【风格】正式学术中文,不口语化。
-
-只输出译文,不要解释。`;
-}
+// ar5iv 段落级翻译 prompt 已弃用(2026-05-19 PM 决策方案 E)— FE iframe arxiv.org/html
+// 用户用浏览器翻译插件实时翻;BE 不再做。
 
 // ────────────────────────────────────────────────────────────────────
 // 评论翻译 prompt(flash,batch 调用)
