@@ -13,6 +13,7 @@
 import { useState } from "react";
 import type { HfPaperMetrics, Item, ItemExtra } from "../types";
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
+import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
 
 interface Props {
@@ -136,7 +137,7 @@ export function HfPaperCard({ item }: Props) {
       {cover && !coverFailed && (
         <div className="mb-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100">
           <img
-            src={cover.url}
+            src={resolveAssetUrl(cover.url)}
             alt=""
             loading="lazy"
             className="aspect-[1200/630] w-full object-cover"
@@ -200,7 +201,7 @@ export function HfPaperCard({ item }: Props) {
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
           {submitter?.avatar_url ? (
             <img
-              src={submitter.avatar_url}
+              src={resolveAssetUrl(submitter.avatar_url)}
               alt={submitter.user}
               className="h-5 w-5 shrink-0 rounded-full bg-neutral-200 object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -209,15 +210,24 @@ export function HfPaperCard({ item }: Props) {
             <span className="h-5 w-5 shrink-0 rounded-full bg-neutral-200" />
           )}
           {submitter?.user && (
-            <span className="truncate">
-              by <span className="text-neutral-700">@{submitter.user}</span>
+            // PM v6.3: 只 truncate handle 部分,其他("等 N 位 · X 天前")必须完整露出。
+            // handle 给 max-w-[100px] 上限,超长则 ellipsis,例如:
+            //   "by @caiyuchen... 等 12 位 · 1 天前"
+            // min-w-0 让外层 flex 容器允许 handle 子项 shrink。
+            <span className="inline-flex min-w-0 items-baseline">
+              <span className="shrink-0">by&nbsp;</span>
+              <span className="inline-block max-w-[100px] truncate text-neutral-700 align-bottom">
+                @{submitter.user}
+              </span>
               {authorsCount > 1 && (
-                <span className="text-neutral-500"> 等 {authorsCount} 位</span>
+                <span className="shrink-0 text-neutral-500">
+                  &nbsp;等 {authorsCount} 位
+                </span>
               )}
               {relTime && (
                 <>
-                  <span className="mx-1 text-neutral-400">·</span>
-                  <span className="text-neutral-500">{relTime}</span>
+                  <span className="mx-1 shrink-0 text-neutral-400">·</span>
+                  <span className="shrink-0 text-neutral-500">{relTime}</span>
                 </>
               )}
             </span>

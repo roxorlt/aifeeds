@@ -31,6 +31,7 @@ import type {
   ItemExtra,
 } from "../types";
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
+import { resolveAssetUrl } from "../lib/asset";
 import { useIsNarrow } from "../lib/breakpoint";
 
 // 评论 HTML 渲染走 DOMPurify sanitize(BE 给的 content_html 来自 HF 用户输入,
@@ -420,7 +421,7 @@ export function HfPaperDrawerBody({ item }: Props) {
         {cover && (
           <div className="aspect-[1200/630] w-full overflow-hidden bg-neutral-100">
             <img
-              src={cover.url}
+              src={resolveAssetUrl(cover.url)}
               alt=""
               className="h-full w-full object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -917,7 +918,7 @@ function CommentItem({
       <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
         {comment.author_avatar_url ? (
           <img
-            src={comment.author_avatar_url}
+            src={resolveAssetUrl(comment.author_avatar_url)}
             alt={comment.author_name}
             className="h-7 w-7 rounded-full bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
