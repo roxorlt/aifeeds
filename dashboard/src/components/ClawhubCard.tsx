@@ -96,6 +96,8 @@ export function ClawhubCard({ item }: Props) {
           <img
             src={proxyImg(ownerAvatar, 80)}
             alt={ownerHandle}
+            loading="lazy"
+            decoding="async"
             className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
           />

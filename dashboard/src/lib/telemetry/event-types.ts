@@ -39,11 +39,12 @@ export const EVENTS = {
   VIDEO_AUTOPLAY_ATTEMPT: 'video_autoplay_attempt',
   VIDEO_AUTOPLAY_BLOCKED: 'video_autoplay_blocked',
   VIDEO_PLAY_START: 'video_play_start',
-  // 性能
+  // 性能(web-vitals)
   PERF_LCP: 'perf_lcp',
   PERF_INP: 'perf_inp',
   PERF_CLS: 'perf_cls',
   PERF_TTFB: 'perf_ttfb',
+  PERF_FCP: 'perf_fcp',         // First Contentful Paint — 比 LCP 早,首屏首字符耗时
   // 错误
   JS_ERROR: 'js_error',
   UNHANDLED_PROMISE: 'unhandled_promise',

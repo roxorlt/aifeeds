@@ -130,6 +130,9 @@ function DashboardHome() {
   // filter 切到非可视 chip 时把它居中到 rail 中部,让用户知道这是 active(避免
   // 切了但用户看不到激活状态以为没动)。useEffect 跑在 filter 声明之后(挪到 L155+)
   const chipRailRef = useRef<HTMLElement | null>(null);
+  // PM 2026-05-20:#5 横划切 tab — feed 区域 main 上挂 touch listener,
+  // 识别 horizontal-dominant swipe 切上/下一个 filter chip
+  const mainRef = useRef<HTMLElement | null>(null);
 
   // Derived filter: PC always shows "all" (chips hidden); mobile coerces
   // "all" → "x_list" since the "all" chip isn't rendered on narrow.
@@ -156,6 +159,76 @@ function DashboardHome() {
     });
     return () => cancelAnimationFrame(raf);
   }, [filter, isNarrow]);
+
+  // PM 2026-05-20 #5: feed 区域横划切 tab(mobile only)。
+  // 排除区域:drawer panel(swipe close 优先)/ chips-rail(已 pan-x) /
+  // video 元素(组件内手势优先)/ data-no-swipe-tab 自定义 opt-out /
+  // iOS 左 24px edge(系统 back gesture)。
+  // 识别:|dx| ≥ 60px 且 |dx| ≥ |dy| × 1.5(horizontal dominant)且 ≤ 800ms。
+  // 左划→下一 chip,右划→上一 chip,边界不变。
+  // 用 ref 存最新 filter(避免每次 filter 变都 reattach listener)
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
+  useEffect(() => {
+    if (!isNarrow) return;
+    const el = mainRef.current;
+    if (!el) return;
+
+    let startX = 0, startY = 0, startT = 0;
+    let active = false;
+
+    const onStart = (e: TouchEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // 排除区域:drawer / chips-rail / video / opt-out / iOS 左边缘
+      if (target.closest('[data-drawer-panel]')) return;
+      if (target.closest('.chips-rail')) return;
+      if (target.closest('video')) return;
+      if (target.closest('[data-no-swipe-tab]')) return;
+      const t0 = e.touches[0];
+      if (t0.clientX < 24) return;
+      startX = t0.clientX;
+      startY = t0.clientY;
+      startT = Date.now();
+      active = true;
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (!active) return;
+      active = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const dt = Date.now() - startT;
+      if (Math.abs(dx) < 60) return;
+      if (Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      if (dt > 800) return;
+
+      const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
+      const cur = filterRef.current;
+      const idx = tabs.findIndex((c) => c.key === cur);
+      if (idx < 0) return;
+      const nextIdx = dx < 0
+        ? Math.min(idx + 1, tabs.length - 1)
+        : Math.max(idx - 1, 0);
+      if (nextIdx === idx) return;
+      track(EVENTS.SOURCE_FILTER_CHANGE, {
+        from_id: cur,
+        to_id: tabs[nextIdx].key,
+        method: 'swipe',
+      });
+      setFilter(tabs[nextIdx].key);
+    };
+    const onCancel = () => { active = false; };
+
+    el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchend', onEnd, { passive: true });
+    el.addEventListener('touchcancel', onCancel, { passive: true });
+    return () => {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchend', onEnd);
+      el.removeEventListener('touchcancel', onCancel);
+    };
+  }, [isNarrow]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores
@@ -388,7 +461,10 @@ function DashboardHome() {
       </header>
 
       {/* 3-column grid */}
-      <main className="mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16">
+      <main
+        ref={mainRef}
+        className="mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
+      >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
             const isPlaceholder = !liveSourceTypes.has(col.source_type);

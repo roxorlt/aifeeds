@@ -36,8 +36,8 @@ export type EventTypeName =
   | 'favorite_toggle' | 'subscribe_toggle'
   // 视频起播（诊断 mobile/微信 autoplay 受限）
   | 'video_autoplay_attempt' | 'video_autoplay_blocked' | 'video_play_start'
-  // 性能
-  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb'
+  // 性能(web-vitals)
+  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp'
   // 错误
   | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error'
   | 'feed_load_error';

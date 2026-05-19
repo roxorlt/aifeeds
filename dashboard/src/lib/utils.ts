@@ -96,6 +96,11 @@ const PROXY_HOSTS = new Set([
   "opengraph.githubassets.com",      // X 嵌 GH 仓库 / issue 链接卡
   "og.luma.com",                      // X 嵌 Luma 活动链接卡
   "jf.x.com",                         // Twitter media inflight gateway
+  // 2026-05-20 PM #2 图片首屏卡顿 — GitHub README 内嵌图大量直链,CN 慢
+  // ⚠️ 需要 BE 同步加 ALLOWED_IMG_HOSTS,否则 worker /img 返 403
+  "raw.githubusercontent.com",        // GH README 内嵌 image / assets
+  "user-images.githubusercontent.com", // GH 老版 user-attachments
+  "github.com",                       // /user-attachments/ 路径(新版)
 ]);
 const PROXY_BASE =
   import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
@@ -283,4 +288,20 @@ export function groupByThread(items: Item[]): FeedRow[] {
     }
   }
   return rows;
+}
+
+// 2026-05-20 PM #2 图片首屏卡顿 — feed 卡片大量 <img> 同时 fetch 浏览器 6 并发
+// 排队 + decode 阻塞 main thread,移动端表现为"从上到下一点点刷出来"。
+// 默认 lazy + async decode:浏览器只 fetch 视口内 cover,decode 不阻塞渲染。
+// eager=true 留给确定首屏的 hero(如 drawer 打开后的封面 — 已经是用户主动 trigger)
+export function imgPerfAttrs(eager = false): {
+  loading: 'lazy' | 'eager';
+  decoding: 'async';
+  fetchPriority?: 'high' | 'low' | 'auto';
+} {
+  return {
+    loading: eager ? 'eager' : 'lazy',
+    decoding: 'async',
+    fetchPriority: eager ? 'high' : 'auto',
+  };
 }

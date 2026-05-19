@@ -133,6 +133,8 @@ export function GithubCard({ item }: Props) {
         <img
           src={proxyImg(ownerAvatar, 80)}
           alt={owner}
+          loading="lazy"
+          decoding="async"
           className="h-10 w-10 shrink-0 rounded-full bg-neutral-200 object-cover"
           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
         />
@@ -265,6 +267,8 @@ export function GithubCard({ item }: Props) {
                       key={c.login}
                       src={proxyImg(c.avatar_url, 80)}
                       alt={c.login}
+                      loading="lazy"
+                      decoding="async"
                       className="h-5 w-5 rounded-full border border-white bg-neutral-200"
                       onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                     />

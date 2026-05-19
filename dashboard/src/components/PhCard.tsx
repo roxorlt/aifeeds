@@ -137,6 +137,8 @@ export function PhCard({ item }: Props) {
           <img
             src={logoUrl}
             alt={name}
+            loading="lazy"
+            decoding="async"
             className="h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover"
             onError={(e) => (e.currentTarget.style.visibility = "hidden")}
           />
@@ -238,6 +240,8 @@ export function PhCard({ item }: Props) {
                       key={m.handle || i}
                       src={src}
                       alt={m.name || m.handle || ""}
+                      loading="lazy"
+                      decoding="async"
                       className="h-5 w-5 rounded-full border border-white bg-neutral-200 object-cover"
                       onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                     />

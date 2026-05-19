@@ -206,6 +206,8 @@ export function HfPaperCard({ item }: Props) {
             <img
               src={resolveAssetUrl(submitter.avatar_url)}
               alt={submitter.user}
+              loading="lazy"
+              decoding="async"
               className="h-5 w-5 shrink-0 rounded-full bg-neutral-200 object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
             />

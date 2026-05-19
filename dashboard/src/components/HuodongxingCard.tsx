@@ -184,6 +184,8 @@ export function HuodongxingCard({ item }: Props) {
           <img
             src={thumbUrl}
             alt={title}
+            loading="lazy"
+            decoding="async"
             className={`h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover ${
               isEnded ? "opacity-55 grayscale-[.5]" : ""
             }`}
@@ -270,6 +272,8 @@ export function HuodongxingCard({ item }: Props) {
             <img
               src={orgAvatar}
               alt={orgName}
+              loading="lazy"
+              decoding="async"
               className="h-[18px] w-[18px] shrink-0 rounded-full bg-neutral-200 object-cover"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
             />
