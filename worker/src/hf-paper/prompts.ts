@@ -55,7 +55,18 @@ const SHARED_RULES = `【翻译规则】
 - 中国从业者视角:每段必须有"对实际工程的启示"或"跟同类工作的差异"
 - 严禁堆砌动词形容词凑字数;200-500 字必须有信息密度
 
-只输出 JSON,不要 markdown 代码块包裹,不要解释。`;
+【markdown 排版要求】(PM 反馈大块文字不利阅读,各段 string 字段必须 markdown 结构化):
+- 内部合理分段,段落之间空行分隔
+- **关键概念**用粗体标(模型名 / 数据集 / 指标 / 核心创新)
+- 列表组织对比 / 步骤 / 要点(- bullet 或 1. 2. 3.)
+- 行内代码 \`identifier\`(变量 / 函数 / 配置 / arxiv id 等)
+- 必要时用 > blockquote 强调引用 / 原作者论断
+- 用 ### 三级标题 切大段(单段 > 300 字时建议)
+- 必要时用表格 | col1 | col2 | 做指标 / 对比
+- 外部链接 [文字](url) 引用 GH / 项目主页 / 论文 / blog
+- ⚠️ 不要包整段在 \`\`\`markdown\`\`\` block 内,直接输出原始 markdown
+
+只输出 JSON,JSON 内的 string 值是 markdown 文本。不要 markdown 代码块包裹整个 JSON。不要解释。`;
 
 // ────────────────────────────────────────────────────────────────────
 // 8 段 deep_analysis prompts(每段独立 pro reasoning JSON Mode 调用)
@@ -216,13 +227,22 @@ ${ctx.ai_keywords && ctx.ai_keywords.length > 0 ? `- paper_keywords: ${ctx.ai_ke
 
 【任务】输出 JSON:
 {
-  "title_zh": "<标题中译,保留专有名词英文>",
-  "summary_zh": "<abstract 中译,80-200 字,口语化但保持学术准确>",
-  "ai_summary_zh": "<HF ai_summary 中译,30 字内>"
+  "title_zh": "<标题中译,保留专有名词英文,不带任何 markdown>",
+  "summary_zh": "<abstract 中译,200-400 字,**markdown 格式**(见排版要求)>",
+  "ai_summary_zh": "<HF ai_summary 中译,30 字内,不带 markdown>"
 }
 
-【规则】专有名词保留英文(参考 paper_keywords),中英混合留空格。
-只输出 JSON,不要 markdown 包裹。`;
+【翻译规则】专有名词保留英文(参考 paper_keywords),中英混合留空格。
+
+【summary_zh markdown 排版要求】(PM 反馈大块文字不利阅读,要求结构化):
+- 合理分段(2-4 段),每段聚焦一个层面(问题 / 方法 / 实验 / 结论 等)
+- **关键概念**用粗体标(模型名 / 数据集 / 指标 / 创新点)
+- 必要时用列表组织对比或要点(- bullet 或 1. 2. 3.)
+- 段落之间空行分隔
+- 不用 # 标题(summary 篇幅短,标题反而碎)
+- 行内代码 \`identifier\`(变量名 / 函数名 / 配置项)
+
+只输出 JSON,不要 markdown 代码块包裹整个 JSON。`;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -281,7 +301,7 @@ ${list}
 【任务】每条评论翻译为简体中文,输出 JSON:
 {
   "translations": [
-    { "id": "<原 id>", "content_zh": "<译文>" }
+    { "id": "<原 id>", "content_zh": "<译文,支持 markdown>" }
   ]
 }
 
@@ -289,9 +309,10 @@ ${list}
 - 保留 @username / #hashtag / URL 原文
 - 专有名词英文(参考 paper_title)
 - 口语化(学术评论常用 colloquial 语言)
-- 代码 / 公式原文保留
+- 代码 / 公式原文保留(行内 \`code\` / 代码块 \`\`\`...\`\`\`)
 - emoji 保留
 - 已是中文的评论 content_zh 仍输出原文(便于 FE 统一渲染)
+- 翻译保留原 markdown 元素(列表 / 加粗 / 链接等),原文有则保留
 
-只输出 JSON,不要 markdown 包裹。`;
+只输出 JSON,不要 markdown 包裹整个 JSON。`;
 }

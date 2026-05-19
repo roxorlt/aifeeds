@@ -268,16 +268,30 @@ export async function fetchAr5ivAndExtractFigureForHf(
     figure_image: figureInfo,
   };
 
-  // media[0] 替换为论文 figure(若抓到),HF thumbnail 降级到 media[1] 兜底
+  // media[0] 处理(强保证 FE 始终拿到 R2 path,不出现 raw URL):
+  //   - figure 抓到(source='pdf' / 'ar5iv') → media[0] = figure R2 path
+  //     原 thumbnail 降级到 media[1] role=thumbnail_fallback(也 ensure R2 path)
+  //   - figure 没抓到(source='none') → media[0] = HF thumbnail R2 path
+  //     如果原 media[0] 还是 raw HF URL,显式 migrate + replace
   let newMedia = media;
-  if (figureInfo.source === 'ar5iv' && figureInfo.r2_url) {
+  if ((figureInfo.source === 'pdf' || figureInfo.source === 'ar5iv') && figureInfo.r2_url) {
     const thumbnailItem = media.find((m) => m.role === 'thumbnail' || m.type === 'image') || media[0];
+    const thumbR2 = thumbnailItem?.url
+      ? await ensureR2Url(env, thumbnailItem.url, MAX_THUMBNAIL_BYTES)
+      : null;
     newMedia = [
       { type: 'image', url: figureInfo.r2_url, role: 'figure' },
-      ...(thumbnailItem
-        ? [{ type: thumbnailItem.type ?? 'image', url: thumbnailItem.url, role: 'thumbnail_fallback' }]
-        : []),
+      ...(thumbR2 ? [{ type: thumbnailItem?.type ?? 'image', url: thumbR2, role: 'thumbnail_fallback' }] : []),
     ];
+  } else {
+    // source='none':figure 没抓到,ensure media[0] 是 R2 path
+    const head = media[0];
+    if (head?.url && !head.url.startsWith('/r/')) {
+      const r2 = await ensureR2Url(env, head.url, MAX_THUMBNAIL_BYTES);
+      if (r2) {
+        newMedia = [{ ...head, url: r2 }, ...media.slice(1)];
+      }
+    }
   }
 
   await env.DB.prepare(
@@ -286,9 +300,43 @@ export async function fetchAr5ivAndExtractFigureForHf(
 
   return {
     fetched: true,
-    has_figure: figureInfo.source === 'ar5iv',
+    has_figure: figureInfo.source === 'pdf' || figureInfo.source === 'ar5iv',
     paragraphs_count: paragraphsStored,
   };
+}
+
+const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024;
+const ALLOWED_THUMB_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+/**
+ * 显式 fetch raw URL → 迁 R2 → return `/r/<key>` path
+ * 用于 figure step 兜底 media[0] R2 path(防 FE 拿到 raw HF URL)
+ */
+async function ensureR2Url(env: Env, url: string, maxBytes: number): Promise<string | null> {
+  if (!env.READMES) return null;
+  if (url.startsWith('/r/')) return url;
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' } });
+    if (!r.ok) return null;
+    const ct = (r.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+    if (!ALLOWED_THUMB_MIME.has(ct)) return null;
+    const lenStr = r.headers.get('content-length');
+    if (lenStr && parseInt(lenStr, 10) > maxBytes) return null;
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > maxBytes) return null;
+    const hash = await sha256OfBytes(new Uint8Array(buf));
+    const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' :
+                ct === 'image/webp' ? 'webp' : ct === 'image/gif' ? 'gif' : 'bin';
+    const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.${ext}`;
+    await env.READMES.put(key, buf, {
+      httpMetadata: { contentType: ct },
+      customMetadata: { 'src-url': url, 'source': 'hf-thumbnail-fallback' },
+    });
+    return `/r/${key}`;
+  } catch (e) {
+    console.error(`[hf-paper:ensure-r2] ${url}`, e);
+    return null;
+  }
 }
 
 /**

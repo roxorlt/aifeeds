@@ -379,6 +379,7 @@ function transformToItemInput(
     ai_summary_en: p.ai_summary ?? null,
     ai_keywords: p.ai_keywords ?? [],
     arxiv_categories: categories,         // NEW #2(可能空数组,workflow step 0 兜底)
+    paper_authors: (p.authors || []).map((a) => ({ name: a.name })),  // PM 反馈 #2:完整 author list
     is_author_participating: entry.isAuthorParticipating ?? false,
     // 所有 _zh / deep_analysis / ar5iv_* / discussion_comments / figure_image
     // workflow step 完成后填,Phase 2 不写
