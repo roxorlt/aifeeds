@@ -164,8 +164,14 @@ function DashboardHome() {
   // 排除区域:drawer panel(swipe close 优先)/ chips-rail(已 pan-x) /
   // video 元素(组件内手势优先)/ data-no-swipe-tab 自定义 opt-out /
   // iOS 左 24px edge(系统 back gesture)。
-  // 识别:|dx| ≥ 60px 且 |dx| ≥ |dy| × 1.5(horizontal dominant)且 ≤ 800ms。
-  // 左划→下一 chip,右划→上一 chip,边界不变。
+  //
+  // PM 2026-05-20 反馈:横滑/纵滑总有另一方向的小分量,touchend 一次性判断
+  // 容易误识别(纵滑带点横向 → 误切 tab / 横滑带点纵向 → 误判 vertical)。
+  // 改为 **早期方向锁定** —— touchmove 第一次确定主方向后:
+  //   - |dx| > |dy|×2(角度 < 26.5°)→ 锁定 horizontal,保留到 touchend 切 tab
+  //   - |dy| > |dx|×2(角度 > 63.5°)→ 锁定 vertical,立即 abort 不再监听,
+  //     让浏览器原生 scroll 完全接管(我们是 passive listener,不挡 scroll)
+  //   - 中间 26.5°-63.5° 模糊区:等下次 touchmove,通常 1-2 frame 内方向就明确
   // 用 ref 存最新 filter(避免每次 filter 变都 reattach listener)
   const filterRef = useRef(filter);
   filterRef.current = filter;
@@ -176,6 +182,7 @@ function DashboardHome() {
 
     let startX = 0, startY = 0, startT = 0;
     let active = false;
+    let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
 
     const onStart = (e: TouchEvent) => {
       const target = e.target as HTMLElement | null;
@@ -190,15 +197,39 @@ function DashboardHome() {
       startX = t0.clientX;
       startY = t0.clientY;
       startT = Date.now();
+      direction = 'unknown';
       active = true;
     };
+    const onMove = (e: TouchEvent) => {
+      // 方向已锁定 / 已 abort 就不再判断
+      if (!active || direction !== 'unknown') return;
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const absDx = Math.abs(dx), absDy = Math.abs(dy);
+      // 小于 10px 还在抖动阈值内,等更明显的位移
+      if (absDx < 10 && absDy < 10) return;
+      if (absDx > absDy * 2) {
+        direction = 'horizontal';
+      } else if (absDy > absDx * 2) {
+        // 纵向锁定 = 用户在垂直滚动,完全 abort,让浏览器原生 scroll 接管
+        direction = 'vertical';
+        active = false;
+      }
+      // 26.5°-63.5° 模糊带,等下次 move 方向更明显再锁
+    };
     const onEnd = (e: TouchEvent) => {
-      if (!active) return;
+      // 只有横向锁定才切 tab,纵向/模糊态('unknown')都跳过
+      if (!active || direction !== 'horizontal') {
+        active = false;
+        return;
+      }
       active = false;
       const t = e.changedTouches[0];
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const dt = Date.now() - startT;
+      // 二次确认:已锁横向 + 距离够 60px + 时间合理(800ms 内)
       if (Math.abs(dx) < 60) return;
       if (Math.abs(dx) < Math.abs(dy) * 1.5) return;
       if (dt > 800) return;
@@ -218,13 +249,15 @@ function DashboardHome() {
       });
       setFilter(tabs[nextIdx].key);
     };
-    const onCancel = () => { active = false; };
+    const onCancel = () => { active = false; direction = 'unknown'; };
 
     el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchmove', onMove, { passive: true });
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
       el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };

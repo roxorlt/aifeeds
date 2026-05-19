@@ -31,6 +31,33 @@ import { useDrawer } from "../lib/drawer";
 import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
 
+// PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
+// <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
+// items state 清空 → 重 fetch 显 skeleton。
+//
+// 改造:module-level FEED_CACHE 缓存每个 sourceType 的 items / cursor / hasMore,
+// Feed mount 时从 cache lazy init state(有 cache 直接显已有 items,不 skeleton);
+// fetch 完成后 sync 回 cache;items 变化(load more / refresh)同步 cache。
+// TTL 5min,过期视为没缓存(避免显太老数据)。
+// 注:cache key = sourceType,不带其他 filter param(简化);切回时短暂显之前的
+// items + 后台 fetch 当前 filter 数据,fetch 完成后立即覆盖。loadMore append 也
+// 通过 items state change useEffect sync 回 cache,append 后切走再回来不丢。
+type FeedCacheEntry = {
+  items: Item[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  ts: number;
+};
+const FEED_CACHE = new Map<string, FeedCacheEntry>();
+const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function readFeedCache(key: string): FeedCacheEntry | null {
+  const c = FEED_CACHE.get(key);
+  if (!c) return null;
+  if (Date.now() - c.ts > FEED_CACHE_TTL_MS) return null;
+  return c;
+}
+
 interface Props {
   sourceType: SourceType;
   title: string;
@@ -133,15 +160,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   { sourceType, title, placeholder, refreshTick },
   ref,
 ) {
-  const [items, setItems] = useState<Item[]>([]);
+  // PM 2026-05-20:从 FEED_CACHE 拿之前缓存的 items,有 cache 时 mount 直接显
+  // (不显 skeleton),background refetch 更新。lazy init 保证只在 mount 时读一次
+  const cachedInit = readFeedCache(sourceType);
+  const [items, setItems] = useState<Item[]>(cachedInit?.items ?? []);
   const [pending, setPending] = useState<Item[]>([]);
+  // 有 cache 不显 loading(直接显已有 items);无 cache 默认 false,useEffect
+  // fetch 时 set true 显 skeleton
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastScrapedAt = useRef<string | null>(null);
   const [retryTick, setRetryTick] = useState(0);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(cachedInit?.nextCursor ?? null);
+  const [hasMore, setHasMore] = useState(cachedInit?.hasMore ?? true);
   // Cooldown: after N consecutive load_more failures we stop auto-firing
   // loadMore via IntersectionObserver and show a manual retry button.
   // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
@@ -193,6 +225,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   const isHot = sortMode === "hot";
 
+  // PM 2026-05-20:items / nextCursor / hasMore 变化时 sync 回 FEED_CACHE,
+  // 让 loadMore append / drawer 单条更新 / refresh 拉新都被记住,切 tab
+  // 再回来时仍能 hydrate 完整 list(否则切走丢 append 部分,scroll 位置
+  // 看起来"少了一截")。items 为空时不写(避免覆盖错误状态污染 cache)
+  useEffect(() => {
+    if (placeholder) return;
+    if (items.length === 0) return;
+    FEED_CACHE.set(sourceType, { items, nextCursor, hasMore, ts: Date.now() });
+  }, [sourceType, items, nextCursor, hasMore, placeholder]);
+
   // 订阅 drawer 单条更新：抽屉打开触发的 lazy-enrich 拿到 fresh.item 后，
   // 把 feed 列表里同 id 的那张卡片也替换掉，避免抽屉新 / feed 老。
   useEffect(() => {
@@ -206,7 +248,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   useEffect(() => {
     if (placeholder) return;
     let cancelled = false;
-    setLoading(true);
+    // PM 2026-05-20:若已有 cache hydrate 的 items,后台静默 refetch
+    // (loading=false,不显 skeleton);否则首次进 tab 显 skeleton
+    const hasHydrated = items.length > 0;
+    if (!hasHydrated) setLoading(true);
     setError(null);
     fetchItems({
       source_type: sourceType,
@@ -234,6 +279,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         setNextCursor(res.next_cursor);
         setHasMore(res.has_more);
         lastScrapedAt.current = res.items[0]?.scraped_at || null;
+        // 写入 FEED_CACHE,下次 mount 时直接 hydrate(不 skeleton)
+        FEED_CACHE.set(sourceType, {
+          items: itemsToShow,
+          nextCursor: res.next_cursor,
+          hasMore: res.has_more,
+          ts: Date.now(),
+        });
       })
       .catch((e) => {
         if (cancelled) return;
