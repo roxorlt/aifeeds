@@ -403,23 +403,25 @@ export function HfPaperDrawerBody({ item }: Props) {
   const cover = media.find((m) => m.type === "image");
 
   // BE 2026-05-19: figure_image 元数据 — width/height 用来算 hero 容器 aspect-ratio。
-  // 纵向 figure(GUI/screenshot 类 paper,如 2605.15138)在 16:9 容器内 letterbox
-  // 会补白巨大,改成跟 figure aspect 分档自适应,letterbox 仍保留(object-contain)
+  // PM 决策(2026-05-19 v6.8):只有横向 figure(aspect >= 1.0)才适合做 hero;
+  // 方形 / 纵向(< 1.0,GUI/screenshot 类)即便 BE 经 lookahead 给出最佳 figure,
+  // 强撑出来视觉也是"中间一小条 + 两侧大补白"或"接近方形像被裁的 GUI",
+  // 当无 hero 隐藏更干净(用户可以去 figures tab 看完整真实图)
   const figureImage = extra.figure_image;
   const heroAspect =
     figureImage?.width && figureImage?.height
       ? figureImage.width / figureImage.height
       : null;
+  // 渲染门控:有 cover + (无 figure 元数据兜底 OR figure 横向)
+  const shouldRenderHero =
+    !!cover && (heroAspect == null || heroAspect >= 1.0);
+  // 容器 aspect 分档:wide / 横向偏方两档,纵向已隐藏不需要
   const heroContainerAspect =
     heroAspect == null
-      ? "1200 / 630"           // 没 figure 元数据:回退原 16:9 hero(cover/og-image)
+      ? "1200 / 630"          // 兜底:无 figure 元数据(og-image fallback 等),走原 16:9
       : heroAspect >= 1.5
-        ? "16 / 9"             // 横向 wide(大多数 paper figure 命中)
-        : heroAspect >= 1.0
-          ? "4 / 3"             // 横向方形偏宽
-          : heroAspect >= 0.7
-            ? "1 / 1"           // 方形
-            : "4 / 5";           // 纵向(GUI / screenshot / mobile UI 类)
+        ? "16 / 9"             // 横向 wide
+        : "4 / 3";              // 横向偏方(1.0 - 1.5)
 
   // tab + 内部状态
   const [activeTab, setActiveTab] = useState<TabKey>("raw");
