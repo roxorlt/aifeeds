@@ -57,10 +57,19 @@ export const TRACK_ENDPOINT = `${API_BASE}/api/track`;
 const FETCH_TIMEOUT_MS = 5000;
 const RETRY_BACKOFFS_MS = [200, 600] as const; // 重试 2 次 = 共 3 次 attempt
 
-async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+async function apiFetch(
+  path: string,
+  init: RequestInit & { timeoutMs?: number } = {},
+): Promise<Response> {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   const headers = new Headers(init.headers);
   headers.set('X-Device-Id', getDeviceId());
+  // Caller can override default 5s timeout per-call (e.g. refreshHfDiscussion
+  // 跑评论 fetch + img R2 mirror + 翻译 ~8s,默认 5s 会 abort 掉)
+  const timeoutMs = init.timeoutMs ?? FETCH_TIMEOUT_MS;
+  // 单独把 timeoutMs 从 init 摘出来,避免 fetch() 收到 unknown 属性
+  const { timeoutMs: _omit, ...fetchInit } = init;
+  void _omit;
 
   // Each attempt is wrapped in its own AbortController so a single hung
   // request can't block the entire retry chain. WeChat WebView is known
@@ -68,9 +77,9 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
   // pending forever.
   const tryOnce = async (): Promise<Response> => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      return await fetch(url, { ...init, headers, credentials: 'include', signal: ctrl.signal });
+      return await fetch(url, { ...fetchInit, headers, credentials: 'include', signal: ctrl.signal });
     } finally {
       clearTimeout(timer);
     }
@@ -125,7 +134,7 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
         track(EVENTS.API_ERROR, {
           endpoint: path,
           status: 0,
-          error_msg: isAbort ? `timeout_${FETCH_TIMEOUT_MS}ms` : rawMsg,
+          error_msg: isAbort ? `timeout_${timeoutMs}ms` : rawMsg,
           attempts: attempt + 1,
         });
         throw e;
@@ -207,6 +216,27 @@ export async function refreshItem(id: string): Promise<RefreshItemResponse> {
   const path = `/api/items/${encodeURIComponent(id)}/refresh`;
   const res = await apiFetch(path, { method: 'POST' });
   if (!res.ok) return { refreshed: false, source_type: 'unknown', reason: 'fetch_failed' };
+  return res.json();
+}
+
+// hf_paper 专用 — discussion fetch + content_html <img> 抓 R2 + rewrite src + 翻译。
+// 慢路径,BE 跑 ~5-10s,跟 refreshItem(metrics-only ~2s)拆分独立 endpoint
+// 避免 FE 5s 默认 abort timeout。drawer mount 时跟主 refresh 并行 fire。
+// BE: POST /api/items/:id/refresh-hf-discussion(KV 5min throttle 独立 key)
+export interface RefreshHfDiscussionResponse {
+  refreshed: boolean;
+  comments_count: number;
+  translated_count: number;
+  images_mirrored: number;
+  reason?: string;
+}
+
+export async function refreshHfDiscussion(id: string): Promise<RefreshHfDiscussionResponse> {
+  const path = `/api/items/${encodeURIComponent(id)}/refresh-hf-discussion`;
+  const res = await apiFetch(path, { method: 'POST', timeoutMs: 15000 });
+  if (!res.ok) {
+    return { refreshed: false, comments_count: 0, translated_count: 0, images_mirrored: 0, reason: 'fetch_failed' };
+  }
   return res.json();
 }
 
