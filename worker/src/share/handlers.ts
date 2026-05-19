@@ -380,6 +380,15 @@ async function pickAuthorAvatar(
         // ignore — fall through to undefined
       }
     }
+  } else if (sourceType === 'hf_paper') {
+    // HF Paper: submitter 头像 = extra.submitted_by.avatar_url(R2 path /r/hf/<sha>.svg)
+    // 或 raw_avatar_url(HF identicon /avatars/<hash>.svg)兜底
+    const sb = extra?.submitted_by as { avatar_url?: string; raw_avatar_url?: string } | undefined;
+    url = sb?.avatar_url || sb?.raw_avatar_url || undefined;
+    // /avatars/ 是 HF identicon 相对路径,拼 huggingface.co host
+    if (url && url.startsWith('/avatars/')) {
+      url = `https://huggingface.co${url}`;
+    }
   }
   if (!url) return undefined;
   // 头像走单独路径：只需要 fetch + sniff + base64，不做 media 门控
@@ -533,6 +542,23 @@ async function pickPosterMedia(
             candidates.push({ url: poster, width: x.width, height: x.height, isVideo: true });
             if (candidates.length >= 8) break;
           }
+        }
+      }
+    }
+  } else if (sourceType === 'hf_paper') {
+    // HF Paper: media[0] 是 BE 抽取的论文 figure(role=figure)或 HF social-thumbnail
+    // 兜底 R2 path /r/hf/<sha>.{png,jpg}。figure_image.width/height(BE 写)
+    const figureImage = extra?.figure_image as { width?: number; height?: number } | undefined;
+    if (Array.isArray(media)) {
+      const arr = media as Array<{ type?: string; url?: string; role?: string }>;
+      for (const x of arr) {
+        if (x?.type === 'image' && typeof x.url === 'string') {
+          candidates.push({
+            url: x.url,
+            width: figureImage?.width,
+            height: figureImage?.height,
+          });
+          if (candidates.length >= 4) break;
         }
       }
     }
