@@ -310,6 +310,13 @@ export default {
       if (itemRefreshMatch && request.method === 'POST') {
         return withCors(await handleItemRefresh(request, env, decodeURIComponent(itemRefreshMatch[1])), request, env);
       }
+      // POST /api/items/:id/refresh-hf-discussion — hf_paper 专用,drawer 第二个 useEffect 并发调
+      // 跑 discussion fetch + content_html 内 <img> 抓 R2 + 翻译,wall-clock 5-10s
+      // FE 单独 15s timeout(api.ts refreshHfDiscussion),避开通用 /refresh 5s cap
+      const itemHfDiscRefreshMatch = path.match(/^\/api\/items\/(.+)\/refresh-hf-discussion$/);
+      if (itemHfDiscRefreshMatch && request.method === 'POST') {
+        return withCors(await handleHfDiscussionRefresh(request, env, decodeURIComponent(itemHfDiscRefreshMatch[1])), request, env);
+      }
       // POST /api/items/:id/translate-now — 用户点译文按钮触发即时翻译(批 1.5)
       // cookie auth + per-user-per-item 60s 冷却 + per-user 每日 20 次上限
       const itemTranslateMatch = path.match(/^\/api\/items\/(.+)\/translate-now$/);
@@ -2473,6 +2480,76 @@ async function handleItemRefresh(request: Request, env: Env, id: string): Promis
   // 节流：worker 内部 KV throttle 5min；前端调用时 anti-burst 自己也加防抖
   const r = await refreshSingleItem(env, id);
   return jsonResponse(r, 200, request, env);
+}
+
+// ─── POST /api/items/:id/refresh-hf-discussion ───────────────────
+// hf_paper drawer 打开时 FE 第二个并发调用,5-10s wall-clock,FE 端 timeoutMs 15s。
+// 跑:fetchDiscussionForHfPaper → mirrorCommentImagesForHfPaper → translateDiscussionCommentsForHfPaper
+// 独立 KV throttle key(`hf-disc-refresh:<id>`)5min,跟通用 /refresh 不冲突。
+const HF_DISC_REFRESH_THROTTLE_KEY = 'hf-disc-refresh:';
+const HF_DISC_REFRESH_THROTTLE_TTL = 300;             // 5min
+
+async function handleHfDiscussionRefresh(request: Request, env: Env, id: string): Promise<Response> {
+  // 1. 校验 item + source_type
+  const item = await env.DB.prepare(
+    `SELECT id, source_type, source_id FROM items WHERE id = ?`,
+  ).bind(id).first<{ id: string; source_type: string; source_id: string }>();
+  if (!item) {
+    return jsonResponse({ refreshed: false, reason: 'item_not_found' }, 404, request, env);
+  }
+  if (item.source_type !== 'hf_paper') {
+    return jsonResponse({ refreshed: false, reason: 'unsupported_source' }, 400, request, env);
+  }
+
+  // 2. KV 5min throttle
+  if (env.AUTH_KV) {
+    const tKey = HF_DISC_REFRESH_THROTTLE_KEY + id;
+    const last = await env.AUTH_KV.get(tKey);
+    if (last) {
+      return jsonResponse(
+        { refreshed: false, reason: 'throttled' },
+        200, request, env,
+      );
+    }
+  }
+
+  // 3. discussion fetch + 评论 <img> R2 mirror + 翻译
+  const arxivId = String(item.source_id);
+  let commentsCount = 0;
+  let translated = 0;
+  let imagesMirrored = 0;
+  try {
+    const { fetchDiscussionForHfPaper, mirrorCommentImagesForHfPaper, translateDiscussionCommentsForHfPaper } =
+      await import('./hf-paper/discussion');
+    const dResult = await fetchDiscussionForHfPaper(env as Parameters<typeof fetchDiscussionForHfPaper>[0], id, arxivId);
+    commentsCount = dResult.comments_count;
+    if (dResult.fetched && commentsCount > 0) {
+      const mResult = await mirrorCommentImagesForHfPaper(env as Parameters<typeof mirrorCommentImagesForHfPaper>[0], id);
+      imagesMirrored = mResult.mirrored;
+      const tResult = await translateDiscussionCommentsForHfPaper(env as Parameters<typeof translateDiscussionCommentsForHfPaper>[0], id);
+      translated = tResult.translated;
+    }
+  } catch (e) {
+    console.error(`[hf-disc-refresh] ${id} exception`, e);
+    return jsonResponse(
+      { refreshed: false, reason: 'fetch_failed', error: (e as Error).message.slice(0, 200) },
+      500, request, env,
+    );
+  }
+
+  if (env.AUTH_KV) {
+    await env.AUTH_KV.put(HF_DISC_REFRESH_THROTTLE_KEY + id, String(Date.now()), {
+      expirationTtl: HF_DISC_REFRESH_THROTTLE_TTL,
+    });
+  }
+
+  return jsonResponse({
+    refreshed: true,
+    source_type: 'hf_paper',
+    comments_count: commentsCount,
+    translated_count: translated,
+    images_mirrored: imagesMirrored,
+  }, 200, request, env);
 }
 
 // ─── POST /api/items/:id/translate-now ────────────────────────

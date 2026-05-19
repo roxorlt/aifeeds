@@ -244,3 +244,105 @@ export async function translateDiscussionCommentsForHfPaper(
   console.log(`[hf-paper:translate-comments] ${itemId} translated=${translated}/${toTranslate.length}`);
   return { translated, skipped: comments.length - translated };
 }
+
+// ────────────────────────────────────────────────────────────────────
+// mirror comment <img> src → R2(2026-05-19 PM #2/#3 反馈:
+//   评论 content_html 内 user-content / 第三方 img 直链
+//   被浏览器加载失败(防盗链 / CN 网络慢 / CDN 缓存空)。
+// 抓回 R2 prefix 'hf-comment/<sha>.<ext>',rewrite src 为 /r/hf-comment/<sha>.<ext>。
+// 跳过 svg / data: URL / 已是 /r/ 开头的 R2 路径。
+// ────────────────────────────────────────────────────────────────────
+
+const COMMENT_IMG_R2_PREFIX = 'hf-comment';
+const COMMENT_IMG_MAX_BYTES = 5 * 1024 * 1024;        // 5MB / img
+const COMMENT_IMG_MAX_PER_COMMENT = 10;               // 防恶意 inline 100 张
+const COMMENT_IMG_FETCH_TIMEOUT = 10_000;
+
+const IMG_TAG_RE = /<img\s+[^>]*\bsrc=["']([^"']+)["'][^>]*>/g;
+
+export async function mirrorCommentImagesForHfPaper(
+  env: Env,
+  itemId: string,
+): Promise<{ mirrored: number; skipped: number; failed: number }> {
+  if (!env.READMES) return { mirrored: 0, skipped: 0, failed: 0 };
+
+  const row = await env.DB.prepare(
+    `SELECT extra FROM items WHERE id = ?`,
+  ).bind(itemId).first<{ extra: string | null }>();
+  if (!row?.extra) return { mirrored: 0, skipped: 0, failed: 0 };
+  const extra = JSON.parse(row.extra) as { discussion_comments?: HfCommentNormalized[] };
+  const comments = extra.discussion_comments || [];
+  if (comments.length === 0) return { mirrored: 0, skipped: 0, failed: 0 };
+
+  let mirrored = 0;
+  let skipped = 0;
+  let failed = 0;
+  let dirty = false;
+
+  for (const c of comments) {
+    if (!c.content_html) continue;
+    const imgUrls = new Set<string>();
+    let m: RegExpExecArray | null;
+    IMG_TAG_RE.lastIndex = 0;
+    while ((m = IMG_TAG_RE.exec(c.content_html)) !== null) {
+      imgUrls.add(m[1]);
+      if (imgUrls.size >= COMMENT_IMG_MAX_PER_COMMENT) break;
+    }
+    if (imgUrls.size === 0) continue;
+
+    // 对每个 unique URL fetch → R2 → 记 src 映射
+    const srcMap = new Map<string, string>();
+    for (const url of imgUrls) {
+      if (url.startsWith('data:') || url.startsWith('/r/') || url.toLowerCase().endsWith('.svg')) {
+        skipped++; continue;
+      }
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), COMMENT_IMG_FETCH_TIMEOUT);
+        const r = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        if (!r.ok) { failed++; continue; }
+        const ct = (r.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+        const ext = ct === 'image/jpeg' ? 'jpg' :
+                    ct === 'image/png'  ? 'png' :
+                    ct === 'image/webp' ? 'webp' :
+                    ct === 'image/gif'  ? 'gif' : null;
+        if (!ext) { skipped++; continue; }
+        const buf = await r.arrayBuffer();
+        if (buf.byteLength > COMMENT_IMG_MAX_BYTES) { skipped++; continue; }
+        const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+        const hashArr = new Uint8Array(hashBuf);
+        let hash = '';
+        for (const b of hashArr) hash += b.toString(16).padStart(2, '0');
+        const key = `${COMMENT_IMG_R2_PREFIX}/${hash}.${ext}`;
+        await env.READMES.put(key, buf, {
+          httpMetadata: { contentType: ct },
+          customMetadata: { 'src-item-id': itemId, 'src-comment-url': url.slice(0, 200) },
+        });
+        srcMap.set(url, `/r/${key}`);
+        mirrored++;
+      } catch {
+        failed++;
+      }
+    }
+    if (srcMap.size === 0) continue;
+
+    // rewrite content_html 内 img src
+    c.content_html = c.content_html.replace(IMG_TAG_RE, (full, src: string) => {
+      const newSrc = srcMap.get(src);
+      return newSrc ? full.replace(src, newSrc) : full;
+    });
+    dirty = true;
+  }
+
+  if (dirty) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.discussion_comments', json(?)) WHERE id = ?`,
+    ).bind(JSON.stringify(comments), itemId).run();
+  }
+  console.log(`[hf-paper:mirror-comment-imgs] ${itemId} mirrored=${mirrored} skipped=${skipped} failed=${failed}`);
+  return { mirrored, skipped, failed };
+}

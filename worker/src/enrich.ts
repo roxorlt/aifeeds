@@ -594,6 +594,9 @@ export async function refreshSingleItem(
     } catch (e) {
       console.error(`[refresh-single:hf_paper] ${item.id} refreshGhStar exception`, e);
     }
+    // discussion + 翻译 + comment 内 <img> 抓 R2 已拆到独立 endpoint
+    // POST /api/items/:id/refresh-hf-discussion(FE drawer mount 并发调用,
+    // 单独 15s timeout 避开通用 /refresh 的 5s FETCH_TIMEOUT_MS cap)
     // 拉刷新后的 metrics 给 FE(同其他 source 模式)
     const updated = await env.DB.prepare(
       `SELECT metrics FROM items WHERE id = ?`,
