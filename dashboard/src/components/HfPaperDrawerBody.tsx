@@ -689,7 +689,7 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
         <strong className="font-medium">💡 未装翻译插件?</strong>{" "}
         推荐{" "}
         <a
-          href="https://immersivetranslate.com/"
+          href="https://immersivetranslate.com/zh-Hans/?via=roxor"
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
