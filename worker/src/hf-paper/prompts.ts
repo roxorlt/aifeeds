@@ -200,6 +200,18 @@ export const DIMENSIONS: Record<DimensionKey, DimensionSpec> = {
 /**
  * 拼完整 prompt 给指定 dimension
  */
+/**
+ * 拼完整 prompt 给指定 dimension
+ *
+ * ⚠️ 顺序固定:[SHARED_INTRO + baseCtx + SHARED_RULES] 永远在前面(8 段共享前缀 ~4500 tok),
+ * dimension 专属 [instruction + schemaExample] 放最后(每段不同 ~300 tok)。
+ *
+ * 目的:DeepSeek 服务端 prompt caching(2024-08+)按 prefix 自动 cache,
+ *      cached input tokens 计费 ≈ 1/10 原价。前缀重排让 8 段中第 1 段付全价,
+ *      后 7 段 prefix 4500 tok 走 cached price → 节省 ≈ 60% input token 成本。
+ *      CF AI Gateway 透传 body 不影响(operations.md § 10),无需 OPS 改 Gateway 配置。
+ * Verify:看 DeepSeek response.usage.prompt_cache_hit_tokens(deep-analyze.ts log)。
+ */
 export function buildDimensionPrompt(
   dimension: DimensionKey,
   ctx: DeepAnalyzeContext,
@@ -210,9 +222,10 @@ export function buildDimensionPrompt(
 
 ${baseCtx}
 
-${spec.instruction}
-
 ${SHARED_RULES}
+
+──────────────────────────
+${spec.instruction}
 
 【输出 JSON schema 示例(只参考结构,内容自己写)】
 ${spec.schemaExample}`;

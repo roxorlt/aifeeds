@@ -51,7 +51,39 @@ interface R2BindingMin {
 }
 
 /**
- * 主入口:对一个 arxiv_id loop x1-x10,选第一张通过 gate 的 figure,迁 R2,返 info
+ * Aspect 偏好打分(score 高优先):
+ *   1.2 ≤ aspect ≤ 3.0 → 100(理想 hero,横向 multi-panel)
+ *   1.0 ≤ aspect < 1.2 → 60(近正方形偏横,可接受)
+ *   0.7 ≤ aspect < 1.0 → 30(近正方形偏纵)
+ *   3.0 < aspect ≤ 5.0 → 25(过宽 banner-like)
+ *   aspect < 0.7        → 10(纵向 GUI/screenshot,迫不得已)
+ *
+ * 同 score 按 picked_index 优先小(优先 paper Figure 1)。
+ */
+function scoreAspect(aspect: number): number {
+  if (aspect >= 1.2 && aspect <= 3.0) return 100;
+  if (aspect >= 1.0 && aspect < 1.2) return 60;
+  if (aspect >= 0.7 && aspect < 1.0) return 30;
+  if (aspect > 3.0 && aspect <= 5.0) return 25;
+  return 10;
+}
+
+interface FigureCandidate {
+  url: string;
+  bytes: Uint8Array;
+  verdict: { width: number; height: number; palette_size: number | null };
+  picked_index: number;
+  score: number;
+}
+
+const LOOKAHEAD_MIN_CANDIDATES = 3;          // 至少收集 3 张通过 gate 再选(给 score 排序留余地)
+const EARLY_STOP_IDEAL_SCORE = 100;          // 一旦拿到 score 100 立即停(理想 wide hero)
+
+/**
+ * 主入口:loop x1-x10 收集通过 gate 的 candidate,按 aspect 偏好 score 排序选最佳,迁 R2
+ *
+ * 跟 user 2026-05-19 讨论后改:不再 first-pass-take(2605.15138 全 paper 纵向 figure 仍取
+ * 纵向,但若 paper 内同时有横向 alternative,prefer 横向 wider)。
  */
 export async function fetchFirstFigureFromArxivHtml(
   env: { READMES?: R2BindingMin },
@@ -59,20 +91,20 @@ export async function fetchFirstFigureFromArxivHtml(
 ): Promise<ArxivHtmlFigure | null> {
   if (!env.READMES) return null;
 
+  const candidates: FigureCandidate[] = [];
+
   for (let n = 1; n <= MAX_FIGURES_PER_PAPER; n++) {
     const url = `${ARXIV_HTML_BASE}/${arxivId}/x${n}.png`;
     const fetched = await fetchWithRetry(url);
     if (!fetched) {
-      if (n === 1) {
-        // x1 直接 404 → paper 没 HTML 渲染,后面也不会有
+      if (n === 1 && candidates.length === 0) {
         console.log(`[hf-paper:figure-arxiv-html] ${arxivId} x1 404, no HTML rendering`);
       }
-      // 404 / 其他非 200 → break(后面也不会有更高编号)
-      return null;
+      break;                                       // 404 → 后面也不会有
     }
     if (fetched.kind === 'network_error') {
       console.warn(`[hf-paper:figure-arxiv-html] ${arxivId} x${n} network error, skip`);
-      continue;          // 网络错,试下一张
+      continue;
     }
 
     const bytes = fetched.bytes;
@@ -83,42 +115,64 @@ export async function fetchFirstFigureFromArxivHtml(
 
     const verdict = inspectAndGate(bytes);
     if (!verdict.pass) {
-      console.log(`[hf-paper:figure-arxiv-html] ${arxivId} x${n} gate fail: ${verdict.reason} (w=${verdict.width} h=${verdict.height} palette=${verdict.palette_size} b=${bytes.byteLength})`);
+      console.log(`[hf-paper:figure-arxiv-html] ${arxivId} x${n} gate fail: ${verdict.reason} (w=${verdict.width} h=${verdict.height} palette=${verdict.palette_size})`);
       continue;
     }
 
-    // 通过 → R2 put
-    const hash = await sha256Hex(bytes);
-    const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.png`;
-    try {
-      await env.READMES.put(key, bytes, {
-        httpMetadata: { contentType: 'image/png' },
-        customMetadata: {
-          'src-arxiv-id': arxivId,
-          'source': 'hf-figure-arxiv-html',
-          'picked-index': String(n),
-        },
-      });
-    } catch (e) {
-      console.error(`[hf-paper:figure-arxiv-html] ${arxivId} R2 put fail ${key}`, e);
-      continue;
-    }
-    console.log(`[hf-paper:figure-arxiv-html] ${arxivId} ✅ x${n} (w=${verdict.width} h=${verdict.height} palette=${verdict.palette_size} b=${bytes.byteLength}) → ${key}`);
-    return {
-      source: 'arxiv-html',
-      raw_url: url,
-      r2_url: `/r/${key}`,
-      width: verdict.width,
-      height: verdict.height,
-      bytes: bytes.byteLength,
-      palette_size: verdict.palette_size,
+    const aspect = verdict.width / verdict.height;
+    const score = scoreAspect(aspect);
+    candidates.push({
+      url, bytes,
+      verdict: { width: verdict.width, height: verdict.height, palette_size: verdict.palette_size },
       picked_index: n,
-      extracted_at: new Date().toISOString(),
-    };
+      score,
+    });
+
+    // early stop:已经有理想 wide hero(score=100)→ 直接停,不浪费 fetch
+    if (score >= EARLY_STOP_IDEAL_SCORE) break;
+    // 收集够 3 张通过 gate 的 candidate 也停(避免 paper figure 多导致全部 fetch)
+    if (candidates.length >= LOOKAHEAD_MIN_CANDIDATES) break;
   }
 
-  console.log(`[hf-paper:figure-arxiv-html] ${arxivId} ${MAX_FIGURES_PER_PAPER} candidates all rejected`);
-  return null;
+  if (candidates.length === 0) {
+    console.log(`[hf-paper:figure-arxiv-html] ${arxivId} 0 candidates passed gate`);
+    return null;
+  }
+
+  // 排序:score 优先(高分先),同分 picked_index 优先小(paper Figure 1 优先)
+  candidates.sort((a, b) => b.score - a.score || a.picked_index - b.picked_index);
+  const best = candidates[0];
+
+  // R2 put
+  const hash = await sha256Hex(best.bytes);
+  const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.png`;
+  try {
+    await env.READMES.put(key, best.bytes, {
+      httpMetadata: { contentType: 'image/png' },
+      customMetadata: {
+        'src-arxiv-id': arxivId,
+        'source': 'hf-figure-arxiv-html',
+        'picked-index': String(best.picked_index),
+      },
+    });
+  } catch (e) {
+    console.error(`[hf-paper:figure-arxiv-html] ${arxivId} R2 put fail ${key}`, e);
+    return null;
+  }
+  const aspect = best.verdict.width / best.verdict.height;
+  console.log(`[hf-paper:figure-arxiv-html] ${arxivId} ✅ x${best.picked_index} score=${best.score} (w=${best.verdict.width} h=${best.verdict.height} ar=${aspect.toFixed(2)} palette=${best.verdict.palette_size}) candidates=${candidates.length} → ${key}`);
+
+  return {
+    source: 'arxiv-html',
+    raw_url: best.url,
+    r2_url: `/r/${key}`,
+    width: best.verdict.width,
+    height: best.verdict.height,
+    bytes: best.bytes.byteLength,
+    palette_size: best.verdict.palette_size,
+    picked_index: best.picked_index,
+    extracted_at: new Date().toISOString(),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────

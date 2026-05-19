@@ -16,8 +16,10 @@ export const DEEPSEEK_PRO = 'deepseek-v4-pro';
 export interface DeepSeekUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
-  reasoning_tokens?: number;     // pro reasoning model only
+  reasoning_tokens?: number;             // pro reasoning model only
   total_tokens?: number;
+  prompt_cache_hit_tokens?: number;      // DeepSeek 2024-08+:prefix cache 命中 tokens(计费 1/10)
+  prompt_cache_miss_tokens?: number;     // 没命中 cache 的 input tokens(全价)
 }
 
 export interface DeepSeekResult {

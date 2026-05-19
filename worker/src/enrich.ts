@@ -571,6 +571,45 @@ export async function refreshSingleItem(
     return { refreshed: true, source_type: 'product_hunt', reason: 'success', metrics: r.metrics };
   }
 
+  if (item.source_type === 'hf_paper') {
+    // hf_paper:复用 workflow Step 0/Step 1 的 refresh helper(动态 import 避免循环依赖)
+    // 1. HF API /papers/<arxiv_id> 刷 detail(upvotes / githubRepo / githubStars / paper_authors / ai_summary)
+    // 2. 如果 hasGhRepo → 调 GitHub API 拿最新 stars(覆盖 HF API 的旧 stars)
+    const arxivId = String(item.source_id);
+    try {
+      const { refreshPaperDetailForHf } = await import('./hf-paper/api');
+      await refreshPaperDetailForHf(env as Parameters<typeof refreshPaperDetailForHf>[0], item.id, arxivId);
+    } catch (e) {
+      console.error(`[refresh-single:hf_paper] ${item.id} refreshPaperDetail exception`, e);
+    }
+    // GH stars(若 hasGhRepo)
+    try {
+      const hasRepo = await env.DB.prepare(
+        `SELECT json_extract(extra, '$.github_repo') AS repo FROM items WHERE id = ?`,
+      ).bind(item.id).first<{ repo: string | null }>();
+      if (hasRepo?.repo) {
+        const { refreshGhStarForHfPaper } = await import('./hf-paper/media');
+        await refreshGhStarForHfPaper(env as Parameters<typeof refreshGhStarForHfPaper>[0], item.id);
+      }
+    } catch (e) {
+      console.error(`[refresh-single:hf_paper] ${item.id} refreshGhStar exception`, e);
+    }
+    // 拉刷新后的 metrics 给 FE(同其他 source 模式)
+    const updated = await env.DB.prepare(
+      `SELECT metrics FROM items WHERE id = ?`,
+    ).bind(item.id).first<{ metrics: string | null }>();
+    let metrics: Metrics = {};
+    if (updated?.metrics) {
+      try { metrics = JSON.parse(updated.metrics) || {}; } catch { /* ignore */ }
+    }
+    if (env.AUTH_KV) {
+      await env.AUTH_KV.put(REFRESH_THROTTLE_KEY_PREFIX + itemId, String(Date.now()), {
+        expirationTtl: REFRESH_THROTTLE_TTL,
+      });
+    }
+    return { refreshed: true, source_type: 'hf_paper', reason: 'success', metrics };
+  }
+
   return { refreshed: false, source_type: item.source_type, reason: 'unsupported_source' };
 }
 
