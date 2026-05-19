@@ -490,6 +490,64 @@ export default {
         const result = await runHfDailyFetch(env, { force, date });
         return jsonResponse(result, 200, request, env);
       }
+      // ─── HF R2 staging → prod 搬运 endpoint(prod 上线一次性用)──
+      // POST /api/admin/hf-r2-migrate-from-staging?force=1&dry_run=1
+      //   body: { "keys": ["hf/abc.png", "hf/avatar/xyz.jpg"], "source_origin"?: "https://staging-api.ai-feeds.com" }
+      //
+      // 行为:对每个 key 走 source_origin + /r/<key> 拉 staging R2,put 到本地 prod R2。
+      // - force=1:覆盖已存在的 key(默认 skip)
+      // - dry_run=1:只检查 staging 可达 + prod 是否已有,不实际 put
+      // - 单次 hard cap 200 key(避免 subrequest 超 1000/invocation)
+      if (path === '/api/admin/hf-r2-migrate-from-staging' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const force = u.searchParams.get('force') === '1';
+        const dryRun = u.searchParams.get('dry_run') === '1';
+        type Body = { keys?: string[]; source_origin?: string };
+        const body = (await request.json().catch(() => ({}))) as Body;
+        const keys = Array.isArray(body.keys) ? body.keys.slice(0, 200) : [];
+        const srcOrigin = body.source_origin || 'https://staging-api.ai-feeds.com';
+        if (keys.length === 0) {
+          return jsonResponse({ error: 'keys[] required (≤200/batch)' }, 400, request, env);
+        }
+        let migrated = 0;
+        let skippedExisting = 0;
+        const failed: Array<{ key: string; reason: string }> = [];
+        for (const rawKey of keys) {
+          const key = rawKey.replace(/^\/r\//, '');                                // 容忍 /r/ 前缀
+          if (!key) { failed.push({ key: rawKey, reason: 'empty_after_strip' }); continue; }
+          try {
+            if (!force) {
+              const existing = await env.READMES.head(key);
+              if (existing) { skippedExisting++; continue; }
+            }
+            const srcUrl = `${srcOrigin}/r/${key}`;
+            const srcResp = await fetch(srcUrl);
+            if (!srcResp.ok) { failed.push({ key, reason: `src_http_${srcResp.status}` }); continue; }
+            if (dryRun) { migrated++; continue; }
+            const buf = await srcResp.arrayBuffer();
+            const ct = srcResp.headers.get('content-type') || 'application/octet-stream';
+            await env.READMES.put(key, buf, { httpMetadata: { contentType: ct } });
+            migrated++;
+          } catch (e) {
+            failed.push({ key, reason: `exception:${(e as Error).message}` });
+          }
+        }
+        return jsonResponse({
+          requested: keys.length,
+          migrated,
+          skipped_existing: skippedExisting,
+          failed,
+          source_origin: srcOrigin,
+          dry_run: dryRun,
+          force,
+        }, 200, request, env);
+      }
       // ─── GH Workflow 一次性 drain pending（迁移后兜底） ───────────
       // POST /api/admin/gh-trigger-pending-workflows-now?limit=N
       //
