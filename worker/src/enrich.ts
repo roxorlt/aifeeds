@@ -594,18 +594,9 @@ export async function refreshSingleItem(
     } catch (e) {
       console.error(`[refresh-single:hf_paper] ${item.id} refreshGhStar exception`, e);
     }
-    // discussion + 翻译(2026-05-19 加,drawer 打开拿最新评论 + 译文)
-    // 走 svelte_ssr 抓 HF 页面 ~1s,翻译每条评论 1 次 DeepSeek flash ~1-2s
-    // wall-clock ~3-8s,KV 5min throttle 缓解频繁调用
-    try {
-      const { fetchDiscussionForHfPaper, translateDiscussionCommentsForHfPaper } = await import('./hf-paper/discussion');
-      const dResult = await fetchDiscussionForHfPaper(env as Parameters<typeof fetchDiscussionForHfPaper>[0], item.id, arxivId);
-      if (dResult.fetched && dResult.comments_count > 0) {
-        await translateDiscussionCommentsForHfPaper(env as Parameters<typeof translateDiscussionCommentsForHfPaper>[0], item.id);
-      }
-    } catch (e) {
-      console.error(`[refresh-single:hf_paper] ${item.id} discussion exception`, e);
-    }
+    // discussion + 翻译 + comment 内 <img> 抓 R2 已拆到独立 endpoint
+    // POST /api/items/:id/refresh-hf-discussion(FE drawer mount 并发调用,
+    // 单独 15s timeout 避开通用 /refresh 的 5s FETCH_TIMEOUT_MS cap)
     // 拉刷新后的 metrics 给 FE(同其他 source 模式)
     const updated = await env.DB.prepare(
       `SELECT metrics FROM items WHERE id = ?`,
