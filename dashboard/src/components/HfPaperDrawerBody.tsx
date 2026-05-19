@@ -697,8 +697,16 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
       )}
 
       {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton。
-          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5) */}
-      <div className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50">
+          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5)
+          PM 2026-05-19 #5: 容器 + iframe 都 touch-action: pan-y,
+          只允许垂直滚动,禁水平 pan + pinch zoom。注意:iframe 内
+          cross-origin 跨域 pinch 来自 iframe 内 arxiv.org 自身 viewport,
+          FE 端无法跨域注入样式;此处控制的是外层容器手势识别,iframe
+          内部 webview 默认手势若用户触发 pinch 仍可能生效 */}
+      <div
+        className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50"
+        style={{ touchAction: "pan-y" }}
+      >
         {!loaded && !iframeError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
             <div className="mb-2 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-500" />
@@ -712,7 +720,7 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
             loading="lazy"
             referrerPolicy="no-referrer"
             className="h-[600px] w-full overflow-x-hidden"
-            style={{ overflowX: "hidden" }}
+            style={{ overflowX: "hidden", touchAction: "pan-y" }}
             scrolling="auto"
             title={`arxiv ${arxivId} LaTeXML 全文`}
             onLoad={() => setLoaded(true)}
