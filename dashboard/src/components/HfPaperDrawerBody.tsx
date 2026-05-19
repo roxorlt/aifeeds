@@ -439,7 +439,7 @@ export function HfPaperDrawerBody({ item }: Props) {
     <div className="text-neutral-900">
       {/* ─── Hero: thumbnail + 标题中英 + by @xxx 等 N 位提交 ─────────── */}
       <div className="border-b border-neutral-200" data-drawer-title-anchor>
-        {cover && (
+        {shouldRenderHero && cover && (
           // hero 容器:aspectRatio inline 跟 figure 形状走,letterbox 用 object-contain
           // (figure 真实比例完整露出),max-h 60vh 防纵向 figure 在小屏占满全屏
           <div
