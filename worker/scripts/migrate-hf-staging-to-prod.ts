@@ -31,25 +31,16 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const PROD_ORIGIN = 'https://api.ai-feeds.com';
 const STAGING_ORIGIN = 'https://staging-api.ai-feeds.com';
 const STAGING_DB = 'xlist-staging';
 const PROD_DB = 'xlist';
-const R2_BATCH = 50;                                                                // /api/admin/hf-r2-migrate-from-staging hard cap 200,留余量
+const PROD_R2_BUCKET = 'xlist-readme-assets';                                       // wrangler r2 object put 用
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has('--dry-run');
 const d1Only = args.has('--d1-only');
 const r2Only = args.has('--r2-only');
 const force = args.has('--force');
-
-const adminUser = process.env.ADMIN_USER;
-const adminPass = process.env.ADMIN_PASS;
-if (!r2Only && !d1Only && (!adminUser || !adminPass)) {
-  console.error('FATAL: 需要 source .secrets/aifeeds-prod.env(ADMIN_USER / ADMIN_PASS 用于 R2 batch)');
-  process.exit(1);
-}
-const adminAuth = adminUser && adminPass ? `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString('base64')}` : '';
 
 const TMP_DIR = join(tmpdir(), `hf-migrate-${Date.now()}`);
 mkdirSync(TMP_DIR, { recursive: true });
@@ -61,7 +52,7 @@ console.log(`[migrate] dry_run=${dryRun} d1_only=${d1Only} r2_only=${r2Only} for
  */
 function wranglerJsonSelect(dbName: string, env: 'staging' | 'prod', sql: string): unknown[] {
   const envFlag = env === 'staging' ? '--env staging' : '';
-  const cmd = `npx wrangler d1 execute ${dbName} ${envFlag} --remote --json --command ${JSON.stringify(sql)}`;
+  const cmd = `npx wrangler --config wrangler.toml d1 execute ${dbName} ${envFlag} --remote --json --command ${JSON.stringify(sql)}`;
   const raw = execSync(cmd, { encoding: 'utf-8', maxBuffer: 100 * 1024 * 1024 });
   const start = raw.indexOf('[');
   const end = raw.lastIndexOf(']');
@@ -72,7 +63,7 @@ function wranglerJsonSelect(dbName: string, env: 'staging' | 'prod', sql: string
 
 function wranglerExecFile(dbName: string, env: 'staging' | 'prod', sqlFile: string): void {
   const envFlag = env === 'staging' ? '--env staging' : '';
-  const cmd = `npx wrangler d1 execute ${dbName} ${envFlag} --remote --file=${sqlFile}`;
+  const cmd = `npx wrangler --config wrangler.toml d1 execute ${dbName} ${envFlag} --remote --file=${sqlFile}`;
   console.log(`[migrate] exec: ${cmd}`);
   if (dryRun) { console.log('  [dry-run skip]'); return; }
   execSync(cmd, { stdio: 'inherit' });
@@ -150,19 +141,28 @@ function extractR2Keys(rows: Record<string, unknown>[]): string[] {
   return Array.from(keys);
 }
 
-async function postR2Batch(keys: string[]): Promise<{ migrated: number; skipped: number; failed: number; details?: unknown }> {
-  const url = `${PROD_ORIGIN}/api/admin/hf-r2-migrate-from-staging?${dryRun ? 'dry_run=1' : ''}${force ? '&force=1' : ''}`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: adminAuth, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keys, source_origin: STAGING_ORIGIN }),
-  });
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`prod admin endpoint HTTP ${r.status}: ${text}`);
+/**
+ * 单 key 搬运:fetch staging 公开反代 → wrangler r2 object put 到 prod bucket
+ * (走 wrangler CLI 而非 worker admin endpoint,避开 CF Access JWT 拦截)
+ */
+async function copyOneKey(key: string): Promise<{ ok: boolean; reason?: string }> {
+  const safeName = key.replace(/[/\\]/g, '_');
+  const tmpFile = join(TMP_DIR, safeName);
+  try {
+    const resp = await fetch(`${STAGING_ORIGIN}/r/${key}`);
+    if (!resp.ok) return { ok: false, reason: `staging_http_${resp.status}` };
+    const buf = Buffer.from(await resp.arrayBuffer());
+    writeFileSync(tmpFile, buf);
+    const ct = resp.headers.get('content-type') || 'application/octet-stream';
+    if (dryRun) return { ok: true };
+    execSync(
+      `npx wrangler --config wrangler.toml r2 object put ${PROD_R2_BUCKET}/${JSON.stringify(key).slice(1, -1)} --file=${JSON.stringify(tmpFile)} --content-type=${JSON.stringify(ct)} --remote`,
+      { stdio: 'pipe' },
+    );
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `exception:${(e as Error).message.slice(0, 200)}` };
   }
-  const data = (await r.json()) as { migrated: number; skipped_existing: number; failed: unknown[] };
-  return { migrated: data.migrated, skipped: data.skipped_existing, failed: data.failed.length, details: data.failed.length > 0 ? data.failed : undefined };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -209,26 +209,23 @@ async function postR2Batch(keys: string[]): Promise<{ migrated: number; skipped:
     }
   }
 
-  // ─── Stage 3:R2 ───
+  // ─── Stage 3:R2(走 wrangler CLI 串行,~1-2s/key)───
   if (!d1Only) {
     const keys = extractR2Keys(stagingItems);
-    console.log(`[migrate] R2 keys to migrate: ${keys.length}(去重后)`);
-    let totalMigrated = 0;
-    let totalSkipped = 0;
-    let totalFailed = 0;
-    const allFailedDetails: unknown[] = [];
-    for (let i = 0; i < keys.length; i += R2_BATCH) {
-      const batch = keys.slice(i, i + R2_BATCH);
-      const result = await postR2Batch(batch);
-      console.log(`  batch ${i / R2_BATCH + 1}/${Math.ceil(keys.length / R2_BATCH)}: migrated=${result.migrated} skipped=${result.skipped} failed=${result.failed}`);
-      if (result.details) allFailedDetails.push(...(result.details as unknown[]));
-      totalMigrated += result.migrated;
-      totalSkipped += result.skipped;
-      totalFailed += result.failed;
+    console.log(`[migrate] R2 keys to migrate: ${keys.length}(去重后,串行 wrangler r2 put)`);
+    let migrated = 0;
+    let failed = 0;
+    const failedDetails: Array<{ key: string; reason: string }> = [];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      process.stdout.write(`  [${i + 1}/${keys.length}] ${key.slice(0, 60)}... `);
+      const r = await copyOneKey(key);
+      if (r.ok) { migrated++; console.log('OK'); }
+      else { failed++; failedDetails.push({ key, reason: r.reason || '?' }); console.log(`FAIL ${r.reason}`); }
     }
-    console.log(`[migrate] R2 总计:migrated=${totalMigrated} skipped_existing=${totalSkipped} failed=${totalFailed}`);
-    if (totalFailed > 0) {
-      console.error('[migrate] R2 failed details:', JSON.stringify(allFailedDetails.slice(0, 20), null, 2));
+    console.log(`[migrate] R2 总计:migrated=${migrated} failed=${failed}`);
+    if (failed > 0) {
+      console.error('[migrate] R2 failed details:', JSON.stringify(failedDetails.slice(0, 20), null, 2));
     }
   }
 
