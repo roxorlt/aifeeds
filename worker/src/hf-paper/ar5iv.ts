@@ -1,39 +1,26 @@
-// Step 1 helper:fetch-arxiv-html-and-extract-figure(NEW #1)
-// Step 2 helper:translate-ar5iv(段落级 flash 翻译;字段名保留 ar5iv 兼容 DB schema)
+// Step 1 helper:fetch-arxiv-html-and-extract-figure
 //
-// **2026-05-18 改:从 ar5iv 切到 arxiv.org/html**
-//   原因:ar5iv.labs.arxiv.org 是社区项目,mirror 滞后几周;新论文(本月发表)只返 stub。
-//        arxiv.org/html/<id> 是 arxiv 官方 2024+ 提供的 HTML 服务,实时 LaTeXML 渲染,
-//        几乎所有新论文都有完整 HTML + figure。
-//   实测 2605.* 5 月新论文 arxiv.org/html 全有完整 HTML(几百 KB - 2 MB),
-//        ar5iv 全是 47 KB stub。figure 命中率从 1/50 预期升到 30-90%。
+// 2026-05-19 切换 figure 主路径:**arxiv.org/html/<id>/x{N}.png URL construct + gate**
+//   原 PDF XRef parser(figure-pdf.ts)弃用,理由:
+//   - 取 PDF 内 image 顺序跟 paper 内"Figure 1"语义不一致(常误抓 logo / mascot)
+//   - x1.png 是 LaTeXML 编号过的 figure,语义对齐 paper 真正 Figure N
+//   - stats 实测 59 paper:51 paper 有 x1.png(86%);剩 8 个是纯文本 paper(arxiv 不渲染 HTML)
+//   - gate 跑下来 51/51 全选对(2605.15824 淘宝 logo → x1 fashion try-on / 2605.15963 → 跳到 x3)
+//   完整 stats + gate 阈值见 figure-arxiv-html.ts 注释。
 //
-// - fetch HTML: https://arxiv.org/html/<arxiv_id>(自动 redirect 到最新 v 版本)
-// - extract first qualifying figure(arxiv chrome 排除 + magic-bytes dimensions 探测 +
-//   aspect ratio 0.25-4 + density ≥ 0.05 + max dim ≥ 300)→ 迁 R2 → 写 media[0] + extra.figure_image
-// - parse paragraphs(<p> 内文本,strip tags + decode entities)→ store as R2 JSON
-//   (避免 D1 行爆 1MB cap)→ flash 批量翻译
+// - fetch HTML: https://arxiv.org/html/<arxiv_id>(自动 redirect 到最新 v 版本)→ 取段落给 deep_analysis 用
+// - figure 走独立路径:fetchFirstFigureFromArxivHtml(loop x1-x10 + dim/palette/aspect gate)→ R2
+// - 无 figure 兜底:HF thumbnail(API 给的);仍无 → media[0] 缺,FE drawer 隐藏 hero 区
+// - parse paragraphs(<p> 内文本,strip tags + decode entities)→ R2 JSON 给 deep_analysis ar5iv_excerpt 用
 
 import type { Env } from '../index';
-import { extractImagesFromPdf } from './figure-pdf';
+import { fetchFirstFigureFromArxivHtml } from './figure-arxiv-html';
 
 const ARXIV_HTML_BASE = 'https://arxiv.org/html';
-const AR5IV_BASE = 'https://ar5iv.labs.arxiv.org/html';   // fallback for figure(CF IP ban arxiv.org img)
-const R2_KEY_PREFIX_FIGURE = 'hf';
 const R2_KEY_PREFIX_AR5IV = 'hf-paper-ar5iv';
-
-// 论文 figure 提取的排除规则
-// `/static/browse/*` 是 arxiv chrome(Cornell logo / arxiv logo / license icon 等)
-// static.arxiv.org 也是 chrome 资源域
-const ARXIV_CHROME_PATH_RE = /\/static\/browse\//i;
-const ARXIV_CHROME_HOSTS = new Set(['static.arxiv.org']);
-
-const MIN_FIGURE_DIM = 200;        // 最小 width 或 height
-const FIGURE_MAX_BYTES = 2 * 1024 * 1024;  // 2 MB cap
-
-const ALLOWED_IMG_TYPES = new Set([
-  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
-]);
+const R2_KEY_PREFIX_FIGURE = 'hf';
+const FIGURE_MAX_BYTES = 2 * 1024 * 1024;
+const ALLOWED_IMG_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 // ────────────────────────────────────────────────────────────────────
 // fetch ar5iv HTML + extract first figure
@@ -51,99 +38,14 @@ interface MediaItem {
 }
 
 interface FigureInfo {
-  source: 'ar5iv' | 'pdf' | 'hf_thumbnail' | 'none';
+  source: 'arxiv-html' | 'hf_thumbnail' | 'none';
   raw_url?: string;
   r2_url?: string;
   width?: number;
   height?: number;
-  codec?: string;             // PDF 来源时记 DCTDecode / FlateDecode
-  obj_id?: string;            // PDF 来源时记 obj 号(debug 用)
+  picked_index?: number;       // x1 / x2 / ... arxiv-html 来源时记
+  palette_size?: number | null;
   extracted_at: string;
-}
-
-/**
- * fetch arxiv.org/pdf + extract first qualifying image XObject(B 主路径)
- * eval 2026-05-18 测 90 paper:92.9% per-paper / 97.6% per-image 命中率
- */
-async function extractFirstFigureFromPdf(env: Env, arxivId: string): Promise<FigureInfo | null> {
-  if (!env.READMES) return null;
-
-  // 1. fetch PDF binary
-  let pdfBytes: Uint8Array;
-  try {
-    const r = await fetch(`https://arxiv.org/pdf/${arxivId}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
-    });
-    if (!r.ok) {
-      console.warn(`[hf-paper:figure-pdf] ${arxivId} PDF HTTP ${r.status}`);
-      return null;
-    }
-    const lenStr = r.headers.get('content-length');
-    if (lenStr && parseInt(lenStr, 10) > 50 * 1024 * 1024) {
-      console.warn(`[hf-paper:figure-pdf] ${arxivId} PDF too large ${lenStr}, skip`);
-      return null;
-    }
-    pdfBytes = new Uint8Array(await r.arrayBuffer());
-  } catch (e) {
-    console.error(`[hf-paper:figure-pdf] ${arxivId} fetch exception`, e);
-    return null;
-  }
-
-  // 2. extract image XObject(max 30 candidates,quality gate 之前先 cap)
-  const { images, stats } = extractImagesFromPdf(pdfBytes, { max: 30 });
-  if (images.length === 0) {
-    console.log(`[hf-paper:figure-pdf] ${arxivId} 0/${stats.total_image_xobjects} extracted`);
-    return null;
-  }
-
-  // 3. quality gate + 找第一张合格 figure 迁 R2
-  //    PDF extract 出的 image bytes 已可用,用 width/height aspect / size 双门控
-  for (const img of images) {
-    if (img.width < 300 || img.height < 200) continue;
-    const ar = img.width / img.height;
-    if (ar > 4 || ar < 0.25) continue;
-    if (img.bytes.length < 5 * 1024) continue;            // < 5KB 可能是 mask / thumbnail
-    if (img.bytes.length > 5 * 1024 * 1024) continue;     // > 5MB 跳过(R2 上限)
-
-    // 通过门控 → 迁 R2
-    const hash = await sha256OfBytes(img.bytes);
-    const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.${img.ext}`;
-    try {
-      await env.READMES.put(key, img.bytes, {
-        httpMetadata: { contentType: img.mime },
-        customMetadata: {
-          'src-arxiv-id': arxivId,
-          'source': 'hf-figure-pdf',
-          'codec': img.codec,
-          'obj-id': img.obj_id,
-        },
-      });
-    } catch (e) {
-      console.error(`[hf-paper:figure-pdf] R2 put fail ${key}`, e);
-      continue;
-    }
-    console.log(`[hf-paper:figure-pdf] ${arxivId} extracted obj ${img.obj_id} ${img.codec} ${img.width}x${img.height} → ${key}`);
-    return {
-      source: 'pdf',
-      raw_url: `https://arxiv.org/pdf/${arxivId}#obj=${img.obj_id}`,
-      r2_url: `/r/${key}`,
-      width: img.width,
-      height: img.height,
-      codec: img.codec,
-      obj_id: img.obj_id,
-      extracted_at: new Date().toISOString(),
-    };
-  }
-  console.log(`[hf-paper:figure-pdf] ${arxivId} ${images.length} candidates all rejected by quality gate`);
-  return null;
-}
-
-async function sha256OfBytes(buf: Uint8Array): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  const bytes = new Uint8Array(hash);
-  let out = '';
-  for (const b of bytes) out += b.toString(16).padStart(2, '0');
-  return out;
 }
 
 export async function fetchAr5ivAndExtractFigureForHf(
@@ -151,9 +53,8 @@ export async function fetchAr5ivAndExtractFigureForHf(
   itemId: string,
   arxivId: string,
 ): Promise<{ fetched: boolean; has_figure: boolean; paragraphs_count: number }> {
-  // 1. fetch arxiv.org/html(自动 redirect 到最新 v 版本)
+  // 1. fetch arxiv.org/html(自动 redirect 到最新 v 版本)→ 给 paragraph 抽取用
   let html: string | null = null;
-  let finalUrl: string = `${ARXIV_HTML_BASE}/${arxivId}`;
   try {
     const r = await fetch(`${ARXIV_HTML_BASE}/${arxivId}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
@@ -162,7 +63,6 @@ export async function fetchAr5ivAndExtractFigureForHf(
       console.warn(`[hf-paper:arxiv-html] ${arxivId} HTTP ${r.status}`);
       return { fetched: false, has_figure: false, paragraphs_count: 0 };
     }
-    finalUrl = r.url;  // arxiv redirect 到 v1/v2 后的 URL,figure src 相对路径要用这个 resolve
     html = await r.text();
   } catch (e) {
     console.error(`[hf-paper:arxiv-html] ${arxivId} fetch exception`, e);
@@ -170,57 +70,24 @@ export async function fetchAr5ivAndExtractFigureForHf(
   }
 
   // 2. extract first qualifying figure
-  //    fallback 链:
-  //      a. arxiv.org/html direct fetch + extract img URLs(arxiv 对 CF IP 替换 placeholder
-  //         多数 0 candidate,极少数 paper 才能直接拿到)
-  //      b. **arxiv.org/pdf 下载 + PDF extract image XObject**(B 方案,2026-05-18 eval 92.9%
-  //         per-paper 命中率)— 这是主路径
-  //      c. ar5iv.labs.arxiv.org 兜底(社区项目,老 paper 兼容)
+  //    主路径:loop /html/<id>/x{N}.png + dim/palette/aspect gate
+  //    无图兜底:HF API thumbnail(thumbnailUrl 字段;若无则 figureInfo.source='none',FE 隐藏 hero)
   let figureInfo: FigureInfo = {
     source: 'none',
     extracted_at: new Date().toISOString(),
   };
-
-  // a. arxiv.org HTML 直接 candidate(罕见 work)
-  let figureUrls = extractFigureCandidates(html, finalUrl);
-  for (const candidate of figureUrls) {
-    const migrated = await migrateFigureToR2(env, candidate);
-    if (migrated) {
-      figureInfo = {
-        source: 'ar5iv',
-        raw_url: candidate,
-        r2_url: migrated.r2_url,
-        width: migrated.width,
-        height: migrated.height,
-        extracted_at: new Date().toISOString(),
-      };
-      break;
-    }
-  }
-
-  // b. PDF extract(主路径)— arxiv.org/pdf CF Workers 可拿
-  if (figureInfo.source === 'none') {
-    const pdfFig = await extractFirstFigureFromPdf(env, arxivId);
-    if (pdfFig) figureInfo = pdfFig;
-  }
-
-  // c. ar5iv 兜底(老 paper / 罕见情况)
-  if (figureInfo.source === 'none') {
-    figureUrls = await fetchFigureCandidatesFromAr5iv(arxivId);
-    for (const candidate of figureUrls) {
-      const migrated = await migrateFigureToR2(env, candidate);
-      if (migrated) {
-        figureInfo = {
-          source: 'ar5iv',
-          raw_url: candidate,
-          r2_url: migrated.r2_url,
-          width: migrated.width,
-          height: migrated.height,
-          extracted_at: new Date().toISOString(),
-        };
-        break;
-      }
-    }
+  const arxivFig = await fetchFirstFigureFromArxivHtml(env, arxivId);
+  if (arxivFig) {
+    figureInfo = {
+      source: 'arxiv-html',
+      raw_url: arxivFig.raw_url,
+      r2_url: arxivFig.r2_url,
+      width: arxivFig.width,
+      height: arxivFig.height,
+      picked_index: arxivFig.picked_index,
+      palette_size: arxivFig.palette_size,
+      extracted_at: arxivFig.extracted_at,
+    };
   }
 
   // 3. parse paragraphs → R2 JSON
@@ -254,7 +121,7 @@ export async function fetchAr5ivAndExtractFigureForHf(
   const row = await env.DB.prepare(
     `SELECT extra, media FROM items WHERE id = ?`,
   ).bind(itemId).first<ItemAr5ivRow>();
-  if (!row) return { fetched: true, has_figure: figureInfo.source === 'ar5iv', paragraphs_count: paragraphsStored };
+  if (!row) return { fetched: true, has_figure: figureInfo.source === 'arxiv-html', paragraphs_count: paragraphsStored };
 
   const extra = row.extra ? JSON.parse(row.extra) : {};
   const media: MediaItem[] = row.media ? JSON.parse(row.media) : [];
@@ -272,7 +139,7 @@ export async function fetchAr5ivAndExtractFigureForHf(
   //   - figure 没抓到(source='none') → media[0] = HF thumbnail R2 path
   //     如果原 media[0] 还是 raw HF URL,显式 migrate + replace
   let newMedia = media;
-  if ((figureInfo.source === 'pdf' || figureInfo.source === 'ar5iv') && figureInfo.r2_url) {
+  if (figureInfo.source === 'arxiv-html' && figureInfo.r2_url) {
     const thumbnailItem = media.find((m) => m.role === 'thumbnail' || m.type === 'image') || media[0];
     const thumbR2 = thumbnailItem?.url
       ? await ensureR2Url(env, thumbnailItem.url, MAX_THUMBNAIL_BYTES)
@@ -298,7 +165,7 @@ export async function fetchAr5ivAndExtractFigureForHf(
 
   return {
     fetched: true,
-    has_figure: figureInfo.source === 'pdf' || figureInfo.source === 'ar5iv',
+    has_figure: figureInfo.source === 'arxiv-html',
     paragraphs_count: paragraphsStored,
   };
 }
@@ -348,59 +215,6 @@ async function ensureR2Url(env: Env, url: string, maxBytes: number): Promise<str
  * arxiv.org/html 论文 figure 一般是相对路径 "2605.15298v1/x1.png",
  * resolve base 是 fetch response 的 final URL(redirect 后的 arxiv.org/html/<id>v<N>)
  */
-function extractFigureCandidates(html: string, baseUrl: string): string[] {
-  const candidates: string[] = [];
-  // 确保 baseUrl 末尾有 / 让相对路径 resolve 进 base 目录
-  const baseWithSlash = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
-  const imgRe = /<img\s+[^>]*src="([^"]+)"[^>]*>/g;
-  let m: RegExpExecArray | null;
-  while ((m = imgRe.exec(html)) !== null) {
-    const src = m[1];
-    // 排除 data: URL(arxiv.org 对 CF Workers 出口 IP 替换 img src 为 11x14 px
-    // placeholder data:image/png;base64,...,真 figure URL 看不到。anti-scraping。
-    // ar5iv fallback 拿真 URL)
-    if (src.startsWith('data:')) continue;
-    if (ARXIV_CHROME_PATH_RE.test(src)) continue;
-    if (src.endsWith('.svg')) continue;
-    let abs: string;
-    try {
-      abs = new URL(src, baseWithSlash).toString();
-    } catch {
-      continue;
-    }
-    let host: string;
-    try {
-      host = new URL(abs).hostname;
-    } catch {
-      continue;
-    }
-    if (ARXIV_CHROME_HOSTS.has(host)) continue;
-    candidates.push(abs);
-  }
-  return candidates;
-}
-
-/**
- * Fallback:fetch ar5iv HTML 拿 figure 候选(arxiv.org 在 CF Workers 被替换 placeholder
- * 时用)。ar5iv 滞后但 figure URL 真实可抓;老 paper(arxiv id 月份 < 当月)走得通。
- */
-async function fetchFigureCandidatesFromAr5iv(arxivId: string): Promise<string[]> {
-  try {
-    const r = await fetch(`${AR5IV_BASE}/${arxivId}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; aifeeds-bot/1.0)' },
-    });
-    if (!r.ok) {
-      console.warn(`[hf-paper:figure-fallback-ar5iv] ${arxivId} HTTP ${r.status}`);
-      return [];
-    }
-    const html = await r.text();
-    return extractFigureCandidates(html, r.url);
-  } catch (e) {
-    console.error(`[hf-paper:figure-fallback-ar5iv] ${arxivId} exception`, e);
-    return [];
-  }
-}
-
 /**
  * 质量门控 + R2 迁移
  *

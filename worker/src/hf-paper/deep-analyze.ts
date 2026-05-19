@@ -218,6 +218,14 @@ export async function analyzeDimensionForHfPaper(
     prompt,
     { maxTokens, timeoutMs: 300_000, retries: 1 },     // pro reasoning 可能 > 60s
   );
+  // log DeepSeek prefix cache 命中(verify prompts.ts buildDimensionPrompt 共享前缀 cache work)
+  const u = result.usage;
+  if (u) {
+    const hit = u.prompt_cache_hit_tokens ?? 0;
+    const miss = u.prompt_cache_miss_tokens ?? 0;
+    const hitRate = (hit + miss) > 0 ? ((hit / (hit + miss)) * 100).toFixed(1) : '0';
+    console.log(`[hf-paper:analyze:usage] ${itemId}/${dimension} prompt=${u.prompt_tokens} (cache_hit=${hit}/${hit + miss}=${hitRate}%) completion=${u.completion_tokens} reasoning=${u.reasoning_tokens ?? 0}`);
+  }
   if (!result.data) {
     return {
       dimension, data: null, failed: true,
