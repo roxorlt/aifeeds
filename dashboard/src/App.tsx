@@ -126,6 +126,10 @@ function DashboardHome() {
 
   const isNarrow = useIsNarrow();
   const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
+  // PM 2026-05-19:选中 tab 自动 scrollIntoView 居中 — chip rail 横向滚动容器,
+  // filter 切到非可视 chip 时把它居中到 rail 中部,让用户知道这是 active(避免
+  // 切了但用户看不到激活状态以为没动)。useEffect 跑在 filter 声明之后(挪到 L155+)
+  const chipRailRef = useRef<HTMLElement | null>(null);
 
   // Derived filter: PC always shows "all" (chips hidden); mobile coerces
   // "all" → "x_list" since the "all" chip isn't rendered on narrow.
@@ -139,6 +143,19 @@ function DashboardHome() {
     fetchSources().then(setSources).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
+
+  // PM 2026-05-19:active chip 自动 scrollIntoView 居中(声明位置必须在
+  // `filter` derived state 之后,否则 TS 报 used-before-declaration)
+  useEffect(() => {
+    if (!isNarrow || !chipRailRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      const chip = chipRailRef.current?.querySelector<HTMLButtonElement>(
+        `[data-chip-key="${filter}"]`,
+      );
+      chip?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [filter, isNarrow]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores
@@ -307,14 +324,17 @@ function DashboardHome() {
           data-no-page-scroll
           className="mx-auto flex max-w-[1280px] items-stretch justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-8 sm:py-3 lg:px-16 max-md:touch-pan-x"
         >
-          <div className="flex shrink-0 items-center gap-2">
+          {/* PM 2026-05-19:移动端 AppBar logo + "AI-Feeds" 改上下结构,
+              字号缩到 10px,腾出空间给右侧 tab(原横排单行占 ~120px → 现在 ~40px)。
+              PC(sm:+)保持横排不变 */}
+          <div className="flex shrink-0 items-center gap-2 max-md:flex-col max-md:items-center max-md:gap-0">
             <img
               src="/favicon.svg"
               alt="AI-Feeds"
-              className="h-7 w-7 sm:h-8 sm:w-8"
+              className="h-7 w-7 max-md:h-5 max-md:w-5 sm:h-8 sm:w-8"
               draggable={false}
             />
-            <h1 className="whitespace-nowrap text-lg font-bold tracking-tight text-neutral-900 sm:text-xl">
+            <h1 className="whitespace-nowrap text-lg font-bold tracking-tight text-neutral-900 max-md:text-[10px] max-md:leading-none sm:text-xl">
               AI-Feeds
             </h1>
             {/* Subtitle slogan TBD; intentionally empty for now */}
@@ -328,7 +348,10 @@ function DashboardHome() {
               through to the parent (touch-action: auto) and iOS picked the
               vertical axis, dragging the feed below. */}
           {isNarrow && (
-            <nav className="chips-rail flex min-w-0 items-center gap-1 self-stretch overflow-x-auto">
+            <nav
+              ref={chipRailRef}
+              className="chips-rail flex min-w-0 items-center gap-1 self-stretch overflow-x-auto"
+            >
               {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
                 const hasData = liveSourceTypes.has(key as SourceType);
@@ -336,6 +359,7 @@ function DashboardHome() {
                   <button
                     key={key}
                     type="button"
+                    data-chip-key={key}
                     onClick={() => {
                       if (isActive) {
                         scrollFeedOrPage(null);

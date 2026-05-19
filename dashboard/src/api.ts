@@ -55,7 +55,18 @@ export const TRACK_ENDPOINT = `${API_BASE}/api/track`;
  * /api/track 自身不能走（会循环），用原生 fetch。
  */
 const FETCH_TIMEOUT_MS = 5000;
-const RETRY_BACKOFFS_MS = [200, 600] as const; // 重试 2 次 = 共 3 次 attempt
+// BE 2026-05-19 建议:retry 第三档拉长到 ≥ 2s 跨过 CF Workers deploy 切换窗口
+// (deploy 是 replace-style cutover,几秒切换里 in-flight 必然有损,旧 200/600ms
+// retry 间隔太短可能两次都撞在窗口里);加 ±20% jitter 避免雪崩 retry storm
+// (多 client 同步 retry 会瞬时叠加压力)。
+// 共 4 次 attempt(初次 + 3 次 retry),最坏 case 总耗时 ≈ 400+1500+2500+timeoutMs。
+// 调用方对延迟敏感的 endpoint 用 timeoutMs override 来截断。
+const RETRY_BACKOFFS_MS = [400, 1500, 2500] as const;
+
+function backoffWithJitter(baseMs: number): number {
+  // ±20% jitter:randomize within [base*0.8, base*1.2)
+  return Math.floor(baseMs * (0.8 + Math.random() * 0.4));
+}
 
 async function apiFetch(
   path: string,
@@ -101,7 +112,7 @@ async function apiFetch(
 
   for (let attempt = 0; attempt <= RETRY_BACKOFFS_MS.length; attempt++) {
     if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, RETRY_BACKOFFS_MS[attempt - 1]));
+      await new Promise((r) => setTimeout(r, backoffWithJitter(RETRY_BACKOFFS_MS[attempt - 1])));
     }
     try {
       const r = await tryOnce();
@@ -122,8 +133,10 @@ async function apiFetch(
       handle401(r.status);
       return r;
     } catch (e) {
+      // catch path 覆盖:network fail / CORS preflight fail(TypeError:Failed to fetch)/
+      // AbortError(timeout)。这三种都走 retry — for loop 在 attempt < length 时
+      // 自然进入下一轮 attempt(无需显式 continue);只在最后一轮才 track + throw
       lastErr = e;
-      // Last attempt — give up
       if (attempt >= RETRY_BACKOFFS_MS.length) {
         // Every fetch attempt is wrapped in its own AbortController with a
         // FETCH_TIMEOUT_MS timeout, so AbortError almost always means "timeout"
@@ -131,10 +144,16 @@ async function apiFetch(
         // admin dashboard can bucket timeouts separately from real errors.
         const rawMsg = e instanceof Error ? e.message : String(e);
         const isAbort = e instanceof Error && (e.name === 'AbortError' || /aborted|abort/i.test(rawMsg));
+        // CORS preflight failure / network unreachable / opaque fetch error 浏览器
+        // 统一抛 TypeError: "Failed to fetch",上报时归类 cors_or_network 便于
+        // admin dashboard 分桶(deploy 切换暂态 CORS fail 应该 < 1% 全部 attempts)
+        const isCorsOrNet = e instanceof TypeError && /failed to fetch|fetch/i.test(rawMsg);
         track(EVENTS.API_ERROR, {
           endpoint: path,
           status: 0,
-          error_msg: isAbort ? `timeout_${timeoutMs}ms` : rawMsg,
+          error_msg: isAbort
+            ? `timeout_${timeoutMs}ms`
+            : (isCorsOrNet ? 'cors_or_network' : rawMsg),
           attempts: attempt + 1,
         });
         throw e;
