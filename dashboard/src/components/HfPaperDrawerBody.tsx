@@ -648,17 +648,15 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
   const isNarrow = useIsNarrow();
   const htmlUrl = `https://arxiv.org/html/${arxivId}`;
   const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
-  // 沉浸式翻译扩展 .crx 本地兜底(墙内不翻墙可直接下载侧载)
-  // crx 文件由 PM 后续上传到 dashboard/public/extensions/,这里 link 已就位
-  const crxLocalUrl = "/extensions/immersive-translate-latest.crx";
 
   return (
     <div className="space-y-2.5">
-      {/* 沉浸式翻译 tips — PM v6: 文案改简 + referral link + 本地 crx 兜底;
+      {/* 沉浸式翻译 tips — PM v6.1: 「沉浸式翻译」纯文本不挂 link,只在「点击安装 ↓」
+          唯一 anchor。↓ 暗示「下载/安装」动作。砍掉本地 .crx 兜底(referral 链接已够);
           移动端(useIsNarrow)隐藏整段,因为手机 Chrome/Safari 不支持扩展 */}
       {!isNarrow && (
         <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
-          推荐{" "}
+          推荐 <span className="font-medium">沉浸式翻译</span> — LaTeXML 全文中英对照翻译。{" "}
           <a
             href="https://immersivetranslate.com/zh-Hans/?via=roxor"
             target="_blank"
@@ -666,26 +664,7 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
             onClick={(e) => e.stopPropagation()}
             className="font-medium text-sky-700 hover:underline"
           >
-            沉浸式翻译
-          </a>
-          {" "}— LaTeXML 全文中英对照翻译。{" "}
-          <a
-            href="https://immersivetranslate.com/zh-Hans/?via=roxor"
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="font-medium text-sky-700 hover:underline"
-          >
-            点击安装 ↗
-          </a>
-          {" "}或{" "}
-          <a
-            href={crxLocalUrl}
-            onClick={(e) => e.stopPropagation()}
-            className="text-sky-700 hover:underline"
-            title="墙内可达 — 直接下载 .crx 包侧载到 Chrome / Edge"
-          >
-            下载 .crx
+            点击安装 ↓
           </a>
         </div>
       )}
