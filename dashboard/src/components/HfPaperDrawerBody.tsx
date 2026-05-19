@@ -178,13 +178,6 @@ function IconChevronDown({ className }: { className?: string }) {
     </svg>
   );
 }
-function IconDownload({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M8 2v8M4 8l4 4 4-4M3 14h10" />
-    </svg>
-  );
-}
 
 // ─── Sub-components ───────────────────────────────────────────────────────
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -386,7 +379,13 @@ export function HfPaperDrawerBody({ item }: Props) {
 
   // 外跳 URL — item.url 当 HF 主链接(供 hero submitter 跳),tab 内的外链精简,
   // 砍掉重复的"在 HF 打开"(用户已经在 aifeeds 看到聚合视图,不必再二跳 HF)。
-  const arxivUrl = `https://arxiv.org/abs/${extra.arxiv_id}`;
+  // arxiv_id 来源 priority: extra.arxiv_id(BE 可能不存)→ item.source_id(staging
+  // 实际是 arxiv_id,因为 BE 用 source_id 装 arxiv_id)→ 从 item.id 剥 prefix
+  const arxivId =
+    extra.arxiv_id ||
+    item.source_id ||
+    item.id?.replace(/^hf_paper:/, "");
+  const arxivUrl = `https://arxiv.org/abs/${arxivId}`;
   const githubUrl =
     extra.github_repo ||
     extra.github_url ||
@@ -514,9 +513,12 @@ export function HfPaperDrawerBody({ item }: Props) {
               <CopyButton text={abstractTab === "translated" ? summaryZh : summaryEn} />
             </div>
           </div>
-          <p className="whitespace-pre-wrap text-[14px] leading-[1.65] text-neutral-700">
-            {abstractTab === "translated" ? summaryZh : summaryEn}
-          </p>
+          {/* PM v5: 摘要用 MdContent 渲染。BE flash 翻译 prompt 加 markdown 排版要求后,
+              这里会自动分段 / 加粗 / 列表渲染,告别大块文字。当前 staging 数据
+              纯文本 也兼容(MdContent 单段渲染等同 <p>)。 */}
+          <div className="text-[14px] leading-[1.65] text-neutral-700">
+            <MdContent source={abstractTab === "translated" ? summaryZh : summaryEn} />
+          </div>
         </div>
       )}
 
@@ -612,17 +614,12 @@ export function HfPaperDrawerBody({ item }: Props) {
         <RawInfoTab
           ar5ivUrl={extra.ar5iv_html_url}
           fullTextZh={fullTextZh}
-          arxivPdfUrl={extra.arxiv_pdf_url}
           arxivUrl={arxivUrl}
           projectPage={projectPage}
           githubUrl={githubUrl}
           discussionComments={discussionComments}
           discussionFetchedAt={discussionFetchedAt}
-          discussionUrl={
-            extra.arxiv_id
-              ? `https://huggingface.co/papers/${extra.arxiv_id}#community`
-              : null
-          }
+          discussionUrl={arxivId ? `https://huggingface.co/papers/${arxivId}#community` : null}
           commentsCount={numComments}
         />
       ) : (
@@ -664,7 +661,6 @@ function TabButton({
 interface RawInfoProps {
   ar5ivUrl: string | undefined;
   fullTextZh: string | null | undefined;
-  arxivPdfUrl: string | undefined;
   arxivUrl: string;
   projectPage: string | null;
   githubUrl: string | null;
@@ -677,36 +673,42 @@ interface RawInfoProps {
 function RawInfoTab(p: RawInfoProps) {
   return (
     <>
-      {/* 全文翻译 (Phase 2 ar5iv,placeholder) */}
-      <div className="border-b border-neutral-200 p-5">
-        <div className="mb-2 flex items-center justify-between">
-          <SectionTitle>全文翻译</SectionTitle>
-          {p.ar5ivUrl && (
-            <a
-              href={p.ar5ivUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="text-[11px] text-sky-600 hover:underline"
-            >
-              在 ar5iv 看 HTML 原文 ↗
-            </a>
-          )}
-        </div>
-        {p.fullTextZh ? (
-          <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-neutral-700">
-            {p.fullTextZh}
-          </p>
-        ) : (
-          <div className="rounded-md border border-dashed border-neutral-300 bg-neutral-50/40 px-3 py-5 text-center text-[13px] text-neutral-500">
-            <div className="text-[18px] text-neutral-400">⏳</div>
-            <div className="mt-1">全文翻译正在抓取中…</div>
-            <div className="mt-0.5 text-[11px] text-neutral-400">
-              ar5iv 段落级翻译由 Phase 2 实现,预计上线后自动填充
-            </div>
+      {/* 正文 — PM v5 rename(原「全文翻译」)。有 full_text_zh 时 markdown 渲染;
+          无时显简单引导(跳 PDF / ar5iv 看原文),不再用 placeholder 框占位。
+          BE 正文方案待 PM v5 决策(选 A/B/C/D 之一,见 [FE → BE · v5 反馈])。 */}
+      {p.fullTextZh ? (
+        <div className="border-b border-neutral-200 p-5">
+          <SectionTitle>正文</SectionTitle>
+          <div className="text-[14px] leading-[1.7] text-neutral-700">
+            <MdContent source={p.fullTextZh} />
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="border-b border-neutral-200 p-5">
+          <SectionTitle>正文</SectionTitle>
+          <p className="text-[13px] leading-[1.6] text-neutral-500">
+            正文完整翻译尚未生成。点击右侧外部链接的{" "}
+            <strong className="text-neutral-700">arXiv 原文</strong>{" "}
+            可下载 PDF 阅读完整论文
+            {p.ar5ivUrl && (
+              <>
+                ;或在{" "}
+                <a
+                  href={p.ar5ivUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-sky-600 hover:underline"
+                >
+                  ar5iv
+                </a>{" "}
+                查看 HTML 版原文
+              </>
+            )}
+            。
+          </p>
+        </div>
+      )}
 
       {/* 评论 — discussion_fetched_at NULL 显加载中,有数据展示评论列表 */}
       <div className="border-b border-neutral-200 p-5">
@@ -718,47 +720,15 @@ function RawInfoTab(p: RawInfoProps) {
         />
       </div>
 
-      {/* 外部链接 — 精简(arxiv 含 PDF 子按钮 + GitHub + 项目主页;砍 HF) */}
+      {/* 外部链接 — PM v5: arxiv / GitHub / 项目主页 三个同款 chip 并排,
+          arxiv 链接默认指向 abs 页面(用户可在 arxiv 页面点击 Download PDF)。
+          砍掉之前的 PDF 子按钮 + 「打开」按钮的复合卡片样式,统一为 chip。 */}
       <div className="p-5">
         <SectionTitle>外部链接</SectionTitle>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5">
-            <div className="min-w-0">
-              <div className="text-[13px] font-medium text-neutral-900">arXiv 原文</div>
-              <div className="text-[11px] text-neutral-500 truncate">{p.arxivUrl}</div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              {p.arxivPdfUrl && (
-                <a
-                  href={p.arxivPdfUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900"
-                  title="下载 PDF"
-                >
-                  <IconDownload className="h-3 w-3" />
-                  PDF
-                </a>
-              )}
-              <a
-                href={p.arxivUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900"
-              >
-                <IconArrowOut className="h-3 w-3" />
-                打开
-              </a>
-            </div>
-          </div>
-          {(p.githubUrl || p.projectPage) && (
-            <div className="flex flex-wrap gap-2">
-              {p.githubUrl && <ExternalLinkPill href={p.githubUrl} label="GitHub 仓库" />}
-              {p.projectPage && <ExternalLinkPill href={p.projectPage} label="项目主页" />}
-            </div>
-          )}
+        <div className="flex flex-wrap gap-2">
+          <ExternalLinkPill href={p.arxivUrl} label="arXiv 原文" />
+          {p.githubUrl && <ExternalLinkPill href={p.githubUrl} label="GitHub 仓库" />}
+          {p.projectPage && <ExternalLinkPill href={p.projectPage} label="项目主页" />}
         </div>
       </div>
     </>
@@ -1091,13 +1061,6 @@ function AnalysisTab({ dna }: { dna: ItemExtra["deep_analysis"] }) {
         <DimensionListBlock label="局限 Limitations" sources={dna.limitations} />
       </div>
 
-      {/* 占位提醒(mockup 阶段) — PM v2 要求拆解长度有深度,需 BE 改 prompt */}
-      <div className="mt-8 rounded-md border border-dashed border-neutral-300 bg-amber-50/40 px-3 py-3 text-[11px] text-neutral-500">
-        <strong className="text-neutral-700">mockup 注:</strong> 当前每段为示例文本(50-150 字)。
-        PM 反馈:实际希望每段是 200-500 字深度长文(可能上 DeepSeek pro
-        research mode / 多 subagent 分维度生成)。BE Phase 4 改 prompt + 输出
-        schema 后此处自动承载长文(已预留 leading-[1.7] 大行距 + whitespace-pre-wrap)。
-      </div>
     </div>
   );
 }

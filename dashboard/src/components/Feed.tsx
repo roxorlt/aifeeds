@@ -691,7 +691,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               }}
             />
           )}
-          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && (
+          {/* hf_paper 默认按时间倒序,不需要 sort toggle(PM v5 反馈) */}
+          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && sourceType !== "hf_paper" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {

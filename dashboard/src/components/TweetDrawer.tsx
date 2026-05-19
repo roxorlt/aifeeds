@@ -457,7 +457,9 @@ export function TweetDrawer() {
                   )}
                 </>
               )}
-              {item.url && (
+              {/* PM v5: HF paper 抽屉 body 内已有「外部链接」3 chip(arxiv/GH/项目主页),
+                  drawer 框架 footer 的「在 HF 打开」按钮跟那里重复了,砍掉。其他源保留。 */}
+              {item.url && !isHfPaper && (
                 <div className="flex justify-center border-t border-neutral-100 px-4 py-5">
                   <a
                     href={item.url}
