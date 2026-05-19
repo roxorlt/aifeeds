@@ -3492,6 +3492,10 @@ const ALLOWED_IMG_HOSTS = new Set([
   'huggingface.co',
   'arxiv.org',
   'ar5iv.labs.arxiv.org',
+  // 2026-05-19 FE 反馈:X 推文嵌外链卡片的 OG 图 host
+  'opengraph.githubassets.com',          // GH 仓库 / issue OG image(X 嵌 GH 链接卡用)
+  'og.luma.com',                          // Luma 活动 OG(X 嵌 Luma 活动链接卡)
+  'jf.x.com',                             // Twitter media inflight gateway(部分推文图走这域)
 ]);
 
 async function handleImageProxy(request: Request): Promise<Response> {
@@ -3554,7 +3558,11 @@ async function handleImageProxy(request: Request): Promise<Response> {
     cfOptions = {
       cf: {
         image: imageOpts,
-        cacheTtl: 86400,
+        // 2026-05-19 FE 反馈:cacheTtl=86400 + cacheEverything=true 会把上游瞬态
+        // 502/404 也 cache 24h(典型 case:pbs.twimg.com/amplify_video_thumb/*
+        // 上游限流时 worker cache 5xx,后续 24h 一直返同 502)。
+        // 改 cacheTtlByStatus:2xx cache 24h / 3xx 5min / 4xx 1min / 5xx 不 cache。
+        cacheTtlByStatus: { '200-299': 86400, '300-399': 300, '400-499': 60, '500-599': 0 },
         cacheEverything: true,
         cacheKey,
       },
