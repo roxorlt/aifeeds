@@ -176,6 +176,9 @@ const ICON = {
   star: 'M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z',
   fork: 'M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z',
   watching: 'M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z',
+  // HF 互动 — 朝上三角(upvote) / 评论方框气泡(16-viewBox,跟 HfPaperCard inline icon 同 path)
+  upvoteTri: 'M8 2.5l5.5 7H2.5l5.5-7z',
+  commentSquare: 'M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z',
 };
 
 // trophy 是 stroke-only path，单独给 paths 数组
@@ -1180,20 +1183,22 @@ export interface PosterShareCtx {
 }
 
 // ─── HF Paper 海报 content rendering ─────────────────────────────────────────
-// PM v6.4 7 项调整后版:
+// PM v6.6 调整:
 //   - hero thumbnail:撑满 innerW + max-h 600 + xMidYMid slice 居中裁
-//   - 标题中译(48px,2 行 cap,font-weight 600,不加粗到 900)
-//   - TL;DR 中译(30px,5-6 行 cap,font-weight 400 普通)
-//   - 删 stats row(upvotes/comments/stars 不要)
-//   - 加 #tag chip 行(ai_keywords 前 4-5 个 #chip)
-//   - byline:by @xxx 等 N 位(砍 "· HF Daily",顶部 hero 已有 source chip)
+//   - 标题中译(48px,2 行 cap,font-weight 600,wrap 17 字防右边距溢出)
+//   - TL;DR 中译(30px,5-6 行 cap,font-weight 400)
+//   - **删 #tag chip 行**,改回 stats(只 upvotes + 评论,不要 GH stars)
+//   - **底部同行布局**:左 stats(▲ upvotes ·· 💬 comments) / 右 avatar + byline,
+//     视觉对齐 feed 卡片底部一行
+//   - byline 不显示时间
 function renderHfContent(opts: {
   x: number; y: number; w: number;
   titleZh: string;
   tldr: string;
   submitterHandle: string;
   authorsCount: number;
-  tags?: string[];                 // ai_keywords 前 N 个,#chip 行
+  upvotes?: number;
+  numComments?: number;
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
   submitterAvatarDataUri?: string;
@@ -1221,10 +1226,12 @@ function renderHfContent(opts: {
     cy += 28;
   }
 
-  // 2. 标题中译 — 48px,2 行 cap,font-weight 600(不 900),wrap maxChars 22
+  // 2. 标题中译 — 48px,2 行 cap,font-weight 600(不 900)
+  // PM v6.6: wrap maxChars 22 → 17 修右边距溢出
+  // (innerW=896px,中文每字 48px,22 字 = 1056px 溢出;17 字 = 816px 安全余 80px)
   const titleSize = 48;
   const titleLine = titleSize * 1.3;
-  const titleLines = wrapText(opts.titleZh || '论文', 22, 2);
+  const titleLines = wrapText(opts.titleZh || '论文', 17, 2);
   const titleSvg = titleLines
     .map((line, i) => `<text x="${innerX}" y="${cy + titleSize + i * titleLine}" font-family='${FONT}' font-size="${titleSize}" font-weight="600" fill="${C.ink}" letter-spacing="-1">${esc(line)}</text>`)
     .join('');
@@ -1239,38 +1246,41 @@ function renderHfContent(opts: {
     .join('');
   cy += tldrLines.length * tldrLine + 28;
 
-  // 4. #tag chip 行 — ai_keywords 前 4-5 个,圆角矩形 chip(替代 stats 行)
-  //    每个 chip 宽度按 estimateTextWidth + padX*2 自适应。一行排开,超出 wrap 到下行。
-  let tagsSvg = '';
-  if (opts.tags && opts.tags.length > 0) {
-    const chipH = 44;
-    const chipPadX = 16;
-    const chipGap = 12;
-    const chipFontSize = 22;
-    let chipCy = cy;
-    let chipCx = innerX;
-    const maxCx = innerX + innerW;
-    for (const tag of opts.tags.slice(0, 6)) {
-      const text = `#${tag}`;
-      const textW = estimateTextWidth(text, chipFontSize, 0.95);
-      const chipW = Math.ceil(textW + chipPadX * 2);
-      // wrap to next line if overflow
-      if (chipCx + chipW > maxCx && chipCx > innerX) {
-        chipCx = innerX;
-        chipCy += chipH + chipGap;
-      }
-      tagsSvg += `
-        <rect x="${chipCx}" y="${chipCy}" width="${chipW}" height="${chipH}" rx="${chipH / 2}" fill="#f3f4f6"/>
-        <text x="${chipCx + chipW / 2}" y="${chipCy + chipH / 2 + chipFontSize / 3}" font-family='${FONT}' font-size="${chipFontSize}" font-weight="500" fill="${C.muted}" text-anchor="middle">${esc(text)}</text>`;
-      chipCx += chipW + chipGap;
-    }
-    cy = chipCy + chipH + 28;
-  }
+  // 4. 底部同行布局(PM v6.6)— 左 stats(▲ upvotes ·· 💬 comments)、右 avatar + byline。
+  //    学 HfPaperCard 卡片底部 footer 风格,左右两组同行对齐。行高 = avatarSize(44)。
+  const rowH = 44;
+  const rowTop = cy;
+  const rowMidY = rowTop + rowH / 2;
+  const textBaselineY = rowMidY + 9; // font-size 26 baseline 补偿
 
-  // 5. Byline 行 — submitter 头像 + by @xxx 等 N 位(PM v6.4 砍 "· HF Daily")
+  // 4a. 左侧 stats — 只 upvotes + 评论数,不要 GH stars
+  const statIconSize = 30;
+  const statIconY = rowTop + (rowH - statIconSize) / 2;
+  const statFontSize = 26;
+  const statGap = 10;       // icon ↔ number
+  const statBetween = 32;   // 两组 stat 之间
+  let statsSvg = '';
+  let statsCx = innerX;
+  const renderStat = (iconD: string, value: number | undefined) => {
+    if (value === undefined || value === null) return;
+    statsSvg += fillIcon(iconD, statsCx, statIconY, statIconSize, C.muted, 16);
+    const valText = formatStat(value);
+    const valX = statsCx + statIconSize + statGap;
+    statsSvg += `<text x="${valX}" y="${textBaselineY}" font-family='${FONT}' font-size="${statFontSize}" font-weight="500" fill="${C.muted}">${esc(valText)}</text>`;
+    statsCx = valX + estimateTextWidth(valText, statFontSize, 0.95) + statBetween;
+  };
+  renderStat(ICON.upvoteTri, opts.upvotes);
+  renderStat(ICON.commentSquare, opts.numComments);
+
+  // 4b. 右侧 byline — avatar + by @xxx 等 N 位作者,整组右对齐到 innerX+innerW
   const avatarSize = 44;
-  const avatarX = innerX;
-  const avatarY = cy;
+  const bylineFontSize = 26;
+  const bylineGap = 14;     // avatar ↔ byline text
+  const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位作者` : ''}`;
+  const bylineTextW = estimateTextWidth(bylineText, bylineFontSize, 0.95);
+  const bylineTotalW = avatarSize + bylineGap + bylineTextW;
+  const avatarX = innerX + innerW - bylineTotalW;
+  const avatarY = rowTop;
   let avatarSvg = '';
   if (opts.submitterAvatarDataUri) {
     const clipId = `hf-byline-clip-${Math.random().toString(36).slice(2, 8)}`;
@@ -1281,16 +1291,13 @@ function renderHfContent(opts: {
   } else {
     avatarSvg = `<circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}" fill="${C.line}"/>`;
   }
-  // PM v6.5: 1 人 "by @x";N>1 人 "by @x 等 N 位作者"(加"作者"二字明确语义)
-  const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位作者` : ''}`;
-  const bylineX = avatarX + avatarSize + 14;
-  const bylineY = avatarY + avatarSize / 2 + 9;
-  const bylineSvg = `<text x="${bylineX}" y="${bylineY}" font-family='${FONT}' font-size="26" font-weight="500" fill="${C.muted}">${esc(bylineText)}</text>`;
-  cy += avatarSize + 24;
+  const bylineX = avatarX + avatarSize + bylineGap;
+  const bylineSvg = `<text x="${bylineX}" y="${textBaselineY}" font-family='${FONT}' font-size="${bylineFontSize}" font-weight="500" fill="${C.muted}">${esc(bylineText)}</text>`;
+  cy = rowTop + rowH + 24;
 
   const totalH = cy - opts.y;
   return {
-    svg: mediaSvg + titleSvg + tldrSvg + tagsSvg + avatarSvg + bylineSvg,
+    svg: mediaSvg + titleSvg + tldrSvg + statsSvg + avatarSvg + bylineSvg,
     height: totalH,
   };
 }
@@ -1425,23 +1432,30 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     contentSvg = r.svg;
     contentH = r.height;
   } else if (sourceMeta.kind === 'hf') {
-    // HF Paper 海报:hero figure + 标题中译 + TL;DR + #tag chip + byline
-    // PM v6.4 改造:删 stats 行,改 #tag chip(ai_keywords 前 N 个);byline 去 "· HF Daily"
+    // HF Paper 海报:hero figure + 标题中译 + TL;DR + stats/byline 同行
+    // PM v6.6 改造:删 #tag chip,改回 stats(只 upvotes + comments);
+    //              stats 左 / byline(avatar + by @x 等 N 位作者) 右,视觉对齐 feed 卡片
     const extra = item.extra || {};
     const dna = (extra.deep_analysis || {}) as { tldr?: string };
     const submitter = (extra.submitted_by || {}) as { user?: string; avatar_url?: string };
     const authors = Array.isArray(extra.paper_authors) ? (extra.paper_authors as Array<unknown>) : [];
-    // ai_keywords HF 自带的关键词列表;若空 fallback arxiv_categories
-    const aiKw = Array.isArray(extra.ai_keywords) ? (extra.ai_keywords as string[]) : [];
-    const arxCats = Array.isArray(extra.arxiv_categories) ? (extra.arxiv_categories as string[]) : [];
-    const tags = (aiKw.length > 0 ? aiKw : arxCats).slice(0, 6);
+    // HF metrics:upvotes + num_comments(GH stars 不要)
+    const m = (item.metrics as Record<string, unknown> | null) || {};
+    const toNum = (v: unknown): number | undefined => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string') { const n = parseInt(v, 10); return Number.isFinite(n) ? n : undefined; }
+      return undefined;
+    };
+    const upvotes = toNum(m.upvotes);
+    const numComments = toNum(m.num_comments);
     const r = renderHfContent({
       x: cardX, y: cardY, w: cardW,
       titleZh: (extra.title_zh as string) || item.title || '论文',
       tldr: dna.tldr || (extra.ai_summary_zh as string) || '',
       submitterHandle: submitter.user || item.handle || 'unknown',
       authorsCount: authors.length,
-      tags,
+      upvotes,
+      numComments,
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
       submitterAvatarDataUri: item.authorAvatarDataUri,
