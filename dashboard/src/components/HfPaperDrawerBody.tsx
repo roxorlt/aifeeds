@@ -936,8 +936,10 @@ function CommentItem({
   const plainBody = showZh ? (comment.content_zh as string) : comment.content;
 
   // 作者本人回复缩进显示(BE 推算的 is_author_reply,精确替代之前的字符串 reply_to_author)
+  // PM 2026-05-19: 去掉左侧 amber 竖线,只保留缩进 + padding;
+  // 作者身份的视觉区分由头部那枚 amber "作者" badge 承担,不再要双重强调
   const indentCls = comment.is_author_reply
-    ? "ml-6 border-l-2 border-amber-200 pl-3"
+    ? "ml-6 pl-3"
     : "";
   return (
     <div className={indentCls}>
