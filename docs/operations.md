@@ -111,6 +111,27 @@ npm run deploy:staging         # = build:staging + wrangler pages deploy
 curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
 ```
 
+### ⚠️ 多人协作 deploy:必须先同步 main(2026-05-19 事故教训)
+
+**根因**：Cloudflare deploy(worker / pages)是**整包替换**,不是 patch 合并。当 BE / FE 多人并行开发,各自从**自己的 PR branch** 直接 deploy 时,后 deploy 的会**覆盖前者已 deploy 的改动**。即使两个 PR 改的是不同文件,只要任一方 deploy 时的本地 branch 没合并对方的 commit,对方那些文件就会回退到 branch 上的旧版本(因为整包替换里那些文件还是旧的)。
+
+**典型事故**(`2026-05-19` 海报模板回退):
+
+| 时间 | 操作 | 后果 |
+|---|---|---|
+| `09:18` | FE deploy `xlist-api-staging` v6.6 hf poster(`d0c5c85d`)|  staging 含 hf 分支正确 dispatch |
+| `09:29` | FE deploy v6.7 hf poster(`a2766d25`)| staging 含 hf 分支 v6.7 完整 |
+| `09:40` | BE 从 PR #85 figure lookahead branch deploy(`603d2554`)— 该 branch **没合并** FE 09:18/09:29 的 share/poster 改动| 整包覆盖,FE 改动全丢,海报回退走 X fallback 模板 |
+| `~10:10` | PM 截图发现 paper 海报又是 X 模板 | 排查 → 从 `main` HEAD redeploy worker 恢复 |
+
+**强制约束**：
+
+1. **deploy 前必须先 `git pull origin main` 把对方 commit 合到当前 branch**(或 rebase 到 main HEAD)。`wrangler deploy` 不接受 dirty index 之外的 sanity check,你自己要保证 worktree 是 main HEAD 的超集
+2. **从 `main` HEAD deploy 最稳**:即使你的 PR 还没 merge,本地 `git checkout main && git pull` 再 deploy 也比从自己 branch 直 deploy 安全(代价是只能 deploy 已 merge 的改动)
+3. **deploy 完立刻同步**:在 issue / PR / 协作频道说一句「已 deploy worker staging Version XXX,含 PR #YY」,让另一方知道当前 staging 是哪个版本,避免重复覆盖
+4. **应急恢复**:发现自己 deploy 的改动消失 → 从 `main` HEAD redeploy 即可(`main` 永远是双方改动的并集,前提是改动都已 PR merge)
+5. **跨域改动不要拆开 deploy**:同时动 `worker/src/share/` 和 `worker/src/hf-paper/` 时,两个 PR 合并到 main 后再 deploy 一次,不要分两次各 deploy 各自的
+
 **staging D1 schema 同步**（prod 改 schema 时）：
 ```bash
 # 先在 staging 上执行 migration 文件验证
