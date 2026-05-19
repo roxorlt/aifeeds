@@ -751,7 +751,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 ### 6a. R2 bucket: `ai-feeds-fonts`（2026-05-11 上线）
 
 - **挂载域**：`fonts.ai-feeds.com`（R2 → Custom Domains 绑定，min-TLS 1.2）
-- **CORS**：允许 `https://ai-feeds.com` / `https://staging.ai-feeds.com` / `http://localhost:5173` / `http://localhost:4173` 的 GET / HEAD；Max-Age 86400
+- **CORS**：允许 `https://ai-feeds.com` / `https://www.ai-feeds.com` / `https://staging.ai-feeds.com` / `http://localhost:5173` / `http://localhost:4173` 的 GET / HEAD;Max-Age 86400。**注意 `www.` 子域必须单独列**(R2 CORS allowed_origins 是精确字符串匹配,不支持 wildcard 子域),否则 `https://www.ai-feeds.com` 访问字体会被拦,fallback 到系统默认(2026-05-19 PM 反馈 console 80+ CORS errors 即此因,修复用 `wrangler r2 bucket cors set ai-feeds-fonts --file cors.json` + CF Dashboard 手动 purge `fonts.ai-feeds.com` cache,否则 4h 内仍命中旧 cached response 没 ACAO 头)
 - **内容**：HarmonyOS Sans SC Regular(400) / Medium(500) / Bold(700) 三档，每档用 `cn-font-split@5.0.0` 按 unicode-range 子集化为 ~87 个 woff2 + 一份 result.css。共 263 个文件，bucket 总大小 ~15 MB。单页实际只下 ≈ 200 KB
 - **目录结构**：`hmos-regular/` + `hmos-medium/` + `hmos-bold/`，CSS 用相对路径 `url("./xxx.woff2")` 引用同目录 woff2
 - **CSS 引入**：dashboard 通过 `<link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-{regular,medium,bold}/result.css">` 三次引入
