@@ -102,7 +102,10 @@ export function HfPaperCard({ item }: Props) {
 
   // 优先中译，缺时退到原文
   const title = extra.title_zh || item.title || "";
-  const aiSummaryZh = extra.ai_summary_zh || "";
+  // PM v6.7: 正文用 deep_analysis.tldr(2-3 句的 TL;DR 描述,信息量比 ai_summary_zh
+  // 一句话更够)。不带 "TL;DR" 前缀,直接显示纯内容。deep_analysis 还没生成时
+  // fallback 到 ai_summary_zh
+  const summary = extra.deep_analysis?.tldr || extra.ai_summary_zh || "";
   const keywords = (extra.ai_keywords || []).slice(0, 3);
 
   // thumbnail：HF 提供 1200×630 social-thumbnail（cdn-thumbnails.huggingface.co）
@@ -152,10 +155,10 @@ export function HfPaperCard({ item }: Props) {
         {title}
       </h3>
 
-      {/* HF AI 一句话摘要（中译）— 最多 4 行 clamp，超出 ……。跟标题区分用 neutral-600 + smaller */}
-      {aiSummaryZh && (
+      {/* TL;DR（中译）— 最多 4 行 clamp,超出 ……。跟标题区分用 neutral-600 + smaller */}
+      {summary && (
         <p className="mt-1 line-clamp-4 text-[13px] leading-[1.5] text-neutral-600 break-words">
-          {aiSummaryZh}
+          {summary}
         </p>
       )}
 

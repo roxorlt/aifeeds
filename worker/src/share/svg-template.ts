@@ -1199,6 +1199,7 @@ function renderHfContent(opts: {
   authorsCount: number;
   upvotes?: number;
   numComments?: number;
+  githubStars?: number;          // PM v6.7: GH stars(如有 + 空间允许)
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
   submitterAvatarDataUri?: string;
@@ -1226,59 +1227,83 @@ function renderHfContent(opts: {
     cy += 28;
   }
 
-  // 2. 标题中译 — 48px,2 行 cap,font-weight 600(不 900)
+  // 2. 标题中译 — 48px,2 行 cap
   // PM v6.6: wrap maxChars 22 → 17 修右边距溢出
-  // (innerW=896px,中文每字 48px,22 字 = 1056px 溢出;17 字 = 816px 安全余 80px)
+  // PM v6.7: font-weight 600 → 500(再减弱一档),letter-spacing -1 → -0.5
+  //          减小负值字间距,中文字符不要太挤,视觉更轻
   const titleSize = 48;
   const titleLine = titleSize * 1.3;
   const titleLines = wrapText(opts.titleZh || '论文', 17, 2);
   const titleSvg = titleLines
-    .map((line, i) => `<text x="${innerX}" y="${cy + titleSize + i * titleLine}" font-family='${FONT}' font-size="${titleSize}" font-weight="600" fill="${C.ink}" letter-spacing="-1">${esc(line)}</text>`)
+    .map((line, i) => `<text x="${innerX}" y="${cy + titleSize + i * titleLine}" font-family='${FONT}' font-size="${titleSize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.5">${esc(line)}</text>`)
     .join('');
   cy += titleLines.length * titleLine + 20;
 
-  // 3. TL;DR 中译 — 30px,6 行 cap(更多内容上墙),font-weight 400 普通,wrap maxChars 30
+  // 3. TL;DR 中译 — 30px,6 行 cap,wrap maxChars 30
+  // PM v6.7: font-weight 400 保持(已最轻),letter-spacing -0.3 → 0
+  //          去掉字符紧度负值,放松字间距让正文更"通透"
   const tldrSize = 30;
   const tldrLine = tldrSize * 1.55;
   const tldrLines = wrapText(opts.tldr || '', 30, 6);
   const tldrSvg = tldrLines
-    .map((line, i) => `<text x="${innerX}" y="${cy + tldrSize + i * tldrLine}" font-family='${FONT}' font-size="${tldrSize}" font-weight="400" fill="${C.ink}" letter-spacing="-0.3">${esc(line)}</text>`)
+    .map((line, i) => `<text x="${innerX}" y="${cy + tldrSize + i * tldrLine}" font-family='${FONT}' font-size="${tldrSize}" font-weight="400" fill="${C.ink}" letter-spacing="0">${esc(line)}</text>`)
     .join('');
   cy += tldrLines.length * tldrLine + 28;
 
-  // 4. 底部同行布局(PM v6.6)— 左 stats(▲ upvotes ·· 💬 comments)、右 avatar + byline。
+  // 4. 底部同行布局(PM v6.6 + v6.7)— 左 stats(▲ upvotes ·· 💬 comments ·· ⭐ stars)、右 avatar + byline。
   //    学 HfPaperCard 卡片底部 footer 风格,左右两组同行对齐。行高 = avatarSize(44)。
+  //    PM v6.7: GH stars 加入候选;byline 占宽优先,stats 按 budget 自适应放几个
   const rowH = 44;
   const rowTop = cy;
   const rowMidY = rowTop + rowH / 2;
   const textBaselineY = rowMidY + 9; // font-size 26 baseline 补偿
 
-  // 4a. 左侧 stats — 只 upvotes + 评论数,不要 GH stars
-  const statIconSize = 30;
-  const statIconY = rowTop + (rowH - statIconSize) / 2;
-  const statFontSize = 26;
-  const statGap = 10;       // icon ↔ number
-  const statBetween = 32;   // 两组 stat 之间
-  let statsSvg = '';
-  let statsCx = innerX;
-  const renderStat = (iconD: string, value: number | undefined) => {
-    if (value === undefined || value === null) return;
-    statsSvg += fillIcon(iconD, statsCx, statIconY, statIconSize, C.muted, 16);
-    const valText = formatStat(value);
-    const valX = statsCx + statIconSize + statGap;
-    statsSvg += `<text x="${valX}" y="${textBaselineY}" font-family='${FONT}' font-size="${statFontSize}" font-weight="500" fill="${C.muted}">${esc(valText)}</text>`;
-    statsCx = valX + estimateTextWidth(valText, statFontSize, 0.95) + statBetween;
-  };
-  renderStat(ICON.upvoteTri, opts.upvotes);
-  renderStat(ICON.commentSquare, opts.numComments);
-
-  // 4b. 右侧 byline — avatar + by @xxx 等 N 位作者,整组右对齐到 innerX+innerW
+  // 4a. 先算 byline 总宽(右侧固定,左侧 stats 看剩余空间决定放几个)
   const avatarSize = 44;
   const bylineFontSize = 26;
-  const bylineGap = 14;     // avatar ↔ byline text
+  const bylineGap = 14;
   const bylineText = `by @${opts.submitterHandle}${opts.authorsCount > 1 ? ` 等 ${opts.authorsCount} 位作者` : ''}`;
   const bylineTextW = estimateTextWidth(bylineText, bylineFontSize, 0.95);
   const bylineTotalW = avatarSize + bylineGap + bylineTextW;
+
+  // 4b. 左侧 stats budget check — 候选 upvotes / comments / GH stars,
+  //     依次试加,累计宽 ≤ statsBudget 才纳入,超了就 drop(GH stars 排最后)
+  const statIconSize = 30;
+  const statIconY = rowTop + (rowH - statIconSize) / 2;
+  const statFontSize = 26;
+  const statGap = 10;          // icon ↔ number
+  const statBetween = 32;      // 两组 stat 之间
+  const sectionGap = 32;       // stats 区 ↔ byline 区最小间距
+  const statsBudget = innerW - bylineTotalW - sectionGap;
+  const candidateStats: Array<{ icon: string; value: number; viewBox: number }> = [];
+  const pushStat = (icon: string, value: number | undefined, viewBox: number) => {
+    if (typeof value === 'number' && Number.isFinite(value)) candidateStats.push({ icon, value, viewBox });
+  };
+  pushStat(ICON.upvoteTri, opts.upvotes, 16);
+  pushStat(ICON.commentSquare, opts.numComments, 16);
+  pushStat(ICON.star, opts.githubStars, 16);
+
+  const drawnStats: typeof candidateStats = [];
+  let runningW = 0;
+  for (const s of candidateStats) {
+    const oneW = statIconSize + statGap + estimateTextWidth(formatStat(s.value), statFontSize, 0.95);
+    const nextW = drawnStats.length === 0 ? oneW : runningW + statBetween + oneW;
+    if (nextW > statsBudget) break;
+    drawnStats.push(s);
+    runningW = nextW;
+  }
+
+  let statsSvg = '';
+  let statsCx = innerX;
+  for (const s of drawnStats) {
+    statsSvg += fillIcon(s.icon, statsCx, statIconY, statIconSize, C.muted, s.viewBox);
+    const valText = formatStat(s.value);
+    const valX = statsCx + statIconSize + statGap;
+    statsSvg += `<text x="${valX}" y="${textBaselineY}" font-family='${FONT}' font-size="${statFontSize}" font-weight="500" fill="${C.muted}">${esc(valText)}</text>`;
+    statsCx = valX + estimateTextWidth(valText, statFontSize, 0.95) + statBetween;
+  }
+
+  // 4c. 右侧 byline — avatar + by @xxx 等 N 位作者,整组右对齐到 innerX+innerW
   const avatarX = innerX + innerW - bylineTotalW;
   const avatarY = rowTop;
   let avatarSvg = '';
@@ -1439,7 +1464,9 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     const dna = (extra.deep_analysis || {}) as { tldr?: string };
     const submitter = (extra.submitted_by || {}) as { user?: string; avatar_url?: string };
     const authors = Array.isArray(extra.paper_authors) ? (extra.paper_authors as Array<unknown>) : [];
-    // HF metrics:upvotes + num_comments(GH stars 不要)
+    // HF metrics:upvotes + num_comments(必含)+ github_stars(v6.7 加,但 byline 占宽优先)
+    // github_stars 顺序:item.metrics.github_stars 优先,extra.github_stars fallback
+    // (跟 HfPaperCard 同优先级,确保卡片/海报数据一致)
     const m = (item.metrics as Record<string, unknown> | null) || {};
     const toNum = (v: unknown): number | undefined => {
       if (typeof v === 'number') return v;
@@ -1448,6 +1475,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     };
     const upvotes = toNum(m.upvotes);
     const numComments = toNum(m.num_comments);
+    const githubStars = toNum(m.github_stars) ?? toNum(extra.github_stars);
     const r = renderHfContent({
       x: cardX, y: cardY, w: cardW,
       titleZh: (extra.title_zh as string) || item.title || '论文',
@@ -1456,6 +1484,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       authorsCount: authors.length,
       upvotes,
       numComments,
+      githubStars,
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
       submitterAvatarDataUri: item.authorAvatarDataUri,
