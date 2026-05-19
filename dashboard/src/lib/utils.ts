@@ -92,6 +92,10 @@ const PROXY_HOSTS = new Set([
   "cdn-uploads.huggingface.co",
   "huggingface.co",
   "arxiv.org",
+  // 2026-05-19 PM #4 X 推文嵌外链卡片 OG 图 — BE 已加 worker ALLOWED_IMG_HOSTS (#87)
+  "opengraph.githubassets.com",      // X 嵌 GH 仓库 / issue 链接卡
+  "og.luma.com",                      // X 嵌 Luma 活动链接卡
+  "jf.x.com",                         // Twitter media inflight gateway
 ]);
 const PROXY_BASE =
   import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
