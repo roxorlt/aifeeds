@@ -9,11 +9,6 @@ const TweetDrawer = lazy(() =>
   import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
 );
 
-// HF Phase 0 mockup 页（/mockup/hf）— lazy load 避免污染主 bundle，
-// 上线 BE Phase 1-7 真接口后整体删除。
-const HfPaperMockupPage = lazy(() =>
-  import("./components/HfPaperMockupPage").then((m) => ({ default: m.HfPaperMockupPage })),
-);
 import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
@@ -467,15 +462,6 @@ function App() {
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
-        {/* Phase 0 mockup 临时路由（BE Phase 1-7 上线后删除） */}
-        <Route
-          path="/mockup/hf"
-          element={
-            <Suspense fallback={<div className="p-10 text-center text-sm text-neutral-500">mockup 加载中…</div>}>
-              <HfPaperMockupPage />
-            </Suspense>
-          }
-        />
       </Routes>
       <LoginModalGate />
       <ToastGate />

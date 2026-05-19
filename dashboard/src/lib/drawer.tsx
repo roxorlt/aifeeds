@@ -38,9 +38,7 @@ interface DrawerContextValue {
   clearSpotlight: () => void;
 }
 
-// Exported so mockup pages（如 /mockup/hf）可以用自定义 value 替代默认 provider，
-// 让卡片 useDrawer().openItem 走本地 state 而非 fetchItem 网络调用。
-export const DrawerContext = createContext<DrawerContextValue | null>(null);
+const DrawerContext = createContext<DrawerContextValue | null>(null);
 
 function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null {
   // /t/:source_id  → x_list:<source_id>
