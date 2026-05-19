@@ -31,6 +31,7 @@ import type {
   ItemExtra,
 } from "../types";
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
+import { useIsNarrow } from "../lib/breakpoint";
 
 // 评论 HTML 渲染走 DOMPurify sanitize(BE 给的 content_html 来自 HF 用户输入,
 // XSS 风险必须过滤)。afterSanitizeAttributes hook 强制所有 <a> 加 target=_blank。
@@ -369,7 +370,9 @@ export function HfPaperDrawerBody({ item }: Props) {
   const titleEn = item.title || "";
   const summaryZh = extra.summary_zh || item.content_translated || "";
   const summaryEn = item.content || "";
-  const submitter = extra.submitted_by;
+  // submitter / submitted_by 字段 PM v6 已从 hero 砍掉,这里保留 binding 防后续
+  // 需要(评论 author_handle 比对 submitter 用)。当前未使用 → 加 void 标记避免 lint。
+  void extra.submitted_by;
   const authors = extra.paper_authors || [];
   const keywords = extra.ai_keywords || [];
   const dna = extra.deep_analysis;
@@ -434,46 +437,69 @@ export function HfPaperDrawerBody({ item }: Props) {
             </p>
           )}
 
-          {/* Submitter 行 — PM v3: 删 fullname / 删"到 HF Daily"文案 / 加 "等 N 位提交" */}
-          {submitter && (
-            <div className="mt-3 flex items-center gap-2 text-[13px] text-neutral-500">
-              {submitter.avatar_url ? (
-                <img
-                  src={submitter.avatar_url}
-                  alt={submitter.user}
-                  className="h-6 w-6 rounded-full bg-neutral-200 object-cover"
-                  onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-                />
-              ) : (
-                <span className="h-6 w-6 rounded-full bg-neutral-200" />
-              )}
-              <span>
-                由{" "}
-                <a
-                  href={`https://huggingface.co/${submitter.user}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="font-medium text-neutral-700 hover:text-sky-600 hover:underline"
-                >
-                  @{submitter.user}
-                </a>
-                {authors.length > 1 && (
-                  <span> 等 {authors.length} 位</span>
-                )}
-                {" 提交"}
-                {submitter.is_pro && (
-                  <span className="ml-1.5 rounded-full bg-amber-50 px-1.5 py-0 text-[10px] font-medium text-amber-700 ring-1 ring-amber-200">
-                    PRO
-                  </span>
-                )}
-              </span>
-            </div>
-          )}
+          {/* PM v6: submitter 行整段砍掉(作者列表 + 数据 KPI 已经覆盖论文出处信息) */}
         </div>
       </div>
 
-      {/* ─── 摘要 Abstract (PM v3 2.3: 上移到 by 张三下方,常驻不切 tab) ── */}
+      {/* ─── 作者列表 (PM v6: 上移到第 2 位,标题下方) ────────────────── */}
+      {authors.length > 0 && (
+        <div className="border-b border-neutral-200 p-5">
+          <SectionTitle>作者列表 · 共 {authors.length} 位</SectionTitle>
+          <div className="flex flex-wrap gap-x-2 gap-y-1.5">
+            {visibleAuthors.map((a, i) => (
+              <span
+                key={i}
+                className="rounded-md bg-neutral-100 px-2 py-0.5 text-[12px] text-neutral-700"
+              >
+                {a.name}
+              </span>
+            ))}
+            {!authorsExpanded && hiddenCount > 0 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setAuthorsExpanded(true);
+                }}
+                className="inline-flex items-center gap-0.5 text-[12px] text-sky-600 hover:underline"
+              >
+                展开 +{hiddenCount} 位
+                <IconChevronDown className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── 数据 KPI 4-col (PM v6: 第 3 位) ─────────────────────────── */}
+      <div className="grid grid-cols-4 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
+        <Kpi
+          icon={<IconUpvoteTri className="h-3.5 w-3.5" />}
+          label="upvotes"
+          value={upvotes !== undefined ? formatCompact(upvotes) : "—"}
+        />
+        <Kpi
+          icon={<IconCommentSquare className="h-3.5 w-3.5" />}
+          label="comments"
+          value={numComments !== undefined ? formatCompact(numComments) : "—"}
+        />
+        <Kpi
+          icon={<IconStarFilled className="h-3.5 w-3.5" />}
+          label="GH stars"
+          value={
+            githubStars !== undefined && githubStars !== null
+              ? formatCompact(githubStars)
+              : "—"
+          }
+        />
+        <Kpi
+          icon={<IconUserCircle className="h-3.5 w-3.5" />}
+          label="作者"
+          value={authors.length > 0 ? String(authors.length) : "—"}
+        />
+      </div>
+
+      {/* ─── 摘要 Abstract (PM v6: 第 4 位,下移到 KPI 之后) ─────────── */}
       {(summaryEn || summaryZh) && (
         <div className="border-b border-neutral-200 p-5">
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -512,69 +538,9 @@ export function HfPaperDrawerBody({ item }: Props) {
               <CopyButton text={abstractTab === "translated" ? summaryZh : summaryEn} />
             </div>
           </div>
-          {/* PM v5: 摘要用 MdContent 渲染。BE flash 翻译 prompt 加 markdown 排版要求后,
-              这里会自动分段 / 加粗 / 列表渲染,告别大块文字。当前 staging 数据
-              纯文本 也兼容(MdContent 单段渲染等同 <p>)。 */}
+          {/* MdContent 渲染 BE 翻译输出的 markdown(分段 / strong / 列表) */}
           <div className="text-[14px] leading-[1.65] text-neutral-700">
             <MdContent source={abstractTab === "translated" ? summaryZh : summaryEn} />
-          </div>
-        </div>
-      )}
-
-      {/* ─── 数据 KPI 4-col (常驻) ───────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-2 border-b border-neutral-200 px-5 py-4 text-center">
-        <Kpi
-          icon={<IconUpvoteTri className="h-3.5 w-3.5" />}
-          label="upvotes"
-          value={upvotes !== undefined ? formatCompact(upvotes) : "—"}
-        />
-        <Kpi
-          icon={<IconCommentSquare className="h-3.5 w-3.5" />}
-          label="comments"
-          value={numComments !== undefined ? formatCompact(numComments) : "—"}
-        />
-        <Kpi
-          icon={<IconStarFilled className="h-3.5 w-3.5" />}
-          label="GH stars"
-          value={
-            githubStars !== undefined && githubStars !== null
-              ? formatCompact(githubStars)
-              : "—"
-          }
-        />
-        <Kpi
-          icon={<IconUserCircle className="h-3.5 w-3.5" />}
-          label="作者"
-          value={authors.length > 0 ? String(authors.length) : "—"}
-        />
-      </div>
-
-      {/* ─── 作者列表 (常驻,折叠) ─────────────────────────────────────── */}
-      {authors.length > 0 && (
-        <div className="border-b border-neutral-200 p-5">
-          <SectionTitle>作者列表 · 共 {authors.length} 位</SectionTitle>
-          <div className="flex flex-wrap gap-x-2 gap-y-1.5">
-            {visibleAuthors.map((a, i) => (
-              <span
-                key={i}
-                className="rounded-md bg-neutral-100 px-2 py-0.5 text-[12px] text-neutral-700"
-              >
-                {a.name}
-              </span>
-            ))}
-            {!authorsExpanded && hiddenCount > 0 && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setAuthorsExpanded(true);
-                }}
-                className="inline-flex items-center gap-0.5 text-[12px] text-sky-600 hover:underline"
-              >
-                展开 +{hiddenCount} 位
-                <IconChevronDown className="h-3 w-3" />
-              </button>
-            )}
           </div>
         </div>
       )}
@@ -679,28 +645,53 @@ interface RawInfoProps {
 function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
   const [loaded, setLoaded] = useState(false);
   const [iframeError, setIframeError] = useState(false);
+  const isNarrow = useIsNarrow();
   const htmlUrl = `https://arxiv.org/html/${arxivId}`;
   const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
+  // 沉浸式翻译扩展 .crx 本地兜底(墙内不翻墙可直接下载侧载)
+  // crx 文件由 PM 后续上传到 dashboard/public/extensions/,这里 link 已就位
+  const crxLocalUrl = "/extensions/immersive-translate-latest.crx";
 
   return (
     <div className="space-y-2.5">
-      {/* 沉浸式翻译提示 banner — 中文用户阅读英文 LaTeXML 需要翻译插件 */}
-      <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
-        <strong className="font-medium">💡 未装翻译插件?</strong>{" "}
-        推荐{" "}
-        <a
-          href="https://immersivetranslate.com/zh-Hans/?via=roxor"
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="font-medium text-sky-700 hover:underline"
-        >
-          沉浸式翻译
-        </a>
-        {" "}— 浏览器扩展,iframe 内的 LaTeXML 全文中英对照翻译。
-      </div>
+      {/* 沉浸式翻译 tips — PM v6: 文案改简 + referral link + 本地 crx 兜底;
+          移动端(useIsNarrow)隐藏整段,因为手机 Chrome/Safari 不支持扩展 */}
+      {!isNarrow && (
+        <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
+          推荐{" "}
+          <a
+            href="https://immersivetranslate.com/zh-Hans/?via=roxor"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="font-medium text-sky-700 hover:underline"
+          >
+            沉浸式翻译
+          </a>
+          {" "}— LaTeXML 全文中英对照翻译。{" "}
+          <a
+            href="https://immersivetranslate.com/zh-Hans/?via=roxor"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="font-medium text-sky-700 hover:underline"
+          >
+            点击安装 ↗
+          </a>
+          {" "}或{" "}
+          <a
+            href={crxLocalUrl}
+            onClick={(e) => e.stopPropagation()}
+            className="text-sky-700 hover:underline"
+            title="墙内可达 — 直接下载 .crx 包侧载到 Chrome / Edge"
+          >
+            下载 .crx
+          </a>
+        </div>
+      )}
 
-      {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton */}
+      {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton。
+          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5) */}
       <div className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50">
         {!loaded && !iframeError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
@@ -714,7 +705,9 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
             sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
             loading="lazy"
             referrerPolicy="no-referrer"
-            className="h-[600px] w-full"
+            className="h-[600px] w-full overflow-x-hidden"
+            style={{ overflowX: "hidden" }}
+            scrolling="auto"
             title={`arxiv ${arxivId} LaTeXML 全文`}
             onLoad={() => setLoaded(true)}
             onError={() => setIframeError(true)}
