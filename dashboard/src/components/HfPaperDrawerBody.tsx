@@ -373,7 +373,6 @@ export function HfPaperDrawerBody({ item }: Props) {
   const authors = extra.paper_authors || [];
   const keywords = extra.ai_keywords || [];
   const dna = extra.deep_analysis;
-  const fullTextZh = extra.full_text_zh;
   const discussionComments = (extra.discussion_comments || []) as HfDiscussionComment[];
   const discussionFetchedAt = extra.discussion_fetched_at;
 
@@ -612,8 +611,7 @@ export function HfPaperDrawerBody({ item }: Props) {
       {/* ─── Tab body ───────────────────────────────────────────────────── */}
       {activeTab === "raw" ? (
         <RawInfoTab
-          ar5ivUrl={extra.ar5iv_html_url}
-          fullTextZh={fullTextZh}
+          arxivId={arxivId}
           arxivUrl={arxivUrl}
           projectPage={projectPage}
           githubUrl={githubUrl}
@@ -659,8 +657,7 @@ function TabButton({
 
 // ─── Tab 1: 原始信息 (全文 → 评论 → 外链) ───────────────────────────────
 interface RawInfoProps {
-  ar5ivUrl: string | undefined;
-  fullTextZh: string | null | undefined;
+  arxivId: string | undefined;
   arxivUrl: string;
   projectPage: string | null;
   githubUrl: string | null;
@@ -670,43 +667,110 @@ interface RawInfoProps {
   commentsCount: number | undefined;
 }
 
+// 正文 iframe — 嵌 arxiv.org/html LaTeXML 渲染。PM v5 方案 E。
+//
+// 关键点:
+// - arxiv 实测无 X-Frame-Options + CORS:* → 可任意域嵌
+// - LaTeXML 实时渲染需要 2-3s,加 loading skeleton 改善等待体验
+// - sandbox 限制 iframe 权限,只给 scripts + popups + forms(不给 same-origin
+//   防 XSS 攻击宿主页)
+// - 沉浸式翻译 banner 提示用户(中文阅读体验依赖外部翻译插件)
+// - 下方 chip:PDF 下载 + 新标签打开兜底(iframe 失败 / 移动端不友好)
+function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [iframeError, setIframeError] = useState(false);
+  const htmlUrl = `https://arxiv.org/html/${arxivId}`;
+  const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
+
+  return (
+    <div className="space-y-2.5">
+      {/* 沉浸式翻译提示 banner — 中文用户阅读英文 LaTeXML 需要翻译插件 */}
+      <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
+        <strong className="font-medium">💡 未装翻译插件?</strong>{" "}
+        推荐{" "}
+        <a
+          href="https://immersivetranslate.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="font-medium text-sky-700 hover:underline"
+        >
+          沉浸式翻译
+        </a>
+        {" "}— 浏览器扩展,iframe 内的 LaTeXML 全文中英对照翻译。
+      </div>
+
+      {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton */}
+      <div className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50">
+        {!loaded && !iframeError && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
+            <div className="mb-2 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-500" />
+            arxiv LaTeXML 渲染中…(通常 2-3s)
+          </div>
+        )}
+        {!iframeError ? (
+          <iframe
+            src={htmlUrl}
+            sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            className="h-[600px] w-full"
+            title={`arxiv ${arxivId} LaTeXML 全文`}
+            onLoad={() => setLoaded(true)}
+            onError={() => setIframeError(true)}
+          />
+        ) : (
+          <div className="flex h-[200px] flex-col items-center justify-center px-4 text-center text-[13px] text-neutral-500">
+            <div className="mb-1">⚠️ 嵌入加载失败</div>
+            <a
+              href={htmlUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-sky-600 hover:underline"
+            >
+              在新标签打开 ↗
+            </a>
+          </div>
+        )}
+      </div>
+
+      {/* 下方工具栏:PDF 下载 + 新标签打开兜底(移动端 / iframe 不友好时用) */}
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <a
+          href={pdfUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 hover:bg-neutral-50 hover:text-neutral-900"
+        >
+          📄 下载 PDF
+        </a>
+        <a
+          href={htmlUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 hover:bg-neutral-50 hover:text-neutral-900"
+        >
+          在新标签打开 ↗
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function RawInfoTab(p: RawInfoProps) {
   return (
     <>
-      {/* 正文 — PM v5 rename(原「全文翻译」)。有 full_text_zh 时 markdown 渲染;
-          无时显简单引导(跳 PDF / ar5iv 看原文),不再用 placeholder 框占位。
-          BE 正文方案待 PM v5 决策(选 A/B/C/D 之一,见 [FE → BE · v5 反馈])。 */}
-      {p.fullTextZh ? (
+      {/* 正文 — PM v5 方案 E: 嵌 arxiv.org/html LaTeXML iframe(arxiv 实测无
+          X-Frame-Options,允许任意域嵌)+ 上方沉浸式翻译 banner + 下方 PDF chip
+          + 新标签兜底。BE 已砍 ar5iv 翻译(workflow Step 2 省 5-10 min/paper),
+          不再渲染 full_text_zh markdown(字段废弃)。 */}
+      {p.arxivId && (
         <div className="border-b border-neutral-200 p-5">
           <SectionTitle>正文</SectionTitle>
-          <div className="text-[14px] leading-[1.7] text-neutral-700">
-            <MdContent source={p.fullTextZh} />
-          </div>
-        </div>
-      ) : (
-        <div className="border-b border-neutral-200 p-5">
-          <SectionTitle>正文</SectionTitle>
-          <p className="text-[13px] leading-[1.6] text-neutral-500">
-            正文完整翻译尚未生成。点击右侧外部链接的{" "}
-            <strong className="text-neutral-700">arXiv 原文</strong>{" "}
-            可下载 PDF 阅读完整论文
-            {p.ar5ivUrl && (
-              <>
-                ;或在{" "}
-                <a
-                  href={p.ar5ivUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-sky-600 hover:underline"
-                >
-                  ar5iv
-                </a>{" "}
-                查看 HTML 版原文
-              </>
-            )}
-            。
-          </p>
+          <ArxivHtmlIframe arxivId={p.arxivId} />
         </div>
       )}
 
