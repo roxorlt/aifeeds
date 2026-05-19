@@ -27,6 +27,14 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
       },
+      // /r/* 是 worker 全站 media R2 反代路径(GH README / PH logo / X media /
+      // HF figure 都走这条)。漏配会让 vite SPA fallback 返 HTML 导致 dev 看不到图。
+      // 同 /api proxy target,通过 VITE_API_PROXY 覆盖(staging / prod / 本地 wrangler dev)。
+      '/r': {
+        target: process.env.VITE_API_PROXY || 'https://staging-api.ai-feeds.com',
+        changeOrigin: true,
+        secure: true,
+      },
     },
   },
 })
