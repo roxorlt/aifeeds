@@ -197,6 +197,9 @@ export interface ItemExtra {
   discussion_fetched_at?: string | null;        // ISO,null = 未抓 → 显示「加载中」
   full_text_zh?: string | null;               // ar5iv markdown 翻译(Phase 2)
   deep_analysis?: HfDeepAnalysis;             // 8 维度 + novelty meta 评分
+  // BE figure lookahead 抽出的 hero 配图元数据;FE 用 width/height 算 aspect 决定容器形状,
+  // 避免纵向 figure(GUI/screenshot 类 paper) 在 16:9 容器内 letterbox 留巨大补白
+  figure_image?: { width?: number; height?: number; src_url?: string };
   workflow_completed_at?: string;
 
   [k: string]: unknown;

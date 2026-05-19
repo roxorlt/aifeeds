@@ -402,6 +402,25 @@ export function HfPaperDrawerBody({ item }: Props) {
   const media = Array.isArray(item.media) ? item.media : [];
   const cover = media.find((m) => m.type === "image");
 
+  // BE 2026-05-19: figure_image 元数据 — width/height 用来算 hero 容器 aspect-ratio。
+  // 纵向 figure(GUI/screenshot 类 paper,如 2605.15138)在 16:9 容器内 letterbox
+  // 会补白巨大,改成跟 figure aspect 分档自适应,letterbox 仍保留(object-contain)
+  const figureImage = extra.figure_image;
+  const heroAspect =
+    figureImage?.width && figureImage?.height
+      ? figureImage.width / figureImage.height
+      : null;
+  const heroContainerAspect =
+    heroAspect == null
+      ? "1200 / 630"           // 没 figure 元数据:回退原 16:9 hero(cover/og-image)
+      : heroAspect >= 1.5
+        ? "16 / 9"             // 横向 wide(大多数 paper figure 命中)
+        : heroAspect >= 1.0
+          ? "4 / 3"             // 横向方形偏宽
+          : heroAspect >= 0.7
+            ? "1 / 1"           // 方形
+            : "4 / 5";           // 纵向(GUI / screenshot / mobile UI 类)
+
   // tab + 内部状态
   const [activeTab, setActiveTab] = useState<TabKey>("raw");
   const [authorsExpanded, setAuthorsExpanded] = useState(false);
@@ -419,11 +438,16 @@ export function HfPaperDrawerBody({ item }: Props) {
       {/* ─── Hero: thumbnail + 标题中英 + by @xxx 等 N 位提交 ─────────── */}
       <div className="border-b border-neutral-200" data-drawer-title-anchor>
         {cover && (
-          <div className="aspect-[1200/630] w-full overflow-hidden bg-neutral-100">
+          // hero 容器:aspectRatio inline 跟 figure 形状走,letterbox 用 object-contain
+          // (figure 真实比例完整露出),max-h 60vh 防纵向 figure 在小屏占满全屏
+          <div
+            className="w-full overflow-hidden bg-neutral-100"
+            style={{ aspectRatio: heroContainerAspect, maxHeight: "60vh" }}
+          >
             <img
               src={resolveAssetUrl(cover.url)}
               alt=""
-              className="h-full w-full object-cover"
+              className="h-full w-full object-contain object-center"
               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
             />
           </div>
