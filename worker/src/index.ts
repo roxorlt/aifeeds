@@ -86,6 +86,7 @@ import {
   handleDelete,
 } from './auth/handlers';
 import { handleEmailSend } from './auth/email-handlers';
+import { handleWechatExchange } from './auth/wechat-handlers';
 import {
   serveAdminToolsHtml,
   adminSmsStatus,
@@ -196,6 +197,13 @@ export interface Env {
   API_BASE?: string;                    // worker API 域(回流/退订端点),prod https://api.ai-feeds.com
   ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
   ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
+  // PR-WechatAuth(worker)：微信扫码登录 — .cc 中转代理 ↔ worker 互信 HMAC
+  // 架构见 docs/wechat/architecture.md §4-5。
+  // BRIDGE_SECRET：.cc 调 /api/auth/wechat/exchange 时 HMAC 签名用的共享 secret，
+  // wrangler secret put（每环境独立值，prod/staging 不能共用）。
+  // ENABLE_WECHAT_LOGIN：默认开启；'false' = 紧急关停（rate-limited 等场景）。
+  BRIDGE_SECRET?: string;
+  ENABLE_WECHAT_LOGIN?: string;
   // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.
   // Used by worker/src/scrapers/ph.ts (daily fetch cron).
   PH_CLIENT_ID?: string;
@@ -432,6 +440,11 @@ export default {
       }
       if (path === '/api/auth/email/send' && request.method === 'POST') {
         return withCors(await handleEmailSend(request, env, ctx), request, env);
+      }
+      // .cc 中转代理 POST 过来换 session（架构见 docs/wechat/architecture.md）
+      // server-to-server，不走 dashboard，不需要 device_id header（device_id 在 body 里透传）
+      if (path === '/api/auth/wechat/exchange' && request.method === 'POST') {
+        return withCors(await handleWechatExchange(request, env, ctx), request, env);
       }
       if (path === '/api/auth/login' && request.method === 'POST') {
         return withCors(await handleLogin(request, env, ctx), request, env);
