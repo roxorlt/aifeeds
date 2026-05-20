@@ -591,6 +591,51 @@ const ENRICH_ONLY_EXTRA_KEYS = [
   'maker_post_text_translated',
 ] as const;
 
+/**
+ * 合并新拉的 PH extra 与老的 D1 extra,保留 enrichment 字段 + comment 元素级翻译。
+ *
+ * 用法:
+ * - refreshPhItem(FE drawer 调) 老 extra 已读 → 直接传入
+ * - runPhDailyFetch ingest 前批量预读老 extra → 单条调用
+ *
+ * 策略:
+ * - root 字段:ENRICH_ONLY_EXTRA_KEYS 列表里的字段从老 extra 取(覆盖新值)
+ * - top_comments 数组:按 text 匹配老 comment,复制 .translated 到新 comment
+ *   (新 ingest 永远不含 translated → 不会反向覆盖老 translated)
+ */
+export function mergePhExtraPreservingEnrichment(
+  oldExtra: Record<string, unknown>,
+  newExtra: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...newExtra };
+
+  // root-level enrichment 字段保留老值
+  for (const k of ENRICH_ONLY_EXTRA_KEYS) {
+    if (oldExtra[k] !== undefined) merged[k] = oldExtra[k];
+  }
+
+  // top_comments 元素级保留 translated
+  if (Array.isArray(merged.top_comments) && Array.isArray(oldExtra.top_comments)) {
+    const oldByText = new Map<string, Record<string, unknown>>();
+    for (const c of oldExtra.top_comments as Array<Record<string, unknown>>) {
+      const text = c?.text;
+      if (typeof text === 'string') oldByText.set(text, c);
+    }
+    merged.top_comments = (merged.top_comments as Array<Record<string, unknown>>).map((newC) => {
+      const text = newC?.text;
+      if (typeof text === 'string') {
+        const oldC = oldByText.get(text);
+        if (oldC?.translated && !newC.translated) {
+          return { ...newC, translated: oldC.translated };
+        }
+      }
+      return newC;
+    });
+  }
+
+  return merged;
+}
+
 export interface PhRefreshResult {
   refreshed: boolean;
   reason: 'success' | 'not_found' | 'fetch_failed' | 'invalid_source_id';
@@ -653,10 +698,10 @@ export async function refreshPhItem(
       }
     } catch { /* ignore — treat as empty */ }
   }
-  const mergedExtra: Record<string, unknown> = { ...freshExtra };
-  for (const k of ENRICH_ONLY_EXTRA_KEYS) {
-    if (oldExtra[k] !== undefined) mergedExtra[k] = oldExtra[k];
-  }
+  // 2026-05-21 fix:用统一 merge helper 保留 enrichment + comment 元素级 translated。
+  // 之前只保 6 个 root 字段,top_comments 数组被新 fetch 整组替换 → translated 全 wipe。
+  // user 反馈 FE drawer 打开后 "zh→en flip 1s" 的根因。
+  const mergedExtra = mergePhExtraPreservingEnrichment(oldExtra, freshExtra);
 
   // 5. UPDATE items + append metrics_snapshots_ph（atomic batch）
   const capturedAt = Math.floor(Date.now() / 1000);
@@ -696,6 +741,49 @@ export interface PhDailyFetchResult {
   ingested?: { inserted: number; updated: number; errors: number };
   duration_ms: number;
   error?: string;
+}
+
+/**
+ * 合并新 ingest 的 extra 与 D1 现存 extra,防 daily re-fetch 覆盖 enrichment 字段。
+ *
+ * 策略:
+ * - 老 extra 字段全保留(spread base)
+ * - 新 ingest 字段覆盖同名字段(新 wins),但 null 不覆盖老的非 null(避免新写的占位 null 擦掉)
+ * - top_comments 元素级合并:按 text 匹配,新数组里每条 comment 若 .text 在老 comment 中
+ *   找到,且老 comment 有 translated → 把 translated 复制到新 comment
+ * - 同样的 maker_post.text → maker_post_translated 在 root 不在 maker_post 对象里,
+ *   靠新数据不写 maker_post_translated + 老 extra 保留 自然 work
+ */
+async function mergePhItemsWithExisting(
+  env: Env,
+  items: ItemInput[],
+): Promise<ItemInput[]> {
+  if (items.length === 0) return items;
+  const ids = items.map((i) => `${i.source_type}:${i.source_id}`);
+  const placeholders = ids.map(() => '?').join(',');
+  const existing = await env.DB.prepare(
+    `SELECT id, extra FROM items WHERE id IN (${placeholders})`,
+  ).bind(...ids).all<{ id: string; extra: string | null }>();
+
+  const oldExtraById = new Map<string, Record<string, unknown>>();
+  for (const r of existing.results) {
+    if (r.extra) {
+      try { oldExtraById.set(r.id, JSON.parse(r.extra) as Record<string, unknown>); } catch { /* ignore */ }
+    }
+  }
+
+  return items.map((item) => {
+    const id = `${item.source_type}:${item.source_id}`;
+    const oldExtra = oldExtraById.get(id);
+    if (!oldExtra) return item; // 新 item,无需合并
+
+    const newExtra = typeof item.extra === 'string'
+      ? (JSON.parse(item.extra) as Record<string, unknown>)
+      : ((item.extra as Record<string, unknown> | null) ?? {});
+
+    const merged = mergePhExtraPreservingEnrichment(oldExtra, newExtra);
+    return { ...item, extra: JSON.stringify(merged) };
+  });
 }
 
 export async function runPhDailyFetch(
@@ -763,8 +851,15 @@ export async function runPhDailyFetch(
   //    评论/long content 留 fill-translations cron 后台慢慢翻
   await translatePhItemsInline(env, items);
 
-  // 4. Ingest via internal function call
-  const ingestResult = await ingestItems(env, items);
+  // 4. Merge with existing extra(防 daily re-fetch 覆盖 enrichment 字段)
+  //    根因:ingestItems UPSERT 用 excluded.extra 整体覆盖老 extra(只保 longform/enriched_at
+  //    两个 X-only 字段),PH 每天再抓时 r2_migrated_at / ai_summary / classified_at /
+  //    maker_post_translated / top_comments[].translated 全被 wipe(staging prod 反复观察)。
+  //    app-level 合并:保留老 enrichment + 新 ingest 字段 + comment 元素级保留 translated。
+  const mergedItems = await mergePhItemsWithExisting(env, items);
+
+  // 5. Ingest via internal function call
+  const ingestResult = await ingestItems(env, mergedItems);
   console.log(
     `[ph] ingestItems: inserted=${ingestResult.inserted} updated=${ingestResult.updated} errors=${ingestResult.errors.length}`,
   );
