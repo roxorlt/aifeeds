@@ -201,6 +201,47 @@ CLOUDFLARE_API_TOKEN="$PROD_OPS" npx wrangler pages deploy ...
 
 token scope 其实**不需要** Memberships:Read,只要 deploy 命令带 CLOUDFLARE_ACCOUNT_ID 就 OK。
 
+### ⚠️ CF account-scoped token 不要用 /user/tokens/verify 诊断（2026-05-20 晚教训）
+
+**坑**：account-owned token（claude-ops、CF_OPS_API_TOKEN 这类，权限范围全是 `Entire <account_id> account`）调 `https://api.cloudflare.com/client/v4/user/tokens/verify` 必然返：
+
+```json
+{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}]}
+```
+
+或者调 `/user` 路径返 `code 9109 Invalid access token`。
+
+**这不是 token 失效**，是 CF API 设计：user-scope 路径要求 token 带 user-level 权限，account-owned token 没有这个 scope，必然被拒。CF 的错误码（1000「Invalid Token」/ 9109「Invalid access token」）措辞极具误导性，看着就像 token 真挂了。
+
+**正确的 account token 验证路径**（任选其一，能力上 wrangler 实际要用的）：
+
+```bash
+TOKEN=$(awk -F= '/^CLOUDFLARE_API_TOKEN=/ {sub(/^CLOUDFLARE_API_TOKEN=/,""); print; exit}' .secrets/aifeeds-prod.env)
+ACCT=$(awk -F= '/^CLOUDFLARE_ACCOUNT_ID=/ {sub(/^CLOUDFLARE_ACCOUNT_ID=/,""); print; exit}' .secrets/aifeeds-prod.env)
+
+# 调 D1 list（最常用 — wrangler deploy 实际要的能力）
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://api.cloudflare.com/client/v4/accounts/$ACCT/d1/database?per_page=2"
+
+# 或调 account 元信息
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://api.cloudflare.com/client/v4/accounts/$ACCT"
+```
+
+返 HTTP 200 即正常；只有这种 account 路径才真实反映 token 状态。
+
+**事故时间线**（`2026-05-20` 晚）：
+
+| 时间 | 操作 | 后果 |
+|---|---|---|
+| `~22:30` | session 推 BRIDGE_SECRET 到 staging worker，撞 9109 → 误以为 token 失效 | 让 PM 走 Roll 流程，把好好的 token 换掉 |
+| `~23:00` | PM Roll claude-ops 后 .env 已更新，再 curl `/user/tokens/verify` 仍 401（路径就拒 account token） | session 再次误判，PM 接近崩溃 |
+| `~23:20` | 改用 `/accounts/<id>/d1/database` curl → 200 OK | 真相浮出水面：token 一直没坏 |
+
+**不要把这两条误用路径写进任何诊断脚本 / skill / agent prompt**。下次任何 AI session 排查 wrangler / CF API 401 时，先按本节方法验证 token，**不要让用户去 Roll**。如果 account 路径返 200 但 wrangler 仍报错，再排查 wrangler 参数 / 缓存 / ACCOUNT_ID 注入等问题。
+
 **staging D1 schema 同步**（prod 改 schema 时）：
 ```bash
 # 先在 staging 上执行 migration 文件验证
