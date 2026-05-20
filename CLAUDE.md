@@ -85,6 +85,7 @@ docs/
 - [ ] **dashboard 视觉改动：对照 `docs/frontend-ux-guidelines.md` 检查 token / 组件规范**（颜色、字号、间距、按钮 variant、错误位置等不能跑偏）
 - [ ] **dashboard + worker 同时改：必须同步部署 staging 验证 → 同步部署 prod**（不要单边升级）
 - [ ] **D1 schema 变更：先 staging 跑 migration（`wrangler d1 execute xlist-staging --env staging --remote --file=migrations/0NN.sql`），验证后再 prod**
+- [ ] **deploy 命令模板**:`set -a; . .secrets/aifeeds-{prod,staging}.env; set +a` 把整个 env 文件 source 进去再跑 `wrangler deploy`,不要单 grep 挑 token —— env 必须含 `CLOUDFLARE_ACCOUNT_ID`,否则 wrangler 4.x 走 `/memberships` fallback 需要 token Memberships:Read scope,撞 9106 auth fail(`2026-05-20` 事故案例 + 完整模板见 `docs/operations.md` 「⚠️ deploy 命令模板:必须 source 整个 env 文件」节)
 - [ ] scraper/processor 改动：小批量跑一次，看 DB 状态
 - [ ] 涉及 D1 数据同步：确认 `push_to_cloud()` 已覆盖本地变更
 - [ ] **远端服务变更同步更新运维文档**（见下方"运维手册"节），遗漏会导致跨 session 维护断档

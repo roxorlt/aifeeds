@@ -97,12 +97,17 @@
 
 **部署命令**：
 ```bash
-# Worker
+# 注意:必须先 set -a + source 整个 env 文件再 deploy,不要单独 grep 挑 token。
+# 详见下方「⚠️ deploy 命令模板:必须 source 整个 env 文件」节。
+
+# Worker(staging)
 cd worker
+set -a; . /Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-staging.env; set +a
 npx wrangler deploy --env staging
 
-# Dashboard
+# Dashboard(staging)
 cd dashboard
+set -a; . /Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-staging.env; set +a
 npm run deploy:staging         # = build:staging + wrangler pages deploy
 ```
 
@@ -131,6 +136,42 @@ curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
 3. **deploy 完立刻同步**:在 issue / PR / 协作频道说一句「已 deploy worker staging Version XXX,含 PR #YY」,让另一方知道当前 staging 是哪个版本,避免重复覆盖
 4. **应急恢复**:发现自己 deploy 的改动消失 → 从 `main` HEAD redeploy 即可(`main` 永远是双方改动的并集,前提是改动都已 PR merge)
 5. **跨域改动不要拆开 deploy**:同时动 `worker/src/share/` 和 `worker/src/hf-paper/` 时,两个 PR 合并到 main 后再 deploy 一次,不要分两次各 deploy 各自的
+
+### ⚠️ deploy 命令模板:必须 source 整个 env 文件(2026-05-20 教训)
+
+**根因**:wrangler 4.x 在 deploy 前会查 `https://api.cloudflare.com/client/v4/memberships` 列出当前 token 可访问的 account 列表。如果 token scope 不含 `User → Memberships → Read`,这个调用返 `code 9106 Authentication failed` → deploy 卡死。**但**只要 env 里有 `CLOUDFLARE_ACCOUNT_ID`,wrangler 会跳过 `/memberships` 调用直接用该 ID,无需 Memberships scope。
+
+`.secrets/aifeeds-{prod,staging}.env` 里**已经有** `CLOUDFLARE_ACCOUNT_ID`,所以正确的 deploy 命令必须**把整个 env 文件 source 进 shell**(让 ACCOUNT_ID 也 export 到 env),而不能只 grep 单挑 token。
+
+**正确模板**(所有 deploy 命令一律按此):
+
+```bash
+# 把整个 env 文件所有 var 都 export 到当前 shell(含 CLOUDFLARE_ACCOUNT_ID)
+set -a; . /Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-prod.env; set +a
+# 如需用 ops token override 默认 CLOUDFLARE_API_TOKEN(L47 旧 / L49 新 ops)
+CLOUDFLARE_API_TOKEN="$CF_OPS_API_TOKEN" npx wrangler pages deploy dist \
+  --project-name=xlist-dashboard --branch=main --commit-dirty=true \
+  --commit-message="ASCII commit msg"   # 注意 commit-message 必须 ASCII 防 CF 8000111 UTF-8 bug
+```
+
+**错误模板**(不要写):
+
+```bash
+# ❌ 单独 grep 挑 token,丢失 CLOUDFLARE_ACCOUNT_ID,wrangler 走 /memberships fallback 撞 9106
+PROD_OPS=$(grep '^CF_OPS_API_TOKEN=' .secrets/aifeeds-prod.env | cut -d= -f2-)
+CLOUDFLARE_API_TOKEN="$PROD_OPS" npx wrangler pages deploy ...
+```
+
+**事故时间线**(`2026-05-20`):
+
+| 时间 | 操作 | 后果 |
+|---|---|---|
+| `~01:00` | FE deploy 用 `set -a + source` 模式 | ACCOUNT_ID 在 env,wrangler 跳过 /memberships,deploy 成功 |
+| `~01:15` | PM 把新 ops token 更到 env L49,FE 为了 override token 改用 `grep | cut` 单挑 | env 里没 ACCOUNT_ID,wrangler 查 /memberships,token 缺 Memberships scope → 9106 |
+| `~01:20` | FE 误以为是 token scope 问题,让 PM 加 Memberships scope | 改了仍 fail,因为 wrangler 缓存或 CF 一致性延迟 |
+| `~02:20` | 实际试 `CLOUDFLARE_ACCOUNT_ID=$ACCT wrangler ...` | 立刻 success;真相是 env vars 模式问题,token scope 早就够 |
+
+token scope 其实**不需要** Memberships:Read,只要 deploy 命令带 CLOUDFLARE_ACCOUNT_ID 就 OK。
 
 **staging D1 schema 同步**（prod 改 schema 时）：
 ```bash
