@@ -34,11 +34,15 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricTopDevices(env));
     case 'channel-dwell':
       return jsonRes(await metricChannelDwell(env));
+    case 'drawer-by-source':
+      return jsonRes(await metricDrawerBySource(env));
+    case 'feed-depth':
+      return jsonRes(await metricFeedDepth(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
         'overview', 'dau-trend', 'retention', 'event-distribution',
         'funnel', 'session-duration', 'errors', 'error-trend',
-        'top-devices', 'channel-dwell',
+        'top-devices', 'channel-dwell', 'drawer-by-source', 'feed-depth',
       ] }, 400);
   }
 }
@@ -61,6 +65,38 @@ const BOT_UA_LIKE = `(
   OR ua = ''
 )`;
 
+// 项目 owner 的 device：从报表里整体踢掉，避免自己开发 / 测试访问污染数据。
+// 两层识别：
+//   1. OWNER_EMAILS — 登录过的 email，自动反查 user_id → events.user_id → device_id
+//   2. OWNER_DEVICE_IDS — 没登录就用的 device，手动加（看 top-devices 表挑明显的）
+// 业务读取的所有 device 维度 metric (retention / dau-trend / top-devices /
+// channel-dwell / drawer-by-source / feed-depth) 都套上 NOT IN (owner_devices)。
+const OWNER_EMAILS = ['ltsms86@gmail.com'];
+const OWNER_DEVICE_IDS = [
+  'XVsq80drDCUOo3CSXJbrm',  // active_days 17, user_id=null（chrome 隐身 / 测试 profile）
+  'isNbeSgimLuEPGnI4dvF9',  // active_days 15, 关联 ltsms86 user（冗余覆盖）
+];
+
+// SQL fragment: device_id 子查询，含 owner 的所有 device。CTE 形式给 caller 用：
+//   WITH owner_devices AS (${OWNER_DEVICE_CTE}) SELECT ... WHERE device_id NOT IN owner_devices
+// 两个数据源 union：
+//   1. events.user_id 关联到 identities.user_id 匹配 OWNER_EMAILS（自动发现登录设备）
+//   2. OWNER_DEVICE_IDS hardcoded（未登录设备手动加）
+const OWNER_DEVICE_CTE = (() => {
+  const emails = OWNER_EMAILS.map((e) => `'${e.replace(/'/g, "''")}'`).join(',');
+  const deviceUnions = OWNER_DEVICE_IDS.map((d) => `SELECT '${d.replace(/'/g, "''")}' AS device_id`).join(' UNION ');
+  const fromEmail = `
+    SELECT DISTINCT device_id FROM events
+    WHERE user_id IN (
+      SELECT user_id FROM identities
+      WHERE identity_value IN (${emails || "''"}) AND unbound_at IS NULL
+    )`;
+  return deviceUnions ? `${fromEmail} UNION ${deviceUnions}` : fromEmail;
+})();
+
+// 直接拼到 WHERE 子句的 fragment：device_id NOT IN (...owner devices...)
+const NOT_OWNER_SQL = `device_id NOT IN (${OWNER_DEVICE_CTE})`;
+
 async function metricOverview(env: Env) {
   const row = await env.DB.prepare(`
     SELECT
@@ -70,6 +106,7 @@ async function metricOverview(env: Env) {
       COUNT(DISTINCT device_id) AS total_devices,
       COUNT(*) AS total_events
     FROM events
+    WHERE ${NOT_OWNER_SQL}
   `).first<{ dau: number; wau: number; mau: number; total_devices: number; total_events: number }>();
   return { ...row };
 }
@@ -77,6 +114,7 @@ async function metricOverview(env: Env) {
 async function metricDauTrend(env: Env) {
   // events 列只算业务事件（排除 ERROR_EVENT_TYPES），人均事件数才有意义；
   // dau 列仍按所有事件去重 device 算（错误事件也算"那天来过"）。
+  // 整个 query 排除 owner devices。
   const placeholders = ERROR_EVENT_TYPES.map(() => '?').join(',');
   const rs = await env.DB.prepare(`
     SELECT
@@ -85,6 +123,7 @@ async function metricDauTrend(env: Env) {
       COUNT(CASE WHEN event_type NOT IN (${placeholders}) THEN 1 END) AS events
     FROM events
     WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
+      AND ${NOT_OWNER_SQL}
     GROUP BY day
     ORDER BY day
   `).bind(...ERROR_EVENT_TYPES).all();
@@ -106,6 +145,7 @@ async function metricRetention(env: Env) {
       SELECT device_id, MIN(date(occurred_at/1000,'unixepoch','+8 hours')) AS cohort_day
       FROM events
       WHERE device_id NOT IN (SELECT device_id FROM bot_devices)
+        AND ${NOT_OWNER_SQL}
       GROUP BY device_id
     )
     SELECT
@@ -126,12 +166,14 @@ async function metricRetention(env: Env) {
 async function metricEventDistribution(env: Env) {
   // 错误类事件单独由 metric=errors / error-trend 呈现，event-distribution 排除掉
   // 防止两个模块重复占用顶部位置。ERROR_EVENT_TYPES 名单见文件顶部。
+  // 排除 owner devices。
   const placeholders = ERROR_EVENT_TYPES.map(() => '?').join(',');
   const rs = await env.DB.prepare(`
     SELECT event_type, COUNT(*) AS events, COUNT(DISTINCT device_id) AS devices
     FROM events
     WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
       AND event_type NOT IN (${placeholders})
+      AND ${NOT_OWNER_SQL}
     GROUP BY event_type
     ORDER BY events DESC
     LIMIT 25
@@ -155,6 +197,7 @@ async function metricFunnel(env: Env) {
         MAX(CASE WHEN event_type IN ('share_click','favorite_toggle','login_success') THEN 1 ELSE 0 END) AS s4
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
+        AND ${NOT_OWNER_SQL}
       GROUP BY device_id
     )
     SELECT
@@ -185,6 +228,7 @@ async function metricSessionDuration(env: Env) {
         (MAX(occurred_at) - MIN(occurred_at)) / 1000 AS session_seconds
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
+        AND ${NOT_OWNER_SQL}
       GROUP BY day, device_id
       HAVING COUNT(*) >= 2 AND session_seconds > 0
     )
@@ -211,6 +255,7 @@ async function metricSessionDuration(env: Env) {
       SELECT (MAX(occurred_at) - MIN(occurred_at)) / 1000 AS session_seconds
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
+        AND ${NOT_OWNER_SQL}
       GROUP BY date(occurred_at/1000,'unixepoch','+8 hours'), device_id
       HAVING COUNT(*) >= 2 AND session_seconds > 0
     )
@@ -231,6 +276,7 @@ async function metricErrors(env: Env) {
     FROM events
     WHERE event_type IN ('api_error','js_error','feed_load_error','image_load_error','unhandled_promise')
       AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
     GROUP BY event_type, error_msg
     ORDER BY errors DESC
     LIMIT 20
@@ -240,6 +286,7 @@ async function metricErrors(env: Env) {
     FROM events
     WHERE event_type IN ('api_error','js_error','feed_load_error','image_load_error','unhandled_promise')
       AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
     GROUP BY device_id
     ORDER BY errors DESC
     LIMIT 10
@@ -260,6 +307,7 @@ async function metricErrorTrend(env: Env) {
     FROM events
     WHERE event_type IN (${placeholders})
       AND occurred_at > (strftime('%s','now')-30*86400)*1000
+      AND ${NOT_OWNER_SQL}
     GROUP BY day, event_type
     ORDER BY day, event_type
   `).bind(...ERROR_EVENT_TYPES).all();
@@ -282,11 +330,63 @@ async function metricTopDevices(env: Env) {
       GROUP_CONCAT(DISTINCT date(occurred_at/1000,'unixepoch','+8 hours')) AS active_dates
     FROM events
     WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
+      AND ${NOT_OWNER_SQL}
     GROUP BY device_id
     ORDER BY active_days DESC, events DESC
     LIMIT 30
   `).all();
   return { devices: rs.results };
+}
+
+async function metricDrawerBySource(env: Env) {
+  // 7 天 item_open_drawer 按 source GROUP。payload.source 直接给了 source 名（如
+  // hf_paper / github / clawhub / x_list / product_hunt / huodongxing），无需从
+  // item_id 前缀推。返回 source / opens / devices，前端画横条 bar。
+  const rs = await env.DB.prepare(`
+    SELECT
+      json_extract(event_payload, '$.source') AS source,
+      COUNT(*) AS opens,
+      COUNT(DISTINCT device_id) AS devices
+    FROM events
+    WHERE event_type = 'item_open_drawer'
+      AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
+    GROUP BY source
+    ORDER BY opens DESC
+  `).all();
+  return { sources: rs.results };
+}
+
+async function metricFeedDepth(env: Env) {
+  // 翻页深度 = 用户在 feed 上浏览了多少 item。
+  // 严格"翻页"需要前端发 feed_load_more 事件（当前没埋，需要 FE 加）。
+  // 用 item_impression 作近似：每天每个 device 平均看了多少 item（impression 数）。
+  // 也算 item_open_drawer / app_open 的 per-device per-day 平均值，给一个全景。
+  const rs = await env.DB.prepare(`
+    WITH per_dev_day AS (
+      SELECT
+        date(occurred_at/1000,'unixepoch','+8 hours') AS day,
+        device_id,
+        COUNT(CASE WHEN event_type = 'item_impression' THEN 1 END) AS impressions,
+        COUNT(CASE WHEN event_type = 'item_open_drawer' THEN 1 END) AS drawer_opens,
+        COUNT(CASE WHEN event_type IN ('app_open','page_view') THEN 1 END) AS opens
+      FROM events
+      WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
+        AND ${NOT_OWNER_SQL}
+      GROUP BY day, device_id
+      HAVING opens > 0 OR impressions > 0 OR drawer_opens > 0
+    )
+    SELECT
+      day,
+      COUNT(*) AS active_devices,
+      CAST(AVG(impressions) AS REAL) AS avg_impressions,
+      CAST(AVG(drawer_opens) AS REAL) AS avg_drawer_opens,
+      SUM(impressions) AS total_impressions
+    FROM per_dev_day
+    GROUP BY day
+    ORDER BY day
+  `).all();
+  return { days: rs.results };
 }
 
 async function metricChannelDwell(env: Env) {
@@ -308,6 +408,7 @@ async function metricChannelDwell(env: Env) {
       FROM events
       WHERE event_type = 'source_filter_change'
         AND occurred_at > (strftime('%s','now')-7*86400)*1000
+        AND ${NOT_OWNER_SQL}
     ),
     dwell AS (
       SELECT
@@ -367,12 +468,19 @@ ${ADMIN_SHARED_CSS}
 
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   thead th { text-align: left; padding: 6px 8px; color: #9ca3af; font-weight: 500;
-             border-bottom: 1px solid #1f2937; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+             border-bottom: 1px solid #1f2937; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+             vertical-align: middle; }
   thead th.num { text-align: right; }
-  tbody td { padding: 6px 8px; border-bottom: 1px solid #1f2937; color: #d1d5db; font-family: ui-monospace, monospace; }
+  tbody td { padding: 10px 8px; border-bottom: 1px solid #1f2937; color: #d1d5db; font-family: ui-monospace, monospace;
+             vertical-align: top; }
   tbody tr:hover { background: #161b24; }
   td.num { text-align: right; }
   td.muted { color: #6b7280; }
+  /* 设备表 UA 列：第一行设备名（大号），第二行原始 UA（灰小字） */
+  .ua-cell { font-family: -apple-system, system-ui, sans-serif; }
+  .ua-cell .device-name { color: #d1d5db; font-size: 12px; font-weight: 500; }
+  .ua-cell .ua-raw { color: #6b7280; font-size: 10px; font-family: ui-monospace, monospace;
+                     margin-top: 4px; line-height: 1.4; word-break: break-all; }
 
   .funnel-step { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin: 8px 0;
                  padding: 12px; background: #0b0e14; border: 1px solid #1f2937; border-radius: 6px; }
@@ -385,12 +493,14 @@ ${ADMIN_SHARED_CSS}
   .loading { color: #6b7280; font-size: 12px; text-align: center; padding: 24px; }
   .err { color: #fca5a5; font-size: 12px; padding: 12px; background: #1f1212; border: 1px solid #7f1d1d; border-radius: 6px; }
 
-  /* GitHub-style 贡献小方格（重度设备的活跃日期分布）。
-     30 天一行 30 格，活跃日 #6ee7b7 / 非活跃 #1f2937，hover 显示日期 */
-  .contrib { display: inline-grid; grid-template-columns: repeat(30, 9px); gap: 2px; vertical-align: middle; }
-  .contrib > span { width: 9px; height: 9px; border-radius: 2px; background: #1a2230; }
+  /* GitHub-style 贡献小方格 — 30 天活跃日。7 列 × 5 行 = 35 格容纳 30 天（前 5 格留空），
+     每列 = 一周，从左到右越近。今天那格加 outline。activeDates 是 "YYYY-MM-DD,..." 串 */
+  .contrib { display: inline-grid; grid-template-columns: repeat(7, 12px); grid-auto-rows: 12px; gap: 3px;
+             vertical-align: middle; }
+  .contrib > span { width: 12px; height: 12px; border-radius: 2px; background: #1a2230; }
   .contrib > span.on { background: #6ee7b7; }
   .contrib > span.today { outline: 1px solid #6b7280; outline-offset: 1px; }
+  .contrib > span.pad { background: transparent; }
 </style>
 </head>
 <body>
@@ -431,6 +541,18 @@ ${adminNavHtml('dashboard')}
     <div style="overflow-x:auto"><table id="tbl-channels"><thead><tr>
       <th>频道</th><th class="num">平均停留</th><th class="num">总时长</th><th class="num">切换次数</th><th class="num">device 数</th>
     </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>📂 详情打开 · 按数据源</h2>
+    <p class="hint">7 天 item_open_drawer 按 source 分组。哪个源的内容最吸引用户进抽屉深读</p>
+    <div class="chart" id="ch-drawer-source"></div>
+  </div>
+
+  <div class="card wide">
+    <h2>📜 人均浏览深度</h2>
+    <p class="hint">最近 30 天每天人均 item_impression（曝光到屏幕中央的 item 数）+ 人均 item_open_drawer。粗略反映"翻多深"。严格翻页深度需 FE 加 feed_load_more 埋点</p>
+    <div class="chart tall" id="ch-feed-depth"></div>
   </div>
 
   <div class="card wide">
@@ -732,14 +854,15 @@ async function loadErrorTrend() {
 }
 
 // 生成 GitHub-style 30 格贡献小方格。activeDates 是 "YYYY-MM-DD,..." 串。
-// 从 today-29 到 today 渲染，最右一格是今天（带 outline 标识）。BJT 时区下 user
-// 本地时区跟 events 表的 +8h 对齐；其他时区 user 可能 off-by-one，影响很小。
+// 7 列 × 5 行 = 35 格，前 5 格透明 pad，后 30 格按时间排（左到右、上到下都是从远到近）。
+// 最后一格 = 今天（带 outline）。BJT 时区下 user 本地时区跟 events 表的 +8h 对齐。
 function renderContribGrid(activeDates) {
   if (!activeDates) return '<span class="muted">—</span>';
   const set = new Set(String(activeDates).split(','));
   const today = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   let html = '<div class="contrib">';
+  for (let p = 0; p < 5; p++) html += '<span class="pad"></span>';
   for (let i = 29; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
@@ -751,14 +874,49 @@ function renderContribGrid(activeDates) {
   return html + '</div>';
 }
 
+// 把原始 UA 翻译成 "macOS · Chrome 120" 这种人话。识别不出的退到 "其他设备"。
+// 主流就这几个 device family + browser，没必要上 ua-parser-js 依赖。
+function parseUA(ua) {
+  if (!ua) return { device: '未知', browser: '' };
+  // 顺序很重要：先匹配更具体的，否则 Mobile Safari 会被当成普通 Safari
+  let device = '其他';
+  if (/iPhone/i.test(ua)) device = 'iPhone';
+  else if (/iPad/i.test(ua)) device = 'iPad';
+  else if (/Android/i.test(ua)) device = 'Android';
+  else if (/Macintosh/i.test(ua)) device = 'Mac';
+  else if (/Windows/i.test(ua)) device = 'Windows';
+  else if (/Linux/i.test(ua)) device = 'Linux';
+
+  let browser = '';
+  // 微信内置浏览器优先识别（覆盖 Safari/Chrome 内核）
+  if (/MicroMessenger/i.test(ua)) browser = '微信';
+  else if (/Weibo/i.test(ua)) browser = '微博';
+  else if (/Edg\//i.test(ua)) browser = 'Edge';
+  else if (/OPR\/|Opera/i.test(ua)) browser = 'Opera';
+  else if (/Firefox/i.test(ua)) browser = 'Firefox';
+  else if (/Chrome\//i.test(ua) && !/Chromium/i.test(ua)) browser = 'Chrome';
+  else if (/CriOS/i.test(ua)) browser = 'Chrome (iOS)';
+  else if (/FxiOS/i.test(ua)) browser = 'Firefox (iOS)';
+  else if (/Safari/i.test(ua)) browser = 'Safari';
+  // Chrome 版本号
+  const m = ua.match(/(?:Chrome|CriOS|Edg|Firefox|FxiOS|Version)\/(\d+)/);
+  if (m && browser) browser += ' ' + m[1];
+
+  return { device, browser };
+}
+
 async function loadDevices() {
   const tb = document.querySelector('#tbl-devices tbody');
   try {
     const d = await getJson('/api/admin/analytics?metric=top-devices');
     if (!d.devices.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">无数据</td></tr>'; return; }
     tb.innerHTML = d.devices.map(r => {
-      // 只给 active_days >= 5 的 device 渲染方格，其他显示 "—" 减视觉噪声
       const grid = r.active_days >= 5 ? renderContribGrid(r.active_dates) : '<span class="muted">—</span>';
+      const ua = parseUA(r.ua_sample || '');
+      const uaCell = '<div class="ua-cell">'
+        + '<div class="device-name">' + ua.device + (ua.browser ? ' · ' + ua.browser : '') + '</div>'
+        + '<div class="ua-raw" title="' + (r.ua_sample || '').replace(/"/g, '&quot;') + '">' + (r.ua_sample || '—') + '</div>'
+        + '</div>';
       return '<tr><td>' + r.device_id + '</td>'
         + '<td class="num">' + fmt(r.events) + '</td>'
         + '<td class="num">' + fmt(r.active_days) + '</td>'
@@ -766,10 +924,72 @@ async function loadDevices() {
         + '<td>' + r.first_seen + '</td>'
         + '<td>' + r.last_seen + '</td>'
         + '<td>' + grid + '</td>'
-        + '<td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.ua_sample || '').replace(/"/g,'&quot;') + '">' + (r.ua_sample || '—') + '</td>'
+        + '<td style="max-width:340px">' + uaCell + '</td>'
         + '</tr>';
     }).join('');
   } catch (e) { tb.innerHTML = '<tr><td colspan="8" class="err">' + e.message + '</td></tr>'; }
+}
+
+async function loadDrawerBySource() {
+  const chart = echarts.init(document.getElementById('ch-drawer-source'), 'dark', { renderer: 'canvas' });
+  try {
+    const d = await getJson('/api/admin/analytics?metric=drawer-by-source');
+    if (!d.sources.length) {
+      document.getElementById('ch-drawer-source').innerHTML = '<div class="loading">7 天无 drawer 打开数据</div>';
+      return;
+    }
+    const SRC_LABELS = {
+      x_list: 'X 动态', github: 'GitHub 开源', product_hunt: '产品 (PH)',
+      clawhub: 'Skill (龙虾)', hf_paper: '论文 (HF)', huodongxing: '活动',
+    };
+    const rows = d.sources.slice().reverse();
+    const names = rows.map(r => SRC_LABELS[r.source] || r.source || '未知');
+    const opens = rows.map(r => r.opens);
+    const devices = rows.map(r => r.devices);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 110, right: 30, top: 30, bottom: 30 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { data: ['打开次数', '设备数'], textStyle: { color: '#9ca3af' } },
+      xAxis: { type: 'value', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+      yAxis: { type: 'category', data: names, axisLabel: { color: '#d1d5db', fontSize: 11 } },
+      series: [
+        { name: '打开次数', type: 'bar', data: opens, itemStyle: { color: COLORS[1] } },
+        { name: '设备数', type: 'bar', data: devices, itemStyle: { color: COLORS[0] } },
+      ],
+    });
+  } catch (e) { document.getElementById('ch-drawer-source').innerHTML = '<div class="err">' + e.message + '</div>'; }
+}
+
+async function loadFeedDepth() {
+  const chart = echarts.init(document.getElementById('ch-feed-depth'), 'dark', { renderer: 'canvas' });
+  try {
+    const d = await getJson('/api/admin/analytics?metric=feed-depth');
+    if (!d.days.length) {
+      document.getElementById('ch-feed-depth').innerHTML = '<div class="loading">无浏览数据</div>';
+      return;
+    }
+    const days = d.days.map(r => r.day);
+    const avgImp = d.days.map(r => Math.round((r.avg_impressions || 0) * 10) / 10);
+    const avgDrawer = d.days.map(r => Math.round((r.avg_drawer_opens || 0) * 10) / 10);
+    const totalImp = d.days.map(r => r.total_impressions || 0);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 50, right: 50, top: 30, bottom: 30 },
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['人均曝光 item', '人均打开 drawer', '曝光总数'], textStyle: { color: '#9ca3af' } },
+      xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280', fontSize: 10 } },
+      yAxis: [
+        { type: 'value', name: '人均', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+        { type: 'value', name: '曝光总数', axisLabel: { color: '#6b7280' }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: '人均曝光 item', type: 'line', data: avgImp, smooth: true, itemStyle: { color: COLORS[0] }, areaStyle: { opacity: 0.2 } },
+        { name: '人均打开 drawer', type: 'line', data: avgDrawer, smooth: true, itemStyle: { color: COLORS[2] }, lineStyle: { type: 'dashed' } },
+        { name: '曝光总数', type: 'line', data: totalImp, smooth: true, yAxisIndex: 1, itemStyle: { color: COLORS[1] } },
+      ],
+    });
+  } catch (e) { document.getElementById('ch-feed-depth').innerHTML = '<div class="err">' + e.message + '</div>'; }
 }
 
 async function loadChannels() {
@@ -795,7 +1015,7 @@ async function loadChannels() {
 
 // Resize charts on window resize so cards don't overflow on mobile/tablet.
 window.addEventListener('resize', () => {
-  ['ch-dau','ch-session','ch-events','ch-error-trend'].forEach(id => {
+  ['ch-dau','ch-session','ch-events','ch-error-trend','ch-drawer-source','ch-feed-depth'].forEach(id => {
     const el = document.getElementById(id);
     if (el && el.__echarts__) {
       const inst = echarts.getInstanceByDom(el);
@@ -810,6 +1030,8 @@ Promise.all([
   loadFunnel(),
   loadSession(),
   loadChannels(),
+  loadDrawerBySource(),
+  loadFeedDepth(),
   loadRetention(),
   loadEvents(),
   loadErrorTrend(),

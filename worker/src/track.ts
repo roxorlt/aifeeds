@@ -22,6 +22,8 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'favorite_toggle', 'subscribe_toggle',
   // 视频起播（诊断 mobile/微信 autoplay 受限）
   'video_autoplay_attempt', 'video_autoplay_blocked', 'video_play_start',
+  // 视频有效播放（连续播放 ≥3s，IAB/Twitter/Meta 短视频 view 标准）
+  'video_effective_play',
   // 性能
   'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb',
   // 错误
