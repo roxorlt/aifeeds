@@ -34,6 +34,7 @@ import {
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
   backfillNestedXQuoteForXTweet,
+  resolveTcoLinksForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
 
@@ -155,6 +156,14 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // check-longform 是 index 6,只在它 fulfilled 时取值
     const longformResult = results[6];
     const longform = longformResult.status === 'fulfilled' ? longformResult.value : null;
+
+    // ─── Step 1.5: resolve t.co shortlinks ───────────────────────
+    // 2026-05-21:fan-out 之后跑,确保 quote_of / reply_of / retweet_of 已写入。
+    // 扫 L1/L2/L3 共 6 个 path 哪些 content 是裸 t.co,HEAD resolve 写
+    // content_resolved_url。failed 也标 failed_at 防重试。
+    await step.do('resolve-tco-links', RETRY, () =>
+      safeStep('resolve-tco-links', itemId, () => resolveTcoLinksForXTweet(this.env, itemId)),
+    );
 
     // ─── Step 2: longform fetch via ScrapeBadger (条件) ──────────
     // 2026-05-18 fix:longform fetch 也包 try 防 throw 阻塞 step 3
