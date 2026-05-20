@@ -22,6 +22,14 @@ if [[ -z "${BRIDGE_SECRET:-}" ]]; then
 fi
 HOST="${HOST:-https://staging-api.ai-feeds.com}"
 
+# DEV_TOKEN：bot UA gate bypass（远端 staging/prod 拦 curl 默认 UA）。
+# .cc 中转服务实际调用时不需要这个 — 它有正常浏览器 UA。
+# 仅 dev/OPS curl smoke 测试用。
+DEV_TOKEN_HEADER=()
+if [[ -n "${DEV_TOKEN:-}" ]]; then
+  DEV_TOKEN_HEADER=(-H "X-Dev-Token: $DEV_TOKEN")
+fi
+
 # 生成一个唯一 openid（带时间戳，避免与之前测试用户冲突）
 TEST_OPENID="test_openid_$(date +%s)_$(openssl rand -hex 4)"
 
@@ -48,6 +56,7 @@ run_case() {
     -H "Content-Type: application/json" \
     -H "X-Bridge-Timestamp: $ts" \
     -H "X-Bridge-Signature: $sig" \
+    "${DEV_TOKEN_HEADER[@]}" \
     -d "$body")
   echo "  HTTP: $HTTP_CODE"
   echo "  body: $(cat /tmp/wechat-exchange-resp.json | head -c 500)"
