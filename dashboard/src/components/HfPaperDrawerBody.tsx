@@ -33,6 +33,7 @@ import type {
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useIsNarrow } from "../lib/breakpoint";
+import { IconPdf } from "./icons";
 
 // 评论 HTML 渲染走 DOMPurify sanitize(BE 给的 content_html 来自 HF 用户输入,
 // XSS 风险必须过滤)。afterSanitizeAttributes hook 强制所有 <a> 加 target=_blank。
@@ -59,7 +60,6 @@ interface Props {
   item: Item;
 }
 
-type TabKey = "raw" | "analysis";
 type AbstractTab = "translated" | "original";
 
 // HF 拆解 markdown 渲染样式 —— 轻量,只覆盖 DeepSeek pro 实际会用的元素
@@ -423,8 +423,7 @@ export function HfPaperDrawerBody({ item }: Props) {
         ? "16 / 9"             // 横向 wide
         : "4 / 3";              // 横向偏方(1.0 - 1.5)
 
-  // tab + 内部状态
-  const [activeTab, setActiveTab] = useState<TabKey>("raw");
+  // 内部状态(2026-05-20: 砍掉 raw/analysis tab,单栏顺序渲染,activeTab 不再需要)
   const [authorsExpanded, setAuthorsExpanded] = useState(false);
   const [abstractTab, setAbstractTab] = useState<AbstractTab>("translated");
 
@@ -596,75 +595,40 @@ export function HfPaperDrawerBody({ item }: Props) {
         </div>
       )}
 
-      {/* ─── Tabs (PM v3 2.2: 下移到关键词模块下方;sticky 顶部) ─────── */}
-      <div className="sticky top-0 z-10 border-b border-neutral-200 bg-white">
-        <div className="flex px-5">
-          <TabButton active={activeTab === "raw"} onClick={() => setActiveTab("raw")}>
-            原始信息
-          </TabButton>
-          <TabButton active={activeTab === "analysis"} onClick={() => setActiveTab("analysis")}>
-            拆解阅读
-          </TabButton>
+      {/* ─── 原文PDF (PM 2026-05-20: tabs 砍掉,单栏顺序渲染) ─────── */}
+      {arxivId && (
+        <div className="border-b border-neutral-200 p-5">
+          <SectionTitle>原文PDF</SectionTitle>
+          <ArxivHtmlIframe arxivId={arxivId} />
         </div>
+      )}
+
+      {/* ─── 拆解阅读 (TL;DR + 7 维度) ─────────────────────────────── */}
+      <div className="border-b border-neutral-200">
+        <AnalysisTab dna={dna} />
       </div>
 
-      {/* ─── Tab body ───────────────────────────────────────────────────── */}
-      {activeTab === "raw" ? (
-        <RawInfoTab
-          arxivId={arxivId}
-          arxivUrl={arxivUrl}
-          projectPage={projectPage}
-          githubUrl={githubUrl}
-          discussionComments={discussionComments}
-          discussionFetchedAt={discussionFetchedAt}
+      {/* ─── 评论 ─────────────────────────────────────────────────── */}
+      <div className="border-b border-neutral-200 p-5">
+        <CommentsSection
+          comments={discussionComments}
+          fetchedAt={discussionFetchedAt}
           discussionUrl={arxivId ? `https://huggingface.co/papers/${arxivId}#community` : null}
           commentsCount={numComments}
         />
-      ) : (
-        <AnalysisTab dna={dna} />
-      )}
+      </div>
+
+      {/* ─── 外部链接 ─────────────────────────────────────────────── */}
+      <div className="p-5">
+        <SectionTitle>外部链接</SectionTitle>
+        <div className="flex flex-wrap gap-2">
+          <ExternalLinkPill href={arxivUrl} label="arXiv 原文" />
+          {githubUrl && <ExternalLinkPill href={githubUrl} label="GitHub 仓库" />}
+          {projectPage && <ExternalLinkPill href={projectPage} label="项目主页" />}
+        </div>
+      </div>
     </div>
   );
-}
-
-// ─── Tab button ───────────────────────────────────────────────────────────
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      className={
-        active
-          ? "border-b-2 border-neutral-900 px-4 py-3 text-[14px] font-semibold text-neutral-900"
-          : "border-b-2 border-transparent px-4 py-3 text-[14px] font-medium text-neutral-500 hover:text-neutral-700"
-      }
-    >
-      {children}
-    </button>
-  );
-}
-
-// ─── Tab 1: 原始信息 (全文 → 评论 → 外链) ───────────────────────────────
-interface RawInfoProps {
-  arxivId: string | undefined;
-  arxivUrl: string;
-  projectPage: string | null;
-  githubUrl: string | null;
-  discussionComments: HfDiscussionComment[];
-  discussionFetchedAt: string | null | undefined;
-  discussionUrl: string | null;
-  commentsCount: number | undefined;
 }
 
 // 正文阅读 — PM v6 方案 E + 2026-05-20 修订:
@@ -691,43 +655,16 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
   // ────────────────────────────────────────────────
   if (isNarrow) {
     return (
-      <div className="space-y-2.5">
-        <a
-          href={pdfUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-sky-300 bg-sky-50/60 px-4 py-4 text-[14px] font-medium text-sky-900 active:bg-sky-100"
-        >
-          <span className="text-[18px]">📄</span>
-          <span>打开 PDF 全文</span>
-          <span className="text-[12px] text-sky-700">arxiv {arxivId}.pdf</span>
-        </a>
-        <p className="text-center text-[12px] text-neutral-500">
-          点击后调起微信内置 PDF 浏览器(全屏 + 双指缩放)
-        </p>
-        {/* 兜底:HTML 版 + ar5iv 易读版 */}
-        <div className="flex flex-wrap items-center justify-center gap-2 text-[12px]">
-          <a
-            href={htmlUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 active:bg-neutral-100"
-          >
-            arxiv HTML ↗
-          </a>
-          <a
-            href={`https://ar5iv.labs.arxiv.org/html/${arxivId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 active:bg-neutral-100"
-          >
-            ar5iv 易读版 ↗
-          </a>
-        </div>
-      </div>
+      <a
+        href={pdfUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-sky-300 bg-sky-50/60 px-4 py-4 text-[14px] font-medium text-sky-900 active:bg-sky-100"
+      >
+        <IconPdf className="h-5 w-5" />
+        <span>打开论文.pdf</span>
+      </a>
     );
   }
 
@@ -810,44 +747,6 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
   );
 }
 
-function RawInfoTab(p: RawInfoProps) {
-  return (
-    <>
-      {/* 正文 — PM v5 方案 E: 嵌 arxiv.org/html LaTeXML iframe(arxiv 实测无
-          X-Frame-Options,允许任意域嵌)+ 上方沉浸式翻译 banner + 下方 PDF chip
-          + 新标签兜底。BE 已砍 ar5iv 翻译(workflow Step 2 省 5-10 min/paper),
-          不再渲染 full_text_zh markdown(字段废弃)。 */}
-      {p.arxivId && (
-        <div className="border-b border-neutral-200 p-5">
-          <SectionTitle>正文</SectionTitle>
-          <ArxivHtmlIframe arxivId={p.arxivId} />
-        </div>
-      )}
-
-      {/* 评论 — discussion_fetched_at NULL 显加载中,有数据展示评论列表 */}
-      <div className="border-b border-neutral-200 p-5">
-        <CommentsSection
-          comments={p.discussionComments}
-          fetchedAt={p.discussionFetchedAt}
-          discussionUrl={p.discussionUrl}
-          commentsCount={p.commentsCount}
-        />
-      </div>
-
-      {/* 外部链接 — PM v5: arxiv / GitHub / 项目主页 三个同款 chip 并排,
-          arxiv 链接默认指向 abs 页面(用户可在 arxiv 页面点击 Download PDF)。
-          砍掉之前的 PDF 子按钮 + 「打开」按钮的复合卡片样式,统一为 chip。 */}
-      <div className="p-5">
-        <SectionTitle>外部链接</SectionTitle>
-        <div className="flex flex-wrap gap-2">
-          <ExternalLinkPill href={p.arxivUrl} label="arXiv 原文" />
-          {p.githubUrl && <ExternalLinkPill href={p.githubUrl} label="GitHub 仓库" />}
-          {p.projectPage && <ExternalLinkPill href={p.projectPage} label="项目主页" />}
-        </div>
-      </div>
-    </>
-  );
-}
 
 // ─── 评论 section (RawInfoTab 内) ────────────────────────────────────────
 function CommentsSection({

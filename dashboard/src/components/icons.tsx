@@ -286,6 +286,33 @@ export function IconCopy({ className }: IconProps) {
   );
 }
 
+// PDF document icon — Adobe-ish 红底白字 PDF 标识,通用 PDF 视觉惯例。
+// 用于「打开论文 .pdf」按钮等场景。颜色硬编码不走 currentColor,因为
+// 红色是 PDF 品牌识别的一部分,跟周围按钮文字色保持区分。
+export function IconPdf({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || "h-[18px] w-[18px]"} aria-hidden="true">
+      {/* 文档主体(红底) */}
+      <path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#DC2626" />
+      {/* 右上折角(深一档红) */}
+      <path d="M14 2v6h6" fill="#B91C1C" />
+      {/* PDF 字 */}
+      <text
+        x="12"
+        y="17.5"
+        textAnchor="middle"
+        fontSize="6"
+        fontWeight="900"
+        fill="#fff"
+        fontFamily="ui-sans-serif, system-ui, sans-serif"
+        letterSpacing="-0.4"
+      >
+        PDF
+      </text>
+    </svg>
+  );
+}
+
 // HuggingFace 标志风格 logo — 黄色「拥抱脸」笑脸 + 双手举起。
 // 简化版纯几何形:头(圆) + 两眼(椭圆) + 嘴(弧) + 两手(圆角矩形)。
 // HF 品牌色 #FFD21E,但 SourceIcon 通常受父级 className 控制颜色,这里走 currentColor
