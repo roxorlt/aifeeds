@@ -449,7 +449,13 @@ const DASHBOARD_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ai-feeds admin · 仪表盘</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- echarts: cdnjs (Cloudflare CDN) 国内访问比 jsdelivr 稳；fallback 到 jsdelivr -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<script>
+  if (typeof echarts === 'undefined') {
+    document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"><\/script>');
+  }
+</script>
 <style>
 ${ADMIN_SHARED_CSS}
   .kpi-row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 24px; }
@@ -604,9 +610,27 @@ function setMeta() {
 setMeta();
 setInterval(setMeta, 30000);
 
+// echarts 加载失败兜底：所有 .chart 容器换成提示，table 类继续 load
+if (typeof echarts === 'undefined') {
+  console.error('[admin/dashboard] echarts CDN 加载失败，图表区降级为文字提示');
+  document.querySelectorAll('.chart').forEach(function(el) {
+    el.innerHTML = '<div class="err">echarts CDN 加载失败 — 检查网络 / 刷新页面 / 浏览器开发者工具看具体错误</div>';
+  });
+}
+
 async function getJson(url) {
   const r = await fetch(url, { credentials: 'include' });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+  // CF Access JWT 过期时 fetch 会跟到 cloudflareaccess.com 拿 HTML 登录页 — 检测
+  // 一下：URL 跨域或 Content-Type 不是 JSON 都给 user 提示重登
+  if (r.redirected && !r.url.startsWith(location.origin)) {
+    throw new Error('CF Access 会话过期，刷新整页重新登录');
+  }
+  const ct = r.headers.get('content-type') || '';
+  if (!r.ok) throw new Error('HTTP ' + r.status + (ct.includes('text') ? ' · ' + (await r.text()).slice(0, 80) : ''));
+  if (!ct.includes('application/json')) {
+    const sample = (await r.text()).slice(0, 80);
+    throw new Error('非 JSON 响应（' + ct + '）: ' + sample);
+  }
   return r.json();
 }
 
