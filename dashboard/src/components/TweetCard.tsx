@@ -499,10 +499,16 @@ export function TweetCard({
   const isThread = Boolean(extra.thread_root_id);
   const replyOf = extra.reply_of;
   const isReply = Boolean(extra.reply_to_id) || Boolean(extra.reply_of_id);
-  const quoteOf = extra.quote_of;
+  // PM 2026-05-20:retweet 场景下,主卡显示已翻转到 retweet_of(被转推者),
+  // 嵌套 quote 也应该取 retweet_of.quote_of(被转推者引用的那一推),
+  // 而不是 top-level extra.quote_of(retweet 时 top-level 通常空)
+  // 例:tweet 2056769896458166631 = levie RT fchollet,fchollet 又 quote 了第三方,
+  // 流内卡片之前完全丢这第二层
+  const quoteOf = (isRetweet && retweetOf?.quote_of) ? retweetOf.quote_of : extra.quote_of;
+  const quoteOfId = (isRetweet && retweetOf) ? retweetOf.quote_of_id : extra.quote_of_id;
   // Only show the "❝ 引用推文" banner if we have quote_of_id but no full quote_of data
   // (fallback for pre-backfill tweets). If we have quote_of, render nested card instead.
-  const hasQuotePlaceholder = Boolean(extra.quote_of_id) && !quoteOf;
+  const hasQuotePlaceholder = Boolean(quoteOfId) && !quoteOf;
   // Reply placeholder when we know it's a reply but parent fetch hasn't run yet.
   const hasReplyPlaceholder = isReply && !replyOf;
 

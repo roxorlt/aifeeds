@@ -62,6 +62,10 @@ export interface QuoteOf {
   media?: MediaItem[] | null;
   published_at?: string | null;
   metrics?: Metrics | null;
+  // 嵌套引用(BE apiToQuoteOf 输出 — quote_of_id 始终在,quote_of 取决于 API
+  // 是否返 inline)。FE 渲染最多到 depth=2,不再继续递归。
+  quote_of_id?: string | null;
+  quote_of?: QuoteOf | null;
 }
 
 export interface LinkCard {
