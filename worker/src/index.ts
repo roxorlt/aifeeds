@@ -22,6 +22,7 @@ import {
   triggerXWorkflowForItem,
   runBackfillTruncatedFromSyndication,
   classifyAndTranslateForXTweet,
+  runBackfillL3Translations,
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
 } from './enrich';
@@ -860,6 +861,24 @@ export default {
         const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '400', 10), 0);
         const recover = u.searchParams.get('recover') === '1';
         const result = await runBackfillQuotes(env, limit, rateSleepMs, recover);
+        return jsonResponse(result, 200, request, env);
+      }
+      // Bug #1 backfill (2026-05-20): 历史 X 推 L3 嵌套翻译漏洞补全
+      // 选条件:is_relevant=1 + workflow_completed_at 有 + retweet_of.quote_of / reply_of.quote_of /
+      // quote_of.quote_of 任一 path 有 content 但 content_translated=null。
+      // 调 classifyAndTranslateForXTweet(prompt + 入库已升级覆盖 L3)。
+      // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=500 (DeepSeek 速率保护)
+      if (path === '/api/admin/backfill-l3-translations-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '500', 10), 0);
+        const result = await runBackfillL3Translations(env, limit, rateSleepMs);
         return jsonResponse(result, 200, request, env);
       }
       // D2: 一次性清掉历史脏数据 — 老 chrome scraper 抓时把 quoted preview
@@ -3069,6 +3088,17 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
     // 跳过 backfill-retweet 的历史数据(P0 fix 后无法通过 workflow 路径修)。
     const recover = url.searchParams.get('recover') === '1';
     const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-l3-translations') {
+    // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
+    // 跑 classifyAndTranslateForXTweet,prompt + 入库新版覆盖 retweet_of.quote_of /
+    // reply_of.quote_of / quote_of.quote_of 三条 path 的 content_translated。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillL3Translations(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-link-card') {
