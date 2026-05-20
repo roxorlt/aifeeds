@@ -28,15 +28,21 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricSessionDuration(env));
     case 'errors':
       return jsonRes(await metricErrors(env));
+    case 'error-trend':
+      return jsonRes(await metricErrorTrend(env));
     case 'top-devices':
       return jsonRes(await metricTopDevices(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
         'overview', 'dau-trend', 'retention', 'event-distribution',
-        'funnel', 'session-duration', 'errors', 'top-devices',
+        'funnel', 'session-duration', 'errors', 'error-trend', 'top-devices',
       ] }, 400);
   }
 }
+
+// Error event types — 与 metricErrors 保持一致，error-trend 走同一名单，
+// event-distribution 用来排除（避免 events 列表跟错误模块重复）。
+const ERROR_EVENT_TYPES = ['api_error', 'js_error', 'feed_load_error', 'image_load_error', 'unhandled_promise'];
 
 async function metricOverview(env: Env) {
   const row = await env.DB.prepare(`
@@ -90,14 +96,18 @@ async function metricRetention(env: Env) {
 }
 
 async function metricEventDistribution(env: Env) {
+  // 错误类事件单独由 metric=errors / error-trend 呈现，event-distribution 排除掉
+  // 防止两个模块重复占用顶部位置。ERROR_EVENT_TYPES 名单见文件顶部。
+  const placeholders = ERROR_EVENT_TYPES.map(() => '?').join(',');
   const rs = await env.DB.prepare(`
     SELECT event_type, COUNT(*) AS events, COUNT(DISTINCT device_id) AS devices
     FROM events
     WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND event_type NOT IN (${placeholders})
     GROUP BY event_type
     ORDER BY events DESC
     LIMIT 25
-  `).all();
+  `).bind(...ERROR_EVENT_TYPES).all();
   return { events: rs.results };
 }
 
@@ -207,6 +217,25 @@ async function metricErrors(env: Env) {
     LIMIT 10
   `).all();
   return { by_msg: byMsg.results, by_device: byDevice.results };
+}
+
+async function metricErrorTrend(env: Env) {
+  // 最近 30 天每天每类错误数 + 独立 device 数。前端把它 pivot 成
+  // stacked bar（x=日期 / y=次数 / 每个 event_type 一段颜色）。
+  const placeholders = ERROR_EVENT_TYPES.map(() => '?').join(',');
+  const rs = await env.DB.prepare(`
+    SELECT
+      date(occurred_at/1000,'unixepoch','+8 hours') AS day,
+      event_type,
+      COUNT(*) AS errors,
+      COUNT(DISTINCT device_id) AS devices
+    FROM events
+    WHERE event_type IN (${placeholders})
+      AND occurred_at > (strftime('%s','now')-30*86400)*1000
+    GROUP BY day, event_type
+    ORDER BY day, event_type
+  `).bind(...ERROR_EVENT_TYPES).all();
+  return { rows: rs.results };
 }
 
 async function metricTopDevices(env: Env) {
@@ -324,15 +353,21 @@ ${adminNavHtml('dashboard')}
 
   <div class="card">
     <h2>🧩 事件类型分布</h2>
-    <p class="hint">7 天内 top 事件类型（按次数）</p>
+    <p class="hint">7 天内 top 事件类型（按次数，排除错误类，错误见下方专门模块）</p>
     <div class="chart tall" id="ch-events"></div>
   </div>
 
-  <div class="card">
-    <h2>⚠️ 错误明细</h2>
-    <p class="hint">7 天内 api_error / js_error / feed_load_error 等的分桶（timeout_5000ms 是 fetch 超时，不是后端 500）</p>
+  <div class="card wide">
+    <h2>⚠️ 错误趋势</h2>
+    <p class="hint">最近 30 天每天各类前端错误次数（堆叠柱状）。timeout_5000ms 是 fetch 5s 超时，不是后端 500</p>
+    <div class="chart tall" id="ch-error-trend"></div>
+  </div>
+
+  <div class="card wide">
+    <h2>⚠️ 错误明细（7 天 top 20）</h2>
+    <p class="hint">同一 error_msg 聚合，可看具体超时端点 / JS 堆栈 / 网络抖动等真因。配合上面的「错误趋势」一起看</p>
     <div style="overflow-x:auto"><table id="tbl-errors"><thead><tr>
-      <th>type</th><th>error_msg</th><th class="num">errors</th><th class="num">devices</th>
+      <th>类型</th><th>error_msg</th><th class="num">errors</th><th class="num">devices</th>
     </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
@@ -433,18 +468,23 @@ async function loadDauTrend() {
     const days = d.days.map(r => r.day);
     const dau = d.days.map(r => r.dau);
     const evs = d.days.map(r => r.events);
+    // 人均事件数 = 事件总数 / DAU。挂左轴（跟 DAU 量级相近，10-200），
+    // 虚线区分。判断「打开了就刷一刷」vs「打开了快速离开」很有用。
+    const perUser = d.days.map(r => r.dau > 0 ? +(r.events / r.dau).toFixed(1) : 0);
     chart.setOption({
       backgroundColor: 'transparent',
       grid: { left: 50, right: 50, top: 30, bottom: 30 },
       tooltip: { trigger: 'axis' },
-      legend: { data: ['DAU', '事件数'], textStyle: { color: '#9ca3af' } },
+      legend: { data: ['DAU', '人均事件数', '事件数'], textStyle: { color: '#9ca3af' } },
       xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280', fontSize: 10 } },
       yAxis: [
-        { type: 'value', name: 'DAU', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+        { type: 'value', name: 'DAU / 人均', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
         { type: 'value', name: '事件数', axisLabel: { color: '#6b7280' }, splitLine: { show: false } },
       ],
       series: [
         { name: 'DAU', type: 'line', data: dau, smooth: true, itemStyle: { color: COLORS[0] }, areaStyle: { opacity: 0.2 } },
+        { name: '人均事件数', type: 'line', data: perUser, smooth: true, itemStyle: { color: COLORS[2] },
+          lineStyle: { type: 'dashed', width: 2 } },
         { name: '事件数', type: 'line', data: evs, smooth: true, yAxisIndex: 1, itemStyle: { color: COLORS[1] } },
       ],
     });
@@ -552,6 +592,54 @@ async function loadErrors() {
   } catch (e) { tb.innerHTML = '<tr><td colspan="4" class="err">' + e.message + '</td></tr>'; }
 }
 
+async function loadErrorTrend() {
+  const chart = echarts.init(document.getElementById('ch-error-trend'), 'dark', { renderer: 'canvas' });
+  try {
+    const d = await getJson('/api/admin/analytics?metric=error-trend');
+    if (!d.rows.length) {
+      document.getElementById('ch-error-trend').innerHTML = '<div class="loading">最近 30 天无错误数据</div>';
+      return;
+    }
+    // pivot: rows[{day,event_type,errors}] → days[] + 每个 event_type 一个 series
+    const daySet = new Set();
+    const typeSet = new Set();
+    const cell = {};
+    for (const r of d.rows) {
+      daySet.add(r.day);
+      typeSet.add(r.event_type);
+      if (!cell[r.day]) cell[r.day] = {};
+      cell[r.day][r.event_type] = r.errors;
+    }
+    const days = Array.from(daySet).sort();
+    const types = Array.from(typeSet);
+    const series = types.map((t, i) => ({
+      name: evtZh(t),
+      type: 'bar',
+      stack: 'errors',
+      data: days.map(day => cell[day] && cell[day][t] || 0),
+      itemStyle: { color: COLORS[i % COLORS.length] },
+    }));
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 50, right: 30, top: 30, bottom: 50 },
+      tooltip: {
+        trigger: 'axis', axisPointer: { type: 'shadow' },
+        formatter: (params) => {
+          const day = params[0].axisValue;
+          const total = params.reduce((s, p) => s + (p.value || 0), 0);
+          const lines = params.filter(p => p.value > 0).map(p =>
+            p.marker + p.seriesName + ': <b>' + fmt(p.value) + '</b>');
+          return '<b>' + day + '</b> · 合计 ' + fmt(total) + '<br/>' + lines.join('<br/>');
+        },
+      },
+      legend: { data: types.map(evtZh), textStyle: { color: '#9ca3af' }, bottom: 0, type: 'scroll' },
+      xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280', fontSize: 10 } },
+      yAxis: { type: 'value', name: '错误数', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+      series,
+    });
+  } catch (e) { document.getElementById('ch-error-trend').innerHTML = '<div class="err">' + e.message + '</div>'; }
+}
+
 async function loadDevices() {
   const tb = document.querySelector('#tbl-devices tbody');
   try {
@@ -572,7 +660,7 @@ async function loadDevices() {
 
 // Resize charts on window resize so cards don't overflow on mobile/tablet.
 window.addEventListener('resize', () => {
-  ['ch-dau','ch-session','ch-events'].forEach(id => {
+  ['ch-dau','ch-session','ch-events','ch-error-trend'].forEach(id => {
     const el = document.getElementById(id);
     if (el && el.__echarts__) {
       const inst = echarts.getInstanceByDom(el);
@@ -588,6 +676,7 @@ Promise.all([
   loadSession(),
   loadRetention(),
   loadEvents(),
+  loadErrorTrend(),
   loadErrors(),
   loadDevices(),
 ]);
