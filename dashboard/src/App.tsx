@@ -9,6 +9,9 @@ const TweetDrawer = lazy(() =>
   import("./components/TweetDrawer").then((m) => ({ default: m.TweetDrawer })),
 );
 
+// PR3 quote 嵌套小卡点击 → 站内 modal。轻量(无 markdown 依赖),不 lazy
+import { QuoteSnapshotModal } from "./components/QuoteSnapshotModal";
+
 import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
@@ -550,6 +553,7 @@ function DashboardHome() {
       <Suspense fallback={null}>
         <TweetDrawer />
       </Suspense>
+      <QuoteSnapshotModal />
     </div>
     </DrawerProvider>
   );

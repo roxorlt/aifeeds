@@ -763,7 +763,7 @@ export function TweetCard({
               line 连接。父推渲染移到 article 顶部见下方 ReplyParentRow 块。 */}
 
           {/* Quoted tweet (nested card) */}
-          {quoteOf && <QuotedTweet quote={quoteOf} embedded={embedded} />}
+          {quoteOf && <QuotedTweet quote={quoteOf} />}
 
           {/* Link preview card (URL auto-expanded by X) */}
           {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}

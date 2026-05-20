@@ -1,13 +1,11 @@
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { QuoteOf } from "../types";
 import { proxyImg, timeAgo } from "../lib/utils";
+import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { VerifiedBadge } from "./icons";
 
 interface Props {
   quote: QuoteOf;
-  /** B1: 嵌套小卡在 drawer 内（embedded=true）才允许点击跳 X；feed 流内点击
-   *  应该让外层主卡 click 处理（先开抽屉），不直接跳出站。 */
-  embedded?: boolean;
   /** PM 2026-05-20: 支持递归 1 次(retweet→quote→quote 或 quote→quote)。
    *  depth=0 默认主调用,depth=1 内嵌第二层,>=2 不再渲染避免无限套娃。
    *  内嵌层视觉降级:更小 padding + 不显 cover image + placeholder 兜底 */
@@ -16,13 +14,12 @@ interface Props {
 
 const MAX_QUOTE_DEPTH = 2;
 
-export function QuotedTweet({ quote, embedded, depth = 0 }: Props) {
+export function QuotedTweet({ quote, depth = 0 }: Props) {
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
+  const openSnapshot = useQuoteSnapshotStore((s) => s.open);
   const handle = quote.handle || "";
   const author = quote.author || handle || "Unknown";
-  const url =
-    quote.id && handle ? `https://x.com/${handle}/status/${quote.id}` : "";
   const images = (quote.media || []).filter((m) => m.type === "image");
   const firstImage = images[0];
   const isNested = depth >= 1;
@@ -31,30 +28,22 @@ export function QuotedTweet({ quote, embedded, depth = 0 }: Props) {
   const innerQuoteId = quote.quote_of_id;
   const canRecurseInner = depth + 1 < MAX_QUOTE_DEPTH;
 
-  // B1: drawer 内（embedded）才允许跳 X;feed 流内不阻止 propagation,
-  // 让事件冒泡到外层 article 触发 openTweet。嵌套第二层时 stopPropagation
-  // 防止误触外层
-  const handleClick = embedded
-    ? (e: ReactMouseEvent) => {
-        e.stopPropagation();
-        if (url) window.open(url, "_blank");
-      }
-    : isNested
-      ? (e: ReactMouseEvent) => {
-          // 嵌套层任何点击都阻止冒泡,避免外层 quote 误判
-          e.stopPropagation();
-          if (url) window.open(url, "_blank");
-        }
-      : undefined;
+  // PM 2026-05-20 PR3: 所有 quote 小卡点击 → 打开站内 QuoteSnapshotModal
+  // 显示完整 quote 内容(数据从已有 snapshot 取,不调 API)。
+  // - stopPropagation 防冒泡到外层 article 触发 openTweet(主推 drawer);
+  //   流内主卡里点 quote 小卡的意图是看 quote 本身,不是开主推
+  // - 嵌套第二层(depth=1)点击 → 同样开 modal 显示该层 quote
+  const handleClick = (e: ReactMouseEvent) => {
+    e.stopPropagation();
+    openSnapshot(quote);
+  };
 
   return (
     <div
       className={
         isNested
           ? "mt-2 cursor-pointer overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50/40 transition-colors hover:bg-neutral-100"
-          : embedded
-            ? "mt-2.5 cursor-pointer overflow-hidden rounded-2xl border border-neutral-200 bg-white transition-colors hover:bg-neutral-50"
-            : "mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-white"
+          : "mt-2.5 cursor-pointer overflow-hidden rounded-2xl border border-neutral-200 bg-white transition-colors hover:bg-neutral-50"
       }
       onClick={handleClick}
     >
@@ -102,7 +91,7 @@ export function QuotedTweet({ quote, embedded, depth = 0 }: Props) {
 
         {/* 嵌套第二层 quote — 数据有就递归画;只有 id 没对象画 placeholder */}
         {canRecurseInner && innerQuote && (
-          <QuotedTweet quote={innerQuote} embedded={embedded} depth={depth + 1} />
+          <QuotedTweet quote={innerQuote} depth={depth + 1} />
         )}
         {canRecurseInner && !innerQuote && innerQuoteId && (
           <div className="mt-2 rounded-md border border-dashed border-neutral-300 px-2 py-1.5 text-[12px] text-neutral-500">
