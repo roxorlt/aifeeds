@@ -383,8 +383,13 @@ export function TweetDrawer() {
               )}
             </button>
           </div>
-          <div className="min-w-0 truncate px-2 text-center text-sm font-semibold text-neutral-900">
-            {headerTitle}
+          {/* PM 2026-05-20: title 上推后 standin 居中不准 — cell h-10 跟左右
+              button 等高 + flex items-center 让文字精确 cross-axis 居中,
+              避免依赖 grid items-center 时 text line-box 默认 leading 偏移 */}
+          <div className="flex h-10 min-w-0 items-center justify-center px-2">
+            <span className="truncate text-sm font-semibold text-neutral-900">
+              {headerTitle}
+            </span>
           </div>
           <div className="justify-self-end">
             {item && (

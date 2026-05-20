@@ -729,12 +729,15 @@ function CommentsSection({
   }
 
   // fetched_at 有但 comments 为空 → 该论文真的没评论(冷启动 / 新论文常见)
-  // PM 2026-05-20: 砍掉 dashed 容器 + "在 HF 发起第一条讨论"链接,只留灰色文字
+  // PM 2026-05-20: 砍 dashed 容器 + HF 链接,但保持原来的占位高度 + 居中
+  // (评论区不能塌成一行,跟其他模块视觉权重对齐)
   if (comments.length === 0) {
     return (
       <>
         <SectionTitle>评论</SectionTitle>
-        <div className="text-[13px] text-neutral-400">暂无评论</div>
+        <div className="flex min-h-[120px] items-center justify-center text-[13px] text-neutral-400">
+          暂无评论
+        </div>
       </>
     );
   }
