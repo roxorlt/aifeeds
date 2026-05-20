@@ -32,17 +32,34 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricErrorTrend(env));
     case 'top-devices':
       return jsonRes(await metricTopDevices(env));
+    case 'channel-dwell':
+      return jsonRes(await metricChannelDwell(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
         'overview', 'dau-trend', 'retention', 'event-distribution',
-        'funnel', 'session-duration', 'errors', 'error-trend', 'top-devices',
+        'funnel', 'session-duration', 'errors', 'error-trend',
+        'top-devices', 'channel-dwell',
       ] }, 400);
   }
 }
 
 // Error event types — 与 metricErrors 保持一致，error-trend 走同一名单，
-// event-distribution 用来排除（避免 events 列表跟错误模块重复）。
+// event-distribution / dau-trend 用来排除（避免错误事件混进业务统计）。
 const ERROR_EVENT_TYPES = ['api_error', 'js_error', 'feed_load_error', 'image_load_error', 'unhandled_promise'];
+
+// Bot UA 过滤 — 用于 retention / top-devices 等"人"指标。这些 UA 子串虽然在
+// worker 入口已经被 isBlockedBot 拦了大部分，但有些 bot（如 Twitterbot / 老 Bingbot
+// / 部分爬虫）走 SEO 白名单仍能跑 JS 进 events 表，会污染留存数字。
+// SQL 用一段 OR 表达式拼到 NOT (...)，复用统一名单。
+const BOT_UA_LIKE = `(
+  ua LIKE '%bot%' OR ua LIKE '%Bot%' OR ua LIKE '%BOT%'
+  OR ua LIKE '%spider%' OR ua LIKE '%Spider%'
+  OR ua LIKE '%crawler%' OR ua LIKE '%Crawler%'
+  OR ua LIKE '%python-requests%' OR ua LIKE '%Python-urllib%'
+  OR ua LIKE 'curl/%' OR ua LIKE 'Wget/%'
+  OR ua LIKE 'Go-http-client%' OR ua LIKE 'okhttp%'
+  OR ua = ''
+)`;
 
 async function metricOverview(env: Env) {
   const row = await env.DB.prepare(`
@@ -58,26 +75,37 @@ async function metricOverview(env: Env) {
 }
 
 async function metricDauTrend(env: Env) {
+  // events 列只算业务事件（排除 ERROR_EVENT_TYPES），人均事件数才有意义；
+  // dau 列仍按所有事件去重 device 算（错误事件也算"那天来过"）。
+  const placeholders = ERROR_EVENT_TYPES.map(() => '?').join(',');
   const rs = await env.DB.prepare(`
     SELECT
       date(occurred_at/1000, 'unixepoch', '+8 hours') AS day,
       COUNT(DISTINCT device_id) AS dau,
-      COUNT(*) AS events
+      COUNT(CASE WHEN event_type NOT IN (${placeholders}) THEN 1 END) AS events
     FROM events
     WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
     GROUP BY day
     ORDER BY day
-  `).all();
+  `).bind(...ERROR_EVENT_TYPES).all();
   return { days: rs.results };
 }
 
 async function metricRetention(env: Env) {
   // Cohort × N-day retention. cohort_day = device 第一次出现的日期。
   // d1 / d3 / d7 = 那天首次访问的 device，N 天后是否还回访。
+  // 排除 bot device：MAX(ua) 命中 BOT_UA_LIKE 的 device 整个剔除（这些"留存"
+  // 都是噪声，bot 不会真回访）。
   const rs = await env.DB.prepare(`
-    WITH first_seen AS (
+    WITH bot_devices AS (
+      SELECT device_id FROM events
+      GROUP BY device_id
+      HAVING MAX(CASE WHEN ${BOT_UA_LIKE} THEN 1 ELSE 0 END) = 1
+    ),
+    first_seen AS (
       SELECT device_id, MIN(date(occurred_at/1000,'unixepoch','+8 hours')) AS cohort_day
       FROM events
+      WHERE device_id NOT IN (SELECT device_id FROM bot_devices)
       GROUP BY device_id
     )
     SELECT
@@ -239,6 +267,9 @@ async function metricErrorTrend(env: Env) {
 }
 
 async function metricTopDevices(env: Env) {
+  // active_dates = 该 device 30 天内活跃过的所有日期，逗号分隔串（前端 split
+  // 后渲染 GitHub-style 30 格贡献小方格，只对 active_days >= 5 的 device 展示）。
+  // GROUP_CONCAT(DISTINCT) 在 SQLite 默认按内部顺序拼，前端会再 sort。
   const rs = await env.DB.prepare(`
     SELECT
       device_id,
@@ -247,7 +278,8 @@ async function metricTopDevices(env: Env) {
       COUNT(DISTINCT event_type) AS event_types,
       MIN(date(occurred_at/1000,'unixepoch','+8 hours')) AS first_seen,
       MAX(date(occurred_at/1000,'unixepoch','+8 hours')) AS last_seen,
-      substr(COALESCE(MAX(ua),''), 1, 80) AS ua_sample
+      substr(COALESCE(MAX(ua),''), 1, 80) AS ua_sample,
+      GROUP_CONCAT(DISTINCT date(occurred_at/1000,'unixepoch','+8 hours')) AS active_dates
     FROM events
     WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
     GROUP BY device_id
@@ -255,6 +287,50 @@ async function metricTopDevices(env: Env) {
     LIMIT 30
   `).all();
   return { devices: rs.results };
+}
+
+async function metricChannelDwell(env: Env) {
+  // 频道停留时长。逻辑：source_filter_change.payload.from_id = 用户切走的频道。
+  // 用 LAG 拿同一 device 上一次 source_filter_change 的 occurred_at + to_id。
+  // 仅当 prev.to_id == current.from_id（连续切换、未中断）时算一段停留，
+  // 时长 = current.occurred_at - prev.occurred_at。> 1h 视为离开会话不计。
+  // 漏掉的：用户最初的频道（首次切换前）+ 最后一个频道（切换后离开）。
+  // 这两段时间无 next event 无法精确推断，接受。
+  const rs = await env.DB.prepare(`
+    WITH switches AS (
+      SELECT
+        device_id,
+        occurred_at,
+        json_extract(event_payload, '$.from_id') AS from_id,
+        json_extract(event_payload, '$.to_id') AS to_id,
+        LAG(occurred_at) OVER (PARTITION BY device_id ORDER BY occurred_at) AS prev_occurred_at,
+        LAG(json_extract(event_payload, '$.to_id')) OVER (PARTITION BY device_id ORDER BY occurred_at) AS prev_to
+      FROM events
+      WHERE event_type = 'source_filter_change'
+        AND occurred_at > (strftime('%s','now')-7*86400)*1000
+    ),
+    dwell AS (
+      SELECT
+        from_id AS channel,
+        (occurred_at - prev_occurred_at) / 1000 AS dwell_sec,
+        device_id
+      FROM switches
+      WHERE prev_occurred_at IS NOT NULL
+        AND prev_to = from_id
+        AND (occurred_at - prev_occurred_at) BETWEEN 1000 AND 3600 * 1000
+    )
+    SELECT
+      channel,
+      COUNT(*) AS sessions,
+      COUNT(DISTINCT device_id) AS devices,
+      CAST(AVG(dwell_sec) AS INTEGER) AS avg_sec,
+      CAST(SUM(dwell_sec) AS INTEGER) AS total_sec
+    FROM dwell
+    WHERE channel IS NOT NULL
+    GROUP BY channel
+    ORDER BY total_sec DESC
+  `).all();
+  return { channels: rs.results };
 }
 
 // ─── /admin/dashboard → 仪表盘 HTML ──────────────────────────────
@@ -308,6 +384,13 @@ ${ADMIN_SHARED_CSS}
 
   .loading { color: #6b7280; font-size: 12px; text-align: center; padding: 24px; }
   .err { color: #fca5a5; font-size: 12px; padding: 12px; background: #1f1212; border: 1px solid #7f1d1d; border-radius: 6px; }
+
+  /* GitHub-style 贡献小方格（重度设备的活跃日期分布）。
+     30 天一行 30 格，活跃日 #6ee7b7 / 非活跃 #1f2937，hover 显示日期 */
+  .contrib { display: inline-grid; grid-template-columns: repeat(30, 9px); gap: 2px; vertical-align: middle; }
+  .contrib > span { width: 9px; height: 9px; border-radius: 2px; background: #1a2230; }
+  .contrib > span.on { background: #6ee7b7; }
+  .contrib > span.today { outline: 1px solid #6b7280; outline-offset: 1px; }
 </style>
 </head>
 <body>
@@ -342,6 +425,14 @@ ${adminNavHtml('dashboard')}
     <div class="chart" id="ch-session"></div>
   </div>
 
+  <div class="card">
+    <h2>📺 频道停留时长</h2>
+    <p class="hint">7 天每个 source 平均停留时长 + 总时长。算法：相邻 source_filter_change 间隔（&gt;1h 视为离开会话不计），漏算首尾两段</p>
+    <div style="overflow-x:auto"><table id="tbl-channels"><thead><tr>
+      <th>频道</th><th class="num">平均停留</th><th class="num">总时长</th><th class="num">切换次数</th><th class="num">device 数</th>
+    </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
   <div class="card wide">
     <h2>♻️ 留存矩阵</h2>
     <p class="hint">最近 30 天每个 cohort（首次访问日期）在 +1/+3/+7 天的留存率</p>
@@ -373,11 +464,11 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide">
     <h2>🧑‍💻 重度设备</h2>
-    <p class="hint">最近 30 天按 active_days × events 排序前 30，active_days ≥ 5 的高度可能是你自己或测试 / 老用户</p>
+    <p class="hint">最近 30 天按 active_days × events 排序前 30。active_days ≥ 5 加 GitHub 风格活跃日方格（30 天内每天一格，绿色 = 活跃，最右侧带框是今天）</p>
     <div style="overflow-x:auto"><table id="tbl-devices"><thead><tr>
-      <th>device_id</th><th class="num">events</th><th class="num">active days</th><th class="num">event types</th>
-      <th>first seen</th><th>last seen</th><th>UA</th>
-    </tr></thead><tbody><tr><td colspan="7" class="loading">loading…</td></tr></tbody></table></div>
+      <th>device_id</th><th class="num">events</th><th class="num">活跃天</th><th class="num">事件类型</th>
+      <th>first seen</th><th>last seen</th><th>30 天分布</th><th>UA</th>
+    </tr></thead><tbody><tr><td colspan="8" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
 </div>
@@ -640,22 +731,66 @@ async function loadErrorTrend() {
   } catch (e) { document.getElementById('ch-error-trend').innerHTML = '<div class="err">' + e.message + '</div>'; }
 }
 
+// 生成 GitHub-style 30 格贡献小方格。activeDates 是 "YYYY-MM-DD,..." 串。
+// 从 today-29 到 today 渲染，最右一格是今天（带 outline 标识）。BJT 时区下 user
+// 本地时区跟 events 表的 +8h 对齐；其他时区 user 可能 off-by-one，影响很小。
+function renderContribGrid(activeDates) {
+  if (!activeDates) return '<span class="muted">—</span>';
+  const set = new Set(String(activeDates).split(','));
+  const today = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  let html = '<div class="contrib">';
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const key = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    const on = set.has(key) ? ' on' : '';
+    const todayMark = i === 0 ? ' today' : '';
+    html += '<span class="' + on + todayMark + '" title="' + key + (set.has(key) ? ' · 活跃' : '') + '"></span>';
+  }
+  return html + '</div>';
+}
+
 async function loadDevices() {
   const tb = document.querySelector('#tbl-devices tbody');
   try {
     const d = await getJson('/api/admin/analytics?metric=top-devices');
-    if (!d.devices.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">无数据</td></tr>'; return; }
-    tb.innerHTML = d.devices.map(r =>
-      '<tr><td>' + r.device_id + '</td>'
-      + '<td class="num">' + fmt(r.events) + '</td>'
-      + '<td class="num">' + fmt(r.active_days) + '</td>'
-      + '<td class="num">' + fmt(r.event_types) + '</td>'
-      + '<td>' + r.first_seen + '</td>'
-      + '<td>' + r.last_seen + '</td>'
-      + '<td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.ua_sample || '').replace(/"/g,'&quot;') + '">' + (r.ua_sample || '—') + '</td>'
-      + '</tr>'
-    ).join('');
-  } catch (e) { tb.innerHTML = '<tr><td colspan="7" class="err">' + e.message + '</td></tr>'; }
+    if (!d.devices.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">无数据</td></tr>'; return; }
+    tb.innerHTML = d.devices.map(r => {
+      // 只给 active_days >= 5 的 device 渲染方格，其他显示 "—" 减视觉噪声
+      const grid = r.active_days >= 5 ? renderContribGrid(r.active_dates) : '<span class="muted">—</span>';
+      return '<tr><td>' + r.device_id + '</td>'
+        + '<td class="num">' + fmt(r.events) + '</td>'
+        + '<td class="num">' + fmt(r.active_days) + '</td>'
+        + '<td class="num">' + fmt(r.event_types) + '</td>'
+        + '<td>' + r.first_seen + '</td>'
+        + '<td>' + r.last_seen + '</td>'
+        + '<td>' + grid + '</td>'
+        + '<td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.ua_sample || '').replace(/"/g,'&quot;') + '">' + (r.ua_sample || '—') + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { tb.innerHTML = '<tr><td colspan="8" class="err">' + e.message + '</td></tr>'; }
+}
+
+async function loadChannels() {
+  const tb = document.querySelector('#tbl-channels tbody');
+  try {
+    const d = await getJson('/api/admin/analytics?metric=channel-dwell');
+    if (!d.channels.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">无切换事件 — 没人切过频道</td></tr>'; return; }
+    // 频道 id → 中文标签。跟前端 sources 配置对齐（dashboard/src/sources 那套）
+    const CHANNEL_LABELS = {
+      x_list: 'X List', github: 'GitHub', product_hunt: 'Product Hunt',
+      clawhub: 'ClawHub', hf_paper: 'HuggingFace Paper', huodongxing: '活动行',
+    };
+    tb.innerHTML = d.channels.map(r => {
+      const name = CHANNEL_LABELS[r.channel] || r.channel;
+      return '<tr><td title="' + r.channel + '">' + name + '</td>'
+        + '<td class="num">' + fmtDuration(r.avg_sec) + '</td>'
+        + '<td class="num">' + fmtDuration(r.total_sec) + '</td>'
+        + '<td class="num">' + fmt(r.sessions) + '</td>'
+        + '<td class="num">' + fmt(r.devices) + '</td></tr>';
+    }).join('');
+  } catch (e) { tb.innerHTML = '<tr><td colspan="5" class="err">' + e.message + '</td></tr>'; }
 }
 
 // Resize charts on window resize so cards don't overflow on mobile/tablet.
@@ -674,6 +809,7 @@ Promise.all([
   loadDauTrend(),
   loadFunnel(),
   loadSession(),
+  loadChannels(),
   loadRetention(),
   loadEvents(),
   loadErrorTrend(),
