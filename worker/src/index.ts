@@ -3496,6 +3496,10 @@ const ALLOWED_IMG_HOSTS = new Set([
   'opengraph.githubassets.com',          // GH 仓库 / issue OG image(X 嵌 GH 链接卡用)
   'og.luma.com',                          // Luma 活动 OG(X 嵌 Luma 活动链接卡)
   'jf.x.com',                             // Twitter media inflight gateway(部分推文图走这域)
+  // 2026-05-20 FE 反馈:GH README / attachment 内嵌图片高频域(走 cf.image transform 提速)
+  'raw.githubusercontent.com',           // README 内 ![](raw.githubusercontent.com/...) raw asset
+  'user-images.githubusercontent.com',   // GH 老版 user-attachments 上传 image
+  'github.com',                           // 新版 /user-attachments/ 路径(实际 redirect 到 githubusercontent)
 ]);
 
 async function handleImageProxy(request: Request): Promise<Response> {
