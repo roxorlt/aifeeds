@@ -667,58 +667,90 @@ interface RawInfoProps {
   commentsCount: number | undefined;
 }
 
-// 正文 iframe — 嵌 arxiv.org/html LaTeXML 渲染。PM v5 方案 E。
+// 正文阅读 — PM v6 方案 E + 2026-05-20 修订:
 //
-// 关键点:
-// - arxiv 实测无 X-Frame-Options + CORS:* → 可任意域嵌
-// - LaTeXML 实时渲染需要 2-3s,加 loading skeleton 改善等待体验
-// - sandbox 限制 iframe 权限,只给 scripts + popups + forms(不给 same-origin
-//   防 XSS 攻击宿主页)
-// - 沉浸式翻译 banner 提示用户(中文阅读体验依赖外部翻译插件)
-// - 下方 chip:PDF 下载 + 新标签打开兜底(iframe 失败 / 移动端不友好)
+// 桌面端:嵌 arxiv.org/html LaTeXML iframe(arxiv 实测无 X-Frame-Options + CORS:* → 可任意域嵌)
+//   + sandbox 限制权限 + 沉浸式翻译 banner 推荐。桌面 webkit 没 iOS quirk,iframe 滚动正常。
+//
+// 移动端:不嵌 iframe(iOS Safari / 微信 webview 跨域 iframe 滚动 + 缩放都无法干净解决,
+//   scrolling=auto 横划溢出,scrolling=no 纵滑也禁,无 trade-off 可走)。
+//   改成一个**显著大按钮**「打开 PDF · arxiv {id}.pdf」, href 指 arxiv.org/pdf/{id}.pdf
+//   (带 .pdf 后缀让微信 X5 内核 / iOS WebKit 识别为 PDF mime),
+//   点击即调起微信内置全屏 PDF viewer(Android: TbsReaderTemp / iOS: WebKit PDFKit),
+//   全屏滚动 + pinch zoom 都由原生 viewer 接管,体验远超内嵌。
 function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
   const [loaded, setLoaded] = useState(false);
   const [iframeError, setIframeError] = useState(false);
   const isNarrow = useIsNarrow();
   const htmlUrl = `https://arxiv.org/html/${arxivId}`;
-  const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
+  // 带 .pdf 后缀帮微信 / iOS Safari 识别为 PDF 触发全屏 viewer
+  const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
 
-  return (
-    <div className="space-y-2.5">
-      {/* 沉浸式翻译 tips — PM v6.1: 「沉浸式翻译」纯文本不挂 link,只在「点击安装 ↓」
-          唯一 anchor。↓ 暗示「下载/安装」动作。砍掉本地 .crx 兜底(referral 链接已够);
-          移动端(useIsNarrow)隐藏整段,因为手机 Chrome/Safari 不支持扩展 */}
-      {!isNarrow && (
-        <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
-          推荐 <span className="font-medium">沉浸式翻译</span> — LaTeXML 全文中英对照翻译。{" "}
+  // ────────────────────────────────────────────────
+  // 移动端:大按钮调起原生 PDF viewer
+  // ────────────────────────────────────────────────
+  if (isNarrow) {
+    return (
+      <div className="space-y-2.5">
+        <a
+          href={pdfUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-sky-300 bg-sky-50/60 px-4 py-4 text-[14px] font-medium text-sky-900 active:bg-sky-100"
+        >
+          <span className="text-[18px]">📄</span>
+          <span>打开 PDF 全文</span>
+          <span className="text-[12px] text-sky-700">arxiv {arxivId}.pdf</span>
+        </a>
+        <p className="text-center text-[12px] text-neutral-500">
+          点击后调起微信内置 PDF 浏览器(全屏 + 双指缩放)
+        </p>
+        {/* 兜底:HTML 版 + ar5iv 易读版 */}
+        <div className="flex flex-wrap items-center justify-center gap-2 text-[12px]">
           <a
-            href="https://immersivetranslate.com/zh-Hans/?via=roxor"
+            href={htmlUrl}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="font-medium text-sky-700 hover:underline"
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 active:bg-neutral-100"
           >
-            点击安装 ↓
+            arxiv HTML ↗
+          </a>
+          <a
+            href={`https://ar5iv.labs.arxiv.org/html/${arxivId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2.5 py-1 text-neutral-700 active:bg-neutral-100"
+          >
+            ar5iv 易读版 ↗
           </a>
         </div>
-      )}
+      </div>
+    );
+  }
 
-      {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton。
-          PM 2026-05-20 反馈:
-          #1.1 iOS Safari / 微信 webview iframe quirk — iframe 会展开到内容
-              真实尺寸(忽略 width/height attr),外层 div 的 overflow:hidden
-              不一定 clip(border-radius / position 触发不同 bug)。修复方式:
-              内层 wrapper 用 overflow-y:auto + overflow-x:hidden +
-              WebkitOverflowScrolling:touch 接管滚动,iframe scrolling="no"
-              + 固定 100% 尺寸,wrapper 把 iframe 的展开 clip 在 600px 视窗里。
-          #1.2 双指缩放穿透微信浏览器 — viewport meta 已加 user-scalable=no
-              全站禁缩放(index.html)。iframe 内 cross-origin pinch 跨域无法
-              拦截,但全站 viewport 锁定后,微信内核不会再放大宿主页。
-          外层 overflow-hidden + max-w-full 双保险防 iframe 撑出 panel 宽度。*/}
-      <div
-        className="relative max-w-full overflow-hidden rounded-md border border-neutral-200 bg-neutral-50"
-        style={{ touchAction: "pan-y" }}
-      >
+  // ────────────────────────────────────────────────
+  // 桌面端:保留 iframe LaTeXML 嵌入
+  // ────────────────────────────────────────────────
+  return (
+    <div className="space-y-2.5">
+      {/* 沉浸式翻译 tips — 仅桌面(手机不支持扩展) */}
+      <div className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-[12px] text-sky-900">
+        推荐 <span className="font-medium">沉浸式翻译</span> — LaTeXML 全文中英对照翻译。{" "}
+        <a
+          href="https://immersivetranslate.com/zh-Hans/?via=roxor"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="font-medium text-sky-700 hover:underline"
+        >
+          点击安装 ↓
+        </a>
+      </div>
+
+      <div className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50">
         {!loaded && !iframeError && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
             <div className="mb-2 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-500" />
@@ -726,26 +758,17 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
           </div>
         )}
         {!iframeError ? (
-          <div
-            className="h-[600px] w-full max-w-full overflow-y-auto overflow-x-hidden"
-            style={{
-              WebkitOverflowScrolling: "touch",
-              touchAction: "pan-y",
-            }}
-          >
-            <iframe
-              src={htmlUrl}
-              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
-              loading="lazy"
-              referrerPolicy="no-referrer"
-              className="block border-0"
-              style={{ width: "100%", minHeight: "600px", maxWidth: "100%" }}
-              scrolling="no"
-              title={`arxiv ${arxivId} LaTeXML 全文`}
-              onLoad={() => setLoaded(true)}
-              onError={() => setIframeError(true)}
-            />
-          </div>
+          <iframe
+            src={htmlUrl}
+            sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            className="h-[600px] w-full"
+            scrolling="auto"
+            title={`arxiv ${arxivId} LaTeXML 全文`}
+            onLoad={() => setLoaded(true)}
+            onError={() => setIframeError(true)}
+          />
         ) : (
           <div className="flex h-[200px] flex-col items-center justify-center px-4 text-center text-[13px] text-neutral-500">
             <div className="mb-1">⚠️ 嵌入加载失败</div>
@@ -762,7 +785,7 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
         )}
       </div>
 
-      {/* 下方工具栏:PDF 下载 + 新标签打开兜底(移动端 / iframe 不友好时用) */}
+      {/* 桌面端下方工具栏:PDF + 新标签兜底 */}
       <div className="flex flex-wrap items-center gap-2 text-[12px]">
         <a
           href={pdfUrl}

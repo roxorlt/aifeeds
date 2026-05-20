@@ -2489,6 +2489,35 @@ async function handleItemRefresh(request: Request, env: Env, id: string): Promis
 const HF_DISC_REFRESH_THROTTLE_KEY = 'hf-disc-refresh:';
 const HF_DISC_REFRESH_THROTTLE_TTL = 300;             // 5min
 
+// Reconcile metrics.num_comments → extra.discussion_comments.length。
+// 用于 throttle 命中时也能修正老数据 stale 状态(2026-05-20 FE 反馈:
+// 抽屉显示评论 2 条但外卡片 1 条)。读 1 行 + 可能写 1 行,几 ms。
+async function reconcileHfCommentsMetric(
+  env: Env,
+  id: string,
+): Promise<{ changed: boolean; before: number | null; after: number | null }> {
+  const row = await env.DB.prepare(
+    `SELECT extra, metrics FROM items WHERE id = ?`,
+  ).bind(id).first<{ extra: string | null; metrics: string | null }>();
+  if (!row) return { changed: false, before: null, after: null };
+
+  const extra = row.extra ? JSON.parse(row.extra) as { discussion_comments?: unknown[] } : {};
+  const metrics = row.metrics ? JSON.parse(row.metrics) as { num_comments?: number } : {};
+
+  const actual = Array.isArray(extra.discussion_comments) ? extra.discussion_comments.length : null;
+  const stored = typeof metrics.num_comments === 'number' ? metrics.num_comments : null;
+
+  // 没拉过 discussion 时 actual 是 null → 不强写(保留 HF API 给的 stored)
+  if (actual === null) return { changed: false, before: stored, after: stored };
+  if (stored === actual) return { changed: false, before: stored, after: stored };
+
+  await env.DB.prepare(
+    `UPDATE items SET metrics = json_set(coalesce(metrics, '{}'), '$.num_comments', ?) WHERE id = ?`,
+  ).bind(actual, id).run();
+  console.log(`[hf-disc-reconcile] ${id} num_comments ${stored} → ${actual}`);
+  return { changed: true, before: stored, after: actual };
+}
+
 async function handleHfDiscussionRefresh(request: Request, env: Env, id: string): Promise<Response> {
   // 1. 校验 item + source_type
   const item = await env.DB.prepare(
@@ -2501,13 +2530,20 @@ async function handleHfDiscussionRefresh(request: Request, env: Env, id: string)
     return jsonResponse({ refreshed: false, reason: 'unsupported_source' }, 400, request, env);
   }
 
-  // 2. KV 5min throttle
+  // 2. KV 5min throttle — 命中 throttle 时也跑一次轻量 reconcile,把
+  //    metrics.num_comments 对齐到 extra.discussion_comments.length。
+  //    背景:2026-05-20 BE 改 fetchDiscussionForHfPaper 同步 metrics 前,
+  //    存量数据 metrics.num_comments 可能跟实际拉到的评论数不一致(HF
+  //    daily papers API 不算 librarian-bot 等)。新版 fetch 会同步,但
+  //    KV throttle 命中时不跑 fetch,老数据就一直 stale。这里加 reconcile
+  //    确保老数据也能自愈。读 1 行 + 可能写 1 行,几 ms 开销可忽略。
   if (env.AUTH_KV) {
     const tKey = HF_DISC_REFRESH_THROTTLE_KEY + id;
     const last = await env.AUTH_KV.get(tKey);
     if (last) {
+      const reconciled = await reconcileHfCommentsMetric(env, id);
       return jsonResponse(
-        { refreshed: false, reason: 'throttled' },
+        { refreshed: false, reason: 'throttled', reconciled },
         200, request, env,
       );
     }
