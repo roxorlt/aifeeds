@@ -5069,8 +5069,11 @@ const CLASSIFY_TRANSLATE_PROMPT = `你是 AI 资讯整理助手,对推文做两�
 - main.text:主推正文(必给)
 - main.handle:作者 handle
 - quote_of.content:引用的推文正文(可能没有)
+- quote_of.quote_of.content:引用推内部又嵌套的引用(L3,可能没有)
 - reply_of.content:回复的父推正文(可能没有)
+- reply_of.quote_of.content:父推内部嵌套的引用(L3,可能没有)
 - retweet_of.content:转推原文(可能没有)
+- retweet_of.quote_of.content:转推原文内部嵌套的引用(L3,可能没有)
 - link_card.title / .description:外链卡(可能没有)
 
 返回 JSON 对象(只返回一个 JSON 对象,不要其他文字):
@@ -5080,8 +5083,11 @@ const CLASSIFY_TRANSLATE_PROMPT = `你是 AI 资讯整理助手,对推文做两�
   "ai_summary": "主推 1 行中文摘要(≤ 40 字,仅 is_relevant=1 时给,否则空字符串)",
   "content_zh": "主推中文翻译" 或 null,
   "quote_of_zh": "引用推中文翻译" 或 null,
+  "quote_of_quote_of_zh": "引用推嵌套引用的中文翻译(L3)" 或 null,
   "reply_of_zh": "父推中文翻译" 或 null,
+  "reply_of_quote_of_zh": "父推嵌套引用的中文翻译(L3)" 或 null,
   "retweet_of_zh": "转推原文中文翻译" 或 null,
+  "retweet_of_quote_of_zh": "转推嵌套引用的中文翻译(L3)" 或 null,
   "link_card_title_zh": "外链标题中文" 或 null,
   "link_card_desc_zh": "外链描述中文" 或 null
 }
@@ -5103,9 +5109,9 @@ is_relevant 判断标准:
 
 interface ClassifyTranslateInput {
   main: { handle: string; text: string };
-  quote_of?: { content: string };
-  reply_of?: { content: string };
-  retweet_of?: { content: string };
+  quote_of?: { content: string; quote_of?: { content: string } };
+  reply_of?: { content: string; quote_of?: { content: string } };
+  retweet_of?: { content: string; quote_of?: { content: string } };
   link_card?: { title?: string; description?: string };
 }
 
@@ -5115,8 +5121,11 @@ interface ClassifyTranslateResponse {
   ai_summary?: string;
   content_zh?: string | null;
   quote_of_zh?: string | null;
+  quote_of_quote_of_zh?: string | null;
   reply_of_zh?: string | null;
+  reply_of_quote_of_zh?: string | null;
   retweet_of_zh?: string | null;
+  retweet_of_quote_of_zh?: string | null;
   link_card_title_zh?: string | null;
   link_card_desc_zh?: string | null;
 }
@@ -5131,7 +5140,7 @@ export interface ClassifyTranslateResult {
 export async function classifyAndTranslateForXTweet(
   env: EnrichEnv,
   itemId: string,
-  opts: { lang: 'zh' | 'en' | 'ja' } = { lang: 'zh' },
+  opts: { lang: 'zh' | 'en' | 'ja'; preserveIsRelevant?: boolean } = { lang: 'zh' },
 ): Promise<ClassifyTranslateResult> {
   if (!env.DEEPSEEK_API_KEY) {
     throw new Error('classifyAndTranslateForXTweet: DEEPSEEK_API_KEY missing');
@@ -5141,7 +5150,7 @@ export async function classifyAndTranslateForXTweet(
   }
 
   const row = await env.DB.prepare(
-    `SELECT id, content, handle, lang, extra
+    `SELECT id, content, handle, lang, extra, is_relevant
        FROM items
       WHERE id = ? AND source_type = 'x_list'`,
   ).bind(itemId).first<{
@@ -5150,12 +5159,20 @@ export async function classifyAndTranslateForXTweet(
     handle: string | null;
     lang: string | null;
     extra: string | null;
+    is_relevant: number | null;
   }>();
 
   if (!row) throw new Error(`classifyAndTranslateForXTweet: item not found ${itemId}`);
   if (!row.content) {
     return { is_relevant: 0, fields_translated: [], attempts: 0, failed: 'no_content' };
   }
+
+  // preserveIsRelevant=true(backfill 模式):不再让 DeepSeek 重判 is_relevant,只补翻译。
+  // 历史 item 已经被前一次 classify-translate 判过 is_relevant,backfill 重跑只是补漏字段的
+  // 翻译,不应该让 DeepSeek 重新分类(模型 non-determinism / borderline case 可能 1→0 误降级)。
+  // 用法:runBackfillL3Translations 传 preserveIsRelevant=true。
+  const preserveIsRelevant = opts.preserveIsRelevant === true;
+  const existingIsRel = typeof row.is_relevant === 'number' ? row.is_relevant : 0;
 
   const extra: Record<string, unknown> = row.extra
     ? (JSON.parse(row.extra) as Record<string, unknown>)
@@ -5169,14 +5186,34 @@ export async function classifyAndTranslateForXTweet(
     },
   };
 
-  const qo = extra.quote_of as { content?: string } | undefined;
-  if (qo?.content) input.quote_of = { content: qo.content.slice(0, 1000) };
+  // L2 + L3 嵌套字段:apiToQuoteOf 递归解析 inline quoted_tweet → extra.{quote_of,reply_of,retweet_of}.quote_of
+  // syndication 返 retweet 时常 inline 嵌一层 quote(prod 数据 30 天里 27 条 RT→Q + 53 条 Rep→Q + 0 条 Q→Q)。
+  // L3 字段也要发给 DeepSeek 翻译,否则 FE 渲染 L3 时显示英文(bug #1 根因)。
+  type L2Field = { content?: string; quote_of?: { content?: string } };
 
-  const ro = extra.reply_of as { content?: string } | undefined;
-  if (ro?.content) input.reply_of = { content: ro.content.slice(0, 1000) };
+  const qo = extra.quote_of as L2Field | undefined;
+  if (qo?.content) {
+    input.quote_of = { content: qo.content.slice(0, 1000) };
+    if (qo.quote_of?.content) {
+      input.quote_of.quote_of = { content: qo.quote_of.content.slice(0, 1000) };
+    }
+  }
 
-  const rto = extra.retweet_of as { content?: string } | undefined;
-  if (rto?.content) input.retweet_of = { content: rto.content.slice(0, 1000) };
+  const ro = extra.reply_of as L2Field | undefined;
+  if (ro?.content) {
+    input.reply_of = { content: ro.content.slice(0, 1000) };
+    if (ro.quote_of?.content) {
+      input.reply_of.quote_of = { content: ro.quote_of.content.slice(0, 1000) };
+    }
+  }
+
+  const rto = extra.retweet_of as L2Field | undefined;
+  if (rto?.content) {
+    input.retweet_of = { content: rto.content.slice(0, 1000) };
+    if (rto.quote_of?.content) {
+      input.retweet_of.quote_of = { content: rto.quote_of.content.slice(0, 1000) };
+    }
+  }
 
   const lc = extra.link_card as { title?: string; description?: string } | undefined;
   if (lc?.title || lc?.description) {
@@ -5240,7 +5277,10 @@ export async function classifyAndTranslateForXTweet(
       continue;
     }
     // is_relevant=1 + 主推是英文 → content_zh 必须有
-    if (candidate.is_relevant === 1 && !isMainZh && !candidate.content_zh) {
+    // 例外:preserveIsRelevant(backfill 模式)放宽此检查 —— 主推可能是 degenerate
+    // (裸 URL / "来源：" / 短词)无法翻译,但 L3 内容仍可处理(中文→skip,英文→翻译)。
+    // 严格 check 会让这种 item 永远卡 missing_fields,反复 picked 浪费 DeepSeek call。
+    if (!preserveIsRelevant && candidate.is_relevant === 1 && !isMainZh && !candidate.content_zh) {
       lastError = 'missing_fields';
       continue;
     }
@@ -5251,23 +5291,42 @@ export async function classifyAndTranslateForXTweet(
   }
 
   if (!parsed) {
-    // 仍失败:标 translation_failed_at,is_relevant 默认 0,workflow 继续
+    // 仍失败:标 translation_failed_at。preserveIsRelevant=true 时保留原 is_relevant
+    // (backfill 失败不该影响 feed 可见性);否则按老逻辑 is_relevant=0 + matched_by 兜底。
     const nowIsoFail = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE items
-          SET is_relevant = 0,
-              matched_by = COALESCE(matched_by, 'workflow-classify-translate'),
-              extra = json_set(coalesce(extra, '{}'),
-                               '$.translation_failed_at', ?,
-                               '$.translation_failed_reason', ?)
-        WHERE id = ?`,
-    ).bind(nowIsoFail, lastError || 'unknown', itemId).run();
-    console.log(`[x-workflow:step3] ${itemId}: classify+translate failed after ${attempts} attempts, reason=${lastError}`);
-    return { is_relevant: 0, fields_translated: [], attempts, failed: lastError || 'http' };
+    if (preserveIsRelevant) {
+      await env.DB.prepare(
+        `UPDATE items
+            SET extra = json_set(coalesce(extra, '{}'),
+                                 '$.translation_failed_at', ?,
+                                 '$.translation_failed_reason', ?)
+          WHERE id = ?`,
+      ).bind(nowIsoFail, lastError || 'unknown', itemId).run();
+    } else {
+      await env.DB.prepare(
+        `UPDATE items
+            SET is_relevant = 0,
+                matched_by = COALESCE(matched_by, 'workflow-classify-translate'),
+                extra = json_set(coalesce(extra, '{}'),
+                                 '$.translation_failed_at', ?,
+                                 '$.translation_failed_reason', ?)
+          WHERE id = ?`,
+      ).bind(nowIsoFail, lastError || 'unknown', itemId).run();
+    }
+    console.log(`[x-workflow:step3] ${itemId}: classify+translate failed after ${attempts} attempts, reason=${lastError} preserve=${preserveIsRelevant}`);
+    return {
+      is_relevant: preserveIsRelevant ? (existingIsRel === 1 ? 1 : 0) : 0,
+      fields_translated: [],
+      attempts,
+      failed: lastError || 'http',
+    };
   }
 
   // ── 写回 D1 ────────────────────────────────────────────────
-  const isRel = parsed.is_relevant;
+  // preserveIsRelevant=true 时用旧 is_relevant 决定是否翻译相关字段(因为 DeepSeek
+  // 在 backfill 重跑时可能 1→0,但实际项已经在 feed 里,不该误降)。is_relevant 的 DB
+  // 写入也保留旧值。
+  const isRel = preserveIsRelevant ? (existingIsRel === 1 ? 1 : 0) : parsed.is_relevant;
   const summary = (parsed.ai_summary || '').trim();
   const fieldsTranslated: string[] = [];
   const nowTs = Math.floor(Date.now() / 1000);
@@ -5275,25 +5334,60 @@ export async function classifyAndTranslateForXTweet(
 
   // 构建新 extra(增量更新关联字段的翻译)
   const newExtra: Record<string, unknown> = { ...extra };
-  newExtra.ai_summary = summary;
-  newExtra.classified_at = nowIso;
+  // backfill 模式不覆盖 ai_summary / classified_at(那些是 classify 元数据,
+  // 老值是上次正经 classify 的结果,backfill 不该洗掉)
+  if (!preserveIsRelevant) {
+    newExtra.ai_summary = summary;
+    newExtra.classified_at = nowIso;
+  }
 
   if (isRel === 1) {
-    if (parsed.quote_of_zh && extra.quote_of) {
-      const qoObj = (extra.quote_of || {}) as Record<string, unknown>;
-      newExtra.quote_of = { ...qoObj, content_translated: parsed.quote_of_zh, translated_at: nowTs };
-      fieldsTranslated.push('quote_of.content');
-    }
-    if (parsed.reply_of_zh && extra.reply_of) {
-      const roObj = (extra.reply_of || {}) as Record<string, unknown>;
-      newExtra.reply_of = { ...roObj, content_translated: parsed.reply_of_zh, translated_at: nowTs };
-      fieldsTranslated.push('reply_of.content');
-    }
-    if (parsed.retweet_of_zh && extra.retweet_of) {
-      const rtoObj = (extra.retweet_of || {}) as Record<string, unknown>;
-      newExtra.retweet_of = { ...rtoObj, content_translated: parsed.retweet_of_zh, translated_at: nowTs };
-      fieldsTranslated.push('retweet_of.content');
-    }
+    // L2 + L3 嵌套写回:每个 L2 容器(quote_of/reply_of/retweet_of)可能同时需要写
+    // L2 content_translated + L3 quote_of.content_translated。L2 是中文不翻译(parsed.X_zh=null)
+    // 但 L3 是英文(parsed.X_quote_of_zh 有值)时,仍要进入分支补 L3 翻译。
+    const writeL2WithL3 = (
+      l2Key: 'quote_of' | 'reply_of' | 'retweet_of',
+      l2Zh: string | null | undefined,
+      l3Zh: string | null | undefined,
+    ): void => {
+      const l2Obj = extra[l2Key] as Record<string, unknown> | undefined;
+      if (!l2Obj) return;
+      const nestedQO = (l2Obj.quote_of || {}) as Record<string, unknown>;
+      const newL2: Record<string, unknown> = { ...l2Obj };
+      let mutated = false;
+
+      if (l2Zh) {
+        newL2.content_translated = l2Zh;
+        newL2.translated_at = nowTs;
+        fieldsTranslated.push(`${l2Key}.content`);
+        mutated = true;
+      } else if (preserveIsRelevant && typeof l2Obj.content === 'string' && l2Obj.content.length > 0 && !l2Obj.content_translated) {
+        // backfill 已确认 L2 内容不需翻译(已经是中文 / 不可译),打 skip marker 防 SQL 反复挑
+        newL2.translation_skipped_at = nowIso;
+        mutated = true;
+      }
+
+      if (l3Zh && nestedQO.content) {
+        newL2.quote_of = {
+          ...nestedQO,
+          content_translated: l3Zh,
+          translated_at: nowTs,
+        };
+        fieldsTranslated.push(`${l2Key}.quote_of.content`);
+        mutated = true;
+      } else if (preserveIsRelevant && typeof nestedQO.content === 'string' && nestedQO.content.length > 0 && !nestedQO.content_translated) {
+        // L3 已确认无需翻译,同上 skip marker
+        newL2.quote_of = { ...nestedQO, translation_skipped_at: nowIso };
+        mutated = true;
+      }
+
+      if (mutated) newExtra[l2Key] = newL2;
+    };
+
+    writeL2WithL3('quote_of', parsed.quote_of_zh, parsed.quote_of_quote_of_zh);
+    writeL2WithL3('reply_of', parsed.reply_of_zh, parsed.reply_of_quote_of_zh);
+    writeL2WithL3('retweet_of', parsed.retweet_of_zh, parsed.retweet_of_quote_of_zh);
+
     if ((parsed.link_card_title_zh || parsed.link_card_desc_zh) && extra.link_card) {
       const lcObj = (extra.link_card || {}) as Record<string, unknown>;
       const lcNew: Record<string, unknown> = { ...lcObj };
@@ -5347,6 +5441,105 @@ export interface XWorkflowSignals {
   hasReplyRef: boolean;
   hasLinkCard: boolean;
   hasRetweetRef: boolean;
+}
+
+/**
+ * Bug #1 backfill (2026-05-20):一次性扫存量 X items 漏 L3 嵌套翻译,重跑 classify-translate。
+ * Prompt + 入库逻辑现在覆盖 retweet_of.quote_of / reply_of.quote_of / quote_of.quote_of 的 content
+ * 翻译,跑一遍即可补齐历史。函数内不删 workflow_completed_at(已经完成的其它步骤不重做),
+ * 只调用 classifyAndTranslateForXTweet 拿新版翻译写入 D1。
+ *
+ * 选择条件:is_relevant=1 + workflow_completed_at 有 + 任一 L3 path 有 content 但 content_translated=null。
+ * 不过滤 lang(主推可能是 zh / L3 可能是 en,函数内部 isMainZh 判断不影响 L3 翻译)。
+ */
+export async function runBackfillL3Translations(
+  env: EnrichEnv,
+  limit: number,
+  rateSleepMs: number,
+): Promise<{
+  scanned: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // SQL 排除 t.co-only L3 content(DeepSeek 拿不到真实文章内容,翻译永远返 null,
+  // 每批重复 pick 浪费 DeepSeek 调用)。t.co 单独 PR 用 URL resolve + link card 渲染。
+  // 同时排除已被 backfill 标记 translation_skipped_at 的(中文 L3 无需翻译,markered 后跳过)。
+  const HAS_L3_NEED_TRANSLATE = `(
+    (json_type(extra, '$.retweet_of.quote_of') = 'object'
+     AND json_extract(extra, '$.retweet_of.quote_of.content_translated') IS NULL
+     AND json_extract(extra, '$.retweet_of.quote_of.translation_skipped_at') IS NULL
+     AND length(json_extract(extra, '$.retweet_of.quote_of.content')) > 0
+     AND json_extract(extra, '$.retweet_of.quote_of.content') NOT LIKE 'https://t.co/%')
+    OR
+    (json_type(extra, '$.reply_of.quote_of') = 'object'
+     AND json_extract(extra, '$.reply_of.quote_of.content_translated') IS NULL
+     AND json_extract(extra, '$.reply_of.quote_of.translation_skipped_at') IS NULL
+     AND length(json_extract(extra, '$.reply_of.quote_of.content')) > 0
+     AND json_extract(extra, '$.reply_of.quote_of.content') NOT LIKE 'https://t.co/%')
+    OR
+    (json_type(extra, '$.quote_of.quote_of') = 'object'
+     AND json_extract(extra, '$.quote_of.quote_of.content_translated') IS NULL
+     AND json_extract(extra, '$.quote_of.quote_of.translation_skipped_at') IS NULL
+     AND length(json_extract(extra, '$.quote_of.quote_of.content')) > 0
+     AND json_extract(extra, '$.quote_of.quote_of.content') NOT LIKE 'https://t.co/%')
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='x_list'
+        AND is_relevant=1
+        AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+        AND ${HAS_L3_NEED_TRANSLATE}
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  // 同条件下未处理的总数(给 caller 看还剩多少)
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='x_list'
+        AND is_relevant=1
+        AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+        AND ${HAS_L3_NEED_TRANSLATE}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let succeeded = 0;
+  let failed = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      // preserveIsRelevant=true 防止 DeepSeek 在 backfill 重跑时把老 is_relevant=1 误降为 0
+      // (staging 12 条试跑时观察到 3 条降级,改用此标志后保留原值)
+      const r = await classifyAndTranslateForXTweet(env, c.id, { lang: 'zh', preserveIsRelevant: true });
+      if (r.failed) {
+        failed++;
+        errors.push({ id: c.id, reason: r.failed });
+      } else {
+        succeeded++;
+      }
+    } catch (e) {
+      failed++;
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    succeeded,
+    failed,
+    errors: errors.slice(0, 20), // 限 20 条避免 response 过大
+    remaining: (remainingRow?.n || 0) - succeeded,
+  };
 }
 
 export async function triggerXWorkflowForItem(
