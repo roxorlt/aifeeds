@@ -39,6 +39,8 @@ export const EVENTS = {
   VIDEO_AUTOPLAY_ATTEMPT: 'video_autoplay_attempt',
   VIDEO_AUTOPLAY_BLOCKED: 'video_autoplay_blocked',
   VIDEO_PLAY_START: 'video_play_start',
+  // 视频有效播放（连续播放 ≥3s 触发一次，IAB/Twitter/Meta 短视频 view 标准）
+  VIDEO_EFFECTIVE_PLAY: 'video_effective_play',
   // 性能(web-vitals)
   PERF_LCP: 'perf_lcp',
   PERF_INP: 'perf_inp',

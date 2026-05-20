@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
@@ -45,6 +45,10 @@ function VideoPlayer({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playStartedRef = useRef(false);
+  // video_effective_play 节流：连续播放 ≥3s 才上报一次（IAB / Twitter / Meta 短视频
+  // view 行业标准）。pause / ended 取消未触发 timer，unmount 必须清防 phantom track。
+  const effectiveTimerRef = useRef<number | null>(null);
+  const effectiveReportedRef = useRef(false);
   const [showControls, setShowControls] = useState(false);
 
   const { isActive, muted } = useCoordinatedVideo({
@@ -52,15 +56,37 @@ function VideoPlayer({
     videoRef,
   });
 
-  const handlePlay = () => {
-    if (playStartedRef.current) return;
-    playStartedRef.current = true;
-    track(EVENTS.VIDEO_PLAY_START, {
-      item_id: itemId,
-      source: sourceType,
-      triggered: isActive ? "auto" : "user",
-    });
+  const clearEffectiveTimer = () => {
+    if (effectiveTimerRef.current !== null) {
+      window.clearTimeout(effectiveTimerRef.current);
+      effectiveTimerRef.current = null;
+    }
   };
+
+  const handlePlay = () => {
+    if (!playStartedRef.current) {
+      playStartedRef.current = true;
+      track(EVENTS.VIDEO_PLAY_START, {
+        item_id: itemId,
+        source: sourceType,
+        triggered: isActive ? "auto" : "user",
+      });
+    }
+    if (!effectiveReportedRef.current && effectiveTimerRef.current === null) {
+      effectiveTimerRef.current = window.setTimeout(() => {
+        effectiveReportedRef.current = true;
+        track(EVENTS.VIDEO_EFFECTIVE_PLAY, {
+          item_id: itemId,
+          source: sourceType,
+          threshold_ms: 3000,
+          triggered: isActive ? "auto" : "user",
+        });
+        effectiveTimerRef.current = null;
+      }, 3000);
+    }
+  };
+
+  useEffect(() => clearEffectiveTimer, []);
 
   return (
     <video
@@ -78,6 +104,8 @@ function VideoPlayer({
       onMouseLeave={() => setShowControls(false)}
       onClick={() => setShowControls(true)}
       onPlay={handlePlay}
+      onPause={clearEffectiveTimer}
+      onEnded={clearEffectiveTimer}
       onError={onError}
     />
   );

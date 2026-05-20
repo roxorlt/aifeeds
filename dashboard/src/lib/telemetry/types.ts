@@ -35,7 +35,10 @@ export type EventTypeName =
   // 互动（PR5）
   | 'favorite_toggle' | 'subscribe_toggle'
   // 视频起播（诊断 mobile/微信 autoplay 受限）
+  // video_effective_play: 连续播放 ≥3s 触发一次（IAB/Twitter/Meta 短视频 view 标准），
+  // 区分"真看了"和"快滑/误触" — payload 含 threshold_ms 兼容未来阈值调整
   | 'video_autoplay_attempt' | 'video_autoplay_blocked' | 'video_play_start'
+  | 'video_effective_play'
   // 性能(web-vitals)
   | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp'
   // 错误
