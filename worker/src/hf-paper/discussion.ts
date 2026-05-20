@@ -148,13 +148,25 @@ export async function fetchDiscussionForHfPaper(
   });
 
   // 5. 写回 extra.discussion_comments + discussion_fetched_at + discussion_fetch_method
+  //    同步 metrics.num_comments = normalized.length(2026-05-20 PM 反馈:
+  //    HF daily papers API 给的 numComments 可能不算 librarian-bot 自动评论 /
+  //    刷新延迟,与 discussion API 实际拉到的评论数偏差。以实际拉到的为准,
+  //    drawer KPI + feed 卡片才能 refresh 后跟底部评论区显示一致)。
   await env.DB.prepare(
-    `UPDATE items SET extra = json_set(coalesce(extra, '{}'),
-      '$.discussion_comments', json(?),
-      '$.discussion_fetched_at', ?,
-      '$.discussion_fetch_method', 'svelte_ssr')
+    `UPDATE items SET
+      extra = json_set(coalesce(extra, '{}'),
+        '$.discussion_comments', json(?),
+        '$.discussion_fetched_at', ?,
+        '$.discussion_fetch_method', 'svelte_ssr'),
+      metrics = json_set(coalesce(metrics, '{}'),
+        '$.num_comments', ?)
       WHERE id = ?`,
-  ).bind(JSON.stringify(normalized), new Date().toISOString(), itemId).run();
+  ).bind(
+    JSON.stringify(normalized),
+    new Date().toISOString(),
+    normalized.length,
+    itemId,
+  ).run();
 
   return { fetched: true, comments_count: normalized.length };
 }

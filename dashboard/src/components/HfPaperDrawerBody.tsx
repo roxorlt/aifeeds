@@ -432,7 +432,14 @@ export function HfPaperDrawerBody({ item }: Props) {
   const hiddenCount = Math.max(0, authors.length - 5);
 
   const upvotes = metrics.upvotes;
-  const numComments = metrics.num_comments;
+  // PM 2026-05-20 反馈:KPI 评论数与底部评论区显示不一致。
+  // metrics.num_comments 来自 HF daily papers API(可能不算 librarian-bot
+  // 自动评论 / 刷新延迟);discussion_comments.length 是用户实际能看到的。
+  // 已拉到 discussion 时以实际为准;未拉到时 fallback metrics(drawer 刚 mount
+  // 几秒间的过渡值,refresh 完会更上)。
+  const numComments = discussionComments.length > 0
+    ? discussionComments.length
+    : metrics.num_comments;
   const githubStars = metrics.github_stars ?? extra.github_stars ?? undefined;
 
   return (
@@ -697,35 +704,48 @@ function ArxivHtmlIframe({ arxivId }: { arxivId: string }) {
       )}
 
       {/* iframe 区域 — 600px 高度 + sandbox + loading skeleton。
-          外层 overflow-hidden + iframe scrolling="no" 禁横向滑(PM v6 #5)
-          PM 2026-05-19 #5: 容器 + iframe 都 touch-action: pan-y,
-          只允许垂直滚动,禁水平 pan + pinch zoom。注意:iframe 内
-          cross-origin 跨域 pinch 来自 iframe 内 arxiv.org 自身 viewport,
-          FE 端无法跨域注入样式;此处控制的是外层容器手势识别,iframe
-          内部 webview 默认手势若用户触发 pinch 仍可能生效 */}
+          PM 2026-05-20 反馈:
+          #1.1 iOS Safari / 微信 webview iframe quirk — iframe 会展开到内容
+              真实尺寸(忽略 width/height attr),外层 div 的 overflow:hidden
+              不一定 clip(border-radius / position 触发不同 bug)。修复方式:
+              内层 wrapper 用 overflow-y:auto + overflow-x:hidden +
+              WebkitOverflowScrolling:touch 接管滚动,iframe scrolling="no"
+              + 固定 100% 尺寸,wrapper 把 iframe 的展开 clip 在 600px 视窗里。
+          #1.2 双指缩放穿透微信浏览器 — viewport meta 已加 user-scalable=no
+              全站禁缩放(index.html)。iframe 内 cross-origin pinch 跨域无法
+              拦截,但全站 viewport 锁定后,微信内核不会再放大宿主页。
+          外层 overflow-hidden + max-w-full 双保险防 iframe 撑出 panel 宽度。*/}
       <div
-        className="relative overflow-hidden rounded-md border border-neutral-200 bg-neutral-50"
+        className="relative max-w-full overflow-hidden rounded-md border border-neutral-200 bg-neutral-50"
         style={{ touchAction: "pan-y" }}
       >
         {!loaded && !iframeError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-neutral-50 text-[13px] text-neutral-500">
             <div className="mb-2 h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-500" />
             arxiv LaTeXML 渲染中…(通常 2-3s)
           </div>
         )}
         {!iframeError ? (
-          <iframe
-            src={htmlUrl}
-            sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            className="h-[600px] w-full overflow-x-hidden"
-            style={{ overflowX: "hidden", touchAction: "pan-y" }}
-            scrolling="auto"
-            title={`arxiv ${arxivId} LaTeXML 全文`}
-            onLoad={() => setLoaded(true)}
-            onError={() => setIframeError(true)}
-          />
+          <div
+            className="h-[600px] w-full max-w-full overflow-y-auto overflow-x-hidden"
+            style={{
+              WebkitOverflowScrolling: "touch",
+              touchAction: "pan-y",
+            }}
+          >
+            <iframe
+              src={htmlUrl}
+              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              className="block border-0"
+              style={{ width: "100%", minHeight: "600px", maxWidth: "100%" }}
+              scrolling="no"
+              title={`arxiv ${arxivId} LaTeXML 全文`}
+              onLoad={() => setLoaded(true)}
+              onError={() => setIframeError(true)}
+            />
+          </div>
         ) : (
           <div className="flex h-[200px] flex-col items-center justify-center px-4 text-center text-[13px] text-neutral-500">
             <div className="mb-1">⚠️ 嵌入加载失败</div>
