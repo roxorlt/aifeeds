@@ -4576,6 +4576,141 @@ export async function backfillNestedXQuoteForXTweet(
   return { updated: true, found_quote_id: foundStatusId, reason: 'quote_filled' };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// resolveTcoLinksForXTweet — 2026-05-21 user 反馈 t.co-only content L3 没翻译
+//
+// 根因:X tweet 内容只是一个 t.co 短链(典型情况是 retweet/quote 一个 X article,
+// X DOM 把 article 链接转 t.co),syndication API 返的 content = "https://t.co/xxx"
+// 一串。DeepSeek 拿不到 article 内容,翻译永远返 null → FE 显示一坨没意义的 t.co URL。
+//
+// 解决:逐个 path 检测 content === t.co-only,HEAD t.co 拿 redirect URL,写
+// content_resolved_url 字段(指向 x.com/i/article/<id> 或外站 URL)。FE 后续
+// 渲染 link card "查看原文 ↗" 而不是裸 t.co。
+//
+// 6 个 path 覆盖:L1 main + L2 (quote_of / reply_of / retweet_of) + L3 (各自的 quote_of)
+// 已有 content_resolved_url / content_resolve_failed_at sentinel → 跳过
+// 防 cron 重试。失败永久标 failed_at(t.co 一般稳定,失败大多是 deleted 短链)。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TCO_ONLY_RE = /^https?:\/\/t\.co\/[a-zA-Z0-9]+\s*$/i;
+
+function isTcoOnlyContent(content: string | null | undefined): boolean {
+  if (!content || typeof content !== 'string') return false;
+  return TCO_ONLY_RE.test(content.trim());
+}
+
+async function resolveTcoToFinalUrl(tcoUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(tcoUrl, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.headers.get('location');
+  } catch (e) {
+    console.warn(`[tco-resolve] HEAD ${tcoUrl} failed: ${String(e).slice(0, 200)}`);
+    return null;
+  }
+}
+
+export async function resolveTcoLinksForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ resolved: number; failed: number; skipped: number; mutated: boolean }> {
+  const row = await env.DB.prepare(
+    `SELECT id, content, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; content: string | null; extra: string | null }>();
+  if (!row) throw new Error(`resolveTcoLinksForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  const newExtra: Record<string, unknown> = { ...extra };
+  const nowIso = new Date().toISOString();
+  let resolved = 0;
+  let failed = 0;
+  let skipped = 0;
+  let mutated = false;
+
+  // 单字段处理 helper:isTcoOnly + 无 sentinel → HEAD → 写 resolved_url 或 failed_at
+  // 返回新对象(若 mutated)或 null(若 skip)。caller 决定要不要写回 newExtra。
+  const resolveContentField = async (
+    obj: Record<string, unknown>,
+    contentVal: string | null | undefined,
+  ): Promise<Record<string, unknown> | null> => {
+    if (!isTcoOnlyContent(contentVal)) return null;
+    if (obj.content_resolved_url || obj.content_resolve_failed_at) {
+      skipped++;
+      return null;
+    }
+    const url = await resolveTcoToFinalUrl(contentVal!.trim());
+    if (url) {
+      resolved++;
+      return { ...obj, content_resolved_url: url, content_resolved_at: nowIso };
+    } else {
+      failed++;
+      return { ...obj, content_resolve_failed_at: nowIso };
+    }
+  };
+
+  // L1 main content (extra root level field)
+  if (isTcoOnlyContent(row.content)) {
+    if (extra.content_resolved_url || extra.content_resolve_failed_at) {
+      skipped++;
+    } else {
+      const url = await resolveTcoToFinalUrl(row.content!.trim());
+      if (url) {
+        newExtra.content_resolved_url = url;
+        newExtra.content_resolved_at = nowIso;
+        resolved++;
+      } else {
+        newExtra.content_resolve_failed_at = nowIso;
+        failed++;
+      }
+      mutated = true;
+    }
+  }
+
+  // L2 + L3:quote_of / reply_of / retweet_of 各自 + 其内嵌 quote_of
+  for (const l2Key of ['quote_of', 'reply_of', 'retweet_of'] as const) {
+    const l2 = extra[l2Key] as Record<string, unknown> | undefined;
+    if (!l2) continue;
+    let newL2 = l2;
+    let l2Mutated = false;
+
+    // L2 content
+    const l2Updated = await resolveContentField(l2, l2.content as string | undefined);
+    if (l2Updated) {
+      newL2 = l2Updated;
+      l2Mutated = true;
+    }
+
+    // L3 quote_of (nested inside L2)
+    const l3 = newL2.quote_of as Record<string, unknown> | undefined;
+    if (l3) {
+      const l3Updated = await resolveContentField(l3, l3.content as string | undefined);
+      if (l3Updated) {
+        newL2 = { ...newL2, quote_of: l3Updated };
+        l2Mutated = true;
+      }
+    }
+
+    if (l2Mutated) {
+      newExtra[l2Key] = newL2;
+      mutated = true;
+    }
+  }
+
+  if (mutated) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newExtra), itemId).run();
+    console.log(`[tco-resolve] ${itemId}: resolved=${resolved} failed=${failed} skipped=${skipped}`);
+  }
+
+  return { resolved, failed, skipped, mutated };
+}
+
 export interface BackfillTruncatedResult {
   mode: string;
   selected: number;
@@ -5539,6 +5674,102 @@ export async function runBackfillL3Translations(
     failed,
     errors: errors.slice(0, 20), // 限 20 条避免 response 过大
     remaining: (remainingRow?.n || 0) - succeeded,
+  };
+}
+
+/**
+ * Bug t.co resolve backfill (2026-05-21):一次性扫存量 X items 哪些 content
+ * 是裸 t.co 短链,resolve HEAD → write content_resolved_url。
+ *
+ * SQL filter:any path (L1 content / L2 *.content / L3 *.quote_of.content) 是
+ * t.co-only(LIKE 'https://t.co/%' + length < 40)且未 resolved 也未标 failed。
+ * 单 item 调 resolveTcoLinksForXTweet,函数内 6 个 path 逐个处理。
+ */
+export async function runBackfillTcoResolutions(
+  env: EnrichEnv,
+  limit: number,
+  rateSleepMs: number = 200,
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_resolved: number;
+  total_failed: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // 任一 path content 是 t.co-only + 未 resolved + 未 failed → candidate
+  const TCO_CANDIDATE = `(
+    (content LIKE 'https://t.co/%' AND length(content) < 40
+     AND json_extract(extra, '$.content_resolved_url') IS NULL
+     AND json_extract(extra, '$.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.quote_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.quote_of.content')) < 40
+        AND json_extract(extra, '$.quote_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.quote_of.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.reply_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.reply_of.content')) < 40
+        AND json_extract(extra, '$.reply_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.reply_of.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.retweet_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.retweet_of.content')) < 40
+        AND json_extract(extra, '$.retweet_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.retweet_of.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.quote_of.quote_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.quote_of.quote_of.content')) < 40
+        AND json_extract(extra, '$.quote_of.quote_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.quote_of.quote_of.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.reply_of.quote_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.reply_of.quote_of.content')) < 40
+        AND json_extract(extra, '$.reply_of.quote_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.reply_of.quote_of.content_resolve_failed_at') IS NULL)
+    OR (json_extract(extra, '$.retweet_of.quote_of.content') LIKE 'https://t.co/%'
+        AND length(json_extract(extra, '$.retweet_of.quote_of.content')) < 40
+        AND json_extract(extra, '$.retweet_of.quote_of.content_resolved_url') IS NULL
+        AND json_extract(extra, '$.retweet_of.quote_of.content_resolve_failed_at') IS NULL)
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='x_list'
+        AND is_relevant=1
+        AND ${TCO_CANDIDATE}
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='x_list'
+        AND is_relevant=1
+        AND ${TCO_CANDIDATE}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalResolved = 0;
+  let totalFailed = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await resolveTcoLinksForXTweet(env, c.id);
+      totalResolved += r.resolved;
+      totalFailed += r.failed;
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_resolved: totalResolved,
+    total_failed: totalFailed,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
   };
 }
 

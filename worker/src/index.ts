@@ -23,6 +23,8 @@ import {
   runBackfillTruncatedFromSyndication,
   classifyAndTranslateForXTweet,
   runBackfillL3Translations,
+  runBackfillTcoResolutions,
+  resolveTcoLinksForXTweet,
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
 } from './enrich';
@@ -879,6 +881,22 @@ export default {
         const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '20', 10), 1), 100);
         const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '500', 10), 0);
         const result = await runBackfillL3Translations(env, limit, rateSleepMs);
+        return jsonResponse(result, 200, request, env);
+      }
+      // t.co resolve backfill (2026-05-21): 历史 X items 哪些 content 是裸 t.co
+      // 短链(L1/L2/L3 共 6 个 path),HEAD 拉 redirect URL 写 content_resolved_url。
+      // ?limit=N (默认 50, 上限 200), ?rate_sleep_ms=200 (t.co 是 CDN 速率宽松)
+      if (path === '/api/admin/backfill-tco-resolutions-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '50', 10), 1), 200);
+        const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '200', 10), 0);
+        const result = await runBackfillTcoResolutions(env, limit, rateSleepMs);
         return jsonResponse(result, 200, request, env);
       }
       // D2: 一次性清掉历史脏数据 — 老 chrome scraper 抓时把 quoted preview
@@ -3099,6 +3117,16 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillL3Translations(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-tco-resolutions') {
+    // t.co resolve backfill (2026-05-21): L1/L2/L3 共 6 个 path 哪些 content 是裸 t.co,
+    // HEAD 拉 redirect URL 写 extra.{path}.content_resolved_url。FE 渲染 link card。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '50'), 1),
+      200,
+    );
+    const result = await runBackfillTcoResolutions(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-link-card') {
