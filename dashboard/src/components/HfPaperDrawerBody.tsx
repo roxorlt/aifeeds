@@ -165,14 +165,6 @@ function IconArrowOut({ className }: { className?: string }) {
     </svg>
   );
 }
-function IconCopy({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <rect x="5" y="5" width="9" height="9" rx="1.5" />
-      <path d="M3 11h-.5A1.5 1.5 0 011 9.5v-7A1.5 1.5 0 012.5 1h7A1.5 1.5 0 0111 2.5V3" />
-    </svg>
-  );
-}
 function IconChevronDown({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -185,26 +177,6 @@ function IconChevronDown({ className }: { className?: string }) {
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <div className="mb-2 text-[13px] font-medium text-neutral-500">{children}</div>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        });
-      }}
-      className="inline-flex items-center gap-1 rounded-md border border-neutral-200 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900"
-    >
-      <IconCopy className="h-3 w-3" />
-      {copied ? "已复制" : "复制"}
-    </button>
   );
 }
 
@@ -258,7 +230,7 @@ function DimensionBlock({
   // 大概率含 markdown(粗体 / 列表 / 链接 / 代码 / 表格)。用 MdContent 渲染。
   return (
     <section className="border-t border-neutral-200 pt-5 first:border-t-0 first:pt-0">
-      <h4 className="mb-2 text-[14px] font-semibold text-neutral-900">{label}</h4>
+      <h4 className="mb-2 text-[16px] font-semibold text-neutral-900">{label}</h4>
       <div className="text-[15px] leading-[1.7] text-neutral-800">
         {source !== undefined ? <MdContent source={source} /> : children}
       </div>
@@ -284,7 +256,7 @@ function CodeStatusBlock({ status }: { status: HfCodeStatus | undefined }) {
 
   return (
     <section className="border-t border-neutral-200 pt-5">
-      <h4 className="mb-3 text-[14px] font-semibold text-neutral-900">代码状态 Code Status</h4>
+      <h4 className="mb-3 text-[16px] font-semibold text-neutral-900">代码状态 Code Status</h4>
 
       {/* meta chip 行 */}
       {hasMeta && (
@@ -345,7 +317,7 @@ function DimensionListBlock({
   if (!sources || sources.length === 0) return null;
   return (
     <section className="border-t border-neutral-200 pt-5 first:border-t-0 first:pt-0">
-      <h4 className="mb-3 text-[14px] font-semibold text-neutral-900">{label}</h4>
+      <h4 className="mb-3 text-[16px] font-semibold text-neutral-900">{label}</h4>
       <ol className="space-y-4">
         {sources.map((s, i) => (
           <li key={i} className="flex gap-3">
@@ -425,10 +397,16 @@ export function HfPaperDrawerBody({ item }: Props) {
 
   // 内部状态(2026-05-20: 砍掉 raw/analysis tab,单栏顺序渲染,activeTab 不再需要)
   const [authorsExpanded, setAuthorsExpanded] = useState(false);
+  const [keywordsExpanded, setKeywordsExpanded] = useState(false);
   const [abstractTab, setAbstractTab] = useState<AbstractTab>("translated");
 
   const visibleAuthors = authorsExpanded ? authors : authors.slice(0, 5);
   const hiddenCount = Math.max(0, authors.length - 5);
+  // 关键词默认 8 个 chip(~ 2 行,按 chip 数切而非按行精确切;chip 长度不一,
+  // 按行 measurement 太复杂,先用计数,后续若 PM 不满意再上 ResizeObserver)
+  const KEYWORDS_DEFAULT_COUNT = 8;
+  const visibleKeywords = keywordsExpanded ? keywords : keywords.slice(0, KEYWORDS_DEFAULT_COUNT);
+  const hiddenKeywordsCount = Math.max(0, keywords.length - KEYWORDS_DEFAULT_COUNT);
 
   const upvotes = metrics.upvotes;
   // PM 2026-05-20 反馈:KPI 评论数与底部评论区显示不一致。
@@ -568,7 +546,6 @@ export function HfPaperDrawerBody({ item }: Props) {
                   原文
                 </button>
               </div>
-              <CopyButton text={abstractTab === "translated" ? summaryZh : summaryEn} />
             </div>
           </div>
           {/* MdContent 渲染 BE 翻译输出的 markdown(分段 / strong / 列表) */}
@@ -578,12 +555,12 @@ export function HfPaperDrawerBody({ item }: Props) {
         </div>
       )}
 
-      {/* ─── 关键词 (常驻,tab 之前的最后一段) ────────────────────────── */}
+      {/* ─── 关键词 (常驻;PM 2026-05-20: 加折叠展开,对齐作者列表模式) ─── */}
       {keywords.length > 0 && (
         <div className="border-b border-neutral-200 p-5">
           <SectionTitle>关键词</SectionTitle>
-          <div className="flex flex-wrap gap-1.5">
-            {keywords.map((kw) => (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {visibleKeywords.map((kw) => (
               <span
                 key={kw}
                 className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700"
@@ -591,6 +568,19 @@ export function HfPaperDrawerBody({ item }: Props) {
                 #{kw}
               </span>
             ))}
+            {!keywordsExpanded && hiddenKeywordsCount > 0 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setKeywordsExpanded(true);
+                }}
+                className="inline-flex items-center gap-0.5 text-[11px] text-sky-600 hover:underline"
+              >
+                展开 +{hiddenKeywordsCount}
+                <IconChevronDown className="h-3 w-3" />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -885,14 +875,12 @@ function CommentItem({
     : "";
   const plainBody = showZh ? (comment.content_zh as string) : comment.content;
 
-  // 作者本人回复缩进显示(BE 推算的 is_author_reply,精确替代之前的字符串 reply_to_author)
-  // PM 2026-05-19: 去掉左侧 amber 竖线,只保留缩进 + padding;
-  // 作者身份的视觉区分由头部那枚 amber "作者" badge 承担,不再要双重强调
-  const indentCls = comment.is_author_reply
-    ? "ml-6 pl-3"
-    : "";
+  // PM 2026-05-20 反馈:作者评论的 content 比其他人多 24px 左边距,
+  // 视觉上不对齐。砍掉外层 ml-6 pl-3 indent,作者身份的视觉区分继续靠头部
+  // amber "作者" badge,不再用 indent 双重强调(2026-05-19 已经砍过左侧 amber
+  // 竖线同思路)。
   return (
-    <div className={indentCls}>
+    <div>
       <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
         {comment.author_avatar_url ? (
           <img
@@ -1010,7 +998,7 @@ function AnalysisTab({ dna }: { dna: ItemExtra["deep_analysis"] }) {
 
         {/* 实验 — 结构化 datasets / metrics / compute */}
         <section className="border-t border-neutral-200 pt-5">
-          <h4 className="mb-2 text-[14px] font-semibold text-neutral-900">实验 Experiments</h4>
+          <h4 className="mb-2 text-[16px] font-semibold text-neutral-900">实验 Experiments</h4>
           {dna.experiments && (
             <div className="space-y-3">
               {dna.experiments.datasets?.length > 0 && (
@@ -1061,9 +1049,10 @@ function AnalysisTab({ dna }: { dna: ItemExtra["deep_analysis"] }) {
                 </div>
               )}
               {/* narrative 实验叙事(BE pro reasoning 输出,2026-05-18 起返回)
-                  比 datasets/metrics 信息密度更大,放最后用 MdContent 完整渲 */}
+                  PM 2026-05-20 反馈:外层 border + bg-50 容器看起来像代码块。
+                  砍掉容器样式,跟其他 DimensionBlock 的 markdown 渲染对齐 */}
               {dna.experiments.narrative && (
-                <div className="rounded-md border border-neutral-200 bg-neutral-50/40 p-3 text-[14px] leading-[1.7] text-neutral-700">
+                <div className="text-[15px] leading-[1.7] text-neutral-800">
                   <MdContent source={dna.experiments.narrative} />
                 </div>
               )}

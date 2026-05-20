@@ -279,7 +279,7 @@ export function TweetDrawer() {
   const defaultPhTitle = "产品详情";
   const defaultClawhubTitle = "Skill 详情";
   const defaultHdxTitle = "活动详情";
-  const defaultHfTitle = "论文拆解";
+  const defaultHfTitle = "论文详情";
   const headerTitle = item
     ? isGithub
       ? titleHidden
