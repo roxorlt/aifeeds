@@ -920,16 +920,21 @@ const PH_TRANSLATE_PROMPT = `把下面每条 Product Hunt 产品文案或开发�
 
 输出：`;
 
-async function translatePhBatch(
+// 单次 DeepSeek call 翻译 1 个 chunk(原 caller index 保留映射)。
+// 跟原 translatePhBatch 同逻辑,只是 caller 拆 chunk 后调多次。
+async function translatePhBatchChunk(
   apiKey: string,
-  texts: string[],
+  chunk: Array<{ origIdx: number; text: string }>,
 ): Promise<Map<number, string>> {
-  const numbered = texts
-    .map((t, i) => `${i}:${t.replace(/\r\n/g, '\n').replace(/\n/g, NL_MARK_TR)}`)
+  const out = new Map<number, string>();
+  if (chunk.length === 0) return out;
+
+  // chunk 内 0-based 重编号给 prompt 用;响应解析后映射回 origIdx
+  const numbered = chunk
+    .map((c, i) => `${i}:${c.text.replace(/\r\n/g, '\n').replace(/\n/g, NL_MARK_TR)}`)
     .join('\n');
   const prompt = PH_TRANSLATE_PROMPT.replace('%INPUT%', numbered);
 
-  const out = new Map<number, string>();
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 45000);
@@ -943,7 +948,7 @@ async function translatePhBatch(
         model: DS_MODEL_TR,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
-        max_tokens: 4000,
+        max_tokens: 8000,
       }),
       signal: controller.signal,
     });
@@ -956,17 +961,40 @@ async function translatePhBatch(
       choices?: Array<{ message?: { content?: string } }>;
     };
     const text = body.choices?.[0]?.message?.content || '';
+    // 容错的格式 parse:N: / N： / **N:** / N.
     for (const line of text.split('\n')) {
-      const m = line.match(/^(\d+):(.*)$/);
+      const m = line.match(/^\**\s*(\d+)\**\s*[:：.]\s*(.*?)\s*\**\s*$/);
       if (!m) continue;
-      const idx = parseInt(m[1], 10);
+      const chunkIdx = parseInt(m[1], 10);
+      const c = chunk[chunkIdx];
+      if (!c) continue;
       const tr = m[2].replace(new RegExp(NL_MARK_TR, 'g'), '\n').trim();
-      if (tr) out.set(idx, tr);
+      if (tr) out.set(c.origIdx, tr);
     }
   } catch (e) {
     console.warn('[ph] inline translate error:', e instanceof Error ? e.message : String(e));
   }
   return out;
+}
+
+// translatePhBatch — 拆 chunk(每 chunk ≤ 5 个 task)防 max_tokens 截断尾部任务。
+// 之前用 max_tokens=4000 + 一次发 10+ 任务,长 comments 撞 token 上限尾部不输出
+// (prod 11 个 item 71 条 comment 未翻译的根因)。chunk 化让每次输出有足够空间。
+async function translatePhBatch(
+  apiKey: string,
+  texts: string[],
+): Promise<Map<number, string>> {
+  const CHUNK_SIZE = 5;
+  const all = new Map<number, string>();
+  for (let start = 0; start < texts.length; start += CHUNK_SIZE) {
+    const chunk: Array<{ origIdx: number; text: string }> = [];
+    for (let i = start; i < Math.min(start + CHUNK_SIZE, texts.length); i++) {
+      chunk.push({ origIdx: i, text: texts[i] });
+    }
+    const partial = await translatePhBatchChunk(apiKey, chunk);
+    for (const [k, v] of partial) all.set(k, v);
+  }
+  return all;
 }
 
 /**
@@ -1217,6 +1245,74 @@ export async function translatePhFieldsForItem(
 
   console.log(`[ph-workflow:step3] ${itemId}: translated ${translated}/${tasks.length} fields`);
   return { fields_translated: translated };
+}
+
+/**
+ * PH 评论翻译 backfill (2026-05-21):一次性扫存量 PH items 哪些
+ * top_comments[i].text 是英文但没有 translated → 重跑 translatePhFieldsForItem。
+ *
+ * 根因:老版 translatePhBatch 一次发 10+ task 用 max_tokens=4000,中文输出撞
+ * token 上限 → 尾部 comments 被截断 → 永远 null。新版拆 chunk 5/批 + 8000 tokens。
+ */
+export async function runBackfillPhCommentsTranslation(
+  env: Env,
+  limit: number,
+  rateSleepMs: number = 200,
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_translated: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // 找 top_comments 里有 text 非中文但 translated=null 的 item
+  // 用 EXISTS sub-query 检查至少一条 comment 缺翻译
+  const HAS_UNTRANS_COMMENT = `EXISTS (
+    SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+    WHERE json_extract(c.value, '$.text') IS NOT NULL
+      AND json_extract(c.value, '$.translated') IS NULL
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='product_hunt'
+        AND is_relevant=1
+        AND ${HAS_UNTRANS_COMMENT}
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='product_hunt'
+        AND is_relevant=1
+        AND ${HAS_UNTRANS_COMMENT}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalTranslated = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await translatePhFieldsForItem(env, c.id);
+      totalTranslated += r.fields_translated;
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_translated: totalTranslated,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
+  };
 }
 
 /**
