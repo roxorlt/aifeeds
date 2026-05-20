@@ -449,11 +449,13 @@ const DASHBOARD_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ai-feeds admin · 仪表盘</title>
-<!-- echarts: cdnjs (Cloudflare CDN) 国内访问比 jsdelivr 稳；fallback 到 jsdelivr -->
+<!-- echarts: cdnjs (Cloudflare CDN) 国内访问比 jsdelivr 稳；fallback 到 jsdelivr。
+     注意：内嵌 HTML 字符串里 '</script>' 必须拆开，否则 HTML parser 会把它当成
+     外层 <script> 闭合标签，导致后面所有 JS 语法错乱。这里用字符串拼接绕开。 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
 <script>
   if (typeof echarts === 'undefined') {
-    document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"><\/script>');
+    document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></scr' + 'ipt>');
   }
 </script>
 <style>
