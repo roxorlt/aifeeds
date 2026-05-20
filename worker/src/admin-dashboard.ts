@@ -915,17 +915,20 @@ function parseUA(ua) {
 
   let browser = '';
   // 微信内置浏览器优先识别（覆盖 Safari/Chrome 内核）
+  // 注意：以下 regex 内的 \\/ 和 \\d+ 是为了在 TS 外层 template literal 里
+  // 输出 \/ 和 \d+ 给浏览器 JS 解析。直接写 \/ / \d V8 会当 invalid escape
+  // 吃掉 backslash，regex 失效引发 SyntaxError。
   if (/MicroMessenger/i.test(ua)) browser = '微信';
   else if (/Weibo/i.test(ua)) browser = '微博';
-  else if (/Edg\//i.test(ua)) browser = 'Edge';
-  else if (/OPR\/|Opera/i.test(ua)) browser = 'Opera';
+  else if (/Edg\\//i.test(ua)) browser = 'Edge';
+  else if (/OPR\\/|Opera/i.test(ua)) browser = 'Opera';
   else if (/Firefox/i.test(ua)) browser = 'Firefox';
-  else if (/Chrome\//i.test(ua) && !/Chromium/i.test(ua)) browser = 'Chrome';
+  else if (/Chrome\\//i.test(ua) && !/Chromium/i.test(ua)) browser = 'Chrome';
   else if (/CriOS/i.test(ua)) browser = 'Chrome (iOS)';
   else if (/FxiOS/i.test(ua)) browser = 'Firefox (iOS)';
   else if (/Safari/i.test(ua)) browser = 'Safari';
   // Chrome 版本号
-  const m = ua.match(/(?:Chrome|CriOS|Edg|Firefox|FxiOS|Version)\/(\d+)/);
+  const m = ua.match(/(?:Chrome|CriOS|Edg|Firefox|FxiOS|Version)\\/(\\d+)/);
   if (m && browser) browser += ' ' + m[1];
 
   return { device, browser };
