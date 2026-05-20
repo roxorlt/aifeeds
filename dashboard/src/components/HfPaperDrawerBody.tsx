@@ -370,30 +370,9 @@ export function HfPaperDrawerBody({ item }: Props) {
   const projectPage =
     extra.project_page && extra.project_page !== githubUrl ? extra.project_page : null;
 
-  // media thumbnail
-  const media = Array.isArray(item.media) ? item.media : [];
-  const cover = media.find((m) => m.type === "image");
-
-  // BE 2026-05-19: figure_image 元数据 — width/height 用来算 hero 容器 aspect-ratio。
-  // PM 决策(2026-05-19 v6.8):只有横向 figure(aspect >= 1.0)才适合做 hero;
-  // 方形 / 纵向(< 1.0,GUI/screenshot 类)即便 BE 经 lookahead 给出最佳 figure,
-  // 强撑出来视觉也是"中间一小条 + 两侧大补白"或"接近方形像被裁的 GUI",
-  // 当无 hero 隐藏更干净(用户可以去 figures tab 看完整真实图)
-  const figureImage = extra.figure_image;
-  const heroAspect =
-    figureImage?.width && figureImage?.height
-      ? figureImage.width / figureImage.height
-      : null;
-  // 渲染门控:有 cover + (无 figure 元数据兜底 OR figure 横向)
-  const shouldRenderHero =
-    !!cover && (heroAspect == null || heroAspect >= 1.0);
-  // 容器 aspect 分档:wide / 横向偏方两档,纵向已隐藏不需要
-  const heroContainerAspect =
-    heroAspect == null
-      ? "1200 / 630"          // 兜底:无 figure 元数据(og-image fallback 等),走原 16:9
-      : heroAspect >= 1.5
-        ? "16 / 9"             // 横向 wide
-        : "4 / 3";              // 横向偏方(1.0 - 1.5)
+  // PM 2026-05-20: hero pic 整段砍掉(figure 拉伸视觉杂,直接进标题 + KPI
+  // 更紧凑;用户想看 figure 可以打开 PDF 全文)。media / figure_image /
+  // shouldRenderHero / heroContainerAspect / resolveAssetUrl 都不再需要
 
   // 内部状态(2026-05-20: 砍掉 raw/analysis tab,单栏顺序渲染,activeTab 不再需要)
   const [authorsExpanded, setAuthorsExpanded] = useState(false);
@@ -421,35 +400,16 @@ export function HfPaperDrawerBody({ item }: Props) {
 
   return (
     <div className="text-neutral-900">
-      {/* ─── Hero: thumbnail + 标题中英 + by @xxx 等 N 位提交 ─────────── */}
-      <div className="border-b border-neutral-200" data-drawer-title-anchor>
-        {shouldRenderHero && cover && (
-          // hero 容器:aspectRatio inline 跟 figure 形状走,letterbox 用 object-contain
-          // (figure 真实比例完整露出),max-h 60vh 防纵向 figure 在小屏占满全屏
-          <div
-            className="w-full overflow-hidden bg-neutral-100"
-            style={{ aspectRatio: heroContainerAspect, maxHeight: "60vh" }}
-          >
-            <img
-              src={resolveAssetUrl(cover.url)}
-              alt=""
-              className="h-full w-full object-contain object-center"
-              onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-            />
-          </div>
+      {/* ─── 标题区 (PM 2026-05-20: hero figure 整段砍,直接进标题) ──── */}
+      <div className="border-b border-neutral-200 p-5" data-drawer-title-anchor>
+        <h2 className="text-[18px] font-bold leading-[1.35] text-neutral-900 break-words">
+          {titleZh}
+        </h2>
+        {titleEn && titleEn !== titleZh && (
+          <p className="mt-1 text-[12px] italic text-neutral-500 break-words">
+            {titleEn}
+          </p>
         )}
-        <div className="p-5">
-          <h2 className="text-[18px] font-bold leading-[1.35] text-neutral-900 break-words">
-            {titleZh}
-          </h2>
-          {titleEn && titleEn !== titleZh && (
-            <p className="mt-1 text-[12px] italic text-neutral-500 break-words">
-              {titleEn}
-            </p>
-          )}
-
-          {/* PM v6: submitter 行整段砍掉(作者列表 + 数据 KPI 已经覆盖论文出处信息) */}
-        </div>
       </div>
 
       {/* ─── 作者列表 (PM v6: 上移到第 2 位,标题下方) ────────────────── */}
@@ -769,24 +729,12 @@ function CommentsSection({
   }
 
   // fetched_at 有但 comments 为空 → 该论文真的没评论(冷启动 / 新论文常见)
+  // PM 2026-05-20: 砍掉 dashed 容器 + "在 HF 发起第一条讨论"链接,只留灰色文字
   if (comments.length === 0) {
     return (
       <>
         <SectionTitle>评论</SectionTitle>
-        <div className="rounded-md border border-dashed border-neutral-300 bg-neutral-50/40 px-3 py-5 text-center text-[13px] text-neutral-500">
-          <div>暂无评论</div>
-          {discussionUrl && (
-            <a
-              href={discussionUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="mt-2 inline-block text-[11px] text-sky-600 hover:underline"
-            >
-              在 HF 发起第一条讨论 ↗
-            </a>
-          )}
-        </div>
+        <div className="text-[13px] text-neutral-400">暂无评论</div>
       </>
     );
   }
