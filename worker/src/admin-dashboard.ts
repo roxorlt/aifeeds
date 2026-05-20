@@ -315,23 +315,44 @@ async function metricErrorTrend(env: Env) {
 }
 
 async function metricTopDevices(env: Env) {
-  // active_dates = 该 device 30 天内活跃过的所有日期，逗号分隔串（前端 split
-  // 后渲染 GitHub-style 30 格贡献小方格，只对 active_days >= 5 的 device 展示）。
-  // GROUP_CONCAT(DISTINCT) 在 SQLite 默认按内部顺序拼，前端会再 sort。
+  // active_date_counts = 该 device 28 天内每天的事件数，json 对象 {"YYYY-MM-DD": N}。
+  // 前端按 count 分级染色渲染 GitHub 风格 28 格（7×4）贡献小方格。28 而非 30 让
+  // 7 列 × 4 行整齐，无需 pad；最右下角是今天（带 outline）。
+  // 用 CTE 先按 device+day group 算 cnt，再 outer 用 json_group_object 拼。
+  // 避免 correlated subquery 跟 NOT_OWNER_SQL 拼接时 alias 混乱。
   const rs = await env.DB.prepare(`
+    WITH per_dev_day AS (
+      SELECT
+        device_id,
+        date(occurred_at/1000,'unixepoch','+8 hours') AS day,
+        COUNT(*) AS cnt
+      FROM events
+      WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
+        AND ${NOT_OWNER_SQL}
+      GROUP BY device_id, day
+    ),
+    per_dev AS (
+      SELECT
+        device_id,
+        COUNT(DISTINCT event_type) AS event_types,
+        substr(COALESCE(MAX(ua),''), 1, 80) AS ua_sample
+      FROM events
+      WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
+        AND ${NOT_OWNER_SQL}
+      GROUP BY device_id
+    )
     SELECT
-      device_id,
-      COUNT(*) AS events,
-      COUNT(DISTINCT date(occurred_at/1000,'unixepoch','+8 hours')) AS active_days,
-      COUNT(DISTINCT event_type) AS event_types,
-      MIN(date(occurred_at/1000,'unixepoch','+8 hours')) AS first_seen,
-      MAX(date(occurred_at/1000,'unixepoch','+8 hours')) AS last_seen,
-      substr(COALESCE(MAX(ua),''), 1, 80) AS ua_sample,
-      GROUP_CONCAT(DISTINCT date(occurred_at/1000,'unixepoch','+8 hours')) AS active_dates
-    FROM events
-    WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
-      AND ${NOT_OWNER_SQL}
-    GROUP BY device_id
+      d.device_id,
+      SUM(d.cnt) AS events,
+      COUNT(*) AS active_days,
+      p.event_types,
+      MIN(d.day) AS first_seen,
+      MAX(d.day) AS last_seen,
+      p.ua_sample,
+      json_group_object(d.day, d.cnt) AS active_date_counts
+    FROM per_dev_day d
+    JOIN per_dev p ON p.device_id = d.device_id
+    GROUP BY d.device_id, p.event_types, p.ua_sample
     ORDER BY active_days DESC, events DESC
     LIMIT 30
   `).all();
@@ -501,14 +522,16 @@ ${ADMIN_SHARED_CSS}
   .loading { color: #6b7280; font-size: 12px; text-align: center; padding: 24px; }
   .err { color: #fca5a5; font-size: 12px; padding: 12px; background: #1f1212; border: 1px solid #7f1d1d; border-radius: 6px; }
 
-  /* GitHub-style 贡献小方格 — 30 天活跃日。7 列 × 5 行 = 35 格容纳 30 天（前 5 格留空），
-     每列 = 一周，从左到右越近。今天那格加 outline。activeDates 是 "YYYY-MM-DD,..." 串 */
+  /* GitHub-style 贡献小方格 — 28 天活跃日 7 列 × 4 行整齐。按当天 event 数 5 级染色，
+     最右下角是今天（带 outline）。.lv0 无事件，.lv1-.lv4 由浅到深。 */
   .contrib { display: inline-grid; grid-template-columns: repeat(7, 12px); grid-auto-rows: 12px; gap: 3px;
              vertical-align: middle; }
   .contrib > span { width: 12px; height: 12px; border-radius: 2px; background: #1a2230; }
-  .contrib > span.on { background: #6ee7b7; }
-  .contrib > span.today { outline: 1px solid #6b7280; outline-offset: 1px; }
-  .contrib > span.pad { background: transparent; }
+  .contrib > span.lv1 { background: #1f3a2e; }
+  .contrib > span.lv2 { background: #2d6649; }
+  .contrib > span.lv3 { background: #4ea876; }
+  .contrib > span.lv4 { background: #6ee7b7; }
+  .contrib > span.today { outline: 1px solid #9ca3af; outline-offset: 1px; }
 </style>
 </head>
 <body>
@@ -594,10 +617,10 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide">
     <h2>🧑‍💻 重度设备</h2>
-    <p class="hint">最近 30 天按 active_days × events 排序前 30。active_days ≥ 5 加 GitHub 风格活跃日方格（30 天内每天一格，绿色 = 活跃，最右侧带框是今天）</p>
+    <p class="hint">最近 28 天按 active_days × events 排序前 30。active_days ≥ 5 加 GitHub 风格活跃日方格（7×4 排列，由浅到深 4 级颜色按当天 event 数：1-9 / 10-49 / 50-199 / 200+；带边框那格是今天）</p>
     <div style="overflow-x:auto"><table id="tbl-devices"><thead><tr>
       <th>device_id</th><th class="num">events</th><th class="num">活跃天</th><th class="num">事件类型</th>
-      <th>first seen</th><th>last seen</th><th>30 天分布</th><th>UA</th>
+      <th>first seen</th><th>last seen</th><th>28 天分布</th><th>UA</th>
     </tr></thead><tbody><tr><td colspan="8" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
@@ -879,23 +902,35 @@ async function loadErrorTrend() {
   } catch (e) { document.getElementById('ch-error-trend').innerHTML = '<div class="err">' + e.message + '</div>'; }
 }
 
-// 生成 GitHub-style 30 格贡献小方格。activeDates 是 "YYYY-MM-DD,..." 串。
-// 7 列 × 5 行 = 35 格，前 5 格透明 pad，后 30 格按时间排（左到右、上到下都是从远到近）。
-// 最后一格 = 今天（带 outline）。BJT 时区下 user 本地时区跟 events 表的 +8h 对齐。
-function renderContribGrid(activeDates) {
-  if (!activeDates) return '<span class="muted">—</span>';
-  const set = new Set(String(activeDates).split(','));
+// GitHub-style 28 格贡献小方格 (7 列 × 4 行整齐，无 pad)。activeDateCounts 是
+// JSON 对象 {"YYYY-MM-DD": N} (后端 json_group_object 输出)。按当天 event 数
+// 5 级染色：0 / 1-9 / 10-49 / 50-199 / 200+。今天那格 (最右下角，i=0) 带 outline。
+// BJT 时区下 user 本地时区跟 events 表的 +8h 对齐。
+function eventLevel(n) {
+  if (!n) return 'lv0';
+  if (n < 10) return 'lv1';
+  if (n < 50) return 'lv2';
+  if (n < 200) return 'lv3';
+  return 'lv4';
+}
+function renderContribGrid(activeDateCounts) {
+  if (!activeDateCounts) return '<span class="muted">—</span>';
+  // 后端 json_group_object 输出 string，前端 parse。容错：万一是 object 直接用
+  let counts;
+  try { counts = typeof activeDateCounts === 'string' ? JSON.parse(activeDateCounts) : activeDateCounts; }
+  catch (e) { return '<span class="muted">—</span>'; }
   const today = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   let html = '<div class="contrib">';
-  for (let p = 0; p < 5; p++) html += '<span class="pad"></span>';
-  for (let i = 29; i >= 0; i--) {
+  for (let i = 27; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
     const key = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-    const on = set.has(key) ? ' on' : '';
+    const cnt = counts[key] || 0;
+    const lv = eventLevel(cnt);
     const todayMark = i === 0 ? ' today' : '';
-    html += '<span class="' + on + todayMark + '" title="' + key + (set.has(key) ? ' · 活跃' : '') + '"></span>';
+    const title = key + (cnt ? ' · ' + cnt + ' events' : ' · 无');
+    html += '<span class="' + lv + todayMark + '" title="' + title + '"></span>';
   }
   return html + '</div>';
 }
@@ -940,7 +975,7 @@ async function loadDevices() {
     const d = await getJson('/api/admin/analytics?metric=top-devices');
     if (!d.devices.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">无数据</td></tr>'; return; }
     tb.innerHTML = d.devices.map(r => {
-      const grid = r.active_days >= 5 ? renderContribGrid(r.active_dates) : '<span class="muted">—</span>';
+      const grid = r.active_days >= 5 ? renderContribGrid(r.active_date_counts) : '<span class="muted">—</span>';
       const ua = parseUA(r.ua_sample || '');
       const uaCell = '<div class="ua-cell">'
         + '<div class="device-name">' + ua.device + (ua.browser ? ' · ' + ua.browser : '') + '</div>'
