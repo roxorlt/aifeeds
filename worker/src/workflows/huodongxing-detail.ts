@@ -57,6 +57,15 @@ export class HuodongxingDetailWorkflow extends WorkflowEntrypoint<Env, HdxDetail
       persistHdxDetail(this.env, itemId, parsed),
     );
 
+    // Step 3: 统一 workflow 完整性 gate(2026-05-21) — persist 成功才 mark
+    // /api/items?source_type=huodongxing 在 WORKFLOW_COMPLETED_FILTER='true' 时滤掉
+    // workflow_completed_at IS NULL 的半成品。parse-failed 早退不 mark。
+    await step.do('mark-completed', RETRY, async () => {
+      await this.env.DB.prepare(
+        `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
+      ).bind(new Date().toISOString(), itemId).run();
+    });
+
     return { itemId, status: result.status };
   }
 }
