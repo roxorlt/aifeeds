@@ -4742,14 +4742,21 @@ interface XArticleStub {
 }
 
 export async function fetchXArticlesForXTweet(
-  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  env: EnrichEnv,
   itemId: string,
 ): Promise<{ fetched: number; failed: number; skipped: number; mutated: boolean; credits: number }> {
-  const { extractXArticleId, fetchXArticleViaSb } = await import('./scrapebadger');
+  // 2026-05-21 重构:用 X public syndication API 替代 SB article endpoint。
+  // 根因:SB tweets/article/<id> endpoint 极度不可靠 — lazy fetch + 极短 evict,
+  // 实测 spike 验过的 article 几小时后重测 100% null content。
+  // 解法:syndication tweet-result?id=<tweet_id> 公开 API,response.article 字段
+  // 含 rest_id/title/preview_text/cover_media。免费 + 可靠 + 老 article 也工作。
+  // 路径:对每个 path,用该 path 的 tweet id(L1=row.source_id / L2=obj.id /
+  // L3=nested.id)调 syndication → article 字段 + user 字段(=article author)。
+  const { extractXArticleId } = await import('./scrapebadger');
 
   const row = await env.DB.prepare(
-    `SELECT id, extra FROM items WHERE id = ? AND source_type='x_list'`,
-  ).bind(itemId).first<{ id: string; extra: string | null }>();
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
   if (!row) throw new Error(`fetchXArticlesForXTweet: item not found ${itemId}`);
 
   let extra: Record<string, unknown> = {};
@@ -4761,13 +4768,14 @@ export async function fetchXArticlesForXTweet(
   let failed = 0;
   let skipped = 0;
   let mutated = false;
-  let totalCredits = 0;
 
-  // 单字段处理 helper:已有 x_article + (fetched_at OR fetch_failed_at) 就 skip
+  // 单字段处理:tweetId 是该 path 对应的 tweet id(L1 是 row.source_id,L2/L3 是 obj.id)。
+  // 调 syndication on tweetId,从 response.article 抽 metadata,response.user 抽 author。
   const processField = async (
     obj: Record<string, unknown>,
     resolvedUrlKey: string,
     xArticleKey: string,
+    tweetId: string | null | undefined,
   ): Promise<Record<string, unknown> | null> => {
     const resolvedUrl = obj[resolvedUrlKey] as string | undefined;
     const articleId = extractXArticleId(resolvedUrl);
@@ -4777,35 +4785,78 @@ export async function fetchXArticlesForXTweet(
       skipped++;
       return null;
     }
+    if (!tweetId) {
+      // 该 path 没 tweet id 无法 syndication 查 — 标 failed
+      const stub: XArticleStub = {
+        article_id: articleId,
+        title: null, excerpt: null, cover_image_url: null, summary_text: null,
+        author_handle: null, author_name: null,
+        fetch_failed_at: nowIso, fetch_failed_reason: 'no_tweet_id',
+      };
+      failed++;
+      return { ...obj, [xArticleKey]: stub };
+    }
 
-    const r = await fetchXArticleViaSb(env, articleId);
-    totalCredits += r.detail_credits + r.search_credits;
+    let synd;
+    try {
+      synd = await fetchTweet(tweetId);
+    } catch {
+      synd = null;
+    }
 
     const stub: XArticleStub = {
       article_id: articleId,
-      title: r.detail?.title || null,
-      excerpt: r.detail?.excerpt || null,
-      cover_image_url: r.detail?.cover_image_url || null,
-      summary_text: r.detail?.summary_text || null,
-      author_handle: r.author?.username || null,
-      author_name: r.author?.user_name || null,
+      title: null, excerpt: null, cover_image_url: null, summary_text: null,
+      author_handle: null, author_name: null,
     };
 
-    if (r.ok && r.detail) {
-      stub.fetched_at = nowIso;
-      fetched++;
-    } else {
-      // detail null(content 反索引 / 已删) 或其它 failure:仍标 failed,但 author 字段若有就保留
+    if (!synd || synd.notFound || !synd.data) {
       stub.fetch_failed_at = nowIso;
-      stub.fetch_failed_reason = r.reason || 'unknown';
+      stub.fetch_failed_reason = synd?.notFound ? 'tweet_404' : 'syndication_http';
       failed++;
+      return { ...obj, [xArticleKey]: stub };
     }
 
+    const data = synd.data as Record<string, unknown>;
+    const user = data.user as Record<string, unknown> | undefined;
+    const article = data.article as Record<string, unknown> | undefined;
+
+    // user 字段几乎总能拿到(tweet 存在则有 user) — 作 author 兜底
+    stub.author_handle = (user?.screen_name as string) || null;
+    stub.author_name = (user?.name as string) || null;
+
+    if (!article) {
+      // tweet 存在但没 article 字段 — 该 tweet 不是 article tweet(可能 t.co 指向 article
+      // 但该 tweet 只是文本提到 article URL,article tweet 是另一条)。
+      // 仍 mark failed 但 author 保留。
+      stub.fetch_failed_at = nowIso;
+      stub.fetch_failed_reason = 'no_article_in_tweet';
+      failed++;
+      return { ...obj, [xArticleKey]: stub };
+    }
+
+    // article rest_id 跟我们的 articleId 校对 — 一般一致,有差异说明不是同一篇
+    const articleRestId = (article.rest_id as string) || null;
+    if (articleRestId && articleRestId !== articleId) {
+      stub.fetch_failed_at = nowIso;
+      stub.fetch_failed_reason = `article_id_mismatch:${articleRestId}`;
+      failed++;
+      return { ...obj, [xArticleKey]: stub };
+    }
+
+    // 成功:抽 title/excerpt/cover
+    stub.title = (article.title as string) || null;
+    stub.excerpt = (article.preview_text as string) || null;
+    const coverMedia = article.cover_media as Record<string, unknown> | undefined;
+    const mediaInfo = coverMedia?.media_info as Record<string, unknown> | undefined;
+    stub.cover_image_url = (mediaInfo?.original_img_url as string) || null;
+    stub.fetched_at = nowIso;
+    fetched++;
     return { ...obj, [xArticleKey]: stub };
   };
 
-  // L1 main content (extra root level)
-  const l1Updated = await processField(extra, 'content_resolved_url', 'x_article');
+  // L1 main content (extra root level) — tweet id 是 row.source_id
+  const l1Updated = await processField(extra, 'content_resolved_url', 'x_article', row.source_id);
   if (l1Updated) {
     Object.assign(newExtra, l1Updated);
     mutated = true;
@@ -4817,9 +4868,10 @@ export async function fetchXArticlesForXTweet(
     if (!l2) continue;
     let newL2 = l2;
     let l2Mutated = false;
+    const l2TweetId = (l2.id as string) || null;
 
     // L2 content
-    const l2Updated = await processField(l2, 'content_resolved_url', 'x_article');
+    const l2Updated = await processField(l2, 'content_resolved_url', 'x_article', l2TweetId);
     if (l2Updated) {
       newL2 = l2Updated;
       l2Mutated = true;
@@ -4828,7 +4880,8 @@ export async function fetchXArticlesForXTweet(
     // L3 quote_of(nested)
     const l3 = newL2.quote_of as Record<string, unknown> | undefined;
     if (l3) {
-      const l3Updated = await processField(l3, 'content_resolved_url', 'x_article');
+      const l3TweetId = (l3.id as string) || null;
+      const l3Updated = await processField(l3, 'content_resolved_url', 'x_article', l3TweetId);
       if (l3Updated) {
         newL2 = { ...newL2, quote_of: l3Updated };
         l2Mutated = true;
@@ -4840,6 +4893,9 @@ export async function fetchXArticlesForXTweet(
       mutated = true;
     }
   }
+
+  // 兼容性:旧 result type 有 credits 字段,syndication 不消 credit 总是 0
+  const totalCredits = 0;
 
   if (mutated) {
     await env.DB.prepare(
