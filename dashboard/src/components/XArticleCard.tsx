@@ -77,8 +77,12 @@ export function XArticleCard({ article, resolvedUrl, content, compact }: Props) 
   // - excerpt line-clamp-3
   if (!article) return null;
   const cover = article.cover_image_url;
-  const title = article.title || "";
-  const excerpt = article.excerpt || "";
+  // BE PR #112 (2026-05-22): 优先取翻译,fallback 原文。
+  // - 英文 article + 翻译成功 → 显示中文 title_translated/excerpt_translated
+  // - 中文 article (translate_skipped_at 有) → 翻译字段为空 → fallback 原文中文
+  // - 翻译失败 (translate_failed_at) → 同样 fallback 原文
+  const title = article.title_translated || article.title || "";
+  const excerpt = article.excerpt_translated || article.excerpt || "";
   const authorName = article.author_name || "";
   const authorHandle = article.author_handle || "";
 

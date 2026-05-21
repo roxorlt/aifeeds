@@ -93,6 +93,13 @@ export interface XArticle {
   fetched_at?: string | null;
   fetch_failed_at?: string | null;    // mutex 跟 fetched_at
   fetch_failed_reason?: string | null;
+  // BE PR #112 (2026-05-22): DeepSeek 翻译 title + excerpt
+  // (workflow step 1.7,跟 1.6 fetch 串行)
+  title_translated?: string | null;
+  excerpt_translated?: string | null;
+  translated_at?: string | null;
+  translate_failed_at?: string | null;
+  translate_skipped_at?: string | null;   // 中文原文 / 中英混合 skip 翻译
 }
 
 export interface LinkCard {
