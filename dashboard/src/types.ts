@@ -46,6 +46,9 @@ export interface Item {
   published_at?: string | null;
   scraped_at: string;
   is_relevant?: number | null;
+  // 运营看板内容池：score > P90（X 7d AI 基线）时为 1，cron 自动维护
+  // 设计：docs/plans/2026-05-21-ops-pool-design.md
+  is_hot?: number | null;
   matched_by?: string | null;
   lang?: string | null;
   extra?: ItemExtra | string | null;

@@ -79,6 +79,9 @@ import {
   checkAdminAuth,
 } from './admin';
 import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
+import { serveAdminOpsHtml, handleAdminOps } from './admin-ops';
+import { runOpsBaseline } from './ops/baseline';
+import { runOpsDetect } from './ops/detect';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -121,6 +124,8 @@ export interface Env {
   TENCENT_SMS_TEMPLATE_ID?: string;     // 已审模板 ID
   TENCENT_SMS_REGION?: string;          // 默认 ap-guangzhou
   PUSHDEER_ADMIN_KEYS?: string;         // 逗号分隔多个 key
+  // 运营看板内容池：'true' 开启 PushDeer 推送，否则只跑 cron 不推（首次上线先观察 3 天）
+  OPS_PUSHDEER_ENABLED?: string;
   // PR2 配置
   SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
   SMS_PROVIDER?: string;                // 'tencent'（默认）/ 'pushdeer'（dev/staging 走 PushDeer 推到 admin）
@@ -383,8 +388,14 @@ export default {
       if (path === '/admin/tools' && request.method === 'GET') {
         return serveAdminToolsHtml(request, env);
       }
+      if (path === '/admin/ops' && request.method === 'GET') {
+        return serveAdminOpsHtml(request, env);
+      }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
+      }
+      if (path === '/api/admin/ops' && request.method === 'GET') {
+        return handleAdminOps(request, env);
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);
@@ -1548,6 +1559,27 @@ export default {
           }
         } catch (e) {
           console.error(`[cron] ${mode} error:`, e);
+        }
+      })(),
+    );
+
+    // ─── Ops pool: baseline + detect (并行跑，不阻塞主 mode dispatch) ─
+    // baseline 每日 BJT 02:10 (= UTC 18:10) 一次，KV 哨兵防多触发。
+    // detect 每 30min (minute=0 / 30) 跟 refresh-metrics 同 tick，独立 waitUntil 不阻塞。
+    // 设计：docs/plans/2026-05-21-ops-pool-design.md
+    ctx.waitUntil(
+      (async () => {
+        try {
+          if (hour === 18 && minute === 10) {
+            const r = await runOpsBaseline(env);
+            console.log(`[cron] ops-baseline:`, JSON.stringify(r));
+          }
+          if (minute === 0 || minute === 30) {
+            const r = await runOpsDetect(env);
+            console.log(`[cron] ops-detect:`, JSON.stringify(r));
+          }
+        } catch (e) {
+          console.error('[cron] ops error:', e);
         }
       })(),
     );
