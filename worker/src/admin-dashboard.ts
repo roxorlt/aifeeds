@@ -98,9 +98,18 @@ const OWNER_DEVICE_CTE = (() => {
 const NOT_OWNER_SQL = `device_id NOT IN (${OWNER_DEVICE_CTE})`;
 
 async function metricOverview(env: Env) {
+  // DAU "今日" = 自然日（BJT 0 点 - 当前时刻），不是最近 24h 滚动。
+  // 滚动窗口的 bug：同一天里 DAU 可能上下波动 — 昨天某时段的 device 滑出窗口
+  // 比新增的 device 还多 → DAU 下降。自然日窗口下一天内单调递增，BJT 24 点归零。
+  //
+  // BJT 今日 0 点的 unix 秒：strftime('%s', date('now','+8 hours'), '-8 hours')
+  //   date('now','+8 hours') → BJT 当前日期 'YYYY-MM-DD'
+  //   strftime('%s', 日期, '-8 hours') → 该 BJT 日期 0 点的 UTC unix 秒
+  //
+  // WAU / MAU 仍保留 last 7d / last 30d 滚动（业内 product analytics 标准）。
   const row = await env.DB.prepare(`
     SELECT
-      COUNT(DISTINCT CASE WHEN occurred_at > (strftime('%s','now')-1*86400)*1000 THEN device_id END) AS dau,
+      COUNT(DISTINCT CASE WHEN occurred_at >= strftime('%s', date('now', '+8 hours'), '-8 hours') * 1000 THEN device_id END) AS dau,
       COUNT(DISTINCT CASE WHEN occurred_at > (strftime('%s','now')-7*86400)*1000 THEN device_id END) AS wau,
       COUNT(DISTINCT CASE WHEN occurred_at > (strftime('%s','now')-30*86400)*1000 THEN device_id END) AS mau,
       COUNT(DISTINCT device_id) AS total_devices,
