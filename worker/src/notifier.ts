@@ -71,7 +71,17 @@ export async function notifyCronSummary(
   const keys = keysCsv.split(',').map((k) => k.trim()).filter(Boolean);
   if (keys.length === 0) return;
 
-  const title = `aifeeds 抓取 | ${taskName}`;
+  // 2026-05-21 加 ⚠️ alert prefix:HF prod 跑 3 天 skipped='no_token'(HF_READ secret 漏 push)
+  // 静默退出,用户察觉不到。alarming reason 让 title 自带警告标识 + 通知凸显。
+  const CONCERNING_SKIP_REASONS = new Set([
+    'no_token',         // HF — env.HF_READ 缺失
+    'no_credentials',   // PH — env.PH_CLIENT_ID/SECRET 缺失
+    'fetch_failed',     // 任意源网络失败
+    'list_empty',       // 通常 transient,但若持续多天可能是 API 端 break
+  ]);
+  const skipReason = typeof result.skipped === 'string' ? result.skipped : null;
+  const isConcerning = skipReason !== null && CONCERNING_SKIP_REASONS.has(skipReason);
+  const title = `${isConcerning ? '⚠️ ' : ''}aifeeds 抓取 | ${taskName}`;
 
   // 字段名 i18n 映射。对照 5 个 fetch handler 的真实 return 字段（一一核对过）：
   // - PH:      worker/src/scrapers/ph.ts runPhDailyFetch
@@ -153,11 +163,13 @@ export async function notifyCronSummary(
     return FIELD_LABELS[k] ?? k;
   };
 
-  // skip reason 字符串翻译（PH 用）
+  // skip reason 字符串翻译（PH / HF / 通用）
   const SKIP_REASON_CN: Record<string, string> = {
     sentinel: '已抓过（哨兵命中）',
-    no_credentials: '凭证未配置',
-    list_empty: '列表为空',
+    no_credentials: '⚠️ 凭证未配置(PH_CLIENT_ID / SECRET 缺失)',
+    no_token: '⚠️ Token 未配置(HF_READ secret 缺失)',
+    list_empty: '⚠️ 列表为空(可能源 API 异常)',
+    fetch_failed: '⚠️ 抓取失败(网络 / 远端 500)',
   };
 
   // 格式化 value：nested 对象展开为 "子key=value / 子key=value"；数组用分号连接
