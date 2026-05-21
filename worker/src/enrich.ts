@@ -5921,6 +5921,11 @@ export async function runBackfillTcoResolutions(
  * 用法:每条 item 内 6 path 各自处理(L1 + L2*3 + L3*3)。fetchXArticlesForXTweet
  * 处理一个 item 内所有 path。
  */
+// 2026-05-21 fix(post-PR5):移除 is_relevant=1 filter
+// FE 反馈 jxnlco "Getting the most out of Codex"(source_id 2057250417638035555)L1 case
+// main content 只是 t.co URL → DeepSeek 分类得 is_relevant=0 → 被原 backfill 漏掉。
+// workflow step 1.6 本身没 is_relevant gate(step 1.6 在 step 3 classify 之前跑),
+// backfill 应该跟 workflow 行为一致 — 即便 is_relevant=0 也写 x_article 给 FE 渲染。
 export async function runBackfillXArticles(
   env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
   limit: number,
@@ -5961,7 +5966,7 @@ export async function runBackfillXArticles(
 
   const candidates = await env.DB.prepare(
     `SELECT id FROM items
-      WHERE source_type='x_list' AND is_relevant=1
+      WHERE source_type='x_list'
         AND ${HAS_ARTICLE_NEED_FETCH}
       ORDER BY scraped_at DESC
       LIMIT ?`,
@@ -5969,7 +5974,7 @@ export async function runBackfillXArticles(
 
   const remainingRow = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items
-      WHERE source_type='x_list' AND is_relevant=1
+      WHERE source_type='x_list'
         AND ${HAS_ARTICLE_NEED_FETCH}`,
   ).first<{ n: number }>();
 
