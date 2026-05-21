@@ -1637,17 +1637,25 @@ export async function ingestItems(env: Env, items: ItemInput[]): Promise<IngestR
             metrics = excluded.metrics,
             is_relevant = excluded.is_relevant,
             matched_by = excluded.matched_by,
+            -- 2026-05-21 重构:通用 extra 合并,不再 wholesale 覆盖。
+            -- 老 ELSE 分支用 excluded.extra 整组替换 → workflow 写入的 enrichment 字段
+            -- (PH 的 r2_migrated_at / ai_summary / classified_at / HF 的 deep_analysis /
+            -- ar5iv_paragraphs / discussion_comments 等)被下次 daily fetch 擦掉。PR #100 已
+            -- 用 app-level merge 给 PH 绕过,这次 SQL 层一次性通用化。
+            -- 策略:json_patch(老 extra, strip-null 后的新 extra)
+            -- - strip-null:新 ingest 的显式 null 占位(如 PH 的 r2_migrated_at: null /
+            --   HF 的 github_stars: null)不会擦老的非 null 值
+            -- - shallow:只过 root level 的 null,数组(top_comments[])整组替换 → 元素级保留
+            --   仍需 caller app-level merge(如 PH 的 mergePhExtraPreservingEnrichment)
             extra = CASE
-              WHEN (items.extra -> '$.longform') IS NOT NULL
-                   OR (items.extra -> '$.enriched_at') IS NOT NULL
-                THEN json_patch(
-                  coalesce(excluded.extra, '{}'),
-                  json_object(
-                    'longform',    items.extra -> '$.longform',
-                    'enriched_at', items.extra -> '$.enriched_at'
-                  )
-                )
-              ELSE excluded.extra
+              WHEN items.extra IS NULL THEN excluded.extra
+              WHEN excluded.extra IS NULL THEN items.extra
+              ELSE json_patch(
+                items.extra,
+                (SELECT coalesce(json_group_object(key, value), '{}')
+                   FROM json_each(excluded.extra)
+                  WHERE value IS NOT NULL)
+              )
             END
         `).bind(
           id,
