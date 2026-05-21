@@ -13,7 +13,8 @@ import { useAuthStore } from "../lib/authStore";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
 import { QuotedTweet } from "./QuotedTweet";
-import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { XArticleCard } from "./XArticleCard";
 import {
   IconEye,
   IconHeart,
@@ -733,19 +734,24 @@ export function TweetCard({
             </div>
           )}
 
-          {/* Body — PR4: 主推 content 是单纯 t.co 短链时,走 link card 替换。
-              retweet 翻转时取被转推者的 retweet_of.content_resolved_url;
-              否则 (原创 / quote 主推) 取 L1 extra.content_resolved_url */}
+          {/* Body — PR5: 主推 content 是单纯 t.co 短链时,走 XArticleCard
+              3-tier 渲染 (Rich 完整 X 流内同款 / Mid 仅 author / Basic 裸 URL).
+              retweet 翻转时取 retweet_of.{content_resolved_url, x_article};
+              否则 (原创 / quote 主推) 取 L1 extra.{content_resolved_url, x_article} */}
           {(() => {
             const sourceContent = isRetweet && retweetOf?.content ? retweetOf.content : item.content;
             const sourceResolvedUrl = isRetweet && retweetOf
               ? retweetOf.content_resolved_url
               : extra.content_resolved_url;
+            const sourceArticle = isRetweet && retweetOf
+              ? retweetOf.x_article
+              : extra.x_article;
             if (isTcoOnly(sourceContent) && sourceResolvedUrl) {
               return (
-                <TcoResolvedLinkCard
-                  content={sourceContent}
+                <XArticleCard
+                  article={sourceArticle}
                   resolvedUrl={sourceResolvedUrl}
+                  content={sourceContent}
                 />
               );
             }

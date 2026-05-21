@@ -16,7 +16,8 @@ import { useEffect, useState } from "react";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { VerifiedBadge, IconShare } from "./icons";
-import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { XArticleCard } from "./XArticleCard";
 
 export function QuoteSnapshotModal() {
   const quote = useQuoteSnapshotStore((s) => s.quote);
@@ -154,11 +155,13 @@ export function QuoteSnapshotModal() {
             )}
           </div>
 
-          {/* Content — PR4: t.co only + 有 resolved_url 时走 link card 替换 */}
+          {/* Content — PR5: t.co only + 有 resolved_url 时走 XArticleCard
+              3-tier (Rich cover+title+excerpt / Mid 仅 author / Basic 裸 URL) */}
           {isTcoOnly(quote.content) && quote.content_resolved_url ? (
-            <TcoResolvedLinkCard
-              content={quote.content}
+            <XArticleCard
+              article={quote.x_article}
               resolvedUrl={quote.content_resolved_url}
+              content={quote.content}
             />
           ) : (
             displayText && (

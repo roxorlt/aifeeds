@@ -3,7 +3,8 @@ import type { QuoteOf } from "../types";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { VerifiedBadge } from "./icons";
-import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { XArticleCard } from "./XArticleCard";
 
 interface Props {
   quote: QuoteOf;
@@ -82,12 +83,14 @@ export function QuotedTweet({ quote, depth = 0 }: Props) {
         </div>
 
         {/* Body — translated if available, else original;
-            PR4: 如果原 content 是单纯 t.co 短链且 BE resolve 出真实 URL,
-            走 link card 替换纯文本(译文也一并跳过,因为翻译 URL 没意义) */}
+            PR5: content 是单纯 t.co 短链且 BE resolve 出 url 时,走 XArticleCard
+            3-tier 渲染 (Rich: cover + title + excerpt + author / Mid: 仅
+            author / Basic: 裸 URL),自动 fallback 到当前简化 link card */}
         {isTcoOnly(quote.content) && quote.content_resolved_url ? (
-          <TcoResolvedLinkCard
-            content={quote.content}
+          <XArticleCard
+            article={quote.x_article}
             resolvedUrl={quote.content_resolved_url}
+            content={quote.content}
             compact={isNested}
           />
         ) : (

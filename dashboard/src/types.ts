@@ -75,6 +75,24 @@ export interface QuoteOf {
   // 可识别 link card(几乎全是 x.com/i/article/... X Articles)
   content_resolved_url?: string | null;
   content_resolve_failed_at?: string | null;
+  // BE PR5 (2026-05-21): X Article 内容 (ScrapeBadger 抓回)。
+  // mutex: fetched_at 有 title 通常齐 → Rich tier;fetch_failed_at 有但
+  // author_handle 在 → Mid tier (老 article SB 反索引,只剩 author meta);
+  // 完全没字段 → Basic tier (fallback 到 TcoResolvedLinkCard 裸 URL)。
+  x_article?: XArticle | null;
+}
+
+export interface XArticle {
+  article_id?: string | null;
+  title?: string | null;
+  excerpt?: string | null;
+  cover_image_url?: string | null;
+  summary_text?: string | null;       // Grok 5-bullet, bonus
+  author_handle?: string | null;
+  author_name?: string | null;
+  fetched_at?: string | null;
+  fetch_failed_at?: string | null;    // mutex 跟 fetched_at
+  fetch_failed_reason?: string | null;
 }
 
 export interface LinkCard {
@@ -115,6 +133,8 @@ export interface ItemExtra {
   // 6 个 path 都遵守同一语义(mutex: 要么 url 要么 failed_at)
   content_resolved_url?: string | null;
   content_resolve_failed_at?: string | null;
+  // BE PR5 (2026-05-21): L1 主推的 X Article meta(同样 6 个 path,L2/L3 在 QuoteOf)
+  x_article?: XArticle | null;
 
   // GitHub-source specific fields (source_type = 'github')
   ai_category?: "agent" | "model" | "tool" | "infra" | "app" | "tutorial" | "other" | null;
