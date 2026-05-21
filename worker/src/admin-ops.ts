@@ -51,7 +51,7 @@ async function metricOverview(env: Env) {
 
   const hotCount = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items WHERE is_hot = 1
-     AND scraped_at > (strftime('%s','now')-7*86400)*1000`,
+     AND scraped_at > datetime('now', '-7 days')`,
   ).first<{ n: number }>();
 
   return {

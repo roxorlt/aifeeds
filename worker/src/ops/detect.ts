@@ -88,7 +88,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
       SET is_hot = 1
       WHERE source_type = 'x_list'
         AND is_relevant = 1
-        AND scraped_at > (strftime('%s', 'now') - 7 * 86400) * 1000
+        AND scraped_at > datetime('now', '-7 days')
         AND metrics IS NOT NULL
         AND COALESCE(is_hot, 0) = 0
         AND (
@@ -116,7 +116,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         ) AS score
       FROM items
       WHERE source_type = 'x_list' AND is_relevant = 1
-        AND scraped_at > (strftime('%s', 'now') - 24 * 3600) * 1000
+        AND scraped_at > datetime('now', '-1 day')
         AND metrics IS NOT NULL
         AND COALESCE(json_extract(metrics, '$.likes'), 0) >= ?
         AND (
@@ -229,7 +229,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         FROM items
         WHERE source_type='x_list' AND is_relevant=1
           AND json_extract(extra, '$.quote_of.handle') IS NOT NULL
-          AND scraped_at > (strftime('%s','now') - 14 * 86400) * 1000
+          AND scraped_at > datetime('now', '-14 days')
         UNION ALL
         SELECT
           json_extract(extra, '$.reply_of.handle'),
@@ -237,7 +237,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         FROM items
         WHERE source_type='x_list' AND is_relevant=1
           AND json_extract(extra, '$.reply_of.handle') IS NOT NULL
-          AND scraped_at > (strftime('%s','now') - 14 * 86400) * 1000
+          AND scraped_at > datetime('now', '-14 days')
       )
       SELECT
         h AS handle,

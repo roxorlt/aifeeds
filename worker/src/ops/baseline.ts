@@ -41,7 +41,7 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
           + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20 AS score
         FROM items
         WHERE source_type = 'x_list' AND is_relevant = 1
-          AND scraped_at > (strftime('%s', 'now') - 7 * 86400) * 1000
+          AND scraped_at > datetime('now', '-7 days')
           AND metrics IS NOT NULL
       ),
       ranked AS (
