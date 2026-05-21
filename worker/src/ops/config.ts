@@ -24,4 +24,18 @@ export const OPS_CONFIG = {
   POOL_DISPLAY_WINDOW_HOURS: 24,   // /admin/ops 爆推 + 趋势推 显示最近多久内进池
   DISCOVER_DISPLAY_WINDOW_DAYS: 14,
   HOT_DISPLAY_WINDOW_DAYS: 7,
+
+  // ─── 方案 A：detect cron 跑前 force refresh 24h AI tweet metrics ─
+  // 让 score 算的是 fresh 数据而非入库时刻快照（之前实测 metrics 平均陈旧 5.6h）
+  // SB 用 batch endpoint (worker scrapebadger.ts 已支持)，120 条 = 3 batch ≈ 153 credit
+  // 48 cron/day × 153 ≈ 220k credits/月（订阅 600k/月，36% 占比）
+  ENABLE_PRE_DETECT_REFRESH: true,
+  PRE_DETECT_REFRESH_BATCH_SIZE: 50,    // SB 实测保守上限
+  PRE_DETECT_REFRESH_BATCH_GAP_MS: 12000, // SB rate limit 5/min → 12s/batch 安全
+
+  // ─── score 公式 ───
+  // weighted_score = raw_score / (age_hours + 2) ^ TIME_DECAY_GRAVITY
+  // HN 经典 1.5，让 1 天前的 tweet 衰减到 ~5%，2 天前 ~2%
+  // raw_score = likes×1 + bookmarks×10 + replies×13.5 + retweets×20（X 开源权重）
+  TIME_DECAY_GRAVITY: 1.5,
 } as const;

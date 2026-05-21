@@ -14,6 +14,7 @@
 
 import type { Env } from '../index';
 import { pushDeerAlert } from '../notifier';
+import { fetchTweetsScrapeBadger } from '../scrapebadger';
 import { OPS_CONFIG } from './config';
 
 const PROD_HOST = 'https://ai-feeds.com';
@@ -24,9 +25,80 @@ export type DetectResult = {
   trend_added: number;
   discover_added: number;
   pushed: number;
+  refreshed: number;        // 方案 A: detect 前 force refresh 的 tweet 数
+  refresh_errors: number;
   skipped_no_baseline?: boolean;
   error?: string;
 };
+
+// 方案 A：detect cron 跑前强制 refresh 24h 内 AI tweet 的 metrics。
+// 之前实测 metrics 平均陈旧 5.6h → score 算的是入库时刻快照，新爆款被漏掉。
+// SB batch endpoint 单 call 拿多个 ID（1 credit base + 1 per tweet），
+// 50/batch + 12s 间隔避撞 rate limit (5 req/min)。
+async function refreshRecentAITweets(env: Env): Promise<{ refreshed: number; errors: number }> {
+  const rows = await env.DB.prepare(`
+    SELECT id FROM items
+    WHERE source_type = 'x_list' AND is_relevant = 1
+      AND scraped_at > datetime('now', '-1 day')
+      AND deleted_at IS NULL
+    ORDER BY scraped_at DESC
+  `).all<{ id: string }>();
+
+  const items = rows.results || [];
+  if (items.length === 0) return { refreshed: 0, errors: 0 };
+
+  const BATCH = OPS_CONFIG.PRE_DETECT_REFRESH_BATCH_SIZE;
+  const GAP_MS = OPS_CONFIG.PRE_DETECT_REFRESH_BATCH_GAP_MS;
+  let refreshed = 0;
+  let errors = 0;
+
+  for (let i = 0; i < items.length; i += BATCH) {
+    const batch = items.slice(i, i + BATCH);
+    // SB API tweet ID 是裸数字（不含 'x_list:' 前缀）
+    const ids = batch.map((r) => r.id.replace(/^x_list:/, ''));
+
+    const r = await fetchTweetsScrapeBadger(env, ids);
+    if (r.error) {
+      console.warn(`[ops/refresh] batch ${i / BATCH + 1} error: ${r.error}`);
+      errors++;
+      continue;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const stmts: D1PreparedStatement[] = [];
+    for (const [tid, m] of r.metrics.entries()) {
+      const itemId = `x_list:${tid}`;
+      // 更新 items.metrics
+      stmts.push(
+        env.DB.prepare(`UPDATE items SET metrics = ? WHERE id = ?`)
+          .bind(JSON.stringify(m), itemId),
+      );
+      // append metrics_snapshots（detect 的趋势推算增速依赖这张表）
+      stmts.push(
+        env.DB.prepare(`
+          INSERT INTO metrics_snapshots (item_id, captured_at, likes, retweets, replies, bookmarks, views)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).bind(itemId, now, m.likes ?? 0, m.retweets ?? 0, m.replies ?? 0, m.bookmarks ?? 0, m.views ?? 0),
+      );
+      refreshed++;
+    }
+    if (stmts.length > 0) {
+      try {
+        await env.DB.batch(stmts);
+      } catch (e) {
+        console.error('[ops/refresh] D1 batch write failed:', e);
+        errors++;
+      }
+    }
+
+    // 最后一 batch 不用 sleep
+    if (i + BATCH < items.length) {
+      await new Promise((resolve) => setTimeout(resolve, GAP_MS));
+    }
+  }
+
+  return { refreshed, errors };
+}
 
 type PushItem = { pool: string; itemKey: string; title: string; body: string };
 
@@ -64,9 +136,17 @@ function tweetUrl(itemId: string): string {
 export async function runOpsDetect(env: Env): Promise<DetectResult> {
   const result: DetectResult = {
     hot_marked: 0, baopui_added: 0, trend_added: 0, discover_added: 0, pushed: 0,
+    refreshed: 0, refresh_errors: 0,
   };
 
   try {
+    // 方案 A：先 force refresh 24h AI metrics，让后续 score 算的是 fresh 数据
+    if (OPS_CONFIG.ENABLE_PRE_DETECT_REFRESH) {
+      const refreshRes = await refreshRecentAITweets(env);
+      result.refreshed = refreshRes.refreshed;
+      result.refresh_errors = refreshRes.errors;
+    }
+
     const baseline = await readBaseline(env);
     const scoreP90 = baseline.get('x_list:score_p90');
     const scoreP99 = baseline.get('x_list:score_p99');
@@ -81,7 +161,8 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
     const now = Math.floor(Date.now() / 1000);
     const pushList: PushItem[] = [];
 
-    // ─── 1) hot 标 — score > P90 (AI 窗口) UPDATE 增量 ───────────
+    // ─── 1) hot 标 — weighted_score > P90 UPDATE 增量 ─────────────
+    // 用时间衰减 score (raw / (age_hours+2)^gravity)，让新爆款公平参赛
     const hotUpdate = await env.DB.prepare(`
       UPDATE items
       SET is_hot = 1
@@ -89,17 +170,18 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         AND is_relevant = 1
         AND scraped_at > datetime('now', '-${OPS_CONFIG.HOT_UPDATE_WINDOW_DAYS} days')
         AND metrics IS NOT NULL
+        AND published_at IS NOT NULL
         AND COALESCE(is_hot, 0) = 0
         AND (
           COALESCE(json_extract(metrics, '$.likes'), 0) * 1
           + COALESCE(json_extract(metrics, '$.bookmarks'), 0) * 10
           + COALESCE(json_extract(metrics, '$.replies'), 0) * 13.5
           + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20
-        ) > ?
+        ) / POW(((julianday('now') - julianday(published_at)) * 24) + 2, ${OPS_CONFIG.TIME_DECAY_GRAVITY}) > ?
     `).bind(scoreP90).run();
     result.hot_marked = hotUpdate.meta.changes || 0;
 
-    // ─── 2) 爆推 — score > P99 AND likes >= 底线 (AI 24h) ────────
+    // ─── 2) 爆推 — weighted_score > P99 AND likes >= 底线 (AI 24h) ─
     const baopuiRows = await env.DB.prepare(`
       SELECT
         id, handle, content_translated, content,
@@ -112,30 +194,38 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
           + COALESCE(json_extract(metrics, '$.bookmarks'), 0) * 10
           + COALESCE(json_extract(metrics, '$.replies'), 0) * 13.5
           + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20
-        ) AS score
+        ) AS raw_score,
+        (
+          COALESCE(json_extract(metrics, '$.likes'), 0) * 1
+          + COALESCE(json_extract(metrics, '$.bookmarks'), 0) * 10
+          + COALESCE(json_extract(metrics, '$.replies'), 0) * 13.5
+          + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20
+        ) / POW(((julianday('now') - julianday(published_at)) * 24) + 2, ${OPS_CONFIG.TIME_DECAY_GRAVITY}) AS weighted
       FROM items
       WHERE source_type = 'x_list' AND is_relevant = 1
         AND scraped_at > datetime('now', '-${OPS_CONFIG.BAOPUI_WINDOW_HOURS} hours')
         AND metrics IS NOT NULL
+        AND published_at IS NOT NULL
         AND COALESCE(json_extract(metrics, '$.likes'), 0) >= ?
         AND (
           COALESCE(json_extract(metrics, '$.likes'), 0) * 1
           + COALESCE(json_extract(metrics, '$.bookmarks'), 0) * 10
           + COALESCE(json_extract(metrics, '$.replies'), 0) * 13.5
           + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20
-        ) > ?
-      ORDER BY score DESC
+        ) / POW(((julianday('now') - julianday(published_at)) * 24) + 2, ${OPS_CONFIG.TIME_DECAY_GRAVITY}) > ?
+      ORDER BY weighted DESC
       LIMIT 50
     `).bind(OPS_CONFIG.BAOPUI_LIKES_MIN, scoreP99).all<{
       id: string; handle: string;
       content_translated: string | null; content: string | null;
       likes: number; retweets: number; replies: number; bookmarks: number;
-      score: number;
+      raw_score: number; weighted: number;
     }>();
 
     for (const r of baopuiRows.results || []) {
       const inserted = await tryInsertPool(env, 'baopui', r.id, {
-        score: Math.round(r.score),
+        weighted: Math.round(r.weighted),
+        raw_score: Math.round(r.raw_score),
         likes: r.likes, retweets: r.retweets, replies: r.replies, bookmarks: r.bookmarks,
         threshold: Math.round(scoreP99),
         handle: r.handle,
@@ -147,7 +237,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
           pool: 'baopui',
           itemKey: r.id,
           title: `🔥 爆推 · @${r.handle}`,
-          body: `score ${Math.round(r.score)}（阈值 P99=${Math.round(scoreP99)}）\n`
+          body: `weighted ${Math.round(r.weighted)} (P99=${Math.round(scoreP99)}) / 累积 score ${Math.round(r.raw_score)}\n`
             + `likes ${r.likes} / retweets ${r.retweets} / replies ${r.replies} / bookmarks ${r.bookmarks}\n\n`
             + `${snippet}\n\n${tweetUrl(r.id)}`,
         });

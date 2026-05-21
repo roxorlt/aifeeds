@@ -282,10 +282,14 @@ async function loadBaopui() {
       const p = (function() { try { return JSON.parse(r.payload || '{}'); } catch (e) { return {}; } })();
       const snippet = esc((r.content_translated || r.content || '').slice(0, 120));
       const url = r.url || ('https://ai-feeds.com/x/' + String(r.item_id).replace('x_list:', ''));
+      // weighted = score / (age_hours+2)^1.5 (HN 时间衰减)，raw_score = 累积值
+      const scoreLabel = p.weighted != null
+        ? 'w ' + fmt(p.weighted) + ' (≥' + fmt(p.threshold) + ') · raw ' + fmt(p.raw_score)
+        : 'score ' + fmt(p.score) + ' / 阈值 ' + fmt(p.threshold);
       return '<div class="card-item">'
         + '<div class="head">'
         + '  <a class="handle" href="' + esc(url) + '" target="_blank">@' + esc(r.handle) + '</a>'
-        + '  <span class="score">score ' + fmt(p.score) + ' / 阈值 ' + fmt(p.threshold) + '</span>'
+        + '  <span class="score">' + scoreLabel + '</span>'
         + '</div>'
         + '<div class="metrics">likes ' + fmt(p.likes) + ' / rt ' + fmt(p.retweets) + ' / rp ' + fmt(p.replies) + ' / bm ' + fmt(p.bookmarks) + '</div>'
         + '<div class="snippet">' + snippet + '</div>'

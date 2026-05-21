@@ -32,18 +32,23 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
   try {
     const computed: BaselineRow[] = [];
 
-    // §1 X score P90 + P99 (AI only, OPS_CONFIG.BASELINE_SCORE_WINDOW_DAYS 滑动)
+    // §1 X weighted_score P90 + P99
+    //    raw = likes×1 + bookmarks×10 + replies×13.5 + retweets×20 (X 开源权重)
+    //    weighted = raw / (age_hours + 2)^GRAVITY  (HN 经典时间衰减)
+    //    1 天前的 tweet 自动衰减到 ~5%, 让最新爆款公平参赛
     const scoreRow = await env.DB.prepare(`
       WITH scored AS (
-        SELECT
-            COALESCE(json_extract(metrics, '$.likes'), 0) * 1
+        SELECT (
+          COALESCE(json_extract(metrics, '$.likes'), 0) * 1
           + COALESCE(json_extract(metrics, '$.bookmarks'), 0) * 10
           + COALESCE(json_extract(metrics, '$.replies'), 0) * 13.5
-          + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20 AS score
+          + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20
+        ) / POW(((julianday('now') - julianday(published_at)) * 24) + 2, ${OPS_CONFIG.TIME_DECAY_GRAVITY}) AS score
         FROM items
         WHERE source_type = 'x_list' AND is_relevant = 1
           AND scraped_at > datetime('now', '-${OPS_CONFIG.BASELINE_SCORE_WINDOW_DAYS} days')
           AND metrics IS NOT NULL
+          AND published_at IS NOT NULL
       ),
       ranked AS (
         SELECT score, NTILE(100) OVER (ORDER BY score) AS pct
