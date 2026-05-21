@@ -591,6 +591,51 @@ const ENRICH_ONLY_EXTRA_KEYS = [
   'maker_post_text_translated',
 ] as const;
 
+/**
+ * 合并新拉的 PH extra 与老的 D1 extra,保留 enrichment 字段 + comment 元素级翻译。
+ *
+ * 用法:
+ * - refreshPhItem(FE drawer 调) 老 extra 已读 → 直接传入
+ * - runPhDailyFetch ingest 前批量预读老 extra → 单条调用
+ *
+ * 策略:
+ * - root 字段:ENRICH_ONLY_EXTRA_KEYS 列表里的字段从老 extra 取(覆盖新值)
+ * - top_comments 数组:按 text 匹配老 comment,复制 .translated 到新 comment
+ *   (新 ingest 永远不含 translated → 不会反向覆盖老 translated)
+ */
+export function mergePhExtraPreservingEnrichment(
+  oldExtra: Record<string, unknown>,
+  newExtra: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...newExtra };
+
+  // root-level enrichment 字段保留老值
+  for (const k of ENRICH_ONLY_EXTRA_KEYS) {
+    if (oldExtra[k] !== undefined) merged[k] = oldExtra[k];
+  }
+
+  // top_comments 元素级保留 translated
+  if (Array.isArray(merged.top_comments) && Array.isArray(oldExtra.top_comments)) {
+    const oldByText = new Map<string, Record<string, unknown>>();
+    for (const c of oldExtra.top_comments as Array<Record<string, unknown>>) {
+      const text = c?.text;
+      if (typeof text === 'string') oldByText.set(text, c);
+    }
+    merged.top_comments = (merged.top_comments as Array<Record<string, unknown>>).map((newC) => {
+      const text = newC?.text;
+      if (typeof text === 'string') {
+        const oldC = oldByText.get(text);
+        if (oldC?.translated && !newC.translated) {
+          return { ...newC, translated: oldC.translated };
+        }
+      }
+      return newC;
+    });
+  }
+
+  return merged;
+}
+
 export interface PhRefreshResult {
   refreshed: boolean;
   reason: 'success' | 'not_found' | 'fetch_failed' | 'invalid_source_id';
@@ -653,10 +698,10 @@ export async function refreshPhItem(
       }
     } catch { /* ignore — treat as empty */ }
   }
-  const mergedExtra: Record<string, unknown> = { ...freshExtra };
-  for (const k of ENRICH_ONLY_EXTRA_KEYS) {
-    if (oldExtra[k] !== undefined) mergedExtra[k] = oldExtra[k];
-  }
+  // 2026-05-21 fix:用统一 merge helper 保留 enrichment + comment 元素级 translated。
+  // 之前只保 6 个 root 字段,top_comments 数组被新 fetch 整组替换 → translated 全 wipe。
+  // user 反馈 FE drawer 打开后 "zh→en flip 1s" 的根因。
+  const mergedExtra = mergePhExtraPreservingEnrichment(oldExtra, freshExtra);
 
   // 5. UPDATE items + append metrics_snapshots_ph（atomic batch）
   const capturedAt = Math.floor(Date.now() / 1000);
@@ -696,6 +741,49 @@ export interface PhDailyFetchResult {
   ingested?: { inserted: number; updated: number; errors: number };
   duration_ms: number;
   error?: string;
+}
+
+/**
+ * 合并新 ingest 的 extra 与 D1 现存 extra,防 daily re-fetch 覆盖 enrichment 字段。
+ *
+ * 策略:
+ * - 老 extra 字段全保留(spread base)
+ * - 新 ingest 字段覆盖同名字段(新 wins),但 null 不覆盖老的非 null(避免新写的占位 null 擦掉)
+ * - top_comments 元素级合并:按 text 匹配,新数组里每条 comment 若 .text 在老 comment 中
+ *   找到,且老 comment 有 translated → 把 translated 复制到新 comment
+ * - 同样的 maker_post.text → maker_post_translated 在 root 不在 maker_post 对象里,
+ *   靠新数据不写 maker_post_translated + 老 extra 保留 自然 work
+ */
+async function mergePhItemsWithExisting(
+  env: Env,
+  items: ItemInput[],
+): Promise<ItemInput[]> {
+  if (items.length === 0) return items;
+  const ids = items.map((i) => `${i.source_type}:${i.source_id}`);
+  const placeholders = ids.map(() => '?').join(',');
+  const existing = await env.DB.prepare(
+    `SELECT id, extra FROM items WHERE id IN (${placeholders})`,
+  ).bind(...ids).all<{ id: string; extra: string | null }>();
+
+  const oldExtraById = new Map<string, Record<string, unknown>>();
+  for (const r of existing.results) {
+    if (r.extra) {
+      try { oldExtraById.set(r.id, JSON.parse(r.extra) as Record<string, unknown>); } catch { /* ignore */ }
+    }
+  }
+
+  return items.map((item) => {
+    const id = `${item.source_type}:${item.source_id}`;
+    const oldExtra = oldExtraById.get(id);
+    if (!oldExtra) return item; // 新 item,无需合并
+
+    const newExtra = typeof item.extra === 'string'
+      ? (JSON.parse(item.extra) as Record<string, unknown>)
+      : ((item.extra as Record<string, unknown> | null) ?? {});
+
+    const merged = mergePhExtraPreservingEnrichment(oldExtra, newExtra);
+    return { ...item, extra: JSON.stringify(merged) };
+  });
 }
 
 export async function runPhDailyFetch(
@@ -763,8 +851,15 @@ export async function runPhDailyFetch(
   //    评论/long content 留 fill-translations cron 后台慢慢翻
   await translatePhItemsInline(env, items);
 
-  // 4. Ingest via internal function call
-  const ingestResult = await ingestItems(env, items);
+  // 4. Merge with existing extra(防 daily re-fetch 覆盖 enrichment 字段)
+  //    根因:ingestItems UPSERT 用 excluded.extra 整体覆盖老 extra(只保 longform/enriched_at
+  //    两个 X-only 字段),PH 每天再抓时 r2_migrated_at / ai_summary / classified_at /
+  //    maker_post_translated / top_comments[].translated 全被 wipe(staging prod 反复观察)。
+  //    app-level 合并:保留老 enrichment + 新 ingest 字段 + comment 元素级保留 translated。
+  const mergedItems = await mergePhItemsWithExisting(env, items);
+
+  // 5. Ingest via internal function call
+  const ingestResult = await ingestItems(env, mergedItems);
   console.log(
     `[ph] ingestItems: inserted=${ingestResult.inserted} updated=${ingestResult.updated} errors=${ingestResult.errors.length}`,
   );
@@ -920,16 +1015,21 @@ const PH_TRANSLATE_PROMPT = `把下面每条 Product Hunt 产品文案或开发�
 
 输出：`;
 
-async function translatePhBatch(
+// 单次 DeepSeek call 翻译 1 个 chunk(原 caller index 保留映射)。
+// 跟原 translatePhBatch 同逻辑,只是 caller 拆 chunk 后调多次。
+async function translatePhBatchChunk(
   apiKey: string,
-  texts: string[],
+  chunk: Array<{ origIdx: number; text: string }>,
 ): Promise<Map<number, string>> {
-  const numbered = texts
-    .map((t, i) => `${i}:${t.replace(/\r\n/g, '\n').replace(/\n/g, NL_MARK_TR)}`)
+  const out = new Map<number, string>();
+  if (chunk.length === 0) return out;
+
+  // chunk 内 0-based 重编号给 prompt 用;响应解析后映射回 origIdx
+  const numbered = chunk
+    .map((c, i) => `${i}:${c.text.replace(/\r\n/g, '\n').replace(/\n/g, NL_MARK_TR)}`)
     .join('\n');
   const prompt = PH_TRANSLATE_PROMPT.replace('%INPUT%', numbered);
 
-  const out = new Map<number, string>();
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 45000);
@@ -943,7 +1043,7 @@ async function translatePhBatch(
         model: DS_MODEL_TR,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
-        max_tokens: 4000,
+        max_tokens: 8000,
       }),
       signal: controller.signal,
     });
@@ -956,17 +1056,40 @@ async function translatePhBatch(
       choices?: Array<{ message?: { content?: string } }>;
     };
     const text = body.choices?.[0]?.message?.content || '';
+    // 容错的格式 parse:N: / N： / **N:** / N.
     for (const line of text.split('\n')) {
-      const m = line.match(/^(\d+):(.*)$/);
+      const m = line.match(/^\**\s*(\d+)\**\s*[:：.]\s*(.*?)\s*\**\s*$/);
       if (!m) continue;
-      const idx = parseInt(m[1], 10);
+      const chunkIdx = parseInt(m[1], 10);
+      const c = chunk[chunkIdx];
+      if (!c) continue;
       const tr = m[2].replace(new RegExp(NL_MARK_TR, 'g'), '\n').trim();
-      if (tr) out.set(idx, tr);
+      if (tr) out.set(c.origIdx, tr);
     }
   } catch (e) {
     console.warn('[ph] inline translate error:', e instanceof Error ? e.message : String(e));
   }
   return out;
+}
+
+// translatePhBatch — 拆 chunk(每 chunk ≤ 5 个 task)防 max_tokens 截断尾部任务。
+// 之前用 max_tokens=4000 + 一次发 10+ 任务,长 comments 撞 token 上限尾部不输出
+// (prod 11 个 item 71 条 comment 未翻译的根因)。chunk 化让每次输出有足够空间。
+async function translatePhBatch(
+  apiKey: string,
+  texts: string[],
+): Promise<Map<number, string>> {
+  const CHUNK_SIZE = 5;
+  const all = new Map<number, string>();
+  for (let start = 0; start < texts.length; start += CHUNK_SIZE) {
+    const chunk: Array<{ origIdx: number; text: string }> = [];
+    for (let i = start; i < Math.min(start + CHUNK_SIZE, texts.length); i++) {
+      chunk.push({ origIdx: i, text: texts[i] });
+    }
+    const partial = await translatePhBatchChunk(apiKey, chunk);
+    for (const [k, v] of partial) all.set(k, v);
+  }
+  return all;
 }
 
 /**
@@ -1217,6 +1340,74 @@ export async function translatePhFieldsForItem(
 
   console.log(`[ph-workflow:step3] ${itemId}: translated ${translated}/${tasks.length} fields`);
   return { fields_translated: translated };
+}
+
+/**
+ * PH 评论翻译 backfill (2026-05-21):一次性扫存量 PH items 哪些
+ * top_comments[i].text 是英文但没有 translated → 重跑 translatePhFieldsForItem。
+ *
+ * 根因:老版 translatePhBatch 一次发 10+ task 用 max_tokens=4000,中文输出撞
+ * token 上限 → 尾部 comments 被截断 → 永远 null。新版拆 chunk 5/批 + 8000 tokens。
+ */
+export async function runBackfillPhCommentsTranslation(
+  env: Env,
+  limit: number,
+  rateSleepMs: number = 200,
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_translated: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // 找 top_comments 里有 text 非中文但 translated=null 的 item
+  // 用 EXISTS sub-query 检查至少一条 comment 缺翻译
+  const HAS_UNTRANS_COMMENT = `EXISTS (
+    SELECT 1 FROM json_each(json_extract(extra, '$.top_comments')) AS c
+    WHERE json_extract(c.value, '$.text') IS NOT NULL
+      AND json_extract(c.value, '$.translated') IS NULL
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='product_hunt'
+        AND is_relevant=1
+        AND ${HAS_UNTRANS_COMMENT}
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='product_hunt'
+        AND is_relevant=1
+        AND ${HAS_UNTRANS_COMMENT}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalTranslated = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await translatePhFieldsForItem(env, c.id);
+      totalTranslated += r.fields_translated;
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_translated: totalTranslated,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
+  };
 }
 
 /**

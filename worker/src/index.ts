@@ -38,7 +38,7 @@ import {
   triggerGhWorkflowForItem,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
-import { runPhDailyFetch, triggerPhWorkflowForItem } from './scrapers/ph';
+import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary } from './notifier';
 import {
@@ -3127,6 +3127,17 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       200,
     );
     const result = await runBackfillTcoResolutions(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-ph-comments-translation') {
+    // PH 评论翻译漏洞 backfill (2026-05-21):老版 translatePhBatch 单次发 10+ task
+    // 用 max_tokens=4000 撞上限 → 尾部 comments 截断。新版拆 chunk 5/批 + 8000 tokens。
+    // 跑此 backfill 让历史漏翻 71 条评论的 11 个 item 重跑 translatePhFieldsForItem。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillPhCommentsTranslation(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-link-card') {
