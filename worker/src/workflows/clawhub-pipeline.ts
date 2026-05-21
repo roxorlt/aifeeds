@@ -33,6 +33,17 @@ export class ClawhubPipelineWorkflow extends WorkflowEntrypoint<Env, ChPipelineP
       enrichAndTranslateChItem(this.env, itemId),
     );
 
+    // Step 2: 统一 workflow 完整性 gate(2026-05-21) — 仅 enrich 成功才 mark
+    // /api/items?source_type=clawhub 在 WORKFLOW_COMPLETED_FILTER='true' 时滤掉
+    // workflow_completed_at IS NULL 的半成品(enrich 失败的 item 没 mark)。
+    if (result.ok) {
+      await step.do('mark-completed', RETRY, async () => {
+        await this.env.DB.prepare(
+          `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
+        ).bind(new Date().toISOString(), itemId).run();
+      });
+    }
+
     return { itemId, status: result.ok ? 'enriched' : 'failed' as const };
   }
 }

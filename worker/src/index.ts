@@ -881,6 +881,51 @@ export default {
       // quote_of.quote_of 任一 path 有 content 但 content_translated=null。
       // 调 classifyAndTranslateForXTweet(prompt + 入库已升级覆盖 L3)。
       // ?limit=N (默认 20, 上限 100), ?rate_sleep_ms=500 (DeepSeek 速率保护)
+      // 通用 workflow_completed_at backfill (2026-05-21):历史 is_relevant=1 但缺 wc_at 的
+      // item 用 scraped_at 作 proxy mark complete。给 PH/GH/CH/HDX 4 个 source 用,X / HF 已有。
+      // ?source_type=product_hunt|github|clawhub|huodongxing (必填) ?dry_run=0 (默认 1)
+      if (path === '/api/admin/backfill-workflow-completed-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const sourceType = u.searchParams.get('source_type') || '';
+        const dryRun = u.searchParams.get('dry_run') !== '0';
+        const VALID = ['product_hunt', 'github', 'clawhub', 'huodongxing'];
+        if (!VALID.includes(sourceType)) {
+          return jsonResponse({ error: `source_type required, one of: ${VALID.join(', ')}` }, 400, request, env);
+        }
+        // 候选:is_relevant=1 + wc_at 缺 + 未 deleted
+        const countRow = await env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM items
+            WHERE source_type = ?
+              AND is_relevant = 1
+              AND json_extract(extra, '$.workflow_completed_at') IS NULL
+              AND deleted_at IS NULL`,
+        ).bind(sourceType).first<{ n: number }>();
+        const candidates = countRow?.n || 0;
+        if (dryRun) {
+          return jsonResponse({ source_type: sourceType, dry_run: true, candidates }, 200, request, env);
+        }
+        // bulk UPDATE — D1 单次处理几千行约 100-500ms
+        const result = await env.DB.prepare(
+          `UPDATE items
+              SET extra = json_set(coalesce(extra, '{}'), '$.workflow_completed_at', scraped_at)
+            WHERE source_type = ?
+              AND is_relevant = 1
+              AND json_extract(extra, '$.workflow_completed_at') IS NULL
+              AND deleted_at IS NULL`,
+        ).bind(sourceType).run();
+        return jsonResponse({
+          source_type: sourceType,
+          dry_run: false,
+          candidates,
+          updated: result.meta.changes || 0,
+        }, 200, request, env);
+      }
       if (path === '/api/admin/backfill-l3-translations-now' && request.method === 'POST') {
         if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
@@ -1884,11 +1929,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // X workflow 完整性 gate(2026-05-17 重构):env.WORKFLOW_COMPLETED_FILTER='true' 时启用。
-  // 启用后 X 数据必须有 workflow_completed_at 才返回 — 筛掉翻译失败 / workflow 未完成的项。
-  // 老数据(批 4 backfill 前)workflow_completed_at IS NULL 会被筛掉,staging 先开 prod 等批 4 完成再开。
+  // 通用 workflow 完整性 gate(2026-05-21 重构):所有源都过 workflow_completed_at filter。
+  // 老的 X-only gate 已扩展到 PH/GH/CH/HDX/HF 5 个源 + X — 每个 workflow 末尾 mark wc_at
+  // (workflows/*-pipeline.ts step "mark-completed"),feed 滤掉 wc_null 的半成品。
+  // 历史数据通过 /api/admin/backfill-workflow-completed-now 一次性回填 wc_at = scraped_at。
   if (env.WORKFLOW_COMPLETED_FILTER === 'true') {
-    conditions.push("(source_type != 'x_list' OR json_extract(extra, '$.workflow_completed_at') IS NOT NULL)");
+    conditions.push("json_extract(extra, '$.workflow_completed_at') IS NOT NULL");
   }
 
   // Relevance filter
@@ -2069,6 +2115,10 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
     'is_relevant=1',
     'deleted_at IS NULL',
   ];
+  // 2026-05-21 统一 gate:WORKFLOW_COMPLETED_FILTER 开启时滤掉 wc_at=null 的半成品
+  if (env.WORKFLOW_COMPLETED_FILTER === 'true') {
+    conditions.push("json_extract(extra, '$.workflow_completed_at') IS NOT NULL");
+  }
   const params: unknown[] = [];
 
   if (category !== 'all') {
@@ -2241,6 +2291,10 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
     'is_relevant=1',
     'deleted_at IS NULL',
   ];
+  // 2026-05-21 统一 gate
+  if (env.WORKFLOW_COMPLETED_FILTER === 'true') {
+    conditions.push("json_extract(extra, '$.workflow_completed_at') IS NOT NULL");
+  }
   const params: unknown[] = [];
 
   if (!includeHistorical) {
@@ -2378,6 +2432,10 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
     "COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0",
     'deleted_at IS NULL',
   ];
+  // 2026-05-21 统一 gate
+  if (env.WORKFLOW_COMPLETED_FILTER === 'true') {
+    conditions.push("json_extract(extra, '$.workflow_completed_at') IS NOT NULL");
+  }
   const params: unknown[] = [];
 
   if (cursor) {
@@ -2489,6 +2547,10 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
 
   // 子查询给每行打 display_rank（同日内连续编号，绕过 PH dailyRank 跳号）。
   // 子查询不带 cursor 过滤，否则 ROW_NUMBER 会被分页边界破坏（同日跨页时从 1 重启）。
+  // 2026-05-21 加 wc_at gate(在子查询内,确保 display_rank 计算只对完整 item)
+  const wcGate = env.WORKFLOW_COMPLETED_FILTER === 'true'
+    ? "AND json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL"
+    : '';
   const sql = `
     SELECT * FROM (
       SELECT
@@ -2505,6 +2567,7 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
       WHERE source_type = 'product_hunt'
         AND is_relevant = 1
         AND deleted_at IS NULL
+        ${wcGate}
     ) sub
     ${cursorWhere}
     ORDER BY ${pinExpr}

@@ -64,6 +64,15 @@ export class GithubPipelineWorkflow extends WorkflowEntrypoint<Env, GithubPipeli
       return await recomputeGithubDailyRank(this.env);
     });
 
+    // Step 6: 统一 workflow 完整性 gate(2026-05-21)
+    // /api/items?source_type=github feed 在 WORKFLOW_COMPLETED_FILTER='true' 时滤掉
+    // workflow_completed_at IS NULL 的半成品。is_relevant=0 早退不 mark。
+    await step.do('mark-completed', RETRY, async () => {
+      await this.env.DB.prepare(
+        `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
+      ).bind(new Date().toISOString(), itemId).run();
+    });
+
     return { itemId, classified: 'relevant' as const };
   }
 }

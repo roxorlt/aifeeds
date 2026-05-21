@@ -49,6 +49,16 @@ export class PhPipelineWorkflow extends WorkflowEntrypoint<Env, PhPipelineParams
       translatePhFieldsForItem(this.env, itemId),
     );
 
+    // Step 4: 统一 workflow 完整性 gate(2026-05-21)
+    // /api/items?source_type=product_hunt 在 WORKFLOW_COMPLETED_FILTER='true' 时滤掉
+    // workflow_completed_at IS NULL 的半成品(workflow 未完成/失败的 item)。
+    // is_relevant=0 早退路径不 mark — 那些项天然不在 feed(is_relevant=1 filter)。
+    await step.do('mark-completed', RETRY, async () => {
+      await this.env.DB.prepare(
+        `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
+      ).bind(new Date().toISOString(), itemId).run();
+    });
+
     return { itemId, classified: 'relevant' as const };
   }
 }
