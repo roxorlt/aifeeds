@@ -14,6 +14,7 @@ import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
 import { QuotedTweet } from "./QuotedTweet";
 import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { isSelfLinkCard } from "../lib/linkCardFilter";
 import { XArticleCard } from "./XArticleCard";
 import {
   IconEye,
@@ -801,8 +802,13 @@ export function TweetCard({
           {/* Quoted tweet (nested card) */}
           {quoteOf && <QuotedTweet quote={quoteOf} />}
 
-          {/* Link preview card (URL auto-expanded by X) */}
-          {extra.link_card && !quoteOf && <LinkCard card={extra.link_card} />}
+          {/* Link preview card (URL auto-expanded by X) —
+              PM 2026-05-22: 过滤 link_card 指向本推文自己的 self-preview
+              (twitter.com/handle/status/<本 source_id>), 底部"打开 X 原文"
+              已是同款入口, 重复展示无意义 */}
+          {extra.link_card && !quoteOf && !isSelfLinkCard(extra.link_card, item.handle, item.source_id) && (
+            <LinkCard card={extra.link_card} />
+          )}
 
           {/* Metrics bar (read-only X-platform data, not interactive) */}
           <MetricsRow metrics={metrics} />

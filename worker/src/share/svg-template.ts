@@ -237,6 +237,199 @@ function renderMediaBlock(
     <image href="${dataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
 }
 
+// PR2 (2026-05-22): X 推文发布时间格式 MM-DD HH:MM (BJT 视角)
+// 跟 timeAgo "几小时前" 不同, 海报固定布局, 用绝对时间避免截断点点点
+function formatXTime(iso: string | undefined | null): string {
+  if (!iso) return '';
+  let d: Date;
+  try {
+    d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+  } catch {
+    return '';
+  }
+  // UTC + 8 转 BJT
+  const bjt = new Date(d.getTime() + 8 * 3600 * 1000);
+  const mm = String(bjt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(bjt.getUTCDate()).padStart(2, '0');
+  const hh = String(bjt.getUTCHours()).padStart(2, '0');
+  const mi = String(bjt.getUTCMinutes()).padStart(2, '0');
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
+// PR2: X 平台 verified 蓝勾 (24×24 viewBox), 圆形蓝底 + 白勾
+function renderVerifiedBadge(x: number, y: number, size: number): string {
+  const cx = x + size / 2;
+  const cy = y + size / 2;
+  // 8 角星(X verified shape 近似): 用 path 八角圆边
+  return `
+    <g transform="translate(${x},${y}) scale(${size / 24})">
+      <path d="M22.46 7.57c.6 .59 .6 1.55 0 2.14L20.39 11.78c-.16 .16 -.27 .37 -.31 .59l-.5 2.86c-.13 .77 -.83 1.31 -1.61 1.24l-2.91 -.27c-.22 -.02 -.44 .04 -.62 .17l-2.38 1.7c-.62 .44 -1.45 .44 -2.07 0L7.61 16.37c-.18 -.13 -.4 -.19 -.62 -.17l-2.91 .27c-.78 .07 -1.48 -.47 -1.61 -1.24l-.5 -2.86c-.04 -.22 -.15 -.43 -.31 -.59L.59 9.71c-.6 -.59 -.6 -1.55 0 -2.14l2.07 -2.07c.16 -.16 .27 -.37 .31 -.59l.5 -2.86c.13 -.77 .83 -1.31 1.61 -1.24l2.91 .27c.22 .02 .44 -.04 .62 -.17l2.38 -1.7c.62 -.44 1.45 -.44 2.07 0l2.38 1.7c.18 .13 .4 .19 .62 .17l2.91 -.27c.78 -.07 1.48 .47 1.61 1.24l.5 2.86c.04 .22 .15 .43 .31 .59l2.07 2.07z" fill="#1da1f2"/>
+      <path d="M9 12l2 2 4 -4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>`;
+  void cx; void cy;
+}
+
+// PR2: 渲染圆形头像 — 有 dataUri 用 image (clipPath 圆形), 没就色块 + 首字母 fallback
+function renderAvatar(
+  dataUri: string | undefined,
+  x: number,
+  y: number,
+  size: number,
+  fallbackSeed: string,
+  fallbackInitial: string,
+  clipIdSuffix: string,
+): string {
+  if (dataUri) {
+    const clipId = `avatar-clip-${clipIdSuffix}`;
+    return `
+      <defs><clipPath id="${clipId}"><circle cx="${x + size / 2}" cy="${y + size / 2}" r="${size / 2}"/></clipPath></defs>
+      <circle cx="${x + size / 2}" cy="${y + size / 2}" r="${size / 2}" fill="#eee"/>
+      <image href="${dataUri}" x="${x}" y="${y}" width="${size}" height="${size}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  }
+  // Fallback 色块 + 首字母
+  const bg = avatarBg(fallbackSeed);
+  const fontSize = Math.round(size * 0.5);
+  return `
+    <circle cx="${x + size / 2}" cy="${y + size / 2}" r="${size / 2}" fill="${bg}"/>
+    <text x="${x + size / 2}" y="${y + size / 2 + fontSize * 0.36}"
+          font-family='${FONT}' font-size="${fontSize}" font-weight="700" fill="${C.ink}" text-anchor="middle">${esc(fallbackInitial)}</text>`;
+}
+
+// PR2: 海报 X Article Rich 卡渲染(对齐 FE 抽屉的 cover+title+excerpt+author)
+// 高度自适应: cover 16:9 + title 2 行 + author 1 行 + excerpt 3 行 + padding
+function renderXArticleEmbed(opts: {
+  x: number;
+  y: number;
+  w: number;
+  coverDataUri?: string;
+  title: string;
+  excerpt: string;
+  authorName: string;
+  authorHandle: string;
+  clipIdSuffix: string;
+}): { svg: string; height: number } {
+  const padX = 28;
+  const padY = 28;
+  const innerW = opts.w - padX * 2;
+  let cy = opts.y;
+  let svg = '';
+
+  // 外框 rounded
+  // 高度先占位, 渲染完后回填实际 height
+  const startY = cy;
+
+  // Cover 16:9 in card content area (撑满 inner)
+  if (opts.coverDataUri) {
+    const coverH = Math.min(innerW * 9 / 16, 420);
+    const coverY = cy + padY;
+    const clipId = `xa-cover-${opts.clipIdSuffix}`;
+    svg += `
+      <defs><clipPath id="${clipId}"><rect x="${opts.x + padX}" y="${coverY}" width="${innerW}" height="${coverH}" rx="14"/></clipPath></defs>
+      <rect x="${opts.x + padX}" y="${coverY}" width="${innerW}" height="${coverH}" rx="14" fill="#eee"/>
+      <image href="${opts.coverDataUri}" x="${opts.x + padX}" y="${coverY}" width="${innerW}" height="${coverH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+    // 左下角 X 文章 chip
+    svg += `
+      <rect x="${opts.x + padX + 14}" y="${coverY + coverH - 42}" width="84" height="28" rx="8" fill="rgba(0,0,0,0.72)"/>
+      <text x="${opts.x + padX + 14 + 42}" y="${coverY + coverH - 42 + 20}" font-family='${FONT}' font-size="16" font-weight="700" fill="#fff" text-anchor="middle">X 文章</text>`;
+    cy = coverY + coverH + 20;
+  } else {
+    cy = cy + padY;
+  }
+
+  // Title 2 行
+  if (opts.title) {
+    const titleSize = 34;
+    const titleLine = titleSize * 1.35;
+    const lines = wrapText(opts.title, 24, 2);
+    for (let i = 0; i < lines.length; i++) {
+      svg += `<text x="${opts.x + padX}" y="${cy + titleSize + i * titleLine}" font-family='${FONT}' font-size="${titleSize}" font-weight="800" fill="${C.ink}" letter-spacing="-0.6">${esc(lines[i])}</text>`;
+    }
+    cy += lines.length * titleLine + 14;
+  }
+
+  // Author 行
+  if (opts.authorName || opts.authorHandle) {
+    const authorText = opts.authorName
+      ? (opts.authorHandle ? `by ${opts.authorName} @${opts.authorHandle}` : `by ${opts.authorName}`)
+      : (opts.authorHandle ? `@${opts.authorHandle}` : '');
+    svg += `<text x="${opts.x + padX}" y="${cy + 24}" font-family='${FONT}' font-size="24" fill="${C.muted}">${esc(truncate(authorText, 40))}</text>`;
+    cy += 32;
+  }
+
+  // Excerpt 3 行
+  if (opts.excerpt) {
+    const excSize = 26;
+    const excLine = excSize * 1.55;
+    const lines = wrapText(opts.excerpt, 28, 3);
+    for (let i = 0; i < lines.length; i++) {
+      svg += `<text x="${opts.x + padX}" y="${cy + excSize + i * excLine}" font-family='${FONT}' font-size="${excSize}" fill="${C.ink}" opacity="0.78">${esc(lines[i])}</text>`;
+    }
+    cy += lines.length * excLine + 8;
+  }
+
+  const totalH = cy - startY + padY;
+  // 把外框 rect 加到 svg 最前(z 在下), 防遮文字
+  const frame = `<rect x="${opts.x}" y="${startY}" width="${opts.w}" height="${totalH}" rx="20" fill="#fff" stroke="${C.line}" stroke-width="1"/>`;
+  return { svg: frame + svg, height: totalH };
+}
+
+// PR2: 简化版 link_card 嵌入 (cover + title + desc + domain)
+function renderLinkCardEmbed(opts: {
+  x: number;
+  y: number;
+  w: number;
+  title: string;
+  description: string;
+  domain: string;
+  clipIdSuffix: string;
+}): { svg: string; height: number } {
+  const padX = 24;
+  const padY = 20;
+  const innerW = opts.w - padX * 2;
+  let cy = opts.y + padY;
+  let svg = '';
+  const startY = opts.y;
+  if (opts.domain) {
+    svg += `<text x="${opts.x + padX}" y="${cy + 22}" font-family='${FONT}' font-size="20" fill="${C.muted}">${esc(opts.domain)}</text>`;
+    cy += 30;
+  }
+  if (opts.title) {
+    const lines = wrapText(opts.title, 28, 2);
+    for (let i = 0; i < lines.length; i++) {
+      svg += `<text x="${opts.x + padX}" y="${cy + 28 + i * 38}" font-family='${FONT}' font-size="28" font-weight="700" fill="${C.ink}">${esc(lines[i])}</text>`;
+    }
+    cy += lines.length * 38 + 8;
+  }
+  if (opts.description) {
+    const lines = wrapText(opts.description, 32, 2);
+    for (let i = 0; i < lines.length; i++) {
+      svg += `<text x="${opts.x + padX}" y="${cy + 24 + i * 34}" font-family='${FONT}' font-size="24" fill="${C.muted}">${esc(lines[i])}</text>`;
+    }
+    cy += lines.length * 34 + 4;
+  }
+  void innerW;
+  const totalH = cy - startY + padY;
+  const frame = `<rect x="${opts.x}" y="${startY}" width="${opts.w}" height="${totalH}" rx="20" fill="rgba(15,23,42,0.04)" stroke="${C.line}" stroke-width="1"/>`;
+  return { svg: frame + svg, height: totalH };
+}
+
+// PR2: self-link 判断 (link_card URL 指向本推文自己, 没必要展示)
+function isSelfLinkCardWorker(
+  cardUrl: string | undefined | null,
+  sourceId: string | undefined | null,
+): boolean {
+  if (!cardUrl || !sourceId) return false;
+  try {
+    const u = new URL(cardUrl);
+    if (u.hostname !== 'x.com' && u.hostname !== 'twitter.com' && u.hostname !== 'www.x.com') return false;
+    const m = u.pathname.match(/^\/[^/]+\/status\/(\d+)/);
+    return m ? m[1] === sourceId : false;
+  } catch {
+    return false;
+  }
+}
+
 // 视频封面叠加 play 按钮：半透明圆 + 白色三角，居中放在 media block
 function playOverlay(centerX: number, centerY: number, radius = 60): string {
   const size = radius * 2;
@@ -428,6 +621,9 @@ function renderXContent(opts: {
   x: number; y: number; w: number;
   authorName: string;
   authorHandle: string;
+  authorAvatarDataUri?: string;
+  authorIsVerified?: boolean;
+  publishedAt?: string;
   body: string;
   metrics?: {
     replies?: number | string | null;
@@ -438,41 +634,224 @@ function renderXContent(opts: {
   mediaImageDataUri?: string;
   mediaAspectRatio?: number;
   mediaIsVideo?: boolean;
+  // PR2 v2: retweet 顶部 indicator + 真实小头像
+  retweetIndicator?: {
+    retweeterName?: string;
+    retweeterHandle?: string;
+    retweeterAvatarDataUri?: string;
+  };
+  // PR2 v2: 主推 X Article 卡(t.co rich tier)
+  xArticle?: {
+    title: string;
+    excerpt: string;
+    authorName?: string;
+    authorHandle?: string;
+    coverDataUri?: string;
+  };
+  // PR2 v2: 主推 link_card(非 self-link)
+  linkCard?: {
+    title?: string;
+    description?: string;
+    domain?: string;
+  };
+  // PR2 v2: quote 嵌套小卡完整版
+  quoteEmbed?: {
+    author: string;
+    handle: string;
+    body: string;
+    isVerified?: boolean;
+    publishedAt?: string;
+    avatarDataUri?: string;
+    coverDataUri?: string;
+    coverAspectRatio?: number;
+    // L2 mini 卡(深度 2 嵌套, 仅当 quote.quote_of 存在时)
+    innerQuote?: {
+      author: string;
+      handle: string;
+      body: string;
+    };
+  };
 }): { svg: string; height: number } {
-  const padX = 36;       // 56→36：让 body 宽度更接近 v7 mockup 期望
+  const padX = 36;
   const padTop = 56;
   const innerX = opts.x + padX;
   const innerW = opts.w - padX * 2;
-
   let cy = opts.y + padTop;
+  let svg = '';
 
-  // top-line: avatar 112 + name + handle（avatar 改圆形 — X 平台头像本来就是圆）
+  // PR2 v2: retweet 顶部 indicator — "♻ 由 @retweeter 转发" + 小头像
+  if (opts.retweetIndicator?.retweeterHandle) {
+    const rt = opts.retweetIndicator;
+    const rtAvSize = 36;
+    const rtAvX = innerX;
+    const rtAvY = cy;
+    svg += renderAvatar(
+      rt.retweeterAvatarDataUri,
+      rtAvX, rtAvY, rtAvSize,
+      rt.retweeterHandle || '',
+      (rt.retweeterName || rt.retweeterHandle || '?').charAt(0),
+      `rt-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    const labelX = rtAvX + rtAvSize + 12;
+    svg += `<text x="${labelX}" y="${cy + 26}" font-family='${FONT}' font-size="26" fill="${C.muted}" font-weight="500">${esc(truncate(`♻ 由 @${rt.retweeterHandle} 转发`, 32))}</text>`;
+    cy += rtAvSize + 22;
+  }
+
+  // PR2 v2 author row — 真实头像 + name + verified badge + @handle + 时间
   const avatarSize = 112;
-  const avatarBgColor = avatarBg(opts.authorHandle || opts.authorName);
-  const initial = (opts.authorName || '?').charAt(0);
-  const topLine = `
-    <circle cx="${innerX + avatarSize / 2}" cy="${cy + avatarSize / 2}" r="${avatarSize / 2}" fill="${avatarBgColor}"/>
-    <text x="${innerX + avatarSize / 2}" y="${cy + avatarSize / 2 + 20}"
-          font-family='${FONT}' font-size="56" font-weight="700" fill="${C.ink}" text-anchor="middle">${esc(initial)}</text>
-    <text x="${innerX + avatarSize + 24}" y="${cy + 50}" font-family='${FONT}' font-size="52" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(truncate(opts.authorName, 16))}</text>
-    <text x="${innerX + avatarSize + 24}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="36" fill="${C.muted}">${esc(truncate(opts.authorHandle || '', 28))}</text>`;
+  const avatarFallbackInitial = (opts.authorName || '?').charAt(0);
+  svg += renderAvatar(
+    opts.authorAvatarDataUri,
+    innerX, cy, avatarSize,
+    opts.authorHandle || opts.authorName,
+    avatarFallbackInitial,
+    `x-author-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  const nameX = innerX + avatarSize + 24;
+  // name + verified
+  const nameTruncated = truncate(opts.authorName || '', 14);
+  const nameSize = 52;
+  // 估算 name 宽度,确定 verified 位置
+  const nameWidth = estimateTextWidth(nameTruncated, nameSize, 1.2);
+  svg += `<text x="${nameX}" y="${cy + 50}" font-family='${FONT}' font-size="${nameSize}" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(nameTruncated)}</text>`;
+  if (opts.authorIsVerified) {
+    svg += renderVerifiedBadge(nameX + nameWidth + 10, cy + 50 - 36, 36);
+  }
+  // 第二行: @handle · 时间
+  const handleStr = opts.authorHandle ? `@${opts.authorHandle}` : '';
+  const timeStr = formatXTime(opts.publishedAt);
+  const meta2 = timeStr ? `${handleStr} · ${timeStr}` : handleStr;
+  svg += `<text x="${nameX}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="32" fill="${C.muted}">${esc(truncate(meta2, 30))}</text>`;
   cy += avatarSize + 30;
 
-  // body：38px / line-height 1.52；innerW=1008（38px ≈ 1em 中文，max 24 字 = 912px）
+  // body
   const lines = wrapText(opts.body, 24, 8);
   const bodySize = 38;
   const bodyLine = bodySize * 1.52;
-  const body = lines
+  svg += lines
     .map((line, i) => `<text x="${innerX}" y="${cy + bodySize + i * bodyLine}" font-family='${FONT}' font-size="${bodySize}" font-weight="500" fill="${C.ink}" letter-spacing="-0.6">${esc(line)}</text>`)
     .join('');
   cy += lines.length * bodyLine + 24;
 
-  // 有媒体（X 推文图）：body 之后 / engagement 之前插入 media block
-  let mediaSvg = '';
+  // PR2 v2: X Article 卡(t.co rich tier) — 主推 body 之后
+  if (opts.xArticle) {
+    const xa = renderXArticleEmbed({
+      x: innerX, y: cy, w: innerW,
+      coverDataUri: opts.xArticle.coverDataUri,
+      title: opts.xArticle.title,
+      excerpt: opts.xArticle.excerpt,
+      authorName: opts.xArticle.authorName || '',
+      authorHandle: opts.xArticle.authorHandle || '',
+      clipIdSuffix: `xa-main-${Math.random().toString(36).slice(2, 8)}`,
+    });
+    svg += xa.svg;
+    cy += xa.height + 20;
+  }
+
+  // PR2 v2: link card 嵌入(非 self-link) — 简化版
+  if (opts.linkCard && (opts.linkCard.title || opts.linkCard.description || opts.linkCard.domain)) {
+    const lc = renderLinkCardEmbed({
+      x: innerX, y: cy, w: innerW,
+      title: opts.linkCard.title || '',
+      description: opts.linkCard.description || '',
+      domain: opts.linkCard.domain || '',
+      clipIdSuffix: `lc-${Math.random().toString(36).slice(2, 8)}`,
+    });
+    svg += lc.svg;
+    cy += lc.height + 20;
+  }
+
+  // PR2 v2: quote 嵌套小卡(完整版,含真实头像 + verified + 时间 + 媒体)
+  if (opts.quoteEmbed) {
+    const q = opts.quoteEmbed;
+    const qPadX = 28;
+    const qPadY = 24;
+    const qInnerW = innerW - qPadX * 2;
+    const qInnerX = innerX + qPadX;
+    const qStartY = cy;
+    let qCy = cy + qPadY;
+    let qSvg = '';
+
+    // q header: 小头像 + name + verified + handle + 时间
+    const qAv = 64;
+    qSvg += renderAvatar(
+      q.avatarDataUri,
+      qInnerX, qCy, qAv,
+      q.handle || q.author, (q.author || '?').charAt(0),
+      `q-av-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    const qNameX = qInnerX + qAv + 16;
+    const qName = truncate(q.author, 16);
+    const qNameSize = 32;
+    const qNameW = estimateTextWidth(qName, qNameSize, 1.1);
+    qSvg += `<text x="${qNameX}" y="${qCy + 30}" font-family='${FONT}' font-size="${qNameSize}" font-weight="700" fill="${C.ink}">${esc(qName)}</text>`;
+    if (q.isVerified) {
+      qSvg += renderVerifiedBadge(qNameX + qNameW + 8, qCy + 30 - 24, 22);
+    }
+    const qHandle = q.handle ? `@${q.handle}` : '';
+    const qTime = formatXTime(q.publishedAt);
+    const qMeta = qTime ? `${qHandle} · ${qTime}` : qHandle;
+    qSvg += `<text x="${qNameX}" y="${qCy + 30 + 28}" font-family='${FONT}' font-size="24" fill="${C.muted}">${esc(truncate(qMeta, 32))}</text>`;
+    qCy += qAv + 14;
+
+    // q body
+    const qBodyLines = q.body ? wrapText(q.body, 28, 4) : [];
+    const qBodySize = 28;
+    const qBodyLine = qBodySize * 1.5;
+    qSvg += qBodyLines
+      .map((line, i) => `<text x="${qInnerX}" y="${qCy + qBodySize + i * qBodyLine}" font-family='${FONT}' font-size="${qBodySize}" fill="${C.ink}" letter-spacing="-0.3">${esc(line)}</text>`)
+      .join('');
+    qCy += qBodyLines.length * qBodyLine + (qBodyLines.length > 0 ? 16 : 0);
+
+    // q media (嵌套 cover)
+    if (q.coverDataUri) {
+      const qmAr = q.coverAspectRatio && q.coverAspectRatio > 0 ? q.coverAspectRatio : 16 / 9;
+      const qmH = Math.min(qInnerW / qmAr, 320);
+      const clipId = `q-cover-${Math.random().toString(36).slice(2, 8)}`;
+      qSvg += `
+        <defs><clipPath id="${clipId}"><rect x="${qInnerX}" y="${qCy}" width="${qInnerW}" height="${qmH}" rx="14"/></clipPath></defs>
+        <rect x="${qInnerX}" y="${qCy}" width="${qInnerW}" height="${qmH}" rx="14" fill="#eee"/>
+        <image href="${q.coverDataUri}" x="${qInnerX}" y="${qCy}" width="${qInnerW}" height="${qmH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+      qCy += qmH + 14;
+    }
+
+    // L2 inner quote (mini 卡, depth=2)
+    if (q.innerQuote) {
+      const iq = q.innerQuote;
+      const iqPadX = 20;
+      const iqPadY = 16;
+      const iqStartY = qCy;
+      let iqCy = qCy + iqPadY;
+      let iqSvg = '';
+      iqSvg += `<text x="${qInnerX + iqPadX}" y="${iqCy + 24}" font-family='${FONT}' font-size="24" font-weight="700" fill="${C.ink}">${esc(truncate(iq.author, 14))}</text>`;
+      iqSvg += `<text x="${qInnerX + iqPadX + estimateTextWidth(truncate(iq.author, 14), 24, 1.1) + 12}" y="${iqCy + 24}" font-family='${FONT}' font-size="20" fill="${C.muted}">${esc(truncate(iq.handle ? '@' + iq.handle : '', 24))}</text>`;
+      iqCy += 30;
+      const iqLines = iq.body ? wrapText(iq.body, 30, 3) : [];
+      const iqBodySize = 22;
+      const iqBodyLine = iqBodySize * 1.45;
+      iqSvg += iqLines
+        .map((line, i) => `<text x="${qInnerX + iqPadX}" y="${iqCy + iqBodySize + i * iqBodyLine}" font-family='${FONT}' font-size="${iqBodySize}" fill="${C.ink}" opacity="0.85">${esc(line)}</text>`)
+        .join('');
+      iqCy += iqLines.length * iqBodyLine;
+      const iqTotalH = iqCy - iqStartY + iqPadY;
+      const iqFrame = `<rect x="${qInnerX}" y="${iqStartY}" width="${qInnerW}" height="${iqTotalH}" rx="14" fill="rgba(15,23,42,0.06)" stroke="${C.line}" stroke-width="1"/>`;
+      qSvg += iqFrame + iqSvg;
+      qCy = iqStartY + iqTotalH + 12;
+    }
+
+    // q 外框
+    const qTotalH = qCy - qStartY + qPadY;
+    const qFrame = `<rect x="${innerX}" y="${qStartY}" width="${innerW}" height="${qTotalH}" rx="20" fill="rgba(15,23,42,0.04)" stroke="${C.line}" stroke-width="1"/>`;
+    svg += qFrame + qSvg;
+    cy = qStartY + qTotalH + 26;
+  }
+
+  // 主推媒体 (X 推文图/视频缩略图)
   if (opts.mediaImageDataUri || opts.mediaIsVideo) {
-    mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'x-media');
+    const mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'x-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
     const mediaH = Math.min(innerW / ar, 520);
+    svg += mediaSvg;
     cy = cy + mediaH + 26;
   }
 
@@ -507,7 +886,9 @@ function renderXContent(opts: {
   cy = engY + engHeight;
 
   const totalH = cy - opts.y + 42; // 42 padding-bottom
-  return { svg: topLine + body + mediaSvg + engagementSvg, height: totalH };
+  // PR2 v2: svg accumulator 已经按 retweet/author/body/article/linkCard/quote/media 顺序拼
+  // 这里只追加 engagement
+  return { svg: svg + engagementSvg, height: totalH };
 }
 
 // owner/repo 优先按 / 分两行，再各自截断到 maxChars 字符
@@ -1143,10 +1524,12 @@ function renderHuodongxingContent(opts: {
 // ─── 顶层入口：renderShareSvg ──────────────────────────────
 export interface PosterItem {
   id: string;
+  source_id?: string;
   source_type: 'x_list' | 'github' | 'product_hunt' | string;
   // X 字段
   author?: string;
   handle?: string;
+  published_at?: string;
   // 通用
   content?: string;
   content_translated?: string;
@@ -1165,8 +1548,19 @@ export interface PosterItem {
   // 作者/项目头像（worker fetch + base64 后传入）
   // GH = owner 头像 https://github.com/<owner>.png
   // PH = 产品 logo（media JSON role=logo 那张）
-  // X = 不传（推文头像 scraper 没存）
+  // X = retweet 翻转后的主作者头像(retweet_of.profile_image_url)或 top-level
+  //     (PR2 2026-05-22 起接入,之前 X 走色块 fallback)
   authorAvatarDataUri?: string;
+  // PR2 (2026-05-22) X 海报扩展字段:
+  // 顶部 "♻ 由 @X 转发" indicator 旁边的真实小头像(retweeter, 即 item.handle 那位)
+  retweeterAvatarDataUri?: string;
+  // 嵌入 quote 卡的被引用者头像 + 媒体封面
+  // (retweet 时取 retweet_of.quote_of, 否则 top-level extra.quote_of)
+  nestedQuoteAvatarDataUri?: string;
+  nestedQuoteCoverDataUri?: string;
+  nestedQuoteCoverAspectRatio?: number;
+  // 主推 X Article 卡 cover (PR4/PR5 t.co 文章场景, 海报里渲 Rich tier)
+  xArticleCoverDataUri?: string;
 }
 
 export interface PosterShareCtx {
@@ -1492,14 +1886,56 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     contentSvg = r.svg;
     contentH = r.height;
   } else {
-    // X / X List 默认走 X 模板
-    // metrics 缺失保留 undefined（不强转 0），让 formatStat 渲成 "—" 跟 dashboard 一致
+    // X / X List — PR2 v2 (2026-05-22): 海报全面对齐抽屉详情页
+    // - 真实头像(主作者 + retweet indicator + nested quote)
+    // - verified 蓝勾 (主作者 / quote 作者)
+    // - 发布时间 MM-DD HH:MM (BJT)
+    // - X Article Rich 卡 (t.co + extra.x_article)
+    // - link_card 嵌入 (过滤指向本推文 self URL)
+    // - quote 嵌套小卡含媒体 + L2 mini 卡 (depth=2)
+    // - retweet 翻转: author / handle / body / 头像 / 时间都翻到 retweet_of
     const xm = (item.metrics as Record<string, unknown> | null) || {};
+    const xExtra = (item.extra as Record<string, unknown> | null) || {};
+    const isRetweet = Boolean(xExtra.is_retweet);
+    const retweetOf = (xExtra.retweet_of as Record<string, unknown> | null) || null;
+    // 翻转源 (retweet 时取 retweet_of, 否则 top-level item)
+    const flippedAuthor = isRetweet && retweetOf ? (retweetOf.author as string) || (retweetOf.handle as string) || (item.author || '?') : (item.author || '?');
+    const flippedHandle = isRetweet && retweetOf ? ((retweetOf.handle as string) || '') : (item.handle || '');
+    const flippedIsVerified = isRetweet && retweetOf
+      ? Boolean(retweetOf.is_verified)
+      : Boolean(xExtra.is_verified);
+    const flippedPublishedAt = isRetweet && retweetOf
+      ? (retweetOf.published_at as string | undefined)
+      : item.published_at;
+    const flippedBody = isRetweet && retweetOf
+      ? ((retweetOf.content_translated as string) || (retweetOf.content as string) || bodyText(item))
+      : bodyText(item);
+    // 嵌套 quote 翻转: retweet 时取 retweet_of.quote_of, 否则 top-level extra.quote_of
+    const nestedQuote = isRetweet && retweetOf
+      ? (retweetOf.quote_of as Record<string, unknown> | null) || null
+      : (xExtra.quote_of as Record<string, unknown> | null) || null;
+    // X Article: retweet 时 retweet_of.x_article 优先 (跟 FE TweetCard 同 path 选择)
+    const xArticleRaw = isRetweet && retweetOf
+      ? (retweetOf.x_article as Record<string, unknown> | null) || null
+      : (xExtra.x_article as Record<string, unknown> | null) || null;
+    // Rich tier 判断 (跟 FE XArticleCard 同思路): fetched_at && title
+    const isRichArticle = xArticleRaw && xArticleRaw.fetched_at && xArticleRaw.title;
+    // link_card: 取 extra.link_card, 过滤 self-link
+    const lc = (xExtra.link_card as Record<string, unknown> | null) || null;
+    const sourceId = item.source_id;
+    const isSelfLc = lc ? isSelfLinkCardWorker(lc.url as string | undefined, sourceId) : false;
+    // 嵌套 quote 内的 L2 inner quote (depth=2 mini 卡)
+    const innerQuoteOfQuote = nestedQuote
+      ? (nestedQuote.quote_of as Record<string, unknown> | null) || null
+      : null;
     const r = renderXContent({
       x: cardX, y: cardY, w: cardW,
-      authorName: item.author || '?',
-      authorHandle: item.handle || '',
-      body: bodyText(item),
+      authorName: flippedAuthor,
+      authorHandle: flippedHandle,
+      authorAvatarDataUri: item.authorAvatarDataUri,    // handlers.ts 已翻转 fetch
+      authorIsVerified: flippedIsVerified,
+      publishedAt: flippedPublishedAt,
+      body: flippedBody,
       metrics: {
         replies: xm.replies as number | string | undefined,
         retweets: xm.retweets as number | string | undefined,
@@ -1509,6 +1945,48 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       mediaImageDataUri: item.mediaImageDataUri,
       mediaAspectRatio: item.mediaAspectRatio,
       mediaIsVideo: item.mediaIsVideo,
+      retweetIndicator: isRetweet && retweetOf
+        ? {
+            retweeterHandle: item.handle || '',
+            retweeterName: item.author || '',
+            retweeterAvatarDataUri: item.retweeterAvatarDataUri,
+          }
+        : undefined,
+      xArticle: isRichArticle && xArticleRaw
+        ? {
+            title: (xArticleRaw.title_translated as string) || (xArticleRaw.title as string) || '',
+            excerpt: (xArticleRaw.excerpt_translated as string) || (xArticleRaw.excerpt as string) || '',
+            authorName: xArticleRaw.author_name as string | undefined,
+            authorHandle: xArticleRaw.author_handle as string | undefined,
+            coverDataUri: item.xArticleCoverDataUri,
+          }
+        : undefined,
+      linkCard: lc && !isSelfLc
+        ? {
+            title: (lc.title_translated as string) || (lc.title as string) || '',
+            description: (lc.description_translated as string) || (lc.description as string) || '',
+            domain: lc.domain as string | undefined,
+          }
+        : undefined,
+      quoteEmbed: nestedQuote
+        ? {
+            author: (nestedQuote.author as string) || (nestedQuote.handle as string) || '?',
+            handle: (nestedQuote.handle as string) || '',
+            body: (nestedQuote.content_translated as string) || (nestedQuote.content as string) || '',
+            isVerified: Boolean(nestedQuote.is_verified),
+            publishedAt: nestedQuote.published_at as string | undefined,
+            avatarDataUri: item.nestedQuoteAvatarDataUri,
+            coverDataUri: item.nestedQuoteCoverDataUri,
+            coverAspectRatio: item.nestedQuoteCoverAspectRatio,
+            innerQuote: innerQuoteOfQuote
+              ? {
+                  author: (innerQuoteOfQuote.author as string) || (innerQuoteOfQuote.handle as string) || '?',
+                  handle: (innerQuoteOfQuote.handle as string) || '',
+                  body: (innerQuoteOfQuote.content_translated as string) || (innerQuoteOfQuote.content as string) || '',
+                }
+              : undefined,
+          }
+        : undefined,
     });
     contentSvg = r.svg;
     contentH = r.height;

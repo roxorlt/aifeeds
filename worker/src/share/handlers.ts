@@ -85,26 +85,15 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
 export async function handleSharePoster(request: Request, env: Env, token: string): Promise<Response> {
   const url = new URL(request.url);
   const fake = url.searchParams.get('fake'); // 'x' | 'github' | 'ph' — 跳过 DB 用 hardcoded 样本，仅 staging 验视觉
-  const noCache = url.searchParams.get('nocache') === '1' || fake; // fake 模式 / 强制 bypass 不走 R2
-
-  // ─── R2 缓存：命中直接返回 ────────────────────────────
-  // key 形如 share/poster/<token>.png；写一次后 immutable，命中即时返回
-  const r2Key = `share/poster/${token}.png`;
-  if (env.READMES && !noCache) {
-    const cached = await env.READMES.get(r2Key);
-    if (cached) {
-      return new Response(cached.body, {
-        status: 200,
-        headers: {
-          'Content-Type': 'image/png',
-          'Cache-Control': 'public, max-age=31536000, immutable',
-          'Access-Control-Allow-Origin': '*', // dashboard fetch (跨域) 取 blob 需要
-          'X-Poster-Cache': 'HIT',
-          ...(cached.httpEtag ? { ETag: cached.httpEtag } : {}),
-        },
-      });
-    }
-  }
+  void env;
+  // PR2 v2 (2026-05-22): 砍掉 R2 持久缓存
+  // - 海报 per-token unique (footer 含分享人 name + avatar + token QR), 复用率低
+  // - 之前 R2 cache 1 年 immutable 导致改完 worker 老 PNG 仍命中, PM 截图反馈
+  //   "样式没变" 即此根因 — bump version 是个治标方案
+  // - 改成纯 Cache-Control 1 小时, 浏览器 / CF edge 短期缓存 (同 token 反复点
+  //   击不重复渲染) + deploy 后用户最多卡 1 小时见新版
+  // 仍保留 ?nocache=1 / fake 强制 bypass 浏览器 cache 用 (no-store)
+  const noCache = url.searchParams.get('nocache') === '1' || fake;
 
   let rel: ShareRelation | null = null;
   if (fake) {
@@ -213,22 +202,74 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   const sourceType = String(item.source_type || '');
   // GH/PH/X 抽第一张可用图作为海报媒体（fetch + base64 嵌 SVG）
   const mediaInfo = await pickPosterMedia(sourceType, itemExtra, itemMedia, request, env);
-  // GH owner 头像 / PH 产品 logo（X 暂不抓推文作者头像 — scraper 没存）
+  // GH owner 头像 / PH 产品 logo / X 推文作者头像(PR2 2026-05-22 起接入)
   const authorAvatarDataUri = await pickAuthorAvatar(sourceType, rel.item_id, itemMedia, itemExtra, request, env);
+  // PR2 (2026-05-22): X 海报还需要 aux 头像 — retweet indicator 的 retweeter
+  // 真实头像(顶部小头像)+ quote 嵌入卡的被引用者头像。各路径头像 fetch 共享
+  // fetchAvatarOnly + 失败 fallback 色块
+  let retweeterAvatarDataUri: string | undefined;
+  let nestedQuoteAvatarDataUri: string | undefined;
+  let nestedQuoteCoverDataUri: string | undefined;
+  let nestedQuoteCoverAR: number | undefined;
+  let xArticleCoverDataUri: string | undefined;
+  if (sourceType === 'x_list' && itemExtra) {
+    const isRT = Boolean(itemExtra.is_retweet);
+    const retweetOf = (itemExtra.retweet_of as Record<string, unknown> | null) || null;
+    // retweet indicator 的 retweeter 头像 = top-level extra.profile_image_url
+    // (因为 author 字段在 retweet 时已翻转到 retweet_of, top-level profile 留作转推者)
+    if (isRT) {
+      const rtAvUrl = itemExtra.profile_image_url as string | undefined;
+      if (rtAvUrl) retweeterAvatarDataUri = await fetchAvatarOnly(rtAvUrl, env);
+    }
+    // 嵌套 quote 头像 + 媒体 / cover — retweet 时取 retweet_of.quote_of, 否则 top quote_of
+    const nestedQuote = isRT && retweetOf
+      ? (retweetOf.quote_of as Record<string, unknown> | null) || null
+      : (itemExtra.quote_of as Record<string, unknown> | null) || null;
+    if (nestedQuote) {
+      const nqAvUrl = nestedQuote.profile_image_url as string | undefined;
+      if (nqAvUrl) nestedQuoteAvatarDataUri = await fetchAvatarOnly(nqAvUrl, env);
+      // 嵌套 quote 的首张图片(顺序找 type=image)
+      const nqMedia = Array.isArray(nestedQuote.media) ? nestedQuote.media as Array<Record<string, unknown>> : [];
+      const nqImg = nqMedia.find(m => m?.type === 'image' && typeof m.url === 'string');
+      if (nqImg?.url) {
+        const ar = (typeof nqImg.width === 'number' && typeof nqImg.height === 'number' && nqImg.height > 0)
+          ? (nqImg.width as number) / (nqImg.height as number) : undefined;
+        nestedQuoteCoverDataUri = await fetchAvatarOnly(nqImg.url as string, env);
+        nestedQuoteCoverAR = ar;
+      }
+    }
+    // 主推 X Article 卡 cover(PR4/PR5: extra.x_article.cover_image_url)
+    // retweet 时取 retweet_of.x_article 优先 (跟 FE 同 path 选择)
+    const xa = isRT && retweetOf
+      ? (retweetOf.x_article as Record<string, unknown> | null) || null
+      : (itemExtra.x_article as Record<string, unknown> | null) || null;
+    const xaCoverUrl = xa?.cover_image_url as string | undefined;
+    if (xaCoverUrl) {
+      xArticleCoverDataUri = await fetchAvatarOnly(xaCoverUrl, env);
+    }
+  }
   const posterItem = {
     id: rel.item_id,
     source_type: String(item.source_type || ''),
+    source_id: typeof item.source_id === 'string' ? item.source_id : undefined,
     author: typeof item.author === 'string' ? item.author : undefined,
     handle: typeof item.handle === 'string' ? item.handle : undefined,
     title: typeof item.title === 'string' ? item.title : undefined,
     content: typeof item.content === 'string' ? item.content : undefined,
     content_translated: typeof item.content_translated === 'string' ? item.content_translated : undefined,
+    published_at: typeof item.published_at === 'string' ? item.published_at : undefined,
     metrics: safeJson(item.metrics),
     extra: itemExtra,
     mediaImageDataUri: mediaInfo?.dataUri,
     mediaAspectRatio: mediaInfo?.aspectRatio,
     mediaIsVideo: mediaInfo?.isVideo,
     authorAvatarDataUri,
+    // X 海报扩展(PR2)
+    retweeterAvatarDataUri,
+    nestedQuoteAvatarDataUri,
+    nestedQuoteCoverDataUri,
+    nestedQuoteCoverAspectRatio: nestedQuoteCoverAR,
+    xArticleCoverDataUri,
   };
   // ─── 拉分享人真实信息 ─────────────────────────────────
   // from_uid 查 users 表拿 display_name + avatar_url；display_name 缺失留给
@@ -262,24 +303,15 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   }
   const png = await renderSvgToPng(svg);
 
-  // 写 R2（fake 模式不写避免污染缓存）
-  if (env.READMES && !noCache) {
-    try {
-      await env.READMES.put(r2Key, png, {
-        httpMetadata: { contentType: 'image/png', cacheControl: 'public, max-age=31536000, immutable' },
-      });
-    } catch (e) {
-      console.error('[share-poster] R2 put failed:', e);
-    }
-  }
-
+  // PR2 v2 (2026-05-22): 不再写 R2 — 海报 per-token unique, R2 持久缓存意义有限,
+  // 反而导致代码改后老 PNG 仍命中。改成只用 Cache-Control 让浏览器 / CF edge
+  // 短期缓存(1 小时), deploy 后最多卡 1 小时见新版
   return new Response(png, {
     status: 200,
     headers: {
       'Content-Type': 'image/png',
-      'Cache-Control': noCache ? 'no-store' : 'public, max-age=31536000, immutable',
+      'Cache-Control': noCache ? 'no-store' : 'public, max-age=3600',
       'Access-Control-Allow-Origin': '*', // dashboard fetch (跨域) 取 blob 需要
-      'X-Poster-Cache': 'MISS',
     },
   });
 }
@@ -379,6 +411,17 @@ async function pickAuthorAvatar(
       } catch {
         // ignore — fall through to undefined
       }
+    }
+  } else if (sourceType === 'x_list') {
+    // PR2 (2026-05-22): X 主推头像 — retweet 翻转时取 retweet_of.profile_image_url
+    // (跟 FE 流内 / 海报 author row 同思路), 否则 top-level extra.profile_image_url
+    const isRetweet = Boolean(extra?.is_retweet);
+    const retweetOf = (extra?.retweet_of as Record<string, unknown> | null) || null;
+    const flippedProfileUrl = isRetweet && retweetOf
+      ? (retweetOf.profile_image_url as string | undefined)
+      : (extra?.profile_image_url as string | undefined);
+    if (flippedProfileUrl) {
+      url = flippedProfileUrl;
     }
   } else if (sourceType === 'hf_paper') {
     // HF Paper: submitter 头像 = extra.submitted_by.avatar_url(R2 path /r/hf/<sha>.svg)
