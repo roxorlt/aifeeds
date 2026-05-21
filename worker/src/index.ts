@@ -24,7 +24,9 @@ import {
   classifyAndTranslateForXTweet,
   runBackfillL3Translations,
   runBackfillTcoResolutions,
+  runBackfillXArticles,
   resolveTcoLinksForXTweet,
+  fetchXArticlesForXTweet,
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
 } from './enrich';
@@ -3230,6 +3232,19 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       200,
     );
     const result = await runBackfillTcoResolutions(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-x-articles') {
+    // PR5 X Article backfill (2026-05-21):L1/L2/L3 共 6 path 哪些 content_resolved_url
+    // 是 /i/article/<id>,调 SB tweets/article + advanced_search 拿 detail + author,
+    // 写 extra.{path}.x_article。FE 渲染 X-style rich link card。
+    // 2 credits / article (~$0.00003)。SB 老 article 内容反索引,detail null 时
+    // 仍写 fetch_failed_at + author(search 不受时效影响)。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '30'), 1),
+      100,
+    );
+    const result = await runBackfillXArticles(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-ph-comments-translation') {

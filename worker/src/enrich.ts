@@ -4711,6 +4711,146 @@ export async function resolveTcoLinksForXTweet(
   return { resolved, failed, skipped, mutated };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// fetchXArticlesForXTweet — 2026-05-21 PR5
+//
+// 配套 PR #99 t.co resolve:扫 6 个 path 哪些 content_resolved_url 是
+// https://x.com/i/article/<id>,调 SB endpoint 拿 article 内容 + author。
+//
+// 行为:
+// - 每个 path 已有 content_resolved_url + 未有 x_article(也未标 fetch_failed_at)
+// - 调 fetchXArticleViaSb(2 credit/article = detail + author search)
+// - 写 extra.{path}.x_article = { article_id, title, excerpt, cover_image_url,
+//                                  summary_text, author_handle, author_name,
+//                                  fetched_at }
+// - 失败 graceful:写 fetch_failed_at + reason,不抛
+// - 老 article(SB 反索引)detail null 但 author 仍可拿 → 标 fetched_at + 部分字段 null,
+//   FE 看到 author_handle 有 + title 无时降级 mid card
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface XArticleStub {
+  article_id: string;
+  title: string | null;
+  excerpt: string | null;
+  cover_image_url: string | null;
+  summary_text: string | null;
+  author_handle: string | null;
+  author_name: string | null;
+  fetched_at?: string;
+  fetch_failed_at?: string;
+  fetch_failed_reason?: string;
+}
+
+export async function fetchXArticlesForXTweet(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  itemId: string,
+): Promise<{ fetched: number; failed: number; skipped: number; mutated: boolean; credits: number }> {
+  const { extractXArticleId, fetchXArticleViaSb } = await import('./scrapebadger');
+
+  const row = await env.DB.prepare(
+    `SELECT id, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; extra: string | null }>();
+  if (!row) throw new Error(`fetchXArticlesForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  const newExtra: Record<string, unknown> = { ...extra };
+  const nowIso = new Date().toISOString();
+  let fetched = 0;
+  let failed = 0;
+  let skipped = 0;
+  let mutated = false;
+  let totalCredits = 0;
+
+  // 单字段处理 helper:已有 x_article + (fetched_at OR fetch_failed_at) 就 skip
+  const processField = async (
+    obj: Record<string, unknown>,
+    resolvedUrlKey: string,
+    xArticleKey: string,
+  ): Promise<Record<string, unknown> | null> => {
+    const resolvedUrl = obj[resolvedUrlKey] as string | undefined;
+    const articleId = extractXArticleId(resolvedUrl);
+    if (!articleId) return null;
+    const existing = obj[xArticleKey] as XArticleStub | undefined;
+    if (existing && (existing.fetched_at || existing.fetch_failed_at)) {
+      skipped++;
+      return null;
+    }
+
+    const r = await fetchXArticleViaSb(env, articleId);
+    totalCredits += r.detail_credits + r.search_credits;
+
+    const stub: XArticleStub = {
+      article_id: articleId,
+      title: r.detail?.title || null,
+      excerpt: r.detail?.excerpt || null,
+      cover_image_url: r.detail?.cover_image_url || null,
+      summary_text: r.detail?.summary_text || null,
+      author_handle: r.author?.username || null,
+      author_name: r.author?.user_name || null,
+    };
+
+    if (r.ok && r.detail) {
+      stub.fetched_at = nowIso;
+      fetched++;
+    } else {
+      // detail null(content 反索引 / 已删) 或其它 failure:仍标 failed,但 author 字段若有就保留
+      stub.fetch_failed_at = nowIso;
+      stub.fetch_failed_reason = r.reason || 'unknown';
+      failed++;
+    }
+
+    return { ...obj, [xArticleKey]: stub };
+  };
+
+  // L1 main content (extra root level)
+  const l1Updated = await processField(extra, 'content_resolved_url', 'x_article');
+  if (l1Updated) {
+    Object.assign(newExtra, l1Updated);
+    mutated = true;
+  }
+
+  // L2 + L3:quote_of / reply_of / retweet_of 各自 + 其内嵌 quote_of
+  for (const l2Key of ['quote_of', 'reply_of', 'retweet_of'] as const) {
+    const l2 = extra[l2Key] as Record<string, unknown> | undefined;
+    if (!l2) continue;
+    let newL2 = l2;
+    let l2Mutated = false;
+
+    // L2 content
+    const l2Updated = await processField(l2, 'content_resolved_url', 'x_article');
+    if (l2Updated) {
+      newL2 = l2Updated;
+      l2Mutated = true;
+    }
+
+    // L3 quote_of(nested)
+    const l3 = newL2.quote_of as Record<string, unknown> | undefined;
+    if (l3) {
+      const l3Updated = await processField(l3, 'content_resolved_url', 'x_article');
+      if (l3Updated) {
+        newL2 = { ...newL2, quote_of: l3Updated };
+        l2Mutated = true;
+      }
+    }
+
+    if (l2Mutated) {
+      newExtra[l2Key] = newL2;
+      mutated = true;
+    }
+  }
+
+  if (mutated) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(newExtra), itemId).run();
+    console.log(`[x-article] ${itemId}: fetched=${fetched} failed=${failed} skipped=${skipped} credits=${totalCredits}`);
+  }
+
+  return { fetched, failed, skipped, mutated, credits: totalCredits };
+}
+
 export interface BackfillTruncatedResult {
   mode: string;
   selected: number;
@@ -5768,6 +5908,98 @@ export async function runBackfillTcoResolutions(
     processed,
     total_resolved: totalResolved,
     total_failed: totalFailed,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
+  };
+}
+
+/**
+ * PR5 backfill (2026-05-21):扫存量 X items 哪些 path 已有 content_resolved_url
+ * 匹配 /i/article/<id> 但缺 x_article(未 fetched 也未标 failed)。SB 调用拿
+ * detail + author search 写入。
+ *
+ * 用法:每条 item 内 6 path 各自处理(L1 + L2*3 + L3*3)。fetchXArticlesForXTweet
+ * 处理一个 item 内所有 path。
+ */
+export async function runBackfillXArticles(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  limit: number,
+  rateSleepMs: number = 200,
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_fetched: number;
+  total_failed: number;
+  total_credits: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // 候选:任一 path content_resolved_url 含 /i/article/ + 该 path 缺 x_article(or 标记缺 fetched_at/fail_at)
+  const HAS_ARTICLE_NEED_FETCH = `(
+    (json_extract(extra, '$.content_resolved_url') LIKE '%/i/article/%'
+     AND json_extract(extra, '$.x_article.fetched_at') IS NULL
+     AND json_extract(extra, '$.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.quote_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.quote_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.quote_of.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.reply_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.reply_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.reply_of.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.retweet_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.retweet_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.retweet_of.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.quote_of.quote_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.quote_of.quote_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.quote_of.quote_of.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.reply_of.quote_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.reply_of.quote_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.reply_of.quote_of.x_article.fetch_failed_at') IS NULL)
+    OR (json_extract(extra, '$.retweet_of.quote_of.content_resolved_url') LIKE '%/i/article/%'
+        AND json_extract(extra, '$.retweet_of.quote_of.x_article.fetched_at') IS NULL
+        AND json_extract(extra, '$.retweet_of.quote_of.x_article.fetch_failed_at') IS NULL)
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='x_list' AND is_relevant=1
+        AND ${HAS_ARTICLE_NEED_FETCH}
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='x_list' AND is_relevant=1
+        AND ${HAS_ARTICLE_NEED_FETCH}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalFetched = 0;
+  let totalFailed = 0;
+  let totalCredits = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await fetchXArticlesForXTweet(env, c.id);
+      totalFetched += r.fetched;
+      totalFailed += r.failed;
+      totalCredits += r.credits;
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_fetched: totalFetched,
+    total_failed: totalFailed,
+    total_credits: totalCredits,
     errors: errors.slice(0, 20),
     remaining: (remainingRow?.n || 0) - processed,
   };

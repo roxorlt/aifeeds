@@ -35,6 +35,7 @@ import {
   backfillLinkCardForXTweet,
   backfillNestedXQuoteForXTweet,
   resolveTcoLinksForXTweet,
+  fetchXArticlesForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
 
@@ -163,6 +164,15 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // content_resolved_url。failed 也标 failed_at 防重试。
     await step.do('resolve-tco-links', RETRY, () =>
       safeStep('resolve-tco-links', itemId, () => resolveTcoLinksForXTweet(this.env, itemId)),
+    );
+
+    // ─── Step 1.6: fetch X article content (PR5) ────────────────
+    // 2026-05-21:跟 1.5 串行,扫 6 path 哪些 content_resolved_url 是 /i/article/<id>,
+    // 调 SB 拿 article detail + author search,写 extra.{path}.x_article。
+    // 失败 graceful:写 fetch_failed_at,FE 降级 link card。
+    // 老 article(SB 反索引)detail null 但 author 仍可拿。
+    await step.do('fetch-x-articles', RETRY, () =>
+      safeStep('fetch-x-articles', itemId, () => fetchXArticlesForXTweet(this.env, itemId)),
     );
 
     // ─── Step 2: longform fetch via ScrapeBadger (条件) ──────────

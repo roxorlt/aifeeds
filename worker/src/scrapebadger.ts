@@ -422,3 +422,171 @@ export async function fetchListTweetsPage(
     durationMs,
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// X Article 抓取(2026-05-21):配合 PR #99 t.co resolve,把 /i/article/<id>
+// 的内容 + author 写入 extra.{path}.x_article。
+//
+// SB endpoint:
+// - GET /v1/twitter/tweets/article/{article_id} 拿 title/preview_text/body/cover
+// - GET /v1/twitter/tweets/advanced_search?query=<article_id> 拿 article tweet
+//   (author 不在 article detail response 里,要 search 反查)
+//
+// Cost: 2 credits/article (detail + search)。0.15 USD / 1000 credit = $0.00003/article。
+// 老 article(~5+天) detail 返 null content 是正常的(X 反索引/已删),
+// search 即便 detail null 也能返 author tweet → 降级 link card 也能显示 author。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SB_ARTICLE_DETAIL_PATH = '/twitter/tweets/article/'; // GET /<article_id>
+const SB_ADVANCED_SEARCH_PATH = '/twitter/tweets/advanced_search'; // GET ?query=...
+
+export interface XArticleDetail {
+  article_id: string;
+  title: string | null;
+  excerpt: string | null;       // preview_text(SB) 或 body[:200] 截断
+  cover_image_url: string | null;
+  summary_text: string | null;  // bonus: Grok 5-bullet,可空
+  created_at: string | null;
+  // author 字段单独 search 获取
+}
+
+export interface XArticleAuthor {
+  user_id: string | null;
+  username: string | null; // handle 不带 @
+  user_name: string | null; // 显示名
+}
+
+export interface XArticleFetchResult {
+  ok: boolean;
+  detail: XArticleDetail | null;
+  author: XArticleAuthor | null;
+  detail_credits: number;
+  search_credits: number;
+  reason?: 'no_key' | 'detail_http' | 'detail_null_content' | 'search_http' | 'fetch_failed';
+}
+
+async function fetchXArticleDetail(
+  env: ScrapeBadgerEnv,
+  articleId: string,
+): Promise<{ detail: XArticleDetail | null; credits: number; reason?: string }> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { detail: null, credits: 0, reason: 'no_key' };
+  }
+  const url = `${SB_BASE}${SB_ARTICLE_DETAIL_PATH}${encodeURIComponent(articleId)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+    });
+  } catch (e) {
+    console.warn(`[sb-article] detail fetch error ${articleId}:`, e);
+    return { detail: null, credits: 0, reason: 'detail_http' };
+  }
+  const credits = Number(res.headers.get('x-credits-used')) || 0;
+  if (!res.ok) {
+    return { detail: null, credits, reason: 'detail_http' };
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    return { detail: null, credits, reason: 'detail_http' };
+  }
+  const title = (body.title as string | null) || null;
+  // title null = SB 没拿到内容(老 article 反索引 / 已删) — 标 detail_null_content,caller 决定是否仍 search author
+  if (!title) {
+    return { detail: null, credits, reason: 'detail_null_content' };
+  }
+  // excerpt: 优先 preview_text,fallback body 前 200 字
+  let excerpt = (body.preview_text as string | null) || null;
+  if (!excerpt && typeof body.body === 'string') {
+    excerpt = (body.body as string).slice(0, 200);
+  }
+  return {
+    detail: {
+      article_id: articleId,
+      title,
+      excerpt,
+      cover_image_url: (body.cover_image_url as string | null) || (body.cover_media_url as string | null) || null,
+      summary_text: (body.summary_text as string | null) || null,
+      created_at: (body.created_at as string | null) || null,
+    },
+    credits,
+  };
+}
+
+async function fetchXArticleAuthor(
+  env: ScrapeBadgerEnv,
+  articleId: string,
+): Promise<{ author: XArticleAuthor | null; credits: number; reason?: string }> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { author: null, credits: 0, reason: 'no_key' };
+  }
+  // advanced_search 用 article_id 当 query 找 article tweet — 第一条结果的 author 就是真作者
+  const url = `${SB_BASE}${SB_ADVANCED_SEARCH_PATH}?query=${encodeURIComponent(articleId)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+    });
+  } catch (e) {
+    console.warn(`[sb-article] author search error ${articleId}:`, e);
+    return { author: null, credits: 0, reason: 'search_http' };
+  }
+  const credits = Number(res.headers.get('x-credits-used')) || 0;
+  if (!res.ok) {
+    return { author: null, credits, reason: 'search_http' };
+  }
+  let body: { data?: Array<Record<string, unknown>> };
+  try {
+    body = (await res.json()) as { data?: Array<Record<string, unknown>> };
+  } catch {
+    return { author: null, credits, reason: 'search_http' };
+  }
+  const first = body.data?.[0];
+  if (!first) {
+    return { author: null, credits };
+  }
+  return {
+    author: {
+      user_id: (first.user_id as string | null) || null,
+      username: (first.username as string | null) || null,
+      user_name: (first.user_name as string | null) || null,
+    },
+    credits,
+  };
+}
+
+/**
+ * 拉 X article 完整信息(detail + author)。失败 graceful return ok=false + reason。
+ * Caller 决定是否仍 write fetched_at(成功)或 fetch_failed_at(失败)。
+ * 即便 detail null,author 仍尝试 search — 老 article 没正文但能显示 "X 文章 by @xxx"。
+ */
+export async function fetchXArticleViaSb(
+  env: ScrapeBadgerEnv,
+  articleId: string,
+): Promise<XArticleFetchResult> {
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { ok: false, detail: null, author: null, detail_credits: 0, search_credits: 0, reason: 'no_key' };
+  }
+  const detailRes = await fetchXArticleDetail(env, articleId);
+  const authorRes = await fetchXArticleAuthor(env, articleId);
+  return {
+    ok: !!detailRes.detail, // 只有 detail 拿到才算 ok;detail null + author 有的情况算 partial(reason: detail_null_content)
+    detail: detailRes.detail,
+    author: authorRes.author,
+    detail_credits: detailRes.credits,
+    search_credits: authorRes.credits,
+    reason: detailRes.reason as XArticleFetchResult['reason'],
+  };
+}
+
+const X_ARTICLE_URL_RE = /^https?:\/\/(?:www\.)?x\.com\/i\/article\/(\d+)/i;
+
+export function extractXArticleId(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = url.match(X_ARTICLE_URL_RE);
+  return m ? m[1] : null;
+}
