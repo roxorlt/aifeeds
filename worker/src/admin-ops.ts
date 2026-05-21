@@ -7,6 +7,7 @@
 
 import type { Env } from './index';
 import { ADMIN_SHARED_CSS, adminNavHtml, requireAuth, jsonRes } from './admin';
+import { OPS_CONFIG } from './ops/config';
 
 // ─── /api/admin/ops?metric=<name> ────────────────────────────────
 export async function handleAdminOps(request: Request, env: Env): Promise<Response> {
@@ -42,16 +43,16 @@ async function metricOverview(env: Env) {
 
   const counts = await env.DB.prepare(`
     SELECT
-      SUM(CASE WHEN pool_type='baopui' AND added_at > strftime('%s','now')-24*3600 THEN 1 ELSE 0 END) AS baopui_24h,
-      SUM(CASE WHEN pool_type='trend' AND added_at > strftime('%s','now')-24*3600 THEN 1 ELSE 0 END) AS trend_24h,
-      SUM(CASE WHEN pool_type='discover' AND added_at > strftime('%s','now')-14*86400 THEN 1 ELSE 0 END) AS discover_14d,
-      SUM(CASE WHEN pushed_at IS NOT NULL AND added_at > strftime('%s','now')-24*3600 THEN 1 ELSE 0 END) AS pushed_24h
+      SUM(CASE WHEN pool_type='baopui' AND added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600 THEN 1 ELSE 0 END) AS baopui_24h,
+      SUM(CASE WHEN pool_type='trend' AND added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600 THEN 1 ELSE 0 END) AS trend_24h,
+      SUM(CASE WHEN pool_type='discover' AND added_at > strftime('%s','now') - ${OPS_CONFIG.DISCOVER_DISPLAY_WINDOW_DAYS} * 86400 THEN 1 ELSE 0 END) AS discover_14d,
+      SUM(CASE WHEN pushed_at IS NOT NULL AND added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600 THEN 1 ELSE 0 END) AS pushed_24h
     FROM ops_pool_items
   `).first<{ baopui_24h: number; trend_24h: number; discover_14d: number; pushed_24h: number }>();
 
   const hotCount = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items WHERE is_hot = 1
-     AND scraped_at > datetime('now', '-7 days')`,
+     AND scraped_at > datetime('now', '-${OPS_CONFIG.HOT_DISPLAY_WINDOW_DAYS} days')`,
   ).first<{ n: number }>();
 
   return {
@@ -71,7 +72,7 @@ async function metricBaopui(env: Env) {
     FROM ops_pool_items p
     JOIN items i ON i.id = p.item_id
     WHERE p.pool_type = 'baopui'
-      AND p.added_at > strftime('%s','now') - 24 * 3600
+      AND p.added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600
     ORDER BY p.added_at DESC
     LIMIT 50
   `).all();
@@ -88,7 +89,7 @@ async function metricTrend(env: Env) {
     FROM ops_pool_items p
     JOIN items i ON i.id = p.item_id
     WHERE p.pool_type = 'trend'
-      AND p.added_at > strftime('%s','now') - 24 * 3600
+      AND p.added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600
     ORDER BY p.added_at DESC
     LIMIT 30
   `).all<{
@@ -122,7 +123,7 @@ async function metricDiscover(env: Env) {
            datetime(added_at, 'unixepoch', '+8 hours') AS added_bjt
     FROM ops_pool_items
     WHERE pool_type = 'discover'
-      AND added_at > strftime('%s','now') - 14 * 86400
+      AND added_at > strftime('%s','now') - ${OPS_CONFIG.DISCOVER_DISPLAY_WINDOW_DAYS} * 86400
     ORDER BY json_extract(payload, '$.distinct_tweets') DESC
     LIMIT 60
   `).all();

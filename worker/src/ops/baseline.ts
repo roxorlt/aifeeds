@@ -4,6 +4,7 @@
 // 写 ops_pool_baseline 表，detect cron 读这张表做对比
 
 import type { Env } from '../index';
+import { OPS_CONFIG } from './config';
 
 const KV_SENTINEL_KEY = 'ops:baseline:last_run_bjt_date';
 
@@ -31,7 +32,7 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
   try {
     const computed: BaselineRow[] = [];
 
-    // §1 X score P90 + P99 (7d AI only)
+    // §1 X score P90 + P99 (AI only, OPS_CONFIG.BASELINE_SCORE_WINDOW_DAYS 滑动)
     const scoreRow = await env.DB.prepare(`
       WITH scored AS (
         SELECT
@@ -41,7 +42,7 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
           + COALESCE(json_extract(metrics, '$.retweets'), 0) * 20 AS score
         FROM items
         WHERE source_type = 'x_list' AND is_relevant = 1
-          AND scraped_at > datetime('now', '-7 days')
+          AND scraped_at > datetime('now', '-${OPS_CONFIG.BASELINE_SCORE_WINDOW_DAYS} days')
           AND metrics IS NOT NULL
       ),
       ranked AS (
@@ -60,7 +61,7 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
       computed.push({ source_type: 'x_list', metric_key: 'score_p99', value: scoreRow.p99, sample_size: scoreRow.n });
     }
 
-    // §2 X likes/h 增速 P95 (3d AI only, captured_at 单位是秒)
+    // §2 X likes/h 增速 P95 (captured_at 是秒级 INTEGER，跟 items.scraped_at 不同)
     const rateRow = await env.DB.prepare(`
       WITH snaps AS (
         SELECT
@@ -72,7 +73,7 @@ export async function runOpsBaseline(env: Env): Promise<BaselineResult> {
         FROM metrics_snapshots s
         JOIN items i ON i.id = s.item_id
         WHERE i.is_relevant = 1
-          AND s.captured_at > (strftime('%s', 'now') - 3 * 86400)
+          AND s.captured_at > (strftime('%s', 'now') - ${OPS_CONFIG.BASELINE_RATE_WINDOW_DAYS} * 86400)
       ),
       rates AS (
         SELECT CAST((likes - prev_likes) AS REAL) * 3600 / NULLIF(captured_at - prev_at, 0) AS rate

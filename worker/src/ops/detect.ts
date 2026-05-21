@@ -1,22 +1,21 @@
 // 运营看板内容池 — 池子检测 cron（每 30min 跑一次）
 // 设计：docs/plans/2026-05-21-ops-pool-design.md § 5
 // 一处坑全坑：所有 SQL 必须 is_relevant = 1（设计 § 3）
+// items.scraped_at 是 ISO 字符串（不是毫秒 INTEGER），用 datetime() 比较
 //
 // 4 件事：
 //   1. hot 标：score > P90 → UPDATE items.is_hot = 1（仅 update 增量）
-//   2. 爆推：score > P99 AND likes >= 300 → 写 ops_pool_items + PushDeer
-//   3. 趋势推：最近 snapshot pair 增速 > P95 AND likes_total >= 50 → 写池 + push
-//   4. 发现博主：14d distinct_tweets >= 5 AND not in list → 写池 + push
+//   2. 爆推：score > P99 AND likes >= 底线 → 写 ops_pool_items + PushDeer
+//   3. 趋势推：最近 snapshot pair 增速 > P95 AND likes_total >= 起跑线 → 写池 + push
+//   4. 发现博主：N 天 distinct_tweets >= 阈值 AND not in list → 写池 + push
 //
+// 所有窗口 + 阈值都在 ops/config.ts，改完一处 deploy 一次即可。
 // PushDeer 通过 OPS_PUSHDEER_ENABLED env flag 控制（先跑不推 3 天）。
 
 import type { Env } from '../index';
 import { pushDeerAlert } from '../notifier';
+import { OPS_CONFIG } from './config';
 
-const BAOPUI_LIKES_MIN = 300;
-const TREND_LIKES_MIN = 50;
-const DISCOVER_DISTINCT_TWEETS_MIN = 5;
-const DISCOVER_WINDOW_DAYS = 14;
 const PROD_HOST = 'https://ai-feeds.com';
 
 export type DetectResult = {
@@ -82,13 +81,13 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
     const now = Math.floor(Date.now() / 1000);
     const pushList: PushItem[] = [];
 
-    // ─── 1) hot 标 — score > P90 (AI 7d) UPDATE 增量 ─────────────
+    // ─── 1) hot 标 — score > P90 (AI 窗口) UPDATE 增量 ───────────
     const hotUpdate = await env.DB.prepare(`
       UPDATE items
       SET is_hot = 1
       WHERE source_type = 'x_list'
         AND is_relevant = 1
-        AND scraped_at > datetime('now', '-7 days')
+        AND scraped_at > datetime('now', '-${OPS_CONFIG.HOT_UPDATE_WINDOW_DAYS} days')
         AND metrics IS NOT NULL
         AND COALESCE(is_hot, 0) = 0
         AND (
@@ -100,7 +99,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
     `).bind(scoreP90).run();
     result.hot_marked = hotUpdate.meta.changes || 0;
 
-    // ─── 2) 爆推 — score > P99 AND likes >= 300 (AI 24h) ─────────
+    // ─── 2) 爆推 — score > P99 AND likes >= 底线 (AI 24h) ────────
     const baopuiRows = await env.DB.prepare(`
       SELECT
         id, handle, content_translated, content,
@@ -116,7 +115,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         ) AS score
       FROM items
       WHERE source_type = 'x_list' AND is_relevant = 1
-        AND scraped_at > datetime('now', '-1 day')
+        AND scraped_at > datetime('now', '-${OPS_CONFIG.BAOPUI_WINDOW_HOURS} hours')
         AND metrics IS NOT NULL
         AND COALESCE(json_extract(metrics, '$.likes'), 0) >= ?
         AND (
@@ -127,7 +126,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         ) > ?
       ORDER BY score DESC
       LIMIT 50
-    `).bind(BAOPUI_LIKES_MIN, scoreP99).all<{
+    `).bind(OPS_CONFIG.BAOPUI_LIKES_MIN, scoreP99).all<{
       id: string; handle: string;
       content_translated: string | null; content: string | null;
       likes: number; retweets: number; replies: number; bookmarks: number;
@@ -155,7 +154,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
       }
     }
 
-    // ─── 3) 趋势推 — 最近 6h 内 snapshot pair 增速 > P95 ──────────
+    // ─── 3) 趋势推 — 最近 N 小时 snapshot pair 增速 > P95 ────────
     if (rateP95 != null) {
       const trendRows = await env.DB.prepare(`
         WITH snaps AS (
@@ -168,7 +167,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
           FROM metrics_snapshots s
           JOIN items i ON i.id = s.item_id
           WHERE i.is_relevant = 1
-            AND s.captured_at > (strftime('%s', 'now') - 6 * 3600)
+            AND s.captured_at > (strftime('%s', 'now') - ${OPS_CONFIG.TREND_SNAPSHOT_WINDOW_HOURS} * 3600)
         ),
         latest AS (
           SELECT item_id, MAX(captured_at) AS captured_at FROM snaps GROUP BY item_id
@@ -191,7 +190,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         WHERE r.likes >= ? AND r.rate > ?
         ORDER BY r.rate DESC
         LIMIT 30
-      `).bind(TREND_LIKES_MIN, rateP95).all<{
+      `).bind(OPS_CONFIG.TREND_LIKES_MIN, rateP95).all<{
         id: string; rate: number; likes: number;
         handle: string; content: string | null; content_translated: string | null;
       }>();
@@ -217,7 +216,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
       }
     }
 
-    // ─── 4) 发现博主 — 14d distinct_tweets >= 5 AND not in list ─
+    // ─── 4) 发现博主 — N 天 distinct_tweets >= 阈值 AND not in list ─
     const discoverRows = await env.DB.prepare(`
       WITH known AS (
         SELECT DISTINCT handle FROM items WHERE source_type='x_list' AND handle IS NOT NULL
@@ -229,7 +228,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         FROM items
         WHERE source_type='x_list' AND is_relevant=1
           AND json_extract(extra, '$.quote_of.handle') IS NOT NULL
-          AND scraped_at > datetime('now', '-14 days')
+          AND scraped_at > datetime('now', '-${OPS_CONFIG.DISCOVER_WINDOW_DAYS} days')
         UNION ALL
         SELECT
           json_extract(extra, '$.reply_of.handle'),
@@ -237,7 +236,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         FROM items
         WHERE source_type='x_list' AND is_relevant=1
           AND json_extract(extra, '$.reply_of.handle') IS NOT NULL
-          AND scraped_at > datetime('now', '-14 days')
+          AND scraped_at > datetime('now', '-${OPS_CONFIG.DISCOVER_WINDOW_DAYS} days')
       )
       SELECT
         h AS handle,
@@ -249,7 +248,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
       GROUP BY h
       HAVING COUNT(DISTINCT src_tid) >= ?
       ORDER BY distinct_tweets DESC
-    `).bind(DISCOVER_DISTINCT_TWEETS_MIN).all<{
+    `).bind(OPS_CONFIG.DISCOVER_DISTINCT_TWEETS_MIN).all<{
       handle: string; total_mentions: number; distinct_tweets: number; dilution: number;
     }>();
 
@@ -261,7 +260,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         distinct_tweets: r.distinct_tweets,
         total_mentions: r.total_mentions,
         dilution: r.dilution,
-        window_days: DISCOVER_WINDOW_DAYS,
+        window_days: OPS_CONFIG.DISCOVER_WINDOW_DAYS,
       }, now);
       if (inserted) {
         result.discover_added++;
@@ -269,7 +268,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
           pool: 'discover',
           itemKey,
           title: `👤 发现博主 · @${r.handle}`,
-          body: `14 天被引用 ${r.distinct_tweets} 条不同 tweet（共 ${r.total_mentions} 次提及，dilution ${r.dilution}）\n\n`
+          body: `${OPS_CONFIG.DISCOVER_WINDOW_DAYS} 天被引用 ${r.distinct_tweets} 条不同 tweet（共 ${r.total_mentions} 次提及，dilution ${r.dilution}）\n\n`
             + `https://x.com/${r.handle}`,
         });
       }
