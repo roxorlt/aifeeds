@@ -36,6 +36,7 @@ import {
   backfillNestedXQuoteForXTweet,
   resolveTcoLinksForXTweet,
   fetchXArticlesForXTweet,
+  translateXArticlesForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
 
@@ -173,6 +174,14 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
     // 老 article(SB 反索引)detail null 但 author 仍可拿。
     await step.do('fetch-x-articles', RETRY, () =>
       safeStep('fetch-x-articles', itemId, () => fetchXArticlesForXTweet(this.env, itemId)),
+    );
+
+    // ─── Step 1.7: translate X article fields (PR5 follow-up) ────
+    // 2026-05-21:1.6 抓到的 article title / excerpt 大多英文,翻成中文供 FE
+    // Rich card 显示一致体验。单 DeepSeek call 处理 item 内所有 path 的 article 翻译。
+    // 失败 graceful:写 translate_failed_at,FE 渲染时降级到原文。
+    await step.do('translate-x-articles', RETRY, () =>
+      safeStep('translate-x-articles', itemId, () => translateXArticlesForXTweet(this.env, itemId)),
     );
 
     // ─── Step 2: longform fetch via ScrapeBadger (条件) ──────────

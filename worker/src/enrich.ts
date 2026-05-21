@@ -4907,6 +4907,255 @@ export async function fetchXArticlesForXTweet(
   return { fetched, failed, skipped, mutated, credits: totalCredits };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// translateXArticlesForXTweet — 2026-05-21 PR5 follow-up
+//
+// fetchXArticlesForXTweet 写 x_article.title / excerpt(syndication 原文),但
+// 大部分 article 是英文。FE 渲染 Rich card 时希望显示中文标题/摘要 一致体验。
+// 这个 step 扫 6 个 path 的 x_article,把 title + excerpt 整批 DeepSeek 翻译。
+//
+// 单 DeepSeek 调用处理一个 item 内所有 path 的 article 翻译。
+// 已翻译(title_translated 有) 或已标 translate_failed_at 的跳过。
+// 中文原文 → DeepSeek 返 null _zh → 标 _translate_skipped_at 防重试。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const X_ARTICLE_TRANSLATE_PROMPT = `把下面 X article 标题和摘要翻译成自然中文。
+
+规则:
+- 专有名词保留英文(API / OpenAI / RAG / Transformer / Cloudflare / Codex 等)
+- 已经是中文 / 中英混合的字段返回 null(不需翻译)
+- 输出自然口语化中文,避免直译腔
+- 输入字段不存在时对应 _zh 返回 null
+
+输入(JSON 数组,每条 {idx, title, excerpt}):
+%INPUT%
+
+只返回一个 JSON 对象,不要其他文字:
+{ "items": [{ "idx": 0, "title_zh": "..." 或 null, "excerpt_zh": "..." 或 null }, ...] }`;
+
+interface ArticleTranslateTask {
+  pathRef: { l1: true } | { l2Key: 'quote_of' | 'reply_of' | 'retweet_of' } | { l2Key: 'quote_of' | 'reply_of' | 'retweet_of'; isL3: true };
+  title: string | null;
+  excerpt: string | null;
+}
+
+export async function translateXArticlesForXTweet(
+  env: EnrichEnv,
+  itemId: string,
+): Promise<{ translated: number; skipped: number; failed: number; mutated: boolean }> {
+  if (!env.DEEPSEEK_API_KEY) {
+    return { translated: 0, skipped: 0, failed: 0, mutated: false };
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; extra: string | null }>();
+  if (!row) throw new Error(`translateXArticlesForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  // 收集 tasks:每个 path 的 x_article 若 title/excerpt 存在且 _translated 未写 + 未 skip,放进任务
+  const tasks: ArticleTranslateTask[] = [];
+  const stubs: Array<Record<string, unknown> | undefined> = [];
+
+  const collectIfPending = (
+    stub: Record<string, unknown> | undefined,
+    ref: ArticleTranslateTask['pathRef'],
+  ) => {
+    if (!stub) return;
+    const title = stub.title as string | null;
+    const excerpt = stub.excerpt as string | null;
+    if (!title && !excerpt) return;
+    // 已 translated 或已 skip 不重做
+    if (stub.title_translated || stub.excerpt_translated) return;
+    if (stub.translate_skipped_at || stub.translate_failed_at) return;
+    tasks.push({ pathRef: ref, title, excerpt });
+    stubs.push(stub);
+  };
+
+  collectIfPending(extra.x_article as Record<string, unknown> | undefined, { l1: true });
+  for (const l2Key of ['quote_of', 'reply_of', 'retweet_of'] as const) {
+    const l2 = extra[l2Key] as Record<string, unknown> | undefined;
+    if (!l2) continue;
+    collectIfPending(l2.x_article as Record<string, unknown> | undefined, { l2Key });
+    const l3 = l2.quote_of as Record<string, unknown> | undefined;
+    if (l3) {
+      collectIfPending(l3.x_article as Record<string, unknown> | undefined, { l2Key, isL3: true });
+    }
+  }
+
+  if (tasks.length === 0) {
+    return { translated: 0, skipped: 0, failed: 0, mutated: false };
+  }
+
+  // 调 DeepSeek
+  const input = tasks.map((t, i) => ({ idx: i, title: t.title, excerpt: t.excerpt }));
+  const prompt = X_ARTICLE_TRANSLATE_PROMPT.replace('%INPUT%', JSON.stringify(input));
+  const nowIso = new Date().toISOString();
+
+  let parsed: { items?: Array<{ idx: number; title_zh?: string | null; excerpt_zh?: string | null }> } | null = null;
+  let attempts = 0;
+  for (let i = 0; i < 2; i++) {
+    attempts++;
+    try {
+      const res = await fetch(DEEPSEEK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
+        body: JSON.stringify({
+          model: 'deepseek-v4-flash',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          max_tokens: 8000,
+        }),
+      });
+      if (!res.ok) continue;
+      const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const raw = body.choices?.[0]?.message?.content || '';
+      parsed = JSON.parse(raw);
+      break;
+    } catch { /* retry */ }
+  }
+
+  // 失败:所有 stub 标 translate_failed_at,不阻塞
+  if (!parsed?.items) {
+    let mutCount = 0;
+    for (const stub of stubs) {
+      if (stub) {
+        stub.translate_failed_at = nowIso;
+        stub.translate_failed_reason = 'http_or_parse';
+        mutCount++;
+      }
+    }
+    if (mutCount > 0) {
+      await env.DB.prepare(
+        `UPDATE items SET extra = ? WHERE id = ?`,
+      ).bind(JSON.stringify(extra), itemId).run();
+    }
+    console.log(`[x-article-translate] ${itemId}: HTTP/parse fail after ${attempts} attempts`);
+    return { translated: 0, skipped: 0, failed: mutCount, mutated: mutCount > 0 };
+  }
+
+  // 写回每个 stub
+  let translated = 0, skipped = 0, failed = 0;
+  for (let i = 0; i < tasks.length; i++) {
+    const stub = stubs[i];
+    if (!stub) continue;
+    const out = parsed.items.find((it) => it.idx === i);
+    if (!out) {
+      stub.translate_failed_at = nowIso;
+      stub.translate_failed_reason = 'idx_missing_in_response';
+      failed++;
+      continue;
+    }
+    const t = tasks[i];
+    const titleZh = out.title_zh ?? null;
+    const excerptZh = out.excerpt_zh ?? null;
+    let didTranslate = false;
+    if (titleZh && t.title) {
+      stub.title_translated = titleZh;
+      didTranslate = true;
+    }
+    if (excerptZh && t.excerpt) {
+      stub.excerpt_translated = excerptZh;
+      didTranslate = true;
+    }
+    if (didTranslate) {
+      stub.translated_at = nowIso;
+      translated++;
+    } else {
+      // 中文原文 / DeepSeek 判定不需翻译 → skip marker 防重试
+      stub.translate_skipped_at = nowIso;
+      skipped++;
+    }
+  }
+
+  await env.DB.prepare(
+    `UPDATE items SET extra = ? WHERE id = ?`,
+  ).bind(JSON.stringify(extra), itemId).run();
+  console.log(`[x-article-translate] ${itemId}: translated=${translated} skipped=${skipped} failed=${failed}`);
+
+  return { translated, skipped, failed, mutated: true };
+}
+
+/**
+ * Backfill 历史 x_article 翻译。SQL filter 找有 title/excerpt 但缺
+ * title_translated/excerpt_translated 且没标 translate_skipped/failed 的 path。
+ */
+export async function runBackfillXArticleTranslations(
+  env: EnrichEnv,
+  limit: number,
+  rateSleepMs: number = 200,
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_translated: number;
+  total_skipped: number;
+  total_failed: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+}> {
+  // 候选:任一 path x_article 有 title 但无 title_translated + 没 skip / fail marker
+  const TR = (path: string) => `(
+    json_extract(extra, '$.${path}x_article.title') IS NOT NULL
+    AND json_extract(extra, '$.${path}x_article.title_translated') IS NULL
+    AND json_extract(extra, '$.${path}x_article.translate_skipped_at') IS NULL
+    AND json_extract(extra, '$.${path}x_article.translate_failed_at') IS NULL
+  )`;
+  const HAS_PENDING = `(
+    ${TR('')} OR
+    ${TR('quote_of.')} OR
+    ${TR('reply_of.')} OR
+    ${TR('retweet_of.')} OR
+    ${TR('quote_of.quote_of.')} OR
+    ${TR('reply_of.quote_of.')} OR
+    ${TR('retweet_of.quote_of.')}
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='x_list' AND ${HAS_PENDING}
+      ORDER BY scraped_at DESC LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='x_list' AND ${HAS_PENDING}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalTranslated = 0;
+  let totalSkipped = 0;
+  let totalFailed = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await translateXArticlesForXTweet(env, c.id);
+      totalTranslated += r.translated;
+      totalSkipped += r.skipped;
+      totalFailed += r.failed;
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    if (rateSleepMs > 0 && processed < candidates.results.length) {
+      await new Promise((r) => setTimeout(r, rateSleepMs));
+    }
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_translated: totalTranslated,
+    total_skipped: totalSkipped,
+    total_failed: totalFailed,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
+  };
+}
+
 export interface BackfillTruncatedResult {
   mode: string;
   selected: number;
