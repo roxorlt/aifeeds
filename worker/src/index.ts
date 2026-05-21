@@ -80,6 +80,7 @@ import {
   adminUser,
   adminCleanupAccount,
   adminDailyCap,
+  adminClearPosterCache,
   checkAdminAuth,
 } from './admin';
 import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
@@ -415,6 +416,9 @@ export default {
       }
       if (path === '/api/admin/daily-cap' && request.method === 'GET') {
         return adminDailyCap(request, env);
+      }
+      if (path === '/api/admin/share/poster-cleanup' && request.method === 'POST') {
+        return adminClearPosterCache(request, env);
       }
       // ─── PR5 share endpoints ───────────────────────────────────
       if (path === '/api/share/create' && request.method === 'POST') {

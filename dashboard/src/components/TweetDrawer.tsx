@@ -53,6 +53,13 @@ export function TweetDrawer() {
   const user = useAuthStore((s) => s.user);
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
+  // PM 2026-05-22 反馈:换账号点同一 feed 分享时不应复用上一账号的 token
+  // (token 跟 from_uid 绑定, 海报 footer 含分享人 name + avatar + token QR,
+  // user2 拿 user1 token 等于把 user1 信息分发出去)。监听 user.id 变化清 cache
+  useEffect(() => {
+    setShareCache({});
+  }, [user?.id]);
+
   const onClickShare = () => {
     if (!user) {
       // 未登录 → 弹登录 modal，登录成功后 retry 自动打开 ShareDialog

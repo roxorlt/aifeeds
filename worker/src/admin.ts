@@ -286,6 +286,34 @@ export async function adminDailyCap(request: Request, env: Env): Promise<Respons
   });
 }
 
+// ─── POST /api/admin/share/poster-cleanup ───
+// PR2 v2 (2026-05-22): 清掉 R2 里所有历史海报 PNG cache。
+// 当前 worker 已不再读写 share/poster/* (改成 worker per-request 渲染 +
+// Cache-Control 1 小时), 但之前 1 年 immutable 写入的 PNG 仍占 R2 空间。
+// 部署后调一次清空; 此后 R2 海报目录始终空。
+//
+// curl -u admin:pass -X POST https://staging-api.ai-feeds.com/api/admin/share/poster-cleanup
+export async function adminClearPosterCache(request: Request, env: Env): Promise<Response> {
+  const guard = await requireAuth(request, env);
+  if (guard) return guard;
+  if (!env.READMES) return jsonRes({ error: 'no R2 bucket bound' }, 500);
+
+  let deleted = 0;
+  let cursor: string | undefined;
+  // 分页 list + 批量 delete (R2 list 单页 limit 1000)
+  for (let i = 0; i < 100; i++) {  // 防爆: 最多 100 页 = 100k objects
+    const list = await env.READMES.list({ prefix: 'share/poster/', limit: 1000, cursor });
+    if (list.objects.length === 0) break;
+    const keys = list.objects.map(o => o.key);
+    await env.READMES.delete(keys);
+    deleted += keys.length;
+    if (!list.truncated) break;
+    cursor = list.truncated ? (list as { cursor?: string }).cursor : undefined;
+    if (!cursor) break;
+  }
+  return jsonRes({ deleted, prefix: 'share/poster/' });
+}
+
 // ─── /admin/tools → 运维工具 HTML ───
 export async function serveAdminToolsHtml(request: Request, env: Env): Promise<Response> {
   const guard = await requireAuth(request, env);

@@ -10,6 +10,16 @@ import { useEffect, useRef, useState } from "react";
 import { createShare, type CreateShareResponse } from "../lib/share";
 import { toast } from "../lib/toast";
 
+// PM 2026-05-22 反馈: 改完海报代码后浏览器拿到的还是老 PNG cache
+// (老 worker 给的 max-age=31536000 永久缓存). 用 ?v= bust 浏览器 cache —
+// 海报渲染代码 / 字段任何变化都 bump 这个版本号, URL 变 → 浏览器视为新资源
+const POSTER_CLIENT_VERSION = "v2-2026-05-22-pr2";
+
+function withPosterVersion(url: string): string {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}v=${POSTER_CLIENT_VERSION}`;
+}
+
 interface Props {
   open: boolean;
   itemId: string;
@@ -86,7 +96,7 @@ export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose
     if (!cachedShare || saving) return;
     setSaving(true);
     try {
-      const res = await fetch(cachedShare.poster_url);
+      const res = await fetch(withPosterVersion(cachedShare.poster_url));
       if (!res.ok) throw new Error(`fetch ${res.status}`);
       const blob = await res.blob();
       const filename = `ai-feeds-${cachedShare.token}.png`;
@@ -150,7 +160,7 @@ export function ShareDialog({ open, itemId, cachedShare, onShareCreated, onClose
           {stage === "creating" && <Skeleton hint="正在生成短链…" />}
           {stage === "ready" && cachedShare && (
             // key 用 token，token 变了 <img> 重挂载，避免 React 复用旧 src 的过渡帧
-            <PosterPreview key={cachedShare.token} src={cachedShare.poster_url} />
+            <PosterPreview key={cachedShare.token} src={withPosterVersion(cachedShare.poster_url)} />
           )}
           {stage === "error" && (
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
