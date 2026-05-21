@@ -13,6 +13,7 @@ import { useAuthStore } from "../lib/authStore";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
 import { QuotedTweet } from "./QuotedTweet";
+import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
 import {
   IconEye,
   IconHeart,
@@ -732,16 +733,34 @@ export function TweetCard({
             </div>
           )}
 
-          {/* Body */}
-          <div
-            ref={bodyRef}
-            className={cn(
-              "mt-1 text-[15px] leading-[1.45] text-neutral-900 break-words whitespace-pre-wrap",
-              !expanded && "line-clamp-4",
-            )}
-          >
-            {renderRichText(expanded ? displayText : smartTruncate(displayText, 280))}
-          </div>
+          {/* Body — PR4: 主推 content 是单纯 t.co 短链时,走 link card 替换。
+              retweet 翻转时取被转推者的 retweet_of.content_resolved_url;
+              否则 (原创 / quote 主推) 取 L1 extra.content_resolved_url */}
+          {(() => {
+            const sourceContent = isRetweet && retweetOf?.content ? retweetOf.content : item.content;
+            const sourceResolvedUrl = isRetweet && retweetOf
+              ? retweetOf.content_resolved_url
+              : extra.content_resolved_url;
+            if (isTcoOnly(sourceContent) && sourceResolvedUrl) {
+              return (
+                <TcoResolvedLinkCard
+                  content={sourceContent}
+                  resolvedUrl={sourceResolvedUrl}
+                />
+              );
+            }
+            return (
+              <div
+                ref={bodyRef}
+                className={cn(
+                  "mt-1 text-[15px] leading-[1.45] text-neutral-900 break-words whitespace-pre-wrap",
+                  !expanded && "line-clamp-4",
+                )}
+              >
+                {renderRichText(expanded ? displayText : smartTruncate(displayText, 280))}
+              </div>
+            );
+          })()}
 
           {/* "展开"/"收起" inline right after body (Twitter-style blue link) */}
           {canExpand && (

@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { VerifiedBadge, IconShare } from "./icons";
+import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
 
 export function QuoteSnapshotModal() {
   const quote = useQuoteSnapshotStore((s) => s.quote);
@@ -153,11 +154,18 @@ export function QuoteSnapshotModal() {
             )}
           </div>
 
-          {/* Content */}
-          {displayText && (
-            <div className="mt-3 whitespace-pre-wrap break-words text-[15px] leading-[1.6] text-neutral-800">
-              {displayText}
-            </div>
+          {/* Content — PR4: t.co only + 有 resolved_url 时走 link card 替换 */}
+          {isTcoOnly(quote.content) && quote.content_resolved_url ? (
+            <TcoResolvedLinkCard
+              content={quote.content}
+              resolvedUrl={quote.content_resolved_url}
+            />
+          ) : (
+            displayText && (
+              <div className="mt-3 whitespace-pre-wrap break-words text-[15px] leading-[1.6] text-neutral-800">
+                {displayText}
+              </div>
+            )
           )}
 
           {/* Media grid — 简化版,每张占满宽度 */}

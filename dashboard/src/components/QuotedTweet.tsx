@@ -3,6 +3,7 @@ import type { QuoteOf } from "../types";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { VerifiedBadge } from "./icons";
+import { TcoResolvedLinkCard, isTcoOnly } from "./TcoResolvedLinkCard";
 
 interface Props {
   quote: QuoteOf;
@@ -80,13 +81,23 @@ export function QuotedTweet({ quote, depth = 0 }: Props) {
           )}
         </div>
 
-        {/* Body — translated if available, else original */}
-        {(quote.content_translated || quote.content) && (
-          <div className={isNested
-            ? "mt-1 line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-[1.45] text-neutral-700"
-            : "mt-1 line-clamp-4 whitespace-pre-wrap break-words text-[14px] leading-[1.45] text-neutral-800"}>
-            {quote.content_translated || quote.content}
-          </div>
+        {/* Body — translated if available, else original;
+            PR4: 如果原 content 是单纯 t.co 短链且 BE resolve 出真实 URL,
+            走 link card 替换纯文本(译文也一并跳过,因为翻译 URL 没意义) */}
+        {isTcoOnly(quote.content) && quote.content_resolved_url ? (
+          <TcoResolvedLinkCard
+            content={quote.content}
+            resolvedUrl={quote.content_resolved_url}
+            compact={isNested}
+          />
+        ) : (
+          (quote.content_translated || quote.content) && (
+            <div className={isNested
+              ? "mt-1 line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-[1.45] text-neutral-700"
+              : "mt-1 line-clamp-4 whitespace-pre-wrap break-words text-[14px] leading-[1.45] text-neutral-800"}>
+              {quote.content_translated || quote.content}
+            </div>
+          )
         )}
 
         {/* 嵌套第二层 quote — 数据有就递归画;只有 id 没对象画 placeholder */}

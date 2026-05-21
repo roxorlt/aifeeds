@@ -69,6 +69,12 @@ export interface QuoteOf {
   // 是否返 inline)。FE 渲染最多到 depth=2,不再继续递归。
   quote_of_id?: string | null;
   quote_of?: QuoteOf | null;
+  // BE PR #99 (2026-05-21): content 是单纯 t.co 短链时,BE 会 resolve 真实 URL
+  // 写到 content_resolved_url。失败时(t.co 已删)写 content_resolve_failed_at
+  // 而非 url(mutex,两者不会同时有)。FE 看到 resolved_url 时把 t.co 替换成
+  // 可识别 link card(几乎全是 x.com/i/article/... X Articles)
+  content_resolved_url?: string | null;
+  content_resolve_failed_at?: string | null;
 }
 
 export interface LinkCard {
@@ -104,6 +110,11 @@ export interface ItemExtra {
   hashtags?: string[];
   urls?: Array<{ display_url?: string; expanded_url?: string; url?: string }>;
   ocr_text?: string;
+  // BE PR #99 (2026-05-21): L1 主推 content 是单纯 t.co 短链时的 resolve 结果。
+  // L2/L3 字段在 QuoteOf 自己上(quote_of/reply_of/retweet_of.content_resolved_url)。
+  // 6 个 path 都遵守同一语义(mutex: 要么 url 要么 failed_at)
+  content_resolved_url?: string | null;
+  content_resolve_failed_at?: string | null;
 
   // GitHub-source specific fields (source_type = 'github')
   ai_category?: "agent" | "model" | "tool" | "infra" | "app" | "tutorial" | "other" | null;
