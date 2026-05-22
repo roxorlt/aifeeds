@@ -360,7 +360,7 @@ export default {
         return handleStats(request, env);
       }
       if (path === '/api/enrich/run' && request.method === 'POST') {
-        return handleEnrichRun(request, env);
+        return handleEnrichRun(request, env, ctx);
       }
       if (path === '/api/longform/pending' && request.method === 'GET') {
         return handleLongformPending(request, env);
@@ -3108,7 +3108,7 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
 //   &lookback_days=14       (refresh-metrics only)
 //   &batch_size=5           (fill-translations only)
 
-async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
+async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const auth = request.headers.get('Authorization');
   if (!auth || auth !== `Bearer ${env.INGEST_TOKEN}`) {
     return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
@@ -3358,6 +3358,27 @@ async function handleEnrichRun(request: Request, env: Env): Promise<Response> {
       100,
     );
     const result = await runBackfillXArticleTranslations(env, limit, rateSleepMs);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-x-article-bodies') {
+    // PR6 (2026-05-22):扫 x_article 已抓但 body 缺的 item,X GraphQL 拿 plain_text。
+    // 走 cookie 鉴权 + 5-10s jitter + 日 cap。Cookie 失效 / cap 撞顶 → 中断返
+    // stopped_reason,等下次 cron 续跑(KV 隔天自动重置 count)。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      50,
+    );
+    const result = await runBackfillXArticleBodies(
+      {
+        DB: env.DB,
+        DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
+        AUTH_KV: env.AUTH_KV,
+        PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS,
+        X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP,
+      },
+      limit,
+      ctx,
+    );
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-ph-comments-translation') {
