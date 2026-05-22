@@ -26,12 +26,23 @@ import {
   runBackfillTcoResolutions,
   runBackfillXArticles,
   runBackfillXArticleTranslations,
+  runBackfillXArticleBodies,
   resolveTcoLinksForXTweet,
   fetchXArticlesForXTweet,
+  fetchXArticleBodiesForXTweet,
   translateXArticlesForXTweet,
   backfillMediaForXTweet,
   backfillLinkCardForXTweet,
 } from './enrich';
+import {
+  X_COOKIE_KV_KEY,
+  getXCookie,
+  saveXCookie,
+  extractCookieValue,
+  getDailyCount,
+  getDailyCap,
+} from './x-graphql';
+import type { XCookieBlob } from './x-graphql';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
 import {
@@ -130,6 +141,9 @@ export interface Env {
   PUSHDEER_ADMIN_KEYS?: string;         // 逗号分隔多个 key
   // 运营看板内容池：'true' 开启 PushDeer 推送，否则只跑 cron 不推（首次上线先观察 3 天）
   OPS_PUSHDEER_ENABLED?: string;
+  // X article body 抓取日总量 cap (PR6, 2026-05-22)。默认 50/天,可调
+  // 走 X GraphQL TweetResultByRestId 需 cookie + 风控,KV 计数 UTC 0 重置
+  X_GRAPHQL_DAILY_CAP?: string;
   // PR2 配置
   SMS_DAILY_CAP?: string;               // 默认 200，可临时降到 0 = kill switch
   SMS_PROVIDER?: string;                // 'tencent'（默认）/ 'pushdeer'（dev/staging 走 PushDeer 推到 admin）
@@ -957,6 +971,95 @@ export default {
         const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '50', 10), 1), 200);
         const rateSleepMs = Math.max(parseInt(u.searchParams.get('rate_sleep_ms') || '200', 10), 0);
         const result = await runBackfillTcoResolutions(env, limit, rateSleepMs);
+        return jsonResponse(result, 200, request, env);
+      }
+      // X cookie 状态查询 (GET):返 updated_at / invalid_at / daily_used / daily_cap
+      // X cookie 更新 (POST):提交新 cookie blob,清 invalid_at。鉴权同其他 admin。
+      // 2026-05-22 PR6: 配合 X article body 抓取(GraphQL TweetResultByRestId 需 cookie)
+      if (path === '/api/admin/x-cookie' && request.method === 'GET') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        if (!env.AUTH_KV) {
+          return jsonResponse({ error: 'AUTH_KV binding missing' }, 500, request, env);
+        }
+        const cookie = await getXCookie({ AUTH_KV: env.AUTH_KV });
+        const dailyUsed = await getDailyCount({ AUTH_KV: env.AUTH_KV });
+        const dailyCap = getDailyCap({ AUTH_KV: env.AUTH_KV, X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP });
+        return jsonResponse({
+          configured: !!cookie,
+          updated_at: cookie?.updated_at || null,
+          invalid_at: cookie?.invalid_at || null,
+          invalid_reason: cookie?.invalid_reason || null,
+          auth_token_prefix: cookie?.auth_token ? cookie.auth_token.slice(0, 8) + '...' : null,
+          daily_used: dailyUsed,
+          daily_cap: dailyCap,
+        }, 200, request, env);
+      }
+      if (path === '/api/admin/x-cookie' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        if (!env.AUTH_KV) {
+          return jsonResponse({ error: 'AUTH_KV binding missing' }, 500, request, env);
+        }
+        const body = await request.json<{ cookie_string?: string }>().catch(() => ({ cookie_string: undefined }));
+        const cookieStr = (body.cookie_string || '').trim();
+        if (!cookieStr) {
+          return jsonResponse({ error: 'cookie_string required' }, 400, request, env);
+        }
+        const ct0 = extractCookieValue(cookieStr, 'ct0');
+        const authToken = extractCookieValue(cookieStr, 'auth_token');
+        if (!ct0 || !authToken) {
+          return jsonResponse({
+            error: 'cookie_string must contain ct0 and auth_token',
+            extracted: { ct0: !!ct0, auth_token: !!authToken },
+          }, 400, request, env);
+        }
+        const blob: XCookieBlob = {
+          cookie_string: cookieStr,
+          ct0,
+          auth_token: authToken,
+          updated_at: new Date().toISOString(),
+        };
+        await saveXCookie({ AUTH_KV: env.AUTH_KV }, blob);
+        return jsonResponse({
+          ok: true,
+          updated_at: blob.updated_at,
+          auth_token_prefix: authToken.slice(0, 8) + '...',
+          message: 'Cookie updated. invalid_at flag cleared.',
+        }, 200, request, env);
+      }
+      // X article body 抓取 backfill (2026-05-22 PR6)
+      // 走 X GraphQL TweetResultByRestId 拿 plain_text 字段(login-gated)。
+      // 风控:单 worker request 内 5-10s jitter,日 cap(默认 50,可配)。
+      // ?limit=N (默认 30,上限 100 — 单次 worker request 上限,避免 worker timeout)
+      if (path === '/api/admin/backfill-x-article-bodies-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const u = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '30', 10), 1), 100);
+        const result = await runBackfillXArticleBodies(
+          {
+            DB: env.DB,
+            DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
+            AUTH_KV: env.AUTH_KV,
+            PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS,
+            X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP,
+          },
+          limit,
+          ctx,
+        );
         return jsonResponse(result, 200, request, env);
       }
       // D2: 一次性清掉历史脏数据 — 老 chrome scraper 抓时把 quoted preview

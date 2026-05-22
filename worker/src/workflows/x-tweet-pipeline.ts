@@ -36,6 +36,7 @@ import {
   backfillNestedXQuoteForXTweet,
   resolveTcoLinksForXTweet,
   fetchXArticlesForXTweet,
+  fetchXArticleBodiesForXTweet,
   translateXArticlesForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
@@ -176,9 +177,19 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
       safeStep('fetch-x-articles', itemId, () => fetchXArticlesForXTweet(this.env, itemId)),
     );
 
-    // ─── Step 1.7: translate X article fields (PR5 follow-up) ────
+    // ─── Step 1.65: fetch X article body (PR6, 2026-05-22) ──────
+    // 走 X GraphQL TweetResultByRestId 拉 article.plain_text(login-gated)。
+    // 风控:cookie 失效/rate limit/日 cap 撞顶 → graceful return,不阻塞 1.7 翻译。
+    // 没 cookie / KV 未配 → 静默 skip,workflow 继续。
+    // 6 path 都跑(日 cap 50 vs 日新 ~10-30 article tweet × ~1-2 path 平均 = 余量大)。
+    await step.do('fetch-x-article-bodies', RETRY, () =>
+      safeStep('fetch-x-article-bodies', itemId, () => fetchXArticleBodiesForXTweet(this.env, itemId)),
+    );
+
+    // ─── Step 1.7: translate X article fields (PR5/6 follow-up) ────
     // 2026-05-21:1.6 抓到的 article title / excerpt 大多英文,翻成中文供 FE
-    // Rich card 显示一致体验。单 DeepSeek call 处理 item 内所有 path 的 article 翻译。
+    // Rich card 显示一致体验。
+    // 2026-05-22 PR6:加翻 body 字段。单 task 单 DeepSeek call,max_tokens 8000。
     // 失败 graceful:写 translate_failed_at,FE 渲染时降级到原文。
     await step.do('translate-x-articles', RETRY, () =>
       safeStep('translate-x-articles', itemId, () => translateXArticlesForXTweet(this.env, itemId)),
