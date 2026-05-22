@@ -289,11 +289,13 @@ function TweetMediaTile({
         }}
         className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
       >
+        {/* PM 2026-05-22: 之前 aspect-[16/9] + object-cover 高图被裁切.
+            改成宽度撑满 + 高度按图原比例自适应 (height: auto), 不裁不变形 */}
         <img
           src={proxyImg(first.url, 400)}
           alt={first.alt || ""}
           loading="lazy"
-          className="aspect-[16/9] w-full object-cover transition-transform hover:scale-[1.02]"
+          className="w-full transition-transform hover:scale-[1.02]"
           onError={() => setFailed(true)}
         />
         {mediaCount > 1 && (

@@ -253,6 +253,37 @@ function renderMediaBlock(
     <image href="${dataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>${overlay}`;
 }
 
+// PM 2026-05-22 v2: X 推文 media 用宽度适配版本 — 不 cap mediaH, 宽度撑满 +
+// 高度按真实 ar 展开, preserveAspectRatio meet 不裁切 (跟 FE TweetCard
+// "w-full + height auto" 视觉一致). GH/PH 仍走原 renderMediaBlock cap 520
+function renderMediaBlockFull(
+  dataUri: string | undefined,
+  aspectRatio: number | undefined,
+  isVideo: boolean | undefined,
+  innerX: number,
+  innerW: number,
+  cy: number,
+  clipPrefix: string,
+): string {
+  const ar = aspectRatio && aspectRatio > 0 ? aspectRatio : 16 / 9;
+  const mediaW = innerW;
+  const mediaH = innerW / ar;
+  const mediaX = innerX;
+  const mediaY = cy;
+  const clipId = `${clipPrefix}-clip-${Math.random().toString(36).slice(2, 8)}`;
+  const overlay = isVideo ? playOverlay(mediaX + mediaW / 2, mediaY + mediaH / 2) : '';
+  if (!dataUri && isVideo) {
+    return `
+      <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#1a1d24" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+      ${overlay}`;
+  }
+  if (!dataUri) return '';
+  return `
+    <defs><clipPath id="${clipId}"><rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28"/></clipPath></defs>
+    <rect x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" rx="28" fill="#fbfbfc" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>
+    <image href="${dataUri}" x="${mediaX}" y="${mediaY}" width="${mediaW}" height="${mediaH}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid meet"/>${overlay}`;
+}
+
 // PR2 (2026-05-22): X 推文发布时间格式 MM-DD HH:MM (BJT 视角)
 // 跟 timeAgo "几小时前" 不同, 海报固定布局, 用绝对时间避免截断点点点
 function formatXTime(iso: string | undefined | null): string {
@@ -696,22 +727,16 @@ function renderXContent(opts: {
   let cy = opts.y + padTop;
   let svg = '';
 
-  // PR2 v2: retweet 顶部 indicator — "♻ 由 @retweeter 转发" + 小头像
+  // PR2 v2 (2026-05-22): retweet 顶部 indicator — 对齐抽屉 (icon + name 已转帖)
+  // FE TweetCard line 657-662: 没头像 + retweet icon + "{name|@handle} 已转帖"
   if (opts.retweetIndicator?.retweeterHandle) {
     const rt = opts.retweetIndicator;
-    const rtAvSize = 36;
-    const rtAvX = innerX;
-    const rtAvY = cy;
-    svg += renderAvatar(
-      rt.retweeterAvatarDataUri,
-      rtAvX, rtAvY, rtAvSize,
-      rt.retweeterHandle || '',
-      (rt.retweeterName || rt.retweeterHandle || '?').charAt(0),
-      `rt-${Math.random().toString(36).slice(2, 8)}`,
-    );
-    const labelX = rtAvX + rtAvSize + 12;
-    svg += `<text x="${labelX}" y="${cy + 26}" font-family='${FONT}' font-size="26" fill="${C.muted}" font-weight="500">${esc(truncate(`♻ 由 @${rt.retweeterHandle} 转发`, 32))}</text>`;
-    cy += rtAvSize + 22;
+    const rtIconSize = 28;
+    svg += fillIcon(ICON.retweet, innerX, cy + 6, rtIconSize, C.muted);
+    const labelX = innerX + rtIconSize + 12;
+    const rtDisplayName = rt.retweeterName || `@${rt.retweeterHandle}`;
+    svg += `<text x="${labelX}" y="${cy + 28}" font-family='${FONT}' font-size="26" fill="${C.muted}" font-weight="500">${esc(truncate(`${rtDisplayName} 已转帖`, 36))}</text>`;
+    cy += 44;
   }
 
   // PR2 v2 author row — 真实头像 + name + verified badge + @handle + 时间
@@ -728,11 +753,12 @@ function renderXContent(opts: {
   // name + verified
   const nameTruncated = truncate(opts.authorName || '', 14);
   const nameSize = 52;
-  // 估算 name 宽度,确定 verified 位置
-  const nameWidth = estimateTextWidth(nameTruncated, nameSize, 1.2);
+  // PM 2026-05-22: verified 之前 boost 1.2 + offset 10 让 badge 离昵称太远.
+  // letter-spacing -1.5 实际宽度比 estimate 小, boost 0.82 + offset 4 更贴
+  const nameWidth = estimateTextWidth(nameTruncated, nameSize, 0.82);
   svg += `<text x="${nameX}" y="${cy + 50}" font-family='${FONT}' font-size="${nameSize}" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(nameTruncated)}</text>`;
   if (opts.authorIsVerified) {
-    svg += renderVerifiedBadge(nameX + nameWidth + 10, cy + 50 - 36, 36);
+    svg += renderVerifiedBadge(nameX + nameWidth + 4, cy + 50 - 36, 36);
   }
   // 第二行: @handle · 时间
   const handleStr = opts.authorHandle ? `@${opts.authorHandle}` : '';
@@ -865,12 +891,12 @@ function renderXContent(opts: {
   }
 
   // 主推媒体 (X 推文图/视频缩略图)
-  // PM 2026-05-22: 撑满 card 宽度(等同 X app 流内媒体不缩进 padX), 视觉更冲击
-  // outerX = opts.x (card 左边界), outerW = opts.w (card 完整宽度) 替代 innerX/innerW
+  // PM 2026-05-22 v2: 撑满 card 宽度 + 宽度适配高度不裁切 — 之前 max-h cap 520
+  // 让纵向偏长图被 object-cover slice 头尾, 改成完全按 aspect 撑出真实高度
   if (opts.mediaImageDataUri || opts.mediaIsVideo) {
-    const mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, opts.x, opts.w, cy, 'x-media');
+    const mediaSvg = renderMediaBlockFull(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, opts.x, opts.w, cy, 'x-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
-    const mediaH = Math.min(opts.w / ar, 600);
+    const mediaH = opts.w / ar;  // 不再 cap, 按真实 ar 展示完整图
     svg += mediaSvg;
     cy = cy + mediaH + 26;
   }

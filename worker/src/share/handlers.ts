@@ -625,6 +625,8 @@ async function pickPosterMedia(
     }
   }
 
+  // PR2 v2 (2026-05-22): X 推文媒体 = 用户上传截图, 跳过 small/square icon/QR 门控
+  const isUserMedia = sourceType === 'x_list';
   for (let i = 0; i < Math.min(candidates.length, 8); i++) {
     const c = candidates[i];
     // 已有 known dims：先做 aspect 门控避免无效 fetch
@@ -635,7 +637,7 @@ async function pickPosterMedia(
         continue;
       }
     }
-    const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height, c.isVideo);
+    const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height, c.isVideo, isUserMedia);
     if (result) return { ...result, isVideo: c.isVideo };
   }
   // fallback：GH readme 有 <video> 但所有 <img> 都被弃 → 灰底 + play 占位
@@ -656,6 +658,7 @@ async function tryFetchPosterImage(
   knownW?: number,
   knownH?: number,
   isVideoPoster?: boolean,
+  isUserMedia?: boolean,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   // /r/* 资源在 R2：直接读 R2 binding，绕过 worker self-fetch（prod 上 self-fetch
   // 自己暴露的 /r/ 路由会再次进 worker，cold path 时延 + 偶发 504）
@@ -674,7 +677,7 @@ async function tryFetchPosterImage(
           return undefined;
         }
         const ct = obj.httpMetadata?.contentType || 'image/png';
-        return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster);
+        return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster, isUserMedia);
       } catch (e) {
         console.error('[share-poster] R2 read failed:', key, e);
         return undefined;
@@ -715,7 +718,7 @@ async function tryFetchPosterImage(
     }
     const ct = res.headers.get('content-type') || 'image/png';
     const buf = await res.arrayBuffer();
-    return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster);
+    return await maybeConvertAndEncode(buf, ct, rawUrl, knownW, knownH, isVideoPoster, isUserMedia);
   } catch (e) {
     console.error('[share-poster] media fetch failed:', rawUrl, e);
     return undefined;
@@ -730,6 +733,7 @@ async function maybeConvertAndEncode(
   knownW?: number,
   knownH?: number,
   isVideoPoster?: boolean,
+  isUserMedia?: boolean,
 ): Promise<{ dataUri: string; aspectRatio?: number } | undefined> {
   // 优先信 magic bytes，不信 R2 metadata / response header（GH user-attachments
   // 跟 R2 mirror 经常 ct 跟实际 bytes 不符 — .png 文件里塞 JPEG 之类的）
@@ -737,7 +741,7 @@ async function maybeConvertAndEncode(
   const isSvg = realType === 'svg' || (!realType && (contentType.includes('svg') || /\.svg(\?|$)/i.test(origUrl)));
   if (!isSvg) {
     const ct = realType ? mimeFor(realType) : contentType;
-    return validateAndEncode(buf, ct, origUrl, knownW, knownH, isVideoPoster);
+    return validateAndEncode(buf, ct, origUrl, knownW, knownH, isVideoPoster, isUserMedia);
   }
   try {
     const svgText = new TextDecoder().decode(new Uint8Array(buf));
@@ -774,6 +778,7 @@ function validateAndEncode(
   knownW?: number,
   knownH?: number,
   isVideoPoster?: boolean,
+  isUserMedia?: boolean,  // PR2 v2 (2026-05-22): X 推文用户媒体跳过 icon/QR small-square 门控
 ): { dataUri: string; aspectRatio?: number } | undefined {
   if (buf.byteLength > 4 * 1024 * 1024) {
     console.log(`[share-poster] reject ${origUrl}: too big ${buf.byteLength}`);
@@ -795,13 +800,16 @@ function validateAndEncode(
     }
     if (!isVideoPoster) {
       // 全局最小尺寸：max dim < 600 → 弃（icon、button、shields、wechat 群 QR 都偏小）
+      // PM 2026-05-22: isUserMedia (X 推文用户上传截图) 跳过该 small/square 门控,
+      // 之前 977x749 也被误判为 icon/QR (PM 反馈 https://staging.ai-feeds.com/
+      // t/2057460544643404125 主推图没进海报即此 case)
       const maxDim = Math.max(dim.width, dim.height);
-      if (maxDim < 600) {
+      if (maxDim < 600 && !isUserMedia) {
         console.log(`[share-poster] reject ${origUrl}: too small ${dim.width}x${dim.height}`);
         return undefined;
       }
       // 中等尺寸方图额外门控：> 600 但 < 1000 + aspect ~1 也按 icon/QR 处理
-      if (maxDim < 1000 && ar > 0.7 && ar < 1.4) {
+      if (!isUserMedia && maxDim < 1000 && ar > 0.7 && ar < 1.4) {
         console.log(`[share-poster] reject ${origUrl}: small square ${dim.width}x${dim.height}`);
         return undefined;
       }
