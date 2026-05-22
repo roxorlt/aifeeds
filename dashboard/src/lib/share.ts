@@ -2,17 +2,11 @@
 // 设计：docs/plans/2026-05-04-pr5-share-implementation.md
 
 import { getDeviceId } from './device';
-
-const API_BASE = (() => {
-  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE) {
-    return import.meta.env.VITE_API_BASE;
-  }
-  if (typeof window !== 'undefined') {
-    const host = window.location.hostname;
-    if (host === 'localhost' || host === '127.0.0.1') return '';
-  }
-  return 'https://api.ai-feeds.com';
-})();
+// PM 2026-05-22 反馈 (Network 截图诊断): staging dashboard share API 调
+// 的是 prod api.ai-feeds.com 而非 staging-api,根因 — 本文件之前自己
+// 定义 API_BASE 漏了 staging.ai-feeds.com hostname check (api.ts 有,
+// share.ts 没同步)。统一 import api.ts 的 API_BASE 避免双源维护
+import { API_BASE } from '../api';
 
 export interface CreateShareResponse {
   token: string;
