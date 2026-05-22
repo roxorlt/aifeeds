@@ -96,7 +96,30 @@ function esc(s: string): string {
 // 避免 "Andrej Karpathy" 在 P/a 之间硬切。中文字符仍按单字断行。
 // 单 token 超 maxCharsPerLine（极长 URL）才退化到字符级硬切兜底。
 function wrapText(text: string, maxCharsPerLine: number, maxLines: number): string[] {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
+  // PM 2026-05-22: 保留 X 推文 \n 段落格式 — 之前 text.replace(/\s+/g,' ')
+  // 把所有 whitespace (含换行) collapse 成空格, 多段落变一段, 海报丢段落格式
+  const paragraphs = text.split(/\n+/).map(p => p.replace(/[ \t]+/g, ' ').trim()).filter(Boolean);
+  const allLines: string[] = [];
+  for (let pi = 0; pi < paragraphs.length; pi++) {
+    if (allLines.length >= maxLines) break;
+    const pLines = wrapSingleParagraph(paragraphs[pi], maxCharsPerLine, maxLines - allLines.length);
+    allLines.push(...pLines);
+    // 段落之间空行 (除非最后一段 / 行数已满)
+    if (pi < paragraphs.length - 1 && allLines.length < maxLines) {
+      allLines.push('');
+    }
+  }
+  // 末尾省略号 — 若原文段落多于已渲染 (任一段被截 / 整段被丢)
+  const renderedChars = allLines.join('').length;
+  const totalChars = paragraphs.join('').length;
+  if (renderedChars < totalChars && allLines.length === maxLines) {
+    const last = allLines[maxLines - 1];
+    allLines[maxLines - 1] = last.slice(0, Math.max(0, last.length - 1)) + '…';
+  }
+  return allLines.slice(0, maxLines);
+}
+
+function wrapSingleParagraph(text: string, maxCharsPerLine: number, maxLines: number): string[] {
   const charWidth = (ch: string) => (/[一-鿿　-〿]/.test(ch) ? 1 : 0.55);
   const tokenWidth = (s: string) => {
     let w = 0;
@@ -107,7 +130,7 @@ function wrapText(text: string, maxCharsPerLine: number, maxLines: number): stri
   // 切 token：连续 ASCII word-char 是一个 token；其他字符（中文 / 空格 / 标点）单独 token
   const tokens: string[] = [];
   let buf = '';
-  for (const ch of cleaned) {
+  for (const ch of text) {
     if (/[A-Za-z0-9._\-/'’"]/.test(ch)) {
       buf += ch;
     } else {
@@ -155,13 +178,6 @@ function wrapText(text: string, maxCharsPerLine: number, maxLines: number): stri
     weight += tw;
   }
   if (current && lines.length < maxLines) lines.push(current.replace(/\s+$/, ''));
-
-  // 若内容还有剩余 → 尾行加省略号
-  const used = lines.join('').length;
-  if (used < cleaned.length && lines.length === maxLines) {
-    const last = lines[maxLines - 1];
-    lines[maxLines - 1] = last.slice(0, Math.max(0, last.length - 1)) + '…';
-  }
   return lines;
 }
 
@@ -414,17 +430,18 @@ function renderLinkCardEmbed(opts: {
   return { svg: frame + svg, height: totalH };
 }
 
-// PR2: self-link 判断 (link_card URL 指向本推文自己, 没必要展示)
-function isSelfLinkCardWorker(
+// PR2: link card URL 指向 X 推文时过滤掉(self-preview 或 quote 重复)。
+// 原 self-link 只过滤本推文自身, PM 2026-05-22 反馈含 X 推文的 link card
+// 跟主推 body / quote_of 信息重复, 海报展示无意义 — 扩展为所有
+// x.com / twitter.com /<handle>/status/<id> URL 都过滤
+function isXTweetLinkCard(
   cardUrl: string | undefined | null,
-  sourceId: string | undefined | null,
 ): boolean {
-  if (!cardUrl || !sourceId) return false;
+  if (!cardUrl) return false;
   try {
     const u = new URL(cardUrl);
     if (u.hostname !== 'x.com' && u.hostname !== 'twitter.com' && u.hostname !== 'www.x.com') return false;
-    const m = u.pathname.match(/^\/[^/]+\/status\/(\d+)/);
-    return m ? m[1] === sourceId : false;
+    return /^\/[^/]+\/status\/\d+/.test(u.pathname);
   } catch {
     return false;
   }
@@ -724,8 +741,9 @@ function renderXContent(opts: {
   svg += `<text x="${nameX}" y="${cy + 50 + 50}" font-family='${FONT}' font-size="32" fill="${C.muted}">${esc(truncate(meta2, 30))}</text>`;
   cy += avatarSize + 30;
 
-  // body
-  const lines = wrapText(opts.body, 24, 8);
+  // body — PM 2026-05-22 反馈正文超右边距 (24 字含 emoji/ASCII 实测仍溢出),
+  // 改 20 字保守一档; wrapText 现已支持 \n 段落分隔, 不再 collapse 推文换行
+  const lines = wrapText(opts.body, 20, 10);
   const bodySize = 38;
   const bodyLine = bodySize * 1.52;
   svg += lines
@@ -847,10 +865,12 @@ function renderXContent(opts: {
   }
 
   // 主推媒体 (X 推文图/视频缩略图)
+  // PM 2026-05-22: 撑满 card 宽度(等同 X app 流内媒体不缩进 padX), 视觉更冲击
+  // outerX = opts.x (card 左边界), outerW = opts.w (card 完整宽度) 替代 innerX/innerW
   if (opts.mediaImageDataUri || opts.mediaIsVideo) {
-    const mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, innerX, innerW, cy, 'x-media');
+    const mediaSvg = renderMediaBlock(opts.mediaImageDataUri, opts.mediaAspectRatio, opts.mediaIsVideo, opts.x, opts.w, cy, 'x-media');
     const ar = opts.mediaAspectRatio && opts.mediaAspectRatio > 0 ? opts.mediaAspectRatio : 16 / 9;
-    const mediaH = Math.min(innerW / ar, 520);
+    const mediaH = Math.min(opts.w / ar, 600);
     svg += mediaSvg;
     cy = cy + mediaH + 26;
   }
@@ -1923,7 +1943,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     // link_card: 取 extra.link_card, 过滤 self-link
     const lc = (xExtra.link_card as Record<string, unknown> | null) || null;
     const sourceId = item.source_id;
-    const isSelfLc = lc ? isSelfLinkCardWorker(lc.url as string | undefined, sourceId) : false;
+    const isSelfLc = lc ? isXTweetLinkCard(lc.url as string | undefined) : false;
+    void sourceId;
     // 嵌套 quote 内的 L2 inner quote (depth=2 mini 卡)
     const innerQuoteOfQuote = nestedQuote
       ? (nestedQuote.quote_of as Record<string, unknown> | null) || null
