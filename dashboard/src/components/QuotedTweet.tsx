@@ -12,11 +12,14 @@ interface Props {
    *  depth=0 默认主调用,depth=1 内嵌第二层,>=2 不再渲染避免无限套娃。
    *  内嵌层视觉降级:更小 padding + 不显 cover image + placeholder 兜底 */
   depth?: number;
+  /** PR2 v3 (2026-05-25): 海报渲染模式 — 隐藏 @handle / 时间 / "·",
+   *  跟主推 TweetCard.posterMode 行为对齐 */
+  posterMode?: boolean;
 }
 
 const MAX_QUOTE_DEPTH = 2;
 
-export function QuotedTweet({ quote, depth = 0 }: Props) {
+export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
   const openSnapshot = useQuoteSnapshotStore((s) => s.open);
@@ -67,12 +70,12 @@ export function QuotedTweet({ quote, depth = 0 }: Props) {
             {author}
           </span>
           {Boolean(quote.is_verified) && (
-            <VerifiedBadge className="h-[14px] w-[14px] shrink-0 fill-sky-500" />
+            <VerifiedBadge className={`h-[14px] w-[14px] shrink-0 fill-sky-500 ${posterMode ? "ml-1.5" : ""}`} />
           )}
-          {handle && (
+          {!posterMode && handle && (
             <span className="truncate text-neutral-500">@{handle}</span>
           )}
-          {quote.published_at && (
+          {!posterMode && quote.published_at && (
             <>
               <span className="text-neutral-400">·</span>
               <span className="shrink-0 text-neutral-500">
@@ -105,7 +108,7 @@ export function QuotedTweet({ quote, depth = 0 }: Props) {
 
         {/* 嵌套第二层 quote — 数据有就递归画;只有 id 没对象画 placeholder */}
         {canRecurseInner && innerQuote && (
-          <QuotedTweet quote={innerQuote} depth={depth + 1} />
+          <QuotedTweet quote={innerQuote} depth={depth + 1} posterMode={posterMode} />
         )}
         {canRecurseInner && !innerQuote && innerQuoteId && (
           <div className="mt-2 rounded-md border border-dashed border-neutral-300 px-2 py-1.5 text-[12px] text-neutral-500">

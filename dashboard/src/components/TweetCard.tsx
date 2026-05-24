@@ -696,13 +696,13 @@ export function TweetCard({
               {author}
             </span>
             {isVerified && (
-              <span className={cn("shrink-0 self-center", posterMode && "ml-1")}>
+              <span className={cn("shrink-0 self-center", posterMode && "ml-2.5")}>
                 <VerifiedBadge />
               </span>
             )}
             {!posterMode && handle && <span className="truncate">@{handle}</span>}
-            <span className="shrink-0 text-neutral-400">·</span>
-            <span className="shrink-0">
+            {!posterMode && <span className="shrink-0 text-neutral-400">·</span>}
+            <span className={cn("shrink-0", posterMode && "ml-2")}>
               {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
             </span>
             {item.is_hot === 1 && (
@@ -808,7 +808,7 @@ export function TweetCard({
               line 连接。父推渲染移到 article 顶部见下方 ReplyParentRow 块。 */}
 
           {/* Quoted tweet (nested card) */}
-          {quoteOf && <QuotedTweet quote={quoteOf} />}
+          {quoteOf && <QuotedTweet quote={quoteOf} posterMode={posterMode} />}
 
           {/* Link preview card (URL auto-expanded by X) —
               PM 2026-05-22: 过滤 link_card 指向本推文自己的 self-preview

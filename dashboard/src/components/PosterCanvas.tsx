@@ -144,6 +144,10 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
+  // PM 2026-05-25 反馈:有时 user.avatar_url 是 R2 URL 但加载失败 (CORS / 404),
+  // 当前三元条件 `sharerAvatarUrl ? <img/> : <fallback/>` 不切回 fallback.
+  // 加 state + onError 切到首字母圆 fallback.
+  const [avatarFailed, setAvatarFailed] = useState(false);
 
   const source = SOURCE_LABELS[item.source_type] || {
     label: item.source_type,
@@ -333,36 +337,41 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           </div>
         </div>
 
-        {/* Hero 底部弧形:用 SVG path overlay (quadratic bezier 凹陷) 让 hero
-            下沿跟 worker svg-template 视觉一致 — 中心凹陷 ~36px 弧线 */}
+        {/* Hero 底部弧形:用 SVG path overlay 模拟 worker svg-template 的
+            quadratic bezier 凹陷 ($\cup$ 形 — 中间高两端低,hero 中部"陷"进 body)。
+            PM 2026-05-25 反馈:之前弧线方向反了(中间凸下),改成中间凹上.
+            实现:overlay 占 hero 底部 80px 高,fill body 色,bezier 控制点
+            在 svg 顶部(y=0),弧形从左下 → 顶中 → 右下,fill 多边形是
+            "拱形+底部矩形" → 视觉 hero 底部被切出 $\cup$ 凹陷. */}
         <svg
-          viewBox="0 0 1080 60"
+          viewBox="0 0 1080 80"
           width="1080"
-          height="60"
+          height="80"
           preserveAspectRatio="none"
           style={{
             position: "absolute",
-            bottom: -1,
+            bottom: 0,
             left: 0,
             display: "block",
             pointerEvents: "none",
           }}
         >
-          <path d="M 0 0 Q 540 80 1080 0 L 1080 60 L 0 60 Z" fill="#f8fafc" />
+          <path d="M 0 80 Q 540 0 1080 80 Z" fill="#f8fafc" />
         </svg>
       </div>
 
       {/* BODY: 真实 Card 用 transform scale 放大 — 流内 Card 字号
           按 mobile/PC ~400-700px 宽设计(15px 正文),搬到 1080 海报后
-          相对卡片"看起来小".scale 1.7x → 15px 视觉 ≈ 25.5px.
-          padding 砍到 16px 让内层 layout 宽 ~616px,metrics 4 个 chip 不折行. */}
+          相对卡片"看起来小".scale 1.9 → 15px 视觉 ≈ 28.5px (PM 要求接近翻倍).
+          padding 0 让内层 layout 宽 = 1080/1.9 ≈ 568px,X header (author + ✓ +
+          MM-DD) 和 metrics 4 个 chip 都不折行. */}
       <div
         style={{
-          padding: "24px 16px 20px",
+          padding: "20px 8px 20px",
           backgroundColor: "#f8fafc",
         }}
       >
-        <PosterBody item={item} scale={1.7} />
+        <PosterBody item={item} scale={1.9} />
       </div>
 
       {/* FOOTER: sharer + QR */}
@@ -378,13 +387,15 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
       >
         {/* Sharer 左 */}
         <div style={{ display: "flex", alignItems: "center", gap: 18, flex: 1, minWidth: 0 }}>
-          {sharerAvatarUrl ? (
+          {sharerAvatarUrl && !avatarFailed ? (
             // PM 2026-05-25:之前加 crossOrigin="anonymous" 在 R2 头像
             // 无 ACAO 时会让浏览器拒载;modern-screenshot 内部会处理跨域,
             // 不需要在 <img> 上手动加这个 attr.直接用默认行为兜底.
+            // onError → avatarFailed=true 切到首字母圆 fallback.
             <img
               src={sharerAvatarUrl}
               alt=""
+              onError={() => setAvatarFailed(true)}
               style={{
                 width: 88,
                 height: 88,
