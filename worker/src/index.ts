@@ -3877,6 +3877,10 @@ function isBotGateExempt(path: string, method: string): boolean {
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/api/items' || path === '/api/sources' || path === '/api/stats') return true;
     if (path === '/img' || path.startsWith('/r/')) return true;
+    // PM 2026-05-25:/s/<token> 是分享二维码扫码命中点,微信内置浏览器 / 二维码
+    // 扫描 app 的 UA 经常被 bot gate 判 403,用户扫码看到"内容不存在".分享 redirect
+    // 本身就是公开 endpoint,handler 内部有 token 校验,不该卡 UA 闸
+    if (path.startsWith('/s/')) return true;
   }
   return false;
 }

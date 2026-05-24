@@ -16,6 +16,7 @@ import { createShare, type CreateShareResponse } from "../lib/share";
 import { toast } from "../lib/toast";
 import { PosterCanvas, type PosterCanvasHandle } from "./PosterCanvas";
 import { useAuthStore } from "../lib/authStore";
+import { avatarUrlOf, displayNameOf } from "../lib/defaultProfile";
 import type { Item } from "../types";
 
 interface Props {
@@ -47,19 +48,12 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   const posterRef = useRef<PosterCanvasHandle>(null);
 
   const user = useAuthStore((s) => s.user);
-  // PM 反馈 2026-05-25 R6:user.display_name 在邮箱登录时 BE 不会自动设置 (默认 null),
-  // 用 identity_masked 邮箱前缀 (例 "l***@gmail.com" → "l***") 作为兜底,
-  // 比"匿名分享者"更具识别度且不露完整邮箱.手机号登录同理用 phone_masked.
-  const sharerName = (() => {
-    if (user?.display_name) return user.display_name;
-    if (user?.identity_masked) {
-      const at = user.identity_masked.indexOf("@");
-      return at > 0 ? user.identity_masked.slice(0, at) : user.identity_masked;
-    }
-    if (user?.phone_masked) return user.phone_masked;
-    return "AI-Feeds 用户";
-  })();
-  const sharerAvatarUrl = user?.avatar_url || undefined;
+  // PM 2026-05-25:邮箱注册 BE 不自动设 display_name / avatar_url (DB 默认 null).
+  // 复用项目已有的 displayNameOf / avatarUrlOf (UserMenu / Settings 同款),
+  // 基于 user.id 稳定 hash 派生昵称 (32 词词库 + 4位数字) + 头像 (30 张默认池)
+  // → 海报跟流内头像 / 昵称一致,即使 user 没设置过也有可识别身份.
+  const sharerName = user ? displayNameOf(user) : "AI-Feeds 用户";
+  const sharerAvatarUrl = user ? avatarUrlOf(user) : undefined;
 
   // 状态机:根据 (open, itemId, cachedShare) 决定 stage + 触发 createShare
   // - dialog 关 / itemId 切 → 重置 stage 跟 triggeredRef
@@ -108,6 +102,7 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
 
   // PR2 v3: cachedShare ready 后立即触发 c 端截图,生成 PNG preview
   useEffect(() => {
+    if (!open) return;
     if (stage !== "ready" || !cachedShare) return;
     let cancelled = false;
     setPreviewing(true);
@@ -138,7 +133,10 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
     };
   // PM 2026-05-25 第四轮:sharerName / sharerAvatarUrl 进依赖,user 数据
   // hydrate 完后 (fetchMe 返回) 重新截图,确保海报上是登录态完整数据
-  }, [stage, cachedShare, sharerName, sharerAvatarUrl]);
+  // PM 2026-05-25 补:open 也进依赖 — close → 再次 open 时 stage/cachedShare 没
+  // 变化 effect 不重跑,导致 previewUrl (close 时 revoke 了) 永远不会重生成
+  // → UI 卡 "海报渲染中…" loading
+  }, [open, stage, cachedShare, sharerName, sharerAvatarUrl]);
 
   if (!open) return null;
 
