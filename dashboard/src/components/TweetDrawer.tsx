@@ -509,7 +509,7 @@ export function TweetDrawer() {
       {item && (
         <ShareDialog
           open={shareOpen}
-          itemId={item.id}
+          item={item}
           cachedShare={shareCache[item.id] ?? null}
           onShareCreated={(id, share) => setShareCache((prev) => ({ ...prev, [id]: share }))}
           onClose={() => setShareOpen(false)}
