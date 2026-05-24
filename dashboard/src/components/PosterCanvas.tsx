@@ -224,12 +224,13 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
         pointerEvents: "none",
       }}
     >
-      {/* HERO */}
+      {/* HERO — PM 2026-05-25 反馈:body 上沿应该跟弧形顶部齐高,hero
+          区域不要那么高的空白.总高 260 → 180,svg 占底部 60,body 直接接 */}
       <div
         style={{
           position: "relative",
           width: "100%",
-          height: 260,
+          height: 180,
           background:
             "linear-gradient(135deg, #0b1626 0%, #1a2745 45%, #322152 100%)",
           overflow: "hidden",
@@ -267,8 +268,8 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             position: "relative",
             display: "flex",
             alignItems: "center",
-            padding: "56px 64px 0",
-            gap: 26,
+            padding: "30px 60px 0",
+            gap: 22,
             zIndex: 1,
           }}
         >
@@ -276,8 +277,8 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             src={AI_FEEDS_LOGO_DATA_URL}
             alt=""
             style={{
-              width: 96,
-              height: 96,
+              width: 76,
+              height: 76,
               flexShrink: 0,
               display: "block",
             }}
@@ -285,10 +286,10 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
-                fontSize: 56,
+                fontSize: 46,
                 fontWeight: 900,
                 color: "#fff",
-                letterSpacing: -2,
+                letterSpacing: -1.5,
                 lineHeight: 1.05,
               }}
             >
@@ -296,11 +297,11 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             </div>
             <div
               style={{
-                marginTop: 6,
-                fontSize: 22,
+                marginTop: 4,
+                fontSize: 18,
                 fontWeight: 600,
                 color: "rgba(255,255,255,0.72)",
-                letterSpacing: 0.6,
+                letterSpacing: 0.4,
               }}
             >
               专注 AI 领域资讯聚合
@@ -343,10 +344,11 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             实现:overlay 占 hero 底部 80px 高,fill body 色,bezier 控制点
             在 svg 顶部(y=0),弧形从左下 → 顶中 → 右下,fill 多边形是
             "拱形+底部矩形" → 视觉 hero 底部被切出 $\cup$ 凹陷. */}
+        {/* Hero 底部 $\cup$ 弧形,占 hero 下半 60px,fill body 灰 */}
         <svg
-          viewBox="0 0 1080 80"
+          viewBox="0 0 1080 60"
           width="1080"
-          height="80"
+          height="60"
           preserveAspectRatio="none"
           style={{
             position: "absolute",
@@ -356,22 +358,20 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             pointerEvents: "none",
           }}
         >
-          <path d="M 0 80 Q 540 0 1080 80 Z" fill="#f8fafc" />
+          <path d="M 0 60 Q 540 0 1080 60 Z" fill="#f8fafc" />
         </svg>
       </div>
 
-      {/* BODY: 真实 Card 用 transform scale 放大 — 流内 Card 字号
-          按 mobile/PC ~400-700px 宽设计(15px 正文),搬到 1080 海报后
-          相对卡片"看起来小".scale 1.9 → 15px 视觉 ≈ 28.5px (PM 要求接近翻倍).
-          padding 0 让内层 layout 宽 = 1080/1.9 ≈ 568px,X header (author + ✓ +
-          MM-DD) 和 metrics 4 个 chip 都不折行. */}
+      {/* BODY: 真实 Card 用 transform scale 放大 — PM 2026-05-25 第四轮:
+          scale 1.9 → 2.5 (15px → 视觉 37.5px),padding 0 让内层 layout 宽 ~426px.
+          配合 TweetCard whitespace-nowrap 防 header/metrics 折行. */}
       <div
         style={{
-          padding: "20px 8px 20px",
+          padding: "4px 4px 16px",
           backgroundColor: "#f8fafc",
         }}
       >
-        <PosterBody item={item} scale={1.9} />
+        <PosterBody item={item} scale={2.5} />
       </div>
 
       {/* FOOTER: sharer + QR */}

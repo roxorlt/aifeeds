@@ -194,12 +194,12 @@ function Metric({
     <span
       aria-label={label}
       className={cn(
-        "flex items-center gap-1",
+        "flex shrink-0 items-center gap-1 whitespace-nowrap",
         isMissing ? "text-neutral-300" : "text-neutral-500",
       )}
     >
       {icon}
-      <span className="text-[12px] tabular-nums">{display}</span>
+      <span className="text-[12px] tabular-nums whitespace-nowrap">{display}</span>
     </span>
   );
 }
@@ -702,7 +702,7 @@ export function TweetCard({
             )}
             {!posterMode && handle && <span className="truncate">@{handle}</span>}
             {!posterMode && <span className="shrink-0 text-neutral-400">·</span>}
-            <span className={cn("shrink-0", posterMode && "ml-2")}>
+            <span className={cn("shrink-0 whitespace-nowrap", posterMode && "ml-2")}>
               {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
             </span>
             {item.is_hot === 1 && (

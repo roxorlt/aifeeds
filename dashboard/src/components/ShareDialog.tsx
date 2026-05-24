@@ -127,7 +127,9 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [stage, cachedShare]);
+  // PM 2026-05-25 第四轮:sharerName / sharerAvatarUrl 进依赖,user 数据
+  // hydrate 完后 (fetchMe 返回) 重新截图,确保海报上是登录态完整数据
+  }, [stage, cachedShare, sharerName, sharerAvatarUrl]);
 
   if (!open) return null;
 
