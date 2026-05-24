@@ -1007,14 +1007,21 @@ function extractDeviceIdFromCookie(request: Request): string | null {
 }
 
 function buildDetailPath(itemId: string): string {
-  // 各 source 详情页路由必须跟 dashboard drawer.tsx parseDeepLinkFromPath 对齐，
-  // 否则扫码 redirect 过去会被当 X 推文 query 失败显示"推文不存在"。
+  // 各 source 详情页路由必须跟 dashboard drawer.tsx parseDeepLinkFromPath 对齐:
+  //   /t/:source_id   → x_list:<source_id>  (前缀必须剥, dashboard 再加)
+  //   /g/:owner/:repo → github:<owner>/<repo>
+  //   /ph/:slug/:date → product_hunt:<slug>:<date>
+  //   /c/:slug        → clawhub:<slug>
+  //   /e/:event_id    → huodongxing:<event_id>
+  //   /h/:arxiv_id    → hf_paper:<arxiv_id>
   //
-  //   X / podcast / arxiv / fallback → /t/<source_id>
-  //   GitHub        → /g/<owner>/<repo>
-  //   Product Hunt  → /ph/<slug>/<date>
-  //   ClawHub       → /c/<slug>
-  //   Huodongxing   → /e/<event_id>
+  // PM 2026-05-25 反馈"扫码显示推文不存在": 根因是 x_list / hf_paper 没剥前缀
+  // 就走兜底 /t/<itemId>, dashboard 再加一次 prefix 拼出 "x_list:x_list:<id>"
+  // → fetchItem 404 → 显示推文不存在. 必须显式剥前缀.
+  if (itemId.startsWith('x_list:')) {
+    const sid = itemId.slice('x_list:'.length);
+    return `/t/${encodeURIComponent(sid)}`;
+  }
   if (itemId.startsWith('github:')) {
     const repo = itemId.slice('github:'.length); // 形如 'owner/repo'
     return `/g/${repo}`;
@@ -1034,6 +1041,10 @@ function buildDetailPath(itemId: string): string {
     const eid = itemId.slice('huodongxing:'.length);
     if (eid) return `/e/${encodeURIComponent(eid)}`;
   }
-  // X list / 未知 source → /t/<full_id> 兜底（保持 PR5 既有行为，不冒回归风险）
+  if (itemId.startsWith('hf_paper:')) {
+    const arxiv = itemId.slice('hf_paper:'.length);
+    if (arxiv) return `/h/${encodeURIComponent(arxiv)}`;
+  }
+  // 未知 source 兜底 — 极少触发, 保留是为日志可追溯
   return `/t/${encodeURIComponent(itemId)}`;
 }
