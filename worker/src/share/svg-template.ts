@@ -753,12 +753,13 @@ function renderXContent(opts: {
   // name + verified
   const nameTruncated = truncate(opts.authorName || '', 14);
   const nameSize = 52;
-  // PM 2026-05-22: verified 之前 boost 1.2 + offset 10 让 badge 离昵称太远.
-  // letter-spacing -1.5 实际宽度比 estimate 小, boost 0.82 + offset 4 更贴
-  const nameWidth = estimateTextWidth(nameTruncated, nameSize, 0.82);
+  // PM 2026-05-22 反馈: boost 0.82 + offset 4 让 badge 压到末字 'z' 上 (英文
+  // 字符 0.55 倍宽 + font-weight 900 加宽 + letter-spacing 调整, estimate
+  // 整体偏小). 改成 boost 1.0 + offset 14 让 badge 跟字尾有可识别间距
+  const nameWidth = estimateTextWidth(nameTruncated, nameSize, 1.0);
   svg += `<text x="${nameX}" y="${cy + 50}" font-family='${FONT}' font-size="${nameSize}" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(nameTruncated)}</text>`;
   if (opts.authorIsVerified) {
-    svg += renderVerifiedBadge(nameX + nameWidth + 4, cy + 50 - 36, 36);
+    svg += renderVerifiedBadge(nameX + nameWidth + 14, cy + 50 - 36, 36);
   }
   // 第二行: @handle · 时间
   const handleStr = opts.authorHandle ? `@${opts.authorHandle}` : '';
