@@ -147,10 +147,10 @@ export function GithubCard({ item }: Props) {
               </div>
             </div>
             {dailyRank && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-amber-200">
-                {dateMd && <span className="font-medium tabular-nums">{dateMd}</span>}
+              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-neutral-700 ring-1 ring-amber-200">
+                {dateMd && <span className="whitespace-nowrap font-medium tabular-nums">{dateMd}</span>}
                 <IconLeaderboard className="h-3 w-3 text-amber-500" />
-                <span className="font-semibold tabular-nums">{ordinal(dailyRank)}</span>
+                <span className="whitespace-nowrap font-semibold tabular-nums">{ordinal(dailyRank)}</span>
               </span>
             )}
           </div>
@@ -159,16 +159,16 @@ export function GithubCard({ item }: Props) {
           {(language || category) && (
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
               {language && (
-                <span className="inline-flex items-center gap-1">
+                <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
                   <span className={cn("h-2 w-2 rounded-full", langDotClass(language))} />
                   {language}
                 </span>
               )}
-              {language && category && <span className="text-neutral-400">·</span>}
+              {language && category && <span className="shrink-0 text-neutral-400">·</span>}
               {category && (
                 <span
                   className={cn(
-                    "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                    "shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium",
                     CATEGORY_STYLE[category] || CATEGORY_STYLE.other,
                   )}
                 >
@@ -239,23 +239,23 @@ export function GithubCard({ item }: Props) {
           位置一致），右 contributors（头像 + count）— 跟 PH 的 makers 行同款
           排版对齐三个源 */}
       {(stars !== undefined || forks !== undefined || watchers !== undefined || contributorsInline.length > 0) && (
-        <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
           {stars !== undefined && (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconStarFill className="h-3.5 w-3.5" />
-              <span className="tabular-nums">{formatCompact(stars)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(stars)}</span>
             </span>
           )}
           {forks !== undefined && (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconRepoForked className="h-3.5 w-3.5" />
-              <span className="tabular-nums">{formatCompact(forks)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(forks)}</span>
             </span>
           )}
           {watchers !== undefined && (
-            <span className="inline-flex items-center gap-1" title={`${watchers} watchers`}>
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" title={`${watchers} watchers`}>
               <IconWatching className="h-3.5 w-3.5" />
-              <span className="tabular-nums">{formatCompact(watchers)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(watchers)}</span>
             </span>
           )}
           {(contributorsInline.length > 0 || (contributorsCount && contributorsCount > 0)) && (
@@ -276,7 +276,7 @@ export function GithubCard({ item }: Props) {
                 </span>
               )}
               {contributorsCount && contributorsCount > 0 && (
-                <span className="min-w-0 truncate text-[12px]">{contributorsCount} contributors</span>
+                <span className="min-w-0 truncate whitespace-nowrap text-[12px]">{contributorsCount} contributors</span>
               )}
             </span>
           )}

@@ -168,7 +168,7 @@ export function HfPaperCard({ item }: Props) {
           {keywords.map((kw) => (
             <span
               key={kw}
-              className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700"
+              className="shrink-0 whitespace-nowrap rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700"
             >
               #{kw}
             </span>
@@ -178,25 +178,25 @@ export function HfPaperCard({ item }: Props) {
 
       {/* Footer 行 — 左：metrics(▲ upvotes · 💬 comments · ⭐ GH stars)；右：submitter avatar + by @handle · 相对时间。
           单行排布,左右对齐(PM v2 反馈:合并到同一行;砍掉 ★ novelty 与「拆解阅读」CTA)。 */}
-      <div className="mt-2.5 flex items-center justify-between gap-3 text-[13px] text-neutral-500">
+      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 text-[13px] text-neutral-500">
         {/* 左:metrics */}
         <div className="flex shrink-0 items-center gap-x-3">
           {upvotes !== undefined && (
-            <span className="inline-flex items-center gap-1" aria-label="upvotes">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" aria-label="upvotes">
               <IconUpvoteTri className="h-3.5 w-3.5" />
-              <span className="tabular-nums">{formatCompact(upvotes)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(upvotes)}</span>
             </span>
           )}
           {numComments !== undefined && (
-            <span className="inline-flex items-center gap-1" aria-label="comments">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" aria-label="comments">
               <IconCommentSquare className="h-3.5 w-3.5" />
-              <span className="tabular-nums">{formatCompact(numComments)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(numComments)}</span>
             </span>
           )}
           {githubStars !== undefined && githubStars !== null && (
-            <span className="inline-flex items-center gap-1" aria-label="github stars">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" aria-label="github stars">
               <IconStarFilled className="h-3.5 w-3.5 text-amber-500" />
-              <span className="tabular-nums">{formatCompact(githubStars)}</span>
+              <span className="tabular-nums whitespace-nowrap">{formatCompact(githubStars)}</span>
             </span>
           )}
         </div>
@@ -219,20 +219,20 @@ export function HfPaperCard({ item }: Props) {
             // handle 给 max-w-[100px] 上限,超长则 ellipsis,例如:
             //   "by @caiyuchen... 等 12 位 · 1 天前"
             // min-w-0 让外层 flex 容器允许 handle 子项 shrink。
-            <span className="inline-flex min-w-0 items-baseline">
-              <span className="shrink-0">by&nbsp;</span>
-              <span className="inline-block max-w-[100px] truncate text-neutral-700 align-bottom">
+            <span className="inline-flex min-w-0 items-baseline whitespace-nowrap">
+              <span className="shrink-0 whitespace-nowrap">by&nbsp;</span>
+              <span className="inline-block max-w-[100px] truncate whitespace-nowrap text-neutral-700 align-bottom">
                 @{submitter.user}
               </span>
               {authorsCount > 1 && (
-                <span className="shrink-0 text-neutral-500">
+                <span className="shrink-0 whitespace-nowrap text-neutral-500">
                   &nbsp;等 {authorsCount} 位
                 </span>
               )}
               {relTime && (
                 <>
                   <span className="mx-1 shrink-0 text-neutral-400">·</span>
-                  <span className="shrink-0 text-neutral-500">{relTime}</span>
+                  <span className="shrink-0 whitespace-nowrap text-neutral-500">{relTime}</span>
                 </>
               )}
             </span>

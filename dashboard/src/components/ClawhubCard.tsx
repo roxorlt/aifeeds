@@ -113,17 +113,17 @@ export function ClawhubCard({ item }: Props) {
 
           {/* Meta line — text-[13px] 跟 GH/PH 卡片对齐 */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
-            {ownerHandle && <span className="truncate">@{ownerHandle}</span>}
+            {ownerHandle && <span className="truncate whitespace-nowrap">@{ownerHandle}</span>}
             {version && (
               <>
-                <span className="text-neutral-400">·</span>
-                <span className="tabular-nums">v{version}</span>
+                <span className="shrink-0 text-neutral-400">·</span>
+                <span className="shrink-0 whitespace-nowrap tabular-nums">v{version}</span>
               </>
             )}
-            <span className="text-neutral-400">·</span>
+            <span className="shrink-0 text-neutral-400">·</span>
             <span
               className={cn(
-                "rounded-full px-1.5 py-0.5 text-[11px] font-medium",
+                "shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium",
                 categoryStyle,
               )}
             >
@@ -141,16 +141,16 @@ export function ClawhubCard({ item }: Props) {
       )}
 
       {/* Footer metrics — text-[13px]，gap-x-3 gap-y-0.5，跟 GH/PH 同款 */}
-      <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500 tabular-nums">
-        <span className="inline-flex items-center gap-1" title={`${stars} 星标`}>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500 tabular-nums">
+        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" title={`${stars} 星标`}>
           <IconStarFill className="h-3.5 w-3.5 text-amber-500" />
           {formatCompact(stars)}
         </span>
-        <span className="inline-flex items-center gap-1" title={`${downloads} 下载`}>
+        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" title={`${downloads} 下载`}>
           <IconDownload className="h-3.5 w-3.5" />
           {formatCompact(downloads)}
         </span>
-        <span className="inline-flex items-center gap-1" title={`${installs} 当前安装`}>
+        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" title={`${installs} 当前安装`}>
           <IconPackage className="h-3.5 w-3.5" />
           {formatCompact(installs)} active
         </span>

@@ -16,7 +16,7 @@
 //   CTA           → 跳 item.url（站外报名页）
 
 import type { HuodongxingMetrics, HuodongxingOrganizer, Item, ItemExtra, MediaItem } from "../types";
-import { parseJsonField } from "../lib/utils";
+import { cn, parseJsonField } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { resolveAssetUrl } from "../lib/asset";
@@ -220,22 +220,25 @@ export function HuodongxingCard({ item }: Props) {
 
           {/* Meta：时间 · 地点 · 价格 · 报名数 */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] leading-[1.5] text-neutral-500">
-            {timeStr && <span className="tabular-nums">{timeStr}</span>}
-            {timeStr && locationStr && <span className="text-neutral-400">·</span>}
+            {timeStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{timeStr}</span>}
+            {timeStr && locationStr && <span className="shrink-0 text-neutral-400">·</span>}
             {locationStr && (
-              <span className="inline-flex items-center gap-1">
+              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
                 <LocationIcon online={isOnline} />
                 {locationStr}
               </span>
             )}
-            {locationStr && priceStr && <span className="text-neutral-400">·</span>}
+            {locationStr && priceStr && <span className="shrink-0 text-neutral-400">·</span>}
             {priceStr && (
-              <span className={priceStr === "免费" ? "font-medium text-neutral-700" : "tabular-nums"}>
+              <span className={cn(
+                "shrink-0 whitespace-nowrap",
+                priceStr === "免费" ? "font-medium text-neutral-700" : "tabular-nums",
+              )}>
                 {priceStr}
               </span>
             )}
-            {(timeStr || locationStr || priceStr) && registeredStr && <span className="text-neutral-400">·</span>}
-            {registeredStr && <span className="tabular-nums">{registeredStr}</span>}
+            {(timeStr || locationStr || priceStr) && registeredStr && <span className="shrink-0 text-neutral-400">·</span>}
+            {registeredStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{registeredStr}</span>}
           </div>
         </div>
       </div>
@@ -283,19 +286,19 @@ export function HuodongxingCard({ item }: Props) {
             />
           )}
           {orgName && (
-            <span className="min-w-0 truncate font-medium text-neutral-900">{orgName}</span>
+            <span className="min-w-0 truncate whitespace-nowrap font-medium text-neutral-900">{orgName}</span>
           )}
           {organizer?.is_certified_company && <CertBadge kind="cert" />}
           {organizer?.is_vip_gold && <CertBadge kind="vip" />}
           {orgFans && (
             <>
-              <span className="text-neutral-400">·</span>
-              <span className="shrink-0 tabular-nums">{orgFans}</span>
+              <span className="shrink-0 text-neutral-400">·</span>
+              <span className="shrink-0 whitespace-nowrap tabular-nums">{orgFans}</span>
             </>
           )}
         </span>
         {isEnded ? (
-          <span className="shrink-0 rounded-full border border-neutral-200 px-2 py-0.5 text-[12px] font-medium text-neutral-400">
+          <span className="shrink-0 whitespace-nowrap rounded-full border border-neutral-200 px-2 py-0.5 text-[12px] font-medium text-neutral-400">
             已结束
           </span>
         ) : item.url ? (
@@ -305,7 +308,7 @@ export function HuodongxingCard({ item }: Props) {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-[12px] font-medium text-sky-600 transition-colors hover:border-neutral-400 hover:bg-neutral-50"
+            className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-[12px] font-medium text-sky-600 transition-colors hover:border-neutral-400 hover:bg-neutral-50"
           >
             报名
             <ExtLinkIcon />

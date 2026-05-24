@@ -156,18 +156,18 @@ export function PhCard({ item }: Props) {
 
           {/* Meta（第二行）：日期 / #排名 / 分类标签（彩色 chip） */}
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-neutral-500">
-            {dateMd && <span className="tabular-nums">{dateMd}</span>}
-            {dateMd && displayRank !== undefined && <span className="text-neutral-400">·</span>}
+            {dateMd && <span className="shrink-0 whitespace-nowrap tabular-nums">{dateMd}</span>}
+            {dateMd && displayRank !== undefined && <span className="shrink-0 text-neutral-400">·</span>}
             {displayRank !== undefined && (
-              <span className="tabular-nums" title={phRawRank !== undefined && phRawRank !== displayRank ? `aifeeds 排名 #${displayRank}（PH 原始 dailyRank: ${phRawRank}）` : `PH 当日榜第 ${displayRank} 名`}>
+              <span className="shrink-0 whitespace-nowrap tabular-nums" title={phRawRank !== undefined && phRawRank !== displayRank ? `aifeeds 排名 #${displayRank}（PH 原始 dailyRank: ${phRawRank}）` : `PH 当日榜第 ${displayRank} 名`}>
                 #{displayRank}
               </span>
             )}
             {(dateMd || displayRank !== undefined) && aiCategoryLabel && (
-              <span className="text-neutral-400">·</span>
+              <span className="shrink-0 text-neutral-400">·</span>
             )}
             {aiCategoryLabel && (
-              <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${categoryStyle(aiCategoryRaw)}`}>
+              <span className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${categoryStyle(aiCategoryRaw)}`}>
                 {aiCategoryLabel}
               </span>
             )}
@@ -216,17 +216,17 @@ export function PhCard({ item }: Props) {
       {/* Footer：左 votes/comments，右 makers 头像 + by @xxx 等 N 人。
           跨整张卡宽给 makers 行更多空间。makers span 用 flex-1 + justify-end +
           min-w-0 + 内层 truncate 兜底（仍长就省略号，不会溢出）。 */}
-      <div className="mt-2 flex items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-neutral-500">
         {votes !== undefined && (
-          <span className="inline-flex items-center gap-1" aria-label="votes">
+          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" aria-label="votes">
             <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l5 6H3l5-6z"/></svg>
-            <span className="tabular-nums">{formatCompact(votes)}</span>
+            <span className="tabular-nums whitespace-nowrap">{formatCompact(votes)}</span>
           </span>
         )}
         {comments !== undefined && (
-          <span className="inline-flex items-center gap-1" aria-label="comments">
+          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap" aria-label="comments">
             <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 4h10a1 1 0 011 1v6a1 1 0 01-1 1H8l-3 3v-3H3a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
-            <span className="tabular-nums">{formatCompact(comments)}</span>
+            <span className="tabular-nums whitespace-nowrap">{formatCompact(comments)}</span>
           </span>
         )}
         {(visibleMakers.length > 0 || firstHandle) && (
@@ -255,7 +255,7 @@ export function PhCard({ item }: Props) {
               </span>
             )}
             {firstHandle && (
-              <span className="min-w-0 truncate text-[13px]">
+              <span className="min-w-0 truncate whitespace-nowrap text-[13px]">
                 by @{firstHandle}{makers.length > 1 ? ` 等 ${makers.length} 人` : ""}
               </span>
             )}
