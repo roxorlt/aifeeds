@@ -51,6 +51,21 @@ export function timeAgo(iso: string | null | undefined): string {
   return `${Math.floor(mo / 12)} 年前`;
 }
 
+/** 格式化 BJT 的 MM-DD HH:MM (海报场景:固定时间戳比"3天前"更可靠) */
+export function formatBjtMdHm(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const normalized = iso.includes("T") ? iso : iso.replace(" ", "T");
+  const withTz = /Z$|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
+  const date = new Date(withTz);
+  if (isNaN(date.getTime())) return iso;
+  const bjt = new Date(date.getTime() + (date.getTimezoneOffset() + 480) * 60 * 1000);
+  const mm = String(bjt.getMonth() + 1).padStart(2, "0");
+  const dd = String(bjt.getDate()).padStart(2, "0");
+  const HH = String(bjt.getHours()).padStart(2, "0");
+  const MM = String(bjt.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${HH}:${MM}`;
+}
+
 export function formatNumber(n: number | undefined | null): string {
   if (n === undefined || n === null) return "";
   if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;

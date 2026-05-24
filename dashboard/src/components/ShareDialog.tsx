@@ -47,15 +47,9 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   const posterRef = useRef<PosterCanvasHandle>(null);
 
   const user = useAuthStore((s) => s.user);
-  // PM 反馈 2026-05-25:之前 fallback "AI-Feeds 用户" 太 generic,改成 chain:
-  // display_name → identity_masked (手机号脱敏 / 微信 OpenID 前缀) → phone_masked
-  // → 兜底匿名标签.大概率 display_name 是 null 时,identity_masked 能给出
-  // 类似 "138****1234" 的可识别身份
-  const sharerName =
-    user?.display_name ||
-    user?.identity_masked ||
-    user?.phone_masked ||
-    "AI-Feeds 用户";
+  // PM 反馈 2026-05-25 第二轮:identity_masked / phone_masked 拿到的是邮箱,
+  // 海报里露邮箱不合适.只用 display_name,缺失时显示"匿名分享者"中性兜底
+  const sharerName = user?.display_name || "匿名分享者";
   const sharerAvatarUrl = user?.avatar_url || undefined;
 
   // 状态机:根据 (open, itemId, cachedShare) 决定 stage + 触发 createShare

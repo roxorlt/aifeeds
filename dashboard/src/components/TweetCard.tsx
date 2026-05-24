@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
-import { cn, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
 import { useDrawer } from "../lib/drawer";
@@ -328,6 +328,10 @@ interface Props {
   // border — suppress the per-card border regardless of hasThreadBelow so
   // the last reply doesn't create a divider between itself and the toggle.
   inThread?: boolean;
+  // PR2 v3 (2026-05-25):海报渲染模式 — PosterCanvas 复用 TweetCard 时,
+  // header 隐藏 @handle 跟"原文"按钮、时间用 MM-DD HH:MM 固定格式(而非
+  // 易过期的"3 天前")、verified badge 跟昵称留更大 gap (海报字号放大场景)
+  posterMode?: boolean;
 }
 
 export function TweetCard({
@@ -338,6 +342,7 @@ export function TweetCard({
   hasThreadAbove,
   hasThreadBelow,
   inThread,
+  posterMode,
 }: Props) {
   const { openTweet } = useDrawer();
   const impressionRef = useImpression(() => {
@@ -684,20 +689,21 @@ export function TweetCard({
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          {/* Header: single row — author + ✓ + @handle · time + 原文 toggle */}
+          {/* Header: single row — author + ✓ + @handle · time + 原文 toggle.
+              posterMode 下隐藏 @handle / 原文按钮, 时间用 MM-DD HH:MM. */}
           <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
             <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
               {author}
             </span>
             {isVerified && (
-              <span className="shrink-0 self-center">
+              <span className={cn("shrink-0 self-center", posterMode && "ml-1")}>
                 <VerifiedBadge />
               </span>
             )}
-            {handle && <span className="truncate">@{handle}</span>}
+            {!posterMode && handle && <span className="truncate">@{handle}</span>}
             <span className="shrink-0 text-neutral-400">·</span>
             <span className="shrink-0">
-              {timeAgo(displayTime)}
+              {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
             </span>
             {item.is_hot === 1 && (
               // 运营看板内容池 hot 标：score > 7d AI P90 基线（cron 计算）。
@@ -710,7 +716,7 @@ export function TweetCard({
                 🔥
               </span>
             )}
-            {showLangButton && (
+            {!posterMode && showLangButton && (
               <button
                 type="button"
                 disabled={translating}

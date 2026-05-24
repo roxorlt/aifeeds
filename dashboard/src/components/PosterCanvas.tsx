@@ -101,7 +101,7 @@ function PosterBody({ item, scale }: { item: Item; scale: number }) {
 function CardForItem({ item }: { item: Item }) {
   switch (item.source_type) {
     case "x_list":
-      return <TweetCard item={item} embedded hideThreadBanner />;
+      return <TweetCard item={item} embedded hideThreadBanner posterMode />;
     case "github":
       return <GithubCard item={item} />;
     case "product_hunt":
@@ -354,14 +354,15 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
 
       {/* BODY: 真实 Card 用 transform scale 放大 — 流内 Card 字号
           按 mobile/PC ~400-700px 宽设计(15px 正文),搬到 1080 海报后
-          相对卡片"看起来小".scale 1.5x → 15px 视觉 ≈ 22px,合适. */}
+          相对卡片"看起来小".scale 1.7x → 15px 视觉 ≈ 25.5px.
+          padding 砍到 16px 让内层 layout 宽 ~616px,metrics 4 个 chip 不折行. */}
       <div
         style={{
-          padding: "28px 36px 24px",
+          padding: "24px 16px 20px",
           backgroundColor: "#f8fafc",
         }}
       >
-        <PosterBody item={item} scale={1.5} />
+        <PosterBody item={item} scale={1.7} />
       </div>
 
       {/* FOOTER: sharer + QR */}
@@ -378,10 +379,12 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
         {/* Sharer 左 */}
         <div style={{ display: "flex", alignItems: "center", gap: 18, flex: 1, minWidth: 0 }}>
           {sharerAvatarUrl ? (
+            // PM 2026-05-25:之前加 crossOrigin="anonymous" 在 R2 头像
+            // 无 ACAO 时会让浏览器拒载;modern-screenshot 内部会处理跨域,
+            // 不需要在 <img> 上手动加这个 attr.直接用默认行为兜底.
             <img
               src={sharerAvatarUrl}
               alt=""
-              crossOrigin="anonymous"
               style={{
                 width: 88,
                 height: 88,
