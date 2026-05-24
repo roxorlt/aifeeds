@@ -720,17 +720,6 @@ export function TweetCard({
             <span className={cn("shrink-0 whitespace-nowrap", posterMode && "ml-2")}>
               {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
             </span>
-            {item.is_hot === 1 && (
-              // 运营看板内容池 hot 标：score > 7d AI P90 基线（cron 计算）。
-              // 设计：docs/plans/2026-05-21-ops-pool-design.md
-              <span
-                className="shrink-0 text-[13px] leading-none"
-                title="互动数超过近 7 天 AI 推文 P90 基线"
-                aria-label="hot"
-              >
-                🔥
-              </span>
-            )}
             {!posterMode && showLangButton && (
               <button
                 type="button"
