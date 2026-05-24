@@ -345,10 +345,9 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           </div>
         </div>
 
-        {/* Hero 底部 $\cap$ 弧形 (中间向下凸,fill 白色) — PM 2026-05-25 R5:
-            弧线方向竖直往下,白色 fill 让弧形跟下方白卡片连续衔接.
-            视觉:hero 紫色 + 底部白色弧形 (中部向下凸 60px) + 白卡片
-            紧接弧形底 = 白卡片"上沿压在弧线上" 整体形如 $\cap$ 顶的白色块. */}
+        {/* Hero 底部 $\cup$ 弧形 (中间向上凹陷,fill body 灰) — PM 2026-05-25 R6:
+            恢复 R3 弧线方向 (R5 改 $\cap$ 是误解,PM 想要 $\cup$).
+            white card 用 negative marginTop 上移覆盖 弧形装饰下半,弧形上半仍 visible. */}
         <svg
           viewBox="0 0 1080 60"
           width="1080"
@@ -356,22 +355,24 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           preserveAspectRatio="none"
           style={{
             position: "absolute",
-            bottom: -1,
+            bottom: 0,
             left: 0,
             display: "block",
             pointerEvents: "none",
           }}
         >
-          <path d="M 0 0 Q 540 60 1080 0 L 1080 60 L 0 60 Z" fill="#ffffff" />
+          <path d="M 0 60 Q 540 0 1080 60 Z" fill="#f8fafc" />
         </svg>
       </div>
 
-      {/* BODY: 真实 Card 用 transform scale 放大 — scale 2.5,padding 0 + 白卡片
-          顶部 border-radius 0 (因为已被 hero 内白弧形装饰接管) + 接 hero 底部. */}
+      {/* BODY: white card 上移 30px 覆盖 hero 内弧形装饰下半,
+          弧形上半 (中间凹陷顶点 visible 在 white card 之上) — 视觉上
+          "白框压在弧线上方". flatTop 让顶部 radius 0 防硬切. */}
       <div
         style={{
           padding: "0 4px 16px",
           backgroundColor: "#f8fafc",
+          marginTop: -30,
         }}
       >
         <PosterBody item={item} scale={2.5} flatTop />

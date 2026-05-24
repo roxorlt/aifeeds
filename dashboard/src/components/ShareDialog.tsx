@@ -47,9 +47,18 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   const posterRef = useRef<PosterCanvasHandle>(null);
 
   const user = useAuthStore((s) => s.user);
-  // PM 反馈 2026-05-25 第二轮:identity_masked / phone_masked 拿到的是邮箱,
-  // 海报里露邮箱不合适.只用 display_name,缺失时显示"匿名分享者"中性兜底
-  const sharerName = user?.display_name || "匿名分享者";
+  // PM 反馈 2026-05-25 R6:user.display_name 在邮箱登录时 BE 不会自动设置 (默认 null),
+  // 用 identity_masked 邮箱前缀 (例 "l***@gmail.com" → "l***") 作为兜底,
+  // 比"匿名分享者"更具识别度且不露完整邮箱.手机号登录同理用 phone_masked.
+  const sharerName = (() => {
+    if (user?.display_name) return user.display_name;
+    if (user?.identity_masked) {
+      const at = user.identity_masked.indexOf("@");
+      return at > 0 ? user.identity_masked.slice(0, at) : user.identity_masked;
+    }
+    if (user?.phone_masked) return user.phone_masked;
+    return "AI-Feeds 用户";
+  })();
   const sharerAvatarUrl = user?.avatar_url || undefined;
 
   // 状态机:根据 (open, itemId, cachedShare) 决定 stage + 触发 createShare

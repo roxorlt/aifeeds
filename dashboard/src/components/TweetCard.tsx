@@ -692,18 +692,26 @@ export function TweetCard({
           {/* Header: single row — author + ✓ + @handle · time + 原文 toggle.
               posterMode 下隐藏 @handle / 原文按钮, 时间用 MM-DD HH:MM. */}
           <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
-            {/* PM 2026-05-25 R5: posterMode 下 author 不 truncate 给 verified
-                明确独占空间,加 pr-1 让 author 末字跟 verified 之间空一档 */}
+            {/* PM 2026-05-25 R6: posterMode 下 author 加 relative z-10 + bg-white
+                让 author 文字层级在 verified 之上,即使 svg viewBox 透明区
+                跟 author 末字视觉重叠也不被遮挡 */}
             <span
               className={cn(
                 "text-[15px] font-bold leading-tight text-neutral-900",
-                posterMode ? "shrink-0 pr-1" : "truncate",
+                posterMode
+                  ? "shrink-0 whitespace-nowrap relative z-10 bg-white pr-1"
+                  : "truncate",
               )}
             >
               {author}
             </span>
             {isVerified && (
-              <span className={cn("shrink-0 self-center", posterMode && "ml-2")}>
+              <span
+                className={cn(
+                  "shrink-0 self-center",
+                  posterMode && "ml-3 relative z-0",
+                )}
+              >
                 <VerifiedBadge />
               </span>
             )}
