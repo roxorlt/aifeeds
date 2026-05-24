@@ -614,20 +614,30 @@ export function TweetCard({
             )}
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
-                <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
+                <span
+                  className={cn(
+                    "text-[15px] font-bold leading-tight text-neutral-900",
+                    posterMode
+                      ? "shrink-0 whitespace-nowrap relative z-10 bg-white pr-1"
+                      : "truncate",
+                  )}
+                >
                   {replyOf.author || replyOf.handle}
                 </span>
                 {Boolean(replyOf.is_verified) && (
-                  <span className="shrink-0 self-center">
+                  <span className={cn("shrink-0 self-center", posterMode && "ml-3 relative z-0")}>
                     <VerifiedBadge />
                   </span>
                 )}
-                {replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
-                {replyOf.published_at && (
+                {!posterMode && replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
+                {!posterMode && replyOf.published_at && (
                   <>
                     <span className="shrink-0 text-neutral-400">·</span>
-                    <span className="shrink-0">{timeAgo(replyOf.published_at)}</span>
+                    <span className="shrink-0 whitespace-nowrap">{timeAgo(replyOf.published_at)}</span>
                   </>
+                )}
+                {posterMode && replyOf.published_at && (
+                  <span className="shrink-0 whitespace-nowrap ml-2">{formatBjtMdHm(replyOf.published_at)}</span>
                 )}
               </div>
               <div className="mt-1 line-clamp-4 break-words whitespace-pre-wrap text-[15px] leading-[1.45] text-neutral-800">
@@ -648,23 +658,23 @@ export function TweetCard({
       {/* Thread / quote-placeholder banner (kept outside avatar block — rare cases).
           Reply banner moves into the content column, below the header (see further down). */}
       {((isThread && !hideThreadBanner) || hasQuotePlaceholder || isRetweet) && (
-        <div className="mb-1.5 ml-[52px] flex items-center gap-1.5 text-[12px] text-neutral-500">
+        <div className="mb-1.5 ml-[52px] flex flex-wrap items-center gap-1.5 text-[12px] text-neutral-500">
           {isThread && !hideThreadBanner && (
-            <span className="flex items-center gap-1">
+            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconThread className="h-3.5 w-3.5 fill-current text-sky-500" />
-              <span>Thread</span>
+              <span className="whitespace-nowrap">Thread</span>
             </span>
           )}
           {hasQuotePlaceholder && (
-            <span className="flex items-center gap-1">
+            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconQuote className="h-3.5 w-3.5 fill-current text-neutral-400" />
-              <span>引用推文</span>
+              <span className="whitespace-nowrap">引用推文</span>
             </span>
           )}
           {isRetweet && (
-            <span className="flex items-center gap-1">
+            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconRetweet className="h-3.5 w-3.5 fill-current text-sky-500" />
-              <span>{retweeterAuthor || `@${retweeterHandle}`} 已转帖</span>
+              <span className="whitespace-nowrap">{retweeterAuthor || `@${retweeterHandle}`} 已转帖</span>
             </span>
           )}
         </div>

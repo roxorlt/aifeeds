@@ -66,11 +66,17 @@ export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
               onError={() => setAvatarFailed(true)}
             />
           ) : null}
-          <span className="truncate font-semibold text-neutral-900">
+          <span
+            className={
+              posterMode
+                ? "shrink-0 whitespace-nowrap font-semibold text-neutral-900 relative z-10 bg-white pr-1"
+                : "truncate font-semibold text-neutral-900"
+            }
+          >
             {author}
           </span>
           {Boolean(quote.is_verified) && (
-            <VerifiedBadge className={`h-[14px] w-[14px] shrink-0 fill-sky-500 ${posterMode ? "ml-1.5" : ""}`} />
+            <VerifiedBadge className={`h-[14px] w-[14px] shrink-0 fill-sky-500 ${posterMode ? "ml-2 relative z-0" : ""}`} />
           )}
           {!posterMode && handle && (
             <span className="truncate text-neutral-500">@{handle}</span>
@@ -78,7 +84,7 @@ export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
           {!posterMode && quote.published_at && (
             <>
               <span className="text-neutral-400">·</span>
-              <span className="shrink-0 text-neutral-500">
+              <span className="shrink-0 whitespace-nowrap text-neutral-500">
                 {timeAgo(quote.published_at)}
               </span>
             </>
