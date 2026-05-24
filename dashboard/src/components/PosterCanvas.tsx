@@ -11,7 +11,7 @@
 //
 // 包装层 .poster-shell 上的 CSS 防止内层 hover/cursor 等交互态影响截图
 
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { domToBlob } from "modern-screenshot";
 import type { Item } from "../types";
@@ -36,6 +36,67 @@ const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
   clawhub: { label: "ClawHub · 技能", color: "#7c3aed" },
   huodongxing: { label: "活动行 · 活动", color: "#ef4444" },
 };
+
+/**
+ * Body wrapper:把流内 Card 用 transform scale 放大,让 1080 海报里
+ * 字号视觉跟卡片尺寸成正比.外层容器 overflow:hidden + height 跟随
+ * 内层 layout 高度 × scale (用 ResizeObserver 测量),避免内容被裁切.
+ *
+ * 为什么不用 css zoom:zoom 在 modern-screenshot 跨浏览器序列化不一致;
+ * transform + 测量更可靠.
+ */
+function PosterBody({ item, scale }: { item: Item; scale: number }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    const wrap = wrapRef.current;
+    if (!inner || !wrap) return;
+    const update = () => {
+      // 用 scrollHeight 兜底 (offsetHeight 在某些 flex 容器下 ≠ 实际内容)
+      const h = Math.max(inner.offsetHeight, inner.scrollHeight);
+      wrap.style.height = `${h * scale}px`;
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(inner);
+    // 内部图片异步加载完后高度会变,再 update 一次
+    const imgs = inner.querySelectorAll("img");
+    imgs.forEach((img) => {
+      if (!img.complete) {
+        img.addEventListener("load", update, { once: true });
+        img.addEventListener("error", update, { once: true });
+      }
+    });
+    return () => ro.disconnect();
+  }, [item, scale]);
+
+  return (
+    <div
+      ref={wrapRef}
+      style={{
+        width: "100%",
+        overflow: "hidden",
+        backgroundColor: "#ffffff",
+        border: "1px solid #e2e8f0",
+        borderRadius: 18,
+        boxShadow: "0 8px 24px -12px rgba(15,23,42,0.16)",
+      }}
+    >
+      <div
+        ref={innerRef}
+        style={{
+          transform: `scale(${scale})`,
+          transformOrigin: "top left",
+          width: `${(100 / scale).toFixed(4)}%`,
+        }}
+      >
+        <CardForItem item={item} />
+      </div>
+    </div>
+  );
+}
 
 function CardForItem({ item }: { item: Item }) {
   switch (item.source_type) {
@@ -164,7 +225,7 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
         style={{
           position: "relative",
           width: "100%",
-          height: 240,
+          height: 260,
           background:
             "linear-gradient(135deg, #0b1626 0%, #1a2745 45%, #322152 100%)",
           overflow: "hidden",
@@ -271,26 +332,36 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
             {source.label}
           </div>
         </div>
+
+        {/* Hero 底部弧形:用 SVG path overlay (quadratic bezier 凹陷) 让 hero
+            下沿跟 worker svg-template 视觉一致 — 中心凹陷 ~36px 弧线 */}
+        <svg
+          viewBox="0 0 1080 60"
+          width="1080"
+          height="60"
+          preserveAspectRatio="none"
+          style={{
+            position: "absolute",
+            bottom: -1,
+            left: 0,
+            display: "block",
+            pointerEvents: "none",
+          }}
+        >
+          <path d="M 0 0 Q 540 80 1080 0 L 1080 60 L 0 60 Z" fill="#f8fafc" />
+        </svg>
       </div>
 
-      {/* BODY: 真实 Card 嵌一层白色 inset 容器 */}
+      {/* BODY: 真实 Card 用 transform scale 放大 — 流内 Card 字号
+          按 mobile/PC ~400-700px 宽设计(15px 正文),搬到 1080 海报后
+          相对卡片"看起来小".scale 1.5x → 15px 视觉 ≈ 22px,合适. */}
       <div
         style={{
           padding: "28px 36px 24px",
           backgroundColor: "#f8fafc",
         }}
       >
-        <div
-          style={{
-            backgroundColor: "#ffffff",
-            border: "1px solid #e2e8f0",
-            borderRadius: 18,
-            overflow: "hidden",
-            boxShadow: "0 8px 24px -12px rgba(15,23,42,0.16)",
-          }}
-        >
-          <CardForItem item={item} />
-        </div>
+        <PosterBody item={item} scale={1.5} />
       </div>
 
       {/* FOOTER: sharer + QR */}
@@ -342,23 +413,13 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           <div style={{ minWidth: 0 }}>
             <div
               style={{
-                fontSize: 22,
+                fontSize: 26,
                 fontWeight: 700,
                 color: "#0f172a",
                 lineHeight: 1.2,
               }}
             >
-              {sharerName || "AI-Feeds 用户"}
-            </div>
-            <div
-              style={{
-                marginTop: 6,
-                fontSize: 16,
-                color: "#64748b",
-                lineHeight: 1.3,
-              }}
-            >
-              分享自 ai-feeds.com · 你的 AI 一手情报
+              {sharerName}
             </div>
           </div>
         </div>
