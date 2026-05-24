@@ -692,11 +692,18 @@ export function TweetCard({
           {/* Header: single row — author + ✓ + @handle · time + 原文 toggle.
               posterMode 下隐藏 @handle / 原文按钮, 时间用 MM-DD HH:MM. */}
           <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
-            <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
+            {/* PM 2026-05-25 R5: posterMode 下 author 不 truncate 给 verified
+                明确独占空间,加 pr-1 让 author 末字跟 verified 之间空一档 */}
+            <span
+              className={cn(
+                "text-[15px] font-bold leading-tight text-neutral-900",
+                posterMode ? "shrink-0 pr-1" : "truncate",
+              )}
+            >
               {author}
             </span>
             {isVerified && (
-              <span className={cn("shrink-0 self-center", posterMode && "ml-2.5")}>
+              <span className={cn("shrink-0 self-center", posterMode && "ml-2")}>
                 <VerifiedBadge />
               </span>
             )}

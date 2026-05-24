@@ -45,7 +45,7 @@ const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
  * 为什么不用 css zoom:zoom 在 modern-screenshot 跨浏览器序列化不一致;
  * transform + 测量更可靠.
  */
-function PosterBody({ item, scale }: { item: Item; scale: number }) {
+function PosterBody({ item, scale, flatTop }: { item: Item; scale: number; flatTop?: boolean }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
 
@@ -79,8 +79,15 @@ function PosterBody({ item, scale }: { item: Item; scale: number }) {
         width: "100%",
         overflow: "hidden",
         backgroundColor: "#ffffff",
-        border: "1px solid #e2e8f0",
-        borderRadius: 18,
+        // flatTop: 顶部接 hero 内白弧形,无需 border / radius 重复装饰
+        borderTop: flatTop ? "none" : "1px solid #e2e8f0",
+        borderLeft: "1px solid #e2e8f0",
+        borderRight: "1px solid #e2e8f0",
+        borderBottom: "1px solid #e2e8f0",
+        borderTopLeftRadius: flatTop ? 0 : 18,
+        borderTopRightRadius: flatTop ? 0 : 18,
+        borderBottomLeftRadius: 18,
+        borderBottomRightRadius: 18,
         boxShadow: "0 8px 24px -12px rgba(15,23,42,0.16)",
       }}
     >
@@ -338,13 +345,10 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           </div>
         </div>
 
-        {/* Hero 底部弧形:用 SVG path overlay 模拟 worker svg-template 的
-            quadratic bezier 凹陷 ($\cup$ 形 — 中间高两端低,hero 中部"陷"进 body)。
-            PM 2026-05-25 反馈:之前弧线方向反了(中间凸下),改成中间凹上.
-            实现:overlay 占 hero 底部 80px 高,fill body 色,bezier 控制点
-            在 svg 顶部(y=0),弧形从左下 → 顶中 → 右下,fill 多边形是
-            "拱形+底部矩形" → 视觉 hero 底部被切出 $\cup$ 凹陷. */}
-        {/* Hero 底部 $\cup$ 弧形,占 hero 下半 60px,fill body 灰 */}
+        {/* Hero 底部 $\cap$ 弧形 (中间向下凸,fill 白色) — PM 2026-05-25 R5:
+            弧线方向竖直往下,白色 fill 让弧形跟下方白卡片连续衔接.
+            视觉:hero 紫色 + 底部白色弧形 (中部向下凸 60px) + 白卡片
+            紧接弧形底 = 白卡片"上沿压在弧线上" 整体形如 $\cap$ 顶的白色块. */}
         <svg
           viewBox="0 0 1080 60"
           width="1080"
@@ -352,26 +356,25 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
           preserveAspectRatio="none"
           style={{
             position: "absolute",
-            bottom: 0,
+            bottom: -1,
             left: 0,
             display: "block",
             pointerEvents: "none",
           }}
         >
-          <path d="M 0 60 Q 540 0 1080 60 Z" fill="#f8fafc" />
+          <path d="M 0 0 Q 540 60 1080 0 L 1080 60 L 0 60 Z" fill="#ffffff" />
         </svg>
       </div>
 
-      {/* BODY: 真实 Card 用 transform scale 放大 — PM 2026-05-25 第四轮:
-          scale 1.9 → 2.5 (15px → 视觉 37.5px),padding 0 让内层 layout 宽 ~426px.
-          配合 TweetCard whitespace-nowrap 防 header/metrics 折行. */}
+      {/* BODY: 真实 Card 用 transform scale 放大 — scale 2.5,padding 0 + 白卡片
+          顶部 border-radius 0 (因为已被 hero 内白弧形装饰接管) + 接 hero 底部. */}
       <div
         style={{
-          padding: "4px 4px 16px",
+          padding: "0 4px 16px",
           backgroundColor: "#f8fafc",
         }}
       >
-        <PosterBody item={item} scale={2.5} />
+        <PosterBody item={item} scale={2.5} flatTop />
       </div>
 
       {/* FOOTER: sharer + QR */}
