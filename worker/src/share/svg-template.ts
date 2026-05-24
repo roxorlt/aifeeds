@@ -304,17 +304,18 @@ function formatXTime(iso: string | undefined | null): string {
   return `${mm}-${dd} ${hh}:${mi}`;
 }
 
-// PR2: X 平台 verified 蓝勾 (24×24 viewBox), 圆形蓝底 + 白勾
+// PR2 v3 (2026-05-24): X 平台 verified 蓝勾 — 直接复用 FE icons.tsx
+// VerifiedBadge 的 path (22×22 viewBox), 整 path 含外形 + 对勾,
+// fill-rule=evenodd 让对勾子路径镂空露白底, 视觉跟 FE 流内 / 抽屉一致.
+// 之前自画的 8 角形 + 中心对勾两个独立 path 位置算不准, 对勾偏离中心
 function renderVerifiedBadge(x: number, y: number, size: number): string {
-  const cx = x + size / 2;
-  const cy = y + size / 2;
-  // 8 角星(X verified shape 近似): 用 path 八角圆边
+  const scale = size / 22;
+  // 蓝底矩形先垫在下面, evenodd path 镂空对勾透出白底
   return `
-    <g transform="translate(${x},${y}) scale(${size / 24})">
-      <path d="M22.46 7.57c.6 .59 .6 1.55 0 2.14L20.39 11.78c-.16 .16 -.27 .37 -.31 .59l-.5 2.86c-.13 .77 -.83 1.31 -1.61 1.24l-2.91 -.27c-.22 -.02 -.44 .04 -.62 .17l-2.38 1.7c-.62 .44 -1.45 .44 -2.07 0L7.61 16.37c-.18 -.13 -.4 -.19 -.62 -.17l-2.91 .27c-.78 .07 -1.48 -.47 -1.61 -1.24l-.5 -2.86c-.04 -.22 -.15 -.43 -.31 -.59L.59 9.71c-.6 -.59 -.6 -1.55 0 -2.14l2.07 -2.07c.16 -.16 .27 -.37 .31 -.59l.5 -2.86c.13 -.77 .83 -1.31 1.61 -1.24l2.91 .27c.22 .02 .44 -.04 .62 -.17l2.38 -1.7c.62 -.44 1.45 -.44 2.07 0l2.38 1.7c.18 .13 .4 .19 .62 .17l2.91 -.27c.78 -.07 1.48 .47 1.61 1.24l.5 2.86c.04 .22 .15 .43 .31 .59l2.07 2.07z" fill="#1da1f2"/>
-      <path d="M9 12l2 2 4 -4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(${x},${y}) scale(${scale})">
+      <rect x="2" y="2" width="18" height="18" rx="4" fill="#fff"/>
+      <path fill-rule="evenodd" fill="#1d9bf0" d="M20.396 11c-.018-.646-.215-1.275-.57-1.816-.354-.54-.852-.972-1.438-1.246.223-.607.27-1.264.14-1.897-.131-.634-.437-1.218-.882-1.687-.47-.445-1.053-.75-1.687-.882-.633-.13-1.29-.083-1.897.14-.273-.587-.704-1.086-1.245-1.44S11.647 1.62 11 1.604c-.646.017-1.273.213-1.813.568s-.969.854-1.24 1.44c-.608-.223-1.267-.272-1.902-.14-.635.13-1.22.436-1.69.882-.445.47-.749 1.055-.878 1.688-.13.633-.08 1.29.144 1.896-.587.274-1.087.705-1.443 1.245-.356.54-.555 1.17-.574 1.817.02.647.218 1.276.574 1.817.356.54.856.972 1.443 1.245-.224.606-.274 1.263-.144 1.896.13.634.433 1.218.877 1.688.47.443 1.054.747 1.687.878.633.132 1.29.084 1.897-.136.274.586.705 1.084 1.246 1.439.54.354 1.17.551 1.816.569.647-.016 1.276-.213 1.817-.567s.972-.854 1.245-1.44c.604.239 1.266.296 1.903.164.636-.132 1.22-.447 1.68-.907.46-.46.776-1.044.908-1.681s.075-1.299-.165-1.903c.586-.274 1.084-.705 1.439-1.246.354-.54.551-1.17.569-1.816zM9.662 14.85l-3.429-3.428 1.293-1.302 2.072 2.072 4.4-4.794 1.347 1.246z"/>
     </g>`;
-  void cx; void cy;
 }
 
 // PR2: 渲染圆形头像 — 有 dataUri 用 image (clipPath 圆形), 没就色块 + 首字母 fallback
@@ -753,13 +754,15 @@ function renderXContent(opts: {
   // name + verified
   const nameTruncated = truncate(opts.authorName || '', 14);
   const nameSize = 52;
-  // PM 2026-05-22 反馈: boost 0.82 + offset 4 让 badge 压到末字 'z' 上 (英文
-  // 字符 0.55 倍宽 + font-weight 900 加宽 + letter-spacing 调整, estimate
-  // 整体偏小). 改成 boost 1.0 + offset 14 让 badge 跟字尾有可识别间距
+  // PM 2026-05-24: badge 跟昵称间距对齐 FE 流内 (Tailwind gap-1 ≈ 4px in 15px text,
+  // 比例 ≈ 0.27 × fontSize → 海报 nameSize 52 时 offset ≈ 14px).
+  // badge size 40 (跟 name 高 ~52 接近, 视觉等高); FE path evenodd 自带对勾居中
   const nameWidth = estimateTextWidth(nameTruncated, nameSize, 1.0);
   svg += `<text x="${nameX}" y="${cy + 50}" font-family='${FONT}' font-size="${nameSize}" font-weight="900" fill="${C.ink}" letter-spacing="-1.5">${esc(nameTruncated)}</text>`;
   if (opts.authorIsVerified) {
-    svg += renderVerifiedBadge(nameX + nameWidth + 14, cy + 50 - 36, 36);
+    const badgeSize = 40;
+    // baseline 对齐: text baseline y = cy+50, badge 中心对齐 baseline 上方 nameSize*0.35
+    svg += renderVerifiedBadge(nameX + nameWidth + 12, cy + 50 - nameSize * 0.7, badgeSize);
   }
   // 第二行: @handle · 时间
   const handleStr = opts.authorHandle ? `@${opts.authorHandle}` : '';
