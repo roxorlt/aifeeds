@@ -165,9 +165,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const cachedInit = readFeedCache(sourceType);
   const [items, setItems] = useState<Item[]>(cachedInit?.items ?? []);
   const [pending, setPending] = useState<Item[]>([]);
-  // 有 cache 不显 loading(直接显已有 items);无 cache 默认 false,useEffect
-  // fetch 时 set true 显 skeleton
-  const [loading, setLoading] = useState(false);
+  // PM 2026-05-25 R11: 有 cache 不显 loading; 无 cache 初始 true 让 mount 那一帧
+  // 立即显 skeleton (不留 mount → useEffect fetch 之间的空白帧, 配 channel
+  // transition overlay fade-out 无缝衔接)
+  const [loading, setLoading] = useState(!cachedInit);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastScrapedAt = useRef<string | null>(null);

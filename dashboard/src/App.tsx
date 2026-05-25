@@ -271,11 +271,12 @@ function DashboardHome() {
       const cur = filterRef.current;
       const idx = tabs.findIndex((c) => c.key === cur);
 
-      const shouldSwitch =
-        Math.abs(dx) >= 60 &&
-        Math.abs(dx) >= Math.abs(dy) * 1.5 &&
-        dt <= 800 &&
-        idx >= 0;
+      // PM 2026-05-25 R11: 阈值放宽 + flick (高 velocity 短滑也算切换)
+      const v = Math.abs(dx) / Math.max(dt, 1);
+      const distanceOk = Math.abs(dx) >= 40;
+      const flickOk = v > 0.3 && Math.abs(dx) >= 25;
+      const horizontalDominant = Math.abs(dx) >= Math.abs(dy) * 1.5;
+      const shouldSwitch = (distanceOk || flickOk) && horizontalDominant && dt <= 800 && idx >= 0;
       const nextIdx = !shouldSwitch ? idx : (dx < 0
         ? Math.min(idx + 1, tabs.length - 1)
         : Math.max(idx - 1, 0));
@@ -559,36 +560,40 @@ function DashboardHome() {
         </div>
       </header>
 
+      {/* Channel transition skeleton overlay — PM 2026-05-25 R11:
+          改 fixed inset 独立于 main translate (swipe 时 main 在 -width,
+          overlay 跟着走会跑出屏外; 独立 fixed 始终覆盖 viewport, 消除 main
+          reset transform 时的 "main 跳 0" 视觉闪烁). */}
+      {isNarrow && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-40 overflow-hidden bg-white"
+          style={{
+            top: 49,        // header 高度
+            bottom: 0,
+            opacity: transitionActive ? 1 : 0,
+            transition: transitionActive ? "none" : "opacity 220ms ease-out",
+          }}
+          aria-hidden
+        >
+          {transitionActive && (
+            <div className="flex h-full flex-col gap-4 px-4 py-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="space-y-2">
+                  <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
+                  <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
+                  <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 3-column grid */}
       <main
         ref={mainRef}
         className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
       >
-        {/* Channel transition skeleton overlay — 切 tab 时覆盖 220ms, 防"空白帧" */}
-        {isNarrow && (
-          <div
-            className="pointer-events-none absolute inset-x-0 top-0 z-10 overflow-hidden bg-white"
-            style={{
-              height: "calc(100vh - 64px)",
-              opacity: transitionActive ? 1 : 0,
-              transition: transitionActive ? "none" : "opacity 220ms ease-out",
-            }}
-            aria-hidden
-          >
-            {transitionActive && (
-              <div className="flex h-full flex-col gap-4 px-4 py-4">
-                {/* skeleton 列表 — 模拟卡片框架 */}
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="space-y-2">
-                    <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
-                    <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
-                    <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
             const isPlaceholder = !liveSourceTypes.has(col.source_type);
