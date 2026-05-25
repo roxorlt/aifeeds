@@ -5113,9 +5113,13 @@ export async function runBackfillXArticleTranslations(
 }> {
   // 候选:任一 path x_article 有 title 但无 title_translated + 没 skip / fail marker
   // 2026-05-22 PR6:加 body 字段后,SQL 选 "任一字段(title/excerpt/body) 存在 + 对应 _translated 缺"。
-  // body 后到的场景:之前可能 title/excerpt 翻完标了 translate_skipped_at(中文原文),
-  // 但 body 后到且可能是英文 → SQL 需放过去,collect 阶段判断 body 需要翻 + 清 skip flag。
-  // translate_failed_at 仍然短路(避免反复触发已永久失败)。
+  // 2026-05-25 hotfix:必须短路 translate_skipped_at,否则中文原文的 stub
+  // (DeepSeek 返 null _zh)会在 SQL 选中→翻 null→标 skip→SQL 又选中 形成死循环。
+  //
+  // body 后到的 case 仍 OK:fetchXArticleBodiesForXTweet 写 body 时会
+  // delete stub.translate_skipped_at,所以 SQL 加 skip_at IS NULL 不阻挡 body 重翻。
+  // 中文原文 stub 标 skip 后真的不再选,fetchXArticleBodies 不会动它(因为 body 已存在或失败已标)。
+  // translate_failed_at 同理短路(永久失败)。
   const TR = (path: string) => `(
     (
       (json_extract(extra, '$.${path}x_article.title') IS NOT NULL AND json_extract(extra, '$.${path}x_article.title_translated') IS NULL)
@@ -5123,6 +5127,7 @@ export async function runBackfillXArticleTranslations(
       OR (json_extract(extra, '$.${path}x_article.body') IS NOT NULL AND json_extract(extra, '$.${path}x_article.body_translated') IS NULL)
     )
     AND json_extract(extra, '$.${path}x_article.translate_failed_at') IS NULL
+    AND json_extract(extra, '$.${path}x_article.translate_skipped_at') IS NULL
   )`;
   const HAS_PENDING = `(
     ${TR('')} OR

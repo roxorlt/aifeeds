@@ -1408,6 +1408,17 @@ export default {
     // backfill 性质,不需实时)。UTC 04:05 = BJT 12:05 中午闲时段。
     const isXReconstructThreadsSlot = hour === 4 && minute === 5;
 
+    // X Article body 抓取 + 翻译兜底(2026-05-25 PR6 follow-up):
+    // PR #113/#114 上线后 prod 170 篇候选 article,日 cap 50 限制下需要 ~3-4 天 backfill。
+    // 加 cron 自动跑,免人工撑。
+    //   :05 (除 hour=4 让 reconstruct) → backfill-x-article-bodies limit=3 ≈ 20-30s wall
+    //     288/24 = 12 tick/day,12 × 3 = 36/day,日 cap 50 短路保护
+    //   :35 (除 hour=3 cleanup) → backfill-x-article-translations limit=2 ≈ 30s wall
+    //     12 tick/day × 2 = 24/day(翻译比抓取慢,每 tick 少点)
+    // Cookie 失效 / cap 撞顶 → graceful return,不阻塞别的 cron。
+    const isXArticleBodyBackfillSlot = minute === 5 && hour !== 4;
+    const isXArticleTranslateBackfillSlot = minute === 35 && hour !== 3;
+
     // GitHub enrich (phase 2) opportunistic: on any tick where pending exists,
     // preempt this slot for one repo's enrich (~9 subrequests vs running an X
     // mode). Phase-1 is only twice/day, so ≤20 enriches/day to drain → at most
@@ -1544,6 +1555,33 @@ export default {
           if (isXReconstructThreadsSlot) {
             const r = await runReconstructThreads(env, false, 5);
             console.log(`[cron] x-reconstruct-threads result:`, JSON.stringify(r));
+            return;
+          }
+          // X article body 抓取(2026-05-25 PR6 follow-up):
+          // :05 每 hour(除 hour=4 让 reconstruct)limit=3 ≈ 20-30s wall。
+          // 日 cap 50/天短路:用满后续 tick graceful return,等下次 UTC 0 重置。
+          // Cookie 失效 / rate limit → markCookieInvalid + 中断,等 user 通过 admin 面板更新。
+          if (isXArticleBodyBackfillSlot) {
+            const r = await runBackfillXArticleBodies(
+              {
+                DB: env.DB,
+                DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
+                AUTH_KV: env.AUTH_KV,
+                PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS,
+                X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP,
+              },
+              3,
+              ctx,
+            );
+            console.log(`[cron] x-article-body-backfill result:`, JSON.stringify(r));
+            return;
+          }
+          // X article body 翻译(2026-05-25 PR6 follow-up):
+          // :35 每 hour(除 hour=3 cleanup)limit=2 ≈ 30s wall。
+          // 单 task 单 DeepSeek call,~15s/task。limit=2 保留 CF edge 30s 余量。
+          if (isXArticleTranslateBackfillSlot) {
+            const r = await runBackfillXArticleTranslations(env, 2, 200);
+            console.log(`[cron] x-article-translate-backfill result:`, JSON.stringify(r));
             return;
           }
           // X workflow backfill 兜底（2026-05-17 批 4）:扫 workflow_completed_at IS NULL
