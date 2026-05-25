@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Feed, type FeedHandle } from "./components/Feed";
+import { Feed, SkeletonCard, type FeedHandle } from "./components/Feed";
 import { DrawerProvider } from "./lib/drawer";
 
 // Drawer drags in react-markdown + remark-gfm + rehype-raw (~150kb gzipped).
@@ -199,6 +199,32 @@ function DashboardHome() {
     let active = false;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
     let currentSide: 'left' | 'right' | null = null;
+    let bodyLockY: number | null = null;
+
+    // R18: lock body position:fixed 期间 swipe horizontal → 真机彻底防
+    // pull-to-refresh (overscroll-behavior + preventDefault 真机都拦不住,
+    // body fixed 让浏览器认为页面不滚动, 不触发系统下拉刷新动作).
+    // 保 scrollY 用 top:-sy, unlock 时 scrollTo restore.
+    const lockBody = () => {
+      if (bodyLockY !== null) return;
+      bodyLockY = window.scrollY;
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${bodyLockY}px`;
+      document.body.style.left = '0';
+      document.body.style.right = '0';
+      document.body.style.width = '100%';
+    };
+    const unlockBody = () => {
+      if (bodyLockY === null) return;
+      const sy = bodyLockY;
+      bodyLockY = null;
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.left = '';
+      document.body.style.right = '';
+      document.body.style.width = '';
+      window.scrollTo(0, sy);
+    };
 
     const applyMainTransform = (dx: number, withTransition: boolean) => {
       el.style.transition = withTransition
@@ -273,6 +299,8 @@ function DashboardHome() {
       if (direction === 'horizontal') {
         // 防 native vertical scroll 跟 JS horizontal swipe 同时发生
         if (e.cancelable) e.preventDefault();
+        // R18: lock body position:fixed 防真机 pull-to-refresh
+        lockBody();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
@@ -295,6 +323,7 @@ function DashboardHome() {
       const cleanupAdjacent = () => {
         currentSide = null;
         setSwipeAdjacent(null);
+        unlockBody(); // R18 释放 body fixed
       };
       if (!active || direction !== 'horizontal') {
         active = false;
@@ -375,6 +404,7 @@ function DashboardHome() {
       direction = 'unknown';
       currentSide = null;
       setSwipeAdjacent(null);
+      unlockBody(); // R18 释放
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
@@ -664,14 +694,9 @@ function DashboardHome() {
           aria-hidden
         >
           {transitionActive && (
-            <div className="flex h-full flex-col gap-4 px-4 py-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="space-y-2">
-                  <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
-                  <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
-                  <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
-                </div>
-              ))}
+            <div className="flex h-full flex-col overflow-hidden">
+              {/* R18: 复用 Feed 的 SkeletonCard, 切换全程 skeleton 样式一致, 不再 3 屏闪 */}
+              {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
             </div>
           )}
         </div>

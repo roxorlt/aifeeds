@@ -133,7 +133,10 @@ function PendingAvatars({ pending }: { pending: Item[] }) {
   );
 }
 
-function SkeletonCard() {
+// R18 PM 反馈: 切换前 / 切换中 / 切换后 三处 skeleton 样式不一致, 看 3 屏闪.
+// export 让 App.tsx 的 channel transition overlay / adjacent panel 共用同款,
+// 视觉上 skeleton 一致, 只是 mount 位置变化, 用户感受切换连续.
+export function SkeletonCard() {
   return (
     <div className="border-b border-neutral-200 px-3 py-3">
       <div className="mb-1.5 flex items-center gap-2">
