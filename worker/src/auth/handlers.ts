@@ -165,6 +165,40 @@ interface LoginBody {
 
 const SESSION_COOKIE_DEV_MARKER = 'localhost';  // 区分 dev/prod 环境
 
+// ─── 默认 profile derive (2026-05-25, FE 要求) ─────────────
+// 新 user 注册时自动填 display_name + avatar_url,避免 client-side 各自打 fallback。
+// 设计:
+//   display_name:
+//     email → 前缀("jdoe@example.com" → "jdoe")
+//     phone → "用户" + 后 4 位("13912345678" → "用户5678")
+//     其他 → identifier 原值兜底
+//   avatar_url:
+//     /avatars/avatar-NN.png(NN = djb2(user.id) % 30 + 1,1-30 池)
+//     30 张默认头像在 dashboard/public/avatars/ 已经备好
+// 老 user 不动:已存在 user 登录时不 override display_name / avatar_url,
+// 让用户保留自己设过的值(或仍是 null)。
+function deriveDisplayName(provider: string, identifier: string): string {
+  if (provider === 'email') {
+    const prefix = identifier.split('@')[0];
+    return prefix || identifier;
+  }
+  if (provider === 'phone') {
+    return '用户' + identifier.slice(-4);
+  }
+  return identifier;
+}
+
+function deriveAvatarUrl(userId: string): string {
+  // djb2 hash → 1-30
+  let h = 5381;
+  for (let i = 0; i < userId.length; i++) {
+    h = (h * 33 + userId.charCodeAt(i)) >>> 0;
+  }
+  const num = (h % 30) + 1;
+  const padded = num.toString().padStart(2, '0');
+  return `/avatars/avatar-${padded}.png`;
+}
+
 function isDevHost(req: Request): boolean {
   const h = req.headers.get('Host') || '';
   return h.includes(SESSION_COOKIE_DEV_MARKER) || h.includes('127.0.0.1');
@@ -271,16 +305,28 @@ export async function handleLogin(
 
   let userId: string;
   let isNewUser = false;
+  let displayName: string | null = null;
+  let avatarUrl: string | null = null;
   if (ident) {
     userId = ident.user_id;
     await env.DB.prepare(`UPDATE users SET last_active_at = ? WHERE id = ?`).bind(now, userId).run();
+    // 老 user:读 DB 拿现有 profile(可能 user 已设过,也可能仍是 null)
+    const userRow = await env.DB.prepare(
+      `SELECT display_name, avatar_url FROM users WHERE id = ?`,
+    ).bind(userId).first<{ display_name: string | null; avatar_url: string | null }>();
+    displayName = userRow?.display_name ?? null;
+    avatarUrl = userRow?.avatar_url ?? null;
   } else {
     userId = nanoid(14);
     isNewUser = true;
+    // 新 user:自动 derive display_name + avatar_url
+    displayName = deriveDisplayName(provider, identifier);
+    avatarUrl = deriveAvatarUrl(userId);
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO users (id, created_at, last_active_at, status) VALUES (?, ?, ?, 'active')`,
-      ).bind(userId, now, now),
+        `INSERT INTO users (id, display_name, avatar_url, created_at, last_active_at, status)
+         VALUES (?, ?, ?, ?, ?, 'active')`,
+      ).bind(userId, displayName, avatarUrl, now, now),
       env.DB.prepare(
         `INSERT INTO identities (user_id, provider, identity_value, verified_at) VALUES (?, ?, ?, ?)`,
       ).bind(userId, provider, identifier, now),
@@ -311,8 +357,8 @@ export async function handleLogin(
     {
       user: {
         id: userId,
-        display_name: null,
-        avatar_url: null,
+        display_name: displayName,
+        avatar_url: avatarUrl,
         is_new: isNewUser,
       },
       session: {
