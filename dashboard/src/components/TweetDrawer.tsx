@@ -157,57 +157,90 @@ export function TweetDrawer() {
 
   // Mobile swipe-to-close: rightward swipe → close.
   //
-  // Decision is made entirely on `touchend` from the start/end position delta,
-  // so we never attach a `touchmove` listener (no `preventDefault` ever fires
-  // on the aside). That guarantees native scroll has zero interference,
-  // including the iOS scroll-trap at the README bottom.
-  //
-  // Visual: aside slides off via existing CSS transition on close. We don't
-  // follow the finger during the swipe (small UX trade-off for a reliable
-  // body scroll).
+  // PM 2026-05-25 R9 改"跟手":touchmove 阶段同步 dragX 让 aside 跟手指走,
+  // 早期方向锁定避开 native vertical scroll (passive listener 不挡 scroll).
+  // direction='horizontal' 且 dx > 0 → setDrag(dx),其他情况一律 abort.
   useEffect(() => {
     if (!open || !isNarrow) return;
     const aside = asideRef.current;
     if (!aside) return;
 
+    let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
+
     const onStart = (e: TouchEvent) => {
       const t = e.touches[0];
-      // Skip if touch starts inside the system edge zone — let OS gesture win
       if (t.clientX < SWIPE_EDGE_BUFFER) {
         dragStart.current = null;
         return;
       }
       dragStart.current = { x: t.clientX, y: t.clientY };
+      direction = 'unknown';
+      setIsDragging(false);
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!dragStart.current) return;
+      const t = e.touches[0];
+      const dx = t.clientX - dragStart.current.x;
+      const dy = t.clientY - dragStart.current.y;
+      const absDx = Math.abs(dx), absDy = Math.abs(dy);
+      // 方向未锁:抖动阈值 10px 内等
+      if (direction === 'unknown') {
+        if (absDx < 10 && absDy < 10) return;
+        if (absDx > absDy * 2) {
+          direction = 'horizontal';
+          setIsDragging(true);
+        } else if (absDy > absDx * 2) {
+          // 纵向锁定 = abort, let native scroll take over
+          direction = 'vertical';
+          dragStart.current = null;
+          return;
+        } else {
+          return; // 模糊带等下次
+        }
+      }
+      if (direction === 'horizontal') {
+        // 只跟手向右 (close direction), 向左阻尼 0
+        setDrag(dx > 0 ? dx : 0);
+      }
     };
     const onEnd = (e: TouchEvent) => {
-      if (!dragStart.current) return;
+      if (!dragStart.current) {
+        setIsDragging(false);
+        return;
+      }
       const t = e.changedTouches[0];
       if (!t) {
         dragStart.current = null;
+        setIsDragging(false);
+        setDrag(0);
         return;
       }
       const dx = t.clientX - dragStart.current.x;
       const dy = t.clientY - dragStart.current.y;
-      // Commit close only on a clearly horizontal-rightward gesture: dx past
-      // threshold AND horizontal motion at least 1.5× vertical.
-      if (dx > SWIPE_COMMIT_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
-        // Visual cue: snap aside off-screen then close after transition
-        setIsDragging(false);
+      setIsDragging(false);
+      // close 条件:dx 过半屏 或 dx > 阈值 且 horizontal dominant
+      const halfScreen = window.innerWidth / 2;
+      const shouldClose =
+        direction === 'horizontal' &&
+        (dx > halfScreen || (dx > SWIPE_COMMIT_PX && Math.abs(dx) > Math.abs(dy) * 1.5));
+      if (shouldClose) {
         setDrag(window.innerWidth);
         setTimeout(close, SWIPE_ANIM_MS);
+      } else {
+        // 弹回 0 (transition 已自动接管, isDragging=false)
+        setDrag(0);
       }
-      // For other gestures (vertical scroll, leftward, etc.) just clear
-      // start state — let the user-agent handle the rest natively.
       dragStart.current = null;
+      direction = 'unknown';
     };
 
-    // Both listeners are passive: we never call preventDefault, so the
-    // browser commits to native scroll immediately on touchmove.
     aside.addEventListener("touchstart", onStart, { passive: true });
+    aside.addEventListener("touchmove", onMove, { passive: true });
     aside.addEventListener("touchend", onEnd, { passive: true });
     aside.addEventListener("touchcancel", onEnd, { passive: true });
     return () => {
       aside.removeEventListener("touchstart", onStart);
+      aside.removeEventListener("touchmove", onMove);
       aside.removeEventListener("touchend", onEnd);
       aside.removeEventListener("touchcancel", onEnd);
     };
@@ -356,10 +389,23 @@ export function TweetDrawer() {
     smoothScrollToTop(bodyScrollRef.current);
   };
 
+  // Backdrop opacity 跟 dragX 联动:dragX 0 → 全黑 40%, 滑到 100% width → 0
+  // entered=false 时 backdrop 也从 0 渐入 → 跟 aside slide-in 同步
+  const screenW = typeof window !== "undefined" ? window.innerWidth : 1;
+  const dragRatio = Math.min(Math.max(dragX / screenW, 0), 1);
+  const backdropOpacity = entered ? 0.4 * (1 - dragRatio) : 0;
+
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={close} />
+      {/* Backdrop — opacity 跟 drag 联动让底层频道流自然透出, 配 aside slide */}
+      <div
+        className="absolute inset-0 bg-black"
+        onClick={close}
+        style={{
+          opacity: backdropOpacity,
+          transition: isDragging ? "none" : "opacity 280ms cubic-bezier(0.32, 0.72, 0, 1)",
+        }}
+      />
       {/* Panel */}
       <aside
         ref={asideRef}
