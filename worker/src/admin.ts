@@ -362,9 +362,9 @@ ${ADMIN_SHARED_CSS}
 <body>
 ${adminNavHtml('tools')}
 <main>
-<div class="grid">
+<div class="grid" data-testid="admin-tools-grid">
 
-  <div class="card">
+  <div class="card" data-testid="card-sms-status">
     <h2>📊 SMS 状态查询</h2>
     <p class="hint">查看某手机号的当前限流 count + 锁定状态 + 最近 20 条 log</p>
     <input type="tel" id="smsStatusPhone" placeholder="11 位手机号" />
@@ -372,7 +372,7 @@ ${adminNavHtml('tools')}
     <pre id="smsStatusOut">—</pre>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-unlock-sms">
     <h2>🔓 解锁 SMS 限流</h2>
     <p class="hint">将该手机号所有 success 记录改成 cleared，限流 count 立即归零</p>
     <input type="tel" id="unlockPhone" placeholder="11 位手机号" />
@@ -380,7 +380,7 @@ ${adminNavHtml('tools')}
     <pre id="unlockOut">—</pre>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-user-detail">
     <h2>👤 User 详情</h2>
     <p class="hint">按手机号查 user / sessions / 关联 events 数</p>
     <input type="tel" id="userPhone" placeholder="11 位手机号" />
@@ -388,7 +388,7 @@ ${adminNavHtml('tools')}
     <pre id="userOut">—</pre>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-cleanup-account">
     <h2>🗑 清除测试账号</h2>
     <p class="hint">删除 user / identities / sessions，events 的 user_id 置 NULL，sms_send_log 标 cleared。<b style="color:#fca5a5">不可逆</b>。</p>
     <input type="tel" id="cleanupPhone" placeholder="11 位手机号" />
@@ -396,14 +396,14 @@ ${adminNavHtml('tools')}
     <pre id="cleanupOut">—</pre>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-daily-cap">
     <h2>📈 今日 SMS 用量</h2>
     <p class="hint">SMS_DAILY_CAP 每日总量上限 + KV 当前 count + provider 切换状态</p>
     <div class="row"><button onclick="run('GET','/api/admin/daily-cap', null, 'capOut')">刷新</button></div>
     <pre id="capOut">—</pre>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-x-cookie">
     <h2>🍪 X Cookie 更新</h2>
     <p class="hint">X article body 抓取走 GraphQL <code>TweetResultByRestId</code> 需登录 cookie。失效时(401/403)workflow 自动标失败 + PushDeer 推送,需在此页面更新。<br>步骤:浏览器登录 X 小号 → F12 → Application → Cookies → x.com → 全选复制 → 粘贴 Submit。</p>
     <div class="row" style="margin-bottom: 8px;"><button onclick="loadXCookieStatus()">查当前状态</button></div>

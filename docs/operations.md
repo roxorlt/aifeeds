@@ -137,6 +137,32 @@ curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
 4. **应急恢复**:发现自己 deploy 的改动消失 → 从 `main` HEAD redeploy 即可(`main` 永远是双方改动的并集,前提是改动都已 PR merge)
 5. **跨域改动不要拆开 deploy**:同时动 `worker/src/share/` 和 `worker/src/hf-paper/` 时,两个 PR 合并到 main 后再 deploy 一次,不要分两次各 deploy 各自的
 
+### ⚠️ 手动 deploy 边界(2026-05-25 PR6 收尾教训)
+
+**默认**:prod deploy **永远走 CICD**(`.github/workflows/deploy-worker.yml` + `deploy-dashboard.yml`),push 到 main 自动触发。不要手动 `wrangler deploy` 推 prod。
+
+**根因**:即使有 §「多人协作 deploy」L132-138 的"deploy 前 rebase main"约定,手动 deploy 仍是事故温床 — branch 切换 / worktree HEAD / 漏 fetch 等环境状态都可能让 rebase 失效。CICD 在 GitHub-side 跑,branch state 由 main HEAD 唯一确定,无环境分叉。PR6 期间手动 deploy 4 次实际是因为 CI auto-deploy 挂了的兜底,而不是常规习惯 — 后续 OPS 修好 CI 后必须切回 CICD-only。
+
+**允许手动 wrangler deploy 的场景**(白名单,其他都禁):
+
+| 场景 | 目标环境 | 允许原因 |
+|---|---|---|
+| Staging spike(BE/FE 跑 spike 验证假设) | staging | 不影响 prod,快速迭代 |
+| Prod emergency rollback(prod 挂了,需要立刻回退到 main HEAD) | prod(临时) | CICD 跑 ~2-3min 太慢,事故时手动 deploy 从 `main` HEAD 立刻恢复 |
+| CICD 挂了 BE 必须 unblock | prod / staging | 配合 OPS 排查 CI 同时手动 deploy 兜底 |
+
+**手动 deploy 必走 `predeploy-check`**(2026-05-25 PR #N 落地):
+
+`worker/package.json` 和 `dashboard/package.json` 已加 `predeploy` npm lifecycle hook,自动跑 `scripts/predeploy-check.sh`。这个脚本:
+
+1. `git fetch origin main`
+2. `git merge-base --is-ancestor origin/main HEAD` — HEAD 必须包含 origin/main HEAD
+3. 失败 → 报错列出缺失 commits + 提示 `git pull --rebase origin main`
+
+`npm run deploy` 会自动跑这个 check,fail 时 deploy 不触发。
+
+**应急逃生**(慎用):`SKIP_PREDEPLOY_CHECK=1 npm run deploy` 跳过 check(知道自己在做什么时用)
+
 ### ⚠️ deploy 命令模板:必须 source 整个 env 文件(2026-05-20 教训)
 
 **根因**:wrangler 4.x 在 deploy 前会查 `https://api.cloudflare.com/client/v4/memberships` 列出当前 token 可访问的 account 列表。如果 token scope 不含 `User → Memberships → Read`,这个调用返 `code 9106 Authentication failed` → deploy 卡死。**但**只要 env 里有 `CLOUDFLARE_ACCOUNT_ID`,wrangler 会跳过 `/memberships` 调用直接用该 ID,无需 Memberships scope。

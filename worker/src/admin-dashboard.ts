@@ -547,35 +547,35 @@ ${ADMIN_SHARED_CSS}
 ${adminNavHtml('dashboard')}
 <main>
 
-<div class="kpi-row" id="kpis">
-  <div class="kpi"><div class="label">DAU · 今日</div><div class="value" id="kpi-dau">—</div><div class="hint">最近 24h 独立 device</div></div>
-  <div class="kpi"><div class="label">WAU · 7d</div><div class="value" id="kpi-wau">—</div><div class="hint">最近 7 天独立 device</div></div>
-  <div class="kpi"><div class="label">MAU · 30d</div><div class="value" id="kpi-mau">—</div><div class="hint">最近 30 天独立 device</div></div>
-  <div class="kpi"><div class="label">累计 device</div><div class="value" id="kpi-total">—</div><div class="hint">events 表全部 unique</div></div>
-  <div class="kpi"><div class="label">累计事件</div><div class="value" id="kpi-events">—</div><div class="hint">events 表全部行数</div></div>
+<div class="kpi-row" id="kpis" data-testid="kpis-row">
+  <div class="kpi" data-testid="kpi-dau"><div class="label">DAU · 今日</div><div class="value" id="kpi-dau">—</div><div class="hint">最近 24h 独立 device</div></div>
+  <div class="kpi" data-testid="kpi-wau"><div class="label">WAU · 7d</div><div class="value" id="kpi-wau">—</div><div class="hint">最近 7 天独立 device</div></div>
+  <div class="kpi" data-testid="kpi-mau"><div class="label">MAU · 30d</div><div class="value" id="kpi-mau">—</div><div class="hint">最近 30 天独立 device</div></div>
+  <div class="kpi" data-testid="kpi-total"><div class="label">累计 device</div><div class="value" id="kpi-total">—</div><div class="hint">events 表全部 unique</div></div>
+  <div class="kpi" data-testid="kpi-events"><div class="label">累计事件</div><div class="value" id="kpi-events">—</div><div class="hint">events 表全部行数</div></div>
 </div>
 
 <div class="grid">
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-dau-trend">
     <h2>📈 DAU 趋势</h2>
     <p class="hint">最近 30 天每天独立 device 数 + 事件总数（双轴）</p>
     <div class="chart tall" id="ch-dau"></div>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-funnel">
     <h2>🎯 行为漏斗</h2>
     <p class="hint">7 天内每个 device 是否触达 4 步关键行为（独立 device 数）</p>
     <div id="ch-funnel"></div>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-session-duration">
     <h2>⏱ 会话时长分布</h2>
     <p class="hint">7 天内每个 device-day 的事件首末时间差。session_end 在 mobile 大量丢失，用 max-min 兜底</p>
     <div class="chart" id="ch-session"></div>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-channel-dwell">
     <h2>📺 频道停留时长</h2>
     <p class="hint">7 天每个 source 平均停留时长 + 总时长。算法：相邻 source_filter_change 间隔（&gt;1h 视为离开会话不计），漏算首尾两段</p>
     <div style="overflow-x:auto"><table id="tbl-channels"><thead><tr>
@@ -583,19 +583,19 @@ ${adminNavHtml('dashboard')}
     </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-drawer-by-source">
     <h2>📂 详情打开 · 按数据源</h2>
     <p class="hint">7 天 item_open_drawer 按 source 分组。哪个源的内容最吸引用户进抽屉深读</p>
     <div class="chart" id="ch-drawer-source"></div>
   </div>
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-feed-depth">
     <h2>📜 人均浏览深度</h2>
     <p class="hint">最近 30 天每天人均 item_impression（曝光到屏幕中央的 item 数）+ 人均 item_open_drawer。粗略反映"翻多深"。严格翻页深度需 FE 加 feed_load_more 埋点</p>
     <div class="chart tall" id="ch-feed-depth"></div>
   </div>
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-retention">
     <h2>♻️ 留存矩阵</h2>
     <p class="hint">最近 30 天每个 cohort（首次访问日期）在 +1/+3/+7 天的留存率</p>
     <div style="overflow-x:auto"><table id="tbl-retention"><thead><tr>
@@ -604,19 +604,19 @@ ${adminNavHtml('dashboard')}
     </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
-  <div class="card">
+  <div class="card" data-testid="card-event-distribution">
     <h2>🧩 事件类型分布</h2>
     <p class="hint">7 天内 top 事件类型（按次数，排除错误类，错误见下方专门模块）</p>
     <div class="chart tall" id="ch-events"></div>
   </div>
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-error-trend">
     <h2>⚠️ 错误趋势</h2>
     <p class="hint">最近 30 天每天各类前端错误次数（堆叠柱状）。timeout_5000ms 是 fetch 5s 超时，不是后端 500</p>
     <div class="chart tall" id="ch-error-trend"></div>
   </div>
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-errors">
     <h2>⚠️ 错误明细（7 天 top 20）</h2>
     <p class="hint">同一 error_msg 聚合，可看具体超时端点 / JS 堆栈 / 网络抖动等真因。配合上面的「错误趋势」一起看</p>
     <div style="overflow-x:auto"><table id="tbl-errors"><thead><tr>
@@ -624,7 +624,7 @@ ${adminNavHtml('dashboard')}
     </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
-  <div class="card wide">
+  <div class="card wide" data-testid="card-top-devices">
     <h2>🧑‍💻 重度设备</h2>
     <p class="hint">最近 28 天按 active_days × events 排序前 30。active_days ≥ 5 加 GitHub 风格活跃日方格（7×4 排列，由浅到深 4 级颜色按当天 event 数：1-9 / 10-49 / 50-199 / 200+；带边框那格是今天）</p>
     <div style="overflow-x:auto"><table id="tbl-devices"><thead><tr>

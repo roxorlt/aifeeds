@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:staging": "tsc -b && vite build --mode staging",
+    "predeploy": "bash ../scripts/predeploy-check.sh",
     "deploy": "npm run build && wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=true",
+    "predeploy:staging": "bash ../scripts/predeploy-check.sh",
     "deploy:staging": "npm run build:staging && wrangler pages deploy dist --project-name=xlist-dashboard-staging --branch=main --commit-dirty=true",
     "lint": "eslint .",
     "preview": "vite preview"
