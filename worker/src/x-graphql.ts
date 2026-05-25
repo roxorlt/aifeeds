@@ -99,6 +99,9 @@ export class TweetNotFoundError extends Error {
 export interface XGraphqlEnv {
   AUTH_KV: KVNamespace;
   PUSHDEER_ADMIN_KEYS?: string;
+  // Optional: 让 markCookieInvalid 跑 SQL 统计影响范围(N 篇 body 待抓 + M 篇 cover 缺)
+  // 让告警消息含紧迫度提示。无 DB 也可工作(只是不带 stats)。
+  DB?: D1Database;
 }
 
 // 从完整 cookie string 提取 ct0 / auth_token 值(用 ; 分割,trim,k=v split)
@@ -131,6 +134,46 @@ export async function saveXCookie(
   await env.AUTH_KV.put(X_COOKIE_KV_KEY, JSON.stringify(blob));
 }
 
+// 跑 SQL 统计 cookie 失效影响范围:
+//   - bodies_pending: 已抓 title/excerpt(fetched_at)但 body 缺 + 没标 fetch_failed_at 的 path 数
+//   - covers_missing: 已抓 article 但 cover_image_url 缺的 path 数(影响海报)
+// 6 path 合计。无 DB 时返 null。
+async function statXArticlePending(
+  env: XGraphqlEnv,
+): Promise<{ bodies_pending: number; covers_missing: number } | null> {
+  if (!env.DB) return null;
+  const PE_BODY = (path: string) => `(
+    json_extract(extra, '$.${path}x_article.fetched_at') IS NOT NULL
+    AND json_extract(extra, '$.${path}x_article.body') IS NULL
+    AND json_extract(extra, '$.${path}x_article.body_fetched_at') IS NULL
+    AND json_extract(extra, '$.${path}x_article.body_fetch_failed_at') IS NULL
+  )`;
+  const PE_COVER = (path: string) => `(
+    json_extract(extra, '$.${path}x_article.fetched_at') IS NOT NULL
+    AND json_extract(extra, '$.${path}x_article.cover_image_url') IS NULL
+  )`;
+  const PATHS = ['', 'quote_of.', 'reply_of.', 'retweet_of.',
+                 'quote_of.quote_of.', 'reply_of.quote_of.', 'retweet_of.quote_of.'];
+  // 任一 path body 缺 / 任一 path cover 缺
+  const BODY_OR = PATHS.map(PE_BODY).join(' OR ');
+  const COVER_OR = PATHS.map(PE_COVER).join(' OR ');
+  try {
+    const row = await env.DB.prepare(
+      `SELECT
+        SUM(CASE WHEN ${BODY_OR} THEN 1 ELSE 0 END) as bodies,
+        SUM(CASE WHEN ${COVER_OR} THEN 1 ELSE 0 END) as covers
+       FROM items WHERE source_type='x_list' AND deleted_at IS NULL`,
+    ).first<{ bodies: number; covers: number }>();
+    return {
+      bodies_pending: row?.bodies || 0,
+      covers_missing: row?.covers || 0,
+    };
+  } catch (e) {
+    console.warn('[x-graphql] statXArticlePending failed:', e);
+    return null;
+  }
+}
+
 // 标记 cookie 失效 + 推 PushDeer(异步,不阻塞 caller)
 export async function markCookieInvalid(
   env: XGraphqlEnv,
@@ -143,10 +186,15 @@ export async function markCookieInvalid(
   blob.invalid_at = new Date().toISOString();
   blob.invalid_reason = reason;
   await saveXCookie(env, blob);
+  // 跑 SQL 统计影响范围(可选,DB 缺失时不带)
+  const stats = await statXArticlePending(env);
+  const statsLine = stats
+    ? `- 影响:${stats.bodies_pending} 篇 article body 待抓,${stats.covers_missing} 篇 cover 缺(海报降级)\n`
+    : '';
   const alert = pushDeerAlert(
     env as unknown as IndexEnv,
     'X Cookie 失效',
-    `## X Cookie 失效\n\n- 失效原因: ${reason}\n- 失效时间: ${blob.invalid_at}\n- 请打开运维面板「X Cookie 更新」card,粘新 cookie 提交`,
+    `## X Cookie 失效\n\n- 失效原因: ${reason}\n- 失效时间: ${blob.invalid_at}\n${statsLine}- 请打开运维面板「X Cookie 更新」card,粘新 cookie 提交`,
   );
   if (ctx?.waitUntil) ctx.waitUntil(alert);
   else await alert;
