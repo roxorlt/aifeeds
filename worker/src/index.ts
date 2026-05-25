@@ -3440,6 +3440,20 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const result = await runBackfillXArticleTranslations(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
+  // 2026-05-25 告警分级 Phase A 测试 mode(走 INGEST_TOKEN,绕 CF Access):
+  // /api/enrich/run?mode=notify-warning-test&title=X&body=Y → enqueue 一条 warning
+  // /api/enrich/run?mode=notify-digest-now → flush KV buffer 推一次 digest
+  if (mode === 'notify-warning-test') {
+    const { pushDeerWarning } = await import('./notifier');
+    const title = url.searchParams.get('title') || '测试 warning';
+    const body = url.searchParams.get('body') || `测试时间: ${new Date().toISOString()}`;
+    await pushDeerWarning(env, title, body);
+    return jsonResponse({ ok: true, enqueued: { title, body } }, 200, request, env);
+  }
+  if (mode === 'notify-digest-now') {
+    const result = await sendDailyWarningDigest(env);
+    return jsonResponse(result, 200, request, env);
+  }
   if (mode === 'backfill-x-article-bodies') {
     // PR6 (2026-05-22):扫 x_article 已抓但 body 缺的 item,X GraphQL 拿 plain_text。
     // 走 cookie 鉴权 + 5-10s jitter + 日 cap。Cookie 失效 / cap 撞顶 → 中断返
