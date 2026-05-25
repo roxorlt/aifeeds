@@ -1,5 +1,10 @@
 name: Deploy Worker
 
+# 2026-05-25 起加固:GitHub Free + private repo 无法 require status checks,
+# PR 级 pr-validation.yml 是软门槛(红叉不阻断 merge),
+# 这里 push to main 的 validate-before-deploy job 是硬防线:
+# validate fail → deploy 不跑 + PushDeer 告警,防红叉代码上 prod。
+
 on:
   push:
     branches:
@@ -7,6 +12,7 @@ on:
       - staging
     paths:
       - 'worker/**'
+      - 'scripts/ci/**'
       - '.github/workflows/deploy-worker.yml'
   workflow_dispatch:
     inputs:
@@ -20,7 +26,40 @@ on:
           - prod
 
 jobs:
+  validate-before-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+      - name: Type check
+        # TODO(baseline cleanup):当前 main 有 20 个 tsc errors(HF 接入新代码:
+        # src/workflows/hf-paper-pipeline.ts × 16, src/index.ts × 2,
+        # src/hf-paper/ar5iv.ts × 2)。启用此 step 会 abort 所有 prod auto-deploy。
+        # 等 BE 清零 baseline(HF 接入收尾 PR 一并修)后,把下面 if: false 去掉即可启用。
+        # 在 pr-validation.yml 里 tsc 是硬跑(PR UI 红叉),所以 baseline 不会被掩盖。
+        if: false
+        working-directory: worker
+        run: npx tsc --noEmit
+      - name: Smoke admin-dashboard
+        run: bash scripts/ci/admin-dashboard-smoke.sh
+      - name: Notify on validation failure
+        if: failure()
+        env:
+          PUSHDEER_ADMIN_KEYS: ${{ secrets.PUSHDEER_ADMIN_KEYS }}
+        run: |
+          bash scripts/ci/pushdeer-notify.sh \
+            "[CI] 🚫 Worker prod deploy aborted" \
+            "validate-before-deploy failed on ${{ github.ref_name }}@${{ github.sha }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
   deploy:
+    needs: validate-before-deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,3 +102,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         # 用项目本地的 wrangler（package.json devDependency），保证版本和 lockfile 一致
         run: npx wrangler deploy ${{ steps.env.outputs.wrangler_env }}
+
+      - name: Notify on deploy failure
+        if: failure()
+        env:
+          PUSHDEER_ADMIN_KEYS: ${{ secrets.PUSHDEER_ADMIN_KEYS }}
+        run: |
+          bash scripts/ci/pushdeer-notify.sh \
+            "[CI] 🚫 Worker ${{ steps.env.outputs.label }} deploy failed" \
+            "wrangler deploy failed on ${{ github.ref_name }}@${{ github.sha }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

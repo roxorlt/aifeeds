@@ -1,0 +1,87 @@
+name: PR Validation
+
+# 软门槛:GitHub Free + private repo 无法 require status checks,
+# 这里 PR 阶段红叉只是 UI 提醒(不阻断 merge)。硬防线在 deploy-*.yml
+# 的 validate-before-deploy job,即便红叉 PR merge 进 main,prod
+# deploy 之前还会再跑一遍 validate,fail 直接 abort + PushDeer 告警。
+
+on:
+  pull_request:
+    paths:
+      - 'worker/**'
+      - 'dashboard/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/**'
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      worker: ${{ steps.filter.outputs.worker }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      admin_dashboard: ${{ steps.filter.outputs.admin_dashboard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            worker:
+              - 'worker/**'
+            dashboard:
+              - 'dashboard/**'
+            admin_dashboard:
+              - 'worker/src/admin-dashboard.ts'
+
+  validate-worker:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+      - name: Type check
+        working-directory: worker
+        run: npx tsc --noEmit
+
+  validate-dashboard:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install dashboard deps
+        working-directory: dashboard
+        run: npm ci
+      - name: Build (tsc + vite)
+        working-directory: dashboard
+        run: npm run build
+
+  smoke-admin-dashboard:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.admin_dashboard == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+      - name: Run admin-dashboard smoke
+        run: bash scripts/ci/admin-dashboard-smoke.sh
