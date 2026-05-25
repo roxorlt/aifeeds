@@ -250,23 +250,20 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // 方向未锁定: 抖动阈值内等
+      // 方向锁定 — R13 改社区标准 (swiper.js): |dx|+|dy| > 10 直接按主分量,
+      // 无模糊带. main 设 touch-pan-y 后 native vertical scroll 由浏览器接管,
+      // 无需 preventDefault + passive:false hack.
       if (direction === 'unknown') {
-        if (absDx < 10 && absDy < 10) return;
-        if (absDx > absDy * 2) {
+        if (absDx + absDy < 10) return;
+        if (absDx > absDy) {
           direction = 'horizontal';
-        } else if (absDy > absDx * 2) {
+        } else {
           direction = 'vertical';
           active = false;
           return;
-        } else {
-          return; // 模糊区, 等下一帧
         }
       }
-      // 横向锁定 → preventDefault 防 native vertical scroll 同时发生
-      // (PM 2026-05-25 R12 反馈: 斜滑两个方向都在动)
       if (direction === 'horizontal') {
-        if (e.cancelable) e.preventDefault();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
@@ -359,8 +356,9 @@ function DashboardHome() {
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
-    // R12: passive=false 让 onMove 内 preventDefault 生效防 native vertical scroll
-    el.addEventListener('touchmove', onMove, { passive: false });
+    // R13: passive:true 回归 (touch-action: pan-y CSS 已 partition native vs JS,
+    // 不再需要 JS preventDefault hack)
+    el.addEventListener('touchmove', onMove, { passive: true });
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
@@ -657,10 +655,12 @@ function DashboardHome() {
         </div>
       )}
 
-      {/* 3-column grid */}
+      {/* 3-column grid — touch-pan-y (社区最佳实践 = swiper.js / framer-motion 同款):
+          告诉浏览器 main 内只接管垂直 native scroll, 水平方向交给 JS swipe handler
+          处理. 这比 JS preventDefault hack 可靠, 不会出现"斜滑两个方向都在动" */}
       <main
         ref={mainRef}
-        className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
+        className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16 max-md:touch-pan-y"
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
