@@ -201,28 +201,38 @@ function DashboardHome() {
     let currentSide: 'left' | 'right' | null = null;
     let bodyLockY: number | null = null;
 
-    // R18: lock body position:fixed 期间 swipe horizontal → 真机彻底防
-    // pull-to-refresh (overscroll-behavior + preventDefault 真机都拦不住,
-    // body fixed 让浏览器认为页面不滚动, 不触发系统下拉刷新动作).
-    // 保 scrollY 用 top:-sy, unlock 时 scrollTo restore.
+    // R20: 综合大锁 — body fixed + html overflow:hidden + touch-action:none.
+    // R18/R19 单设 body fixed 在 iOS Safari 隐私模式仍能 pull-to-refresh
+    // (浏览器看 html 层 viewport 仍可下拉). 必须 html + body 双管齐下:
+    // - html overflow:hidden 禁 root scroll context
+    // - html.touch-action:none 完全屏蔽 native pan/zoom 手势
+    // - body position:fixed + top:-scrollY 保位置
     const lockBody = () => {
       if (bodyLockY !== null) return;
       bodyLockY = window.scrollY;
+      const html = document.documentElement;
+      html.style.overflow = 'hidden';
+      html.style.touchAction = 'none';
       document.body.style.position = 'fixed';
       document.body.style.top = `-${bodyLockY}px`;
       document.body.style.left = '0';
       document.body.style.right = '0';
       document.body.style.width = '100%';
+      document.body.style.overflow = 'hidden';
     };
     const unlockBody = () => {
       if (bodyLockY === null) return;
       const sy = bodyLockY;
       bodyLockY = null;
+      const html = document.documentElement;
+      html.style.overflow = '';
+      html.style.touchAction = '';
       document.body.style.position = '';
       document.body.style.top = '';
       document.body.style.left = '';
       document.body.style.right = '';
       document.body.style.width = '';
+      document.body.style.overflow = '';
       window.scrollTo(0, sy);
     };
 
@@ -703,8 +713,10 @@ function DashboardHome() {
           aria-hidden
         >
           {transitionActive && (
-            <div className="flex h-full flex-col overflow-hidden">
-              {/* R19: 8 个 SkeletonCard 跟 Feed.tsx:835 一致, 切换前/中/后骨架数量+样式都对齐, 不闪 */}
+            <div className="mx-auto h-full max-w-[1280px] overflow-hidden px-3 py-3">
+              {/* R20: 容器 padding 跟 main (mx-auto max-w-1280 px-3 py-3) 对齐, 让
+                  adjacent/overlay 的 SkeletonCard 跟 Feed 内 SkeletonCard 横向
+                  位置一致, 切换不"横移" */}
               {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
             </div>
           )}
