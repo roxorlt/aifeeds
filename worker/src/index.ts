@@ -1577,6 +1577,61 @@ export default {
             } catch (e) {
               console.error('[cron] drain-pending failed:', e);
             }
+
+            // M17 告警信号（除常规 summary 外的额外推送）
+            const stopReason = (r as unknown as Record<string, unknown>).stop_reason as string | undefined;
+            const newlyInserted = (r as unknown as Record<string, unknown>).newly_inserted as number | undefined;
+
+            // 信号 1：catch-up 触发
+            if (typeof newlyInserted === 'number' && newlyInserted > 70) {
+              console.log(`[cron] CATCH-UP: newly_inserted=${newlyInserted}, pending=${newlyInserted - 70}`);
+              // 单独 push（不打扰常规 summary，但运维要看到）
+              try {
+                await notifyCronSummary(env, 'X List 补漏触发', {
+                  message: `本轮新增 ${newlyInserted} 条（>70），已分流，${newlyInserted - 70} 条进入待加工队列`,
+                  newly_inserted: newlyInserted,
+                  pending_added: newlyInserted - 70,
+                });
+              } catch (e) {
+                console.error('[notify] catch-up push failed:', e);
+              }
+            }
+
+            // 信号 2：硬上限触发（10 页都没撞 seen_set）
+            if (stopReason === 'hard_max') {
+              try {
+                await notifyCronSummary(env, 'X List 警告: 翻满硬上限', {
+                  message: '翻满 10 页未撞 seen_set。可能 seen_set 全被作者删 / list 突增 / SB 异常。需要人看一眼',
+                  list_id: env.LIST_POLL_LIST_ID || '1643236611378008066',
+                });
+              } catch (e) {
+                console.error('[notify] hard-max push failed:', e);
+              }
+            }
+
+            // 信号 3：连续失败（依赖 KV state，跨 tick 累计）
+            // 简化版：每次失败 KV +1，连续 3 次告警，成功清 0
+            const FAIL_STREAK_KEY = 'x-list-poll-fail-streak';
+            if ((r as unknown as Record<string, unknown>).error) {
+              try {
+                const cur = parseInt((await env.AUTH_KV.get(FAIL_STREAK_KEY)) || '0', 10);
+                const next = cur + 1;
+                await env.AUTH_KV.put(FAIL_STREAK_KEY, String(next), { expirationTtl: 86400 });
+                if (next >= 3) {
+                  await notifyCronSummary(env, 'X List 告警: 连续失败', {
+                    message: `连续 ${next} 轮抓取失败，cursor 已停止推进`,
+                    last_error: (r as unknown as Record<string, unknown>).error,
+                    fail_streak: next,
+                  });
+                }
+              } catch (e) {
+                console.error('[notify] fail-streak track failed:', e);
+              }
+            } else {
+              // 成功清 streak
+              try { await env.AUTH_KV.delete(FAIL_STREAK_KEY); } catch { /* ignore */ }
+            }
+
             await notifyCronSummary(env, 'X List 抓取', r as unknown as Record<string, unknown>);
             return;
           }
