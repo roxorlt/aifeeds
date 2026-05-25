@@ -55,7 +55,7 @@ import {
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
-import { notifyCronSummary } from './notifier';
+import { notifyCronSummary, sendDailyWarningDigest } from './notifier';
 import {
   handleHuodongxingPoc,
   runHuodongxingFetchList,
@@ -1113,6 +1113,35 @@ export default {
         const result = await runReconstructThreads(env, dryRun, maxPasses);
         return jsonResponse(result, 200, request, env);
       }
+      // 运维:手动触发 warning 日报 flush(测试用,也可应急 force push)
+      // POST /api/admin/notify-digest-now
+      // 不带 dry_run 时真发 PushDeer(empty buffer 时也不发)
+      if (path === '/api/admin/notify-digest-now' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const result = await sendDailyWarningDigest(env);
+        return jsonResponse(result, 200, request, env);
+      }
+      // 运维:手动 enqueue 一条 warning 验证日报机制(不真出问题时测 buffer + digest)
+      // POST /api/admin/notify-warning-test?title=测试&body=...
+      if (path === '/api/admin/notify-warning-test' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const { pushDeerWarning } = await import('./notifier');
+        const u = new URL(request.url);
+        const title = u.searchParams.get('title') || '测试 warning';
+        const body = u.searchParams.get('body') || `测试时间: ${new Date().toISOString()}`;
+        await pushDeerWarning(env, title, body);
+        return jsonResponse({ ok: true, enqueued: { title, body } }, 200, request, env);
+      }
       // 运维：手动触发一条测试推送，验证 PUSHDEER 配置 + body 中文化效果
       // POST /api/admin/notify-test
       //   ?source=ph|x|gh|clawhub|hdx|hdx-skip|all
@@ -1469,6 +1498,15 @@ export default {
             const r = await runHfDailyFetch(env);
             console.log(`[cron] hf-daily-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'HF Daily Papers 每日抓取', r as unknown as Record<string, unknown>);
+            return;
+          }
+          // ─── Daily warning digest (UTC 23:00 = BJT 07:00) ──────────────
+          // 2026-05-25 告警分级 Phase A:flush KV 攒批 warning,推一次合并日报。
+          // 早 7 点发,user 起床看,不打扰半夜睡眠。
+          // 没 warning 不推(empty buffer 直接 return,避免无意义打扰)。
+          if (hour === 23 && minute === 0) {
+            const r = await sendDailyWarningDigest(env);
+            console.log(`[cron] warning-digest result:`, JSON.stringify(r));
             return;
           }
           // ─── X list-poll-ingest (minute=25 / 55, 30 min cadence) ──
