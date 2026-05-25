@@ -5328,7 +5328,12 @@ export async function fetchXArticleBodiesForXTweet(
     }
     const { stub, tweetId } = candidates[i];
     try {
-      const tweetResult = await fetchTweetResultByRestId({ AUTH_KV: env.AUTH_KV }, tweetId, ctx);
+      // 把 DB 传给 fetchTweetResultByRestId,让 markCookieInvalid 失效时可跑 SQL 统计影响范围
+      const tweetResult = await fetchTweetResultByRestId(
+        { AUTH_KV: env.AUTH_KV, PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS, DB: env.DB },
+        tweetId,
+        ctx,
+      );
       const articleData = extractArticleBodyFromTweet(tweetResult);
       used = await incrDailyCount({ AUTH_KV: env.AUTH_KV });
 
