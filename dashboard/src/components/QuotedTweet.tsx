@@ -53,49 +53,54 @@ export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
       onClick={handleClick}
     >
       <div className={isNested ? "p-2.5" : "p-3"}>
-        {/* PM 2026-05-25 R7 双行 header (内嵌引用卡也按主卡同款两行):
-            Row 1: avatar + name + ✓
-            Row 2: @handle · 时间 */}
-        <div>
-          <div className={isNested ? "flex items-center gap-1.5 text-[12px]" : "flex items-center gap-1.5 text-[13px]"}>
-            {quote.profile_image_url && !avatarFailed ? (
-              <img
-                src={proxyImg(quote.profile_image_url, 80)}
-                alt=""
-                loading="lazy"
-                className={isNested
-                  ? "h-4 w-4 shrink-0 rounded-full bg-neutral-200 object-cover"
-                  : "h-5 w-5 shrink-0 rounded-full bg-neutral-200 object-cover"}
-                onError={() => setAvatarFailed(true)}
-              />
-            ) : null}
-            <span
-              className={
-                posterMode
-                  ? "shrink-0 whitespace-nowrap font-semibold text-neutral-900"
-                  : "truncate font-semibold text-neutral-900"
-              }
-            >
-              {author}
-            </span>
-            {Boolean(quote.is_verified) && (
-              <VerifiedBadge className="h-[14px] w-[14px] shrink-0 fill-sky-500" />
-            )}
-          </div>
-          {(handle || quote.published_at) && (
+        {/* PM 2026-05-25 R8 双行 header — 头像独占左列 (avatar column) +
+            右列两行 (author+✓ / @handle·时间):这样 Row 2 起点对齐 author,
+            不再缩进到头像下方 */}
+        <div className="flex items-start gap-1.5">
+          {quote.profile_image_url && !avatarFailed ? (
+            <img
+              src={proxyImg(quote.profile_image_url, 80)}
+              alt=""
+              loading="lazy"
+              className={isNested
+                ? "h-4 w-4 shrink-0 rounded-full bg-neutral-200 object-cover"
+                : "h-5 w-5 shrink-0 rounded-full bg-neutral-200 object-cover"}
+              onError={() => setAvatarFailed(true)}
+            />
+          ) : null}
+          <div className="min-w-0 flex-1">
             <div className={cn(
-              "mt-0.5 flex items-baseline gap-1 text-neutral-500",
-              isNested ? "text-[11px]" : "text-[12px]",
+              "flex items-center gap-1.5",
+              isNested ? "text-[12px]" : "text-[13px]",
             )}>
-              {handle && <span className="truncate">@{handle}</span>}
-              {handle && quote.published_at && <span className="shrink-0 text-neutral-400">·</span>}
-              {quote.published_at && (
-                <span className="shrink-0 whitespace-nowrap">
-                  {posterMode ? formatBjtMdHm(quote.published_at) : timeAgo(quote.published_at)}
-                </span>
+              <span
+                className={
+                  posterMode
+                    ? "shrink-0 whitespace-nowrap font-semibold text-neutral-900"
+                    : "truncate font-semibold text-neutral-900"
+                }
+              >
+                {author}
+              </span>
+              {Boolean(quote.is_verified) && (
+                <VerifiedBadge className="h-[14px] w-[14px] shrink-0 fill-sky-500" />
               )}
             </div>
-          )}
+            {(handle || quote.published_at) && (
+              <div className={cn(
+                "mt-0.5 flex items-baseline gap-1 text-neutral-500",
+                isNested ? "text-[11px]" : "text-[12px]",
+              )}>
+                {handle && <span className="truncate">@{handle}</span>}
+                {handle && quote.published_at && <span className="shrink-0 text-neutral-400">·</span>}
+                {quote.published_at && (
+                  <span className="shrink-0 whitespace-nowrap">
+                    {posterMode ? formatBjtMdHm(quote.published_at) : timeAgo(quote.published_at)}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Body — translated if available, else original;
