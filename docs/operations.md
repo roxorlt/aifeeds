@@ -207,6 +207,46 @@ npx wrangler deploy
 
 ---
 
+### 2026-05-25 新增:CICD 加固 + GH secret 同步规范(PR #119)
+
+**背景**:
+- 2026-05-20 admin-dashboard 三次浏览器级 SyntaxError 事故(PR #92/#93/#94/#95):TS 文件嵌 HTML/JS 字符串的隐藏坑(`document.write('...</script>...')` / template literal 里 `\d` `\/` 被 V8 当 invalid escape 吃掉),tsc + esbuild 都不报,只有真浏览器加载才暴露
+- 同期 `CLOUDFLARE_API_TOKEN` GH secret 跟本地 `.secrets/aifeeds-prod.env` 不同步,导致最近 5 次 `Deploy Worker` 全 `Authentication error code 9109` fail,prod 全靠 BE 本地 `wrangler deploy` 手动兜底(问题被掩盖)
+
+**两道防线**(GitHub Free + private repo 无法 require status checks,所以分软硬两层):
+
+| 层 | 文件 | 触发 | 作用 |
+|----|------|------|------|
+| PR 软门槛 | `.github/workflows/pr-validation.yml` | `pull_request` | tsc / build / smoke,UI 红叉**不阻断 merge**(GitHub Free 限制下自然如此) |
+| Deploy 硬防线 | `deploy-worker.yml` / `deploy-dashboard.yml` 内 `validate-before-deploy` job | `push: [main, staging]` | 跟 deploy job 间 `needs:`,validate fail → deploy abort + PushDeer 推手机 |
+
+**关键脚本**:
+- `scripts/ci/admin-dashboard-smoke.sh` — 静态 grep 拦 `document.write </script>` 这类已知坑;playwright 断言等 BE 给 admin-dashboard.ts 加 `data-testid` 后填(P0.5 增量)
+- `scripts/ci/pushdeer-notify.sh` — 守卫 `PUSHDEER_ADMIN_KEYS` 缺时静默 skip(不让缺 secret 把 abort 路径自己 abort)
+
+**Known issue**:`deploy-worker.yml` 的 validate tsc step 当前 `if: false`,因为 worker `main` 上有 ~20 个 tsc baseline errors(HF 接入新代码:`hf-paper-pipeline.ts` × 16 / `index.ts` × 2 / `ar5iv.ts` × 2)。BE 清零后删那一行即启用。`pr-validation.yml` 里 tsc 正常硬跑挂 UI 红叉。
+
+**GH Actions secret 同步规范**(强制约定):
+
+> ⚠️ 本地 `.secrets/aifeeds-prod.env` rotate / 新增 secret 后**必须**同步到 GH Actions secret,否则 CI deploy 9109 fail。今后 § 3「Secrets」的「新增 / rotate secret 流程」隐含第 5 步:**如果该 secret 用于 GH Actions**(CI deploy / 通知),同步推到 GH。
+
+```bash
+# 模板(分两行,避免 zsh `!` 触发时单行被粘连)
+set -a; source .secrets/aifeeds-prod.env; set +a
+printf '%s' "$SECRET_NAME" | gh secret set SECRET_NAME --repo roxorlt/aifeeds
+# 验证
+gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
+```
+
+**当前已同步到 GH 的 secret 清单**(2026-05-25):
+- `CLOUDFLARE_API_TOKEN`(2026-05-25 rotate 同步)
+- `CLOUDFLARE_ACCOUNT_ID`
+- `PUSHDEER_ADMIN_KEYS`(2026-05-25 新加)
+
+**手动触发 staging deploy 验证 any time**:`gh workflow run deploy-worker.yml --repo roxorlt/aifeeds -f env=staging`
+
+---
+
 ### 2026-05-25 新增:分享海报转 c 端 + share 闭环 fix
 
 **架构变更**:
