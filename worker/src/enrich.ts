@@ -4754,6 +4754,9 @@ interface XArticleStub {
   translate_skipped_at?: string;
   translate_failed_at?: string;
   translate_failed_reason?: string;
+  // body 单字段 sentinel:超长 body(>15000 字符)跳过 body 翻译,不影响 title/excerpt
+  body_translate_skipped_at?: string;
+  body_translate_skipped_reason?: string;
 }
 
 export async function fetchXArticlesForXTweet(
@@ -4990,7 +4993,8 @@ export async function translateXArticlesForXTweet(
     // 也要进入翻译(stub.body_translated 缺 + stub.body 有 = 需翻 body)。
     const titleDone = !!stub.title_translated || !title;
     const excerptDone = !!stub.excerpt_translated || !excerpt;
-    const bodyDone = !!stub.body_translated || !body;
+    // body 也算 done 的情况:已翻译 OR 无 body OR 已标 body_translate_skipped_at(超长跳过)
+    const bodyDone = !!stub.body_translated || !body || !!stub.body_translate_skipped_at;
     if (titleDone && excerptDone && bodyDone) return;
     if (stub.translate_failed_at) return;
     // translate_skipped_at 是"中文原文" sentinel,如果 body 后到且非中文需重翻
@@ -5019,18 +5023,30 @@ export async function translateXArticlesForXTweet(
   const nowIso = new Date().toISOString();
   let translated = 0, skipped = 0, failed = 0;
 
+  // 超长 body 阈值:>= 15000 字符英文 ~ 4000 tokens 输入 + 4000-6000 输出,
+  // DeepSeek 处理 ~30-60s,撞 worker wall + curl 30s timeout。
+  // 这种 article 先翻 title+excerpt,body 标 too_long 失败,
+  // FE 渲染时降级到原文(英文 body 也仍能读)。
+  const LONG_BODY_THRESHOLD = 15000;
+
   for (let i = 0; i < tasks.length; i++) {
     const t = tasks[i];
     const stub = stubs[i];
     if (!stub) continue;
 
-    const input = { title: t.title, excerpt: t.excerpt, body: t.body };
+    const bodyTooLong = !!(t.body && t.body.length >= LONG_BODY_THRESHOLD);
+    // 超长 body 提前跳过 body 字段翻译,只翻 title+excerpt
+    const taskBody = bodyTooLong ? null : t.body;
+    const input = { title: t.title, excerpt: t.excerpt, body: taskBody };
     const prompt = X_ARTICLE_TRANSLATE_PROMPT.replace('%INPUT%', JSON.stringify(input));
 
     let parsed: { title_zh?: string | null; excerpt_zh?: string | null; body_zh?: string | null } | null = null;
     let attempts = 0;
+    let lastError: string | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       attempts++;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
       try {
         const res = await fetch(DEEPSEEK_URL, {
           method: 'POST',
@@ -5042,18 +5058,24 @@ export async function translateXArticlesForXTweet(
             response_format: { type: 'json_object' },
             max_tokens: 8000,
           }),
+          signal: controller.signal,
         });
-        if (!res.ok) continue;
+        if (!res.ok) { lastError = `http_${res.status}`; continue; }
         const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
         const raw = body.choices?.[0]?.message?.content || '';
         parsed = JSON.parse(raw);
         break;
-      } catch { /* retry */ }
+      } catch (e) {
+        // AbortError = 25s timeout;其他 = 网络/JSON parse 错误
+        lastError = e instanceof Error && e.name === 'AbortError' ? 'timeout_25s' : `error:${String(e).slice(0,80)}`;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
 
     if (!parsed) {
       stub.translate_failed_at = nowIso;
-      stub.translate_failed_reason = 'http_or_parse';
+      stub.translate_failed_reason = lastError || 'http_or_parse';
       failed++;
       continue;
     }
@@ -5074,6 +5096,14 @@ export async function translateXArticlesForXTweet(
       stub.body_translated = bodyZh;
       didTranslate = true;
     }
+    // 超长 body 单独标 fail(不阻塞 title/excerpt 翻译 + 不进 ping-pong),
+    // 用 body_fetch_failed_at 风格的 sentinel 短路 SQL,但跟 fetch fail 隔离
+    if (bodyTooLong && t.body) {
+      // body 字段翻译标失败,但允许 title/excerpt 已被翻译(didTranslate=true)
+      // 用专门的 sentinel,不污染整体 translate_failed_at
+      stub.body_translate_skipped_at = nowIso;
+      stub.body_translate_skipped_reason = `body_too_long:${t.body.length}`;
+    }
     if (didTranslate) {
       stub.translated_at = nowIso;
       // 清 skip sentinel(body 后到时此前可能被标过)
@@ -5083,7 +5113,7 @@ export async function translateXArticlesForXTweet(
       stub.translate_skipped_at = nowIso;
       skipped++;
     }
-    console.log(`[x-article-translate] ${itemId} task#${i} attempts=${attempts} translated=${didTranslate}`);
+    console.log(`[x-article-translate] ${itemId} task#${i} attempts=${attempts} translated=${didTranslate} body_too_long=${bodyTooLong}`);
   }
 
   await env.DB.prepare(
@@ -5113,18 +5143,17 @@ export async function runBackfillXArticleTranslations(
 }> {
   // 候选:任一 path x_article 有 title 但无 title_translated + 没 skip / fail marker
   // 2026-05-22 PR6:加 body 字段后,SQL 选 "任一字段(title/excerpt/body) 存在 + 对应 _translated 缺"。
-  // 2026-05-25 hotfix:必须短路 translate_skipped_at,否则中文原文的 stub
-  // (DeepSeek 返 null _zh)会在 SQL 选中→翻 null→标 skip→SQL 又选中 形成死循环。
+  // 2026-05-25 hotfix #1:必须短路 translate_skipped_at(中文原文 ping-pong 死循环)。
+  // 2026-05-25 hotfix #2:body 单字段加 body_translate_skipped_at 短路(超长 body 跳过翻译)。
   //
-  // body 后到的 case 仍 OK:fetchXArticleBodiesForXTweet 写 body 时会
-  // delete stub.translate_skipped_at,所以 SQL 加 skip_at IS NULL 不阻挡 body 重翻。
-  // 中文原文 stub 标 skip 后真的不再选,fetchXArticleBodies 不会动它(因为 body 已存在或失败已标)。
-  // translate_failed_at 同理短路(永久失败)。
+  // body 短路逻辑:body 子句必须独立 short-circuit body_translate_skipped_at,
+  // 否则超长 body 标 skip 后,SQL 因为 title/excerpt 翻译完整仍可能选中(实际不会,
+  // 因为整体 skip 标了,但 future-proof 写清)。
   const TR = (path: string) => `(
     (
       (json_extract(extra, '$.${path}x_article.title') IS NOT NULL AND json_extract(extra, '$.${path}x_article.title_translated') IS NULL)
       OR (json_extract(extra, '$.${path}x_article.excerpt') IS NOT NULL AND json_extract(extra, '$.${path}x_article.excerpt_translated') IS NULL)
-      OR (json_extract(extra, '$.${path}x_article.body') IS NOT NULL AND json_extract(extra, '$.${path}x_article.body_translated') IS NULL)
+      OR (json_extract(extra, '$.${path}x_article.body') IS NOT NULL AND json_extract(extra, '$.${path}x_article.body_translated') IS NULL AND json_extract(extra, '$.${path}x_article.body_translate_skipped_at') IS NULL)
     )
     AND json_extract(extra, '$.${path}x_article.translate_failed_at') IS NULL
     AND json_extract(extra, '$.${path}x_article.translate_skipped_at') IS NULL
