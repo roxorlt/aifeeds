@@ -269,6 +269,13 @@ function DashboardHome() {
       direction = 'unknown';
       currentSide = null;
       active = true;
+      // R19: viewport top (scrollY <= 1) touchstart 立即 lockBody, 防 iOS Safari
+      // 在 touchstart 阶段就 commit pull-to-refresh 动作 (R18 在 onMove 锁定后
+      // 调 lockBody 太晚, 浏览器已经预判). vertical 锁定后 unlockBody 让 native
+      // scroll 接管 (scrollY=0 restore 不动, 用户无感).
+      if (window.scrollY <= 1) {
+        lockBody();
+      }
     };
     const onMove = (e: TouchEvent) => {
       if (!active) return;
@@ -292,7 +299,9 @@ function DashboardHome() {
         } else {
           direction = 'vertical';
           active = false;
-          // vertical 锁定后让 native scroll 接管, 不再 preventDefault
+          // R19: unlockBody 让 native vertical scroll 接管 (touchstart 时 lockBody
+          // 在顶部为防 pull-to-refresh, 锁定 vertical 后允许 scroll)
+          unlockBody();
           return;
         }
       }
@@ -695,8 +704,8 @@ function DashboardHome() {
         >
           {transitionActive && (
             <div className="flex h-full flex-col overflow-hidden">
-              {/* R18: 复用 Feed 的 SkeletonCard, 切换全程 skeleton 样式一致, 不再 3 屏闪 */}
-              {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
+              {/* R19: 8 个 SkeletonCard 跟 Feed.tsx:835 一致, 切换前/中/后骨架数量+样式都对齐, 不闪 */}
+              {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
             </div>
           )}
         </div>
