@@ -13,6 +13,11 @@ on:
       - 'scripts/ci/**'
       - '.github/workflows/**'
 
+# dorny/paths-filter 需要读 PR changed files,默认 GITHUB_TOKEN 没此权限。
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
