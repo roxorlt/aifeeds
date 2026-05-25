@@ -163,12 +163,13 @@ function DashboardHome() {
     return () => cancelAnimationFrame(raf);
   }, [filter, isNarrow]);
 
-  // PM 2026-05-25 R10: Channel Transition skeleton overlay.
-  // 自测 PNG snapshot 方案在 cross-origin img 多的 channel 必失败
-  // (modern-screenshot 强制 fetch inline 所有图, worker /img proxy 403/404/429
-  // 触发大量 throw, store 写不进). 改纯 skeleton overlay + FEED_CACHE 立即填充 —
-  // transition 期间显 skeleton 220ms, 然后 fade-out 给真 Feed 接管.
+  // PM 2026-05-25 R10/R12: Channel Transition system
+  // - transitionActive: chip click 后的过渡 overlay (fade 220ms)
+  // - swipeAdjacent: swipe 期间 mount 邻居 panel (skeleton), 跟 main 同步 translate
+  //   让用户看到双 panel 紧贴跟手 (multi-column 效果, 不真 mount Feed 避免成本)
   const [transitionActive, setTransitionActive] = useState(false);
+  const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right" } | null>(null);
+  const adjacentRef = useRef<HTMLDivElement>(null);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
     setTransitionActive(true);
@@ -197,17 +198,34 @@ function DashboardHome() {
     let startX = 0, startY = 0, startT = 0;
     let active = false;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
-    let currentDx = 0;
+    let currentSide: 'left' | 'right' | null = null;
 
-    const applyTransform = (dx: number, withTransition: boolean) => {
+    const applyMainTransform = (dx: number, withTransition: boolean) => {
       el.style.transition = withTransition
         ? 'transform 220ms cubic-bezier(0.32, 0.72, 0, 1)'
         : 'none';
       el.style.transform = dx === 0 ? '' : `translateX(${dx}px)`;
     };
+    const applyAdjacentTransform = (dx: number, withTransition: boolean) => {
+      const adj = adjacentRef.current;
+      if (!adj) return;
+      const w = window.innerWidth;
+      // adjacent base 位置: side='right' 初始在屏右 (+w), side='left' 在屏左 (-w)
+      // 跟 main 同 dx 同步移动 → main 滑出去时 adjacent 滑进来, 紧贴
+      const base = currentSide === 'right' ? w : -w;
+      adj.style.transition = withTransition
+        ? 'transform 220ms cubic-bezier(0.32, 0.72, 0, 1)'
+        : 'none';
+      adj.style.transform = `translateX(${base + dx}px)`;
+    };
     const resetTransform = () => {
       el.style.transition = '';
       el.style.transform = '';
+      const adj = adjacentRef.current;
+      if (adj) {
+        adj.style.transition = '';
+        adj.style.transform = '';
+      }
     };
 
     const onStart = (e: TouchEvent) => {
@@ -223,7 +241,7 @@ function DashboardHome() {
       startY = t0.clientY;
       startT = Date.now();
       direction = 'unknown';
-      currentDx = 0;
+      currentSide = null;
       active = true;
     };
     const onMove = (e: TouchEvent) => {
@@ -232,7 +250,7 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // 方向未锁定:抖动阈值内等
+      // 方向未锁定: 抖动阈值内等
       if (direction === 'unknown') {
         if (absDx < 10 && absDy < 10) return;
         if (absDx > absDy * 2) {
@@ -245,21 +263,37 @@ function DashboardHome() {
           return; // 模糊区, 等下一帧
         }
       }
-      // 横向锁定 → 跟手 translate (边界 tab 往外划阻尼 1/3 反弹)
+      // 横向锁定 → preventDefault 防 native vertical scroll 同时发生
+      // (PM 2026-05-25 R12 反馈: 斜滑两个方向都在动)
       if (direction === 'horizontal') {
+        if (e.cancelable) e.preventDefault();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
-        let dampened = dx;
-        if (idx === 0 && dx > 0) dampened = dx / 3;
-        else if (idx === tabs.length - 1 && dx < 0) dampened = dx / 3;
-        currentDx = dampened;
-        applyTransform(dampened, false);
+        const targetIdx = dx < 0 ? idx + 1 : idx - 1;
+        const atBoundary = targetIdx < 0 || targetIdx >= tabs.length;
+        // mount adjacent panel (一次) — side 由 dx 方向定
+        if (!atBoundary) {
+          const newSide: 'left' | 'right' = dx < 0 ? 'right' : 'left';
+          if (currentSide !== newSide) {
+            currentSide = newSide;
+            setSwipeAdjacent({ side: newSide });
+          }
+        }
+        // main 跟手 translate (边界 tab 阻尼 1/3)
+        const dampened = atBoundary ? dx / 3 : dx;
+        applyMainTransform(dampened, false);
+        if (!atBoundary) applyAdjacentTransform(dampened, false);
       }
     };
     const onEnd = (e: TouchEvent) => {
+      const cleanupAdjacent = () => {
+        currentSide = null;
+        setSwipeAdjacent(null);
+      };
       if (!active || direction !== 'horizontal') {
         active = false;
         resetTransform();
+        cleanupAdjacent();
         return;
       }
       active = false;
@@ -282,19 +316,23 @@ function DashboardHome() {
         : Math.max(idx - 1, 0));
 
       if (!shouldSwitch || nextIdx === idx) {
-        // 弹回 0
-        applyTransform(0, true);
+        // 弹回 0 — main + adjacent 同步 animate 回原位
+        applyMainTransform(0, true);
+        applyAdjacentTransform(0, true);
         const onTransitionEnd = () => {
           el.removeEventListener('transitionend', onTransitionEnd);
           resetTransform();
+          cleanupAdjacent();
         };
         el.addEventListener('transitionend', onTransitionEnd);
         return;
       }
-      // animate off-screen 然后 switchChannel (CTS overlay 接管 transition)
+      // animate 切换: main 滑到 ±width, adjacent 滑到 0 (屏内中央, 跟手紧贴)
       const width = el.offsetWidth || window.innerWidth;
-      const target = dx < 0 ? -width : width;
-      applyTransform(target, true);
+      const mainTarget = dx < 0 ? -width : width;
+      // adjacent target dx 同样 ±width, 加 base 后到 0
+      applyMainTransform(mainTarget, true);
+      applyAdjacentTransform(mainTarget, true);
       const onTransitionEnd = () => {
         el.removeEventListener('transitionend', onTransitionEnd);
         track(EVENTS.SOURCE_FILTER_CHANGE, {
@@ -302,23 +340,27 @@ function DashboardHome() {
           to_id: tabs[nextIdx].key,
           method: 'swipe',
         });
-        // 重置 transform → 主容器回原位, overlay (CTS snapshot) 覆盖 transition gap
-        resetTransform();
+        // setFilter + transitionActive overlay 接管, 然后 reset adjacent / main transform
         switchChannelRef.current(tabs[nextIdx].key);
+        resetTransform();
+        cleanupAdjacent();
       };
       el.addEventListener('transitionend', onTransitionEnd);
-      void currentDx; // referenced for closure capture across handlers
     };
     const onCancel = () => {
       if (active && direction === 'horizontal') {
-        applyTransform(0, true);
+        applyMainTransform(0, true);
+        applyAdjacentTransform(0, true);
       }
       active = false;
       direction = 'unknown';
+      currentSide = null;
+      setSwipeAdjacent(null);
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
-    el.addEventListener('touchmove', onMove, { passive: true });
+    // R12: passive=false 让 onMove 内 preventDefault 生效防 native vertical scroll
+    el.addEventListener('touchmove', onMove, { passive: false });
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
@@ -560,15 +602,41 @@ function DashboardHome() {
         </div>
       </header>
 
-      {/* Channel transition skeleton overlay — PM 2026-05-25 R11:
-          改 fixed inset 独立于 main translate (swipe 时 main 在 -width,
-          overlay 跟着走会跑出屏外; 独立 fixed 始终覆盖 viewport, 消除 main
-          reset transform 时的 "main 跳 0" 视觉闪烁). */}
+      {/* Swipe adjacent skeleton panel — PM 2026-05-25 R12: 横滑时显紧贴 main
+          的邻居 panel (skeleton), 跟手指同步 translate, swipe end 切换 →
+          adjacent 滑到 0 取代 main. 独立 fixed inset 跟 swipe handler 通过
+          adjacentRef 操作 transform. */}
+      {isNarrow && swipeAdjacent && (
+        <div
+          ref={adjacentRef}
+          className="pointer-events-none fixed inset-x-0 z-30 overflow-hidden bg-white"
+          style={{
+            top: 49,
+            bottom: 0,
+            // initial position: side='right' 屏右 (+100%), side='left' 屏左 (-100%)
+            transform: `translateX(${swipeAdjacent.side === 'right' ? '100%' : '-100%'})`,
+          }}
+          aria-hidden
+        >
+          <div className="flex h-full flex-col gap-4 px-4 py-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="space-y-2">
+                <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
+                <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
+                <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Chip click transition overlay — PM 2026-05-25 R11/R12: 跟 swipe 互补,
+          chip click 没 swipe 跟手, 直接 fade-in skeleton 220ms 然后 fade-out */}
       {isNarrow && (
         <div
           className="pointer-events-none fixed inset-x-0 z-40 overflow-hidden bg-white"
           style={{
-            top: 49,        // header 高度
+            top: 49,
             bottom: 0,
             opacity: transitionActive ? 1 : 0,
             transition: transitionActive ? "none" : "opacity 220ms ease-out",
