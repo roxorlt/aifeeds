@@ -305,14 +305,17 @@ function DashboardHome() {
       const cur = filterRef.current;
       const idx = tabs.findIndex((c) => c.key === cur);
 
-      // R15: direction 已锁 horizontal (上方过滤过), onEnd 不再检查 horizontalDominant —
-      // PM 反馈"滑了一段 adjacent 都进来了, 松手却弹回" 根因就在 horizontalDominant
-      // 失败 (dy 累积大). 锁定即信任, 只判 distance + flick + dt.
+      // R16 切换阈值放宽 (PM 反馈"非常非常快才触发"):
+      // - distance: viewport 15% (414 屏 = ~62px) 即切, 跟 iOS Music / Twitter 主流
+      //   slide-to-switch 一致
+      // - flick: v > 0.2 px/ms 且 |dx| > viewport 5% (~20px) — 短而快也切
+      // - 移除 dt ≤ 800 限制 (慢滑只要距离够也切)
+      const w = el.offsetWidth || window.innerWidth;
       const v = Math.abs(dx) / Math.max(dt, 1);
-      const distanceOk = Math.abs(dx) >= 40;
-      const flickOk = v > 0.3 && Math.abs(dx) >= 25;
-      const shouldSwitch = (distanceOk || flickOk) && dt <= 800 && idx >= 0;
-      void dy; // dy 已经在 direction lock 阶段判过, 这里不再用
+      const distanceOk = Math.abs(dx) >= w * 0.15;
+      const flickOk = v > 0.2 && Math.abs(dx) >= w * 0.05;
+      const shouldSwitch = (distanceOk || flickOk) && idx >= 0;
+      void dy; void dt; // direction 已锁 horizontal, 不再叠加 dy / dt 过滤
       const nextIdx = !shouldSwitch ? idx : (dx < 0
         ? Math.min(idx + 1, tabs.length - 1)
         : Math.max(idx - 1, 0));
@@ -342,10 +345,18 @@ function DashboardHome() {
           to_id: tabs[nextIdx].key,
           method: 'swipe',
         });
-        // setFilter + transitionActive overlay 接管, 然后 reset adjacent / main transform
+        // R16 PM 反馈"完成切换后整页闪白":根因是 adjacent unmount + main reset
+        // transform 跟 React commit setFilter / 新 Feed mount 不同步, 中间一帧
+        // viewport 显白底. 修复:先 setFilter (overlay opacity=1 + 新 Feed mount),
+        // 等 React commit 用 raf 双 buffer, 再 resetTransform + cleanup adjacent,
+        // overlay 已经盖住 viewport 时 unmount 不闪
         switchChannelRef.current(tabs[nextIdx].key);
-        resetTransform();
-        cleanupAdjacent();
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            resetTransform();
+            cleanupAdjacent();
+          });
+        });
       };
       el.addEventListener('transitionend', onTransitionEnd);
     };
@@ -660,12 +671,13 @@ function DashboardHome() {
         </div>
       )}
 
-      {/* 3-column grid — touch-pan-y (社区最佳实践 = swiper.js / framer-motion 同款):
-          告诉浏览器 main 内只接管垂直 native scroll, 水平方向交给 JS swipe handler
-          处理. 这比 JS preventDefault hack 可靠, 不会出现"斜滑两个方向都在动" */}
+      {/* 3-column grid — touch-pan-y (swiper.js / framer-motion 同款) +
+          overscroll-y-contain (R16 PM 反馈: 顶部斜滑既切又下拉刷新, 加
+          overscroll-behavior-y:contain 阻止 iOS / Android pull-to-refresh 跨域
+          滚动链穿透到浏览器, swipe 时只走 JS 不触发系统刷新动作) */}
       <main
         ref={mainRef}
-        className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16 max-md:touch-pan-y"
+        className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16 max-md:touch-pan-y max-md:overscroll-y-contain"
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
