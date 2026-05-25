@@ -1,5 +1,8 @@
 name: Deploy Dashboard
 
+# 2026-05-25 起加固:GitHub Free + private repo 无法 require status checks,
+# 加 validate-before-deploy 硬防线 — validate fail 不跑 deploy + PushDeer 告警。
+
 on:
   push:
     branches:
@@ -7,6 +10,7 @@ on:
       - staging
     paths:
       - 'dashboard/**'
+      - 'scripts/ci/**'
       - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
     inputs:
@@ -20,7 +24,32 @@ on:
           - prod
 
 jobs:
+  validate-before-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install deps
+        working-directory: dashboard
+        run: npm ci
+      - name: Build (tsc + vite)
+        working-directory: dashboard
+        run: npm run build
+      - name: Notify on validation failure
+        if: failure()
+        env:
+          PUSHDEER_ADMIN_KEYS: ${{ secrets.PUSHDEER_ADMIN_KEYS }}
+        run: |
+          bash scripts/ci/pushdeer-notify.sh \
+            "[CI] 🚫 Dashboard deploy aborted" \
+            "validate-before-deploy failed on ${{ github.ref_name }}@${{ github.sha }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
   deploy:
+    needs: validate-before-deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,3 +103,12 @@ jobs:
             --commit-message="${{ github.sha }}" \
             --commit-dirty=true
           echo "::notice::Deployed to ${{ steps.target.outputs.url }}"
+
+      - name: Notify on deploy failure
+        if: failure()
+        env:
+          PUSHDEER_ADMIN_KEYS: ${{ secrets.PUSHDEER_ADMIN_KEYS }}
+        run: |
+          bash scripts/ci/pushdeer-notify.sh \
+            "[CI] 🚫 Dashboard ${{ steps.target.outputs.project }} deploy failed" \
+            "wrangler pages deploy failed on ${{ github.ref_name }}@${{ github.sha }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
