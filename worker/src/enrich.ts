@@ -6948,3 +6948,64 @@ export async function triggerXWorkflowForItem(
     return 'failed';
   }
 }
+
+/**
+ * 收尾消化「待加工」队列（M17 catch-up 平摊机制）。
+ * 每个 cron tick 主流程做完后调用一次，按 published_at asc（最老先）取 N 条
+ * pending_workflow=1 的 item，逐条 trigger workflow，触发成功的清 0。
+ *
+ * @returns { drained, remaining } 本次消化数 + 剩余 pending 数（用于通知 / 监控）
+ */
+export async function drainPendingWorkflowQueue(
+  env: EnrichEnv,
+  batchSize: number = CATCHUP_THRESHOLD_DEFAULT,
+): Promise<{ drained: number; remaining: number; error?: string }> {
+  if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+    return { drained: 0, remaining: 0, error: 'no_workflow_binding' };
+  }
+
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      `SELECT id, extra FROM items
+       WHERE pending_workflow = 1 AND source_type = 'x_list'
+       ORDER BY published_at ASC
+       LIMIT ?`,
+    ).bind(batchSize).all<{ id: string; extra: string | null }>();
+  } catch (e) {
+    return { drained: 0, remaining: -1, error: e instanceof Error ? e.message : 'select_failed' };
+  }
+
+  let drained = 0;
+  for (const r of rows.results) {
+    let extraObj: Record<string, unknown> = {};
+    try {
+      extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+    } catch { /* ignore */ }
+    try {
+      await triggerXWorkflowForItem(env, r.id, {
+        hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+        hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+        hasLinkCard: !!extraObj.link_card,
+        hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
+      });
+      // 触发成功后清 pending 标志
+      await env.DB.prepare(`UPDATE items SET pending_workflow=0 WHERE id=?`).bind(r.id).run();
+      drained++;
+    } catch (e) {
+      // 单条失败不影响其它；下次 cron tick 还能再试
+      console.error(`[drain-pending] item=${r.id} err:`, e);
+    }
+  }
+
+  // 查剩余总量（监控用）
+  let remaining = -1;
+  try {
+    const rest = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM items WHERE pending_workflow = 1 AND source_type = 'x_list'`,
+    ).first<{ n: number }>();
+    remaining = rest?.n ?? -1;
+  } catch { /* ignore */ }
+
+  return { drained, remaining };
+}

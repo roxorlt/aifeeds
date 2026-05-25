@@ -15,6 +15,7 @@ import {
   submitLongformText,
   refreshSingleItem,
   runListPollIngest,
+  drainPendingWorkflowQueue,
   runLongformViaSb,
   runClassifyPending,
   runBackfillVideoMp4,
@@ -1564,6 +1565,18 @@ export default {
               console.error('[list-poll-ingest] log insert failed:', e);
             }
             console.log(`[cron] list-poll-ingest result:`, JSON.stringify(r));
+            // M17 收尾：消化 pending_workflow 队列（不阻塞主结果通知）
+            try {
+              const drainRes = await drainPendingWorkflowQueue(env);
+              if (drainRes.drained > 0 || drainRes.remaining > 0) {
+                console.log(`[cron] list-poll-ingest drain-pending: drained=${drainRes.drained} remaining=${drainRes.remaining}`);
+                // 把 drain 信息合并到通知 payload
+                (r as unknown as Record<string, unknown>).pending_drained = drainRes.drained;
+                (r as unknown as Record<string, unknown>).pending_remaining = drainRes.remaining;
+              }
+            } catch (e) {
+              console.error('[cron] drain-pending failed:', e);
+            }
             await notifyCronSummary(env, 'X List 抓取', r as unknown as Record<string, unknown>);
             return;
           }
