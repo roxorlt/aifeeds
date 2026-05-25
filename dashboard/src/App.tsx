@@ -250,20 +250,25 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // 方向锁定 — R13 改社区标准 (swiper.js): |dx|+|dy| > 10 直接按主分量,
-      // 无模糊带. main 设 touch-pan-y 后 native vertical scroll 由浏览器接管,
-      // 无需 preventDefault + passive:false hack.
+      // R14 方向锁定 — swiper.js 同款混合策略:
+      // - 主分量横向 → 锁 horizontal + preventDefault 防 native scroll 同时跑
+      // - 主分量纵向 → 不锁死 (continue unknown, 让 native scroll 接管,
+      //   后续帧用户改横向时仍可锁 horizontal — 解决 PM "明明横滑了却没切"
+      //   因为之前 vertical lock + active=false 一锁死再也不响应)
+      // - touch-action: pan-y + preventDefault 双保险:touch-action 在
+      //   touchstart 阶段就告诉浏览器水平归 JS, preventDefault 在 touchmove
+      //   防斜滑 native scroll 偷跑 (PM R13 反馈)
       if (direction === 'unknown') {
         if (absDx + absDy < 10) return;
         if (absDx > absDy) {
           direction = 'horizontal';
-        } else {
-          direction = 'vertical';
-          active = false;
-          return;
         }
+        // 纵向主分量 — 不锁死, 等下次主分量切换. native vertical scroll 由
+        // touch-action: pan-y 自动接管, JS 不干预
       }
       if (direction === 'horizontal') {
+        // 防 native vertical scroll 跟 JS horizontal swipe 同时发生 (PM 斜滑反馈)
+        if (e.cancelable) e.preventDefault();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
@@ -356,9 +361,9 @@ function DashboardHome() {
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
-    // R13: passive:true 回归 (touch-action: pan-y CSS 已 partition native vs JS,
-    // 不再需要 JS preventDefault hack)
-    el.addEventListener('touchmove', onMove, { passive: true });
+    // R14: passive:false 让 horizontal lock 后 preventDefault 生效,
+    // 阻止斜滑时 native vertical scroll 跟 JS horizontal swipe 同时跑
+    el.addEventListener('touchmove', onMove, { passive: false });
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
