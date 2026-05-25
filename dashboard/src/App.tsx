@@ -30,7 +30,6 @@ import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
-import { useChannelSnapshotStore } from "./lib/channelSnapshotStore";
 
 // LoginModal 拖入 Turnstile 校验 + auth 表单逻辑。99% 已登录用户首屏永远
 // 不会触发它 → lazy + Gate：loginModalOpen === false 时根本不挂 lazy 组件，
@@ -164,63 +163,17 @@ function DashboardHome() {
     return () => cancelAnimationFrame(raf);
   }, [filter, isNarrow]);
 
-  // PM 2026-05-25 R10: Channel Transition Snapshot (CTS) — main viewport
-  // 自动截图存 store, 切 channel 时显 snapshot 当过渡占位 (避免 Feed mount
-  // 前的空白帧). 触发: scrollend (debounce) + filter change 之前 (出场快照).
-  // 复用 modern-screenshot (已 install for poster), 单次截图 ~100ms, 0.5x scale
-  // 控制 PNG ~50-150KB / channel.
-  const captureChannelSnapshot = useRef<(type: string) => Promise<void>>(async () => {});
-  useEffect(() => {
-    captureChannelSnapshot.current = async (sourceType: string) => {
-      const node = mainRef.current;
-      if (!node) return;
-      try {
-        const { domToPng } = await import("modern-screenshot");
-        const dataUri = await domToPng(node, {
-          scale: 0.5,
-          type: "image/png",
-          backgroundColor: "#ffffff",
-        });
-        useChannelSnapshotStore.getState().setSnapshot(sourceType, dataUri);
-      } catch (e) {
-        // 截图失败不阻塞业务, 切换 transition 走 skeleton
-        console.warn("[snapshot] capture failed", e);
-      }
-    };
-  }, []);
-  // scrollend (debounce 600ms) 触发当前 filter 截图. requestIdleCallback 避免阻塞 main thread.
-  useEffect(() => {
-    if (!isNarrow) return;
-    let timer: number | null = null;
-    const onScroll = () => {
-      if (timer !== null) clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        timer = null;
-        const ric = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
-        if (ric) ric(() => captureChannelSnapshot.current(filterRef.current));
-        else setTimeout(() => captureChannelSnapshot.current(filterRef.current), 0);
-      }, 600);
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-      if (timer !== null) clearTimeout(timer);
-    };
-  }, [isNarrow]);
-
-  // Snapshot overlay state (channel switch 期间显示, setFilter 后 ~200ms fade-out)
-  const [transitionOverlay, setTransitionOverlay] = useState<{ from: string; to: string; toSnap: string | null } | null>(null);
-
-  // 切 channel 的统一入口 — 先截出场快照 (current), 显示目标 snapshot 当 overlay, 切 filter
-  // useCallback 让 swipe handler 内 ref 捕获稳定 (deps [] 因内部都用 ref / setState)
+  // PM 2026-05-25 R10: Channel Transition skeleton overlay.
+  // 自测 PNG snapshot 方案在 cross-origin img 多的 channel 必失败
+  // (modern-screenshot 强制 fetch inline 所有图, worker /img proxy 403/404/429
+  // 触发大量 throw, store 写不进). 改纯 skeleton overlay + FEED_CACHE 立即填充 —
+  // transition 期间显 skeleton 220ms, 然后 fade-out 给真 Feed 接管.
+  const [transitionActive, setTransitionActive] = useState(false);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
-    const fromFilter = filterRef.current;
-    const toSnap = useChannelSnapshotStore.getState().getSnapshot(nextFilter)?.dataUri || null;
-    captureChannelSnapshot.current(fromFilter);
-    setTransitionOverlay({ from: fromFilter, to: nextFilter, toSnap });
+    setTransitionActive(true);
     setFilter(nextFilter as typeof filter);
-    window.setTimeout(() => setTransitionOverlay(null), 220);
+    window.setTimeout(() => setTransitionActive(false), 220);
   }, []);
   const switchChannelRef = useRef(switchChannel);
   switchChannelRef.current = switchChannel;
@@ -611,28 +564,29 @@ function DashboardHome() {
         ref={mainRef}
         className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
       >
-        {/* CTS overlay — channel 切换 transition 期间显目标 channel snapshot
-            (5min TTL, 无 / 过期 → skeleton). 220ms 后 fade-out 给真 Feed 接管. */}
+        {/* Channel transition skeleton overlay — 切 tab 时覆盖 220ms, 防"空白帧" */}
         {isNarrow && (
           <div
             className="pointer-events-none absolute inset-x-0 top-0 z-10 overflow-hidden bg-white"
             style={{
               height: "calc(100vh - 64px)",
-              opacity: transitionOverlay ? 1 : 0,
-              transition: transitionOverlay ? "none" : "opacity 220ms ease-out",
+              opacity: transitionActive ? 1 : 0,
+              transition: transitionActive ? "none" : "opacity 220ms ease-out",
             }}
             aria-hidden
           >
-            {transitionOverlay && (transitionOverlay.toSnap ? (
-              <img
-                src={transitionOverlay.toSnap}
-                alt=""
-                className="h-full w-full object-cover object-top"
-                draggable={false}
-              />
-            ) : (
-              <div className="h-full w-full animate-pulse bg-neutral-100" />
-            ))}
+            {transitionActive && (
+              <div className="flex h-full flex-col gap-4 px-4 py-4">
+                {/* skeleton 列表 — 模拟卡片框架 */}
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="space-y-2">
+                    <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
+                    <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
+                    <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
