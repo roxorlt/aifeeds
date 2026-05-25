@@ -613,32 +613,32 @@ export function TweetCard({
               </div>
             )}
             <div className="min-w-0 flex-1">
-              <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
-                <span
-                  className={cn(
-                    "text-[15px] font-bold leading-tight text-neutral-900",
-                    posterMode
-                      ? "shrink-0 whitespace-nowrap relative z-10 bg-white pr-1"
-                      : "truncate",
-                  )}
-                >
-                  {replyOf.author || replyOf.handle}
-                </span>
-                {Boolean(replyOf.is_verified) && (
-                  <span className={cn("shrink-0 self-center", posterMode && "ml-3 relative z-0")}>
-                    <VerifiedBadge />
+              {/* PM 2026-05-25 R7 双行 header:author + ✓ / @handle · 时间 */}
+              <div>
+                <div className="flex items-baseline gap-1">
+                  <span
+                    className={cn(
+                      "text-[15px] font-bold leading-tight text-neutral-900",
+                      posterMode ? "shrink-0 whitespace-nowrap" : "truncate",
+                    )}
+                  >
+                    {replyOf.author || replyOf.handle}
                   </span>
-                )}
-                {!posterMode && replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
-                {!posterMode && replyOf.published_at && (
-                  <>
-                    <span className="shrink-0 text-neutral-400">·</span>
-                    <span className="shrink-0 whitespace-nowrap">{timeAgo(replyOf.published_at)}</span>
-                  </>
-                )}
-                {posterMode && replyOf.published_at && (
-                  <span className="shrink-0 whitespace-nowrap ml-2">{formatBjtMdHm(replyOf.published_at)}</span>
-                )}
+                  {Boolean(replyOf.is_verified) && (
+                    <span className="shrink-0 self-center">
+                      <VerifiedBadge />
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
+                  {replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
+                  {replyOf.handle && replyOf.published_at && <span className="shrink-0 text-neutral-400">·</span>}
+                  {replyOf.published_at && (
+                    <span className="shrink-0 whitespace-nowrap">
+                      {posterMode ? formatBjtMdHm(replyOf.published_at) : timeAgo(replyOf.published_at)}
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="mt-1 line-clamp-4 break-words whitespace-pre-wrap text-[15px] leading-[1.45] text-neutral-800">
                 {replyOf.content_translated || replyOf.content || ""}
@@ -699,53 +699,54 @@ export function TweetCard({
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          {/* Header: single row — author + ✓ + @handle · time + 原文 toggle.
-              posterMode 下隐藏 @handle / 原文按钮, 时间用 MM-DD HH:MM. */}
-          <div className="flex items-baseline gap-1 text-[13px] text-neutral-500">
-            {/* PM 2026-05-25 R6: posterMode 下 author 加 relative z-10 + bg-white
-                让 author 文字层级在 verified 之上,即使 svg viewBox 透明区
-                跟 author 末字视觉重叠也不被遮挡 */}
-            <span
-              className={cn(
-                "text-[15px] font-bold leading-tight text-neutral-900",
-                posterMode
-                  ? "shrink-0 whitespace-nowrap relative z-10 bg-white pr-1"
-                  : "truncate",
-              )}
-            >
-              {author}
-            </span>
-            {isVerified && (
+          {/* Header — PM 2026-05-25 R7 双行布局:
+              第 1 行:author + verified badge
+              第 2 行:@handle · 时间 (· 原文按钮, posterMode 不显)
+              单行容器旧布局在 author 长 / 字号大场景容易挤,双行后更耐挤. */}
+          <div>
+            {/* Row 1: author + ✓ */}
+            <div className="flex items-baseline gap-1">
               <span
                 className={cn(
-                  "shrink-0 self-center",
-                  posterMode && "ml-3 relative z-0",
+                  "text-[15px] font-bold leading-tight text-neutral-900",
+                  posterMode ? "shrink-0 whitespace-nowrap" : "truncate",
                 )}
               >
-                <VerifiedBadge />
+                {author}
               </span>
-            )}
-            {!posterMode && handle && <span className="truncate">@{handle}</span>}
-            {!posterMode && <span className="shrink-0 text-neutral-400">·</span>}
-            <span className={cn("shrink-0 whitespace-nowrap", posterMode && "ml-2")}>
-              {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
-            </span>
-            {!posterMode && showLangButton && (
-              <button
-                type="button"
-                disabled={translating}
-                onClick={handleLangButtonClick}
-                className="shrink-0 hover:text-neutral-900 disabled:cursor-default disabled:text-neutral-300"
-              >
-                {translating
-                  ? "翻译中…"
-                  : canToggleOriginal
-                    ? showOriginal
-                      ? "译文"
-                      : "原文"
-                    : "译文"}
-              </button>
-            )}
+              {isVerified && (
+                <span className="shrink-0 self-center">
+                  <VerifiedBadge />
+                </span>
+              )}
+            </div>
+            {/* Row 2: @handle · 时间 · 原文按钮 */}
+            <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
+              {handle && <span className="truncate">@{handle}</span>}
+              {handle && <span className="shrink-0 text-neutral-400">·</span>}
+              <span className="shrink-0 whitespace-nowrap">
+                {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
+              </span>
+              {!posterMode && showLangButton && (
+                <>
+                  <span className="shrink-0 text-neutral-400">·</span>
+                  <button
+                    type="button"
+                    disabled={translating}
+                    onClick={handleLangButtonClick}
+                    className="shrink-0 hover:text-neutral-900 disabled:cursor-default disabled:text-neutral-300"
+                  >
+                    {translating
+                      ? "翻译中…"
+                      : canToggleOriginal
+                        ? showOriginal
+                          ? "译文"
+                          : "原文"
+                        : "译文"}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
 
           {/* F3: Reply 占位提示（仅 replyOf 数据未回填时显示，X 详情页里完整 reply
