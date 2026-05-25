@@ -250,22 +250,28 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // R15 方向锁定 — 一旦定方向就锁死, 不允许中途切换 (PM 反馈):
-      // - 主分量横向 → 锁 horizontal + preventDefault 防 native scroll
-      // - 主分量纵向 → 锁 vertical + active=false 让 native scroll 接管
-      // 后续帧不再 reassess direction. 这跟 swiper.js / framer 行为一致.
+      // R17:direction lock 之前的第一帧也 preventDefault, 防 iOS / Android
+      // 在顶部启动 pull-to-refresh (PM 反馈 #3:滑频道同时下拉刷新文案露出).
+      // overscroll-behavior-y:none 没用是因为 pull-to-refresh 在 touchstart
+      // 阶段决定, native scroll 启动后即使后续 preventDefault 也停不下来.
+      // 首帧 preventDefault → 浏览器知道 JS 要 capture, 不启动 pull-to-refresh.
       if (direction === 'unknown') {
-        if (absDx + absDy < 10) return;
+        if (absDx + absDy < 10) {
+          // 抖动阈值内, 但仍 preventDefault 防 pull-to-refresh 启动
+          if (e.cancelable) e.preventDefault();
+          return;
+        }
         if (absDx > absDy) {
           direction = 'horizontal';
         } else {
           direction = 'vertical';
           active = false;
+          // vertical 锁定后让 native scroll 接管, 不再 preventDefault
           return;
         }
       }
       if (direction === 'horizontal') {
-        // 防 native vertical scroll 跟 JS horizontal swipe 同时发生 (PM 斜滑反馈)
+        // 防 native vertical scroll 跟 JS horizontal swipe 同时发生
         if (e.cancelable) e.preventDefault();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
