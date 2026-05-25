@@ -250,21 +250,19 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // R14 方向锁定 — swiper.js 同款混合策略:
-      // - 主分量横向 → 锁 horizontal + preventDefault 防 native scroll 同时跑
-      // - 主分量纵向 → 不锁死 (continue unknown, 让 native scroll 接管,
-      //   后续帧用户改横向时仍可锁 horizontal — 解决 PM "明明横滑了却没切"
-      //   因为之前 vertical lock + active=false 一锁死再也不响应)
-      // - touch-action: pan-y + preventDefault 双保险:touch-action 在
-      //   touchstart 阶段就告诉浏览器水平归 JS, preventDefault 在 touchmove
-      //   防斜滑 native scroll 偷跑 (PM R13 反馈)
+      // R15 方向锁定 — 一旦定方向就锁死, 不允许中途切换 (PM 反馈):
+      // - 主分量横向 → 锁 horizontal + preventDefault 防 native scroll
+      // - 主分量纵向 → 锁 vertical + active=false 让 native scroll 接管
+      // 后续帧不再 reassess direction. 这跟 swiper.js / framer 行为一致.
       if (direction === 'unknown') {
         if (absDx + absDy < 10) return;
         if (absDx > absDy) {
           direction = 'horizontal';
+        } else {
+          direction = 'vertical';
+          active = false;
+          return;
         }
-        // 纵向主分量 — 不锁死, 等下次主分量切换. native vertical scroll 由
-        // touch-action: pan-y 自动接管, JS 不干预
       }
       if (direction === 'horizontal') {
         // 防 native vertical scroll 跟 JS horizontal swipe 同时发生 (PM 斜滑反馈)
@@ -307,12 +305,14 @@ function DashboardHome() {
       const cur = filterRef.current;
       const idx = tabs.findIndex((c) => c.key === cur);
 
-      // PM 2026-05-25 R11: 阈值放宽 + flick (高 velocity 短滑也算切换)
+      // R15: direction 已锁 horizontal (上方过滤过), onEnd 不再检查 horizontalDominant —
+      // PM 反馈"滑了一段 adjacent 都进来了, 松手却弹回" 根因就在 horizontalDominant
+      // 失败 (dy 累积大). 锁定即信任, 只判 distance + flick + dt.
       const v = Math.abs(dx) / Math.max(dt, 1);
       const distanceOk = Math.abs(dx) >= 40;
       const flickOk = v > 0.3 && Math.abs(dx) >= 25;
-      const horizontalDominant = Math.abs(dx) >= Math.abs(dy) * 1.5;
-      const shouldSwitch = (distanceOk || flickOk) && horizontalDominant && dt <= 800 && idx >= 0;
+      const shouldSwitch = (distanceOk || flickOk) && dt <= 800 && idx >= 0;
+      void dy; // dy 已经在 direction lock 阶段判过, 这里不再用
       const nextIdx = !shouldSwitch ? idx : (dx < 0
         ? Math.min(idx + 1, tabs.length - 1)
         : Math.max(idx - 1, 0));
