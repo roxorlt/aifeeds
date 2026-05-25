@@ -4736,9 +4736,24 @@ interface XArticleStub {
   summary_text: string | null;
   author_handle: string | null;
   author_name: string | null;
+  // Phase 1 (syndication, no auth): title/excerpt/cover/author
   fetched_at?: string;
   fetch_failed_at?: string;
   fetch_failed_reason?: string;
+  // Phase 2 (X GraphQL, auth cookie required): article body 全文
+  // body 字段独立成 mutex 集合 — title/excerpt 失败不影响 body 流程,反之亦然
+  body?: string | null;
+  body_fetched_at?: string;
+  body_fetch_failed_at?: string;
+  body_fetch_failed_reason?: string;
+  // 翻译(title/excerpt/body 同一次 DeepSeek 调用,所以共用 translated_at/skipped/failed)
+  title_translated?: string;
+  excerpt_translated?: string;
+  body_translated?: string;
+  translated_at?: string;
+  translate_skipped_at?: string;
+  translate_failed_at?: string;
+  translate_failed_reason?: string;
 }
 
 export async function fetchXArticlesForXTweet(
@@ -4919,24 +4934,26 @@ export async function fetchXArticlesForXTweet(
 // 中文原文 → DeepSeek 返 null _zh → 标 _translate_skipped_at 防重试。
 // ═══════════════════════════════════════════════════════════════════════════
 
-const X_ARTICLE_TRANSLATE_PROMPT = `把下面 X article 标题和摘要翻译成自然中文。
+const X_ARTICLE_TRANSLATE_PROMPT = `把下面 X article 的 title / excerpt / body 翻译成自然中文。
 
 规则:
 - 专有名词保留英文(API / OpenAI / RAG / Transformer / Cloudflare / Codex 等)
 - 已经是中文 / 中英混合的字段返回 null(不需翻译)
 - 输出自然口语化中文,避免直译腔
-- 输入字段不存在时对应 _zh 返回 null
+- 输入字段为空或不存在时对应 _zh 返回 null
+- body 是正文全文,翻译完整保留段落结构(原文 \\n 用 \\n 保留)
 
-输入(JSON 数组,每条 {idx, title, excerpt}):
+输入(JSON 对象):
 %INPUT%
 
 只返回一个 JSON 对象,不要其他文字:
-{ "items": [{ "idx": 0, "title_zh": "..." 或 null, "excerpt_zh": "..." 或 null }, ...] }`;
+{ "title_zh": "..." 或 null, "excerpt_zh": "..." 或 null, "body_zh": "..." 或 null }`;
 
 interface ArticleTranslateTask {
   pathRef: { l1: true } | { l2Key: 'quote_of' | 'reply_of' | 'retweet_of' } | { l2Key: 'quote_of' | 'reply_of' | 'retweet_of'; isL3: true };
   title: string | null;
   excerpt: string | null;
+  body: string | null;
 }
 
 export async function translateXArticlesForXTweet(
@@ -4966,11 +4983,19 @@ export async function translateXArticlesForXTweet(
     if (!stub) return;
     const title = stub.title as string | null;
     const excerpt = stub.excerpt as string | null;
-    if (!title && !excerpt) return;
-    // 已 translated 或已 skip 不重做
-    if (stub.title_translated || stub.excerpt_translated) return;
-    if (stub.translate_skipped_at || stub.translate_failed_at) return;
-    tasks.push({ pathRef: ref, title, excerpt });
+    const body = (stub.body as string | null) ?? null;
+    if (!title && !excerpt && !body) return;
+    // 已 translated(任一字段)或已 skip 不重做。
+    // 注意:body 后于 title/excerpt 抓取,所以已翻译过 title/excerpt 但 body 后到的 case,
+    // 也要进入翻译(stub.body_translated 缺 + stub.body 有 = 需翻 body)。
+    const titleDone = !!stub.title_translated || !title;
+    const excerptDone = !!stub.excerpt_translated || !excerpt;
+    const bodyDone = !!stub.body_translated || !body;
+    if (titleDone && excerptDone && bodyDone) return;
+    if (stub.translate_failed_at) return;
+    // translate_skipped_at 是"中文原文" sentinel,如果 body 后到且非中文需重翻
+    if (stub.translate_skipped_at && titleDone && excerptDone && bodyDone) return;
+    tasks.push({ pathRef: ref, title, excerpt, body });
     stubs.push(stub);
   };
 
@@ -4989,69 +5014,53 @@ export async function translateXArticlesForXTweet(
     return { translated: 0, skipped: 0, failed: 0, mutated: false };
   }
 
-  // 调 DeepSeek
-  const input = tasks.map((t, i) => ({ idx: i, title: t.title, excerpt: t.excerpt }));
-  const prompt = X_ARTICLE_TRANSLATE_PROMPT.replace('%INPUT%', JSON.stringify(input));
+  // 单 task 单调用,串行。每 task body 可能 6k 字符 ≈ 4k token 输出,
+  // 加 title + excerpt 拼起来一次调用 max_tokens=8000 够。
   const nowIso = new Date().toISOString();
-
-  let parsed: { items?: Array<{ idx: number; title_zh?: string | null; excerpt_zh?: string | null }> } | null = null;
-  let attempts = 0;
-  for (let i = 0; i < 2; i++) {
-    attempts++;
-    try {
-      const res = await fetch(DEEPSEEK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({
-          model: 'deepseek-v4-flash',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0,
-          response_format: { type: 'json_object' },
-          max_tokens: 8000,
-        }),
-      });
-      if (!res.ok) continue;
-      const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-      const raw = body.choices?.[0]?.message?.content || '';
-      parsed = JSON.parse(raw);
-      break;
-    } catch { /* retry */ }
-  }
-
-  // 失败:所有 stub 标 translate_failed_at,不阻塞
-  if (!parsed?.items) {
-    let mutCount = 0;
-    for (const stub of stubs) {
-      if (stub) {
-        stub.translate_failed_at = nowIso;
-        stub.translate_failed_reason = 'http_or_parse';
-        mutCount++;
-      }
-    }
-    if (mutCount > 0) {
-      await env.DB.prepare(
-        `UPDATE items SET extra = ? WHERE id = ?`,
-      ).bind(JSON.stringify(extra), itemId).run();
-    }
-    console.log(`[x-article-translate] ${itemId}: HTTP/parse fail after ${attempts} attempts`);
-    return { translated: 0, skipped: 0, failed: mutCount, mutated: mutCount > 0 };
-  }
-
-  // 写回每个 stub
   let translated = 0, skipped = 0, failed = 0;
+
   for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
     const stub = stubs[i];
     if (!stub) continue;
-    const out = parsed.items.find((it) => it.idx === i);
-    if (!out) {
+
+    const input = { title: t.title, excerpt: t.excerpt, body: t.body };
+    const prompt = X_ARTICLE_TRANSLATE_PROMPT.replace('%INPUT%', JSON.stringify(input));
+
+    let parsed: { title_zh?: string | null; excerpt_zh?: string | null; body_zh?: string | null } | null = null;
+    let attempts = 0;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      attempts++;
+      try {
+        const res = await fetch(DEEPSEEK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
+          body: JSON.stringify({
+            model: 'deepseek-v4-flash',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0,
+            response_format: { type: 'json_object' },
+            max_tokens: 8000,
+          }),
+        });
+        if (!res.ok) continue;
+        const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+        const raw = body.choices?.[0]?.message?.content || '';
+        parsed = JSON.parse(raw);
+        break;
+      } catch { /* retry */ }
+    }
+
+    if (!parsed) {
       stub.translate_failed_at = nowIso;
-      stub.translate_failed_reason = 'idx_missing_in_response';
+      stub.translate_failed_reason = 'http_or_parse';
       failed++;
       continue;
     }
-    const t = tasks[i];
-    const titleZh = out.title_zh ?? null;
-    const excerptZh = out.excerpt_zh ?? null;
+
+    const titleZh = parsed.title_zh ?? null;
+    const excerptZh = parsed.excerpt_zh ?? null;
+    const bodyZh = parsed.body_zh ?? null;
     let didTranslate = false;
     if (titleZh && t.title) {
       stub.title_translated = titleZh;
@@ -5061,14 +5070,20 @@ export async function translateXArticlesForXTweet(
       stub.excerpt_translated = excerptZh;
       didTranslate = true;
     }
+    if (bodyZh && t.body) {
+      stub.body_translated = bodyZh;
+      didTranslate = true;
+    }
     if (didTranslate) {
       stub.translated_at = nowIso;
+      // 清 skip sentinel(body 后到时此前可能被标过)
+      delete stub.translate_skipped_at;
       translated++;
     } else {
-      // 中文原文 / DeepSeek 判定不需翻译 → skip marker 防重试
       stub.translate_skipped_at = nowIso;
       skipped++;
     }
+    console.log(`[x-article-translate] ${itemId} task#${i} attempts=${attempts} translated=${didTranslate}`);
   }
 
   await env.DB.prepare(
@@ -5097,10 +5112,16 @@ export async function runBackfillXArticleTranslations(
   remaining: number;
 }> {
   // 候选:任一 path x_article 有 title 但无 title_translated + 没 skip / fail marker
+  // 2026-05-22 PR6:加 body 字段后,SQL 选 "任一字段(title/excerpt/body) 存在 + 对应 _translated 缺"。
+  // body 后到的场景:之前可能 title/excerpt 翻完标了 translate_skipped_at(中文原文),
+  // 但 body 后到且可能是英文 → SQL 需放过去,collect 阶段判断 body 需要翻 + 清 skip flag。
+  // translate_failed_at 仍然短路(避免反复触发已永久失败)。
   const TR = (path: string) => `(
-    json_extract(extra, '$.${path}x_article.title') IS NOT NULL
-    AND json_extract(extra, '$.${path}x_article.title_translated') IS NULL
-    AND json_extract(extra, '$.${path}x_article.translate_skipped_at') IS NULL
+    (
+      (json_extract(extra, '$.${path}x_article.title') IS NOT NULL AND json_extract(extra, '$.${path}x_article.title_translated') IS NULL)
+      OR (json_extract(extra, '$.${path}x_article.excerpt') IS NOT NULL AND json_extract(extra, '$.${path}x_article.excerpt_translated') IS NULL)
+      OR (json_extract(extra, '$.${path}x_article.body') IS NOT NULL AND json_extract(extra, '$.${path}x_article.body_translated') IS NULL)
+    )
     AND json_extract(extra, '$.${path}x_article.translate_failed_at') IS NULL
   )`;
   const HAS_PENDING = `(
@@ -5153,6 +5174,282 @@ export async function runBackfillXArticleTranslations(
     total_failed: totalFailed,
     errors: errors.slice(0, 20),
     remaining: (remainingRow?.n || 0) - processed,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// fetchXArticleBodiesForXTweet — 2026-05-22 PR6
+//
+// 抓 X article 正文 body(全文,login-gated)。
+// 前置:fetchXArticlesForXTweet 已经写了 x_article.title/excerpt/cover/author,
+// 这里在已 fetched_at 的 path 上调 X GraphQL TweetResultByRestId 拿 plain_text。
+//
+// 风控:
+// - 单 item 内串行(多 path 时 5-10s jitter)
+// - 日总量 cap(默认 50/天,X_GRAPHQL_DAILY_CAP env override)
+// - Cookie 失效(401/403)→ 标 cookie_invalid + 中断 + PushDeer 报警
+// - RateLimit(429)→ 中断当前 item,workflow 等下次 cron 续跑
+//
+// 路径覆盖:6 个(同 fetchXArticlesForXTweet)。
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface XArticleBodyEnv extends EnrichEnv {
+  AUTH_KV?: KVNamespace;
+  PUSHDEER_ADMIN_KEYS?: string;
+  X_GRAPHQL_DAILY_CAP?: string;
+}
+
+export async function fetchXArticleBodiesForXTweet(
+  env: XArticleBodyEnv,
+  itemId: string,
+  ctx?: { waitUntil: (p: Promise<unknown>) => void },
+): Promise<{
+  fetched: number;
+  failed: number;
+  skipped: number;
+  mutated: boolean;
+  cap_hit?: boolean;
+  cookie_invalid?: boolean;
+  rate_limited?: boolean;
+}> {
+  if (!env.AUTH_KV) {
+    // 无 KV binding(本地 dev 没绑)— 静默 skip
+    return { fetched: 0, failed: 0, skipped: 0, mutated: false };
+  }
+
+  const {
+    fetchTweetResultByRestId,
+    extractArticleBodyFromTweet,
+    getXCookie,
+    getDailyCount,
+    incrDailyCount,
+    getDailyCap,
+    CookieInvalidError,
+    CookieMissingError,
+    RateLimitError,
+    TweetNotFoundError,
+  } = await import('./x-graphql');
+
+  const cookie = await getXCookie({ AUTH_KV: env.AUTH_KV });
+  if (!cookie || cookie.invalid_at) {
+    // 无 cookie 或已知失效 — 不报警(那是 markCookieInvalid 的事),静默 skip
+    return { fetched: 0, failed: 0, skipped: 0, mutated: false, cookie_invalid: !!cookie?.invalid_at };
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT id, source_id, extra FROM items WHERE id = ? AND source_type='x_list'`,
+  ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
+  if (!row) throw new Error(`fetchXArticleBodiesForXTweet: item not found ${itemId}`);
+
+  let extra: Record<string, unknown> = {};
+  try { extra = row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {}; } catch { /* ignore */ }
+
+  const cap = getDailyCap({ AUTH_KV: env.AUTH_KV, X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP });
+  let used = await getDailyCount({ AUTH_KV: env.AUTH_KV });
+
+  const nowIso = new Date().toISOString();
+  let fetched = 0;
+  let failed = 0;
+  let skipped = 0;
+  let mutated = false;
+  let capHit = false;
+  let cookieInvalid = false;
+  let rateLimited = false;
+
+  // 收集所有候选(stub, tweetId)— stub 是 x_article obj,tweetId 是该 path 的 tweet id
+  interface Candidate {
+    stub: Record<string, unknown>;
+    tweetId: string;
+    path: string;
+  }
+  const candidates: Candidate[] = [];
+
+  const collect = (stub: Record<string, unknown> | undefined, tweetId: string | null | undefined, path: string) => {
+    if (!stub || !tweetId) return;
+    // 必须已 fetched_at(title/excerpt 流跑过)+ body 字段未 set + 未标 body_fetch_failed_at
+    if (!stub.fetched_at) return;
+    if (stub.body !== undefined && stub.body !== null) return;
+    if (stub.body_fetched_at || stub.body_fetch_failed_at) return;
+    candidates.push({ stub, tweetId, path });
+  };
+
+  collect(extra.x_article as Record<string, unknown> | undefined, row.source_id, 'L1');
+  for (const l2Key of ['quote_of', 'reply_of', 'retweet_of'] as const) {
+    const l2 = extra[l2Key] as Record<string, unknown> | undefined;
+    if (!l2) continue;
+    collect(l2.x_article as Record<string, unknown> | undefined, (l2.id as string) || undefined, `L2.${l2Key}`);
+    const l3 = l2.quote_of as Record<string, unknown> | undefined;
+    if (l3) collect(l3.x_article as Record<string, unknown> | undefined, (l3.id as string) || undefined, `L3.${l2Key}.quote_of`);
+  }
+
+  if (candidates.length === 0) {
+    return { fetched: 0, failed: 0, skipped: 0, mutated: false };
+  }
+
+  // 串行处理候选,失败模式短路
+  for (let i = 0; i < candidates.length; i++) {
+    if (used >= cap) {
+      capHit = true;
+      break;
+    }
+    const { stub, tweetId } = candidates[i];
+    try {
+      const tweetResult = await fetchTweetResultByRestId({ AUTH_KV: env.AUTH_KV }, tweetId, ctx);
+      const articleData = extractArticleBodyFromTweet(tweetResult);
+      used = await incrDailyCount({ AUTH_KV: env.AUTH_KV });
+
+      if (!articleData || !articleData.plain_text) {
+        stub.body_fetch_failed_at = nowIso;
+        stub.body_fetch_failed_reason = articleData ? 'no_plain_text_in_response' : 'no_article_in_tweet';
+        failed++;
+      } else {
+        stub.body = articleData.plain_text;
+        stub.body_fetched_at = nowIso;
+        // 顺手 update 别的字段(更准确版本)
+        if (articleData.title && !stub.title) stub.title = articleData.title;
+        if (articleData.cover_image_url && !stub.cover_image_url) stub.cover_image_url = articleData.cover_image_url;
+        // body 后到 → 清 translate_skipped_at 让 translate step 重评估
+        // (之前可能只基于 title/excerpt 判定中文标 skip,但 body 可能英文需翻)
+        if (stub.translate_skipped_at) delete stub.translate_skipped_at;
+        fetched++;
+      }
+      mutated = true;
+    } catch (e) {
+      if (e instanceof CookieInvalidError || e instanceof CookieMissingError) {
+        cookieInvalid = true;
+        // markCookieInvalid 已在 fetchTweetResultByRestId 内调用
+        break; // 后续 path 没意义,直接中断
+      }
+      if (e instanceof RateLimitError) {
+        rateLimited = true;
+        break;
+      }
+      if (e instanceof TweetNotFoundError) {
+        stub.body_fetch_failed_at = nowIso;
+        stub.body_fetch_failed_reason = 'tweet_404';
+        failed++;
+        mutated = true;
+      } else {
+        stub.body_fetch_failed_at = nowIso;
+        stub.body_fetch_failed_reason = `error:${String(e).slice(0, 100)}`;
+        failed++;
+        mutated = true;
+      }
+    }
+
+    // jitter 间隔 5-10s(除最后一个不 sleep)
+    if (i < candidates.length - 1 && !cookieInvalid && !rateLimited) {
+      const jitter = 5000 + Math.random() * 5000;
+      await new Promise((r) => setTimeout(r, jitter));
+    }
+  }
+
+  if (mutated) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = ? WHERE id = ?`,
+    ).bind(JSON.stringify(extra), itemId).run();
+    console.log(
+      `[x-article-body] ${itemId}: fetched=${fetched} failed=${failed} skipped=${skipped}` +
+      `${capHit ? ' CAP_HIT' : ''}${cookieInvalid ? ' COOKIE_INVALID' : ''}${rateLimited ? ' RATE_LIMITED' : ''}`,
+    );
+  }
+
+  return { fetched, failed, skipped, mutated, cap_hit: capHit, cookie_invalid: cookieInvalid, rate_limited: rateLimited };
+}
+
+/**
+ * Backfill 历史 x_article body。SQL filter 找有 x_article.fetched_at 但
+ * 缺 body / body_fetched_at / body_fetch_failed_at 的 path。
+ *
+ * 单 worker request 内串行 + 5-10s 每篇 jitter + 日总量 cap。
+ * cap 触底 / cookie 失效 / rate limit → 中断返 stopped_reason。
+ */
+export async function runBackfillXArticleBodies(
+  env: XArticleBodyEnv,
+  limit: number,
+  ctx?: { waitUntil: (p: Promise<unknown>) => void },
+): Promise<{
+  scanned: number;
+  processed: number;
+  total_fetched: number;
+  total_failed: number;
+  total_skipped: number;
+  errors: Array<{ id: string; reason: string }>;
+  remaining: number;
+  stopped_reason?: 'cap_hit' | 'cookie_invalid' | 'rate_limited' | null;
+  daily_used?: number;
+  daily_cap?: number;
+}> {
+  // 候选 SQL:任一 path x_article.fetched_at 存在 + (body IS NULL 或不存在) + body_fetched_at / body_fetch_failed_at 也都不存在
+  const PE = (path: string) => `(
+    json_extract(extra, '$.${path}x_article.fetched_at') IS NOT NULL
+    AND json_extract(extra, '$.${path}x_article.body') IS NULL
+    AND json_extract(extra, '$.${path}x_article.body_fetched_at') IS NULL
+    AND json_extract(extra, '$.${path}x_article.body_fetch_failed_at') IS NULL
+  )`;
+  const HAS_PENDING = `(
+    ${PE('')} OR
+    ${PE('quote_of.')} OR
+    ${PE('reply_of.')} OR
+    ${PE('retweet_of.')} OR
+    ${PE('quote_of.quote_of.')} OR
+    ${PE('reply_of.quote_of.')} OR
+    ${PE('retweet_of.quote_of.')}
+  )`;
+
+  const candidates = await env.DB.prepare(
+    `SELECT id FROM items
+      WHERE source_type='x_list' AND ${HAS_PENDING}
+      ORDER BY scraped_at DESC LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
+
+  const remainingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE source_type='x_list' AND ${HAS_PENDING}`,
+  ).first<{ n: number }>();
+
+  let processed = 0;
+  let totalFetched = 0;
+  let totalFailed = 0;
+  let totalSkipped = 0;
+  const errors: Array<{ id: string; reason: string }> = [];
+  let stopReason: 'cap_hit' | 'cookie_invalid' | 'rate_limited' | null = null;
+
+  for (const c of candidates.results) {
+    processed++;
+    try {
+      const r = await fetchXArticleBodiesForXTweet(env, c.id, ctx);
+      totalFetched += r.fetched;
+      totalFailed += r.failed;
+      totalSkipped += r.skipped;
+      if (r.cap_hit) { stopReason = 'cap_hit'; break; }
+      if (r.cookie_invalid) { stopReason = 'cookie_invalid'; break; }
+      if (r.rate_limited) { stopReason = 'rate_limited'; break; }
+    } catch (e) {
+      errors.push({ id: c.id, reason: String(e).slice(0, 200) });
+    }
+    // items 间不额外 sleep(本身 single item 内已经 jitter,跨 item 累计已分散)
+  }
+
+  let dailyUsed: number | undefined;
+  let dailyCap: number | undefined;
+  if (env.AUTH_KV) {
+    const { getDailyCount, getDailyCap } = await import('./x-graphql');
+    dailyUsed = await getDailyCount({ AUTH_KV: env.AUTH_KV });
+    dailyCap = getDailyCap({ AUTH_KV: env.AUTH_KV, X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP });
+  }
+
+  return {
+    scanned: candidates.results.length,
+    processed,
+    total_fetched: totalFetched,
+    total_failed: totalFailed,
+    total_skipped: totalSkipped,
+    errors: errors.slice(0, 20),
+    remaining: (remainingRow?.n || 0) - processed,
+    stopped_reason: stopReason,
+    daily_used: dailyUsed,
+    daily_cap: dailyCap,
   };
 }
 

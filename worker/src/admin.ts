@@ -335,11 +335,13 @@ ${ADMIN_SHARED_CSS}
   .card { background: #11161f; border: 1px solid #1f2937; border-radius: 8px; padding: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: #d1d5db; }
   .card p.hint { margin: 0 0 12px; font-size: 12px; color: #6b7280; }
-  input[type=text], input[type=tel] {
+  input[type=text], input[type=tel], textarea {
     width: 100%; background: #0b0e14; border: 1px solid #374151; color: #e6e8eb;
     padding: 8px 10px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px;
+    box-sizing: border-box;
   }
-  input:focus { outline: none; border-color: #6b7280; }
+  textarea { min-height: 90px; resize: vertical; line-height: 1.4; }
+  input:focus, textarea:focus { outline: none; border-color: #6b7280; }
   .row { display: flex; gap: 8px; margin-top: 8px; }
   button {
     flex: 0 0 auto; padding: 8px 14px; border-radius: 6px; border: 1px solid #374151;
@@ -401,6 +403,16 @@ ${adminNavHtml('tools')}
     <pre id="capOut">—</pre>
   </div>
 
+  <div class="card">
+    <h2>🍪 X Cookie 更新</h2>
+    <p class="hint">X article body 抓取走 GraphQL <code>TweetResultByRestId</code> 需登录 cookie。失效时(401/403)workflow 自动标失败 + PushDeer 推送,需在此页面更新。<br>步骤:浏览器登录 X 小号 → F12 → Application → Cookies → x.com → 全选复制 → 粘贴 Submit。</p>
+    <div class="row" style="margin-bottom: 8px;"><button onclick="loadXCookieStatus()">查当前状态</button></div>
+    <pre id="xCookieStatusOut" style="margin: 0 0 12px;">—</pre>
+    <textarea id="xCookieInput" placeholder="auth_token=...; ct0=...; twid=...; (整个 Cookie header 粘进来,分号分割)"></textarea>
+    <div class="row"><button class="danger" onclick="submitXCookie()">提交新 Cookie</button></div>
+    <pre id="xCookieOut">—</pre>
+  </div>
+
 </div>
 </main>
 
@@ -435,8 +447,26 @@ async function confirmRun(msg, method, url, body, outId) {
   if (!confirm(msg)) return;
   await run(method, url, body, outId);
 }
+async function loadXCookieStatus() {
+  await run('GET', '/api/admin/x-cookie', null, 'xCookieStatusOut');
+}
+async function submitXCookie() {
+  const cs = document.getElementById('xCookieInput').value.trim();
+  if (!cs) { alert('请粘贴 cookie 字符串'); return; }
+  if (!cs.includes('auth_token=') || !cs.includes('ct0=')) {
+    alert('Cookie 必须含 auth_token + ct0 字段(其他可选)');
+    return;
+  }
+  if (!confirm('确认提交新 Cookie? 旧的会被覆盖')) return;
+  await run('POST', '/api/admin/x-cookie', { cookie_string: cs }, 'xCookieOut');
+  // 提交完顺手刷新状态
+  await loadXCookieStatus();
+  // 安全:textarea 清掉防 cookie 残留在 DOM
+  document.getElementById('xCookieInput').value = '';
+}
 setMeta();
 setInterval(setMeta, 30000);
+loadXCookieStatus();
 </script>
 </body>
 </html>`;
