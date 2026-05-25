@@ -4,7 +4,7 @@
 
 import type { Env } from '../index';
 import type { RateLimitResult } from './types';
-import { pushDeerAlert } from '../notifier';
+import { pushDeerAlert, pushDeerWarning } from '../notifier';
 
 const SMS_HOST = 'sms.tencentcloudapi.com';
 const SMS_SERVICE = 'sms';
@@ -108,7 +108,8 @@ export async function checkDailyCapAlerts(env: Env, sent: number, cap: number): 
     await pushDeerAlert(env, 'SMS 95% 紧急', `今日发送 ${sent}/${cap}，建议立即检查异常 IP/phone 并临时把 SMS_DAILY_CAP 调到 0 切流`);
   } else if (pct >= 0.80 && (sent === Math.floor(cap * 0.80) || sent === Math.floor(cap * 0.80) + 1)) {
     // 仅在跨过 80% 阈值的瞬间触发一次（避免每条都告警）
-    await pushDeerAlert(env, 'SMS 80% 警告', `今日发送 ${sent}/${cap}，请关注 events 表 sms_send_attempt 分布`);
+    // 80% warning 级:日报推,95% 才立即(critical)
+    await pushDeerWarning(env, 'SMS 80% 警告', `今日发送 ${sent}/${cap}，请关注 events 表 sms_send_attempt 分布`);
   }
 }
 

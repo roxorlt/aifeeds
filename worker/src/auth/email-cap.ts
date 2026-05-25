@@ -2,7 +2,7 @@
 // 设计参考：docs/plans/2026-05-06-email-auth-design.md § 5.4
 
 import type { Env } from '../index';
-import { pushDeerAlert } from '../notifier';
+import { pushDeerAlert, pushDeerWarning } from '../notifier';
 
 const DEFAULT_DAILY_CAP = 100;
 const DEFAULT_MONTHLY_CAP = 3000;
@@ -64,7 +64,8 @@ export async function checkEmailDailyCapAlerts(env: Env, sent: number, cap: numb
     const dedupKey = `email_alert_daily_80_${dateStr}`;
     if (!(await env.AUTH_KV.get(dedupKey))) {
       await env.AUTH_KV.put(dedupKey, '1', { expirationTtl: 36 * 3600 });
-      await pushDeerAlert(env, 'Email 80% 警告', `今日 email 已发 ${sent}/${cap}，关注异常 IP/email 分布`);
+      // 80% 是 warning 级:不紧急,日报推 (95% 才 critical)
+      await pushDeerWarning(env, 'Email 80% 警告', `今日 email 已发 ${sent}/${cap}，关注异常 IP/email 分布`);
     }
   }
 }
@@ -82,7 +83,8 @@ export async function checkEmailMonthlyCapAlerts(env: Env, sent: number, cap: nu
     const dedupKey = `email_alert_monthly_80_${monthStr}`;
     if (!(await env.AUTH_KV.get(dedupKey))) {
       await env.AUTH_KV.put(dedupKey, '1', { expirationTtl: 35 * 24 * 3600 });
-      await pushDeerAlert(env, 'Email 月度 80% 警告', `本月 email 已发 ${sent}/${cap}，预算关注`);
+      // 80% warning,日报推
+      await pushDeerWarning(env, 'Email 月度 80% 警告', `本月 email 已发 ${sent}/${cap}，预算关注`);
     }
   }
 }

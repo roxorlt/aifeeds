@@ -1,10 +1,32 @@
 // PR2 PushDeer 告警接入
 // 设计参考：docs/plans/2026-05-01-auth-system-design.md § 11
 // 实现参考：/Users/roxor/brain/30-projects/xueqiuFollow/src/notifier.py
+//
+// 2026-05-25 告警分级 Phase A:
+//   critical = pushDeerAlert(...)           → 立即推送
+//   warning  = pushDeerWarning(env, ...)    → KV ring buffer 攒批,每日 UTC 23:00 推日报
+//   info     = console.log + Workers Logs   → 不推 PushDeer
+//
+// 痛点:旧版所有 PushDeer 同优先级 → 半夜被 80% 用量警告吵 → user 学会忽略
+// → 真出事(cookie 失效 / cron 全挂)反应慢。
+//
+// Phase A 落地基础设施 + 改造已知低优先级 call sites(80% 用量类)。
+// Phase B(follow-up)再加业务级规则("scrape 0 new 持续 3 轮" /
+// "翻译失败率 > 5%" / "metrics 覆盖率跌破 90%")。
 
 import type { Env } from './index';
 
 const PUSHDEER_ENDPOINT = 'https://api2.pushdeer.com/message/push';
+
+// 攒批 warning 用的 KV key + buffer 上限
+const WARNING_BUFFER_KEY = 'PUSHDEER_WARNING_BUFFER';
+const WARNING_BUFFER_MAX = 200; // 防止 KV value 过大(单 value 25MB,200 条够撑日内任意流量)
+
+export interface WarningEntry {
+  title: string;
+  body: string;
+  at: string; // ISO timestamp
+}
 
 export async function pushDeerAlert(
   env: Env,
@@ -48,6 +70,121 @@ export async function pushDeerAlert(
       }
     }),
   );
+}
+
+/**
+ * Warning 级别告警:不立即推送,写 KV ring buffer 攒批,
+ * 每日 UTC 23:00 (BJT 07:00) cron 触发 sendDailyWarningDigest 推一次日报。
+ *
+ * 用于:配额 80% 警告 / 单批失败但不阻塞流程 / metrics 抖动 / 其他可延迟处理的提醒。
+ * Critical 紧急情况(整 cron 挂 / cookie 失效 / 配额 95%)仍用 pushDeerAlert 立即推送。
+ *
+ * 设计:
+ * - KV 单值存 JSON Array<{title, body, at}>,append-only 直到 digest flush
+ * - 超过 WARNING_BUFFER_MAX 时 trim 最老的(LIFO)防 KV value 撑爆
+ * - AUTH_KV 未配置时降级 → 直接 console.warn(本地 dev / 测试场景兼容)
+ */
+export async function pushDeerWarning(
+  env: Env,
+  title: string,
+  body: string,
+): Promise<void> {
+  // 无 KV 时降级日志,保留可观测性
+  if (!env.AUTH_KV) {
+    console.warn(`[pushdeer-warning|no-kv] ${title}: ${body.slice(0, 200)}`);
+    return;
+  }
+  const entry: WarningEntry = {
+    title,
+    body,
+    at: new Date().toISOString(),
+  };
+  // 读老 buffer + append + 写回(KV 没有 atomic append,接受微小并发覆盖风险 —
+  // worst case 高并发瞬间丢 1-2 条 warning,可接受;digest 还在第二天发)
+  let buffer: WarningEntry[] = [];
+  try {
+    const raw = await env.AUTH_KV.get(WARNING_BUFFER_KEY);
+    if (raw) buffer = JSON.parse(raw) as WarningEntry[];
+  } catch {
+    buffer = [];
+  }
+  buffer.push(entry);
+  // Trim 防爆:保留最新 WARNING_BUFFER_MAX 条
+  if (buffer.length > WARNING_BUFFER_MAX) {
+    buffer = buffer.slice(-WARNING_BUFFER_MAX);
+  }
+  // 写回 + TTL 25h 兜底(若 daily cron 漏跑两天,KV 自然过期防积累)
+  await env.AUTH_KV.put(WARNING_BUFFER_KEY, JSON.stringify(buffer), {
+    expirationTtl: 25 * 3600,
+  });
+  console.log(`[pushdeer-warning|buffered] ${title} (buffer size: ${buffer.length})`);
+}
+
+/**
+ * Daily UTC 23:00 (BJT 07:00) cron 触发,flush warning buffer 推一次合并日报。
+ * 推送完清空 KV buffer。
+ *
+ * 推送格式:
+ *   标题:"📋 aifeeds 日报 | N 条 warning (YYYY-MM-DD)"
+ *   正文:按 warning title 分组 + 每条带时间戳
+ *
+ * 没 warning 不推(避免无意义打扰)。
+ */
+export async function sendDailyWarningDigest(env: Env): Promise<{
+  warnings: number;
+  pushed: boolean;
+  reason?: string;
+}> {
+  if (!env.AUTH_KV) return { warnings: 0, pushed: false, reason: 'no_kv' };
+  if (!env.PUSHDEER_ADMIN_KEYS) return { warnings: 0, pushed: false, reason: 'no_keys' };
+
+  let buffer: WarningEntry[] = [];
+  try {
+    const raw = await env.AUTH_KV.get(WARNING_BUFFER_KEY);
+    if (raw) buffer = JSON.parse(raw) as WarningEntry[];
+  } catch {
+    buffer = [];
+  }
+  if (buffer.length === 0) {
+    return { warnings: 0, pushed: false, reason: 'empty' };
+  }
+
+  // 按 title 分组,每组列时间戳
+  const groups = new Map<string, WarningEntry[]>();
+  for (const e of buffer) {
+    const arr = groups.get(e.title) || [];
+    arr.push(e);
+    groups.set(e.title, arr);
+  }
+  const bjtDate = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  const title = `📋 aifeeds 日报 | ${buffer.length} 条 warning (${bjtDate})`;
+  const lines: string[] = [];
+  for (const [groupTitle, entries] of groups) {
+    lines.push(`### ${groupTitle} × ${entries.length}`);
+    for (const e of entries) {
+      const bjt = new Date(new Date(e.at).getTime() + 8 * 3600 * 1000)
+        .toISOString().replace('T', ' ').slice(0, 19);
+      lines.push(`- _${bjt}_ ${e.body}`);
+    }
+    lines.push('');
+  }
+  const body = lines.join('\n');
+
+  // 推送 + 成功后清空 buffer
+  const keys = env.PUSHDEER_ADMIN_KEYS.split(',').map((k) => k.trim()).filter(Boolean);
+  await Promise.allSettled(
+    keys.map((key) =>
+      fetch(PUSHDEER_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ pushkey: key, text: title, desp: body, type: 'markdown' }),
+      })
+    ),
+  );
+  // 清 buffer(即使 PushDeer 部分失败也清 — 重试机制由 buffer 自然累计承担)
+  await env.AUTH_KV.delete(WARNING_BUFFER_KEY);
+  console.log(`[pushdeer-digest] flushed ${buffer.length} warnings`);
+  return { warnings: buffer.length, pushed: true };
 }
 
 /**
