@@ -15,6 +15,7 @@
 //   主办方粉丝    → metrics.organizer_fans（drawer 用；卡片简显）
 //   CTA           → 跳 item.url（站外报名页）
 
+import { useState } from "react";
 import type { HuodongxingMetrics, HuodongxingOrganizer, Item, ItemExtra, MediaItem } from "../types";
 import { cn, parseJsonField } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
@@ -137,6 +138,7 @@ interface Props {
 
 export function HuodongxingCard({ item }: Props) {
   const drawer = useDrawer();
+  const [coverFailed, setCoverFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<HuodongxingMetrics>(item.metrics) ?? ({} as HuodongxingMetrics);
   const media = parseMedia(item.media);
@@ -152,9 +154,14 @@ export function HuodongxingCard({ item }: Props) {
   const registeredStr = formatEventRegistered(metrics.registered_count, metrics.max_instance);
   const isOnline = Boolean(extra.is_online);
 
-  // Thumbnail：先取 media role=thumbnail，再 fallback 到 extra.thumbnail_full
+  // PM 2026-05-25:卡片改 HfPaper 风格 — 顶部 16:9 大封面 + 下面紧凑信息.
+  // 封面用 drawer 头图同源字段 (extra.og_image → thumbnail_full → media role=thumbnail).
+  // 流内 cover 跟抽屉头图视觉一致, 用户点开 drawer 也是同一张图
   const thumb = media.find((m) => (m as MediaItem & { role?: string }).role === "thumbnail");
-  const thumbUrl = thumb?.url ? resolveAssetUrl(thumb.url) : extra.thumbnail_full ? resolveAssetUrl(extra.thumbnail_full) : "";
+  const coverUrl =
+    (extra.og_image ? resolveAssetUrl(extra.og_image) : "") ||
+    (extra.thumbnail_full ? resolveAssetUrl(extra.thumbnail_full) : "") ||
+    (thumb?.url ? resolveAssetUrl(thumb.url) : "");
 
   // 正文：item.content (backend 写入 og:description 或正文首段 100 字)
   // 未来如 backend 加 ai_summary 字段，优先用之
@@ -178,69 +185,63 @@ export function HuodongxingCard({ item }: Props) {
         isEnded ? "bg-neutral-50/60" : ""
       }`}
     >
-      <div className="flex items-start gap-2.5">
-        {/* Thumbnail 40×40 */}
-        {thumbUrl ? (
+      {/* PM 2026-05-25:改 HfPaper 风格 — 顶部 16:9 cover + 紧凑信息.
+          cover 取 drawer 头图同源 (extra.og_image / thumbnail_full), 跟用户
+          点开抽屉看到的头图视觉一致 */}
+      {coverUrl && !coverFailed && (
+        <div className={cn(
+          "mb-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100",
+          isEnded && "opacity-60 grayscale-[.5]",
+        )}>
           <img
-            src={thumbUrl}
+            src={coverUrl}
             alt={title}
             loading="lazy"
             decoding="async"
-            className={`h-10 w-10 shrink-0 rounded-md bg-neutral-200 object-cover ${
-              isEnded ? "opacity-55 grayscale-[.5]" : ""
-            }`}
-            onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+            className="aspect-[16/9] w-full object-cover"
+            onError={() => setCoverFailed(true)}
           />
-        ) : (
-          <div
-            className={`h-10 w-10 shrink-0 rounded-md bg-[repeating-linear-gradient(135deg,#e5e5e5_0_6px,#d4d4d4_6px_12px)] ${
-              isEnded ? "opacity-55" : ""
-            }`}
-            aria-label="event poster"
-          />
-        )}
-
-        <div className="min-w-0 flex-1">
-          {/* Title row：标题 + 状态徽章 */}
-          <div className="flex flex-wrap items-start gap-1.5">
-            <h3
-              className={`min-w-0 flex-1 break-words text-[15px] font-medium leading-[1.3] ${
-                isEnded ? "text-neutral-500" : "text-neutral-900"
-              }`}
-            >
-              {title}
-            </h3>
-            {state !== "unenriched" && <StatusBadge state={state} />}
-            {state === "unenriched" && (
-              <span className="inline-flex shrink-0 items-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium leading-none text-neutral-700">
-                未开始
-              </span>
-            )}
-          </div>
-
-          {/* Meta：时间 · 地点 · 价格 · 报名数 */}
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] leading-[1.5] text-neutral-500">
-            {timeStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{timeStr}</span>}
-            {timeStr && locationStr && <span className="shrink-0 text-neutral-400">·</span>}
-            {locationStr && (
-              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
-                <LocationIcon online={isOnline} />
-                {locationStr}
-              </span>
-            )}
-            {locationStr && priceStr && <span className="shrink-0 text-neutral-400">·</span>}
-            {priceStr && (
-              <span className={cn(
-                "shrink-0 whitespace-nowrap",
-                priceStr === "免费" ? "font-medium text-neutral-700" : "tabular-nums",
-              )}>
-                {priceStr}
-              </span>
-            )}
-            {(timeStr || locationStr || priceStr) && registeredStr && <span className="shrink-0 text-neutral-400">·</span>}
-            {registeredStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{registeredStr}</span>}
-          </div>
         </div>
+      )}
+
+      {/* Title row:标题 + 状态徽章 (跨整张卡宽, 没有 avatar 缩进) */}
+      <div className="flex flex-wrap items-start gap-1.5">
+        <h3
+          className={`min-w-0 flex-1 break-words text-[15px] font-bold leading-tight ${
+            isEnded ? "text-neutral-500" : "text-neutral-900"
+          }`}
+        >
+          {title}
+        </h3>
+        {state !== "unenriched" && <StatusBadge state={state} />}
+        {state === "unenriched" && (
+          <span className="inline-flex shrink-0 items-center rounded-full bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium leading-none text-neutral-700">
+            未开始
+          </span>
+        )}
+      </div>
+
+      {/* Meta:时间 · 地点 · 价格 · 报名数 */}
+      <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] leading-[1.5] text-neutral-500">
+        {timeStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{timeStr}</span>}
+        {timeStr && locationStr && <span className="shrink-0 text-neutral-400">·</span>}
+        {locationStr && (
+          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+            <LocationIcon online={isOnline} />
+            {locationStr}
+          </span>
+        )}
+        {locationStr && priceStr && <span className="shrink-0 text-neutral-400">·</span>}
+        {priceStr && (
+          <span className={cn(
+            "shrink-0 whitespace-nowrap",
+            priceStr === "免费" ? "font-medium text-neutral-700" : "tabular-nums",
+          )}>
+            {priceStr}
+          </span>
+        )}
+        {(timeStr || locationStr || priceStr) && registeredStr && <span className="shrink-0 text-neutral-400">·</span>}
+        {registeredStr && <span className="shrink-0 whitespace-nowrap tabular-nums">{registeredStr}</span>}
       </div>
 
       {/* Body / Skeleton — unenriched 状态显骨架 */}

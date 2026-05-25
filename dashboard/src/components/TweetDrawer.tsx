@@ -43,6 +43,14 @@ export function TweetDrawer() {
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  // PM 2026-05-25:抽屉打开时右→左 "盖被子" slide-in 动画.
+  // mount 后下一帧 setEntered(true), transform translateX(100%) → 0 配
+  // transition transform 280ms 触发 slide. 关闭走原有路径(close() → unmount)
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
   // Tracks whether the in-body title (owner/repo for GH, etc.) has scrolled
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
@@ -363,8 +371,15 @@ export function TweetDrawer() {
         //     不是 flex item，但保留无害且一致性更好）。
         className="absolute inset-y-0 right-0 flex w-full max-w-[600px] min-w-0 flex-col overflow-x-hidden bg-white shadow-xl sm:w-[560px]"
         style={{
-          transform: dragX > 0 ? `translateX(${dragX}px)` : undefined,
-          transition: isDragging ? "none" : "transform 200ms ease-out",
+          // 优先级:用户 drag (dragX>0) > entered slide-in > fallback 隐藏
+          // entered=false 时 panel 在屏外 (translateX 100%), entered=true 滑入 0,
+          // 用户 drag-to-close 时跟手 dragX, transition 在 dragging 时关掉
+          transform: dragX > 0
+            ? `translateX(${dragX}px)`
+            : entered
+              ? "translateX(0)"
+              : "translateX(100%)",
+          transition: isDragging ? "none" : "transform 280ms cubic-bezier(0.32, 0.72, 0, 1)",
         }}
       >
         {/* PM 2026-05-19: mobile 长 title 跟「分享」按钮 overlap。

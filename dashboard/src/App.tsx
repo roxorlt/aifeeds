@@ -168,14 +168,10 @@ function DashboardHome() {
   // video 元素(组件内手势优先)/ data-no-swipe-tab 自定义 opt-out /
   // iOS 左 24px edge(系统 back gesture)。
   //
-  // PM 2026-05-20 反馈:横滑/纵滑总有另一方向的小分量,touchend 一次性判断
-  // 容易误识别(纵滑带点横向 → 误切 tab / 横滑带点纵向 → 误判 vertical)。
-  // 改为 **早期方向锁定** —— touchmove 第一次确定主方向后:
-  //   - |dx| > |dy|×2(角度 < 26.5°)→ 锁定 horizontal,保留到 touchend 切 tab
-  //   - |dy| > |dx|×2(角度 > 63.5°)→ 锁定 vertical,立即 abort 不再监听,
-  //     让浏览器原生 scroll 完全接管(我们是 passive listener,不挡 scroll)
-  //   - 中间 26.5°-63.5° 模糊区:等下次 touchmove,通常 1-2 frame 内方向就明确
-  // 用 ref 存最新 filter(避免每次 filter 变都 reattach listener)
+  // PM 2026-05-25 R8 跟手感:之前 touchend 时硬切 filter 无视觉过渡.
+  // 现在 touchmove 阶段同步 main translateX 跟手指 (边界 tab 阻尼 1/3 反弹),
+  // touchend 时若满足切换条件,先 animate slide-off → setFilter → reset.
+  // 直接操作 DOM (而非 React state) 避开 60fps re-render 掉帧.
   const filterRef = useRef(filter);
   filterRef.current = filter;
   useEffect(() => {
@@ -186,11 +182,22 @@ function DashboardHome() {
     let startX = 0, startY = 0, startT = 0;
     let active = false;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
+    let currentDx = 0;
+
+    const applyTransform = (dx: number, withTransition: boolean) => {
+      el.style.transition = withTransition
+        ? 'transform 220ms cubic-bezier(0.32, 0.72, 0, 1)'
+        : 'none';
+      el.style.transform = dx === 0 ? '' : `translateX(${dx}px)`;
+    };
+    const resetTransform = () => {
+      el.style.transition = '';
+      el.style.transform = '';
+    };
 
     const onStart = (e: TouchEvent) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // 排除区域:drawer / chips-rail / video / opt-out / iOS 左边缘
       if (target.closest('[data-drawer-panel]')) return;
       if (target.closest('.chips-rail')) return;
       if (target.closest('video')) return;
@@ -201,30 +208,43 @@ function DashboardHome() {
       startY = t0.clientY;
       startT = Date.now();
       direction = 'unknown';
+      currentDx = 0;
       active = true;
     };
     const onMove = (e: TouchEvent) => {
-      // 方向已锁定 / 已 abort 就不再判断
-      if (!active || direction !== 'unknown') return;
+      if (!active) return;
       const t = e.touches[0];
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // 小于 10px 还在抖动阈值内,等更明显的位移
-      if (absDx < 10 && absDy < 10) return;
-      if (absDx > absDy * 2) {
-        direction = 'horizontal';
-      } else if (absDy > absDx * 2) {
-        // 纵向锁定 = 用户在垂直滚动,完全 abort,让浏览器原生 scroll 接管
-        direction = 'vertical';
-        active = false;
+      // 方向未锁定:抖动阈值内等
+      if (direction === 'unknown') {
+        if (absDx < 10 && absDy < 10) return;
+        if (absDx > absDy * 2) {
+          direction = 'horizontal';
+        } else if (absDy > absDx * 2) {
+          direction = 'vertical';
+          active = false;
+          return;
+        } else {
+          return; // 模糊区, 等下一帧
+        }
       }
-      // 26.5°-63.5° 模糊带,等下次 move 方向更明显再锁
+      // 横向锁定 → 跟手 translate (边界 tab 往外划阻尼 1/3 反弹)
+      if (direction === 'horizontal') {
+        const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
+        const idx = tabs.findIndex((c) => c.key === filterRef.current);
+        let dampened = dx;
+        if (idx === 0 && dx > 0) dampened = dx / 3;
+        else if (idx === tabs.length - 1 && dx < 0) dampened = dx / 3;
+        currentDx = dampened;
+        applyTransform(dampened, false);
+      }
     };
     const onEnd = (e: TouchEvent) => {
-      // 只有横向锁定才切 tab,纵向/模糊态('unknown')都跳过
       if (!active || direction !== 'horizontal') {
         active = false;
+        resetTransform();
         return;
       }
       active = false;
@@ -232,27 +252,62 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const dt = Date.now() - startT;
-      // 二次确认:已锁横向 + 距离够 60px + 时间合理(800ms 内)
-      if (Math.abs(dx) < 60) return;
-      if (Math.abs(dx) < Math.abs(dy) * 1.5) return;
-      if (dt > 800) return;
-
       const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
       const cur = filterRef.current;
       const idx = tabs.findIndex((c) => c.key === cur);
-      if (idx < 0) return;
-      const nextIdx = dx < 0
+
+      const shouldSwitch =
+        Math.abs(dx) >= 60 &&
+        Math.abs(dx) >= Math.abs(dy) * 1.5 &&
+        dt <= 800 &&
+        idx >= 0;
+      const nextIdx = !shouldSwitch ? idx : (dx < 0
         ? Math.min(idx + 1, tabs.length - 1)
-        : Math.max(idx - 1, 0);
-      if (nextIdx === idx) return;
-      track(EVENTS.SOURCE_FILTER_CHANGE, {
-        from_id: cur,
-        to_id: tabs[nextIdx].key,
-        method: 'swipe',
-      });
-      setFilter(tabs[nextIdx].key);
+        : Math.max(idx - 1, 0));
+
+      if (!shouldSwitch || nextIdx === idx) {
+        // 弹回 0
+        applyTransform(0, true);
+        const onTransitionEnd = () => {
+          el.removeEventListener('transitionend', onTransitionEnd);
+          resetTransform();
+        };
+        el.addEventListener('transitionend', onTransitionEnd);
+        return;
+      }
+      // animate off-screen 然后 setFilter + reset
+      const width = el.offsetWidth || window.innerWidth;
+      const target = dx < 0 ? -width : width;
+      applyTransform(target, true);
+      const onTransitionEnd = () => {
+        el.removeEventListener('transitionend', onTransitionEnd);
+        track(EVENTS.SOURCE_FILTER_CHANGE, {
+          from_id: cur,
+          to_id: tabs[nextIdx].key,
+          method: 'swipe',
+        });
+        setFilter(tabs[nextIdx].key);
+        // 下一帧把新内容从对面 slide-in (反向初始位置 → 0)
+        requestAnimationFrame(() => {
+          applyTransform(-target, false);
+          requestAnimationFrame(() => applyTransform(0, true));
+          const cleanup = () => {
+            el.removeEventListener('transitionend', cleanup);
+            resetTransform();
+          };
+          el.addEventListener('transitionend', cleanup);
+        });
+      };
+      el.addEventListener('transitionend', onTransitionEnd);
+      void currentDx; // referenced for closure capture across handlers
     };
-    const onCancel = () => { active = false; direction = 'unknown'; };
+    const onCancel = () => {
+      if (active && direction === 'horizontal') {
+        applyTransform(0, true);
+      }
+      active = false;
+      direction = 'unknown';
+    };
 
     el.addEventListener('touchstart', onStart, { passive: true });
     el.addEventListener('touchmove', onMove, { passive: true });
