@@ -13,19 +13,11 @@ import {
 let pass = 0;
 let fail = 0;
 
-function assert(cond: boolean, msg: string): void {
-  if (cond) {
-    pass++;
-    console.log(`  ✓ ${msg}`);
-  } else {
-    fail++;
-    console.error(`  ✗ ${msg}`);
-  }
-}
-
 function eq<T>(actual: T, expected: T, msg: string): void {
-  const a = JSON.stringify(actual);
-  const e = JSON.stringify(expected);
+  const norm = (v: unknown): unknown =>
+    v instanceof Set ? [...v].sort() : v;
+  const a = JSON.stringify(norm(actual));
+  const e = JSON.stringify(norm(expected));
   if (a === e) {
     pass++;
     console.log(`  ✓ ${msg}`);
@@ -46,6 +38,11 @@ eq(
 );
 eq(parseSeenSet('not json'), new Set<string>(), '非法 JSON → 空 Set（容错）');
 eq(parseSeenSet('{}'), new Set<string>(), '非数组 → 空 Set（容错）');
+eq(
+  parseSeenSet('["A", 123, null, "B"]'),
+  new Set(['A', 'B']),
+  '混合类型数组 → 只保留 string 元素（容错）',
+);
 
 // ─── serializeSeenSet ───────────────────────────────────────────
 console.log('\nserializeSeenSet:');
@@ -94,6 +91,11 @@ eq(
   -1,
   '空 seen_set（冷启动）→ -1（全部要）',
 );
+eq(
+  findStopIndex(['N1', 'N2', 'A'], new Set(['A'])),
+  2,
+  'singleton seen_set 命中 → 正确 index',
+);
 
 // ─── partitionForCatchup ────────────────────────────────────────
 console.log('\npartitionForCatchup:');
@@ -110,6 +112,18 @@ console.log('\npartitionForCatchup:');
   eq(r.pending.length, 280, '350 条 → pending 280 条');
   eq(r.immediate[0], 'id0', 'immediate 是最新的（index 0 in）');
   eq(r.pending[0], 'id70', 'pending 从 index 70 起');
+}
+{
+  const items = Array.from({ length: 70 }, (_, i) => `id${i}`);
+  const r = partitionForCatchup(items, 70);
+  eq(r.immediate.length, 70, '正好 70 条（=阈值）→ 全部 immediate');
+  eq(r.pending.length, 0, '正好 70 条 → pending 空');
+}
+{
+  const items = Array.from({ length: 71 }, (_, i) => `id${i}`);
+  const r = partitionForCatchup(items, 70);
+  eq(r.immediate.length, 70, '71 条 → immediate 70 条');
+  eq(r.pending.length, 1, '71 条 → pending 1 条（第一个溢出）');
 }
 {
   const r = partitionForCatchup([], 70);
