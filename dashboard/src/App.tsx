@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Feed, type FeedHandle } from "./components/Feed";
 import { DrawerProvider } from "./lib/drawer";
 
@@ -30,6 +30,7 @@ import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
+import { useChannelSnapshotStore } from "./lib/channelSnapshotStore";
 
 // LoginModal 拖入 Turnstile 校验 + auth 表单逻辑。99% 已登录用户首屏永远
 // 不会触发它 → lazy + Gate：loginModalOpen === false 时根本不挂 lazy 组件，
@@ -163,6 +164,67 @@ function DashboardHome() {
     return () => cancelAnimationFrame(raf);
   }, [filter, isNarrow]);
 
+  // PM 2026-05-25 R10: Channel Transition Snapshot (CTS) — main viewport
+  // 自动截图存 store, 切 channel 时显 snapshot 当过渡占位 (避免 Feed mount
+  // 前的空白帧). 触发: scrollend (debounce) + filter change 之前 (出场快照).
+  // 复用 modern-screenshot (已 install for poster), 单次截图 ~100ms, 0.5x scale
+  // 控制 PNG ~50-150KB / channel.
+  const captureChannelSnapshot = useRef<(type: string) => Promise<void>>(async () => {});
+  useEffect(() => {
+    captureChannelSnapshot.current = async (sourceType: string) => {
+      const node = mainRef.current;
+      if (!node) return;
+      try {
+        const { domToPng } = await import("modern-screenshot");
+        const dataUri = await domToPng(node, {
+          scale: 0.5,
+          type: "image/png",
+          backgroundColor: "#ffffff",
+        });
+        useChannelSnapshotStore.getState().setSnapshot(sourceType, dataUri);
+      } catch (e) {
+        // 截图失败不阻塞业务, 切换 transition 走 skeleton
+        console.warn("[snapshot] capture failed", e);
+      }
+    };
+  }, []);
+  // scrollend (debounce 600ms) 触发当前 filter 截图. requestIdleCallback 避免阻塞 main thread.
+  useEffect(() => {
+    if (!isNarrow) return;
+    let timer: number | null = null;
+    const onScroll = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        const ric = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+        if (ric) ric(() => captureChannelSnapshot.current(filterRef.current));
+        else setTimeout(() => captureChannelSnapshot.current(filterRef.current), 0);
+      }, 600);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [isNarrow]);
+
+  // Snapshot overlay state (channel switch 期间显示, setFilter 后 ~200ms fade-out)
+  const [transitionOverlay, setTransitionOverlay] = useState<{ from: string; to: string; toSnap: string | null } | null>(null);
+
+  // 切 channel 的统一入口 — 先截出场快照 (current), 显示目标 snapshot 当 overlay, 切 filter
+  // useCallback 让 swipe handler 内 ref 捕获稳定 (deps [] 因内部都用 ref / setState)
+  const switchChannel = useCallback((nextFilter: string) => {
+    if (nextFilter === filterRef.current) return;
+    const fromFilter = filterRef.current;
+    const toSnap = useChannelSnapshotStore.getState().getSnapshot(nextFilter)?.dataUri || null;
+    captureChannelSnapshot.current(fromFilter);
+    setTransitionOverlay({ from: fromFilter, to: nextFilter, toSnap });
+    setFilter(nextFilter as typeof filter);
+    window.setTimeout(() => setTransitionOverlay(null), 220);
+  }, []);
+  const switchChannelRef = useRef(switchChannel);
+  switchChannelRef.current = switchChannel;
+
   // PM 2026-05-20 #5: feed 区域横划切 tab(mobile only)。
   // 排除区域:drawer panel(swipe close 优先)/ chips-rail(已 pan-x) /
   // video 元素(组件内手势优先)/ data-no-swipe-tab 自定义 opt-out /
@@ -275,7 +337,7 @@ function DashboardHome() {
         el.addEventListener('transitionend', onTransitionEnd);
         return;
       }
-      // animate off-screen 然后 setFilter + reset
+      // animate off-screen 然后 switchChannel (CTS overlay 接管 transition)
       const width = el.offsetWidth || window.innerWidth;
       const target = dx < 0 ? -width : width;
       applyTransform(target, true);
@@ -286,17 +348,9 @@ function DashboardHome() {
           to_id: tabs[nextIdx].key,
           method: 'swipe',
         });
-        setFilter(tabs[nextIdx].key);
-        // 下一帧把新内容从对面 slide-in (反向初始位置 → 0)
-        requestAnimationFrame(() => {
-          applyTransform(-target, false);
-          requestAnimationFrame(() => applyTransform(0, true));
-          const cleanup = () => {
-            el.removeEventListener('transitionend', cleanup);
-            resetTransform();
-          };
-          el.addEventListener('transitionend', cleanup);
-        });
+        // 重置 transform → 主容器回原位, overlay (CTS snapshot) 覆盖 transition gap
+        resetTransform();
+        switchChannelRef.current(tabs[nextIdx].key);
       };
       el.addEventListener('transitionend', onTransitionEnd);
       void currentDx; // referenced for closure capture across handlers
@@ -529,7 +583,8 @@ function DashboardHome() {
                         scrollFeedOrPage(null);
                       } else {
                         track(EVENTS.SOURCE_FILTER_CHANGE, { from_id: storedFilter, to_id: key });
-                        setFilter(key);
+                        // 走 CTS overlay 过渡, 避免 chip click 切换的 "空白帧"
+                        switchChannel(key);
                       }
                     }}
                     className={cn(
@@ -554,8 +609,32 @@ function DashboardHome() {
       {/* 3-column grid */}
       <main
         ref={mainRef}
-        className="mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
+        className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16"
       >
+        {/* CTS overlay — channel 切换 transition 期间显目标 channel snapshot
+            (5min TTL, 无 / 过期 → skeleton). 220ms 后 fade-out 给真 Feed 接管. */}
+        {isNarrow && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 overflow-hidden bg-white"
+            style={{
+              height: "calc(100vh - 64px)",
+              opacity: transitionOverlay ? 1 : 0,
+              transition: transitionOverlay ? "none" : "opacity 220ms ease-out",
+            }}
+            aria-hidden
+          >
+            {transitionOverlay && (transitionOverlay.toSnap ? (
+              <img
+                src={transitionOverlay.toSnap}
+                alt=""
+                className="h-full w-full object-cover object-top"
+                draggable={false}
+              />
+            ) : (
+              <div className="h-full w-full animate-pulse bg-neutral-100" />
+            ))}
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
             const isPlaceholder = !liveSourceTypes.has(col.source_type);
