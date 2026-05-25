@@ -207,6 +207,39 @@ npx wrangler deploy
 
 ---
 
+### 2026-05-25 新增:分享海报转 c 端 + share 闭环 fix
+
+**架构变更**:
+- 海报渲染从 worker `resvg-wasm SVG → PNG`(`/api/share/poster/:token`)切到 c 端
+  `modern-screenshot` 截图(`dashboard/src/components/PosterCanvas.tsx`)
+- 原因:worker 字体 bundle 大小限制只能 embed Noto SC 子集,c 端可直接复用
+  浏览器已加载的 HarmonyOS Sans SC + 真实 Card 组件,WYSIWYG
+- worker `svg-template.ts` 保留作 og:image fallback(分享链 LinkPreview scan 仍用)
+
+**Bot UA gate exempt 加 `/s/<token>`**(`worker/src/index.ts:isBotGateExempt`):
+- 分享二维码扫码命中点,微信内置浏览器 / 二维码扫描 app UA 经常被判 bot 403
+- 加进 exempt list 后正常 302 redirect 到 dashboard 详情页
+
+**`buildDetailPath` 必须剥所有 source_type 前缀**
+(`worker/src/share/handlers.ts:buildDetailPath`):
+- `x_list:1234` → `/t/1234` (而非 `/t/x_list:1234`),否则 dashboard `parseDeepLinkFromPath`
+  再加一次 prefix 拼出 `x_list:x_list:1234` 找不到 item → 显示"推文不存在"
+- 同理 `hf_paper:`(`/h/`)、`github:`(`/g/`)、`product_hunt:`(`/ph/`)、
+  `clawhub:`(`/c/`)、`huodongxing:`(`/e/`)
+
+**c 端 `authStore.hydrate` 401 不再清 user**
+(`dashboard/src/lib/authStore.ts`):
+- 老逻辑 `/api/auth/me` 401 立即清 user → 每次发版用户假掉登录态
+- 改成所有 hydrate 错误都保留 persisted user(乐观信任 localStorage)
+- 真 cookie 失效兜底:用户后续 action 仍会自然 401 → openLoginModal 弹登录
+
+**sharer 默认 profile 复用** (`dashboard/src/lib/defaultProfile.ts`):
+- BE 邮箱注册时 `display_name` / `avatar_url` 默认 null
+- c 端用 `displayNameOf` / `avatarUrlOf`(基于 `user.id` 稳定 hash)派生
+  昵称(32 词 + 4 位数字)+ 头像(30 张默认池),海报跟流内 UserMenu 一致
+
+---
+
 ## 远端服务（Cloudflare）
 
 ### 1. Worker: `xlist-api`
