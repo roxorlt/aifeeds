@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
+    "predeploy": "bash ../scripts/predeploy-check.sh",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute xlist --file=schema.sql --remote",
     "db:init:local": "wrangler d1 execute xlist --file=schema.sql --local"

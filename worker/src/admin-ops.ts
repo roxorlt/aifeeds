@@ -193,27 +193,27 @@ ${ADMIN_SHARED_CSS}
 ${adminNavHtml('ops')}
 <main>
 
-<div class="kpi-row" id="kpis">
-  <div class="kpi"><div class="label">🔥 hot (7d)</div><div class="value" id="kpi-hot">—</div><div class="hint">items.is_hot=1</div></div>
-  <div class="kpi"><div class="label">爆推 (24h)</div><div class="value" id="kpi-baopui">—</div><div class="hint">score &gt; P99</div></div>
-  <div class="kpi"><div class="label">趋势推 (24h)</div><div class="value" id="kpi-trend">—</div><div class="hint">增速 &gt; P95</div></div>
-  <div class="kpi"><div class="label">发现博主 (14d)</div><div class="value" id="kpi-discover">—</div><div class="hint">distinct ≥ 5</div></div>
-  <div class="kpi"><div class="label">已推送 (24h)</div><div class="value" id="kpi-pushed">—</div><div class="hint">PushDeer 触发</div></div>
+<div class="kpi-row" id="kpis" data-testid="ops-kpis-row">
+  <div class="kpi" data-testid="ops-kpi-hot"><div class="label">🔥 hot (7d)</div><div class="value" id="kpi-hot">—</div><div class="hint">items.is_hot=1</div></div>
+  <div class="kpi" data-testid="ops-kpi-baopui"><div class="label">爆推 (24h)</div><div class="value" id="kpi-baopui">—</div><div class="hint">score &gt; P99</div></div>
+  <div class="kpi" data-testid="ops-kpi-trend"><div class="label">趋势推 (24h)</div><div class="value" id="kpi-trend">—</div><div class="hint">增速 &gt; P95</div></div>
+  <div class="kpi" data-testid="ops-kpi-discover"><div class="label">发现博主 (14d)</div><div class="value" id="kpi-discover">—</div><div class="hint">distinct ≥ 5</div></div>
+  <div class="kpi" data-testid="ops-kpi-pushed"><div class="label">已推送 (24h)</div><div class="value" id="kpi-pushed">—</div><div class="hint">PushDeer 触发</div></div>
 </div>
 
-<div class="section">
+<div class="section" data-testid="ops-section-baopui">
   <h2>🔥 爆推（24h 内 score &gt; P99 + likes ≥ 300）</h2>
   <p class="hint">基线 P99 / 阈值 / 当前互动数详见 hover；点击 handle 跳详情页</p>
   <div id="baopui-list" class="baopui-grid"><div class="loading">loading…</div></div>
 </div>
 
-<div class="section">
+<div class="section" data-testid="ops-section-trend">
   <h2>📈 趋势推（24h 内增速 &gt; P95 + likes_total ≥ 50）</h2>
   <p class="hint">右侧 sparkline 显示最近 12 个 snapshot 的 likes 序列（粒度 30min）</p>
   <div id="trend-list"><div class="loading">loading…</div></div>
 </div>
 
-<div class="section">
+<div class="section" data-testid="ops-section-discover">
   <h2>👤 发现博主（14d 内 distinct_tweets ≥ 5，按去重后引用数倒序）</h2>
   <p class="hint">dilution 接近 1 = 持续输出；&gt; 1.5 = 单条爆款被多次引用（事件信号）</p>
   <div id="discover-list"><div class="loading">loading…</div></div>
