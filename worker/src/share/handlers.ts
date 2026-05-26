@@ -201,7 +201,8 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
   const itemExtra = safeJson(item.extra);
   const sourceType = String(item.source_type || '');
   // GH/PH/X 抽第一张可用图作为海报媒体（fetch + base64 嵌 SVG）
-  const mediaInfo = await pickPosterMedia(sourceType, itemExtra, itemMedia, request, env);
+  const itemSourceId = typeof item.source_id === 'string' ? item.source_id : undefined;
+  const mediaInfo = await pickPosterMedia(sourceType, itemExtra, itemMedia, request, env, itemSourceId);
   // GH owner 头像 / PH 产品 logo / X 推文作者头像(PR2 2026-05-22 起接入)
   const authorAvatarDataUri = await pickAuthorAvatar(sourceType, rel.item_id, itemMedia, itemExtra, request, env);
   // PR2 (2026-05-22): X 海报还需要 aux 头像 — retweet indicator 的 retweeter
@@ -533,6 +534,7 @@ async function pickPosterMedia(
   media: unknown,
   request: Request,
   env: Env,
+  sourceId?: string,  // 2026-05-26: GH OG image fallback 需要 ownerRepo
 ): Promise<{ dataUri: string; aspectRatio?: number; isVideo?: boolean } | undefined> {
   // candidate 可带 known dims（X media 已提供 w/h，避免 fetch 后再探）
   // isVideo 标记：用作 svg-template 渲 media 时叠加 play 按钮
@@ -640,9 +642,25 @@ async function pickPosterMedia(
     const result = await tryFetchPosterImage(c.url, request, env, c.width, c.height, c.isVideo, isUserMedia);
     if (result) return { ...result, isVideo: c.isVideo };
   }
-  // fallback：GH readme 有 <video> 但所有 <img> 都被弃 → 灰底 + play 占位
-  // （GitHub user-attachments video 没有可拿的 poster URL，video 解码超出 worker 能力）
-  if (sourceType === 'github') {
+  // GH fallback (2026-05-26 §3): 所有 README <img> candidates 都 fail 时,
+  // 退到 GH 公开 OG image (opengraph.githubassets.com 自动生成 1280x640 含
+  // repo name + stars + lang 的卡)。覆盖 video 含 README 的 3% case + 无
+  // <img> 或 <img> 全被门控弃的其他 case (~30%)。
+  //
+  // GH OG image 不限速 + 公开 + GH 自家 CDN,fetch 稳定。
+  // 1 是 cache buster token,任意值都接受(GH 内部用作 CDN cache version)。
+  if (sourceType === 'github' && typeof sourceId === 'string') {
+    const ownerRepo = sourceId.replace(/^github:/, '');
+    if (ownerRepo && /^[\w.-]+\/[\w.-]+$/.test(ownerRepo)) {
+      const ogUrl = `https://opengraph.githubassets.com/1/${ownerRepo}`;
+      const result = await tryFetchPosterImage(ogUrl, request, env, undefined, undefined, false, false);
+      if (result) {
+        console.log(`[share-poster] gh og fallback ok: ${ownerRepo}`);
+        return result;
+      }
+    }
+    // 极少触发兜底: OG image 也 fail + README 含 <video> → 灰底 + play 占位
+    // (GitHub user-attachments video 无 public poster URL,video 解码超出 worker 能力)
     const readme = typeof extra?.readme_excerpt === 'string' ? extra.readme_excerpt : '';
     if (/<video\b/i.test(readme)) {
       return { dataUri: '', aspectRatio: 16 / 9, isVideo: true };
