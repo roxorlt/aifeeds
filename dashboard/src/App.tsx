@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Feed, SkeletonCard, type FeedHandle } from "./components/Feed";
+import { SourceIcon } from "./components/icons";
 import { DrawerProvider } from "./lib/drawer";
 
 // Drawer drags in react-markdown + remark-gfm + rehype-raw (~150kb gzipped).
@@ -109,6 +110,28 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "podcast", label: "Podcast" },
 ];
 
+// R22: skeleton + channel header 复用组件. swipe adjacent + chip overlay 都用,
+// 跟 Feed mount 后的 header (SourceIcon + label + border-b bg-neutral-50)
+// + 8 SkeletonCard 完全一致, 切换瞬间不"跳一下".
+function ChannelSkeletonPanel({ filterKey }: { filterKey: string }) {
+  const chip = FILTER_CHIPS.find((c) => c.key === filterKey);
+  const label = chip?.label ?? filterKey;
+  return (
+    <div className="mx-auto h-full max-w-[1280px] overflow-hidden px-3 py-3">
+      <div className="flex items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+        <SourceIcon
+          source_type={filterKey as SourceType}
+          className="h-4 w-4 shrink-0 fill-current text-neutral-700"
+        />
+        <span className="truncate text-sm font-semibold text-neutral-900">{label}</span>
+      </div>
+      {Array.from({ length: 8 }).map((_, i) => (
+        <SkeletonCard key={i} />
+      ))}
+    </div>
+  );
+}
+
 function DashboardHome() {
   const [sources, setSources] = useState<Source[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -167,14 +190,17 @@ function DashboardHome() {
   // - transitionActive: chip click 后的过渡 overlay (fade 220ms)
   // - swipeAdjacent: swipe 期间 mount 邻居 panel (skeleton), 跟 main 同步 translate
   //   让用户看到双 panel 紧贴跟手 (multi-column 效果, 不真 mount Feed 避免成本)
-  const [transitionActive, setTransitionActive] = useState(false);
-  const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right" } | null>(null);
+  // R22: transition / adjacent state 加 key, 让 overlay / adjacent 能渲对应
+  // channel 的 header (SourceIcon + label), 跟 Feed mount 后的 header 视觉一致,
+  // 切换瞬间不再"跳一下"
+  const [transitionActive, setTransitionActive] = useState<{ key: string } | null>(null);
+  const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string } | null>(null);
   const adjacentRef = useRef<HTMLDivElement>(null);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
-    setTransitionActive(true);
+    setTransitionActive({ key: nextFilter });
     setFilter(nextFilter as typeof filter);
-    window.setTimeout(() => setTransitionActive(false), 220);
+    window.setTimeout(() => setTransitionActive(null), 220);
   }, []);
   const switchChannelRef = useRef(switchChannel);
   switchChannelRef.current = switchChannel;
@@ -199,29 +225,10 @@ function DashboardHome() {
     let active = false;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
     let currentSide: 'left' | 'right' | null = null;
-    let bodyLockY: number | null = null;
-
-    // R21 架构改造后:mobile body 永久 fixed, scroll context 在 #root.
-    // swipe horizontal 期间临时 lock #root.overflow:hidden 防 vertical scroll
-    // 跟横滑同时跑. PTR 在新架构下根本不存在 (body 不滚 = 没东西可下拉),
-    // 不再需要 R18-R20 那套 body+html 大锁 hack.
-    const lockBody = () => {
-      if (bodyLockY !== null) return;
-      const root = document.getElementById('root');
-      if (!root) return;
-      bodyLockY = root.scrollTop;
-      root.style.overflow = 'hidden';
-    };
-    const unlockBody = () => {
-      if (bodyLockY === null) return;
-      const sy = bodyLockY;
-      bodyLockY = null;
-      const root = document.getElementById('root');
-      if (root) {
-        root.style.overflow = '';
-        root.scrollTop = sy;
-      }
-    };
+    // R22: 删 lockBody/unlockBody. 架构改造后 PTR 不存在 (body 永久 fixed),
+    // 不需要 swipe 期间额外 lock #root (反而拦了 vertical scroll, PM 反馈
+    // "竖直方向无法上划"). horizontal swipe 期间 #root vertical scroll 跟
+    // 横滑同时跑视觉上不明显, JS translate main 是主导.
 
     const applyMainTransform = (dx: number, withTransition: boolean) => {
       el.style.transition = withTransition
@@ -266,16 +273,10 @@ function DashboardHome() {
       direction = 'unknown';
       currentSide = null;
       active = true;
-      // R19: viewport top (scrollY <= 1) touchstart 立即 lockBody, 防 iOS Safari
-      // 在 touchstart 阶段就 commit pull-to-refresh 动作 (R18 在 onMove 锁定后
-      // 调 lockBody 太晚, 浏览器已经预判). vertical 锁定后 unlockBody 让 native
-      // scroll 接管 (scrollY=0 restore 不动, 用户无感).
-      // R21 架构改造后: mobile body 不滚, #root 是 scroll context
-      const root = document.getElementById('root');
-      const scrollTop = root ? root.scrollTop : window.scrollY;
-      if (scrollTop <= 1) {
-        lockBody();
-      }
+      // R22: 架构改造后 body 永久 fixed, PTR 根本不存在, touchstart 不需要
+      // 任何 lockBody. lockBody 移到 onMove direction lock horizontal 时调,
+      // 不影响 vertical scroll (R21 之前 touchstart lock 让 vertical 也被锁,
+      // 导致 PM 反馈"竖直方向无法上划")
     };
     const onMove = (e: TouchEvent) => {
       if (!active) return;
@@ -299,27 +300,25 @@ function DashboardHome() {
         } else {
           direction = 'vertical';
           active = false;
-          // R19: unlockBody 让 native vertical scroll 接管 (touchstart 时 lockBody
-          // 在顶部为防 pull-to-refresh, 锁定 vertical 后允许 scroll)
-          unlockBody();
+          // R22: vertical lock, JS 不动 main, #root native scroll 接管
           return;
         }
       }
       if (direction === 'horizontal') {
-        // 防 native vertical scroll 跟 JS horizontal swipe 同时发生
+        // R22: 架构改造后 PTR 不存在 (body 永久 fixed), 不再需要 preventDefault
+        // + lockBody hack (它们反而拦了 #root native vertical scroll, 导致 PM
+        // 反馈竖直方向上划失效). horizontal 锁定后只跟手 translate 即可.
         if (e.cancelable) e.preventDefault();
-        // R18: lock body position:fixed 防真机 pull-to-refresh
-        lockBody();
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
         const atBoundary = targetIdx < 0 || targetIdx >= tabs.length;
-        // mount adjacent panel (一次) — side 由 dx 方向定
+        // mount adjacent panel (一次) — side 由 dx 方向定, key 是目标 channel
         if (!atBoundary) {
           const newSide: 'left' | 'right' = dx < 0 ? 'right' : 'left';
           if (currentSide !== newSide) {
             currentSide = newSide;
-            setSwipeAdjacent({ side: newSide });
+            setSwipeAdjacent({ side: newSide, key: tabs[targetIdx].key });
           }
         }
         // main 跟手 translate (边界 tab 阻尼 1/3)
@@ -332,7 +331,6 @@ function DashboardHome() {
       const cleanupAdjacent = () => {
         currentSide = null;
         setSwipeAdjacent(null);
-        unlockBody(); // R18 释放 body fixed
       };
       if (!active || direction !== 'horizontal') {
         active = false;
@@ -413,7 +411,6 @@ function DashboardHome() {
       direction = 'unknown';
       currentSide = null;
       setSwipeAdjacent(null);
-      unlockBody(); // R18 释放
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
@@ -661,10 +658,9 @@ function DashboardHome() {
         </div>
       </header>
 
-      {/* Swipe adjacent skeleton panel — PM 2026-05-25 R12: 横滑时显紧贴 main
-          的邻居 panel (skeleton), 跟手指同步 translate, swipe end 切换 →
-          adjacent 滑到 0 取代 main. 独立 fixed inset 跟 swipe handler 通过
-          adjacentRef 操作 transform. */}
+      {/* Swipe adjacent panel — R22 加 channel header (SourceIcon + label) +
+          8 SkeletonCard, 跟 Feed mount 后的 header + skeleton 完全一致, 切换
+          完成不再"跳一下". */}
       {isNarrow && swipeAdjacent && (
         <div
           ref={adjacentRef}
@@ -672,22 +668,15 @@ function DashboardHome() {
           style={{
             top: 49,
             bottom: 0,
-            // initial position: side='right' 屏右 (+100%), side='left' 屏左 (-100%)
             transform: `translateX(${swipeAdjacent.side === 'right' ? '100%' : '-100%'})`,
           }}
           aria-hidden
         >
-          <div className="mx-auto h-full max-w-[1280px] overflow-hidden px-3 py-3">
-            {/* R21 PM 自测验证:adjacent panel (z-30) 之前漏改 R20, 仍用老 cover-based
-                自定义 skeleton, 跟 chip overlay (z-40) / Feed 内 SkeletonCard 三处
-                不一致看上去 3 屏闪. 改成统一 SkeletonCard + 容器 padding 对齐 main */}
-            {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
-          </div>
+          <ChannelSkeletonPanel filterKey={swipeAdjacent.key} />
         </div>
       )}
 
-      {/* Chip click transition overlay — PM 2026-05-25 R11/R12: 跟 swipe 互补,
-          chip click 没 swipe 跟手, 直接 fade-in skeleton 220ms 然后 fade-out */}
+      {/* Chip click transition overlay — R22 也加 header */}
       {isNarrow && (
         <div
           className="pointer-events-none fixed inset-x-0 z-40 overflow-hidden bg-white"
@@ -699,14 +688,7 @@ function DashboardHome() {
           }}
           aria-hidden
         >
-          {transitionActive && (
-            <div className="mx-auto h-full max-w-[1280px] overflow-hidden px-3 py-3">
-              {/* R20: 容器 padding 跟 main (mx-auto max-w-1280 px-3 py-3) 对齐, 让
-                  adjacent/overlay 的 SkeletonCard 跟 Feed 内 SkeletonCard 横向
-                  位置一致, 切换不"横移" */}
-              {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
-            </div>
-          )}
+          {transitionActive && <ChannelSkeletonPanel filterKey={transitionActive.key} />}
         </div>
       )}
 
