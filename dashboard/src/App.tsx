@@ -687,14 +687,11 @@ function DashboardHome() {
           }}
           aria-hidden
         >
-          <div className="flex h-full flex-col gap-4 px-4 py-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="space-y-2">
-                <div className="h-44 w-full animate-pulse rounded-2xl bg-neutral-100" />
-                <div className="h-4 w-3/4 animate-pulse rounded bg-neutral-100" />
-                <div className="h-3 w-1/2 animate-pulse rounded bg-neutral-100" />
-              </div>
-            ))}
+          <div className="mx-auto h-full max-w-[1280px] overflow-hidden px-3 py-3">
+            {/* R21 PM 自测验证:adjacent panel (z-30) 之前漏改 R20, 仍用老 cover-based
+                自定义 skeleton, 跟 chip overlay (z-40) / Feed 内 SkeletonCard 三处
+                不一致看上去 3 屏闪. 改成统一 SkeletonCard + 容器 padding 对齐 main */}
+            {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
           </div>
         </div>
       )}
