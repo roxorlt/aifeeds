@@ -400,7 +400,12 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     // Only activate PRR on mobile — PC uses bounded cell scroll, no pull gesture
     if (!window.matchMedia("(max-width: 767px)").matches) return;
 
-    const isAtTop = () => window.scrollY <= 0;
+    // R21: mobile body fixed 架构后 window.scrollY 永远 0, 用 getScrollY 兜底
+    const isAtTop = () => {
+      const root = document.getElementById("root");
+      const isNarrow = window.matchMedia("(max-width: 767px)").matches;
+      return (isNarrow && root ? root.scrollTop : window.scrollY) <= 0;
+    };
 
     const onStart = (e: TouchEvent) => {
       // Skip when touch starts in any non-feed zone — drawer, app header,

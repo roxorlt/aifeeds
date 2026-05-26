@@ -39,6 +39,19 @@ export function smoothScrollToTop(
 export function smoothScrollWindowToTop(
   opts: { duration?: number } = {},
 ): Promise<void> {
+  // R21 架构改造: mobile body fixed 不滚, #root 当 scroll context
+  const isNarrow = typeof window !== "undefined" && window.matchMedia(NARROW_QUERY).matches;
+  if (isNarrow) {
+    const root = document.getElementById("root");
+    if (root) {
+      return animate(
+        () => root.scrollTop,
+        (y) => (root.scrollTop = y),
+        0,
+        opts.duration ?? DEFAULT_DURATION,
+      );
+    }
+  }
   return animate(
     () => window.scrollY,
     (y) => window.scrollTo(0, y),

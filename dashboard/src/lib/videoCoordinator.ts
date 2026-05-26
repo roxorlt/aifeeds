@@ -373,6 +373,10 @@ export function attachGlobalVideoListeners(): () => void {
       useVideoCoordinator.getState().recompute();
     });
   };
+  // R21 架构改造: mobile 时 scroll 触发在 #root 不在 window. 双挂保险:
+  // window 跟 #root 都监听, mobile 只有 #root 真触发, PC 只有 window 触发.
+  const root = document.getElementById("root");
+  if (root) root.addEventListener("scroll", onWindowScroll, { passive: true });
   window.addEventListener("scroll", onWindowScroll, { passive: true });
   window.addEventListener("resize", onWindowScroll, { passive: true });
 
@@ -386,6 +390,7 @@ export function attachGlobalVideoListeners(): () => void {
   document.addEventListener("visibilitychange", onVis);
 
   return () => {
+    if (root) root.removeEventListener("scroll", onWindowScroll);
     window.removeEventListener("scroll", onWindowScroll);
     window.removeEventListener("resize", onWindowScroll);
     document.removeEventListener("visibilitychange", onVis);

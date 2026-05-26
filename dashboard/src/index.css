@@ -31,6 +31,27 @@ body {
   overscroll-behavior-y: none;
 }
 
+/* R21 PM 反馈:iOS Safari 真机 pull-to-refresh 怎么改 overscroll-behavior / JS
+   lockBody 都根治不了 (浏览器在 touchstart 那一帧已决定动作). 架构改造 mobile:
+   body 永久 fixed 不滚, #root 当 scroll context. body 不滚 → 浏览器没东西可
+   下拉 → PTR 根本不触发. PC 仍走 window scroll (多 col + cell scroll 不动). */
+@media (max-width: 767px) {
+  html,
+  body {
+    height: 100vh;
+    overflow: hidden;
+  }
+  #root {
+    height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* iOS 流畅 momentum scroll */
+    -webkit-overflow-scrolling: touch;
+    /* 仍禁 overscroll 防 inner pull-to-refresh */
+    overscroll-behavior-y: none;
+  }
+}
+
 body {
   background: #fafafa;
   color: #171717;

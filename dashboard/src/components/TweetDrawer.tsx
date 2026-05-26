@@ -93,13 +93,30 @@ export function TweetDrawer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, close]);
 
-  // Lock body scroll while open — iOS-safe pattern.
-  // Plain `overflow:hidden` doesn't fully prevent iOS Safari from rubber-banding
-  // the underlying page when an inner scroller hits its boundary, which traps
-  // gestures inside the drawer body. The fix is to take the body out of flow
-  // (position:fixed, top:-scrollY), then restore on close.
+  // R21: 架构改造 mobile body 永久 fixed, scroll context 转到 #root.
+  // drawer 打开 lock #root scroll (不是 body), 关闭 restore.
+  // PC 仍走 body lock 老路径.
   useEffect(() => {
     if (!open) return;
+    const isNarrow = window.matchMedia("(max-width: 767px)").matches;
+    const root = document.getElementById("root");
+    if (isNarrow && root) {
+      // mobile: lock #root
+      const sy = root.scrollTop;
+      const prev = {
+        overflow: root.style.overflow,
+        position: root.style.position,
+      };
+      root.style.overflow = "hidden";
+      // 保 scroll position: #root 已经 overflow:auto, 直接 fix scrollTop 即可
+      // (内容长 + position relative 不动)
+      return () => {
+        root.style.overflow = prev.overflow;
+        root.style.position = prev.position;
+        root.scrollTop = sy;
+      };
+    }
+    // PC: body lock 老路径
     const scrollY = window.scrollY;
     const prev = {
       overflow: document.body.style.overflow,
@@ -122,7 +139,6 @@ export function TweetDrawer() {
       document.body.style.width = prev.width;
       document.body.style.left = prev.left;
       document.body.style.right = prev.right;
-      // Restore the previous scroll position (lost when we set position:fixed)
       window.scrollTo(0, scrollY);
     };
   }, [open]);

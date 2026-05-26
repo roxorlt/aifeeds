@@ -201,39 +201,26 @@ function DashboardHome() {
     let currentSide: 'left' | 'right' | null = null;
     let bodyLockY: number | null = null;
 
-    // R20: 综合大锁 — body fixed + html overflow:hidden + touch-action:none.
-    // R18/R19 单设 body fixed 在 iOS Safari 隐私模式仍能 pull-to-refresh
-    // (浏览器看 html 层 viewport 仍可下拉). 必须 html + body 双管齐下:
-    // - html overflow:hidden 禁 root scroll context
-    // - html.touch-action:none 完全屏蔽 native pan/zoom 手势
-    // - body position:fixed + top:-scrollY 保位置
+    // R21 架构改造后:mobile body 永久 fixed, scroll context 在 #root.
+    // swipe horizontal 期间临时 lock #root.overflow:hidden 防 vertical scroll
+    // 跟横滑同时跑. PTR 在新架构下根本不存在 (body 不滚 = 没东西可下拉),
+    // 不再需要 R18-R20 那套 body+html 大锁 hack.
     const lockBody = () => {
       if (bodyLockY !== null) return;
-      bodyLockY = window.scrollY;
-      const html = document.documentElement;
-      html.style.overflow = 'hidden';
-      html.style.touchAction = 'none';
-      document.body.style.position = 'fixed';
-      document.body.style.top = `-${bodyLockY}px`;
-      document.body.style.left = '0';
-      document.body.style.right = '0';
-      document.body.style.width = '100%';
-      document.body.style.overflow = 'hidden';
+      const root = document.getElementById('root');
+      if (!root) return;
+      bodyLockY = root.scrollTop;
+      root.style.overflow = 'hidden';
     };
     const unlockBody = () => {
       if (bodyLockY === null) return;
       const sy = bodyLockY;
       bodyLockY = null;
-      const html = document.documentElement;
-      html.style.overflow = '';
-      html.style.touchAction = '';
-      document.body.style.position = '';
-      document.body.style.top = '';
-      document.body.style.left = '';
-      document.body.style.right = '';
-      document.body.style.width = '';
-      document.body.style.overflow = '';
-      window.scrollTo(0, sy);
+      const root = document.getElementById('root');
+      if (root) {
+        root.style.overflow = '';
+        root.scrollTop = sy;
+      }
     };
 
     const applyMainTransform = (dx: number, withTransition: boolean) => {
@@ -283,7 +270,10 @@ function DashboardHome() {
       // 在 touchstart 阶段就 commit pull-to-refresh 动作 (R18 在 onMove 锁定后
       // 调 lockBody 太晚, 浏览器已经预判). vertical 锁定后 unlockBody 让 native
       // scroll 接管 (scrollY=0 restore 不动, 用户无感).
-      if (window.scrollY <= 1) {
+      // R21 架构改造后: mobile body 不滚, #root 是 scroll context
+      const root = document.getElementById('root');
+      const scrollTop = root ? root.scrollTop : window.scrollY;
+      if (scrollTop <= 1) {
         lockBody();
       }
     };
