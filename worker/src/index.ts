@@ -98,6 +98,8 @@ import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard
 import { serveAdminOpsHtml, handleAdminOps } from './admin-ops';
 import { runOpsBaseline } from './ops/baseline';
 import { runOpsDetect } from './ops/detect';
+import { recordCronRun } from './cron-runs';
+import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -410,11 +412,17 @@ export default {
       if (path === '/admin/ops' && request.method === 'GET') {
         return serveAdminOpsHtml(request, env);
       }
+      if (path === '/admin/tasks' && request.method === 'GET') {
+        return serveAdminTasksHtml(request, env);
+      }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
       }
       if (path === '/api/admin/ops' && request.method === 'GET') {
         return handleAdminOps(request, env);
+      }
+      if (path === '/api/admin/tasks' && request.method === 'GET') {
+        return handleAdminTasks(request, env);
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);
@@ -1481,7 +1489,11 @@ export default {
           // or cross-day retries. Returns early so this tick is dedicated to PH
           // (~50+ detail queries + ingest + snapshot ≈ 110+ subreq).
           if (hour === 10 && minute >= 10 && minute < 15) {
-            const r = await runPhDailyFetch(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'ph-daily-fetch', source: 'ph', category: 'fetch' },
+              () => runPhDailyFetch(env),
+            );
             console.log(`[cron] ph-daily-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'PH 每日抓取', r as unknown as Record<string, unknown>);
             return;
@@ -1495,7 +1507,11 @@ export default {
           // Phase 8 通知:result 含 list_size / fetched_details / fetched_categories /
           // ingested / triggered / duration_ms,notifyCronSummary 自动展开成 markdown。
           if (hour === 0 && minute >= 0 && minute < 5) {
-            const r = await runHfDailyFetch(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'hf-daily-fetch', source: 'hf', category: 'fetch' },
+              () => runHfDailyFetch(env),
+            );
             console.log(`[cron] hf-daily-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'HF Daily Papers 每日抓取', r as unknown as Record<string, unknown>);
             return;
@@ -1505,7 +1521,11 @@ export default {
           // 早 7 点发,user 起床看,不打扰半夜睡眠。
           // 没 warning 不推(empty buffer 直接 return,避免无意义打扰)。
           if (hour === 23 && minute === 0) {
-            const r = await sendDailyWarningDigest(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'warning-digest', source: 'common', category: 'system' },
+              () => sendDailyWarningDigest(env),
+            );
             console.log(`[cron] warning-digest result:`, JSON.stringify(r));
             return;
           }
@@ -1516,7 +1536,11 @@ export default {
           // 现在跟 PH daily fetch 同级，:25 / :55 时直接跑 + return。
           if (mode === 'list-poll-ingest') {
             const listId = env.LIST_POLL_LIST_ID || '1643236611378008066';
-            const r = await runListPollIngest(env, listId, 3);
+            const r = await recordCronRun(
+              env,
+              { name: 'list-poll-ingest', source: 'x', category: 'fetch' },
+              () => runListPollIngest(env, listId, 3),
+            );
             try {
               await env.DB.prepare(
                 `INSERT INTO refresh_log (refreshed_at, tier, items_count, subrequests_used, duration_ms, errors)
@@ -1541,7 +1565,11 @@ export default {
           //   enrich：minute=20/50 跑 batch=3 detail（节流后 15-24s 单 tick）
           //   sweep：BJT 03:00 标过期
           if (isHdxFetchStartSlot) {
-            const r = await runHuodongxingFetchList(env, { budget: 40, reset: true });
+            const r = await recordCronRun(
+              env,
+              { name: 'hdx-fetch-start', source: 'hdx', category: 'fetch' },
+              () => runHuodongxingFetchList(env, { budget: 40, reset: true }),
+            );
             console.log(`[cron] hdx-fetch (start) result:`, JSON.stringify(r));
             await notifyCronSummary(env, '活动行抓取 (start)', r as unknown as Record<string, unknown>);
             return;
@@ -1553,7 +1581,11 @@ export default {
               try {
                 const p = JSON.parse(progressRaw) as { cities_pending?: string[] };
                 if (p.cities_pending && p.cities_pending.length > 0) {
-                  const r = await runHuodongxingFetchList(env, { budget: 40 });
+                  const r = await recordCronRun(
+                    env,
+                    { name: 'hdx-fetch-continue', source: 'hdx', category: 'fetch' },
+                    () => runHuodongxingFetchList(env, { budget: 40 }),
+                  );
                   console.log(`[cron] hdx-fetch (continue) result:`, JSON.stringify(r));
                   await notifyCronSummary(env, '活动行抓取 (continue)', r as unknown as Record<string, unknown>);
                   return;
@@ -1565,7 +1597,11 @@ export default {
             }
           }
           if (isHdxSweepSlot) {
-            const r = await markStaleEventsHistorical(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'hdx-sweep', source: 'hdx', category: 'cleanup' },
+              () => markStaleEventsHistorical(env),
+            );
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
@@ -1576,14 +1612,22 @@ export default {
           // SQL 跟 admin /api/admin/hdx-trigger-pending-workflows-now 共用（marker
           // 30min 窗口 filter），单 tick limit 25 → 48 tick × 25 = 1200/天 capacity。
           if (isHdxEnrichSlot && env.HUODONGXING_DETAIL_WORKFLOW) {
-            const r = await drainHdxPendingWorkflows(env, 25, 3);
+            const r = await recordCronRun(
+              env,
+              { name: 'hdx-auto-drain', source: 'hdx', category: 'enrich' },
+              () => drainHdxPendingWorkflows(env, 25, 3),
+            );
             console.log(`[cron] hdx-auto-drain result:`, JSON.stringify(r));
             return;
           }
           // X tweets 截断 backfill 兜底（2026-05-17）：workflow step 0 治本但旧
           // ingest 漏检的 ~500 条靠这个 cron tick 慢慢消化（也覆盖 workflow trigger 失败的 case）。
           if (isXBackfillTruncatedSlot) {
-            const r = await runBackfillTruncatedFromSyndication(env, 30, 400);
+            const r = await recordCronRun(
+              env,
+              { name: 'x-backfill-truncated', source: 'x', category: 'backfill' },
+              () => runBackfillTruncatedFromSyndication(env, 30, 400),
+            );
             console.log(`[cron] x-backfill-truncated result:`, JSON.stringify(r));
             return;
           }
@@ -1591,7 +1635,11 @@ export default {
           // runReconstructThreads,从 self-reply chain 反向填 thread_root_id。
           // dryRun=false 真跑,maxPasses=5 覆盖普通 thread 链长。
           if (isXReconstructThreadsSlot) {
-            const r = await runReconstructThreads(env, false, 5);
+            const r = await recordCronRun(
+              env,
+              { name: 'x-reconstruct-threads', source: 'x', category: 'backfill' },
+              () => runReconstructThreads(env, false, 5),
+            );
             console.log(`[cron] x-reconstruct-threads result:`, JSON.stringify(r));
             return;
           }
@@ -1600,16 +1648,20 @@ export default {
           // 日 cap 50/天短路:用满后续 tick graceful return,等下次 UTC 0 重置。
           // Cookie 失效 / rate limit → markCookieInvalid + 中断,等 user 通过 admin 面板更新。
           if (isXArticleBodyBackfillSlot) {
-            const r = await runBackfillXArticleBodies(
-              {
-                DB: env.DB,
-                DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
-                AUTH_KV: env.AUTH_KV,
-                PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS,
-                X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP,
-              },
-              3,
-              ctx,
+            const r = await recordCronRun(
+              env,
+              { name: 'x-article-body-backfill', source: 'x', category: 'backfill' },
+              () => runBackfillXArticleBodies(
+                {
+                  DB: env.DB,
+                  DEEPSEEK_API_KEY: env.DEEPSEEK_API_KEY,
+                  AUTH_KV: env.AUTH_KV,
+                  PUSHDEER_ADMIN_KEYS: env.PUSHDEER_ADMIN_KEYS,
+                  X_GRAPHQL_DAILY_CAP: env.X_GRAPHQL_DAILY_CAP,
+                },
+                3,
+                ctx,
+              ),
             );
             console.log(`[cron] x-article-body-backfill result:`, JSON.stringify(r));
             return;
@@ -1618,7 +1670,11 @@ export default {
           // :35 每 hour(除 hour=3 cleanup)limit=2 ≈ 30s wall。
           // 单 task 单 DeepSeek call,~15s/task。limit=2 保留 CF edge 30s 余量。
           if (isXArticleTranslateBackfillSlot) {
-            const r = await runBackfillXArticleTranslations(env, 2, 200);
+            const r = await recordCronRun(
+              env,
+              { name: 'x-article-translate-backfill', source: 'x', category: 'backfill' },
+              () => runBackfillXArticleTranslations(env, 2, 200),
+            );
             console.log(`[cron] x-article-translate-backfill result:`, JSON.stringify(r));
             return;
           }
@@ -1630,60 +1686,67 @@ export default {
               console.warn('[cron] x-backfill-workflow: X_TWEET_PIPELINE_WORKFLOW binding missing');
               return;
             }
-            const t0 = Date.now();
-            // 2026-05-17 加速 + prioritize:
-            // - LIMIT 100(原 20)→ 每 30min 100 条 = 4800/day,prod 25k 老数据 ~5 天完成
-            // - ORDER BY priority:retweet_pending(0)/ quote_pending(1)/ reply_pending(2)/ 其他(9)
-            //   stuck 类型先 backfill,user 体验更快(retweet bug 等问题立即修)
-            // - throttle 2s(原 3s)→ 100 条 × 2s = 200s wall + workflow async
-            const pending = await env.DB.prepare(
-              `SELECT id, extra FROM items
-                WHERE source_type='x_list'
-                  AND deleted_at IS NULL
-                  AND json_extract(extra, '$.workflow_completed_at') IS NULL
-                  AND (
-                    json_extract(extra, '$.workflow_triggered_at') IS NULL
-                    OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
-                  )
-                ORDER BY
-                  (CASE
-                    WHEN json_extract(extra,'$.is_retweet')=1 AND json_extract(extra,'$.retweet_of') IS NULL THEN 0
-                    WHEN json_extract(extra,'$.quote_of_id') IS NOT NULL AND json_extract(extra,'$.quote_of') IS NULL THEN 1
-                    WHEN json_extract(extra,'$.reply_to_id') IS NOT NULL AND json_extract(extra,'$.reply_of') IS NULL THEN 2
-                    ELSE 9
-                  END),
-                  published_at DESC
-                LIMIT 100`,
-            ).all<{ id: string; extra: string | null }>();
-            let triggered = 0;
-            let skipped = 0;
-            let failed = 0;
-            for (let i = 0; i < pending.results.length; i++) {
-              const r = pending.results[i];
-              let extraObj: Record<string, unknown> = {};
-              try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
-              const signals = {
-                hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
-                hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
-                hasLinkCard: !!extraObj.link_card,
-                hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
-              };
-              const result = await triggerXWorkflowForItem(env, r.id, signals);
-              if (result === 'triggered') triggered++;
-              else if (result === 'already_exists') skipped++;
-              else failed++;
-              // throttle 2s/instance 避免 SB / syndication burst
-              if (i < pending.results.length - 1) {
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-              }
-            }
-            console.log(`[cron] x-backfill-workflow result:`, JSON.stringify({
-              found: pending.results.length,
-              triggered,
-              skipped,
-              failed,
-              elapsed_ms: Date.now() - t0,
-            }));
+            const r = await recordCronRun(
+              env,
+              { name: 'x-backfill-workflow', source: 'x', category: 'backfill' },
+              async () => {
+                const t0 = Date.now();
+                // 2026-05-17 加速 + prioritize:
+                // - LIMIT 100(原 20)→ 每 30min 100 条 = 4800/day,prod 25k 老数据 ~5 天完成
+                // - ORDER BY priority:retweet_pending(0)/ quote_pending(1)/ reply_pending(2)/ 其他(9)
+                //   stuck 类型先 backfill,user 体验更快(retweet bug 等问题立即修)
+                // - throttle 2s(原 3s)→ 100 条 × 2s = 200s wall + workflow async
+                const pending = await env.DB.prepare(
+                  `SELECT id, extra FROM items
+                    WHERE source_type='x_list'
+                      AND deleted_at IS NULL
+                      AND json_extract(extra, '$.workflow_completed_at') IS NULL
+                      AND (
+                        json_extract(extra, '$.workflow_triggered_at') IS NULL
+                        OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+                      )
+                    ORDER BY
+                      (CASE
+                        WHEN json_extract(extra,'$.is_retweet')=1 AND json_extract(extra,'$.retweet_of') IS NULL THEN 0
+                        WHEN json_extract(extra,'$.quote_of_id') IS NOT NULL AND json_extract(extra,'$.quote_of') IS NULL THEN 1
+                        WHEN json_extract(extra,'$.reply_to_id') IS NOT NULL AND json_extract(extra,'$.reply_of') IS NULL THEN 2
+                        ELSE 9
+                      END),
+                      published_at DESC
+                    LIMIT 100`,
+                ).all<{ id: string; extra: string | null }>();
+                let triggered = 0;
+                let skipped = 0;
+                let failed = 0;
+                for (let i = 0; i < pending.results.length; i++) {
+                  const row = pending.results[i];
+                  let extraObj: Record<string, unknown> = {};
+                  try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+                  const signals = {
+                    hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+                    hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+                    hasLinkCard: !!extraObj.link_card,
+                    hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
+                  };
+                  const result = await triggerXWorkflowForItem(env, row.id, signals);
+                  if (result === 'triggered') triggered++;
+                  else if (result === 'already_exists') skipped++;
+                  else failed++;
+                  // throttle 2s/instance 避免 SB / syndication burst
+                  if (i < pending.results.length - 1) {
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                  }
+                }
+                return {
+                  found: pending.results.length,
+                  triggered,
+                  skipped,
+                  failed,
+                  elapsed_ms: Date.now() - t0,
+                };
+              },
+            );
+            console.log(`[cron] x-backfill-workflow result:`, JSON.stringify(r));
             return;
           }
           // HF Paper backfill 兜底(2026-05-19 Phase 4)
@@ -1695,42 +1758,49 @@ export default {
               console.warn('[cron] hf-backfill-workflow: HF_PAPER_PIPELINE_WORKFLOW binding missing');
               return;
             }
-            const t0 = Date.now();
-            const pending = await env.DB.prepare(
-              `SELECT id, extra FROM items
-                WHERE source_type='hf_paper'
-                  AND deleted_at IS NULL
-                  AND json_extract(extra, '$.workflow_completed_at') IS NULL
-                  AND (
-                    json_extract(extra, '$.workflow_triggered_at') IS NULL
-                    OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
-                  )
-                ORDER BY published_at DESC
-                LIMIT 20`,
-            ).all<{ id: string; extra: string | null }>();
-            let triggered = 0, skipped = 0, failed = 0;
-            for (let i = 0; i < pending.results.length; i++) {
-              const r = pending.results[i];
-              let extraObj: Record<string, unknown> = {};
-              try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
-              const arxivId = String(r.id).replace(/^hf_paper:/, '');
-              const result = await triggerHfPaperWorkflowForItem(env, r.id, arxivId, {
-                hasGhRepo: !!extraObj.github_repo,
-                hasProjectPage: !!extraObj.project_page,
-                hasDiscussionId: !!extraObj.discussion_id,
-              });
-              if (result === 'triggered') triggered++;
-              else if (result === 'already_exists') skipped++;
-              else failed++;
-              if (i < pending.results.length - 1) {
-                await new Promise((resolve) => setTimeout(resolve, 3000));
-              }
-            }
-            console.log(`[cron] hf-backfill-workflow result:`, JSON.stringify({
-              found: pending.results.length,
-              triggered, skipped, failed,
-              elapsed_ms: Date.now() - t0,
-            }));
+            const r = await recordCronRun(
+              env,
+              { name: 'hf-backfill-workflow', source: 'hf', category: 'backfill' },
+              async () => {
+                const t0 = Date.now();
+                const pending = await env.DB.prepare(
+                  `SELECT id, extra FROM items
+                    WHERE source_type='hf_paper'
+                      AND deleted_at IS NULL
+                      AND json_extract(extra, '$.workflow_completed_at') IS NULL
+                      AND (
+                        json_extract(extra, '$.workflow_triggered_at') IS NULL
+                        OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
+                      )
+                    ORDER BY published_at DESC
+                    LIMIT 20`,
+                ).all<{ id: string; extra: string | null }>();
+                let triggered = 0, skipped = 0, failed = 0;
+                for (let i = 0; i < pending.results.length; i++) {
+                  const row = pending.results[i];
+                  let extraObj: Record<string, unknown> = {};
+                  try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+                  const arxivId = String(row.id).replace(/^hf_paper:/, '');
+                  const result = await triggerHfPaperWorkflowForItem(env, row.id, arxivId, {
+                    hasGhRepo: !!extraObj.github_repo,
+                    hasProjectPage: !!extraObj.project_page,
+                    hasDiscussionId: !!extraObj.discussion_id,
+                  });
+                  if (result === 'triggered') triggered++;
+                  else if (result === 'already_exists') skipped++;
+                  else failed++;
+                  if (i < pending.results.length - 1) {
+                    await new Promise((resolve) => setTimeout(resolve, 3000));
+                  }
+                }
+                return {
+                  found: pending.results.length,
+                  triggered, skipped, failed,
+                  elapsed_ms: Date.now() - t0,
+                };
+              },
+            );
+            console.log(`[cron] hf-backfill-workflow result:`, JSON.stringify(r));
             return;
           }
           // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
@@ -1754,13 +1824,21 @@ export default {
           // 唯一保留的「PH 翻译 fallback」: 老 runFillTranslations admin endpoint
           // 仍能跑（/api/admin/fill-translations-now）。
           if (mode === 'github-fetch') {
-            const r = await runGithubFetchTrending(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'github-fetch', source: 'github', category: 'fetch' },
+              () => runGithubFetchTrending(env),
+            );
             console.log(`[cron] github-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'GitHub Trending 抓取', r as unknown as Record<string, unknown>);
             return;
           }
           if (mode === 'clawhub-fetch') {
-            const r = await runClawhubFetchList(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'clawhub-fetch', source: 'clawhub', category: 'fetch' },
+              () => runClawhubFetchList(env),
+            );
             console.log(`[cron] clawhub-fetch result:`, JSON.stringify(r));
             await notifyCronSummary(env, 'ClawHub 列表抓取', r as unknown as Record<string, unknown>);
             return;
@@ -1770,10 +1848,14 @@ export default {
               console.log('[cron] refresh-metrics skipped (REFRESH_MODE=off)');
               return;
             }
-            const result =
-              refreshMode === 'tiered'
-                ? await runRefreshTiered(env, 20, 400, maxTier)
-                : await runRefreshMetrics(env);
+            const result = await recordCronRun(
+              env,
+              { name: 'refresh-metrics', source: 'common', category: 'refresh' },
+              () =>
+                refreshMode === 'tiered'
+                  ? runRefreshTiered(env, 20, 400, maxTier)
+                  : runRefreshMetrics(env),
+            );
             console.log(
               `[cron] refresh-metrics(${refreshMode},maxTier=${maxTier}) result:`,
               JSON.stringify(result),
@@ -1786,7 +1868,11 @@ export default {
           // cleanup 等固定槽位再触发。老 batch 函数保留作 /api/enrich/run?mode=X
           // 兜底（Bearer INGEST_TOKEN）。
           if (mode === 'cleanup') {
-            const result = await runCleanup(env);
+            const result = await recordCronRun(
+              env,
+              { name: 'cleanup', source: 'common', category: 'cleanup' },
+              () => runCleanup(env),
+            );
             console.log(`[cron] cleanup result:`, JSON.stringify(result));
           }
         } catch (e) {
@@ -1803,11 +1889,19 @@ export default {
       (async () => {
         try {
           if (hour === 18 && minute === 10) {
-            const r = await runOpsBaseline(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'ops-baseline', source: 'common', category: 'system' },
+              () => runOpsBaseline(env),
+            );
             console.log(`[cron] ops-baseline:`, JSON.stringify(r));
           }
           if (minute === 0 || minute === 30) {
-            const r = await runOpsDetect(env);
+            const r = await recordCronRun(
+              env,
+              { name: 'ops-detect', source: 'common', category: 'system' },
+              () => runOpsDetect(env),
+            );
             console.log(`[cron] ops-detect:`, JSON.stringify(r));
           }
         } catch (e) {
