@@ -3,6 +3,7 @@ import type { GithubMetrics, Item, ItemExtra } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField, proxyImg } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
+import { useImpressionRefresh } from "../lib/impressionRefresh";
 import { langDotClass } from "../lib/githubLang";
 import {
   IconLeaderboard,
@@ -124,8 +125,12 @@ export function GithubCard({ item }: Props) {
     drawer.openItem(item);
   }
 
+  // BE §5b: 视口停留 500ms 弱触发 metrics refresh
+  const refreshRef = useImpressionRefresh(item.id);
+
   return (
     <article
+      ref={refreshRef}
       onClick={open}
       className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >

@@ -404,6 +404,21 @@ ${adminNavHtml('tools')}
     <pre id="capOut">—</pre>
   </div>
 
+  <div class="card" data-testid="card-feature-flags">
+    <h2>🚦 功能开关 (Feature Flags)</h2>
+    <p class="hint">出 prod 事故时秒切关闭功能。当前已定义:<br>
+      <code>impression_refresh</code> — feed 卡曝光弱触发 metrics refresh (BE §5b)。关闭后 FE 仍发请求,worker 立即返 <code>disabled</code> 不进下游 (省 ScrapeBadger 计费)。drawer 打开 / 海报触发不受影响。<br>
+      改完 60s 内全 worker isolate 生效 (各 isolate 自己的内存缓存到期才 reload)。
+    </p>
+    <div class="row" style="margin-bottom: 8px;"><button onclick="loadFlags()">查当前状态</button></div>
+    <pre id="flagsOut" style="margin: 0 0 12px;">—</pre>
+    <div class="row" style="gap: 6px; flex-wrap: wrap;">
+      <button onclick="run('POST', '/api/admin/feature-flags/impression_refresh', {value: 'on'}, 'flagsSetOut')">impression_refresh → ON</button>
+      <button class="danger" onclick="confirmRun('确认关闭 impression_refresh? (FE 曝光弱触发 metrics refresh 立即停)', 'POST', '/api/admin/feature-flags/impression_refresh', {value: 'off'}, 'flagsSetOut')">impression_refresh → OFF</button>
+    </div>
+    <pre id="flagsSetOut">—</pre>
+  </div>
+
   <div class="card" data-testid="card-x-cookie">
     <h2>🍪 X Cookie 更新</h2>
     <p class="hint">X article body 抓取走 GraphQL <code>TweetResultByRestId</code> 需登录 cookie。失效时(401/403)workflow 自动标失败 + PushDeer 推送,需在此页面更新。<br>步骤:浏览器登录 X 小号 → F12 → Application → Cookies → x.com → 全选复制 → 粘贴 Submit。</p>
@@ -450,6 +465,9 @@ async function confirmRun(msg, method, url, body, outId) {
 }
 async function loadXCookieStatus() {
   await run('GET', '/api/admin/x-cookie', null, 'xCookieStatusOut');
+}
+async function loadFlags() {
+  await run('GET', '/api/admin/feature-flags', null, 'flagsOut');
 }
 async function submitXCookie() {
   const cs = document.getElementById('xCookieInput').value.trim();

@@ -443,6 +443,17 @@ export default {
       if (path === '/api/admin/share/poster-cleanup' && request.method === 'POST') {
         return adminClearPosterCache(request, env);
       }
+      // 5/28 加: feature flag CRUD (admin /admin/tools UI 调). impression refresh
+      // 开关 + 未来可扩其他 flag. 改完立即 invalidate worker memory cache.
+      if (path === '/api/admin/feature-flags' && request.method === 'GET') {
+        const { handleAdminListFlags } = await import('./feature-flags');
+        return handleAdminListFlags(request, env);
+      }
+      const flagMatch = path.match(/^\/api\/admin\/feature-flags\/([a-z_]+)$/);
+      if (flagMatch && request.method === 'POST') {
+        const { handleAdminSetFlag } = await import('./feature-flags');
+        return handleAdminSetFlag(request, env, flagMatch[1]);
+      }
       // ─── PR5 share endpoints ───────────────────────────────────
       if (path === '/api/share/create' && request.method === 'POST') {
         return withCors(await handleShareCreate(request, env, ctx), request, env);
@@ -2975,6 +2986,22 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
 async function handleItemRefresh(request: Request, env: Env, id: string): Promise<Response> {
   // 不需要登录：刷新公开 metrics 不涉及私密数据
   // 节流：worker 内部 KV throttle 5min；前端调用时 anti-burst 自己也加防抖
+  // 触发源区分: ?trigger=impression (FE feed 卡曝光弱触发) 才走 feature flag 开关.
+  // drawer 打开 / 海报触发 不带 trigger param, 不受 flag 影响 (这俩是 user-initiated
+  // 强需求, 不该跟 ScrapeBadger 计费保护混在一起 mute).
+  const url = new URL(request.url);
+  const trigger = url.searchParams.get('trigger');
+  if (trigger === 'impression') {
+    const { isFlagOn } = await import('./feature-flags');
+    if (!(await isFlagOn(env, 'impression_refresh'))) {
+      return jsonResponse(
+        { refreshed: false, source_type: 'unknown', reason: 'disabled' },
+        200,
+        request,
+        env,
+      );
+    }
+  }
   const r = await refreshSingleItem(env, id);
   return jsonResponse(r, 200, request, env);
 }

@@ -20,6 +20,7 @@ import type { HuodongxingMetrics, HuodongxingOrganizer, Item, ItemExtra, MediaIt
 import { cn, parseJsonField } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
+import { useImpressionRefresh } from "../lib/impressionRefresh";
 import { resolveAssetUrl } from "../lib/asset";
 import {
   formatEventLocation,
@@ -178,8 +179,12 @@ export function HuodongxingCard({ item }: Props) {
     drawer.openItem(item);
   }
 
+  // BE §5b: 视口停留 500ms 弱触发 metrics refresh
+  const refreshRef = useImpressionRefresh(item.id);
+
   return (
     <article
+      ref={refreshRef}
       onClick={open}
       className={`cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60 ${
         isEnded ? "bg-neutral-50/60" : ""
