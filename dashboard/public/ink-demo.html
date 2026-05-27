@@ -188,7 +188,8 @@
       <div class="row">
         <label>方案</label>
         <select id="scheme">
-          <option value="goo">A. SVG goo filter (液态金属)</option>
+          <option value="metaball2phase">E. 两阶段缩 + 流体连线 (PM 反馈版)</option>
+          <option value="goo">A. SVG goo filter 单端</option>
           <option value="lerp">B. 线性 lerp (当前 PR #126)</option>
           <option value="shrinkdot">C. 出场缩点 + 入场扩展 (无连接)</option>
           <option value="bridge">D. 桥接长方形 (实心,无液态)</option>
@@ -239,6 +240,10 @@
     ];
 
     const SCHEMES = {
+      metaball2phase:
+        "PM 反馈版: 出场分两阶段 (圆角矩形 → 圆形 → 圆点 → 消失), 进场对称 (圆点 → 圆形 → 圆角矩形); " +
+        "中间一条流体连线始终连着出场 chip 的黑色部分, 把墨汁'拽'到进场 chip; " +
+        "全部元素在 SVG goo filter 下 → 边界处 metaball 合并成液态形状.",
       goo: "两个独立 pill: 出场宽度缩 (chip.w → 0), 入场宽度长 (0 → chip.w), 中间 SVG goo filter 让 blur+contrast 把它们液态合并 → 拉伸时像墨汁拖丝, 分离时各成独立 pill. 调下方 Blur stddev / Contrast K 看不同质感.",
       lerp: "PR #126 当前实现: 单个 pill 在 from-chip / to-chip 之间线性插值位置+宽度. 没有缩点/扩展过程, 整体平移.",
       shrinkdot: "出场 pill 宽度均匀缩到圆点然后消失; 入场 pill 在 to-chip 处从无 → 圆点 → 圆形 → 完整宽度. 中间无连接, 两者各自独立.",
@@ -308,11 +313,25 @@
     }
 
     function render(from, to, p, scheme) {
-      // 清掉桥接 (B/C/A 不用)
-      if (scheme !== "bridge") ensureBridge(false);
+      // 清掉桥接 (B/C/A 不用; D / E 用)
+      if (scheme !== "bridge" && scheme !== "metaball2phase") ensureBridge(false);
 
       const f = rect(from);
       const t = rect(to);
+
+      // 重置 pill 的 height + borderRadius (默认 26px 高 + 胶囊 — lerp/shrinkdot/bridge 都用)
+      // metaball2phase 会动态覆盖
+      pillA.style.height = "26px";
+      pillB.style.height = "26px";
+      pillA.style.borderRadius = "999px";
+      pillB.style.borderRadius = "999px";
+      pillA.style.opacity = "1";
+      pillB.style.opacity = "1";
+      if (bridge) {
+        bridge.style.height = scheme === "metaball2phase" ? "12px" : "16px";
+        bridge.style.borderRadius = "999px";
+        bridge.style.opacity = "1";
+      }
 
       if (scheme === "lerp") {
         // 单 pill 线性插值 — PR #126 现状
@@ -356,8 +375,80 @@
         bridge.style.transform = `translateX(${bridgeLeft}px) translateY(-50%)`;
         bridge.style.width = `${bridgeW}px`;
         inkLayer.style.filter = "none";
+      } else if (scheme === "metaball2phase") {
+        // E — PM 反馈版: 两阶段缩 + 流体连线
+        // 出场 pill: 阶段一 (0..0.4) 圆角矩形 → 正圆 (width chip.w → chip.h);
+        //          阶段二 (0.4..0.7) 正圆 → 圆点 → 消失 (width=height chip.h → 0)
+        // 入场 pill: 阶段一 (0.3..0.6) 圆点 → 正圆 (对称);
+        //          阶段二 (0.6..1) 正圆 → 圆角矩形 (对称)
+        // 连接桥: 一直从出场 pill 边缘到入场 pill 边缘 (高度 12px 比 pill 矮),
+        //        SVG goo filter 把它跟两端 pill blur 后 metaball 合并成液态形状
+        const PILL_H = 26;
+        const fromCenter = f.left + f.width / 2;
+        const toCenter = t.left + t.width / 2;
+        pillA.style.display = "";
+        pillB.style.display = "";
+        ensureBridge(true);
+
+        // 出场 pill 两阶段
+        let aw, ah;
+        if (p < 0.4) {
+          const tt = p / 0.4;
+          aw = f.width + (PILL_H - f.width) * tt;
+          ah = PILL_H;
+        } else if (p < 0.7) {
+          const tt = (p - 0.4) / 0.3;
+          aw = PILL_H * (1 - tt);
+          ah = aw;
+        } else {
+          aw = 0;
+          ah = 0;
+        }
+        pillA.style.width = `${aw}px`;
+        pillA.style.height = `${ah}px`;
+        pillA.style.transform = `translateX(${fromCenter - aw / 2}px) translateY(-50%)`;
+
+        // 入场 pill 两阶段
+        let bw, bh;
+        if (p < 0.3) {
+          bw = 0;
+          bh = 0;
+        } else if (p < 0.6) {
+          const tt = (p - 0.3) / 0.3;
+          bw = PILL_H * tt;
+          bh = bw;
+        } else {
+          const tt = (p - 0.6) / 0.4;
+          bw = PILL_H + (t.width - PILL_H) * tt;
+          bh = PILL_H;
+        }
+        pillB.style.width = `${bw}px`;
+        pillB.style.height = `${bh}px`;
+        pillB.style.transform = `translateX(${toCenter - bw / 2}px) translateY(-50%)`;
+
+        // 连接桥: 从出场 pill 边缘到入场 pill 边缘 (overlap 4px 确保 goo 衔接)
+        // swipe 方向: dx<0 切下一个 chip (toCenter > fromCenter), dx>0 切上一个
+        const reverse = toCenter < fromCenter;
+        let bL, bR;
+        if (!reverse) {
+          bL = fromCenter + aw / 2 - 4;
+          bR = toCenter - bw / 2 + 4;
+        } else {
+          bL = toCenter + bw / 2 - 4;
+          bR = fromCenter - aw / 2 + 4;
+        }
+        const bridgeW = Math.max(0, bR - bL);
+        bridge.style.width = `${bridgeW}px`;
+        bridge.style.transform = `translateX(${bL}px) translateY(-50%)`;
+        // bridge fade in/out 边缘期 — 防边缘 progress=0/1 时 bridge 突然消失太硬
+        let bridgeOp = 1;
+        if (p < 0.12) bridgeOp = p / 0.12;
+        else if (p > 0.88) bridgeOp = (1 - p) / 0.12;
+        bridge.style.opacity = String(bridgeOp);
+
+        inkLayer.style.filter = "url(#goo)";
       } else {
-        // goo (A) — 默认: 两个独立 pill, SVG filter 在外层做液态合并
+        // goo (A) — 两个独立 pill, SVG filter 在外层做液态合并
         pillA.style.display = "";
         pillB.style.display = "";
         // 出场宽度跟 progress 缩 (但起步慢点尾巴拖一下) — easeOutQuad
@@ -402,9 +493,9 @@
 
     function refreshSchemeDesc() {
       schemeDesc.textContent = SCHEMES[schemeSel.value];
-      const gooOnly = schemeSel.value === "goo";
-      document.getElementById("gooRow").style.display = gooOnly ? "" : "none";
-      document.getElementById("contrastRow").style.display = gooOnly ? "" : "none";
+      const usesGoo = schemeSel.value === "goo" || schemeSel.value === "metaball2phase";
+      document.getElementById("gooRow").style.display = usesGoo ? "" : "none";
+      document.getElementById("contrastRow").style.display = usesGoo ? "" : "none";
     }
 
     // Play animation forwards/backwards
