@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import type { Env } from '../index';
 import type { CreateShareRequest, CreateShareResponse, LandingRequest, ShareRelation } from './types';
 import { authenticate } from '../auth/session';
+import { refreshSingleItem } from '../enrich';
 
 // 根据 worker 请求 host 推 (site, api) origin，三环境（dev/staging/prod）都能匹配
 function originsFor(request: Request): { site: string; api: string } {
@@ -66,6 +67,25 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
   )
     .bind(token, auth.userId, body.item_id, now)
     .run();
+
+  // §5 (2026-05-27) 海报触发 enrich:share/create 时 fire-and-forget 触发
+  // refreshSingleItem,避免海报渲染时拿到 1-7 天前的旧 metrics。
+  //
+  // 用 ctx.waitUntil 异步跑,不阻塞 token return — dashboard 拿到 token 后
+  // 1-2s 调 /api/share/poster/:token 时 enrich 大概率已完成(refreshSingleItem
+  // 通常 < 2s),poster 用新数据渲染。
+  //
+  // 5min throttle KV 兜底:用户刚 enrich 过(打开 drawer 触发 PR6.6 同 KV key)
+  // refresh 直接 throttled return,不浪费 API。
+  //
+  // 异常不阻塞:refreshSingleItem 内部 try/catch,任一失败仅 console.warn。
+  ctx.waitUntil(
+    refreshSingleItem(env, body.item_id).then((r) => {
+      console.log(`[share-create] pre-refresh ${body.item_id}: refreshed=${r.refreshed} reason=${r.reason ?? '—'}`);
+    }).catch((e) => {
+      console.warn(`[share-create] pre-refresh ${body.item_id} exception:`, e);
+    }),
+  );
 
   // 5. 返回 — origin 跟着 request host 走，staging / prod 不串
   const { site, api } = originsFor(request);
