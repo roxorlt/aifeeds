@@ -31,6 +31,7 @@ import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordi
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
 import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
+import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
@@ -358,6 +359,64 @@ function DashboardHome() {
   const [transitionActive, setTransitionActive] = useState<{ key: string } | null>(null);
   const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string } | null>(null);
   const adjacentRef = useRef<HTMLDivElement>(null);
+  // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐, 下拉时渐显 (iOS Safari /
+  // Twitter mobile 同款). PC 不动 (header 永远显示).
+  // PM 2026-05-27 v2 反馈: 不要 threshold + transition 二值切换 (看着像"突然"),
+  // 改 1:1 跟手 progress-based — 手指刚动 1px header 就移动 1/49, opacity 连续渐变,
+  // "渐变"在手势刚开始就启动.
+  const headerRef = useRef<HTMLElement>(null);
+  const hideRatioRef = useRef(0);
+  useEffect(() => {
+    const apply = (ratio: number) => {
+      const h = headerRef.current;
+      if (!h) return;
+      h.style.transform = `translateY(${-ratio * 100}%)`;
+      h.style.opacity = `${1 - ratio}`;
+    };
+    if (!isNarrow) {
+      hideRatioRef.current = 0;
+      apply(0);
+      return;
+    }
+    const TOP_ZONE = 50;
+    const HEADER_H = 49;
+    let ticking = false;
+    let lastY = getScrollY();
+    const handler = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const y = getScrollY();
+        const delta = y - lastY;
+        lastY = y;
+        let next: number;
+        if (y < TOP_ZONE) {
+          next = 0;
+        } else {
+          next = Math.max(0, Math.min(1, hideRatioRef.current + delta / HEADER_H));
+        }
+        if (next !== hideRatioRef.current) {
+          hideRatioRef.current = next;
+          apply(next);
+        }
+      });
+    };
+    return addScrollRootListener(handler);
+  }, [isNarrow]);
+  // chip click / swipe 切 channel 时 header 强制显示 — overlay 用 top:49 hardcode header
+  // 高度做位置, header hidden 状态下切 channel 会留 49px 空白条. 切 channel 是 user
+  // 主动 interaction, 配合 show header 也符合 "看到新 channel 标识" 的直觉.
+  useEffect(() => {
+    if (transitionActive || swipeAdjacent) {
+      hideRatioRef.current = 0;
+      const h = headerRef.current;
+      if (h) {
+        h.style.transform = "translateY(0%)";
+        h.style.opacity = "1";
+      }
+    }
+  }, [transitionActive, swipeAdjacent]);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
     setTransitionActive({ key: nextFilter });
@@ -775,8 +834,15 @@ function DashboardHome() {
         </svg>
       )}
       {/* Top bar */}
+      {/* PM 2026-05-27 任务 3 v3 反馈: 频道流惯性 momentum 没了 — 根因是 mobile
+          sticky header + RAF 每帧 set transform, iOS 把 #root scroll 的 momentum
+          节流了 (sticky 每次 scroll 都重算 stickiness offset, 加上 transform write
+          → main thread 持续 sync 工作 → iOS disable momentum 优化). 改 fixed 让
+          header 完全脱离 #root scroll layout, 改它任何 style 都不影响 #root scroll.
+          PC 保持 sticky 不变 (PC 走 window scroll 没这个问题). */}
       <header
-        className="sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur"
+        ref={headerRef}
+        className="z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur max-md:fixed max-md:inset-x-0 max-md:top-0 sm:sticky sm:top-0"
         onClick={(e) => {
           // Skip when click is on chips, refresh button, etc.
           if ((e.target as HTMLElement).closest("button")) return;
@@ -903,6 +969,11 @@ function DashboardHome() {
           <UserMenu />
         </div>
       </header>
+
+      {/* mobile-only spacer: header 改 fixed 后不占 layout 空间, 加 49px spacer
+          补齐 (跟 sticky 时一样让 main 内容从 49 起步, swipeAdjacent / transitionActive
+          overlay 的 top:49 hardcode 也无需变). PC sticky 自己占空间, 不需 spacer. */}
+      <div className="max-md:h-[49px] md:hidden" aria-hidden />
 
       {/* Swipe adjacent panel — R22 加 channel header (SourceIcon + label) +
           8 SkeletonCard, 跟 Feed mount 后的 header + skeleton 完全一致, 切换
