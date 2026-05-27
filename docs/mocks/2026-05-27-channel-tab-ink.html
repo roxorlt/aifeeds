@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>频道 Tab 墨汁动效 Demo</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #fafafa;
+      color: #111;
+      overscroll-behavior: none;
+    }
+
+    .page { padding: 16px 12px 80px; max-width: 480px; margin: 0 auto; }
+
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    .hint { font-size: 12px; color: #666; line-height: 1.55; margin-bottom: 12px; }
+
+    /* Chips rail — 跟 dashboard 同款样式 */
+    .rail-host {
+      position: relative;
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px 0;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .chips-rail {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0 12px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .chips-rail::-webkit-scrollbar { display: none; }
+
+    .chip {
+      position: relative;
+      z-index: 2;
+      flex-shrink: 0;
+      min-width: 64px;
+      border: 0;
+      background: transparent;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      color: #525252;
+      transition: color 180ms ease-out;
+    }
+    .chip.active { color: #fff; }
+
+    /* Ink layer — pill 容器, 加 goo filter 让两个 pill 在中间 blur+contrast 后
+       metaball 合并成液态流体. filter 只对 SourceGraphic 起效, 不影响外层 chip 文字
+       (chip 在 layer 外部) */
+    .ink-layer {
+      position: absolute;
+      inset: 8px 12px;
+      pointer-events: none;
+      filter: url(#goo);
+      z-index: 1;
+    }
+    .pill {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 26px;
+      background: #111;
+      border-radius: 999px;
+      transition: none;
+    }
+    .pill.snap {
+      transition: transform 240ms cubic-bezier(0.32, 0.72, 0, 1), width 240ms cubic-bezier(0.32, 0.72, 0, 1);
+    }
+    .ink-svg {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    /* Swipe area — 模拟 dashboard main */
+    .swipe-area {
+      height: 240px;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #999;
+      font-size: 13px;
+      user-select: none;
+      touch-action: pan-y;
+      margin-bottom: 24px;
+    }
+
+    /* Control panel — slider 慢动作, 方案对比, 参数调节 */
+    .panel {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .panel h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+
+    .row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    .row label { font-size: 12px; color: #525252; min-width: 88px; }
+    .row input[type="range"] { flex: 1; min-width: 160px; }
+    .row .val { font-size: 12px; color: #111; min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+    .row select {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      font-size: 13px;
+      background: #fff;
+    }
+
+    .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+    .btn {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #e5e5e5;
+      background: #fff;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover { background: #f5f5f5; }
+
+    .scheme-desc {
+      font-size: 12px;
+      color: #666;
+      line-height: 1.55;
+      padding: 8px 12px;
+      background: #f9f9f9;
+      border-radius: 6px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <!-- SVG goo filter defs — feGaussianBlur 让边缘模糊, feColorMatrix 把 alpha 通道
+       拉到只剩高 alpha 部分 (mode matrix 最后一行 [0 0 0 X Y]: alpha = old_alpha*X + Y).
+       结果: 两个相邻的 blur 后的圆/胶囊在边界处叠加 alpha 超过阈值 → 显黑,
+       自然 metaball 合并;远了 alpha 不够 → 各自独立 -->
+  <svg width="0" height="0" style="position:absolute">
+    <defs>
+      <filter id="goo">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+        <feColorMatrix in="blur" mode="matrix" values="
+          1 0 0 0 0
+          0 1 0 0 0
+          0 0 1 0 0
+          0 0 0 20 -10
+        " result="goo" />
+        <feBlend in="SourceGraphic" in2="goo" />
+      </filter>
+    </defs>
+  </svg>
+
+  <div class="page">
+    <h1>频道 Tab 墨汁动效 Demo</h1>
+    <p class="hint">
+      手指在下方"模拟 feed"区域横滑切换 chip(跟 dashboard 行为一致);也可以拖 slider 慢动作看每个阶段。
+      右侧"方案"切换不同实现对比。
+    </p>
+
+    <!-- Chips rail -->
+    <div class="rail-host">
+      <div class="chips-rail" id="rail">
+        <!-- SVG ink layer 跟 pill 在同一个 absolute parent -->
+        <div class="ink-layer" id="inkLayer">
+          <svg class="ink-svg" id="inkSvg" xmlns="http://www.w3.org/2000/svg">
+            <path id="bridgePath" fill="#111" d="" />
+          </svg>
+          <div class="pill" id="pillA"></div>
+          <div class="pill" id="pillB" style="width:0"></div>
+        </div>
+        <!-- chips JS 注入 -->
+      </div>
+    </div>
+
+    <!-- Swipe area -->
+    <div class="swipe-area" id="swipe">向左 / 向右滑切频道</div>
+
+    <!-- Control panel -->
+    <div class="panel">
+      <h2>动效控制</h2>
+      <div class="row">
+        <label>方案</label>
+        <select id="scheme">
+          <option value="metaball2phase">E. 两阶段缩 + 流体连线 (PM 反馈版)</option>
+          <option value="goo">A. SVG goo filter 单端</option>
+          <option value="lerp">B. 线性 lerp (当前 PR #126)</option>
+          <option value="shrinkdot">C. 出场缩点 + 入场扩展 (无连接)</option>
+          <option value="bridge">D. 桥接长方形 (实心,无液态)</option>
+        </select>
+      </div>
+      <div class="scheme-desc" id="schemeDesc"></div>
+
+      <h2 style="margin-top:16px">慢动作</h2>
+      <div class="row">
+        <label>From → To</label>
+        <select id="fromChip"></select>
+        <span style="color:#999">→</span>
+        <select id="toChip"></select>
+      </div>
+      <div class="row">
+        <label>Progress</label>
+        <input type="range" id="progress" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="progressVal">0.00</span>
+      </div>
+      <div class="row" id="gooRow">
+        <label>Blur stddev</label>
+        <input type="range" id="blurStd" min="2" max="14" step="0.5" value="6" />
+        <span class="val" id="blurVal">6.0</span>
+      </div>
+      <div class="row" id="contrastRow">
+        <label>Contrast K</label>
+        <input type="range" id="contrastK" min="10" max="40" step="1" value="20" />
+        <span class="val" id="contrastVal">20</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="playFwd">▶ 正向播</button>
+        <button class="btn" id="playRev">◀ 反向播</button>
+        <button class="btn" id="reset">重置</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const CHIPS = [
+      { key: "x_list", label: "动态" },
+      { key: "product_hunt", label: "热门产品" },
+      { key: "huodongxing", label: "活动" },
+      { key: "github", label: "开源项目" },
+      { key: "hf_paper", label: "论文" },
+      { key: "clawhub", label: "龙虾技能" },
+      { key: "youtube", label: "YouTube" },
+      { key: "podcast", label: "Podcast" },
+    ];
+
+    const SCHEMES = {
+      metaball2phase:
+        "PM 反馈版: 出场分两阶段 (圆角矩形 → 圆形 → 圆点 → 消失), 进场对称 (圆点 → 圆形 → 圆角矩形); " +
+        "中间一条流体连线始终连着出场 chip 的黑色部分, 把墨汁'拽'到进场 chip; " +
+        "全部元素在 SVG goo filter 下 → 边界处 metaball 合并成液态形状.",
+      goo: "两个独立 pill: 出场宽度缩 (chip.w → 0), 入场宽度长 (0 → chip.w), 中间 SVG goo filter 让 blur+contrast 把它们液态合并 → 拉伸时像墨汁拖丝, 分离时各成独立 pill. 调下方 Blur stddev / Contrast K 看不同质感.",
+      lerp: "PR #126 当前实现: 单个 pill 在 from-chip / to-chip 之间线性插值位置+宽度. 没有缩点/扩展过程, 整体平移.",
+      shrinkdot: "出场 pill 宽度均匀缩到圆点然后消失; 入场 pill 在 to-chip 处从无 → 圆点 → 圆形 → 完整宽度. 中间无连接, 两者各自独立.",
+      bridge: "出场 + 入场 + 中间一段实心桥接长方形 (no blur, no liquid), 跟手势同步缩短/拉长.",
+    };
+
+    const rail = document.getElementById("rail");
+    const inkLayer = document.getElementById("inkLayer");
+    const pillA = document.getElementById("pillA");
+    const pillB = document.getElementById("pillB");
+    const fromSel = document.getElementById("fromChip");
+    const toSel = document.getElementById("toChip");
+    const progressInput = document.getElementById("progress");
+    const progressVal = document.getElementById("progressVal");
+    const schemeSel = document.getElementById("scheme");
+    const schemeDesc = document.getElementById("schemeDesc");
+    const blurStd = document.getElementById("blurStd");
+    const blurVal = document.getElementById("blurVal");
+    const contrastK = document.getElementById("contrastK");
+    const contrastVal = document.getElementById("contrastVal");
+    const playFwd = document.getElementById("playFwd");
+    const playRev = document.getElementById("playRev");
+    const resetBtn = document.getElementById("reset");
+    const swipeArea = document.getElementById("swipe");
+
+    const chipEls = {};
+    CHIPS.forEach((c, i) => {
+      const b = document.createElement("button");
+      b.className = "chip" + (i === 0 ? " active" : "");
+      b.textContent = c.label;
+      b.dataset.key = c.key;
+      rail.appendChild(b);
+      chipEls[c.key] = b;
+      // chip select 填充
+      const o1 = document.createElement("option"); o1.value = c.key; o1.textContent = c.label; fromSel.appendChild(o1);
+      const o2 = document.createElement("option"); o2.value = c.key; o2.textContent = c.label; toSel.appendChild(o2);
+    });
+    fromSel.value = "x_list";
+    toSel.value = "product_hunt";
+
+    let active = "x_list";
+
+    // Bridge pill — scheme D 专用
+    let bridge = null;
+    function ensureBridge(create) {
+      if (create && !bridge) {
+        bridge = document.createElement("div");
+        bridge.className = "pill";
+        bridge.style.height = "16px";
+        bridge.style.borderRadius = "8px";
+        inkLayer.appendChild(bridge);
+      } else if (!create && bridge) {
+        bridge.remove();
+        bridge = null;
+      }
+    }
+
+    function rect(key) {
+      const el = chipEls[key];
+      // offsetLeft 是相对 chips-rail 的; ink-layer 跟 rail 同处一个 positioning context
+      // 但 ink-layer 有 inset: 8px 12px, 内部坐标系也偏 12px. 我们让 chip rect 直接对齐 chip
+      // 实际位置, 不补偿 inset (chip 在 chips-rail 内, rail padding 0 12px, 整体偏 12).
+      // 简化: pill 用 chip 的 getBoundingClientRect 减去 ink-layer 的 rect 拿 inner offset
+      const c = el.getBoundingClientRect();
+      const lr = inkLayer.getBoundingClientRect();
+      return { left: c.left - lr.left, width: c.width };
+    }
+
+    function render(from, to, p, scheme) {
+      // 清掉桥接 (B/C/A 不用; D / E 用)
+      if (scheme !== "bridge" && scheme !== "metaball2phase") ensureBridge(false);
+
+      const f = rect(from);
+      const t = rect(to);
+
+      // 重置 pill 的 height + borderRadius (默认 26px 高 + 胶囊 — lerp/shrinkdot/bridge 都用)
+      // metaball2phase 会动态覆盖
+      pillA.style.height = "26px";
+      pillB.style.height = "26px";
+      pillA.style.borderRadius = "999px";
+      pillB.style.borderRadius = "999px";
+      pillA.style.opacity = "1";
+      pillB.style.opacity = "1";
+      if (bridge) {
+        bridge.style.height = scheme === "metaball2phase" ? "12px" : "16px";
+        bridge.style.borderRadius = "999px";
+        bridge.style.opacity = "1";
+      }
+
+      if (scheme === "lerp") {
+        // 单 pill 线性插值 — PR #126 现状
+        pillA.style.display = "";
+        pillB.style.display = "none";
+        const left = f.left + (t.left - f.left) * p;
+        const w = f.width + (t.width - f.width) * p;
+        pillA.style.transform = `translateX(${left}px) translateY(-50%)`;
+        pillA.style.width = `${w}px`;
+        inkLayer.style.filter = "none";
+      } else if (scheme === "shrinkdot") {
+        // 出场缩到点, 入场从点扩展. 中间无连接
+        pillA.style.display = "";
+        pillB.style.display = "";
+        // 出场: progress 0..0.5 内宽度缩 chip.w → 0, 0.5 后消失
+        const ap = Math.min(p * 2, 1);
+        const aw = f.width * (1 - ap);
+        pillA.style.transform = `translateX(${f.left + (f.width - aw) / 2}px) translateY(-50%)`;
+        pillA.style.width = `${aw}px`;
+        // 入场: progress 0.5..1 内宽度长 0 → chip.w
+        const bp = Math.max((p - 0.5) * 2, 0);
+        const bw = t.width * bp;
+        pillB.style.transform = `translateX(${t.left + (t.width - bw) / 2}px) translateY(-50%)`;
+        pillB.style.width = `${bw}px`;
+        inkLayer.style.filter = "none";
+      } else if (scheme === "bridge") {
+        // 出场缩, 入场长, 中间 + 一段桥接长方形跟手势同步
+        pillA.style.display = "";
+        pillB.style.display = "";
+        ensureBridge(true);
+        const aw = f.width * (1 - p);
+        pillA.style.transform = `translateX(${f.left + (f.width - aw) / 2}px) translateY(-50%)`;
+        pillA.style.width = `${aw}px`;
+        const bw = t.width * p;
+        pillB.style.transform = `translateX(${t.left + (t.width - bw) / 2}px) translateY(-50%)`;
+        pillB.style.width = `${bw}px`;
+        // 桥接: 跟手势同步, 高度 16px 比 pill 矮显层次
+        const bridgeLeft = f.left + (f.width - aw) / 2 + aw;
+        const bridgeRight = t.left + (t.width - bw) / 2;
+        const bridgeW = Math.max(0, bridgeRight - bridgeLeft);
+        bridge.style.transform = `translateX(${bridgeLeft}px) translateY(-50%)`;
+        bridge.style.width = `${bridgeW}px`;
+        inkLayer.style.filter = "none";
+      } else if (scheme === "metaball2phase") {
+        // E — PM 反馈版 v5: 两阶段缩 + 流体连线 (smoothstep ease + jitter 整体感)
+        //
+        // PM 反馈 v5: 两端 pill 两阶段衔接处用 smoothstep ease (derivative 在
+        // 衔接点 = 0) → 速度自然减速到 0 再加速, 不再是线性变速突变;
+        // 加微小 jitter 让形变有"有机"随机感, jitter 振幅在关键帧 (0/0.35/0.6
+        // /0.65/1) 时 = 0, 不破坏首尾关键帧
+        //
+        // Timing (PM 反馈 #2: 出场/入场/连线 progress 0 同时启动):
+        //   出场 pill: phase 1 (0..0.35) rect → circle, phase 2 (0.35..0.6) circle → 0
+        //   入场 pill: phase 1 (0..0.65) 0 → circle, phase 2 (0.65..1) circle → rect
+        //   流体连线: phase 1 (0..0.18) 渐显, phase 2 (0.18..0.82) 稳定流动, phase 3 (0.82..1) 渐隐
+        const PILL_H = 26;
+        const fromCenter = f.left + f.width / 2;
+        const toCenter = t.left + t.width / 2;
+        pillA.style.display = "";
+        pillB.style.display = "";
+        ensureBridge(false);
+        const now = performance.now();
+
+        // smoothstep — derivative 在 t=0 / t=1 时 = 0, 让 phase 衔接平滑
+        const smoothstep = (t) => {
+          if (t <= 0) return 0;
+          if (t >= 1) return 1;
+          return t * t * (3 - 2 * t);
+        };
+
+        // 出场 pill 两阶段 (smoothstep ease)
+        let aw, ah;
+        if (p < 0.35) {
+          const tt = smoothstep(p / 0.35);
+          aw = f.width + (PILL_H - f.width) * tt;
+          ah = PILL_H;
+        } else if (p < 0.6) {
+          const tt = smoothstep((p - 0.35) / 0.25);
+          const d = PILL_H * (1 - tt);
+          aw = d;
+          ah = d;
+        } else {
+          aw = 0;
+          ah = 0;
+        }
+        // 微小 jitter — 关键帧 (0 / 0.35 / 0.6) amp=0, 中间峰值 → 不破坏首尾
+        // 两个不同频率 sin/cos 让 jitter 不规则有机感
+        let jitterAmpA = 0;
+        if (p < 0.35) jitterAmpA = Math.sin((p / 0.35) * Math.PI) * 0.8;
+        else if (p < 0.6) jitterAmpA = Math.sin(((p - 0.35) / 0.25) * Math.PI) * 0.5;
+        aw = Math.max(0, aw + Math.sin(now / 850) * jitterAmpA);
+        ah = Math.max(0, ah + Math.cos(now / 720 + 1.2) * jitterAmpA * 0.8);
+        pillA.style.width = `${aw}px`;
+        pillA.style.height = `${ah}px`;
+        pillA.style.transform = `translateX(${fromCenter - aw / 2}px) translateY(-50%)`;
+
+        // 入场 pill 两阶段 (phase 1 从 progress 0 启动, smoothstep ease)
+        let bw, bh;
+        if (p < 0.65) {
+          const tt = smoothstep(p / 0.65);
+          const d = PILL_H * tt;
+          bw = d;
+          bh = d;
+        } else {
+          const tt = smoothstep((p - 0.65) / 0.35);
+          bw = PILL_H + (t.width - PILL_H) * tt;
+          bh = PILL_H;
+        }
+        // 入场 jitter — 关键帧 (0 / 0.65 / 1) amp=0
+        let jitterAmpB = 0;
+        if (p < 0.65) jitterAmpB = Math.sin((p / 0.65) * Math.PI) * 0.7;
+        else if (p < 1) jitterAmpB = Math.sin(((p - 0.65) / 0.35) * Math.PI) * 0.5;
+        bw = Math.max(0, bw + Math.sin(now / 920 + 2.1) * jitterAmpB);
+        bh = Math.max(0, bh + Math.cos(now / 770 + 0.5) * jitterAmpB * 0.8);
+        pillB.style.width = `${bw}px`;
+        pillB.style.height = `${bh}px`;
+        pillB.style.transform = `translateX(${toCenter - bw / 2}px) translateY(-50%)`;
+
+        // 连线高度三阶段
+        const BRIDGE_FULL_HALF = 6;   // 完整高度 12px → halfH 6
+        let halfH;
+        if (p < 0.18) {
+          // phase 1: 0 → 1px → 12px 渐显 (起步用 1px 细线意象, 拉到完整)
+          const tt = p / 0.18;
+          halfH = BRIDGE_FULL_HALF * tt;
+        } else if (p < 0.82) {
+          halfH = BRIDGE_FULL_HALF;
+        } else {
+          const tt = (p - 0.82) / 0.18;
+          halfH = BRIDGE_FULL_HALF * (1 - tt);
+        }
+
+        // 连线 x 范围: 从出场 pill 边缘到入场 pill 边缘 (overlap 3px 让 goo 自然衔接)
+        const reverse = toCenter < fromCenter;
+        let xL, xR, leftH, rightH;
+        if (!reverse) {
+          xL = fromCenter + aw / 2 - 3;
+          xR = toCenter - bw / 2 + 3;
+          leftH = ah; rightH = bh;
+        } else {
+          xL = toCenter + bw / 2 - 3;
+          xR = fromCenter - aw / 2 + 3;
+          leftH = bh; rightH = ah;
+        }
+        const bridgeLen = Math.max(0, xR - xL);
+
+        // SVG path: 多节点 (5 个) Catmull-Rom 平滑串接, 上下边独立 sin+cos 组合波,
+        // 各 node 相位偏移 → 波形沿 x 传播, 不规则有机感
+        const ymid = inkLayer.clientHeight / 2;
+        if (bridgeLen <= 0 || halfH <= 0.3) {
+          bridgePath.setAttribute("d", "");
+        } else {
+          // PM 反馈 v3 #2: 周期 480/680 → 1200/1700ms (速率减半, 更优雅水感)
+          const tU = (now / 1200) * 2 * Math.PI;
+          const tD = (now / 1700) * 2 * Math.PI + 1.7;
+          const tU2 = (now / 1500) * 2 * Math.PI + 0.6;  // 第二组波叠加, 不规则感
+          const tD2 = (now / 2100) * 2 * Math.PI + 2.3;
+          const ampU = halfH * 0.40;
+          const ampD = halfH * 0.50;
+
+          // PM 反馈 v3 #1: 连线根部高度收紧到不超过连线主体 → goo blur 把
+          // pill 比连线高出的部分 (pill 26px - 连线 12px = 7px/边) 自然 metaball
+          // 合并成圆球, 不再显尖锐三角
+          const ROOT_MAX = halfH * 2;
+          const leftRootH = Math.min(leftH, ROOT_MAX);
+          const rightRootH = Math.min(rightH, ROOT_MAX);
+          const yLT = ymid - leftRootH / 2;
+          const yLB = ymid + leftRootH / 2;
+          const yRT = ymid - rightRootH / 2;
+          const yRB = ymid + rightRootH / 2;
+
+          // PM 反馈 v3 #3: 5 个 wave node 沿 x 等距, 每个 node y 用
+          // sin+cos 组合 (两个不同频率叠加) + 各 node 独立相位偏移
+          // → 波形沿连线传播, 不再是单段 cubic 的简单凸起
+          const N = 5;
+          const peakTop = ymid - halfH;
+          const peakBot = ymid + halfH;
+          const upNodes = [];
+          const dnNodes = [];
+          for (let i = 0; i < N; i++) {
+            const x = xL + (bridgeLen * i) / (N - 1);
+            const phase = i * 0.45;
+            // sin + cos 组合两个不同频率 → 不规则有机感
+            const yu = peakTop + Math.sin(tU + phase) * ampU + Math.cos(tU2 + phase * 1.6) * ampU * 0.45;
+            const yd = peakBot + Math.sin(tD + phase * 1.2) * ampD + Math.cos(tD2 + phase * 0.8) * ampD * 0.4;
+            upNodes.push({ x, y: yu });
+            dnNodes.push({ x, y: yd });
+          }
+          // 端点 y 固定 (跟 pill 衔接), 中间 node 用 sin 波动
+          upNodes[0].y = yLT;
+          upNodes[N - 1].y = yRT;
+          dnNodes[0].y = yLB;
+          dnNodes[N - 1].y = yRB;
+
+          // Catmull-Rom → cubic bezier 转换 (tension 0.5, 默认 Catmull-Rom)
+          // 平滑串接所有 nodes, 自然过渡不显折角
+          const toBezierPath = (nodes, openWithMove) => {
+            const segs = [];
+            if (openWithMove) segs.push(`M ${nodes[0].x.toFixed(2)} ${nodes[0].y.toFixed(2)}`);
+            for (let i = 0; i < nodes.length - 1; i++) {
+              const p0 = nodes[Math.max(i - 1, 0)];
+              const p1 = nodes[i];
+              const p2 = nodes[i + 1];
+              const p3 = nodes[Math.min(i + 2, nodes.length - 1)];
+              const cp1x = p1.x + (p2.x - p0.x) / 6;
+              const cp1y = p1.y + (p2.y - p0.y) / 6;
+              const cp2x = p2.x - (p3.x - p1.x) / 6;
+              const cp2y = p2.y - (p3.y - p1.y) / 6;
+              segs.push(`C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`);
+            }
+            return segs.join(" ");
+          };
+          // closed path: 上边走从左到右, 右端 L 衔接到下边右端, 下边走 reverse 从右到左
+          const dnNodesReverse = [...dnNodes].reverse();
+          const d = [
+            toBezierPath(upNodes, true),
+            `L ${xR.toFixed(2)} ${yRB.toFixed(2)}`,
+            toBezierPath(dnNodesReverse, false),
+            "Z",
+          ].join(" ");
+          bridgePath.setAttribute("d", d);
+        }
+
+        inkLayer.style.filter = "url(#goo)";
+      } else {
+        // goo (A) — 两个独立 pill, SVG filter 在外层做液态合并
+        pillA.style.display = "";
+        pillB.style.display = "";
+        // 出场宽度跟 progress 缩 (但起步慢点尾巴拖一下) — easeOutQuad
+        const ap = 1 - (1 - p) * (1 - p); // ease out: 进入快尾巴慢
+        const aw = Math.max(f.width * (1 - ap), 0);
+        pillA.style.transform = `translateX(${f.left + (f.width - aw) / 2}px) translateY(-50%)`;
+        pillA.style.width = `${aw}px`;
+        // 入场: ease in (起步慢, 接近时快)
+        const bp = p * p;
+        const bw = Math.max(t.width * bp, 0);
+        pillB.style.transform = `translateX(${t.left + (t.width - bw) / 2}px) translateY(-50%)`;
+        pillB.style.width = `${bw}px`;
+        inkLayer.style.filter = "url(#goo)";
+      }
+
+      // chip 文字颜色: progress 切到 0.5 时 active 切换 (lerp 例外 — 它平移没"出生"概念)
+      Object.values(chipEls).forEach((el) => el.classList.remove("active"));
+      const winner = p < 0.5 ? from : to;
+      chipEls[winner].classList.add("active");
+    }
+
+    function update() {
+      const p = parseFloat(progressInput.value);
+      progressVal.textContent = p.toFixed(2);
+      // 关掉 snap transition (慢动作模式即时反馈)
+      pillA.classList.remove("snap");
+      pillB.classList.remove("snap");
+      if (bridge) bridge.classList.remove("snap");
+      render(fromSel.value, toSel.value, p, schemeSel.value);
+    }
+
+    function refreshGooFilter() {
+      const std = parseFloat(blurStd.value);
+      const k = parseFloat(contrastK.value);
+      blurVal.textContent = std.toFixed(1);
+      contrastVal.textContent = k.toFixed(0);
+      const blur = document.querySelector("#goo feGaussianBlur");
+      const cm = document.querySelector("#goo feColorMatrix");
+      blur.setAttribute("stdDeviation", String(std));
+      cm.setAttribute("values", `1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${k} ${-k / 2}`);
+    }
+
+    function refreshSchemeDesc() {
+      schemeDesc.textContent = SCHEMES[schemeSel.value];
+      const usesGoo = schemeSel.value === "goo" || schemeSel.value === "metaball2phase";
+      document.getElementById("gooRow").style.display = usesGoo ? "" : "none";
+      document.getElementById("contrastRow").style.display = usesGoo ? "" : "none";
+    }
+
+    // Play animation forwards/backwards
+    let raf = null;
+    function play(direction) {
+      cancelAnimationFrame(raf);
+      const start = performance.now();
+      const dur = 700;
+      const startP = direction > 0 ? 0 : 1;
+      const endP = direction > 0 ? 1 : 0;
+      progressInput.value = String(startP);
+      const tick = (now) => {
+        const t = Math.min((now - start) / dur, 1);
+        const eased = 1 - Math.pow(1 - t, 3);   // ease out cubic
+        const p = startP + (endP - startP) * eased;
+        progressInput.value = String(p);
+        update();
+        if (t < 1) raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    }
+
+    playFwd.addEventListener("click", () => play(+1));
+    playRev.addEventListener("click", () => play(-1));
+    resetBtn.addEventListener("click", () => {
+      cancelAnimationFrame(raf);
+      progressInput.value = "0";
+      update();
+    });
+
+    progressInput.addEventListener("input", () => { cancelAnimationFrame(raf); update(); });
+    fromSel.addEventListener("change", update);
+    toSel.addEventListener("change", update);
+    schemeSel.addEventListener("change", () => { refreshSchemeDesc(); update(); });
+    blurStd.addEventListener("input", refreshGooFilter);
+    contrastK.addEventListener("input", refreshGooFilter);
+
+    // Swipe gesture on .swipe-area — 模拟真实 dashboard swipe
+    let startX = 0, startT = 0, gesturing = false;
+    const VIEWPORT_W = () => window.innerWidth;
+
+    function tabsList() {
+      return CHIPS.map((c) => c.key);
+    }
+    function neighborOf(cur, dx) {
+      const list = tabsList();
+      const idx = list.indexOf(cur);
+      if (dx < 0) return idx + 1 < list.length ? list[idx + 1] : null;
+      return idx - 1 >= 0 ? list[idx - 1] : null;
+    }
+
+    function onSwipeStart(x) { startX = x; startT = performance.now(); gesturing = true; }
+    function onSwipeMove(x) {
+      if (!gesturing) return;
+      const dx = x - startX;
+      const target = neighborOf(active, dx);
+      if (!target) return;   // boundary, no animation
+      const p = Math.min(Math.abs(dx) / VIEWPORT_W(), 1);
+      pillA.classList.remove("snap");
+      pillB.classList.remove("snap");
+      if (bridge) bridge.classList.remove("snap");
+      fromSel.value = active;
+      toSel.value = target;
+      progressInput.value = String(p);
+      update();
+    }
+    function onSwipeEnd(x) {
+      if (!gesturing) return;
+      gesturing = false;
+      const dx = x - startX;
+      const dt = performance.now() - startT;
+      const v = Math.abs(dx) / Math.max(dt, 1);
+      const w = VIEWPORT_W();
+      const distanceOk = Math.abs(dx) >= w * 0.15;
+      const flickOk = v > 0.2 && Math.abs(dx) >= w * 0.05;
+      const target = neighborOf(active, dx);
+      const shouldSwitch = target && (distanceOk || flickOk);
+
+      pillA.classList.add("snap");
+      pillB.classList.add("snap");
+      if (bridge) bridge.classList.add("snap");
+
+      if (shouldSwitch) {
+        active = target;
+        progressInput.value = "1";
+        update();
+        // animate done — reset 到新的 active 单 pill state (progress 0, from=active)
+        setTimeout(() => {
+          fromSel.value = active;
+          toSel.value = neighborOf(active, -1) || tabsList()[1] || active;
+          progressInput.value = "0";
+          pillA.classList.remove("snap");
+          pillB.classList.remove("snap");
+          if (bridge) bridge.classList.remove("snap");
+          update();
+        }, 260);
+      } else {
+        progressInput.value = "0";
+        update();
+      }
+    }
+
+    // Touch
+    swipeArea.addEventListener("touchstart", (e) => onSwipeStart(e.touches[0].clientX), { passive: true });
+    swipeArea.addEventListener("touchmove", (e) => { onSwipeMove(e.touches[0].clientX); }, { passive: true });
+    swipeArea.addEventListener("touchend", (e) => onSwipeEnd(e.changedTouches[0].clientX));
+    // Mouse (PC 预览)
+    let mouseDown = false;
+    swipeArea.addEventListener("mousedown", (e) => { mouseDown = true; onSwipeStart(e.clientX); });
+    swipeArea.addEventListener("mousemove", (e) => { if (mouseDown) onSwipeMove(e.clientX); });
+    swipeArea.addEventListener("mouseup", (e) => { if (mouseDown) { onSwipeEnd(e.clientX); mouseDown = false; } });
+    swipeArea.addEventListener("mouseleave", (e) => { if (mouseDown) { onSwipeEnd(e.clientX); mouseDown = false; } });
+
+    // Init
+    refreshGooFilter();
+    refreshSchemeDesc();
+    update();
+    window.addEventListener("resize", update);
+
+    // Live RAF loop — 仅 metaball2phase 时持续重绘, 让连线 sin 时间相位不停演变
+    // (即 progress 不变, 水流曲线仍持续流动, 对应 PM 反馈 #1.2)
+    function tickLive() {
+      if (schemeSel.value === "metaball2phase") {
+        const p = parseFloat(progressInput.value);
+        render(fromSel.value, toSel.value, p, schemeSel.value);
+      }
+      requestAnimationFrame(tickLive);
+    }
+    requestAnimationFrame(tickLive);
+  </script>
+</body>
+</html>
