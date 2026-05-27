@@ -162,6 +162,7 @@ export function QuoteSnapshotModal() {
               article={quote.x_article}
               resolvedUrl={quote.content_resolved_url}
               content={quote.content}
+              showBody
             />
           ) : (
             displayText && (
