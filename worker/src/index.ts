@@ -2991,9 +2991,24 @@ async function handleItemRefresh(request: Request, env: Env, id: string): Promis
   // 强需求, 不该跟 ScrapeBadger 计费保护混在一起 mute).
   const url = new URL(request.url);
   const trigger = url.searchParams.get('trigger');
+
+  // 2026-05-28 结构化 log:观察 impression vs drawer/share 调用比例 + throttle/disabled 比率
+  // Workers Logs 可 grep:`evt=item_refresh trigger=impression reason=throttled` 等
+  const logEvt = (reason: string, refreshed: boolean, sourceType: string): void => {
+    console.log(JSON.stringify({
+      evt: 'item_refresh',
+      trigger: trigger || 'direct',  // 'impression' / 'direct'(drawer/share/manual)
+      item_id: id,
+      refreshed,
+      reason,
+      source_type: sourceType,
+    }));
+  };
+
   if (trigger === 'impression') {
     const { isFlagOn } = await import('./feature-flags');
     if (!(await isFlagOn(env, 'impression_refresh'))) {
+      logEvt('disabled', false, 'unknown');
       return jsonResponse(
         { refreshed: false, source_type: 'unknown', reason: 'disabled' },
         200,
@@ -3003,6 +3018,7 @@ async function handleItemRefresh(request: Request, env: Env, id: string): Promis
     }
   }
   const r = await refreshSingleItem(env, id);
+  logEvt(r.reason || 'no_reason', r.refreshed, r.source_type);
   return jsonResponse(r, 200, request, env);
 }
 
