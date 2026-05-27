@@ -776,6 +776,7 @@ export function TweetCard({
                   article={sourceArticle}
                   resolvedUrl={sourceResolvedUrl}
                   content={sourceContent}
+                  showBody={embedded}
                 />
               );
             }

@@ -10,7 +10,7 @@
 //   → "📄 X 文章 by @handle ↗" + URL (老 article SB 反索引只剩 author)
 // - Basic: 其他 (含 !x_article) → 当前 TcoResolvedLinkCard (裸 URL link 卡条)
 
-import { useState } from "react";
+import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { XArticle } from "../types";
 import { proxyImg } from "../lib/utils";
 import { TcoResolvedLinkCard } from "./TcoResolvedLinkCard";
@@ -32,12 +32,20 @@ interface Props {
   content: string | null | undefined;
   // 嵌套 quote 小卡 / modal 内更紧凑布局
   compact?: boolean;
+  // BE PR6 (2026-05-25): 展示 body 全文 (默认 false)。
+  // - 流内 (TweetCard L1 / QuotedTweet nested) 不传 — 保持紧凑预览
+  // - QuoteSnapshotModal 内传 true — 用户进 modal 是想读全文
+  // body 区域有独立交互(展开/收起),内部 click 不冒泡到外层 <a> 跳 X
+  showBody?: boolean;
 }
 
-export function XArticleCard({ article, resolvedUrl, content, compact }: Props) {
+const BODY_COLLAPSED_CHARS = 600;   // body 短于这个长度直接全显;否则 line-clamp
+
+export function XArticleCard({ article, resolvedUrl, content, compact, showBody }: Props) {
   const tier = articleTier(article);
   const url = resolvedUrl || undefined;
   const [coverFailed, setCoverFailed] = useState(false);
+  const [bodyExpanded, setBodyExpanded] = useState(false);
 
   // Basic — 复用 PR4 简化卡(纯 URL)
   if (tier === "basic") {
@@ -85,6 +93,24 @@ export function XArticleCard({ article, resolvedUrl, content, compact }: Props) 
   const excerpt = article.excerpt_translated || article.excerpt || "";
   const authorName = article.author_name || "";
   const authorHandle = article.author_handle || "";
+
+  // Body render chain (BE PR6):
+  //   body_translated > body (英文兜底也能读)
+  // sentinel 判断 (UI 友好提示):
+  //   - body_translate_skipped_at: body > 15000 chars 跳过翻译,显原文 + 灰字提示
+  //   - translate_failed_at + body 有: 翻译 timeout/parse fail,显原文 + 灰字
+  //   - body_fetch_failed_at: 没 body 数据,body section 不渲染
+  const bodyRaw = article.body_translated || article.body || "";
+  const bodyShown = Boolean(showBody && bodyRaw);
+  const bodyIsOriginal = !article.body_translated && Boolean(article.body);
+  const bodyTooLongToTranslate = Boolean(article.body_translate_skipped_at);
+  const bodyTranslateFailed = Boolean(article.translate_failed_at) && bodyIsOriginal;
+  const bodyNeedsClamp = bodyRaw.length > BODY_COLLAPSED_CHARS;
+  const stopLinkNav = (e: ReactMouseEvent) => {
+    // body section 整体阻断 — 用户点 body 是想读 body,不应跳 X
+    e.stopPropagation();
+    e.preventDefault();
+  };
 
   return (
     <a
@@ -141,6 +167,50 @@ export function XArticleCard({ article, resolvedUrl, content, compact }: Props) 
             }
           >
             {excerpt}
+          </div>
+        )}
+        {/* Body 全文 (showBody=true 才显;modal 内场景) */}
+        {bodyShown && (
+          <div
+            className="mt-3 border-t border-neutral-100 pt-3"
+            onClick={stopLinkNav}
+          >
+            {/* sentinel 灰字提示 — 翻译失败 / body 超长跳过翻译时告知用户在看原文 */}
+            {(bodyTooLongToTranslate || bodyTranslateFailed) && (
+              <div className="mb-2 text-[11px] text-neutral-400">
+                {bodyTooLongToTranslate
+                  ? "原文较长未翻译,以下为英文原文"
+                  : "翻译失败,以下为英文原文"}
+              </div>
+            )}
+            <div
+              className={
+                "whitespace-pre-wrap break-words text-[14px] leading-[1.6] text-neutral-800" +
+                (bodyNeedsClamp && !bodyExpanded ? " line-clamp-[8]" : "")
+              }
+            >
+              {bodyRaw}
+            </div>
+            {bodyNeedsClamp && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setBodyExpanded((v) => !v);
+                }}
+                className="mt-1.5 text-[13px] font-medium text-sky-600 hover:text-sky-700"
+              >
+                {bodyExpanded ? "收起" : "展开全文"}
+              </button>
+            )}
+          </div>
+        )}
+        {/* body 抓取失败 (cookie 失效 / 老 article 死链) — 仅在 showBody 场景显小灰字,
+            流内场景不打扰 */}
+        {showBody && !bodyRaw && article.body_fetch_failed_at && (
+          <div className="mt-3 border-t border-neutral-100 pt-3 text-[12px] text-neutral-400">
+            原文正文暂时无法加载
           </div>
         )}
       </div>

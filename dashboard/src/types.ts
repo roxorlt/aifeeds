@@ -100,6 +100,16 @@ export interface XArticle {
   translated_at?: string | null;
   translate_failed_at?: string | null;
   translate_skipped_at?: string | null;   // 中文原文 / 中英混合 skip 翻译
+  // BE PR6 / #113 (2026-05-25): body 抓取 (X GraphQL + cookie) + 翻译
+  // body 跟 title/excerpt 是独立 mutex:body fetch 失败不影响 title/excerpt
+  body?: string | null;                       // article.plain_text 完整正文
+  body_fetched_at?: string | null;            // success sentinel
+  body_fetch_failed_at?: string | null;       // failed sentinel (cookie 失效 / 老 article)
+  body_fetch_failed_reason?: string | null;
+  body_translated?: string | null;            // DeepSeek 译文
+  // body 单字段 skip 标记:body > 15000 字符跳过翻译 (不影响 title/excerpt 翻译)
+  body_translate_skipped_at?: string | null;
+  body_translate_skipped_reason?: string | null;
 }
 
 export interface LinkCard {
