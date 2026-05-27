@@ -177,6 +177,10 @@ function DashboardHome() {
   const pillBRef = useRef<HTMLDivElement | null>(null);
   const bridgePathRef = useRef<SVGPathElement | null>(null);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  // chip rect cache — swipe 期间高频 read chip.offsetLeft/offsetWidth 触发 layout
+  // reflow 是真机卡顿主因. ResizeObserver 监听 chip rail 变化, layout 稳定后 refresh
+  // 一次, touch 期间只读 ref 不读 DOM
+  const chipRectsRef = useRef<Record<string, { left: number; width: number }>>({});
   const fancyAnim = useFancyAnimation();
   const fancyAnimRef = useRef(fancyAnim);
   fancyAnimRef.current = fancyAnim;
@@ -207,35 +211,47 @@ function DashboardHome() {
   // renderInkBetween: swipe 期间根据 progress 0..1 在 from/to chip 之间
   //                   渲染 fancy 流体动效 (出/入两阶段缩 + 流体连线), 或朴素
   //                   单 pill lerp.
+  // chip rect 取值: 优先 cache, 缺时 fallback 到 DOM read (mount 后 ResizeObserver
+  // 会自动 refresh, 但首次 render 之前可能还没 cache 命中)
+  const getChipRect = useCallback((key: string): { left: number; width: number } | null => {
+    const cached = chipRectsRef.current[key];
+    if (cached) return cached;
+    const chip = chipRefs.current[key];
+    if (!chip) return null;
+    const r = { left: chip.offsetLeft, width: chip.offsetWidth };
+    chipRectsRef.current[key] = r;
+    return r;
+  }, []);
+
   const resetInkToActive = useCallback((key: string, withTransition: boolean) => {
     const pillA = pillARef.current;
     const pillB = pillBRef.current;
     const bridgePath = bridgePathRef.current;
-    const chip = chipRefs.current[key];
-    if (!pillA || !chip) return;
+    const rect = getChipRect(key);
+    if (!pillA || !rect) return;
     const trans = withTransition
       ? "transform 220ms cubic-bezier(0.32, 0.72, 0, 1), width 220ms cubic-bezier(0.32, 0.72, 0, 1), height 220ms cubic-bezier(0.32, 0.72, 0, 1)"
       : "none";
     pillA.style.transition = trans;
-    pillA.style.width = `${chip.offsetWidth}px`;
+    pillA.style.width = `${rect.width}px`;
     pillA.style.height = `${PILL_H}px`;
-    pillA.style.transform = `translate(${chip.offsetLeft}px, -50%)`;
+    pillA.style.transform = `translate(${rect.left}px, -50%)`;
     if (pillB) {
       pillB.style.transition = trans;
       pillB.style.width = "0px";
       pillB.style.height = "0px";
     }
     if (bridgePath) bridgePath.setAttribute("d", "");
-  }, []);
+  }, [getChipRect]);
 
   const renderInkBetween = useCallback((fromKey: string, toKey: string, progress: number) => {
     const pillA = pillARef.current;
     const pillB = pillBRef.current;
     const bridgePath = bridgePathRef.current;
     const inkLayer = inkLayerRef.current;
-    const fromChip = chipRefs.current[fromKey];
-    const toChip = chipRefs.current[toKey];
-    if (!pillA || !fromChip || !toChip) return;
+    const fromRect = getChipRect(fromKey);
+    const toRect = getChipRect(toKey);
+    if (!pillA || !fromRect || !toRect) return;
     const fancy = fancyAnimRef.current;
 
     if (!fancy) {
@@ -243,22 +259,22 @@ function DashboardHome() {
       const p = Math.max(0, Math.min(1, progress));
       const lerp = (a: number, b: number) => a + (b - a) * p;
       pillA.style.transition = "none";
-      pillA.style.transform = `translate(${lerp(fromChip.offsetLeft, toChip.offsetLeft)}px, -50%)`;
-      pillA.style.width = `${lerp(fromChip.offsetWidth, toChip.offsetWidth)}px`;
+      pillA.style.transform = `translate(${lerp(fromRect.left, toRect.left)}px, -50%)`;
+      pillA.style.width = `${lerp(fromRect.width, toRect.width)}px`;
       pillA.style.height = `${PILL_H}px`;
       return;
     }
 
     // Fancy v5 流体动效
     if (!pillB || !bridgePath || !inkLayer) return;
-    const fromCenter = fromChip.offsetLeft + fromChip.offsetWidth / 2;
-    const toCenter = toChip.offsetLeft + toChip.offsetWidth / 2;
+    const fromCenter = fromRect.left + fromRect.width / 2;
+    const toCenter = toRect.left + toRect.width / 2;
     const ymid = inkLayer.clientHeight / 2;
     const now = performance.now();
 
     // 出场 / 入场 pill 大小 (smoothstep ease) + 微小 jitter (关键帧 amp=0)
-    const out = computeOutPillSize(progress, fromChip.offsetWidth);
-    const inS = computeInPillSize(progress, toChip.offsetWidth);
+    const out = computeOutPillSize(progress, fromRect.width);
+    const inS = computeInPillSize(progress, toRect.width);
     const jOut = jitterAmpOut(progress);
     const jIn = jitterAmpIn(progress);
     const ow = Math.max(0, out.w + Math.sin(now / 850) * jOut);
@@ -292,6 +308,28 @@ function DashboardHome() {
     }
     bridgePath.setAttribute("d", buildBridgePath({ xL, xR, leftH, rightH, halfH, ymid, now }));
   }, []);
+
+  // PM 2026-05-27 v5: chip rect cache refresh — ResizeObserver 监听 chip rail
+  // layout 变化 (mount / chip 内容变化 / window resize) 自动 refresh, swipe 期间
+  // 不读 DOM 避免 layout reflow 导致真机卡顿
+  useEffect(() => {
+    if (!isNarrow) return;
+    const rail = chipRailRef.current;
+    if (!rail) return;
+    const refresh = () => {
+      Object.entries(chipRefs.current).forEach(([key, chip]) => {
+        if (chip) chipRectsRef.current[key] = { left: chip.offsetLeft, width: chip.offsetWidth };
+      });
+    };
+    refresh();
+    const obs = new ResizeObserver(refresh);
+    obs.observe(rail);
+    window.addEventListener("resize", refresh);
+    return () => {
+      obs.disconnect();
+      window.removeEventListener("resize", refresh);
+    };
+  }, [isNarrow]);
 
   // PM 2026-05-27 v5: fancy mode swipe 期间 RAF 持续重绘 (流体连线 sin 波相位
   // 随时间演变, 即使 progress 没变也得每帧 redraw). swipe end → swipeStateRef.active
