@@ -31,6 +31,7 @@ import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordi
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
 import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
+import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
@@ -358,6 +359,46 @@ function DashboardHome() {
   const [transitionActive, setTransitionActive] = useState<{ key: string } | null>(null);
   const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string } | null>(null);
   const adjacentRef = useRef<HTMLDivElement>(null);
+  // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐, 下拉时渐显 (iOS Safari /
+  // Twitter mobile 同款). PC 不动 (header 永远显示).
+  const [headerHidden, setHeaderHidden] = useState(false);
+  const lastScrollYRef = useRef(0);
+  // delta > SHOW_THRESHOLD 才触发方向切换 (防 sub-px 抖动反复 hide/show).
+  // y < TOP_ZONE 时强制 show (回到顶部 header 必须可见, 用户也才好点 logo refresh).
+  useEffect(() => {
+    if (!isNarrow) {
+      setHeaderHidden(false);
+      return;
+    }
+    const SHOW_THRESHOLD = 5;
+    const TOP_ZONE = 50;
+    let ticking = false;
+    lastScrollYRef.current = getScrollY();
+    const handler = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const y = getScrollY();
+        const delta = y - lastScrollYRef.current;
+        if (y < TOP_ZONE) {
+          setHeaderHidden(false);
+          lastScrollYRef.current = y;
+          return;
+        }
+        if (Math.abs(delta) < SHOW_THRESHOLD) return;
+        setHeaderHidden(delta > 0);
+        lastScrollYRef.current = y;
+      });
+    };
+    return addScrollRootListener(handler);
+  }, [isNarrow]);
+  // chip click / swipe 切 channel 时 header 强制显示 — overlay 用 top:49 hardcode header
+  // 高度做位置, header hidden 状态下切 channel 会留 49px 空白条. 切 channel 是 user
+  // 主动 interaction, 配合 show header 也符合 "看到新 channel 标识" 的直觉.
+  useEffect(() => {
+    if (transitionActive || swipeAdjacent) setHeaderHidden(false);
+  }, [transitionActive, swipeAdjacent]);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
     setTransitionActive({ key: nextFilter });
@@ -776,7 +817,14 @@ function DashboardHome() {
       )}
       {/* Top bar */}
       <header
-        className="sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur"
+        className={cn(
+          "sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur",
+          // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐 (iOS Safari/Twitter 同款).
+          // transform-translate 不影响 layout (sticky 占位还在), 视觉移出 viewport 上方.
+          // PC: headerHidden 永远 false, transition 也无效, 无副作用.
+          "transition-[transform,opacity] duration-200 ease-out will-change-transform",
+          isNarrow && headerHidden && "-translate-y-full opacity-0",
+        )}
         onClick={(e) => {
           // Skip when click is on chips, refresh button, etc.
           if ((e.target as HTMLElement).closest("button")) return;
