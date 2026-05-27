@@ -187,21 +187,217 @@ export async function sendDailyWarningDigest(env: Env): Promise<{
   return { warnings: buffer.length, pushed: true };
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Phase B 业务级告警 (2026-05-27)
+// ═══════════════════════════════════════════════════════════════════
+
+// 从各 source cron summary result 提取 "新增" 数。返回 NaN 表示无字段(不计入 streak)。
+// 字段优先级:
+//   X list:    newly_inserted
+//   HDX:       cards_inserted_or_updated
+//   GH/CH:     inserted (顶层)
+//   PH:        ingested.inserted (嵌套对象)
+//   HF:        fetched_details / ingested.inserted (复合,fetched_details 是 paper 数)
+function extractNewCount(result: Record<string, unknown>): number {
+  if (typeof result.newly_inserted === 'number') return result.newly_inserted;
+  if (typeof result.cards_inserted_or_updated === 'number') return result.cards_inserted_or_updated;
+  if (typeof result.inserted === 'number') return result.inserted;
+  const ingested = result.ingested as Record<string, unknown> | undefined;
+  if (ingested && typeof ingested.inserted === 'number') return ingested.inserted;
+  if (typeof result.fetched_details === 'number') return result.fetched_details;
+  if (typeof result.fetched === 'number') return result.fetched;
+  return NaN;
+}
+
+const ZERO_STREAK_THRESHOLD = 3;  // 连续 3 轮 = 0 触发 critical
+const ZERO_STREAK_BUFFER_MAX = 6; // 保留最近 6 轮足以判断 3 轮 streak
+
+// 检查 source 的 "scrape 0 new" streak。每次 cron summary 调用一次。
+// streak >= 3 时立即推送 critical(去重:同一天同一 source 只推一次)。
+export async function checkZeroStreak(
+  env: Env,
+  sourceKey: string,      // 短 key (ph / hf / x / hdx / gh / clawhub) - KV 命名用
+  taskName: string,       // 中文展示名 ("PH 每日抓取" 等) - alert body 用
+  result: Record<string, unknown>,
+): Promise<void> {
+  if (!env.AUTH_KV) return; // 无 KV 静默跳过
+  const count = extractNewCount(result);
+  if (Number.isNaN(count)) return; // 无 "新增" 字段(可能是错误 result),不计 streak
+
+  const bufKey = `ZERO_STREAK_${sourceKey}`;
+  let buffer: Array<{ at: string; count: number }> = [];
+  try {
+    const raw = await env.AUTH_KV.get(bufKey);
+    if (raw) buffer = JSON.parse(raw);
+  } catch { /* ignore */ }
+  buffer.push({ at: new Date().toISOString(), count });
+  if (buffer.length > ZERO_STREAK_BUFFER_MAX) {
+    buffer = buffer.slice(-ZERO_STREAK_BUFFER_MAX);
+  }
+  // KV TTL 比 buffer 长一点防边界:任一 source 7 天没跑 cron 自然清(也算告警)
+  await env.AUTH_KV.put(bufKey, JSON.stringify(buffer), { expirationTtl: 7 * 24 * 3600 });
+
+  // 检查连续 3 轮 0
+  if (buffer.length < ZERO_STREAK_THRESHOLD) return;
+  const lastN = buffer.slice(-ZERO_STREAK_THRESHOLD);
+  const allZero = lastN.every((e) => e.count === 0);
+  if (!allZero) return;
+
+  // 去重:同一 source 同一 UTC date 只推一次 critical(避免每轮反复推)
+  const utcDate = new Date().toISOString().slice(0, 10);
+  const dedupKey = `ZERO_STREAK_ALERTED_${sourceKey}_${utcDate}`;
+  if (await env.AUTH_KV.get(dedupKey)) return;
+  await env.AUTH_KV.put(dedupKey, '1', { expirationTtl: 25 * 3600 });
+
+  const span = lastN.map((e) => {
+    const bjt = new Date(new Date(e.at).getTime() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    return `_${bjt}_ count=${e.count}`;
+  }).join('\n- ');
+  await pushDeerAlert(
+    env,
+    `⚠️ ${taskName} 连续 ${ZERO_STREAK_THRESHOLD} 轮 0 新增`,
+    `**${taskName}** 最近 ${ZERO_STREAK_THRESHOLD} 轮抓取都 0 新增,可能源 API / scraper 异常:\n- ${span}\n\n建议排查:\n- 数据源 API 是否限流 / 改协议\n- 抓取代码是否解析失败\n- 翻译 / classify 流程是否堵塞`,
+  );
+}
+
+// 每日健康检查:翻译失败率 (critical >5%) + X metrics 覆盖率 (warning <90%)
+export async function runDailyHealthChecks(env: Env): Promise<{
+  checks_run: number;
+  alerts_critical: number;
+  alerts_warning: number;
+  details: Record<string, unknown>;
+}> {
+  if (!env.DB) {
+    return { checks_run: 0, alerts_critical: 0, alerts_warning: 0, details: { skipped: 'no_db' } };
+  }
+  let criticals = 0;
+  let warnings = 0;
+  const details: Record<string, unknown> = {};
+
+  // ─── Check 1: 翻译失败率 by source(7d 滚动窗) ────────────────
+  // 标准:translation_failed_at IS NOT NULL OR x_article.translate_failed_at 存在
+  // 分母:7d 内 workflow_completed_at 写过的 item
+  // 5% 阈值仅对样本 >= 50 的 source 触发(避免小样本噪声)
+  try {
+    const failedRows = await env.DB.prepare(
+      `SELECT source_type,
+              COUNT(*) as total,
+              SUM(CASE WHEN json_extract(extra, '$.translation_failed_at') IS NOT NULL THEN 1 ELSE 0 END) as failed
+         FROM items
+        WHERE deleted_at IS NULL
+          AND CAST(strftime('%s', scraped_at) AS INTEGER) >= strftime('%s', 'now', '-7 days')
+          AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+        GROUP BY source_type`,
+    ).all<{ source_type: string; total: number; failed: number }>();
+    const failRates: Array<{ source: string; total: number; failed: number; pct: string }> = [];
+    for (const r of failedRows.results) {
+      const pct = r.total > 0 ? (r.failed * 100) / r.total : 0;
+      failRates.push({ source: r.source_type, total: r.total, failed: r.failed, pct: pct.toFixed(2) + '%' });
+      if (r.total >= 50 && pct > 5) {
+        criticals++;
+        await pushDeerAlert(
+          env,
+          `⚠️ ${r.source_type} 翻译失败率 ${pct.toFixed(1)}%`,
+          `**${r.source_type}** 7 天滚动窗:\n- 完成 workflow: ${r.total} 条\n- 翻译失败: ${r.failed} 条 (${pct.toFixed(2)}%)\n- 阈值 5% 已触发\n\n排查 DeepSeek 余额 / 翻译 prompt 是否退化 / network 抖动`,
+        );
+      }
+    }
+    details.translation_fail_rates = failRates;
+  } catch (e) {
+    console.warn('[health-check] translation fail rate query failed:', e);
+    details.translation_fail_rates_error = String(e).slice(0, 200);
+  }
+
+  // ─── Check 2: X metrics 覆盖率(warning,数据质量) ─────────────
+  // metrics 字段 retweets / views / replies 在 X 推文里应该都 >= 0(用 ScrapeBadger
+  // batch refresh 拉)。如果非 null 比例 < 90% 说明 refresh 跑不到。
+  // 只查最近 30 天 x_list item,避免老数据 noise。
+  try {
+    const xMetrics = await env.DB.prepare(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN json_extract(metrics, '$.retweets') IS NOT NULL THEN 1 ELSE 0 END) as has_retweets,
+         SUM(CASE WHEN json_extract(metrics, '$.views') IS NOT NULL THEN 1 ELSE 0 END) as has_views,
+         SUM(CASE WHEN json_extract(metrics, '$.replies') IS NOT NULL THEN 1 ELSE 0 END) as has_replies
+       FROM items
+       WHERE source_type='x_list' AND deleted_at IS NULL
+         AND CAST(strftime('%s', scraped_at) AS INTEGER) >= strftime('%s', 'now', '-30 days')`,
+    ).first<{ total: number; has_retweets: number; has_views: number; has_replies: number }>();
+    if (xMetrics && xMetrics.total >= 50) {
+      const coverage = {
+        retweets: (xMetrics.has_retweets * 100) / xMetrics.total,
+        views: (xMetrics.has_views * 100) / xMetrics.total,
+        replies: (xMetrics.has_replies * 100) / xMetrics.total,
+      };
+      const below: string[] = [];
+      for (const [field, pct] of Object.entries(coverage)) {
+        if (pct < 90) below.push(`${field}: ${pct.toFixed(1)}%`);
+      }
+      details.x_metrics_coverage = {
+        sample_size: xMetrics.total,
+        retweets_pct: coverage.retweets.toFixed(1),
+        views_pct: coverage.views.toFixed(1),
+        replies_pct: coverage.replies.toFixed(1),
+        below_90: below,
+      };
+      if (below.length > 0) {
+        warnings++;
+        await pushDeerWarning(
+          env,
+          'X metrics 覆盖率跌破 90%',
+          `**X 推文 metrics 字段覆盖率(30 天滚动窗,样本 ${xMetrics.total}):\n- 跌破 90% 的字段: ${below.join(' / ')}\n\n排查 ScrapeBadger refresh-tiered cron 是否跑 / 字段映射是否漂移`,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn('[health-check] x metrics coverage query failed:', e);
+    details.x_metrics_coverage_error = String(e).slice(0, 200);
+  }
+
+  return { checks_run: 2, alerts_critical: criticals, alerts_warning: warnings, details };
+}
+
 /**
  * Cron 抓取轮次摘要推送。跟 pushDeerAlert 区别：
  * - 标题前缀 "aifeeds 抓取" 而非 "xList告警"（不是告警语义）
  * - result 对象自动格式化为 markdown bullet list
  * - 静默失败不抛错（cron 不该因推送失败而失败）
  *
+ * 2026-05-27 加 Phase B 业务规则:内部调 checkZeroStreak 监控 "连续 N 轮 0 新增"。
+ * sourceKey 用 PH/HF/X/HDX/GH/CH 等短 key,作 KV 命名 + dedup。
+ *
  * 调用建议：cron handler 在 fetch 完成后用 ctx.waitUntil 异步推送，
  * 不阻塞 worker return：
- *   ctx.waitUntil(notifyCronSummary(env, 'PH daily fetch', result));
+ *   ctx.waitUntil(notifyCronSummary(env, 'ph', 'PH 每日抓取', result));
  */
+// taskName → sourceKey 映射(KV 命名 + dedup 用)。新 taskName 加进来即可。
+// 多个 taskName 可以映射到同一 sourceKey(例如 hdx start/continue 都算 hdx)。
+function inferSourceKey(taskName: string): string | null {
+  if (taskName.startsWith('PH ')) return 'ph';
+  if (taskName.startsWith('HF ')) return 'hf';
+  if (taskName.startsWith('X List')) return 'x';
+  if (taskName.startsWith('活动行')) return 'hdx';  // start + continue 都映射到 hdx
+  if (taskName.startsWith('GitHub')) return 'gh';
+  if (taskName.startsWith('ClawHub')) return 'clawhub';
+  return null;
+}
+
 export async function notifyCronSummary(
   env: Env,
   taskName: string,
   result: Record<string, unknown>,
 ): Promise<void> {
+  // Phase B 业务规则:连续 N 轮 0 新增触发 critical。不阻塞通知主流程
+  // (Promise.allSettled 等价 — 任一异常都不影响 cron 摘要推送)。
+  const sourceKey = inferSourceKey(taskName);
+  if (sourceKey) {
+    try {
+      await checkZeroStreak(env, sourceKey, taskName, result);
+    } catch (e) {
+      console.warn(`[zero-streak] check failed for ${sourceKey}:`, e);
+    }
+  }
+
   const keysCsv = env.PUSHDEER_ADMIN_KEYS;
   if (!keysCsv) return; // 静默：没配置 key 直接跳过
 
