@@ -468,44 +468,80 @@
         }
         const bridgeLen = Math.max(0, xR - xL);
 
-        // SVG path: 上下两条 bezier 用不同 sin 相位/频率, 不对称水流感
-        // ymid 取 inkLayer 中心
+        // SVG path: 多节点 (5 个) Catmull-Rom 平滑串接, 上下边独立 sin+cos 组合波,
+        // 各 node 相位偏移 → 波形沿 x 传播, 不规则有机感
         const ymid = inkLayer.clientHeight / 2;
         if (bridgeLen <= 0 || halfH <= 0.3) {
           bridgePath.setAttribute("d", "");
         } else {
           const now = performance.now();
-          // 上边波 / 下边波 — 不同频率 (0.6/0.85) + 不同相位 + 不同振幅
-          // → 上下不对称且随时间不停变形 (水流体感)
-          const tU = now / 480 * 2 * Math.PI;
-          const tD = now / 680 * 2 * Math.PI + 1.7;
-          const ampU = halfH * 0.45;
-          const ampD = halfH * 0.55;
-          const waveU = Math.sin(tU) * ampU;
-          const waveU2 = Math.sin(tU + 1.1) * ampU * 0.7;
-          const waveD = Math.sin(tD) * ampD;
-          const waveD2 = Math.sin(tD + 0.8) * ampD * 0.6;
-          // 端点 y (跟两端 pill height 衔接, 半圆收口)
-          const yLT = ymid - leftH / 2;
-          const yLB = ymid + leftH / 2;
-          const yRT = ymid - rightH / 2;
-          const yRB = ymid + rightH / 2;
-          // bezier 控制点 x (1/3 / 2/3 位置)
-          const cx1 = xL + bridgeLen * 0.33;
-          const cx2 = xL + bridgeLen * 0.67;
-          // bezier 控制点 y (peak ± wave)
+          // PM 反馈 v3 #2: 周期 480/680 → 1200/1700ms (速率减半, 更优雅水感)
+          const tU = (now / 1200) * 2 * Math.PI;
+          const tD = (now / 1700) * 2 * Math.PI + 1.7;
+          const tU2 = (now / 1500) * 2 * Math.PI + 0.6;  // 第二组波叠加, 不规则感
+          const tD2 = (now / 2100) * 2 * Math.PI + 2.3;
+          const ampU = halfH * 0.40;
+          const ampD = halfH * 0.50;
+
+          // PM 反馈 v3 #1: 连线根部高度收紧到不超过连线主体 → goo blur 把
+          // pill 比连线高出的部分 (pill 26px - 连线 12px = 7px/边) 自然 metaball
+          // 合并成圆球, 不再显尖锐三角
+          const ROOT_MAX = halfH * 2;
+          const leftRootH = Math.min(leftH, ROOT_MAX);
+          const rightRootH = Math.min(rightH, ROOT_MAX);
+          const yLT = ymid - leftRootH / 2;
+          const yLB = ymid + leftRootH / 2;
+          const yRT = ymid - rightRootH / 2;
+          const yRB = ymid + rightRootH / 2;
+
+          // PM 反馈 v3 #3: 5 个 wave node 沿 x 等距, 每个 node y 用
+          // sin+cos 组合 (两个不同频率叠加) + 各 node 独立相位偏移
+          // → 波形沿连线传播, 不再是单段 cubic 的简单凸起
+          const N = 5;
           const peakTop = ymid - halfH;
           const peakBot = ymid + halfH;
-          const cy1u = peakTop + waveU;
-          const cy2u = peakTop + waveU2;
-          const cy1d = peakBot + waveD;
-          const cy2d = peakBot + waveD2;
+          const upNodes = [];
+          const dnNodes = [];
+          for (let i = 0; i < N; i++) {
+            const x = xL + (bridgeLen * i) / (N - 1);
+            const phase = i * 0.45;
+            // sin + cos 组合两个不同频率 → 不规则有机感
+            const yu = peakTop + Math.sin(tU + phase) * ampU + Math.cos(tU2 + phase * 1.6) * ampU * 0.45;
+            const yd = peakBot + Math.sin(tD + phase * 1.2) * ampD + Math.cos(tD2 + phase * 0.8) * ampD * 0.4;
+            upNodes.push({ x, y: yu });
+            dnNodes.push({ x, y: yd });
+          }
+          // 端点 y 固定 (跟 pill 衔接), 中间 node 用 sin 波动
+          upNodes[0].y = yLT;
+          upNodes[N - 1].y = yRT;
+          dnNodes[0].y = yLB;
+          dnNodes[N - 1].y = yRB;
+
+          // Catmull-Rom → cubic bezier 转换 (tension 0.5, 默认 Catmull-Rom)
+          // 平滑串接所有 nodes, 自然过渡不显折角
+          const toBezierPath = (nodes, openWithMove) => {
+            const segs = [];
+            if (openWithMove) segs.push(`M ${nodes[0].x.toFixed(2)} ${nodes[0].y.toFixed(2)}`);
+            for (let i = 0; i < nodes.length - 1; i++) {
+              const p0 = nodes[Math.max(i - 1, 0)];
+              const p1 = nodes[i];
+              const p2 = nodes[i + 1];
+              const p3 = nodes[Math.min(i + 2, nodes.length - 1)];
+              const cp1x = p1.x + (p2.x - p0.x) / 6;
+              const cp1y = p1.y + (p2.y - p0.y) / 6;
+              const cp2x = p2.x - (p3.x - p1.x) / 6;
+              const cp2y = p2.y - (p3.y - p1.y) / 6;
+              segs.push(`C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`);
+            }
+            return segs.join(" ");
+          };
+          // closed path: 上边走从左到右, 右端 L 衔接到下边右端, 下边走 reverse 从右到左
+          const dnNodesReverse = [...dnNodes].reverse();
           const d = [
-            `M ${xL.toFixed(2)} ${yLT.toFixed(2)}`,
-            `C ${cx1.toFixed(2)} ${cy1u.toFixed(2)}, ${cx2.toFixed(2)} ${cy2u.toFixed(2)}, ${xR.toFixed(2)} ${yRT.toFixed(2)}`,
+            toBezierPath(upNodes, true),
             `L ${xR.toFixed(2)} ${yRB.toFixed(2)}`,
-            `C ${cx2.toFixed(2)} ${cy2d.toFixed(2)}, ${cx1.toFixed(2)} ${cy1d.toFixed(2)}, ${xL.toFixed(2)} ${yLB.toFixed(2)}`,
-            `Z`,
+            toBezierPath(dnNodesReverse, false),
+            "Z",
           ].join(" ");
           bridgePath.setAttribute("d", d);
         }
