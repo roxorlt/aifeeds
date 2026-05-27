@@ -177,10 +177,10 @@ function DashboardHome() {
   const pillBRef = useRef<HTMLDivElement | null>(null);
   const bridgePathRef = useRef<SVGPathElement | null>(null);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  // chip rect cache — swipe 期间高频 read chip.offsetLeft/offsetWidth 触发 layout
-  // reflow 是真机卡顿主因. ResizeObserver 监听 chip rail 变化, layout 稳定后 refresh
-  // 一次, touch 期间只读 ref 不读 DOM
-  const chipRectsRef = useRef<Record<string, { left: number; width: number }>>({});
+  // 之前用 chipRectsRef cache 想砍 touchmove DOM read, 但 cache stale 导致 pill
+  // 位置错 (PM 2026-05-27 反馈 chip 黑框跨"热门产品"末尾跟"活动"). 回滚直接 read DOM —
+  // browser 没改动 layout 时 offsetLeft 读取走 layout cache, 60Hz 4 次 read 实际成本
+  // 比想象低; pill 准确性 > 微小 perf 优化
   const fancyAnim = useFancyAnimation();
   const fancyAnimRef = useRef(fancyAnim);
   fancyAnimRef.current = fancyAnim;
@@ -211,47 +211,37 @@ function DashboardHome() {
   // renderInkBetween: swipe 期间根据 progress 0..1 在 from/to chip 之间
   //                   渲染 fancy 流体动效 (出/入两阶段缩 + 流体连线), 或朴素
   //                   单 pill lerp.
-  // chip rect 取值: 优先 cache, 缺时 fallback 到 DOM read (mount 后 ResizeObserver
-  // 会自动 refresh, 但首次 render 之前可能还没 cache 命中)
-  const getChipRect = useCallback((key: string): { left: number; width: number } | null => {
-    const cached = chipRectsRef.current[key];
-    if (cached) return cached;
-    const chip = chipRefs.current[key];
-    if (!chip) return null;
-    const r = { left: chip.offsetLeft, width: chip.offsetWidth };
-    chipRectsRef.current[key] = r;
-    return r;
-  }, []);
-
   const resetInkToActive = useCallback((key: string, withTransition: boolean) => {
     const pillA = pillARef.current;
     const pillB = pillBRef.current;
     const bridgePath = bridgePathRef.current;
-    const rect = getChipRect(key);
-    if (!pillA || !rect) return;
+    const chip = chipRefs.current[key];
+    if (!pillA || !chip) return;
     const trans = withTransition
       ? "transform 220ms cubic-bezier(0.32, 0.72, 0, 1), width 220ms cubic-bezier(0.32, 0.72, 0, 1), height 220ms cubic-bezier(0.32, 0.72, 0, 1)"
       : "none";
     pillA.style.transition = trans;
-    pillA.style.width = `${rect.width}px`;
+    pillA.style.width = `${chip.offsetWidth}px`;
     pillA.style.height = `${PILL_H}px`;
-    pillA.style.transform = `translate(${rect.left}px, -50%)`;
+    pillA.style.transform = `translate(${chip.offsetLeft}px, -50%)`;
     if (pillB) {
       pillB.style.transition = trans;
       pillB.style.width = "0px";
       pillB.style.height = "0px";
     }
     if (bridgePath) bridgePath.setAttribute("d", "");
-  }, [getChipRect]);
+  }, []);
 
   const renderInkBetween = useCallback((fromKey: string, toKey: string, progress: number) => {
     const pillA = pillARef.current;
     const pillB = pillBRef.current;
     const bridgePath = bridgePathRef.current;
     const inkLayer = inkLayerRef.current;
-    const fromRect = getChipRect(fromKey);
-    const toRect = getChipRect(toKey);
-    if (!pillA || !fromRect || !toRect) return;
+    const fromChip = chipRefs.current[fromKey];
+    const toChip = chipRefs.current[toKey];
+    if (!pillA || !fromChip || !toChip) return;
+    const fromRect = { left: fromChip.offsetLeft, width: fromChip.offsetWidth };
+    const toRect = { left: toChip.offsetLeft, width: toChip.offsetWidth };
     const fancy = fancyAnimRef.current;
 
     if (!fancy) {
@@ -309,33 +299,22 @@ function DashboardHome() {
     bridgePath.setAttribute("d", buildBridgePath({ xL, xR, leftH, rightH, halfH, ymid, now }));
   }, []);
 
-  // PM 2026-05-27 v5: chip rect cache refresh — ResizeObserver 监听 chip rail
-  // layout 变化 (mount / chip 内容变化 / window resize) 自动 refresh, swipe 期间
-  // 不读 DOM 避免 layout reflow 导致真机卡顿. 同时初始 sync 一次 ink-layer
-  // scrollLeft transform (防 mount 时 nav 已有 scrollLeft 导致 pill 跟 chip 错位)
+  // PM 2026-05-27: 初始同步 ink-layer 跟随 nav.scrollLeft (onScroll handler 只在
+  // 用户/scrollIntoView 触发 scroll 时跑, 不 cover 首屏 chip 自动 scrollIntoView
+  // 居中场景). filter / isNarrow 变化时也要 sync.
   useEffect(() => {
     if (!isNarrow) return;
     const rail = chipRailRef.current;
-    if (!rail) return;
-    const refresh = () => {
-      Object.entries(chipRefs.current).forEach(([key, chip]) => {
-        if (chip) chipRectsRef.current[key] = { left: chip.offsetLeft, width: chip.offsetWidth };
-      });
-      // 初始 / resize 后同步 ink-layer 跟随 nav.scrollLeft (onScroll handler 只在
-      // 用户/scrollIntoView 触发 scroll 时跑, 不 cover 首屏)
+    if (!rail || !inkLayerRef.current) return;
+    const sync = () => {
       if (inkLayerRef.current) {
         inkLayerRef.current.style.transform = `translateX(${-rail.scrollLeft}px)`;
       }
     };
-    refresh();
-    const obs = new ResizeObserver(refresh);
-    obs.observe(rail);
-    window.addEventListener("resize", refresh);
-    return () => {
-      obs.disconnect();
-      window.removeEventListener("resize", refresh);
-    };
-  }, [isNarrow]);
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, [isNarrow, filter]);
 
   // PM 2026-05-27 v5: fancy mode swipe 期间 RAF 持续重绘 (流体连线 sin 波相位
   // 随时间演变, 即使 progress 没变也得每帧 redraw). swipe end → swipeStateRef.active
