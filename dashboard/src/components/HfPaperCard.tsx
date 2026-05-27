@@ -15,6 +15,7 @@ import type { HfPaperMetrics, Item, ItemExtra } from "../types";
 import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
+import { useImpressionRefresh } from "../lib/impressionRefresh";
 
 interface Props {
   item: Item;
@@ -130,8 +131,12 @@ export function HfPaperCard({ item }: Props) {
     drawer.openItem(item);
   }
 
+  // BE §5b: 视口停留 500ms 弱触发 metrics refresh
+  const refreshRef = useImpressionRefresh(item.id);
+
   return (
     <article
+      ref={refreshRef}
       onClick={open}
       className="cursor-pointer border-b border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50/60"
     >

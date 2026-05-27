@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
+import { useImpressionRefresh, mergeRefs } from "../lib/impressionRefresh";
 import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
 import { cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
@@ -352,6 +353,9 @@ export function TweetCard({
       source: item.source_type,
     });
   });
+  // BE §5b: 视口停留 500ms 弱触发 metrics refresh (worker 5min KV throttle 兜底).
+  // drawer 内嵌套的卡片不触发 (跟 impression 一样的语义,只算主 feed 上的浏览)
+  const refreshRef = useImpressionRefresh(embedded ? null : item.id);
   const [expanded, setExpanded] = useState(Boolean(embedded));
   const [showOriginal, setShowOriginal] = useState(false);
   const [translating, setTranslating] = useState(false);
@@ -571,7 +575,7 @@ export function TweetCard({
 
   return (
     <article
-      ref={impressionRef}
+      ref={mergeRefs(impressionRef, refreshRef)}
       onPointerDown={handlePointerDown}
       onClick={handleCardClick}
       className={cn(
