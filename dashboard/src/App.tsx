@@ -834,13 +834,15 @@ function DashboardHome() {
         </svg>
       )}
       {/* Top bar */}
+      {/* PM 2026-05-27 任务 3 v3 反馈: 频道流惯性 momentum 没了 — 根因是 mobile
+          sticky header + RAF 每帧 set transform, iOS 把 #root scroll 的 momentum
+          节流了 (sticky 每次 scroll 都重算 stickiness offset, 加上 transform write
+          → main thread 持续 sync 工作 → iOS disable momentum 优化). 改 fixed 让
+          header 完全脱离 #root scroll layout, 改它任何 style 都不影响 #root scroll.
+          PC 保持 sticky 不变 (PC 走 window scroll 没这个问题). */}
       <header
         ref={headerRef}
-        // PM 2026-05-27 任务 3: 1:1 跟手 progress-based autohide — transform / opacity
-        // 在 useEffect 内 imperatively set, 不用 React state + CSS transition (那样会
-        // 有 threshold 等待 + 二值切换感, PM 反馈"突然"). 这里 will-change 提示浏览器
-        // 提前合成 layer, 60fps 跟手稳.
-        className="sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur will-change-transform"
+        className="z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur max-md:fixed max-md:inset-x-0 max-md:top-0 sm:sticky sm:top-0"
         onClick={(e) => {
           // Skip when click is on chips, refresh button, etc.
           if ((e.target as HTMLElement).closest("button")) return;
@@ -967,6 +969,11 @@ function DashboardHome() {
           <UserMenu />
         </div>
       </header>
+
+      {/* mobile-only spacer: header 改 fixed 后不占 layout 空间, 加 49px spacer
+          补齐 (跟 sticky 时一样让 main 内容从 49 起步, swipeAdjacent / transitionActive
+          overlay 的 top:49 hardcode 也无需变). PC sticky 自己占空间, 不需 spacer. */}
+      <div className="max-md:h-[49px] md:hidden" aria-hidden />
 
       {/* Swipe adjacent panel — R22 加 channel header (SourceIcon + label) +
           8 SkeletonCard, 跟 Feed mount 后的 header + skeleton 完全一致, 切换
