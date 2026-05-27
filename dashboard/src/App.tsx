@@ -166,6 +166,10 @@ function DashboardHome() {
   // filter 切到非可视 chip 时把它居中到 rail 中部,让用户知道这是 active(避免
   // 切了但用户看不到激活状态以为没动)。useEffect 跑在 filter 声明之后(挪到 L155+)
   const chipRailRef = useRef<HTMLElement | null>(null);
+  // PM 2026-05-27: chip-rail 内层 scroll content wrapper — ink-layer + chips 都在
+  // 这个 inline-flex 内, nav 自己 overflow-x-auto 自动 scroll 整个 wrapper, ink-layer
+  // 跟 chip 共享同一 offsetParent → 完全不需要 JS 同步 scrollLeft
+  const chipScrollContentRef = useRef<HTMLDivElement | null>(null);
   // PM 2026-05-27 任务 2 v5 实现 (demo: docs/mocks/2026-05-27-channel-tab-ink.html):
   //   - pillA: 出场 pill (无 swipe 时落 active chip 当 baseline);
   //   - pillB: 入场 pill (fancy mode 才渲染, swipe 期间从 to-chip 中心扩展);
@@ -299,22 +303,8 @@ function DashboardHome() {
     bridgePath.setAttribute("d", buildBridgePath({ xL, xR, leftH, rightH, halfH, ymid, now }));
   }, []);
 
-  // PM 2026-05-27: 初始同步 ink-layer 跟随 nav.scrollLeft (onScroll handler 只在
-  // 用户/scrollIntoView 触发 scroll 时跑, 不 cover 首屏 chip 自动 scrollIntoView
-  // 居中场景). filter / isNarrow 变化时也要 sync.
-  useEffect(() => {
-    if (!isNarrow) return;
-    const rail = chipRailRef.current;
-    if (!rail || !inkLayerRef.current) return;
-    const sync = () => {
-      if (inkLayerRef.current) {
-        inkLayerRef.current.style.transform = `translateX(${-rail.scrollLeft}px)`;
-      }
-    };
-    sync();
-    window.addEventListener("resize", sync);
-    return () => window.removeEventListener("resize", sync);
-  }, [isNarrow, filter]);
+  // PM 2026-05-27: ink-layer 现在跟 chips 在同一个 scroll-content wrapper 内,
+  // nav 的 overflow-x scroll 会自动带着 ink-layer + chips 一起移动, 不需要 JS sync
 
   // PM 2026-05-27 v5: fancy mode swipe 期间 RAF 持续重绘 (流体连线 sin 波相位
   // 随时间演变, 即使 progress 没变也得每帧 redraw). swipe end → swipeStateRef.active
@@ -835,50 +825,50 @@ function DashboardHome() {
           {isNarrow && (
             <nav
               ref={chipRailRef}
-              className="chips-rail relative flex min-w-0 items-center gap-1 self-stretch overflow-x-auto"
-              onScroll={(e) => {
-                // ink-layer 是 absolute inset:0 钉在 nav viewport 上, 不跟 scrollLeft
-                // 移动. pill 用 chip.offsetLeft (scroll content 坐标) 定位 → scroll
-                // 之后 pill 在 viewport 内的位置 = offsetLeft - scrollLeft 才对.
-                // 这里 transform translateX(-scrollLeft) 让 ink-layer 跟随 scroll,
-                // pill 内部 transform 不变, 显示位置自动跟 chip 同步.
-                if (inkLayerRef.current) {
-                  inkLayerRef.current.style.transform = `translateX(${-e.currentTarget.scrollLeft}px)`;
-                }
-              }}
+              className="chips-rail min-w-0 self-stretch overflow-x-auto"
             >
-              {/* 墨汁 ink layer — pillA (出场/baseline) + pillB (入场, fancy 才渲染)
-                  + bridge SVG path (流体连线, fancy 才渲染). 套 goo filter 让三者 metaball
-                  合并成液态. pointer-events-none 不拦 chip click. 初始 width:0 避免
-                  chip mount 前闪一帧. onScroll 同步 translateX 让 pill 跟 chip 一起被滚 */}
+              {/* Inner scroll content — relative parent for ink-layer + chips.
+                  inline-flex 让宽度跟 chip 内容紧凑 (= scroll content width),
+                  nav 自己 overflow-x-auto 自动 scroll 整个 inner div + ink-layer + chips.
+                  这样 ink-layer 是 absolute 相对 inner (= scroll content), 跟 chip
+                  共享同一个 offsetParent (chip.offsetLeft 跟 pill.transform translateX
+                  对齐), 完全不需要 JS 同步 scrollLeft */}
               <div
-                ref={inkLayerRef}
-                className="pointer-events-none absolute inset-0 z-0"
-                style={fancyAnim ? { filter: "url(#chip-goo)" } : undefined}
-                aria-hidden
+                ref={chipScrollContentRef}
+                className="relative inline-flex h-full items-center gap-1"
               >
-                {fancyAnim && (
-                  <svg
-                    className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
-                    aria-hidden
-                  >
-                    <path ref={bridgePathRef} fill="#111" d="" />
-                  </svg>
-                )}
+                {/* 墨汁 ink layer — pillA (出场/baseline) + pillB (入场, fancy 才渲染)
+                    + bridge SVG path (流体连线, fancy 才渲染). 套 goo filter 让三者 metaball
+                    合并成液态. pointer-events-none 不拦 chip click. 初始 width:0 避免
+                    chip mount 前闪一帧 */}
                 <div
-                  ref={pillARef}
-                  className="absolute top-1/2 rounded-full bg-neutral-900"
-                  style={{ width: 0, height: `${PILL_H}px`, transform: "translate(0px, -50%)" }}
-                />
-                {fancyAnim && (
+                  ref={inkLayerRef}
+                  className="pointer-events-none absolute inset-0 z-0"
+                  style={fancyAnim ? { filter: "url(#chip-goo)" } : undefined}
+                  aria-hidden
+                >
+                  {fancyAnim && (
+                    <svg
+                      className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+                      aria-hidden
+                    >
+                      <path ref={bridgePathRef} fill="#111" d="" />
+                    </svg>
+                  )}
                   <div
-                    ref={pillBRef}
+                    ref={pillARef}
                     className="absolute top-1/2 rounded-full bg-neutral-900"
-                    style={{ width: 0, height: 0, transform: "translate(0px, -50%)" }}
+                    style={{ width: 0, height: `${PILL_H}px`, transform: "translate(0px, -50%)" }}
                   />
-                )}
-              </div>
-              {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
+                  {fancyAnim && (
+                    <div
+                      ref={pillBRef}
+                      className="absolute top-1/2 rounded-full bg-neutral-900"
+                      style={{ width: 0, height: 0, transform: "translate(0px, -50%)" }}
+                    />
+                  )}
+                </div>
+                {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
                 const hasData = liveSourceTypes.has(key as SourceType);
                 return (
@@ -905,7 +895,8 @@ function DashboardHome() {
                     {label}
                   </button>
                 );
-              })}
+                })}
+              </div>
             </nav>
           )}
 
