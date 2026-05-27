@@ -52,15 +52,9 @@
   - 业务级告警（"scrape 0 new 持续 3 轮" / "翻译失败率 > 5%" / "metrics 覆盖率跌破 90%"）仍要自己写，CF 给不了语义
   - 基础错误率告警等 CF 阶段 1 的 Workers Logs 接管
 
-### 2. ClawHub 30 天热度趋势 sparkline 收尾
+### 2. ~~ClawHub 30 天热度趋势 sparkline 收尾~~ ✅ 已完成
 
-> v0 / v1 / v2 / 3-dropdown 都已上线，趋势区段的容器和阈值判断也搭好了，**只差最后一公里**：实际的 SVG 渲染。
-
-- 现状：`dashboard/src/components/ClawhubDrawerBody.tsx:562` 是占位文案 "★ stars 走势 sparkline（v2 渲染中…当前仅展示采样点数）"
-- 要做：从 `metrics_history` 拿 stars 时序数据 → 画 SVG sparkline
-- 阈值已就位：`TRENDS_MIN_DATA_POINTS = 14`（< 14 个采样点不展示，避免新 skill 一根直线丑）
-- 简单方案：手写 SVG `<polyline>`，无依赖，30 行代码搞定
-- 复杂方案：引入 visx / recharts，但只为一个 sparkline 引依赖不值
+实现：`dashboard/src/components/ClawhubDrawerBody.tsx` 内 `StarsSparkline` 组件（line 247-310）— 手写 SVG `<polygon>` 渐变填充 + `<polyline>` 折线，无图表库依赖。`fetchItem(item.id)` 拉 `metrics_history`，count ≥ 14 才展示，首尾 stars 数字 + 涨跌幅 + 起止日期一目了然。挂在抽屉「30 天趋势」`<details>` 区段（line 628-641）。
 
 ### 3. 海报视频封面预抓帧（D 方案）
 
@@ -88,7 +82,7 @@
 
 **阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
 - [x] **AI Gateway** — OPS 2026-05-16 已建 `aifeeds-deepseek` gateway（详见 [operations.md §10](docs/operations.md)）；BE 待办：worker 把 DeepSeek 调用 base URL 切到 `https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek`，is_relevant 等可缓存请求加 `cf-aig-cache-ttl: 3600` header
-- [x] **Web Analytics** — OPS 2026-05-16 已建 prod + staging 两个 site（详见 [operations.md §11](docs/operations.md)）；FE 待办：`dashboard/index.html` 加 beacon snippet（prod token `857fab92…`，staging token `9e6f987f…`，按构建 target 切）
+- [x] **Web Analytics** — OPS 2026-05-16 已建 + zone auto-inject 接管（详见 [operations.md §11](docs/operations.md)）；**FE 不需要装 beacon snippet** — CF 边缘按 UA 判断浏览器时自动注 token `850b4048…`，prod + staging 两个域都已验证（curl 带 Chrome UA 能看到注入的 `<script>`）。早期 OPS 手动建的 2 个 standalone site 测出收不到数据已删，FE 也不需要按 build target 切 token
 - [x] **Workers Logs** — BE 2026-05-16 已加（PR #34），`worker/wrangler.toml` 含 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
 
 **阶段 2（半天）—— 图片走边缘优化**
@@ -97,33 +91,27 @@
 - [x] **FE 2026-05-16**（PR #51）`proxyImg(url, width)` per-call-site：14 处 img 调用按场景传 80 / 400 / 不传，GH avatar 28KB → 1.5-3KB
 - [x] **BE/FE 2026-05-16**（PR #54）format=auto 在 worker fetch 上下文不可靠（curl + chrome devtools 都验证 3 种 Accept 都返原 jpeg / 无 Vary）；worker 改成自己 parse Accept header 主动设 `cf.image.format = 'avif' | 'webp' | (omit)`，cacheKey 编入 format 防跨 client 污染。Prod 实测 ruvnet 头像：jpeg 4970B → avif 3188B（再省 36% on top of resize）
 
-**阶段 3（1-2 周）—— GH 链试点 Workflow**
-- GH 抓取链最简单（单源、量小），拿来试点
-- worker scheduled cron 那套 GH trending 抓取拆成 CF Workflow（CF 自家工作流编排）
-- 验证 Workflow 是否真比 cron 好用（重试 / 状态可视化 / 单步 retry）
+**~~阶段 3（1-2 周）—— GH 链试点 Workflow~~** ✅ 已完成
+- PR #40 把 GH trending 抓取从 worker cron 切到 CF Workflow，验证下来重试 / 状态可视化 / 单步 retry 都比 cron 好用，决定继续推进后续源。
 
-**阶段 4（2-3 周）—— X 主链双写迁移**
-- 试点 OK 后把 X 主流水线 6 个 cron mode（抓取 / longform / quote 补全 / metrics 刷新 / 翻译 / 分类）全迁到 Workflow
-- 双写期：老 cron + 新 Workflow 并行跑，稳定后下线 cron
-- **翻译模式重写候选 SQL**（2026-05-14 留）：现在 `selectTranslationCandidates`（`worker/src/enrich.ts:2198`）用 `RANDOM()` 在大池子（X 4000+ 条 content_translated IS NULL 但实际中文）里抽 150，命中 quote_of / link_card 边角的概率 ~1%，单轮 limit=50 实际只翻 1 条 task。导致 X feed 上 quote_of 引用推文 / link_card 链接卡长期 47 条左右积压（cron 也清不动）；2026-05-14 加的 `POST /api/admin/fill-translations-now` admin endpoint 同样卡这个瓶颈。Workflow 改造时按 task 类型分独立队列（content / quote / link_card 各一），扁平消费，根治此问题。
-- **顺便加 reply / retweet 父推 snapshot 翻译覆盖**（2026-05-16 留）：当前 `selectTranslationCandidates` 不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上展示的「回复 @父推作者」/「转推 @某人」对应 snapshot 内容是英文（backfill-quotes / backfill-replies 抓回来塞进 extra 但翻译流程不扫）。阶段 4 重写 SQL 时顺便加这两个 task 类型独立队列（边际 0.5 天），新功能从第一天享受 Workflow 秒级 + 死信兜底，避免「先做半成品再升级」。
-- **翻译流水线 i18n 友好接口**（2026-05-16 留，为未来多语言铺路，边际成本约 0.5-1 天）：
-  - Task 类型加 `lang` 字段（暂硬编码 `'zh'`），未来支持 `ja` / `es` 时只需在 task 生成器循环 langs 列表，不重写核心逻辑
-  - Workflow 队列命名带 lang 后缀（`translate:zh:content`、`translate:zh:quote_of` 等），未来加新语言队列不影响 zh 队列性能
-  - DeepSeek prompt 模板参数化（`source_lang` / `target_lang`），不再硬编码「翻译成中文」
-  - **DB schema 暂不改**（保留 `items.content_translated` 列），未来真正多语言时再迁 `translations` 表（item_id, field, lang, translated_text, quality, attempts, translated_at, model 主键 item_id+field+lang）— schema 设计落 `docs/plans/2026-05-16-i18n-design.md`（未来需要时启用 migration）
-  - **API lang 参数暂不加**（前端没多语言 UI），等真正多语言 UI 时一起做
-- **C 端用户已浏览英文时翻译完成的展示策略**（2026-05-16 留，迁移完后顺便加）：
-  - API 下发按「已翻译优先」排序（`ORDER BY (content_translated IS NULL) ASC` 优先级），未翻译的不过滤但放后面
-  - 翻译完的 item 标新（`translated_at > last_user_fetch_at`），前端 feed 顶部「N 条新内容可加载」横条扩展到「N 条新译文可刷新」
-  - drawer lazy enrich on open 已有（PR6.6），保留
-  - 不做实时推送（WebSocket / SSE 复杂度过高且阅读中突变体验奇怪）
-  - 不做严格服务端过滤未翻译的不下发（会让 feed 数量缩水 + 热点新推文延迟出现）
+**~~阶段 4（2-3 周）—— X 主链双写迁移~~** ✅ 已完成
+- PR #43 把 X 主流水线全迁到 Workflow，PR #65 顺便把分类 + 翻译合成一次 JSON Mode 调用、加完整性 gate。配套加固：#66（数据失效级联）/ #69（老数据回填 + 关联推 metrics）/ #74（media 字段缺失回填）/ #75（instance ID 加 hour-bucket 根治全源 stuck）/ #80 #81（uncaught exception 双层兜底）/ #106（五源统一 `workflow_completed_at` gate）。
+- 翻译候选 SQL 重写、reply / retweet 父推 snapshot 翻译覆盖、翻译流水线 i18n 友好接口、C 端「已浏览英文时译文完成」的展示策略 —— 这几个原本挂在阶段 4 下的小尾巴**仍未做**，记到下面新增的「翻译流水线后续优化」段。
 
-**阶段 5（按需）—— 高级能力**
+**~~阶段 5（hdx + PH + ClawHub 抓取链迁移）~~** ✅ 已完成
+- PR #45 把活动行（hdx）抓取链迁到 Workflow。PR #47 把 PH + ClawHub 也迁完。设计文档分别在 `docs/plans/2026-05-* 阶段 5 / 6` 系列。
+- BE 端 SOP 改造也跟上了（PR #78 重写信源接入 SOP 适配 Workflow 时代）。
+
+**阶段 6（按需）—— 高级能力**
 - Queue：消息总线（比如 enrich 任务排队）
 - Logpush：日志推到 R2 / S3 长期存档
 - Container：跑需要长任务 / 自定义环境的 job（D1 备份 / video 抽帧）
+
+**翻译流水线后续优化**（原阶段 4 下挂的小尾巴，迁移完成后单独跟）：
+- **翻译候选 SQL 重写按 task 类型分队列**：现在 `selectTranslationCandidates`（`worker/src/enrich.ts`）用 `RANDOM()` 抽样，命中 quote_of / link_card 边角的概率 ~1%。Workflow 时代应按 task 类型分独立队列（content / quote / link_card 各一），扁平消费。
+- **reply / retweet 父推 snapshot 翻译覆盖**：当前候选选择不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上的「回复 @父推作者」/「转推 @某人」snapshot 还是英文。
+- **翻译流水线 i18n 友好接口**（多语言铺路）：Task 加 `lang` 字段、队列命名带 lang 后缀、DeepSeek prompt 模板参数化 source/target lang。DB schema 和 API lang 参数都暂不改，等真正多语言 UI 时一起做。完整设计 `docs/plans/2026-05-16-i18n-design.md`。
+- **C 端已浏览英文时译文完成的展示策略**：API 下发按「已翻译优先」排序、translated_at > last_user_fetch_at 标新、前端横条提示「N 条新译文可刷新」。drawer lazy enrich on open（PR6.6）保留，不做实时推送，不做严格服务端过滤。
 
 ---
 
@@ -265,40 +253,9 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 
-### 13. HarmonyOS Sans SC 字体上线（R2 自托管 + cn-font-split 子集化）
+### 13. ~~HarmonyOS Sans SC 字体上线（R2 自托管 + cn-font-split 子集化）~~ ✅ 已完成
 
-> 详见：[`docs/design-handoff.md`](docs/design-handoff.md) § 2
-
-把 dashboard 默认字体从 system stack 切到 HarmonyOS Sans SC，按字符 unicode-range 子集化后挂到 R2 + `fonts.ai-feeds.com` 子域，国内访问不被 Google Fonts 拦，单页实际只下载 ≈ 200KB。
-
-**6 步实施清单**：
-1. 从华为官方 / `chinese-fonts-cdn` 拿 Regular / Medium / Bold 三档 ttf-otf
-2. `bunx cn-font-split` 切成 ~50KB woff2 块（每档 ~30-50 个文件 + `result.css`）
-3. CF dashboard 新建 R2 bucket `ai-feeds-fonts`，绑 `fonts.ai-feeds.com` + CORS 允许 `ai-feeds.com`
-4. 改 `result.css` 字体路径为 R2 公网地址（或保持相对路径直接上传整目录）
-5. `dashboard/index.html` 加 preconnect + 3 个 stylesheet link
-6. 验证：devtools Network 实际只下载几个 50KB woff2 + Lighthouse LCP 不被字体阻塞
-
-**字体 stack 落地点**：`dashboard/src/index.css` 的 `:root { font-family: "HarmonyOS Sans SC", ... }`（完整 stack 见 handoff § 2）
-
-**session 分工**（**ops + 前端两路，backend 不参与**）：
-
-| 步骤 | 谁干 | 说明 |
-|------|------|------|
-| 1. 下字体 | 任一 session（机器操作） | 文件落到 `~/Downloads/` 或临时目录即可 |
-| 2. cn-font-split 切块 | 任一 session（npm 命令） | 输出到 `dashboard/public/fonts/` 或临时目录 |
-| 3. R2 bucket + 绑子域 + CORS | **ops** | CF 控制台操作 + DNS 解析 `fonts.ai-feeds.com`；CORS 必须允许 `https://ai-feeds.com` + `https://staging.ai-feeds.com` 两个 origin |
-| 4. 上传 woff2 + result.css | **ops**（或前端用 `wrangler r2 object put`） | 整目录传上去，相对路径仍然有效 |
-| 5. `dashboard/index.html` 加 preconnect + stylesheet link | **前端** | 加完跑 `npm run build` 看 vite 没报错；`vite dev` 看 network 实际命中 woff2 |
-| 6. `dashboard/src/index.css` 改 font-family + 验证 | **前端** | Chrome devtools Network 过滤 Font，应只看到几个 50KB 包；Lighthouse 跑一次 LCP |
-
-**backend 不动的原因**：worker 不渲染前端、不返字体；字体文件挂在独立子域 + R2 bucket，跟 `api.ai-feeds.com` worker 没耦合。
-
-**回退**：步骤 3 之前可临时用 `chinese-fonts-cdn.deno.dev` 公共 CDN（非自托管），handoff § 2 末有 fallback link 模板。前端 session 可以先用 fallback link 把视觉切过去看效果，等 ops 把 R2 + 子域准备好再换 self-host 链接
-
-**权重档位**：只引 400 / 500 / 700 三档，不要再加更多
-
-**优先级**：相对独立，不阻塞 #11 / #12，可在备案空窗期顺手做
+详见 [`docs/design-handoff.md`](docs/design-handoff.md) § 2。R2 bucket `ai-feeds-fonts` 绑 `fonts.ai-feeds.com`，cn-font-split 切的三档（hmos-regular / hmos-medium / hmos-bold）已上传，每页实际只下 ~200KB。`dashboard/index.html` line 10-13 加 preconnect + 3 个 `result.css` stylesheet link；`dashboard/src/index.css` :root font-family stack 以 "HarmonyOS Sans SC" 为主，后接 system + 中文 fallback。Medium 字重（weight=500）已在 R2 CSS 里 sed 修正成统一 family 名。
 
 ---
 
