@@ -645,8 +645,9 @@ export async function runClawhubFetchList(env: ClawhubEnv): Promise<{
   if (env.CH_PIPELINE_WORKFLOW) {
     const slugs = Array.from(allBySort.keys());
     if (slugs.length > 0) {
-      // 拆 chunks 查 — 单次 IN(...) 太多 params D1 限制；250 一批安全
-      const SLUG_CHUNK = 250;
+      // 拆 chunks 查 — D1 prepared statement bound parameters 上限 100 (2026-05-27
+      // 实测 250 撞 SQLITE_ERROR "too many SQL variables")。90 留余量,1500 slug 17 个 chunk
+      const SLUG_CHUNK = 90;
       const newSlugIds: string[] = [];
       for (let i = 0; i < slugs.length; i += SLUG_CHUNK) {
         const chunk = slugs.slice(i, i + SLUG_CHUNK);
