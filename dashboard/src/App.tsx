@@ -361,34 +361,45 @@ function DashboardHome() {
   const adjacentRef = useRef<HTMLDivElement>(null);
   // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐, 下拉时渐显 (iOS Safari /
   // Twitter mobile 同款). PC 不动 (header 永远显示).
-  const [headerHidden, setHeaderHidden] = useState(false);
-  const lastScrollYRef = useRef(0);
-  // delta > SHOW_THRESHOLD 才触发方向切换 (防 sub-px 抖动反复 hide/show).
-  // y < TOP_ZONE 时强制 show (回到顶部 header 必须可见, 用户也才好点 logo refresh).
+  // PM 2026-05-27 v2 反馈: 不要 threshold + transition 二值切换 (看着像"突然"),
+  // 改 1:1 跟手 progress-based — 手指刚动 1px header 就移动 1/49, opacity 连续渐变,
+  // "渐变"在手势刚开始就启动.
+  const headerRef = useRef<HTMLElement>(null);
+  const hideRatioRef = useRef(0);
   useEffect(() => {
+    const apply = (ratio: number) => {
+      const h = headerRef.current;
+      if (!h) return;
+      h.style.transform = `translateY(${-ratio * 100}%)`;
+      h.style.opacity = `${1 - ratio}`;
+    };
     if (!isNarrow) {
-      setHeaderHidden(false);
+      hideRatioRef.current = 0;
+      apply(0);
       return;
     }
-    const SHOW_THRESHOLD = 5;
     const TOP_ZONE = 50;
+    const HEADER_H = 49;
     let ticking = false;
-    lastScrollYRef.current = getScrollY();
+    let lastY = getScrollY();
     const handler = () => {
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
         ticking = false;
         const y = getScrollY();
-        const delta = y - lastScrollYRef.current;
+        const delta = y - lastY;
+        lastY = y;
+        let next: number;
         if (y < TOP_ZONE) {
-          setHeaderHidden(false);
-          lastScrollYRef.current = y;
-          return;
+          next = 0;
+        } else {
+          next = Math.max(0, Math.min(1, hideRatioRef.current + delta / HEADER_H));
         }
-        if (Math.abs(delta) < SHOW_THRESHOLD) return;
-        setHeaderHidden(delta > 0);
-        lastScrollYRef.current = y;
+        if (next !== hideRatioRef.current) {
+          hideRatioRef.current = next;
+          apply(next);
+        }
       });
     };
     return addScrollRootListener(handler);
@@ -397,7 +408,14 @@ function DashboardHome() {
   // 高度做位置, header hidden 状态下切 channel 会留 49px 空白条. 切 channel 是 user
   // 主动 interaction, 配合 show header 也符合 "看到新 channel 标识" 的直觉.
   useEffect(() => {
-    if (transitionActive || swipeAdjacent) setHeaderHidden(false);
+    if (transitionActive || swipeAdjacent) {
+      hideRatioRef.current = 0;
+      const h = headerRef.current;
+      if (h) {
+        h.style.transform = "translateY(0%)";
+        h.style.opacity = "1";
+      }
+    }
   }, [transitionActive, swipeAdjacent]);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
@@ -817,14 +835,12 @@ function DashboardHome() {
       )}
       {/* Top bar */}
       <header
-        className={cn(
-          "sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur",
-          // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐 (iOS Safari/Twitter 同款).
-          // transform-translate 不影响 layout (sticky 占位还在), 视觉移出 viewport 上方.
-          // PC: headerHidden 永远 false, transition 也无效, 无副作用.
-          "transition-[transform,opacity] duration-200 ease-out will-change-transform",
-          isNarrow && headerHidden && "-translate-y-full opacity-0",
-        )}
+        ref={headerRef}
+        // PM 2026-05-27 任务 3: 1:1 跟手 progress-based autohide — transform / opacity
+        // 在 useEffect 内 imperatively set, 不用 React state + CSS transition (那样会
+        // 有 threshold 等待 + 二值切换感, PM 反馈"突然"). 这里 will-change 提示浏览器
+        // 提前合成 layer, 60fps 跟手稳.
+        className="sticky top-0 z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur will-change-transform"
         onClick={(e) => {
           // Skip when click is on chips, refresh button, etc.
           if ((e.target as HTMLElement).closest("button")) return;
