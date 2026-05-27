@@ -97,6 +97,33 @@ const OWNER_DEVICE_CTE = (() => {
 // 直接拼到 WHERE 子句的 fragment：device_id NOT IN (...owner devices...)
 const NOT_OWNER_SQL = `device_id NOT IN (${OWNER_DEVICE_CTE})`;
 
+// "真实用户" device 子查询 — 排除 itdog/ping 测速、link preview 爬虫、SEO 监控
+// 等"打开页面就走"的合成流量。判定:30 天内有 interact 事件 (点击/抽屉/视频/筛选/
+// impression 等) OR 总停留 > 5 秒。
+// 2026-05-27: user 反馈今日 DAU 49 异常,排查发现 38 个零互动 < 5 秒,正是 itdog 全国
+// 节点测速 (一次测速 30-50 个不同 device_id 独立 Chrome UA)。事件数据保留不动,只在
+// metric query 加这层过滤。
+// 窗口取 30 天 = 覆盖 MAU 最大需求;30 天内有过 1 次互动的 device,以后即使快速访问也算真人。
+const REAL_USER_INTERACT_EVENTS = [
+  'item_click',
+  'item_open_drawer',
+  'video_play_start',
+  'video_effective_play',
+  'image_lightbox_open',
+  'source_filter_change',
+  'sort_change',
+  'new_content_banner_click',
+  'item_impression',
+] as const;
+const REAL_USER_DEVICE_CTE = `
+  SELECT device_id FROM events
+  WHERE occurred_at > (strftime('%s','now') - 30 * 86400) * 1000
+  GROUP BY device_id
+  HAVING MAX(CASE WHEN event_type IN (${REAL_USER_INTERACT_EVENTS.map((e) => `'${e}'`).join(',')}) THEN 1 ELSE 0 END) = 1
+      OR (MAX(occurred_at) - MIN(occurred_at)) > 5000
+`;
+const IS_REAL_USER_SQL = `device_id IN (${REAL_USER_DEVICE_CTE})`;
+
 async function metricOverview(env: Env) {
   // DAU "今日" = 自然日（BJT 0 点 - 当前时刻），不是最近 24h 滚动。
   // 滚动窗口的 bug：同一天里 DAU 可能上下波动 — 昨天某时段的 device 滑出窗口
@@ -116,8 +143,19 @@ async function metricOverview(env: Env) {
       COUNT(*) AS total_events
     FROM events
     WHERE ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
   `).first<{ dau: number; wau: number; mau: number; total_devices: number; total_events: number }>();
-  return { ...row };
+
+  // 同时算一下被过滤的合成流量数 (transparency 用,方便日后审计)
+  const synth = await env.DB.prepare(`
+    SELECT COUNT(DISTINCT device_id) AS synthetic_today
+    FROM events
+    WHERE occurred_at >= strftime('%s', date('now', '+8 hours'), '-8 hours') * 1000
+      AND ${NOT_OWNER_SQL}
+      AND device_id NOT IN (${REAL_USER_DEVICE_CTE})
+  `).first<{ synthetic_today: number }>();
+
+  return { ...row, synthetic_today: synth?.synthetic_today ?? 0 };
 }
 
 async function metricDauTrend(env: Env) {
@@ -133,6 +171,7 @@ async function metricDauTrend(env: Env) {
     FROM events
     WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
       AND ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
     GROUP BY day
     ORDER BY day
   `).bind(...ERROR_EVENT_TYPES).all();
@@ -155,6 +194,7 @@ async function metricRetention(env: Env) {
       FROM events
       WHERE device_id NOT IN (SELECT device_id FROM bot_devices)
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY device_id
     )
     SELECT
@@ -183,6 +223,7 @@ async function metricEventDistribution(env: Env) {
     WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
       AND event_type NOT IN (${placeholders})
       AND ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
     GROUP BY event_type
     ORDER BY events DESC
     LIMIT 25
@@ -207,6 +248,7 @@ async function metricFunnel(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY device_id
     )
     SELECT
@@ -238,6 +280,7 @@ async function metricSessionDuration(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY day, device_id
       HAVING COUNT(*) >= 2 AND session_seconds > 0
     )
@@ -265,6 +308,7 @@ async function metricSessionDuration(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-7*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY date(occurred_at/1000,'unixepoch','+8 hours'), device_id
       HAVING COUNT(*) >= 2 AND session_seconds > 0
     )
@@ -338,6 +382,7 @@ async function metricTopDevices(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY device_id, day
     ),
     per_dev AS (
@@ -348,6 +393,7 @@ async function metricTopDevices(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY device_id
     )
     SELECT
@@ -381,6 +427,7 @@ async function metricDrawerBySource(env: Env) {
     WHERE event_type = 'item_open_drawer'
       AND occurred_at > (strftime('%s','now')-7*86400)*1000
       AND ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
     GROUP BY source
     ORDER BY opens DESC
   `).all();
@@ -403,6 +450,7 @@ async function metricFeedDepth(env: Env) {
       FROM events
       WHERE occurred_at > (strftime('%s','now')-30*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
       GROUP BY day, device_id
       HAVING opens > 0 OR impressions > 0 OR drawer_opens > 0
     )
@@ -439,6 +487,7 @@ async function metricChannelDwell(env: Env) {
       WHERE event_type = 'source_filter_change'
         AND occurred_at > (strftime('%s','now')-7*86400)*1000
         AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
     ),
     dwell AS (
       SELECT
@@ -548,7 +597,7 @@ ${adminNavHtml('dashboard')}
 <main>
 
 <div class="kpi-row" id="kpis" data-testid="kpis-row">
-  <div class="kpi" data-testid="kpi-dau"><div class="label">DAU · 今日</div><div class="value" id="kpi-dau">—</div><div class="hint">最近 24h 独立 device</div></div>
+  <div class="kpi" data-testid="kpi-dau"><div class="label">DAU · 今日</div><div class="value" id="kpi-dau">—</div><div class="hint" id="kpi-dau-hint">真实活跃 device (BJT 当日)</div></div>
   <div class="kpi" data-testid="kpi-wau"><div class="label">WAU · 7d</div><div class="value" id="kpi-wau">—</div><div class="hint">最近 7 天独立 device</div></div>
   <div class="kpi" data-testid="kpi-mau"><div class="label">MAU · 30d</div><div class="value" id="kpi-mau">—</div><div class="hint">最近 30 天独立 device</div></div>
   <div class="kpi" data-testid="kpi-total"><div class="label">累计 device</div><div class="value" id="kpi-total">—</div><div class="hint">events 表全部 unique</div></div>
@@ -729,6 +778,11 @@ async function loadOverview() {
     document.getElementById('kpi-mau').textContent = fmt(d.mau);
     document.getElementById('kpi-total').textContent = fmt(d.total_devices);
     document.getElementById('kpi-events').textContent = fmt(d.total_events);
+    // 合成流量 (测速 / preview bot / SEO 监控) 提示
+    const hintEl = document.getElementById('kpi-dau-hint');
+    if (hintEl && d.synthetic_today != null) {
+      hintEl.textContent = '真实活跃 device · 已剔 ' + fmt(d.synthetic_today) + ' 个测速/bot';
+    }
   } catch (e) { console.error('overview', e); }
 }
 
