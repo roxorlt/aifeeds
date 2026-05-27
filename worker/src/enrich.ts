@@ -2,7 +2,15 @@
 // by calling cdn.syndication.twimg.com (same API react-tweet uses).
 // Replaces the local Python enrich_from_syndication.py for cloud-side runs.
 
-import { fetchTweetsScrapeBadger, fetchListTweetsPage, sbTweetToIngestItem } from './scrapebadger';
+import { fetchTweetsScrapeBadger, fetchListTweetsPage, sbTweetToIngestItem, type SbTweet } from './scrapebadger';
+import {
+  parseSeenSet,
+  serializeSeenSet,
+  findStopIndex,
+  partitionForCatchup,
+  SEEN_SET_MAX_SIZE,
+  CATCHUP_THRESHOLD_DEFAULT,
+} from './x-list-cursor';
 
 export interface EnrichEnv {
   DB: D1Database;
@@ -14,6 +22,12 @@ export interface EnrichEnv {
   // 对每条新 tweet 触发 instance；缺失时降级到「写 D1 + 等老 preempt cron」
   // 兜底（不会破坏老路径）。设计：docs/plans/2026-05-16-x-main-pipeline-workflows-design.md
   X_TWEET_PIPELINE_WORKFLOW?: Workflow;
+  /**
+   * X list-poll 模式开关（M17 灰度）：
+   * 'cursor-driven'（默认）= 游标驱动（设计文档 docs/plans/2026-05-22-x-list-cursor-driven-design.md）
+   * 'fixed-pages'         = 旧逻辑（固定 maxPages=3 + 整页全 known 早停）
+   */
+  LIST_POLL_MODE?: string;
 }
 
 const SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result";
@@ -2148,9 +2162,185 @@ export interface ListPollIngestResult {
   duration_ms: number;
   early_stop: boolean;
   error?: string;
+  // ─── M17 cursor-driven 新增（可选，旧 caller 不受影响） ─────
+  stop_reason?: 'hit_seen' | 'hard_max' | 'no_cursor' | 'error';
+  cold_start?: boolean;
+  pending_count?: number;
 }
 
-export async function runListPollIngest(
+/**
+ * 把一组 tweet upsert 到 items 表，返回 new vs updated 分类 + 新 items 元信息。
+ *
+ * 抽自原 runListPollIngest 的 upsert + new-item-collection 逻辑（M17 抽 helper
+ * 让 fixed-pages / cursor-driven 两个模式共用同一份 SQL）。SQL 内 ON CONFLICT
+ * 子句和 json_patch 合并语义 1:1 保留——这部分是反复踩坑后稳定的版本，别动。
+ */
+async function upsertTweetsAndCollectNew(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  tweets: SbTweet[],
+): Promise<{
+  newCount: number;
+  updatedCount: number;
+  newItems: Array<{
+    itemId: string;
+    publishedAt: string | null;
+    hasQuoteRef: boolean;
+    hasReplyRef: boolean;
+    hasLinkCard: boolean;
+    hasRetweetRef: boolean;
+  }>;
+}> {
+  // 视频补全：SB get-tweets-by-ids/lists 都不返 mp4 url，只给缩略图。
+  // 找出本批带视频的 tweet，逐条调免费的 syndication API 拿 mp4 variants。
+  // 数量小（典型 3-8 视频/页），串行调用即可，免费不计 SB credits。
+  //
+  // Lookup key 用 tweet_id 而非 SB media_key：syndication mediaDetails 里
+  // id_str/id 经常返 null（实测过），用它当 key 永远 miss。一个 tweet
+  // 99% 只有 1 个 video，用 tweet_id 简单可靠；多 video 推 fallback 取首条。
+  const videoMp4Map = new Map<string, string>();
+  const videoTweets = tweets.filter((t) =>
+    (t.media || []).some((m) => m.type === 'video' || m.type === 'animated_gif'),
+  );
+  for (const vt of videoTweets) {
+    if (!vt.id) continue;
+    try {
+      const fr = await fetchTweet(vt.id);
+      if (!fr?.data) continue;
+      const mediaDetails = (fr.data as Record<string, unknown>).mediaDetails as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (!mediaDetails) continue;
+      for (const md of mediaDetails) {
+        if (md.type !== 'video' && md.type !== 'animated_gif') continue;
+        const variants =
+          ((md.video_info as Record<string, unknown>)?.variants as Array<{
+            content_type?: string;
+            bitrate?: number;
+            url?: string;
+          }>) || [];
+        const mp4s = variants.filter((v) => v.content_type === 'video/mp4' && v.url);
+        mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+        const best = mp4s[0]?.url;
+        if (best && !videoMp4Map.has(vt.id)) videoMp4Map.set(vt.id, best);
+      }
+    } catch {
+      // 单条失败不影响其它，下次 cron 还会再试
+    }
+  }
+
+  const composedIds = tweets.map((t) => `x_list:${t.id}`).filter(Boolean);
+  if (composedIds.length === 0) {
+    return { newCount: 0, updatedCount: 0, newItems: [] };
+  }
+
+  // 哪些已经在 D1 — 用来判断区分 insert vs update + 给调用方算 early stop / cursor 推进
+  const placeholders = composedIds.map(() => '?').join(',');
+  const existingRows = await env.DB.prepare(
+    `SELECT id FROM items WHERE id IN (${placeholders})`,
+  )
+    .bind(...composedIds)
+    .all<{ id: string }>();
+  const existingSet = new Set(existingRows.results.map((row) => row.id));
+
+  // upsert 整批（已存在的也走，让 metrics 跟着 SB 实时刷新）
+  const stmts: D1PreparedStatement[] = [];
+  let newCount = 0;
+  let updatedCount = 0;
+  const newItems: Array<{
+    itemId: string;
+    publishedAt: string | null;
+    hasQuoteRef: boolean;
+    hasReplyRef: boolean;
+    hasLinkCard: boolean;
+    hasRetweetRef: boolean;
+  }> = [];
+
+  for (const t of tweets) {
+    const item = sbTweetToIngestItem(t, videoMp4Map);
+    if (!item) continue;
+    const id = `x_list:${item.source_id}`;
+    stmts.push(
+      env.DB.prepare(`
+        INSERT INTO items (id, source_type, source_id, title, content,
+          content_translated, author, handle, url, media, metrics, published_at,
+          scraped_at, is_relevant, matched_by, lang, extra)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          content = CASE
+            WHEN items.content IS NULL OR length(coalesce(excluded.content, '')) >= length(items.content)
+              THEN excluded.content
+            ELSE items.content
+          END,
+          media = excluded.media,
+          metrics = excluded.metrics,
+          -- extra merge：以 items.extra（旧）为基础，excluded.extra（新 SB
+          -- 抓取）覆盖同名字段。旧 extra 里 backfill 写入的字段（quote_of,
+          -- reply_of, retweet_of, link_card, thread_root_id, longform,
+          -- enriched_at, reply_enriched_at, retweet_enriched_at 等）会被
+          -- 完整保留，不再被新 SB 数据洗掉。
+          -- 之前的实现只保留 longform/enriched_at 两个字段，导致每次
+          -- list-poll 重抓同一推都把 backfill 的嵌套数据擦掉（用户报
+          -- /t/2055058976530919843 quote_of 丢失的根因）。
+          extra = CASE
+            WHEN items.extra IS NULL THEN excluded.extra
+            WHEN excluded.extra IS NULL THEN items.extra
+            ELSE json_patch(items.extra, excluded.extra)
+          END
+      `).bind(
+        id,
+        item.source_type,
+        item.source_id,
+        item.title,
+        item.content,
+        item.content_translated,
+        item.author,
+        item.handle,
+        item.url,
+        item.media,
+        item.metrics,
+        item.published_at,
+        item.scraped_at,
+        item.is_relevant,
+        item.matched_by,
+        item.lang,
+        item.extra,
+      ),
+    );
+    if (!existingSet.has(id)) {
+      newCount++;
+      // 解析 item.extra 拿 workflow signals（quote / reply / link_card / retweet）
+      let extraObj: Record<string, unknown> = {};
+      try {
+        extraObj = JSON.parse(item.extra || '{}') as Record<string, unknown>;
+      } catch { /* ignore */ }
+      newItems.push({
+        itemId: id,
+        publishedAt: item.published_at ?? null,
+        hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+        hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+        hasLinkCard: !!extraObj.link_card,
+        hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
+      });
+    } else {
+      updatedCount++;
+    }
+  }
+
+  if (stmts.length > 0) {
+    await env.DB.batch(stmts);
+  }
+
+  return { newCount, updatedCount, newItems };
+}
+
+/**
+ * 旧版固定 maxPages list-poll ingest（M17 之前的实现）。
+ *
+ * 保留作为 LIST_POLL_MODE='fixed-pages' 灰度回滚开关。新代码默认走
+ * runListPollIngestCursorDriven。两个版本通过 upsertTweetsAndCollectNew
+ * helper 共用 D1 batch upsert 逻辑（M17 抽出来去重）。
+ */
+async function runListPollIngestFixedPages(
   env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
   listId: string,
   maxPages = 3,
@@ -2159,7 +2349,7 @@ export async function runListPollIngest(
   let cursor: string | null = null;
   let totalCredits = 0;
   let totalSeen = 0;
-  let inserted = 0;
+  let updatedCount = 0;
   let newCount = 0;
   let earlyStop = false;
   let pages = 0;
@@ -2181,146 +2371,21 @@ export async function runListPollIngest(
     const composedIds = r.tweets.map((t) => `x_list:${t.id}`).filter(Boolean);
     if (composedIds.length === 0) break;
 
-    // 哪些已经在 D1 — 用来判断 early stop + 区分 insert vs update
-    const placeholders = composedIds.map(() => '?').join(',');
-    const existingRows = await env.DB.prepare(
-      `SELECT id FROM items WHERE id IN (${placeholders})`,
-    )
-      .bind(...composedIds)
-      .all<{ id: string }>();
-    const existingSet = new Set(existingRows.results.map((row) => row.id));
-
-    // 视频补全：SB get-tweets-by-ids/lists 都不返 mp4 url，只给缩略图。
-    // 找出本页带视频的 tweet，逐条调免费的 syndication API 拿 mp4 variants。
-    // 数量小（典型 3-8 视频/页），串行调用即可，免费不计 SB credits。
-    //
-    // Lookup key 用 tweet_id 而非 SB media_key：syndication mediaDetails 里
-    // id_str/id 经常返 null（实测过），用它当 key 永远 miss。一个 tweet
-    // 99% 只有 1 个 video，用 tweet_id 简单可靠；多 video 推 fallback 取首条。
-    const videoMp4Map = new Map<string, string>();
-    const videoTweets = r.tweets.filter((t) =>
-      (t.media || []).some((m) => m.type === 'video' || m.type === 'animated_gif'),
-    );
-    for (const vt of videoTweets) {
-      if (!vt.id) continue;
-      try {
-        const fr = await fetchTweet(vt.id);
-        if (!fr?.data) continue;
-        const mediaDetails = (fr.data as Record<string, unknown>).mediaDetails as
-          | Array<Record<string, unknown>>
-          | undefined;
-        if (!mediaDetails) continue;
-        for (const md of mediaDetails) {
-          if (md.type !== 'video' && md.type !== 'animated_gif') continue;
-          const variants =
-            ((md.video_info as Record<string, unknown>)?.variants as Array<{
-              content_type?: string;
-              bitrate?: number;
-              url?: string;
-            }>) || [];
-          const mp4s = variants.filter((v) => v.content_type === 'video/mp4' && v.url);
-          mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-          const best = mp4s[0]?.url;
-          if (best && !videoMp4Map.has(vt.id)) videoMp4Map.set(vt.id, best);
-        }
-      } catch {
-        // 单条失败不影响其它，下次 cron 还会再试
-      }
+    let pageResult: Awaited<ReturnType<typeof upsertTweetsAndCollectNew>>;
+    try {
+      pageResult = await upsertTweetsAndCollectNew(env, r.tweets);
+    } catch (e) {
+      console.error('[list-poll-ingest] batch error:', e);
+      firstError = e instanceof Error ? e.message : 'batch_error';
+      break;
     }
-
-    // upsert 整页（已存在的也走，让 metrics 跟着 SB 实时刷新）
-    const stmts: D1PreparedStatement[] = [];
-    const newItemsForWorkflow: Array<{
-      itemId: string;
-      hasQuoteRef: boolean;
-      hasReplyRef: boolean;
-      hasLinkCard: boolean;
-      hasRetweetRef: boolean;
-    }> = [];
-    for (const t of r.tweets) {
-      const item = sbTweetToIngestItem(t, videoMp4Map);
-      if (!item) continue;
-      const id = `x_list:${item.source_id}`;
-      stmts.push(
-        env.DB.prepare(`
-          INSERT INTO items (id, source_type, source_id, title, content,
-            content_translated, author, handle, url, media, metrics, published_at,
-            scraped_at, is_relevant, matched_by, lang, extra)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            content = CASE
-              WHEN items.content IS NULL OR length(coalesce(excluded.content, '')) >= length(items.content)
-                THEN excluded.content
-              ELSE items.content
-            END,
-            media = excluded.media,
-            metrics = excluded.metrics,
-            -- extra merge：以 items.extra（旧）为基础，excluded.extra（新 SB
-            -- 抓取）覆盖同名字段。旧 extra 里 backfill 写入的字段（quote_of,
-            -- reply_of, retweet_of, link_card, thread_root_id, longform,
-            -- enriched_at, reply_enriched_at, retweet_enriched_at 等）会被
-            -- 完整保留，不再被新 SB 数据洗掉。
-            -- 之前的实现只保留 longform/enriched_at 两个字段，导致每次
-            -- list-poll 重抓同一推都把 backfill 的嵌套数据擦掉（用户报
-            -- /t/2055058976530919843 quote_of 丢失的根因）。
-            extra = CASE
-              WHEN items.extra IS NULL THEN excluded.extra
-              WHEN excluded.extra IS NULL THEN items.extra
-              ELSE json_patch(items.extra, excluded.extra)
-            END
-        `).bind(
-          id,
-          item.source_type,
-          item.source_id,
-          item.title,
-          item.content,
-          item.content_translated,
-          item.author,
-          item.handle,
-          item.url,
-          item.media,
-          item.metrics,
-          item.published_at,
-          item.scraped_at,
-          item.is_relevant,
-          item.matched_by,
-          item.lang,
-          item.extra,
-        ),
-      );
-      if (!existingSet.has(id)) {
-        newCount++;
-        // 解析 item.extra 拿 workflow signals（quote / reply / link_card / retweet）
-        let extraObj: Record<string, unknown> = {};
-        try {
-          extraObj = JSON.parse(item.extra || '{}') as Record<string, unknown>;
-        } catch { /* ignore */ }
-        newItemsForWorkflow.push({
-          itemId: id,
-          hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
-          hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
-          hasLinkCard: !!extraObj.link_card,
-          hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
-        });
-      } else {
-        inserted++; // 实际是 update
-      }
-    }
-
-    if (stmts.length > 0) {
-      try {
-        await env.DB.batch(stmts);
-      } catch (e) {
-        console.error('[list-poll-ingest] batch error:', e);
-        firstError = e instanceof Error ? e.message : 'batch_error';
-        break;
-      }
-    }
+    newCount += pageResult.newCount;
+    updatedCount += pageResult.updatedCount;
 
     // 阶段 4 cutover：D1 batch 成功后，对每条新 tweet 触发 XTweetPipelineWorkflow
     // instance（helper 写 marker + create）。
-    if (env.X_TWEET_PIPELINE_WORKFLOW && newItemsForWorkflow.length > 0) {
-      for (const n of newItemsForWorkflow) {
+    if (env.X_TWEET_PIPELINE_WORKFLOW && pageResult.newItems.length > 0) {
+      for (const n of pageResult.newItems) {
         await triggerXWorkflowForItem(env, n.itemId, {
           hasQuoteRef: n.hasQuoteRef,
           hasReplyRef: n.hasReplyRef,
@@ -2331,7 +2396,7 @@ export async function runListPollIngest(
     }
 
     // 全部都 already known → early stop
-    if (existingSet.size === composedIds.length) {
+    if (pageResult.newCount === 0 && pageResult.updatedCount === composedIds.length) {
       earlyStop = true;
       break;
     }
@@ -2344,7 +2409,7 @@ export async function runListPollIngest(
     list_id: listId,
     pages,
     tweets_seen: totalSeen,
-    inserted_or_updated: inserted + newCount,
+    inserted_or_updated: updatedCount + newCount,
     newly_inserted: newCount,
     credits_used: totalCredits,
     rate_limit_remaining: lastRateRemaining,
@@ -2352,6 +2417,202 @@ export async function runListPollIngest(
     early_stop: earlyStop,
     error: firstError,
   };
+}
+
+/**
+ * 游标驱动版 list-poll ingest（M17，2026-05-22）。
+ *
+ * 设计文档: docs/plans/2026-05-22-x-list-cursor-driven-design.md
+ *
+ * 与旧的 runListPollIngestFixedPages 的核心差异：
+ * 1. 从 sources.cursor 读上轮顶端 10 个 tweet_id（seen_set）
+ * 2. 翻页时本页 ids ∩ seen_set 非空就停（替代「整页全 known」早停）
+ * 3. 硬上限 10 页（兜底，防 seen_set 全被删导致无限翻）
+ * 4. 整轮成功才更新 sources.cursor（中途失败保留旧值，下轮重头）
+ * 5. newly_inserted > 70 时分流走 partitionForCatchup，剩余 pending_workflow=1
+ *    由 scheduled() 收尾步骤消化
+ */
+async function runListPollIngestCursorDriven(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  listId: string,
+): Promise<ListPollIngestResult> {
+  const HARD_MAX_PAGES = 10;
+
+  const t0 = Date.now();
+  let totalCredits = 0;
+  let totalSeen = 0;
+  let newCount = 0;
+  let updatedCount = 0;
+  let pages = 0;
+  let lastRateRemaining: number | undefined;
+  let firstError: string | undefined;
+  let stopReason: 'hit_seen' | 'hard_max' | 'no_cursor' | 'error' = 'error';
+
+  // 1. 读 sources.cursor → seen_set
+  const sourceId = `x_list:${listId}`;
+  const sourceRow = await env.DB.prepare(
+    `SELECT cursor FROM sources WHERE id = ?`,
+  ).bind(sourceId).first<{ cursor: string | null }>();
+  const seenSet = parseSeenSet(sourceRow?.cursor ?? null);
+  const isColdStart = seenSet.size === 0;
+
+  // 2. 累积所有新 items（跨多页），整轮成功后再统一 trigger workflow
+  const allNewItems: Array<{
+    itemId: string;
+    publishedAt: string | null;
+    hasQuoteRef: boolean;
+    hasReplyRef: boolean;
+    hasLinkCard: boolean;
+    hasRetweetRef: boolean;
+  }> = [];
+
+  // 第一页的顶端 ids（用于结束时更新 cursor）
+  let firstPageTopIds: string[] = [];
+
+  let cursor: string | null = null;
+  let stopped = false;
+
+  for (let p = 0; p < HARD_MAX_PAGES && !stopped; p++) {
+    const r = await fetchListTweetsPage(env, listId, cursor);
+    pages++;
+    totalCredits += r.creditsUsed || 0;
+    totalSeen += r.tweets.length;
+    lastRateRemaining = r.rateLimitRemaining;
+
+    if (r.error) {
+      firstError = r.error;
+      stopReason = 'error';
+      break;
+    }
+    if (r.tweets.length === 0) {
+      stopReason = 'no_cursor';
+      stopped = true;
+      break;
+    }
+
+    const pageIds = r.tweets.map((t) => t.id).filter((x): x is string => !!x);
+    if (p === 0) {
+      firstPageTopIds = pageIds.slice(0, SEEN_SET_MAX_SIZE);
+    }
+
+    // 命中判定：seen_set 内第一个命中位置之前的都是新的
+    const stopIndex = findStopIndex(pageIds, seenSet);
+    const tweetsToProcess = stopIndex === -1 ? r.tweets : r.tweets.slice(0, stopIndex);
+
+    let pageResult: Awaited<ReturnType<typeof upsertTweetsAndCollectNew>>;
+    try {
+      pageResult = await upsertTweetsAndCollectNew(env, tweetsToProcess);
+    } catch (e) {
+      console.error('[list-poll-ingest:cursor] batch error:', e);
+      firstError = e instanceof Error ? e.message : 'batch_error';
+      stopReason = 'error';
+      break;
+    }
+    newCount += pageResult.newCount;
+    updatedCount += pageResult.updatedCount;
+    allNewItems.push(...pageResult.newItems);
+
+    if (stopIndex !== -1) {
+      stopReason = 'hit_seen';
+      stopped = true;
+      break;
+    }
+    if (!r.nextCursor) {
+      stopReason = 'no_cursor';
+      stopped = true;
+      break;
+    }
+    cursor = r.nextCursor;
+  }
+
+  if (!stopped && pages >= HARD_MAX_PAGES) {
+    stopReason = 'hard_max';
+  }
+
+  // 3. 整轮成功才推进 cursor + trigger workflow
+  const allSuccess = !firstError;
+  let pendingCount = 0;
+  if (allSuccess) {
+    // catch-up 分流：按 published_at desc 排序（SB 返回已经是时序，re-sort 防御）
+    allNewItems.sort((a, b) => (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''));
+    const partition = partitionForCatchup(allNewItems, CATCHUP_THRESHOLD_DEFAULT);
+    pendingCount = partition.pending.length;
+
+    // 立即 trigger immediate 部分
+    if (env.X_TWEET_PIPELINE_WORKFLOW) {
+      for (const n of partition.immediate) {
+        await triggerXWorkflowForItem(env, n.itemId, {
+          hasQuoteRef: n.hasQuoteRef,
+          hasReplyRef: n.hasReplyRef,
+          hasLinkCard: n.hasLinkCard,
+          hasRetweetRef: n.hasRetweetRef,
+        });
+      }
+    }
+
+    // pending 部分标记 pending_workflow=1，由 scheduled() 后续 tick 消化
+    if (partition.pending.length > 0) {
+      const stmts = partition.pending.map((n) =>
+        env.DB.prepare(`UPDATE items SET pending_workflow=1 WHERE id=?`).bind(n.itemId),
+      );
+      await env.DB.batch(stmts);
+    }
+
+    // 更新 sources.cursor（整轮成功才推进；中途失败保留旧值，下轮重头）
+    if (firstPageTopIds.length > 0) {
+      await env.DB.prepare(
+        `INSERT INTO sources (id, source_type, source_ref, cursor, last_success_at)
+         VALUES (?, 'x_list', ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           cursor = excluded.cursor,
+           last_success_at = excluded.last_success_at`,
+      ).bind(
+        sourceId,
+        listId,
+        serializeSeenSet(firstPageTopIds),
+        new Date().toISOString(),
+      ).run();
+    }
+  }
+
+  return {
+    mode: 'list-poll-ingest',
+    list_id: listId,
+    pages,
+    tweets_seen: totalSeen,
+    inserted_or_updated: newCount + updatedCount,
+    newly_inserted: newCount,
+    credits_used: totalCredits,
+    rate_limit_remaining: lastRateRemaining,
+    duration_ms: Date.now() - t0,
+    early_stop: stopReason === 'hit_seen',
+    error: firstError,
+    stop_reason: stopReason,
+    cold_start: isColdStart,
+    pending_count: pendingCount,
+  };
+}
+
+/**
+ * X list-poll ingest 统一入口（M17 dispatcher）。
+ *
+ * env.LIST_POLL_MODE:
+ *   'fixed-pages'    = 旧逻辑（备份用，灰度回滚开关）
+ *   'cursor-driven'  = 新逻辑（默认，M17+）
+ *   缺省            = 'cursor-driven'（默认走新）
+ *
+ * 第 3 个参数 maxPages 仅 fixed-pages 模式有效；cursor-driven 用硬编码 10。
+ */
+export async function runListPollIngest(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string; LIST_POLL_MODE?: string },
+  listId: string,
+  maxPages = 3,
+): Promise<ListPollIngestResult> {
+  const mode = (env.LIST_POLL_MODE || 'cursor-driven').toLowerCase();
+  if (mode === 'fixed-pages') {
+    return runListPollIngestFixedPages(env, listId, maxPages);
+  }
+  return runListPollIngestCursorDriven(env, listId);
 }
 
 // ─── classify-pending：DeepSeek 批量判 is_relevant + ai_summary ───
@@ -6686,4 +6947,65 @@ export async function triggerXWorkflowForItem(
     console.error(`[x-trigger] create failed for ${itemId}:`, e);
     return 'failed';
   }
+}
+
+/**
+ * 收尾消化「待加工」队列（M17 catch-up 平摊机制）。
+ * 每个 cron tick 主流程做完后调用一次，按 published_at asc（最老先）取 N 条
+ * pending_workflow=1 的 item，逐条 trigger workflow，触发成功的清 0。
+ *
+ * @returns { drained, remaining } 本次消化数 + 剩余 pending 数（用于通知 / 监控）
+ */
+export async function drainPendingWorkflowQueue(
+  env: EnrichEnv,
+  batchSize: number = CATCHUP_THRESHOLD_DEFAULT,
+): Promise<{ drained: number; remaining: number; error?: string }> {
+  if (!env.X_TWEET_PIPELINE_WORKFLOW) {
+    return { drained: 0, remaining: 0, error: 'no_workflow_binding' };
+  }
+
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      `SELECT id, extra FROM items
+       WHERE pending_workflow = 1 AND source_type = 'x_list'
+       ORDER BY published_at ASC
+       LIMIT ?`,
+    ).bind(batchSize).all<{ id: string; extra: string | null }>();
+  } catch (e) {
+    return { drained: 0, remaining: -1, error: e instanceof Error ? e.message : 'select_failed' };
+  }
+
+  let drained = 0;
+  for (const r of rows.results) {
+    let extraObj: Record<string, unknown> = {};
+    try {
+      extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+    } catch { /* ignore */ }
+    try {
+      await triggerXWorkflowForItem(env, r.id, {
+        hasQuoteRef: !!(extraObj.quote_of_id || extraObj.quote_of),
+        hasReplyRef: !!(extraObj.reply_to_id || extraObj.reply_of_id || extraObj.reply_of),
+        hasLinkCard: !!extraObj.link_card,
+        hasRetweetRef: !!(extraObj.is_retweet || extraObj.retweeted_status_id || extraObj.retweet_of_id || extraObj.retweet_of),
+      });
+      // 触发成功后清 pending 标志
+      await env.DB.prepare(`UPDATE items SET pending_workflow=0 WHERE id=?`).bind(r.id).run();
+      drained++;
+    } catch (e) {
+      // 单条失败不影响其它；下次 cron tick 还能再试
+      console.error(`[drain-pending] item=${r.id} err:`, e);
+    }
+  }
+
+  // 查剩余总量（监控用）
+  let remaining = -1;
+  try {
+    const rest = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM items WHERE pending_workflow = 1 AND source_type = 'x_list'`,
+    ).first<{ n: number }>();
+    remaining = rest?.n ?? -1;
+  } catch { /* ignore */ }
+
+  return { drained, remaining };
 }

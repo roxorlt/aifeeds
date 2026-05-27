@@ -118,29 +118,26 @@ docs/
 
 **统一规范**：新加的源/任务遵循上表，不要凭感觉乱挑模型。如有"必须升 pro"的复杂场景，先在 PR 里写清楚理由。
 
-### ⚠️ 抓取停止条件：禁用 ID 游标（反复踩过的坑）
+### X list 抓取：游标驱动停止条件（M17，2026-05-22 上线）
 
-**核心事实**：X list 页面的默认排序是**热度排序**（For You / Top），**不是时间倒序**，**不是 ID 倒序**。
-这意味着：
+**关键事实更正**（2026-05-21 实测确认）：
+- X web 端访问 list 默认是热度排序（For You / Top）
+- 但 aifeeds 走的 **ScrapeBadger `/v1/twitter/lists/{id}/tweets` endpoint 是严格时间倒序**（行为等价于 X 官方 `ListLatestTweetsTimeline`）
+- 历史上 CLAUDE.md 里「禁止基于 tweet_id 做游标」的禁令是基于「热度排序」前提写的，前提作废，禁令也作废
 
-- 往下滚 ≠ ID 依次变小
-- 新热的 tweet 可能 ID 比"更老但冷门"的 tweet 大
-- 一个 batch 里会同时出现 2025-10 的老爆款 + 2026-04 的新帖
+**当前抓取停止策略**（runListPollIngest，cursor-driven 模式）：
 
-**禁止的做法**（已经讨论过很多次，别再提了）：
+- `sources.cursor` 字段存上次抓完后 page 1 的顶端 10 个 `tweet_id`（JSON 数组），称 seen_set
+- 每次抓取从最新一页开始翻；本页任意 `id ∈ seen_set` 即停（时序保证：命中之后的全是上轮处理过的）
+- 硬上限 10 页（兜底，防 seen_set 全部被作者删导致无限翻爆 API 费用）
+- 整轮成功才更新 seen_set；中途失败保留旧值，下轮重头（D1 upsert 无副作用）
+- `newly_inserted > 70` 时进入 catch-up 分流：最新 70 条立即触发 workflow，其余 `items.pending_workflow=1`，由后续 cron tick 在 `drainPendingWorkflowQueue` 里平摊消化
 
-- ❌ 基于 `tweet_id ≤ last_max_tweet_id` 做早停
-- ❌ 把 snowflake ID 当成 "pagination cursor" 来判断"是否已经翻过"
-- ❌ 把 `lists.cursor` / `lists.last_max_tweet_id` 列当 ID 边界用（这些列的存在是历史包袱，不要依赖）
+**灰度开关**：`LIST_POLL_MODE`（worker secret）
+- `cursor-driven`（默认）= 新逻辑
+- `fixed-pages`        = 旧逻辑（回滚开关，跑 1 周稳定后可删）
 
-**允许的停止信号**（都是 sort-agnostic，热度乱序下也成立）：
-
-1. **连续 N 个 batch 都是"0 new-to-DB"**：`known_ids` 命中率 100% 持续 N 轮 → feed 已耗尽新内容
-2. **已知覆盖率 ≥ 阈值持续 K 轮**：例如最近 3 个 batch 里 ≥80% 的 tweet 都在 DB 里 → 已经在反复看老货
-3. **时间盒**：整轮超过 T 秒强制结束（当前 30 分钟，可以收紧到 5-10 分钟）
-4. **滚动轮数上限**：超过 M 次 scroll 直接停（粗粒度兜底）
-
-如果某 PR 里出现"根据 tweet_id 判断是否过了游标"这种逻辑，就是走错了路，打回重写。
+**完整设计**：见 `docs/plans/2026-05-22-x-list-cursor-driven-design.md`
 
 ## 自动化 Chrome 工作流（已退役 2026-05-06，规范归档）
 
