@@ -55,7 +55,7 @@ import {
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
-import { notifyCronSummary, sendDailyWarningDigest } from './notifier';
+import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
 import {
   handleHuodongxingPoc,
   runHuodongxingFetchList,
@@ -1516,17 +1516,25 @@ export default {
             await notifyCronSummary(env, 'HF Daily Papers 每日抓取', r as unknown as Record<string, unknown>);
             return;
           }
-          // ─── Daily warning digest (UTC 23:00 = BJT 07:00) ──────────────
+          // ─── Daily warning digest + health checks (UTC 23:00 = BJT 07:00) ─
           // 2026-05-25 告警分级 Phase A:flush KV 攒批 warning,推一次合并日报。
+          // 2026-05-27 Phase B:同 tick 跑 daily health checks(翻译失败率 +
+          //   X metrics 覆盖率)。同一 cron tick 串行,~5s 总耗时。
           // 早 7 点发,user 起床看,不打扰半夜睡眠。
-          // 没 warning 不推(empty buffer 直接 return,避免无意义打扰)。
+          // 没 warning + 无 alert 不推(empty 不打扰)。
           if (hour === 23 && minute === 0) {
-            const r = await recordCronRun(
+            const r1 = await recordCronRun(
               env,
               { name: 'warning-digest', source: 'common', category: 'system' },
               () => sendDailyWarningDigest(env),
             );
-            console.log(`[cron] warning-digest result:`, JSON.stringify(r));
+            console.log(`[cron] warning-digest result:`, JSON.stringify(r1));
+            const r2 = await recordCronRun(
+              env,
+              { name: 'daily-health-checks', source: 'common', category: 'system' },
+              () => runDailyHealthChecks(env),
+            );
+            console.log(`[cron] daily-health-checks result:`, JSON.stringify(r2));
             return;
           }
           // ─── X list-poll-ingest (minute=25 / 55, 30 min cadence) ──
@@ -3547,6 +3555,47 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   if (mode === 'notify-digest-now') {
     const result = await sendDailyWarningDigest(env);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'daily-health-checks') {
+    // Phase B 业务规则手动触发(测试 / 应急)。返 SQL stats + 触发的告警计数。
+    const result = await runDailyHealthChecks(env);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'zero-streak-test') {
+    // 测试 / 模拟某 source 一轮 0 新增写入 ring buffer,验证 3 轮触发 critical。
+    // ?source=ph|hf|x|hdx|gh|clawhub  必传
+    // ?count=0  默认 0
+    // ?reset=1  清空当前 source 的 ZERO_STREAK_<source> + dedup key,允许重新测
+    const source = url.searchParams.get('source') || '';
+    const allow = new Set(['ph', 'hf', 'x', 'hdx', 'gh', 'clawhub']);
+    if (!allow.has(source)) {
+      return jsonResponse({ error: 'source must be one of: ' + Array.from(allow).join(' / ') }, 400, request, env);
+    }
+    if (url.searchParams.get('reset') === '1') {
+      if (env.AUTH_KV) {
+        await env.AUTH_KV.delete(`ZERO_STREAK_${source}`);
+        const utcDate = new Date().toISOString().slice(0, 10);
+        await env.AUTH_KV.delete(`ZERO_STREAK_ALERTED_${source}_${utcDate}`);
+      }
+      return jsonResponse({ ok: true, reset: source }, 200, request, env);
+    }
+    const count = parseInt(url.searchParams.get('count') || '0', 10);
+    const { checkZeroStreak } = await import('./notifier');
+    const taskName = source === 'ph' ? 'PH 每日抓取' :
+                     source === 'hf' ? 'HF Daily Papers 每日抓取' :
+                     source === 'x' ? 'X List 抓取' :
+                     source === 'hdx' ? '活动行抓取' :
+                     source === 'gh' ? 'GitHub Trending 抓取' :
+                     'ClawHub 列表抓取';
+    // 模拟 result obj — 各 source 字段不同,这里用 inserted 兜底(所有 source 都识别)
+    await checkZeroStreak(env, source, taskName, { inserted: count });
+    // 返当前 KV buffer 状态便于检查
+    let buffer: unknown = null;
+    if (env.AUTH_KV) {
+      const raw = await env.AUTH_KV.get(`ZERO_STREAK_${source}`);
+      buffer = raw ? JSON.parse(raw) : null;
+    }
+    return jsonResponse({ ok: true, source, count, buffer }, 200, request, env);
   }
   if (mode === 'backfill-x-article-bodies') {
     // PR6 (2026-05-22):扫 x_article 已抓但 body 缺的 item,X GraphQL 拿 plain_text。
