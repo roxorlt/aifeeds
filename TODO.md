@@ -52,15 +52,9 @@
   - 业务级告警（"scrape 0 new 持续 3 轮" / "翻译失败率 > 5%" / "metrics 覆盖率跌破 90%"）仍要自己写，CF 给不了语义
   - 基础错误率告警等 CF 阶段 1 的 Workers Logs 接管
 
-### 2. ClawHub 30 天热度趋势 sparkline 收尾
+### 2. ~~ClawHub 30 天热度趋势 sparkline 收尾~~ ✅ 已完成
 
-> v0 / v1 / v2 / 3-dropdown 都已上线，趋势区段的容器和阈值判断也搭好了，**只差最后一公里**：实际的 SVG 渲染。
-
-- 现状：`dashboard/src/components/ClawhubDrawerBody.tsx:562` 是占位文案 "★ stars 走势 sparkline（v2 渲染中…当前仅展示采样点数）"
-- 要做：从 `metrics_history` 拿 stars 时序数据 → 画 SVG sparkline
-- 阈值已就位：`TRENDS_MIN_DATA_POINTS = 14`（< 14 个采样点不展示，避免新 skill 一根直线丑）
-- 简单方案：手写 SVG `<polyline>`，无依赖，30 行代码搞定
-- 复杂方案：引入 visx / recharts，但只为一个 sparkline 引依赖不值
+实现：`dashboard/src/components/ClawhubDrawerBody.tsx` 内 `StarsSparkline` 组件（line 247-310）— 手写 SVG `<polygon>` 渐变填充 + `<polyline>` 折线，无图表库依赖。`fetchItem(item.id)` 拉 `metrics_history`，count ≥ 14 才展示，首尾 stars 数字 + 涨跌幅 + 起止日期一目了然。挂在抽屉「30 天趋势」`<details>` 区段（line 628-641）。
 
 ### 3. 海报视频封面预抓帧（D 方案）
 
@@ -88,7 +82,7 @@
 
 **阶段 1（这周内，3 小时）—— 纯启用观测，不动业务代码**
 - [x] **AI Gateway** — OPS 2026-05-16 已建 `aifeeds-deepseek` gateway（详见 [operations.md §10](docs/operations.md)）；BE 待办：worker 把 DeepSeek 调用 base URL 切到 `https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe06998141f3b0f9a/aifeeds-deepseek/deepseek`，is_relevant 等可缓存请求加 `cf-aig-cache-ttl: 3600` header
-- [x] **Web Analytics** — OPS 2026-05-16 已建 prod + staging 两个 site（详见 [operations.md §11](docs/operations.md)）；FE 待办：`dashboard/index.html` 加 beacon snippet（prod token `857fab92…`，staging token `9e6f987f…`，按构建 target 切）
+- [x] **Web Analytics** — OPS 2026-05-16 已建 + zone auto-inject 接管（详见 [operations.md §11](docs/operations.md)）；**FE 不需要装 beacon snippet** — CF 边缘按 UA 判断浏览器时自动注 token `850b4048…`，prod + staging 两个域都已验证（curl 带 Chrome UA 能看到注入的 `<script>`）。早期 OPS 手动建的 2 个 standalone site 测出收不到数据已删，FE 也不需要按 build target 切 token
 - [x] **Workers Logs** — BE 2026-05-16 已加（PR #34），`worker/wrangler.toml` 含 `[observability] enabled = true` + `head_sampling_rate = 1.0` + `[observability.logs] invocation_logs = true`；查日志走 CF Dashboard → Workers → xlist-api → Logs tab
 
 **阶段 2（半天）—— 图片走边缘优化**
@@ -265,40 +259,9 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 
-### 13. HarmonyOS Sans SC 字体上线（R2 自托管 + cn-font-split 子集化）
+### 13. ~~HarmonyOS Sans SC 字体上线（R2 自托管 + cn-font-split 子集化）~~ ✅ 已完成
 
-> 详见：[`docs/design-handoff.md`](docs/design-handoff.md) § 2
-
-把 dashboard 默认字体从 system stack 切到 HarmonyOS Sans SC，按字符 unicode-range 子集化后挂到 R2 + `fonts.ai-feeds.com` 子域，国内访问不被 Google Fonts 拦，单页实际只下载 ≈ 200KB。
-
-**6 步实施清单**：
-1. 从华为官方 / `chinese-fonts-cdn` 拿 Regular / Medium / Bold 三档 ttf-otf
-2. `bunx cn-font-split` 切成 ~50KB woff2 块（每档 ~30-50 个文件 + `result.css`）
-3. CF dashboard 新建 R2 bucket `ai-feeds-fonts`，绑 `fonts.ai-feeds.com` + CORS 允许 `ai-feeds.com`
-4. 改 `result.css` 字体路径为 R2 公网地址（或保持相对路径直接上传整目录）
-5. `dashboard/index.html` 加 preconnect + 3 个 stylesheet link
-6. 验证：devtools Network 实际只下载几个 50KB woff2 + Lighthouse LCP 不被字体阻塞
-
-**字体 stack 落地点**：`dashboard/src/index.css` 的 `:root { font-family: "HarmonyOS Sans SC", ... }`（完整 stack 见 handoff § 2）
-
-**session 分工**（**ops + 前端两路，backend 不参与**）：
-
-| 步骤 | 谁干 | 说明 |
-|------|------|------|
-| 1. 下字体 | 任一 session（机器操作） | 文件落到 `~/Downloads/` 或临时目录即可 |
-| 2. cn-font-split 切块 | 任一 session（npm 命令） | 输出到 `dashboard/public/fonts/` 或临时目录 |
-| 3. R2 bucket + 绑子域 + CORS | **ops** | CF 控制台操作 + DNS 解析 `fonts.ai-feeds.com`；CORS 必须允许 `https://ai-feeds.com` + `https://staging.ai-feeds.com` 两个 origin |
-| 4. 上传 woff2 + result.css | **ops**（或前端用 `wrangler r2 object put`） | 整目录传上去，相对路径仍然有效 |
-| 5. `dashboard/index.html` 加 preconnect + stylesheet link | **前端** | 加完跑 `npm run build` 看 vite 没报错；`vite dev` 看 network 实际命中 woff2 |
-| 6. `dashboard/src/index.css` 改 font-family + 验证 | **前端** | Chrome devtools Network 过滤 Font，应只看到几个 50KB 包；Lighthouse 跑一次 LCP |
-
-**backend 不动的原因**：worker 不渲染前端、不返字体；字体文件挂在独立子域 + R2 bucket，跟 `api.ai-feeds.com` worker 没耦合。
-
-**回退**：步骤 3 之前可临时用 `chinese-fonts-cdn.deno.dev` 公共 CDN（非自托管），handoff § 2 末有 fallback link 模板。前端 session 可以先用 fallback link 把视觉切过去看效果，等 ops 把 R2 + 子域准备好再换 self-host 链接
-
-**权重档位**：只引 400 / 500 / 700 三档，不要再加更多
-
-**优先级**：相对独立，不阻塞 #11 / #12，可在备案空窗期顺手做
+详见 [`docs/design-handoff.md`](docs/design-handoff.md) § 2。R2 bucket `ai-feeds-fonts` 绑 `fonts.ai-feeds.com`，cn-font-split 切的三档（hmos-regular / hmos-medium / hmos-bold）已上传，每页实际只下 ~200KB。`dashboard/index.html` line 10-13 加 preconnect + 3 个 `result.css` stylesheet link；`dashboard/src/index.css` :root font-family stack 以 "HarmonyOS Sans SC" 为主，后接 system + 中文 fallback。Medium 字重（weight=500）已在 R2 CSS 里 sed 修正成统一 family 名。
 
 ---
 
