@@ -78,6 +78,12 @@
     .pill.snap {
       transition: transform 240ms cubic-bezier(0.32, 0.72, 0, 1), width 240ms cubic-bezier(0.32, 0.72, 0, 1);
     }
+    .ink-svg {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: visible;
+    }
 
     /* Swipe area — 模拟 dashboard main */
     .swipe-area {
@@ -172,6 +178,9 @@
       <div class="chips-rail" id="rail">
         <!-- SVG ink layer 跟 pill 在同一个 absolute parent -->
         <div class="ink-layer" id="inkLayer">
+          <svg class="ink-svg" id="inkSvg" xmlns="http://www.w3.org/2000/svg">
+            <path id="bridgePath" fill="#111" d="" />
+          </svg>
           <div class="pill" id="pillA"></div>
           <div class="pill" id="pillB" style="width:0"></div>
         </div>
@@ -376,28 +385,36 @@
         bridge.style.width = `${bridgeW}px`;
         inkLayer.style.filter = "none";
       } else if (scheme === "metaball2phase") {
-        // E — PM 反馈版: 两阶段缩 + 流体连线
-        // 出场 pill: 阶段一 (0..0.4) 圆角矩形 → 正圆 (width chip.w → chip.h);
-        //          阶段二 (0.4..0.7) 正圆 → 圆点 → 消失 (width=height chip.h → 0)
-        // 入场 pill: 阶段一 (0.3..0.6) 圆点 → 正圆 (对称);
-        //          阶段二 (0.6..1) 正圆 → 圆角矩形 (对称)
-        // 连接桥: 一直从出场 pill 边缘到入场 pill 边缘 (高度 12px 比 pill 矮),
-        //        SVG goo filter 把它跟两端 pill blur 后 metaball 合并成液态形状
+        // E — PM 反馈版 v2: 两阶段缩 + 流体连线 (三阶段 + 不对称曲线 + 水流动)
+        //
+        // Timing (PM 反馈 #2: 出场/入场/连线 progress 0 同时启动):
+        //   出场 pill:
+        //     phase 1 (0..0.35)   rect chip.w → circle PILL_H, height 始终 PILL_H
+        //     phase 2 (0.35..0.6) circle → dot → 0 (width=height PILL_H → 0)
+        //     dead    (0.6..1)    disappeared
+        //   入场 pill:
+        //     phase 1 (0..0.65)   0 → circle PILL_H (慢慢长出来), width=height 同步
+        //     phase 2 (0.65..1)   circle → rect chip.w (扩开)
+        //   流体连线 (PM 反馈 #1 三阶段 + #3 不对称曲线):
+        //     phase 1 (0..0.18)   高度 0 → 1px → 12px 渐显
+        //     phase 2 (0.18..0.82) 高度稳定 12px, 上/下两条 bezier 用不同频率/相位
+        //                          /振幅的 sin 波动 → 水流不对称流动感; 始终 RAF 重绘
+        //     phase 3 (0.82..1)   高度 12px → 1px → 0 渐隐
         const PILL_H = 26;
         const fromCenter = f.left + f.width / 2;
         const toCenter = t.left + t.width / 2;
         pillA.style.display = "";
         pillB.style.display = "";
-        ensureBridge(true);
+        ensureBridge(false); // E 用 SVG path, 不用 div bridge
 
         // 出场 pill 两阶段
         let aw, ah;
-        if (p < 0.4) {
-          const tt = p / 0.4;
+        if (p < 0.35) {
+          const tt = p / 0.35;
           aw = f.width + (PILL_H - f.width) * tt;
           ah = PILL_H;
-        } else if (p < 0.7) {
-          const tt = (p - 0.4) / 0.3;
+        } else if (p < 0.6) {
+          const tt = (p - 0.35) / 0.25;
           aw = PILL_H * (1 - tt);
           ah = aw;
         } else {
@@ -408,17 +425,14 @@
         pillA.style.height = `${ah}px`;
         pillA.style.transform = `translateX(${fromCenter - aw / 2}px) translateY(-50%)`;
 
-        // 入场 pill 两阶段
+        // 入场 pill 两阶段 (phase 1 从 progress 0 启动)
         let bw, bh;
-        if (p < 0.3) {
-          bw = 0;
-          bh = 0;
-        } else if (p < 0.6) {
-          const tt = (p - 0.3) / 0.3;
+        if (p < 0.65) {
+          const tt = p / 0.65;
           bw = PILL_H * tt;
           bh = bw;
         } else {
-          const tt = (p - 0.6) / 0.4;
+          const tt = (p - 0.65) / 0.35;
           bw = PILL_H + (t.width - PILL_H) * tt;
           bh = PILL_H;
         }
@@ -426,25 +440,75 @@
         pillB.style.height = `${bh}px`;
         pillB.style.transform = `translateX(${toCenter - bw / 2}px) translateY(-50%)`;
 
-        // 连接桥: 从出场 pill 边缘到入场 pill 边缘 (overlap 4px 确保 goo 衔接)
-        // swipe 方向: dx<0 切下一个 chip (toCenter > fromCenter), dx>0 切上一个
-        const reverse = toCenter < fromCenter;
-        let bL, bR;
-        if (!reverse) {
-          bL = fromCenter + aw / 2 - 4;
-          bR = toCenter - bw / 2 + 4;
+        // 连线高度三阶段
+        const BRIDGE_FULL_HALF = 6;   // 完整高度 12px → halfH 6
+        let halfH;
+        if (p < 0.18) {
+          // phase 1: 0 → 1px → 12px 渐显 (起步用 1px 细线意象, 拉到完整)
+          const tt = p / 0.18;
+          halfH = BRIDGE_FULL_HALF * tt;
+        } else if (p < 0.82) {
+          halfH = BRIDGE_FULL_HALF;
         } else {
-          bL = toCenter + bw / 2 - 4;
-          bR = fromCenter - aw / 2 + 4;
+          const tt = (p - 0.82) / 0.18;
+          halfH = BRIDGE_FULL_HALF * (1 - tt);
         }
-        const bridgeW = Math.max(0, bR - bL);
-        bridge.style.width = `${bridgeW}px`;
-        bridge.style.transform = `translateX(${bL}px) translateY(-50%)`;
-        // bridge fade in/out 边缘期 — 防边缘 progress=0/1 时 bridge 突然消失太硬
-        let bridgeOp = 1;
-        if (p < 0.12) bridgeOp = p / 0.12;
-        else if (p > 0.88) bridgeOp = (1 - p) / 0.12;
-        bridge.style.opacity = String(bridgeOp);
+
+        // 连线 x 范围: 从出场 pill 边缘到入场 pill 边缘 (overlap 3px 让 goo 自然衔接)
+        const reverse = toCenter < fromCenter;
+        let xL, xR, leftH, rightH;
+        if (!reverse) {
+          xL = fromCenter + aw / 2 - 3;
+          xR = toCenter - bw / 2 + 3;
+          leftH = ah; rightH = bh;
+        } else {
+          xL = toCenter + bw / 2 - 3;
+          xR = fromCenter - aw / 2 + 3;
+          leftH = bh; rightH = ah;
+        }
+        const bridgeLen = Math.max(0, xR - xL);
+
+        // SVG path: 上下两条 bezier 用不同 sin 相位/频率, 不对称水流感
+        // ymid 取 inkLayer 中心
+        const ymid = inkLayer.clientHeight / 2;
+        if (bridgeLen <= 0 || halfH <= 0.3) {
+          bridgePath.setAttribute("d", "");
+        } else {
+          const now = performance.now();
+          // 上边波 / 下边波 — 不同频率 (0.6/0.85) + 不同相位 + 不同振幅
+          // → 上下不对称且随时间不停变形 (水流体感)
+          const tU = now / 480 * 2 * Math.PI;
+          const tD = now / 680 * 2 * Math.PI + 1.7;
+          const ampU = halfH * 0.45;
+          const ampD = halfH * 0.55;
+          const waveU = Math.sin(tU) * ampU;
+          const waveU2 = Math.sin(tU + 1.1) * ampU * 0.7;
+          const waveD = Math.sin(tD) * ampD;
+          const waveD2 = Math.sin(tD + 0.8) * ampD * 0.6;
+          // 端点 y (跟两端 pill height 衔接, 半圆收口)
+          const yLT = ymid - leftH / 2;
+          const yLB = ymid + leftH / 2;
+          const yRT = ymid - rightH / 2;
+          const yRB = ymid + rightH / 2;
+          // bezier 控制点 x (1/3 / 2/3 位置)
+          const cx1 = xL + bridgeLen * 0.33;
+          const cx2 = xL + bridgeLen * 0.67;
+          // bezier 控制点 y (peak ± wave)
+          const peakTop = ymid - halfH;
+          const peakBot = ymid + halfH;
+          const cy1u = peakTop + waveU;
+          const cy2u = peakTop + waveU2;
+          const cy1d = peakBot + waveD;
+          const cy2d = peakBot + waveD2;
+          const d = [
+            `M ${xL.toFixed(2)} ${yLT.toFixed(2)}`,
+            `C ${cx1.toFixed(2)} ${cy1u.toFixed(2)}, ${cx2.toFixed(2)} ${cy2u.toFixed(2)}, ${xR.toFixed(2)} ${yRT.toFixed(2)}`,
+            `L ${xR.toFixed(2)} ${yRB.toFixed(2)}`,
+            `C ${cx2.toFixed(2)} ${cy2d.toFixed(2)}, ${cx1.toFixed(2)} ${cy1d.toFixed(2)}, ${xL.toFixed(2)} ${yLB.toFixed(2)}`,
+            `Z`,
+          ].join(" ");
+          bridgePath.setAttribute("d", d);
+        }
 
         inkLayer.style.filter = "url(#goo)";
       } else {
@@ -614,6 +678,17 @@
     refreshSchemeDesc();
     update();
     window.addEventListener("resize", update);
+
+    // Live RAF loop — 仅 metaball2phase 时持续重绘, 让连线 sin 时间相位不停演变
+    // (即 progress 不变, 水流曲线仍持续流动, 对应 PM 反馈 #1.2)
+    function tickLive() {
+      if (schemeSel.value === "metaball2phase") {
+        const p = parseFloat(progressInput.value);
+        render(fromSel.value, toSel.value, p, schemeSel.value);
+      }
+      requestAnimationFrame(tickLive);
+    }
+    requestAnimationFrame(tickLive);
   </script>
 </body>
 </html>
