@@ -57,44 +57,6 @@ body {
   color: #171717;
 }
 
-/* PM 2026-05-27 任务 3 v4: CSS scroll-driven autohide (iOS Safari 26+ / Chrome 115+
-   原生 GPU 通路, JS 不参与 scroll). 旧浏览器走 App.tsx 内 RAF fallback (direction-
-   based 累积 deltaY). prefers-reduced-motion 时整体 disable autohide. */
-@keyframes header-autohide {
-  to {
-    transform: translateY(-100%);
-    opacity: 0;
-  }
-}
-
-@media (max-width: 767px) and (prefers-reduced-motion: no-preference) {
-  @supports (animation-timeline: scroll()) {
-    /* timeline-scope 让 fixed-position 的 header (脱离 #root 子树的 layout) 也能
-       引用 #root 的 scroll-timeline */
-    html {
-      timeline-scope: --root-scroll;
-    }
-    #root {
-      scroll-timeline-name: --root-scroll;
-    }
-    /* scrollY 50-99 px 之间 animation 0-100% 1:1 渐变;
-       scrollY > 99 → 永远 hidden, scrollY < 50 → 永远 show.
-       注意这是 scrollY-based, 不是 direction-based (CSS 规范本质限制) */
-    .header-autohide-css {
-      animation: header-autohide linear forwards;
-      animation-timeline: --root-scroll;
-      animation-range: 50px 99px;
-    }
-  }
-}
-
-/* chip click / swipe 切 channel 时加这个 class override scroll-driven, 强制 show */
-.header-no-autohide {
-  animation: none !important;
-  transform: translateY(0) !important;
-  opacity: 1 !important;
-}
-
 /* Feed body height is now controlled by Tailwind on the element itself
    (md:flex-1 md:overflow-y-auto inside md:max-h-[70vh] wrapper). Mobile
    gets natural document flow — no internal scroll. */
