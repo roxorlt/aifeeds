@@ -2894,6 +2894,7 @@ export interface CleanupResult {
   cutoff_ts: number;
   snapshots_deleted: number;
   refresh_log_deleted: number;
+  cron_runs_deleted: number;
   elapsed_ms: number;
 }
 
@@ -2903,10 +2904,12 @@ export async function runCleanup(
 ): Promise<CleanupResult> {
   const t0 = Date.now();
   const cutoffTs = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  const cutoffMs = cutoffTs * 1000;
 
-  const [snapRes, logRes] = await env.DB.batch([
+  const [snapRes, logRes, cronRes] = await env.DB.batch([
     env.DB.prepare(`DELETE FROM metrics_snapshots WHERE captured_at < ?`).bind(cutoffTs),
     env.DB.prepare(`DELETE FROM refresh_log WHERE refreshed_at < ?`).bind(cutoffTs),
+    env.DB.prepare(`DELETE FROM cron_runs WHERE started_at < ?`).bind(cutoffMs),
   ]);
 
   return {
@@ -2914,6 +2917,7 @@ export async function runCleanup(
     cutoff_ts: cutoffTs,
     snapshots_deleted: snapRes.meta?.changes ?? 0,
     refresh_log_deleted: logRes.meta?.changes ?? 0,
+    cron_runs_deleted: cronRes.meta?.changes ?? 0,
     elapsed_ms: Date.now() - t0,
   };
 }
