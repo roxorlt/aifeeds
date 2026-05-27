@@ -119,19 +119,17 @@
 
 ### 5. metrics 流水线统一改造
 
-> enricher daemon L0-L5 已上线（refresh-tiered M4），抽屉打开主动 enrich 也上线了（PR6.6）。但"什么时候刷新、谁触发、刷不到怎么办"还有 3 个口子要补：前端曝光触发、字段补全扫描、统一防抖。
+> enricher daemon L0-L5 已上线（refresh-tiered M4），抽屉打开主动 enrich 也上线了（PR6.6）。"什么时候刷新、谁触发、刷不到怎么办"原有 4 个口子，3 个已做，2 个待做。
 
 **已就位**：
 - refresh-tiered M4（L0-L5 + velocity 阈值 + active/inactive 双 interval）
 - `/api/items/:id/refresh`（PR6.6 抽屉触发，X / GH / ClawHub 三源都接了）
+- ~~**前端曝光触发**~~ ✅ 2026-05-27 PR #137：feed 卡进入视口 ≥ 5s 调 `/api/items/:id/refresh?trigger=impression`。FE 接 IntersectionObserver（threshold 0.7）+ sessionStorage 5min 客户端缓存 + worker KV throttle 5min 服务端兜底 + feature flag 全局开关（admin `/admin/tools` 可一键 toggle）。详见 `dashboard/src/lib/impressionRefresh.ts` + `worker/src/feature-flags.ts`。
+- ~~**分享海报触发**~~ ✅ 2026-05-27 PR #128：share/create 时 `ctx.waitUntil(refreshSingleItem(...))`，海报渲染时数据已新鲜。
 
 **还要做**：
-- **前端曝光触发**：feed 卡片进入视口后调 `/api/items/:id/refresh`（弱触发，throttle 5 分钟内一次，避免无意义刷新）
 - **字段补全扫描**：每天一遍专门补 NULL 字段，目标全表 ≥ 95% 覆盖。重点 retweets（当前 64%）/ views（70%）/ replies（73%）
-- **分享海报触发**：海报生成前主动 enrich，避免海报数据老
 - **失败死信队列**：3 次重试失败后入死信队列告警
-
-**依赖**：建议等 CF 阶段 4 把 X cron mode 迁到 Workflow 时一起做，避免现在用 KV / Durable Object 重写一遍下个月又拆掉
 
 ### 6. PR7 收藏 + 邮件订阅
 
@@ -173,10 +171,9 @@
 - admin 面板：列出最近 30 天学到的新词 + 词频 + 命中样本推文 → 一键 demote / 加白名单
 - 和下面 #9 关键词自学习优化一起做更顺
 
-**C. 智能正文截断**
-- 现状：卡片正文按字数截断，常断在词中间或 markdown 链接中间
-- 改成按句号 / 换行 / 标点切，避免视觉突兀
-- GH 描述 / X 长推 / PH 长描述都受益
+**~~C. 智能正文截断~~** ✅ 已完成
+- `dashboard/src/lib/truncate.ts` `smartTruncate()` 已实现：5 级 fallback（句末符号 → 中等停顿 → 空格词边界 → 中英文分界 → markdown 链接保护 → 兜底硬截），lookback 60 字符。
+- 接入 TweetCard / GithubCard / PhCard / ClawhubCard / HuodongxingCard 五张卡（HfPaperCard 走纯 CSS line-clamp 不用 smartTruncate，论文 abstract 结构化短，不会切到链接中间）。
 
 ### 9. 关键词自学习优化
 
