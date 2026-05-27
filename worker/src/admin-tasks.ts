@@ -413,16 +413,16 @@ function renderFishbone(tasks) {
                   + cx + ',' + (laneY - s);
           svg += '<polygon ' + nodeAttrs + ' points="' + pts + '" fill="' + color + '" '
               + (hasError ? 'stroke="#dc2626" stroke-width="1.5"' : (hasRun ? '' : 'opacity="0.4"')) + '>'
-              + '<title>' + esc(t.label) + ' @ ' + t.bjt_times.join(', ') + '\n'
-              + esc(t.description) + '\n'
+              + '<title>' + esc(t.label) + ' @ ' + t.bjt_times.join(', ') + '\\n'
+              + esc(t.description) + '\\n'
               + '24h: ' + (t.runs_24h || 0) + ' runs / ' + (t.error_24h || 0) + ' err / avg ' + fmtMs(t.avg_ms) + '</title>'
               + '</polygon>';
         } else {
           // 圆点(每日)
           svg += '<circle ' + nodeAttrs + ' cx="' + cx.toFixed(1) + '" cy="' + laneY + '" r="5" fill="' + color + '" '
               + (hasError ? 'stroke="#dc2626" stroke-width="1.5"' : (hasRun ? '' : 'opacity="0.4"')) + '>'
-              + '<title>' + esc(t.label) + ' @ ' + t.bjt_times.join(', ') + '\n'
-              + esc(t.description) + '\n'
+              + '<title>' + esc(t.label) + ' @ ' + t.bjt_times.join(', ') + '\\n'
+              + esc(t.description) + '\\n'
               + '24h: ' + (t.runs_24h || 0) + ' runs / ' + (t.error_24h || 0) + ' err / avg ' + fmtMs(t.avg_ms) + '</title>'
               + '</circle>';
         }
