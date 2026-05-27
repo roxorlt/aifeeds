@@ -359,13 +359,26 @@ function DashboardHome() {
   const [transitionActive, setTransitionActive] = useState<{ key: string } | null>(null);
   const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string } | null>(null);
   const adjacentRef = useRef<HTMLDivElement>(null);
-  // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐, 下拉时渐显 (iOS Safari /
-  // Twitter mobile 同款). PC 不动 (header 永远显示).
-  // PM 2026-05-27 v2 反馈: 不要 threshold + transition 二值切换 (看着像"突然"),
-  // 改 1:1 跟手 progress-based — 手指刚动 1px header 就移动 1/49, opacity 连续渐变,
-  // "渐变"在手势刚开始就启动.
+  // PM 2026-05-27 任务 3 v4: header autohide 走双通路.
+  // - 新浏览器 (iOS Safari 26+ / Chrome 115+): CSS scroll-driven animation
+  //   (index.css 内 @supports + scroll-timeline), 完全 GPU, JS skip RAF.
+  //   注意: CSS scroll() 是 scrollY-based, 不是 direction-based (规范限制),
+  //   行为类似 iOS Safari address bar (scroll 50-99px 1:1 渐隐).
+  // - 旧浏览器 (iOS 17-25 / Chrome 旧版): JS RAF fallback, direction-based
+  //   累积 deltaY (上滑就隐下滑就显 — Twitter mobile / 头条手感).
+  // - prefers-reduced-motion: 整体 disable, header 永远显示.
   const headerRef = useRef<HTMLElement>(null);
   const hideRatioRef = useRef(0);
+  // feature detection runtime: 不会变, 一次即可
+  const scrollTimelineSupportedRef = useRef<boolean>(
+    typeof window !== "undefined" &&
+      typeof CSS !== "undefined" &&
+      CSS.supports("animation-timeline", "scroll()"),
+  );
+  const reducedMotionRef = useRef<boolean>(
+    typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
   useEffect(() => {
     const apply = (ratio: number) => {
       const h = headerRef.current;
@@ -374,6 +387,22 @@ function DashboardHome() {
       h.style.opacity = `${1 - ratio}`;
     };
     if (!isNarrow) {
+      hideRatioRef.current = 0;
+      apply(0);
+      return;
+    }
+    // CSS scroll-driven 接管: JS 不挂 listener, 不动 inline style (让 CSS animation 跑)
+    if (scrollTimelineSupportedRef.current && !reducedMotionRef.current) {
+      // 清空 inline style 万一之前 fallback 路径写过
+      const h = headerRef.current;
+      if (h) {
+        h.style.transform = "";
+        h.style.opacity = "";
+      }
+      return;
+    }
+    // prefers-reduced-motion: 完全不跑 autohide
+    if (reducedMotionRef.current) {
       hideRatioRef.current = 0;
       apply(0);
       return;
@@ -407,14 +436,18 @@ function DashboardHome() {
   // chip click / swipe 切 channel 时 header 强制显示 — overlay 用 top:49 hardcode header
   // 高度做位置, header hidden 状态下切 channel 会留 49px 空白条. 切 channel 是 user
   // 主动 interaction, 配合 show header 也符合 "看到新 channel 标识" 的直觉.
+  // 双通路: CSS 路径下 toggle .header-no-autohide class (CSS override scroll-driven);
+  // JS fallback 路径下 reset inline style.
   useEffect(() => {
-    if (transitionActive || swipeAdjacent) {
+    const forceShow = !!(transitionActive || swipeAdjacent);
+    const h = headerRef.current;
+    if (!h) return;
+    if (scrollTimelineSupportedRef.current && !reducedMotionRef.current) {
+      h.classList.toggle("header-no-autohide", forceShow);
+    } else if (forceShow) {
       hideRatioRef.current = 0;
-      const h = headerRef.current;
-      if (h) {
-        h.style.transform = "translateY(0%)";
-        h.style.opacity = "1";
-      }
+      h.style.transform = "translateY(0%)";
+      h.style.opacity = "1";
     }
   }, [transitionActive, swipeAdjacent]);
   const switchChannel = useCallback((nextFilter: string) => {
@@ -842,7 +875,13 @@ function DashboardHome() {
           PC 保持 sticky 不变 (PC 走 window scroll 没这个问题). */}
       <header
         ref={headerRef}
-        className="z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur max-md:fixed max-md:inset-x-0 max-md:top-0 sm:sticky sm:top-0"
+        className={cn(
+          "z-10 cursor-pointer border-b border-neutral-200 bg-white/80 backdrop-blur max-md:fixed max-md:inset-x-0 max-md:top-0 sm:sticky sm:top-0",
+          // header-autohide-css 触发 index.css 内的 CSS scroll-driven animation (@supports +
+          // @media (max-width:767px) 内部, 旧浏览器无副作用). prefers-reduced-motion 时
+          // class 不加 + CSS 也被 media query 排除掉双重保险.
+          isNarrow && scrollTimelineSupportedRef.current && !reducedMotionRef.current && "header-autohide-css",
+        )}
         onClick={(e) => {
           // Skip when click is on chips, refresh button, etc.
           if ((e.target as HTMLElement).closest("button")) return;
