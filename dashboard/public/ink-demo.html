@@ -385,57 +385,76 @@
         bridge.style.width = `${bridgeW}px`;
         inkLayer.style.filter = "none";
       } else if (scheme === "metaball2phase") {
-        // E — PM 反馈版 v2: 两阶段缩 + 流体连线 (三阶段 + 不对称曲线 + 水流动)
+        // E — PM 反馈版 v5: 两阶段缩 + 流体连线 (smoothstep ease + jitter 整体感)
+        //
+        // PM 反馈 v5: 两端 pill 两阶段衔接处用 smoothstep ease (derivative 在
+        // 衔接点 = 0) → 速度自然减速到 0 再加速, 不再是线性变速突变;
+        // 加微小 jitter 让形变有"有机"随机感, jitter 振幅在关键帧 (0/0.35/0.6
+        // /0.65/1) 时 = 0, 不破坏首尾关键帧
         //
         // Timing (PM 反馈 #2: 出场/入场/连线 progress 0 同时启动):
-        //   出场 pill:
-        //     phase 1 (0..0.35)   rect chip.w → circle PILL_H, height 始终 PILL_H
-        //     phase 2 (0.35..0.6) circle → dot → 0 (width=height PILL_H → 0)
-        //     dead    (0.6..1)    disappeared
-        //   入场 pill:
-        //     phase 1 (0..0.65)   0 → circle PILL_H (慢慢长出来), width=height 同步
-        //     phase 2 (0.65..1)   circle → rect chip.w (扩开)
-        //   流体连线 (PM 反馈 #1 三阶段 + #3 不对称曲线):
-        //     phase 1 (0..0.18)   高度 0 → 1px → 12px 渐显
-        //     phase 2 (0.18..0.82) 高度稳定 12px, 上/下两条 bezier 用不同频率/相位
-        //                          /振幅的 sin 波动 → 水流不对称流动感; 始终 RAF 重绘
-        //     phase 3 (0.82..1)   高度 12px → 1px → 0 渐隐
+        //   出场 pill: phase 1 (0..0.35) rect → circle, phase 2 (0.35..0.6) circle → 0
+        //   入场 pill: phase 1 (0..0.65) 0 → circle, phase 2 (0.65..1) circle → rect
+        //   流体连线: phase 1 (0..0.18) 渐显, phase 2 (0.18..0.82) 稳定流动, phase 3 (0.82..1) 渐隐
         const PILL_H = 26;
         const fromCenter = f.left + f.width / 2;
         const toCenter = t.left + t.width / 2;
         pillA.style.display = "";
         pillB.style.display = "";
-        ensureBridge(false); // E 用 SVG path, 不用 div bridge
+        ensureBridge(false);
+        const now = performance.now();
 
-        // 出场 pill 两阶段
+        // smoothstep — derivative 在 t=0 / t=1 时 = 0, 让 phase 衔接平滑
+        const smoothstep = (t) => {
+          if (t <= 0) return 0;
+          if (t >= 1) return 1;
+          return t * t * (3 - 2 * t);
+        };
+
+        // 出场 pill 两阶段 (smoothstep ease)
         let aw, ah;
         if (p < 0.35) {
-          const tt = p / 0.35;
+          const tt = smoothstep(p / 0.35);
           aw = f.width + (PILL_H - f.width) * tt;
           ah = PILL_H;
         } else if (p < 0.6) {
-          const tt = (p - 0.35) / 0.25;
-          aw = PILL_H * (1 - tt);
-          ah = aw;
+          const tt = smoothstep((p - 0.35) / 0.25);
+          const d = PILL_H * (1 - tt);
+          aw = d;
+          ah = d;
         } else {
           aw = 0;
           ah = 0;
         }
+        // 微小 jitter — 关键帧 (0 / 0.35 / 0.6) amp=0, 中间峰值 → 不破坏首尾
+        // 两个不同频率 sin/cos 让 jitter 不规则有机感
+        let jitterAmpA = 0;
+        if (p < 0.35) jitterAmpA = Math.sin((p / 0.35) * Math.PI) * 0.8;
+        else if (p < 0.6) jitterAmpA = Math.sin(((p - 0.35) / 0.25) * Math.PI) * 0.5;
+        aw = Math.max(0, aw + Math.sin(now / 850) * jitterAmpA);
+        ah = Math.max(0, ah + Math.cos(now / 720 + 1.2) * jitterAmpA * 0.8);
         pillA.style.width = `${aw}px`;
         pillA.style.height = `${ah}px`;
         pillA.style.transform = `translateX(${fromCenter - aw / 2}px) translateY(-50%)`;
 
-        // 入场 pill 两阶段 (phase 1 从 progress 0 启动)
+        // 入场 pill 两阶段 (phase 1 从 progress 0 启动, smoothstep ease)
         let bw, bh;
         if (p < 0.65) {
-          const tt = p / 0.65;
-          bw = PILL_H * tt;
-          bh = bw;
+          const tt = smoothstep(p / 0.65);
+          const d = PILL_H * tt;
+          bw = d;
+          bh = d;
         } else {
-          const tt = (p - 0.65) / 0.35;
+          const tt = smoothstep((p - 0.65) / 0.35);
           bw = PILL_H + (t.width - PILL_H) * tt;
           bh = PILL_H;
         }
+        // 入场 jitter — 关键帧 (0 / 0.65 / 1) amp=0
+        let jitterAmpB = 0;
+        if (p < 0.65) jitterAmpB = Math.sin((p / 0.65) * Math.PI) * 0.7;
+        else if (p < 1) jitterAmpB = Math.sin(((p - 0.65) / 0.35) * Math.PI) * 0.5;
+        bw = Math.max(0, bw + Math.sin(now / 920 + 2.1) * jitterAmpB);
+        bh = Math.max(0, bh + Math.cos(now / 770 + 0.5) * jitterAmpB * 0.8);
         pillB.style.width = `${bw}px`;
         pillB.style.height = `${bh}px`;
         pillB.style.transform = `translateX(${toCenter - bw / 2}px) translateY(-50%)`;
@@ -474,7 +493,6 @@
         if (bridgeLen <= 0 || halfH <= 0.3) {
           bridgePath.setAttribute("d", "");
         } else {
-          const now = performance.now();
           // PM 反馈 v3 #2: 周期 480/680 → 1200/1700ms (速率减半, 更优雅水感)
           const tU = (now / 1200) * 2 * Math.PI;
           const tD = (now / 1700) * 2 * Math.PI + 1.7;
