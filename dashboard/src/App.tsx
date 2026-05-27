@@ -311,7 +311,8 @@ function DashboardHome() {
 
   // PM 2026-05-27 v5: chip rect cache refresh — ResizeObserver 监听 chip rail
   // layout 变化 (mount / chip 内容变化 / window resize) 自动 refresh, swipe 期间
-  // 不读 DOM 避免 layout reflow 导致真机卡顿
+  // 不读 DOM 避免 layout reflow 导致真机卡顿. 同时初始 sync 一次 ink-layer
+  // scrollLeft transform (防 mount 时 nav 已有 scrollLeft 导致 pill 跟 chip 错位)
   useEffect(() => {
     if (!isNarrow) return;
     const rail = chipRailRef.current;
@@ -320,6 +321,11 @@ function DashboardHome() {
       Object.entries(chipRefs.current).forEach(([key, chip]) => {
         if (chip) chipRectsRef.current[key] = { left: chip.offsetLeft, width: chip.offsetWidth };
       });
+      // 初始 / resize 后同步 ink-layer 跟随 nav.scrollLeft (onScroll handler 只在
+      // 用户/scrollIntoView 触发 scroll 时跑, 不 cover 首屏)
+      if (inkLayerRef.current) {
+        inkLayerRef.current.style.transform = `translateX(${-rail.scrollLeft}px)`;
+      }
     };
     refresh();
     const obs = new ResizeObserver(refresh);
@@ -851,11 +857,21 @@ function DashboardHome() {
             <nav
               ref={chipRailRef}
               className="chips-rail relative flex min-w-0 items-center gap-1 self-stretch overflow-x-auto"
+              onScroll={(e) => {
+                // ink-layer 是 absolute inset:0 钉在 nav viewport 上, 不跟 scrollLeft
+                // 移动. pill 用 chip.offsetLeft (scroll content 坐标) 定位 → scroll
+                // 之后 pill 在 viewport 内的位置 = offsetLeft - scrollLeft 才对.
+                // 这里 transform translateX(-scrollLeft) 让 ink-layer 跟随 scroll,
+                // pill 内部 transform 不变, 显示位置自动跟 chip 同步.
+                if (inkLayerRef.current) {
+                  inkLayerRef.current.style.transform = `translateX(${-e.currentTarget.scrollLeft}px)`;
+                }
+              }}
             >
               {/* 墨汁 ink layer — pillA (出场/baseline) + pillB (入场, fancy 才渲染)
                   + bridge SVG path (流体连线, fancy 才渲染). 套 goo filter 让三者 metaball
                   合并成液态. pointer-events-none 不拦 chip click. 初始 width:0 避免
-                  chip mount 前闪一帧 */}
+                  chip mount 前闪一帧. onScroll 同步 translateX 让 pill 跟 chip 一起被滚 */}
               <div
                 ref={inkLayerRef}
                 className="pointer-events-none absolute inset-0 z-0"
