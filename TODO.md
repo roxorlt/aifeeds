@@ -91,33 +91,27 @@
 - [x] **FE 2026-05-16**（PR #51）`proxyImg(url, width)` per-call-site：14 处 img 调用按场景传 80 / 400 / 不传，GH avatar 28KB → 1.5-3KB
 - [x] **BE/FE 2026-05-16**（PR #54）format=auto 在 worker fetch 上下文不可靠（curl + chrome devtools 都验证 3 种 Accept 都返原 jpeg / 无 Vary）；worker 改成自己 parse Accept header 主动设 `cf.image.format = 'avif' | 'webp' | (omit)`，cacheKey 编入 format 防跨 client 污染。Prod 实测 ruvnet 头像：jpeg 4970B → avif 3188B（再省 36% on top of resize）
 
-**阶段 3（1-2 周）—— GH 链试点 Workflow**
-- GH 抓取链最简单（单源、量小），拿来试点
-- worker scheduled cron 那套 GH trending 抓取拆成 CF Workflow（CF 自家工作流编排）
-- 验证 Workflow 是否真比 cron 好用（重试 / 状态可视化 / 单步 retry）
+**~~阶段 3（1-2 周）—— GH 链试点 Workflow~~** ✅ 已完成
+- PR #40 把 GH trending 抓取从 worker cron 切到 CF Workflow，验证下来重试 / 状态可视化 / 单步 retry 都比 cron 好用，决定继续推进后续源。
 
-**阶段 4（2-3 周）—— X 主链双写迁移**
-- 试点 OK 后把 X 主流水线 6 个 cron mode（抓取 / longform / quote 补全 / metrics 刷新 / 翻译 / 分类）全迁到 Workflow
-- 双写期：老 cron + 新 Workflow 并行跑，稳定后下线 cron
-- **翻译模式重写候选 SQL**（2026-05-14 留）：现在 `selectTranslationCandidates`（`worker/src/enrich.ts:2198`）用 `RANDOM()` 在大池子（X 4000+ 条 content_translated IS NULL 但实际中文）里抽 150，命中 quote_of / link_card 边角的概率 ~1%，单轮 limit=50 实际只翻 1 条 task。导致 X feed 上 quote_of 引用推文 / link_card 链接卡长期 47 条左右积压（cron 也清不动）；2026-05-14 加的 `POST /api/admin/fill-translations-now` admin endpoint 同样卡这个瓶颈。Workflow 改造时按 task 类型分独立队列（content / quote / link_card 各一），扁平消费，根治此问题。
-- **顺便加 reply / retweet 父推 snapshot 翻译覆盖**（2026-05-16 留）：当前 `selectTranslationCandidates` 不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上展示的「回复 @父推作者」/「转推 @某人」对应 snapshot 内容是英文（backfill-quotes / backfill-replies 抓回来塞进 extra 但翻译流程不扫）。阶段 4 重写 SQL 时顺便加这两个 task 类型独立队列（边际 0.5 天），新功能从第一天享受 Workflow 秒级 + 死信兜底，避免「先做半成品再升级」。
-- **翻译流水线 i18n 友好接口**（2026-05-16 留，为未来多语言铺路，边际成本约 0.5-1 天）：
-  - Task 类型加 `lang` 字段（暂硬编码 `'zh'`），未来支持 `ja` / `es` 时只需在 task 生成器循环 langs 列表，不重写核心逻辑
-  - Workflow 队列命名带 lang 后缀（`translate:zh:content`、`translate:zh:quote_of` 等），未来加新语言队列不影响 zh 队列性能
-  - DeepSeek prompt 模板参数化（`source_lang` / `target_lang`），不再硬编码「翻译成中文」
-  - **DB schema 暂不改**（保留 `items.content_translated` 列），未来真正多语言时再迁 `translations` 表（item_id, field, lang, translated_text, quality, attempts, translated_at, model 主键 item_id+field+lang）— schema 设计落 `docs/plans/2026-05-16-i18n-design.md`（未来需要时启用 migration）
-  - **API lang 参数暂不加**（前端没多语言 UI），等真正多语言 UI 时一起做
-- **C 端用户已浏览英文时翻译完成的展示策略**（2026-05-16 留，迁移完后顺便加）：
-  - API 下发按「已翻译优先」排序（`ORDER BY (content_translated IS NULL) ASC` 优先级），未翻译的不过滤但放后面
-  - 翻译完的 item 标新（`translated_at > last_user_fetch_at`），前端 feed 顶部「N 条新内容可加载」横条扩展到「N 条新译文可刷新」
-  - drawer lazy enrich on open 已有（PR6.6），保留
-  - 不做实时推送（WebSocket / SSE 复杂度过高且阅读中突变体验奇怪）
-  - 不做严格服务端过滤未翻译的不下发（会让 feed 数量缩水 + 热点新推文延迟出现）
+**~~阶段 4（2-3 周）—— X 主链双写迁移~~** ✅ 已完成
+- PR #43 把 X 主流水线全迁到 Workflow，PR #65 顺便把分类 + 翻译合成一次 JSON Mode 调用、加完整性 gate。配套加固：#66（数据失效级联）/ #69（老数据回填 + 关联推 metrics）/ #74（media 字段缺失回填）/ #75（instance ID 加 hour-bucket 根治全源 stuck）/ #80 #81（uncaught exception 双层兜底）/ #106（五源统一 `workflow_completed_at` gate）。
+- 翻译候选 SQL 重写、reply / retweet 父推 snapshot 翻译覆盖、翻译流水线 i18n 友好接口、C 端「已浏览英文时译文完成」的展示策略 —— 这几个原本挂在阶段 4 下的小尾巴**仍未做**，记到下面新增的「翻译流水线后续优化」段。
 
-**阶段 5（按需）—— 高级能力**
+**~~阶段 5（hdx + PH + ClawHub 抓取链迁移）~~** ✅ 已完成
+- PR #45 把活动行（hdx）抓取链迁到 Workflow。PR #47 把 PH + ClawHub 也迁完。设计文档分别在 `docs/plans/2026-05-* 阶段 5 / 6` 系列。
+- BE 端 SOP 改造也跟上了（PR #78 重写信源接入 SOP 适配 Workflow 时代）。
+
+**阶段 6（按需）—— 高级能力**
 - Queue：消息总线（比如 enrich 任务排队）
 - Logpush：日志推到 R2 / S3 长期存档
 - Container：跑需要长任务 / 自定义环境的 job（D1 备份 / video 抽帧）
+
+**翻译流水线后续优化**（原阶段 4 下挂的小尾巴，迁移完成后单独跟）：
+- **翻译候选 SQL 重写按 task 类型分队列**：现在 `selectTranslationCandidates`（`worker/src/enrich.ts`）用 `RANDOM()` 抽样，命中 quote_of / link_card 边角的概率 ~1%。Workflow 时代应按 task 类型分独立队列（content / quote / link_card 各一），扁平消费。
+- **reply / retweet 父推 snapshot 翻译覆盖**：当前候选选择不扫 `extra.reply_of.content` 和 `extra.retweet_of.content`，X 子推卡片上的「回复 @父推作者」/「转推 @某人」snapshot 还是英文。
+- **翻译流水线 i18n 友好接口**（多语言铺路）：Task 加 `lang` 字段、队列命名带 lang 后缀、DeepSeek prompt 模板参数化 source/target lang。DB schema 和 API lang 参数都暂不改，等真正多语言 UI 时一起做。完整设计 `docs/plans/2026-05-16-i18n-design.md`。
+- **C 端已浏览英文时译文完成的展示策略**：API 下发按「已翻译优先」排序、translated_at > last_user_fetch_at 标新、前端横条提示「N 条新译文可刷新」。drawer lazy enrich on open（PR6.6）保留，不做实时推送，不做严格服务端过滤。
 
 ---
 
