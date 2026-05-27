@@ -156,6 +156,11 @@ function DashboardHome() {
   // filter 切到非可视 chip 时把它居中到 rail 中部,让用户知道这是 active(避免
   // 切了但用户看不到激活状态以为没动)。useEffect 跑在 filter 声明之后(挪到 L155+)
   const chipRailRef = useRef<HTMLElement | null>(null);
+  // PM 2026-05-27 任务 2:墨汁 pill — chip active 黑色底色用 absolute pill 实现,
+  // swipe 期间根据 dx 在 from-chip ↔ to-chip 之间 lerp 位置/宽度,不走 React state
+  // (60fps re-render 太重,直接操作 DOM ref)。chip 自身去掉 bg-neutral-900。
+  const pillRef = useRef<HTMLDivElement | null>(null);
+  const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   // PM 2026-05-20:#5 横划切 tab — feed 区域 main 上挂 touch listener,
   // 识别 horizontal-dominant swipe 切上/下一个 filter chip
   const mainRef = useRef<HTMLElement | null>(null);
@@ -173,6 +178,34 @@ function DashboardHome() {
     fetchStats().then(setStats).catch(() => {});
   }, [refreshTick]);
 
+  // PM 2026-05-27 任务 2:墨汁 pill 定位 helpers
+  // - positionPillToChip(key, withTransition): pill 立即落到 key 对应 chip 位置/宽度
+  // - lerpPillBetween(from, to, progress): swipe 期间 lerp (progress 0=from / 1=to)
+  // 都用 chip.offsetLeft/offsetWidth 算 — 这是 chip 相对 chipRailRef 父 (nav 也是
+  // positioning context) 的内部坐标,跟 rail.scrollLeft 无关 (rail 滚时 chip
+  // offsetLeft 仍是同一个值;pill 跟 chip 同处一个 absolute 父,一起被 rail 滚)
+  const positionPillToChip = useCallback((key: string, withTransition: boolean) => {
+    const pill = pillRef.current;
+    const chip = chipRefs.current[key];
+    if (!pill || !chip) return;
+    pill.style.transition = withTransition
+      ? "transform 220ms cubic-bezier(0.32, 0.72, 0, 1), width 220ms cubic-bezier(0.32, 0.72, 0, 1)"
+      : "none";
+    pill.style.transform = `translateX(${chip.offsetLeft}px)`;
+    pill.style.width = `${chip.offsetWidth}px`;
+  }, []);
+  const lerpPillBetween = useCallback((fromKey: string, toKey: string, progress: number) => {
+    const pill = pillRef.current;
+    const fromChip = chipRefs.current[fromKey];
+    const toChip = chipRefs.current[toKey];
+    if (!pill || !fromChip || !toChip) return;
+    const p = Math.max(0, Math.min(1, progress));
+    const lerp = (a: number, b: number) => a + (b - a) * p;
+    pill.style.transition = "none";
+    pill.style.transform = `translateX(${lerp(fromChip.offsetLeft, toChip.offsetLeft)}px)`;
+    pill.style.width = `${lerp(fromChip.offsetWidth, toChip.offsetWidth)}px`;
+  }, []);
+
   // PM 2026-05-19:active chip 自动 scrollIntoView 居中(声明位置必须在
   // `filter` derived state 之后,否则 TS 报 used-before-declaration)
   useEffect(() => {
@@ -185,6 +218,16 @@ function DashboardHome() {
     });
     return () => cancelAnimationFrame(raf);
   }, [filter, isNarrow]);
+
+  // PM 2026-05-27 任务 2:filter 切换后 pill 落到 active chip (chip 刚 mount 时也跑)
+  // 注意:swipe end successful 已经 lerpPill(progress=1) animate 到 to-chip 了,
+  // 这个 effect 跑时 pill 已就位,positionPillToChip 立即 set 同位置 → 无视觉变化.
+  // chip click 切换走 switchChannel,没 lerp 过渡,pill 直接跳到 to-chip 位置.
+  useEffect(() => {
+    if (!isNarrow) return;
+    const raf = requestAnimationFrame(() => positionPillToChip(filter, false));
+    return () => cancelAnimationFrame(raf);
+  }, [filter, isNarrow, positionPillToChip]);
 
   // PM 2026-05-25 R10/R12: Channel Transition system
   // - transitionActive: chip click 后的过渡 overlay (fade 220ms)
@@ -325,6 +368,13 @@ function DashboardHome() {
         const dampened = atBoundary ? dx / 3 : dx;
         applyMainTransform(dampened, false);
         if (!atBoundary) applyAdjacentTransform(dampened, false);
+        // 任务 2:墨汁 pill 跟手 lerp (边界不动 — 没有 to-chip)
+        // progress 按 viewport 算, 跟 main translate 同节奏 (main 滑 1 屏 = pill 到位)
+        if (!atBoundary) {
+          const w = window.innerWidth;
+          const progress = Math.min(Math.abs(dx) / w, 1);
+          lerpPillBetween(filterRef.current, tabs[targetIdx].key, progress);
+        }
       }
     };
     const onEnd = (e: TouchEvent) => {
@@ -366,6 +416,8 @@ function DashboardHome() {
         // 弹回 0 — main + adjacent 同步 animate 回原位
         applyMainTransform(0, true);
         applyAdjacentTransform(0, true);
+        // 任务 2:墨汁 pill 回弹到 from-chip
+        positionPillToChip(cur, true);
         const onTransitionEnd = () => {
           el.removeEventListener('transitionend', onTransitionEnd);
           resetTransform();
@@ -380,6 +432,8 @@ function DashboardHome() {
       // adjacent target dx 同样 ±width, 加 base 后到 0
       applyMainTransform(mainTarget, true);
       applyAdjacentTransform(mainTarget, true);
+      // 任务 2:墨汁 pill animate 到 to-chip (跟 main 同 220ms 节奏)
+      positionPillToChip(tabs[nextIdx].key, true);
       const onTransitionEnd = () => {
         el.removeEventListener('transitionend', onTransitionEnd);
         track(EVENTS.SOURCE_FILTER_CHANGE, {
@@ -406,6 +460,8 @@ function DashboardHome() {
       if (active && direction === 'horizontal') {
         applyMainTransform(0, true);
         applyAdjacentTransform(0, true);
+        // 任务 2:墨汁 pill 回弹到原 chip
+        positionPillToChip(filterRef.current, true);
       }
       active = false;
       direction = 'unknown';
@@ -620,14 +676,25 @@ function DashboardHome() {
           {isNarrow && (
             <nav
               ref={chipRailRef}
-              className="chips-rail flex min-w-0 items-center gap-1 self-stretch overflow-x-auto"
+              className="chips-rail relative flex min-w-0 items-center gap-1 self-stretch overflow-x-auto"
             >
+              {/* 墨汁 pill — absolute 跟手势 lerp 到 from / to chip 中间.
+                  pointer-events-none 不拦 chip click. left:0/top 自适应, pill 高度
+                  默认 100% 太挤, 直接给固定 py-1 高度 (跟 chip 同款). 初始 width:0
+                  避免 chip mount 前闪一帧黑底全宽 */}
+              <div
+                ref={pillRef}
+                className="pointer-events-none absolute left-0 top-1/2 z-0 h-[26px] -translate-y-1/2 rounded-full bg-neutral-900"
+                style={{ width: 0, transform: "translateX(0)" }}
+                aria-hidden
+              />
               {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
                 const hasData = liveSourceTypes.has(key as SourceType);
                 return (
                   <button
                     key={key}
+                    ref={(el) => { chipRefs.current[key] = el; }}
                     type="button"
                     data-chip-key={key}
                     onClick={() => {
@@ -640,10 +707,8 @@ function DashboardHome() {
                       }
                     }}
                     className={cn(
-                      "shrink-0 min-w-[64px] rounded-full px-3 py-1 text-center text-xs font-medium transition-colors",
-                      isActive
-                        ? "bg-neutral-900 text-white"
-                        : "text-neutral-600 hover:bg-neutral-100",
+                      "relative z-10 shrink-0 min-w-[64px] rounded-full px-3 py-1 text-center text-xs font-medium transition-colors",
+                      isActive ? "text-white" : "text-neutral-600",
                       !hasData && !isActive && "opacity-40",
                     )}
                   >
