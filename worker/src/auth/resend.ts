@@ -81,3 +81,52 @@ export async function sendEmailViaResend(
   const data = (await r.json()) as { id?: string };
   return { ok: true, id: data.id || 'no-id' };
 }
+
+// ── 通用发信(订阅 digest / welcome / 确认邮件复用;支持 HTML + 自定义 header)──
+
+export interface SendEmailOptions {
+  to: string;
+  subject: string;
+  text: string;
+  html?: string;
+  headers?: Record<string, string>; // 如 List-Unsubscribe / List-Unsubscribe-Post(RFC 8058)
+  replyTo?: string;
+}
+
+export async function sendEmail(env: Env, opts: SendEmailOptions): Promise<SendEmailResult> {
+  // dev / 冷启动:无 RESEND_API_KEY 不真发(避免本地误发),只 log。
+  if (!env.RESEND_API_KEY) {
+    console.warn(`[email] dev simulate sendEmail to=${opts.to} subject="${opts.subject}"`);
+    return { ok: true, id: `dev-simulated-${Date.now()}` };
+  }
+  const from = env.EMAIL_FROM || 'AI Feeds <noreply@mail.ai-feeds.com>';
+  const payload: Record<string, unknown> = {
+    from,
+    to: opts.to,
+    subject: opts.subject,
+    text: opts.text,
+  };
+  if (opts.html) payload.html = opts.html;
+  if (opts.replyTo) payload.reply_to = opts.replyTo;
+  if (opts.headers) payload.headers = opts.headers;
+
+  let r: Response;
+  try {
+    r = await fetch(RESEND_API, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    return { ok: false, errCode: 'NETWORK', errMsg: String(e).slice(0, 200) };
+  }
+  if (!r.ok) {
+    const errMsg = await r.text().catch(() => '');
+    return { ok: false, errCode: String(r.status), errMsg: errMsg.slice(0, 200) };
+  }
+  const data = (await r.json()) as { id?: string };
+  return { ok: true, id: data.id || 'no-id' };
+}

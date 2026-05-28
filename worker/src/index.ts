@@ -108,6 +108,14 @@ import {
   handleShareLanding,
   handleAdminShareStats,
 } from './share/handlers';
+import {
+  handleSubscribe,
+  handleGetMySubscription,
+  handlePutMySubscription,
+  handleUnsubMySubscription,
+  handleUnsubscribeByToken,
+} from './digest/handlers';
+import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 
 export interface Env {
   DB: D1Database;
@@ -180,6 +188,9 @@ export interface Env {
   // Used by worker/src/scrapers/ph.ts (daily fetch cron).
   PH_CLIENT_ID?: string;
   PH_CLIENT_SECRET?: string;
+  // 订阅推送子系统(migration 018)。secret 进 .secrets/aifeeds-{prod,staging}.env。
+  DIGEST_EMAIL_HMAC?: string;             // 邮件回流 token HMAC secret(32B hex)
+  RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -395,6 +406,28 @@ export default {
       }
       if (path === '/api/auth/me/preferences' && request.method === 'PUT') {
         return withCors(await handlePutPreferences(request, env, ctx), request, env);
+      }
+      // 订阅推送(digest)。匿名订阅 + 登录态管理 + RFC8058 一键退订。
+      if (path === '/api/subscribe' && request.method === 'POST') {
+        return withCors(await handleSubscribe(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/subscription' && request.method === 'GET') {
+        return withCors(await handleGetMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/subscription' && request.method === 'PUT') {
+        return withCors(await handlePutMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/subscription/unsubscribe' && request.method === 'POST') {
+        return withCors(await handleUnsubMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/unsubscribe' && (request.method === 'GET' || request.method === 'POST')) {
+        return await handleUnsubscribeByToken(request, env);
+      }
+      if (path === '/api/digest/return' && request.method === 'GET') {
+        return await handleDigestReturn(request, env, ctx);
+      }
+      if (path === '/api/webhook/resend' && request.method === 'POST') {
+        return await handleResendWebhook(request, env, ctx);
       }
       if (path === '/api/auth/delete' && request.method === 'POST') {
         return withCors(await handleDelete(request, env, ctx), request, env);
