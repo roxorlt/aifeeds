@@ -40,6 +40,7 @@ import { UserMenu } from "./components/UserMenu";
 import { RequireAuth } from "./components/RequireAuth";
 import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
+import { Subscription } from "./pages/Subscription";
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
 
@@ -1119,6 +1120,8 @@ function App() {
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
+        <Route path="/subscribe" element={<Subscription mode="anonymous" />} />
+        <Route path="/me/subscription" element={<RequireAuth><Subscription mode="manage" /></RequireAuth>} />
       </Routes>
       <LoginModalGate />
       <ToastGate />

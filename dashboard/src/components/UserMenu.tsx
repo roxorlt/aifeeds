@@ -138,8 +138,18 @@ export function UserMenu() {
                 native controls 上点 unmute 后当前 session 内 sticky。 */}
           </div>
 
-          {user && (
-            <div className="border-t border-neutral-100">
+          <div className="border-t border-neutral-100">
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                navigate(user ? "/me/subscription" : "/subscribe");
+              }}
+              className="flex w-full items-center px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+            >
+              订阅推送
+            </button>
+            {user && (
               <button
                 type="button"
                 onClick={() => {
@@ -150,8 +160,8 @@ export function UserMenu() {
               >
                 账号设置
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>

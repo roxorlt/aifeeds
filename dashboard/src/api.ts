@@ -331,3 +331,105 @@ export async function fetchStats(): Promise<Stats> {
   if (!res.ok) throw new Error(`fetchStats failed: ${res.status}`);
   return res.json();
 }
+
+// ─── 订阅推送（digest subscription）──────────────────────────────────
+// 契约见 docs/plans 设计文档「API 契约」节，源 key / slot / density 以 BE 为单一可信源。
+// 匿名订阅走 POST /api/subscribe（非个人态路径，不触发 401 拦截）；登录态管理走
+// /api/auth/me/subscription（apiFetch 401 拦截白名单已含 /api/auth/me 前缀）。
+
+export type DigestSourceKey = 'ph' | 'gh' | 'hf-paper' | 'clawhub' | 'x';
+export type DigestSlot = 8 | 12 | 17;
+export type DigestDensity = 'normal' | 'curated';
+// status 对外三态：active / unsubscribed / kicked（内部 paused 后端归一成 active 不暴露）
+export type SubscriptionStatus = 'active' | 'unsubscribed' | 'kicked';
+
+export interface SubscriptionData {
+  email: string;
+  sources: DigestSourceKey[];
+  send_slot: DigestSlot;
+  density: DigestDensity;
+  status: SubscriptionStatus;
+}
+
+export type SubscribeErrorCode =
+  | 'invalid_email'
+  | 'invalid_sources'
+  | 'invalid_slot'
+  | 'turnstile_failed'
+  | 'rate_limited'
+  | 'server_error';
+
+export type SubscribeResult =
+  | { ok: true; status: 'active' | 'pending_confirm' }
+  | { ok: false; code: SubscribeErrorCode };
+
+export interface SubscribePayload {
+  email: string;
+  sources: DigestSourceKey[];
+  send_slot: DigestSlot;
+  density: DigestDensity;
+  turnstile_token: string;
+}
+
+// 匿名订阅。后端 ON CONFLICT DO UPDATE 幂等，apiFetch 的 retry 不会造成重复 welcome。
+export async function subscribeDigest(payload: SubscribePayload): Promise<SubscribeResult> {
+  const res = await apiFetch('/api/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  try {
+    return (await res.json()) as SubscribeResult;
+  } catch {
+    return { ok: false, code: 'server_error' };
+  }
+}
+
+// 登录态读当前订阅（未订阅返回 { subscription: null }）。
+export async function getMySubscription(): Promise<{ subscription: SubscriptionData | null }> {
+  const res = await apiFetch('/api/auth/me/subscription');
+  if (!res.ok) throw new Error(`getMySubscription failed: ${res.status}`);
+  return res.json();
+}
+
+export type UpdateSubscriptionErrorCode =
+  | 'invalid_sources'
+  | 'invalid_slot'
+  | 'not_subscribed'
+  | 'server_error';
+
+export type UpdateSubscriptionResult =
+  | { ok: true }
+  | { ok: false; code: UpdateSubscriptionErrorCode };
+
+export interface UpdateSubscriptionPayload {
+  sources: DigestSourceKey[];
+  send_slot: DigestSlot;
+  density: DigestDensity;
+}
+
+// 登录态改偏好（不含 email，管理页不可改邮箱）。后端改 send_slot 时自行重算 next_send_at。
+export async function updateMySubscription(
+  payload: UpdateSubscriptionPayload,
+): Promise<UpdateSubscriptionResult> {
+  const res = await apiFetch('/api/auth/me/subscription', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  try {
+    return (await res.json()) as UpdateSubscriptionResult;
+  } catch {
+    return { ok: false, code: 'server_error' };
+  }
+}
+
+// 站内退订（status → unsubscribed，与邮件 RFC 8058 一键退订归同一状态）。
+export async function unsubscribeMySubscription(): Promise<{ ok: boolean }> {
+  const res = await apiFetch('/api/auth/me/subscription/unsubscribe', { method: 'POST' });
+  try {
+    return (await res.json()) as { ok: boolean };
+  } catch {
+    return { ok: false };
+  }
+}
