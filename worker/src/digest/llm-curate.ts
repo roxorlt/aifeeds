@@ -34,11 +34,15 @@ export async function curateSource(
   }
 
   const prompt = buildCuratePrompt(source, candidates, target);
-  const { data } = await callDeepSeekJson<CurateLLMResult>(
+  const { data, error } = await callDeepSeekJson<CurateLLMResult>(
     env.DEEPSEEK_API_KEY,
     DEEPSEEK_PRO,
     prompt,
-    { retries: 2, maxTokens: 1500 },
+    { retries: 2, maxTokens: 4000 },
+  );
+  console.log(
+    `[curate] ${source} cands=${candidates.length} promptLen=${prompt.length} ` +
+      (data ? `selected=${data.selected?.length ?? 'nil'}` : `no_data err=${error}`),
   );
 
   // worker 端校验(DeepSeek 只保证 valid JSON,不保证 schema)
@@ -67,8 +71,8 @@ export async function curateSource(
 function buildCuratePrompt(source: DigestSource, candidates: CurateCandidate[], target: number): string {
   const label = SOURCE_LABELS[source] || source;
   const list = candidates
-    .map((c, i) => `${i + 1}. [id=${c.id}] ${c.title}${c.summary ? ' — ' + c.summary.slice(0, 120) : ''}`)
-    .join('\n');
+    .map((c, i) => `${i + 1}. [id=${c.id}] ${c.title}${c.summary ? '\n   ' + c.summary : ''}`)
+    .join('\n\n');
   return `你是 AI 资讯精选编辑。下面是「${label}」过去 24 小时的 ${candidates.length} 条候选。请挑出最值得 AI 从业者关注的 ${target} 条,并为每条写一句不超过 40 字的中文亮点(说清为什么值得看,不要复述标题)。
 
 候选:
