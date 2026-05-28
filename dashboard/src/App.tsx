@@ -505,15 +505,18 @@ function DashboardHome() {
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // R17:direction lock 之前的第一帧也 preventDefault, 防 iOS / Android
-      // 在顶部启动 pull-to-refresh (PM 反馈 #3:滑频道同时下拉刷新文案露出).
-      // overscroll-behavior-y:none 没用是因为 pull-to-refresh 在 touchstart
-      // 阶段决定, native scroll 启动后即使后续 preventDefault 也停不下来.
-      // 首帧 preventDefault → 浏览器知道 JS 要 capture, 不启动 pull-to-refresh.
+      // R23 (2026-05-28): 删掉方向锁定前的首帧 preventDefault.
+      // 它是 R17 为防"斜滑触发系统下拉刷新"加的, 但 R22 把 mobile body 改成
+      // 永久 fixed (index.css max-md:overflow:hidden) 之后 pull-to-refresh 物理上
+      // 已不存在 —— R22 删了配套的 onStart lockBody, 却漏删了这里的 preventDefault.
+      // 残留的它反而拦了慢速纵滑的头几帧 (absDx+absDy<10 窗口内): iOS Safari 一旦
+      // 在手势早期帧收到 preventDefault, 就判定该手势被 JS 接管, 即便后续锁定为
+      // vertical 也不再启动 native scroll → 表现为"滑动偶尔不响应, 要反复多次才滚".
+      // 横滑不受影响: 锁定为 horizontal 后下方 L532 仍 preventDefault 跟手.
       if (direction === 'unknown') {
         if (absDx + absDy < 10) {
-          // 抖动阈值内, 但仍 preventDefault 防 pull-to-refresh 启动
-          if (e.cancelable) e.preventDefault();
+          // 抖动阈值内, 还没法判方向, 直接 return 等下一帧 (不 preventDefault,
+          // 让 #root native vertical scroll 能正常启动)
           return;
         }
         if (absDx > absDy) {
