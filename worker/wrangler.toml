@@ -113,6 +113,19 @@ name = "hf-paper-pipeline-workflow"
 binding = "HF_PAPER_PIPELINE_WORKFLOW"
 class_name = "HfPaperPipelineWorkflow"
 
+# CF Workflow: 订阅推送(worker/src/digest/)。scheduled handler 在节点(UTC 0/4/9)
+# create node-run;node-run Phase 2 对每个订阅 create deliver。
+# 设计:roxor-main-design-20260528-090625.md
+[[workflows]]
+name = "digest-node-run-workflow"
+binding = "DIGEST_NODE_RUN_WORKFLOW"
+class_name = "DigestNodeRunWorkflow"
+
+[[workflows]]
+name = "digest-deliver-workflow"
+binding = "DIGEST_DELIVER_WORKFLOW"
+class_name = "DigestDeliverWorkflow"
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -191,6 +204,16 @@ class_name = "ClawhubPipelineWorkflow"
 name = "hf-paper-pipeline-workflow-staging"
 binding = "HF_PAPER_PIPELINE_WORKFLOW"
 class_name = "HfPaperPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "digest-node-run-workflow-staging"
+binding = "DIGEST_NODE_RUN_WORKFLOW"
+class_name = "DigestNodeRunWorkflow"
+
+[[env.staging.workflows]]
+name = "digest-deliver-workflow-staging"
+binding = "DIGEST_DELIVER_WORKFLOW"
+class_name = "DigestDeliverWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。

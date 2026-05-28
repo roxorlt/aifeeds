@@ -116,6 +116,7 @@ import {
   handleUnsubscribeByToken,
 } from './digest/handlers';
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
+import { slotKey } from './digest/lib';
 
 export interface Env {
   DB: D1Database;
@@ -220,6 +221,9 @@ export interface Env {
   // runClawhubFetchList 后对每条新 skill create instance。替换
   // clawhub-enrich preempt cron。设计同上。
   CH_PIPELINE_WORKFLOW: Workflow;
+  // 订阅推送(worker/src/digest/):node-run 算榜单+起 deliver;deliver per-sub 投递。
+  DIGEST_NODE_RUN_WORKFLOW: Workflow;
+  DIGEST_DELIVER_WORKFLOW: Workflow;
   // HuggingFace Daily Papers token(read scope)— worker/src/scrapers/hf-paper.ts
   // 通过 Authorization: Bearer 调 GET /api/daily_papers + GET /api/papers/:id。
   // 2026-05-18 OPS verify staging + prod 均已配。
@@ -242,6 +246,8 @@ export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 export { PhPipelineWorkflow } from './workflows/ph-pipeline';
 export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
 export { HfPaperPipelineWorkflow } from './workflows/hf-paper-pipeline';
+export { DigestNodeRunWorkflow } from './digest/node-run';
+export { DigestDeliverWorkflow } from './digest/deliver';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -1429,6 +1435,21 @@ export default {
     const utc = new Date(event.scheduledTime);
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
+
+    // digest 推送节点:UTC 0/4/9 (= BJT 8/12/17),minute=0。独立触发 node-run workflow
+    // (不占 X mode rotation);instance id 唯一 = 同节点同天幂等防重复 create。
+    const digestSlotBjt =
+      minute === 0 ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour] : undefined;
+    if (digestSlotBjt !== undefined) {
+      ctx.waitUntil(
+        env.DIGEST_NODE_RUN_WORKFLOW.create({
+          id: `digest-node-${slotKey(digestSlotBjt)}`,
+          params: { slotHourBjt: digestSlotBjt },
+        })
+          .then(() => undefined)
+          .catch((e) => console.error('[digest] node-run create fail', e)),
+      );
+    }
 
     // GitHub trending fetch (phase 1) at BJT 01:00 + 13:00 (= UTC 17:00 + 05:00).
     // 2 subrequests, doesn't conflict with X cron rotation.

@@ -1,0 +1,95 @@
+// 订阅 digest 选品:每源按各自真实排序取过去 24h top N 的 item id。
+// 时间窗口用 scraped_at(入库时间)而非 published_at —— GitHub/HF 的 published_at 是内容
+// 发布日(老),scraped_at 才是"最近系统收录"。scraped_at 格式跨源不一(x_list 空格 /
+// 其余 ISO with T/Z),统一用 datetime(scraped_at) 归一化比较。
+// 排序复用各源 feed handler 同款信号:
+//   X(x_list) — HOT_EXPR(engagement / age decay by published_at),is_relevant=1
+//   GH        — metrics.today_stars DESC(当日新增 star)
+//   PH        — launch_date_pt DESC, daily_rank ASC(当日榜),is_relevant=1
+//   HF        — metrics.upvotes DESC
+//   ClawHub   — 24h star 增量(metrics_snapshots_clawhub delta,防累积 top 永远不变)
+// 设计文档:roxor-main-design-20260528-090625.md
+
+import type { Env } from '../index';
+import type { DigestSource } from './config';
+
+// config 源 key → items.source_type(注意 X 历史命名为 x_list)
+export const SOURCE_TYPE: Record<DigestSource, string> = {
+  'ph': 'product_hunt',
+  'gh': 'github',
+  'hf-paper': 'hf_paper',
+  'clawhub': 'clawhub',
+  'x': 'x_list',
+};
+
+const HOT_EXPR = `((COALESCE(CAST(json_extract(metrics,'$.likes') AS INTEGER),0)
+   + 2*COALESCE(CAST(json_extract(metrics,'$.retweets') AS INTEGER),0)
+   + 3*COALESCE(CAST(json_extract(metrics,'$.replies') AS INTEGER),0))
+  * 1.0 / POW((julianday('now')-julianday(published_at))*24+2, 1.5))`;
+
+// 取某源过去 24h 的 top `limit` item id(按该源真实热度排序)。
+// 同时供 normal 榜(limit=config.normal)与 curated 候选池(limit=30)使用。
+export async function selectTopForSource(
+  env: Env,
+  source: DigestSource,
+  limit: number,
+): Promise<string[]> {
+  if (source === 'clawhub') return selectClawhubByDelta(env, limit);
+
+  const sourceType = SOURCE_TYPE[source];
+  const wcGate =
+    env.WORKFLOW_COMPLETED_FILTER === 'true'
+      ? "AND json_extract(extra,'$.workflow_completed_at') IS NOT NULL"
+      : '';
+
+  let orderBy: string;
+  let extraWhere = '';
+  if (source === 'x') {
+    orderBy = `${HOT_EXPR} DESC`;
+    extraWhere = 'AND is_relevant = 1';
+  } else if (source === 'gh') {
+    orderBy = `CAST(json_extract(metrics,'$.today_stars') AS INTEGER) DESC`;
+  } else if (source === 'ph') {
+    orderBy = `json_extract(extra,'$.launch_date_pt') DESC, CAST(json_extract(extra,'$.daily_rank') AS INTEGER) ASC`;
+    extraWhere = 'AND is_relevant = 1';
+  } else {
+    // hf-paper
+    orderBy = `CAST(json_extract(metrics,'$.upvotes') AS INTEGER) DESC`;
+  }
+
+  const sql = `SELECT id FROM items
+    WHERE source_type = ?
+      AND datetime(scraped_at) >= datetime('now','-1 day')
+      AND deleted_at IS NULL ${extraWhere} ${wcGate}
+    ORDER BY ${orderBy}
+    LIMIT ?`;
+  const rows = await env.DB.prepare(sql).bind(sourceType, limit).all<{ id: string }>();
+  return (rows.results || []).map((r) => r.id);
+}
+
+// ClawHub 按 24h star 增量排序(累积 star/install 取 topN 会永远是头部老项目)。
+// 用 metrics_snapshots_clawhub:最新快照 stars - 24h 前快照 stars。captured_at 为 unix 秒。
+async function selectClawhubByDelta(env: Env, limit: number): Promise<string[]> {
+  const sql = `
+    WITH latest AS (
+      SELECT item_id, stars AS cur FROM metrics_snapshots_clawhub m1
+      WHERE captured_at = (
+        SELECT MAX(captured_at) FROM metrics_snapshots_clawhub m2 WHERE m2.item_id = m1.item_id
+      )
+    ),
+    prev AS (
+      SELECT item_id, stars AS old FROM metrics_snapshots_clawhub m1
+      WHERE captured_at = (
+        SELECT MAX(captured_at) FROM metrics_snapshots_clawhub m2
+        WHERE m2.item_id = m1.item_id AND m2.captured_at <= unixepoch() - 86400
+      )
+    )
+    SELECT i.id FROM items i
+    JOIN latest l ON l.item_id = i.id
+    LEFT JOIN prev p ON p.item_id = i.id
+    WHERE i.source_type = 'clawhub' AND i.deleted_at IS NULL
+    ORDER BY (l.cur - COALESCE(p.old, l.cur)) DESC
+    LIMIT ?`;
+  const rows = await env.DB.prepare(sql).bind(limit).all<{ id: string }>();
+  return (rows.results || []).map((r) => r.id);
+}

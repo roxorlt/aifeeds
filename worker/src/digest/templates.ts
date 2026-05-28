@@ -123,3 +123,102 @@ export function buildWelcomeEmail(input: WelcomeEmailInput): {
 
   return { subject, text, html };
 }
+
+// ── digest 正式日报邮件 ──
+
+export interface DigestItem {
+  source: DigestSource;
+  title: string;
+  summary: string;
+  url: string;
+  author: string;
+  hook: string | null;
+  cover?: string;
+}
+
+export interface DigestEmailInput {
+  subject: string; // 节点标题摘要(不含日期前缀)
+  items: DigestItem[];
+  emailToken: string | null; // footer 进站按钮回流 token
+  unsubscribeUrl: string;
+}
+
+function cnDate(ts = Date.now()): string {
+  const d = new Date(ts + 8 * 3600 * 1000);
+  return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日`;
+}
+
+function renderCard(it: DigestItem): string {
+  const author = it.author ? `${escapeHtml(it.author)} · ` : '';
+  const hook = it.hook
+    ? `<div style="font-size:13px;color:${BRAND.accent};margin-top:4px;line-height:1.5;">${escapeHtml(it.hook)}</div>`
+    : '';
+  const cover = it.cover
+    ? `<img src="${escapeHtml(it.cover)}" width="100%" style="max-width:544px;border-radius:8px;margin-top:8px;display:block;" alt="" />`
+    : '';
+  return `<tr><td style="padding:8px 28px;">
+    <a href="${escapeHtml(it.url)}" style="text-decoration:none;color:inherit;display:block;">
+      <div style="font-size:15px;font-weight:600;color:${BRAND.text};line-height:1.45;">${escapeHtml(it.title)}</div>
+      <div style="font-size:13px;color:${BRAND.sub};margin-top:3px;line-height:1.5;">${author}${escapeHtml(it.summary)}</div>
+      ${hook}
+      ${cover}
+    </a>
+  </td></tr>`;
+}
+
+export function buildDigestEmail(input: DigestEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `${cnDate()} · ${input.subject}`;
+
+  const groups: Partial<Record<DigestSource, DigestItem[]>> = {};
+  for (const it of input.items) (groups[it.source] ||= []).push(it);
+  const orderedSources = DIGEST_SOURCE_ORDER.filter((s) => groups[s]?.length);
+
+  // text 版
+  const textParts = [`【AI Feeds】${subject}`, ''];
+  for (const s of orderedSources) {
+    textParts.push(`## ${SOURCE_LABELS[s]}`);
+    for (const it of groups[s]!) {
+      textParts.push(`- ${it.title}${it.hook ? `（${it.hook}）` : ''}\n  ${it.url}`);
+    }
+    textParts.push('');
+  }
+  textParts.push(`管理订阅 / 退订:${input.unsubscribeUrl}`);
+  const text = textParts.join('\n');
+
+  // html 版
+  const enterUrl = input.emailToken
+    ? `https://ai-feeds.com/api/digest/return?u=${encodeURIComponent(input.emailToken)}`
+    : 'https://ai-feeds.com';
+  let sections = '';
+  for (const s of orderedSources) {
+    sections += `<tr><td style="padding:18px 28px 2px;"><div style="font-size:13px;font-weight:700;color:${BRAND.accent};letter-spacing:.5px;">${escapeHtml(SOURCE_LABELS[s])}</div></td></tr>`;
+    for (const it of groups[s]!) sections += renderCard(it);
+  }
+
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:${BRAND.bg};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BRAND.bg};padding:24px 0;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${BRAND.card};border:1px solid ${BRAND.border};border-radius:12px;overflow:hidden;font-family:${FONT};">
+    <tr><td style="padding:24px 28px 4px;">
+      <div style="font-size:20px;font-weight:700;color:${BRAND.text};">AI Feeds</div>
+      <div style="font-size:13px;color:${BRAND.sub};margin-top:2px;">${escapeHtml(subject)}</div>
+    </td></tr>
+    ${sections}
+    <tr><td style="padding:20px 28px 24px;border-top:1px solid ${BRAND.border};margin-top:12px;">
+      <a href="${enterUrl}" style="display:inline-block;background:${BRAND.accent};color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 20px;border-radius:8px;">进站看全部 →</a>
+      <div style="font-size:12px;color:${BRAND.sub};line-height:1.6;margin-top:14px;">
+        <a href="${input.unsubscribeUrl}" style="color:${BRAND.sub};">退订</a> · AI Feeds · <a href="https://ai-feeds.com" style="color:${BRAND.sub};">ai-feeds.com</a>
+      </div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body></html>`;
+
+  return { subject, text, html };
+}
