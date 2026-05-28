@@ -13,7 +13,7 @@ import {
 import { selectTopForSource } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey } from './lib';
-import { callDeepSeek, DEEPSEEK_FLASH } from '../hf-paper/llm';
+import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
 
 interface NodeRunParams {
   slotHourBjt: number;
@@ -42,17 +42,52 @@ async function upsertPool(
     .run();
 }
 
-async function fetchCandidates(env: Env, ids: string[]): Promise<CurateCandidate[]> {
+interface CandRow {
+  id: string;
+  title: string | null;
+  content: string | null;
+  content_translated: string | null;
+  author: string | null;
+  handle: string | null;
+  extra: string | null;
+}
+
+// X 候选:完整文案(不截断)+ 引用推文全文(extra.quote_of)+ 链接卡,给 pro 充分上下文。
+function buildXCandidate(id: string, row: CandRow | undefined): CurateCandidate {
+  const parts: string[] = [];
+  const main = row?.content_translated || row?.content || '';
+  if (main) parts.push(main);
+  try {
+    const ex = JSON.parse(row?.extra || '{}') as Record<string, unknown>;
+    const q = ex.quote_of as Record<string, unknown> | undefined;
+    if (q && typeof q === 'object') {
+      const qt = (q.content_translated as string) || (q.content as string) || '';
+      const qa = (q.author as string) || (q.handle as string) || '';
+      if (qt) parts.push(`[引用 @${qa}] ${qt}`);
+    }
+    const lc = ex.link_card as Record<string, unknown> | undefined;
+    if (lc && typeof lc === 'object' && lc.title) {
+      parts.push(`[链接] ${lc.title}${lc.description ? ': ' + (lc.description as string) : ''}`);
+    }
+  } catch {
+    /* ignore */
+  }
+  const author = row?.author || row?.handle || '';
+  return { id, title: author ? `@${author}` : id, summary: parts.join('\n') };
+}
+
+async function fetchCandidates(env: Env, source: DigestSource, ids: string[]): Promise<CurateCandidate[]> {
   if (!ids.length) return [];
   const ph = ids.map(() => '?').join(',');
   const r = await env.DB.prepare(
-    `SELECT id, title, content, content_translated FROM items WHERE id IN (${ph})`,
+    `SELECT id, title, content, content_translated, author, handle, extra FROM items WHERE id IN (${ph})`,
   )
     .bind(...ids)
-    .all<{ id: string; title: string | null; content: string | null; content_translated: string | null }>();
+    .all<CandRow>();
   const byId = new Map((r.results || []).map((row) => [row.id, row]));
   return ids.map((id) => {
     const row = byId.get(id);
+    if (source === 'x') return buildXCandidate(id, row);
     const body = row?.content_translated || row?.content || '';
     return {
       id,
@@ -90,12 +125,15 @@ async function genSubjectDigest(env: Env, sk: string): Promise<string> {
     .map((row) => row.title || (row.content_translated || row.content || '').slice(0, 40))
     .filter(Boolean);
   if (!titles.length) return fallback;
-  const prompt = `下面是今天 AI 圈热门内容的标题,用一句不超过 30 字的中文概括今日热点(给邮件标题用,不要用句号结尾):\n\n${titles.join('\n')}`;
-  const { text } = await callDeepSeek(env.DEEPSEEK_API_KEY, DEEPSEEK_FLASH, prompt, {
-    maxTokens: 100,
-    temperature: 0.5,
+  // deepseek-v4 是 reasoning 模型:普通调用 content 空(内容在 reasoning_content),
+  // 必须走 JSON Mode 让答案进 content;maxTokens 要留够 reasoning 占用。
+  const prompt = `下面是今天 AI 圈热门内容的标题,用一句不超过 30 字的中文概括今日热点(给邮件标题用)。只返回 JSON:{"subject":"概括内容"}\n\n${titles.join('\n')}`;
+  const { data } = await callDeepSeekJson<{ subject: string }>(env.DEEPSEEK_API_KEY, DEEPSEEK_FLASH, prompt, {
+    maxTokens: 800,
+    retries: 1,
   });
-  return (text || '').trim().replace(/[。.]$/, '').slice(0, 40) || fallback;
+  const s = data?.subject;
+  return typeof s === 'string' && s.trim() ? s.trim().replace(/[。.]$/, '').slice(0, 40) : fallback;
 }
 
 export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams> {
@@ -115,7 +153,7 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
         }
         const normalIds = candidateIds.slice(0, cfg.normal);
         await upsertPool(this.env, sk, source, 'normal', normalIds, null);
-        const candidates = await fetchCandidates(this.env, candidateIds);
+        const candidates = await fetchCandidates(this.env, source as DigestSource, candidateIds);
         const { ids, hooks } = await curateSource(this.env, source as DigestSource, candidates, cfg.curated);
         await upsertPool(this.env, sk, source, 'curated', ids, hooks);
         return candidateIds.length;
