@@ -354,7 +354,34 @@ export async function runDailyHealthChecks(env: Env): Promise<{
     details.x_metrics_coverage_error = String(e).slice(0, 200);
   }
 
-  return { checks_run: 2, alerts_critical: criticals, alerts_warning: warnings, details };
+  // ─── Check 3: digest 投递成功率(7d 滚动,warning) ─────────────
+  // 分母:7d 内 sent + failed_resend;成功率 < 95% 且样本 >= 20 触发
+  try {
+    const send = await env.DB.prepare(
+      `SELECT COUNT(*) as total,
+              SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) as sent
+         FROM digest_send_log
+        WHERE status IN ('sent','failed_resend')
+          AND sent_at >= (unixepoch()*1000 - 7*86400000)`,
+    ).first<{ total: number; sent: number }>();
+    if (send && send.total >= 20) {
+      const pct = (send.sent * 100) / send.total;
+      details.digest_send_success = { total: send.total, sent: send.sent, pct: pct.toFixed(1) + '%' };
+      if (pct < 95) {
+        warnings++;
+        await pushDeerWarning(
+          env,
+          'digest 投递成功率跌破 95%',
+          `digest 邮件投递(7 天滚动,样本 ${send.total}):\n- 成功 ${send.sent} / ${send.total} = ${pct.toFixed(1)}%\n- 阈值 95% 已触发\n\n排查 Resend 配额 / API 故障 / 域名信誉`,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn('[health-check] digest send rate query failed:', e);
+    details.digest_send_rate_error = String(e).slice(0, 200);
+  }
+
+  return { checks_run: 3, alerts_critical: criticals, alerts_warning: warnings, details };
 }
 
 /**
