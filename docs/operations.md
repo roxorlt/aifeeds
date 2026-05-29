@@ -1222,6 +1222,60 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ---
 
+## 订阅推送子系统（digest，2026-05-29 staging 验证中，**未上 prod**）
+
+> 邮件日报订阅。FE（订阅页 + 横幅）在分支 `worktree-feat-subscription-page`，BE（引擎 + 接口）在 `feat/digest-subscription`，**只在 staging 验证，未合 main / 未上 prod**。设计文档：`~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260528-090625.md`。worker 内部细节（cron/workflow）以 BE 实现为准。
+
+### Worker endpoints（`xlist-api`）
+
+| 路径 | 方法 | 鉴权 | 用途 |
+|------|------|------|------|
+| `/api/subscribe` | POST | 匿名 + Turnstile | 匿名订阅（默认配置）；成功回 `edit_token` |
+| `/api/subscribe/configure` | POST | `edit_token`（无 turnstile） | 两步订阅第二页改偏好 |
+| `/api/auth/me/subscription` | GET / PUT | session cookie | 登录态读 / 改订阅 |
+| `/api/auth/me/subscription/unsubscribe` | POST | session cookie | 站内退订 |
+| `/api/digest/return` | GET | email HMAC token | 邮件回流：隐式注册登录 + 302 落地深链 |
+| `/unsubscribe` | GET / POST | unsubscribe_token | RFC 8058 一键退订 |
+| `/api/webhook/resend` | POST | Svix 签名 | bounce/complaint → 计数 / 踢出 |
+
+**⚠️ 邮件链接域名规则（2026-05-29 白页 bug 修复 `df8b3d5` 后）**：回流 `/api/digest/return` + 退订 `/unsubscribe` + List-Unsubscribe header 走 **API 域**（`API_BASE` = `api.ai-feeds.com` / `staging-api.ai-feeds.com`）；落地深链（`to=` 参数 + 进站）走**前端域**（`SITE_BASE` = `ai-feeds.com` / `staging.ai-feeds.com`）。基址由 `[vars] SITE_BASE / API_BASE` 按环境取。**worker 没有 apex `ai-feeds.com/api/*` 路由，邮件里 worker 端点必须用 api 域，否则落到 Pages SPA → 白页。**
+
+### D1（`xlist` / `xlist-staging`）— migration 018
+
+- `subscriptions`：`email`（唯一键 email+channel）/ `sources`(JSON) / `send_slot`(8/12/17) / `density`(normal|curated) / `status`(active|unsubscribed|kicked|paused) / `next_send_at` / `bounce_count`(≥2→kicked) / `worker_send_failures`(≥5→paused) / `unsubscribe_token` / `user_id`(回流回填)
+- `digest_pool`：`slot_key`(YYYY-MM-DD-HH BJT) × `source` × `density` → `item_ids`(JSON) + `items_meta`；UNIQUE(slot_key,source,density) 重跑覆盖
+- `digest_send_log`：每次投递记账（status: sent|no_items|failed_resend|welcome）
+- migration 跑法（同 §2 D1）：`wrangler d1 execute xlist-staging --env staging --remote --file=migrations/018-subscriptions.sql`（**prod 待上线再跑**）
+
+### Workflows（wrangler.toml）
+
+- `digest-node-run-workflow`：节点到点现算 5 源榜单（normal 纯分 / curated LLM 精选）+ 给选了该节点的订阅起 deliver
+- `digest-deliver-workflow`：per-subscription 选品（无 LLM）→ 渲染 → Resend 投递 → 记账 + 重算 next_send_at
+- 节点触发：scheduled handler 按 `utc.getUTCHours()` 在 UTC 0/4/9（BJT 8/12/17）触发 node-run；prod 复用现有 `*/5` cron tick 内判断节点时刻；**staging cron 全关（手动触发，同现有约定）**
+
+### Secrets（加到 `.secrets/aifeeds-{prod,staging}.env`）
+
+- `DIGEST_EMAIL_HMAC`（32B hex）：回流 token + 编辑令牌（`edit:` 前缀）HMAC 签名
+- `RESEND_WEBHOOK_SECRET`（Svix）：Resend webhook 签名校验
+- 复用现有：`RESEND_API_KEY` / `TURNSTILE_*` / `PUSHDEER_*`
+
+### 前端（dashboard）
+
+- 路由：`/subscribe`（匿名两步订阅：先邮箱后可选精调）、`/me/subscription`（登录态管理，RequireAuth）
+- 顶栏未登录引导横幅（`SubscribeBanner`，每日首访展示、可关闭）
+- staging 部署：`cd dashboard && npm run deploy:staging`（Pages 项目 `xlist-dashboard-staging`）
+
+### 上 prod 前待办
+
+- [ ] prod 注入 `DIGEST_EMAIL_HMAC` / `RESEND_WEBHOOK_SECRET`
+- [ ] prod 跑 migration 018
+- [ ] Resend dashboard 配 webhook → `api.ai-feeds.com/api/webhook/resend`
+- [ ] prod 节点 cron 确认（加 0/4/9 专用 cron 或确认 `*/5` tick 内判断，BE 核对）
+- [ ] 真人端到端验收（订阅 → welcome → 点链接回流登录 + 落地抽屉 → 退订）
+- [ ] 后台订阅看板（规格 `plans/2026-05-29-admin-subscriptions-view-spec.md`）
+
+---
+
 ## 本地服务（MacBook）
 
 ### 1. launchd: `com.xlist-scraper.cron`（**已停用 2026-05-06**）
