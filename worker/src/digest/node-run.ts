@@ -155,8 +155,8 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
         const normalIds = candidateIds.slice(0, cfg.normal);
         await upsertPool(this.env, sk, source, 'normal', normalIds, null);
         const candidates = await fetchCandidates(this.env, source as DigestSource, candidateIds);
-        const { ids, hooks } = await curateSource(this.env, source as DigestSource, candidates, cfg.curated);
-        await upsertPool(this.env, sk, source, 'curated', ids, hooks);
+        const ids = await curateSource(this.env, source as DigestSource, candidates, cfg.curated);
+        await upsertPool(this.env, sk, source, 'curated', ids, null);
         return candidateIds.length;
       });
     }

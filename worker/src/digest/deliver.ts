@@ -70,27 +70,67 @@ function deepLinkPath(itemId: string): string {
   }
 }
 
-function toDigestItem(source: DigestSource, row: ItemRow, hook: string | undefined): DigestItem {
-  let cover: string | undefined;
-  let aiSummary: string | undefined;
+// github:<owner>/<repo> → repo 名(去 owner,项目名保留英文)
+function ghRepoName(itemId: string): string {
+  const idx = itemId.indexOf(':');
+  const sid = idx >= 0 ? itemId.slice(idx + 1) : itemId;
+  const slash = sid.lastIndexOf('/');
+  return slash >= 0 ? sid.slice(slash + 1) : sid;
+}
+
+// 去 markdown 标记 + 压缩空白(GH/HF 中文总结含 markdown)
+function cleanText(s: string): string {
+  return s
+    .replace(/[#*`>_~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// 每源取中文字段(全中文;产品名/项目名/人名保留英文)。精选档 A 方案不再用 hook。
+function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
+  let ex: Record<string, unknown> = {};
   try {
-    const ex = JSON.parse(row.extra || '{}') as Record<string, unknown>;
-    cover = (ex.cover_image as string) || (ex.video_thumbnail as string) || undefined;
-    aiSummary = ex.ai_summary as string | undefined;
+    ex = JSON.parse(row.extra || '{}') as Record<string, unknown>;
   } catch {
     /* ignore */
   }
-  const body = row.content_translated || row.content || '';
-  // X 推文无 title:优先用 ai_summary(简洁),否则正文开头
-  const title = row.title || aiSummary || body.slice(0, 80) || '(无标题)';
+  const cover = (ex.cover_image as string) || (ex.video_thumbnail as string) || undefined;
+  const ct = row.content_translated || '';
+  const body = ct || row.content || '';
+  let title: string;
+  let summary: string;
+  switch (source) {
+    case 'gh': // 项目名(英文)+ DeepSeek 中文总结
+      title = ghRepoName(row.id);
+      summary = (ex.ai_summary as string) || ct;
+      break;
+    case 'ph': // 产品名(英文)+ 中文 tagline
+      title = row.title || '';
+      summary = ct || (ex.description as string) || '';
+      break;
+    case 'hf-paper': // 一句话中文摘要作标题 + 详细中文摘要
+      title = (ex.ai_summary_zh as string) || row.title || '';
+      summary = (ex.summary_zh as string) || (ex.ai_summary_zh as string) || '';
+      break;
+    case 'x': // X 中文摘要作标题 + 推文译文
+      title = (ex.ai_summary as string) || body.slice(0, 60);
+      summary = ct || row.content || '';
+      break;
+    case 'clawhub': // skill 名 + 中文简介
+      title = row.title || '';
+      summary = ct || (ex.ai_summary as string) || '';
+      break;
+    default:
+      title = row.title || body.slice(0, 60);
+      summary = body;
+  }
   return {
     source,
-    title,
-    summary: body.slice(0, 120),
+    title: cleanText(title || '(无标题)').slice(0, 120),
+    summary: cleanText(summary).slice(0, 160),
     url: row.url || SITE,
     deepLinkPath: deepLinkPath(row.id),
     author: row.author || row.handle || '',
-    hook: hook || null,
     cover,
   };
 }
@@ -148,7 +188,6 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
         if (!pool) continue;
         const ids = safeParseArray<string>(pool.item_ids);
         if (!ids.length) continue;
-        const hooks = safeParseObj(pool.items_meta);
         const ph = ids.map(() => '?').join(',');
         const r = await this.env.DB.prepare(
           `SELECT id, title, content, content_translated, author, handle, url, media, extra FROM items WHERE id IN (${ph})`,
@@ -158,7 +197,7 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
         const byId = new Map((r.results || []).map((row) => [row.id, row]));
         for (const id of ids) {
           const row = byId.get(id);
-          if (row) items.push(toDigestItem(source, row, hooks[id]));
+          if (row) items.push(toDigestItem(source, row));
         }
       }
       return { items, subject };
@@ -251,13 +290,5 @@ function safeParseArray<T>(s: string | null): T[] {
     return Array.isArray(v) ? (v as T[]) : [];
   } catch {
     return [];
-  }
-}
-function safeParseObj(s: string | null): Record<string, string> {
-  try {
-    const v = JSON.parse(s || '{}');
-    return v && typeof v === 'object' ? (v as Record<string, string>) : {};
-  } catch {
-    return {};
   }
 }
