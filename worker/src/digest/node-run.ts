@@ -127,13 +127,14 @@ async function genSubjectDigest(env: Env, sk: string): Promise<string> {
   if (!titles.length) return fallback;
   // deepseek-v4 是 reasoning 模型:普通调用 content 空(内容在 reasoning_content),
   // 必须走 JSON Mode 让答案进 content;maxTokens 要留够 reasoning 占用。
-  const prompt = `下面是今天 AI 圈热门内容的标题,用一句不超过 30 字的中文概括今日热点(给邮件标题用)。只返回 JSON:{"subject":"概括内容"}\n\n${titles.join('\n')}`;
+  // 主题走 TLDR 风格:挑最重磅的 3 个精简成短名列举,而非总结句。
+  const prompt = `下面是今天 AI 圈精选内容的标题。挑出最重磅的 3 个,每个精简成不超过 12 字的短名(产品名/事件名/技术名),用「、」连接成邮件标题。像 TLDR 那样直接列举,不要总结句、不要修饰词。只返回 JSON:{"subject":"短名1、短名2、短名3"}\n\n${titles.join('\n')}`;
   const { data } = await callDeepSeekJson<{ subject: string }>(env.DEEPSEEK_API_KEY, DEEPSEEK_FLASH, prompt, {
-    maxTokens: 800,
+    maxTokens: 1000,
     retries: 1,
   });
   const s = data?.subject;
-  return typeof s === 'string' && s.trim() ? s.trim().replace(/[。.]$/, '').slice(0, 40) : fallback;
+  return typeof s === 'string' && s.trim() ? s.trim().replace(/[。.]$/, '').slice(0, 60) : fallback;
 }
 
 export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams> {
