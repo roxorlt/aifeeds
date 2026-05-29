@@ -54,11 +54,13 @@ function buildCuratePrompt(source: DigestSource, candidates: CurateCandidate[], 
   const list = candidates
     .map((c, i) => `${i + 1}. [id=${c.id}] ${c.title}${c.summary ? '\n   ' + c.summary : ''}`)
     .join('\n\n');
-  return `你是 AI 资讯精选编辑。下面是「${label}」过去 24 小时的 ${candidates.length} 条候选。挑出最值得 AI 从业者关注的 ${target} 条。只返回 JSON,不要解释:
+  return `你是 AI 资讯精选编辑。下面是「${label}」过去 24 小时的 ${candidates.length} 条候选,已按热度(互动量/star/upvotes/排名)从高到低排序——**序号即热度排名,1 最热**。
+
+请综合「内容价值」与「热度」挑出最值得 AI 从业者关注的 ${target} 条:热度是重要参考(高热往往代表关注度),但不必严格按序号,优质但稍冷门的也可入选。只返回 JSON,不要解释:
 {"selected":["候选的 id 原值", ...]}
 
 要求:selected 恰好 ${target} 个 id,必须是候选里出现过的原值。
 
-候选:
+候选(按热度降序):
 ${list}`;
 }
