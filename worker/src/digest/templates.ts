@@ -1,22 +1,24 @@
-// 订阅推送邮件模板。welcome 邮件(订阅即时发)+ digest 正式日报。
-// 邮件 HTML 约束:table 布局 + inline CSS + 无 JS,跨客户端兼容(Gmail/Outlook/Apple/QQ/163)。
-// 源名对齐主站频道 tab;每条 title 深链到 aifeeds 抽屉(经回流端点带 token 自动注册登录)。
+// 订阅推送邮件模板 v3(FE 视觉规格 2026-05-29)。
+// table 布局 + inline CSS + 无 JS,跨客户端兼容(Gmail/Outlook/Apple/QQ/163)。
+// 精选档 A 方案:邮件不显示单独"亮点"行,精选只体现"条数更少";每条 title 深链到抽屉(回流端点带 token 自动注册登录)。
 
 import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
 
 const SITE = 'https://ai-feeds.com';
+const SLOGAN = '专注 AI 领域资讯聚合';
 
-// 占位品牌色,待 FE 出最终规格替换。
-const BRAND = {
-  text: '#16181c',
-  sub: '#6b7280',
-  accent: '#2563eb',
-  border: '#e5e7eb',
-  bg: '#f6f7f9',
+// FE v3 配色 token
+const C = {
+  text: '#171717', // neutral-900 标题/深色条/黑按钮
+  body: '#525252', // neutral-600 卡片简介
+  sub: '#737373', // neutral-500 日期/meta/footer
+  accent: '#0284c7', // sky-600 仅行内链接
+  headerLink: '#7dd3fc', // sky-300 深色条上链接
+  border: '#e5e5e5',
+  band: '#f5f5f5', // 源分区灰带
+  bg: '#fafafa',
   card: '#ffffff',
-  headerBg: '#16181c',
-  headerSub: '#cbd5e1',
-  headerLink: '#93c5fd',
+  headerSub: '#a3a3a3',
 };
 const FONT = `'HarmonyOS Sans SC','PingFang SC',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif`;
 
@@ -48,9 +50,14 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function cnDate(ts = Date.now()): string {
-  const d = new Date(ts + 8 * 3600 * 1000);
-  return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日`;
+// YYYY-MM-DD(北京时间)
+function isoDate(ts = Date.now()): string {
+  return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+function withUtm(pathOrUrl: string): string {
+  const sep = pathOrUrl.includes('?') ? '&' : '?';
+  return `${pathOrUrl}${sep}utm_source=email&utm_campaign=digest`;
 }
 
 function sourcesLine(sources: DigestSource[]): string {
@@ -59,7 +66,7 @@ function sourcesLine(sources: DigestSource[]): string {
     .join(' · ');
 }
 
-// ── welcome 邮件(订阅即时发)──
+// ── welcome 邮件 ──
 
 export interface WelcomeEmailInput {
   sources: DigestSource[];
@@ -91,38 +98,36 @@ export function buildWelcomeEmail(input: WelcomeEmailInput): {
     '',
     `不想再收到?一键退订:${input.unsubscribeUrl}`,
     '',
-    `AI Feeds · ${SITE}`,
+    `AI Feeds · ${SLOGAN}`,
   ]
     .filter((l) => l !== '')
     .join('\n');
 
   const confirmBtn = input.confirmUrl
     ? `<tr><td style="padding:8px 0 4px;">
-         <a href="${input.confirmUrl}" style="display:inline-block;background:${BRAND.accent};color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:11px 22px;border-radius:8px;">确认并进站看看 →</a>
+         <a href="${input.confirmUrl}" style="display:inline-block;background:${C.text};color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:11px 24px;border-radius:8px;">确认并进站看看</a>
        </td></tr>`
     : '';
 
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:${BRAND.bg};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BRAND.bg};padding:24px 0;">
+<body style="margin:0;padding:0;background:${C.bg};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};padding:24px 0;">
 <tr><td align="center">
-  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${BRAND.card};border:1px solid ${BRAND.border};border-radius:14px;overflow:hidden;font-family:${FONT};">
-    <tr><td style="padding:26px 28px 20px;text-align:center;background:${BRAND.headerBg};">
-      <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
-      <div style="font-size:12px;color:${BRAND.headerSub};margin-top:4px;">每日 AI 多源精选</div>
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${C.card};border:1px solid ${C.border};border-radius:12px;overflow:hidden;font-family:${FONT};">
+    <tr><td style="padding:20px 28px 16px;text-align:center;background:${C.text};">
+      <div style="font-size:22px;font-weight:800;color:#fff;">AI Feeds</div>
+      <div style="font-size:12px;color:${C.headerSub};margin-top:3px;">${SLOGAN}</div>
     </td></tr>
     <tr><td style="padding:20px 28px 4px;">
-      <div style="font-size:17px;font-weight:600;color:${BRAND.text};">订阅成功</div>
-      <p style="font-size:14px;line-height:1.7;color:${BRAND.text};margin:12px 0 0;">
-        你已订阅 <strong>${escapeHtml(srcText)}</strong>，每天 <strong>${escapeHtml(when)}</strong>（北京时间）推送，档位为 ${escapeHtml(dens)}。
+      <div style="font-size:17px;font-weight:700;color:${C.text};">订阅成功</div>
+      <p style="font-size:14px;line-height:1.7;color:${C.body};margin:12px 0 0;">
+        你已订阅 <strong style="color:${C.text};">${escapeHtml(srcText)}</strong>，每天 <strong style="color:${C.text};">${escapeHtml(when)}</strong>（北京时间）推送，档位为 ${escapeHtml(dens)}。
       </p>
-      <p style="font-size:14px;line-height:1.7;color:${BRAND.sub};margin:8px 0 0;">下一个推送时间点，你会收到第一封正式日报。</p>
+      <p style="font-size:14px;line-height:1.7;color:${C.sub};margin:8px 0 0;">下一个推送时间点，你会收到第一封正式日报。</p>
     </td></tr>
     <tr><td style="padding:12px 28px 20px;"><table role="presentation" cellpadding="0" cellspacing="0">${confirmBtn}</table></td></tr>
-    <tr><td style="padding:16px 28px 24px;border-top:1px solid ${BRAND.border};">
-      <div style="font-size:12px;color:${BRAND.sub};line-height:1.6;">
-        不想再收到？<a href="${input.unsubscribeUrl}" style="color:${BRAND.sub};">一键退订</a>。<br>AI Feeds · <a href="${SITE}" style="color:${BRAND.sub};">ai-feeds.com</a>
-      </div>
+    <tr><td style="padding:16px 28px 24px;border-top:1px solid ${C.border};">
+      <div style="font-size:12px;color:${C.sub};line-height:1.6;">不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。AI Feeds · ${SLOGAN}</div>
     </td></tr>
   </table>
 </td></tr>
@@ -132,47 +137,47 @@ export function buildWelcomeEmail(input: WelcomeEmailInput): {
   return { subject, text, html };
 }
 
-// ── digest 正式日报邮件 ──
+// ── digest 正式日报 ──
 
 export interface DigestItem {
   source: DigestSource;
   title: string;
   summary: string;
-  url: string; // 原始链接(text 版 fallback,极端情况)
-  deepLinkPath: string; // aifeeds 抽屉深链 path,如 /t/<id> /g/<owner>/<repo>
+  url: string;
+  deepLinkPath: string;
   author: string;
-  hook: string | null;
   cover?: string;
 }
 
 export interface DigestEmailInput {
-  subject: string; // 精华标题(node-run 生成,如"AlphaFold3, M4 芯片, 模型规范")
+  subject: string; // 精华标题(只作邮件主题行)
   items: DigestItem[];
-  emailToken: string | null; // 回流 token:每条 link 带它经回流端点自动注册登录
+  emailToken: string | null;
   unsubscribeUrl: string;
 }
 
-// 每条 link:有 token 走回流端点(自动注册登录)+ 落地抽屉深链;无 token 直接深链。
+// 每条 link:回流端点(带 token 自动注册登录)+ 落地抽屉深链(带 utm);无 token 直接深链。
 function itemLink(deepLinkPath: string, token: string | null): string {
-  if (token) {
-    return `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(deepLinkPath)}`;
-  }
-  return `${SITE}${deepLinkPath}`;
+  const dest = withUtm(deepLinkPath);
+  if (token) return `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
+  return `${SITE}${dest}`;
+}
+
+function enterLink(token: string | null): string {
+  const dest = withUtm('/');
+  if (token) return `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
+  return `${SITE}${dest}`;
 }
 
 function renderCard(it: DigestItem, link: string): string {
   const author = it.author ? `${escapeHtml(it.author)} · ` : '';
-  const hook = it.hook
-    ? `<div style="font-size:13px;color:${BRAND.accent};margin-top:5px;line-height:1.55;">${escapeHtml(it.hook)}</div>`
-    : '';
   const cover = it.cover
     ? `<img src="${escapeHtml(it.cover)}" width="100%" style="max-width:536px;border-radius:8px;margin-top:8px;display:block;" alt="" />`
     : '';
-  return `<tr><td style="padding:10px 28px 14px;border-bottom:1px solid ${BRAND.border};">
+  return `<tr><td style="padding:14px 28px;border-bottom:1px solid ${C.border};">
     <a href="${escapeHtml(link)}" style="text-decoration:none;display:block;">
-      <div style="font-size:15px;font-weight:600;color:${BRAND.accent};line-height:1.45;">${escapeHtml(it.title)}</div>
-      <div style="font-size:13px;color:${BRAND.sub};margin-top:4px;line-height:1.6;">${author}${escapeHtml(it.summary)}</div>
-      ${hook}
+      <div style="font-size:16px;font-weight:700;color:${C.text};text-decoration:underline;line-height:1.45;">${escapeHtml(it.title)}</div>
+      <div style="font-size:14px;color:${C.body};margin-top:6px;line-height:1.65;">${author}${escapeHtml(it.summary)}</div>
       ${cover}
     </a>
   </td></tr>`;
@@ -184,21 +189,19 @@ export function buildDigestEmail(input: DigestEmailInput): {
   html: string;
 } {
   const headline = input.subject || '今日 AI 精选';
-  const date = cnDate();
-  const enterUrl = input.emailToken
-    ? `${SITE}/api/digest/return?u=${encodeURIComponent(input.emailToken)}`
-    : SITE;
+  const date = isoDate();
+  const enterUrl = enterLink(input.emailToken);
 
   const groups: Partial<Record<DigestSource, DigestItem[]>> = {};
   for (const it of input.items) (groups[it.source] ||= []).push(it);
   const orderedSources = DIGEST_SOURCE_ORDER.filter((s) => groups[s]?.length);
 
   // text 版
-  const textParts = [`【AI Feeds】${date} · ${headline}`, ''];
+  const textParts = [`【AI Feeds】${date}`, ''];
   for (const s of orderedSources) {
     textParts.push(`【${SOURCE_LABELS[s]}】`);
     for (const it of groups[s]!) {
-      textParts.push(`· ${it.title}${it.hook ? `\n  ${it.hook}` : ''}\n  ${itemLink(it.deepLinkPath, input.emailToken)}`);
+      textParts.push(`· ${it.title}\n  ${it.summary}\n  ${itemLink(it.deepLinkPath, input.emailToken)}`);
     }
     textParts.push('');
   }
@@ -206,41 +209,34 @@ export function buildDigestEmail(input: DigestEmailInput): {
   textParts.push(`退订:${input.unsubscribeUrl}`);
   const text = textParts.join('\n');
 
-  // html 分区 + 卡片
+  // html 分区(整条灰带)+ 卡片
   let sections = '';
   for (const s of orderedSources) {
-    sections += `<tr><td style="padding:22px 28px 4px;">
-      <span style="display:inline-block;font-size:13px;font-weight:700;color:#fff;background:${BRAND.accent};padding:4px 14px;border-radius:14px;">${escapeHtml(SOURCE_LABELS[s])}</span>
+    sections += `<tr><td style="padding:0;">
+      <div style="background:${C.band};border-top:1px solid ${C.border};border-bottom:1px solid ${C.border};padding:11px 28px;font-size:15px;font-weight:700;color:${C.text};">${escapeHtml(SOURCE_LABELS[s])}</div>
     </td></tr>`;
     for (const it of groups[s]!) sections += renderCard(it, itemLink(it.deepLinkPath, input.emailToken));
   }
 
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:${BRAND.bg};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BRAND.bg};padding:20px 0;">
+<body style="margin:0;padding:0;background:${C.bg};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};padding:20px 0;">
 <tr><td align="center">
-  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${BRAND.card};border:1px solid ${BRAND.border};border-radius:14px;overflow:hidden;font-family:${FONT};">
-    <tr><td style="padding:26px 28px 20px;text-align:center;background:${BRAND.headerBg};">
-      <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
-      <div style="font-size:12px;color:${BRAND.headerSub};margin-top:4px;">每日 AI 多源精选 · ${date}</div>
-      <div style="font-size:12px;margin-top:12px;">
-        <a href="${SITE}" style="color:${BRAND.headerLink};text-decoration:none;">访问主站</a>
-        <span style="color:#475569;">&nbsp;|&nbsp;</span>
-        <a href="${enterUrl}" style="color:${BRAND.headerLink};text-decoration:none;">注册 / 登录</a>
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${C.card};border:1px solid ${C.border};border-radius:12px;overflow:hidden;font-family:${FONT};">
+    <tr><td style="padding:18px 28px 14px;text-align:center;background:${C.text};">
+      <div style="font-size:21px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
+      <div style="font-size:12px;color:${C.headerSub};margin-top:3px;">${SLOGAN} · ${date}</div>
+      <div style="font-size:12px;margin-top:9px;">
+        <a href="${withUtm(SITE)}" style="color:${C.headerLink};text-decoration:none;">访问主站</a>
+        <span style="color:#525252;">&nbsp;|&nbsp;</span>
+        <a href="${enterUrl}" style="color:${C.headerLink};text-decoration:none;">注册 / 登录</a>
       </div>
     </td></tr>
-    <tr><td style="padding:18px 28px 2px;">
-      <div style="font-size:16px;font-weight:700;color:${BRAND.text};line-height:1.5;">${escapeHtml(headline)}</div>
-    </td></tr>
     ${sections}
-    <tr><td style="padding:26px 28px;text-align:center;background:${BRAND.bg};border-top:1px solid ${BRAND.border};">
-      <div style="font-size:19px;font-weight:800;color:${BRAND.text};">AI Feeds</div>
-      <div style="font-size:12px;color:${BRAND.sub};margin-top:4px;">多源 AI 资讯,一站精选</div>
-      <a href="${enterUrl}" style="display:inline-block;margin-top:14px;background:${BRAND.accent};color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 24px;border-radius:8px;">进站看全部 →</a>
-      <div style="font-size:11px;color:${BRAND.sub};margin-top:18px;line-height:1.6;">
-        <a href="${input.unsubscribeUrl}" style="color:${BRAND.sub};">退订</a>
-        <span style="color:${BRAND.border};">·</span>
-        <a href="${SITE}" style="color:${BRAND.sub};">ai-feeds.com</a>
+    <tr><td style="padding:24px 28px;text-align:center;background:${C.bg};border-top:1px solid ${C.border};">
+      <a href="${enterUrl}" style="display:inline-block;background:${C.text};color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 28px;border-radius:8px;">进站看全部</a>
+      <div style="font-size:12px;color:${C.sub};margin-top:16px;line-height:1.6;">
+        不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。AI Feeds · ${SLOGAN}
       </div>
     </td></tr>
   </table>
@@ -248,5 +244,5 @@ export function buildDigestEmail(input: DigestEmailInput): {
 </table>
 </body></html>`;
 
-  return { subject: `${date} · ${headline}`, text, html };
+  return { subject: headline, text, html };
 }
