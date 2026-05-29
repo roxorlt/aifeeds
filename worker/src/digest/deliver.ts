@@ -5,6 +5,7 @@
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
 import { sendEmail } from '../auth/resend';
+import { pushDeerAlert } from '../notifier';
 import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
 import { nextSendAt, genEmailToken } from './lib';
 import { buildDigestEmail, type DigestItem } from './templates';
@@ -278,6 +279,18 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
         )
           .bind(nextSendAt(sub.send_slot), subId)
           .run();
+        const after = await this.env.DB.prepare(
+          `SELECT status, worker_send_failures FROM subscriptions WHERE id = ?`,
+        )
+          .bind(subId)
+          .first<{ status: string; worker_send_failures: number }>();
+        if (after?.status === 'paused') {
+          await pushDeerAlert(
+            this.env,
+            'digest 订阅 paused',
+            `sub ${subId}(${sub.email})投递连续失败 ${after.worker_send_failures} 次已 paused。疑似 Resend 故障,排查后手动恢复 status=active。`,
+          );
+        }
       });
       return { subId, status: 'failed_resend' };
     }
