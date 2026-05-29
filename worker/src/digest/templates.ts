@@ -172,14 +172,12 @@ function enterLink(token: string | null): string {
 function renderCard(it: DigestItem, link: string): string {
   // 只有 X 的 KOL 昵称有信息价值;GH/PH/HF/CH 的作者 id 是噪音,不显示
   const author = it.source === 'x' && it.author ? `${escapeHtml(it.author)} · ` : '';
-  const cover = it.cover
-    ? `<img src="${escapeHtml(it.cover)}" width="100%" style="max-width:536px;border-radius:8px;margin-top:8px;display:block;" alt="" />`
-    : '';
+  // 邮件渠道不渲染图片(纯文字+链接,对齐 TLDR)。DigestItem.cover 数据保留,
+  // 供未来支持图片的渠道(微信图文/小程序卡片)读取,本渲染层不展示。
   return `<tr><td style="padding:14px 28px;border-bottom:1px solid ${C.border};">
     <a href="${escapeHtml(link)}" style="text-decoration:none;display:block;">
       <div style="font-size:16px;font-weight:700;color:${C.text};text-decoration:underline;line-height:1.45;">${escapeHtml(it.title)}</div>
       <div style="font-size:14px;color:${C.body};margin-top:6px;line-height:1.65;">${author}${escapeHtml(it.summary)}</div>
-      ${cover}
     </a>
   </td></tr>`;
 }
