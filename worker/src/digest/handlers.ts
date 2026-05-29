@@ -15,7 +15,7 @@ import {
   type DigestSource,
   type Density,
 } from './config';
-import { genUnsubscribeToken, nextSendAt, genEmailToken } from './lib';
+import { genUnsubscribeToken, nextSendAt, genEmailToken, genEditToken, verifyEditToken } from './lib';
 import { buildWelcomeEmail } from './templates';
 
 const JSON_H = { 'Content-Type': 'application/json' };
@@ -181,7 +181,8 @@ export async function handleSubscribe(
       )
         .bind(JSON.stringify(sources), slot, density, nextSendAt(slot, now), now, existing.id)
         .run();
-      return jok({ status: 'active' });
+      const editToken = await genEditToken(env, existing.id);
+      return jok({ status: 'active', edit_token: editToken || undefined });
     }
 
     // 全新订阅
@@ -196,7 +197,8 @@ export async function handleSubscribe(
       .run();
     const subId = Number(r.meta.last_row_id);
     ctx.waitUntil(sendWelcome(env, email, subId, unsubToken, sources, slot, density));
-    return jok({ status: 'active' });
+    const editToken = await genEditToken(env, subId);
+    return jok({ status: 'active', edit_token: editToken || undefined });
   } catch (e) {
     console.error('[digest/subscribe] error', e);
     return jerr('server_error', 500);
@@ -318,4 +320,32 @@ export async function handleUnsubscribeByToken(request: Request, env: Env): Prom
 <a href="${SITE}" style="display:inline-block;margin-top:18px;color:#2563eb;text-decoration:none;font-size:14px;">回到 AI Feeds →</a>
 </div></body></html>`;
   return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+// ── POST /api/subscribe/configure(两步订阅第二页;无 turnstile/session,凭 edit_token)──
+export async function handleConfigure(request: Request, env: Env): Promise<Response> {
+  let body: SubscribeBody & { edit_token?: unknown };
+  try {
+    body = (await request.json()) as SubscribeBody & { edit_token?: unknown };
+  } catch {
+    return jerr('invalid_token', 401);
+  }
+  if (typeof body.edit_token !== 'string') return jerr('invalid_token', 401);
+  const v = await verifyEditToken(env, body.edit_token);
+  if (v === null) return jerr('invalid_token', 401);
+  if (v === 'expired') return jerr('expired_token', 401);
+
+  if (!isValidSources(body.sources)) return jerr('invalid_sources');
+  if (!isValidSlot(body.send_slot)) return jerr('invalid_slot');
+  const sources = normalizeSources(body.sources);
+  const density: Density = isValidDensity(body.density) ? body.density : 'normal';
+
+  const r = await env.DB.prepare(
+    `UPDATE subscriptions SET sources = ?, send_slot = ?, density = ?, next_send_at = ?, updated_at = ?
+     WHERE id = ? AND status IN ('active','paused')`,
+  )
+    .bind(JSON.stringify(sources), body.send_slot, density, nextSendAt(body.send_slot), Date.now(), v.subId)
+    .run();
+  if ((r.meta.changes ?? 0) === 0) return jerr('invalid_token', 404);
+  return jok();
 }
