@@ -3,12 +3,10 @@
 
 import { nanoid } from 'nanoid';
 import type { Env } from '../index';
-import { verifyEmailToken, nextSendAt } from './lib';
+import { verifyEmailToken, nextSendAt, getBases } from './lib';
 import { createSession, buildSessionCookie } from '../auth/session';
 import { deriveDisplayName, deriveAvatarUrl, isDevHost } from '../auth/handlers';
 import { pushDeerAlert } from '../notifier';
-
-const SITE = 'https://ai-feeds.com';
 
 function clientIp(req: Request): string {
   return req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || '0.0.0.0';
@@ -51,7 +49,7 @@ export async function handleDigestReturn(
   // to = 落地抽屉深链 path(邮件每条内容带);只允许站内 path(/ 开头且非 //),防开放重定向
   const to = url.searchParams.get('to');
   const safeTo = to && /^\/[^/]/.test(to) ? to : '/';
-  const dest = `${SITE}${safeTo}`;
+  const dest = `${getBases(env).siteBase}${safeTo}`;
 
   const verified = token ? await verifyEmailToken(env, token) : null;
   if (!verified) {

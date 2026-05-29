@@ -134,3 +134,12 @@ export async function verifyEditToken(
   if (Date.now() > exp) return 'expired';
   return { subId };
 }
+
+// 邮件链接基址:回流/退订端点走 worker API 域(apiBase),落地深链/进站走前端域(siteBase)。
+// 按环境取(prod / staging),缺省回落 prod。
+export function getBases(env: Env): { apiBase: string; siteBase: string } {
+  return {
+    apiBase: env.API_BASE || 'https://api.ai-feeds.com',
+    siteBase: env.SITE_BASE || 'https://ai-feeds.com',
+  };
+}

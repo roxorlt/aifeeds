@@ -32,6 +32,9 @@ preview_id = "78f0a9567d434d8b87c71cc29eea88f9"
 # 改走 PDF parse(figure-pdf.ts,unzlibSync 修复后 92.9% per-paper 命中率)。binding 移除。
 
 [vars]
+# 邮件链接基址:回流/退订走 worker API 域(API_BASE),落地深链走前端域(SITE_BASE)
+SITE_BASE = "https://ai-feeds.com"
+API_BASE = "https://api.ai-feeds.com"
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）
 EMAIL_DAILY_CAP = "100"
 EMAIL_MONTHLY_CAP = "3000"
@@ -150,6 +153,9 @@ preview_id = "f187810317a845eca4b20f6e7b357a79"
 # browser binding 移除(走 PDF parse 替代)
 
 [env.staging.vars]
+# 邮件链接基址(staging 域名,避免 staging 测的邮件指到 prod)
+SITE_BASE = "https://staging.ai-feeds.com"
+API_BASE = "https://staging-api.ai-feeds.com"
 # email auth 默认值（RESEND_API_KEY secret 通过 wrangler secret put 配置，不入 vars）
 EMAIL_DAILY_CAP = "100"
 EMAIL_MONTHLY_CAP = "3000"

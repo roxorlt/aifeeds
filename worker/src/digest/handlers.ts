@@ -15,11 +15,10 @@ import {
   type DigestSource,
   type Density,
 } from './config';
-import { genUnsubscribeToken, nextSendAt, genEmailToken, genEditToken, verifyEditToken } from './lib';
+import { genUnsubscribeToken, nextSendAt, genEmailToken, genEditToken, verifyEditToken, getBases } from './lib';
 import { buildWelcomeEmail } from './templates';
 
 const JSON_H = { 'Content-Type': 'application/json' };
-const SITE = 'https://ai-feeds.com';
 const REPLY_TO = 'support@mail.ai-feeds.com';
 
 function jsonResp(data: unknown, status = 200): Response {
@@ -55,12 +54,12 @@ async function checkSubscribeRateLimit(env: Env, ip: string): Promise<boolean> {
   return true;
 }
 
-function unsubscribeUrl(token: string): string {
-  return `${SITE}/unsubscribe?token=${encodeURIComponent(token)}`;
+function unsubscribeUrl(apiBase: string, token: string): string {
+  return `${apiBase}/unsubscribe?token=${encodeURIComponent(token)}`;
 }
-function listUnsubHeaders(token: string): Record<string, string> {
+function listUnsubHeaders(apiBase: string, token: string): Record<string, string> {
   return {
-    'List-Unsubscribe': `<${unsubscribeUrl(token)}>`,
+    'List-Unsubscribe': `<${unsubscribeUrl(apiBase, token)}>`,
     'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
   };
 }
@@ -74,21 +73,22 @@ async function sendWelcome(
   slotBjt: number,
   density: Density,
 ): Promise<void> {
+  const { apiBase } = getBases(env);
   const token = await genEmailToken(env, email, subId);
-  const confirmUrl = token ? `${SITE}/api/digest/return?u=${encodeURIComponent(token)}` : null;
+  const confirmUrl = token ? `${apiBase}/api/digest/return?u=${encodeURIComponent(token)}` : null;
   const mail = buildWelcomeEmail({
     sources,
     slotBjt,
     density,
     confirmUrl,
-    unsubscribeUrl: unsubscribeUrl(unsubToken),
+    unsubscribeUrl: unsubscribeUrl(apiBase, unsubToken),
   });
   const res = await sendEmail(env, {
     to: email,
     subject: mail.subject,
     text: mail.text,
     html: mail.html,
-    headers: listUnsubHeaders(unsubToken),
+    headers: listUnsubHeaders(apiBase, unsubToken),
     replyTo: REPLY_TO,
   });
   await env.DB.prepare(
@@ -100,10 +100,11 @@ async function sendWelcome(
 }
 
 async function sendReSubscribeConfirm(env: Env, email: string, subId: number): Promise<void> {
+  const { apiBase, siteBase } = getBases(env);
   const token = await genEmailToken(env, email, subId);
   const confirmUrl = token
-    ? `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&action=resubscribe`
-    : SITE;
+    ? `${apiBase}/api/digest/return?u=${encodeURIComponent(token)}&action=resubscribe`
+    : siteBase;
   const text = [
     '你正在重新订阅 AI Feeds 每日精选。',
     '',
@@ -317,7 +318,7 @@ export async function handleUnsubscribeByToken(request: Request, env: Env): Prom
 <div style="max-width:420px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:32px 24px;">
 <div style="font-size:20px;font-weight:700;">已退订</div>
 <p style="font-size:14px;color:#6b7280;line-height:1.7;margin:14px 0 0;">你将不再收到 AI Feeds 的邮件推送。改主意了？随时可以重新订阅。</p>
-<a href="${SITE}" style="display:inline-block;margin-top:18px;color:#2563eb;text-decoration:none;font-size:14px;">回到 AI Feeds →</a>
+<a href="${getBases(env).siteBase}" style="display:inline-block;margin-top:18px;color:#2563eb;text-decoration:none;font-size:14px;">回到 AI Feeds →</a>
 </div></body></html>`;
   return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
