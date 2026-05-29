@@ -42,9 +42,9 @@ const SLOTS: { value: DigestSlot; label: string }[] = [
   { value: 17, label: '下午 17:00' },
 ];
 
-const DENSITIES: { value: DigestDensity; label: string; desc: string }[] = [
-  { value: 'normal', label: '默认档', desc: '每源精选若干条，按综合热度排序' },
-  { value: 'curated', label: '精选档', desc: 'AI 跨条优中选优，每条附一句亮点' },
+const DENSITIES: { value: DigestDensity; label: string }[] = [
+  { value: 'normal', label: '默认档' },
+  { value: 'curated', label: '精选档' },
 ];
 
 function slotLabel(slot: DigestSlot): string {
@@ -151,15 +151,15 @@ function PreferenceFields({
       </section>
 
       <section className="mb-6">
-        <h2 className="mb-2 text-sm font-medium text-neutral-700">推送时间（北京时间，每天一次）</h2>
-        <div className="grid grid-cols-3 gap-2">
+        <h2 className="mb-2 text-sm font-medium text-neutral-700">推送时间</h2>
+        <div className="flex flex-wrap gap-2">
           {SLOTS.map((s) => (
             <button
               key={s.value}
               type="button"
               onClick={() => setSlot(s.value)}
               className={cn(
-                'rounded-md border px-3 py-2 text-sm font-medium transition-colors',
+                'rounded-md border px-3.5 py-1.5 text-sm font-medium transition-colors',
                 slot === s.value
                   ? 'border-neutral-900 bg-neutral-900 text-white'
                   : 'border-neutral-300 text-neutral-700 hover:bg-neutral-50',
@@ -173,29 +173,17 @@ function PreferenceFields({
 
       <section className="mb-6">
         <h2 className="mb-2 text-sm font-medium text-neutral-700">内容密度</h2>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {DENSITIES.map((d) => {
-            const selected = density === d.value;
-            return (
-              <button
-                key={d.value}
-                type="button"
-                onClick={() => setDensity(d.value)}
-                className={cn(
-                  'rounded-md border px-3 py-2.5 text-left transition-colors',
-                  selected ? 'border-neutral-900 bg-neutral-900' : 'border-neutral-300 hover:bg-neutral-50',
-                )}
-              >
-                <div className={cn('text-sm font-medium', selected ? 'text-white' : 'text-neutral-900')}>
-                  {d.label}
-                </div>
-                <div className={cn('mt-0.5 text-xs', selected ? 'text-neutral-300' : 'text-neutral-500')}>
-                  {d.desc}
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        <select
+          value={density}
+          onChange={(e) => setDensity(e.target.value as DigestDensity)}
+          className="rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
+        >
+          {DENSITIES.map((d) => (
+            <option key={d.value} value={d.value}>
+              {d.label}
+            </option>
+          ))}
+        </select>
       </section>
     </>
   );
@@ -363,9 +351,9 @@ function AnonymousSubscribe() {
     return (
       <PageShell title="订阅推送">
         <div className="mb-6 rounded-lg border border-neutral-200 bg-neutral-50 p-4">
-          <h2 className="text-base font-medium text-neutral-900">订阅成功</h2>
+          <h2 className="text-base font-medium text-neutral-900">订阅成功！</h2>
           <p className="mt-1 text-sm text-neutral-600">
-            已按默认设置订阅（全部来源 · 早 8:00 · 默认档）。想更精准就在下面调整，不调也没关系，按默认推送即可。
+            邮件将在每天早 8 点推送。如需对推送内容和时间做精细定制，可在下面调整。
           </p>
         </div>
 
