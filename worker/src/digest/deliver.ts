@@ -105,9 +105,9 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       title = ghRepoName(row.id);
       summary = (ex.ai_summary as string) || ct;
       break;
-    case 'ph': // 产品名(英文)+ 中文 tagline
+    case 'ph': // 产品名(英文)+ DeepSeek 客观总结(避开 maker 自述/description 第一人称口吻)
       title = row.title || '';
-      summary = ct || (ex.description as string) || '';
+      summary = (ex.ai_summary as string) || ct;
       break;
     case 'hf-paper': // 一句话中文摘要作标题 + 详细中文摘要
       title = (ex.ai_summary_zh as string) || row.title || '';
@@ -117,9 +117,9 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       title = (ex.ai_summary as string) || body.slice(0, 60);
       summary = ct || row.content || '';
       break;
-    case 'clawhub': // skill 名 + 中文简介
+    case 'clawhub': // skill 名 + DeepSeek 总结优先
       title = row.title || '';
-      summary = ct || (ex.ai_summary as string) || '';
+      summary = (ex.ai_summary as string) || ct;
       break;
     default:
       title = row.title || body.slice(0, 60);
