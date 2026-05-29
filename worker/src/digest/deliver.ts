@@ -87,6 +87,20 @@ function cleanText(s: string): string {
     .trim();
 }
 
+// 按句末标点截断到 ~maxLen,避免切断句子(简介保 2-3 句完整);超长且无句末标点才加省略号
+function clampSentences(s: string, maxLen = 180): string {
+  const clean = cleanText(s);
+  if (clean.length <= maxLen) return clean;
+  const slice = clean.slice(0, maxLen);
+  const lastPunct = Math.max(
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('！'),
+    slice.lastIndexOf('？'),
+    slice.lastIndexOf('；'),
+  );
+  return lastPunct > maxLen * 0.5 ? slice.slice(0, lastPunct + 1) : slice + '…';
+}
+
 // 每源取中文字段(全中文;产品名/项目名/人名保留英文)。精选档 A 方案不再用 hook。
 function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
   let ex: Record<string, unknown> = {};
@@ -128,7 +142,7 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
   return {
     source,
     title: cleanText(title || '(无标题)').slice(0, 120),
-    summary: cleanText(summary).slice(0, 160),
+    summary: clampSentences(summary),
     url: row.url || SITE,
     deepLinkPath: deepLinkPath(row.id),
     author: row.author || row.handle || '',
