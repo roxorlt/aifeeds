@@ -43,8 +43,8 @@ const SLOTS: { value: DigestSlot; label: string }[] = [
 ];
 
 const DENSITIES: { value: DigestDensity; label: string }[] = [
-  { value: 'normal', label: '默认档' },
-  { value: 'curated', label: '精选档' },
+  { value: 'normal', label: '默认5条' },
+  { value: 'curated', label: '精选3条' },
 ];
 
 function slotLabel(slot: DigestSlot): string {
@@ -173,17 +173,23 @@ function PreferenceFields({
 
       <section className="mb-6">
         <h2 className="mb-2 text-sm font-medium text-neutral-700">内容密度</h2>
-        <select
-          value={density}
-          onChange={(e) => setDensity(e.target.value as DigestDensity)}
-          className="rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 focus:border-neutral-900 focus:outline-none"
-        >
+        <div className="flex flex-wrap gap-2">
           {DENSITIES.map((d) => (
-            <option key={d.value} value={d.value}>
+            <button
+              key={d.value}
+              type="button"
+              onClick={() => setDensity(d.value)}
+              className={cn(
+                'rounded-md border px-3.5 py-1.5 text-sm font-medium transition-colors',
+                density === d.value
+                  ? 'border-neutral-900 bg-neutral-900 text-white'
+                  : 'border-neutral-300 text-neutral-700 hover:bg-neutral-50',
+              )}
+            >
               {d.label}
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
       </section>
     </>
   );
