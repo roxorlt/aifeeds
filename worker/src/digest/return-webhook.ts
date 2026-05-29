@@ -48,7 +48,10 @@ export async function handleDigestReturn(
   const url = new URL(request.url);
   const token = url.searchParams.get('u');
   const action = url.searchParams.get('action');
-  const dest = `${SITE}/`;
+  // to = 落地抽屉深链 path(邮件每条内容带);只允许站内 path(/ 开头且非 //),防开放重定向
+  const to = url.searchParams.get('to');
+  const safeTo = to && /^\/[^/]/.test(to) ? to : '/';
+  const dest = `${SITE}${safeTo}`;
 
   const verified = token ? await verifyEmailToken(env, token) : null;
   if (!verified) {

@@ -44,20 +44,51 @@ interface ItemRow {
   extra: string | null;
 }
 
+// item.id(<source_type>:<source_id>)→ aifeeds 抽屉深链 path(对齐 dashboard parseDeepLinkFromPath)
+function deepLinkPath(itemId: string): string {
+  const idx = itemId.indexOf(':');
+  if (idx < 0) return '/';
+  const st = itemId.slice(0, idx);
+  const sid = itemId.slice(idx + 1);
+  switch (st) {
+    case 'x_list':
+      return `/t/${encodeURIComponent(sid)}`;
+    case 'github': {
+      const [o, r] = sid.split('/');
+      return o && r ? `/g/${encodeURIComponent(o)}/${encodeURIComponent(r)}` : '/';
+    }
+    case 'product_hunt': {
+      const [slug, date] = sid.split(':');
+      return slug && date ? `/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}` : '/';
+    }
+    case 'clawhub':
+      return `/c/${encodeURIComponent(sid)}`;
+    case 'hf_paper':
+      return `/h/${encodeURIComponent(sid)}`;
+    default:
+      return '/';
+  }
+}
+
 function toDigestItem(source: DigestSource, row: ItemRow, hook: string | undefined): DigestItem {
   let cover: string | undefined;
+  let aiSummary: string | undefined;
   try {
     const ex = JSON.parse(row.extra || '{}') as Record<string, unknown>;
     cover = (ex.cover_image as string) || (ex.video_thumbnail as string) || undefined;
+    aiSummary = ex.ai_summary as string | undefined;
   } catch {
     /* ignore */
   }
   const body = row.content_translated || row.content || '';
+  // X 推文无 title:优先用 ai_summary(简洁),否则正文开头
+  const title = row.title || aiSummary || body.slice(0, 80) || '(无标题)';
   return {
     source,
-    title: row.title || body.slice(0, 80) || '(无标题)',
+    title,
     summary: body.slice(0, 120),
     url: row.url || SITE,
+    deepLinkPath: deepLinkPath(row.id),
     author: row.author || row.handle || '',
     hook: hook || null,
     cover,
