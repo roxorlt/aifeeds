@@ -330,8 +330,8 @@ function AnonymousSubscribe() {
           <p className="mt-2 text-sm text-neutral-600">
             {active ? (
               <>
-                我们会在每天 {slotLabel(slot)}（北京时间）把多源 AI 精华推送到{' '}
-                <span className="font-medium text-neutral-900">{submittedEmail}</span>。首封邮件即欢迎信，记得查收。
+                日报邮件将在 {slotLabel(slot)} 推送到{' '}
+                <span className="font-medium text-neutral-900">{submittedEmail}</span>。
               </>
             ) : (
               <>
