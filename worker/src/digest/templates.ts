@@ -224,20 +224,25 @@ export function buildDigestEmail(input: DigestEmailInput): {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};padding:20px 0;">
 <tr><td align="center">
   <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:92%;background:${C.card};border:1px solid ${C.border};border-radius:12px;overflow:hidden;font-family:${FONT};">
-    <tr><td style="padding:18px 28px 14px;text-align:center;background:${C.text};">
-      <div style="font-size:21px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
-      <div style="font-size:12px;color:${C.headerSub};margin-top:3px;">${SLOGAN} · ${date}</div>
-      <div style="font-size:12px;margin-top:9px;">
-        <a href="${withUtm(SITE)}" style="color:${C.headerLink};text-decoration:none;">访问主站</a>
-        <span style="color:#525252;">&nbsp;|&nbsp;</span>
-        <a href="${enterUrl}" style="color:${C.headerLink};text-decoration:none;">注册 / 登录</a>
-      </div>
+    <tr><td style="padding:18px 28px 14px;background:${C.text};">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td align="left" valign="middle">
+          <span style="font-size:20px;font-weight:800;color:#fff;">AI Feeds</span>
+          <span style="font-size:11px;color:${C.headerSub};">&nbsp;${SLOGAN}</span>
+        </td>
+        <td align="right" valign="middle" style="font-size:12px;white-space:nowrap;">
+          <a href="${withUtm(SITE)}" style="color:${C.headerLink};text-decoration:none;">访问 aifeeds</a>
+          <span style="color:#525252;">&nbsp;|&nbsp;</span>
+          <a href="${enterUrl}" style="color:${C.headerLink};text-decoration:none;">登录</a>
+        </td>
+      </tr></table>
+      <div style="font-size:12px;color:${C.headerSub};margin-top:8px;">AI 日报 · ${date}</div>
     </td></tr>
     ${sections}
     <tr><td style="padding:24px 28px;text-align:center;background:${C.bg};border-top:1px solid ${C.border};">
       <a href="${enterUrl}" style="display:inline-block;background:${C.text};color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 28px;border-radius:8px;">进站看全部</a>
       <div style="font-size:12px;color:${C.sub};margin-top:16px;line-height:1.6;">
-        不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。AI Feeds · ${SLOGAN}
+        不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。
       </div>
     </td></tr>
   </table>
