@@ -114,6 +114,7 @@ import {
   handlePutMySubscription,
   handleUnsubMySubscription,
   handleUnsubscribeByToken,
+  handleConfigure,
 } from './digest/handlers';
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 import { slotKey } from './digest/lib';
@@ -416,6 +417,9 @@ export default {
       // 订阅推送(digest)。匿名订阅 + 登录态管理 + RFC8058 一键退订。
       if (path === '/api/subscribe' && request.method === 'POST') {
         return withCors(await handleSubscribe(request, env, ctx), request, env);
+      }
+      if (path === '/api/subscribe/configure' && request.method === 'POST') {
+        return withCors(await handleConfigure(request, env), request, env);
       }
       if (path === '/api/auth/me/subscription' && request.method === 'GET') {
         return withCors(await handleGetMySubscription(request, env, ctx), request, env);

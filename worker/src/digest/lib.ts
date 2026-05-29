@@ -92,3 +92,45 @@ export async function verifyEmailToken(
   if (!Number.isFinite(subId)) return null;
   return { email: parts[0], subId };
 }
+
+// ── 两步订阅编辑令牌(edit_token)──
+// 第一页订阅成功后下发,授权第二页(无 turnstile/无 session)精调这一条订阅。30 分钟有效。
+// token = base64url(`subId:exp`) + '.' + hmac16hex;'edit:' 前缀与回流 token 区分。
+
+const EDIT_TOKEN_TTL_MS = 30 * 60 * 1000;
+
+export async function genEditToken(env: Env, subId: number): Promise<string | null> {
+  if (!env.DIGEST_EMAIL_HMAC) return null;
+  const payload = `${subId}:${Date.now() + EDIT_TOKEN_TTL_MS}`;
+  const sig = (await hmacHex(env.DIGEST_EMAIL_HMAC, `edit:${payload}`)).slice(0, 32);
+  return `${b64urlEncode(payload)}.${sig}`;
+}
+
+// 返回 { subId } | 'expired' | null(invalid)
+export async function verifyEditToken(
+  env: Env,
+  token: string,
+): Promise<{ subId: number } | 'expired' | null> {
+  if (!env.DIGEST_EMAIL_HMAC) return null;
+  const dot = token.lastIndexOf('.');
+  if (dot < 0) return null;
+  let payload: string;
+  try {
+    payload = b64urlDecode(token.slice(0, dot));
+  } catch {
+    return null;
+  }
+  const sig = token.slice(dot + 1);
+  const expected = (await hmacHex(env.DIGEST_EMAIL_HMAC, `edit:${payload}`)).slice(0, 32);
+  if (sig.length !== expected.length) return null;
+  let diff = 0;
+  for (let i = 0; i < sig.length; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
+  if (diff !== 0) return null;
+  const parts = payload.split(':');
+  if (parts.length !== 2) return null;
+  const subId = parseInt(parts[0], 10);
+  const exp = parseInt(parts[1], 10);
+  if (!Number.isFinite(subId) || !Number.isFinite(exp)) return null;
+  if (Date.now() > exp) return 'expired';
+  return { subId };
+}
