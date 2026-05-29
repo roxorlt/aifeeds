@@ -184,6 +184,8 @@ export interface Env {
   EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
   EMAIL_MONTHLY_CAP?: string;           // 默认 3000（Resend free 3000/月）
   EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
+  SITE_BASE?: string;                   // 前端域(落地深链/进站),prod https://ai-feeds.com
+  API_BASE?: string;                    // worker API 域(回流/退订端点),prod https://api.ai-feeds.com
   ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
   ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
   // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.

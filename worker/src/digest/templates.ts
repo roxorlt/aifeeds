@@ -1,10 +1,10 @@
 // 订阅推送邮件模板 v3(FE 视觉规格 2026-05-29)。
 // table 布局 + inline CSS + 无 JS,跨客户端兼容(Gmail/Outlook/Apple/QQ/163)。
 // 精选档 A 方案:邮件不显示单独"亮点"行,精选只体现"条数更少";每条 title 深链到抽屉(回流端点带 token 自动注册登录)。
+// 域名:回流/退订端点走 worker API 域(apiBase),落地深链/进站走前端域(siteBase),按环境从 env 传入。
 
 import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
 
-const SITE = 'https://ai-feeds.com';
 const SLOGAN = '专注 AI 领域资讯聚合';
 
 // FE v3 配色 token
@@ -72,8 +72,8 @@ export interface WelcomeEmailInput {
   sources: DigestSource[];
   slotBjt: number;
   density: Density;
-  confirmUrl: string | null;
-  unsubscribeUrl: string;
+  confirmUrl: string | null; // handlers 用 apiBase 拼好的完整 URL
+  unsubscribeUrl: string; // handlers 用 apiBase 拼好的完整 URL
 }
 
 export function buildWelcomeEmail(input: WelcomeEmailInput): {
@@ -146,27 +146,29 @@ export interface DigestItem {
   url: string;
   deepLinkPath: string;
   author: string;
-  cover?: string;
+  cover?: string; // 邮件不渲染;保留供未来支持图片的渠道读取
 }
 
 export interface DigestEmailInput {
   subject: string; // 精华标题(只作邮件主题行)
   items: DigestItem[];
   emailToken: string | null;
-  unsubscribeUrl: string;
+  unsubscribeUrl: string; // 完整 URL(handlers 用 apiBase 拼,走 worker 域)
+  apiBase: string; // worker API 域(回流端点)
+  siteBase: string; // 前端域(深链/进站)
 }
 
-// 每条 link:回流端点(带 token 自动注册登录)+ 落地抽屉深链(带 utm);无 token 直接深链。
-function itemLink(deepLinkPath: string, token: string | null): string {
+// 每条 link:有 token 走回流端点(worker API 域,自动注册登录)+ 落地深链 to=(前端域,带 utm);无 token 直接前端深链。
+function itemLink(deepLinkPath: string, token: string | null, apiBase: string, siteBase: string): string {
   const dest = withUtm(deepLinkPath);
-  if (token) return `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
-  return `${SITE}${dest}`;
+  if (token) return `${apiBase}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
+  return `${siteBase}${dest}`;
 }
 
-function enterLink(token: string | null): string {
+function enterLink(token: string | null, apiBase: string, siteBase: string): string {
   const dest = withUtm('/');
-  if (token) return `${SITE}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
-  return `${SITE}${dest}`;
+  if (token) return `${apiBase}/api/digest/return?u=${encodeURIComponent(token)}&to=${encodeURIComponent(dest)}`;
+  return `${siteBase}${dest}`;
 }
 
 function renderCard(it: DigestItem, link: string): string {
@@ -189,7 +191,8 @@ export function buildDigestEmail(input: DigestEmailInput): {
 } {
   const headline = input.subject || '今日 AI 精选';
   const date = isoDate();
-  const enterUrl = enterLink(input.emailToken);
+  const { apiBase, siteBase } = input;
+  const enterUrl = enterLink(input.emailToken, apiBase, siteBase);
 
   const groups: Partial<Record<DigestSource, DigestItem[]>> = {};
   for (const it of input.items) (groups[it.source] ||= []).push(it);
@@ -200,7 +203,7 @@ export function buildDigestEmail(input: DigestEmailInput): {
   for (const s of orderedSources) {
     textParts.push(`【${SOURCE_LABELS[s]}】`);
     for (const it of groups[s]!) {
-      textParts.push(`· ${it.title}\n  ${it.summary}\n  ${itemLink(it.deepLinkPath, input.emailToken)}`);
+      textParts.push(`· ${it.title}\n  ${it.summary}\n  ${itemLink(it.deepLinkPath, input.emailToken, apiBase, siteBase)}`);
     }
     textParts.push('');
   }
@@ -214,7 +217,7 @@ export function buildDigestEmail(input: DigestEmailInput): {
     sections += `<tr><td style="padding:0;">
       <div style="background:${C.band};border-top:1px solid ${C.border};border-bottom:1px solid ${C.border};padding:11px 28px;font-size:15px;font-weight:700;color:${C.text};">${escapeHtml(SOURCE_LABELS[s])}</div>
     </td></tr>`;
-    for (const it of groups[s]!) sections += renderCard(it, itemLink(it.deepLinkPath, input.emailToken));
+    for (const it of groups[s]!) sections += renderCard(it, itemLink(it.deepLinkPath, input.emailToken, apiBase, siteBase));
   }
 
   const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -229,7 +232,7 @@ export function buildDigestEmail(input: DigestEmailInput): {
           <span style="font-size:11px;color:${C.headerSub};">&nbsp;${SLOGAN}</span>
         </td>
         <td align="right" valign="middle" style="font-size:12px;white-space:nowrap;">
-          <a href="${withUtm(SITE)}" style="color:${C.headerLink};text-decoration:none;">访问 aifeeds</a>
+          <a href="${withUtm(siteBase)}" style="color:${C.headerLink};text-decoration:none;">访问 aifeeds</a>
           <span style="color:#525252;">&nbsp;|&nbsp;</span>
           <a href="${enterUrl}" style="color:${C.headerLink};text-decoration:none;">登录</a>
         </td>

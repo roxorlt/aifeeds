@@ -7,7 +7,7 @@ import type { Env } from '../index';
 import { sendEmail } from '../auth/resend';
 import { pushDeerAlert } from '../notifier';
 import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
-import { nextSendAt, genEmailToken } from './lib';
+import { nextSendAt, genEmailToken, getBases } from './lib';
 import { buildDigestEmail, type DigestItem } from './templates';
 
 interface DeliverParams {
@@ -20,7 +20,6 @@ const RETRY = {
   timeout: '3 minutes',
 } as const;
 
-const SITE = 'https://ai-feeds.com';
 const REPLY_TO = 'support@mail.ai-feeds.com';
 
 interface SubRow {
@@ -143,7 +142,7 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
     source,
     title: cleanText(title || '(无标题)').slice(0, 120),
     summary: clampSentences(summary),
-    url: row.url || SITE,
+    url: row.url || '',
     deepLinkPath: deepLinkPath(row.id),
     author: row.author || row.handle || '',
     cover,
@@ -235,18 +234,21 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
 
     // Step 2:渲染
     const mail = await step.do('render', RETRY, async () => {
+      const { apiBase, siteBase } = getBases(this.env);
       const token = await genEmailToken(this.env, sub.email, subId);
-      const unsubUrl = `${SITE}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
+      const unsubUrl = `${apiBase}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
       return buildDigestEmail({
         subject: collected.subject,
         items: collected.items,
         emailToken: token,
         unsubscribeUrl: unsubUrl,
+        apiBase,
+        siteBase,
       });
     });
 
     // Step 3:投递(sendEmail 失败抛错触发 step RETRY;耗尽则 catch 记 failed + 计数)
-    const unsubUrl = `${SITE}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
+    const unsubUrl = `${getBases(this.env).apiBase}/unsubscribe?token=${encodeURIComponent(sub.unsubscribe_token)}`;
     try {
       const sendRes = await step.do('send', RETRY, async () => {
         const r = await sendEmail(this.env, {
