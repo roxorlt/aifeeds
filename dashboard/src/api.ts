@@ -360,7 +360,8 @@ export type SubscribeErrorCode =
   | 'server_error';
 
 export type SubscribeResult =
-  | { ok: true; status: 'active' | 'pending_confirm' }
+  // edit_token：active 时后端下发的短期令牌，供两步订阅的「第二页改偏好」免二次人机校验使用。
+  | { ok: true; status: 'active' | 'pending_confirm'; edit_token?: string }
   | { ok: false; code: SubscribeErrorCode };
 
 export interface SubscribePayload {
@@ -372,6 +373,8 @@ export interface SubscribePayload {
 }
 
 // 匿名订阅。后端 ON CONFLICT DO UPDATE 幂等，apiFetch 的 retry 不会造成重复 welcome。
+// 两步流程：第一页只填邮箱 + 人机校验，按默认配置订阅；成功（active）后端回 edit_token，
+// 第二页用 configureSubscription 带 token 改偏好（不再过人机校验）。
 export async function subscribeDigest(payload: SubscribePayload): Promise<SubscribeResult> {
   const res = await apiFetch('/api/subscribe', {
     method: 'POST',
@@ -380,6 +383,37 @@ export async function subscribeDigest(payload: SubscribePayload): Promise<Subscr
   });
   try {
     return (await res.json()) as SubscribeResult;
+  } catch {
+    return { ok: false, code: 'server_error' };
+  }
+}
+
+export type ConfigureErrorCode =
+  | 'invalid_token'
+  | 'expired_token'
+  | 'invalid_sources'
+  | 'invalid_slot'
+  | 'server_error';
+
+export type ConfigureResult = { ok: true } | { ok: false; code: ConfigureErrorCode };
+
+export interface ConfigurePayload {
+  edit_token: string;
+  sources: DigestSourceKey[];
+  send_slot: DigestSlot;
+  density: DigestDensity;
+}
+
+// 两步订阅第二页：用 subscribeDigest 下发的 edit_token 改偏好。无需登录、无需人机校验
+// （token 即凭证，短期有效）。token 失效返回 expired_token / invalid_token，FE 兜底"已按默认订阅"。
+export async function configureSubscription(payload: ConfigurePayload): Promise<ConfigureResult> {
+  const res = await apiFetch('/api/subscribe/configure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  try {
+    return (await res.json()) as ConfigureResult;
   } catch {
     return { ok: false, code: 'server_error' };
   }

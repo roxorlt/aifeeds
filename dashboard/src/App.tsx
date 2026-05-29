@@ -37,6 +37,7 @@ import { installVitals } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
 import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
+import { SubscribeBanner } from "./components/SubscribeBanner";
 import { RequireAuth } from "./components/RequireAuth";
 import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
@@ -978,6 +979,10 @@ function DashboardHome() {
           补齐 (跟 sticky 时一样让 main 内容从 49 起步, swipeAdjacent / transitionActive
           overlay 的 top:49 hardcode 也无需变). PC sticky 自己占空间, 不需 spacer. */}
       <div className="max-md:h-[49px] md:hidden" aria-hidden />
+
+      {/* 未登录订阅引导横幅（每日首访展示，可关闭；登录用户不显示）。
+          放在 header/spacer 之后、main 之前 → 位于内容流顶部，随页面滚动。 */}
+      <SubscribeBanner />
 
       {/* Swipe adjacent panel — R22 加 channel header (SourceIcon + label) +
           8 SkeletonCard, 跟 Feed mount 后的 header + skeleton 完全一致, 切换

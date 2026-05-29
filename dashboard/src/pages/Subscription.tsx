@@ -4,6 +4,7 @@ import { SourceIcon } from '../components/icons';
 import { TurnstileWidget, type TurnstileWidgetHandle } from '../components/TurnstileWidget';
 import {
   subscribeDigest,
+  configureSubscription,
   getMySubscription,
   updateMySubscription,
   unsubscribeMySubscription,
@@ -200,32 +201,38 @@ function PreferenceFields({
   );
 }
 
-// ─── 匿名订阅 /subscribe ─────────────────────────────────────────────
+// ─── 匿名订阅 /subscribe（两步：先填邮箱一键订阅，再可选精调）──────────────
+const DEFAULT_SOURCES: DigestSourceKey[] = DIGEST_SOURCES.map((s) => s.key);
+const DEFAULT_SLOT: DigestSlot = 8;
+const DEFAULT_DENSITY: DigestDensity = 'normal';
+
 function AnonymousSubscribe() {
   const navigate = useNavigate();
+  // step:'email' 只填邮箱 + 人机校验，按默认配置（全选 / 早8 / 默认档）一键订阅
+  //   → 'config' 已订阅成功，可选精调（用 edit_token 改偏好）→ 'done'
+  const [step, setStep] = useState<'email' | 'config' | 'done'>('email');
   const [email, setEmail] = useState('');
-  const [sources, setSources] = useState<DigestSourceKey[]>(DIGEST_SOURCES.map((s) => s.key));
-  const [slot, setSlot] = useState<DigestSlot>(8);
-  const [density, setDensity] = useState<DigestDensity>('normal');
+  const [submittedEmail, setSubmittedEmail] = useState('');
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileError, setTurnstileError] = useState('');
   const [emailError, setEmailError] = useState('');
-  const [sourcesError, setSourcesError] = useState('');
   const [formError, setFormError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [done, setDone] = useState<{ status: 'active' | 'pending_confirm'; email: string } | null>(null);
+  const [editToken, setEditToken] = useState<string | null>(null);
+  const [doneKind, setDoneKind] = useState<'active' | 'pending_confirm'>('active');
   const turnstileRef = useRef<TurnstileWidgetHandle>(null);
+
+  // 第二页精调偏好，预填默认值；用户不改也没关系，已按默认订阅
+  const [sources, setSources] = useState<DigestSourceKey[]>(DEFAULT_SOURCES);
+  const [slot, setSlot] = useState<DigestSlot>(DEFAULT_SLOT);
+  const [density, setDensity] = useState<DigestDensity>(DEFAULT_DENSITY);
+  const [sourcesError, setSourcesError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   function applyError(code: SubscribeErrorCode) {
     switch (code) {
       case 'invalid_email':
         setEmailError('请输入正确的邮箱');
-        break;
-      case 'invalid_sources':
-        setSourcesError('请至少选择一个订阅源');
-        break;
-      case 'invalid_slot':
-        setFormError('推送时间无效，请重新选择');
         break;
       case 'turnstile_failed':
         setFormError('人机验证失败，请重试');
@@ -235,22 +242,19 @@ function AnonymousSubscribe() {
       case 'rate_limited':
         setFormError('请求过于频繁，请稍后再试');
         break;
+      // invalid_sources / invalid_slot：第一步用默认配置不会触发，归兜底
       default:
         setFormError('服务暂时不可用，请稍后重试');
     }
   }
 
-  async function handleSubmit() {
+  // 第一步：只校验邮箱 + 人机校验，按默认配置一键订阅
+  async function handleSubscribe() {
     setEmailError('');
-    setSourcesError('');
     setFormError('');
     const trimmed = email.trim().toLowerCase();
     if (!EMAIL_REGEX.test(trimmed)) {
       setEmailError('请输入正确的邮箱');
-      return;
-    }
-    if (sources.length === 0) {
-      setSourcesError('请至少选择一个订阅源');
       return;
     }
     if (!turnstileToken) {
@@ -261,13 +265,22 @@ function AnonymousSubscribe() {
     try {
       const r = await subscribeDigest({
         email: trimmed,
-        sources,
-        send_slot: slot,
-        density,
+        sources: DEFAULT_SOURCES,
+        send_slot: DEFAULT_SLOT,
+        density: DEFAULT_DENSITY,
         turnstile_token: turnstileToken,
       });
       if (r.ok) {
-        setDone({ status: r.status, email: trimmed });
+        setSubmittedEmail(trimmed);
+        if (r.status === 'pending_confirm') {
+          // 曾退订重订 → 不直接激活，跳过精调，提示已发确认邮件
+          setDoneKind('pending_confirm');
+          setStep('done');
+        } else {
+          setEditToken(r.edit_token ?? null);
+          setDoneKind('active');
+          setStep('config'); // 已按默认订阅成功，进第二页可选精调
+        }
       } else {
         applyError(r.code);
       }
@@ -278,8 +291,42 @@ function AnonymousSubscribe() {
     }
   }
 
-  if (done) {
-    const active = done.status === 'active';
+  // 第二步（可选）：用 edit_token 改偏好。无 token / 失效 → 已按默认订阅，引导登录后改
+  async function handleSaveConfig() {
+    setSourcesError('');
+    if (sources.length === 0) {
+      setSourcesError('请至少选择一个订阅源');
+      return;
+    }
+    if (!editToken) {
+      toast.info('已按默认订阅；如需调整可登录后在「订阅推送」里修改');
+      setStep('done');
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await configureSubscription({ edit_token: editToken, sources, send_slot: slot, density });
+      if (r.ok) {
+        toast.success('偏好已保存');
+        setStep('done');
+      } else if (r.code === 'invalid_sources') {
+        setSourcesError('请至少选择一个订阅源');
+      } else if (r.code === 'invalid_token' || r.code === 'expired_token') {
+        toast.info('调整链接已过期，已按默认订阅；可登录后再改');
+        setStep('done');
+      } else {
+        toast.error('保存失败，请稍后重试');
+      }
+    } catch {
+      toast.error('保存失败，请稍后重试');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── 第三步：完成 ──
+  if (step === 'done') {
+    const active = doneKind === 'active';
     return (
       <PageShell title="订阅推送">
         <div className="rounded-lg border border-neutral-200 bg-white p-6 text-center">
@@ -290,12 +337,12 @@ function AnonymousSubscribe() {
             {active ? (
               <>
                 我们会在每天 {slotLabel(slot)}（北京时间）把多源 AI 精华推送到{' '}
-                <span className="font-medium text-neutral-900">{done.email}</span>。首封邮件即欢迎信，记得查收。
+                <span className="font-medium text-neutral-900">{submittedEmail}</span>。首封邮件即欢迎信，记得查收。
               </>
             ) : (
               <>
                 你之前退订过本推送。我们已发送确认邮件到{' '}
-                <span className="font-medium text-neutral-900">{done.email}</span>，请点击邮件中的链接完成重新订阅。
+                <span className="font-medium text-neutral-900">{submittedEmail}</span>，请点击邮件中的链接完成重新订阅。
               </>
             )}
           </p>
@@ -311,12 +358,55 @@ function AnonymousSubscribe() {
     );
   }
 
-  const submitDisabled = loading || !email || sources.length === 0 || !turnstileToken;
+  // ── 第二步：可选精调 ──
+  if (step === 'config') {
+    return (
+      <PageShell title="订阅推送">
+        <div className="mb-6 rounded-lg border border-neutral-200 bg-neutral-50 p-4">
+          <h2 className="text-base font-medium text-neutral-900">订阅成功</h2>
+          <p className="mt-1 text-sm text-neutral-600">
+            已按默认设置订阅（全部来源 · 早 8:00 · 默认档）。想更精准就在下面调整，不调也没关系，按默认推送即可。
+          </p>
+        </div>
+
+        <PreferenceFields
+          sources={sources}
+          setSources={setSources}
+          slot={slot}
+          setSlot={setSlot}
+          density={density}
+          setDensity={setDensity}
+          sourcesError={sourcesError}
+        />
+
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={handleSaveConfig}
+            disabled={saving || sources.length === 0}
+            className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {saving ? '保存中…' : '保存偏好'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setStep('done')}
+            className="text-sm text-neutral-500 hover:text-neutral-700"
+          >
+            暂不调整
+          </button>
+        </div>
+      </PageShell>
+    );
+  }
+
+  // ── 第一步：只填邮箱 ──
+  const submitDisabled = loading || !email || !turnstileToken;
 
   return (
     <PageShell title="订阅推送">
       <p className="mb-6 text-sm text-neutral-600">
-        填邮箱、选你关心的源和推送时间，我们每天把过去 24 小时的多源 AI 精华推到你邮箱。首封推送即欢迎邮件，随时可一键退订。
+        填入邮箱即可订阅，我们每天把过去 24 小时的多源 AI 精华推到你邮箱。首封推送即欢迎邮件，随时可一键退订。订阅后还能精调来源和推送时间。
       </p>
 
       <section className="mb-6">
@@ -331,16 +421,6 @@ function AnonymousSubscribe() {
         />
         {emailError && <p className="mt-1 text-xs text-rose-600">{emailError}</p>}
       </section>
-
-      <PreferenceFields
-        sources={sources}
-        setSources={setSources}
-        slot={slot}
-        setSlot={setSlot}
-        density={density}
-        setDensity={setDensity}
-        sourcesError={sourcesError}
-      />
 
       <section className="mb-6">
         <TurnstileWidget
@@ -363,7 +443,7 @@ function AnonymousSubscribe() {
 
       <button
         type="button"
-        onClick={handleSubmit}
+        onClick={handleSubscribe}
         disabled={submitDisabled}
         className="w-full rounded-md bg-neutral-900 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
       >

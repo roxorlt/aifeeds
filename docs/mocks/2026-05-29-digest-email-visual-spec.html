@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Feeds 订阅邮件视觉规格 v3</title>
+<style>
+  body { margin:0; background:#e9eaec; font-family:'HarmonyOS Sans SC','PingFang SC',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#171717; }
+  .wrap { max-width:760px; margin:0 auto; padding:28px 16px 64px; }
+  .doc-h { font-size:20px; font-weight:800; margin:8px 0 4px; }
+  .doc-sub { font-size:13px; color:#525252; line-height:1.7; margin:0 0 20px; }
+  .changelog { background:#fff; border:1px solid #e5e5e5; border-radius:12px; padding:14px 18px; margin-bottom:18px; font-size:12.5px; color:#404040; line-height:1.9; }
+  .changelog b { color:#171717; }
+  .note { background:#fff; border:1px solid #e5e5e5; border-left:3px solid #0284c7; border-radius:10px; padding:13px 16px; margin:14px 0 0; font-size:12.5px; color:#404040; line-height:1.8; }
+  .note b { color:#171717; }
+  .section-label { font-size:12px; font-weight:700; color:#737373; letter-spacing:.06em; text-transform:uppercase; margin:34px 0 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="doc-h">AI Feeds 订阅邮件 · 视觉规格 v3</div>
+  <p class="doc-sub">对标 TLDR + 继承主站走法 B（黑白灰为主，蓝只给行内链接）。</p>
+
+  <div class="changelog">
+    <b>v3 改动：</b><br>
+    · 精选档定 <b>A 方案</b>：无单独点评行（BE 顺手把 DeepSeek 精选提示词里"生成亮点"那段去掉）<br>
+    · <b>删掉顶部"精华标题"那句</b>（它只留作邮件主题行 / 收件箱标题，正文不重复）<br>
+    · <b>压缩品牌区高度</b>：日期并进顶栏副标题，顶栏更矮<br>
+    · <b>内容标题加下划线</b>，让用户一眼看出可点击（沿用 TLDR）<br>
+    · 末尾加了「③ 带缩略图变体」给你对比，并附图片 / 排版的可行性说明
+  </div>
+
+  <!-- ============ DIGEST 日报邮件（主推：纯列表，最易扫读）============ -->
+  <div class="section-label">① 日报邮件 digest（主推版式）</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafa;padding:20px 0;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border:1px solid #e5e5e5;border-radius:14px;overflow:hidden;">
+
+    <!-- header 深色条（压缩高度，日期并入副标题）-->
+    <tr><td style="padding:20px 28px 15px;text-align:center;background:#171717;">
+      <div style="font-size:23px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
+      <div style="font-size:12px;color:#a3a3a3;margin-top:5px;">专注 AI 领域资讯聚合 · 2026-05-29</div>
+      <div style="font-size:12px;margin-top:10px;"><a href="#" style="color:#7dd3fc;text-decoration:none;">注册 / 登录</a></div>
+    </td></tr>
+
+    <!-- ── 源分区：热门产品（整条灰带）── -->
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">热门产品</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;border-bottom:1px solid #f0f0f0;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">Cursor 2.0</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">Anysphere 把这款 AI 代码编辑器全面重写：支持多文件同时编辑、内置 agent 自主改代码、补全延迟据称比 Copilot 低一半，上线当天冲上当日产品榜第一。</div>
+      </a>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">Granola</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">一款会议笔记 AI 助手，不用拉机器人进会，直接在本地转录系统音频，会后自动生成结构化纪要和待办，主打隐私和零打扰，被不少投资人列为日常必备。</div>
+      </a>
+    </td></tr>
+
+    <!-- ── 源分区：开源项目 ── -->
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">开源项目</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;border-bottom:1px solid #f0f0f0;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">markitdown</div>
+        <div style="font-size:12px;color:#737373;margin-top:4px;">今日 +2,100 star</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">微软开源的文档转换工具，把 PDF、Word、PPT、图片等几乎任意格式统一转成干净的 Markdown，专门用来喂给大模型读取，省去自己写解析的麻烦。</div>
+      </a>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">OmniParser</div>
+        <div style="font-size:12px;color:#737373;margin-top:4px;">今日 +860 star</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">把任意界面截图解析成结构化元素的视觉模型，让 GUI agent 不依赖 HTML 也能"看懂"屏幕并操作，适合做自动化点击与桌面操控。</div>
+      </a>
+    </td></tr>
+
+    <!-- ── 源分区：论文 ── -->
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">论文</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">DeepSeek-V4 技术报告</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">671B 总参数、37B 激活的 MoE 架构，训练成本只有同级稠密模型的约五分之一，多项推理评测追平甚至超过 GPT-4 级模型，权重已开源放出。</div>
+      </a>
+    </td></tr>
+
+    <!-- ── 源分区：龙虾技能 ── -->
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">龙虾技能</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">pdf-to-podcast</div>
+        <div style="font-size:12px;color:#737373;margin-top:4px;">24 小时新增 +180 安装</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">把 PDF 论文一键转成双人对谈式播客，支持中文配音，适合通勤路上"听论文"，省去自己读长篇 PDF 的时间。</div>
+      </a>
+    </td></tr>
+
+    <!-- ── 源分区：动态 ── -->
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">动态</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <a href="#" style="text-decoration:none;display:block;">
+        <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">Karpathy 谈小模型蒸馏</div>
+        <div style="font-size:12px;color:#737373;margin-top:4px;">@karpathy</div>
+        <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">与其一味堆大参数，不如让大模型当"老师"去精炼训练数据，小模型同样能学到关键推理能力——他认为这会是未来端侧模型的主路线。</div>
+      </a>
+    </td></tr>
+
+    <!-- footer：1 个回流按钮 + 1 句退订 -->
+    <tr><td style="padding:26px 28px;text-align:center;background:#fafafa;border-top:1px solid #e5e5e5;">
+      <a href="#" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 26px;border-radius:8px;">进站看全部 →</a>
+      <div style="font-size:12px;color:#737373;margin-top:20px;line-height:1.7;">
+        你订阅了 AI Feeds 每日精选，所以收到这封邮件。不想再收到可随时
+        <a href="#" style="color:#0284c7;text-decoration:none;">一键退订</a>。
+      </div>
+      <div style="font-size:11px;color:#a3a3a3;margin-top:10px;">AI Feeds · 专注 AI 领域资讯聚合</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+
+  <!-- ============ WELCOME 欢迎邮件 ============ -->
+  <div class="section-label">② 欢迎邮件 welcome（订阅即时发，兼首封）</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafa;padding:24px 0;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border:1px solid #e5e5e5;border-radius:14px;overflow:hidden;">
+    <tr><td style="padding:20px 28px 15px;text-align:center;background:#171717;">
+      <div style="font-size:23px;font-weight:800;color:#fff;letter-spacing:.5px;">AI Feeds</div>
+      <div style="font-size:12px;color:#a3a3a3;margin-top:5px;">专注 AI 领域资讯聚合</div>
+    </td></tr>
+    <tr><td style="padding:20px 28px 4px;">
+      <div style="font-size:17px;font-weight:700;color:#171717;">订阅成功</div>
+      <p style="font-size:14px;line-height:1.7;color:#525252;margin:12px 0 0;">
+        你已订阅 <strong style="color:#171717;">热门产品 · 开源项目 · 论文 · 龙虾技能 · 动态</strong>，每天 <strong style="color:#171717;">早上 8:00</strong>（北京时间）推送一封多源精选。
+      </p>
+      <p style="font-size:14px;line-height:1.7;color:#737373;margin:8px 0 0;">下一个推送时间点，你会收到第一封正式日报。</p>
+    </td></tr>
+    <tr><td style="padding:14px 28px 20px;">
+      <a href="#" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:11px 24px;border-radius:8px;">确认并进站看看 →</a>
+    </td></tr>
+    <tr><td style="padding:16px 28px 24px;border-top:1px solid #e5e5e5;">
+      <div style="font-size:12px;color:#737373;line-height:1.7;">
+        你刚订阅了 AI Feeds 每日精选，所以收到这封邮件。不想再收到可随时
+        <a href="#" style="color:#0284c7;text-decoration:none;">一键退订</a>。
+      </div>
+      <div style="font-size:11px;color:#a3a3a3;margin-top:10px;">AI Feeds · 专注 AI 领域资讯聚合</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+
+  <!-- ============ ③ 带缩略图变体（可选对比）============ -->
+  <div class="section-label">③ 变体：带缩略图（可选，仅给有图的源）</div>
+  <div class="note">
+    <b>图片在邮件里能用，但有几条硬约束（先说清再决定）：</b><br>
+    1. Gmail / Outlook / QQ / 163 <b>默认不加载远程图片</b>，要用户手动点"显示图片"。所以图只能是"锦上添花"，<b>没图也得能读全</b>（文字不能依赖图片）。<br>
+    2. 邮件 HTML 只可靠支持 <b>table 布局</b>，没有 flex / grid / 瀑布流。<b>小红书那种瀑布流 / 卡片网格在邮件里做不出来</b>（各家客户端会散架）。<br>
+    3. 图片走 R2 托管 + 压缩，控制体积，否则拖慢加载。<br><br>
+    <b>结论</b>：主推还是上面①的纯列表（最易扫读，TLDR 同款）。如果要图，安全做法是"文字为主 + 右侧小缩略图"，且仅给天然有图的源（热门产品截图 / 论文封面）。下面是这个变体的样子 👇
+  </div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafa;padding:18px 0;margin-top:12px;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border:1px solid #e5e5e5;border-radius:14px;overflow:hidden;">
+    <tr><td style="padding:0;">
+      <div style="background:#f5f5f5;border-bottom:1px solid #e5e5e5;padding:11px 28px;">
+        <span style="font-size:15px;font-weight:700;color:#171717;">热门产品</span>
+      </div>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;border-bottom:1px solid #f0f0f0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:top;padding-right:14px;">
+          <a href="#" style="text-decoration:none;">
+            <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">Cursor 2.0</div>
+            <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">Anysphere 把这款 AI 代码编辑器全面重写：多文件同时编辑、内置 agent 自主改代码，上线当天冲上当日产品榜第一。</div>
+          </a>
+        </td>
+        <td width="84" style="vertical-align:top;">
+          <div style="width:84px;height:84px;border-radius:8px;background:#e5e5e5;text-align:center;line-height:84px;color:#a3a3a3;font-size:11px;">缩略图</div>
+        </td>
+      </tr></table>
+    </td></tr>
+    <tr><td style="padding:15px 28px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:top;padding-right:14px;">
+          <a href="#" style="text-decoration:none;">
+            <div style="font-size:16px;font-weight:700;color:#171717;line-height:1.45;text-decoration:underline;text-underline-offset:2px;">Granola</div>
+            <div style="font-size:14px;color:#525252;margin-top:6px;line-height:1.65;">会议笔记 AI 助手，不用拉机器人进会，本地转录后自动生成纪要和待办，主打隐私零打扰。</div>
+          </a>
+        </td>
+        <td width="84" style="vertical-align:top;">
+          <div style="width:84px;height:84px;border-radius:8px;background:#e5e5e5;text-align:center;line-height:84px;color:#a3a3a3;font-size:11px;">缩略图</div>
+        </td>
+      </tr></table>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+
+</div>
+</body>
+</html>
