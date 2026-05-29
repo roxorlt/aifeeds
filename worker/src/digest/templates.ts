@@ -170,7 +170,8 @@ function enterLink(token: string | null): string {
 }
 
 function renderCard(it: DigestItem, link: string): string {
-  const author = it.author ? `${escapeHtml(it.author)} · ` : '';
+  // 只有 X 的 KOL 昵称有信息价值;GH/PH/HF/CH 的作者 id 是噪音,不显示
+  const author = it.source === 'x' && it.author ? `${escapeHtml(it.author)} · ` : '';
   const cover = it.cover
     ? `<img src="${escapeHtml(it.cover)}" width="100%" style="max-width:536px;border-radius:8px;margin-top:8px;display:block;" alt="" />`
     : '';
