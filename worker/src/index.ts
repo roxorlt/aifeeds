@@ -101,6 +101,7 @@ import { runOpsBaseline } from './ops/baseline';
 import { runOpsDetect } from './ops/detect';
 import { recordCronRun } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
+import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -461,6 +462,9 @@ export default {
       if (path === '/admin/tasks' && request.method === 'GET') {
         return serveAdminTasksHtml(request, env);
       }
+      if (path === '/admin/subscriptions' && request.method === 'GET') {
+        return serveAdminSubscriptionsHtml(request, env);
+      }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
       }
@@ -469,6 +473,9 @@ export default {
       }
       if (path === '/api/admin/tasks' && request.method === 'GET') {
         return handleAdminTasks(request, env);
+      }
+      if (path === '/api/admin/subscriptions' && request.method === 'GET') {
+        return handleAdminSubscriptions(request, env);
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);
