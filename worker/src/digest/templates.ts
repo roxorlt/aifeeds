@@ -81,29 +81,21 @@ export function buildWelcomeEmail(input: WelcomeEmailInput): {
   text: string;
   html: string;
 } {
-  const srcText = sourcesLine(input.sources);
   const when = slotLabel(input.slotBjt);
-  const dens = densityLabel(input.density);
   const subject = '欢迎订阅 AI Feeds 每日精选';
 
   const text = [
     '【AI Feeds】欢迎订阅每日精选',
     '',
-    `你已订阅:${srcText}`,
-    `推送时间:每天 ${when}(北京时间)`,
-    `内容档位:${dens}`,
+    `每天 ${when}(北京时间)将为你推送 AI 每日精选。`,
     '',
-    '下一个推送时间点,你会收到第一封正式日报。',
-    '',
-    '【为了不漏掉每天的精选,花 10 秒做这 3 件事】',
-    '1. 直接回复这封邮件(一个字也行),邮箱就会记住我们不是垃圾邮件',
-    '2. 如果这封进了「垃圾邮件」或「推广」文件夹,把它移到主收件箱',
-    '3. 可选:把 noreply@mail.ai-feeds.com 加入联系人/白名单',
+    '【为了不让精选推送被当做垃圾邮件,请花 10 秒配置】',
+    '1. 把 noreply@mail.ai-feeds.com 加为联系人',
+    '2. 直接回复这封邮件(一个字也行)',
+    '3. 如果进了「垃圾邮件」或「推广」,把它移到主收件箱',
     input.confirmUrl ? `\n确认并进站看看:${input.confirmUrl}` : '',
     '',
     `不想再收到?一键退订:${input.unsubscribeUrl}`,
-    '',
-    `AI Feeds · ${SLOGAN}`,
   ]
     .filter((l) => l !== '')
     .join('\n');
@@ -126,21 +118,20 @@ export function buildWelcomeEmail(input: WelcomeEmailInput): {
     <tr><td style="padding:20px 28px 4px;">
       <div style="font-size:17px;font-weight:700;color:${C.text};">订阅成功</div>
       <p style="font-size:14px;line-height:1.7;color:${C.body};margin:12px 0 0;">
-        你已订阅 <strong style="color:${C.text};">${escapeHtml(srcText)}</strong>，每天 <strong style="color:${C.text};">${escapeHtml(when)}</strong>（北京时间）推送，档位为 ${escapeHtml(dens)}。
+        每天 <strong style="color:${C.text};">${escapeHtml(when)}</strong>（北京时间）将为你推送 AI 每日精选。
       </p>
-      <p style="font-size:14px;line-height:1.7;color:${C.sub};margin:8px 0 0;">下一个推送时间点，你会收到第一封正式日报。</p>
     </td></tr>
     <tr><td style="padding:10px 28px 4px;">
       <div style="background:${C.band};border-radius:8px;padding:14px 16px;font-size:13px;color:${C.body};line-height:1.8;">
-        <strong style="color:${C.text};">为了不漏掉每天的精选，花 10 秒：</strong><br>
-        1. 直接<strong>回复这封邮件</strong>（一个字也行）—— 邮箱会记住我们不是垃圾邮件<br>
-        2. 如果进了「垃圾邮件」或「推广」，把它<strong>移到主收件箱</strong><br>
-        3. 可选：把 <strong>noreply@mail.ai-feeds.com</strong> 加入联系人
+        <strong style="color:${C.text};">为了不让精选推送被当做垃圾邮件，请花 10 秒配置：</strong><br>
+        1. 把 <strong>noreply@mail.ai-feeds.com</strong> 加为联系人<br>
+        2. 直接<strong>回复这封邮件</strong>（一个字也行）<br>
+        3. 如果进了「垃圾邮件」或「推广」，把它<strong>移到主收件箱</strong>
       </div>
     </td></tr>
     <tr><td style="padding:12px 28px 20px;"><table role="presentation" cellpadding="0" cellspacing="0">${confirmBtn}</table></td></tr>
     <tr><td style="padding:16px 28px 24px;border-top:1px solid ${C.border};">
-      <div style="font-size:12px;color:${C.sub};line-height:1.6;">不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。AI Feeds · ${SLOGAN}</div>
+      <div style="font-size:12px;color:${C.sub};line-height:1.6;">不想再收到？<a href="${input.unsubscribeUrl}" style="color:${C.accent};">一键退订</a>。</div>
     </td></tr>
   </table>
 </td></tr>
