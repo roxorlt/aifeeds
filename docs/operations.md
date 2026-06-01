@@ -1222,9 +1222,9 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ---
 
-## 订阅推送子系统（digest，2026-05-29 staging 验证中，**未上 prod**）
+## 订阅推送子系统（digest，**2026-06-01 已上 prod ｜ FE+BE**）
 
-> 邮件日报订阅。FE（订阅页 + 横幅）在分支 `worktree-feat-subscription-page`，BE（引擎 + 接口）在 `feat/digest-subscription`，**只在 staging 验证，未合 main / 未上 prod**。设计文档：`~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260528-090625.md`。worker 内部细节（cron/workflow）以 BE 实现为准。
+> 邮件日报订阅。**2026-06-01 已上 prod**（BE worker + FE dashboard 均已合 main 并部署 prod）。设计文档：`~/.gstack/projects/roxorlt-aifeeds/roxor-main-design-20260528-090625.md`。worker 内部细节（cron/workflow）以 BE 实现为准。
 
 ### Worker endpoints（`xlist-api`）
 
@@ -1265,14 +1265,14 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - 顶栏未登录引导横幅（`SubscribeBanner`，每日首访展示、可关闭）
 - staging 部署：`cd dashboard && npm run deploy:staging`（Pages 项目 `xlist-dashboard-staging`）
 
-### 上 prod 前待办
+### 上线核对（2026-06-01 已上 prod）
 
-- [ ] prod 注入 `DIGEST_EMAIL_HMAC` / `RESEND_WEBHOOK_SECRET`
-- [ ] prod 跑 migration 018
-- [ ] Resend dashboard 配 webhook → `api.ai-feeds.com/api/webhook/resend`
-- [ ] prod 节点 cron 确认（加 0/4/9 专用 cron 或确认 `*/5` tick 内判断，BE 核对）
-- [ ] 真人端到端验收（订阅 → welcome → 点链接回流登录 + 落地抽屉 → 退订）
-- [ ] 后台订阅看板（规格 `plans/2026-05-29-admin-subscriptions-view-spec.md`）
+- [x] prod worker（BE）+ dashboard（FE）已部署；订阅页 + 横幅在 ai-feeds.com 生效
+- [x] prod 订阅接口实测通（`/api/subscribe` 400、`/api/digest/return` 302 落地前端域）→ 说明 prod secret + migration 018 已就位
+- [x] 后台订阅看板：BE 已做独立页 `/admin/subscriptions`（6 聚合 + 明细分页；FE 规格存档 `plans/2026-05-29-admin-subscriptions-view-spec.md`）
+- [ ] Resend webhook prod 配置确认（BE）：Resend dashboard → `api.ai-feeds.com/api/webhook/resend`
+- [ ] 节点 cron prod 确认（BE）：UTC 0/4/9 是否如期触发 node-run
+- [ ] 真人端到端验收：订阅 → welcome → 点链接回流登录 + 落地抽屉 → 退订
 
 ---
 
