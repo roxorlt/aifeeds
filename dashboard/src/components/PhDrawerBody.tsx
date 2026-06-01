@@ -19,13 +19,15 @@
 //   8. Top 评论 (10，maker reply 嵌套)
 //   9. 更多 (论坛 / 类似产品出链 + Pricing chips)
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
+import { useDrawer } from "../lib/drawer";
+import { fetchItems } from "../api";
 
 // 抽屉 gallery 内单个直链 mp4 视频 — hook 接 VideoCoordinator
 // columnId 由父级 <VideoColumnProvider value="drawer"> 自动 inject，组件本身不写
@@ -143,14 +145,28 @@ const IconStar = ({ className }: { className?: string }) => (
 const IconFollow = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><circle cx="8" cy="6" r="3"/><path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>
 );
-const IconArrowOut = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M5 3h8v8M13 3L5 11"/></svg>
-);
 
 export function PhDrawerBody({ item }: Props) {
+  const drawer = useDrawer();
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<PhMetrics>(item.metrics) ?? ({} as PhMetrics);
   const media = parseMedia(item.media);
+
+  // 同类产品（站内）：拉一页 PH feed，按共享的具体 topic 匹配“同类型”。
+  // pool module 级缓存，computeRelatedPh 见文件底部。item 切换（点进同类产品）
+  // 时按 item.id 重算。
+  const [related, setRelated] = useState<Item[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    setRelated([]);
+    loadPhPool().then((pool) => {
+      if (!cancelled) setRelated(computeRelatedPh(item, pool));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
 
   const name = item.title || "?";
   const tagline = item.content || "";
@@ -503,45 +519,45 @@ export function PhDrawerBody({ item }: Props) {
         </div>
       )}
 
-      {/* ⑨ 更多 + Pricing */}
-      <div className="border-b border-neutral-200 p-5">
-        <div className="mb-2 text-[13px] font-medium text-neutral-500">更多</div>
-        <div className="space-y-2">
-          {phUrl && (
-            <ExternalLinkRow
-              href={phUrl.replace("/products/", "/p/")}
-              title="论坛深度讨论"
-              hint="PH 论坛页（二期接入）"
-            />
+      {/* ⑨ 同类产品（站内）+ Pricing */}
+      {(related.length > 0 || pricingLabel || isOpenSource) && (
+        <div className="border-b border-neutral-200 p-5">
+          {related.length > 0 && (
+            <>
+              <div className="mb-2 text-[13px] font-medium text-neutral-500">同类产品</div>
+              <div className="space-y-0.5">
+                {related.map((r) => (
+                  <RelatedPhRow key={r.id} item={r} onOpen={() => drawer.openItem(r)} />
+                ))}
+              </div>
+            </>
           )}
-          {phUrl && (
-            <ExternalLinkRow
-              href={`${phUrl}/alternatives`}
-              title="类似产品"
-              hint="在 PH 看 alternatives"
-            />
+
+          {/* Pricing chips — neutral 风格 */}
+          {(pricingLabel || isOpenSource) && (
+            <div
+              className={cn(
+                "flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500",
+                related.length > 0 && "mt-3",
+              )}
+            >
+              {pricingLabel && (
+                <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+                  {pricingLabel}
+                </span>
+              )}
+              {isOpenSource && (
+                <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
+                  开源
+                </span>
+              )}
+              {displayRank !== undefined && (
+                <span className="ml-auto text-[11px] text-neutral-400">{ordinal(displayRank)} on PH</span>
+              )}
+            </div>
           )}
         </div>
-
-        {/* Pricing chips — neutral 风格 */}
-        {(pricingLabel || isOpenSource) && (
-          <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500">
-            {pricingLabel && (
-              <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-                {pricingLabel}
-              </span>
-            )}
-            {isOpenSource && (
-              <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-                开源
-              </span>
-            )}
-            {displayRank !== undefined && (
-              <span className="ml-auto text-[11px] text-neutral-400">{ordinal(displayRank)} on PH</span>
-            )}
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Lightbox */}
       {lightboxIndex !== null && lightboxMedia.length > 0 && (
@@ -702,20 +718,90 @@ function CommentItem({
   );
 }
 
-function ExternalLinkRow({ href, title, hint }: { href: string; title: string; hint: string }) {
+// ─── 同类产品（站内）─────────────────────────────────────────────────
+// FE-only：拉一页 PH feed 做“同类型”匹配 — 共享 PH 原生 topic 标签即算同类。
+// 'artificial-intelligence' 几乎每条都带（≈80%），无区分度，作为通用标签剔除；
+// 真正决定“同类型”的是更具体的 topic（design-tools / marketing / mac …）。
+// ai_category 命中作次要加权（ai_other 是 catch-all，不计）。
+// pool 在 module 级缓存（每次页面加载只拉一次），避免每开一个 PH 抽屉都重拉。
+const GENERIC_PH_TOPICS = new Set(["artificial-intelligence"]);
+const RELATED_POOL_LIMIT = 150;
+const RELATED_MAX = 6;
+
+let phPoolPromise: Promise<Item[]> | null = null;
+function loadPhPool(): Promise<Item[]> {
+  if (!phPoolPromise) {
+    phPoolPromise = fetchItems({ source_type: "product_hunt", limit: RELATED_POOL_LIMIT })
+      .then((r) => r.items)
+      .catch(() => {
+        phPoolPromise = null; // 失败不缓存，下个抽屉可重试
+        return [];
+      });
+  }
+  return phPoolPromise;
+}
+
+function topicsOf(it: Item): string[] {
+  const ex = parseJsonField<{ topics?: unknown }>(it.extra) ?? {};
+  return Array.isArray(ex.topics) ? (ex.topics.filter((x) => typeof x === "string") as string[]) : [];
+}
+
+function computeRelatedPh(current: Item, pool: Item[]): Item[] {
+  const curExtra = parseJsonField<ItemExtra>(current.extra) ?? ({} as ItemExtra);
+  const curSpecific = new Set(topicsOf(current).filter((t) => !GENERIC_PH_TOPICS.has(t)));
+  const curCat = (curExtra.ai_category as string) || "";
+  // 没有具体 topic（只挂通用 AI 标签）→ 无可靠“同类”信号，不展示
+  if (curSpecific.size === 0) return [];
+
+  const scored: Array<{ item: Item; score: number }> = [];
+  for (const cand of pool) {
+    if (cand.id === current.id) continue;
+    let shared = 0;
+    for (const t of topicsOf(cand)) if (curSpecific.has(t)) shared++;
+    if (shared === 0) continue; // 必须共享 ≥1 个具体 topic 才算“同类”（仅 ai_category 相同不算）
+    // 同 ai_category 仅作 topic 命中者之间的次要排序加权（ai_other 是 catch-all 不计）
+    const cCat = ((parseJsonField<ItemExtra>(cand.extra) ?? ({} as ItemExtra)).ai_category as string) || "";
+    const score = shared * 10 + (curCat && curCat !== "ai_other" && cCat === curCat ? 5 : 0);
+    scored.push({ item: cand, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, RELATED_MAX).map((s) => s.item);
+}
+
+const IconChevronRight = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M6 4l4 4-4 4" /></svg>
+);
+
+function RelatedPhRow({ item, onOpen }: { item: Item; onOpen: () => void }) {
+  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
+  const media = parseMedia(item.media);
+  const logo = media.find((m) => (m as MediaItem & { role?: string }).role === "logo");
+  const logoUrl = logo?.url ? resolveAssetUrl(logo.url) : "";
+  const name = item.title || "?";
+  const tagline = (extra.ai_summary as string) || item.content_translated || item.content || "";
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2 transition-colors hover:bg-neutral-50/60"
-      onClick={(e) => e.stopPropagation()}
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-3 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-neutral-50/60"
     >
-      <div className="min-w-0">
-        <div className="text-[13px] font-medium text-neutral-900">{title}</div>
-        <div className="text-[11px] text-neutral-500">{hint}</div>
+      {logoUrl ? (
+        <img
+          src={logoUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="h-9 w-9 shrink-0 rounded-md bg-neutral-200 object-cover"
+          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+        />
+      ) : (
+        <div className="h-9 w-9 shrink-0 rounded-md bg-neutral-200" />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-medium text-neutral-900">{name}</div>
+        {tagline && <div className="truncate text-[11px] text-neutral-500">{tagline}</div>}
       </div>
-      <IconArrowOut className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
-    </a>
+      <IconChevronRight className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+    </button>
   );
 }
