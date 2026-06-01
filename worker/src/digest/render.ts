@@ -93,6 +93,27 @@ function safeParse(s: string | null): Record<string, unknown> {
   }
 }
 
+// GH 流内封面:从 README excerpt 抽第一张非 badge 的 <img>/![]() (hero/截图)。
+// 复刻前端 GithubCard.extractFirstReadmeImage:跳过 .svg 和 shields 类 badge;
+// /r/ 拼 apiBase(worker R2),相对路径拼 raw.githubusercontent。无图返回 null(不退 owner 头像)。
+function extractReadmeImage(readme: string, owner: string, repo: string, branch: string, apiBase: string): string | null {
+  const urls: string[] = [];
+  let m: RegExpExecArray | null;
+  const mdRe = /!\[[^\]]*\]\(([^)\s]+)/g;
+  while ((m = mdRe.exec(readme)) !== null) urls.push(m[1]);
+  const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  while ((m = htmlRe.exec(readme)) !== null) urls.push(m[1]);
+  if (!urls.length) return null;
+  const isBadge = (u: string): boolean =>
+    /\.svg(\?|$)/i.test(u) || /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(u);
+  const picked = urls.find((u) => !isBadge(u)) || urls[0];
+  if (!picked) return null;
+  if (/^(https?:|data:|blob:)/i.test(picked)) return picked;
+  if (picked.startsWith('/r/')) return `${apiBase}${picked}`;
+  const base = `https://raw.githubusercontent.com/${owner}/${repo}/${branch || 'main'}`;
+  return picked.startsWith('/') ? `${base}${picked}` : `${base}/${picked.replace(/^\.\//, '')}`;
+}
+
 // 封面图(对齐前端流内卡片 + 用户规则:gh/hf/ph 取真图,x 仅推文附图,clawhub 不取头像)
 function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unknown>, apiBase: string): string | null {
   const abs = (u: string | null | undefined): string | null =>
@@ -121,16 +142,29 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
       }
       return null;
     }
-    case 'gh':
-      return `https://avatars.githubusercontent.com/${ghOwner(row.id)}`;
+    case 'gh': {
+      // 流内封面 = README 第一张真图(hero/截图),无则 null;owner 头像不当封面
+      const readme = typeof ex.readme_excerpt === 'string' ? (ex.readme_excerpt as string) : '';
+      if (!readme) return null;
+      return extractReadmeImage(readme, ghOwner(row.id), ghRepoName(row.id), (ex.default_branch as string) || 'main', apiBase);
+    }
     case 'hf-paper': {
       if (imgs.length) return abs(imgs[0].url as string);
       const fig = ex.figure_image as Record<string, unknown> | undefined;
       if (fig && typeof fig === 'object' && fig.r2_url) return abs(fig.r2_url as string);
       return null;
     }
-    case 'x':
-      return imgs.length ? abs(imgs[0].url as string) : null; // 仅推文附图,无图不用头像
+    case 'x': {
+      // 推文附图;有 video 用 poster(X video.url 是 mp4 流,不能当图);都没有 null(不用作者头像)
+      if (imgs.length) return abs(imgs[0].url as string);
+      const vids = Array.isArray(media)
+        ? (media as Array<Record<string, unknown>>).filter((m) => m && m.type === 'video')
+        : [];
+      for (const v of vids) {
+        if (v.poster) return abs(v.poster as string);
+      }
+      return null;
+    }
     case 'clawhub':
       return null; // 不用作者头像
     default:
