@@ -177,7 +177,7 @@ const SESSION_COOKIE_DEV_MARKER = 'localhost';  // 区分 dev/prod 环境
 //     30 张默认头像在 dashboard/public/avatars/ 已经备好
 // 老 user 不动:已存在 user 登录时不 override display_name / avatar_url,
 // 让用户保留自己设过的值(或仍是 null)。
-function deriveDisplayName(provider: string, identifier: string): string {
+export function deriveDisplayName(provider: string, identifier: string): string {
   if (provider === 'email') {
     const prefix = identifier.split('@')[0];
     return prefix || identifier;
@@ -188,7 +188,7 @@ function deriveDisplayName(provider: string, identifier: string): string {
   return identifier;
 }
 
-function deriveAvatarUrl(userId: string): string {
+export function deriveAvatarUrl(userId: string): string {
   // djb2 hash → 1-30
   let h = 5381;
   for (let i = 0; i < userId.length; i++) {
@@ -199,7 +199,7 @@ function deriveAvatarUrl(userId: string): string {
   return `/avatars/avatar-${padded}.png`;
 }
 
-function isDevHost(req: Request): boolean {
+export function isDevHost(req: Request): boolean {
   const h = req.headers.get('Host') || '';
   return h.includes(SESSION_COOKIE_DEV_MARKER) || h.includes('127.0.0.1');
 }

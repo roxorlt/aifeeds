@@ -121,9 +121,12 @@ export function LoginModal() {
             setTurnstileToken(null);
             // 错误码翻译表 — 用户看得懂的中文。完整列表见 Cloudflare Turnstile 文档
             // https://developers.cloudflare.com/turnstile/troubleshooting/client-side-errors/
+            // ⚠️ 600010 是「通用校验失败」，CF 判定浏览器环境可疑时抛出（DevTools 打开 / 广告拦截
+            // 插件 / VPN / 浏览器过旧 / 系统时钟偏差），不是域名授权问题 —— widget allowlist 已含
+            // ai-feeds.com + staging.ai-feeds.com + www（2026-05-29 查证）。别再当成配置 bug 去查域名。
             const c = String(code || '');
             const map: Record<string, string> = {
-              '600010': '人机校验配置异常（域名未在 Cloudflare Turnstile 授权列表内），请联系管理员。',
+              '600010': '人机校验未通过（浏览器环境被判定为异常）。请刷新重试；如反复失败，可关闭 VPN / 代理与广告拦截插件，或更换浏览器（开发者调试时请先关闭 DevTools）。',
               '300010': '人机校验已超时，请刷新页面重试。',
               '300020': '人机校验加载失败（网络受限）。如果开启了网络代理，请尝试关闭后重试。',
               '300030': '人机校验失败，请刷新页面重试。',

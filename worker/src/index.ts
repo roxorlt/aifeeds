@@ -101,6 +101,7 @@ import { runOpsBaseline } from './ops/baseline';
 import { runOpsDetect } from './ops/detect';
 import { recordCronRun } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
+import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -108,6 +109,16 @@ import {
   handleShareLanding,
   handleAdminShareStats,
 } from './share/handlers';
+import {
+  handleSubscribe,
+  handleGetMySubscription,
+  handlePutMySubscription,
+  handleUnsubMySubscription,
+  handleUnsubscribeByToken,
+  handleConfigure,
+} from './digest/handlers';
+import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
+import { slotKey } from './digest/lib';
 
 export interface Env {
   DB: D1Database;
@@ -174,12 +185,17 @@ export interface Env {
   EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
   EMAIL_MONTHLY_CAP?: string;           // 默认 3000（Resend free 3000/月）
   EMAIL_FROM?: string;                  // 默认 'AI Feeds <noreply@mail.ai-feeds.com>'
+  SITE_BASE?: string;                   // 前端域(落地深链/进站),prod https://ai-feeds.com
+  API_BASE?: string;                    // worker API 域(回流/退订端点),prod https://api.ai-feeds.com
   ENABLE_SMS_LOGIN?: string;            // 'true' = 开放 SMS 通道（备案后），缺省/'false' = 关闭
   ENABLE_EMAIL_LOGIN?: string;          // 默认开启；'false' = 紧急关闭 email 通道
   // PH GraphQL OAuth (client_credentials flow). Set via wrangler secret put.
   // Used by worker/src/scrapers/ph.ts (daily fetch cron).
   PH_CLIENT_ID?: string;
   PH_CLIENT_SECRET?: string;
+  // 订阅推送子系统(migration 018)。secret 进 .secrets/aifeeds-{prod,staging}.env。
+  DIGEST_EMAIL_HMAC?: string;             // 邮件回流 token HMAC secret(32B hex)
+  RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -209,6 +225,9 @@ export interface Env {
   // runClawhubFetchList 后对每条新 skill create instance。替换
   // clawhub-enrich preempt cron。设计同上。
   CH_PIPELINE_WORKFLOW: Workflow;
+  // 订阅推送(worker/src/digest/):node-run 算榜单+起 deliver;deliver per-sub 投递。
+  DIGEST_NODE_RUN_WORKFLOW: Workflow;
+  DIGEST_DELIVER_WORKFLOW: Workflow;
   // HuggingFace Daily Papers token(read scope)— worker/src/scrapers/hf-paper.ts
   // 通过 Authorization: Bearer 调 GET /api/daily_papers + GET /api/papers/:id。
   // 2026-05-18 OPS verify staging + prod 均已配。
@@ -231,6 +250,8 @@ export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 export { PhPipelineWorkflow } from './workflows/ph-pipeline';
 export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
 export { HfPaperPipelineWorkflow } from './workflows/hf-paper-pipeline';
+export { DigestNodeRunWorkflow } from './digest/node-run';
+export { DigestDeliverWorkflow } from './digest/deliver';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -396,6 +417,31 @@ export default {
       if (path === '/api/auth/me/preferences' && request.method === 'PUT') {
         return withCors(await handlePutPreferences(request, env, ctx), request, env);
       }
+      // 订阅推送(digest)。匿名订阅 + 登录态管理 + RFC8058 一键退订。
+      if (path === '/api/subscribe' && request.method === 'POST') {
+        return withCors(await handleSubscribe(request, env, ctx), request, env);
+      }
+      if (path === '/api/subscribe/configure' && request.method === 'POST') {
+        return withCors(await handleConfigure(request, env), request, env);
+      }
+      if (path === '/api/auth/me/subscription' && request.method === 'GET') {
+        return withCors(await handleGetMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/subscription' && request.method === 'PUT') {
+        return withCors(await handlePutMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/api/auth/me/subscription/unsubscribe' && request.method === 'POST') {
+        return withCors(await handleUnsubMySubscription(request, env, ctx), request, env);
+      }
+      if (path === '/unsubscribe' && (request.method === 'GET' || request.method === 'POST')) {
+        return await handleUnsubscribeByToken(request, env);
+      }
+      if (path === '/api/digest/return' && request.method === 'GET') {
+        return await handleDigestReturn(request, env, ctx);
+      }
+      if (path === '/api/webhook/resend' && request.method === 'POST') {
+        return await handleResendWebhook(request, env, ctx);
+      }
       if (path === '/api/auth/delete' && request.method === 'POST') {
         return withCors(await handleDelete(request, env, ctx), request, env);
       }
@@ -416,6 +462,9 @@ export default {
       if (path === '/admin/tasks' && request.method === 'GET') {
         return serveAdminTasksHtml(request, env);
       }
+      if (path === '/admin/subscriptions' && request.method === 'GET') {
+        return serveAdminSubscriptionsHtml(request, env);
+      }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
       }
@@ -424,6 +473,9 @@ export default {
       }
       if (path === '/api/admin/tasks' && request.method === 'GET') {
         return handleAdminTasks(request, env);
+      }
+      if (path === '/api/admin/subscriptions' && request.method === 'GET') {
+        return handleAdminSubscriptions(request, env);
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);
@@ -1396,6 +1448,21 @@ export default {
     const utc = new Date(event.scheduledTime);
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
+
+    // digest 推送节点:UTC 0/4/9 (= BJT 8/12/17),minute=0。独立触发 node-run workflow
+    // (不占 X mode rotation);instance id 唯一 = 同节点同天幂等防重复 create。
+    const digestSlotBjt =
+      minute === 0 ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour] : undefined;
+    if (digestSlotBjt !== undefined) {
+      ctx.waitUntil(
+        env.DIGEST_NODE_RUN_WORKFLOW.create({
+          id: `digest-node-${slotKey(digestSlotBjt)}`,
+          params: { slotHourBjt: digestSlotBjt },
+        })
+          .then(() => undefined)
+          .catch((e) => console.error('[digest] node-run create fail', e)),
+      );
+    }
 
     // GitHub trending fetch (phase 1) at BJT 01:00 + 13:00 (= UTC 17:00 + 05:00).
     // 2 subrequests, doesn't conflict with X cron rotation.
