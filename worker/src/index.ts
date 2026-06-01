@@ -118,6 +118,7 @@ import {
   handleConfigure,
 } from './digest/handlers';
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
+import { handleDigestDaily } from './digest/daily-api';
 import { slotKey } from './digest/lib';
 
 export interface Env {
@@ -196,6 +197,7 @@ export interface Env {
   // 订阅推送子系统(migration 018)。secret 进 .secrets/aifeeds-{prod,staging}.env。
   DIGEST_EMAIL_HMAC?: string;             // 邮件回流 token HMAC secret(32B hex)
   RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
+  DIGEST_API_KEY?: string;                // 对外日报 JSON API(GET /api/digest/daily)Bearer key
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -438,6 +440,9 @@ export default {
       }
       if (path === '/api/digest/return' && request.method === 'GET') {
         return await handleDigestReturn(request, env, ctx);
+      }
+      if (path === '/api/digest/daily' && request.method === 'GET') {
+        return await handleDigestDaily(request, env);
       }
       if (path === '/api/webhook/resend' && request.method === 'POST') {
         return await handleResendWebhook(request, env, ctx);
@@ -4412,6 +4417,8 @@ function isBotGateExempt(path: string, method: string): boolean {
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/api/items' || path === '/api/sources' || path === '/api/stats') return true;
     if (path === '/img' || path.startsWith('/r/')) return true;
+    // /api/digest/daily:Bearer key 鉴权(handler 内校验),受信设备 agent 调用 UA 可能非浏览器,不卡 UA 闸
+    if (path === '/api/digest/daily') return true;
     // PM 2026-05-25:/s/<token> 是分享二维码扫码命中点,微信内置浏览器 / 二维码
     // 扫描 app 的 UA 经常被 bot gate 判 403,用户扫码看到"内容不存在".分享 redirect
     // 本身就是公开 endpoint,handler 内部有 token 校验,不该卡 UA 闸

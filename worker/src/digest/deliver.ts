@@ -130,9 +130,9 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       title = (ex.ai_summary as string) || body.slice(0, 60);
       summary = ct || row.content || '';
       break;
-    case 'clawhub': // skill 名 + DeepSeek 总结优先
+    case 'clawhub': // skill 名 + DeepSeek 中文总结(clawhub enrich 写的是 summary_translated,非 ai_summary)
       title = row.title || '';
-      summary = (ex.ai_summary as string) || ct;
+      summary = (ex.summary_translated as string) || (ex.summary_en as string) || ct;
       break;
     default:
       title = row.title || body.slice(0, 60);
