@@ -108,9 +108,18 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
     : [];
   switch (source) {
     case 'ph': {
-      const logo = imgs.find((m) => m.role === 'logo') || imgs[0];
-      if (logo) return abs(logo.url as string);
-      return (ex.cover_image as string) || (ex.video_thumbnail as string) || null;
+      // 流内卡片封面 = 第一张非 logo 的 image(产品截图/hero shot),否则 video poster;
+      // logo 只是头部 40×40 小图标,不当封面。对齐前端 PhCard.selectPhCover + share/handlers。
+      const shot = imgs.find((m) => m.role !== 'logo');
+      if (shot) return abs(shot.url as string);
+      const vids = Array.isArray(media)
+        ? (media as Array<Record<string, unknown>>).filter((m) => m && m.type === 'video')
+        : [];
+      for (const v of vids) {
+        const poster = (v.poster as string) || (v.url as string); // PH video.url 即缩略图
+        if (poster) return abs(poster);
+      }
+      return null;
     }
     case 'gh':
       return `https://avatars.githubusercontent.com/${ghOwner(row.id)}`;
