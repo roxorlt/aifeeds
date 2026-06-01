@@ -210,6 +210,12 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
         type: "image/png",
         quality: 1,
         backgroundColor: "#ffffff",
+        // 兜底:modern-screenshot 默认 timeout 30s — 单张图 fetch 慢 / video 元素
+        // 等 loadeddata 时会卡满 30s,体感"一直转圈"。压到 8s,超时的图走库内置
+        // placeholder(透明占位)继续出图,海报不再因某张媒体取不到而长时间 hang。
+        // (X 视频已在 posterMode 下渲染成 poster <img> 而非 <video>,这里是二道防线:
+        //  覆盖 link_card video / PH 视频 poster / GH README 图等任意慢媒体)
+        timeout: 8000,
       });
     },
   }));

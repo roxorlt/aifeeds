@@ -243,18 +243,56 @@ function TweetMediaTile({
   sourceType,
   videoIdSuffix = "",
   onClickImage,
+  posterMode,
 }: {
   media: MediaItem[];
   itemId: string;
   sourceType: string;
   videoIdSuffix?: string;
   onClickImage: (idx: number) => void;
+  posterMode?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   if (failed || media.length === 0) return null;
   const first = media[0];
   const mediaCount = media.length;
   const hasVideo = media.some((m) => m.type === "video");
+
+  // 海报模式:modern-screenshot 截图遇到真实 <video> 会卡在等 loadeddata
+  // (preload=metadata 永不 fire) + 跨域 seek,体感"一直转圈"。这里改渲染封面
+  // <img> + ▶ 视频 角标(等价 PhCard 的视频封面处理),截图不再 hang。
+  // 封面优先用视频自带 poster 帧,缺失则退到媒体里的下一张图片(对应用户反馈
+  // "第一个附件取不到图就取第二个位置"),再缺失留灰底占位(不放 <img> 即不会卡)。
+  if (posterMode && first.type === "video") {
+    const firstImage = media.find((m) => m.type === "image" && m.url);
+    const coverUrl = first.poster
+      ? proxyImg(first.poster, 400)
+      : firstImage
+        ? proxyImg(firstImage.url, 400)
+        : "";
+    return (
+      <div className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black">
+        {coverUrl ? (
+          <img
+            src={coverUrl}
+            alt={first.alt || ""}
+            className="aspect-[16/9] w-full object-cover"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <div className="aspect-[16/9] w-full" />
+        )}
+        <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+          ▶ 视频
+        </span>
+        {mediaCount > 1 && (
+          <span className="pointer-events-none absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
+            +{mediaCount - 1}
+          </span>
+        )}
+      </div>
+    );
+  }
 
   if (first.type === "video") {
     return (
@@ -653,6 +691,7 @@ export function TweetCard({
                 sourceType={item.source_type}
                 videoIdSuffix="-replyOf"
                 onClickImage={(idx) => setReplyLightboxIndex(idx)}
+                posterMode={posterMode}
               />
               {replyOf.metrics && <MetricsRow metrics={replyOf.metrics} />}
             </div>
@@ -821,6 +860,7 @@ export function TweetCard({
             itemId={item.id}
             sourceType={item.source_type}
             onClickImage={(idx) => setLightboxIndex(idx)}
+            posterMode={posterMode}
           />
 
           {/* F3: Reply parent 不再嵌套在 main media 之后（旧的 quote 视觉语言）。
