@@ -1237,6 +1237,9 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 | `/api/digest/return` | GET | email HMAC token | 邮件回流：隐式注册登录 + 302 落地深链 |
 | `/unsubscribe` | GET / POST | unsubscribe_token | RFC 8058 一键退订 |
 | `/api/webhook/resend` | POST | Svix 签名 | bounce/complaint → 计数 / 踢出 |
+| `/api/digest/daily` | GET | `Bearer DIGEST_API_KEY` | 对外日报 JSON（受信设备 agent 定时取）；**2026-06-01 上 prod `6246e28`** |
+
+**`/api/digest/daily` 对外 API（2026-06-01）**：实时选品（`selectTopForSource` normal + `curateSource` curated 走 DeepSeek），非历史快照。参数 `density`(normal|curated|both) / `sources`(csv 子集) / `verbose`(1 附 raw 原始字段，不缓存)。每条含 `rank`（该源热度排名）+ `cover`（ph 媒体 logo / gh owner 头像 `avatars.githubusercontent.com/{owner}` / hf 社交缩略图 / x 推文附图；clawhub 及 x 无图留 null；相对路径拼 `API_BASE`）。`AUTH_KV` 15min 缓存防 curated 频繁烧 token。bot UA 闸已豁免（handler 内 Bearer 校验）。鉴权 key = secret `DIGEST_API_KEY`（prod + staging 均已配，存 `.secrets/aifeeds-{prod,staging}.env`）。注：hf-paper 实时档可能空（选品 24h 窗按 scraped_at，hf 那批未落窗）。同 commit 修了 clawhub 邮件简介取字段 bug（`deliver.ts` `ex.ai_summary`→`summary_translated`）。
 
 **⚠️ 邮件链接域名规则（2026-05-29 白页 bug 修复 `df8b3d5` 后）**：回流 `/api/digest/return` + 退订 `/unsubscribe` + List-Unsubscribe header 走 **API 域**（`API_BASE` = `api.ai-feeds.com` / `staging-api.ai-feeds.com`）；落地深链（`to=` 参数 + 进站）走**前端域**（`SITE_BASE` = `ai-feeds.com` / `staging.ai-feeds.com`）。基址由 `[vars] SITE_BASE / API_BASE` 按环境取。**worker 没有 apex `ai-feeds.com/api/*` 路由，邮件里 worker 端点必须用 api 域，否则落到 Pages SPA → 白页。**
 
