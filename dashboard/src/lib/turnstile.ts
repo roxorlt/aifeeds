@@ -55,7 +55,7 @@ export function loadTurnstileScript(): Promise<void> {
 export function turnstileErrorMessage(code?: string): string {
   const c = String(code || '');
   const map: Record<string, string> = {
-    '600010': '人机校验配置异常（域名未在 Cloudflare Turnstile 授权列表内），请联系管理员。',
+    '600010': '人机校验未通过（浏览器环境被判定为异常）。请刷新重试；如反复失败，可关闭 VPN / 代理与广告拦截插件，或更换浏览器（开发者调试时请先关闭 DevTools）。',
     '300010': '人机校验已超时，请刷新页面重试。',
     '300020': '人机校验加载失败（网络受限）。如果开启了网络代理，请尝试关闭后重试。',
     '300030': '人机校验失败，请刷新页面重试。',
