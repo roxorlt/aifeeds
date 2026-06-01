@@ -76,7 +76,7 @@ function buildXCandidate(id: string, row: CandRow | undefined): CurateCandidate 
   return { id, title: author ? `@${author}` : id, summary: parts.join('\n') };
 }
 
-async function fetchCandidates(env: Env, source: DigestSource, ids: string[]): Promise<CurateCandidate[]> {
+export async function fetchCandidates(env: Env, source: DigestSource, ids: string[]): Promise<CurateCandidate[]> {
   if (!ids.length) return [];
   const ph = ids.map(() => '?').join(',');
   const r = await env.DB.prepare(
