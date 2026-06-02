@@ -6052,14 +6052,15 @@ export async function fetchLongformViaScrapeBadger(
 
   const nowIso = new Date().toISOString();
   if (!ft) {
-    // SB 没返（已删/私密/受限）→ 记 fetch_error 避免下次再选
+    // SB 没返（已删/私密/受限）→ 记 fetch_error + backfill_source 防 backfill mode 反复再选
     await env.DB.prepare(
       `UPDATE items
           SET extra = json_set(coalesce(extra, '{}'),
                                '$.longform.fetch_error', ?,
-                               '$.longform.fetched_at', ?)
+                               '$.longform.fetched_at', ?,
+                               '$.longform.backfill_source', ?)
         WHERE id = ?`,
-    ).bind('not_returned_by_sb', nowIso, row.id).run();
+    ).bind('not_returned_by_sb', nowIso, isRetweet ? 'sb_retweet_original_not_found' : 'sb_not_found', row.id).run();
     console.log(`[x-workflow:step3] ${itemId}: SB no full_text returned (target=${targetId})`);
     return { updated: false, full_text_len: 0 };
   }
@@ -6150,7 +6151,9 @@ export async function runRetweetLongformBackfill(
         AND json_extract(extra, '$.is_retweet') = 1
         AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
         AND length(json_extract(extra, '$.retweet_of.content')) BETWEEN 270 AND 290
-        AND COALESCE(json_extract(extra, '$.longform.backfill_source'), '') != 'sb_retweet_original'
+        -- 排除所有已被本 mode 处理过的(成功 sb_retweet_original / 真·短推 _same_length /
+        -- 原推已删 _not_found)。否则真·280 字转推会被反复重选,mode 永远到不了 selected=0。
+        AND COALESCE(json_extract(extra, '$.longform.backfill_source'), '') NOT LIKE 'sb_retweet_original%'
       ORDER BY scraped_at DESC
       LIMIT ?`,
   ).bind(Math.min(Math.max(limit, 1), 50)).all<{ id: string }>();
