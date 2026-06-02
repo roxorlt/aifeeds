@@ -3,14 +3,11 @@
 
 import { nanoid } from 'nanoid';
 import type { Env } from '../index';
+import { getClientIp } from '../client-ip';
 import { verifyEmailToken, nextSendAt, getBases } from './lib';
 import { createSession, buildSessionCookie } from '../auth/session';
 import { deriveDisplayName, deriveAvatarUrl, isDevHost } from '../auth/handlers';
 import { pushDeerAlert } from '../notifier';
-
-function clientIp(req: Request): string {
-  return req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || '0.0.0.0';
-}
 
 // 查/建 email user,返回 userId。复用登录端同款 derive 逻辑(头像/显示名风格一致)。
 async function findOrCreateEmailUser(env: Env, email: string, now: number): Promise<string> {
@@ -87,7 +84,7 @@ export async function handleDigestReturn(
       .run(),
   );
 
-  const session = await createSession(env, userId, null, clientIp(request), request.headers.get('User-Agent') || '');
+  const session = await createSession(env, userId, null, getClientIp(request, env), request.headers.get('User-Agent') || '');
   const cookie = buildSessionCookie(session.id, isDevHost(request));
   return new Response(null, { status: 302, headers: { Location: dest, 'Set-Cookie': cookie } });
 }

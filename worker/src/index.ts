@@ -181,6 +181,11 @@ export interface Env {
   // Note: this does NOT bypass CF Access JWT on /admin* — that needs a separate
   // CF Access Service Token (see docs/operations.md § 7a).
   DEV_TOKEN?: string;
+  // 香港中转回源密钥(2026-06-02)。VPS nginx 反代 api 时注入 X-Origin-Secret 头;
+  // worker 据此判断"请求是否来自我的香港 VPS"——用于 (1) 拒绝直连 *.workers.dev 的匿名请求
+  // (防白嫖额度 / 绕过 VPS 限流) (2) getClientIp 信任 X-Forwarded-For 取真实访客 IP。
+  // 仅 prod 设置(staging 不设 = 该 gate 关闭)。存 .secrets/aifeeds-prod.env,wrangler secret put 注入。
+  ORIGIN_SECRET?: string;
   // PR-EmailAuth：Resend + email 风控配置
   RESEND_API_KEY?: string;              // wrangler secret put 设置（不入 git）
   EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
@@ -316,6 +321,29 @@ export default {
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
+    }
+
+    // ── Origin gate (2026-06-02 香港中转) ──────────────────────────────────
+    // 中转上线后 api.ai-feeds.com 经香港 VPS 到达 worker(nginx 把 Host 改成
+    // *.workers.dev),所以靠 hostname 没法区分"经中转"和"直连 *.workers.dev"。
+    // VPS 注入 X-Origin-Secret;没带的就是直接打公开 *.workers.dev 的请求
+    // (白嫖额度 / 绕过 VPS 限流),拒掉。仅当 ORIGIN_SECRET 设置时启用(prod);
+    // staging/dev 不设 → 跳过。豁免:admin.ai-feeds.com(CF Access 把门,不经中转)、
+    // Resend webhook(自带 Svix 签名)、邮件回流落地(公开 link)、BE/OPS 的
+    // X-Dev-Token 逃生通道(可直连 *.workers.dev 调试)。
+    if (env.ORIGIN_SECRET) {
+      const viaRelay = request.headers.get('X-Origin-Secret') === env.ORIGIN_SECRET;
+      const exempt =
+        url.hostname === 'admin.ai-feeds.com' ||
+        path === '/api/webhook/resend' ||
+        path === '/api/digest/return' ||
+        (!!env.DEV_TOKEN && request.headers.get('X-Dev-Token') === env.DEV_TOKEN);
+      if (!viaRelay && !exempt) {
+        return new Response('Forbidden', {
+          status: 403,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private, no-store' },
+        });
+      }
     }
 
     // Bot UA gate: cheap UA-string match to drop obvious scrapers/AI-training crawlers
