@@ -44,6 +44,7 @@ export async function selectTopForSource(
 
   let orderBy: string;
   let extraWhere = '';
+  let windowDays = 1; // hf-paper 放宽到 3 天(避开与 digest 撞车),其余源 24h
   if (source === 'x') {
     orderBy = `${HOT_EXPR} DESC`;
     extraWhere = 'AND is_relevant = 1';
@@ -57,13 +58,18 @@ export async function selectTopForSource(
     orderBy = `json_extract(extra,'$.launch_date_pt') DESC, CAST(json_extract(extra,'$.daily_rank') AS INTEGER) ASC`;
     extraWhere = 'AND is_relevant = 1';
   } else {
-    // hf-paper
-    orderBy = `CAST(json_extract(metrics,'$.upvotes') AS INTEGER) DESC`;
+    // hf-paper:放宽窗 3 天 + 只取已 enrich(有中文摘要),按出榜日倒序保证取"最近一期"。
+    // 原因:hf 抓取(UTC0)与 digest 早 8 档(UTC0)同刻触发,选品瞬间当天 hf 还没入库/enrich
+    // (入库 +1min、中文摘要 +4~5min),24h 窗又卡边界 → 早档常无 hf。3 天窗 + submitted_on_daily
+    // DESC 稳定取最近一期已 ready 的;ai_summary_zh 非空过滤排除刚入库没加工完的半成品。
+    orderBy = `json_extract(extra,'$.submitted_on_daily_at') DESC, CAST(json_extract(metrics,'$.upvotes') AS INTEGER) DESC`;
+    extraWhere = `AND json_extract(extra,'$.ai_summary_zh') IS NOT NULL AND json_extract(extra,'$.ai_summary_zh') != ''`;
+    windowDays = 3;
   }
 
   const sql = `SELECT id FROM items
     WHERE source_type = ?
-      AND datetime(scraped_at) >= datetime('now','-1 day')
+      AND datetime(scraped_at) >= datetime('now','-${windowDays} day')
       AND deleted_at IS NULL ${extraWhere} ${wcGate}
     ORDER BY ${orderBy}
     LIMIT ?`;
