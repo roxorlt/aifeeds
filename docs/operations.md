@@ -995,7 +995,13 @@ ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'fail2ban-client set nginx-limi
 # 清缓存：rm -rf /var/cache/nginx/aifeeds/* && systemctl reload nginx
 ```
 
-> **仍未做（下一步）**：Worker 回源密钥 —— 让 `xlist-api` Worker 只接受带密钥头的请求（密钥由 VPS nginx 注入），堵住 `xlist-api.ltsms86.workers.dev` 被直连白嫖额度 / 绕过 VPS 限流的洞。需改 worker 代码 + 部署（staging 不设密钥即跳过校验；部署前 grep 确认无组件硬编码 workers.dev）。
+> **✅ 回源密钥 + 真实访客 IP（2026-06-02 完成，prod worker Version `10b2787d`）**：
+>
+> - **回源密钥 gate**（`worker/src/index.ts` 入口，OPTIONS 之后 / bot gate 之前）：香港 VPS nginx 给 api 块注入 `X-Origin-Secret`（值存 `.secrets/aifeeds-prod.env` 的 `ORIGIN_SECRET`，并 `wrangler secret put ORIGIN_SECRET`）。worker 校验：**仅当 `env.ORIGIN_SECRET` 设置（=prod）时启用**，无密钥且非 `admin.ai-feeds.com`（CF Access 把门）/ `/api/webhook/resend`（Svix 签名）/ `/api/digest/return`（公开回流）/ `X-Dev-Token`（OPS 逃生）的请求一律 403 —— 堵死直连 `xlist-api.ltsms86.workers.dev` 白嫖 worker 额度 / 绕过 VPS 限流。**staging 不设 secret = gate 关闭**。
+> - **真实访客 IP**（新 `worker/src/client-ip.ts` 的 `getClientIp(req, env)`，统一替换 auth/handlers、auth/email-handlers、track、digest/return-webhook、digest/handlers 共 5 处旧拷贝）：中转后 `CF-Connecting-IP` 对每个访客都成了 VPS 的 IP；带合法 `X-Origin-Secret` 时改取 `X-Forwarded-For` 第一段（nginx 注入的真实客户端）。**修复了登录 OTP per-IP 限流误伤真人的隐患**（sms/email：同 IP 1h ≥10 个不同账号、24h ≥30 条 → 中转后全站塌缩到 VPS 单 IP，会把正常用户挡在 `ip_1h_unique_*_limit` 外）。
+> - **回滚**：`wrangler secret delete ORIGIN_SECRET`（prod）→ gate 代码 `if (env.ORIGIN_SECRET)` 立即跳过，秒回无闸状态 + IP 回落 CF-Connecting-IP。nginx 的注入行留着无害（worker 不校验即忽略）。
+> - **自查**：`curl -sI https://xlist-api.ltsms86.workers.dev/api/items`（直连无密钥应 **403**）；`curl https://api.ai-feeds.com/api/items`（经香港应 **200**）。
+> - **⚠️ 部署顺序硬要求**：改动这套时务必 ①先 nginx 注入头 → ②`wrangler secret put` → ③`wrangler deploy`。顺序颠倒（worker 先校验、nginx 还没注入）会让 prod api 瞬间全 403。
 
 ### 7. CF 安全配置
 
