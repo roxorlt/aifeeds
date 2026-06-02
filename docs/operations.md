@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
+最后更新：2026-06-02（香港中转加速上线：前端 / api / fonts 改走香港 VPS 反代，绕开 CF 中国无节点的慢，itdog 全国平均访问 1.46s→0.87s、电信快 3 倍。详见 §6 自定义域名与 DNS + §6b 香港中转加速节）
+
+历史：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
 
 历史：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Phase 1+2（fetchList / enrichPending）、`metrics_snapshots_clawhub` 表、`renderClawhubContent` SVG 模板、前端 `BrandClawhub` logo 都在这次落地）
 
@@ -879,14 +881,19 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 
 域名：`ai-feeds.com`（CF 注册 + 托管）
 
-| 记录类型 | Name | Target | Proxy | 作用 |
-|----------|------|--------|-------|------|
-| CNAME | `ai-feeds.com`（@） | `xlist-dashboard.pages.dev` | ✅ Proxied | 主站 |
-| CNAME | `www` | `xlist-dashboard.pages.dev` | ✅ Proxied | www 别名 |
-| Worker Route | `api.ai-feeds.com` | Worker `xlist-api` | ✅ Proxied | API 子域 |
-| R2 Custom Domain | `fonts.ai-feeds.com` | R2 bucket `ai-feeds-fonts` | ✅ Proxied | HarmonyOS Sans SC 自托管字体 |
+> ⚠️ **2026-06-02 起，前端 / www / api / fonts 改走香港 VPS 中转加速**（绕开 CF 中国无节点的慢，详见下方 §6b）。下表为当前真实状态。
 
-**DNS proxy 必须全开橙云**（CF WAF / 缓存 / DDoS 保护依赖此）。
+| 记录 | Name | Target | Proxy | 作用 |
+|------|------|--------|-------|------|
+| A | `ai-feeds.com`（@） | `154.12.188.231`（香港 VPS） | 🔘 DNS only | 主站（VPS 反代 → Pages） |
+| A | `www` | `154.12.188.231` | 🔘 DNS only | www（VPS 反代 → Pages） |
+| A | `api` | `154.12.188.231` | 🔘 DNS only | API（VPS 反代 → Worker） |
+| A | `fonts` | `154.12.188.231` | 🔘 DNS only | 字体（VPS 反代 → R2） |
+| CNAME | `staging` / `staging-api` | CF Pages / Worker | ✅ Proxied | staging（未走香港） |
+| AAAA | `blog` | Worker `roxor-blog` | ✅ Proxied | blog（未走香港） |
+| MX×3 + TXT | `ai-feeds.com` / `mail.*` | CF Email Routing + Resend/SES | — | 邮件（未动） |
+
+**注意**：走香港的 4 条是**灰云 A 记录（DNS only，直连 VPS）** —— 这部分流量不经 CF 边缘，**不再享受 CF WAF / 缓存 / DDoS**（由香港 VPS 自己扛）。staging / 邮件仍走 CF 橙云。完整架构 + 回滚见 §6b。
 
 ### 6a. R2 bucket: `ai-feeds-fonts`（2026-05-11 上线）
 
@@ -919,6 +926,53 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   done
   ```
 - **CORS 调整**：编辑 `cors.json`（rules → allowed.origins / methods / headers），`wrangler r2 bucket cors set ai-feeds-fonts --file cors.json`
+
+### 6b. 香港中转加速（2026-06-02 上线）
+
+**背景**：CF 免费版在中国无境内节点，给大陆用户分美/日节点，慢（itdog 实测全国平均 1.46s，电信晚高峰常 >10s）。RUM 时段分析显示真实用户大头按北京作息活动（挂梯子使 IP 显示美国，掩盖了真实占比）。
+
+**方案**：香港 VPS 跑 nginx 反向代理；`ai-feeds.com` / `www` / `api` / `fonts` 的 DNS 改成灰云 A 记录直连 VPS，VPS 再反代回 CF 源。**所有用户（含海外）都走香港** —— 真·地域分流（大陆走港、海外走 CF）对 CF Pages 架构做不干净（DNS 搬离 CF 后 CF 边缘不认 host，海外反而挂），且真实海外用户少，故取此简化方案。
+
+**实测效果**（itdog，切换前→后，全国平均）：1.46s → 0.87s（快 40%）；电信 1.52→0.52（快 3 倍）；移动 1.45→0.79（快 2 倍）；联通基本持平（买的 EB 线路偏移动/联通 CMI，电信反而最受益）。
+
+**架构**：
+
+```
+用户 → ai-feeds.com / www / api / fonts  (灰云 A → 香港VPS 154.12.188.231)
+     → nginx 反代:
+        ├ 前端 → https://xlist-dashboard.pages.dev                       (Host: pages.dev)
+        ├ api  → https://xlist-api.ltsms86.workers.dev                   (Host: workers.dev + X-Forwarded-Host: api.ai-feeds.com)
+        └ fonts→ https://pub-552cb27a652c4fde908550439112c814.r2.dev     (Host: r2.dev)
+未动（仍走 CF 橙云）：邮件 MX / Email Routing、staging / staging-api、blog
+```
+
+**VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。IP `154.12.188.231`。SSH `ssh -i <私钥> root@154.12.188.231`。nginx 配置 `/etc/nginx/sites-available/aifeeds.conf`。TLS 用 Let's Encrypt（certbot 自动续期，8/31 到期自动续）。
+
+**切换时的前置改动**（回滚要逆操作）：
+- R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）
+- 移除了 api 的 Worker custom domain（`xlist-api`）+ fonts 的 R2 custom domain，DNS 才能解锁改 A 记录
+
+**⚠️ 风险 / 长期运维**：
+- **VPS 单点** —— 它挂了，前端 + api + 字体全挂（邮件不受影响）；按下方回滚秒退回 CF
+- **按月续费**（DMIT），忘续 = 全站挂
+- 走香港的流量**不经 CF**，WAF / 缓存 / DDoS 由 VPS 自己扛
+- **cookie 功能**（admin 后台 / 分享）：api 反代用 workers.dev 的 Host，cookie domain 可能受影响；nginx 已传 `X-Forwarded-Host: api.ai-feeds.com` 备用，异常时 BE 读它修
+- **数据仍回源海外**：api 是动态请求，香港只优化「大陆→香港」这段；「香港→CF Worker」那段仍走海外（已是服务器间高速链路，比大陆直连 CF 快）
+
+**🔙 回滚（退回全走 CF，今天之前状态）**：
+1. **前端**：CF DNS 删 `ai-feeds.com` / `www` 的 A 记录 → Pages 项目 `xlist-dashboard` 重新加 custom domain `ai-feeds.com` + `www`（CF 自动重建 CNAME 橙云）
+2. **api**：删 A 记录 → Worker `xlist-api` 重新加 custom domain `api.ai-feeds.com`
+3. **fonts**：删 A 记录 → R2 `ai-feeds-fonts` 重新加 custom domain `fonts.ai-feeds.com`
+4. 邮件 / staging 不用管（没动）
+- 原始 DNS 备份：`~/Downloads/ai-feeds-dns-backup-2026-06-02.json`；CF nameservers `ivy / james.ns.cloudflare.com`
+
+**自查命令**（验证香港中转是否正常）：
+
+```bash
+curl -sI --resolve ai-feeds.com:443:154.12.188.231     https://ai-feeds.com/
+curl -s  --resolve api.ai-feeds.com:443:154.12.188.231 "https://api.ai-feeds.com/api/items?limit=1"
+curl -sI --resolve fonts.ai-feeds.com:443:154.12.188.231 https://fonts.ai-feeds.com/hmos-bold/009b6137cf3bcf65ce3e6e2fcb4f187c.woff2
+```
 
 ### 7. CF 安全配置
 
