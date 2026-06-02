@@ -49,6 +49,10 @@ export async function selectTopForSource(
     extraWhere = 'AND is_relevant = 1';
   } else if (source === 'gh') {
     orderBy = `CAST(json_extract(metrics,'$.today_stars') AS INTEGER) DESC`;
+    // is_relevant=1 = classify-with-llm 成功且判定 AI 相关(隐含已生成 ai_summary)。
+    // 漏掉这道过滤会让非 AI 项目(如 godot 游戏引擎)+ 未分类半成品(is_relevant NULL)
+    // 因当日涨星高被选进 digest,渲染时 ai_summary 空 → 邮件里只有 repo 名没简介。对齐 x/ph。
+    extraWhere = 'AND is_relevant = 1';
   } else if (source === 'ph') {
     orderBy = `json_extract(extra,'$.launch_date_pt') DESC, CAST(json_extract(extra,'$.daily_rank') AS INTEGER) ASC`;
     extraWhere = 'AND is_relevant = 1';
