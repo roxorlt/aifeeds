@@ -85,7 +85,13 @@ data = r.json()
             "url": "https://github.com/nesquena/hermes-webui",  // 原文外链
             "deep_link": "/g/nesquena/hermes-webui",     // aifeeds 站内详情路径，拼 https://ai-feeds.com 前缀即完整链接
             "author": "nesquena",
-            "cover": "https://avatars.githubusercontent.com/nesquena"  // 封面图 URL，无图时为 null
+            "cover": "https://api.ai-feeds.com/r/gh/nesquena/hermes-webui/hero.png",  // 流内封面(=media 第一张实质图)，无图 null
+            "logo": null,                                // 品牌 logo/icon：仅 PH 产品有值，其他源多为 null
+            "media": [                                   // 详情页所有图片+视频(尽可能多)；logo 不在内；无媒体为 []
+              { "type": "image", "url": "https://api.ai-feeds.com/r/gh/nesquena/hermes-webui/p1.png" },
+              { "type": "image", "url": "https://api.ai-feeds.com/r/gh/nesquena/hermes-webui/p2.png" }
+              // 视频项格式：{ "type": "video", "url": "<mp4或youtube链接>", "poster": "<封面缩略图>" }
+            ]
           }
         ]
       }
@@ -97,15 +103,19 @@ data = r.json()
 ## 注意事项
 
 1. 遍历顺序按 `meta.source_order`；每个 source 段里 `items` 已按 `rank` 升序（1 最热）。
-2. `cover` 可能为 `null`（动态 `x` 和龙虾技能 `clawhub` 没有合适封面时留空），渲染时要判空。
-3. `deep_link` 是站内相对路径：要跳 aifeeds 详情页就拼成 `https://ai-feeds.com` + `deep_link`；要跳原文用 `url`。
+2. **`cover` / `logo` / `media` 三者分工**：`cover` 是流内卡片封面(通常 = `media` 第一张实质图)，单图、可为 `null`；`logo` 是品牌图标/icon，**仅 PH 产品有值**，其他源多为 `null`(故意不放人头像/org 头像)；`media` 是详情页**所有**图片+视频数组(尽可能多)，logo 不含在内，无媒体时为 `[]`。
+3. **`media` 项格式**：图片 `{ "type": "image", "url": "..." }`；视频 `{ "type": "video", "url": "<mp4或youtube>", "poster": "<封面缩略图>" }`。相对路径(`/r/...`)的 `url`/`poster` 已拼成 `https://api.ai-feeds.com` 完整 URL，可直接用。各源 media 来源：PH=产品截图+视频 / GitHub=README 内所有图 / 论文=社交卡图+论文配图 / X=推文附图+视频 / 龙虾技能=无(空数组)。
+4. `cover`/`logo`/`media` 的图都可能为空，渲染时判空。
+5. `deep_link` 是站内相对路径：要跳 aifeeds 详情页就拼成 `https://ai-feeds.com` + `deep_link`；要跳原文用 `url`。
 4. 论文（`hf-paper`）这一段有时为空（数据时间窗原因），属正常，按「该源无内容」处理即可。
 5. 同样参数 **15 分钟内返回缓存**（响应头 `X-Cache: HIT` 表示命中）。高频重复调用不会拿到更新数据、也不重复消耗算力——定时取（每天几次）即可。
 6. `density=curated` 或 `both` 会触发 AI 实时精选，单次响应约 8 秒，**请求超时给到 30 秒以上**。
 
 ## 设计说明（维护者向）
 
-- 实现：`worker/src/digest/daily-api.ts`（handler）+ `worker/src/digest/render.ts`（渲染纯函数：rank / cover / 中文 title-summary）。
+- 实现：`worker/src/digest/daily-api.ts`（handler）+ `worker/src/digest/render.ts`（渲染纯函数：rank / cover / logo / media / 中文 title-summary）。
 - 选品复用 `selection.ts`（normal 纯 SQL 热度排序）+ `llm-curate.ts`（curated 走 DeepSeek）。
 - 缓存走 `AUTH_KV`，key 形如 `digestapi:v1:<density>:<sources>:<15min窗口>`，TTL 900s；`verbose` 不缓存。
-- cover 取值规则：`ph`=媒体 logo（R2 路径拼 `API_BASE`）/ `gh`=`avatars.githubusercontent.com/{owner}` / `hf-paper`=社交缩略图 / `x`=推文附图（无图 null，不用头像）/ `clawhub`=null（不用头像）。
+- **cover 取值**（流内封面，单图）：`ph`=第一张非 logo 截图 / `gh`=README 第一张非 badge 图 / `hf-paper`=社交缩略图 / `x`=推文附图或视频 poster / `clawhub`=null。均不取头像/logo/icon。
+- **logo 取值**：`ph`=media 里 `role=logo` 的产品图标；其余源 null。
+- **media 取值**（详情页全部）：`ph`=所有非 logo 截图+视频 / `gh`=`resolveReadmeImages` 抽 README 全部非 badge 图 / `hf-paper`=media 图+`extra.figure_image` / `x`=推文图+视频 / `clawhub`=[]。按 url 去重。
