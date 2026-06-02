@@ -2,6 +2,7 @@
 // 设计参考：docs/plans/2026-05-06-email-auth-design.md § 4.2
 
 import type { Env } from '../index';
+import { getClientIp } from '../client-ip';
 import { verifyTurnstile } from './turnstile';
 import {
   EMAIL_REGEX,
@@ -35,10 +36,6 @@ function jsonErr(message: string, status: number, extra: Record<string, unknown>
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-}
-
-function getClientIp(req: Request): string {
-  return req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || '0.0.0.0';
 }
 
 interface EmailSendBody {
@@ -75,7 +72,7 @@ export async function handleEmailSend(
   const email = normalizeEmail(body.email);
   if (!EMAIL_REGEX.test(email)) return jsonErr('invalid email', 400);
 
-  const ip = getClientIp(request);
+  const ip = getClientIp(request, env);
   const ua = request.headers.get('User-Agent') || '';
   const now = Date.now();
 

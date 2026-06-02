@@ -2,6 +2,7 @@
 // 设计参考：docs/plans/2026-05-01-auth-system-design.md § 9 + § 6
 
 import type { Env } from '../index';
+import { getClientIp } from '../client-ip';
 import { nanoid } from 'nanoid';
 import { verifyTurnstile } from './turnstile';
 import {
@@ -39,10 +40,6 @@ function jsonErr(message: string, status: number, extra: Record<string, unknown>
   });
 }
 
-function getClientIp(req: Request): string {
-  return req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || '0.0.0.0';
-}
-
 const PHONE_REGEX = /^1[3-9]\d{9}$/;  // 大陆 11 位手机号
 
 // ─── POST /api/auth/sms/send ──────────────────────────────
@@ -76,7 +73,7 @@ export async function handleSmsSend(
     return jsonErr('invalid phone', 400);
   }
 
-  const ip = getClientIp(request);
+  const ip = getClientIp(request, env);
   const ua = request.headers.get('User-Agent') || '';
 
   // 2. Turnstile 校验（dev secret 缺失时 bypass）
@@ -254,7 +251,7 @@ export async function handleLogin(
     return jsonErr('invalid code format', 400);
   }
 
-  const ip = getClientIp(request);
+  const ip = getClientIp(request, env);
   const ua = request.headers.get('User-Agent') || '';
   const now = Date.now();
 

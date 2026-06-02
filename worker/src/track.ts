@@ -2,6 +2,7 @@
 // 设计：docs/plans/2026-05-01-auth-system-design.md § 9.2 + § 3.5
 
 import type { Env } from './index';
+import { getClientIp } from './client-ip';
 
 // 与 dashboard/src/lib/telemetry/event-types.ts 保持一致
 // 任一端新增事件类型时两边都要改
@@ -76,7 +77,7 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
   }
 
   // 4. 抽出 IP / UA / Referer (从请求 headers)
-  const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '';
+  const ip = getClientIp(request, env);
   const ua = request.headers.get('User-Agent') || '';
   const referer = request.headers.get('Referer') || '';
   const ingestedAt = Date.now();

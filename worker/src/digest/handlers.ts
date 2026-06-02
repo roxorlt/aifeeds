@@ -3,6 +3,7 @@
 // 契约:设计文档「API 契约(FE ↔ BE 对齐)」节。
 
 import type { Env } from '../index';
+import { getClientIp } from '../client-ip';
 import { verifyTurnstile } from '../auth/turnstile';
 import { EMAIL_REGEX, normalizeEmail } from '../auth/email-validation';
 import { authenticate } from '../auth/session';
@@ -30,10 +31,6 @@ function jok(data: Record<string, unknown> = {}): Response {
 function jerr(code: string, status = 400): Response {
   return jsonResp({ ok: false, code }, status);
 }
-function clientIp(req: Request): string {
-  return req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || '0.0.0.0';
-}
-
 // 该 user 绑定的 email(用于登录态关联订阅;订阅表以 email 为稳定键,user_id 后填)
 async function getUserEmail(env: Env, userId: string): Promise<string | null> {
   const row = await env.DB.prepare(
@@ -144,7 +141,7 @@ export async function handleSubscribe(
   if (!isValidSources(body.sources)) return jerr('invalid_sources');
   if (!isValidSlot(body.send_slot)) return jerr('invalid_slot');
 
-  const ip = clientIp(request);
+  const ip = getClientIp(request, env);
   const tsOk = await verifyTurnstile(env, typeof body.turnstile_token === 'string' ? body.turnstile_token : null, ip);
   if (!tsOk) return jerr('turnstile_failed', 403);
 
