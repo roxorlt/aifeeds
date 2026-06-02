@@ -22,10 +22,13 @@ const SWIPE_COMMIT_PX = 80; // dx threshold to commit close
 const SWIPE_ANIM_MS = 200;
 
 export function TweetDrawer() {
-  const { state, close } = useDrawer();
+  const { state, close, depth } = useDrawer();
   const { item, siblings, siblings_has_more, loading, error } = state;
   const open = Boolean(item) || loading || Boolean(error);
   const isNarrow = useIsNarrow();
+  // 顶栏左上：抽屉内下钻（depth>0，如点进 PH「同类产品」）→ 显示「←」返回上一条；
+  // 否则保持原行为（窄屏「‹」返回流内、宽屏「✕」关闭）。
+  const showBack = isNarrow || depth > 0;
   const targetRef = useRef<HTMLDivElement | null>(null);
 
   // Scroll the URL-targeted tweet into view when opening into a thread where
@@ -458,9 +461,9 @@ export function TweetDrawer() {
               type="button"
               onClick={close}
               className="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
-              aria-label={isNarrow ? "返回" : "关闭"}
+              aria-label={showBack ? "返回" : "关闭"}
             >
-              {isNarrow ? (
+              {showBack ? (
                 <span className="text-2xl leading-none">‹</span>
               ) : (
                 <span className="text-base leading-none">✕</span>

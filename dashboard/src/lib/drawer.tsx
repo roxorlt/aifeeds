@@ -27,7 +27,13 @@ interface DrawerContextValue {
   // to openTweet (URL → /t/:id); for GitHub items it sets state directly until
   // PR-5 wires /g/:owner/:repo. Either way the drawer renders.
   openItem: (item: Item, siblings?: Item[]) => void;
+  // 抽屉内下钻打开另一条（如 PH「同类产品」）：覆盖式压栈，新页顶栏显示「←」返回
+  // 而非「✕」，返回回到上一条。深度记在 history state（drawerDepth），浏览器前进/
+  // 后退天然同步。覆盖打开不走 spotlight（不向流内插该条）。
+  pushItem: (item: Item) => void;
   close: () => void;
+  /** 抽屉下钻深度：0=根层（流内/冷链打开），>0=覆盖下钻层。驱动顶栏 ←/✕。 */
+  depth: number;
   // Spotlight: latest item the user opened via /t/:id (cold link or in-app
   // click). Feed prepends this to its data with dedup, so closing the drawer
   // doesn't leave the user without the tweet they just shared/landed on.
@@ -81,6 +87,32 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
   return null;
 }
 
+// item → 抽屉 deep-link 路径（跟 parseDeepLinkFromPath 互逆）。openItem / pushItem 共用。
+function urlForItem(item: Item): string | null {
+  switch (item.source_type) {
+    case "x_list":
+      return `/t/${encodeURIComponent(item.source_id)}`;
+    case "github": {
+      // /g/:owner/:repo（两段，跟 github.com URL 同形）
+      const [owner, repo] = item.source_id.split("/");
+      return owner && repo ? `/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` : null;
+    }
+    case "product_hunt": {
+      // /ph/:slug/:date — source_id 是 <slug>:<launch_date> 复合键
+      const [slug, date] = item.source_id.split(":");
+      return slug && date ? `/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}` : null;
+    }
+    case "clawhub":
+      return `/c/${encodeURIComponent(item.source_id)}`;
+    case "huodongxing":
+      return `/e/${encodeURIComponent(item.source_id)}`;
+    case "hf_paper":
+      return `/h/${encodeURIComponent(item.source_id)}`;
+    default:
+      return null;
+  }
+}
+
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DrawerState>({
     item: null,
@@ -96,6 +128,9 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   const clearSpotlight = useCallback(() => setSpotlightItem(null), []);
   const navigate = useNavigate();
   const location = useLocation();
+  // 抽屉下钻深度：存在 history state 里，浏览器前进/后退天然带着走。
+  // 驱动顶栏 ←/✕ 切换 + 覆盖层不插 spotlight。
+  const depth = (location.state as { drawerDepth?: number } | null)?.drawerDepth ?? 0;
 
   // Track which composite id is currently shown / being fetched, to dedupe
   // URL-effect work when the cache was just primed by openTweet().
@@ -119,33 +154,25 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       setState({ item, siblings, loading: false, error: null });
       // B2: 同 openTweet 不强插 spotlight
       activeIdRef.current = item.id;
-      if (item.source_type === "x_list") {
-        navigate(`/t/${encodeURIComponent(item.source_id)}`);
-      } else if (item.source_type === "github") {
-        // /g/:owner/:repo (two segments — same shape as github.com URLs)
-        const [owner, repo] = item.source_id.split("/");
-        if (owner && repo) {
-          navigate(`/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
-        }
-      } else if (item.source_type === "product_hunt") {
-        // /ph/:slug/:date — source_id 是 <slug>:<launch_date> 复合键
-        const [slug, date] = item.source_id.split(":");
-        if (slug && date) {
-          navigate(`/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}`);
-        }
-      } else if (item.source_type === "clawhub") {
-        // /c/:slug — source_id 是 skill slug（单段）
-        navigate(`/c/${encodeURIComponent(item.source_id)}`);
-      } else if (item.source_type === "huodongxing") {
-        // /e/:event_id — source_id 是站点原始数字 ID（如 5859894940100）
-        navigate(`/e/${encodeURIComponent(item.source_id)}`);
-      } else if (item.source_type === "hf_paper") {
-        // /h/:arxiv_id — source_id 是 arxiv id（如 2605.13301）
-        navigate(`/h/${encodeURIComponent(item.source_id)}`);
-      }
-      // Future sources: youtube / podcast / arxiv — add URL forms here.
+      const url = urlForItem(item);
+      if (url) navigate(url);
+      // Future sources: youtube / podcast / arxiv — 在 urlForItem 里补 URL 形式。
     },
     [navigate],
+  );
+
+  // 覆盖式下钻：压栈打开 item（history state drawerDepth +1），顶栏显示「←」。
+  // 跟 openItem 一样 optimistic + 预设 activeIdRef → URL effect early-return，
+  // 所以不会触发 fetch / spotlight（覆盖层不向流内插该条，满足「不插流」要求）。
+  const pushItem = useCallback(
+    (item: Item) => {
+      const url = urlForItem(item);
+      if (!url) return;
+      setState({ item, siblings: [], loading: false, error: null });
+      activeIdRef.current = item.id;
+      navigate(url, { state: { drawerDepth: depth + 1 } });
+    },
+    [navigate, depth],
   );
 
   const close = useCallback(() => {
@@ -184,14 +211,16 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       .then(({ item, siblings, siblings_has_more }) => {
         if (activeIdRef.current !== compositeId) return;
         setState({ item, siblings, siblings_has_more, loading: false, error: null });
-        setSpotlightItem(item);
+        // 只有根层（depth 0：冷链 / 直接访问）才向流内插该条；覆盖下钻层（depth>0）不插。
+        if (depth === 0) setSpotlightItem(item);
       })
       .catch((err: unknown) => {
         if (activeIdRef.current !== compositeId) return;
         const code = err instanceof ItemNotFoundError ? "not_found" : "network";
         setState({ item: null, siblings: [], loading: false, error: code });
       });
-  }, [location.pathname]);
+  // depth 进依赖：back 到不同 depth 的条目时正确重算 spotlight 门控
+  }, [location.pathname, depth]);
 
   // itemUpdateBus 订阅：外部（如 TweetCard 译文按钮触发 translate-now）更新某 item
   // 后 dispatch，drawer 内若当前正显示该 item 则同步更新 state.item，保证抽屉视图实时刷新。
@@ -293,7 +322,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   }, [state.item?.id]);
 
   return (
-    <DrawerContext.Provider value={{ state, openTweet, openItem, close, spotlightItem, clearSpotlight }}>
+    <DrawerContext.Provider value={{ state, openTweet, openItem, pushItem, close, depth, spotlightItem, clearSpotlight }}>
       {children}
     </DrawerContext.Provider>
   );

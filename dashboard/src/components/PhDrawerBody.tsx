@@ -527,7 +527,7 @@ export function PhDrawerBody({ item }: Props) {
               <div className="mb-2 text-[13px] font-medium text-neutral-500">同类产品</div>
               <div className="space-y-0.5">
                 {related.map((r) => (
-                  <RelatedPhRow key={r.id} item={r} onOpen={() => drawer.openItem(r)} />
+                  <RelatedPhRow key={r.id} item={r} onOpen={() => drawer.pushItem(r)} />
                 ))}
               </div>
             </>
