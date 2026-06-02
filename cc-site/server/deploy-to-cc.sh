@@ -92,7 +92,8 @@ scp -i "$KEY" "$TMP_ENV" "$HOST:/tmp/relay.env.tmp" >/dev/null 2>&1
 rm -f "$TMP_ENV"
 ssh_q 'sudo mv /tmp/relay.env.tmp /etc/aifeeds/relay.env
   sudo chmod 600 /etc/aifeeds/relay.env && sudo chown root:root /etc/aifeeds/relay.env
-  echo "relay.env 落位（$(sudo wc -l < /etc/aifeeds/relay.env) 行，权限 $(sudo stat -c %a /etc/aifeeds/relay.env)）"'
+  # wc 用文件参数而非 < 重定向（重定向是非 root shell 打开文件，600 root 会 Permission denied）
+  echo "relay.env 落位（$(sudo wc -l /etc/aifeeds/relay.env | awk "{print \$1}") 行，权限 $(sudo stat -c %a /etc/aifeeds/relay.env)）"'
 
 echo ""
 echo "═══ 5. systemd 守护 + 开机自启 ═══"

@@ -4,7 +4,7 @@
 // 两个路由（nginx 反代 /auth/wechat/* → 本进程 127.0.0.1:PORT）：
 //   GET /auth/wechat/start    生成飞行态 cookie + 302 到微信扫码页
 //   GET /auth/wechat/callback 验 state + 换 openid + 调 worker exchange + 302 回 .com
-//   GET /auth/wechat/health   健康检查（PM2 / 监控用）
+//   GET /auth/wechat/health   健康检查（systemd / 监控用）
 //
 // state 处理：微信 state 有长度限制，故只放短 nonce；return_to / device_id 放
 // 签名 cookie（.cc 域，SameSite=Lax，5min）。回调时 cookie.nonce === state 做 CSRF。

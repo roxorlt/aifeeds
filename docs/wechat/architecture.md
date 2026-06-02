@@ -121,7 +121,7 @@ ai-feeds.com  →  open.weixin.qq.com  →  ai-feeds.cc (闪过 100ms)  →  ai-
 允许跨站顶级 GET 携带 cookie，所以回调能读到。服务端**仍无状态**（不存 session / 不写 DB），
 重启不丢正在进行的登录以外的任何东西（飞行中的那个登录失败用户重试即可）。
 
-**单实例约束**：code 去重用进程内存 Map（架构 §5b 已注明 PM2 单实例）。飞行态本身在
+**单实例约束**：code 去重用进程内存 Map（systemd 单实例运行）。飞行态本身在
 cookie 里（无状态），但 code 去重表在内存；多实例需换共享存储，当前单实例够用。
 
 ## 5. 互信 HMAC 设计（`.cc` ↔ worker）
@@ -242,23 +242,38 @@ relay 失败时一律 `302 → ai-feeds.com/login?error=<code>` + 清 `wx_oauth`
 
 - [x] `cc-site/server/`：**零依赖 Node**（非 Express）+ 2 路由 + 签名 cookie 飞行态 + bridge HMAC + code 去重
 - [x] state 用签名 cookie（避微信 state 长度限制）+ bridge HMAC（与 worker 交叉验证通过）
-- [x] `ecosystem.config.cjs`（PM2）+ `nginx-auth-wechat.conf`（反代 + 限流）+ `fail2ban-aifeeds-relay.conf`
-- [x] `cc-site/deploy.sh` 加 `server` / `all` 模式（sync + pm2 reload）
+- [x] `aifeeds-cc-relay.service`（systemd，非 pm2）+ `nginx-auth-wechat.conf`（反代 + 限流）+ `fail2ban-aifeeds-relay.conf`
+- [x] `deploy-to-cc.sh`：Mac 一键部署（装 Node 18 + 专用用户 + 代码到 /opt + secret + systemd + 健康检查）
 - [x] 本地冒烟 21/21 通过
-- [ ] **部署到 .cc 服务器**（手动一次性：装 Node/pm2 + `/etc/aifeeds/relay.env` + nginx + fail2ban，见 `cc-site/server/README.md`）—— **需要正式 AppID/AppSecret + 微信审核通过**
-- [ ] 服务器加固落地（fail2ban / ufw / secret 600，见 README §🛡️）
+- [x] **2026-06-02 部署到 .cc 服务器 + 真实微信扫码端到端通过**（昵称「刘彤」+ 头像落库，staging 库建用户，session 有效）
+- [ ] 服务器加固落地（nginx 限流 + fail2ban，链路验通后补，见 README §🛡️）
 
 ### 9.3 dashboard（`ai-feeds.com`）— PR3 待开
 
-- [ ] 登录弹窗加「微信登录」按钮（lucide icon + 微信品牌色 #07C160）
-- [ ] 点击 → `window.location.href = 'https://ai-feeds.cc/auth/wechat/start?return_to=' + encodeURIComponent(location.href) + '&device_id=' + deviceId`
-- [ ] 新增路由 `/auth/callback?session=...&return_to=...`：解 session_token → 写 cookie（与现有 email auth 同机制） → `location.replace(return_to)`
+**登录方式路由矩阵**（2026-06-02 PM 定，PR3 核心）：
+
+| 环境 | 检测 | 登录方式 | turnstile |
+|------|------|---------|-----------|
+| 微信内置浏览器 | UA 含 `MicroMessenger` | 微信登录（⚠️ 需公众号网页授权，见下注，PR4） | ❌ 去掉 |
+| PC + 大陆 IP | 桌面 UA + 大陆 IP | **微信扫码登录**（本方案，PR1+2 已通） | ❌ 微信登录不需要 |
+| PC + 非大陆 IP | 桌面 UA + 非大陆 IP | 邮箱验证码 | ✅ |
+| 移动端 + 非微信浏览器 | 移动 UA + 非 MicroMessenger | 邮箱验证码 | ✅ |
+
+> ⚠️ **微信内置浏览器那一支（5.1）≠ 本方案**：网站应用 qrconnect（PC 扫码 snsapi_login）在微信内浏览器用不了。微信内登录需「公众号网页授权」（`oauth2/authorize` + `snsapi_userinfo`），是另一套流程 + 需要**服务号**（网页授权域名 = ai-feeds.cc）。两者同开放平台账号下共享 unionid → 同一用户（`identity_value=unionid` 已兼容）。**PR3 先做 PC + 移动端路由 + PC 扫码；微信内浏览器这支等服务号到位再补（PR4），当前保留「请用 Safari 打开」提示兜底。**
+>
+> IP 归属判定：大陆 vs 非大陆，可用 CF `request.cf.country === 'CN'`（worker 透传给前端）或前端 IP 库。香港中转后真实 IP 取法见 [`../operations.md`](../operations.md) §6b。
+
+PR3 实施项：
+- [ ] 环境检测工具：`isWechatBrowser()` / `isMobile()` / `isMainlandIP()`（country 从 worker 透传）
+- [ ] 登录弹窗按矩阵路由：微信登录按钮（绿 #07C160 + lucide）vs 邮箱验证码（带 turnstile）
+- [ ] 微信按钮点击 → `https://ai-feeds.cc/auth/wechat/start?return_to=<当前页>&device_id=<did>`
+- [ ] 新增路由 `/auth/callback?session=...&return_to=...`：解 session_token → 写 cookie（与现有 email auth 同机制）→ `location.replace(return_to)`
 - [ ] `/login?error=...`：解 error code 显示中文提示（错误码见 §7 + relay errorRedirect）
 
 ### 9.4 可观测性
 
 - [ ] worker 端打点：`wechat_exchange_success/failure_total{reason}`（CF Analytics Engine）
-- [ ] `.cc` 端 access log + PM2 logs 滚动
+- [ ] `.cc` 端 access log + journald（`journalctl -u aifeeds-cc-relay`）
 - [ ] 监控告警：`.cc` 进程 down / nginx 5xx 飙升 → PushDeer
 
 ## 10. FAQ（澄清常见误解）

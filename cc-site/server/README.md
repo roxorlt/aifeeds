@@ -19,10 +19,14 @@
 | `lib/crypto.mjs` | 飞行态 cookie 签名/验签 + bridge HMAC + sha256 |
 | `lib/wechat.mjs` | 微信 API：qrconnect URL / code→openid / userinfo |
 | `test/smoke.mjs` | 本地冒烟（crypto + 路由 + 错误路径，21 项） |
-| `ecosystem.config.cjs` | PM2 守护配置 |
+| `deploy-to-cc.sh` | **一键部署**（Mac 上跑，SSH 完成全部安装/配置） |
+| `aifeeds-cc-relay.service` | systemd 单元（守护 + 开机自启 + 加固） |
 | `nginx-auth-wechat.conf` | nginx 反代 + 限流片段 |
 | `fail2ban-aifeeds-relay.conf` | fail2ban jail（与香港 VPS 对齐） |
 | `.env.example` | 环境变量样例 |
+
+> 进程管理用 **systemd**（非 pm2）：零依赖服务更轻，systemd 原生开机自启 + 沙箱加固。
+> 代码部署在 `/opt/aifeeds-cc-relay`（web 根目录外，nginx 不会吐源码）。
 
 ## 状态处理（为什么用 cookie 不用 state）
 
@@ -35,53 +39,45 @@
 
 ## 部署步骤（腾讯云 .cc 服务器）
 
-### 1. 装 Node（宝塔软件商店 或 nvm）
+### 1. 一键部署（在 Mac 上跑）
 
 ```bash
-node -v   # 确认 ≥ 18，没有就装
-npm i -g pm2
+# 自动 SSH 到 .cc：装 Node 18 + 建专用用户 + 传代码到 /opt + 写 secret + systemd + 健康检查
+./cc-site/server/deploy-to-cc.sh staging   # 先指向 staging worker 试链路
+# 验通后切 prod：
+./cc-site/server/deploy-to-cc.sh prod
 ```
 
-### 2. 上传代码
+脚本从本地 `.secrets/aifeeds-{prod,staging}.env` 读 secret（加密传输、不打印），
+`STATE_SECRET` 自动随机生成。无需手动 ssh / 填 env。
 
-```bash
-# 本地（仓库根）：把 server/ 传到站点目录
-cd cc-site && ./deploy.sh     # deploy.sh 已含 server/ 同步 + pm2 reload（见下方「自动部署」）
-# 或手动 scp 整个 cc-site/server → /www/wwwroot/ai-feeds.cc/server
+实际落点（脚本自动完成）：
+- 代码 → `/opt/aifeeds-cc-relay/`（web 根目录外）
+- secret → `/etc/aifeeds/relay.env`（600 root，systemd EnvironmentFile 注入）
+- 守护 → systemd `aifeeds-cc-relay.service`（开机自启 + 沙箱加固）
+- 运行用户 → `aifeeds-relay`（非 root 专用系统用户）
+
+### 2. 配 nginx 反代（`/auth/wechat/*` → 127.0.0.1:3001）
+
+把下面这段加进 ai-feeds.cc 的 server 块（宝塔站点配置 `html_ai-feeds.cc.conf` 的
+`#REWRITE-END` 之后，或宝塔「网站→设置→配置文件」里）：
+
+```nginx
+location ^~ /auth/wechat/ {
+    proxy_pass http://127.0.0.1:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 15s;
+    add_header Cache-Control "no-store" always;
+}
 ```
 
-### 3. 配 secret（不进 git / web root）
+`nginx -t && nginx -s reload`。限流（limit_req）+ fail2ban 是加固项，链路验通后补（见 §🛡️ + `nginx-auth-wechat.conf`）。
 
-```bash
-sudo mkdir -p /etc/aifeeds
-sudo cp /www/wwwroot/ai-feeds.cc/server/.env.example /etc/aifeeds/relay.env
-sudo vim /etc/aifeeds/relay.env      # 填 WECHAT_OPEN_APP_ID / SECRET / BRIDGE_SECRET / STATE_SECRET
-sudo chmod 600 /etc/aifeeds/relay.env
-sudo chown root:root /etc/aifeeds/relay.env
-```
-
-- `WECHAT_OPEN_APP_ID` / `WECHAT_OPEN_APP_SECRET`：微信开放平台网站应用凭据
-- `BRIDGE_SECRET`：**必须与 worker 的 `BRIDGE_SECRET` 一致**（prod 用 prod 值，见 `.secrets/aifeeds-prod.env`）
-- `STATE_SECRET`：随机 `openssl rand -hex 32`（仅 .cc 自用）
-
-### 4. 起进程
-
-```bash
-sudo mkdir -p /var/log/aifeeds-cc-relay
-cd /www/wwwroot/ai-feeds.cc/server
-pm2 start ecosystem.config.cjs
-pm2 save                              # 存进程列表
-pm2 startup                           # 生成开机自启（按提示跑它输出的命令）
-curl -s http://127.0.0.1:3001/auth/wechat/health    # → ok
-```
-
-### 5. 配 nginx（见 `nginx-auth-wechat.conf` 内注释）
-
-- **A 段** limit_req_zone → `/www/server/nginx/conf/conf.d/aifeeds-relay.conf`
-- **B 段** location → 宝塔「网站 → ai-feeds.cc → 设置 → 配置文件」的 `server{}` 内
-- `nginx -t && systemctl reload nginx`
-
-### 6. 确认微信开放平台「授权回调域名」= `ai-feeds.cc`
+### 3. 确认微信开放平台「授权回调域名」= `ai-feeds.cc`
 
 （裸域，不带 https://、不带路径——见 architecture.md §Q7）
 
@@ -106,14 +102,14 @@ curl -s http://127.0.0.1:3001/auth/wechat/health    # → ok
 ## 验证
 
 ```bash
-# 1. 进程健康
+# 1. 进程健康（本地）
 curl -s http://127.0.0.1:3001/auth/wechat/health      # ok
 
-# 2. /start 重定向（应 302 到 open.weixin.qq.com，且 Set-Cookie wx_oauth）
+# 2. /start 重定向（经 nginx 公网，应 302 到 open.weixin.qq.com + Set-Cookie wx_oauth）
 curl -sI "https://ai-feeds.cc/auth/wechat/start?return_to=https%3A%2F%2Fai-feeds.com%2Ffeed" | grep -iE "location|set-cookie"
 
 # 3. 本地冒烟（crypto + 路由，21 项）
-cd /www/wwwroot/ai-feeds.cc/server && node test/smoke.mjs
+cd /opt/aifeeds-cc-relay && node test/smoke.mjs
 
 # 4. 真实扫码：浏览器开上面的 start URL → 微信扫码 → 看是否跳回 ai-feeds.com/auth/callback?session=...
 ```
@@ -121,15 +117,14 @@ cd /www/wwwroot/ai-feeds.cc/server && node test/smoke.mjs
 ## 运维
 
 ```bash
-pm2 logs aifeeds-cc-relay            # 看日志
-pm2 restart aifeeds-cc-relay         # 重启
-pm2 reload aifeeds-cc-relay          # 0 停机重载（改 secret 后）
-fail2ban-client status nginx-limit-req-cc          # 看封了谁
+journalctl -u aifeeds-cc-relay -f         # 看日志（实时）
+journalctl -u aifeeds-cc-relay -n 50      # 最近 50 行
+sudo systemctl restart aifeeds-cc-relay   # 重启（改代码 / 改 secret 后）
+sudo systemctl status aifeeds-cc-relay    # 状态
+fail2ban-client status nginx-limit-req-cc # 看封了谁（加固后）
 fail2ban-client set nginx-limit-req-cc unbanip <IP>  # 解封误伤
 ```
 
-**回滚（关掉微信登录）**：worker 侧 `wrangler secret put ENABLE_WECHAT_LOGIN`（设 `false`）即可让 exchange 返 503；或 `pm2 stop aifeeds-cc-relay` 让 `/start` 502（前端 fallback email 登录）。
+**回滚（关掉微信登录）**：worker 侧 `wrangler secret put ENABLE_WECHAT_LOGIN`（设 `false`）让 exchange 返 503；或 `sudo systemctl stop aifeeds-cc-relay` 让 `/start` 502（前端 fallback email 登录）。
 
-## staging 联调
-
-`/etc/aifeeds/relay.env` 里把 `WORKER_EXCHANGE_URL` 改成 `https://staging-api.ai-feeds.com/api/auth/wechat/exchange`（staging 回源 gate 关闭，可直连），`BRIDGE_SECRET` 用 staging 值。联调完改回 prod。
+**改 secret / 切 staging↔prod worker**：编辑 `/etc/aifeeds/relay.env`（`WORKER_EXCHANGE_URL` + 对应 `BRIDGE_SECRET`）→ `sudo systemctl restart aifeeds-cc-relay`。或直接重跑 `deploy-to-cc.sh staging|prod`（注意会重生成 STATE_SECRET，使飞行中的登录失效，无害）。
