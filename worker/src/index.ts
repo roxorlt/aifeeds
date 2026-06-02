@@ -17,6 +17,7 @@ import {
   runListPollIngest,
   drainPendingWorkflowQueue,
   runLongformViaSb,
+  runRetweetLongformBackfill,
   runClassifyPending,
   runBackfillVideoMp4,
   runPhEnrich,
@@ -3709,6 +3710,16 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     // 跳过 backfill-retweet 的历史数据(P0 fix 后无法通过 workflow 路径修)。
     const recover = url.searchParams.get('recover') === '1';
     const result = await runBackfillRetweets(env, limit, rateSleepMs, recover);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'retweet-longform-backfill') {
+    // 2026-06-02 转推长推截断存量修复:用被转推原推 id 去 SB 拿全文(复用 fetchLongformViaScrapeBadger)
+    // + preserveIsRelevant 重翻。SB 5 req/min,默认 limit 5,反复调直到 selected=0。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '5'), 1),
+      50,
+    );
+    const result = await runRetweetLongformBackfill(env, limit);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
