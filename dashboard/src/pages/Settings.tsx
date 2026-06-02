@@ -54,7 +54,10 @@ export function Settings() {
                 <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-500">默认</span>
               )}
             </div>
-            <div className="font-mono text-sm text-neutral-500">{user.phone_masked || 'xxx****xxxx'}</div>
+            {/* 脱敏标识：手机/邮箱用户显示脱敏号；微信用户无脱敏标识则不展示该行 */}
+            {user.identity_masked && (
+              <div className="font-mono text-sm text-neutral-500">{user.identity_masked}</div>
+            )}
           </div>
           <button
             type="button"

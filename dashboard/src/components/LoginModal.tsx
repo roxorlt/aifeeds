@@ -289,6 +289,8 @@ export function LoginModal() {
           </div>
         )}
 
+        {/* 固定最小高度，切换 tab 时减少弹窗高度跳动 */}
+        <div className="min-h-[268px]">
         {activeTab === 'wechat' ? (
           /* ── 微信登录面板 ── */
           <div>
@@ -321,9 +323,6 @@ export function LoginModal() {
               <WechatIcon className="h-5 w-5" />
               微信登录
             </button>
-            <p className="mt-3 text-center text-xs text-neutral-500">
-              {wechatOnly ? '在浏览器中打开后，用微信扫码即可登录' : '将跳转到微信，扫码授权后自动返回'}
-            </p>
           </div>
         ) : (
           /* ── 邮箱登录面板 ── */
@@ -383,6 +382,7 @@ export function LoginModal() {
             </button>
           </div>
         )}
+        </div>
 
         <p className="mt-4 text-center text-[11px] text-neutral-500">
           登录即同意{' '}

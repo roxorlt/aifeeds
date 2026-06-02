@@ -29,7 +29,8 @@ export function AccountManage() {
         <div className="flex items-center justify-between gap-3 px-4 py-3">
           <span className="text-sm text-neutral-700">手机号</span>
           <div className="flex items-center gap-3">
-            <span className="font-mono text-sm text-neutral-500">{user.phone_masked || 'xxx****xxxx'}</span>
+            {/* 手机号专属行：phone 用户显示脱敏号；微信/邮箱用户无手机号 → 未绑定（不再假占位） */}
+            <span className="font-mono text-sm text-neutral-500">{user.phone_masked || '未绑定'}</span>
             <button
               type="button"
               onClick={() => toast.info('即将开放')}
