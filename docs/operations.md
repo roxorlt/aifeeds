@@ -1017,6 +1017,8 @@ curl -sI --resolve fonts.ai-feeds.com:443:154.12.188.231 https://fonts.ai-feeds.
 
 ### 7a. Admin 鉴权：Cloudflare Access（2026-05-17 上线 staging）
 
+> ⚠️ **2026-06-02 变更（香港中转后）**：`api.ai-feeds.com` 改走香港 VPS（绕过 CF 边缘 → CF Access 在边缘层失效，`api.ai-feeds.com/admin` 会报 `Unauthorized: missing or invalid Cf-Access JWT`）。**prod admin 入口已改为 `https://admin.ai-feeds.com/admin/dashboard`** —— 单独的橙云走 CF 域名（Worker `xlist-api` 的 custom domain），保留 CF Access 邮箱登录。worker 代码没改（验的还是同一个 aud）。详见 §6b。
+
 > **背景**：原 `/admin` + `/api/admin/*` 走 HTTP Basic Auth（`ADMIN_USER` / `ADMIN_PASS`），单因素、可爆破、密码存在 Secret 里万一泄露就完蛋。2026-05-17 起切换到 **CF Access（Zero Trust）** —— 边缘节点先拦截 + 邮箱 OTP 登录 + worker 二次校验 JWT。
 
 **架构**：
@@ -1040,7 +1042,7 @@ curl -sI --resolve fonts.ai-feeds.com:443:154.12.188.231 https://fonts.ai-feeds.
 | App name | Destinations | Policy |
 |---|---|---|
 | `aifeeds-admin-staging` | `staging-api.ai-feeds.com/admin*` + `staging-api.ai-feeds.com/api/admin/*` | Allow Emails = `ltsms86@gmail.com` |
-| `aifeeds-admin-prod` | `api.ai-feeds.com/admin*` + `api.ai-feeds.com/api/admin/*` | 同上（待创建） |
+| `aifeeds-admin-prod` | **`admin.ai-feeds.com`**（整个域名；2026-06-02 香港中转后从 `api.ai-feeds.com/admin*` 迁来，因 api 走香港绕过了边缘 Access） | Allow Emails = `ltsms86@gmail.com` |
 
 **Worker 校验逻辑**（`worker/src/admin.ts`）：
 
@@ -1053,7 +1055,7 @@ curl -sI --resolve fonts.ai-feeds.com:443:154.12.188.231 https://fonts.ai-feeds.
 | Secret | 配置方式 | 当前状态 |
 |---|---|---|
 | `CF_ACCESS_TEAM_DOMAIN` | wrangler.toml `[vars]` + `[env.staging.vars]` 明文（非敏感）| ✅ prod + staging |
-| `CF_ACCESS_AUD` | `wrangler secret put CF_ACCESS_AUD [--env staging]`（每环境对应一个 App 的 AUD tag） | ✅ staging / ⏳ prod 待配 |
+| `CF_ACCESS_AUD` | `wrangler secret put CF_ACCESS_AUD [--env staging]`（每环境对应一个 App 的 AUD tag） | ✅ staging / ✅ prod（app `aifeeds-admin-prod`，保护 `admin.ai-feeds.com`） |
 | `ADMIN_USER` / `ADMIN_PASS` | wrangler secret（保留作 fallback） | ✅ prod + staging（CF Access 稳定 1 周后可删） |
 
 **部署**：
