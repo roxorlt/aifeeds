@@ -13,9 +13,10 @@
 | `www.ai-feeds.cc` → apex 301（宝塔重定向） | ✅ | 2026-05-14 |
 | 微信开放平台企业认证 | ✅ | 2026-05-14 |
 | 微信网站应用创建 + 提审 | ⏳ 审核中 | 2026-05-14 提交 |
-| worker `POST /api/auth/wechat/exchange`（PR1） | ✅ 代码 + staging e2e 4/4 过 | 2026-05-20 |
-| `.cc` Node + Express OAuth 中转服务（PR2） | ⏳ | — |
+| worker `POST /api/auth/wechat/exchange`（PR1） | ✅ 合入 main #97 + staging e2e 4/4 | 2026-05-20 |
+| `.cc` 零依赖 Node OAuth 中转服务（PR2） | ✅ 代码 + 本地冒烟 21/21 + relay↔worker 交叉验证 | 2026-06-02 |
 | dashboard 登录入口 + `/auth/callback` 路由（PR3） | ⏳ | — |
+| `.cc` 服务器部署中转服务 | ⏳ 需正式 AppID + 微信审核过 | — |
 
 > **⚠️ 2026-06-02 香港中转加速上线后复核**：`api.ai-feeds.com` 现在走香港 VPS 反代 + 回源密钥 gate（详见 [`../operations.md`](../operations.md) §6b）。已确认本登录方案**整体仍成立、无需改动 gate**，详见下方 [§5b](#5b-与香港中转加速架构的交互2026-06-02-后)。
 
@@ -92,26 +93,36 @@ ai-feeds.com  →  open.weixin.qq.com  →  ai-feeds.cc (闪过 100ms)  →  ai-
 
 ## 4. State HMAC 设计（stateless CSRF token）
 
-`.cc` 不需要 Redis / 数据库存 state，因为 state 自带签名：
+`.cc` 不需要 Redis / 数据库存 state。但有个**实现约束**：微信 qrconnect 的 `state`
+参数有长度限制（~128 字节），塞不下完整 `return_to`。所以 PR2 实现采用**签名 cookie**
+方案——bulky 数据放 cookie，发给微信的 state 只放短 nonce：
 
 ```
-state = base64url(payload) + "." + base64url(HMAC_SHA256(secret, payload))
-payload = JSON.stringify({
-  return_to: "https://ai-feeds.com/feed",  // .com 上的原始页面
-  ts: 1715680000,                            // Unix 时间戳（秒）
-  nonce: "8f3a..."                           // 16 字节随机
-})
+/start：
+  nonce = random(16 bytes)
+  飞行态 = signFlightState({return_to, device_id, nonce, ts}, STATE_SECRET)
+         = base64url(payload) + "." + HMAC_SHA256(STATE_SECRET, payload)
+  Set-Cookie: wx_oauth=<飞行态>  (Domain=ai-feeds.cc, HttpOnly, Secure, SameSite=Lax,
+                                  Path=/auth/wechat, Max-Age=300)
+  302 → 微信 qrconnect?...&state=<nonce>     ← state 只放短 nonce
+
+/callback：
+  读 wx_oauth cookie → verifyFlightState（验签）→ 拿回 {return_to, device_id, nonce, ts}
+  校验：
+    1. cookie 验签通过（防伪造）
+    2. Date.now()/1000 - ts < 300（5 分钟窗）
+    3. cookie.nonce === 微信带回的 state（CSRF 防护）
+    4. return_to 以 https://ai-feeds.com/ 开头（防 open redirect）
+  任一失败 → 302 → ai-feeds.com/login?error=<code>
 ```
 
-回调时 `.cc` 校验：
+**为什么 cookie 能撑过微信往返**：`wx_oauth` 设在 `ai-feeds.cc` 域、`/start` 时种下；
+微信扫码后 302 回 `ai-feeds.cc/auth/wechat/callback`（同域顶级 GET 导航），SameSite=Lax
+允许跨站顶级 GET 携带 cookie，所以回调能读到。服务端**仍无状态**（不存 session / 不写 DB），
+重启不丢正在进行的登录以外的任何东西（飞行中的那个登录失败用户重试即可）。
 
-1. `payload` + 签名 → 重新计算 HMAC → 对比签名（防伪造）
-2. `Date.now()/1000 - payload.ts < 300` （5 分钟过期窗）
-3. `payload.return_to` 必须以 `https://ai-feeds.com/` 开头（防 open redirect）
-
-如果三条任一失败 → 302 跳回 `ai-feeds.com/login?error=state_expired`。
-
-**关键好处**：`.cc` 重启 / 升级 / 多实例都不丢 state，因为 state 自身就是携带验证信息的。
+**单实例约束**：code 去重用进程内存 Map（systemd 单实例运行）。飞行态本身在
+cookie 里（无状态），但 code 去重表在内存；多实例需换共享存储，当前单实例够用。
 
 ## 5. 互信 HMAC 设计（`.cc` ↔ worker）
 
@@ -186,16 +197,22 @@ worker 端校验：
 
 ## 7. 错误处理
 
-| 错误 | 何时发生 | 处理 | 用户感知 |
-|------|---------|------|---------|
-| state HMAC 校验失败 | 攻击 / 篡改 | 302 → .com/login?error=invalid_state | 提示「登录链接异常，请重试」 |
-| state 时间窗过期 | 用户停在扫码页 > 5 分钟 | 同上，error=state_expired | 提示「登录超时，请重新发起」 |
-| return_to 不在白名单 | open redirect 攻击 | 同上，error=bad_return | 提示「登录链接异常」 |
-| 微信 code 换 token 失败 | 微信侧问题 / code 重用 | 302 → .com/login?error=wechat_api | 提示「微信授权异常，请重试」 |
-| `.cc` 调 worker 失败（network/5xx） | worker 挂 / 网络不通 | 同上，error=exchange_failed | 提示「服务暂时不可用」+ fallback 入口 |
-| bridge HMAC 校验失败 | secret 不匹配 / replay | worker 返回 401，`.cc` 302 → .com/login?error=internal | 提示「系统错误」 |
+relay 失败时一律 `302 → ai-feeds.com/login?error=<code>` + 清 `wx_oauth` cookie。
+下表 `code` 为 relay 实际发出的值（`relay.mjs errorRedirect`），PR3 的 `/login` 页据此显示中文提示：
 
-`.com/login` 页面识别 `?error=` query 参数，根据 code 显示中文提示 + 提供 email auth fallback 入口。
+| error code | 何时发生 | 用户感知建议文案 |
+|------------|---------|----------------|
+| `bad_return` | return_to 不在白名单（open redirect 防护） | 登录链接异常，请重试 |
+| `wechat_denied` | 用户在微信里取消授权（无 code） | 已取消微信授权 |
+| `state_invalid` | wx_oauth cookie 缺失 / 验签失败（伪造 / 跨设备） | 登录链接异常，请重新发起 |
+| `state_expired` | 停在扫码页 > 5 分钟 | 登录超时，请重新发起 |
+| `state_mismatch` | cookie.nonce ≠ 微信带回 state（CSRF） | 登录链接异常，请重试 |
+| `code_replay` | 同一 code 5 分钟内重复回调 | 请勿重复操作，请重新登录 |
+| `wechat_api` | 微信 code 换 token 失败（code 失效 / 微信侧问题） | 微信授权异常，请重试 |
+| `exchange_failed` | 调 worker 失败 / worker 非 200（含 bridge HMAC 不匹配 401） | 服务暂时不可用，请稍后重试或用邮箱登录 |
+| `internal` | relay 未捕获异常兜底 | 系统错误，请稍后重试 |
+
+`.com/login` 页面识别 `?error=` query 参数，显示对应中文提示 + 提供 email auth fallback 入口。
 
 ## 8. 风险与缓解
 
@@ -212,35 +229,51 @@ worker 端校验：
 
 ## 9. 实施清单
 
-### 9.1 worker 端（`api.ai-feeds.com`）
+### 9.1 worker 端（`api.ai-feeds.com`）— PR1 ✅ 已合入 main（#97）
 
-- [ ] `wrangler secret put WECHAT_OPEN_APP_ID`
-- [ ] `wrangler secret put WECHAT_OPEN_APP_SECRET`
-- [ ] `wrangler secret put BRIDGE_SECRET`（与 `.cc` 共享）
-- [ ] 新增 `POST /api/auth/wechat/exchange`（30s replay 窗 + HMAC 校验 + 建 user/identity + 签 session_token）
-- [ ] `identities` 表添加 `provider='wechat'` 支持（schema 已预留）
-- [ ] `/api/auth/wechat/exchange` 限流（每 IP 每分钟 10 次）
+- [x] `wrangler secret put BRIDGE_SECRET`（staging 已配；prod 待 PR2 上线前配）
+- [x] 新增 `POST /api/auth/wechat/exchange`（30s replay 窗 + HMAC 校验 + 建 user/identity + 签 session_token）
+- [x] `identities` 表 `provider='wechat'` 支持（schema 已预留，无需 migration）
+- [x] staging e2e 4/4 通过 + relay crypto 交叉验证通过
+- [ ] prod 部署 + `wrangler secret put WECHAT_OPEN_APP_ID/SECRET/BRIDGE_SECRET`（PR2/PR3 一起上 prod 时）
+- 注：exchange 不做 IP 限流（请求方是 .cc 单 IP，限流无意义；bridge HMAC 是真正防护）
 
-### 9.2 `.cc` 端（腾讯云宝塔 + Node 进程）
+### 9.2 `.cc` 端（腾讯云宝塔 + Node 进程）— PR2 ✅ 代码完成
 
-- [ ] 宝塔后台软件商店装 Node.js 18 + PM2
-- [ ] `cc-site/server/` 新目录：Express + 2 个 handler + state HMAC + bridge HMAC + code 去重 LRU
-- [ ] 环境变量：`BRIDGE_SECRET` + `STATE_SECRET` + `WECHAT_OPEN_APP_ID` + `WECHAT_OPEN_APP_SECRET`
-- [ ] nginx 反代：`location /auth/wechat/ → proxy_pass http://127.0.0.1:3001`
-- [ ] PM2 守护 + 启动脚本 + 监控（`pm2 logs` / `pm2 monit`）
-- [ ] `cc-site/deploy.sh` 扩展支持 server/ 部署 + PM2 reload
+- [x] `cc-site/server/`：**零依赖 Node**（非 Express）+ 2 路由 + 签名 cookie 飞行态 + bridge HMAC + code 去重
+- [x] state 用签名 cookie（避微信 state 长度限制）+ bridge HMAC（与 worker 交叉验证通过）
+- [x] `aifeeds-cc-relay.service`（systemd，非 pm2）+ `nginx-auth-wechat.conf`（反代 + 限流）+ `fail2ban-aifeeds-relay.conf`
+- [x] `deploy-to-cc.sh`：Mac 一键部署（装 Node 18 + 专用用户 + 代码到 /opt + secret + systemd + 健康检查）
+- [x] 本地冒烟 21/21 通过
+- [x] **2026-06-02 部署到 .cc 服务器 + 真实微信扫码端到端通过**（昵称「刘彤」+ 头像落库，staging 库建用户，session 有效）
+- [ ] 服务器加固落地（nginx 限流 + fail2ban，链路验通后补，见 README §🛡️）
 
-### 9.3 dashboard（`ai-feeds.com`）
+### 9.3 dashboard（`ai-feeds.com`）— PR3 待开
 
-- [ ] 登录弹窗加「微信登录」按钮（lucide icon + 微信品牌色 #07C160）
-- [ ] 点击 → `window.location.href = 'https://ai-feeds.cc/auth/wechat/start?return_to=' + encodeURIComponent(location.href)`
-- [ ] 新增路由 `/auth/callback?session=...&return_to=...`：解 session_token → 写 cookie（与现有 email auth 同机制） → `location.replace(return_to)`
-- [ ] 新增路由 `/login?error=...`：解 error code 显示中文提示
+**登录方式路由矩阵**（2026-06-02 PM 定，PR3 核心）：
+
+| 环境 | 检测 | 登录方式 | turnstile |
+|------|------|---------|-----------|
+| 微信内置浏览器 | UA 含 `MicroMessenger` | 微信登录（⚠️ 需公众号网页授权，见下注，PR4） | ❌ 去掉 |
+| PC + 大陆 IP | 桌面 UA + 大陆 IP | **微信扫码登录**（本方案，PR1+2 已通） | ❌ 微信登录不需要 |
+| PC + 非大陆 IP | 桌面 UA + 非大陆 IP | 邮箱验证码 | ✅ |
+| 移动端 + 非微信浏览器 | 移动 UA + 非 MicroMessenger | 邮箱验证码 | ✅ |
+
+> ⚠️ **微信内置浏览器那一支（5.1）≠ 本方案**：网站应用 qrconnect（PC 扫码 snsapi_login）在微信内浏览器用不了。微信内登录需「公众号网页授权」（`oauth2/authorize` + `snsapi_userinfo`），是另一套流程 + 需要**服务号**（网页授权域名 = ai-feeds.cc）。两者同开放平台账号下共享 unionid → 同一用户（`identity_value=unionid` 已兼容）。**PR3 先做 PC + 移动端路由 + PC 扫码；微信内浏览器这支等服务号到位再补（PR4），当前保留「请用 Safari 打开」提示兜底。**
+>
+> IP 归属判定：大陆 vs 非大陆，可用 CF `request.cf.country === 'CN'`（worker 透传给前端）或前端 IP 库。香港中转后真实 IP 取法见 [`../operations.md`](../operations.md) §6b。
+
+PR3 实施项：
+- [ ] 环境检测工具：`isWechatBrowser()` / `isMobile()` / `isMainlandIP()`（country 从 worker 透传）
+- [ ] 登录弹窗按矩阵路由：微信登录按钮（绿 #07C160 + lucide）vs 邮箱验证码（带 turnstile）
+- [ ] 微信按钮点击 → `https://ai-feeds.cc/auth/wechat/start?return_to=<当前页>&device_id=<did>`
+- [ ] 新增路由 `/auth/callback?session=...&return_to=...`：解 session_token → 写 cookie（与现有 email auth 同机制）→ `location.replace(return_to)`
+- [ ] `/login?error=...`：解 error code 显示中文提示（错误码见 §7 + relay errorRedirect）
 
 ### 9.4 可观测性
 
 - [ ] worker 端打点：`wechat_exchange_success/failure_total{reason}`（CF Analytics Engine）
-- [ ] `.cc` 端 access log + PM2 logs 滚动
+- [ ] `.cc` 端 access log + journald（`journalctl -u aifeeds-cc-relay`）
 - [ ] 监控告警：`.cc` 进程 down / nginx 5xx 飙升 → PushDeer
 
 ## 10. FAQ（澄清常见误解）

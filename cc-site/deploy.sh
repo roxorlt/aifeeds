@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Deploy cc-site/ to ai-feeds.cc (82.156.0.68:/www/wwwroot/ai-feeds.cc/).
+# Deploy cc-site/ static site to ai-feeds.cc (82.156.0.68:/www/wwwroot/ai-feeds.cc/).
 # Requires ~/.ssh/aifeeds_temp private key.
+#
+# 只部署静态站（5 页 + 公安图标）。微信登录中转服务（server/）单独用
+# server/deploy-to-cc.sh 部署（装 Node + systemd + secret，落点 /opt/aifeeds-cc-relay）。
 
 set -euo pipefail
 
@@ -41,7 +44,6 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
 "
 
 echo "▶ smoke test"
-# 先试 https，没配证书时 fallback 到 http
 SCHEME=https
 curl -skI --max-time 5 https://ai-feeds.cc/ >/dev/null 2>&1 || SCHEME=http
 for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /style.css; do
@@ -49,4 +51,4 @@ for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /s
   echo "  $SCHEME://ai-feeds.cc$path → $code"
 done
 
-echo "✓ deploy done. Open https://ai-feeds.cc to verify."
+echo "✓ static deploy done. Open https://ai-feeds.cc to verify."
