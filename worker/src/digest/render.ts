@@ -17,6 +17,12 @@ export interface RenderRow {
   extra: string | null; // JSON string
 }
 
+export interface MediaAsset {
+  type: 'image' | 'video';
+  url: string; // 图片 URL,或视频播放源(mp4 / youtube 链接);相对路径已拼 apiBase
+  poster?: string; // 视频封面帧(已拼 apiBase)
+}
+
 export interface RenderedItem {
   rank: number; // 该源热度排名(1-based)
   item_id: string;
@@ -27,7 +33,9 @@ export interface RenderedItem {
   url: string;
   deep_link: string; // 站内抽屉深链
   author: string;
-  cover: string | null; // 封面图,相对路径已拼 apiBase;无图 null
+  cover: string | null; // 流内封面(通常 = media 第一张实质图);相对路径已拼 apiBase,无则 null
+  logo: string | null; // 品牌 logo/icon(PH 产品图标;其他源多为 null)
+  media: MediaAsset[]; // 详情页所有图片+视频(尽可能多;logo 不含在内;无媒体为 [])
 }
 
 export function cleanText(s: string): string {
@@ -93,25 +101,34 @@ function safeParse(s: string | null): Record<string, unknown> {
   }
 }
 
-// GH 流内封面:从 README excerpt 抽第一张非 badge 的 <img>/![]() (hero/截图)。
-// 复刻前端 GithubCard.extractFirstReadmeImage:跳过 .svg 和 shields 类 badge;
-// /r/ 拼 apiBase(worker R2),相对路径拼 raw.githubusercontent。无图返回 null(不退 owner 头像)。
-function extractReadmeImage(readme: string, owner: string, repo: string, branch: string, apiBase: string): string | null {
-  const urls: string[] = [];
+// GH README excerpt 抽所有非 badge 图(<img>/![]()),按出现顺序去重 + 拼 abs URL。
+// cover 取第一张,media 取全部。跳过 .svg 和 shields 类 badge;/r/ 拼 apiBase,相对路径拼 raw.githubusercontent。
+function resolveReadmeImages(readme: string, owner: string, repo: string, branch: string, apiBase: string): string[] {
+  const raw: string[] = [];
   let m: RegExpExecArray | null;
   const mdRe = /!\[[^\]]*\]\(([^)\s]+)/g;
-  while ((m = mdRe.exec(readme)) !== null) urls.push(m[1]);
+  while ((m = mdRe.exec(readme)) !== null) raw.push(m[1]);
   const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
-  while ((m = htmlRe.exec(readme)) !== null) urls.push(m[1]);
-  if (!urls.length) return null;
+  while ((m = htmlRe.exec(readme)) !== null) raw.push(m[1]);
   const isBadge = (u: string): boolean =>
     /\.svg(\?|$)/i.test(u) || /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(u);
-  const picked = urls.find((u) => !isBadge(u)) || urls[0];
-  if (!picked) return null;
-  if (/^(https?:|data:|blob:)/i.test(picked)) return picked;
-  if (picked.startsWith('/r/')) return `${apiBase}${picked}`;
   const base = `https://raw.githubusercontent.com/${owner}/${repo}/${branch || 'main'}`;
-  return picked.startsWith('/') ? `${base}${picked}` : `${base}/${picked.replace(/^\.\//, '')}`;
+  const resolve = (u: string): string => {
+    if (/^(https?:|data:|blob:)/i.test(u)) return u;
+    if (u.startsWith('/r/')) return `${apiBase}${u}`;
+    return u.startsWith('/') ? `${base}${u}` : `${base}/${u.replace(/^\.\//, '')}`;
+  };
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const u of raw) {
+    if (isBadge(u)) continue;
+    const r = resolve(u);
+    if (!seen.has(r)) {
+      seen.add(r);
+      out.push(r);
+    }
+  }
+  return out;
 }
 
 // 封面图(对齐前端流内卡片 + 用户规则:gh/hf/ph 取真图,x 仅推文附图,clawhub 不取头像)
@@ -146,7 +163,7 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
       // 流内封面 = README 第一张真图(hero/截图),无则 null;owner 头像不当封面
       const readme = typeof ex.readme_excerpt === 'string' ? (ex.readme_excerpt as string) : '';
       if (!readme) return null;
-      return extractReadmeImage(readme, ghOwner(row.id), ghRepoName(row.id), (ex.default_branch as string) || 'main', apiBase);
+      return resolveReadmeImages(readme, ghOwner(row.id), ghRepoName(row.id), (ex.default_branch as string) || 'main', apiBase)[0] || null;
     }
     case 'hf-paper': {
       if (imgs.length) return abs(imgs[0].url as string);
@@ -170,6 +187,87 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
     default:
       return null;
   }
+}
+
+// 品牌 logo/icon 独立字段。目前仅 PH 有产品 logo(media role=logo);其他源无产品 logo → null。
+function pickLogo(source: DigestSource, row: RenderRow, apiBase: string): string | null {
+  if (source !== 'ph') return null;
+  let media: unknown = null;
+  try {
+    media = JSON.parse(row.media || 'null');
+  } catch {
+    /* ignore */
+  }
+  if (!Array.isArray(media)) return null;
+  const logo = (media as Array<Record<string, unknown>>).find(
+    (m) => m && m.type === 'image' && m.role === 'logo' && m.url,
+  );
+  if (!logo) return null;
+  const u = logo.url as string;
+  return u.startsWith('http') ? u : `${apiBase}${u}`;
+}
+
+// 详情页所有图片+视频(尽可能多)。logo 不进 media(单独字段);按 url 去重。
+function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unknown>, apiBase: string): MediaAsset[] {
+  const abs = (u: string | null | undefined): string => (!u ? '' : u.startsWith('http') ? u : `${apiBase}${u}`);
+  let media: unknown = null;
+  try {
+    media = JSON.parse(row.media || 'null');
+  } catch {
+    /* ignore */
+  }
+  const arr = Array.isArray(media) ? (media as Array<Record<string, unknown>>) : [];
+  const out: MediaAsset[] = [];
+  switch (source) {
+    case 'ph':
+      for (const m of arr) {
+        if (m.role === 'logo') continue; // logo 单独字段
+        if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+        else if (m.type === 'video') {
+          // PH video:url 是缩略图(jpeg),videoUrl 是 youtube 播放链接
+          out.push({ type: 'video', url: (m.videoUrl as string) || abs(m.url as string), poster: abs(m.url as string) });
+        }
+      }
+      break;
+    case 'gh': {
+      const readme = typeof ex.readme_excerpt === 'string' ? (ex.readme_excerpt as string) : '';
+      if (readme) {
+        for (const u of resolveReadmeImages(readme, ghOwner(row.id), ghRepoName(row.id), (ex.default_branch as string) || 'main', apiBase)) {
+          out.push({ type: 'image', url: u });
+        }
+      }
+      break;
+    }
+    case 'hf-paper': {
+      for (const m of arr) if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+      const fig = ex.figure_image as Record<string, unknown> | undefined;
+      if (fig && typeof fig === 'object') {
+        const fu = (fig.r2_url as string) || (fig.raw_url as string);
+        if (fu) out.push({ type: 'image', url: abs(fu) });
+      }
+      break;
+    }
+    case 'x':
+      for (const m of arr) {
+        if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+        else if (m.type === 'video') {
+          // X video:url 是 mp4 流,poster 是缩略图
+          const v: MediaAsset = { type: 'video', url: abs(m.url as string) };
+          if (m.poster) v.poster = abs(m.poster as string);
+          out.push(v);
+        }
+      }
+      break;
+    case 'clawhub':
+      break; // skill 无媒体
+  }
+  const seen = new Set<string>();
+  return out.filter((a) => {
+    const k = `${a.url}|${a.poster || ''}`;
+    if (seen.has(k) || !a.url) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string): RenderedItem {
@@ -214,5 +312,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     deep_link: deepLinkPath(row.id),
     author: row.author || row.handle || '',
     cover: pickCover(source, row, ex, apiBase),
+    logo: pickLogo(source, row, apiBase),
+    media: buildMedia(source, row, ex, apiBase),
   };
 }
