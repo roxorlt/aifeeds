@@ -6015,14 +6015,37 @@ export async function fetchLongformViaScrapeBadger(
   ).bind(itemId).first<{ id: string; source_id: string; content: string | null; extra: string | null }>();
   if (!row) throw new Error(`fetchLongformViaScrapeBadger: item not found ${itemId}`);
 
-  // 直接 SB raw endpoint 拿 full_text（同老 runLongformViaSb 的简化版）
-  const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${row.source_id}`;
+  // 2026-06-02 修(转推长推截断根因):
+  // 转推的长推全文不挂在「转推壳」id 上,挂在「被转推原推」id(retweeted_status_id)上。
+  // SB 查转推壳 → 只返 ~140 字转发摘要;查原推 id → 才返完整 full_text(实测 1485 字)。
+  // syndication 对两者都只返 280 字 teaser(note_tweet.text 为空)。所以这里必须用原推 id 问 SB。
+  // 另外 FE 对 retweet 翻转显示 extra.retweet_of.content,全文要同步写回 retweet_of.content,
+  // 否则即使 top-level content 补全了,卡片/抽屉仍显示截断的 retweet_of。
+  let extraObj: Record<string, unknown> = {};
+  if (row.extra) {
+    try { extraObj = JSON.parse(row.extra); } catch { /* keep {} */ }
+  }
+  const retweetOrigId =
+    typeof extraObj.retweeted_status_id === 'string' && extraObj.retweeted_status_id
+      ? extraObj.retweeted_status_id
+      : null;
+  const isRetweet = !!retweetOrigId;
+  const targetId = retweetOrigId || row.source_id;
+  const retweetOf =
+    extraObj.retweet_of && typeof extraObj.retweet_of === 'object'
+      ? (extraObj.retweet_of as Record<string, unknown>)
+      : null;
+  const retweetOfLen =
+    retweetOf && typeof retweetOf.content === 'string' ? (retweetOf.content as string).length : 0;
+
+  // 直接 SB raw endpoint 拿 full_text（同老 runLongformViaSb 的简化版）。用 targetId（转推→原推）。
+  const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${targetId}`;
   const res = await fetch(url, {
     method: 'GET',
     headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
   });
   if (!res.ok) {
-    throw new Error(`fetchLongformViaScrapeBadger: SB HTTP ${res.status} for ${row.source_id}`);
+    throw new Error(`fetchLongformViaScrapeBadger: SB HTTP ${res.status} for ${targetId}`);
   }
   const body = (await res.json()) as { data?: Array<{ id?: string; full_text?: string; text?: string }> };
   const ft = body.data?.[0]?.full_text || body.data?.[0]?.text || '';
@@ -6037,32 +6060,126 @@ export async function fetchLongformViaScrapeBadger(
                                '$.longform.fetched_at', ?)
         WHERE id = ?`,
     ).bind('not_returned_by_sb', nowIso, row.id).run();
-    console.log(`[x-workflow:step3] ${itemId}: SB no full_text returned`);
+    console.log(`[x-workflow:step3] ${itemId}: SB no full_text returned (target=${targetId})`);
     return { updated: false, full_text_len: 0 };
   }
 
-  // 仅在 SB 给的更长时才覆盖（monotonic 规则同 ingest）
-  // 数据失效级联(2026-05-17 批 2):content 真正更新时(CASE WHEN 命中),
-  // 同步清 content_translated + translated_at 让 workflow 重翻。
-  await env.DB.prepare(
-    `UPDATE items
-        SET content = CASE
-              WHEN content IS NULL OR length(?) >= length(content) THEN ?
-              ELSE content
-            END,
-            content_translated = CASE
-              WHEN content IS NULL OR length(?) >= length(content) THEN NULL
-              ELSE content_translated
-            END,
-            translated_at = CASE
-              WHEN content IS NULL OR length(?) >= length(content) THEN NULL
-              ELSE translated_at
-            END,
-            extra = json_set(coalesce(extra, '{}'), '$.longform.fetched_at', ?)
-      WHERE id = ?`,
-  ).bind(ft, ft, ft, ft, nowIso, row.id).run();
-  console.log(`[x-workflow:step3] ${itemId}: longform fetched ${ft.length}c (cascade-clear if updated)`);
+  const curLen = row.content ? row.content.length : 0;
+  const bumpsTop = curLen === 0 || ft.length >= curLen;
+  const bumpsRetweet = isRetweet && !!retweetOf && ft.length > retweetOfLen;
+  const backfillSrc = isRetweet ? 'sb_retweet_original' : 'sb';
+
+  if (!bumpsTop && !bumpsRetweet) {
+    // SB 没给更长的（退化场景）→ 标 fetched_at + backfill_source 防重复挑
+    await env.DB.prepare(
+      `UPDATE items
+          SET extra = json_set(coalesce(extra, '{}'),
+                               '$.longform.fetched_at', ?,
+                               '$.longform.backfill_source', ?)
+        WHERE id = ?`,
+    ).bind(nowIso, `${backfillSrc}_same_length`, row.id).run();
+    console.log(`[x-workflow:step3] ${itemId}: SB full_text not longer (${ft.length}c, target=${targetId})`);
+    return { updated: false, full_text_len: ft.length };
+  }
+
+  // 仅在 SB 给的更长时才覆盖（monotonic 规则同 ingest）。
+  // 数据失效级联(2026-05-17 批 2):content 真正更新时同步清 content_translated + translated_at 让 workflow 重翻。
+  // 转推命中:同时把 retweet_of.content 写成全文 + 清 retweet_of.content_translated(FE 翻转显示这个字段)。
+  if (bumpsRetweet) {
+    await env.DB.prepare(
+      `UPDATE items
+          SET content = CASE WHEN content IS NULL OR length(?) >= length(content) THEN ? ELSE content END,
+              content_translated = CASE WHEN content IS NULL OR length(?) >= length(content) THEN NULL ELSE content_translated END,
+              translated_at = CASE WHEN content IS NULL OR length(?) >= length(content) THEN NULL ELSE translated_at END,
+              extra = json_set(coalesce(extra, '{}'),
+                               '$.retweet_of.content', ?,
+                               '$.retweet_of.content_translated', null,
+                               '$.longform.fetched_at', ?,
+                               '$.longform.backfill_source', ?)
+        WHERE id = ?`,
+    ).bind(ft, ft, ft, ft, ft, nowIso, backfillSrc, row.id).run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE items
+          SET content = CASE WHEN content IS NULL OR length(?) >= length(content) THEN ? ELSE content END,
+              content_translated = CASE WHEN content IS NULL OR length(?) >= length(content) THEN NULL ELSE content_translated END,
+              translated_at = CASE WHEN content IS NULL OR length(?) >= length(content) THEN NULL ELSE translated_at END,
+              extra = json_set(coalesce(extra, '{}'),
+                               '$.longform.fetched_at', ?,
+                               '$.longform.backfill_source', ?)
+        WHERE id = ?`,
+    ).bind(ft, ft, ft, ft, nowIso, backfillSrc, row.id).run();
+  }
+  console.log(`[x-workflow:step3] ${itemId}: longform ${ft.length}c via ${targetId}${isRetweet ? ' (retweet→orig)' : ''} (cascade-clear)`);
   return { updated: true, full_text_len: ft.length };
+}
+
+// ─── retweet-longform-backfill：补存量「转推长推」被截断的 item ──────
+// 2026-06-02:历史上转推的长推全程用「转推壳」id 去问 SB/syndication,只拿到
+// 140/280 字 teaser,正文卡在截断版(retweet_of.content ~280)。本 mode 把这些
+// 存量捞出来,用「被转推原推」id 去 SB 拿全文(复用已修好的 fetchLongformViaScrapeBadger),
+// 再用 preserveIsRelevant 重翻一遍(不动 is_relevant,避免误降 feed 可见性)。
+//
+// 选择条件:is_retweet=1 + retweeted_status_id 有 + retweet_of.content 卡在 270-290
+//          + 还没被本 mode 处理过(backfill_source != 'sb_retweet_original')。
+// 节流:每次只处理 limit 条(SB 5 req/min);429/已删 graceful 跳过,下轮再挑。
+// 用法:GET /api/enrich/run?mode=retweet-longform-backfill&limit=5(可反复调直到 selected=0)。
+export async function runRetweetLongformBackfill(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  limit: number,
+): Promise<{
+  mode: 'retweet-longform-backfill';
+  selected: number;
+  updated: number;
+  retranslated: number;
+  skipped: number;
+  errors: number;
+  duration_ms: number;
+  error?: string;
+}> {
+  const t0 = Date.now();
+  if (!env.SCRAPEBADGER_API_KEY) {
+    return { mode: 'retweet-longform-backfill', selected: 0, updated: 0, retranslated: 0, skipped: 0, errors: 0, duration_ms: Date.now() - t0, error: 'no_key' };
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT id
+       FROM items
+      WHERE source_type = 'x_list'
+        AND is_relevant = 1
+        AND json_extract(extra, '$.is_retweet') = 1
+        AND json_extract(extra, '$.retweeted_status_id') IS NOT NULL
+        AND length(json_extract(extra, '$.retweet_of.content')) BETWEEN 270 AND 290
+        AND COALESCE(json_extract(extra, '$.longform.backfill_source'), '') != 'sb_retweet_original'
+      ORDER BY scraped_at DESC
+      LIMIT ?`,
+  ).bind(Math.min(Math.max(limit, 1), 50)).all<{ id: string }>();
+
+  const selected = rows.results?.length || 0;
+  let updated = 0;
+  let retranslated = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const r of rows.results || []) {
+    try {
+      const fetched = await fetchLongformViaScrapeBadger(env, r.id);
+      if (fetched.updated) {
+        updated++;
+        // 全文已写回 content + retweet_of.content,译文已清空 → 重翻(保留 is_relevant)
+        const tr = await classifyAndTranslateForXTweet(env, r.id, { lang: 'zh', preserveIsRelevant: true });
+        if (!tr.failed) retranslated++;
+      } else {
+        skipped++;
+      }
+    } catch (e) {
+      errors++;
+      console.warn(`[retweet-longform-backfill] ${r.id}: ${String(e).slice(0, 160)}`);
+    }
+  }
+
+  console.log(`[retweet-longform-backfill] selected=${selected} updated=${updated} retranslated=${retranslated} skipped=${skipped} errors=${errors} dur=${Date.now() - t0}ms`);
+  return { mode: 'retweet-longform-backfill', selected, updated, retranslated, skipped, errors, duration_ms: Date.now() - t0 };
 }
 
 /**
@@ -6390,7 +6507,10 @@ export async function classifyAndTranslateForXTweet(
 
   const rto = extra.retweet_of as L2Field | undefined;
   if (rto?.content) {
-    input.retweet_of = { content: rto.content.slice(0, 1000) };
+    // 2026-06-02:retweet 翻转时 FE 显示 retweet_of.content,转推长推可达数千字。
+    // 之前 slice(0,1000) 会让译文只覆盖前 1000 字（英文全、中文截断）。提到 4000 与
+    // 主推 text 对齐,配合 max_tokens 8000 保证整条译完。
+    input.retweet_of = { content: rto.content.slice(0, 4000) };
     if (rto.quote_of?.content) {
       input.retweet_of.quote_of = { content: rto.quote_of.content.slice(0, 1000) };
     }
@@ -6428,7 +6548,9 @@ export async function classifyAndTranslateForXTweet(
           messages: [{ role: 'user', content: prompt }],
           temperature: 0,
           response_format: { type: 'json_object' },
-          max_tokens: 4000,
+          // 2026-06-02:转推长推补全后,content_zh + retweet_of_zh 两条全文译文可能 >4000 token,
+          // 升到 8000 防 JSON 截断导致 json_parse 失败→translation_failed→item 不下发。
+          max_tokens: 8000,
         }),
       });
     } catch {
