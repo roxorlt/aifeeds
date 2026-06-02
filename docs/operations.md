@@ -946,7 +946,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 未动（仍走 CF 橙云）：邮件 MX / Email Routing、staging / staging-api、blog
 ```
 
-**VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。IP `154.12.188.231`。SSH `ssh -i <私钥> root@154.12.188.231`。nginx 配置 `/etc/nginx/sites-available/aifeeds.conf`。TLS 用 Let's Encrypt（certbot 自动续期，8/31 到期自动续）。
+**VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
 
 **切换时的前置改动**（回滚要逆操作）：
 - R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）
@@ -955,7 +955,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 **⚠️ 风险 / 长期运维**：
 - **VPS 单点** —— 它挂了，前端 + api + 字体全挂（邮件不受影响）；按下方回滚秒退回 CF
 - **按月续费**（DMIT），忘续 = 全站挂
-- 走香港的流量**不经 CF**，WAF / 缓存 / DDoS 由 VPS 自己扛
+- 走香港的流量**不经 CF**，WAF / 缓存 / DDoS 改由 VPS 自己扛 —— 缓存 / 限流 / 防火墙 / fail2ban 已在 VPS 上重建（见下方「🛡️ VPS 防护层」），但**真正的大流量 DDoS 单机扛不住**，真出事按回滚退回 CF
 - **cookie 功能**（admin 后台 / 分享）：api 反代用 workers.dev 的 Host，cookie domain 可能受影响；nginx 已传 `X-Forwarded-Host: api.ai-feeds.com` 备用，异常时 BE 读它修
 - **数据仍回源海外**：api 是动态请求，香港只优化「大陆→香港」这段；「香港→CF Worker」那段仍走海外（已是服务器间高速链路，比大陆直连 CF 快）
 
@@ -973,6 +973,28 @@ curl -sI --resolve ai-feeds.com:443:154.12.188.231     https://ai-feeds.com/
 curl -s  --resolve api.ai-feeds.com:443:154.12.188.231 "https://api.ai-feeds.com/api/items?limit=1"
 curl -sI --resolve fonts.ai-feeds.com:443:154.12.188.231 https://fonts.ai-feeds.com/hmos-bold/009b6137cf3bcf65ce3e6e2fcb4f187c.woff2
 ```
+
+**🛡️ VPS 防护层（2026-06-02 加，方案 A）**：灰云后流量不经 CF，故在 VPS 上重建以下防护（SSH 加固系统默认已达标：禁密码、仅密钥）。
+
+| 层 | 配置 | 位置 / 备注 |
+|---|------|-----------|
+| 缓存 | nginx `proxy_cache`：前端 + 字体缓存、**api 不缓存**；尊重上游 Cache-Control（index.html 不缓存、哈希资源 / 字体长缓存）；`proxy_cache_use_stale` 上游抖动时吐旧版兜底 | `conf.d/aifeeds-perf.conf` 定义 `aifeeds_cache` 区；响应头 `X-Cache-Status: HIT/MISS` 可查 |
+| 限流 | 每 IP `rate=50r/s` `burst=200`、`limit_conn=100`，超限 429 | `conf.d/aifeeds-perf.conf`。**故意宽松**照顾中国 CGNAT（多个真实用户共享一个公网 IP），误伤就调高 |
+| 防火墙 | ufw：只放行 22 / 80 / 443，默认 deny incoming | `ufw status` |
+| 自动封禁 | fail2ban：`sshd`（走 systemd journal）+ `nginx-limit-req`（走 `error.log` 文件，反复触发限流 30 次 / 分钟 → 封 1h） | `jail.local`；`ignoreip` 含管理 IP（当前 SSH 客户端 IP，明文见 VPS 上 jail.local）（已端到端验证：真实 459 条限流日志，规则 459 matched）|
+
+> nginx / ufw / fail2ban 均已 `enable` 开机自启（重启不丢）。
+
+**防护层运维**：
+```bash
+# 看谁被封 / 解封误伤的 IP
+ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'fail2ban-client status nginx-limit-req'
+ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'fail2ban-client set nginx-limit-req unbanip <IP>'
+# 调限流（CGNAT 误伤时调高 rate/burst）：编辑 conf.d/aifeeds-perf.conf → nginx -t && systemctl reload nginx
+# 清缓存：rm -rf /var/cache/nginx/aifeeds/* && systemctl reload nginx
+```
+
+> **仍未做（下一步）**：Worker 回源密钥 —— 让 `xlist-api` Worker 只接受带密钥头的请求（密钥由 VPS nginx 注入），堵住 `xlist-api.ltsms86.workers.dev` 被直连白嫖额度 / 绕过 VPS 限流的洞。需改 worker 代码 + 部署（staging 不设密钥即跳过校验；部署前 grep 确认无组件硬编码 workers.dev）。
 
 ### 7. CF 安全配置
 
