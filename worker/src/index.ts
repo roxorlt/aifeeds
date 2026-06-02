@@ -86,7 +86,7 @@ import {
   handleDelete,
 } from './auth/handlers';
 import { handleEmailSend } from './auth/email-handlers';
-import { handleWechatExchange } from './auth/wechat-handlers';
+import { handleWechatExchange, handleSessionAdopt } from './auth/wechat-handlers';
 import {
   serveAdminToolsHtml,
   adminSmsStatus,
@@ -445,6 +445,10 @@ export default {
       // server-to-server，不走 dashboard，不需要 device_id header（device_id 在 body 里透传）
       if (path === '/api/auth/wechat/exchange' && request.method === 'POST') {
         return withCors(await handleWechatExchange(request, env, ctx), request, env);
+      }
+      // dashboard /auth/callback 拿微信 session_token 换 HttpOnly cookie（Bearer → Set-Cookie）
+      if (path === '/api/auth/session/adopt' && request.method === 'POST') {
+        return withCors(await handleSessionAdopt(request, env, ctx), request, env);
       }
       if (path === '/api/auth/login' && request.method === 'POST') {
         return withCors(await handleLogin(request, env, ctx), request, env);

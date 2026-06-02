@@ -39,6 +39,7 @@ import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
 import { RequireAuth } from "./components/RequireAuth";
+import { AuthCallback } from "./components/AuthCallback";
 import { Settings } from "./pages/Settings";
 import { AccountManage } from "./pages/AccountManage";
 import { Subscription } from "./pages/Subscription";
@@ -1123,6 +1124,7 @@ function App() {
         <Route path="/e/:eventId" element={<DashboardHome />} />
         <Route path="/h/:arxivId" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
+        <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
         <Route path="/subscribe" element={<Subscription mode="anonymous" />} />

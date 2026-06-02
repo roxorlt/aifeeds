@@ -157,3 +157,26 @@ export async function deleteAccount(phoneConfirm: string): Promise<{ ok: true }>
   });
   return parseOrThrow(res);
 }
+
+// ─── 微信扫码登录 ───────────────────────────────────────────
+// 中转服务在 ai-feeds.cc（备案域名，唯一实例；详见 docs/wechat/architecture.md）。
+// 流程：dashboard → .cc/auth/wechat/start → 微信扫码 → .cc/callback → worker exchange
+//      → relay 302 回 .com/auth/callback?session=... → adoptSession 换 HttpOnly cookie。
+export const WECHAT_RELAY_BASE: string =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_WECHAT_RELAY_BASE) ||
+  'https://ai-feeds.cc';
+
+/** 微信登录起点 URL：跳到 .cc relay /start，带当前页 return_to + device_id */
+export function wechatStartUrl(returnTo: string): string {
+  const params = new URLSearchParams({ return_to: returnTo, device_id: getDeviceId() });
+  return `${WECHAT_RELAY_BASE}/auth/wechat/start?${params.toString()}`;
+}
+
+/** 把微信 session_token 换成 HttpOnly cookie（dashboard /auth/callback 落地时调） */
+export async function adoptSession(sessionToken: string): Promise<{ ok: true; user_id: string }> {
+  const res = await authFetch('/api/auth/session/adopt', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${sessionToken}` },
+  });
+  return parseOrThrow(res);
+}

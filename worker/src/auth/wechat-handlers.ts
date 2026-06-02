@@ -21,7 +21,14 @@
 
 import { nanoid } from 'nanoid';
 import type { Env } from '../index';
-import { createSession } from './session';
+import {
+  createSession,
+  getSidFromRequest,
+  findActiveSession,
+  touchSessionLastUsed,
+  buildSessionCookie,
+} from './session';
+import { isDevHost } from './handlers';
 
 const BRIDGE_REPLAY_WINDOW_SEC = 30;
 const OPENID_LEN_MIN = 4;
@@ -233,7 +240,7 @@ export async function handleWechatExchange(
     );
   }
 
-  // 8. 创建 session（不 Set-Cookie，由 .com 前端 /auth/callback 自行写 cookie）
+  // 8. 创建 session（不 Set-Cookie，由 .com 前端 /auth/callback 调 adopt 换 HttpOnly cookie）
   const session = await createSession(env, userId, deviceId, ip, ua);
 
   return jsonOk({
@@ -241,5 +248,31 @@ export async function handleWechatExchange(
     session_token: session.id,
     expires_at: session.expiresAt,
     is_new: isNewUser,
+  });
+}
+
+// ─── POST /api/auth/session/adopt ───────────────────────────
+// 把已存在的 session_token（微信 exchange 创建、经 relay 带到 .com/auth/callback 的）
+// 换成 HttpOnly cookie。dashboard /auth/callback 拿 URL 里的 session 调本端点（Bearer），
+// worker 校验是真实活跃 session 后下发 Set-Cookie —— 微信登录由此与邮箱/SMS 共用同一套
+// HttpOnly cookie 会话，前端无需 JS 写 cookie（更安全）。
+//
+// 只对【已存在且活跃】的 session 重发 cookie，不创建 session；token 不可猜（nanoid32）。
+export async function handleSessionAdopt(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const sid = getSidFromRequest(request); // 优先 Authorization: Bearer，再 Cookie
+  if (!sid) return jsonErr('missing session token', 401, { reason: 'no_token' });
+
+  const session = await findActiveSession(env, sid);
+  if (!session) return jsonErr('invalid or expired session', 401, { reason: 'invalid_session' });
+
+  ctx.waitUntil(touchSessionLastUsed(env, sid));
+  const cookie = buildSessionCookie(sid, isDevHost(request));
+  return new Response(JSON.stringify({ ok: true, user_id: session.user_id }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': cookie },
   });
 }
