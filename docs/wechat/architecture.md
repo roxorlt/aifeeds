@@ -12,10 +12,12 @@
 | `.cc` SSL/HTTPS + HSTS | ✅ | 2026-05-13 |
 | `www.ai-feeds.cc` → apex 301（宝塔重定向） | ✅ | 2026-05-14 |
 | 微信开放平台企业认证 | ✅ | 2026-05-14 |
-| 微信网站应用创建 + 提审 | ⏳ 审核中 | 2026-05-14 提交，约 7 工作日 |
-| worker `POST /api/auth/wechat/exchange` | ⏳ | — |
-| `.cc` Node + Express OAuth 中转服务 | ⏳ | — |
-| dashboard 登录入口 + `/auth/callback` 路由 | ⏳ | — |
+| 微信网站应用创建 + 提审 | ⏳ 审核中 | 2026-05-14 提交 |
+| worker `POST /api/auth/wechat/exchange`（PR1） | ✅ 代码 + staging e2e 4/4 过 | 2026-05-20 |
+| `.cc` Node + Express OAuth 中转服务（PR2） | ⏳ | — |
+| dashboard 登录入口 + `/auth/callback` 路由（PR3） | ⏳ | — |
+
+> **⚠️ 2026-06-02 香港中转加速上线后复核**：`api.ai-feeds.com` 现在走香港 VPS 反代 + 回源密钥 gate（详见 [`../operations.md`](../operations.md) §6b）。已确认本登录方案**整体仍成立、无需改动 gate**，详见下方 [§5b](#5b-与香港中转加速架构的交互2026-06-02-后)。
 
 ## 1. TL;DR
 
@@ -132,10 +134,44 @@ worker 端校验：
 
 `BRIDGE_SECRET` 在：
 
-- worker：`wrangler secret put BRIDGE_SECRET`
+- worker：`wrangler secret put BRIDGE_SECRET`（prod / staging 各一个独立值，已落 `.secrets/aifeeds-{prod,staging}.env`）
 - `.cc`：宝塔环境变量或 `/etc/aifeeds/bridge.env`（chmod 600）
 
 不要进仓库，不要写入 `.secrets/` 之外。
+
+## 5b. 与香港中转加速架构的交互（2026-06-02 后）
+
+> 2026-06-02 上线香港 VPS 中转：`ai-feeds.com` / `www` / `api` / `fonts` 改走香港 VPS（`154.12.188.231`）反代回 CF（详见 [`../operations.md`](../operations.md) §6b）。这给登录链路加了两道关卡，本节复核**本方案整体仍成立，无需改 gate**。
+
+### 新增的两道 gate（worker 入口，在所有路由之前）
+
+1. **回源密钥 gate**：prod worker 校验 `X-Origin-Secret`（香港 nginx 注入）。无密钥且非豁免的请求一律 403。豁免名单：`admin.ai-feeds.com` / `/api/webhook/resend` / `/api/digest/return` / `X-Dev-Token`。**staging 不设密钥 = gate 关闭**。
+2. **Bot UA gate**：拦 `curl/` `wget/` `python-requests` `okhttp` `go-http-client` 等 UA。
+
+### 登录链路如何穿过这两道 gate（关键结论）
+
+```
+.cc 中转服务（腾讯云 82.156.0.68，境内）
+  → POST https://api.ai-feeds.com/api/auth/wechat/exchange
+  → DNS 解析 api.ai-feeds.com = 154.12.188.231（香港 VPS）
+  → 香港 nginx 注入 X-Origin-Secret + 反代到 xlist-api.ltsms86.workers.dev
+  → worker 回源密钥 gate：X-Origin-Secret 命中 → ✅ 放行（无需加豁免）
+  → worker bot UA gate：.cc 用 Node fetch（undici/axios UA，不在拦截名单）→ ✅ 放行
+  → handleWechatExchange 跑 bridge HMAC 校验 → 建/找 user → 签 session
+```
+
+- **回源 gate**：`.cc` 调 `api.ai-feeds.com`（而非直连 `*.workers.dev`），香港 nginx 自动注入密钥，gate 天然放行。**不需要**把 `/api/auth/wechat/exchange` 加进豁免名单——加了反而会让它能被直连 workers.dev 白嫖。bridge HMAC 是这个 endpoint 真正的身份校验，回源 gate 只是额外一层。
+- **Bot UA gate**：`.cc` 中转服务必须用 Node `fetch`（undici）或 axios（UA 不在拦截名单），**不要用 curl / python-requests 风格 UA**。PR2 实现时给中转服务设显式 UA `aifeeds-cc-relay/1.0`，既可读又确保不撞名单。
+- **真实用户 IP**：worker exchange handler 的 IP 从 `body.ip` 取（`.cc` 捕获的真实用户 IP），**不用** `client-ip.ts` 的 `getClientIp`——因为这个 endpoint 的「请求方」是 `.cc` 服务器不是终端用户（handler 内有注释防误改）。
+
+### `.cc` 中转服务仍部署在腾讯云，不迁香港
+
+香港 VPS 虽然也是我控制的公网服务器，但**微信 OAuth 回调域名必须是 ICP 备案域名 `ai-feeds.cc`**（京ICP备2025123594号-2），而备案要求境内主机 = 腾讯云 `82.156.0.68`。香港对 ICP 而言算境外，承载的是未备案的 `.com`。所以 `.cc/auth/wechat/*` 这套中转**只能跑在腾讯云**，香港 VPS 不参与登录链路。
+
+### 部署期注意
+
+- **prod 部署顺序**（同 operations.md §6b 硬要求）：本 PR 系列上 prod 时，回源 gate 已在 prod 生效，`.cc` 必须调 `api.ai-feeds.com`（带密钥）才能过 gate。staging 阶段 gate 关闭，`.cc` 调 `staging-api.ai-feeds.com` 直连验证即可。
+- **session cookie 不受香港 cookie-domain 隐患影响**：worker exchange **不发 Set-Cookie**，session_token 走 JSON 返回，由 `.com` 前端 `/auth/callback` 自己写 cookie（见 §3 时序图 step 7）。operations.md §6b 提到的「api 反代用 workers.dev Host 导致 cookie domain 受影响」对登录链路无影响。
 
 ## 6. 用户感知与跳转次数
 

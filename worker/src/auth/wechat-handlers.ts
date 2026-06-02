@@ -147,6 +147,12 @@ export async function handleWechatExchange(
   const identityValue = hasUnionId ? (body.unionid as string) : body.openid;
   const identityProvider = 'wechat';
 
+  // ⚠️ IP 故意从 body 取，不用 client-ip.ts 的 getClientIp(req, env)。
+  // 本 endpoint 的「请求方」是 .cc 中转服务器（server-to-server），不是终端用户。
+  // getClientIp 取的会是 .cc / 香港 VPS 的 IP，不是真实用户。真实用户 IP 由 .cc 在
+  // 用户访问 .cc/auth/wechat/callback 时捕获，拼进 body.ip 透传过来。
+  // （2026-06-02 香港中转后 getClientIp 重构成 relay-aware，但只对终端用户直连的
+  //  endpoint 有意义；本 endpoint 不要改用它。）
   const ip = typeof body.ip === 'string' && body.ip.length > 0 ? body.ip : '0.0.0.0';
   const ua = typeof body.ua === 'string' ? body.ua : '';
   const deviceId =
