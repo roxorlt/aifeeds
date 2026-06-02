@@ -1,0 +1,29 @@
+[Unit]
+Description=ai-feeds.cc WeChat login OAuth relay
+Documentation=https://github.com/roxorlt/aifeeds/blob/main/cc-site/server/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 专用非 root 系统用户运行（最小权限）
+User=aifeeds-relay
+Group=aifeeds-relay
+# secret 由 systemd 以 root 读入并注入进程 env；服务用户读不到原文件（600 root:root）
+EnvironmentFile=/etc/aifeeds/relay.env
+ExecStart=/usr/bin/node /opt/aifeeds-cc-relay/relay.mjs
+Restart=on-failure
+RestartSec=3
+# ── 加固 ──
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# 日志进 journald（journalctl -u aifeeds-cc-relay）
+SyslogIdentifier=aifeeds-cc-relay
+
+[Install]
+WantedBy=multi-user.target
