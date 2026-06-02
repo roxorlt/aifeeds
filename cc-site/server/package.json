@@ -1,0 +1,15 @@
+{
+  "name": "aifeeds-cc-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ai-feeds.cc 微信扫码登录无状态 OAuth 中转服务（零运行时依赖）",
+  "main": "relay.mjs",
+  "scripts": {
+    "start": "node relay.mjs",
+    "smoke": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
