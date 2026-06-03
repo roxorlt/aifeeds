@@ -873,6 +873,31 @@ npx wrangler secret put RESEND_API_KEY --env staging  # staging（可与 prod �
 
 **完整设计文档**：[`docs/plans/2026-05-06-email-auth-design.md`](plans/2026-05-06-email-auth-design.md)
 
+### 3.7. Email Routing 收信转发（CF 原生，与 Resend 互不相干）
+
+> Resend（§3.6）只管**发信**（登录验证码）；这里管**收信转发**——`xxx@ai-feeds.com` 收到的邮件自动转到个人 Gmail。走 CF Email Routing，MX 记录仍在 CF（未随 2026-06-02 香港中转迁走）。
+
+**当前转发地址**（全部 → `ltsms86@gmail.com`，该 destination 已验证 2026-05-19）：
+
+| 收件地址 | 用途 | 状态 |
+|---|---|---|
+| `wxmp@ai-feeds.com` | 微信公众平台等平台注册收信（2026-06-03 加） | 启用 |
+| `roxor@ai-feeds.com` | 站长通用 | 启用 |
+| `support@ai-feeds.com` | 用户支持 | 启用 |
+
+> ⚠️ catch-all（未列出的地址）= **drop（丢弃，不转发）**。要新增地址必须显式加一条规则，否则发来的信直接被丢。
+
+**加 / 删一个转发地址**：
+- **推荐（手动）**：CF Dashboard → 选 `ai-feeds.com` 域 → 左侧 Email → Email Routing → Routing rules → Create address，填收件前缀 + 选 destination。`ltsms86@gmail.com` 已验证，可直接选；转到一个**没验证过的新邮箱**时 CF 会给那个邮箱发验证信，点了才生效。
+- **API（claude session 用，本次即用此法）**：
+  ```bash
+  set -a; . .secrets/aifeeds-prod.env; set +a
+  curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_AIFEEDS_COM/email/routing/rules" \
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+    --data '{"name":"forward NAME to gmail","enabled":true,"matchers":[{"type":"literal","field":"to","value":"NAME@ai-feeds.com"}],"actions":[{"type":"forward","value":["ltsms86@gmail.com"]}]}'
+  ```
+  > 经验：现用的 `CLOUDFLARE_API_TOKEN` 实测能管 Email Routing 规则。若哪天 token 重建后缺 Email Routing 权限导致 403，退回上面 Dashboard 手动法即可。
+
 ### 4. 运维 Token 速查（claude session 跨设备共享用）
 
 > ⚠️ 这一节**只列 token 干啥用 / 字段名是什么 / 怎么再生**，绝不写 token 值。值在 `.secrets/aifeeds-prod.env` / `.secrets/aifeeds-staging.env`（gitignored）。
