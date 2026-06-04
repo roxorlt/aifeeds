@@ -64,63 +64,62 @@ aifeeds 把每条 X 推文存在 D1 `items` 表(`source_type='x_list'`),源专�
 
 ## 5. JSON Schema v1
 
-### 5.1 请求 `POST /aifeeds-api/render/x-card`(aifeeds → Codex)
+> 2026-06-04 Codex 已确认 3 个开放项 + 提议扁平结构,本节为**双方约定的 v1 schema**。
+
+端点:`POST http://82.156.0.68/aifeeds/api/render/x-card`
+请求头:`Authorization: Bearer <shared_token>` + `Content-Type: application/json` + `Accept: image/png`
+
+### 5.1 请求体(aifeeds → Codex)
+
+采用 Codex 提议的扁平结构(`tweet`/`author`/`media`/`metrics`/`style` 平级):
 
 ```json
 {
-  "request_id": "x-2061117302528188712-a1b2c3d4",
-  "style": "aifeeds-x-card-v1",
-  "ratio": "3:4",
+  "render_key": "2061117302528188712-a1b2c3d4",
   "tweet": {
     "id": "2061117302528188712",
-    "permalink": "https://x.com/sama/status/2061117302528188712",
     "lang": "en",
-    "author_name": "Sam Altman",
-    "author_handle": "sama",
-    "author_avatar": "https://api.ai-feeds.com/r/x-avatar/<key>.jpg",
-    "verified": true,
-    "created_at": "2026-06-01T12:34:56Z",
     "text": "原文,保留换行",
-    "text_zh": "中文译文,保留换行(原文即中文时为 null)",
+    "text_zh": "中文译文,可为空(原文即中文时,渲染端回退 text)",
     "summary_zh": "一句话中文摘要",
-    "is_long": false,
-    "metrics": { "likes": 1234, "reposts": 123, "replies": 45, "views": 123456 },
-    "media": [
-      { "type": "image", "url": "https://api.ai-feeds.com/r/x-media/<key>.jpg", "width": 1200, "height": 800, "poster_url": null },
-      { "type": "video", "url": "https://api.ai-feeds.com/r/x-media/<key>.mp4", "width": 1916, "height": 1080, "poster_url": "https://api.ai-feeds.com/r/x-media/<key>-poster.jpg" }
-    ],
-    "quoted_tweet": null,
-    "thread": []
+    "permalink": "https://x.com/sama/status/2061117302528188712",
+    "created_at": "2026-06-01T12:34:56Z"
   },
-  "copy": { "title": null, "summary": null }
+  "author": {
+    "name": "Sam Altman",
+    "handle": "sama",
+    "avatar_url": "https://api.ai-feeds.com/r/x-avatar/<key>.jpg",
+    "verified": true
+  },
+  "media": [
+    { "type": "image", "url": "https://api.ai-feeds.com/r/x-media/<key>.jpg", "poster_url": null, "width": 1200, "height": 800 }
+  ],
+  "metrics": { "likes": 1234, "reposts": 123, "replies": 45, "views": null },
+  "style": { "template": "x-card-v1", "size": "1080x1440" }
 }
 ```
 
-- `request_id` = `x-<tweet_id>-<内容哈希前 8 位>`(幂等键,见 §6)。
-- `copy.title`/`copy.summary`:可选的人工覆盖,留空则用 `summary_zh`。
-- 图片字段全部是 aifeeds R2 https 链接,Codex 直接下载。
+- `render_key` = `<tweet_id>-<内容哈希前 8 位>`,幂等键(见 §6)。
+- **`author.verified`**(aifeeds 补充字段):蓝V 在卡片里是关键视觉,aifeeds 有 `extra.is_verified`,建议保留。
+- **v1 视频处理**:v1 Codex 不做视频封面卡,故 aifeeds **只发 image**——纯视频推文把封面图当 `type:"image"` 发(`url` 给封面),保证卡片有主视觉;无任何图则纯文字卡。
+- `media[].width`/`height`:aifeeds 可附带(帮判断横竖排版),Codex 不需可忽略。
+- `metrics` 缺字段(如 `views: null`)渲染端优雅降级,不强依赖。
+- `created_at`:aifeeds 发 ISO 8601 UTC;`reposts` = aifeeds 侧转推数。
 
 ### 5.2 响应(Codex → aifeeds)
 
-```json
-{
-  "ok": true,
-  "request_id": "x-2061117302528188712-a1b2c3d4",
-  "job_id": "x-2061117302528188712-20260604-xxxx",
-  "images": ["<待定:Codex 可取的 URL,或直接图片字节/base64>"],
-  "meta": { "count": 1, "width": 1080, "height": 1440 }
-}
-```
-
-- 成品图最终由 aifeeds 转存 R2,对外用 `https://api.ai-feeds.com/r/x-card/<job_id>/01.png`。
-- `images` 的具体形态(URL 取回 vs 直接回字节/zip)**待 Codex 确认**(开放项①)。
+**直接返回 PNG 字节**,`Content-Type: image/png`(v1 单图,不返 JSON/zip)。
+aifeeds 收到字节后转存 R2,对外统一用 `https://api.ai-feeds.com/r/x-card/<render_key>.png`。
+82.156 只做渲染机,不托管公网图片。
 
 ## 6. 鉴权与幂等
 
-- **鉴权**:`Authorization: Bearer <shared_token>`。token 生成方待定(开放项②)。
-- **幂等**:`request_id = tweet_id + 内容哈希`。哈希覆盖 `text + text_zh + summary_zh + media urls + metrics`。
-  内容变了(互动数刷新、翻译回填)→ 哈希变 → 重渲染;没变 → 返已有成品。
-  **不可只用 tweet_id 当幂等键**,否则回填更新后会返回旧图。
+- **鉴权**:`Authorization: Bearer <shared_token>`。**token 由 Codex 生成**(存其 `/opt/dailyVideo/.env`
+  的 `X_CARD_SHARED_TOKEN`),单独发给 aifeeds。aifeeds 把它**存进 `.secrets/aifeeds-{prod,staging}.env`
+  + worker secret**(不写进代码/文档/payload),调用时带 Header。
+- **幂等**:`render_key = tweet_id + 内容哈希`。哈希覆盖 `text + text_zh + summary_zh + media urls + metrics`。
+  内容变了(互动数刷新、翻译回填)→ 哈希变 → Codex 重渲染;没变 → 命中缓存返同一张图。
+  **不可只用 tweet_id 当幂等键**,否则回填更新后会返回旧图。幂等缓存由 Codex 侧按 `render_key` 维护。
 
 ## 7. 成品图托管流程
 
@@ -143,11 +142,16 @@ aifeeds 拼 payload → POST Codex 渲染 → Codex 回成品(URL 或字节)
 
 验证:每阶段 staging 跑通再合 main;只从 main 发 prod。Codex 侧是其自有服务器/仓库,与本分支无关。
 
-## 9. 开放项(待 Codex 回)
+## 9. 开放项
 
-1. **成品交付形态**:Codex 回一个 URL 让 aifeeds 取,还是直接回图片字节 / zip?
-2. **`shared_token`**:Codex 生成还是 aifeeds 生成?
-3. **比例**:1080×1440 固定,还是要支持 payload 里 `ratio` 的其它比例?
+**Codex 已确认(2026-06-04)**:
+1. ✅ 成品交付:直接返回 PNG 字节(`Content-Type: image/png`),aifeeds 转存 R2;v1 单图不返 zip。
+2. ✅ `shared_token`:Codex 生成,aifeeds 带 Header(见 §6)。
+3. ✅ 尺寸:v1 固定 1080×1440;`style.size` 字段预留,v2 再支持 1:1 / 4:3 / 16:9。
+
+**待 Codex 点头(aifeeds 提议的 2 处小补充)**:
+- `author.verified` 字段是否保留(蓝V 视觉)。
+- v1 视频推文降级为「封面图当 image 发」是否 OK。
 
 ## 10. 分期 roadmap
 
