@@ -122,8 +122,8 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       title = row.title || '';
       summary = (ex.ai_summary as string) || ct;
       break;
-    case 'hf-paper': // 一句话中文摘要作标题 + 详细中文摘要
-      title = (ex.ai_summary_zh as string) || row.title || '';
+    case 'hf-paper': // 标题=原始论文标题译文(title_zh,对齐前端)+ 详细中文摘要
+      title = (ex.title_zh as string) || row.title || '';
       summary = (ex.summary_zh as string) || (ex.ai_summary_zh as string) || '';
       break;
     case 'x': // X 中文摘要作标题 + 推文译文
