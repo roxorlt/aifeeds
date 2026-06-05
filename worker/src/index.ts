@@ -57,6 +57,7 @@ import {
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
+import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -214,8 +215,9 @@ export interface Env {
   DIGEST_EMAIL_HMAC?: string;             // 邮件回流 token HMAC secret(32B hex)
   RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
   DIGEST_API_KEY?: string;                // 对外日报 JSON API(GET /api/digest/daily)Bearer key
-  X_CARD_SHARED_TOKEN?: string;           // 调 Codex X 卡片渲染 API 的 Bearer token(P3)
+  X_CARD_SHARED_TOKEN?: string;           // 调 Codex X 卡片渲染 API 的 Bearer token(P3)。日报推送也复用此 token
   X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://82.156.0.68/aifeeds/api/render/x-card)
+  DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -3798,6 +3800,17 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     if (!u) return jsonResponse({ error: 'missing url' }, 400, request, env);
     const result = await addManualXCardRender(env, u);
     return jsonResponse(result, result.ok ? 200 : 400, request, env);
+  }
+  if (mode === 'daily-codex-push') {
+    // 日报推 Codex 渲染机(正常由早 8 点 workflow 自动跑;此 mode 供测试手动触发)。
+    // ?dry=1 只返拼好的 payload(看结构,不真 POST);否则真推 + 返 Codex 202 结果。
+    if (url.searchParams.get('dry') === '1') {
+      const payload = await buildDailyCodexPayload(env, 8);
+      const total = payload.digest.sections.normal.reduce((n, s) => n + s.count, 0);
+      return jsonResponse({ ok: true, dry: true, total_items: total, payload }, 200, request, env);
+    }
+    const result = await pushDailyToCodex(env, 8);
+    return jsonResponse(result, result.ok ? 200 : 502, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。

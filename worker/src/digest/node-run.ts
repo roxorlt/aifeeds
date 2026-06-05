@@ -13,6 +13,7 @@ import {
 import { selectTopForSource } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey } from './lib';
+import { pushDailyToCodex } from './codex-push';
 import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
 
 interface NodeRunParams {
@@ -185,6 +186,14 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
           params: { subId, slotKey: sk },
         });
         return subId;
+      });
+    }
+
+    // Phase 3:仅早 8 点 → 把当天日报内容(快照,normal,ph/gh/hf-paper)并行推给 Codex 渲染机。
+    // 放在 deliver spawn 之后(邮件已在投递路上,不拖慢);pushDailyToCodex 非阻塞、永不抛错。
+    if (slotHourBjt === 8) {
+      await step.do('push-codex-daily', RETRY, async () => {
+        return await pushDailyToCodex(this.env, slotHourBjt);
       });
     }
 
