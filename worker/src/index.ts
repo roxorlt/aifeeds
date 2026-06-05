@@ -56,6 +56,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
+import { renderXCardViaCodex, buildXCardPayload } from './x-card-render';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -213,6 +214,8 @@ export interface Env {
   DIGEST_EMAIL_HMAC?: string;             // 邮件回流 token HMAC secret(32B hex)
   RESEND_WEBHOOK_SECRET?: string;         // Resend(Svix)webhook 签名校验 secret
   DIGEST_API_KEY?: string;                // 对外日报 JSON API(GET /api/digest/daily)Bearer key
+  X_CARD_SHARED_TOKEN?: string;           // 调 Codex X 卡片渲染 API 的 Bearer token(P3)
+  X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://82.156.0.68/aifeeds/api/render/x-card)
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -3748,6 +3751,18 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const result = await runXMediaR2Migrate(env, limit, days);
     const pending = await countXMediaR2Pending(env, days);
     return jsonResponse({ ...result, pending, days: days || null }, 200, request, env);
+  }
+  if (mode === 'x-card-render') {
+    // P2/P3 联调:?mode=x-card-render&itemId=x_list:<tid>[&dry=1]
+    // dry=1 只返拼好的 payload(P2 自测,不调 Codex);否则真渲染(P3)+ 转存 R2。
+    const itemId = url.searchParams.get('itemId') || '';
+    if (!itemId) return jsonResponse({ error: 'missing itemId' }, 400, request, env);
+    if (url.searchParams.get('dry') === '1') {
+      const payload = await buildXCardPayload(env, itemId);
+      return jsonResponse(payload ? { ok: true, dry: true, payload } : { ok: false, error: 'item_not_found' }, 200, request, env);
+    }
+    const result = await renderXCardViaCodex(env, itemId);
+    return jsonResponse(result, result.ok ? 200 : 502, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
