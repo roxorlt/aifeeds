@@ -218,6 +218,7 @@ export interface Env {
   X_CARD_SHARED_TOKEN?: string;           // 调 Codex X 卡片渲染 API 的 Bearer token(P3)。日报推送也复用此 token
   X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://82.156.0.68/aifeeds/api/render/x-card)
   DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
+  DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /

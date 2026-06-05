@@ -189,9 +189,10 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
       });
     }
 
-    // Phase 3:仅早 8 点 → 把当天日报内容(快照,normal,ph/gh/hf-paper)并行推给 Codex 渲染机。
-    // 放在 deliver spawn 之后(邮件已在投递路上,不拖慢);pushDailyToCodex 非阻塞、永不抛错。
-    if (slotHourBjt === 8) {
+    // Phase 3:仅早 8 点 + 总开关 DAILY_PUSH_ENABLED==='1' → 把当天日报内容(快照,normal,
+    // ph/gh/hf-paper)并行推给 Codex 渲染机。放在 deliver spawn 之后(邮件已在投递路上,不拖慢);
+    // pushDailyToCodex 非阻塞、永不抛错。开关默认关,手动 mode(daily-codex-push)不受此限。
+    if (slotHourBjt === 8 && this.env.DAILY_PUSH_ENABLED === '1') {
       await step.do('push-codex-daily', RETRY, async () => {
         return await pushDailyToCodex(this.env, slotHourBjt);
       });
