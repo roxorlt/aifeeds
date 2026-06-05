@@ -56,7 +56,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
-import { renderXCardViaCodex, buildXCardPayload } from './x-card-render';
+import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender } from './x-card-render';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -1514,6 +1514,15 @@ export default {
           .catch((e) => console.error('[digest] node-run create fail', e)),
       );
     }
+
+    // X 卡片渲染队列:每 tick drain 2 条(空队列一次 SELECT 秒回,不阻塞主 cron)。
+    // 设计 docs/plans/2026-06-05-x-card-ops-render-design.md §3。串行渲染天然符合
+    // Codex 并发1/3-5s;低量(爆推/趋势每小时几条),24/h 容量充足。
+    ctx.waitUntil(
+      runDrainXCardRenders(env, 2)
+        .then((res) => { if (res.picked > 0) console.log('[cron] x-card-render drain:', JSON.stringify(res)); })
+        .catch((e) => console.error('[cron] x-card-render drain failed:', e)),
+    );
 
     // GitHub trending fetch (phase 1) at BJT 01:00 + 13:00 (= UTC 17:00 + 05:00).
     // 2 subrequests, doesn't conflict with X cron rotation.
@@ -3763,6 +3772,19 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await renderXCardViaCodex(env, itemId);
     return jsonResponse(result, result.ok ? 200 : 502, request, env);
+  }
+  if (mode === 'x-card-enqueue') {
+    // 测试/手动:把一条入渲染队列(?itemId=x_list:<tid>),等 drain 或 cron 渲。
+    const itemId = url.searchParams.get('itemId') || '';
+    if (!itemId) return jsonResponse({ error: 'missing itemId' }, 400, request, env);
+    await enqueueXCardRender(env, itemId, 'manual');
+    return jsonResponse({ ok: true, item_id: itemId, status: 'pending' }, 200, request, env);
+  }
+  if (mode === 'drain-x-card-renders') {
+    // 渲染队列 drain(cron 每 tick 自动跑 limit=2;此 mode 供 OPS/测试手动触发)。
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '2'), 1), 10);
+    const result = await runDrainXCardRenders(env, limit);
+    return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。

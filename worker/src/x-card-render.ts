@@ -196,3 +196,76 @@ export async function renderXCardViaCodex(env: Env, itemId: string): Promise<XCa
   }
   return { ok: false, error: lastErr };
 }
+
+// ─── 渲染队列 drain（cron tick + enrich mode 共用）────────────────
+// 设计:docs/plans/2026-06-05-x-card-ops-render-design.md §3。
+// 取 pending,逐条渲染(串行,天然符合 Codex 并发1/3-5s)。渲染前确认 enrich 完成
+// (有中文译文或本就中文 + 媒体已迁 R2),否则跳过等下轮,不渲半成品。
+const MAX_RENDER_ATTEMPTS = 3;
+
+export async function runDrainXCardRenders(
+  env: Env,
+  limit = 2,
+): Promise<{ picked: number; rendered: number; skipped_not_ready: number; failed: number; pending_left: number }> {
+  const counts = { picked: 0, rendered: 0, skipped_not_ready: 0, failed: 0, pending_left: 0 };
+  if (!env.X_CARD_SHARED_TOKEN || !env.READMES) return counts;
+
+  const rows = await env.DB.prepare(
+    `SELECT item_id, attempts FROM x_card_renders WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`,
+  ).bind(Math.min(Math.max(limit, 1), 10)).all<{ item_id: string; attempts: number }>();
+
+  for (const r of rows.results || []) {
+    counts.picked++;
+    // enrich 就绪检查
+    const it = await env.DB.prepare(
+      `SELECT content_translated, lang, json_extract(extra,'$.x_media_r2_at') AS r2 FROM items WHERE id = ? AND source_type = 'x_list'`,
+    ).bind(r.item_id).first<{ content_translated: string | null; lang: string | null; r2: string | null }>();
+    if (!it) {
+      await env.DB.prepare(`UPDATE x_card_renders SET status='failed', error='item_gone' WHERE item_id=?`).bind(r.item_id).run();
+      counts.failed++;
+      continue;
+    }
+    const isZh = it.lang === 'zh' || it.lang === 'zh-cn' || it.lang === 'zh-tw';
+    const ready = (isZh || !!it.content_translated) && !!it.r2;
+    if (!ready) { counts.skipped_not_ready++; continue; } // 留 pending,等下轮
+
+    await env.DB.prepare(`UPDATE x_card_renders SET status='rendering' WHERE item_id=?`).bind(r.item_id).run();
+    const res = await renderXCardViaCodex(env, r.item_id);
+    const now = Math.floor(Date.now() / 1000);
+    if (res.ok) {
+      await env.DB.prepare(
+        `UPDATE x_card_renders SET status='ok', image_url=?, render_key=?, rendered_at=?, error=NULL WHERE item_id=?`,
+      ).bind(res.url || null, res.render_key || null, now, r.item_id).run();
+      counts.rendered++;
+    } else {
+      const nextAttempts = r.attempts + 1;
+      const nextStatus = nextAttempts >= MAX_RENDER_ATTEMPTS ? 'failed' : 'pending';
+      await env.DB.prepare(
+        `UPDATE x_card_renders SET status=?, error=?, attempts=? WHERE item_id=?`,
+      ).bind(nextStatus, res.error || 'render_failed', nextAttempts, r.item_id).run();
+      counts.failed++;
+    }
+  }
+
+  const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM x_card_renders WHERE status='pending'`).first<{ n: number }>();
+  counts.pending_left = left?.n ?? 0;
+  return counts;
+}
+
+// 入队 helper(detect 自动 + 手动添加共用)。
+export async function enqueueXCardRender(env: Env, itemId: string, source: 'pool-auto' | 'manual'): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  // manual 重新入队 → 覆盖重置;pool-auto 已存在则不动(避免重复入队)。
+  if (source === 'manual') {
+    await env.DB.prepare(
+      `INSERT INTO x_card_renders (item_id, status, source, attempts, created_at)
+       VALUES (?, 'pending', 'manual', 0, ?)
+       ON CONFLICT(item_id) DO UPDATE SET status='pending', source='manual', attempts=0, error=NULL, created_at=?`,
+    ).bind(itemId, now, now).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO x_card_renders (item_id, status, source, attempts, created_at)
+       VALUES (?, 'pending', 'pool-auto', 0, ?)`,
+    ).bind(itemId, now).run();
+  }
+}
