@@ -15,6 +15,7 @@
 import type { Env } from '../index';
 import { pushDeerAlert } from '../notifier';
 import { fetchTweetsScrapeBadger } from '../scrapebadger';
+import { enqueueXCardRender } from '../x-card-render';
 import { OPS_CONFIG } from './config';
 
 const PROD_HOST = 'https://ai-feeds.com';
@@ -232,6 +233,8 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
       }, now);
       if (inserted) {
         result.baopui_added++;
+        // 2026-06-05:入池即入渲染队列(Phase C)。失败不阻塞检测/PushDeer。
+        try { await enqueueXCardRender(env, r.id, 'pool-auto'); } catch (e) { console.error('[detect] enqueue render fail', r.id, e); }
         const snippet = (r.content_translated || r.content || '').slice(0, 80);
         pushList.push({
           pool: 'baopui',
@@ -294,6 +297,7 @@ export async function runOpsDetect(env: Env): Promise<DetectResult> {
         }, now);
         if (inserted) {
           result.trend_added++;
+          try { await enqueueXCardRender(env, r.id, 'pool-auto'); } catch (e) { console.error('[detect] enqueue render fail', r.id, e); }
           const snippet = (r.content_translated || r.content || '').slice(0, 80);
           pushList.push({
             pool: 'trend',

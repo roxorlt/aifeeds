@@ -56,7 +56,7 @@ import {
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
-import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender } from './x-card-render';
+import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -3785,6 +3785,13 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '2'), 1), 10);
     const result = await runDrainXCardRenders(env, limit);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'x-card-manual') {
+    // 手动添加(Phase D 测试入口;UI 走 /api/admin/x-card-manual):?url=<x推文/抽屉地址>
+    const u = url.searchParams.get('url') || '';
+    if (!u) return jsonResponse({ error: 'missing url' }, 400, request, env);
+    const result = await addManualXCardRender(env, u);
+    return jsonResponse(result, result.ok ? 200 : 400, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。

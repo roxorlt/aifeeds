@@ -14,6 +14,8 @@
 import type { Env } from './index';
 import { getBases } from './digest/lib';
 import { migrateXMediaForItem } from './x-media-r2';
+import { sbTweetToIngestItem, type SbTweet } from './scrapebadger';
+import { triggerXWorkflowForItem } from './enrich';
 
 // 2026-06-05 Codex 切到 HTTPS 域名端点(避免 token 明文 + 绕开 Worker 调 IP literal 触发的网络层拦截)。
 // 旧 http://82.156.0.68 端点 Worker 调会 403(疑似腾讯云/宝塔全局 IP 黑名单,请求没进 nginx)。
@@ -250,6 +252,82 @@ export async function runDrainXCardRenders(
   const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM x_card_renders WHERE status='pending'`).first<{ n: number }>();
   counts.pending_left = left?.n ?? 0;
   return counts;
+}
+
+// ─── 手动添加(Phase D):解析 URL → 不在库则抓取入库 → 入队 ────────
+// 支持 x.com/twitter.com/.../status/<id>、ai-feeds.com(/staging)/t/<id>、裸数字 id。
+const TWEET_ID_RES: RegExp[] = [
+  /(?:x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/i,
+  /\/t\/(\d+)/, // aifeeds 抽屉深链
+  /^(\d{8,25})$/, // 裸 tweet id
+];
+function parseTweetId(raw: string): string | null {
+  const s = (raw || '').trim();
+  for (const re of TWEET_ID_RES) {
+    const m = s.match(re);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+async function fetchSbTweetById(env: Env, id: string): Promise<SbTweet | null> {
+  if (!env.SCRAPEBADGER_API_KEY) return null;
+  try {
+    const r = await fetch(`https://scrapebadger.com/v1/twitter/tweets/?tweets=${id}`, {
+      headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const body = (await r.json()) as { data?: SbTweet[] };
+    return body.data?.[0] || null;
+  } catch (e) {
+    console.error(`[x-card-manual] SB fetch ${id}:`, e);
+    return null;
+  }
+}
+
+export async function addManualXCardRender(
+  env: Env,
+  url: string,
+): Promise<{ ok: boolean; item_id?: string; tweet_id?: string; ingested?: boolean; status?: string; error?: string }> {
+  const tweetId = parseTweetId(url);
+  if (!tweetId) return { ok: false, error: 'bad_url' };
+  const itemId = `x_list:${tweetId}`;
+
+  const existing = await env.DB.prepare(
+    `SELECT 1 AS x FROM items WHERE id = ? AND source_type = 'x_list'`,
+  ).bind(itemId).first<{ x: number }>();
+
+  let ingested = false;
+  if (!existing) {
+    const t = await fetchSbTweetById(env, tweetId);
+    if (!t) return { ok: false, error: 'tweet_not_found' };
+    const item = sbTweetToIngestItem(t);
+    if (!item) return { ok: false, error: 'ingest_failed' };
+    // 手动添加 = operator 主动选,强制 is_relevant=1 让 workflow 翻译它(否则 classify
+    // 可能判 0 → 不翻译 → 渲染就绪检查永远等不到译文)。
+    await env.DB.prepare(`
+      INSERT INTO items (id, source_type, source_id, title, content,
+        content_translated, author, handle, url, media, metrics, published_at,
+        scraped_at, is_relevant, matched_by, lang, extra)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(id) DO NOTHING
+    `).bind(
+      itemId, item.source_type, item.source_id, item.title, item.content,
+      item.content_translated, item.author, item.handle, item.url, item.media, item.metrics,
+      item.published_at, item.scraped_at, 'x-card-manual', item.lang, item.extra,
+    ).run();
+
+    await triggerXWorkflowForItem(env, itemId, {
+      hasQuoteRef: !!t.quoted_status_id,
+      hasReplyRef: !!t.in_reply_to_status_id,
+      hasLinkCard: !!t.has_card,
+      hasRetweetRef: !!(t.is_retweet || t.retweeted_status_id),
+    });
+    ingested = true;
+  }
+
+  await enqueueXCardRender(env, itemId, 'manual');
+  return { ok: true, item_id: itemId, tweet_id: tweetId, ingested, status: 'pending' };
 }
 
 // 入队 helper(detect 自动 + 手动添加共用)。
