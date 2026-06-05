@@ -40,6 +40,7 @@ import {
   translateXArticlesForXTweet,
   classifyAndTranslateForXTweet,
 } from '../enrich';
+import { migrateXMediaForItem } from '../x-media-r2';
 
 interface XTweetParams {
   itemId: string;
@@ -202,6 +203,18 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
         safeStep('longform-via-sb', itemId, () => fetchLongformViaScrapeBadger(this.env, itemId)),
       );
     }
+
+    // ─── Step 2.5: X 媒体 → R2 缓存 ──────────────────────────────
+    // 2026-06-04 P0(docs/plans/2026-06-04-x-card-render-api.md):fan-out + longform 之后,
+    // 头像/媒体/嵌套(quote_of/retweet_of)字段都已 backfill 完整,把 twimg 资源缓存进 R2、
+    // 就地改写为 /r/x/...。
+    // 位置考究:① 放 classify-translate(step3)之前 —— step3 是 extra 整体读改写,
+    // 串行 await 保证它读到的是已改写成 /r/ 的 extra,不会覆盖回 twimg;
+    // ② 放 mark-completed(step4)之前 —— 下发时媒体已是稳定 https 链接,不会先露 twimg 死链。
+    // 幂等:migrateXMediaForItem 见 x_media_r2_at 已设则早退,retry 安全。
+    await step.do('x-media-r2', RETRY, () =>
+      safeStep('x-media-r2', itemId, () => migrateXMediaForItem(this.env, itemId)),
+    );
 
     // ─── Step 3: classify + translate 合并调用 (JSON Mode 1 次) ──
     // 2026-05-17 重构:合并 classifyXTweetWithLlm + translateXTweetField × 6 = 7 次调用 → 1 次。
