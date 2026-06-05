@@ -100,7 +100,7 @@ import {
   checkAdminAuth,
 } from './admin';
 import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
-import { serveAdminOpsHtml, handleAdminOps } from './admin-ops';
+import { serveAdminOpsHtml, handleAdminOps, handleXCardManual, handleXCardRepush } from './admin-ops';
 import { runOpsBaseline } from './ops/baseline';
 import { runOpsDetect } from './ops/detect';
 import { recordCronRun } from './cron-runs';
@@ -521,6 +521,12 @@ export default {
       }
       if (path === '/api/admin/ops' && request.method === 'GET') {
         return handleAdminOps(request, env);
+      }
+      if (path === '/api/admin/x-card-manual' && request.method === 'POST') {
+        return handleXCardManual(request, env);
+      }
+      if (path === '/api/admin/x-card-render-repush' && request.method === 'POST') {
+        return handleXCardRepush(request, env);
       }
       if (path === '/api/admin/tasks' && request.method === 'GET') {
         return handleAdminTasks(request, env);

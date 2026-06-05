@@ -8,6 +8,29 @@
 import type { Env } from './index';
 import { ADMIN_SHARED_CSS, adminNavHtml, requireAuth, jsonRes } from './admin';
 import { OPS_CONFIG } from './ops/config';
+import { addManualXCardRender, enqueueXCardRender } from './x-card-render';
+
+// ─── POST /api/admin/x-card-manual + /api/admin/x-card-render-repush ──
+// 运营面板「手动渲染」+「重推」按钮调用,CF Access 鉴权同 handleAdminOps。
+export async function handleXCardManual(request: Request, env: Env): Promise<Response> {
+  const guard = await requireAuth(request, env);
+  if (guard) return guard;
+  let body: { url?: string };
+  try { body = (await request.json()) as { url?: string }; } catch { return jsonRes({ ok: false, error: 'bad_json' }, 400); }
+  if (!body.url) return jsonRes({ ok: false, error: 'missing url' }, 400);
+  const r = await addManualXCardRender(env, body.url);
+  return jsonRes(r, r.ok ? 200 : 400);
+}
+
+export async function handleXCardRepush(request: Request, env: Env): Promise<Response> {
+  const guard = await requireAuth(request, env);
+  if (guard) return guard;
+  let body: { item_id?: string };
+  try { body = (await request.json()) as { item_id?: string }; } catch { return jsonRes({ ok: false, error: 'bad_json' }, 400); }
+  if (!body.item_id) return jsonRes({ ok: false, error: 'missing item_id' }, 400);
+  await enqueueXCardRender(env, body.item_id, 'manual'); // upsert → status=pending, attempts=0
+  return jsonRes({ ok: true, item_id: body.item_id, status: 'pending' });
+}
 
 // ─── /api/admin/ops?metric=<name> ────────────────────────────────
 export async function handleAdminOps(request: Request, env: Env): Promise<Response> {
@@ -26,9 +49,11 @@ export async function handleAdminOps(request: Request, env: Env): Promise<Respon
       return jsonRes(await metricTrend(env));
     case 'discover':
       return jsonRes(await metricDiscover(env));
+    case 'renders':
+      return jsonRes(await metricRenders(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
-        'overview', 'baopui', 'trend', 'discover',
+        'overview', 'baopui', 'trend', 'discover', 'renders',
       ] }, 400);
   }
 }
@@ -68,9 +93,11 @@ async function metricBaopui(env: Env) {
     SELECT
       p.item_id, p.added_at, p.pushed_at, p.payload,
       i.handle, i.content, i.content_translated, i.url,
+      rc.status AS render_status, rc.image_url AS render_image, rc.error AS render_error,
       datetime(p.added_at, 'unixepoch', '+8 hours') AS added_bjt
     FROM ops_pool_items p
     JOIN items i ON i.id = p.item_id
+    LEFT JOIN x_card_renders rc ON rc.item_id = p.item_id
     WHERE p.pool_type = 'baopui'
       AND p.added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600
     ORDER BY p.added_at DESC
@@ -85,9 +112,11 @@ async function metricTrend(env: Env) {
     SELECT
       p.item_id, p.added_at, p.pushed_at, p.payload,
       i.handle, i.content, i.content_translated, i.url,
+      rc.status AS render_status, rc.image_url AS render_image, rc.error AS render_error,
       datetime(p.added_at, 'unixepoch', '+8 hours') AS added_bjt
     FROM ops_pool_items p
     JOIN items i ON i.id = p.item_id
+    LEFT JOIN x_card_renders rc ON rc.item_id = p.item_id
     WHERE p.pool_type = 'trend'
       AND p.added_at > strftime('%s','now') - ${OPS_CONFIG.POOL_DISPLAY_WINDOW_HOURS} * 3600
     ORDER BY p.added_at DESC
@@ -126,6 +155,22 @@ async function metricDiscover(env: Env) {
       AND added_at > strftime('%s','now') - ${OPS_CONFIG.DISCOVER_DISPLAY_WINDOW_DAYS} * 86400
     ORDER BY json_extract(payload, '$.distinct_tweets') DESC
     LIMIT 60
+  `).all();
+  return { items: rs.results };
+}
+
+async function metricRenders(env: Env) {
+  // 最近渲染(手动 + 自动池),给「手动渲染 / 渲染队列」区显示。
+  const rs = await env.DB.prepare(`
+    SELECT
+      rc.item_id, rc.status, rc.image_url, rc.error, rc.source, rc.attempts,
+      datetime(rc.created_at, 'unixepoch', '+8 hours') AS created_bjt,
+      CASE WHEN rc.rendered_at IS NOT NULL THEN datetime(rc.rendered_at, 'unixepoch', '+8 hours') ELSE NULL END AS rendered_bjt,
+      i.handle, i.content, i.content_translated
+    FROM x_card_renders rc
+    LEFT JOIN items i ON i.id = rc.item_id
+    ORDER BY rc.created_at DESC
+    LIMIT 40
   `).all();
   return { items: rs.results };
 }
@@ -187,6 +232,32 @@ ${ADMIN_SHARED_CSS}
   .loading { color: #6b7280; font-size: 12px; text-align: center; padding: 24px; }
   .empty { color: #6b7280; font-size: 12px; padding: 24px; text-align: center; }
   .err { color: #fca5a5; font-size: 12px; padding: 12px; background: #1f1212; border: 1px solid #7f1d1d; border-radius: 6px; }
+
+  /* X 卡片渲染状态 */
+  .rbadge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 7px; border-radius: 10px;
+            font-family: ui-monospace, monospace; margin-top: 8px; }
+  .rbadge.ok { background: #052e1a; color: #6ee7b7; border: 1px solid #14532d; }
+  .rbadge.pending { background: #1f1b08; color: #fcd34d; border: 1px solid #713f12; }
+  .rbadge.failed { background: #1f1212; color: #fca5a5; border: 1px solid #7f1d1d; }
+  .rbadge.none { background: #11161f; color: #6b7280; border: 1px solid #1f2937; }
+  .rbadge a { color: inherit; text-decoration: underline; }
+  .rbadge button { background: #7f1d1d; color: #fecaca; border: none; border-radius: 4px; padding: 1px 6px;
+                   font-size: 10px; cursor: pointer; font-family: inherit; }
+  .rbadge button:hover { background: #991b1b; }
+  .manual-row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .manual-row input { flex: 1; background: #0b0e14; border: 1px solid #1f2937; border-radius: 6px;
+                      color: #e6e8eb; padding: 8px 10px; font-size: 13px; }
+  .manual-row button { background: #1d4ed8; color: #fff; border: none; border-radius: 6px; padding: 8px 16px;
+                       font-size: 13px; cursor: pointer; }
+  .manual-row button:hover { background: #2563eb; }
+  .manual-row button:disabled { background: #374151; cursor: not-allowed; }
+  .render-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 8px 0;
+                border-bottom: 1px solid #1f2937; align-items: center; font-size: 12px; }
+  .render-row:last-child { border-bottom: none; }
+  .render-row img { width: 36px; height: 48px; object-fit: cover; border-radius: 3px; background: #0b0e14; }
+  .render-row .ph { width: 36px; height: 48px; border-radius: 3px; background: #0b0e14; border: 1px solid #1f2937; }
+  .render-row .rmeta { color: #9ca3af; }
+  .render-row .rmeta .h { color: #6ee7b7; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -199,6 +270,17 @@ ${adminNavHtml('ops')}
   <div class="kpi" data-testid="ops-kpi-trend"><div class="label">趋势推 (24h)</div><div class="value" id="kpi-trend">—</div><div class="hint">增速 &gt; P95</div></div>
   <div class="kpi" data-testid="ops-kpi-discover"><div class="label">发现博主 (14d)</div><div class="value" id="kpi-discover">—</div><div class="hint">distinct ≥ 5</div></div>
   <div class="kpi" data-testid="ops-kpi-pushed"><div class="label">已推送 (24h)</div><div class="value" id="kpi-pushed">—</div><div class="hint">PushDeer 触发</div></div>
+</div>
+
+<div class="section" data-testid="ops-section-render">
+  <h2>🖼️ X 卡片渲染</h2>
+  <p class="hint">爆推/趋势入池自动渲染（下方各卡片显示状态）；这里可手动填 X 推文地址或 aifeeds /t/ 抽屉地址加渲</p>
+  <div class="manual-row">
+    <input id="manual-url" type="text" placeholder="https://x.com/.../status/123  或  https://ai-feeds.com/t/123" />
+    <button id="manual-btn" onclick="submitManual()">渲染</button>
+  </div>
+  <div id="manual-msg" style="font-size:12px;margin-bottom:10px;color:#6b7280;"></div>
+  <div id="render-list"><div class="loading">loading…</div></div>
 </div>
 
 <div class="section" data-testid="ops-section-baopui">
@@ -293,6 +375,7 @@ async function loadBaopui() {
         + '</div>'
         + '<div class="metrics">likes ' + fmt(p.likes) + ' / rt ' + fmt(p.retweets) + ' / rp ' + fmt(p.replies) + ' / bm ' + fmt(p.bookmarks) + '</div>'
         + '<div class="snippet">' + snippet + '</div>'
+        + renderBadge(r)
         + '</div>';
     }).join('');
   } catch (e) { root.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
@@ -313,6 +396,7 @@ async function loadTrend() {
         + '  <a class="handle" href="' + esc(url) + '" target="_blank">@' + esc(r.handle) + '</a>'
         + '  <span class="meta"> · 增速 ' + fmt(p.rate) + ' likes/h（阈值 ' + fmt(p.threshold) + '） · 当前 ' + fmt(p.likes) + '</span>'
         + '  <div class="snippet">' + snippet + '</div>'
+        + '  ' + renderBadge(r)
         + '</div>'
         + '<div class="spark">' + spark + '</div>'
         + '</div>';
@@ -337,7 +421,62 @@ async function loadDiscover() {
   } catch (e) { root.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
 }
 
-Promise.all([loadOverview(), loadBaopui(), loadTrend(), loadDiscover()]);
+// X 卡片渲染状态徽章(爆推/趋势卡片用)
+function renderBadge(r) {
+  var st = r.render_status;
+  var iid = String(r.item_id || '');
+  if (!st) return '<div class="rbadge none">未渲染</div>';
+  if (st === 'ok') return '<div class="rbadge ok">✓ 已渲染 · <a href="' + esc(r.render_image) + '" target="_blank">看图</a></div>';
+  if (st === 'failed') return '<div class="rbadge failed">✗ ' + esc(r.render_error || '失败') + ' <button onclick="repush(\\'' + esc(iid) + '\\')">重推</button></div>';
+  return '<div class="rbadge pending">⏳ 渲染中…</div>';
+}
+
+async function repush(itemId) {
+  try {
+    await fetch('/api/admin/x-card-render-repush', { method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item_id: itemId }) });
+    await Promise.all([loadBaopui(), loadTrend(), loadRenders()]);
+  } catch (e) { alert('重推失败: ' + e.message); }
+}
+
+async function submitManual() {
+  var inp = document.getElementById('manual-url');
+  var btn = document.getElementById('manual-btn');
+  var msg = document.getElementById('manual-msg');
+  var u = inp.value.trim();
+  if (!u) return;
+  btn.disabled = true; msg.textContent = '提交中…'; msg.style.color = '#6b7280';
+  try {
+    var r = await fetch('/api/admin/x-card-manual', { method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: u }) });
+    var d = await r.json();
+    if (d.ok) { msg.textContent = '已入队' + (d.ingested ? '（新抓取入库，渲染需等翻译完成）' : ''); msg.style.color = '#6ee7b7'; inp.value = ''; await loadRenders(); }
+    else { msg.textContent = '失败: ' + (d.error || 'unknown'); msg.style.color = '#fca5a5'; }
+  } catch (e) { msg.textContent = '失败: ' + e.message; msg.style.color = '#fca5a5'; }
+  btn.disabled = false;
+}
+
+async function loadRenders() {
+  var root = document.getElementById('render-list');
+  try {
+    var d = await getJson('/api/admin/ops?metric=renders');
+    if (!d.items.length) { root.innerHTML = '<div class="empty">暂无渲染记录</div>'; return; }
+    root.innerHTML = d.items.map(function(r) {
+      var snippet = esc((r.content_translated || r.content || '').slice(0, 60));
+      var thumb = (r.status === 'ok' && r.image_url)
+        ? '<a href="' + esc(r.image_url) + '" target="_blank"><img src="' + esc(r.image_url) + '"/></a>'
+        : '<div class="ph"></div>';
+      var stTxt = r.status === 'ok' ? '<span style="color:#6ee7b7">✓ ' + esc(r.rendered_bjt || '') + '</span>'
+        : r.status === 'failed' ? '<span style="color:#fca5a5">✗ ' + esc(r.error || '失败') + '</span> <button class="rbadge failed" onclick="repush(\\'' + esc(String(r.item_id)) + '\\')">重推</button>'
+        : '<span style="color:#fcd34d">⏳ ' + esc(r.status) + '</span>';
+      return '<div class="render-row">' + thumb
+        + '<div class="rmeta"><span class="h">@' + esc(r.handle || '?') + '</span> · ' + esc(r.source) + ' · ' + esc(r.created_bjt) + '<div>' + snippet + '</div></div>'
+        + '<div>' + stTxt + '</div></div>';
+    }).join('');
+  } catch (e) { root.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
+}
+
+Promise.all([loadOverview(), loadBaopui(), loadTrend(), loadDiscover(), loadRenders()]);
 </script>
 </body>
 </html>`;
