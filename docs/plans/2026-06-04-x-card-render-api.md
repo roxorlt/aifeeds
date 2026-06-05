@@ -133,12 +133,12 @@ aifeeds 拼 payload → POST Codex 渲染 → Codex 回成品(URL 或字节)
 
 ## 8. aifeeds 侧实现计划(本分支 `feat/x-card-render`)
 
-| 阶段 | 内容 | 落点 |
-|------|------|------|
-| P0 | **X 媒体 → R2 缓存**:扩展 ph-r2 模式,迁 `media[].url` + 头像;workflow 实时迁新推 + cron 增量迁存量 | 新 `worker/src/x-media-r2.ts` |
-| P1 | **日报 API 换链**:`/api/digest/daily` 的 logo/media 统一输出 R2 链接(补 X/GH) | `worker/src/digest/` |
-| P2 | **payload 组装器**:给 tweet_id,从 D1 拼出 §5.1 payload(含内容哈希) | 新内部函数 |
-| P3 | **调 Codex + 转存**:POST payload → 取回成品 → 存 R2 → 返最终 URL;幂等缓存 | 新 endpoint |
+| 阶段 | 内容 | 落点 | 状态 |
+|------|------|------|------|
+| P0 | **X 媒体 → R2 缓存**:迁 `media[].url`+`poster`+头像(`_400x400`)+L2 嵌套;workflow step 2.5 实时迁新推 + `mode=x-media-r2[&days=N]` 批量迁存量 | `worker/src/x-media-r2.ts` | ✅ **2026-06-05 上线**(staging 验证→prod 部署→回填最近 14 天) |
+| P1 | **日报 API 换链**:`/api/digest/daily` 的 logo/media 统一输出 R2 链接(补 X/GH) | `worker/src/digest/` | 待做 |
+| P2 | **payload 组装器**:给 tweet_id,从 D1 拼出 §5.1 payload(含内容哈希) | 新内部函数 | 待做 |
+| P3 | **调 Codex + 转存**:POST payload(带 `shared_token`)→ 收 PNG 字节 → 存 R2 → 返 `/r/x-card/<render_key>.png` | 新 endpoint | 待做(需 Codex 发 token) |
 
 验证:每阶段 staging 跑通再合 main;只从 main 发 prod。Codex 侧是其自有服务器/仓库,与本分支无关。
 
