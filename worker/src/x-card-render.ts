@@ -15,7 +15,9 @@ import type { Env } from './index';
 import { getBases } from './digest/lib';
 import { migrateXMediaForItem } from './x-media-r2';
 
-const DEFAULT_ENDPOINT = 'http://82.156.0.68/aifeeds/api/render/x-card';
+// 2026-06-05 Codex 切到 HTTPS 域名端点(避免 token 明文 + 绕开 Worker 调 IP literal 触发的网络层拦截)。
+// 旧 http://82.156.0.68 端点 Worker 调会 403(疑似腾讯云/宝塔全局 IP 黑名单,请求没进 nginx)。
+const DEFAULT_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/render/x-card';
 const RENDER_TIMEOUT_MS = 60_000;
 
 async function sha256Hex(s: string): Promise<string> {
