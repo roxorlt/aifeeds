@@ -1,4 +1,5 @@
 import type { Item, ItemExtra } from "../types";
+import { resolveAssetUrl } from "./asset";
 
 export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
@@ -135,6 +136,11 @@ export function proxyImg(
   opts: { force?: boolean } = {},
 ): string {
   if (!url) return "";
+  // 2026-06-05 fix:相对路径(/r/ R2 反代 + /avatars/ HF identicon)在 new URL() 会 throw,
+  // 旧逻辑 catch 后原样返回 → <img src="/r/x/...">被浏览器按前端域名(ai-feeds.com)解析,
+  // Pages 无 /r/ route → SPA 兜底返 index.html(text/html)→ 图裂。
+  // P0 把 X 头像迁 R2 后头像值变成 /r/x/... 暴露了这个洞。先拼成绝对 URL 再走代理逻辑。
+  url = resolveAssetUrl(url);
   try {
     const u = new URL(url);
     if (opts.force || PROXY_HOSTS.has(u.hostname)) {
