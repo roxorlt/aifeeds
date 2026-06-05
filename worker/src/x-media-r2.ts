@@ -212,18 +212,24 @@ async function migrateRow(env: Env, row: XItemRow): Promise<{ migrated: number; 
 export async function runXMediaR2Migrate(
   env: Env,
   limit = 5,
+  sinceDays?: number,
 ): Promise<{ picked: number; ok: number; assets_migrated: number; assets_failed: number; failed: number }> {
   const counts = { picked: 0, ok: 0, assets_migrated: 0, assets_failed: 0, failed: 0 };
   if (!env.READMES) {
     console.warn('[x-media-r2] R2 binding READMES not configured — skip');
     return counts;
   }
+  // sinceDays>0:只迁最近 N 天(scraped_at 窗口),供"回填最近 N 天"用;不传则全量。
+  const dateFilter = sinceDays && sinceDays > 0
+    ? `AND scraped_at >= datetime('now', '-${Math.floor(sinceDays)} days')`
+    : '';
   const rows = await env.DB.prepare(
     `SELECT id, source_id, media as media_raw, extra as extra_raw
        FROM items
       WHERE source_type='x_list'
         AND is_relevant = 1
         AND json_extract(extra, '$.x_media_r2_at') IS NULL
+        ${dateFilter}
       ORDER BY scraped_at DESC
       LIMIT ?`,
   ).bind(Math.min(Math.max(limit, 1), 50)).all<XItemRow>();
@@ -259,11 +265,15 @@ export async function migrateXMediaForItem(env: Env, itemId: string): Promise<{ 
   return { migrated: r.migrated, failed: r.failed };
 }
 
-export async function countXMediaR2Pending(env: Env): Promise<number> {
+export async function countXMediaR2Pending(env: Env, sinceDays?: number): Promise<number> {
+  const dateFilter = sinceDays && sinceDays > 0
+    ? `AND scraped_at >= datetime('now', '-${Math.floor(sinceDays)} days')`
+    : '';
   const r = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items
       WHERE source_type='x_list' AND is_relevant = 1
-        AND json_extract(extra, '$.x_media_r2_at') IS NULL`,
+        AND json_extract(extra, '$.x_media_r2_at') IS NULL
+        ${dateFilter}`,
   ).first<{ n: number }>();
   return r?.n ?? 0;
 }

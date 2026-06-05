@@ -3743,9 +3743,11 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       Math.max(parseInt(url.searchParams.get('limit') || '5'), 1),
       50,
     );
-    const result = await runXMediaR2Migrate(env, limit);
-    const pending = await countXMediaR2Pending(env);
-    return jsonResponse({ ...result, pending }, 200, request, env);
+    // days=N:只迁最近 N 天(回填窗口);不传=全量。pending 也按同窗口算,drain 到 0 即停。
+    const days = Math.max(parseInt(url.searchParams.get('days') || '0'), 0) || undefined;
+    const result = await runXMediaR2Migrate(env, limit, days);
+    const pending = await countXMediaR2Pending(env, days);
+    return jsonResponse({ ...result, pending, days: days || null }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
