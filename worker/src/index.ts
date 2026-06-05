@@ -4544,7 +4544,7 @@ function isBotGateExempt(path: string, method: string): boolean {
 }
 
 const R2_REFERER_ALLOW = new Set<string>([
-  'ai-feeds.com', 'www.ai-feeds.com', 'api.ai-feeds.com',
+  'ai-feeds.com', 'www.ai-feeds.com', 'api.ai-feeds.com', 'admin.ai-feeds.com',
   'staging.ai-feeds.com', 'staging-api.ai-feeds.com',
   'twitter.com', 'x.com', 'mobile.twitter.com', 'mobile.x.com', 't.co',
   'producthunt.com', 'www.producthunt.com',
@@ -4572,7 +4572,9 @@ async function handleR2Asset(request: Request, env: Env, key: string): Promise<R
   if (!env.READMES) return new Response('R2 not configured', { status: 503 });
   if (!key) return new Response('missing key', { status: 400 });
 
-  if (!isAllowedR2Referer(request.headers.get('Referer') || '')) {
+  // x-card 输出卡片是给社媒分发用的(本就要被各处嵌入/转载),任意 referer 都放行,不做防盗链。
+  const isPublicCard = key.startsWith('x-card/');
+  if (!isPublicCard && !isAllowedR2Referer(request.headers.get('Referer') || '')) {
     return new Response('Forbidden (hotlink)', {
       status: 403,
       headers: {
