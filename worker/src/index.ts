@@ -55,6 +55,7 @@ import {
   triggerGhWorkflowForItem,
 } from './github';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
+import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -3734,6 +3735,17 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     );
     const result = await runRetweetLongformBackfill(env, limit);
     return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'x-media-r2') {
+    // 2026-06-04 P0:把 X 头像/媒体缓存进 R2,改写 media+extra 里的 twimg URL 为 /r/x/...
+    // SB 无关,纯下载+R2 put。limit 默认 5,反复调直到 pending=0(见 countXMediaR2Pending)。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '5'), 1),
+      50,
+    );
+    const result = await runXMediaR2Migrate(env, limit);
+    const pending = await countXMediaR2Pending(env);
+    return jsonResponse({ ...result, pending }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
