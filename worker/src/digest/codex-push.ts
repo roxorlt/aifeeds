@@ -166,6 +166,12 @@ export interface DailyPushResult {
 export async function pushDailyToCodex(env: Env, slotHourBjt = 8, dateOverride?: string): Promise<DailyPushResult> {
   if (!env.X_CARD_SHARED_TOKEN) return { ok: false, skipped: 'no_token' };
 
+  // 闸:只有 prod 能真推到 Codex 生产端;staging/dev 一律拦死(防假数据污染 Codex,2026-06-07 事故)。
+  // staging 验证只能用 dry=1 看 payload 结构,绝不真推。
+  if (!getBases(env).apiBase.includes('//api.ai-feeds.com')) {
+    return { ok: false, skipped: 'non_prod_blocked' };
+  }
+
   let payload: DailyCodexPayload;
   try {
     payload = await buildDailyCodexPayload(env, slotHourBjt, dateOverride);
