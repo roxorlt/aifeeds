@@ -3812,7 +3812,8 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     if (url.searchParams.get('dry') === '1') {
       const payload = await buildDailyCodexPayload(env, 8, dateParam);
       const total = payload.digest.sections.normal.reduce((n, s) => n + s.count, 0);
-      return jsonResponse({ ok: true, dry: true, total_items: total, payload }, 200, request, env);
+      // daily_push_enabled:8 点自动推总开关状态(与 node-run Phase 3 的门控同款判断),便于验证
+      return jsonResponse({ ok: true, dry: true, daily_push_enabled: env.DAILY_PUSH_ENABLED === '1', total_items: total, payload }, 200, request, env);
     }
     const result = await pushDailyToCodex(env, 8, dateParam);
     return jsonResponse(result, result.ok ? 200 : 502, request, env);
