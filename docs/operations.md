@@ -1429,6 +1429,17 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - [ ] 节点 cron prod 确认（BE）：UTC 0/4/9 是否如期触发 node-run
 - [ ] 真人端到端验收：订阅 → welcome → 点链接回流登录 + 落地抽屉 → 退订
 
+### 日报推送 Codex 渲染机（daily/ingest，**2026-06-07 上线**）
+
+> 早 8 点 `digest-node-run-workflow` 算完当天榜单后，并行把日报内容推给 Codex 渲染机做下游加工（日报图 / ZIP / 微信+小红书文案）。Codex 工作台：`https://ai-feeds.cc/aifeeds/`。设计：`docs/plans/2026-06-05-daily-codex-push-design.md`。
+
+- **触发**：`DigestNodeRunWorkflow` Phase 3，仅 `slotHourBjt===8` **且** 总开关 `DAILY_PUSH_ENABLED==='1'`。放在 deliver spawn 之后，非阻塞（`pushDailyToCodex` 永不抛错，失败 PushDeer），不影响邮件投递。
+- **内容**：当天 8 点 `digest_pool` 快照（normal 档，ph/gh/hf-paper 三源），复用 `digest/render.ts` `renderItem` 出完整条目：title=`title_zh`（论文原始标题译文，对齐前端）/ summary / cover+media（R2 链接）/ url / deep_link。`render_key` 内容指纹幂等。
+- **端点**：`POST https://ai-feeds.cc/aifeeds/api/daily/ingest`，`Bearer X_CARD_SHARED_TOKEN`（复用 X-card 那个，可被 `DAILY_PUSH_ENDPOINT` env 覆盖）。
+- **总开关** `DAILY_PUSH_ENABLED`：prod = `1`（已开）；staging/dev 不设。**另有硬闸**：`pushDailyToCodex` 只在 `API_BASE` 含 `//api.ai-feeds.com`（prod）才真推，staging/dev 一律返 `non_prod_blocked`（2026-06-07 staging 假数据污染 Codex 事故后加，staging 验证只能 dry）。
+- **手动触发 / 重推**：`POST /api/enrich/run?mode=daily-codex-push[&date=YYYY-MM-DD][&dry=1]`（`Bearer INGEST_TOKEN`）。`dry=1` 只返 payload + `daily_push_enabled` 诊断、不真推；`date` 重推指定日的池（默认今天）。
+- ⚠️ **同一天勿连推多条不同 render_key**：Codex 按日期覆盖图、文案按 render_key，多条会图文错位（2026-06-07 事故）。Codex 侧已加串行 + 最新 render_key 胜出保护，但本侧也应只推一条干净 payload。
+
 ---
 
 ## 本地服务（MacBook）
