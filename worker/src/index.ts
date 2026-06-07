@@ -3803,14 +3803,18 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     return jsonResponse(result, result.ok ? 200 : 400, request, env);
   }
   if (mode === 'daily-codex-push') {
-    // 日报推 Codex 渲染机(正常由早 8 点 workflow 自动跑;此 mode 供测试手动触发)。
-    // ?dry=1 只返拼好的 payload(看结构,不真 POST);否则真推 + 返 Codex 202 结果。
+    // 日报推 Codex 渲染机(正常由早 8 点 workflow 自动跑;此 mode 供测试/重推手动触发)。
+    // ?date=YYYY-MM-DD 重推指定日(默认今天);?dry=1 只返 payload 不真 POST。
+    const dateParam = url.searchParams.get('date') || undefined;
+    if (dateParam && !/^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
     if (url.searchParams.get('dry') === '1') {
-      const payload = await buildDailyCodexPayload(env, 8);
+      const payload = await buildDailyCodexPayload(env, 8, dateParam);
       const total = payload.digest.sections.normal.reduce((n, s) => n + s.count, 0);
       return jsonResponse({ ok: true, dry: true, total_items: total, payload }, 200, request, env);
     }
-    const result = await pushDailyToCodex(env, 8);
+    const result = await pushDailyToCodex(env, 8, dateParam);
     return jsonResponse(result, result.ok ? 200 : 502, request, env);
   }
   if (mode === 'backfill-l3-translations') {

@@ -97,9 +97,12 @@ export interface DailyCodexPayload {
 export async function buildDailyCodexPayload(
   env: Env,
   slotHourBjt = 8,
+  dateOverride?: string, // 'YYYY-MM-DD':重推指定日的池(默认今天)
 ): Promise<DailyCodexPayload> {
-  const sk = slotKey(slotHourBjt);
-  const date = bjtDateStr();
+  const date = dateOverride || bjtDateStr();
+  const sk = dateOverride
+    ? `${dateOverride}-${String(slotHourBjt).padStart(2, '0')}`
+    : slotKey(slotHourBjt);
   const { apiBase } = getBases(env);
 
   const sections: DailyCodexPayload['digest']['sections']['normal'] = [];
@@ -160,12 +163,12 @@ export interface DailyPushResult {
 }
 
 // 构造 payload + POST Codex。内部对 5xx/网络错重试一次。永不抛错(非阻塞)。
-export async function pushDailyToCodex(env: Env, slotHourBjt = 8): Promise<DailyPushResult> {
+export async function pushDailyToCodex(env: Env, slotHourBjt = 8, dateOverride?: string): Promise<DailyPushResult> {
   if (!env.X_CARD_SHARED_TOKEN) return { ok: false, skipped: 'no_token' };
 
   let payload: DailyCodexPayload;
   try {
-    payload = await buildDailyCodexPayload(env, slotHourBjt);
+    payload = await buildDailyCodexPayload(env, slotHourBjt, dateOverride);
   } catch (e) {
     const error = String(e).slice(0, 200);
     await pushDeerAlert(env, '日报推 Codex 失败', `构造 payload 异常: ${error}`).catch(() => {});
