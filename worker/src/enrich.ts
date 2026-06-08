@@ -308,13 +308,15 @@ export function sbTweetToQuoteOf(t: SbTweet): QuoteOf {
   };
 }
 
-// ─── 拉「被转推原推」快照:SB by-ids 优先 + syndication 兜底 ──────────
-// 根因(2026-06-08 查):retweet_of 原作者快照旧路径单走 cdn.syndication.twimg.com,
-// 从 Cloudflare worker 出口只有 ~30% 成功(Twitter 节流数据中心 IP),导致 ~70% 转推
-// retweet_of 永远空 → FE 翻转 fallback 显示转推者本人(「X 转帖 X 自己」)。SB by-ids
-// 用 API-key 鉴权不受 IP 节流,从 CF 稳定返完整原推 → 当主路径,syndication 仅兜底。
-// 返回:{quoteOf} 成功 / {notFound} 原推删/封/私密 / null 两路都传输失败(调用方 retry)。
-async function fetchRetweetOriginSnapshot(
+// ─── 按 id 拉单条推快照(QuoteOf):SB by-ids 优先 + syndication 兜底 ──────────
+// 通用 helper,给 retweet_of(被转推原推)/ quote_of(被引用推)/ reply_of(父推)三处共用。
+// 根因(2026-06-08 查):这些「被引用/转推/回复」原推快照旧路径单走
+// cdn.syndication.twimg.com,从 Cloudflare worker 出口只有 ~30% 成功(Twitter 节流
+// 数据中心 IP),导致大量 retweet_of/quote_of 永空 → FE 翻转 fallback 显示转推者本人
+// (「X 转帖 X 自己」)。SB by-ids 用 API-key 鉴权不受 IP 节流,从 CF 稳定返完整原推 →
+// 当主路径,syndication 仅兜底。返回:{quoteOf} 成功 / {notFound} 原推删/封/私密 /
+// null 两路都传输失败(调用方按需 retry)。
+async function fetchTweetSnapshotById(
   env: EnrichEnv,
   originId: string,
 ): Promise<{ quoteOf: QuoteOf } | { notFound: true } | null> {
@@ -971,28 +973,25 @@ export async function runBackfillQuotes(
 
   for (const row of candidates) {
     const tid = row.source_id;
-    const res = await fetchTweet(tid);
-    if (res === null) {
-      state.failed_ids.push(tid);
-      counts.failed++;
-    } else if (res.notFound) {
-      state.not_found_ids.push(tid);
-      counts.not_found++;
-    } else if (res.data) {
-      const qt = res.data.quoted_tweet as
-        | Record<string, unknown>
-        | undefined;
-      const card = apiToLinkCard(res.data);
-      const apiReplyTo = res.data.in_reply_to_status_id_str as
-        | string
-        | undefined;
+    let extraObj: Record<string, unknown> = {};
+    try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+    const quoteOfId =
+      typeof extraObj.quote_of_id === 'string' && extraObj.quote_of_id ? extraObj.quote_of_id : null;
 
-      const patch: Patch = {};
-      let gotAny = false;
+    const res = await fetchTweet(tid);
+    const synOk = !!(res && !res.notFound && res.data);
+    const patch: Patch = {};
+    let hasQuote = false;
+    let gotAny = false;
+    if (res && !res.notFound && res.data) {
+      const qt = res.data.quoted_tweet as Record<string, unknown> | undefined;
+      const card = apiToLinkCard(res.data);
+      const apiReplyTo = res.data.in_reply_to_status_id_str as string | undefined;
       if (qt && qt.id_str) {
         patch.quote_of_id = qt.id_str as string;
         patch.quote_of = apiToQuoteOf(qt);
         counts.with_quote++;
+        hasQuote = true;
         gotAny = true;
       }
       if (card) {
@@ -1000,11 +999,30 @@ export async function runBackfillQuotes(
         counts.with_card++;
         gotAny = true;
       }
-      if (!apiReplyTo) {
-        patch.clearThreadRoot = true;
+      if (!apiReplyTo) patch.clearThreadRoot = true;
+    }
+    // SB-first 兜底 quote_of:syndication 没 inline quote(从 CF ~30% 常态),但已知
+    // quote_of_id → 用 SB by-ids 拉被引用推,根治 quote_of 低填充率(2026-06-08)。
+    if (!hasQuote && quoteOfId) {
+      const snap = await fetchTweetSnapshotById(env, quoteOfId);
+      if (snap && 'quoteOf' in snap) {
+        patch.quote_of_id = quoteOfId;
+        patch.quote_of = snap.quoteOf;
+        counts.with_quote++;
+        hasQuote = true;
+        gotAny = true;
       }
+    }
+    if (res === null && !hasQuote) {
+      // 两路都传输失败 → failed,不写 sentinel,下轮重试
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (!synOk && !hasQuote) {
+      // syndication notFound + SB 也没拿到(原推删/无引用)→ not_found sentinel
+      state.not_found_ids.push(tid);
+      counts.not_found++;
+    } else {
       if (!gotAny) counts.empty++;
-
       await applyPatch(env, row, patch);
       state.processed_ids.push(tid);
       counts.processed++;
@@ -1098,39 +1116,55 @@ export async function runBackfillReplies(
 
   for (const row of candidates) {
     const tid = row.source_id;
-    const res = await fetchTweet(tid);
-    if (res === null) {
-      state.failed_ids.push(tid);
-      counts.failed++;
-    } else if (res.notFound) {
-      state.not_found_ids.push(tid);
-      counts.not_found++;
-    } else if (res.data) {
-      const apiReplyToId = res.data.in_reply_to_status_id_str as
-        | string
-        | undefined;
-      const apiReplyToHandle = res.data.in_reply_to_screen_name as
-        | string
-        | undefined;
-      const parent = res.data.parent as Record<string, unknown> | undefined;
+    let extraObj: Record<string, unknown> = {};
+    try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+    const replyToId =
+      typeof extraObj.reply_to_id === 'string' && extraObj.reply_to_id ? extraObj.reply_to_id : null;
 
-      const patch: Patch = { reply_enriched: true };
+    const res = await fetchTweet(tid);
+    const synOk = !!(res && !res.notFound && res.data);
+    const patch: Patch = { reply_enriched: true };
+    let isReply = false;
+    let replyOfFilled = false;
+    if (res && !res.notFound && res.data) {
+      const apiReplyToId = res.data.in_reply_to_status_id_str as string | undefined;
+      const apiReplyToHandle = res.data.in_reply_to_screen_name as string | undefined;
+      const parent = res.data.parent as Record<string, unknown> | undefined;
       if (apiReplyToId) {
         patch.reply_of_id = apiReplyToId;
         patch.reply_to_screen_name = apiReplyToHandle ?? null;
         if (parent && parent.id_str) {
           patch.reply_of = apiToQuoteOf(parent);
+          replyOfFilled = true;
         } else {
-          // Parent suppressed (deleted/protected) — keep id+handle for the
-          // "↩ 回复 @handle" placeholder, leave reply_of null.
+          // Parent suppressed (deleted/protected) — keep id+handle,reply_of 待 SB 兜底
           patch.reply_of = null;
         }
-        counts.with_reply++;
-      } else {
-        // Confirmed not a reply. Still mark sentinel so we skip on rerun.
-        counts.no_reply++;
+        isReply = true;
       }
-
+    }
+    // SB-first 兜底 reply_of:parent 缺(suppressed)或 syndication 失败,有正面证据是回复
+    // 时(syndication 确认 / ingest reply_to_id)用 SB by-ids 拉父推(2026-06-08)。
+    if (!replyOfFilled && replyToId && (isReply || !synOk)) {
+      const snap = await fetchTweetSnapshotById(env, replyToId);
+      if (snap && 'quoteOf' in snap) {
+        patch.reply_of_id = patch.reply_of_id || replyToId;
+        patch.reply_of = snap.quoteOf;
+        replyOfFilled = true;
+        isReply = true;
+      }
+    }
+    if (res === null && !replyOfFilled) {
+      // 两路都传输失败 → failed,下轮重试
+      state.failed_ids.push(tid);
+      counts.failed++;
+    } else if (!synOk && !isReply) {
+      // syndication notFound + 非回复 / SB 没父推 → not_found sentinel
+      state.not_found_ids.push(tid);
+      counts.not_found++;
+    } else {
+      if (isReply) counts.with_reply++;
+      else counts.no_reply++;
       try {
         await applyPatch(env, row, patch);
         state.processed_ids.push(tid);
@@ -1248,7 +1282,7 @@ export async function runBackfillRetweets(
     // 用 retweeted_status_id(被转推那条)拉原推快照,不是 row.source_id。
     // SB by-ids 优先 + syndication 兜底(2026-06-08 根治:旧单走 syndication 从 CF ~30%)。
     const targetId = row.retweeted_status_id;
-    const res = await fetchRetweetOriginSnapshot(env, targetId);
+    const res = await fetchTweetSnapshotById(env, targetId);
     if (res === null) {
       state.failed_ids.push(row.source_id);
       counts.failed++;
@@ -5925,32 +5959,54 @@ export async function backfillQuoteForXTweet(
   ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
   if (!row) throw new Error(`backfillQuoteForXTweet: item not found ${itemId}`);
 
-  const res = await fetchTweet(row.source_id);
-  if (res === null) {
-    throw new Error(`backfillQuoteForXTweet: fetchTweet failed ${row.source_id}`);
-  }
-  if (res.notFound || !res.data) {
-    console.log(`[x-workflow:step2a] ${itemId}: tweet not found via syndication`);
-    return { has_quote: false, has_link_card: false };
-  }
+  let extraObj: Record<string, unknown> = {};
+  try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+  const quoteOfId =
+    typeof extraObj.quote_of_id === 'string' && extraObj.quote_of_id ? extraObj.quote_of_id : null;
 
-  const qt = res.data.quoted_tweet as Record<string, unknown> | undefined;
-  const card = apiToLinkCard(res.data);
-  const apiReplyTo = res.data.in_reply_to_status_id_str as string | undefined;
+  // syndication 主推(免费):inline quote + link_card + thread-root 信号
+  const res = await fetchTweet(row.source_id);
+  const synOk = !!(res && !res.notFound && res.data);
 
   const patch: Patch = {};
   let hasQuote = false;
   let hasLinkCard = false;
-  if (qt && qt.id_str) {
-    patch.quote_of_id = qt.id_str as string;
-    patch.quote_of = apiToQuoteOf(qt);
-    hasQuote = true;
+  if (res && !res.notFound && res.data) {
+    const qt = res.data.quoted_tweet as Record<string, unknown> | undefined;
+    const card = apiToLinkCard(res.data);
+    const apiReplyTo = res.data.in_reply_to_status_id_str as string | undefined;
+    if (qt && qt.id_str) {
+      patch.quote_of_id = qt.id_str as string;
+      patch.quote_of = apiToQuoteOf(qt);
+      hasQuote = true;
+    }
+    if (card) {
+      patch.link_card = card;
+      hasLinkCard = true;
+    }
+    if (!apiReplyTo) patch.clearThreadRoot = true;
   }
-  if (card) {
-    patch.link_card = card;
-    hasLinkCard = true;
+
+  // SB-first 兜底 quote_of:syndication 没 inline quote(从 CF ~30% 常态),但 ingest
+  // 已知 quote_of_id → 用 SB by-ids 直接拉被引用推,根治 quote_of 低填充率(2026-06-08)。
+  if (!hasQuote && quoteOfId) {
+    const snap = await fetchTweetSnapshotById(env, quoteOfId);
+    if (snap && 'quoteOf' in snap) {
+      patch.quote_of_id = quoteOfId;
+      patch.quote_of = snap.quoteOf;
+      hasQuote = true;
+    }
   }
-  if (!apiReplyTo) patch.clearThreadRoot = true;
+
+  // syndication 传输失败且 SB 也没拿到 → throw 让 workflow retry
+  if (res === null && !hasQuote) {
+    throw new Error(`backfillQuoteForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  // syndication 不可用(notFound/失败)且 SB 没 quote → 没东西可写,直接返回
+  if (!synOk && !hasQuote) {
+    console.log(`[x-workflow:step2a] ${itemId}: no quote/card (syn unavailable, SB miss)`);
+    return { has_quote: false, has_link_card: false };
+  }
 
   await applyPatch(env, row as CandidateRow, patch);
   console.log(`[x-workflow:step2a] ${itemId}: quote=${hasQuote} link_card=${hasLinkCard}`);
@@ -5970,31 +6026,57 @@ export async function backfillReplyForXTweet(
   ).bind(itemId).first<{ id: string; source_id: string; extra: string | null }>();
   if (!row) throw new Error(`backfillReplyForXTweet: item not found ${itemId}`);
 
-  const res = await fetchTweet(row.source_id);
-  if (res === null) {
-    throw new Error(`backfillReplyForXTweet: fetchTweet failed ${row.source_id}`);
-  }
-  if (res.notFound || !res.data) {
-    console.log(`[x-workflow:step2b] ${itemId}: tweet not found via syndication`);
-    return { has_reply: false };
-  }
+  let extraObj: Record<string, unknown> = {};
+  try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+  const replyToId =
+    typeof extraObj.reply_to_id === 'string' && extraObj.reply_to_id ? extraObj.reply_to_id : null;
 
-  const apiReplyToId = res.data.in_reply_to_status_id_str as string | undefined;
-  const apiReplyToHandle = res.data.in_reply_to_screen_name as string | undefined;
-  const parent = res.data.parent as Record<string, unknown> | undefined;
+  // syndication 主推(免费):reply_to_id + inline parent 快照
+  const res = await fetchTweet(row.source_id);
+  const synOk = !!(res && !res.notFound && res.data);
 
   const patch: Patch = { reply_enriched: true };
   let hasReply = false;
-  if (apiReplyToId) {
-    patch.reply_of_id = apiReplyToId;
-    patch.reply_to_screen_name = apiReplyToHandle ?? null;
-    if (parent && parent.id_str) {
-      patch.reply_of = apiToQuoteOf(parent);
-    } else {
-      // Parent suppressed (deleted/protected) — keep id+handle 但 reply_of null
-      patch.reply_of = null;
+  let replyOfFilled = false;
+  if (res && !res.notFound && res.data) {
+    const apiReplyToId = res.data.in_reply_to_status_id_str as string | undefined;
+    const apiReplyToHandle = res.data.in_reply_to_screen_name as string | undefined;
+    const parent = res.data.parent as Record<string, unknown> | undefined;
+    if (apiReplyToId) {
+      patch.reply_of_id = apiReplyToId;
+      patch.reply_to_screen_name = apiReplyToHandle ?? null;
+      if (parent && parent.id_str) {
+        patch.reply_of = apiToQuoteOf(parent);
+        replyOfFilled = true;
+      } else {
+        // Parent suppressed (deleted/protected) — keep id+handle,reply_of 待 SB 兜底
+        patch.reply_of = null;
+      }
+      hasReply = true;
     }
-    hasReply = true;
+  }
+
+  // SB-first 兜底 reply_of:syndication parent 缺(suppressed)或 syndication 失败,但
+  // 有正面证据是回复(syndication 确认 / ingest reply_to_id)→ 用 SB by-ids 拉父推快照。
+  // syndication 在线且明确判非回复时不强行兜底(syndication 对主推自身字段权威)。
+  if (!replyOfFilled && replyToId && (hasReply || !synOk)) {
+    const snap = await fetchTweetSnapshotById(env, replyToId);
+    if (snap && 'quoteOf' in snap) {
+      patch.reply_of_id = patch.reply_of_id || replyToId;
+      patch.reply_of = snap.quoteOf;
+      replyOfFilled = true;
+      hasReply = true;
+    }
+  }
+
+  // syndication 传输失败且 SB 也没拿到父推 → throw 让 workflow retry
+  if (res === null && !replyOfFilled) {
+    throw new Error(`backfillReplyForXTweet: fetchTweet failed ${row.source_id}`);
+  }
+  // syndication 不可用且不是回复 / SB 也没父推 → 没东西可写,直接返回
+  if (!synOk && !hasReply) {
+    console.log(`[x-workflow:step2b] ${itemId}: no reply (syn unavailable, SB miss)`);
+    return { has_reply: false };
   }
 
   await applyPatch(env, row as CandidateRow, patch);
@@ -6034,7 +6116,7 @@ export async function backfillRetweetForXTweet(
   }
 
   // SB by-ids 优先 + syndication 兜底(2026-06-08 根治:旧单走 syndication 从 CF ~30% 成功)
-  const res = await fetchRetweetOriginSnapshot(env, targetId);
+  const res = await fetchTweetSnapshotById(env, targetId);
   if (res === null) {
     throw new Error(`backfillRetweetForXTweet: origin fetch failed ${targetId}`);
   }
