@@ -1062,21 +1062,30 @@ async function selectReplyBackfillCandidates(
   env: EnrichEnv,
   done: Set<string>,
   limit: number,
+  recover = false,
 ): Promise<CandidateRow[]> {
   const fetchBatch = Math.min(Math.max(limit * 2, 100), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT id, source_id, extra
-     FROM items
-     WHERE source_type = 'x_list'
-       AND is_relevant = 1
-       AND (extra IS NULL
-            OR (extra NOT LIKE '%"reply_enriched_at"%'
-                AND extra NOT LIKE '%"reply_of"%'))
-     ORDER BY published_at DESC, id DESC
-     LIMIT ?`,
-  )
-    .bind(fetchBatch)
-    .all<CandidateRow>();
+  // recover=true:选 "reply_to_id 有但 reply_of 没" 的存量,绕开 reply_enriched_at 哨兵
+  // (覆盖早期处理过、父推当时被隐藏 → reply_of=null 打了哨兵、老 SQL 不再选回的 row)。
+  // 默认 recover=false:选未跑过 reply backfill 的 row(首次回填)。
+  const sql = recover
+    ? `SELECT id, source_id, extra
+       FROM items
+       WHERE source_type = 'x_list' AND deleted_at IS NULL
+         AND extra ->> '$.reply_to_id' IS NOT NULL
+         AND extra ->> '$.reply_of' IS NULL
+       ORDER BY scraped_at DESC
+       LIMIT ?`
+    : `SELECT id, source_id, extra
+       FROM items
+       WHERE source_type = 'x_list'
+         AND is_relevant = 1
+         AND (extra IS NULL
+              OR (extra NOT LIKE '%"reply_enriched_at"%'
+                  AND extra NOT LIKE '%"reply_of"%'))
+       ORDER BY published_at DESC, id DESC
+       LIMIT ?`;
+  const rows = await env.DB.prepare(sql).bind(fetchBatch).all<CandidateRow>();
 
   const out: CandidateRow[] = [];
   for (const r of rows.results) {
@@ -1092,16 +1101,20 @@ export async function runBackfillReplies(
   env: EnrichEnv,
   limit = 20,
   rateSleepMs = 400,
+  recover = false,
 ): Promise<RunResult> {
   const mode = "backfill-replies";
   const t0 = Date.now();
-  const state = await loadState(env, mode);
-  const done = new Set<string>([
+  // recover=true 时不读 state KV(绕开 sentinel),不写 processed_ids
+  const state: EnrichState = recover
+    ? { processed_ids: [], not_found_ids: [], failed_ids: [], started_at: new Date().toISOString(), last_update: null }
+    : await loadState(env, mode);
+  const done = new Set<string>(recover ? [] : [
     ...state.processed_ids,
     ...state.not_found_ids,
   ]);
 
-  const candidates = await selectReplyBackfillCandidates(env, done, limit);
+  const candidates = await selectReplyBackfillCandidates(env, done, limit, recover);
   const counts = {
     processed: 0,
     with_reply: 0,
@@ -1178,12 +1191,12 @@ export async function runBackfillReplies(
 
     if (rateSleepMs > 0) await sleep(rateSleepMs);
 
-    if (counts.processed % 25 === 0 && counts.processed > 0) {
+    if (!recover && counts.processed % 25 === 0 && counts.processed > 0) {
       await saveState(env, mode, state);
     }
   }
 
-  await saveState(env, mode, state);
+  if (!recover) await saveState(env, mode, state);
 
   return {
     mode,
