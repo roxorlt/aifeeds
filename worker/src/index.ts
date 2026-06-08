@@ -3724,7 +3724,11 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
       100,
     );
-    const result = await runBackfillQuotes(env, limit, rateSleepMs);
+    // recover=1:绕开 enriched_at sentinel,选 quote_of_id 有但 quote_of 空的存量
+    // (2026-06-08 修:此 dispatch 之前漏传 recover,导致 recover=1 被无视,存量 backlog
+    //  永远选不中 —— backfill-retweets dispatch 一直有传,所以转推能清存量而引用不能)。
+    const recover = url.searchParams.get('recover') === '1';
+    const result = await runBackfillQuotes(env, limit, rateSleepMs, recover);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-replies') {
