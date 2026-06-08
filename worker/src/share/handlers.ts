@@ -7,17 +7,25 @@ import type { CreateShareRequest, CreateShareResponse, LandingRequest, ShareRela
 import { authenticate } from '../auth/session';
 import { refreshSingleItem } from '../enrich';
 
-// 根据 worker 请求 host 推 (site, api) origin，三环境（dev/staging/prod）都能匹配
-function originsFor(request: Request): { site: string; api: string } {
+// 分享短链 / 二维码 / 落地跳转用的 (site, api) 规范公网域。
+// ⚠️ 2026-06-02 香港中转上线后,prod 的 api.ai-feeds.com 经 VPS nginx 反代到达 worker,
+// nginx 会把 Host 改写成 *.workers.dev —— 所以这里【不能】再靠 request host 推断域名,
+// 否则分享短链会写成 https://xlist-api.ltsms86.workers.dev/s/xxx,扫码直连 *.workers.dev
+// 没带 X-Origin-Secret,撞 index.ts 的 Origin gate 被 Forbidden(用户实测 2026-06-08)。
+// 改用 wrangler.toml 各环境已配的 SITE_BASE / API_BASE 当真值源(prod=ai-feeds.com /
+// staging=staging.ai-feeds.com),与邮件链接同一套规范域。
+function originsFor(request: Request, env: Env): { site: string; api: string } {
   const url = new URL(request.url);
-  const host = url.host;
-  if (host === 'staging-api.ai-feeds.com') {
-    return { site: 'https://staging.ai-feeds.com', api: 'https://staging-api.ai-feeds.com' };
+  // 本地 wrangler dev:Host 是 localhost/127.0.0.1,用请求 origin(site=api 同源,vite proxy 透传)。
+  // 放最前面短路,避免被下面的 env.*_BASE 带偏(wrangler.toml [vars] 在 local 也会加载,值是 prod 域)。
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+    return { site: url.origin, api: url.origin };
   }
-  if (host === 'api.ai-feeds.com') {
-    return { site: 'https://ai-feeds.com', api: 'https://api.ai-feeds.com' };
+  // 线上(prod/staging):用环境变量里的规范公网域。
+  if (env.SITE_BASE && env.API_BASE) {
+    return { site: env.SITE_BASE, api: env.API_BASE };
   }
-  // dev / wrangler local：site 跟 api 同 origin（vite proxy 透传）
+  // 兜底:env 没配(理论上不会发生)→ 退回请求 origin。
   return { site: url.origin, api: url.origin };
 }
 
@@ -87,8 +95,8 @@ export async function handleShareCreate(request: Request, env: Env, ctx: Executi
     }),
   );
 
-  // 5. 返回 — origin 跟着 request host 走，staging / prod 不串
-  const { site, api } = originsFor(request);
+  // 5. 返回 — origin 用各环境规范公网域(SITE_BASE/API_BASE),香港中转后不能再靠 request host
+  const { site, api } = originsFor(request, env);
   const response: CreateShareResponse = {
     token,
     share_url: `${api}/s/${token}`,
@@ -305,12 +313,12 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
     ).bind(rel.from_uid).first<{ display_name: string | null; avatar_url: string | null }>();
     if (user?.display_name) sharerName = user.display_name;
     const avatarUrl = user?.avatar_url || defaultAvatarPath(rel.from_uid);
-    sharerAvatarDataUri = await fetchAvatarAsDataUri(avatarUrl, request);
+    sharerAvatarDataUri = await fetchAvatarAsDataUri(avatarUrl, request, env);
   }
 
   const { renderShareSvg } = await import('./svg-template');
   const { renderSvgToPng } = await import('./poster');
-  const { api } = originsFor(request);
+  const { api } = originsFor(request, env);
   const svg = await renderShareSvg(posterItem, {
     token,
     shareUrl: `${api}/s/${token}`,
@@ -339,10 +347,10 @@ export async function handleSharePoster(request: Request, env: Env, token: strin
 
 // 根据 avatar URL fetch + base64 → data URI
 // 支持：https://... 完整 URL / /avatars/avatar-NN.png（需要拼 site origin）
-async function fetchAvatarAsDataUri(avatarUrl: string, request: Request): Promise<string | undefined> {
+async function fetchAvatarAsDataUri(avatarUrl: string, request: Request, env: Env): Promise<string | undefined> {
   let absUrl = avatarUrl;
   if (avatarUrl.startsWith('/')) {
-    const { site } = originsFor(request);
+    const { site } = originsFor(request, env);
     absUrl = site + avatarUrl;
   }
   try {
@@ -727,7 +735,7 @@ async function tryFetchPosterImage(
 
   let url = rawUrl;
   if (url.startsWith('/')) {
-    const { api } = originsFor(request);
+    const { api } = originsFor(request, env);
     url = api + url;
   }
   // PH imgix：限宽 1080 减小 fetch 体积；强转 png（resvg-wasm 不支持 gif/webp 嵌入）
@@ -954,7 +962,7 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 // 扫码命中：写 landed_at + to_did，redirect 到详情页
 
 export async function handleShareRedirect(request: Request, env: Env, ctx: ExecutionContext, token: string): Promise<Response> {
-  const { site } = originsFor(request);
+  const { site } = originsFor(request, env);
   const rel = await env.DB.prepare(`SELECT * FROM share_relations WHERE token = ?`).bind(token).first<ShareRelation>();
   if (!rel) {
     // token 不存在直接 redirect 首页
