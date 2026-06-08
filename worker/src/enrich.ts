@@ -252,6 +252,101 @@ export function apiToQuoteOf(qt: Record<string, unknown>): QuoteOf {
   };
 }
 
+// ─── SB tweet → QuoteOf 快照映射 ────────────────────────────────
+// apiToQuoteOf 的 ScrapeBadger 版:把 SB by-ids 返的扁平 SbTweet 映射成 QuoteOf
+// (原作者 / handle / 头像 / ✓ / 正文 / 媒体 / metrics)。SbTweet 字段扁平
+// (user_name / username / user_profile_image_url),不像 syndication 的嵌套 user 对象。
+export function sbTweetToQuoteOf(t: SbTweet): QuoteOf {
+  const media: QuoteOf['media'] = [];
+  for (const m of t.media || []) {
+    const rawUrl = m.url || m.preview_image_url || '';
+    if (!rawUrl) continue;
+    media.push({
+      type:
+        m.type === 'photo'
+          ? 'image'
+          : m.type === 'video' || m.type === 'animated_gif'
+            ? 'video'
+            : (m.type as string) || 'image',
+      url: rawUrl,
+      width: m.width ?? undefined,
+      height: m.height ?? undefined,
+    });
+  }
+  const metrics: NonNullable<QuoteOf['metrics']> = {};
+  if (typeof t.reply_count === 'number') metrics.replies = t.reply_count;
+  if (typeof t.retweet_count === 'number') metrics.retweets = t.retweet_count;
+  if (typeof t.favorite_count === 'number') metrics.likes = t.favorite_count;
+  const views =
+    typeof t.view_count === 'number'
+      ? t.view_count
+      : t.view_count
+        ? parseInt(String(t.view_count), 10)
+        : NaN;
+  if (Number.isFinite(views)) metrics.views = views;
+  const hasMetrics = Object.keys(metrics).length > 0;
+  // published_at 归一成 ISO,跟 syndication 路径(apiToQuoteOf 用 created_at ISO)对齐,
+  // 避免 retweet_of 来源不同导致 FE 时间格式不一致。SB created_at 是 "Tue May 05 ..." 格式。
+  let publishedAt: string | null = t.created_at || null;
+  if (publishedAt) {
+    const d = new Date(publishedAt);
+    if (!isNaN(d.getTime())) publishedAt = d.toISOString();
+  }
+  const nestedQuoteId =
+    typeof t.quoted_status_id === 'string' && t.quoted_status_id ? t.quoted_status_id : null;
+  return {
+    id: t.id || null,
+    author: t.user_name || null,
+    handle: t.username || null,
+    content: t.full_text || t.text || null,
+    profile_image_url: t.user_profile_image_url || null,
+    is_verified: t.user_is_blue_verified || t.user_verified ? 1 : 0,
+    media,
+    published_at: publishedAt,
+    ...(hasMetrics ? { metrics } : {}),
+    ...(nestedQuoteId ? { quote_of_id: nestedQuoteId } : {}),
+  };
+}
+
+// ─── 拉「被转推原推」快照:SB by-ids 优先 + syndication 兜底 ──────────
+// 根因(2026-06-08 查):retweet_of 原作者快照旧路径单走 cdn.syndication.twimg.com,
+// 从 Cloudflare worker 出口只有 ~30% 成功(Twitter 节流数据中心 IP),导致 ~70% 转推
+// retweet_of 永远空 → FE 翻转 fallback 显示转推者本人(「X 转帖 X 自己」)。SB by-ids
+// 用 API-key 鉴权不受 IP 节流,从 CF 稳定返完整原推 → 当主路径,syndication 仅兜底。
+// 返回:{quoteOf} 成功 / {notFound} 原推删/封/私密 / null 两路都传输失败(调用方 retry)。
+async function fetchRetweetOriginSnapshot(
+  env: EnrichEnv,
+  originId: string,
+): Promise<{ quoteOf: QuoteOf } | { notFound: true } | null> {
+  // 主路径:ScrapeBadger by-ids(从 CF 可靠,不受 syndication 的 IP 节流)
+  if (env.SCRAPEBADGER_API_KEY) {
+    try {
+      const url = `https://scrapebadger.com/v1/twitter/tweets/?tweets=${originId}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { 'x-api-key': env.SCRAPEBADGER_API_KEY, Accept: 'application/json' },
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { data?: SbTweet[] };
+        const t = body.data?.[0];
+        if (t && t.id) return { quoteOf: sbTweetToQuoteOf(t) };
+        // 200 但空 data → 不当永久 notFound(SB 偶发漏返),落到 syndication 再判
+      } else {
+        console.log(`[retweet-origin] SB HTTP ${res.status} for ${originId}, fallback syndication`);
+      }
+    } catch (e) {
+      console.log(
+        `[retweet-origin] SB error for ${originId}: ${e instanceof Error ? e.name : 'unknown'}, fallback`,
+      );
+    }
+  }
+  // 兜底:syndication(从 CF ~30%,但免费;SB 没配 / 限流 / 漏返时尽力一搏)
+  const syn = await fetchTweet(originId);
+  if (syn === null) return null; // 两路都传输失败 → caller throw → 下轮重试
+  if (syn.notFound || !syn.data) return { notFound: true };
+  return { quoteOf: apiToQuoteOf(syn.data) };
+}
+
 export interface LinkCard {
   url: string | null;
   display_url: string | null;
@@ -1150,13 +1245,14 @@ export async function runBackfillRetweets(
   };
 
   for (const row of candidates) {
-    // 注意：fetchTweet 用 retweeted_status_id（被转推那条），不是 row.source_id
+    // 用 retweeted_status_id(被转推那条)拉原推快照,不是 row.source_id。
+    // SB by-ids 优先 + syndication 兜底(2026-06-08 根治:旧单走 syndication 从 CF ~30%)。
     const targetId = row.retweeted_status_id;
-    const res = await fetchTweet(targetId);
+    const res = await fetchRetweetOriginSnapshot(env, targetId);
     if (res === null) {
       state.failed_ids.push(row.source_id);
       counts.failed++;
-    } else if (res.notFound) {
+    } else if ('notFound' in res) {
       // 原推被删 / 账号被封 / 私密 → 记 not_found 标记 sentinel 避免反复重试
       state.not_found_ids.push(row.source_id);
       counts.not_found++;
@@ -1167,10 +1263,10 @@ export async function runBackfillRetweets(
       } catch (e) {
         console.error(`[backfill-retweets] applyPatch (notFound sentinel) failed for ${row.source_id}:`, e);
       }
-    } else if (res.data) {
+    } else {
       const patch: Patch = {
         retweet_enriched: true,
-        retweet_of: apiToQuoteOf(res.data as unknown as Record<string, unknown>),
+        retweet_of: res.quoteOf,
       };
       counts.with_retweet++;
       try {
@@ -5937,11 +6033,12 @@ export async function backfillRetweetForXTweet(
     return { has_retweet: false, not_found: false };
   }
 
-  const res = await fetchTweet(targetId);
+  // SB by-ids 优先 + syndication 兜底(2026-06-08 根治:旧单走 syndication 从 CF ~30% 成功)
+  const res = await fetchRetweetOriginSnapshot(env, targetId);
   if (res === null) {
-    throw new Error(`backfillRetweetForXTweet: fetchTweet failed ${targetId}`);
+    throw new Error(`backfillRetweetForXTweet: origin fetch failed ${targetId}`);
   }
-  if (res.notFound || !res.data) {
+  if ('notFound' in res) {
     // 原推被删 / 账号封 / 私密 → sentinel 标 retweet_of=null + retweet_enriched=true 防重试
     await applyPatch(env, row as CandidateRow, { retweet_enriched: true, retweet_of: null });
     console.log(`[x-workflow:step2c] ${itemId}: retweet origin ${targetId} not found`);
@@ -5950,9 +6047,9 @@ export async function backfillRetweetForXTweet(
 
   await applyPatch(env, row as CandidateRow, {
     retweet_enriched: true,
-    retweet_of: apiToQuoteOf(res.data as unknown as Record<string, unknown>),
+    retweet_of: res.quoteOf,
   });
-  console.log(`[x-workflow:step2c] ${itemId}: retweet_of filled from ${targetId}`);
+  console.log(`[x-workflow:step2c] ${itemId}: retweet_of filled from ${targetId} (SB-first)`);
   return { has_retweet: true, not_found: false };
 }
 
