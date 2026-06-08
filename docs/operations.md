@@ -1027,6 +1027,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 - **按月续费**（DMIT），忘续 = 全站挂
 - 走香港的流量**不经 CF**，WAF / 缓存 / DDoS 改由 VPS 自己扛 —— 缓存 / 限流 / 防火墙 / fail2ban 已在 VPS 上重建（见下方「🛡️ VPS 防护层」），但**真正的大流量 DDoS 单机扛不住**，真出事按回滚退回 CF
 - **cookie 功能**（admin 后台 / 分享）：api 反代用 workers.dev 的 Host，cookie domain 可能受影响；nginx 已传 `X-Forwarded-Host: api.ai-feeds.com` 备用，异常时 BE 读它修
+  - **✅ 已踩坑并修复（2026-06-08）**：这个「Host 被改成 workers.dev」的副作用还坑了**分享短链/二维码/落地跳转** —— `worker/src/share/handlers.ts` 的 `originsFor()` 原本靠 request host 推域名，中转后 host=workers.dev → 落 dev fallback，分享二维码写成 `https://xlist-api.ltsms86.workers.dev/s/xxx`，**扫码直连 workers.dev 没带 `X-Origin-Secret` → 撞 Origin gate → Forbidden**（用户实测截图）。修复：`originsFor` 改用各环境已配的 `SITE_BASE`/`API_BASE`（与邮件链接同一套规范公网域，**没走 X-Forwarded-Host**，直接 env 真值源），localhost 短路保留本地 dev。**教训：中转后 worker 内任何「靠 request host 拼对外 URL」都不可信，一律用 env 的规范域**。
 - **数据仍回源海外**：api 是动态请求，香港只优化「大陆→香港」这段；「香港→CF Worker」那段仍走海外（已是服务器间高速链路，比大陆直连 CF 快）
 
 **🔙 回滚（退回全走 CF，今天之前状态）**：
