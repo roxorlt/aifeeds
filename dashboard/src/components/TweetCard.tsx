@@ -20,7 +20,6 @@ import { XArticleCard } from "./XArticleCard";
 import {
   IconEye,
   IconHeart,
-  IconQuote,
   IconReply,
   IconRetweet,
   IconThread,
@@ -700,18 +699,12 @@ export function TweetCard({
       )}
       {/* Thread / quote-placeholder banner (kept outside avatar block — rare cases).
           Reply banner moves into the content column, below the header (see further down). */}
-      {((isThread && !hideThreadBanner) || hasQuotePlaceholder || isRetweet) && (
+      {((isThread && !hideThreadBanner) || isRetweet) && (
         <div className="mb-1.5 ml-[52px] flex flex-wrap items-center gap-1.5 text-[12px] text-neutral-500">
           {isThread && !hideThreadBanner && (
             <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
               <IconThread className="h-3.5 w-3.5 fill-current text-sky-500" />
               <span className="whitespace-nowrap">Thread</span>
-            </span>
-          )}
-          {hasQuotePlaceholder && (
-            <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
-              <IconQuote className="h-3.5 w-3.5 fill-current text-neutral-400" />
-              <span className="whitespace-nowrap">引用推文</span>
             </span>
           )}
           {isRetweet && (
@@ -867,8 +860,15 @@ export function TweetCard({
               X 详情页用 thread 视觉语言：父推上移到主推**上方**，用 connector
               line 连接。父推渲染移到 article 顶部见下方 ReplyParentRow 块。 */}
 
-          {/* Quoted tweet (nested card) */}
-          {quoteOf && <QuotedTweet quote={quoteOf} posterMode={posterMode} />}
+          {/* Quoted tweet (nested card) — 拉不到原推时(被删/封)显示 X 风格「不可用」灰框,
+              对齐 X 原生 "This post is unavailable",不再用顶部「引用推文」标签 */}
+          {quoteOf ? (
+            <QuotedTweet quote={quoteOf} posterMode={posterMode} />
+          ) : hasQuotePlaceholder ? (
+            <div className="mt-2.5 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-[13px] text-neutral-400">
+              引用的推文已不可用
+            </div>
+          ) : null}
 
           {/* Link preview card (URL auto-expanded by X) —
               PM 2026-05-22: 过滤 link_card 指向本推文自己的 self-preview

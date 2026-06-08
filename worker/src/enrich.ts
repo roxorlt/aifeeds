@@ -319,6 +319,7 @@ export function sbTweetToQuoteOf(t: SbTweet): QuoteOf {
 async function fetchTweetSnapshotById(
   env: EnrichEnv,
   originId: string,
+  depth = 0,
 ): Promise<{ quoteOf: QuoteOf } | { notFound: true } | null> {
   // 主路径:ScrapeBadger by-ids(从 CF 可靠,不受 syndication 的 IP 节流)
   if (env.SCRAPEBADGER_API_KEY) {
@@ -331,7 +332,11 @@ async function fetchTweetSnapshotById(
       if (res.ok) {
         const body = (await res.json()) as { data?: SbTweet[] };
         const t = body.data?.[0];
-        if (t && t.id) return { quoteOf: sbTweetToQuoteOf(t) };
+        if (t && t.id) {
+          const quoteOf = sbTweetToQuoteOf(t);
+          await embedNestedQuote(env, quoteOf, depth);
+          return { quoteOf };
+        }
         // 200 但空 data → 不当永久 notFound(SB 偶发漏返),落到 syndication 再判
       } else {
         console.log(`[retweet-origin] SB HTTP ${res.status} for ${originId}, fallback syndication`);
@@ -346,7 +351,20 @@ async function fetchTweetSnapshotById(
   const syn = await fetchTweet(originId);
   if (syn === null) return null; // 两路都传输失败 → caller throw → 下轮重试
   if (syn.notFound || !syn.data) return { notFound: true };
-  return { quoteOf: apiToQuoteOf(syn.data) };
+  const quoteOf = apiToQuoteOf(syn.data);
+  await embedNestedQuote(env, quoteOf, depth);
+  return { quoteOf };
+}
+
+// 被引用/转推/回复的原推自己又引用了一条(quote_of_id 有但 quote_of 没)时,再拉一层
+// 嵌套快照 embed 进 quoteOf.quote_of,让 FE 能渲染内层引用卡(retweet_of.quote_of 等)。
+// 只递归 1 层(depth < 1):2 层以上 X 自己也不展开,够用且防 SB 调用爆炸。SB by-ids 不返
+// inline 嵌套推(syndication apiToQuoteOf 旧版会),所以 SB 路径必须显式再拉一次。
+async function embedNestedQuote(env: EnrichEnv, quoteOf: QuoteOf, depth: number): Promise<void> {
+  if (depth >= 1) return;
+  if (!quoteOf.quote_of_id || quoteOf.quote_of) return;
+  const nested = await fetchTweetSnapshotById(env, quoteOf.quote_of_id, depth + 1);
+  if (nested && 'quoteOf' in nested) quoteOf.quote_of = nested.quoteOf;
 }
 
 export interface LinkCard {
@@ -1209,6 +1227,82 @@ export async function runBackfillReplies(
     elapsed_ms: Date.now() - t0,
     remaining_hint: Math.max(0, candidates.length - counts.processed),
   };
+}
+
+// ─── backfill-nested-quotes mode ───────────────────────────────
+// 2026-06-08:retweet_of/quote_of 切 SB by-ids 后,内层引用(被转推/被引用的原推自己
+// 又引用了一条)只存了 quote_of_id 没存 quote_of 快照 —— SB by-ids 不返 inline 嵌套推
+// (syndication 旧版 apiToQuoteOf 会 inline)。导致 FE retweet_of.quote_of 渲染不出来。
+// 本 mode 选 [retweet_of|quote_of|reply_of].quote_of_id 有但 .quote_of 没的 row,拉嵌套
+// 原推用 json_set 精确写进嵌套 path(不整体覆盖父快照)。新进推文已由 fetchTweetSnapshotById
+// 的 depth 递归自动覆盖,本 mode 只清存量。嵌套原推删了 → 留空,FE 显示「引用不可用」灰框。
+const NESTED_QUOTE_PATHS = ['retweet_of', 'quote_of', 'reply_of'] as const;
+
+export async function runBackfillNestedQuotes(
+  env: EnrichEnv & { SCRAPEBADGER_API_KEY?: string },
+  limit = 20,
+  rateSleepMs = 200,
+): Promise<{
+  mode: 'backfill-nested-quotes';
+  processed: number;
+  filled: number;
+  not_found: number;
+  failed: number;
+  elapsed_ms: number;
+}> {
+  const t0 = Date.now();
+  const counts = { processed: 0, filled: 0, not_found: 0, failed: 0 };
+  const rows = await env.DB.prepare(
+    `SELECT id, extra FROM items
+       WHERE source_type = 'x_list' AND deleted_at IS NULL
+         AND (
+           (extra ->> '$.retweet_of.quote_of_id' IS NOT NULL AND extra ->> '$.retweet_of.quote_of' IS NULL)
+           OR (extra ->> '$.quote_of.quote_of_id' IS NOT NULL AND extra ->> '$.quote_of.quote_of' IS NULL)
+           OR (extra ->> '$.reply_of.quote_of_id' IS NOT NULL AND extra ->> '$.reply_of.quote_of' IS NULL)
+         )
+       ORDER BY scraped_at DESC
+       LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{ id: string; extra: string | null }>();
+
+  for (const row of rows.results) {
+    let ex: Record<string, unknown> = {};
+    try { ex = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
+    let anyFetch = false;
+    for (const path of NESTED_QUOTE_PATHS) {
+      try {
+        const parent = ex[path] as Record<string, unknown> | null | undefined;
+        if (!parent || typeof parent !== 'object') continue;
+        const nestedId = parent.quote_of_id;
+        if (typeof nestedId !== 'string' || !nestedId || parent.quote_of) continue;
+        anyFetch = true;
+        const snap = await fetchTweetSnapshotById(env, nestedId, 1); // depth=1:不再往下递归
+        if (snap === null) {
+          counts.failed++;
+          continue;
+        }
+        if ('notFound' in snap) {
+          // 嵌套原推删/封 → 留空(不写),FE 显示「引用不可用」灰框;loop 靠"无进展即停"收敛
+          counts.not_found++;
+          continue;
+        }
+        await env.DB.prepare(
+          `UPDATE items SET extra = json_set(coalesce(extra, '{}'), '$.${path}.quote_of', json(?)) WHERE id = ?`,
+        )
+          .bind(JSON.stringify(snap.quoteOf), row.id)
+          .run();
+        counts.filled++;
+      } catch (e) {
+        console.error(`[backfill-nested] ${row.id} ${path}:`, e);
+        counts.failed++;
+      }
+    }
+    counts.processed++;
+    if (anyFetch && rateSleepMs > 0) await sleep(rateSleepMs);
+  }
+
+  return { mode: 'backfill-nested-quotes', ...counts, elapsed_ms: Date.now() - t0 };
 }
 
 // ─── backfill-retweets mode ────────────────────────────────────

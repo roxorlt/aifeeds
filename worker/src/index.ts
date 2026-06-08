@@ -2,6 +2,7 @@ import {
   runBackfillQuotes,
   runBackfillReplies,
   runBackfillRetweets,
+  runBackfillNestedQuotes,
   runDedupeQuoteContent,
   runLongformFetchOne,
   runReclassifyThreads,
@@ -3740,6 +3741,16 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     // (2026-06-08:同 backfill-quotes,补 recover 透传,清早期父推被隐藏的回复存量)。
     const recover = url.searchParams.get('recover') === '1';
     const result = await runBackfillReplies(env, limit, rateSleepMs, recover);
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'backfill-nested-quotes') {
+    // 补 retweet_of/quote_of/reply_of 内层引用快照(SB by-ids 不返 inline 嵌套,2026-06-08)。
+    // 反复调直到 filled=0(嵌套删了的留空 → FE 灰框)。
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '20'), 1),
+      100,
+    );
+    const result = await runBackfillNestedQuotes(env, limit, rateSleepMs);
     return jsonResponse(result, 200, request, env);
   }
   if (mode === 'backfill-retweets') {
