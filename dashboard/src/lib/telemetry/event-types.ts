@@ -48,6 +48,7 @@ export const EVENTS = {
   PERF_TTFB: 'perf_ttfb',
   PERF_FCP: 'perf_fcp',         // First Contentful Paint — 比 LCP 早,首屏首字符耗时
   PERF_NAV: 'perf_nav',         // PerformanceNavigationTiming 全相位(dns/tcp/tls/ttfb/response/dcl/load)
+  PERF_IMG: 'perf_img',         // 封面图(/img 代理)加载耗时,Resource Timing 采样上报
   // 错误
   JS_ERROR: 'js_error',
   UNHANDLED_PROMISE: 'unhandled_promise',

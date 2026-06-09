@@ -349,6 +349,7 @@ async function metricLoadPerf(env: Env) {
     ['ttfb', 'perf_nav', 'ttfb'], ['fcp', 'perf_fcp', 'value'], ['lcp', 'perf_lcp', 'value'],
     ['dom', 'perf_nav', 'dom_interactive'], ['dcl', 'perf_nav', 'dcl'],
     ['response', 'perf_nav', 'response'], ['load', 'perf_nav', 'load'],
+    ['img', 'perf_img', 'dur'],
   ];
   const overall: Array<{ metric: string; p50: number; p75: number; p95: number; samples: number }> = [];
   for (const [name, t, p] of M) overall.push({ metric: name, ...(await pctl(env, t, p)) });
@@ -821,6 +822,7 @@ const EVENT_LABELS = {
   'perf_cls': '性能 · CLS',
   'perf_ttfb': '性能 · TTFB',
   'perf_fcp': '性能 · FCP',
+  'perf_img': '性能 · 封面图',
   'perf_nav': '性能 · 导航计时',
   'js_error': 'JS 错误',
   'unhandled_promise': 'Promise 错误',

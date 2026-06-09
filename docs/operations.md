@@ -1021,6 +1021,8 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 **VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
 
 > **2026-06-09 首屏提速（根因 = nginx 还在 HTTP/1.1）**：perf_nav 埋点实测大陆冷加载 `tcp:969 tls:347 ttfb:1353 load:7638`、但 `下载≈0` —— 慢在「每个资源单独冷建连」，不是下载。修：① 三个 443 server 块 `listen 443 ssl;` → `listen 443 ssl http2;`（含 `hktest.conf` 一起改，否则 0.0.0.0:443 protocol options redefined warning）；② `nginx.conf` 取消注释 `gzip_vary/gzip_proxied any/gzip_comp_level 6/gzip_types ...text/css...` —— 让 VPS 给 R2 来的字体 CSS 压缩（106KB→37KB，CF Pages 的 JS/CSS 仍是 br 透传不受影响）。TLS1.3 + BBR+fq 早已开。备份 `*.bak-20260609-100702`，回滚 = `cp` 回去 + `nginx -t && systemctl reload nginx`。验证：`curl --http2 -I https://ai-feeds.com/` 看 `HTTP/2`、字体 `content-encoding: gzip`。
+>
+> **2026-06-09 续（封面图 + www 规范化）**：① api server 块加 `location /img { proxy_pass …workers.dev; proxy_cache aifeeds_cache; proxy_cache_valid 200 30d; proxy_cache_key "$scheme$request_method$host$request_uri"; … }` —— 封面图(cf.image 缩到 ~7KB、`immutable` 1 周)改在香港边缘缓存,不再每张回源 worker(实测 `X-Cache-Status: MISS→HIT`)。② `www.ai-feeds.com` 拆出独立 server 块 `return 301 https://ai-feeds.com$request_uri`(复用 ai-feeds.com 证书,SAN 已含 www),front 块 server_name 去掉 www —— 统一规范域名,省用户在两域间重复冷建连。备份 `*.bak-imgwww-<ts>`。配套前端加 `perf_img` 埋点(Resource Timing 采样 /img 资源,admin「页面打开耗时」卡多一根 IMG 柱)看真机图片加载耗时。
 
 **切换时的前置改动**（回滚要逆操作）：
 - R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）

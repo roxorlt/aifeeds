@@ -40,7 +40,7 @@ export type EventTypeName =
   | 'video_autoplay_attempt' | 'video_autoplay_blocked' | 'video_play_start'
   | 'video_effective_play'
   // 性能(web-vitals + navigation timing)
-  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp' | 'perf_nav'
+  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp' | 'perf_nav' | 'perf_img'
   // 错误
   | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error'
   | 'feed_load_error';

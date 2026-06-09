@@ -102,6 +102,37 @@ export function installNavTiming(): void {
   else window.addEventListener('load', () => setTimeout(emit, 0), { once: true });
 }
 
+// perf_img: 封面图(经 /img 代理)的加载耗时。图多,按 IMG_SAMPLE 采样控制事件量。
+// Resource Timing 观察 /img? 资源,取 responseEnd-startTime;transferSize===0 表示
+// 浏览器缓存命中(看重复浏览的缓存效果)。VPS 边缘缓存的 HIT/MISS 客户端看不到
+// (CORS 不暴露响应头),但 dur 直接反映真实加载快慢 —— 用来量化"切 tab 封面图慢"。
+const IMG_SAMPLE = 0.25;
+export function installImgTiming(): void {
+  if (Math.random() >= SAMPLE_RATE) return;
+  if (typeof PerformanceObserver === 'undefined') return;
+  try {
+    const obs = new PerformanceObserver((list) => {
+      for (const e of list.getEntries() as PerformanceResourceTiming[]) {
+        if (!e.name.includes('/img?')) continue;
+        if (Math.random() >= IMG_SAMPLE) continue;
+        const dur = Math.round(e.responseEnd - e.startTime);
+        if (dur <= 0) continue;
+        const wMatch = e.name.match(/[?&]w=(\d+)/);
+        track(EVENTS.PERF_IMG, {
+          dur,
+          kb: Math.round((e.transferSize || 0) / 1024),
+          cached: e.transferSize === 0 && e.decodedBodySize > 0,
+          w: wMatch ? Number(wMatch[1]) : undefined,
+          ...deviceMeta(),
+        });
+      }
+    });
+    obs.observe({ type: 'resource', buffered: true });
+  } catch {
+    /* resource timing 不支持 → 略过 */
+  }
+}
+
 function report(eventType: string): (metric: Metric) => void {
   // device meta 只在 install 时算一次(connection.effectiveType 用户网络切换
   // 时会变,但成本极低这里偷懒不监听 change);如需精准捕获 install 后切换可

@@ -33,7 +33,7 @@ import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
-import { installVitals, installNavTiming } from "./lib/telemetry/vitals";
+import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
 import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
@@ -772,6 +772,7 @@ function DashboardHome() {
     initTelemetry({ endpoint: TRACK_ENDPOINT });
     installVitals();
     installNavTiming();
+    installImgTiming();
     installErrorHandlers();
     track(EVENTS.APP_OPEN, {
       utm_source: new URLSearchParams(window.location.search).get('utm_source') || undefined,
