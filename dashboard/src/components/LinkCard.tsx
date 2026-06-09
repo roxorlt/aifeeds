@@ -40,7 +40,7 @@ export function LinkCard({ card }: Props) {
           src={card.video_url || undefined}
           poster={posterSrc}
           controls
-          preload="metadata"
+          preload="none"
           playsInline
           className="aspect-[1.91/1] w-full bg-black object-cover"
           onClick={(e) => e.stopPropagation()}

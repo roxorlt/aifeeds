@@ -52,7 +52,7 @@ function PhGalleryVideo({
       className="h-44 w-72 shrink-0 snap-start rounded-md bg-neutral-200 object-cover"
       controls
       muted={muted}
-      preload="metadata"
+      preload="none"
       playsInline
       loop
     />

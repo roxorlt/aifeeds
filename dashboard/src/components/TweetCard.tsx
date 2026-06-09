@@ -96,7 +96,7 @@ function VideoPlayer({
       ref={videoRef}
       src={src}
       poster={poster}
-      preload="metadata"
+      preload="none"
       controls={showControls}
       muted={muted}
       loop
