@@ -2524,7 +2524,7 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const items = hasMore ? result.results.slice(0, limit) : result.results;
 
   // Parse JSON fields for response
-  const parsed = items.map(parseItemRow);
+  const parsed = items.map((r) => parseItemRow(r));
 
   // Build next cursor from last item
   let nextCursor: string | null = null;
@@ -2580,11 +2580,21 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   }, 200, request, env);
 }
 
-function parseItemRow(row: Record<string, unknown>): Record<string, unknown> {
+// 抽屉才用的重字段:feed 列表不渲染,但单条能占 item 90% 体积(PH top_comments 一条
+// 12-18KB)。列表默认剥掉,抽屉打开走 fetchItem(GET /api/items/:id, full=true)拿完整 extra。
+const LIST_HEAVY_EXTRA_KEYS = ['top_comments', 'llm_analysis', 'files_manifest', 'discussion_comments'];
+
+function parseItemRow(row: Record<string, unknown>, full = false): Record<string, unknown> {
   const parsed = { ...row };
   for (const field of ['media', 'metrics', 'extra']) {
     if (typeof parsed[field] === 'string') {
       try { parsed[field] = JSON.parse(parsed[field] as string); } catch {}
+    }
+  }
+  if (!full && parsed.extra && typeof parsed.extra === 'object') {
+    const ex = parsed.extra as Record<string, unknown>;
+    for (const k of LIST_HEAVY_EXTRA_KEYS) {
+      if (k in ex) delete ex[k];
     }
   }
   return parsed;
@@ -2689,7 +2699,7 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map(parseItemRow);
+  const items = rows.map((r) => parseItemRow(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
@@ -2912,7 +2922,7 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map(parseItemRow);
+  const items = rows.map((r) => parseItemRow(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
@@ -3004,7 +3014,7 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map(parseItemRow);
+  const items = rows.map((r) => parseItemRow(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
@@ -3433,7 +3443,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     return jsonResponse({ error: 'not_found' }, 404, request, env);
   }
 
-  const parsedItem = parseItemRow(item);
+  const parsedItem = parseItemRow(item, true);  // 单条详情(抽屉来源)要完整 extra:top_comments / llm_analysis 等
   const extra = parsedItem.extra as { thread_root_id?: string } | null | undefined;
   const threadRootId = extra && typeof extra === 'object' ? extra.thread_root_id : undefined;
 
@@ -3451,7 +3461,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
        LIMIT ?`
     ).bind(parsedItem.source_type, threadRootId, SIBLINGS_MAX + 1).all();
     siblingsHasMore = result.results.length > SIBLINGS_MAX;
-    siblings = result.results.slice(0, SIBLINGS_MAX).map(parseItemRow);
+    siblings = result.results.slice(0, SIBLINGS_MAX).map((r) => parseItemRow(r));
   }
 
   // For GitHub / ClawHub items, attach metrics_history (last 30 days) so drawer can
