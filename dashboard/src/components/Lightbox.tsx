@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MediaItem } from "../types";
 import { proxyImg } from "../lib/utils";
 import { track, EVENTS } from "../lib/telemetry";
+import { useScrollLock, useTouchScrollGuard } from "../lib/useScrollLock";
 
 interface Props {
   media: MediaItem[];
@@ -11,6 +12,7 @@ interface Props {
 
 export function Lightbox({ media, startIndex, onClose }: Props) {
   const [index, setIndex] = useState(startIndex);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -23,14 +25,17 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [media.length, onClose]);
 
-  // Lock body scroll while open
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, []);
+  // Lock page scroll + stop touch bleed while open.
+  //
+  // The old code only set `document.body.style.overflow = "hidden"`, which is a
+  // no-op on mobile (≤767px): the app makes <body> permanently overflow:hidden
+  // and scrolls via #root, so swipes on the lightbox scrolled the page / drawer
+  // body underneath (scroll penetration on iOS WKWebView + WeChat X5).
+  //   - useScrollLock locks the real scroller (#root on mobile, <body> on PC).
+  //   - useTouchScrollGuard kills the residual touch bleed that iOS/X5 still
+  //     let through, while leaving the <video> controls draggable.
+  useScrollLock();
+  useTouchScrollGuard(overlayRef);
 
   // Telemetry: lightbox open (mount once)
   useEffect(() => {
@@ -64,6 +69,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
 
   return (
     <div
+      ref={overlayRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
       onClick={onOverlayClick}
       onPointerDown={(e) => e.stopPropagation()}
