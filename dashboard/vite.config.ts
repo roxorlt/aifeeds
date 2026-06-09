@@ -37,4 +37,17 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // react 生态拆成独立 chunk：它很少变，发版后浏览器跨版本命中缓存，
+        // 回访不用每次重下整包（首屏总量不变，纯为二次/回访提速）。
+        manualChunks(id) {
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom)[\\/]/.test(id)) {
+            return 'react-vendor'
+          }
+        },
+      },
+    },
+  },
 })

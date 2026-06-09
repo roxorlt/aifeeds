@@ -7,6 +7,27 @@
     <meta name="description" content="AI-Feeds — 一站式 AI 信息聚合看板" />
     <link rel="preconnect" href="https://api.ai-feeds.com" crossorigin />
     <link rel="dns-prefetch" href="https://api.ai-feeds.com" />
+    <!-- 首屏冷启动数据预取:在 JS 还在下载/解析时就并行发起默认 feed(x_list)请求,让接口
+         数据跟 JS 加载并行、而非「等 JS 跑完才发请求」的串行等待。命中由 fetchItems 用 path
+         严格匹配消费(默认频道 = x_list / time 排序 / limit 30);其他频道或排序不匹配自动
+         回退正常请求,失败(null)也回退,无副作用。 -->
+    <script>
+      (function () {
+        try {
+          var h = location.host, base = null;
+          if (h === "ai-feeds.com" || h === "www.ai-feeds.com") base = "https://api.ai-feeds.com";
+          else if (h.indexOf("staging") >= 0) base = "https://staging-api.ai-feeds.com";
+          if (!base) return;
+          var path = "/api/items?source_type=x_list&limit=30";
+          window.__feedPrefetch = {
+            path: path,
+            promise: fetch(base + path, { credentials: "include" })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .catch(function () { return null; }),
+          };
+        } catch (e) {}
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.ai-feeds.com" crossorigin />
     <!-- 字体非阻塞加载：HarmonyOS Sans SC 托管在非 Cloudflare 代理的海外 VPS（国内访问很慢，
          每个 result.css 约 106KB 未压缩）。用 media=print + onload 切 all，让字体 CSS 不阻塞首屏

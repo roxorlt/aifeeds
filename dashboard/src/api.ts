@@ -202,6 +202,26 @@ function buildQuery(params: Record<string, unknown>): string {
 
 export async function fetchItems(query: ItemsQuery = {}): Promise<ItemsResponse> {
   const path = `/api/items${buildQuery(query as Record<string, unknown>)}`;
+  // 首屏冷启动:index.html 已在 JS 加载阶段并行预取默认 x_list feed。path 严格匹配就直接用
+  // 预取结果,省掉「等 JS 跑完才发请求」的串行等待;只用一次,失败/不匹配自动回退正常请求。
+  const w = window as unknown as {
+    __feedPrefetch?: { path: string; promise: Promise<ItemsResponse | null> } | null;
+  };
+  const pf = w.__feedPrefetch;
+  if (pf && pf.path === path) {
+    w.__feedPrefetch = null;
+    try {
+      // 跟 4.5s 超时赛跑:WeChat WebView 偶尔会把 fetch 丢掉永不 resolve,
+      // 那样直接 await 会把 feed 永久挂住 —— 超时就回退到带重试的正常请求。
+      const data = await Promise.race([
+        pf.promise,
+        new Promise<null>((r) => setTimeout(() => r(null), 4500)),
+      ]);
+      if (data && Array.isArray(data.items)) return data;
+    } catch {
+      /* fall through to normal fetch */
+    }
+  }
   const res = await apiFetch(path);
   if (!res.ok) throw new Error(`fetchItems failed: ${res.status}`);
   return res.json();
