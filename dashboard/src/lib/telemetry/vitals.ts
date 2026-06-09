@@ -31,8 +31,10 @@ interface NavigatorPerf {
 function deviceMeta(): Record<string, unknown> {
   const nav = navigator as Navigator & NavigatorPerf;
   const c = nav.connection;
+  const ua = navigator.userAgent;
   return {
-    // 网络
+    // 网络（⚠️ iOS 微信 WKWebView 无 navigator.connection → 这几项 undefined,
+    // admin 切片时 nettype=NULL 要单独归一桶,不能丢）
     nettype: c?.effectiveType,
     downlink_mbps: c?.downlink,
     rtt_ms: c?.rtt,
@@ -44,6 +46,18 @@ function deviceMeta(): Record<string, unknown> {
     viewport_w: window.innerWidth,
     viewport_h: window.innerHeight,
     dpr: window.devicePixelRatio,
+    // 客户端识别 —— 让 admin 能把"国内微信"人群单独切出来看慢在哪
+    is_wechat: /micromessenger/i.test(ua),
+    is_ios: /iphone|ipad|ipod/i.test(ua),
+    is_android: /android/i.test(ua),
+    // 大陆 hint(非 ground truth): 时区 = Asia/Shanghai
+    mainland_hint: (() => {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone === 'Asia/Shanghai';
+      } catch {
+        return undefined;
+      }
+    })(),
   };
 }
 
@@ -54,6 +68,38 @@ export function installVitals(): void {
   onCLS(report(EVENTS.PERF_CLS));
   onTTFB(report(EVENTS.PERF_TTFB));
   onFCP(report(EVENTS.PERF_FCP));
+}
+
+// perf_nav: PerformanceNavigationTiming 全相位拆解(dns/tcp/tls/ttfb/下载/dcl/load)。
+// web-vitals 的 TTFB 只有一个数,这里把"页面打开"拆成各阶段,才能区分国内慢的三种成因:
+//   - 海外 POP 路由(dns+tls+ttfb 高) vs 大字体/JS 下载(response/transfer 高) vs
+//     手机解析慢(responseEnd→FCP 的差)。
+// ⚠️ 必须在 load 事件后读,否则 loadEventEnd=0。iOS15+/现代 X5 支持 L2 NavTiming;
+// 老 Android X5 退化到 performance.timing(此处不再读,缺就略过,不影响主信号)。
+export function installNavTiming(): void {
+  if (Math.random() >= SAMPLE_RATE) return;
+  const emit = () => {
+    const n = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+    if (!n || n.loadEventEnd <= 0) return; // 未就绪 / 不支持
+    const r = (x: number) => Math.max(0, Math.round(x));
+    track(EVENTS.PERF_NAV, {
+      dns: r(n.domainLookupEnd - n.domainLookupStart),
+      tcp: r(n.connectEnd - n.connectStart),
+      tls: n.secureConnectionStart > 0 ? r(n.connectEnd - n.secureConnectionStart) : 0,
+      ttfb: r(n.responseStart - n.startTime),
+      request: r(n.responseStart - n.requestStart),
+      response: r(n.responseEnd - n.responseStart), // 下载耗时(对 webfont/JS 体积敏感)
+      dom_interactive: r(n.domInteractive - n.startTime),
+      dcl: r(n.domContentLoadedEventEnd - n.startTime),
+      load: r(n.loadEventEnd - n.startTime),
+      transfer_kb: r((n.transferSize || 0) / 1024),
+      encoded_kb: r((n.encodedBodySize || 0) / 1024),
+      nav_type: n.type, // navigate | reload | back_forward —— 量化"第二次更快"(bfcache/磁盘缓存)
+      ...deviceMeta(),
+    });
+  };
+  if (document.readyState === 'complete') setTimeout(emit, 0);
+  else window.addEventListener('load', () => setTimeout(emit, 0), { once: true });
 }
 
 function report(eventType: string): (metric: Metric) => void {

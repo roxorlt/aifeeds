@@ -39,8 +39,8 @@ export type EventTypeName =
   // 区分"真看了"和"快滑/误触" — payload 含 threshold_ms 兼容未来阈值调整
   | 'video_autoplay_attempt' | 'video_autoplay_blocked' | 'video_play_start'
   | 'video_effective_play'
-  // 性能(web-vitals)
-  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp'
+  // 性能(web-vitals + navigation timing)
+  | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp' | 'perf_nav'
   // 错误
   | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error'
   | 'feed_load_error';

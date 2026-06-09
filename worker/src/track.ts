@@ -25,8 +25,9 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'video_autoplay_attempt', 'video_autoplay_blocked', 'video_play_start',
   // 视频有效播放（连续播放 ≥3s，IAB/Twitter/Meta 短视频 view 标准）
   'video_effective_play',
-  // 性能
-  'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb',
+  // 性能(web-vitals + navigation timing)。perf_fcp 之前漏了白名单被丢弃 ——
+  // iOS 微信 WKWebView 不支持 LCP observer,FCP 是该设备唯一的 paint 信号,必须收。
+  'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb', 'perf_fcp', 'perf_nav',
   // 错误
   'js_error', 'unhandled_promise', 'api_error', 'image_load_error',
   'feed_load_error',

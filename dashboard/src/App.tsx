@@ -33,15 +33,17 @@ import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
-import { installVitals } from "./lib/telemetry/vitals";
+import { installVitals, installNavTiming } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
 import { Routes, Route, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
 import { RequireAuth } from "./components/RequireAuth";
-import { Settings } from "./pages/Settings";
-import { AccountManage } from "./pages/AccountManage";
-import { Subscription } from "./pages/Subscription";
+// 路由专属页面 lazy 化：只在 /settings、/settings/account、/subscribe、
+// /me/subscription 才需要，不该进首屏 bundle（Subscription 还拖 Turnstile）。
+const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
+const AccountManage = lazy(() => import("./pages/AccountManage").then((m) => ({ default: m.AccountManage })));
+const Subscription = lazy(() => import("./pages/Subscription").then((m) => ({ default: m.Subscription })));
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
 
@@ -73,6 +75,33 @@ function ToastGate() {
   return (
     <Suspense fallback={null}>
       <Toast />
+    </Suspense>
+  );
+}
+
+// TweetDrawer 拖 react-markdown + dompurify + qrcode + modern-screenshot + 5 个
+// drawer body（~154kB gzip），首屏不该下载。Gate：抽屉没打开时不挂（chunk 不
+// 下载），同时 idle 时悄悄预取，让首次点开依然秒开。冷链接 /t/:id 等首帧
+// DrawerProvider 就把 state.item/loading 置上，need=true 立即挂载（不丢深链）。
+function TweetDrawerGate() {
+  const { state } = useDrawer();
+  const need = Boolean(state.item) || state.loading || Boolean(state.error);
+  useEffect(() => {
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    const schedule = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
+    const cancel = w.cancelIdleCallback ?? ((id: number) => window.clearTimeout(id));
+    const id = schedule(() => {
+      void import("./components/TweetDrawer");
+    });
+    return () => cancel(id);
+  }, []);
+  if (!need) return null;
+  return (
+    <Suspense fallback={null}>
+      <TweetDrawer />
     </Suspense>
   );
 }
@@ -742,6 +771,7 @@ function DashboardHome() {
   useEffect(() => {
     initTelemetry({ endpoint: TRACK_ENDPOINT });
     installVitals();
+    installNavTiming();
     installErrorHandlers();
     track(EVENTS.APP_OPEN, {
       utm_source: new URLSearchParams(window.location.search).get('utm_source') || undefined,
@@ -1075,9 +1105,7 @@ function DashboardHome() {
           </a>
         </footer>
       </main>
-      <Suspense fallback={null}>
-        <TweetDrawer />
-      </Suspense>
+      <TweetDrawerGate />
       <QuoteSnapshotModal />
     </div>
     </DrawerProvider>
@@ -1114,6 +1142,7 @@ function App() {
 
   return (
     <>
+      <Suspense fallback={null}>
       <Routes>
         <Route path="/" element={<DashboardHome />} />
         <Route path="/t/:id" element={<DashboardHome />} />
@@ -1128,6 +1157,7 @@ function App() {
         <Route path="/subscribe" element={<Subscription mode="anonymous" />} />
         <Route path="/me/subscription" element={<RequireAuth><Subscription mode="manage" /></RequireAuth>} />
       </Routes>
+      </Suspense>
       <LoginModalGate />
       <ToastGate />
     </>

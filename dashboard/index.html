@@ -8,9 +8,19 @@
     <link rel="preconnect" href="https://api.ai-feeds.com" crossorigin />
     <link rel="dns-prefetch" href="https://api.ai-feeds.com" />
     <link rel="preconnect" href="https://fonts.ai-feeds.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" />
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-medium/result.css" />
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-bold/result.css" />
+    <!-- 字体非阻塞加载：HarmonyOS Sans SC 托管在非 Cloudflare 代理的海外 VPS（国内访问很慢，
+         每个 result.css 约 106KB 未压缩）。用 media=print + onload 切 all，让字体 CSS 不阻塞首屏
+         渲染——先用系统字体（PingFang SC，见 index.css 的 fallback 栈）秒出文字，字体到了再 swap
+         （CSS 内已是 font-display:swap）。这是国内 iPhone/微信首屏慢的最大单点优化。
+         <noscript> 兜底 JS 关闭场景。 -->
+    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-medium/result.css" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-bold/result.css" media="print" onload="this.media='all'" />
+    <noscript>
+      <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" />
+      <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-medium/result.css" />
+      <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-bold/result.css" />
+    </noscript>
     <title>AI-Feeds</title>
   </head>
   <body>
