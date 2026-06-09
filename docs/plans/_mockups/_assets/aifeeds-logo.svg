@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 512 512" role="img" aria-label="ai-feeds carrot on a stick logo">
+  <title>ai-feeds carrot on a stick logo</title>
+  <desc>Minimal carrot-on-a-stick illustration for ai-feeds, expressing the pull of endless AI feeds.</desc>
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#FFFFFF"/>
+  <g id="stick" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M54 340 L405 94" stroke="#111111" stroke-width="18"/>
+    <path d="M70 331 L394 104" stroke="#FFFFFF" stroke-width="5" opacity="0.92"/>
+    <ellipse cx="55" cy="340" rx="9.5" ry="12.5" transform="rotate(-55 55 340)" fill="#FFFFFF" stroke="#111111" stroke-width="6"/>
+    <path d="M150 276 C154 267 163 267 166 274" stroke="#111111" stroke-width="5"/>
+    <path d="M276 188 C281 178 291 180 292 188" stroke="#111111" stroke-width="5"/>
+  </g>
+  <g id="top-tie" fill="none" stroke="#111111" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M398 100 C386 88 390 76 403 83 C414 90 411 102 398 100Z"/>
+    <path d="M405 99 C423 83 436 84 437 93 C438 103 420 106 405 99Z"/>
+    <path d="M404 100 C392 113 383 120 377 115"/>
+    <path d="M407 102 C420 115 429 122 435 116"/>
+  </g>
+  <path id="rope" d="M405 103 L405 241" fill="none" stroke="#111111" stroke-width="5.5" stroke-linecap="round"/>
+  <g id="leaves" fill="none" stroke="#62B91D" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M405 246 L405 178"/>
+    <path d="M405 214 L384 193"/><path d="M405 210 L430 187"/>
+    <path d="M406 229 L371 218"/><path d="M407 225 L444 218"/>
+    <path d="M401 233 L382 246"/><path d="M410 235 L437 248"/>
+    <path d="M405 190 L394 179"/><path d="M405 198 L418 184"/>
+    <path d="M384 193 L370 190"/><path d="M384 193 L381 179"/>
+    <path d="M430 187 L443 184"/><path d="M430 187 L432 172"/>
+    <path d="M371 218 L358 215"/><path d="M371 218 L365 205"/>
+    <path d="M444 218 L458 218"/><path d="M444 218 L452 205"/>
+  </g>
+  <g id="carrot" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M382 249 C365 281 365 353 390 444 C392 452 401 452 404 444 C431 353 429 280 413 249 C405 237 390 237 382 249Z" fill="#FF8A00" stroke="#111111" stroke-width="8"/>
+    <path d="M381 291 C394 299 407 300 421 294" fill="none" stroke="#B65C00" stroke-width="4.5" opacity="0.9"/>
+    <path d="M376 331 C391 339 405 340 423 333" fill="none" stroke="#B65C00" stroke-width="4.5" opacity="0.9"/>
+    <path d="M384 378 C397 384 410 384 420 379" fill="none" stroke="#B65C00" stroke-width="4.5" opacity="0.9"/>
+    <path d="M390 414 C398 419 407 419 414 415" fill="none" stroke="#B65C00" stroke-width="4.5" opacity="0.9"/>
+  </g>
+  <g id="carrot-bow" fill="none" stroke="#111111" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M404 247 C385 226 359 231 369 250 C378 268 392 260 404 247Z"/>
+    <path d="M406 247 C428 224 452 232 442 251 C432 268 418 261 406 247Z"/>
+    <path d="M404 248 C398 259 392 267 385 273"/>
+    <path d="M407 248 C415 260 421 268 429 273"/>
+  </g>
+</svg>

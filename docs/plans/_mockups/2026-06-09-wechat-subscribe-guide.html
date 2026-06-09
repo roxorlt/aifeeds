@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信内订阅引导 — mockup</title>
+<style>
+  :root {
+    --n900:#171717; --n700:#404040; --n600:#525252; --n500:#737373;
+    --n400:#a3a3a3; --n300:#d4d4d4; --n200:#e5e5e5; --n100:#f5f5f5; --n50:#fafafa;
+    --carrot:#f97316;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    font-family:"HarmonyOS Sans SC","PingFang SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#ededed; color:var(--n900); -webkit-font-smoothing:antialiased;
+    padding:24px 12px; display:flex; gap:32px; flex-wrap:wrap; justify-content:center;
+  }
+  .phone {
+    width:390px; background:#fff; border-radius:28px; overflow:hidden;
+    box-shadow:0 12px 40px rgba(0,0,0,.16); border:1px solid var(--n200);
+  }
+  /* 模拟微信导航栏 */
+  .wx-nav {
+    height:44px; background:#ededed; display:flex; align-items:center; justify-content:center;
+    position:relative; font-size:15px; font-weight:500; color:#181818; border-bottom:1px solid #dcdcdc;
+  }
+  .wx-nav .back { position:absolute; left:12px; font-size:20px; color:#181818; }
+  .wx-nav .more { position:absolute; right:12px; font-size:20px; color:#181818; letter-spacing:2px;}
+  /* 页面内容 */
+  .page { padding:20px 16px 28px; }
+  .page-head { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+  .page-head .arrow { color:var(--n600); font-size:20px; line-height:1; }
+  .page-head h1 { font-size:18px; font-weight:600; }
+
+  /* 主引导卡片 */
+  .card {
+    border:1px solid var(--n200); border-radius:16px; background:#fff;
+    padding:22px 20px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+  }
+  .hero-title { font-size:20px; font-weight:700; letter-spacing:-.01em; line-height:1.35; }
+  .hero-sub { margin-top:7px; font-size:13px; color:var(--n500); line-height:1.6; }
+
+  /* 公众号名片块 */
+  .acct {
+    margin-top:18px; display:flex; align-items:center; gap:12px;
+    padding:12px; border:1px solid var(--n200); border-radius:12px; background:var(--n50);
+  }
+  .acct .avatar {
+    width:46px; height:46px; border-radius:11px; flex-shrink:0; border:1px solid var(--n200);
+  }
+  .acct .info { min-width:0; flex:1; }
+  .acct .name-row { display:flex; align-items:center; gap:6px; }
+  .acct .name { font-size:15px; font-weight:600; }
+  .acct .badge {
+    display:inline-flex; align-items:center; gap:3px; font-size:10.5px; font-weight:500;
+    color:var(--n600); background:var(--n100); border:1px solid var(--n200);
+    padding:1px 6px; border-radius:999px;
+  }
+  .acct .badge svg { width:11px; height:11px; }
+  .acct .desc { margin-top:3px; font-size:12px; color:var(--n500); line-height:1.5; }
+
+  /* 二维码区 */
+  .qr-wrap { margin-top:20px; display:flex; flex-direction:column; align-items:center; }
+  .qr-box {
+    width:200px; height:200px; padding:10px; border:1px solid var(--n200);
+    border-radius:14px; background:#fff;
+  }
+  .qr-box img { width:100%; height:100%; display:block; }
+  .qr-hint {
+    margin-top:12px; display:inline-flex; align-items:center; gap:6px;
+    font-size:14px; font-weight:600; color:var(--n900);
+  }
+  .qr-hint svg { width:16px; height:16px; color:var(--n600); }
+  .qr-sub { margin-top:5px; font-size:12px; color:var(--n500); }
+  .qr-sub b { color:var(--n700); font-weight:600; }
+
+  /* 效果预览块 */
+  .preview { margin-top:18px; }
+  .preview-label {
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:13px; color:var(--n600); margin-bottom:12px;
+  }
+  .preview-label svg { width:15px; height:15px; }
+  .preview-scroller {
+    display:flex; gap:10px; overflow-x:auto; padding:2px 0 10px;
+    scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;
+  }
+  .preview-scroller::-webkit-scrollbar { height:0; }
+  .preview-scroller img {
+    flex:0 0 auto; width:138px; height:184px; object-fit:cover;
+    border-radius:10px; border:1px solid var(--n200); background:#fff;
+    box-shadow:0 4px 14px rgba(0,0,0,.08); scroll-snap-align:start;
+  }
+
+  .caption { width:390px; font-size:12px; color:#888; text-align:center; line-height:1.7; }
+  .caption b { color:#555; }
+</style>
+</head>
+<body>
+
+<div>
+  <div class="phone">
+    <div class="wx-nav">
+      <span class="back">‹</span>
+      AI Feeds
+      <span class="more">···</span>
+    </div>
+    <div class="page">
+      <div class="page-head">
+        <span class="arrow">←</span>
+        <h1>订阅推送</h1>
+      </div>
+
+      <div class="card">
+        <div class="hero-title">关注公众号，每早看 AI 日报</div>
+
+        <!-- 公众号名片：包装成账号形态 -->
+        <div class="acct">
+          <img class="avatar" src="_assets/aifeeds-logo.svg" alt="AI Feeds">
+          <div class="info">
+            <div class="name-row">
+              <span class="name">AI Feeds</span>
+              <span class="badge">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+                公众号
+              </span>
+            </div>
+            <div class="desc">聚合 X、Product Hunt、GitHub、arXiv 等 AI 资讯精华</div>
+          </div>
+        </div>
+
+        <!-- 二维码 -->
+        <div class="qr-wrap">
+          <div class="qr-box">
+            <img src="_assets/aifeeds-wechat-qr.png" alt="AI Feeds 公众号二维码">
+          </div>
+          <div class="qr-hint">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v.01M14 21h.01M17 21h4v-4"/></svg>
+            长按二维码关注
+          </div>
+        </div>
+      </div>
+
+      <!-- 往期日报横划预览 -->
+      <div class="preview">
+        <div class="preview-label">
+          <span>往期日报</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+        </div>
+        <div class="preview-scroller">
+          <img src="_assets/digest-00.webp" alt="AI 日报封面">
+          <img src="_assets/digest-01.webp" alt="AI 日报 1">
+          <img src="_assets/digest-02.webp" alt="AI 日报 2">
+          <img src="_assets/digest-03.webp" alt="AI 日报 3">
+          <img src="_assets/digest-04.webp" alt="AI 日报 4">
+          <img src="_assets/digest-05.webp" alt="AI 日报 5">
+          <img src="_assets/digest-06.webp" alt="AI 日报 6">
+          <img src="_assets/digest-07.webp" alt="AI 日报 7">
+          <img src="_assets/digest-08.webp" alt="AI 日报 8">
+          <img src="_assets/digest-09.webp" alt="AI 日报 9">
+          <img src="_assets/digest-10.webp" alt="AI 日报 10">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="caption">
+  公众号名片 + 二维码 + 往期日报横划（11 张，可左右滑）<br>
+  （灰色顶栏只是模拟微信，不在实际页面里）
+</div>
+
+</body>
+</html>

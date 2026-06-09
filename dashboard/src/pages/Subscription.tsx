@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router';
 import { SourceIcon } from '../components/icons';
 import { TurnstileWidget, type TurnstileWidgetHandle } from '../components/TurnstileWidget';
+import { WechatFollowGuide } from '../components/WechatFollowGuide';
+import { isWeChatBrowser } from '../lib/wechat';
 import {
   subscribeDigest,
   configureSubscription,
@@ -222,6 +224,17 @@ function AnonymousSubscribe() {
   const [density, setDensity] = useState<DigestDensity>(DEFAULT_DENSITY);
   const [sourcesError, setSourcesError] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // 微信内置浏览器：Turnstile 人机校验过不去，邮箱订阅走不通 →
+  // 整页改为引导关注公众号「AI Feeds」，每早收 AI 日报（见 WechatFollowGuide）。
+  // UA 不变，放在所有 hooks 之后 early return，不破坏 hooks 调用顺序。
+  if (isWeChatBrowser()) {
+    return (
+      <PageShell title="订阅推送">
+        <WechatFollowGuide />
+      </PageShell>
+    );
+  }
 
   function applyError(code: SubscribeErrorCode) {
     switch (code) {

@@ -4,16 +4,11 @@ import * as authApi from '../lib/auth';
 import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
 import { toast } from '../lib/toast';
+import { isWeChatBrowser } from '../lib/wechat';
 
 const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widget
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-// 微信内置浏览器（WeChat WKWebView）人机校验经常过不去，提前提示用户外部浏览器打开
-function isWeChatBrowser(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return /MicroMessenger/i.test(navigator.userAgent);
-}
 
 declare global {
   interface Window {
