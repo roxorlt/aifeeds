@@ -2597,6 +2597,17 @@ function parseItemRow(row: Record<string, unknown>, full = false): Record<string
       if (k in ex) delete ex[k];
     }
   }
+  // clawhub: content/content_translated 装的是 README 全文(单条 ~5KB),但卡片正文用
+  // extra.summary_translated(200 字);全文只在抽屉渲染(ClawhubDrawerBody 走 fetchItem
+  // 拿完整 item)。列表里截断到预览长度,省掉 feed 最大的一块体积。X 不截(展开要全文)。
+  if (!full && parsed.source_type === 'clawhub') {
+    if (typeof parsed.content === 'string' && parsed.content.length > 280) {
+      parsed.content = parsed.content.slice(0, 280);
+    }
+    if (typeof parsed.content_translated === 'string' && parsed.content_translated.length > 280) {
+      parsed.content_translated = parsed.content_translated.slice(0, 280);
+    }
+  }
   return parsed;
 }
 
