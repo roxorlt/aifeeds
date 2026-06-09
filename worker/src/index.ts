@@ -1534,6 +1534,23 @@ export default {
         .catch((e) => console.error('[cron] x-card-render drain failed:', e)),
     );
 
+    // X 转推自愈兜底(2026-06-09 Layer-3):workflow 的 backfill-retweet step fetch 失败时
+    // 抛异常、不留 sentinel,workflow 用 allSettled 照样跑完 → 该行 retweet_of 永久空 →
+    // FE 翻转无快照 → 冒名显示转推者(本次 fchollet bug 的 Defect C)。每小时 :25 扫一次
+    // 「从没成功 enrich 过(无 retweet_of 也无 retweet_enriched_at)」的搁浅行重拉。
+    // 用非 recover 选择:天然带 retweet_enriched_at 哨兵守卫,自动跳过健康行(有 retweet_of)
+    // 和已删原推(有 sentinel),不会无限重拉。空集一次 SELECT 秒回,limit=3 + 300ms ≈ 数秒。
+    if (minute === 25) {
+      ctx.waitUntil(
+        runBackfillRetweets(env, 3, 300, false)
+          .then((res) => {
+            const n = (res as unknown as { processed?: number }).processed ?? 0;
+            if (n > 0) console.log('[cron] x-retweet-self-heal:', JSON.stringify(res));
+          })
+          .catch((e) => console.error('[cron] x-retweet-self-heal failed:', e)),
+      );
+    }
+
     // GitHub trending fetch (phase 1) at BJT 01:00 + 13:00 (= UTC 17:00 + 05:00).
     // 2 subrequests, doesn't conflict with X cron rotation.
     const isGithubFetchSlot = (hour === 17 || hour === 5) && minute === 0;

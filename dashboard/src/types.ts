@@ -143,6 +143,8 @@ export interface ItemExtra {
   link_card?: LinkCard;
   thread_root_id?: string;
   hashtags?: string[];
+  // 推文里 @ 到的 handle 列表(SB ingest)。转推无快照降级时取 [0] 当原作者 handle 兜底。
+  user_mentions?: string[];
   urls?: Array<{ display_url?: string; expanded_url?: string; url?: string }>;
   ocr_text?: string;
   // BE PR #99 (2026-05-21): L1 主推 content 是单纯 t.co 短链时的 resolve 结果。

@@ -4991,6 +4991,7 @@ export async function backfillNestedXQuoteForXTweet(
     | 'already_attempted'
     | 'no_url'
     | 'no_x_url'
+    | 'is_retweet_target'
     | 'quote_filled'
     | 'quote_backfill_failed';
 }> {
@@ -5058,6 +5059,17 @@ export async function backfillNestedXQuoteForXTweet(
       `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.nested_x_quote_backfilled_at', ?) WHERE id = ?`,
     ).bind(nowIso, itemId).run();
     return { updated: false, reason: 'no_x_url' };
+  }
+
+  // X 渲染契约 §2:扫到的 status_id 若等于 retweeted_status_id,说明这是「纯转推」的目标推
+  // (该由 backfill-retweet 写进 retweet_of),不是引用。绝不写 quote_of_id 制造幽灵引用
+  // —— 否则 FE 会把同一条推文既翻转成主卡、又当引用卡重复画一遍(2026-06-09 fchollet bug 根源)。
+  if (typeof extra.retweeted_status_id === 'string' && foundStatusId === extra.retweeted_status_id) {
+    await env.DB.prepare(
+      `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.nested_x_quote_backfilled_at', ?) WHERE id = ?`,
+    ).bind(nowIso, itemId).run();
+    console.log(`[nested-x-quote] ${itemId}: skip — ${foundStatusId} == retweeted_status_id (转推目标,非引用)`);
+    return { updated: false, reason: 'is_retweet_target' };
   }
 
   // 3. 找到嵌 X URL → 写 quote_of_id + 标 attempted

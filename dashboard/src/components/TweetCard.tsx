@@ -411,17 +411,35 @@ export function TweetCard({
   //   - 如果 retweet_of 完整数据存在 → 翻转作者主体，content 用 retweet_of.content
   //   - 如果 retweet_of 缺（backfill 未跑到）→ 兜底用转推者卡 + 剥 "RT @xxx: " 前缀
   const isRetweet = Boolean(extra.is_retweet);
-  const retweetOf = extra.retweet_of;
-  // 转推者本人信息（顶部小字 + 兜底主卡）
+  // 转推者本人信息（顶部「已转帖」小字用，跟主卡翻转身份严格分开，绝不混用）
   const retweeterHandle = item.handle || "";
   const retweeterAuthor = item.author || retweeterHandle;
-  // 主卡显示的作者：翻转 or 兜底
-  const flippedAuthor = isRetweet && retweetOf ? (retweetOf.author || retweetOf.handle || retweeterAuthor) : null;
-  const flippedHandle = isRetweet && retweetOf ? (retweetOf.handle || "") : null;
-  const flippedAvatar = isRetweet && retweetOf ? retweetOf.profile_image_url : null;
-  const flippedVerified = isRetweet && retweetOf ? Boolean(retweetOf.is_verified) : null;
-  // 时间戳：翻转时显示被转推时间（X 一致），兜底时显示转推时间
-  const flippedPublishedAt = isRetweet && retweetOf ? retweetOf.published_at : null;
+  // X 渲染契约 §1：转推主卡永远是「原作者」，绝不 fallback 成转推者（那正是反复出现的冒名 bug）。
+  // 原推快照取值优先级：
+  //   1. retweet_of（正常回填）
+  //   2. quote_of —— 仅当它其实就是转推目标(quote_of_id == retweeted_status_id)。纯转推被
+  //      nested-x-quote 误标成 quote 的存量数据走这条借用，保证拿回原作者而不是丢失。
+  const retweetedStatusId = extra.retweeted_status_id || null;
+  const retweetOf: QuoteOf | null =
+    extra.retweet_of ||
+    (isRetweet && extra.quote_of && extra.quote_of_id && extra.quote_of_id === retweetedStatusId
+      ? extra.quote_of
+      : null) ||
+    null;
+  // 降级（转推但无任何原推快照）：从 "RT @handle:" 前缀或 user_mentions[0] 取原作者 handle
+  //   当主卡身份（只有 handle、无头像/蓝标），仍然不显示转推者。Layer-4 回填后这些行补上完整
+  //   retweet_of，此分支只兜「回填窗口期 + 原推被删」的少数情况。
+  const rtFallbackHandle =
+    isRetweet && !retweetOf
+      ? (item.content || "").match(/^RT @(\w+):/)?.[1] || extra.user_mentions?.[0] || null
+      : null;
+  // 主卡作者/handle：翻转到原作者快照 → 降级到原作者 handle → null（由下方消费处兜底为通用占位）
+  const flippedAuthor = retweetOf ? (retweetOf.author || retweetOf.handle || null) : rtFallbackHandle;
+  const flippedHandle = retweetOf ? (retweetOf.handle || "") : rtFallbackHandle;
+  const flippedAvatar = retweetOf ? retweetOf.profile_image_url : null;
+  const flippedVerified = retweetOf ? Boolean(retweetOf.is_verified) : null;
+  // 时间戳：翻转时显示被转推时间（X 一致），降级/兜底时显示转推时间
+  const flippedPublishedAt = retweetOf ? retweetOf.published_at : null;
 
   // content 处理：翻转时优先用 retweet_of.content + content_translated（item 的
   // 翻译是基于完整 "RT @xxx: ..." 文本翻译的，可能含 RT 前缀的翻译版，要剥）
@@ -538,13 +556,16 @@ export function TweetCard({
     setCanExpand(el.scrollHeight > el.clientHeight + 1);
   }, [displayText, expanded, truncatedDisplayLen]);
 
-  // 主卡作者主体：F1 isRetweet+retweetOf → 翻转为被转推者；否则原值。
-  const handle = flippedHandle ?? item.handle ?? "";
-  const author = flippedAuthor ?? item.author ?? handle;
-  const avatarUrl = flippedAvatar ?? extra.profile_image_url;
-  const isVerified = flippedVerified ?? Boolean(extra.is_verified);
+  // 主卡身份（X 渲染契约 §1）：非转推用 item 本身；转推只用翻转/降级出的原作者身份，
+  // 绝不回退到转推者 item.author/item.handle（杜绝「A 转帖 A 自己」的冒名）。
+  const handle = isRetweet ? (flippedHandle ?? "") : (item.handle ?? "");
+  const author = isRetweet
+    ? (flippedAuthor ?? flippedHandle ?? "原推作者")
+    : (item.author ?? item.handle ?? "");
+  const avatarUrl = isRetweet ? (flippedAvatar ?? undefined) : extra.profile_image_url;
+  const isVerified = isRetweet ? Boolean(flippedVerified) : Boolean(extra.is_verified);
   // 时间戳：翻转时用被转推时间，否则原 published_at/scraped_at
-  const displayTime = flippedPublishedAt ?? item.published_at ?? item.scraped_at;
+  const displayTime = (isRetweet ? flippedPublishedAt : item.published_at) ?? item.published_at ?? item.scraped_at;
 
   // Thread / reply / quote indicators
   const isThread = Boolean(extra.thread_root_id);
@@ -555,10 +576,18 @@ export function TweetCard({
   // 而不是 top-level extra.quote_of(retweet 时 top-level 通常空)
   // 例:tweet 2056769896458166631 = levie RT fchollet,fchollet 又 quote 了第三方,
   // 流内卡片之前完全丢这第二层
-  const quoteOf = (isRetweet && retweetOf?.quote_of) ? retweetOf.quote_of : extra.quote_of;
-  const quoteOfId = (isRetweet && retweetOf) ? retweetOf.quote_of_id : extra.quote_of_id;
-  // Only show the "❝ 引用推文" banner if we have quote_of_id but no full quote_of data
-  // (fallback for pre-backfill tweets). If we have quote_of, render nested card instead.
+  // X 渲染契约 §2/§3：嵌套引用卡只画「真正的引用」。
+  //   - 转推：只画原推自己的二级引用 retweetOf.quote_of；转推目标(quote_of_id==retweeted_status_id)
+  //     已被 retweetOf 借走当主卡，绝不再当引用画（否则同一推文显示两遍 = 幽灵重复卡）。
+  //   - 非转推：画 extra.quote_of，但排除 quote_of_id==retweeted_status_id 的幽灵引用。
+  const isPhantomQuote = Boolean(extra.quote_of_id) && extra.quote_of_id === retweetedStatusId;
+  const quoteOf = isRetweet
+    ? (retweetOf?.quote_of ?? null)
+    : (isPhantomQuote ? null : (extra.quote_of ?? null));
+  const quoteOfId = isRetweet
+    ? (retweetOf?.quote_of_id ?? null)
+    : (isPhantomQuote ? null : (extra.quote_of_id ?? null));
+  // 有 quote_of_id 但拉不到完整 quote_of → X 风格「不可用」灰框（仅真正引用，幽灵引用已排除）。
   const hasQuotePlaceholder = Boolean(quoteOfId) && !quoteOf;
   // Reply placeholder when we know it's a reply but parent fetch hasn't run yet.
   const hasReplyPlaceholder = isReply && !replyOf;
