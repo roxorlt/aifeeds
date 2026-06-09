@@ -498,10 +498,12 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // sort is score-based, so newly-scraped items may not belong at the top —
   // we still count them, but clicking the banner triggers a full re-fetch with
   // fresh hot ranking instead of prepending stale positions.
-  // PH 每天 04:10 cron 一次性更新（PT 日榜性质）；huodongxing BJT 04:30/16:30
-  // 两次 cron 抓全 24 城市。两者都不需要持续 poll，节约请求。
+  // 只有 x_list(实时推文)需要 30s 轮询拉新。其余源(github / PH / clawhub / hf_paper /
+  // huodongxing)都是每天 cron 一次性更新,轮询不仅没意义,还会用陈旧的 since(如 github
+  // since 两周前)去拉超大结果集 → 5s 超时报 api_error(2026-06-09 排查:超时 349 条几乎
+  // 全是这些非实时源的 poll)。所以只对 x_list / 默认混合流轮询。
   useEffect(() => {
-    if (placeholder || isPh || isHdx) return;
+    if (placeholder || (sourceType && !sourceType.includes('x_list'))) return;
     const poll = async () => {
       if (!lastScrapedAt.current) return;
       try {
@@ -522,7 +524,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [sourceType, placeholder, items, pending, isPh]);
+  }, [sourceType, placeholder, items, pending]);
 
   const showPending = () => {
     if (isHot) {
