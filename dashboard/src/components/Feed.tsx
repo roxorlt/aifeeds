@@ -58,6 +58,34 @@ function readFeedCache(key: string): FeedCacheEntry | null {
   return c;
 }
 
+// 频道预取:空闲时后台拉其余频道首页写进 FEED_CACHE,让首次横划切换、以及扫码/分享落地
+// 抽屉后关掉抽屉看到的底层流都直接 hydrate 秒开(不再现拉显 skeleton)。limit 小(只为首屏
+// instant,真正 mount 时的 silent refetch 会补全量);已在 cache 的频道跳过;失败忽略。
+const PREFETCH_LIMIT = 12;
+export function prefetchChannels(sourceTypes: SourceType[]): void {
+  for (const st of sourceTypes) {
+    if (FEED_CACHE.has(st)) continue;
+    fetchItems({
+      source_type: st,
+      limit: PREFETCH_LIMIT,
+      sort: st === "clawhub" ? "stars" : undefined,
+    })
+      .then((res) => {
+        if (res.items.length > 0 && !FEED_CACHE.has(st)) {
+          FEED_CACHE.set(st, {
+            items: res.items,
+            nextCursor: res.next_cursor,
+            hasMore: res.has_more,
+            ts: Date.now(),
+          });
+        }
+      })
+      .catch(() => {
+        /* 预取失败忽略,真正切过去时会正常重拉 */
+      });
+  }
+}
+
 interface Props {
   sourceType: SourceType;
   title: string;

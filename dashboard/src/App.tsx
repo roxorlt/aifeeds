@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Feed, SkeletonCard, type FeedHandle } from "./components/Feed";
+import { Feed, SkeletonCard, prefetchChannels, type FeedHandle } from "./components/Feed";
 import { SourceIcon } from "./components/icons";
 import { DrawerProvider } from "./lib/drawer";
 
@@ -810,6 +810,23 @@ function DashboardHome() {
       stats ? (Object.keys(stats.by_source) as SourceType[]) : [],
     ),
   );
+
+  // 空闲时后台预取其余频道首页(写 FEED_CACHE):首次横划切换、以及扫码/分享落地抽屉后
+  // 关掉抽屉看到的底层流都直接 hydrate 秒开。用 ref 取 fire 时最新的 liveSourceTypes(它每次
+  // render 都新建,不能进 deps);[] deps 只跑一次;2.5s 延迟 + requestIdleCallback 不抢首屏资源。
+  const liveRef = useRef(liveSourceTypes);
+  liveRef.current = liveSourceTypes;
+  useEffect(() => {
+    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number };
+    const idle = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 0));
+    const t = window.setTimeout(() => {
+      idle(() => {
+        const live = liveRef.current;
+        if (live.size > 0) prefetchChannels([...live] as SourceType[]);
+      });
+    }, 2500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const visibleColumns = SOURCE_COLUMNS.filter((col) => {
     if (filter === "all") return true;
