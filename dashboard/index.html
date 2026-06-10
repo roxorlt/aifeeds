@@ -29,14 +29,24 @@
       })();
     </script>
     <link rel="preconnect" href="https://fonts.ai-feeds.com" crossorigin />
-    <!-- 字体非阻塞加载：HarmonyOS Sans SC 托管在非 Cloudflare 代理的海外 VPS（国内访问很慢，
-         每个 result.css 约 106KB 未压缩）。用 media=print + onload 切 all，让字体 CSS 不阻塞首屏
-         渲染——先用系统字体（PingFang SC，见 index.css 的 fallback 栈）秒出文字，字体到了再 swap
-         （CSS 内已是 font-display:swap）。这是国内 iPhone/微信首屏慢的最大单点优化。
-         <noscript> 兜底 JS 关闭场景。 -->
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" media="print" onload="this.media='all'" />
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-medium/result.css" media="print" onload="this.media='all'" />
-    <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-bold/result.css" media="print" onload="this.media='all'" />
+    <!-- 字体在 window.load 之后才注入：HarmonyOS Sans SC 已改 font-display: optional（品牌字体
+         非必须），但若在加载窗口内引用，~38 个 woff2（~200KB）仍会后台下载、把 load 指标拖到 12s+、
+         也跟首屏抢带宽。改成 load 之后空闲时才注入字体 CSS —— 字体不再算进 load、不抢首屏；首屏先用
+         系统苹方（见 index.css fallback 栈）秒出，字体下完缓存供回访用。<noscript> 兜底 JS 关闭场景。 -->
+    <script>
+      window.addEventListener("load", function () {
+        var inject = function () {
+          ["regular", "medium", "bold"].forEach(function (w) {
+            var l = document.createElement("link");
+            l.rel = "stylesheet";
+            l.href = "https://fonts.ai-feeds.com/hmos-" + w + "/result.css";
+            document.head.appendChild(l);
+          });
+        };
+        if (window.requestIdleCallback) window.requestIdleCallback(inject, { timeout: 3000 });
+        else setTimeout(inject, 300);
+      });
+    </script>
     <noscript>
       <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" />
       <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-medium/result.css" />
