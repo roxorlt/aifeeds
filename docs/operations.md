@@ -988,6 +988,14 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   # local() 改回精确名（保护本地 Medium 字体优先）：
   sed -i.bak 's|src:local("HarmonyOS Sans SC"),|src:local("HarmonyOS Sans SC Medium"),|g' hmos-medium/result.css
 
+  # ⚠️ 2026-06-11:字体改 font-display: optional(品牌字体非必须,不让它阻塞/拖慢加载)。
+  # cn-font-split 默认输出 swap → 慢网首屏会等 ~38 个 woff2(实测把 load 拖到 12-15s)。
+  # optional = 首屏直接用系统苹方(几乎一模一样)秒出,字体后台下载缓存,回访才用品牌字;
+  # 慢网则跳过下载下次再说。重新 split 后必须对三份 result.css 都跑这条 sed:
+  for d in hmos-regular hmos-medium hmos-bold; do sed -i.bak 's/font-display: swap/font-display: optional/g' $d/result.css; done
+  # 改完 result.css 上传后,记得清香港 VPS 缓存让它重拉:
+  #   ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'rm -rf /var/cache/nginx/aifeeds/* && systemctl reload nginx'
+
   # 上传（wrangler 4.x 默认走 local R2 stub，必须加 --remote）
   source .secrets/aifeeds-prod.env
   find hmos-regular hmos-medium hmos-bold -name '*.woff2' | xargs -n 1 -P 8 -I {} \
