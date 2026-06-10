@@ -1038,6 +1038,11 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 >
 > ⚠️ **2026-06-10 四续(字体浏览器缓存 —— load 指标偏高根因)**:CORS 修好字体能加载后,perf_nav 的 `load` 偏高。playwright 查到单页加载 **~38 个 woff2 分块(~200KB)**,且 woff2/css **完全没有 `Cache-Control` 响应头**(R2 没给、VPS 也没补)→ 浏览器每次访问全重下,load 一直高。woff2 文件名带内容哈希 = immutable。**修复**:perf.conf 加 `map $uri $font_cache_control { "~*\.woff2$" "public, max-age=31536000, immutable"; "~*\.css$" "public, max-age=3600"; default "public, max-age=86400"; }`;fonts location 加 `proxy_hide_header Cache-Control; add_header Cache-Control $font_cache_control always;`。验证 `curl -I …/*.woff2` 见 `cache-control: public, max-age=31536000, immutable`。备份 `*.bak-fontcache-<ts>`。这样回访浏览器直接命中本地缓存、跳过 ~200KB 字体下载,load 大降(且保留品牌字体,无取舍)。注:FCP(首屏可见,系统字体兜底)一直 ~1.5s 没受影响 —— load 高只是品牌字体在后台补,非阻塞。
 
+> ⚠️ **2026-06-11 五续(回访秒开三件套:TLS 票据/0-RTT + index.html 香港 1 分钟缓存 + Service Worker)**:
+> 1. **TLS 会话票据 + 0-RTT**:`/etc/letsencrypt/options-ssl-nginx.conf` 把 `ssl_session_tickets off → on`(⚠️ certbot 管理的文件,重装 certbot 可能被打回,改完留意);`aifeeds.conf` 的 front(ai-feeds.com)和 fonts server 块加 `ssl_early_data on;`(**api 域故意不开** —— 0-RTT 有重放风险,只给纯 GET 静态域开)。验证:VPS 本机 `openssl s_client -sess_out/-sess_in` 两连,见 `Reused` + `Max Early Data: 16384`。效果:回访握手省 1-2 个跨境 RTT(~300-600ms)。
+> 2. **index.html / sw.js 香港缓存 1 分钟**:front server 加 `location = /` 和 `location = /sw.js`(上游 CF Pages 给 `max-age=0, must-revalidate`,nginx 视为不可缓存,每次导航白付 HK→CF 一跳)→ `proxy_ignore_headers Cache-Control Expires; proxy_cache_valid 200 1m;`。**副作用:发版后 prod 最多旧 60s**(hashed assets 跨版本保留不会 404);急的话清 VPS 缓存立即生效。深链(/t/ /g/ 等)仍走不缓存的 `location /`。
+> 3. **Service Worker 壳缓存**(`dashboard/public/sw.js` + main.tsx 注册):回访导航 0 网络直接回缓存壳(实测 22ms/0 字节,FCP ~0.5s),后台拉新壳下次用(最多旧一个版本)。FEED_CACHE 同时落 localStorage 快照(每频道 15 条),冷启动先显旧内容再 silent refetch。**紧急停用(kill switch)**:全员停 = 往 `dashboard/index.html` 加 `<script>window.__SW_OFF=true</script>` 发版(SW 每次导航都后台拉新壳,一个访问周期内传达到);单机停 = localStorage 设 `aifeeds_sw_off=1`。SW 不碰 api//img/视频/字体/跨域(视频 Range 不能拦,5/9 事故同类风险)。
+
 **切换时的前置改动**（回滚要逆操作）：
 - R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）
 - 移除了 api 的 Worker custom domain（`xlist-api`）+ fonts 的 R2 custom domain，DNS 才能解锁改 A 记录
