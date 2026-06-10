@@ -31,3 +31,35 @@ createRoot(document.getElementById('root')!).render(
     </BrowserRouter>
   </StrictMode>,
 )
+
+// Service Worker:壳缓存,回访打开零网络秒出(public/sw.js)。load 之后才注册,
+// 不跟首屏抢任何资源。kill switch 两道:
+// 1) 全员紧急停用:发版往 index.html 加 <script>window.__SW_OFF=true</script>
+//    (SW 导航时总会后台拉新壳,所以这个 flag 一个访问周期内就能传达到所有用户)
+// 2) 单机停用:localStorage 设 aifeeds_sw_off = 1
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    let off = (window as unknown as { __SW_OFF?: boolean }).__SW_OFF === true
+    try {
+      off = off || localStorage.getItem('aifeeds_sw_off') === '1'
+    } catch {
+      /* 隐私模式读不了 localStorage,忽略 */
+    }
+    if (off) {
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((regs) => regs.forEach((r) => r.unregister()))
+        .catch(() => {})
+      if (window.caches) {
+        caches
+          .keys()
+          .then((ks) => ks.forEach((k) => { if (k.startsWith('aifeeds-')) caches.delete(k) }))
+          .catch(() => {})
+      }
+      return
+    }
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* 注册失败(老 webview 不支持等)→ 一切照旧,无 SW 行为 */
+    })
+  })
+}

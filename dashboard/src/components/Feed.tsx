@@ -51,11 +51,42 @@ type FeedCacheEntry = {
 const FEED_CACHE = new Map<string, FeedCacheEntry>();
 const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
 
-function readFeedCache(key: string): FeedCacheEntry | null {
+// 本地持久化(2026-06-11,回访秒开):FEED_CACHE 同步落一份轻量快照到 localStorage,
+// 下次打开 App(冷启动,内存是空的)先显示上次的内容、后台 silent refetch 换新 —— 微博/
+// 小红书的"先显旧再刷新"模式。只存前 FEED_SNAP_ITEMS 条(首屏够用,控制配额);不存
+// nextCursor(截断后 cursor 和 items 对不上),hasMore 落 false → 恢复期间 loadMore
+// 不会用错误的起点拼页,等 silent refetch 回来整体替换出正确的 cursor/hasMore。
+const FEED_SNAP_PREFIX = "aifeeds_feed_snap:";
+const FEED_SNAP_ITEMS = 15;
+const FEED_SNAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function setFeedCache(key: string, entry: FeedCacheEntry): void {
+  FEED_CACHE.set(key, entry);
+  try {
+    localStorage.setItem(
+      FEED_SNAP_PREFIX + key,
+      JSON.stringify({ items: entry.items.slice(0, FEED_SNAP_ITEMS), ts: entry.ts }),
+    );
+  } catch {
+    /* 配额满/隐私模式 → 忽略,纯内存照常工作 */
+  }
+}
+
+function readFeedCache(key: string, maxAgeMs: number = FEED_CACHE_TTL_MS): FeedCacheEntry | null {
   const c = FEED_CACHE.get(key);
-  if (!c) return null;
-  if (Date.now() - c.ts > FEED_CACHE_TTL_MS) return null;
-  return c;
+  if (c) return Date.now() - c.ts <= maxAgeMs ? c : null;
+  // 内存 miss(冷启动)→ 尝试 localStorage 快照,命中则 hydrate 回内存
+  try {
+    const raw = localStorage.getItem(FEED_SNAP_PREFIX + key);
+    if (!raw) return null;
+    const snap = JSON.parse(raw) as { items?: Item[]; ts?: number };
+    if (!snap || !Array.isArray(snap.items) || snap.items.length === 0 || !snap.ts) return null;
+    const entry: FeedCacheEntry = { items: snap.items, nextCursor: null, hasMore: false, ts: snap.ts };
+    FEED_CACHE.set(key, entry);
+    return Date.now() - snap.ts <= maxAgeMs ? entry : null;
+  } catch {
+    return null;
+  }
 }
 
 // 频道预取:空闲时后台拉其余频道首页写进 FEED_CACHE,让首次横划切换、以及扫码/分享落地
@@ -64,15 +95,17 @@ function readFeedCache(key: string): FeedCacheEntry | null {
 const PREFETCH_LIMIT = 12;
 export function prefetchChannels(sourceTypes: SourceType[]): void {
   for (const st of sourceTypes) {
-    if (FEED_CACHE.has(st)) continue;
+    // TTL 感知:有"新鲜"缓存才跳过。localStorage 恢复的旧快照(显示用)不算,
+    // 仍然预取一份新的覆盖,保证横划切过去时内容是新的。
+    if (readFeedCache(st)) continue;
     fetchItems({
       source_type: st,
       limit: PREFETCH_LIMIT,
       sort: st === "clawhub" ? "stars" : undefined,
     })
       .then((res) => {
-        if (res.items.length > 0 && !FEED_CACHE.has(st)) {
-          FEED_CACHE.set(st, {
+        if (res.items.length > 0 && !readFeedCache(st)) {
+          setFeedCache(st, {
             items: res.items,
             nextCursor: res.next_cursor,
             hasMore: res.has_more,
@@ -192,8 +225,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   ref,
 ) {
   // PM 2026-05-20:从 FEED_CACHE 拿之前缓存的 items,有 cache 时 mount 直接显
-  // (不显 skeleton),background refetch 更新。lazy init 保证只在 mount 时读一次
-  const cachedInit = readFeedCache(sourceType);
+  // (不显 skeleton),background refetch 更新。lazy init 保证只在 mount 时读一次。
+  // 2026-06-11:展示场景放宽到 24h(localStorage 快照)— 冷启动先秒显上次内容,
+  // mount effect 里的 silent refetch(只认 60s 内新鲜缓存)马上换新。
+  const cachedInit = readFeedCache(sourceType, FEED_SNAP_MAX_AGE_MS);
   const [items, setItems] = useState<Item[]>(cachedInit?.items ?? []);
   const [pending, setPending] = useState<Item[]>([]);
   // PM 2026-05-25 R11: 有 cache 不显 loading; 无 cache 初始 true 让 mount 那一帧
@@ -266,7 +301,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   useEffect(() => {
     if (placeholder) return;
     if (items.length === 0) return;
-    FEED_CACHE.set(sourceType, { items, nextCursor, hasMore, ts: Date.now() });
+    // ts 保留已有值(= 数据真正从网络拿到的时间),不在 sync 时重新盖章 —— 否则
+    // mount 时这个 effect 会把 localStorage 恢复的旧快照重新标成"新鲜",让下面
+    // fetch effect 的 60s skip 误判,silent refetch 被跳过,用户停在旧内容上。
+    const prevTs = FEED_CACHE.get(sourceType)?.ts;
+    setFeedCache(sourceType, { items, nextCursor, hasMore, ts: prevTs ?? Date.now() });
   }, [sourceType, items, nextCursor, hasMore, placeholder]);
 
   // 订阅 drawer 单条更新：抽屉打开触发的 lazy-enrich 拿到 fresh.item 后，
@@ -321,7 +360,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         setHasMore(res.has_more);
         lastScrapedAt.current = res.items[0]?.scraped_at || null;
         // 写入 FEED_CACHE,下次 mount 时直接 hydrate(不 skeleton)
-        FEED_CACHE.set(sourceType, {
+        setFeedCache(sourceType, {
           items: itemsToShow,
           nextCursor: res.next_cursor,
           hasMore: res.has_more,
