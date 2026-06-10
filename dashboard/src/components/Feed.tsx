@@ -254,6 +254,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const pullYRef = useRef(0);
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
+  // 切回频道秒切:本 Feed 实例是否已发过初次请求。首次 mount 时若 FEED_CACHE 够新就跳过 refetch。
+  const didFetchRef = useRef(false);
 
   const isHot = sortMode === "hot";
 
@@ -279,6 +281,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // Initial load + refresh on tick or sort change
   useEffect(() => {
     if (placeholder) return;
+    // 切回频道秒切:本实例首次 mount + FEED_CACHE 够新(<60s)→ 不重拉,直接用 hydrate 的缓存。
+    // 下拉刷新 / 换排序会让 deps 变,届时 didFetchRef 已 true → 照常拉新。
+    if (!didFetchRef.current) {
+      didFetchRef.current = true;
+      const fresh = readFeedCache(sourceType);
+      if (items.length > 0 && fresh && Date.now() - fresh.ts < 60_000) return;
+    }
     let cancelled = false;
     // PM 2026-05-20:若已有 cache hydrate 的 items,后台静默 refetch
     // (loading=false,不显 skeleton);否则首次进 tab 显 skeleton
