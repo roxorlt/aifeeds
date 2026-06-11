@@ -137,8 +137,50 @@ async function ingestOneBlogFeed(
   const existing = await selectExistingIds(env, enriched.map((e) => e.id));
   let newOnes = enriched.filter((e) => !existing.has(e.id));
 
-  // 冷启动限深(D10)：首跑一个几百条历史的 feed 不要灌满
-  if (isColdStart) newOnes = newOnes.slice(0, COLD_START_MAX);
+  // 冷启动限深(D10)：首跑只 enrich 最近 COLD_START_MAX 条;**截掉的旧文也必须
+  // 入库占位**(直接标 workflow_completed_at + cold_start_skipped,不 enrich 不展示)。
+  // 否则它们不在 items,第二轮 isColdStart=false 不再限深 → 全窗历史旧文涌入
+  // (2026-06-11 staging A1 用例实测:blog 102→408 / podcast 110→631)。
+  // items 存在性是防重权威,占位即永久排除,零新增游标状态(设计 §5.5 占位游标)。
+  let coldOverflow: typeof newOnes = [];
+  if (isColdStart) {
+    coldOverflow = newOnes.slice(COLD_START_MAX);
+    newOnes = newOnes.slice(0, COLD_START_MAX);
+  }
+  if (coldOverflow.length > 0) {
+    const lang0 = feed.region === 'domestic' ? 'zh' : 'en';
+    const stmts = coldOverflow.map((e) =>
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO items
+           (id, source_type, source_id, title, content, author, url,
+            metrics, published_at, scraped_at, is_relevant, lang, extra)
+         VALUES (?, 'blog', ?, ?, '', NULL, ?, '{}', ?, ?, NULL, ?, ?)`,
+      ).bind(
+        e.id,
+        `${feed.key}:${e.idHash}`,
+        e.p.title || '',
+        e.canonicalUrl || e.p.link || null,
+        e.p.published_at || null,
+        nowIso,
+        lang0,
+        JSON.stringify({
+          feed_id: feed.id,
+          feed_key: feed.key,
+          guid: e.guid,
+          canonical_url: e.canonicalUrl,
+          url_hash: e.urlHash,
+          workflow_completed_at: nowIso,
+          cold_start_skipped: 1,
+        }),
+      ),
+    );
+    try {
+      await env.DB.batch(stmts);
+    } catch (err) {
+      console.error(`[blog-fetch] ${feed.id} cold-overflow batch error:`, err);
+      throw err; // 占位失败不推进 cursor,下轮重头(否则旧文下轮仍会涌入)
+    }
+  }
 
   // 5. INSERT OR IGNORE stub(is_relevant=NULL，立即可被 workflow 接走)
   let insertedCount = 0;
