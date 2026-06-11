@@ -17,7 +17,7 @@
 // AudioPlayer 由 fe-cards 写，但为避免并行写竞态（其 props 签名未在契约固定），
 // 此处内联等价的原生 <audio controls>，零外部依赖、零 emoji。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -232,6 +232,12 @@ export function PodcastDrawerBody({ item }: Props) {
   const [tTab, setTTab] = useState<"zh" | "orig">(
     isForeign && transcriptZh ? "zh" : "orig",
   );
+  // 同 BlogDrawerBody:首渲染时列表瘦 item 没有 transcript_text_zh(被剥),
+  // tTab 定格 "orig";full-fetch 回填后自动切译文(用户手动切过则尊重)。
+  const userSwitchedTTab = useRef(false);
+  useEffect(() => {
+    if (!userSwitchedTTab.current && isForeign && transcriptZh) setTTab("zh");
+  }, [isForeign, transcriptZh]);
   const [tOpen, setTOpen] = useState(false);
   const transcriptToShow = tTab === "zh" ? transcriptZh || transcriptRaw : transcriptRaw;
   // 文字稿规模提示（约 N 字，按默认展示文本估，round 到百位）
@@ -383,7 +389,13 @@ export function PodcastDrawerBody({ item }: Props) {
             <div className="border-t border-neutral-200 px-3 py-3">
               {isForeign && transcriptZh && (
                 <div className="mb-3">
-                  <LangToggle value={tTab} onChange={setTTab} />
+                  <LangToggle
+                    value={tTab}
+                    onChange={(v) => {
+                      userSwitchedTTab.current = true;
+                      setTTab(v);
+                    }}
+                  />
                 </div>
               )}
               <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-600">

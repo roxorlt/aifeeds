@@ -18,7 +18,7 @@
 // http(s) 透传 —— 不抄 GH 绑死 owner/repo/branch 的相对 URL 重写（相对 URL 已在
 // BE step3 按各 feed base 域解析成绝对，见 §9.2）。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -268,6 +268,14 @@ export function BlogDrawerBody({ item }: Props) {
   const [tab, setTab] = useState<"zh" | "orig">(
     isForeign && bodyZh ? "zh" : "orig",
   );
+  // useState 初始值只在首渲染求值 — 那时还是列表瘦 item(body_markdown_zh 被
+  // LIST_HEAVY_EXTRA_KEYS 剥掉,bodyZh 空)→ tab 定格 "orig";full-fetch 回填后
+  // 不会重算 → 外文源默认显英文(2026-06-11 验收实测)。译文到位且用户没手动
+  // 切过 → 自动切到译文。
+  const userSwitchedTab = useRef(false);
+  useEffect(() => {
+    if (!userSwitchedTab.current && isForeign && bodyZh) setTab("zh");
+  }, [isForeign, bodyZh]);
   const bodyToShow = tab === "zh" ? bodyZh || bodyRaw : bodyRaw;
 
   // Lightbox：封面（idx 0）+ 正文内联图，按序收集。React Compiler 自动 memo，
@@ -375,7 +383,15 @@ export function BlogDrawerBody({ item }: Props) {
         <div>
           <div className="mt-4 flex items-center justify-between border-y border-neutral-100 px-5 py-2.5">
             <h3 className="text-[13px] font-semibold text-neutral-900">正文</h3>
-            {showTabs && <LangToggle value={tab} onChange={setTab} />}
+            {showTabs && (
+              <LangToggle
+                value={tab}
+                onChange={(v) => {
+                  userSwitchedTab.current = true;
+                  setTab(v);
+                }}
+              />
+            )}
           </div>
           <div className="max-w-none break-words p-5 pt-3 text-[13px]">
             {showTabs && tab === "zh" && !bodyZh ? (
