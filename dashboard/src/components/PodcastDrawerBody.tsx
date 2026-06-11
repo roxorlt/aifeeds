@@ -308,10 +308,13 @@ export function PodcastDrawerBody({ item }: Props) {
             <div className="mb-1.5 text-[13px] font-semibold text-neutral-700">收听</div>
             {/* src 直接挂 <audio>（§10.3）：podcast enclosure 的 mime 常不可靠
                 （application/octet-stream 等会让 <source type> 被浏览器跳过），
-                直挂 src 让浏览器自行尝试，最稳。绝不走 /r/（无 Range → seek 失效）。 */}
+                直挂 src 让浏览器自行尝试，最稳。绝不走 /r/（无 Range → seek 失效）。
+                preload=none(2026-06-11 D4 用例抓到:metadata 也会向海外 CDN 发请求,
+                大陆易挂起占连接;时长 UI 用 extra.duration_sec,点播放才加载,
+                对齐 22c27da 视频 preload=none 思路)。 */}
             <audio
               controls
-              preload="metadata"
+              preload="none"
               src={audioUrl}
               className="w-full"
             >
