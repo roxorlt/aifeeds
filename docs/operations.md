@@ -412,7 +412,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）/ `clawhub-fetch` / `clawhub-enrich`（ClawHub phase 1/2 手动触发）
+- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）/ `clawhub-fetch` / `clawhub-enrich`（ClawHub phase 1/2 手动触发）/ `blog-fetch` / `podcast-fetch`（官方新闻 phase 1 手动拉取,staging crons=[] 验证 + 回灌用,2026-06-11）/ `backfill-blog-workflow` / `backfill-podcast-workflow`（扫 wc_at IS NULL 的 stuck blog/podcast 行重 trigger,兜底无专属 cron slot,只手动跑）
 - `mode=backfill-replies`：回填 reply_to_id + reply_of 父推快照（用 syndication `parent` 字段，与 quote 平行）。cron 占 :05 :35 槽（2/h），历史回补主要靠本地 loop。
 - `mode=reclassify-threads`：清理错分的 thread_root_id（默认 `dry_run=1` 只统计；`dry_run=0` 真执行）。一次性，等 backfill-replies 跑完再触发。
 - `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）；detect-longform 默认 30（1-80）
@@ -425,7 +425,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 
 | cron | 触发 | 调度逻辑 |
 |------|------|---------|
-| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1，触发 GithubPipelineWorkflow）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `10:10-10:14` → `runPhDailyFetch`（PH 一日一抓，北京 18:10）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`（X metrics 刷新，**不是 workflow**）；`:25` `:55` → `runListPollIngest`（X phase 1，触发 XTweetPipelineWorkflow per new tweet）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）。**抢占路径**（catch-all tick 在分发前先查 pending 队列）：**PH enrich** / PH r2-migrate / **ClawHub enrich** + PH 字段 fill-translations，pending 非零就走 preempt |
+| `*/5 * * * *` | `scheduled()` | 按触发时分分流：UTC `17:00` `05:00` → `runGithubFetchTrending`（GH phase 1，触发 GithubPipelineWorkflow）；UTC `08:00` `20:00` → `runClawhubFetchList`（ClawHub phase 1）；UTC `10:10-10:14` → `runPhDailyFetch`（PH 一日一抓，北京 18:10）；`:00` `:30` → `runRefreshMetrics`/`runRefreshTiered`（X metrics 刷新，**不是 workflow**）；`:25` `:55` → `runListPollIngest`（X phase 1，触发 XTweetPipelineWorkflow per new tweet）；`:20` → `runBlogFetch` + `:50` → `runPodcastFetch`（官方新闻 blog/podcast phase 1,占原 hdx-drain 槽,per-feed cadence 由 sources.config 控,触发 Blog/PodcastPipelineWorkflow per new item,各 `recordCronRun` 包裹;**2026-06-11 staging 已上线验收、prod 待合 main**,设计 `docs/plans/2026-06-09-ai-vendor-feeds-source-design.md`）；`03:35 UTC` 每天一次 → `runCleanup`（清 30 天前的 snapshots/refresh_log）。**抢占路径**（catch-all tick 在分发前先查 pending 队列）：**PH enrich** / PH r2-migrate / **ClawHub enrich** + PH 字段 fill-translations，pending 非零就走 preempt |
 
 **调度节奏（2026-05-16 阶段 4 cutover 后）**：每小时 2 次 refresh-metrics（`:00` `:30`，ScrapeBadger batch 刷新现有 tweet 互动数据）+ 2 次 list-poll-ingest（`:25` `:55`，拉新 tweet 触发 workflow）。每天 03:35 UTC（11:35 BJT）cleanup。其余 tick 走 catch-all preempt（PH/ClawHub 链）。
 

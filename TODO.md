@@ -21,7 +21,12 @@
 - [x] **2 个视觉取舍已定**(2026-06-09 看 mockup 后):① blog 流内卡 = **右侧小缩略图(news-card 式,文字为主,非满宽 hero)** ② publisher logo = **真实 logo(BE 迁 R2)**。已记设计文档 §10.1/§10.2/§13 + 决策矩阵。→ **Phase 0(设计 + mockup)彻底完成**
   - 注:`feeds-feed-mockup.html` 里 blog 卡画的是旧的满宽 hero,**最终以 `feeds-card-variants.html` 的 ② 右侧小缩略图为准**(设计文档已是权威);Phase 1 建卡照 §10.2,需要的话可再刷一版 feed-mockup
 - [ ] **mockup 实现注记**(非阻塞,FE 落地时):blog 抽屉头图标 ico-close 统一为 ico-back(对齐 podcast 抽屉/kit 外壳);logo 描边 #FF9A1A 改回规范 #FF8A00
-- [ ] **Phase 1**(估 9-12 天,零基建 ~24 源):schema migration 020 → blog/podcast 拉取 + 两条 CF Workflow(含 step1 is_ai gate + ELI25 翻译)→ 前端三件套 → 真机验收 → operations.md 同步
+- [x] **Phase 1 代码 + staging 验收完成**(2026-06-11,branch `feat/blog-podcast-sources` = main + 4 commits,**未合 main / prod 未动**):
+  - 代码:migration **021**(因 main 020 撞号改名)+ feeds/ 共享库(registry 24 源/解析/抽取/is_ai gate+ELI25/L1去重/R2)+ Blog/PodcastPipelineWorkflow + cron :20/:50 + 前端三件套「官方新闻」频道
+  - staging 实测:blog 13 feeds 102 条 + podcast 11 feeds 110 条,workflow 完成率 ~96%+ 收敛,三终态 wc_at ✅,is_ai gate 滤掉 3 条非 AI ✅,ELI25 翻译抽查过关 ✅,R2 封面迁移 ✅,列表剥重字段(单条 ~4KB)✅,抽屉全文+audio player 真机渲染 ✅
+  - staging 期间修掉 3 个问题:`/o` 裸路径路由缺失(白屏)/ 官方新闻排序传 `sort=published_at`(默认 scraped_at 同秒入库乱序)/ `.env.staging` 重建(被 7ef229c 移出跟踪后 checkout 删失)
+  - ⚠️ 遗留注意:**staging 浏览器有 SW 壳缓存**,部署后旧版可能吊 24h,验收前注销 SW / 硬刷新
+- [ ] **prod 上线**(待用户发话):PR review → 合 main → migration 021 跑 prod D1 → worker+dashboard 同步部署 prod → 触发首拉 → PushDeer 通知验证(Phase 8)
 - [ ] **Phase 2/3**:RSSHub 中文播客 / 页面抓取 + 无头(按 D1-D10 结果排)
 - [ ] **明确不接**(需求 4.8):不往 digest(订阅日报)/ codex daily 推送加 blog/podcast
 
