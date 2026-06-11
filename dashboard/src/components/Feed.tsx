@@ -103,7 +103,7 @@ export function prefetchChannels(sourceTypes: SourceType[]): void {
     fetchItems({
       source_type: st,
       limit: PREFETCH_LIMIT,
-      sort: st === "clawhub" ? "stars" : undefined,
+      sort: st === "clawhub" ? "stars" : (st as string) === "blog,podcast" ? "published_at" : undefined,
     })
       .then((res) => {
         if (res.items.length > 0 && !readFeedCache(st)) {
@@ -340,7 +340,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     fetchItems({
       source_type: sourceType,
       limit: INITIAL_LIMIT,
-      sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
+      // 官方新闻必须显式 sort=published_at:默认 scraped_at 在批量回灌时同秒
+      // 入库,排序退化成 id 序(实测乱跳「5个月前→2个月前→8个月前」)。
+      sort: isClawhub ? chSort : (isHot ? "hot" : sourceType === "blog,podcast" ? "published_at" : undefined),
       category: isClawhub && chCategory !== "all" ? chCategory : undefined,
       include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
       city: isHdx && hdxCity ? hdxCity : undefined,
@@ -399,7 +401,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         source_type: sourceType,
         cursor: nextCursor,
         limit: LOAD_MORE_LIMIT,
-        sort: isClawhub ? chSort : (isHot ? "hot" : undefined),
+        sort: isClawhub ? chSort : (isHot ? "hot" : sourceType === "blog,podcast" ? "published_at" : undefined),
         category: isClawhub && chCategory !== "all" ? chCategory : undefined,
         include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
         city: isHdx && hdxCity ? hdxCity : undefined,
