@@ -4,9 +4,11 @@ import { proxyImg } from "../lib/utils";
 
 interface Props {
   card: LinkCardType;
+  // 首屏前几张卡(TweetCard 透传):预览图 eager + fetchPriority=high,LCP 优化
+  eager?: boolean;
 }
 
-export function LinkCard({ card }: Props) {
+export function LinkCard({ card, eager }: Props) {
   const [imageFailed, setImageFailed] = useState(false);
   const [videoFailed, setVideoFailed] = useState(false);
   const title = card.title_translated || card.title;
@@ -53,7 +55,8 @@ export function LinkCard({ card }: Props) {
         <img
           src={posterSrc}
           alt=""
-          loading="lazy"
+          loading={eager ? "eager" : "lazy"}
+          fetchPriority={eager ? "high" : undefined}
           className="aspect-[1.91/1] w-full object-cover"
           onError={() => setImageFailed(true)}
         />

@@ -78,9 +78,11 @@ function bjtDateFromIso(isoOrTs: string | number | undefined | null): string {
 
 interface Props {
   item: Item;
+  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
+  eager?: boolean;
 }
 
-export function GithubCard({ item }: Props) {
+export function GithubCard({ item, eager }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
   // onLoad 后检测真实 natural dims，aspect 极端 / 太小（banner / badge / repo icon）
@@ -226,7 +228,8 @@ export function GithubCard({ item }: Props) {
         <img
           src={proxyImg(coverImage, 400)}
           alt=""
-          loading="lazy"
+          loading={eager ? "eager" : "lazy"}
+          fetchPriority={eager ? "high" : undefined}
           className="mt-2.5 aspect-[16/9] w-full rounded-2xl border border-neutral-200 bg-neutral-100 object-cover"
           onError={() => setCoverFailed(true)}
           onLoad={(e) => {

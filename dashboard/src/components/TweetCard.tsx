@@ -243,6 +243,7 @@ function TweetMediaTile({
   videoIdSuffix = "",
   onClickImage,
   posterMode,
+  eager,
 }: {
   media: MediaItem[];
   itemId: string;
@@ -250,6 +251,7 @@ function TweetMediaTile({
   videoIdSuffix?: string;
   onClickImage: (idx: number) => void;
   posterMode?: boolean;
+  eager?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   if (failed || media.length === 0) return null;
@@ -332,7 +334,8 @@ function TweetMediaTile({
         <img
           src={proxyImg(first.url, 400)}
           alt={first.alt || ""}
-          loading="lazy"
+          loading={eager ? "eager" : "lazy"}
+          fetchPriority={eager ? "high" : undefined}
           className="w-full transition-transform hover:scale-[1.02]"
           onError={() => setFailed(true)}
         />
@@ -370,6 +373,9 @@ interface Props {
   // header 隐藏 @handle 跟"原文"按钮、时间用 MM-DD HH:MM 固定格式(而非
   // 易过期的"3 天前")、verified badge 跟昵称留更大 gap (海报字号放大场景)
   posterMode?: boolean;
+  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,不参与 lazy
+  // 排队 — 否则浏览器会刻意推迟首屏可见图,LCP 白慢几百 ms
+  eager?: boolean;
 }
 
 export function TweetCard({
@@ -381,6 +387,7 @@ export function TweetCard({
   hasThreadBelow,
   inThread,
   posterMode,
+  eager,
 }: Props) {
   const { openTweet } = useDrawer();
   const impressionRef = useImpression(() => {
@@ -883,6 +890,7 @@ export function TweetCard({
             sourceType={item.source_type}
             onClickImage={(idx) => setLightboxIndex(idx)}
             posterMode={posterMode}
+            eager={eager}
           />
 
           {/* F3: Reply parent 不再嵌套在 main media 之后（旧的 quote 视觉语言）。
@@ -904,7 +912,7 @@ export function TweetCard({
               (twitter.com/handle/status/<本 source_id>), 底部"打开 X 原文"
               已是同款入口, 重复展示无意义 */}
           {extra.link_card && !quoteOf && !isSelfLinkCard(extra.link_card, item.handle, item.source_id) && (
-            <LinkCard card={extra.link_card} />
+            <LinkCard card={extra.link_card} eager={eager} />
           )}
 
           {/* Metrics bar (read-only X-platform data, not interactive) */}

@@ -82,9 +82,11 @@ interface Maker {
 
 interface Props {
   item: Item;
+  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
+  eager?: boolean;
 }
 
-export function PhCard({ item }: Props) {
+export function PhCard({ item, eager }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
   // onLoad 后检测真实 natural dims（同 GithubCard / worker share/handlers.ts 门控）
@@ -196,7 +198,8 @@ export function PhCard({ item }: Props) {
           <img
             src={proxyImg(resolveAssetUrl(cover.url) || cover.url, 400)}
             alt=""
-            loading="lazy"
+            loading={eager ? "eager" : "lazy"}
+            fetchPriority={eager ? "high" : undefined}
             className="aspect-[16/9] w-full object-cover"
             onError={() => setCoverFailed(true)}
             onLoad={(e) => {

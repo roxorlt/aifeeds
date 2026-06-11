@@ -135,9 +135,11 @@ function ExtLinkIcon() {
 
 interface Props {
   item: Item;
+  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
+  eager?: boolean;
 }
 
-export function HuodongxingCard({ item }: Props) {
+export function HuodongxingCard({ item, eager }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
@@ -201,7 +203,8 @@ export function HuodongxingCard({ item }: Props) {
           <img
             src={coverUrl}
             alt={title}
-            loading="lazy"
+            loading={eager ? "eager" : "lazy"}
+            fetchPriority={eager ? "high" : undefined}
             decoding="async"
             className="aspect-[16/9] w-full object-cover"
             onError={() => setCoverFailed(true)}

@@ -953,23 +953,29 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                   </div>,
                 );
               }
+              // 首屏前 3 张卡的封面图 eager + fetchPriority=high:浏览器对 lazy
+              // 图会刻意推迟,首屏可见图也跟着排队,LCP 白慢几百 ms。前 3 行
+              // 立即下载且插队;其余照旧 lazy(省流量)。ClawhubCard 只有小头像、
+              // ThreadCard 场景少,不传。
+              const eager = idx < 3;
               nodes.push(
                 row.kind === "single" ? (
                   row.item.source_type === "github" ? (
-                    <GithubCard key={row.item.id} item={row.item} />
+                    <GithubCard key={row.item.id} item={row.item} eager={eager} />
                   ) : row.item.source_type === "product_hunt" ? (
-                    <PhCard key={row.item.id} item={row.item} />
+                    <PhCard key={row.item.id} item={row.item} eager={eager} />
                   ) : row.item.source_type === "clawhub" ? (
                     <ClawhubCard key={row.item.id} item={row.item} />
                   ) : row.item.source_type === "huodongxing" ? (
-                    <HuodongxingCard key={row.item.id} item={row.item} />
+                    <HuodongxingCard key={row.item.id} item={row.item} eager={eager} />
                   ) : row.item.source_type === "hf_paper" ? (
-                    <HfPaperCard key={row.item.id} item={row.item} />
+                    <HfPaperCard key={row.item.id} item={row.item} eager={eager} />
                   ) : (
                     <TweetCard
                       key={row.item.id}
                       item={row.item}
                       hideThreadBanner
+                      eager={eager}
                     />
                   )
                 ) : (

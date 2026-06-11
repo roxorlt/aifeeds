@@ -19,6 +19,8 @@ import { useImpressionRefresh } from "../lib/impressionRefresh";
 
 interface Props {
   item: Item;
+  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
+  eager?: boolean;
 }
 
 // ─── Inline icons (HF feed specific) ──────────────────────────────────────
@@ -95,7 +97,7 @@ export function NoveltyStars({
   );
 }
 
-export function HfPaperCard({ item }: Props) {
+export function HfPaperCard({ item, eager }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
@@ -147,7 +149,8 @@ export function HfPaperCard({ item }: Props) {
           <img
             src={resolveAssetUrl(cover.url)}
             alt=""
-            loading="lazy"
+            loading={eager ? "eager" : "lazy"}
+            fetchPriority={eager ? "high" : undefined}
             className="aspect-[1200/630] w-full object-cover"
             onError={() => setCoverFailed(true)}
           />
