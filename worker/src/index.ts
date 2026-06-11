@@ -3822,6 +3822,23 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       estimated_workflow_completion_min: Math.ceil((triggered * 60) / 60),  // ~60s/paper serial step
     }, 200, request, env);
   }
+  // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
+  // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
+  // (ensureFeedSources upsert + INSERT OR IGNORE + seen-set 游标)。
+  if (mode === 'blog-fetch') {
+    if (!env.BLOG_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'BLOG_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const r = await runBlogFetch(env);
+    return jsonResponse({ mode: 'blog-fetch', ...r }, 200, request, env);
+  }
+  if (mode === 'podcast-fetch') {
+    if (!env.PODCAST_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'PODCAST_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const r = await runPodcastFetch(env);
+    return jsonResponse({ mode: 'podcast-fetch', ...r }, 200, request, env);
+  }
   // 官方新闻 backfill 兜底(2026-06-09 §1.6):扫 workflow_completed_at IS NULL 的
   // blog/podcast 行重 trigger workflow(hour-bucket instance id 让卡住的可重入)。
   // blog/podcast 无专属 cron backfill slot —— pending 几乎不产生(per-feed
