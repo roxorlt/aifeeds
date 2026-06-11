@@ -26,6 +26,8 @@
   - staging 实测:blog 13 feeds 102 条 + podcast 11 feeds 110 条,workflow 完成率 ~96%+ 收敛,三终态 wc_at ✅,is_ai gate 滤掉 3 条非 AI ✅,ELI25 翻译抽查过关 ✅,R2 封面迁移 ✅,列表剥重字段(单条 ~4KB)✅,抽屉全文+audio player 真机渲染 ✅
   - staging 期间修掉 3 个问题:`/o` 裸路径路由缺失(白屏)/ 官方新闻排序传 `sort=published_at`(默认 scraped_at 同秒入库乱序)/ `.env.staging` 重建(被 7ef229c 移出跟踪后 checkout 删失)
   - ⚠️ 遗留注意:**staging 浏览器有 SW 壳缓存**,部署后旧版可能吊 24h,验收前注销 SW / 硬刷新
+- [x] **验收反馈 5 项已修**(2026-06-11 二轮,commit `0d0b8d4`+`8c87f70` 级):① blog 抽屉无译文 ② podcast 抽屉无 shownotes/文字稿 — 根因「列表剥重字段 + refresh 端点不覆盖 blog/podcast → 抽屉永远拿瘦 item」,DrawerBody mount 自拉 fetchItem(同 ClawHub 先例)+ 修 toggle stale-init(译文回填后自动切 zh);③ 返回退出站 — urlForItem 缺 blog/podcast 分支(不 push 历史),补 /o/:id 生成+解析+main.tsx seed;④ track 400 — sendBeacon 无法带 X-Device-Id header,worker 加 body._did fallback(**全站既有 bug,顺手修**);⑤ 官方新闻挪源 tab 首位。auth/me 401 = 未登录既有行为非缺陷
+- [ ] **已知小瑕疵(不阻塞 prod)**:译文 markdown 里 `**粗体**` 紧贴中文时不解析(CommonMark flanking 限制,评审曾预警)— prod 前可在翻译 prompt 加边界规则(粗体两侧留空格)或 FE remark 容错
 - [ ] **prod 上线**(待用户发话):PR review → 合 main → migration 021 跑 prod D1 → worker+dashboard 同步部署 prod → 触发首拉 → PushDeer 通知验证(Phase 8)
 - [ ] **Phase 2/3**:RSSHub 中文播客 / 页面抓取 + 无头(按 D1-D10 结果排)
 - [ ] **明确不接**(需求 4.8):不往 digest(订阅日报)/ codex daily 推送加 blog/podcast
