@@ -84,6 +84,15 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const arxivId = decodeURIComponent(hfMatch[1]);
     return { compositeId: `hf_paper:${arxivId}` };
   }
+  // /o/:id → 官方新闻(blog/podcast)。:id 是完整 composite id(blog:<feed>:<hash>),
+  // 前缀校验防把裸 /o/ 频道或非法值当 item 深链。
+  const oMatch = pathname.match(/^\/o\/([^/]+)$/);
+  if (oMatch) {
+    const cid = decodeURIComponent(oMatch[1]);
+    if (cid.startsWith("blog:") || cid.startsWith("podcast:")) {
+      return { compositeId: cid };
+    }
+  }
   return null;
 }
 
@@ -108,6 +117,12 @@ function urlForItem(item: Item): string | null {
       return `/e/${encodeURIComponent(item.source_id)}`;
     case "hf_paper":
       return `/h/${encodeURIComponent(item.source_id)}`;
+    case "blog":
+    case "podcast":
+      // /o/:id 用完整 composite id(blog:<feed>:<hash>),parse 侧 decode 即还原。
+      // 没这分支时 openItem 不 push 历史,close() navigate(-1) 会把进站前历史
+      // 退出去(用户实测「返回变 chrome 启动页」,2026-06-11)。
+      return `/o/${encodeURIComponent(item.id)}`;
     default:
       return null;
   }

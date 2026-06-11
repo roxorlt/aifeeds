@@ -18,12 +18,13 @@
 // http(s) 透传 —— 不抄 GH 绑死 owner/repo/branch 的相对 URL 重写（相对 URL 已在
 // BE step3 按各 feed base 域解析成绝对，见 §9.2）。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra, MediaItem } from "../types";
+import { fetchItem } from "../api";
 import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { Lightbox } from "./Lightbox";
@@ -215,7 +216,23 @@ interface Props {
 }
 
 export function BlogDrawerBody({ item }: Props) {
-  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
+  // 列表 /api/items 已剥重字段(body_markdown/_zh 等,LIST_HEAVY_EXTRA_KEYS),
+  // 且 /api/items/:id/refresh 对 blog 返 unsupported_source(drawer 层不会补拉)。
+  // 抽屉 mount 自拉一次完整 item(单条接口走 parseItemRow(item, true))拿正文全文,
+  // 同 ClawhubDrawerBody 抽屉自 fetch 的先例。拉到前先渲染列表瘦 item(摘要可见)。
+  const [fullItem, setFullItem] = useState<Item | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setFullItem(null);
+    fetchItem(item.id)
+      .then((resp) => {
+        if (!cancelled && resp.item) setFullItem(resp.item);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [item.id]);
+  const view = fullItem ?? item;
+  const extra = parseJsonField<ItemExtra>(view.extra) ?? ({} as ItemExtra);
 
   // publisher 头
   const pub = extra.publisher;

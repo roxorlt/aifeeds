@@ -16,7 +16,7 @@ import App from './App.tsx'
 // /e/ (huodongxing event deeplink) 同样漏在列表里,顺手补上。
 {
   const p = window.location.pathname
-  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/') || p.startsWith('/ph/') || p.startsWith('/c/') || p.startsWith('/h/') || p.startsWith('/e/')
+  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/') || p.startsWith('/ph/') || p.startsWith('/c/') || p.startsWith('/h/') || p.startsWith('/e/') || p.startsWith('/o/')
   if (isDeepLink) {
     const target = window.location.pathname + window.location.search + window.location.hash
     window.history.replaceState({}, '', '/')

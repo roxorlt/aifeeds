@@ -47,14 +47,13 @@ interface ClientEvent {
 interface TrackRequest {
   events: ClientEvent[];
   session_token_hash?: string;  // 前端 SDK 生成的会话 hash
+  _did?: string;                // pagehide sendBeacon 通道:无法带自定义 header,did 落 body(queue.ts:78)
 }
 
 export async function handleTrack(request: Request, env: Env): Promise<Response> {
-  // 1. X-Device-Id 必填
-  const deviceId = request.headers.get('X-Device-Id');
-  if (!deviceId || deviceId.length < 8 || deviceId.length > 64) {
-    return jsonError('missing or invalid X-Device-Id', 400);
-  }
+  // 1. X-Device-Id(header 优先;sendBeacon 不能带自定义 header,fallback 读 body._did,
+  //    否则 pagehide flush 一律 400 丢埋点 — 2026-06-11 staging 验收实测)
+  const headerDid = request.headers.get('X-Device-Id');
 
   // 2. body 大小限制
   const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
@@ -68,6 +67,11 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
     body = await request.json() as TrackRequest;
   } catch {
     return jsonError('invalid json', 400);
+  }
+
+  const deviceId = headerDid || (typeof body._did === 'string' ? body._did : null);
+  if (!deviceId || deviceId.length < 8 || deviceId.length > 64) {
+    return jsonError('missing or invalid X-Device-Id', 400);
   }
 
   if (!body || !Array.isArray(body.events)) {

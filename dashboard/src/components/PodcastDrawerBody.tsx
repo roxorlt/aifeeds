@@ -17,11 +17,12 @@
 // AudioPlayer 由 fe-cards 写，但为避免并行写竞态（其 props 签名未在契约固定），
 // 此处内联等价的原生 <audio controls>，零外部依赖、零 emoji。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra } from "../types";
+import { fetchItem } from "../api";
 import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { BrandPodcast, IconClock } from "./icons";
@@ -183,7 +184,21 @@ interface Props {
 }
 
 export function PodcastDrawerBody({ item }: Props) {
-  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
+  // 列表已剥 shownotes/transcript 重字段且 refresh 端点不覆盖 podcast,
+  // 抽屉 mount 自拉完整 item 补 shownotes_zh / transcript_text_zh(同 BlogDrawerBody)。
+  const [fullItem, setFullItem] = useState<Item | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setFullItem(null);
+    fetchItem(item.id)
+      .then((resp) => {
+        if (!cancelled && resp.item) setFullItem(resp.item);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [item.id]);
+  const view = fullItem ?? item;
+  const extra = parseJsonField<ItemExtra>(view.extra) ?? ({} as ItemExtra);
 
   const pub = extra.publisher;
   const showName = extra.show_name || pub?.name || extra.source_company || item.author || "";
