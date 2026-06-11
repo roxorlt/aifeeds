@@ -1193,6 +1193,7 @@ function App() {
             DashboardHome（initialFilter 据 pathname 落「官方新闻」tab）；抽屉冷启动
             的 composite-id 解析在 lib/drawer.tsx parseDeepLinkFromPath（跨团队，
             未命中时优雅降级为仅打开频道、不自动开抽屉）。 */}
+        <Route path="/o" element={<DashboardHome />} />
         <Route path="/o/:id" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
