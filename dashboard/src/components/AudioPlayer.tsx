@@ -90,10 +90,13 @@ export function AudioPlayer({ src, externalUrl, externalLabel }: AudioPlayerProp
 
   return (
     <div>
-      {/* src 是原始 enclosure 直链，浏览器原生 <audio> 直吃，不走 /r/。 */}
+      {/* src 是原始 enclosure 直链，浏览器原生 <audio> 直吃，不走 /r/。
+          preload=none(2026-06-11 C 端速度对齐 22c27da 视频 preload=none 思路):
+          metadata 也会向海外 CDN(megaphone/acast/libsyn)发请求,大陆可能挂起占
+          连接;时长 UI 由 extra.duration_sec 提供,不依赖 audio 元数据,点播放才加载。 */}
       <audio
         controls
-        preload="metadata"
+        preload="none"
         src={src ?? undefined}
         onError={() => setFailed(true)}
         onClick={(e) => e.stopPropagation()}

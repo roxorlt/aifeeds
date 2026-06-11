@@ -842,7 +842,14 @@ function DashboardHome() {
     const t = window.setTimeout(() => {
       idle(() => {
         const live = liveRef.current;
-        if (live.size > 0) prefetchChannels([...live] as SourceType[]);
+        if (live.size > 0) {
+          // blog/podcast 折叠成「官方新闻」复合值预取:Feed 的 FEED_CACHE key 是
+          // 列的 sourceType("blog,podcast"),按单源 key 预取写进缓存永远 miss
+          // (2026-06-11 C 端速度核查发现)。其余源 key 即 source_type,原样。
+          const list: SourceType[] = [...live].filter((s) => s !== "blog" && s !== "podcast");
+          if (live.has("blog") || live.has("podcast")) list.push(OFFICIAL_NEWS as unknown as SourceType);
+          prefetchChannels(list);
+        }
       });
     }, 2500);
     return () => window.clearTimeout(t);

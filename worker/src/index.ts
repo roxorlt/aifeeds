@@ -2672,6 +2672,17 @@ function parseItemRow(row: Record<string, unknown>, full = false): Record<string
       parsed.content_translated = parsed.content_translated.slice(0, 280);
     }
   }
+  // blog/podcast 同款(2026-06-11):content 装 excerpt/shownotes 纯文本(podcast 均
+  // ~1KB、max 2.7KB),卡片摘要走 extra.ai_summary_zh、content 只作 fallback 且
+  // clamp 2-3 行(280 足够);全文在抽屉(DrawerBody 自拉 fetchItem full)。
+  if (!full && (parsed.source_type === 'blog' || parsed.source_type === 'podcast')) {
+    if (typeof parsed.content === 'string' && parsed.content.length > 280) {
+      parsed.content = parsed.content.slice(0, 280);
+    }
+    if (typeof parsed.content_translated === 'string' && parsed.content_translated.length > 280) {
+      parsed.content_translated = parsed.content_translated.slice(0, 280);
+    }
+  }
   return parsed;
 }
 
