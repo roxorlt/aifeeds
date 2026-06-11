@@ -55,6 +55,11 @@ import {
   runGithubR2Migrate,
   triggerGhWorkflowForItem,
 } from './github';
+// 官方新闻源（blog 厂商博客 + podcast AI 播客，Phase 1 2026-06-09）。
+// runBlogFetch/runPodcastFetch 内部已幂等 ensureFeedSources，cron slot 直接调。
+// backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
+import { runBlogFetch, runBlogBackfill } from './blog';
+import { runPodcastFetch, runPodcastBackfill } from './podcast';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
@@ -265,6 +270,19 @@ export interface Env {
   // Phase 2 阶段 wrangler.toml binding 尚未加(等 Phase 3 写 class 一起 commit),
   // 故 optional。triggerHfPaperWorkflowForItem 内置 binding-missing fallback。
   HF_PAPER_PIPELINE_WORKFLOW?: Workflow;
+  // 官方新闻源 workflow binding(worker/src/workflows/blog-pipeline.ts /
+  // podcast-pipeline.ts，Phase 1 2026-06-09)。runBlogFetch/runPodcastFetch 后对每条
+  // 新 item create 1 个 instance 跑 enrich/classify/translate/r2-migrate pipeline。
+  // optional：trigger 函数内置 binding-missing fallback，缺 binding 不崩 cron。
+  // 设计：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §8
+  BLOG_PIPELINE_WORKFLOW?: Workflow;
+  PODCAST_PIPELINE_WORKFLOW?: Workflow;
+  // RSSHub 基址 + token（feeds/parse.ts 的 via='rsshub' 分支用）。Phase 1 的 24 个
+  // feed 全 via='native'，此项暂未启用；留作未来需要 RSSHub 中转的源（如某些无原生
+  // RSS 的国内厂商）。香港 host-rewrite 铁律：基址只走 env.RSSHUB_BASE，不靠 request host。
+  // 缺省时 fetchFeedXml 对 rsshub feed 抛错（per-feed catch，不影响其它 feed）。
+  RSSHUB_BASE?: string;
+  RSSHUB_TOKEN?: string;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
@@ -274,6 +292,8 @@ export { HuodongxingDetailWorkflow } from './workflows/huodongxing-detail';
 export { PhPipelineWorkflow } from './workflows/ph-pipeline';
 export { ClawhubPipelineWorkflow } from './workflows/clawhub-pipeline';
 export { HfPaperPipelineWorkflow } from './workflows/hf-paper-pipeline';
+export { BlogPipelineWorkflow } from './workflows/blog-pipeline';
+export { PodcastPipelineWorkflow } from './workflows/podcast-pipeline';
 export { DigestNodeRunWorkflow } from './digest/node-run';
 export { DigestDeliverWorkflow } from './digest/deliver';
 
@@ -1846,6 +1866,39 @@ export default {
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
+          // ─── 官方新闻：blog 厂商博客 fetch (Phase 1, 2026-06-09 §7.2) ───
+          // :20 偶数 UTC 时(12x/天，cadence ~2h)。INSERT OR IGNORE stub + 立即 trigger
+          // workflow(catch-up 分流余者 pending，但 per-feed COLD_START_MAX=10 < 阈值 50，
+          // 实际几乎不进 pending)。整轮成功推进 sources.cursor(seen-set)。
+          // ⚠️ 必须放在 isHdxEnrichSlot(:20/:50)hdx-drain check 之前 —— 那块带 return，
+          //    放它后面会把本 slot shadow 掉。被偷的 12 个 :20 even-hour tick，hdx-drain
+          //    仍有 :50 全时 + :20 奇数时共 36 tick/天兜底，容量充足。
+          const isBlogFetchSlot = minute === 20 && hour % 2 === 0;
+          if (isBlogFetchSlot) {
+            const r = await recordCronRun(
+              env,
+              { name: 'blog-fetch', source: 'blog', category: 'fetch' },
+              () => runBlogFetch(env),
+            );
+            console.log(`[cron] blog-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, '厂商博客抓取', r as unknown as Record<string, unknown>);
+            return;
+          }
+          // ─── 官方新闻：podcast AI 播客 fetch (Phase 1, 2026-06-09 §7.2) ───
+          // :50 UTC {1,7,13,19}(4x/天，cadence ~6h)。同 blog：stub + 立即 trigger。
+          // 放 hdx-drain :50 check 之前防 shadow；偷的 4 个 :50 tick，hdx-drain 仍充裕。
+          const isPodcastFetchSlot =
+            minute === 50 && (hour === 1 || hour === 7 || hour === 13 || hour === 19);
+          if (isPodcastFetchSlot) {
+            const r = await recordCronRun(
+              env,
+              { name: 'podcast-fetch', source: 'podcast', category: 'fetch' },
+              () => runPodcastFetch(env),
+            );
+            console.log(`[cron] podcast-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, 'AI 播客抓取', r as unknown as Record<string, unknown>);
+            return;
+          }
           // 阶段 5 (2026-05-16): huodongxing detail enrich 迁 CF Workflow
           // (HuodongxingDetailWorkflow)。runHuodongxingFetchList 对每条新事件
           // 触发 instance，5s/instance throttleSec 错开避免 site rate limit。
@@ -2459,6 +2512,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     conditions.push("json_extract(extra, '$.workflow_completed_at') IS NOT NULL");
   }
 
+  // 官方新闻 L1 去重(2026-06-09):blog/podcast 跨源同 URL 命中时，次源行被标
+  // extra.dedup_of=主源 id 并隐藏，只留主源。对所有不写 dedup_of 的源(x/hf 等)恒
+  // 为 NULL → 不受影响，故无条件加一条通用过滤。github/ph/clawhub/hdx 走各自 feed
+  // handler（上面已 early-return），不经此段。
+  conditions.push("json_extract(extra, '$.dedup_of') IS NULL");
+
   // Relevance filter
   if (relevant === '1') {
     conditions.push('is_relevant = 1');
@@ -2582,7 +2641,12 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
 
 // 抽屉才用的重字段:feed 列表不渲染,但单条能占 item 90% 体积(PH top_comments 一条
 // 12-18KB)。列表默认剥掉,抽屉打开走 fetchItem(GET /api/items/:id, full=true)拿完整 extra。
-const LIST_HEAVY_EXTRA_KEYS = ['top_comments', 'llm_analysis', 'files_manifest', 'discussion_comments'];
+const LIST_HEAVY_EXTRA_KEYS = [
+  'top_comments', 'llm_analysis', 'files_manifest', 'discussion_comments',
+  // blog/podcast 全文类重字段(blog 正文 markdown 几十 KB、podcast 文字稿更大):
+  // 卡片只用 ai_summary/标题摘要,全文只在抽屉渲染(fetchItem full=true 拿完整 extra)。
+  'body_markdown', 'body_markdown_zh', 'transcript_text', 'transcript_text_zh', 'shownotes', 'shownotes_zh',
+];
 
 function parseItemRow(row: Record<string, unknown>, full = false): Record<string, unknown> {
   const parsed = { ...row };
@@ -3757,6 +3821,24 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       elapsed_ms: Date.now() - t0,
       estimated_workflow_completion_min: Math.ceil((triggered * 60) / 60),  // ~60s/paper serial step
     }, 200, request, env);
+  }
+  // 官方新闻 backfill 兜底(2026-06-09 §1.6):扫 workflow_completed_at IS NULL 的
+  // blog/podcast 行重 trigger workflow(hour-bucket instance id 让卡住的可重入)。
+  // blog/podcast 无专属 cron backfill slot —— pending 几乎不产生(per-feed
+  // COLD_START_MAX=10 < catch-up 阈值 50)，stuck 兜底只经此 OPS 端点手动跑。
+  if (mode === 'backfill-blog-workflow') {
+    if (!env.BLOG_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'BLOG_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const r = await runBlogBackfill(env, 'stuck-workflow');
+    return jsonResponse({ mode: 'backfill-blog-workflow', ...r }, 200, request, env);
+  }
+  if (mode === 'backfill-podcast-workflow') {
+    if (!env.PODCAST_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'PODCAST_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const r = await runPodcastBackfill(env, 'stuck-workflow');
+    return jsonResponse({ mode: 'backfill-podcast-workflow', ...r }, 200, request, env);
   }
   if (mode === 'backfill-quotes') {
     const limit = Math.min(

@@ -11,6 +11,9 @@
 // - hero 弧线用 <clipPath> ellipse 还原 CSS mask 效果
 
 import QRCode from 'qrcode';
+// 官方新闻(blog/podcast)Content 区渲染器（share-render 独占文件，自包含、无回依赖
+// 本文件 → 静态 import 无循环）。renderShareSvg 的 kind 分发到这两个函数。
+import { renderBlogContent, renderPodcastContent } from './blog-podcast-content';
 
 // ─── 颜色 / 字体 token（与 v7 mockup 保持一致） ──────────────
 const C = {
@@ -1935,6 +1938,41 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
     });
     contentSvg = r.svg;
     contentH = r.height;
+  } else if (sourceMeta.kind === 'blog') {
+    // 官方新闻 — blog 厂商博客(news-card 式：满宽封面 conditional → 标题中译 →
+    // ELI25 body → publisher byline，无互动数)。封面走 mediaImageDataUri(pickPosterMedia
+    // 解析 cover_image)，publisher logo 走 authorAvatarDataUri(pickAuthorAvatar)。
+    // renderBlogContent 内禁自拼对外 URL，资源全由 handlers 预解析成 data URI 传入。
+    const extra = item.extra || {};
+    const r = renderBlogContent({
+      x: cardX, y: cardY, w: cardW,
+      title: (extra.title_zh as string) || item.title || '',
+      body: (extra.ai_summary_zh as string) || item.content_translated || item.content || '',
+      publisherName: (extra.source_company as string) || (extra.blog_name as string) || item.author || '',
+      publisherLogoDataUri: item.authorAvatarDataUri,
+      readingMinutes: typeof extra.reading_minutes === 'number' ? (extra.reading_minutes as number) : undefined,
+      publishedAt: item.published_at,
+      coverDataUri: item.mediaImageDataUri,
+      coverAspectRatio: item.mediaAspectRatio,
+    });
+    contentSvg = r.svg;
+    contentH = r.height;
+  } else if (sourceMeta.kind === 'podcast') {
+    // 官方新闻 — podcast AI 播客(方形专辑封面 + play → 节目名 + 单集标题中译 →
+    // ELI25 shownotes → 时长 byline，无互动数)。方形 art 走 authorAvatarDataUri
+    // (pickAuthorAvatar 不过 media 门控，避免方图被 aspect~1 误杀)。音频不入海报。
+    const extra = item.extra || {};
+    const r = renderPodcastContent({
+      x: cardX, y: cardY, w: cardW,
+      showName: (extra.show_name as string) || (extra.source_company as string) || item.author || '',
+      title: (extra.title_zh as string) || item.title || '',
+      body: (extra.ai_summary_zh as string) || (extra.shownotes_zh as string) || item.content_translated || item.content || '',
+      coverDataUri: item.authorAvatarDataUri,
+      durationSec: typeof extra.duration_sec === 'number' ? (extra.duration_sec as number) : undefined,
+      publishedAt: item.published_at,
+    });
+    contentSvg = r.svg;
+    contentH = r.height;
   } else {
     // X / X List — PR2 v2 (2026-05-22): 海报全面对齐抽屉详情页
     // - 真实头像(主作者 + retweet indicator + nested quote)
@@ -2072,7 +2110,7 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
 }
 
 // ─── helpers: source meta / tag / body ────────────────────
-function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub' | 'hdx' | 'hf'; label: string; chipColor: string } {
+function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'clawhub' | 'hdx' | 'hf' | 'blog' | 'podcast'; label: string; chipColor: string } {
   if (sourceType === 'github') return { kind: 'github', label: 'GitHub', chipColor: '#c1f0d8' };
   if (sourceType === 'product_hunt' || sourceType === 'ph') return { kind: 'ph', label: 'Product Hunt', chipColor: '#ffd1c1' };
   if (sourceType === 'clawhub') return { kind: 'clawhub', label: 'ClawHub', chipColor: '#d8c8f5' };
@@ -2081,6 +2119,10 @@ function pickSourceMeta(sourceType: string): { kind: 'x' | 'github' | 'ph' | 'cl
   // PM v6.5: chip label 用 'arxiv'(论文实际来源),不写 HF
   // (HF 只是 paper 发现渠道,论文本体在 arxiv.org)
   if (sourceType === 'hf_paper') return { kind: 'hf', label: 'arxiv', chipColor: '#ffd9a8' };
+  // 官方新闻(2026-06-09)：blog 厂商博客 sky 冷蓝 #bae6fd / podcast AI 播客 orchid
+  // 洋兰紫粉 #f2c4ee，均不撞现有 5 源色(见 mockup posters §0 色卡)。chip 文案抄 mockup。
+  if (sourceType === 'blog') return { kind: 'blog', label: '厂商博客', chipColor: '#bae6fd' };
+  if (sourceType === 'podcast') return { kind: 'podcast', label: 'AI 播客', chipColor: '#f2c4ee' };
   return { kind: 'x', label: 'X', chipColor: '#ffffff' };
 }
 

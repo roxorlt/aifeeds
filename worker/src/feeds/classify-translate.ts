@@ -1,0 +1,378 @@
+// worker/src/feeds/classify-translate.ts
+//
+// DeepSeek flash 上的 is_ai 判别 + ELI25 翻译（§8.4，JSON Mode / 纯文本）。
+// 复用现网 DeepSeek client 调用方式（github.ts 的 system+user+response_format）+
+// hf-paper/llm.ts 的 gateway URL / 模型常量。
+//
+//   - isAiGate（§8.4.0）：step1 廉价前置 gate，只判 is_relevant + confidence（最频繁调用）。
+//     纯判别不落库；DB 写由 pipeline 的 quick-classify step 负责。
+//   - reclassifyOnFulltext（§8.1）：step3 末尾全文复判（终判），落 is_relevant。
+//   - classifyAndTranslateForFeeds（§8.4.A）：step4 eager 合并 enrich+翻译，不再判 is_relevant。
+//   - translateBodyMarkdown（§8.4.B）：step4 lazy 全文 ELI25 翻译，fenced/inline code 不译。
+//
+// 设计文档：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §8
+
+import type { Env } from "../index";
+import { DEEPSEEK_FLASH, DEEPSEEK_URL } from "../hf-paper/llm";
+import type { FeedAiCategory, FeedKind, FeedLang } from "./types";
+
+const LLM_TIMEOUT_MS = 60_000;
+const AI_CATEGORIES: ReadonlySet<string> = new Set([
+  "model-release",
+  "research",
+  "product",
+  "engineering",
+  "safety",
+  "company",
+  "other",
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeepSeek 调用（system+user；JSON / 纯文本两种）— 1 次 retry
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function callRaw(
+  env: Env,
+  system: string,
+  user: string,
+  opts: { maxTokens: number; jsonMode: boolean },
+): Promise<string | null> {
+  if (!env.DEEPSEEK_API_KEY) {
+    console.warn("[feeds-llm] DEEPSEEK_API_KEY missing — skip");
+    return null;
+  }
+  const body: Record<string, unknown> = {
+    model: DEEPSEEK_FLASH,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: 0,
+    max_tokens: opts.maxTokens,
+  };
+  if (opts.jsonMode) body.response_format = { type: "json_object" };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    try {
+      const r = await fetch(DEEPSEEK_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        console.error(`[feeds-llm] HTTP ${r.status}`);
+        continue;
+      }
+      const data = await r.json<{
+        choices?: { message?: { content?: string } }[];
+      }>();
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (text) return text;
+    } catch (e) {
+      console.warn(`[feeds-llm] attempt ${attempt + 1} fail`, e);
+    }
+  }
+  return null;
+}
+
+async function callJson<T>(
+  env: Env,
+  system: string,
+  user: string,
+  maxTokens: number,
+): Promise<T | null> {
+  const text = await callRaw(env, system, user, { maxTokens, jsonMode: true });
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    console.error(`[feeds-llm] JSON parse fail: ${text.slice(0, 300)}`);
+    return null;
+  }
+}
+
+/** json_set 多路径写 extra（路径 + 值都 bind，防 SQL 注入 + 防 lost-update）。 */
+async function jsonSetExtra(
+  env: Env,
+  itemId: string,
+  pairs: Array<{ path: string; value: unknown }>,
+): Promise<void> {
+  if (!pairs.length) return;
+  const setExpr = pairs.map(() => "?, ?").join(", ");
+  const binds: unknown[] = [];
+  for (const p of pairs) {
+    binds.push(p.path);
+    binds.push(p.value);
+  }
+  binds.push(itemId);
+  await env.DB.prepare(
+    `UPDATE items SET extra = json_set(COALESCE(extra, '{}'), ${setExpr}) WHERE id = ?`,
+  )
+    .bind(...binds)
+    .run();
+}
+
+interface ItemRow {
+  title: string | null;
+  content: string | null;
+  extra: string | null;
+  is_relevant: number | null;
+}
+
+async function loadItem(env: Env, itemId: string): Promise<{
+  title: string;
+  content: string;
+  extra: Record<string, unknown>;
+  is_relevant: number | null;
+}> {
+  const row = await env.DB.prepare(
+    `SELECT title, content, extra, is_relevant FROM items WHERE id = ?`,
+  )
+    .bind(itemId)
+    .first<ItemRow>();
+  if (!row) throw new Error(`classify-translate: item not found ${itemId}`);
+  return {
+    title: row.title || "",
+    content: row.content || "",
+    extra: row.extra ? (JSON.parse(row.extra) as Record<string, unknown>) : {},
+    is_relevant: row.is_relevant,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8.4.0 — step1 廉价 is_ai gate（is_relevant-only）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GATE_SYSTEM =
+  "你是 AI 资讯的相关性判别器，服务一个面向中国 AI 从业者的聚合 feed。只判断「这条内容是否与 AI 相关」，不做翻译、不做摘要、不做分类。只输出 JSON。";
+
+function gateUser(kind: FeedKind, title: string, excerpt: string): string {
+  const noun = kind === "podcast" ? "播客单集" : "厂商博客";
+  const exLabel = kind === "podcast" ? "shownotes" : "feed 摘要";
+  return `判断下面这条${noun}是否与 AI 相关，并给出置信度。
+
+【算「AI 相关」(is_relevant=1)】涉及以下任一：大模型 / LLM / 生成式 AI（文本、图像、语音、视频、多模态）/ AI 产品或功能 / AI 研究或技术报告 / 机器学习与深度学习 / AI 工程与基础设施（训练、推理、Agent、RAG、评测、对齐、安全）/ AI 公司的模型或产品动态。
+
+【算「不相关」(is_relevant=0)】与 AI 无实质关系：纯硬件 / 芯片财报或股价、与 AI 无关的公司新闻（招聘、办公室、ESG、人事变动）、纯消费电子评测、通用云 / 网络 / 数据库且不涉及 AI、生活方式等。
+
+【置信度 confidence】
+- high：标题或摘要已能明确判定（无论判相关或不相关）
+- low：摘要太薄、只有标题、或主题两可 —— 一律给 low（下游会抓全文再复判，宁可放行不要误杀）
+
+【输入】
+- title: ${title}
+- ${exLabel}: ${excerpt}
+
+【输出】只输出 JSON，不要用 markdown 代码块包裹：
+{ "is_relevant": 0 | 1, "confidence": "high" | "low" }`;
+}
+
+export async function isAiGate(
+  env: Env,
+  input: { title: string; excerpt: string; kind: FeedKind },
+): Promise<{ is_relevant: 0 | 1; confidence: "high" | "low" }> {
+  const out = await callJson<{ is_relevant?: unknown; confidence?: unknown }>(
+    env,
+    GATE_SYSTEM,
+    gateUser(input.kind, input.title || "", input.excerpt || ""),
+    60,
+  );
+  // fail-open：LLM 不可用时不误杀，放行到全文复判（confidence:low）
+  if (!out) return { is_relevant: 1, confidence: "low" };
+  const ir: 0 | 1 = out.is_relevant === 0 ? 0 : 1;
+  const conf: "high" | "low" = out.confidence === "high" ? "high" : "low";
+  return { is_relevant: ir, confidence: conf };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8.1 — step3 末尾全文复判（终判，落 is_relevant）
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function reclassifyOnFulltext(
+  env: Env,
+  itemId: string,
+  kind: FeedKind,
+): Promise<{ is_relevant: 0 | 1 }> {
+  const it = await loadItem(env, itemId);
+  const fullText =
+    kind === "podcast"
+      ? String(it.extra.transcript_text || it.extra.shownotes || it.content || "")
+      : String(it.extra.body_markdown || it.extra.excerpt || it.content || "");
+  const excerpt = fullText.slice(0, 4000);
+
+  const out = await callJson<{ is_relevant?: unknown }>(
+    env,
+    GATE_SYSTEM,
+    gateUser(kind, it.title, excerpt),
+    60,
+  );
+  // fail-open：复判失败保留 relevant（已放行到 step3 说明 step1 没高置信否决）
+  const ir: 0 | 1 = out && out.is_relevant === 0 ? 0 : 1;
+  await env.DB.prepare(`UPDATE items SET is_relevant = ? WHERE id = ?`)
+    .bind(ir, itemId)
+    .run();
+  console.log(`[feeds:reclassify] ${itemId}: is_relevant=${ir}`);
+  return { is_relevant: ir };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8.4.A — step4 合并 enrich + translate（eager，不再判 is_relevant）
+// ─────────────────────────────────────────────────────────────────────────────
+
+function enrichSystem(kind: FeedKind): string {
+  const noun = kind === "podcast" ? "AI 播客单集" : "AI 厂商博客";
+  return `你是 AI 行业内容编辑，服务中国 AI 从业者。把一篇${noun}整理成"讲给一个聪明的 25 岁年轻人听"(ELI25)的中文摘要。
+
+【ELI25 是什么】
+- 对象是聪明、好学、但不一定是这个细分领域专家的成年人
+- 不是 ELI5（不要幼稚化、不要打比方打到失真），也不是论文摘要（不要堆术语）
+- 每个专业名词第一次出现时，用一个从句或破折号顺带解释它是什么，例："用 RLHF（基于人类反馈的强化学习，一种让模型对齐人类偏好的训练方法）……"
+- 先说结论/为什么重要，再说细节
+- 句子短、具体、有信息密度；禁止"重磅/震撼/最强/革命性/颠覆"等营销腔`;
+}
+
+function enrichUser(
+  kind: FeedKind,
+  title: string,
+  excerpt: string,
+  sourceCompany: string,
+  lang: FeedLang,
+): string {
+  const zhField = kind === "podcast" ? "shownotes_zh" : "excerpt_zh";
+  const exLabel = kind === "podcast" ? "shownotes / 节目简介" : "feed 摘要 / 正文首段";
+  return `【输入】
+- title: ${title}
+- excerpt: ${excerpt}
+- source_company: ${sourceCompany}
+- lang: ${lang}
+
+（excerpt 来源：${exLabel}）
+
+【任务】输出 JSON（只输出 JSON，不要 markdown 代码块包裹）。**不要输出 is_relevant**（上游 step1 已判定，此处只对已确认相关的内容做分类 + 翻译）：
+{
+  "ai_category": "<二级分类，见枚举>",
+  "title_zh": "<标题中译，保留专有名词英文>",
+  "${zhField}": "<摘要中译，ELI25 风格，60-120 字>",
+  "ai_summary_zh": "<一句话 ELI25 解读，30-50 字，读完这一句就知道这篇讲什么 + 为什么值得看>"
+}
+
+【ai_category 枚举】model-release（模型发布）| research（研究/技术报告）| product（产品/功能）| engineering（工程/基础设施）| safety（安全/对齐/政策）| company（公司动态/融资/合作）| other
+
+【翻译规则】
+- 专有名词、模型名、API 名、公司名保留英文（GPT-5 / Claude / Gemini / Transformer / LoRA / vLLM …），中英之间留一个空格
+- 代码、命令、配置、公式原文不译
+- 中文标点，不混用英文标点`;
+}
+
+export async function classifyAndTranslateForFeeds(
+  env: Env,
+  itemId: string,
+  opts: { lang: FeedLang; kind: FeedKind },
+): Promise<{ enrichFailed: boolean }> {
+  const { kind, lang } = opts;
+  const it = await loadItem(env, itemId);
+  const excerpt = String(
+    (kind === "podcast" ? it.extra.shownotes : it.extra.excerpt) ||
+      it.content ||
+      "",
+  ).slice(0, 4000);
+  const sourceCompany = String(it.extra.source_company || "");
+  const zhField = kind === "podcast" ? "shownotes_zh" : "excerpt_zh";
+
+  const out = await callJson<{
+    ai_category?: unknown;
+    title_zh?: unknown;
+    excerpt_zh?: unknown;
+    shownotes_zh?: unknown;
+    ai_summary_zh?: unknown;
+  }>(env, enrichSystem(kind), enrichUser(kind, it.title, excerpt, sourceCompany, lang), 800);
+
+  if (!out) {
+    await jsonSetExtra(env, itemId, [
+      { path: "$.enrich_failed_at", value: new Date().toISOString() },
+    ]);
+    return { enrichFailed: true };
+  }
+
+  const cat = String(out.ai_category || "other");
+  const aiCategory: FeedAiCategory = (
+    AI_CATEGORIES.has(cat) ? cat : "other"
+  ) as FeedAiCategory;
+  const zhVal = String(
+    (kind === "podcast" ? out.shownotes_zh : out.excerpt_zh) || "",
+  );
+
+  await jsonSetExtra(env, itemId, [
+    { path: "$.ai_category", value: aiCategory },
+    { path: "$.title_zh", value: String(out.title_zh || "") },
+    { path: `$.${zhField}`, value: zhVal },
+    { path: "$.ai_summary_zh", value: String(out.ai_summary_zh || "") },
+    { path: "$.llm_model", value: DEEPSEEK_FLASH },
+    { path: "$.llm_called_at", value: Math.floor(Date.now() / 1000) },
+  ]);
+  console.log(`[feeds:enrich] ${itemId}: cat=${aiCategory}`);
+  return { enrichFailed: false };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8.4.B — step4 lazy 全文 ELI25 翻译（输出 markdown，非 JSON）
+// ─────────────────────────────────────────────────────────────────────────────
+
+function bodyTransSystem(kind: FeedKind): string {
+  const subj = kind === "podcast" ? "AI 播客文字稿" : "AI 博客全文";
+  const extra =
+    kind === "podcast"
+      ? "\n- 保留时间戳 / 章节标记（若有），不要删改"
+      : "";
+  return `你是${subj}翻译助手，目标读者是聪明的 25 岁中国 AI 从业者(ELI25 标准)。把正文 markdown 翻译成中文。
+
+【ELI25 + 翻译规则】
+- 通顺、准确、有信息密度；术语首次出现顺带一句解释；无营销腔
+- 严格保留 markdown 结构：标题层级 #、列表 -、表格 |、引用 >、链接 [..](..)、图片 ![..](..) 原样保留
+- fenced code block(\`\`\`)与 inline code(\`code\`)内的内容【一字不译】，原样保留
+- 专有名词保留英文，中英之间留一个空格
+- ⚠️ markdown 强调语法边界：**加粗** 或 \`行内代码\` 紧贴中文时，在 ** / \` 与相邻中文之间留一个空格 ——
+  写 "这是 **重点** 内容"，不要写 "这是**重点**内容"
+  (CommonMark flanking 规则会让紧贴 CJK 的 ** 不渲染成加粗，这是前端渲染失效的常见根因)${extra}
+- 只输出翻译后的 markdown 正文，不要加任何说明文字`;
+}
+
+export async function translateBodyMarkdown(
+  env: Env,
+  itemId: string,
+  opts: { lang: FeedLang; kind: FeedKind },
+): Promise<{ enrichFailed: boolean }> {
+  const { kind } = opts;
+  const it = await loadItem(env, itemId);
+  const srcField = kind === "podcast" ? "transcript_text" : "body_markdown";
+  const dstField = kind === "podcast" ? "transcript_text_zh" : "body_markdown_zh";
+  const body = String(it.extra[srcField] || "");
+  // 没正文 / 文字稿可译 → 空操作成功（body 抓不到不阻塞完整性 gate）
+  if (!body.trim()) return { enrichFailed: false };
+
+  const sourceCompany = String(it.extra.source_company || "");
+  const user = `【输入】
+- title: ${it.title}
+- source_company: ${sourceCompany}
+- body_markdown:
+${body.slice(0, 24000)}`;
+
+  const text = await callRaw(env, bodyTransSystem(kind), user, {
+    maxTokens: 8000,
+    jsonMode: false,
+  });
+  if (!text) {
+    await jsonSetExtra(env, itemId, [
+      { path: "$.translation_failed_at", value: new Date().toISOString() },
+    ]);
+    return { enrichFailed: true };
+  }
+  await jsonSetExtra(env, itemId, [{ path: `$.${dstField}`, value: text }]);
+  console.log(`[feeds:translate-body] ${itemId}: ${dstField} ${text.length} chars`);
+  return { enrichFailed: false };
+}

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>官方新闻分享海报 mockup（blog + podcast · 1080×1350）— AI-Feeds Phase 0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* 字体 stack 对齐真站（mockup 不加载 R2 字体，系统字兜底） */
+    body { font-family: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+
+    /* line-clamp 工具类（CDN Tailwind 已内置，这里兜底） */
+    .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-3 { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+
+    /* 决策标注徽章 */
+    .anno { font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 6px; border-radius: 4px; display: inline-block; white-space: nowrap; }
+    .anno-must { color:#059669; background:#f0fdf4; }
+    .anno-rec  { color:#2563eb; background:#eff6ff; }
+    .anno-opt  { color:#ca8a04; background:#fefce8; }
+    .anno-skip { color:#6b7280; background:#f9fafb; }
+
+    /* 各源专属封面渐变（始终渲染，不依赖网络；与 kit 同源） */
+    .cv-openai    { background: radial-gradient(circle at 28% 22%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#0f766e,#064e3b); }
+    .cv-anthropic { background: radial-gradient(circle at 28% 22%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#cc785c,#6b3320); }
+    .cv-hf        { background: radial-gradient(circle at 28% 22%, rgba(255,255,255,.22), transparent 55%), linear-gradient(135deg,#f59e0b,#b45309); }
+    .cv-mistral   { background: radial-gradient(circle at 28% 22%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#f2542d,#9a2d12); }
+    .cv-latent    { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.2), transparent 55%), linear-gradient(135deg,#7c5cff,#2a1b54); }
+    .cv-zhang     { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#ef5a4c,#7a221a); }
+    .cv-lex       { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.14), transparent 55%), linear-gradient(135deg,#3f3f46,#09090b); }
+
+    /* poster QR 占位（CSS grid mini-QR，参 clawhub mockup / kit） */
+    .qr-mini { display:grid; grid-template-columns:repeat(7,1fr); grid-template-rows:repeat(7,1fr); gap:2px; }
+    .qr-mini > i { background:#fff; }
+    .qr-mini > i.on { background:#111; }
+
+    /* ── 海报舞台：1080-base 真实尺寸 + zoom 等比缩放预览 ──
+       用 zoom（非 transform:scale）让缩放后的盒子占真实布局空间，
+       flex 并排自动排版、高度自适应；所有内部 px 写 1080 真实值，1:1 对齐 svg-template.ts */
+    .poster-shell { display:inline-block; border-radius:22px; overflow:hidden; box-shadow:0 18px 48px rgba(15,23,42,.16); }
+    .poster-1080  { width:1080px; background:#f6f7fa; }       /* 真实 1080 宽 */
+    .poster-zoom  { zoom:.42; }                                /* 1080→453.6 / 1350→567 预览 */
+
+    /* Hero 区（0..360）：深色径向渐变 + 紫 glow + 底部贝塞尔弧（clip-path path 与 svg-template heroPath 同坐标） */
+    .poster-hero {
+      position:relative; height:360px; flex-shrink:0;
+      background: radial-gradient(ellipse at 82% 22%, rgba(111,99,255,.34) 0%, transparent 38%),
+                  linear-gradient(to bottom, #050505, #0c0c10);
+      clip-path: path('M 0 0 L 1080 0 L 1080 360 Q 540 220 0 360 Z');
+    }
+    /* Content / Footer 白卡（rx48 + soft shadow，对齐 renderCardBg） */
+    .poster-card   { background:#fff; border:1px solid rgba(15,23,42,.06); box-shadow:0 18px 40px rgba(15,23,42,.10); }
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-100 text-neutral-900">
+
+  <!-- ============================================================ -->
+  <!-- SVG <symbol> defs（lucide 风；全部 SVG，零 emoji；与 kit 同源） -->
+  <!-- ============================================================ -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <!-- 时长 / 阅读时长 -->
+      <symbol id="ico-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+      <!-- BrandBlog 源 icon（lucide newspaper） -->
+      <symbol id="ico-newspaper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></symbol>
+      <!-- play 实心三角（复用 PhCard 的 path，禁 ▶ emoji） -->
+      <symbol id="ico-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></symbol>
+      <!-- 外链 ↗（arrow-up-right，禁 ↗ emoji） -->
+      <symbol id="ico-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+      <!-- 分享 -->
+      <symbol id="ico-share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></symbol>
+      <!-- QR 占位（lucide qr-code，inline 用） -->
+      <symbol id="ico-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Top bar（与 kit 同风格） -->
+  <header class="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-[1480px] items-center justify-between gap-4 px-6 py-3">
+      <div class="flex shrink-0 items-baseline gap-3">
+        <h1 class="text-xl font-bold tracking-tight text-neutral-900">官方新闻分享海报</h1>
+        <span class="text-xs text-neutral-400">blog + podcast · 1080×1350 · 3 区结构 · Phase 0 · 2026-06-09</span>
+      </div>
+      <div class="flex gap-2">
+        <span class="anno anno-must">★★★ 必须</span>
+        <span class="anno anno-rec">★★ 建议</span>
+        <span class="anno anno-opt">★ 可选</span>
+        <span class="anno anno-skip">☆ 不做</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1480px] px-6 py-7">
+
+    <!-- 决策 banner -->
+    <div class="mb-8 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sky-900">
+      <div class="mb-2 text-sm font-semibold">分享海报视觉 mockup —— 只确认视觉，不写生产代码</div>
+      <ul class="space-y-1 pl-5 text-[13px] leading-relaxed list-disc">
+        <li><b>3 区结构</b>（1:1 对齐 <code class="rounded bg-white/70 px-1">worker/src/share/svg-template.ts</code>）：<b>Hero</b>（深色径向渐变 <code class="rounded bg-white/70 px-1">#050505→#0c0c10</code> + 紫 glow + 底部贝塞尔弧 <code class="rounded bg-white/70 px-1">Q 540 220</code> + 右上「来源」chip + 左上 logo/slogan）→ <b>Content</b> 白卡（overlap 进 hero 弧，<code class="rounded bg-white/70 px-1">rx48</code> + soft shadow）→ <b>Footer</b> 白卡（分享人 avatar + 昵称 + QR 168）。</li>
+        <li><b>Hero / Footer / QR / 香港规范域全自动继承</b>（<code class="rounded bg-white/70 px-1">renderHero()</code> / <code class="rounded bg-white/70 px-1">renderFooter()</code>），各源只定制 Content 区 —— <b>本页标注只写 Content 区</b>。</li>
+        <li><b>来源 chip 各源色</b>：blog = <code class="rounded bg-white/70 px-1">#bae6fd</code>（sky 冷蓝）、podcast = <code class="rounded bg-white/70 px-1">#f2c4ee</code>（orchid 洋兰紫粉），均不撞现有 X 白 / GH mint / PH peach / ClawHub lavender / HF amber（见下方色卡对比）。</li>
+        <li><b>blog Content = 满宽封面族</b>（顶部 og:image 16:9 → 标题中译 → ELI25 body → byline：publisher logo + 约 N 分钟），<b>podcast Content = 方形 art 族</b>（专辑封面 1:1 + play 三角叠加 + 单集标题 → ELI25 shownotes → 时长）。两者<b>均无互动数</b>（RSS 无 likes/stars）。</li>
+        <li><b>零 emoji</b>：海报只子集 Noto Sans SC，emoji 不渲染。所有 icon 走 <code class="rounded bg-white/70 px-1">&lt;symbol&gt;</code> SVG；play 用实心三角 <code class="rounded bg-white/70 px-1">M8 5v14l11-7z</code>、时长用 <code class="rounded bg-white/70 px-1">ico-clock</code> SVG，<b>禁 ▶ / ⏱ / ★ 当 icon</b>。</li>
+      </ul>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- 0. 来源 chip 色卡对比（证明新两色不撞现有 5 源） -->
+    <!-- ============================================================ -->
+    <section class="mb-10">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">0 · 来源 chip 色卡（hero 深底上呈现，证明新两色不撞色）</h2>
+        <span class="anno anno-rec">★★ 仅定色，文案待定</span>
+      </div>
+      <div class="rounded-xl p-5" style="background: radial-gradient(ellipse at 82% 0%, rgba(111,99,255,.30) 0%, transparent 45%), linear-gradient(120deg,#050505,#0c0c10);">
+        <div class="mb-3 flex flex-wrap gap-2.5">
+          <!-- 新增两源（本次定色） -->
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#bae6fd">厂商博客</span></span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#f2c4ee">AI 播客</span></span>
+          <span class="mx-1 self-center text-[11px] text-white/30">|  现有 5 源（示意色）</span>
+          <!-- 现有 5 源（示意，实际以各源 share chip 为准） -->
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#ffffff">X 动态</span></span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#86efac">GitHub</span></span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#fed7aa">Product Hunt</span></span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#ddd6fe">龙虾技能</span></span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5"><span class="text-[10px] font-semibold text-white/60">来源</span><span class="text-[13px] font-extrabold" style="color:#fcd34d">HF 论文</span></span>
+        </div>
+      </div>
+      <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
+        <code>#bae6fd</code>（sky 冷蓝）偏蓝、与 HF amber 暖黄 / GH mint 绿分明；<code>#f2c4ee</code>（orchid 洋兰紫粉）偏洋红，与 ClawHub lavender <code>#ddd6fe</code>（蓝紫）色相分开。
+        <span class="anno anno-opt ml-1">★ chip 文案「厂商博客 / AI 播客」待定，设计仅定色</span>
+      </p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- 1. 主交付：blog + podcast 海报并排（1080×1350，zoom .42 预览） -->
+    <!-- ============================================================ -->
+    <section class="mb-12">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">1 · 分享海报并排（1080×1350 · zoom ≈ 0.42 预览）</h2>
+        <span class="anno anno-must">★★★ 核心交付</span>
+      </div>
+      <p class="mb-5 text-[13px] leading-relaxed text-neutral-500">
+        实际产物为 1080×1350 PNG（resvg-wasm + Noto SC 子集），<b>平角矩形、无圆角</b>（此处预览壳加圆角仅为美观）。下方各海报内部均按 1080 真实 px 绘制，<code>zoom</code> 等比缩放。
+      </p>
+
+      <div class="flex flex-wrap gap-12">
+
+        <!-- ========== blog 海报（来源 chip #bae6fd · 有封面） ========== -->
+        <figure>
+          <figcaption class="mb-2 text-[13px] font-semibold text-neutral-700">blog 海报 · 来源 chip <code class="rounded bg-neutral-100 px-1">#bae6fd</code> · 满宽封面</figcaption>
+          <div class="poster-shell">
+            <div class="poster-1080 poster-zoom">
+
+              <!-- ⓪ Hero（复用 renderHero） -->
+              <div class="poster-hero">
+                <div style="position:absolute; left:70px; top:60px; display:flex; align-items:center; gap:26px;">
+                  <span style="width:104px;height:104px;flex-shrink:0;background:#0B0F14;border-radius:22px;display:flex;align-items:center;justify-content:center;">
+                    <svg viewBox="0 0 512 512" style="width:88px;height:88px;">
+                      <g fill="none" stroke="#F3F4F6" stroke-linecap="round" stroke-linejoin="round"><path d="M54 340 L405 94" stroke-width="18"/><ellipse cx="55" cy="340" rx="9.5" ry="12.5" transform="rotate(-55 55 340)" fill="#0B0F14" stroke-width="6"/></g>
+                      <path d="M382 249 C365 281 365 353 390 444 C392 452 401 452 404 444 C431 353 429 280 413 249 C405 237 390 237 382 249Z" fill="#FF9A1A" stroke="#F3F4F6" stroke-width="8"/>
+                    </svg>
+                  </span>
+                  <span style="line-height:1;">
+                    <span style="display:block;color:#fff;font-size:60px;font-weight:900;letter-spacing:-2px;">AI-Feeds</span>
+                    <span style="display:block;color:rgba(255,255,255,.66);font-size:26px;font-weight:600;margin-top:14px;">专注 AI 领域资讯聚合</span>
+                  </span>
+                </div>
+                <!-- 来源 chip（blog sky #bae6fd） -->
+                <div style="position:absolute; right:70px; top:74px; height:76px; display:inline-flex; align-items:center; gap:14px; padding:0 40px; border-radius:38px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.18);">
+                  <span style="color:rgba(255,255,255,.65);font-size:24px;font-weight:600;">来源</span>
+                  <span style="color:#bae6fd;font-size:32px;font-weight:800;">厂商博客</span>
+                </div>
+              </div>
+
+              <!-- ① Content 卡（overlap -120 进 hero 弧；blog 满宽封面族） -->
+              <div class="poster-card" style="margin:-120px 48px 0; padding:36px; border-radius:44px; position:relative;">
+                <!-- 顶部满宽封面 og:image 16:9（质量门控未过则跳过此块） -->
+                <div class="cv-openai" style="width:100%;height:513px;border-radius:28px;"></div>
+                <!-- 标题中译（48px/800，2 行 clamp） -->
+                <div class="line-clamp-2" style="margin-top:30px;font-size:46px;font-weight:800;line-height:1.18;color:#111318;letter-spacing:-1px;">介绍 GPT-5.5：更强的推理与更低的延迟</div>
+                <!-- ELI25 body（30px/.82，3 行 clamp；取流内同段 ELI25 摘要） -->
+                <div class="line-clamp-3" style="margin-top:22px;font-size:30px;line-height:1.5;color:#111318;opacity:.82;">这是 OpenAI 最新的旗舰模型，简单说就是比上一代更会“想问题”——遇到复杂任务时它会自己多想几步再回答，同时响应速度还更快了。对开发者最实在的变化是 API 价格降了三成。</div>
+                <!-- byline：publisher monogram + 名 · 约 N 分钟(ico-clock) · MM-DD（无互动数） -->
+                <div style="margin-top:30px;display:flex;align-items:center;gap:16px;font-size:27px;color:#687084;">
+                  <span style="width:44px;height:44px;border-radius:11px;background:#10a37f;color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center;">O</span>
+                  <span style="color:#111318;font-weight:600;">OpenAI</span>
+                  <span style="color:#98a0af;">·</span>
+                  <span style="display:inline-flex;align-items:center;gap:8px;"><svg style="width:26px;height:26px;"><use href="#ico-clock"/></svg>约 5 分钟</span>
+                  <span style="color:#98a0af;">·</span><span>06-03</span>
+                </div>
+              </div>
+
+              <!-- 区间 gap -->
+              <div style="height:40px;"></div>
+
+              <!-- ② Footer 卡（复用 renderFooter：分享人 avatar 120 + 昵称 + QR 168） -->
+              <div class="poster-card" style="margin:0 48px 64px; height:220px; border-radius:40px; padding:0 44px; display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex;align-items:center;gap:28px;">
+                  <span style="height:120px;width:120px;border-radius:50%;background:linear-gradient(135deg,#60a5fa,#a78bfa);color:#fff;font-size:60px;font-weight:700;display:flex;align-items:center;justify-content:center;">L</span>
+                  <span style="line-height:1;">
+                    <span style="display:block;font-size:26px;color:#687084;">分享自</span>
+                    <span style="display:block;font-size:36px;font-weight:500;color:#111318;margin-top:14px;">ltsms</span>
+                  </span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;">
+                  <div class="qr-mini" style="height:168px;width:168px;padding:10px;background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:18px;">
+                    <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i class="on"></i>
+                    <i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i>
+                    <i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                    <i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                    <i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i>
+                    <i></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                    <i class="on"></i><i></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                  </div>
+                  <span style="font-size:22px;color:#98a0af;margin-top:14px;">微信扫码查看</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- 3 区速记 -->
+          <div class="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span class="rounded bg-neutral-100 px-2 py-0.5 text-neutral-500">Hero · 复用</span>
+            <span class="rounded bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700">Content · 本源定制</span>
+            <span class="rounded bg-neutral-100 px-2 py-0.5 text-neutral-500">Footer · 复用</span>
+          </div>
+          <!-- Content 区标注 -->
+          <ul class="mt-3 max-w-[454px] space-y-2 text-[12px] leading-relaxed text-neutral-600">
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ 封面</span><span>顶部满宽 og:image 16:9；质量门控未过则<b>跳过此块</b>、Content 卡从标题起（见下「无封面」变体）。</span></li>
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ 文字</span><span>标题中译 48px/800 2 行 clamp；ELI25 body 30px/.82 3 行 clamp（与流内 / 抽屉<b>同一段 ELI25</b>，单一来源）。</span></li>
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ byline</span><span>publisher monogram + 名 · 约 5 分钟（<code>ico-clock</code> SVG）· 06-03，<b>无互动数</b>（RSS 无 likes/stars，用阅读时长替代）。</span></li>
+            <li class="flex gap-2"><span class="anno anno-rec shrink-0">★★ chipColor</span><span>来源 chip <code>#bae6fd</code>（sky 冷蓝），不撞 X 白 / GH mint / PH peach / ClawHub lavender / HF amber。</span></li>
+            <li class="flex gap-2"><span class="anno anno-skip shrink-0">☆ emoji</span><span>海报只子集字体，<b>禁 emoji</b>（▶ / ⏱ / ★ 一律 SVG）；Hero / Footer / QR / 香港规范域全自动继承，Content 内禁自拼对外 URL。</span></li>
+          </ul>
+        </figure>
+
+        <!-- ========== podcast 海报（来源 chip #f2c4ee · 方形 cover + play） ========== -->
+        <figure>
+          <figcaption class="mb-2 text-[13px] font-semibold text-neutral-700">podcast 海报 · 来源 chip <code class="rounded bg-neutral-100 px-1">#f2c4ee</code> · 方形专辑封面 + play 三角</figcaption>
+          <div class="poster-shell">
+            <div class="poster-1080 poster-zoom">
+
+              <!-- ⓪ Hero（复用 renderHero） -->
+              <div class="poster-hero">
+                <div style="position:absolute; left:70px; top:60px; display:flex; align-items:center; gap:26px;">
+                  <span style="width:104px;height:104px;flex-shrink:0;background:#0B0F14;border-radius:22px;display:flex;align-items:center;justify-content:center;">
+                    <svg viewBox="0 0 512 512" style="width:88px;height:88px;">
+                      <g fill="none" stroke="#F3F4F6" stroke-linecap="round" stroke-linejoin="round"><path d="M54 340 L405 94" stroke-width="18"/><ellipse cx="55" cy="340" rx="9.5" ry="12.5" transform="rotate(-55 55 340)" fill="#0B0F14" stroke-width="6"/></g>
+                      <path d="M382 249 C365 281 365 353 390 444 C392 452 401 452 404 444 C431 353 429 280 413 249 C405 237 390 237 382 249Z" fill="#FF9A1A" stroke="#F3F4F6" stroke-width="8"/>
+                    </svg>
+                  </span>
+                  <span style="line-height:1;">
+                    <span style="display:block;color:#fff;font-size:60px;font-weight:900;letter-spacing:-2px;">AI-Feeds</span>
+                    <span style="display:block;color:rgba(255,255,255,.66);font-size:26px;font-weight:600;margin-top:14px;">专注 AI 领域资讯聚合</span>
+                  </span>
+                </div>
+                <!-- 来源 chip（podcast orchid #f2c4ee） -->
+                <div style="position:absolute; right:70px; top:74px; height:76px; display:inline-flex; align-items:center; gap:14px; padding:0 40px; border-radius:38px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.18);">
+                  <span style="color:rgba(255,255,255,.65);font-size:24px;font-weight:600;">来源</span>
+                  <span style="color:#f2c4ee;font-size:32px;font-weight:800;">AI 播客</span>
+                </div>
+              </div>
+
+              <!-- ① Content 卡（方形 art 前置 + playOverlay；标题右侧、body 下方） -->
+              <div class="poster-card" style="margin:-120px 48px 0; padding:36px; border-radius:44px; position:relative;">
+                <div style="display:flex;gap:28px;">
+                  <!-- 节目 art 1:1（264）+ play 三角叠加（ico-play 实心三角，禁 ▶ emoji） -->
+                  <div class="cv-latent" style="position:relative;width:264px;height:264px;flex-shrink:0;border-radius:30px;">
+                    <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+                      <span style="display:flex;height:88px;width:88px;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.6);color:#fff;"><svg style="width:44px;height:44px;margin-left:5px;"><use href="#ico-play"/></svg></span>
+                    </span>
+                  </div>
+                  <div style="min-width:0;flex:1;">
+                    <!-- 节目名 -->
+                    <div style="font-size:27px;color:#687084;font-weight:600;">Latent Space</div>
+                    <!-- 单集标题中译（44px/800，3 行 clamp） -->
+                    <div class="line-clamp-3" style="margin-top:14px;font-size:42px;font-weight:800;line-height:1.2;color:#111318;letter-spacing:-.8px;">对话 OpenAI 工程负责人：万亿参数训练背后的工程取舍</div>
+                  </div>
+                </div>
+                <!-- ELI25 shownotes body（30px/.82，3 行 clamp） -->
+                <div class="line-clamp-3" style="margin-top:28px;font-size:30px;line-height:1.5;color:#111318;opacity:.82;">这期请来 OpenAI 负责训练基础设施的工程师，聊了训练超大模型时那些教科书不会讲的现实问题——几千张显卡里总有几张会坏，怎么让训练不中断；以及为什么“省电”如今成了模型能力的隐形天花板。</div>
+                <!-- meta：节目缩略 + 节目名 · 时长 1:23:45(ico-clock，纯文本 + SVG，禁 ⏱) · MM-DD（无互动数） -->
+                <div style="margin-top:30px;display:flex;align-items:center;gap:16px;font-size:27px;color:#687084;">
+                  <span class="cv-latent" style="width:44px;height:44px;border-radius:11px;flex-shrink:0;"></span>
+                  <span style="color:#111318;font-weight:600;">Latent Space</span>
+                  <span style="color:#98a0af;">·</span>
+                  <span style="display:inline-flex;align-items:center;gap:8px;"><svg style="width:26px;height:26px;"><use href="#ico-clock"/></svg><span style="font-variant-numeric:tabular-nums;">1:23:45</span></span>
+                  <span style="color:#98a0af;">·</span><span>06-06</span>
+                </div>
+              </div>
+
+              <!-- 区间 gap -->
+              <div style="height:40px;"></div>
+
+              <!-- ② Footer 卡（复用 renderFooter） -->
+              <div class="poster-card" style="margin:0 48px 64px; height:220px; border-radius:40px; padding:0 44px; display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex;align-items:center;gap:28px;">
+                  <span style="height:120px;width:120px;border-radius:50%;background:linear-gradient(135deg,#f472b6,#a78bfa);color:#fff;font-size:60px;font-weight:700;display:flex;align-items:center;justify-content:center;">L</span>
+                  <span style="line-height:1;">
+                    <span style="display:block;font-size:26px;color:#687084;">分享自</span>
+                    <span style="display:block;font-size:36px;font-weight:500;color:#111318;margin-top:14px;">ltsms</span>
+                  </span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;">
+                  <div class="qr-mini" style="height:168px;width:168px;padding:10px;background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:18px;">
+                    <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i class="on"></i>
+                    <i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i>
+                    <i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                    <i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                    <i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i>
+                    <i></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                    <i class="on"></i><i></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                  </div>
+                  <span style="font-size:22px;color:#98a0af;margin-top:14px;">微信扫码查看</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- 3 区速记 -->
+          <div class="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span class="rounded bg-neutral-100 px-2 py-0.5 text-neutral-500">Hero · 复用</span>
+            <span class="rounded bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700">Content · 本源定制</span>
+            <span class="rounded bg-neutral-100 px-2 py-0.5 text-neutral-500">Footer · 复用</span>
+          </div>
+          <!-- Content 区标注 -->
+          <ul class="mt-3 max-w-[454px] space-y-2 text-[12px] leading-relaxed text-neutral-600">
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ 封面</span><span>方形专辑封面 1:1（264）+ <b>play 三角叠加</b>（<code>ico-play</code> 实心三角 <code>M8 5v14l11-7z</code>，禁 ▶ emoji）。</span></li>
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ 文字</span><span>节目名 27px + 单集标题中译 44px/800 3 行；ELI25 shownotes body 30px/.82 3 行（与流内 / 抽屉同段）。</span></li>
+            <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ meta</span><span>专辑缩略 + 节目名 · <code>ico-clock</code> SVG + <code>1:23:45</code> · 06-06，<b>纯文本时长、禁 ⏱ emoji</b>，<b>无互动数</b>。</span></li>
+            <li class="flex gap-2"><span class="anno anno-rec shrink-0">★★ chipColor</span><span>来源 chip <code>#f2c4ee</code>（orchid 洋兰紫粉），与 ClawHub lavender <code>#ddd6fe</code> 色相分开，不撞色。</span></li>
+            <li class="flex gap-2"><span class="anno anno-skip shrink-0">☆ 继承</span><span>Hero / Footer / QR / 香港规范域全自动继承；<code>renderPodcastContent</code> 内<b>禁自拼对外 URL</b>（一律 env 规范域）。</span></li>
+          </ul>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- 2. blog 无封面变体（跳过顶部媒体块，Content 从标题起） -->
+    <!-- ============================================================ -->
+    <section class="mb-12">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">2 · blog 无封面变体（Mistral · 跳过顶部媒体块）</h2>
+        <span class="anno anno-must">★★★ 无封面态</span>
+      </div>
+      <p class="mb-5 text-[13px] leading-relaxed text-neutral-500">
+        og:image 缺失或质量门控未过时，Content 卡<b>直接从标题起</b>（同 §10.4 <code class="rounded bg-neutral-100 px-1">padTop=0</code>），不留灰底空白；Hero / Footer / 来源 chip 与有封面态完全一致。
+      </p>
+
+      <figure>
+        <div class="poster-shell">
+          <div class="poster-1080 poster-zoom">
+
+            <!-- ⓪ Hero（同 blog 有封面态） -->
+            <div class="poster-hero">
+              <div style="position:absolute; left:70px; top:60px; display:flex; align-items:center; gap:26px;">
+                <span style="width:104px;height:104px;flex-shrink:0;background:#0B0F14;border-radius:22px;display:flex;align-items:center;justify-content:center;">
+                  <svg viewBox="0 0 512 512" style="width:88px;height:88px;">
+                    <g fill="none" stroke="#F3F4F6" stroke-linecap="round" stroke-linejoin="round"><path d="M54 340 L405 94" stroke-width="18"/><ellipse cx="55" cy="340" rx="9.5" ry="12.5" transform="rotate(-55 55 340)" fill="#0B0F14" stroke-width="6"/></g>
+                    <path d="M382 249 C365 281 365 353 390 444 C392 452 401 452 404 444 C431 353 429 280 413 249 C405 237 390 237 382 249Z" fill="#FF9A1A" stroke="#F3F4F6" stroke-width="8"/>
+                  </svg>
+                </span>
+                <span style="line-height:1;">
+                  <span style="display:block;color:#fff;font-size:60px;font-weight:900;letter-spacing:-2px;">AI-Feeds</span>
+                  <span style="display:block;color:rgba(255,255,255,.66);font-size:26px;font-weight:600;margin-top:14px;">专注 AI 领域资讯聚合</span>
+                </span>
+              </div>
+              <div style="position:absolute; right:70px; top:74px; height:76px; display:inline-flex; align-items:center; gap:14px; padding:0 40px; border-radius:38px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.18);">
+                <span style="color:rgba(255,255,255,.65);font-size:24px;font-weight:600;">来源</span>
+                <span style="color:#bae6fd;font-size:32px;font-weight:800;">厂商博客</span>
+              </div>
+            </div>
+
+            <!-- ① Content 卡（无媒体块，padTop=0，直接标题） -->
+            <div class="poster-card" style="margin:-120px 48px 0; padding:40px 36px 36px; border-radius:44px; position:relative;">
+              <div class="line-clamp-2" style="font-size:46px;font-weight:800;line-height:1.18;color:#111318;letter-spacing:-1px;">我们为什么坚持开放权重：Mistral 的开源立场</div>
+              <div class="line-clamp-4" style="margin-top:22px;font-size:30px;line-height:1.5;color:#111318;opacity:.82;">很多 AI 公司把模型藏起来只给 API，Mistral 解释了为什么他们坚持把模型权重公开下载。一句话：让企业能把模型部署在自己服务器上，数据不出门，也不被单一供应商绑死。</div>
+              <div style="margin-top:30px;display:flex;align-items:center;gap:16px;font-size:27px;color:#687084;">
+                <span style="width:44px;height:44px;border-radius:11px;background:#f2542d;color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center;">M</span>
+                <span style="color:#111318;font-weight:600;">Mistral AI</span>
+                <span style="color:#98a0af;">·</span>
+                <span style="display:inline-flex;align-items:center;gap:8px;"><svg style="width:26px;height:26px;"><use href="#ico-clock"/></svg>约 4 分钟</span>
+                <span style="color:#98a0af;">·</span><span>06-05</span>
+              </div>
+            </div>
+
+            <div style="height:40px;"></div>
+
+            <!-- ② Footer 卡 -->
+            <div class="poster-card" style="margin:0 48px 64px; height:220px; border-radius:40px; padding:0 44px; display:flex; align-items:center; justify-content:space-between;">
+              <div style="display:flex;align-items:center;gap:28px;">
+                <span style="height:120px;width:120px;border-radius:50%;background:linear-gradient(135deg,#60a5fa,#a78bfa);color:#fff;font-size:60px;font-weight:700;display:flex;align-items:center;justify-content:center;">L</span>
+                <span style="line-height:1;">
+                  <span style="display:block;font-size:26px;color:#687084;">分享自</span>
+                  <span style="display:block;font-size:36px;font-weight:500;color:#111318;margin-top:14px;">ltsms</span>
+                </span>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:center;">
+                <div class="qr-mini" style="height:168px;width:168px;padding:10px;background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:18px;">
+                  <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i class="on"></i>
+                  <i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i>
+                  <i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                  <i></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                  <i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i>
+                  <i></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i>
+                  <i class="on"></i><i></i><i></i><i></i><i class="on"></i><i class="on"></i><i></i>
+                </div>
+                <span style="font-size:22px;color:#98a0af;margin-top:14px;">微信扫码查看</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <ul class="mt-3 max-w-[454px] space-y-2 text-[12px] leading-relaxed text-neutral-600">
+          <li class="flex gap-2"><span class="anno anno-must shrink-0">★★★ 无媒体</span><span>无 og:image 时省略顶部封面块、<b>不留灰底空白</b>，Content 卡 <code>padTop=40</code> 直接起标题，body 可放至 4 行补足信息密度。</span></li>
+          <li class="flex gap-2"><span class="anno anno-skip shrink-0">☆ 其余</span><span>Hero（含来源 chip <code>#bae6fd</code>）/ byline / Footer 与有封面态完全一致，仅缺顶部媒体。</span></li>
+        </ul>
+      </figure>
+    </section>
+
+    <footer class="mt-10 border-t border-neutral-200 pt-5 text-center text-[11px] text-neutral-400">
+      AI-Feeds · 官方新闻（blog + podcast）源接入 · Phase 0 分享海报 mockup · 2026-06-09 · 3 区结构对齐 worker/src/share/svg-template.ts
+    </footer>
+  </main>
+</body>
+</html>

@@ -467,6 +467,16 @@ async function pickAuthorAvatar(
       if (dataUri) return dataUri;
     }
     return undefined;
+  } else if (sourceType === 'blog') {
+    // 官方新闻 blog publisher logo(海报 byline 缩略) — extra.publisher.icon_r2(R2 path)
+    // 优先，icon_src_url 兜底。缺则 renderBlogContent monogram 兜底(首字母色块)。
+    const pub = extra?.publisher as { icon_r2?: string; icon_src_url?: string } | undefined;
+    url = pub?.icon_r2 || pub?.icon_src_url || undefined;
+  } else if (sourceType === 'podcast') {
+    // 官方新闻 podcast 方形专辑封面 — extra.cover_image(R2 path 或原直链)。走 avatar
+    // 路径(不过 media 门控，方图不会被 aspect~1 / 小尺寸误杀)，renderPodcastContent
+    // 用作左侧方形 art 的 coverDataUri；缺则 monogram 兜底。
+    url = typeof extra?.cover_image === 'string' ? extra.cover_image : undefined;
   }
   if (!url) return undefined;
   // 头像走单独路径：只需要 fetch + sniff + base64，不做 media 门控
@@ -653,7 +663,16 @@ async function pickPosterMedia(
         }
       }
     }
+  } else if (sourceType === 'blog') {
+    // 官方新闻 blog 封面 — extra.cover_image(og:image，R2 path /r/blog/<sha> 或原直链)。
+    // 单候选；landscape og:image 走下方 aspect/dim 门控，过不了则无封面，
+    // renderBlogContent 会跳过顶部媒体块、不留灰底。
+    if (typeof extra?.cover_image === 'string' && extra.cover_image) {
+      candidates.push({ url: extra.cover_image });
+    }
   }
+  // podcast 方形专辑封面不走这里(会被 aspect~1 媒体门控误杀)，改由 pickAuthorAvatar
+  // 取 extra.cover_image(avatar 路径不过门控)，renderPodcastContent 用作 coverDataUri。
 
   // PR2 v2 (2026-05-22): X 推文媒体 = 用户上传截图, 跳过 small/square icon/QR 门控
   const isUserMedia = sourceType === 'x_list';

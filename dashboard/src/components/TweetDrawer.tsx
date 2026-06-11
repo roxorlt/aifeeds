@@ -7,6 +7,8 @@ import { PhDrawerBody } from "./PhDrawerBody";
 import { ClawhubDrawerBody } from "./ClawhubDrawerBody";
 import { HuodongxingDrawerBody } from "./HuodongxingDrawerBody";
 import { HfPaperDrawerBody } from "./HfPaperDrawerBody";
+import { BlogDrawerBody } from "./BlogDrawerBody";
+import { PodcastDrawerBody } from "./PodcastDrawerBody";
 import { parseJsonField, cn } from "../lib/utils";
 import { useIsNarrow } from "../lib/breakpoint";
 import { smoothScrollToTop } from "../lib/scroll";
@@ -326,8 +328,10 @@ export function TweetDrawer() {
   const isClawhub = item?.source_type === "clawhub";
   const isHdx = item?.source_type === "huodongxing";
   const isHfPaper = item?.source_type === "hf_paper";
+  const isBlog = item?.source_type === "blog";
+  const isPodcast = item?.source_type === "podcast";
   const threadMembers =
-    item && !isGithub && !isPh && !isClawhub && !isHdx && !isHfPaper
+    item && !isGithub && !isPh && !isClawhub && !isHdx && !isHfPaper && !isBlog && !isPodcast
       ? resolveThreadMembers(item, siblings)
       : [];
   const githubOwnerRepo = isGithub ? (item?.title || item?.source_id || "") : "";
@@ -339,6 +343,9 @@ export function TweetDrawer() {
     ? (parseJsonField<{ title_zh?: string }>(item?.extra) as { title_zh?: string } | null)
     : null;
   const hfTitle = isHfPaper ? (hfExtra?.title_zh || item?.title || "") : "";
+  // blog/podcast：item.title 已是中译标题,drawer header 滚动后 reveal。
+  const blogName = isBlog ? (item?.title || "") : "";
+  const podcastName = isPodcast ? (item?.title || "") : "";
   // Default title is generic ("项目详情" / "推文详情" / etc.). Once the body's
   // own title element scrolls past the top, the header takes over and
   // displays the actual identifier (owner/repo for GH, name for PH).
@@ -347,6 +354,8 @@ export function TweetDrawer() {
   const defaultClawhubTitle = "Skill 详情";
   const defaultHdxTitle = "活动详情";
   const defaultHfTitle = "论文详情";
+  const defaultBlogTitle = "博客详情";
+  const defaultPodcastTitle = "播客详情";
   const headerTitle = item
     ? isGithub
       ? titleHidden
@@ -368,9 +377,17 @@ export function TweetDrawer() {
               ? titleHidden
                 ? hfTitle || defaultHfTitle
                 : defaultHfTitle
-              : threadMembers.length > 1
-                ? `Thread · ${threadMembers.length} 条`
-                : "推文详情"
+              : isBlog
+                ? titleHidden
+                  ? blogName || defaultBlogTitle
+                  : defaultBlogTitle
+                : isPodcast
+                  ? titleHidden
+                    ? podcastName || defaultPodcastTitle
+                    : defaultPodcastTitle
+                  : threadMembers.length > 1
+                    ? `Thread · ${threadMembers.length} 条`
+                    : "推文详情"
     : loading
       ? "加载中…"
       : error === "not_found"
@@ -386,7 +403,11 @@ export function TweetDrawer() {
           ? "在活动行查看完整详情 ↗"
           : isHfPaper
             ? "在 HF 打开 ↗"
-            : "打开X原文 ↗";
+            : isBlog
+              ? "阅读原文 ↗"
+              : isPodcast
+                ? "在原平台收听 ↗"
+                : "打开X原文 ↗";
   const externalLinkTitle = isGithub
     ? "在 GitHub 打开"
     : isPh
@@ -397,7 +418,11 @@ export function TweetDrawer() {
           ? "在活动行打开"
           : isHfPaper
             ? "在 HuggingFace 打开"
-            : "在 x.com 打开";
+            : isBlog
+              ? "在原博客打开"
+              : isPodcast
+                ? "在播客平台打开"
+                : "在 x.com 打开";
 
   // Double-tap on the title bar (excluding the back / external-link buttons)
   // scrolls the drawer body to top via 300ms ease-out (smoothScrollToTop).
@@ -515,6 +540,10 @@ export function TweetDrawer() {
                 <HuodongxingDrawerBody item={item} />
               ) : isHfPaper ? (
                 <HfPaperDrawerBody item={item} />
+              ) : isBlog ? (
+                <BlogDrawerBody item={item} />
+              ) : isPodcast ? (
+                <PodcastDrawerBody item={item} />
               ) : (
                 <>
                   {threadMembers.map((it, idx) => {

@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>blog 抽屉详情 mockup — 官方新闻（blog）· AI-Feeds Phase 0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* ── 以下 head/style 复制自 feeds-kit.html，保证与其它页面视觉完全一致 ── */
+    /* 字体 stack 对齐真站（mockup 不加载 R2 字体，系统字兜底） */
+    body { font-family: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+
+    /* line-clamp 工具类 */
+    .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-3 { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+
+    /* 移动 device 框 */
+    .device { width: 390px; box-shadow: 0 4px 24px rgba(0,0,0,.08); border-radius: 28px; overflow: hidden; background:#fafafa; border: 8px solid #111; }
+
+    /* 决策标注徽章 */
+    .anno { font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 6px; border-radius: 4px; display: inline-block; white-space: nowrap; }
+    .anno-must { color:#059669; background:#f0fdf4; }
+    .anno-rec  { color:#2563eb; background:#eff6ff; }
+    .anno-opt  { color:#ca8a04; background:#fefce8; }
+    .anno-skip { color:#6b7280; background:#f9fafb; }
+
+    /* 各源专属封面渐变（始终渲染，不依赖网络） */
+    .cv-openai    { background: radial-gradient(circle at 28% 22%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#0f766e,#064e3b); }
+
+    /* 正文内联图片占位（faux benchmark chart，近白底，读作"文章里的真实配图"） */
+    .cv-chart { background: linear-gradient(180deg,#ffffff,#f3f6fb); }
+
+    /* 译/原 toggle（pill 段控，与 kit drawer-shell 的 译/原 toggle 同款视觉） */
+    .lang-seg { display:inline-flex; align-items:center; gap:2px; border:1px solid #e5e5e5; border-radius:9999px; padding:2px; }
+    .lang-btn { display:inline-flex; align-items:center; gap:4px; border-radius:9999px; padding:4px 10px; font-size:12px; line-height:1; color:#525252; cursor:pointer; }
+    .lang-btn:hover:not(.active) { background:#fafafa; }
+    .lang-btn.active { background:#171717; color:#fff; }
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-100 text-neutral-900">
+
+  <!-- ============================================================ -->
+  <!-- SVG <symbol> defs（ico-* 子集复制自 feeds-kit.html + 2 个 lightbox chevron） -->
+  <!-- ============================================================ -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <!-- 阅读时长 -->
+      <symbol id="ico-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+      <!-- 官方新闻 源 icon（lucide newspaper） -->
+      <symbol id="ico-newspaper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></symbol>
+      <!-- 外链 external（lucide arrow-up-right；UI 一律走此 SVG，不用箭头字符当 icon） -->
+      <symbol id="ico-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+      <!-- 译/原 toggle（lucide languages） -->
+      <symbol id="ico-translate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></symbol>
+      <!-- chevron-down -->
+      <symbol id="ico-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+      <!-- 返回 -->
+      <symbol id="ico-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+      <!-- 关闭 -->
+      <symbol id="ico-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+      <!-- 分享 -->
+      <symbol id="ico-share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></symbol>
+      <!-- 图片（Lightbox 提示） -->
+      <symbol id="ico-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></symbol>
+      <!-- 放大（Lightbox 角标） -->
+      <symbol id="ico-zoom" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/></symbol>
+      <!-- Lightbox 导航 chevron（扩展 kit defs，仍是 lucide 风 SVG；不用尖括号字符当箭头 icon） -->
+      <symbol id="ico-cleft" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></symbol>
+      <symbol id="ico-cright" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Top bar -->
+  <header class="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-[1480px] items-center justify-between gap-4 px-6 py-3">
+      <div class="flex shrink-0 items-baseline gap-3">
+        <h1 class="text-xl font-bold tracking-tight text-neutral-900">blog 抽屉详情 mockup</h1>
+        <span class="text-xs text-neutral-400">官方新闻 · blog · Phase 0 · 2026-06-09 · 范本 GithubDrawerBody（markdown + 译/原 + Lightbox）</span>
+      </div>
+      <div class="flex gap-2">
+        <span class="anno anno-must">★★★ 必须</span>
+        <span class="anno anno-rec">★★ 建议</span>
+        <span class="anno anno-opt">★ 可选</span>
+        <span class="anno anno-skip">☆ 不做</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1480px] px-6 py-7">
+
+    <!-- 决策 banner -->
+    <div class="mb-8 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sky-900">
+      <div class="mb-2 text-sm font-semibold">这一页 = blog 抽屉详情（阅读路径）。数据用 OpenAI《介绍 GPT-5.5》（外文源·英译中·有封面）</div>
+      <ul class="space-y-1 pl-5 text-[13px] leading-relaxed list-disc">
+        <li><b>区段顺序「是什么 → 读正文 → 去原文」</b>：publisher 头 + 标题中译（外文源加英文原标题）+ ELI25 摘要 lead + 封面 →（读正文）markdown 全文 + <b>译/原 toggle</b> + 内联图 <b>Lightbox</b> →（去原文）外链「在 OpenAI 博客打开」。</li>
+        <li><b>复用 <code class="rounded bg-white/70 px-1">GithubDrawerBody</code></b>：直抓它的 <code class="rounded bg-white/70 px-1">makeMarkdownComponents</code>（同一套 Tailwind 标签样式）+ <code class="rounded bg-white/70 px-1">extractReadmeImages</code>（按渲染序收集图喂 Lightbox）+ <code class="rounded bg-white/70 px-1">Lightbox</code> 组件；只换简化 resolver：<code class="rounded bg-white/70 px-1">/r/</code> 走 <code class="rounded bg-white/70 px-1">resolveAssetUrl</code>、<code class="rounded bg-white/70 px-1">http(s)</code> 透传，<b>不抄 GH 绑死 owner/repo/branch 的相对 URL 重写</b>（相对 URL 已在 BE step3 按各 feed base 域解析成绝对）。</li>
+        <li><b>代码块原文不译</b>：fenced/inline code 在「译文 / 原文」两态下都保持原始内容（下方 python 示例字符串两态一致）。</li>
+        <li><b>无互动数行</b>：RSS 无 likes/stars，meta 用「约 N 分钟阅读」替代；<b>品牌橙只在 logo</b>，抽屉内零品牌橙；全 icon 走 SVG <code class="rounded bg-white/70 px-1">&lt;use&gt;</code>，零 emoji。</li>
+        <li><b>publisher logo（D9 未定）</b>：本 mockup 用首字母 monogram（无网络永远可渲染）；真实态切 BE 迁 R2 公司 logo（见 kit §1 两态对比）。</li>
+      </ul>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- A. PC 抽屉 560px + 右侧区段注释 -->
+    <!-- ============================================================ -->
+    <section class="mb-14">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">A · PC 抽屉（560px 右侧滑入面板）</h2>
+        <span class="anno anno-must">★★★ 主交付</span>
+      </div>
+      <p class="mb-4 text-[13px] text-neutral-500">默认进入「译文」态（英译中源 + 已有译文，省一次点击）。点封面或正文内联图 → Lightbox 放大；点右上「分享」→ 走分享海报流程。</p>
+
+      <div class="grid gap-8 lg:grid-cols-[560px_1fr]">
+
+        <!-- ── 抽屉面板（faithful render，560 宽 + 内部滚动，sticky header） ── -->
+        <div data-drawer="pc">
+          <div class="max-h-[860px] w-[560px] overflow-y-auto overscroll-contain rounded-2xl border border-neutral-200 bg-white shadow-xl">
+
+            <!-- sticky header：关闭（左） / 博客详情（中） / 分享（右） -->
+            <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-white/95 px-2 py-1.5 backdrop-blur">
+              <div class="justify-self-start">
+                <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100" aria-label="关闭"><svg class="h-5 w-5"><use href="#ico-close"/></svg></button>
+              </div>
+              <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">博客详情</div>
+              <div class="justify-self-end">
+                <button class="flex h-9 items-center gap-1 rounded-md px-2 text-[13px] text-neutral-600 hover:bg-neutral-100"><svg class="h-4 w-4"><use href="#ico-share"/></svg>分享</button>
+              </div>
+            </header>
+
+            <!-- ① 是什么：publisher 头 + 标题中译 + 英文原标题 -->
+            <div class="border-b border-neutral-100 p-5">
+              <div class="flex items-start gap-3">
+                <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[18px] font-bold text-white" style="background:#10a37f">O</span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[15px] font-semibold text-neutral-800">OpenAI</span>
+                    <span class="ml-auto shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">模型发布</span>
+                  </div>
+                  <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                    <span>6 天前</span>
+                    <span class="text-neutral-400">·</span>
+                    <span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg>约 5 分钟阅读</span>
+                  </div>
+                </div>
+              </div>
+              <h2 data-drawer-title-anchor class="mt-3 text-[18px] font-bold leading-snug text-neutral-900">介绍 GPT-5.5：更强的推理与更低的延迟</h2>
+              <div class="mt-1 text-[13px] leading-snug text-neutral-500">Introducing GPT-5.5: stronger reasoning, lower latency</div>
+            </div>
+
+            <!-- ① 是什么：ELI25 摘要 lead -->
+            <div class="border-b border-neutral-100 p-5">
+              <div class="mb-1.5 text-[11px] font-medium tracking-wide text-neutral-400">ELI25 摘要</div>
+              <p class="text-[15px] leading-relaxed text-neutral-700">这是 OpenAI 最新的旗舰模型，简单说就是比上一代更会“想问题”——遇到复杂任务时它会自己多想几步再回答，同时响应速度还更快了。对开发者最实在的变化是 API 价格降了三成。</p>
+            </div>
+
+            <!-- ① 是什么：封面 og:image（可点放大 → Lightbox idx 0） -->
+            <div class="px-5 pt-5">
+              <div class="overflow-hidden rounded-xl border border-neutral-200">
+                <button type="button" data-lightbox="0" class="group relative block w-full cursor-zoom-in" aria-label="放大封面">
+                  <span class="cv-openai block aspect-[16/9] w-full"></span>
+                  <span class="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/45 px-2 py-1 text-[10px] text-white opacity-0 transition-opacity group-hover:opacity-100"><svg class="h-3 w-3"><use href="#ico-zoom"/></svg>放大</span>
+                </button>
+              </div>
+              <div class="mt-1.5 text-[11px] text-neutral-400">封面 og:image · 经质量门控（ar&gt;2‖ar&lt;0.5‖maxDim&lt;240 滤低质）+ R2 缓存</div>
+            </div>
+
+            <!-- ② 读正文：正文 header（标题 + 译/原 toggle）+ markdown 全文 -->
+            <div class="mt-4 flex items-center justify-between border-y border-neutral-100 px-5 py-2.5">
+              <h3 class="text-[13px] font-semibold text-neutral-900">正文</h3>
+              <!-- 译/原 toggle（外文源才显示；译文 active） -->
+              <div class="lang-seg">
+                <button class="lang-btn active" data-lang="zh"><svg class="h-3.5 w-3.5"><use href="#ico-translate"/></svg>译文</button>
+                <button class="lang-btn" data-lang="en">原文</button>
+              </div>
+            </div>
+
+            <!-- markdown body（zh：默认显示；en：隐藏。两态共用 GithubDrawerBody 标签样式） -->
+            <div data-body="zh" class="max-w-none break-words p-5 pt-3 text-[13px]">
+              <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">主要变化</h2>
+              <p class="my-2 leading-relaxed text-neutral-700">GPT-5.5 在复杂推理任务上比 GPT-5 有明显提升，尤其是<strong>多步数学</strong>、<strong>代码调试</strong>和<strong>长文档分析</strong>这三类场景；它会在内部先规划再作答，而不是一上来就给结论。</p>
+              <ul class="my-2 list-disc pl-5 space-y-1 text-neutral-700">
+                <li><strong>推理更深</strong>：遇到难题时自动展开多步思考，必要时回头检查自己的中间结论。</li>
+                <li><strong>延迟更低</strong>：相同任务下首字延迟（time-to-first-token）平均下降约 40%。</li>
+                <li><strong>价格更低</strong>：API 输入价格下调 30%、输出价格下调 20%。</li>
+              </ul>
+
+              <!-- 正文内联图（markdown img，复用 GithubDrawerBody img 样式 cursor-zoom-in；点击 → Lightbox idx 1） -->
+              <button type="button" data-lightbox="1" class="group my-3 block w-full cursor-zoom-in overflow-hidden rounded-md border border-neutral-200 text-left">
+                <span class="cv-chart block p-4">
+                  <span class="mb-3 block text-[12px] font-semibold text-neutral-700">Reasoning benchmark · GPT-5.5 vs GPT-5</span>
+                  <span class="block space-y-2.5">
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:91%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:78%"></span>
+                    </span>
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:88%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:70%"></span>
+                    </span>
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:90%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:74%"></span>
+                    </span>
+                  </span>
+                  <span class="mt-3 flex items-center gap-3 text-[10px] text-neutral-500">
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-sky-500"></span>GPT-5.5</span>
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-neutral-300"></span>GPT-5</span>
+                    <span class="ml-auto inline-flex items-center gap-1 text-neutral-400"><svg class="h-3 w-3"><use href="#ico-image"/></svg>点击放大</span>
+                  </span>
+                </span>
+              </button>
+
+              <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">开发者如何接入</h2>
+              <p class="my-2 leading-relaxed text-neutral-700">把模型名改成 <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800">gpt-5.5</code> 即可，接口保持兼容：</p>
+              <pre class="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200"><code class="font-mono text-[12px] text-neutral-800">from openai import OpenAI
+client = OpenAI()
+
+resp = client.responses.create(
+    model="gpt-5.5",
+    input="Explain quantum entanglement in one sentence",
+    reasoning={"effort": "high"},
+)
+print(resp.output_text)</code></pre>
+              <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600">注意：<code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">reasoning.effort</code> 设为 <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">high</code> 时会消耗更多推理 token，建议只在确实需要深度思考的任务上开启。</blockquote>
+
+              <h3 class="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900">定价对照</h3>
+              <div class="my-3 overflow-x-auto">
+                <table class="min-w-full border-collapse text-[12px]">
+                  <thead><tr>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">档位</th>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">输入（每百万 token）</th>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">输出（每百万 token）</th>
+                  </tr></thead>
+                  <tbody>
+                    <tr><td class="border border-neutral-200 px-2 py-1">GPT-5</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$2.50</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$10.00</td></tr>
+                    <tr><td class="border border-neutral-200 px-2 py-1">GPT-5.5</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$1.75</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$8.00</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="my-2 leading-relaxed text-neutral-700">更多迁移细节见官方文档；旧模型在过渡期内仍可继续调用，<a href="#" onclick="return false" class="text-sky-600 hover:underline">查看迁移指南</a>。</p>
+            </div>
+
+            <!-- markdown body（en：原文，默认隐藏；代码块字符串与 zh 完全一致 = 原文不译） -->
+            <div data-body="en" class="hidden max-w-none break-words p-5 pt-3 text-[13px]">
+              <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">What's new</h2>
+              <p class="my-2 leading-relaxed text-neutral-700">GPT-5.5 shows a clear jump over GPT-5 on multi-step reasoning — especially <strong>multi-step math</strong>, <strong>code debugging</strong>, and <strong>long-document analysis</strong>. It plans internally before answering instead of replying in one pass.</p>
+              <ul class="my-2 list-disc pl-5 space-y-1 text-neutral-700">
+                <li><strong>Deeper reasoning</strong>: expands several thinking steps on hard problems and re-checks its own intermediate results.</li>
+                <li><strong>Lower latency</strong>: time-to-first-token drops ~40% on the same task.</li>
+                <li><strong>Lower price</strong>: API input price −30%, output price −20%.</li>
+              </ul>
+
+              <button type="button" data-lightbox="1" class="group my-3 block w-full cursor-zoom-in overflow-hidden rounded-md border border-neutral-200 text-left">
+                <span class="cv-chart block p-4">
+                  <span class="mb-3 block text-[12px] font-semibold text-neutral-700">Reasoning benchmark · GPT-5.5 vs GPT-5</span>
+                  <span class="block space-y-2.5">
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:91%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:78%"></span>
+                    </span>
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:88%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:70%"></span>
+                    </span>
+                    <span class="block">
+                      <span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></span>
+                      <span class="block h-2 rounded-full bg-sky-500" style="width:90%"></span>
+                      <span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:74%"></span>
+                    </span>
+                  </span>
+                  <span class="mt-3 flex items-center gap-3 text-[10px] text-neutral-500">
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-sky-500"></span>GPT-5.5</span>
+                    <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-neutral-300"></span>GPT-5</span>
+                    <span class="ml-auto inline-flex items-center gap-1 text-neutral-400"><svg class="h-3 w-3"><use href="#ico-image"/></svg>click to zoom</span>
+                  </span>
+                </span>
+              </button>
+
+              <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">How to integrate</h2>
+              <p class="my-2 leading-relaxed text-neutral-700">Change the model name to <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800">gpt-5.5</code>; the interface stays compatible:</p>
+              <pre class="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200"><code class="font-mono text-[12px] text-neutral-800">from openai import OpenAI
+client = OpenAI()
+
+resp = client.responses.create(
+    model="gpt-5.5",
+    input="Explain quantum entanglement in one sentence",
+    reasoning={"effort": "high"},
+)
+print(resp.output_text)</code></pre>
+              <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600">Note: setting <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">reasoning.effort</code> to <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">high</code> consumes more reasoning tokens — enable it only for tasks that truly need deep thinking.</blockquote>
+
+              <h3 class="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900">Pricing</h3>
+              <div class="my-3 overflow-x-auto">
+                <table class="min-w-full border-collapse text-[12px]">
+                  <thead><tr>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">Tier</th>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">Input (per 1M tokens)</th>
+                    <th class="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold">Output (per 1M tokens)</th>
+                  </tr></thead>
+                  <tbody>
+                    <tr><td class="border border-neutral-200 px-2 py-1">GPT-5</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$2.50</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$10.00</td></tr>
+                    <tr><td class="border border-neutral-200 px-2 py-1">GPT-5.5</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$1.75</td><td class="border border-neutral-200 px-2 py-1 tabular-nums">$8.00</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="my-2 leading-relaxed text-neutral-700">See the docs for migration details; older models remain callable during the transition, <a href="#" onclick="return false" class="text-sky-600 hover:underline">read the migration guide</a>.</p>
+            </div>
+
+            <!-- ③ 去原文：外链「在 OpenAI 博客打开」（ico-external SVG，箭头不用符号 emoji） -->
+            <div class="border-t border-neutral-100 p-5">
+              <a href="#" onclick="return false" class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5 text-[13px] font-medium text-neutral-700 hover:bg-neutral-50">
+                <span>在 OpenAI 博客打开</span>
+                <svg class="h-4 w-4 text-neutral-400"><use href="#ico-external"/></svg>
+              </a>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ── 右侧区段注释（faithful render 之外，房子格式标注） ── -->
+        <div class="space-y-4">
+          <div class="rounded-xl border border-neutral-200 bg-white p-4">
+            <div class="mb-2 flex items-center gap-2"><span class="anno anno-must">★★★ 是什么</span><span class="text-[12px] font-semibold text-neutral-700">顶部信息块</span></div>
+            <ul class="space-y-1.5 pl-4 text-[12px] leading-relaxed text-neutral-600 list-disc">
+              <li><b>publisher 头</b>：monogram「O」+ OpenAI + 分类 chip「模型发布」+ 时间 + 「约 5 分钟阅读」（<b>无 metrics 行</b>，RSS 无 likes/stars）。</li>
+              <li><b>标题中译</b>（18px bold）+ 下方<b>英文原标题</b>（13px neutral-500）—— 外文源才出原标题，中文源省略（见下方 D 区）。</li>
+              <li><b>ELI25 摘要 lead</b>（15px neutral-700）：打开第一眼拿结论；与 13px 正文拉开层级。</li>
+              <li><b>封面</b> 16:9 满宽，可点放大；质量门控不过则降级无封面。</li>
+            </ul>
+          </div>
+          <div class="rounded-xl border border-neutral-200 bg-white p-4">
+            <div class="mb-2 flex items-center gap-2"><span class="anno anno-must">★★★ 读正文</span><span class="text-[12px] font-semibold text-neutral-700">markdown 正文 + 译/原 + Lightbox</span></div>
+            <ul class="space-y-1.5 pl-4 text-[12px] leading-relaxed text-neutral-600 list-disc">
+              <li>直接复用 <code class="rounded bg-neutral-100 px-1">GithubDrawerBody.makeMarkdownComponents</code>：H2/H3/p/列表/代码块/blockquote/表格 全套同款 Tailwind 样式（与 GH README 抽屉像素一致）。</li>
+              <li><b>译/原 toggle</b>（pill 段控，译文 active 黑底 + ico-translate）切换中/英两套 body；<b>代码块两态保持原文</b>（fenced/inline code 不译）。</li>
+              <li><b>Lightbox</b>：<code class="rounded bg-neutral-100 px-1">extractReadmeImages</code> 按渲染序收集封面 + 正文内联图，点任一图放大、键盘 ←/→ 切换、Esc 关。</li>
+              <li>resolver 简化：<code class="rounded bg-neutral-100 px-1">/r/</code>→<code class="rounded bg-neutral-100 px-1">resolveAssetUrl</code>、<code class="rounded bg-neutral-100 px-1">http(s)</code> 透传；<b>不抄</b> GH 的 owner/repo/branch 相对 URL 重写（BE 已解析成绝对）。</li>
+            </ul>
+          </div>
+          <div class="rounded-xl border border-neutral-200 bg-white p-4">
+            <div class="mb-2 flex items-center gap-2"><span class="anno anno-rec">★★ 去原文</span><span class="text-[12px] font-semibold text-neutral-700">外链 + 降级</span></div>
+            <ul class="space-y-1.5 pl-4 text-[12px] leading-relaxed text-neutral-600 list-disc">
+              <li>底部外链「<b>在 OpenAI 博客打开</b>」+ <code class="rounded bg-neutral-100 px-1">ico-external</code> SVG（<b>箭头走 SVG，不用箭头符号当 icon</b>）；<code class="rounded bg-neutral-100 px-1">externalLinkLabel/Title</code> 按源分支。</li>
+              <li>headless 抓不全正文时<b>降级</b>：只留「ELI25 摘要 + 在原站打开」，不强塞半截正文。</li>
+            </ul>
+          </div>
+          <div class="rounded-xl border border-neutral-200 bg-white p-4">
+            <div class="mb-2 flex items-center gap-2"><span class="anno anno-opt">★ D9 未定</span><span class="text-[12px] font-semibold text-neutral-700">publisher logo 两态</span></div>
+            <p class="text-[12px] leading-relaxed text-neutral-600">本 mockup 用首字母 monogram（彩块 +「O」，零网络永远可渲染）。真实态可切 BE 迁 R2 的公司 logo；两态对比见 kit §1，待用户挑。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- B. 移动 device 全屏抽屉 -->
+    <!-- ============================================================ -->
+    <section class="mb-14">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">B · 移动抽屉（390px 全屏 + 下拉关闭手柄）</h2>
+        <span class="anno anno-rec">★★ 同结构</span>
+      </div>
+      <p class="mb-4 text-[13px] text-neutral-500">移动端从底部升起全屏抽屉，顶部加 swipe 提示条（下拉关闭手柄）；header/正文/译原 toggle/Lightbox 与 PC 完全同构，单列堆叠。</p>
+
+      <div class="device" data-drawer="mobile">
+        <div class="h-[760px] overflow-y-auto bg-white">
+          <!-- swipe 提示条（移动端下拉关闭手柄） -->
+          <div class="sticky top-0 z-20 flex justify-center bg-white/95 pt-2 pb-1 backdrop-blur"><div class="h-1 w-9 rounded-full bg-neutral-300"></div></div>
+          <!-- sticky header -->
+          <header class="sticky top-[14px] z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-white/95 px-2 py-1.5 backdrop-blur">
+            <div class="justify-self-start">
+              <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100" aria-label="关闭"><svg class="h-5 w-5"><use href="#ico-close"/></svg></button>
+            </div>
+            <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">博客详情</div>
+            <div class="justify-self-end">
+              <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100" aria-label="分享"><svg class="h-4 w-4"><use href="#ico-share"/></svg></button>
+            </div>
+          </header>
+
+          <!-- ① 是什么 -->
+          <div class="border-b border-neutral-100 p-4">
+            <div class="flex items-start gap-3">
+              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[16px] font-bold text-white" style="background:#10a37f">O</span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="text-[15px] font-semibold text-neutral-800">OpenAI</span>
+                  <span class="ml-auto shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">模型发布</span>
+                </div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
+                  <span>6 天前</span><span class="text-neutral-400">·</span>
+                  <span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg>约 5 分钟阅读</span>
+                </div>
+              </div>
+            </div>
+            <h2 class="mt-3 text-[18px] font-bold leading-snug text-neutral-900">介绍 GPT-5.5：更强的推理与更低的延迟</h2>
+            <div class="mt-1 text-[13px] leading-snug text-neutral-500">Introducing GPT-5.5: stronger reasoning, lower latency</div>
+          </div>
+
+          <!-- ① ELI25 lead -->
+          <div class="border-b border-neutral-100 p-4">
+            <div class="mb-1.5 text-[11px] font-medium tracking-wide text-neutral-400">ELI25 摘要</div>
+            <p class="text-[15px] leading-relaxed text-neutral-700">这是 OpenAI 最新的旗舰模型，简单说就是比上一代更会“想问题”——遇到复杂任务时它会自己多想几步再回答，同时响应速度还更快了。对开发者最实在的变化是 API 价格降了三成。</p>
+          </div>
+
+          <!-- ① 封面 -->
+          <div class="px-4 pt-4">
+            <div class="overflow-hidden rounded-xl border border-neutral-200">
+              <button type="button" data-lightbox="0" class="group relative block w-full cursor-zoom-in" aria-label="放大封面">
+                <span class="cv-openai block aspect-[16/9] w-full"></span>
+                <span class="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/45 px-2 py-1 text-[10px] text-white"><svg class="h-3 w-3"><use href="#ico-zoom"/></svg>放大</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- ② 正文 header + toggle -->
+          <div class="mt-4 flex items-center justify-between border-y border-neutral-100 px-4 py-2.5">
+            <h3 class="text-[13px] font-semibold text-neutral-900">正文</h3>
+            <div class="lang-seg">
+              <button class="lang-btn active" data-lang="zh"><svg class="h-3.5 w-3.5"><use href="#ico-translate"/></svg>译文</button>
+              <button class="lang-btn" data-lang="en">原文</button>
+            </div>
+          </div>
+
+          <!-- ② markdown body zh -->
+          <div data-body="zh" class="max-w-none break-words p-4 pt-3 text-[13px]">
+            <h2 class="mt-3 mb-2 text-[16px] font-bold text-neutral-900">主要变化</h2>
+            <p class="my-2 leading-relaxed text-neutral-700">GPT-5.5 在复杂推理任务上比 GPT-5 有明显提升，尤其是<strong>多步数学</strong>、<strong>代码调试</strong>和<strong>长文档分析</strong>；它会在内部先规划再作答。</p>
+            <ul class="my-2 list-disc pl-5 space-y-1 text-neutral-700">
+              <li><strong>推理更深</strong>：难题自动展开多步思考。</li>
+              <li><strong>延迟更低</strong>：首字延迟平均下降约 40%。</li>
+              <li><strong>价格更低</strong>：输入 −30%、输出 −20%。</li>
+            </ul>
+            <button type="button" data-lightbox="1" class="group my-3 block w-full cursor-zoom-in overflow-hidden rounded-md border border-neutral-200 text-left">
+              <span class="cv-chart block p-4">
+                <span class="mb-3 block text-[12px] font-semibold text-neutral-700">Reasoning benchmark · GPT-5.5 vs GPT-5</span>
+                <span class="block space-y-2.5">
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:91%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:78%"></span></span>
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:88%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:70%"></span></span>
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:90%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:74%"></span></span>
+                </span>
+                <span class="mt-3 flex items-center gap-3 text-[10px] text-neutral-500"><span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-sky-500"></span>GPT-5.5</span><span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-neutral-300"></span>GPT-5</span><span class="ml-auto inline-flex items-center gap-1 text-neutral-400"><svg class="h-3 w-3"><use href="#ico-image"/></svg>点击放大</span></span>
+              </span>
+            </button>
+            <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">开发者如何接入</h2>
+            <p class="my-2 leading-relaxed text-neutral-700">把模型名改成 <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800">gpt-5.5</code> 即可：</p>
+            <pre class="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200"><code class="font-mono text-[12px] text-neutral-800">resp = client.responses.create(
+    model="gpt-5.5",
+    input="Explain quantum entanglement",
+    reasoning={"effort": "high"},
+)</code></pre>
+            <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600">注意：<code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">effort:"high"</code> 会消耗更多推理 token。</blockquote>
+          </div>
+
+          <!-- ② markdown body en（隐藏） -->
+          <div data-body="en" class="hidden max-w-none break-words p-4 pt-3 text-[13px]">
+            <h2 class="mt-3 mb-2 text-[16px] font-bold text-neutral-900">What's new</h2>
+            <p class="my-2 leading-relaxed text-neutral-700">GPT-5.5 shows a clear jump over GPT-5 on multi-step reasoning — <strong>math</strong>, <strong>code debugging</strong>, and <strong>long-document analysis</strong>.</p>
+            <ul class="my-2 list-disc pl-5 space-y-1 text-neutral-700">
+              <li><strong>Deeper reasoning</strong>: expands multiple thinking steps.</li>
+              <li><strong>Lower latency</strong>: TTFT drops ~40%.</li>
+              <li><strong>Lower price</strong>: input −30%, output −20%.</li>
+            </ul>
+            <button type="button" data-lightbox="1" class="group my-3 block w-full cursor-zoom-in overflow-hidden rounded-md border border-neutral-200 text-left">
+              <span class="cv-chart block p-4">
+                <span class="mb-3 block text-[12px] font-semibold text-neutral-700">Reasoning benchmark · GPT-5.5 vs GPT-5</span>
+                <span class="block space-y-2.5">
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:91%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:78%"></span></span>
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:88%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:70%"></span></span>
+                  <span class="block"><span class="mb-1 flex justify-between text-[10px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></span><span class="block h-2 rounded-full bg-sky-500" style="width:90%"></span><span class="mt-1 block h-2 rounded-full bg-neutral-300" style="width:74%"></span></span>
+                </span>
+                <span class="mt-3 flex items-center gap-3 text-[10px] text-neutral-500"><span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-sky-500"></span>GPT-5.5</span><span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-neutral-300"></span>GPT-5</span><span class="ml-auto inline-flex items-center gap-1 text-neutral-400"><svg class="h-3 w-3"><use href="#ico-image"/></svg>click to zoom</span></span>
+              </span>
+            </button>
+            <h2 class="mt-4 mb-2 text-[16px] font-bold text-neutral-900">How to integrate</h2>
+            <p class="my-2 leading-relaxed text-neutral-700">Change the model name to <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-800">gpt-5.5</code>:</p>
+            <pre class="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200"><code class="font-mono text-[12px] text-neutral-800">resp = client.responses.create(
+    model="gpt-5.5",
+    input="Explain quantum entanglement",
+    reasoning={"effort": "high"},
+)</code></pre>
+            <blockquote class="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600">Note: <code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] not-italic text-neutral-800">effort:"high"</code> consumes more reasoning tokens.</blockquote>
+          </div>
+
+          <!-- ③ 外链 -->
+          <div class="border-t border-neutral-100 p-4">
+            <a href="#" onclick="return false" class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5 text-[13px] font-medium text-neutral-700 hover:bg-neutral-50">
+              <span>在 OpenAI 博客打开</span>
+              <svg class="h-4 w-4 text-neutral-400"><use href="#ico-external"/></svg>
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- C. Lightbox 叠层态（静态渲染，正文内联图放大） -->
+    <!-- ============================================================ -->
+    <section class="mb-14">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">C · Lightbox 叠层态（点正文内联图 / 封面放大）</h2>
+        <span class="anno anno-must">★★★ 复用 Lightbox 组件</span>
+      </div>
+      <p class="mb-4 text-[13px] text-neutral-500">复用 X TweetCard 同款 <code class="rounded bg-neutral-100 px-1">Lightbox.tsx</code>：全屏 <code class="rounded bg-neutral-100 px-1">bg-black/90</code> 蒙层 + 居中图 + 上/下张 + 计数。键盘 ←/→ 切图、Esc 关，点蒙层关闭。下方为静态渲染（counter 2 / 2 = 正文内联图）；上方 A/B 抽屉里的图可<b>实际点击</b>触发同款 Lightbox。</p>
+
+      <div class="relative h-[520px] w-full max-w-[760px] overflow-hidden rounded-2xl border border-neutral-300">
+        <!-- 底层：虚化的抽屉一角，示意 Lightbox 叠在抽屉之上 -->
+        <div class="absolute inset-0 bg-white p-5">
+          <div class="flex items-start gap-3 opacity-60">
+            <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[18px] font-bold text-white" style="background:#10a37f">O</span>
+            <div><div class="text-[15px] font-semibold text-neutral-800">OpenAI</div><div class="mt-1 text-[13px] text-neutral-500">6 天前 · 约 5 分钟阅读</div></div>
+          </div>
+          <div class="mt-3 text-[18px] font-bold text-neutral-900 opacity-60">介绍 GPT-5.5：更强的推理与更低的延迟</div>
+        </div>
+
+        <!-- 叠层：Lightbox -->
+        <div class="absolute inset-0 z-10 flex items-center justify-center bg-black/90">
+          <!-- 关闭（ico-close SVG，不用叉号字符当 icon） -->
+          <button class="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full text-white/70 hover:bg-white/10 hover:text-white" aria-label="关闭"><svg class="h-5 w-5"><use href="#ico-close"/></svg></button>
+          <!-- 上一张（ico-cleft SVG，不用尖括号字符当 icon） -->
+          <button class="absolute left-4 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white/80 hover:bg-black/60" aria-label="上一张"><svg class="h-6 w-6"><use href="#ico-cleft"/></svg></button>
+          <!-- 下一张（disabled，已是最后一张） -->
+          <button class="absolute right-4 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white/30" aria-label="下一张" disabled><svg class="h-6 w-6"><use href="#ico-cright"/></svg></button>
+          <!-- 放大的正文内联图（chart） -->
+          <div class="cv-chart w-[420px] max-w-[80%] rounded-lg p-6 shadow-2xl">
+            <div class="mb-4 text-[15px] font-semibold text-neutral-800">Reasoning benchmark · GPT-5.5 vs GPT-5</div>
+            <div class="space-y-4">
+              <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></div><div class="h-3 rounded-full bg-sky-500" style="width:91%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:78%"></div></div>
+              <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></div><div class="h-3 rounded-full bg-sky-500" style="width:88%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:70%"></div></div>
+              <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></div><div class="h-3 rounded-full bg-sky-500" style="width:90%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:74%"></div></div>
+            </div>
+            <div class="mt-4 flex items-center gap-4 text-[12px] text-neutral-500">
+              <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-sky-500"></span>GPT-5.5</span>
+              <span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-neutral-300"></span>GPT-5</span>
+            </div>
+          </div>
+          <!-- 计数 -->
+          <div class="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/40 px-3 py-1 text-xs text-white/80 tabular-nums">2 / 2</div>
+        </div>
+      </div>
+      <p class="mt-2 text-[11px] text-neutral-500"><code class="rounded bg-neutral-100 px-1">extractReadmeImages</code> 收集到的图序：封面（1/2）→ 正文内联 chart（2/2）。多图才出上/下张 + 计数；单图只放大不出导航。</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- D. 中文源差异（toggle 隐藏 + 无英文原标题） -->
+    <!-- ============================================================ -->
+    <section class="mb-12">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">D · 中文源差异（如美团技术等：无译/原 toggle）</h2>
+        <span class="anno anno-rec">★★ 外文/中文源对照</span>
+      </div>
+      <p class="mb-4 text-[13px] text-neutral-500"><code class="rounded bg-neutral-100 px-1">showTabs = readmeLang !== "zh"</code>：中文源不出译/原 toggle、标题不加英文原标题，正文直接渲染原中文 markdown。其余结构与外文源一致。</p>
+      <div class="max-w-[560px] overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
+        <div class="border-b border-neutral-100 p-5">
+          <div class="flex items-start gap-3">
+            <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[15px] font-bold text-white" style="background:#ffc300">美团</span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span class="text-[15px] font-semibold text-neutral-800">美团技术团队</span>
+                <span class="ml-auto shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">技术实践</span>
+              </div>
+              <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500"><span>3 天前</span><span class="text-neutral-400">·</span><span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg>约 9 分钟阅读</span></div>
+            </div>
+          </div>
+          <!-- 中文源：标题无英文原标题行 -->
+          <h2 class="mt-3 text-[18px] font-bold leading-snug text-neutral-900">大模型推理服务的弹性扩缩容实践</h2>
+        </div>
+        <div class="border-b border-neutral-100 p-5">
+          <div class="mb-1.5 text-[11px] font-medium tracking-wide text-neutral-400">ELI25 摘要</div>
+          <p class="text-[15px] leading-relaxed text-neutral-700">大模型服务流量忽高忽低，养着一堆显卡空转太贵。这篇讲怎么按实时请求量自动加减机器，高峰顶得住、低谷不浪费。</p>
+        </div>
+        <!-- 中文源：正文 header 无 toggle -->
+        <div class="mt-4 flex items-center justify-between border-y border-neutral-100 px-5 py-2.5">
+          <h3 class="text-[13px] font-semibold text-neutral-900">正文</h3>
+          <span class="text-[11px] text-neutral-400">中文源 · 无译/原 toggle</span>
+        </div>
+        <div class="max-w-none break-words p-5 pt-3 text-[13px]">
+          <p class="my-2 leading-relaxed text-neutral-700">我们的推理集群在晚高峰 QPS 可冲到平峰的 5 倍，固定容量要么峰值时排队、要么低谷时大量闲置……</p>
+          <ul class="my-2 list-disc pl-5 space-y-1 text-neutral-700"><li>按 P95 延迟 + 队列长度双指标触发扩容</li><li>缩容加冷却窗口，避免抖动反复拉起实例</li></ul>
+        </div>
+      </div>
+    </section>
+
+    <footer class="mt-10 border-t border-neutral-200 pt-5 text-center text-[11px] text-neutral-400">
+      AI-Feeds · 官方新闻（blog）抽屉详情 · Phase 0 mockup · 2026-06-09 · 范本 GithubDrawerBody（makeMarkdownComponents + extractReadmeImages + Lightbox）
+    </footer>
+  </main>
+
+  <!-- 全屏 Lightbox（A/B 抽屉里的图实际点击触发） -->
+  <div id="lightbox" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/90">
+    <button id="lb-close" class="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full text-white/70 hover:bg-white/10 hover:text-white" aria-label="关闭"><svg class="h-6 w-6"><use href="#ico-close"/></svg></button>
+    <button id="lb-prev" class="absolute left-4 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white/80 hover:bg-black/60 disabled:opacity-30 sm:left-6" aria-label="上一张"><svg class="h-6 w-6"><use href="#ico-cleft"/></svg></button>
+    <button id="lb-next" class="absolute right-4 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white/80 hover:bg-black/60 disabled:opacity-30 sm:right-6" aria-label="下一张"><svg class="h-6 w-6"><use href="#ico-cright"/></svg></button>
+    <!-- slide 0：封面 -->
+    <div data-lb-slide="0" class="hidden">
+      <div class="cv-openai h-[60vh] w-[80vw] max-w-[820px] rounded-lg shadow-2xl"></div>
+    </div>
+    <!-- slide 1：正文内联 chart -->
+    <div data-lb-slide="1" class="hidden">
+      <div class="cv-chart w-[460px] max-w-[86vw] rounded-lg p-6 shadow-2xl">
+        <div class="mb-4 text-[15px] font-semibold text-neutral-800">Reasoning benchmark · GPT-5.5 vs GPT-5</div>
+        <div class="space-y-4">
+          <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Math</span><span class="tabular-nums">91 / 78</span></div><div class="h-3 rounded-full bg-sky-500" style="width:91%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:78%"></div></div>
+          <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Code</span><span class="tabular-nums">88 / 70</span></div><div class="h-3 rounded-full bg-sky-500" style="width:88%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:70%"></div></div>
+          <div><div class="mb-1 flex justify-between text-[12px] text-neutral-500"><span>Long-doc</span><span class="tabular-nums">90 / 74</span></div><div class="h-3 rounded-full bg-sky-500" style="width:90%"></div><div class="mt-1.5 h-3 rounded-full bg-neutral-300" style="width:74%"></div></div>
+        </div>
+        <div class="mt-4 flex items-center gap-4 text-[12px] text-neutral-500"><span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-sky-500"></span>GPT-5.5</span><span class="inline-flex items-center gap-1"><span class="h-2.5 w-2.5 rounded-full bg-neutral-300"></span>GPT-5</span></div>
+      </div>
+    </div>
+    <div id="lb-counter" class="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/40 px-3 py-1 text-xs text-white/80 tabular-nums">1 / 2</div>
+  </div>
+
+  <script>
+    (function () {
+      // ── 译/原 toggle（按 [data-drawer] 作用域，互不干扰） ──
+      document.querySelectorAll('[data-lang]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var drawer = btn.closest('[data-drawer]');
+          if (!drawer) return;
+          var lang = btn.getAttribute('data-lang');
+          drawer.querySelectorAll('[data-lang]').forEach(function (x) {
+            x.classList.toggle('active', x.getAttribute('data-lang') === lang);
+          });
+          drawer.querySelectorAll('[data-body]').forEach(function (bd) {
+            bd.classList.toggle('hidden', bd.getAttribute('data-body') !== lang);
+          });
+        });
+      });
+
+      // ── Lightbox（封面 idx 0 / 正文内联图 idx 1） ──
+      var lb = document.getElementById('lightbox');
+      var slides = lb.querySelectorAll('[data-lb-slide]');
+      var counter = document.getElementById('lb-counter');
+      var prev = document.getElementById('lb-prev');
+      var next = document.getElementById('lb-next');
+      var total = slides.length;
+      var idx = 0;
+      function render() {
+        slides.forEach(function (s, i) { s.classList.toggle('hidden', i !== idx); });
+        counter.textContent = (idx + 1) + ' / ' + total;
+        prev.disabled = idx === 0;
+        next.disabled = idx === total - 1;
+      }
+      function open(i) { idx = i; render(); lb.classList.remove('hidden'); lb.classList.add('flex'); }
+      function close() { lb.classList.add('hidden'); lb.classList.remove('flex'); }
+      document.querySelectorAll('[data-lightbox]').forEach(function (el) {
+        el.addEventListener('click', function () { open(parseInt(el.getAttribute('data-lightbox'), 10) || 0); });
+      });
+      document.getElementById('lb-close').addEventListener('click', close);
+      prev.addEventListener('click', function () { if (idx > 0) { idx--; render(); } });
+      next.addEventListener('click', function () { if (idx < total - 1) { idx++; render(); } });
+      lb.addEventListener('click', function (e) { if (e.target === lb) close(); });
+      document.addEventListener('keydown', function (e) {
+        if (lb.classList.contains('hidden')) return;
+        if (e.key === 'Escape') close();
+        if (e.key === 'ArrowLeft' && idx > 0) { idx--; render(); }
+        if (e.key === 'ArrowRight' && idx < total - 1) { idx++; render(); }
+      });
+    })();
+  </script>
+</body>
+</html>

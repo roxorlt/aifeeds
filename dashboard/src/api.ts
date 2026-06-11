@@ -167,7 +167,9 @@ async function apiFetch(
 }
 
 export interface ItemsQuery {
-  source_type?: SourceType | SourceType[];
+  // "blog,podcast" 为「官方新闻」合并频道哨兵值：buildQuery 透传为 source_type=blog,podcast，
+  // worker handleItems 按逗号 split 过滤（见设计文档 §10）。
+  source_type?: SourceType | SourceType[] | "blog,podcast";
   since?: string;
   until?: string;
   relevant?: 0 | 1;

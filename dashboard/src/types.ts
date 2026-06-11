@@ -7,7 +7,8 @@ export type SourceType =
   | "github"
   | "arxiv"
   | "clawhub"
-  | "hf_paper";
+  | "hf_paper"
+  | "blog";
 
 export interface MediaItem {
   type: "image" | "video" | string;
@@ -156,7 +157,13 @@ export interface ItemExtra {
   x_article?: XArticle | null;
 
   // GitHub-source specific fields (source_type = 'github')
-  ai_category?: "agent" | "model" | "tool" | "infra" | "app" | "tutorial" | "other" | null;
+  // 注：union 末尾的 model-release|research|product|engineering|safety|company 是
+  // blog/podcast 源的 ai_category（§8.4.A）；与 GH 的 agent/model/... 共用同一 extra
+  // 字段但语义不同，各卡片只 switch 自己的取值，不匹配的落 default。
+  ai_category?:
+    | "agent" | "model" | "tool" | "infra" | "app" | "tutorial" | "other"
+    | "model-release" | "research" | "product" | "engineering" | "safety" | "company"
+    | null;
   ai_summary?: string;
   llm_model?: string;
   llm_called_at?: number;
@@ -218,7 +225,7 @@ export interface ItemExtra {
   is_free?: boolean;
   is_private?: boolean;                       // 私密活动
   ticket_tiers?: HuodongxingTicketTier[];     // 前端取 .length / .slice(0, N) 自己算 count / preview
-  guests?: HuodongxingGuest[];                // 同上
+  guests?: HuodongxingGuest[] | string[];     // huodongxing 用对象数组；podcast 复用此字段存嘉宾名 string[]（合并避免 ItemExtra 重复声明）
   contact?: HuodongxingContact;
   thumbnail_full?: string | null;             // 大图原 URL（可能尚未迁 R2）
   og_image?: string | null;                   // 主图 og:image
@@ -259,7 +266,61 @@ export interface ItemExtra {
   figure_image?: { width?: number; height?: number; src_url?: string };
   workflow_completed_at?: string;
 
+  // ── blog / podcast 两源共享字段（source_type = 'blog' | 'podcast'）──────────
+  // 设计文档：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §4 / §5 / §10
+  // 与 worker/src/feeds/types.ts 的 BlogExtra / PodcastExtra 形态对齐（BE 写、FE 读）。
+  feed_id?: string;                           // 'blog:openai' / 'podcast:lex-fridman'
+  source_company?: string;                    // 'OpenAI' / 'Lex Fridman'
+  publisher?: BlogPublisher;                  // 出品方品牌（name + 迁 R2 logo）
+  cover_image?: string;                       // 封面（迁 R2 后为 /r/ 路径）
+  // ai_summary_zh / title_zh 复用上方 HF 已声明字段（ELI25 摘要 + 标题中译）
+  // 跨源去重：次源写 dedup_of 指主源；handleItems 用 dedup_of IS NULL 隐藏
+  dedup_of?: string | null;
+  dedup_reason?: string;
+
+  // blog 专属
+  blog_name?: string;
+  feed_key?: string;
+  body_markdown?: string;                     // 正文原文 markdown（抓到才有）
+  body_markdown_zh?: string;                  // 正文中译（ELI25 lazy）
+  excerpt?: string;                           // 摘要原文（注：PH 也有 description，不混）
+  excerpt_zh?: string;                        // 摘要中译（ELI25 eager）
+  reading_minutes?: number;                   // 阅读时长（卡片 meta，替代缺失互动数）
+  blog_media_r2_at?: string;
+
+  // podcast 专属
+  show_name?: string;
+  show_key?: string;
+  audio_url?: string;                         // ⚠️ 原始 enclosure 直链，前端 <audio> 直吃，不走 /r/
+  audio_type?: string;
+  audio_bytes?: number;
+  duration_sec?: number;                      // 单集时长（卡片 / 海报 meta）
+  episode_no?: number;
+  episode_type?: string;
+  shownotes?: string;                         // shownotes 原文
+  shownotes_zh?: string;                      // shownotes 中译（ELI25 eager）
+  transcript_tier?: "A" | "B" | "C";
+  transcript_source?:
+    | "podcast:transcript" | "substack-fulltext" | "show-page" | "none";
+  transcript_url?: string;
+  transcript_type?: string;
+  transcript_text?: string;                   // A 档原生文字稿全文
+  transcript_text_zh?: string;                // 文字稿中译（ELI25 lazy）
+  chapters?: Array<{ start_sec: number; title: string }>;
+  // guests 见上方 huodongxing 段：已合并为 HuodongxingGuest[] | string[] union（podcast 写 string[]）
+  hosts?: string[];
+  podcast_media_r2_at?: string;
+
   [k: string]: unknown;
+}
+
+// blog / podcast 出品方品牌信息（与 worker FeedPublisher 对齐）。
+// icon_r2 = 迁 R2 后的反代路径（'/r/blog/<hash>'）；无则前端用首字母 monogram 兜底。
+export interface BlogPublisher {
+  name: string;
+  icon_r2?: string;
+  icon_src_url?: string;
+  domain?: string;
 }
 
 export interface HfSubmitter {

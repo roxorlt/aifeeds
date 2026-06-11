@@ -44,6 +44,10 @@ ENABLE_EMAIL_LOGIN = "true"
 # CF Access JWT 校验（admin 入口）。AUD 走 wrangler secret put（每环境不同 app）。
 # 缺 AUD secret 时 admin.checkAdminAuth 自动回落到 ADMIN_USER/PASS Basic Auth。
 CF_ACCESS_TEAM_DOMAIN = "https://aifeeds.cloudflareaccess.com"
+# 官方新闻源 RSSHub 基址(feeds/parse.ts via='rsshub' 用)。Phase 1 的 24 个 feed
+# 全 via='native'，暂未启用 → 留作未来需 RSSHub 中转的源。启用时取消注释设基址
+# (token 走 wrangler secret put RSSHUB_TOKEN)。staging 不设 = 该路径跳过 rsshub。
+# RSSHUB_BASE = "https://rsshub.example.com"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -115,6 +119,25 @@ class_name = "HuodongxingDetailWorkflow"
 name = "hf-paper-pipeline-workflow"
 binding = "HF_PAPER_PIPELINE_WORKFLOW"
 class_name = "HfPaperPipelineWorkflow"
+
+# CF Workflow: 官方新闻 — blog 厂商博客抓取链(worker/src/workflows/blog-pipeline.ts)。
+# runBlogFetch(cron :20 偶数时)后对每条新文章 create 1 个 instance，跑
+# ensure-excerpt → is_ai gate → extract-fulltext + reclassify → enrich(classify+
+# translate) → media-r2 → dedup → mark-completed。
+# 设计：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §8
+[[workflows]]
+name = "blog-pipeline-workflow"
+binding = "BLOG_PIPELINE_WORKFLOW"
+class_name = "BlogPipelineWorkflow"
+
+# CF Workflow: 官方新闻 — podcast AI 播客抓取链(worker/src/workflows/podcast-pipeline.ts)。
+# runPodcastFetch(cron :50 UTC 1/7/13/19)后对每集 create 1 个 instance，跑
+# ensure-shownotes → is_ai gate → 原生文字稿(A 档)→ enrich → cover-r2 → dedup →
+# mark-completed。音频 enclosure 直链不迁 R2。
+[[workflows]]
+name = "podcast-pipeline-workflow"
+binding = "PODCAST_PIPELINE_WORKFLOW"
+class_name = "PodcastPipelineWorkflow"
 
 # CF Workflow: 订阅推送(worker/src/digest/)。scheduled handler 在节点(UTC 0/4/9)
 # create node-run;node-run Phase 2 对每个订阅 create deliver。
@@ -210,6 +233,16 @@ class_name = "ClawhubPipelineWorkflow"
 name = "hf-paper-pipeline-workflow-staging"
 binding = "HF_PAPER_PIPELINE_WORKFLOW"
 class_name = "HfPaperPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "blog-pipeline-workflow-staging"
+binding = "BLOG_PIPELINE_WORKFLOW"
+class_name = "BlogPipelineWorkflow"
+
+[[env.staging.workflows]]
+name = "podcast-pipeline-workflow-staging"
+binding = "PODCAST_PIPELINE_WORKFLOW"
+class_name = "PodcastPipelineWorkflow"
 
 [[env.staging.workflows]]
 name = "digest-node-run-workflow-staging"

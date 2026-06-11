@@ -106,8 +106,20 @@ function TweetDrawerGate() {
   );
 }
 
+// 「官方新闻」合并频道（D7）：逗号拼 blog+podcast 的复合 filter 值。worker
+// /api/items?source_type=blog,podcast 已支持；这是 FE 顶部入口专用的复合值，
+// 不是单个 SourceType。fetchItems 调用时拆成数组传（buildQuery 会 join 回逗号）。
+type MergedSource = "blog,podcast";
+const OFFICIAL_NEWS: MergedSource = "blog,podcast";
+
+// 列 / chip 的 source_type 可能是逗号复合值（「官方新闻」= "blog,podcast"）。
+// 任一子源有数据即视为该频道有数据（非 placeholder）。
+function channelHasData(live: Set<SourceType>, sourceType: string): boolean {
+  return sourceType.split(",").some((s) => live.has(s as SourceType));
+}
+
 interface SourceConfig {
-  source_type: SourceType;
+  source_type: SourceType | MergedSource;
   title: string;
 }
 
@@ -135,10 +147,14 @@ const SOURCE_COLUMNS: SourceConfig[] = [
   { source_type: "hf_paper", title: "论文" },
   { source_type: "clawhub", title: "龙虾技能" },
   { source_type: "youtube", title: "YouTube" },
-  { source_type: "podcast", title: "Podcast" },
+  // D7（2026-06-09 用户已定）：blog + podcast 合并为单频道「官方新闻」，占原
+  // podcast placeholder 槽位、不再单列 Podcast。filter 用逗号复合值
+  // `blog,podcast`（worker /api/items?source_type=blog,podcast 已支持），该列内
+  // 两源按 published_at desc 混排，Feed.tsx 按 item.source_type 逐条路由卡片样式。
+  { source_type: OFFICIAL_NEWS, title: "官方新闻" },
 ];
 
-type FilterKey = "all" | SourceType;
+type FilterKey = "all" | SourceType | MergedSource;
 
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
@@ -149,7 +165,9 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "hf_paper", label: "论文" },
   { key: "clawhub", label: "龙虾技能" },
   { key: "youtube", label: "YouTube" },
-  { key: "podcast", label: "Podcast" },
+  // 顺序必须与 SOURCE_COLUMNS 完全一致（错位会让 PC 列序与 mobile tab 序对不上 +
+  // 墨汁动效错位）。「官方新闻」占原 Podcast chip 槽位。
+  { key: OFFICIAL_NEWS, label: "官方新闻" },
 ];
 
 // R22: skeleton + channel header 复用组件. swipe adjacent + chip overlay 都用,
@@ -187,6 +205,8 @@ function DashboardHome() {
     if (p.startsWith("/c/")) return "clawhub";
     if (p.startsWith("/e/")) return "huodongxing";
     if (p.startsWith("/t/")) return "x_list";
+    // /o/ → 官方新闻（blog + podcast 合并频道）。/h/ 已被 hf_paper 占用。
+    if (p.startsWith("/o/")) return OFFICIAL_NEWS;
     return "all";
   })();
   const [storedFilter, setFilter] = useState<FilterKey>(initialFilter);
@@ -989,7 +1009,7 @@ function DashboardHome() {
                 </div>
                 {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
-                const hasData = liveSourceTypes.has(key as SourceType);
+                const hasData = channelHasData(liveSourceTypes, key);
                 return (
                   <button
                     key={key}
@@ -1076,7 +1096,7 @@ function DashboardHome() {
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
-            const isPlaceholder = !liveSourceTypes.has(col.source_type);
+            const isPlaceholder = !channelHasData(liveSourceTypes, col.source_type);
             return (
               // 列内任意 click 都标记该列为 lastClickedColumnId，让 VideoCoordinator
               // 在多列同时有视频候选时优先选这列（设计文档 §2.2）。capture 阶段抓
@@ -1169,6 +1189,11 @@ function App() {
         <Route path="/c/:slug" element={<DashboardHome />} />
         <Route path="/e/:eventId" element={<DashboardHome />} />
         <Route path="/h/:arxivId" element={<DashboardHome />} />
+        {/* /o/:id → 官方新闻（blog + podcast）详情深链。本路由只负责让 SPA 渲染
+            DashboardHome（initialFilter 据 pathname 落「官方新闻」tab）；抽屉冷启动
+            的 composite-id 解析在 lib/drawer.tsx parseDeepLinkFromPath（跨团队，
+            未命中时优雅降级为仅打开频道、不自动开抽屉）。 */}
+        <Route path="/o/:id" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />

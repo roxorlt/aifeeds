@@ -8,6 +8,23 @@
 
 ## 进行中
 
+### A. AI 厂商博客 + 播客新源接入（2026-06-09，Phase 0 设计完成）
+
+> 新增两个内容形态:`blog`(国内外 AI 厂商官方/技术博客长文)+ `podcast`(国内外 AI 播客单集)。完全复用现有「items 大一统表 + 每源一条 CF Workflow + 完整性 gate + 三件套前端」架构。
+> 设计文档:[docs/plans/2026-06-09-ai-vendor-feeds-source-design.md](docs/plans/2026-06-09-ai-vendor-feeds-source-design.md)(已过对抗式 critic + 必修项修正)
+> 数据源参考:`/Users/roxor/cola/outputs/AI-Feeds-数据源汇总文档/`(2026-06-09 实测 45 候选源)
+> 关键实测结论:45 个候选里 34 个零 VPS 基建可拿(24 原生 feed + 10 页面抓取),只 4 个中文播客必须 RSSHub、8 个 SPA 必须无头。
+> ⚠️ 香港中转 VPS(1 核 961MB,prod 全站单点)**绝不跑无头/RSSHub**——无头走 CF Browser Rendering、RSSHub 另起独立小鸡。
+
+- [x] **D1/D3/D4/D7 已定**(2026-06-09 用户拍板,见设计文档 §13 顶部小结):基建复用 Codex 腾讯云机 82.156.0.68(跨方依赖,Phase 1 不用它)/ 公众号 v1 不接标 v2 / 前端合并单频道「官方新闻」。余 D2 上限 / D5 中文播客 ASR / D6 SPA 硬骨头 / D8 去重范围 / D9 publisher logo / D10 冷启动深度 维持推荐默认,可读后再调
+- [x] **Phase 0 mockup 三件套已出**(2026-06-09):[索引](docs/plans/_mockups/2026-06-09-feeds-index.html) + kit + feed/卡片变体/blog抽屉/podcast抽屉/海报 5 页。审查通过(emoji 零违规、token 对齐 TweetCard 基线、合并频道/卡片家族/chipColor 全落实)
+- [x] **2 个视觉取舍已定**(2026-06-09 看 mockup 后):① blog 流内卡 = **右侧小缩略图(news-card 式,文字为主,非满宽 hero)** ② publisher logo = **真实 logo(BE 迁 R2)**。已记设计文档 §10.1/§10.2/§13 + 决策矩阵。→ **Phase 0(设计 + mockup)彻底完成**
+  - 注:`feeds-feed-mockup.html` 里 blog 卡画的是旧的满宽 hero,**最终以 `feeds-card-variants.html` 的 ② 右侧小缩略图为准**(设计文档已是权威);Phase 1 建卡照 §10.2,需要的话可再刷一版 feed-mockup
+- [ ] **mockup 实现注记**(非阻塞,FE 落地时):blog 抽屉头图标 ico-close 统一为 ico-back(对齐 podcast 抽屉/kit 外壳);logo 描边 #FF9A1A 改回规范 #FF8A00
+- [ ] **Phase 1**(估 9-12 天,零基建 ~24 源):schema migration 020 → blog/podcast 拉取 + 两条 CF Workflow(含 step1 is_ai gate + ELI25 翻译)→ 前端三件套 → 真机验收 → operations.md 同步
+- [ ] **Phase 2/3**:RSSHub 中文播客 / 页面抓取 + 无头(按 D1-D10 结果排)
+- [ ] **明确不接**(需求 4.8):不往 digest(订阅日报)/ codex daily 推送加 blog/podcast
+
 ### 0. PH GraphQL + worker cron 主 PR 收尾（2026-05-11）
 
 > 主 PR 已合 staging 验收完毕（设计 [docs/plans/2026-05-11-ph-graphql-cf-cron-design.md](docs/plans/2026-05-11-ph-graphql-cf-cron-design.md)、计划 [docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md](docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md)）。剩下：

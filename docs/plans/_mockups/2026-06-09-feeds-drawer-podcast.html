@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>podcast 抽屉详情 mockup — AI-Feeds Phase 0（#4）</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* 字体 stack 对齐真站（mockup 不加载 R2 字体，系统字兜底） */
+    body { font-family: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+
+    /* line-clamp 工具类（CDN Tailwind 已内置，这里兜底） */
+    .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-3 { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+
+    /* 移动 device 框 */
+    .device { width: 390px; box-shadow: 0 4px 24px rgba(0,0,0,.08); border-radius: 28px; overflow: hidden; background:#fafafa; border: 8px solid #111; }
+
+    /* 决策标注徽章 */
+    .anno { font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 6px; border-radius: 4px; display: inline-block; white-space: nowrap; }
+    .anno-must { color:#059669; background:#f0fdf4; }
+    .anno-rec  { color:#2563eb; background:#eff6ff; }
+    .anno-opt  { color:#ca8a04; background:#fefce8; }
+    .anno-skip { color:#6b7280; background:#f9fafb; }
+
+    /* 各源专属封面渐变（始终渲染，不依赖网络） */
+    .cv-latent    { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.2), transparent 55%), linear-gradient(135deg,#7c5cff,#2a1b54); }
+    .cv-zhang     { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.18), transparent 55%), linear-gradient(135deg,#ef5a4c,#7a221a); }
+    .cv-lex       { background: radial-gradient(circle at 30% 25%, rgba(255,255,255,.14), transparent 55%), linear-gradient(135deg,#3f3f46,#09090b); }
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-100 text-neutral-900">
+
+  <!-- ============================================================ -->
+  <!-- SVG <symbol> defs（与 kit 同源；lucide 风；全部 SVG，零 emoji） -->
+  <!-- ============================================================ -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <!-- 时长 / 阅读时长 -->
+      <symbol id="ico-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+      <!-- podcast 源 icon：mic -->
+      <symbol id="ico-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></symbol>
+      <!-- play 实心三角（复用 PhCard 的 path，禁 ▶ emoji） -->
+      <symbol id="ico-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></symbol>
+      <!-- pause（v2 自绘播放条用） -->
+      <symbol id="ico-pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></symbol>
+      <!-- 快退 15s（v2 自绘） -->
+      <symbol id="ico-rewind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 19a7 7 0 1 0-6-3.5"/><path d="M5 19v-4h4"/></symbol>
+      <!-- 外链 ↗（arrow-up-right，禁 ↗ emoji） -->
+      <symbol id="ico-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+      <!-- 译/原 toggle（lucide languages） -->
+      <symbol id="ico-translate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></symbol>
+      <!-- chevron-down（折叠区） -->
+      <symbol id="ico-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+      <!-- 返回 -->
+      <symbol id="ico-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+      <!-- 关闭 -->
+      <symbol id="ico-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+      <!-- 分享 -->
+      <symbol id="ico-share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></symbol>
+      <!-- 列表（章节/shownotes 提示） -->
+      <symbol id="ico-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></symbol>
+      <!-- 文字稿（lucide file-text） -->
+      <symbol id="ico-filetext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+      <!-- podcast brand（appbar/列头用，paths 取自 dashboard icons.tsx） -->
+      <symbol id="brand-podcast" viewBox="0 0 24 24" fill="currentColor"><path d="M5.34 0A5.328 5.328 0 000 5.34v13.32A5.328 5.328 0 005.34 24h13.32A5.328 5.328 0 0024 18.66V5.34A5.328 5.328 0 0018.66 0zm6.525 2.568c2.336 0 4.448.902 6.056 2.587 1.224 1.272 1.912 2.619 2.264 4.392.12.59.12 2.2.007 2.864a8.506 8.506 0 01-3.24 5.296c-.608.46-2.096 1.261-2.336 1.261-.088 0-.096-.091-.056-.46.072-.592.144-.715.48-.856.536-.224 1.448-.874 2.008-1.435a7.644 7.644 0 002.008-3.536c.208-.824.184-2.656-.048-3.504-.728-2.696-2.928-4.792-5.624-5.352-.784-.16-2.208-.16-3 0-2.728.56-4.984 2.76-5.672 5.528-.184.752-.184 2.584 0 3.336.456 1.832 1.64 3.512 3.192 4.512.304.2.672.408.824.472.336.144.408.264.472.856.04.36.03.464-.056.464-.056 0-.464-.176-.896-.384l-.04-.03c-2.472-1.216-4.056-3.274-4.632-6.012-.144-.706-.168-2.392-.03-3.04.36-1.74 1.048-3.1 2.192-4.304 1.648-1.737 3.768-2.656 6.128-2.656zm.134 2.81c.409.004.803.04 1.106.106 2.784.62 4.76 3.408 4.376 6.174-.152 1.114-.536 2.03-1.216 2.88-.336.43-1.152 1.15-1.296 1.15-.023 0-.048-.272-.048-.603v-.605l.416-.496c1.568-1.878 1.456-4.502-.256-6.224-.664-.67-1.432-1.064-2.424-1.246-.64-.118-.776-.118-1.448-.008-1.02.167-1.81.562-2.512 1.256-1.72 1.704-1.832 4.342-.264 6.222l.413.496v.608c0 .336-.027.608-.06.608-.03 0-.264-.16-.512-.36l-.034-.011c-.832-.664-1.568-1.842-1.872-2.997-.184-.698-.184-2.024.008-2.72.504-1.878 1.888-3.335 3.808-4.019.41-.145 1.133-.22 1.814-.211zm-.13 2.99c.31 0 .62.06.844.178.488.253.888.745 1.04 1.259.464 1.578-1.208 2.96-2.72 2.254h-.015c-.712-.331-1.096-.956-1.104-1.77 0-.733.408-1.371 1.112-1.745.224-.117.534-.176.844-.176zm-.011 4.728c.988-.004 1.706.349 1.97.97.198.464.124 1.932-.218 4.302-.232 1.656-.36 2.074-.68 2.356-.44.39-1.064.498-1.656.288h-.003c-.716-.257-.87-.605-1.164-2.644-.341-2.37-.416-3.838-.218-4.302.262-.616.974-.966 1.97-.97z"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Top bar（mockup 页面 chrome） -->
+  <header class="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-[1480px] items-center justify-between gap-4 px-6 py-3">
+      <div class="flex shrink-0 items-baseline gap-3">
+        <h1 class="text-xl font-bold tracking-tight text-neutral-900">podcast 抽屉详情</h1>
+        <span class="text-xs text-neutral-400">mockup #4 · PC 560 + 移动 390 · Phase 0 · 2026-06-09 · 复制基准 = feeds-kit.html</span>
+      </div>
+      <div class="flex gap-2">
+        <span class="anno anno-must">★★★ 必须</span>
+        <span class="anno anno-rec">★★ 建议</span>
+        <span class="anno anno-opt">★ 可选</span>
+        <span class="anno anno-skip">☆ 不做</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1480px] px-6 py-7">
+
+    <!-- 决策 banner -->
+    <div class="mb-8 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sky-900">
+      <div class="mb-2 text-sm font-semibold">podcast 抽屉（收听路径）—— 全站首个 <code class="rounded bg-white/70 px-1">&lt;audio&gt;</code> 形态，对照设计文档 §10.3</div>
+      <ul class="space-y-1 pl-5 text-[13px] leading-relaxed list-disc">
+        <li><b>内容顺序（§10.3）</b>：节目封面 + 节目名 + 单集标题 → <b>音频播放器置顶</b> → ELI25 摘要 → shownotes/章节（带时间戳）→（A 档）transcript 折叠区 + 译/原 toggle → 外链。</li>
+        <li><b>音频直连原 <code class="rounded bg-white/70 px-1">&lt;enclosure&gt;</code></b>：<code class="rounded bg-white/70 px-1">src=原始直链不走 /r/</code>（R2 反代无 Range → seek 失效；几十 MB 串流过 1c1g 香港中转会 OOM 拖垮全站）。<b>大陆访问海外播客可能较慢/需科学上网</b>，始终保留「在原平台收听」兜底外链。</li>
+        <li><b>播放器档位</b>：MVP 用<b>浏览器原生 <code class="rounded bg-white/70 px-1">controls</code></b>（零代码、最稳）；v2 再自绘播放条 + <b>全局单实例</b>（同时只播一个）。下方两态都画出来对比。</li>
+        <li><b>A / B 档差异</b>：A 档（Latent Space / Lex，英译中）有 transcript 折叠区 + 译/原 toggle；<b>B 档（张小珺，中文源）无 transcript、整个抽屉不出译/原 toggle</b>（按 §10 graceful 缺字段，文字稿区省略或显「本期暂无文字稿」占位）。</li>
+        <li><b>零 emoji</b>：play=实心三角 <code class="rounded bg-white/70 px-1">M8 5v14l11-7z</code>，时长/章节/外链全走 <code class="rounded bg-white/70 px-1">&lt;symbol&gt;</code> SVG；token 严守 TweetCard 基线（灰阶 neutral、链接 sky-600、品牌橙只在 logo）。</li>
+      </ul>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- A：PC 560 双版并排（A 档 Latent Space full + B 档 张小珺） -->
+    <!-- ============================================================ -->
+    <section class="mb-12">
+      <div class="mb-4 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">PC 抽屉 560 宽 · A 档（Latent Space）vs B 档（张小珺）</h2>
+        <span class="anno anno-must">★★★ 主交付</span>
+      </div>
+
+      <div class="flex flex-wrap gap-8">
+
+        <!-- ───────────────── A 档：Latent Space（有文字稿·英译中） ───────────────── -->
+        <div>
+          <div class="mb-2 text-[12px] font-semibold text-neutral-500">① A 档 · Latent Space · 有文字稿 · 英译中（含 transcript 折叠 + 译/原 toggle）</div>
+          <!-- 抽屉浮在 feed 上的语境：浅遮罩底 + 白卡 shadow-xl -->
+          <div class="rounded-2xl bg-neutral-200/40 p-3">
+            <div style="width:560px" class="overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-xl">
+
+              <!-- swipe 提示条（移动端下拉关闭手柄；桌面保留以保持外壳一致） -->
+              <div class="flex justify-center pt-2 pb-1"><div class="h-1 w-9 rounded-full bg-neutral-300"></div></div>
+
+              <!-- sticky header（3 列：返回 / 播客详情 / 分享）—— 与 kit drawer-shell 同源 -->
+              <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-white/95 px-2 py-1.5 backdrop-blur">
+                <div class="justify-self-start">
+                  <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100" aria-label="返回"><svg class="h-5 w-5"><use href="#ico-back"/></svg></button>
+                </div>
+                <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">播客详情</div>
+                <div class="justify-self-end">
+                  <button class="flex h-9 items-center gap-1 rounded-md px-2 text-[13px] text-neutral-600 hover:bg-neutral-100"><svg class="h-4 w-4"><use href="#ico-share"/></svg>分享</button>
+                </div>
+              </header>
+
+              <!-- body -->
+              <div class="px-5 py-4 space-y-5">
+
+                <!-- 1) 节目封面（大方图）+ 节目名 + 单集标题中译（A 档外文源加英文原标题） -->
+                <div class="flex gap-3.5">
+                  <div class="cv-latent relative h-24 w-24 shrink-0 overflow-hidden rounded-2xl border border-neutral-200">
+                    <span class="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <span class="flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white"><svg class="ml-0.5 h-5 w-5"><use href="#ico-play"/></svg></span>
+                    </span>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5 text-[13px] text-neutral-500">
+                      <span class="inline-flex h-4 w-4 items-center justify-center text-neutral-400"><svg class="h-4 w-4"><use href="#brand-podcast"/></svg></span>
+                      <span class="truncate font-medium text-neutral-700">Latent Space</span>
+                    </div>
+                    <h2 class="mt-1 text-[18px] font-bold leading-snug text-neutral-900">对话 OpenAI 工程负责人：万亿参数训练背后的工程取舍</h2>
+                    <p class="mt-1 text-[13px] leading-snug text-neutral-400">How OpenAI trains at trillion-parameter scale</p>
+                  </div>
+                </div>
+
+                <!-- meta 行：时长 · 时间 · 有文字稿 chip（A 档）。无互动数 -->
+                <div class="flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg><span class="tabular-nums">1:23:45</span></span>
+                  <span class="text-neutral-400">·</span><span>3 天前</span>
+                  <span class="ml-1 inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700"><svg class="h-3 w-3"><use href="#ico-filetext"/></svg>有文字稿</span>
+                </div>
+
+                <!-- 2) 音频播放器置顶 —— MVP 原生 <audio controls> -->
+                <div>
+                  <div class="mb-1.5 flex items-center gap-2">
+                    <div class="text-[13px] font-semibold text-neutral-700">收听</div>
+                    <span class="anno anno-rec">★★ MVP：原生 &lt;audio controls&gt;</span>
+                  </div>
+                  <!-- 实际 MVP 渲染：浏览器原生控件（无音源时为静态控件，仅示意播放条） -->
+                  <audio controls preload="metadata" class="w-full"></audio>
+                  <p class="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-neutral-400">
+                    <svg class="mt-px h-3.5 w-3.5 shrink-0"><use href="#ico-clock"/></svg>
+                    <span>音频直连海外平台（megaphone / acast / Substack 等），未迁 R2、绕开香港中转 —— 大陆访问可能较慢或需科学上网；播放失败用下方「在原平台收听」兜底。</span>
+                  </p>
+                  <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <span class="anno anno-must">★★★ src = 原始 &lt;enclosure&gt; 直链，不走 /r/（无 Range→seek 失效 + 1c1g 中转串流 OOM）</span>
+                  </div>
+
+                  <!-- v2 自绘播放条预览（dimmed，非 MVP；演示「全局单实例」目标态） -->
+                  <div class="mt-3 rounded-xl border border-dashed border-neutral-300 bg-neutral-50/60 p-3 opacity-80">
+                    <div class="mb-2 flex items-center gap-2">
+                      <span class="text-[11px] font-medium text-neutral-500">v2 自绘播放条预览（非 MVP）</span>
+                      <span class="anno anno-opt">★ v2：自绘 + 全局单实例（同时只播一个）</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <button class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-900 text-white" aria-label="播放"><svg class="ml-0.5 h-5 w-5"><use href="#ico-play"/></svg></button>
+                      <div class="min-w-0 flex-1">
+                        <div class="relative h-1 w-full rounded-full bg-neutral-200">
+                          <div class="absolute inset-y-0 left-0 w-[18%] rounded-full bg-neutral-900"></div>
+                          <span class="absolute top-1/2 left-[18%] h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-neutral-300 bg-white shadow-sm"></span>
+                        </div>
+                        <div class="mt-1 flex items-center justify-between text-[11px] tabular-nums text-neutral-400">
+                          <span>14:53</span><span>1:23:45</span>
+                        </div>
+                      </div>
+                      <button class="shrink-0 rounded-full bg-neutral-100 px-2 py-1 text-[11px] font-medium text-neutral-600">1.5x</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3) ELI25 摘要 lead -->
+                <div>
+                  <div class="mb-1.5 text-[13px] font-semibold text-neutral-700">概览</div>
+                  <div class="rounded-xl bg-neutral-50 px-4 py-3 text-[15px] leading-relaxed text-neutral-700">
+                    这期请来 OpenAI 负责训练基础设施的工程师，聊了训练超大模型时那些教科书不会讲的现实问题——几千张显卡里总有几张会坏，怎么让训练不中断；以及为什么“省电”如今成了模型能力的隐形天花板。
+                  </div>
+                </div>
+
+                <!-- 4) shownotes / 章节（带时间戳） -->
+                <div>
+                  <div class="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-neutral-700"><svg class="h-4 w-4 text-neutral-400"><use href="#ico-list"/></svg>章节</div>
+                  <div class="space-y-0.5">
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">00:00</span><span class="text-neutral-700">开场与嘉宾介绍</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">04:12</span><span class="text-neutral-700">万亿参数训练的第一性原理</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">18:45</span><span class="text-neutral-700">几千张显卡的容错：训练为何总在“救火”</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">37:20</span><span class="text-neutral-700">为什么“省电”成了模型能力的隐形天花板</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">1:09:30</span><span class="text-neutral-700">给想进入基础设施方向工程师的建议</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">1:20:15</span><span class="text-neutral-700">快问快答</span>
+                    </button>
+                  </div>
+                  <p class="mt-1.5 text-[11px] text-neutral-400">点章节 = 跳到对应播放时间（v2 自绘播放器才接；MVP 仅展示、可作锚点）。无 chapters 时退化为纯 shownotes markdown（<code>hfMarkdownComponents</code> 轻量版）。</p>
+                </div>
+
+                <!-- 5) (A 档) transcript 折叠区 + 译/原 toggle（默认收起） -->
+                <div>
+                  <div class="mb-2 flex items-center gap-2">
+                    <span class="anno anno-rec">★★ A 档才有 · 默认收起</span>
+                    <span class="anno anno-must">★★★ A/B 差异点：B 档无此区</span>
+                  </div>
+                  <details class="rounded-lg border border-neutral-200">
+                    <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-[13px] font-medium text-neutral-700">
+                      <svg class="h-4 w-4 text-neutral-400"><use href="#ico-chevron"/></svg><svg class="h-4 w-4 text-neutral-400"><use href="#ico-filetext"/></svg>文字稿
+                      <span class="ml-auto text-[11px] text-neutral-400">英译中 · 约 9000 字</span>
+                    </summary>
+                    <div class="border-t border-neutral-200 px-3 py-3">
+                      <!-- 译/原 toggle（仅英译中源出现；中文源不显） -->
+                      <div class="mb-3 flex items-center gap-2">
+                        <div class="inline-flex items-center gap-1 rounded-full border border-neutral-200 p-0.5 text-[12px]">
+                          <span class="inline-flex items-center gap-1 rounded-full bg-neutral-900 px-2.5 py-1 text-white"><svg class="h-3.5 w-3.5"><use href="#ico-translate"/></svg>译文</span>
+                          <button class="rounded-full px-2.5 py-1 text-neutral-600 hover:bg-neutral-50">原文</button>
+                        </div>
+                        <span class="anno anno-rec">★★ 仅英译中源</span>
+                      </div>
+                      <div class="space-y-2 text-[13px] leading-relaxed text-neutral-600">
+                        <p><span class="tabular-nums text-neutral-400">[00:02]</span> 主持人：今天请到的嘉宾负责 OpenAI 的训练基础设施……</p>
+                        <p><span class="tabular-nums text-neutral-400">[01:15]</span> 嘉宾：先说个反直觉的事实——当显卡规模到几千张，每天都有几张在坏，训练系统第一要务不是更快，而是“不中断”。</p>
+                        <p><span class="tabular-nums text-neutral-400">[03:48]</span> 嘉宾：我们假设硬件一定会坏，软件层把它当常态来设计……</p>
+                        <p class="text-neutral-400">……（展开后完整渲染；时间戳保留，译/原切换整段替换）</p>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <!-- 6) 外链 -->
+                <div>
+                  <div class="mb-2 text-[13px] font-semibold text-neutral-700">原文链接</div>
+                  <a class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5 text-[13px] text-neutral-700 hover:bg-neutral-50">
+                    <span>在 Latent Space 打开</span><svg class="h-3.5 w-3.5 text-neutral-400"><use href="#ico-external"/></svg>
+                  </a>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ───────────────── B 档：张小珺（仅 shownotes·中文源） ───────────────── -->
+        <div>
+          <div class="mb-2 text-[12px] font-semibold text-neutral-500">② B 档 · 张小珺·商业访谈录 · 仅 shownotes · 中文源（无 transcript、无译/原 toggle）</div>
+          <div class="rounded-2xl bg-neutral-200/40 p-3">
+            <div style="width:560px" class="overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-xl">
+
+              <div class="flex justify-center pt-2 pb-1"><div class="h-1 w-9 rounded-full bg-neutral-300"></div></div>
+
+              <header class="sticky top-0 z-10 grid grid-cols-3 items-center border-b border-neutral-200 bg-white/95 px-2 py-1.5 backdrop-blur">
+                <div class="justify-self-start">
+                  <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100" aria-label="返回"><svg class="h-5 w-5"><use href="#ico-back"/></svg></button>
+                </div>
+                <div class="justify-self-center truncate text-sm font-semibold text-neutral-900">播客详情</div>
+                <div class="justify-self-end">
+                  <button class="flex h-9 items-center gap-1 rounded-md px-2 text-[13px] text-neutral-600 hover:bg-neutral-100"><svg class="h-4 w-4"><use href="#ico-share"/></svg>分享</button>
+                </div>
+              </header>
+
+              <div class="px-5 py-4 space-y-5">
+
+                <!-- 1) 封面 + 节目名 + 单集标题（中文源：无英文原标题） -->
+                <div class="flex gap-3.5">
+                  <div class="cv-zhang relative h-24 w-24 shrink-0 overflow-hidden rounded-2xl border border-neutral-200">
+                    <span class="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <span class="flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white"><svg class="ml-0.5 h-5 w-5"><use href="#ico-play"/></svg></span>
+                    </span>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5 text-[13px] text-neutral-500">
+                      <span class="inline-flex h-4 w-4 items-center justify-center text-neutral-400"><svg class="h-4 w-4"><use href="#brand-podcast"/></svg></span>
+                      <span class="truncate font-medium text-neutral-700">张小珺·商业访谈录</span>
+                    </div>
+                    <h2 class="mt-1 text-[18px] font-bold leading-snug text-neutral-900">对谈月之暗面杨植麟：长文本之后，下一个战场在哪</h2>
+                    <!-- 中文源：无英文原标题行（graceful 省略） -->
+                  </div>
+                </div>
+
+                <!-- meta：无「有文字稿」chip（B 档） -->
+                <div class="flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500">
+                  <span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg><span class="tabular-nums">1:52:10</span></span>
+                  <span class="text-neutral-400">·</span><span>5 天前</span>
+                  <span class="anno anno-rec ml-1">★★ B 档：无「有文字稿」chip</span>
+                </div>
+
+                <!-- 2) 音频播放器（中文源走小宇宙 CDN，大陆可达性较好） -->
+                <div>
+                  <div class="mb-1.5 flex items-center gap-2">
+                    <div class="text-[13px] font-semibold text-neutral-700">收听</div>
+                    <span class="anno anno-rec">★★ MVP：原生 &lt;audio controls&gt;</span>
+                  </div>
+                  <audio controls preload="metadata" class="w-full"></audio>
+                  <p class="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-neutral-400">
+                    <svg class="mt-px h-3.5 w-3.5 shrink-0"><use href="#ico-clock"/></svg>
+                    <span>中文源音频走小宇宙 CDN（国内节点），大陆可达性较好；仍直连原 <code>&lt;enclosure&gt;</code> 不迁 R2，保留「在小宇宙打开」兜底。</span>
+                  </p>
+                </div>
+
+                <!-- 3) ELI25 摘要 -->
+                <div>
+                  <div class="mb-1.5 text-[13px] font-semibold text-neutral-700">概览</div>
+                  <div class="rounded-xl bg-neutral-50 px-4 py-3 text-[15px] leading-relaxed text-neutral-700">
+                    这期聊大模型创业公司怎么在巨头夹缝里找差异化。杨植麟认为单纯比谁的上下文窗口长已经到头了，真正的壁垒是把模型用进具体场景后积累的数据飞轮。
+                  </div>
+                </div>
+
+                <!-- 4) shownotes / 章节（B 档有 shownotes/时间轴，无逐句 transcript） -->
+                <div>
+                  <div class="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-neutral-700"><svg class="h-4 w-4 text-neutral-400"><use href="#ico-list"/></svg>时间轴</div>
+                  <div class="space-y-0.5">
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">00:00</span><span class="text-neutral-700">为什么说“卷长文本”这条路到头了</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">21:30</span><span class="text-neutral-700">数据飞轮：把模型用进场景后才有的壁垒</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">48:05</span><span class="text-neutral-700">在巨头夹缝里，创业公司的差异化在哪</span>
+                    </button>
+                    <button class="flex w-full items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-neutral-50">
+                      <span class="shrink-0 tabular-nums text-neutral-400">1:30:40</span><span class="text-neutral-700">对下一代产品形态的判断</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 5) transcript 区：B 档无文字稿 → graceful 缺字段（省略或显占位，此处显占位演示差异） -->
+                <div>
+                  <div class="mb-2 flex items-center gap-2">
+                    <span class="anno anno-must">★★★ A/B 差异点：B 档此区缺省</span>
+                    <span class="anno anno-opt">★ v1 可省略 / 或显此占位</span>
+                  </div>
+                  <div class="flex items-center gap-2 rounded-lg border border-dashed border-neutral-200 px-3 py-2.5 text-[13px] text-neutral-400">
+                    <svg class="h-4 w-4 shrink-0"><use href="#ico-filetext"/></svg>本期暂无文字稿（中文源 MVP 不做 ASR）
+                  </div>
+                  <p class="mt-1.5 text-[11px] text-neutral-400">中文源（含 4 个小宇宙播客）<code>transcript_source='none'</code>；D5 暂不上托管 ASR。整个抽屉<b>无译/原 toggle</b>（中文不翻）。</p>
+                </div>
+
+                <!-- 6) 外链 -->
+                <div>
+                  <div class="mb-2 text-[13px] font-semibold text-neutral-700">原文链接</div>
+                  <a class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5 text-[13px] text-neutral-700 hover:bg-neutral-50">
+                    <span>在小宇宙打开</span><svg class="h-3.5 w-3.5 text-neutral-400"><use href="#ico-external"/></svg>
+                  </a>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- B：移动 390 device（A 档 Latent Space 条目，纵向滚动） -->
+    <!-- ============================================================ -->
+    <section class="mb-12">
+      <div class="mb-4 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">移动 · 390px device（A 档全屏抽屉，节选）</h2>
+        <span class="anno anno-rec">★★ 移动满宽 + swipe 下拉关闭</span>
+      </div>
+
+      <div class="device">
+        <!-- swipe 手柄 -->
+        <div class="flex justify-center bg-white pt-2 pb-1"><div class="h-1 w-9 rounded-full bg-neutral-300"></div></div>
+        <!-- header -->
+        <header class="grid grid-cols-3 items-center border-b border-neutral-200 bg-white px-2 py-1.5">
+          <div class="justify-self-start">
+            <button class="flex h-9 w-9 items-center justify-center rounded-md text-neutral-600" aria-label="返回"><svg class="h-5 w-5"><use href="#ico-back"/></svg></button>
+          </div>
+          <div class="justify-self-center text-sm font-semibold text-neutral-900">播客详情</div>
+          <div class="justify-self-end">
+            <button class="flex h-9 items-center gap-1 rounded-md px-2 text-[13px] text-neutral-600"><svg class="h-4 w-4"><use href="#ico-share"/></svg>分享</button>
+          </div>
+        </header>
+
+        <div class="max-h-[640px] overflow-y-auto bg-white px-4 py-4 space-y-4">
+          <!-- 封面 + 标题 -->
+          <div class="flex gap-3">
+            <div class="cv-latent relative h-[84px] w-[84px] shrink-0 overflow-hidden rounded-2xl border border-neutral-200">
+              <span class="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <span class="flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white"><svg class="ml-0.5 h-4 w-4"><use href="#ico-play"/></svg></span>
+              </span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5 text-[13px] text-neutral-500"><svg class="h-4 w-4 text-neutral-400"><use href="#brand-podcast"/></svg><span class="truncate font-medium text-neutral-700">Latent Space</span></div>
+              <h2 class="mt-1 text-[15px] font-bold leading-snug text-neutral-900">对话 OpenAI 工程负责人：万亿参数训练背后的工程取舍</h2>
+              <p class="mt-1 text-[11px] leading-snug text-neutral-400">How OpenAI trains at trillion-parameter scale</p>
+            </div>
+          </div>
+          <!-- meta -->
+          <div class="flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500">
+            <span class="inline-flex items-center gap-1"><svg class="h-3.5 w-3.5"><use href="#ico-clock"/></svg><span class="tabular-nums">1:23:45</span></span>
+            <span class="text-neutral-400">·</span><span>3 天前</span>
+            <span class="ml-1 inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700"><svg class="h-3 w-3"><use href="#ico-filetext"/></svg>有文字稿</span>
+          </div>
+          <!-- audio player -->
+          <div>
+            <div class="mb-1.5 text-[13px] font-semibold text-neutral-700">收听</div>
+            <audio controls preload="metadata" class="w-full"></audio>
+            <p class="mt-2 text-[11px] leading-relaxed text-neutral-400">音频直连海外平台、未迁 R2，大陆可能需科学上网；失败用下方外链兜底。</p>
+          </div>
+          <!-- ELI25 -->
+          <div>
+            <div class="mb-1.5 text-[13px] font-semibold text-neutral-700">概览</div>
+            <div class="rounded-xl bg-neutral-50 px-3.5 py-3 text-[15px] leading-relaxed text-neutral-700">这期请来 OpenAI 负责训练基础设施的工程师，聊了训练超大模型那些教科书不讲的现实问题——几千张显卡总有坏的，怎么让训练不中断。</div>
+          </div>
+          <!-- 章节（节选） -->
+          <div>
+            <div class="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-neutral-700"><svg class="h-4 w-4 text-neutral-400"><use href="#ico-list"/></svg>章节</div>
+            <div class="space-y-0.5">
+              <div class="flex items-baseline gap-3 px-2 py-1.5 text-[13px]"><span class="shrink-0 tabular-nums text-neutral-400">00:00</span><span class="text-neutral-700">开场与嘉宾介绍</span></div>
+              <div class="flex items-baseline gap-3 px-2 py-1.5 text-[13px]"><span class="shrink-0 tabular-nums text-neutral-400">18:45</span><span class="text-neutral-700">几千张显卡的容错：训练为何总在“救火”</span></div>
+              <div class="flex items-baseline gap-3 px-2 py-1.5 text-[13px]"><span class="shrink-0 tabular-nums text-neutral-400">37:20</span><span class="text-neutral-700">“省电”成了模型能力的隐形天花板</span></div>
+            </div>
+          </div>
+          <!-- transcript 折叠（默认收起） -->
+          <details class="rounded-lg border border-neutral-200">
+            <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-[13px] font-medium text-neutral-700"><svg class="h-4 w-4 text-neutral-400"><use href="#ico-chevron"/></svg>文字稿<span class="ml-auto text-[11px] text-neutral-400">英译中 · 约 9000 字</span></summary>
+            <div class="border-t border-neutral-200 px-3 py-3">
+              <div class="mb-3 inline-flex items-center gap-1 rounded-full border border-neutral-200 p-0.5 text-[12px]">
+                <span class="inline-flex items-center gap-1 rounded-full bg-neutral-900 px-2.5 py-1 text-white"><svg class="h-3.5 w-3.5"><use href="#ico-translate"/></svg>译文</span>
+                <button class="rounded-full px-2.5 py-1 text-neutral-600">原文</button>
+              </div>
+              <div class="space-y-2 text-[13px] leading-relaxed text-neutral-600">
+                <p><span class="tabular-nums text-neutral-400">[00:02]</span> 主持人：今天请到的嘉宾负责 OpenAI 的训练基础设施……</p>
+                <p><span class="tabular-nums text-neutral-400">[01:15]</span> 嘉宾：先说个反直觉的事实——显卡到几千张，每天都有几张在坏……</p>
+              </div>
+            </div>
+          </details>
+          <!-- 外链 -->
+          <a class="flex items-center justify-between rounded-md border border-neutral-200 px-3 py-2.5 text-[13px] text-neutral-700"><span>在 Latent Space 打开</span><svg class="h-3.5 w-3.5 text-neutral-400"><use href="#ico-external"/></svg></a>
+        </div>
+      </div>
+      <p class="mt-3 max-w-[640px] text-[11px] leading-relaxed text-neutral-500">移动端抽屉为全屏 sheet：顶部 swipe 手柄下拉关闭、header 同 PC 三列（返回 / 播客详情 / 分享）、body 纵向滚动。结构与 PC 完全一致，仅标题字号回落到卡片 <code>15px</code>、封面缩到 <code>84×84</code>。</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- C：组件落点对照（页面 agent 接线参考） -->
+    <!-- ============================================================ -->
+    <section class="mb-4">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-base font-bold text-neutral-900">组件落点（§10.3 / §10.5 接线对照）</h2>
+        <span class="anno anno-skip">☆ 参考</span>
+      </div>
+      <div class="overflow-hidden rounded-xl border border-neutral-200">
+        <table class="w-full text-left text-[13px]">
+          <thead class="bg-neutral-50 text-neutral-500">
+            <tr>
+              <th class="px-4 py-2 font-semibold">抽屉区块</th>
+              <th class="px-4 py-2 font-semibold">真实组件（新建/复用）</th>
+              <th class="px-4 py-2 font-semibold">关键约束</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-200 text-neutral-700">
+            <tr><td class="px-4 py-2">外壳 + header 路由</td><td class="px-4 py-2"><code>TweetDrawer.tsx</code> 加 <code>isPodcast</code> 分支</td><td class="px-4 py-2"><code>headerTitle="播客详情"</code> / 外链 label/title 分支</td></tr>
+            <tr><td class="px-4 py-2">封面 + 标题 + 音频 + shownotes</td><td class="px-4 py-2"><b>新建</b> <code>PodcastDrawerBody.tsx</code></td><td class="px-4 py-2">shownotes 走 <code>hfMarkdownComponents</code> 轻量版</td></tr>
+            <tr><td class="px-4 py-2">音频播放器</td><td class="px-4 py-2"><b>新建</b> <code>AudioPlayer.tsx</code>（MVP 仅包原生 <code>&lt;audio&gt;</code>）</td><td class="px-4 py-2"><code>src=extra.audio_url</code> 原始 enclosure，<b>不走 /r/</b>；host 失效 fallback 外链</td></tr>
+            <tr><td class="px-4 py-2">transcript 折叠 + 译/原</td><td class="px-4 py-2">复用 blog 的译/原 toggle 组件</td><td class="px-4 py-2">仅 A 档（<code>transcript_text</code> 非空）渲染；中文源不出 toggle</td></tr>
+            <tr><td class="px-4 py-2">轮询/排序/banner</td><td class="px-4 py-2"><code>Feed.tsx</code> L504/L756/L777 加 <code>isPodcast</code></td><td class="px-4 py-2">关 30s 轮询 + 关时间/热门切换器 + 关「N 条新推文」banner</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="mt-10 border-t border-neutral-200 pt-5 text-center text-[11px] text-neutral-400">
+      AI-Feeds · 官方新闻（blog + podcast）源接入 · Phase 0 mockup #4 podcast 抽屉 · 2026-06-09 · token/图标/假数据同源 feeds-kit.html
+    </footer>
+  </main>
+</body>
+</html>

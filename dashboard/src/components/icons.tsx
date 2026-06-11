@@ -334,6 +334,24 @@ export function BrandHF({ className }: IconProps) {
   );
 }
 
+// 官方新闻（blog + podcast 合并频道）column / chip 图标 —— lucide / heroicons 风
+// 「报纸」silhouette。SourceIcon 家族全部走 fill-current 实心剪影（BrandX / BrandGitHub
+// / BrandEvents 等同款），所以这里用 heroicons solid newspaper 填充路径（而非 mockup
+// 里的 stroke 版 ico-newspaper），保证在 `fill-current text-neutral-700` 下渲染干净、
+// 与其它源 chip 视觉一致。零 emoji。
+export function BrandBlog({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className || BRAND_CLASS} aria-label="官方新闻" fill="currentColor">
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M4.125 3C3.089 3 2.25 3.84 2.25 4.875V18a3 3 0 0 0 3 3h15a3 3 0 0 1-3-3V4.875C17.25 3.839 16.41 3 15.375 3H4.125ZM12 9.75a.75.75 0 0 0 0 1.5h1.5a.75.75 0 0 0 0-1.5H12Zm-.75-2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H12a.75.75 0 0 1-.75-.75ZM6 12.75a.75.75 0 0 0 0 1.5h7.5a.75.75 0 0 0 0-1.5H6Zm-.75 3.75a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5H6a.75.75 0 0 1-.75-.75ZM6 6.75a.75.75 0 0 0-.75.75v3c0 .414.336.75.75.75h3a.75.75 0 0 0 .75-.75v-3A.75.75 0 0 0 9 6.75H6Z"
+      />
+      <path d="M18.75 6.75h1.875c.621 0 1.125.504 1.125 1.125V18a1.5 1.5 0 0 1-3 0V6.75Z" />
+    </svg>
+  );
+}
+
 export function SourceIcon({ source_type, className }: IconProps & { source_type: string }) {
   switch (source_type) {
     case "x_list":
@@ -342,6 +360,10 @@ export function SourceIcon({ source_type, className }: IconProps & { source_type
       return <BrandYouTube className={className} />;
     case "github":
       return <BrandGitHub className={className} />;
+    // 「官方新闻」合并频道（filter source_type="blog,podcast"），blog 单值也走报纸图标。
+    case "blog":
+    case "blog,podcast":
+      return <BrandBlog className={className} />;
     case "podcast":
       return <BrandPodcast className={className} />;
     case "product_hunt":

@@ -10,6 +10,8 @@ import { PhCard } from "./PhCard";
 import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
 import { HfPaperCard } from "./HfPaperCard";
+import { BlogCard } from "./BlogCard";
+import { PodcastCard } from "./PodcastCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { HuodongxingColumnHeader, type HdxCity, type HdxWhen, type HdxForm } from "./HuodongxingColumnHeader";
 import { SourceIcon } from "./icons";
@@ -120,7 +122,9 @@ export function prefetchChannels(sourceTypes: SourceType[]): void {
 }
 
 interface Props {
-  sourceType: SourceType;
+  // 「官方新闻」合并频道（D7）以逗号复合值 "blog,podcast" 传入；其余源是单个
+  // SourceType。复合值仅在 fetchItems 时拆数组，其它地方当 string key 用。
+  sourceType: SourceType | "blog,podcast";
   title: string;
   placeholder?: boolean;
   refreshTick: number;
@@ -830,8 +834,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               }}
             />
           )}
-          {/* hf_paper 默认按时间倒序,不需要 sort toggle(PM v5 反馈) */}
-          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && sourceType !== "hf_paper" && (
+          {/* hf_paper 默认按时间倒序,不需要 sort toggle(PM v5 反馈)；
+              官方新闻(blog,podcast)无互动数,时间倒序即可,同样不显示(§10.5) */}
+          {!placeholder && !isClawhub && sourceType !== "github" && sourceType !== "product_hunt" && sourceType !== "huodongxing" && sourceType !== "hf_paper" && sourceType !== "blog,podcast" && (
             <SortSelector
               value={sortMode}
               onChange={(next) => {
@@ -970,6 +975,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                     <HuodongxingCard key={row.item.id} item={row.item} eager={eager} />
                   ) : row.item.source_type === "hf_paper" ? (
                     <HfPaperCard key={row.item.id} item={row.item} eager={eager} />
+                  ) : row.item.source_type === "blog" ? (
+                    <BlogCard key={row.item.id} item={row.item} eager={eager} />
+                  ) : row.item.source_type === "podcast" ? (
+                    <PodcastCard key={row.item.id} item={row.item} eager={eager} />
                   ) : (
                     <TweetCard
                       key={row.item.id}

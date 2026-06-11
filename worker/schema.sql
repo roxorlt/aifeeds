@@ -3,6 +3,9 @@
 
 CREATE TABLE IF NOT EXISTS items (
   id TEXT PRIMARY KEY,
+  -- source_type 取值（裸 TEXT，新增源只加枚举值不改表结构）:
+  --   x_list | youtube | podcast | product_hunt | huodongxing | github | arxiv | clawhub | hf_paper | blog
+  --   (blog/podcast = 2026-06-09 AI 厂商博客 + AI 播客两源；特异字段全进 extra JSON)
   source_type TEXT NOT NULL,
   source_id TEXT NOT NULL,
   source_ref TEXT,
@@ -58,6 +61,10 @@ CREATE INDEX IF NOT EXISTS idx_items_relevant ON items(is_relevant, scraped_at D
 CREATE INDEX IF NOT EXISTS idx_items_published ON items(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_next_refresh ON items(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(deleted_at);
+-- 020: blog/podcast L1 跨源精确去重用（partial 表达式索引，只索引写了 url_hash 的行）
+CREATE INDEX IF NOT EXISTS idx_items_url_hash
+  ON items(json_extract(extra, '$.url_hash'))
+  WHERE json_extract(extra, '$.url_hash') IS NOT NULL;
 
 -- Enrich state: per-mode progress for CF Worker cron-based enrichment
 -- (replaces data/enrich_state/*.json from the Python script)
