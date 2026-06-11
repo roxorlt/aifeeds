@@ -345,10 +345,13 @@ async function pctl(env: Env, eventType: string, path: string) {
 async function metricLoadPerf(env: Env) {
   // 各里程碑 → [展示名, 事件类型, payload 字段]。perf_nav 拆相位（ttfb/dom/dcl/response/load），
   // FCP/LCP 来自 web-vitals 各自的 value 字段。
+  // 按时间线顺序排:除 response(正文下载段)/img(单图,独立)外,其余都是
+  // 「从点击起的累计时刻」,后一根天然 ≥ 前一根 — 总耗时 = load 那一根,不能相加。
   const M: [string, string, string][] = [
-    ['ttfb', 'perf_nav', 'ttfb'], ['fcp', 'perf_fcp', 'value'], ['lcp', 'perf_lcp', 'value'],
+    ['ttfb', 'perf_nav', 'ttfb'], ['response', 'perf_nav', 'response'],
     ['dom', 'perf_nav', 'dom_interactive'], ['dcl', 'perf_nav', 'dcl'],
-    ['response', 'perf_nav', 'response'], ['load', 'perf_nav', 'load'],
+    ['fcp', 'perf_fcp', 'value'], ['lcp', 'perf_lcp', 'value'],
+    ['load', 'perf_nav', 'load'],
     ['img', 'perf_img', 'dur'],
   ];
   const overall: Array<{ metric: string; p50: number; p75: number; p95: number; samples: number }> = [];
@@ -698,7 +701,7 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide" data-testid="card-load-perf">
     <h2>🚀 页面打开耗时</h2>
-    <p class="hint">7 天内 perf_nav / FCP / LCP 的 p50/p75/p95（ms）；下表按 客户端×网络 切片，定位国内微信慢在哪</p>
+    <p class="hint">⚠️ 读法：柱子是「从点击到该节点」的累计时刻，互相包含、<b>不能相加</b> —— 总耗时只看「全就绪LOAD」一根；用户体感看「出内容FCP」。例外：「下载」「单图」是独立时长。7 天窗口 p50/p75/p95（ms）；下表按 客户端×网络 切片</p>
     <div class="chart tall" id="ch-load-perf"></div>
     <div style="overflow-x:auto;margin-top:12px"><table id="tbl-load-slice"><thead><tr>
       <th>客户端</th><th>网络</th><th class="num">avg load</th><th class="num">avg ttfb</th><th class="num">样本</th>
@@ -1210,7 +1213,8 @@ async function loadLoadPerf() {
   try {
     const d = await getJson('/api/admin/analytics?metric=load-perf');
     // 分位柱状：x = 里程碑（大写），P50/P75/P95 三组（快→慢用 绿/黄/红）
-    const names = d.overall.map(r => (r.metric || '').toUpperCase());
+    const PERF_LABEL = { ttfb: '首字节TTFB', response: '下载(段)', dom: 'DOM就绪', dcl: '结构齐DCL', fcp: '出内容FCP', lcp: '主图LCP', load: '全就绪LOAD', img: '单图(独立)' };
+    const names = d.overall.map(r => PERF_LABEL[r.metric] || (r.metric || '').toUpperCase());
     const p50 = d.overall.map(r => Math.round(r.p50 || 0));
     const p75 = d.overall.map(r => Math.round(r.p75 || 0));
     const p95 = d.overall.map(r => Math.round(r.p95 || 0));
@@ -1223,7 +1227,7 @@ async function loadLoadPerf() {
           + params.map(p => p.marker + p.seriesName + ': <b>' + fmt(p.value) + 'ms</b>').join('<br/>'),
       },
       legend: { data: ['P50', 'P75', 'P95'], textStyle: { color: '#9ca3af' } },
-      xAxis: { type: 'category', data: names, axisLabel: { color: '#6b7280', fontSize: 10 } },
+      xAxis: { type: 'category', data: names, axisLabel: { color: '#6b7280', fontSize: 10, interval: 0, rotate: 18 } },
       yAxis: { type: 'value', name: 'ms', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
       series: [
         { name: 'P50', type: 'bar', data: p50, itemStyle: { color: COLORS[0] } },

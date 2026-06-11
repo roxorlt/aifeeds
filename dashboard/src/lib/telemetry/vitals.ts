@@ -95,6 +95,9 @@ export function installNavTiming(): void {
       transfer_kb: r((n.transferSize || 0) / 1024),
       encoded_kb: r((n.encodedBodySize || 0) / 1024),
       nav_type: n.type, // navigate | reload | back_forward —— 量化"第二次更快"(bfcache/磁盘缓存)
+      // SW 壳缓存命中(2026-06-11):1 = 本次导航由 Service Worker 直接回壳(回访秒开),
+      // 0 = 走网络(新用户首开/SW 未装)。用来在面板上区分"秒开人群"和"冷连接人群"。
+      sw: navigator.serviceWorker?.controller ? 1 : 0,
       ...deviceMeta(),
     });
   };
