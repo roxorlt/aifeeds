@@ -60,6 +60,8 @@ import {
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
 import { runBlogFetch, runBlogBackfill } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
+import { classifySensitivityForFeeds } from './feeds/classify-translate';
+import { migrateAudioForPodcast } from './feeds/media-r2';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
@@ -2518,6 +2520,13 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   // handler（上面已 early-return），不经此段。
   conditions.push("json_extract(extra, '$.dedup_of') IS NULL");
 
+  // 涉华敏感过滤(2026-06-12 合规需求):cn_sensitive=1 的内容一律不下发。
+  // 字段由 blog/podcast workflow step3 全文终判写入(classify-translate.ts
+  // RECLASSIFY_SYSTEM),存量经 mode=backfill-cn-sensitive 回填;其它源恒 NULL
+  // 不受影响。⚠️ 未来任何新的内容出口(搜索 / 推荐 / RSS 输出 / digest 若接入
+  // blog/podcast)都必须复用同一条过滤,不要只过滤 feed 列表。
+  conditions.push("COALESCE(json_extract(extra, '$.cn_sensitive'), 0) != 1");
+
   // Relevance filter
   if (relevant === '1') {
     conditions.push('is_relevant = 1');
@@ -3529,6 +3538,16 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     return jsonResponse({ error: 'not_found' }, 404, request, env);
   }
 
+  // 涉华敏感过滤(2026-06-12 合规):列表已过滤,单条详情(深链/分享落地直达)同样
+  // 不下发,按不存在处理。未来搜索/任何内容出口必须复用此判断。
+  {
+    const rawExtra = item.extra;
+    const exObj = typeof rawExtra === 'string' ? (safeJson(rawExtra) as Record<string, unknown> | null) : (rawExtra as Record<string, unknown> | null);
+    if (exObj && exObj.cn_sensitive === 1) {
+      return jsonResponse({ error: 'not_found' }, 404, request, env);
+    }
+  }
+
   const parsedItem = parseItemRow(item, true);  // 单条详情(抽屉来源)要完整 extra:top_comments / llm_analysis 等
   const extra = parsedItem.extra as { thread_root_id?: string } | null | undefined;
   const threadRootId = extra && typeof extra === 'object' ? extra.thread_root_id : undefined;
@@ -3836,6 +3855,62 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
   // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
   // (ensureFeedSources upsert + INSERT OR IGNORE + seen-set 游标)。
+  // podcast 音频存量迁 R2(2026-06-12 #3):扫 relevant 且 audio_url 仍为外链直链的
+  // 单集,流式搬 R2。单条 10-60s(30-200MB),limit 默认小,OPS forever loop 消化。
+  if (mode === 'podcast-audio-r2') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '3'), 10);
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id FROM items
+        WHERE source_type='podcast' AND is_relevant = 1
+          AND json_extract(extra, '$.audio_url') LIKE 'http%'
+          AND json_extract(extra, '$.audio_r2_at') IS NULL
+          AND json_extract(extra, '$.audio_r2_skip') IS NULL
+        ORDER BY published_at DESC LIMIT ?`,
+    ).bind(limit).all<{ id: string }>();
+    let migrated = 0, skipped = 0, failed = 0;
+    for (const r of pending.results || []) {
+      try {
+        const res = await migrateAudioForPodcast(env, r.id);
+        if (res.migrated) migrated++;
+        else if (res.reason.startsWith('skip:') || res.reason === 'already') skipped++;
+        else failed++;
+      } catch { failed++; }
+    }
+    return jsonResponse({
+      mode: 'podcast-audio-r2', found: (pending.results || []).length,
+      migrated, skipped, failed, elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
+  // 涉华敏感存量回填(2026-06-12 合规):扫已 relevant 但 cn_sensitive 未判的
+  // blog/podcast 行,逐条全文判定写 extra.cn_sensitive。失败留 NULL 下轮重试。
+  if (mode === 'backfill-cn-sensitive') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200);
+    const throttleMs = Math.max(parseInt(url.searchParams.get('throttle_ms') || '300'), 0);
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id, source_type FROM items
+        WHERE source_type IN ('blog','podcast') AND is_relevant = 1
+          AND json_extract(extra, '$.cn_sensitive') IS NULL
+        ORDER BY published_at DESC LIMIT ?`,
+    ).bind(limit).all<{ id: string; source_type: string }>();
+    let done = 0, flagged = 0, failed = 0;
+    const rows = pending.results || [];
+    for (const [i, r] of rows.entries()) {
+      try {
+        const res = await classifySensitivityForFeeds(env, r.id, r.source_type as 'blog' | 'podcast');
+        if (res.cn_sensitive === null) failed++;
+        else { done++; if (res.cn_sensitive === 1) flagged++; }
+      } catch { failed++; }
+      if (throttleMs > 0 && i < rows.length - 1) {
+        await new Promise((rs) => setTimeout(rs, throttleMs));
+      }
+    }
+    return jsonResponse({
+      mode: 'backfill-cn-sensitive', found: rows.length, done, flagged, failed,
+      elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
   if (mode === 'blog-fetch') {
     if (!env.BLOG_PIPELINE_WORKFLOW) {
       return jsonResponse({ error: 'BLOG_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
@@ -4769,15 +4844,51 @@ async function handleR2Asset(request: Request, env: Env, key: string): Promise<R
     });
   }
 
-  const obj = await env.READMES.get(key);
+  // Range 支持(2026-06-12,podcast 音频迁 R2 后 <audio> seek 必需):
+  // 浏览器拖进度条发 Range: bytes=N-,R2 get 原生支持 range 读取,按 206 返回。
+  // 无 Range 的图片等照旧 200 全量。⚠️ 经香港中转时 nginx 对 api 不缓存、Range
+  // 透传(operations.md §6b;/img 视频曾因缓存剥 Range 翻车,/r/ 走 api 块无此问题)。
+  const rangeHeader = request.headers.get('Range');
+  let obj: R2ObjectBody | null = null;
+  let rangeParsed: { offset: number; length?: number } | { suffix: number } | null = null;
+  if (rangeHeader) {
+    const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+    if (m && (m[1] || m[2])) {
+      if (m[1]) {
+        const offset = parseInt(m[1], 10);
+        const end = m[2] ? parseInt(m[2], 10) : undefined;
+        rangeParsed = end !== undefined ? { offset, length: end - offset + 1 } : { offset };
+      } else {
+        rangeParsed = { suffix: parseInt(m[2], 10) };
+      }
+      try {
+        obj = await env.READMES.get(key, { range: rangeParsed });
+      } catch {
+        obj = null; // range 越界等 → 退回全量
+      }
+    }
+  }
+  const isRanged = !!(obj && rangeParsed);
+  if (!obj) obj = await env.READMES.get(key);
   if (!obj) return new Response('not found', { status: 404 });
 
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
   headers.set('Cache-Control', 'public, max-age=31536000, immutable');
   headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Accept-Ranges', 'bytes');
   // ETag from R2 lets browsers and CF edge revalidate.
   if (obj.httpEtag) headers.set('ETag', obj.httpEtag);
 
+  if (isRanged && obj.range) {
+    const total = obj.size;
+    const r = obj.range as { offset?: number; length?: number; suffix?: number };
+    const start = r.suffix !== undefined ? total - r.suffix : (r.offset ?? 0);
+    const length = r.suffix !== undefined ? r.suffix : (r.length ?? total - start);
+    const end = start + length - 1;
+    headers.set('Content-Range', `bytes ${start}-${end}/${total}`);
+    headers.set('Content-Length', String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
   return new Response(obj.body, { status: 200, headers });
 }

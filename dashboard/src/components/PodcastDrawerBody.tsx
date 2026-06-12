@@ -184,6 +184,26 @@ interface Props {
 }
 
 export function PodcastDrawerBody({ item }: Props) {
+  // 空格键控播(2026-06-12 验收反馈 #2):抽屉打开时按空格 = play/pause,阻止
+  // 默认滚动穿透到底层 feed。target 是表单控件/audio 自身/按钮时让原生行为接管
+  // (audio 聚焦时原生空格已是 play/pause,避免双触发)。
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      const t = e.target as HTMLElement | null;
+      const tag = (t?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button" || tag === "audio" || t?.isContentEditable) return;
+      const a = audioRef.current;
+      if (!a) return;
+      e.preventDefault();
+      if (a.paused) void a.play().catch(() => {});
+      else a.pause();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // 列表已剥 shownotes/transcript 重字段且 refresh 端点不覆盖 podcast,
   // 抽屉 mount 自拉完整 item 补 shownotes_zh / transcript_text_zh(同 BlogDrawerBody)。
   const [fullItem, setFullItem] = useState<Item | null>(null);
@@ -210,8 +230,9 @@ export function PodcastDrawerBody({ item }: Props) {
   const isForeign = (item.lang || "") !== "zh";
   const showOriginalTitle = isForeign && !!titleOriginal && titleOriginal !== titleZh;
 
-  // 音频直链（原始 enclosure，绝不 resolveAssetUrl / 不走 /r/）
-  const audioUrl = extra.audio_url || "";
+  // 音频:迁 R2 后是 /r/podcast/<sha> 路径(resolveAssetUrl 拼 API base,经香港中转,
+  // /r/ 已支持 Range seek);存量未迁/超大兜底仍是原始 enclosure 直链(http 透传)。
+  const audioUrl = extra.audio_url ? resolveAssetUrl(extra.audio_url) : "";
 
   const durationLabel = formatDuration(extra.duration_sec);
   const publishedAt = item.published_at || item.scraped_at;
@@ -302,17 +323,17 @@ export function PodcastDrawerBody({ item }: Props) {
           )}
         </div>
 
-        {/* ③ 音频播放器置顶 —— 原生 <audio controls>，src 直连原始 enclosure */}
-        {audioUrl && (
+        {/* ③ 音频播放器置顶 —— 原生 <audio controls>。空格键全抽屉控播(2026-06-12
+            验收反馈:PC 上空格穿透滚动底层 feed,预期 play/pause)。 */}
+        {audioUrl ? (
           <div>
             <div className="mb-1.5 text-[13px] font-semibold text-neutral-700">收听</div>
             {/* src 直接挂 <audio>（§10.3）：podcast enclosure 的 mime 常不可靠
                 （application/octet-stream 等会让 <source type> 被浏览器跳过），
-                直挂 src 让浏览器自行尝试，最稳。绝不走 /r/（无 Range → seek 失效）。
-                preload=none(2026-06-11 D4 用例抓到:metadata 也会向海外 CDN 发请求,
-                大陆易挂起占连接;时长 UI 用 extra.duration_sec,点播放才加载,
-                对齐 22c27da 视频 preload=none 思路)。 */}
+                直挂 src 让浏览器自行尝试，最稳。preload=none(D4):点播放才加载,
+                时长 UI 用 extra.duration_sec。 */}
             <audio
+              ref={audioRef}
               controls
               preload="none"
               src={audioUrl}
@@ -320,13 +341,11 @@ export function PodcastDrawerBody({ item }: Props) {
             >
               您的浏览器不支持音频播放。
             </audio>
-            <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-neutral-400">
-              <IconClock className="mt-px h-3.5 w-3.5 shrink-0" />
-              <span>
-                音频直连原平台、未迁 R2，大陆访问可能较慢或需科学上网；播放失败可用下方原文链接，在原平台收听。
-              </span>
-            </p>
           </div>
+        ) : (
+          /* 该 feed 混发图文 newsletter(Latent Space/Last Week in AI 的 Substack),
+             此类 entry 无 enclosure 音频,占位说明而非空缺(2026-06-12 验收反馈 #4)。 */
+          <p className="text-[13px] text-neutral-400">本期为图文内容,无音频;全文见下方或原文链接。</p>
         )}
 
         {/* ④ ELI25 摘要（标 "概览"，避免向终端用户暴露 ELI25 内部代号） */}

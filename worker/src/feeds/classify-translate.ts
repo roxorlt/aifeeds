@@ -180,7 +180,9 @@ export async function isAiGate(
     env,
     GATE_SYSTEM,
     gateUser(input.kind, input.title || "", input.excerpt || ""),
-    60,
+    // ⚠️ deepseek-v4-flash 是 reasoning 模型:思维链 reasoning_content 也计入
+    // completion tokens,给小了正文被 finish_reason=length 截断(2026-06-12 实测)。
+    300,
   );
   // fail-open：LLM 不可用时不误杀，放行到全文复判（confidence:low）
   if (!out) return { is_relevant: 1, confidence: "low" };
@@ -193,11 +195,23 @@ export async function isAiGate(
 // §8.1 — step3 末尾全文复判（终判，落 is_relevant）
 // ─────────────────────────────────────────────────────────────────────────────
 
+// 涉华敏感判定标准(2026-06-12 合规需求):与 AI 复判合并在同一次全文调用里,
+// 写 extra.cn_sensitive(0/1)。下发层(handleItems 列表 + 单条详情 + 未来搜索)
+// 一律过滤 cn_sensitive=1。
+const RECLASSIFY_SYSTEM = `${GATE_SYSTEM}
+
+另外,同时判定内容是否包含「涉华敏感/负面舆论」(cn_sensitive):
+【cn_sensitive=1】以负面立场报道、评论或渲染:中国政治体制/政府/领导人/人权/审查制度,台湾、香港、新疆、西藏等政治议题;以明显批评中国的立场展开的中美对抗、技术封锁/制裁叙事;呼吁制裁、抵制、脱钩中国的内容。
+【cn_sensitive=0】纯技术/产品/研究内容;中性提及中国市场、中国公司、中国模型(DeepSeek / Qwen / GLM 等);客观陈述出口管制等事实而无立场渲染;与中国无关的内容。
+拿不准时倾向 cn_sensitive=1(面向中国大陆服务,合规优先,宁可错过不可上线)。
+
+输出 JSON:{ "is_relevant": 0 | 1, "cn_sensitive": 0 | 1 }`;
+
 export async function reclassifyOnFulltext(
   env: Env,
   itemId: string,
   kind: FeedKind,
-): Promise<{ is_relevant: 0 | 1 }> {
+): Promise<{ is_relevant: 0 | 1; cn_sensitive: 0 | 1 }> {
   const it = await loadItem(env, itemId);
   const fullText =
     kind === "podcast"
@@ -205,19 +219,54 @@ export async function reclassifyOnFulltext(
       : String(it.extra.body_markdown || it.extra.excerpt || it.content || "");
   const excerpt = fullText.slice(0, 4000);
 
-  const out = await callJson<{ is_relevant?: unknown }>(
+  const out = await callJson<{ is_relevant?: unknown; cn_sensitive?: unknown }>(
     env,
-    GATE_SYSTEM,
+    RECLASSIFY_SYSTEM,
     gateUser(kind, it.title, excerpt),
-    60,
+    300,
   );
-  // fail-open：复判失败保留 relevant（已放行到 step3 说明 step1 没高置信否决）
+  // is_relevant fail-open：复判失败保留 relevant（已放行到 step3 说明 step1 没高置信否决）
   const ir: 0 | 1 = out && out.is_relevant === 0 ? 0 : 1;
+  // cn_sensitive:调用成功才写(失败留 NULL,由 backfill-cn-sensitive 兜底重判;
+  // 判定值缺省按 1 处理 —— 模型输出异常时合规优先)。
+  const cs: 0 | 1 | null = out ? (out.cn_sensitive === 0 ? 0 : 1) : null;
   await env.DB.prepare(`UPDATE items SET is_relevant = ? WHERE id = ?`)
     .bind(ir, itemId)
     .run();
-  console.log(`[feeds:reclassify] ${itemId}: is_relevant=${ir}`);
-  return { is_relevant: ir };
+  if (cs !== null) {
+    await jsonSetExtra(env, itemId, [{ path: "$.cn_sensitive", value: cs }]);
+  }
+  console.log(`[feeds:reclassify] ${itemId}: is_relevant=${ir} cn_sensitive=${cs}`);
+  return { is_relevant: ir, cn_sensitive: cs ?? 1 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 涉华敏感单字段判定(存量回填用,mode=backfill-cn-sensitive 批量调)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CN_SENSITIVE_SYSTEM = `你是面向中国大陆服务的内容合规审核员。判定一篇 AI 行业内容是否包含「涉华敏感/负面舆论」。
+【cn_sensitive=1】以负面立场报道、评论或渲染:中国政治体制/政府/领导人/人权/审查制度,台湾、香港、新疆、西藏等政治议题;以明显批评中国的立场展开的中美对抗、技术封锁/制裁叙事;呼吁制裁、抵制、脱钩中国的内容。
+【cn_sensitive=0】纯技术/产品/研究内容;中性提及中国市场、中国公司、中国模型(DeepSeek / Qwen / GLM 等);客观陈述出口管制等事实而无立场渲染;与中国无关的内容。
+拿不准时倾向 =1(合规优先,宁可错过不可上线)。
+只输出 JSON:{ "cn_sensitive": 0 | 1 }`;
+
+export async function classifySensitivityForFeeds(
+  env: Env,
+  itemId: string,
+  kind: FeedKind,
+): Promise<{ cn_sensitive: 0 | 1 | null }> {
+  const it = await loadItem(env, itemId);
+  const fullText =
+    kind === "podcast"
+      ? String(it.extra.transcript_text || it.extra.shownotes || it.content || "")
+      : String(it.extra.body_markdown || it.extra.excerpt || it.content || "");
+  const user = `【title】${it.title}\n【全文】\n${fullText.slice(0, 6000)}`;
+  const out = await callJson<{ cn_sensitive?: unknown }>(env, CN_SENSITIVE_SYSTEM, user, 500);
+  if (!out) return { cn_sensitive: null }; // 失败留 NULL,下轮回填重试
+  const cs: 0 | 1 = out.cn_sensitive === 0 ? 0 : 1;
+  await jsonSetExtra(env, itemId, [{ path: "$.cn_sensitive", value: cs }]);
+  console.log(`[feeds:cn-sensitive] ${itemId}: ${cs}`);
+  return { cn_sensitive: cs };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

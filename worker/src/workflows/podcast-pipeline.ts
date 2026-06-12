@@ -33,7 +33,7 @@ import {
   suppressDupCompleted,
   markCompleted,
 } from '../feeds/dedup';
-import { migrateCoverForPodcast } from '../feeds/media-r2';
+import { migrateCoverForPodcast, migrateAudioForPodcast } from '../feeds/media-r2';
 import { fetchNativeTranscriptForPodcast } from '../podcast';
 
 const RETRY = {
@@ -137,6 +137,11 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
             translateBodyMarkdown(this.env, itemId, { lang, kind: 'podcast' }),
           )
         : Promise.resolve({ enrichFailed: false }),
+      // 音频流式迁 R2(2026-06-12 #3,推翻原「绝不迁」决策):30-200MB 流式直传 R2,
+      // /r/ 已支持 Range seek;无长度/超 250MB/失败 → 保留原 enclosure 直链兜底,不阻塞 gate。
+      step.do('migrate-audio-r2', RETRY, () =>
+        migrateAudioForPodcast(this.env, itemId),
+      ),
     ]);
     // ⚠️ 完整性 gate 条件 = enrich + eager(shownotes)翻译成功(fan[1])，**不是** transcript 翻译。
     // §8.3 代码字面 gate 在 transTrans(transcript 翻译)是 doc bug：§4 明确 transcript 是 lazy，

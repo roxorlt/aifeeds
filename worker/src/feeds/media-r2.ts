@@ -513,3 +513,99 @@ export async function migrateCoverForPodcast(
   console.log(`[feeds-r2:podcast] ${itemId}: ${migrated} assets migrated`);
   return { migrated, marker };
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// podcast 音频迁 R2(2026-06-12 验收反馈 #3:干掉"直连原平台"文案,音频入库 R2,
+// 经 /r/(已支持 Range seek)+ 香港中转服务大陆用户)。
+//
+// 与图片路径的关键差异 —— **流式直传,绝不 buffer**:
+//   - 单集 30-200MB,worker 内存 128MB,arrayBuffer 必 OOM → resp.body 直接 put
+//   - R2 put 流式要求已知长度 → 依赖上游 Content-Length;无(chunked)→ 跳过保留原链
+//   - key 用 sha256(URL) 而非内容 hash(内容 hash 需全量读)
+//   - >250MB 跳过保留原链(R2 存储成本 + workflow step 时长)
+// 失败/跳过均保留原 enclosure 直链,前端播放器 graceful(直链兜底)。
+// ═════════════════════════════════════════════════════════════════════════════
+
+const AUDIO_MAX_BYTES = 250 * 1024 * 1024;
+const AUDIO_EXT_FROM_TYPE: Record<string, string> = {
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/mp4": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "aac",
+  "audio/ogg": "ogg",
+};
+
+export async function migrateAudioForPodcast(
+  env: Env,
+  itemId: string,
+): Promise<{ migrated: boolean; reason: string }> {
+  if (!env.READMES) return { migrated: false, reason: "no-r2-binding" };
+  const row = await env.DB.prepare(
+    `SELECT id, extra as extra_raw FROM items WHERE id = ? AND source_type='podcast'`,
+  )
+    .bind(itemId)
+    .first<ItemRow>();
+  if (!row) return { migrated: false, reason: "not-found" };
+  const extra: PodcastExtra & {
+    audio_r2_at?: string;
+    audio_r2_skip?: string;
+    audio_src_url?: string;
+  } = row.extra_raw ? JSON.parse(row.extra_raw) : {};
+
+  const audio = String(extra.audio_url || "").trim();
+  if (!audio) return { migrated: false, reason: "no-audio" };
+  if (audio.startsWith("/r/")) return { migrated: false, reason: "already" };
+  if (extra.audio_r2_at) return { migrated: false, reason: "already" };
+  if (extra.audio_r2_skip) return { migrated: false, reason: `skip:${extra.audio_r2_skip}` };
+
+  const markSkip = async (why: string) => {
+    await applyExtraPatch(env, itemId, [{ path: "$.audio_r2_skip", value: why }]);
+    return { migrated: false, reason: `skip:${why}` };
+  };
+
+  let resp: Response;
+  try {
+    resp = await fetch(audio, {
+      redirect: "follow",
+      headers: { "User-Agent": FEED_R2_USER_AGENT, Accept: "*/*" },
+    });
+  } catch {
+    return { migrated: false, reason: "fetch-error" }; // 网络错不标 skip,下轮重试
+  }
+  if (!resp.ok || !resp.body) return { migrated: false, reason: `http-${resp.status}` };
+
+  const len = parseInt(resp.headers.get("content-length") || "", 10);
+  if (!Number.isFinite(len) || len <= 0) {
+    // chunked 无长度 → R2 流式 put 不支持未知长度,保留原链
+    try { await resp.body.cancel(); } catch { /* ignore */ }
+    return markSkip("no-length");
+  }
+  if (len > AUDIO_MAX_BYTES) {
+    try { await resp.body.cancel(); } catch { /* ignore */ }
+    return markSkip("too-large");
+  }
+
+  const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  const ext = AUDIO_EXT_FROM_TYPE[ct] || extFromUrl(audio, ct) || "mp3";
+  const urlDigest = await sha256Hex(new TextEncoder().encode(audio).buffer as ArrayBuffer);
+  const key = `podcast-audio/${urlDigest}.${ext}`;
+
+  try {
+    await env.READMES.put(key, resp.body, {
+      httpMetadata: { contentType: ct || "audio/mpeg" },
+    });
+  } catch (e) {
+    console.error(`[feeds-r2:audio] ${itemId} put error:`, e);
+    return { migrated: false, reason: "put-error" }; // 不标 skip,下轮重试
+  }
+
+  const nowIso = new Date().toISOString();
+  await applyExtraPatch(env, itemId, [
+    { path: "$.audio_src_url", value: audio },          // 原 enclosure 备份
+    { path: "$.audio_url", value: `/r/${key}` },        // FE resolveAssetUrl 拼 API base
+    { path: "$.audio_r2_at", value: nowIso },
+  ]);
+  console.log(`[feeds-r2:audio] ${itemId}: ${(len / 1048576).toFixed(1)}MB → ${key}`);
+  return { migrated: true, reason: "ok" };
+}

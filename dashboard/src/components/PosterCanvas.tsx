@@ -21,6 +21,8 @@ import { PhCard } from "./PhCard";
 import { HfPaperCard } from "./HfPaperCard";
 import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
+import { BlogCard } from "./BlogCard";
+import { PodcastCard } from "./PodcastCard";
 
 // AI-Feeds logo (square_bw_night 同款 — 跟 worker svg-template.ts 的
 // AI_FEEDS_LOGO_DATA_URL 完全一致,保证 og:image fallback 跟 c 端海报视觉对齐)
@@ -119,6 +121,10 @@ function CardForItem({ item }: { item: Item }) {
       return <ClawhubCard item={item} />;
     case "huodongxing":
       return <HuodongxingCard item={item} />;
+    case "blog":
+      return <BlogCard item={item} eager />;
+    case "podcast":
+      return <PodcastCard item={item} eager />;
     default:
       return (
         <div className="p-6 text-center text-sm text-neutral-500">
