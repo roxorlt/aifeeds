@@ -32,6 +32,7 @@ import {
   reclassifyOnFulltext,
   classifyAndTranslateForFeeds,
   translateBodyMarkdown,
+  classifySensitivityForFeeds,
 } from '../feeds/classify-translate';
 import {
   dedupL1,
@@ -128,13 +129,23 @@ export class BlogPipelineWorkflow extends WorkflowEntrypoint<
       step.do('translate-body', RETRY, () =>
         translateBodyMarkdown(this.env, itemId, { lang, kind: 'blog' }),
       ),
+      // 涉华敏感判定(2026-06-12 合规,**无条件每条必经**):此前只挂在 borderline
+      // 的 reclassify-fulltext 上,高置信 relevant 的内容会跳过 → 裸奔到手动回填
+      // (自测用例暴露的覆盖缺口)。全文依据,写 extra.cn_sensitive。
+      step.do('classify-cn-sensitive', RETRY, () =>
+        classifySensitivityForFeeds(this.env, itemId, 'blog'),
+      ),
     ]);
     // 完整性 gate 条件 = enrich + eager 翻译成功(§4「relevant 在 enrich + eager 翻译 done 后写」)；
     // 正文全文翻译是 lazy / best-effort，其失败不阻塞 item 上 feed(抽屉降级显原文)。
     const enrich = fan[1];
+    // 合规 gate(2026-06-12):cn_sensitive 判定失败(null)不放行 —— 下发过滤把
+    // NULL 当通过,放行即裸奔。不 markCompleted → backfill 兜底重跑自愈。
+    const sens = fan[3];
 
     // Step 5：完整性 gate(正文完整度不是 gate 条件——抓不到全文也能上 feed 显摘要)。
-    if (!enrich.enrichFailed) {
+    const ok = !enrich.enrichFailed && sens.cn_sensitive !== null;
+    if (ok) {
       await step.do('mark-completed', RETRY, () =>
         markCompleted(this.env, itemId),
       );
@@ -142,7 +153,7 @@ export class BlogPipelineWorkflow extends WorkflowEntrypoint<
     return {
       itemId,
       is_relevant: 1 as const,
-      completed: !enrich.enrichFailed,
+      completed: ok,
     };
   }
 }

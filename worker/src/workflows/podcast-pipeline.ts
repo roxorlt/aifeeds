@@ -26,6 +26,7 @@ import {
   reclassifyOnFulltext,
   classifyAndTranslateForFeeds,
   translateBodyMarkdown,
+  classifySensitivityForFeeds,
 } from '../feeds/classify-translate';
 import {
   dedupL1,
@@ -142,14 +143,23 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
       step.do('migrate-audio-r2', RETRY, () =>
         migrateAudioForPodcast(this.env, itemId),
       ),
+      // 涉华敏感判定(2026-06-12 合规,**无条件每条必经**):此前只挂 borderline 复判,
+      // 高置信 relevant 跳过 → 裸奔到手动回填(自测用例暴露)。全文/shownotes 依据。
+      step.do('classify-cn-sensitive', RETRY, () =>
+        classifySensitivityForFeeds(this.env, itemId, 'podcast'),
+      ),
     ]);
     // ⚠️ 完整性 gate 条件 = enrich + eager(shownotes)翻译成功(fan[1])，**不是** transcript 翻译。
     // §8.3 代码字面 gate 在 transTrans(transcript 翻译)是 doc bug：§4 明确 transcript 是 lazy，
     // 其失败不应把单集挡出 feed(抽屉降级显原稿/原 shownotes)。对齐 blog-pipeline.ts + §4 语义。
     const enrich = fan[1];
+    // 合规 gate(2026-06-12):cn_sensitive 判定失败(null)不放行(NULL 会被下发过滤
+    // 当通过)。不 markCompleted → backfill 兜底重跑自愈。
+    const sens = fan[4];
 
     // Step 5：完整性 gate(文字稿有无不是 gate 条件——无稿也能上 feed 显 shownotes)。
-    if (!enrich.enrichFailed) {
+    const ok = !enrich.enrichFailed && sens.cn_sensitive !== null;
+    if (ok) {
       await step.do('mark-completed', RETRY, () =>
         markCompleted(this.env, itemId),
       );
@@ -157,7 +167,7 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
     return {
       itemId,
       is_relevant: 1 as const,
-      completed: !enrich.enrichFailed,
+      completed: ok,
     };
   }
 }
