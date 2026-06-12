@@ -28,7 +28,11 @@
   - ⚠️ 遗留注意:**staging 浏览器有 SW 壳缓存**,部署后旧版可能吊 24h,验收前注销 SW / 硬刷新
 - [x] **验收反馈 5 项已修**(2026-06-11 二轮,commit `0d0b8d4`+`8c87f70` 级):① blog 抽屉无译文 ② podcast 抽屉无 shownotes/文字稿 — 根因「列表剥重字段 + refresh 端点不覆盖 blog/podcast → 抽屉永远拿瘦 item」,DrawerBody mount 自拉 fetchItem(同 ClawHub 先例)+ 修 toggle stale-init(译文回填后自动切 zh);③ 返回退出站 — urlForItem 缺 blog/podcast 分支(不 push 历史),补 /o/:id 生成+解析+main.tsx seed;④ track 400 — sendBeacon 无法带 X-Device-Id header,worker 加 body._did fallback(**全站既有 bug,顺手修**);⑤ 官方新闻挪源 tab 首位。auth/me 401 = 未登录既有行为非缺陷
 - [ ] **已知小瑕疵(不阻塞 prod)**:译文 markdown 里 `**粗体**` 紧贴中文时不解析(CommonMark flanking 限制,评审曾预警)— prod 前可在翻译 prompt 加边界规则(粗体两侧留空格)或 FE remark 容错
-- [ ] **prod 上线**(待用户发话):PR review → 合 main → migration 021 跑 prod D1 → worker+dashboard 同步部署 prod → 触发首拉 → PushDeer 通知验证(Phase 8)
+- [x] **🔴 涉华敏感合规过滤**(2026-06-12 用户反馈,最高优先,已上 staging):step3 全文终判合并判 `extra.cn_sensitive` → 下发双过滤(列表 + 单条 404)→ `mode=backfill-cn-sensitive` 存量回填。实测命中用户指出的 PRC influence 条目并拦截。**⚠️ 未来搜索/推荐/任何内容出口必须复用该过滤**(index.ts 注释已标)。**踩坑记录:deepseek-v4-flash 是 reasoning 模型,思维链计入 completion tokens,maxTokens ≤80 大面积截断 → gate/复判/合规统一 300/300/500**
+- [x] **二轮验收 4 项已修**(2026-06-12,staging 已验):①海报 PosterCanvas 补 blog/podcast 分支 ②PC 空格控播(不再穿透滚动)③**音频入 R2**(推翻原决策;/r/ 加 Range 206、流式直传 250MB cap、`mode=podcast-audio-r2` 回填、删「直连原平台」文案)④无音频单集占位「本期为图文内容」(Latent Space/LWiAI Substack 混发 newsletter 本性)
+- [ ] **回填收尾**(后台 loop 自跑,日志 `~/.claude/jobs/36d0f79d/tmp/{cn,audio}-backfill.log`):cn-sensitive ~800 条(~30min)、audio-r2 ~440 条(~40min);跑完抽查 flagged 误杀率
+- [ ] **待讨论**:中文播客/音频用 Google 新上线模型做实时翻译(翻译音频入库?成本/形态待对齐)— 用户 2026-06-12 提出
+- [ ] **prod 上线**(待用户发话):PR review → 合 main → migration 021 跑 prod D1 → worker+dashboard 同步部署 prod → 触发首拉 + cn-sensitive/audio 回填 → PushDeer 通知验证(Phase 8)。⚠️ prod 上线前确认香港 nginx 对 api 块 Range 透传(音频 seek 依赖;operations §6b 有 /img 视频 Range 前科)
 - [ ] **Phase 2/3**:RSSHub 中文播客 / 页面抓取 + 无头(按 D1-D10 结果排)
 - [ ] **明确不接**(需求 4.8):不往 digest(订阅日报)/ codex daily 推送加 blog/podcast
 
