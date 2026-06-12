@@ -166,6 +166,10 @@ export interface ParsedFeedItem {
   episode_no?: number;
   /** 单集类型（<itunes:episodeType>：full/trailer/bonus）。podcast only。 */
   episode_type?: string;
+  /** 主持人（<podcast:person role=host>，部分 feed 有）。海报增信息量。podcast only。 */
+  hosts?: string[];
+  /** 嘉宾（<podcast:person role=guest>，部分 feed 有）。podcast only。 */
+  guests?: string[];
   /** 原始 feed item 标签 / 分类（<category>）。 */
   tags?: string[];
 }

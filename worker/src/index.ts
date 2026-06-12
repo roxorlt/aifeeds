@@ -62,6 +62,9 @@ import { runBlogFetch, runBlogBackfill } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
 import { classifySensitivityForFeeds } from './feeds/classify-translate';
 import { migrateAudioForPodcast } from './feeds/media-r2';
+import { feedsByKind } from './feeds/registry';
+import { fetchFeedXml, parseFeed } from './feeds/parse';
+import { idHashOf } from './feeds/extract';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
@@ -3855,6 +3858,45 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
   // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
   // (ensureFeedSources upsert + INSERT OR IGNORE + seen-set 游标)。
+  // podcast 主持人/嘉宾存量回填(2026-06-12 #2):重抓有 <podcast:person> 的 feed,
+  // 按 idHash(=sha256(guid||link)[:16]) 匹配已入库单集,补 extra.hosts/guests。
+  // 只有 Transistor 系等部分 feed 有此标签;无标签的 feed 自然跳过。一次性即可。
+  if (mode === 'podcast-hosts-backfill') {
+    const t0 = Date.now();
+    const podFeeds = feedsByKind('podcast');
+    let scanned = 0, updated = 0, feedsWithPersons = 0;
+    for (const feed of podFeeds) {
+      let parsed;
+      try {
+        const xml = await fetchFeedXml(env as { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string }, feed);
+        parsed = parseFeed(xml, feed);
+      } catch { continue; }
+      const withPersons = parsed.filter((p) => (p.hosts && p.hosts.length) || (p.guests && p.guests.length));
+      if (withPersons.length === 0) continue;
+      feedsWithPersons++;
+      for (const p of withPersons) {
+        const guid = (p.guid || p.link || '').trim();
+        if (!guid) continue;
+        const id = `podcast:${feed.key}:${idHashOf(guid)}`;
+        scanned++;
+        try {
+          const patches: string[] = [];
+          const binds: unknown[] = [];
+          if (p.hosts && p.hosts.length) { patches.push("'$.hosts', json(?)"); binds.push(JSON.stringify(p.hosts)); }
+          if (p.guests && p.guests.length) { patches.push("'$.guests', json(?)"); binds.push(JSON.stringify(p.guests)); }
+          if (patches.length === 0) continue;
+          const res = await env.DB.prepare(
+            `UPDATE items SET extra = json_set(coalesce(extra,'{}'), ${patches.join(', ')}) WHERE id = ?`,
+          ).bind(...binds, id).run();
+          if (res.meta?.changes && res.meta.changes > 0) updated++;
+        } catch { /* skip */ }
+      }
+    }
+    return jsonResponse({
+      mode: 'podcast-hosts-backfill', feeds: podFeeds.length, feedsWithPersons,
+      scanned, updated, elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
   // podcast 音频存量迁 R2(2026-06-12 #3):扫 relevant 且 audio_url 仍为外链直链的
   // 单集,流式搬 R2。单条 10-60s(30-200MB),limit 默认小,OPS forever loop 消化。
   if (mode === 'podcast-audio-r2') {

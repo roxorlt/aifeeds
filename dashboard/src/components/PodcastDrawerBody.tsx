@@ -306,7 +306,7 @@ export function PodcastDrawerBody({ item }: Props) {
           </div>
         </div>
 
-        {/* ② meta：时长 · 时间 · (A 档) 有文字稿 chip（无互动数行） */}
+        {/* ② meta：时长 · 时间（无互动数行；有文字稿标签已删——无效信息 2026-06-12 #1） */}
         <div className="flex flex-wrap items-center gap-1.5 text-[13px] text-neutral-500">
           {durationLabel && (
             <span className="inline-flex items-center gap-1">
@@ -316,11 +316,6 @@ export function PodcastDrawerBody({ item }: Props) {
           )}
           {durationLabel && publishedAt && <span className="text-neutral-400">·</span>}
           {publishedAt && <span>{timeAgo(publishedAt)}</span>}
-          {hasTranscript && (
-            <span className="ml-1 inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-              <IconFileText className="h-3 w-3" />有文字稿
-            </span>
-          )}
         </div>
 
         {/* ③ 音频播放器置顶 —— 原生 <audio controls>。空格键全抽屉控播(2026-06-12

@@ -133,16 +133,7 @@ function makeBlogMarkdownComponents(
   };
 }
 
-// blog ai_category → 中文 chip 文案（neutral chip，不上彩色，对齐 mockup +
-// frontend-ux-guidelines）。未知值不出 chip。
-const BLOG_CATEGORY_LABEL: Record<string, string> = {
-  "model-release": "模型发布",
-  research: "研究",
-  product: "产品",
-  engineering: "工程实践",
-  safety: "安全",
-  company: "公司动态",
-};
+// 注:ai_category 分类 chip 已删 —— 无效信息(2026-06-12 #3)。字段后端保留备用。
 
 // 译/原 toggle —— lucide languages 图标（icons.tsx 暂无，本地内联；零 emoji）
 function IconTranslate({ className }: { className?: string }) {
@@ -241,8 +232,6 @@ export function BlogDrawerBody({ item }: Props) {
   const monogram = (pubName || "?").trim().charAt(0).toUpperCase() || "?";
 
   // 分类 chip
-  const category = (extra.ai_category as string | null | undefined) || "";
-  const categoryLabel = category ? BLOG_CATEGORY_LABEL[category] : "";
 
   // 时间 + 阅读时长（无 metrics 行，RSS 无互动数）
   const publishedAt = item.published_at || item.scraped_at;
@@ -308,22 +297,18 @@ export function BlogDrawerBody({ item }: Props) {
             </span>
           )}
           <div className="min-w-0 flex-1">
+            {/* 分类 chip 已删 —— 无效信息(2026-06-12 #3) */}
             <div className="flex items-center gap-2">
               <span className="truncate text-[15px] font-semibold text-neutral-800">
                 {pubName}
               </span>
-              {categoryLabel && (
-                <span className="ml-auto shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-                  {categoryLabel}
-                </span>
-              )}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-neutral-500">
               {publishedAt && <span>{timeAgo(publishedAt)}</span>}
               {publishedAt && readingMinutes ? <span className="text-neutral-400">·</span> : null}
               {readingMinutes ? (
                 <span className="inline-flex items-center gap-1">
-                  <IconClock className="h-3.5 w-3.5" />约 {readingMinutes} 分钟阅读
+                  <IconClock className="h-3.5 w-3.5" />阅读约 {readingMinutes} 分钟
                 </span>
               ) : null}
             </div>

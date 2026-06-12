@@ -211,6 +211,8 @@ async function ingestOnePodcastFeed(
         duration_sec: e.p.duration_sec,
         episode_no: e.p.episode_no,
         episode_type: e.p.episode_type || undefined,
+        hosts: e.p.hosts,    // <podcast:person role=host>(部分 feed),海报增信息量
+        guests: e.p.guests,  // <podcast:person role=guest>
         cover_image: e.p.cover_url || undefined, // 原始域名 URL，step4 migrateCoverForPodcast 再迁 R2
         shownotes: e.p.summary || undefined,
         transcript_tier: feed.transcript_tier,

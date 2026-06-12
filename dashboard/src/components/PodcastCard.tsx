@@ -81,14 +81,6 @@ export function PodcastCard({ item, eager }: Props) {
   const time = timeAgo(item.published_at);
   const duration = formatDuration(extra.duration_sec);
 
-  // A 档「有文字稿」chip：transcript_source 非 none 且确有文字稿信号
-  // （tier A / 已抓正文 / 有 transcript 链接）。
-  const hasTranscript =
-    extra.transcript_source !== "none" &&
-    (extra.transcript_tier === "A" ||
-      !!extra.transcript_text ||
-      !!extra.transcript_url);
-
   const coverImage = extra.cover_image || "";
 
   function open() {
@@ -140,11 +132,6 @@ export function PodcastCard({ item, eager }: Props) {
                 <span className="shrink-0 text-neutral-400">·</span>
                 <span className="shrink-0 whitespace-nowrap">{time}</span>
               </>
-            )}
-            {hasTranscript && (
-              <span className="shrink-0 whitespace-nowrap rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-                有文字稿
-              </span>
             )}
           </div>
 

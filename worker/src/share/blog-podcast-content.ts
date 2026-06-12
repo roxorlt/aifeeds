@@ -318,6 +318,8 @@ export interface PodcastContentOpts {
   coverDataUri?: string;         // 方形专辑封面 data URI
   durationSec?: number;          // duration_sec → 「1:23:45」
   publishedAt?: string;          // ISO → MM-DD
+  hosts?: string[];              // <podcast:person host>（部分 feed）→「主持 …」行
+  guests?: string[];             // <podcast:person guest> →「嘉宾 …」行
 }
 
 // integration 调用约定兼容：renderXxxContent(opts) 单参（抄 renderGithubContent）
@@ -413,6 +415,22 @@ export function renderPodcastContent(meta: any, opts?: any): { svg: string; heig
   const colX = innerX + artSize + 28;
   const colW = innerW - artSize - 28;
   let colY = headTop;
+  // 「收听 · 音频」徽标:让海报一眼看出这是音频内容(2026-06-12 #2)。
+  //   圆角 pill + play 三角 + 「收听播客」+ 时长,放节目名上方,强调媒体类型。
+  {
+    const durTxt = formatDuration(o.durationSec);
+    const label = durTxt ? `收听播客 · ${durTxt}` : '收听播客';
+    const fs = 24;
+    const padH = 18, h = 44, triR = 9;
+    const txtW = estimateTextWidth(label, fs, 1.0);
+    const pillW = padH + triR * 2 + 12 + txtW + padH;
+    svg += `<rect x="${colX}" y="${colY}" width="${pillW}" height="${h}" rx="${h / 2}" fill="${C.ink}" opacity="0.92"/>`;
+    const tcx = colX + padH + triR;
+    const tcy = colY + h / 2;
+    svg += `<path d="M ${tcx - triR * 0.6} ${tcy - triR} L ${tcx + triR} ${tcy} L ${tcx - triR * 0.6} ${tcy + triR} Z" fill="#ffffff"/>`;
+    svg += text(colX + padH + triR * 2 + 12, colY + h / 2 + fs * 0.36, fs, 700, '#ffffff', label);
+    colY += h + 16;
+  }
   // 节目名 27px / 600 / muted
   const showName = truncate(o.showName || '', 18);
   if (showName) {
@@ -420,6 +438,14 @@ export function renderPodcastContent(meta: any, opts?: any): { svg: string; heig
     colY += 27 + 14;
   } else {
     colY += 8;
+  }
+  // 主持/嘉宾(部分 feed 有 podcast:person)→ 增信息量。两行内,各截断防溢出。
+  const people: string[] = [];
+  if (o.hosts && o.hosts.length) people.push('主持 ' + o.hosts.slice(0, 2).join('、'));
+  if (o.guests && o.guests.length) people.push('嘉宾 ' + o.guests.slice(0, 2).join('、'));
+  for (const line of people) {
+    svg += text(colX, colY + 24, 24, 500, C.muted2, truncate(line, Math.max(8, Math.floor(colW / 24))));
+    colY += 24 + 10;
   }
   // 单集标题中译 42px / 800 / 3 行（在右窄列内排，letter-spacing -0.8，line-height 1.2）
   const titleSize = 42;

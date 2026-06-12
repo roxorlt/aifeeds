@@ -140,6 +140,25 @@ function parseRss(xml: string): ParsedFeedItem[] {
         tagAttr(block, "podcast:transcript", "type") || undefined;
     }
 
+    // podcast:person(Podcasting 2.0 结构化讲话人,2026-06-12 海报增信息量)。
+    // 部分 feed 才有(Transistor 系覆盖好,megaphone/简单 RSS 无);role 缺省按 host。
+    // 跨集主持人多重复,去重 + 截断防海报溢出。每集嘉宾多藏标题/shownotes(LLM 另议)。
+    const persons = allTagsWithAttrs(block, "podcast:person");
+    if (persons.length > 0) {
+      const hosts: string[] = [];
+      const guests: string[] = [];
+      for (const p of persons) {
+        const name = stripTags(p.inner).trim();
+        if (!name) continue;
+        const role = (p.attrs.match(/\brole\s*=\s*"([^"]*)"/i)?.[1] || "host").toLowerCase();
+        if (role.includes("guest")) {
+          if (!guests.includes(name)) guests.push(name);
+        } else if (!hosts.includes(name)) hosts.push(name);
+      }
+      if (hosts.length > 0) item.hosts = hosts.slice(0, 4);
+      if (guests.length > 0) item.guests = guests.slice(0, 4);
+    }
+
     out.push(item);
   }
   return out;
@@ -310,6 +329,23 @@ function tagInner(block: string, tag: string): string | undefined {
   const m = block.match(re);
   if (!m) return undefined;
   return stripCdata(m[1]).trim();
+}
+
+/** 取所有同名标签的 { attrs(起始标签属性串), inner(内容) }（podcast:person 等多值）。 */
+function allTagsWithAttrs(
+  block: string,
+  tag: string,
+): Array<{ attrs: string; inner: string }> {
+  const re = new RegExp(
+    `<${escapeRe(tag)}((?:\\s[^>]*)?)>([\\s\\S]*?)</${escapeRe(tag)}>`,
+    "gi",
+  );
+  const out: Array<{ attrs: string; inner: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(block)) !== null) {
+    out.push({ attrs: m[1] || "", inner: stripCdata(m[2]) });
+  }
+  return out;
 }
 
 /** 从首个 <tag ...> 起始标签里取属性值（支持自闭合）。 */

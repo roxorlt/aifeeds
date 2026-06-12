@@ -27,17 +27,8 @@ interface Props {
   eager?: boolean;
 }
 
-// blog ai_category（§8.4.A）→ 中文标签。与 GH 的 agent/model/... 不同枚举，
-// 各卡片只 switch 自己取值，不匹配落 undefined（不渲染 chip）。
-const BLOG_CATEGORY_LABEL: Record<string, string> = {
-  "model-release": "模型发布",
-  research: "研究",
-  product: "产品",
-  engineering: "工程",
-  safety: "安全",
-  company: "公司",
-  // 'other' 故意不映射 → 不渲染 chip（零信号，避免 byline 噪音；mockup 也只显有效分类）
-};
+// 注:ai_category 分类 chip(模型发布/产品 等)已删 —— 无效信息(2026-06-12 #3)。
+// ai_category 字段后端保留(未来若做分类筛选/搜索可用),仅前端 byline 不再展示。
 
 // monogram fallback 取色：按 publisher 名 hash 取一档固定彩色（logo 是唯一允许
 // 出现品牌色的地方）。零网络、永远可渲染。
@@ -92,10 +83,6 @@ export function BlogCard({ item, eager }: Props) {
     typeof extra.reading_minutes === "number" && extra.reading_minutes > 0
       ? extra.reading_minutes
       : null;
-  const categoryLabel = extra.ai_category
-    ? BLOG_CATEGORY_LABEL[extra.ai_category as string]
-    : undefined;
-
   const coverImage = extra.cover_image || "";
 
   function open() {
@@ -153,14 +140,9 @@ export function BlogCard({ item, eager }: Props) {
               <>
                 <span className="shrink-0 text-neutral-400">·</span>
                 <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
-                  <IconClock className="h-3.5 w-3.5" />约 {readingMinutes} 分钟
+                  <IconClock className="h-3.5 w-3.5" />阅读约 {readingMinutes} 分钟
                 </span>
               </>
-            )}
-            {categoryLabel && (
-              <span className="shrink-0 whitespace-nowrap rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-700">
-                {categoryLabel}
-              </span>
             )}
           </div>
         </div>

@@ -1970,6 +1970,8 @@ export async function renderShareSvg(item: PosterItem, ctx: PosterShareCtx): Pro
       coverDataUri: item.authorAvatarDataUri,
       durationSec: typeof extra.duration_sec === 'number' ? (extra.duration_sec as number) : undefined,
       publishedAt: item.published_at,
+      hosts: Array.isArray(extra.hosts) ? (extra.hosts as string[]) : undefined,
+      guests: Array.isArray(extra.guests) ? (extra.guests as string[]) : undefined,
     });
     contentSvg = r.svg;
     contentH = r.height;
