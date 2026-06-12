@@ -122,9 +122,9 @@ function CardForItem({ item }: { item: Item }) {
     case "huodongxing":
       return <HuodongxingCard item={item} />;
     case "blog":
-      return <BlogCard item={item} eager />;
+      return <BlogCard item={item} eager posterMode />;
     case "podcast":
-      return <PodcastCard item={item} eager />;
+      return <PodcastCard item={item} eager posterMode />;
     default:
       return (
         <div className="p-6 text-center text-sm text-neutral-500">

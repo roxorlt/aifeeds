@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra } from "../types";
-import { parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { cn, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
 import { IconClock } from "./icons";
@@ -25,6 +25,8 @@ interface Props {
   item: Item;
   // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
   eager?: boolean;
+  // 海报模式(PosterCanvas 截图):标题/摘要不截断,信息更全(2026-06-12 #2)。
+  posterMode?: boolean;
 }
 
 // 注:ai_category 分类 chip(模型发布/产品 等)已删 —— 无效信息(2026-06-12 #3)。
@@ -48,7 +50,7 @@ function monoLetter(name: string): string {
   return ch ? ch.toUpperCase() : "?";
 }
 
-export function BlogCard({ item, eager }: Props) {
+export function BlogCard({ item, eager, posterMode }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
   // onLoad 后检测真实 natural dims，aspect 极端 / 太小视为低质图（同 GithubCard /
@@ -97,12 +99,12 @@ export function BlogCard({ item, eager }: Props) {
       <div className="flex items-start gap-3">
         {/* 左：文字主体 */}
         <div className="min-w-0 flex-1">
-          <h3 className="line-clamp-2 text-[15px] font-bold leading-tight text-neutral-900 break-words">
+          <h3 className={cn("text-[15px] font-bold leading-tight text-neutral-900 break-words", posterMode ? "" : "line-clamp-2")}>
             {title}
           </h3>
 
           {summary && (
-            <p className="mt-1 line-clamp-3 text-[13px] leading-[1.5] text-neutral-600 break-words">
+            <p className={cn("mt-1 text-[13px] leading-[1.5] text-neutral-600 break-words", posterMode ? "line-clamp-4" : "line-clamp-3")}>
               {summary}
             </p>
           )}

@@ -96,18 +96,19 @@ async function callJson<T>(
   }
 }
 
-/** json_set 多路径写 extra（路径 + 值都 bind，防 SQL 注入 + 防 lost-update）。 */
+/** json_set 多路径写 extra（路径 + 值都 bind，防 SQL 注入 + 防 lost-update）。
+ *  json:true → 值用 json(?) 解析回 JSON（写数组/对象，如 guests string[]）。 */
 async function jsonSetExtra(
   env: Env,
   itemId: string,
-  pairs: Array<{ path: string; value: unknown }>,
+  pairs: Array<{ path: string; value: unknown; json?: boolean }>,
 ): Promise<void> {
   if (!pairs.length) return;
-  const setExpr = pairs.map(() => "?, ?").join(", ");
+  const setExpr = pairs.map((p) => (p.json ? "?, json(?)" : "?, ?")).join(", ");
   const binds: unknown[] = [];
   for (const p of pairs) {
     binds.push(p.path);
-    binds.push(p.value);
+    binds.push(p.json ? JSON.stringify(p.value) : p.value);
   }
   binds.push(itemId);
   await env.DB.prepare(
@@ -307,8 +308,23 @@ function enrichUser(
   "ai_category": "<二级分类，见枚举>",
   "title_zh": "<标题中译，保留专有名词英文>",
   "${zhField}": "<摘要中译，ELI25 风格，60-120 字>",
-  "ai_summary_zh": "<一句话 ELI25 解读，30-50 字，读完这一句就知道这篇讲什么 + 为什么值得看>"
-}
+  "ai_summary_zh": "<一句话 ELI25 解读，30-50 字，读完这一句就知道这篇讲什么 + 为什么值得看>"${
+    kind === "podcast"
+      ? `,
+  "guests": ["<本集受访嘉宾/对谈人的真名，从 title 与 shownotes 提取，1-4 人>"]`
+      : ""
+  }
+}${
+    kind === "podcast"
+      ? `
+
+【guests 提取规则（仅播客）】
+- 只提「本集的受访嘉宾 / 对谈人」真名（如 "Sarah Guo"、"Jeffrey Wasserstrom"），用原文/英文名
+- **不要**填节目固定主持人、不要填公司名/产品名/泛称（"a16z partner"、"researchers" 不算）
+- 标题 "#466 – Jeffrey Wasserstrom: ..." 里冒号前的人名就是嘉宾
+- 提取不到明确人名 → 输出空数组 []`
+      : ""
+  }
 
 【ai_category 枚举】model-release（模型发布）| research（研究/技术报告）| product（产品/功能）| engineering（工程/基础设施）| safety（安全/对齐/政策）| company（公司动态/融资/合作）| other
 
@@ -339,6 +355,7 @@ export async function classifyAndTranslateForFeeds(
     excerpt_zh?: unknown;
     shownotes_zh?: unknown;
     ai_summary_zh?: unknown;
+    guests?: unknown;
   }>(env, enrichSystem(kind), enrichUser(kind, it.title, excerpt, sourceCompany, lang), 800);
 
   if (!out) {
@@ -356,14 +373,32 @@ export async function classifyAndTranslateForFeeds(
     (kind === "podcast" ? out.shownotes_zh : out.excerpt_zh) || "",
   );
 
-  await jsonSetExtra(env, itemId, [
+  const patches: Array<{ path: string; value: unknown; json?: boolean }> = [
     { path: "$.ai_category", value: aiCategory },
     { path: "$.title_zh", value: String(out.title_zh || "") },
     { path: `$.${zhField}`, value: zhVal },
     { path: "$.ai_summary_zh", value: String(out.ai_summary_zh || "") },
     { path: "$.llm_model", value: DEEPSEEK_FLASH },
     { path: "$.llm_called_at", value: Math.floor(Date.now() / 1000) },
-  ]);
+  ];
+  // 播客嘉宾(LLM 从 title+shownotes 抽,2026-06-12 #2):仅当结构化 podcast:person
+  // 没给 guests 时才写(尊重结构化数据);清洗成 string[],去重 + 截 4 人。
+  // ⚠️ 没抽到也写 guests:[](而非留 NULL)—— 否则 backfill 的 `guests IS NULL`
+  // 查询永远命中这些「已查无嘉宾」条目,每轮重判、白烧 DeepSeek、永不收敛。
+  if (kind === "podcast") {
+    const existing = Array.isArray(it.extra.guests) ? (it.extra.guests as unknown[]) : [];
+    const hasStructured = existing.some((g) => typeof g === "string" && g.trim());
+    if (!hasStructured) {
+      const names = Array.isArray(out.guests)
+        ? (out.guests as unknown[])
+            .map((g) => (typeof g === "string" ? g.trim() : ""))
+            .filter((g, i, a) => g && g.length <= 60 && a.indexOf(g) === i)
+            .slice(0, 4)
+        : [];
+      patches.push({ path: "$.guests", value: names, json: true });
+    }
+  }
+  await jsonSetExtra(env, itemId, patches);
   console.log(`[feeds:enrich] ${itemId}: cat=${aiCategory}`);
   return { enrichFailed: false };
 }

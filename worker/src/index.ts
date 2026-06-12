@@ -60,7 +60,7 @@ import {
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
 import { runBlogFetch, runBlogBackfill } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
-import { classifySensitivityForFeeds } from './feeds/classify-translate';
+import { classifySensitivityForFeeds, classifyAndTranslateForFeeds } from './feeds/classify-translate';
 import { migrateAudioForPodcast } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
@@ -3858,6 +3858,38 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
   // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
   // (ensureFeedSources upsert + INSERT OR IGNORE + seen-set 游标)。
+  // podcast 嘉宾 LLM 存量回填(2026-06-12 #2):扫 relevant 且无 guests 的单集,
+  // 重跑 enrich(LLM 从 title+shownotes 抽嘉宾,顺带刷新译文/分类,幂等)。
+  if (mode === 'podcast-guests-backfill') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 60);
+    const throttleMs = Math.max(parseInt(url.searchParams.get('throttle_ms') || '150'), 0);
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id FROM items
+        WHERE source_type='podcast' AND is_relevant = 1
+          AND json_extract(extra, '$.guests') IS NULL
+          AND json_extract(extra, '$.title_zh') IS NOT NULL
+        ORDER BY published_at DESC LIMIT ?`,
+    ).bind(limit).all<{ id: string }>();
+    let done = 0, withGuests = 0, failed = 0;
+    const rows = pending.results || [];
+    for (const [i, r] of rows.entries()) {
+      try {
+        const res = await classifyAndTranslateForFeeds(env, r.id, { lang: 'zh', kind: 'podcast' });
+        if (res.enrichFailed) { failed++; }
+        else {
+          done++;
+          const chk = await env.DB.prepare(`SELECT json_extract(extra,'$.guests') g FROM items WHERE id=?`).bind(r.id).first<{ g: string | null }>();
+          if (chk?.g) withGuests++;
+        }
+      } catch { failed++; }
+      if (throttleMs > 0 && i < rows.length - 1) await new Promise((rs) => setTimeout(rs, throttleMs));
+    }
+    return jsonResponse({
+      mode: 'podcast-guests-backfill', found: rows.length, done, withGuests, failed,
+      elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
   // podcast 主持人/嘉宾存量回填(2026-06-12 #2):重抓有 <podcast:person> 的 feed,
   // 按 idHash(=sha256(guid||link)[:16]) 匹配已入库单集,补 extra.hosts/guests。
   // 只有 Transistor 系等部分 feed 有此标签;无标签的 feed 自然跳过。一次性即可。
