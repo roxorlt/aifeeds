@@ -377,7 +377,7 @@ export function BrandHF({ className }: IconProps) {
 // 与其它源 chip 视觉一致。零 emoji。
 export function BrandBlog({ className }: IconProps) {
   return (
-    <svg viewBox="0 0 24 24" className={className || BRAND_CLASS} aria-label="官方新闻" fill="currentColor">
+    <svg viewBox="0 0 24 24" className={className || BRAND_CLASS} aria-label="新闻&播客" fill="currentColor">
       <path
         fillRule="evenodd"
         clipRule="evenodd"

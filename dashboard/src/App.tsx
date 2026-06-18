@@ -137,19 +137,19 @@ function DrawerModeSync() {
 // show "暂无数据源" until their scrapers come online.
 // PM 2026-05-19:论文(hf_paper) 插到「开源项目 (github)」和「龙虾技能 (clawhub)」中间,
 // 三者都是"工程产出/可读资产"类信息源,放一起方便用户横向浏览
+// 2026-06-18 上线定序：x → 新闻&播客 → 热门产品 → 开源项目 → 论文 → 活动 → 龙虾技能。
+// 「官方新闻」频道改名「新闻&播客」(blog+podcast 合并频道,filter 仍用逗号复合值
+// `blog,podcast`,worker /api/items?source_type=blog,podcast 已支持,列内两源按
+// published_at desc 混排,Feed.tsx 按 item.source_type 逐条路由卡片样式)。
 const SOURCE_COLUMNS: SourceConfig[] = [
-  // D7（2026-06-09 用户已定 + 2026-06-11 验收反馈挪首位）：blog + podcast 合并为
-  // 单频道「官方新闻」，filter 用逗号复合值 `blog,podcast`（worker
-  // /api/items?source_type=blog,podcast 已支持），列内两源按 published_at desc
-  // 混排，Feed.tsx 按 item.source_type 逐条路由卡片样式。
-  { source_type: OFFICIAL_NEWS, title: "官方新闻" },
   { source_type: "x_list", title: "动态" },
+  { source_type: OFFICIAL_NEWS, title: "新闻&播客" },
   { source_type: "product_hunt", title: "热门产品" },
-  { source_type: "huodongxing", title: "活动" },
   { source_type: "github", title: "开源项目" },
   // 2026-05-18：原 arxiv 列重命名为「论文」，source_type 切换到 hf_paper。
   // arxiv source_type 保留在 types.ts 备用（未来如接入非 HF arxiv 源可再加回 COLUMNS）。
   { source_type: "hf_paper", title: "论文" },
+  { source_type: "huodongxing", title: "活动" },
   { source_type: "clawhub", title: "龙虾技能" },
   { source_type: "youtube", title: "YouTube" },
 ];
@@ -159,13 +159,13 @@ type FilterKey = "all" | SourceType | MergedSource;
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
   // 顺序必须与 SOURCE_COLUMNS 完全一致（错位会让 PC 列序与 mobile tab 序对不上 +
-  // 墨汁动效错位）。「官方新闻」放源 tab 首位（2026-06-11 验收反馈）。
-  { key: OFFICIAL_NEWS, label: "官方新闻" },
+  // 墨汁动效错位）。2026-06-18 上线定序 + 「官方新闻」改名「新闻&播客」。
   { key: "x_list", label: "动态" },
+  { key: OFFICIAL_NEWS, label: "新闻&播客" },
   { key: "product_hunt", label: "热门产品" },
-  { key: "huodongxing", label: "活动" },
   { key: "github", label: "开源项目" },
   { key: "hf_paper", label: "论文" },
+  { key: "huodongxing", label: "活动" },
   { key: "clawhub", label: "龙虾技能" },
   { key: "youtube", label: "YouTube" },
 ];
