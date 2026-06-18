@@ -28,13 +28,15 @@ export async function handleAdminSubscriptions(request: Request, env: Env): Prom
         return jsonRes(await getDelivery7d(env));
       case 'growth-14d':
         return jsonRes(await getGrowth14d(env));
+      case 'email-returns':
+        return jsonRes(await getEmailReturns(env));
       case 'list':
         return jsonRes(await getList(env, url));
       default:
         return jsonRes(
           {
             error: `unknown metric: ${metric}`,
-            available: ['overview', 'by-slot', 'by-density', 'by-source', 'delivery-7d', 'growth-14d', 'list'],
+            available: ['overview', 'by-slot', 'by-density', 'by-source', 'delivery-7d', 'growth-14d', 'email-returns', 'list'],
           },
           400,
         );
@@ -113,6 +115,49 @@ async function getGrowth14d(env: Env) {
     .bind(since)
     .all<{ d: string; n: number }>();
   return { rows: rows.results || [] };
+}
+
+// 邮件回流(近 14 天):发送(digest_send_log)→ 回流(email_landings 去重 sub)→ 回流率;
+// 再 join events.user_id 算「落地后浏览」(回流后 24h 内有 interact 行为,排除被动曝光/app_open)。
+// 两表分别按 BJT 天聚合后在 JS 里 merge(SQLite 无 FULL OUTER JOIN)。
+async function getEmailReturns(env: Env) {
+  const since = Date.now() - 14 * 86400_000;
+  const sent = await env.DB.prepare(
+    `SELECT date(sent_at/1000,'unixepoch','+8 hours') AS day, COUNT(*) AS sent_n
+     FROM digest_send_log WHERE status='sent' AND sent_at > ? GROUP BY day`,
+  )
+    .bind(since)
+    .all<{ day: string; sent_n: number }>();
+  const land = await env.DB.prepare(
+    `SELECT el.day AS day,
+       COUNT(DISTINCT el.subscription_id) AS landed_n,
+       COUNT(DISTINCT CASE WHEN EXISTS (
+         SELECT 1 FROM events ev
+         WHERE ev.user_id = el.user_id
+           AND ev.event_type IN ('item_click','item_open_drawer','video_play_start','video_effective_play','image_lightbox_open','source_filter_change','sort_change','new_content_banner_click')
+           AND ev.occurred_at > el.landed_at AND ev.occurred_at < el.landed_at + 86400000
+       ) THEN el.subscription_id END) AS browsed_n
+     FROM email_landings el
+     WHERE el.landed_at > ?
+     GROUP BY el.day`,
+  )
+    .bind(since)
+    .all<{ day: string; landed_n: number; browsed_n: number }>();
+
+  const map = new Map<string, { day: string; sent_n: number; landed_n: number; browsed_n: number }>();
+  for (const r of sent.results || []) map.set(r.day, { day: r.day, sent_n: r.sent_n, landed_n: 0, browsed_n: 0 });
+  for (const r of land.results || []) {
+    const cur = map.get(r.day) || { day: r.day, sent_n: 0, landed_n: 0, browsed_n: 0 };
+    cur.landed_n = r.landed_n;
+    cur.browsed_n = r.browsed_n;
+    map.set(r.day, cur);
+  }
+  const days = Array.from(map.values()).sort((a, b) => b.day.localeCompare(a.day));
+  const totals = days.reduce(
+    (t, r) => ({ sent_n: t.sent_n + r.sent_n, landed_n: t.landed_n + r.landed_n, browsed_n: t.browsed_n + r.browsed_n }),
+    { sent_n: 0, landed_n: 0, browsed_n: 0 },
+  );
+  return { days, totals };
 }
 
 // ── 明细列表(分页 + 筛选) ──
@@ -271,6 +316,18 @@ ${adminNavHtml('subscriptions')}
   </div>
 
   <div class="section">
+    <h2>📧 邮件回流(近 14 天)</h2>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 12px">每封 digest 的内容链接都走 /api/digest/return,点击即记一条精确回流。<b>发送</b>=投递记录里 status=sent;<b>回流人数</b>=当天点回来的去重订阅者;<b>落地后浏览</b>=回流后 24h 内在站内有实际互动(点击/抽屉/筛选/视频等,排除被动曝光与落地首屏)的人。⚠️ 回流率=回流人数÷发送,可能跨天(今天发的邮件明天点)。</p>
+    <div id="returnsTotals" class="breakdown" style="margin-bottom:12px"></div>
+    <table class="detail" id="returnsTable">
+      <thead><tr>
+        <th>日期</th><th>发送</th><th>回流人数</th><th>回流率</th><th>落地后浏览</th><th>浏览率</th>
+      </tr></thead>
+      <tbody id="returnsBody"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section">
     <h2>订阅明细</h2>
     <div class="filters">
       <span class="label">时段</span>
@@ -366,6 +423,36 @@ async function loadCards() {
   }
 }
 
+async function loadEmailReturns() {
+  try {
+    const d = await getJson('/api/admin/subscriptions?metric=email-returns');
+    const rows = d.days || [];
+    const body = document.getElementById('returnsBody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">近 14 天暂无邮件回流(还没人点邮件链接,或 digest 刚上线)</td></tr>';
+    } else {
+      body.innerHTML = rows.map(r => {
+        const lr = r.sent_n > 0 ? Math.round(r.landed_n / r.sent_n * 100) + '%' : '-';
+        const br = r.landed_n > 0 ? Math.round(r.browsed_n / r.landed_n * 100) + '%' : '-';
+        return '<tr><td>' + r.day + '</td><td>' + r.sent_n + '</td><td>' + r.landed_n + '</td><td>' + lr +
+          '</td><td>' + r.browsed_n + '</td><td>' + br + '</td></tr>';
+      }).join('');
+    }
+    const t = d.totals || { sent_n: 0, landed_n: 0, browsed_n: 0 };
+    const tlr = t.sent_n > 0 ? Math.round(t.landed_n / t.sent_n * 100) + '%' : '-';
+    const tbr = t.landed_n > 0 ? Math.round(t.browsed_n / t.landed_n * 100) + '%' : '-';
+    document.getElementById('returnsTotals').innerHTML =
+      '<span class="item"><b>' + t.sent_n + '</b>总发送</span>' +
+      '<span class="item"><b>' + t.landed_n + '</b>总回流</span>' +
+      '<span class="item"><b>' + tlr + '</b>整体回流率</span>' +
+      '<span class="item"><b>' + t.browsed_n + '</b>回流且浏览</span>' +
+      '<span class="item"><b>' + tbr + '</b>浏览率</span>';
+  } catch (e) {
+    console.error('loadEmailReturns', e);
+    document.getElementById('returnsBody').innerHTML = '<tr><td colspan="6" class="empty">加载失败: ' + e.message + '</td></tr>';
+  }
+}
+
 let pageOffset = 0;
 const PAGE_SIZE = 50;
 
@@ -408,6 +495,7 @@ document.getElementById('prevBtn').addEventListener('click', () => { pageOffset 
 document.getElementById('nextBtn').addEventListener('click', () => { pageOffset += PAGE_SIZE; loadList(); });
 
 loadCards();
+loadEmailReturns();
 loadList();
 document.getElementById('metaText').textContent = new Date().toLocaleString('zh-CN');
 </script>

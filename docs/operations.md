@@ -385,9 +385,9 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
 | `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | CF Access JWT（Basic Auth fallback，见 § 7a） |
 | `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | CF Access JWT（边缘拦截，见 § 7a） |
-| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、留存矩阵、事件类型分布（中文标签）、错误明细、重度设备表。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
-| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 
@@ -1428,7 +1428,8 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - `subscriptions`：`email`（唯一键 email+channel）/ `sources`(JSON) / `send_slot`(8/12/17) / `density`(normal|curated) / `status`(active|unsubscribed|kicked|paused) / `next_send_at` / `bounce_count`(≥2→kicked) / `worker_send_failures`(≥5→paused) / `unsubscribe_token` / `user_id`(回流回填)
 - `digest_pool`：`slot_key`(YYYY-MM-DD-HH BJT) × `source` × `density` → `item_ids`(JSON) + `items_meta`；UNIQUE(slot_key,source,density) 重跑覆盖
 - `digest_send_log`：每次投递记账（status: sent|no_items|failed_resend|welcome）
-- migration 跑法（同 §2 D1）：`wrangler d1 execute xlist-staging --env staging --remote --file=migrations/018-subscriptions.sql`（**prod 待上线再跑**）
+- `email_landings`（migration 021，2026-06-18）：邮件回流精确归因。`/api/digest/return` 验 token 后服务端已知 sub/user/email，每次邮件点击在 `handleDigestReturn` 里 `ctx.waitUntil` 落一条（`subscription_id`/`user_id`/`email`/`to_path`/`landed_at`/`day` BJT/`ip`/`ua`）。配 `digest_send_log` 算 发送→回流→回流率；join `events.user_id` 算「落地后浏览」（回流后 24h 内有 interact 行为）。admin 订阅页「📧 邮件回流」section 读取（`/api/admin/subscriptions?metric=email-returns`）。**无需前端改动**（归因点在服务端 return 端点）
+- migration 跑法（同 §2 D1）：`wrangler d1 execute xlist-staging --env staging --remote --file=migrations/018-subscriptions.sql`（018 已上 prod）。**021 同法；prod 上线顺序：先跑 migration 建表，再 deploy worker**（否则查空表/INSERT 撞缺表）
 
 ### Workflows（wrangler.toml）
 

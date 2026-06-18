@@ -84,6 +84,18 @@ export async function handleDigestReturn(
       .run(),
   );
 
+  // 邮件回流精确归因:token 已验 → 服务端已知 sub/user/email,落一条 email_landings,
+  // 配 digest_send_log(发送)算 发送→回流。非阻塞,不拖慢 302 跳转。
+  const bjtDay = new Date(now + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  ctx.waitUntil(
+    env.DB.prepare(
+      `INSERT INTO email_landings (subscription_id, user_id, email, to_path, landed_at, day, ip, ua)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(subId ?? null, userId, email, safeTo, now, bjtDay, getClientIp(request, env), request.headers.get('User-Agent') || '')
+      .run(),
+  );
+
   const session = await createSession(env, userId, null, getClientIp(request, env), request.headers.get('User-Agent') || '');
   const cookie = buildSessionCookie(session.id, isDevHost(request));
   return new Response(null, { status: 302, headers: { Location: dest, 'Set-Cookie': cookie } });
