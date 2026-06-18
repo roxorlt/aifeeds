@@ -2497,9 +2497,9 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  // Source type filter
+  // Source type filter（types 提升到函数作用域:下方时间窗口判断官方新闻也要用）
+  const types = sourceType ? sourceType.split(',').map(t => t.trim()).filter(Boolean) : [];
   if (sourceType) {
-    const types = sourceType.split(',').map(t => t.trim()).filter(Boolean);
     if (types.length === 1) {
       conditions.push('source_type = ?');
       params.push(types[0]);
@@ -2549,10 +2549,14 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
       conditions.push(`${sort} >= ?`);
       params.push(since);
     } else if (!cursor) {
-      // Default: last 7 days
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      // 默认窗口:官方新闻(blog/podcast)发布频率远低于社交源,7 天窗口首页装不满 limit
+      // → 前端误判"到底"不再翻页,旧内容永远加载不到。这两个源放宽到 30 天,首页填满后
+      // 翻页正常续拉;其他源(X/GH/PH 等)维持 7 天新鲜度(2026-06-18 上线实测调整)。
+      const isFeeds = types.some((t) => t === 'blog' || t === 'podcast');
+      const windowDays = isFeeds ? 30 : 7;
+      const windowAgo = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
       conditions.push(`${sort} >= ?`);
-      params.push(sevenDaysAgo);
+      params.push(windowAgo);
     }
     if (until) {
       conditions.push(`${sort} <= ?`);

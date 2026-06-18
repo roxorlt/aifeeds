@@ -1,4 +1,4 @@
--- 021-blog-podcast.sql
+-- 022-blog-podcast.sql
 -- blog / podcast 两个新源接入。设计：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §5
 --
 -- 本 migration 唯一 schema 增量 = 1 条 partial 表达式索引（给 v1 L1 跨源精确去重）。
@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_items_feed_src_pub
   ON items(source_type, is_relevant, (content_translated IS NULL), published_at DESC, id DESC);
 --
 -- 部署（照 CLAUDE.md checklist：先 staging 验证再 prod）：
---   wrangler d1 execute xlist-staging --env staging --remote --file=migrations/021-blog-podcast.sql
---   wrangler d1 execute xlist           --remote --file=migrations/021-blog-podcast.sql
+--   wrangler d1 execute xlist-staging --env staging --remote --file=migrations/022-blog-podcast.sql
+--   wrangler d1 execute xlist           --remote --file=migrations/022-blog-podcast.sql
 -- 退路：若某 D1 版本对 partial 表达式索引报错，退成无 WHERE 的普通表达式索引；
 --       再不行改加真列 url_hash（代价小）。
