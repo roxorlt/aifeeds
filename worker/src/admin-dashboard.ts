@@ -20,6 +20,8 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricDauTrend(env));
     case 'retention':
       return jsonRes(await metricRetention(env));
+    case 'returning':
+      return jsonRes(await metricReturning(env));
     case 'event-distribution':
       return jsonRes(await metricEventDistribution(env));
     case 'funnel':
@@ -42,7 +44,7 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricLoadPerf(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
-        'overview', 'dau-trend', 'retention', 'event-distribution',
+        'overview', 'dau-trend', 'retention', 'returning', 'event-distribution',
         'funnel', 'session-duration', 'errors', 'error-trend',
         'top-devices', 'channel-dwell', 'drawer-by-source', 'feed-depth',
         'load-perf',
@@ -203,9 +205,18 @@ async function metricRetention(env: Env) {
     SELECT
       fs.cohort_day,
       COUNT(DISTINCT fs.device_id) AS cohort_size,
-      COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 1 THEN fs.device_id END) AS d1,
-      COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 3 THEN fs.device_id END) AS d3,
-      COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 7 THEN fs.device_id END) AS d7
+      -- 成熟度门槛:cohort 还没到「第 N 天的次日」(age_days <= N,即第 N 天当天仍在累计
+      -- 或更早还没到)时返回 NULL,前端渲染成「—」而非误导性的 0%。age_days = 今日(BJT)距
+      -- cohort_day 的天数。只有 age_days > N(第 N 天已完整过完)才给出最终留存数。
+      CASE WHEN CAST(julianday(date('now','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) > 1
+           THEN COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 1 THEN fs.device_id END)
+           ELSE NULL END AS d1,
+      CASE WHEN CAST(julianday(date('now','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) > 3
+           THEN COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 3 THEN fs.device_id END)
+           ELSE NULL END AS d3,
+      CASE WHEN CAST(julianday(date('now','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) > 7
+           THEN COUNT(DISTINCT CASE WHEN CAST(julianday(date(e.occurred_at/1000,'unixepoch','+8 hours')) - julianday(fs.cohort_day) AS INTEGER) = 7 THEN fs.device_id END)
+           ELSE NULL END AS d7
     FROM first_seen fs
     JOIN events e ON e.device_id = fs.device_id
     WHERE fs.cohort_day >= date('now','-30 days','+8 hours')
@@ -213,6 +224,57 @@ async function metricRetention(env: Env) {
     ORDER BY fs.cohort_day DESC
   `).all();
   return { cohorts: rs.results };
+}
+
+async function metricReturning(env: Env) {
+  // 反向口径(回访率):分母是「当天 DAU」,往回看有多少是回头客。和正向 cohort 留存
+  // (metricRetention)互补 —— 正向问「获取的用户留得住吗」(对今天这行天然算不出,未来没发生),
+  // 反向问「今天来的人里多少是回头客」(每天都有意义,适合日常看体感)。
+  // 每日 DAU 拆三段(加和 = DAU):
+  //   new_devices = 该 device 第一次出现(全历史 MIN)就是当天 → 新增
+  //   back_7d     = 非新增,且过去 7 天[T-7,T-1]内有活跃 → 近期回访
+  //   更早回流    = 非新增,且过去 7 天内没活跃 → 前端算(dau - new_devices - back_7d)
+  // 回访率 = (dau - new_devices)/dau。⚠️ 回访率被当天新增量强烈影响(新增越多分母越大、率越低),
+  // 必须和新增数并看。过滤口径同 retention:真人 + 非 owner + 非 bot。
+  const rs = await env.DB.prepare(`
+    WITH bot_devices AS (
+      SELECT device_id FROM events
+      GROUP BY device_id
+      HAVING MAX(CASE WHEN ${BOT_UA_LIKE} THEN 1 ELSE 0 END) = 1
+    ),
+    daily AS (
+      SELECT DISTINCT device_id, date(occurred_at/1000,'unixepoch','+8 hours') AS day
+      FROM events
+      WHERE occurred_at > (strftime('%s','now') - 38 * 86400) * 1000
+        AND device_id NOT IN (SELECT device_id FROM bot_devices)
+        AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
+    ),
+    first_seen AS (
+      SELECT device_id, MIN(date(occurred_at/1000,'unixepoch','+8 hours')) AS fs
+      FROM events
+      WHERE device_id NOT IN (SELECT device_id FROM bot_devices)
+        AND ${NOT_OWNER_SQL}
+        AND ${IS_REAL_USER_SQL}
+      GROUP BY device_id
+    ),
+    target_days AS (
+      SELECT DISTINCT day AS t FROM daily WHERE day >= date('now','-30 days','+8 hours')
+    )
+    SELECT
+      t.t AS day,
+      COUNT(DISTINCT a.device_id) AS dau,
+      COUNT(DISTINCT CASE WHEN fs.fs = t.t THEN a.device_id END) AS new_devices,
+      COUNT(DISTINCT CASE WHEN fs.fs <> t.t AND EXISTS (
+        SELECT 1 FROM daily x WHERE x.device_id = a.device_id AND x.day < t.t AND x.day >= date(t.t,'-7 day')
+      ) THEN a.device_id END) AS back_7d
+    FROM target_days t
+    JOIN daily a ON a.day = t.t
+    JOIN first_seen fs ON fs.device_id = a.device_id
+    GROUP BY t.t
+    ORDER BY t.t
+  `).all();
+  return { days: rs.results };
 }
 
 async function metricEventDistribution(env: Env) {
@@ -708,9 +770,15 @@ ${adminNavHtml('dashboard')}
     </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
+  <div class="card wide" data-testid="card-returning">
+    <h2>🔄 每日新增 vs 回访</h2>
+    <p class="hint">最近 30 天每天真实 DAU 拆成 新增 / 7天内回访 / 更早回流（堆叠，加和=DAU），右轴叠加回访率（回头客÷DAU）。⚠️ 回访率受当天新增量影响（新增越多率越低），要和新增数并看</p>
+    <div class="chart tall" id="ch-returning"></div>
+  </div>
+
   <div class="card wide" data-testid="card-retention">
-    <h2>♻️ 留存矩阵</h2>
-    <p class="hint">最近 30 天每个 cohort（首次访问日期）在 +1/+3/+7 天的留存率</p>
+    <h2>♻️ 留存矩阵（正向 cohort）</h2>
+    <p class="hint">最近 30 天每个 cohort（首次访问日期）在 +1/+3/+7 天的留存率。「—」表示该 cohort 还没到第 N 天、或第 N 天当天数据仍在累计（次日完整后才显示），不是 0%</p>
     <div style="overflow-x:auto"><table id="tbl-retention"><thead><tr>
       <th>cohort 日</th><th class="num">新增</th>
       <th class="num">+1d</th><th class="num">+3d</th><th class="num">+7d</th>
@@ -919,14 +987,44 @@ async function loadSession() {
   } catch (e) { document.getElementById('ch-session').innerHTML = '<div class="err">' + e.message + '</div>'; }
 }
 
+async function loadReturning() {
+  const chart = echarts.init(document.getElementById('ch-returning'), 'dark', { renderer: 'canvas' });
+  try {
+    const d = await getJson('/api/admin/analytics?metric=returning');
+    const days = d.days.map(r => r.day);
+    const neu = d.days.map(r => r.new_devices);
+    const back7 = d.days.map(r => r.back_7d);
+    const older = d.days.map(r => Math.max(0, r.dau - r.new_devices - r.back_7d));
+    const rate = d.days.map(r => r.dau > 0 ? Math.round((r.dau - r.new_devices) / r.dau * 100) : 0);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 50, right: 50, top: 50, bottom: 30 },
+      legend: { data: ['新增', '7天内回访', '更早回流', '回访率'], textStyle: { color: '#9ca3af' } },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280', fontSize: 10 } },
+      yAxis: [
+        { type: 'value', name: 'device', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+        { type: 'value', name: '回访率', max: 100, axisLabel: { color: '#6b7280', formatter: '{value}%' }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: '新增', type: 'bar', stack: 'dau', data: neu, itemStyle: { color: COLORS[1] } },
+        { name: '7天内回访', type: 'bar', stack: 'dau', data: back7, itemStyle: { color: COLORS[0] } },
+        { name: '更早回流', type: 'bar', stack: 'dau', data: older, itemStyle: { color: COLORS[4] } },
+        { name: '回访率', type: 'line', yAxisIndex: 1, data: rate, smooth: true, symbol: 'circle', symbolSize: 5, itemStyle: { color: COLORS[2] }, lineStyle: { width: 2 } },
+      ],
+    });
+  } catch (e) { document.getElementById('ch-returning').innerHTML = '<div class="err">' + e.message + '</div>'; }
+}
+
 async function loadRetention() {
   const tb = document.querySelector('#tbl-retention tbody');
   try {
     const d = await getJson('/api/admin/analytics?metric=retention');
     if (!d.cohorts.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">无数据</td></tr>'; return; }
     tb.innerHTML = d.cohorts.map(r => {
-      const pct = (n) => r.cohort_size > 0 ? Math.round(n / r.cohort_size * 100) + '%' : '—';
-      const cls = (n) => 'class="num' + (n === 0 ? ' muted' : '') + '"';
+      // d1/d3/d7 为 null = 未到期(后端成熟度门槛返回 NULL),渲染成「—」而非 0%
+      const pct = (n) => n == null ? '—' : (r.cohort_size > 0 ? Math.round(n / r.cohort_size * 100) + '%' : '—');
+      const cls = (n) => 'class="num' + (n == null || n === 0 ? ' muted' : '') + '"';
       return '<tr><td>' + r.cohort_day + '</td>'
         + '<td class="num">' + fmt(r.cohort_size) + '</td>'
         + '<td ' + cls(r.d1) + '>' + pct(r.d1) + '</td>'
@@ -1273,6 +1371,7 @@ Promise.all([
   loadDrawerBySource(),
   loadFeedDepth(),
   loadLoadPerf(),
+  loadReturning(),
   loadRetention(),
   loadEvents(),
   loadErrorTrend(),
