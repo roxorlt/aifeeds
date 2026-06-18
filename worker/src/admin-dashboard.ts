@@ -707,6 +707,12 @@ ${ADMIN_SHARED_CSS}
   .contrib > span.lv3 { background: #4ea876; }
   .contrib > span.lv4 { background: #6ee7b7; }
   .contrib > span.today { outline: 1px solid #9ca3af; outline-offset: 1px; }
+
+  /* 表格默认折叠到前 N 行,超出的加 .collapsed-row 隐藏,配 .row-toggle 按钮展开/收起 */
+  tr.collapsed-row { display: none; }
+  .row-toggle { margin-top: 8px; font-size: 12px; color: #9ca3af; background: #1a2230;
+                border: 1px solid #2a3441; border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  .row-toggle:hover { background: #232d3d; color: #e6e8eb; }
 </style>
 </head>
 <body>
@@ -772,8 +778,10 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide" data-testid="card-returning">
     <h2>🔄 每日新增 vs 回访</h2>
-    <p class="hint">最近 30 天每天真实 DAU 拆成 新增 / 7天内回访 / 更早回流（堆叠，加和=DAU），右轴叠加回访率（回头客÷DAU）。⚠️ 回访率受当天新增量影响（新增越多率越低），要和新增数并看</p>
-    <div class="chart tall" id="ch-returning"></div>
+    <p class="hint">最近 30 天每天真实 DAU 拆成 新增 / 7天内回访 / 更早回流（加和=DAU）+ 回访率（回头客÷DAU）。⚠️ 回访率受当天新增量影响（新增越多率越低），要和新增数并看。默认显示最近 5 天，可展开</p>
+    <div style="overflow-x:auto"><table id="tbl-returning"><thead><tr>
+      <th>日期</th><th class="num">DAU</th><th class="num">新增</th><th class="num">7天内回访</th><th class="num">更早回流</th><th class="num">回访率</th>
+    </tr></thead><tbody><tr><td colspan="6" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
   <div class="card wide" data-testid="card-retention">
@@ -987,33 +995,48 @@ async function loadSession() {
   } catch (e) { document.getElementById('ch-session').innerHTML = '<div class="err">' + e.message + '</div>'; }
 }
 
+// 表格默认折叠到前 visibleCount 行,超出部分加 .collapsed-row,插一个展开/收起按钮。
+// 回访表 / 留存表通用。重渲染时先清掉旧按钮 + 重置 class(防重复插)。
+function applyRowCollapse(tableId, visibleCount) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const rows = Array.from(table.querySelectorAll('tbody tr'));
+  const card = table.closest('.card');
+  const old = card && card.querySelector('.row-toggle[data-for="' + tableId + '"]');
+  if (old) old.remove();
+  rows.forEach(tr => tr.classList.remove('collapsed-row'));
+  if (rows.length <= visibleCount) return;
+  let collapsed = true;
+  const apply = () => rows.forEach((tr, i) => { if (i >= visibleCount) tr.classList.toggle('collapsed-row', collapsed); });
+  const label = () => btn.textContent = collapsed ? ('展开全部 ' + rows.length + ' 行（+' + (rows.length - visibleCount) + '）') : '收起';
+  const btn = document.createElement('button');
+  btn.className = 'row-toggle';
+  btn.setAttribute('data-for', tableId);
+  btn.onclick = () => { collapsed = !collapsed; apply(); label(); };
+  apply(); label();
+  const scrollDiv = table.closest('div[style*="overflow"]') || table.parentElement;
+  scrollDiv.insertAdjacentElement('afterend', btn);
+}
+
 async function loadReturning() {
-  const chart = echarts.init(document.getElementById('ch-returning'), 'dark', { renderer: 'canvas' });
+  const tb = document.querySelector('#tbl-returning tbody');
   try {
     const d = await getJson('/api/admin/analytics?metric=returning');
-    const days = d.days.map(r => r.day);
-    const neu = d.days.map(r => r.new_devices);
-    const back7 = d.days.map(r => r.back_7d);
-    const older = d.days.map(r => Math.max(0, r.dau - r.new_devices - r.back_7d));
-    const rate = d.days.map(r => r.dau > 0 ? Math.round((r.dau - r.new_devices) / r.dau * 100) : 0);
-    chart.setOption({
-      backgroundColor: 'transparent',
-      grid: { left: 50, right: 50, top: 50, bottom: 30 },
-      legend: { data: ['新增', '7天内回访', '更早回流', '回访率'], textStyle: { color: '#9ca3af' } },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280', fontSize: 10 } },
-      yAxis: [
-        { type: 'value', name: 'device', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
-        { type: 'value', name: '回访率', max: 100, axisLabel: { color: '#6b7280', formatter: '{value}%' }, splitLine: { show: false } },
-      ],
-      series: [
-        { name: '新增', type: 'bar', stack: 'dau', data: neu, itemStyle: { color: COLORS[1] } },
-        { name: '7天内回访', type: 'bar', stack: 'dau', data: back7, itemStyle: { color: COLORS[0] } },
-        { name: '更早回流', type: 'bar', stack: 'dau', data: older, itemStyle: { color: COLORS[4] } },
-        { name: '回访率', type: 'line', yAxisIndex: 1, data: rate, smooth: true, symbol: 'circle', symbolSize: 5, itemStyle: { color: COLORS[2] }, lineStyle: { width: 2 } },
-      ],
-    });
-  } catch (e) { document.getElementById('ch-returning').innerHTML = '<div class="err">' + e.message + '</div>'; }
+    if (!d.days.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">无数据</td></tr>'; return; }
+    const rows = d.days.slice().reverse(); // 最新在前
+    tb.innerHTML = rows.map(r => {
+      const older = Math.max(0, r.dau - r.new_devices - r.back_7d);
+      const rate = r.dau > 0 ? Math.round((r.dau - r.new_devices) / r.dau * 100) : 0;
+      return '<tr><td>' + r.day + '</td>'
+        + '<td class="num">' + fmt(r.dau) + '</td>'
+        + '<td class="num">' + fmt(r.new_devices) + '</td>'
+        + '<td class="num">' + fmt(r.back_7d) + '</td>'
+        + '<td class="num' + (older === 0 ? ' muted' : '') + '">' + fmt(older) + '</td>'
+        + '<td class="num">' + rate + '%</td>'
+        + '</tr>';
+    }).join('');
+    applyRowCollapse('tbl-returning', 5);
+  } catch (e) { tb.innerHTML = '<tr><td colspan="6" class="err">' + e.message + '</td></tr>'; }
 }
 
 async function loadRetention() {
@@ -1032,6 +1055,7 @@ async function loadRetention() {
         + '<td ' + cls(r.d7) + '>' + pct(r.d7) + '</td>'
         + '</tr>';
     }).join('');
+    applyRowCollapse('tbl-retention', 5);
   } catch (e) { tb.innerHTML = '<tr><td colspan="5" class="err">' + e.message + '</td></tr>'; }
 }
 
