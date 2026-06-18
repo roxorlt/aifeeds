@@ -60,7 +60,7 @@ import {
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
 import { runBlogFetch, runBlogBackfill } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
-import { classifySensitivityForFeeds, classifyAndTranslateForFeeds } from './feeds/classify-translate';
+import { classifySensitivityForFeeds, classifyAndTranslateForFeeds, summarizeTimelineForPodcast } from './feeds/classify-translate';
 import { migrateAudioForPodcast } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
@@ -3858,6 +3858,32 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
   // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
   // (ensureFeedSources upsert + INSERT OR IGNORE + seen-set 游标)。
+  // podcast 时间轴主题概要存量回填(2026-06-12 #4):扫 A 档(有 transcript_url)
+  // 且无 timeline 的单集,回 VTT + pro LLM 生成时间轴。单条慢(pro + 抓 VTT),limit 小。
+  if (mode === 'podcast-timeline-backfill') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '5'), 20);
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id FROM items
+        WHERE source_type='podcast' AND is_relevant = 1
+          AND json_extract(extra, '$.transcript_tier') = 'A'
+          AND json_extract(extra, '$.transcript_url') IS NOT NULL
+          AND json_extract(extra, '$.timeline') IS NULL
+        ORDER BY published_at DESC LIMIT ?`,
+    ).bind(limit).all<{ id: string }>();
+    let done = 0, withTimeline = 0, skipped = 0;
+    for (const r of pending.results || []) {
+      try {
+        const res = await summarizeTimelineForPodcast(env, r.id);
+        if (res.ok) { done++; withTimeline++; }
+        else { skipped++; await env.DB.prepare(`UPDATE items SET extra=json_set(coalesce(extra,'{}'),'$.timeline', json('[]')) WHERE id=?`).bind(r.id).run(); }
+      } catch { skipped++; }
+    }
+    return jsonResponse({
+      mode: 'podcast-timeline-backfill', found: (pending.results || []).length,
+      done, withTimeline, skipped, elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
   // podcast 嘉宾 LLM 存量回填(2026-06-12 #2):扫 relevant 且无 guests 的单集,
   // 重跑 enrich(LLM 从 title+shownotes 抽嘉宾,顺带刷新译文/分类,幂等)。
   if (mode === 'podcast-guests-backfill') {

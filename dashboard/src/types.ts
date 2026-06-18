@@ -307,6 +307,7 @@ export interface ItemExtra {
   transcript_text?: string;                   // A 档原生文字稿全文
   transcript_text_zh?: string;                // 文字稿中译（ELI25 lazy）
   chapters?: Array<{ start_sec: number; title: string }>;
+  timeline?: Array<{ ts: string; topic: string; speaker?: string; point: string }>;  // 时间轴主题概要(A 档,#4)
   // guests 见上方 huodongxing 段：已合并为 HuodongxingGuest[] | string[] union（podcast 写 string[]）
   hosts?: string[];
   podcast_media_r2_at?: string;

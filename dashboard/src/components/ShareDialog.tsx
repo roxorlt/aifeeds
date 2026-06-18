@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createShare, type CreateShareResponse } from "../lib/share";
+import { fetchItem } from "../api";
 import { toast } from "../lib/toast";
 import { PosterCanvas, type PosterCanvasHandle } from "./PosterCanvas";
 import { useAuthStore } from "../lib/authStore";
@@ -46,6 +47,29 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   // 防止重复触发 createShare 的 itemId 标记 (StrictMode 双 effect / 闪进闪出)
   const triggeredRef = useRef<string>("");
   const posterRef = useRef<PosterCanvasHandle>(null);
+
+  // 海报渲染需要完整 item:列表负载把 shownotes/transcript 等重字段剥了(LIST_HEAVY_EXTRA_KEYS),
+  // 而 podcast 海报「节目简介」就用 shownotes。开 dialog 时拉一次完整 item,拉到前先用列表
+  // item 兜底(timeline/hosts 等轻字段列表已有),拉到后替换;截图 effect 等 posterItemReady。
+  const [posterItem, setPosterItem] = useState<Item>(item);
+  const [posterItemReady, setPosterItemReady] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setPosterItem(item);
+    setPosterItemReady(false);
+    let cancelled = false;
+    fetchItem(item.id)
+      .then((r) => {
+        if (!cancelled && r.item) setPosterItem(r.item);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setPosterItemReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, item]);
 
   const user = useAuthStore((s) => s.user);
   // PM 2026-05-25:邮箱注册 BE 不自动设 display_name / avatar_url (DB 默认 null).
@@ -104,6 +128,8 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   useEffect(() => {
     if (!open) return;
     if (stage !== "ready" || !cachedShare) return;
+    // 等完整 item 拉到位再截图(否则 podcast 海报「节目简介」缺 shownotes)
+    if (!posterItemReady) return;
     let cancelled = false;
     setPreviewing(true);
     // 等一帧 DOM mount 完成 (PosterCanvas 是同一 render 周期 mount 的)
@@ -136,7 +162,8 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   // PM 2026-05-25 补:open 也进依赖 — close → 再次 open 时 stage/cachedShare 没
   // 变化 effect 不重跑,导致 previewUrl (close 时 revoke 了) 永远不会重生成
   // → UI 卡 "海报渲染中…" loading
-  }, [open, stage, cachedShare, sharerName, sharerAvatarUrl]);
+  // posterItemReady 进依赖:完整 item 拉到后触发截图(podcast 海报需 shownotes)
+  }, [open, stage, cachedShare, sharerName, sharerAvatarUrl, posterItemReady]);
 
   if (!open) return null;
 
@@ -286,7 +313,7 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
         >
           <PosterCanvas
             ref={posterRef}
-            item={item}
+            item={posterItem}
             shareUrl={cachedShare!.share_url}
             sharerName={sharerName}
             sharerAvatarUrl={sharerAvatarUrl}

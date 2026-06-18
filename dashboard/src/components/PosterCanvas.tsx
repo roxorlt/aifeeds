@@ -37,6 +37,10 @@ const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
   hf_paper: { label: "HF · 每日论文", color: "#ff9d00" },
   clawhub: { label: "ClawHub · 技能", color: "#7c3aed" },
   huodongxing: { label: "活动行 · 活动", color: "#ef4444" },
+  // 官方新闻合并频道:blog/podcast 各自的源 chip(此前缺条目 → 回退英文 source_type)。
+  // podcast 只显「播客」两字(2026-06-18 反馈 #1)。
+  blog: { label: "官方新闻", color: "#475569" },
+  podcast: { label: "播客", color: "#8b5cf6" },
 };
 
 /**

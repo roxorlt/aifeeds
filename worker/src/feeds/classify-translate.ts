@@ -13,7 +13,7 @@
 // 设计文档：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §8
 
 import type { Env } from "../index";
-import { DEEPSEEK_FLASH, DEEPSEEK_URL } from "../hf-paper/llm";
+import { DEEPSEEK_FLASH, DEEPSEEK_PRO, DEEPSEEK_URL } from "../hf-paper/llm";
 import type { FeedAiCategory, FeedKind, FeedLang } from "./types";
 
 const LLM_TIMEOUT_MS = 60_000;
@@ -35,14 +35,14 @@ async function callRaw(
   env: Env,
   system: string,
   user: string,
-  opts: { maxTokens: number; jsonMode: boolean },
+  opts: { maxTokens: number; jsonMode: boolean; model?: string },
 ): Promise<string | null> {
   if (!env.DEEPSEEK_API_KEY) {
     console.warn("[feeds-llm] DEEPSEEK_API_KEY missing — skip");
     return null;
   }
   const body: Record<string, unknown> = {
-    model: DEEPSEEK_FLASH,
+    model: opts.model || DEEPSEEK_FLASH,
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -386,17 +386,21 @@ export async function classifyAndTranslateForFeeds(
   // ⚠️ 没抽到也写 guests:[](而非留 NULL)—— 否则 backfill 的 `guests IS NULL`
   // 查询永远命中这些「已查无嘉宾」条目,每轮重判、白烧 DeepSeek、永不收敛。
   if (kind === "podcast") {
-    const existing = Array.isArray(it.extra.guests) ? (it.extra.guests as unknown[]) : [];
-    const hasStructured = existing.some((g) => typeof g === "string" && g.trim());
-    if (!hasStructured) {
-      const names = Array.isArray(out.guests)
-        ? (out.guests as unknown[])
-            .map((g) => (typeof g === "string" ? g.trim() : ""))
-            .filter((g, i, a) => g && g.length <= 60 && a.indexOf(g) === i)
-            .slice(0, 4)
-        : [];
-      patches.push({ path: "$.guests", value: names, json: true });
-    }
+    // 始终对 hosts 去重 + 覆盖写(2026-06-12:LLM 常把固定主持人当嘉宾抽,
+    // Practical AI 的 guests 抽成了 hosts Chris/Daniel;旧的 hasStructured 守卫
+    // 会因 guests 已被上轮写值而跳过、永不修正)。hosts 来自 podcast:person 结构化,
+    // 是嘉宾的「黑名单」;结构化真嘉宾在我们的 feed 里几乎不存在,覆盖写无损。
+    const hostSet = new Set(
+      (Array.isArray(it.extra.hosts) ? (it.extra.hosts as unknown[]) : [])
+        .map((h) => (typeof h === "string" ? h.trim().toLowerCase() : "")),
+    );
+    const names = Array.isArray(out.guests)
+      ? (out.guests as unknown[])
+          .map((g) => (typeof g === "string" ? g.trim() : ""))
+          .filter((g, i, a) => g && g.length <= 60 && a.indexOf(g) === i && !hostSet.has(g.toLowerCase()))
+          .slice(0, 4)
+      : [];
+    patches.push({ path: "$.guests", value: names, json: true });
   }
   await jsonSetExtra(env, itemId, patches);
   console.log(`[feeds:enrich] ${itemId}: cat=${aiCategory}`);
@@ -459,4 +463,142 @@ ${body.slice(0, 24000)}`;
   await jsonSetExtra(env, itemId, [{ path: `$.${dstField}`, value: text }]);
   console.log(`[feeds:translate-body] ${itemId}: ${dstField} ${text.length} chars`);
   return { enrichFailed: false };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 时间轴主题概要（2026-06-12 #4）：回原始 VTT 拿带时间戳字幕 → pro LLM 切成
+// 「时间点 · 主题 · 核心观点」list。仅 A 档(有 transcript_url 的 VTT/SRT)。
+// 奥卡姆剃刀：6-12 个节点，每节点一句核心观点，不啰嗦。
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface TimelineSeg { ts: string; topic: string; point: string; speaker?: string }
+
+/** 解析 VTT/SRT cue → [{ start_sec, text }]（去 <v 说话人> 标签但记下说话人）。 */
+function parseVttCues(raw: string): Array<{ sec: number; speaker?: string; text: string }> {
+  const out: Array<{ sec: number; speaker?: string; text: string }> = [];
+  // 时间戳行：HH:MM:SS.mmm --> ... 或 MM:SS.mmm / SRT 的 , 毫秒
+  const lines = raw.replace(/\r/g, "").split("\n");
+  let i = 0;
+  const tsRe = /(\d{1,2}):(\d{2}):(\d{2})[.,]\d{1,3}\s*-->|(\d{1,2}):(\d{2})[.,]\d{1,3}\s*-->/;
+  while (i < lines.length) {
+    const m = lines[i].match(tsRe);
+    if (m) {
+      const sec = m[1] !== undefined
+        ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])
+        : (+m[4]) * 60 + (+m[5]);
+      i++;
+      const buf: string[] = [];
+      while (i < lines.length && lines[i].trim() !== "" && !tsRe.test(lines[i])) {
+        buf.push(lines[i]);
+        i++;
+      }
+      let text = buf.join(" ");
+      let speaker: string | undefined;
+      const vm = text.match(/<v\s+([^>]+)>/);
+      if (vm) speaker = vm[1].trim();
+      text = text.replace(/<[^>]+>/g, "").trim();
+      if (text) out.push({ sec, speaker, text });
+    } else {
+      i++;
+    }
+  }
+  return out;
+}
+
+function secToMmSs(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+    : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+const TIMELINE_SYSTEM = `你是 AI 播客的结构化摘要助手，服务中国 AI 从业者。输入是一集播客的带时间戳逐字稿（[MM:SS] 说话人: 内容）。把整集切成 6-12 个「主题节点」的时间轴。
+【奥卡姆剃刀原则】只保留真正换了话题的节点，宁少勿滥；每个节点一句话讲清「这段在聊什么 + 核心观点是什么」，不复述、不展开、无营销腔。
+【每个节点】
+- ts：该主题开始的时间戳（从逐字稿里取最接近的 [MM:SS]，原样输出 "MM:SS" 或 "H:MM:SS"）
+- topic：这段的主题（中文，≤16 字）
+- speaker：这段主要发言人（嘉宾/主持名，逐字稿里有就填，没有留空）
+- point：嘉宾/主持在这个主题上的核心观点或结论（中文一句，25-50 字，ELI25：术语顺带一句解释，保留专有名词英文）
+开头寒暄/片头/广告/结尾鸣谢不单独成节点（并入相邻主题或跳过）。只输出 JSON：{ "timeline": [ { "ts": "...", "topic": "...", "speaker": "...", "point": "..." } ] }`;
+
+export async function summarizeTimelineForPodcast(
+  env: Env,
+  itemId: string,
+): Promise<{ ok: boolean; segments: number }> {
+  const it = await loadItem(env, itemId);
+  if (it.extra.timeline) return { ok: true, segments: Array.isArray(it.extra.timeline) ? (it.extra.timeline as unknown[]).length : 0 }; // 幂等
+  const url = String(it.extra.transcript_url || "").trim();
+  // 只处理真带时间戳的 VTT/SRT（show-page HTML 链接不行）
+  const tier = String(it.extra.transcript_tier || "");
+  if (!url || tier !== "A") return { ok: false, segments: 0 };
+
+  let raw = "";
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": "AIFeedsBot/1.0" }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) return { ok: false, segments: 0 };
+    raw = await r.text();
+  } catch {
+    return { ok: false, segments: 0 };
+  }
+  const cues = parseVttCues(raw);
+  if (cues.length < 4) return { ok: false, segments: 0 }; // 非时间戳格式（show-page 等）
+
+  // 压缩成带时间戳的 digest。锚点窗口间隔按全集时长自适应(全集 ≈40 窗),每窗
+  // 文字截到均摊预算 —— 保证 digest 覆盖整集而非只有开头。旧版「固定 45s 锚点 +
+  // 从头 slice(11000)」对 40min+ 节目只覆盖前 ~13 分钟(2026-06-12 验收 W2 实测:
+  // 已生成时间轴末节点位置中位数仅全集 21%,93% 条目覆盖不过半),整改为本方案。
+  const totalSec = cues[cues.length - 1].sec;
+  const interval = Math.max(45, Math.ceil(totalSec / 40));
+  const wins: Array<{ sec: number; speaker?: string; parts: string[] }> = [];
+  let lastAnchor = -1e9;
+  for (const c of cues) {
+    if (c.sec - lastAnchor >= interval || wins.length === 0) {
+      wins.push({ sec: c.sec, speaker: c.speaker, parts: [c.text] });
+      lastAnchor = c.sec;
+    } else {
+      wins[wins.length - 1].parts.push(c.text);
+    }
+  }
+  const cap = Math.max(120, Math.floor(10500 / wins.length));
+  const digestLines = wins.map((w) => {
+    const sp = w.speaker ? `${w.speaker}: ` : "";
+    let text = w.parts.join(" ");
+    if (text.length > cap) text = text.slice(0, cap);
+    return `[${secToMmSs(w.sec)}] ${sp}${text}`;
+  });
+  let digest = digestLines.join("\n");
+  // 烂源防御:正常 A 档逐字稿远超 600 字符;低于说明 VTT 是占位/错文件(实例:
+  // MSR Podcast 51min 节目的 Blubrry VTT 只有 1KB 招聘模板文案,生成出 1 节点垃圾轴)。
+  if (digest.length < 600) return { ok: false, segments: 0 };
+  // flash 在 60s LLM 超时内能稳定处理的量(pro 跑 16k 超 60s 双超时,2026-06-12 实测)。
+  // 结构化抽取任务 flash 足够(§DeepSeek 选型 + 奥卡姆剃刀:简单转写/抽取用 flash)。
+  if (digest.length > 11000) digest = digest.slice(0, 11000);
+
+  const raw2 = await callRaw(
+    env,
+    TIMELINE_SYSTEM,
+    `【标题】${it.title}\n【带时间戳逐字稿】\n${digest}`,
+    { maxTokens: 4000, jsonMode: true, model: DEEPSEEK_FLASH },
+  );
+  let parsed: { timeline?: unknown } | null = null;
+  try { parsed = raw2 ? JSON.parse(raw2) : null; } catch { parsed = null; }
+  const arr = parsed && Array.isArray(parsed.timeline) ? (parsed.timeline as unknown[]) : [];
+  const timeline: TimelineSeg[] = arr
+    .map((s) => {
+      const o = (s && typeof s === "object" ? s : {}) as Record<string, unknown>;
+      return {
+        ts: String(o.ts || "").trim(),
+        topic: String(o.topic || "").trim(),
+        speaker: o.speaker ? String(o.speaker).trim() : undefined,
+        point: String(o.point || "").trim(),
+      };
+    })
+    .filter((s) => s.topic && s.point)
+    .slice(0, 14);
+  if (timeline.length === 0) return { ok: false, segments: 0 };
+  await jsonSetExtra(env, itemId, [{ path: "$.timeline", value: timeline, json: true }]);
+  console.log(`[feeds:timeline] ${itemId}: ${timeline.length} segments`);
+  return { ok: true, segments: timeline.length };
 }

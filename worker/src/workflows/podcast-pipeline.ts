@@ -27,6 +27,7 @@ import {
   classifyAndTranslateForFeeds,
   translateBodyMarkdown,
   classifySensitivityForFeeds,
+  summarizeTimelineForPodcast,
 } from '../feeds/classify-translate';
 import {
   dedupL1,
@@ -138,6 +139,13 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
             translateBodyMarkdown(this.env, itemId, { lang, kind: 'podcast' }),
           )
         : Promise.resolve({ enrichFailed: false }),
+      // 时间轴主题概要(2026-06-12 #4,A 档有 VTT 才做):回 VTT 拿带时间戳字幕 →
+      // pro LLM 切「时间点·主题·核心观点」list。best-effort,失败不阻塞 gate。
+      hasNativeTranscript
+        ? step.do('timeline-summary', RETRY, () =>
+            summarizeTimelineForPodcast(this.env, itemId),
+          )
+        : Promise.resolve({ ok: false, segments: 0 }),
       // 音频流式迁 R2(2026-06-12 #3,推翻原「绝不迁」决策):30-200MB 流式直传 R2,
       // /r/ 已支持 Range seek;无长度/超 250MB/失败 → 保留原 enclosure 直链兜底,不阻塞 gate。
       step.do('migrate-audio-r2', RETRY, () =>
@@ -155,7 +163,8 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
     const enrich = fan[1];
     // 合规 gate(2026-06-12):cn_sensitive 判定失败(null)不放行(NULL 会被下发过滤
     // 当通过)。不 markCompleted → backfill 兜底重跑自愈。
-    const sens = fan[4];
+    // ⚠️ fan 顺序:0 cover / 1 enrich / 2 transcript / 3 timeline / 4 audio / 5 cn-sensitive。
+    const sens = fan[5] as { cn_sensitive: 0 | 1 | null };
 
     // Step 5：完整性 gate(文字稿有无不是 gate 条件——无稿也能上 feed 显 shownotes)。
     const ok = !enrich.enrichFailed && sens.cn_sensitive !== null;

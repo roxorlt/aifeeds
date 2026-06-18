@@ -286,6 +286,42 @@ export function IconCopy({ className }: IconProps) {
   );
 }
 
+// lucide mic — 主持人标识（podcast 主持/嘉宾行、海报、抽屉）。
+export function IconMic({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-[14px] w-[14px]"} aria-hidden="true">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </svg>
+  );
+}
+
+// lucide user — 嘉宾标识。
+export function IconUser({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-[14px] w-[14px]"} aria-hidden="true">
+      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  );
+}
+
+// lucide audio-lines（波形）—— 「音频内容」徽标，比 play 三角更专指音频、不与封面
+// 播放按钮重复（2026-06-12 海报反馈 #2）。
+export function IconAudioLines({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-[14px] w-[14px]"} aria-hidden="true">
+      <path d="M2 10v3" />
+      <path d="M6 6v11" />
+      <path d="M10 3v18" />
+      <path d="M14 8v7" />
+      <path d="M18 5v13" />
+      <path d="M22 10v3" />
+    </svg>
+  );
+}
+
 // PDF document icon — Adobe-ish 红底白字 PDF 标识,通用 PDF 视觉惯例。
 // 用于「打开论文 .pdf」按钮等场景。颜色硬编码不走 currentColor,因为
 // 红色是 PDF 品牌识别的一部分,跟周围按钮文字色保持区分。

@@ -168,6 +168,8 @@ export interface ParsedFeedItem {
   episode_type?: string;
   /** 主持人（<podcast:person role=host>，部分 feed 有）。海报增信息量。podcast only。 */
   hosts?: string[];
+  /** 时间轴主题概要(A 档 VTT，#4)：[{ts,topic,speaker?,point}]。 */
+  timeline?: Array<{ ts: string; topic: string; speaker?: string; point: string }>;
   /** 嘉宾（<podcast:person role=guest>，部分 feed 有）。podcast only。 */
   guests?: string[];
   /** 原始 feed item 标签 / 分类（<category>）。 */
@@ -356,6 +358,8 @@ export interface PodcastExtra
   /** 嘉宾 / 主持人（若 shownotes 可抽）。 */
   guests?: string[];
   hosts?: string[];
+  /** 时间轴主题概要(A 档 VTT，#4):[{ts,topic,speaker?,point}]。 */
+  timeline?: Array<{ ts: string; topic: string; speaker?: string; point: string }>;
   /** R2 媒体迁移 marker（专属字段，不撞 r2_migrated_at）。 */
   podcast_media_r2_at?: string;
 }

@@ -25,7 +25,7 @@ import type { Item, ItemExtra } from "../types";
 import { fetchItem } from "../api";
 import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
-import { BrandPodcast, IconClock } from "./icons";
+import { BrandPodcast, IconClock, IconMic, IconUser } from "./icons";
 
 // shownotes 轻量 markdown 渲染（hfMarkdownComponents 风，只覆盖 RSS shownotes
 // 常见元素；不引入相对路径图片 / HTML 反序列化）。13px 对齐抽屉正文层级。
@@ -237,8 +237,26 @@ export function PodcastDrawerBody({ item }: Props) {
   const durationLabel = formatDuration(extra.duration_sec);
   const publishedAt = item.published_at || item.scraped_at;
 
-  // ELI25 摘要（概览）
-  const summary = extra.ai_summary_zh || extra.shownotes_zh || extra.ai_summary || "";
+  // 主持/嘉宾(podcast:person 结构化 + LLM 抽取)。guests 对 hosts 去重(显示层兜底)。
+  const hostsArr = Array.isArray(extra.hosts)
+    ? (extra.hosts as unknown[]).filter((h): h is string => typeof h === "string" && !!h.trim())
+    : [];
+  const hostLower = new Set(hostsArr.map((h) => h.toLowerCase()));
+  const guestsArr = Array.isArray(extra.guests)
+    ? (extra.guests as unknown[]).filter(
+        (g): g is string => typeof g === "string" && !!g.trim() && !hostLower.has(g.toLowerCase()),
+      )
+    : [];
+
+  // 本期话题脉络(奥卡姆剃刀时间轴):每节点 = 时间点 · 主题 · 该时段核心观点 · 说话人。
+  // 单节点不成"轴"(烂源 VTT 偶发产物),≥2 才渲染。
+  const timelineRaw = Array.isArray(extra.timeline) ? extra.timeline : [];
+  const timeline = timelineRaw.length >= 2 ? timelineRaw : [];
+
+  // 概览 = 纯 LLM 生成的 ELI25 摘要(deepseek)。不再兜底 shownotes —— 否则无
+  // ai_summary 时「概览」会和「节目简介」展示同一段原文(2026-06-12 用户反馈:二者
+  // 关系混淆)。无 LLM 摘要时这块直接省略,节目简介那块照常出抓取的原文。
+  const summary = extra.ai_summary_zh || extra.ai_summary || "";
 
   // shownotes：外文源优先中译，中文源用原文
   const shownotes = isForeign
@@ -318,6 +336,26 @@ export function PodcastDrawerBody({ item }: Props) {
           {publishedAt && <span>{timeAgo(publishedAt)}</span>}
         </div>
 
+        {/* ②.5 主持/嘉宾(有结构化或 LLM 抽取的才显)各带图标提升识别度(2026-06-12 #3) */}
+        {(hostsArr.length > 0 || guestsArr.length > 0) && (
+          <div className="flex flex-col gap-1.5">
+            {hostsArr.length > 0 && (
+              <div className="flex items-start gap-2 text-[13px]">
+                <IconMic className="mt-0.5 h-4 w-4 shrink-0 text-neutral-400" />
+                <span className="shrink-0 font-medium text-neutral-500">主持</span>
+                <span className="break-words text-neutral-700">{hostsArr.join("、")}</span>
+              </div>
+            )}
+            {guestsArr.length > 0 && (
+              <div className="flex items-start gap-2 text-[13px]">
+                <IconUser className="mt-0.5 h-4 w-4 shrink-0 text-neutral-400" />
+                <span className="shrink-0 font-medium text-neutral-500">嘉宾</span>
+                <span className="break-words text-neutral-700">{guestsArr.join("、")}</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ③ 音频播放器置顶 —— 原生 <audio controls>。空格键全抽屉控播(2026-06-12
             验收反馈:PC 上空格穿透滚动底层 feed,预期 play/pause)。 */}
         {audioUrl ? (
@@ -353,8 +391,9 @@ export function PodcastDrawerBody({ item }: Props) {
           </div>
         )}
 
-        {/* ⑤ shownotes / 章节（带时间戳）。有 chapters 出章节列表，否则退化为
-            shownotes markdown 轻量渲染 */}
+        {/* ⑤ 节目简介 / 章节（抓取的 RSS 原文，发布方所写；外文优先中译）。有
+            chapters 出章节列表，否则退化为 shownotes markdown 轻量渲染。
+            排在「话题脉络」之前——官方描述先于 LLM 提炼(2026-06-12 用户反馈)。 */}
         {(chapters.length > 0 || shownotes) && (
           <div>
             <div className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-neutral-700">
@@ -382,6 +421,49 @@ export function PodcastDrawerBody({ item }: Props) {
                 </Markdown>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ⑤.5 本期话题脉络(奥卡姆剃刀时间轴)—— LLM 从逐字稿提炼,每节点
+            时间点 · 主题 · 该时段核心观点 · 说话人,竖向时间轴呈现(2026-06-12 #4)。
+            紧贴文字稿上方——它是逐字稿的「索引版」。仅 A 档(有真字幕)生成;
+            非 A 档 timeline 为空数组,整段省略。 */}
+        {timeline.length > 0 && (
+          <div>
+            <div className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold text-neutral-700">
+              <IconList className="h-4 w-4 text-neutral-400" />
+              本期话题脉络
+            </div>
+            <div className="space-y-0">
+              {timeline.map((seg, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "relative border-l-2 border-neutral-200 pl-4",
+                    i === timeline.length - 1 ? "pb-0" : "pb-4",
+                  )}
+                >
+                  <span className="absolute -left-[5px] top-1.5 h-2 w-2 rounded-full bg-neutral-300" />
+                  <div className="flex items-baseline gap-2">
+                    <span className="shrink-0 tabular-nums text-[12px] font-semibold text-neutral-400">
+                      {seg.ts}
+                    </span>
+                    <span className="text-[14px] font-semibold leading-snug text-neutral-900 break-words">
+                      {seg.topic}
+                    </span>
+                  </div>
+                  {seg.point && (
+                    <p className="mt-1 text-[13px] leading-[1.6] text-neutral-600 break-words">{seg.point}</p>
+                  )}
+                  {seg.speaker && (
+                    <div className="mt-1 flex items-center gap-1 text-[12px] text-neutral-400">
+                      <IconUser className="h-3 w-3 shrink-0" />
+                      {seg.speaker}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
