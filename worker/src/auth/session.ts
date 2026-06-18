@@ -7,6 +7,15 @@ import type { AuthContext, SessionRow, UserRow } from './types';
 
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;  // 30 天
 const COOKIE_NAME = 'xlist_sid';
+const COOKIE_NAME_STAGING = 'xlist_sid_stg';
+
+// staging 与 prod 都把 cookie 写到 .ai-feeds.com 顶域(子域共享),若同名 `xlist_sid`
+// 就会互相覆盖登录态 —— 发版后去 staging 登录会顶掉 prod 的登录,反之亦然
+// (2026-06-19 根因)。staging 用独立 cookie 名隔离;prod 名不变,现网用户不受影响。
+// 环境判断用 API_BASE(prod=api.ai-feeds.com / staging=staging-api.ai-feeds.com,可靠)。
+function sessionCookieName(env: Env): string {
+  return (env.API_BASE || '').includes('staging') ? COOKIE_NAME_STAGING : COOKIE_NAME;
+}
 
 export async function createSession(
   env: Env,
@@ -57,19 +66,21 @@ export async function revokeAllSessionsOfUser(env: Env, userId: string): Promise
 }
 
 /** 从请求拿 session_id（优先 Authorization Bearer，再 Cookie） */
-export function getSidFromRequest(req: Request): string | null {
+export function getSidFromRequest(req: Request, env: Env): string | null {
   const auth = req.headers.get('Authorization');
   if (auth?.startsWith('Bearer ')) return auth.slice(7).trim();
+  const name = sessionCookieName(env);
   const cookie = req.headers.get('Cookie') || '';
-  const m = cookie.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
+  const m = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-/** 生成 Set-Cookie header 值。生产用 .ai-feeds.com 顶域（共享子域），dev 用 host-only */
-export function buildSessionCookie(sid: string, isDev: boolean): string {
+/** 生成 Set-Cookie header 值。生产用 .ai-feeds.com 顶域（共享子域），dev 用 host-only。
+ *  cookie 名按环境区分（staging=xlist_sid_stg / prod=xlist_sid），避免顶域同名互相覆盖。 */
+export function buildSessionCookie(sid: string, isDev: boolean, env: Env): string {
   const maxAge = SESSION_TTL_MS / 1000;
   const parts = [
-    `${COOKIE_NAME}=${encodeURIComponent(sid)}`,
+    `${sessionCookieName(env)}=${encodeURIComponent(sid)}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
@@ -81,8 +92,8 @@ export function buildSessionCookie(sid: string, isDev: boolean): string {
   return parts.join('; ');
 }
 
-export function buildClearCookie(isDev: boolean): string {
-  const parts = [`${COOKIE_NAME}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+export function buildClearCookie(isDev: boolean, env: Env): string {
+  const parts = [`${sessionCookieName(env)}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
   if (!isDev) {
     parts.push('Secure', 'Domain=.ai-feeds.com');
   }
@@ -95,7 +106,7 @@ export async function authenticate(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<AuthContext> {
-  const sid = getSidFromRequest(req);
+  const sid = getSidFromRequest(req, env);
   if (!sid) return { kind: 'anonymous' };
   const session = await findActiveSession(env, sid);
   if (!session) return { kind: 'anonymous' };

@@ -348,7 +348,7 @@ export async function handleLogin(
 
   // 7. 创建 session
   const session = await createSession(env, userId, deviceId, ip, ua);
-  const cookie = buildSessionCookie(session.id, isDevHost(request));
+  const cookie = buildSessionCookie(session.id, isDevHost(request), env);
 
   return jsonOk(
     {
@@ -379,7 +379,7 @@ export async function handleLogout(
     return jsonErr('not authenticated', 401);
   }
   await revokeSession(env, auth.sessionId);
-  return jsonOk({ ok: true }, { 'Set-Cookie': buildClearCookie(isDevHost(request)) });
+  return jsonOk({ ok: true }, { 'Set-Cookie': buildClearCookie(isDevHost(request), env) });
 }
 
 // ─── POST /api/auth/logout-all ───────────────────────────
@@ -394,7 +394,7 @@ export async function handleLogoutAll(
     return jsonErr('not authenticated', 401);
   }
   const count = await revokeAllSessionsOfUser(env, auth.userId);
-  return jsonOk({ ok: true, revoked: count }, { 'Set-Cookie': buildClearCookie(isDevHost(request)) });
+  return jsonOk({ ok: true, revoked: count }, { 'Set-Cookie': buildClearCookie(isDevHost(request), env) });
 }
 
 // ─── GET /api/auth/me ────────────────────────────────────
@@ -550,6 +550,6 @@ export async function handleDelete(
 
   return jsonOk(
     { ok: true },
-    { 'Set-Cookie': buildClearCookie(isDevHost(request)) },
+    { 'Set-Cookie': buildClearCookie(isDevHost(request), env) },
   );
 }

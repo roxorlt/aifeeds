@@ -97,7 +97,7 @@ export async function handleDigestReturn(
   );
 
   const session = await createSession(env, userId, null, getClientIp(request, env), request.headers.get('User-Agent') || '');
-  const cookie = buildSessionCookie(session.id, isDevHost(request));
+  const cookie = buildSessionCookie(session.id, isDevHost(request), env);
   return new Response(null, { status: 302, headers: { Location: dest, 'Set-Cookie': cookie } });
 }
 
