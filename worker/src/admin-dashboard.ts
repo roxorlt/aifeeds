@@ -1257,6 +1257,10 @@ async function loadDrawerBySource() {
     const SRC_LABELS = {
       x_list: 'X 动态', github: 'GitHub 开源', product_hunt: '产品 (PH)',
       clawhub: 'Skill (龙虾)', hf_paper: '论文 (HF)', huodongxing: '活动',
+      // 新闻&播客频道(blog+podcast 合并):drawer 事件按单源记 blog/podcast,各占一条;
+      // 标签对齐前端 PosterCanvas(blog→新闻 / podcast→播客)。复合值防御性补一条。
+      // youtube 暂无 drawer 数据,补上与 CHANNEL_LABELS 保持一致 + 未来防御。
+      blog: '新闻', podcast: '播客', 'blog,podcast': '新闻&播客', youtube: 'YouTube',
     };
     const rows = d.sources.slice().reverse();
     const names = rows.map(r => SRC_LABELS[r.source] || r.source || '未知');
@@ -1317,6 +1321,9 @@ async function loadChannels() {
     const CHANNEL_LABELS = {
       x_list: 'X List', github: 'GitHub', product_hunt: 'Product Hunt',
       clawhub: 'ClawHub', hf_paper: 'HuggingFace Paper', huodongxing: '活动行',
+      // 新闻&播客频道:filter 哨兵值是复合 "blog,podcast"(频道切换事件记的就是它);
+      // 个别 blog/podcast 单值防御性补,对齐前端标签。youtube 真实出现在切换数据里(此前裸显示)。
+      'blog,podcast': '新闻&播客', blog: '新闻', podcast: '播客', youtube: 'YouTube',
     };
     tb.innerHTML = d.channels.map(r => {
       const name = CHANNEL_LABELS[r.channel] || r.channel;
