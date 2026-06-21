@@ -15,6 +15,7 @@ import type { DigestSource } from './config';
 
 // config 源 key → items.source_type(注意 X 历史命名为 x_list)
 export const SOURCE_TYPE: Record<DigestSource, string> = {
+  'news': 'blog', // 占位满足类型:news 是 blog+podcast 合并虚拟源,实际走 selectNewsByScore,不用此单值映射
   'ph': 'product_hunt',
   'gh': 'github',
   'hf-paper': 'hf_paper',
@@ -35,6 +36,7 @@ export async function selectTopForSource(
   limit: number,
 ): Promise<string[]> {
   if (source === 'clawhub') return selectClawhubByDelta(env, limit);
+  if (source === 'news') return selectNewsByScore(env, limit);
 
   const sourceType = SOURCE_TYPE[source];
   const wcGate =
@@ -99,6 +101,43 @@ async function selectClawhubByDelta(env: Env, limit: number): Promise<string[]> 
     LEFT JOIN prev p ON p.item_id = i.id
     WHERE i.source_type = 'clawhub' AND i.deleted_at IS NULL
     ORDER BY (l.cur - COALESCE(p.old, l.cur)) DESC
+    LIMIT ?`;
+  const rows = await env.DB.prepare(sql).bind(limit).all<{ id: string }>();
+  return (rows.results || []).map((r) => r.id);
+}
+
+// 行业新闻(blog+podcast 合并)按「规则综合分」排序(无 LLM)。权重(总分 100):
+//   重要性 40(ai_category)+ 源权威 30(source_company 三档)+ 新鲜度 20(published_at 衰减)+ 深度 10(blog/播客文字稿档)
+// 窗口 2 天(覆盖「昨天到今天」),只取已 enrich(有 ai_summary_zh)的 AI 相关条目;同分按发布时间倒序。
+async function selectNewsByScore(env: Env, limit: number): Promise<string[]> {
+  const cat = `json_extract(extra,'$.ai_category')`;
+  const co = `json_extract(extra,'$.source_company')`;
+  const tier = `json_extract(extra,'$.transcript_tier')`;
+  const score = `(
+    CASE ${cat}
+      WHEN 'model-release' THEN 40 WHEN 'research' THEN 34 WHEN 'safety' THEN 30
+      WHEN 'product' THEN 24 WHEN 'engineering' THEN 20 WHEN 'company' THEN 14 ELSE 6 END
+    + CASE
+        WHEN ${co} IN ('OpenAI','Anthropic','Google','Microsoft Research','NVIDIA','Hugging Face','Latent Space','Lex Fridman') THEN 30
+        WHEN ${co} IN ('Mistral AI','Qwen','面壁智能 / OpenBMB','Practical AI','No Priors','Machine Learning Street Talk','The Cognitive Revolution','OpenAI Podcast') THEN 22
+        ELSE 14 END
+    + CASE
+        WHEN (julianday('now') - julianday(published_at)) < 1 THEN 20
+        WHEN (julianday('now') - julianday(published_at)) < 2 THEN 15
+        WHEN (julianday('now') - julianday(published_at)) < 3 THEN 10
+        WHEN (julianday('now') - julianday(published_at)) < 4 THEN 6 ELSE 3 END
+    + CASE
+        WHEN source_type = 'blog' THEN 8
+        WHEN ${tier} = 'A' THEN 10 WHEN ${tier} = 'B' THEN 5 ELSE 2 END
+  )`;
+  const sql = `SELECT id FROM items
+    WHERE source_type IN ('blog','podcast')
+      AND is_relevant = 1
+      AND json_extract(extra,'$.ai_summary_zh') IS NOT NULL
+      AND json_extract(extra,'$.ai_summary_zh') != ''
+      AND datetime(scraped_at) >= datetime('now','-3 day')
+      AND deleted_at IS NULL
+    ORDER BY ${score} DESC, datetime(published_at) DESC
     LIMIT ?`;
   const rows = await env.DB.prepare(sql).bind(limit).all<{ id: string }>();
   return (rows.results || []).map((r) => r.id);

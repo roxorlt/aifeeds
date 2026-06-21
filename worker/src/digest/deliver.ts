@@ -65,6 +65,10 @@ function deepLinkPath(itemId: string): string {
       return `/c/${encodeURIComponent(sid)}`;
     case 'hf_paper':
       return `/h/${encodeURIComponent(sid)}`;
+    case 'blog':
+    case 'podcast':
+      // 行业新闻(blog/podcast):/o/<完整 composite id>,对齐 dashboard parseDeepLinkFromPath
+      return `/o/${encodeURIComponent(itemId)}`;
     default:
       return '/';
   }
@@ -134,6 +138,10 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       title = row.title || '';
       summary = (ex.summary_translated as string) || (ex.summary_en as string) || ct;
       break;
+    case 'news': // 行业新闻(blog/podcast):中文标题 title_zh + 一句话中文摘要 ai_summary_zh
+      title = (ex.title_zh as string) || row.title || '';
+      summary = (ex.ai_summary_zh as string) || ct;
+      break;
     default:
       title = row.title || body.slice(0, 60);
       summary = body;
@@ -195,7 +203,8 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
       for (const source of DIGEST_SOURCE_ORDER) {
         // 2026-06-21 ClawHub 退出订阅日报:即便老订阅 sources 里仍存了 clawhub 也不投递(只留 homepage 频道)。
         if (source === 'clawhub') continue;
-        if (!sources.includes(source)) continue;
+        // 'news'(行业新闻)是强制头条,所有订阅者都收;其余源按用户订阅勾选。
+        if (source !== 'news' && !sources.includes(source)) continue;
         const pool = await this.env.DB.prepare(
           `SELECT item_ids, items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
         )

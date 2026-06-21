@@ -14,8 +14,8 @@ import { pushDeerAlert } from '../notifier';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
-// Codex 当前只渲这 3 源(X/clawhub 暂不打包,等模板扩展)
-const PUSH_SOURCES: DigestSource[] = ['ph', 'gh', 'hf-paper'];
+// Codex 渲这几源(news 行业新闻排头条;X/clawhub 暂不打包,等模板扩展)
+const PUSH_SOURCES: DigestSource[] = ['news', 'ph', 'gh', 'hf-paper'];
 
 async function sha256Hex(s: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));

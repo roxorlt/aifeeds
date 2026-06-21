@@ -24,6 +24,7 @@ const FONT = `'HarmonyOS Sans SC','PingFang SC',-apple-system,BlinkMacSystemFont
 
 // 源名 = 主站频道 tab 名(dashboard App.tsx)
 export const SOURCE_LABELS: Record<DigestSource, string> = {
+  'news': '行业新闻',
   'ph': '热门产品',
   'gh': '开源项目',
   'hf-paper': '论文',

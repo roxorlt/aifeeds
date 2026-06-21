@@ -7,13 +7,16 @@
 export const PUSH_SLOTS_BJT = [8, 12, 17] as const;
 
 // 订阅推送源固定展示顺序(邮件内分区 + 勾选界面)。活动行 huodongxing 不参与订阅推送。
-export const DIGEST_SOURCE_ORDER = ['ph', 'gh', 'hf-paper', 'clawhub', 'x'] as const;
+// 'news'(行业新闻=blog+podcast 合并)2026-06-21 加入,固定排第一位 = 邮件头条;它是强制板块
+// (deliver.ts 对所有订阅者强制包含,不参与勾选界面),其余 4 源(clawhub 已下架)按用户订阅。
+export const DIGEST_SOURCE_ORDER = ['news', 'ph', 'gh', 'hf-paper', 'clawhub', 'x'] as const;
 export type DigestSource = (typeof DIGEST_SOURCE_ORDER)[number];
 
 export type Density = 'normal' | 'curated';
 
 // 每源在两档下各取多少条。normal=默认档(纯综合分);curated=精选档(LLM 从更大候选挑)。
 export const SOURCE_DIGEST_CONFIG: Record<DigestSource, { normal: number; curated: number }> = {
+  'news': { normal: 3, curated: 3 }, // 行业新闻:规则分(非 LLM)取 top 3,见 selection.ts selectNewsByScore + node-run 跳过 curate
   'ph': { normal: 5, curated: 3 },
   'gh': { normal: 5, curated: 3 },
   'hf-paper': { normal: 5, curated: 3 },

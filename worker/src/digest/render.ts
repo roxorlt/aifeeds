@@ -75,6 +75,10 @@ export function deepLinkPath(itemId: string): string {
       return `/c/${encodeURIComponent(sid)}`;
     case 'hf_paper':
       return `/h/${encodeURIComponent(sid)}`;
+    case 'blog':
+    case 'podcast':
+      // 行业新闻(blog/podcast):/o/<完整 composite id>,对齐 dashboard parseDeepLinkFromPath
+      return `/o/${encodeURIComponent(itemId)}`;
     default:
       return '/';
   }
@@ -184,6 +188,12 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
     }
     case 'clawhub':
       return null; // 不用作者头像
+    case 'news': {
+      // 行业新闻:博客/播客封面 = extra.cover_image,否则 media 第一张图
+      const cov = (ex.cover_image as string) || '';
+      if (cov) return abs(cov);
+      return imgs.length ? abs(imgs[0].url as string) : null;
+    }
     default:
       return null;
   }
@@ -260,6 +270,17 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
       break;
     case 'clawhub':
       break; // skill 无媒体
+    case 'news':
+      // 行业新闻:博客/播客正文图片(及视频)
+      for (const m of arr) {
+        if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+        else if (m.type === 'video' && m.url) {
+          const v: MediaAsset = { type: 'video', url: abs(m.url as string) };
+          if (m.poster) v.poster = abs(m.poster as string);
+          out.push(v);
+        }
+      }
+      break;
   }
   const seen = new Set<string>();
   return out.filter((a) => {
@@ -296,6 +317,10 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     case 'clawhub':
       title = row.title || '';
       summary = (ex.summary_translated as string) || (ex.summary_en as string) || ct;
+      break;
+    case 'news': // 行业新闻(blog/podcast):中文标题 title_zh + 一句话中文摘要 ai_summary_zh
+      title = (ex.title_zh as string) || row.title || '';
+      summary = (ex.ai_summary_zh as string) || ct;
       break;
     default:
       title = row.title || body.slice(0, 60);

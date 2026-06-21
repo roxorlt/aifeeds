@@ -158,9 +158,15 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
         }
         const normalIds = candidateIds.slice(0, cfg.normal);
         await upsertPool(this.env, sk, source, 'normal', normalIds, null);
-        const candidates = await fetchCandidates(this.env, source as DigestSource, candidateIds);
-        const ids = await curateSource(this.env, source as DigestSource, candidates, cfg.curated);
-        await upsertPool(this.env, sk, source, 'curated', ids, null);
+        // 行业新闻:规则分已在 selectNewsByScore 排好,curated 直接取分数 top M,不走 LLM curate
+        let curatedIds: string[];
+        if (source === 'news') {
+          curatedIds = candidateIds.slice(0, cfg.curated);
+        } else {
+          const candidates = await fetchCandidates(this.env, source as DigestSource, candidateIds);
+          curatedIds = await curateSource(this.env, source as DigestSource, candidates, cfg.curated);
+        }
+        await upsertPool(this.env, sk, source, 'curated', curatedIds, null);
         return candidateIds.length;
       });
     }
