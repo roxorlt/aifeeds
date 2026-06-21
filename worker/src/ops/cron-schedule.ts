@@ -15,6 +15,8 @@ export type CronSource =
   | 'hf'
   | 'clawhub'
   | 'hdx'
+  | 'blog'
+  | 'podcast'
   | 'common';
 
 export interface CronTaskDef {
@@ -23,7 +25,7 @@ export interface CronTaskDef {
   category: CronCategory;
   label: string;
   bjt_times: string[];
-  frequency: 'daily' | 'daily-2x' | 'hourly-2x' | 'hourly-1x' | 'multi-tick';
+  frequency: 'daily' | 'daily-2x' | 'daily-4x' | 'hourly-2x' | 'hourly-1x' | 'multi-tick';
   description: string;
 }
 
@@ -169,6 +171,25 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     frequency: 'daily',
     description: '标 stale events historical, 每日清扫一次',
   },
+  // ─── 官方新闻：厂商博客 + AI 播客 (feeds, Phase 1 2026-06-09) ──
+  {
+    name: 'blog-fetch',
+    source: 'blog',
+    category: 'fetch',
+    label: '厂商博客抓取',
+    bjt_times: ['00:20', '02:20', '04:20', '06:20', '08:20', '10:20', '12:20', '14:20', '16:20', '18:20', '20:20', '22:20'],
+    frequency: 'multi-tick',
+    description: '厂商博客 RSS 抓取 (每 2h, UTC 偶数时 :20) → blog-pipeline workflow enrich',
+  },
+  {
+    name: 'podcast-fetch',
+    source: 'podcast',
+    category: 'fetch',
+    label: 'AI 播客抓取',
+    bjt_times: ['03:50', '09:50', '15:50', '21:50'],
+    frequency: 'daily-4x',
+    description: 'AI 播客 RSS 抓取 (4x/天, UTC {1,7,13,19}:50) → podcast-pipeline workflow enrich',
+  },
   // ─── 通用 (common) ───────────────────────────────────────────
   {
     name: 'refresh-metrics',
@@ -196,6 +217,15 @@ export const CRON_SCHEDULE: CronTaskDef[] = [
     bjt_times: ['07:00'],
     frequency: 'daily',
     description: 'Flush KV 攒批 warning,推合并日报到 PushDeer (早 7 点)',
+  },
+  {
+    name: 'daily-health-checks',
+    source: 'common',
+    category: 'system',
+    label: '每日健康检查',
+    bjt_times: ['07:00'],
+    frequency: 'daily',
+    description: '翻译失败率 + X metrics 覆盖率检查 (UTC 23:00,与 warning-digest 同 tick)',
   },
   {
     name: 'ops-baseline',

@@ -261,7 +261,7 @@ ${adminNavHtml('tasks')}
     <span class="label">状态</span>
     <select id="filter-status"><option value="">全部</option><option value="ok">ok</option><option value="error">error</option><option value="running">running</option><option value="skipped">skipped</option></select>
     <span class="label">信源</span>
-    <select id="filter-source"><option value="">全部</option><option value="x">x</option><option value="github">github</option><option value="ph">ph</option><option value="hf">hf</option><option value="clawhub">clawhub</option><option value="hdx">hdx</option><option value="common">common</option></select>
+    <select id="filter-source"><option value="">全部</option><option value="x">x</option><option value="github">github</option><option value="ph">ph</option><option value="hf">hf</option><option value="clawhub">clawhub</option><option value="hdx">hdx</option><option value="blog">blog</option><option value="podcast">podcast</option><option value="common">common</option></select>
     <span class="label">类型</span>
     <select id="filter-category"><option value="">全部</option><option value="fetch">fetch</option><option value="enrich">enrich</option><option value="backfill">backfill</option><option value="refresh">refresh</option><option value="cleanup">cleanup</option><option value="system">system</option></select>
   </div>
@@ -282,9 +282,9 @@ const CAT_COLORS = {
 };
 const SOURCE_LABEL = {
   x: 'X', github: 'GH', ph: 'PH', hf: 'HF',
-  clawhub: 'CH', hdx: 'HDX', common: '通用',
+  clawhub: 'CH', hdx: 'HDX', blog: '博客', podcast: '播客', common: '通用',
 };
-const SOURCE_ORDER = ['x', 'github', 'ph', 'hf', 'clawhub', 'hdx', 'common'];
+const SOURCE_ORDER = ['x', 'github', 'ph', 'hf', 'clawhub', 'hdx', 'blog', 'podcast', 'common'];
 
 let viewMode = 'task';      // 'task' | 'all'
 let currentTask = null;
