@@ -14,8 +14,13 @@ import { pushDeerAlert } from '../notifier';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
-// Codex 渲这几源(news 行业新闻排头条;X/clawhub 暂不打包,等模板扩展)
-const PUSH_SOURCES: DigestSource[] = ['news', 'ph', 'gh', 'hf-paper'];
+// Codex 渲这几源(X/clawhub 暂不打包,等模板扩展)。
+// news(行业新闻)推送由 env.NEWS_CODEX_PUSH 门控:默认关,等下游 Codex 适配好 news 板块再开
+// (prod 设 NEWS_CODEX_PUSH=1 即生效,无需改码 / 重部署)。
+function pushSources(env: Env): DigestSource[] {
+  const base: DigestSource[] = ['ph', 'gh', 'hf-paper'];
+  return env.NEWS_CODEX_PUSH === '1' ? ['news', ...base] : base;
+}
 
 async function sha256Hex(s: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -99,6 +104,7 @@ export async function buildDailyCodexPayload(
   slotHourBjt = 8,
   dateOverride?: string, // 'YYYY-MM-DD':重推指定日的池(默认今天)
 ): Promise<DailyCodexPayload> {
+  const PUSH_SOURCES = pushSources(env);
   const date = dateOverride || bjtDateStr();
   const sk = dateOverride
     ? `${dateOverride}-${String(slotHourBjt).padStart(2, '0')}`

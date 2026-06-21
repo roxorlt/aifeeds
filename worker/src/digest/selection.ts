@@ -108,7 +108,8 @@ async function selectClawhubByDelta(env: Env, limit: number): Promise<string[]> 
 
 // 行业新闻(blog+podcast 合并)按「规则综合分」排序(无 LLM)。权重(总分 100):
 //   重要性 40(ai_category)+ 源权威 30(source_company 三档)+ 新鲜度 20(published_at 衰减)+ 深度 10(blog/播客文字稿档)
-// 窗口 2 天(覆盖「昨天到今天」),只取已 enrich(有 ai_summary_zh)的 AI 相关条目;同分按发布时间倒序。
+// 窗口 3 天,只取已 enrich(有 ai_summary_zh)的 AI 相关条目。
+// 同源去重:同一 source_company 先只出最高分 1 条,top N 尽量分散到不同源(防头条全是同一家)。
 async function selectNewsByScore(env: Env, limit: number): Promise<string[]> {
   const cat = `json_extract(extra,'$.ai_category')`;
   const co = `json_extract(extra,'$.source_company')`;
@@ -130,14 +131,26 @@ async function selectNewsByScore(env: Env, limit: number): Promise<string[]> {
         WHEN source_type = 'blog' THEN 8
         WHEN ${tier} = 'A' THEN 10 WHEN ${tier} = 'B' THEN 5 ELSE 2 END
   )`;
-  const sql = `SELECT id FROM items
-    WHERE source_type IN ('blog','podcast')
-      AND is_relevant = 1
-      AND json_extract(extra,'$.ai_summary_zh') IS NOT NULL
-      AND json_extract(extra,'$.ai_summary_zh') != ''
-      AND datetime(scraped_at) >= datetime('now','-3 day')
-      AND deleted_at IS NULL
-    ORDER BY ${score} DESC, datetime(published_at) DESC
+  // 同源去重:每个 source_company 先出最高分 1 条(rn_co=1),top N 不够再补各源第 2、3 条。
+  // ORDER BY rn_co ASC, score DESC = 先所有源「头名」按分排,再所有源「次名」…… LIMIT 截断 → 尽量分散到不同源。
+  const sql = `
+    WITH base AS (
+      SELECT id, ${score} AS score, COALESCE(${co}, '') AS co, published_at
+      FROM items
+      WHERE source_type IN ('blog','podcast')
+        AND is_relevant = 1
+        AND json_extract(extra,'$.ai_summary_zh') IS NOT NULL
+        AND json_extract(extra,'$.ai_summary_zh') != ''
+        AND datetime(scraped_at) >= datetime('now','-3 day')
+        AND deleted_at IS NULL
+    ),
+    ranked AS (
+      SELECT id, score,
+        ROW_NUMBER() OVER (PARTITION BY co ORDER BY score DESC, datetime(published_at) DESC) AS rn_co
+      FROM base
+    )
+    SELECT id FROM ranked
+    ORDER BY rn_co ASC, score DESC
     LIMIT ?`;
   const rows = await env.DB.prepare(sql).bind(limit).all<{ id: string }>();
   return (rows.results || []).map((r) => r.id);
