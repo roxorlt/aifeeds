@@ -38,6 +38,8 @@ export interface RenderedItem {
   media: MediaAsset[]; // 详情页所有图片+视频(尽可能多;logo 不含在内;无媒体为 [])
   duration_sec?: number; // 播客单集时长(秒);仅 podcast(行业新闻板块)有,blog/其他源省略
   guests?: string[]; // 播客本集嘉宾名(LLM 抽取);仅 podcast 且抽到嘉宾时有
+  intro?: string; // 内容简介:图文新闻→excerpt_zh / 播客→shownotes_zh(比一句话 summary 更完整);仅行业新闻有
+  timeline?: Array<{ ts: string; topic: string; speaker?: string; point: string }>; // 话题脉络:仅有原生时间戳文字稿的 podcast 有
 }
 
 export function cleanText(s: string): string {
@@ -333,6 +335,17 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
   const guests = Array.isArray(ex.guests)
     ? (ex.guests as unknown[]).filter((g): g is string => typeof g === 'string' && g.trim() !== '')
     : [];
+  // 行业新闻专属:内容简介(图文→excerpt_zh / 播客→shownotes_zh)+ 话题脉络(有原生时间戳文字稿的播客)
+  let intro: string | undefined;
+  let timeline: RenderedItem['timeline'];
+  if (source === 'news') {
+    const isPod = row.id.startsWith('podcast:');
+    const introRaw = String((isPod ? ex.shownotes_zh : ex.excerpt_zh) || '').trim();
+    if (introRaw) intro = clampSentences(introRaw, 800);
+    if (isPod && Array.isArray(ex.timeline) && ex.timeline.length) {
+      timeline = ex.timeline as RenderedItem['timeline'];
+    }
+  }
   return {
     rank,
     item_id: row.id,
@@ -348,5 +361,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     media: buildMedia(source, row, ex, apiBase),
     ...(durationSec ? { duration_sec: durationSec } : {}),
     ...(guests.length ? { guests } : {}),
+    ...(intro ? { intro } : {}),
+    ...(timeline && timeline.length ? { timeline } : {}),
   };
 }

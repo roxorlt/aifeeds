@@ -41,6 +41,8 @@ interface CodexItem {
   item_id: string;
   duration_sec?: number; // 播客单集时长(秒),仅 podcast 行业新闻条目有
   guests?: string[]; // 播客本集嘉宾名,仅 podcast 且抽到时有
+  intro?: string; // 内容简介:图文→excerpt_zh / 播客→shownotes_zh
+  timeline?: RenderedItem['timeline']; // 话题脉络:有原生时间戳文字稿的 podcast 才有
   raw: { media: RenderedItem['media']; logo: string | null };
 }
 
@@ -58,6 +60,8 @@ function toCodexItem(r: RenderedItem): CodexItem {
     item_id: r.item_id,
     ...(r.duration_sec ? { duration_sec: r.duration_sec } : {}),
     ...(r.guests && r.guests.length ? { guests: r.guests } : {}),
+    ...(r.intro ? { intro: r.intro } : {}),
+    ...(r.timeline && r.timeline.length ? { timeline: r.timeline } : {}),
     raw: { media: r.media, logo: r.logo },
   };
 }
