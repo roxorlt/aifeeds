@@ -1435,7 +1435,8 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ### Workflows（wrangler.toml）
 
-- `digest-node-run-workflow`：节点到点现算 5 源榜单（normal 纯分 / curated LLM 精选）+ 给选了该节点的订阅起 deliver
+- `digest-node-run-workflow`：节点到点现算 4 源榜单（normal 纯分 / curated LLM 精选）+ 给选了该节点的订阅起 deliver
+  - 2026-06-21 ClawHub（龙虾技能）退出订阅日报：`node-run.ts` pool 构建 + `deliver.ts` 投递都 `if (source==='clawhub') continue`，订阅源 ph/gh/hf-paper/x 四源；前端订阅页（`Subscription.tsx`）也去掉龙虾技能勾选项。**仅订阅日报下架** —— 首页「龙虾技能」频道 + 对外 `/api/digest/daily`（仍含 clawhub）都不受影响（DigestSource 类型保留 clawhub）
 - `digest-deliver-workflow`：per-subscription 选品（无 LLM）→ 渲染 → Resend 投递 → 记账 + 重算 next_send_at
 - 节点触发：scheduled handler 按 `utc.getUTCHours()` 在 UTC 0/4/9（BJT 8/12/17）触发 node-run；prod 复用现有 `*/5` cron tick 内判断节点时刻；**staging cron 全关（手动触发，同现有约定）**
 
