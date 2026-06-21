@@ -36,6 +36,8 @@ export interface RenderedItem {
   cover: string | null; // 流内封面(通常 = media 第一张实质图);相对路径已拼 apiBase,无则 null
   logo: string | null; // 品牌 logo/icon(PH 产品图标;其他源多为 null)
   media: MediaAsset[]; // 详情页所有图片+视频(尽可能多;logo 不含在内;无媒体为 [])
+  duration_sec?: number; // 播客单集时长(秒);仅 podcast(行业新闻板块)有,blog/其他源省略
+  guests?: string[]; // 播客本集嘉宾名(LLM 抽取);仅 podcast 且抽到嘉宾时有
 }
 
 export function cleanText(s: string): string {
@@ -326,6 +328,11 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
       title = row.title || body.slice(0, 60);
       summary = body;
   }
+  // 播客专属:单集时长 + 本集嘉宾(blog / 其他源没有 → 省略,不进 JSON)
+  const durationSec = typeof ex.duration_sec === 'number' && ex.duration_sec > 0 ? ex.duration_sec : undefined;
+  const guests = Array.isArray(ex.guests)
+    ? (ex.guests as unknown[]).filter((g): g is string => typeof g === 'string' && g.trim() !== '')
+    : [];
   return {
     rank,
     item_id: row.id,
@@ -339,5 +346,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     cover: pickCover(source, row, ex, apiBase),
     logo: pickLogo(source, row, apiBase),
     media: buildMedia(source, row, ex, apiBase),
+    ...(durationSec ? { duration_sec: durationSec } : {}),
+    ...(guests.length ? { guests } : {}),
   };
 }
