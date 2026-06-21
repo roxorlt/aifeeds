@@ -38,6 +38,8 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricChannelDwell(env));
     case 'drawer-by-source':
       return jsonRes(await metricDrawerBySource(env));
+    case 'dub-wishlist':
+      return jsonRes(await metricDubWishlist(env));
     case 'feed-depth':
       return jsonRes(await metricFeedDepth(env));
     case 'load-perf':
@@ -47,7 +49,7 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
         'overview', 'dau-trend', 'retention', 'returning', 'event-distribution',
         'funnel', 'session-duration', 'errors', 'error-trend',
         'top-devices', 'channel-dwell', 'drawer-by-source', 'feed-depth',
-        'load-perf',
+        'load-perf', 'dub-wishlist',
       ] }, 400);
   }
 }
@@ -551,6 +553,69 @@ async function metricDrawerBySource(env: Env) {
   return { sources: rs.results };
 }
 
+// 「翻译成中文音频」假门需求信号。KPI + 需求强度漏斗(打开播客详情→点想听)+
+// 需求排行(决定先配哪几集)+ 按节目聚合 + 每日趋势。计数全在这看,不暴露 C 端。
+async function metricDubWishlist(env: Env) {
+  // KPI:想听人次 / 去重设备 / 覆盖集数(排除 owner 自己点的)
+  const kpi = await env.DB.prepare(`
+    SELECT COUNT(*) AS total_wishes,
+           COUNT(DISTINCT device_id) AS devices,
+           COUNT(DISTINCT item_id) AS items
+    FROM dub_wishlist WHERE ${NOT_OWNER_SQL}
+  `).first<{ total_wishes: number; devices: number; items: number }>();
+
+  // 需求强度漏斗。分母 = 假门上线后打开过播客详情的去重设备(之前打开的没机会点,
+  // 用首条 wishlist 的时间当起算点排除掉,避免低估转化率)。分子 = 点了想听的去重设备。
+  const funnel = await env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(DISTINCT device_id) FROM events
+        WHERE event_type = 'item_open_drawer'
+          AND json_extract(event_payload, '$.source') = 'podcast'
+          AND occurred_at >= COALESCE((SELECT MIN(created_at) FROM dub_wishlist), strftime('%s','now')*1000)
+          AND ${NOT_OWNER_SQL} AND ${IS_REAL_USER_SQL}) AS openers,
+      (SELECT COUNT(DISTINCT device_id) FROM dub_wishlist WHERE ${NOT_OWNER_SQL}) AS wishers
+  `).first<{ openers: number; wishers: number }>();
+
+  // 需求排行:哪几集最多人想听(去重设备计数)。真做时先配票数高的。
+  const ranking = await env.DB.prepare(`
+    SELECT w.item_id,
+           COUNT(DISTINCT w.device_id) AS wishes,
+           COALESCE(json_extract(i.extra, '$.show_name'), i.author) AS show,
+           COALESCE(json_extract(i.extra, '$.title_zh'), i.title) AS title
+    FROM dub_wishlist w JOIN items i ON i.id = w.item_id
+    WHERE w.${NOT_OWNER_SQL}
+    GROUP BY w.item_id
+    ORDER BY wishes DESC
+    LIMIT 50
+  `).all();
+
+  // 按节目聚合:哪个节目源需求最旺,决定优先级
+  const byShow = await env.DB.prepare(`
+    SELECT COALESCE(json_extract(i.extra, '$.show_name'), i.author) AS show,
+           COUNT(DISTINCT w.device_id) AS wishes
+    FROM dub_wishlist w JOIN items i ON i.id = w.item_id
+    WHERE w.${NOT_OWNER_SQL}
+    GROUP BY show
+    ORDER BY wishes DESC
+    LIMIT 20
+  `).all();
+
+  // 每日趋势:去重设备数 + 人次
+  const trend = await env.DB.prepare(`
+    SELECT day, COUNT(DISTINCT device_id) AS devices, COUNT(*) AS wishes
+    FROM dub_wishlist WHERE ${NOT_OWNER_SQL}
+    GROUP BY day ORDER BY day
+  `).all();
+
+  return {
+    kpi: kpi ?? { total_wishes: 0, devices: 0, items: 0 },
+    funnel: funnel ?? { openers: 0, wishers: 0 },
+    ranking: ranking.results,
+    by_show: byShow.results,
+    trend: trend.results,
+  };
+}
+
 async function metricFeedDepth(env: Env) {
   // 翻页深度 = 用户在 feed 上浏览了多少 item。
   // 严格"翻页"需要前端发 feed_load_more 事件（当前没埋，需要 FE 加）。
@@ -729,6 +794,28 @@ ${adminNavHtml('dashboard')}
 
 <div class="grid">
 
+  <div class="card wide" data-testid="card-dub-wishlist">
+    <h2>🎧 中文配音需求（假门）</h2>
+    <p class="hint">「翻译成中文音频」按钮点击信号。一台设备一集只算一次。计数仅后台可见，不暴露 C 端。设计见 docs/plans/2026-06-20-podcast-dubbing-cost-and-painted-door.md</p>
+    <div class="kpi-row" style="margin:8px 0 16px">
+      <div class="kpi"><div class="label">想听人次</div><div class="value" id="dw-total">—</div></div>
+      <div class="kpi"><div class="label">去重设备</div><div class="value" id="dw-devices">—</div></div>
+      <div class="kpi"><div class="label">覆盖集数</div><div class="value" id="dw-items">—</div></div>
+    </div>
+    <div class="funnel-step">
+      <div><div class="name">打开播客详情</div><div class="sub">item_open_drawer · source=podcast · 假门上线后</div></div>
+      <div class="right"><div class="count" id="dw-openers">—</div></div>
+    </div>
+    <div class="funnel-step">
+      <div><div class="name">点「想听中文版」</div><div class="sub">去重设备</div></div>
+      <div class="right"><div class="count" id="dw-wishers">—</div><div class="pct" id="dw-cvr">—</div></div>
+    </div>
+    <p class="hint" style="margin-top:8px">转化率 = 想听设备 ÷ 打开播客详情设备。经验：&gt;5% 需求明显，&gt;10% 很强</p>
+    <div style="overflow-x:auto;margin-top:16px"><table id="tbl-dub-wishlist"><thead><tr>
+      <th class="num">#</th><th>节目</th><th>单集</th><th class="num">想听设备</th>
+    </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
   <div class="card wide" data-testid="card-dau-trend">
     <h2>📈 DAU 趋势</h2>
     <p class="hint">最近 30 天每天独立 device 数 + 事件总数（双轴）</p>
@@ -858,6 +945,7 @@ async function getJson(url) {
 }
 
 function fmt(n) { return (n || 0).toLocaleString('en-US'); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
 function fmtDuration(sec) {
   sec = Math.max(0, Math.round(sec || 0));
   if (sec < 60) return sec + 's';
@@ -927,6 +1015,34 @@ async function loadOverview() {
       hintEl.textContent = '真实活跃 device · 已剔 ' + fmt(d.synthetic_today) + ' 个测速/bot';
     }
   } catch (e) { console.error('overview', e); }
+}
+
+async function loadDubWishlist() {
+  const tb = document.querySelector('#tbl-dub-wishlist tbody');
+  try {
+    const d = await getJson('/api/admin/analytics?metric=dub-wishlist');
+    const k = d.kpi || {};
+    document.getElementById('dw-total').textContent = fmt(k.total_wishes);
+    document.getElementById('dw-devices').textContent = fmt(k.devices);
+    document.getElementById('dw-items').textContent = fmt(k.items);
+    const f = d.funnel || {};
+    const openers = f.openers || 0, wishers = f.wishers || 0;
+    document.getElementById('dw-openers').textContent = fmt(openers);
+    document.getElementById('dw-wishers').textContent = fmt(wishers);
+    document.getElementById('dw-cvr').textContent = openers > 0 ? (100 * wishers / openers).toFixed(1) + '%' : '—';
+    const rows = d.ranking || [];
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td colspan="4" class="muted">还没有人点（假门刚上线 / 等数据累积）</td></tr>';
+      return;
+    }
+    tb.innerHTML = rows.map(function(r, i) {
+      return '<tr><td class="num">' + (i + 1) + '</td><td>' + esc(r.show || '—') +
+        '</td><td>' + esc(r.title || '—') + '</td><td class="num">' + fmt(r.wishes) + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    console.error('dub-wishlist', e);
+    if (tb) tb.innerHTML = '<tr><td colspan="4" class="err">' + esc(e.message || e) + '</td></tr>';
+  }
 }
 
 async function loadDauTrend() {
@@ -1395,6 +1511,7 @@ window.addEventListener('resize', () => {
 
 Promise.all([
   loadOverview(),
+  loadDubWishlist(),
   loadDauTrend(),
   loadFunnel(),
   loadSession(),

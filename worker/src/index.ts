@@ -48,6 +48,7 @@ import {
 import type { XCookieBlob } from './x-graphql';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
+import { handleDubWishlistAdd, handleDubWishlistState } from './dub-wishlist';
 import {
   runGithubFetchTrending,
   runGithubEnrichPending,
@@ -467,6 +468,13 @@ export default {
       }
       if (path === '/api/track' && request.method === 'POST') {
         return withCors(await handleTrack(request, env), request, env);
+      }
+      // 「翻译成中文音频」假门(painted door):匿名收集需求信号,不真做配音
+      if (path === '/api/dub-wishlist' && request.method === 'POST') {
+        return withCors(await handleDubWishlistAdd(request, env, ctx), request, env);
+      }
+      if (path === '/api/dub-wishlist' && request.method === 'GET') {
+        return withCors(await handleDubWishlistState(request, env), request, env);
       }
       if (path === '/api/auth/sms/send' && request.method === 'POST') {
         return withCors(await handleSmsSend(request, env, ctx), request, env);

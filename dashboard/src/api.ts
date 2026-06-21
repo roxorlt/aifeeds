@@ -354,6 +354,32 @@ export async function fetchStats(): Promise<Stats> {
   return res.json();
 }
 
+// ─── 中文配音「愿望清单」假门(painted door)─────────────────────────
+// 点击只记录需求信号(后台统计用),不真做配音;计数不回给 C 端。匿名即可
+// (apiFetch 自动带 X-Device-Id),登录则后端附 user_id。失败静默(假门容错优先)。
+export async function addDubWishlist(itemId: string): Promise<void> {
+  try {
+    await apiFetch('/api/dub-wishlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_id: itemId }),
+    });
+  } catch {
+    // 假门信号丢一条无所谓,不打扰用户
+  }
+}
+
+// 刷新后回显「已加入」:查当前设备是否已对这集点过。失败当未加入。
+export async function getDubWishlistState(itemId: string): Promise<boolean> {
+  try {
+    const res = await apiFetch(`/api/dub-wishlist?item_id=${encodeURIComponent(itemId)}`);
+    const d = (await res.json()) as { wishlisted?: boolean };
+    return !!d.wishlisted;
+  } catch {
+    return false;
+  }
+}
+
 // ─── 订阅推送（digest subscription）──────────────────────────────────
 // 契约见 docs/plans 设计文档「API 契约」节，源 key / slot / density 以 BE 为单一可信源。
 // 匿名订阅走 POST /api/subscribe（非个人态路径，不触发 401 拦截）；登录态管理走

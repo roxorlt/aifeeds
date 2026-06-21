@@ -22,7 +22,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra } from "../types";
-import { fetchItem } from "../api";
+import { fetchItem, addDubWishlist, getDubWishlistState } from "../api";
 import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { BrandPodcast, IconClock, IconMic, IconUser } from "./icons";
@@ -138,6 +138,15 @@ function IconChevron({ className }: { className?: string }) {
   );
 }
 
+// lucide check（假门「已加入」确认态）
+function IconCheck({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
 // 译/原 pill 段控（对齐 mockup：rounded-full border，active = neutral-900 黑底）
 function LangToggle({
   value,
@@ -217,6 +226,19 @@ export function PodcastDrawerBody({ item }: Props) {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [item.id]);
+
+  // 假门「翻译成中文音频」:点击只记需求(addDubWishlist),不真做配音。
+  // 挂载查当前设备是否已点过,刷新后回显「已加入」(切换不同单集时先重置)。
+  const [dubAdded, setDubAdded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setDubAdded(false);
+    getDubWishlistState(item.id).then((w) => {
+      if (!cancelled && w) setDubAdded(true);
+    });
+    return () => { cancelled = true; };
+  }, [item.id]);
+
   const view = fullItem ?? item;
   const extra = parseJsonField<ItemExtra>(view.extra) ?? ({} as ItemExtra);
 
@@ -374,6 +396,32 @@ export function PodcastDrawerBody({ item }: Props) {
             >
               您的浏览器不支持音频播放。
             </audio>
+            {/* 假门:翻译成中文音频(painted door)。点击只记需求强度,不真做配音。
+                点击后就地变「已加入愿望清单」绿色确认态,刷新后保持。 */}
+            <div className="mt-2.5">
+              {dubAdded ? (
+                <div className="flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] text-emerald-700">
+                  <IconCheck className="h-4 w-4 shrink-0" />
+                  已加入愿望清单
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDubAdded(true); // 乐观更新;信号失败也静默,不打扰用户
+                    void addDubWishlist(item.id);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md border border-neutral-300 px-3 py-2 text-left text-[13px] font-medium text-neutral-700 transition-colors hover:bg-neutral-50"
+                >
+                  <IconTranslate className="h-4 w-4 shrink-0 text-neutral-400" />
+                  <span className="flex flex-col leading-tight">
+                    <span>翻译成中文音频</span>
+                    <span className="text-[11px] font-normal text-neutral-400">AI 配音 · 区分主持与嘉宾</span>
+                  </span>
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           /* 该 feed 混发图文 newsletter(Latent Space/Last Week in AI 的 Substack),
