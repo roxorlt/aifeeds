@@ -228,13 +228,18 @@ export function PodcastDrawerBody({ item }: Props) {
   }, [item.id]);
 
   // 假门「翻译成中文音频」:点击只记需求(addDubWishlist),不真做配音。
-  // 挂载查当前设备是否已点过,刷新后回显「已加入」(切换不同单集时先重置)。
-  const [dubAdded, setDubAdded] = useState(false);
+  // 三种状态(2026-06-21 产品反馈:历史点过的不再展示,避免长期占位):
+  //   loading → 查询中,先不渲染(避免历史已点的集子闪一下按钮再消失)
+  //   button  → 没点过,显示按钮
+  //   added   → 本次会话刚点,显示「已加入」绿条给即时反馈
+  //   hidden  → 以前点过(挂载查到),整块隐藏,什么都不显示
+  // 区分「本次刚点」与「历史已点」:挂载查到已点 = hidden;只有按钮点击才进 added。
+  const [dubState, setDubState] = useState<"loading" | "button" | "added" | "hidden">("loading");
   useEffect(() => {
     let cancelled = false;
-    setDubAdded(false);
-    getDubWishlistState(item.id).then((w) => {
-      if (!cancelled && w) setDubAdded(true);
+    setDubState("loading");
+    getDubWishlistState(item.id).then((wished) => {
+      if (!cancelled) setDubState(wished ? "hidden" : "button");
     });
     return () => { cancelled = true; };
   }, [item.id]);
@@ -397,31 +402,33 @@ export function PodcastDrawerBody({ item }: Props) {
               您的浏览器不支持音频播放。
             </audio>
             {/* 假门:翻译成中文音频(painted door)。点击只记需求强度,不真做配音。
-                点击后就地变「已加入愿望清单」绿色确认态,刷新后保持。 */}
-            <div className="mt-2.5">
-              {dubAdded ? (
-                <div className="flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] text-emerald-700">
-                  <IconCheck className="h-4 w-4 shrink-0" />
-                  已加入愿望清单
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDubAdded(true); // 乐观更新;信号失败也静默,不打扰用户
-                    void addDubWishlist(item.id);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md border border-neutral-300 px-3 py-2 text-left text-[13px] font-medium text-neutral-700 transition-colors hover:bg-neutral-50"
-                >
-                  <IconTranslate className="h-4 w-4 shrink-0 text-neutral-400" />
-                  <span className="flex flex-col leading-tight">
-                    <span>翻译成中文音频</span>
-                    <span className="text-[11px] font-normal text-neutral-400">AI 配音 · 区分主持与嘉宾</span>
-                  </span>
-                </button>
-              )}
-            </div>
+                没点过显示按钮;本次刚点显示「已加入」绿条;历史点过则整块隐藏。 */}
+            {(dubState === "button" || dubState === "added") && (
+              <div className="mt-2.5">
+                {dubState === "added" ? (
+                  <div className="flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] text-emerald-700">
+                    <IconCheck className="h-4 w-4 shrink-0" />
+                    已加入愿望清单
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDubState("added"); // 乐观更新;信号失败也静默,不打扰用户
+                      void addDubWishlist(item.id);
+                    }}
+                    className="flex w-full items-center gap-2 rounded-md border border-neutral-300 px-3 py-2 text-left text-[13px] font-medium text-neutral-700 transition-colors hover:bg-neutral-50"
+                  >
+                    <IconTranslate className="h-4 w-4 shrink-0 text-neutral-400" />
+                    <span className="flex flex-col leading-tight">
+                      <span>翻译成中文音频</span>
+                      <span className="text-[11px] font-normal text-neutral-400">AI 配音 · 区分主持与嘉宾</span>
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           /* 该 feed 混发图文 newsletter(Latent Space/Last Week in AI 的 Substack),
