@@ -1444,7 +1444,7 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 ### Secrets（加到 `.secrets/aifeeds-{prod,staging}.env`）
 
 - `DIGEST_EMAIL_HMAC`（32B hex）：回流 token + 编辑令牌（`edit:` 前缀）HMAC 签名
-- `NEWS_CODEX_PUSH`（flag，默认不设=关）：是否把「行业新闻」板块推进 Codex（`codex-push.ts pushSources`）。**默认关** —— prod 邮件已出行业新闻头条，但**等下游 Codex 适配好 news 板块再设 `=1`**（设了即生效，无需改码/重部署）。`daily-codex-push` payload `source_order` 含不含 news 由此开关决定；prod `DAILY_PUSH_ENABLED=1`（8 点推 ph/gh/hf）已开，故 news 推送只差这个 flag
+- `NEWS_CODEX_PUSH`（flag，prod 已设 `=1`）：是否把「行业新闻」板块推进 Codex（`codex-push.ts pushSources`）。**2026-06-22 Codex 下游适配完成后已开启**（`wrangler secret put`，秒生效无需重部署，已记于 `.secrets/aifeeds-prod.env`）—— 自此 prod `daily-codex-push` payload `source_order = ['news','ph','gh','hf-paper']`，8 点节点把行业新闻头条一并推 Codex。回滚：删该 secret 或设非 `1`
 - `RESEND_WEBHOOK_SECRET`（Svix）：Resend webhook 签名校验
 - 复用现有：`RESEND_API_KEY` / `TURNSTILE_*` / `PUSHDEER_*`
 
