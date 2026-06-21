@@ -1435,14 +1435,16 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ### Workflows（wrangler.toml）
 
-- `digest-node-run-workflow`：节点到点现算 4 源榜单（normal 纯分 / curated LLM 精选）+ 给选了该节点的订阅起 deliver
-  - 2026-06-21 ClawHub（龙虾技能）退出订阅日报：`node-run.ts` pool 构建 + `deliver.ts` 投递都 `if (source==='clawhub') continue`，订阅源 ph/gh/hf-paper/x 四源；前端订阅页（`Subscription.tsx`）也去掉龙虾技能勾选项。**仅订阅日报下架** —— 首页「龙虾技能」频道 + 对外 `/api/digest/daily`（仍含 clawhub）都不受影响（DigestSource 类型保留 clawhub）
+- `digest-node-run-workflow`：节点到点现算 5 源榜单（normal 纯分 / curated LLM 精选）+ 给选了该节点的订阅起 deliver
+  - **2026-06-22 行业新闻（`news` = blog+podcast 合并）进日报 `367a5bc`**：`DIGEST_SOURCE_ORDER` 排第一 = 邮件**头条**，对**所有**订阅者强制展示（`deliver.ts` 对 news 不按勾选过滤，非可订阅源）。选品走 `selection.ts selectNewsByScore`：SQL 规则综合分（重要性40 `ai_category` / 源权威30 `source_company` 三档 / 新鲜20 `published_at` / 深度10 blog或播客文字稿档），3 天窗，窗口函数**同源去重**（每 `source_company` 先出头名），top 3，**无 LLM**（`node-run` 对 news 跳过 `curateSource`）。条目额外字段（`render.ts`/`codex-push.ts` 的 `RenderedItem`/`CodexItem`）：`intro`(图文 `excerpt_zh` / 播客 `shownotes_zh`) / `duration_sec` / `guests` / `timeline`(话题脉络,仅原生时间戳文字稿播客有)；blog/podcast 深链 `/o/<urlencode(composite-id)>`
+  - 2026-06-21 ClawHub（龙虾技能）退出订阅日报：`node-run.ts` pool 构建 + `deliver.ts` 投递都 `if (source==='clawhub') continue`；前端订阅页（`Subscription.tsx`）也去掉龙虾技能勾选项。**仅订阅日报下架** —— 首页「龙虾技能」频道 + 对外 `/api/digest/daily`（仍含 clawhub）都不受影响（DigestSource 类型保留 clawhub）
 - `digest-deliver-workflow`：per-subscription 选品（无 LLM）→ 渲染 → Resend 投递 → 记账 + 重算 next_send_at
 - 节点触发：scheduled handler 按 `utc.getUTCHours()` 在 UTC 0/4/9（BJT 8/12/17）触发 node-run；prod 复用现有 `*/5` cron tick 内判断节点时刻；**staging cron 全关（手动触发，同现有约定）**
 
 ### Secrets（加到 `.secrets/aifeeds-{prod,staging}.env`）
 
 - `DIGEST_EMAIL_HMAC`（32B hex）：回流 token + 编辑令牌（`edit:` 前缀）HMAC 签名
+- `NEWS_CODEX_PUSH`（flag，默认不设=关）：是否把「行业新闻」板块推进 Codex（`codex-push.ts pushSources`）。**默认关** —— prod 邮件已出行业新闻头条，但**等下游 Codex 适配好 news 板块再设 `=1`**（设了即生效，无需改码/重部署）。`daily-codex-push` payload `source_order` 含不含 news 由此开关决定；prod `DAILY_PUSH_ENABLED=1`（8 点推 ph/gh/hf）已开，故 news 推送只差这个 flag
 - `RESEND_WEBHOOK_SECRET`（Svix）：Resend webhook 签名校验
 - 复用现有：`RESEND_API_KEY` / `TURNSTILE_*` / `PUSHDEER_*`
 
