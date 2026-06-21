@@ -34,7 +34,7 @@ const DIGEST_SOURCES: SourceMeta[] = [
   { key: 'ph', sourceType: 'product_hunt', label: '热门产品', desc: 'Product Hunt 每日新品' },
   { key: 'gh', sourceType: 'github', label: '开源项目', desc: 'GitHub 趋势仓库' },
   { key: 'hf-paper', sourceType: 'hf_paper', label: '论文', desc: 'arXiv / HuggingFace 精选' },
-  { key: 'clawhub', sourceType: 'clawhub', label: '龙虾技能', desc: 'ClawHub Claude 技能' },
+  // 2026-06-21 ClawHub(龙虾技能)退出订阅日报:仍是首页频道,但不再作为可订阅源(DigestSourceKey 类型保留 clawhub 以兼容老订阅数据解析)
   { key: 'x', sourceType: 'x_list', label: '动态', desc: 'X 平台 AI 推文' },
 ];
 

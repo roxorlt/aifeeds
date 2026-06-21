@@ -193,6 +193,8 @@ export class DigestDeliverWorkflow extends WorkflowEntrypoint<Env, DeliverParams
       }
 
       for (const source of DIGEST_SOURCE_ORDER) {
+        // 2026-06-21 ClawHub 退出订阅日报:即便老订阅 sources 里仍存了 clawhub 也不投递(只留 homepage 频道)。
+        if (source === 'clawhub') continue;
         if (!sources.includes(source)) continue;
         const pool = await this.env.DB.prepare(
           `SELECT item_ids, items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,

@@ -145,6 +145,9 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
 
     // Phase 1:各源算 normal(纯分 top N)+ curated(LLM 挑 M)榜单
     for (const source of DIGEST_SOURCE_ORDER) {
+      // 2026-06-21 ClawHub(龙虾技能)退出订阅日报:仍保留 homepage 频道 + 对外 daily-api 源,
+      // 但不入 digest_pool(省 curated LLM 调用)、不进订阅邮件。仅此一处下架,daily-api 不受影响。
+      if (source === 'clawhub') continue;
       const cfg = SOURCE_DIGEST_CONFIG[source as DigestSource];
       await step.do(`pool-${source}`, RETRY, async (): Promise<number> => {
         const candidateIds = await selectTopForSource(this.env, source as DigestSource, CURATED_CANDIDATE_POOL);
