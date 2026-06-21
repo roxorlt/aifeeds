@@ -374,6 +374,8 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/longform/pending` | GET | 长推 fetch 队列（`?limit=20`，最多 50；`attempts < 3`） | Bearer `INGEST_TOKEN` |
 | `/api/longform/submit` | POST | 提交本地浏览器抓回的完整长推正文 | Bearer `INGEST_TOKEN` |
 | `/api/track` | POST | Dashboard telemetry 上报（dashboard SDK 用，必带 `X-Device-Id`） | 无（CORS 白名单 + did 必填） |
+| `/api/dub-wishlist` | POST | 播客「翻译成中文音频」假门(painted door)：记录需求信号（body `item_id`，必带 `X-Device-Id`，登录则附 `user_id`）。`INSERT OR IGNORE` 去重，返回 `{ok,already}`。点击不真做配音，计数只在 admin 看板（2026-06-21 上线，`worker/src/dub-wishlist.ts`，表 `dub_wishlist` migration 023） | 无（匿名，必带 X-Device-Id） |
+| `/api/dub-wishlist` | GET | `?item_id=X` 查当前设备是否已点过 → `{wishlisted}`，前端「历史已点则隐藏整块」用 | 无（必带 X-Device-Id） |
 | `/api/auth/sms/send` | POST | 发送短信验证码（必带 `X-Device-Id` + Turnstile token） | 无 + 4 层防刷 |
 | `/api/auth/login` | POST | 提交 phone+code 登录或自动注册（必带 `X-Device-Id`） | 无 |
 | `/api/auth/logout` | POST | 撤销当前 session | session token |
@@ -385,9 +387,9 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
 | `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | CF Access JWT（Basic Auth fallback，见 § 7a） |
 | `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | CF Access JWT（边缘拦截，见 § 7a） |
-| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）、**🎧 中文配音需求（假门）卡片**（2026-06-21：想听 KPI + 需求强度漏斗「打开播客详情→点想听」转化率 + 需求排行榜）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
-| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices`（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices` / `dub-wishlist`(中文配音需求假门)（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 
