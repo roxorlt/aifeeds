@@ -794,28 +794,6 @@ ${adminNavHtml('dashboard')}
 
 <div class="grid">
 
-  <div class="card wide" data-testid="card-dub-wishlist">
-    <h2>🎧 中文配音需求（假门）</h2>
-    <p class="hint">「翻译成中文音频」按钮点击信号。一台设备一集只算一次。计数仅后台可见，不暴露 C 端。设计见 docs/plans/2026-06-20-podcast-dubbing-cost-and-painted-door.md</p>
-    <div class="kpi-row" style="margin:8px 0 16px">
-      <div class="kpi"><div class="label">想听人次</div><div class="value" id="dw-total">—</div></div>
-      <div class="kpi"><div class="label">去重设备</div><div class="value" id="dw-devices">—</div></div>
-      <div class="kpi"><div class="label">覆盖集数</div><div class="value" id="dw-items">—</div></div>
-    </div>
-    <div class="funnel-step">
-      <div><div class="name">打开播客详情</div><div class="sub">item_open_drawer · source=podcast · 假门上线后</div></div>
-      <div class="right"><div class="count" id="dw-openers">—</div></div>
-    </div>
-    <div class="funnel-step">
-      <div><div class="name">点「想听中文版」</div><div class="sub">去重设备</div></div>
-      <div class="right"><div class="count" id="dw-wishers">—</div><div class="pct" id="dw-cvr">—</div></div>
-    </div>
-    <p class="hint" style="margin-top:8px">转化率 = 想听设备 ÷ 打开播客详情设备。经验：&gt;5% 需求明显，&gt;10% 很强</p>
-    <div style="overflow-x:auto;margin-top:16px"><table id="tbl-dub-wishlist"><thead><tr>
-      <th class="num">#</th><th>节目</th><th>单集</th><th class="num">想听设备</th>
-    </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
-  </div>
-
   <div class="card wide" data-testid="card-dau-trend">
     <h2>📈 DAU 趋势</h2>
     <p class="hint">最近 30 天每天独立 device 数 + 事件总数（双轴）</p>
@@ -846,6 +824,28 @@ ${adminNavHtml('dashboard')}
     <h2>📂 详情打开 · 按数据源</h2>
     <p class="hint">7 天 item_open_drawer 按 source 分组。哪个源的内容最吸引用户进抽屉深读</p>
     <div class="chart" id="ch-drawer-source"></div>
+  </div>
+
+  <div class="card" data-testid="card-dub-wishlist">
+    <h2>🎧 中文配音需求</h2>
+    <p class="hint">「翻译成中文音频」按钮点击信号。一台设备一集只算一次。计数仅后台可见，不暴露 C 端。设计见 docs/plans/2026-06-20-podcast-dubbing-cost-and-painted-door.md</p>
+    <div class="kpi-row" style="margin:8px 0 16px">
+      <div class="kpi"><div class="label">想听人次</div><div class="value" id="dw-total">—</div></div>
+      <div class="kpi"><div class="label">去重设备</div><div class="value" id="dw-devices">—</div></div>
+      <div class="kpi"><div class="label">覆盖集数</div><div class="value" id="dw-items">—</div></div>
+    </div>
+    <div class="funnel-step">
+      <div><div class="name">打开播客详情</div><div class="sub">item_open_drawer · source=podcast · 假门上线后</div></div>
+      <div class="right"><div class="count" id="dw-openers">—</div></div>
+    </div>
+    <div class="funnel-step">
+      <div><div class="name">点「想听中文版」</div><div class="sub">去重设备</div></div>
+      <div class="right"><div class="count" id="dw-wishers">—</div><div class="pct" id="dw-cvr">—</div></div>
+    </div>
+    <p class="hint" style="margin-top:8px">转化率 = 想听设备 ÷ 打开播客详情设备。经验：&gt;5% 需求明显，&gt;10% 很强</p>
+    <div style="overflow-x:auto;margin-top:16px"><table id="tbl-dub-wishlist"><thead><tr>
+      <th class="num">#</th><th>节目</th><th>单集</th><th class="num">想听设备</th>
+    </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
   </div>
 
   <div class="card wide" data-testid="card-feed-depth">
