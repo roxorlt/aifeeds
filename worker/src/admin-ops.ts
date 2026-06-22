@@ -258,6 +258,9 @@ ${ADMIN_SHARED_CSS}
   .render-row .ph { width: 36px; height: 48px; border-radius: 3px; background: #0b0e14; border: 1px solid #1f2937; }
   .render-row .rmeta { color: #9ca3af; }
   .render-row .rmeta .h { color: #6ee7b7; font-weight: 600; }
+  .render-toggle { margin-top: 10px; font-size: 12px; color: #9ca3af; background: #1a2230;
+                   border: 1px solid #2a3441; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .render-toggle:hover { background: #232d3d; color: #e6e8eb; }
 </style>
 </head>
 <body>
@@ -473,7 +476,24 @@ async function loadRenders() {
         + '<div class="rmeta"><span class="h">@' + esc(r.handle || '?') + '</span> · ' + esc(r.source) + ' · ' + esc(r.created_bjt) + '<div>' + snippet + '</div></div>'
         + '<div>' + stTxt + '</div></div>';
     }).join('');
+    collapseRenderList(5);
   } catch (e) { root.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
+}
+
+// X 卡片渲染列表默认只展示前 N 条,超出折叠 +「展开全部/收起」按钮(模块太高)。
+// 每次 loadRenders 重设 innerHTML 会清掉旧按钮,这里重新挂,无重复。
+function collapseRenderList(visibleCount) {
+  var root = document.getElementById('render-list');
+  var rows = Array.prototype.slice.call(root.querySelectorAll('.render-row'));
+  if (rows.length <= visibleCount) return;
+  var collapsed = true;
+  function apply() { for (var i = 0; i < rows.length; i++) { if (i >= visibleCount) rows[i].style.display = collapsed ? 'none' : ''; } }
+  var btn = document.createElement('button');
+  btn.className = 'render-toggle';
+  function label() { btn.textContent = collapsed ? ('展开全部 ' + rows.length + ' 条（+' + (rows.length - visibleCount) + '）') : '收起'; }
+  btn.onclick = function() { collapsed = !collapsed; apply(); label(); };
+  apply(); label();
+  root.appendChild(btn);
 }
 
 Promise.all([loadOverview(), loadBaopui(), loadTrend(), loadDiscover(), loadRenders()]);
