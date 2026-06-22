@@ -114,6 +114,7 @@ async function selectNewsByScore(env: Env, limit: number): Promise<string[]> {
   const cat = `json_extract(extra,'$.ai_category')`;
   const co = `json_extract(extra,'$.source_company')`;
   const tier = `json_extract(extra,'$.transcript_tier')`;
+  const tzh = `json_extract(extra,'$.title_zh')`;
   const score = `(
     CASE ${cat}
       WHEN 'model-release' THEN 40 WHEN 'research' THEN 34 WHEN 'safety' THEN 30
@@ -143,6 +144,26 @@ async function selectNewsByScore(env: Env, limit: number): Promise<string[]> {
         AND json_extract(extra,'$.ai_summary_zh') != ''
         AND datetime(scraped_at) >= datetime('now','-3 day')
         AND deleted_at IS NULL
+        -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
+        -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
+        AND lower(COALESCE(title,'')) NOT LIKE '%not much happened%'
+        AND lower(COALESCE(title,'')) NOT LIKE '%nothing happened%'
+        AND lower(COALESCE(title,'')) NOT LIKE '%slow news%'
+        AND COALESCE(${tzh},'') NOT LIKE '%没什么大事%'
+        -- 噪音过滤②:纯活动门票/促销广告(如 "[Exclusive] $250 off AI Engineer tix")。
+        -- 限定在 ai_category='other' 内匹配,保护被正确分类(model-release/product/...)的真新闻。
+        AND NOT (
+          ${cat} = 'other' AND (
+            (lower(COALESCE(title,'')) LIKE '% off %' AND (lower(COALESCE(title,'')) LIKE '%tix%' OR lower(COALESCE(title,'')) LIKE '%ticket%'))
+            OR lower(COALESCE(title,'')) LIKE '%early bird%'
+            OR lower(COALESCE(title,'')) LIKE '%promo code%'
+            OR lower(COALESCE(title,'')) LIKE '%register now%'
+            OR COALESCE(${tzh},'') LIKE '%门票%'
+            OR COALESCE(${tzh},'') LIKE '%早鸟%'
+            OR COALESCE(${tzh},'') LIKE '%报名%'
+            OR COALESCE(${tzh},'') LIKE '%优惠码%'
+          )
+        )
     ),
     ranked AS (
       SELECT id, score,
