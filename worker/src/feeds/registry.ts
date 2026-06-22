@@ -5,6 +5,7 @@
 //   - 10 国外博客原生 RSS（含 Anthropic 第三方桥）+ 2 国内原生（Qwen 旧站 / 美团）
 //   - 1 GitHub Releases（MiniCPM，归 source_type='blog'）
 //   - 11 播客 feed（A 档 5 个有原生文字稿）
+//   - (Phase 2,2026-06-22) +4 国内播客,经 HK VPS 自托管 RSSHub 小宇宙路由（via='rsshub'）→ 共 28
 //
 // ensureFeedSources(env) 启动时幂等 upsert 进 sources 表（镜像 X 把 list 存 sources 的范式）：
 //   sources.id=FeedDef.id, source_type=kind, source_ref=key, name, config=JSON.stringify(FeedDef)。
@@ -396,11 +397,83 @@ const PODCASTS: FeedDef[] = [
   },
 ];
 
-/** 全部可直连 feed（Phase 1，~24）。 */
+// ── 国内播客（Phase 2,经 HK VPS 自托管 RSSHub 的小宇宙路由;2026-06-22 接入,4）─────
+// via='rsshub' → fetchFeedXml 拼 env.RSSHUB_BASE + feed_url(route path)+ X-RSSHub-Token。
+// region='domestic' → pipeline 自动 lang='zh'(podcast.ts)。小宇宙只有 shownotes、无原生
+// 文字稿(has_native_transcript=false,tier B);is_ai gate 滤掉非 AI 单集。
+const DOMESTIC_PODCASTS: FeedDef[] = [
+  {
+    id: "podcast:guigu101",
+    key: "guigu101",
+    kind: "podcast",
+    format: "rss",
+    source_company: "硅谷101",
+    name: "硅谷101",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/xiaoyuzhou/podcast/5e5c52c9418a84a04625e6cc",
+    cadence_hours: 6,
+    fetch_strategy: "native",
+    transcript_tier: "B",
+    has_native_transcript: false,
+    notes: "小宇宙 via RSSHub(rss.ai-feeds.com);shownotes 当正文,无原生文字稿",
+  },
+  {
+    id: "podcast:onboard",
+    key: "onboard",
+    kind: "podcast",
+    format: "rss",
+    source_company: "OnBoard!",
+    name: "OnBoard!",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/xiaoyuzhou/podcast/61cbaac48bb4cd867fcabe22",
+    cadence_hours: 6,
+    fetch_strategy: "native",
+    transcript_tier: "B",
+    has_native_transcript: false,
+    notes: "小宇宙 via RSSHub",
+  },
+  {
+    id: "podcast:ai-qianxian",
+    key: "ai-qianxian",
+    kind: "podcast",
+    format: "rss",
+    source_company: "AI 前线",
+    name: "AI 前线",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/xiaoyuzhou/podcast/679d8c5ded7799e793bb7936",
+    cadence_hours: 6,
+    fetch_strategy: "native",
+    transcript_tier: "B",
+    has_native_transcript: false,
+    notes: "小宇宙 via RSSHub;InfoQ/极客邦出品",
+  },
+  {
+    id: "podcast:zhangxiaojun",
+    key: "zhangxiaojun",
+    kind: "podcast",
+    format: "rss",
+    source_company: "张小珺·商业访谈录",
+    name: "张小珺·商业访谈录",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/xiaoyuzhou/podcast/626b46ea9cbbf0451cf5a962",
+    cadence_hours: 6,
+    fetch_strategy: "native",
+    transcript_tier: "B",
+    has_native_transcript: false,
+    notes: "小宇宙 via RSSHub",
+  },
+];
+
+/** 全部 feed(Phase 1 原生 24 + Phase 2 RSSHub 中文播客 4 = 28)。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...DOMESTIC_BLOGS,
   ...PODCASTS,
+  ...DOMESTIC_PODCASTS,
 ];
 
 /** 按 id 查 FeedDef。 */
