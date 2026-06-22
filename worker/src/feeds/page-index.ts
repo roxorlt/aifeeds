@@ -68,6 +68,14 @@ const PAGE_INDEX: Record<string, PageIndexConfig> = {
       !/\/blog\/(category|authors?|tag)$/.test(u),
     recentN: 15,
   },
+  // MiniMax(minimax.io/news):Next.js app-router,server 端只渲染最新数篇 /news/<slug> anchor
+  //（其余在 JS 里）。取这几篇最新即可(新文章滚动进"最新"菜单);date/标题靠详情页 og(ISO datePublished)。
+  minimax: {
+    method: "html-index",
+    indexUrls: ["https://www.minimax.io/news"],
+    isArticle: (u) => /^https:\/\/www\.minimax\.io\/news\/[a-z0-9-]+$/.test(u),
+    recentN: 12,
+  },
   // 美团技术团队:原 RSS(/feed/)已 301 迁走且停更 → 扒首页 + 归档页;date 在 URL /YYYY/MM/DD/。
   "meituan-tech": {
     method: "html-index",

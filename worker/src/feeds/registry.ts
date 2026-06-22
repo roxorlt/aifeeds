@@ -268,6 +268,21 @@ const PAGE_SCRAPE_BLOGS: FeedDef[] = [
     site_base: "https://www.databricks.com",
     notes: "Phase 3 page-scrape;sitemap 无 lastmod → 扒首页 anchor 发现(html-index),date 靠详情页 og;极活跃",
   },
+  {
+    id: "blog:minimax",
+    key: "minimax",
+    kind: "blog",
+    format: "rss",
+    source_company: "MiniMax",
+    name: "MiniMax News",
+    region: "foreign",
+    via: "native",
+    fetch_strategy: "page-scrape",
+    feed_url: "https://www.minimax.io/news",
+    cadence_hours: 2,
+    site_base: "https://www.minimax.io",
+    notes: "Phase 3 page-scrape;Next.js app-router,首页 server 渲染最新数篇 /news/ anchor(html-index),标题/封面/日期 og 详情页抽",
+  },
 ];
 
 // ── 播客（11；A 档 5 个 has_native_transcript=true）──────────────────────────
@@ -519,8 +534,9 @@ const DOMESTIC_PODCASTS: FeedDef[] = [
   },
 ];
 
-/** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 4 = 31）。
- *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团。 */
+/** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5 = 32）。
+ *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团;
+ *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...DOMESTIC_BLOGS,
