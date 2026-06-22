@@ -486,12 +486,21 @@ async function metricErrorTrend(env: Env) {
   return { rows: rs.results };
 }
 
+// 邮箱脱敏:本地部分保留首2 + 末1,中间打码,域名保留(lt***6@gmail.com)。短本地名只留首字。
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at < 1) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  if (local.length <= 2) return local.slice(0, 1) + '***' + domain;
+  const tail = local.length > 3 ? local.slice(-1) : '';
+  return local.slice(0, 2) + '***' + tail + domain;
+}
+
 async function metricTopDevices(env: Env) {
-  // active_date_counts = 该 device 28 天内每天的事件数，json 对象 {"YYYY-MM-DD": N}。
-  // 前端按 count 分级染色渲染 GitHub 风格 28 格（7×4）贡献小方格。28 而非 30 让
-  // 7 列 × 4 行整齐，无需 pad；最右下角是今天（带 outline）。
-  // 用 CTE 先按 device+day group 算 cnt，再 outer 用 json_group_object 拼。
-  // 避免 correlated subquery 跟 NOT_OWNER_SQL 拼接时 alias 混乱。
+  // active_date_counts = 该 device 28 天内每天事件数 json {"YYYY-MM-DD": N},前端渲 28 格(7×4)贡献图。
+  // event_type_counts  = 该 device 各事件类型次数 json {event_type: N},前端译中文名展示(替代裸数字)。
+  // email = 该 device 关联登录 user 的邮箱(provider=email),metric 内脱敏后返回 email_masked,原始邮箱不出 worker。
   const rs = await env.DB.prepare(`
     WITH per_dev_day AS (
       SELECT
@@ -504,33 +513,62 @@ async function metricTopDevices(env: Env) {
         AND ${IS_REAL_USER_SQL}
       GROUP BY device_id, day
     ),
+    per_dev_evt AS (
+      SELECT device_id, json_group_object(event_type, n) AS event_type_counts
+      FROM (
+        SELECT device_id, event_type, COUNT(*) AS n
+        FROM events
+        WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
+          AND ${NOT_OWNER_SQL}
+          AND ${IS_REAL_USER_SQL}
+        GROUP BY device_id, event_type
+      )
+      GROUP BY device_id
+    ),
     per_dev AS (
       SELECT
         device_id,
-        COUNT(DISTINCT event_type) AS event_types,
         substr(COALESCE(MAX(ua),''), 1, 80) AS ua_sample
       FROM events
       WHERE occurred_at > (strftime('%s','now')-28*86400)*1000
         AND ${NOT_OWNER_SQL}
         AND ${IS_REAL_USER_SQL}
       GROUP BY device_id
+    ),
+    per_dev_email AS (
+      SELECT e.device_id, MAX(i.identity_value) AS email
+      FROM events e
+      JOIN identities i ON i.user_id = e.user_id AND i.provider = 'email' AND i.unbound_at IS NULL
+      WHERE e.user_id IS NOT NULL
+        AND e.occurred_at > (strftime('%s','now')-28*86400)*1000
+      GROUP BY e.device_id
     )
     SELECT
       d.device_id,
       SUM(d.cnt) AS events,
       COUNT(*) AS active_days,
-      p.event_types,
+      pe.event_type_counts,
       MIN(d.day) AS first_seen,
       MAX(d.day) AS last_seen,
       p.ua_sample,
+      em.email,
       json_group_object(d.day, d.cnt) AS active_date_counts
     FROM per_dev_day d
     JOIN per_dev p ON p.device_id = d.device_id
-    GROUP BY d.device_id, p.event_types, p.ua_sample
+    JOIN per_dev_evt pe ON pe.device_id = d.device_id
+    LEFT JOIN per_dev_email em ON em.device_id = d.device_id
+    GROUP BY d.device_id, pe.event_type_counts, p.ua_sample, em.email
     ORDER BY active_days DESC, events DESC
     LIMIT 30
   `).all();
-  return { devices: rs.results };
+  // 脱敏邮箱,原始邮箱不发前端
+  const devices = ((rs.results || []) as any[]).map((d) => {
+    const masked = d.email ? maskEmail(d.email as string) : null;
+    delete d.email;
+    d.email_masked = masked;
+    return d;
+  });
+  return { devices };
 }
 
 async function metricDrawerBySource(env: Env) {
@@ -750,6 +788,8 @@ ${ADMIN_SHARED_CSS}
   .ua-cell .device-name { color: #d1d5db; font-size: 12px; font-weight: 500; }
   .ua-cell .ua-raw { color: #6b7280; font-size: 10px; font-family: ui-monospace, monospace;
                      margin-top: 4px; line-height: 1.4; word-break: break-all; }
+  .dev-id { color: #e6e8eb; font-family: ui-monospace, monospace; font-size: 12px; }
+  .dev-email { color: #7c93b8; font-size: 11px; margin-top: 3px; font-family: ui-monospace, monospace; }
 
   .funnel-step { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin: 8px 0;
                  padding: 12px; background: #0b0e14; border: 1px solid #1f2937; border-radius: 6px; }
@@ -902,7 +942,7 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide" data-testid="card-top-devices">
     <h2>🧑‍💻 重度设备</h2>
-    <p class="hint">最近 28 天按 active_days × events 排序前 30。active_days ≥ 5 加 GitHub 风格活跃日方格（7×4 排列，由浅到深 4 级颜色按当天 event 数：1-9 / 10-49 / 50-199 / 200+；带边框那格是今天）</p>
+    <p class="hint">最近 28 天按 active_days × events 排序前 30。每行都展示 GitHub 风格活跃日方格（7×4，由浅到深 4 级按当天 event 数：1-9 / 10-49 / 50-199 / 200+；带边框那格是今天）。「事件类型」列悬停看完整类型及次数；device_id 下方 ✉ 为该设备关联过的登录邮箱（已脱敏）</p>
     <div style="overflow-x:auto"><table id="tbl-devices"><thead><tr>
       <th>device_id</th><th class="num">events</th><th class="num">活跃天</th><th class="num">事件类型</th>
       <th>first seen</th><th>last seen</th><th>28 天分布</th><th>UA</th>
@@ -1343,16 +1383,32 @@ async function loadDevices() {
     const d = await getJson('/api/admin/analytics?metric=top-devices');
     if (!d.devices.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">无数据</td></tr>'; return; }
     tb.innerHTML = d.devices.map(r => {
-      const grid = r.active_days >= 5 ? renderContribGrid(r.active_date_counts) : '<span class="muted">—</span>';
+      // 28 天分布:所有行都展示(此前仅 active_days ≥ 5 才显示)
+      const grid = renderContribGrid(r.active_date_counts);
       const ua = parseUA(r.ua_sample || '');
       const uaCell = '<div class="ua-cell">'
         + '<div class="device-name">' + ua.device + (ua.browser ? ' · ' + ua.browser : '') + '</div>'
         + '<div class="ua-raw" title="' + (r.ua_sample || '').replace(/"/g, '&quot;') + '">' + (r.ua_sample || '—') + '</div>'
         + '</div>';
-      return '<tr><td>' + r.device_id + '</td>'
+      // device_id 下方挂脱敏邮箱(若该设备关联过登录邮箱)
+      const idCell = '<div class="dev-id">' + r.device_id + '</div>'
+        + (r.email_masked ? '<div class="dev-email" title="该设备关联过的登录邮箱(已脱敏)">✉ ' + r.email_masked + '</div>' : '');
+      // 事件类型:译成中文名展示 top3 +「等N种」,悬停 tooltip 列全部类型及次数(替代裸数字)
+      let evtCell = '<span class="muted">—</span>';
+      try {
+        const ec = typeof r.event_type_counts === 'string' ? JSON.parse(r.event_type_counts) : (r.event_type_counts || {});
+        const entries = Object.entries(ec).sort((a, b) => b[1] - a[1]);
+        if (entries.length) {
+          const top = entries.slice(0, 3).map(e => evtZh(e[0])).join('·');
+          const more = entries.length > 3 ? ' 等' + entries.length + '种' : '';
+          const tip = entries.map(e => evtZh(e[0]) + ' ' + e[1]).join(' / ');
+          evtCell = '<span title="' + tip.replace(/"/g, '&quot;') + '">' + top + more + '</span>';
+        }
+      } catch (e) {}
+      return '<tr><td>' + idCell + '</td>'
         + '<td class="num">' + fmt(r.events) + '</td>'
         + '<td class="num">' + fmt(r.active_days) + '</td>'
-        + '<td class="num">' + fmt(r.event_types) + '</td>'
+        + '<td>' + evtCell + '</td>'
         + '<td>' + r.first_seen + '</td>'
         + '<td>' + r.last_seen + '</td>'
         + '<td>' + grid + '</td>'
