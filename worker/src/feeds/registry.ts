@@ -196,11 +196,11 @@ const DOMESTIC_BLOGS: FeedDef[] = [
     name: "美团技术团队",
     region: "domestic",
     via: "native",
-    feed_url: "https://tech.meituan.com/feed/",
+    feed_url: "https://tech.meituan.com/",
     cadence_hours: 2,
-    fetch_strategy: "native",
+    fetch_strategy: "page-scrape",
     site_base: "https://tech.meituan.com",
-    notes: "原生可用更稳，不走 RSSHub；is_ai gate 滤非 AI 工程文",
+    notes: "2026-06-22 原 RSS(/feed/)已 301 迁走且停更 → 改 page-scrape;首页 + history.html 发现(page-index.ts),date 在 URL /YYYY/MM/DD/;is_ai gate 滤非 AI 工程文",
   },
   {
     id: "blog:minicpm",
@@ -252,6 +252,21 @@ const PAGE_SCRAPE_BLOGS: FeedDef[] = [
     fetch_strategy: "page-scrape",
     site_base: "https://cohere.com",
     notes: "Phase 3 page-scrape;sitemap.xml 扁平发现(带 lastmod,排除 locale 变体),og: 详情页抽",
+  },
+  {
+    id: "blog:databricks",
+    key: "databricks",
+    kind: "blog",
+    format: "rss",
+    source_company: "Databricks",
+    name: "Databricks Blog",
+    region: "foreign",
+    via: "native",
+    fetch_strategy: "page-scrape",
+    feed_url: "https://www.databricks.com/blog",
+    cadence_hours: 2,
+    site_base: "https://www.databricks.com",
+    notes: "Phase 3 page-scrape;sitemap 无 lastmod → 扒首页 anchor 发现(html-index),date 靠详情页 og;极活跃",
   },
 ];
 
@@ -504,7 +519,8 @@ const DOMESTIC_PODCASTS: FeedDef[] = [
   },
 ];
 
-/** 全部 feed(Phase 1 原生 24 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 2 = 30)。 */
+/** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 4 = 31）。
+ *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...DOMESTIC_BLOGS,

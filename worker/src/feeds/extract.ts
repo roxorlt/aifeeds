@@ -337,19 +337,36 @@ export function extractPageMeta(html: string, baseUrl: string): PageMeta {
     if (abs) meta.cover = abs;
   }
 
-  // 发布时间
-  let pub = metaContent(html, "article:published_time") || metaContent(html, "datePublished");
-  if (!pub) {
-    const jm = html.match(/"datePublished"\s*:\s*"([^"]+)"/);
-    if (jm) pub = jm[1];
+  // 发布时间:多来源取第一个能规整成 ISO 的。JSON-LD datePublished 最规范(优先);
+  // article:published_time 有的站是非 ISO 怪格式(如 Databricks "Tue, 06/16/2026 - 12:45")。
+  const jm = html.match(/"datePublished"\s*:\s*"([^"]+)"/);
+  const tm = html.match(/<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i);
+  const dateCandidates = [
+    jm ? jm[1] : undefined,
+    metaContent(html, "article:published_time"),
+    metaContent(html, "datePublished"),
+    tm ? tm[1] : undefined,
+  ];
+  for (const c of dateCandidates) {
+    const iso = toIsoDate(c);
+    if (iso) {
+      meta.published_at = iso;
+      break;
+    }
   }
-  if (!pub) {
-    const tm = html.match(/<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i);
-    if (tm) pub = tm[1];
-  }
-  if (pub) meta.published_at = pub.trim();
 
   return meta;
+}
+
+/** 把各种日期串规整成 ISO8601;已是 ISO 原样(纯日期补时间),否则试 Date 解析,非法返回 undefined。 */
+function toIsoDate(s?: string): string | undefined {
+  if (!s) return undefined;
+  const t = s.trim();
+  if (/^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}|$)/.test(t)) {
+    return t.length === 10 ? `${t}T00:00:00Z` : t;
+  }
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 export async function extractFullText(
