@@ -291,6 +291,39 @@ async function fetchBodyForBlog(
       .bind(res.body_markdown || '', JSON.stringify(bodyMeta), readingMin, itemId)
       .run();
 
+    // page-scrape：用详情页 og: 元数据补 title / cover / published_at。
+    // stub 只有 slug 占位标题(discoverPageIndex)+ sitemap lastmod；og:title 更准必覆盖，
+    // 封面 sitemap 没有、发布时间 sitemap 可能缺(Databricks) → 仅当当前为空才补。
+    if (fetchStrategy === 'page-scrape' && res.meta) {
+      const m = res.meta;
+      const sets: string[] = [];
+      const binds: unknown[] = [];
+      if (m.title) {
+        sets.push('title = ?');
+        binds.push(m.title.slice(0, 300));
+      }
+      if (m.published_at) {
+        sets.push("published_at = COALESCE(NULLIF(published_at, ''), ?)");
+        binds.push(m.published_at);
+      }
+      if (m.cover) {
+        sets.push(
+          "extra = json_set(coalesce(extra,'{}'), '$.cover_image', COALESCE(json_extract(extra,'$.cover_image'), ?))",
+        );
+        binds.push(m.cover);
+      }
+      if (sets.length > 0) {
+        binds.push(itemId);
+        try {
+          await env.DB.prepare(`UPDATE items SET ${sets.join(', ')} WHERE id = ?`)
+            .bind(...binds)
+            .run();
+        } catch (e) {
+          console.error(`[blog-pipeline:body] ${itemId} page-meta update error`, e);
+        }
+      }
+    }
+
     console.log(
       `[blog-pipeline:body] ${itemId}: source=${res.source} len=${(res.body_markdown || '').length} assets=${res.assets.length}`,
     );

@@ -26,6 +26,7 @@ import type {
   BlogExtra,
   BlogTriggerSignals,
   FeedDef,
+  ParsedFeedItem,
   TriggerResult,
 } from './feeds/types';
 import {
@@ -35,6 +36,7 @@ import {
   feedsByKind,
 } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
+import { discoverPageIndex, hasPageIndexConfig } from './feeds/page-index';
 import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet } from './x-list-cursor';
 import { partitionForCatchup } from './x-list-cursor';
@@ -108,11 +110,18 @@ async function ingestOneBlogFeed(
   //    fetchFeedXml 只结构化读 env.RSSHUB_BASE/RSSHUB_TOKEN(运行时由 worker-integration
   //    在 wrangler.toml [vars] + Env 提供)。窄化转型到其入参形态，避免依赖 worker-integration
   //    是否已把这两字段补进 Env 类型(并行构建顺序无关；纯编译期，零运行时变化)。
-  const xml = await fetchFeedXml(
-    env as { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string },
-    feed,
-  );
-  const parsedItems = parseFeed(xml, feed);
+  // Phase 3 page-scrape:无 RSS 的源走 sitemap 列表发现(discoverPageIndex),产出
+  // 与 parseFeed 同构的 ParsedFeedItem[];其余走 RSS/Atom(fetchFeedXml + parseFeed)。
+  let parsedItems: ParsedFeedItem[];
+  if (feed.fetch_strategy === 'page-scrape' && hasPageIndexConfig(feed.key)) {
+    parsedItems = await discoverPageIndex(feed);
+  } else {
+    const xml = await fetchFeedXml(
+      env as { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string },
+      feed,
+    );
+    parsedItems = parseFeed(xml, feed);
+  }
   if (parsedItems.length === 0) {
     return { parsed: 0, inserted: 0, triggered: 0, pending: 0, coldStart: isColdStart };
   }

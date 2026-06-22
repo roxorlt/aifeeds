@@ -233,7 +233,7 @@ function pageHeaders(referer?: string): Record<string, string> {
 }
 
 /** 同 origin 串行 + 间隔门控 + jitter 的 fetch（拿 HTML 文本，永不 throw）。 */
-async function throttledFetchText(url: string): Promise<string | null> {
+export async function throttledFetchText(url: string): Promise<string | null> {
   let origin: string;
   try {
     origin = new URL(url).origin;
@@ -283,6 +283,75 @@ async function throttledFetchText(url: string): Promise<string | null> {
 const MIN_BODY_CHARS = 400;
 const MIN_FULL_TEXT_CHARS = 800;
 
+/** 详情页 og: / JSON-LD 元数据(page-scrape 源补 title / cover / 发布时间用)。 */
+export interface PageMeta {
+  title?: string;
+  cover?: string;
+  published_at?: string;
+}
+
+/** 找 property/name === key 的 <meta> 的 content。 */
+function metaContent(html: string, key: string): string | undefined {
+  const re = /<meta\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  const target = key.toLowerCase();
+  while ((m = re.exec(html)) !== null) {
+    const tag = m[0];
+    const prop = (attrIn(tag, "property") || attrIn(tag, "name") || "").toLowerCase();
+    if (prop === target) {
+      const content = attrIn(tag, "content");
+      if (content) return content;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 从详情页 HTML 抽标准化元数据。优先 og:(近乎通用、干净);标题退化到 <title>(去站名后缀)
+ * 或 <h1>;发布时间退化到 JSON-LD datePublished / <time datetime>。
+ */
+export function extractPageMeta(html: string, baseUrl: string): PageMeta {
+  const meta: PageMeta = {};
+
+  // 标题:og:title → twitter:title → <title> → 首个 <h1>
+  let title = metaContent(html, "og:title") || metaContent(html, "twitter:title");
+  if (!title) {
+    const t = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) title = inlineText(t[1]);
+  }
+  if (!title) {
+    const h1 = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1) title = inlineText(h1[1]);
+  }
+  if (title) {
+    // 去站名后缀("标题 | Site" / "标题 · Site"):og:title 也常带(如 AI21 "... | AI21")。
+    // 仅吃 | 和 ·(不吃 -,避免误伤连字符标题),且后缀 ≤40 字,降低误伤正文含 | 的概率。
+    title = title.replace(/\s*[|·]\s*[^|·]{1,40}$/, "").trim() || title.trim();
+    meta.title = title.trim();
+  }
+
+  // 封面
+  const cover = metaContent(html, "og:image") || metaContent(html, "twitter:image");
+  if (cover) {
+    const abs = resolveUrl(cover, baseUrl);
+    if (abs) meta.cover = abs;
+  }
+
+  // 发布时间
+  let pub = metaContent(html, "article:published_time") || metaContent(html, "datePublished");
+  if (!pub) {
+    const jm = html.match(/"datePublished"\s*:\s*"([^"]+)"/);
+    if (jm) pub = jm[1];
+  }
+  if (!pub) {
+    const tm = html.match(/<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i);
+    if (tm) pub = tm[1];
+  }
+  if (pub) meta.published_at = pub.trim();
+
+  return meta;
+}
+
 export async function extractFullText(
   env: Env,
   input: {
@@ -295,6 +364,7 @@ export async function extractFullText(
   body_markdown: string;
   assets: FeedBodyAsset[];
   source: FeedBodyMeta["source"];
+  meta?: PageMeta;
 }> {
   void env; // v1 无需 env（无头渲染留 Phase 3 才需 BROWSER / RENDER_TOKEN）
   const { canonicalUrl, feed, fetchStrategy, rssContentHtml } = input;
@@ -309,22 +379,25 @@ export async function extractFullText(
   }
 
   // ② 服务端静态抽取（native / page-scrape）。③无头 v1 不接（headless 留 Phase 3）。
+  let pageMeta: PageMeta | undefined;
   if (fetchStrategy === "native" || fetchStrategy === "page-scrape") {
     try {
       const html = await throttledFetchText(canonicalUrl);
       if (html && !isChallengeOrShell(html)) {
+        // 详情页 og: / JSON-LD 元数据：page-scrape 源 stub 只有 slug 占位标题，靠这个补真标题/封面/日期
+        pageMeta = extractPageMeta(html, baseUrl);
         const region = isolateMainRegion(html);
         if (region) {
           const { markdown, assets } = htmlToMarkdown(region, baseUrl);
           if (markdown.length >= MIN_BODY_CHARS) {
-            return { body_markdown: markdown, assets, source: "static_extract" };
+            return { body_markdown: markdown, assets, source: "static_extract", meta: pageMeta };
           }
         }
         const nextHtml = extractNextDataHtml(html);
         if (nextHtml) {
           const { markdown, assets } = htmlToMarkdown(nextHtml, baseUrl);
           if (markdown.length >= MIN_BODY_CHARS) {
-            return { body_markdown: markdown, assets, source: "static_extract" };
+            return { body_markdown: markdown, assets, source: "static_extract", meta: pageMeta };
           }
         }
         // 段落兜底（抄 ar5iv extractParagraphs 风格）
@@ -335,6 +408,7 @@ export async function extractFullText(
             body_markdown: joined,
             assets: collectAssetsFromHtml(html, baseUrl),
             source: "static_extract",
+            meta: pageMeta,
           };
         }
       }
@@ -343,12 +417,12 @@ export async function extractFullText(
     }
   }
 
-  // ④ 优雅降级：用 RSS 摘要 HTML 转 markdown（抓不到全文也能上 feed）
+  // ④ 优雅降级：用 RSS 摘要 HTML 转 markdown（抓不到全文也能上 feed）；已抓到的 meta 一并带上
   if (rssContentHtml) {
     const { markdown, assets } = htmlToMarkdown(rssContentHtml, baseUrl);
-    return { body_markdown: markdown, assets, source: "rss_summary_fallback" };
+    return { body_markdown: markdown, assets, source: "rss_summary_fallback", meta: pageMeta };
   }
-  return { body_markdown: "", assets: [], source: "rss_summary_fallback" };
+  return { body_markdown: "", assets: [], source: "rss_summary_fallback", meta: pageMeta };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

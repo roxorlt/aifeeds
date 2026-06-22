@@ -219,6 +219,42 @@ const DOMESTIC_BLOGS: FeedDef[] = [
   },
 ];
 
+// ── 国外博客 page-scrape（Phase 3,无 RSS;sitemap 发现 + og: 详情页抽,2026-06-22）──────
+// fetch_strategy='page-scrape' → blog.ts 走 feeds/page-index.ts 的 discoverPageIndex(sitemap),
+// 不走 parseFeed;feed_url 仅文档/展示用(真实 sitemap 在 page-index.ts 配)。via 字段不参与。
+const PAGE_SCRAPE_BLOGS: FeedDef[] = [
+  {
+    id: "blog:ai21",
+    key: "ai21",
+    kind: "blog",
+    format: "rss",
+    source_company: "AI21 Labs",
+    name: "AI21 Labs Blog",
+    region: "foreign",
+    via: "native",
+    feed_url: "https://www.ai21.com/blog/",
+    cadence_hours: 2,
+    fetch_strategy: "page-scrape",
+    site_base: "https://www.ai21.com",
+    notes: "Phase 3 page-scrape;post-sitemap.xml 发现(带 lastmod),标题/封面/正文 og: 详情页抽",
+  },
+  {
+    id: "blog:cohere",
+    key: "cohere",
+    kind: "blog",
+    format: "rss",
+    source_company: "Cohere",
+    name: "Cohere Blog",
+    region: "foreign",
+    via: "native",
+    feed_url: "https://cohere.com/blog",
+    cadence_hours: 2,
+    fetch_strategy: "page-scrape",
+    site_base: "https://cohere.com",
+    notes: "Phase 3 page-scrape;sitemap.xml 扁平发现(带 lastmod,排除 locale 变体),og: 详情页抽",
+  },
+];
+
 // ── 播客（11；A 档 5 个 has_native_transcript=true）──────────────────────────
 const PODCASTS: FeedDef[] = [
   {
@@ -468,10 +504,11 @@ const DOMESTIC_PODCASTS: FeedDef[] = [
   },
 ];
 
-/** 全部 feed(Phase 1 原生 24 + Phase 2 RSSHub 中文播客 4 = 28)。 */
+/** 全部 feed(Phase 1 原生 24 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 2 = 30)。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...DOMESTIC_BLOGS,
+  ...PAGE_SCRAPE_BLOGS,
   ...PODCASTS,
   ...DOMESTIC_PODCASTS,
 ];
