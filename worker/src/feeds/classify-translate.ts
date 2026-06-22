@@ -27,6 +27,22 @@ const AI_CATEGORIES: ReadonlySet<string> = new Set([
   "other",
 ]);
 
+// 去掉新闻标题开头的栏目 / 推广标签前缀:[AINews]、[Exclusive]、【独家】 等。
+// 这些标签是源站原标题自带的(如 smol.ai newsletter),直译会原样带进来,降低可读性。
+// 仅剥「开头、短(≤24 字)、方括号 [] 或中文方括号 【】」的标签段,可连续多个;
+// 圆括号 () 不剥(常含有意义的限定词);剥完过短(<4 字)则放弃,防把纯标签标题清空。
+// 新 prompt 已要求 LLM 自行去前缀,这里是渲染层 + 存量老标题的兜底防线。
+export function stripLabelPrefix(s: string): string {
+  let t = (s || "").trim();
+  const re = /^\s*[\[【][^\]】\n]{1,24}[\]】]\s*[:：–—-]?\s*/;
+  for (let i = 0; i < 4; i++) {
+    const stripped = t.replace(re, "").trim();
+    if (!stripped || stripped.length < 4 || stripped === t) break;
+    t = stripped;
+  }
+  return t;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DeepSeek 调用（system+user；JSON / 纯文本两种）— 1 次 retry
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,7 +322,7 @@ function enrichUser(
 【任务】输出 JSON（只输出 JSON，不要 markdown 代码块包裹）。**不要输出 is_relevant**（上游 step1 已判定，此处只对已确认相关的内容做分类 + 翻译）：
 {
   "ai_category": "<二级分类，见枚举>",
-  "title_zh": "<标题中译，保留专有名词英文>",
+  "title_zh": "<严肃行业媒体口吻的中文新闻标题，规则见下方【标题规则】，不是逐字翻译>",
   "${zhField}": "<摘要中译，ELI25 风格，60-120 字>",
   "ai_summary_zh": "<一句话 ELI25 解读，30-50 字，读完这一句就知道这篇讲什么 + 为什么值得看>"${
     kind === "podcast"
@@ -323,6 +339,19 @@ function enrichUser(
 - **不要**填节目固定主持人、不要填公司名/产品名/泛称（"a16z partner"、"researchers" 不算）
 - 标题 "#466 – Jeffrey Wasserstrom: ..." 里冒号前的人名就是嘉宾
 - 提取不到明确人名 → 输出空数组 []`
+      : ""
+  }
+
+【标题规则（title_zh，行业报刊严肃口吻）】
+- 这是要进日报邮件和首页信息流的新闻标题，按严肃行业媒体（财新、路透科技频道那种）的口吻重写，不是逐字翻译
+- 去掉原标题里的栏目 / 邮件 / 推广前缀和方括号标签，例：[AINews]、[Exclusive]、【独家】、Sponsored、节目编号 "#466 –"、播客节目名前缀 —— 一律删干净
+- 客观陈述事实、信息密度高；不要标题党、不要 "A > B?" 式挑逗对比、不要营销词（重磅 / 震撼 / 最强 / 革命性 / 颠覆）、不要口语网络梗（如 "vibe check"、"main character energy"，直接删掉或还原成中性表述）
+- 忠于原文，不杜撰、不夸大、不添加原文没有的数字或结论
+- 一句话、结尾不加句号；尽量不超过 28 字，最长不超过 40 字
+- 专有名词、模型名、公司名、产品名保留英文，中英之间留一个空格${
+    kind === "podcast"
+      ? `
+- 播客：标题聚焦这期在谈的核心话题 / 事件，可保留关键嘉宾真名；不要用"对谈 / 聊聊"这类口语开头`
       : ""
   }
 
@@ -375,7 +404,7 @@ export async function classifyAndTranslateForFeeds(
 
   const patches: Array<{ path: string; value: unknown; json?: boolean }> = [
     { path: "$.ai_category", value: aiCategory },
-    { path: "$.title_zh", value: String(out.title_zh || "") },
+    { path: "$.title_zh", value: stripLabelPrefix(String(out.title_zh || "")) },
     { path: `$.${zhField}`, value: zhVal },
     { path: "$.ai_summary_zh", value: String(out.ai_summary_zh || "") },
     { path: "$.llm_model", value: DEEPSEEK_FLASH },

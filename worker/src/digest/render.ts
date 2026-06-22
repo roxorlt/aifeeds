@@ -4,6 +4,7 @@
 // (deliver.ts 暂保留自己的私有副本,不在本次重构,避免动邮件链路。)
 
 import type { DigestSource } from './config';
+import { stripLabelPrefix } from '../feeds/classify-translate';
 
 export interface RenderRow {
   id: string;
@@ -323,7 +324,8 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
       summary = (ex.summary_translated as string) || (ex.summary_en as string) || ct;
       break;
     case 'news': // 行业新闻(blog/podcast):中文标题 title_zh + 一句话中文摘要 ai_summary_zh
-      title = (ex.title_zh as string) || row.title || '';
+      // 标题剥栏目/推广标签前缀([AINews] 等),存量老标题也即时生效
+      title = stripLabelPrefix((ex.title_zh as string) || row.title || '');
       summary = (ex.ai_summary_zh as string) || ct;
       break;
     default:

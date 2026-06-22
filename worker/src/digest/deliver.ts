@@ -9,6 +9,7 @@ import { pushDeerAlert } from '../notifier';
 import { DIGEST_SOURCE_ORDER, type DigestSource, type Density } from './config';
 import { nextSendAt, genEmailToken, getBases } from './lib';
 import { buildDigestEmail, type DigestItem } from './templates';
+import { stripLabelPrefix } from '../feeds/classify-translate';
 
 interface DeliverParams {
   subId: number;
@@ -139,7 +140,8 @@ function toDigestItem(source: DigestSource, row: ItemRow): DigestItem {
       summary = (ex.summary_translated as string) || (ex.summary_en as string) || ct;
       break;
     case 'news': // 行业新闻(blog/podcast):中文标题 title_zh + 一句话中文摘要 ai_summary_zh
-      title = (ex.title_zh as string) || row.title || '';
+      // 标题剥栏目/推广标签前缀([AINews] 等),存量老标题也即时生效
+      title = stripLabelPrefix((ex.title_zh as string) || row.title || '');
       summary = (ex.ai_summary_zh as string) || ct;
       break;
     default:

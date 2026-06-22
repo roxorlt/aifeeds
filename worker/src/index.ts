@@ -3929,6 +3929,38 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       elapsed_ms: Date.now() - t0,
     }, 200, request, env);
   }
+  // 行业新闻标题严肃化存量回填(2026-06-22):新标题 prompt 上线后,对 digest 窗内
+  // (默认近 4 天)已入库的 blog+podcast 重跑 enrich,把 title_zh 刷成严肃报刊口吻 + 去标签。
+  // 幂等(覆盖写);摘要/分类/嘉宾用的是未改动的 prompt,重生成值不变。
+  // 用法:POST /api/enrich/run?mode=reenrich-feeds-titles&limit=40&days=4
+  if (mode === 'reenrich-feeds-titles') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '40'), 100);
+    const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '4'), 1), 10);
+    const throttleMs = Math.max(parseInt(url.searchParams.get('throttle_ms') || '150'), 0);
+    const t0 = Date.now();
+    const pending = await env.DB.prepare(
+      `SELECT id, source_type FROM items
+        WHERE source_type IN ('blog','podcast') AND is_relevant = 1
+          AND json_extract(extra,'$.title_zh') IS NOT NULL
+          AND datetime(scraped_at) >= datetime('now','-${days} day')
+          AND deleted_at IS NULL
+        ORDER BY published_at DESC LIMIT ?`,
+    ).bind(limit).all<{ id: string; source_type: string }>();
+    let done = 0, failed = 0;
+    const rows = pending.results || [];
+    for (const [i, r] of rows.entries()) {
+      const kind: 'blog' | 'podcast' = r.source_type === 'podcast' ? 'podcast' : 'blog';
+      try {
+        const res = await classifyAndTranslateForFeeds(env, r.id, { lang: 'zh', kind });
+        if (res.enrichFailed) failed++; else done++;
+      } catch { failed++; }
+      if (throttleMs > 0 && i < rows.length - 1) await new Promise((rs) => setTimeout(rs, throttleMs));
+    }
+    return jsonResponse({
+      mode: 'reenrich-feeds-titles', found: rows.length, done, failed,
+      elapsed_ms: Date.now() - t0,
+    }, 200, request, env);
+  }
   // podcast 主持人/嘉宾存量回填(2026-06-12 #2):重抓有 <podcast:person> 的 feed,
   // 按 idHash(=sha256(guid||link)[:16]) 匹配已入库单集,补 extra.hosts/guests。
   // 只有 Transistor 系等部分 feed 有此标签;无标签的 feed 自然跳过。一次性即可。
