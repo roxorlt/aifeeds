@@ -27,6 +27,30 @@ import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { BrandPodcast, IconClock, IconMic, IconUser } from "./icons";
 
+// 中文播客(小宇宙)shownotes 是发布方写的 HTML(<p><span><img> 等),抽屉渲染前清成
+// 干净文本:丢装饰图(封面另展示)、块级闭合标签转段落、剥其余标签、解码常见实体。
+// 已是纯文本(如外文源的 shownotes_zh)直接返回,no-op。
+function cleanShownotesHtml(s: string): string {
+  if (!s || !/<[a-z!/]/i.test(s)) return s || "";
+  let t = s.replace(/<\s*(script|style)[\s\S]*?<\/\s*\1\s*>/gi, "");
+  t = t.replace(/<\s*img\b[^>]*>/gi, "");
+  t = t.replace(/<\s*br\s*\/?>/gi, "\n");
+  t = t.replace(/<\/\s*(p|div|li|h[1-6]|tr)\s*>/gi, "\n\n");
+  t = t.replace(/<[^>]+>/g, "");
+  t = t
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => {
+      const c = parseInt(n, 10);
+      return Number.isFinite(c) ? String.fromCodePoint(c) : _;
+    });
+  return t.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // shownotes 轻量 markdown 渲染（hfMarkdownComponents 风，只覆盖 RSS shownotes
 // 常见元素；不引入相对路径图片 / HTML 反序列化）。13px 对齐抽屉正文层级。
 const shownotesComponents: Components = {
@@ -285,10 +309,11 @@ export function PodcastDrawerBody({ item }: Props) {
   // 关系混淆)。无 LLM 摘要时这块直接省略,节目简介那块照常出抓取的原文。
   const summary = extra.ai_summary_zh || extra.ai_summary || "";
 
-  // shownotes：外文源优先中译，中文源用原文
-  const shownotes = isForeign
+  // shownotes：外文源优先中译，中文源用原文(发布方所写);中文源 shownotes 是 HTML,清成干净文本
+  const shownotesRaw = isForeign
     ? extra.shownotes_zh || extra.shownotes || ""
     : extra.shownotes || "";
+  const shownotes = cleanShownotesHtml(shownotesRaw);
   const chapters = extra.chapters || [];
 
   // transcript（A 档才有）：译/原
@@ -402,8 +427,9 @@ export function PodcastDrawerBody({ item }: Props) {
               您的浏览器不支持音频播放。
             </audio>
             {/* 假门:翻译成中文音频(painted door)。点击只记需求强度,不真做配音。
-                没点过显示按钮;本次刚点显示「已加入」绿条;历史点过则整块隐藏。 */}
-            {(dubState === "button" || dubState === "added") && (
+                没点过显示按钮;本次刚点显示「已加入」绿条;历史点过则整块隐藏。
+                中文播客(lang=zh)不显示——内容已是中文,无需翻译配音。 */}
+            {isForeign && (dubState === "button" || dubState === "added") && (
               <div className="mt-2.5">
                 {dubState === "added" ? (
                   <div className="flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] text-emerald-700">
