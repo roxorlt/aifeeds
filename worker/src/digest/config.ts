@@ -16,7 +16,7 @@ export type Density = 'normal' | 'curated';
 
 // 每源在两档下各取多少条。normal=默认档(纯综合分);curated=精选档(LLM 从更大候选挑)。
 export const SOURCE_DIGEST_CONFIG: Record<DigestSource, { normal: number; curated: number }> = {
-  'news': { normal: 3, curated: 3 }, // 行业新闻:规则分(非 LLM)取 top 3,见 selection.ts selectNewsByScore + node-run 跳过 curate
+  'news': { normal: 5, curated: 3 }, // 行业新闻:规则分(非 LLM)默认档 top 5 / 精选档 top 3;Codex 8 点推送读 normal 档=5 条。见 selection.ts selectNewsByScore + node-run 跳过 curate
   'ph': { normal: 5, curated: 3 },
   'gh': { normal: 5, curated: 3 },
   'hf-paper': { normal: 5, curated: 3 },

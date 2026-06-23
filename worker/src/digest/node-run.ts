@@ -128,14 +128,24 @@ async function genSubjectDigest(env: Env, sk: string): Promise<string> {
   if (!titles.length) return fallback;
   // deepseek-v4 是 reasoning 模型:普通调用 content 空(内容在 reasoning_content),
   // 必须走 JSON Mode 让答案进 content;maxTokens 要留够 reasoning 占用。
-  // 主题走 TLDR 风格:挑最重磅的 3 个精简成短名列举,而非总结句。
-  const prompt = `下面是今天 AI 圈精选内容的标题。挑出最重磅的 3 个,每个精简成不超过 12 字的短名(产品名/事件名/技术名),用「、」连接成邮件标题。像 TLDR 那样直接列举,不要总结句、不要修饰词。只返回 JSON:{"subject":"短名1、短名2、短名3"}\n\n${titles.join('\n')}`;
+  // 主题走 TLDR 风格:挑最重磅的 3-4 件,每件写成「主体+动作+具体对象」的短句(能看懂谁做了什么),
+  // 而非干巴巴堆产品名/型号。字数放宽(每件 ~10-18 字,整体 ~50 字内)。
+  const prompt = `下面是今天 AI 圈精选内容的标题。挑出最重磅的 3-4 件,每件改写成「主体 + 动作 + 具体对象」的短句,用「、」连接成邮件标题。
+
+风格要求(像 TLDR 那样直接列事件):
+- 让人一眼看懂「谁做了什么」,例:「MiniMax 发布新语音模型」「OpenAI 推出 Daybreak 工具集」「NVIDIA 推出暗物质搜索等多款软件」
+- 不要只堆产品名 / 型号(反例:「MiniMax语音2.8」「NVIDIA AI软件」太干、看不出做了啥)
+- 同一主体多个产品可合并成「等多款 / 等」
+- 每件约 10-18 字,整体顺口;不要笼统总结句、不要营销修饰词
+
+只返回 JSON:{"subject":"短句1、短句2、短句3"}\n\n${titles.join('\n')}`;
   const { data } = await callDeepSeekJson<{ subject: string }>(env.DEEPSEEK_API_KEY, DEEPSEEK_FLASH, prompt, {
     maxTokens: 1000,
     retries: 1,
   });
   const s = data?.subject;
-  return typeof s === 'string' && s.trim() ? s.trim().replace(/[。.]$/, '').slice(0, 60) : fallback;
+  // 字数放宽(描述性短句比短名长):60 → 90,够 3-4 件「主体+动作+对象」短句
+  return typeof s === 'string' && s.trim() ? s.trim().replace(/[。.]$/, '').slice(0, 90) : fallback;
 }
 
 export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams> {
