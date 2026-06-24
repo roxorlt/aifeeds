@@ -6,6 +6,8 @@
 //   - 1 GitHub Releases（MiniCPM，归 source_type='blog'）
 //   - 11 播客 feed（A 档 5 个有原生文字稿）
 //   - (Phase 2,2026-06-22) +4 国内播客,经 HK VPS 自托管 RSSHub 小宇宙路由（via='rsshub'）→ 共 28
+//   - (Phase 3,2026-06-22) +5 page-scrape 博客（AI21/Cohere/Databricks/MiniMax/美团）→ 共 32
+//   - (2026-06-24) +3 国外第三方新闻媒体原生 RSS（TechCrunch / The Verge / MIT Technology Review）→ 共 35
 //
 // ensureFeedSources(env) 启动时幂等 upsert 进 sources 表（镜像 X 把 list 存 sources 的范式）：
 //   sources.id=FeedDef.id, source_type=kind, source_ref=key, name, config=JSON.stringify(FeedDef)。
@@ -171,6 +173,59 @@ const FOREIGN_BLOGS: FeedDef[] = [
     fetch_strategy: "native",
     site_base: "https://updates.midjourney.com",
     notes: "Ghost 子域",
+  },
+];
+
+// ── 国外第三方 AI/科技新闻媒体（原生 RSS，3；2026-06-24 接入）──────────────────
+// 区别于上方 FOREIGN_BLOGS（厂商官方博客 = PR 软文）：这层是第三方媒体报道，补「官博漏掉的
+// 突发 + 第三方视角」。都高产且非全 AI（尤其 The Verge 偏消费科技），blog 管线的 is_ai
+// gate（DeepSeek flash）滤非 AI，冷启动走「最近 30 天发布窗」压历史。format 照各 feed 实测：
+// TechCrunch/MITTR = RSS 2.0，The Verge = Atom（<entry>/<content>）。
+const FOREIGN_NEWS_MEDIA: FeedDef[] = [
+  {
+    id: "blog:techcrunch",
+    key: "techcrunch",
+    kind: "blog",
+    format: "rss",
+    source_company: "TechCrunch",
+    name: "TechCrunch — AI",
+    region: "foreign",
+    via: "native",
+    feed_url: "https://techcrunch.com/category/artificial-intelligence/feed/",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    site_base: "https://techcrunch.com",
+    notes: "AI 板块 feed,高产(实测窗口内 ~19 条);<description> 只给摘要(无 content:encoded),正文是摘要级;含少量活动促销条,is_ai gate 滤",
+  },
+  {
+    id: "blog:the-verge",
+    key: "the-verge",
+    kind: "blog",
+    format: "atom",
+    source_company: "The Verge",
+    name: "The Verge — AI",
+    region: "foreign",
+    via: "native",
+    feed_url: "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    site_base: "https://www.theverge.com",
+    notes: "AI 板块 Atom feed(<entry>/<content>,parseFeed atom 分支);选题偏消费科技、非 AI 噪音最多,is_ai gate 必做",
+  },
+  {
+    id: "blog:mit-tech-review",
+    key: "mit-tech-review",
+    kind: "blog",
+    format: "rss",
+    source_company: "MIT Technology Review",
+    name: "MIT Technology Review — AI",
+    region: "foreign",
+    via: "native",
+    feed_url: "https://www.technologyreview.com/topic/artificial-intelligence/feed/",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    site_base: "https://www.technologyreview.com",
+    notes: "替 VentureBeat(其 /category/ai/feed 实测停更:最新仅 2026-05-19,之前跳回 1 月);MITTR AI 主题 feed 新鲜 + content:encoded 带全文,低产高质",
   },
 ];
 
@@ -538,11 +593,14 @@ const DOMESTIC_PODCASTS: FeedDef[] = [
   },
 ];
 
-/** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5 = 32）。
+/** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5
+ *  + 2026-06-24 国外第三方新闻媒体 3 = 35）。
  *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团;
- *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团。 */
+ *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团;
+ *  国外新闻媒体 3 = TechCrunch / The Verge / MIT Technology Review(原生 RSS,补官博漏掉的第三方报道)。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
+  ...FOREIGN_NEWS_MEDIA,
   ...DOMESTIC_BLOGS,
   ...PAGE_SCRAPE_BLOGS,
   ...PODCASTS,
