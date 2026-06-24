@@ -137,3 +137,46 @@ RSSHub 自带 `lib/routes/wechat` 命名空间（第三方 WeChat relay：`ce` /
 - RSSHub commit 锁定，不自动更新；本次只加路由，不升级 RSSHub 本体
 - 鉴权 / 限流 / `MemoryMax` / OOM 优先级保护现有 nginx 中转——均不变
 - secret：`RSSHUB_BASE` / `RSSHUB_TOKEN` 复用同一份（`.secrets/aifeeds-prod.env`），**本次无新增 secret**
+
+---
+
+## 8. Codex 实施结果（2026-06-24）
+
+已在 HK VPS 现有 RSSHub 实例上线并验证 3 条国内 AI 媒体 route。入口仍为 `https://rss.ai-feeds.com`，鉴权头仍为 `X-RSSHub-Token`，token / base 复用既有配置：`/Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-prod.env` 中的 `RSSHUB_BASE` / `RSSHUB_TOKEN`（本文档不展开 secret 值）。
+
+本次对 RSSHub 做了一个小补丁：新增 `新智元` 自定义首页 route `/aiera`，解析 `https://aiera.com.cn` 首页文章卡片；RSSHub 本体仍基于 06-22 锁定版本，本次 release 标识为 `9807609-aiera-20260624`。nginx / TLS / token gate / systemd 资源保护均未改变。
+
+交付表：
+
+| 源 | 确认的 route | HTTPS 状态 | item 数 | 最新条标题 / pubDate |
+|---|---|---:|---:|---|
+| 量子位 | `/qbitai/category/%E8%B5%84%E8%AE%AF`（等价 `/qbitai/category/资讯`） | 200 | 10 | 百度智能云发布百度千帆Token Plan企业版，提供GLM-5.2等模型 / Wed, 24 Jun 2026 11:09:51 GMT |
+| 机器之心 | `/wechat/sogou/jiqizhixin` | 200 | 10 | PPT之外,AI之内\|2026WAIC机器之心特别企划栏目 / Thu, 18 Jun 2026 09:10:51 GMT |
+| 新智元 | `/aiera` | 200 | 10 | 360发布“中国版Mythos”图龙锋 周鸿祎：漏洞发现能力正成为新的战略能力 / Wed, 24 Jun 2026 09:26:46 GMT |
+
+鉴权 smoke：
+
+| 检查 | 结果 |
+|---|---:|
+| 正确 `X-RSSHub-Token` 拉取上述 3 条 route | 200 |
+| 无 token 拉 `/aiera` | 403 |
+| 错 token 拉 `/aiera` | 403 |
+
+worker 侧建议 registry `feed_url` 直接使用上表 route。量子位建议用 percent-encoded 形态 `/qbitai/category/%E8%B5%84%E8%AE%AF`，避免运行时/配置文件对中文路径编码行为产生歧义。
+
+---
+
+## 9. Worker 侧接入结果（2026-06-24，cc/worker）
+
+按 Codex 交付的 route 接入 + staging 实测：
+
+| 源 | 最终接入 | staging 结果 |
+|---|---|---|
+| **量子位** | **走 native**（`qbitai.com/feed`，非 RSSHub route）| ✅ 10 条 9 AI、含 `content:encoded` 全文 |
+| **新智元** | rsshub `/aiera` | ✅ 10 条 9 AI、有正文、标题质量高 |
+| **机器之心** | ❌ **暂未接入**，从 registry 摘除 | ⚠️ 见下 |
+
+**量子位为何走 native**：worker 实测能直抓 `qbitai.com/feed`（CF Worker IP 未被拦），native 无 HK 中转依赖、且带 `content:encoded` 全文，优于 RSSHub route。Codex 的 `/qbitai/category/资讯` 路由保留作 native 失效时的备份。
+
+**⚠️ 机器之心需换 route（请 Codex 跟进）**：`/wechat/sogou/jiqizhixin` 验证时虽 200/10 条，但每条 item **只有标题 + 一个 Sogou 搜索跳转链**（`url` 形如 `https://weixin.sogou.com/link?...`），**RSS 里无文章正文**（`<description>`/`content:encoded` 为空）。worker 的 blog 管线用普通 `fetch` 抓取（不渲染 JS、无 Sogou 会话），跟不动 Sogou 跳转 → 这些 item 正文为空、`is_relevant` 上不去、被频道 `is_relevant=1` 过滤掉，等于无效源。
+**期望**：换一个**正文内嵌在 RSS 里**的机器之心 route —— 如 `wechat2rss` 那类把公众号全文打进 `content:encoded` 的方案，或 `jiqizhixin.com` 站点直连路由。新智元 `/aiera` 即是「正文内嵌」的正面例子，可参照。Codex 交付带全文的 route 后，worker 侧加一个 registry 条目即可（`via='rsshub'` `kind='blog'`）。
