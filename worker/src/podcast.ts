@@ -32,7 +32,7 @@ import type {
   TriggerResult,
 } from './feeds/types';
 import {
-  COLD_START_MAX,
+  COLD_START_WINDOW_DAYS,
   FEED_SEEN_SET_MAX_SIZE,
   ensureFeedSources,
   feedsByKind,
@@ -144,14 +144,20 @@ async function ingestOnePodcastFeed(
   const existing = await selectExistingIds(env, enriched.map((e) => e.id));
   let newOnes = enriched.filter((e) => !existing.has(e.id));
 
-  // 冷启动限深(D10)：首跑只 enrich 最近 COLD_START_MAX 集;**截掉的历史单集也必须
-  // 入库占位**(标 workflow_completed_at + cold_start_skipped,不 enrich 不展示)——
+  // 冷启动限深(D10)：首跑只 enrich「最近 COLD_START_WINDOW_DAYS 天内发布」的单集;**窗口外
+  // 的历史单集仍入库占位**(标 workflow_completed_at + cold_start_skipped,不 enrich 不展示)——
   // 否则第二轮 isColdStart=false 不再限深,Lex/MLST 这类几百集 feed 全窗涌入
-  // (2026-06-11 staging A1/A2 用例实测 podcast 110→631)。同 blog.ts 占位游标。
+  // (2026-06-11 staging A1/A2 用例实测 podcast 110→631)。2026-06-24 由「最近 N 集」改「最近
+  // N 天发布」,同 blog.ts:窗口内全放行不误伤,只压窗口外真历史;无日期当「新」放行。占位游标同前。
   let coldOverflow: typeof newOnes = [];
   if (isColdStart) {
-    coldOverflow = newOnes.slice(COLD_START_MAX);
-    newOnes = newOnes.slice(0, COLD_START_MAX);
+    const coldCutoffMs = Date.now() - COLD_START_WINDOW_DAYS * 86400_000;
+    const isOldBacklog = (e: (typeof newOnes)[number]): boolean => {
+      const t = e.p.published_at ? Date.parse(e.p.published_at) : NaN;
+      return !Number.isNaN(t) && t < coldCutoffMs; // 有发布日期且早于窗口 → 真历史,压占位
+    };
+    coldOverflow = newOnes.filter(isOldBacklog);
+    newOnes = newOnes.filter((e) => !isOldBacklog(e));
   }
   if (coldOverflow.length > 0) {
     const lang0 = feed.region === 'domestic' ? 'zh' : 'en';

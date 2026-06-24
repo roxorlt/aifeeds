@@ -13,8 +13,12 @@
 
 import type { FeedDef } from "./types";
 
-/** 冷启动每 feed 限收最近 N 条（压洪峰 + 减历史噪音，D10）。 */
-export const COLD_START_MAX = 10;
+/** 冷启动每 feed 只 enrich「最近 N 天内发布」的条目（压洪峰 + 减历史噪音，D10）。
+ *  2026-06-24 由「最近 N 条」改为「最近 N 天」：count 上限对高产源(OpenAI/NVIDIA 等)
+ *  会把窗口内(30 天显示窗)还该展示的新文也当历史压掉(实测 OpenAI 误伤 35 条)。
+ *  改成发布日期窗口后：窗口内全 enrich、不再误伤；仅压窗口外的真历史(防几年老文涌入)。
+ *  值对齐 C 端 blog/podcast 显示窗(index.ts handleItems isFeeds=30 天)。 */
+export const COLD_START_WINDOW_DAYS = 30;
 /** seen-set 大小上限（blog/podcast 比 X 的 10 略宽，D10）。 */
 export const FEED_SEEN_SET_MAX_SIZE = 20;
 /** 分页型 page-scrape「连续 K 条全已见」才停翻下一页（对冲分页内乱序，§7.4）。 */

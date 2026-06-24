@@ -30,7 +30,7 @@ import type {
   TriggerResult,
 } from './feeds/types';
 import {
-  COLD_START_MAX,
+  COLD_START_WINDOW_DAYS,
   FEED_SEEN_SET_MAX_SIZE,
   ensureFeedSources,
   feedsByKind,
@@ -146,15 +146,23 @@ async function ingestOneBlogFeed(
   const existing = await selectExistingIds(env, enriched.map((e) => e.id));
   let newOnes = enriched.filter((e) => !existing.has(e.id));
 
-  // 冷启动限深(D10)：首跑只 enrich 最近 COLD_START_MAX 条;**截掉的旧文也必须
-  // 入库占位**(直接标 workflow_completed_at + cold_start_skipped,不 enrich 不展示)。
+  // 冷启动限深(D10)：首跑只 enrich「最近 COLD_START_WINDOW_DAYS 天内发布」的;**窗口外的
+  // 真历史旧文仍入库占位**(标 workflow_completed_at + cold_start_skipped,不 enrich 不展示)。
   // 否则它们不在 items,第二轮 isColdStart=false 不再限深 → 全窗历史旧文涌入
   // (2026-06-11 staging A1 用例实测:blog 102→408 / podcast 110→631)。
-  // items 存在性是防重权威,占位即永久排除,零新增游标状态(设计 §5.5 占位游标)。
+  // 2026-06-24:由「最近 N 条」改「最近 N 天发布」—— 旧的 count 上限对高产源(OpenAI/NVIDIA)
+  // 会把 30 天显示窗内该展示的新文也压成历史(实测误伤 OpenAI 35 条);改发布日期窗后窗口内
+  // 全放行、只压窗口外真历史(防几年老文涌入)。无发布日期/无法解析的当「新」放行(宁多 enrich
+  // 不误伤,catch-up 分流兜量)。items 存在性防重,占位即永久排除,零新增游标状态(设计 §5.5)。
   let coldOverflow: typeof newOnes = [];
   if (isColdStart) {
-    coldOverflow = newOnes.slice(COLD_START_MAX);
-    newOnes = newOnes.slice(0, COLD_START_MAX);
+    const coldCutoffMs = Date.now() - COLD_START_WINDOW_DAYS * 86400_000;
+    const isOldBacklog = (e: (typeof newOnes)[number]): boolean => {
+      const t = e.p.published_at ? Date.parse(e.p.published_at) : NaN;
+      return !Number.isNaN(t) && t < coldCutoffMs; // 有发布日期且早于窗口 → 真历史,压占位
+    };
+    coldOverflow = newOnes.filter(isOldBacklog);
+    newOnes = newOnes.filter((e) => !isOldBacklog(e));
   }
   if (coldOverflow.length > 0) {
     const lang0 = feed.region === 'domestic' ? 'zh' : 'en';
