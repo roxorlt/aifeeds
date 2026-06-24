@@ -18,7 +18,7 @@ import {
   type DigestSource,
   type Density,
 } from './config';
-import { selectTopForSource } from './selection';
+import { selectTopForSource, excludeStalePushes } from './selection';
 import { curateSource } from './llm-curate';
 import { fetchCandidates } from './node-run';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
@@ -132,7 +132,11 @@ export async function handleDigestDaily(request: Request, env: Env): Promise<Res
   for (const source of DIGEST_SOURCE_ORDER) {
     if (!wantSources.includes(source)) continue;
     const cfg = SOURCE_DIGEST_CONFIG[source];
-    const candidateIds = await selectTopForSource(env, source, CURATED_CANDIDATE_POOL);
+    // daily-api「宽松」跨周期去重(2026-06-24):允许与最近 3 次推送(8/12/17 各算一次)重复
+    // —— 拉取方可能要近期热点;但第 4 次及更早的旧内容滤掉,避免陈旧重复。daily-api 自身不写
+    // digest_pool 账本(不污染邮件/Codex 的严格跨天去重)。严格跨天去重见 node-run excludeAlreadyPushed。
+    const candidateIds0 = await selectTopForSource(env, source, CURATED_CANDIDATE_POOL);
+    const candidateIds = await excludeStalePushes(env, candidateIds0, source);
     if (!candidateIds.length) continue;
     const rows = await fetchRows(env, candidateIds);
     if (wantNormal) {

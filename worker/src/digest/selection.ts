@@ -28,6 +28,83 @@ const HOT_EXPR = `((COALESCE(CAST(json_extract(metrics,'$.likes') AS INTEGER),0)
    + 3*COALESCE(CAST(json_extract(metrics,'$.replies') AS INTEGER),0))
   * 1.0 / POW((julianday('now')-julianday(published_at))*24+2, 1.5))`;
 
+// 跨天去重(2026-06-24):排除「今天之前」已进过 digest_pool(= node-run 已推送过)的 item,
+// 确保每天推送不含前几天推过的同一条(如 6/23 推过的「MiniMax 语音 2.8」6/24 不再重复)。
+// 账本 = digest_pool(node-run 每档每源写入的榜单 item_ids,JSON 数组)。只需回看选品窗:
+//   各源 scraped_at 窗最长 3 天(news/hf),故回看 DEDUP_LOOKBACK_DAYS=5 足够覆盖可被重选的范围。
+// 严格 < 今日 BJT 0 点 → 只去「跨天」重复,不让同日 8/12/17 三档互相去重(各档用户不重叠)。
+// 仅用于「同一受众反复收」的推送场景:订阅邮件 + Codex API(都读 node-run 建的 pool)。
+// daily-api 不用本函数,改用下方 excludeStalePushes(宽松:容忍近期重复、只滤陈旧)。
+const DEDUP_LOOKBACK_DAYS = 5;
+export async function excludeAlreadyPushed(
+  env: Env,
+  ids: string[],
+  source: DigestSource,
+): Promise<string[]> {
+  if (ids.length === 0) return ids;
+  const now = Date.now();
+  // 今日 BJT(UTC+8)0 点对应的 epoch ms
+  const startOfTodayBjtMs =
+    Math.floor((now + 8 * 3600_000) / 86400_000) * 86400_000 - 8 * 3600_000;
+  const lookbackFromMs = startOfTodayBjtMs - DEDUP_LOOKBACK_DAYS * 86400_000;
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT je.value AS id
+       FROM digest_pool dp, json_each(COALESCE(dp.item_ids,'[]')) je
+      WHERE dp.source = ?
+        AND dp.generated_at >= ?
+        AND dp.generated_at < ?`,
+  )
+    .bind(source, lookbackFromMs, startOfTodayBjtMs)
+    .all<{ id: string }>();
+  const pushed = new Set((rows.results || []).map((r) => r.id));
+  if (pushed.size === 0) return ids;
+  return ids.filter((id) => !pushed.has(id));
+}
+
+// daily-api 专用「宽松」跨周期去重(2026-06-24):允许与最近 KEEP_RECENT_SLOTS 次推送
+// (8/12/17 各算一次)重复 —— 无状态拉取方可能要近期热点;但第 (N+1) 次及更早的旧内容滤掉,
+// 避免陈旧重复。判定:一条 item 只有当它「最近一次被推的档次」早于「倒数第 N 档」时才剔除
+// (= 只存在于更老的推送、不在最近 N 档里);只要它落在最近 N 档任意一档就保留(允许重复)。
+// ⚠️ 推送档次必须用 slot_key 计数,不能用 generated_at:一次 node-run 给同源写 normal+curated
+// 两行,generated_at 差几秒,会把一次推送数成两档。slot_key(=YYYY-MM-DD-HH,零填充可字典序排)
+// 一次 run 所有行共享 → DISTINCT slot_key 才是真实推送档次。与 excludeAlreadyPushed(邮件/Codex
+// 严格按「跨天」)分开;daily-api 自身不写账本。
+const KEEP_RECENT_SLOTS = 3;
+export async function excludeStalePushes(
+  env: Env,
+  ids: string[],
+  source: DigestSource,
+  keepRecentN: number = KEEP_RECENT_SLOTS,
+): Promise<string[]> {
+  if (ids.length === 0) return ids;
+  const lookbackFromMs = Date.now() - 7 * 86400_000; // 选品窗最长 3 天,7 天足够覆盖最近若干推送档
+  // 最近 keepRecentN 个「推送档次」= DISTINCT slot_key 字典序倒排(slot_key 零填充,字典序=时序)
+  const slotRows = await env.DB.prepare(
+    `SELECT DISTINCT slot_key FROM digest_pool
+      WHERE source = ? AND generated_at >= ?
+      ORDER BY slot_key DESC LIMIT ?`,
+  )
+    .bind(source, lookbackFromMs, keepRecentN)
+    .all<{ slot_key: string }>();
+  const slots = (slotRows.results || []).map((r) => r.slot_key);
+  if (slots.length < keepRecentN) return ids; // 推送档次不足 N → 全算「近期」,不滤
+  const minRecentSlot = slots[slots.length - 1]; // 倒数第 N 档的 slot_key(最近 N 档里最早的)
+  // 「陈旧」item = 其最近一次被推的档次(MAX slot_key)< 倒数第 N 档 → 只在更老的推送里出现过;
+  // 若它也落在最近 N 档(MAX slot_key >= minRecentSlot)则不算陈旧 → 保留(允许与近期重复)。
+  const staleRows = await env.DB.prepare(
+    `SELECT je.value AS id, MAX(dp.slot_key) AS latest_slot
+       FROM digest_pool dp, json_each(COALESCE(dp.item_ids,'[]')) je
+      WHERE dp.source = ? AND dp.generated_at >= ?
+      GROUP BY je.value
+     HAVING latest_slot < ?`,
+  )
+    .bind(source, lookbackFromMs, minRecentSlot)
+    .all<{ id: string }>();
+  const stale = new Set((staleRows.results || []).map((r) => r.id));
+  if (stale.size === 0) return ids;
+  return ids.filter((id) => !stale.has(id));
+}
+
 // 取某源过去 24h 的 top `limit` item id(按该源真实热度排序)。
 // 同时供 normal 榜(limit=config.normal)与 curated 候选池(limit=30)使用。
 export async function selectTopForSource(

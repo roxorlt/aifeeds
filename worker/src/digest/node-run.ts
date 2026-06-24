@@ -10,7 +10,7 @@ import {
   CURATED_CANDIDATE_POOL,
   type DigestSource,
 } from './config';
-import { selectTopForSource } from './selection';
+import { selectTopForSource, excludeAlreadyPushed } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey } from './lib';
 import { pushDailyToCodex } from './codex-push';
@@ -160,7 +160,11 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
       if (source === 'clawhub') continue;
       const cfg = SOURCE_DIGEST_CONFIG[source as DigestSource];
       await step.do(`pool-${source}`, RETRY, async (): Promise<number> => {
-        const candidateIds = await selectTopForSource(this.env, source as DigestSource, CURATED_CANDIDATE_POOL);
+        const candidateIds0 = await selectTopForSource(this.env, source as DigestSource, CURATED_CANDIDATE_POOL);
+        // 跨天去重:剔除前几天已推过的同一条。若全被剔(极端冷门日,候选全是前几天推过的)
+        // → 兜底回退原始榜,宁可重复也不让板块(尤其 news 强制头条)整块空掉。
+        let candidateIds = await excludeAlreadyPushed(this.env, candidateIds0, source as DigestSource);
+        if (!candidateIds.length && candidateIds0.length) candidateIds = candidateIds0;
         if (!candidateIds.length) {
           await upsertPool(this.env, sk, source, 'normal', [], null);
           await upsertPool(this.env, sk, source, 'curated', [], null);
