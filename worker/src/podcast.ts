@@ -25,6 +25,8 @@
 
 import type { Env } from './index';
 import type {
+  BlogExtra,
+  BlogTriggerSignals,
   FeedDef,
   PodcastExtra,
   PodcastTriggerSignals,
@@ -40,6 +42,8 @@ import {
 import { fetchFeedXml, parseFeed } from './feeds/parse';
 import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet, partitionForCatchup } from './x-list-cursor';
+// 无音频文字项改判 blog：复用 blog 管线的 trigger + 全文门槛(同一套 BlogPipeline 产 excerpt_zh)。
+import { triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
 
 /** podcast catch-up 分流阈值：最新 N 条立即 trigger，其余 pending_workflow=1 平摊(§5.5)。 */
 const PODCAST_CATCHUP_THRESHOLD = 50;
@@ -194,12 +198,23 @@ async function ingestOnePodcastFeed(
     }
   }
 
-  // 5. INSERT OR IGNORE stub(is_relevant=NULL，立即可被 workflow 接走)
+  // 5. INSERT OR IGNORE stub(is_relevant=NULL，立即可被 workflow 接走)。按是否有音频分流：
+  //    - 有 <enclosure type="audio/*"> → 真播客单集，podcast 形状 extra（原逻辑不变）。
+  //    - 无音频(纯文字新闻帖：latent-space / last-week-in-ai 这类 Substack 混发的 AINews
+  //      日报，URL 形如 latent.space/p/ainews-...) → 本是图文不是播客，改判 source_type='blog'
+  //      + blog 形状 extra，让前端 BlogCard 渲染（不再误当「音频播客卡片」）。id 仍保
+  //      `podcast:${feed.key}:${idHash}` 前缀作来源痕迹（不断分享链 / 防重存在性检查靠它），
+  //      只换 source_type + extra 形状（不写 show_key/audio_url/transcript_tier）。
+  const audioOnes = newOnes.filter((e) => !!e.p.enclosure_url);
+  const textOnes = newOnes.filter((e) => !e.p.enclosure_url);
+  const lang = feed.region === 'domestic' ? 'zh' : 'en';
+  const publisherDomain = hostOf(feed.site_base || feed.feed_url);
+
   let insertedCount = 0;
-  if (newOnes.length > 0) {
-    const lang = feed.region === 'domestic' ? 'zh' : 'en';
-    const publisherDomain = hostOf(feed.site_base || feed.feed_url);
-    const stmts = newOnes.map((e) => {
+
+  // 5a. 有音频：podcast stub。
+  if (audioOnes.length > 0) {
+    const stmts = audioOnes.map((e) => {
       const extra: PodcastExtra & { rss_content_html?: string } = {
         feed_id: feed.id,
         show_key: feed.key,
@@ -257,14 +272,65 @@ async function ingestOnePodcastFeed(
     }
   }
 
-  // 6. catch-up 分流：immediate 立即 trigger，pending 标 pending_workflow=1
-  //    入参按 published_at desc 排序(RSS 无序，re-sort 防御)
-  newOnes.sort((a, b) =>
+  // 5b. 无音频：改判 blog stub（blog 形状 extra；source_type='blog'；id 仍是 podcast:...）。
+  if (textOnes.length > 0) {
+    const stmts = textOnes.map((e) => {
+      const extra: BlogExtra & { rss_content_html?: string } = {
+        feed_id: feed.id,
+        feed_key: feed.key,
+        source_company: feed.source_company,
+        blog_name: feed.name,
+        feed_url: feed.feed_url,
+        fetch_strategy: feed.fetch_strategy,
+        guid: e.guid,
+        canonical_url: e.canonicalUrl,
+        url_hash: e.urlHash,
+        cover_image: e.p.cover_url || undefined, // 原始域名 URL，BlogPipeline step4 再迁 R2
+        excerpt: e.p.summary || undefined,
+        publisher: { name: feed.source_company, domain: publisherDomain },
+        tags: e.p.tags,
+        // 透传 RSS 正文 HTML 给 BlogPipeline step3 extractFullText 的 ①RSS-full 快路径；消费后删除。
+        rss_content_html: e.p.content_html || undefined,
+      };
+      return env.DB.prepare(
+        `INSERT OR IGNORE INTO items
+           (id, source_type, source_id, title, content, author, url,
+            metrics, published_at, scraped_at, is_relevant, lang, extra)
+         VALUES (?, 'blog', ?, ?, ?, ?, ?, '{}', ?, ?, NULL, ?, ?)`,
+      ).bind(
+        e.id,
+        `${feed.key}:${e.idHash}`,
+        e.p.title || '',
+        e.p.summary || '',
+        e.p.author || null,
+        e.canonicalUrl || e.p.link || null,
+        e.p.published_at || null,
+        nowIso,
+        lang,
+        JSON.stringify(extra),
+      );
+    });
+    try {
+      const results = await env.DB.batch(stmts);
+      for (const res of results) {
+        if (res.meta?.changes && res.meta.changes > 0) insertedCount++;
+      }
+    } catch (e) {
+      console.error(`[podcast-fetch] ${feed.id} blog-stub batch error:`, e);
+      throw e; // 不推进 cursor(下轮重头)
+    }
+  }
+
+  // 6. 触发 workflow。
+  let triggeredCount = 0;
+  let pendingCount = 0;
+
+  // 6a. 有音频：catch-up 分流(immediate 立即 trigger podcast / 余 pending_workflow=1 平摊)。
+  //     入参按 published_at desc 排序(RSS 无序，re-sort 防御)。
+  audioOnes.sort((a, b) =>
     (b.p.published_at ?? '').localeCompare(a.p.published_at ?? ''),
   );
-  const partition = partitionForCatchup(newOnes, PODCAST_CATCHUP_THRESHOLD);
-
-  let triggeredCount = 0;
+  const partition = partitionForCatchup(audioOnes, PODCAST_CATCHUP_THRESHOLD);
   for (const e of partition.immediate) {
     const signals: PodcastTriggerSignals = {
       hasNativeTranscript: feed.has_native_transcript === true,
@@ -272,8 +338,6 @@ async function ingestOnePodcastFeed(
     const res = await triggerPodcastWorkflowForItem(env, e.id, signals);
     if (res === 'triggered') triggeredCount++;
   }
-
-  let pendingCount = 0;
   if (partition.pending.length > 0) {
     pendingCount = partition.pending.length;
     const stmts = partition.pending.map((e) =>
@@ -284,6 +348,22 @@ async function ingestOnePodcastFeed(
     } catch (e) {
       console.error(`[podcast-fetch] ${feed.id} pending mark error:`, e);
     }
+  }
+
+  // 6b. 无音频文字项：量小（Substack 偶发文字日报），一律立即 trigger blog workflow，跳过
+  //     catch-up/pending。原因：drainPendingWorkflowQueue 只认 source_type='x_list'，
+  //     blog/podcast 的 pending 无 cron 自动 drain（只能 OPS backfill 兜底），故文字项不进
+  //     pending 队列，直接 trigger 最稳。blog 形状 → BlogPipeline 产 excerpt_zh/body/reading。
+  textOnes.sort((a, b) =>
+    (b.p.published_at ?? '').localeCompare(a.p.published_at ?? ''),
+  );
+  for (const e of textOnes) {
+    const signals: BlogTriggerSignals = {
+      fetchStrategy: feed.fetch_strategy,
+      hasNativeFulltext: isFullEnoughHtml(e.p.content_html),
+    };
+    const res = await triggerBlogWorkflowForItem(env, e.id, signals);
+    if (res === 'triggered') triggeredCount++;
   }
 
   // 7. 整轮成功才推进 cursor(seen-set = 当前窗口顶端 N 个 id)+ last_success_at

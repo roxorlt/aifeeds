@@ -59,8 +59,9 @@ import {
 // 官方新闻源（blog 厂商博客 + podcast AI 播客，Phase 1 2026-06-09）。
 // runBlogFetch/runPodcastFetch 内部已幂等 ensureFeedSources，cron slot 直接调。
 // backfill 兜底（workflow_completed_at IS NULL 重 trigger）经 /api/enrich/run 暴露。
-import { runBlogFetch, runBlogBackfill } from './blog';
+import { runBlogFetch, runBlogBackfill, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
+import type { BlogExtra, BlogTriggerSignals } from './feeds/types';
 import { classifySensitivityForFeeds, classifyAndTranslateForFeeds, summarizeTimelineForPodcast } from './feeds/classify-translate';
 import { migrateAudioForPodcast } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
@@ -4087,6 +4088,96 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const r = await runPodcastBackfill(env, 'stuck-workflow');
     return jsonResponse({ mode: 'backfill-podcast-workflow', ...r }, 200, request, env);
+  }
+  // 存量回填(2026-06-24):把历史误存为 source_type='podcast' 的「无音频文字帖」改判 blog。
+  // 背景:latent-space / last-week-in-ai(Substack)混发真播客单集 + 纯文字 AINews 日报,
+  // 早期入库把无音频文字帖也存成 podcast → 前端渲染成「音频播客卡片」(播放三角 + 收听时长),错。
+  // 选取:source_type='podcast' AND audio_url IS NULL(无音频) AND show_key IS NOT NULL
+  //       (排除冷启动占位 —— 占位 extra 只有 feed_key、无 show_key、is_relevant=NULL,不该动)。
+  // 动作:extra 改 blog 形状(show_key→feed_key、show_name→blog_name、shownotes→excerpt,
+  //       保留 cover_image/source_company/publisher + identity),丢 workflow_completed_at +
+  //       清 is_relevant,设 source_type='blog',再 triggerBlogWorkflowForItem 重跑
+  //       (博客渲染要 excerpt_zh/body_markdown_zh/reading_minutes,只有 BlogPipeline 能产)。
+  // 用法:POST /api/enrich/run?mode=reclassify-noaudio-podcast&limit=50 (Bearer INGEST_TOKEN)
+  //       反复调直到 reclassified=0。
+  if (mode === 'reclassify-noaudio-podcast') {
+    if (!env.BLOG_PIPELINE_WORKFLOW) {
+      return jsonResponse({ error: 'BLOG_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
+    }
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200);
+    const rows = await env.DB.prepare(
+      `SELECT id, extra FROM items
+        WHERE source_type = 'podcast'
+          AND json_extract(extra, '$.audio_url') IS NULL
+          AND json_extract(extra, '$.show_key') IS NOT NULL
+        ORDER BY scraped_at DESC
+        LIMIT ?`,
+    ).bind(limit).all<{ id: string; extra: string | null }>();
+
+    let reclassified = 0;
+    let retriggered = 0;
+    let failed = 0;
+    for (const r of (rows.results || [])) {
+      let old: Record<string, unknown> = {};
+      try {
+        old = JSON.parse(r.extra || '{}') as Record<string, unknown>;
+      } catch { /* ignore */ }
+      // 重建 blog 形状 extra:只搬源/身份字段 + 映射 show_key→feed_key / show_name→blog_name /
+      // shownotes→excerpt;丢弃 podcast 专属(audio_*/transcript_*/episode_* 等) +
+      // workflow_completed_at + 旧 enrich(让 BlogPipeline 重新产 blog 形 excerpt_zh 等)。
+      const fetchStrategy =
+        (old.fetch_strategy as BlogTriggerSignals['fetchStrategy']) || 'native';
+      const rssHtml =
+        typeof old.rss_content_html === 'string' ? old.rss_content_html : undefined;
+      const newExtra: BlogExtra & { rss_content_html?: string } = {
+        feed_id: old.feed_id as string | undefined,
+        feed_key: old.show_key as string | undefined,
+        source_company: old.source_company as string | undefined,
+        blog_name: old.show_name as string | undefined,
+        feed_url: old.feed_url as string | undefined,
+        fetch_strategy: fetchStrategy,
+        guid: old.guid as string | undefined,
+        canonical_url: old.canonical_url as string | undefined,
+        url_hash: old.url_hash as string | undefined,
+        cover_image: old.cover_image as string | undefined,
+        excerpt: old.shownotes as string | undefined,
+        publisher: old.publisher as BlogExtra['publisher'],
+        tags: Array.isArray(old.tags) ? (old.tags as string[]) : undefined,
+        ...(rssHtml ? { rss_content_html: rssHtml } : {}),
+      };
+      for (const k of Object.keys(newExtra)) {
+        if ((newExtra as Record<string, unknown>)[k] === undefined) {
+          delete (newExtra as Record<string, unknown>)[k];
+        }
+      }
+      try {
+        await env.DB.prepare(
+          `UPDATE items SET source_type='blog', is_relevant=NULL, extra=? WHERE id=?`,
+        ).bind(JSON.stringify(newExtra), r.id).run();
+        reclassified++;
+        const signals: BlogTriggerSignals = {
+          fetchStrategy,
+          hasNativeFulltext: isFullEnoughHtml(rssHtml),
+        };
+        const res = await triggerBlogWorkflowForItem(env, r.id, signals);
+        if (res === 'triggered') retriggered++;
+      } catch (e) {
+        failed++;
+        console.error(`[reclassify-noaudio-podcast] ${r.id} error:`, e);
+      }
+    }
+    return jsonResponse(
+      {
+        mode: 'reclassify-noaudio-podcast',
+        found: (rows.results || []).length,
+        reclassified,
+        retriggered,
+        failed,
+      },
+      200,
+      request,
+      env,
+    );
   }
   if (mode === 'backfill-quotes') {
     const limit = Math.min(

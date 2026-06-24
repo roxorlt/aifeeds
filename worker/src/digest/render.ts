@@ -341,7 +341,10 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
   let intro: string | undefined;
   let timeline: RenderedItem['timeline'];
   if (source === 'news') {
-    const isPod = row.id.startsWith('podcast:');
+    // 真播客 extra 有 show_key;无音频文字项改判 blog 后 extra 是 feed_key、无 show_key。
+    // 不用 id 前缀(`podcast:`)判断 —— 改判项保留 podcast: 前缀作来源痕迹(不断分享链/防重),
+    // 但内容是图文,应读 excerpt_zh 走博客渲染,故按 extra 形状(show_key 有无)区分。
+    const isPod = !!ex.show_key;
     const introRaw = String((isPod ? ex.shownotes_zh : ex.excerpt_zh) || '').trim();
     if (introRaw) intro = clampSentences(introRaw, 800);
     if (isPod && Array.isArray(ex.timeline) && ex.timeline.length) {
