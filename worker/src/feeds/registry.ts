@@ -614,9 +614,20 @@ const DOMESTIC_NEWS_MEDIA: FeedDef[] = [
     site_base: "https://www.qbitai.com",
     notes: "国内顶级 AI 媒体,追产品发布最快(Seedance/腾讯等第一时间报);原生 RSS 含 content:encoded 全文,中文无需翻译;is_ai gate + cn_sensitive 过滤照常",
   },
-  // 机器之心:暂缓。Codex 给的 /wechat/sogou/jiqizhixin 路由只返回标题 + Sogou 搜索跳转链
-  // (weixin.sogou.com/link?...),无 rss_content_html、worker fetch 抓不到正文 → 条目空内容、
-  // is_relevant 上不去被过滤。待 Codex 换带全文的路由(wechat2rss 内嵌 HTML / jiqizhixin.com 直连)。
+  {
+    id: "blog:jiqizhixin",
+    key: "jiqizhixin",
+    kind: "blog",
+    format: "rss",
+    source_company: "机器之心",
+    name: "机器之心",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/jiqizhixin",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    notes: "经 HK VPS RSSHub /jiqizhixin(官网文章库 API 直连:列表 API 取最新 + 详情 API 补全文进 RSS description,~4.4KB/条);Codex 2026-06-24 换源,原 /wechat/sogou/jiqizhixin(只标题+Sogou跳转无正文)已废",
+  },
   {
     id: "blog:aiera",
     key: "aiera",
@@ -634,11 +645,11 @@ const DOMESTIC_NEWS_MEDIA: FeedDef[] = [
 ];
 
 /** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5
- *  + 2026-06-24 国外第三方新闻媒体 3 + 国内新闻媒体 2（量子位 native + 新智元 rsshub）= 37）。
+ *  + 2026-06-24 国外第三方新闻媒体 3 + 国内新闻媒体 3（量子位 native + 机器之心/新智元 rsshub）= 38）。
  *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团;
  *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团;
  *  国外新闻媒体 3 = TechCrunch / The Verge / MIT Technology Review;
- *  国内新闻媒体 2 = 量子位(原生 RSS)+ 新智元(/aiera,HK VPS RSSHub);机器之心暂缓(Sogou 路由无正文,待 Codex 换带全文路由)。 */
+ *  国内新闻媒体 3 = 量子位(原生 RSS)+ 机器之心(/jiqizhixin 官网直连全文)+ 新智元(/aiera)(后两者 HK VPS RSSHub,Codex 2026-06-24 部署)。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...FOREIGN_NEWS_MEDIA,
