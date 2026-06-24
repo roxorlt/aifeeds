@@ -593,15 +593,40 @@ const DOMESTIC_PODCASTS: FeedDef[] = [
   },
 ];
 
+// ── 国内第三方 AI 新闻媒体（2026-06-24）─────────────────────────────────────────
+// 对标 FOREIGN_NEWS_MEDIA：第三方媒体报道（非厂商官博），补国内生态热点（字节/腾讯/阿里
+// 产品发布等）。量子位有可用原生 RSS（qbitai.com/feed，RFC822 pubDate 经 parseFeed 归一 ISO，
+// 含 content:encoded 全文）→ 走 native，无需 RSSHub。机器之心/新智元无可靠直连 RSS，待 Codex
+// 经 HK VPS RSSHub 接（via='rsshub'），见 docs/plans/2026-06-24-rsshub-domestic-ai-media-handoff.md。
+const DOMESTIC_NEWS_MEDIA: FeedDef[] = [
+  {
+    id: "blog:qbitai",
+    key: "qbitai",
+    kind: "blog",
+    format: "rss",
+    source_company: "量子位",
+    name: "量子位",
+    region: "domestic",
+    via: "native",
+    feed_url: "https://www.qbitai.com/feed",
+    cadence_hours: 2,
+    fetch_strategy: "native",
+    site_base: "https://www.qbitai.com",
+    notes: "国内顶级 AI 媒体,追产品发布最快(Seedance/腾讯等第一时间报);原生 RSS 含 content:encoded 全文,中文无需翻译;is_ai gate + cn_sensitive 过滤照常",
+  },
+];
+
 /** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5
- *  + 2026-06-24 国外第三方新闻媒体 3 = 35）。
+ *  + 2026-06-24 国外第三方新闻媒体 3 + 国内新闻媒体 1（量子位）= 36）。
  *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团;
  *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团;
- *  国外新闻媒体 3 = TechCrunch / The Verge / MIT Technology Review(原生 RSS,补官博漏掉的第三方报道)。 */
+ *  国外新闻媒体 3 = TechCrunch / The Verge / MIT Technology Review;
+ *  国内新闻媒体 1 = 量子位(原生 RSS);机器之心/新智元待 Codex RSSHub。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...FOREIGN_NEWS_MEDIA,
   ...DOMESTIC_BLOGS,
+  ...DOMESTIC_NEWS_MEDIA,
   ...PAGE_SCRAPE_BLOGS,
   ...PODCASTS,
   ...DOMESTIC_PODCASTS,
