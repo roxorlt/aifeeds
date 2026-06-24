@@ -421,8 +421,9 @@ async function selectExistingIds(env: Env, ids: string[]): Promise<Set<string>> 
   return out;
 }
 
-/** RSS 正文 HTML 是否「自带全文」(纯文本 ≥800 字)，决定 hasNativeFulltext 信号。 */
-function isFullEnoughHtml(html: string | undefined): boolean {
+/** RSS 正文 HTML 是否「自带全文」(纯文本 ≥800 字)，决定 hasNativeFulltext 信号。
+ *  export 给 podcast.ts 的无音频文字项改判 blog 复用(单一真相，避免两处门槛漂移)。 */
+export function isFullEnoughHtml(html: string | undefined): boolean {
   if (!html) return false;
   const text = html
     .replace(/<[^>]+>/g, ' ')
