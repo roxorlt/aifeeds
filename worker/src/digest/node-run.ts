@@ -15,6 +15,7 @@ import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey } from './lib';
 import { pushDailyToCodex } from './codex-push';
 import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
+import { buildDigestSubjectFallback, digestSubjectTitleFromRow } from './subject';
 
 interface NodeRunParams {
   slotHourBjt: number;
@@ -100,7 +101,6 @@ export async function fetchCandidates(env: Env, source: DigestSource, ids: strin
 
 // 节点级标题摘要(flash,该节点所有用户共用)。失败 fallback。
 async function genSubjectDigest(env: Env, sk: string): Promise<string> {
-  const fallback = '今日 AI 精选';
   const pools = await env.DB.prepare(
     `SELECT item_ids FROM digest_pool WHERE slot_key = ? AND density = 'curated'`,
   )
@@ -114,17 +114,20 @@ async function genSubjectDigest(env: Env, sk: string): Promise<string> {
       /* ignore */
     }
   }
-  if (!ids.length || !env.DEEPSEEK_API_KEY) return fallback;
+  if (!ids.length) return '今日 AI 精选';
   const top = ids.slice(0, 8);
   const ph = top.map(() => '?').join(',');
   const r = await env.DB.prepare(
-    `SELECT title, content_translated, content FROM items WHERE id IN (${ph})`,
+    `SELECT id, title, content_translated, content, extra FROM items WHERE id IN (${ph})`,
   )
     .bind(...top)
-    .all<{ title: string | null; content_translated: string | null; content: string | null }>();
-  const titles = (r.results || [])
-    .map((row) => row.title || (row.content_translated || row.content || '').slice(0, 40))
+    .all<{ id: string; title: string | null; content_translated: string | null; content: string | null; extra: string | null }>();
+  const byId = new Map((r.results || []).map((row) => [row.id, row]));
+  const titles = top
+    .map((id) => digestSubjectTitleFromRow(byId.get(id)))
     .filter(Boolean);
+  const fallback = buildDigestSubjectFallback(titles);
+  if (!env.DEEPSEEK_API_KEY) return fallback;
   if (!titles.length) return fallback;
   // deepseek-v4 是 reasoning 模型:普通调用 content 空(内容在 reasoning_content),
   // 必须走 JSON Mode 让答案进 content;maxTokens 要留够 reasoning 占用。
@@ -160,7 +163,12 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
       if (source === 'clawhub') continue;
       const cfg = SOURCE_DIGEST_CONFIG[source as DigestSource];
       await step.do(`pool-${source}`, RETRY, async (): Promise<number> => {
-        const candidateIds0 = await selectTopForSource(this.env, source as DigestSource, CURATED_CANDIDATE_POOL);
+        const candidateIds0 = await selectTopForSource(
+          this.env,
+          source as DigestSource,
+          CURATED_CANDIDATE_POOL,
+          source === 'news' ? { strictCrossDayEventDedup: true } : {},
+        );
         // 跨天去重:剔除前几天已推过的同一条。若全被剔(极端冷门日,候选全是前几天推过的)
         // → 兜底回退原始榜,宁可重复也不让板块(尤其 news 强制头条)整块空掉。
         let candidateIds = await excludeAlreadyPushed(this.env, candidateIds0, source as DigestSource);

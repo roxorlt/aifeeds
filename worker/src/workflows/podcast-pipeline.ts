@@ -25,6 +25,7 @@ import {
   isAiGate,
   reclassifyOnFulltext,
   classifyAndTranslateForFeeds,
+  generateEventFingerprintForFeeds,
   translateBodyMarkdown,
   classifySensitivityForFeeds,
   summarizeTimelineForPodcast,
@@ -155,6 +156,9 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
       // 高置信 relevant 跳过 → 裸奔到手动回填(自测用例暴露)。全文/shownotes 依据。
       step.do('classify-cn-sensitive', RETRY, () =>
         classifySensitivityForFeeds(this.env, itemId, 'podcast'),
+      ),
+      step.do('event-fingerprint', RETRY, () =>
+        generateEventFingerprintForFeeds(this.env, itemId, { kind: 'podcast' }),
       ),
     ]);
     // ⚠️ 完整性 gate 条件 = enrich + eager(shownotes)翻译成功(fan[1])，**不是** transcript 翻译。

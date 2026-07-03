@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra } from "../types";
-import { cn, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { cn, htmlToPlainText, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
 import { IconClock } from "./icons";
@@ -62,13 +62,14 @@ export function BlogCard({ item, eager, posterMode }: Props) {
 
   // 标题优先中译，缺时退原文。ELI25 摘要优先 ai_summary_zh（§8.4.A），逐级降级。
   const title = extra.title_zh || item.title || "";
-  const summary =
+  const summary = htmlToPlainText(
     extra.ai_summary_zh ||
     extra.excerpt_zh ||
     extra.excerpt ||
     item.content_translated ||
     item.content ||
-    "";
+    "",
+  );
 
   const publisherName =
     extra.publisher?.name ||

@@ -104,6 +104,10 @@ export interface FeedDef {
   cadence_hours: number;
   /** 详情页正文抓取策略。Phase 1 全部 'native'。 */
   fetch_strategy: FetchStrategy;
+  /** 明确跳过涉华敏感 LLM 判定，直接写 extra.cn_sensitive=0（仅限可信白名单源）。 */
+  skip_cn_sensitive?: boolean;
+  /** 该 RSSHub 路由需要 Worker 通过 X-Weibo-Cookie 转发 WEIBO_COOKIES。 */
+  needs_weibo_cookie?: boolean;
   /**
    * 正文相对 URL 解析的 base 域（§9.2：<content:encoded> 里的 src="/img/x.png" 要按各 feed 自己的域解析）。
    * 缺省时用该 item 的 canonical_url 推导。例 'https://openai.com'。
@@ -287,6 +291,7 @@ export interface BlogExtra
   blog_name?: string;
   feed_url?: string;
   fetch_strategy?: FetchStrategy;
+  skip_cn_sensitive?: boolean;
   publisher?: FeedPublisher;
 
   /** 封面（迁 R2 后改写为 /r/ 路径；迁移前是原始域名 URL）。 */
@@ -378,6 +383,8 @@ export interface BlogPipelineParams {
   lang: FeedLang;
   /** 信号：feed 是否自带全文（true 时 step3 可跳过回源抓取）。 */
   hasNativeFulltext?: boolean;
+  /** 信号：是否跳过涉华敏感 LLM 判定，直接写 extra.cn_sensitive=0。 */
+  skipCnSensitive?: boolean;
 }
 
 /** PODCAST_PIPELINE_WORKFLOW.create({ id, params }) 的 params（§8.3）。 */
@@ -394,6 +401,7 @@ export interface PodcastPipelineParams {
 export interface BlogTriggerSignals {
   fetchStrategy: FetchStrategy;
   hasNativeFulltext?: boolean;
+  skipCnSensitive?: boolean;
 }
 export interface PodcastTriggerSignals {
   hasNativeTranscript?: boolean;

@@ -19,12 +19,38 @@ const FEED_FETCH_TIMEOUT_MS = 20_000;
 /** 单 feed 单次最多归一化条数（防病态超长 feed 拖垮 stub INSERT）。 */
 const MAX_ITEMS_PER_FEED = 80;
 
+export interface FeedFetchEnv {
+  RSSHUB_BASE?: string;
+  RSSHUB_TOKEN?: string;
+  WEIBO_COOKIES?: string;
+}
+
+export class WeiboCookieMissingError extends Error {
+  readonly code = "WEIBO_COOKIE_MISSING";
+  readonly status = 401;
+
+  constructor(feedId: string) {
+    super(`feed ${feedId} requires WEIBO_COOKIES`);
+    this.name = "WeiboCookieMissingError";
+  }
+}
+
+export class WeiboCookieInvalidError extends Error {
+  readonly code = "WEIBO_COOKIE_INVALID";
+  readonly status = 403;
+
+  constructor(feedId: string, detail?: string) {
+    super(`feed ${feedId} Weibo cookie invalid${detail ? `: ${detail}` : ""}`);
+    this.name = "WeiboCookieInvalidError";
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // fetchFeedXml — native 与 rsshub 统一入口
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function fetchFeedXml(
-  env: { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string },
+  env: FeedFetchEnv,
   feed: FeedDef,
 ): Promise<string> {
   const isRss = feed.via === "rsshub";
@@ -40,6 +66,25 @@ export async function fetchFeedXml(
     url = feed.feed_url;
   }
 
+  const headers = buildFeedFetchHeaders(env, feed);
+
+  const r = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT_MS),
+  });
+  if (feed.needs_weibo_cookie && (r.status === 401 || r.status === 403)) {
+    const body = await r.text().catch(() => "");
+    throw new WeiboCookieInvalidError(feed.id, body.slice(0, 200));
+  }
+  if (!r.ok) throw new Error(`feed ${feed.id} HTTP ${r.status}`);
+  return r.text();
+}
+
+export function buildFeedFetchHeaders(
+  env: Pick<FeedFetchEnv, "RSSHUB_TOKEN" | "WEIBO_COOKIES">,
+  feed: FeedDef,
+): Record<string, string> {
+  const isRss = feed.via === "rsshub";
   const headers: Record<string, string> = {
     "User-Agent": USER_AGENT,
     Accept:
@@ -48,13 +93,12 @@ export async function fetchFeedXml(
     "Cache-Control": "no-cache",
   };
   if (isRss && env.RSSHUB_TOKEN) headers["X-RSSHub-Token"] = env.RSSHUB_TOKEN;
-
-  const r = await fetch(url, {
-    headers,
-    signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT_MS),
-  });
-  if (!r.ok) throw new Error(`feed ${feed.id} HTTP ${r.status}`);
-  return r.text();
+  if (feed.needs_weibo_cookie) {
+    const cookie = env.WEIBO_COOKIES?.trim();
+    if (!cookie) throw new WeiboCookieMissingError(feed.id);
+    headers["X-Weibo-Cookie"] = cookie;
+  }
+  return headers;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

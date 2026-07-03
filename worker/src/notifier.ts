@@ -21,6 +21,7 @@ const PUSHDEER_ENDPOINT = 'https://api2.pushdeer.com/message/push';
 // 攒批 warning 用的 KV key + buffer 上限
 const WARNING_BUFFER_KEY = 'PUSHDEER_WARNING_BUFFER';
 const WARNING_BUFFER_MAX = 200; // 防止 KV value 过大(单 value 25MB,200 条够撑日内任意流量)
+const WEIBO_COOKIE_ALERT_KEY = 'WEIBO_COOKIE_INVALID_ALERTED';
 
 export interface WarningEntry {
   title: string;
@@ -118,6 +119,36 @@ export async function pushDeerWarning(
     expirationTtl: 25 * 3600,
   });
   console.log(`[pushdeer-warning|buffered] ${title} (buffer size: ${buffer.length})`);
+}
+
+export async function notifyWeiboCookieInvalid(
+  env: Env,
+  reason: string,
+): Promise<void> {
+  if (env.AUTH_KV) {
+    const existing = await env.AUTH_KV.get(WEIBO_COOKIE_ALERT_KEY);
+    if (existing) {
+      console.warn(`[weibo-cookie] suppress duplicate alert: ${reason.slice(0, 160)}`);
+      return;
+    }
+    await env.AUTH_KV.put(
+      WEIBO_COOKIE_ALERT_KEY,
+      new Date().toISOString(),
+      { expirationTtl: 25 * 3600 },
+    );
+  }
+
+  await pushDeerAlert(
+    env,
+    '微博 Cookie 失效',
+    [
+      '微博科技热搜 RSSHub 路由返回 cookie 缺失或失效。',
+      '',
+      `- Secret 文件: \`/Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-prod.env\``,
+      '- 变量名: `WEIBO_COOKIES`',
+      `- 错误: \`${reason.slice(0, 300)}\``,
+    ].join('\n'),
+  );
 }
 
 /**

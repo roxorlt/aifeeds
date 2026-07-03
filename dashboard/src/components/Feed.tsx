@@ -20,8 +20,6 @@ import {
   getLastSeen,
   setLastSeen,
   rowMaxScrapedAt,
-  getSeenIds,
-  markSeen,
   parseJsonField,
   proxyImg,
   cn,
@@ -49,6 +47,7 @@ type FeedCacheEntry = {
   nextCursor: string | null;
   hasMore: boolean;
   ts: number;
+  snapshot?: boolean;
 };
 const FEED_CACHE = new Map<string, FeedCacheEntry>();
 const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -56,8 +55,8 @@ const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
 // 本地持久化(2026-06-11,回访秒开):FEED_CACHE 同步落一份轻量快照到 localStorage,
 // 下次打开 App(冷启动,内存是空的)先显示上次的内容、后台 silent refetch 换新 —— 微博/
 // 小红书的"先显旧再刷新"模式。只存前 FEED_SNAP_ITEMS 条(首屏够用,控制配额);不存
-// nextCursor(截断后 cursor 和 items 对不上),hasMore 落 false → 恢复期间 loadMore
-// 不会用错误的起点拼页,等 silent refetch 回来整体替换出正确的 cursor/hasMore。
+// nextCursor(截断后 cursor 和 items 对不上)。快照只用于首屏占位,必须强制 silent
+// refetch,否则冷启动会把 15 条快照误当完整列表并显示"到底"。
 const FEED_SNAP_PREFIX = "aifeeds_feed_snap:";
 const FEED_SNAP_ITEMS = 15;
 const FEED_SNAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -83,7 +82,7 @@ function readFeedCache(key: string, maxAgeMs: number = FEED_CACHE_TTL_MS): FeedC
     if (!raw) return null;
     const snap = JSON.parse(raw) as { items?: Item[]; ts?: number };
     if (!snap || !Array.isArray(snap.items) || snap.items.length === 0 || !snap.ts) return null;
-    const entry: FeedCacheEntry = { items: snap.items, nextCursor: null, hasMore: false, ts: snap.ts };
+    const entry: FeedCacheEntry = { items: snap.items, nextCursor: null, hasMore: true, ts: snap.ts, snapshot: true };
     FEED_CACHE.set(key, entry);
     return Date.now() - snap.ts <= maxAgeMs ? entry : null;
   } catch {
@@ -329,7 +328,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     if (!didFetchRef.current) {
       didFetchRef.current = true;
       const fresh = readFeedCache(sourceType);
-      if (items.length > 0 && fresh && Date.now() - fresh.ts < 60_000) return;
+      if (items.length > 0 && fresh && !fresh.snapshot && Date.now() - fresh.ts < 60_000) return;
     }
     let cancelled = false;
     // PM 2026-05-20:若已有 cache hydrate 的 items,后台静默 refetch
@@ -351,15 +350,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     })
       .then((res) => {
         if (cancelled) return;
-        let itemsToShow = res.items;
-        if (isHot && !isClawhub && !isPh && !isHdx) {
-          // Filter out already-seen ids so pull-down surfaces unseen hottest.
-          // ClawHub 是 marketplace 性质、PH 是日榜、huodongxing 是活动列表，
-          // 都不是流式新闻 → 跳过曝光过滤，用户应看完整 top。
-          const seen = getSeenIds(sourceType);
-          itemsToShow = res.items.filter((i) => !seen.has(i.id));
-          markSeen(sourceType, itemsToShow.map((i) => i.id));
-        }
+        const itemsToShow = res.items;
         setItems(itemsToShow);
         setPending([]);
         setNextCursor(res.next_cursor);
@@ -409,13 +400,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         form: isHdx && hdxForm ? hdxForm : undefined,
       });
       consecutiveFailRef.current = 0;
-      const seen = (isHot && !isClawhub && !isPh && !isHdx) ? getSeenIds(sourceType) : null;
       setItems((prev) => {
         const existing = new Set(prev.map((i) => i.id));
         const fresh = res.items.filter(
-          (i) => !existing.has(i.id) && (!seen || !seen.has(i.id)),
+          (i) => !existing.has(i.id),
         );
-        if (isHot && !isClawhub && !isPh && !isHdx) markSeen(sourceType, fresh.map((i) => i.id));
         return [...prev, ...fresh];
       });
       setNextCursor(res.next_cursor);
@@ -620,10 +609,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         sort: "hot",
       })
         .then((res) => {
-          const seen = getSeenIds(sourceType);
-          const itemsToShow = res.items.filter((i) => !seen.has(i.id));
-          markSeen(sourceType, itemsToShow.map((i) => i.id));
-          setItems(itemsToShow);
+          setItems(res.items);
           setPending([]);
           setNextCursor(res.next_cursor);
           setHasMore(res.has_more);

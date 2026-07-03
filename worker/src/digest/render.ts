@@ -194,10 +194,12 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
     case 'clawhub':
       return null; // 不用作者头像
     case 'news': {
-      // 行业新闻:博客/播客封面 = extra.cover_image,否则 media 第一张图
+      // 行业新闻:博客/播客封面 = extra.cover_image,否则 media 第一张图,再否则正文 assets 第一张图
       const cov = (ex.cover_image as string) || '';
       if (cov) return abs(cov);
-      return imgs.length ? abs(imgs[0].url as string) : null;
+      if (imgs.length) return abs(imgs[0].url as string);
+      const bodyImg = bodyImageAssets(ex)[0];
+      return bodyImg ? abs(bodyImg.url) : null;
     }
     default:
       return null;
@@ -285,6 +287,9 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
           out.push(v);
         }
       }
+      for (const m of bodyImageAssets(ex)) {
+        out.push({ type: 'image', url: abs(m.url) });
+      }
       break;
   }
   const seen = new Set<string>();
@@ -294,6 +299,63 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
     seen.add(k);
     return true;
   });
+}
+
+function bodyImageAssets(ex: Record<string, unknown>): Array<{ url: string }> {
+  const out: Array<{ url: string }> = [];
+  const seen = new Set<string>();
+  const add = (url: string) => {
+    const u = String(url || '').trim();
+    if (!u || seen.has(u) || isSkippableInlineImage(u)) return;
+    seen.add(u);
+    out.push({ url: u });
+  };
+  const body = ex.body;
+  if (body && typeof body === 'object') {
+    const assets = (body as { assets?: unknown }).assets;
+    if (Array.isArray(assets)) {
+      for (const asset of assets) {
+        if (
+          !!asset
+          && typeof asset === 'object'
+          && typeof (asset as { url?: unknown }).url === 'string'
+          && ((asset as { kind?: unknown }).kind === 'image' || !(asset as { kind?: unknown }).kind)
+        ) {
+          add((asset as { url: string }).url);
+        }
+      }
+    }
+  }
+  for (const field of ['body_markdown_zh', 'body_markdown', 'excerpt_zh', 'excerpt']) {
+    const value = typeof ex[field] === 'string' ? (ex[field] as string) : '';
+    for (const url of inlineImageUrls(value)) add(url);
+  }
+  return out;
+}
+
+function inlineImageUrls(text: string): string[] {
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  while ((m = htmlRe.exec(text)) !== null) out.push(htmlDecode(m[1]));
+  const mdRe = /!\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+  while ((m = mdRe.exec(text)) !== null) out.push(htmlDecode(m[1]));
+  return out;
+}
+
+function htmlDecode(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function isSkippableInlineImage(url: string): boolean {
+  return /\.svg(\?|$)/i.test(url)
+    || /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(url)
+    || /^data:/i.test(url);
 }
 
 export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string): RenderedItem {

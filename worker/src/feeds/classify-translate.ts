@@ -101,8 +101,9 @@ async function callJson<T>(
   system: string,
   user: string,
   maxTokens: number,
+  model: string = DEEPSEEK_FLASH,
 ): Promise<T | null> {
-  const text = await callRaw(env, system, user, { maxTokens, jsonMode: true });
+  const text = await callRaw(env, system, user, { maxTokens, jsonMode: true, model });
   if (!text) return null;
   try {
     return JSON.parse(text) as T;
@@ -139,6 +140,46 @@ interface ItemRow {
   content: string | null;
   extra: string | null;
   is_relevant: number | null;
+}
+
+export interface FeedEventFingerprint {
+  event_type: string;
+  primary_actor: string;
+  primary_object: string;
+  object_family: string;
+  object_variant: string;
+  object_version: string;
+  action: string;
+  canonical_event: string;
+  confidence: number;
+}
+
+export function normalizeFeedEventFingerprint(value: unknown): FeedEventFingerprint | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  const pick = (...keys: string[]) => {
+    for (const key of keys) {
+      const raw = obj[key];
+      if (typeof raw === "string" && raw.trim()) return raw.trim().slice(0, 120);
+    }
+    return "";
+  };
+  const eventType = pick("event_type", "eventType").replace(/-/g, "_");
+  const canonical = pick("canonical_event", "canonicalEvent");
+  const primaryObject = pick("primary_object", "primaryObject");
+  if (!eventType || (!canonical && !primaryObject)) return null;
+  const confidence = Number(obj.confidence);
+  return {
+    event_type: eventType,
+    primary_actor: pick("primary_actor", "primaryActor"),
+    primary_object: primaryObject,
+    object_family: pick("object_family", "objectFamily"),
+    object_variant: pick("object_variant", "objectVariant"),
+    object_version: pick("object_version", "objectVersion"),
+    action: pick("action").replace(/-/g, "_"),
+    canonical_event: canonical || primaryObject,
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.5,
+  };
 }
 
 async function loadItem(env: Env, itemId: string): Promise<{
@@ -363,6 +404,102 @@ function enrichUser(
 - 中文标点，不混用英文标点`;
 }
 
+export function selectEnrichExcerptForFeeds(
+  kind: FeedKind,
+  it: { content?: string; extra?: Record<string, unknown> },
+): string {
+  const extra = it.extra || {};
+  const candidates =
+    kind === "podcast"
+      ? [
+          extra.transcript_text_zh,
+          extra.transcript_text,
+          extra.shownotes_zh,
+          extra.shownotes,
+          it.content,
+        ]
+      : [
+          extra.body_markdown_zh,
+          extra.body_markdown,
+          extra.excerpt_zh,
+          extra.excerpt,
+          it.content,
+        ];
+  const picked = candidates.find((value) => isTextRichForEnrich(String(value || "")));
+  return String(picked || candidates.find((value) => String(value || "").trim()) || "").slice(0, 4000);
+}
+
+function isTextRichForEnrich(text: string): boolean {
+  const clean = text
+    .replace(/!\[[^\]]*]\([^)]+\)/g, "")
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  return clean.length >= 80;
+}
+
+export function validateFeedEnrichGrounding(input: {
+  sourceTitle: string;
+  sourceText: string;
+  titleZh: string;
+  summaryZh: string;
+}): { suspect: boolean; reason: string; bodySubjects: string[]; outputSubjects: string[] } {
+  const bodySubjects = extractGroundingSubjects(input.sourceText);
+  const titleSubjects = extractGroundingSubjects(input.sourceTitle);
+  const output = `${input.titleZh}\n${input.summaryZh}`;
+  const outputSubjects = extractGroundingSubjects(output);
+  const outputSearch = normalizeGroundingText(output);
+  const missingBodySubjects = bodySubjects
+    .filter((subject) => !titleSubjects.includes(subject))
+    .filter((subject) => !outputSearch.includes(normalizeGroundingText(subject)));
+  const titleOnlySubjects = titleSubjects
+    .filter((subject) => !bodySubjects.includes(subject))
+    .filter((subject) => outputSearch.includes(normalizeGroundingText(subject)));
+  const suspect = bodySubjects.length > 0
+    && missingBodySubjects.length > 0
+    && (titleOnlySubjects.length > 0 || outputSubjects.length > 0);
+  return {
+    suspect,
+    reason: suspect
+      ? `missing_body_subject:${missingBodySubjects.slice(0, 4).join('|')};title_only_subject:${titleOnlySubjects.slice(0, 4).join('|')}`
+      : "",
+    bodySubjects,
+    outputSubjects,
+  };
+}
+
+function extractGroundingSubjects(text: string): string[] {
+  const clean = stripMarkupForGrounding(text);
+  const out: string[] = [];
+  const add = (value: string) => {
+    const v = value.trim().replace(/[。！？；，,、:：()[\]【】"'“”‘’]/g, "");
+    if (!v || v.length < 2) return;
+    if (/^(AI|API|LLM|GPU|CPU|X|GitHub)$/i.test(v)) return;
+    if (!out.includes(v)) out.push(v);
+  };
+  for (const match of clean.matchAll(/\b[A-Z][A-Za-z0-9.+-]{1,}(?:\s+[A-Z][A-Za-z0-9.+-]{1,}){0,3}\b/g)) {
+    add(match[0]);
+  }
+  for (const match of clean.matchAll(/[\u4e00-\u9fff]{2,12}(?:系统|模型|平台|工具|芯片|公司|实验室|项目|产品)/g)) {
+    add(match[0]);
+  }
+  return out.slice(0, 12);
+}
+
+function stripMarkupForGrounding(text: string): string {
+  return String(text || "")
+    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+    .replace(/<img\b[^>]*>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeGroundingText(text: string): string {
+  return stripMarkupForGrounding(text).replace(/\s+/g, "").toLowerCase();
+}
+
 export async function classifyAndTranslateForFeeds(
   env: Env,
   itemId: string,
@@ -370,11 +507,7 @@ export async function classifyAndTranslateForFeeds(
 ): Promise<{ enrichFailed: boolean }> {
   const { kind, lang } = opts;
   const it = await loadItem(env, itemId);
-  const excerpt = String(
-    (kind === "podcast" ? it.extra.shownotes : it.extra.excerpt) ||
-      it.content ||
-      "",
-  ).slice(0, 4000);
+  const excerpt = selectEnrichExcerptForFeeds(kind, it);
   const sourceCompany = String(it.extra.source_company || "");
   const zhField = kind === "podcast" ? "shownotes_zh" : "excerpt_zh";
 
@@ -410,6 +543,24 @@ export async function classifyAndTranslateForFeeds(
     { path: "$.llm_model", value: DEEPSEEK_FLASH },
     { path: "$.llm_called_at", value: Math.floor(Date.now() / 1000) },
   ];
+  const grounding = validateFeedEnrichGrounding({
+    sourceTitle: it.title,
+    sourceText: excerpt,
+    titleZh: String(out.title_zh || ""),
+    summaryZh: String(out.ai_summary_zh || ""),
+  });
+  if (grounding.suspect) {
+    patches.push(
+      { path: "$.suspect_enrich", value: 1 },
+      { path: "$.suspect_enrich_reason", value: grounding.reason },
+    );
+    console.warn(`[feeds:enrich:suspect] ${itemId}: ${grounding.reason}`);
+  } else {
+    patches.push(
+      { path: "$.suspect_enrich", value: 0 },
+      { path: "$.suspect_enrich_reason", value: "" },
+    );
+  }
   // 播客嘉宾(LLM 从 title+shownotes 抽,2026-06-12 #2):仅当结构化 podcast:person
   // 没给 guests 时才写(尊重结构化数据);清洗成 string[],去重 + 截 4 人。
   // ⚠️ 没抽到也写 guests:[](而非留 NULL)—— 否则 backfill 的 `guests IS NULL`
@@ -434,6 +585,100 @@ export async function classifyAndTranslateForFeeds(
   await jsonSetExtra(env, itemId, patches);
   console.log(`[feeds:enrich] ${itemId}: cat=${aiCategory}`);
   return { enrichFailed: false };
+}
+
+const EVENT_FINGERPRINT_SYSTEM = `你是 AI 行业新闻的「同一事件」指纹抽取器。你的输出会用于日报选品去重,目标是判断两条新闻是否报道同一个现实世界事件,而不是同一家公司、同一产品线或同一泛话题。
+
+只输出 JSON,不要 markdown。
+
+核心原则:
+- “同一事件”必须共享具体对象 + 动作 + 时间语境。例如“Anthropic 发布 Claude Sonnet 5”和“TechCrunch 报道 Claude Sonnet 5 降低 Agent 成本”是同一事件。
+- 只共享公司/品牌/产品族不是同一事件。例如“Claude Sonnet 5 发布”≠“Claude 模型运行在 NVIDIA GB300/Azure 上”≠“Claude Science 科研工作台发布”。
+- 模型家族要拆到具体变体:Claude Sonnet / Opus / Haiku / Mythos / Fable 是不同对象;GPT-5.6 Sol/Terra/Luna 也要保留具体版本/变体。
+- 监管/解禁/访问政策类事件可同时涉及多个模型名,但 event_type 应标为 policy_access,canonical_event 写政策事件本身。
+- 不确定时不要强行合并,confidence 降低。
+
+输出 JSON 结构:
+{
+  "event_type": "model_release | product_launch | product_update | infrastructure_integration | research_result | policy_access | company_business | funding_mna | benchmark_eval | tutorial_opinion | other",
+  "primary_actor": "主要行为主体,如 Anthropic / NVIDIA / OpenAI",
+  "primary_object": "事件核心对象,尽量具体,如 Claude Sonnet 5 / Claude Science / NVIDIA GB300 on Azure",
+  "object_family": "对象所属产品族,如 Claude / GPT / Gemini / DeepSeek;没有则空字符串",
+  "object_variant": "具体变体,如 Sonnet / Fable / Mythos / Sol;没有则空字符串",
+  "object_version": "版本号,如 5 / 5.6 / 2.8;没有则空字符串",
+  "action": "launch | update | integrate | open_source | restrict | approve | price_change | benchmark | report | partner | fundraise | other",
+  "canonical_event": "英文或中英混合的一句话规范事件名,≤80字符",
+  "confidence": 0到1之间的小数
+}`;
+
+function eventFingerprintUser(
+  kind: FeedKind,
+  input: {
+    title: string;
+    titleZh: string;
+    summaryZh: string;
+    aiCategory: string;
+    sourceCompany: string;
+    excerpt: string;
+  },
+): string {
+  return `【输入】
+- kind: ${kind}
+- source_company: ${input.sourceCompany}
+- ai_category: ${input.aiCategory}
+- title: ${input.title}
+- title_zh: ${input.titleZh}
+- ai_summary_zh: ${input.summaryZh}
+- excerpt:
+${input.excerpt.slice(0, 2500)}
+
+【任务】
+为这条内容抽取“同一事件判断”用的事件指纹。重点区分:
+- 模型发布 vs 产品/工作台发布 vs 基础设施集成 vs 政策解禁/限制
+- 同一产品族下的不同具体对象,例如 Claude Sonnet 5、Claude Science、Claude on GB300 必须是不同 primary_object
+- 媒体报道角度可以不同,但只要现实事件相同,canonical_event 应一致或高度相近`;
+}
+
+export async function generateEventFingerprintForFeeds(
+  env: Env,
+  itemId: string,
+  opts: { kind: FeedKind },
+): Promise<{ ok: boolean; failed: boolean }> {
+  const { kind } = opts;
+  const it = await loadItem(env, itemId);
+  const excerpt = selectEnrichExcerptForFeeds(kind, it);
+  const sourceCompany = String(it.extra.source_company || "");
+  const out = await callJson<Record<string, unknown>>(
+    env,
+    EVENT_FINGERPRINT_SYSTEM,
+    eventFingerprintUser(kind, {
+      title: it.title,
+      titleZh: String(it.extra.title_zh || ""),
+      summaryZh: String(it.extra.ai_summary_zh || ""),
+      aiCategory: String(it.extra.ai_category || ""),
+      sourceCompany,
+      excerpt,
+    }),
+    1000,
+    DEEPSEEK_PRO,
+  );
+  const fp = normalizeFeedEventFingerprint(out);
+  if (!fp) {
+    await jsonSetExtra(env, itemId, [
+      { path: "$.event_fingerprint_failed_at", value: new Date().toISOString() },
+      { path: "$.event_fingerprint_model", value: DEEPSEEK_PRO },
+    ]);
+    console.warn(`[feeds:event-fingerprint] ${itemId}: failed`);
+    return { ok: false, failed: true };
+  }
+  await jsonSetExtra(env, itemId, [
+    { path: "$.event_fingerprint", value: fp, json: true },
+    { path: "$.event_fingerprint_model", value: DEEPSEEK_PRO },
+    { path: "$.event_fingerprint_called_at", value: Math.floor(Date.now() / 1000) },
+    { path: "$.event_fingerprint_failed_at", value: "" },
+  ]);
+  console.log(`[feeds:event-fingerprint] ${itemId}: ${fp.event_type} ${fp.canonical_event}`);
+  return { ok: true, failed: false };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

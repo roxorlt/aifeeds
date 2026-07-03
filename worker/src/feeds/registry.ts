@@ -8,6 +8,7 @@
 //   - (Phase 2,2026-06-22) +4 国内播客,经 HK VPS 自托管 RSSHub 小宇宙路由（via='rsshub'）→ 共 28
 //   - (Phase 3,2026-06-22) +5 page-scrape 博客（AI21/Cohere/Databricks/MiniMax/美团）→ 共 32
 //   - (2026-06-24) +3 国外第三方新闻媒体原生 RSS（TechCrunch / The Verge / MIT Technology Review）→ 共 35
+//   - (2026-06-25) +1 微博科技热搜 via HK RSSHub（热度雷达，Worker 转发 WEIBO_COOKIES）→ 共 39
 //
 // ensureFeedSources(env) 启动时幂等 upsert 进 sources 表（镜像 X 把 list 存 sources 的范式）：
 //   sources.id=FeedDef.id, source_type=kind, source_ref=key, name, config=JSON.stringify(FeedDef)。
@@ -644,17 +645,43 @@ const DOMESTIC_NEWS_MEDIA: FeedDef[] = [
   },
 ];
 
+// ── 国内热度雷达（2026-06-25）───────────────────────────────────────────────
+// 微博科技热搜只作为热点发现信号，不做正文媒体报道源；cookie 只存在 Worker secret，
+// fetchFeedXml 对 needs_weibo_cookie 源通过 X-Weibo-Cookie 透传给 HK RSSHub。
+const DOMESTIC_HOT_RADAR: FeedDef[] = [
+  {
+    id: "blog:weibo-hot-tech",
+    key: "weibo-hot-tech",
+    kind: "blog",
+    format: "rss",
+    source_company: "微博",
+    name: "微博科技热搜",
+    region: "domestic",
+    via: "rsshub",
+    feed_url: "/weibo/hot/tech",
+    cadence_hours: 0.5,
+    fetch_strategy: "native",
+    skip_cn_sensitive: true,
+    needs_weibo_cookie: true,
+    notes:
+      "热度雷达源;30min 抓取;RSSHub 专用 /weibo/hot/tech 路由需要 Worker 以 X-Weibo-Cookie 转发 WEIBO_COOKIES;仅做科技热搜话题发现,cn_sensitive 固定写 0",
+  },
+];
+
 /** 全部 feed(Phase 1 原生 23 + Phase 2 RSSHub 中文播客 4 + Phase 3 page-scrape 5
- *  + 2026-06-24 国外第三方新闻媒体 3 + 国内新闻媒体 3（量子位 native + 机器之心/新智元 rsshub）= 38）。
+ *  + 2026-06-24 国外第三方新闻媒体 3 + 国内新闻媒体 3（量子位 native + 机器之心/新智元 rsshub）
+ *  + 2026-06-25 微博科技热搜 1 = 39）。
  *  注:美团 2026-06-22 从原生 RSS 改 page-scrape(RSS 已迁走),故原生从 24→23、page-scrape 含美团;
  *  page-scrape 5 = AI21 / Cohere / Databricks / MiniMax / 美团;
  *  国外新闻媒体 3 = TechCrunch / The Verge / MIT Technology Review;
- *  国内新闻媒体 3 = 量子位(原生 RSS)+ 机器之心(/jiqizhixin 官网直连全文)+ 新智元(/aiera)(后两者 HK VPS RSSHub,Codex 2026-06-24 部署)。 */
+ *  国内新闻媒体 3 = 量子位(原生 RSS)+ 机器之心(/jiqizhixin 官网直连全文)+ 新智元(/aiera)(后两者 HK VPS RSSHub,Codex 2026-06-24 部署);
+ *  热度雷达 1 = 微博科技热搜(/weibo/hot/tech,HK VPS RSSHub,Codex 2026-06-25 部署)。 */
 export const FEED_REGISTRY: FeedDef[] = [
   ...FOREIGN_BLOGS,
   ...FOREIGN_NEWS_MEDIA,
   ...DOMESTIC_BLOGS,
   ...DOMESTIC_NEWS_MEDIA,
+  ...DOMESTIC_HOT_RADAR,
   ...PAGE_SCRAPE_BLOGS,
   ...PODCASTS,
   ...DOMESTIC_PODCASTS,

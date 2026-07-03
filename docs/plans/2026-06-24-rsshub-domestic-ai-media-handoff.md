@@ -180,3 +180,29 @@ worker 侧建议 registry `feed_url` 直接使用上表 route。量子位建议�
 
 **⚠️ 机器之心需换 route（请 Codex 跟进）**：`/wechat/sogou/jiqizhixin` 验证时虽 200/10 条，但每条 item **只有标题 + 一个 Sogou 搜索跳转链**（`url` 形如 `https://weixin.sogou.com/link?...`），**RSS 里无文章正文**（`<description>`/`content:encoded` 为空）。worker 的 blog 管线用普通 `fetch` 抓取（不渲染 JS、无 Sogou 会话），跟不动 Sogou 跳转 → 这些 item 正文为空、`is_relevant` 上不去、被频道 `is_relevant=1` 过滤掉，等于无效源。
 **期望**：换一个**正文内嵌在 RSS 里**的机器之心 route —— 如 `wechat2rss` 那类把公众号全文打进 `content:encoded` 的方案，或 `jiqizhixin.com` 站点直连路由。新智元 `/aiera` 即是「正文内嵌」的正面例子，可参照。Codex 交付带全文的 route 后，worker 侧加一个 registry 条目即可（`via='rsshub'` `kind='blog'`）。
+
+---
+
+## 10. Codex 修订（2026-06-24，机器之心正文问题）
+
+cc 反馈 `/wechat/sogou/jiqizhixin` 虽然 `200`，但 item 只有标题 + Sogou 跳转链，worker 无法普通 fetch Sogou 跳转拿正文，因此该 route **不再建议接入 worker**。
+
+已改为机器之心官网直连自定义 route：`/jiqizhixin`。实现方式：RSSHub 走 `https://www.jiqizhixin.com/api/article_library/articles.json` 取最新列表，再用 `https://www.jiqizhixin.com/api/article_library/articles/<id-or-slug>.json` 补每篇完整 HTML 正文，并写入 RSS item `description`。本次 release 标识为 `9807609-aiera-jiqizhixin-20260624`。
+
+修订后的 worker 接入表：
+
+| 源 | 确认的 route | HTTPS 状态 | item 数 | 正文验证 | 最新条标题 / pubDate |
+|---|---|---:|---:|---|---|
+| 量子位 | `/qbitai/category/%E8%B5%84%E8%AE%AF`（等价 `/qbitai/category/资讯`） | 200 | 10 | 第一条 `description` 约 2.6KB | 百度智能云发布百度千帆Token Plan企业版，提供GLM-5.2等模型 / Wed, 24 Jun 2026 11:09:51 GMT |
+| 机器之心 | `/jiqizhixin` | 200 | 20 | 第一条 `description` 约 4.4KB，内嵌官网详情 HTML 正文；不依赖 Sogou 跳转 | Future Tech｜谁会成为下一个AI巨头？这175个早期项目站上WAIC 2026 / Wed, 24 Jun 2026 10:57:50 GMT |
+| 新智元 | `/aiera` | 200 | 10 | route 可用；cc 已验收当前内容形态 | 360发布“中国版Mythos”图龙锋 周鸿祎：漏洞发现能力正成为新的战略能力 / Wed, 24 Jun 2026 09:26:46 GMT |
+
+鉴权 smoke：
+
+| 检查 | 结果 |
+|---|---:|
+| 正确 `X-RSSHub-Token` 拉取 `/qbitai/category/%E8%B5%84%E8%AE%AF` / `/jiqizhixin` / `/aiera` | 200 |
+| 无 token 拉 `/jiqizhixin` | 403 |
+| 错 token 拉 `/jiqizhixin` | 403 |
+
+worker 侧请把机器之心 `feed_url` 从旧的 `/wechat/sogou/jiqizhixin` 改为 `/jiqizhixin`。

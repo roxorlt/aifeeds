@@ -62,7 +62,20 @@ import {
 import { runBlogFetch, runBlogBackfill, triggerBlogWorkflowForItem, isFullEnoughHtml } from './blog';
 import { runPodcastFetch, runPodcastBackfill } from './podcast';
 import type { BlogExtra, BlogTriggerSignals } from './feeds/types';
-import { classifySensitivityForFeeds, classifyAndTranslateForFeeds, summarizeTimelineForPodcast } from './feeds/classify-translate';
+import {
+  classifySensitivityForFeeds,
+  classifyAndTranslateForFeeds,
+  summarizeTimelineForPodcast,
+} from './feeds/classify-translate';
+import {
+  buildEventFingerprintBackfillRequestHeaders,
+  buildNextEventFingerprintBackfillUrl,
+  eventFingerprintBackfillRuntimeOptions,
+  parseEventFingerprintBackfillOptions,
+  runEventFingerprintBackfillBatch,
+  shouldScheduleNextEventFingerprintBackfillBatch,
+} from './feeds/event-fingerprint-backfill';
+import { feedNewsRankSqlExpression } from './feeds/ranking';
 import { migrateAudioForPodcast } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
@@ -138,6 +151,8 @@ import {
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 import { handleDigestDaily } from './digest/daily-api';
 import { slotKey } from './digest/lib';
+
+const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:active';
 
 export interface Env {
   DB: D1Database;
@@ -291,6 +306,9 @@ export interface Env {
   // 缺省时 fetchFeedXml 对 rsshub feed 抛错（per-feed catch，不影响其它 feed）。
   RSSHUB_BASE?: string;
   RSSHUB_TOKEN?: string;
+  // 微博科技热搜源 cookie。只由 Worker 通过 X-Weibo-Cookie 转发给 HK RSSHub，
+  // 不写进 RSSHub 服务器环境，便于 CC 在 Cloudflare 侧轮换。
+  WEIBO_COOKIES?: string;
 }
 
 // re-export workflow class 让 wrangler.toml [[workflows]] class_name 能找到
@@ -1569,6 +1587,53 @@ export default {
         .catch((e) => console.error('[cron] x-card-render drain failed:', e)),
     );
 
+    // 行业新闻事件指纹历史回补兜底:DeepSeek Pro 单条有时接近 60s,不适合在一次
+    // HTTP waitUntil 里跑大批量。手动入口会写 active KV + 自调用链;如果链路被慢调用
+    // 打断,每 5 分钟 cron 继续捡 1 条,直到窗口内无缺失或达到 max_batches。
+    ctx.waitUntil(
+      (async () => {
+        const raw = await env.AUTH_KV.get(EVENT_FINGERPRINT_BACKFILL_KV_KEY);
+        if (!raw) return;
+        let state: Record<string, unknown> = {};
+        try { state = JSON.parse(raw) as Record<string, unknown>; } catch { state = {}; }
+        const backfillUrl = new URL('https://internal.local/api/enrich/run?mode=feed-event-fingerprint-backfill');
+        backfillUrl.searchParams.set('async', '1');
+        for (const [param, key] of [
+          ['days', 'days'],
+          ['limit', 'limit'],
+          ['max_batches', 'maxBatches'],
+          ['throttle_ms', 'throttleMs'],
+          ['batch', 'batchIndex'],
+        ] as const) {
+          const value = state[key];
+          if (typeof value === 'number' && Number.isFinite(value)) backfillUrl.searchParams.set(param, String(value));
+        }
+        if (state.force === true) backfillUrl.searchParams.set('force', '1');
+        if (state.retryFailed === true) backfillUrl.searchParams.set('retry_failed', '1');
+        const opts = eventFingerprintBackfillRuntimeOptions(parseEventFingerprintBackfillOptions(backfillUrl));
+        const result = await runEventFingerprintBackfillBatch(env, opts);
+        console.log('[cron] feed-event-fingerprint-backfill:', JSON.stringify(result));
+        if (result.found === 0 || result.batch_index >= result.max_batches) {
+          await env.AUTH_KV.delete(EVENT_FINGERPRINT_BACKFILL_KV_KEY);
+          return;
+        }
+        await env.AUTH_KV.put(
+          EVENT_FINGERPRINT_BACKFILL_KV_KEY,
+          JSON.stringify({
+            ...state,
+            days: result.days,
+            limit: result.limit,
+            maxBatches: result.max_batches,
+            throttleMs: opts.throttleMs,
+            force: result.force,
+            retryFailed: result.retry_failed,
+            batchIndex: result.batch_index + 1,
+          }),
+          { expirationTtl: 24 * 3600 },
+        );
+      })().catch((e) => console.error('[cron] feed-event-fingerprint-backfill failed:', e)),
+    );
+
     // X 转推自愈兜底(2026-06-09 Layer-3):workflow 的 backfill-retweet step fetch 失败时
     // 抛异常、不留 sentinel,workflow 用 allSettled 照样跑完 → 该行 retweet_of 永久空 →
     // FE 翻转无快照 → 冒名显示转推者(本次 fchollet bug 的 Defect C)。每小时 :25 扫一次
@@ -1881,6 +1946,21 @@ export default {
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
+          // ─── 官方新闻：微博热搜雷达 fetch ───
+          // :20 奇数 UTC 时 + :50 全时；再叠加下面全量 blog 的 :20 偶数 UTC 时，
+          // weibo-hot-tech 合计 30min cadence。只跑该源，不把其它官方博客一起加频。
+          const isWeiboHotFetchSlot = minute === 50 || (minute === 20 && hour % 2 !== 0);
+          if (isWeiboHotFetchSlot) {
+            const r = await recordCronRun(
+              env,
+              { name: 'weibo-hot-fetch', source: 'blog', category: 'fetch' },
+              () => runBlogFetch(env, { feedKeys: ['weibo-hot-tech'] }),
+            );
+            console.log(`[cron] weibo-hot-fetch result:`, JSON.stringify(r));
+            await notifyCronSummary(env, '微博热搜抓取', r as unknown as Record<string, unknown>);
+            return;
+          }
+
           // ─── 官方新闻：blog 厂商博客 fetch (Phase 1, 2026-06-09 §7.2) ───
           // :20 偶数 UTC 时(12x/天，cadence ~2h)。INSERT OR IGNORE stub + 立即 trigger
           // workflow(catch-up 分流余者 pending，但 per-feed COLD_START_MAX=10 < 阈值 50，
@@ -2467,7 +2547,7 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   const cursor = url.searchParams.get('cursor');
   const sortParam = url.searchParams.get('sort');
   const isHot = sortParam === 'hot';
-  const sort = sortParam === 'published_at' || isHot ? 'published_at' : 'scraped_at';
+  let sort = sortParam === 'published_at' || isHot ? 'published_at' : 'scraped_at';
 
   // GitHub feed uses a totally different shape: pick today's AI-relevant
   // non-sponsor rows (latest trending_date_str in DB), order by daily_rank ASC,
@@ -2503,12 +2583,20 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
       3 * COALESCE(CAST(json_extract(metrics, '$.replies') AS INTEGER), 0)
     ) * 1.0 / POW((julianday('now') - julianday(published_at)) * 24 + 2, 1.5)
   )`;
-
   const conditions: string[] = [];
   const params: unknown[] = [];
 
   // Source type filter（types 提升到函数作用域:下方时间窗口判断官方新闻也要用）
   const types = sourceType ? sourceType.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const isFeedRanking = !isHot && types.length > 0 && types.every((t) => t === 'blog' || t === 'podcast');
+  const cursorParts = cursor ? cursor.split('|') : [];
+  const cursorRankNow = cursorParts[3] && Number.isFinite(Date.parse(cursorParts[3])) ? cursorParts[3] : '';
+  const feedRankNowIso = isFeedRanking ? (cursorRankNow || new Date().toISOString()) : '';
+  const feedRankNowSql = feedRankNowIso ? `'${feedRankNowIso.replace(/'/g, "''")}'` : "'now'";
+  const FEED_RANK_EXPR = feedNewsRankSqlExpression(feedRankNowSql);
+  if (isFeedRanking) {
+    sort = 'published_at';
+  }
   if (sourceType) {
     if (types.length === 1) {
       conditions.push('source_type = ?');
@@ -2540,7 +2628,7 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   // blog/podcast)都必须复用同一条过滤,不要只过滤 feed 列表。
   conditions.push("COALESCE(json_extract(extra, '$.cn_sensitive'), 0) != 1");
 
-  // Relevance filter
+  // Relevance filter.
   if (relevant === '1') {
     conditions.push('is_relevant = 1');
   } else if (relevant === '0') {
@@ -2574,10 +2662,14 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Cursor pagination. For hot mode cursor is "score|id"; otherwise "time|id".
+  // Cursor pagination. Hot mode uses "score|id"; feed ranking uses
+  // "score|published_at|id|rank_time"; otherwise "time|id".
   if (cursor) {
-    const [a, b] = cursor.split('|');
-    if (a && b) {
+    const [a, b, c] = cursorParts;
+    if (isFeedRanking && a && b && c) {
+      conditions.push(`(${FEED_RANK_EXPR} < ? OR (${FEED_RANK_EXPR} = ? AND (${sort} < ? OR (${sort} = ? AND id < ?))))`);
+      params.push(parseFloat(a), parseFloat(a), b, b, c);
+    } else if (a && b) {
       if (isHot) {
         conditions.push(`(${HOT_EXPR} < ? OR (${HOT_EXPR} = ? AND id < ?))`);
         params.push(parseFloat(a), parseFloat(a), b);
@@ -2594,11 +2686,20 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   // task #8 C 端展示策略：非 hot 模式下，已翻译 item 优先（content_translated IS
   // NOT NULL）。同时间戳内，已翻译靠前。降低用户「刷到一条英文 wait 翻译」体验。
   // hot 模式仍按 engagement score 排（翻译先后跟 hot score 无关）。
+  const untranslatedRankExpr = `(
+    content_translated IS NULL
+    AND json_extract(extra, '$.title_zh') IS NULL
+    AND json_extract(extra, '$.excerpt_zh') IS NULL
+    AND json_extract(extra, '$.ai_summary_zh') IS NULL
+  )`;
   const orderBy = isHot
     ? `${HOT_EXPR} DESC, id DESC`
-    : `(content_translated IS NULL) ASC, ${sort} DESC, id DESC`;
+    : isFeedRanking
+      ? `${FEED_RANK_EXPR} DESC, ${untranslatedRankExpr} ASC, ${sort} DESC, id DESC`
+    : `${untranslatedRankExpr} ASC, ${sort} DESC, id DESC`;
   const selectHotScore = isHot ? `, ${HOT_EXPR} AS hot_score` : '';
-  const sql = `SELECT *${selectHotScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
+  const selectFeedRankScore = isFeedRanking ? `, ${FEED_RANK_EXPR} AS feed_rank_score` : '';
+  const sql = `SELECT *${selectHotScore}${selectFeedRankScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
   params.push(limit + 1);
 
   const start = Date.now();
@@ -2617,6 +2718,8 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     const last = items[items.length - 1] as Record<string, unknown>;
     nextCursor = isHot
       ? `${last.hot_score}|${last.id}`
+      : isFeedRanking
+        ? `${last.feed_rank_score}|${last[sort]}|${last.id}|${feedRankNowIso}`
       : `${last[sort]}|${last.id}`;
   }
 
@@ -3632,7 +3735,8 @@ async function handleSources(request: Request, env: Env): Promise<Response> {
   const sources = await env.DB.prepare(`
     SELECT s.*,
       (SELECT COUNT(*) FROM items WHERE source_type = s.source_type
-       AND source_ref = s.source_ref AND is_relevant = 1) as item_count
+       AND COALESCE(source_ref, json_extract(extra, '$.feed_key')) = s.source_ref
+       AND is_relevant = 1) as item_count
     FROM sources s
     ORDER BY s.last_success_at DESC
   `).all();
@@ -3961,6 +4065,67 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       mode: 'reenrich-feeds-titles', found: rows.length, done, failed,
       elapsed_ms: Date.now() - t0,
     }, 200, request, env);
+  }
+  // 行业新闻事件指纹回补(2026-07-01):用于 digest 事件聚簇/跨天去重。默认后台分批
+  // 回补 7 天,上限 14 天;Pro 模型调用较慢,所以每批默认 4 条,由 waitUntil + 自调用
+  // 链式续跑。item_id 或 async=0 时仍同步跑一批,便于 OPS 定点验证。
+  // 用法:
+  //   POST /api/enrich/run?mode=feed-event-fingerprint-backfill
+  //   POST /api/enrich/run?mode=feed-event-fingerprint-backfill&async=0&limit=4
+  if (mode === 'feed-event-fingerprint-backfill') {
+    const opts = parseEventFingerprintBackfillOptions(url);
+    const runtimeOpts = eventFingerprintBackfillRuntimeOptions(opts);
+    const runAndMaybeContinue = async () => {
+      const result = await runEventFingerprintBackfillBatch(env, runtimeOpts);
+      if (!runtimeOpts.itemId && shouldScheduleNextEventFingerprintBackfillBatch({
+        batchIndex: result.batch_index,
+        maxBatches: result.max_batches,
+        found: result.found,
+        done: result.done,
+        failed: result.failed,
+        limit: result.limit,
+      })) {
+        await fetch(buildNextEventFingerprintBackfillUrl(url, runtimeOpts), {
+          method: 'POST',
+          headers: buildEventFingerprintBackfillRequestHeaders(env),
+        });
+      }
+      return result;
+    };
+
+    if (runtimeOpts.async && !runtimeOpts.itemId) {
+      await env.AUTH_KV.put(
+        EVENT_FINGERPRINT_BACKFILL_KV_KEY,
+        JSON.stringify({
+          days: runtimeOpts.days,
+          limit: runtimeOpts.limit,
+          maxBatches: runtimeOpts.maxBatches,
+          throttleMs: runtimeOpts.throttleMs,
+          force: runtimeOpts.force,
+          retryFailed: runtimeOpts.retryFailed,
+          batchIndex: runtimeOpts.batchIndex,
+        }),
+        { expirationTtl: 24 * 3600 },
+      );
+      ctx.waitUntil(
+        runAndMaybeContinue()
+          .then((r) => console.log('[feed-event-fingerprint-backfill]', JSON.stringify(r)))
+          .catch((e) => console.error('[feed-event-fingerprint-backfill] fail', e)),
+      );
+      return jsonResponse({
+        mode: 'feed-event-fingerprint-backfill',
+        status: 'scheduled',
+        async: true,
+        days: runtimeOpts.days,
+        limit: runtimeOpts.limit,
+        max_batches: runtimeOpts.maxBatches,
+        batch_index: runtimeOpts.batchIndex,
+        force: runtimeOpts.force,
+        retry_failed: runtimeOpts.retryFailed,
+      }, 202, request, env);
+    }
+    const result = await runAndMaybeContinue();
+    return jsonResponse(result, 200, request, env);
   }
   // podcast 主持人/嘉宾存量回填(2026-06-12 #2):重抓有 <podcast:person> 的 feed,
   // 按 idHash(=sha256(guid||link)[:16]) 匹配已入库单集,补 extra.hosts/guests。

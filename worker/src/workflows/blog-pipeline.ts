@@ -31,6 +31,7 @@ import {
   isAiGate,
   reclassifyOnFulltext,
   classifyAndTranslateForFeeds,
+  generateEventFingerprintForFeeds,
   translateBodyMarkdown,
   classifySensitivityForFeeds,
 } from '../feeds/classify-translate';
@@ -56,7 +57,7 @@ export class BlogPipelineWorkflow extends WorkflowEntrypoint<
   BlogPipelineParams
 > {
   async run(event: WorkflowEvent<BlogPipelineParams>, step: WorkflowStep) {
-    const { itemId, feedKey, fetchStrategy, lang } = event.payload;
+    const { itemId, feedKey, fetchStrategy, lang, skipCnSensitive } = event.payload;
 
     // Step 0：确保至少有 title + excerpt(feed 多数已给；只有 title 时从 RSS 正文 HTML 兜底，无网络)。
     await step.do('ensure-excerpt', RETRY, () =>
@@ -129,11 +130,15 @@ export class BlogPipelineWorkflow extends WorkflowEntrypoint<
       step.do('translate-body', RETRY, () =>
         translateBodyMarkdown(this.env, itemId, { lang, kind: 'blog' }),
       ),
-      // 涉华敏感判定(2026-06-12 合规,**无条件每条必经**):此前只挂在 borderline
-      // 的 reclassify-fulltext 上,高置信 relevant 的内容会跳过 → 裸奔到手动回填
-      // (自测用例暴露的覆盖缺口)。全文依据,写 extra.cn_sensitive。
-      step.do('classify-cn-sensitive', RETRY, () =>
-        classifySensitivityForFeeds(this.env, itemId, 'blog'),
+      skipCnSensitive
+        ? step.do('force-cn-sensitive-safe', RETRY, () =>
+            forceCnSensitiveSafe(this.env, itemId),
+          )
+        : step.do('classify-cn-sensitive', RETRY, () =>
+            classifySensitivityForFeeds(this.env, itemId, 'blog'),
+          ),
+      step.do('event-fingerprint', RETRY, () =>
+        generateEventFingerprintForFeeds(this.env, itemId, { kind: 'blog' }),
       ),
     ]);
     // 完整性 gate 条件 = enrich + eager 翻译成功(§4「relevant 在 enrich + eager 翻译 done 后写」)；
@@ -333,6 +338,18 @@ async function fetchBodyForBlog(
     console.error(`[blog-pipeline:body] ${itemId}: error`, e);
     return { ok: false, source: 'skip' };
   }
+}
+
+async function forceCnSensitiveSafe(
+  env: Env,
+  itemId: string,
+): Promise<{ cn_sensitive: 0 }> {
+  await env.DB.prepare(
+    `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.cn_sensitive', 0) WHERE id = ?`,
+  )
+    .bind(itemId)
+    .run();
+  return { cn_sensitive: 0 };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

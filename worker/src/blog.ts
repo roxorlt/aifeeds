@@ -35,11 +35,17 @@ import {
   ensureFeedSources,
   feedsByKind,
 } from './feeds/registry';
-import { fetchFeedXml, parseFeed } from './feeds/parse';
+import {
+  WeiboCookieInvalidError,
+  WeiboCookieMissingError,
+  fetchFeedXml,
+  parseFeed,
+} from './feeds/parse';
 import { discoverPageIndex, hasPageIndexConfig } from './feeds/page-index';
 import { canonicalize, idHashOf, urlHashOf } from './feeds/extract';
 import { parseSeenSet } from './x-list-cursor';
 import { partitionForCatchup } from './x-list-cursor';
+import { notifyWeiboCookieInvalid } from './notifier';
 
 /** blog catch-up 分流阈值：最新 N 条立即 trigger，其余 pending_workflow=1 平摊(§5.5)。 */
 const BLOG_CATCHUP_THRESHOLD = 50;
@@ -54,6 +60,7 @@ const EXISTING_ID_CHUNK = 50;
 
 export async function runBlogFetch(
   env: Env,
+  opts: { feedKeys?: string[] } = {},
 ): Promise<{ feeds: number; inserted: number; triggered: number; pending: number }> {
   // 幂等把 FEED_REGISTRY upsert 进 sources(只覆盖 name/config，保留运行时游标)。
   try {
@@ -62,7 +69,8 @@ export async function runBlogFetch(
     console.error('[blog-fetch] ensureFeedSources error:', e);
   }
 
-  const feeds = feedsByKind('blog');
+  const feedKeySet = opts.feedKeys ? new Set(opts.feedKeys) : null;
+  const feeds = feedsByKind('blog').filter((feed) => !feedKeySet || feedKeySet.has(feed.key));
   let inserted = 0;
   let triggered = 0;
   let pending = 0;
@@ -77,6 +85,9 @@ export async function runBlogFetch(
         `[blog-fetch] ${feed.id}: parsed=${r.parsed} new=${r.inserted} trig=${r.triggered} pending=${r.pending} cold=${r.coldStart}`,
       );
     } catch (e) {
+      if (isWeiboCookieError(e)) {
+        await notifyWeiboCookieInvalid(env, String(e));
+      }
       // 单 feed 失败不影响其它(整轮其它 feed 照跑)；该 feed 不推进 cursor，下轮重头。
       console.error(`[blog-fetch] feed ${feed.id} error:`, e);
     }
@@ -117,7 +128,7 @@ async function ingestOneBlogFeed(
     parsedItems = await discoverPageIndex(feed);
   } else {
     const xml = await fetchFeedXml(
-      env as { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string },
+      env as { RSSHUB_BASE?: string; RSSHUB_TOKEN?: string; WEIBO_COOKIES?: string },
       feed,
     );
     parsedItems = parseFeed(xml, feed);
@@ -131,9 +142,11 @@ async function ingestOneBlogFeed(
   const enriched = parsedItems.map((p) => {
     const guid = (p.guid || p.link || '').trim();
     const canonicalUrl = canonicalize(p.link || guid);
+    const publishedAt = p.published_at || (feed.key === 'weibo-hot-tech' ? nowIso : undefined);
     const idHash = idHashOf(guid);
     return {
       p,
+      publishedAt,
       guid,
       canonicalUrl,
       urlHash: urlHashOf(canonicalUrl),
@@ -177,7 +190,7 @@ async function ingestOneBlogFeed(
         `${feed.key}:${e.idHash}`,
         e.p.title || '',
         e.canonicalUrl || e.p.link || null,
-        e.p.published_at || null,
+        e.publishedAt || null,
         nowIso,
         lang0,
         JSON.stringify({
@@ -212,6 +225,7 @@ async function ingestOneBlogFeed(
         blog_name: feed.name,
         feed_url: feed.feed_url,
         fetch_strategy: feed.fetch_strategy,
+        skip_cn_sensitive: feed.skip_cn_sensitive || undefined,
         guid: e.guid,
         canonical_url: e.canonicalUrl,
         url_hash: e.urlHash,
@@ -234,7 +248,7 @@ async function ingestOneBlogFeed(
         e.p.summary || '',
         e.p.author || null,
         e.canonicalUrl || e.p.link || null,
-        e.p.published_at || null,
+        e.publishedAt || null,
         nowIso,
         lang,
         JSON.stringify(extra),
@@ -263,6 +277,7 @@ async function ingestOneBlogFeed(
     const signals: BlogTriggerSignals = {
       fetchStrategy: feed.fetch_strategy,
       hasNativeFulltext: isFullEnoughHtml(e.p.content_html),
+      skipCnSensitive: feed.skip_cn_sensitive === true,
     };
     const res = await triggerBlogWorkflowForItem(env, e.id, signals);
     if (res === 'triggered') triggeredCount++;
@@ -340,6 +355,7 @@ export async function triggerBlogWorkflowForItem(
         fetchStrategy: signals.fetchStrategy,
         lang: 'zh' as const,
         hasNativeFulltext: signals.hasNativeFulltext,
+        skipCnSensitive: signals.skipCnSensitive,
       },
     });
     return 'triggered';
@@ -392,6 +408,7 @@ export async function runBlogBackfill(
         (extraObj.rss_content_html as string | undefined) ||
           (extraObj.body_markdown as string | undefined),
       ),
+      skipCnSensitive: extraObj.skip_cn_sensitive === true,
     });
     if (res === 'triggered') retriggered++;
   }
@@ -441,4 +458,13 @@ function hostOf(url: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isWeiboCookieError(e: unknown): boolean {
+  return (
+    e instanceof WeiboCookieMissingError ||
+    e instanceof WeiboCookieInvalidError ||
+    String((e as { name?: string })?.name || '').startsWith('WeiboCookie') ||
+    String((e as { code?: string })?.code || '').startsWith('WEIBO_COOKIE_')
+  );
 }

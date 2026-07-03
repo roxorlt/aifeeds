@@ -25,7 +25,7 @@ import rehypeRaw from "rehype-raw";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra, MediaItem } from "../types";
 import { fetchItem } from "../api";
-import { cn, parseJsonField, timeAgo } from "../lib/utils";
+import { cn, htmlToPlainText, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { Lightbox } from "./Lightbox";
 import { IconClock } from "./icons";
@@ -244,7 +244,7 @@ export function BlogDrawerBody({ item }: Props) {
   const showOriginalTitle = isForeign && !!titleOriginal && titleOriginal !== titleZh;
 
   // ELI25 摘要 lead（概览）
-  const summary = extra.ai_summary_zh || extra.excerpt_zh || extra.excerpt || "";
+  const summary = htmlToPlainText(extra.ai_summary_zh || extra.excerpt_zh || extra.excerpt || "");
 
   // 封面
   const coverSrc = extra.cover_image ? resolveAssetUrl(extra.cover_image) : "";

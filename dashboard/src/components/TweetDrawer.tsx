@@ -178,8 +178,9 @@ export function TweetDrawer() {
 
   // Mobile swipe-to-close: rightward swipe → close.
   //
-  // PM 2026-05-25 R9 改"跟手":touchmove 阶段同步 dragX 让 aside 跟手指走,
-  // 早期方向锁定避开 native vertical scroll (passive listener 不挡 scroll).
+  // PM 2026-05-25 R9 改"跟手":touchmove 阶段同步 dragX 让 aside 跟手指走。
+  // 早期方向锁定避开 native vertical scroll：touchmove 必须非 passive，
+  // 只在横向锁定后 preventDefault；纵向锁定则 allow native vertical scroll。
   // direction='horizontal' 且 dx > 0 → setDrag(dx),其他情况一律 abort.
   useEffect(() => {
     if (!open || !isNarrow) return;
@@ -211,7 +212,7 @@ export function TweetDrawer() {
           direction = 'horizontal';
           setIsDragging(true);
         } else if (absDy > absDx * 2) {
-          // 纵向锁定 = abort, let native scroll take over
+          // 纵向锁定 = abort, allow native vertical scroll
           direction = 'vertical';
           dragStart.current = null;
           return;
@@ -220,6 +221,7 @@ export function TweetDrawer() {
         }
       }
       if (direction === 'horizontal') {
+        if (e.cancelable) e.preventDefault();
         // 只跟手向右 (close direction), 向左阻尼 0
         setDrag(dx > 0 ? dx : 0);
       }
@@ -256,7 +258,7 @@ export function TweetDrawer() {
     };
 
     aside.addEventListener("touchstart", onStart, { passive: true });
-    aside.addEventListener("touchmove", onMove, { passive: true });
+    aside.addEventListener("touchmove", onMove, { passive: false });
     aside.addEventListener("touchend", onEnd, { passive: true });
     aside.addEventListener("touchcancel", onEnd, { passive: true });
     return () => {
@@ -523,7 +525,7 @@ export function TweetDrawer() {
           // overflow-x-hidden：drawer body 内任何宽过 panel 的内容（评论富文本里的
           // 长 URL、原文 wide pre block、宽截图等）都被横向 clip 而不是让 body 横滑。
           // 配合 panel 自身的 overflow-x-hidden 双保险。
-          className="flex-1 min-h-0 overflow-y-scroll overflow-x-hidden overscroll-none touch-pan-y"
+          className="flex-1 min-h-0 overflow-y-scroll overflow-x-hidden overscroll-none"
           style={{ WebkitOverflowScrolling: "touch" }}
         >
           {/* 抽屉内所有 video 自动归 columnId='drawer'，scroll root = 抽屉 body */}

@@ -36,6 +36,18 @@
 - [ ] **Phase 2/3**:RSSHub 中文播客 / 页面抓取 + 无头(按 D1-D10 结果排)
 - [ ] **明确不接**(需求 4.8):不往 digest(订阅日报)/ codex daily 推送加 blog/podcast
 
+### A2. 微博科技热搜接入（热度雷达，2026-06-25 plan 完成，待 Codex 开发）
+
+> 补官方媒体源「慢半拍、覆盖窄」的短板(Seedance/腾讯/Meta眼镜这类当天爆点)。**完整开发(含 worker/CF)交 Codex**,cc 只出 plan。
+> 交付 plan:[docs/plans/2026-06-25-weibo-hot-search-source-handoff.md](docs/plans/2026-06-25-weibo-hot-search-source-handoff.md)
+> 调研背景:2026-06-25「Anthropic 诉阿里蒸馏」漏抓排查 → 根因①国内综合快讯源缺位②cn_sensitive 合规闸(本案设计上不可见)。微博热搜补的是**非敏感热点**,补不了这条。
+
+- [x] **可行性已验**(2026-06-25):RSSHub 实例健康(小宇宙路由 200),微博路由当前 503(缺无头浏览器);改用 cookie 注入绕开。`/weibo/search/hot/fulltext` 自带每条摘要,无需逐条抓
+- [ ] **专属规则**:仅此源 **跳过 cn_sensitive**(微博平台已合规预筛),其它源敏感过滤不变;**is_ai gate 保留**(科技榜仍混非 AI)
+- [ ] **cookie 管理**:`WEIBO_COOKIES` 放 prod.env(user 维护);过期告警复用 X cookie 同款模式(notifier.ts PushDeer + admin.ts:425 先例)
+- [ ] **架构**:RSSHub(HK 出口,绕 worker 美区 IP 风控)+ cookie 走请求头(只活在我方,不落 VPS);Codex 实测可退 VPS env
+- [ ] **开放确认点**:① 当内容卡片进频道 vs 仅选题雷达 ② 科技垂直榜 vs 通用榜+is_ai 过滤 ③ cookie 注入方式(详见 plan §8)
+
 ### 0. PH GraphQL + worker cron 主 PR 收尾（2026-05-11）
 
 > 主 PR 已合 staging 验收完毕（设计 [docs/plans/2026-05-11-ph-graphql-cf-cron-design.md](docs/plans/2026-05-11-ph-graphql-cf-cron-design.md)、计划 [docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md](docs/plans/2026-05-11-ph-graphql-cf-cron-implementation-plan.md)）。剩下：

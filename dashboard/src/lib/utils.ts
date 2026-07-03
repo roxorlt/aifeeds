@@ -83,6 +83,39 @@ export function formatCompact(n: number | undefined | null): string {
   return String(n);
 }
 
+export function htmlToPlainText(input: string | null | undefined): string {
+  if (!input) return "";
+  let text = String(input);
+  if (!/[<&]/.test(text)) return text.trim();
+
+  text = text
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\s*\/\s*(p|div|section|article|h[1-6]|li|ol|ul|blockquote)\s*>/gi, "\n")
+    .replace(/<\s*li\b[^>]*>/gi, "• ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ");
+
+  if (typeof document !== "undefined") {
+    const textarea = document.createElement("textarea");
+    textarea.innerHTML = text;
+    text = textarea.value;
+  } else {
+    text = text
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'");
+  }
+
+  return text
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 // 1 → "1st", 2 → "2nd", 3 → "3rd", 4 → "4th", ..., 11 → "11th", 21 → "21st"
 export function ordinal(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "";
