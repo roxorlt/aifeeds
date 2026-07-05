@@ -35,10 +35,11 @@ import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
-import { Routes, Route, useParams } from "react-router";
+import { Routes, Route, Navigate, useParams } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
 import { RequireAuth } from "./components/RequireAuth";
+import { isWeChatBrowser } from "./lib/wechat";
 // 路由专属页面 lazy 化：只在 /settings、/settings/account、/subscribe、
 // /me/subscription 才需要，不该进首屏 bundle（Subscription 还拖 Turnstile）。
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
@@ -1206,7 +1207,7 @@ function App() {
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
-        <Route path="/feedback" element={<RequireAuth><Feedback /></RequireAuth>} />
+        <Route path="/feedback" element={isWeChatBrowser() ? <Navigate to="/" replace /> : <RequireAuth><Feedback /></RequireAuth>} />
         <Route path="/subscribe" element={<Subscription mode="anonymous" />} />
         <Route path="/me/subscription" element={<RequireAuth><Subscription mode="manage" /></RequireAuth>} />
       </Routes>
