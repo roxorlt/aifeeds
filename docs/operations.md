@@ -115,6 +115,8 @@ set -a; . /Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-staging.env; s
 npm run deploy:staging         # = build:staging + wrangler pages deploy
 ```
 
+> ⚠️ **staging 前端构建输入坑位（2026-07-05 事故）**：`dashboard/.env.staging`（`VITE_API_BASE`）一度是未跟踪文件，worktree / CI 干净构建拿不到它 → 运行时兜底暴露出 `lib/auth.ts` API_BASE 镜像缺 staging 分支 → staging 页面 auth 打 prod、业务打 staging-api → 登录死循环。已根治：`.env.staging` 入库（`.gitignore` 显式 `!` 例外）+ `dashboard/src/lib/apiBase.ts` 单一事实源（新增 base 解析一律 import 它，**不许再写镜像**）+ api.ts 401 断路器。残留非致命镜像（GithubCard/GithubDrawerBody/utils.ts 的 /r/ /img 媒体代理）待后续 PR 收编。
+
 **手动触发 staging cron**：
 ```bash
 curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
