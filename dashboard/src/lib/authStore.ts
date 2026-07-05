@@ -9,6 +9,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import * as authApi from './auth';
 import type { User } from './auth';
+import { toast } from './toast';
 
 export type LoginTrigger =
   | 'manual'
@@ -82,8 +83,12 @@ export const useAuthStore = create<AuthStore>()(
     try {
       const me = await authApi.fetchMe();
       full = me.user;
-    } catch {
-      // /api/auth/me 临时挂了：降级用 login 响应（少 phone_masked，下次 hydrate 补）
+    } catch (e) {
+      // /api/auth/me 临时挂了：降级用 login 响应（少 phone_masked，下次 hydrate 补）。
+      // 但不再静默 —— 2026-07-05 事故:base 镜像分叉时登录后 fetchMe 持续失败,
+      // 用户只见反复弹登录却毫无提示。给一条 toast + error log 让异常可见可诊断。
+      toast.error('登录状态同步异常，如遇反复弹登录请刷新页面');
+      console.error('[auth] post-login fetchMe failed', e);
     }
     set({ user: full, loginModalOpen: false, pendingRetry: null });
     if (pendingRetry) {
