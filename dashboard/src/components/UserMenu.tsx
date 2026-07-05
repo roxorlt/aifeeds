@@ -3,6 +3,17 @@ import { useNavigate } from "react-router";
 import { useAuthStore } from "../lib/authStore";
 import { avatarUrlOf } from "../lib/defaultProfile";
 import { useVideoCoordinator } from "../lib/videoCoordinator";
+import { isWeChatBrowser } from "../lib/wechat";
+import { useFeedbackUnreadStore } from "../api";
+
+// 对话气泡 icon — lucide MessageSquare 同款，1.6 stroke 跟全站 icon 风格统一
+function IconMessageSquare({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
 
 // 齿轮 icon — lucide Settings 同款，1.5 stroke 跟全站 icon 风格统一
 function IconSettings({ className }: { className?: string }) {
@@ -46,6 +57,16 @@ export function UserMenu() {
 
   const prefs = useVideoCoordinator((s) => s.prefs);
   const setPrefs = useVideoCoordinator((s) => s.setPrefs);
+
+  // 用户反馈入口 gating（1.1/1.2）：登录 + 非微信浏览器才展示。
+  const showFeedback = !!user && !isWeChatBrowser();
+  const unread = useFeedbackUnreadStore((s) => s.unread);
+  // 登录态确定后拉一次未读回复数（§5.7：不轮询，只在 hydrate 成功后拉一次）。
+  useEffect(() => {
+    if (hydrated && user && !isWeChatBrowser()) {
+      useFeedbackUnreadStore.getState().loadUnread();
+    }
+  }, [hydrated, user]);
 
   // outside click + Esc 关
   useEffect(() => {
@@ -159,6 +180,25 @@ export function UserMenu() {
                 className="flex w-full items-center px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
               >
                 账号设置
+              </button>
+            )}
+            {showFeedback && (
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  navigate("/feedback");
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+              >
+                <IconMessageSquare className="h-4 w-4 shrink-0 text-neutral-500" />
+                <span>用户反馈</span>
+                {unread > 0 && (
+                  <span
+                    className="ml-auto h-2 w-2 shrink-0 rounded-full bg-rose-500"
+                    aria-label="有新回复"
+                  />
+                )}
               </button>
             )}
           </div>

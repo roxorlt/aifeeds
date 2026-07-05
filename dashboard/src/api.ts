@@ -1,3 +1,4 @@
+import { create } from "zustand";
 import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
 import { getDeviceId } from "./lib/device";
 import { track, EVENTS } from "./lib/telemetry";
@@ -99,7 +100,7 @@ async function apiFetch(
   // 401 拦截：仅对个人态 endpoint 弹登录（避免 /api/items 等公开 endpoint 误触发）
   const handle401 = (status: number) => {
     if (status !== 401) return;
-    const protectedPaths = ['/api/auth/me', '/api/favorites', '/api/subscriptions'];
+    const protectedPaths = ['/api/auth/me', '/api/favorites', '/api/subscriptions', '/api/feedback'];
     const isProtected = protectedPaths.some((p) => path.startsWith(p));
     if (!isProtected) return;
     const store = useAuthStore.getState();
@@ -515,3 +516,182 @@ export async function unsubscribeMySubscription(): Promise<{ ok: boolean }> {
     return { ok: false };
   }
 }
+
+// ─── 用户反馈（feedback）──────────────────────────────────────────────────
+// C 端登录用户图文反馈 + 后台图文回复回执。契约见设计文档 §4.1
+// docs/plans/2026-07-05-user-feedback-design.md。
+//
+// 401 策略（三条路径各不同，刻意不统一走 apiFetch）：
+//  - 提交（multipart）：手写 fetch，单次尝试，绝不自动重试写请求；401 时显式复用
+//    openLoginModal('api_401') 语义（清登录态 + 弹登录弹窗）。
+//  - 我的反馈（GET /mine）：走 apiFetch，靠 protectedPaths 前缀命中自动 401 拦截
+//    （与订阅管理页 /api/auth/me 同款；反馈页是主动导航，会话真失效时弹登录正确）。
+//  - 已读回执 / 未读数：手写 fetch 且静默吞错（fire-and-forget / 后台红点），绝不
+//    因后台瞬时 401 把用户假踢下线（对齐 authStore hydrate 的乐观保留策略）。
+
+export interface FeedbackReply {
+  id: number;
+  content: string;
+  image_url: string | null;
+  created_at: number;
+  read_at: number | null;
+}
+
+export interface FeedbackItem {
+  id: number;
+  content: string;
+  image_url: string | null;
+  created_at: number;
+  replies: FeedbackReply[];
+}
+
+export interface FeedbackMineResponse {
+  ok: true;
+  unread_count: number;
+  items: FeedbackItem[];
+}
+
+export type SubmitFeedbackCode =
+  | 'rate_limited'
+  | 'unauthorized'
+  | 'server_error';
+
+export type SubmitFeedbackResult =
+  | { ok: true; id: number; created_at: number; remaining: number }
+  | { ok: false; code: SubmitFeedbackCode };
+
+// 前端采集的设备信息（§5.4 device JSON 结构逐字对齐：ua / platform / language /
+// languages / screen / viewport / dpr / timezone / page / network）。
+function collectDeviceInfo(): Record<string, unknown> {
+  const nav = navigator as Navigator & {
+    connection?: { effectiveType?: string };
+    languages?: readonly string[];
+  };
+  let timezone: string | null = null;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+  } catch {
+    timezone = null;
+  }
+  return {
+    ua: nav.userAgent,
+    platform: nav.platform,
+    language: nav.language,
+    languages: nav.languages ? Array.from(nav.languages) : null,
+    screen: { w: window.screen?.width ?? null, h: window.screen?.height ?? null },
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+    dpr: window.devicePixelRatio ?? null,
+    timezone,
+    page: location.pathname,
+    network: nav.connection?.effectiveType ?? null,
+  };
+}
+
+// 提交反馈：multipart/form-data { content, image?, device }。手写 fetch，单次尝试，
+// 绝不自动重试（写请求）。Content-Type 交给浏览器按 FormData 自动带 boundary，
+// 手动设会破坏 multipart 分隔符。
+export async function submitFeedback(
+  content: string,
+  image: File | null,
+): Promise<SubmitFeedbackResult> {
+  const fd = new FormData();
+  fd.append('content', content);
+  if (image) fd.append('image', image);
+  fd.append('device', JSON.stringify(collectDeviceInfo()));
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/feedback`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'X-Device-Id': getDeviceId() },
+      body: fd,
+    });
+  } catch {
+    return { ok: false, code: 'server_error' };
+  }
+
+  if (res.ok) {
+    try {
+      const d = (await res.json()) as { id: number; created_at: number; remaining: number };
+      return { ok: true, id: d.id, created_at: d.created_at, remaining: d.remaining };
+    } catch {
+      return { ok: false, code: 'server_error' };
+    }
+  }
+
+  if (res.status === 401) {
+    const store = useAuthStore.getState();
+    if (store.user) store.logout();
+    store.openLoginModal('api_401');
+    return { ok: false, code: 'unauthorized' };
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // 非 JSON body — 归为 server_error
+  }
+  const err = typeof body.error === 'string' ? body.error : '';
+  if (res.status === 429 || err === 'rate_limited') return { ok: false, code: 'rate_limited' };
+  return { ok: false, code: 'server_error' };
+}
+
+// 我的反馈列表（最近 50 条 + 每条回复 + 未读回复数）。走 apiFetch → protectedPaths
+// 命中 → 401 自动弹登录。
+export async function fetchMyFeedback(): Promise<FeedbackMineResponse> {
+  const res = await apiFetch('/api/feedback/mine');
+  if (!res.ok) throw new Error(`fetchMyFeedback failed: ${res.status}`);
+  return res.json();
+}
+
+// 标记本人全部未读回复为已读（fire-and-forget）。手写 fetch，静默吞错。
+export async function markFeedbackRead(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/feedback/read`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'X-Device-Id': getDeviceId() },
+    });
+  } catch {
+    // 已读回执丢一条无妨，下次打开反馈页会再标
+  }
+}
+
+// 未读回复数（后台红点用）。手写 fetch，失败/401 一律当 0，绝不触发登出/弹窗
+// —— 后台瞬时 401 不该把用户假踢下线。
+export async function fetchFeedbackUnreadCount(): Promise<number> {
+  try {
+    const res = await fetch(`${API_BASE}/api/feedback/unread-count`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { 'X-Device-Id': getDeviceId() },
+    });
+    if (!res.ok) return 0;
+    const d = (await res.json()) as { count?: number };
+    return typeof d.count === 'number' ? d.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// 未读红点共享 state：UserMenu / Settings 读红点，Feedback 页拉取列表后清零。
+// 放在 api.ts 内而非单独 lib 文件 —— 本任务文件边界只允许改这 5 个文件，
+// store 依附 api 层（无 JSX 组件导出，不触发 react-refresh 规则）可接受。
+interface FeedbackUnreadStore {
+  unread: number;
+  setUnread: (n: number) => void;
+  clearUnread: () => void;
+  loadUnread: () => Promise<void>;
+}
+
+export const useFeedbackUnreadStore = create<FeedbackUnreadStore>((set) => ({
+  unread: 0,
+  setUnread: (n) => set({ unread: Math.max(0, n) }),
+  clearUnread: () => set({ unread: 0 }),
+  async loadUnread() {
+    const n = await fetchFeedbackUnreadCount();
+    set({ unread: Math.max(0, n) });
+  },
+}));

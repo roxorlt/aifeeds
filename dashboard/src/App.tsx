@@ -44,6 +44,7 @@ import { RequireAuth } from "./components/RequireAuth";
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
 const AccountManage = lazy(() => import("./pages/AccountManage").then((m) => ({ default: m.AccountManage })));
 const Subscription = lazy(() => import("./pages/Subscription").then((m) => ({ default: m.Subscription })));
+const Feedback = lazy(() => import("./pages/Feedback").then((m) => ({ default: m.Feedback })));
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
 
@@ -1205,6 +1206,7 @@ function App() {
         <Route path="/s/:token" element={<ShareLanding />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
+        <Route path="/feedback" element={<RequireAuth><Feedback /></RequireAuth>} />
         <Route path="/subscribe" element={<Subscription mode="anonymous" />} />
         <Route path="/me/subscription" element={<RequireAuth><Subscription mode="manage" /></RequireAuth>} />
       </Routes>
