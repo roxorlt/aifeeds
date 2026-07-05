@@ -16,8 +16,9 @@
 - [x] Task A（migration 024 + worker 7 端点）/ Task B（C 端页 + 入口 gating + 红点）/ Task C（admin tab）实施完成；R1 backend 23/23、R2 E2E 23/23 全绿，0 Critical/Important
 - [x] staging 部署 + 冒烟（2026-07-05 首轮：migration 024 → staging D1，worker `5bc2b789` + dashboard 部署）
 - [x] **🔴 事故修复轮**（2026-07-05 用户首验翻车：staging 登录死循环）：根因 = `lib/auth.ts` API_BASE 镜像缺 staging 分支 + `.env.staging` 未跟踪 → worktree 构建的 staging 前端 auth 打 prod、业务打 staging-api。修复 4 层：`lib/apiBase.ts` 单一事实源 / `.env.staging` 入库+.gitignore 例外 / 401 断路器（60s 抑制自动登出弹窗，杜绝死循环类问题）/ 登录后同步失败显式 toast。测试盲区补 TC-ST 6 条（52 条总量），R3 终验 staging 真机真实登录全链路 5 PASS + 1 BLOCKED（admin SSO 不可自动化）。教训已沉淀 memory + operations.md
-- [ ] 用户真机验收：staging.ai-feeds.com（⚠️ 硬刷新/注销 SW；⚠️ 事故连带登出过 prod，ai-feeds.com 需重登一次）登录 → 头像菜单「用户反馈」提交/查回复；admin SSO → `admin.ai-feeds.com` 对应 staging 入口为 `staging-api.ai-feeds.com/admin/feedback` → 图文回复（顺带人工验证 admin_email 落库非 NULL——TC-ST-05 唯一待人工项）
-- [ ] prod 上线（用户拍板）：**先跑 prod migration**（`cd worker && npx wrangler d1 execute xlist --remote --file=migrations/024-user-feedback.sql`）→ merge PR（CI 自动 deploy）→ 真机验证。⚠️ 顺序不能反：代码先上而表不存在会 500
+- [x] 用户 staging 真机验收通过（2026-07-05）
+- [x] **prod 上线完成**（2026-07-05）：① migration 024 → prod D1（feedback/feedback_replies 两表确认）② merge PR #159（CI Deploy Worker 45s + Dashboard 1m25s 全绿）③ 真机验证：401 契约/admin Access 302/CORS 预检/新包含反馈功能 + playwright 匿名行为断言。**上线时 prod 断言揪出微信匿名直访 /feedback 不重定向的边缘缺陷 → 热修 PR #160**（微信判断提升路由层先于 RequireAuth + TC-B-03b 防回归用例，52→53 条）→ merge 后重验 **5/5 全绿**。香港 nginx 缓存两轮均已清
+- [ ] prod admin 首次使用时顺手人工验证：SSO 回复后 `feedback_replies.admin_email` 落库为邮箱非 NULL（TC-ST-05 唯一无法自动化项，staging 已人工验过同链路）
 - [ ] 非阻塞 Minor 择机优化（详见 PR body / `.superpowers/sdd/progress.md`）：未读 store 从 api.ts 挪 lib/、admin 回复成功提示持久化、**GithubDrawerBody/GithubCard/utils.ts 的 /r/ /img 媒体代理 2 分支镜像收编进 apiBase（非致命残留）**；⚠️ PR 的 CI worker job 红叉是 main 既有 24 个 tsc baseline error（与本 feature 无关，deploy 硬防线 tsc 为 if:false 不受影响）
 
 ### A. AI 厂商博客 + 播客新源接入（2026-06-09，Phase 0 设计完成）
