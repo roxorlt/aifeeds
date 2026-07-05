@@ -627,6 +627,14 @@ playwright 依赖：`cd /Users/roxor/brain/30-projects/aifeeds && npx playwright
 - **期望**：① 即便已登录，UserMenu / Settings **无**「用户反馈」入口（`isWeChatBrowser()` 为真，§5.1 / 需求 1.1）；② 直接访问 `/feedback` 被 `<Navigate to="/" replace>` 重定向，最终 `page.url()` 为站点根 `/`（§5.2）。
 - **需求回链**：1.1。
 
+### TC-B-03b 微信 UA + 匿名（无登录态）→ 直接访问 /feedback 仍重定向回 /
+> 2026-07-05 prod 行为断言发现的漏网组合：微信判断原在 Feedback 组件内部，匿名时 RequireAuth 先拦、组件不挂载、重定向不执行（URL 停 /feedback 显示「请先登录后访问」）。修复 = 微信判断提升到 App.tsx 路由层先于 RequireAuth（commit 28b898c）。此用例防回归。
+- **前置**：新建 context 时 `userAgent: WECHAT_UA`（含 `MicroMessenger`），**不注入任何 cookie**。
+- **步骤**：`page.goto('/feedback')` → 等待 2s → 读 `page.url()` 与页面文案。
+- **期望**：最终 `page.url()` 为站点根 `/`；全程**不出现**「请先登录后访问」占位与登录弹窗（微信内该模块彻底不可达，需求 1.1）。
+- **对照组**：普通 Chrome UA + 匿名访问 /feedback → 仍停在 /feedback 显示「请先登录后访问」（RequireAuth 行为不回归）。
+- **需求回链**：1.1。
+
 ### TC-B-04 空内容 → 提交按钮 disabled
 - **前置**：甲登录态，`page.goto('/feedback')`。
 - **步骤**：不输入任何内容，检查提交按钮（primary）`disabled`；在 textarea 输入纯空格后再检查；输入有效文字后再检查。
