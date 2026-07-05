@@ -3,6 +3,7 @@ import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
 import { getDeviceId } from "./lib/device";
 import { track, EVENTS } from "./lib/telemetry";
 import { useAuthStore } from "./lib/authStore";
+import { API_BASE } from "./lib/apiBase";
 
 export interface MetricsSnapshotGh {
   captured_at: number;
@@ -29,24 +30,31 @@ export class ItemNotFoundError extends Error {
   }
 }
 
-export const API_BASE = (() => {
-  if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    // Dev: 走相对路径 → vite proxy 透传到目标 worker（默认 prod，可用 VITE_API_PROXY 覆盖）
-    if (host === "localhost" || host === "127.0.0.1") {
-      return "";
-    }
-    // Staging dashboard 必须打 staging worker，否则线上 prod 没有最新 endpoint
-    // 时（例如 PR 部署的新接口）会全线 404
-    if (host === "staging.ai-feeds.com" || host.endsWith(".xlist-dashboard-staging.pages.dev")) {
-      return "https://staging-api.ai-feeds.com";
-    }
-  }
-  return "https://api.ai-feeds.com";
-})();
+// API_BASE 的定义已收敛到唯一事实源 lib/apiBase.ts(2026-07-05 镜像分叉事故后)。
+// 这里 re-export,保持既有 `import { API_BASE } from './api'` 的消费者不破。
+export { API_BASE };
 
 export const TRACK_ENDPOINT = `${API_BASE}/api/track`;
+
+// ─── 401 自动登出断路器 ─────────────────────────────────────────────────────
+// 个人态请求收到 401 时会「清登录态 + 弹登录弹窗」。若 base 再次分叉(auth 打
+// 一个环境、业务打另一个),logout 会连锁触发新一轮 401 → 又 logout → 无限循环
+// (2026-07-05 事故现象)。断路器:同一 60s 窗口内只允许触发一次,其余只 warn
+// 不动作。请求本身照常把 401 返回给调用方走各自错误态,断路器只压「自动登出/弹窗」
+// 这一副作用,不吞状态码。handle401(apiFetch)与 submitFeedback 的 401 分支共用
+// 此 helper,消除两处逻辑漂移。
+let last401At = 0;
+function trigger401Login(): void {
+  const now = Date.now();
+  if (now - last401At < 60_000) {
+    console.warn('[auth] 401 circuit-breaker: suppressed auto-logout');
+    return;
+  }
+  last401At = now;
+  const store = useAuthStore.getState();
+  if (store.user) store.logout();
+  store.openLoginModal('api_401');
+}
 
 /**
  * 统一 fetch 包装：自动注入 X-Device-Id，失败上报 api_error，
@@ -97,15 +105,14 @@ async function apiFetch(
     }
   };
 
-  // 401 拦截：仅对个人态 endpoint 弹登录（避免 /api/items 等公开 endpoint 误触发）
+  // 401 拦截：仅对个人态 endpoint 弹登录（避免 /api/items 等公开 endpoint 误触发）。
+  // 实际的登出+弹窗走 trigger401Login（含 60s 断路器，防分叉时死循环）。
   const handle401 = (status: number) => {
     if (status !== 401) return;
     const protectedPaths = ['/api/auth/me', '/api/favorites', '/api/subscriptions', '/api/feedback'];
     const isProtected = protectedPaths.some((p) => path.startsWith(p));
     if (!isProtected) return;
-    const store = useAuthStore.getState();
-    if (store.user) store.logout();
-    store.openLoginModal('api_401');
+    trigger401Login();
   };
 
   let res: Response | null = null;
@@ -621,9 +628,7 @@ export async function submitFeedback(
   }
 
   if (res.status === 401) {
-    const store = useAuthStore.getState();
-    if (store.user) store.logout();
-    store.openLoginModal('api_401');
+    trigger401Login();
     return { ok: false, code: 'unauthorized' };
   }
 
