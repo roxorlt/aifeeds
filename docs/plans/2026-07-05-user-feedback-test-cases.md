@@ -2,8 +2,8 @@
 
 > 依据：`docs/plans/2026-07-05-user-feedback-design.md`（§0 需求 / §2 全局约束 / §4 API 契约 / §5 C 端 UI / §6 admin UI / §7 harness / §9 用例框架）。
 > 断言方式：**black-box spec-based** —— 期望值全部来自设计文档，不反推实现代码。
-> 执行者：R1（backend，跑 TC-A / TC-S）+ R2（E2E，跑 TC-B / TC-C / TC-I）。
-> 用例总数 **46**：TC-A ×17 · TC-S ×6 · TC-B ×12 · TC-C ×8 · TC-I ×3。
+> 执行者：R1（backend，跑 TC-A / TC-S）+ R2（E2E，跑 TC-B / TC-C / TC-I）+ R2/OPS（TC-ST，在 staging 真机环境跑）。
+> 用例总数 **52**：TC-A ×17 · TC-S ×6 · TC-B ×12 · TC-C ×8 · TC-I ×3 · TC-ST ×6（Staging 构建产物 / 真机层，本轮新增）。
 
 ---
 
@@ -53,6 +53,14 @@
 | TC-I | 完整回环 提交→回复→红点→查看→已读 | TC-I-01 |
 | TC-I | 双反馈多回复计数正确 | TC-I-02 |
 | TC-I | 图片全链路 | TC-I-03 |
+| TC-ST | staging 构建产物 API base 单一事实源（无 env） | TC-ST-01 |
+| TC-ST | staging 真机全流程（真实登录 Set-Cookie，铸码法） | TC-ST-02 |
+| TC-ST | 401 断路器（60s 内不重复自动登出+弹窗） | TC-ST-03 |
+| TC-ST | 登录后 fetchMe 失败提示（非静默降级） | TC-ST-04 |
+| TC-ST | staging admin 回复回环（SSO 人工 + API/SQL 断言） | TC-ST-05 |
+| TC-ST | staging 真机回归抽查（TC-B 关键 4 条） | TC-ST-06 |
+
+> ⚠️ TC-ST 段不源于设计 §9，而是 2026-07-05 staging 无限登录循环事故暴露的「staging 真机层」测试盲区 + 本轮并行修复方向（详见第 7 节段首）。
 
 ---
 
@@ -777,7 +785,194 @@ playwright 依赖：`cd /Users/roxor/brain/30-projects/aifeeds && npx playwright
 
 ---
 
-## 7. 执行记录表（review agent 填写）
+## 7. TC-ST — Staging 构建产物 / 真机层（本轮新增）
+
+> **为什么新增这一段**：既有 TC-A~TC-I 的 E2E 全部跑在 `localhost` + 注入 cookie 上，绕过了两条真机链路 —— ①「staging 域名下构建产物如何解析 API base」②「真实登录的 `Set-Cookie` 全链路」。2026-07-05 staging 无限登录循环事故正卡在这两处盲区：`dashboard/src/lib/auth.ts` 的 `API_BASE` 镜像漏了 staging 分支，叠加 `.env.staging` 未入库 → worktree / CI 构建拿不到 `VITE_API_BASE` → staging 页面 auth 请求打到 prod `api.ai-feeds.com`、业务请求打到 `staging-api.ai-feeds.com` → 登录「成功」假象 + 业务 401 → 无限弹登录。
+> **断言来源**：设计 §2（API_BASE 环境解析 / cookie 名分环境）/ §4（登录 & 反馈契约）/ §5（入口 gating）+ 本轮并行修复方向（`lib/apiBase.ts` 单一事实源 / `.env.staging` 入库 / 401 断路器 60s 窗口 / 登录后 `fetchMe` 失败提示）。仍是 black-box spec-based，期望值取自设计与修复目标，不反推实现。
+> **环境**：staging（`https://staging.ai-feeds.com` / `https://staging-api.ai-feeds.com`），cookie 名 `xlist_sid_stg`。与本地 harness（§1）完全隔离；多数用例需真机浏览器 + 真实登录。
+> **playwright 脚手架（staging 版，每条复用）**：
+> ```js
+> import { chromium } from 'playwright';
+> const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+> const browser = await chromium.launch();               // headless
+> // ★ 每个用例全新 context：干净 cookie + 覆盖默认 HeadlessChrome UA
+> //   （staging bot-UA gate 会拦 headless UA，必须伪装普通 Chrome）
+> const ctx = await browser.newContext({ baseURL: 'https://staging.ai-feeds.com', userAgent: DESKTOP_UA });
+> const page = await ctx.newPage();
+> ```
+
+### 7.0 执行前置（TC-ST 专用）
+
+**A. staging 部署状态要求**（跑任何 TC-ST 前确认）：
+- 本轮分支最新代码已部署 staging：worker（`set -a; . .secrets/aifeeds-staging.env; set +a; cd worker && npx wrangler deploy --env staging`）+ dashboard（`cd dashboard && npm run build:staging && npx wrangler pages deploy dist --project-name=xlist-dashboard-staging`）。
+- migration 024 已在 staging D1 apply：`npx wrangler d1 execute xlist-staging --env staging --remote --file=migrations/024-user-feedback.sql`（`SELECT name FROM sqlite_master WHERE name IN ('feedback','feedback_replies');` 回两行）。
+- staging email 登录通道开启：worker env `ENABLE_EMAIL_LOGIN` ≠ `'false'`（email 是 staging 主登录通道）。
+- **除 TC-ST-01 故意移除外**，staging dashboard 构建必须带 `dashboard/.env.staging`（`VITE_API_BASE=https://staging-api.ai-feeds.com`），否则就撞进事故本身。
+
+**B. 铸码法（mint-code，TC-ST-02 / TC-ST-05 复用）**：staging 收不到真实邮件 → 绕过发码，直接往 staging D1 的 `email_send_log` 插一条 `result='success'` 的待消费验证码行，让 `POST /api/auth/login` 的校验命中。
+- **code_hash 公式**（与 worker 逐字一致：`worker/src/auth/sms.ts:128` 的 `hashCode` + salt `worker/src/auth/handlers.ts:207` 的 `EMAIL_HASH_SALT`）：`SHA-256("xlist-email-v1|" + <code>)`。
+- **shasum 命令**（`CODE=000000` 为例）：
+  ```bash
+  CODE=000000
+  printf '%s' "xlist-email-v1|$CODE" | shasum -a 256 | awk '{print $1}'
+  # → bcb3af9fd0e0393d0a0c6859e0802cae0e6b7f59810b1027372d5dea67a8e537
+  ```
+- **铸码 INSERT**（email 需合法格式且小写 —— login handler 会 `toLowerCase()`；`code_expires_at` 设远期未来、`code_attempts=0`、`code_used_at` 留 NULL；`ip` / `sent_at` NOT NULL 必填）：
+  ```bash
+  TEST_EMAIL='st-tester@example.com'
+  NOW=$(python3 -c "import time;print(int(time.time()*1000))")
+  EXP=4102444800000    # 2100 年，远期未来
+  HASH=bcb3af9fd0e0393d0a0c6859e0802cae0e6b7f59810b1027372d5dea67a8e537   # = code 000000
+  npx wrangler d1 execute xlist-staging --env staging --remote --command \
+    "INSERT INTO email_send_log (email, ip, sent_at, result, code_hash, code_expires_at, code_attempts) \
+     VALUES ('$TEST_EMAIL','127.0.0.1',$NOW,'success','$HASH',$EXP,0);"
+  ```
+- 之后 `POST https://staging-api.ai-feeds.com/api/auth/login`（body `{"identifier":"st-tester@example.com","code":"000000"}` + header `X-Device-Id: <8~64 字符>`）即真实登录：handler 自动 find-or-create user + 下发 `Set-Cookie: xlist_sid_stg=<sid>; Domain=.ai-feeds.com`。
+- ⚠️ 若走 UI 登录且弹窗强制先点「获取验证码」：先在 UI 点获取（可能触发一次真实发码，无所谓）→ **再执行上面 INSERT**（确保铸码行 `sent_at` 最新，login 取 `ORDER BY sent_at DESC LIMIT 1` 命中它）→ 再在 UI 填 `000000` 提交。
+
+**C. 测试数据清理 SQL**（每轮 TC-ST 跑完执行，仅限测试邮箱 / UID，**严禁全表 DELETE**）：
+```bash
+TEST_EMAIL='st-tester@example.com'
+# 1) 查 user_id
+npx wrangler d1 execute xlist-staging --env staging --remote --command \
+  "SELECT user_id FROM identities WHERE identity_value='$TEST_EMAIL';"
+# 2) 用上一步的 <UID> 逐表清（feedback_replies 先删，无级联外键）
+npx wrangler d1 execute xlist-staging --env staging --remote --command \
+  "DELETE FROM feedback_replies WHERE feedback_id IN (SELECT id FROM feedback WHERE user_id='<UID>'); \
+   DELETE FROM feedback   WHERE user_id='<UID>'; \
+   DELETE FROM sessions   WHERE user_id='<UID>'; \
+   DELETE FROM identities WHERE user_id='<UID>'; \
+   DELETE FROM users      WHERE id='<UID>'; \
+   DELETE FROM email_send_log WHERE email='$TEST_EMAIL';"
+```
+> staging 是共享环境，清理务必按测试邮箱 / UID 定向；误删真实用户不可逆。
+
+### TC-ST-01 请求 host 一致性（无 env 构建）
+- **前置**：在 `dashboard/`；本用例故意复刻「worktree / CI 构建缺 `.env.staging`」→ `VITE_API_BASE` 为空 → 运行时 host 兜底生效（正是 2026-07-05 事故触发条件）。先确认 `dashboard/` 下除 `.env.staging` 外无其他 `.env*` 注入 `VITE_API_BASE`（当前仅 `.env.example` + `.env.staging`）。
+- **步骤（路径 A · 静态产物断言，推荐、稳定可复制）**：
+  ```bash
+  cd /Users/roxor/brain/30-projects/aifeeds/dashboard
+
+  # 1) 模拟无 env 构建
+  mv .env.staging /tmp/.env.staging.bak
+  npm run build:staging          # = tsc -b && vite build --mode staging；无 .env.staging → VITE_API_BASE 未注入
+
+  # A1 源码「单一事实源」不变量：staging→staging-api 的解析返回全站唯一
+  grep -rn 'return "https://staging-api.ai-feeds.com"' src/ --include="*.ts" --include="*.tsx"
+  #   期望：恰好 1 处命中，且文件 == src/lib/apiBase.ts
+
+  # A2 事故根因文件 auth.ts 不再自带镜像
+  grep -cE 'const API_BASE = \(\(\)' src/lib/auth.ts     # 期望 0（无自建 IIFE）
+  grep -c  "from './apiBase'"        src/lib/auth.ts     # 期望 1（改为 import 唯一源）
+
+  # A3 无 env 构建产物仍含 staging worker 域名（host 兜底已进 bundle，不靠 env）
+  grep -rl "staging-api.ai-feeds.com" dist/assets/*.js   # 期望 ≥1 个 chunk 命中
+
+  # A4 残留镜像审计（WARN 级）：仍 env||prod、缺 staging host 分支的文件
+  grep -rn '|| "https://api.ai-feeds.com"' src/ --include="*.ts" --include="*.tsx"
+  #   已知残留：components/GithubDrawerBody.tsx、components/GithubCard.tsx、lib/utils.ts
+
+  # 5) 还原 env（务必执行，避免污染后续 staging 构建）
+  mv /tmp/.env.staging.bak .env.staging
+  ```
+- **期望**：
+  1. **A1**：`staging-api.ai-feeds.com` 的解析返回字面量全站唯一，位于 `src/lib/apiBase.ts`（修复方向：apiBase 单一事实源）。
+  2. **A2**：`src/lib/auth.ts` 无自建 `API_BASE` IIFE、改为 `import { API_BASE } from './apiBase'`（事故根因镜像已删）。
+  3. **A3**：无 `.env.staging` 的 staging 构建产物仍包含 `staging-api.ai-feeds.com` —— 运行时 host 兜底能把 `staging.ai-feeds.com` 解析到 staging worker，不依赖 env（这正是事故的正解：env 丢了也不该打到 prod）。
+  4. **A4（WARN，不阻断本条）**：`GithubDrawerBody.tsx / GithubCard.tsx / lib/utils.ts` 仍各自 `VITE_API_BASE || "https://api.ai-feeds.com"`、缺 staging host 分支 → 同根因残留镜像（低危：仅影响 GitHub 卡片 `/r/` 图片，非 auth 环）。登记进「残留风险 / 待收敛」，建议一并收敛到 `apiBase.ts`。
+  5. **env 入库校验**：`git ls-files --error-unmatch dashboard/.env.staging` 应成功（`.env.staging` 已跟踪）—— 修复方向「env 入库」。**现状**：该文件当前未跟踪（`git ls-files` 报 `did not match`），正是事故里 worktree / CI 丢 env 的直接原因；此断言在 env 入库前应 FAIL，据此驱动修复。
+- **步骤（路径 B · 真机运行时断言，有 sudo 时加做，最贴近事故）**：无 env 构建后 `npx vite preview --port 4173`；`/etc/hosts` 临时加 `127.0.0.1 staging.ai-feeds.com`；playwright（DESKTOP_UA、全新 context）打开 `http://staging.ai-feeds.com:4173`，`page.on('request')` 收集所有 `/api/*` 请求 → 触发首屏 hydrate（`GET /api/auth/me`）+ 一次业务请求。**期望**：所有 `/api/*` 请求 host **唯一**且均为 `staging-api.ai-feeds.com`（事故时 auth 会打 `api.ai-feeds.com`）。测完删 hosts 行 + kill preview。CI / 无 sudo 环境跳过路径 B，以路径 A 等效兜底。
+- **需求回链**：事故根因（apiBase 镜像分叉 + `.env.staging` 未跟踪）；设计 §2（API_BASE 环境解析）/ 修复方向「apiBase.ts 单一事实源 + env 入库」。
+
+### TC-ST-02 staging 真机全流程（真实登录，铸码法）
+- **前置**：按 7.0-B 插入铸码行（`st-tester@example.com` / code `000000`）；全新 context（DESKTOP_UA）。
+- **步骤**（playwright）：
+  1. 收集 API host：`const apiHosts = new Set(); page.on('request', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) apiHosts.add(u.host); });`
+  2. `page.goto('/')` → 打开登录弹窗 → 填邮箱 `st-tester@example.com`；若弹窗要求先点「获取验证码」，点它后按 7.0-B 顺序执行铸码 INSERT（保证最新）→ 回 UI 填 `000000` → 点登录 / 提交。
+  3. 等登录成功（弹窗关闭 + 头像变已登录态）。
+  4. 打开头像菜单 → 点「用户反馈」跳 `/feedback`。
+  5. 在 `/feedback` 填「staging 真机反馈」→ 提交。
+- **期望**：
+  1. **host 唯一性（核心回归）**：`apiHosts` size === 1 且唯一元素 === `staging-api.ai-feeds.com`（事故时 auth 会混入 `api.ai-feeds.com`）。
+  2. **真实 cookie**：`(await ctx.cookies()).some(c => c.name === 'xlist_sid_stg' && c.domain.includes('ai-feeds.com'))` 为 true（staging cookie 名，设计 §2）。
+  3. **入口**：头像菜单出现「用户反馈」（`user && !isWeChatBrowser()`，桌面 UA，§5.1）。
+  4. **无登录循环**：进入 `/feedback` 不再弹登录弹窗；`GET /api/feedback/mine` HTTP 200（network 面板核对）。
+  5. **提交成功**：toast 逐字 `反馈已提交，感谢支持`（§5.4）；列表新增该卡片。
+- **清理**：见 7.0-C。
+- **需求回链**：事故根因（auth / 业务分叉 + Set-Cookie 链路）；设计 §2 / §4.1 / §5.1。
+
+### TC-ST-03 401 断路器
+- **前置**：先按 7.0-B 完成真实登录（context 内已有 `xlist_sid_stg`）。
+- **步骤**（playwright）：
+  1. `await ctx.route('**/api/feedback/mine', r => r.fulfill({ status:401, contentType:'application/json', body:'{"error":"not authenticated"}' }));` —— 强制 mine 401。
+  2. 监听 console：`const warns=[]; page.on('console', m => { if (m.type()==='warning') warns.push(m.text()); });`
+  3. `page.goto('/feedback')` —— 首次 mine 401 → 触发一次登录弹窗（`fetchMyFeedback` 走 `apiFetch` → `protectedPaths` 命中 `/api/feedback` → `trigger401Login`）。
+  4. 60s 窗口内制造第二次受保护 401：`page.reload()`（再次 mine 401）。
+- **期望**：
+  1. 60s 窗口内登录弹窗**至多出现 1 次**（第 2 次 401 被断路器压住，不再 `openLoginModal` / 不再二次 `logout`）。
+  2. **辅助断言（强）**：第 2 次 401 后 `warns` 含逐字 `[auth] 401 circuit-breaker: suppressed auto-logout`（`api.ts` `trigger401Login` 的 60s 分支，2026-07-05 事故防线）。
+  3. 页面不进入「弹窗↔登出」高频抖动循环（无反复闪现）。
+- **需求回链**：修复方向「401 断路器（60s 内不重复自动登出+弹窗）」；设计 §5.4（401 语义）。
+
+### TC-ST-04 登录后同步异常提示
+- **前置**：按 7.0-B 插入铸码行；全新 context。
+- **步骤**（playwright）：
+  1. `await ctx.route('**/api/auth/me', r => r.fulfill({ status:401, contentType:'application/json', body:'{"error":"unauthorized"}' }));` —— **只**拦 `/api/auth/me`，放行 `/api/auth/login`。
+  2. 走 7.0-B 的 UI 真实登录（`/api/auth/login` 真实命中 staging-api → 200 + Set-Cookie）。
+  3. 登录成功回调 `onLoginSuccess` 内 `authApi.fetchMe()` 命中被拦的 401。
+- **期望**：
+  1. 出现 toast **逐字** `登录状态同步异常`（而非静默降级）—— 正是本轮「登录后 `fetchMe` 失败提示」修复目标。
+  2. 不因该 401 触发登出 / 无限弹窗（`fetchMe` 走 `auth.ts` 的 `authFetch`，不经 `api.ts` 的 401 弹窗拦截）。
+  > ⚠️ 现状核对：`dashboard/src/lib/authStore.ts` 的 `onLoginSuccess`（约 82-87 行）当前 `catch {}` 为空、注释「降级用 login 响应」= **静默**。本用例断言的是修复到位后的行为；若在修复合入前跑，本条应 FAIL 并据此驱动修复（把空 catch 改为弹 `登录状态同步异常` toast）。
+- **需求回链**：修复方向「登录后 fetchMe 失败提示」；设计 §4.1（/api/auth/me）。
+
+### TC-ST-05 staging admin 回复回环真机（SSO 部分人工）
+- **前置**：用 7.0-B 铸出的用户，先由该用户在 staging 提交 1 条反馈：
+  ```bash
+  # 从 /api/auth/login 响应的 Set-Cookie 取 sid（curl -i 抓 xlist_sid_stg），或查 sessions 表
+  SID_STG='<从 /api/auth/login 响应 Set-Cookie 取得>'
+  curl -sS -A "$DESKTOP_UA" -H "Cookie: xlist_sid_stg=$SID_STG" \
+    -X POST "https://staging-api.ai-feeds.com/api/feedback" \
+    -F 'content=staging admin 回环测试' | jq '{ok,id}'
+  # 记下返回的 feedback id = <FB>
+  ```
+- **步骤**：
+  1. **人工（SSO 不可自动化）**：管理员用 SSO 登录 staging admin（走 CF Access）→ 打开「用户反馈」→ 搜到 `<FB>` → 图文回复。
+     > ⚠️ staging admin **无 Basic 兜底**（CF Access 强制、也无 service token）→ **不能**像本地 TC-C 那样 curl admin 端点；这一步只能人工过 SSO。记录在案的 Basic 兜底路径不可用于 staging。
+  2. **API 层 SQL 断言**（回复落库后）：
+     ```bash
+     npx wrangler d1 execute xlist-staging --env staging --remote --command \
+       "SELECT fr.id, fr.admin_email, fr.created_at, f.last_reply_at \
+        FROM feedback_replies fr JOIN feedback f ON f.id = fr.feedback_id \
+        WHERE fr.feedback_id = <FB> ORDER BY fr.id DESC LIMIT 1;"
+     ```
+- **期望**：
+  1. 新增 1 条 `feedback_replies`，且 `feedback.last_reply_at` 更新为该回复时间（§4.2 reply 副作用）。
+  2. **`admin_email` 非 NULL**，等于回复管理员的 SSO 邮箱 —— 这是 staging 独有断言：本地 Basic 兜底下 `admin_email` 恒为 NULL（见 TC-A-17），只有 staging 的 CF Access JWT `email` claim 才验证得了「回复人落库」这一环（§4.2 `admin_email` 取 `Cf-Access-Jwt-Assertion`）。
+  3. C 端该用户 `GET /api/feedback/mine` 的 `unread_count ≥ 1`、对应 reply 可见（可 curl 复核）。
+- **清理**：见 7.0-C。
+- **需求回链**：设计 §4.2（admin reply）/ 需求 2.3；staging admin CF Access（§7）。
+
+### TC-ST-06 回归抽查（TC-B 关键 4 条 @ staging 真机）
+> 在 staging 真机 + 真实登录（7.0-B）下复跑 TC-B 的 4 条高价值用例，验证「真机层」与本地行为一致。全程全新 context、DESKTOP_UA、baseURL `https://staging.ai-feeds.com`。
+
+- **6a 微信 UA 无入口 + 重定向**（对齐 TC-B-03）：新 context `userAgent` 换成含 `MicroMessenger` 的微信 UA + 完成真实登录 → ① 打开头像菜单 / 设置页断言**无**「用户反馈」入口；② `page.goto('/feedback')` 后 `page.url()` 最终为 `https://staging.ai-feeds.com/`（`<Navigate to="/" replace>`，§5.2 / 需求 1.1）。
+- **6b 第 4 条 429 toast 逐字**（对齐 TC-B-09）：真实登录后，先用 curl（带 `xlist_sid_stg`）连提 3 条把当日额度打满（BJT 自然日，§2）→ UI 填第 4 条提交 → 断言 toast **逐字** `操作太频繁了，稍后再试`（不得转述 / 改标点，§5.4）；表单内容保留未清空。
+- **6c 图片上传预览**（对齐 TC-B-06）：`/feedback` 点「添加图片（选填，最多 1 张）」→ `page.setInputFiles('input[type=file]', '/tmp/fb-test/small.jpg')` → 断言出现约 80px 缩略预览 + 右上 ✕（lucide `X`）；点 ✕ 断言预览消失、可重选（§5.3）。
+- **6d 红点闭环**（对齐 TC-B-11，admin 侧用 D1 直插绕过 SSO）：为该用户造一条**未读**回复（`read_at` 留 NULL）：
+  ```bash
+  NOW=$(python3 -c "import time;print(int(time.time()*1000))")
+  npx wrangler d1 execute xlist-staging --env staging --remote --command \
+    "INSERT INTO feedback_replies (feedback_id, content, created_at) VALUES (<FB>, 'staging 红点回归', $NOW); \
+     UPDATE feedback SET last_reply_at=$NOW WHERE id=<FB>;"
+  ```
+  ① 新 context `page.goto('/')`（真实登录后 hydrate 拉 `GET /api/feedback/unread-count`）→ 打开头像菜单断言「用户反馈」右侧红点（`h-2 w-2 rounded-full bg-rose-500`）存在；② `goto('/feedback')`（mount 后 fire-and-forget `POST /api/feedback/read`）→ 回 `/` 重开菜单断言红点消失；③ `reload()` 后仍无红点（服务端已读持久，§5.6 / §5.7）。
+- **清理**：见 7.0-C。
+- **需求回链**：需求 1.1 / 1.2 / 1.3 / 2.4；设计 §5.2 / §5.3 / §5.4 / §5.6。
+
+---
+
+## 8. 执行记录表（review agent 填写）
 
 > 结果填 ✅PASS / ❌FAIL / ⚠️BLOCKED；证据填 curl 输出摘要 / 截图路径（`$CLAUDE_JOB_DIR/tmp/...`）/ DB 查询结果。
 
@@ -829,6 +1024,12 @@ playwright 依赖：`cd /Users/roxor/brain/30-projects/aifeeds && npx playwright
 | TC-I-01 | 完整回环 |  |  |
 | TC-I-02 | 双反馈多回复计数 |  |  |
 | TC-I-03 | 图片全链路 |  |  |
+| TC-ST-01 | 请求 host 一致性（无 env 构建） |  |  |
+| TC-ST-02 | staging 真机全流程（真实登录 · 铸码法） |  |  |
+| TC-ST-03 | 401 断路器（60s 窗口） |  |  |
+| TC-ST-04 | 登录后同步异常提示 |  |  |
+| TC-ST-05 | staging admin 回复回环（SSO 人工 + SQL） |  |  |
+| TC-ST-06 | staging 真机回归抽查（TC-B ×4） |  |  |
 
 ---
 
@@ -851,3 +1052,8 @@ playwright 依赖：`cd /Users/roxor/brain/30-projects/aifeeds && npx playwright
 | admin nav | `💬 用户反馈` | §6 |
 | admin 回复按钮 | `回复用户` | §6.3 |
 | 错误码枚举（§4.1） | `not authenticated` / `rate_limited` / `content required` / `content too long` / `image too large` / `unsupported image type` | §4.1 |
+| 401 断路器 console warn | `[auth] 401 circuit-breaker: suppressed auto-logout` | TC-ST-03 / `api.ts` |
+| 登录后同步失败 toast | `登录状态同步异常` | TC-ST-04（修复目标） |
+| staging cookie 名 | `xlist_sid_stg` | TC-ST-02 / 设计 §2 |
+| email 验证码 hash 公式 | `SHA-256("xlist-email-v1\|" + code)` | TC-ST-02 铸码法 |
+| staging worker 域名（唯一解析） | `https://staging-api.ai-feeds.com` | TC-ST-01 / `apiBase.ts` |
