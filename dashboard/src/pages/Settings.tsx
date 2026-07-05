@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuthStore } from '../lib/authStore';
 import { LogoutConfirm } from '../components/LogoutConfirm';
 import { AvatarPicker } from '../components/AvatarPicker';
 import { displayNameOf, avatarUrlOf } from '../lib/defaultProfile';
 import { toast } from '../lib/toast';
+import { isWeChatBrowser } from '../lib/wechat';
+import { useFeedbackUnreadStore } from '../api';
 
 export function Settings() {
   // user 由 <RequireAuth> 守卫保证非空
@@ -13,6 +15,13 @@ export function Settings() {
   const navigate = useNavigate();
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
+
+  // 用户反馈入口 gating：非微信浏览器才展示（user 已由 RequireAuth 保证）。
+  // Settings 是独立路由（不挂 DashboardHome 的 UserMenu），落地时自己拉一次未读数。
+  const unread = useFeedbackUnreadStore((s) => s.unread);
+  useEffect(() => {
+    if (!isWeChatBrowser()) useFeedbackUnreadStore.getState().loadUnread();
+  }, []);
 
   const name = displayNameOf(user);
   const avatarSrc = avatarUrlOf(user);
@@ -77,6 +86,24 @@ export function Settings() {
           <span className="text-neutral-400">›</span>
         </button>
         <div className="border-t border-neutral-100" />
+        {!isWeChatBrowser() && (
+          <>
+            <button
+              type="button"
+              onClick={() => navigate('/feedback')}
+              className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-neutral-700 hover:bg-neutral-50"
+            >
+              <span className="flex items-center gap-2">
+                用户反馈
+                {unread > 0 && (
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500" aria-label="有新回复" />
+                )}
+              </span>
+              <span className="text-neutral-400">›</span>
+            </button>
+            <div className="border-t border-neutral-100" />
+          </>
+        )}
         <button
           type="button"
           onClick={() => setLogoutOpen(true)}

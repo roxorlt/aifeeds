@@ -39,13 +39,14 @@ export const ADMIN_SHARED_CSS = `
   h1 b { color: #e6e8eb; font-weight: 600; }
 `;
 
-export function adminNavHtml(active: 'dashboard' | 'tools' | 'ops' | 'tasks' | 'subscriptions'): string {
+export function adminNavHtml(active: 'dashboard' | 'tools' | 'ops' | 'tasks' | 'subscriptions' | 'feedback'): string {
   const cls = (k: string) => (k === active ? 'active' : '');
   return `<nav class="topnav">
     <span class="brand">ai-feeds <span>admin</span></span>
     <a class="${cls('dashboard')}" href="/admin/dashboard">📊 仪表盘</a>
     <a class="${cls('ops')}" href="/admin/ops">📦 运营</a>
     <a class="${cls('subscriptions')}" href="/admin/subscriptions">📮 订阅</a>
+    <a class="${cls('feedback')}" href="/admin/feedback">💬 用户反馈</a>
     <a class="${cls('tasks')}" href="/admin/tasks">⏰ 抓取任务</a>
     <a class="${cls('tools')}" href="/admin/tools">🔧 运维工具</a>
     <span class="meta" id="metaText"></span>

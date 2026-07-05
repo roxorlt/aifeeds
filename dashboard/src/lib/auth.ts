@@ -2,20 +2,10 @@
 // 设计参考：docs/plans/2026-05-01-auth-system-design.md § 9.3
 
 import { getDeviceId } from './device';
-
-const API_BASE = (() => {
-  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE) {
-    return import.meta.env.VITE_API_BASE;
-  }
-  if (typeof window !== 'undefined') {
-    const host = window.location.hostname;
-    // Dev: 走相对路径 → vite proxy 透传到目标 worker（默认 prod，可用 VITE_API_PROXY 覆盖）
-    if (host === 'localhost' || host === '127.0.0.1') {
-      return '';
-    }
-  }
-  return 'https://api.ai-feeds.com';
-})();
+// API_BASE 用唯一事实源 lib/apiBase.ts。历史上本文件自己抄了一份镜像却漏了
+// staging 分支,导致 staging 域名下 auth 打 prod、业务打 staging → 登录死循环
+// (2026-07-05 事故)。镜像已删除,只准从 apiBase import。
+import { API_BASE } from './apiBase';
 
 export interface User {
   id: string;

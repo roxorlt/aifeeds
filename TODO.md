@@ -8,6 +8,18 @@
 
 ## 进行中
 
+### A3. 用户反馈功能（2026-07-05，branch `feat/user-feedback`，开发 + 双层独立验收完成，待 staging 真机验收 + prod 上线）
+
+> C 端登录用户图文反馈（每账号每 BJT 日 3 条限频，超出 toast「操作太频繁了，稍后再试」；微信浏览器无此模块）→ admin 看板「用户反馈」tab（按账号查全部历史 + 图文回复）→ C 端红点接收查看回复。
+> 设计：[docs/plans/2026-07-05-user-feedback-design.md](docs/plans/2026-07-05-user-feedback-design.md) · 测试用例（46 条，R1/R2 独立执行全 PASS）：[docs/plans/2026-07-05-user-feedback-test-cases.md](docs/plans/2026-07-05-user-feedback-test-cases.md)
+
+- [x] Task A（migration 024 + worker 7 端点）/ Task B（C 端页 + 入口 gating + 红点）/ Task C（admin tab）实施完成；R1 backend 23/23、R2 E2E 23/23 全绿，0 Critical/Important
+- [x] staging 部署 + 冒烟（2026-07-05 首轮：migration 024 → staging D1，worker `5bc2b789` + dashboard 部署）
+- [x] **🔴 事故修复轮**（2026-07-05 用户首验翻车：staging 登录死循环）：根因 = `lib/auth.ts` API_BASE 镜像缺 staging 分支 + `.env.staging` 未跟踪 → worktree 构建的 staging 前端 auth 打 prod、业务打 staging-api。修复 4 层：`lib/apiBase.ts` 单一事实源 / `.env.staging` 入库+.gitignore 例外 / 401 断路器（60s 抑制自动登出弹窗，杜绝死循环类问题）/ 登录后同步失败显式 toast。测试盲区补 TC-ST 6 条（52 条总量），R3 终验 staging 真机真实登录全链路 5 PASS + 1 BLOCKED（admin SSO 不可自动化）。教训已沉淀 memory + operations.md
+- [ ] 用户真机验收：staging.ai-feeds.com（⚠️ 硬刷新/注销 SW；⚠️ 事故连带登出过 prod，ai-feeds.com 需重登一次）登录 → 头像菜单「用户反馈」提交/查回复；admin SSO → `admin.ai-feeds.com` 对应 staging 入口为 `staging-api.ai-feeds.com/admin/feedback` → 图文回复（顺带人工验证 admin_email 落库非 NULL——TC-ST-05 唯一待人工项）
+- [ ] prod 上线（用户拍板）：**先跑 prod migration**（`cd worker && npx wrangler d1 execute xlist --remote --file=migrations/024-user-feedback.sql`）→ merge PR（CI 自动 deploy）→ 真机验证。⚠️ 顺序不能反：代码先上而表不存在会 500
+- [ ] 非阻塞 Minor 择机优化（详见 PR body / `.superpowers/sdd/progress.md`）：未读 store 从 api.ts 挪 lib/、admin 回复成功提示持久化、**GithubDrawerBody/GithubCard/utils.ts 的 /r/ /img 媒体代理 2 分支镜像收编进 apiBase（非致命残留）**；⚠️ PR 的 CI worker job 红叉是 main 既有 24 个 tsc baseline error（与本 feature 无关，deploy 硬防线 tsc 为 if:false 不受影响）
+
 ### A. AI 厂商博客 + 播客新源接入（2026-06-09，Phase 0 设计完成）
 
 > 新增两个内容形态:`blog`(国内外 AI 厂商官方/技术博客长文)+ `podcast`(国内外 AI 播客单集)。完全复用现有「items 大一统表 + 每源一条 CF Workflow + 完整性 gate + 三件套前端」架构。

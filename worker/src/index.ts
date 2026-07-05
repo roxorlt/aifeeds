@@ -50,6 +50,15 @@ import { authenticate } from './auth/session';
 import { handleTrack } from './track';
 import { handleDubWishlistAdd, handleDubWishlistState } from './dub-wishlist';
 import {
+  handleFeedbackSubmit,
+  handleFeedbackMine,
+  handleFeedbackMarkRead,
+  handleFeedbackUnreadCount,
+  handleAdminFeedbackList,
+  handleAdminFeedbackDetail,
+  handleAdminFeedbackReply,
+} from './feedback';
+import {
   runGithubFetchTrending,
   runGithubEnrichPending,
   runGithubReadmeTranslate,
@@ -133,6 +142,7 @@ import { runOpsDetect } from './ops/detect';
 import { recordCronRun } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
 import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
+import { serveAdminFeedbackHtml } from './admin-feedback';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -496,6 +506,19 @@ export default {
       if (path === '/api/dub-wishlist' && request.method === 'GET') {
         return withCors(await handleDubWishlistState(request, env), request, env);
       }
+      // ─── 用户反馈(登录用户图文反馈 + 后台回复回执)──────────────
+      if (path === '/api/feedback' && request.method === 'POST') {
+        return withCors(await handleFeedbackSubmit(request, env, ctx), request, env);
+      }
+      if (path === '/api/feedback/mine' && request.method === 'GET') {
+        return withCors(await handleFeedbackMine(request, env, ctx), request, env);
+      }
+      if (path === '/api/feedback/read' && request.method === 'POST') {
+        return withCors(await handleFeedbackMarkRead(request, env, ctx), request, env);
+      }
+      if (path === '/api/feedback/unread-count' && request.method === 'GET') {
+        return withCors(await handleFeedbackUnreadCount(request, env, ctx), request, env);
+      }
       if (path === '/api/auth/sms/send' && request.method === 'POST') {
         return withCors(await handleSmsSend(request, env, ctx), request, env);
       }
@@ -573,6 +596,9 @@ export default {
       if (path === '/admin/subscriptions' && request.method === 'GET') {
         return serveAdminSubscriptionsHtml(request, env);
       }
+      if (path === '/admin/feedback' && request.method === 'GET') {
+        return serveAdminFeedbackHtml(request, env);
+      }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
       }
@@ -590,6 +616,26 @@ export default {
       }
       if (path === '/api/admin/subscriptions' && request.method === 'GET') {
         return handleAdminSubscriptions(request, env);
+      }
+      // ─── 用户反馈 admin(列表 / 详情 / 图文回复)──────────────────
+      if (path === '/api/admin/feedback' && request.method === 'GET') {
+        return withCors(await handleAdminFeedbackList(request, env), request, env);
+      }
+      const adminFeedbackReplyMatch = path.match(/^\/api\/admin\/feedback\/(\d+)\/reply$/);
+      if (adminFeedbackReplyMatch && request.method === 'POST') {
+        return withCors(
+          await handleAdminFeedbackReply(request, env, Number(adminFeedbackReplyMatch[1])),
+          request,
+          env,
+        );
+      }
+      const adminFeedbackDetailMatch = path.match(/^\/api\/admin\/feedback\/(\d+)$/);
+      if (adminFeedbackDetailMatch && request.method === 'GET') {
+        return withCors(
+          await handleAdminFeedbackDetail(request, env, Number(adminFeedbackDetailMatch[1])),
+          request,
+          env,
+        );
       }
       if (path === '/api/admin/sms-status' && request.method === 'GET') {
         return adminSmsStatus(request, env);

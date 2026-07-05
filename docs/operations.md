@@ -115,6 +115,8 @@ set -a; . /Users/roxor/brain/30-projects/aifeeds/.secrets/aifeeds-staging.env; s
 npm run deploy:staging         # = build:staging + wrangler pages deploy
 ```
 
+> ⚠️ **staging 前端构建输入坑位（2026-07-05 事故）**：`dashboard/.env.staging`（`VITE_API_BASE`）一度是未跟踪文件，worktree / CI 干净构建拿不到它 → 运行时兜底暴露出 `lib/auth.ts` API_BASE 镜像缺 staging 分支 → staging 页面 auth 打 prod、业务打 staging-api → 登录死循环。已根治：`.env.staging` 入库（`.gitignore` 显式 `!` 例外）+ `dashboard/src/lib/apiBase.ts` 单一事实源（新增 base 解析一律 import 它，**不许再写镜像**）+ api.ts 401 断路器。残留非致命镜像（GithubCard/GithubDrawerBody/utils.ts 的 /r/ /img 媒体代理）待后续 PR 收编。
+
 **手动触发 staging cron**：
 ```bash
 curl https://staging-api.ai-feeds.com/cdn-cgi/handler/scheduled
@@ -378,6 +380,10 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/track` | POST | Dashboard telemetry 上报（dashboard SDK 用，必带 `X-Device-Id`） | 无（CORS 白名单 + did 必填） |
 | `/api/dub-wishlist` | POST | 播客「翻译成中文音频」假门(painted door)：记录需求信号（body `item_id`，必带 `X-Device-Id`，登录则附 `user_id`）。`INSERT OR IGNORE` 去重，返回 `{ok,already}`。点击不真做配音，计数只在 admin 看板（2026-06-21 上线，`worker/src/dub-wishlist.ts`，表 `dub_wishlist` migration 023） | 无（匿名，必带 X-Device-Id） |
 | `/api/dub-wishlist` | GET | `?item_id=X` 查当前设备是否已点过 → `{wishlisted}`，前端「历史已点则隐藏整块」用 | 无（必带 X-Device-Id） |
+| `/api/feedback` | POST | 用户反馈提交（multipart：`content` 必填 ≤2000 字 / `image` 选填 ≤5MB jpeg png webp gif / `device` 前端设备信息 JSON）。**限频：每账号每 BJT 自然日 3 条**，超出 429 `rate_limited`（C 端 toast「操作太频繁了，稍后再试」）。图片入 R2 `feedback/<sha256>.<ext>`；服务端快照 device_info（request.cf country/colo/asn + ip/ua）与 account_info（display_name + identities）（2026-07-05，`worker/src/feedback.ts`，表 `feedback`/`feedback_replies` migration 024，入口 UserMenu/Settings 仅登录+非微信 UA 展示） | session（cookie） |
+| `/api/feedback/mine` | GET | 我的反馈列表（最近 50 条 + 回复线程 + `unread_count`） | session（cookie） |
+| `/api/feedback/read` | POST | 本人全部官方回复标记已读（C 端红点清零，打开反馈页自动触发） | session（cookie） |
+| `/api/feedback/unread-count` | GET | 未读官方回复数（UserMenu 红点数据源，登录 hydrate 后拉一次，不轮询） | session（cookie） |
 | `/api/auth/sms/send` | POST | 发送短信验证码（必带 `X-Device-Id` + Turnstile token） | 无 + 4 层防刷 |
 | `/api/auth/login` | POST | 提交 phone+code 登录或自动注册（必带 `X-Device-Id`） | 无 |
 | `/api/auth/logout` | POST | 撤销当前 session | session token |
@@ -392,6 +398,10 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）、**🎧 中文配音需求（假门）卡片**（2026-06-21：想听 KPI + 需求强度漏斗「打开播客详情→点想听」转化率 + 需求排行榜）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
 | `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices` / `dub-wishlist`(中文配音需求假门)（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/admin/feedback` | GET | **用户反馈看板页**（2026-07-05，`worker/src/admin-feedback.ts`）：列表 + 搜索（user_id 精确 / 昵称 / identity 模糊 → 按账号查该用户全部历史）+ 状态过滤（未回复/已回复）+ 分页 + 详情（device_info / 账号快照 / 回复线程）+ 图文回复用户 | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/feedback` | GET | 反馈列表数据源（`q` / `status=all,pending,replied` / `page` / `page_size≤100`） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/feedback/:id` | GET | 反馈详情 + 回复线程（device_info/account_info 解析后 JSON） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/feedback/:id/reply` | POST | 图文回复用户（multipart：`content` ≤5000 必填 / `image` 选填同 C 端规则）；写 `feedback_replies` + 刷 `feedback.last_reply_at`；`admin_email` 取 CF Access JWT email claim（Basic 兜底为 NULL） | CF Access JWT（Basic Auth fallback） |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 
@@ -698,6 +708,8 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - `sms_send_log`（2026-05-02 PR2 新增）— 短信发送日志 + 防刷计数 + 验证码 hash。`result` 枚举 success/rate_limited/turnstile_failed/sms_api_error/budget_capped。30 天 retention cron 待加。详见 § 3.4
   - `share_relations`（2026-05-04 PR5 新增）— 分享关系图。`token` (nanoid 8) UNIQUE / `from_uid` 分享人 / `item_id` 复合 id / `to_did` 落地浏览器 device_id（首次扫码补） / `to_uid` 落地用户后续注册的 user.id / `landed_at` / `registered_at` / `scan_count` / `last_scanned_at`。4 索引：token / from_uid+time / item+time / to_did。社交关系图基础数据。migration `009-share-relations.sql`
   - `metrics_snapshots_clawhub`（2026-05-07 ClawHub 接入新增）— ClawHub skill metrics 历史。每次 phase 1 cron append 一行 (item_id, captured_at, stars, downloads, installs_current, installs_all_time)。30 天 retention（沿用 `runCleanup` 03:35 UTC 每天清理）。两个索引：`idx_msch_item_time` / `idx_msch_captured`。migration: `worker/migrations/011-metrics-snapshots-clawhub.sql`，prod + staging 都已 apply（prod 2026-05-08 跟 ClawHub v2 一起上线）
+  - `feedback`（2026-07-05 用户反馈功能新增）— C 端用户反馈主表：user_id / content / image_key（R2 `feedback/<sha256>.<ext>`）/ device_info + account_info（JSON 快照，定位问题用）/ ip / ua / day（BJT，配 `idx_feedback_user_day` 做每日 3 条限频）/ created_at(ms) / last_reply_at。migration `024-user-feedback.sql`，设计 `docs/plans/2026-07-05-user-feedback-design.md`
+  - `feedback_replies`（2026-07-05 同上）— 后台图文回复：feedback_id / content / image_key / admin_email（CF Access JWT email，Basic 兜底 NULL）/ created_at(ms) / read_at（用户已读时间，C 端未读红点数据源）。索引 `idx_feedback_replies_fb`。同 migration 024
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
