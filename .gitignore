@@ -52,6 +52,12 @@ x-com-tweet.png
 !.dev.vars.example
 !.env.example
 
+# dashboard/.env.staging 只含公开 URL(VITE_API_BASE=staging-api),无 secret,
+# 必须保持跟踪:worktree / CI 构建缺它 → VITE_API_BASE 为空 → staging 前端 base
+# 解析全靠运行时兜底(2026-07-05 登录死循环事故根因)。显式反跟踪,防止未来把上面
+# *.env 收紧成 .env* 时再次静默把它漏出构建。
+!dashboard/.env.staging
+
 # wrangler 4.x 在主仓库根自动生成的 jsonc，跟 worker/wrangler.toml 冲突
 wrangler.jsonc
 
