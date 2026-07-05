@@ -91,8 +91,9 @@ cd /Users/roxor/brain/30-projects/aifeeds/worker
 # （可选）想要绝对干净的库，先清本地 D1 状态再 init：
 # rm -rf .wrangler/state/v3/d1
 
-# 1) schema.sql 基线（含 users / identities / sessions，已确认）
-npm run db:init:local
+# 1) ⚠️ 不要用 npm run db:init:local —— schema.sql 存在既有错误（next_refresh_at 处中断，
+#    auth 表建不出来，Task A 实测 2026-07-05）。直接按依赖顺序 apply 单个 migration：
+npx wrangler d1 execute xlist --local --file=migrations/006-users-identities-sessions.sql
 
 # 2) apply 反馈表迁移（Task A 产出，内容即设计 §3）
 npx wrangler d1 execute xlist --local --file=migrations/024-user-feedback.sql
