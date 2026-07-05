@@ -142,6 +142,7 @@ import { runOpsDetect } from './ops/detect';
 import { recordCronRun } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
 import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
+import { serveAdminFeedbackHtml } from './admin-feedback';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -594,6 +595,9 @@ export default {
       }
       if (path === '/admin/subscriptions' && request.method === 'GET') {
         return serveAdminSubscriptionsHtml(request, env);
+      }
+      if (path === '/admin/feedback' && request.method === 'GET') {
+        return serveAdminFeedbackHtml(request, env);
       }
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
