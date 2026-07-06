@@ -182,9 +182,20 @@ function seoDescription(item: RenderedItem): string {
   return extendedSummary(item) || clampSentences(item.summary_full || item.summary || '');
 }
 
+// 前缀重叠判定:规范化(去尾部省略号 `…` + trim)后,一句话 summary 是否为扩展摘要的逐字前缀。
+// 同源(hf 两者 summary_zh / x 两者 content_translated / gh 都 ai_summary / ph 缺 description_zh 回退 ai_summary)
+// 时,扩展摘要开头 = 一句话 summary(仅 clamp 长度不同,相等亦算前缀)→ true。
+// 异源(blog: summary vs excerpt_zh / podcast: vs shownotes_zh / ph: vs description_zh)内容不同 → false。
+function isPrefixOverlap(oneLiner: string, extended: string): boolean {
+  const norm = (s: string): string => s.replace(/…+$/, '').trim();
+  const a = norm(oneLiner);
+  const b = norm(extended);
+  return a.length > 0 && b.length > 0 && b.startsWith(a);
+}
+
 function renderArticle(item: RenderedItem, siteBase: string): string {
   const deepUrl = `${siteBase}${item.deep_link}`;
-  const summary = clampSentences(item.summary_full || item.summary || '');
+  const oneLiner = clampSentences(item.summary_full || item.summary || '');
   const extended = extendedSummary(item);
   const parts: string[] = [];
   parts.push(`<article>`);
@@ -192,11 +203,14 @@ function renderArticle(item: RenderedItem, siteBase: string): string {
   if (item.cover) {
     parts.push(`<img class="cover" src="${escapeHtml(item.cover)}" alt="${escapeHtml(item.title)}" loading="lazy">`);
   }
-  if (summary) parts.push(`<p class="summary">${escapeHtml(summary)}</p>`);
-  // 扩展摘要段:非空且与一句话 summary 不完全相同才渲染(gh/短推文等一句话已是全文 → 不重复;
-  // hf/blog 等更长版天然不同 → 渲染,多出真实非重复中文供 SEO 抓取)。
-  if (extended && extended !== summary) {
-    parts.push(`<p class="summary-full">${escapeHtml(extended)}</p>`);
+  if (extended && isPrefixOverlap(oneLiner, extended)) {
+    // 同源前缀:一句话 summary 只是扩展摘要的截断前缀 → collapse 成一段,取更长的扩展 500 版,
+    // 占据一句话 summary 的位置/样式层级(.summary),避免开头 ~180 字逐字重复,SEO 文字量还更多。
+    parts.push(`<p class="summary">${escapeHtml(extended)}</p>`);
+  } else {
+    // 异源(内容不同)或无扩展摘要:保留一句话 summary;有扩展且确非前缀重叠 → 再补扩展段供 SEO 抓取。
+    if (oneLiner) parts.push(`<p class="summary">${escapeHtml(oneLiner)}</p>`);
+    if (extended) parts.push(`<p class="summary-full">${escapeHtml(extended)}</p>`);
   }
   const meta: string[] = [];
   if (item.author) meta.push(`<span>${escapeHtml(item.author)}</span>`);

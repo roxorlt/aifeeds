@@ -13,8 +13,8 @@ import {
 } from './daily-page';
 import { selectTopForSource } from './selection';
 import type { Env } from '../index';
-import type { DigestSource } from './config';
-import type { RenderedItem, RenderRow } from './render';
+import { DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
+import { clampSentences, type RenderedItem, type RenderRow } from './render';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
@@ -308,6 +308,68 @@ describe('renderDailyPageHtml', () => {
   test('.summary-full 有内联样式(字号/颜色对齐摘要段)', () => {
     const html = renderDailyPageHtml(mkData(), envFixture());
     expect(html).toContain('.summary-full{');
+  });
+
+  // ── Task 4 审查修复:同源前缀 collapse(一句话 summary 是扩展摘要的逐字前缀 → 只渲一段更长的)──
+
+  function countOccurrences(hay: string, needle: string): number {
+    let n = 0;
+    let i = 0;
+    for (;;) {
+      const j = hay.indexOf(needle, i);
+      if (j < 0) break;
+      n++;
+      i = j + needle.length;
+    }
+    return n;
+  }
+
+  test('同源前缀(hf:summary_zh 同喂一句话与扩展)→ collapse 成一段(=扩展 500 版),前缀不重复', () => {
+    const head = '这是论文的详细中文摘要第一句。';
+    const sameLong = head + '这是补充说明使正文超过一百八十字的第二句内容更长一些。'.repeat(20);
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'hf-paper', label: '论文', items: [mkItem({
+        source: 'hf-paper', summary: head, summary_full: sameLong, intro: sameLong,
+      })] }] }),
+      envFixture(),
+    );
+    const body = stripJsonLd(html);
+    // collapse 后只一段:无独立的扩展 summary-full 段
+    expect(body).not.toContain('<p class="summary-full">');
+    // 保留下来的那段 = 扩展 500 版(更长),占据一句话 summary 的位置/样式层级(.summary)
+    const extended = clampSentences(sameLong, DAILY_PAGE_INTRO_MAX);
+    const oneLiner = clampSentences(sameLong, 180);
+    expect(extended.length).toBeGreaterThan(oneLiner.length); // 确保测的是严格前缀而非相等
+    expect(body).toContain(`<p class="summary">${extended}</p>`);
+    // 文本开头在正文里只出现一次(不再「180 段 + 前缀重复的扩展段」两处)
+    expect(countOccurrences(body, head)).toBe(1);
+  });
+
+  test('长推文 content_translated 前缀重叠(summary_full 与 intro 同源)→ collapse 一段', () => {
+    const head = '这条推文讲了一个关于模型发布的重要更新。';
+    const sameLong = head + '随后作者补充了大量上下文让正文远超一句话摘要的长度。'.repeat(18);
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'x', label: '动态', items: [mkItem({
+        source: 'x', summary: head, summary_full: sameLong, intro: sameLong,
+      })] }] }),
+      envFixture(),
+    );
+    const body = stripJsonLd(html);
+    expect(body).not.toContain('<p class="summary-full">');
+    expect(body).toContain(`<p class="summary">${clampSentences(sameLong, DAILY_PAGE_INTRO_MAX)}</p>`);
+    expect(countOccurrences(body, head)).toBe(1);
+  });
+
+  test('异源(blog:summary≠excerpt_zh)→ 不 collapse,保留两段(一句话 .summary + 扩展 .summary-full)', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'news', label: '行业新闻', items: [mkItem({
+        source: 'news', summary: '一句话新闻摘要。', summary_full: '一句话新闻摘要。',
+        intro: '完全不同的图文扩展简介正文，与一句话摘要并非同一字段来源。',
+      })] }] }),
+      envFixture(),
+    );
+    expect(html).toContain('<p class="summary">一句话新闻摘要。</p>');
+    expect(html).toContain('<p class="summary-full">完全不同的图文扩展简介正文，与一句话摘要并非同一字段来源。</p>');
   });
 });
 
