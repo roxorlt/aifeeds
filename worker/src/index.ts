@@ -686,6 +686,18 @@ export default {
       if (path === '/api/admin/search/reindex' && request.method === 'POST') {
         return withCors(await handleSearchReindex(request, env), request, env);
       }
+      // C 端搜索 suggestion 词表手动重建(admin auth)：物化 entity + hot_query 词条。
+      // 生产由整点 cron 触发；此端点供 staging backfill 后手动补一次（Task 7）。
+      if (path === '/api/admin/search/rebuild-terms' && request.method === 'POST') {
+        if (!(await checkAdminAuth(request, env))) {
+          return new Response('Unauthorized', {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Basic realm="ai-feeds admin"' },
+          });
+        }
+        const result = await rebuildSearchTerms(env);
+        return jsonResponse(result, 200, request, env);
+      }
       // 5/28 加: feature flag CRUD (admin /admin/tools UI 调). impression refresh
       // 开关 + 未来可扩其他 flag. 改完立即 invalidate worker memory cache.
       if (path === '/api/admin/feature-flags' && request.method === 'GET') {
