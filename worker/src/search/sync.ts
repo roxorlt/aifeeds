@@ -33,8 +33,22 @@ const BATCH_LIMIT = 2000;
 // db.batch() 整批只算一次 D1 subrequest，控制在 100 条以内避免单请求过大。
 const STMT_CHUNK = 100;
 // 增量水位 buffer：防时钟偏差 / 落库与 scraped_at 之间的微小时序差。
-const SCRAPED_BUFFER_MS = 10 * 60 * 1000; // 10 分钟
+const SCRAPED_BUFFER_SEC = 600; // 600 秒
 const TRANSLATED_BUFFER_SEC = 600; // 600 秒
+
+/**
+ * scraped_at 混合格式解析 → epoch 秒。库里 X 源是 "YYYY-MM-DD HH:MM:SS"（空格分隔、
+ * 无时区后缀，按 UTC 处理），GitHub/blog 等是 ISO "...T...Z"。空格先归一成 'T'，
+ * 无时区后缀（Z 或 ±hh:mm / ±hhmm）补 'Z' —— 裸 Date.parse 无后缀串会按本地时区解析，
+ * 必须显式钉死 UTC。非法串返回 null。
+ */
+export function parseScrapedAt(s: string | null | undefined): number | null {
+  if (!s) return null;
+  let t = s.trim().replace(" ", "T");
+  if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) t += "Z";
+  const ms = Date.parse(t);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
 
 // 截断辅助：非空则截前 n 字符，否则空串。
 const cut = (s: string | null | undefined, n: number): string =>
@@ -151,8 +165,11 @@ export function extractSearchFields(
 
 // ─── search_sync_state 读写辅助 ───────────────────────────────────────────
 
+// 注：fts_wm_scraped_epoch 存 epoch 秒（不是 ISO 串）——库里 scraped_at 是混合格式
+// （X 源空格分隔 / 其他源 ISO），字典序比较会漏行，统一走 epoch 数值比较。
+// 旧 key fts_wm_scraped（ISO 串）已废弃，不再读写。
 const STATE_KEYS = [
-  "fts_wm_scraped",
+  "fts_wm_scraped_epoch",
   "fts_wm_translated",
   "fts_backfill_rowid",
   "fts_backfill_done",
@@ -222,18 +239,21 @@ async function applyRows(env: Env, rows: ScanRow[]): Promise<number> {
 /**
  * 增量同步（挂每 5 分钟 cron）。首次自动 backfill：fts_backfill_done 为空时按 rowid 分批追平；
  * 追平后走时间水位增量。单轮上限 2000 行，幂等 upsert，全程 try/catch 不抛出。
- * 返回 { scanned, upserted }：scanned = 本轮扫描行数（< 2000 表示已追平/无新增）。
+ * 返回 { scanned, upserted, errored }：scanned = 本轮扫描行数（< 2000 表示已追平/无新增）；
+ * errored = 本轮异常兜底（此时 scanned=0 不代表追平，调用方勿据此 break 追平判定）。
  */
-export async function syncSearchIndex(env: Env): Promise<{ scanned: number; upserted: number }> {
+export async function syncSearchIndex(
+  env: Env,
+): Promise<{ scanned: number; upserted: number; errored: boolean }> {
   try {
     const state = await readState(env);
     const seedStmts: D1PreparedStatement[] = [];
 
     // 首次调用：播种增量水位为「当前时刻」——即 backfill 起点。backfill 按 rowid 覆盖
     // 全表历史，增量水位守住 backfill 期间发生变更的行（scraped_at / translated_at 均晚于起点）。
-    if (state.fts_wm_scraped == null) {
-      state.fts_wm_scraped = new Date().toISOString();
-      seedStmts.push(stateSet(env, "fts_wm_scraped", state.fts_wm_scraped));
+    if (state.fts_wm_scraped_epoch == null) {
+      state.fts_wm_scraped_epoch = String(Math.floor(Date.now() / 1000));
+      seedStmts.push(stateSet(env, "fts_wm_scraped_epoch", state.fts_wm_scraped_epoch));
     }
     if (state.fts_wm_translated == null) {
       state.fts_wm_translated = String(Math.floor(Date.now() / 1000));
@@ -262,49 +282,57 @@ export async function syncSearchIndex(env: Env): Promise<{ scanned: number; upse
         writes.push(stateSet(env, "fts_backfill_done", "1"));
       }
       if (writes.length) await env.DB.batch(writes);
-      return { scanned: rows.length, upserted };
+      return { scanned: rows.length, upserted, errored: false };
     }
 
     // ── backfill 完成：时间水位增量 ──
-    const wmScrapedIso = state.fts_wm_scraped || "1970-01-01T00:00:00.000Z";
+    // scraped_at 是混合格式（X 源 "YYYY-MM-DD HH:MM:SS" / 其他源 ISO "...T...Z"），
+    // 纯字典序比较会漏行（空格 0x20 < 'T' 0x54）。两段式：
+    //   1) scraped_at >= dayFloor（"YYYY-MM-DD" 日期前缀，两种格式的同日行都 > 前缀，
+    //      字典序对两种格式均成立，可吃 idx_items_scraped 做范围收窄，避免全表 strftime）
+    //   2) CAST(strftime('%s', scraped_at) AS INTEGER) > epochFloor 精确 epoch 比较
+    //      （SQLite strftime 对空格 / T 分隔均可解析；CAST 必需——TEXT 与数值直接比较
+    //      走 SQLite 存储类排序恒为 TEXT > number）。
+    const wmScrapedEpoch = Number(state.fts_wm_scraped_epoch || "0") || 0;
     const wmTranslatedSec = Number(state.fts_wm_translated || "0") || 0;
-    const scrapedFloorMs = Date.parse(wmScrapedIso);
-    const scrapedFloor = Number.isFinite(scrapedFloorMs)
-      ? new Date(scrapedFloorMs - SCRAPED_BUFFER_MS).toISOString()
-      : "1970-01-01T00:00:00.000Z";
+    const scrapedEpochFloor = Math.max(0, wmScrapedEpoch - SCRAPED_BUFFER_SEC);
+    const dayFloor = new Date(scrapedEpochFloor * 1000).toISOString().slice(0, 10);
     const translatedFloor = Math.max(0, wmTranslatedSec - TRANSLATED_BUFFER_SEC);
 
     // scraped_at / translated_at 额外取出用于推进水位（不在 ITEM_COLS 里）。
     const rs = await env.DB.prepare(
       `SELECT rowid AS rid, ${ITEM_COLS}, scraped_at, translated_at FROM items
-       WHERE scraped_at > ? OR COALESCE(translated_at, 0) > ?
+       WHERE (scraped_at >= ? AND CAST(strftime('%s', scraped_at) AS INTEGER) > ?)
+          OR COALESCE(translated_at, 0) > ?
        ORDER BY scraped_at ASC LIMIT ?`,
     )
-      .bind(scrapedFloor, translatedFloor, BATCH_LIMIT)
+      .bind(dayFloor, scrapedEpochFloor, translatedFloor, BATCH_LIMIT)
       .all<ScanRow & { scraped_at: string | null; translated_at: number | null }>();
     const rows = rs.results ?? [];
     const upserted = await applyRows(env, rows);
 
-    // 推进水位到本轮实际见到的最大值（scraped_at ISO 字典序 = 时序；translated_at epoch 秒）。
-    let maxScraped = wmScrapedIso;
+    // 推进水位到本轮实际见到的最大值（scraped_at 经 parseScrapedAt 归一为 epoch 秒；
+    // translated_at 本身是 epoch 秒）。
+    let maxScrapedEpoch = wmScrapedEpoch;
     let maxTranslated = wmTranslatedSec;
     for (const r of rows) {
-      const sa = r.scraped_at;
-      if (sa && sa > maxScraped) maxScraped = sa;
+      const se = parseScrapedAt(r.scraped_at);
+      if (se != null && se > maxScrapedEpoch) maxScrapedEpoch = se;
       const ta = Number(r.translated_at || 0);
       if (Number.isFinite(ta) && ta > maxTranslated) maxTranslated = ta;
     }
     const writes: D1PreparedStatement[] = [];
-    if (maxScraped !== wmScrapedIso) writes.push(stateSet(env, "fts_wm_scraped", maxScraped));
+    if (maxScrapedEpoch !== wmScrapedEpoch)
+      writes.push(stateSet(env, "fts_wm_scraped_epoch", String(maxScrapedEpoch)));
     if (maxTranslated !== wmTranslatedSec)
       writes.push(stateSet(env, "fts_wm_translated", String(maxTranslated)));
     if (writes.length) await env.DB.batch(writes);
 
-    return { scanned: rows.length, upserted };
+    return { scanned: rows.length, upserted, errored: false };
   } catch (e) {
     // 同步失败只记 log，下轮自动补齐；绝不影响主 cron / feed。
     console.error("[search] syncSearchIndex failed:", e);
-    return { scanned: 0, upserted: 0 };
+    return { scanned: 0, upserted: 0, errored: true };
   }
 }
 
@@ -312,17 +340,19 @@ export async function syncSearchIndex(env: Env): Promise<{ scanned: number; upse
 // ELIGIBLE_SQL 用于 COUNT（WHERE 里 NULL 自然当 false，is_relevant=1 已排除 NULL）；
 // INELIGIBLE_SQL 用于 purge 的子查询（用 IS NOT NULL / != 的显式否定 + COALESCE 兜住
 // is_relevant NULL，避免 NOT(AND) 遇 NULL 时漏删）。
+// cn_sensitive 用 IN (1,'1') 同时吃数值与字符串写法，与 JS 侧 Number(...)===1 口径对齐
+// （json_extract 对 "cn_sensitive":"1" 返回 TEXT '1'，= 1 数值比较会漏）。
 const ELIGIBLE_SQL =
   "i.deleted_at IS NULL AND i.is_relevant = 1 " +
   "AND json_extract(i.extra,'$.workflow_completed_at') IS NOT NULL " +
   "AND json_extract(i.extra,'$.dedup_of') IS NULL " +
-  "AND COALESCE(json_extract(i.extra,'$.cn_sensitive'),0) != 1";
+  "AND COALESCE(json_extract(i.extra,'$.cn_sensitive'),0) NOT IN (1,'1')";
 const INELIGIBLE_SQL =
   "i.deleted_at IS NOT NULL " +
   "OR COALESCE(i.is_relevant,0) != 1 " +
   "OR json_extract(i.extra,'$.workflow_completed_at') IS NULL " +
   "OR json_extract(i.extra,'$.dedup_of') IS NOT NULL " +
-  "OR COALESCE(json_extract(i.extra,'$.cn_sensitive'),0) = 1";
+  "OR COALESCE(json_extract(i.extra,'$.cn_sensitive'),0) IN (1,'1')";
 
 /**
  * 每日对账（挂 cleanup 档 03:35 UTC）：
@@ -393,12 +423,11 @@ export async function handleSearchReindex(request: Request, env: Env): Promise<R
 
   const url = new URL(request.url);
   if (url.searchParams.get("reset") === "1") {
-    const nowIso = new Date().toISOString();
     const nowSec = String(Math.floor(Date.now() / 1000));
     await env.DB.batch([
       stateSet(env, "fts_backfill_done", ""),
       stateSet(env, "fts_backfill_rowid", "0"),
-      stateSet(env, "fts_wm_scraped", nowIso),
+      stateSet(env, "fts_wm_scraped_epoch", nowSec),
       stateSet(env, "fts_wm_translated", nowSec),
     ]);
   }
@@ -407,13 +436,17 @@ export async function handleSearchReindex(request: Request, env: Env): Promise<R
   let rounds = 0;
   let lastScanned = 0;
   let totalUpserted = 0;
+  let lastErrored = false;
   const BUDGET_MS = 20000;
   while (Date.now() - t0 < BUDGET_MS) {
     const r = await syncSearchIndex(env);
     rounds++;
     lastScanned = r.scanned;
     totalUpserted += r.upserted;
-    if (r.scanned < BATCH_LIMIT) break; // 追平或无新增
+    lastErrored = r.errored;
+    // errored 轮的 scanned=0 不是追平信号：直接 break 避免 20s 内空转重试，
+    // errored 透传给 admin 观察；正常轮 scanned < 2000 = 追平/无新增。
+    if (r.errored || r.scanned < BATCH_LIMIT) break;
   }
 
   const state = await readState(env);
@@ -421,6 +454,7 @@ export async function handleSearchReindex(request: Request, env: Env): Promise<R
     rounds,
     lastScanned,
     totalUpserted,
+    errored: lastErrored,
     backfillDone: state.fts_backfill_done === "1",
     backfillRowid: Number(state.fts_backfill_rowid || "0") || 0,
     elapsed_ms: Date.now() - t0,

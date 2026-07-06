@@ -1,7 +1,7 @@
 // worker/src/search/sync.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractSearchFields } from "./sync";
+import { extractSearchFields, parseScrapedAt } from "./sync";
 
 const base = {
   id: "github:foo/bar", source_type: "github", title: "foo/bar",
@@ -46,4 +46,18 @@ test("podcast：shownotes_zh 截 1000 字，不含 transcript", () => {
   assert.ok(f.body.length <= 1100);
   assert.ok(!f.body.includes("禁止出现"));
   assert.match(f.title, /中文标题/);
+});
+test("parseScrapedAt：空格分隔格式按 UTC 解析", () => {
+  assert.equal(parseScrapedAt("2026-07-06 12:34:56"), Date.parse("2026-07-06T12:34:56Z") / 1000);
+});
+test("parseScrapedAt：ISO 毫秒 Z 格式", () => {
+  assert.equal(
+    parseScrapedAt("2026-07-06T12:34:56.789Z"),
+    Math.floor(Date.parse("2026-07-06T12:34:56.789Z") / 1000),
+  );
+});
+test("parseScrapedAt：非法串与空值返回 null", () => {
+  assert.equal(parseScrapedAt("not a date"), null);
+  assert.equal(parseScrapedAt(""), null);
+  assert.equal(parseScrapedAt(null), null);
 });
