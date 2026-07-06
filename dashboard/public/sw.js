@@ -55,9 +55,11 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
-  // /daily* 是 worker 伺服的纯静态日报/归档 HTML,不是 SPA 路由 — 透传网络,
-  // 不能被 shellFirst 回成 SPA 壳(那会把日报页覆盖成空白单页应用)。
-  if (url.pathname.startsWith("/daily")) return;
+  // /daily 与 /daily/* 是 worker 伺服的纯静态日报/归档 HTML,不是 SPA 路由 — 透传网络,
+  // 不能被 shellFirst 回成 SPA 壳(那会把日报页覆盖成空白单页应用)。口径与 worker isSeoPath
+  // (pathname === '/daily' || startsWith('/daily/'))及 nginx 正则 ^/(daily(/.*)?...)$ 对齐:
+  // 精确 /daily 或 /daily/ 子路径,不误伤 /dailyxxx 之类 SPA 路由。
+  if (url.pathname === "/daily" || url.pathname.startsWith("/daily/")) return;
   if (req.mode === "navigate") {
     e.respondWith(shellFirst(e));
     return;

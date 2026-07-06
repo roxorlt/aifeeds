@@ -66,6 +66,7 @@ CF 实测 24 小时内 AI bot 抓取 200+ 次（AI Assistant 124 / AI Search 59 
 - 幂等：同日重跑覆盖同一 R2 key；`daily_pages` 行 UPSERT
 - 空数据保护：当日 digest_pool 无 normal 档数据时跳过生成并记日志，不写空页
 - 相邻日互链：生成日期 D 的页面后，若 `daily_pages` 存在 D 的前一个已生成日期，则**重渲染该前日页面**（内容快照不变，仅令其「后一日」导航指向 D），保证历史页链式互链完整；backfill 按日期升序执行天然满足
+- **去重口径**：页面选品沿用 news 源的跨天事件去重（`strictCrossDayEventDedup`，与邮件 Phase 1 同款），**仅在当日自然路径启用**——该去重依赖「已推送账本」（`digest_pool` + 今日 BJT 0 点边界，见 `selection.ts` 的 `fetchPreviousPushedNewsCandidates`），账本锚的是「当下」，对回填历史日期（`anchorToDate`）语义不成立，故锚定路径不传。**不做** `excludeAlreadyPushed`：邮件账本每源只覆盖 3-5 条，对每源取 20 条的页面无意义；hf-paper 放宽到 3 天窗导致的跨页部分重复是已知接受项，后续若确认影响 SEO 再评估为页面自建独立账本
 
 ### 4.2 存储
 

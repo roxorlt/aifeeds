@@ -12,7 +12,7 @@
 
 import type { Env } from '../index';
 import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, type DigestSource } from './config';
-import { selectTopForSource } from './selection';
+import { selectTopForSource, type SelectTopOptions } from './selection';
 import { renderItem, clampSentences, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
@@ -95,9 +95,18 @@ export async function buildDailyPageData(
 ): Promise<DailyPageData | null> {
   const { apiBase } = getBases(env);
   const sections: DailyPageSection[] = [];
-  const selectOpts = opts.anchorToDate ? { asOfDate: date } : {};
 
   for (const source of DAILY_PAGE_SOURCES) {
+    // 每源选品选项:
+    // - anchorToDate(回填历史日期)→ 传 asOfDate 把候选窗锚到该日,选品结果对应历史当日。
+    // - news 源:当日自然路径沿用邮件 Phase 1 的跨天事件去重(strictCrossDayEventDedup),
+    //   剔除近几日已在日报里出现过的同一事件(与邮件 node-run.ts:167-175 同款传参)。
+    //   但该去重依赖「已推送账本」——fetchPreviousPushedNewsCandidates 读 digest_pool 且以
+    //   「今日 BJT 0 点」为边界(锚的是当下),对回填历史日期(anchorToDate)语义不成立,
+    //   会拿今天之前的账本去 dedup 历史某日的候选 → 因此仅当日自然路径启用,锚定路径不传。
+    const selectOpts: SelectTopOptions = {};
+    if (opts.anchorToDate) selectOpts.asOfDate = date;
+    else if (source === 'news') selectOpts.strictCrossDayEventDedup = true;
     const selected = await selectTopForSource(env, source, DAILY_PAGE_PER_SOURCE_LIMIT, selectOpts);
     // 防御性截断:选品函数已带 limit,天然 ≤20;这里再 slice 一次,渲染层不做保护。
     const ids = selected.slice(0, DAILY_PAGE_PER_SOURCE_LIMIT);

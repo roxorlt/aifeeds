@@ -368,4 +368,36 @@ describe('buildDailyPageData', () => {
     expect(html).toContain(`${SITE}/t/1890`);
     expect(stripJsonLd(html)).not.toContain('<script');
   });
+
+  // ── 去重口径:news 源当日自然路径带跨天事件去重,锚定路径不带(账本锚当下,历史日期语义不成立)──
+
+  test('当日自然路径:news 源带 strictCrossDayEventDedup、非 news 源不带任何选项', async () => {
+    setSelection({ news: ['blog:n1'], x: ['x_list:1'] });
+    const rowsById = new Map<string, RenderRow>([
+      ['blog:n1', mkRow('blog:n1', 1)],
+      ['x_list:1', mkRow('x_list:1', 2)],
+    ]);
+    const env = envWithDb(makeDbMock({ rowsById }));
+
+    await buildDailyPageData(env, '2026-07-06'); // 不锚定 = 当日自然路径
+    const calls = vi.mocked(selectTopForSource).mock.calls;
+    const newsOpts = calls.find((c) => c[1] === 'news')?.[3];
+    const xOpts = calls.find((c) => c[1] === 'x')?.[3];
+    // news 与邮件 Phase 1(node-run.ts:167-175)同款传参
+    expect(newsOpts).toEqual({ strictCrossDayEventDedup: true });
+    // 非 news 源不带跨天去重,也不带 asOfDate
+    expect(xOpts).toEqual({});
+  });
+
+  test('锚定路径(anchorToDate):news 源改传 asOfDate,不带 strictCrossDayEventDedup', async () => {
+    setSelection({ news: ['blog:n1'] });
+    const rowsById = new Map<string, RenderRow>([['blog:n1', mkRow('blog:n1', 1)]]);
+    const env = envWithDb(makeDbMock({ rowsById }));
+
+    await buildDailyPageData(env, '2026-07-01', { anchorToDate: true });
+    const newsOpts = vi.mocked(selectTopForSource).mock.calls.find((c) => c[1] === 'news')?.[3];
+    // 账本(digest_pool + 今日 BJT 0 点边界)锚的是当下,对回填历史日期语义不成立 → 只传 asOfDate
+    expect(newsOpts).toEqual({ asOfDate: '2026-07-01' });
+    expect(newsOpts).not.toHaveProperty('strictCrossDayEventDedup');
+  });
 });

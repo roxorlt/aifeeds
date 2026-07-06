@@ -91,29 +91,59 @@ describe('selectTopForSource asOfDate 锚点', () => {
 
   // ── asOfDate 锚点路径 ──
 
-  test('gh 传 asOfDate:窗口锚到该日(+1 day 上界 / windowDays 下界),binds 带日期', async () => {
+  test('gh 传 asOfDate:窗口锚到该日晨自然跑窗口(上界 datetime(?) 无 +1 day / 下界回退 windowDays),binds 带日期', async () => {
     const caps = await capture('gh', { asOfDate: '2026-07-01' });
     const c = caps[caps.length - 1];
-    expect(c.sql).toContain("datetime(scraped_at) < datetime(?, '+1 day')");
-    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '+1 day', '-1 day')");
+    expect(c.sql).toContain("datetime(scraped_at) < datetime(?)");
+    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '-1 day')");
+    expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain("datetime('now'");
     expect(c.binds).toEqual(['github', '2026-07-01', '2026-07-01', 20]);
   });
 
-  test('hf-paper 传 asOfDate:下界用 windowDays=3', async () => {
+  test('hf-paper 传 asOfDate:下界用 windowDays=3、上界无 +1 day', async () => {
     const caps = await capture('hf-paper', { asOfDate: '2026-07-01' });
     const c = caps[caps.length - 1];
-    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '+1 day', '-3 day')");
-    expect(c.sql).toContain("datetime(scraped_at) < datetime(?, '+1 day')");
+    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '-3 day')");
+    expect(c.sql).toContain("datetime(scraped_at) < datetime(?)");
+    expect(c.sql).not.toContain("'+1 day'");
     expect(c.binds).toEqual(['hf_paper', '2026-07-01', '2026-07-01', 20]);
   });
 
-  test('news 传 asOfDate:窗口锚到该日 + 日期 bind', async () => {
+  test('news 传 asOfDate:窗口锚到该日晨自然跑窗口 + 日期 bind', async () => {
     const caps = await capture('news', { asOfDate: '2026-07-01' });
     const c = caps[0];
-    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '+1 day', '-3 day')");
-    expect(c.sql).toContain("datetime(scraped_at) < datetime(?, '+1 day')");
+    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '-3 day')");
+    expect(c.sql).toContain("datetime(scraped_at) < datetime(?)");
+    expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain("datetime('now'");
     expect(c.binds).toEqual(['2026-07-01', '2026-07-01']);
+  });
+
+  // ── 语义级不变式:anchored(D) 必须等于 D 日晨自然跑窗口 ──
+  // 自然跑在 D 日 08:00 BJT(= D 日 00:00 UTC)时默认窗口为 [datetime('now','-N day'), now],
+  // now≈D 日 0 点 UTC。锚定路径必须复刻同一窗口:上界恰为 datetime(?)(= datetime(D)=D 日 0 点 UTC,
+  // 绝不带 '+1 day' —— 否则整窗后移一天,前日补链把昨日页重选成今日内容、backfill 历史页整体错位一天),
+  // 下界回退偏移 '-N day' 与默认路径 datetime('now','-N day') 的 '-N day' 逐字一致。此测试锁死该不变式,
+  // 防止历史页错位一天回归。
+  test('anchored(D) ≡ D 日晨自然跑窗口:上界无 +1 day、下界偏移与默认路径 -N day 逐字一致', async () => {
+    const cases: Array<[DigestSource, number]> = [
+      ['gh', 1],
+      ['hf-paper', 3],
+      ['news', 3],
+    ];
+    for (const [source, windowDays] of cases) {
+      const anchoredCaps = await capture(source, { asOfDate: '2026-07-01' });
+      const defaultCaps = await capture(source);
+      // news 走 selectNewsByScore(主查询 = caps[0]);其余源单条查询 = caps[last]。
+      const anchoredSql = source === 'news' ? anchoredCaps[0].sql : anchoredCaps[anchoredCaps.length - 1].sql;
+      const defaultSql = source === 'news' ? defaultCaps[0].sql : defaultCaps[defaultCaps.length - 1].sql;
+      // 上界恰为 datetime(?),绝不带 '+1 day'
+      expect(anchoredSql).toContain('datetime(scraped_at) < datetime(?)');
+      expect(anchoredSql).not.toContain("'+1 day'");
+      // 下界偏移 '-N day' 锚定路径与默认路径逐字一致(仅锚点由 ? / 'now' 不同)
+      expect(anchoredSql).toContain(`datetime(scraped_at) >= datetime(?, '-${windowDays} day')`);
+      expect(defaultSql).toContain(`datetime(scraped_at) >= datetime('now','-${windowDays} day')`);
+    }
   });
 });
