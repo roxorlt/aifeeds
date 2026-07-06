@@ -3,7 +3,8 @@
  * 策略(只做两件事,其余请求一概不碰):
  * 1. 导航请求(打开/刷新页面):cache-first 回缓存的壳(零网络秒开),同时后台拉新壳
  *    更新缓存 → 下次打开用新版。最多旧一个版本周期。深链(/t/ /g/ /ph/ ...)同样回壳,
- *    SPA 自己按 URL 渲染。
+ *    SPA 自己按 URL 渲染。例外:/daily 前缀是 worker 伺服的纯静态 HTML(每日日报页 +
+ *    归档页),不是 SPA 路由 — 一律透传网络,不能回 SPA 壳(否则日报页被壳覆盖成空白 SPA)。
  * 2. /assets/ 哈希静态资源:cache-first(文件名带内容哈希,内容永不变)。HTTP 缓存之外
  *    多一层兜底 — iOS/微信会激进清 HTTP 缓存,Cache API 更持久。超上限删最旧。
  *
@@ -15,7 +16,7 @@
  *   下次打开即 unregister + 清缓存
  * - 单机:localStorage 设 aifeeds_sw_off = 1
  */
-const VERSION = "v1";
+const VERSION = "v2";
 const SHELL_CACHE = "aifeeds-shell-" + VERSION;
 const ASSET_CACHE = "aifeeds-assets-" + VERSION;
 const ASSET_MAX_ENTRIES = 80;
@@ -54,6 +55,9 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
+  // /daily* 是 worker 伺服的纯静态日报/归档 HTML,不是 SPA 路由 — 透传网络,
+  // 不能被 shellFirst 回成 SPA 壳(那会把日报页覆盖成空白单页应用)。
+  if (url.pathname.startsWith("/daily")) return;
   if (req.mode === "navigate") {
     e.respondWith(shellFirst(e));
     return;

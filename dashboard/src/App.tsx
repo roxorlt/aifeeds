@@ -1150,6 +1150,11 @@ function DashboardHome() {
           >
             GitHub
           </a>
+          <span className="mx-1.5">·</span>
+          {/* AI 日报是 worker 伺服的纯静态归档页,普通整页导航离开 SPA(不走 react-router Link) */}
+          <a href="/daily/" className="hover:text-neutral-600 hover:underline">
+            AI 日报
+          </a>
         </footer>
       </main>
       <TweetDrawerGate />
