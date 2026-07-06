@@ -304,8 +304,10 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - **P4** 内容矩阵：知乎 / CSDN / SegmentFault / 稀土掘金 / HN / Reddit
 - **P5** 监测：GA4 / CF AI Crawl Control / crawl-to-referral 比率
 
-**低优技术债**（随 P0 PR #161 产生）：
-- [ ] **gitleaks / secret-scan allowlist 收编 `worker/src/seo-routes.test.ts` 测试桩误报**：该测试用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 会被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报。给 `.gitleaks.toml` 的 allowlist 加 `worker/src/*.test.ts`（或该文件路径）豁免，避免后续 CI secret-scan 假红
+**低优技术债**（随 P0 PR #161 / 封面修复 PR #162 产生）：
+- [ ] **gitleaks / secret-scan allowlist 收编 `worker/src/seo-routes.test.ts` 测试桩误报**：该测试用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 会被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报。给 `.gitleaks.toml` 的 allowlist 加 `worker/src/*.test.ts`（或该文件路径）豁免，避免后续 CI secret-scan 假红。2026-07-06 复核：main 上 Secret Scan 长期红均为此误报，建议顺手加 `.gitleaksignore`
+- [ ] **封面质量门的不可 probe 格式兜底误留**（PR #162 遗留）：ico/webp/avif 无法读尺寸时走「>8KB 即通过」兜底，导致 48×48 `.ico` 被误留为封面（prod 实测 7 条 items）。可选收紧：`.ico` 扩展名直接拒，或 probe 失败即拒（代价是误杀部分 webp 正常封面）。位置 `worker/src/media-r2.ts` 质量门函数
+- [ ] **`mode=daily-page&backfill=1` 单请求跑不完全量**：worker 时限下 36 页只跑到 ~20 页即截停（2026-07-06 实测），目前靠单日循环兜底。可加游标参数（`&from=YYYY-MM-DD`）或内部分批 `waitUntil`，位置 `worker/src/digest/daily-page-run.ts`
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 
