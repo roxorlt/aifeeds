@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useIsNarrow } from "../lib/breakpoint";
 import { addSearchHistory } from "../lib/searchHistory";
 import { track, EVENTS } from "../lib/telemetry";
+import { DrawerProvider } from "../lib/drawer";
 import { SourceIcon } from "../components/icons";
 import SearchInput from "../components/search/SearchInput";
 import SearchStart from "../components/search/SearchStart";
+import SearchGroups from "../components/search/SearchGroups";
+import SearchSourceList from "../components/search/SearchSourceList";
 import { browseSourceLabel } from "../components/search/sources";
 
 // C 端搜索页（公开，不包 RequireAuth）。
@@ -53,25 +56,21 @@ export default function SearchPage() {
     return <SearchStartView narrow={narrow} submit={submitQuery} onCancel={() => navigate(-1)} />;
   }
 
-  let body: ReactNode;
-  if (!source) {
-    body = (
-      <div data-search-state="grouped">
-        分组结果占位（Task 11）：q = {q}
-      </div>
-    );
-  } else {
-    body = (
-      <div data-search-state="list">
-        单源结果占位（Task 11）：q = {q} / source = {source}
-      </div>
-    );
-  }
-
+  // 结果页需 DrawerProvider：ItemCard 各源卡片内部 useDrawer() 打开抽屉，而 /search
+  // 路由不在 DashboardHome 的 DrawerProvider 内。卡片点击 → drawer.openItem →
+  // navigate 到 /t/:id 等深链（本组件随即卸载，落到 DashboardHome 由其 DrawerProvider
+  // 渲染真正的抽屉，返回键逐级回退免费获得）。q/source 变化经 useSearchParams →
+  // SearchGroups/SearchSourceList 的 useEffect 响应，父级不 key 重建，popstate 不重挂载。
   return (
-    <div className="mx-auto max-w-[720px] px-4 py-6 text-neutral-700">
-      {body}
-    </div>
+    <DrawerProvider>
+      <div className="mx-auto max-w-[720px] px-4 py-6 text-neutral-700">
+        {!source ? (
+          <SearchGroups q={q} submit={submitQuery} />
+        ) : (
+          <SearchSourceList q={q} source={source} />
+        )}
+      </div>
+    </DrawerProvider>
   );
 }
 

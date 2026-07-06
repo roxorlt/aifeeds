@@ -385,8 +385,38 @@ export async function fetchStats(): Promise<Stats> {
 // ─── C 端搜索（匿名可搜，不入 protectedPaths）─────────────────────────────
 // 契约见 types.ts SearchResponse / worker/src/search/handlers.ts（Task 6 定稿）。
 // 无 source → grouped（每源预览）；带 source → list（单源分页流）。mode 字段收窄类型。
-// 错误码由 worker 以 4xx/5xx + {error} 返回；这里只把非 2xx 归一成 throw，
-// 具体 400/429/500 文案由 Task 11 消费方按 res / error 分支处理（此层只保证签名稳定）。
+// 错误码由 worker 以 4xx/5xx + {error} 返回。此层把非 2xx 归一成 SearchError，
+// 携带 status + body 的 error code（如 429 rate_limited），供 Task 11 消费方按
+// 429 → toast / 其它 → 行内重试分支处理（apiFetch 只透传 status，不细分 code）。
+export class SearchError extends Error {
+  status: number;
+  /** worker body 的 error 字段（如 'rate_limited' / 'invalid_source' / 'search_unavailable'）；解析不出为 null */
+  code: string | null;
+  constructor(status: number, code: string | null) {
+    super(`searchItems failed: ${status}`);
+    this.name = 'SearchError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export type SearchErrorKind = 'rate_limited' | 'server' | 'client' | 'network';
+
+// 归类给埋点 / UI 分支用。SearchError（拿到了 HTTP 响应）按 status/code 分；
+// 非 SearchError（apiFetch retry 用尽后抛的 timeout / CORS / 断网 TypeError）→ network。
+export function classifySearchError(err: unknown): SearchErrorKind {
+  if (err instanceof SearchError) {
+    if (err.status === 429 || err.code === 'rate_limited') return 'rate_limited';
+    if (err.status >= 500) return 'server';
+    return 'client';
+  }
+  return 'network';
+}
+
+export function isRateLimited(err: unknown): boolean {
+  return err instanceof SearchError && (err.status === 429 || err.code === 'rate_limited');
+}
+
 export async function searchItems(
   q: string,
   opts: { source?: string; cursor?: string } = {},
@@ -395,7 +425,16 @@ export async function searchItems(
   if (opts.source) p.set('source', opts.source);
   if (opts.cursor) p.set('cursor', opts.cursor);
   const res = await apiFetch(`/api/search?${p}`);
-  if (!res.ok) throw new Error(`searchItems failed: ${res.status}`);
+  if (!res.ok) {
+    let code: string | null = null;
+    try {
+      const body = (await res.json()) as { error?: unknown };
+      if (typeof body.error === 'string') code = body.error;
+    } catch {
+      // body 非 JSON / 解析失败 → code 保持 null，仅凭 status 判别
+    }
+    throw new SearchError(res.status, code);
+  }
   return res.json();
 }
 

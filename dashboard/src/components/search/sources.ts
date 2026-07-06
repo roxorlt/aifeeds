@@ -15,7 +15,18 @@ export const BROWSE_SOURCES: { source: string; label: string }[] = [
   { source: "youtube", label: "YouTube" },
 ];
 
-// 源 → 中文名（scope chip 复用）。未知源回退原值。
+// 结果分组可能出现 BROWSE_SOURCES 之外的合法源（worker LEGAL_SOURCES 含 arxiv /
+// weibo，但不作为「按来源浏览」入口），补一张兜底表让组头/单源页头有中文名。
+const EXTRA_SOURCE_LABELS: Record<string, string> = {
+  arxiv: "arXiv",
+  weibo: "微博",
+};
+
+// 源 → 中文名（scope chip / 结果组头 / 单源页头复用）。未知源回退原值。
 export function browseSourceLabel(source: string): string {
-  return BROWSE_SOURCES.find((s) => s.source === source)?.label ?? source;
+  return (
+    BROWSE_SOURCES.find((s) => s.source === source)?.label ??
+    EXTRA_SOURCE_LABELS[source] ??
+    source
+  );
 }
