@@ -26,7 +26,7 @@ import type {
   FetchStrategy,
 } from '../feeds/types';
 import { getFeedDefByKey } from '../feeds/registry';
-import { extractFullText } from '../feeds/extract';
+import { extractFullText, buildBlogPageMetaPatch } from '../feeds/extract';
 import {
   isAiGate,
   reclassifyOnFulltext,
@@ -296,27 +296,12 @@ async function fetchBodyForBlog(
       .bind(res.body_markdown || '', JSON.stringify(bodyMeta), readingMin, itemId)
       .run();
 
-    // page-scrape：用详情页 og: 元数据补 title / cover / published_at。
-    // stub 只有 slug 占位标题(discoverPageIndex)+ sitemap lastmod；og:title 更准必覆盖，
-    // 封面 sitemap 没有、发布时间 sitemap 可能缺(Databricks) → 仅当当前为空才补。
-    if (fetchStrategy === 'page-scrape' && res.meta) {
-      const m = res.meta;
-      const sets: string[] = [];
-      const binds: unknown[] = [];
-      if (m.title) {
-        sets.push('title = ?');
-        binds.push(m.title.slice(0, 300));
-      }
-      if (m.published_at) {
-        sets.push("published_at = COALESCE(NULLIF(published_at, ''), ?)");
-        binds.push(m.published_at);
-      }
-      if (m.cover) {
-        sets.push(
-          "extra = json_set(coalesce(extra,'{}'), '$.cover_image', COALESCE(json_extract(extra,'$.cover_image'), ?))",
-        );
-        binds.push(m.cover);
-      }
+    // 用详情页 og: 元数据补 cover（全部 blog 源，Fix 1）+ page-scrape 补 title / published_at。
+    // 封面：native 源（如 The Verge）此前把抓到的 og:image 又丢弃，导致回退到「正文首图」
+    //   （常是作者署名头像）——buildBlogPageMetaPatch 把 og:image 采用放开到所有策略（幂等，
+    //   不覆盖已有合格 cover_image；随后 step4 migrateMediaForBlog 过质量门迁 R2）。
+    if (res.meta) {
+      const { sets, binds } = buildBlogPageMetaPatch(fetchStrategy, res.meta);
       if (sets.length > 0) {
         binds.push(itemId);
         try {
