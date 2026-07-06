@@ -1,7 +1,7 @@
 // worker/src/search/ranking.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { finalScore, rankHits, groupHits, encodeOffsetCursor, decodeOffsetCursor } from "./ranking";
+import { finalScore, rankHits, groupHits, encodeOffsetCursor, decodeOffsetCursor, RECALL_LIMIT } from "./ranking";
 
 const NOW = Date.parse("2026-07-06T00:00:00Z");
 const daysAgo = (d: number) => new Date(NOW - d * 86400000).toISOString();
@@ -35,4 +35,18 @@ test("offset cursor 编解码，非法输入回 0", () => {
   assert.equal(decodeOffsetCursor(null), 0);
   assert.equal(decodeOffsetCursor("garbage!!"), 0);
   assert.equal(decodeOffsetCursor(encodeOffsetCursor(-5)), 0);
+});
+test("groupHits 组序按真实组内最高分，不依赖输入预排序", () => {
+  // 乱序输入（非 rankHits 输出顺序）：x_list 组的最高分成员出现在 github 之后
+  const ranked = [
+    { source_type: "github", published_at: daysAgo(1), b: -8, score: 5 },
+    { source_type: "x_list", published_at: daysAgo(0), b: -5, score: 3 },
+    { source_type: "x_list", published_at: daysAgo(0), b: -20, score: 10 },
+  ];
+  const groups = groupHits(ranked);
+  assert.equal(groups[0].source_type, "x_list"); // 真实组内最高分 10 > github 的 5
+  assert.equal(groups[1].source_type, "github");
+});
+test("超大 offset 解码后钳制到 RECALL_LIMIT", () => {
+  assert.equal(decodeOffsetCursor(btoa(`o:${"9".repeat(32)}`)), RECALL_LIMIT);
 });

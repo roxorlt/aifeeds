@@ -34,6 +34,7 @@ export function groupHits<T extends Hit & { score: number }>(
   for (const h of ranked) {
     let g = map.get(h.source_type);
     if (!g) { g = { source_type: h.source_type, total: 0, top: [], best: h.score }; map.set(h.source_type, g); }
+    g.best = Math.max(g.best, h.score); // 组内最高分逐条更新，不依赖输入预排序
     g.total += 1;
     if (g.top.length < GROUP_TOP_N) g.top.push(h);
   }
@@ -48,6 +49,7 @@ export function decodeOffsetCursor(cursor: string | null): number {
   if (!cursor) return 0;
   try {
     const m = /^o:(\d+)$/.exec(atob(cursor));
-    return m ? parseInt(m[1], 10) : 0;
+    return m ? Math.min(parseInt(m[1], 10), RECALL_LIMIT) : 0; // offset 语义上不会超过召回集上限
+
   } catch { return 0; }
 }
