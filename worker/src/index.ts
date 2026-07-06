@@ -85,7 +85,7 @@ import {
   shouldScheduleNextEventFingerprintBackfillBatch,
 } from './feeds/event-fingerprint-backfill';
 import { feedNewsRankSqlExpression } from './feeds/ranking';
-import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill } from './feeds/media-r2';
+import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill, runBlogCoverBodyHeroBackfill } from './feeds/media-r2';
 import { runBlogBodyRedecode } from './feeds/blog-body-redecode';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
@@ -4565,6 +4565,16 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const dry = url.searchParams.get('dry') === '1';
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 50);
     const result = await runBlogCoverOgBackfill(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-cover-bodyhero-backfill') {
+    // Task 2 层 2（2026-07-06）：被 generic-sweep / 采用护栏清簇（cover_generic_cleared_hash 置位）后
+    // cover 落空的 blog item，改从正文 body.assets 选合格 hero 补 cover（og 是被清 logo，Fix C 已挡 og-backfill）。
+    // 天然按源分流：qbitai 正文有真图 → 采用；jiqizhixin 图荒 → 保持 monogram 推游标。
+    // 游标 cover_bodyhero_backfilled_at 单调；?dry=1 零写；?limit 默认 50。循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200);
+    const result = await runBlogCoverBodyHeroBackfill(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'blog-body-redecode') {

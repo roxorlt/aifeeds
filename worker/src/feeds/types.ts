@@ -270,6 +270,10 @@ export interface FeedWorkflowMarkers {
   cover_generic_cleared_at?: string;
   /** generic-sweep 清簇时记录的被清 R2 key（Fix C：og-backfill 判同 hash 回填终止循环）。 */
   cover_generic_cleared_hash?: string;
+  /** 采用护栏（Task 2，2026-07-06）：迁 R2 后判同源 ≥3 条共用同图 → 撤销 og 采用的时间。 */
+  cover_brandlogo_guarded_at?: string;
+  /** 正文 hero 存量回填游标（bodyhero-backfill，单调，处理必置位，无论 adopt/skip）。 */
+  cover_bodyhero_backfilled_at?: string;
 }
 
 /** blog / podcast 共有的 enrich 产物（§8.4.A）。 */
