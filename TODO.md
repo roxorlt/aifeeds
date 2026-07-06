@@ -294,12 +294,18 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 5. 媒体存储策略（图片 / 视频缩略图是否复制到境内 OSS）
 
 **P0-P5 优先级框架**（备案后展开，详见备忘录第 9 轮）：
-- **P0** 修底：SSR / prerender + robots.txt 三类法 + sitemap.xml + schema.org JSON-LD（**阻塞所有其他动作的单点瓶颈**）
-- **P1** 站长平台提交：Google / Bing / Yandex + IndexNow key + 国内五站长
+- **P0** ✅ **已完成（2026-07-06，PR #161）**：`.com` 主站每日静态日报页（`/daily/:date` + `/daily/` 归档，worker SSR 出静态 HTML）+ `robots.txt`（决策 5 全放）+ `sitemap.xml` + `llms.txt` + 日报页 `schema.org` JSON-LD（`ItemList` 数据岛）+ `dashboard/index.html` head 修复（canonical / og / twitter / description）。早 8 点 digest workflow Phase 4 自动生成、香港 nginx 主域转发。设计 [`docs/plans/2026-07-06-daily-static-page-seo-design.md`](docs/plans/2026-07-06-daily-static-page-seo-design.md)；运维见 `docs/operations.md` §1「每日静态日报页 + SEO 伺服」+ 「每日静态日报页 Phase 4」
+- **P1** 站长平台提交：
+  - [x] **IndexNow 自动 ping**（2026-07-06 随 P0 上线）：每日 Phase 4 生成后自动向 IndexNow 提交新页 + 归档 + sitemap，无需手动
+  - [ ] **Google Search Console + Bing Webmaster Tools 域名验证 + sitemap 提交**：**待用户手动一次性完成**，step-by-step 指引见 [`docs/seo-webmaster-guide.md`](docs/seo-webmaster-guide.md)（Google 走 DNS TXT 验证 → 提交 `https://ai-feeds.com/sitemap.xml`；Bing 可从 GSC 导入）
+  - [ ] Yandex + 国内五站长（百度 / 神马 / 搜狗 / 头条 / 360）：低优，视国内 `.cc` 镜像站（本节 P2）进度再定
 - **P2** 中国战略：本任务（`.cc` 镜像站）
 - **P3** GEO 强化：llms.txt + AI 友好结构 + AI referrer 追踪
 - **P4** 内容矩阵：知乎 / CSDN / SegmentFault / 稀土掘金 / HN / Reddit
 - **P5** 监测：GA4 / CF AI Crawl Control / crawl-to-referral 比率
+
+**低优技术债**（随 P0 PR #161 产生）：
+- [ ] **gitleaks / secret-scan allowlist 收编 `worker/src/seo-routes.test.ts` 测试桩误报**：该测试用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 会被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报。给 `.gitleaks.toml` 的 allowlist 加 `worker/src/*.test.ts`（或该文件路径）豁免，避免后续 CI secret-scan 假红
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 

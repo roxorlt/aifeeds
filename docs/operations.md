@@ -404,6 +404,21 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/admin/feedback/:id/reply` | POST | 图文回复用户（multipart：`content` ≤5000 必填 / `image` 选填同 C 端规则）；写 `feedback_replies` + 刷 `feedback.last_reply_at`；`admin_email` 取 CF Access JWT email claim（Basic 兜底为 NULL） | CF Access JWT（Basic Auth fallback） |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
+| `/daily/:date` | GET | **每日静态日报页**（SEO P0，2026-07-06，`worker/src/seo-routes.ts`）：`:date`=`YYYY-MM-DD`，命中 R2 `daily/<date>.html` 返回 200 静态 HTML（`max-age=3600`）；miss → `noindex` 简洁 404 页；日期形状对但日历越界（`2026-13-99`）→ 302 归档 | 无（公开，bot gate 豁免） |
+| `/daily/` `/daily` | GET | 日报归档索引（从 D1 `daily_pages` 表实时渲染，按月分组倒序，`max-age=3600`）；`/daily/<其它非法段>`（如 `/daily/abc`）→ 302 本页 | 无（公开，bot gate 豁免） |
+| `/robots.txt` | GET | 决策 5 全放（含 AI 训练爬虫），仅 `Disallow` `/api/` `/admin` `/settings` `/me/` `/unsubscribe`；末行 `Sitemap:` 指 `SITE_BASE/sitemap.xml`（`max-age=86400`） | 无（公开，bot gate 豁免） |
+| `/sitemap.xml` | GET | 站点地图（`/` + `/daily/` + 全部 `daily_pages` 行，`lastmod` 取各行 `generated_at` 日期部分，`max-age=3600`） | 无（公开，bot gate 豁免） |
+| `/llms.txt` | GET | AI 检索友好站点说明（Markdown：中英各一行定位 + 归档/订阅入口 + 最近 7 天日报链接，`max-age=86400`） | 无（公开，bot gate 豁免） |
+| `/<INDEXNOW_KEY>.txt` | GET | IndexNow 域名归属校验文件：路径 = `/<INDEXNOW_KEY 值>.txt` 时返回 key 纯文本（`max-age=86400`）；未配置 secret / key 不匹配的其它根目录 `.txt` → 404 `no-store` | 无（公开，bot gate 豁免） |
+
+**每日静态日报页 + SEO 伺服**（2026-07-06 上线，PR #161，`worker/src/seo-routes.ts`）：
+- 上述 6 条公开路由在 `index.ts` 里 **bot gate 之后、鉴权路由之前**由 `handleSeoRoute` 统一伺服；`isSeoPath` 与 `isBotGateExempt` 并联豁免 bot UA 闸（决策 5 全放，让搜索引擎 / AI 检索 / 训练爬虫全部可达，放行策略统一收口 robots.txt）
+- **绝对 URL 一律走 `env.SITE_BASE`（`getBases`），禁止取 request host** —— 香港中转会把 `Host` 改写成 `workers.dev`（2026-06-08 事故教训），canonical / 深链 / sitemap `loc` / IndexNow host 全部用 env 域
+- 归档索引 / sitemap / llms 均从 D1 `daily_pages` 表**实时读取，不做 R2 list**（R2 `READMES` bucket 只存 `daily/YYYY-MM-DD.html` 快照）
+- 日报页 HTML **零可执行 `<script>`**：唯一的 `<script>` 是 `application/ld+json` JSON-LD 数据岛（`ItemList` 结构化数据，`<` 转义防 `</script>` 越权）；外部 title 字段一律 `escapeHtml`
+- 静态页生成挂在 digest 早 8 点 workflow 的 **Phase 4**（详见下方「订阅推送子系统」§「每日静态日报页 Phase 4」）；手动 `POST /api/enrich/run?mode=daily-page` 重建 / 回填
+- **主域 `ai-feeds.com` 经香港 nginx 转发**：front server 块加 regex location 把这 6 类路径转发到与 api 块同一 worker upstream（详见下方 §6b 六续 note）；api 域 `api.ai-feeds.com` 直接可达不受影响
+- 设计文档：[`plans/2026-07-06-daily-static-page-seo-design.md`](plans/2026-07-06-daily-static-page-seo-design.md)
 
 **`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
@@ -426,7 +441,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - 游标格式 `score|id`（score 为浮点）；前端 `dashboard/src/components/Feed.tsx` 配合 localStorage 曝光过滤（500 条 LRU + 3 天 TTL）
 
 **`/api/enrich/run` 查询参数**：
-- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）/ `clawhub-fetch` / `clawhub-enrich`（ClawHub phase 1/2 手动触发）/ `blog-fetch` / `podcast-fetch`（官方新闻 phase 1 手动拉取,staging crons=[] 验证 + 回灌用,2026-06-11）/ `backfill-blog-workflow` / `backfill-podcast-workflow`（扫 wc_at IS NULL 的 stuck blog/podcast 行重 trigger,兜底无专属 cron slot,只手动跑）/ `reenrich-feeds-titles`（行业新闻标题严肃化存量回填:`?mode=reenrich-feeds-titles&limit=40&days=4`,Bearer INGEST_TOKEN,对 digest 窗内 blog/podcast 重跑 enrich 刷新 `title_zh`，新标题 prompt 上线后刷存量用,幂等,2026-06-22）
+- `mode=backfill-quotes`（默认）/ `backfill-replies` / `reclassify-threads` / `refresh-metrics` / `refresh-tiered` / `fill-translations` / `detect-longform` / `cleanup`（手动跑：`?mode=cleanup&retention_days=30`）/ `clawhub-fetch` / `clawhub-enrich`（ClawHub phase 1/2 手动触发）/ `blog-fetch` / `podcast-fetch`（官方新闻 phase 1 手动拉取,staging crons=[] 验证 + 回灌用,2026-06-11）/ `backfill-blog-workflow` / `backfill-podcast-workflow`（扫 wc_at IS NULL 的 stuck blog/podcast 行重 trigger,兜底无专属 cron slot,只手动跑）/ `reenrich-feeds-titles`（行业新闻标题严肃化存量回填:`?mode=reenrich-feeds-titles&limit=40&days=4`,Bearer INGEST_TOKEN,对 digest 窗内 blog/podcast 重跑 enrich 刷新 `title_zh`，新标题 prompt 上线后刷存量用,幂等,2026-06-22）/ `daily-page`（SEO 静态日报页生成/回填,Bearer INGEST_TOKEN,2026-07-06：`?date=YYYY-MM-DD` 重建指定日 / `?backfill=1` 遍历 digest_pool 历史全量回填 / `?dry=1` 只算不落盘,详见下方「订阅推送子系统」§「每日静态日报页 Phase 4」）
 - `mode=backfill-replies`：回填 reply_to_id + reply_of 父推快照（用 syndication `parent` 字段，与 quote 平行）。cron 占 :05 :35 槽（2/h），历史回补主要靠本地 loop。
 - `mode=reclassify-threads`：清理错分的 thread_root_id（默认 `dry_run=1` 只统计；`dry_run=0` 真执行）。一次性，等 backfill-replies 跑完再触发。
 - `limit`：默认 20（backfill / refresh / tiered，1-100）；fill-translations 默认 15（1-50）；detect-longform 默认 30（1-80）
@@ -710,6 +725,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - `metrics_snapshots_clawhub`（2026-05-07 ClawHub 接入新增）— ClawHub skill metrics 历史。每次 phase 1 cron append 一行 (item_id, captured_at, stars, downloads, installs_current, installs_all_time)。30 天 retention（沿用 `runCleanup` 03:35 UTC 每天清理）。两个索引：`idx_msch_item_time` / `idx_msch_captured`。migration: `worker/migrations/011-metrics-snapshots-clawhub.sql`，prod + staging 都已 apply（prod 2026-05-08 跟 ClawHub v2 一起上线）
   - `feedback`（2026-07-05 用户反馈功能新增）— C 端用户反馈主表：user_id / content / image_key（R2 `feedback/<sha256>.<ext>`）/ device_info + account_info（JSON 快照，定位问题用）/ ip / ua / day（BJT，配 `idx_feedback_user_day` 做每日 3 条限频）/ created_at(ms) / last_reply_at。migration `024-user-feedback.sql`，设计 `docs/plans/2026-07-05-user-feedback-design.md`
   - `feedback_replies`（2026-07-05 同上）— 后台图文回复：feedback_id / content / image_key / admin_email（CF Access JWT email，Basic 兜底 NULL）/ created_at(ms) / read_at（用户已读时间，C 端未读红点数据源）。索引 `idx_feedback_replies_fb`。同 migration 024
+  - `daily_pages`（2026-07-06 每日静态日报页 SEO P0 新增，migration 025）— 每日静态日报页的 D1 索引表。4 列：`date`(YYYY-MM-DD BJT，PRIMARY KEY) / `title`(页面 title，含当日主题) / `item_count`(INTEGER) / `generated_at`(ISO8601)。`sitemap.xml` + `/daily/` 归档索引 + `llms.txt` 最近日报均从此表读取（**不做 R2 list**；R2 `READMES` bucket 的 `daily/YYYY-MM-DD.html` 只存快照）。写入：`digest/daily-page-run.ts persistPage` 的 `INSERT ... ON CONFLICT(date) DO UPDATE`（同 date 幂等覆盖）。migration `025-daily-pages.sql`，设计 `docs/plans/2026-07-06-daily-static-page-seo-design.md` §4.2
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -1060,6 +1076,8 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 > 1. **TLS 会话票据 + 0-RTT**:`/etc/letsencrypt/options-ssl-nginx.conf` 把 `ssl_session_tickets off → on`(⚠️ certbot 管理的文件,重装 certbot 可能被打回,改完留意);`aifeeds.conf` 的 front(ai-feeds.com)和 fonts server 块加 `ssl_early_data on;`(**api 域故意不开** —— 0-RTT 有重放风险,只给纯 GET 静态域开)。验证:VPS 本机 `openssl s_client -sess_out/-sess_in` 两连,见 `Reused` + `Max Early Data: 16384`。效果:回访握手省 1-2 个跨境 RTT(~300-600ms)。
 > 2. **index.html / sw.js 香港缓存 1 分钟**:front server 加 `location = /` 和 `location = /sw.js`(上游 CF Pages 给 `max-age=0, must-revalidate`,nginx 视为不可缓存,每次导航白付 HK→CF 一跳)→ `proxy_ignore_headers Cache-Control Expires; proxy_cache_valid 200 1m;`。**副作用:发版后 prod 最多旧 60s**(hashed assets 跨版本保留不会 404);急的话清 VPS 缓存立即生效。深链(/t/ /g/ 等)仍走不缓存的 `location /`。
 > 3. **Service Worker 壳缓存**(`dashboard/public/sw.js` + main.tsx 注册):回访导航 0 网络直接回缓存壳(实测 22ms/0 字节,FCP ~0.5s),后台拉新壳下次用(最多旧一个版本)。FEED_CACHE 同时落 localStorage 快照(每频道 15 条),冷启动先显旧内容再 silent refetch。**紧急停用(kill switch)**:全员停 = 往 `dashboard/index.html` 加 `<script>window.__SW_OFF=true</script>` 发版(SW 每次导航都后台拉新壳,一个访问周期内传达到);单机停 = localStorage 设 `aifeeds_sw_off=1`。SW 不碰 api//img/视频/字体/跨域(视频 Range 不能拦,5/9 事故同类风险)。
+
+> ⚠️ **2026-07-06 六续(主域 SEO 路径转发 —— 每日静态日报页上线)**:`ai-feeds.com` front server 块新增一个 **regex location**,把 `/daily`、`/daily/*`、`/robots.txt`、`/sitemap.xml`、`/llms.txt`、`/<INDEXNOW_KEY>.txt`(key 真值在 nginx 配置 + `.secrets/aifeeds-prod.env` 的 `INDEXNOW_KEY`,IndexNow 验证文件本就公开) 转发到与 api 块**同一 worker upstream**(`xlist-api.ltsms86.workers.dev`),**照 api 块注入全套头**(`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `X-Forwarded-Proto/For` + `proxy_ssl_name/server_name`)。正则:`location ~ ^/(daily(/.*)?|robots\.txt|sitemap\.xml|llms\.txt|<key>\.txt)$`,放在 front 块 SPA fallback `location /` **之前**(regex location 优先于 prefix location 匹配;其余路径仍走 CF Pages)。**故意不启用 proxy_cache**(流量低,避开 6-21 新旧 HTML 混喂缓存事故)。worker 侧日报页 canonical/深链一律用 env `SITE_BASE`(`https://ai-feeds.com`),不依赖 request host。备份 `aifeeds.conf.bak-20260706-seo`。**回滚**:删该 location 块 → `nginx -t && systemctl reload nginx`(worker 路由无状态,删 nginx location 即回滚,api 域 `/daily` 等仍可访问不受影响)。设计见 `docs/plans/2026-07-06-daily-static-page-seo-design.md` §4.10。
 
 **切换时的前置改动**（回滚要逆操作）：
 - R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）
@@ -1464,6 +1482,8 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - `DIGEST_EMAIL_HMAC`（32B hex）：回流 token + 编辑令牌（`edit:` 前缀）HMAC 签名
 - `NEWS_CODEX_PUSH`（flag，prod 已设 `=1`）：是否把「行业新闻」板块推进 Codex（`codex-push.ts pushSources`）。**2026-06-22 Codex 下游适配完成后已开启**（`wrangler secret put`，秒生效无需重部署，已记于 `.secrets/aifeeds-prod.env`）—— 自此 prod `daily-codex-push` payload `source_order = ['news','ph','gh','hf-paper']`，8 点节点把行业新闻头条一并推 Codex。回滚：删该 secret 或设非 `1`
 - `RESEND_WEBHOOK_SECRET`（Svix）：Resend webhook 签名校验
+- `INDEXNOW_KEY`（SEO IndexNow 快速收录 key，**prod / staging 各自值**，均存 `.secrets/aifeeds-{prod,staging}.env`）：未配置时 `pingIndexNow` 静默跳过；同时用于 `/<INDEXNOW_KEY>.txt` 域名归属校验文件。每日静态日报页 Phase 4 用，详见下方「每日静态日报页 Phase 4」
+- `DAILY_PAGE_ENABLED`（flag，prod 已设 `=1`；**staging 未设 = 关**）：早 8 点自动生成 SEO 静态日报页的总开关（node-run Phase 4）。手动 `mode=daily-page` 不受此限。同上「每日静态日报页 Phase 4」
 - 复用现有：`RESEND_API_KEY` / `TURNSTILE_*` / `PUSHDEER_*`
 
 ### 前端（dashboard）
@@ -1491,6 +1511,21 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - **总开关** `DAILY_PUSH_ENABLED`：prod = `1`（已开）；staging/dev 不设。**另有硬闸**：`pushDailyToCodex` 只在 `API_BASE` 含 `//api.ai-feeds.com`（prod）才真推，staging/dev 一律返 `non_prod_blocked`（2026-06-07 staging 假数据污染 Codex 事故后加，staging 验证只能 dry）。
 - **手动触发 / 重推**：`POST /api/enrich/run?mode=daily-codex-push[&date=YYYY-MM-DD][&dry=1]`（`Bearer INGEST_TOKEN`）。`dry=1` 只返 payload + `daily_push_enabled` 诊断、不真推；`date` 重推指定日的池（默认今天）。
 - ⚠️ **同一天勿连推多条不同 render_key**：Codex 按日期覆盖图、文案按 render_key，多条会图文错位（2026-06-07 事故）。Codex 侧已加串行 + 最新 render_key 胜出保护，但本侧也应只推一条干净 payload。
+
+### 每日静态日报页 Phase 4（daily static page，**2026-07-06 上线，PR #161**）
+
+> 早 8 点 `digest-node-run-workflow` 算完当天榜单后，Phase 4 **非阻塞**生成 SEO 静态日报页（R2 快照 + `daily_pages` 索引 + IndexNow ping），失败只记日志。伺服路由（`/daily/*` `/robots.txt` `/sitemap.xml` `/llms.txt` `/<key>.txt`）见上方 §1「每日静态日报页 + SEO 伺服」。设计：`docs/plans/2026-07-06-daily-static-page-seo-design.md`。
+
+- **触发**：`DigestNodeRunWorkflow` Phase 4，仅 `slotHourBjt===8` **且** 开关 `DAILY_PAGE_ENABLED==='1'`。独立 workflow step（`generate-daily-page`）+ try/catch，学 Phase 3 容错 —— 任何异常只 `console.error`，**绝不影响邮件投递 / Codex 推送**。
+- **产物**（`digest/daily-page-run.ts generateDailyPage`）：① R2（`READMES` bucket）`daily/YYYY-MM-DD.html` 静态快照；② D1 `daily_pages` 索引行（`ON CONFLICT(date) DO UPDATE` 幂等）；③ **前一已生成日期页重渲染补链**（本日行 UPSERT 后重跑前日页，其「后一日」导航即解析到本日，保证历史页链式互链）；④ IndexNow ping（`daily/<date>` + `/daily/` + `/sitemap.xml`）。
+- **选品**：`digest/daily-page.ts buildDailyPageData`，每源上限 `DAILY_PAGE_PER_SOURCE_LIMIT`（=20，`digest/config.ts`），与邮件同款评分逻辑**现算**（不读 digest_pool 快照）。当日主题（页面 title / description）复用 digest_pool `_subject` meta 行（8 点节点写入）。历史日期回填时 `anchorToDate` 把候选窗口锚到该日，避免选出「当下」的 top N。
+- **手动触发 / 重建 / 回填**（`Bearer INGEST_TOKEN`，**不受 `DAILY_PAGE_ENABLED` 限制**，可在 staging 验证）：
+  - `POST /api/enrich/run?mode=daily-page` —— 重建今日 BJT 页
+  - `POST /api/enrich/run?mode=daily-page&date=YYYY-MM-DD` —— 重建指定历史日
+  - `POST /api/enrich/run?mode=daily-page&backfill=1` —— 遍历 `digest_pool`（normal 档非空）全部历史日期逐日串行回填，收尾一次性批量 IndexNow ping
+  - 追加 `&dry=1` —— 只算不落盘（返回 `itemCount` / 回填日期清单）
+- **⚠️ 已知运维事项**：`backfill=1` 单请求逐日串行跑，**受香港中转 60s proxy read 超时限制**（2026-06-22 教训）—— 历史日期多时单请求可能被中转掐断（worker 后台仍会跑完当前日）。大批量回填改为「按单日循环」在外层分多次请求（每次 `?date=` 指定一日，或先 `?backfill=1&dry=1` 拿到日期清单再逐日实跑），避免一次请求扛全部历史。
+- **开关与 secret**（均存 `.secrets/aifeeds-{prod,staging}.env`）：`DAILY_PAGE_ENABLED` prod = `1`（已开）/ staging 未设 = 关；`INDEXNOW_KEY` prod / staging 各自值，未配置时 IndexNow 静默跳过。
 
 ---
 
