@@ -8,7 +8,7 @@
 
 | # | 决策点 | 结论 |
 |---|--------|------|
-| 1 | 结果页组织 | **按源分组从上到下**：每组露 top 3 + 「更多 →」下钻单源完整流；组序按组内最高相关性分降序；空组不渲染 |
+| 1 | 结果页组织 | **按源分组从上到下**：每组露 top 3 + 「更多 →」下钻单源完整流；组序按 feed 固定列序（SOURCE_COLUMNS），组内 top3 按相关性；空组不渲染 |
 | 2 | 入口形态 | **独立 `/search` 路由页**：移动端全屏、PC 居中面板；起始页放历史/热搜/源入口 |
 | 3 | 检索引擎 | **D1 FTS5 影子表 + 中文 bigram 预分词**（索引侧/查询侧共用同一分词函数） |
 | 4 | 实施节奏 | **与 SEO 每日静态页并行**（不同分支，migration 编号与 index.ts 接线协调见 §12） |
@@ -148,7 +148,7 @@ ORDER BY score LIMIT 200;
 | 中性 | podcast、hf_paper、huodongxing、youtube、arxiv | 30 天 |
 | 长效 | github、product_hunt、clawhub | 180 天 |
 
-- **分组模式**：召回集按 source_type 分组，组内按 final 降序取 top 3；组序按组内 max(final) 降序；每组 total = 该源在召回集中的命中数（上限展示为「200+」当召回触顶）。
+- **分组模式**：召回集按 source_type 分组，组内按 final 降序取 top 3；组序按 feed 固定列序渲染（前端 `SearchGroups` 依 `sources.ts` 的 `SOURCE_FEED_ORDER` 稳定排序，与 App.tsx `SOURCE_COLUMNS` 一致），后端组间顺序仅作组内相关性 tiebreaker；每组 total = 该源在召回集中的命中数（上限展示为「200+」当召回触顶）。
 - **单源 list 模式**：MATCH + `source_type = ?` 过滤，final 排序，cursor 分页，每页 20。**cursor 按实现最终定为「召回集内 offset」**（base64 编码的偏移量，非设计初稿的 `final|rowid`）：单 query 单源在 `RECALL_LIMIT`=200 条召回集内翻页，offset 到顶即 `has_more=false`。简化理由与召回集封顶一致——超 200 条命中的长尾单源极罕见，offset 分页实现更简、无 tiebreaker 抖动。
 - 权重与半衰期写成 `worker/src/search/ranking.ts` 顶部常量表，上线后按监控调参。
 
@@ -288,5 +288,6 @@ q 明文入 events 用于热搜词聚合与坏 case 分析（行业常规；even
 | 4 | 水位 key `fts_watermark` / `terms_last_run`（§3.4） | **`fts_wm_scraped_epoch`（epoch 秒）+ `fts_wm_translated` + `fts_backfill_rowid` + `last_reconcile`**；词表每整点全量重算不存 last_run | `scraped_at` 混合格式字典序会越行，改存 epoch 秒规避（正文 §3.4 已改） |
 | 5 | 分组模式 total = 该源在召回集中的命中数（§5.2） | 同设计，但**明确语义**：total 取自召回集内命中数，与「更多」下钻 list 模式的实际可翻页数**可能不完全一致**（列入 V2 文案优化） | 召回封顶 + 分组/list 两条查询路径的固有差异；不影响正确性，仅文案 |
 | 6 | §3.3 hot_query「末次搜索非空结果」过滤 | **未实现**（依赖尚不存在的 payload） | 列入 TODO V2 backlog（join `search_empty` 事件补齐） |
+| 7 | 分组页组序按组内 max(final) 降序（§5.2 初稿） | **改为按 feed 固定列序（SOURCE_COLUMNS）**：前端 `SearchGroups` 依 `sources.ts` 的 `SOURCE_FEED_ORDER` 对 nonEmpty 组稳定排序 | staging 验收反馈——组序随相关性浮动导致每次搜索版式跳动，用户期望与 feed 各分类顺序一致、位置可预期（正文 §5.2 与决策表第 1 行已改） |
 
 其余（三表 schema、bigram 分词、召回排序衰减、限流缓存、埋点、前端三态与返回链）均与设计一致。

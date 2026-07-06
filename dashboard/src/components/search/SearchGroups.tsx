@@ -12,7 +12,7 @@ import { toast } from "../../lib/toast";
 import { SkeletonCard } from "../Feed";
 import { ItemCard } from "../ItemCard";
 import { SourceIcon } from "../icons";
-import { browseSourceLabel } from "./sources";
+import { browseSourceLabel, sourceFeedOrder } from "./sources";
 import { RECALL_CAP, trackResultClick, chipBase } from "./searchResultShared";
 
 // 分组结果页（?q= 无 source）：请求期 3 张 SkeletonCard；每组 = 组头（SourceIcon +
@@ -98,9 +98,15 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
     );
   }
 
+  // 组序对齐 feed 列序（SOURCE_COLUMNS），组内 top3 仍按后端相关性顺序。
+  // Array.prototype.sort 在 V8 稳定 → 同序组保持后端返回相对次序。
+  const orderedGroups = [...outcome.groups].sort(
+    (a, b) => sourceFeedOrder(a.source_type) - sourceFeedOrder(b.source_type),
+  );
+
   return (
     <div data-search-state="grouped" className="divide-y divide-neutral-200">
-      {outcome.groups.map((group, groupIndex) => (
+      {orderedGroups.map((group, groupIndex) => (
         <section key={group.source_type} className="py-2 first:pt-0">
           <header className="flex items-center justify-between gap-2 px-1 py-2">
             <div className="flex min-w-0 items-center gap-1.5">
