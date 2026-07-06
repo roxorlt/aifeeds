@@ -34,6 +34,9 @@ export type EventTypeName =
   | 'code_verify_attempt' | 'login_success' | 'logout' | 'account_delete'
   // 互动（PR5）
   | 'favorite_toggle' | 'subscribe_toggle'
+  // C 端搜索（worker/src/track.ts 白名单同步）
+  | 'search_open' | 'search_submit' | 'search_suggest_click'
+  | 'search_result_click' | 'search_empty' | 'search_error' | 'search_perf'
   // 视频起播（诊断 mobile/微信 autoplay 受限）
   // video_effective_play: 连续播放 ≥3s 触发一次（IAB/Twitter/Meta 短视频 view 标准），
   // 区分"真看了"和"快滑/误触" — payload 含 threshold_ms 兼容未来阈值调整

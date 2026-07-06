@@ -1,5 +1,13 @@
 import { create } from "zustand";
-import type { Item, ItemsResponse, Source, SourceType, Stats } from "./types";
+import type {
+  Item,
+  ItemsResponse,
+  SearchResponse,
+  SearchSuggestTerm,
+  Source,
+  SourceType,
+  Stats,
+} from "./types";
 import { getDeviceId } from "./lib/device";
 import { track, EVENTS } from "./lib/telemetry";
 import { useAuthStore } from "./lib/authStore";
@@ -87,8 +95,9 @@ async function apiFetch(
   // Caller can override default 5s timeout per-call (e.g. refreshHfDiscussion
   // 跑评论 fetch + img R2 mirror + 翻译 ~8s,默认 5s 会 abort 掉)
   const timeoutMs = init.timeoutMs ?? FETCH_TIMEOUT_MS;
-  // 单独把 timeoutMs 从 init 摘出来,避免 fetch() 收到 unknown 属性
-  const { timeoutMs: _omit, ...fetchInit } = init;
+  // 单独把 timeoutMs / signal 从 init 摘出来:timeoutMs 避免 fetch() 收到 unknown
+  // 属性;signal 单独接管(见 tryOnce),否则会被下方 ctrl.signal 覆盖而失效。
+  const { timeoutMs: _omit, signal: externalSignal, ...fetchInit } = init;
   void _omit;
 
   // Each attempt is wrapped in its own AbortController so a single hung
@@ -98,10 +107,18 @@ async function apiFetch(
   const tryOnce = async (): Promise<Response> => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    // 外部 signal（如 suggest debounce 弃单）联动内部 timeout controller:任一触发都
+    // abort。仅在调用方传 signal 时生效 —— 既有调用方全部无 signal,行为完全不变。
+    const onExternalAbort = () => ctrl.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) ctrl.abort();
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     try {
       return await fetch(url, { ...fetchInit, headers, credentials: 'include', signal: ctrl.signal });
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
     }
   };
 
@@ -145,6 +162,9 @@ async function apiFetch(
       // AbortError(timeout)。这三种都走 retry — for loop 在 attempt < length 时
       // 自然进入下一轮 attempt(无需显式 continue);只在最后一轮才 track + throw
       lastErr = e;
+      // 外部 signal 主动取消（调用方 debounce 弃单等）→ 不 retry、不上报 api_error,
+      // 直接抛出让调用方按需忽略 AbortError。timeout 触发的内部 abort 不受此影响。
+      if (externalSignal?.aborted) throw e;
       if (attempt >= RETRY_BACKOFFS_MS.length) {
         // Every fetch attempt is wrapped in its own AbortController with a
         // FETCH_TIMEOUT_MS timeout, so AbortError almost always means "timeout"
@@ -360,6 +380,38 @@ export async function fetchStats(): Promise<Stats> {
   const res = await apiFetch('/api/stats');
   if (!res.ok) throw new Error(`fetchStats failed: ${res.status}`);
   return res.json();
+}
+
+// ─── C 端搜索（匿名可搜，不入 protectedPaths）─────────────────────────────
+// 契约见 types.ts SearchResponse / worker/src/search/handlers.ts（Task 6 定稿）。
+// 无 source → grouped（每源预览）；带 source → list（单源分页流）。mode 字段收窄类型。
+// 错误码由 worker 以 4xx/5xx + {error} 返回；这里只把非 2xx 归一成 throw，
+// 具体 400/429/500 文案由 Task 11 消费方按 res / error 分支处理（此层只保证签名稳定）。
+export async function searchItems(
+  q: string,
+  opts: { source?: string; cursor?: string } = {},
+): Promise<SearchResponse> {
+  const p = new URLSearchParams({ q });
+  if (opts.source) p.set('source', opts.source);
+  if (opts.cursor) p.set('cursor', opts.cursor);
+  const res = await apiFetch(`/api/search?${p}`);
+  if (!res.ok) throw new Error(`searchItems failed: ${res.status}`);
+  return res.json();
+}
+
+// suggest：空 prefix = 热搜 top10。worker 对超限/出错一律返回 200 空 terms，
+// 前端无需 429/错误分支。signal 用于输入态 debounce 弃单（AbortError 由调用方忽略）。
+export async function searchSuggest(
+  prefix: string,
+  signal?: AbortSignal,
+): Promise<SearchSuggestTerm[]> {
+  const res = await apiFetch(
+    `/api/search/suggest?prefix=${encodeURIComponent(prefix)}`,
+    { signal },
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as { terms?: SearchSuggestTerm[] };
+  return data.terms ?? [];
 }
 
 // ─── 中文配音「愿望清单」假门(painted door)─────────────────────────

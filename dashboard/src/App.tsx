@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Feed, SkeletonCard, prefetchChannels, type FeedHandle } from "./components/Feed";
-import { SourceIcon } from "./components/icons";
+import { SourceIcon, IconSearch } from "./components/icons";
 import { DrawerProvider } from "./lib/drawer";
 
 // Drawer drags in react-markdown + remark-gfm + rehype-raw (~150kb gzipped).
@@ -35,7 +35,7 @@ import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
 import { installErrorHandlers } from "./lib/telemetry/errors";
-import { Routes, Route, Navigate, useParams } from "react-router";
+import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
 import { RequireAuth } from "./components/RequireAuth";
@@ -46,6 +46,8 @@ const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m
 const AccountManage = lazy(() => import("./pages/AccountManage").then((m) => ({ default: m.AccountManage })));
 const Subscription = lazy(() => import("./pages/Subscription").then((m) => ({ default: m.Subscription })));
 const Feedback = lazy(() => import("./pages/Feedback").then((m) => ({ default: m.Feedback })));
+// C 端搜索页(公开,不包 RequireAuth)。三态骨架本任务建,内容 Task 10/11 填。
+const SearchPage = lazy(() => import("./pages/SearchPage"));
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
 
@@ -105,6 +107,26 @@ function TweetDrawerGate() {
     <Suspense fallback={null}>
       <TweetDrawer />
     </Suspense>
+  );
+}
+
+// 顶栏搜索入口:放大镜按钮 → /search。样式对齐 UserMenu 未登录触发器(neutral 灰、
+// hover 浅底、transition-colors)。shrink-0 保证移动端不被 chips rail 挤掉。
+// 自带 useNavigate + track,不依赖 DashboardHome 作用域(同 Gate 组件惯例)。
+function SearchEntryButton() {
+  const navigate = useNavigate();
+  return (
+    <button
+      type="button"
+      aria-label="搜索"
+      onClick={() => {
+        track(EVENTS.SEARCH_OPEN, { from: "appbar" });
+        navigate("/search");
+      }}
+      className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-md text-neutral-700 transition-colors hover:bg-neutral-100 hover:text-neutral-900"
+    >
+      <IconSearch className="h-5 w-5" />
+    </button>
   );
 }
 
@@ -1048,6 +1070,7 @@ function DashboardHome() {
             </nav>
           )}
 
+          <SearchEntryButton />
           <UserMenu />
         </div>
       </header>
@@ -1210,6 +1233,8 @@ function App() {
         <Route path="/o" element={<DashboardHome />} />
         <Route path="/o/:id" element={<DashboardHome />} />
         <Route path="/s/:token" element={<ShareLanding />} />
+        {/* C 端搜索页,公开可搜(不包 RequireAuth)。骨架本任务建,内容 Task 10/11 填。 */}
+        <Route path="/search" element={<SearchPage />} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/settings/account" element={<RequireAuth><AccountManage /></RequireAuth>} />
         <Route path="/feedback" element={isWeChatBrowser() ? <Navigate to="/" replace /> : <RequireAuth><Feedback /></RequireAuth>} />

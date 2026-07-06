@@ -122,6 +122,16 @@ export function IconShare({ className }: IconProps) {
   );
 }
 
+// Search / magnifier icon (lucide "search" 24x24, stroke 2 outline)
+export function IconSearch({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className || "h-[18px] w-[18px]"} aria-hidden="true">
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
 // Trophy icon for GitHub trending rank chip (lucide-style 24x24)
 export function IconLeaderboard({ className }: IconProps) {
   return (
