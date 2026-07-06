@@ -260,7 +260,7 @@ q 明文入 events 用于热搜词聚合与坏 case 分析（行业常规；even
 
 ## 12. 与「SEO 每日静态页」并行的协调条款
 
-- migration 编号：SEO 占 025；搜索实施时取 `migrations/` 现存 max+1（若 SEO 未合并则本分支暂用 026，merge 前重查重编）。
+- migration 编号：SEO 占 `025-daily-pages`；搜索让位取 `026-search-fts`（2026-07-06 rebase onto main 时最终定编，原暂用 025 已重命名为 026）。
 - `worker/src/index.ts`：搜索只加 3-4 行路由 if（逻辑全在 `src/search/`），冲突面最小化；deploy 前执行 CLAUDE.md 的 rebase 检查强制条款（fetch + 对账 origin/main）。
 - cron `scheduled()` 分流表：搜索新增两档（5 分钟增量、每小时词表），与 SEO 的 Phase 4 互不重叠。
 - `wrangler.toml` 无需新增 binding（复用 DB / AUTH_KV）。

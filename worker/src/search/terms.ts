@@ -3,7 +3,7 @@
 //   - entity 词从 items 挖掘（各源提词规则见 collectEntityTerms）。
 //   - hot_query 从 events(search_submit) 近 7 天聚合（Task 6 开始产生事件；现为空正常）。
 // 语义：本轮 upsert 后删除 updated_at < 本轮时间戳 的旧行（全量刷新）。
-// 物化到 search_terms（migration 025），/suggest 直接读。全程 try/catch 不抛出，挂整点 cron。
+// 物化到 search_terms（migration 026），/suggest 直接读。全程 try/catch 不抛出，挂整点 cron。
 // 设计：docs/plans/2026-07-06-c-search-design.md §5。
 import type { Env } from "../index";
 import { tokenizeForSearch } from "./tokenize";

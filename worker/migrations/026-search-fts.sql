@@ -1,4 +1,4 @@
--- 025-search-fts.sql — C 端搜索：FTS5 影子表 + suggestion 词表 + 同步水位
+-- 026-search-fts.sql — C 端搜索：FTS5 影子表 + suggestion 词表 + 同步水位
 -- 影子表列内容是预分词后的空格分隔 token 流（见 src/search/tokenize.ts），
 -- rowid 与 items.rowid 对齐（插入时显式指定）。
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
