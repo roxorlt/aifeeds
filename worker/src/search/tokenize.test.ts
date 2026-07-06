@@ -35,6 +35,12 @@ test("MATCH：末位拉丁≥3 加前缀星", () => {
 test("MATCH：末位中文单字加前缀星", () => {
   assert.equal(buildMatchQuery(["深"]), '"深"*');
 });
+test("MATCH：非末位中文单字也加前缀星（bigram 召回修正）", () => {
+  assert.equal(buildMatchQuery(["深", "学习"]), '"深"* "学习"');
+});
+test("MATCH：多 token 中末位中文单字加前缀星", () => {
+  assert.equal(buildMatchQuery(["大模", "模型", "深"]), '"大模" "模型" "深"*');
+});
 test("MATCH：注入字符被中和（双引号剔除，语法词只是普通 token）", () => {
   assert.equal(buildMatchQuery(['fo"o', "or", "near"]), '"foo" "or" "near"');
   assert.equal(buildMatchQuery(['"""']), null);
