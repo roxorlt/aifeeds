@@ -181,6 +181,19 @@ function probePngDimensions(
   return { width, height };
 }
 
+// ar5iv 风质量门控（图 buffer → 合格与否）。滤 logo/banner/icon/spacer。
+// aspect 0.25–4 + byte density ≥0.05 + maxDim ≥300；webp/avif/svg 无法 probe →
+// 最小字节阈值兜底。migrateAsset（inline 图 / 封面迁移）与 cover-quality-sweep 共用。
+export function passesFeedImageQualityGate(buf: ArrayBuffer): boolean {
+  const dim = probeImageDimensions(buf);
+  if (!dim) return buf.byteLength >= MIN_UNPROBEABLE_INLINE_BYTES;
+  const ar = dim.width / dim.height;
+  if (ar > 4 || ar < 0.25) return false;
+  if (buf.byteLength / (dim.width * dim.height) < 0.05) return false;
+  if (Math.max(dim.width, dim.height) < 300) return false;
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 单资产迁移：下载 → 校验（mime + size，inline 图额外过质量门控）→ 上传 R2。
 // 返回 `/r/<prefix>/<sha256>.<ext>`；失败 / 不达标 / 已迁 → null。
@@ -218,38 +231,11 @@ async function migrateAsset(
     const buf = await r.arrayBuffer();
     if (buf.byteLength > opts.maxBytes) return null;
 
-    // ─── 质量门控（仅 inline 图）───
+    // ─── 质量门控（inline 图 + 封面迁移共用）───
     if (opts.qualityGate && opts.kind === "image") {
-      const dim = probeImageDimensions(buf);
-      if (!dim) {
-        // webp/avif/svg 无法 probe：用最小字节阈值兜底过滤 icon/spacer，不一刀切拒绝。
-        if (buf.byteLength < MIN_UNPROBEABLE_INLINE_BYTES) {
-          console.log(
-            `[feeds-r2] reject ${url}: unprobeable & tiny (${buf.byteLength}B)`,
-          );
-          return null;
-        }
-      } else {
-        const ar = dim.width / dim.height;
-        if (ar > 4 || ar < 0.25) {
-          console.log(
-            `[feeds-r2] reject ${url}: aspect ${ar.toFixed(2)} (${dim.width}x${dim.height})`,
-          );
-          return null;
-        }
-        const density = buf.byteLength / (dim.width * dim.height);
-        if (density < 0.05) {
-          console.log(
-            `[feeds-r2] reject ${url}: density ${density.toFixed(3)} (${dim.width}x${dim.height})`,
-          );
-          return null;
-        }
-        if (Math.max(dim.width, dim.height) < 300) {
-          console.log(
-            `[feeds-r2] reject ${url}: too small ${dim.width}x${dim.height}`,
-          );
-          return null;
-        }
+      if (!passesFeedImageQualityGate(buf)) {
+        console.log(`[feeds-r2] reject ${url}: quality gate (${buf.byteLength}B)`);
+        return null;
       }
     }
 
@@ -360,20 +346,25 @@ export async function migrateMediaForBlog(
   const mapping = new Map<string, string>(); // 原始 URL → /r/key
   let migrated = 0;
 
-  // ── 1. 封面（无条件，不过质量门控）──
+  // ── 1. 封面（过质量门控；不合格/防盗链失败 → cover 落 null，不保留外链）──
   let newCover: string | undefined;
+  let coverRejected = false;
   const cover = (extra.cover_image || "").trim();
   if (cover && !isAlreadyMigrated(cover)) {
     const r2 = await migrateAsset(env, cover, {
       prefix: R2_PREFIX_BLOG,
       kind: "image",
       maxBytes: IMG_MAX_BYTES,
-      qualityGate: false,
+      qualityGate: true,
     });
     if (r2) {
       mapping.set(cover, r2);
       newCover = r2;
       migrated++;
+    } else {
+      // 迁移/门控失败 → 清空 cover_image（渲染层 Fix 1 已不用外链 cover，
+      // 前端/日报走 monogram / 节目图兜底，设计文档 §769）。
+      coverRejected = true;
     }
   }
 
@@ -420,6 +411,10 @@ export async function migrateMediaForBlog(
   if (newCover) {
     patches.push({ path: "$.cover_image", value: newCover });
     patches.push({ path: "$.cover_backfilled_at", value: nowIso });
+  } else if (coverRejected) {
+    // 空串 = 渲染层 falsy 处理（等价无封面）；不保留外链，避免日报/卡片挂图。
+    patches.push({ path: "$.cover_image", value: "" });
+    patches.push({ path: "$.cover_rejected_at", value: nowIso });
   }
   if (extra.body && assets.length) {
     const newBody = { ...extra.body, assets: newAssets };
@@ -467,19 +462,22 @@ export async function migrateCoverForPodcast(
   const nowIso = new Date().toISOString();
   let migrated = 0;
 
-  // ── 单集封面（无条件，不过质量门控；audio_url 完全不碰）──
+  // ── 单集封面（过质量门控；不合格/防盗链失败 → cover 落 null；audio_url 完全不碰）──
   let newCover: string | undefined;
+  let coverRejected = false;
   const cover = (extra.cover_image || "").trim();
   if (cover && !isAlreadyMigrated(cover)) {
     const r2 = await migrateAsset(env, cover, {
       prefix: R2_PREFIX_PODCAST,
       kind: "image",
       maxBytes: IMG_MAX_BYTES,
-      qualityGate: false,
+      qualityGate: true,
     });
     if (r2) {
       newCover = r2;
       migrated++;
+    } else {
+      coverRejected = true;
     }
   }
 
@@ -500,6 +498,9 @@ export async function migrateCoverForPodcast(
   if (newCover) {
     patches.push({ path: "$.cover_image", value: newCover });
     patches.push({ path: "$.cover_backfilled_at", value: nowIso });
+  } else if (coverRejected) {
+    patches.push({ path: "$.cover_image", value: "" });
+    patches.push({ path: "$.cover_rejected_at", value: nowIso });
   }
   if (logoChanged && publisher) {
     patches.push({
@@ -608,4 +609,98 @@ export async function migrateAudioForPodcast(
   ]);
   console.log(`[feeds-r2:audio] ${itemId}: ${(len / 1048576).toFixed(1)}MB → ${key}`);
   return { migrated: true, reason: "ok" };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 一次性清洗:cover-quality-sweep（症状 2 + 外链残留）。
+//   - R2 形态 cover_image 的 blog/podcast item：R2 读回图 buffer 过质量门，
+//     不过 → cover_image 清空（json_remove）。
+//   - 外链态 cover_image 且迁移 marker 已置位（~102 条永不重试）：直接清空。
+//   - 通过 / 处理过的 item 打 `$.cover_swept_at` marker，下轮不再扫（分页前进）。
+// 返回 {scanned, cleared, remaining} 供循环调用；dry=1 只统计不落盘。
+// R2 读走 binding（非 HTTP 子请求），单次 limit 默认 40 稳在子请求限额内。
+// ═════════════════════════════════════════════════════════════════════════════
+
+// cover url（`/r/blog/hash.jpg` 或 api 域绝对形式）→ R2 key（`blog/hash.jpg`）。
+function coverR2Key(u: string): string | null {
+  const i = u.indexOf("/r/");
+  return i >= 0 ? u.slice(i + 3) : null;
+}
+
+function isR2CoverUrl(u: string): boolean {
+  return u.startsWith("/r/") || /^https?:\/\/[^/]+\/r\//i.test(u);
+}
+
+interface SweepRow {
+  id: string;
+  source_type: string;
+  extra: string | null;
+}
+
+// 一批待扫 item 的 SQL 谓词（batch + remaining 共用，保证 remaining 单调递减）。
+const SWEEP_PREDICATE = `
+  source_type IN ('blog','podcast')
+  AND json_extract(extra, '$.cover_swept_at') IS NULL
+  AND COALESCE(json_extract(extra, '$.cover_image'), '') != ''
+  AND (
+    json_extract(extra, '$.cover_image') LIKE '/r/%'
+    OR json_extract(extra, '$.cover_image') LIKE 'http%://%/r/%'
+    OR json_extract(extra, '$.blog_media_r2_at') IS NOT NULL
+    OR json_extract(extra, '$.podcast_media_r2_at') IS NOT NULL
+  )`;
+
+export async function runCoverQualitySweep(
+  env: Env,
+  opts: { limit: number; dry: boolean },
+): Promise<{ scanned: number; cleared: number; remaining: number }> {
+  const nowIso = new Date().toISOString();
+  const batch = await env.DB.prepare(
+    `SELECT id, source_type, extra FROM items WHERE ${SWEEP_PREDICATE} LIMIT ?`,
+  )
+    .bind(opts.limit)
+    .all<SweepRow>();
+
+  let scanned = 0;
+  let cleared = 0;
+  for (const row of batch.results || []) {
+    scanned++;
+    let extra: Record<string, unknown> = {};
+    try {
+      extra = row.extra ? JSON.parse(row.extra) : {};
+    } catch {
+      extra = {};
+    }
+    const cover = String(extra.cover_image || "").trim();
+    let clear = false;
+    if (isR2CoverUrl(cover)) {
+      const key = coverR2Key(cover);
+      let buf: ArrayBuffer | null = null;
+      if (key && env.READMES) {
+        try {
+          const obj = await env.READMES.get(key);
+          buf = obj ? await obj.arrayBuffer() : null;
+        } catch {
+          buf = null;
+        }
+      }
+      // 读不到对象（已失联）或过不了门 → 清空。
+      if (!buf || !passesFeedImageQualityGate(buf)) clear = true;
+    } else {
+      // 外链态（能进本批 ⇒ 迁移 marker 已置位）→ 直接清空，数据面归零。
+      clear = true;
+    }
+
+    if (!opts.dry) {
+      const sql = clear
+        ? `UPDATE items SET extra = json_set(json_remove(COALESCE(extra,'{}'), '$.cover_image'), '$.cover_swept_at', ?) WHERE id = ?`
+        : `UPDATE items SET extra = json_set(COALESCE(extra,'{}'), '$.cover_swept_at', ?) WHERE id = ?`;
+      await env.DB.prepare(sql).bind(nowIso, row.id).run();
+    }
+    if (clear) cleared++;
+  }
+
+  const rem = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM items WHERE ${SWEEP_PREDICATE}`,
+  ).first<{ c: number }>();
+  return { scanned, cleared, remaining: rem?.c ?? 0 };
 }

@@ -149,6 +149,15 @@ describe('handleSeoRoute 归档索引 /daily(/)', () => {
     const resp = await handleSeoRoute(req('/daily/'), makeEnv({}, makeDb([])));
     expect(resp!.status).toBe(200);
   });
+
+  test('归档页 header 含显著「订阅」按钮(subscribe-btn + 绝对 URL)', async () => {
+    const resp = await handleSeoRoute(req('/daily/'), makeEnv({}, makeDb([mkRow('2026-07-06')])));
+    const html = await resp!.text();
+    expect(html).toContain('class="subscribe-btn"');
+    expect(html).toContain(`<a href="${SITE}/subscribe" class="subscribe-btn">订阅日报</a>`);
+    const header = html.slice(html.indexOf('<header>'), html.indexOf('</header>'));
+    expect(header).toContain('subscribe-btn');
+  });
 });
 
 describe('handleSeoRoute /robots.txt', () => {

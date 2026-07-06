@@ -116,7 +116,8 @@ export async function buildDailyPageData(
     ids.forEach((id, i) => {
       const row = rows.get(id);
       if (!row) return;
-      items.push(renderItem(source, row, i + 1, apiBase));
+      // 静态日报页无 JS 兜底 → 开 news 封面质量门(拒外链 cover / 二维码 / 低质 R2 图)。
+      items.push(renderItem(source, row, i + 1, apiBase, { newsCoverQualityGate: true }));
     });
     if (!items.length) continue;
     sections.push({ source, label: SOURCE_LABELS[source] || source, items });
@@ -147,7 +148,10 @@ header{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:8
 .brand{font-size:18px;font-weight:700;color:var(--text)}
 .brand a{color:var(--text)}
 .date{color:var(--sub);font-size:14px;margin-top:4px}
-.nav{margin-top:12px;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
+.nav{margin-top:12px;font-size:14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.subscribe-btn{margin-left:auto;flex:none;white-space:nowrap;background:var(--link);color:#fff;
+  padding:6px 14px;border-radius:6px;font-weight:600}
+.subscribe-btn:hover{background:#0369a1;text-decoration:none;color:#fff}
 section{margin-top:28px}
 h2{font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;
   border-left:3px solid var(--link);padding-left:10px}
@@ -230,6 +234,8 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
   if (data.prevDate) nav.push(`<a href="${dailyBase}/${data.prevDate}">前一日</a>`);
   nav.push(`<a href="${dailyBase}/">全部日报</a>`);
   nav.push(`<a href="${data.nextDate ? `${dailyBase}/${data.nextDate}` : `${dailyBase}/`}">后一日</a>`);
+  // 显著「订阅」按钮:品牌色实心,移动端不换行(white-space:nowrap + flex:none),margin-left:auto 靠右。
+  nav.push(`<a href="${siteBase}/subscribe" class="subscribe-btn">订阅日报</a>`);
 
   const sectionsHtml = data.sections
     .map((sec) => {

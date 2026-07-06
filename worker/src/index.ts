@@ -85,7 +85,7 @@ import {
   shouldScheduleNextEventFingerprintBackfillBatch,
 } from './feeds/event-fingerprint-backfill';
 import { feedNewsRankSqlExpression } from './feeds/ranking';
-import { migrateAudioForPodcast } from './feeds/media-r2';
+import { migrateAudioForPodcast, runCoverQualitySweep } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
 import { idHashOf } from './feeds/extract';
@@ -4534,6 +4534,15 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await generateDailyPage(env, dateParam, { dry });
     return jsonResponse({ ok: true, ...result }, 200, request, env);
+  }
+  if (mode === 'cover-quality-sweep') {
+    // 一次性清洗低质 R2 封面 + 外链残留封面(症状 2)。分页扫描 blog/podcast:
+    // R2 封面过质量门 → 不过清空;外链态(迁移 marker 已置位)直接清空。已处理项打
+    // cover_swept_at marker,循环调用直到 remaining=0。?dry=1 只统计;?limit 默认 40(子请求限额)。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '40'), 1), 100);
+    const result = await runCoverQualitySweep(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
