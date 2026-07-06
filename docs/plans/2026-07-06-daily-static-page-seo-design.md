@@ -26,7 +26,7 @@ CF 实测 24 小时内 AI bot 抓取 200+ 次（AI Assistant 124 / AI Search 59 
 | # | 决策点 | 结论 |
 |---|--------|------|
 | 1 | URL 方案 | 主域路径 `ai-feeds.com/daily/YYYY-MM-DD`（需改 HK nginx 路由 + sw.js 排除） |
-| 2 | 内容范围 | 与 8 点邮件一致：五源 normal 档（news/ph/gh/hf-paper/x，约 23 条/天） |
+| 2 | 内容范围 | 五源（news/ph/gh/hf-paper/x），**每源上限 20 条**（2026-07-06 增补：不沿用邮件的 3-5 条上限；不足 20 有多少放多少），全页最多约 100 条 |
 | 3 | 打包范围 | P0 整包：daily 页 + robots.txt + sitemap.xml + llms.txt + index.html head 修复 + IndexNow 自动 ping |
 | 4 | 历史回填 | 回填 digest_pool 中全部可重建的历史日期 |
 | 5 | AI 爬虫策略 | /daily/* 对搜索引擎 + AI 检索 + AI 训练爬虫全部放行（GEO 收益最大化） |
@@ -42,7 +42,7 @@ CF 实测 24 小时内 AI bot 抓取 200+ 次（AI Assistant 124 / AI Search 59 
   Phase 2  订阅邮件分发（现有）
   Phase 3  Codex 日报推送（现有，非阻塞）
   Phase 4  ★新增：生成日报静态页（非阻塞，学 Phase 3 的容错写法）
-            ├─ 读 digest_pool 五源 normal 档 → renderItem()（复用 render.ts）
+            ├─ 同款评分选品：selectTopForSource() 每源 top 20 → renderItem()（复用 selection.ts + render.ts）
             ├─ daily-page.ts 渲染纯 HTML（内联 CSS，零 JS）
             ├─ PUT R2 daily/YYYY-MM-DD.html
             ├─ UPSERT D1 daily_pages 索引行
@@ -58,8 +58,9 @@ CF 实测 24 小时内 AI bot 抓取 200+ 次（AI Assistant 124 / AI Search 59 
 
 ### 4.1 生成器 `worker/src/digest/daily-page.ts`（新文件）
 
-- 输入：`env` + `date`（BJT 日期字符串）。数据源与 `codex-push.ts` 的 `buildDailyCodexPayload()` 同构：读 `digest_pool` 当日 normal 档快照 → `render.ts` 的 `renderItem()` 得到 `RenderedItem[]`（title/summary/summary_full/url/deep_link/author/cover 均现成）
-- 源范围与展示顺序：`news → ph → gh → hf-paper → x`（沿用 `DIGEST_SOURCE_ORDER` 剔除 clawhub），源标签沿用 `source_labels`（行业新闻/热门产品/开源项目/论文/X 精选）
+- 输入：`env` + `date`（BJT 日期字符串）
+- 选品：**不读 digest_pool 快照**（快照只有邮件的每源 3-5 条）。在 Phase 4 内部调用与 Phase 1 相同的评分选品 `selectTopForSource()`（`selection.ts`），每源取 top N，N = 新常量 `DAILY_PAGE_PER_SOURCE_LIMIT = 20`（`config.ts`），沿用同样的跨天去重逻辑；normal 档是纯评分确定性选品，页面每源前几条与当日邮件天然一致。选出后走 `render.ts` 的 `renderItem()` 得到 `RenderedItem[]`（title/summary/summary_full/url/deep_link/author/cover 均现成）
+- 源范围与展示顺序：`news → ph → gh → hf-paper → x`（沿用 `DIGEST_SOURCE_ORDER` 剔除 clawhub），源标签沿用 `source_labels`（行业新闻/热门产品/开源项目/论文/X 精选）；某源当日不足 20 条则有多少放多少，为空则隐藏该 section
 - 页面标题副题与 meta description 复用 `digest_pool` 的 `_subject` meta 行（当日 LLM 汇总主题）；缺失时回落 `buildDigestSubjectFallback` 同款文案
 - 输出：完整 HTML 字符串（规格见 §5）
 - 幂等：同日重跑覆盖同一 R2 key；`daily_pages` 行 UPSERT
@@ -92,7 +93,7 @@ sitemap 与 `/daily/` 归档索引均从此表读取，不做 R2 list。
 
 - 扩展现有 `POST /api/enrich/run`（admin 鉴权）新增 `mode=daily-page`：
   - `&date=YYYY-MM-DD`：重建指定日期
-  - `&backfill=1`：遍历 `digest_pool` 中全部有 normal 档快照的历史日期，逐日生成（循环内串行，避免 R2/D1 写放大）
+  - `&backfill=1`：遍历 `digest_pool` 中有 normal 档快照的全部历史日期（用它判定「哪些天有日报」），逐日按 §4.1 的选品函数带日期窗口回算 top 20 生成（循环内串行，避免 R2/D1 写放大）。**回算漂移说明**：互动 metrics 已被后续 cron 刷新，历史日期回算的 top 20 与当日真实榜单会有轻微出入，属可接受；每源前 5 条仍可与 digest_pool 快照对照参考
   - `&dry=1`：只返回将生成的日期清单与首页 HTML 摘要，不落盘
 - 上线后执行一次 backfill，预期产出几十个页面
 
@@ -174,7 +175,7 @@ location ~ ^/(daily(/.*)?|robots\.txt|sitemap\.xml|llms\.txt|<indexnow-key>\.txt
   - header：站名（链回 `https://ai-feeds.com/`）+ 日期 + 前一日/后一日导航：前一日取 `daily_pages` 中相邻的已生成日期（缺则隐藏）；后一日在生成时刻尚不存在，先渲染为指向 `/daily/` 归档页，待次日 Phase 4 重渲染本页时替换为真实链接（见 §4.1 相邻日互链）
   - 每源一个 `<section>`：`<h2>` 源标签；每条 item 为 `<article>`：`<h3><a href="深链绝对URL">中文标题</a></h3>` + 中文摘要（summary_full 优先，clamp 同邮件逻辑）+ 来源/作者行 + 原文外链（`target="_blank" rel="noopener"`）+ 封面缩略图（`loading="lazy"`，绝对 URL 走 `API_BASE` 的 `/r/` 反代）
   - footer：订阅入口（`/subscribe`）+「进站看全部」+ 归档页链接
-- 样式：单 `<style>` 内联，系统字体栈，品牌色对齐 `docs/design-handoff.md`（主色/文字/分割线三个 token 即可），移动优先单列，目标整页 ≤ 200KB（图片为外链不计入）
+- 样式：单 `<style>` 内联，系统字体栈，品牌色对齐 `docs/design-handoff.md`（主色/文字/分割线三个 token 即可），移动优先单列，目标整页 ≤ 300KB（每页最多约 100 条；图片为外链不计入）
 - 零 `<script>`
 
 ## 6. 错误处理汇总
@@ -192,7 +193,7 @@ location ~ ^/(daily(/.*)?|robots\.txt|sitemap\.xml|llms\.txt|<indexnow-key>\.txt
 
 ### 7.1 单元测试（vitest，参照 `node-run-options.test.ts` 既有模式）
 
-- `daily-page.ts`：fixture 快照 → 断言 title/canonical/JSON-LD 合法（可解析且 ItemList 条数正确）/五源 section 齐全/深链绝对 URL 正确/零 script 标签/后一日链接指向归档页
+- `daily-page.ts`：fixture 选品结果 → 断言 title/canonical/JSON-LD 合法（可解析且 ItemList 条数正确）/五源 section 齐全/每源条数 ≤ 20 且超限截断/空源 section 隐藏/深链绝对 URL 正确/零 script 标签/后一日链接指向归档页
 - sitemap 生成：条目数 = daily_pages 行数 + 2；XML 合法
 - robots/llms 生成：包含 Sitemap 行 / 最近 7 天链接
 - 路由：非法日期 302；合法日期 R2 miss 404；正常 200 + 正确 Content-Type 与 Cache-Control
