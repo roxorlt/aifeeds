@@ -44,12 +44,14 @@ export async function handleAdminAnalytics(request: Request, env: Env): Promise<
       return jsonRes(await metricFeedDepth(env));
     case 'load-perf':
       return jsonRes(await metricLoadPerf(env));
+    case 'search':
+      return jsonRes(await metricSearch(env));
     default:
       return jsonRes({ error: `unknown metric: ${metric}`, available: [
         'overview', 'dau-trend', 'retention', 'returning', 'event-distribution',
         'funnel', 'session-duration', 'errors', 'error-trend',
         'top-devices', 'channel-dwell', 'drawer-by-source', 'feed-depth',
-        'load-perf', 'dub-wishlist',
+        'load-perf', 'dub-wishlist', 'search',
       ] }, 400);
   }
 }
@@ -733,6 +735,142 @@ async function metricChannelDwell(env: Env) {
   return { channels: rs.results };
 }
 
+// ─── 搜索监控（C 端搜索 feature）────────────────────────────────────
+// 数据来自 events 表 search_* 事件（track.ts 白名单）+ search_sync_state.last_reconcile
+// （search/sync.ts reconcile 写入）。窗口一律 7 天；PV/UV/CTR 复用 NOT_OWNER + IS_REAL_USER
+// 剔除 owner 与合成流量（bot / 测速），跟其他"人"指标口径一致；错误 / 性能只剔 owner。
+
+// 使用总览:近 7 天 PV(search_submit)/UV(去重 device)/无结果(search_empty)/点击(search_result_click)。
+// 人均次数 / 无结果率 / CTR 交前端算(除零防护),与 loadDauTrend / loadReturning 一致。
+async function metricSearchOverview(env: Env) {
+  const row = await env.DB.prepare(`
+    SELECT
+      COUNT(CASE WHEN event_type='search_submit' THEN 1 END) AS pv,
+      COUNT(DISTINCT CASE WHEN event_type='search_submit' THEN device_id END) AS uv,
+      COUNT(CASE WHEN event_type='search_empty' THEN 1 END) AS empties,
+      COUNT(CASE WHEN event_type='search_result_click' THEN 1 END) AS clicks
+    FROM events
+    WHERE event_type IN ('search_submit','search_empty','search_result_click')
+      AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
+  `).first<{ pv: number; uv: number; empties: number; clicks: number }>();
+  return row ?? { pv: 0, uv: 0, empties: 0, clicks: 0 };
+}
+
+// 热门搜索词:近 7 天 top 20 query(按提交次数)。submits(search_submit)+ 各自无结果次数
+// (search_empty)。q 是用户输入,前端渲染必须 esc() 转义(XSS)。
+async function metricSearchTopQueries(env: Env) {
+  const rs = await env.DB.prepare(`
+    SELECT
+      json_extract(event_payload,'$.q') AS q,
+      COUNT(CASE WHEN event_type='search_submit' THEN 1 END) AS submits,
+      COUNT(CASE WHEN event_type='search_empty' THEN 1 END) AS empties
+    FROM events
+    WHERE event_type IN ('search_submit','search_empty')
+      AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
+      AND ${IS_REAL_USER_SQL}
+      AND json_extract(event_payload,'$.q') IS NOT NULL
+      AND TRIM(json_extract(event_payload,'$.q')) <> ''
+    GROUP BY q
+    ORDER BY submits DESC, empties DESC
+    LIMIT 20
+  `).all();
+  return { queries: rs.results };
+}
+
+// 单字段分位:复用 pctl() 的 ROW_NUMBER 分位技法,但分位点换成 50/90/99(pctl 固定 50/75/95)。
+// path 为 hardcoded 字段名(server_ms/client_ms),非用户输入,直接拼 json_extract 安全(同 pctl)。
+async function searchPctl(env: Env, path: string) {
+  const row = await env.DB.prepare(`
+    WITH vals AS (
+      SELECT CAST(json_extract(event_payload,'$.${path}') AS REAL) AS v
+      FROM events
+      WHERE event_type='search_perf' AND occurred_at > (strftime('%s','now')-7*86400)*1000
+        AND ${NOT_OWNER_SQL} AND json_extract(event_payload,'$.${path}') IS NOT NULL
+    ),
+    ranked AS (SELECT v, COUNT(*) OVER() AS n, ROW_NUMBER() OVER(ORDER BY v) AS rn FROM vals)
+    SELECT MAX(CASE WHEN rn=CAST(0.50*n AS INT)+1 THEN v END) AS p50,
+           MAX(CASE WHEN rn=CAST(0.90*n AS INT)+1 THEN v END) AS p90,
+           MAX(CASE WHEN rn=CAST(0.99*n AS INT)+1 THEN v END) AS p99,
+           MAX(n) AS samples FROM ranked
+  `).first<{ p50: number; p90: number; p99: number; samples: number }>();
+  return row ?? { p50: 0, p90: 0, p99: 0, samples: 0 };
+}
+
+// 搜索性能:server_ms(worker 端 query_time_ms)与 client_ms(前端总耗时,含网络)各 p50/p90/p99。
+async function metricSearchPerf(env: Env) {
+  return {
+    server: await searchPctl(env, 'server_ms'),
+    client: await searchPctl(env, 'client_ms'),
+  };
+}
+
+// 搜索异常:近 7 天 按日 × kind(rate_limited/server/client/network)计数。429(限流)= kind
+// ='rate_limited';单列 rate_limited_total 便于 KPI 直读。错误只剔 owner,口径同 metricErrors。
+async function metricSearchErrors(env: Env) {
+  const rows = await env.DB.prepare(`
+    SELECT
+      date(occurred_at/1000,'unixepoch','+8 hours') AS day,
+      COALESCE(json_extract(event_payload,'$.kind'),'unknown') AS kind,
+      COUNT(*) AS errors
+    FROM events
+    WHERE event_type='search_error'
+      AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
+    GROUP BY day, kind
+    ORDER BY day, kind
+  `).all();
+  const rl = await env.DB.prepare(`
+    SELECT COUNT(*) AS rate_limited_total
+    FROM events
+    WHERE event_type='search_error'
+      AND json_extract(event_payload,'$.kind')='rate_limited'
+      AND occurred_at > (strftime('%s','now')-7*86400)*1000
+      AND ${NOT_OWNER_SQL}
+  `).first<{ rate_limited_total: number }>();
+  return { rows: rows.results, rate_limited_total: rl?.rate_limited_total ?? 0 };
+}
+
+// 索引滞后:读 search_sync_state.last_reconcile(sync.ts reconcile 写入的 JSON)。
+// 字段:itemsEligible(items 合规行) / ftsRows(items_fts 行数) / drift(差值) / purged / at(ISO 时间)。
+async function metricSearchIndexLag(env: Env) {
+  const row = await env.DB.prepare(
+    `SELECT v FROM search_sync_state WHERE k = 'last_reconcile'`,
+  ).first<{ v: string }>();
+  if (!row?.v) return { present: false as const };
+  try {
+    const p = JSON.parse(row.v) as {
+      itemsEligible?: number; ftsRows?: number; drift?: number; purged?: number; at?: string;
+    };
+    const itemsEligible = p.itemsEligible ?? 0;
+    const ftsRows = p.ftsRows ?? 0;
+    return {
+      present: true as const,
+      itemsEligible,
+      ftsRows,
+      drift: p.drift ?? (itemsEligible - ftsRows),
+      purged: p.purged ?? 0,
+      at: p.at ?? null,
+    };
+  } catch {
+    return { present: false as const };
+  }
+}
+
+// 组装:一个 ?metric=search 端点,Promise.all 并发跑 5 个子指标,前端一次 fetch 渲染整块。
+async function metricSearch(env: Env) {
+  const [overview, topQueries, perf, errors, indexLag] = await Promise.all([
+    metricSearchOverview(env),
+    metricSearchTopQueries(env),
+    metricSearchPerf(env),
+    metricSearchErrors(env),
+    metricSearchIndexLag(env),
+  ]);
+  return { overview, topQueries, perf, errors, indexLag };
+}
+
 // ─── /admin/dashboard → 仪表盘 HTML ──────────────────────────────
 export async function serveAdminDashboardHtml(request: Request, env: Env): Promise<Response> {
   const guard = await requireAuth(request, env);
@@ -947,6 +1085,55 @@ ${adminNavHtml('dashboard')}
       <th>device_id</th><th class="num">events</th><th class="num">活跃天</th><th class="num">事件类型</th>
       <th>first seen</th><th>last seen</th><th>28 天分布</th><th>UA</th>
     </tr></thead><tbody><tr><td colspan="8" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
+  <!-- ─── 搜索监控（C 端搜索 feature）─── -->
+  <div class="card wide" data-testid="card-search-overview">
+    <h2>🔍 搜索 · 使用总览</h2>
+    <p class="hint">近 7 天。PV=搜索提交次数 / UV=去重 device / 人均=PV÷UV / 无结果率=无结果÷PV / CTR=结果点击÷PV。已剔 owner + 测速/bot 合成流量</p>
+    <div class="kpi-row" style="margin:8px 0 0">
+      <div class="kpi"><div class="label">搜索 PV</div><div class="value" id="se-pv">—</div><div class="hint">search_submit</div></div>
+      <div class="kpi"><div class="label">搜索 UV</div><div class="value" id="se-uv">—</div><div class="hint">去重 device</div></div>
+      <div class="kpi"><div class="label">人均次数</div><div class="value" id="se-per">—</div><div class="hint">PV ÷ UV</div></div>
+      <div class="kpi"><div class="label">无结果率</div><div class="value" id="se-empty">—</div><div class="hint">search_empty ÷ PV</div></div>
+      <div class="kpi"><div class="label">CTR</div><div class="value" id="se-ctr">—</div><div class="hint">result_click ÷ PV</div></div>
+    </div>
+  </div>
+
+  <div class="card" data-testid="card-search-top-queries">
+    <h2>🔥 热门搜索词</h2>
+    <p class="hint">近 7 天 top 20 query（按提交次数）。「无结果」列 = 该词命中 search_empty 的次数，高说明供给缺口</p>
+    <div style="overflow-x:auto"><table id="tbl-search-queries"><thead><tr>
+      <th class="num">#</th><th>搜索词</th><th class="num">提交</th><th class="num">无结果</th>
+    </tr></thead><tbody><tr><td colspan="4" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
+  <div class="card" data-testid="card-search-perf">
+    <h2>⚡ 搜索性能</h2>
+    <p class="hint">近 7 天 search_perf 分位（ms）。server=worker 查询耗时 / client=前端总耗时（含网络）。p50/p90/p99</p>
+    <div style="overflow-x:auto"><table id="tbl-search-perf"><thead><tr>
+      <th>指标</th><th class="num">p50</th><th class="num">p90</th><th class="num">p99</th><th class="num">样本</th>
+    </tr></thead><tbody><tr><td colspan="5" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
+  <div class="card" data-testid="card-search-errors">
+    <h2>🚨 搜索异常</h2>
+    <p class="hint">近 7 天 search_error 按日 × kind。rate_limited=429 限流 / server=5xx / client=4xx / network=断网超时</p>
+    <div style="overflow-x:auto"><table id="tbl-search-errors"><thead><tr>
+      <th>日期</th><th class="num">限流429</th><th class="num">服务端</th><th class="num">客户端</th><th class="num">网络</th><th class="num">合计</th>
+    </tr></thead><tbody><tr><td colspan="6" class="loading">loading…</td></tr></tbody></table></div>
+  </div>
+
+  <div class="card" data-testid="card-search-index-lag">
+    <h2>🗂 搜索索引滞后</h2>
+    <p class="hint">最近一次对账（search/sync.ts reconcile）。差值 = 合规 items − FTS 行数，|差值|&gt;500 会 PushDeer 告警</p>
+    <div class="kpi-row" style="margin:8px 0 0">
+      <div class="kpi"><div class="label">合规 items</div><div class="value" id="se-elig">—</div><div class="hint">满足索引五条件</div></div>
+      <div class="kpi"><div class="label">FTS 行数</div><div class="value" id="se-fts">—</div><div class="hint">items_fts</div></div>
+      <div class="kpi"><div class="label">差值 drift</div><div class="value" id="se-drift">—</div><div class="hint">合规 − FTS</div></div>
+      <div class="kpi"><div class="label">本次清理</div><div class="value" id="se-purged">—</div><div class="hint">purged 行</div></div>
+    </div>
+    <p class="hint" id="se-reconcile-at" style="margin-top:12px">对账时间：—</p>
   </div>
 
 </div>
@@ -1554,6 +1741,87 @@ async function loadLoadPerf() {
   }
 }
 
+// 搜索监控:一次 fetch ?metric=search 拿 { overview, topQueries, perf, errors, indexLag }
+// 全量渲染 5 张卡。搜索词 q 是用户输入 → 一律 esc() 转义防 XSS。
+async function loadSearch() {
+  try {
+    const d = await getJson('/api/admin/analytics?metric=search');
+    // 使用总览
+    const o = d.overview || {};
+    const pv = o.pv || 0, uv = o.uv || 0, empties = o.empties || 0, clicks = o.clicks || 0;
+    document.getElementById('se-pv').textContent = fmt(pv);
+    document.getElementById('se-uv').textContent = fmt(uv);
+    document.getElementById('se-per').textContent = uv > 0 ? (pv / uv).toFixed(1) : '—';
+    document.getElementById('se-empty').textContent = pv > 0 ? (100 * empties / pv).toFixed(1) + '%' : '—';
+    document.getElementById('se-ctr').textContent = pv > 0 ? (100 * clicks / pv).toFixed(1) + '%' : '—';
+    // 热门搜索词（q 转义）
+    const qtb = document.querySelector('#tbl-search-queries tbody');
+    const queries = (d.topQueries && d.topQueries.queries) || [];
+    if (!queries.length) {
+      qtb.innerHTML = '<tr><td colspan="4" class="muted">近 7 天无搜索</td></tr>';
+    } else {
+      qtb.innerHTML = queries.map(function(r, i) {
+        return '<tr><td class="num">' + (i + 1) + '</td><td>' + esc(r.q) +
+          '</td><td class="num">' + fmt(r.submits) +
+          '</td><td class="num' + (r.empties > 0 ? '' : ' muted') + '">' + fmt(r.empties) + '</td></tr>';
+      }).join('');
+    }
+    // 搜索性能
+    const ptb = document.querySelector('#tbl-search-perf tbody');
+    const perf = d.perf || {};
+    const prow = function(label, m) {
+      m = m || {};
+      const cell = function(v) { return m.samples ? fmt(Math.round(v || 0)) + 'ms' : '—'; };
+      return '<tr><td>' + label + '</td>'
+        + '<td class="num">' + cell(m.p50) + '</td>'
+        + '<td class="num">' + cell(m.p90) + '</td>'
+        + '<td class="num">' + cell(m.p99) + '</td>'
+        + '<td class="num">' + fmt(m.samples || 0) + '</td></tr>';
+    };
+    ptb.innerHTML = prow('server（worker 查询）', perf.server) + prow('client（前端总耗时）', perf.client);
+    // 搜索异常（按日 pivot 成 kind 列）
+    const etb = document.querySelector('#tbl-search-errors tbody');
+    const erows = (d.errors && d.errors.rows) || [];
+    if (!erows.length) {
+      etb.innerHTML = '<tr><td colspan="6" class="muted">近 7 天无搜索异常</td></tr>';
+    } else {
+      const byDay = {};
+      erows.forEach(function(r) {
+        if (!byDay[r.day]) byDay[r.day] = { rate_limited: 0, server: 0, client: 0, network: 0, total: 0 };
+        if (byDay[r.day][r.kind] != null) byDay[r.day][r.kind] += r.errors;
+        byDay[r.day].total += r.errors;
+      });
+      const days = Object.keys(byDay).sort().reverse();
+      etb.innerHTML = days.map(function(day) {
+        const c = byDay[day];
+        const cell = function(v) { return '<td class="num' + (v ? '' : ' muted') + '">' + fmt(v) + '</td>'; };
+        return '<tr><td>' + esc(day) + '</td>'
+          + cell(c.rate_limited) + cell(c.server) + cell(c.client) + cell(c.network)
+          + '<td class="num">' + fmt(c.total) + '</td></tr>';
+      }).join('');
+    }
+    // 索引滞后
+    const lag = d.indexLag || {};
+    if (lag.present) {
+      document.getElementById('se-elig').textContent = fmt(lag.itemsEligible);
+      document.getElementById('se-fts').textContent = fmt(lag.ftsRows);
+      document.getElementById('se-drift').textContent = fmt(lag.drift);
+      document.getElementById('se-purged').textContent = fmt(lag.purged);
+      document.getElementById('se-reconcile-at').textContent =
+        '对账时间：' + (lag.at ? new Date(lag.at).toLocaleString('zh-CN', { hour12: false }) : '—');
+    } else {
+      ['se-elig','se-fts','se-drift','se-purged'].forEach(function(id){ document.getElementById(id).textContent = '—'; });
+      document.getElementById('se-reconcile-at').textContent = '对账时间：还没跑过 reconcile';
+    }
+  } catch (e) {
+    console.error('search', e);
+    [['tbl-search-queries',4],['tbl-search-perf',5],['tbl-search-errors',6]].forEach(function(p){
+      const tb = document.querySelector('#' + p[0] + ' tbody');
+      if (tb) tb.innerHTML = '<tr><td colspan="' + p[1] + '" class="err">' + esc(e.message || e) + '</td></tr>';
+    });
+  }
+}
+
 // Resize charts on window resize so cards don't overflow on mobile/tablet.
 window.addEventListener('resize', () => {
   ['ch-dau','ch-session','ch-events','ch-error-trend','ch-drawer-source','ch-feed-depth','ch-load-perf'].forEach(id => {
@@ -1581,6 +1849,7 @@ Promise.all([
   loadErrorTrend(),
   loadErrors(),
   loadDevices(),
+  loadSearch(),
 ]);
 </script>
 </body>
