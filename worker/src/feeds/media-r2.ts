@@ -971,14 +971,16 @@ export async function runBlogCoverOgBackfill(
       }
     }
 
-    // Fix C（2026-07-06）：sweep↔backfill 循环终止。若此 item 曾被 generic-sweep 清簇
-    // （`cover_generic_cleared_at` 置位），且本次拟写入的 R2 key 与被清前的 hash 相同
-    // （即 og:image 本身就是那张站点通用图 → 回填 → 下轮 sweep 再清 → 无限循环），
+    // Fix C（2026-07-06）：sweep/live 护栏 ↔ backfill 循环终止。若此 item 曾被判为
+    // 站点通用图/logo 清掉（`cover_generic_cleared_hash` 置位），且本次拟写入的 R2 key
+    // 与被清前的 hash 相同（即 og:image 本身就是那张图 → 回填 → 下轮再清 → 无限循环），
     // 则跳过写入、仅推进游标，保持 monogram 兜底、终止循环。不同 hash（真 hero）正常写入。
+    // 终审 I1（2026-07-06）：判据只认 clearedHash，去掉 `cover_generic_cleared_at` 门 ——
+    // generic-sweep 仍同时写 hash+at（无回归），但 live 采用护栏只写 hash 不写 at，
+    // 留着 at 门会漏判 live 侧路把 logo 灌回。clearedHash 本身即「曾被判 logo 清掉」的充分标记。
     const clearedHash = String(extra.cover_generic_cleared_hash || '');
     const r2Key = r2 ? coverR2Key(r2) || r2 : '';
-    const isGenericLoop =
-      !!r2 && !!extra.cover_generic_cleared_at && !!clearedHash && r2Key === clearedHash;
+    const isGenericLoop = !!r2 && !!clearedHash && r2Key === clearedHash;
 
     if (r2 && !isGenericLoop) {
       await env.DB.prepare(
