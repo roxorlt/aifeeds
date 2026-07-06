@@ -143,8 +143,8 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
   );
 }
 
-// 行内错误块：429 已弹 toast，这里给「请求太频繁」+ 重试；其它错误给「搜索暂时不
-// 可用」+ 重试。neutral 沉静，重试按钮 rounded-md border。
+// 行内错误块：429 已弹 toast，这里给「搜索太频繁」+ 重试；其它错误给「搜索暂时不
+// 可用」+ 重试。neutral 沉静，重试按钮 rounded-md border。文案与 toast 保持一致。
 export function SearchErrorBlock({
   kind,
   onRetry,
@@ -156,7 +156,7 @@ export function SearchErrorBlock({
   return (
     <div className="flex flex-col items-center gap-3 py-16 text-center">
       <p className="text-sm text-neutral-600">
-        {rateLimited ? "请求太频繁，请稍后再试" : "搜索暂时不可用"}
+        {rateLimited ? "搜索太频繁，请稍后再试" : "搜索暂时不可用"}
       </p>
       <button
         type="button"

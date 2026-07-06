@@ -261,9 +261,13 @@ export async function handleSearchSuggest(
     // ③ 业务。
     let rows: { term: string; term_type: string }[];
     if (prefix === "") {
-      // 空 prefix：热搜优先（hot_query 置顶），再按 weight 降序。
+      // 空 prefix「大家在搜」：hot_query 永远置顶，entity 补位时排除作者类词
+      // （term_type='entity' AND source_type IN ('x_list','podcast')）—— 作者词只产自
+      // 这两个源，热门作者按出现次数计权会霸榜，压掉 GH 仓库名 / PH 产品名等检索引导词。
+      // 前缀联想分支不做此排除（输入作者名前缀联想出作者是合理的）。
       const res = await env.DB.prepare(
         "SELECT term, term_type FROM search_terms " +
+          "WHERE NOT (term_type = 'entity' AND source_type IN ('x_list','podcast')) " +
           "ORDER BY CASE term_type WHEN 'hot_query' THEN 0 ELSE 1 END, weight DESC LIMIT 10",
       ).all<{ term: string; term_type: string }>();
       rows = res.results ?? [];
