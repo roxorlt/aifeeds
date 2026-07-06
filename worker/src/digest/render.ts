@@ -140,8 +140,94 @@ function resolveReadmeImages(readme: string, owner: string, repo: string, branch
   return out;
 }
 
+// renderItem 可选项。默认全 false,保证 daily-api / codex-push 路径逐字节不变;
+// 仅 SEO 静态日报页(daily-page.ts)开启 newsCoverQualityGate。
+export interface RenderOptions {
+  // news 源封面质量门:拒外链 cover_image、回退只认 R2 正文图、黑名单 + 尺寸过滤。
+  // 静态日报页无 JS 兜底(不能像前端卡片那样 onError/onLoad reject),故在渲染层挡。
+  newsCoverQualityGate?: boolean;
+}
+
+// 站内 R2 反代 URL 判定:相对 `/r/` 前缀,或 api 域绝对形式(`<apiBase>/r/...`)。
+// 第三方域名里的 `/r/` 不算(必须是本站 apiBase),避免误放外链。
+function isInternalR2(u: string | null | undefined, apiBase: string): boolean {
+  if (!u) return false;
+  if (u.startsWith('/r/')) return true;
+  return !!apiBase && u.startsWith(`${apiBase}/r/`);
+}
+
+// news 封面垃圾 URL 黑名单(不区分大小写):二维码 / logo / 头像 / 图标 / 徽章 / 页脚 banner。
+const NEWS_COVER_BLACKLIST = /qrcode|qr_code|qr-code|erweima|二维码|logo|avatar|icon|badge|banner_footer|footer/i;
+
+interface CoverCandidate { r2: string; orig: string; width?: number; height?: number }
+
+// news 正文图封面候选:只收「有 R2 形态可用」的 asset(用 r2_url,绝不用原始外链 url)+
+// 已迁移为 /r/ 的 body_markdown inline 图。外链态一律不入选(症状 1 挂图根源)。
+function bodyCoverCandidates(ex: Record<string, unknown>, apiBase: string): CoverCandidate[] {
+  const out: CoverCandidate[] = [];
+  const seen = new Set<string>();
+  const push = (r2: string, orig: string, width?: number, height?: number) => {
+    if (!r2 || seen.has(r2)) return;
+    seen.add(r2);
+    out.push({ r2, orig: orig || r2, width, height });
+  };
+  const body = ex.body;
+  if (body && typeof body === 'object') {
+    const assets = (body as { assets?: unknown }).assets;
+    if (Array.isArray(assets)) {
+      for (const asset of assets) {
+        if (!asset || typeof asset !== 'object') continue;
+        const a = asset as { url?: unknown; r2_url?: unknown; kind?: unknown; width?: unknown; height?: unknown };
+        if (a.kind && a.kind !== 'image') continue; // 跳视频/非图
+        const orig = typeof a.url === 'string' ? a.url : '';
+        const r2raw = typeof a.r2_url === 'string' ? a.r2_url : '';
+        const r2 = isInternalR2(r2raw, apiBase) ? r2raw : isInternalR2(orig, apiBase) ? orig : '';
+        if (!r2) continue; // 纯外链 asset → 不当封面
+        const width = typeof a.width === 'number' ? a.width : undefined;
+        const height = typeof a.height === 'number' ? a.height : undefined;
+        push(r2, orig, width, height);
+      }
+    }
+  }
+  // body_markdown 内嵌图:仅收已迁 R2 的(外链态跳过);无尺寸元数据,靠黑名单放行。
+  for (const field of ['body_markdown_zh', 'body_markdown', 'excerpt_zh', 'excerpt']) {
+    const value = typeof ex[field] === 'string' ? (ex[field] as string) : '';
+    for (const u of inlineImageUrls(value)) {
+      if (isInternalR2(u, apiBase)) push(u, u);
+    }
+  }
+  return out;
+}
+
+// news 封面质量门(仅日报静态页启用):R2 cover_image 直采,否则回退过滤后的 R2 正文图。
+function pickNewsCoverGated(ex: Record<string, unknown>, apiBase: string): string | null {
+  const abs = (u: string): string => (u.startsWith('http') ? u : `${apiBase}${u}`);
+  // 1. cover_image 仅当站内 R2 反代形态才直采(外链态视为无效,进回退链)。
+  const cov = String((ex.cover_image as string) || '').trim();
+  if (cov && isInternalR2(cov, apiBase)) return abs(cov);
+  // 2. 回退:按顺序取第一张通过黑名单 + 尺寸门的 R2 正文图。
+  for (const c of bodyCoverCandidates(ex, apiBase)) {
+    if (NEWS_COVER_BLACKLIST.test(c.orig) || NEWS_COVER_BLACKLIST.test(c.r2)) continue;
+    if (c.width && c.height) {
+      const maxDim = Math.max(c.width, c.height);
+      const ar = c.width / c.height;
+      // 与前端卡片缩略图 qualityGate 同参:maxDim≥240 且 0.5≤ar≤2。
+      if (maxDim < 240 || ar < 0.5 || ar > 2) continue;
+    }
+    return abs(c.r2);
+  }
+  // 3. 全部不过 → 无封面(渲染层不出 <img>,与站内抽屉一致的纯文字降级)。
+  return null;
+}
+
 // 封面图(对齐前端流内卡片 + 用户规则:gh/hf/ph 取真图,x 仅推文附图,clawhub 不取头像)
-function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unknown>, apiBase: string): string | null {
+function pickCover(
+  source: DigestSource,
+  row: RenderRow,
+  ex: Record<string, unknown>,
+  apiBase: string,
+  opts: RenderOptions = {},
+): string | null {
   const abs = (u: string | null | undefined): string | null =>
     !u ? null : u.startsWith('http') ? u : `${apiBase}${u}`;
   let media: unknown = null;
@@ -194,7 +280,10 @@ function pickCover(source: DigestSource, row: RenderRow, ex: Record<string, unkn
     case 'clawhub':
       return null; // 不用作者头像
     case 'news': {
-      // 行业新闻:博客/播客封面 = extra.cover_image,否则 media 第一张图,再否则正文 assets 第一张图
+      // 日报静态页(newsCoverQualityGate)走质量门:拒外链 cover、回退只认 R2 正文图 + 黑名单/尺寸过滤。
+      if (opts.newsCoverQualityGate) return pickNewsCoverGated(ex, apiBase);
+      // 默认路径(daily-api / codex-push)保持原逻辑,逐字节不变:
+      // 封面 = extra.cover_image,否则 media 第一张图,再否则正文 assets 第一张图。
       const cov = (ex.cover_image as string) || '';
       if (cov) return abs(cov);
       if (imgs.length) return abs(imgs[0].url as string);
@@ -358,7 +447,7 @@ function isSkippableInlineImage(url: string): boolean {
     || /^data:/i.test(url);
 }
 
-export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string): RenderedItem {
+export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string, opts: RenderOptions = {}): RenderedItem {
   const ex = safeParse(row.extra);
   const ct = row.content_translated || '';
   const body = ct || row.content || '';
@@ -423,7 +512,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     url: row.url || '',
     deep_link: deepLinkPath(row.id),
     author: row.author || row.handle || '',
-    cover: pickCover(source, row, ex, apiBase),
+    cover: pickCover(source, row, ex, apiBase, opts),
     logo: pickLogo(source, row, apiBase),
     media: buildMedia(source, row, ex, apiBase),
     ...(durationSec ? { duration_sec: durationSec } : {}),

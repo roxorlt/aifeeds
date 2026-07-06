@@ -199,6 +199,25 @@ describe('renderDailyPageHtml', () => {
     const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ name: string }> } };
     expect(ld.mainEntity.itemListElement[0].name).toBe('危险</script><b>');
   });
+
+  test('header 含显著「订阅」按钮(subscribe-btn class + 绝对 URL)', () => {
+    const html = renderDailyPageHtml(mkData(), envFixture());
+    expect(html).toContain('class="subscribe-btn"');
+    expect(html).toContain(`<a href="${SITE}/subscribe" class="subscribe-btn">订阅日报</a>`);
+    // 订阅按钮在 header 内(nav 之后、</header> 之前)
+    const header = html.slice(html.indexOf('<header>'), html.indexOf('</header>'));
+    expect(header).toContain('subscribe-btn');
+    // 零可执行 script 约束不变
+    expect(stripJsonLd(html)).not.toContain('<script');
+  });
+
+  test('cover 为空的条目不渲染空 <img>', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'news', label: '行业新闻', items: [mkItem({ source: 'news', cover: null })] }] }),
+      envFixture(),
+    );
+    expect(html).not.toContain('<img class="cover"');
+  });
 });
 
 // ── build 层:mock 选品 + mock env.DB ──

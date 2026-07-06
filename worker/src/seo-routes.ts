@@ -168,8 +168,12 @@ a{color:var(--link);text-decoration:none}
 a:hover{text-decoration:underline}
 .wrap{max-width:720px;margin:0 auto;padding:20px 16px 48px}
 header{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:8px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:nowrap}
 .brand{font-size:18px;font-weight:700}
 .brand a{color:var(--text)}
+.subscribe-btn{flex:none;white-space:nowrap;background:var(--link);color:#fff;
+  padding:6px 14px;border-radius:6px;font-weight:600;font-size:14px}
+.subscribe-btn:hover{background:#0369a1;text-decoration:none;color:#fff}
 h1{font-size:22px;margin:16px 0 4px}
 .lede{color:var(--sub);font-size:14px;margin:0}
 section{margin-top:28px}
@@ -183,7 +187,10 @@ footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color
 <body>
 <div class="wrap">
 <header>
+<div class="top">
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
+<a href="${siteBase}/subscribe" class="subscribe-btn">订阅日报</a>
+</div>
 <h1>AI 日报归档</h1>
 <p class="lede">${escapeHtml(desc)}</p>
 </header>
