@@ -260,6 +260,16 @@ export interface FeedWorkflowMarkers {
   translation_failed_at?: string;
   /** 封面回填 marker，防重复迁移（§9.1）。 */
   cover_backfilled_at?: string;
+  /** cover-quality-sweep 已处理 marker（分页前进，下轮不再扫）。 */
+  cover_swept_at?: string;
+  /** 封面迁移/门控拒绝时间（cover_image 落 ''）。 */
+  cover_rejected_at?: string;
+  /** og:image 存量回填游标（单调，处理必置位，无论 adopt/skip）。 */
+  cover_og_backfilled_at?: string;
+  /** generic-sweep 清簇时间（源级通用图被整簇清空）。 */
+  cover_generic_cleared_at?: string;
+  /** generic-sweep 清簇时记录的被清 R2 key（Fix C：og-backfill 判同 hash 回填终止循环）。 */
+  cover_generic_cleared_hash?: string;
 }
 
 /** blog / podcast 共有的 enrich 产物（§8.4.A）。 */

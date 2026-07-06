@@ -366,6 +366,8 @@ export function extractPageMeta(html: string, baseUrl: string): PageMeta {
  * （常是作者署名头像）。现改为任意策略只要有 meta.cover 就采用。
  *   - 幂等：`COALESCE(NULLIF(cover_image, ''), ?)` —— 已有合格 cover_image 不覆盖；
  *     空串（此前被质量门/sweep 清成 ''）也视为无封面，允许 og:image 补上。
+ *   - Fix B 守卫：迁移 marker `blog_media_r2_at` 已置位（item 已过一轮 R2 迁移）时，
+ *     **不再**把 og 外链回写空槽（否则 step4 幂等早退不迁 → 外链永久滞留、前端直出）。
  * title / published_at 仍**仅 page-scrape 采用**：page-scrape 的 stub 只有 slug 占位标题，
  *   靠 og:title 补真标题；native 源标题来自 RSS 权威，不动。
  *
@@ -381,9 +383,21 @@ export function buildBlogPageMetaPatch(
   if (!meta) return { sets, binds };
 
   // 封面：全部 blog 源都采用 og:image（幂等，不覆盖已有合格 cover_image）。
+  //
+  // Fix B（2026-07-06，workflow 重跑防护）：一旦 R2 迁移 marker `blog_media_r2_at`
+  // 已置位，cover 槽即由 migrateMediaForBlog 独占——此处**绝不**把 og 外链回写进
+  // 此前被质量门/sweep 清成 '' 的空槽。否则重 trigger 已迁移的 item 时，本 patch 写入
+  // og 外链，而 step4 migrateMediaForBlog 因 marker 已置位直接幂等早退（media-r2.ts），
+  // 外链永久滞留、前端直出（防盗链风险）。CASE 守卫：marker 已置位 → 保留原值（'' 或
+  // /r/）；marker 未置位（首轮）才允许 og 外链落位（随后 step4 过质量门迁 R2）。
   if (meta.cover) {
     sets.push(
-      "extra = json_set(coalesce(extra,'{}'), '$.cover_image', COALESCE(NULLIF(json_extract(extra,'$.cover_image'), ''), ?))",
+      "extra = json_set(coalesce(extra,'{}'), '$.cover_image', " +
+        "COALESCE(" +
+        "NULLIF(json_extract(extra,'$.cover_image'), ''), " +
+        "CASE WHEN json_extract(extra,'$.blog_media_r2_at') IS NULL THEN ? END, " +
+        "json_extract(extra,'$.cover_image')" +
+        "))",
     );
     binds.push(meta.cover);
   }

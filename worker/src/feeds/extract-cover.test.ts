@@ -73,3 +73,58 @@ describe('buildBlogPageMetaPatch — og:image 采用条件', () => {
     expect((binds[0] as string).length).toBe(300);
   });
 });
+
+// ═══════════════ Fix B（审查修复）：workflow 重跑不回写 og 外链 ═══════════════
+// 忠实解释 buildBlogPageMetaPatch 生成的 cover 子句，锁 SQL 真的带迁移 marker 守卫：
+// 迁移 marker(blog_media_r2_at)已置位时，cover='' 空槽**不得**被 og 外链回写。
+function evalCoverPatch(
+  coverSql: string,
+  bind: string,
+  extra: { cover_image?: string; blog_media_r2_at?: string },
+): string | null {
+  // COALESCE(NULLIF(cover,''), CASE WHEN marker IS NULL THEN ? END, cover)
+  const cover = extra.cover_image;
+  const guarded = /blog_media_r2_at/.test(coverSql); // 修复后 SQL 带 marker 守卫
+  const nullif = cover === '' || cover == null ? null : cover;
+  if (nullif != null) return nullif; // 已有合格 cover 不覆盖
+  if (guarded) {
+    const markerIsNull = extra.blog_media_r2_at == null;
+    return markerIsNull ? bind : cover ?? null; // marker 置位 → 保留原值(不落外链)
+  }
+  return bind; // 旧逻辑(无守卫)：cover 空 → 无条件写 og 外链
+}
+
+describe('buildBlogPageMetaPatch — Fix B 迁移 marker 守卫', () => {
+  test('生成的 cover 子句包含 blog_media_r2_at 守卫', () => {
+    const { sets } = buildBlogPageMetaPatch('native', { cover: 'https://cdn/og.jpg' });
+    expect(sets[0]).toContain('blog_media_r2_at');
+    // 仍保留幂等 COALESCE/NULLIF（已有合格 cover 不覆盖）
+    expect(sets[0]).toContain('COALESCE');
+    expect(sets[0]).toContain('NULLIF');
+  });
+
+  test('marker 已置位 + cover=\'\' + 重跑 patch → cover 不落外链', () => {
+    const { sets, binds } = buildBlogPageMetaPatch('native', { cover: 'https://cdn/og.jpg' });
+    const result = evalCoverPatch(sets[0], binds[0] as string, {
+      cover_image: '',
+      blog_media_r2_at: '2026-07-06T00:00:00Z',
+    });
+    expect(result).not.toBe('https://cdn/og.jpg'); // 外链未回写
+    expect(result).toBe(''); // 保留空槽 → 前端 monogram 兜底
+  });
+
+  test('marker 未置位(首轮)+ cover=\'\' → og 外链正常落位(随后 step4 迁 R2)', () => {
+    const { sets, binds } = buildBlogPageMetaPatch('native', { cover: 'https://cdn/og.jpg' });
+    const result = evalCoverPatch(sets[0], binds[0] as string, { cover_image: '' });
+    expect(result).toBe('https://cdn/og.jpg');
+  });
+
+  test('已有合格 cover(/r/) → 不覆盖(marker 有无都不动)', () => {
+    const { sets, binds } = buildBlogPageMetaPatch('native', { cover: 'https://cdn/og.jpg' });
+    const result = evalCoverPatch(sets[0], binds[0] as string, {
+      cover_image: '/r/blog/good.jpg',
+      blog_media_r2_at: '2026-07-06T00:00:00Z',
+    });
+    expect(result).toBe('/r/blog/good.jpg');
+  });
+});

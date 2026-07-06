@@ -62,9 +62,14 @@ function makeEnv(items: FakeItem[]) {
           if (/GROUP BY/i.test(sql) && /HAVING/i.test(sql)) {
             const minCount = Number(bound[0]) || 3;
             const limit = Number(bound[1]) || 1000;
+            // 忠实解释 SQL 的 source_type 谓词(Fix A：新版收敛为 source_type='blog',
+            // 旧版是 IN ('blog','podcast'))——让测试真正锁 SQL 改动而非 mock 硬编码。
+            const allowPodcast = /IN\s*\(\s*'blog'\s*,\s*'podcast'\s*\)/i.test(sql);
+            const typeOk = (t: string) =>
+              allowPodcast ? ['blog', 'podcast'].includes(t) : t === 'blog';
             const buckets = new Map<string, { src: string; cover: string; n: number }>();
             for (const it of items) {
-              if (!['blog', 'podcast'].includes(it.source_type)) continue;
+              if (!typeOk(it.source_type)) continue;
               const cov = coverOf(it);
               if (!cov || !isR2(cov)) continue;
               const src = srcOf(it);
@@ -103,14 +108,25 @@ function makeEnv(items: FakeItem[]) {
               it.extra.cover_og_backfilled_at = 'done';
             }
           }
-          // generic-sweep 清簇:WHERE cover=? AND src=?
-          if (/json_extract\(extra,'\$\.cover_image'\) = \?/i.test(sql) || /cover_image'\) = \?/i.test(sql)) {
-            const cover = String(bound[1]);
-            const src = String(bound[2]);
+          // generic-sweep 清簇:WHERE cover=? AND src=?（binds 顺序随 SQL 变化,忠实解析）
+          if (/cover_image'\) = \?/i.test(sql) && /cover_generic_cleared_at/i.test(sql)) {
+            const allowPodcast = /IN\s*\(\s*'blog'\s*,\s*'podcast'\s*\)/i.test(sql);
+            const hasHash = /cover_generic_cleared_hash/i.test(sql);
+            // 新版 binds = [nowIso, clearedKey, cover, src]；旧版 = [nowIso, cover, src]
+            const clearedAt = String(bound[0]);
+            const clearedHash = hasHash ? String(bound[1]) : undefined;
+            const cover = String(bound[hasHash ? 2 : 1]);
+            const src = String(bound[hasHash ? 3 : 2]);
             for (const it of items) {
-              if (coverOf(it) === cover && srcOf(it) === src) {
+              const typeOk = allowPodcast
+                ? ['blog', 'podcast'].includes(it.source_type)
+                : it.source_type === 'blog';
+              if (typeOk && coverOf(it) === cover && srcOf(it) === src) {
                 delete it.extra.cover_image;
-                it.extra.cover_generic_cleared_at = String(bound[0]);
+                it.extra.cover_generic_cleared_at = clearedAt;
+                if (clearedHash !== undefined) {
+                  it.extra.cover_generic_cleared_hash = clearedHash;
+                }
                 delete it.extra.cover_og_backfilled_at;
               }
             }
@@ -208,6 +224,56 @@ describe('runBlogCoverOgBackfill', () => {
     expect(items[0].extra.cover_og_backfilled_at).toBeUndefined();
   });
 
+  // Fix C（审查修复）：sweep↔backfill 循环终止。曾被清簇的 item 若回填的 og:image
+  // 又是同一张通用图(R2 key 相同)→ 跳过写入,仅推进游标,保持 monogram。
+  test('曾清簇 + 回填同 hash(通用图)→ 跳过写入,游标推进,cover 保持空', async () => {
+    const items: FakeItem[] = [
+      {
+        id: 'blog:loop:1',
+        source_type: 'blog',
+        url: 'https://theverge.com/loop',
+        extra: {
+          feed_key: 'the-verge',
+          cover_generic_cleared_at: '2026-07-06',
+          cover_generic_cleared_hash: 'blog/generic.jpg',
+        },
+      },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverOgBackfill(env, { limit: 15, dry: false }, {
+      fetchHtml: async () => OG_HTML,
+      migrateCover: async () => '/r/blog/generic.jpg', // 同 hash：og:image 就是通用图
+    });
+    expect(res.adopted).toBe(0);
+    expect(res.skipped).toBe(1);
+    expect(items[0].extra.cover_image).toBeUndefined();      // 未回写通用图
+    expect(items[0].extra.cover_og_backfilled_at).toBe('done'); // 游标推进,终止循环
+  });
+
+  test('曾清簇 + 回填不同 hash(真 hero)→ 正常写入', async () => {
+    const items: FakeItem[] = [
+      {
+        id: 'blog:loop:2',
+        source_type: 'blog',
+        url: 'https://theverge.com/hero',
+        extra: {
+          feed_key: 'the-verge',
+          cover_generic_cleared_at: '2026-07-06',
+          cover_generic_cleared_hash: 'blog/generic.jpg',
+        },
+      },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverOgBackfill(env, { limit: 15, dry: false }, {
+      fetchHtml: async () => OG_HTML,
+      migrateCover: async () => '/r/blog/real-hero.jpg', // 不同 hash：真 hero
+    });
+    expect(res.adopted).toBe(1);
+    expect(res.skipped).toBe(0);
+    expect(items[0].extra.cover_image).toBe('/r/blog/real-hero.jpg');
+    expect(items[0].extra.cover_og_backfilled_at).toBe('done');
+  });
+
   test('非 blog / 已有 cover / 已打游标 → 不进批', async () => {
     const items: FakeItem[] = [
       { id: 'pod:p', source_type: 'podcast', url: 'https://p.com', extra: {} }, // 非 blog
@@ -295,5 +361,40 @@ describe('runBlogCoverGenericSweep', () => {
     const { env } = makeEnv(items);
     const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: true });
     expect(res.clusters.length).toBe(0);
+  });
+
+  // Fix A（审查修复）：只扫 blog；播客单集共用节目封面是合法常态,不判簇清空。
+  test('podcast 同节目 5 集共用节目封面 → 不判簇,不清空', async () => {
+    const items: FakeItem[] = [
+      { id: 'pod:s:1', source_type: 'podcast', extra: { show_key: 'lex', cover_image: '/r/podcast/show-cover.jpg', podcast_media_r2_at: 'x' } },
+      { id: 'pod:s:2', source_type: 'podcast', extra: { show_key: 'lex', cover_image: '/r/podcast/show-cover.jpg', podcast_media_r2_at: 'x' } },
+      { id: 'pod:s:3', source_type: 'podcast', extra: { show_key: 'lex', cover_image: '/r/podcast/show-cover.jpg', podcast_media_r2_at: 'x' } },
+      { id: 'pod:s:4', source_type: 'podcast', extra: { show_key: 'lex', cover_image: '/r/podcast/show-cover.jpg', podcast_media_r2_at: 'x' } },
+      { id: 'pod:s:5', source_type: 'podcast', extra: { show_key: 'lex', cover_image: '/r/podcast/show-cover.jpg', podcast_media_r2_at: 'x' } },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: false });
+    expect(res.clusters.length).toBe(0);        // 不进 blog-only 聚合
+    expect(res.clustersCleared).toBe(0);
+    expect(res.itemsCleared).toBe(0);
+    // 5 集封面全部保留
+    for (const it of items) {
+      expect(it.extra.cover_image).toBe('/r/podcast/show-cover.jpg');
+      expect(it.extra.cover_generic_cleared_at).toBeUndefined();
+    }
+  });
+
+  // Fix C（审查修复）：清簇时把被清 R2 key 记到 cover_generic_cleared_hash（供 og-backfill 判循环）。
+  test('清簇记录被清 hash 到 cover_generic_cleared_hash', async () => {
+    const items: FakeItem[] = [
+      { id: 'blog:g:1', source_type: 'blog', extra: { feed_key: 'qbitai', cover_image: '/r/blog/9ab.jpg', blog_media_r2_at: 'x' } },
+      { id: 'blog:g:2', source_type: 'blog', extra: { feed_key: 'qbitai', cover_image: '/r/blog/9ab.jpg', blog_media_r2_at: 'x' } },
+      { id: 'blog:g:3', source_type: 'blog', extra: { feed_key: 'qbitai', cover_image: '/r/blog/9ab.jpg', blog_media_r2_at: 'x' } },
+    ];
+    const { env } = makeEnv(items);
+    await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: false });
+    // 被清簇的成员记录 key 形态(strip /r/)
+    expect(items[0].extra.cover_generic_cleared_hash).toBe('blog/9ab.jpg');
+    expect(items[0].extra.cover_image).toBeUndefined();
   });
 });
