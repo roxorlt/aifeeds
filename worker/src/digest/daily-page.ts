@@ -86,12 +86,19 @@ async function loadAdjacentDates(env: Env, date: string): Promise<{ prevDate: st
   return { prevDate: prev?.date ?? null, nextDate: next?.date ?? null };
 }
 
-export async function buildDailyPageData(env: Env, date: string): Promise<DailyPageData | null> {
+// opts.anchorToDate=true 时把 date 作为选品候选窗口的锚点(回填历史日期用),默认 false
+// (8 点当日主路径 = 调用时刻 top N,与改动前逐字节一致)。见 selection.ts asOfDate。
+export async function buildDailyPageData(
+  env: Env,
+  date: string,
+  opts: { anchorToDate?: boolean } = {},
+): Promise<DailyPageData | null> {
   const { apiBase } = getBases(env);
   const sections: DailyPageSection[] = [];
+  const selectOpts = opts.anchorToDate ? { asOfDate: date } : {};
 
   for (const source of DAILY_PAGE_SOURCES) {
-    const selected = await selectTopForSource(env, source, DAILY_PAGE_PER_SOURCE_LIMIT);
+    const selected = await selectTopForSource(env, source, DAILY_PAGE_PER_SOURCE_LIMIT, selectOpts);
     // 防御性截断:选品函数已带 limit,天然 ≤20;这里再 slice 一次,渲染层不做保护。
     const ids = selected.slice(0, DAILY_PAGE_PER_SOURCE_LIMIT);
     if (!ids.length) continue;
