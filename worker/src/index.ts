@@ -148,6 +148,7 @@ import { serveAdminFeedbackHtml } from './admin-feedback';
 // C 端搜索索引同步（docs/plans/2026-07-06-c-search-design.md §7）：
 // */5 增量 + 每日 reconcile 挂 scheduled()；reindex admin 手动触发。
 import { syncSearchIndex, reconcileSearchIndex, handleSearchReindex } from './search/sync';
+import { rebuildSearchTerms } from './search/terms';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -1670,6 +1671,17 @@ export default {
         reconcileSearchIndex(env)
           .then((res) => console.log('[cron] search-reconcile:', JSON.stringify(res)))
           .catch((e) => console.error('[cron] search-reconcile failed:', e)),
+      );
+    }
+
+    // C 端搜索 suggestion 词表:每整点(minute===0)全量重建 —— entity 词从 items 挖掘,
+    // hot_query 从 events(search_submit) 近 7 天聚合,物化到 search_terms,/suggest 直接读。
+    // 独立 waitUntil,失败不影响主 cron。设计 docs/plans/2026-07-06-c-search-design.md §5。
+    if (minute === 0) {
+      ctx.waitUntil(
+        rebuildSearchTerms(env)
+          .then((res) => console.log('[cron] search-terms rebuild:', JSON.stringify(res)))
+          .catch((e) => console.error('[cron] search-terms rebuild failed:', e)),
       );
     }
 
