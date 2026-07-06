@@ -16,10 +16,21 @@
  *   下次打开即 unregister + 清缓存
  * - 单机:localStorage 设 aifeeds_sw_off = 1
  */
-const VERSION = "v2";
+const VERSION = "v3";
 const SHELL_CACHE = "aifeeds-shell-" + VERSION;
 const ASSET_CACHE = "aifeeds-assets-" + VERSION;
 const ASSET_MAX_ENTRIES = 80;
+
+// worker 伺服的纯文本 SEO 文件路径判定 —— 与 worker/src/seo-routes.ts 的 isSeoPath 一字不差
+// 的等价实现。根级单段 .txt(robots.txt / llms.txt / <indexnow-key>.txt)用同一条正则。
+// 三层口径对齐:sw.js(本函数)/ worker isSeoPath / nginx 正则,三处放行范围必须一致。
+const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
+function isSeoPath(pathname) {
+  if (pathname === "/daily" || pathname.startsWith("/daily/")) return true;
+  if (pathname === "/sitemap.xml") return true;
+  if (ROOT_TXT_RE.test(pathname)) return true;
+  return false;
+}
 
 self.addEventListener("install", (e) => {
   e.waitUntil(
@@ -55,11 +66,11 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
-  // /daily 与 /daily/* 是 worker 伺服的纯静态日报/归档 HTML,不是 SPA 路由 — 透传网络,
-  // 不能被 shellFirst 回成 SPA 壳(那会把日报页覆盖成空白单页应用)。口径与 worker isSeoPath
-  // (pathname === '/daily' || startsWith('/daily/'))及 nginx 正则 ^/(daily(/.*)?...)$ 对齐:
-  // 精确 /daily 或 /daily/ 子路径,不误伤 /dailyxxx 之类 SPA 路由。
-  if (url.pathname === "/daily" || url.pathname.startsWith("/daily/")) return;
+  // worker 伺服的纯静态/纯文本 SEO 文件(日报页 /daily/* + 归档 /daily + sitemap.xml +
+  // robots.txt / llms.txt / <indexnow-key>.txt),不是 SPA 路由 — 一律透传网络,不能被
+  // shellFirst 回成 SPA 壳(否则这些文件被覆盖成空白单页应用,浏览器打开一片空白)。
+  // 判定口径与 worker isSeoPath 完全对齐(见上方 isSeoPath),不误伤 /dailyxxx 之类 SPA 路由。
+  if (isSeoPath(url.pathname)) return;
   if (req.mode === "navigate") {
     e.respondWith(shellFirst(e));
     return;
