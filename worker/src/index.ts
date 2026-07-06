@@ -93,6 +93,7 @@ import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
+import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -160,7 +161,7 @@ import {
 } from './digest/handlers';
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 import { handleDigestDaily } from './digest/daily-api';
-import { slotKey } from './digest/lib';
+import { slotKey, bjtDateStr } from './digest/lib';
 
 const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:active';
 
@@ -258,6 +259,8 @@ export interface Env {
   DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
   DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
   NEWS_CODEX_PUSH?: string;               // 行业新闻板块是否推进 Codex:'1'=开;不设/其他=关(等下游 Codex 适配好 news 板块再开,翻 flag 即生效)
+  DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
+  INDEXNOW_KEY?: string;                  // IndexNow 提交 key(SEO 快速收录)。未配置时 pingIndexNow 静默跳过。secret 进 .secrets/aifeeds-{prod,staging}.env
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
   // 替换原 3 个 preempt cron mode (github-enrich / github-r2-migrate /
@@ -4505,6 +4508,22 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await pushDailyToCodex(env, 8, dateParam);
     return jsonResponse(result, result.ok ? 200 : 502, request, env);
+  }
+  if (mode === 'daily-page') {
+    // SEO 静态日报页生成(正常由早 8 点 workflow Phase 4 自动跑;此 mode 供测试/重建/回填手动触发)。
+    // ?backfill=1 遍历 digest_pool 全部历史日期回填;?date=YYYY-MM-DD 重建指定日(默认今日 BJT);
+    // ?dry=1 只算不落盘(返回 itemCount / 回填日期清单)。
+    const dry = url.searchParams.get('dry') === '1';
+    if (url.searchParams.get('backfill') === '1') {
+      const results = await backfillDailyPages(env, { dry });
+      return jsonResponse({ ok: true, backfill: true, dry, count: results.length, results }, 200, request, env);
+    }
+    const dateParam = url.searchParams.get('date') || bjtDateStr();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
+    const result = await generateDailyPage(env, dateParam, { dry });
+    return jsonResponse({ ok: true, ...result }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
     // Bug #1 backfill (2026-05-20): 老数据 L3 嵌套翻译漏洞补全。
