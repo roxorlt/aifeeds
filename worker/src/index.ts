@@ -145,6 +145,9 @@ import { recordCronRun } from './cron-runs';
 import { serveAdminTasksHtml, handleAdminTasks } from './admin-tasks';
 import { serveAdminSubscriptionsHtml, handleAdminSubscriptions } from './admin-subscriptions';
 import { serveAdminFeedbackHtml } from './admin-feedback';
+// C 端搜索索引同步（docs/plans/2026-07-06-c-search-design.md §7）：
+// */5 增量 + 每日 reconcile 挂 scheduled()；reindex admin 手动触发。
+import { syncSearchIndex, reconcileSearchIndex, handleSearchReindex } from './search/sync';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -667,6 +670,11 @@ export default {
       }
       if (path === '/api/admin/share/poster-cleanup' && request.method === 'POST') {
         return adminClearPosterCache(request, env);
+      }
+      // C 端搜索索引手动重建(admin auth)：循环批次 ~20s 预算，?reset=1 从头全量。
+      // 设计 docs/plans/2026-07-06-c-search-design.md §7；staging 验证 backfill 用。
+      if (path === '/api/admin/search/reindex' && request.method === 'POST') {
+        return withCors(await handleSearchReindex(request, env), request, env);
       }
       // 5/28 加: feature flag CRUD (admin /admin/tools UI 调). impression refresh
       // 开关 + 未来可扩其他 flag. 改完立即 invalidate worker memory cache.
@@ -1645,6 +1653,25 @@ export default {
         .then((res) => { if (res.picked > 0) console.log('[cron] x-card-render drain:', JSON.stringify(res)); })
         .catch((e) => console.error('[cron] x-card-render drain failed:', e)),
     );
+
+    // C 端搜索索引增量同步:每 tick(每 5 分钟)推进一批(首轮起自动 backfill,追平后走
+    // 时间水位增量)。幂等 upsert,失败下轮自动补;独立 waitUntil 与主管线解耦,搜索故障
+    // 不影响 feed。设计 docs/plans/2026-07-06-c-search-design.md §7。
+    ctx.waitUntil(
+      syncSearchIndex(env)
+        .then((res) => { if (res.upserted > 0) console.log('[cron] search-sync:', JSON.stringify(res)); })
+        .catch((e) => console.error('[cron] search-sync failed:', e)),
+    );
+
+    // C 端搜索索引每日对账:cleanup 档(UTC 03:35)清出事后不合规行(软删/cn_sensitive
+    // 追标/dedup) + 统计行数差告警。与主 cleanup 独立 waitUntil,互不阻塞。
+    if (hour === 3 && minute === 35) {
+      ctx.waitUntil(
+        reconcileSearchIndex(env)
+          .then((res) => console.log('[cron] search-reconcile:', JSON.stringify(res)))
+          .catch((e) => console.error('[cron] search-reconcile failed:', e)),
+      );
+    }
 
     // 行业新闻事件指纹历史回补兜底:DeepSeek Pro 单条有时接近 60s,不适合在一次
     // HTTP waitUntil 里跑大批量。手动入口会写 active KV + 自调用链;如果链路被慢调用
