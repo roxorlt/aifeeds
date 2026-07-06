@@ -1,6 +1,6 @@
 # C 端站内搜索 — 设计文档
 
-> 状态：已获用户批准的方向性决策（2026-07-06），本文档为实施依据。
+> 状态：**已实施**（2026-07-06，staging 验收通过，待用户验收 → prod）。方向性决策已获用户批准，本文档为实施依据；与最终实现的差异见文末「§14 实施偏差记录」。
 > 配套实施计划：`docs/plans/2026-07-06-c-search-plan.md`
 > 分支：`feat/c-search`（与「SEO 每日静态页」计划并行开发，协调事项见 §12）
 
@@ -109,7 +109,7 @@ CREATE INDEX idx_search_terms_norm ON search_terms(term_norm, weight DESC);
 CREATE TABLE search_sync_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 ```
 
-存 `fts_watermark`（上次增量同步的时间水位）、`fts_backfill_done`、`terms_last_run`。
+**按实现最终的 key 集**：`fts_wm_scraped_epoch`（增量同步的 `scraped_at` 水位，存 **epoch 秒**，规避 `scraped_at` 混合格式的字典序越行）、`fts_wm_translated`（`translated_at` 水位）、`fts_backfill_rowid`（首次 backfill 的 rowid 游标）、`fts_backfill_done`、`last_reconcile`（每日对账结果 JSON：itemsEligible/ftsRows/drift/purged/at）。词表 `rebuildSearchTerms` 每整点全量重算，不再单独存 `terms_last_run`。
 
 ## 4. 分词（tokenizeForSearch，索引侧/查询侧共用）
 
@@ -121,7 +121,7 @@ CREATE TABLE search_sync_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 4. CJK 段：相邻两字滑窗 bigram（「大模型」→ `大模 模型`）；段长为 1 保留单字；
 5. 输出空格拼接（不去重，保留词频给 BM25）。
 
-**查询构造（防 FTS 语法注入的唯一入口）**：query 过同一函数得 token 数组 → 每个 token 用双引号包裹（内部双引号剔除）→ 隐式 AND 连接；末位 token 为拉丁且长度 ≥3、或为 CJK 单字时，追加 `*` 前缀匹配。**禁止任何用户输入直接拼进 MATCH 表达式**。token 数上限 12（超出截断）。
+**查询构造（防 FTS 语法注入的唯一入口）**：query 过同一函数得 token 数组 → 每个 token 用双引号包裹（内部双引号剔除）→ 隐式 AND 连接；前缀星（`*`）规则**按实现最终定为**：**CJK 单字 token 在任意位置一律加 `*` 前缀匹配**（单字过窄，前缀扩召回）；**拉丁 token 仅当它是唯一 token 且长度 ≥3 时加星**（多 token 时拉丁词已由隐式 AND 收敛，无需再放宽）。**禁止任何用户输入直接拼进 MATCH 表达式**。token 数上限 12（超出截断）。
 
 不同匹配目标不做不同分词策略 —— 差异全部放在字段权重（bm25 列权重）与排序衰减上，复杂度低一个量级。
 
@@ -149,7 +149,7 @@ ORDER BY score LIMIT 200;
 | 长效 | github、product_hunt、clawhub | 180 天 |
 
 - **分组模式**：召回集按 source_type 分组，组内按 final 降序取 top 3；组序按组内 max(final) 降序；每组 total = 该源在召回集中的命中数（上限展示为「200+」当召回触顶）。
-- **单源 list 模式**：MATCH + `source_type = ?` 过滤，final 排序，cursor 分页（cursor = `final|rowid` 编码，与现有 hot 模式 cursor 风格一致），每页 20。
+- **单源 list 模式**：MATCH + `source_type = ?` 过滤，final 排序，cursor 分页，每页 20。**cursor 按实现最终定为「召回集内 offset」**（base64 编码的偏移量，非设计初稿的 `final|rowid`）：单 query 单源在 `RECALL_LIMIT`=200 条召回集内翻页，offset 到顶即 `has_more=false`。简化理由与召回集封顶一致——超 200 条命中的长尾单源极罕见，offset 分页实现更简、无 tiebreaker 抖动。
 - 权重与半衰期写成 `worker/src/search/ranking.ts` 顶部常量表，上线后按监控调参。
 
 ## 6. API 设计（`worker/src/search/handlers.ts`，index.ts 只加路由 if 行）
@@ -275,3 +275,18 @@ q 明文入 events 用于热搜词聚合与坏 case 分析（行业常规；even
 | bigram 召回噪声（跨词边界组合） | BM25 词频天然压噪 + title 权重高；上线后按无结果率/CTR 调 |
 | KV 限流计数写放大 | 搜索 QPS 低；如超预期改 D1 计数（feedback 先例） |
 | worker/src/digest/node-run.ts 有未提交改动（他 session） | 搜索不触碰 digest 目录；分支只改 search/ 前端与少量接线点 |
+
+## 14. 实施偏差记录
+
+> 实现整体与本设计一致（§3-§9 逐条落地、§10 测试计划全过、§11 验收清单 staging 全绿）。以下为与设计初稿的可记录差异，正文相关段落已就地同步。
+
+| # | 设计初稿 | 最终实现 | 原因 |
+|---|---------|---------|------|
+| 1 | migration 预计 025 | **026-search-fts.sql** | 与并行的「SEO 每日静态页」rebase 时让位，SEO 占 025、搜索取 026（见 §12） |
+| 2 | 前缀星「末位 token 拉丁 ≥3 或 CJK 单字」（§4） | **CJK 单字任意位置加星；拉丁仅唯一 token 且 ≥3 加星** | 单字过窄需前缀扩召回；多 token 时拉丁已由隐式 AND 收敛，无需再放宽（正文 §4 已改） |
+| 3 | list 模式 cursor = `final\|rowid`（§5.2） | **召回集内 offset cursor（base64）**，单 query 单源上限 200 条 | 与召回集封顶（RECALL_LIMIT=200）一致，offset 实现更简、无 tiebreaker 抖动（正文 §5.2 已改） |
+| 4 | 水位 key `fts_watermark` / `terms_last_run`（§3.4） | **`fts_wm_scraped_epoch`（epoch 秒）+ `fts_wm_translated` + `fts_backfill_rowid` + `last_reconcile`**；词表每整点全量重算不存 last_run | `scraped_at` 混合格式字典序会越行，改存 epoch 秒规避（正文 §3.4 已改） |
+| 5 | 分组模式 total = 该源在召回集中的命中数（§5.2） | 同设计，但**明确语义**：total 取自召回集内命中数，与「更多」下钻 list 模式的实际可翻页数**可能不完全一致**（列入 V2 文案优化） | 召回封顶 + 分组/list 两条查询路径的固有差异；不影响正确性，仅文案 |
+| 6 | §3.3 hot_query「末次搜索非空结果」过滤 | **未实现**（依赖尚不存在的 payload） | 列入 TODO V2 backlog（join `search_empty` 事件补齐） |
+
+其余（三表 schema、bigram 分词、召回排序衰减、限流缓存、埋点、前端三态与返回链）均与设计一致。

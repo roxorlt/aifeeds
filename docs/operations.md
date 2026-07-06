@@ -374,6 +374,8 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/items/:id/refresh` | POST | Drawer 打开时 dashboard 主动调，触发 on-demand enrich：`x_list` 走 syndication API 拉 metrics + quote_of + link_card；`github` 走 GitHub REST 拉 stars/forks/watchers/issues/PRs/contributors。返回 `{refreshed,source_type,reason,metrics?}`，dashboard 拿到 `refreshed:true` 后重新 `fetchItem` 并 dispatch 到 feed。`product_hunt` 当前返回 `unsupported_source`（待 Browser binding）。KV `item-refresh-throttle:<id>` 60s throttle | 无（只读） |
 | `/api/sources` | GET | Dashboard 左栏 source list | 无 |
 | `/api/stats` | GET | Dashboard 顶部总览（总数、今日、分源） | 无 |
+| `/api/search` | GET | **C 端站内搜索**（2026-07-06，`worker/src/search/handlers.ts`）：`q` 必填（trim 后 1-100 字，空/纯符号分词后为空 → 400 `empty_query`，超限 400）。**无 `source` → 分组模式**（`{mode:"grouped", groups:[{source_type,total,items:≤3}], query_time_ms}`，组序按组内 max 相关性降序）；**有 `source` → 单源 list 模式**（`{mode:"list", items, next_cursor, has_more}`，`cursor` base64 offset 分页 / `limit` 默认 20 上限 50）。`source` 非法 → 400。Item 结构与 `/api/items` 完全一致（复用 `item-row.ts`）。KV 限流 **12/min per device**（超限 429 `rate_limited`）；边缘缓存 `max-age=60`（归一化 `q+source+cursor+limit` 为 key，匿名无个性化） | 无（匿名可搜） |
+| `/api/search/suggest` | GET | **搜索联想 / 热搜**（同上文件）：`prefix`（0-50 字）。**空 prefix → 热搜 top 10**（hot_query 优先、不足补 entity 高权重词）；**非空 → term_norm 前缀范围查询 top 8**。响应 `{terms:[{term,term_type}]}`。KV 限流 **40/min per device**；边缘缓存 `max-age=300`。**任何内部错误 → 200 + 空数组**（联想永不阻塞主流程；仅 prefix 超 50 字返 400） | 无（匿名） |
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
 | `/api/longform/pending` | GET | 长推 fetch 队列（`?limit=20`，最多 50；`attempts < 3`） | Bearer `INGEST_TOKEN` |
 | `/api/longform/submit` | POST | 提交本地浏览器抓回的完整长推正文 | Bearer `INGEST_TOKEN` |
@@ -397,11 +399,13 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | CF Access JWT（边缘拦截，见 § 7a） |
 | `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）、**🎧 中文配音需求（假门）卡片**（2026-06-21：想听 KPI + 需求强度漏斗「打开播客详情→点想听」转化率 + 需求排行榜）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
-| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices` / `dub-wishlist`(中文配音需求假门)（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices` / `dub-wishlist`(中文配音需求假门) / `search`(C 端搜索监控：使用/性能/异常/索引滞后，2026-07-06)（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/feedback` | GET | **用户反馈看板页**（2026-07-05，`worker/src/admin-feedback.ts`）：列表 + 搜索（user_id 精确 / 昵称 / identity 模糊 → 按账号查该用户全部历史）+ 状态过滤（未回复/已回复）+ 分页 + 详情（device_info / 账号快照 / 回复线程）+ 图文回复用户 | CF Access JWT（Basic Auth fallback） |
 | `/api/admin/feedback` | GET | 反馈列表数据源（`q` / `status=all,pending,replied` / `page` / `page_size≤100`） | CF Access JWT（Basic Auth fallback） |
 | `/api/admin/feedback/:id` | GET | 反馈详情 + 回复线程（device_info/account_info 解析后 JSON） | CF Access JWT（Basic Auth fallback） |
 | `/api/admin/feedback/:id/reply` | POST | 图文回复用户（multipart：`content` ≤5000 必填 / `image` 选填同 C 端规则）；写 `feedback_replies` + 刷 `feedback.last_reply_at`；`admin_email` 取 CF Access JWT email claim（Basic 兜底为 NULL） | CF Access JWT（Basic Auth fallback） |
+| `/api/admin/search/reindex` | POST | **搜索索引手动重建**（2026-07-06，`worker/src/search/sync.ts handleSearchReindex`）：单请求内循环跑 `syncSearchIndex`（~20s 时间预算，追平或 errored 即停），返回 `{rounds,lastScanned,totalUpserted,backfillDone,backfillRowid,elapsed_ms}`。**`?reset=1`** 先重置 backfill 进度（`fts_backfill_rowid=0` / `done=""`）+ 播种增量水位为当前时刻，再从头全量重建（5.5 万行 ≈ 2.3h，可反复调用加速）。**prod 首次上线用它循环追平 backfill** | CF Access JWT（Basic Auth fallback，见 §7a；prod/staging `/api/admin/*` 走 CF Access 边缘拦截，backfill 需服务令牌或 `wrangler dev` remote-bindings） |
+| `/api/admin/search/rebuild-terms` | POST | **suggestion 词表手动重建**（2026-07-06，`worker/src/search/terms.ts rebuildSearchTerms`）：全量重算 entity 词（GH 仓库/PH 产品/skill 名/hf keyword/媒体名/高频作者/分类）+ hot_query（近 7 天 `search_submit` 聚合），物化到 `search_terms`。**staging cron 全关，词表靠手动触发** | 同上 |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
 | `/daily/:date` | GET | **每日静态日报页**（SEO P0，2026-07-06，`worker/src/seo-routes.ts`）：`:date`=`YYYY-MM-DD`，命中 R2 `daily/<date>.html` 返回 200 静态 HTML（`max-age=3600`）；miss → `noindex` 简洁 404 页；日期形状对但日历越界（`2026-13-99`）→ 302 归档 | 无（公开，bot gate 豁免） |
@@ -712,7 +716,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **13 个表**：
+- **20 个表**：
   - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
@@ -730,6 +734,9 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - `feedback`（2026-07-05 用户反馈功能新增）— C 端用户反馈主表：user_id / content / image_key（R2 `feedback/<sha256>.<ext>`）/ device_info + account_info（JSON 快照，定位问题用）/ ip / ua / day（BJT，配 `idx_feedback_user_day` 做每日 3 条限频）/ created_at(ms) / last_reply_at。migration `024-user-feedback.sql`，设计 `docs/plans/2026-07-05-user-feedback-design.md`
   - `feedback_replies`（2026-07-05 同上）— 后台图文回复：feedback_id / content / image_key / admin_email（CF Access JWT email，Basic 兜底 NULL）/ created_at(ms) / read_at（用户已读时间，C 端未读红点数据源）。索引 `idx_feedback_replies_fb`。同 migration 024
   - `daily_pages`（2026-07-06 每日静态日报页 SEO P0 新增，migration 025）— 每日静态日报页的 D1 索引表。4 列：`date`(YYYY-MM-DD BJT，PRIMARY KEY) / `title`(页面 title，含当日主题) / `item_count`(INTEGER) / `generated_at`(ISO8601)。`sitemap.xml` + `/daily/` 归档索引 + `llms.txt` 最近日报均从此表读取（**不做 R2 list**；R2 `READMES` bucket 的 `daily/YYYY-MM-DD.html` 只存快照）。写入：`digest/daily-page-run.ts persistPage` 的 `INSERT ... ON CONFLICT(date) DO UPDATE`（同 date 幂等覆盖）。migration `025-daily-pages.sql`，设计 `docs/plans/2026-07-06-daily-static-page-seo-design.md` §4.2
+  - `items_fts`（2026-07-06 C 端搜索新增，migration 026）— **FTS5 影子表**（`USING fts5(... tokenize='unicode61')`）。3 个索引列存**预分词后的空格分隔 token 流**：`title_tok`（标题类，权重高）/ `body_tok`（正文摘要类，中）/ `author_tok`（作者/handle，低）；`item_id` / `source_type` / `published_at` 为 UNINDEXED 列。rowid 与 `items.rowid` 对齐（插入时显式指定）。中文靠 `tokenize.ts` 的 bigram 预分词入流，FTS5 自身只用默认 unicode61（不依赖 D1 的 trigram/ICU 编译选项）。**入索引门槛**：`workflow_completed_at IS NOT NULL` 且 `deleted_at IS NULL` 且 `is_relevant=1` 且 `dedup_of IS NULL` 且 `cn_sensitive != 1`。由 cron `syncSearchIndex` 增量维护（delete+insert 幂等 upsert），事后失格行靠每日 `reconcileSearchIndex` 清出。migration `026-search-fts.sql`，设计 `docs/plans/2026-07-06-c-search-design.md` §3.1
+  - `search_terms`（2026-07-06 同上，migration 026）— suggestion 词表。列：`term`(展示原文保留大小写) / `term_norm`(小写归一，前缀匹配键) / `term_type`(`entity` | `hot_query`) / `source_type`(可空) / `weight`(REAL) / `updated_at`。主键 `(term_norm, term_type)`，索引 `idx_search_terms_norm(term_norm, weight DESC)`。**entity 词**来自库内真实内容（GH 仓库/PH 产品/skill 名/hf keyword/媒体名/高频作者≥3 条/GH·ClawHub 分类）→ 搜必有果；**hot_query 词**从 events `search_submit` 近 7 天聚合 top 100。每整点由 `rebuildSearchTerms` 全量重建。`/api/search/suggest` 用前缀范围扫描直读此表。设计 §3.3
+  - `search_sync_state`（2026-07-06 同上，migration 026）— 搜索索引同步水位（`k TEXT PRIMARY KEY, v TEXT`）。key：`fts_wm_scraped_epoch`（增量水位，scraped_at 的 epoch 秒）/ `fts_wm_translated`（translated_at 水位）/ `fts_backfill_rowid`（backfill 进度游标）/ `fts_backfill_done` / `last_reconcile`（对账 JSON：itemsEligible/ftsRows/drift）。设计 §3.4
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -1530,6 +1537,23 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
   - 追加 `&dry=1` —— 只算不落盘（返回 `itemCount` / 回填日期清单）
 - **⚠️ 已知运维事项**：`backfill=1` 单请求逐日串行跑，**受香港中转 60s proxy read 超时限制**（2026-06-22 教训）—— 历史日期多时单请求可能被中转掐断（worker 后台仍会跑完当前日）。大批量回填改为「按单日循环」在外层分多次请求（每次 `?date=` 指定一日，或先 `?backfill=1&dry=1` 拿到日期清单再逐日实跑），避免一次请求扛全部历史。
 - **开关与 secret**（均存 `.secrets/aifeeds-{prod,staging}.env`）：`DAILY_PAGE_ENABLED` prod = `1`（已开）/ staging 未设 = 关；`INDEXNOW_KEY` prod / staging 各自值，未配置时 IndexNow 静默跳过。
+
+### C 端站内搜索（FTS5 全文检索，**2026-07-06 staging 验收通过，待用户确认 → prod**）
+
+> 匿名可用的站内搜索：入口放大镜 → 起始页（历史/热搜/源入口）→ suggestion → 分组结果页 → 单源下钻 → 抽屉，返回键逐级回退。服务端 D1 FTS5 影子表 + 中文 bigram 预分词，索引/词表全靠 cron 增量维护，与主管线解耦（搜索故障不影响 feed）。伺服路由见上方 §1「`/api/search`」两条；D1 三表（`items_fts` / `search_terms` / `search_sync_state`）见 §2；admin 监控见 §1「`?metric=search`」。设计：`docs/plans/2026-07-06-c-search-design.md`，实施计划：`docs/plans/2026-07-06-c-search-plan.md`。
+
+- **cron 分流**（均挂现有 `*/5` scheduled，独立 `waitUntil` 与主管线解耦，失败下轮自补）：
+  - **每 tick（每 5 分钟）**：`syncSearchIndex` 增量同步 —— 取 `scraped_at`/`translated_at` 超水位的行，过入索引门槛后 delete+insert 幂等 upsert，**单轮上限 2000 行**；首轮起自动 backfill（按 rowid 分批追平，5.5 万行 ≈ 2.3-2.5h）
+  - **每整点（`minute===0`）**：`rebuildSearchTerms` 全量重建 suggestion 词表（entity + hot_query）
+  - **每日 03:35 UTC**：`reconcileSearchIndex` 对账 —— **只 DELETE 事后失格行**（软删 / cn_sensitive 追标 / dedup），写 `last_reconcile` + drift（`items 合规行 − items_fts 行`），`|drift|>500` 触发既有 PushDeer 告警「搜索索引滞后」
+- **限流**（KV `search:rl:{device_id|clientIp}:{分钟桶}`，TTL 120s，**fail-open**）：`/api/search` **12/min per device**、`/api/search/suggest` **40/min per device**；身份优先 `X-Device-Id`，缺失走 `client-ip.ts`（HK 中转塌 IP 坑）；超限 429 `rate_limited`。CF 既有 `/api/*` 10s/30req 规则兜底
+- **admin 监控**：`/admin/dashboard` 搜索区块（`/api/admin/analytics?metric=search`，`admin-dashboard.ts`）—— 一次 fetch 拿 `{overview, topQueries, perf, errors, indexLag}`：搜索 PV/UV/人均次数、热门 query top、无结果率/CTR、query_time_ms 端到端 p50/p90/p99、429/500 错误趋势、**索引滞后量**（reconcile 写入的 drift）
+- **埋点**：7 个 `search_*` 事件（open / submit / suggest_click / result_click / empty / error / perf）已加入 `worker/src/track.ts` `EVENT_TYPE_WHITELIST` 与 `dashboard/src/lib/telemetry/event-types.ts` 镜像
+
+> [!important] Runbook（搜索索引运维，终审要求必读）
+> 1. **`reconcile` 只清失格行，不回填缺失行** —— 每日 03:35 UTC 的 `reconcileSearchIndex` 只 `DELETE` items 已失格但 FTS 仍残留的行，**不会**把「合规却漏进索引」的行补回去。收到「搜索索引滞后」告警（`drift>500`）或发现某内容明明在库却搜不到时，跑 `POST /api/admin/search/reindex?reset=1` **全量重建**（重置 backfill 进度 + 重新播种水位，5.5 万行约 2.3h；单请求 ~20s 时间预算，**反复调用可加速**追平）。
+> 2. **prod 首次上线后主动循环追平 backfill** —— 别干等每 5 分钟 cron 一点点推进（要 2h+），部署后立即循环调 `POST /api/admin/search/reindex`（首次不带 `reset`，靠自动 backfill 游标；返回 `backfillDone:true` 即追平），并触发一次 `POST /api/admin/search/rebuild-terms` 让 suggestion 词表就位。
+> 3. **staging cron 全关** —— staging 的搜索索引与词表**不由 cron 自动维护**，只能靠手动触发 `reindex` / `rebuild-terms`（且 prod/staging `/api/admin/*` 被 CF Access 边缘拦截，无服务令牌时走 `wrangler dev` remote-bindings 调用，参见 Task 7 backfill 记录）。
 
 ---
 

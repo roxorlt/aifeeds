@@ -8,6 +8,23 @@
 
 ## 进行中
 
+### A4. C 端站内搜索（2026-07-06，branch `feat/c-search`，**staging 验收通过，待用户确认 → prod**）
+
+> 匿名可用站内搜索：入口放大镜 → 起始页（历史/热搜/源入口）→ suggestion → 分组结果页（每源 top3 + 「更多」）→ 单源无限滚动流 → 抽屉深链，返回键逐级回退。服务端 D1 FTS5 影子表 + 中文 bigram 预分词，索引/词表全靠 cron 增量维护、与主管线解耦。限流 search 12/min + suggest 40/min per device（KV fail-open）；admin 看板搜索区块（`?metric=search`）。
+> 设计 [docs/plans/2026-07-06-c-search-design.md](docs/plans/2026-07-06-c-search-design.md) · 实施计划 [docs/plans/2026-07-06-c-search-plan.md](docs/plans/2026-07-06-c-search-plan.md) · 台账 `.superpowers/sdd/progress.md`
+
+- [x] Task 1-12 实施完成（migration 026 + worker `src/search/` + 前端 `src/components/search/` + admin 监控），41 条单测（35 搜索 + rebase 后全绿），各任务 review 0 Critical/Important
+- [x] staging 全量部署 + 验收（worker 741820d3 / pages 1b3d5b7c）：集成断言 9/9、E2E 全链通过（入口/起始页三块/suggestion/分组 7 组/更多下钻/无限滚动/抽屉深链/返回逐级回退/历史 LRU/空态/PC 视口/微信 UA/feed 回归/埋点落库）、合规复检 3/3（cn_sensitive/dedup/软删不可见）。终审 **READY TO MERGE**（0 Critical / 1 运维 runbook 项非代码缺陷）
+- [ ] **用户 staging 验收确认**（staging.ai-feeds.com 未登录走全链）
+- [ ] **prod 上线三步**（待用户发话，留用户执行/确认）：① prod D1 跑 migration 026（`items_fts` / `search_terms` / `search_sync_state` 三表）② merge PR（CI 自动部署 worker + dashboard）③ 部署后循环调 `POST /api/admin/search/reindex` 追平 backfill（勿等 cron 点滴推进）+ 触发一次 `rebuild-terms` + 清 HK nginx 缓存 + prod 冒烟
+- [ ] **V2 backlog**（V1 明确不做，按需排期）：
+  - hot_query 补「末次非空结果」过滤（join `search_empty` 事件，排掉搜了但零结果的 query）
+  - 搜索结果缓存与滚动位置恢复（FEED_CACHE 同款，解决抽屉深链返回单源流重挂载重拉首屏、滚动位不跨抽屉保留）
+  - suggestion 下拉方向键导航（↑↓ + Enter）
+  - grouped 模式 total 与单源实际命中数可能不一致的文案优化（total 是召回集内命中数，下钻 list 可能更多）
+  - burst >2000 行/轮 catch-up 时 ORDER BY 混合格式 `scraped_at` 字典序越行根治（`CAST strftime`；稳态不触发，reconcile + reindex reset 兜底）
+  - 零散清理：hot_query GROUP BY 大小写归一 / `rate_limited_total` 死代码清理 / `searchPctl` 泛化合并进 `pctl` / weibo 源缺 `SourceIcon`
+
 ### A3. 用户反馈功能（2026-07-05，branch `feat/user-feedback`，开发 + 双层独立验收完成，待 staging 真机验收 + prod 上线）
 
 > C 端登录用户图文反馈（每账号每 BJT 日 3 条限频，超出 toast「操作太频繁了，稍后再试」；微信浏览器无此模块）→ admin 看板「用户反馈」tab（按账号查全部历史 + 图文回复）→ C 端红点接收查看回复。
