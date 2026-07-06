@@ -85,7 +85,7 @@ import {
   shouldScheduleNextEventFingerprintBackfillBatch,
 } from './feeds/event-fingerprint-backfill';
 import { feedNewsRankSqlExpression } from './feeds/ranking';
-import { migrateAudioForPodcast, runCoverQualitySweep } from './feeds/media-r2';
+import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill } from './feeds/media-r2';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
 import { idHashOf } from './feeds/extract';
@@ -4542,6 +4542,26 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const dry = url.searchParams.get('dry') === '1';
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '40'), 1), 100);
     const result = await runCoverQualitySweep(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-cover-generic-sweep') {
+    // Fix 2a:源级通用图剔除。同源(feed_key/show_key)内 cover_image 命中同一 R2 hash
+    // ≥?min(默认 3)→ 判源级通用图(作者头像/站点通栏/二维码横幅),整簇清空 cover_image +
+    // 清 og 游标(供 blog-cover-og-backfill 回填)。?dry=1 只列簇明细;?limit 默认 50(簇数上限)。
+    const dry = url.searchParams.get('dry') === '1';
+    const minCount = Math.min(Math.max(parseInt(url.searchParams.get('min') || '3'), 2), 100);
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 500);
+    const result = await runBlogCoverGenericSweep(env, { minCount, limit, dry });
+    return jsonResponse({ ok: true, dry, minCount, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-cover-og-backfill') {
+    // Fix 3:og:image 存量回填。分页扫 blog 中 cover_image 空(含 Fix 2 清空/迁移拒绝/天生无封面)
+    // 且未打 og 游标的行 → 外呼原文页取 og:image → 过质量门 + 迁 R2 → 写 cover_image。
+    // 游标 cover_og_backfilled_at 单调;拉不到/无 og → 推进游标保持 monogram。
+    // ?dry=1 只统计 og 命中零写;?limit 默认 15(每条外呼原文页,控子请求量)。循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 50);
+    const result = await runBlogCoverOgBackfill(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {
