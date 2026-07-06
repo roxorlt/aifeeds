@@ -18,6 +18,13 @@ export default defineConfig({
       'src/feeds/ranking.test.ts',
       'src/feeds/event-fingerprint-backfill.test.ts',
       'src/feeds/parse-weibo-cookie.test.ts',
+      // C 端搜索测试同为 node:test 风格（`node:test` 的 test()），用 `tsx --test` 跑（35 条全过）。
+      // rebase onto main 引入 vitest 后被 glob 命中会误报 "No test suite found"，同上排除。
+      'src/search/tokenize.test.ts',
+      'src/search/ranking.test.ts',
+      'src/search/sync.test.ts',
+      'src/search/terms.test.ts',
+      'src/search/handlers.test.ts',
     ],
   },
 });
