@@ -33,6 +33,7 @@ import type {
   FeedPublisher,
 } from "./types";
 import { extractPageMeta, throttledFetchText } from "./extract";
+import { COVER_BLACKLIST, passesCoverSizeGate } from "./cover-heuristics";
 
 const R2_PREFIX_BLOG = "blog";
 const R2_PREFIX_PODCAST = "podcast";
@@ -382,26 +383,9 @@ export async function migrateMediaForBlog(
     }
   }
 
-  // ── 1b. 采用护栏（层 1，Task 2，2026-07-06）──
-  //   og:image 迁 R2 后拿到内容寻址 R2 key，此刻比对「同 source 已有 ≥3 条 item 用它作
-  //   cover」——命中即判为源级品牌 logo（jiqizhixin/qbitai 每篇 og 都是站点固定 logo），
-  //   撤销本条采用（cover 落空走 monogram / 后续正文 hero），并记 cover_generic_cleared_hash
-  //   让 og-backfill Fix C 不再回填同图。比对时机放在「迁移后拿到 R2 key」而非 og 采用点
-  //   （step3 只有外链 og，无法与已入库 R2 cover 比对）。Verge 每篇 og 不同 → COUNT 恒 0，不受影响。
-  //   R2 对象内容寻址（同 hash 复用），不删除（其他 ≥3 条仍引用）；仅撤销本条引用。
-  let brandLogoGuarded = false;
-  let guardedHash = "";
-  if (newCover) {
-    const srcVal = String(
-      extra.feed_key || (extra as { show_key?: string }).show_key || "blog",
-    );
-    if (await isSourceLevelBrandLogo(env, itemId, srcVal, newCover)) {
-      brandLogoGuarded = true;
-      guardedHash = coverR2Key(newCover) || newCover;
-    }
-  }
-
   // ── 2. 正文 inline 资产（图过质量门控；直链视频仅过 size cap）──
+  //   ⚠️ 顺序（Fix 1，2026-07-06）：正文 assets 迁 R2 必须排在下方「采用护栏」**之前**——
+  //   护栏命中要就地从已迁 R2 的 body.assets 选正文 hero 回落，故先拿到各 asset 的 r2_url。
   const assets: FeedBodyAsset[] = extra.body?.assets ? [...extra.body.assets] : [];
   const newAssets: FeedBodyAsset[] = [];
   for (const a of assets) {
@@ -428,6 +412,32 @@ export async function migrateMediaForBlog(
     newAssets.push(next);
   }
 
+  // ── 2b. 采用护栏（层 1，Task 2；Fix 1 重排到 body.assets 迁移之后，2026-07-06）──
+  //   og:image 迁 R2 后拿到内容寻址 R2 key，此刻比对同 source 是否为「源级品牌 logo」
+  //   （① 已有 ≥3 条 item 用它作 cover，或 ② 该 hash 曾被同源清过——见 isSourceLevelBrandLogo）。
+  //   命中即撤销本条 og 采用；**但不直接落 monogram**：先就地调用与 bodyhero-backfill 同一套
+  //   `pickBodyHeroCover`，从**已迁 R2** 的 body.assets 里选合格 hero（过黑名单 + 尺寸门 + 排除
+  //   logo 本身）——有则 live 当场用它作 cover（qbitai 类正文有真配图，不必等手动 backfill），
+  //   无则清空走 monogram（jiqizhixin 类图荒）。两种都记 cover_generic_cleared_hash，供 og-backfill
+  //   Fix C 拦截同图回填 + 持久拒绝集合（Fix 2）。Verge 每篇 og 不同且从未清过 → 恒不命中，不受影响。
+  //   R2 对象内容寻址（同 hash 复用），不删除（其他 ≥3 条仍引用）；仅撤销本条引用。
+  let brandLogoGuarded = false;
+  let guardedHash = "";
+  let bodyHeroCover: string | undefined; // 护栏命中后就地回落的正文 hero（无则 undefined → monogram）
+  if (newCover) {
+    const srcVal = String(
+      extra.feed_key || (extra as { show_key?: string }).show_key || "blog",
+    );
+    if (await isSourceLevelBrandLogo(env, itemId, srcVal, newCover)) {
+      brandLogoGuarded = true;
+      guardedHash = coverR2Key(newCover) || newCover;
+      // 与 runBlogCoverBodyHeroBackfill 共用 pickBodyHeroCover（喂已迁 R2 的 body.assets）。
+      bodyHeroCover =
+        pickBodyHeroCover({ body: { assets: newAssets } }, guardedHash) ||
+        undefined;
+    }
+  }
+
   // ── 3. publisher logo ──
   const publisher: FeedPublisher | undefined = extra.publisher
     ? { ...extra.publisher }
@@ -445,9 +455,16 @@ export async function migrateMediaForBlog(
     patches.push({ path: "$.cover_image", value: newCover });
     patches.push({ path: "$.cover_backfilled_at", value: nowIso });
   } else if (brandLogoGuarded) {
-    // 采用护栏命中：撤销采用 → cover 落空（走 monogram / 后续 bodyhero-backfill），
-    // 记被判 R2 key 供 og-backfill Fix C 拦截再灌回。
-    patches.push({ path: "$.cover_image", value: "" });
+    // 采用护栏命中：撤销 og(logo) 采用。就地从正文 assets 选到合格 hero → live 当场落它作 cover
+    // （无需等手动 backfill）；无合格 hero → cover 落空走 monogram。两者都记被判 R2 key，供
+    // og-backfill Fix C 拦截同图再灌 + 持久拒绝集合（Fix 2）复用。
+    if (bodyHeroCover) {
+      patches.push({ path: "$.cover_image", value: bodyHeroCover });
+      patches.push({ path: "$.cover_backfilled_at", value: nowIso });
+      patches.push({ path: "$.cover_bodyhero_backfilled_at", value: nowIso });
+    } else {
+      patches.push({ path: "$.cover_image", value: "" });
+    }
     patches.push({ path: "$.cover_generic_cleared_hash", value: guardedHash });
     patches.push({ path: "$.cover_brandlogo_guarded_at", value: nowIso });
   } else if (coverRejected) {
@@ -769,9 +786,15 @@ const GENERIC_SRC_EXPR =
 // 与 generic-sweep 默认 minCount 一致（3）。
 export const BRAND_LOGO_MIN_COUNT = 3;
 
-// 采用护栏（层 1，Task 2）：某 R2 封面是否已被同 source ≥ minCount 条**其他** item 用作 cover。
-// coverUrl 为 migrateAsset 产出的 `/r/blog/<hash>.<ext>`；归一化用 coverR2Key，LIKE `%/r/<key>`
-// 同时匹配相对（`/r/...`）与绝对（`<apiBase>/r/...`）两种存库形态。src 口径与 GENERIC_SRC_EXPR 一致。
+// 采用护栏（层 1，Task 2）：判断某张 og→R2 封面是否属于「源级品牌 logo」，两条判据取或：
+//   ① live 计数：同 source 已有 ≥ minCount 条**其他** item 正用它作 cover（稳态簇成形后拦）；
+//   ② 持久拒绝（Fix 2，2026-07-06）：同 source **曾被清过**这张 logo（`cover_generic_cleared_hash`
+//      记录了它的归一 key）——某源的 logo 一旦被清簇/护栏清过一次，之后任何一篇立即被拒，
+//      不再有「清簇归零 COUNT → 前 ≤2 篇又把 logo 当 cover、到第 3 篇才自愈」的再泄漏窗口。
+// coverUrl 为 migrateAsset 产出的 `/r/blog/<hash>.<ext>`；归一化用 coverR2Key（与四处一致），
+//   ① 的 LIKE `%/r/<key>` 兼容相对（`/r/...`）与绝对（`<apiBase>/r/...`）两种存库形态，
+//   ② 的 cover_generic_cleared_hash 本就以归一 key 形态落库（generic-sweep / 护栏两侧都写 coverR2Key）。
+// 一次聚合查询（SUM/CASE）同时取两计数，src 口径与 GENERIC_SRC_EXPR 一致，避免二次全表扫。
 export async function isSourceLevelBrandLogo(
   env: Env,
   itemId: string,
@@ -781,15 +804,19 @@ export async function isSourceLevelBrandLogo(
 ): Promise<boolean> {
   const r2Key = coverR2Key(coverUrl) || coverUrl;
   const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM items
-       WHERE source_type = 'blog'
-         AND id != ?
-         AND ${GENERIC_SRC_EXPR} = ?
-         AND json_extract(extra,'$.cover_image') LIKE ?`,
+    `SELECT
+        SUM(CASE WHEN json_extract(extra,'$.cover_image') LIKE ? THEN 1 ELSE 0 END) AS n,
+        SUM(CASE WHEN json_extract(extra,'$.cover_generic_cleared_hash') = ? THEN 1 ELSE 0 END) AS cleared
+       FROM items
+      WHERE source_type = 'blog'
+        AND id != ?
+        AND ${GENERIC_SRC_EXPR} = ?`,
   )
-    .bind(itemId, srcVal, `%/r/${r2Key}`)
-    .first<{ n: number }>();
-  return (row?.n ?? 0) >= minCount;
+    .bind(`%/r/${r2Key}`, r2Key, itemId, srcVal)
+    .first<{ n: number | null; cleared: number | null }>();
+  const liveCount = row?.n ?? 0;
+  const clearedHits = row?.cleared ?? 0;
+  return liveCount >= minCount || clearedHits >= 1;
 }
 
 interface GenericClusterRow {
@@ -989,9 +1016,8 @@ export async function runBlogCoverOgBackfill(
 //   游标 `cover_bodyhero_backfilled_at` 单调（处理必置位，无论 adopt/skip）；dry=1 零写。
 // ═════════════════════════════════════════════════════════════════════════════
 
-// news 封面垃圾 URL 黑名单（与 digest/render.ts pickNewsCoverGated 的 NEWS_COVER_BLACKLIST 一致）。
-const BODY_HERO_BLACKLIST =
-  /qrcode|qr_code|qr-code|erweima|二维码|logo|avatar|icon|badge|banner_footer|footer/i;
+// 黑名单 + 尺寸门统一到 feeds/cover-heuristics.ts（COVER_BLACKLIST / passesCoverSizeGate），
+// 与 digest/render.ts pickNewsCoverGated 共用同一口径，消除复制漂移（Minor，2026-07-06）。
 
 // 从 body.assets 选第一张合格正文 hero：已迁 R2 + 过黑名单 + 过尺寸门（maxDim≥240 且 0.5≤ar≤2）。
 // 只用已迁 R2 的 asset（外链态不当封面，与渲染层一致）；排除与被清 logo 同 hash 的资产。
@@ -1015,16 +1041,12 @@ export function pickBodyHeroCover(
     const r2 = typeof a.r2_url === "string" ? a.r2_url : "";
     if (!r2 || !isR2CoverUrl(r2)) continue; // 只用已迁 R2 的 asset
     const orig = typeof a.url === "string" ? a.url : "";
-    if (BODY_HERO_BLACKLIST.test(orig) || BODY_HERO_BLACKLIST.test(r2)) continue;
+    if (COVER_BLACKLIST.test(orig) || COVER_BLACKLIST.test(r2)) continue;
     if (clearedHash && (coverR2Key(r2) || r2) === clearedHash) continue; // 排除被清 logo 本身
     const w = typeof a.width === "number" ? a.width : undefined;
     const h = typeof a.height === "number" ? a.height : undefined;
-    if (w && h) {
-      const maxDim = Math.max(w, h);
-      const ar = w / h;
-      // 与渲染层 pickNewsCoverGated / 前端卡片缩略图 qualityGate 同参。
-      if (maxDim < 240 || ar < 0.5 || ar > 2) continue;
-    }
+    // 与渲染层 pickNewsCoverGated / 前端卡片缩略图 qualityGate 同参（共享 passesCoverSizeGate）。
+    if (!passesCoverSizeGate(w, h)) continue;
     return r2;
   }
   return null;

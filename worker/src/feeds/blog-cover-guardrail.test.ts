@@ -64,20 +64,26 @@ function makeEnv(items: FakeItem[], hasR2 = true) {
           return { results: [] as T[] };
         },
         async first<T>() {
-          // 采用护栏 COUNT：id != ? AND <src>=? AND cover LIKE ?
-          if (/COUNT\(\*\) AS n/i.test(sql)) {
-            const excludeId = String(bound[0]);
-            const src = String(bound[1]);
-            const like = String(bound[2]); // '%/r/<key>'
+          // 采用护栏聚合（Fix 2 后一次查两计数）：
+          //   SUM(cover LIKE ?) AS n, SUM(cleared_hash = ?) AS cleared
+          //   ... id != ? AND <src>=?   binds=[likePattern, r2Key, itemId, srcVal]
+          if (/AS cleared/i.test(sql)) {
+            const like = String(bound[0]); // '%/r/<key>'
+            const clearedKey = String(bound[1]); // 归一 R2 key
+            const excludeId = String(bound[2]);
+            const src = String(bound[3]);
             const suffix = like.startsWith('%') ? like.slice(1) : like;
-            const n = items.filter(
+            const same = items.filter(
               (it) =>
                 it.source_type === 'blog' &&
                 it.id !== excludeId &&
-                srcOf(it) === src &&
-                coverOf(it).endsWith(suffix),
+                srcOf(it) === src,
+            );
+            const n = same.filter((it) => coverOf(it).endsWith(suffix)).length;
+            const cleared = same.filter(
+              (it) => String(it.extra.cover_generic_cleared_hash || '') === clearedKey,
             ).length;
-            return { n } as unknown as T;
+            return { n, cleared } as unknown as T;
           }
           // bodyhero-backfill remaining
           if (/COUNT\(\*\) AS c/i.test(sql)) {
@@ -177,6 +183,38 @@ describe('isSourceLevelBrandLogo（同源 ≥3 条共用同图 → 判品牌 log
     const hit = await isSourceLevelBrandLogo(env, 'blog:jiqizhixin:9', 'jiqizhixin', '/r/blog/jzx.png');
     expect(hit).toBe(true);
   });
+
+  // ── Fix 2（Important 2）：持久化 logo hash 拒绝，关掉清簇后的再泄漏窗口 ──
+  test('持久拒绝：源曾清过该 logo hash（cover_generic_cleared_hash）→ 即便 live COUNT<3 仍判 logo', async () => {
+    const items: FakeItem[] = [
+      // 曾被清的一篇：cover 已空，但 cleared_hash 记录了这张站点 logo
+      { id: 'blog:qbitai:cleared', source_type: 'blog', extra: { feed_key: 'qbitai', cover_generic_cleared_hash: 'blog/qlogo.png' } },
+      // 清簇后又冒出的第 1 篇仍用 logo（live COUNT 仅 1，不足 3）
+      { id: 'blog:qbitai:1', source_type: 'blog', extra: { feed_key: 'qbitai', cover_image: '/r/blog/qlogo.png' } },
+    ];
+    const { env } = makeEnv(items);
+    const hit = await isSourceLevelBrandLogo(env, 'blog:qbitai:new', 'qbitai', '/r/blog/qlogo.png');
+    expect(hit).toBe(true); // cleared 集合命中，不再等第 3 篇自愈
+  });
+
+  test('新源从未清过 + COUNT<3 → 不误伤（正常采用）', async () => {
+    const items: FakeItem[] = [
+      { id: 'blog:newsrc:1', source_type: 'blog', extra: { feed_key: 'newsrc', cover_image: '/r/blog/pic.jpg' } },
+      { id: 'blog:newsrc:2', source_type: 'blog', extra: { feed_key: 'newsrc', cover_image: '/r/blog/pic.jpg' } },
+    ];
+    const { env } = makeEnv(items);
+    const hit = await isSourceLevelBrandLogo(env, 'blog:newsrc:3', 'newsrc', '/r/blog/pic.jpg');
+    expect(hit).toBe(false); // COUNT=2 且无 cleared 记录 → 不判
+  });
+
+  test('cleared_hash 是别的 hash（非本 og）→ 不误判', async () => {
+    const items: FakeItem[] = [
+      { id: 'blog:qbitai:cleared', source_type: 'blog', extra: { feed_key: 'qbitai', cover_generic_cleared_hash: 'blog/other.png' } },
+    ];
+    const { env } = makeEnv(items);
+    const hit = await isSourceLevelBrandLogo(env, 'blog:qbitai:new', 'qbitai', '/r/blog/qlogo.png');
+    expect(hit).toBe(false); // 归一 key 不同 → 不命中持久拒绝集合
+  });
 });
 
 // ═══════════════ 层 1：migrateMediaForBlog 集成（护栏撤销采用）═══════════════
@@ -235,6 +273,87 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     });
     expect(target.extra.cover_image).toBe('/r/blog/uniquehero.jpg');
     expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined();
+  });
+
+  // ── Fix 1（Important 1）：护栏命中后 live 就地从正文 assets 回落 hero ──
+  test('护栏命中 + 正文有合格 R2 hero → live 就地采用 body hero（不等 backfill）', async () => {
+    const siblings: FakeItem[] = [1, 2, 3].map((i) => ({
+      id: `blog:qbitai:s${i}`,
+      source_type: 'blog',
+      extra: { feed_key: 'qbitai', cover_image: '/r/blog/qlogo.png' },
+    }));
+    const target: FakeItem = {
+      id: 'blog:qbitai:new',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'qbitai',
+        cover_image: 'https://qbitai.com/logo.png',
+        body: {
+          source: 'rss_full',
+          extracted_at: 'x',
+          assets: [
+            // 已迁 R2 的正文合格配图（url 为 /r/ 形态 → 迁移循环幂等跳过，测试不触发真 fetch）
+            { url: '/r/blog/hero.webp', r2_url: '/r/blog/hero.webp', kind: 'image', role: 'inline', width: 1200, height: 675 },
+          ],
+        },
+      },
+    };
+    const { env } = makeEnv([...siblings, target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:new', {
+      migrateCover: async () => '/r/blog/qlogo.png', // og 迁出 = 站点 logo
+    });
+    expect(target.extra.cover_image).toBe('/r/blog/hero.webp');            // 就地回落正文 hero
+    expect(target.extra.cover_generic_cleared_hash).toBe('blog/qlogo.png'); // 仍记 logo hash（供持久拒绝 + Fix C）
+    expect(target.extra.cover_brandlogo_guarded_at).toBeTruthy();
+  });
+
+  test('护栏命中 + 正文只有黑名单/不合格图 → 清空走 monogram', async () => {
+    const siblings: FakeItem[] = [1, 2, 3].map((i) => ({
+      id: `blog:qbitai:s${i}`,
+      source_type: 'blog',
+      extra: { feed_key: 'qbitai', cover_image: '/r/blog/qlogo.png' },
+    }));
+    const target: FakeItem = {
+      id: 'blog:qbitai:new',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'qbitai',
+        cover_image: 'https://qbitai.com/logo.png',
+        body: {
+          source: 'rss_full',
+          extracted_at: 'x',
+          assets: [
+            { url: '/r/blog/qrcode.png', r2_url: '/r/blog/qrcode.png', kind: 'image', role: 'inline', width: 600, height: 600 },
+          ],
+        },
+      },
+    };
+    const { env } = makeEnv([...siblings, target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:new', {
+      migrateCover: async () => '/r/blog/qlogo.png',
+    });
+    expect(target.extra.cover_image).toBeUndefined();                      // 无合格 hero → 空 → monogram
+    expect(target.extra.cover_generic_cleared_hash).toBe('blog/qlogo.png');
+    expect(target.extra.cover_brandlogo_guarded_at).toBeTruthy();
+  });
+
+  test('持久拒绝集成：同源曾清过该 logo hash → 新文 og 同 hash 即撤销（live COUNT 仅 1）', async () => {
+    const cleared: FakeItem = {
+      id: 'blog:qbitai:cleared',
+      source_type: 'blog',
+      extra: { feed_key: 'qbitai', cover_generic_cleared_hash: 'blog/qlogo.png' },
+    };
+    const target: FakeItem = {
+      id: 'blog:qbitai:new2',
+      source_type: 'blog',
+      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/logo.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
+    };
+    const { env } = makeEnv([cleared, target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:new2', {
+      migrateCover: async () => '/r/blog/qlogo.png',
+    });
+    expect(target.extra.cover_image).toBeUndefined();                      // 持久拒绝命中 → 撤销采用
+    expect(target.extra.cover_brandlogo_guarded_at).toBeTruthy();
   });
 });
 

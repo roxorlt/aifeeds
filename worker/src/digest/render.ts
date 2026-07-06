@@ -5,6 +5,7 @@
 
 import type { DigestSource } from './config';
 import { stripLabelPrefix } from '../feeds/classify-translate';
+import { COVER_BLACKLIST, passesCoverSizeGate } from '../feeds/cover-heuristics';
 
 export interface RenderRow {
   id: string;
@@ -156,8 +157,8 @@ function isInternalR2(u: string | null | undefined, apiBase: string): boolean {
   return !!apiBase && u.startsWith(`${apiBase}/r/`);
 }
 
-// news 封面垃圾 URL 黑名单(不区分大小写):二维码 / logo / 头像 / 图标 / 徽章 / 页脚 banner。
-const NEWS_COVER_BLACKLIST = /qrcode|qr_code|qr-code|erweima|二维码|logo|avatar|icon|badge|banner_footer|footer/i;
+// news 封面垃圾 URL 黑名单 + 尺寸门统一到 feeds/cover-heuristics.ts（COVER_BLACKLIST /
+// passesCoverSizeGate），与 media-r2.ts pickBodyHeroCover 共用同一口径，消除复制漂移（Minor，2026-07-06）。
 
 interface CoverCandidate { r2: string; orig: string; width?: number; height?: number }
 
@@ -207,13 +208,9 @@ function pickNewsCoverGated(ex: Record<string, unknown>, apiBase: string): strin
   if (cov && isInternalR2(cov, apiBase)) return abs(cov);
   // 2. 回退:按顺序取第一张通过黑名单 + 尺寸门的 R2 正文图。
   for (const c of bodyCoverCandidates(ex, apiBase)) {
-    if (NEWS_COVER_BLACKLIST.test(c.orig) || NEWS_COVER_BLACKLIST.test(c.r2)) continue;
-    if (c.width && c.height) {
-      const maxDim = Math.max(c.width, c.height);
-      const ar = c.width / c.height;
-      // 与前端卡片缩略图 qualityGate 同参:maxDim≥240 且 0.5≤ar≤2。
-      if (maxDim < 240 || ar < 0.5 || ar > 2) continue;
-    }
+    if (COVER_BLACKLIST.test(c.orig) || COVER_BLACKLIST.test(c.r2)) continue;
+    // 与前端卡片缩略图 qualityGate 同参:maxDim≥240 且 0.5≤ar≤2（共享 passesCoverSizeGate）。
+    if (!passesCoverSizeGate(c.width, c.height)) continue;
     return abs(c.r2);
   }
   // 3. 全部不过 → 无封面(渲染层不出 <img>,与站内抽屉一致的纯文字降级)。
