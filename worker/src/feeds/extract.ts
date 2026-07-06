@@ -358,6 +358,65 @@ export function extractPageMeta(html: string, baseUrl: string): PageMeta {
   return meta;
 }
 
+/**
+ * 由 fetchStrategy + 详情页 meta 决定要落库的 SQL 片段（Fix 1，2026-07-06）。
+ *
+ * 封面（og:image）**放开到全部 blog 源**：历史上只有 page-scrape 才采用 res.meta.cover，
+ * native 源（如 The Verge）把抓到的 og:image 算出来又丢掉，导致下游回退到「正文首图」
+ * （常是作者署名头像）。现改为任意策略只要有 meta.cover 就采用。
+ *   - 幂等：`COALESCE(NULLIF(cover_image, ''), ?)` —— 已有合格 cover_image 不覆盖；
+ *     空串（此前被质量门/sweep 清成 ''）也视为无封面，允许 og:image 补上。
+ *   - Fix B 守卫：迁移 marker `blog_media_r2_at` 已置位（item 已过一轮 R2 迁移）时，
+ *     **不再**把 og 外链回写空槽（否则 step4 幂等早退不迁 → 外链永久滞留、前端直出）。
+ * title / published_at 仍**仅 page-scrape 采用**：page-scrape 的 stub 只有 slug 占位标题，
+ *   靠 og:title 补真标题；native 源标题来自 RSS 权威，不动。
+ *
+ * 返回可直接拼进 `UPDATE items SET ${sets.join(', ')} WHERE id = ?` 的 sets/binds
+ * （path 均来自固定字面量，无注入；value 走 bind）。meta 缺失或无可采字段 → 空。
+ */
+export function buildBlogPageMetaPatch(
+  fetchStrategy: FetchStrategy,
+  meta: PageMeta | undefined,
+): { sets: string[]; binds: unknown[] } {
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if (!meta) return { sets, binds };
+
+  // 封面：全部 blog 源都采用 og:image（幂等，不覆盖已有合格 cover_image）。
+  //
+  // Fix B（2026-07-06，workflow 重跑防护）：一旦 R2 迁移 marker `blog_media_r2_at`
+  // 已置位，cover 槽即由 migrateMediaForBlog 独占——此处**绝不**把 og 外链回写进
+  // 此前被质量门/sweep 清成 '' 的空槽。否则重 trigger 已迁移的 item 时，本 patch 写入
+  // og 外链，而 step4 migrateMediaForBlog 因 marker 已置位直接幂等早退（media-r2.ts），
+  // 外链永久滞留、前端直出（防盗链风险）。CASE 守卫：marker 已置位 → 保留原值（'' 或
+  // /r/）；marker 未置位（首轮）才允许 og 外链落位（随后 step4 过质量门迁 R2）。
+  if (meta.cover) {
+    sets.push(
+      "extra = json_set(coalesce(extra,'{}'), '$.cover_image', " +
+        "COALESCE(" +
+        "NULLIF(json_extract(extra,'$.cover_image'), ''), " +
+        "CASE WHEN json_extract(extra,'$.blog_media_r2_at') IS NULL THEN ? END, " +
+        "json_extract(extra,'$.cover_image')" +
+        "))",
+    );
+    binds.push(meta.cover);
+  }
+
+  // title / published_at 仅 page-scrape 采用（native 用 RSS 标题/时间）。
+  if (fetchStrategy === 'page-scrape') {
+    if (meta.title) {
+      sets.push('title = ?');
+      binds.push(meta.title.slice(0, 300));
+    }
+    if (meta.published_at) {
+      sets.push("published_at = COALESCE(NULLIF(published_at, ''), ?)");
+      binds.push(meta.published_at);
+    }
+  }
+
+  return { sets, binds };
+}
+
 /** 把各种日期串规整成 ISO8601;已是 ISO 原样(纯日期补时间),否则试 Date 解析,非法返回 undefined。 */
 function toIsoDate(s?: string): string | undefined {
   if (!s) return undefined;

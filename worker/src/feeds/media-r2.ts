@@ -32,6 +32,7 @@ import type {
   FeedBodyAsset,
   FeedPublisher,
 } from "./types";
+import { extractPageMeta, throttledFetchText } from "./extract";
 
 const R2_PREFIX_BLOG = "blog";
 const R2_PREFIX_PODCAST = "podcast";
@@ -251,6 +252,19 @@ async function migrateAsset(
     console.error(`[feeds-r2] asset error ${url}:`, e);
     return null;
   }
+}
+
+// 单张 blog 封面 URL → R2（过质量门；Fix 3 backfill 复用）。合格返回 /r/key，否则 null。
+export async function migrateFeedCover(
+  env: Env,
+  coverUrl: string,
+): Promise<string | null> {
+  return migrateAsset(env, coverUrl, {
+    prefix: R2_PREFIX_BLOG,
+    kind: "image",
+    maxBytes: IMG_MAX_BYTES,
+    qualityGate: true,
+  });
 }
 
 // publisher logo / favicon 迁 R2（§9.1 / D9：BE 迁真实 logo）。
@@ -703,4 +717,212 @@ export async function runCoverQualitySweep(
     `SELECT COUNT(*) AS c FROM items WHERE ${SWEEP_PREDICATE}`,
   ).first<{ c: number }>();
   return { scanned, cleared, remaining: rem?.c ?? 0 };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Fix 2a：源级通用图剔除（blog-cover-generic-sweep，2026-07-06）。
+//   统计特征法：同一 blog source（feed_key）内 cover_image 命中**同一 R2 hash**
+//   ≥ minCount 次 → 判为「源级通用图」（作者头像 / 站点通栏 / 二维码横幅都逃不过）。
+//   整簇 cover_image 清空（json_remove），并**清掉 cover_og_backfilled_at 游标**，
+//   使随后 Fix 3 blog-cover-og-backfill 能重新拉 og:image 回填真 hero。
+//   dry=1 只列簇明细（src / cover / count）供人工核对，不落盘。
+//   src 派生 = COALESCE(feed_key, show_key, source_type)，与两条 SQL 保持一致。
+//
+//   ⚠️ 只扫 source_type='blog'（审查修复，2026-07-06）：播客单集共用节目封面是
+//      合法常态（一档节目所有 episode 天然同一张节目图），且 og-backfill 只回填 blog，
+//      清了 podcast 簇没有回填方 → 永久掉封面。故收敛到 blog-only。
+//   ⚠️ 清簇时把被清 R2 key 记到 `$.cover_generic_cleared_hash`（Fix C，2026-07-06）：
+//      供 og-backfill 判定「回填的 og:image 又是同一张通用图」→ 跳过写入终止
+//      sweep↔backfill 无限循环（og:image 本身就是站点通用图时）。
+// ═════════════════════════════════════════════════════════════════════════════
+
+// src 派生表达式（聚合 GROUP BY 与逐簇 UPDATE 复用同一字面量，保证匹配一致）。
+const GENERIC_SRC_EXPR =
+  "COALESCE(json_extract(extra,'$.feed_key'), json_extract(extra,'$.show_key'), source_type)";
+
+interface GenericClusterRow {
+  src: string;
+  cover: string;
+  n: number;
+}
+
+export async function runBlogCoverGenericSweep(
+  env: Env,
+  opts: { minCount: number; limit: number; dry: boolean },
+): Promise<{
+  clusters: Array<{ src: string; cover: string; count: number }>;
+  clustersCleared: number;
+  itemsCleared: number;
+}> {
+  const nowIso = new Date().toISOString();
+  const agg = await env.DB.prepare(
+    `SELECT ${GENERIC_SRC_EXPR} AS src,
+            json_extract(extra,'$.cover_image') AS cover,
+            COUNT(*) AS n
+       FROM items
+      WHERE source_type = 'blog'
+        AND COALESCE(json_extract(extra,'$.cover_image'),'') != ''
+        AND (json_extract(extra,'$.cover_image') LIKE '/r/%'
+             OR json_extract(extra,'$.cover_image') LIKE 'http%://%/r/%')
+      GROUP BY src, cover
+     HAVING n >= ?
+      ORDER BY n DESC
+      LIMIT ?`,
+  )
+    .bind(opts.minCount, opts.limit)
+    .all<GenericClusterRow>();
+
+  const clusters = (agg.results || []).map((r) => ({
+    src: String(r.src),
+    cover: String(r.cover),
+    count: Number(r.n),
+  }));
+
+  let clustersCleared = 0;
+  let itemsCleared = 0;
+  if (!opts.dry) {
+    for (const c of clusters) {
+      // 清簇：cover_image + cover_og_backfilled_at 一并移除（让 Fix 3 可重填），打 cleared marker
+      // + 记被清 R2 key 到 cover_generic_cleared_hash（Fix C：og-backfill 判同 hash 回填终止循环）。
+      const clearedKey = coverR2Key(c.cover) || c.cover;
+      await env.DB.prepare(
+        `UPDATE items
+            SET extra = json_set(
+                          json_remove(COALESCE(extra,'{}'),
+                            '$.cover_image', '$.cover_og_backfilled_at'),
+                          '$.cover_generic_cleared_at', ?,
+                          '$.cover_generic_cleared_hash', ?)
+          WHERE source_type = 'blog'
+            AND json_extract(extra,'$.cover_image') = ?
+            AND ${GENERIC_SRC_EXPR} = ?`,
+      )
+        .bind(nowIso, clearedKey, c.cover, c.src)
+        .run();
+      clustersCleared++;
+      itemsCleared += c.count;
+    }
+  }
+
+  return { clusters, clustersCleared, itemsCleared };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Fix 3：og:image 存量回填（blog-cover-og-backfill，2026-07-06）。
+//   分页扫 blog items 中 cover_image 空（含 Fix 2 清空 / 迁移拒绝 '' / 天生无封面）
+//   且未打 og 游标的行 → 外呼原文页取 og:image → 过质量门 + 迁 R2 → 写 cover_image。
+//   游标字段 `cover_og_backfilled_at` 单调（每条处理后必置位，无论 adopt/skip），
+//   与 cover_swept_at / cover_generic_cleared_at 独立防互相干扰。
+//   外站拉不到 / 无 og:image / 门控拒 → 只推进游标，保持 monogram 兜底。
+//   Fix C：若 og:image 迁出的 R2 key 与被 generic-sweep 清掉的 hash 相同
+//   （`cover_generic_cleared_hash`），则跳过写入（否则回填→再清→死循环），仅推进游标。
+//   deps 可注入（测试 mock 外呼）；默认走 throttledFetchText + migrateFeedCover。
+//   单批默认 limit 15（每条外呼原文页，控制子请求量）。返回 {scanned,adopted,skipped,remaining}。
+// ═════════════════════════════════════════════════════════════════════════════
+
+const BACKFILL_OG_PREDICATE = `
+  source_type = 'blog'
+  AND COALESCE(json_extract(extra, '$.cover_image'), '') = ''
+  AND json_extract(extra, '$.cover_og_backfilled_at') IS NULL
+  AND COALESCE(url, '') != ''`;
+
+interface BackfillRow {
+  id: string;
+  url: string | null;
+  extra: string | null;
+}
+
+export async function runBlogCoverOgBackfill(
+  env: Env,
+  opts: { limit: number; dry: boolean },
+  deps?: {
+    fetchHtml?: (url: string) => Promise<string | null>;
+    migrateCover?: (env: Env, coverUrl: string) => Promise<string | null>;
+  },
+): Promise<{ scanned: number; adopted: number; skipped: number; remaining: number }> {
+  const fetchHtml = deps?.fetchHtml ?? throttledFetchText;
+  const migrateCover = deps?.migrateCover ?? migrateFeedCover;
+  const nowIso = new Date().toISOString();
+
+  const batch = await env.DB.prepare(
+    `SELECT id, url, extra FROM items WHERE ${BACKFILL_OG_PREDICATE} LIMIT ?`,
+  )
+    .bind(opts.limit)
+    .all<BackfillRow>();
+
+  let scanned = 0;
+  let adopted = 0;
+  let skipped = 0;
+
+  for (const row of batch.results || []) {
+    scanned++;
+    let extra: Record<string, unknown> = {};
+    try {
+      extra = row.extra ? JSON.parse(row.extra) : {};
+    } catch {
+      extra = {};
+    }
+    const pageUrl = String(extra.canonical_url || row.url || "").trim();
+
+    // 1. 外呼原文页 → 抽 og:image。
+    let ogCover: string | undefined;
+    if (pageUrl) {
+      try {
+        const html = await fetchHtml(pageUrl);
+        if (html) ogCover = extractPageMeta(html, pageUrl).cover;
+      } catch (e) {
+        console.warn(`[feeds-r2:og-backfill] ${row.id} fetch/extract fail`, e);
+      }
+    }
+
+    // 2. dry：只按 og 命中计数，零写。
+    if (opts.dry) {
+      if (ogCover) adopted++;
+      else skipped++;
+      continue;
+    }
+
+    // 3. og:image 过质量门 + 迁 R2 → 写 cover_image。
+    let r2: string | null = null;
+    if (ogCover) {
+      try {
+        r2 = await migrateCover(env, ogCover);
+      } catch (e) {
+        console.warn(`[feeds-r2:og-backfill] ${row.id} migrate fail`, e);
+        r2 = null;
+      }
+    }
+
+    // Fix C（2026-07-06）：sweep↔backfill 循环终止。若此 item 曾被 generic-sweep 清簇
+    // （`cover_generic_cleared_at` 置位），且本次拟写入的 R2 key 与被清前的 hash 相同
+    // （即 og:image 本身就是那张站点通用图 → 回填 → 下轮 sweep 再清 → 无限循环），
+    // 则跳过写入、仅推进游标，保持 monogram 兜底、终止循环。不同 hash（真 hero）正常写入。
+    const clearedHash = String(extra.cover_generic_cleared_hash || '');
+    const r2Key = r2 ? coverR2Key(r2) || r2 : '';
+    const isGenericLoop =
+      !!r2 && !!extra.cover_generic_cleared_at && !!clearedHash && r2Key === clearedHash;
+
+    if (r2 && !isGenericLoop) {
+      await env.DB.prepare(
+        `UPDATE items SET extra = json_set(COALESCE(extra,'{}'),
+           '$.cover_image', ?, '$.cover_backfilled_at', ?, '$.cover_og_backfilled_at', ?)
+         WHERE id = ?`,
+      )
+        .bind(r2, nowIso, nowIso, row.id)
+        .run();
+      adopted++;
+    } else {
+      // 拉不到 / 无 og / 门控拒 / 同 hash 循环命中 → 仅推进游标，保持 monogram 兜底。
+      await env.DB.prepare(
+        `UPDATE items SET extra = json_set(COALESCE(extra,'{}'), '$.cover_og_backfilled_at', ?) WHERE id = ?`,
+      )
+        .bind(nowIso, row.id)
+        .run();
+      skipped++;
+    }
+  }
+
+  const rem = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM items WHERE ${BACKFILL_OG_PREDICATE}`,
+  ).first<{ c: number }>();
+  return { scanned, adopted, skipped, remaining: rem?.c ?? 0 };
 }

@@ -441,10 +441,34 @@ function htmlDecode(s: string): string {
     .replace(/&gt;/g, '>');
 }
 
-function isSkippableInlineImage(url: string): boolean {
-  return /\.svg(\?|$)/i.test(url)
+// 署名头像 / 作者头像形态的 URL 模式清单（可配置，泛化不硬编码单站，Fix 2.2 2026-07-06）。
+// 背景：native blog 源无结构化封面时回退取「正文首图」，而作者署名头像常是正文第一张图
+//   （如 The Verge 的 TERRENCE_BLURPLE.jpg，"blurple" 是其品牌双色调头像特征）。
+// 依据调查报告的头像形态证据泛化：作者/头像路径关键词 + 已知品牌头像标记 + 小尺寸缩略图变体。
+// 正常题图（大尺寸、无这些标记）不受影响。
+const AVATAR_INLINE_PATTERNS: RegExp[] = [
+  // 路径 / 文件名里的头像语义关键词（authors/、_avatar、headshot、byline、gravatar 等）
+  /(^|[/_-])avatars?([/_.-]|$)/i,
+  /\/authors?\//i,
+  /author[_-]/i,
+  /head[_-]?shot/i,
+  /byline/i,
+  /contributor/i,
+  /profile[_-]?(pic|photo|image)/i,
+  /gravatar\.com/i,
+  // 已知品牌作者头像标记（The Verge "blurple" 双色调署名头像）
+  /blurple/i,
+  // 小尺寸缩略图变体（w/width=1..149）——头像常以小图请求，hero 一般 ≥600
+  /[?&](?:w|width)=(?:[1-9]\d?|1[0-4]\d)(?:\D|$)/i,
+];
+
+export function isSkippableInlineImage(url: string): boolean {
+  if (/\.svg(\?|$)/i.test(url)
     || /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(url)
-    || /^data:/i.test(url);
+    || /^data:/i.test(url)) {
+    return true;
+  }
+  return AVATAR_INLINE_PATTERNS.some((re) => re.test(url));
 }
 
 export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string, opts: RenderOptions = {}): RenderedItem {
