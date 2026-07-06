@@ -41,6 +41,12 @@ export interface SelectTopOptions {
   // node-run / 邮件 / Codex 快照使用:过滤前几天已经推过的同事件媒体重复。
   // daily-api 实时模式不启用,它只做日内事件折叠 + 自己的宽松 stale 去重。
   strictCrossDayEventDedup?: boolean;
+  // 历史回填日期锚点(YYYY-MM-DD)。缺省=不锚定,行为与改动前逐字节一致(8 点当日路径 + 邮件路径零影响);
+  // 传入时把候选时间窗锚到该日 D 的 00:00 UTC 时刻,即「D 日晨 8 点 BJT 自然跑」时的窗口
+  // (上界=D 日 0 点 UTC=datetime(D);下界=上界回退该源 windowDays 天)。不变式:anchored(D) ≡
+  // D 日 00:00 UTC 自然跑窗口 —— 上界绝不用 '+1 day',否则窗口整体后移一天,前日补链/backfill
+  // 历史页会错位选成次日内容。仅日报静态页回填(daily-page-run)使用。
+  asOfDate?: string;
 }
 
 export async function excludeAlreadyPushed(
@@ -154,13 +160,23 @@ export async function selectTopForSource(
     windowDays = 3;
   }
 
+  // 时间窗:默认锚到 now(逐字节保持原样);传 asOfDate=D 时锚到 D 日 00:00 UTC(= D 日晨 8 点 BJT
+  // 自然跑时刻),使 anchored(D) 严格等于当日自然跑窗口 —— 上界=datetime(D)(绝不加 '+1 day',
+  // 否则整窗后移一天),下界回退 windowDays 天。回填历史页时才不选出"当下"的热点。
+  const asOf = options.asOfDate;
+  const windowClause = asOf
+    ? `datetime(scraped_at) >= datetime(?, '-${windowDays} day')
+      AND datetime(scraped_at) < datetime(?)`
+    : `datetime(scraped_at) >= datetime('now','-${windowDays} day')`;
   const sql = `SELECT id FROM items
     WHERE source_type = ?
-      AND datetime(scraped_at) >= datetime('now','-${windowDays} day')
+      AND ${windowClause}
       AND deleted_at IS NULL ${extraWhere} ${wcGate}
     ORDER BY ${orderBy}
     LIMIT ?`;
-  const rows = await env.DB.prepare(sql).bind(sourceType, limit).all<{ id: string }>();
+  const rows = asOf
+    ? await env.DB.prepare(sql).bind(sourceType, asOf, asOf, limit).all<{ id: string }>()
+    : await env.DB.prepare(sql).bind(sourceType, limit).all<{ id: string }>();
   return (rows.results || []).map((r) => r.id);
 }
 
@@ -201,12 +217,19 @@ async function selectNewsByScore(env: Env, limit: number, options: SelectTopOpti
   const cat = `json_extract(extra,'$.ai_category')`;
   const co = `json_extract(extra,'$.source_company')`;
   const tzh = `json_extract(extra,'$.title_zh')`;
+  // 时间窗:默认锚 now(逐字节保持原样);传 asOfDate=D 时锚到 D 日 00:00 UTC(= 当日晨自然跑时刻),
+  // 上界=datetime(D)(不加 '+1 day',与通用路径同构),下界回退 3 天。anchored(D) ≡ 当日自然跑窗口。
+  const asOf = options.asOfDate;
+  const windowClause = asOf
+    ? `datetime(scraped_at) >= datetime(?, '-3 day')
+      AND datetime(scraped_at) < datetime(?)`
+    : `datetime(scraped_at) >= datetime('now','-3 day')`;
   const sql = `
     SELECT id, title, source_type, content, content_translated, extra, published_at
     FROM items
     WHERE source_type IN ('blog','podcast')
       AND is_relevant = 1
-      AND datetime(scraped_at) >= datetime('now','-3 day')
+      AND ${windowClause}
       AND deleted_at IS NULL
       -- 噪音过滤①:slow-news / "没什么大事" 填充帖(如 smol.ai 的 "[AINews] not much
       -- happened today")。措辞很特定,按原标题英文匹配(对中文重写鲁棒),几乎不误伤真新闻。
@@ -228,7 +251,9 @@ async function selectNewsByScore(env: Env, limit: number, options: SelectTopOpti
           OR COALESCE(${tzh},'') LIKE '%优惠码%'
         )
       )`;
-  const rows = await env.DB.prepare(sql).all<NewsCandidateDbRow>();
+  const rows = asOf
+    ? await env.DB.prepare(sql).bind(asOf, asOf).all<NewsCandidateDbRow>()
+    : await env.DB.prepare(sql).all<NewsCandidateDbRow>();
   const candidates = (rows.results || []).map(newsCandidateFromDbRow);
   const scored = scoreNewsCandidatesForDigest(candidates);
   const eventDeduped = options.strictCrossDayEventDedup

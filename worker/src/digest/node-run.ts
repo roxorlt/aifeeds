@@ -12,8 +12,9 @@ import {
 } from './config';
 import { selectTopForSource, excludeAlreadyPushed } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
-import { slotKey } from './lib';
+import { slotKey, bjtDateStr } from './lib';
 import { pushDailyToCodex } from './codex-push';
+import { generateDailyPage } from './daily-page-run';
 import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
 import { buildDigestSubjectFallback, digestSubjectTitleFromRow } from './subject';
 
@@ -226,6 +227,20 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
     if (slotHourBjt === 8 && this.env.DAILY_PUSH_ENABLED === '1') {
       await step.do('push-codex-daily', RETRY, async () => {
         return await pushDailyToCodex(this.env, slotHourBjt);
+      });
+    }
+
+    // Phase 4:仅早 8 点 + 开关 DAILY_PAGE_ENABLED==='1' → 生成当日 SEO 静态日报页。
+    // 学 Phase 3 容错:独立 workflow step + try/catch,任何异常只 console.error,绝不影响邮件/Codex。
+    // 手动 mode(daily-page)不受此开关限制。
+    if (slotHourBjt === 8 && this.env.DAILY_PAGE_ENABLED === '1') {
+      await step.do('generate-daily-page', RETRY, async () => {
+        try {
+          return await generateDailyPage(this.env, bjtDateStr());
+        } catch (e) {
+          console.error(`[daily-page] Phase 4 生成失败: ${String(e).slice(0, 300)}`);
+          return { error: String(e).slice(0, 300) };
+        }
       });
     }
 
