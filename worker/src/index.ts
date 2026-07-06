@@ -94,6 +94,7 @@ import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
+import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -436,7 +437,10 @@ export default {
     //
     // Empty UA is suspicious but we allow it — some monitoring tools and curl-style
     // health checks omit UA.
-    if (!isBotGateExempt(path, request.method)) {
+    //
+    // 公开 SEO 路由(/daily/* /robots.txt /sitemap.xml /llms.txt /<indexnow-key>.txt)也豁免:
+    // 决策 5 全放,让搜索引擎 / AI 检索 / 训练爬虫全部可达,放行策略统一收口 robots.txt(见 isSeoPath)。
+    if (!isBotGateExempt(path, request.method) && !isSeoPath(path)) {
       const hasDevBypass =
         !!env.DEV_TOKEN && request.headers.get('X-Dev-Token') === env.DEV_TOKEN;
       if (!hasDevBypass) {
@@ -456,6 +460,12 @@ export default {
     }
 
     try {
+      // ─── 公开 SEO 路由(bot gate 之后、鉴权路由之前)──────────────
+      // /daily/* 日报页 + 归档、robots.txt、sitemap.xml、llms.txt、<indexnow-key>.txt。
+      // 返回 null = 非本模块路径,继续后续匹配。绝对 URL 一律走 SITE_BASE(seo-routes.ts)。
+      const seoResp = await handleSeoRoute(request, env);
+      if (seoResp) return seoResp;
+
       if (path === '/api/ingest' && request.method === 'POST') {
         return handleIngest(request, env);
       }
