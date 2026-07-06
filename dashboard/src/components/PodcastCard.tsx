@@ -16,6 +16,7 @@ import type { Item, ItemExtra } from "../types";
 import { cn, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
 import { useDrawer } from "../lib/drawer";
 import { IconAudioLines, IconClock, IconMic, IconUser } from "./icons";
+import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
@@ -255,11 +256,11 @@ export function PodcastCard({ item, eager, posterMode }: Props) {
           </div>
 
           <h3 className="mt-0.5 line-clamp-2 text-[15px] font-bold leading-tight text-neutral-900 break-words">
-            {title}
+            <HL text={title} />
           </h3>
 
           {summary && (
-            <p className="mt-1 line-clamp-2 text-[13px] leading-[1.5] text-neutral-600 break-words">{summary}</p>
+            <p className="mt-1 line-clamp-2 text-[13px] leading-[1.5] text-neutral-600 break-words"><HL text={summary} /></p>
           )}
 
           {duration && (

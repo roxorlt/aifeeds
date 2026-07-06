@@ -30,6 +30,7 @@ import {
   formatOrganizerFans,
   getEventState,
 } from "../lib/huodongxing";
+import { HL } from "./search/highlight";
 
 function parseMedia(raw: Item["media"]): MediaItem[] {
   if (!raw) return [];
@@ -219,7 +220,7 @@ export function HuodongxingCard({ item, eager }: Props) {
             isEnded ? "text-neutral-500" : "text-neutral-900"
           }`}
         >
-          {title}
+          <HL text={title} />
         </h3>
         {state !== "unenriched" && <StatusBadge state={state} />}
         {state === "unenriched" && (
@@ -273,7 +274,7 @@ export function HuodongxingCard({ item, eager }: Props) {
             isEnded ? "text-neutral-500" : "text-neutral-900"
           }`}
         >
-          {smartTruncate(body, 200)}
+          <HL text={smartTruncate(body, 200)} />
         </p>
       ) : null}
 

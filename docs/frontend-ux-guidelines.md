@@ -45,6 +45,8 @@
 | 警告 | `text-xs text-amber-600` | `bg-amber-50 px-3 py-2 text-sm text-amber-700` |
 | 成功 | `text-xs text-emerald-600` | `bg-emerald-50 px-3 py-2 text-sm text-emerald-700` |
 
+> ⚠️ **破例：搜索命中高亮**。搜索结果卡片里命中 query 的文案标红，用 `<mark class="bg-transparent text-rose-600 font-medium">`（`bg-transparent` 消掉 `<mark>` 默认黄底）。rose 常规仅用于错误态，这里破例作「搜索命中」语义色——命中高亮是结果页专属、瞬时且信息性的强调，不属于主结构，与"错误"语境不会同屏混淆。实现见 `dashboard/src/components/search/highlight.tsx`（Context 注入：feed 不注入 → 零高亮，搜索页注入 terms → 命中标红）。
+
 ### 字号
 
 | Token | 用途 | Tailwind |

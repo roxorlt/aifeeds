@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import { useImpressionRefresh, mergeRefs } from "../lib/impressionRefresh";
@@ -25,6 +25,7 @@ import {
   IconThread,
   VerifiedBadge,
 } from "./icons";
+import { useHighlightTerms, highlightNodes } from "./search/highlight";
 
 // Match URL | #hashtag (CJK + ASCII) | @mention
 const RICH_PATTERN =
@@ -123,15 +124,24 @@ function pbsMediaId(url: string): string {
   return m ? m[1] : url;
 }
 
-function renderRichText(text: string): ReactNode[] {
+// terms（搜索命中高亮词，非搜索场景传 []）：RICH_PATTERN 已把链接/@/# 切成独立
+// 节点，只在剩余的纯文本段上叠加 highlightNodes。terms 为空时 highlightNodes 直接
+// 返回原始 string → push 裸字符串，与改前完全一致（feed / 抽屉零影响）。
+function renderRichText(text: string, terms: string[] = []): ReactNode[] {
   const out: ReactNode[] = [];
   let lastIndex = 0;
   let key = 0;
   let m: RegExpExecArray | null;
+  // 纯文本段 → 高亮（terms 空则原样）。命中时包一层 keyed Fragment，<mark> 的 key
+  // 被 Fragment 隔离，不与 out 里其它节点冲突。
+  const pushText = (seg: string) => {
+    const hn = highlightNodes(seg, terms);
+    out.push(typeof hn === "string" ? hn : <Fragment key={key++}>{hn}</Fragment>);
+  };
   RICH_PATTERN.lastIndex = 0;
   while ((m = RICH_PATTERN.exec(text)) !== null) {
     if (m.index > lastIndex) {
-      out.push(text.slice(lastIndex, m.index));
+      pushText(text.slice(lastIndex, m.index));
     }
     const [full, url, tag, mention] = m;
     if (url) {
@@ -172,7 +182,7 @@ function renderRichText(text: string): ReactNode[] {
     }
     lastIndex = RICH_PATTERN.lastIndex;
   }
-  if (lastIndex < text.length) out.push(text.slice(lastIndex));
+  if (lastIndex < text.length) pushText(text.slice(lastIndex));
   return out;
 }
 
@@ -408,6 +418,8 @@ export function TweetCard({
   const [avatarFailed, setAvatarFailed] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [canExpand, setCanExpand] = useState(false);
+  // 搜索命中高亮词（feed / 抽屉无 HighlightProvider → 空数组 → renderRichText 原样输出）
+  const highlightTerms = useHighlightTerms();
 
   const media = parseJsonField<MediaItem[]>(item.media) || [];
   const metrics = parseJsonField<Metrics>(item.metrics) || {};
@@ -860,7 +872,7 @@ export function TweetCard({
                   !expanded && "line-clamp-4",
                 )}
               >
-                {renderRichText(expanded ? displayText : smartTruncate(displayText, 280))}
+                {renderRichText(expanded ? displayText : smartTruncate(displayText, 280), highlightTerms)}
               </div>
             );
           })()}

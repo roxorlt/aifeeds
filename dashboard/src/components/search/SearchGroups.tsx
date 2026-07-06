@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import type { Item, SearchGroup, SearchSuggestTerm } from "../../types";
 import {
@@ -13,6 +13,7 @@ import { SkeletonCard } from "../Feed";
 import { ItemCard } from "../ItemCard";
 import { SourceIcon } from "../icons";
 import { browseSourceLabel, sourceFeedOrder } from "./sources";
+import { HighlightProvider, extractHighlightTerms } from "./highlight";
 import { RECALL_CAP, trackResultClick, chipBase } from "./searchResultShared";
 
 // 分组结果页（?q= 无 source）：请求期 3 张 SkeletonCard；每组 = 组头（SourceIcon +
@@ -38,6 +39,7 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
   const [outcome, setOutcome] = useState<GroupsOutcome | null>(null);
   const [retryTick, setRetryTick] = useState(0);
   const reqKey = `${retryTick}:${q}`;
+  const highlightTerms = useMemo(() => extractHighlightTerms(q), [q]);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +106,9 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
     (a, b) => sourceFeedOrder(a.source_type) - sourceFeedOrder(b.source_type),
   );
 
+  // 高亮词从原始 q 提取；只包结果卡片区域（组头/更多按钮无 <HL>，不受影响）。
   return (
+    <HighlightProvider terms={highlightTerms}>
     <div data-search-state="grouped" className="divide-y divide-neutral-200">
       {orderedGroups.map((group, groupIndex) => (
         <section key={group.source_type} className="py-2 first:pt-0">
@@ -146,6 +150,7 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
         </section>
       ))}
     </div>
+    </HighlightProvider>
   );
 }
 

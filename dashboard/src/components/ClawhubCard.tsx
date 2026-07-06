@@ -8,6 +8,7 @@ import {
   IconDownload,
   IconPackage,
 } from "./icons";
+import { HL } from "./search/highlight";
 
 // 8-class category color map (worker derives client-side keyword match,
 // stored in extra.category). Mirrors mockup design.
@@ -113,7 +114,7 @@ export function ClawhubCard({ item }: Props) {
         <div className="min-w-0 flex-1">
           {/* Title — text-[15px] font-bold（手册基线）*/}
           <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
-            {displayName}
+            <HL text={displayName} />
           </div>
 
           {/* Meta line — text-[13px] 跟 GH/PH 卡片对齐 */}
@@ -141,7 +142,7 @@ export function ClawhubCard({ item }: Props) {
       {/* Body — text-[15px] leading-[1.45] line-clamp-4，跟 GH/PH 同款 */}
       {summary && (
         <p className="mt-2 text-[15px] leading-[1.45] text-neutral-900 break-words line-clamp-4">
-          {cleanTruncatedSummary(smartTruncate(summary, 280))}
+          <HL text={cleanTruncatedSummary(smartTruncate(summary, 280))} />
         </p>
       )}
 
