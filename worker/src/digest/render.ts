@@ -147,6 +147,10 @@ export interface RenderOptions {
   // news 源封面质量门:拒外链 cover_image、回退只认 R2 正文图、黑名单 + 尺寸过滤。
   // 静态日报页无 JS 兜底(不能像前端卡片那样 onError/onLoad reject),故在渲染层挡。
   newsCoverQualityGate?: boolean;
+  // 静态日报页 SEO 扩展摘要:为「非 news 源」(hf/gh/ph/x)也填充 intro = 每源最优加长字段。
+  // 默认关 → codex-push / daily-api 的 renderItem 输出逐字节不变(它们不传此项,非 news 源无 intro)。
+  // news 源 intro 始终为 excerpt_zh/shownotes_zh,与本开关无关(见 renderItem intro 分支)。
+  extendedIntro?: boolean;
 }
 
 // 站内 R2 反代 URL 判定:相对 `/r/` 前缀,或 api 域绝对形式(`<apiBase>/r/...`)。
@@ -468,6 +472,24 @@ export function isSkippableInlineImage(url: string): boolean {
   return AVATAR_INLINE_PATTERNS.some((re) => re.test(url));
 }
 
+// 每源「最优加长字段」(静态日报页 SEO 扩展摘要用;news 源不走此处,由下方 excerpt_zh/shownotes_zh 分支处理)。
+// 与 CLAUDE.md「每源最优加长字段」调查结论一致:gh=ai_summary / hf=summary_zh / ph=description_zh(回退 ai_summary) / x=content_translated。
+function pickExtendedIntro(source: DigestSource, row: RenderRow, ex: Record<string, unknown>): string {
+  switch (source) {
+    case 'hf-paper':
+      return String((ex.summary_zh as string) || (ex.ai_summary_zh as string) || '');
+    case 'gh':
+      return String((ex.ai_summary as string) || '');
+    case 'ph':
+      // Task 3 产出 description_zh(英文长描述的中文译文);缺失回退短的 ai_summary。
+      return String((ex.description_zh as string) || (ex.ai_summary as string) || '');
+    case 'x':
+      return String(row.content_translated || row.content || '');
+    default:
+      return '';
+  }
+}
+
 export function renderItem(source: DigestSource, row: RenderRow, rank: number, apiBase: string, opts: RenderOptions = {}): RenderedItem {
   const ex = safeParse(row.extra);
   const ct = row.content_translated || '';
@@ -522,6 +544,11 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     if (isPod && Array.isArray(ex.timeline) && ex.timeline.length) {
       timeline = ex.timeline as RenderedItem['timeline'];
     }
+  } else if (opts.extendedIntro) {
+    // 静态日报页 SEO 专用:非 news 源也产出「每源最优加长字段」作扩展摘要。
+    // 仅 daily-page 传 extendedIntro → codex-push / daily-api 不传 → 它们非 news 源仍无 intro,输出零回归。
+    const introRaw = pickExtendedIntro(source, row, ex).trim();
+    if (introRaw) intro = clampSentences(introRaw, 800);
   }
   return {
     rank,

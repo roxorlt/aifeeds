@@ -218,6 +218,97 @@ describe('renderDailyPageHtml', () => {
     );
     expect(html).not.toContain('<img class="cover"');
   });
+
+  // ── Task 4:扩展摘要段(<p class="summary-full">)──
+
+  test('item.intro 存在且与一句话 summary 不同 → 渲染 <p class="summary-full">', () => {
+    const html = renderDailyPageHtml(
+      mkData({
+        sections: [{ source: 'news', label: '行业新闻', items: [mkItem({
+          source: 'news', summary: '一句话摘要。', summary_full: '一句话摘要。',
+          intro: '这是更完整的扩展摘要，包含更多背景信息与细节。',
+        })] }],
+      }),
+      envFixture(),
+    );
+    expect(html).toContain('<p class="summary-full">这是更完整的扩展摘要，包含更多背景信息与细节。</p>');
+  });
+
+  test('item.intro 缺失 → 不渲染空的 <p class="summary-full">(CSS 选择器不算)', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'x', label: '动态', items: [mkItem({ intro: undefined })] }] }),
+      envFixture(),
+    );
+    expect(html).not.toContain('<p class="summary-full">');
+  });
+
+  test('summary-full 段位于一句话 summary 之后、meta 之前', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'news', label: '行业新闻', items: [mkItem({
+        source: 'news', summary: '短句。', summary_full: '短句。', intro: '加长段落，补充更多内容。', author: '作者', url: 'https://e.com/1',
+      })] }] }),
+      envFixture(),
+    );
+    const iSummary = html.indexOf('<p class="summary">');
+    const iFull = html.indexOf('<p class="summary-full">');
+    const iMeta = html.indexOf('<div class="meta">');
+    expect(iSummary).toBeGreaterThan(-1);
+    expect(iFull).toBeGreaterThan(iSummary);
+    expect(iMeta).toBeGreaterThan(iFull);
+  });
+
+  test('item.intro 超 500 字 → clamp 到 500 且按句截断', () => {
+    const long = '一段完整的句子。'.repeat(120); // 960 字
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'hf-paper', label: '论文', items: [mkItem({ source: 'hf-paper', summary: '短', summary_full: '短', intro: long })] }] }),
+      envFixture(),
+    );
+    const m = html.match(/<p class="summary-full">([\s\S]*?)<\/p>/);
+    expect(m).not.toBeNull();
+    expect(m![1].length).toBeLessThanOrEqual(500);
+    expect(m![1].endsWith('。')).toBe(true); // 按句截断,非硬切
+  });
+
+  test('扩展摘要含 < & " 被 HTML 转义,不破坏结构且剥 JSON-LD 后零可执行 script', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'news', label: '行业新闻', items: [mkItem({
+        source: 'news', summary: '短', summary_full: '短', intro: '危险 <script>alert("x")</script> & 更多文本',
+      })] }] }),
+      envFixture(),
+    );
+    // cleanText 先剥 `>` 等 markdown 字符,escapeHtml 再把 `<` / `"` / `&` 转实体 → 无可执行 script
+    expect(stripJsonLd(html)).not.toContain('<script');
+    expect(html).toContain('&lt;script'); // `<` 已转义
+    expect(html).toContain('&amp;');
+    expect(html).toContain('&quot;');
+  });
+
+  test('extended 与一句话 summary 完全相同 → 不重复渲染 summary-full(gh 短摘要场景)', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'gh', label: '开源项目', items: [mkItem({
+        source: 'gh', summary: '同一段摘要。', summary_full: '同一段摘要。', intro: '同一段摘要。',
+      })] }] }),
+      envFixture(),
+    );
+    expect(html).not.toContain('<p class="summary-full">');
+  });
+
+  test('JSON-LD 每条含 description(加长文本 SEO 增强)且仍可 JSON.parse', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'news', label: '行业新闻', items: [mkItem({
+        source: 'news', title: '标题N', summary: '短', summary_full: '短', intro: '扩展摘要文本供爬虫抓取。',
+      })] }] }),
+      envFixture(),
+    );
+    const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ name: string; description?: string }> } };
+    expect(ld.mainEntity.itemListElement[0].name).toBe('标题N');
+    expect(ld.mainEntity.itemListElement[0].description).toBe('扩展摘要文本供爬虫抓取。');
+  });
+
+  test('.summary-full 有内联样式(字号/颜色对齐摘要段)', () => {
+    const html = renderDailyPageHtml(mkData(), envFixture());
+    expect(html).toContain('.summary-full{');
+  });
 });
 
 // ── build 层:mock 选品 + mock env.DB ──
@@ -418,5 +509,25 @@ describe('buildDailyPageData', () => {
     // 账本(digest_pool + 今日 BJT 0 点边界)锚的是当下,对回填历史日期语义不成立 → 只传 asOfDate
     expect(newsOpts).toEqual({ asOfDate: '2026-07-01' });
     expect(newsOpts).not.toHaveProperty('strictCrossDayEventDedup');
+  });
+
+  // ── Task 4:daily-page 传 extendedIntro → 各源扩展摘要按最优字段渲染 ──
+  test('build→render 端到端:blog/ph/hf 扩展摘要各取最优加长字段', async () => {
+    const row = (id: string, extra: Record<string, unknown>, over: Partial<RenderRow> = {}): RenderRow => ({
+      id, title: '标题', content: null, content_translated: null, author: null, handle: null,
+      url: `https://e.com/${id}`, media: null, extra: JSON.stringify(extra), ...over,
+    });
+    const rowsById = new Map<string, RenderRow>([
+      ['blog:n1', row('blog:n1', { title_zh: '新闻标题', ai_summary_zh: '一句话新闻摘要。', excerpt_zh: '图文扩展简介，超过一句话摘要的正文内容。' })],
+      ['product_hunt:p:2026-07-06', row('product_hunt:p:2026-07-06', { ai_summary: '短产品摘要', description_zh: 'PH 中文长描述，供日报 SEO 抓取使用。' })],
+      ['hf_paper:42', row('hf_paper:42', { title_zh: '论文标题', summary_zh: '论文详细中文摘要，长度可观供检索。' })],
+    ]);
+    setSelection({ news: ['blog:n1'], ph: ['product_hunt:p:2026-07-06'], 'hf-paper': ['hf_paper:42'] });
+    const env = envWithDb(makeDbMock({ rowsById }));
+    const data = await buildDailyPageData(env, '2026-07-06');
+    const html = renderDailyPageHtml(data!, env);
+    expect(html).toContain('图文扩展简介，超过一句话摘要的正文内容。'); // blog → excerpt_zh
+    expect(html).toContain('PH 中文长描述，供日报 SEO 抓取使用。');       // ph → description_zh
+    expect(html).toContain('论文详细中文摘要，长度可观供检索。');         // hf → summary_zh(此例落在一句话段)
   });
 });
