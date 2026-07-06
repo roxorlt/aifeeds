@@ -86,6 +86,7 @@ import {
 } from './feeds/event-fingerprint-backfill';
 import { feedNewsRankSqlExpression } from './feeds/ranking';
 import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill } from './feeds/media-r2';
+import { runBlogBodyRedecode } from './feeds/blog-body-redecode';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
 import { idHashOf } from './feeds/extract';
@@ -4564,6 +4565,16 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const dry = url.searchParams.get('dry') === '1';
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 50);
     const result = await runBlogCoverOgBackfill(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-body-redecode') {
+    // Task 1（2026-07-06）：RSSHub 源（jiqizhixin ~142 / weibo-hot-tech ~110）存量正文里
+    // 泄漏的字面结构标签（<p>/<img>/<strong> …）重跑 htmlToMarkdown 清洗写回 body_markdown
+    // (+ body_markdown_zh 如含泄漏)。游标 body_redecoded_at 单调,dry=1 零写。
+    // ?limit 默认 100;循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100'), 1), 500);
+    const result = await runBlogBodyRedecode(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {

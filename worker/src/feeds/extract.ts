@@ -505,11 +505,60 @@ export async function extractFullText(
 // HTML → markdown（无 DOM 库；保留结构 + 收集媒体资产，相对 URL 解析为绝对）
 // ─────────────────────────────────────────────────────────────────────────────
 
-function htmlToMarkdown(
+// ─────────────────────────────────────────────────────────────────────────────
+// 实体编码 HTML 检测 + 解码（Task 1，2026-07-06）
+//
+// RSSHub 等把文章正文 HTML 以实体编码（甚至双重 &amp;lt;）塞进 RSS <description>，
+// 而非 CDATA 包真 HTML（jiqizhixin / weibo-hot-tech 路由如此）。这类输入里结构标签是
+// &lt;p&gt; / &lt;img 形态，htmlToMarkdown 的 tag 正则（只认真实尖括号）全空转，末尾
+// decodeEntities 才把 &lt;p&gt; 还原成字面 <p> 泄漏进正文（145 条含 raw &lt;img、0 条 ![]()）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 结构标签集：用于「实体编码 HTML」判定，区分真 HTML / 纯文本里的孤立 &lt;。
+const STRUCT_TAG_NAMES =
+  "p|div|img|br|h[1-6]|ul|ol|li|a|strong|em|b|i|blockquote|pre|code|figure|table|span|section|article";
+const RAW_STRUCT_TAG_RE = new RegExp(`<\\/?(?:${STRUCT_TAG_NAMES})\\b`, "i");
+// &lt;p / &amp;lt;p（双重）/ &lt;/p / &lt;img … 都覆盖（&(?:amp;)?lt; + 可选闭合斜杠 + 标签名）。
+const ENTITY_STRUCT_TAG_RE = new RegExp(
+  `&(?:amp;)?lt;\\/?(?:${STRUCT_TAG_NAMES})\\b`,
+  "i",
+);
+
+/** 输入是否含裸结构标签（真 HTML，如 CDATA 包的真实 <p>）。 */
+export function hasRawStructuralTag(html: string): boolean {
+  return RAW_STRUCT_TAG_RE.test(html);
+}
+
+/** 输入是否含实体形态结构标签（&lt;p / &amp;lt;p / &lt;img …）。 */
+export function hasEntityStructuralTag(html: string): boolean {
+  return ENTITY_STRUCT_TAG_RE.test(html);
+}
+
+/** 正文疑似含结构化 HTML（真标签或实体标签）——回填判定「是否需重转」用。 */
+export function looksLikeStructuralHtml(s: string): boolean {
+  return hasRawStructuralTag(s) || hasEntityStructuralTag(s);
+}
+
+/**
+ * 进转换管线前，把「实体编码的 HTML」先解码一次还原真 HTML。
+ * decodeEntities 内部先解 &amp; 再解 &lt;/&gt;，故一次调用即可把双重编码（&amp;lt;p&amp;gt;）
+ * 与单层编码（&lt;p&gt;）都还原成 <p>；正文内容里合法的 &amp; 层留给 htmlToMarkdown 末尾的
+ * decodeEntities 收尾（不会过度解码）。
+ * 信号：不含裸结构标签、但含其实体形态 → 判实体编码 HTML。用「结构标签实体」而非任意 &lt;，
+ * 避免把正常含 &lt; 的文本（"x &lt; y 的比较"）误当 HTML 解码。真 HTML（含裸标签）与纯文本
+ * （无结构标签实体）均原样返回，其他源零影响。
+ */
+export function decodeEntityEncodedHtml(html: string): string {
+  if (hasRawStructuralTag(html)) return html; // 已是真 HTML → 不动
+  if (!hasEntityStructuralTag(html)) return html; // 无结构标签实体（纯文本）→ 不动
+  return decodeEntities(html);
+}
+
+export function htmlToMarkdown(
   rawHtml: string,
   baseUrl: string,
 ): { markdown: string; assets: FeedBodyAsset[] } {
-  let html = stripCdata(rawHtml);
+  let html = decodeEntityEncodedHtml(stripCdata(rawHtml));
   const assets = collectAssetsFromHtml(html, baseUrl);
 
   // 去掉非正文块
