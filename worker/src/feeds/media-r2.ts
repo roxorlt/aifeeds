@@ -33,7 +33,12 @@ import type {
   FeedPublisher,
 } from "./types";
 import { extractPageMeta, throttledFetchText } from "./extract";
-import { COVER_BLACKLIST, passesCoverSizeGate } from "./cover-heuristics";
+import {
+  COVER_BLACKLIST,
+  passesCoverSizeGate,
+  isNoCoverSource,
+  noCoverSourcesSqlExclusion,
+} from "./cover-heuristics";
 
 const R2_PREFIX_BLOG = "blog";
 const R2_PREFIX_PODCAST = "podcast";
@@ -366,20 +371,46 @@ export async function migrateMediaForBlog(
   const mapping = new Map<string, string>(); // 原始 URL → /r/key
   let migrated = 0;
 
+  // src 派生（feed_key，退化到 show_key / 'blog'）—— 采用护栏 + no-cover 名单共用同一口径。
+  const srcKey = String(
+    extra.feed_key || (extra as { show_key?: string }).show_key || "blog",
+  );
+  // 源级 no-cover 名单（Fix B，2026-07-07）：名单内源一律不采用任何封面（og 不采、正文 hero
+  // 不回退、cover_image 恒空走 monogram）。jiqizhixin 正文零图 + og 恒为品牌 logo → 写死 no-cover。
+  const noCoverSrc = isNoCoverSource(srcKey);
+
   // ── 1. 封面（过质量门控；不合格/防盗链失败 → cover 落 null，不保留外链）──
+  //   封面品牌 logo 三层防御（自最早到最晚）：
+  //     层 0 关键词（Fix A，2026-07-07）：对**原始 og URL**（迁移前，关键词信息还在）跑
+  //          COVER_BLACKLIST，命中即不迁 R2、不采用——在第 1 篇就拦住带关键词命名的品牌 logo
+  //          （qbitai og 文件名字面含 'logo'），闭合统计护栏「新源前 2 篇成簇前泄漏」窗口。
+  //     层 1/2 统计簇 + 持久 hash：见下方 isSourceLevelBrandLogo（迁移后按 R2 内容 hash 比对）。
+  //   关键词先拦 → 命中时统计护栏无需再触发（迁都不迁，自然到不了层 1/2）。
   let newCover: string | undefined;
   let coverRejected = false;
+  let coverKeywordBlocked = false;
   const cover = (extra.cover_image || "").trim();
-  if (cover && !isAlreadyMigrated(cover)) {
-    const r2 = await migrateCover(env, cover);
-    if (r2) {
-      mapping.set(cover, r2);
-      newCover = r2;
-      migrated++;
+  if (noCoverSrc) {
+    // Fix B：源级 no-cover，跳过全部封面采用（护栏 / 正文回落一并跳过；落库统一清空）。
+  } else if (cover && !isAlreadyMigrated(cover)) {
+    if (COVER_BLACKLIST.test(cover)) {
+      // 层 0 命中：原始 og URL 含 logo/qrcode/avatar/icon… → 不迁 R2（省得白迁一张 logo）、
+      // 不采用，改走正文 hero / monogram（下方 coverKeywordBlocked 分支就地回落）。
+      coverKeywordBlocked = true;
+      console.log(
+        `[feeds-r2:blog] ${itemId}: og cover 关键词黑名单命中，不采用不迁移: ${cover}`,
+      );
     } else {
-      // 迁移/门控失败 → 清空 cover_image（渲染层 Fix 1 已不用外链 cover，
-      // 前端/日报走 monogram / 节目图兜底，设计文档 §769）。
-      coverRejected = true;
+      const r2 = await migrateCover(env, cover);
+      if (r2) {
+        mapping.set(cover, r2);
+        newCover = r2;
+        migrated++;
+      } else {
+        // 迁移/门控失败 → 清空 cover_image（渲染层 Fix 1 已不用外链 cover，
+        // 前端/日报走 monogram / 节目图兜底，设计文档 §769）。
+        coverRejected = true;
+      }
     }
   }
 
@@ -423,12 +454,11 @@ export async function migrateMediaForBlog(
   //   R2 对象内容寻址（同 hash 复用），不删除（其他 ≥3 条仍引用）；仅撤销本条引用。
   let brandLogoGuarded = false;
   let guardedHash = "";
-  let bodyHeroCover: string | undefined; // 护栏命中后就地回落的正文 hero（无则 undefined → monogram）
-  if (newCover) {
-    const srcVal = String(
-      extra.feed_key || (extra as { show_key?: string }).show_key || "blog",
-    );
-    if (await isSourceLevelBrandLogo(env, itemId, srcVal, newCover)) {
+  let bodyHeroCover: string | undefined; // 护栏/关键词命中后就地回落的正文 hero（无则 undefined → monogram）
+  if (noCoverSrc) {
+    // Fix B：源级 no-cover，不采用 og、不回落正文 hero（bodyHeroCover 保持 undefined）。
+  } else if (newCover) {
+    if (await isSourceLevelBrandLogo(env, itemId, srcKey, newCover)) {
       brandLogoGuarded = true;
       guardedHash = coverR2Key(newCover) || newCover;
       // 与 runBlogCoverBodyHeroBackfill 共用 pickBodyHeroCover（喂已迁 R2 的 body.assets）。
@@ -436,6 +466,12 @@ export async function migrateMediaForBlog(
         pickBodyHeroCover({ body: { assets: newAssets } }, guardedHash) ||
         undefined;
     }
+  } else if (coverKeywordBlocked) {
+    // 层 0 关键词命中：og 已不采，比照统计护栏就地从已迁 R2 的正文 assets 回落合格 hero
+    // （qbitai 正文有真配图 → 采用；jiqizhixin 类图荒 → 空走 monogram）。无 clearedHash：
+    // pickBodyHeroCover 内部黑名单已排除 logo/qrcode 类 asset，不需额外 hash 排除。
+    bodyHeroCover =
+      pickBodyHeroCover({ body: { assets: newAssets } }) || undefined;
   }
 
   // ── 3. publisher logo ──
@@ -451,12 +487,18 @@ export async function migrateMediaForBlog(
 
   // ── 5. 落库（json_set 只改自己字段，防擦并行 enrich）──
   const patches: ExtraPatch[] = [{ path: "$.blog_media_r2_at", value: nowIso }];
-  if (newCover && !brandLogoGuarded) {
+  if (noCoverSrc) {
+    // Fix B：源级 no-cover，cover 恒空。仅当原 cover_image 有值（og 外链 / 旧值）才需清空。
+    if (cover) {
+      patches.push({ path: "$.cover_image", value: "" });
+      patches.push({ path: "$.cover_nocover_source_at", value: nowIso });
+    }
+  } else if (newCover && !brandLogoGuarded) {
     patches.push({ path: "$.cover_image", value: newCover });
     patches.push({ path: "$.cover_backfilled_at", value: nowIso });
   } else if (brandLogoGuarded) {
-    // 采用护栏命中：撤销 og(logo) 采用。就地从正文 assets 选到合格 hero → live 当场落它作 cover
-    // （无需等手动 backfill）；无合格 hero → cover 落空走 monogram。两者都记被判 R2 key，供
+    // 统计护栏命中（层 1/2）：撤销 og(logo) 采用。就地从正文 assets 选到合格 hero → live 当场落它作
+    // cover（无需等手动 backfill）；无合格 hero → cover 落空走 monogram。两者都记被判 R2 key，供
     // og-backfill Fix C 拦截同图再灌 + 持久拒绝集合（Fix 2）复用。
     if (bodyHeroCover) {
       patches.push({ path: "$.cover_image", value: bodyHeroCover });
@@ -467,6 +509,17 @@ export async function migrateMediaForBlog(
     }
     patches.push({ path: "$.cover_generic_cleared_hash", value: guardedHash });
     patches.push({ path: "$.cover_brandlogo_guarded_at", value: nowIso });
+  } else if (coverKeywordBlocked) {
+    // 层 0 关键词命中：og 不采（也未迁 R2，无 R2 hash 可记）。就地正文 hero → 采用；
+    // 否则空走 monogram。记 cover_keyword_blacklisted_at marker 供观测。
+    if (bodyHeroCover) {
+      patches.push({ path: "$.cover_image", value: bodyHeroCover });
+      patches.push({ path: "$.cover_backfilled_at", value: nowIso });
+      patches.push({ path: "$.cover_bodyhero_backfilled_at", value: nowIso });
+    } else {
+      patches.push({ path: "$.cover_image", value: "" });
+    }
+    patches.push({ path: "$.cover_keyword_blacklisted_at", value: nowIso });
   } else if (coverRejected) {
     // 空串 = 渲染层 falsy 处理（等价无封面）；不保留外链，避免日报/卡片挂图。
     patches.push({ path: "$.cover_image", value: "" });
@@ -902,7 +955,8 @@ const BACKFILL_OG_PREDICATE = `
   source_type = 'blog'
   AND COALESCE(json_extract(extra, '$.cover_image'), '') = ''
   AND json_extract(extra, '$.cover_og_backfilled_at') IS NULL
-  AND COALESCE(url, '') != ''`;
+  AND COALESCE(url, '') != ''
+  ${noCoverSourcesSqlExclusion(GENERIC_SRC_EXPR)}`;
 
 interface BackfillRow {
   id: string;
@@ -1058,7 +1112,8 @@ const BACKFILL_BODYHERO_PREDICATE = `
   source_type = 'blog'
   AND COALESCE(json_extract(extra, '$.cover_image'), '') = ''
   AND json_extract(extra, '$.cover_generic_cleared_hash') IS NOT NULL
-  AND json_extract(extra, '$.cover_bodyhero_backfilled_at') IS NULL`;
+  AND json_extract(extra, '$.cover_bodyhero_backfilled_at') IS NULL
+  ${noCoverSourcesSqlExclusion(GENERIC_SRC_EXPR)}`;
 
 interface BodyHeroRow {
   id: string;
