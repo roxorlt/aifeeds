@@ -171,9 +171,16 @@ async function loadAnalyzeContext(
 // 最后 merge step 一次写入 extra.deep_analysis
 // ────────────────────────────────────────────────────────────────────
 
+// JSON 干净类型(非递归有界，避免 CF Serializable 映射类型无限递归 TS2589)：
+// CF Workflow step.do 的 Serializable<T> 约束要求返回值可序列化，Record<string, unknown>
+// 里的 unknown 无法证明可序列化(可能是 Date/函数)，故用有界 JSON 类型。
+type JsonScalar = string | number | boolean | null;
+type JsonNode = JsonScalar | JsonScalar[] | { [k: string]: JsonScalar | JsonScalar[] } | Array<{ [k: string]: JsonScalar | JsonScalar[] }>;
+type JsonObject = { [k: string]: JsonNode };
+
 export interface DimensionResult {
   dimension: DimensionKey;
-  data: Record<string, unknown> | null;  // 单 dimension JSON 输出(本段返回的 key)
+  data: JsonObject | null;  // 单 dimension JSON 输出(本段返回的 key)
   failed: boolean;
   usage?: DeepSeekUsage;
   error?: string;
@@ -206,7 +213,7 @@ export async function analyzeDimensionForHfPaper(
         cachedData[k] = cached.deep[k];
       }
       console.log(`[hf-paper:analyze] ${itemId}/${dimension} cached(hash match)`);
-      return { dimension, data: cachedData, failed: false, cached: true };
+      return { dimension, data: cachedData as unknown as JsonObject, failed: false, cached: true };
     }
   }
 
@@ -232,7 +239,7 @@ export async function analyzeDimensionForHfPaper(
       usage: result.usage, error: result.error || 'no_data',
     };
   }
-  return { dimension, data: result.data, failed: false, usage: result.usage };
+  return { dimension, data: result.data as unknown as JsonObject, failed: false, usage: result.usage };
 }
 
 // ────────────────────────────────────────────────────────────────────
