@@ -35,6 +35,14 @@ export const EVENTS = {
   // 互动（PR5）
   FAVORITE_TOGGLE: 'favorite_toggle',
   SUBSCRIBE_TOGGLE: 'subscribe_toggle',
+  // C 端搜索（worker/src/track.ts 白名单同步）
+  SEARCH_OPEN: 'search_open',
+  SEARCH_SUBMIT: 'search_submit',
+  SEARCH_SUGGEST_CLICK: 'search_suggest_click',
+  SEARCH_RESULT_CLICK: 'search_result_click',
+  SEARCH_EMPTY: 'search_empty',
+  SEARCH_ERROR: 'search_error',
+  SEARCH_PERF: 'search_perf',
   // 视频起播（用于诊断 mobile/微信 autoplay 受限）
   VIDEO_AUTOPLAY_ATTEMPT: 'video_autoplay_attempt',
   VIDEO_AUTOPLAY_BLOCKED: 'video_autoplay_blocked',

@@ -3,15 +3,8 @@ import { fetchItems } from "../api";
 import type { Item, SourceType } from "../types";
 import { VideoColumnProvider } from "../lib/videoColumnContext";
 import { useIsNarrow } from "../lib/breakpoint";
-import { TweetCard } from "./TweetCard";
 import { ThreadCard } from "./ThreadCard";
-import { GithubCard } from "./GithubCard";
-import { PhCard } from "./PhCard";
-import { ClawhubCard } from "./ClawhubCard";
-import { HuodongxingCard } from "./HuodongxingCard";
-import { HfPaperCard } from "./HfPaperCard";
-import { BlogCard } from "./BlogCard";
-import { PodcastCard } from "./PodcastCard";
+import { ItemCard } from "./ItemCard";
 import { ClawhubColumnHeader, type ClawhubSort, type ClawhubCategory } from "./ClawhubColumnHeader";
 import { HuodongxingColumnHeader, type HdxCity, type HdxWhen, type HdxForm } from "./HuodongxingColumnHeader";
 import { SourceIcon } from "./icons";
@@ -953,28 +946,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               const eager = idx < 3;
               nodes.push(
                 row.kind === "single" ? (
-                  row.item.source_type === "github" ? (
-                    <GithubCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : row.item.source_type === "product_hunt" ? (
-                    <PhCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : row.item.source_type === "clawhub" ? (
-                    <ClawhubCard key={row.item.id} item={row.item} />
-                  ) : row.item.source_type === "huodongxing" ? (
-                    <HuodongxingCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : row.item.source_type === "hf_paper" ? (
-                    <HfPaperCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : row.item.source_type === "blog" ? (
-                    <BlogCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : row.item.source_type === "podcast" ? (
-                    <PodcastCard key={row.item.id} item={row.item} eager={eager} />
-                  ) : (
-                    <TweetCard
-                      key={row.item.id}
-                      item={row.item}
-                      hideThreadBanner
-                      eager={eager}
-                    />
-                  )
+                  <ItemCard key={row.item.id} item={row.item} eager={eager} />
                 ) : (
                   <ThreadCard key={`thread-${row.rootId}`} items={row.items} />
                 ),

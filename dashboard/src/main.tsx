@@ -16,7 +16,9 @@ import App from './App.tsx'
 // /e/ (huodongxing event deeplink) 同样漏在列表里,顺手补上。
 {
   const p = window.location.pathname
-  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/') || p.startsWith('/ph/') || p.startsWith('/c/') || p.startsWith('/h/') || p.startsWith('/e/') || p.startsWith('/o/')
+  // /search 冷启动直达时也 seed，保证返回键回 feed 不出站（同 /t/ /g/ 等深链逻辑）。
+  // 注意 pathname 不含 query，`/search?q=x` 的 pathname 仅为 `/search`，精确匹配即可。
+  const isDeepLink = p.startsWith('/t/') || p.startsWith('/g/') || p.startsWith('/ph/') || p.startsWith('/c/') || p.startsWith('/h/') || p.startsWith('/e/') || p.startsWith('/o/') || p === '/search' || p.startsWith('/search/')
   if (isDeepLink) {
     const target = window.location.pathname + window.location.search + window.location.hash
     window.history.replaceState({}, '', '/')

@@ -31,6 +31,9 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   // 错误
   'js_error', 'unhandled_promise', 'api_error', 'image_load_error',
   'feed_load_error',
+  // C 端搜索（Task 6）：起始页打开 / 提交 / 联想点击 / 结果点击 / 空结果 / 错误 / 性能
+  'search_open', 'search_submit', 'search_suggest_click', 'search_result_click',
+  'search_empty', 'search_error', 'search_perf',
 ]);
 
 const MAX_PAYLOAD_BYTES = 8 * 1024;     // 单条事件 payload ≤ 8KB

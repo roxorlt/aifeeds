@@ -500,6 +500,38 @@ export interface ItemsResponse {
   query_time_ms?: number;
 }
 
+// ── 搜索 API 契约（Task 6 定稿，字段名与 worker/src/search/handlers.ts 对齐）──
+// GET /api/search?q=            → grouped（每源 total + 预览 items）
+// GET /api/search?q=&source=&cursor=&limit= → list（单源分页流）
+// mode 字段作 discriminant，消费方按 mode 收窄类型。
+export interface SearchGroup {
+  source_type: SourceType;
+  total: number;
+  items: Item[];
+}
+
+export interface SearchGroupedResponse {
+  mode: "grouped";
+  groups: SearchGroup[];
+  query_time_ms: number;
+}
+
+export interface SearchListResponse {
+  mode: "list";
+  items: Item[];
+  next_cursor: string | null;
+  has_more: boolean;
+  query_time_ms: number;
+}
+
+export type SearchResponse = SearchGroupedResponse | SearchListResponse;
+
+// suggest：空 prefix = 热搜 top10；超限/出错 worker 一律返回 200 空 terms（前端无需错误分支）。
+export interface SearchSuggestTerm {
+  term: string;
+  term_type: string;
+}
+
 export interface Source {
   id: string;
   source_type: SourceType;
