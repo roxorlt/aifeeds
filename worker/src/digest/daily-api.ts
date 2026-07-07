@@ -87,7 +87,7 @@ function buildSection(
     const row = rows.get(id);
     if (!row) return;
     const rendered = renderItem(source, row, i + 1, apiBase);
-    items.push(verbose ? { ...rendered, raw: toRaw(row as Record<string, unknown>) } : rendered);
+    items.push(verbose ? { ...rendered, raw: toRaw(row as unknown as Record<string, unknown>) } : rendered);
   });
   return { source, source_label: SOURCE_LABELS[source] || source, count: items.length, items };
 }

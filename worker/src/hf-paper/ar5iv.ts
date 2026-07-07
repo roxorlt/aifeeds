@@ -189,7 +189,7 @@ async function ensureR2Url(env: Env, url: string, maxBytes: number): Promise<str
     if (lenStr && parseInt(lenStr, 10) > maxBytes) return null;
     const buf = await r.arrayBuffer();
     if (buf.byteLength > maxBytes) return null;
-    const hash = await sha256OfBytes(new Uint8Array(buf));
+    const hash = await sha256Hex(buf);
     const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' :
                 ct === 'image/webp' ? 'webp' : ct === 'image/gif' ? 'gif' : 'bin';
     const key = `${R2_KEY_PREFIX_FIGURE}/${hash}.${ext}`;

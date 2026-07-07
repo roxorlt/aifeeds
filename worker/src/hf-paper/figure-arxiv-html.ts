@@ -86,7 +86,7 @@ const EARLY_STOP_IDEAL_SCORE = 100;          // 一旦拿到 score 100 立即停
  * 纵向,但若 paper 内同时有横向 alternative,prefer 横向 wider)。
  */
 export async function fetchFirstFigureFromArxivHtml(
-  env: { READMES?: R2BindingMin },
+  env: { READMES?: R2Bucket },
   arxivId: string,
 ): Promise<ArxivHtmlFigure | null> {
   if (!env.READMES) return null;
