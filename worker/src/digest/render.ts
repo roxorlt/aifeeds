@@ -5,7 +5,7 @@
 
 import type { DigestSource } from './config';
 import { stripLabelPrefix } from '../feeds/classify-translate';
-import { COVER_BLACKLIST, passesCoverSizeGate } from '../feeds/cover-heuristics';
+import { COVER_BLACKLIST, passesCoverSizeGate, isNoCoverSource } from '../feeds/cover-heuristics';
 
 export interface RenderRow {
   id: string;
@@ -207,6 +207,11 @@ function bodyCoverCandidates(ex: Record<string, unknown>, apiBase: string): Cove
 // news 封面质量门(仅日报静态页启用):R2 cover_image 直采,否则回退过滤后的 R2 正文图。
 function pickNewsCoverGated(ex: Record<string, unknown>, apiBase: string): string | null {
   const abs = (u: string): string => (u.startsWith('http') ? u : `${apiBase}${u}`);
+  // 0. 源级 no-cover 短路(Fix 2,2026-07-07):NO_COVER_SOURCES 名单内源在任何数据形态下都不出封面
+  //    —— 与 cover-heuristics 同口径的 srcKey(feed_key,退化 show_key/'blog')。是数据层三点之外的
+  //    渲染层纵深:哪怕数据里意外残留 cover_image / 正文图,daily 页也硬约束为 monogram 兜底。
+  const srcKey = String(ex.feed_key || (ex as { show_key?: string }).show_key || 'blog');
+  if (isNoCoverSource(srcKey)) return null;
   // 1. cover_image 仅当站内 R2 反代形态才直采(外链态视为无效,进回退链)。
   const cov = String((ex.cover_image as string) || '').trim();
   if (cov && isInternalR2(cov, apiBase)) return abs(cov);

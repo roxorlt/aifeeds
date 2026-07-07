@@ -132,6 +132,41 @@ describe('pickCover news — 渲染层质量门(newsCoverQualityGate)', () => {
     expect(item.cover).toBe(`${API}/r/blog/cover-abs.jpg`);
   });
 
+  // ── Fix 2(2026-07-07):NO_COVER_SOURCES 渲染层纵深短路 ──
+  // jiqizhixin 是源级 no-cover 名单成员;即便数据里同时有 R2 cover_image 和 R2 正文图,
+  // daily 渲染(gated 路径)也必须直接返回 null,让名单成为任何数据形态下的硬约束。
+  test('jiqizhixin(no-cover 源)即便有 R2 cover_image + 正文图 → daily 渲染 cover=null', () => {
+    const row = newsRow({
+      feed_key: 'jiqizhixin',
+      cover_image: '/r/blog/jqzx-cover.jpg', // R2 形态,平时会直采
+      body: { assets: [{ url: 'https://external.cdn/hero.jpg', r2_url: '/r/blog/jqzx-hero.jpg', kind: 'image', role: 'inline', width: 800, height: 600 }] },
+    });
+    const item = renderItem('news', row, 1, API, GATE);
+    expect(item.cover).toBeNull();
+  });
+
+  test('jiqizhixin 短路优先级高于 R2 cover_image 直采', () => {
+    const row = newsRow({ feed_key: 'jiqizhixin', cover_image: '/r/blog/cover-r2.jpg' });
+    const item = renderItem('news', row, 1, API, GATE);
+    expect(item.cover).toBeNull();
+  });
+
+  test('qbitai(非 no-cover 源)正常走质量门,合格 R2 正文图照采', () => {
+    const row = newsRow({
+      feed_key: 'qbitai',
+      body: { assets: [{ url: 'https://www.qbitai.com/real-hero.jpg', r2_url: '/r/blog/hero.jpg', kind: 'image', role: 'inline', width: 800, height: 600 }] },
+    });
+    const item = renderItem('news', row, 1, API, GATE);
+    expect(item.cover).toBe(`${API}/r/blog/hero.jpg`);
+  });
+
+  // 隔离锁:no-cover 短路只在 gated(daily)路径生效;默认路径(codex/daily-api)不感知名单,逐字节不变。
+  test('隔离:jiqizhixin 默认路径(无 flag)仍直采 R2 cover_image(不短路)', () => {
+    const row = newsRow({ feed_key: 'jiqizhixin', cover_image: '/r/blog/cover-r2.jpg' });
+    const legacy = renderItem('news', row, 1, API);
+    expect(legacy.cover).toBe(`${API}/r/blog/cover-r2.jpg`);
+  });
+
   // ── 隔离回归:不传门控 flag(daily-api / codex-push 路径)行为逐字节不变 ──
   test('默认(无 flag)外链 cover_image 仍直采(codex/JSON 路径不受影响)', () => {
     const row = newsRow({ cover_image: 'https://external.cdn/cover.jpg' });
