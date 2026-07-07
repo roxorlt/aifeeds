@@ -67,10 +67,16 @@ function fullSections(): DailyPageSection[] {
 function stripJsonLd(html: string): string {
   return html.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/g, '');
 }
-function extractJsonLd(html: string): unknown {
+function extractJsonLd(html: string): any {
   const m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
   if (!m) throw new Error('no JSON-LD block found');
   return JSON.parse(m[1]);
+}
+// JSON-LD 已改 @graph 数组组织(WebSite + Organization + CollectionPage);取其中 CollectionPage 节点。
+function collectionPageOf(ld: any): any {
+  const graph = ld['@graph'];
+  if (Array.isArray(graph)) return graph.find((n: any) => n['@type'] === 'CollectionPage');
+  return ld;
 }
 
 describe('renderDailyPageHtml', () => {
@@ -100,28 +106,71 @@ describe('renderDailyPageHtml', () => {
     expect(noCover).toContain(`<meta property="og:image" content="${SITE}/og-default.png">`);
   });
 
-  test('JSON-LD 可 JSON.parse,ItemList 条数 = fixture 总条数', () => {
+  test('JSON-LD @graph 含 WebSite+Organization+CollectionPage,可 JSON.parse,ItemList 条数 = fixture 总条数', () => {
     const sections: DailyPageSection[] = [
       { source: 'news', label: '行业新闻', items: [mkItem({ title: 'A' }), mkItem({ title: 'B' })] },
       { source: 'x', label: '动态', items: [mkItem({ title: 'C', deep_link: '/t/9' })] },
     ];
     const html = renderDailyPageHtml(mkData({ sections }), envFixture());
-    const ld = extractJsonLd(html) as {
-      '@type': string;
-      mainEntity: { '@type': string; itemListElement: Array<{ name: string; url: string; position: number }> };
-    };
-    expect(ld['@type']).toBe('CollectionPage');
-    expect(ld.mainEntity['@type']).toBe('ItemList');
-    expect(ld.mainEntity.itemListElement.length).toBe(3); // 2 + 1
-    expect(ld.mainEntity.itemListElement[0].name).toBe('A');
+    const ld = extractJsonLd(html);
+    expect(ld['@context']).toBe('https://schema.org');
+    // @graph 三类型齐全
+    const types = ld['@graph'].map((n: any) => n['@type']);
+    expect(types).toContain('WebSite');
+    expect(types).toContain('Organization');
+    expect(types).toContain('CollectionPage');
+    const website = ld['@graph'].find((n: any) => n['@type'] === 'WebSite');
+    expect(website.name).toBe('AI Feeds');
+    expect(website.url).toBe(`${SITE}/`);
+    const org = ld['@graph'].find((n: any) => n['@type'] === 'Organization');
+    expect(org.name).toBe('AI Feeds');
+    expect(org.logo).toBe(`${SITE}/og-default.png`);
+    // CollectionPage + ItemList 条数不变
+    const cp = collectionPageOf(ld);
+    expect(cp.mainEntity['@type']).toBe('ItemList');
+    expect(cp.mainEntity.itemListElement.length).toBe(3); // 2 + 1
+    expect(cp.mainEntity.itemListElement[0].name).toBe('A');
     // url 为深链绝对 URL
-    expect(ld.mainEntity.itemListElement[2].url).toBe(`${SITE}/t/9`);
+    expect(cp.mainEntity.itemListElement[2].url).toBe(`${SITE}/t/9`);
   });
 
   test('五源 section 按序齐全,渲染 <h2> 标签顺序正确', () => {
     const html = renderDailyPageHtml(mkData({ sections: fullSections() }), envFixture());
     const labels = [...html.matchAll(/<h2[^>]*>([^<]+)<\/h2>/g)].map((m) => m[1]);
     expect(labels).toEqual(['行业新闻', '热门产品', '开源项目', '论文', '动态']);
+  });
+
+  // ── #7 SEO 语义层级:单个 h1,层级 h1→h2→h3 ──
+
+  test('页面含且仅含一个 <h1>,层级 h1→h2→h3 顺序正确', () => {
+    const html = renderDailyPageHtml(mkData({ sections: fullSections() }), envFixture());
+    const h1s = [...html.matchAll(/<h1[^>]*>/g)];
+    expect(h1s.length).toBe(1);
+    const iH1 = html.indexOf('<h1');
+    const iH2 = html.indexOf('<h2');
+    const iH3 = html.indexOf('<h3');
+    expect(iH1).toBeGreaterThan(-1);
+    expect(iH1).toBeLessThan(iH2); // h1 在首个 h2 之前
+    expect(iH2).toBeLessThan(iH3); // h2 在首个 h3 之前
+  });
+
+  test('h1 含当日日期 + 主题(SEO 主题相关性)', () => {
+    const html = renderDailyPageHtml(mkData(), envFixture());
+    expect(html).toMatch(/<h1[^>]*>AI 日报 2026-07-06 · MiniMax 发布语音模型、OpenAI 推出 Daybreak<\/h1>/);
+  });
+
+  test('h1 在 <header> 内(位于 brand 之后、nav 之前)', () => {
+    const html = renderDailyPageHtml(mkData(), envFixture());
+    const header = html.slice(html.indexOf('<header>'), html.indexOf('</header>'));
+    expect(header).toContain('<h1>');
+    expect(header.indexOf('class="brand"')).toBeLessThan(header.indexOf('<h1>'));
+    expect(header.indexOf('<h1>')).toBeLessThan(header.indexOf('class="nav"'));
+  });
+
+  test('subject 为空时 h1 只含日期,不出现悬空分隔符', () => {
+    const html = renderDailyPageHtml(mkData({ subject: '' }), envFixture());
+    expect(html).toMatch(/<h1[^>]*>AI 日报 2026-07-06<\/h1>/);
+    expect(html).not.toContain('AI 日报 2026-07-06 · </h1>');
   });
 
   test('只渲染 data.sections 里的源,缺省源不出现(空源已由 build 层剔除)', () => {
@@ -196,8 +245,8 @@ describe('renderDailyPageHtml', () => {
     expect(stripJsonLd(html)).not.toContain('<script');
     expect(html).toContain('&amp;');
     // JSON-LD 仍可解析,标题原文保留
-    const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ name: string }> } };
-    expect(ld.mainEntity.itemListElement[0].name).toBe('危险</script><b>');
+    const cp = collectionPageOf(extractJsonLd(html));
+    expect(cp.mainEntity.itemListElement[0].name).toBe('危险</script><b>');
   });
 
   test('header 含显著「订阅」按钮(subscribe-btn class + 绝对 URL)', () => {
@@ -300,9 +349,9 @@ describe('renderDailyPageHtml', () => {
       })] }] }),
       envFixture(),
     );
-    const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ name: string; description?: string }> } };
-    expect(ld.mainEntity.itemListElement[0].name).toBe('标题N');
-    expect(ld.mainEntity.itemListElement[0].description).toBe('扩展摘要文本供爬虫抓取。');
+    const cp = collectionPageOf(extractJsonLd(html));
+    expect(cp.mainEntity.itemListElement[0].name).toBe('标题N');
+    expect(cp.mainEntity.itemListElement[0].description).toBe('扩展摘要文本供爬虫抓取。');
   });
 
   test('.summary-full 有内联样式(字号/颜色对齐摘要段)', () => {

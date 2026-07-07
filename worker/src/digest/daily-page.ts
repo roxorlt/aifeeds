@@ -148,6 +148,7 @@ a:hover{text-decoration:underline}
 header{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:8px}
 .brand{font-size:18px;font-weight:700;color:var(--text)}
 .brand a{color:var(--text)}
+h1{font-size:21px;font-weight:700;color:var(--text);line-height:1.4;margin:10px 0 4px}
 .date{color:var(--sub);font-size:14px;margin-top:4px}
 .nav{margin-top:12px;font-size:14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
 .subscribe-btn{margin-left:auto;flex:none;white-space:nowrap;background:var(--link);color:#fff;
@@ -239,7 +240,9 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
     }
   }
 
-  // JSON-LD:CollectionPage + ItemList(每条 name=标题、url=深链、description=加长摘要供爬虫抓取)。
+  // JSON-LD @graph:WebSite + Organization + CollectionPage(含 ItemList)。单个 application/ld+json
+  // 数据岛,JSON.parse 通过,jsonLdSafe 的 `<` 转义仍生效。ItemList 每条 name=标题、url=深链、
+  // description=加长摘要供爬虫抓取。
   const itemListElement = data.sections
     .flatMap((sec) => sec.items)
     .map((it, i) => {
@@ -252,18 +255,36 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
         ...(description ? { description } : {}),
       };
     });
+  const siteHome = `${siteBase}/`;
   const jsonLd = {
     '@context': 'https://schema.org',
-    '@type': 'CollectionPage',
-    name: title,
-    description: desc,
-    url: pageUrl,
-    inLanguage: 'zh-CN',
-    mainEntity: {
-      '@type': 'ItemList',
-      numberOfItems: itemListElement.length,
-      itemListElement,
-    },
+    '@graph': [
+      {
+        '@type': 'WebSite',
+        name: 'AI Feeds',
+        url: siteHome,
+        inLanguage: 'zh-CN',
+      },
+      {
+        '@type': 'Organization',
+        name: 'AI Feeds',
+        url: siteHome,
+        logo: `${siteBase}/og-default.png`,
+      },
+      {
+        '@type': 'CollectionPage',
+        name: title,
+        description: desc,
+        url: pageUrl,
+        inLanguage: 'zh-CN',
+        isPartOf: siteHome,
+        mainEntity: {
+          '@type': 'ItemList',
+          numberOfItems: itemListElement.length,
+          itemListElement,
+        },
+      },
+    ],
   };
 
   // header 前后日导航:前一日缺则隐藏;后一日缺(次日未生成)先指向归档 /daily/。
@@ -280,6 +301,9 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
       return `<section><h2>${escapeHtml(sec.label)}</h2>${articles}</section>`;
     })
     .join('');
+
+  // 语义层级 h1→h2→h3:页面主标题 h1(含日期 + 当日主题,SEO 主题相关性),各源分区标题保留 h2。
+  const h1Text = data.subject ? `AI 日报 ${data.date} · ${data.subject}` : `AI 日报 ${data.date}`;
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -301,7 +325,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
 <div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
-<div class="date">AI 日报 · ${escapeHtml(data.date)}</div>
+<h1>${escapeHtml(h1Text)}</h1>
 <nav class="nav">${nav.join('')}</nav>
 </header>
 <main>${sectionsHtml}</main>
