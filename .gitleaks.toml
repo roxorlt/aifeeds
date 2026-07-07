@@ -1,6 +1,6 @@
-# gitleaks 配置 — 项目允许的"看似 secret 实为公开 token"白名单
+# gitleaks 配置 — 项目允许的"看似 secret 实为公开 token / 占位假 key"白名单
 #
-# 当前 working tree 不再包含这两个 token（2026-05-16 清理移除），
+# 当前 working tree 不再包含 CF Web Analytics 那两个 token（2026-05-16 清理移除），
 # 但 git 历史 commit 4ef9f890 (docs/operations.md 旧版本) 里还有。
 # gitleaks detect 扫历史会再报 → 需要 regex allowlist 精确压。
 #
@@ -10,20 +10,21 @@
 # auto-inject 已经覆盖所有子域（详见 docs/operations.md §11 的
 # "2026-05-16 走过的坑"段），manual standalone site + 前端注入全删，
 # 但 git 历史里还有这两个 token 的引用，需要 allowlist 永久压住。
+# 这两个 site 已经在 CF 后台 DELETE，token 失效，无安全风险。
 #
-# 这两个 site 已经在 CF 后台 DELETE，token 失效，即便外泄也无安全风险
-# （CF Web Analytics site_tag 本来就是浏览器端公开 token，且对应 site
-# 已删，CF endpoint 直接拒收）。
+# 2026-07 追加：seo-routes.test.ts 与历史 TODO 中的占位测试 key `abc123def456`
+# 被 gitleaks 当 generic-api-key 误报，非真实密钥，一并 allowlist。
 #
-# 未来如果又要白名单某个 working-tree 公开 token，加新 regex 到 regexes 数组。
+# 未来如果又要白名单某个公开 token / 占位值，加新 regex 到 regexes 数组。
 #
 # gitleaks 默认规则继承（必须显式声明，不然 default 规则不加载）。
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Historical CF Web Analytics site_tag in commit 4ef9f890 (since removed from working tree, sites deleted from CF, no security risk)."
+description = "历史 CF Web Analytics site_tag（commit 4ef9f890，已从 working tree 移除、CF 后台已删）+ seo 路由测试占位 key abc123def456，均非真实密钥。"
 regexes = [
   '''857fab927a70440bb19c685c8f85094f''',
   '''9e6f987fd43d45d8ae74c134ad8a0e4e''',
+  '''abc123def456''',
 ]
