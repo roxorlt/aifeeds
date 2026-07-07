@@ -96,6 +96,7 @@ import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
+import { checkDailyPageFreshness } from './digest/daily-page-monitor';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
@@ -1666,6 +1667,18 @@ export default {
         })
           .then(() => undefined)
           .catch((e) => console.error('[digest] node-run create fail', e)),
+      );
+    }
+
+    // [SEO] 缺页兜底检查(#4 第二道):UTC 01:00 —— 晚于早 8 点(UTC 0 点)自然跑一小时。
+    // 查 D1 daily_pages 今天(BJT)那行 generated_at 是否晚于今天 UTC 0 点(=今天真生成了);
+    // 无行 / 陈旧行 → PushDeer 告警「[SEO] 今日日报页未生成」(KV 标记当天只告一次)。
+    // 仅 DAILY_PAGE_ENABLED='1' 时启用(功能没开时本就不生成,不该告警)。独立 waitUntil,不阻塞主 cron。
+    if (hour === 1 && minute === 0 && env.DAILY_PAGE_ENABLED === '1') {
+      ctx.waitUntil(
+        checkDailyPageFreshness(env)
+          .then((res) => { if (res.alerted) console.log('[cron] daily-page-freshness:', JSON.stringify(res)); })
+          .catch((e) => console.error('[cron] daily-page-freshness failed:', e)),
       );
     }
 
