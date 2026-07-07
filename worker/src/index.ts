@@ -85,7 +85,9 @@ import {
   shouldScheduleNextEventFingerprintBackfillBatch,
 } from './feeds/event-fingerprint-backfill';
 import { feedNewsRankSqlExpression } from './feeds/ranking';
-import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill } from './feeds/media-r2';
+import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill, runBlogCoverBodyHeroBackfill } from './feeds/media-r2';
+import { runBlogBodyRedecode } from './feeds/blog-body-redecode';
+import { runPhDescriptionTranslate } from './scrapers/ph-description-translate';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
 import { idHashOf } from './feeds/extract';
@@ -4564,6 +4566,37 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const dry = url.searchParams.get('dry') === '1';
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '15'), 1), 50);
     const result = await runBlogCoverOgBackfill(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-cover-bodyhero-backfill') {
+    // Task 2 层 2（2026-07-06）：被 generic-sweep / 采用护栏清簇（cover_generic_cleared_hash 置位）后
+    // cover 落空的 blog item，改从正文 body.assets 选合格 hero 补 cover（og 是被清 logo，Fix C 已挡 og-backfill）。
+    // 天然按源分流：qbitai 正文有真图 → 采用；jiqizhixin 图荒 → 保持 monogram 推游标。
+    // 游标 cover_bodyhero_backfilled_at 单调；?dry=1 零写；?limit 默认 50。循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200);
+    const result = await runBlogCoverBodyHeroBackfill(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'blog-body-redecode') {
+    // Task 1（2026-07-06）：RSSHub 源（jiqizhixin ~142 / weibo-hot-tech ~110）存量正文里
+    // 泄漏的字面结构标签（<p>/<img>/<strong> …）重跑 htmlToMarkdown 清洗写回 body_markdown
+    // (+ body_markdown_zh 如含泄漏)。游标 body_redecoded_at 单调,dry=1 零写。
+    // ?limit 默认 100;循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100'), 1), 500);
+    const result = await runBlogBodyRedecode(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'ph-description-translate') {
+    // Task 3（2026-07-06）：PH item 的 extra.description（英文，均值 317 字）翻译成中文写入
+    // extra.description_zh，供 daily 页 SEO 展示。谓词 = product_hunt 且 description 非空且
+    // description_zh 空；游标单调（写了 zh 就退出谓词），dry=1 零写且不调 DeepSeek。
+    // 新入库 PH 走 ph-pipeline translate-fields step 自动翻，此 mode 只清存量 backlog。
+    // ?limit 默认 30（每条一次 LLM，控子请求量）；循环调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '30'), 1), 100);
+    const result = await runPhDescriptionTranslate(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'backfill-l3-translations') {

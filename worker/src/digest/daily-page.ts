@@ -11,7 +11,7 @@
 //   的标准载体,非可执行 JS),标题里的 </script> 已用 < 转义防越权
 
 import type { Env } from '../index';
-import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, type DigestSource } from './config';
+import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { selectTopForSource, type SelectTopOptions } from './selection';
 import { renderItem, clampSentences, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS, escapeHtml } from './templates';
@@ -116,8 +116,9 @@ export async function buildDailyPageData(
     ids.forEach((id, i) => {
       const row = rows.get(id);
       if (!row) return;
-      // 静态日报页无 JS 兜底 → 开 news 封面质量门(拒外链 cover / 二维码 / 低质 R2 图)。
-      items.push(renderItem(source, row, i + 1, apiBase, { newsCoverQualityGate: true }));
+      // 静态日报页无 JS 兜底 → 开 news 封面质量门(拒外链 cover / 二维码 / 低质 R2 图);
+      // 同时开 extendedIntro,让非 news 源(ph/gh/hf/x)也产出 intro=每源最优加长字段供扩展摘要段展示。
+      items.push(renderItem(source, row, i + 1, apiBase, { newsCoverQualityGate: true, extendedIntro: true }));
     });
     if (!items.length) continue;
     sections.push({ source, label: SOURCE_LABELS[source] || source, items });
@@ -158,6 +159,7 @@ h2{font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;
 article{padding:16px 0;border-bottom:1px solid var(--border)}
 h3{font-size:17px;font-weight:600;line-height:1.5;margin:0 0 8px}
 .summary{color:var(--body);font-size:15px;margin:8px 0}
+.summary-full{color:var(--body);font-size:14px;line-height:1.75;margin:6px 0 0}
 .cover{display:block;width:100%;max-width:100%;height:auto;border-radius:8px;margin:10px 0;border:1px solid var(--border)}
 .meta{color:var(--sub);font-size:13px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
 footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);
@@ -169,16 +171,47 @@ function jsonLdSafe(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+// 扩展摘要文本:每源最优加长字段(item.intro)按句 clamp 到 DAILY_PAGE_INTRO_MAX。
+// intro 为空 → 返回 ''(调用方据此不渲染空段)。
+function extendedSummary(item: RenderedItem): string {
+  return item.intro ? clampSentences(item.intro, DAILY_PAGE_INTRO_MAX) : '';
+}
+
+// 每条 item 供爬虫抓取的描述文本:优先扩展摘要,否则回退一句话 summary。
+function seoDescription(item: RenderedItem): string {
+  return extendedSummary(item) || clampSentences(item.summary_full || item.summary || '');
+}
+
+// 前缀重叠判定:规范化(去尾部省略号 `…` + trim)后,一句话 summary 是否为扩展摘要的逐字前缀。
+// 同源(hf 两者 summary_zh / x 两者 content_translated / gh 都 ai_summary / ph 缺 description_zh 回退 ai_summary)
+// 时,扩展摘要开头 = 一句话 summary(仅 clamp 长度不同,相等亦算前缀)→ true。
+// 异源(blog: summary vs excerpt_zh / podcast: vs shownotes_zh / ph: vs description_zh)内容不同 → false。
+function isPrefixOverlap(oneLiner: string, extended: string): boolean {
+  const norm = (s: string): string => s.replace(/…+$/, '').trim();
+  const a = norm(oneLiner);
+  const b = norm(extended);
+  return a.length > 0 && b.length > 0 && b.startsWith(a);
+}
+
 function renderArticle(item: RenderedItem, siteBase: string): string {
   const deepUrl = `${siteBase}${item.deep_link}`;
-  const summary = clampSentences(item.summary_full || item.summary || '');
+  const oneLiner = clampSentences(item.summary_full || item.summary || '');
+  const extended = extendedSummary(item);
   const parts: string[] = [];
   parts.push(`<article>`);
   parts.push(`<h3><a href="${escapeHtml(deepUrl)}">${escapeHtml(item.title)}</a></h3>`);
   if (item.cover) {
     parts.push(`<img class="cover" src="${escapeHtml(item.cover)}" alt="${escapeHtml(item.title)}" loading="lazy">`);
   }
-  if (summary) parts.push(`<p class="summary">${escapeHtml(summary)}</p>`);
+  if (extended && isPrefixOverlap(oneLiner, extended)) {
+    // 同源前缀:一句话 summary 只是扩展摘要的截断前缀 → collapse 成一段,取更长的扩展 500 版,
+    // 占据一句话 summary 的位置/样式层级(.summary),避免开头 ~180 字逐字重复,SEO 文字量还更多。
+    parts.push(`<p class="summary">${escapeHtml(extended)}</p>`);
+  } else {
+    // 异源(内容不同)或无扩展摘要:保留一句话 summary;有扩展且确非前缀重叠 → 再补扩展段供 SEO 抓取。
+    if (oneLiner) parts.push(`<p class="summary">${escapeHtml(oneLiner)}</p>`);
+    if (extended) parts.push(`<p class="summary-full">${escapeHtml(extended)}</p>`);
+  }
   const meta: string[] = [];
   if (item.author) meta.push(`<span>${escapeHtml(item.author)}</span>`);
   if (item.url) {
@@ -206,15 +239,19 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
     }
   }
 
-  // JSON-LD:CollectionPage + ItemList(每条 name=标题、url=深链绝对 URL)。
+  // JSON-LD:CollectionPage + ItemList(每条 name=标题、url=深链、description=加长摘要供爬虫抓取)。
   const itemListElement = data.sections
     .flatMap((sec) => sec.items)
-    .map((it, i) => ({
-      '@type': 'ListItem',
-      position: i + 1,
-      name: it.title,
-      url: `${siteBase}${it.deep_link}`,
-    }));
+    .map((it, i) => {
+      const description = seoDescription(it);
+      return {
+        '@type': 'ListItem',
+        position: i + 1,
+        name: it.title,
+        url: `${siteBase}${it.deep_link}`,
+        ...(description ? { description } : {}),
+      };
+    });
   const jsonLd = {
     '@context': 'https://schema.org',
     '@type': 'CollectionPage',

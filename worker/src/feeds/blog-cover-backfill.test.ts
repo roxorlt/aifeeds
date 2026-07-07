@@ -250,6 +250,34 @@ describe('runBlogCoverOgBackfill', () => {
     expect(items[0].extra.cover_og_backfilled_at).toBe('done'); // 游标推进,终止循环
   });
 
+  // 终审 I1（2026-07-06）：live 采用护栏（migrateMediaForBlog :468）只写 cover_generic_cleared_hash、
+  // 不写 cover_generic_cleared_at。曾被 live 护栏清过的图荒 item（cover 空走 monogram）若日后 og-backfill
+  // 又把站点 logo 拉回（R2 key 相同）→ 必须仍判循环、跳过写入,否则绕过 Fix C 把 logo 灌回。
+  // 改前 RED：旧判据含 `!!extra.cover_generic_cleared_at` 门 → 此 item 无 at → 漏判 → 灌回 logo。
+  test('曾被 live 护栏清过(仅 hash 无 at)+ 回填同 hash logo → 跳过写入,不灌回', async () => {
+    const items: FakeItem[] = [
+      {
+        id: 'blog:liveguard:1',
+        source_type: 'blog',
+        url: 'https://qbitai.com/live',
+        extra: {
+          feed_key: 'qbitai',
+          // live 护栏只记 hash,无 cover_generic_cleared_at
+          cover_generic_cleared_hash: 'blog/qlogo.jpg',
+        },
+      },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverOgBackfill(env, { limit: 15, dry: false }, {
+      fetchHtml: async () => OG_HTML,
+      migrateCover: async () => '/r/blog/qlogo.jpg', // og 拉回站点 logo：同 hash
+    });
+    expect(res.adopted).toBe(0);
+    expect(res.skipped).toBe(1);
+    expect(items[0].extra.cover_image).toBeUndefined();        // logo 未灌回
+    expect(items[0].extra.cover_og_backfilled_at).toBe('done'); // 游标推进,关闭侧路
+  });
+
   test('曾清簇 + 回填不同 hash(真 hero)→ 正常写入', async () => {
     const items: FakeItem[] = [
       {

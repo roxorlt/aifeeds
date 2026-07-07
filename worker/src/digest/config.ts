@@ -30,6 +30,10 @@ export const CURATED_CANDIDATE_POOL = 30;
 // 每日静态日报页:每个源在页面上最多展示的条数(Task 2/3 消费,与订阅推送 SOURCE_DIGEST_CONFIG 独立)。
 export const DAILY_PAGE_PER_SOURCE_LIMIT = 20;
 
+// 每日静态日报页:每条内容一句话 summary 下追加的扩展摘要段(intro,每源最优加长字段)按句截断上限。
+// SEO 出发点纯文本越多越好,但非全文(避免与详情页重复被判 duplicate content),取 500 字。见 daily-page.ts renderArticle。
+export const DAILY_PAGE_INTRO_MAX = 500;
+
 // BJT 节点小时 → UTC 小时(BJT = UTC+8)。8→0, 12→4, 17→9。cron 表达式用 UTC。
 export function slotBjtToUtcHour(bjtHour: number): number {
   return (bjtHour - 8 + 24) % 24;
