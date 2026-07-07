@@ -32,7 +32,7 @@ const COVER_BLACKLIST_WORDS = [
   'footer',
 ];
 export const COVER_BLACKLIST = new RegExp(
-  `(?<![a-z])(?:${COVER_BLACKLIST_WORDS.join('|')})(?![a-z])`,
+  `(?<![a-z])(?:${COVER_BLACKLIST_WORDS.join('|')})s?(?![a-z])`,
   'i',
 );
 

@@ -27,6 +27,11 @@ describe('COVER_BLACKLIST — 路径段边界锚定', () => {
       '/r/blog/site-logo.png',
       'logo.png',
       'logo2x.png', // 后缘数字非字母 → 边界命中（仍是 logo）
+      // 复数形态加固（Fix，2026-07-07）：词表组后缀 `s?`，拦住目录/文件名的复数写法
+      'logos.png',
+      '/assets/logos/brand.png',
+      'icons.svg',
+      'avatars.jpg',
     ];
     for (const u of MUST_BLOCK) {
       test(`拦: ${u}`, () => {
@@ -46,6 +51,7 @@ describe('COVER_BLACKLIST — 路径段边界锚定', () => {
       'biological-research.jpg',
       'real-hero.jpg',
       'https://platform.theverge.com/wp-content/uploads/sites/2/2026/07/hero.jpg',
+      'logotype.png', // logo 后紧邻字母 't'（非可选 's'）→ s? 加固不误伤，仍放行
     ];
     for (const u of MUST_ALLOW) {
       test(`放: ${u}`, () => {
