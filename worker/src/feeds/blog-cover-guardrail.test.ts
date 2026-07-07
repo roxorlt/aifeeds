@@ -5,6 +5,7 @@ import {
   pickBodyHeroCover,
   runBlogCoverBodyHeroBackfill,
 } from './media-r2';
+import { isNoCoverSource } from './cover-heuristics';
 import type { Env } from '../index';
 
 // ── 共享内存 DB mock（Task 2：采用护栏 + 差异回填）──
@@ -29,13 +30,15 @@ function coverOf(it: FakeItem): string {
   return String(it.extra.cover_image || '');
 }
 
-// bodyhero-backfill 谓词：blog + cover 空 + 被清簇（cleared_hash 置位）+ 未打 bodyhero 游标。
+// bodyhero-backfill 谓词：blog + cover 空 + 被清簇（cleared_hash 置位）+ 未打 bodyhero 游标
+// + 非 no-cover 源（Fix B：noCoverSourcesSqlExclusion 把 jiqizhixin 等排除出批）。
 function bodyHeroActionable(it: FakeItem): boolean {
   return (
     it.source_type === 'blog' &&
     coverOf(it) === '' &&
     it.extra.cover_generic_cleared_hash != null &&
-    it.extra.cover_bodyhero_backfilled_at == null
+    it.extra.cover_bodyhero_backfilled_at == null &&
+    !isNoCoverSource(srcOf(it))
   );
 }
 
@@ -217,9 +220,13 @@ describe('isSourceLevelBrandLogo（同源 ≥3 条共用同图 → 判品牌 log
   });
 });
 
-// ═══════════════ 层 1：migrateMediaForBlog 集成（护栏撤销采用）═══════════════
+// ═══════════════ 层 1/2：migrateMediaForBlog 统计护栏集成（护栏撤销采用）═══════════════
+// 注：本组 target 的 og url 一律用**不含关键词**的干净 url（如 post-cover.png），以便越过 Fix A
+// 的层 0 关键词黑名单、真正命中层 1/2 的统计簇 / 持久 hash 护栏（迁出的 R2 key 才是 qlogo.png）。
+// 生产中 qbitai 的 og 文件名字面含 'logo' → 恒被层 0 拦（见下方 Fix A 组），到不了这里；本组
+// 模拟「og 文件名不含关键词、但同一图被 ≥3 篇复用」的另一类源，锁统计护栏不回归。
 describe('migrateMediaForBlog 采用护栏集成', () => {
-  test('og logo 迁 R2 后同源 ≥3 条共用 → 撤销采用，cover 落空 + 记 cleared_hash', async () => {
+  test('og 迁 R2 后同源 ≥3 条共用同一 hash → 撤销采用，cover 落空 + 记 cleared_hash', async () => {
     const siblings: FakeItem[] = [1, 2, 3].map((i) => ({
       id: `blog:qbitai:s${i}`,
       source_type: 'blog',
@@ -228,7 +235,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     const target: FakeItem = {
       id: 'blog:qbitai:new',
       source_type: 'blog',
-      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/logo.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
+      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/2026/07/post-cover.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
     };
     const { env } = makeEnv([...siblings, target]);
     const res = await migrateMediaForBlog(env, 'blog:qbitai:new', {
@@ -287,7 +294,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
       source_type: 'blog',
       extra: {
         feed_key: 'qbitai',
-        cover_image: 'https://qbitai.com/logo.png',
+        cover_image: 'https://qbitai.com/2026/07/post-cover.png',
         body: {
           source: 'rss_full',
           extracted_at: 'x',
@@ -318,7 +325,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
       source_type: 'blog',
       extra: {
         feed_key: 'qbitai',
-        cover_image: 'https://qbitai.com/logo.png',
+        cover_image: 'https://qbitai.com/2026/07/post-cover.png',
         body: {
           source: 'rss_full',
           extracted_at: 'x',
@@ -346,7 +353,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     const target: FakeItem = {
       id: 'blog:qbitai:new2',
       source_type: 'blog',
-      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/logo.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
+      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/2026/07/post-cover.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
     };
     const { env } = makeEnv([cleared, target]);
     await migrateMediaForBlog(env, 'blog:qbitai:new2', {
@@ -435,12 +442,14 @@ describe('runBlogCoverBodyHeroBackfill', () => {
     expect(items[0].extra.cover_bodyhero_backfilled_at).toBeTruthy();
   });
 
-  test('cover 空 + cleared_hash 置位 + 图荒 → 保持空，推游标（jiqizhixin 场景）', async () => {
+  // 用 aiera 代表「被清簇后图荒」的普通源（jiqizhixin 现已被 Fix B no-cover 谓词整体排除，
+  // 见下方 Fix B 专项测试；此处锁的是「非 no-cover 源图荒时保持空 + 推游标」的通用回落行为）。
+  test('cover 空 + cleared_hash 置位 + 图荒 → 保持空，推游标（普通源场景）', async () => {
     const items: FakeItem[] = [
       {
-        id: 'blog:jiqizhixin:1',
+        id: 'blog:aiera:1',
         source_type: 'blog',
-        extra: { feed_key: 'jiqizhixin', cover_generic_cleared_hash: 'blog/jzx.png', body: { assets: [] } },
+        extra: { feed_key: 'aiera', cover_generic_cleared_hash: 'blog/generic.png', body: { assets: [] } },
       },
     ];
     const { env } = makeEnv(items);
@@ -480,5 +489,209 @@ describe('runBlogCoverBodyHeroBackfill', () => {
     const { env } = makeEnv(items);
     const res = await runBlogCoverBodyHeroBackfill(env, { limit: 20, dry: false });
     expect(res.scanned).toBe(0);
+  });
+
+  // ── Fix B：no-cover 源（jiqizhixin）排除出 bodyhero-backfill 批 ──
+  test('jiqizhixin（no-cover 源）即便有合格 body hero → 不进批、不采用', async () => {
+    const items: FakeItem[] = [
+      {
+        id: 'blog:jiqizhixin:1',
+        source_type: 'blog',
+        extra: {
+          feed_key: 'jiqizhixin',
+          cover_generic_cleared_hash: 'blog/jzx.png',
+          body: { assets: [{ url: 'https://j.com/hero.webp', r2_url: '/r/blog/hero.webp', kind: 'image', role: 'inline', width: 1200, height: 675 }] },
+        },
+      },
+      // qbitai 同形态对照：不在 no-cover 名单 → 正常进批采用 body hero
+      {
+        id: 'blog:qbitai:1',
+        source_type: 'blog',
+        extra: {
+          feed_key: 'qbitai',
+          cover_generic_cleared_hash: 'blog/qlogo.png',
+          body: { assets: [{ url: 'https://q.com/hero.webp', r2_url: '/r/blog/qhero.webp', kind: 'image', role: 'inline', width: 1200, height: 675 }] },
+        },
+      },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverBodyHeroBackfill(env, { limit: 20, dry: false });
+    expect(res.scanned).toBe(1);                                  // 只扫到 qbitai，jiqizhixin 被谓词排除
+    expect(res.adopted).toBe(1);
+    expect(items[0].extra.cover_image).toBeUndefined();           // jiqizhixin 恒空
+    expect(items[0].extra.cover_bodyhero_backfilled_at).toBeUndefined(); // 未处理
+    expect(items[1].extra.cover_image).toBe('/r/blog/qhero.webp'); // qbitai 正常采用
+  });
+});
+
+// ═══════════════ Fix A：采用路径层 0 关键词黑名单（原始 og URL）═══════════════
+// og:image 被采用为封面**之前**（迁移前，原始 URL 关键词信息还在）对原始 og URL 跑 COVER_BLACKLIST，
+// 命中即不迁 R2、不采用，改走正文 hero / monogram。三层防御最早的一层，闭合统计护栏「新源前 2 篇泄漏」窗口。
+describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
+  test("og URL 含 'logo'（qbitai-logo-1.png 形态）+ 正文有真 hero → 不迁 og、就地回落正文 hero", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:qbitai:kw1',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'qbitai',
+        cover_image: 'https://www.qbitai.com/wp-content/uploads/imgs/qbitai-logo-1.png',
+        body: {
+          source: 'rss_full',
+          extracted_at: 'x',
+          assets: [
+            { url: '/r/blog/hero.webp', r2_url: '/r/blog/hero.webp', kind: 'image', role: 'inline', width: 1280, height: 680 },
+          ],
+        },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:kw1', {
+      migrateCover: async () => {
+        migrateCoverCalls++;
+        return '/r/blog/should-not-happen.png';
+      },
+    });
+    expect(migrateCoverCalls).toBe(0);                             // og 不迁 R2（省得白迁 logo）
+    expect(target.extra.cover_image).toBe('/r/blog/hero.webp');   // 就地回落正文 hero
+    expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
+    expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined(); // 未走统计护栏（层 0 先拦）
+    expect(target.extra.cover_generic_cleared_hash).toBeUndefined();
+  });
+
+  test("og URL 含 'logo' + 正文图荒 → cover 清空走 monogram", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:qbitai:kw2',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'qbitai',
+        cover_image: 'https://www.qbitai.com/wp-content/uploads/imgs/qbitai-logo-1.png',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:kw2', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+    });
+    expect(migrateCoverCalls).toBe(0);
+    expect(target.extra.cover_image).toBeUndefined();             // 清空 → monogram
+    expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
+  });
+
+  test("og URL 含 'qrcode' → 同拦（不迁、走 monogram）", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:src:kw3',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'somesrc',
+        cover_image: 'https://s.com/footer_qrcode_QbitAI_1.jpg',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:src:kw3', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+    });
+    expect(migrateCoverCalls).toBe(0);
+    expect(target.extra.cover_image).toBeUndefined();
+    expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
+  });
+
+  test("og URL 含 'avatar' → 同拦", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:src:kw4',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'somesrc',
+        cover_image: 'https://s.com/author-avatar-2x.png',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:src:kw4', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+    });
+    expect(migrateCoverCalls).toBe(0);
+    expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
+  });
+
+  // ── 回归锁：干净 og（Verge 真 hero）→ 层 0 放行、正常采用 ──
+  test('回归锁：og URL 干净（Verge 真 hero）→ 正常迁移采用，无关键词 marker', async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:the-verge:kw',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'the-verge',
+        cover_image: 'https://platform.theverge.com/wp-content/uploads/sites/2/2026/07/hero.jpg',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    const res = await migrateMediaForBlog(env, 'blog:the-verge:kw', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/uniquehero.jpg'; },
+    });
+    expect(migrateCoverCalls).toBe(1);                            // 干净 og → 正常迁移
+    expect(res.migrated).toBe(1);
+    expect(target.extra.cover_image).toBe('/r/blog/uniquehero.jpg');
+    expect(target.extra.cover_keyword_blacklisted_at).toBeUndefined();
+    expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined();
+  });
+});
+
+// ═══════════════ Fix B：源级 no-cover 名单（jiqizhixin）═══════════════
+// 名单内源一律不采用任何封面：og 不采、正文 hero 不回退、cover_image 恒空走 monogram。
+describe('migrateMediaForBlog 源级 no-cover（Fix B）', () => {
+  test('jiqizhixin 有 og + 正文有图 → cover 仍恒空（og 不采、正文 hero 不回退）', async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:jiqizhixin:nc1',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'jiqizhixin',
+        cover_image: 'https://image.jiqizhixin.com/uploads/og-brand.png',
+        body: {
+          source: 'rss_full',
+          extracted_at: 'x',
+          assets: [
+            // 即便正文有合格 R2 图，no-cover 源也不回落作封面
+            { url: '/r/blog/jzx-inline.webp', r2_url: '/r/blog/jzx-inline.webp', kind: 'image', role: 'inline', width: 1200, height: 675 },
+          ],
+        },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:jiqizhixin:nc1', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/jzx-og.png'; },
+    });
+    expect(migrateCoverCalls).toBe(0);                            // og 不迁、不采
+    expect(target.extra.cover_image).toBeUndefined();            // cover 恒空
+    expect(target.extra.cover_nocover_source_at).toBeTruthy();
+    expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined();
+    expect(target.extra.cover_keyword_blacklisted_at).toBeUndefined();
+  });
+
+  test('qbitai 不在 no-cover 名单 → 正常走护栏路径（统计簇撤销采用）', async () => {
+    const siblings: FakeItem[] = [1, 2, 3].map((i) => ({
+      id: `blog:qbitai:s${i}`,
+      source_type: 'blog',
+      extra: { feed_key: 'qbitai', cover_image: '/r/blog/qlogo.png' },
+    }));
+    const target: FakeItem = {
+      id: 'blog:qbitai:nc',
+      source_type: 'blog',
+      // og 干净（越过层 0），靠统计簇（层 1）撤销 → 证明 qbitai 未被 no-cover 短路
+      extra: { feed_key: 'qbitai', cover_image: 'https://qbitai.com/2026/07/post-cover.png', body: { source: 'rss_full', extracted_at: 'x', assets: [] } },
+    };
+    const { env } = makeEnv([...siblings, target]);
+    await migrateMediaForBlog(env, 'blog:qbitai:nc', {
+      migrateCover: async () => '/r/blog/qlogo.png',
+    });
+    expect(target.extra.cover_generic_cleared_hash).toBe('blog/qlogo.png'); // 走了统计护栏
+    expect(target.extra.cover_brandlogo_guarded_at).toBeTruthy();
+    expect(target.extra.cover_nocover_source_at).toBeUndefined();           // 非 no-cover 路径
   });
 });

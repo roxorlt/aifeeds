@@ -3,6 +3,7 @@ import {
   runBlogCoverOgBackfill,
   runBlogCoverGenericSweep,
 } from './media-r2';
+import { isNoCoverSource } from './cover-heuristics';
 import type { Env } from '../index';
 
 // ── 共享内存 DB mock:解释 blog-cover 两个 mode 的 SQL ──
@@ -26,13 +27,15 @@ function isR2(u: string): boolean {
   return u.startsWith('/r/') || /^https?:\/\/[^/]+\/r\//i.test(u);
 }
 
-// backfill 谓词:blog + cover 空 + 未打 og 游标 + 有 url
+// backfill 谓词:blog + cover 空 + 未打 og 游标 + 有 url + 非 no-cover 源
+// （Fix B：noCoverSourcesSqlExclusion 把 jiqizhixin 等排除，避免 Fix B 清空后 og-backfill 又灌回 logo）。
 function backfillActionable(it: FakeItem): boolean {
   return (
     it.source_type === 'blog' &&
     coverOf(it) === '' &&
     !it.extra.cover_og_backfilled_at &&
-    !!String(it.url || '').trim()
+    !!String(it.url || '').trim() &&
+    !isNoCoverSource(srcOf(it))
   );
 }
 
@@ -315,6 +318,25 @@ describe('runBlogCoverOgBackfill', () => {
       migrateCover: async () => '/r/blog/x.jpg',
     });
     expect(res.scanned).toBe(0);
+  });
+
+  // Fix B：no-cover 源（jiqizhixin）排除出 og-backfill 批——否则 Fix B 清空封面后，
+  // og-backfill 会重新拉 og:image（jiqizhixin 恒为品牌 logo）灌回，Fix B 沦为空转。
+  test('jiqizhixin（no-cover 源）cover 空 → 不进 og-backfill 批（不灌回 logo）', async () => {
+    const items: FakeItem[] = [
+      { id: 'blog:jiqizhixin:1', source_type: 'blog', url: 'https://jiqizhixin.com/a', extra: { feed_key: 'jiqizhixin' } },
+      // qbitai 对照：不在名单 → 正常进批
+      { id: 'blog:qbitai:1', source_type: 'blog', url: 'https://qbitai.com/a', extra: { feed_key: 'qbitai' } },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverOgBackfill(env, { limit: 15, dry: false }, {
+      fetchHtml: async () => OG_HTML,
+      migrateCover: async () => '/r/blog/real-hero.jpg',
+    });
+    expect(res.scanned).toBe(1);                                 // 只扫 qbitai
+    expect(items[0].extra.cover_image).toBeUndefined();          // jiqizhixin 未被灌回
+    expect(items[0].extra.cover_og_backfilled_at).toBeUndefined();
+    expect(items[1].extra.cover_image).toBe('/r/blog/real-hero.jpg'); // qbitai 正常回填
   });
 });
 
