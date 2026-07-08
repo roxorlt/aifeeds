@@ -20,6 +20,7 @@ import { cn, htmlToPlainText, parseJsonField, proxyImg, timeAgo } from "../lib/u
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
 import { IconClock } from "./icons";
+import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
@@ -101,12 +102,12 @@ export function BlogCard({ item, eager, posterMode }: Props) {
         {/* 左：文字主体 */}
         <div className="min-w-0 flex-1">
           <h3 className={cn("text-[15px] font-bold leading-tight text-neutral-900 break-words", posterMode ? "" : "line-clamp-2")}>
-            {title}
+            <HL text={title} />
           </h3>
 
           {summary && (
             <p className={cn("mt-1 text-[13px] leading-[1.5] text-neutral-600 break-words", posterMode ? "line-clamp-4" : "line-clamp-3")}>
-              {summary}
+              <HL text={summary} />
             </p>
           )}
 

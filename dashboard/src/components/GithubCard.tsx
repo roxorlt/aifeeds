@@ -11,6 +11,7 @@ import {
   IconStarFill,
   IconWatching,
 } from "./icons";
+import { HL } from "./search/highlight";
 
 // dashboard origin（CF Pages） != worker origin（api.ai-feeds.com）；
 // /r/<key> R2 反代在 worker 那边，dashboard 端不能用相对路径访问。
@@ -150,7 +151,7 @@ export function GithubCard({ item, eager }: Props) {
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="text-[15px] font-bold leading-tight text-neutral-900 break-words">
-                {ownerRepo}
+                <HL text={ownerRepo} />
               </div>
             </div>
             {dailyRank && (
@@ -203,7 +204,7 @@ export function GithubCard({ item, eager }: Props) {
               !expanded && "line-clamp-4",
             )}
           >
-            {expanded ? summary : smartTruncate(summary, 280)}
+            <HL text={expanded ? summary : smartTruncate(summary, 280)} />
           </p>
           {!expanded && (
             <button
