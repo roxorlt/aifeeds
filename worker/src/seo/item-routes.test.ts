@@ -200,6 +200,52 @@ describe('handleItemRoute', () => {
     expect(res!.status).toBe(404);
   });
 
+  test('/i/ph/:slug 含 LIKE 通配符（%25→%）→ 404，不进 D1 LIKE（I1）', async () => {
+    // 若不校验 slug，`%` 会作 LIKE 通配符匹配全部 PH 行 → 返回最新 200（可缓存）。
+    const latest = 'product_hunt:whatever:2026-07-08';
+    const key = itemPageR2Key(latest)!;
+    const db = makeDb({
+      items: { [latest]: { is_relevant: 1 } },
+      pages: { [latest]: 'live' },
+      // mock 里 LIKE 命中 %-pattern（等价真实 LIKE 全表命中）；白名单必须在此之前拦掉。
+      phByPattern: { 'product_hunt:%:%': { id: latest } },
+    });
+    const r2 = makeR2({ [key]: '<!doctype html><title>LEAK</title>' });
+    const res = await handleItemRoute(req('/i/ph/%25'), makeEnv(db, r2));
+    expect(res!.status).toBe(404);
+  });
+
+  test('/i/ph/:slug 含连字符的合法 slug → 正常反解命中（I1 不误伤）', async () => {
+    const latest = 'product_hunt:cool-tool:2026-07-08';
+    const key = itemPageR2Key(latest)!;
+    const db = makeDb({
+      items: { [latest]: { is_relevant: 1 } },
+      pages: { [latest]: 'live' },
+      phByPattern: { 'product_hunt:cool-tool:%': { id: latest } },
+    });
+    const r2 = makeR2({ [key]: '<!doctype html><title>HYPHEN-OK</title>' });
+    const res = await handleItemRoute(req('/i/ph/cool-tool'), makeEnv(db, r2));
+    expect(res!.status).toBe(200);
+    expect(await res!.text()).toContain('HYPHEN-OK');
+  });
+
+  test('HEAD 在 R2 miss 时不触发按需生成（M2 零写副作用）→ 404', async () => {
+    const composite = 'github:acme/tool';
+    const db = makeDb({
+      items: { [composite]: { is_relevant: 1 } },
+      pages: { [composite]: 'live' },
+    });
+    const r2 = makeR2(); // 空 → R2 miss
+    const generate = vi.fn(async (_env: Env, cid: string): Promise<ItemPageRunResult> => {
+      await r2.put(itemPageR2Key(composite)!, '<!doctype html><title>GEN</title>');
+      return { itemId: cid, skipped: false };
+    });
+    const res = await handleItemRoute(req('/i/gh/acme/tool', 'HEAD'), makeEnv(db, r2), generate);
+    expect(generate).not.toHaveBeenCalled(); // HEAD 不触发写副作用
+    expect(res!.status).toBe(404);
+    expect(r2.puts.length).toBe(0);
+  });
+
   test('/i/news/<enc composite id> → 反解回整 composite id 伺服', async () => {
     const composite = 'blog:abc123';
     const key = itemPageR2Key(composite)!;

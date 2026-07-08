@@ -54,8 +54,14 @@ function dec(s: string): string {
   }
 }
 
-// /i/ph/<slug> → 该 slug 最新 product_hunt item 的 composite id（含 date）。无匹配返回 null。
+// PH slug 白名单：composite id 的 slug 段字符集（小写字母 / 数字 / 连字符，首字符非连字符）。
+// LIKE 通配符 %、_ 不在集内 → 拦 `/i/ph/%25`（解码 `%`）之类脏 URL 匹配全部 PH 返回最新 200（I1）。
+const PH_SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+// /i/ph/<slug> → 该 slug 最新 product_hunt item 的 composite id（含 date）。无匹配 / slug 非法返回 null。
 async function resolvePhLatest(env: Env, slug: string): Promise<string | null> {
+  // slug 含 LIKE 通配符（% / _）或其它越界字符 → 直接判无匹配（调用点转 404），不进 D1 LIKE。
+  if (!PH_SLUG_RE.test(slug)) return null;
   const row = await env.DB.prepare(
     `SELECT id FROM items WHERE source_type = 'product_hunt' AND id LIKE ? ORDER BY published_at DESC LIMIT 1`,
   )
@@ -155,11 +161,14 @@ export async function handleItemRoute(
   if (hit) return serveHtmlBytes(hit.body);
 
   // R2 miss 但 item 存在且 relevant → 实时兜底生成后再读一次。
-  const gen = await generate(env, compositeId);
-  if (!gen.skipped && bucket) {
-    const regen = await bucket.get(key);
-    if (regen) return serveHtmlBytes(regen.body);
+  // 仅 GET 触发写副作用（M2）：HEAD 探测不应引发 R2 put / D1 upsert，直接落 404 兜底。
+  if (request.method === 'GET') {
+    const gen = await generate(env, compositeId);
+    if (!gen.skipped && bucket) {
+      const regen = await bucket.get(key);
+      if (regen) return serveHtmlBytes(regen.body);
+    }
   }
-  // 生成被跳过（relevant 中途翻转）或仍 miss → 404 兜底。
+  // 生成被跳过（relevant 中途翻转 / dedup 次源）或 HEAD 不生成或仍 miss → 404 兜底。
   return statusPage(env, 404);
 }
