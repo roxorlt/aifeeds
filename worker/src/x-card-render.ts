@@ -177,12 +177,12 @@ export async function renderXCardViaCodex(env: Env, itemId: string): Promise<XCa
     if (resp.status >= 500) {
       lastErr = `http_${resp.status}`;
       if (attempt === 1) continue; // 5xx 重试 1 次
-      const body = await resp.json<{ error?: string; message?: string }>().catch(() => ({}));
+      const body = await resp.json<{ error?: string; message?: string }>().catch(() => ({}) as { error?: string; message?: string });
       return { ok: false, error: body.error || lastErr, status: resp.status };
     }
     if (!resp.ok) {
       // 4xx:不重试,记录校验问题。
-      const body = await resp.json<{ error?: string; message?: string }>().catch(() => ({}));
+      const body = await resp.json<{ error?: string; message?: string }>().catch(() => ({}) as { error?: string; message?: string });
       return { ok: false, error: body.error || `http_${resp.status}`, status: resp.status };
     }
 

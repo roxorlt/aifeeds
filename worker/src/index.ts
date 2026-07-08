@@ -843,7 +843,7 @@ export default {
           if (!key) { failed.push({ key: rawKey, reason: 'empty_after_strip' }); continue; }
           try {
             if (!force) {
-              const existing = await env.READMES.head(key);
+              const existing = await env.READMES!.head(key);
               if (existing) { skippedExisting++; continue; }
             }
             const srcUrl = `${srcOrigin}/r/${key}`;
@@ -852,7 +852,7 @@ export default {
             if (dryRun) { migrated++; continue; }
             const buf = await srcResp.arrayBuffer();
             const ct = srcResp.headers.get('content-type') || 'application/octet-stream';
-            await env.READMES.put(key, buf, { httpMetadata: { contentType: ct } });
+            await env.READMES!.put(key, buf, { httpMetadata: { contentType: ct } });
             migrated++;
           } catch (e) {
             failed.push({ key, reason: `exception:${(e as Error).message}` });
@@ -2358,7 +2358,9 @@ export default {
               console.log('[cron] refresh-metrics skipped (REFRESH_MODE=off)');
               return;
             }
-            const result = await recordCronRun(
+            const result = await recordCronRun<
+              Awaited<ReturnType<typeof runRefreshMetrics>> | Awaited<ReturnType<typeof runRefreshTiered>>
+            >(
               env,
               { name: 'refresh-metrics', source: 'common', category: 'refresh' },
               () =>
