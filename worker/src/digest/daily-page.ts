@@ -171,6 +171,45 @@ function jsonLdSafe(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+// ── 公共 SEO 页骨架(日报页 + item 单页共用)───────────────────────────────────────
+// head(title/description/canonical/OG/单 JSON-LD 数据岛/内联 CSS)+ <html> 外壳。
+// bodyHtml 为 <body> 内的完整内容(调用方自带 .wrap 容器)。零可执行 <script>:唯一 <script>
+// 是 application/ld+json 数据岛(jsonLdSafe 已把 `<` 转义防 </script> 越权)。
+// PAGE_STYLE / jsonLdSafe 未改动 → 日报页调用后输出对既有实现逐字节不变(纯重构)。
+// og:url 与 canonical 同值(self-canonical);og:image 缺省(undefined)时整行省略。
+export function renderSeoPageShell(opts: {
+  lang: 'zh-CN';
+  title: string;
+  description: string;
+  canonical: string;
+  ogImage?: string;
+  ogType: 'website' | 'article';
+  jsonLd: object;
+  bodyHtml: string;
+}): string {
+  const { lang, title, description, canonical, ogImage, ogType, jsonLd, bodyHtml } = opts;
+  const ogImageLine = ogImage ? `<meta property="og:image" content="${escapeHtml(ogImage)}">\n` : '';
+  return `<!doctype html>
+<html lang="${lang}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(description)}">
+<link rel="canonical" href="${canonical}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(description)}">
+<meta property="og:type" content="${ogType}">
+<meta property="og:url" content="${canonical}">
+${ogImageLine}<script type="application/ld+json">${jsonLdSafe(jsonLd)}</script>
+<style>${PAGE_STYLE}</style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
 // 扩展摘要文本:每源最优加长字段(item.intro)按句 clamp 到 DAILY_PAGE_INTRO_MAX。
 // intro 为空 → 返回 ''(调用方据此不渲染空段)。
 function extendedSummary(item: RenderedItem): string {
@@ -281,24 +320,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
     })
     .join('');
 
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<meta name="description" content="${escapeHtml(desc)}">
-<link rel="canonical" href="${pageUrl}">
-<meta property="og:title" content="${escapeHtml(title)}">
-<meta property="og:description" content="${escapeHtml(desc)}">
-<meta property="og:type" content="article">
-<meta property="og:url" content="${pageUrl}">
-<meta property="og:image" content="${escapeHtml(ogImage)}">
-<script type="application/ld+json">${jsonLdSafe(jsonLd)}</script>
-<style>${PAGE_STYLE}</style>
-</head>
-<body>
-<div class="wrap">
+  const bodyHtml = `<div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
 <div class="date">AI 日报 · ${escapeHtml(data.date)}</div>
@@ -310,7 +332,16 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
 <a href="${siteBase}/">进站看全部</a>
 <a href="${dailyBase}/">历史日报</a>
 </footer>
-</div>
-</body>
-</html>`;
+</div>`;
+
+  return renderSeoPageShell({
+    lang: 'zh-CN',
+    title,
+    description: desc,
+    canonical: pageUrl,
+    ogImage,
+    ogType: 'article',
+    jsonLd,
+    bodyHtml,
+  });
 }
