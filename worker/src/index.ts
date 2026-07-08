@@ -97,6 +97,7 @@ import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXC
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
+import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -477,6 +478,10 @@ export default {
       // 返回 null = 非本模块路径,继续后续匹配。绝对 URL 一律走 SITE_BASE(seo-routes.ts)。
       const seoResp = await handleSeoRoute(request, env);
       if (seoResp) return seoResp;
+
+      // item SSR 静态页 /i/:source/*(每条内容独立实体页)。bot gate 豁免同 isSeoPath(见上)。
+      const itemResp = await handleItemRoute(request, env);
+      if (itemResp) return itemResp;
 
       if (path === '/api/ingest' && request.method === 'POST') {
         return handleIngest(request, env);

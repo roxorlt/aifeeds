@@ -15,6 +15,8 @@ import { escapeHtml } from './digest/templates';
 
 // 根目录单段 .txt 文件(robots.txt / llms.txt / <indexnow-key>.txt)。sitemap.xml 另判。
 const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
+// sitemap 分片:/sitemap-<source>.xml、/sitemap-<source>-<n>.xml(Task 6 分源分片,伺服由 handleSeoRoute 出)。
+const SITEMAP_SHARD_RE = /^\/sitemap-[a-z0-9-]+\.xml$/;
 // 日报深链:严格 YYYY-MM-DD 形状(真实性再由 isValidCalendarDate 校验,拦 2026-13-99)。
 const DAILY_DATE_RE = /^\/daily\/(\d{4}-\d{2}-\d{2})$/;
 
@@ -22,7 +24,10 @@ const DAILY_DATE_RE = /^\/daily\/(\d{4}-\d{2}-\d{2})$/;
 // 无 env 参数(签名固定),故 indexnow key 文件按"根目录 .txt"整体豁免,真实 key 校验在 handleSeoRoute。
 export function isSeoPath(pathname: string): boolean {
   if (pathname === '/daily' || pathname.startsWith('/daily/')) return true;
+  // item SSR 静态页 /i/…（伺服由 seo/item-routes.ts handleItemRoute 出）。裸 /i 不放行。
+  if (pathname.startsWith('/i/')) return true;
   if (pathname === '/sitemap.xml') return true;
+  if (SITEMAP_SHARD_RE.test(pathname)) return true;
   if (ROOT_TXT_RE.test(pathname)) return true;
   return false;
 }

@@ -150,6 +150,20 @@ export function itemPagePath(itemId: string): string | null {
   }
 }
 
+// composite id → item 静态页 R2 key（`items/<urlSource>/<url-safe composite id>.html`）。
+// 与 itemPagePath 同源 gate：不可出页（clawhub / huodongxing / 未知）返回 null。
+// Task 3 伺服层读、Task 4 生成层写，共用此函数确保 R2 key 不漂移。
+//   <source> 段用 URL source（x/gh/ph/paper/news），与 url_path 前缀一致；
+//   <id-safe> = 整 composite id 的 encodeURIComponent（`:` `/` 等一律转义，落单段 key）。
+//   product_hunt:slug:date 用整 id（含 date）编码 —— 伺服层先把 /i/ph/slug 反解为最新 composite id 再算 key。
+export function itemPageR2Key(itemId: string): string | null {
+  const idx = itemId.indexOf(':');
+  if (idx < 0) return null;
+  const urlSource = sourceTypeToUrlSource(itemId.slice(0, idx));
+  if (!urlSource) return null;
+  return `items/${urlSource}/${encodeURIComponent(itemId)}.html`;
+}
+
 function ghRepoName(itemId: string): string {
   const idx = itemId.indexOf(':');
   const sid = idx >= 0 ? itemId.slice(idx + 1) : itemId;
