@@ -26,6 +26,7 @@ import {
   type RenderedItem,
 } from '../digest/render';
 import { SOURCE_LABELS, escapeHtml } from '../digest/templates';
+import { renderItemBody, itemIndexableText, ITEM_BODY_STYLE } from './item-body';
 
 // meta description 截断上限(纯文本前 ~150 字,按句)。
 const ITEM_DESC_MAX = 150;
@@ -67,14 +68,6 @@ function displayDate(raw: string): string {
   return m ? m[1] : raw;
 }
 
-// 规范化(去尾部省略号 + trim),判断两段文本是否同源(一段是另一段前缀 → 不重复渲染)。
-function isPrefixOverlap(a: string, b: string): boolean {
-  const norm = (s: string): string => s.replace(/…+$/, '').trim();
-  const x = norm(a);
-  const y = norm(b);
-  return x.length > 0 && y.length > 0 && (x.startsWith(y) || y.startsWith(x));
-}
-
 export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedItem[] = []): string {
   const { siteBase, apiBase } = getBases(env);
   const r = row as ItemPageRow;
@@ -95,10 +88,11 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const description = clampSentences(summaryFull, ITEM_DESC_MAX);
   const datePublished = (r.published_at || r.scraped_at || '').trim();
 
-  // 译文摘录:renderItem 已把 intro(每源最优加长字段)按句 clamp 到 800。
-  // 与 summary_full 同源(前缀重叠,如 x/hf/gh)时不重复渲染;异源(ph/news)时补一段。
-  const intro = item.intro || '';
-  const showIntro = !!intro && !isPrefixOverlap(summaryFull, intro);
+  // 分源混合正文:gh/hf/ph/x 全文,blog/podcast 摘要+分析+短摘录(见 item-body.ts)。净化后零可执行 script。
+  const bodyContent = renderItemBody(source, row, env);
+
+  // JSON-LD articleBody:可安全索引纯文本。全文源用正文派生,blog/podcast 只用我们的摘要+分析(不照译全文)。
+  const articleBody = itemIndexableText(source, row, env);
 
   // ── JSON-LD @graph:Article + BreadcrumbList(首页→源频道→本条) + Organization ──
   const channelUrl = `${siteBase}/?source=${encodeURIComponent(source)}`;
@@ -109,6 +103,7 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
     inLanguage: 'zh-CN',
     mainEntityOfPage: canonical,
     image: cover,
+    ...(articleBody ? { articleBody } : {}),
     ...(datePublished ? { datePublished } : {}),
     ...(item.author ? { author: { '@type': 'Person', name: item.author } } : {}),
   };
@@ -149,10 +144,9 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const coverHtml = item.cover
     ? `<img class="cover" src="${escapeHtml(item.cover)}" alt="${escapeHtml(item.title)}" loading="lazy">`
     : '';
-  const introHtml = showIntro ? `<p class="summary-full">${escapeHtml(intro)}</p>` : '';
-  const summaryHtml = summaryFull ? `<p class="summary">${escapeHtml(summaryFull)}</p>` : '';
 
-  const bodyHtml = `<div class="wrap">
+  const bodyHtml = `<style>${ITEM_BODY_STYLE}</style>
+<div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
 <div class="date">${escapeHtml(label)}</div>
@@ -161,8 +155,7 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
 <article>
 <h1 style="font-size:22px;font-weight:700;line-height:1.4;margin:12px 0 10px">${escapeHtml(item.title)}</h1>
 ${coverHtml}
-${summaryHtml}
-${introHtml}
+${bodyContent}
 <div class="meta">${metaBits.join('')}</div>
 <p><a class="subscribe-btn" style="display:inline-block" href="${escapeHtml(deepUrl)}">打开互动版</a></p>
 </article>

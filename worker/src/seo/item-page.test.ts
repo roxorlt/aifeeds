@@ -148,9 +148,10 @@ describe('renderItemPageHtml', () => {
     expect(html).toContain('<title>tool | AI Feeds</title>');
   });
 
-  test('news 异源：summary_full 与 intro 内容不同 → 两段都渲染（.summary + .summary-full）', () => {
+  test('blog（半文源）：我们的摘要 + 要点 + 显著阅读原文链（正文区改由 renderItemBody 出）', () => {
     const row = mkRow({
       id: 'blog:hash2',
+      url: 'https://openai.com/blog/some-post',
       content_translated: null,
       extra: JSON.stringify({
         title_zh: '新闻标题',
@@ -159,8 +160,12 @@ describe('renderItemPageHtml', () => {
       }),
     });
     const html = renderItemPageHtml(row, envFixture());
-    expect(html).toContain('<p class="summary">一句话新闻摘要。</p>');
-    expect(html).toContain('<p class="summary-full">完全不同的图文扩展正文内容，与一句话摘要并非同源。</p>');
+    // 我们的摘要作引导段（.summary-full），excerpt 作要点段（.summary）。
+    expect(html).toContain('一句话新闻摘要。');
+    expect(html).toContain('完全不同的图文扩展正文内容，与一句话摘要并非同源。');
+    // 半文源必有显著「阅读原文」出处链（带域名署名）。
+    expect(html).toContain('阅读原文（openai.com）');
+    expect(html).toMatch(/href="https:\/\/openai\.com\/blog\/some-post"[^>]*rel="noopener nofollow"/);
   });
 
   test('绝对 URL 一律用 env.SITE_BASE（footer 订阅/首页/归档）', () => {
