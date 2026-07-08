@@ -421,8 +421,13 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - 归档索引 / sitemap / llms 均从 D1 `daily_pages` 表**实时读取，不做 R2 list**（R2 `READMES` bucket 只存 `daily/YYYY-MM-DD.html` 快照）
 - 日报页 HTML **零可执行 `<script>`**：唯一的 `<script>` 是 `application/ld+json` JSON-LD 数据岛（`ItemList` 结构化数据，`<` 转义防 `</script>` 越权）；外部 title 字段一律 `escapeHtml`
 - 静态页生成挂在 digest 早 8 点 workflow 的 **Phase 4**（详见下方「订阅推送子系统」§「每日静态日报页 Phase 4」）；手动 `POST /api/enrich/run?mode=daily-page` 重建 / 回填
-- **主域 `ai-feeds.com` 经香港 nginx 转发**：front server 块加 regex location 把这 6 类路径转发到与 api 块同一 worker upstream（详见下方 §6b 六续 note）；api 域 `api.ai-feeds.com` 直接可达不受影响
+- **主域 `ai-feeds.com` 经香港 nginx 转发**：front server 块加 regex location 把这 6 类路径转发到与 api 块同一 worker upstream（详见下方 §6b 六续 note；2026-07-08 起该 location 再扩 `/i/*` 与 sitemap 分片，见 §6b 七续 + 下方「item SSR 静态页」段）；api 域 `api.ai-feeds.com` 直接可达不受影响
 - 设计文档：[`plans/2026-07-06-daily-static-page-seo-design.md`](plans/2026-07-06-daily-static-page-seo-design.md)
+
+**item SSR 静态页 `/i/*` + sitemap 分片**（2026-07-08 上线，`worker/src/seo/item-routes.ts` + `worker/src/seo-routes.ts`）：
+- `GET /i/<source>/<id...>`：五源单页（`x`/`gh`/`ph`/`hf-paper`/`news`），伺服逻辑、404/410 与 `isSeoPath` 判定见设计 `docs/plans/2026-07-08-item-ssr-pages-design.md` §4.4/§4.6；bot gate 豁免（`isSeoPath` 的 `pathname.startsWith('/i/')`，裸 `/i` 不豁免）
+- `GET /sitemap.xml` 已改 sitemap-index；`GET /sitemap-<source>.xml`（超 5 万续 `-2 -3…`）为各源实际 URL 列表，正则见 `worker/src/seo-routes.ts` 的 `SITEMAP_SHARD_RE`
+- 主域经香港 nginx 转发：同上 regex location 已扩至含 `i/.*` 与 `sitemap-[a-z0-9-]+\.xml`（§6b 七续），权威副本 [`deploy/nginx/aifeeds-seo-location.conf`](../deploy/nginx/aifeeds-seo-location.conf)
 
 **`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
@@ -1096,6 +1101,8 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 > 3. **Service Worker 壳缓存**(`dashboard/public/sw.js` + main.tsx 注册):回访导航 0 网络直接回缓存壳(实测 22ms/0 字节,FCP ~0.5s),后台拉新壳下次用(最多旧一个版本)。FEED_CACHE 同时落 localStorage 快照(每频道 15 条),冷启动先显旧内容再 silent refetch。**紧急停用(kill switch)**:全员停 = 往 `dashboard/index.html` 加 `<script>window.__SW_OFF=true</script>` 发版(SW 每次导航都后台拉新壳,一个访问周期内传达到);单机停 = localStorage 设 `aifeeds_sw_off=1`。SW 不碰 api//img/视频/字体/跨域(视频 Range 不能拦,5/9 事故同类风险)。
 
 > ⚠️ **2026-07-06 六续(主域 SEO 路径转发 —— 每日静态日报页上线)**:`ai-feeds.com` front server 块新增一个 **regex location**,把 `/daily`、`/daily/*`、`/robots.txt`、`/sitemap.xml`、`/llms.txt`、`/<INDEXNOW_KEY>.txt`(key 真值在 nginx 配置 + `.secrets/aifeeds-prod.env` 的 `INDEXNOW_KEY`,IndexNow 验证文件本就公开) 转发到与 api 块**同一 worker upstream**(`xlist-api.ltsms86.workers.dev`),**照 api 块注入全套头**(`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `X-Forwarded-Proto/For` + `proxy_ssl_name/server_name`)。正则:`location ~ ^/(daily(/.*)?|robots\.txt|sitemap\.xml|llms\.txt|<key>\.txt)$`,放在 front 块 SPA fallback `location /` **之前**(regex location 优先于 prefix location 匹配;其余路径仍走 CF Pages)。**故意不启用 proxy_cache**(流量低,避开 6-21 新旧 HTML 混喂缓存事故)。worker 侧日报页 canonical/深链一律用 env `SITE_BASE`(`https://ai-feeds.com`),不依赖 request host。备份 `aifeeds.conf.bak-20260706-seo`。**回滚**:删该 location 块 → `nginx -t && systemctl reload nginx`(worker 路由无状态,删 nginx location 即回滚,api 域 `/daily` 等仍可访问不受影响)。设计见 `docs/plans/2026-07-06-daily-static-page-seo-design.md` §4.10。
+>
+> ⚠️ **2026-07-08 七续(item SSR 静态页 `/i/*` + sitemap 分片纳入同一转发 —— 全量内容静态页上线)**:六续正则扩为 `location ~ ^/(daily(/.*)?|i/.*|robots\.txt|sitemap\.xml|sitemap-[a-z0-9-]+\.xml|llms\.txt|<key>\.txt)$` —— 新增两段:① `i/.*` 转发单页 SEO 静态页 `/i/<source>/<id...>`(如 `/i/x/123`、`/i/gh/owner/repo`;**裸 `/i` 不放行**,与 worker `isSeoPath()` 的 `pathname.startsWith('/i/')` 判定一致);② `sitemap-[a-z0-9-]+\.xml` 转发 sitemap 分片(`/sitemap-daily.xml`、`/sitemap-x.xml`、`/sitemap-hf-paper-2.xml` 等,`/sitemap.xml` 本体已改 sitemap-index,见 `worker/src/seo-routes.ts` 的 `SITEMAP_SHARD_RE`)。回源头 / 不启用 proxy_cache 等约定不变。**本次改动同时把该 location 块纳入 git 版本化**,权威副本落 `deploy/nginx/aifeeds-seo-location.conf`(repo 内,含完整回滚/部署步骤注释),VPS 仍是实际生效配置,改动需 SSH 同步(见文件头注释)。**与 PR #170(fix/seo-polish-ops,未 merge)的关系**:该 PR 也把此文件纳入版本化(无 `/i/` 与分片段),两分支各自基于 main 独立新建同名文件,merge 顺序上后合入一方会遇路径冲突,取本文件(超集,含 `/i/` 与分片)、PR #170 的其余改动(日报页缺页告警等)正常合入。**三层口径核对**:nginx 正则、worker `isSeoPath()` 已同步含 `/i/*` 与 sitemap 分片;⚠️ `dashboard/public/sw.js` 的 `isSeoPath()` **尚未同步** `/i/*` 分支(仍只放行 `/daily`、`/sitemap.xml`、根级 `.txt`)——本 task 范围内未改(不在本次改动文件清单),遗留为后续修复项,影响面:SW 拦截导航请求时若命中缓存壳而非透传 `/i/*` 请求,`/i/` 页面理论上可能被 SW 拿旧壳响应(需验证实际影响并在专门 task 里补分支)。设计见 `docs/plans/2026-07-08-item-ssr-pages-design.md` §4.4/§4.6。
 
 **切换时的前置改动**（回滚要逆操作）：
 - R2 `ai-feeds-fonts` 开了 r2.dev 公共访问（`pub-…r2.dev`，字体公开资源，无安全风险）
