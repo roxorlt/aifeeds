@@ -90,6 +90,66 @@ export function deepLinkPath(itemId: string): string {
   }
 }
 
+// ─── item SSR 静态页 URL 映射（/i/…；deepLinkPath 是 SPA 抽屉深链，两者独立不复用）──────
+// 出页的 5 类源段。clawhub / huodongxing / 未知源不出独立静态页。
+export const ITEM_URL_SOURCES = ['x', 'gh', 'ph', 'paper', 'news'] as const;
+export type ItemUrlSource = (typeof ITEM_URL_SOURCES)[number];
+
+// items.source_type → item 页 URL 段（反向于 selection.ts 的 SOURCE_TYPE）。
+// 出页 5 类返回对应段；clawhub / huodongxing / 未知 → null（不出静态页）。
+export function sourceTypeToUrlSource(sourceType: string): ItemUrlSource | null {
+  switch (sourceType) {
+    case 'x_list':
+      return 'x';
+    case 'github':
+      return 'gh';
+    case 'product_hunt':
+      return 'ph';
+    case 'hf_paper':
+      return 'paper';
+    case 'blog':
+    case 'podcast':
+      return 'news';
+    default:
+      return null;
+  }
+}
+
+// composite id（`${source_type}:${source_id}`）→ item 静态页路径 /i/…，不可出页返回 null。
+//   x_list:123            -> /i/x/123
+//   github:owner/repo     -> /i/gh/owner/repo
+//   product_hunt:slug:D   -> /i/ph/slug        （丢弃末尾 :date）
+//   hf_paper:2501.1       -> /i/paper/2501.1   （URL 段用 paper，不是 hf-paper）
+//   blog:… | podcast:…    -> /i/news/<url-safe(整 composite id)>
+//   clawhub / huodongxing / 未知 -> null
+export function itemPagePath(itemId: string): string | null {
+  const idx = itemId.indexOf(':');
+  if (idx < 0) return null;
+  const st = itemId.slice(0, idx);
+  const sid = itemId.slice(idx + 1);
+  switch (st) {
+    case 'x_list':
+      return sid ? `/i/x/${encodeURIComponent(sid)}` : null;
+    case 'github': {
+      const [o, r] = sid.split('/');
+      return o && r ? `/i/gh/${encodeURIComponent(o)}/${encodeURIComponent(r)}` : null;
+    }
+    case 'product_hunt': {
+      // composite id 末尾带 :date，静态页 URL 只保留 slug（丢 date）。
+      const slug = sid.split(':')[0];
+      return slug ? `/i/ph/${encodeURIComponent(slug)}` : null;
+    }
+    case 'hf_paper':
+      return sid ? `/i/paper/${encodeURIComponent(sid)}` : null;
+    case 'blog':
+    case 'podcast':
+      // 行业新闻：整 composite id 做 url-safe 编码（对齐 deepLinkPath /o/ 的整 id 语义）。
+      return `/i/news/${encodeURIComponent(itemId)}`;
+    default:
+      return null;
+  }
+}
+
 function ghRepoName(itemId: string): string {
   const idx = itemId.indexOf(':');
   const sid = idx >= 0 ? itemId.slice(idx + 1) : itemId;

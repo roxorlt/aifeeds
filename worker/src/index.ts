@@ -171,6 +171,10 @@ import {
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 import { handleDigestDaily } from './digest/daily-api';
 import { slotKey, bjtDateStr } from './digest/lib';
+import { fetchItemRow } from './digest/item-fetch';
+
+// item SSR 静态页 / 详情 API 共用的单条取数函数，从此处对外暴露（实现见 ./digest/item-fetch）。
+export { fetchItemRow };
 
 const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:active';
 
@@ -3729,9 +3733,9 @@ async function handleItemTranslateNow(
 // (same extra.thread_root_id, ordered by published_at ASC) if any.
 
 async function handleItemById(request: Request, env: Env, id: string): Promise<Response> {
-  const item = await env.DB.prepare(
-    'SELECT * FROM items WHERE id = ?'
-  ).bind(id).first<Record<string, unknown>>();
+  // 取数体已抽成可复用的 fetchItemRow（同一句 SELECT * FROM items WHERE id = ?）；
+  // 本处仍需按 Record 访问全部列（cn_sensitive 过滤 / parseItemRow / thread 组装）。
+  const item = (await fetchItemRow(env, id)) as unknown as Record<string, unknown> | null;
 
   if (!item) {
     return jsonResponse({ error: 'not_found' }, 404, request, env);
