@@ -98,10 +98,14 @@ async function fetchRelated(env: Env, mainId: string, source: DigestSource): Pro
 // 单条内容静态页生成。fetchItemRow → is_relevant!=1 或源∉五源 → skipped 零写；
 // 否则查同源相关 3-5 条 → renderItemPageHtml → R2 put(itemPageR2Key) → item_pages upsert(status=live)。
 // 幂等：同 id 二次生成 UPSERT 覆盖（R2 同 key 覆盖 + item_pages 不新增行）；dry 零写不调 R2/D1 写。
+//
+// force：本函数本就是「覆盖写」语义（无「已存在则跳过」判断，每次都重渲染 + upsert），故 force 在此层
+// 不改变行为，仅作为 API 对称位（backfill 透传下来，语义显式化）。关键：dedup 门(C1) + is_relevant 门
+// 是 force 之前的无条件早退，force 永不绕过它们（次源/非 relevant 在 force 下仍 skipped 零写）。
 export async function generateItemPage(
   env: Env,
   id: string,
-  opts: { dry?: boolean } = {},
+  opts: { dry?: boolean; force?: boolean } = {},
 ): Promise<ItemPageRunResult> {
   const row = (await fetchItemRow(env, id)) as (RenderRow & { is_relevant?: number }) | null;
   if (!row) return { itemId: id, skipped: true, reason: 'not-found' };
@@ -150,45 +154,67 @@ export async function markItemPageGone(env: Env, id: string): Promise<void> {
 // 存量分源回填：按 source 扫 is_relevant=1 且未在 item_pages 的 item → generateItemPage。
 // 分批（默认 300）；item_pages 存在性即退出游标（生成即入表，下批天然排除，游标单调）；
 // dry 零写（不写 → 游标不推进，remaining 反映全量待办）。经香港 60s 提断按行数核对（同 daily backfill 教训）。
+//
+// force（升级存量薄页 = gh222/ph500）：谓词去掉「NOT EXISTS 任意页」，改为「NOT EXISTS 本轮已重灌页」——
+// 即选中「无页 OR 页 generated_at < cutoff」。cutoff = 本轮 campaign 起点(ISO)，全程固定：重灌把该行
+// generated_at 推到 >= cutoff → 永久退出候选 → 游标自推进、单调收敛、可重入不无限循环（机制同非 force 的
+// NOT EXISTS，只是「已处理」判据从「存在页」换成「存在本轮之后重灌的页」）。dedup(C1)+is_relevant 门保留。
+// 跨 HTTP 续跑：调用方须回传上轮返回的 cutoff（否则每次重取 now 会让已重灌行重新入选 → 抖动不收敛）。
 export async function backfillItemPages(
   env: Env,
   source: OutSource,
-  opts: { limit?: number; dry?: boolean } = {},
-): Promise<{ scanned: number; generated: number; remaining: number }> {
+  opts: { limit?: number; dry?: boolean; force?: boolean; cutoff?: string } = {},
+): Promise<{ scanned: number; generated: number; remaining: number; cutoff?: string }> {
   const limit = Math.min(Math.max(opts.limit ?? 300, 1), 1000);
   const dry = !!opts.dry;
+  const force = !!opts.force;
   const sts = SOURCE_TYPES[source];
   const ph = sts.map(() => '?').join(',');
 
-  // 选取本批：该源、relevant、非 dedup 次源、尚未生成（NOT EXISTS item_pages）。发布时间倒序（新内容优先收录）。
-  // dedup 谓词（C1）：json_extract(i.extra,'$.dedup_of') IS NULL，让 dedup 次源不算「待办」（否则永远 scanned 不收敛）。
+  // 「已处理」判据：非 force = 存在任意页；force = 存在「本轮 cutoff 之后重灌的页」（generated_at >= cutoff）。
+  // 后者让已生成薄页（generated_at < cutoff）重新算「待办」被重灌，重灌后 generated_at>=cutoff 退出候选。
+  const doneClause = force
+    ? `NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id AND p.generated_at >= ?)`
+    : `NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id)`;
+  const cutoff = force ? opts.cutoff ?? new Date().toISOString() : undefined;
+  // force 谓词多一个 cutoff 绑定，插在 sts 之后、limit 之前（COUNT 无 limit）。
+  const selectExtra: unknown[] = force ? [cutoff] : [];
+
+  // 选取本批：该源、relevant、非 dedup 次源、按 doneClause 未处理。发布时间倒序（新内容优先收录）。
+  // dedup 谓词（C1）：json_extract(i.extra,'$.dedup_of') IS NULL，让 dedup 次源不算「待办」（force 下亦然，不收敛问题）。
   const rows = await env.DB.prepare(
     `SELECT i.id FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
         AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id)
+        AND ${doneClause}
       ORDER BY i.published_at DESC
       LIMIT ?`,
   )
-    .bind(...sts, limit)
+    .bind(...sts, ...selectExtra, limit)
     .all<{ id: string }>();
   const ids = (rows.results || []).map((r) => r.id);
 
   let generated = 0;
   for (const id of ids) {
-    const r = await generateItemPage(env, id, { dry });
+    const r = await generateItemPage(env, id, { dry, force });
     if (!r.skipped) generated++;
   }
 
-  // remaining：重新计数仍未生成的（存在性即游标）。real 模式已入表 → 递减；dry 未写 → 不变。
+  // remaining：重新计数仍未处理的（doneClause 即游标）。real 模式已推进 generated_at → 递减；dry 未写 → 不变。
   const cnt = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
         AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id)`,
+        AND ${doneClause}`,
   )
-    .bind(...sts)
+    .bind(...sts, ...selectExtra)
     .first<{ n: number }>();
 
-  return { scanned: ids.length, generated, remaining: Number(cnt?.n ?? 0) };
+  const result: { scanned: number; generated: number; remaining: number; cutoff?: string } = {
+    scanned: ids.length,
+    generated,
+    remaining: Number(cnt?.n ?? 0),
+  };
+  if (force) result.cutoff = cutoff; // 供调用方跨批续传，维持同一 campaign
+  return result;
 }

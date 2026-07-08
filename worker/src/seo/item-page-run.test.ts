@@ -64,15 +64,19 @@ function makeDb(seed: ItemSeed[] = []) {
     }
   };
 
-  const pendingFor = (sts: string[]): Array<Record<string, unknown>> =>
+  // 非 force：候选 = relevant 非 dedup 且尚未生成（存在性游标）。
+  // force（传 cutoff）：候选 = relevant 非 dedup 且「无本轮已重灌页」——即无页 OR 页 generated_at < cutoff。
+  //   重灌把 generated_at 推到 >= cutoff → 该行退出候选（cutoff 全程固定 → 单调收敛）。
+  const pendingFor = (sts: string[], cutoff?: string): Array<Record<string, unknown>> =>
     items
-      .filter(
-        (r) =>
-          sts.includes(String(r.source_type)) &&
-          Number(r.is_relevant) === 1 &&
-          !isDeduped(r) &&
-          !pages.has(String(r.id)),
-      )
+      .filter((r) => {
+        if (!sts.includes(String(r.source_type))) return false;
+        if (Number(r.is_relevant) !== 1) return false;
+        if (isDeduped(r)) return false;
+        const p = pages.get(String(r.id));
+        if (cutoff == null) return !p; // 非 force：未生成才是候选
+        return !p || String(p.generated_at) < cutoff; // force：无页 OR 页早于本轮 cutoff
+      })
       .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
 
   const db = {
@@ -92,6 +96,12 @@ function makeDb(seed: ItemSeed[] = []) {
             return (row ?? null) as T | null;
           }
           if (/COUNT\(\*\)/i.test(sql)) {
+            if (/generated_at >= \?/i.test(sql)) {
+              // force 计数：binds = [...sts, cutoff]
+              const cutoff = String(binds[binds.length - 1]);
+              const sts = binds.slice(0, binds.length - 1).map(String);
+              return { n: pendingFor(sts, cutoff).length } as T;
+            }
             const sts = binds.map(String);
             return { n: pendingFor(sts).length } as T;
           }
@@ -114,8 +124,16 @@ function makeDb(seed: ItemSeed[] = []) {
               .slice(0, 6);
             return { results: res as unknown as T[] };
           }
+          if (/generated_at >= \?/i.test(sql)) {
+            // force 选取：binds = [...sourceTypes, cutoff, limit]
+            const limit = Number(binds[binds.length - 1]);
+            const cutoff = String(binds[binds.length - 2]);
+            const sts = binds.slice(0, binds.length - 2).map(String);
+            const res = pendingFor(sts, cutoff).slice(0, limit).map((r) => ({ id: r.id }));
+            return { results: res as unknown as T[] };
+          }
           if (/NOT EXISTS/i.test(sql)) {
-            // backfill 选取：binds = [...sourceTypes, limit]
+            // backfill 选取（非 force）：binds = [...sourceTypes, limit]
             const limit = Number(binds[binds.length - 1]);
             const sts = binds.slice(0, binds.length - 1).map(String);
             const res = pendingFor(sts).slice(0, limit).map((r) => ({ id: r.id }));
@@ -164,6 +182,11 @@ function makeEnv(db: unknown, r2: unknown): Env {
 
 const insertRuns = (db: ReturnType<typeof makeDb>): number =>
   db._runs.filter((r) => /INSERT INTO item_pages/i.test(r.sql)).length;
+
+// 预置一条存量 item_pages 行（模拟 prod 已用旧渲染器生成的薄页），带指定 generated_at。
+const seedPage = (db: ReturnType<typeof makeDb>, id: string, source: string, generated_at: string): void => {
+  db._pages.set(id, { item_id: id, source, url_path: itemPagePath(id) ?? `/i/${id}`, generated_at, status: 'live' });
+};
 
 describe('generateItemPage', () => {
   test('is_relevant=1 → R2 put(key=itemPageR2Key) + item_pages upsert(live, url_path)', async () => {
@@ -327,6 +350,51 @@ describe('generateItemPage', () => {
   });
 });
 
+describe('generateItemPage force', () => {
+  test('force=true：已有 item_pages 行仍重渲染（R2 覆盖 + generated_at 刷新）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    const r2 = makeR2();
+    const env = makeEnv(db, r2);
+    // 存量薄页：旧 generated_at + R2 无内容（模拟旧渲染器留下的行）
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z');
+    const res = await generateItemPage(env, id, { force: true });
+    expect(res.skipped).toBe(false);
+    // R2 覆盖（重新 put）
+    expect(r2.puts).toEqual([itemPageR2Key(id)!]);
+    expect(r2.store.has(itemPageR2Key(id)!)).toBe(true);
+    // generated_at 刷新（不再是旧值），status 仍 live
+    const page = db._pages.get(id)!;
+    expect(page.generated_at).not.toBe('2026-07-01T00:00:00.000Z');
+    expect(page.generated_at > '2026-07-01T00:00:00.000Z').toBe(true);
+    expect(page.status).toBe('live');
+  });
+
+  test('force=true 不绕过 dedup 门（C1）：dedup 次源仍 skipped(dedup-suppressed) 零写', async () => {
+    const id = 'x_list:dup';
+    const db = makeDb([
+      { id, source_type: 'x_list', is_relevant: 1, extra: JSON.stringify({ dedup_of: 'x_list:incumbent' }) },
+    ]);
+    const r2 = makeR2();
+    const res = await generateItemPage(makeEnv(db, r2), id, { force: true });
+    expect(res.skipped).toBe(true);
+    expect(res.reason).toBe('dedup-suppressed');
+    expect(r2.puts.length).toBe(0);
+    expect(insertRuns(db)).toBe(0);
+  });
+
+  test('force=true 不绕过 is_relevant 门：is_relevant≠1 仍 skipped(not-relevant) 零写', async () => {
+    const id = 'x_list:8';
+    const db = makeDb([{ id, source_type: 'x_list', is_relevant: 0 }]);
+    const r2 = makeR2();
+    const res = await generateItemPage(makeEnv(db, r2), id, { force: true });
+    expect(res.skipped).toBe(true);
+    expect(res.reason).toBe('not-relevant');
+    expect(r2.puts.length).toBe(0);
+    expect(insertRuns(db)).toBe(0);
+  });
+});
+
 describe('markItemPageGone', () => {
   test('把 item_pages.status 置 gone', async () => {
     const id = 'x_list:1';
@@ -426,5 +494,127 @@ describe('backfillItemPages', () => {
     expect(r2.puts.length).toBe(0);
     expect(insertRuns(db)).toBe(0);
     expect(db._pages.size).toBe(0);
+  });
+});
+
+describe('backfillItemPages force', () => {
+  test('force=true 选全部 relevant 非 dedup（含已生成薄页 → 重灌覆盖 R2 + 刷新 generated_at）', async () => {
+    const thin = 'x_list:1'; // 存量薄页
+    const fresh = 'x_list:2'; // 从未生成
+    const db = makeDb([
+      { id: thin, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+      { id: fresh, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-01T00:00:00Z' },
+    ]);
+    const r2 = makeR2();
+    const env = makeEnv(db, r2);
+    seedPage(db, thin, 'x', '2026-07-01T00:00:00.000Z'); // 旧渲染器留下的薄页行
+    const res = await backfillItemPages(env, 'x', { force: true });
+    expect(res.scanned).toBe(2); // 含已生成的 thin —— 谓词去掉 NOT EXISTS
+    expect(res.generated).toBe(2);
+    expect(res.remaining).toBe(0);
+    // thin 被重灌：R2 覆盖 + generated_at 刷新（不再是旧值）
+    expect(r2.store.has(itemPageR2Key(thin)!)).toBe(true);
+    expect(db._pages.get(thin)!.generated_at).not.toBe('2026-07-01T00:00:00.000Z');
+    expect(db._pages.get(fresh)!.status).toBe('live');
+    // force 回填返回 campaign cutoff 供续跑续传（HTTP 层重入用）
+    expect(typeof res.cutoff).toBe('string');
+  });
+
+  test('非 force（回归锁）：已有 item_pages 行被 NOT EXISTS 跳过，只选未生成、不返回 cutoff', async () => {
+    const thin = 'x_list:1';
+    const fresh = 'x_list:2';
+    const db = makeDb([
+      { id: thin, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+      { id: fresh, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-01T00:00:00Z' },
+    ]);
+    const r2 = makeR2();
+    const env = makeEnv(db, r2);
+    seedPage(db, thin, 'x', '2026-07-01T00:00:00.000Z');
+    const res = await backfillItemPages(env, 'x'); // force 缺省
+    expect(res.scanned).toBe(1); // 只有 fresh
+    expect(res.generated).toBe(1);
+    expect(res.remaining).toBe(0);
+    expect(db._pages.get(thin)!.generated_at).toBe('2026-07-01T00:00:00.000Z'); // 未触碰
+    expect(r2.store.has(itemPageR2Key(thin)!)).toBe(false); // thin 未重灌
+    expect(res.cutoff).toBeUndefined(); // 非 force 返回结构零回归（无 cutoff 字段）
+  });
+
+  test('force=true 仍排 dedup（C1 在 force 下生效）：dedup 次源不入选、不重灌、不计 remaining', async () => {
+    const main = 'x_list:1';
+    const dup = 'x_list:dup';
+    const db = makeDb([
+      { id: main, source_type: 'x_list', is_relevant: 1 },
+      { id: dup, source_type: 'x_list', is_relevant: 1, extra: JSON.stringify({ dedup_of: main }) },
+    ]);
+    const r2 = makeR2();
+    const res = await backfillItemPages(makeEnv(db, r2), 'x', { force: true });
+    expect(res.scanned).toBe(1); // 只 main
+    expect(res.generated).toBe(1);
+    expect(res.remaining).toBe(0);
+    expect(db._pages.has(main)).toBe(true);
+    expect(db._pages.has(dup)).toBe(false); // dedup 次源零写
+  });
+
+  test('force=true 仍排非 relevant（is_relevant 门在 force 下生效）', async () => {
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 0 }, // 非 relevant 不入选
+    ]);
+    const r2 = makeR2();
+    const res = await backfillItemPages(makeEnv(db, r2), 'x', { force: true });
+    expect(res.scanned).toBe(1);
+    expect(res.generated).toBe(1);
+    expect(db._pages.has('x_list:1')).toBe(true);
+    expect(db._pages.has('x_list:2')).toBe(false);
+  });
+
+  test('force 可重入不无限循环：cutoff 固定 → 重灌行退出候选 → 单调收敛到 0', async () => {
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-03T00:00:00Z' },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+      { id: 'x_list:3', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-01T00:00:00Z' },
+    ]);
+    const r2 = makeR2();
+    const env = makeEnv(db, r2);
+    // 三条全为 prod 存量薄页（旧 generated_at）
+    seedPage(db, 'x_list:1', 'x', '2026-07-01T00:00:00.000Z');
+    seedPage(db, 'x_list:2', 'x', '2026-07-01T00:00:00.000Z');
+    seedPage(db, 'x_list:3', 'x', '2026-07-01T00:00:00.000Z');
+
+    const r1 = await backfillItemPages(env, 'x', { limit: 2, force: true });
+    expect(r1.scanned).toBe(2);
+    expect(r1.generated).toBe(2);
+    expect(r1.remaining).toBe(1);
+    const cutoff = r1.cutoff!;
+    expect(typeof cutoff).toBe('string');
+
+    // 续跑传回同一 campaign cutoff → 已重灌两行 generated_at>=cutoff → 退出候选
+    const r2res = await backfillItemPages(env, 'x', { limit: 2, force: true, cutoff });
+    expect(r2res.scanned).toBe(1); // 仅剩第 3 条
+    expect(r2res.generated).toBe(1);
+    expect(r2res.remaining).toBe(0);
+
+    // 再续跑 → 收敛，无重复重灌（防无限循环）
+    const r3 = await backfillItemPages(env, 'x', { limit: 2, force: true, cutoff });
+    expect(r3.scanned).toBe(0);
+    expect(r3.remaining).toBe(0);
+    expect(db._pages.size).toBe(3);
+  });
+
+  test('force dry:true → 零写，游标不动（重灌不落盘，remaining 保持全量）', async () => {
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1 },
+    ]);
+    const r2 = makeR2();
+    const env = makeEnv(db, r2);
+    seedPage(db, 'x_list:1', 'x', '2026-07-01T00:00:00.000Z'); // 一条已有薄页
+    const res = await backfillItemPages(env, 'x', { dry: true, force: true });
+    expect(res.scanned).toBe(2); // force 选全部（含已生成 thin）
+    expect(res.generated).toBe(2); // would-regenerate 计数
+    expect(res.remaining).toBe(2); // dry 未写 → generated_at 不推进 → 游标不动
+    expect(r2.puts.length).toBe(0);
+    expect(insertRuns(db)).toBe(0);
+    expect(db._pages.get('x_list:1')!.generated_at).toBe('2026-07-01T00:00:00.000Z'); // dry 不触碰
   });
 });
