@@ -22,6 +22,7 @@
     "disposable-email-domains": "^1.0.62",
     "fflate": "^0.8.2",
     "jose": "^5.10.0",
+    "marked": "^18.0.5",
     "nanoid": "^5.1.11",
     "qrcode": "^1.5.4"
   }
