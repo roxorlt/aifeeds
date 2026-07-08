@@ -15,14 +15,42 @@ import { escapeHtml } from './digest/templates';
 
 // 根目录单段 .txt 文件(robots.txt / llms.txt / <indexnow-key>.txt)。sitemap.xml 另判。
 const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
+// sitemap 分片:/sitemap-<source>.xml、/sitemap-<source>-<n>.xml(Task 6 分源分片,伺服由 handleSeoRoute 出)。
+const SITEMAP_SHARD_RE = /^\/sitemap-[a-z0-9-]+\.xml$/;
 // 日报深链:严格 YYYY-MM-DD 形状(真实性再由 isValidCalendarDate 校验,拦 2026-13-99)。
 const DAILY_DATE_RE = /^\/daily\/(\d{4}-\d{2}-\d{2})$/;
+
+// sitemap 分源分片(Task 6)。source 口径 = item_pages.source(DigestSource:x|gh|ph|hf-paper|news)。
+// 单片上限 5 万(sitemaps.org 硬限);超则 /sitemap-<source>-2.xml、-3.xml 续片(page1 无后缀)。
+const SITEMAP_SOURCES = ['x', 'gh', 'ph', 'hf-paper', 'news'] as const;
+const SITEMAP_SHARD_SIZE = 50000;
+
+// 解析 /sitemap-<source>.xml、/sitemap-<source>-<n>.xml(n≥2)→ { source, page }。
+// 源名可含连字符(hf-paper),故按已知源集合逐一匹配,天然消解 hf-paper-2 的歧义(不会误拆为 hf-paper-2 源)。
+// page1 只认无后缀形式(-1 视为非法,避免重复内容);未知源 / 非法后缀 → null(伺服层出 404)。
+function parseSitemapShard(pathname: string): { source: string; page: number } | null {
+  const m = pathname.match(/^\/sitemap-(.+)\.xml$/);
+  if (!m) return null;
+  const rest = m[1];
+  for (const s of SITEMAP_SOURCES) {
+    if (rest === s) return { source: s, page: 1 };
+    const pm = rest.match(new RegExp(`^${s}-(\\d+)$`));
+    if (pm) {
+      const p = Number(pm[1]);
+      if (p >= 2) return { source: s, page: p };
+    }
+  }
+  return null;
+}
 
 // bot gate 豁免:上述全部公开路径跳过 UA 闸,确保搜索引擎 / AI 检索 / 训练爬虫可达(放行策略收口 robots.txt)。
 // 无 env 参数(签名固定),故 indexnow key 文件按"根目录 .txt"整体豁免,真实 key 校验在 handleSeoRoute。
 export function isSeoPath(pathname: string): boolean {
   if (pathname === '/daily' || pathname.startsWith('/daily/')) return true;
+  // item SSR 静态页 /i/…（伺服由 seo/item-routes.ts handleItemRoute 出）。裸 /i 不放行。
+  if (pathname.startsWith('/i/')) return true;
   if (pathname === '/sitemap.xml') return true;
+  if (SITEMAP_SHARD_RE.test(pathname)) return true;
   if (ROOT_TXT_RE.test(pathname)) return true;
   return false;
 }
@@ -222,10 +250,47 @@ Sitemap: ${siteBase}/sitemap.xml
   return text(body, 200, 86400);
 }
 
-// ── sitemap.xml ────────────────────────────────────────────────
-// 条目:/ + /daily/ + 全部 daily_pages 行。lastmod 用 generated_at 日期部分;
-// 首页/归档用表中最新 generated_at 日期(空表回落今日)。
-async function sitemapResponse(env: Env): Promise<Response> {
+// ── sitemap.xml(sitemap-index)──────────────────────────────────
+// Task 6:3.2 万内容页 + 年增 5-7 万会破单文件 5 万上限,故 /sitemap.xml 改 sitemap-index。
+// 列:日报片 /sitemap-daily.xml(含首页/归档/全部日报页)+ 五源各 /sitemap-<source>.xml(超 5 万续 -2 -3)。
+// sitemapindex 只能容 <sitemap> 子节点(不能放 <url>),故首页/归档并入日报片的 <urlset>。
+async function sitemapIndexResponse(env: Env): Promise<Response> {
+  const { siteBase } = getBases(env);
+  const daily = await loadDailyPages(env); // date DESC
+  const dailyMod = daily.length ? dateOnly(daily[0].generated_at) : null;
+
+  const entries: string[] = [];
+  entries.push(sitemapEntry(`${siteBase}/sitemap-daily.xml`, dailyMod));
+
+  // 各源 live 计数 + 最新 generated_at,据此算续片数(ceil(count/5万)),空源仍列 page1。
+  const countRes = await env.DB.prepare(
+    `SELECT source, COUNT(*) AS c, MAX(generated_at) AS m FROM item_pages WHERE status = 'live' GROUP BY source`,
+  ).all<{ source: string; c: number; m: string | null }>();
+  const counts = new Map<string, { c: number; m: string | null }>();
+  for (const r of countRes.results || []) counts.set(r.source, { c: Number(r.c), m: r.m });
+
+  for (const s of SITEMAP_SOURCES) {
+    const row = counts.get(s);
+    const c = row ? row.c : 0;
+    const mod = row && row.m ? dateOnly(row.m) : null;
+    const shards = Math.max(1, Math.ceil(c / SITEMAP_SHARD_SIZE));
+    for (let p = 1; p <= shards; p++) {
+      const loc = p === 1 ? `${siteBase}/sitemap-${s}.xml` : `${siteBase}/sitemap-${s}-${p}.xml`;
+      entries.push(sitemapEntry(loc, mod));
+    }
+  }
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${entries.join('\n')}
+</sitemapindex>
+`;
+  return xmlResponse(xml, 200);
+}
+
+// ── /sitemap-daily.xml(日报片)──────────────────────────────────
+// 旧 /sitemap.xml 内容整体搬来:/ + /daily/ + 全部 daily_pages 行。
+async function dailySitemapResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
   const rows = await loadDailyPages(env); // date DESC
   const latestMod = rows.length ? dateOnly(rows[0].generated_at) : dateOnly(new Date().toISOString());
@@ -236,17 +301,43 @@ async function sitemapResponse(env: Env): Promise<Response> {
   for (const row of rows) {
     urls.push(urlEntry(`${siteBase}/daily/${row.date}`, dateOnly(row.generated_at), 'monthly'));
   }
+  return urlsetResponse(urls);
+}
 
+// ── /sitemap-<source>.xml(内容片)───────────────────────────────
+// 该源 item_pages(status=live)的 url_path,按 generated_at DESC 分页(page-1 → OFFSET)。
+// lastmod = generated_at 日期部分;绝对 URL = SITE_BASE + url_path(url_path 存相对 /i/…)。
+async function sourceSitemapResponse(env: Env, source: string, page: number): Promise<Response> {
+  const { siteBase } = getBases(env);
+  const offset = (page - 1) * SITEMAP_SHARD_SIZE;
+  const r = await env.DB.prepare(
+    `SELECT url_path, generated_at FROM item_pages WHERE source = ? AND status = 'live'
+     ORDER BY generated_at DESC, item_id ASC LIMIT ? OFFSET ?`,
+  )
+    .bind(source, SITEMAP_SHARD_SIZE, offset)
+    .all<{ url_path: string; generated_at: string }>();
+  const rows = r.results || [];
+  const urls = rows.map((row) =>
+    urlEntry(`${siteBase}${row.url_path}`, dateOnly(row.generated_at), 'monthly'),
+  );
+  return urlsetResponse(urls);
+}
+
+function urlsetResponse(urls: string[]): Response {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${urls.join('\n')}
 </urlset>
 `;
-  return new Response(xml, {
-    status: 200,
+  return xmlResponse(xml, 200);
+}
+
+function xmlResponse(body: string, status: number): Response {
+  return new Response(body, {
+    status,
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600',
+      'Cache-Control': status === 200 ? 'public, max-age=3600' : 'no-store',
     },
   });
 }
@@ -257,6 +348,12 @@ function dateOnly(iso: string): string {
 
 function urlEntry(loc: string, lastmod: string, changefreq: string): string {
   return `  <url><loc>${loc}</loc><lastmod>${lastmod}</lastmod><changefreq>${changefreq}</changefreq></url>`;
+}
+
+function sitemapEntry(loc: string, lastmod: string | null): string {
+  return lastmod
+    ? `  <sitemap><loc>${loc}</loc><lastmod>${lastmod}</lastmod></sitemap>`
+    : `  <sitemap><loc>${loc}</loc></sitemap>`;
 }
 
 // ── llms.txt ───────────────────────────────────────────────────
@@ -325,7 +422,15 @@ export async function handleSeoRoute(request: Request, env: Env): Promise<Respon
 
   if (pathname === '/robots.txt') return robotsResponse(env);
   if (pathname === '/llms.txt') return llmsResponse(env);
-  if (pathname === '/sitemap.xml') return sitemapResponse(env);
+  if (pathname === '/sitemap.xml') return sitemapIndexResponse(env);
+  // 日报片(须在通用分片正则前判,daily 也匹配 SITEMAP_SHARD_RE)。
+  if (pathname === '/sitemap-daily.xml') return dailySitemapResponse(env);
+  // /sitemap-<source>.xml、/sitemap-<source>-<n>.xml → 内容片;未知源/非法后缀 → 404 xml。
+  if (SITEMAP_SHARD_RE.test(pathname)) {
+    const shard = parseSitemapShard(pathname);
+    if (shard) return sourceSitemapResponse(env, shard.source, shard.page);
+    return xmlResponse('<?xml version="1.0" encoding="UTF-8"?>\n<error>Not Found</error>\n', 404);
+  }
 
   // 其余根目录 .txt → IndexNow key 文件(命中返回 key;未配置/不匹配 404)
   if (ROOT_TXT_RE.test(pathname)) return indexNowResponse(env, pathname);

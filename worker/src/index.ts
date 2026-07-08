@@ -96,8 +96,10 @@ import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
+import { backfillItemPages } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
+import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
@@ -172,6 +174,10 @@ import {
 import { handleDigestReturn, handleResendWebhook } from './digest/return-webhook';
 import { handleDigestDaily } from './digest/daily-api';
 import { slotKey, bjtDateStr } from './digest/lib';
+import { fetchItemRow } from './digest/item-fetch';
+
+// item SSR 静态页 / 详情 API 共用的单条取数函数，从此处对外暴露（实现见 ./digest/item-fetch）。
+export { fetchItemRow };
 
 const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:active';
 
@@ -474,6 +480,10 @@ export default {
       // 返回 null = 非本模块路径,继续后续匹配。绝对 URL 一律走 SITE_BASE(seo-routes.ts)。
       const seoResp = await handleSeoRoute(request, env);
       if (seoResp) return seoResp;
+
+      // item SSR 静态页 /i/:source/*(每条内容独立实体页)。bot gate 豁免同 isSeoPath(见上)。
+      const itemResp = await handleItemRoute(request, env);
+      if (itemResp) return itemResp;
 
       if (path === '/api/ingest' && request.method === 'POST') {
         return handleIngest(request, env);
@@ -3742,9 +3752,9 @@ async function handleItemTranslateNow(
 // (same extra.thread_root_id, ordered by published_at ASC) if any.
 
 async function handleItemById(request: Request, env: Env, id: string): Promise<Response> {
-  const item = await env.DB.prepare(
-    'SELECT * FROM items WHERE id = ?'
-  ).bind(id).first<Record<string, unknown>>();
+  // 取数体已抽成可复用的 fetchItemRow（同一句 SELECT * FROM items WHERE id = ?）；
+  // 本处仍需按 Record 访问全部列（cn_sensitive 过滤 / parseItemRow / thread 组装）。
+  const item = (await fetchItemRow(env, id)) as unknown as Record<string, unknown> | null;
 
   if (!item) {
     return jsonResponse({ error: 'not_found' }, 404, request, env);
@@ -4567,6 +4577,20 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await generateDailyPage(env, dateParam, { dry });
     return jsonResponse({ ok: true, ...result }, 200, request, env);
+  }
+  if (mode === 'item-page-backfill') {
+    // item SSR 静态页存量分源回填(设计 §4.3)。按源扫 is_relevant=1 且未在 item_pages 的 item →
+    // generateItemPage;分批(默认 300)、item_pages 存在性即游标、循环调至 remaining=0。?dry=1 零写。
+    // ?source=x|gh|ph|hf-paper|news(必填);经香港 60s 提断按返回 scanned/generated/remaining 核对续跑。
+    const source = url.searchParams.get('source') || '';
+    const valid = ['x', 'gh', 'ph', 'hf-paper', 'news'] as const;
+    if (!(valid as readonly string[]).includes(source)) {
+      return jsonResponse({ error: 'bad source, expect x|gh|ph|hf-paper|news' }, 400, request, env);
+    }
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '300'), 1), 1000);
+    const result = await backfillItemPages(env, source as (typeof valid)[number], { limit, dry });
+    return jsonResponse({ ok: true, mode: 'item-page-backfill', source, dry, ...result }, 200, request, env);
   }
   if (mode === 'cover-quality-sweep') {
     // 一次性清洗低质 R2 封面 + 外链残留封面(症状 2)。分页扫描 blog/podcast:

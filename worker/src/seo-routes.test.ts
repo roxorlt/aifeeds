@@ -175,27 +175,214 @@ describe('handleSeoRoute /robots.txt', () => {
   });
 });
 
-describe('handleSeoRoute /sitemap.xml', () => {
-  test('条目数 = 行数 + 2 且 XML 前缀合法', async () => {
-    const rows = [mkRow('2026-07-06'), mkRow('2026-07-05'), mkRow('2026-07-04')];
-    const resp = await handleSeoRoute(req('/sitemap.xml'), makeEnv({}, makeDb(rows)));
+// sitemap 分片 mock：同时支持 daily_pages 与 item_pages（COUNT GROUP BY + 分页 SELECT）。
+// counts 传入时直接决定 GROUP BY 结果（模拟 >5 万而无需真造 5 万行）；否则从 items 数组统计。
+interface ItemPageRow {
+  source: string;
+  url_path: string;
+  generated_at: string;
+  status?: string;
+}
+function makeSitemapDb({
+  daily = [],
+  items = [],
+  counts = null,
+}: {
+  daily?: DailyPageRow[];
+  items?: ItemPageRow[];
+  counts?: Record<string, number> | null;
+}) {
+  return {
+    prepare(sql: string) {
+      let binds: unknown[] = [];
+      const stmt = {
+        bind(...args: unknown[]) {
+          binds = args;
+          return stmt;
+        },
+        async all<T>() {
+          if (/GROUP BY source/i.test(sql)) {
+            const map = new Map<string, { source: string; c: number; m: string }>();
+            if (counts) {
+              for (const [source, c] of Object.entries(counts)) {
+                map.set(source, { source, c, m: '2026-07-06T09:00:00.000Z' });
+              }
+            } else {
+              for (const it of items) {
+                if ((it.status || 'live') !== 'live') continue;
+                const e = map.get(it.source) || { source: it.source, c: 0, m: '' };
+                e.c += 1;
+                if (it.generated_at > e.m) e.m = it.generated_at;
+                map.set(it.source, e);
+              }
+            }
+            return { results: [...map.values()] as unknown as T[] };
+          }
+          if (/FROM item_pages/i.test(sql)) {
+            const [source, limit, offset] = binds as [string, number, number];
+            let rows = items
+              .filter((it) => it.source === source && (it.status || 'live') === 'live')
+              .sort((a, b) => (a.generated_at < b.generated_at ? 1 : -1));
+            const off = Number(offset) || 0;
+            const lim = limit == null ? rows.length : Number(limit);
+            rows = rows.slice(off, off + lim);
+            return {
+              results: rows.map((r) => ({
+                url_path: r.url_path,
+                generated_at: r.generated_at,
+              })) as unknown as T[],
+            };
+          }
+          if (/FROM daily_pages/i.test(sql)) {
+            let out = [...daily];
+            const m = sql.match(/LIMIT\s+(\d+)/i);
+            if (m) out = out.slice(0, Number(m[1]));
+            return { results: out as unknown as T[] };
+          }
+          return { results: [] as T[] };
+        },
+        async first<T>() {
+          return null as T | null;
+        },
+        async run() {
+          return { success: true };
+        },
+      };
+      return stmt;
+    },
+  };
+}
+
+function mkItem(
+  source: string,
+  url_path: string,
+  generated_at = '2026-07-06T00:00:00.000Z',
+  status = 'live',
+): ItemPageRow {
+  return { source, url_path, generated_at, status };
+}
+
+describe('handleSeoRoute /sitemap.xml (sitemap-index)', () => {
+  test('合法 <sitemapindex>：列日报片 + 五源分片，无 <url> 条目', async () => {
+    const resp = await handleSeoRoute(
+      req('/sitemap.xml'),
+      makeEnv({}, makeSitemapDb({ daily: [mkRow('2026-07-06')] })),
+    );
     expect(resp!.status).toBe(200);
     expect(resp!.headers.get('Content-Type')).toContain('xml');
     expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
     const xml = await resp!.text();
     expect(xml.startsWith('<?xml')).toBe(true);
+    expect(xml).toContain('<sitemapindex');
+    expect(xml).toContain(`<loc>${SITE}/sitemap-daily.xml</loc>`);
+    for (const s of ['x', 'gh', 'ph', 'hf-paper', 'news']) {
+      expect(xml).toContain(`<loc>${SITE}/sitemap-${s}.xml</loc>`);
+    }
+    // index 只含 <sitemap> 条目，不得混入 <url>
+    expect(xml).not.toContain('<url>');
+    // 日报片 lastmod 用最新 generated_at 日期
+    expect(xml).toContain('<lastmod>2026-07-06</lastmod>');
+  });
+
+  test('>5 万自动续片：某源大计数 → index 列出 -2 -3，未超源仅 page1', async () => {
+    const resp = await handleSeoRoute(
+      req('/sitemap.xml'),
+      makeEnv({}, makeSitemapDb({ counts: { x: 120001 } })),
+    );
+    const xml = await resp!.text();
+    expect(xml).toContain(`<loc>${SITE}/sitemap-x.xml</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/sitemap-x-2.xml</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/sitemap-x-3.xml</loc>`);
+    expect(xml).not.toContain('sitemap-x-4.xml'); // 120001 → 恰 3 片
+    expect(xml).not.toContain('sitemap-gh-2.xml'); // 其它源 count 0 → 仅 page1
+  });
+});
+
+describe('handleSeoRoute /sitemap-daily.xml (日报片回归)', () => {
+  test('含 / 与 /daily/ 与全部日报页 URL（旧 sitemap 内容不丢）', async () => {
+    const rows = [mkRow('2026-07-06'), mkRow('2026-07-05'), mkRow('2026-07-04')];
+    const resp = await handleSeoRoute(
+      req('/sitemap-daily.xml'),
+      makeEnv({}, makeSitemapDb({ daily: rows })),
+    );
+    expect(resp!.status).toBe(200);
+    expect(resp!.headers.get('Content-Type')).toContain('xml');
+    expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
+    const xml = await resp!.text();
+    expect(xml.startsWith('<?xml')).toBe(true);
+    expect(xml).toContain('<urlset');
     expect((xml.match(/<loc>/g) || []).length).toBe(rows.length + 2);
     expect(xml).toContain(`<loc>${SITE}/</loc>`);
     expect(xml).toContain(`<loc>${SITE}/daily/</loc>`);
     expect(xml).toContain(`<loc>${SITE}/daily/2026-07-06</loc>`);
-    // lastmod 用 generated_at 日期部分
     expect(xml).toContain('<lastmod>2026-07-06</lastmod>');
   });
 
   test('空表 → 仅 / 与 /daily/ 两条', async () => {
-    const resp = await handleSeoRoute(req('/sitemap.xml'), makeEnv({}, makeDb([])));
+    const resp = await handleSeoRoute(
+      req('/sitemap-daily.xml'),
+      makeEnv({}, makeSitemapDb({ daily: [] })),
+    );
     const xml = await resp!.text();
     expect((xml.match(/<loc>/g) || []).length).toBe(2);
+  });
+});
+
+describe('handleSeoRoute /sitemap-<source>.xml (内容片)', () => {
+  test('/sitemap-x.xml 条目数 = live(source=x) 计数，gone 不入、异源不混入', async () => {
+    const items = [
+      mkItem('x', '/i/x/1'),
+      mkItem('x', '/i/x/2'),
+      mkItem('x', '/i/x/3', '2026-07-05T00:00:00.000Z', 'gone'),
+      mkItem('gh', '/i/gh/a/b'),
+    ];
+    const resp = await handleSeoRoute(req('/sitemap-x.xml'), makeEnv({}, makeSitemapDb({ items })));
+    expect(resp!.status).toBe(200);
+    expect(resp!.headers.get('Content-Type')).toContain('xml');
+    expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
+    const xml = await resp!.text();
+    expect(xml).toContain('<urlset');
+    expect((xml.match(/<loc>/g) || []).length).toBe(2);
+    expect(xml).toContain(`<loc>${SITE}/i/x/1</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/i/x/2</loc>`);
+    expect(xml).not.toContain('/i/x/3'); // gone 排除
+    expect(xml).not.toContain('/i/gh/'); // 异源不混入
+    expect(xml).toContain('<lastmod>2026-07-06</lastmod>');
+  });
+
+  test('/sitemap-hf-paper.xml（源名含连字符）正确分片', async () => {
+    const items = [mkItem('hf-paper', '/i/paper/2501.1'), mkItem('hf-paper', '/i/paper/2502.2')];
+    const resp = await handleSeoRoute(
+      req('/sitemap-hf-paper.xml'),
+      makeEnv({}, makeSitemapDb({ items })),
+    );
+    expect(resp!.status).toBe(200);
+    const xml = await resp!.text();
+    expect((xml.match(/<loc>/g) || []).length).toBe(2);
+    expect(xml).toContain(`<loc>${SITE}/i/paper/2501.1</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/i/paper/2502.2</loc>`);
+  });
+
+  test('续片路径 /sitemap-x-2.xml 走第 2 页（OFFSET 生效，越界返回空 urlset）', async () => {
+    const items = [mkItem('x', '/i/x/1'), mkItem('x', '/i/x/2')];
+    const resp = await handleSeoRoute(
+      req('/sitemap-x-2.xml'),
+      makeEnv({}, makeSitemapDb({ items })),
+    );
+    expect(resp!.status).toBe(200);
+    const xml = await resp!.text();
+    expect(xml).toContain('<urlset');
+    expect((xml.match(/<loc>/g) || []).length).toBe(0);
+  });
+
+  test('未知源 /sitemap-foo.xml → 404', async () => {
+    const resp = await handleSeoRoute(req('/sitemap-foo.xml'), makeEnv({}, makeSitemapDb({})));
+    expect(resp!.status).toBe(404);
+  });
+
+  test('非法续片 /sitemap-x-1.xml（page1 应为无后缀）→ 404', async () => {
+    const resp = await handleSeoRoute(req('/sitemap-x-1.xml'), makeEnv({}, makeSitemapDb({})));
+    expect(resp!.status).toBe(404);
   });
 });
 

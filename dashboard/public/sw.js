@@ -16,7 +16,7 @@
  *   下次打开即 unregister + 清缓存
  * - 单机:localStorage 设 aifeeds_sw_off = 1
  */
-const VERSION = "v3";
+const VERSION = "v4";
 const SHELL_CACHE = "aifeeds-shell-" + VERSION;
 const ASSET_CACHE = "aifeeds-assets-" + VERSION;
 const ASSET_MAX_ENTRIES = 80;
@@ -25,9 +25,15 @@ const ASSET_MAX_ENTRIES = 80;
 // 的等价实现。根级单段 .txt(robots.txt / llms.txt / <indexnow-key>.txt)用同一条正则。
 // 三层口径对齐:sw.js(本函数)/ worker isSeoPath / nginx 正则,三处放行范围必须一致。
 const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
+// item SSR 静态页分片 sitemap（/sitemap-<source>.xml、/sitemap-<source>-<n>.xml）—— 镜像
+// worker/src/seo-routes.ts 的 SITEMAP_SHARD_RE，三层口径（sw.js / worker isSeoPath / nginx）一字不差。
+const SITEMAP_SHARD_RE = /^\/sitemap-[a-z0-9-]+\.xml$/;
 function isSeoPath(pathname) {
   if (pathname === "/daily" || pathname.startsWith("/daily/")) return true;
+  // item SSR 静态页 /i/…（worker seo/item-routes.ts 伺服）。裸 /i 不放行(与 worker isSeoPath 同口径)。
+  if (pathname.startsWith("/i/")) return true;
   if (pathname === "/sitemap.xml") return true;
+  if (SITEMAP_SHARD_RE.test(pathname)) return true;
   if (ROOT_TXT_RE.test(pathname)) return true;
   return false;
 }

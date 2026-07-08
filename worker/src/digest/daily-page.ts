@@ -13,7 +13,7 @@
 import type { Env } from '../index';
 import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { selectTopForSource, type SelectTopOptions } from './selection';
-import { renderItem, clampSentences, type RenderRow, type RenderedItem } from './render';
+import { renderItem, clampSentences, itemPagePath, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
@@ -172,6 +172,45 @@ function jsonLdSafe(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+// ── 公共 SEO 页骨架(日报页 + item 单页共用)───────────────────────────────────────
+// head(title/description/canonical/OG/单 JSON-LD 数据岛/内联 CSS)+ <html> 外壳。
+// bodyHtml 为 <body> 内的完整内容(调用方自带 .wrap 容器)。零可执行 <script>:唯一 <script>
+// 是 application/ld+json 数据岛(jsonLdSafe 已把 `<` 转义防 </script> 越权)。
+// PAGE_STYLE / jsonLdSafe 未改动 → 日报页调用后输出对既有实现逐字节不变(纯重构)。
+// og:url 与 canonical 同值(self-canonical);og:image 缺省(undefined)时整行省略。
+export function renderSeoPageShell(opts: {
+  lang: 'zh-CN';
+  title: string;
+  description: string;
+  canonical: string;
+  ogImage?: string;
+  ogType: 'website' | 'article';
+  jsonLd: object;
+  bodyHtml: string;
+}): string {
+  const { lang, title, description, canonical, ogImage, ogType, jsonLd, bodyHtml } = opts;
+  const ogImageLine = ogImage ? `<meta property="og:image" content="${escapeHtml(ogImage)}">\n` : '';
+  return `<!doctype html>
+<html lang="${lang}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(description)}">
+<link rel="canonical" href="${canonical}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(description)}">
+<meta property="og:type" content="${ogType}">
+<meta property="og:url" content="${canonical}">
+${ogImageLine}<script type="application/ld+json">${jsonLdSafe(jsonLd)}</script>
+<style>${PAGE_STYLE}</style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
 // 扩展摘要文本:每源最优加长字段(item.intro)按句 clamp 到 DAILY_PAGE_INTRO_MAX。
 // intro 为空 → 返回 ''(调用方据此不渲染空段)。
 function extendedSummary(item: RenderedItem): string {
@@ -194,8 +233,17 @@ function isPrefixOverlap(oneLiner: string, extended: string): boolean {
   return a.length > 0 && b.length > 0 && b.startsWith(a);
 }
 
+// 日报静态页内链(可见链接 + JSON-LD url):优先 /i/ SSR 实体页(itemPagePath),让爬虫落到
+// 有正文的实体页而非 SPA 空壳。理论出页五源(x/gh/ph/paper/news)都有 /i/ 路径;clawhub 等不出页源
+// itemPagePath 返回 null → 回退站内抽屉深链 deep_link(不崩、不出坏链)。
+// 注:仅日报静态页走 /i/;订阅邮件(templates/deliver)、codex-push、daily-api 仍各用自己的
+// deep_link(/t/ 等),它们是独立渲染器,本函数不影响。
+function itemHref(item: RenderedItem, siteBase: string): string {
+  return `${siteBase}${itemPagePath(item.item_id) ?? item.deep_link}`;
+}
+
 function renderArticle(item: RenderedItem, siteBase: string): string {
-  const deepUrl = `${siteBase}${item.deep_link}`;
+  const deepUrl = itemHref(item, siteBase);
   const oneLiner = clampSentences(item.summary_full || item.summary || '');
   const extended = extendedSummary(item);
   const parts: string[] = [];
@@ -241,8 +289,8 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
   }
 
   // JSON-LD @graph:WebSite + Organization + CollectionPage(含 ItemList)。单个 application/ld+json
-  // 数据岛,JSON.parse 通过,jsonLdSafe 的 `<` 转义仍生效。ItemList 每条 name=标题、url=深链、
-  // description=加长摘要供爬虫抓取。
+  // 数据岛,JSON.parse 通过,jsonLdSafe 的 `<` 转义仍生效。ItemList 每条 name=标题、
+  // url=/i/ SSR 实体页(itemHref,与可见链接同源;不出页源回退 deep_link)、description=加长摘要供爬虫抓取。
   const itemListElement = data.sections
     .flatMap((sec) => sec.items)
     .map((it, i) => {
@@ -251,7 +299,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
         '@type': 'ListItem',
         position: i + 1,
         name: it.title,
-        url: `${siteBase}${it.deep_link}`,
+        url: itemHref(it, siteBase),
         ...(description ? { description } : {}),
       };
     });
@@ -305,24 +353,8 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
   // 语义层级 h1→h2→h3:页面主标题 h1(含日期 + 当日主题,SEO 主题相关性),各源分区标题保留 h2。
   const h1Text = data.subject ? `AI 日报 ${data.date} · ${data.subject}` : `AI 日报 ${data.date}`;
 
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<meta name="description" content="${escapeHtml(desc)}">
-<link rel="canonical" href="${pageUrl}">
-<meta property="og:title" content="${escapeHtml(title)}">
-<meta property="og:description" content="${escapeHtml(desc)}">
-<meta property="og:type" content="article">
-<meta property="og:url" content="${pageUrl}">
-<meta property="og:image" content="${escapeHtml(ogImage)}">
-<script type="application/ld+json">${jsonLdSafe(jsonLd)}</script>
-<style>${PAGE_STYLE}</style>
-</head>
-<body>
-<div class="wrap">
+  // SSR 骨架抽取:head/OG/canonical/CSS/html 外壳统一走 renderSeoPageShell,本函数只拼 body。
+  const bodyHtml = `<div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
 <h1>${escapeHtml(h1Text)}</h1>
@@ -334,7 +366,16 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
 <a href="${siteBase}/">进站看全部</a>
 <a href="${dailyBase}/">历史日报</a>
 </footer>
-</div>
-</body>
-</html>`;
+</div>`;
+
+  return renderSeoPageShell({
+    lang: 'zh-CN',
+    title,
+    description: desc,
+    canonical: pageUrl,
+    ogImage,
+    ogType: 'article',
+    jsonLd,
+    bodyHtml,
+  });
 }

@@ -41,6 +41,7 @@ import {
   classifyAndTranslateForXTweet,
 } from '../enrich';
 import { migrateXMediaForItem } from '../x-media-r2';
+import { syncItemPageOnEnrichDone } from '../seo/item-page-hook';
 
 interface XTweetParams {
   itemId: string;
@@ -243,6 +244,11 @@ export class XTweetPipelineWorkflow extends WorkflowEntrypoint<Env, XTweetParams
               WHERE id = ?`,
           ).bind(nowIso, itemId).run();
         }),
+      );
+      // 内容最终态（completed：is_relevant 已定、翻译/关联字段已 backfill）→
+      // relevant 出页 / not-relevant 下架（无行则 no-op）。非阻塞容错，helper 内 try/catch 永不 throw。
+      await step.do('sync-item-page', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, classifyTrans.is_relevant === 1),
       );
     }
 
