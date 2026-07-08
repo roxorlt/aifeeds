@@ -61,8 +61,21 @@ function digestSourceForId(itemId: string): DigestSource | null {
   }
 }
 
-// 同源近期相关内链（3-5 条）：同 source_type、relevant、排除自身、按发布时间倒序取 6 条，
+// extra.dedup_of 非空 → 该 item 是 dedup 次源（被主源隐藏，见 feeds/dedup.ts），不出独立页。
+// 口径同 feeds/dedup.ts 的 json_extract(extra,'$.dedup_of')：非空（非 null 非空串）即次源。
+function isDedupSuppressed(extra: string | null | undefined): boolean {
+  if (!extra) return false;
+  try {
+    const d = (JSON.parse(extra) as { dedup_of?: unknown }).dedup_of;
+    return d != null && d !== '';
+  } catch {
+    return false;
+  }
+}
+
+// 同源近期相关内链（3-5 条）：同 source_type、relevant、非 dedup 次源、排除自身、按发布时间倒序取 6 条，
 // 各自 renderItem 成 RenderedItem 传给渲染器（渲染器只用 item_id + title 织 /i/ 内链）。
+// dedup 次源排除（I2）：避免织出指向被隐藏次源 /i/ 页的软 404 内链 / 触发按需生成。
 async function fetchRelated(env: Env, mainId: string, source: DigestSource): Promise<RenderedItem[]> {
   const sts = SOURCE_TYPES[source];
   if (!sts.length) return [];
@@ -70,6 +83,7 @@ async function fetchRelated(env: Env, mainId: string, source: DigestSource): Pro
   const rows = await env.DB.prepare(
     `SELECT * FROM items
       WHERE source_type IN (${ph}) AND id != ? AND is_relevant = 1
+        AND json_extract(extra, '$.dedup_of') IS NULL
       ORDER BY published_at DESC
       LIMIT 6`,
   )
@@ -92,6 +106,12 @@ export async function generateItemPage(
   const row = (await fetchItemRow(env, id)) as (RenderRow & { is_relevant?: number }) | null;
   if (!row) return { itemId: id, skipped: true, reason: 'not-found' };
   if (Number(row.is_relevant) !== 1) return { itemId: id, skipped: true, reason: 'not-relevant' };
+
+  // dedup 门（C1，一处堵三路）：extra.dedup_of 非空 → 是被主源隐藏的 dedup 次源，零写跳过。
+  // 主源亦是 backfill / 按需兜底 / 相关内链引导 三路调用的公共出口，此处堵死避免重复内容页侵蚀 SEO。
+  if (isDedupSuppressed(row.extra)) {
+    return { itemId: id, skipped: true, reason: 'dedup-suppressed' };
+  }
 
   // 源 gate：itemPageR2Key / itemPagePath 对不可出页源（clawhub / huodongxing / 未知）返回 null。
   const key = itemPageR2Key(id);
@@ -140,10 +160,12 @@ export async function backfillItemPages(
   const sts = SOURCE_TYPES[source];
   const ph = sts.map(() => '?').join(',');
 
-  // 选取本批：该源、relevant、尚未生成（NOT EXISTS item_pages）。发布时间倒序（新内容优先收录）。
+  // 选取本批：该源、relevant、非 dedup 次源、尚未生成（NOT EXISTS item_pages）。发布时间倒序（新内容优先收录）。
+  // dedup 谓词（C1）：json_extract(i.extra,'$.dedup_of') IS NULL，让 dedup 次源不算「待办」（否则永远 scanned 不收敛）。
   const rows = await env.DB.prepare(
     `SELECT i.id FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
+        AND json_extract(i.extra, '$.dedup_of') IS NULL
         AND NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id)
       ORDER BY i.published_at DESC
       LIMIT ?`,
@@ -162,6 +184,7 @@ export async function backfillItemPages(
   const cnt = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
+        AND json_extract(i.extra, '$.dedup_of') IS NULL
         AND NOT EXISTS (SELECT 1 FROM item_pages p WHERE p.item_id = i.id)`,
   )
     .bind(...sts)

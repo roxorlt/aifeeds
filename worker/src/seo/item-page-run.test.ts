@@ -54,9 +54,25 @@ function makeDb(seed: ItemSeed[] = []) {
   const pages = new Map<string, PageRow>();
   const runs: Array<{ sql: string; binds: unknown[] }> = [];
 
+  // extra.dedup_of 非空 → dedup 次源，模拟 SQL `json_extract(extra,'$.dedup_of') IS NULL` 的排除。
+  const isDeduped = (r: Record<string, unknown>): boolean => {
+    try {
+      const d = r.extra ? (JSON.parse(String(r.extra)) as { dedup_of?: unknown }).dedup_of : null;
+      return d != null && d !== '';
+    } catch {
+      return false;
+    }
+  };
+
   const pendingFor = (sts: string[]): Array<Record<string, unknown>> =>
     items
-      .filter((r) => sts.includes(String(r.source_type)) && Number(r.is_relevant) === 1 && !pages.has(String(r.id)))
+      .filter(
+        (r) =>
+          sts.includes(String(r.source_type)) &&
+          Number(r.is_relevant) === 1 &&
+          !isDeduped(r) &&
+          !pages.has(String(r.id)),
+      )
       .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
 
   const db = {
@@ -83,11 +99,17 @@ function makeDb(seed: ItemSeed[] = []) {
         },
         async all<T>() {
           if (/id != \?/i.test(sql)) {
-            // related：binds = [...sourceTypes, mainId]
+            // related：binds = [...sourceTypes, mainId]；SQL 含 dedup_of IS NULL → 排 dedup 次源。
             const mainId = String(binds[binds.length - 1]);
             const sts = binds.slice(0, binds.length - 1).map(String);
             const res = items
-              .filter((r) => sts.includes(String(r.source_type)) && String(r.id) !== mainId && Number(r.is_relevant) === 1)
+              .filter(
+                (r) =>
+                  sts.includes(String(r.source_type)) &&
+                  String(r.id) !== mainId &&
+                  Number(r.is_relevant) === 1 &&
+                  !isDeduped(r),
+              )
               .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)))
               .slice(0, 6);
             return { results: res as unknown as T[] };
@@ -205,6 +227,33 @@ describe('generateItemPage', () => {
     expect(itemPageR2Key(id)).toBeNull();
   });
 
+  test('dedup 次源（is_relevant=1 + extra.dedup_of 非空）→ skipped(dedup-suppressed) 零写 R2/D1', async () => {
+    const id = 'x_list:dup';
+    const db = makeDb([
+      { id, source_type: 'x_list', is_relevant: 1, extra: JSON.stringify({ dedup_of: 'x_list:incumbent' }) },
+    ]);
+    const r2 = makeR2();
+    const res = await generateItemPage(makeEnv(db, r2), id);
+    expect(res.skipped).toBe(true);
+    expect(res.reason).toBe('dedup-suppressed');
+    expect(r2.puts.length).toBe(0);
+    expect(insertRuns(db)).toBe(0);
+  });
+
+  test('正常项（extra.dedup_of 为 null / 缺失）→ 照常生成', async () => {
+    const nullDup = 'x_list:a';
+    const noKey = 'x_list:b';
+    const db = makeDb([
+      { id: nullDup, source_type: 'x_list', is_relevant: 1, extra: JSON.stringify({ dedup_of: null }) },
+      { id: noKey, source_type: 'x_list', is_relevant: 1, extra: JSON.stringify({ ai_summary: '摘要' }) },
+    ]);
+    const r2 = makeR2();
+    expect((await generateItemPage(makeEnv(db, r2), nullDup)).skipped).toBe(false);
+    expect((await generateItemPage(makeEnv(db, r2), noKey)).skipped).toBe(false);
+    expect(db._pages.has(nullDup)).toBe(true);
+    expect(db._pages.has(noKey)).toBe(true);
+  });
+
   test('id 无对应 item → skipped(not-found) 零写', async () => {
     const db = makeDb([]);
     const r2 = makeR2();
@@ -253,6 +302,29 @@ describe('generateItemPage', () => {
     expect(html).toContain(itemPagePath(rel)!); // 同源相关内链指 /i/
     expect(html).not.toContain('/i/gh/a/b'); // 异源不混入
   });
+
+  test('相关内链排除 dedup 次源（I2）：同源 dedup 行不进 related', async () => {
+    const main = 'x_list:1';
+    const rel = 'x_list:2';
+    const dup = 'x_list:3';
+    const db = makeDb([
+      { id: main, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-03T00:00:00Z' },
+      { id: rel, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+      // 同源 relevant 但 dedup 次源 → 不应织进相关内链
+      {
+        id: dup,
+        source_type: 'x_list',
+        is_relevant: 1,
+        published_at: '2026-07-01T00:00:00Z',
+        extra: JSON.stringify({ dedup_of: main }),
+      },
+    ]);
+    const r2 = makeR2();
+    await generateItemPage(makeEnv(db, r2), main);
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+    expect(html).toContain(itemPagePath(rel)!); // 正常同源进 related
+    expect(html).not.toContain(itemPagePath(dup)!); // dedup 次源被排除
+  });
 });
 
 describe('markItemPageGone', () => {
@@ -282,6 +354,26 @@ describe('backfillItemPages', () => {
     expect(res.remaining).toBe(0);
     expect(db._pages.has('x_list:1')).toBe(true);
     expect(db._pages.has('github:a/b')).toBe(false); // 未碰异源
+  });
+
+  test('backfill 排 dedup（C1）：dedup 次源不入选 + 不计入 remaining', async () => {
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
+      // dedup 次源：relevant 但 extra.dedup_of 非空 → 不入选、不算待办
+      {
+        id: 'x_list:dup',
+        source_type: 'x_list',
+        is_relevant: 1,
+        extra: JSON.stringify({ dedup_of: 'x_list:1' }),
+      },
+    ]);
+    const r2 = makeR2();
+    const res = await backfillItemPages(makeEnv(db, r2), 'x');
+    expect(res.scanned).toBe(1); // 只选正常项
+    expect(res.generated).toBe(1);
+    expect(res.remaining).toBe(0); // dedup 次源不再永远算待办
+    expect(db._pages.has('x_list:1')).toBe(true);
+    expect(db._pages.has('x_list:dup')).toBe(false); // dedup 次源零写
   });
 
   test('news 谓词覆盖 blog + podcast', async () => {
