@@ -972,7 +972,7 @@ function DashboardHome() {
           {/* PM 2026-05-19:移动端 AppBar logo + "AI-Feeds" 改上下结构,
               字号缩到 10px,腾出空间给右侧 tab(原横排单行占 ~120px → 现在 ~40px)。
               PC(sm:+)保持横排不变 */}
-          <div className="flex shrink-0 items-center gap-2 max-md:flex-col max-md:items-center max-md:gap-0">
+          <div className="flex shrink-0 items-center gap-2 max-md:flex-col max-md:items-center max-md:gap-0 md:flex-1">
             <img
               src="/favicon.svg"
               alt="AI-Feeds"

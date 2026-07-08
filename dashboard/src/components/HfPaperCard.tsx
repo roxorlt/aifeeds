@@ -16,6 +16,7 @@ import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawer";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
+import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
@@ -160,13 +161,13 @@ export function HfPaperCard({ item, eager }: Props) {
       {/* 标题（中译）— 跟 PhCard tagline 同字号（15px font-bold），允许 2 行 clamp。
           中译缺失时退到英文原标题（rare 但要 graceful）。 */}
       <h3 className="line-clamp-2 text-[15px] font-bold leading-tight text-neutral-900 break-words">
-        {title}
+        <HL text={title} />
       </h3>
 
       {/* TL;DR（中译）— 最多 4 行 clamp,超出 ……。跟标题区分用 neutral-600 + smaller */}
       {summary && (
         <p className="mt-1 line-clamp-4 text-[13px] leading-[1.5] text-neutral-600 break-words">
-          {summary}
+          <HL text={summary} />
         </p>
       )}
 

@@ -30,3 +30,24 @@ export function browseSourceLabel(source: string): string {
     source
   );
 }
+
+// 分组结果页组序权威表：与 App.tsx 的 SOURCE_COLUMNS（feed 列序）保持一致。
+// ⚠️ 改一处必须同步另一处 —— feed 列增删/调序时，这张表要跟着改。
+// blog/podcast 同属「新闻&播客」列（feed 里合并为一列），blog 排 podcast 前，
+// 故取相邻权重（10/11）。未列出的合法源（weibo/arxiv 等）走缺省 999 落末尾。
+export const SOURCE_FEED_ORDER: Record<string, number> = {
+  x_list: 0,
+  blog: 10,
+  podcast: 11,
+  product_hunt: 20,
+  github: 30,
+  hf_paper: 40,
+  huodongxing: 50,
+  clawhub: 60,
+  youtube: 70,
+};
+
+// 查 feed 列序权重，未知源缺省 999（落到末尾）。
+export function sourceFeedOrder(st: string): number {
+  return SOURCE_FEED_ORDER[st] ?? 999;
+}

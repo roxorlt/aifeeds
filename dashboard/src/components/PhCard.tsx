@@ -15,6 +15,7 @@ import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawer";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
 import { resolveAssetUrl } from "../lib/asset";
+import { HL } from "./search/highlight";
 
 // 选 PH cover：第一张非 logo 的 image，没有就用 video poster（YouTube 推 maxresdefault）。
 // 同 worker share/handlers.ts:492-515 的选取逻辑，保证流内 cover 跟分享海报 cover 一致。
@@ -157,7 +158,7 @@ export function PhCard({ item, eager }: Props) {
           {/* Title row：单纯产品名 */}
           <div className="flex items-baseline gap-1.5">
             <span className="truncate text-[15px] font-bold leading-tight text-neutral-900">
-              {name}
+              <HL text={name} />
             </span>
           </div>
 
@@ -185,7 +186,7 @@ export function PhCard({ item, eager }: Props) {
       {/* Tagline 正文 — 跨整张卡宽，4 行 */}
       {tagline && (
         <p className="mt-2 line-clamp-4 text-[15px] leading-[1.45] text-neutral-900 break-words">
-          {smartTruncate(tagline, 280)}
+          <HL text={smartTruncate(tagline, 280)} />
         </p>
       )}
 

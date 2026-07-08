@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import type { Item } from "../../types";
 import { searchItems, classifySearchError, isRateLimited } from "../../api";
@@ -8,6 +8,7 @@ import { SkeletonCard } from "../Feed";
 import { ItemCard } from "../ItemCard";
 import { SourceIcon } from "../icons";
 import { browseSourceLabel } from "./sources";
+import { HighlightProvider, extractHighlightTerms } from "./highlight";
 import { trackResultClick } from "./searchResultShared";
 import { SearchErrorBlock } from "./SearchGroups";
 
@@ -34,6 +35,7 @@ export default function SearchSourceList({ q, source }: SearchSourceListProps) {
   const [retryTick, setRetryTick] = useState(0);
   const consecutiveFailRef = useRef(0);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const highlightTerms = useMemo(() => extractHighlightTerms(q), [q]);
 
   const searchAll = useCallback(
     () => navigate(`/search?q=${encodeURIComponent(q)}`),
@@ -184,6 +186,7 @@ export default function SearchSourceList({ q, source }: SearchSourceListProps) {
     );
   } else {
     body = (
+      <HighlightProvider terms={highlightTerms}>
       <div>
         {items.map((item, position) => (
           <div key={item.id} onClick={(e) => trackResultClick(e, item, position, null)}>
@@ -211,6 +214,7 @@ export default function SearchSourceList({ q, source }: SearchSourceListProps) {
           <div className="py-4 text-center text-xs text-neutral-400">已到底</div>
         )}
       </div>
+      </HighlightProvider>
     );
   }
 
