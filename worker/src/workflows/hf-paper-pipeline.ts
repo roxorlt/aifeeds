@@ -31,6 +31,7 @@ import {
   ALL_DIMENSIONS,
   type DimensionResult,
 } from '../hf-paper/deep-analyze';
+import { syncItemPageOnEnrichDone } from '../seo/item-page-hook';
 
 interface HfPaperParams {
   itemId: string;          // 'hf_paper:2605.13301'
@@ -200,6 +201,10 @@ export class HfPaperPipelineWorkflow extends WorkflowEntrypoint<Env, HfPaperPara
             WHERE id = ?`,
         ).bind(nowIso, itemId).run();
       });
+      // 内容最终态（HF 策展默认 is_relevant=1 + deep_analysis/翻译齐）→ 生成/覆盖 item 静态页（非阻塞容错）。
+      await step.do('sync-item-page', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, true),
+      );
     }
 
     return {

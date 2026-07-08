@@ -38,6 +38,7 @@ import {
 } from '../feeds/dedup';
 import { migrateCoverForPodcast, migrateAudioForPodcast } from '../feeds/media-r2';
 import { fetchNativeTranscriptForPodcast } from '../podcast';
+import { syncItemPageOnEnrichDone } from '../seo/item-page-hook';
 
 const RETRY = {
   retries: {
@@ -72,6 +73,9 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
       await step.do('mark-irrelevant-gate', RETRY, () =>
         markIrrelevantCompleted(this.env, itemId),
       );
+      await step.do('sync-item-page-gone', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, false),
+      );
       return { itemId, is_relevant: 0 as const, completed: true };
     }
 
@@ -86,6 +90,10 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
           dd.winner as string,
           dd.reason || 'l1_same_url',
         ),
+      );
+      // dedup 次源被隐藏（relevant=1 但 dedup_of 非空）→ 不出独立页，下架兜底（非阻塞）。
+      await step.do('sync-item-page-gone', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, false),
       );
       return {
         itemId,
@@ -112,6 +120,9 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
         if (recheck.is_relevant !== 1) {
           await step.do('mark-irrelevant-fulltext', RETRY, () =>
             markIrrelevantCompleted(this.env, itemId),
+          );
+          await step.do('sync-item-page-gone', RETRY, () =>
+            syncItemPageOnEnrichDone(this.env, itemId, false),
           );
           return { itemId, is_relevant: 0 as const, completed: true };
         }
@@ -175,6 +186,11 @@ export class PodcastPipelineWorkflow extends WorkflowEntrypoint<
     if (ok) {
       await step.do('mark-completed', RETRY, () =>
         markCompleted(this.env, itemId),
+      );
+      // 内容最终态（relevant + enrich/翻译/合规 gate 齐）→ 生成/覆盖 item 静态页（非阻塞容错）。
+      // gate 未过（!ok，半成品）不出页，等 backfill 兜底。
+      await step.do('sync-item-page', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, true),
       );
     }
     return {

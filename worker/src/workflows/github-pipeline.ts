@@ -16,6 +16,7 @@ import {
   translateGithubReadmeForItem,
   recomputeGithubDailyRank,
 } from '../github';
+import { syncItemPageOnEnrichDone } from '../seo/item-page-hook';
 
 interface GithubPipelineParams {
   itemId: string;
@@ -46,6 +47,10 @@ export class GithubPipelineWorkflow extends WorkflowEntrypoint<Env, GithubPipeli
 
     // is_relevant=0 早退，省 step 3-5
     if (llm.is_relevant !== 1) {
+      // 改判/不相关 → 下架 item 页（无行则 no-op；非阻塞）。
+      await step.do('sync-item-page-gone', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, false),
+      );
       return { itemId, classified: 'irrelevant' as const };
     }
 
@@ -72,6 +77,11 @@ export class GithubPipelineWorkflow extends WorkflowEntrypoint<Env, GithubPipeli
         `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
       ).bind(new Date().toISOString(), itemId).run();
     });
+
+    // Step 7: 内容最终态（relevant + 翻译/封面/rank 齐）→ 生成/覆盖 item 静态页（非阻塞容错）。
+    await step.do('sync-item-page', RETRY, () =>
+      syncItemPageOnEnrichDone(this.env, itemId, true),
+    );
 
     return { itemId, classified: 'relevant' as const };
   }

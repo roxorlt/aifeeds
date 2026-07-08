@@ -17,6 +17,7 @@ import {
   translatePhFieldsForItem,
 } from '../scrapers/ph';
 import { r2MigratePhItemById } from '../ph-r2';
+import { syncItemPageOnEnrichDone } from '../seo/item-page-hook';
 
 interface PhPipelineParams {
   itemId: string;
@@ -36,6 +37,10 @@ export class PhPipelineWorkflow extends WorkflowEntrypoint<Env, PhPipelineParams
       classifyPhItemWithLlm(this.env, itemId),
     );
     if (cls.is_relevant !== 1) {
+      // 改判/不相关 → 下架 item 页（无行则 no-op；非阻塞）。
+      await step.do('sync-item-page-gone', RETRY, () =>
+        syncItemPageOnEnrichDone(this.env, itemId, false),
+      );
       return { itemId, classified: 'irrelevant' as const };
     }
 
@@ -58,6 +63,11 @@ export class PhPipelineWorkflow extends WorkflowEntrypoint<Env, PhPipelineParams
         `UPDATE items SET extra = json_set(coalesce(extra,'{}'), '$.workflow_completed_at', ?) WHERE id = ?`,
       ).bind(new Date().toISOString(), itemId).run();
     });
+
+    // Step 5: 内容最终态（relevant + 翻译/封面/gate 齐）→ 生成/覆盖 item 静态页（非阻塞容错）。
+    await step.do('sync-item-page', RETRY, () =>
+      syncItemPageOnEnrichDone(this.env, itemId, true),
+    );
 
     return { itemId, classified: 'relevant' as const };
   }
