@@ -14,7 +14,9 @@ import {
 import { selectTopForSource } from './selection';
 import type { Env } from '../index';
 import { DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
-import { clampSentences, type RenderedItem, type RenderRow } from './render';
+import { clampSentences, renderItem, type RenderedItem, type RenderRow } from './render';
+import { buildDigestEmail } from './templates';
+import { buildDailyCodexPayload } from './codex-push';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
@@ -103,7 +105,7 @@ describe('renderDailyPageHtml', () => {
   test('JSON-LD 可 JSON.parse,ItemList 条数 = fixture 总条数', () => {
     const sections: DailyPageSection[] = [
       { source: 'news', label: '行业新闻', items: [mkItem({ title: 'A' }), mkItem({ title: 'B' })] },
-      { source: 'x', label: '动态', items: [mkItem({ title: 'C', deep_link: '/t/9' })] },
+      { source: 'x', label: '动态', items: [mkItem({ title: 'C', item_id: 'x_list:9', deep_link: '/t/9' })] },
     ];
     const html = renderDailyPageHtml(mkData({ sections }), envFixture());
     const ld = extractJsonLd(html) as {
@@ -114,8 +116,8 @@ describe('renderDailyPageHtml', () => {
     expect(ld.mainEntity['@type']).toBe('ItemList');
     expect(ld.mainEntity.itemListElement.length).toBe(3); // 2 + 1
     expect(ld.mainEntity.itemListElement[0].name).toBe('A');
-    // url 为深链绝对 URL
-    expect(ld.mainEntity.itemListElement[2].url).toBe(`${SITE}/t/9`);
+    // url 为 /i/ SSR 实体页绝对 URL(Task 7:内链改指实体页,非 /t/ 抽屉深链)
+    expect(ld.mainEntity.itemListElement[2].url).toBe(`${SITE}/i/x/9`);
   });
 
   test('五源 section 按序齐全,渲染 <h2> 标签顺序正确', () => {
@@ -134,12 +136,52 @@ describe('renderDailyPageHtml', () => {
     expect(html).not.toContain('动态');
   });
 
-  test('深链为绝对 URL(https://ai-feeds.com/t/...)', () => {
+  // ── Task 7:日报静态页内链改指 /i/ SSR 实体页(邮件不动)──
+
+  test('item 可见链接指向 /i/ SSR 实体页(非 /t/ 抽屉深链)', () => {
     const html = renderDailyPageHtml(
-      mkData({ sections: [{ source: 'x', label: '动态', items: [mkItem({ deep_link: '/t/1890', title: '标题X' })] }] }),
+      mkData({ sections: [{ source: 'x', label: '动态', items: [mkItem({ item_id: 'x_list:1890', deep_link: '/t/1890', title: '标题X' })] }] }),
       envFixture(),
     );
-    expect(html).toContain(`<a href="${SITE}/t/1890">`);
+    expect(html).toContain(`<a href="${SITE}/i/x/1890">`);
+    expect(html).not.toContain(`<a href="${SITE}/t/1890">`);
+  });
+
+  test('五源 item 可见链接 + JSON-LD url 全部指向 /i/ 实体页(非 /t//g//o//h//ph/)', () => {
+    const html = renderDailyPageHtml(mkData({ sections: fullSections() }), envFixture());
+    // 可见链接:每源按 itemPagePath 映射(clawhub 已由 build 层剔除,此处只有出页五源)
+    expect(html).toContain(`<a href="${SITE}/i/news/blog%3Ae1">`);
+    expect(html).toContain(`<a href="${SITE}/i/ph/p">`);
+    expect(html).toContain(`<a href="${SITE}/i/gh/o/r">`);
+    expect(html).toContain(`<a href="${SITE}/i/paper/42">`);
+    expect(html).toContain(`<a href="${SITE}/i/x/1890">`);
+    // 旧抽屉深链前缀一律不再作为 item 可见链接
+    expect(html).not.toContain(`<a href="${SITE}/o/`);
+    expect(html).not.toContain(`<a href="${SITE}/g/`);
+    expect(html).not.toContain(`<a href="${SITE}/h/`);
+    expect(html).not.toContain(`<a href="${SITE}/t/`);
+    expect(html).not.toContain(`<a href="${SITE}/ph/`);
+    // JSON-LD ItemList 每条 url 同步为 /i/
+    const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ url: string }> } };
+    expect(ld.mainEntity.itemListElement.map((e) => e.url)).toEqual([
+      `${SITE}/i/news/blog%3Ae1`,
+      `${SITE}/i/ph/p`,
+      `${SITE}/i/gh/o/r`,
+      `${SITE}/i/paper/42`,
+      `${SITE}/i/x/1890`,
+    ]);
+  });
+
+  test('itemPagePath 返回 null 的源(clawhub 混入)→ 可见链接 + JSON-LD url 回退 deep_link,不崩不出坏链', () => {
+    const html = renderDailyPageHtml(
+      mkData({ sections: [{ source: 'clawhub', label: '工具', items: [mkItem({ source: 'clawhub', item_id: 'clawhub:c1', deep_link: '/c/c1', title: '工具一' })] }] }),
+      envFixture(),
+    );
+    // itemPagePath('clawhub:c1') === null → 回退站内抽屉深链 /c/c1(理论五源不会走到,防御性锁死)
+    expect(html).toContain(`<a href="${SITE}/c/c1">`);
+    expect(html).not.toContain(`${SITE}/i/`);
+    const ld = extractJsonLd(html) as { mainEntity: { itemListElement: Array<{ url: string }> } };
+    expect(ld.mainEntity.itemListElement[0].url).toBe(`${SITE}/c/c1`);
   });
 
   test('原文外链带 target=_blank rel=noopener,封面 loading=lazy', () => {
@@ -537,7 +579,8 @@ describe('buildDailyPageData', () => {
     const data = await buildDailyPageData(env, '2026-07-06');
     const html = renderDailyPageHtml(data!, env);
     expect(html).toContain('AI 日报 2026-07-06');
-    expect(html).toContain(`${SITE}/t/1890`);
+    expect(html).toContain(`${SITE}/i/x/1890`); // 内链指 /i/ SSR 实体页(Task 7)
+    expect(html).not.toContain(`${SITE}/t/1890`);
     expect(stripJsonLd(html)).not.toContain('<script');
   });
 
@@ -591,5 +634,81 @@ describe('buildDailyPageData', () => {
     expect(html).toContain('图文扩展简介，超过一句话摘要的正文内容。'); // blog → excerpt_zh
     expect(html).toContain('PH 中文长描述，供日报 SEO 抓取使用。');       // ph → description_zh
     expect(html).toContain('论文详细中文摘要，长度可观供检索。');         // hf → summary_zh(此例落在一句话段)
+  });
+});
+
+// ── Task 7 回归锁:/i/ 只用于日报静态页;邮件 / codex-push / daily-api 深链仍为 /t/ 家族,零回归 ──
+
+// codex-push buildDailyCodexPayload 用的 DB mock:digest_pool 按源返回 item_ids、items 按 id 返回行。
+function codexDbMock(poolBySource: Record<string, string[]>, rowsById: Map<string, RenderRow>) {
+  return {
+    prepare(sql: string) {
+      const state: StmtState = { sql, args: [] };
+      const stmt = {
+        bind(...args: unknown[]) {
+          state.args = args;
+          return stmt;
+        },
+        async all<T>() {
+          if (/FROM items/i.test(state.sql)) {
+            const results = state.args
+              .map((id) => rowsById.get(String(id)))
+              .filter((r): r is RenderRow => !!r);
+            return { results: results as unknown as T[] };
+          }
+          return { results: [] as T[] };
+        },
+        async first<T>() {
+          if (/digest_pool/i.test(state.sql)) {
+            const source = String(state.args[1]); // bind(sk, source)
+            const ids = poolBySource[source];
+            return (ids ? { item_ids: JSON.stringify(ids) } : null) as T | null;
+          }
+          return null as T | null;
+        },
+      };
+      return stmt;
+    },
+  };
+}
+
+describe('Task 7 回归锁:邮件 / codex-push / daily-api 深链不受 /i/ 改动影响', () => {
+  test('邮件(templates.buildDigestEmail)深链仍为 siteBase + /t/(带 utm),无 /i/', () => {
+    const { html, text } = buildDigestEmail({
+      subject: '今日 AI 精选',
+      items: [{
+        source: 'x', title: '推文标题', summary: '一句话摘要',
+        url: 'https://x.com/u/status/1890', deepLinkPath: '/t/1890', author: '@u',
+      }],
+      emailToken: null, // 无 token → 直接 siteBase + deepLinkPath(不走回流端点)
+      unsubscribeUrl: `${API}/api/digest/unsub?u=tok`,
+      apiBase: API,
+      siteBase: SITE,
+    });
+    expect(html).toContain(`${SITE}/t/1890`);
+    expect(text).toContain(`${SITE}/t/1890`);
+    expect(html).not.toContain('/i/');
+    expect(text).not.toContain('/i/');
+  });
+
+  test('codex-push(buildDailyCodexPayload)deep_link 仍为 /g/ 等,无 /i/', async () => {
+    const rowsById = new Map<string, RenderRow>([['github:o/r', mkRow('github:o/r', 1)]]);
+    const env = { SITE_BASE: SITE, API_BASE: API, DB: codexDbMock({ gh: ['github:o/r'] }, rowsById) } as unknown as Env;
+    const payload = await buildDailyCodexPayload(env);
+    const items = payload.digest.sections.normal.flatMap((s) => s.items);
+    expect(items.length).toBeGreaterThan(0);
+    for (const it of items) expect(it.deep_link.startsWith('/i/')).toBe(false);
+    expect(items.find((it) => it.source === 'gh')!.deep_link).toBe('/g/o/r');
+  });
+
+  test('daily-api / codex-push 共用的 renderItem.deep_link 仍为 /t/ 家族(非 /i/)', () => {
+    // daily-api handleDigestDaily → buildSection → renderItem;codex-push 同理,二者都直接输出
+    // RenderedItem.deep_link(= deepLinkPath)。本次只改日报静态页,renderItem 未动 → 仍 /t/ 家族。
+    const x = renderItem('x', mkRow('x_list:1890', 1), 1, API);
+    const gh = renderItem('gh', mkRow('github:o/r', 2), 1, API);
+    expect(x.deep_link).toBe('/t/1890');
+    expect(gh.deep_link).toBe('/g/o/r');
+    expect(x.deep_link.startsWith('/i/')).toBe(false);
+    expect(gh.deep_link.startsWith('/i/')).toBe(false);
   });
 });

@@ -13,7 +13,7 @@
 import type { Env } from '../index';
 import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { selectTopForSource, type SelectTopOptions } from './selection';
-import { renderItem, clampSentences, type RenderRow, type RenderedItem } from './render';
+import { renderItem, clampSentences, itemPagePath, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
@@ -232,8 +232,17 @@ function isPrefixOverlap(oneLiner: string, extended: string): boolean {
   return a.length > 0 && b.length > 0 && b.startsWith(a);
 }
 
+// 日报静态页内链(可见链接 + JSON-LD url):优先 /i/ SSR 实体页(itemPagePath),让爬虫落到
+// 有正文的实体页而非 SPA 空壳。理论出页五源(x/gh/ph/paper/news)都有 /i/ 路径;clawhub 等不出页源
+// itemPagePath 返回 null → 回退站内抽屉深链 deep_link(不崩、不出坏链)。
+// 注:仅日报静态页走 /i/;订阅邮件(templates/deliver)、codex-push、daily-api 仍各用自己的
+// deep_link(/t/ 等),它们是独立渲染器,本函数不影响。
+function itemHref(item: RenderedItem, siteBase: string): string {
+  return `${siteBase}${itemPagePath(item.item_id) ?? item.deep_link}`;
+}
+
 function renderArticle(item: RenderedItem, siteBase: string): string {
-  const deepUrl = `${siteBase}${item.deep_link}`;
+  const deepUrl = itemHref(item, siteBase);
   const oneLiner = clampSentences(item.summary_full || item.summary || '');
   const extended = extendedSummary(item);
   const parts: string[] = [];
@@ -278,7 +287,8 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
     }
   }
 
-  // JSON-LD:CollectionPage + ItemList(每条 name=标题、url=深链、description=加长摘要供爬虫抓取)。
+  // JSON-LD:CollectionPage + ItemList(每条 name=标题、url=/i/ SSR 实体页、description=加长摘要供爬虫抓取)。
+  // url 与可见链接同源(itemHref):优先 /i/ 实体页,不出页源回退 deep_link。
   const itemListElement = data.sections
     .flatMap((sec) => sec.items)
     .map((it, i) => {
@@ -287,7 +297,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
         '@type': 'ListItem',
         position: i + 1,
         name: it.title,
-        url: `${siteBase}${it.deep_link}`,
+        url: itemHref(it, siteBase),
         ...(description ? { description } : {}),
       };
     });
