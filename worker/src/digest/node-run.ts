@@ -14,7 +14,7 @@ import { selectTopForSource, excludeAlreadyPushed } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey, bjtDateStr } from './lib';
 import { pushDailyToCodex } from './codex-push';
-import { generateDailyPage } from './daily-page-run';
+import { runDailyPagePhase } from './daily-page-monitor';
 import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
 import { buildDigestSubjectFallback, digestSubjectTitleFromRow } from './subject';
 
@@ -231,16 +231,12 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
     }
 
     // Phase 4:仅早 8 点 + 开关 DAILY_PAGE_ENABLED==='1' → 生成当日 SEO 静态日报页。
-    // 学 Phase 3 容错:独立 workflow step + try/catch,任何异常只 console.error,绝不影响邮件/Codex。
-    // 手动 mode(daily-page)不受此开关限制。
+    // 学 Phase 3 容错:独立 workflow step,任何异常绝不影响邮件/Codex。runDailyPagePhase 内部
+    // try/catch 兜底(永不抛错)+ 告警:异常 → PushDeer「[SEO] 日报页生成失败」;skipped(选品空)
+    // → 告警「[SEO] 日报页跳过(选品空)」;正常静默。手动 mode(daily-page)不受此开关限制。
     if (slotHourBjt === 8 && this.env.DAILY_PAGE_ENABLED === '1') {
       await step.do('generate-daily-page', RETRY, async () => {
-        try {
-          return await generateDailyPage(this.env, bjtDateStr());
-        } catch (e) {
-          console.error(`[daily-page] Phase 4 生成失败: ${String(e).slice(0, 300)}`);
-          return { error: String(e).slice(0, 300) };
-        }
+        return await runDailyPagePhase(this.env, bjtDateStr());
       });
     }
 
