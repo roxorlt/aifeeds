@@ -96,6 +96,7 @@ import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
+import { backfillItemPages } from './seo/item-page-run';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
@@ -4563,6 +4564,20 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await generateDailyPage(env, dateParam, { dry });
     return jsonResponse({ ok: true, ...result }, 200, request, env);
+  }
+  if (mode === 'item-page-backfill') {
+    // item SSR 静态页存量分源回填(设计 §4.3)。按源扫 is_relevant=1 且未在 item_pages 的 item →
+    // generateItemPage;分批(默认 300)、item_pages 存在性即游标、循环调至 remaining=0。?dry=1 零写。
+    // ?source=x|gh|ph|hf-paper|news(必填);经香港 60s 提断按返回 scanned/generated/remaining 核对续跑。
+    const source = url.searchParams.get('source') || '';
+    const valid = ['x', 'gh', 'ph', 'hf-paper', 'news'] as const;
+    if (!(valid as readonly string[]).includes(source)) {
+      return jsonResponse({ error: 'bad source, expect x|gh|ph|hf-paper|news' }, 400, request, env);
+    }
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '300'), 1), 1000);
+    const result = await backfillItemPages(env, source as (typeof valid)[number], { limit, dry });
+    return jsonResponse({ ok: true, mode: 'item-page-backfill', source, dry, ...result }, 200, request, env);
   }
   if (mode === 'cover-quality-sweep') {
     // 一次性清洗低质 R2 封面 + 外链残留封面(症状 2)。分页扫描 blog/podcast:
