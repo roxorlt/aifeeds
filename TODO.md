@@ -321,12 +321,18 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - **P4** 内容矩阵：知乎 / CSDN / SegmentFault / 稀土掘金 / HN / Reddit
 - **P5** 监测：GA4 / CF AI Crawl Control / crawl-to-referral 比率
 
-**低优技术债**（随 P0 PR #161 / 封面修复 PR #162 产生）：
-- [ ] **gitleaks / secret-scan allowlist 收编 `worker/src/seo-routes.test.ts` 测试桩误报**：该测试用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 会被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报。给 `.gitleaks.toml` 的 allowlist 加 `worker/src/*.test.ts`（或该文件路径）豁免，避免后续 CI secret-scan 假红。2026-07-06 复核：main 上 Secret Scan 长期红均为此误报，建议顺手加 `.gitleaksignore`
-- [ ] **封面质量门的不可 probe 格式兜底误留**（PR #162 遗留）：ico/webp/avif 无法读尺寸时走「>8KB 即通过」兜底，导致 48×48 `.ico` 被误留为封面（prod 实测 7 条 items）。可选收紧：`.ico` 扩展名直接拒，或 probe 失败即拒（代价是误杀部分 webp 正常封面）。位置 `worker/src/media-r2.ts` 质量门函数
-- [ ] **`mode=daily-page&backfill=1` 单请求跑不完全量**：worker 时限下 36 页只跑到 ~20 页即截停（2026-07-06 实测），目前靠单日循环兜底。可加游标参数（`&from=YYYY-MM-DD`）或内部分批 `waitUntil`，位置 `worker/src/digest/daily-page-run.ts`
-- [ ] **外链形态的源级通用封面簇未清**（PR #163 rollout 遗留，2026-07-06）：`blog-cover-generic-sweep` 判簇谓词只扫 R2 形态 cover_image，prod 存量里 techcrunch favicon ×27、the-verge RSS 头像 ×13 等**外链**通用封面在范围外。日报页不受影响（渲染层只认 /r/），但前端 BlogCard/抽屉直读 cover_image 会显示这些外链 favicon/头像。修法：sweep 谓词放宽到外链形态一并判簇清空（清后自动进 og-backfill 候选）。位置 `worker/src/media-r2.ts` generic-sweep SQL
+**P0.2** ✅ **`/i/` 全量内容 SSR 页已上线（2026-07-08，PR #171 #172）**：五源 relevant 每条一个 `/i/:source/:id` 独立 SSR 页（约 3.2 万，分源混合全文正文 + JSON-LD @graph），日报静态页内链改指 `/i/`，sitemap 改 sitemap-index + 分源分片，item_pages 表（migration 027），enrich 收尾 hook 生成 + `mode=item-page-backfill` 回填。2026-07-09 五源 force 全量重灌（薄页→全文版）到 remaining=0。运维见 `docs/operations.md` §「SEO 静态页运维」+ §「item SSR 静态页 `/i/*`」。设计 [`docs/plans/2026-07-08-item-ssr-pages-design.md`](docs/plans/2026-07-08-item-ssr-pages-design.md)。
+
+**SEO 静态页线 — 遗留低优**（2026-07-09 `/i/` 全量内容页收尾整理；随 P0 PR #161 / 封面 #162 #163 / item SSR #171 #172 产生。运维背景见 `docs/operations.md` §「SEO 静态页运维」）：
+- [ ] **`/i/` 页生成未接 IndexNow**（增强项，值得做）：日报静态页生成后会 ping IndexNow（Bing/Yandex），但 3.2 万个 `/i/` 页目前只靠 sitemap + 自然抓取被发现。给 `generateItemPage` / `backfillItemPages` 收尾加批量 IndexNow ping（一批 ≤1 万 URL），加速 Bing/Yandex 侧收录。位置 `worker/src/seo/item-page-run.ts`
+- [ ] **大 README > 40KB 截断链 prod 未触发**（非缺陷，休眠）：`GH_README_MAX_CHARS=40000` 截断 + 「在 GitHub 查看完整 README →」链代码正确且已单测，但 prod gh chosen readme 最大仅 ~2.9 万字 < 阈值（over40k=0）→ 路径当前休眠。未来出现超大 README 自动生效，无需处理，仅记录。位置 `worker/src/seo/item-body.ts` gh 分支
+- [ ] **外链形态的源级通用封面簇未清**（PR #163 rollout 遗留，2026-07-06）：`blog-cover-generic-sweep` 判簇谓词只扫 R2 形态 cover_image，prod 存量里 techcrunch favicon ×27、the-verge RSS 头像 ×13 等**外链**通用封面在范围外。日报页 / `/i/` 页不受影响（渲染层只认 /r/），但前端 BlogCard/抽屉直读 cover_image 会显示这些外链 favicon/头像。修法：sweep 谓词放宽到外链形态一并判簇清空（清后自动进 og-backfill 候选）。位置 `worker/src/media-r2.ts` generic-sweep SQL
 - [ ] **日报页 hf-paper / gh 源缩略图仍是外链**（既有行为非回归，2026-07-06 记录）：最新日报页 21 张外链 img 全部来自 HF 论文缩略图（20）+ GitHub banner（1），有防盗链/失效风险且不在 news 封面质量门范围。后续可评估迁 R2 或日报页降级无图。位置 `worker/src/digest/render.ts` 各源 cover 路径
+- [ ] **PH 3 条顽固翻译失败待自愈**（WorkBuddy / DocsAlot / TryCase，均 07-06 入库）：`ph-description-translate` 反复重选谓词但翻译失败（PR 已知 Minor），日报页 / `/i/ph/` 页已用中文 `ai_summary` 兜底 collapse 单段、无用户可见影响；后续自动翻 step 可能自愈，暂不手动处理
+- [ ] **gitleaks 测试桩假 key 误报（加 `.gitleaksignore`）**：`worker/src/seo-routes.test.ts` 用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报，main 上 Secret Scan 长期红均为此。给 allowlist 加 `worker/src/*.test.ts` 豁免或加 `.gitleaksignore`
+- [ ] **podcast timeline 数据侧回填**（enrichment 事，非 SSR 渲染 bug）：全站 792 条 podcast 只 115 条（~15%）有 `timeline`（话题脉络），有值的 SSR / 抽屉才渲染话题脉络。`renderPodcast` 已对齐抽屉（补渲 timeline 的 point/speaker + 嘉宾区），但覆盖率靠 enrichment 回填 timeline 提升，与本 SEO 线代码无关。`chapters` 字段全站 0 条（从没填过），优先级更低
+- [ ] **封面质量门的不可 probe 格式兜底误留**（PR #162 遗留）：ico/webp/avif 无法读尺寸时走「>8KB 即通过」兜底，导致 48×48 `.ico` 被误留为封面（prod 实测 7 条 items）。可选收紧：`.ico` 扩展名直接拒，或 probe 失败即拒（代价是误杀部分 webp 正常封面）。位置 `worker/src/media-r2.ts` 质量门函数
+- [ ] **`mode=daily-page&backfill=1` 单请求跑不完全量**：worker 时限 / 香港 60s 下单请求只跑到部分日期即截停，目前靠外层单日循环兜底（`&date=` 逐日）。可加游标参数（`&from=YYYY-MM-DD`）或内部分批 `waitUntil`，位置 `worker/src/digest/daily-page-run.ts`
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 

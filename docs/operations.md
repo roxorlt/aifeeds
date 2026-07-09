@@ -728,7 +728,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 
 - **database_id**：`2973d54b-ca13-48e4-8d20-1430c57f5260`
 - **表结构**：见 `worker/schema.sql`
-- **20 个表**：
+- **21 个表**：
   - `items` — 所有内容的统一表（JSON extra 列装 X 专属字段：quote_of/link_card/hashtags/`enriched_at` 等；`translation_quality` TEXT + `translation_attempts` INTEGER 列标记翻译质量；2026-04-23 M3 新增 `tier` INTEGER + `next_refresh_at` INTEGER + `last_velocity` REAL + `deleted_at` INTEGER 四列，含 `idx_items_next_refresh` / `idx_items_deleted` 两个索引）
   - `sources` — 抓取源列表（list_id、cursor、last_success_at）
   - `run_stats` — 每次抓取的统计
@@ -749,6 +749,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - `items_fts`（2026-07-06 C 端搜索新增，migration 026）— **FTS5 影子表**（`USING fts5(... tokenize='unicode61')`）。3 个索引列存**预分词后的空格分隔 token 流**：`title_tok`（标题类，权重高）/ `body_tok`（正文摘要类，中）/ `author_tok`（作者/handle，低）；`item_id` / `source_type` / `published_at` 为 UNINDEXED 列。rowid 与 `items.rowid` 对齐（插入时显式指定）。中文靠 `tokenize.ts` 的 bigram 预分词入流，FTS5 自身只用默认 unicode61（不依赖 D1 的 trigram/ICU 编译选项）。**入索引门槛**：`workflow_completed_at IS NOT NULL` 且 `deleted_at IS NULL` 且 `is_relevant=1` 且 `dedup_of IS NULL` 且 `cn_sensitive != 1`。由 cron `syncSearchIndex` 增量维护（delete+insert 幂等 upsert），事后失格行靠每日 `reconcileSearchIndex` 清出。migration `026-search-fts.sql`，设计 `docs/plans/2026-07-06-c-search-design.md` §3.1
   - `search_terms`（2026-07-06 同上，migration 026）— suggestion 词表。列：`term`(展示原文保留大小写) / `term_norm`(小写归一，前缀匹配键) / `term_type`(`entity` | `hot_query`) / `source_type`(可空) / `weight`(REAL) / `updated_at`。主键 `(term_norm, term_type)`，索引 `idx_search_terms_norm(term_norm, weight DESC)`。**entity 词**来自库内真实内容（GH 仓库/PH 产品/skill 名/hf keyword/媒体名/高频作者≥3 条/GH·ClawHub 分类）→ 搜必有果；**hot_query 词**从 events `search_submit` 近 7 天聚合 top 100。每整点由 `rebuildSearchTerms` 全量重建。`/api/search/suggest` 用前缀范围扫描直读此表。设计 §3.3
   - `search_sync_state`（2026-07-06 同上，migration 026）— 搜索索引同步水位（`k TEXT PRIMARY KEY, v TEXT`）。key：`fts_wm_scraped_epoch`（增量水位，scraped_at 的 epoch 秒）/ `fts_wm_translated`（translated_at 水位）/ `fts_backfill_rowid`（backfill 进度游标）/ `fts_backfill_done` / `last_reconcile`（对账 JSON：itemsEligible/ftsRows/drift）。设计 §3.4
+  - `item_pages`（2026-07-08 `/i/` 全量内容静态页 SEO 新增，migration 027）— 每条内容 SSR 静态页的 D1 索引表。5 列：`item_id`(composite id，PRIMARY KEY，如 `x_list:123`/`github:owner/repo`/`product_hunt:slug:date`/`hf_paper:2603.x`/`blog:...`/`podcast:...`) / `source`(`x`|`gh`|`ph`|`hf-paper`|`news`，注意此列用 `hf-paper`，但 URL 路径段用 `paper`) / `url_path`(如 `/i/x/123`，sitemap 分片用) / `generated_at`(ISO8601) / `status`(`live` 正常伺服 200 ｜ `gone` 转 410 + noindex + 移出 sitemap；`is_relevant` 被改判 0 或 item 删除时置 `gone`)。索引 `idx_item_pages_source(source, status)`。sitemap 分片、下架判定、伺服 status 全从此表读，**不做 R2 list**（R2 `READMES` bucket 的 `items/<source>/<id-safe>.html` 只存快照）。写入：`worker/src/seo/item-page-run.ts`（enrich 收尾 hook `generateItemPage` + `backfillItemPages`）。**prod live ~3.2 万行**（详见下方「SEO 静态页运维」§9）。migration `027-item-pages.sql`，设计 `docs/plans/2026-07-08-item-ssr-pages-design.md` §4.2
 
 **关键字段语义**：
 - `items.extra.enriched_at`（2026-04-20 新增）：ISO timestamp，标记该 item 已被 backfill-quotes 处理过一次（含空结果）。`selectBackfillCandidates` SQL 过滤此字段，防止已处理的 item 被反复捞起
@@ -1575,6 +1576,97 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 > 1. **`reconcile` 只清失格行，不回填缺失行** —— 每日 03:35 UTC 的 `reconcileSearchIndex` 只 `DELETE` items 已失格但 FTS 仍残留的行，**不会**把「合规却漏进索引」的行补回去。收到「搜索索引滞后」告警（`drift>500`）或发现某内容明明在库却搜不到时，跑 `POST /api/admin/search/reindex?reset=1` **全量重建**（重置 backfill 进度 + 重新播种水位，5.5 万行约 2.3h；单请求 ~20s 时间预算，**反复调用可加速**追平）。
 > 2. **prod 首次上线后主动循环追平 backfill** —— 别干等每 5 分钟 cron 一点点推进（要 2h+），部署后立即循环调 `POST /api/admin/search/reindex`（首次不带 `reset`，靠自动 backfill 游标；返回 `backfillDone:true` 即追平），并触发一次 `POST /api/admin/search/rebuild-terms` 让 suggestion 词表就位。
 > 3. **staging cron 全关** —— staging 的搜索索引与词表**不由 cron 自动维护**，只能靠手动触发 `reindex` / `rebuild-terms`（且 prod/staging `/api/admin/*` 被 CF Access 边缘拦截，无服务令牌时走 `wrangler dev` remote-bindings 调用，参见 Task 7 backfill 记录）。
+
+---
+
+## SEO 静态页运维（每日日报页 + `/i/` 全量内容页）
+
+> 这条线把 aifeeds 可索引面从「~39 个 URL（首页 / 归档 / 日报聚合页）」扩到「3.2 万+ 独立内容页」。三块：① **每日静态日报页** `/daily/*`（早 8 点 Phase 4 生成，生成/告警/选品细节见上「订阅推送子系统」§「每日静态日报页 Phase 4」，此处不重复）；② **`/i/:source/:id` 全量内容 SSR 页**（五源 relevant 每条一页，约 3.2 万，2026-07-08 上线）；③ **robots / sitemap-index / 分片 / llms / IndexNow** 配套。内容为分源混合全文（gh/hf/ph/x 全文正文，blog/podcast 因版权只放摘录）+ `marked` markdown→HTML + 净化（零可执行 script）。设计：日报页 `docs/plans/2026-07-06-daily-static-page-seo-design.md`；item 页 `docs/plans/2026-07-08-item-ssr-pages-design.md` + 全文渲染器 `docs/plans/2026-07-08-item-page-fulltext-plan.md`。
+
+### 1. 路由清单（伺服 + 缓存头）
+
+均在 `index.ts` **bot gate 之后、鉴权路由之前**由 SEO 伺服层处理（`isSeoPath` 豁免 bot UA 闸，决策 5 全放），代码 `worker/src/seo-routes.ts` + `worker/src/seo/item-routes.ts`。**绝对 URL 一律 `env.SITE_BASE`，禁取 request host**（香港中转改写 Host，2026-06-08 教训）。
+
+| 路由 | 伺服 | 缓存头 |
+|------|------|--------|
+| `/daily/:date` | R2 `daily/<date>.html` 快照命中 → 200；miss → noindex 404 页；日历越界 → 302 归档 | `public, max-age=3600` |
+| `/daily/` `/daily` | 从 `daily_pages` 表实时渲染归档索引（按月倒序） | `public, max-age=3600` |
+| `/robots.txt` | 模板（决策 5 全放，仅 Disallow `/api/` `/admin` `/settings` `/me/` `/unsubscribe`；末行 `Sitemap:`） | `public, max-age=86400` |
+| `/sitemap.xml` | **sitemap-index**（2026-07-08 改），列全部分片 | `public, max-age=3600` |
+| `/sitemap-<source>.xml` | 各源 `item_pages`(status=live) 实际 URL 列表，每片 ≤5 万（超则续 `-2 -3…`）；分片有 `daily` / `x` / `gh` / `ph` / `hf-paper` / `news` 共 6 类；正则 `SITEMAP_SHARD_RE`（`worker/src/seo-routes.ts`） | `public, max-age=3600` |
+| `/llms.txt` | 模板（中英各一行定位 + 归档/订阅入口 + 最近 7 天日报） | `public, max-age=86400` |
+| `/<INDEXNOW_KEY>.txt` | IndexNow 域名归属校验文件（key 纯文本）；未配置 / key 不匹配的其它根级 `.txt` → 404 | `public, max-age=86400` |
+| `/i/:source/:id` | 五源单页；URL source 段 = `x`\|`gh`\|`ph`\|`paper`\|`news`（`paper` = D1 的 `hf-paper`）。查 `item_pages.status`：live 且 R2 有 → 200；R2 miss 但 item relevant → **实时兜底生成**后返回；status=gone → 410 + noindex；未知 / 非 relevant → 404。**裸 `/i` 不豁免**（`isSeoPath` 要求 `pathname.startsWith('/i/')`） | `public, max-age=3600` |
+
+### 2. D1 表
+
+- **`daily_pages`**（migration 025）：日报页索引，见上 §2 D1 表清单。
+- **`item_pages`**（migration 027）：`/i/` 页索引，见上 §2 D1 表清单。关键：`status` = `live`（伺服 200 + 进 sitemap）｜ `gone`（410 + noindex + 移出 sitemap）；`source` 列用 `hf-paper` 而 URL 段用 `paper`。
+
+### 3. Admin mode 清单 + 用法（`POST /api/enrich/run`，`Bearer INGEST_TOKEN`；staging 加 `X-Dev-Token`）
+
+**SEO 页生成 / 回填**：
+
+- `mode=daily-page`（今日）｜ `&date=YYYY-MM-DD`（指定历史日）｜ `&backfill=1`（遍历 digest_pool 全部历史日逐日回填）｜ 追加 `&dry=1` 只算不落盘。不受 `DAILY_PAGE_ENABLED` 限制。细节见「每日静态日报页 Phase 4」。
+- **`mode=item-page-backfill&source=<x|gh|ph|hf-paper|news>`**（`/i/` 页主力回填）：
+  - `&limit=N`（每批，默认小值；**x 源 limit 必须 ≤100**，见 §4）｜ `&dry=1`（零写，返回 `scanned`/`generated`/`remaining`）
+  - `&force=1`：连**已存在**的页也重渲染覆盖（升级存量薄页 → 全文版 / 换渲染器后刷存量）。不带 `force` 时走存在性游标（`NOT EXISTS item_pages`），只补缺页。
+  - `&cutoff=<ISO8601>`：force 重灌的收敛锚点，见 §4 runbook（**必须逐批回传，漏传不收敛**）。
+  - 出页 gate = `is_relevant=1` 且 `extra.dedup_of IS NULL` 且 `source_type∈五源`；dedup 次源、非 relevant 在扫描前即排除（不进 `scanned`、不出重复页）。
+
+**内容质量 / 封面 / 翻译（供 SEO 页取用的上游字段，均 2026-07-06 批次，`&limit=N[&dry=1]`）**，细节见上 §1 端点清单对应行：
+
+- `mode=blog-cover-generic-sweep` — 源级通用图（favicon/RSS 头像簇）统计剔除，置 `cover_generic_cleared_hash`（**是下面 bodyhero 回填的前置**）
+- `mode=blog-cover-bodyhero-backfill` — logo 清簇后取正文已迁 R2 的 hero 图差异回填（**强依赖先跑 generic-sweep**）
+- `mode=blog-cover-og-backfill` — og:image 存量回填（**勿对 jiqizhixin/qbitai 跑**，其 og 是被清 logo）
+- `mode=blog-body-redecode` — RSSHub 源正文实体编码 `<p>` 泄漏清洗
+- `mode=ph-description-translate` — PH 英文 description → `description_zh`（日报页 / `/i/ph/` 扩展摘要取用）
+
+### 4. `/i/` 页重灌 runbook（关键运维知识）
+
+> 复用脚本 `force-backfill-src.sh <source> [limit]`（job tmp，含 error/stall 守卫 + cutoff 线程化）。2026-07-09 五源 force 全量重灌（薄页 → 全文版）即按此跑到各源 `remaining=0`。
+
+1. **force 重灌必须用 cutoff loop 收敛** —— `force=1` 会重渲染已存在的行，靠 `generated_at >= cutoff` 退出候选实现单调收敛。**每批把上一批响应里的 `cutoff` 原样回传下一批**（脚本把 `:`→`%3A` URL 编码）；首批不带 cutoff（worker 取 now 为 campaign 锚点）。**漏传 cutoff → 每批重扫同一批行、`remaining` 不降、永不收敛**。中途改脚本续跑时用同一 seed cutoff，跳过已重灌行，无重复。
+2. **x 大盘 `limit` 必须 ≤100** —— x 单条含引用/推文串串渲染，`limit=200` 每批渲染太重 → worker CPU 吃紧、~25% 空响应超时。gh/ph/hf 在 100 全 0 错误；x 用 200 撞超时后切回 100 全程 0 新错误。**再跑 x 大盘直接 100，勿用 200**。
+3. **直连 `xlist-api.ltsms86.workers.dev` + `X-Dev-Token` 绕香港 60s** —— 经 `api.ai-feeds.com` 走香港 nginx，item-page 渲染 wall-clock 常 >60s → 客户端 504 / `curl exit28`，但 **worker 后台仍会跑完**。直连 workers.dev（附 `Authorization: Bearer $INGEST_TOKEN` + `X-Dev-Token: $DEV_TOKEN`）绕过；批 100 实测 ~32s 无 504。**若仍走香港看到 504/000，别当失败**，按响应 `remaining` 递减核对进度（或 `SELECT count(*) FROM item_pages GROUP BY source`），worker 大概率已写。
+4. **长任务用 `nohup` 脱离 harness 后台更稳** —— harness 后台任务曾被杀一次（疑后台运行时上限）；`nohup` 脱离进程 + 同 cutoff 无缝续跑。
+5. **`remaining` 卡固定值不降 = 疑脏 id，人工排查** —— 若 `scanned>0` 但 `generated=0` 且 `remaining` 连续不缩，脚本 stall 守卫会 break：多半是 `source_type∈五源` 但 composite id 前缀与源不匹配的脏行。人工 `SELECT` 排查，别硬刷爆 API。
+6. **news 前确认 C1 dedup 门** —— news（=blog+podcast 虚拟源）跑前确认 dedup 次源（`extra.dedup_of` 非空）在扫描谓词里被排除：次源自动 `skipped`、不进 `scanned`、不出重复页、不入 sitemap（2026-07-09 实测 `podcast:gradient-dissent:…` dedup 次源 item_pages 计数 = 0）。
+
+### 5. 香港 nginx 转发
+
+`ai-feeds.com` 灰云直连香港 VPS（`154.12.188.231`）。front server 块一个 **regex location** 把 `/daily(/.*)?`、`/i/.*`、`robots.txt`、`sitemap.xml`、`sitemap-<source>.xml` 分片、`llms.txt`、`<INDEXNOW_KEY>.txt` 转发到与 api 块同一 worker upstream（`xlist-api.ltsms86.workers.dev`），照 api 块注入全套头（`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `proxy_ssl_name/server_name`）。**故意不启用 proxy_cache**。完整正则 + 演进见上 §6b「六续」（daily + SEO 文件）/「七续」（扩 `/i/*` + sitemap 分片）。
+
+- **权威副本已版本化**：`deploy/nginx/aifeeds-seo-location.conf`（repo 内，含完整回滚 / 部署步骤注释）。**VPS 仍是实际生效配置**，改这个副本后须 SSH 同步 VPS → `nginx -t` → `systemctl reload nginx` → 清缓存（`rm -rf /var/cache/nginx/aifeeds/*`）。upstream / SNI / 注入头一律照现有 `/daily` location 的 proxy 体，别自己拼。
+- **回滚**：删该 location 块 + reload（worker 路由无状态；api 域 `/daily` `/i/` 等仍可直达不受影响）。
+
+### 6. 三层路径口径必须一致（加新 SEO 路径时同步三处）
+
+新增任何 SEO 静态路径，**下面三处的路径判定必须同时改，否则页面会被某一层截断**：
+
+1. **nginx 正则**（`deploy/nginx/aifeeds-seo-location.conf` + VPS）—— 决定主域该路径转不转 worker
+2. **worker `isSeoPath()`**（`worker/src/seo-routes.ts`）—— 决定该路径豁不豁免 bot UA 闸
+3. **`dashboard/public/sw.js` 的 `isSeoPath()`** —— 决定 PWA SW 拦导航时透传还是喂缓存壳
+
+> ⚠️ **现状缺口**：sw.js 的 `isSeoPath()` 已含 `/daily`、`/sitemap.xml`、根级 `.txt`，但 **`/i/*` 分支尚未同步**（2026-07-08 记录，见 §6b 七续）。理论风险：老客户端 SW 拦 `/i/*` 导航时可能喂旧壳而非透传。属遗留低优（见 TODO §12 SEO 遗留低优），改前先注销 SW / 硬刷新验证实际影响。
+
+### 7. 图片
+
+- `/i/` 页内图（gh README 图 / ph·hf 封面）走 `/r/<key>` R2 反代（与抽屉同一套 `resolveAssetUrl`，SSR 没缺任何东西）。hf 页无内嵌 R2 图，页图是 HF 官方社交缩略图（外链 og）。
+- ⚠️ **staging `/i/` 页图会挂图是数据假象，非 bug** —— staging R2 是独立空桶 `xlist-readme-assets-staging`（wrangler.toml staging `READMES` binding），从没被 R2 迁移任务填过；staging D1 的 `/r/` key 是从 prod 快照灌来的悬空指针 → staging 全 404、prod 同 key 全 200。**图片是否正常一律以 prod 判定**，别在 staging 纠结挂图。
+
+### 8. IndexNow 现状
+
+- **每日静态日报页生成后 ping**（`daily/<date>` + `/daily/` + `/sitemap.xml`，提交给 Bing/Yandex）。fire-and-forget，非 2xx 只记日志不重试。
+- **`/i/` 页目前未接 IndexNow**（3.2 万页只靠 sitemap + 自然抓取被发现）—— 遗留增强项（TODO §12 SEO 遗留低优 #1，值得做，Bing/Yandex 侧可加速收录）。
+- **Google 不支持 IndexNow**，只能靠 sitemap 提交 + 自然抓取（GSC 提交见 `docs/seo-webmaster-guide.md`）。
+- key = secret `INDEXNOW_KEY`（prod / staging 各自值，存 `.secrets/aifeeds-{prod,staging}.env`）；未配置时 ping 静默跳过。
+
+### 9. 数据量
+
+- `item_pages` prod **live ~3.2 万行**（2026-07-09 全量重灌后：gh 223 / ph 857 / hf-paper 1487 / x 29088 / news 1070，+ x gone 1）+ 日增；= 五源 relevant 非 dedup 总量，与各 sitemap 分片逐一对齐。
+- 3.2 万页 × ~40KB ≈ 1.3GB（R2 免费 10GB 内）；sitemap 每片 ≤5 万，年增五源 5-7 万页超单片时自动续分片（`-2 -3…`）。D1 / R2 / worker 请求均零头，永不撞上限。
+- **大 README 截断链在 prod 当前休眠**（非 bug）：gh chosen readme 最大 ~2.9 万字 < 40000 阈值（`GH_README_MAX_CHARS`），over40k=0，「在 GitHub 查看完整 README →」截断路径已单测但无 live 数据触发；未来出现超大 README 自动生效。
 
 ---
 
