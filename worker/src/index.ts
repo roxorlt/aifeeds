@@ -4611,9 +4611,12 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
   if (mode === 'blog-cover-generic-sweep') {
     // Fix 2a:源级通用图剔除(仅 source_type='blog';播客单集共用节目封面是合法常态,
     // 且 og-backfill 只回填 blog,清了没回填方——审查修复 2026-07-06)。同源(feed_key)内
-    // cover_image 命中同一 R2 hash ≥?min(默认 3)→ 判源级通用图(作者头像/站点通栏/二维码横幅),
-    // 整簇清空 cover_image + 清 og 游标 + 记被清 hash(供 og-backfill 判同 hash 回填终止循环)。
-    // ?dry=1 只列簇明细;?limit 默认 50(簇数上限)。
+    // 同一 cover 被 ≥?min(默认 3)篇**不同文章**共用 → 判源级通用图(作者头像/站点通栏/
+    // 二维码横幅/站点 favicon),整簇清空 cover_image + 清 og 游标 + 记被清封面(供 og-backfill
+    // 判同图回填终止循环)。?dry=1 只列簇明细;?limit 默认 50(簇数上限)。
+    // Task A(2026-07-09):判簇覆盖 R2 + 外链两种形态(原只扫 /r/ 形态,漏 techcrunch favicon
+    // ×27/the-verge 头像 ×13 等外链通用封面);计数按文章标识(canonical_url→url→id)去重,
+    // 防同一篇文章多次抓取被误当成源级通用图。清后外链簇自动进 og-backfill 候选拉真 hero。
     const dry = url.searchParams.get('dry') === '1';
     const minCount = Math.min(Math.max(parseInt(url.searchParams.get('min') || '3'), 2), 100);
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 500);

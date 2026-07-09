@@ -70,22 +70,42 @@ function makeEnv(items: FakeItem[]) {
             const allowPodcast = /IN\s*\(\s*'blog'\s*,\s*'podcast'\s*\)/i.test(sql);
             const typeOk = (t: string) =>
               allowPodcast ? ['blog', 'podcast'].includes(t) : t === 'blog';
-            const buckets = new Map<string, { src: string; cover: string; n: number }>();
+            // Task A（2026-07-09）：忠实解析新 SQL 的两处放宽——
+            //   ① 是否仍限定 R2 形态 cover（放宽后无此 LIKE '/r/%' 过滤 → 外链也计入簇）；
+            //   ② 是否 COUNT(DISTINCT ...)（按文章标识 canonical_url→url→id 去重，
+            //      防「同一篇文章多次抓取」误伤，只统计跨不同文章的共用）。
+            const r2Only = /LIKE\s+'\/r\/%'/i.test(sql);
+            const distinctArticle = /COUNT\(DISTINCT/i.test(sql);
+            const artId = (it: FakeItem) =>
+              String(it.extra.canonical_url || it.url || it.id);
+            const buckets = new Map<
+              string,
+              { src: string; cover: string; ids: Set<string>; rows: number }
+            >();
             for (const it of items) {
               if (!typeOk(it.source_type)) continue;
               const cov = coverOf(it);
-              if (!cov || !isR2(cov)) continue;
+              if (!cov) continue;
+              if (r2Only && !isR2(cov)) continue;
               const src = srcOf(it);
               const k = `${src} ${cov}`;
-              const b = buckets.get(k) || { src, cover: cov, n: 0 };
-              b.n++;
-              buckets.set(k, b);
+              let b = buckets.get(k);
+              if (!b) {
+                b = { src, cover: cov, ids: new Set(), rows: 0 };
+                buckets.set(k, b);
+              }
+              b.ids.add(artId(it));
+              b.rows++;
             }
             const rows = [...buckets.values()]
+              .map((b) => ({
+                src: b.src,
+                cover: b.cover,
+                n: distinctArticle ? b.ids.size : b.rows,
+              }))
               .filter((b) => b.n >= minCount)
               .sort((a, b) => b.n - a.n)
-              .slice(0, limit)
-              .map((b) => ({ src: b.src, cover: b.cover, n: b.n }));
+              .slice(0, limit);
             return { results: rows as unknown as T[] };
           }
           return { results: [] as T[] };
@@ -402,15 +422,71 @@ describe('runBlogCoverGenericSweep', () => {
     expect(items[0].extra.cover_image).toBe('/r/blog/8fba.jpg'); // 未清
   });
 
-  test('外链态 cover 不计入簇(只统计 R2 形态)', async () => {
+  // Task A（2026-07-09）：判簇谓词放宽到外链形态一并计入（原只扫 R2 形态）。
+  // 外链通用封面（techcrunch favicon ×27 / the-verge RSS 头像 ×13）此前逃过判簇，现纳入。
+  test('外链态 cover 也计入簇(Task A 放宽：≥3 篇不同文章共用同一外链)', async () => {
     const items: FakeItem[] = [
-      { id: 'blog:e:1', source_type: 'blog', extra: { feed_key: 'x', cover_image: 'https://cdn/a.jpg' } },
-      { id: 'blog:e:2', source_type: 'blog', extra: { feed_key: 'x', cover_image: 'https://cdn/a.jpg' } },
-      { id: 'blog:e:3', source_type: 'blog', extra: { feed_key: 'x', cover_image: 'https://cdn/a.jpg' } },
+      { id: 'blog:tc:1', source_type: 'blog', url: 'https://techcrunch.com/a1', extra: { feed_key: 'techcrunch', canonical_url: 'https://techcrunch.com/a1', cover_image: 'https://techcrunch.com/favicon.ico' } },
+      { id: 'blog:tc:2', source_type: 'blog', url: 'https://techcrunch.com/a2', extra: { feed_key: 'techcrunch', canonical_url: 'https://techcrunch.com/a2', cover_image: 'https://techcrunch.com/favicon.ico' } },
+      { id: 'blog:tc:3', source_type: 'blog', url: 'https://techcrunch.com/a3', extra: { feed_key: 'techcrunch', canonical_url: 'https://techcrunch.com/a3', cover_image: 'https://techcrunch.com/favicon.ico' } },
     ];
     const { env } = makeEnv(items);
     const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: true });
-    expect(res.clusters.length).toBe(0);
+    expect(res.clusters.length).toBe(1);
+    expect(res.clusters[0]).toMatchObject({ src: 'techcrunch', cover: 'https://techcrunch.com/favicon.ico', count: 3 });
+  });
+
+  test('外链通用封面簇 → 判簇清空 + 记被清 URL(外链无 R2 key,cleared_hash=原 URL) + 清 og 游标', async () => {
+    const items: FakeItem[] = [
+      { id: 'blog:v:1', source_type: 'blog', url: 'https://theverge.com/a', extra: { feed_key: 'the-verge', canonical_url: 'https://theverge.com/a', cover_image: 'https://cdn.vox-cdn.com/verge-avatar.png', cover_og_backfilled_at: 'old' } },
+      { id: 'blog:v:2', source_type: 'blog', url: 'https://theverge.com/b', extra: { feed_key: 'the-verge', canonical_url: 'https://theverge.com/b', cover_image: 'https://cdn.vox-cdn.com/verge-avatar.png' } },
+      { id: 'blog:v:3', source_type: 'blog', url: 'https://theverge.com/c', extra: { feed_key: 'the-verge', canonical_url: 'https://theverge.com/c', cover_image: 'https://cdn.vox-cdn.com/verge-avatar.png' } },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: false });
+    expect(res.clustersCleared).toBe(1);
+    expect(res.itemsCleared).toBe(3);
+    for (const it of items) {
+      expect(it.extra.cover_image).toBeUndefined();                                 // 整簇清空 → 进 og-backfill 候选
+      expect(it.extra.cover_generic_cleared_hash).toBe('https://cdn.vox-cdn.com/verge-avatar.png'); // 外链无 /r/ → 记原 URL
+      expect(it.extra.cover_generic_cleared_at).toBeTruthy();
+    }
+    expect(items[0].extra.cover_og_backfilled_at).toBeUndefined();                   // og 游标清除,允许重填
+  });
+
+  // ⚠️ 关键防误伤：同一篇文章被多次抓取（同 canonical_url/url，不同 item id）导致外链 cover 重复，
+  //    ≠「一个站所有文章共用一张 favicon」。COUNT(DISTINCT 文章标识) 使其只计 1，不判簇。
+  test('防误伤：同一篇文章多次抓取(同 url,3 个 item)→ 不判簇(distinct 文章=1)', async () => {
+    const items: FakeItem[] = [
+      // 同一篇文章的 3 个 item（不同 id，同 canonical_url + 同真实封面）——重复抓取残留
+      { id: 'blog:dup:1', source_type: 'blog', url: 'https://blog.x/post-hero', extra: { feed_key: 'smallblog', canonical_url: 'https://blog.x/post-hero', cover_image: 'https://cdn.x/real-hero.jpg' } },
+      { id: 'blog:dup:2', source_type: 'blog', url: 'https://blog.x/post-hero', extra: { feed_key: 'smallblog', canonical_url: 'https://blog.x/post-hero', cover_image: 'https://cdn.x/real-hero.jpg' } },
+      { id: 'blog:dup:3', source_type: 'blog', url: 'https://blog.x/post-hero', extra: { feed_key: 'smallblog', canonical_url: 'https://blog.x/post-hero', cover_image: 'https://cdn.x/real-hero.jpg' } },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: false });
+    expect(res.clusters.length).toBe(0);                              // distinct 文章标识 = 1 < 3 → 不判
+    expect(res.clustersCleared).toBe(0);
+    for (const it of items) expect(it.extra.cover_image).toBe('https://cdn.x/real-hero.jpg'); // 真封面保留
+  });
+
+  // 反例对照：3 篇不同文章共用同一外链（真通用图）与「同文章重复」同放一批 → 只清前者。
+  test('混合：不同文章共用外链(判簇清) vs 同文章重复(保留) 同批区分', async () => {
+    const items: FakeItem[] = [
+      // 通用图簇：3 篇不同文章
+      { id: 'blog:g:1', source_type: 'blog', url: 'https://site.a/p1', extra: { feed_key: 'sitea', canonical_url: 'https://site.a/p1', cover_image: 'https://site.a/logo.png' } },
+      { id: 'blog:g:2', source_type: 'blog', url: 'https://site.a/p2', extra: { feed_key: 'sitea', canonical_url: 'https://site.a/p2', cover_image: 'https://site.a/logo.png' } },
+      { id: 'blog:g:3', source_type: 'blog', url: 'https://site.a/p3', extra: { feed_key: 'sitea', canonical_url: 'https://site.a/p3', cover_image: 'https://site.a/logo.png' } },
+      // 同文章重复：同 canonical_url ×3
+      { id: 'blog:d:1', source_type: 'blog', url: 'https://site.b/only', extra: { feed_key: 'siteb', canonical_url: 'https://site.b/only', cover_image: 'https://site.b/hero.jpg' } },
+      { id: 'blog:d:2', source_type: 'blog', url: 'https://site.b/only', extra: { feed_key: 'siteb', canonical_url: 'https://site.b/only', cover_image: 'https://site.b/hero.jpg' } },
+      { id: 'blog:d:3', source_type: 'blog', url: 'https://site.b/only', extra: { feed_key: 'siteb', canonical_url: 'https://site.b/only', cover_image: 'https://site.b/hero.jpg' } },
+    ];
+    const { env } = makeEnv(items);
+    const res = await runBlogCoverGenericSweep(env, { minCount: 3, limit: 50, dry: false });
+    expect(res.clustersCleared).toBe(1);                              // 只清 sitea 通用图簇
+    expect(items[0].extra.cover_image).toBeUndefined();               // sitea 清空
+    expect(items[3].extra.cover_image).toBe('https://site.b/hero.jpg'); // siteb 同文章重复,保留
   });
 
   // Fix A（审查修复）：只扫 blog；播客单集共用节目封面是合法常态,不判簇清空。
