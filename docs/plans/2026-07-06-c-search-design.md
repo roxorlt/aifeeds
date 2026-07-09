@@ -1,6 +1,6 @@
 # C 端站内搜索 — 设计文档
 
-> 状态：**已实施**（2026-07-06，staging 验收通过，待用户验收 → prod）。方向性决策已获用户批准，本文档为实施依据；与最终实现的差异见文末「§14 实施偏差记录」。
+> 状态：**代码已全部合入 main**（PR #164 主体 + #168 CI 修复 + #169 polish 三项）；**prod migration 026 已跑、`/api/search` 200**，索引 backfill 追平中。方向性决策已获用户批准，本文档为实施依据；与最终实现的差异见文末「§14 实施偏差记录」。上线进度与待办见 [交接文档](2026-07-08-search-prod-launch-handoff.md)。
 > 配套实施计划：`docs/plans/2026-07-06-c-search-plan.md`
 > 分支：`feat/c-search`（与「SEO 每日静态页」计划并行开发，协调事项见 §12）
 
@@ -148,7 +148,7 @@ ORDER BY score LIMIT 200;
 | 中性 | podcast、hf_paper、huodongxing、youtube、arxiv | 30 天 |
 | 长效 | github、product_hunt、clawhub | 180 天 |
 
-- **分组模式**：召回集按 source_type 分组，组内按 final 降序取 top 3；组序按 feed 固定列序渲染（前端 `SearchGroups` 依 `sources.ts` 的 `SOURCE_FEED_ORDER` 稳定排序，与 App.tsx `SOURCE_COLUMNS` 一致），后端组间顺序仅作组内相关性 tiebreaker；每组 total = 该源在召回集中的命中数（上限展示为「200+」当召回触顶）。
+- **分组模式**：召回集按 source_type 分组，组内按 final 降序取 top 3；组序按 feed 固定列序渲染（前端 `SearchGroups` 依 `sources.ts` 的 `SOURCE_FEED_ORDER` 稳定排序，与 App.tsx `SOURCE_COLUMNS` 一致），后端组间顺序仅作组内相关性 tiebreaker；每组 total = 该源在召回集中的命中数（上限展示为「200+」当召回触顶）。**⚠️ 分组模式不分页、无 cursor / has_more**——它是"概览/路由"层，每源固定露 top 3，响应仅 `{ mode:"grouped", groups, query_time_ms }`。要看某源全部走「更多 →」进入下方单源 list 模式（cursor 分页只存在于 list 模式）。这是有意设计,非遗漏。
 - **单源 list 模式**：MATCH + `source_type = ?` 过滤，final 排序，cursor 分页，每页 20。**cursor 按实现最终定为「召回集内 offset」**（base64 编码的偏移量，非设计初稿的 `final|rowid`）：单 query 单源在 `RECALL_LIMIT`=200 条召回集内翻页，offset 到顶即 `has_more=false`。简化理由与召回集封顶一致——超 200 条命中的长尾单源极罕见，offset 分页实现更简、无 tiebreaker 抖动。
 - 权重与半衰期写成 `worker/src/search/ranking.ts` 顶部常量表，上线后按监控调参。
 
