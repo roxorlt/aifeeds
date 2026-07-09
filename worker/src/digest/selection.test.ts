@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyNewsEditorialReviewDecisions,
+  buildNewsSelectionAudit,
   foldNewsEventsForDigest,
   scoreNewsCandidatesForDigest,
   suppressCrossDayRepeatedNewsEvents,
@@ -80,6 +82,101 @@ test('scoreNewsCandidatesForDigest boosts events reported by multiple independen
   assert.equal(chip.eventSourceCount, 3);
   assert.deepEqual(chip.relatedSourceCompanies.sort(), ['OpenAI', 'TechCrunch', 'The Verge'].sort());
   assert.ok(chip.adjustedScore > (scored.find((item) => item.id === 'blog:openai:gpt5-immunology')?.adjustedScore || 0));
+});
+
+test('scoreNewsCandidatesForDigest recognizes Tencent Hunyuan Hy3 as one multi-source model event', () => {
+  const scored = scoreNewsCandidatesForDigest([
+    row({
+      id: 'blog:jiqizhixin:hy3',
+      title: '腾讯混元Hy3发布：Agent能力和产品体验跃升',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-06T07:37:43.000Z',
+      aiSummaryZh: '腾讯7月6日发布混元Hy3模型，总参数295B、激活参数21B，支持256K上下文。',
+    }),
+    row({
+      id: 'blog:tencent:hy3',
+      title: 'Tencent Hunyuan Hy3 is now available with stronger agent capabilities',
+      sourceCompany: 'Tencent',
+      sourceKey: 'tencent-hunyuan',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-06T08:00:00.000Z',
+      selectable: false,
+      aiSummaryZh: '',
+    }),
+  ], Date.parse('2026-07-07T00:00:00.000Z'));
+
+  const hy3 = scored.find((item) => item.id === 'blog:jiqizhixin:hy3');
+  assert.ok(hy3);
+  assert.equal(hy3.eventSourceCount, 2);
+  assert.deepEqual(hy3.relatedSourceCompanies.sort(), ['Tencent', '机器之心'].sort());
+  assert.ok(hy3.adjustedScore > hy3.baseScore);
+});
+
+test('buildNewsSelectionAudit records score details and selected flag for top candidates', () => {
+  const scored = scoreNewsCandidatesForDigest([
+    row({
+      id: 'blog:jiqizhixin:hy3',
+      title: '腾讯混元Hy3发布：Agent能力和产品体验跃升',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-06T07:37:43.000Z',
+      aiSummaryZh: '腾讯发布混元Hy3模型，总参数295B、激活参数21B，支持256K上下文。',
+    }),
+  ], Date.parse('2026-07-07T00:00:00.000Z'));
+
+  const audit = buildNewsSelectionAudit(scored, ['blog:jiqizhixin:hy3']);
+
+  assert.equal(audit.candidates[0].id, 'blog:jiqizhixin:hy3');
+  assert.equal(audit.candidates[0].selected, true);
+  assert.equal(typeof audit.candidates[0].base_score, 'number');
+  assert.equal(typeof audit.candidates[0].adjusted_score, 'number');
+  assert.equal(audit.candidates[0].source_company, '机器之心');
+  assert.deepEqual(audit.selected_ids, ['blog:jiqizhixin:hy3']);
+});
+
+test('applyNewsEditorialReviewDecisions only applies bounded score adjustments with reasons', () => {
+  const [hy3] = scoreNewsCandidatesForDigest([
+    row({
+      id: 'blog:jiqizhixin:hy3',
+      title: '腾讯混元Hy3发布：Agent能力和产品体验跃升',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-06T07:37:43.000Z',
+      aiSummaryZh: '腾讯发布混元Hy3模型，总参数295B、激活参数21B，支持256K上下文。',
+    }),
+  ], Date.parse('2026-07-07T00:00:00.000Z'));
+
+  const reviewed = applyNewsEditorialReviewDecisions([hy3], [
+    { id: 'blog:jiqizhixin:hy3', adjustment: 99, reason: '国产大厂模型正式发布且开放权重。' },
+  ]);
+
+  assert.equal(reviewed[0].editorialAdjustment, 6);
+  assert.equal(reviewed[0].editorialReason, '国产大厂模型正式发布且开放权重。');
+  assert.equal(reviewed[0].adjustedScore, hy3.adjustedScore + 6);
+});
+
+test('scoreNewsCandidatesForDigest gives major domestic model launches a modest editorial priority over routine product news', () => {
+  const scored = scoreNewsCandidatesForDigest([
+    row({
+      id: 'blog:jiqizhixin:hy3',
+      title: '腾讯混元Hy3发布：Agent能力和产品体验跃升',
+      sourceCompany: '机器之心',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-06T07:37:43.000Z',
+      aiSummaryZh: '腾讯发布混元Hy3模型，总参数295B、激活参数21B，支持256K上下文，并开放权重。',
+    }),
+    row({
+      id: 'blog:databricks:routine-agents',
+      title: 'Databricks 用 17 个专业 Agent 自动分诊低严重性安全告警',
+      sourceCompany: 'Databricks',
+      aiCategory: 'product',
+      publishedAt: '2026-07-06T23:30:00.000Z',
+      aiSummaryZh: 'Databricks 发布面向企业安全告警分诊的 Agent 工作流。',
+    }),
+  ], Date.parse('2026-07-07T00:00:00.000Z'));
+
+  assert.equal(scored[0].id, 'blog:jiqizhixin:hy3');
 });
 
 test('scoreNewsCandidatesForDigest follows feed ranking freshness and industry-person signals', () => {

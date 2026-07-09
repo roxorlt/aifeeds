@@ -111,8 +111,10 @@ function freshnessScore(publishedAt: string, sourceKey: string, nowMs: number): 
 
 function sourceAuthorityScore(company: string, sourceKey: string): number {
   if (sourceKey === 'weibo-hot-tech') return 8;
-  if (['OpenAI', 'Anthropic', 'Google', 'Microsoft Research', 'NVIDIA', 'DeepMind', 'Hugging Face'].includes(company)) return 10;
-  if (['TechCrunch', 'The Verge', 'MIT Technology Review', '量子位', '新智元', '机器之心'].includes(company)) return 9;
+  const companyNorm = normalizeAuthorityName(company);
+  const sourceKeyNorm = normalizeAuthorityName(sourceKey);
+  if (firstPartyModelSourceNames.has(companyNorm) || firstPartyModelSourceNames.has(sourceKeyNorm)) return 10;
+  if (techMediaSourceNames.has(companyNorm) || techMediaSourceNames.has(sourceKeyNorm)) return 9;
   return 7;
 }
 
@@ -122,7 +124,7 @@ function impactScore(title: string, category: string): number {
   if (category === 'model-release') score += 6;
   if (/发布|推出|release|launch|unveil|开源|open source/.test(text)) score += 5;
   if (/融资|收购|acquire|funding|ipo|估值/.test(text)) score += 3;
-  if (/芯片|算力|gpu|robot|机器人|agent|模型|model|deepseek|openai|anthropic|google|nvidia|豆包|qwen|通义/.test(text)) score += 4;
+  if (/芯片|算力|gpu|robot|机器人|agent|模型|model|deepseek|openai|anthropic|google|nvidia|豆包|qwen|通义|千问|腾讯|tencent|混元|hunyuan|hy3|百度|baidu|文心|ernie|智谱|zhipu|glm|kimi|moonshot|minimax|美团|longcat|百川|baichuan|阶跃|stepfun|商汤|sense|讯飞|spark|星火|天工|tiangong|书生|internlm/.test(text)) score += 4;
   return Math.min(10, score);
 }
 
@@ -144,6 +146,42 @@ function normalizeTitle(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 }
+
+function normalizeAuthorityName(value: string): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+const firstPartyModelSourceNames = new Set([
+  'openai', 'anthropic', 'google', 'googleresearch', 'microsoftresearch', 'microsoft',
+  'nvidia', 'deepmind', 'googledeepmind', 'huggingface', 'meta', 'mistral', 'cohere',
+  'perplexity', 'xai', 'ai21', 'cerebras', 'groq',
+  // 国内模型厂商 / 一手模型源。这里故意覆盖厂商名、模型家族名、常见 feed_key。
+  'deepseek',
+  'tencent', '腾讯', 'tencenthunyuan', 'hunyuan', '混元',
+  'alibaba', '阿里', '阿里巴巴', 'qwen', '通义', '通义千问',
+  'baidu', '百度', 'ernie', '文心',
+  'bytedance', '字节', '字节跳动', 'volcengine', '火山引擎', 'doubao', '豆包',
+  'zhipu', '智谱', 'zhipuai', 'glm',
+  'moonshot', '月之暗面', 'kimi',
+  'minimax',
+  'meituan', '美团', 'longcat',
+  'baichuan', '百川',
+  'stepfun', '阶跃星辰', '阶跃',
+  '01ai', '零一万物', '零一',
+  'sense', 'sensetime', '商汤', '日日新',
+  'iflytek', '科大讯飞', '讯飞', 'spark', '星火',
+  'kunlun', 'kunlunwanwei', '昆仑万维', 'tiangong', '天工',
+  'modelbest', '面壁', 'internlm', '书生', '上海人工智能实验室',
+]);
+
+const techMediaSourceNames = new Set([
+  'techcrunch', 'theverge', 'mittechnologyreview',
+  '量子位', '新智元', '机器之心',
+]);
 
 function escapeSqlLike(value: string): string {
   return value.replace(/'/g, "''").replace(/[%_]/g, (m) => `\\${m}`);

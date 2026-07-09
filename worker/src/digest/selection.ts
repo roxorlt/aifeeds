@@ -13,6 +13,7 @@
 import type { Env } from '../index';
 import { scoreFeedNewsItemForOrdering } from '../feeds/ranking';
 import type { DigestSource } from './config';
+import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
 
 // config 源 key → items.source_type(注意 X 历史命名为 x_list)
 export const SOURCE_TYPE: Record<DigestSource, string> = {
@@ -47,6 +48,9 @@ export interface SelectTopOptions {
   // D 日 00:00 UTC 自然跑窗口 —— 上界绝不用 '+1 day',否则窗口整体后移一天,前日补链/backfill
   // 历史页会错位选成次日内容。仅日报静态页回填(daily-page-run)使用。
   asOfDate?: string;
+  // 仅 node-run 快照选品使用:规则 top30 后交给 DeepSeek v4 Pro 做小幅编辑校准。
+  // daily-api 实时路径不要开启,避免每次 API 请求都烧 Pro。
+  editorialReview?: boolean;
 }
 
 export async function excludeAlreadyPushed(
@@ -214,6 +218,14 @@ async function selectClawhubByDelta(env: Env, limit: number): Promise<string[]> 
 // 在同源分散排序里被埋掉。支持行允许 ai_summary_zh 为空(如第三方媒体刚入库未摘要),但最终可选主 item
 // 仍必须有 ai_summary_zh,保证 digest 可渲染。
 async function selectNewsByScore(env: Env, limit: number, options: SelectTopOptions = {}): Promise<string[]> {
+  return (await selectNewsByScoreWithAudit(env, limit, options)).ids;
+}
+
+export async function selectNewsByScoreWithAudit(
+  env: Env,
+  limit: number,
+  options: SelectTopOptions = {},
+): Promise<{ ids: string[]; audit: NewsSelectionAudit }> {
   const cat = `json_extract(extra,'$.ai_category')`;
   const co = `json_extract(extra,'$.source_company')`;
   const tzh = `json_extract(extra,'$.title_zh')`;
@@ -259,7 +271,14 @@ async function selectNewsByScore(env: Env, limit: number, options: SelectTopOpti
   const eventDeduped = options.strictCrossDayEventDedup
     ? suppressCrossDayRepeatedNewsEvents(scored, await fetchPreviousPushedNewsCandidates(env))
     : scored;
-  return foldNewsEventsForDigest(eventDeduped).slice(0, limit).map((r) => r.id);
+  const reviewed = options.editorialReview
+    ? await applyNewsEditorialReviewIfEnabled(env, eventDeduped)
+    : eventDeduped;
+  const ids = foldNewsEventsForDigest(reviewed).slice(0, limit).map((r) => r.id);
+  return {
+    ids,
+    audit: buildNewsSelectionAudit(reviewed.slice(0, Math.max(limit, 30)), ids),
+  };
 }
 
 interface NewsCandidateDbRow {
@@ -295,6 +314,34 @@ export interface ScoredNewsCandidate extends NewsCandidateForScoring {
   sourceRank: number;
   eventSourceCount: number;
   relatedSourceCompanies: string[];
+  editorialAdjustment?: number;
+  editorialReason?: string;
+}
+
+export interface NewsSelectionAudit {
+  selected_ids: string[];
+  candidates: NewsSelectionAuditEntry[];
+}
+
+export interface NewsSelectionAuditEntry {
+  rank: number;
+  id: string;
+  title: string;
+  title_zh: string;
+  source_company: string;
+  source_key: string;
+  ai_category: string;
+  published_at: string;
+  selectable: boolean;
+  selected: boolean;
+  base_score: number;
+  adjusted_score: number;
+  source_rank: number;
+  event_source_count: number;
+  related_source_companies: string[];
+  editorial_adjustment?: number;
+  editorial_reason?: string;
+  event_fingerprint?: NewsEventFingerprint;
 }
 
 export interface NewsEventFingerprint {
@@ -307,6 +354,12 @@ export interface NewsEventFingerprint {
   action?: string;
   canonicalEvent?: string;
   confidence?: number;
+}
+
+export interface NewsEditorialReviewDecision {
+  id: string;
+  adjustment: number;
+  reason: string;
 }
 
 function newsCandidateFromDbRow(row: NewsCandidateDbRow): NewsCandidateForScoring {
@@ -453,6 +506,117 @@ export function scoreNewsCandidatesForDigest(
   );
 }
 
+export function buildNewsSelectionAudit(scored: ScoredNewsCandidate[], selectedIds: string[]): NewsSelectionAudit {
+  const selected = new Set(selectedIds);
+  return {
+    selected_ids: selectedIds,
+    candidates: scored.map((item, index) => ({
+      rank: index + 1,
+      id: item.id,
+      title: item.title,
+      title_zh: item.titleZh || '',
+      source_company: item.sourceCompany,
+      source_key: item.sourceKey,
+      ai_category: item.aiCategory,
+      published_at: item.publishedAt,
+      selectable: item.selectable,
+      selected: selected.has(item.id),
+      base_score: Number(item.baseScore.toFixed(3)),
+      adjusted_score: Number(item.adjustedScore.toFixed(3)),
+      source_rank: item.sourceRank,
+      event_source_count: item.eventSourceCount,
+      related_source_companies: item.relatedSourceCompanies,
+      ...(typeof item.editorialAdjustment === 'number' ? { editorial_adjustment: item.editorialAdjustment } : {}),
+      ...(item.editorialReason ? { editorial_reason: item.editorialReason } : {}),
+      ...(item.eventFingerprint ? { event_fingerprint: item.eventFingerprint } : {}),
+    })),
+  };
+}
+
+export function applyNewsEditorialReviewDecisions(
+  scored: ScoredNewsCandidate[],
+  decisions: NewsEditorialReviewDecision[],
+): ScoredNewsCandidate[] {
+  if (!decisions.length) return scored;
+  const byId = new Map(decisions.map((d) => [d.id, d]));
+  return scored.map((item) => {
+    const decision = byId.get(item.id);
+    if (!decision) return item;
+    const adjustment = clampEditorialAdjustment(decision.adjustment);
+    const reason = String(decision.reason || '').trim().slice(0, 160);
+    return {
+      ...item,
+      adjustedScore: item.adjustedScore + adjustment,
+      editorialAdjustment: adjustment,
+      ...(reason ? { editorialReason: reason } : {}),
+    };
+  }).sort(compareScoredNewsCandidate);
+}
+
+async function applyNewsEditorialReviewIfEnabled(env: Env, scored: ScoredNewsCandidate[]): Promise<ScoredNewsCandidate[]> {
+  const apiKey = (env as { DEEPSEEK_API_KEY?: string }).DEEPSEEK_API_KEY;
+  if (!apiKey || scored.length < 2) return scored;
+  const prompt = buildNewsEditorialReviewPrompt(scored.slice(0, 30));
+  const result = await callDeepSeekJson<{ decisions?: NewsEditorialReviewDecision[] }>(
+    apiKey,
+    DEEPSEEK_PRO,
+    prompt,
+    { maxTokens: 2400, timeoutMs: 120_000, retries: 0 },
+  );
+  const decisions = Array.isArray(result.data?.decisions) ? result.data.decisions : [];
+  if (!decisions.length) return scored;
+  return applyNewsEditorialReviewDecisions(scored, decisions);
+}
+
+function clampEditorialAdjustment(value: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(-4, Math.min(6, Math.round(n)));
+}
+
+function buildNewsEditorialReviewPrompt(scored: ScoredNewsCandidate[]): string {
+  const candidates = scored.map((item, index) => ({
+    rank: index + 1,
+    id: item.id,
+    title: item.titleZh || item.title,
+    source_company: item.sourceCompany,
+    category: item.aiCategory,
+    published_at: item.publishedAt,
+    summary: item.aiSummaryZh,
+    base_score: Number(item.baseScore.toFixed(2)),
+    adjusted_score: Number(item.adjustedScore.toFixed(2)),
+    event_source_count: item.eventSourceCount,
+    related_sources: item.relatedSourceCompanies,
+    event_fingerprint: item.eventFingerprint || null,
+  }));
+  return `你是 AI Feeds 的行业要闻编辑校准器。你只做“轻量校准”,不要重写标题,不要总结新闻,不要输出口播稿。
+
+目标: 在规则分 top30 候选里,识别“今天真正应该进入行业要闻 top5 的重大事件”,给少量候选一个微调分。规则分仍是主导,你只能小幅修正明显的编辑重要性偏差。
+
+优先级判断:
+1. 一线模型厂商/大厂正式发布新模型、开源权重、重要 API/产品上线,通常高于普通产品博客、泛泛方法论文章。
+2. 多家独立信源报道同一事件应更重要。
+3. 官方来源优先于媒体转述;但媒体报道能补充热度。
+4. 新鲜度重要,但不能让普通 routine 更新压过重大模型发布。
+5. 不要偏爱标题党;只看事实含量和行业影响。
+
+调整范围:
+- adjustment 必须是整数,范围 -4 到 +6。
+- 只给确实需要校准的候选输出 decision;大多数候选不输出。
+- +5/+6 只用于重大模型发布、开源权重、芯片/算力/平台级事件等。
+- -3/-4 用于标题党、事实含量弱、普通营销/方法论内容。
+
+必须返回 JSON:
+{
+  "decisions": [
+    { "id": "候选 id", "adjustment": 0, "reason": "20字以内中文理由" }
+  ]
+}
+
+候选:
+${JSON.stringify(candidates, null, 2)}`;
+}
+
 export function foldNewsEventsForDigest(scored: ScoredNewsCandidate[]): ScoredNewsCandidate[] {
   const groups: Array<{ representative: ScoredNewsCandidate; profiles: TokenProfile[] }> = [];
   for (const item of scored) {
@@ -531,7 +695,41 @@ function newsBaseScore(item: NewsCandidateForScoring, nowMs: number): number {
     hasSummary: Boolean(item.aiSummaryZh.trim()),
     hasBody: Boolean(item.content.trim() || item.contentTranslated.trim() || item.transcriptTier),
   }, nowMs);
-  return ranked.total + digestPolicyAccessBonus(item) - titlebaitPenalty(item.title);
+  return ranked.total + digestPolicyAccessBonus(item) + majorModelReleaseBonus(item) - titlebaitPenalty(item.title);
+}
+
+function majorModelReleaseBonus(item: NewsCandidateForScoring): number {
+  const fp = item.eventFingerprint;
+  const eventType = normalizeEventType(fp?.eventType || '');
+  const text = normalizeEventText([
+    item.title,
+    item.titleZh || '',
+    item.aiSummaryZh,
+    item.aiCategory,
+    fp?.eventType || '',
+    fp?.primaryActor || '',
+    fp?.primaryObject || '',
+    fp?.objectFamily || '',
+    fp?.objectVariant || '',
+    fp?.objectVersion || '',
+    fp?.action || '',
+    fp?.canonicalEvent || '',
+  ].join(' '));
+
+  const isModelRelease = item.aiCategory === 'model-release' || eventType === 'model-release';
+  if (!isModelRelease) return 0;
+
+  const hasReleaseSignal =
+    /\blaunch(?:es|ed)?\b|\brelease(?:s|d)?\b|\bintroduc(?:e|es|ing|ed)\b|\bavailable\b|\bopen[-\s]?source\b|发布|推出|上线|开源|开放权重|正式/.test(text);
+  const hasMajorModelActorOrName =
+    /\b(openai|anthropic|google|deepmind|nvidia|meta|mistral|xai|qwen|deepseek|doubao|hunyuan|hy3|tencent|baidu|ernie|glm|zhipu|kimi|moonshot|minimax|longcat|baichuan|stepfun|spark|tiangong|internlm)\b|腾讯|混元|阿里|通义|千问|百度|文心|字节|豆包|智谱|月之暗面|美团|百川|阶跃|商汤|讯飞|星火|昆仑万维|天工|书生|面壁/.test(text);
+  if (!hasReleaseSignal || !hasMajorModelActorOrName) return 0;
+
+  let bonus = 6;
+  if (/\b\d+(?:\.\d+)?\s?b\b|\bmoe\b|\bagent\b|\breasoning\b|\bcontext\b|万亿|千亿|参数|上下文|智能体|推理|权重|开源|256k|100万/.test(text)) {
+    bonus += 2;
+  }
+  return Math.min(8, bonus);
 }
 
 function digestPolicyAccessBonus(item: NewsCandidateForScoring): number {
@@ -682,6 +880,17 @@ function deriveEventFingerprint(
   addIf(/\bqwen\b|通义|千问/, 'qwen', modelFamilies);
   addIf(/\bdeepseek\b/, 'deepseek', modelFamilies);
   addIf(/\bdoubao\b|豆包/, 'doubao', modelFamilies);
+  addIf(/\bhunyuan\b|\bhy[-\s]?\d\b|混元/, 'hunyuan', modelFamilies);
+  addIf(/\bernie\b|文心/, 'ernie', modelFamilies);
+  addIf(/\bglm\b|智谱/, 'glm', modelFamilies);
+  addIf(/\bkimi\b|moonshot|月之暗面/, 'kimi', modelFamilies);
+  addIf(/\bminimax\b/, 'minimax', modelFamilies);
+  addIf(/\blongcat\b|美团/, 'longcat', modelFamilies);
+  addIf(/\bbaichuan\b|百川/, 'baichuan', modelFamilies);
+  addIf(/\bstepfun\b|阶跃/, 'stepfun', modelFamilies);
+  addIf(/\bspark\b|星火|讯飞/, 'spark', modelFamilies);
+  addIf(/\btiangong\b|天工|昆仑万维/, 'tiangong', modelFamilies);
+  addIf(/\binternlm\b|书生/, 'internlm', modelFamilies);
 
   addIf(/\bsonnet\b/, 'sonnet');
   addIf(/\bfable\b/, 'fable');
@@ -696,6 +905,9 @@ function deriveEventFingerprint(
   addIf(/\bsol\b/, 'sol');
   addIf(/\bterra\b/, 'terra');
   addIf(/\bluna\b/, 'luna');
+  addIf(/\bhy[-\s]?3\b|\bhy3\b/, 'hy3');
+  addIf(/\bhunyuan\b|混元/, 'hunyuan');
+  addIf(/\blongcat[-\s]?2(?:\.0)?\b|longcat|美团/, 'longcat');
 
   addIf(/\blaunch(?:es|ed)?\b|\brelease(?:s|d)?\b|\bintroduc(?:e|es|ing|ed)\b|发布|推出|上线/, 'launch', actionTokens);
   addIf(/\bintegrat(?:e|es|ed|ion)\b|\brun(?:s|ning)? on\b|\bbrings\b|接入|集成|运行|可用/, 'integration', actionTokens);
@@ -892,6 +1104,10 @@ const orgEventTokens = new Set([
   'openai', 'anthropic', 'google', 'microsoft', 'nvidia', 'huggingface', 'mistral',
   'qwen', 'meta', 'amazon', 'aws', 'broadcom', 'amd', 'intel', 'cerebras', 'groq',
   'ai21', 'minimax', 'deepseek', 'claude', 'gemini',
+  'tencent', 'hunyuan', 'baidu', 'ernie', 'bytedance', 'doubao', 'alibaba',
+  'zhipu', 'glm', 'moonshot', 'kimi', 'meituan', 'longcat', 'baichuan',
+  'stepfun', '01ai', 'sensetime', 'iflytek', 'spark', 'kunlun', 'tiangong',
+  'modelbest', 'internlm',
 ]);
 
 const officialSourceNames = new Set([
@@ -912,12 +1128,16 @@ const modelNameEventTokens = new Set([
   'gpt4', 'gpt5', 'gpt56', 'claude', 'opus', 'sonnet', 'haiku', 'mythos',
   'fable', 'gemini', 'qwen', 'glm', 'ernie',
   'doubao', 'kling', 'sora', 'veo', 'imagen', 'sol', 'terra', 'luna',
+  'hunyuan', 'hy3', 'hy2', 'kimi', 'minimax', 'longcat', 'baichuan',
+  'stepfun', 'spark', 'tiangong', 'internlm',
 ]);
 
 const strongObjectTokens = new Set([
   'sonnet', 'fable', 'mythos', 'opus', 'haiku',
   'claude-science', 'bionemo', 'gb300', 'blackwell', 'azure',
   'gpt56', 'sol', 'terra', 'luna',
+  'hy3', 'hunyuan', 'longcat', 'kimi', 'glm', 'ernie', 'doubao', 'qwen',
+  'baichuan', 'stepfun', 'spark', 'tiangong', 'internlm',
 ]);
 
 const genericObjectTokens = new Set([
@@ -940,6 +1160,25 @@ const eventStopWords = new Set([
 ]);
 
 const cjkEventTerms: Array<[RegExp, string]> = [
+  [/腾讯/g, 'tencent'],
+  [/混元/g, 'hunyuan'],
+  [/阿里|通义|千问/g, 'qwen'],
+  [/百度|文心/g, 'ernie'],
+  [/字节|火山引擎/g, 'bytedance'],
+  [/豆包/g, 'doubao'],
+  [/智谱/g, 'zhipu'],
+  [/月之暗面/g, 'moonshot'],
+  [/美团/g, 'meituan'],
+  [/百川/g, 'baichuan'],
+  [/阶跃星辰|阶跃/g, 'stepfun'],
+  [/零一万物/g, '01ai'],
+  [/商汤|日日新/g, 'sensetime'],
+  [/科大讯飞|讯飞/g, 'iflytek'],
+  [/星火/g, 'spark'],
+  [/昆仑万维/g, 'kunlun'],
+  [/天工/g, 'tiangong'],
+  [/面壁/g, 'modelbest'],
+  [/书生/g, 'internlm'],
   [/博通/g, 'broadcom'],
   [/自研|定制/g, 'custom'],
   [/芯片|处理器|半导体/g, 'chip'],

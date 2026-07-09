@@ -22,7 +22,7 @@ import { selectTopForSource, excludeStalePushes } from './selection';
 import { curateSource } from './llm-curate';
 import { fetchCandidates } from './node-run';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
-import { getBases } from './lib';
+import { bjtDateStr, getBases } from './lib';
 import { SOURCE_LABELS } from './templates';
 
 function jsonRes(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
@@ -75,6 +75,24 @@ function toRaw(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+function safeIds(s: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(s || '[]');
+    return Array.isArray(v) ? (v as unknown[]).filter((id): id is string => typeof id === 'string' && id.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchSnapshotIds(env: Env, slotKey: string, source: DigestSource, density: Density): Promise<string[]> {
+  const pool = await env.DB.prepare(
+    `SELECT item_ids FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
+  )
+    .bind(slotKey, source, density)
+    .first<{ item_ids: string | null }>();
+  return safeIds(pool?.item_ids);
+}
+
 function buildSection(
   source: DigestSource,
   ids: string[],
@@ -92,6 +110,25 @@ function buildSection(
   return { source, source_label: SOURCE_LABELS[source] || source, count: items.length, items };
 }
 
+async function buildSnapshotSections(
+  env: Env,
+  sources: DigestSource[],
+  slotKey: string,
+  density: Density,
+  apiBase: string,
+  verbose: boolean,
+): Promise<DailySection[]> {
+  const sections: DailySection[] = [];
+  for (const source of DIGEST_SOURCE_ORDER) {
+    if (!sources.includes(source)) continue;
+    const ids = await fetchSnapshotIds(env, slotKey, source, density);
+    if (!ids.length) continue;
+    const rows = await fetchRows(env, ids);
+    sections.push(buildSection(source, ids, rows, apiBase, verbose));
+  }
+  return sections;
+}
+
 export async function handleDigestDaily(request: Request, env: Env): Promise<Response> {
   // ── 鉴权 ──
   const auth = request.headers.get('Authorization') || '';
@@ -103,6 +140,10 @@ export async function handleDigestDaily(request: Request, env: Env): Promise<Res
 
   // ── 参数 ──
   const url = new URL(request.url);
+  const modeParam = (url.searchParams.get('mode') || 'realtime').toLowerCase();
+  if (!['realtime', 'snapshot'].includes(modeParam)) {
+    return jsonRes({ error: 'invalid_mode', allowed: ['realtime', 'snapshot'] }, 400);
+  }
   const densityParam = (url.searchParams.get('density') || 'both').toLowerCase();
   if (!['normal', 'curated', 'both'].includes(densityParam)) {
     return jsonRes({ error: 'invalid_density', allowed: ['normal', 'curated', 'both'] }, 400);
@@ -117,6 +158,39 @@ export async function handleDigestDaily(request: Request, env: Env): Promise<Res
   const wantNormal = densityParam !== 'curated';
   const wantCurated = densityParam !== 'normal';
   const { apiBase } = getBases(env);
+
+  if (modeParam === 'snapshot') {
+    const date = url.searchParams.get('date') || bjtDateStr();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return jsonRes({ error: 'invalid_date', expected: 'YYYY-MM-DD' }, 400);
+    const slotRaw = url.searchParams.get('slot') || '8';
+    const slotHour = Number(slotRaw);
+    if (!Number.isInteger(slotHour) || slotHour < 0 || slotHour > 23) {
+      return jsonRes({ error: 'invalid_slot', expected: '0-23' }, 400);
+    }
+    const sk = `${date}-${String(slotHour).padStart(2, '0')}`;
+    const normalSecs = wantNormal
+      ? await buildSnapshotSections(env, wantSources, sk, 'normal', apiBase, verbose)
+      : [];
+    const curatedSecs = wantCurated
+      ? await buildSnapshotSections(env, wantSources, sk, 'curated', apiBase, verbose)
+      : [];
+    return jsonRes({
+      meta: {
+        mode: 'snapshot',
+        generated_at: new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' (BJT)',
+        slot_key: sk,
+        density: densityParam,
+        sources_requested: wantSources,
+        source_order: DIGEST_SOURCE_ORDER,
+        source_labels: SOURCE_LABELS,
+        note: '历史快照模式:读取 digest_pool 中指定 date/slot 的榜单,用于复盘 8 点实际推送内容;不会重新实时选品。',
+      },
+      sections: {
+        ...(wantNormal ? { normal: normalSecs } : {}),
+        ...(wantCurated ? { curated: curatedSecs } : {}),
+      },
+    });
+  }
 
   // ── 缓存(防频繁实时 curated 烧 token;verbose 含 raw 不缓存)──
   const win = Math.floor(Date.now() / (15 * 60 * 1000));

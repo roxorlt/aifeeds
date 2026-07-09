@@ -80,3 +80,24 @@ test('scoreFeedNewsItemForOrdering does not let stale high-authority model posts
 
   assert.ok(freshProductNews.total > staleModelRelease.total);
 });
+
+test('scoreFeedNewsItemForOrdering treats major Chinese AI labs as first-party model sources', () => {
+  const tencent = scoreFeedNewsItemForOrdering(item({
+    id: 'tencent-hy3',
+    title: '腾讯发布混元Hy3模型，Agent能力和产品体验跃升',
+    aiCategory: 'model-release',
+    sourceCompany: 'Tencent',
+    sourceKey: 'tencent-hunyuan',
+  }), nowMs);
+  const media = scoreFeedNewsItemForOrdering(item({
+    id: 'media-hy3',
+    title: '腾讯发布混元Hy3模型，Agent能力和产品体验跃升',
+    aiCategory: 'model-release',
+    sourceCompany: '机器之心',
+    sourceKey: 'jiqizhixin',
+  }), nowMs);
+
+  assert.equal(tencent.breakdown.sourceAuthority, 10);
+  assert.equal(media.breakdown.sourceAuthority, 9);
+  assert.ok(tencent.total > media.total);
+});

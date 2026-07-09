@@ -10,7 +10,7 @@ import {
   CURATED_CANDIDATE_POOL,
   type DigestSource,
 } from './config';
-import { selectTopForSource, excludeAlreadyPushed } from './selection';
+import { selectTopForSource, selectNewsByScoreWithAudit, excludeAlreadyPushed, type NewsSelectionAudit } from './selection';
 import { curateSource, type CurateCandidate } from './llm-curate';
 import { slotKey, bjtDateStr } from './lib';
 import { pushDailyToCodex } from './codex-push';
@@ -164,12 +164,22 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
       if (source === 'clawhub') continue;
       const cfg = SOURCE_DIGEST_CONFIG[source as DigestSource];
       await step.do(`pool-${source}`, RETRY, async (): Promise<number> => {
-        const candidateIds0 = await selectTopForSource(
-          this.env,
-          source as DigestSource,
-          CURATED_CANDIDATE_POOL,
-          source === 'news' ? { strictCrossDayEventDedup: true } : {},
-        );
+        let newsAudit: NewsSelectionAudit | null = null;
+        const candidateIds0 = source === 'news'
+          ? await (async () => {
+            const result = await selectNewsByScoreWithAudit(this.env, CURATED_CANDIDATE_POOL, {
+              strictCrossDayEventDedup: true,
+              editorialReview: true,
+            });
+            newsAudit = result.audit;
+            return result.ids;
+          })()
+          : await selectTopForSource(
+            this.env,
+            source as DigestSource,
+            CURATED_CANDIDATE_POOL,
+            {},
+          );
         // 跨天去重:剔除前几天已推过的同一条。若全被剔(极端冷门日,候选全是前几天推过的)
         // → 兜底回退原始榜,宁可重复也不让板块(尤其 news 强制头条)整块空掉。
         let candidateIds = await excludeAlreadyPushed(this.env, candidateIds0, source as DigestSource);
@@ -180,7 +190,13 @@ export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams
           return 0;
         }
         const normalIds = candidateIds.slice(0, cfg.normal);
-        await upsertPool(this.env, sk, source, 'normal', normalIds, null);
+        const normalMeta: Record<string, unknown> | null = newsAudit
+          ? Object.assign({}, newsAudit, {
+            selected_ids: normalIds,
+            candidate_ids_after_exact_dedup: candidateIds,
+          })
+          : null;
+        await upsertPool(this.env, sk, source, 'normal', normalIds, normalMeta);
         // 行业新闻:规则分已在 selectNewsByScore 排好,curated 直接取分数 top M,不走 LLM curate
         let curatedIds: string[];
         if (source === 'news') {
