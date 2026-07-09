@@ -35,6 +35,7 @@ import type {
 import { extractPageMeta, throttledFetchText } from "./extract";
 import {
   COVER_BLACKLIST,
+  isBlacklistedCover,
   passesCoverSizeGate,
   isNoCoverSource,
   noCoverSourcesSqlExclusion,
@@ -298,6 +299,29 @@ export async function migrateFeedCover(
   });
 }
 
+// 采用环节封面尺寸探针（关键词命中后的强信号复核，Fix 2026-07-09）。
+// 只在 og cover 命中 COVER_BLACKLIST 时调用（罕见路径）——拉图读 magic bytes 出真实像素，
+// 供 isBlacklistedCover 判「真头图（大图放行）vs 品牌 logo（小图/测不出维持拒绝）」。
+// 拉不到 / 超大 / 非 png/jpeg/gif（webp/avif/ico probeImageDimensions 读不出）→ undefined（判为测不出）。
+// _env 保留以对齐 migrateCover 的注入 seam 形状（本实现不需要 env）。
+export async function probeRemoteCoverSize(
+  _env: Env,
+  url: string,
+): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": FEED_R2_USER_AGENT, Accept: "*/*" },
+    });
+    if (!r.ok) return undefined;
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > IMG_MAX_BYTES) return undefined; // 兜底防拉超大文件
+    return probeImageDimensions(buf);
+  } catch (e) {
+    console.warn(`[feeds-r2:blog] probeRemoteCoverSize 失败 ${url}:`, e);
+    return undefined;
+  }
+}
+
 // publisher logo / favicon 迁 R2（§9.1 / D9：BE 迁真实 logo）。
 // icon_src_url → icon_r2；幂等（内容寻址 + 已是 /r/ 早退）。返回是否改动。
 async function migratePublisherLogo(
@@ -374,10 +398,16 @@ export async function migrateMediaForBlog(
   deps?: {
     /** 封面迁移 seam（测试注入；默认走 migrateFeedCover）。 */
     migrateCover?: (env: Env, coverUrl: string) => Promise<string | null>;
+    /** 关键词命中后的尺寸探针 seam（测试注入；默认走 probeRemoteCoverSize 拉图读 magic bytes）。 */
+    probeCoverSize?: (
+      env: Env,
+      coverUrl: string,
+    ) => Promise<{ width: number; height: number } | undefined>;
   },
 ): Promise<{ migrated: number; marker: "blog_media_r2_at" }> {
   const marker = "blog_media_r2_at" as const;
   const migrateCover = deps?.migrateCover ?? migrateFeedCover;
+  const probeCoverSize = deps?.probeCoverSize ?? probeRemoteCoverSize;
   if (!env.READMES) {
     console.warn("[feeds-r2:blog] R2 binding READMES 未配置 — 跳过");
     return { migrated: 0, marker };
@@ -418,14 +448,28 @@ export async function migrateMediaForBlog(
   if (noCoverSrc) {
     // Fix B：源级 no-cover，跳过全部封面采用（护栏 / 正文回落一并跳过；落库统一清空）。
   } else if (cover && !isAlreadyMigrated(cover)) {
+    let coverBlocked = false;
     if (COVER_BLACKLIST.test(cover)) {
-      // 层 0 命中：原始 og URL 含 logo/qrcode/avatar/icon… → 不迁 R2（省得白迁一张 logo）、
-      // 不采用，改走正文 hero / monogram（下方 coverKeywordBlocked 分支就地回落）。
-      coverKeywordBlocked = true;
-      console.log(
-        `[feeds-r2:blog] ${itemId}: og cover 关键词黑名单命中，不采用不迁移: ${cover}`,
-      );
-    } else {
+      // 层 0 关键词命中——弱信号（文件名判据无法区分「品牌 logo 本身」与「文件名恰好含 logo/icon
+      //   的真头图」，如 nvidia `...-no-copy-logo.jpg` 2048×1024、techcrunch `...Claude-logo-...`）。
+      //   改为尺寸复核（强信号，Fix 2026-07-09）：真品牌 logo 实测 maxDim ≤ 828（qbitai 300 / mit 32），
+      //   真 og 头图 ≥ 1200（nvidia 2048 / techcrunch press hero 1200）。采用环节 probe 原始 og 像素：
+      //     · 够大 → 判真头图，放行走正常迁移采用（下方 !coverBlocked 分支）；
+      //     · 小图 / 测不出（webp/avif/防盗链失败）→ 维持拒绝，改走正文 hero / monogram。
+      //   放行的大图仍会落到下方 isSourceLevelBrandLogo 统计簇护栏（层 1/2）——真品牌大图靠成簇兜住。
+      const dim = await probeCoverSize(env, cover);
+      if (isBlacklistedCover(cover, dim?.width, dim?.height)) {
+        coverBlocked = true;
+        coverKeywordBlocked = true;
+        console.log(
+          `[feeds-r2:blog] ${itemId}: og cover 关键词黑名单命中（尺寸复核未过 ${
+            dim ? `${dim.width}x${dim.height}` : "unprobeable"
+          }），不采用不迁移: ${cover}`,
+        );
+      }
+      // else：尺寸 override（明显是大图头图）→ 落到下方分支，当作干净 og 正常迁移采用。
+    }
+    if (!coverBlocked) {
       const r2 = await migrateCover(env, cover);
       if (r2) {
         mapping.set(cover, r2);
