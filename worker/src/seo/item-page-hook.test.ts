@@ -71,9 +71,9 @@ describe('syncItemPageOnEnrichDone', () => {
 });
 
 describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 Bing/Yandex 收录）', () => {
-  test('首次 live 新页（created=true）→ ping 一次，urlList = [siteBase + itemPagePath]，绝对 URL', async () => {
+  test('转入 live 新页（becameLive=true）→ ping 一次，urlList = [siteBase + itemPagePath]，绝对 URL', async () => {
     const id = 'github:acme/tool';
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, created: true });
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, becameLive: true });
     await syncItemPageOnEnrichDone(pingEnv, id, true);
 
     const calls = indexNowCalls();
@@ -88,8 +88,8 @@ describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 
     expect(body.key).toBe('inx-test-key');
   });
 
-  test('已存在行再 enrich（created=false，re-enrich / metrics 刷新 / 重译）→ 不 ping', async () => {
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: 'x_list:1', skipped: false, created: false });
+  test('已 live 行再 enrich（becameLive=false，re-enrich / metrics 刷新 / 重译）→ 不 ping', async () => {
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: 'x_list:1', skipped: false, becameLive: false });
     await syncItemPageOnEnrichDone(pingEnv, 'x_list:1', true);
     expect(indexNowCalls()).toHaveLength(0);
   });
@@ -106,7 +106,7 @@ describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 
       itemId: 'x_list:dup',
       skipped: true,
       reason: 'dedup-suppressed',
-      created: false,
+      becameLive: false,
     });
     await syncItemPageOnEnrichDone(pingEnv, 'x_list:dup', true);
     expect(indexNowCalls()).toHaveLength(0);
@@ -115,15 +115,15 @@ describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 
   test('itemPagePath 返回 null（不支持源，防御分支）→ 不 ping、不崩', async () => {
     const id = 'clawhub:x';
     expect(itemPagePath(id)).toBeNull();
-    // 构造一个「!skipped 且 created」但 path 为 null 的反常返回，验证 hook 的 path 空守卫。
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, created: true });
+    // 构造一个「!skipped 且 becameLive」但 path 为 null 的反常返回，验证 hook 的 path 空守卫。
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, becameLive: true });
     await expect(syncItemPageOnEnrichDone(pingEnv, id, true)).resolves.toBeUndefined();
     expect(indexNowCalls()).toHaveLength(0);
   });
 
   test('INDEXNOW_KEY 未配置 → pingIndexNow 静默跳过（零 fetch）、不抛错', async () => {
     const id = 'github:acme/tool';
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, created: true });
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, becameLive: true });
     const noKeyEnv = { SITE_BASE: 'https://ai-feeds.com' } as Env; // 无 INDEXNOW_KEY
     await expect(syncItemPageOnEnrichDone(noKeyEnv, id, true)).resolves.toBeUndefined();
     expect(indexNowCalls()).toHaveLength(0);
@@ -132,7 +132,7 @@ describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 
   test('ping 返回非 2xx（500）→ 收尾函数仍 resolve（不阻塞 enrich）', async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 500 }));
     const id = 'github:acme/tool';
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, created: true });
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, becameLive: true });
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(syncItemPageOnEnrichDone(pingEnv, id, true)).resolves.toBeUndefined();
     expect(indexNowCalls()).toHaveLength(1); // 仍发起了 ping，只是 pingIndexNow 内部吞掉非 2xx
@@ -142,7 +142,7 @@ describe('syncItemPageOnEnrichDone → IndexNow ping（首次 live 新页加速 
   test('ping fetch 抛异常（网络错）→ 收尾函数仍 resolve（不阻塞 enrich）', async () => {
     fetchMock.mockRejectedValueOnce(new Error('IndexNow unreachable'));
     const id = 'github:acme/tool';
-    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, created: true });
+    vi.mocked(generateItemPage).mockResolvedValueOnce({ itemId: id, skipped: false, becameLive: true });
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(syncItemPageOnEnrichDone(pingEnv, id, true)).resolves.toBeUndefined();
     errSpy.mockRestore();

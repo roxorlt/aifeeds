@@ -115,9 +115,16 @@ export async function backfillDailyPages(
 }
 
 // IndexNow 提交(SEO 快速收录)。INDEXNOW_KEY 未配置→静默跳过;网络错/非 2xx 仅 console.error,永不抛错。
-export async function pingIndexNow(env: Env, urls: string[]): Promise<void> {
+// opts.tag:日志来源标签(默认 'daily-page' 保持既有调用行为不变;/i/ 内容页 hook 传 'item-page',
+// 便于 wrangler tail 分辨 ping 是日报页还是内容页发的)。仅影响日志前缀,不改任何提交逻辑。
+export async function pingIndexNow(
+  env: Env,
+  urls: string[],
+  opts: { tag?: string } = {},
+): Promise<void> {
+  const tag = opts.tag ?? 'daily-page';
   if (!env.INDEXNOW_KEY) {
-    console.log('[daily-page] IndexNow 跳过:未配置 INDEXNOW_KEY');
+    console.log(`[${tag}] IndexNow 跳过:未配置 INDEXNOW_KEY`);
     return;
   }
   if (!urls.length) return;
@@ -135,11 +142,11 @@ export async function pingIndexNow(env: Env, urls: string[]): Promise<void> {
       body: JSON.stringify({ host, key: env.INDEXNOW_KEY, urlList: urls }),
     });
     if (!res.ok) {
-      console.error(`[daily-page] IndexNow 非 2xx: ${res.status}`);
+      console.error(`[${tag}] IndexNow 非 2xx: ${res.status}`);
     } else {
-      console.log(`[daily-page] IndexNow 提交 ${urls.length} 个 URL,status=${res.status}`);
+      console.log(`[${tag}] IndexNow 提交 ${urls.length} 个 URL,status=${res.status}`);
     }
   } catch (e) {
-    console.error(`[daily-page] IndexNow 请求异常: ${String(e).slice(0, 200)}`);
+    console.error(`[${tag}] IndexNow 请求异常: ${String(e).slice(0, 200)}`);
   }
 }

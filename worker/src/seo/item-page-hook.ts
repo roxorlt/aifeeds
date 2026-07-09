@@ -27,18 +27,21 @@ export async function syncItemPageOnEnrichDone(
     }
     const res = await generateItemPage(env, id);
 
-    // IndexNow ping：只对「首次 live 的新页」提交，加速 Bing / Yandex 收录。
+    // IndexNow ping：只对「本次转入 live 的页」提交，加速 Bing / Yandex 收录。覆盖两类该通知的
+    // 状态变化：首次收录（item_pages 无该行）、gone→live 复活（此前 410，不 ping 搜索引擎可能永不
+    // 回来抓）。不 ping 的情况：
     // - skipped（被 dedup 门 / is_relevant 门 / 源 gate 拦下）→ 无页可推。
-    // - created=false（re-enrich / metrics 刷新 / 重译覆盖已有行）→ URL 已收录，不重推。
+    // - becameLive=false（页此前已 live，re-enrich / metrics 刷新 / 重译覆盖）→ URL 已收录，不重推。
     // 只挂 hook 层、不挂 generateItemPage 本体，是为了让 backfill / force 全量重灌（3.2 万存量）
     // 绝不触发 ping —— 存量靠 sitemap-index 收录即可。pingIndexNow 本身 fire-and-forget 永不抛错，
     // 外层 try/catch 再兜一层，ping 失败绝不阻断 enrich 主流程。
-    if (res.skipped || !res.created) return;
+    if (res.skipped || !res.becameLive) return;
     const path = itemPagePath(id);
     if (!path) return; // 不支持源的防御（正常 !skipped 已保证 path 非空，双保险防崩）
     // 绝对 URL 必须走 env 域（SITE_BASE），不用 request host —— 香港中转会把 Host 改成 workers.dev。
+    // tag='item-page'：日志区分内容页与日报页的 ping（wrangler tail 观测用）。
     const { siteBase } = getBases(env);
-    await pingIndexNow(env, [`${siteBase}${path}`]);
+    await pingIndexNow(env, [`${siteBase}${path}`], { tag: 'item-page' });
   } catch (e) {
     console.error(`[item-page-hook] ${id}: sync failed (non-blocking)`, e);
   }

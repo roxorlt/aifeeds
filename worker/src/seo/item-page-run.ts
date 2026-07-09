@@ -22,10 +22,13 @@ export interface ItemPageRunResult {
   itemId: string;
   skipped: boolean;
   reason?: string;
-  // 仅 !skipped 的实写路径有值：true=首次 live 新页（item_pages 原无该行），false=re-enrich /
-  // metrics 刷新 / 重译覆盖已有行。enrich hook 据此「只对首次新页 ping IndexNow」，避免把已收录
-  // URL 反复提交（dry / skipped 路径不置此字段，均为 undefined → hook 视作不 ping）。
-  created?: boolean;
+  // 仅 !skipped 的实写路径有值：本次生成是否让页面「转入 live」（状态实质变化）——
+  //   true  = 页面此前不是 live：item_pages 无该行（首次收录），或 status='gone'（复活，此前 410）；
+  //   false = 页面此前已是 live：re-enrich / metrics 刷新 / 重译，仅覆盖写、状态未变。
+  // enrich hook 据此「只对转入 live 的页 ping IndexNow」：首次收录 + gone→live 复活都通知
+  // 搜索引擎（复活尤其关键——此前 410 已告知搜索引擎删除，不 ping 它可能永不回来抓）；live→live
+  // 不重推已收录 URL。dry / skipped 路径不置此字段（undefined → hook 视作不 ping）。
+  becameLive?: boolean;
 }
 
 // 出页 5 类源（+ clawhub 占位满足类型）→ items.source_type 列表（反向于 selection.SOURCE_TYPE）。
@@ -136,14 +139,15 @@ export async function generateItemPage(
   await env.READMES!.put(key, html, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },
   });
-  // 首次 live 判定（供 enrich hook 决定是否 ping IndexNow）：UPSERT 前查 item_pages 存在性——
-  // 无行 = 首次生成（created=true）；已有行 = re-enrich / metrics 刷新 / 重译覆盖（created=false，
-  // 不重推同一已收录 URL）。此判定与 backfill 无关：backfill 不经 hook，故 force 重灌 3.2 万存量
-  // 即便逐条 created=false 也无所谓（本函数不 ping，ping 只在 hook 层）。
-  const existing = await env.DB.prepare(`SELECT 1 AS n FROM item_pages WHERE item_id = ?`)
+  // 「转入 live」判定（供 enrich hook 决定是否 ping IndexNow）：UPSERT 前查 item_pages 现状——
+  //   无行 = 首次生成；status='gone' = 复活（此前 410）；两者都算「转入 live」→ 需通知搜索引擎。
+  //   已 live = re-enrich / metrics 刷新 / 重译，仅覆盖写、状态未变 → 不重推已收录 URL。
+  // status 仅两值：'live'（本函数 UPSERT）/ 'gone'（markItemPageGone），故 !== 'live' 即 gone 复活。
+  // 与 backfill 无关：backfill 不经 hook，force 重灌 3.2 万即便逐条 becameLive 也不 ping（本函数不 ping）。
+  const prior = await env.DB.prepare(`SELECT status FROM item_pages WHERE item_id = ?`)
     .bind(id)
-    .first<{ n: number }>();
-  const created = !existing;
+    .first<{ status: string }>();
+  const becameLive = !prior || prior.status !== 'live';
   await env.DB.prepare(
     `INSERT INTO item_pages (item_id, source, url_path, generated_at, status)
      VALUES (?, ?, ?, ?, 'live')
@@ -154,7 +158,7 @@ export async function generateItemPage(
     .bind(id, source, urlPath, new Date().toISOString())
     .run();
 
-  return { itemId: id, skipped: false, created };
+  return { itemId: id, skipped: false, becameLive };
 }
 
 // 下架：把 item_pages.status 置 'gone'（伺服层转 410 + noindex，sitemap 排除）。
