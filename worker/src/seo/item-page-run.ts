@@ -22,6 +22,13 @@ export interface ItemPageRunResult {
   itemId: string;
   skipped: boolean;
   reason?: string;
+  // 仅 !skipped 的实写路径有值：本次生成是否让页面「转入 live」（状态实质变化）——
+  //   true  = 页面此前不是 live：item_pages 无该行（首次收录），或 status='gone'（复活，此前 410）；
+  //   false = 页面此前已是 live：re-enrich / metrics 刷新 / 重译，仅覆盖写、状态未变。
+  // enrich hook 据此「只对转入 live 的页 ping IndexNow」：首次收录 + gone→live 复活都通知
+  // 搜索引擎（复活尤其关键——此前 410 已告知搜索引擎删除，不 ping 它可能永不回来抓）；live→live
+  // 不重推已收录 URL。dry / skipped 路径不置此字段（undefined → hook 视作不 ping）。
+  becameLive?: boolean;
 }
 
 // 出页 5 类源（+ clawhub 占位满足类型）→ items.source_type 列表（反向于 selection.SOURCE_TYPE）。
@@ -132,6 +139,15 @@ export async function generateItemPage(
   await env.READMES!.put(key, html, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },
   });
+  // 「转入 live」判定（供 enrich hook 决定是否 ping IndexNow）：UPSERT 前查 item_pages 现状——
+  //   无行 = 首次生成；status='gone' = 复活（此前 410）；两者都算「转入 live」→ 需通知搜索引擎。
+  //   已 live = re-enrich / metrics 刷新 / 重译，仅覆盖写、状态未变 → 不重推已收录 URL。
+  // status 仅两值：'live'（本函数 UPSERT）/ 'gone'（markItemPageGone），故 !== 'live' 即 gone 复活。
+  // 与 backfill 无关：backfill 不经 hook，force 重灌 3.2 万即便逐条 becameLive 也不 ping（本函数不 ping）。
+  const prior = await env.DB.prepare(`SELECT status FROM item_pages WHERE item_id = ?`)
+    .bind(id)
+    .first<{ status: string }>();
+  const becameLive = !prior || prior.status !== 'live';
   await env.DB.prepare(
     `INSERT INTO item_pages (item_id, source, url_path, generated_at, status)
      VALUES (?, ?, ?, ?, 'live')
@@ -142,7 +158,7 @@ export async function generateItemPage(
     .bind(id, source, urlPath, new Date().toISOString())
     .run();
 
-  return { itemId: id, skipped: false };
+  return { itemId: id, skipped: false, becameLive };
 }
 
 // 下架：把 item_pages.status 置 'gone'（伺服层转 410 + noindex，sitemap 排除）。

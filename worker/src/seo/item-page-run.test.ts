@@ -1,6 +1,7 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi, afterEach } from 'vitest';
 
 import { generateItemPage, markItemPageGone, backfillItemPages } from './item-page-run';
+import { syncItemPageOnEnrichDone } from './item-page-hook';
 import { itemPageR2Key, itemPagePath } from '../digest/render';
 import type { Env } from '../index';
 
@@ -95,6 +96,12 @@ function makeDb(seed: ItemSeed[] = []) {
             const row = items.find((r) => String(r.id) === String(binds[0]));
             return (row ?? null) as T | null;
           }
+          if (/SELECT status FROM item_pages WHERE item_id = \?/i.test(sql)) {
+            // generateItemPage 的「转入 live」现状预查：返回该行 {status} 或 null（无行）。
+            // hook 判据 becameLive = 无行 OR status!='live'（gone 复活）。
+            const p = pages.get(String(binds[0]));
+            return (p ? { status: p.status } : null) as T | null;
+          }
           if (/COUNT\(\*\)/i.test(sql)) {
             if (/generated_at >= \?/i.test(sql)) {
               // force 计数：binds = [...sts, cutoff]
@@ -183,9 +190,16 @@ function makeEnv(db: unknown, r2: unknown): Env {
 const insertRuns = (db: ReturnType<typeof makeDb>): number =>
   db._runs.filter((r) => /INSERT INTO item_pages/i.test(r.sql)).length;
 
-// 预置一条存量 item_pages 行（模拟 prod 已用旧渲染器生成的薄页），带指定 generated_at。
-const seedPage = (db: ReturnType<typeof makeDb>, id: string, source: string, generated_at: string): void => {
-  db._pages.set(id, { item_id: id, source, url_path: itemPagePath(id) ?? `/i/${id}`, generated_at, status: 'live' });
+// 预置一条存量 item_pages 行（模拟 prod 已生成的页），带指定 generated_at 与 status（默认 live）。
+// status='gone' 用于模拟「此前判不相关下架」→ 后续复活场景。
+const seedPage = (
+  db: ReturnType<typeof makeDb>,
+  id: string,
+  source: string,
+  generated_at: string,
+  status = 'live',
+): void => {
+  db._pages.set(id, { item_id: id, source, url_path: itemPagePath(id) ?? `/i/${id}`, generated_at, status });
 };
 
 describe('generateItemPage', () => {
@@ -616,5 +630,159 @@ describe('backfillItemPages force', () => {
     expect(r2.puts.length).toBe(0);
     expect(insertRuns(db)).toBe(0);
     expect(db._pages.get('x_list:1')!.generated_at).toBe('2026-07-01T00:00:00.000Z'); // dry 不触碰
+  });
+});
+
+// becameLive 布尔（UPSERT 前查 item_pages 现状）：供 enrich hook 判「本次是否转入 live」→ 决定是否 ping。
+// 判据 = 无行（首次） OR status!='live'（gone 复活）。status 仅两值 live/gone，故 !='live' 即 gone。
+describe('generateItemPage becameLive（转入 live 判定）', () => {
+  test('首次生成（item_pages 无该行）→ becameLive=true', async () => {
+    const id = 'x_list:new';
+    const db = makeDb([{ id, source_type: 'x_list', is_relevant: 1 }]);
+    const res = await generateItemPage(makeEnv(db, makeR2()), id);
+    expect(res.skipped).toBe(false);
+    expect(res.becameLive).toBe(true);
+  });
+
+  test('已 live 行再生成（re-enrich / metrics 刷新 / 重译）→ becameLive=false', async () => {
+    const id = 'x_list:1';
+    const db = makeDb([{ id, source_type: 'x_list', is_relevant: 1 }]);
+    const env = makeEnv(db, makeR2());
+    expect((await generateItemPage(env, id)).becameLive).toBe(true); // 首次
+    const second = await generateItemPage(env, id);
+    expect(second.skipped).toBe(false);
+    expect(second.becameLive).toBe(false); // 已 live，不重推
+  });
+
+  test('已有行 status=gone → becameLive=true（复活：此前 410，必须重新通知搜索引擎）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'gone'); // 预置 gone 行
+    const res = await generateItemPage(makeEnv(db, makeR2()), id);
+    expect(res.skipped).toBe(false);
+    expect(res.becameLive).toBe(true);
+  });
+
+  test('force 重灌已 live 行 → becameLive=false（存量重灌不误判为转入 live）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'live');
+    const res = await generateItemPage(makeEnv(db, makeR2()), id, { force: true });
+    expect(res.skipped).toBe(false);
+    expect(res.becameLive).toBe(false);
+  });
+
+  test('force 重灌 gone 行 → becameLive=true（复活判据优先于 force）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'gone');
+    const res = await generateItemPage(makeEnv(db, makeR2()), id, { force: true });
+    expect(res.becameLive).toBe(true);
+  });
+
+  test('skipped（not-relevant）→ becameLive 不置（undefined，hook 视作不 ping）', async () => {
+    const db = makeDb([{ id: 'x_list:8', source_type: 'x_list', is_relevant: 0 }]);
+    const res = await generateItemPage(makeEnv(db, makeR2()), 'x_list:8');
+    expect(res.skipped).toBe(true);
+    expect(res.becameLive).toBeUndefined();
+  });
+});
+
+// backfill 一律不 ping IndexNow —— 锁死「force 全量重灌不重推 3.2 万已收录 URL」的头号风险。
+// ping 只在 enrich hook 层（item-page-hook.ts），backfill/generateItemPage 本体绝不发起 IndexNow HTTP。
+// 本组用全局 fetch spy 兜底：backfill（含 force）全程零 fetch → 未来若有人误把 ping 接进本体，此断言即刻变红。
+describe('backfill 一律不 ping IndexNow（锁死 force 重灌不重推存量）', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  test('普通回填首次生成页也不 ping（存量首建靠 sitemap 收录，不走 IndexNow）', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1 },
+    ]);
+    const res = await backfillItemPages(makeEnv(db, makeR2()), 'x', { limit: 100 });
+    expect(res.generated).toBe(2); // 两条都首次生成（becameLive=true），但 backfill 路径不 ping
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('force=1 重灌存量薄页（3.2 万重灌的关键风险路径）→ 全程零 fetch', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-03T00:00:00Z' },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+    ]);
+    const env = makeEnv(db, makeR2());
+    // 预置存量薄页（模拟 prod 已生成的 3.2 万），旧 generated_at → force 全部重灌（覆盖写）。
+    seedPage(db, 'x_list:1', 'x', '2026-07-01T00:00:00.000Z');
+    seedPage(db, 'x_list:2', 'x', '2026-07-01T00:00:00.000Z');
+    const forced = await backfillItemPages(env, 'x', { limit: 100, force: true });
+    expect(forced.generated).toBe(2); // 两条已存在（=已收录）页被重灌
+    // 关键锁：重灌已收录页全程零 HTTP → 绝不向 IndexNow 重推 3.2 万 URL。
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// 端到端：enrich hook（syncItemPageOnEnrichDone，真身）→ generateItemPage（真身）→ pingIndexNow（真身，
+// 仅 mock 全局 fetch）。用真实 item_pages 状态驱动，锁死「首次 / 复活 ping，re-enrich 不 ping」的完整链路。
+// 本文件不 vi.mock('./item-page-run')，故 hook 调的是真 generateItemPage（对状态化 makeDb 生效）。
+describe('端到端 hook → generateItemPage → pingIndexNow（真链路，mock fetch）', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // 带 INDEXNOW_KEY 的 env（makeEnv 不含 key，否则 pingIndexNow 静默跳过）。
+  const pingEnv = (db: unknown, r2: unknown): Env =>
+    ({ SITE_BASE: SITE, API_BASE: API, INDEXNOW_KEY: 'inx-test-key', DB: db, READMES: r2 }) as unknown as Env;
+  const stubFetch = (): ReturnType<typeof vi.fn> => {
+    const f = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    return f;
+  };
+  const inxCalls = (f: ReturnType<typeof vi.fn>) =>
+    f.mock.calls.filter(([u]) => String(u).includes('api.indexnow.org'));
+
+  test('无行 + relevant=true（首次收录）→ ping 一次，urlList=[SITE+itemPagePath]', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    const r2 = makeR2();
+    const f = stubFetch();
+    await syncItemPageOnEnrichDone(pingEnv(db, r2), id, true);
+    expect(db._pages.get(id)!.status).toBe('live'); // 生成后置 live
+    const calls = inxCalls(f);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(String((calls[0][1] as RequestInit).body));
+    expect(body.urlList).toEqual([`${SITE}${itemPagePath(id)}`]);
+  });
+
+  test('已有行 status=gone + relevant=true（复活）→ ping 一次（此前 410，必须重新通知）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    const r2 = makeR2();
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'gone'); // 此前判不相关下架 → gone
+    const f = stubFetch();
+    await syncItemPageOnEnrichDone(pingEnv(db, r2), id, true);
+    expect(db._pages.get(id)!.status).toBe('live'); // 复活为 live
+    expect(inxCalls(f)).toHaveLength(1); // 复活重新 ping
+  });
+
+  test('已有行 status=live + relevant=true（re-enrich 回归锁）→ 不 ping', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    const r2 = makeR2();
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'live'); // 已收录
+    const f = stubFetch();
+    await syncItemPageOnEnrichDone(pingEnv(db, r2), id, true);
+    expect(inxCalls(f)).toHaveLength(0); // 已 live，不重推
+  });
+
+  test('relevant=false → 下架 gone，不 ping', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    const r2 = makeR2();
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z', 'live');
+    const f = stubFetch();
+    await syncItemPageOnEnrichDone(pingEnv(db, r2), id, false);
+    expect(db._pages.get(id)!.status).toBe('gone');
+    expect(inxCalls(f)).toHaveLength(0);
   });
 });
