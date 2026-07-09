@@ -36,6 +36,44 @@ export const COVER_BLACKLIST = new RegExp(
   'i',
 );
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 关键词 = 弱信号，尺寸 = 强信号（Fix，2026-07-09）。
+//
+// COVER_BLACKLIST 是词边界锚定的**文件名**判据，无法区分「品牌 logo 本身」与「文件名里
+// 恰好含关键词的真头图」：
+//   - nvidia GFN Thursday 头图 `...-2048x1024-no-copy-logo.jpg`（no-copy-logo = 不带文案和
+//     logo 的版本）—— 'logo' 前邻 '-'、后邻 '.' 命中词边界，被旧纯关键词逻辑误拒（本次 bug）；
+//   - techcrunch 产品 press hero `...Claude-logo-1920x1080-1.png`（logo 是画面主体但仍是真头图）
+//     同样误命中。
+// 尺寸是可靠得多的判据：2026-07-09 prod 取样实测——
+//   真品牌 logo maxDim ≤ 828（qbitai 300×300 / jiqizhixin 828×828 / mit-tech-review 32px）；
+//   真 og 头图 maxDim ≥ 1200（nvidia 2048×1024 / techcrunch press hero 1200×675）。
+// 阈值取 1000，落在 (828, 1200) 安全间隙：拦住已知最大品牌 logo，放行真头图。
+//   注：jiqizhixin（828）已单列 NO_COVER_SOURCES 硬拦，不靠本阈值；本阈值面向仍靠关键词层的源
+//   （qbitai 等）。若未来某源用 ≥1000px 大图 logo 作 og，前 1-2 篇成簇前可能漏放，随后由采用护栏
+//   统计簇（isSourceLevelBrandLogo，第二道防线）在第 3 篇兜住——这是刻意的取舍。
+export const COVER_KEYWORD_OVERRIDE_MIN_DIM = 1000;
+
+/**
+ * 封面 URL 是否应按垃圾关键词拒绝（弱信号关键词 + 强信号尺寸联合判据）。
+ *   - 不含黑名单关键词 → 不拒（返回 false，尺寸不参与）。
+ *   - 含关键词 + 尺寸可测且 maxDim ≥ COVER_KEYWORD_OVERRIDE_MIN_DIM → 判真头图，放行（false）。
+ *   - 含关键词 + 小图 / 尺寸测不出（width|height 缺失或为 0）→ 拒（true，回退纯关键词判据）。
+ *
+ * 「尺寸 override」的前提是采用环节能 probe 出真实像素（magic bytes：png/jpeg/gif）。
+ * webp/avif/ico 或防盗链失败 → 测不出 → 维持拒绝，不放行——宁可漏放个别真头图，也绝不放进品牌
+ * logo（安全优先于召回）。
+ */
+export function isBlacklistedCover(
+  url: string,
+  width?: number,
+  height?: number,
+): boolean {
+  if (!COVER_BLACKLIST.test(url)) return false;
+  const maxDim = width && height ? Math.max(width, height) : 0;
+  return maxDim < COVER_KEYWORD_OVERRIDE_MIN_DIM;
+}
+
 // 封面尺寸门：maxDim ≥ 240 且 0.5 ≤ 宽高比 ≤ 2。
 // 缺尺寸元数据（webp/avif/svg 无法 probe，或 asset 无 width/height）→ 放行（返回 true），
 // 与两处调用点原有「有尺寸才过门」的行为一致。

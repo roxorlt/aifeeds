@@ -551,6 +551,7 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
         migrateCoverCalls++;
         return '/r/blog/should-not-happen.png';
       },
+      probeCoverSize: async () => ({ width: 300, height: 300 }), // qbitai logo 实测 300×300 → 小图，尺寸复核未过，维持拒绝
     });
     expect(migrateCoverCalls).toBe(0);                             // og 不迁 R2（省得白迁 logo）
     expect(target.extra.cover_image).toBe('/r/blog/hero.webp');   // 就地回落正文 hero
@@ -573,6 +574,7 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
     const { env } = makeEnv([target]);
     await migrateMediaForBlog(env, 'blog:qbitai:kw2', {
       migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+      probeCoverSize: async () => ({ width: 300, height: 300 }),
     });
     expect(migrateCoverCalls).toBe(0);
     expect(target.extra.cover_image).toBeUndefined();             // 清空 → monogram
@@ -593,6 +595,7 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
     const { env } = makeEnv([target]);
     await migrateMediaForBlog(env, 'blog:src:kw3', {
       migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+      probeCoverSize: async () => ({ width: 258, height: 258 }), // qrcode 小图
     });
     expect(migrateCoverCalls).toBe(0);
     expect(target.extra.cover_image).toBeUndefined();
@@ -613,8 +616,54 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
     const { env } = makeEnv([target]);
     await migrateMediaForBlog(env, 'blog:src:kw4', {
       migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+      probeCoverSize: async () => ({ width: 96, height: 96 }), // avatar 小图
     });
     expect(migrateCoverCalls).toBe(0);
+    expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
+  });
+
+  // ── Fix（2026-07-09）：关键词命中但尺寸复核判为真头图 → 放行采用（本次 bug 回归锁）──
+  test("回归锁：nvidia og 含 'no-copy-logo' 但实测 2048×1024 真头图 → 尺寸 override 放行、正常迁移采用", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:nvidia:kw',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'nvidia',
+        cover_image:
+          'https://blogs.nvidia.com/wp-content/uploads/2026/07/gfn-thursday-7-2-blog-2048x1024-no-copy-logo.jpg',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    const res = await migrateMediaForBlog(env, 'blog:nvidia:kw', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/nvidia-hero.jpg'; },
+      probeCoverSize: async () => ({ width: 2048, height: 1024 }), // 实测真头图尺寸
+    });
+    expect(migrateCoverCalls).toBe(1);                             // 尺寸 override → 当作干净 og 正常迁移
+    expect(res.migrated).toBe(1);
+    expect(target.extra.cover_image).toBe('/r/blog/nvidia-hero.jpg'); // 头图被采用（不再误拒）
+    expect(target.extra.cover_keyword_blacklisted_at).toBeUndefined(); // 无关键词拒绝 marker
+  });
+
+  test("尺寸测不出（webp/avif/防盗链失败，probe 返回 undefined）+ 关键词 → 维持拒绝（回退纯关键词）", async () => {
+    let migrateCoverCalls = 0;
+    const target: FakeItem = {
+      id: 'blog:src:kwunprobe',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'somesrc',
+        cover_image: 'https://s.com/brand-logo.webp',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    await migrateMediaForBlog(env, 'blog:src:kwunprobe', {
+      migrateCover: async () => { migrateCoverCalls++; return '/r/blog/x.png'; },
+      probeCoverSize: async () => undefined, // 测不出尺寸
+    });
+    expect(migrateCoverCalls).toBe(0);                            // 未放行、不迁移
+    expect(target.extra.cover_image).toBeUndefined();
     expect(target.extra.cover_keyword_blacklisted_at).toBeTruthy();
   });
 
