@@ -22,6 +22,10 @@ export interface ItemPageRunResult {
   itemId: string;
   skipped: boolean;
   reason?: string;
+  // 仅 !skipped 的实写路径有值：true=首次 live 新页（item_pages 原无该行），false=re-enrich /
+  // metrics 刷新 / 重译覆盖已有行。enrich hook 据此「只对首次新页 ping IndexNow」，避免把已收录
+  // URL 反复提交（dry / skipped 路径不置此字段，均为 undefined → hook 视作不 ping）。
+  created?: boolean;
 }
 
 // 出页 5 类源（+ clawhub 占位满足类型）→ items.source_type 列表（反向于 selection.SOURCE_TYPE）。
@@ -132,6 +136,14 @@ export async function generateItemPage(
   await env.READMES!.put(key, html, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },
   });
+  // 首次 live 判定（供 enrich hook 决定是否 ping IndexNow）：UPSERT 前查 item_pages 存在性——
+  // 无行 = 首次生成（created=true）；已有行 = re-enrich / metrics 刷新 / 重译覆盖（created=false，
+  // 不重推同一已收录 URL）。此判定与 backfill 无关：backfill 不经 hook，故 force 重灌 3.2 万存量
+  // 即便逐条 created=false 也无所谓（本函数不 ping，ping 只在 hook 层）。
+  const existing = await env.DB.prepare(`SELECT 1 AS n FROM item_pages WHERE item_id = ?`)
+    .bind(id)
+    .first<{ n: number }>();
+  const created = !existing;
   await env.DB.prepare(
     `INSERT INTO item_pages (item_id, source, url_path, generated_at, status)
      VALUES (?, ?, ?, ?, 'live')
@@ -142,7 +154,7 @@ export async function generateItemPage(
     .bind(id, source, urlPath, new Date().toISOString())
     .run();
 
-  return { itemId: id, skipped: false };
+  return { itemId: id, skipped: false, created };
 }
 
 // 下架：把 item_pages.status 置 'gone'（伺服层转 410 + noindex，sitemap 排除）。

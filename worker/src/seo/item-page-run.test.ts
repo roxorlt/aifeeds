@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi, afterEach } from 'vitest';
 
 import { generateItemPage, markItemPageGone, backfillItemPages } from './item-page-run';
 import { itemPageR2Key, itemPagePath } from '../digest/render';
@@ -94,6 +94,10 @@ function makeDb(seed: ItemSeed[] = []) {
           if (/SELECT \* FROM items WHERE id = \?/i.test(sql)) {
             const row = items.find((r) => String(r.id) === String(binds[0]));
             return (row ?? null) as T | null;
+          }
+          if (/SELECT 1 AS n FROM item_pages WHERE item_id = \?/i.test(sql)) {
+            // generateItemPage 的「首次 live」存在性预查：有行 → {n:1}（created=false），无行 → null（created=true）。
+            return (pages.has(String(binds[0])) ? { n: 1 } : null) as T | null;
           }
           if (/COUNT\(\*\)/i.test(sql)) {
             if (/generated_at >= \?/i.test(sql)) {
@@ -616,5 +620,88 @@ describe('backfillItemPages force', () => {
     expect(r2.puts.length).toBe(0);
     expect(insertRuns(db)).toBe(0);
     expect(db._pages.get('x_list:1')!.generated_at).toBe('2026-07-01T00:00:00.000Z'); // dry 不触碰
+  });
+});
+
+// created 布尔（UPSERT 前查 item_pages 存在性）：供 enrich hook 判「是否首次 live 新页」→ 决定是否 ping IndexNow。
+describe('generateItemPage created（首次 live 判定）', () => {
+  test('首次生成（item_pages 无该行）→ created=true', async () => {
+    const id = 'x_list:new';
+    const db = makeDb([{ id, source_type: 'x_list', is_relevant: 1 }]);
+    const res = await generateItemPage(makeEnv(db, makeR2()), id);
+    expect(res.skipped).toBe(false);
+    expect(res.created).toBe(true);
+  });
+
+  test('二次生成（re-enrich / metrics 刷新，行已存在）→ created=false', async () => {
+    const id = 'x_list:1';
+    const db = makeDb([{ id, source_type: 'x_list', is_relevant: 1 }]);
+    const env = makeEnv(db, makeR2());
+    const first = await generateItemPage(env, id);
+    expect(first.created).toBe(true);
+    const second = await generateItemPage(env, id);
+    expect(second.skipped).toBe(false);
+    expect(second.created).toBe(false); // 已收录，hook 不重推
+  });
+
+  test('存量已有 item_pages 行（backfill 前遗留）再 enrich → created=false', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z');
+    const res = await generateItemPage(makeEnv(db, makeR2()), id);
+    expect(res.skipped).toBe(false);
+    expect(res.created).toBe(false);
+  });
+
+  test('force 重灌已有行 → created=false（不因 force 误判为新页 → 存量重灌不重推）', async () => {
+    const id = 'github:acme/tool';
+    const db = makeDb([{ id, source_type: 'github', is_relevant: 1 }]);
+    seedPage(db, id, 'gh', '2026-07-01T00:00:00.000Z');
+    const res = await generateItemPage(makeEnv(db, makeR2()), id, { force: true });
+    expect(res.skipped).toBe(false);
+    expect(res.created).toBe(false);
+  });
+
+  test('skipped（not-relevant）→ created 不置（undefined，hook 视作不 ping）', async () => {
+    const db = makeDb([{ id: 'x_list:8', source_type: 'x_list', is_relevant: 0 }]);
+    const res = await generateItemPage(makeEnv(db, makeR2()), 'x_list:8');
+    expect(res.skipped).toBe(true);
+    expect(res.created).toBeUndefined();
+  });
+});
+
+// backfill 一律不 ping IndexNow —— 锁死「force 全量重灌不重推 3.2 万已收录 URL」的头号风险。
+// ping 只在 enrich hook 层（item-page-hook.ts），backfill/generateItemPage 本体绝不发起 IndexNow HTTP。
+// 本组用全局 fetch spy 兜底：backfill（含 force）全程零 fetch → 未来若有人误把 ping 接进本体，此断言即刻变红。
+describe('backfill 一律不 ping IndexNow（锁死 force 重灌不重推存量）', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  test('普通回填首次生成页也不 ping（存量首建靠 sitemap 收录，不走 IndexNow）', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1 },
+    ]);
+    const res = await backfillItemPages(makeEnv(db, makeR2()), 'x', { limit: 100 });
+    expect(res.generated).toBe(2); // 两条都首次生成（created=true），但 backfill 路径不 ping
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('force=1 重灌存量薄页（3.2 万重灌的关键风险路径）→ 全程零 fetch', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const db = makeDb([
+      { id: 'x_list:1', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-03T00:00:00Z' },
+      { id: 'x_list:2', source_type: 'x_list', is_relevant: 1, published_at: '2026-07-02T00:00:00Z' },
+    ]);
+    const env = makeEnv(db, makeR2());
+    // 预置存量薄页（模拟 prod 已生成的 3.2 万），旧 generated_at → force 全部重灌（覆盖写）。
+    seedPage(db, 'x_list:1', 'x', '2026-07-01T00:00:00.000Z');
+    seedPage(db, 'x_list:2', 'x', '2026-07-01T00:00:00.000Z');
+    const forced = await backfillItemPages(env, 'x', { limit: 100, force: true });
+    expect(forced.generated).toBe(2); // 两条已存在（=已收录）页被重灌
+    // 关键锁：重灌已收录页全程零 HTTP → 绝不向 IndexNow 重推 3.2 万 URL。
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
