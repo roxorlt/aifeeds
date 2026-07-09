@@ -259,6 +259,84 @@ describe('renderItemBody — podcast（半文源，不含 transcript 全文）',
     // transcript 全文绝不渲染。
     expect(html).not.toContain(TRANSCRIPT_SENTINEL);
   });
+
+  test('timeline 节点渲染 ts + topic + speaker + point（核心观点），并出嘉宾/主持区，不含 transcript', () => {
+    const html = body('news', {
+      id: 'podcast:ep2',
+      url: 'https://xyzfm.link/ep/2',
+      extra: JSON.stringify({
+        show_key: 'practical-ai',
+        ai_summary_zh: '本期播客概览。',
+        hosts: ['Daniel Whitenack'],
+        guests: ['Ethan He', 'Daniel Whitenack'], // 与 hosts 重复项应去重
+        timeline: [
+          { ts: '4:12', topic: '自主代理采用与安全挑战', speaker: 'Daniel', point: '企业正采用自主代理但面临安全挑战。' },
+          { ts: '18:30', topic: '评估方法', speaker: 'Ethan He', point: '需要新的评估基准。' },
+        ],
+        shownotes_zh: '<p>节目简介段落。</p>',
+        transcript_text_zh: TRANSCRIPT_SENTINEL.repeat(50),
+        transcript_text: TRANSCRIPT_SENTINEL.repeat(50),
+      }),
+    });
+    // 话题脉络 + 时间戳 + 主题。
+    expect(html).toContain('话题脉络');
+    expect(html).toContain('4:12');
+    expect(html).toContain('自主代理采用与安全挑战');
+    expect(html).toContain('18:30');
+    // point（核心观点，最有信息量）+ speaker（说话人）。
+    expect(html).toContain('企业正采用自主代理但面临安全挑战。');
+    expect(html).toContain('需要新的评估基准。');
+    expect(html).toContain('Daniel');
+    // 嘉宾/主持区。
+    expect(html).toContain('主持');
+    expect(html).toContain('嘉宾');
+    expect(html).toContain('Daniel Whitenack');
+    expect(html).toContain('Ethan He');
+    // guests 对 hosts 去重：Daniel Whitenack 只作为主持出现一次（不在嘉宾行重复）。
+    expect((html.match(/Daniel Whitenack/g) || []).length).toBe(1);
+    // 版权回归锁：transcript 全文绝不渲染。
+    expect(html).not.toContain(TRANSCRIPT_SENTINEL);
+  });
+
+  test('timeline 节点无 point/speaker → 只出 ts + topic 不崩', () => {
+    const html = body('news', {
+      id: 'podcast:ep3',
+      url: 'https://xyzfm.link/ep/3',
+      extra: JSON.stringify({
+        show_key: 'show',
+        timeline: [{ ts: '0:30', topic: '仅有主题的节点' }],
+      }),
+    });
+    expect(html).toContain('话题脉络');
+    expect(html).toContain('0:30');
+    expect(html).toContain('仅有主题的节点');
+  });
+
+  test('guests/hosts 空 → 无嘉宾/主持区', () => {
+    const html = body('news', {
+      id: 'podcast:ep4',
+      url: 'https://xyzfm.link/ep/4',
+      extra: JSON.stringify({ show_key: 'show', ai_summary_zh: '仅有概览的一期。' }),
+    });
+    expect(html).not.toContain('嘉宾');
+    expect(html).not.toContain('主持');
+  });
+
+  test('timeline point/speaker/guests 含 <script> → 转义，无可执行脚本', () => {
+    const html = body('news', {
+      id: 'podcast:ep5',
+      url: 'https://x.com/a',
+      extra: JSON.stringify({
+        show_key: 's',
+        guests: ['<script>alert(1)</script>Eve'],
+        timeline: [{ ts: '1:00', topic: 'T', speaker: '<img src=x onerror=alert(2)>', point: 'P <script>alert(3)</script>' }],
+      }),
+    });
+    // 结构化元信息字段一律 escapeHtml：无原始可执行标签（<script / <img），恶意标记只作转义文本存在。
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;'); // 已转义
+  });
 });
 
 describe('renderItemBody — 净化接线（任一源）', () => {
@@ -305,5 +383,27 @@ describe('itemIndexableText — articleBody 可安全索引文本', () => {
   test('gh：含 ai_summary', () => {
     const t = itemIndexableText('gh', mkRow({ id: 'github:a/b', extra: JSON.stringify({ ai_summary: '仓库摘要文本。' }) }), env());
     expect(t).toContain('仓库摘要文本。');
+  });
+
+  test('podcast：含 timeline topic+point（增 SEO），不含 transcript 全文', () => {
+    const SENTINEL = '逐字稿照译标记';
+    const t = itemIndexableText(
+      'news',
+      mkRow({
+        id: 'podcast:ep',
+        extra: JSON.stringify({
+          show_key: 's',
+          ai_summary_zh: '播客概览。',
+          timeline: [{ ts: '1:00', topic: '话题一', point: '核心观点一。' }],
+          transcript_text_zh: SENTINEL.repeat(20),
+          transcript_text: SENTINEL.repeat(20),
+        }),
+      }),
+      env(),
+    );
+    expect(t).toContain('播客概览。');
+    expect(t).toContain('话题一');
+    expect(t).toContain('核心观点一。');
+    expect(t).not.toContain(SENTINEL);
   });
 });

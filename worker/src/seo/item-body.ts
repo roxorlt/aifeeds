@@ -85,6 +85,13 @@ export function itemIndexableText(source: DigestSource, row: RenderRow, env: Env
       if (ex.show_key) {
         push(ex.ai_summary_zh);
         push(clampSentences(stripHtmlTags(s(ex.shownotes_zh || ex.shownotes)), PODCAST_SHOWNOTES_MAX));
+        // 话题脉络 topic+point（LLM 提炼的结构化元信息，非逐字稿）纳入可索引文本增 SEO。
+        for (const t of asArr(ex.timeline)) {
+          const o = asObj(t);
+          if (!o) continue;
+          push(o.topic);
+          push(o.point);
+        }
       } else {
         push(ex.ai_summary_zh);
         push(ex.excerpt_zh || ex.excerpt);
@@ -243,11 +250,16 @@ function renderBlog(row: RenderRow, ex: Rec): string {
   return parts.filter(Boolean).join('\n');
 }
 
-// podcast（半文源）：我们的摘要 + 章节/时间轴（时间戳）+ 节目简介**短摘录**。绝不渲染 transcript 全文。
+// podcast（半文源）：我们的摘要 + 嘉宾/主持 + 章节/时间轴（时间戳 + 说话人 + 核心观点）+ 节目简介**短摘录**。
+// 绝不渲染 transcript 全文（版权边界）。timeline 的 topic/point/speaker 均为 LLM 提炼的结构化元信息，非逐字稿原文。
 function renderPodcast(row: RenderRow, ex: Rec): string {
   const parts: string[] = [];
   const summary = s(ex.ai_summary_zh);
   if (summary) parts.push(lead(summary));
+
+  // 嘉宾/主持：结构化元信息（人名纯文本，非逐字稿）。对齐抽屉——guests 对 hosts 去重。
+  const people = renderPodcastPeople(ex);
+  if (people) parts.push(people);
 
   const chapters = asArr(ex.chapters).map((c) => asObj(c)).filter((c): c is Rec => !!c);
   if (chapters.length) {
@@ -259,16 +271,11 @@ function renderPodcast(row: RenderRow, ex: Rec): string {
       .filter(Boolean);
     if (lis.length) parts.push(`<h2>章节</h2>\n<ul class="chapters">${lis.join('')}</ul>`);
   } else {
-    // 无原生章节时退回时间轴主题脉络（A 档）。
+    // 无原生章节时退回时间轴主题脉络（A 档）。每节点：ts + topic + speaker（有则）+ point（核心观点，有则）。
     const timeline = asArr(ex.timeline).map((t) => asObj(t)).filter((t): t is Rec => !!t);
     if (timeline.length) {
-      const lis = timeline
-        .map((t) => {
-          const topic = s(t.topic);
-          return topic ? `<li><span class="ts">${escapeHtml(s(t.ts))}</span> ${escapeHtml(topic)}</li>` : '';
-        })
-        .filter(Boolean);
-      if (lis.length) parts.push(`<h2>话题脉络</h2>\n<ul class="chapters">${lis.join('')}</ul>`);
+      const lis = timeline.map(renderTimelineNode).filter(Boolean);
+      if (lis.length) parts.push(`<h2>话题脉络</h2>\n<ul class="chapters timeline">${lis.join('')}</ul>`);
     }
   }
 
@@ -280,6 +287,30 @@ function renderPodcast(row: RenderRow, ex: Rec): string {
   }
   parts.push(readOriginal(row, ex));
   return parts.filter(Boolean).join('\n');
+}
+
+// 嘉宾/主持区（结构化人名，纯文本 escapeHtml）。guests 对 hosts 大小写不敏感去重（对齐抽屉显示层兜底）。
+// 数据全无 → 空串（优雅降级，不渲染该区）。
+function renderPodcastPeople(ex: Rec): string {
+  const hosts = names(ex.hosts);
+  const hostLower = new Set(hosts.map((h) => h.toLowerCase()));
+  const guests = names(ex.guests).filter((g) => !hostLower.has(g.toLowerCase()));
+  const rows: string[] = [];
+  if (hosts.length) rows.push(`<p><span class="people-label">主持</span>${escapeHtml(hosts.join('、'))}</p>`);
+  if (guests.length) rows.push(`<p><span class="people-label">嘉宾</span>${escapeHtml(guests.join('、'))}</p>`);
+  return rows.length ? `<div class="podcast-people">${rows.join('')}</div>` : '';
+}
+
+// 话题脉络单节点：ts + topic + point（核心观点，最有信息量，有则渲染）+ speaker（说话人，有则）。topic 缺则丢弃整节点。
+function renderTimelineNode(t: Rec): string {
+  const topic = s(t.topic).trim();
+  if (!topic) return '';
+  const head = `<span class="ts">${escapeHtml(s(t.ts))}</span><span class="tl-topic">${escapeHtml(topic)}</span>`;
+  const point = cleanText(s(t.point));
+  const speaker = s(t.speaker).trim();
+  const pointHtml = point ? `<p class="tl-point">${escapeHtml(point)}</p>` : '';
+  const speakerHtml = speaker ? `<div class="tl-speaker">${escapeHtml(speaker)}</div>` : '';
+  return `<li>${head}${pointHtml}${speakerHtml}</li>`;
 }
 
 // 优雅降级：源专属字段缺失时，回退到「一句话/加长摘要」纯文本段（对齐升级前行为）。
@@ -323,6 +354,13 @@ export const ITEM_BODY_STYLE = `
 .chapters{list-style:none;padding-left:0}
 .chapters li{margin:5px 0;color:var(--body);font-size:14px}
 .chapters .ts{display:inline-block;min-width:56px;color:var(--link);font-variant-numeric:tabular-nums;font-weight:600}
+.timeline li{margin:0 0 12px}
+.timeline .tl-topic{font-weight:600;color:var(--text)}
+.timeline .tl-point{margin:4px 0 0;color:var(--sub);font-size:14px;line-height:1.7}
+.timeline .tl-speaker{margin-top:2px;color:var(--sub);font-size:13px}
+.podcast-people{margin:8px 0;font-size:14px;color:var(--body)}
+.podcast-people p{margin:3px 0}
+.podcast-people .people-label{color:var(--sub);font-weight:600;margin-right:8px}
 .excerpt{margin:10px 0;padding:10px 14px;border-left:3px solid var(--border);color:var(--body);font-size:14px;line-height:1.85;white-space:pre-wrap}
 .read-original{margin:18px 0 4px;font-size:15px;font-weight:600}
 .read-original a{color:var(--link)}
@@ -351,6 +389,13 @@ function asObj(v: unknown): Rec | null {
 
 function asArr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
+}
+
+/** 字符串数组字段 → 去空白的非空字符串列表（嘉宾 / 主持等人名数组）。 */
+function names(v: unknown): string[] {
+  return asArr(v)
+    .map((x) => s(x).trim())
+    .filter(Boolean);
 }
 
 /** 我们的摘要 / 引导段（纯文本，转义后落页）。 */
