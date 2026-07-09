@@ -168,6 +168,27 @@ function probeImageDimensions(
   return undefined;
 }
 
+// ICO/CUR 容器识别（magic bytes，Task B，2026-07-09）。头 = 00 00 01 00（reserved=0 + type=1
+// ICO；CUR 是 type=2，封面里不会出现，只认 ICO）。ICO 是图标容器，48×48 之类小图靠字节兜底
+// 误留为封面（prod 实测 7 条），一律拒。
+//   ⚠️ 与 AVIF/HEIF 消歧：AVIF 以 ISOBMFF box 打头（4B box size + 'ftyp'），若某 avif 的 box
+//      size 恰为 0x00000100 则前 4 字节也是 00 00 01 00 撞车。真 ICO 的 offset4-5 是「目录项数」
+//      （小整数），而 AVIF 那两字节是 'ft'=0x7466≫255 —— 用 count∈[1,255] 把 avif 排除掉。
+function isIcoContainer(buf: ArrayBuffer): boolean {
+  if (buf.byteLength < 6) return false;
+  const v = new DataView(buf);
+  if (
+    v.getUint8(0) !== 0x00 ||
+    v.getUint8(1) !== 0x00 ||
+    v.getUint8(2) !== 0x01 ||
+    v.getUint8(3) !== 0x00
+  ) {
+    return false;
+  }
+  const count = v.getUint16(4, true); // ICONDIRENTRY 数量；真 ICO 很小，排除 AVIF 'ftyp' 误判
+  return count >= 1 && count <= 255;
+}
+
 function probePngDimensions(
   buf: ArrayBuffer,
 ): { width: number; height: number } | undefined {
@@ -192,6 +213,10 @@ function probePngDimensions(
 // aspect 0.25–4 + byte density ≥0.05 + maxDim ≥300；webp/avif/svg 无法 probe →
 // 最小字节阈值兜底。migrateAsset（inline 图 / 封面迁移）与 cover-quality-sweep 共用。
 export function passesFeedImageQualityGate(buf: ArrayBuffer): boolean {
+  // Task B（2026-07-09）：ICO 容器直接拒，不落字节兜底。favicon.ico（48×48，>8KB）过去
+  // 靠「>8KB 即通过」误留为封面。放在 probe 前：ICO 尺寸不可靠（0=256、多尺寸目录），
+  // 按格式一刀切拒最稳，且不动 webp/avif（仍走下方字节兜底，避免误杀现代博客封面）。
+  if (isIcoContainer(buf)) return false;
   const dim = probeImageDimensions(buf);
   if (!dim) return buf.byteLength >= MIN_UNPROBEABLE_INLINE_BYTES;
   const ar = dim.width / dim.height;
@@ -815,20 +840,32 @@ export async function runCoverQualitySweep(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Fix 2a：源级通用图剔除（blog-cover-generic-sweep，2026-07-06）。
-//   统计特征法：同一 blog source（feed_key）内 cover_image 命中**同一 R2 hash**
-//   ≥ minCount 次 → 判为「源级通用图」（作者头像 / 站点通栏 / 二维码横幅都逃不过）。
-//   整簇 cover_image 清空（json_remove），并**清掉 cover_og_backfilled_at 游标**，
-//   使随后 Fix 3 blog-cover-og-backfill 能重新拉 og:image 回填真 hero。
-//   dry=1 只列簇明细（src / cover / count）供人工核对，不落盘。
+// Fix 2a：源级通用图剔除（blog-cover-generic-sweep，2026-07-06；Task A 放宽外链形态 2026-07-09）。
+//   统计特征法：同一 blog source（feed_key）内 cover_image 命中**同一封面**
+//   ≥ minCount 篇**不同文章** → 判为「源级通用图」（作者头像 / 站点通栏 / 二维码横幅 /
+//   站点 favicon 都逃不过）。整簇 cover_image 清空（json_remove），并**清掉
+//   cover_og_backfilled_at 游标**，使随后 Fix 3 blog-cover-og-backfill 能重新拉
+//   og:image 回填真 hero。dry=1 只列簇明细（src / cover / count）供人工核对，不落盘。
 //   src 派生 = COALESCE(feed_key, show_key, source_type)，与两条 SQL 保持一致。
+//
+//   ⚠️ Task A（2026-07-09）：判簇谓词由「只扫 R2 形态 cover」放宽到**外链形态一并计入**。
+//      旧版仅统计 `/r/<hash>` 形态（内容寻址天然同图同 key），遗漏 prod 存量里的外链通用
+//      封面（techcrunch favicon ×27、the-verge RSS 头像 ×13 等）——它们无 R2 内容 hash、只有
+//      URL，逃过判簇，前端 BlogCard/抽屉直读 cover_image 就显示这些 favicon/头像。放宽后
+//      按**归一封面串完全相同**（GROUP BY cover）判簇，外链清后自动进 og-backfill 候选。
+//   ⚠️ 防误伤（Task A 关键）：判簇口径由 `COUNT(*)`（数行）改为
+//      `COUNT(DISTINCT 文章标识)`，文章标识 = COALESCE(canonical_url, url, id)。这样
+//      「同一篇文章被多次抓取导致 URL 重复」（同 canonical_url 多行）只计 1 次，不会被
+//      当成「一个站所有文章共用一张 favicon」而误清；只有**跨 ≥minCount 篇不同文章**
+//      共用同一封面才判簇。对 R2 形态无行为变化（item id 天然唯一，distinct 计数 == 行数）。
 //
 //   ⚠️ 只扫 source_type='blog'（审查修复，2026-07-06）：播客单集共用节目封面是
 //      合法常态（一档节目所有 episode 天然同一张节目图），且 og-backfill 只回填 blog，
 //      清了 podcast 簇没有回填方 → 永久掉封面。故收敛到 blog-only。
-//   ⚠️ 清簇时把被清 R2 key 记到 `$.cover_generic_cleared_hash`（Fix C，2026-07-06）：
-//      供 og-backfill 判定「回填的 og:image 又是同一张通用图」→ 跳过写入终止
-//      sweep↔backfill 无限循环（og:image 本身就是站点通用图时）。
+//   ⚠️ 清簇时把被清封面记到 `$.cover_generic_cleared_hash`（Fix C，2026-07-06）：
+//      R2 形态记归一 key（strip /r/），外链形态无 /r/ → 退化记原 URL。供 og-backfill 判定
+//      「回填的 og:image 又是同一张通用图」→ 跳过写入终止 sweep↔backfill 无限循环
+//      （外链簇清后 og-backfill 会外呼原文页取真 og:image，多数与被清 favicon 不同 → 正常回填）。
 // ═════════════════════════════════════════════════════════════════════════════
 
 // src 派生表达式（聚合 GROUP BY 与逐簇 UPDATE 复用同一字面量，保证匹配一致）。
@@ -887,15 +924,19 @@ export async function runBlogCoverGenericSweep(
   itemsCleared: number;
 }> {
   const nowIso = new Date().toISOString();
+  // Task A（2026-07-09）：判簇覆盖 R2 + 外链两种 cover 形态（去掉 R2-only 过滤）；
+  // 计数按文章标识去重（canonical_url→url→id），防同文章重复抓取被误当成源级通用图。
   const agg = await env.DB.prepare(
     `SELECT ${GENERIC_SRC_EXPR} AS src,
             json_extract(extra,'$.cover_image') AS cover,
-            COUNT(*) AS n
+            COUNT(DISTINCT COALESCE(
+              NULLIF(json_extract(extra,'$.canonical_url'), ''),
+              NULLIF(url, ''),
+              id
+            )) AS n
        FROM items
       WHERE source_type = 'blog'
         AND COALESCE(json_extract(extra,'$.cover_image'),'') != ''
-        AND (json_extract(extra,'$.cover_image') LIKE '/r/%'
-             OR json_extract(extra,'$.cover_image') LIKE 'http%://%/r/%')
       GROUP BY src, cover
      HAVING n >= ?
       ORDER BY n DESC
