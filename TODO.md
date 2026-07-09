@@ -8,15 +8,21 @@
 
 ## 进行中
 
-### A4. C 端站内搜索（2026-07-06，branch `feat/c-search`，**staging 验收通过，待用户确认 → prod**）
+### A4. C 端站内搜索（2026-07-06 起，**代码已全部合入 main；prod migration 已跑、`/api/search` 200；索引 backfill 追平中**）
 
 > 匿名可用站内搜索：入口放大镜 → 起始页（历史/热搜/源入口）→ suggestion → 分组结果页（每源 top3 + 「更多」）→ 单源无限滚动流 → 抽屉深链，返回键逐级回退。服务端 D1 FTS5 影子表 + 中文 bigram 预分词，索引/词表全靠 cron 增量维护、与主管线解耦。限流 search 12/min + suggest 40/min per device（KV fail-open）；admin 看板搜索区块（`?metric=search`）。
 > 设计 [docs/plans/2026-07-06-c-search-design.md](docs/plans/2026-07-06-c-search-design.md) · 实施计划 [docs/plans/2026-07-06-c-search-plan.md](docs/plans/2026-07-06-c-search-plan.md) · 台账 `.superpowers/sdd/progress.md`
 
 - [x] Task 1-12 实施完成（migration 026 + worker `src/search/` + 前端 `src/components/search/` + admin 监控），41 条单测（35 搜索 + rebase 后全绿），各任务 review 0 Critical/Important
 - [x] staging 全量部署 + 验收（worker 741820d3 / pages 1b3d5b7c）：集成断言 9/9、E2E 全链通过（入口/起始页三块/suggestion/分组 7 组/更多下钻/无限滚动/抽屉深链/返回逐级回退/历史 LRU/空态/PC 视口/微信 UA/feed 回归/埋点落库）、合规复检 3/3（cn_sensitive/dedup/软删不可见）。终审 **READY TO MERGE**（0 Critical / 1 运维 runbook 项非代码缺陷）
-- [ ] **用户 staging 验收确认**（staging.ai-feeds.com 未登录走全链）
-- [ ] **prod 上线三步**（待用户发话，留用户执行/确认）：① prod D1 跑 migration 026（`items_fts` / `search_terms` / `search_sync_state` 三表）② merge PR（CI 自动部署 worker + dashboard）③ 部署后循环调 `POST /api/admin/search/reindex` 追平 backfill（勿等 cron 点滴推进）+ 触发一次 `rebuild-terms` + 清 HK nginx 缓存 + prod 冒烟
+- [x] **用户 staging 验收通过**（含 polish 三项：放大镜 PC 靠右 / 分组序按 feed 列序 / 命中关键词标红）
+- [x] **代码全部合入 main**：搜索主体 PR #164、CI 红叉修复 PR #168、polish 三项 PR #169（放大镜靠右 / 分组按 feed 序 / 命中标红，cherry-pick 到最新 main）
+- [x] **prod D1 migration 026 已跑（2026-07-08）**：`items_fts` / `search_terms` / `search_sync_state` 三表已建；`/api/search` 由 500 恢复 **200**
+- [ ] **prod 索引 backfill 追平中**：`items_fts` 建表时为 0 行，靠 prod `*/5` cron 的 `syncSearchIndex` 自动分批灌（每轮 2000 行，~5 万行约 2h）。**待验证行数递增 + `search_terms` 非空（suggestion 可用）**
+- [ ] **prod 搜索全链验证**（注销 SW + 硬刷新后走：放大镜 → 起始页 → suggestion → 分组结果 → 下钻 → 抽屉 → 返回链）
+- [ ] **系统性召回排查**：按 10 种 source_type 抽样，验证中文词 / 英文数字混合词 / suggestion / 结果页命中标红。方法见交接文档
+- 运维实测要点：prod & staging `/api/admin/*` 受 CF Access 保护（basic auth 直连 401），手动 reindex 只能走「本地 worker 连远程 D1 + localhost」；staging `crons=[]` 导致新增行不进索引（QA 前需手动 reindex）；CI 触发 staging 部署用 `gh api ... /dispatches`（`gh workflow run` 对功能分支静默失败）
+- 交接文档：[docs/plans/2026-07-08-search-prod-launch-handoff.md](docs/plans/2026-07-08-search-prod-launch-handoff.md) · 运维手册：[docs/plans/2026-07-06-c-search-prod-runbook.md](docs/plans/2026-07-06-c-search-prod-runbook.md)
 - [ ] **V2 backlog**（V1 明确不做，按需排期）：
   - hot_query 补「末次非空结果」过滤（join `search_empty` 事件，排掉搜了但零结果的 query）
   - 搜索结果缓存与滚动位置恢复（FEED_CACHE 同款，解决抽屉深链返回单源流重挂载重拉首屏、滚动位不跨抽屉保留）
@@ -321,18 +327,10 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 - **P4** 内容矩阵：知乎 / CSDN / SegmentFault / 稀土掘金 / HN / Reddit
 - **P5** 监测：GA4 / CF AI Crawl Control / crawl-to-referral 比率
 
-**P0.2** ✅ **`/i/` 全量内容 SSR 页已上线（2026-07-08，PR #171 #172）**：五源 relevant 每条一个 `/i/:source/:id` 独立 SSR 页（约 3.2 万，分源混合全文正文 + JSON-LD @graph），日报静态页内链改指 `/i/`，sitemap 改 sitemap-index + 分源分片，item_pages 表（migration 027），enrich 收尾 hook 生成 + `mode=item-page-backfill` 回填。2026-07-09 五源 force 全量重灌（薄页→全文版）到 remaining=0。运维见 `docs/operations.md` §「SEO 静态页运维」+ §「item SSR 静态页 `/i/*`」。设计 [`docs/plans/2026-07-08-item-ssr-pages-design.md`](docs/plans/2026-07-08-item-ssr-pages-design.md)。
-
-**SEO 静态页线 — 遗留低优**（2026-07-09 `/i/` 全量内容页收尾整理；随 P0 PR #161 / 封面 #162 #163 / item SSR #171 #172 产生。运维背景见 `docs/operations.md` §「SEO 静态页运维」）：
-- [ ] **`/i/` 页生成未接 IndexNow**（增强项，值得做）：日报静态页生成后会 ping IndexNow（Bing/Yandex），但 3.2 万个 `/i/` 页目前只靠 sitemap + 自然抓取被发现。给 `generateItemPage` / `backfillItemPages` 收尾加批量 IndexNow ping（一批 ≤1 万 URL），加速 Bing/Yandex 侧收录。位置 `worker/src/seo/item-page-run.ts`
-- [ ] **大 README > 40KB 截断链 prod 未触发**（非缺陷，休眠）：`GH_README_MAX_CHARS=40000` 截断 + 「在 GitHub 查看完整 README →」链代码正确且已单测，但 prod gh chosen readme 最大仅 ~2.9 万字 < 阈值（over40k=0）→ 路径当前休眠。未来出现超大 README 自动生效，无需处理，仅记录。位置 `worker/src/seo/item-body.ts` gh 分支
-- [ ] **外链形态的源级通用封面簇未清**（PR #163 rollout 遗留，2026-07-06）：`blog-cover-generic-sweep` 判簇谓词只扫 R2 形态 cover_image，prod 存量里 techcrunch favicon ×27、the-verge RSS 头像 ×13 等**外链**通用封面在范围外。日报页 / `/i/` 页不受影响（渲染层只认 /r/），但前端 BlogCard/抽屉直读 cover_image 会显示这些外链 favicon/头像。修法：sweep 谓词放宽到外链形态一并判簇清空（清后自动进 og-backfill 候选）。位置 `worker/src/media-r2.ts` generic-sweep SQL
-- [ ] **日报页 hf-paper / gh 源缩略图仍是外链**（既有行为非回归，2026-07-06 记录）：最新日报页 21 张外链 img 全部来自 HF 论文缩略图（20）+ GitHub banner（1），有防盗链/失效风险且不在 news 封面质量门范围。后续可评估迁 R2 或日报页降级无图。位置 `worker/src/digest/render.ts` 各源 cover 路径
-- [ ] **PH 3 条顽固翻译失败待自愈**（WorkBuddy / DocsAlot / TryCase，均 07-06 入库）：`ph-description-translate` 反复重选谓词但翻译失败（PR 已知 Minor），日报页 / `/i/ph/` 页已用中文 `ai_summary` 兜底 collapse 单段、无用户可见影响；后续自动翻 step 可能自愈，暂不手动处理
-- [ ] **gitleaks 测试桩假 key 误报（加 `.gitleaksignore`）**：`worker/src/seo-routes.test.ts` 用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报，main 上 Secret Scan 长期红均为此。给 allowlist 加 `worker/src/*.test.ts` 豁免或加 `.gitleaksignore`
-- [ ] **podcast timeline 数据侧回填**（enrichment 事，非 SSR 渲染 bug）：全站 792 条 podcast 只 115 条（~15%）有 `timeline`（话题脉络），有值的 SSR / 抽屉才渲染话题脉络。`renderPodcast` 已对齐抽屉（补渲 timeline 的 point/speaker + 嘉宾区），但覆盖率靠 enrichment 回填 timeline 提升，与本 SEO 线代码无关。`chapters` 字段全站 0 条（从没填过），优先级更低
+**低优技术债**（随 P0 PR #161 / 封面修复 PR #162 产生）：
+- [ ] **gitleaks / secret-scan allowlist 收编 `worker/src/seo-routes.test.ts` 测试桩误报**：该测试用 `INDEXNOW_KEY: 'abc123def456'` / `'realkey'` 等假 key 桩，形似 secret 会被 `gitleaks`（`.gitleaks.toml` / `.github/workflows/secret-scan.yml`）误报。给 `.gitleaks.toml` 的 allowlist 加 `worker/src/*.test.ts`（或该文件路径）豁免，避免后续 CI secret-scan 假红。2026-07-06 复核：main 上 Secret Scan 长期红均为此误报，建议顺手加 `.gitleaksignore`
 - [ ] **封面质量门的不可 probe 格式兜底误留**（PR #162 遗留）：ico/webp/avif 无法读尺寸时走「>8KB 即通过」兜底，导致 48×48 `.ico` 被误留为封面（prod 实测 7 条 items）。可选收紧：`.ico` 扩展名直接拒，或 probe 失败即拒（代价是误杀部分 webp 正常封面）。位置 `worker/src/media-r2.ts` 质量门函数
-- [ ] **`mode=daily-page&backfill=1` 单请求跑不完全量**：worker 时限 / 香港 60s 下单请求只跑到部分日期即截停，目前靠外层单日循环兜底（`&date=` 逐日）。可加游标参数（`&from=YYYY-MM-DD`）或内部分批 `waitUntil`，位置 `worker/src/digest/daily-page-run.ts`
+- [ ] **`mode=daily-page&backfill=1` 单请求跑不完全量**：worker 时限下 36 页只跑到 ~20 页即截停（2026-07-06 实测），目前靠单日循环兜底。可加游标参数（`&from=YYYY-MM-DD`）或内部分批 `waitUntil`，位置 `worker/src/digest/daily-page-run.ts`
 
 **关键事实**（CF 24h 已抓数据，未做任何 GEO 优化）：AI Assistant 124 次 / AI Search 59 次 / AI Crawler 23 次 / Search Engine 仅 5 次 — AI bot 已主动来抓，但 SPA 没 SSR 抓到的是空壳，引用质量为零。
 
