@@ -31,3 +31,12 @@ test("drawer completes an asymmetric exit before ordinary close", () => {
   assert.match(source, /requestClose/);
   assert.match(source, /onClick=\{requestClose\}/);
 });
+
+test("drawer restores its visible position when closing back to an earlier depth", () => {
+  assert.match(source, /drawerActivationMode/);
+  assert.match(source, /closeTimerRef\.current = null/);
+  assert.match(
+    source,
+    /\[open, item\?\.id, depth, applyDrawerPosition\]/,
+  );
+});

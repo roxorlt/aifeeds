@@ -21,7 +21,7 @@ import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordi
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
 import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
-import { shouldReduceMotion } from "./lib/motion";
+import { shouldReduceMotion, watchTransformTransition } from "./lib/motion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { initTelemetry, track, EVENTS } from "./lib/telemetry";
 import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
@@ -321,7 +321,10 @@ function DashboardHome() {
   useEffect(() => {
     if (!isNarrow) return;
     const raf = requestAnimationFrame(() => {
-      resetInkToActive(filter, !isFirstPillSyncRef.current);
+      resetInkToActive(
+        filter,
+        !isFirstPillSyncRef.current && !shouldReduceMotion(),
+      );
       isFirstPillSyncRef.current = false;
     });
     return () => cancelAnimationFrame(raf);
@@ -345,7 +348,7 @@ function DashboardHome() {
       h.style.transform = `translateY(${-ratio * 100}%)`;
       h.style.opacity = `${1 - ratio}`;
     };
-    if (!isNarrow) {
+    if (!isNarrow || shouldReduceMotion()) {
       hideRatioRef.current = 0;
       apply(0);
       return;
@@ -403,6 +406,9 @@ function DashboardHome() {
     let active = false;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
     let currentSide: 'left' | 'right' | null = null;
+    const reduceMotion = shouldReduceMotion();
+    let disposePendingSettle: (() => void) | null = null;
+    let postSwitchRaf = 0;
     // R22: 删 lockBody/unlockBody. 架构改造后 PTR 不存在 (body 永久 fixed),
     // 不需要 swipe 期间额外 lock #root (反而拦了 vertical scroll, PM 反馈
     // "竖直方向无法上划"). horizontal swipe 期间 #root vertical scroll 跟
@@ -435,6 +441,31 @@ function DashboardHome() {
         adj.style.transform = '';
       }
     };
+    const cleanupAdjacent = () => {
+      currentSide = null;
+      setSwipeAdjacent(null);
+    };
+    const cancelPendingSettle = () => {
+      disposePendingSettle?.();
+      disposePendingSettle = null;
+      if (postSwitchRaf) cancelAnimationFrame(postSwitchRaf);
+      postSwitchRaf = 0;
+    };
+    const settleTransform = (onComplete: () => void) => {
+      cancelPendingSettle();
+      disposePendingSettle = watchTransformTransition(el, {
+        fallbackMs: 260,
+        onComplete: () => {
+          disposePendingSettle = null;
+          onComplete();
+        },
+        onCancel: () => {
+          disposePendingSettle = null;
+          resetTransform();
+          cleanupAdjacent();
+        },
+      });
+    };
 
     const onStart = (e: TouchEvent) => {
       const target = e.target as HTMLElement | null;
@@ -445,6 +476,9 @@ function DashboardHome() {
       if (target.closest('[data-no-swipe-tab]')) return;
       const t0 = e.touches[0];
       if (t0.clientX < 24) return;
+      cancelPendingSettle();
+      resetTransform();
+      cleanupAdjacent();
       startX = t0.clientX;
       startY = t0.clientY;
       startT = Date.now();
@@ -490,6 +524,7 @@ function DashboardHome() {
         // + lockBody hack (它们反而拦了 #root native vertical scroll, 导致 PM
         // 反馈竖直方向上划失效). horizontal 锁定后只跟手 translate 即可.
         if (e.cancelable) e.preventDefault();
+        if (reduceMotion) return;
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
@@ -519,10 +554,6 @@ function DashboardHome() {
       }
     };
     const onEnd = (e: TouchEvent) => {
-      const cleanupAdjacent = () => {
-        currentSide = null;
-        setSwipeAdjacent(null);
-      };
       if (!active || direction !== 'horizontal') {
         active = false;
         resetTransform();
@@ -553,18 +584,34 @@ function DashboardHome() {
         ? Math.min(idx + 1, tabs.length - 1)
         : Math.max(idx - 1, 0));
 
+      if (reduceMotion) {
+        resetTransform();
+        cleanupAdjacent();
+        if (shouldSwitch && nextIdx !== idx) {
+          const nextKey = tabs[nextIdx].key;
+          track(EVENTS.SOURCE_FILTER_CHANGE, {
+            from_id: cur,
+            to_id: nextKey,
+            method: 'swipe',
+          });
+          switchChannelRef.current(nextKey);
+          resetInkToActive(nextKey, false);
+        } else {
+          resetInkToActive(cur, false);
+        }
+        return;
+      }
+
       if (!shouldSwitch || nextIdx === idx) {
         // 弹回 0 — main + adjacent 同步 animate 回原位
         applyMainTransform(0, true);
         applyAdjacentTransform(0, true);
         // 墨汁动效回弹到 from-chip baseline (transition 220ms)
         resetInkToActive(cur, true);
-        const onTransitionEnd = () => {
-          el.removeEventListener('transitionend', onTransitionEnd);
+        settleTransform(() => {
           resetTransform();
           cleanupAdjacent();
-        };
-        el.addEventListener('transitionend', onTransitionEnd);
+        });
         return;
       }
       // animate 切换: main 滑到 ±width, adjacent 滑到 0 (屏内中央, 跟手紧贴)
@@ -576,8 +623,7 @@ function DashboardHome() {
       // 墨汁动效落到 to-chip baseline (跟 main 同 220ms 节奏 — useEffect [filter]
       // 也会 setFilter 后跑一次, 但状态已 reset 同位置, 重复 set 无视觉变化)
       resetInkToActive(tabs[nextIdx].key, true);
-      const onTransitionEnd = () => {
-        el.removeEventListener('transitionend', onTransitionEnd);
+      settleTransform(() => {
         track(EVENTS.SOURCE_FILTER_CHANGE, {
           from_id: cur,
           to_id: tabs[nextIdx].key,
@@ -589,17 +635,18 @@ function DashboardHome() {
         // 等 React commit 用 raf 双 buffer, 再 resetTransform + cleanup adjacent,
         // overlay 已经盖住 viewport 时 unmount 不闪
         switchChannelRef.current(tabs[nextIdx].key);
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
+        postSwitchRaf = requestAnimationFrame(() => {
+          postSwitchRaf = requestAnimationFrame(() => {
+            postSwitchRaf = 0;
             resetTransform();
             cleanupAdjacent();
           });
         });
-      };
-      el.addEventListener('transitionend', onTransitionEnd);
+      });
     };
     const onCancel = () => {
-      if (active && direction === 'horizontal') {
+      cancelPendingSettle();
+      if (active && direction === 'horizontal' && !reduceMotion) {
         applyMainTransform(0, true);
         applyAdjacentTransform(0, true);
         // 墨汁动效回弹到原 chip
@@ -618,12 +665,14 @@ function DashboardHome() {
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
+      cancelPendingSettle();
+      resetTransform();
       el.removeEventListener('touchstart', onStart);
       el.removeEventListener('touchmove', onMove);
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };
-  }, [isNarrow]);
+  }, [isNarrow, renderInkBetween, resetInkToActive]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores

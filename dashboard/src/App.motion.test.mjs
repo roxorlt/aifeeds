@@ -40,3 +40,23 @@ test("reduced motion makes channel focus movement immediate", () => {
   assert.match(source, /behavior: shouldReduceMotion\(\) \? "auto" : "smooth"/);
   assert.match(css, /\.motion-channel-pill[\s\S]*transition:\s*none\s*!important/);
 });
+
+test("reduced motion keeps the mobile header visible", () => {
+  assert.match(source, /if \(!isNarrow \|\| shouldReduceMotion\(\)\) \{/);
+  assert.match(source, /hideRatioRef\.current = 0;[\s\S]*apply\(0\);/);
+});
+
+test("reduced motion changes channels without swipe or pill transforms", () => {
+  assert.match(source, /const reduceMotion = shouldReduceMotion\(\);/);
+  assert.match(source, /if \(reduceMotion\) return;[\s\S]*applyMainTransform\(dampened, false\)/);
+  assert.match(
+    source,
+    /if \(reduceMotion\) \{[\s\S]*switchChannelRef\.current\([\s\S]*resetInkToActive\([\s\S]*false\);[\s\S]*return;/,
+  );
+});
+
+test("channel swipe settle is cancellable and does not own raw transition listeners", () => {
+  assert.match(source, /watchTransformTransition/);
+  assert.match(source, /cancelPendingSettle\(\)/);
+  assert.doesNotMatch(source, /el\.addEventListener\('transitionend', onTransitionEnd\)/);
+});

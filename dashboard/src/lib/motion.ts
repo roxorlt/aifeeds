@@ -41,3 +41,76 @@ export function shouldCommitDismiss({
   const velocity = distance / Math.max(elapsedMs, 1);
   return distance >= deliberateDistance || (distance >= 20 && velocity > 0.11);
 }
+
+export type DrawerActivationMode = "closed" | "enter" | "restore";
+
+export function drawerActivationMode(
+  wasOpen: boolean,
+  open: boolean,
+): DrawerActivationMode {
+  if (!open) return "closed";
+  return wasOpen ? "restore" : "enter";
+}
+
+interface TransformTransitionOptions {
+  fallbackMs: number;
+  onComplete: () => void;
+  onCancel?: () => void;
+  setTimeoutFn?: (callback: () => void, delay: number) => number;
+  clearTimeoutFn?: (id: number) => void;
+}
+
+/**
+ * Wait for one element's transform transition without accepting bubbled child
+ * events. The returned disposer is intentionally silent so a new gesture can
+ * invalidate an old settle without running either stale callback.
+ */
+export function watchTransformTransition(
+  target: EventTarget,
+  {
+    fallbackMs,
+    onComplete,
+    onCancel,
+    setTimeoutFn = (callback, delay) => window.setTimeout(callback, delay),
+    clearTimeoutFn = (id) => window.clearTimeout(id),
+  }: TransformTransitionOptions,
+): () => void {
+  let active = true;
+  let fallbackId: number | null = null;
+
+  const cleanup = () => {
+    target.removeEventListener("transitionend", handleEnd);
+    target.removeEventListener("transitioncancel", handleCancel);
+    if (fallbackId !== null) clearTimeoutFn(fallbackId);
+    fallbackId = null;
+  };
+  const isOwnTransform = (event: Event) => (
+    event.target === target
+    && (event as TransitionEvent).propertyName === "transform"
+  );
+  const complete = () => {
+    if (!active) return;
+    active = false;
+    cleanup();
+    onComplete();
+  };
+  function handleEnd(event: Event) {
+    if (isOwnTransform(event)) complete();
+  }
+  function handleCancel(event: Event) {
+    if (!active || !isOwnTransform(event)) return;
+    active = false;
+    cleanup();
+    onCancel?.();
+  }
+
+  target.addEventListener("transitionend", handleEnd);
+  target.addEventListener("transitioncancel", handleCancel);
+  fallbackId = setTimeoutFn(complete, fallbackMs);
+
+  return () => {
+    if (!active) return;
+    active = false;
+    cleanup();
+  };
+}

@@ -18,7 +18,12 @@ import { useAuthStore } from "../lib/authStore";
 import { VideoColumnProvider } from "../lib/videoColumnContext";
 import type { CreateShareResponse } from "../lib/share";
 import type { Item, ItemExtra } from "../types";
-import { DRAWER_EASE, shouldCommitDismiss, shouldReduceMotion } from "../lib/motion";
+import {
+  DRAWER_EASE,
+  drawerActivationMode,
+  shouldCommitDismiss,
+  shouldReduceMotion,
+} from "../lib/motion";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
 const DRAWER_ENTER_MS = 260;
@@ -50,6 +55,7 @@ export function TweetDrawer() {
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
+  const drawerWasOpenRef = useRef(false);
 
   const applyDrawerPosition = useCallback((x: number, duration: number) => {
     const aside = asideRef.current;
@@ -81,18 +87,31 @@ export function TweetDrawer() {
   }, [applyDrawerPosition, close]);
 
   useEffect(() => {
-    if (!open) return;
+    const clearCloseTimer = () => {
+      if (closeTimerRef.current === null) return;
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    };
+    const activation = drawerActivationMode(drawerWasOpenRef.current, open);
+    drawerWasOpenRef.current = open;
     closingRef.current = false;
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    clearCloseTimer();
+
+    if (activation === "closed") return clearCloseTimer;
+    if (activation === "restore" || shouldReduceMotion()) {
+      applyDrawerPosition(0, 0);
+      return clearCloseTimer;
+    }
+
     applyDrawerPosition(window.innerWidth, 0);
     const raf = requestAnimationFrame(() => {
-      applyDrawerPosition(0, shouldReduceMotion() ? 0 : DRAWER_ENTER_MS);
+      applyDrawerPosition(0, DRAWER_ENTER_MS);
     });
     return () => {
       cancelAnimationFrame(raf);
-      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+      clearCloseTimer();
     };
-  }, [open, applyDrawerPosition]);
+  }, [open, item?.id, depth, applyDrawerPosition]);
   // Tracks whether the in-body title (owner/repo for GH, etc.) has scrolled
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
