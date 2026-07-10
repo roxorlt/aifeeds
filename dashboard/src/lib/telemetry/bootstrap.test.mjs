@@ -43,3 +43,72 @@ test("global telemetry initializes before an immediately replayed buffered API e
     path: "/settings?tab=account",
   });
 });
+
+function bootstrapDeps(overrides = {}) {
+  return {
+    endpoint: "https://api.ai-feeds.com/api/track",
+    events: { APP_OPEN: "app_open", PAGE_VIEW: "page_view" },
+    initTelemetry: () => {},
+    installVitals: () => {},
+    installNavTiming: () => {},
+    installImgTiming: () => {},
+    installApiTiming: () => {},
+    installErrorHandlers: () => {},
+    track: () => {},
+    location: { pathname: "/", search: "" },
+    referrer: "",
+    ...overrides,
+  };
+}
+
+test("a throwing telemetry init fails open, disables installers, and remains idempotent", () => {
+  const calls = [];
+  const bootstrap = createTelemetryBootstrap(bootstrapDeps({
+    initTelemetry: () => {
+      calls.push("init");
+      throw new Error("storage unavailable");
+    },
+    installVitals: () => calls.push("vitals"),
+    track: (type) => calls.push(type),
+  }));
+
+  assert.doesNotThrow(() => bootstrap());
+  assert.doesNotThrow(() => bootstrap());
+  assert.deepEqual(calls, ["init"]);
+});
+
+test("a throwing installer is isolated while later installers and startup events continue", () => {
+  const calls = [];
+  const bootstrap = createTelemetryBootstrap(bootstrapDeps({
+    initTelemetry: () => calls.push("init"),
+    installErrorHandlers: () => calls.push("errors"),
+    installVitals: () => {
+      calls.push("vitals");
+      throw new Error("PerformanceObserver unavailable");
+    },
+    installNavTiming: () => calls.push("nav"),
+    installImgTiming: () => calls.push("img"),
+    installApiTiming: () => calls.push("api"),
+    track: (type) => calls.push(type),
+  }));
+
+  assert.doesNotThrow(() => bootstrap());
+  assert.doesNotThrow(() => bootstrap());
+  assert.deepEqual(calls, [
+    "init", "errors", "vitals", "nav", "img", "api", "app_open", "page_view",
+  ]);
+});
+
+test("a throwing startup track call cannot abort the next event or escape bootstrap", () => {
+  const tracked = [];
+  const bootstrap = createTelemetryBootstrap(bootstrapDeps({
+    track: (type) => {
+      tracked.push(type);
+      if (type === "app_open") throw new Error("queue rejected event");
+    },
+  }));
+
+  assert.doesNotThrow(() => bootstrap());
+  assert.doesNotThrow(() => bootstrap());
+  assert.deepEqual(tracked, ["app_open", "page_view"]);
+});

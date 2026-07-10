@@ -11,6 +11,7 @@ export const PERFORMANCE_EVENT_TYPES = [
   'perf_api', 'feed_ready',
 ] as const;
 const PERFORMANCE_EVENT_TYPE_SET = new Set<string>(PERFORMANCE_EVENT_TYPES);
+const NETWORK_EFFECTIVE_TYPES = new Set(['slow-2g', '2g', '3g', '4g']);
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
@@ -73,6 +74,11 @@ export function prepareEventPayload(
     payload = { ...(clientPayload ?? {}) };
     delete payload.edge_country;
     delete payload.edge_colo;
+    // NetworkInformation.effectiveType is a fixed browser enum. The public ingest
+    // endpoint must not persist arbitrary strings that later reach the admin UI.
+    if (typeof payload.nettype !== 'string' || !NETWORK_EFFECTIVE_TYPES.has(payload.nettype)) {
+      delete payload.nettype;
+    }
     const country = trustedEdgeCode(cf?.country, /^[A-Z0-9]{2}$/);
     const colo = trustedEdgeCode(cf?.colo, /^[A-Z0-9]{3}$/);
     if (country) payload.edge_country = country;

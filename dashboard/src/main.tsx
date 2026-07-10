@@ -34,20 +34,24 @@ import { createTelemetryBootstrap } from './lib/telemetry/bootstrap'
 // Global, route-independent telemetry bootstrap. This runs before React so a buffered
 // Resource Timing replay can never beat queue/session initialization, including on
 // /search, /settings, /subscribe and other routes that do not mount DashboardHome.
-const bootstrapTelemetry = createTelemetryBootstrap({
-  endpoint: TRACK_ENDPOINT,
-  events: EVENTS,
-  initTelemetry,
-  installVitals,
-  installNavTiming,
-  installImgTiming,
-  installApiTiming,
-  installErrorHandlers,
-  track,
-  location: window.location,
-  referrer: document.referrer,
-})
-bootstrapTelemetry()
+try {
+  const bootstrapTelemetry = createTelemetryBootstrap({
+    endpoint: TRACK_ENDPOINT,
+    events: EVENTS,
+    initTelemetry,
+    installVitals,
+    installNavTiming,
+    installImgTiming,
+    installApiTiming,
+    installErrorHandlers,
+    track,
+    location: window.location,
+    referrer: document.referrer,
+  })
+  bootstrapTelemetry()
+} catch {
+  // Defense in depth: telemetry must never prevent the product UI from mounting.
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

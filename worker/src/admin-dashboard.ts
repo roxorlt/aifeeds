@@ -156,7 +156,13 @@ export function performanceCohortWhere(cohort: PerformanceCohortName, alias: str
 }
 
 interface PerformanceCohortData {
-  overall: Array<{ metric: string; p50: number; p75: number; p95: number; samples: number }>;
+  overall: Array<{
+    metric: string;
+    p50: number | null;
+    p75: number | null;
+    p95: number | null;
+    samples: number | null;
+  }>;
   slices: unknown[];
 }
 
@@ -456,33 +462,6 @@ async function metricSessionDuration(env: Env) {
   return { buckets: rs.results, avg_sec: overall?.avg_sec ?? 0, total_sessions: overall?.total_sessions ?? 0 };
 }
 
-// load-perf: 页面打开耗时。perf_nav 各相位 + FCP/LCP 的 p50/p75/p95（7 天窗口）。
-// pctl: 单个事件单个 payload 字段的分位数。SQLite 无内置 percentile —— 用 window
-// function 先按 v 升序编号（ROW_NUMBER），再挑第 ceil(pct*n) 名（CAST(pct*n AS INT)+1）。
-// path 来自下方 metricLoadPerf 的 hardcoded 名单（非用户输入），直接拼进 json_extract 安全。
-async function pctl(
-  env: Env,
-  eventType: string,
-  path: string,
-  cohort: PerformanceCohortName,
-) {
-  const cohortWhere = performanceCohortWhere(cohort, 'e');
-  const row = await env.DB.prepare(`
-    WITH vals AS (
-      SELECT CAST(json_extract(e.event_payload,'$.${path}') AS REAL) AS v
-      FROM events e
-      WHERE e.event_type=? AND e.occurred_at > (strftime('%s','now')-7*86400)*1000
-        AND ${cohortWhere} AND json_extract(e.event_payload,'$.${path}') IS NOT NULL
-    ),
-    ranked AS (SELECT v, COUNT(*) OVER() AS n, ROW_NUMBER() OVER(ORDER BY v) AS rn FROM vals)
-    SELECT MAX(CASE WHEN rn=CAST(0.50*n AS INT)+1 THEN v END) AS p50,
-           MAX(CASE WHEN rn=CAST(0.75*n AS INT)+1 THEN v END) AS p75,
-           MAX(CASE WHEN rn=CAST(0.95*n AS INT)+1 THEN v END) AS p95,
-           MAX(n) AS samples FROM ranked
-  `).bind(eventType).first<{ p50: number; p75: number; p95: number; samples: number }>();
-  return row ?? { p50: 0, p75: 0, p95: 0, samples: 0 };
-}
-
 const LOAD_PERF_METRICS: [string, string, string][] = [
   ['ttfb', 'perf_nav', 'ttfb'], ['response', 'perf_nav', 'response'],
   ['dom', 'perf_nav', 'dom_interactive'], ['dcl', 'perf_nav', 'dcl'],
@@ -491,17 +470,66 @@ const LOAD_PERF_METRICS: [string, string, string][] = [
   ['img', 'perf_img', 'dur'],
 ];
 
+const LOAD_PERF_METRIC_DEFS_SQL = LOAD_PERF_METRICS
+  .map(([metric, eventType, jsonPath], order) =>
+    `('${metric}', '${eventType}', '${jsonPath}', ${order})`)
+  .join(',\n        ');
+
 async function loadPerformanceCohort(env: Env, cohort: PerformanceCohortName): Promise<PerformanceCohortData> {
   const cohortWhere = performanceCohortWhere(cohort, 'e');
   const [overall, slices] = await Promise.all([
-    Promise.all(LOAD_PERF_METRICS.map(async ([name, type, path]) => ({
-      metric: name,
-      ...(await pctl(env, type, path, cohort)),
-    }))),
+    env.DB.prepare(`
+      WITH metric_defs(metric, event_type, json_path, sort_order) AS (
+        VALUES ${LOAD_PERF_METRIC_DEFS_SQL}
+      ),
+      recent AS MATERIALIZED (
+        SELECT e.event_type, e.event_payload
+        FROM events e
+        WHERE e.event_type IN ('perf_nav', 'perf_fcp', 'perf_lcp', 'perf_img')
+          AND e.occurred_at > (strftime('%s','now')-7*86400)*1000
+          AND ${cohortWhere}
+      ),
+      vals AS (
+        SELECT defs.metric, defs.sort_order,
+               CAST(json_extract(recent.event_payload, '$.' || defs.json_path) AS REAL) AS v
+        FROM metric_defs defs
+        JOIN recent ON recent.event_type = defs.event_type
+        WHERE json_extract(recent.event_payload, '$.' || defs.json_path) IS NOT NULL
+      ),
+      ranked AS (
+        SELECT metric, sort_order, v,
+               COUNT(*) OVER(PARTITION BY metric) AS n,
+               ROW_NUMBER() OVER(PARTITION BY metric ORDER BY v) AS rn
+        FROM vals
+      )
+      -- Preserve the dashboard's historical floor(p*n)+1 selector exactly. Fixing
+      -- it to nearest-rank is a separate product-metric migration, not this query refactor.
+      SELECT defs.metric,
+             MAX(CASE WHEN ranked.rn=CAST(0.50*ranked.n AS INT)+1 THEN ranked.v END) AS p50,
+             MAX(CASE WHEN ranked.rn=CAST(0.75*ranked.n AS INT)+1 THEN ranked.v END) AS p75,
+             MAX(CASE WHEN ranked.rn=CAST(0.95*ranked.n AS INT)+1 THEN ranked.v END) AS p95,
+             MAX(ranked.n) AS samples
+      FROM metric_defs defs
+      LEFT JOIN ranked ON ranked.metric = defs.metric
+      GROUP BY defs.metric, defs.sort_order
+      ORDER BY defs.sort_order
+    `).all<{
+      metric: string;
+      p50: number | null;
+      p75: number | null;
+      p95: number | null;
+      samples: number | null;
+    }>(),
     env.DB.prepare(`
       WITH base AS (
         SELECT CASE WHEN json_extract(e.event_payload,'$.is_wechat')=1 THEN 'wechat' ELSE 'other' END AS client,
-               COALESCE(json_extract(e.event_payload,'$.nettype'),'unknown') AS net,
+               CASE json_extract(e.event_payload,'$.nettype')
+                 WHEN 'slow-2g' THEN 'slow-2g'
+                 WHEN '2g' THEN '2g'
+                 WHEN '3g' THEN '3g'
+                 WHEN '4g' THEN '4g'
+                 ELSE 'unknown'
+               END AS net,
                CAST(json_extract(e.event_payload,'$.load') AS REAL) AS load_ms,
                CAST(json_extract(e.event_payload,'$.ttfb') AS REAL) AS ttfb_ms
         FROM events e WHERE e.event_type='perf_nav'
@@ -511,19 +539,19 @@ async function loadPerformanceCohort(env: Env, cohort: PerformanceCohortName): P
       FROM base GROUP BY client, net HAVING samples >= 3 ORDER BY avg_load DESC
     `).all(),
   ]);
-  return { overall, slices: slices.results };
+  return { overall: overall.results, slices: slices.results };
 }
 
-async function metricLoadPerf(env: Env) {
+export async function metricLoadPerf(env: Env) {
   // 各里程碑 → [展示名, 事件类型, payload 字段]。perf_nav 拆相位（ttfb/dom/dcl/response/load），
   // FCP/LCP 来自 web-vitals 各自的 value 字段。
   // 按时间线顺序排:除 response(正文下载段)/img(单图,独立)外,其余都是
   // 「从点击起的累计时刻」,后一根天然 ≥ 前一根 — 总耗时 = load 那一根,不能相加。
-  const [allClean, engaged, synthetic] = await Promise.all([
-    loadPerformanceCohort(env, 'all_clean'),
-    loadPerformanceCohort(env, 'engaged'),
-    loadPerformanceCohort(env, 'synthetic'),
-  ]);
+  // D1 executes queries on a single primary. Process cohorts sequentially and run
+  // only the two independent scans inside one cohort concurrently (6 queries total).
+  const allClean = await loadPerformanceCohort(env, 'all_clean');
+  const engaged = await loadPerformanceCohort(env, 'engaged');
+  const synthetic = await loadPerformanceCohort(env, 'synthetic');
   return shapePerformanceAnalyticsOutput(allClean, engaged, synthetic);
 }
 
@@ -1863,7 +1891,7 @@ async function loadLoadPerf() {
       } else {
         tb.innerHTML = slices.map(r =>
           '<tr><td>' + (r.client === 'wechat' ? '微信' : '其他') + '</td>'
-          + '<td>' + (r.net || 'unknown') + '</td>'
+          + '<td>' + esc(r.net || 'unknown') + '</td>'
           + '<td class="num">' + fmt(r.avg_load) + 'ms</td>'
           + '<td class="num">' + fmt(r.avg_ttfb) + 'ms</td>'
           + '<td class="num">' + fmt(r.samples) + '</td></tr>'

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
-import { fileURLToPath } from 'node:url';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { fileURLToPath, URL as NodeURL } from 'node:url';
 
 import {
   PERFORMANCE_EVENT_TYPES,
@@ -11,11 +11,15 @@ import {
 import {
   DASHBOARD_HTML,
   PERFORMANCE_ENGAGEMENT_EVENTS,
+  metricLoadPerf,
   performanceCohortWhere,
   shapePerformanceAnalyticsOutput,
 } from './admin-dashboard';
 
-const adminDashboardSource = fs.readFileSync(fileURLToPath(new URL('./admin-dashboard.ts', import.meta.url)), 'utf8');
+const adminDashboardSource = fs.readFileSync(
+  fileURLToPath(new NodeURL('./admin-dashboard.ts', import.meta.url)),
+  'utf8',
+);
 
 describe('performance event ingest', () => {
   it('keeps all performance event contracts in the geography-enrichment set', () => {
@@ -25,10 +29,11 @@ describe('performance event ingest', () => {
   });
 
   it('overwrites untrusted edge fields with coarse request.cf country and colo only', () => {
+    const edgeProperties = { country: 'CN', colo: 'HKG', city: 'Hong Kong', latitude: '22.3' };
     const prepared = prepareEventPayload(
       'perf_lcp',
       { client_field: 'kept', edge_country: 'US', edge_colo: 'SJC' },
-      { country: 'CN', colo: 'HKG', city: 'Hong Kong', latitude: '22.3' },
+      edgeProperties,
     );
     expect(prepared.ok).toBe(true);
     if (!prepared.ok || !prepared.value) throw new Error('missing payload');
@@ -48,6 +53,25 @@ describe('performance event ingest', () => {
       .toEqual({ ok: true, value: '{"edge_country":"client-value"}' });
     expect(prepareEventPayload('perf_nav', { content: 'x'.repeat(80) }, { country: 'CN', colo: 'HKG' }, 64))
       .toEqual({ ok: false, error: 'payload too large' });
+  });
+
+  it('normalizes untrusted performance nettype while preserving Network Information API enums', () => {
+    const attack = '<img src=x onerror="globalThis.__adminXss=1">';
+    const malicious = prepareEventPayload('perf_nav', { nettype: attack, load: 120 }, undefined);
+    expect(malicious.ok).toBe(true);
+    if (!malicious.ok || !malicious.value) throw new Error('missing malicious payload result');
+    const payload = JSON.parse(malicious.value);
+    expect(payload.nettype).not.toBe(attack);
+    expect(payload.nettype === undefined || payload.nettype === 'unknown').toBe(true);
+
+    for (const nettype of ['slow-2g', '2g', '3g', '4g']) {
+      const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
+      expect(prepared).toEqual({ ok: true, value: JSON.stringify({ nettype }) });
+    }
+    for (const nettype of ['4G', '', 4, { value: '4g' }]) {
+      const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
+      expect(prepared).toEqual({ ok: true, value: '{}' });
+    }
   });
 
   it('handleTrack stores trusted coarse geography produced after validation', async () => {
@@ -71,7 +95,12 @@ describe('performance event ingest', () => {
         events: [{
           type: 'perf_api',
           occurred_at: 1,
-          payload: { endpoint: 'items', edge_country: 'US', edge_colo: 'SJC' },
+          payload: {
+            endpoint: 'items',
+            nettype: '<img src=x onerror="globalThis.__adminXss=1">',
+            edge_country: 'US',
+            edge_colo: 'SJC',
+          },
         }],
       }),
     });
@@ -88,6 +117,132 @@ describe('performance event ingest', () => {
 });
 
 describe('load-performance cohorts', () => {
+  it('loads all cohorts with at most six real SQLite queries and preserves output contracts', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE events (
+        device_id TEXT NOT NULL,
+        user_id TEXT,
+        session_token_hash TEXT,
+        event_type TEXT NOT NULL,
+        event_payload TEXT,
+        page_path TEXT,
+        occurred_at INTEGER NOT NULL
+      );
+      CREATE TABLE identities (user_id TEXT, identity_value TEXT, unbound_at INTEGER);
+    `);
+    const insert = db.prepare(`
+      INSERT INTO events
+        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, occurred_at)
+      VALUES (?, NULL, ?, ?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    const legacyAttackNettype = '<img src=x onerror="globalThis.__adminXss=1">';
+    const addCohortDevice = (
+      cohort: 'ordinary' | 'engaged' | 'synthetic',
+      index: number,
+      base: number,
+    ) => {
+      const device = `${cohort}-${index}`;
+      const session = `session-${device}`;
+      const synthetic = cohort === 'synthetic' ? { traffic_kind: 'synthetic' } : {};
+      insert.run(device, session, 'perf_nav', JSON.stringify({
+        ...synthetic,
+        ttfb: base,
+        response: base + 1,
+        dom_interactive: base + 2,
+        dcl: base + 3,
+        load: base + 4,
+        is_wechat: 1,
+        nettype: cohort === 'ordinary' ? legacyAttackNettype : '4g',
+      }), '/', now + index);
+      insert.run(device, session, 'perf_fcp', JSON.stringify({ ...synthetic, value: base + 5 }), '/', now + index);
+      insert.run(device, session, 'perf_lcp', JSON.stringify({ ...synthetic, value: base + 6 }), '/', now + index);
+      if (cohort !== 'synthetic') {
+        insert.run(device, session, 'perf_img', JSON.stringify({ ...synthetic, dur: base + 7 }), '/', now + index);
+      }
+      if (cohort === 'engaged') {
+        insert.run(device, session, 'item_click', '{}', '/', now + index + 10);
+      }
+    };
+    [100, 200, 300, 400].forEach((base, index) => addCohortDevice('engaged', index, base));
+    [500, 600, 700, 800].forEach((base, index) => addCohortDevice('ordinary', index, base));
+    [10, 20, 30, 40].forEach((base, index) => addCohortDevice('synthetic', index, base));
+
+    let queryCount = 0;
+    let activeQueries = 0;
+    let maxActiveQueries = 0;
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const statement = db.prepare(sql);
+          let bindings: SQLInputValue[] = [];
+          const prepared = {
+            bind(...values: SQLInputValue[]) {
+              bindings = values;
+              return prepared;
+            },
+            async all() {
+              queryCount += 1;
+              activeQueries += 1;
+              maxActiveQueries = Math.max(maxActiveQueries, activeQueries);
+              await Promise.resolve();
+              try {
+                return { results: statement.all(...bindings) };
+              } finally {
+                activeQueries -= 1;
+              }
+            },
+            async first() {
+              queryCount += 1;
+              activeQueries += 1;
+              maxActiveQueries = Math.max(maxActiveQueries, activeQueries);
+              await Promise.resolve();
+              try {
+                return statement.get(...bindings);
+              } finally {
+                activeQueries -= 1;
+              }
+            },
+          };
+          return prepared;
+        },
+      },
+    };
+
+    const output = await metricLoadPerf(env as never);
+
+    expect(queryCount).toBe(6);
+    expect(maxActiveQueries).toBeLessThanOrEqual(2);
+    expect(Object.keys(output)).toEqual(['all_clean', 'engaged', 'synthetic', 'overall', 'slices']);
+    expect(output.overall).toBe(output.all_clean.overall);
+    expect(output.slices).toBe(output.all_clean.slices);
+    expect(output.all_clean.overall).toHaveLength(8);
+    expect(output.engaged.overall).toHaveLength(8);
+    expect(output.synthetic.overall).toHaveLength(8);
+    expect(output.engaged.overall.find((row) => row.metric === 'ttfb')).toEqual({
+      metric: 'ttfb', p50: 300, p75: 400, p95: 400, samples: 4,
+    });
+    expect(output.synthetic.overall.find((row) => row.metric === 'ttfb')).toEqual({
+      metric: 'ttfb', p50: 30, p75: 40, p95: 40, samples: 4,
+    });
+    expect(output.synthetic.overall.find((row) => row.metric === 'img')).toEqual({
+      metric: 'img', p50: null, p75: null, p95: null, samples: null,
+    });
+    expect(output.all_clean.slices).toEqual([
+      { client: 'wechat', net: 'unknown', samples: 4, avg_load: 654, avg_ttfb: 650 },
+      { client: 'wechat', net: '4g', samples: 4, avg_load: 254, avg_ttfb: 250 },
+    ]);
+    expect(JSON.stringify(output.all_clean.slices)).not.toContain(legacyAttackNettype);
+    expect(output.engaged.slices).toEqual([{
+      client: 'wechat', net: '4g', samples: 4, avg_load: 254, avg_ttfb: 250,
+    }]);
+    expect(output.synthetic.slices).toEqual([{
+      client: 'wechat', net: '4g', samples: 4, avg_load: 29, avg_ttfb: 25,
+    }]);
+    db.close();
+  });
+
   it('executes cohort SQL with two-valued marker logic on real SQLite rows', () => {
     const db = new DatabaseSync(':memory:');
     db.exec(`
@@ -173,9 +328,10 @@ describe('load-performance cohorts', () => {
   });
 
   it('returns named cohorts while retaining overall/slices compatibility aliases', () => {
-    const allClean = { overall: [{ metric: 'lcp', p75: 1000 }], slices: [{ client: 'other' }] };
-    const engaged = { overall: [{ metric: 'lcp', p75: 900 }], slices: [] };
-    const synthetic = { overall: [{ metric: 'lcp', p75: 300 }], slices: [] };
+    const row = (p75: number) => ({ metric: 'lcp', p50: p75, p75, p95: p75, samples: 1 });
+    const allClean = { overall: [row(1000)], slices: [{ client: 'other' }] };
+    const engaged = { overall: [row(900)], slices: [] };
+    const synthetic = { overall: [row(300)], slices: [] };
     const output = shapePerformanceAnalyticsOutput(allClean, engaged, synthetic);
     expect(output).toEqual({
       all_clean: allClean,
@@ -194,6 +350,20 @@ describe('load-performance cohorts', () => {
     expect(adminDashboardSource).toContain('d.all_clean || legacyCohort');
     expect(adminDashboardSource).toContain('button.disabled = !cohorts[key]');
     expect(adminDashboardSource).toContain("renderLoadPerfCohort('all_clean')");
+  });
+
+  it('escapes the untrusted network slice label before assigning table innerHTML', () => {
+    const attack = '<img src=x onerror="globalThis.__adminXss=1">';
+    expect(adminDashboardSource).toContain("esc(r.net || 'unknown')");
+    expect(adminDashboardSource).not.toContain("+ (r.net || 'unknown') +");
+
+    const escSource = DASHBOARD_HTML.match(/function esc\(s\) \{[^\n]+\}/)?.[0];
+    expect(escSource).toBeTruthy();
+    const escapeHtml = new Function(`${escSource}; return esc;`)() as (value: string) => string;
+    const rendered = escapeHtml(attack);
+    expect(rendered).not.toContain('<img');
+    expect(rendered).toContain('&lt;img');
+    expect((globalThis as Record<string, unknown>).__adminXss).toBeUndefined();
   });
 
   it('keeps the rendered embedded dashboard script syntactically valid', () => {

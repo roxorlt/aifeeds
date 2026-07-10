@@ -31,6 +31,8 @@ test("main bootstraps telemetry before React on every route and DashboardHome do
   const bootstrapAt = main.indexOf('bootstrapTelemetry()');
   const renderAt = main.indexOf('createRoot(');
   assert.ok(bootstrapAt >= 0 && renderAt >= 0 && bootstrapAt < renderAt);
+  assert.match(main, /try\s*\{\s*const bootstrapTelemetry = createTelemetryBootstrap\(/);
+  assert.match(main, /bootstrapTelemetry\(\)\s*\}\s*catch/);
   assert.doesNotMatch(main, /window\.addEventListener\('load', installApiObserver/);
   assert.doesNotMatch(app, /initTelemetry\(|installVitals\(|installNavTiming\(|installImgTiming\(|installErrorHandlers\(/);
   assert.match(vitals, /track\(EVENTS\.PERF_API, detail\)/);

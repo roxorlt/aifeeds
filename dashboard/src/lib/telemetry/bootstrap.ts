@@ -25,21 +25,46 @@ export function createTelemetryBootstrap(deps: TelemetryBootstrapDependencies): 
     installed = true;
 
     // Queue/session must exist before buffered Resource Timing can replay immediately.
-    deps.initTelemetry({ endpoint: deps.endpoint });
-    deps.installErrorHandlers();
-    deps.installVitals();
-    deps.installNavTiming();
-    deps.installImgTiming();
-    deps.installApiTiming();
+    // If init itself fails, the page's telemetry is disabled: observers must never
+    // replay into a queue/session that was not successfully initialized.
+    try {
+      deps.initTelemetry({ endpoint: deps.endpoint });
+    } catch {
+      return;
+    }
+
+    // Monitoring is strictly fail-open for the product UI. Each optional observer is
+    // isolated so one unsupported/browser-buggy API cannot suppress the others.
+    for (const install of [
+      deps.installErrorHandlers,
+      deps.installVitals,
+      deps.installNavTiming,
+      deps.installImgTiming,
+      deps.installApiTiming,
+    ]) {
+      try {
+        install();
+      } catch {
+        // Best-effort telemetry only; never block React startup.
+      }
+    }
 
     const params = new URLSearchParams(deps.location.search);
-    deps.track(deps.events.APP_OPEN, {
-      utm_source: params.get('utm_source') || undefined,
-      utm_campaign: params.get('utm_campaign') || undefined,
-      referrer: deps.referrer || undefined,
-    });
-    deps.track(deps.events.PAGE_VIEW, {
-      path: deps.location.pathname + deps.location.search,
-    });
+    try {
+      deps.track(deps.events.APP_OPEN, {
+        utm_source: params.get('utm_source') || undefined,
+        utm_campaign: params.get('utm_campaign') || undefined,
+        referrer: deps.referrer || undefined,
+      });
+    } catch {
+      // Keep the independent page_view attempt and the app startup alive.
+    }
+    try {
+      deps.track(deps.events.PAGE_VIEW, {
+        path: deps.location.pathname + deps.location.search,
+      });
+    } catch {
+      // Best-effort telemetry only; never block React startup.
+    }
   };
 }

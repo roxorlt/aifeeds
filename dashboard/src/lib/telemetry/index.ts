@@ -8,47 +8,47 @@ import { enqueue, initQueue, flush } from './queue';
 import { initSession, getSessionTokenHash, touchSession } from './session';
 import { installBeacon } from './beacon';
 import { EVENTS } from './event-types';
+import { createTelemetryLifecycle } from './runtime-state';
 import type { TelemetryEvent } from './types';
 
 export { EVENTS };
 export type { TelemetryEvent } from './types';
 
-let initialized = false;
+const lifecycle = createTelemetryLifecycle();
 
 export interface TelemetryInitOptions {
   endpoint: string;
 }
 
 export function initTelemetry(opts: TelemetryInitOptions): void {
-  if (initialized) return;
-  initialized = true;
+  lifecycle.initialize(() => {
+    initQueue({
+      endpoint: opts.endpoint,
+      sessionTokenHashGetter: getSessionTokenHash,
+    });
 
-  initQueue({
-    endpoint: opts.endpoint,
-    sessionTokenHashGetter: getSessionTokenHash,
+    initSession({
+      onStart: (s) => {
+        enqueue({
+          type: EVENTS.SESSION_START,
+          occurred_at: s.started_at,
+          page_path: getPagePath(),
+        });
+      },
+      onEnd: (s, durationMs) => {
+        enqueue({
+          type: EVENTS.SESSION_END,
+          occurred_at: s.last_activity_at,
+          page_path: getPagePath(),
+          payload: { duration_ms: durationMs },
+        });
+        // session_end 是关键事件，立即 flush 不等队列阈值
+        void flush();
+      },
+    });
+
+    installBeacon();
   });
-
-  initSession({
-    onStart: (s) => {
-      enqueue({
-        type: EVENTS.SESSION_START,
-        occurred_at: s.started_at,
-        page_path: getPagePath(),
-      });
-    },
-    onEnd: (s, durationMs) => {
-      enqueue({
-        type: EVENTS.SESSION_END,
-        occurred_at: s.last_activity_at,
-        page_path: getPagePath(),
-        payload: { duration_ms: durationMs },
-      });
-      // session_end 是关键事件，立即 flush 不等队列阈值
-      void flush();
-    },
-  });
-
-  installBeacon();
 }
 
 /**
@@ -60,23 +60,20 @@ export function track(
   payload?: Record<string, unknown>,
   options: { occurredAt?: number; pagePath?: string } = {},
 ): void {
-  if (!initialized) {
-    // 静默 drop —— init 之前的事件不上报，避免循环依赖
-    return;
-  }
+  lifecycle.runIfReady(() => {
+    touchSession();
 
-  touchSession();
+    const event: TelemetryEvent = {
+      type,
+      occurred_at: options.occurredAt ?? Date.now(),
+      page_path: options.pagePath ?? getPagePath(),
+    };
+    if (payload && Object.keys(payload).length > 0) {
+      event.payload = payload;
+    }
 
-  const event: TelemetryEvent = {
-    type,
-    occurred_at: options.occurredAt ?? Date.now(),
-    page_path: options.pagePath ?? getPagePath(),
-  };
-  if (payload && Object.keys(payload).length > 0) {
-    event.payload = payload;
-  }
-
-  enqueue(event);
+    enqueue(event);
+  });
 }
 
 function getPagePath(): string {
