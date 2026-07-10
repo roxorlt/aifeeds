@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
+import { installApiTiming } from './lib/telemetry/vitals'
 
 // Seed history so cold deep-links into item detail paths don't trap the back
 // button. Stack becomes ['/', '/<deep>'] → back returns to feed.
@@ -33,6 +34,12 @@ createRoot(document.getElementById('root')!).render(
     </BrowserRouter>
   </StrictMode>,
 )
+
+// App 的 telemetry effect 先完成初始化；load 后再用 buffered Resource Timing
+// 一次性补收首屏 API，避免 observer 回调早于 queue 初始化而静默丢样本。
+const installApiObserver = () => { installApiTiming() }
+if (document.readyState === 'complete') setTimeout(installApiObserver, 0)
+else window.addEventListener('load', installApiObserver, { once: true })
 
 // Service Worker:壳缓存,回访打开零网络秒出(public/sw.js)。load 之后才注册,
 // 不跟首屏抢任何资源。kill switch 两道:

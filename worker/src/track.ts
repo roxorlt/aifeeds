@@ -6,6 +6,12 @@ import { getClientIp } from './client-ip';
 
 // 与 dashboard/src/lib/telemetry/event-types.ts 保持一致
 // 任一端新增事件类型时两边都要改
+export const PERFORMANCE_EVENT_TYPES = [
+  'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb', 'perf_fcp', 'perf_nav', 'perf_img',
+  'perf_api', 'feed_ready',
+] as const;
+const PERFORMANCE_EVENT_TYPE_SET = new Set<string>(PERFORMANCE_EVENT_TYPES);
+
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
   'app_open', 'page_view', 'session_start', 'session_end',
@@ -27,7 +33,7 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'video_effective_play',
   // 性能(web-vitals + navigation timing)。perf_fcp 之前漏了白名单被丢弃 ——
   // iOS 微信 WKWebView 不支持 LCP observer,FCP 是该设备唯一的 paint 信号,必须收。
-  'perf_lcp', 'perf_inp', 'perf_cls', 'perf_ttfb', 'perf_fcp', 'perf_nav', 'perf_img',
+  ...PERFORMANCE_EVENT_TYPES,
   // 错误
   'js_error', 'unhandled_promise', 'api_error', 'image_load_error',
   'feed_load_error',
@@ -39,6 +45,46 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
 const MAX_PAYLOAD_BYTES = 8 * 1024;     // 单条事件 payload ≤ 8KB
 const MAX_BATCH_SIZE = 50;              // 单次请求最多 50 条事件
 const MAX_BODY_BYTES = 256 * 1024;      // 请求 body 总大小 ≤ 256KB（防爆量）
+
+interface EdgeCfProperties {
+  country?: unknown;
+  colo?: unknown;
+}
+
+export type PreparedEventPayload =
+  | { ok: true; value: string | null }
+  | { ok: false; error: 'payload too large' };
+
+function trustedEdgeCode(value: unknown, pattern: RegExp): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toUpperCase();
+  return pattern.test(normalized) ? normalized : undefined;
+}
+
+export function prepareEventPayload(
+  eventType: string,
+  clientPayload: Record<string, unknown> | undefined,
+  cf: EdgeCfProperties | undefined,
+  maxBytes: number = MAX_PAYLOAD_BYTES,
+): PreparedEventPayload {
+  let payload = clientPayload;
+  if (PERFORMANCE_EVENT_TYPE_SET.has(eventType)) {
+    // edge_* 只信 Worker request.cf。客户端同名值即使 cf 缺失也要删除，避免伪造 cohort。
+    payload = { ...(clientPayload ?? {}) };
+    delete payload.edge_country;
+    delete payload.edge_colo;
+    const country = trustedEdgeCode(cf?.country, /^[A-Z0-9]{2}$/);
+    const colo = trustedEdgeCode(cf?.colo, /^[A-Z0-9]{3}$/);
+    if (country) payload.edge_country = country;
+    if (colo) payload.edge_colo = colo;
+  }
+
+  const value = payload ? JSON.stringify(payload) : null;
+  if (value && new TextEncoder().encode(value).byteLength > maxBytes) {
+    return { ok: false, error: 'payload too large' };
+  }
+  return { ok: true, value };
+}
 
 interface ClientEvent {
   type: string;
@@ -89,6 +135,7 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
   const ua = request.headers.get('User-Agent') || '';
   const referer = request.headers.get('Referer') || '';
   const ingestedAt = Date.now();
+  const cf = (request as Request & { cf?: EdgeCfProperties }).cf;
 
   // 5. 校验 + 写入
   const stmts: D1PreparedStatement[] = [];
@@ -106,11 +153,12 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
       continue;
     }
 
-    const payloadStr = e.payload ? JSON.stringify(e.payload) : null;
-    if (payloadStr && payloadStr.length > MAX_PAYLOAD_BYTES) {
+    const preparedPayload = prepareEventPayload(e.type, e.payload, cf);
+    if (!preparedPayload.ok) {
       errors.push(`events[${i}].payload too large`);
       continue;
     }
+    const payloadStr = preparedPayload.value;
 
     stmts.push(
       env.DB.prepare(`

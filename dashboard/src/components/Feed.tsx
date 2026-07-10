@@ -23,6 +23,12 @@ import { SortSelector, type SortMode } from "./SortSelector";
 import { useDrawer } from "../lib/drawer";
 import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
+import {
+  createFeedReadyScheduler,
+  type FeedReadyDataSource,
+} from "../lib/telemetry/performance-detail";
+import { getPerformanceDeviceMeta } from "../lib/telemetry/vitals";
+import { feedResponseNetworkSource } from "../lib/feed-prefetch";
 
 // PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
 // <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
@@ -41,6 +47,7 @@ type FeedCacheEntry = {
   hasMore: boolean;
   ts: number;
   snapshot?: boolean;
+  queryTimeMs?: number;
 };
 const FEED_CACHE = new Map<string, FeedCacheEntry>();
 const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -104,6 +111,7 @@ export function prefetchChannels(sourceTypes: SourceType[]): void {
             nextCursor: res.next_cursor,
             hasMore: res.has_more,
             ts: Date.now(),
+            queryTimeMs: res.query_time_ms,
           });
         }
       })
@@ -135,6 +143,15 @@ const PULL_SLOT_HEIGHT = 46;
 // Timer is paused while the tab is hidden — so if the user opens the tab but
 // never looks at it, last-seen stays where it was.
 const MARK_SEEN_DELAY_MS = 5_000;
+
+// 页面级 singleton：PC 多列同时 commit、mobile tab remount/refresh/load-more 都只能
+// 让最先实际 paint 的 Feed 上报一次。每列各排 RAF，StrictMode/卸载只 cancel 自己，
+// 不会误伤其它仍挂载的 contender。
+const feedReadyScheduler = createFeedReadyScheduler({
+  requestFrame: (callback) => window.requestAnimationFrame(callback),
+  cancelFrame: (id) => window.cancelAnimationFrame(id),
+  report: (payload) => track(EVENTS.FEED_READY, payload),
+});
 
 // Network Information API is non-standard but supported on Chrome/Edge/
 // Android Chrome (i.e. the bulk of mobile traffic). Use it for telemetry
@@ -241,6 +258,14 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(cachedInit?.nextCursor ?? null);
   const [hasMore, setHasMore] = useState(cachedInit?.hasMore ?? true);
+  const feedReadySourceRef = useRef<FeedReadyDataSource>(
+    cachedInit ? (cachedInit.snapshot ? "local_snapshot" : "memory_cache") : "network",
+  );
+  const feedReadyQueryTimeRef = useRef<number | undefined>(
+    cachedInit?.snapshot ? undefined : cachedInit?.queryTimeMs,
+  );
+  const feedReadyScheduledRef = useRef(false);
+  const feedReadyCancelRef = useRef<(() => void) | null>(null);
   // Cooldown: after N consecutive load_more failures we stop auto-firing
   // loadMore via IntersectionObserver and show a manual retry button.
   // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
@@ -295,6 +320,26 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   const isHot = sortMode === "hot";
 
+  // items 已在本次 commit 中成为非空后，再等一帧，记录用户真正看到首流的时刻。
+  // payload 在排帧时快照，避免 silent refetch 抢先改写 cache provenance。
+  useEffect(() => {
+    if (placeholder || items.length === 0 || feedReadyScheduledRef.current) return;
+    feedReadyScheduledRef.current = true;
+    const queryTime = feedReadyQueryTimeRef.current;
+    feedReadyCancelRef.current = feedReadyScheduler.schedule({
+      source_type: sourceType,
+      item_count: items.length,
+      data_source: feedReadySourceRef.current,
+      query_time_ms: Number.isFinite(queryTime) ? queryTime : undefined,
+      ...getPerformanceDeviceMeta(),
+    });
+  }, [placeholder, sourceType, items.length]);
+
+  useEffect(() => () => {
+    feedReadyCancelRef.current?.();
+    feedReadyCancelRef.current = null;
+  }, []);
+
   // PM 2026-05-20:items / nextCursor / hasMore 变化时 sync 回 FEED_CACHE,
   // 让 loadMore append / drawer 单条更新 / refresh 拉新都被记住,切 tab
   // 再回来时仍能 hydrate 完整 list(否则切走丢 append 部分,scroll 位置
@@ -305,8 +350,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     // ts 保留已有值(= 数据真正从网络拿到的时间),不在 sync 时重新盖章 —— 否则
     // mount 时这个 effect 会把 localStorage 恢复的旧快照重新标成"新鲜",让下面
     // fetch effect 的 60s skip 误判,silent refetch 被跳过,用户停在旧内容上。
-    const prevTs = FEED_CACHE.get(sourceType)?.ts;
-    setFeedCache(sourceType, { items, nextCursor, hasMore, ts: prevTs ?? Date.now() });
+    const previous = FEED_CACHE.get(sourceType);
+    setFeedCache(sourceType, {
+      items,
+      nextCursor,
+      hasMore,
+      ts: previous?.ts ?? Date.now(),
+      snapshot: previous?.snapshot,
+      queryTimeMs: previous?.queryTimeMs,
+    });
   }, [sourceType, items, nextCursor, hasMore, placeholder]);
 
   // 订阅 drawer 单条更新：抽屉打开触发的 lazy-enrich 拿到 fresh.item 后，
@@ -348,6 +400,8 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     })
       .then((res) => {
         if (cancelled) return;
+        feedReadySourceRef.current = feedResponseNetworkSource(res);
+        feedReadyQueryTimeRef.current = res.query_time_ms;
         const itemsToShow = res.items;
         setItems(itemsToShow);
         setPending([]);
@@ -360,6 +414,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           nextCursor: res.next_cursor,
           hasMore: res.has_more,
           ts: Date.now(),
+          queryTimeMs: res.query_time_ms,
         });
       })
       .catch((e) => {
@@ -780,7 +835,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       scrollRoot={isNarrowFeed ? null : feedBodyRef}
       hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
     >
-    <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
+    <div data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
           (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView
