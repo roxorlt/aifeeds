@@ -290,16 +290,18 @@ interface FeedReadySchedulerOptions {
   report: (payload: FeedReadyPayload) => void;
 }
 
-export function createFeedReadyScheduler(options: FeedReadySchedulerOptions): {
-  schedule: (payload: FeedReadyPayload) => () => void;
-} {
+export interface FeedReadyScheduler {
+  schedule: (payload: FeedReadyPayload, isEligible?: () => boolean) => () => void;
+}
+
+export function createFeedReadyScheduler(options: FeedReadySchedulerOptions): FeedReadyScheduler {
   let reported = false;
   return {
-    schedule(payload) {
+    schedule(payload, isEligible = () => true) {
       if (reported) return () => {};
       let cancelled = false;
       const frameId = options.requestFrame(() => {
-        if (cancelled || reported) return;
+        if (cancelled || reported || !isEligible()) return;
         reported = true;
         options.report(payload);
       });
@@ -310,4 +312,62 @@ export function createFeedReadyScheduler(options: FeedReadySchedulerOptions): {
       };
     },
   };
+}
+
+interface FeedReadyContenderOptions {
+  scheduler: FeedReadyScheduler;
+  isEligible: () => boolean;
+}
+
+export function createFeedReadyContender(options: FeedReadyContenderOptions): {
+  setup: (payload: FeedReadyPayload) => () => void;
+} {
+  let active = false;
+  return {
+    setup(payload) {
+      if (active || !options.isEligible()) return () => {};
+      active = true;
+      const cancel = options.scheduler.schedule(payload, options.isEligible);
+      return () => {
+        if (!active) return;
+        active = false;
+        cancel();
+      };
+    },
+  };
+}
+
+interface FeedRootLike {
+  getBoundingClientRect: () => {
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+    width: number;
+    height: number;
+  };
+}
+
+interface FeedViewportState {
+  documentVisible: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export function isFeedRootEligible(
+  root: FeedRootLike | null | undefined,
+  viewport: FeedViewportState,
+): boolean {
+  if (!root || !viewport.documentVisible) return false;
+  if (!(viewport.viewportWidth > 0) || !(viewport.viewportHeight > 0)) return false;
+  try {
+    const rect = root.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    return rect.bottom > 0
+      && rect.right > 0
+      && rect.top < viewport.viewportHeight
+      && rect.left < viewport.viewportWidth;
+  } catch {
+    return false;
+  }
 }

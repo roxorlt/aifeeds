@@ -13,7 +13,7 @@ const TweetDrawer = lazy(() =>
 // PR3 quote 嵌套小卡点击 → 站内 modal。轻量(无 markdown 依赖),不 lazy
 import { QuoteSnapshotModal } from "./components/QuoteSnapshotModal";
 
-import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
+import { fetchSources, fetchStats, API_BASE } from "./api";
 import type { Source, SourceType, Stats } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
@@ -23,9 +23,7 @@ import { useDrawer } from "./lib/drawer";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { shouldReduceMotion, watchTransformTransition } from "./lib/motion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
-import { initTelemetry, track, EVENTS } from "./lib/telemetry";
-import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
-import { installErrorHandlers } from "./lib/telemetry/errors";
+import { track, EVENTS } from "./lib/telemetry";
 import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
@@ -735,21 +733,8 @@ function DashboardHome() {
     };
   }, [isNarrow]);
 
-  // Telemetry init（仅一次）
+  // PR5 share landing is route-specific; global telemetry initialization lives in main.tsx.
   useEffect(() => {
-    initTelemetry({ endpoint: TRACK_ENDPOINT });
-    installVitals();
-    installNavTiming();
-    installImgTiming();
-    installErrorHandlers();
-    track(EVENTS.APP_OPEN, {
-      utm_source: new URLSearchParams(window.location.search).get('utm_source') || undefined,
-      utm_campaign: new URLSearchParams(window.location.search).get('utm_campaign') || undefined,
-      referrer: document.referrer || undefined,
-    });
-    track(EVENTS.PAGE_VIEW, {
-      path: window.location.pathname + window.location.search,
-    });
     // PR5 landing 回流：从 /s/:token redirect 过来时 worker 加了
     // ?ref=share&token=<token>&from=<uid>，前端拿到 token 上报 landing
     // 让 worker 把当前 device_id 写入 share_relations.to_did + landed_at

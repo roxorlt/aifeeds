@@ -5,8 +5,10 @@ import {
   buildApiTimingDetail,
   classifyApiEndpoint,
   classifyResourceUrl,
+  createFeedReadyContender,
   createFeedReadyScheduler,
   installApiResourceObserver,
+  isFeedRootEligible,
   safeLcpDescriptor,
   safeLcpDescriptorFromMetric,
 } from "./performance-detail.ts";
@@ -341,4 +343,100 @@ test("feed_ready scheduler atomically reports only the first frame when contende
   frames[1]();
   frames[0]();
   assert.deepEqual(reports, [second]);
+});
+
+test("feed_ready contender survives StrictMode setup-cleanup-setup and reports exactly once", () => {
+  const frames = new Map();
+  const reports = [];
+  let id = 0;
+  const scheduler = createFeedReadyScheduler({
+    requestFrame: (cb) => {
+      id += 1;
+      frames.set(id, cb);
+      return id;
+    },
+    cancelFrame: (frameId) => frames.delete(frameId),
+    report: (payload) => reports.push(payload),
+  });
+  const contender = createFeedReadyContender({ scheduler, isEligible: () => true });
+  const payload = { source_type: "x_list", item_count: 12, data_source: "network" };
+
+  const cleanupProbe = contender.setup(payload);
+  cleanupProbe();
+  const cleanupReal = contender.setup(payload);
+  assert.equal(frames.size, 1);
+  frames.get([...frames.keys()][0])();
+  cleanupReal();
+  assert.deepEqual(reports, [payload]);
+});
+
+test("offscreen cached Feed cannot beat the visible Feed and RAF eligibility is rechecked", () => {
+  const frames = new Map();
+  const reports = [];
+  let id = 0;
+  const scheduler = createFeedReadyScheduler({
+    requestFrame: (cb) => {
+      id += 1;
+      frames.set(id, cb);
+      return id;
+    },
+    cancelFrame: (frameId) => frames.delete(frameId),
+    report: (payload) => reports.push(payload),
+  });
+  let belowFoldVisible = false;
+  const belowFold = createFeedReadyContender({ scheduler, isEligible: () => belowFoldVisible });
+  const firstViewport = createFeedReadyContender({ scheduler, isEligible: () => true });
+  belowFold.setup({ source_type: "clawhub", item_count: 12, data_source: "memory_cache" });
+  firstViewport.setup({ source_type: "x_list", item_count: 12, data_source: "network" });
+  assert.equal(frames.size, 1);
+  frames.get([...frames.keys()][0])();
+  assert.equal(reports[0].source_type, "x_list");
+
+  const retryFrames = new Map();
+  const retryReports = [];
+  let retryId = 0;
+  let eligible = true;
+  const retryScheduler = createFeedReadyScheduler({
+    requestFrame: (cb) => {
+      retryId += 1;
+      retryFrames.set(retryId, cb);
+      return retryId;
+    },
+    cancelFrame: (frameId) => retryFrames.delete(frameId),
+    report: (payload) => retryReports.push(payload),
+  });
+  const retrying = createFeedReadyContender({ scheduler: retryScheduler, isEligible: () => eligible });
+  const payload = { source_type: "github", item_count: 8, data_source: "memory_cache" };
+  const cleanupHidden = retrying.setup(payload);
+  eligible = false;
+  retryFrames.get([...retryFrames.keys()][0])();
+  assert.deepEqual(retryReports, []);
+  cleanupHidden();
+  eligible = true;
+  retrying.setup(payload);
+  retryFrames.get([...retryFrames.keys()].at(-1))();
+  assert.deepEqual(retryReports, [payload]);
+});
+
+test("viewport eligibility accepts a visible mobile tab and rejects hidden or below-fold roots", () => {
+  const mobileRoot = {
+    getBoundingClientRect: () => ({ top: 56, bottom: 700, left: 0, right: 390, width: 390, height: 644 }),
+  };
+  assert.equal(isFeedRootEligible(mobileRoot, {
+    documentVisible: true,
+    viewportWidth: 390,
+    viewportHeight: 844,
+  }), true);
+  assert.equal(isFeedRootEligible(mobileRoot, {
+    documentVisible: false,
+    viewportWidth: 390,
+    viewportHeight: 844,
+  }), false);
+  assert.equal(isFeedRootEligible({
+    getBoundingClientRect: () => ({ top: 900, bottom: 1500, left: 0, right: 390, width: 390, height: 600 }),
+  }, {
+    documentVisible: true,
+    viewportWidth: 390,
+    viewportHeight: 844,
+  }), false);
 });

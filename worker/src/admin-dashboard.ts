@@ -128,7 +128,7 @@ export type PerformanceCohortName = 'all_clean' | 'engaged' | 'synthetic';
 export function performanceCohortWhere(cohort: PerformanceCohortName, alias: string = 'e'): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error('invalid SQL alias');
   const syntheticMarker = `(
-    json_extract(${alias}.event_payload,'$.traffic_kind') = 'synthetic'
+    COALESCE(json_extract(${alias}.event_payload,'$.traffic_kind') = 'synthetic', 0)
     OR instr(COALESCE(${alias}.page_path,''), 'codex_perf_probe') > 0
   )`;
   if (cohort === 'synthetic') return syntheticMarker;

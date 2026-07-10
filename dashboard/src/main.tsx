@@ -3,7 +3,11 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
-import { installApiTiming } from './lib/telemetry/vitals'
+import { TRACK_ENDPOINT } from './api'
+import { initTelemetry, track, EVENTS } from './lib/telemetry'
+import { installApiTiming, installImgTiming, installNavTiming, installVitals } from './lib/telemetry/vitals'
+import { installErrorHandlers } from './lib/telemetry/errors'
+import { createTelemetryBootstrap } from './lib/telemetry/bootstrap'
 
 // Seed history so cold deep-links into item detail paths don't trap the back
 // button. Stack becomes ['/', '/<deep>'] → back returns to feed.
@@ -27,6 +31,24 @@ import { installApiTiming } from './lib/telemetry/vitals'
   }
 }
 
+// Global, route-independent telemetry bootstrap. This runs before React so a buffered
+// Resource Timing replay can never beat queue/session initialization, including on
+// /search, /settings, /subscribe and other routes that do not mount DashboardHome.
+const bootstrapTelemetry = createTelemetryBootstrap({
+  endpoint: TRACK_ENDPOINT,
+  events: EVENTS,
+  initTelemetry,
+  installVitals,
+  installNavTiming,
+  installImgTiming,
+  installApiTiming,
+  installErrorHandlers,
+  track,
+  location: window.location,
+  referrer: document.referrer,
+})
+bootstrapTelemetry()
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
@@ -34,12 +56,6 @@ createRoot(document.getElementById('root')!).render(
     </BrowserRouter>
   </StrictMode>,
 )
-
-// App 的 telemetry effect 先完成初始化；load 后再用 buffered Resource Timing
-// 一次性补收首屏 API，避免 observer 回调早于 queue 初始化而静默丢样本。
-const installApiObserver = () => { installApiTiming() }
-if (document.readyState === 'complete') setTimeout(installApiObserver, 0)
-else window.addEventListener('load', installApiObserver, { once: true })
 
 // Service Worker:壳缓存,回访打开零网络秒出(public/sw.js)。load 之后才注册,
 // 不跟首屏抢任何资源。kill switch 两道:

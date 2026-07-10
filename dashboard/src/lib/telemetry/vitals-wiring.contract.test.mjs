@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const vitals = fs.readFileSync(path.join(here, "vitals.ts"), "utf8");
 const main = fs.readFileSync(path.join(here, "../../main.tsx"), "utf8");
+const app = fs.readFileSync(path.join(here, "../../App.tsx"), "utf8");
 
 test("final LCP is safely enriched and settles the local performance gate", () => {
   assert.match(vitals, /onLCP\(\(metric\)\s*=>/);
@@ -25,9 +26,13 @@ test("non-LCP web-vitals retain their existing reporters", () => {
   }
 });
 
-test("main installs buffered API Resource Timing after telemetry initialization can run", () => {
-  assert.match(main, /import \{ installApiTiming \}/);
-  assert.match(main, /window\.addEventListener\('load', installApiObserver, \{ once: true \}\)/);
+test("main bootstraps telemetry before React on every route and DashboardHome does not duplicate it", () => {
+  assert.match(main, /createTelemetryBootstrap/);
+  const bootstrapAt = main.indexOf('bootstrapTelemetry()');
+  const renderAt = main.indexOf('createRoot(');
+  assert.ok(bootstrapAt >= 0 && renderAt >= 0 && bootstrapAt < renderAt);
+  assert.doesNotMatch(main, /window\.addEventListener\('load', installApiObserver/);
+  assert.doesNotMatch(app, /initTelemetry\(|installVitals\(|installNavTiming\(|installImgTiming\(|installErrorHandlers\(/);
   assert.match(vitals, /track\(EVENTS\.PERF_API, detail\)/);
 });
 

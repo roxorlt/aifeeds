@@ -24,7 +24,9 @@ import { useDrawer } from "../lib/drawer";
 import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
 import {
+  createFeedReadyContender,
   createFeedReadyScheduler,
+  isFeedRootEligible,
   type FeedReadyDataSource,
 } from "../lib/telemetry/performance-detail";
 import { getPerformanceDeviceMeta } from "../lib/telemetry/vitals";
@@ -264,8 +266,6 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const feedReadyQueryTimeRef = useRef<number | undefined>(
     cachedInit?.snapshot ? undefined : cachedInit?.queryTimeMs,
   );
-  const feedReadyScheduledRef = useRef(false);
-  const feedReadyCancelRef = useRef<(() => void) | null>(null);
   // Cooldown: after N consecutive load_more failures we stop auto-firing
   // loadMore via IntersectionObserver and show a manual retry button.
   // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
@@ -306,7 +306,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // 不需要轮询 / 曝光过滤；worker 已经按"状态优先 + start_time ASC"排好。
   const isHdx = sourceType === "huodongxing";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const feedRootRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
+  const [feedReadyEligible, setFeedReadyEligible] = useState(false);
   const isNarrowFeed = useIsNarrow();
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
   const pullIndicatorRef = useRef<HTMLDivElement | null>(null);
@@ -317,28 +319,68 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const isDraggingRef = useRef(false);
   // 切回频道秒切:本 Feed 实例是否已发过初次请求。首次 mount 时若 FEED_CACHE 够新就跳过 refetch。
   const didFetchRef = useRef(false);
+  const placeholderRef = useRef(Boolean(placeholder));
+  placeholderRef.current = Boolean(placeholder);
+  const isCurrentFeedEligible = useCallback(() => (
+    !placeholderRef.current && isFeedRootEligible(feedRootRef.current, {
+      documentVisible: document.visibilityState !== "hidden" && !document.hidden,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    })
+  ), []);
+  const feedReadyContenderRef = useRef<ReturnType<typeof createFeedReadyContender> | null>(null);
+  if (!feedReadyContenderRef.current) {
+    feedReadyContenderRef.current = createFeedReadyContender({
+      scheduler: feedReadyScheduler,
+      isEligible: isCurrentFeedEligible,
+    });
+  }
 
   const isHot = sortMode === "hot";
+
+  // Only a currently visible Feed may compete for the page-level milestone. IO handles
+  // PC grid rows and mobile tab transforms; visibilitychange covers background tabs.
+  // The live predicate is checked again inside RAF by createFeedReadyContender.
+  useEffect(() => {
+    const root = feedRootRef.current;
+    if (!root || placeholder) {
+      setFeedReadyEligible(false);
+      return;
+    }
+    const updateEligibility = () => setFeedReadyEligible(isCurrentFeedEligible());
+    updateEligibility();
+    document.addEventListener("visibilitychange", updateEligibility);
+    window.addEventListener("resize", updateEligibility);
+
+    let observer: IntersectionObserver | null = null;
+    const hasIntersectionObserver = typeof IntersectionObserver !== "undefined";
+    if (hasIntersectionObserver) {
+      observer = new IntersectionObserver(updateEligibility, { threshold: 0 });
+      observer.observe(root);
+    } else {
+      window.addEventListener("scroll", updateEligibility, { passive: true });
+    }
+    return () => {
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", updateEligibility);
+      window.removeEventListener("resize", updateEligibility);
+      if (!hasIntersectionObserver) window.removeEventListener("scroll", updateEligibility);
+    };
+  }, [placeholder, sourceType, isCurrentFeedEligible]);
 
   // items 已在本次 commit 中成为非空后，再等一帧，记录用户真正看到首流的时刻。
   // payload 在排帧时快照，避免 silent refetch 抢先改写 cache provenance。
   useEffect(() => {
-    if (placeholder || items.length === 0 || feedReadyScheduledRef.current) return;
-    feedReadyScheduledRef.current = true;
+    if (placeholder || items.length === 0 || !feedReadyEligible) return;
     const queryTime = feedReadyQueryTimeRef.current;
-    feedReadyCancelRef.current = feedReadyScheduler.schedule({
+    return feedReadyContenderRef.current?.setup({
       source_type: sourceType,
       item_count: items.length,
       data_source: feedReadySourceRef.current,
       query_time_ms: Number.isFinite(queryTime) ? queryTime : undefined,
       ...getPerformanceDeviceMeta(),
     });
-  }, [placeholder, sourceType, items.length]);
-
-  useEffect(() => () => {
-    feedReadyCancelRef.current?.();
-    feedReadyCancelRef.current = null;
-  }, []);
+  }, [placeholder, sourceType, items.length, feedReadyEligible]);
 
   // PM 2026-05-20:items / nextCursor / hasMore 变化时 sync 回 FEED_CACHE,
   // 让 loadMore append / drawer 单条更新 / refresh 拉新都被记住,切 tab
@@ -835,7 +877,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       scrollRoot={isNarrowFeed ? null : feedBodyRef}
       hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
     >
-    <div data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
+    <div ref={feedRootRef} data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
           (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView

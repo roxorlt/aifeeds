@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -87,6 +88,53 @@ describe('performance event ingest', () => {
 });
 
 describe('load-performance cohorts', () => {
+  it('executes cohort SQL with two-valued marker logic on real SQLite rows', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE events (
+        device_id TEXT NOT NULL,
+        user_id TEXT,
+        session_token_hash TEXT,
+        event_type TEXT NOT NULL,
+        event_payload TEXT,
+        page_path TEXT,
+        occurred_at INTEGER NOT NULL
+      );
+      CREATE TABLE identities (user_id TEXT, identity_value TEXT, unbound_at INTEGER);
+    `);
+    const insert = db.prepare(`
+      INSERT INTO events
+        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, occurred_at)
+      VALUES (?, NULL, ?, ?, ?, ?, ?)
+    `);
+    const perf = (device: string, payload: string, path: string, at: number) =>
+      insert.run(device, `session-${device}`, 'perf_lcp', payload, path, at);
+    const action = (device: string, type: string, at: number) =>
+      insert.run(device, `session-${device}`, type, '{}', '/', at);
+
+    perf('ordinary', '{}', '/', 1_000);
+    perf('engaged', '{}', '/', 2_000);
+    action('engaged', 'item_click', 2_100);
+    perf('impression_only', '{}', '/', 3_000);
+    action('impression_only', 'item_impression', 3_100);
+    perf('probe_payload', '{"traffic_kind":"synthetic"}', '/', 4_000);
+    perf('probe_path', '{}', '/?codex_perf_probe=1', 5_000);
+    perf('XVsq80drDCUOo3CSXJbrm', '{}', '/', 6_000);
+    action('XVsq80drDCUOo3CSXJbrm', 'item_click', 6_100);
+
+    const devicesFor = (cohort: 'all_clean' | 'engaged' | 'synthetic') =>
+      db.prepare(`
+        SELECT e.device_id FROM events e
+        WHERE e.event_type='perf_lcp' AND ${performanceCohortWhere(cohort, 'e')}
+        ORDER BY e.device_id
+      `).all().map((row) => String(row.device_id));
+
+    expect(devicesFor('all_clean')).toEqual(['engaged', 'impression_only', 'ordinary']);
+    expect(devicesFor('engaged')).toEqual(['engaged']);
+    expect(devicesFor('synthetic')).toEqual(['probe_path', 'probe_payload']);
+    db.close();
+  });
+
   it('uses explicit synthetic markers and excludes owner traffic from all_clean', () => {
     const sql = performanceCohortWhere('all_clean', 'p');
     expect(sql).toContain('p.device_id NOT IN');
