@@ -5,6 +5,7 @@ import { avatarUrlOf } from "../lib/defaultProfile";
 import { useVideoCoordinator } from "../lib/videoCoordinator";
 import { isWeChatBrowser } from "../lib/wechat";
 import { useFeedbackUnreadStore } from "../api";
+import { useMotionDismiss } from "../lib/motionLayer";
 
 // 对话气泡 icon — lucide MessageSquare 同款，1.6 stroke 跟全站 icon 风格统一
 function IconMessageSquare({ className }: { className?: string }) {
@@ -54,6 +55,11 @@ export function UserMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const popRef = useRef<HTMLDivElement | null>(null);
+  const { layerClassName, requestClose } = useMotionDismiss(
+    () => setOpen(false),
+    "popover",
+    open,
+  );
 
   const prefs = useVideoCoordinator((s) => s.prefs);
   const setPrefs = useVideoCoordinator((s) => s.setPrefs);
@@ -73,7 +79,7 @@ export function UserMenu() {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
       if (!popRef.current) return;
-      if (!popRef.current.contains(e.target as Node)) setOpen(false);
+      if (!popRef.current.contains(e.target as Node)) requestClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -84,7 +90,7 @@ export function UserMenu() {
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, requestClose]);
 
   // Pre-hydrate placeholder（避免登录态闪烁）
   if (!hydrated) {
@@ -94,7 +100,7 @@ export function UserMenu() {
   const trigger = user ? (
     <button
       type="button"
-      onClick={() => setOpen((v) => !v)}
+      onClick={() => open ? requestClose() : setOpen(true)}
       className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-full hover:opacity-80"
       aria-label="账号菜单"
       aria-haspopup="menu"
@@ -111,7 +117,7 @@ export function UserMenu() {
   ) : (
     <button
       type="button"
-      onClick={() => setOpen((v) => !v)}
+      onClick={() => open ? requestClose() : setOpen(true)}
       className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-md text-neutral-700 hover:bg-neutral-100 hover:text-neutral-900"
       aria-label="设置"
       aria-haspopup="menu"
@@ -127,7 +133,7 @@ export function UserMenu() {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-lg border border-neutral-200 bg-white py-1 shadow-lg"
+          className={`${layerClassName} absolute right-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-lg border border-neutral-200 bg-white py-1 shadow-lg`}
         >
           {user ? (
             <div className="border-b border-neutral-100 px-3 py-2 text-xs text-neutral-500 truncate">
@@ -137,7 +143,7 @@ export function UserMenu() {
             <button
               type="button"
               onClick={() => {
-                setOpen(false);
+                requestClose();
                 openLogin("manual");
               }}
               className="flex w-full items-center justify-center gap-2 border-b border-neutral-100 bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-800"
@@ -163,7 +169,7 @@ export function UserMenu() {
             <button
               type="button"
               onClick={() => {
-                setOpen(false);
+                requestClose();
                 navigate(user ? "/me/subscription" : "/subscribe");
               }}
               className="flex w-full items-center px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
@@ -174,7 +180,7 @@ export function UserMenu() {
               <button
                 type="button"
                 onClick={() => {
-                  setOpen(false);
+                  requestClose();
                   navigate("/settings");
                 }}
                 className="flex w-full items-center px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
@@ -186,7 +192,7 @@ export function UserMenu() {
               <button
                 type="button"
                 onClick={() => {
-                  setOpen(false);
+                  requestClose();
                   navigate("/feedback");
                 }}
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"

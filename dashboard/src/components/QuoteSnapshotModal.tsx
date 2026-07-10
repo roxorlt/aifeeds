@@ -18,11 +18,13 @@ import { proxyImg, timeAgo } from "../lib/utils";
 import { VerifiedBadge, IconShare } from "./icons";
 import { isTcoOnly } from "./TcoResolvedLinkCard";
 import { XArticleCard } from "./XArticleCard";
+import { useMotionDismiss } from "../lib/motionLayer";
 
 export function QuoteSnapshotModal() {
   const quote = useQuoteSnapshotStore((s) => s.quote);
   const close = useQuoteSnapshotStore((s) => s.close);
   const [showOriginal, setShowOriginal] = useState(false);
+  const { layerClassName, requestClose } = useMotionDismiss(close, "sheet", Boolean(quote));
 
   // 每次新 quote 打开重置 toggle 到默认(译文优先)
   useEffect(() => {
@@ -64,17 +66,17 @@ export function QuoteSnapshotModal() {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-end justify-center sm:items-center"
+      className={`${layerClassName} motion-layer-adaptive fixed inset-0 z-[60] flex items-end justify-center sm:items-center`}
       role="dialog"
       aria-modal="true"
-      onClick={close}
+      onClick={requestClose}
     >
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/40" />
 
       {/* Panel */}
       <div
-        className="relative w-full max-w-[560px] overflow-hidden rounded-t-2xl bg-white shadow-xl sm:rounded-2xl sm:max-h-[85vh]"
+        className="motion-layer-panel relative w-full max-w-[560px] overflow-hidden rounded-t-2xl bg-white shadow-xl sm:rounded-2xl sm:max-h-[85vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -84,7 +86,7 @@ export function QuoteSnapshotModal() {
           </div>
           <button
             type="button"
-            onClick={close}
+            onClick={requestClose}
             className="-mr-1 flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
             aria-label="关闭"
           >

@@ -10,3 +10,24 @@ test("drawer swipe-to-close can claim horizontal gestures inside the scroll body
   assert.doesNotMatch(source, /touch-pan-y/);
   assert.match(source, /allow native vertical scroll/);
 });
+
+test("drawer swipe supports velocity dismissal and protects the active touch", () => {
+  assert.match(source, /shouldCommitDismiss/);
+  assert.match(source, /e\.touches\.length !== 1/);
+  assert.match(source, /identifier/);
+  assert.doesNotMatch(source, /SWIPE_COMMIT_PX|setTimeout\(close, SWIPE_ANIM_MS\)/);
+});
+
+test("drawer drag writes transform and backdrop opacity without React frame state", () => {
+  assert.doesNotMatch(source, /const \[dragX, setDragX\]/);
+  assert.match(source, /aside\.style\.transform/);
+  assert.match(source, /backdropRef\.current/);
+  assert.match(source, /style\.opacity/);
+});
+
+test("drawer completes an asymmetric exit before ordinary close", () => {
+  assert.match(source, /DRAWER_ENTER_MS = 260/);
+  assert.match(source, /DRAWER_EXIT_MS = 200/);
+  assert.match(source, /requestClose/);
+  assert.match(source, /onClick=\{requestClose\}/);
+});

@@ -346,7 +346,7 @@ function TweetMediaTile({
           alt={first.alt || ""}
           loading={eager ? "eager" : "lazy"}
           fetchPriority={eager ? "high" : undefined}
-          className="w-full transition-transform hover:scale-[1.02]"
+          className="motion-card-media w-full"
           onError={() => setFailed(true)}
         />
         {mediaCount > 1 && (

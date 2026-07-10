@@ -5,6 +5,7 @@ import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
 import { toast } from '../lib/toast';
 import { isWeChatBrowser } from '../lib/wechat';
+import { useMotionDismiss } from '../lib/motionLayer';
 
 const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widget
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
@@ -59,6 +60,7 @@ export function LoginModal() {
   const trigger = useAuthStore((s) => s.loginTrigger);
   const closeModal = useAuthStore((s) => s.closeLoginModal);
   const onLoginSuccess = useAuthStore((s) => s.onLoginSuccess);
+  const { layerClassName, requestClose } = useMotionDismiss(closeModal, 'modal', open);
 
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -227,16 +229,16 @@ export function LoginModal() {
   const loginDisabled = loading || !codeSent || code.length !== 6;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+    <div className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4`}>
       <div
-        className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
+        className="motion-layer-panel w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-neutral-900">登录 / 注册</h2>
           <button
             type="button"
-            onClick={closeModal}
+            onClick={requestClose}
             className="-mr-2 rounded-md px-2 py-1 text-neutral-500 hover:bg-neutral-100"
             aria-label="关闭"
           >

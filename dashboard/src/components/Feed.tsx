@@ -125,6 +125,10 @@ interface Props {
 const INITIAL_LIMIT = 30;
 const LOAD_MORE_LIMIT = 30;
 const POLL_INTERVAL_MS = 30_000;
+const PULL_THRESHOLD = 60;
+const PULL_RESISTANCE = 2.5;
+const PULL_MAX = 110;
+const PULL_SLOT_HEIGHT = 46;
 // After this long of page-visible time, commit current top item to localStorage
 // as the new last-seen boundary. Next visit's waistband will sit just below it.
 // Commit the current top item as "seen" after this much *visible* page time.
@@ -213,7 +217,7 @@ export function SkeletonCard() {
 }
 
 export interface FeedHandle {
-  scrollToTop: () => void;
+  scrollToTop: (options?: { instant?: boolean }) => void;
 }
 
 export const Feed = forwardRef<FeedHandle, Props>(function Feed(
@@ -279,8 +283,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
   const isNarrowFeed = useIsNarrow();
-  const [pullY, setPullY] = useState(0);
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
+  const pullIndicatorRef = useRef<HTMLDivElement | null>(null);
+  const pullLabelRef = useRef<HTMLSpanElement | null>(null);
   const pullStartY = useRef<number | null>(null);
   const pullYRef = useRef(0);
   const loadingRef = useRef(false);
@@ -452,9 +457,32 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     loadingRef.current = loading;
   }, [loading]);
 
-  const PULL_THRESHOLD = 60;
-  const PULL_RESISTANCE = 2.5;
-  const PULL_MAX = 110;
+  const updatePullIndicator = useCallback((value: number, animate: boolean, refreshing = false) => {
+    const indicator = pullIndicatorRef.current;
+    const label = pullLabelRef.current;
+    if (!indicator) return;
+    const progress = Math.min(value / PULL_THRESHOLD, 1);
+    indicator.style.transition = animate
+      ? "transform 180ms cubic-bezier(0.23, 1, 0.32, 1), opacity 150ms cubic-bezier(0.23, 1, 0.32, 1)"
+      : "none";
+    indicator.style.transform = `translateY(${-PULL_SLOT_HEIGHT + progress * PULL_SLOT_HEIGHT}px)`;
+    indicator.style.opacity = value > 0 || refreshing ? "1" : "0";
+    if (label) {
+      label.textContent = refreshing
+        ? "正在刷新"
+        : value > PULL_THRESHOLD
+          ? "松手刷新"
+          : "下拉刷新";
+    }
+  }, []);
+
+  useEffect(() => {
+    updatePullIndicator(
+      isRefreshingPull ? PULL_THRESHOLD : 0,
+      true,
+      isRefreshingPull,
+    );
+  }, [isRefreshingPull, updatePullIndicator]);
 
   // Native touch listeners so we can preventDefault in touchmove — React attaches
   // its synthetic touchmove as a passive listener, so the browser's own pull-down
@@ -472,6 +500,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
 
     const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        pullStartY.current = null;
+        return;
+      }
       // Skip when touch starts in any non-feed zone — drawer, app header,
       // or column header. PRR is for the feed cards area only; firing it
       // from non-scroll zones would steal vertical motion and trigger
@@ -495,11 +527,18 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     };
     const onMove = (e: TouchEvent) => {
       if (pullStartY.current === null) return;
+      if (e.touches.length !== 1) {
+        pullStartY.current = null;
+        pullYRef.current = 0;
+        isDraggingRef.current = false;
+        updatePullIndicator(0, true);
+        return;
+      }
       if (!isAtTop()) {
         pullStartY.current = null;
         pullYRef.current = 0;
         isDraggingRef.current = false;
-        setPullY(0);
+        updatePullIndicator(0, true);
         return;
       }
       const dy = e.touches[0].clientY - pullStartY.current;
@@ -508,7 +547,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         isDraggingRef.current = true;
         const next = Math.min(dy / PULL_RESISTANCE, PULL_MAX);
         pullYRef.current = next;
-        setPullY(next);
+        updatePullIndicator(next, false);
       }
     };
     const onEnd = () => {
@@ -522,7 +561,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       }
       pullYRef.current = 0;
       isDraggingRef.current = false;
-      setPullY(0);
+      if (!shouldRefresh) updatePullIndicator(0, true);
       pullStartY.current = null;
     };
 
@@ -536,7 +575,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       window.removeEventListener("touchend", onEnd);
       window.removeEventListener("touchcancel", onEnd);
     };
-  }, [placeholder]);
+  }, [placeholder, updatePullIndicator]);
 
   // Hot mode: if the initial fetch or a page-load returns items that all get
   // filtered out as "seen", items becomes empty but hasMore is still true.
@@ -727,7 +766,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   }, [rows, isHot]);
 
   useImperativeHandle(ref, () => ({
-    scrollToTop: () => smoothScrollToTop(feedBodyRef.current),
+    scrollToTop: (options) => smoothScrollToTop(
+      feedBodyRef.current,
+      options?.instant ? { duration: 0 } : {},
+    ),
   }));
 
   return (
@@ -855,18 +897,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       {/* Body */}
       <div
         ref={feedBodyRef}
-        className="feed-body md:flex-1 md:overflow-y-auto"
+        className="feed-body relative md:flex-1 md:overflow-y-auto"
         style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
       >
-        {(pullY > 0 || isRefreshingPull) && !placeholder && (
+        {!placeholder && (
           <div
-            className="flex items-end justify-center overflow-hidden text-[11px] text-neutral-400"
+            ref={pullIndicatorRef}
+            className="motion-pull-indicator pointer-events-none absolute inset-x-0 top-0 z-10 flex h-[46px] items-end justify-center pb-1.5 text-[11px] text-neutral-400"
             style={{
-              height: isRefreshingPull ? PULL_THRESHOLD : pullY,
-              paddingBottom: 6,
-              transition: isDraggingRef.current
-                ? "none"
-                : "height 200ms ease-out",
+              opacity: 0,
+              transform: `translateY(-${PULL_SLOT_HEIGHT}px)`,
             }}
           >
             <span
@@ -875,13 +915,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                 isRefreshingPull && "animate-spin",
               )}
             >⟳</span>
-            <span>
-              {isRefreshingPull
-                ? "正在刷新"
-                : pullY > PULL_THRESHOLD
-                  ? "松手刷新"
-                  : "下拉刷新"}
-            </span>
+            <span ref={pullLabelRef}>下拉刷新</span>
           </div>
         )}
         {placeholder ? (

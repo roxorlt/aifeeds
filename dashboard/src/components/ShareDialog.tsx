@@ -19,6 +19,7 @@ import { PosterCanvas, type PosterCanvasHandle } from "./PosterCanvas";
 import { useAuthStore } from "../lib/authStore";
 import { avatarUrlOf, displayNameOf } from "../lib/defaultProfile";
 import type { Item } from "../types";
+import { useMotionDismiss } from "../lib/motionLayer";
 
 interface Props {
   open: boolean;
@@ -36,6 +37,7 @@ type Stage = "idle" | "creating" | "ready" | "error";
 
 export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }: Props) {
   const itemId = item.id;
+  const { layerClassName, requestClose } = useMotionDismiss(onClose, "modal", open);
   // ⚠️ 所有 hooks 必须在任何 early-return 之前声明 (React Rules of Hooks)。
   const [stage, setStage] = useState<Stage>("idle");
   const [errMsg, setErrMsg] = useState<string>("");
@@ -240,16 +242,16 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
 
   return (
     <>
-      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className={`${layerClassName} fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4`} onClick={requestClose}>
         <div
-          className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+          className="motion-layer-panel flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
           onClick={(e) => e.stopPropagation()}
         >
           <header className="flex items-center justify-between border-b border-neutral-100 px-5 py-3">
             <h3 className="text-sm font-semibold text-neutral-900">分享</h3>
             <button
               type="button"
-              onClick={onClose}
+              onClick={requestClose}
               className="rounded-md px-2 py-1 text-neutral-500 hover:bg-neutral-100"
               aria-label="关闭"
             >

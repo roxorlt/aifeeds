@@ -2,6 +2,7 @@
 // Auto-dismiss after `duration` ms (default 3000).
 
 import { create } from 'zustand';
+import { MOTION_DURATION } from './motion.ts';
 
 export type ToastType = 'success' | 'error' | 'info';
 
@@ -10,6 +11,7 @@ export interface ToastItem {
   type: ToastType;
   message: string;
   duration: number;
+  leaving: boolean;
 }
 
 interface ToastStore {
@@ -25,15 +27,20 @@ export const useToastStore = create<ToastStore>((set) => ({
   push(type, message, duration = 3000) {
     counter += 1;
     const id = counter;
-    set((s) => ({ items: [...s.items, { id, type, message, duration }] }));
+    set((s) => ({ items: [...s.items, { id, type, message, duration, leaving: false }] }));
     if (duration > 0) {
       setTimeout(() => {
-        set((s) => ({ items: s.items.filter((i) => i.id !== id) }));
+        useToastStore.getState().dismiss(id);
       }, duration);
     }
   },
   dismiss(id) {
-    set((s) => ({ items: s.items.filter((i) => i.id !== id) }));
+    set((s) => ({
+      items: s.items.map((item) => item.id === id ? { ...item, leaving: true } : item),
+    }));
+    setTimeout(() => {
+      set((s) => ({ items: s.items.filter((i) => i.id !== id) }));
+    }, MOTION_DURATION.toastExit);
   },
 }));
 

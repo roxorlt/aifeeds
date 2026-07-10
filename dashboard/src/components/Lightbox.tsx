@@ -3,6 +3,7 @@ import type { MediaItem } from "../types";
 import { proxyImg } from "../lib/utils";
 import { track, EVENTS } from "../lib/telemetry";
 import { useScrollLock, useTouchScrollGuard } from "../lib/useScrollLock";
+import { useMotionDismiss } from "../lib/motionLayer";
 
 interface Props {
   media: MediaItem[];
@@ -13,6 +14,7 @@ interface Props {
 export function Lightbox({ media, startIndex, onClose }: Props) {
   const [index, setIndex] = useState(startIndex);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const { layerClassName, requestClose } = useMotionDismiss(onClose, "lightbox");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -64,13 +66,13 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
   };
   const onOverlayClick = (e: React.MouseEvent) => {
     stopBubble(e);
-    onClose();
+    requestClose();
   };
 
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+      className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/90`}
       onClick={onOverlayClick}
       onPointerDown={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
@@ -115,7 +117,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
           key={current.url}
           src={proxyImg(current.url)}
           poster={current.poster ? proxyImg(current.poster, 400) : undefined}
-          className="max-h-[90vh] max-w-[92vw]"
+          className="motion-layer-panel max-h-[90vh] max-w-[92vw]"
           controls
           autoPlay
           playsInline
@@ -133,7 +135,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
         <img
           src={proxyImg(current.url)}
           alt={current.alt || ""}
-          className="max-h-[90vh] max-w-[92vw] object-contain"
+          className="motion-layer-panel max-h-[90vh] max-w-[92vw] object-contain"
           onClick={(e) => e.stopPropagation()}
           onError={() => {
             let host = "";
