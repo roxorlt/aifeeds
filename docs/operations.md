@@ -1131,19 +1131,24 @@ proxy_set_header X-Request-Id $request_id;
 Worker 会校验并回显 `X-Request-Id`，使浏览器响应、Worker 日志和本文件的 `request_id`
 可以连接起来。
 
-**字段与隐私**：每行是一个 JSON object，包含 request id、host、无 query 的规范化 URI、
+**字段与隐私**：每行是一个 JSON object，包含 request id、host、无 query 的安全 URI 类别、
 状态码、总请求时间、上游连接/首字节/完整响应时间、缓存状态、响应字节数和 user agent。
-配置使用 `escape=json`，不记录 query、Cookie、Authorization、回源密钥、referer、手机号或邮箱。
+配置先用 `map $uri $aifeeds_safe_uri` 把 `/s/:token`、`/api/share/poster/:token`、
+`/api/admin/share/:token` 的永久分享 token 归一化，再用 `escape=json` 写入；禁止直接把 `$uri`
+放进 JSON，也从不使用会包含 query 的 `$request_uri`。日志不记录 query、Cookie、Authorization、
+回源密钥、referer、手机号或邮箱。
 上游时间必须按字符串处理：无上游或未命中阶段时可能是 `-`，重试/多 upstream 时可能是逗号序列，
 不能直接假定为单个 JSON number。user agent 仍可能构成设备指纹，所以日志权限固定为
-`0640 www-data:adm`、只给 root/adm 运维人员读取，默认按日轮转并保留 14 份。
+`0640 www-data:adm`：root、`adm` 组运维人员以及文件 owner `www-data` 服务账号也可读，其他系统账号
+不可读；默认按日轮转并保留 14 份。
 
 **部署（必须再次取得明确批准后才执行）**：以下是 logging-only 变更；禁止在未批准时执行。
 先从仓库根目录上传版本化文件：
 
 ```bash
-scp -i ~/.ssh/aifeeds-hk.pem deploy/nginx/aifeeds-performance-log.conf \
-  root@154.12.188.231:/tmp/aifeeds-performance-log.conf
+scp -i ~/.ssh/aifeeds-hk.pem \
+  deploy/nginx/aifeeds-performance-log.conf deploy/nginx/check-nginx-request-id.py \
+  root@154.12.188.231:/tmp/
 ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231
 ```
 
@@ -1156,28 +1161,34 @@ SITE=/etc/nginx/sites-available/aifeeds.conf
 FORMAT=/etc/nginx/conf.d/aifeeds-performance-log.conf
 ROTATE=/etc/logrotate.d/aifeeds-performance
 LOG=/var/log/nginx/aifeeds-performance.jsonl
+CHECKER=/usr/local/sbin/aifeeds-check-nginx-request-id
 STAMP="$(date +%Y%m%d%H%M%S)"
 BACKUP="${SITE}.bak-perf-${STAMP}"
 
 test ! -e "$FORMAT"
 test ! -e "$ROTATE"
 test ! -e "$LOG"
+test ! -e "$CHECKER"
 cp -a "$SITE" "$BACKUP"
 install -o root -g root -m 0644 /tmp/aifeeds-performance-log.conf "$FORMAT"
 install -o www-data -g adm -m 0640 /dev/null "$LOG"
+install -o root -g root -m 0755 /tmp/check-nginx-request-id.py "$CHECKER"
 printf 'site backup: %s\n' "$BACKUP"
 ```
 
-用私有编辑器打开 `$SITE`，在每个包含 `proxy_pass` 的 location **同层**补上上面的
-`proxy_set_header X-Request-Id $request_id;`，不输出或复制整份配置。保存后用计数守卫确认
-每个 upstream location 都有一条；当前两个数字都应为 `7`：
+用私有编辑器打开 `$SITE`，在每个包含直接 `proxy_pass` 的 location **同层**补上上面的
+`proxy_set_header X-Request-Id $request_id;`，不输出或复制整份配置。保存后运行版本化结构检查器：
 
 ```bash
-PROXY_COUNT="$(grep -cE '^[[:space:]]*proxy_pass[[:space:]]' "$SITE")"
-REQUEST_ID_COUNT="$(grep -cE '^[[:space:]]*proxy_set_header[[:space:]]+X-Request-Id[[:space:]]+\$request_id;' "$SITE")"
-printf 'proxy_pass=%s request_id_headers=%s\n' "$PROXY_COUNT" "$REQUEST_ID_COUNT"
-test "$PROXY_COUNT" -eq "$REQUEST_ID_COUNT"
+"$CHECKER" "$SITE"
 ```
+
+[`deploy/nginx/check-nginx-request-id.py`](../deploy/nginx/check-nginx-request-id.py) 用 Python 标准库词法化
+nginx 的注释、引号、转义、分号和 block，不打印配置内容、upstream、header 值或文件路径，只报告
+input 序号、location 行号和计数。它逐个证明每个含**直接** `proxy_pass` 的 location 恰有一条
+同层 request-id header；因此一个 location 缺失、另一个重复时，即使全局总数碰巧相等也会失败。
+当前成功摘要应为 `locations=<实际数> proxy_locations=7 proxy_pass=7 request_id=7`。检查器也支持
+stdin（无参数或传 `-`）和一个或多个文件；任一 parse/结构错误都返回非零，必须停止部署。
 
 用 `editor "$ROTATE"` 创建 `/etc/logrotate.d/aifeeds-performance`，内容必须精确为：
 
@@ -1248,12 +1259,14 @@ SITE=/etc/nginx/sites-available/aifeeds.conf
 FORMAT=/etc/nginx/conf.d/aifeeds-performance-log.conf
 ROTATE=/etc/logrotate.d/aifeeds-performance
 LOG=/var/log/nginx/aifeeds-performance.jsonl
+CHECKER=/usr/local/sbin/aifeeds-check-nginx-request-id
 BACKUP=/etc/nginx/sites-available/aifeeds.conf.bak-perf-YYYYMMDDHHMMSS
 
 test -f "$BACKUP"
 cp "$BACKUP" /etc/nginx/sites-available/aifeeds.conf
 rm -f /etc/nginx/conf.d/aifeeds-performance-log.conf
 rm -f /etc/logrotate.d/aifeeds-performance
+rm -f /usr/local/sbin/aifeeds-check-nginx-request-id
 nginx -t
 systemctl reload nginx
 # reload 后保留受限日志用于问题复盘；确认无需保留时再由获批运维动作删除 "$LOG"。

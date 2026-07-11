@@ -21,6 +21,25 @@ function performanceRunbook() {
   return operations.slice(startIndex, endIndex + end.length);
 }
 
+function safeUriFor(pathname) {
+  const block = config.match(/map\s+\$uri\s+\$aifeeds_safe_uri\s*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(block, 'safe URI map must exist');
+
+  let fallback;
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    if (!line) continue;
+
+    const regexRule = line.match(/^~(\S+)\s+(\S+);$/);
+    if (regexRule && new RegExp(regexRule[1]).test(pathname)) return regexRule[2];
+
+    const defaultRule = line.match(/^default\s+(\S+);$/);
+    if (defaultRule) fallback = defaultRule[1];
+  }
+
+  return fallback === '$uri' ? pathname : fallback;
+}
+
 test('performance log is a host-scoped http-context JSON include', () => {
   assert.ok(config, 'versioned performance log config must exist');
   assert.match(config, /log_format\s+aifeeds_performance\s+escape=json/);
@@ -37,11 +56,13 @@ test('performance log is a host-scoped http-context JSON include', () => {
     '$upstream_cache_status',
     '$bytes_sent',
     '$http_user_agent',
+    '$aifeeds_safe_uri',
   ]) {
     assert.ok(config.includes(variable), `missing ${variable}`);
   }
 
   assert.match(config, /map\s+\$host\s+\$aifeeds_performance_loggable\s*\{/);
+  assert.match(config, /map\s+\$uri\s+\$aifeeds_safe_uri\s*\{/);
   assert.match(config, /default\s+0;/);
   for (const host of ['ai-feeds.com', 'api.ai-feeds.com', 'fonts.ai-feeds.com']) {
     assert.match(config, new RegExp(`\\b${host.replaceAll('.', '\\.') }\\s+1;`));
@@ -53,6 +74,18 @@ test('performance log is a host-scoped http-context JSON include', () => {
   assert.doesNotMatch(config, /\bproxy_set_header\b/);
   assert.doesNotMatch(config, /\$(?:request_uri|args|query_string|http_cookie|http_authorization)\b/i);
   assert.doesNotMatch(config, /origin.secret|phone|email/i);
+  assert.ok(config.includes('"uri":"$aifeeds_safe_uri"'));
+  assert.ok(!config.includes('"uri":"$uri"'), 'raw URI must never be written directly');
+});
+
+test('safe URI map redacts permanent share tokens without hiding fixed routes', () => {
+  assert.equal(safeUriFor('/s/permanent_share_token'), '/s/:token');
+  assert.equal(safeUriFor('/s/encoded/token'), '/s/:token');
+  assert.equal(safeUriFor('/api/share/poster/permanent_share_token'), '/api/share/poster/:token');
+  assert.equal(safeUriFor('/api/share/poster/encoded/token'), '/api/share/poster/:token');
+  assert.equal(safeUriFor('/api/admin/share/permanent_share_token'), '/api/admin/share/:token');
+  assert.equal(safeUriFor('/api/admin/share/poster-cleanup'), '/api/admin/share/poster-cleanup');
+  assert.equal(safeUriFor('/api/items'), '/api/items');
 });
 
 test('runbook scopes installation to aifeeds sites and documents safe join and staging limits', () => {
@@ -72,11 +105,17 @@ test('runbook scopes installation to aifeeds sites and documents safe join and s
     'X-Request-Id',
     'Worker',
     'jq -e',
+    'deploy/nginx/check-nginx-request-id.py',
+    '/usr/local/sbin/aifeeds-check-nginx-request-id',
+    '"$CHECKER" "$SITE"',
   ]) {
     assert.ok(runbook.includes(required), `runbook missing ${required}`);
   }
 
   assert.doesNotMatch(runbook, /nginx\s+-T/);
+  assert.doesNotMatch(runbook, /PROXY_COUNT|REQUEST_ID_COUNT/);
+  assert.doesNotMatch(runbook, /只给 root\/adm/);
+  assert.match(runbook, /`www-data` 服务账号也可读/);
 });
 
 test('runbook rotates by reopening nginx and gives exact rollback files', () => {
@@ -95,6 +134,7 @@ test('runbook rotates by reopening nginx and gives exact rollback files', () => 
     'editor "$ROTATE"',
     'aifeeds.conf.bak-perf-',
     'rm -f /etc/nginx/conf.d/aifeeds-performance-log.conf',
+    'rm -f /usr/local/sbin/aifeeds-check-nginx-request-id',
     'cp "$BACKUP" /etc/nginx/sites-available/aifeeds.conf',
   ]) {
     assert.ok(runbook.includes(required), `rotation/rollback missing ${required}`);
