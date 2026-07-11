@@ -49,10 +49,9 @@ import type { XCookieBlob } from './x-graphql';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
 import {
-  elapsed,
+  d1DurationMs,
   formatServerTiming,
   resolveRequestId,
-  type Clock,
 } from './server-timing';
 import { handleDubWishlistAdd, handleDubWishlistState } from './dub-wishlist';
 import {
@@ -397,12 +396,8 @@ export type JsonResponseOptions = {
   headers?: HeadersInit;
   timings?: Record<string, number>;
   requestId?: string;
-  totalStartedAt?: number;
-  now?: Clock;
   generateRequestId?: () => string;
 };
-
-const defaultPerformanceClock: Clock = () => performance.now();
 
 function mergeVary(headers: Headers, value: string): void {
   const values = new Set(
@@ -423,10 +418,7 @@ export function jsonResponse(
   options: JsonResponseOptions = {},
 ): Response {
   const isTimed = options.timings !== undefined;
-  const now = options.now ?? defaultPerformanceClock;
-  const jsonStartedAt = isTimed ? now() : 0;
   const body = JSON.stringify(data);
-  const jsonDuration = isTimed ? elapsed(jsonStartedAt, now()) : 0;
 
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
@@ -446,17 +438,9 @@ export function jsonResponse(
   headers.delete('Timing-Allow-Origin');
   if (allowedOrigin) headers.set('Timing-Allow-Origin', allowedOrigin);
 
-  const response = new Response(body, { status, headers });
-  const timings: Record<string, number> = {
-    ...options.timings,
-    json: jsonDuration,
-  };
-  if (options.totalStartedAt !== undefined) {
-    timings.total = elapsed(options.totalStartedAt, now());
-  }
-  const serverTiming = formatServerTiming(timings);
-  if (serverTiming) response.headers.set('Server-Timing', serverTiming);
-  return response;
+  const serverTiming = formatServerTiming(options.timings ?? {});
+  if (serverTiming) headers.set('Server-Timing', serverTiming);
+  return new Response(body, { status, headers });
 }
 
 function withCors(resp: Response, request: Request, env: Env): Response {
@@ -2748,9 +2732,7 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
 export async function handleItems(
   request: Request,
   env: Env,
-  now: Clock = defaultPerformanceClock,
 ): Promise<Response> {
-  const totalStartedAt = now();
   const url = new URL(request.url);
   const sourceType = url.searchParams.get('source_type');
   const since = url.searchParams.get('since');
@@ -2766,23 +2748,23 @@ export async function handleItems(
   // non-sponsor rows (latest trending_date_str in DB), order by daily_rank ASC,
   // optionally pin a specific id to the top (share-link strong-insert).
   if (sourceType === 'github') {
-    return handleGithubFeed(request, env, now, totalStartedAt);
+    return handleGithubFeed(request, env);
   }
   // ClawHub: marketplace style, order by stars DESC (most popular skills first).
   // hot 模式同样走 stars 排序（marketplace 没有 X 那种 likes/RT 互动信号）。
   if (sourceType === 'clawhub') {
-    return handleClawhubFeed(request, env, now, totalStartedAt);
+    return handleClawhubFeed(request, env);
   }
   // Product Hunt: 跟 GH 同样的 (launch_date_pt DESC, daily_rank ASC) 排序。
   // 用户期望：日间倒序（最新日子在上）+ 日内排名升序（#1 在 #2 上面）。
   if (sourceType === 'product_hunt') {
-    return handlePhFeed(request, env, now, totalStartedAt);
+    return handlePhFeed(request, env);
   }
   // Huodongxing: 状态优先（进行中 > 未开始 > 已结束）+ start_time ASC（最近发生在前）。
   // 默认 filter 过期活动：status != 'historical' AND end_time > now（兜底 start_time + 1d）。
   // include_historical=1 时取消 filter，用于"历史活动"页面。
   if (sourceType === 'huodongxing') {
-    return handleHuodongxingFeed(request, env, now, totalStartedAt);
+    return handleHuodongxingFeed(request, env);
   }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
@@ -2916,10 +2898,9 @@ export async function handleItems(
   params.push(limit + 1);
 
   const statement = env.DB.prepare(sql).bind(...params);
-  const d1StartedAt = now();
   const result = await statement.all();
-  const queryTime = elapsed(d1StartedAt, now());
-  const mapStartedAt = now();
+  const queryTime = d1DurationMs(result);
+  let threadQueryTime: number | undefined;
 
   const hasMore = result.results.length > limit;
   const items = hasMore ? result.results.slice(0, limit) : result.results;
@@ -2958,7 +2939,7 @@ export async function handleItems(
       const rootsPh = rootsArr.map(() => '?').join(',');
       const seenArr = [...seenIds];
       const seenPh = seenArr.map(() => '?').join(',');
-      const extraRows = await env.DB.prepare(
+      const threadStatement = env.DB.prepare(
         `SELECT * FROM items
          WHERE source_type = 'x_list'
            AND deleted_at IS NULL
@@ -2967,8 +2948,9 @@ export async function handleItems(
          ORDER BY ${sort} DESC
          LIMIT 200`,
       )
-        .bind(...rootsArr, ...seenArr)
-        .all();
+        .bind(...rootsArr, ...seenArr);
+      const extraRows = await threadStatement.all();
+      threadQueryTime = d1DurationMs(extraRows);
       for (const r of extraRows.results) {
         parsed.push(parseItemRow(r as Record<string, unknown>));
       }
@@ -2981,11 +2963,10 @@ export async function handleItems(
     has_more: hasMore,
     query_time_ms: queryTime,
   };
-  const mapTime = elapsed(mapStartedAt, now());
+  const timings: Record<string, number> = { d1: queryTime };
+  if (threadQueryTime !== undefined) timings.thread_d1 = threadQueryTime;
   return jsonResponse(payload, 200, request, env, {
-    timings: { d1: queryTime, map: mapTime },
-    totalStartedAt,
-    now,
+    timings,
   });
 }
 
@@ -3026,8 +3007,6 @@ const CLAWHUB_SORT_DIR: Record<string, 'DESC' | 'ASC'> = {
 async function handleClawhubFeed(
   request: Request,
   env: Env,
-  now: Clock,
-  totalStartedAt: number,
 ): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
@@ -3091,10 +3070,8 @@ async function handleClawhubFeed(
   params.push(limit + 1);
 
   const statement = env.DB.prepare(sql).bind(...params);
-  const d1StartedAt = now();
   const result = await statement.all();
-  const queryTime = elapsed(d1StartedAt, now());
-  const mapStartedAt = now();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
@@ -3119,11 +3096,8 @@ async function handleClawhubFeed(
     has_more: hasMore,
     query_time_ms: queryTime,
   };
-  const mapTime = elapsed(mapStartedAt, now());
   return jsonResponse(payload, 200, request, env, {
-    timings: { d1: queryTime, map: mapTime },
-    totalStartedAt,
-    now,
+    timings: { d1: queryTime },
   });
 }
 
@@ -3212,8 +3186,6 @@ function computeWhenRange(when: string): { startIso: string; endIso: string } | 
 async function handleHuodongxingFeed(
   request: Request,
   env: Env,
-  now: Clock,
-  totalStartedAt: number,
 ): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
@@ -3327,10 +3299,8 @@ async function handleHuodongxingFeed(
   const finalParams = [...orderParams, ...params, limit + 1];
 
   const statement = env.DB.prepare(sql).bind(...finalParams);
-  const d1StartedAt = now();
   const result = await statement.all();
-  const queryTime = elapsed(d1StartedAt, now());
-  const mapStartedAt = now();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
@@ -3355,11 +3325,8 @@ async function handleHuodongxingFeed(
     has_more: hasMore,
     query_time_ms: queryTime,
   };
-  const mapTime = elapsed(mapStartedAt, now());
   return jsonResponse(payload, 200, request, env, {
-    timings: { d1: queryTime, map: mapTime },
-    totalStartedAt,
-    now,
+    timings: { d1: queryTime },
   });
 }
 
@@ -3373,8 +3340,6 @@ async function handleHuodongxingFeed(
 async function handleGithubFeed(
   request: Request,
   env: Env,
-  now: Clock,
-  totalStartedAt: number,
 ): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
@@ -3432,10 +3397,8 @@ async function handleGithubFeed(
   params.push(limit + 1);
 
   const statement = env.DB.prepare(sql).bind(...params);
-  const d1StartedAt = now();
   const result = await statement.all();
-  const queryTime = elapsed(d1StartedAt, now());
-  const mapStartedAt = now();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
@@ -3456,11 +3419,8 @@ async function handleGithubFeed(
     has_more: hasMore,
     query_time_ms: queryTime,
   };
-  const mapTime = elapsed(mapStartedAt, now());
   return jsonResponse(payload, 200, request, env, {
-    timings: { d1: queryTime, map: mapTime },
-    totalStartedAt,
-    now,
+    timings: { d1: queryTime },
   });
 }
 
@@ -3478,8 +3438,6 @@ async function handleGithubFeed(
 async function handlePhFeed(
   request: Request,
   env: Env,
-  now: Clock,
-  totalStartedAt: number,
 ): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
@@ -3546,10 +3504,8 @@ async function handlePhFeed(
   params.push(limit + 1);
 
   const statement = env.DB.prepare(sql).bind(...params);
-  const d1StartedAt = now();
   const result = await statement.all();
-  const queryTime = elapsed(d1StartedAt, now());
-  const mapStartedAt = now();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
@@ -3578,11 +3534,8 @@ async function handlePhFeed(
     has_more: hasMore,
     query_time_ms: queryTime,
   };
-  const mapTime = elapsed(mapStartedAt, now());
   return jsonResponse(payload, 200, request, env, {
-    timings: { d1: queryTime, map: mapTime },
-    totalStartedAt,
-    now,
+    timings: { d1: queryTime },
   });
 }
 

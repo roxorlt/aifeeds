@@ -13,6 +13,7 @@ vi.mock('cloudflare:workers', () => ({
 }));
 
 import {
+  d1DurationMs,
   formatServerTiming,
   resolveRequestId,
 } from './server-timing';
@@ -24,18 +25,57 @@ import {
 } from './index';
 
 describe('formatServerTiming', () => {
-  it('formats known metrics in a stable order', () => {
-    expect(formatServerTiming({ d1: 223, map: 4, json: 2, total: 231 }))
-      .toBe('d1;dur=223, map;dur=4, json;dur=2, total;dur=231');
+  it('formats only measurable D1 I/O metrics in a stable order', () => {
+    expect(formatServerTiming({
+      d1: 223,
+      thread_d1: 17,
+      map: 4,
+      json: 2,
+      total: 231,
+    })).toBe('d1;dur=223, thread_d1;dur=17');
   });
 
   it('drops invalid values and untrusted metric names', () => {
-    expect(formatServerTiming({ d1: -1, total: Number.NaN })).toBe('');
+    expect(formatServerTiming({ d1: -1, thread_d1: Number.NaN })).toBe('');
     expect(formatServerTiming({
       d1: 2.3456,
+      thread_d1: 1.2345,
       'evil;desc="injected"': 10,
       '__proto__': 8,
-    })).toBe('d1;dur=2.346');
+    })).toBe('d1;dur=2.346, thread_d1;dur=1.234');
+  });
+});
+
+describe('d1DurationMs', () => {
+  it('prefers D1 sql_duration_ms and normalizes it to the header precision', () => {
+    expect(d1DurationMs({
+      meta: {
+        timings: { sql_duration_ms: 7.12345 },
+        duration: 99,
+      },
+    })).toBe(7.123);
+  });
+
+  it('falls back to legacy meta.duration when the precise value is absent or invalid', () => {
+    expect(d1DurationMs({ meta: { duration: 8.76549 } })).toBe(8.765);
+    expect(d1DurationMs({
+      meta: {
+        timings: { sql_duration_ms: Number.NaN },
+        duration: 6.25,
+      },
+    })).toBe(6.25);
+  });
+
+  it('returns a finite non-negative fallback for missing or invalid metadata', () => {
+    for (const result of [
+      {},
+      { meta: {} },
+      { meta: { timings: { sql_duration_ms: -1 }, duration: -2 } },
+      { meta: { timings: { sql_duration_ms: '4' }, duration: Number.POSITIVE_INFINITY } },
+      null,
+    ]) {
+      expect(d1DurationMs(result)).toBe(0);
+    }
   });
 });
 
@@ -55,33 +95,34 @@ describe('resolveRequestId', () => {
   });
 });
 
-function incrementalClock(step = 1): () => number {
-  let value = 0;
-  return () => {
-    const current = value;
-    value += step;
-    return current;
-  };
-}
-
 function metricValue(header: string, metric: string): number {
   const match = header.match(new RegExp(`(?:^|, )${metric};dur=([0-9.]+)(?:,|$)`));
   if (!match) throw new Error(`missing ${metric} in ${header}`);
   return Number(match[1]);
 }
 
-function listEnv(rows: Record<string, unknown>[] = []): Env {
-  return {
+type D1MockResult = {
+  rows: Record<string, unknown>[];
+  meta?: unknown;
+};
+
+function d1Harness(mockResults: D1MockResult[]) {
+  let allCalls = 0;
+  const env = {
     DB: {
       prepare: () => {
         const statement = {
           bind: () => statement,
-          all: async () => ({ results: rows }),
+          all: async () => {
+            const result = mockResults[allCalls++] ?? { rows: [] };
+            return { results: result.rows, meta: result.meta };
+          },
         };
         return statement;
       },
     },
   } as unknown as Env;
+  return { env, allCalls: () => allCalls };
 }
 
 describe('jsonResponse performance headers', () => {
@@ -99,7 +140,7 @@ describe('jsonResponse performance headers', () => {
     expect(response.headers.get('X-Request-Id')).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
   });
 
-  it('measures serialization and total through response creation with safe merged headers', async () => {
+  it('publishes only supplied I/O timings and safely merges CORS/custom headers', async () => {
     const request = new Request('https://api.ai-feeds.com/api/items', {
       headers: {
         Origin: 'https://staging.ai-feeds.com',
@@ -116,18 +157,19 @@ describe('jsonResponse performance headers', () => {
           'Cache-Control': 'private, max-age=0',
           'Access-Control-Allow-Origin': 'https://evil.invalid',
         },
-        timings: { d1: 4, map: 5, ignored: 999 },
-        totalStartedAt: 0,
-        now: (() => {
-          const values = [10, 12, 31];
-          return () => values.shift() ?? 31;
-        })(),
+        timings: {
+          d1: 4,
+          thread_d1: 5,
+          map: 999,
+          json: 999,
+          total: 999,
+        },
       },
     );
 
     expect(await response.json()).toEqual({ items: [] });
-    expect(response.headers.get('Server-Timing'))
-      .toBe('d1;dur=4, map;dur=5, json;dur=2, total;dur=31');
+    expect(response.headers.get('Server-Timing')).toBe('d1;dur=4, thread_d1;dur=5');
+    expect(response.headers.get('Server-Timing')).not.toMatch(/map|json|total/);
     expect(response.headers.get('X-Request-Id')).toBe('relay_123');
     expect(response.headers.get('Timing-Allow-Origin')).toBe('https://staging.ai-feeds.com');
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://staging.ai-feeds.com');
@@ -149,8 +191,6 @@ describe('jsonResponse performance headers', () => {
       {} as Env,
       {
         timings: {},
-        totalStartedAt: 0,
-        now: () => 0,
         generateRequestId: () => generated,
       },
     );
@@ -168,8 +208,6 @@ describe('jsonResponse performance headers', () => {
       {
         headers: { 'Timing-Allow-Origin': '*' },
         timings: {},
-        totalStartedAt: 0,
-        now: () => 0,
         generateRequestId: () => 'generated_safe_id',
       },
     );
@@ -186,33 +224,30 @@ describe('GET /api/items list timing', () => {
     ['clawhub', '?source_type=clawhub'],
     ['product hunt', '?source_type=product_hunt'],
     ['huodongxing', '?source_type=huodongxing'],
-  ])('instruments the %s list handler with attributable finite phases', async (_name, query) => {
+  ])('reports only the %s SQL duration from D1 result metadata', async (_name, query) => {
+    const harness = d1Harness([{
+      rows: [],
+      meta: { timings: { sql_duration_ms: 12.3456 }, duration: 99 },
+    }]);
     const request = new Request(`https://api.ai-feeds.com/api/items${query}`, {
       headers: {
         Origin: 'https://ai-feeds.com',
         'X-Request-Id': 'nginx-list-1',
       },
     });
-    const response = await handleItems(request, listEnv(), incrementalClock(1.23456));
+    const response = await handleItems(request, harness.env);
     const payload = await response.json() as { query_time_ms: number };
     const header = response.headers.get('Server-Timing') || '';
 
-    for (const metric of ['d1', 'map', 'json', 'total']) {
-      expect(metricValue(header, metric)).toBeGreaterThanOrEqual(0);
-      expect(Number.isFinite(metricValue(header, metric))).toBe(true);
-    }
+    expect(harness.allCalls()).toBe(1);
+    expect(header).toBe('d1;dur=12.346');
+    expect(header).not.toMatch(/thread_d1|map|json|total/);
     expect(payload.query_time_ms).toBe(metricValue(header, 'd1'));
-    expect(metricValue(header, 'total')).toBeGreaterThanOrEqual(
-      metricValue(header, 'd1') + metricValue(header, 'json'),
-    );
     expect(response.headers.get('X-Request-Id')).toBe('nginx-list-1');
     expect(response.headers.get('Timing-Allow-Origin')).toBe('https://ai-feeds.com');
   });
 
-  it('keeps thread completion in map while query_time_ms stays the primary list D1 interval', async () => {
-    let allCalls = 0;
-    let time = 0;
-    const now = () => time;
+  it('reports the optional thread query as thread_d1 without changing query_time_ms', async () => {
     const root = {
       id: 'x_list:root',
       source_type: 'x_list',
@@ -225,73 +260,62 @@ describe('GET /api/items list timing', () => {
       scraped_at: '2026-01-01T00:00:00Z',
       extra: JSON.stringify({ thread_root_id: 'root' }),
     };
-    const env = {
-      DB: {
-        prepare: () => {
-          const statement = {
-            bind: () => statement,
-            all: async () => {
-              const isPrimaryQuery = allCalls++ === 0;
-              time += isPrimaryQuery ? 5 : 17;
-              return { results: isPrimaryQuery ? [root] : [sibling] };
-            },
-          };
-          return statement;
-        },
-      },
-    } as unknown as Env;
+    const harness = d1Harness([
+      { rows: [root], meta: { timings: { sql_duration_ms: 5 }, duration: 55 } },
+      { rows: [sibling], meta: { timings: { sql_duration_ms: 17 }, duration: 77 } },
+    ]);
 
     const response = await handleItems(
       new Request('https://api.ai-feeds.com/api/items?limit=1', {
         headers: { Origin: 'https://ai-feeds.com' },
       }),
-      env,
-      now,
+      harness.env,
     );
     const payload = await response.json() as { query_time_ms: number; items: unknown[] };
-    const timing = response.headers.get('Server-Timing') || '';
 
-    expect(allCalls).toBe(2);
+    expect(harness.allCalls()).toBe(2);
     expect(payload.items).toHaveLength(2);
     expect(payload.query_time_ms).toBe(5);
-    expect(metricValue(timing, 'd1')).toBe(5);
-    expect(metricValue(timing, 'map')).toBe(17);
+    expect(response.headers.get('Server-Timing')).toBe('d1;dur=5, thread_d1;dur=17');
   });
 
-  it('measures only the primary all() wait as d1, excluding prepare and bind', async () => {
-    let time = 0;
-    const now = () => time;
-    const env = {
-      DB: {
-        prepare: () => {
-          time += 11;
-          const statement = {
-            bind: () => {
-              time += 13;
-              return statement;
-            },
-            all: async () => {
-              time += 7.12345;
-              return { results: [] };
-            },
-          };
-          return statement;
-        },
-      },
-    } as unknown as Env;
-
+  it.each([
+    ['legacy fallback', { duration: 6.7894 }, 6.789],
+    ['missing metadata', undefined, 0],
+    ['invalid metadata', { timings: { sql_duration_ms: -1 }, duration: Number.NaN }, 0],
+  ])('keeps query_time_ms and d1 safely aligned for %s', async (_name, meta, expected) => {
+    const harness = d1Harness([{ rows: [], meta }]);
     const response = await handleItems(
       new Request('https://api.ai-feeds.com/api/items', {
         headers: { Origin: 'https://ai-feeds.com' },
       }),
-      env,
-      now,
+      harness.env,
     );
     const payload = await response.json() as { query_time_ms: number };
-    const timing = response.headers.get('Server-Timing') || '';
 
-    expect(payload.query_time_ms).toBe(7.123);
-    expect(metricValue(timing, 'd1')).toBe(7.123);
+    expect(payload.query_time_ms).toBe(expected);
+    expect(response.headers.get('Server-Timing')).toBe(`d1;dur=${expected}`);
+  });
+
+  it('does not consult the Worker JS clock for D1 attribution', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(123456);
+    const harness = d1Harness([{
+      rows: [],
+      meta: { timings: { sql_duration_ms: 4.5 }, duration: 99 },
+    }]);
+
+    try {
+      const response = await handleItems(
+        new Request('https://api.ai-feeds.com/api/items', {
+          headers: { Origin: 'https://ai-feeds.com' },
+        }),
+        harness.env,
+      );
+      expect(response.headers.get('Server-Timing')).toBe('d1;dur=4.5');
+      expect(clock).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('does not time or strip detail-only fields from /api/items/:id', async () => {

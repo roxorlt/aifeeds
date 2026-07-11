@@ -146,12 +146,34 @@ git commit -m "perf: add attributable frontend timing"
 - Modify: `worker/src/index.ts:390-397`
 - Modify: `worker/src/index.ts:2686-3459`
 
+> **Implementation note（2026-07-11，修订最初的四段计时设计）：** Cloudflare
+> 生产运行时为缓解 Spectre，`performance.now()` 与 `Date.now()` 只在 I/O 发生后推进；纯
+> parse/map、`JSON.stringify` 和 `Response` 构造前后的时钟会冻结。即使把 start/end 紧贴
+> `.all()`，start 仍可能继承上一次 I/O 的时间，因而混入查询前的 CPU，不能作为纯 D1
+> 计时。实现不再使用 Worker JS clock，而是读取每个 D1 result 自带的
+> `meta.timings.sql_duration_ms`（精确 SQL 执行时间，不含网络），仅在该字段缺失或非法时
+> fallback 到 `meta.duration`，两者都不可用时安全归零。主列表 result 写 `d1`，generic X
+> feed 的 thread sibling result 写可选 `thread_d1`；同一个归一值同时写入
+> `query_time_ms` 与 `Server-Timing`，因此前者继续严格等于主 `d1`。
+>
+> 不发布 `map` / `json` / `total`，也不插入 `scheduler.wait()` 人为推进时钟，避免把 D1
+> 等待错标成 CPU 阶段或为观测本身增加延迟。Worker CPU 与 invocation wall time 使用
+> Cloudflare root span 的 `cloudflare.cpu_time_ms` / `cloudflare.wall_time_ms`，完整请求路径
+> 继续由 nginx `upstream_response_time` 与浏览器 `perf_api.total` 归因；map/json CPU 只在
+> 本地 Workers DevTools 中剖析。依据：
+> [Performance and timers](https://developers.cloudflare.com/workers/runtime-apis/performance/)、
+> [D1 return objects](https://developers.cloudflare.com/d1/worker-api/return-object/)、
+> [Spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/)。
+
 **Step 1: Write failing formatter tests**
 
 ```ts
-expect(formatServerTiming({ d1: 223, map: 4, json: 2, total: 231 }))
-  .toBe('d1;dur=223, map;dur=4, json;dur=2, total;dur=231');
-expect(formatServerTiming({ d1: -1, total: Number.NaN })).toBe('');
+expect(formatServerTiming({ d1: 223, thread_d1: 17, map: 4, json: 2, total: 231 }))
+  .toBe('d1;dur=223, thread_d1;dur=17');
+expect(formatServerTiming({ d1: -1, thread_d1: Number.NaN })).toBe('');
+expect(d1DurationMs({
+  meta: { timings: { sql_duration_ms: 7.12345 }, duration: 99 },
+})).toBe(7.123);
 ```
 
 Run: `cd worker && npm test -- --run src/server-timing.test.ts`
@@ -169,30 +191,36 @@ type JsonResponseOptions = {
 };
 ```
 
-`jsonResponse` must measure `JSON.stringify` separately when timings are supplied, merge CORS safely,
-validate and echo an incoming `X-Request-Id` (ASCII `[A-Za-z0-9_-]`, max 64 chars) or generate one only when
-absent, and return `Server-Timing`. nginx will inject the same id upstream so its access log and Worker response
-can be joined. Public GET responses also set
-`Timing-Allow-Origin` to the allowed site origin; never expose the origin secret.
+`jsonResponse` serializes normally and only publishes the supplied allowlisted D1 metrics; it must not use the
+Worker JS clock to derive `map`、`json` or `total`. Merge CORS safely, validate and echo an incoming
+`X-Request-Id` (ASCII `[A-Za-z0-9_-]`, max 64 chars) or generate a safe id for missing/invalid values, and return
+`Server-Timing`. nginx will inject the same id upstream so its access log and Worker response can be joined.
+Public GET responses also set `Timing-Allow-Origin` to the allowed site origin; never expose the origin secret.
 
 **Step 3: Instrument every list handler**
 
-Measure independently:
+After each list query, read the SQL execution duration from its own D1 result metadata:
 
-- `d1`: `.all()` only;
-- `map`: parse/project/cursor/thread completion;
-- `json`: serialization;
-- `total`: handler entry to response creation.
+- `d1`: primary result `meta.timings.sql_duration_ms`, fallback `meta.duration`;
+- `thread_d1`: optional generic X thread-sibling result, using the same precedence;
+- missing, non-finite or negative metadata: normalize safely to `0`;
+- do not publish `map`、`json` or `total` from Worker timers.
 
-Keep `query_time_ms` for backward compatibility. Do not mix upstream network time into `d1`.
+Keep `query_time_ms` for backward compatibility and set it from the exact same normalized value as `d1`.
+The D1 value intentionally excludes network time; use Cloudflare root telemetry、nginx and browser timing for
+CPU / invocation wall / upstream / end-to-end totals.
 
 **Step 4: Test response headers**
 
 Add mocked-handler tests proving:
 
-- metrics are finite/non-negative;
+- formatter only emits finite/non-negative `d1` / `thread_d1` and rejects injected names;
+- D1 metadata prefers `sql_duration_ms`, falls back to `duration`, and safely handles invalid/missing metadata;
+- all five `/api/items` list handlers use their own primary D1 result; generic thread completion uses a distinct
+  `thread_d1` without changing `query_time_ms`;
+- production responses never emit `map`、`json` or `total`;
 - CORS and TAO remain valid;
-- `query_time_ms` equals the D1 interval, not total;
+- `query_time_ms` equals the normalized `d1` value;
 - `/api/items/:id` does not accidentally receive list-only stripping.
 
 **Step 5: Verify**
@@ -201,7 +229,9 @@ Add mocked-handler tests proving:
 cd worker
 npm test -- --run src/server-timing.test.ts
 npm test
+npx tsc --noEmit
 npx wrangler deploy --dry-run
+git diff --check
 ```
 
 Expected: PASS and dry-run succeeds.
@@ -209,8 +239,9 @@ Expected: PASS and dry-run succeeds.
 **Step 6: Commit**
 
 ```bash
-git add worker/src/server-timing.ts worker/src/server-timing.test.ts worker/src/index.ts
-git commit -m "perf: expose worker list timing"
+git add docs/plans/2026-07-10-c-end-performance-optimization-plan.md \
+  worker/src/server-timing.ts worker/src/server-timing.test.ts worker/src/index.ts
+git commit -m "fix: report only measurable worker timing"
 ```
 
 ### Task 3: 版本化 nginx 分段日志配置
