@@ -16,6 +16,7 @@ test("Feed wires an unsampled page-once feed_ready after paint with bounded prov
   assert.match(feed, /visibilitychange/);
   assert.match(feed, /ref=\{feedRootRef\}/);
   assert.match(feed, /EVENTS\.FEED_READY/);
+  assert.match(feed, /performance\.mark\(["']aifeeds:feed-ready["']\)/);
   assert.match(feed, /data-feed-source=\{sourceType\}/);
   assert.match(feed, /query_time_ms/);
   for (const source of ["memory_cache", "local_snapshot", "network"]) {

@@ -167,7 +167,14 @@ const MARK_SEEN_DELAY_MS = 5_000;
 const feedReadyScheduler = createFeedReadyScheduler({
   requestFrame: (callback) => window.requestAnimationFrame(callback),
   cancelFrame: (id) => window.cancelAnimationFrame(id),
-  report: (payload) => track(EVENTS.FEED_READY, payload),
+  report: (payload) => {
+    try {
+      performance.mark("aifeeds:feed-ready");
+    } catch {
+      // The milestone remains telemetry-only on browsers without User Timing.
+    }
+    track(EVENTS.FEED_READY, payload);
+  },
 });
 
 // Network Information API is non-standard but supported on Chrome/Edge/

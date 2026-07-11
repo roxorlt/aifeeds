@@ -365,7 +365,10 @@ export async function runCardImageVariantBackfill(
   ).first<{ n: number }>();
   result.remaining = remaining?.n ?? 0;
   result.complete = !dryRun && result.remaining === 0 && result.errors === 0 && result.conflicts === 0;
-  result.next_cursor = result.errors === 0 && result.conflicts === 0 && candidates.length === limit
+  result.next_cursor = !result.complete
+    && result.errors === 0
+    && result.conflicts === 0
+    && candidates.length === limit
     ? lastId
     : null;
   return result;

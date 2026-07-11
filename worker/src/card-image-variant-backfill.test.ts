@@ -227,6 +227,24 @@ describe('card variant backfill target selection', () => {
     });
   });
 
+  test('a full final write batch completes without exposing a stale resume cursor', async () => {
+    const { env } = fakeBackfillEnv([{
+      id: 'blog:final',
+      source_type: 'blog',
+      media: '[]',
+      extra: JSON.stringify({ cover_image: 'https://news.example/final.jpg' }),
+    }], { remaining: 0 });
+
+    const result = await runCardImageVariantBackfill(
+      env,
+      { dryRun: false, limit: 1 },
+      { generate: async () => variants },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(result.next_cursor).toBeNull();
+  });
+
   test('HF legacy figure falls back to extra.figure_image.raw_url when R2 metadata is absent', async () => {
     const { env } = fakeBackfillEnv([{
       id: 'hf:figure',

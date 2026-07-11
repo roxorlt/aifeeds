@@ -1429,9 +1429,11 @@ JSON，可保留；回滚代码会忽略它们。
 <!-- aifeeds-card-image-variants:end -->
 
 <!-- aifeeds-same-origin-api:start -->
-#### 同源 API perf staging 与生产切换（2026-07-11，本地版本化，当前未部署）
+#### 同源 API perf staging 与生产切换（2026-07-12，执行包已版本化，当前未部署）
 
-**状态与权限边界**：本节只记录本地代码、构建脚本、版本化模板和未来操作步骤。当前未创建
+**状态与权限边界**：本节只记录本地代码、构建脚本、版本化模板和未来操作步骤。精确命令、停止线
+与逐项回滚见
+[`docs/reviews/c-end-perf-staging-change-packet.md`](reviews/c-end-perf-staging-change-packet.md)。当前未创建
 `xlist-dashboard-perf` Pages 项目，未创建 `perf-staging.ai-feeds.com` DNS/证书，未复制
 [`deploy/nginx/aifeeds-api-location.conf`](../deploy/nginx/aifeeds-api-location.conf) 到 VPS，未执行
 `nginx -t` / reload，也未部署 staging 或 production。下列每类外部动作都必须先取得对应的
@@ -1461,7 +1463,18 @@ HTML 的首流预取与应用 resolver 使用同一优先级：同源 build 请�
 `/api/items?source_type=x_list&limit=12`，不会预连 `api.ai-feeds.com`；external build 才动态加入
 对应 API origin 的 preconnect/dns-prefetch。
 
-**版本化 nginx 模板**：模板只能放在目标 public site front `server` 内、SPA `location /` 之前；
+2026-07-12 只读采证确认：`perf-staging.ai-feeds.com` 还没有 DNS 记录；生产主域和同 VPS 的隔离测试域
+均为 DNS-only A，故本实验也固定为 DNS-only A、TTL 120；VPS 是 nginx 1.24.0 / certbot 2.9.0，
+resolver 为 `1.1.1.1`、`1.0.0.1`；staging 未配置 `ORIGIN_SECRET`，Worker gate 关闭。这些事实只用于
+版本化变更单，没有创建记录、签证书或 reload。
+
+DNS credential 另有硬门：当前统一 env 的 `CLOUDFLARE_API_TOKEN` 按本章权限真值只有
+Worker/Pages/D1/KV/R2，没有 Zone/DNS；当前 env 也没有 `CF_OPS_API_TOKEN`。因此 DNS gate 是
+**BLOCKED**，不得拿 deployment token 试写，也不得静默读取历史 `.bak`。必须由 credential owner 在
+独立审批下提供精确 `ai-feeds.com` zone、最长 24 小时且只有 `Zone Read` + `DNS Edit` 的子 token，
+以 0600 临时文件交给变更单；创建和撤销子 token 与创建/删除 DNS record 是分开的审批边界。
+
+**版本化 nginx 模板**：通用生产 location 模板只能放在目标 public site front `server` 内、SPA `location /` 之前；
 不得放进现有 staging、admin、webhook、API 或其他 virtual host。它故意包含以下占位符，仓库中
 没有任何 secret：
 
@@ -1481,6 +1494,19 @@ microcache、cookie rewrite、CORS header rewrite 或 admin/webhook 转发。
 对照现有 API location 的完整 `proxy_set_header`、body-size、timeout、buffering 与 SNI 设置；差异
 逐项解释后把占位符渲染到临时文件。禁止把 `nginx -T` 全文、`X-Origin-Secret`、Cookie、
 Authorization 或渲染后的配置复制到日志、PR 或本仓库。
+
+perf-staging 不渲染这个含 secret 占位符的通用 location，而使用两份无 secret、固定 staging 身份
+的完整配置：首次签证书前用
+[`deploy/nginx/aifeeds-perf-staging-bootstrap.conf`](../deploy/nginx/aifeeds-perf-staging-bootstrap.conf)
+只开放 HTTP-01；签发后替换为
+[`deploy/nginx/aifeeds-perf-staging-server.conf`](../deploy/nginx/aifeeds-perf-staging-server.conf)。后者在
+nginx 1.24 上用 `resolver` + 变量 `proxy_pass` 让 Pages/Worker hostname 每 30 秒安全重解析，API
+route 固定 `X-Forwarded-Host: staging-api.ai-feeds.com`，不发送 `X-Origin-Secret`，且页面/API 都
+显式禁用 cache；SPA fallback 前另有与生产同形的 `/daily`、`/i/*`、robots/sitemap/llms Worker
+route，防止 SEO 页面被 Pages 壳吞掉，裸 `/i` 则仍交给 SPA。两者都必须先 `nginx -t`，成功后才
+reload。所有 public TLS upstream 都用系统 CA 验证；Pages fallback 明确清空 Cookie、Authorization
+和运维敏感头，不能把 `.ai-feeds.com` session 发给 pages.dev；API body 上限为 6 MiB，覆盖现有
+5 MiB feedback 图片加 multipart framing。
 
 **外部门禁与 perf staging 顺序（均未执行）**：
 
@@ -1508,10 +1534,12 @@ version、request id、状态码和浏览器网络证据，但不得记录验证
   刷新、开新 tab 和 PC/移动端切换后仍登录。
 - 邮件验证码：`/api/auth/email/send` → `/api/auth/login` → `/api/auth/me` → `/api/auth/logout`
   完整闭环。验证码只在受控测试账号和私有界面使用，不写验收日志。
-- SMS：保持当前产品开关禁用；调用 `/api/auth/sms/send` 只验证既定 disabled 响应，禁止为了验收
-  临时打开通道。
-- 登录互动：favorite 添加/取消、subscription 读取/更新/退订、feedback 文本与允许大小的图片上传/
-  mine/read/unread，逐项验证 CSRF/Cookie、状态码和刷新后持久化；不得使用真实用户内容。
+- SMS：保持当前产品开关禁用；本批次已把 `/api/auth/sms/send` 改为只有
+  `ENABLE_SMS_LOGIN === 'true'` 才继续，其他值在解析、Turnstile、DB、额度和 provider 前 fail-closed。
+  验收只提交空 JSON 并断言 `403 / reason=sms_disabled`，不得填手机号/验证码，也禁止临时打开通道。
+- 登录互动：subscription 读取/更新/退订、feedback 文本与允许大小的图片上传/mine/read/unread，逐项
+  验证 CSRF/Cookie、状态码和刷新后持久化；不得使用真实用户内容。`favorite` 记为 **N/A**：当前仓库
+  没有 `/api/favorites` route、favorites table 或收藏 UI，不能用不存在的能力伪造通过项。
 - 分享：`/api/share/create`、poster、landing 与 `/s/:token` 二维码/跳转；规范公开 URL 仍由
   Worker 环境的 `SITE_BASE` / `API_BASE` 生成，不能变成 workers.dev 或 perf host。
 - SPA 深链族逐一冷开与刷新：`/t/:id`、`/g/:owner/:repo`、`/ph/:slug/:date`、`/c/:slug`、
@@ -1519,8 +1547,11 @@ version、request id、状态码和浏览器网络证据，但不得记录验证
   `/settings/account`、`/feedback`、`/subscribe`、`/me/subscription`。
 - Worker/SEO 深链保持原路由：`/daily`、`/daily/:date`、`/i/` item pages、`/robots.txt`、
   `/sitemap.xml`、sitemap shards、`/llms.txt` 和静态 hashed assets。`^~ /api/` 不得吞掉这些路径。
-- 错误/安全：401/403/404/429/5xx 不被缓存；Cookie 不串用户；origin gate、真实访客 IP、限流、
-  CORS、字体和媒体 Range 行为与当前 staging 约定一致。
+- 错误/安全：401/403/404/429/5xx 不被缓存；Cookie 不串用户；CORS、字体和媒体 Range 行为与当前
+  staging 约定一致。**staging 限制必须显式记为 N/A**：该 Worker 未设 `ORIGIN_SECRET`，所以 gate
+  关闭，`getClientIp` 不信任 VPS 的 `X-Forwarded-For` 而回落到 Worker 看到的 VPS
+  `CF-Connecting-IP`；perf-staging 不能证明 production origin gate、真实访客 IP 或 per-IP 限流。
+  验收只用单个低频测试账号，生产 route 上线前必须在私有带 secret 链路另验这三项。
 
 验收至少比较 external staging 与 perf staging 的 cold/warm `perf_api` DNS/connect/TLS/request/total、
 `feed_ready`、FCP/LCP、transfer、错误率；预期因果信号是同源 API 不再支付第二次 TLS 且没有
@@ -1541,7 +1572,7 @@ CORS OPTIONS。只跑 curl 或 synthetic 不能替代真机/浏览器功能矩�
    npx wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=false
    ```
 
-   部署后立即完成 items/manifest/search/auth/favorite/subscription/feedback/share/deep-link smoke，确认
+   部署后立即完成 items/manifest/search/auth/subscription/feedback/share/deep-link smoke，确认
    request-id join、`Set-Cookie` / `Server-Timing` 和 API-origin OPTIONS=0。
 3. 单独观察至少 48 小时，按性能计划的 all-clean/engaged、PC/移动端和错误停止线判断；不得同时
    叠加微缓存、地域路由或其他基础设施实验。
@@ -1551,7 +1582,7 @@ CORS OPTIONS。只跑 curl 或 synthetic 不能替代真机/浏览器功能矩�
 1. 出现回归时**保留 `/api/` route**，停止其他变更；运行现有 `cd dashboard && npm run deploy`
    重新构建/部署 external-API artifact。该 build 会恢复 `https://api.ai-feeds.com`，同时留下的
    same-origin route 对用户无害。
-2. 验证首页/feed/search、`/api/auth/me`、邮件验证码、logout、favorite、subscription、feedback、
+2. 验证首页/feed/search、`/api/auth/me`、邮件验证码、logout、subscription、feedback、
    share 与全部深链已通过外域 API 恢复；确认错误率和 request waterfall 回到基线。
 3. external build 稳定后，才在另一次获批 VPS 动作中按部署时的精确 backup 或审查过的反向 diff
    删除未使用的 production `/api/` location，执行 `nginx -t` 后 reload。不要用通配符猜 backup，
@@ -1564,17 +1595,22 @@ perf staging 回滚彼此独立：Pages project、DNS/证书和 VPS server block
 <!-- aifeeds-same-origin-api:end -->
 
 <!-- aifeeds-upstream-performance:start -->
-#### Worker upstream keepalive / list microcache 实验门禁（2026-07-11，仅本地版本化）
+#### Worker upstream keepalive / list microcache 实验门禁（2026-07-12，keepalive BLOCKED）
 
 **结论先行**：当前不启用 keepalive，也不启用 microcache。Task 11 的 topology-faithful perf
 staging、Task 3 分段 nginx 日志以及 Task 9 远端 projection/index 时序证据均未部署；现有
 staging 不经过香港 VPS，不能提供可信 A/B。仓库中的
 [`deploy/nginx/aifeeds-upstream-performance.conf`](../deploy/nginx/aifeeds-upstream-performance.conf)
-含未渲染 resolver/upstream 占位符，不能直接 include，且明确 `proxy_cache off`。
+含未渲染 resolver/upstream 占位符，**不得安装**，且明确 `proxy_cache off`。
 
-keepalive 实验前必须先经只读 VPS 审批确认 `nginx -v/-V` 与实际构建支持 hostname 动态
-re-resolution 的 `server ... resolve`。不支持就停止，禁止固定 Cloudflare IP，也不为预期仅
-20–30ms 的收益顺带升级生产 nginx。命名 upstream 只替换 Task 11 私有渲染 location 的
+2026-07-12 已获批的只读 VPS 采证确认实际为 **nginx 1.24.0**。开源 nginx 只有从 **1.27.3** 起
+才支持本设计所需的 `upstream server ... resolve` 安全动态重解析；因此当前 keepalive A/B/A
+状态为 **BLOCKED**，不安装 template、不跑伪 A/B，也绝不固定 Cloudflare IP。计划中的预期收益仅
+20–30ms，不足以附带授权升级生产 nginx。纯函数能力门
+[`deploy/nginx/nginx-capability.mjs`](../deploy/nginx/nginx-capability.mjs) 会把 1.24.0 判为
+`resolver+variable-proxy_pass`，只有另行批准升级并验证至少 1.27.3 后才可重新打开本节实验。
+
+未来若能力门重新打开，命名 upstream 只替换 Task 11 私有渲染 location 的
 `proxy_pass`；真实 Worker hostname 仍分别写入 `Host` 和 `proxy_ssl_name`，origin secret、
 Cookie、Authorization、request id 与其他 header 完全沿用原 location。
 

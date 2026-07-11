@@ -890,7 +890,7 @@ Browser matrix:
 - existing login cookie `/api/auth/me`;
 - email-code login/logout;
 - SMS endpoint remains disabled as configured; verify the disabled response rather than temporarily enabling it;
-- favorite/subscription/feedback;
+- subscription/feedback；favorite 标记 N/A（当前仓库无 route/table/UI，不在本性能计划扩产品范围）；
 - share landing and every deep-link family;
 - `/daily`, `/i`, sitemap and static assets unchanged.
 
@@ -1011,6 +1011,13 @@ git commit -m "perf: serve right-sized feed media"
 Use the live nginx version's supported upstream DNS strategy; do not pin Cloudflare IPs. Enable
 `proxy_http_version 1.1`/cleared Connection and an upstream keepalive pool only if hostname re-resolution remains
 safe. Compare 100 reused requests with the current configuration.
+
+**2026-07-12 evidence update:** the approved read-only VPS check found open-source nginx 1.24.0. Safe dynamic
+`upstream server ... resolve` requires at least 1.27.3, so this experiment is **BLOCKED** on the current host.
+`deploy/nginx/aifeeds-upstream-performance.conf` must not be installed, Cloudflare IPs must not be pinned, and the
+expected 20–30 ms gain does not justify an implicit production nginx upgrade. Perf staging uses resolver-backed
+variable `proxy_pass` without an upstream keepalive pool. Reopen A/B/A only after a separately approved upgrade and
+compatibility review.
 
 Accept only if P50/P95 improve and no stale DNS/502 increase. Expected gain is about 20–30 ms, not seconds.
 

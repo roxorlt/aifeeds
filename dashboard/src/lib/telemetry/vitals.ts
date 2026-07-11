@@ -67,17 +67,20 @@ export function getPerformanceDeviceMeta(): Record<string, unknown> {
 }
 
 export function installVitals(): void {
-  if (Math.random() >= SAMPLE_RATE) return;
+  const sampled = Math.random() < SAMPLE_RATE;
   onLCP((metric) => {
-    track(EVENTS.PERF_LCP, {
-      value: Math.round(metric.value * 100) / 100,
-      rating: metric.rating,
-      navigation_type: metric.navigationType,
-      ...safeLcpDescriptorFromMetric(metric, window.location.origin),
-      ...getPerformanceDeviceMeta(),
-    });
+    if (sampled) {
+      track(EVENTS.PERF_LCP, {
+        value: Math.round(metric.value * 100) / 100,
+        rating: metric.rating,
+        navigation_type: metric.navigationType,
+        ...safeLcpDescriptorFromMetric(metric, window.location.origin),
+        ...getPerformanceDeviceMeta(),
+      });
+    }
     window.dispatchEvent(new Event('aifeeds:lcp-settled'));
   });
+  if (!sampled) return;
   onINP(report(EVENTS.PERF_INP));
   onCLS(report(EVENTS.PERF_CLS));
   onTTFB(report(EVENTS.PERF_TTFB));

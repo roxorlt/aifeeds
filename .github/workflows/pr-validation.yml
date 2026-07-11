@@ -12,8 +12,11 @@ on:
       - 'dashboard/**'
       - 'deploy/**'
       - 'scripts/benchmark-aifeeds-upstream*'
+      - 'scripts/run-aifeeds-staging-backfill*'
       - 'scripts/ci/**'
       - 'docs/operations.md'
+      - 'docs/reviews/c-end-perf-staging-change-packet.md'
+      - 'docs/reviews/c-end-performance-rollout-template.md'
       - '.github/workflows/**'
 
 # dorny/paths-filter 需要读 PR changed files,默认 GITHUB_TOKEN 没此权限。
@@ -44,8 +47,11 @@ jobs:
             performance_ops:
               - 'deploy/nginx/**'
               - 'scripts/benchmark-aifeeds-upstream*'
+              - 'scripts/run-aifeeds-staging-backfill*'
               - 'scripts/ci/performance-validation-contract.test.mjs'
               - 'docs/operations.md'
+              - 'docs/reviews/c-end-perf-staging-change-packet.md'
+              - 'docs/reviews/c-end-performance-rollout-template.md'
               - '.github/workflows/**'
 
   validate-worker:
@@ -153,6 +159,7 @@ jobs:
         run: >-
           node --test
           scripts/benchmark-aifeeds-upstream.test.mjs
+          scripts/run-aifeeds-staging-backfill.test.mjs
           deploy/nginx/*.test.mjs
           scripts/ci/performance-validation-contract.test.mjs
       - name: Validate nginx request-id checker

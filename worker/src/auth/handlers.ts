@@ -56,6 +56,11 @@ export async function handleSmsSend(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  // Feature flag：备案前 phone 通道关闭；必须在验证码、限流、额度和 provider 之前短路。
+  if (env.ENABLE_SMS_LOGIN !== 'true') {
+    return jsonErr('sms login disabled', 403, { reason: 'sms_disabled' });
+  }
+
   // 1. 解析 + 字段校验
   const deviceId = request.headers.get('X-Device-Id');
   if (!deviceId || deviceId.length < 8 || deviceId.length > 64) {
