@@ -10,7 +10,10 @@ on:
     paths:
       - 'worker/**'
       - 'dashboard/**'
+      - 'deploy/**'
+      - 'scripts/benchmark-aifeeds-upstream*'
       - 'scripts/ci/**'
+      - 'docs/operations.md'
       - '.github/workflows/**'
 
 # dorny/paths-filter 需要读 PR changed files,默认 GITHUB_TOKEN 没此权限。
@@ -25,6 +28,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       admin_dashboard: ${{ steps.filter.outputs.admin_dashboard }}
+      performance_ops: ${{ steps.filter.outputs.performance_ops }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -37,6 +41,12 @@ jobs:
               - 'dashboard/**'
             admin_dashboard:
               - 'worker/src/admin-dashboard.ts'
+            performance_ops:
+              - 'deploy/nginx/**'
+              - 'scripts/benchmark-aifeeds-upstream*'
+              - 'scripts/ci/performance-validation-contract.test.mjs'
+              - 'docs/operations.md'
+              - '.github/workflows/**'
 
   validate-worker:
     needs: detect-changes
@@ -55,6 +65,14 @@ jobs:
       - name: Type check
         working-directory: worker
         run: npx tsc --noEmit
+      - name: Worker tests
+        working-directory: worker
+        run: npm test
+      - name: Worker deploy dry run
+        working-directory: worker
+        env:
+          WRANGLER_LOG: none
+        run: npx wrangler deploy --dry-run
 
   validate-dashboard:
     needs: detect-changes
@@ -70,9 +88,40 @@ jobs:
       - name: Install dashboard deps
         working-directory: dashboard
         run: npm ci
+      - name: Cache pinned Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-webkit-${{ hashFiles('dashboard/package-lock.json') }}
+      - name: Install Chromium, WebKit, and system dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium webkit
+      - name: Install Chromium and WebKit system dependencies on cache hit
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: dashboard
+        run: npx playwright install-deps chromium webkit
+      - name: Lint
+        working-directory: dashboard
+        run: npm run lint
+      - name: Unit tests
+        working-directory: dashboard
+        run: npm run test:unit
       - name: Build (tsc + vite)
         working-directory: dashboard
         run: npm run build
+      - name: Cross-device performance budgets
+        working-directory: dashboard
+        run: npm run test:e2e
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-playwright-${{ github.run_id }}
+          path: dashboard/output/playwright/**
+          if-no-files-found: ignore
+          retention-days: 7
 
   smoke-admin-dashboard:
     needs: detect-changes
@@ -90,3 +139,21 @@ jobs:
         run: npm ci
       - name: Run admin-dashboard smoke
         run: bash scripts/ci/admin-dashboard-smoke.sh
+
+  validate-performance-ops:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.performance_ops == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate benchmark, nginx templates, and deployment gates
+        run: >-
+          node --test
+          scripts/benchmark-aifeeds-upstream.test.mjs
+          deploy/nginx/*.test.mjs
+          scripts/ci/performance-validation-contract.test.mjs
+      - name: Validate nginx request-id checker
+        run: python3 deploy/nginx/check-nginx-request-id.test.py

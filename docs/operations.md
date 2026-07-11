@@ -11,6 +11,10 @@
 
 历史：2026-07-11（增加香港 nginx 上游 connect/header/response 分段性能日志的版本化配置与审批后部署/轮转/回滚手册；本次未部署）
 
+历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
+
+历史：2026-07-11（新增同源 API 的本地构建开关、版本化 nginx location 与 perf-staging/生产切换回滚手册；当前未部署）
+
 历史：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Phase 1+2（fetchList / enrichPending）、`metrics_snapshots_clawhub` 表、`renderClawhubContent` SVG 模板、前端 `BrandClawhub` logo 都在这次落地）
 
 历史：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
@@ -293,13 +297,14 @@ npx wrangler deploy
 | 层 | 文件 | 触发 | 作用 |
 |----|------|------|------|
 | PR 软门槛 | `.github/workflows/pr-validation.yml` | `pull_request` | tsc / build / smoke,UI 红叉**不阻断 merge**(GitHub Free 限制下自然如此) |
-| Deploy 硬防线 | `deploy-worker.yml` / `deploy-dashboard.yml` 内 `validate-before-deploy` job | `push: [main, staging]` | 跟 deploy job 间 `needs:`,validate fail → deploy abort + PushDeer 推手机 |
+| Deploy 硬防线 | `deploy-worker.yml` / `deploy-dashboard.yml` 内 `validate-before-deploy` job | `push: [main, staging]` / 手动 dispatch | 跟 deploy job 间 `needs:`,validate fail → deploy abort + PushDeer 推手机；按实际 prod/staging 目标互斥，更新的 run 会取消同目标旧 run，手动 prod 只接受 `refs/heads/main` |
 
 **关键脚本**:
 - `scripts/ci/admin-dashboard-smoke.sh` — 静态 grep 拦 `document.write </script>` 这类已知坑;playwright 断言等 BE 给 admin-dashboard.ts 加 `data-testid` 后填(P0.5 增量)
 - `scripts/ci/pushdeer-notify.sh` — 守卫 `PUSHDEER_ADMIN_KEYS` 缺时静默 skip(不让缺 secret 把 abort 路径自己 abort)
 
-**Known issue**:`deploy-worker.yml` 的 validate tsc step 当前 `if: false`,因为 worker `main` 上有 ~20 个 tsc baseline errors(HF 接入新代码:`hf-paper-pipeline.ts` × 16 / `index.ts` × 2 / `ar5iv.ts` × 2)。BE 清零后删那一行即启用。`pr-validation.yml` 里 tsc 正常硬跑挂 UI 红叉。
+**当前状态（2026-07-11）**：Worker TypeScript baseline 已清零；`deploy-worker.yml` 与
+`pr-validation.yml` 都会硬跑 `npx tsc --noEmit`，不得恢复 `if: false` 或用软失败绕过。
 
 **GH Actions secret 同步规范**(强制约定):
 
@@ -1110,7 +1115,8 @@ ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
 
 **配置上下文**：版本化文件只含 `http` 上下文合法的 `map`、`log_format` 和条件
 `access_log`，可以原样安装为 `/etc/nginx/conf.d/aifeeds-performance-log.conf`。`map`
-只允许 `ai-feeds.com`、`api.ai-feeds.com`、`fonts.ai-feeds.com` 写入
+只允许 `ai-feeds.com`、`api.ai-feeds.com`、`fonts.ai-feeds.com`，以及未来获批后才会接入
+此 VPS 的隔离域 `perf-staging.ai-feeds.com` 写入
 `/var/log/nginx/aifeeds-performance.jsonl`；`www`、`hktest`、`rsshub` 和其他站点不会误记：
 
 ```nginx
@@ -1131,8 +1137,12 @@ proxy_set_header X-Request-Id $request_id;
 Worker 会校验并回显 `X-Request-Id`，使浏览器响应、Worker 日志和本文件的 `request_id`
 可以连接起来。
 
-**字段与隐私**：每行是一个 JSON object，包含 request id、host、无 query 的安全 URI 类别、
+**字段与隐私**：每行是一个 JSON object，包含 request id、受控实验关联键 `perf_probe`、host、无 query 的安全 URI 类别、
 状态码、总请求时间、上游连接/首字节/完整响应时间、缓存状态、响应字节数和 user agent。
+benchmark 发来的 `X-Aifeeds-Perf-Probe` 只有严格匹配
+`upstream-<10~16 位时间戳>-<8 位十六进制>` 才会写入 `perf_probe`，其他客户端值一律归一化为
+`-`；因此既能把 A/B/A 每轮与 nginx 分段时间精确 join，又不会把任意、超长的客户端 header
+变成日志维度。
 配置先用 `map $uri $aifeeds_safe_uri` 把 `/s/:token`、`/api/share/poster/:token`、
 `/api/admin/share/:token` 的永久分享 token 归一化，再用 `escape=json` 写入；禁止直接把 `$uri`
 放进 JSON，也从不使用会包含 query 的 `$request_uri`。日志不记录 query、Cookie、Authorization、
@@ -1248,6 +1258,14 @@ test -n "$RID"
 tail -n 1000 "$LOG" | jq -e --arg rid "$RID" 'select(.request_id == $rid)' >/dev/null
 ```
 
+Task 13 benchmark 的 JSON 输出会给出 `run_id`。将该值作为 `$RUN_ID` 后，下面只校验本轮确实可
+关联，不打印用户请求记录；后续 A/B/A 聚合也必须用同一个 `perf_probe` 条件分轮计算：
+
+```bash
+test -n "$RUN_ID"
+tail -n 10000 "$LOG" | jq -e --arg run "$RUN_ID" 'select(.perf_probe == $run)' >/dev/null
+```
+
 验收标准：`nginx -t` 成功；front/API smoke 正常；新日志含非空 request id，且
 connect/header/response 字段为 JSON string（允许 `-` 或逗号序列）；API 响应 id 能在日志中 join。
 这是生产香港链路的受控验收，不是 staging 验收。
@@ -1274,6 +1292,326 @@ systemctl reload nginx
 
 回滚只撤销格式、条件日志和 request-id 传播，不影响 Worker Task 2 的响应头与 Server-Timing。
 <!-- aifeeds-performance-log:end -->
+
+<!-- aifeeds-list-projection:start -->
+#### C 端 list projection、GitHub 封面门禁与 ClawHub 索引（2026-07-11，本地完成，远端未执行）
+
+**当前状态**：`/api/items` 六类列表 SQL 已改为显式列 + source-specific compact `extra`；详情
+`/api/items/:id` 和搜索仍保留各自完整契约。排序/游标辅助列全部使用 `_` 前缀，只在 Worker
+内部生成 cursor，不进入 list JSON。普通列表和官方新闻的新 cursor 以 `v2|...` 开头并包含
+`_untranslated_rank`；旧 cursor 仍可读。Huodongxing 缺失开始时间统一使用与 ORDER BY 相同的
+`9999` key，GitHub/PH 的 `cursor+pinned` 参数顺序也已修正。Hot 列表的新 cursor 使用
+`v2h|score|id|rank_now`，后续页沿用第一页的冻结时间计算衰减分，避免边界 item 因时钟前进重复出现；
+未来或无法解析的发布时间按 `age_hours=0` 计算，保证 score 始终有限且由 `id` 完成稳定全序；格式、
+score、id 或 `rank_now` 非法的 `v2h` cursor 直接返回 `400 invalid_cursor`，不得静默退回第一页。
+旧 `score|id` cursor 仍可读。
+
+本次只完成代码、测试、本地 SQLite JSON1/EXPLAIN 验证；**未部署 Worker、未运行 staging/prod
+GitHub 回填、未对任何远端 D1 应用 migration 028**。下面每个远端写动作仍需独立审批。
+
+**GitHub `cover_url` 覆盖门禁**：新 enrich 在 README 抓取后写
+`cover_status='ok' + cover_url` 或 `cover_status='none'`，R2 rewrite 后再次计算最终 cover。
+README 的全部候选明确 404/空 2xx 才算 confirmed absent；网络错误、429、5xx 与其他非 404
+会抛出并保持 workflow 可重试，不能把瞬时失败固化为 `cover_status='none'`。
+列表 projection 只有看到可信 `cover_status IN ('ok','none')` 才不再携带隐藏 README；旧的非空
+但非法 `javascript:`/SVG/badge cover 不算完成。一次性 mode 默认 dry-run：
+
+```bash
+# staging dry-run：只报告 candidates/covers/none/remaining，零写
+curl -sS -X POST \
+  'https://staging-api.ai-feeds.com/api/enrich/run?mode=github-cover-backfill&dry_run=1&limit=100' \
+  -H "Authorization: Bearer $INGEST_TOKEN" | jq
+```
+
+写模式必须在 staging 单独获批后才把 `dry_run=0`，按返回的 `next_cursor` 传
+`after_id=<urlencoded id>` 分批继续；遇到 `errors>0` 或 `conflicts>0` 时 cursor 会归零，必须从头
+重扫。`complete=true` 不是“本页不足 limit”，而是全局 remaining COUNT=0 且无 error/conflict。
+候选范围严格为 GitHub feed 可见的 relevant、未删、非 sponsor、workflow-complete 行；UPDATE 用
+原 `extra` compare-and-swap，drawer 的 on-demand refresh 也只 `json_set` 局部字段，避免覆盖并发
+cover marker。生产回填需另一次生产数据审批；在 staging/production 各自 `complete=true` 前不得
+删除隐藏 README fallback。
+
+**migration 028 只优化已证实的 ClawHub 默认 SQL**：
+
+- `idx_items_clawhub_feed_stars`：`category=all&sort=stars`；
+- `idx_items_clawhub_category_stars`：具体 category equality + stars/id 顺序；
+- 两者都是 relevant、未删、非 suspicious 的 partial expression index；
+- 没有为 PH、news、X/HF、GH、HDX 新增索引。PH persisted rank 仍需单独版本化 cursor/重排设计；
+  news 的时间动态 score 也不能用静态索引假装解决。
+
+staging 获批后的顺序（当前未执行）：
+
+```bash
+cd worker
+npm test -- --run src/list-query-plan.test.ts
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --file=migrations/028-feed-list-query-indexes.sql
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --command="EXPLAIN QUERY PLAN SELECT id FROM items WHERE source_type='clawhub' AND is_relevant=1 AND deleted_at IS NULL AND COALESCE(json_extract(extra,'$.is_suspicious'),0)=0 ORDER BY CAST(json_extract(metrics,'$.stars') AS INTEGER) DESC,id ASC LIMIT 31"
+```
+
+验收必须同时记录默认 all/category 的 EXPLAIN、结果/next_cursor 对比、D1 P75、Worker
+`Server-Timing`、identity/gzip；要求 ClawHub 不再出现 `USE TEMP B-TREE FOR ORDER BY`，且结果和
+游标无回归。projection 后实测若 PH/news/X/HF 没超过计划阈值，禁止顺手加索引。
+
+生产 apply 仍需单独审批和已记录的 staging 证据。精确回滚 SQL：
+
+```sql
+DROP INDEX IF EXISTS idx_items_clawhub_feed_stars;
+DROP INDEX IF EXISTS idx_items_clawhub_category_stars;
+```
+
+回滚后重新跑两条 EXPLAIN 与列表 cursor smoke；索引回滚不要求回滚 compact DTO。若 DTO/字段或
+分页有回归，应回滚 Worker 版本，而不是删除索引来掩盖应用层问题。
+<!-- aifeeds-list-projection:end -->
+
+<!-- aifeeds-card-image-variants:start -->
+#### C 端卡片图片变体与第三方图片受控链路（2026-07-11，本地完成，远端写未执行）
+
+**选型证据**：只读生产 spike 用同一张 X 图片比较了原图与现有严格白名单 `/img`：原图
+622×1199、98,244 B、TTFB 约 0.95s；`w=400` 返回 400×771 AVIF、35,092 B，但冷 TTFB
+约 2.92s，warm 仍约 1.34s；`w=800` 因 `scale-down` 实际仍为 622×1199。视频 R2 Range
+请求返回 `206`、1024 B。结论是 `/img` 适合活动行/HF 等存量或第三方兜底，但不应把每张首屏图的
+冷转换放在用户请求上；新内容在外部资源迁 R2 时预生成 400/800 请求档的 WebP，记录**实际**输出
+宽高并内容寻址存入 `/r/<source>/card/`。未对 production/staging 发出任何写请求。
+
+**代码契约**：`worker/src/card-image-variant.ts` 只接受 HTTPS 静态图片，拒绝 GIF/SVG、音频、
+视频、私网、本站所有子域和 `*.workers.dev`，并以 `redirect=error` 防止首跳外链重定向回本服务。
+源 Content-Type 未知时先用同源 UA 做 HEAD 探测，无法确认静态类型就跳过；Cloudflare 转换固定
+`anim:false`，不会把动画带进卡片变体。
+每个 item 最多生成一个主视觉的两档变体，原图始终保留给详情、Lightbox 与旧浏览器。X 转推使用
+翻转后的 `retweet_of` 主视觉；视频只可能生成 poster 变体，mp4 不进入转换。PH 跳过 logo、avatar
+与视频 body；HF 兼容 `figure_image.raw_url`；博客在品牌图护栏/body hero 回落之后只处理最终采用
+封面；播客音频迁移完全不变。标量封面使用 `cover_variant_source` 绑定当前 cover，避免后续 sweep
+换图后误用旧变体。
+
+前端有变体时使用 `<picture><source type="image/webp">`，变体加载失败先移除 source 再重试原图；
+没有变体的 HF/活动行候选走 `/img` 的 400/800 受控 URL。`/img` host 白名单为活动行卡片新增
+`cdn.huodongxing.com`、`wimg.huodongxing.com`、`nscdn.huodongxing.com`，并为 GitHub 已知图片
+重定向链补充 `private-user-images.githubusercontent.com`、`objects.githubusercontent.com`、
+`camo.githubusercontent.com`。首跳和最多三次后续跳转都重新验证 HTTPS 与同一严格白名单，
+不允许借重定向访问私网或任意 host；每一跳按验证后的 `currentTarget` 生成独立 cache key，避免
+缓存的首跳 3xx 在最终 URL 上自我重放；宽度/质量均有限分桶，
+`Accept` 独立选择 AVIF/WebP 且 cache key 含格式。图片响应和 `/r` 增加
+`Timing-Allow-Origin`。`video.twimg.com` 才转发 `/img` Range 且不走 `cf.image`；`/r` 的 206、
+`Content-Range`、`Accept-Ranges` 与 hotlink gate 保持原契约。
+
+视频 poster 也服从页面媒体预算：只有首屏 `eager/high` 视频立即写入 `poster`，其余视频在距离
+当前滚动容器 200px 内或收到 hover、pointer、focus、play 等明确意图后才注入；PC 以各自
+`.feed-body` 为观察根，移动端以文档 viewport 为根。Tweet 视频优先使用精确 400px 的已存 WebP
+poster 变体（再退到不小于 400px 的最小合法档和受控 `/img?w=400`），LinkCard 始终使用受控
+代理；不得为了封面提前读取 mp4。Playwright 门禁同时统计 poster 网络请求，保证屏外 lazy
+poster 为零、意图只放行目标视频且不会请求 800px 档。
+
+**存量回填门禁**：ops mode 默认 dry-run、永不由 cron 调用：
+
+```bash
+# 只读 inventory；当前未执行远端请求
+curl -sS -X POST \
+  'https://staging-api.ai-feeds.com/api/enrich/run?mode=card-image-variant-backfill&dry_run=1&limit=10' \
+  -H "Authorization: Bearer $INGEST_TOKEN" | jq
+```
+
+写模式 `dry_run=0` 同时创建 R2 对象并 CAS 更新 D1，必须先单独取得 staging 数据写审批。它从仍
+保留的 HTTPS 原链、R2 对象 `src-url` metadata 或 HF `figure_image.raw_url` 恢复上游，并携带各源
+实时迁移使用的 User-Agent。标量封面与 `cover_variant_source` 失配时，即使 version=1 也重新进入；
+失败会清掉旧变体并绑定本次尝试的 cover，下一次换图仍可重跑但不会无限重下。恢复不到写
+`card_variant_status=source_unavailable` 终态，转换失败写 `transform_failed`，两者都写 version=1，
+不会永久重下；单行 malformed JSON 计入 errors 而不会让整批 500。每批最多 25，按
+`next_cursor` 继续；任何 conflict/error 都停止推进。staging 完成
+后必须抽验 source 绑定、400/800 实际字节/尺寸、DPR 1/2/3 清晰度、CLS、X 视频 seek 与播客音频
+seek，且典型 360–400 CSS px 卡图目标 ≤40 KiB；production 写需另一次审批。
+
+**回滚**：先回滚 Dashboard/Worker 到前一版本；原图字段未被删除，因此卡片会自然退回原图或
+受控 `/img`。变体对象是内容寻址且无业务唯一性约束，无需紧急删除。若要清理，只能在引用审计后
+删除独立的 `<source>/card/` key，禁止清共享 `/r` 音视频或 `/img` cache。D1 marker/variant 字段位于
+JSON，可保留；回滚代码会忽略它们。
+<!-- aifeeds-card-image-variants:end -->
+
+<!-- aifeeds-same-origin-api:start -->
+#### 同源 API perf staging 与生产切换（2026-07-11，本地版本化，当前未部署）
+
+**状态与权限边界**：本节只记录本地代码、构建脚本、版本化模板和未来操作步骤。当前未创建
+`xlist-dashboard-perf` Pages 项目，未创建 `perf-staging.ai-feeds.com` DNS/证书，未复制
+[`deploy/nginx/aifeeds-api-location.conf`](../deploy/nginx/aifeeds-api-location.conf) 到 VPS，未执行
+`nginx -t` / reload，也未部署 staging 或 production。下列每类外部动作都必须先取得对应的
+**独立明确审批**；代码合并、构建成功或“继续计划”不构成 Pages、DNS、证书或 VPS 变更授权。
+
+现有 `staging.ai-feeds.com` / `staging-api.ai-feeds.com` 直接经过 Cloudflare，不经过香港 VPS，
+因此不能用它验证生产同源拓扑。实验必须使用隔离的 `perf-staging.ai-feeds.com`：页面壳经香港 VPS
+回源专用 `xlist-dashboard-perf.pages.dev`，同一 host 的 `/api/` 经香港 VPS 回源 staging Worker。
+**现有 staging 保持不变**，生产也继续使用 `https://api.ai-feeds.com`，直到各自路由存在且单独获批。
+
+**构建矩阵与解析优先级**：`VITE_API_SAME_ORIGIN=true` 明确优先于 `VITE_API_BASE`；因此专用
+perf build 即使读取 checked-in `.env.staging`，也使用相对 `/api`。host fallback 不能覆盖显式
+external base，避免普通 staging/Pages artifact 被误切同源。
+
+| 命令 / artifact | API base | 允许的承载面 |
+|---|---|---|
+| `npm run build` / `npm run deploy` | `https://api.ai-feeds.com` | 普通 production 与 production Pages preview |
+| `npm run build:staging` / `npm run deploy:staging` | `https://staging-api.ai-feeds.com` | 现有 staging 与 staging Pages preview |
+| `npm run build:perf-staging` | `''`（相对 `/api`） | 仅已具备 `/api/` route 的 `perf-staging.ai-feeds.com` |
+| `npm run build:same-origin` | `''`（相对 `/api`） | 仅生产 front `/api/` route 验收后生成本地产物 |
+| `npm run deploy:same-origin` | 固定 fail-closed（退出码非 0） | 不部署；只指向本节获批操作包，不能被 `SKIP_PREDEPLOY_CHECK` 绕过 |
+
+普通 localhost 继续用相对路径交给 Vite proxy。`www.ai-feeds.com` 正常在 nginx 先跳转，不作为
+应用承载面。专用 perf artifact 直接打开 `xlist-dashboard-perf.pages.dev` 时没有同源 `/api`，
+预期不能作为验收面；普通 production/staging Pages preview 则始终使用上表外域 API。
+HTML 的首流预取与应用 resolver 使用同一优先级：同源 build 请求相对
+`/api/items?source_type=x_list&limit=12`，不会预连 `api.ai-feeds.com`；external build 才动态加入
+对应 API origin 的 preconnect/dns-prefetch。
+
+**版本化 nginx 模板**：模板只能放在目标 public site front `server` 内、SPA `location /` 之前；
+不得放进现有 staging、admin、webhook、API 或其他 virtual host。它故意包含以下占位符，仓库中
+没有任何 secret：
+
+| 占位符 | perf staging 私有渲染值 | production 私有渲染值 |
+|---|---|---|
+| `__WORKER_UPSTREAM_HOST__` | staging Worker 的 workers.dev host | production Worker 的 workers.dev host |
+| `__PUBLIC_API_HOST__` | `staging-api.ai-feeds.com` | `api.ai-feeds.com` |
+| `__ORIGIN_SECRET__` | 以 staging Worker 实际 gate 配置为准 | prod `ORIGIN_SECRET`；只在私有 VPS 会话注入 |
+
+模板用无 URI 后缀的 `proxy_pass` 保留完整 `/api/...` 与 query；Cookie、Authorization、
+`X-Forwarded-*`、回源 gate 和 `X-Request-Id` 透传到 Worker，并显式保留响应的 `Set-Cookie`、
+`Server-Timing`、`X-Request-Id`。`proxy_cache off` + bypass/no-cache 防止 front 继承缓存后误存
+登录、favorite、subscription、feedback 或其他个性化/mutation 响应。不得在本任务顺手增加
+microcache、cookie rewrite、CORS header rewrite 或 admin/webhook 转发。
+
+模板不是可直接安装的配置。获批后的私有 VPS 会话必须先备份实际 site 文件，用不会回显值的方式
+对照现有 API location 的完整 `proxy_set_header`、body-size、timeout、buffering 与 SNI 设置；差异
+逐项解释后把占位符渲染到临时文件。禁止把 `nginx -T` 全文、`X-Origin-Secret`、Cookie、
+Authorization 或渲染后的配置复制到日志、PR 或本仓库。
+
+**外部门禁与 perf staging 顺序（均未执行）**：
+
+1. 经 Cloudflare Pages 独立审批，创建专用项目 `xlist-dashboard-perf`，只部署已本地验证的
+   `npm run build:perf-staging` artifact；绝不覆盖 `xlist-dashboard-staging`。
+2. 经 DNS 与证书独立审批，把 `perf-staging.ai-feeds.com` 指向香港 VPS 并签发/安装仅该实验 host
+   所需证书；记录变更前值和逐项回滚值。
+3. 经 VPS/nginx 独立审批，在新的 perf-staging front server 中先放 `location ^~ /api/`，再放
+   Pages SPA fallback；私有渲染模板后先运行 `nginx -t`，成功才允许 reload。
+4. 仅在 DNS、证书、Pages、nginx 全部 ready 后从 `perf-staging.ai-feeds.com` 验收。任何直接 Pages
+   URL、现有 staging 或本地 proxy 的成功都不能替代这一拓扑验收。
+
+**完整验收矩阵**：desktop Chromium 1440×900、tablet Chromium 820×1180、iPhone-like Chromium
+390×844、iPhone WebKit 390×844、Android Chromium 412×915 都要跑匿名与登录态。每项记录
+commit、Pages deployment、nginx config backup、Worker
+version、request id、状态码和浏览器网络证据，但不得记录验证码、session Cookie 或用户内容。
+
+- 网络基线：首个 HTML 与 `/api/items` 复用 `perf-staging.ai-feeds.com` 的 HTTP/2/TLS session；
+  API connect/TLS 为 0 或可解释的复用值；没有指向 staging API origin 的 CORS OPTIONS；首流预取
+  与 React 请求归一化后只有一次；响应保留 `Server-Timing` 和与 nginx/Worker 可 join 的
+  `X-Request-Id`。
+- 匿名面：首页/feed、manifest、搜索与 suggest；列表一次失败后的正常恢复；无权限写操作仍返回
+  原有状态，不因 nginx 变成 HTML/缓存响应。
+- 既有登录：带已有 Cookie 打 `/api/auth/me`，身份保持且响应 `Set-Cookie` 属性未被 nginx 改写；
+  刷新、开新 tab 和 PC/移动端切换后仍登录。
+- 邮件验证码：`/api/auth/email/send` → `/api/auth/login` → `/api/auth/me` → `/api/auth/logout`
+  完整闭环。验证码只在受控测试账号和私有界面使用，不写验收日志。
+- SMS：保持当前产品开关禁用；调用 `/api/auth/sms/send` 只验证既定 disabled 响应，禁止为了验收
+  临时打开通道。
+- 登录互动：favorite 添加/取消、subscription 读取/更新/退订、feedback 文本与允许大小的图片上传/
+  mine/read/unread，逐项验证 CSRF/Cookie、状态码和刷新后持久化；不得使用真实用户内容。
+- 分享：`/api/share/create`、poster、landing 与 `/s/:token` 二维码/跳转；规范公开 URL 仍由
+  Worker 环境的 `SITE_BASE` / `API_BASE` 生成，不能变成 workers.dev 或 perf host。
+- SPA 深链族逐一冷开与刷新：`/t/:id`、`/g/:owner/:repo`、`/ph/:slug/:date`、`/c/:slug`、
+  `/e/:eventId`、`/h/:arxivId`、`/o`、`/o/:id`、`/s/:token`、`/search`、`/settings`、
+  `/settings/account`、`/feedback`、`/subscribe`、`/me/subscription`。
+- Worker/SEO 深链保持原路由：`/daily`、`/daily/:date`、`/i/` item pages、`/robots.txt`、
+  `/sitemap.xml`、sitemap shards、`/llms.txt` 和静态 hashed assets。`^~ /api/` 不得吞掉这些路径。
+- 错误/安全：401/403/404/429/5xx 不被缓存；Cookie 不串用户；origin gate、真实访客 IP、限流、
+  CORS、字体和媒体 Range 行为与当前 staging 约定一致。
+
+验收至少比较 external staging 与 perf staging 的 cold/warm `perf_api` DNS/connect/TLS/request/total、
+`feed_ready`、FCP/LCP、transfer、错误率；预期因果信号是同源 API 不再支付第二次 TLS 且没有
+CORS OPTIONS。只跑 curl 或 synthetic 不能替代真机/浏览器功能矩阵，也不能冒充真实 RUM。
+
+**生产切换（另一次独立生产审批）**：
+
+1. 先备份 production front 配置，私有渲染 prod 占位符并加入 `/api/` location；当前 dashboard
+   仍是 external build，所以新增 route 此时没有用户流量。`nginx -t`、reload、匿名/auth header
+   smoke 全绿后再继续。
+2. `npm run deploy:same-origin` 默认永远拒绝生产发布；不得临时改 package script 或用
+   `SKIP_PREDEPLOY_CHECK` 绕过。获批操作包必须写明 exact clean `main` commit、已验收 route 的
+   request-id 证据、执行人与回滚人。只有该次审批覆盖的私有操作会话才执行：
+
+   ```bash
+   cd dashboard
+   npm run build:same-origin
+   npx wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=false
+   ```
+
+   部署后立即完成 items/manifest/search/auth/favorite/subscription/feedback/share/deep-link smoke，确认
+   request-id join、`Set-Cookie` / `Server-Timing` 和 API-origin OPTIONS=0。
+3. 单独观察至少 48 小时，按性能计划的 all-clean/engaged、PC/移动端和错误停止线判断；不得同时
+   叠加微缓存、地域路由或其他基础设施实验。
+
+**可执行回滚顺序**：应用回滚永远先于 route 删除，避免两个依赖必须在同一瞬间成功。
+
+1. 出现回归时**保留 `/api/` route**，停止其他变更；运行现有 `cd dashboard && npm run deploy`
+   重新构建/部署 external-API artifact。该 build 会恢复 `https://api.ai-feeds.com`，同时留下的
+   same-origin route 对用户无害。
+2. 验证首页/feed/search、`/api/auth/me`、邮件验证码、logout、favorite、subscription、feedback、
+   share 与全部深链已通过外域 API 恢复；确认错误率和 request waterfall 回到基线。
+3. external build 稳定后，才在另一次获批 VPS 动作中按部署时的精确 backup 或审查过的反向 diff
+   删除未使用的 production `/api/` location，执行 `nginx -t` 后 reload。不要用通配符猜 backup，
+   不要 purge 无关缓存。
+4. 若 route 本身导致 front 故障而 Pages external artifact 尚健康，可先用部署时精确备份恢复 nginx；
+   仍需验证 external API 完整功能。记录回滚时刻、原因、artifact 与 config version。
+
+perf staging 回滚彼此独立：Pages project、DNS/证书和 VPS server block 各自使用变更单中的精确旧值，
+不得借“清理实验”改现有 staging。删除任何外部资源同样需要明确审批。
+<!-- aifeeds-same-origin-api:end -->
+
+<!-- aifeeds-upstream-performance:start -->
+#### Worker upstream keepalive / list microcache 实验门禁（2026-07-11，仅本地版本化）
+
+**结论先行**：当前不启用 keepalive，也不启用 microcache。Task 11 的 topology-faithful perf
+staging、Task 3 分段 nginx 日志以及 Task 9 远端 projection/index 时序证据均未部署；现有
+staging 不经过香港 VPS，不能提供可信 A/B。仓库中的
+[`deploy/nginx/aifeeds-upstream-performance.conf`](../deploy/nginx/aifeeds-upstream-performance.conf)
+含未渲染 resolver/upstream 占位符，不能直接 include，且明确 `proxy_cache off`。
+
+keepalive 实验前必须先经只读 VPS 审批确认 `nginx -v/-V` 与实际构建支持 hostname 动态
+re-resolution 的 `server ... resolve`。不支持就停止，禁止固定 Cloudflare IP，也不为预期仅
+20–30ms 的收益顺带升级生产 nginx。命名 upstream 只替换 Task 11 私有渲染 location 的
+`proxy_pass`；真实 Worker hostname 仍分别写入 `Host` 和 `proxy_ssl_name`，origin secret、
+Cookie、Authorization、request id 与其他 header 完全沿用原 location。
+
+获批后的 perf-staging A/B 使用安全脚本（会拒绝 production、任意 host 与个性化 endpoint）：
+
+```bash
+node scripts/benchmark-aifeeds-upstream.mjs \
+  --url 'https://perf-staging.ai-feeds.com/api/items?source_type=x_list&limit=12' \
+  --warmup 20 --requests 100 --concurrency 1
+node scripts/benchmark-aifeeds-upstream.mjs \
+  --url 'https://perf-staging.ai-feeds.com/api/items?source_type=x_list&limit=12' \
+  --warmup 20 --requests 100 --concurrency 8
+```
+
+至少做 A/B/A 三轮并跨两个 resolver TTL；100% 2xx，P50/P95 的 nginx
+`upstream_connect_time` 与 `upstream_header_time` 都改善，`request_time` 不得恶化 >5%，稳定收益
+至少 15ms。收益 <10ms、仅单一分位改善、轮次反转或错误率增加 >0.5pp 均不采用。之后在隔离
+perf staging 观察 24 小时；生产仍需单独审批且不得与同源切换同批。
+
+脚本会给 warmup 使用独立 probe；输出的正式 `run_id` 只随 `requests` 正式样本发送。nginx 只接受
+该脚本生成的受限格式，并写入性能日志的 `perf_probe`。每个 A/B/A 输出必须单独保存，按其
+`run_id = perf_probe` 过滤日志后再计算 connect/header/request 分位，禁止把 warmup、相邻轮次或
+普通访客请求混在一起比较。若日志中正式 `run_id` 的数量与脚本 `requests` 对不上，先停止实验并查
+转发/轮转链路，不能用残缺样本下结论。
+
+microcache 只有 projection/index 后公开 list 的 D1+Worker P75 仍约 ≥150ms、占 API 总耗时
+≥25%，且 20 秒窗口存在足够重复请求时才进入另一份设计/评审。未来即使启用，也只能是两个 exact
+GET location（`/api/items`、`/api/feed-manifest`）和独立 cache zone/path；Authorization、任意
+Cookie、非 GET、cursor、pinned、未知参数、非 200、`Set-Cookie` 全部 bypass/no-store，禁止
+`use_stale`，禁止复用现有图片/字体 cache。cache HIT 必须隐藏填充请求的旧
+`X-Request-Id`/`Server-Timing`，重新输出本次 nginx request id 与真实 cache timing，否则三段
+观测会错误 join。
+
+回滚彼此独立：keepalive 只恢复原 workers.dev `proxy_pass` 并移除 upstream include；microcache
+若未来获批，只移除两个 exact location并清其独立目录。两者都不得删除 Task 11 同源 `/api/`
+route、回滚 Dashboard artifact或清 `/img`、`/r`、页面壳缓存。
+<!-- aifeeds-upstream-performance:end -->
 
 > **2026-06-09 首屏提速（根因 = nginx 还在 HTTP/1.1）**：perf_nav 埋点实测大陆冷加载 `tcp:969 tls:347 ttfb:1353 load:7638`、但 `下载≈0` —— 慢在「每个资源单独冷建连」，不是下载。修：① 三个 443 server 块 `listen 443 ssl;` → `listen 443 ssl http2;`（含 `hktest.conf` 一起改，否则 0.0.0.0:443 protocol options redefined warning）；② `nginx.conf` 取消注释 `gzip_vary/gzip_proxied any/gzip_comp_level 6/gzip_types ...text/css...` —— 让 VPS 给 R2 来的字体 CSS 压缩（106KB→37KB，CF Pages 的 JS/CSS 仍是 br 透传不受影响）。TLS1.3 + BBR+fq 早已开。备份 `*.bak-20260609-100702`，回滚 = `cp` 回去 + `nginx -t && systemctl reload nginx`。验证：`curl --http2 -I https://ai-feeds.com/` 看 `HTTP/2`、字体 `content-encoding: gzip`。
 >
@@ -1350,6 +1688,52 @@ ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'fail2ban-client set nginx-limi
 > - **回滚**：`wrangler secret delete ORIGIN_SECRET`（prod）→ gate 代码 `if (env.ORIGIN_SECRET)` 立即跳过，秒回无闸状态 + IP 回落 CF-Connecting-IP。nginx 的注入行留着无害（worker 不校验即忽略）。
 > - **自查**：`curl -sI https://xlist-api.ltsms86.workers.dev/api/items`（直连无密钥应 **403**）；`curl https://api.ai-feeds.com/api/items`（经香港应 **200**）。
 > - **⚠️ 部署顺序硬要求**：改动这套时务必 ①先 nginx 注入头 → ②`wrangler secret put` → ③`wrangler deploy`。顺序颠倒（worker 先校验、nginx 还没注入）会让 prod api 瞬间全 403。
+
+### 6c. 地域路由实验门禁（2026-07-11，仅方案，当前禁止启动）
+
+完整预注册方案见
+[`docs/plans/c-end-geo-routing-experiment.md`](plans/c-end-geo-routing-experiment.md)。该文档和本节
+**没有**修改 TTL、DNS、CDN、custom domain、证书、nginx、Worker route 或生产流量；当前四个
+用户域名继续全量走香港 VPS。
+
+**当前状态：BLOCKED。** 服务端可信 `edge_country` / `edge_colo` 尚无足量稳定生产样本，
+跨四 host 的稳定 arm 分配/可信归因与 Cloudflare 直达候选链路也未完成验收。前端
+`mainland_hint` 只是 `Asia/Shanghai` 时区提示，**不是地理事实，严禁用作路由、实验分组或放量
+依据**。只有 DNS/CDN/Worker 服务端产生并校验的粗粒度国家/colo，以及未来单独评审的服务端
+网络分类，才可进入路由决策。
+
+启动前必须同时满足：
+
+- P0/P1/P2 逐阶段稳定至少 48 小时，最终版本形成连续 14 天基线；`all-clean`、`engaged`、
+  显式 `synthetic` 可分开查询，owner/synthetic 不混入主分析；
+- 拟开放地域满足固定样本门槛：P75 每个地域 × 设备 × arm 至少 200 个独立 LCP/cold-nav
+  会话，P95 每个地域 × arm 至少 500 个；移动端不足不得拿 desktop 外推；
+- A 为当前全量香港 control；B 仅让满足门槛的非大陆地理直达 Cloudflare，`CN`、未知地理和
+  经审批冻结的受保护网络仍走香港。非大陆按亚太、北美、欧洲、其他预注册大区分别分析，
+  单一国家单臂达到 200 时必须单列；全球平均不得掩盖任何地域恶化；
+- 路由层提供不可由客户端伪造的 `route_arm` / `route_generation` / 粗粒度 route geo，四个
+  host 同臂且分桶稳定；仅能做无法归因的 DNS round-robin 时不得启动；
+- 候选 host 已覆盖 PC/移动端证书/SNI、origin gate、Cookie、登录、搜索、反馈、分享、深链、
+  Service Worker、字体 CORS、图片与音视频 Range 的隔离验收；
+- 实验 owner、监控与回滚人在场，四 host 的当前 DNS/CDN/custom-domain/证书/TTL 值已受控留档，
+  且已取得**针对该次基础设施改动的独立明确审批**。代码合并或“继续执行计划”不构成授权。
+
+**指标与护栏**：主指标为各地域 cold nav `responseStart-startTime` 与 LCP 的 P75/P95，辅以
+`feed_ready`、FCP、`perf_api`、nginx/CDN/Worker/D1 分段。HTTP/API/前端错误率增加超过 0.5 个
+百分点、LCP P75 任一地域/设备恶化超过 10%、可用率低于 99.9% 或较 control 下降超过 0.1 个
+百分点、登录/分享/深链回归、证书/SNI/安全 gate/缓存串臂/Range 问题均触发停止或回滚。
+RUM 看不到 DNS 失败，必须同时看显式 synthetic 与服务端可用性；synthetic 只作护栏，不计入收益。
+
+**TTL、预热与推进**：若未来获批，实验 TTL 目标为 300 秒；降低 TTL 本身也在审批范围内，需在
+首次切流至少 24 小时前完成并等待 `max(24 小时, 2 × 旧 TTL)`。两臂只预热匿名公开且已证明
+缓存安全的壳/哈希资产/manifest/list，禁止预热或跨臂缓存个性化与 mutation；所有预热流量显式
+标 synthetic。真实流量只能按 5%（≥2h）→25%（≥24h）→50/50 推进，每次切权重后的
+`max(30 分钟, 2 × TTL)` 为 burn-in，不计入效果样本。
+
+**回滚**：启动前的独立变更单必须包含当时真实、逐 host 的精确恢复值和 custom-domain/证书
+操作顺序。触发时先把 treatment 归零或恢复全部旧值，核验 apex/www/API/fonts 与关键功能，等待
+至少 `2 × TTL` 并监控 60 分钟；除非确认坏缓存，不做全局 purge。实验达标也不自动授权全量，
+逐地域生产放量仍需新的明确审批。
 
 ### 7. CF 安全配置
 

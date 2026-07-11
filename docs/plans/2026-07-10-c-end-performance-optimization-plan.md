@@ -11,7 +11,7 @@
 路由只在新分段数据证明仍是主要段时实施，所有阶段独立灰度和回滚。
 
 **Tech Stack:** React 19、TypeScript、Vite、Cloudflare Worker/D1/R2、nginx、Web Vitals、
-Vitest、Node test、Playwright/Chrome DevTools。
+Vitest、Node test、Playwright（Chromium/WebKit）/Chrome DevTools。
 
 **Evidence:** `docs/reviews/2026-07-10-c-end-performance-deep-dive.md`
 
@@ -481,7 +481,7 @@ actually consumed. Preserve cursor and thread completeness semantics.
 
 **Step 4: Defer below-fold PC columns**
 
-Create a `DeferredFeed` wrapper using `IntersectionObserver` with `rootMargin: '600px 0px'`:
+Create a `DeferredFeed` wrapper using `IntersectionObserver` with `rootMargin: '200px 0px'`:
 
 - first grid row mounts immediately;
 - lower rows render fixed-height skeleton shells without list/image requests;
@@ -831,8 +831,7 @@ the repo ignore policy only explicitly permits `.env.staging`.
 ```json
 "build:perf-staging": "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build --mode staging",
 "build:same-origin": "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build",
-"predeploy:same-origin": "bash ../scripts/predeploy-check.sh",
-"deploy:same-origin": "npm run build:same-origin && wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=true"
+"deploy:same-origin": "node -e \"console.error('BLOCKED: same-origin production deploy requires explicit approval; follow docs/operations.md same-origin API runbook'); process.exit(1)\""
 ```
 
 Tests must cover both `sameOriginFlag=false` and `true`; host alone must never silently override a checked-in
@@ -924,7 +923,9 @@ git commit -m "perf: route first-party API on the site origin"
 Production rollout is a separate approved operation:
 
 1. add/test the production nginx `/api/` route while the current dashboard still uses the external API;
-2. run `cd dashboard && npm run deploy:same-origin`;
+2. keep `npm run deploy:same-origin` fail-closed; in the separately approved private deployment session run
+   `npm run build:same-origin`, verify the clean commit/artifact, then execute the exact Pages deployment command
+   recorded in `docs/operations.md`;
 3. verify response request ids, auth cookie, list/search/feedback/share and absence of API-origin OPTIONS;
 4. keep the route in place during rollback, then run existing `cd dashboard && npm run deploy` to rebuild/redeploy
    the external-API version;
@@ -1052,12 +1053,13 @@ git commit -m "ops: stage safe upstream performance controls"
 ```bash
 cd dashboard
 npm install --save-dev --save-exact @playwright/test@1.54.1
-npx playwright install chromium
+npx playwright install chromium webkit
 ```
 
-Commit both package files. In `pr-validation.yml`, cache `~/.cache/ms-playwright` keyed by
-`dashboard/package-lock.json`, run `npx playwright install --with-deps chromium` on cache miss, and then run the
-performance spec. Never rely on an unpinned one-off `npx` download.
+Commit both package files. In `pr-validation.yml`, cache `~/.cache/ms-playwright` with a browser-set prefix plus
+`dashboard/package-lock.json`, run `npx playwright install --with-deps chromium webkit` on cache miss, install both
+engines' system dependencies on cache hit, and then run the performance spec. Never rely on an unpinned one-off
+`npx` download.
 
 **Step 2: Add failing browser assertions**
 
@@ -1065,7 +1067,8 @@ Projects:
 
 - desktop Chromium 1440×900;
 - tablet 820×1180;
-- iPhone-like 390×844;
+- iPhone-like Chromium 390×844;
+- iPhone WebKit 390×844（真实 Safari 引擎覆盖滚动、触摸和抽屉差异）；
 - Android-like 412×915.
 
 Tests intercept requests and assert before LCP/first interaction:
@@ -1076,8 +1079,12 @@ Tests intercept requests and assert before LCP/first interaction:
 - lower desktop rows do not request lists/images before scroll;
 - at most one image has `fetchpriority=high`;
 - no font request before defer trigger;
+- offscreen lazy video posters make no request until their feed viewport or explicit user intent, and use the
+  400 px stored WebP variant when available;
+- a failed stored WebP card variant retries the original once, then hides only if the original also fails;
 - active mobile tab renders and adjacent swipe remains functional;
-- drawer full fetch still contains README/deep analysis/body.
+- drawer full fetch still contains README/deep analysis/body, and a search-provider handoff joins the same
+  in-flight detail GET.
 
 **Step 3: Add slow-network visual/functional cases**
 
@@ -1091,7 +1098,7 @@ cd dashboard
 npm run lint
 npm run build
 npx playwright test e2e/home-performance.spec.ts
-node --test src/**/*.test.mjs
+npm run test:unit
 
 cd ../worker
 npm test

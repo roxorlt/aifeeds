@@ -57,6 +57,7 @@ test('performance log is a host-scoped http-context JSON include', () => {
     '$bytes_sent',
     '$http_user_agent',
     '$aifeeds_safe_uri',
+    '$aifeeds_perf_probe',
   ]) {
     assert.ok(config.includes(variable), `missing ${variable}`);
   }
@@ -64,9 +65,17 @@ test('performance log is a host-scoped http-context JSON include', () => {
   assert.match(config, /map\s+\$host\s+\$aifeeds_performance_loggable\s*\{/);
   assert.match(config, /map\s+\$uri\s+\$aifeeds_safe_uri\s*\{/);
   assert.match(config, /default\s+0;/);
-  for (const host of ['ai-feeds.com', 'api.ai-feeds.com', 'fonts.ai-feeds.com']) {
+  for (const host of [
+    'ai-feeds.com',
+    'api.ai-feeds.com',
+    'fonts.ai-feeds.com',
+    'perf-staging.ai-feeds.com',
+  ]) {
     assert.match(config, new RegExp(`\\b${host.replaceAll('.', '\\.') }\\s+1;`));
   }
+  assert.match(config, /map\s+\$http_x_aifeeds_perf_probe\s+\$aifeeds_perf_probe\s*\{/);
+  assert.match(config, /"~\^upstream-\[0-9\]\{10,16\}-\[A-Fa-f0-9\]\{8\}\$"/);
+  assert.ok(config.includes('"perf_probe":"$aifeeds_perf_probe"'));
   assert.match(
     config,
     /access_log\s+\/var\/log\/nginx\/aifeeds-performance\.jsonl\s+aifeeds_performance\s+if=\$aifeeds_performance_loggable;/,
@@ -108,6 +117,8 @@ test('runbook scopes installation to aifeeds sites and documents safe join and s
     'deploy/nginx/check-nginx-request-id.py',
     '/usr/local/sbin/aifeeds-check-nginx-request-id',
     '"$CHECKER" "$SITE"',
+    'perf_probe',
+    'X-Aifeeds-Perf-Probe',
   ]) {
     assert.ok(runbook.includes(required), `runbook missing ${required}`);
   }

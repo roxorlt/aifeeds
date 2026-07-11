@@ -25,6 +25,10 @@ on:
           - staging
           - prod
 
+concurrency:
+  group: deploy-worker-${{ (github.event_name == 'workflow_dispatch' && inputs.env) || (github.ref_name == 'main' && 'prod') || 'staging' }}
+  cancel-in-progress: true
+
 jobs:
   validate-before-deploy:
     runs-on: ubuntu-latest
@@ -39,14 +43,16 @@ jobs:
         working-directory: worker
         run: npm ci
       - name: Type check
-        # TODO(baseline cleanup):当前 main 有 20 个 tsc errors(HF 接入新代码:
-        # src/workflows/hf-paper-pipeline.ts × 16, src/index.ts × 2,
-        # src/hf-paper/ar5iv.ts × 2)。启用此 step 会 abort 所有 prod auto-deploy。
-        # 等 BE 清零 baseline(HF 接入收尾 PR 一并修)后,把下面 if: false 去掉即可启用。
-        # 在 pr-validation.yml 里 tsc 是硬跑(PR UI 红叉),所以 baseline 不会被掩盖。
-        if: false
         working-directory: worker
         run: npx tsc --noEmit
+      - name: Worker tests
+        working-directory: worker
+        run: npm test
+      - name: Worker deploy dry run
+        working-directory: worker
+        env:
+          WRANGLER_LOG: none
+        run: npx wrangler deploy --dry-run
       - name: Smoke admin-dashboard
         run: bash scripts/ci/admin-dashboard-smoke.sh
       - name: Notify on validation failure
@@ -85,6 +91,10 @@ jobs:
             TARGET="prod"
           else
             TARGET="staging"
+          fi
+          if [ "$TARGET" = "prod" ] && [ "${GITHUB_REF:-}" != "refs/heads/main" ]; then
+            echo "::error::Production deployment requires refs/heads/main (got ${GITHUB_REF:-unset})"
+            exit 1
           fi
           if [ "$TARGET" = "prod" ]; then
             echo "wrangler_env=" >> $GITHUB_OUTPUT
