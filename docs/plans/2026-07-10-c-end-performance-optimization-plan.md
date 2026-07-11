@@ -157,12 +157,20 @@ git commit -m "perf: add attributable frontend timing"
 > `query_time_ms` 与 `Server-Timing`，因此前者继续严格等于主 `d1`。
 >
 > 不发布 `map` / `json` / `total`，也不插入 `scheduler.wait()` 人为推进时钟，避免把 D1
-> 等待错标成 CPU 阶段或为观测本身增加延迟。Worker CPU 与 invocation wall time 使用
-> Cloudflare root span 的 `cloudflare.cpu_time_ms` / `cloudflare.wall_time_ms`，完整请求路径
-> 继续由 nginx `upstream_response_time` 与浏览器 `perf_api.total` 归因；map/json CPU 只在
-> 本地 Workers DevTools 中剖析。依据：
+> 等待错标成 CPU 阶段或为观测本身增加延迟。当前 `wrangler.toml` 只启用了
+> `[observability]` 与 `[observability.logs] invocation_logs = true`，未启用
+> `[observability.traces]`；因此 Worker CPU 与 invocation wall time 读取现有 Workers Logs
+> invocation log（Query Builder 字段 `$workers.cpuTimeMs` / `$workers.wallTimeMs`）。若以后配置
+> Tail Worker 或 Logpush，同一口径对应 Workers Trace Events 顶层的 `CPUTimeMs` /
+> `WallTimeMs`。只有未来经成本评估并显式启用 tracing 后，才可改用 root span 的
+> `cloudflare.cpu_time_ms` / `cloudflare.wall_time_ms`，本任务不启用 tracing。完整请求路径继续
+> 由 nginx `upstream_response_time` 与浏览器 `perf_api.total` 归因；map/json CPU 只在本地
+> Workers DevTools 中剖析。依据：
 > [Performance and timers](https://developers.cloudflare.com/workers/runtime-apis/performance/)、
 > [D1 return objects](https://developers.cloudflare.com/d1/worker-api/return-object/)、
+> [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/)、
+> [CPU time and Wall time for Workers invocations](https://developers.cloudflare.com/changelog/post/2025-04-09-workers-timing/)、
+> [Query Builder](https://developers.cloudflare.com/workers/observability/query-builder/)、
 > [Spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/)。
 
 **Step 1: Write failing formatter tests**
@@ -207,8 +215,9 @@ After each list query, read the SQL execution duration from its own D1 result me
 - do not publish `map`、`json` or `total` from Worker timers.
 
 Keep `query_time_ms` for backward compatibility and set it from the exact same normalized value as `d1`.
-The D1 value intentionally excludes network time; use Cloudflare root telemetry、nginx and browser timing for
-CPU / invocation wall / upstream / end-to-end totals.
+The D1 value intentionally excludes network time. Use the currently enabled Workers invocation logs
+(`$workers.cpuTimeMs` / `$workers.wallTimeMs`) for CPU / invocation wall time, then nginx and browser timing
+for upstream / end-to-end totals. Root-span fields are unavailable unless tracing is separately enabled.
 
 **Step 4: Test response headers**
 
