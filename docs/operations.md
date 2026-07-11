@@ -9,6 +9,8 @@
 
 历史：2026-06-25（微博科技热搜源接入：HK RSSHub 新增 `/weibo/hot/tech`，Worker registry 新增 `blog:weibo-hot-tech`，cookie 只放 `.secrets/aifeeds-prod.env` 的 `WEIBO_COOKIES` 并由 Worker 以 `X-Weibo-Cookie` 转发；缺/失效 cookie 返回 401/403 并 PushDeer 告警。源总数 38→39；真实 200 验收需先补 `WEIBO_COOKIES`）
 
+历史：2026-07-11（增加香港 nginx 上游 connect/header/response 分段性能日志的版本化配置与审批后部署/轮转/回滚手册；本次未部署）
+
 历史：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Phase 1+2（fetchList / enrichPending）、`metrics_snapshots_clawhub` 表、`renderClawhubContent` SVG 模板、前端 `BrandClawhub` logo 都在这次落地）
 
 历史：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
@@ -1085,6 +1087,180 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 ```
 
 **VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
+
+<!-- aifeeds-performance-log:start -->
+#### 上游分段性能日志（2026-07-11，版本化待部署）
+
+**状态与边界**：本次提交仅版本化
+[`deploy/nginx/aifeeds-performance-log.conf`](../deploy/nginx/aifeeds-performance-log.conf)
+和本运行手册，**没有**复制配置、改线上站点、执行 reload 或发起部署。2026-07-11 用
+`~/.ssh/aifeeds-hk.pem` 做过一次受限只读检查：实际启用文件是
+`/etc/nginx/sites-enabled/aifeeds.conf`（运行时源为
+`/etc/nginx/sites-available/aifeeds.conf`），其中 `ai-feeds.com` front 有 4 个
+`proxy_pass`、`api.ai-feeds.com` 有 2 个、`fonts.ai-feeds.com` 有 1 个；`www` 是跳转块。
+VPS 上没有 `staging.ai-feeds.com` 或 `staging-api.ai-feeds.com` server block，这两个域名
+不经过香港 VPS，因此 staging 不能验证本配置，也不能宣称已完成 staging 验收。
+
+安全的只读复核只允许输出必要指令，不得导出完整配置或敏感头值：
+
+```bash
+ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "grep -R -nE 'server_name|access_log|proxy_pass|proxy_http_version' /etc/nginx/sites-enabled /etc/nginx/conf.d"
+```
+
+**配置上下文**：版本化文件只含 `http` 上下文合法的 `map`、`log_format` 和条件
+`access_log`，可以原样安装为 `/etc/nginx/conf.d/aifeeds-performance-log.conf`。`map`
+只允许 `ai-feeds.com`、`api.ai-feeds.com`、`fonts.ai-feeds.com` 写入
+`/var/log/nginx/aifeeds-performance.jsonl`；`www`、`hktest`、`rsshub` 和其他站点不会误记：
+
+```nginx
+access_log /var/log/nginx/aifeeds-performance.jsonl aifeeds_performance if=$aifeeds_performance_loggable;
+```
+
+不要把 `log_format` 粘进 `server` / `location`，也不要把下面的请求 ID 头放进该
+`conf.d` 文件。nginx 的 `proxy_set_header` 是“当前层只要定义任意一条，就不再继承上层整组”
+的全有或全无语义；因此必须在 `/etc/nginx/sites-available/aifeeds.conf` 的每个真实
+`proxy_pass` location 内，保留同层已有的所有 header，并额外显式加入：
+
+```nginx
+proxy_set_header X-Request-Id $request_id;
+```
+
+当前应是 7 个 `proxy_pass` location 对 7 个该 header。不能只在 `http` 或 `server` 层加一条，
+否则已有 location 级 header 会让它失去继承；也不能用新 header 替换任何既有 header。
+Worker 会校验并回显 `X-Request-Id`，使浏览器响应、Worker 日志和本文件的 `request_id`
+可以连接起来。
+
+**字段与隐私**：每行是一个 JSON object，包含 request id、host、无 query 的规范化 URI、
+状态码、总请求时间、上游连接/首字节/完整响应时间、缓存状态、响应字节数和 user agent。
+配置使用 `escape=json`，不记录 query、Cookie、Authorization、回源密钥、referer、手机号或邮箱。
+上游时间必须按字符串处理：无上游或未命中阶段时可能是 `-`，重试/多 upstream 时可能是逗号序列，
+不能直接假定为单个 JSON number。user agent 仍可能构成设备指纹，所以日志权限固定为
+`0640 www-data:adm`、只给 root/adm 运维人员读取，默认按日轮转并保留 14 份。
+
+**部署（必须再次取得明确批准后才执行）**：以下是 logging-only 变更；禁止在未批准时执行。
+先从仓库根目录上传版本化文件：
+
+```bash
+scp -i ~/.ssh/aifeeds-hk.pem deploy/nginx/aifeeds-performance-log.conf \
+  root@154.12.188.231:/tmp/aifeeds-performance-log.conf
+ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231
+```
+
+在私有 SSH 终端里备份并安装。`test ! -e` 是保护栏：如果目标已存在，停止并先人工确认，
+不要覆盖历史配置。
+
+```bash
+set -eu
+SITE=/etc/nginx/sites-available/aifeeds.conf
+FORMAT=/etc/nginx/conf.d/aifeeds-performance-log.conf
+ROTATE=/etc/logrotate.d/aifeeds-performance
+LOG=/var/log/nginx/aifeeds-performance.jsonl
+STAMP="$(date +%Y%m%d%H%M%S)"
+BACKUP="${SITE}.bak-perf-${STAMP}"
+
+test ! -e "$FORMAT"
+test ! -e "$ROTATE"
+test ! -e "$LOG"
+cp -a "$SITE" "$BACKUP"
+install -o root -g root -m 0644 /tmp/aifeeds-performance-log.conf "$FORMAT"
+install -o www-data -g adm -m 0640 /dev/null "$LOG"
+printf 'site backup: %s\n' "$BACKUP"
+```
+
+用私有编辑器打开 `$SITE`，在每个包含 `proxy_pass` 的 location **同层**补上上面的
+`proxy_set_header X-Request-Id $request_id;`，不输出或复制整份配置。保存后用计数守卫确认
+每个 upstream location 都有一条；当前两个数字都应为 `7`：
+
+```bash
+PROXY_COUNT="$(grep -cE '^[[:space:]]*proxy_pass[[:space:]]' "$SITE")"
+REQUEST_ID_COUNT="$(grep -cE '^[[:space:]]*proxy_set_header[[:space:]]+X-Request-Id[[:space:]]+\$request_id;' "$SITE")"
+printf 'proxy_pass=%s request_id_headers=%s\n' "$PROXY_COUNT" "$REQUEST_ID_COUNT"
+test "$PROXY_COUNT" -eq "$REQUEST_ID_COUNT"
+```
+
+用 `editor "$ROTATE"` 创建 `/etc/logrotate.d/aifeeds-performance`，内容必须精确为：
+
+```text
+/var/log/nginx/aifeeds-performance.jsonl {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 www-data adm
+    sharedscripts
+    postrotate
+        if [ -s /run/nginx.pid ]; then
+            kill -USR1 "$(cat /run/nginx.pid)"
+        fi
+    endscript
+}
+```
+
+`USR1` 让 nginx master 重新打开日志文件；不能只 rename/compress 而不 reopen，否则进程会继续写
+已轮转的旧 inode。设为 `root:root 0644` 后先 dry-run 检查轮转规则，再验证并 reload nginx：
+
+```bash
+chown root:root "$ROTATE"
+chmod 0644 "$ROTATE"
+logrotate -d "$ROTATE"
+nginx -t
+systemctl reload nginx
+curl -sS -D - -o /dev/null https://ai-feeds.com/
+curl -sS -D - -o /dev/null 'https://api.ai-feeds.com/api/items?source_type=x_list&limit=1'
+```
+
+**验证与安全查看**：先确认新请求已产生合法 JSON；命令只给退出码，不打印单条用户记录：
+
+```bash
+tail -n 100 "$LOG" | jq -e -c . >/dev/null
+```
+
+日常查看只输出 host/status 聚合，不展示 URI、user agent 或 request id：
+
+```bash
+tail -n 1000 "$LOG" | jq -s '
+  group_by(.host)
+  | map({host: .[0].host, requests: length,
+         statuses: (group_by(.status) | map({status: .[0].status, requests: length}))})'
+```
+
+验证 nginx → Worker 的 join 时，从 API 响应读取 Worker 回显的 id，再在最近日志中只判断是否存在，
+仍不打印整行：
+
+```bash
+RID="$(curl -sS -D - -o /dev/null 'https://api.ai-feeds.com/api/items?limit=1' \
+  | awk -F': ' 'tolower($1)=="x-request-id" {gsub("\r", "", $2); print $2; exit}')"
+test -n "$RID"
+tail -n 1000 "$LOG" | jq -e --arg rid "$RID" 'select(.request_id == $rid)' >/dev/null
+```
+
+验收标准：`nginx -t` 成功；front/API smoke 正常；新日志含非空 request id，且
+connect/header/response 字段为 JSON string（允许 `-` 或逗号序列）；API 响应 id 能在日志中 join。
+这是生产香港链路的受控验收，不是 staging 验收。
+
+**精确回滚**：使用部署时打印的具体备份文件，不要用通配符猜最新文件。例如：
+
+```bash
+SITE=/etc/nginx/sites-available/aifeeds.conf
+FORMAT=/etc/nginx/conf.d/aifeeds-performance-log.conf
+ROTATE=/etc/logrotate.d/aifeeds-performance
+LOG=/var/log/nginx/aifeeds-performance.jsonl
+BACKUP=/etc/nginx/sites-available/aifeeds.conf.bak-perf-YYYYMMDDHHMMSS
+
+test -f "$BACKUP"
+cp "$BACKUP" /etc/nginx/sites-available/aifeeds.conf
+rm -f /etc/nginx/conf.d/aifeeds-performance-log.conf
+rm -f /etc/logrotate.d/aifeeds-performance
+nginx -t
+systemctl reload nginx
+# reload 后保留受限日志用于问题复盘；确认无需保留时再由获批运维动作删除 "$LOG"。
+```
+
+回滚只撤销格式、条件日志和 request-id 传播，不影响 Worker Task 2 的响应头与 Server-Timing。
+<!-- aifeeds-performance-log:end -->
 
 > **2026-06-09 首屏提速（根因 = nginx 还在 HTTP/1.1）**：perf_nav 埋点实测大陆冷加载 `tcp:969 tls:347 ttfb:1353 load:7638`、但 `下载≈0` —— 慢在「每个资源单独冷建连」，不是下载。修：① 三个 443 server 块 `listen 443 ssl;` → `listen 443 ssl http2;`（含 `hktest.conf` 一起改，否则 0.0.0.0:443 protocol options redefined warning）；② `nginx.conf` 取消注释 `gzip_vary/gzip_proxied any/gzip_comp_level 6/gzip_types ...text/css...` —— 让 VPS 给 R2 来的字体 CSS 压缩（106KB→37KB，CF Pages 的 JS/CSS 仍是 br 透传不受影响）。TLS1.3 + BBR+fq 早已开。备份 `*.bak-20260609-100702`，回滚 = `cp` 回去 + `nginx -t && systemctl reload nginx`。验证：`curl --http2 -I https://ai-feeds.com/` 看 `HTTP/2`、字体 `content-encoding: gzip`。
 >
