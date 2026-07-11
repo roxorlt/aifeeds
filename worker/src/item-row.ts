@@ -1,15 +1,17 @@
 // worker/src/item-row.ts
 // items 行 → API Item 的共享映射器。原先内联在 index.ts（handleItems 等多处调用），
-// 2026-07-06 抽出为无 worker 依赖的独立模块，供 /api/search 复用同款映射
-// （搜索响应 Item 必须与 /api/items 完全一致），并让纯逻辑可在 node 下单测。
-// ⚠️ 抽取时行为逐字不变；改动务必同时校对 handleItems 的输出。
+// 2026-07-06 抽出为无 worker 依赖的独立模块，供 /api/search 与详情复用，
+// 并让纯逻辑可在 node 下单测。2026-07-11 起 feed `/api/items` 使用独立的
+// list-item DTO；搜索保留自己的既有响应契约，不随 list DTO 自动收窄。
 
-// 抽屉才用的重字段:feed 列表不渲染,但单条能占 item 90% 体积(PH top_comments 一条
-// 12-18KB)。列表默认剥掉,抽屉打开走 fetchItem(GET /api/items/:id, full=true)拿完整 extra。
+// Legacy search responses and detail-thread siblings still use this mapper.
+// `/api/items` feed lists now use the positive DTO allowlists in list-item.ts;
+// item detail keeps calling parseItemRow(row, true) and therefore remains full.
+// The default blacklist below preserves the existing search response contract.
 export const LIST_HEAVY_EXTRA_KEYS = [
   'top_comments', 'llm_analysis', 'files_manifest', 'discussion_comments',
   // blog/podcast 全文类重字段(blog 正文 markdown 几十 KB、podcast 文字稿更大):
-  // 卡片只用 ai_summary/标题摘要,全文只在抽屉渲染(fetchItem full=true 拿完整 extra)。
+  // 搜索预览只用摘要；全文仍由 fetchItem(full=true) 返回。
   'body_markdown', 'body_markdown_zh', 'transcript_text', 'transcript_text_zh', 'shownotes', 'shownotes_zh',
 ];
 
@@ -28,7 +30,7 @@ export function parseItemRow(row: Record<string, unknown>, full = false): Record
   }
   // clawhub: content/content_translated 装的是 README 全文(单条 ~5KB),但卡片正文用
   // extra.summary_translated(200 字);全文只在抽屉渲染(ClawhubDrawerBody 走 fetchItem
-  // 拿完整 item)。列表里截断到预览长度,省掉 feed 最大的一块体积。X 不截(展开要全文)。
+  // 拿完整 item)。legacy 非 full 响应截断到预览长度。X 不截(展开要全文)。
   if (!full && parsed.source_type === 'clawhub') {
     if (typeof parsed.content === 'string' && parsed.content.length > 280) {
       parsed.content = parsed.content.slice(0, 280);

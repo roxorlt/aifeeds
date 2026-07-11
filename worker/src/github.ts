@@ -14,6 +14,12 @@
 //   there's pending work. Recomputes daily_rank at the end if no more
 //   pending today.
 
+import { deriveGithubCover } from './list-item';
+import {
+  generateCardImageVariants,
+  type CardImageVariant,
+} from './card-image-variant';
+
 export interface GithubEnv {
   DB: D1Database;
   GITHUB_TOKEN?: string;
@@ -37,6 +43,181 @@ const DEEPSEEK_URL = "https://gateway.ai.cloudflare.com/v1/0d13b65d05d5d29fe0699
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const USER_AGENT = "ai-feeds-scraper/1.0 (+https://ai-feeds.com)";
 const MAX_README_CHARS = 800_000;
+
+type GithubCoverItem = {
+  source_id?: string | null;
+  title?: string | null;
+};
+
+function applyGithubCoverDecision(
+  item: GithubCoverItem,
+  extra: Record<string, unknown>,
+): void {
+  const cover = deriveGithubCover(
+    {
+      source_id: item.source_id ?? undefined,
+      title: item.title ?? undefined,
+    },
+    extra,
+  );
+  if (cover) {
+    extra.cover_url = cover;
+    extra.cover_status = 'ok';
+  } else {
+    delete extra.cover_url;
+    extra.cover_status = 'none';
+  }
+}
+
+export type GithubCoverBackfillOptions = {
+  dryRun?: boolean;
+  limit?: number;
+  afterId?: string;
+};
+
+export type GithubCoverBackfillResult = {
+  dry_run: boolean;
+  candidates: number;
+  covers: number;
+  none: number;
+  would_update: number;
+  updated: number;
+  conflicts: number;
+  errors: number;
+  remaining: number;
+  complete: boolean;
+  next_cursor: string | null;
+};
+
+/**
+ * Bounded, resumable cover backfill. Dry-run is the default and performs no
+ * writes. Production/staging execution remains an explicitly approved ops
+ * action; an empty final batch is the coverage gate for removing hidden README
+ * projection later.
+ */
+export async function runGithubCoverBackfill(
+  env: GithubEnv,
+  {
+    dryRun = true,
+    limit: requestedLimit = 100,
+    afterId = '',
+  }: GithubCoverBackfillOptions = {},
+): Promise<GithubCoverBackfillResult> {
+  const limit = Math.min(Math.max(Math.trunc(requestedLimit), 1), 500);
+  const batch = await env.DB.prepare(
+    `SELECT id,
+            source_id,
+            title,
+            extra AS original_extra,
+            json_extract(extra, '$.cover_url') AS cover_url,
+            json_extract(extra, '$.default_branch') AS default_branch,
+            json_extract(extra, '$.readme_excerpt') AS readme_excerpt
+       FROM items
+      WHERE source_type = 'github'
+        AND is_relevant = 1
+        AND deleted_at IS NULL
+        AND COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0
+        AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+        AND COALESCE(json_extract(extra, '$.cover_status'), '') NOT IN ('ok', 'none')
+        AND id > ?
+      ORDER BY id ASC
+      LIMIT ?`,
+  ).bind(afterId, limit).all<{
+    id: string;
+    source_id: string | null;
+    title: string | null;
+    original_extra: string | null;
+    cover_url: string | null;
+    default_branch: string | null;
+    readme_excerpt: string | null;
+  }>();
+
+  const result: GithubCoverBackfillResult = {
+    dry_run: dryRun,
+    candidates: batch.results.length,
+    covers: 0,
+    none: 0,
+    would_update: 0,
+    updated: 0,
+    conflicts: 0,
+    errors: 0,
+    remaining: 0,
+    complete: false,
+    next_cursor: null,
+  };
+
+  for (const row of batch.results) {
+    try {
+      const cover = deriveGithubCover(
+        { source_id: row.source_id ?? undefined, title: row.title ?? undefined },
+        {
+          cover_url: row.cover_url ?? undefined,
+          default_branch: row.default_branch ?? undefined,
+          readme_excerpt: row.readme_excerpt ?? undefined,
+        },
+      );
+      result.would_update++;
+      if (cover) result.covers++;
+      else result.none++;
+      if (dryRun) continue;
+
+      if (cover) {
+        const write = await env.DB.prepare(
+          `UPDATE items
+              SET extra = json_set(
+                coalesce(extra, '{}'),
+                '$.cover_url', ?,
+                '$.cover_status', 'ok'
+              )
+            WHERE id = ?
+              AND extra IS ?
+              AND COALESCE(json_extract(extra, '$.cover_status'), '') NOT IN ('ok', 'none')`,
+        ).bind(cover, row.id, row.original_extra).run();
+        const changes = Number((write.meta as { changes?: number } | undefined)?.changes ?? 0);
+        if (changes > 0) result.updated += changes;
+        else result.conflicts++;
+      } else {
+        const write = await env.DB.prepare(
+          `UPDATE items
+              SET extra = json_set(
+                json_remove(coalesce(extra, '{}'), '$.cover_url'),
+                '$.cover_status', 'none'
+              )
+            WHERE id = ?
+              AND extra IS ?
+              AND COALESCE(json_extract(extra, '$.cover_status'), '') NOT IN ('ok', 'none')`,
+        ).bind(row.id, row.original_extra).run();
+        const changes = Number((write.meta as { changes?: number } | undefined)?.changes ?? 0);
+        if (changes > 0) result.updated += changes;
+        else result.conflicts++;
+      }
+    } catch (error) {
+      result.errors++;
+      console.error(`[github-cover-backfill] ${row.id}:`, error);
+    }
+  }
+
+  const remaining = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+       FROM items
+      WHERE source_type = 'github'
+        AND is_relevant = 1
+        AND deleted_at IS NULL
+        AND COALESCE(CAST(json_extract(extra, '$.sponsor') AS INTEGER), 0) = 0
+        AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
+        AND COALESCE(json_extract(extra, '$.cover_status'), '') NOT IN ('ok', 'none')`,
+  ).first<{ n: number }>();
+  result.remaining = Number(remaining?.n ?? 0);
+  result.complete = result.remaining === 0 && result.errors === 0 && result.conflicts === 0;
+  result.next_cursor = !result.complete
+    && result.errors === 0
+    && result.conflicts === 0
+    && batch.results.length === limit
+    ? batch.results[batch.results.length - 1]?.id ?? null
+    : null;
+
+  return result;
+}
 
 // ─── Helpers ───────────────────────────────────────────────────
 
@@ -507,11 +688,15 @@ async function fetchRecentCommits(
   }
 }
 
-async function fetchReadme(
+export type GithubReadmeFetchResult =
+  | { status: 'found'; content: string; branch: string }
+  | { status: 'confirmed_absent'; content: ''; branch: null };
+
+export async function fetchGithubReadme(
   owner: string,
   repo: string,
   defaultBranch: string | null,
-): Promise<{ content: string; branch: string | null }> {
+): Promise<GithubReadmeFetchResult> {
   const branches = [defaultBranch, "main", "master"].filter(Boolean) as string[];
   // De-dupe while preserving order
   const seen = new Set<string>();
@@ -519,18 +704,22 @@ async function fetchReadme(
   for (const branch of uniq) {
     for (const fname of ["README.md", "readme.md", "README", "Readme.md"]) {
       const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fname}`;
+      let response: Response;
       try {
-        const r = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
-        if (r.ok) {
-          const text = await r.text();
-          if (text.trim()) return { content: text, branch };
-        }
-      } catch {
-        // try next
+        response = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`[github-readme] README fetch failed ${url}: ${reason}`);
       }
+      if (response.status === 404) continue;
+      if (!response.ok) {
+        throw new Error(`[github-readme] README fetch HTTP ${response.status} ${url}`);
+      }
+      const text = await response.text();
+      if (text.trim()) return { status: 'found', content: text, branch };
     }
   }
-  return { content: "", branch: null };
+  return { status: 'confirmed_absent', content: '', branch: null };
 }
 
 function detectReadmeLang(readme: string): "zh" | "en" | "other" {
@@ -620,7 +809,7 @@ export async function runGithubEnrichPending(
       const recentCommits = await fetchRecentCommits(env, owner, repoName);
 
       // 5. README
-      const { content: readme, branch: branchUsed } = await fetchReadme(owner, repoName, defaultBranch);
+      const { content: readme, branch: branchUsed } = await fetchGithubReadme(owner, repoName, defaultBranch);
       trending.readme = readme;
       trending.language = trending.language ?? (meta?.language as string | undefined) ?? null;
 
@@ -650,6 +839,7 @@ export async function runGithubEnrichPending(
         language: trending.language,
         recent_commits: recentCommits ?? extra.recent_commits ?? null,
       };
+      applyGithubCoverDecision(row, newExtra);
 
       await env.DB.prepare(
         `UPDATE items
@@ -789,8 +979,31 @@ export async function refreshGithubItem(
   const now = Math.floor(Date.now() / 1000);
   await env.DB.batch([
     env.DB.prepare(
-      `UPDATE items SET metrics = ?, extra = ? WHERE id = ?`,
-    ).bind(JSON.stringify(newMetrics), JSON.stringify(newExtra), itemId),
+      `UPDATE items
+          SET metrics = json_set(
+                coalesce(metrics, '{}'),
+                '$.stars', ?,
+                '$.forks', ?,
+                '$.watchers', ?,
+                '$.open_issues', ?,
+                '$.open_prs', ?
+              ),
+              extra = json_set(
+                coalesce(extra, '{}'),
+                '$.contributors_count', ?,
+                '$.recent_commits', json(?)
+              )
+        WHERE id = ?`,
+    ).bind(
+      stars,
+      forks,
+      watchers,
+      openIssues,
+      openPrs,
+      contributorsCount,
+      JSON.stringify(newExtra.recent_commits),
+      itemId,
+    ),
     env.DB.prepare(
       `INSERT INTO metrics_snapshots_gh
          (item_id, captured_at, trending_date_str, total_stars, today_stars, forks, watchers, open_issues, open_prs)
@@ -1108,6 +1321,23 @@ function rewriteUrls(markdown: string, mapping: Map<string, string>): string {
   return out;
 }
 
+async function generateGithubCoverVariants(
+  env: GithubEnv,
+  cover: string | null | undefined,
+  hits: AssetHit[],
+  mapping: Map<string, string>,
+): Promise<CardImageVariant[]> {
+  if (!cover || !env.READMES) return [];
+  const matchedSource = hits.find((hit) => mapping.get(hit.matchedSrc) === cover);
+  if (!matchedSource) return [];
+  return generateCardImageVariants(env.READMES, {
+    sourceUrl: matchedSource.resolvedUrl,
+    sourcePrefix: 'gh',
+    mediaKind: 'image',
+    sourceRequestHeaders: { 'User-Agent': USER_AGENT },
+  });
+}
+
 export async function runGithubR2Migrate(
   env: GithubEnv,
   limit = 1,
@@ -1169,15 +1399,32 @@ export async function runGithubR2Migrate(
     const newTranslated = row.translated && mapping.size > 0
       ? rewriteUrls(row.translated, mapping)
       : row.translated;
+    const cover = deriveGithubCover(
+      { source_id: row.source_id, title: row.source_id },
+      { readme_excerpt: newReadme, default_branch: branch },
+    );
+    const coverVariants = await generateGithubCoverVariants(
+      env,
+      cover,
+      hits,
+      mapping,
+    );
 
     try {
       await env.DB.prepare(
         `UPDATE items
-            SET extra = json_set(extra,
+            SET extra = json_set(json_remove(coalesce(extra, '{}'),
+                                             '$.cover_url',
+                                             '$.cover_variants',
+                                             '$.cover_variant_source'),
                                  '$.readme_excerpt', ?,
                                  '$.readme_translated', ?,
                                  '$.r2_migrated_at', ?,
-                                 '$.r2_assets_count', ?)
+                                 '$.r2_assets_count', ?,
+                                 '$.cover_url', ?,
+                                 '$.cover_status', ?,
+                                 '$.cover_variants', json(?),
+                                 '$.cover_variant_source', ?)
           WHERE id = ?`,
       )
         .bind(
@@ -1185,6 +1432,10 @@ export async function runGithubR2Migrate(
           newTranslated,
           Math.floor(Date.now() / 1000),
           mapping.size,
+          cover ?? null,
+          cover ? 'ok' : 'none',
+          JSON.stringify(coverVariants),
+          coverVariants.length > 0 ? cover : null,
           row.id,
         )
         .run();
@@ -1277,7 +1528,7 @@ export async function fetchAndPersistGithubMetadata(
   const recentCommits = await fetchRecentCommits(env, owner, repoName);
 
   // 3. README
-  const { content: readme, branch: branchUsed } = await fetchReadme(owner, repoName, defaultBranch);
+  const { content: readme, branch: branchUsed } = await fetchGithubReadme(owner, repoName, defaultBranch);
   const language = extra.language ?? (meta?.language as string | undefined) ?? null;
   const finalBranch = defaultBranch || branchUsed || extra.default_branch || "main";
   const readmeLang = detectReadmeLang(readme);
@@ -1299,6 +1550,7 @@ export async function fetchAndPersistGithubMetadata(
     language,
     recent_commits: recentCommits ?? extra.recent_commits ?? null,
   };
+  applyGithubCoverDecision({ source_id: row.source_id, title: row.source_id }, newExtra);
 
   await env.DB.prepare(
     `UPDATE items
@@ -1440,20 +1692,42 @@ export async function r2MigrateGithubItemById(
   const newTranslated = row.translated && mapping.size > 0
     ? rewriteUrls(row.translated, mapping)
     : row.translated;
+  const cover = deriveGithubCover(
+    { source_id: row.source_id, title: row.source_id },
+    { readme_excerpt: newReadme, default_branch: branch },
+  );
+  const coverVariants = await generateGithubCoverVariants(
+    env,
+    cover,
+    hits,
+    mapping,
+  );
 
   await env.DB.prepare(
     `UPDATE items
-        SET extra = json_set(extra,
+        SET extra = json_set(json_remove(coalesce(extra, '{}'),
+                                        '$.cover_url',
+                                        '$.cover_status',
+                                        '$.cover_variants',
+                                        '$.cover_variant_source'),
                              '$.readme_excerpt', ?,
                              '$.readme_translated', ?,
                              '$.r2_migrated_at', ?,
-                             '$.r2_assets_count', ?)
+                             '$.r2_assets_count', ?,
+                             '$.cover_url', ?,
+                             '$.cover_status', ?,
+                             '$.cover_variants', json(?),
+                             '$.cover_variant_source', ?)
       WHERE id = ?`,
   ).bind(
     newReadme,
     newTranslated,
     Math.floor(Date.now() / 1000),
     mapping.size,
+    cover ?? null,
+    cover ? 'ok' : 'none',
+    JSON.stringify(coverVariants),
+    coverVariants.length > 0 ? cover : null,
     itemId,
   ).run();
 

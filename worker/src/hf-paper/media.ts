@@ -7,6 +7,10 @@
 //   (option:如果 hasGhRepo 且 OPS 想节省 GH API 调用,可以跳过)
 
 import type { Env } from '../index';
+import {
+  generateCardImageVariants,
+  type CardImageVariant,
+} from '../card-image-variant';
 
 const R2_KEY_PREFIX = 'hf';
 const HF_R2_USER_AGENT = 'Mozilla/5.0 (compatible; aifeeds-r2-migrate/1.0)';
@@ -33,13 +37,22 @@ interface MediaItem {
   type?: string;
   url?: string;
   role?: string;
+  width?: number;
+  height?: number;
+  card_variants?: CardImageVariant[];
   [k: string]: unknown;
 }
 
 interface HfExtra {
   submitted_by?: { avatar_url?: string; raw_avatar_url?: string; [k: string]: unknown };
   discussion_comments?: Array<{ author_avatar_url?: string; raw_author_avatar_url?: string; [k: string]: unknown }>;
-  figure_image?: { raw_url?: string; r2_url?: string; [k: string]: unknown };
+  figure_image?: {
+    raw_url?: string;
+    r2_url?: string;
+    width?: number;
+    height?: number;
+    [k: string]: unknown;
+  };
   r2_migrated_at?: string | null;
   [k: string]: unknown;
 }
@@ -64,6 +77,16 @@ export async function backfillMediaForHfPaper(
   if (extra.r2_migrated_at) {
     return { migrated: 0, failed: 0, skipped: 'already_migrated' };
   }
+
+  const primaryMediaIndex = media.findIndex((entry) =>
+    entry.type === 'image' && Boolean(entry.url),
+  );
+  const primaryMedia = primaryMediaIndex >= 0 ? media[primaryMediaIndex] : undefined;
+  const primaryRawUrl = primaryMedia?.url && !isAlreadyMigrated(primaryMedia.url)
+    ? primaryMedia.url
+    : primaryMedia?.role === 'figure'
+      ? extra.figure_image?.raw_url
+      : undefined;
 
   // 收集所有要迁的 URL(thumbnail + submitter avatar + 评论者 avatar)
   // 注意:figure_image 由 fetch-ar5iv-and-extract-figure 单独迁,这里不重复
@@ -113,6 +136,23 @@ export async function backfillMediaForHfPaper(
     return m;
   });
 
+  if (primaryMediaIndex >= 0 && primaryRawUrl && !isAlreadyMigrated(primaryRawUrl)) {
+    const variants = await generateCardImageVariants(env.READMES, {
+      sourceUrl: absolutizeHfUrl(primaryRawUrl),
+      sourcePrefix: 'hf',
+      mediaKind: 'image',
+      sourceWidth: primaryMedia?.width || extra.figure_image?.width,
+      sourceHeight: primaryMedia?.height || extra.figure_image?.height,
+      sourceRequestHeaders: { 'User-Agent': HF_R2_USER_AGENT },
+    });
+    if (variants.length > 0) {
+      newMedia[primaryMediaIndex] = {
+        ...newMedia[primaryMediaIndex],
+        card_variants: variants,
+      };
+    }
+  }
+
   const newExtra: HfExtra = { ...extra };
   if (newExtra.submitted_by) {
     const orig = newExtra.submitted_by.raw_avatar_url || newExtra.submitted_by.avatar_url;
@@ -135,6 +175,10 @@ export async function backfillMediaForHfPaper(
     });
   }
   newExtra.r2_migrated_at = new Date().toISOString();
+  if (newMedia.some((entry) => entry.card_variants?.length)) {
+    newExtra.card_variant_version = 1;
+    newExtra.card_variant_status = 'ok';
+  }
 
   await env.DB.prepare(
     `UPDATE items SET media = ?, extra = ? WHERE id = ?`,

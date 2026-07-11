@@ -17,6 +17,10 @@
 // Bucket: `xlist-readme-assets` (复用 GH bucket, prefix 区分)
 
 import type { Env } from './index';
+import {
+  generateCardImageVariants,
+  type CardImageVariant,
+} from './card-image-variant';
 
 const R2_KEY_PREFIX_PH = 'ph';
 const IMG_MAX_BYTES = 5 * 1024 * 1024;       // 5 MB
@@ -49,6 +53,8 @@ interface AssetRequest {
   url: string;
   kind: 'logo' | 'gallery' | 'video' | 'avatar';
   maxBytes: number;
+  width?: number;
+  height?: number;
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -74,9 +80,10 @@ function isAlreadyMigrated(url: string): boolean {
 async function migrateOne(
   env: Env,
   asset: AssetRequest,
-): Promise<string | null> {
+  withCardVariants = false,
+): Promise<{ url: string; variants: CardImageVariant[] } | null> {
   if (!env.READMES) return null;
-  if (isAlreadyMigrated(asset.url)) return asset.url;
+  if (isAlreadyMigrated(asset.url)) return { url: asset.url, variants: [] };
   try {
     const r = await fetch(asset.url, { headers: { 'User-Agent': PH_R2_USER_AGENT } });
     if (!r.ok) return null;
@@ -102,7 +109,18 @@ async function migrateOne(
       httpMetadata: { contentType: ct || 'application/octet-stream' },
       customMetadata: { 'src-url': asset.url, 'kind': asset.kind, 'source': 'ph' },
     });
-    return `/r/${key}`;
+    const variants = withCardVariants && asset.kind === 'gallery'
+      ? await generateCardImageVariants(env.READMES, {
+          sourceUrl: asset.url,
+          sourcePrefix: 'ph',
+          mediaKind: 'image',
+          sourceContentType: ctLower,
+          sourceWidth: asset.width,
+          sourceHeight: asset.height,
+          sourceRequestHeaders: { 'User-Agent': PH_R2_USER_AGENT },
+        })
+      : [];
+    return { url: `/r/${key}`, variants };
   } catch (e) {
     console.error(`[ph-r2-migrate] asset error ${asset.url}:`, e);
     return null;
@@ -125,6 +143,9 @@ interface MediaItem {
   type?: string;
   url?: string;
   role?: string;
+  width?: number;
+  height?: number;
+  card_variants?: CardImageVariant[];
   [k: string]: unknown;
 }
 
@@ -170,7 +191,13 @@ function collectAssets(
       if (platform) continue;
       videos.push({ url: m.url, kind: 'video', maxBytes: VIDEO_MAX_BYTES });
     } else {
-      galleryImages.push({ url: m.url, kind: 'gallery', maxBytes: IMG_MAX_BYTES });
+      galleryImages.push({
+        url: m.url,
+        kind: 'gallery',
+        maxBytes: IMG_MAX_BYTES,
+        width: m.width,
+        height: m.height,
+      });
     }
   }
 
@@ -211,10 +238,17 @@ function rewriteAllUrls(
   media: MediaItem[],
   extra: PhExtra,
   mapping: Map<string, string>,
+  variantMapping: Map<string, CardImageVariant[]>,
 ): { media: MediaItem[]; extra: PhExtra } {
-  const newMedia = media.map((m) =>
-    m.url && mapping.has(m.url) ? { ...m, url: mapping.get(m.url)! } : m,
-  );
+  const newMedia = media.map((m) => {
+    const next = m.url && mapping.has(m.url)
+      ? { ...m, url: mapping.get(m.url)! }
+      : { ...m };
+    if (m.url && variantMapping.has(m.url)) {
+      next.card_variants = variantMapping.get(m.url)!;
+    }
+    return next;
+  });
   const newExtra: PhExtra = { ...extra };
   if (newExtra.makers) {
     newExtra.makers = newExtra.makers.map((m) => rewriteAvatar({ ...m }, mapping));
@@ -232,6 +266,55 @@ function rewriteAllUrls(
     newExtra.top_reviews = newExtra.top_reviews.map((r) => rewriteAvatar({ ...r }, mapping));
   }
   return { media: newMedia, extra: newExtra };
+}
+
+async function migratePhRow(
+  env: Env,
+  row: ItemForMigrate,
+): Promise<{ migrated: number; failed: number; total: number }> {
+  const media: MediaItem[] = row.media_raw ? JSON.parse(row.media_raw) : [];
+  const extra: PhExtra = row.extra_raw ? JSON.parse(row.extra_raw) : {};
+  const { logos, galleryImages, videos, avatars } = collectAssets(media, extra);
+  const all: AssetRequest[] = [...logos, ...galleryImages, ...videos, ...avatars];
+  const primaryCardUrl = media.find((entry) =>
+    entry.type === 'image' && entry.role !== 'logo' && Boolean(entry.url),
+  )?.url;
+
+  const mapping = new Map<string, string>();
+  const variantMapping = new Map<string, CardImageVariant[]>();
+  let migrated = 0;
+  let failed = 0;
+  for (const asset of all) {
+    const result = await migrateOne(env, asset, asset.url === primaryCardUrl);
+    if (result) {
+      mapping.set(asset.url, result.url);
+      if (result.variants.length > 0) {
+        variantMapping.set(asset.url, result.variants);
+      }
+      migrated++;
+    } else {
+      failed++;
+    }
+  }
+
+  const { media: newMedia, extra: rewrittenExtra } = rewriteAllUrls(
+    media,
+    extra,
+    mapping,
+    variantMapping,
+  );
+  const newExtra: PhExtra = {
+    ...rewrittenExtra,
+    r2_migrated_at: new Date().toISOString(),
+  };
+  if (variantMapping.size > 0) {
+    newExtra.card_variant_version = 1;
+    newExtra.card_variant_status = 'ok';
+  }
+  await env.DB.prepare(
+    `UPDATE items SET media = ?, extra = ? WHERE id = ?`,
+  ).bind(JSON.stringify(newMedia), JSON.stringify(newExtra), row.id).run();
+  return { migrated, failed, total: all.length };
 }
 
 
@@ -265,34 +348,13 @@ export async function runPhR2Migrate(
   for (const row of rows.results || []) {
     counts.picked++;
     try {
-      const media: MediaItem[] = row.media_raw ? JSON.parse(row.media_raw) : [];
-      const extra: PhExtra = row.extra_raw ? JSON.parse(row.extra_raw) : {};
-      const { logos, galleryImages, videos, avatars } = collectAssets(media, extra);
-      const all: AssetRequest[] = [...logos, ...galleryImages, ...videos, ...avatars];
-
-      const mapping = new Map<string, string>();
-      for (const asset of all) {
-        const newUrl = await migrateOne(env, asset);
-        if (newUrl) {
-          mapping.set(asset.url, newUrl);
-          counts.assets_migrated++;
-        } else {
-          counts.assets_failed++;
-        }
-      }
-
-      const { media: newMedia, extra: rewrittenExtra } = rewriteAllUrls(media, extra, mapping);
-      const newExtra: PhExtra = { ...rewrittenExtra, r2_migrated_at: new Date().toISOString() };
-
-      await env.DB.prepare(
-        `UPDATE items SET media = ?, extra = ? WHERE id = ?`,
-      )
-        .bind(JSON.stringify(newMedia), JSON.stringify(newExtra), row.id)
-        .run();
+      const result = await migratePhRow(env, row);
+      counts.assets_migrated += result.migrated;
+      counts.assets_failed += result.failed;
 
       counts.ok++;
       console.log(
-        `[ph-r2-migrate] ${row.source_id}: migrated ${mapping.size}/${all.length} assets`,
+        `[ph-r2-migrate] ${row.source_id}: migrated ${result.migrated}/${result.total} assets`,
       );
     } catch (e) {
       counts.failed++;
@@ -328,7 +390,6 @@ export async function r2MigratePhItemById(
   ).bind(itemId).first<ItemForMigrate>();
   if (!row) throw new Error(`r2MigratePhItemById: item not found ${itemId}`);
 
-  const media: MediaItem[] = row.media_raw ? JSON.parse(row.media_raw) : [];
   const extra: PhExtra = row.extra_raw ? JSON.parse(row.extra_raw) : {};
 
   // 已迁过的早退
@@ -336,31 +397,9 @@ export async function r2MigratePhItemById(
     return { assets_migrated: 0, assets_failed: 0 };
   }
 
-  const { logos, galleryImages, videos, avatars } = collectAssets(media, extra);
-  const all: AssetRequest[] = [...logos, ...galleryImages, ...videos, ...avatars];
-
-  const mapping = new Map<string, string>();
-  let migrated = 0;
-  let failed = 0;
-  for (const asset of all) {
-    const newUrl = await migrateOne(env, asset);
-    if (newUrl) {
-      mapping.set(asset.url, newUrl);
-      migrated++;
-    } else {
-      failed++;
-    }
-  }
-
-  const { media: newMedia, extra: rewrittenExtra } = rewriteAllUrls(media, extra, mapping);
-  const newExtra: PhExtra = { ...rewrittenExtra, r2_migrated_at: new Date().toISOString() };
-
-  await env.DB.prepare(
-    `UPDATE items SET media = ?, extra = ? WHERE id = ?`,
-  ).bind(JSON.stringify(newMedia), JSON.stringify(newExtra), itemId).run();
-
-  console.log(`[ph-workflow:step2] ${itemId}: ${migrated}/${all.length} assets migrated`);
-  return { assets_migrated: migrated, assets_failed: failed };
+  const result = await migratePhRow(env, row);
+  console.log(`[ph-workflow:step2] ${itemId}: ${result.migrated}/${result.total} assets migrated`);
+  return { assets_migrated: result.migrated, assets_failed: result.failed };
 }
 
 export async function countPhR2Pending(env: Env): Promise<number> {
