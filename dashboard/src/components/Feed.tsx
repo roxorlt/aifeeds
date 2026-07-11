@@ -31,6 +31,10 @@ import {
 } from "../lib/telemetry/performance-detail";
 import { getPerformanceDeviceMeta } from "../lib/telemetry/vitals";
 import { feedResponseNetworkSource } from "../lib/feed-prefetch";
+import {
+  OPTIMISTIC_FEED_START,
+  resolveFeedRenderState,
+} from "../lib/feedAvailability";
 
 // PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
 // <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
@@ -240,7 +244,7 @@ export interface FeedHandle {
 }
 
 export const Feed = forwardRef<FeedHandle, Props>(function Feed(
-  { sourceType, title, placeholder, refreshTick },
+  { sourceType, title, placeholder: placeholderFromMetadata, refreshTick },
   ref,
 ) {
   // PM 2026-05-20:从 FEED_CACHE 拿之前缓存的 items,有 cache 时 mount 直接显
@@ -319,6 +323,22 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const isDraggingRef = useRef(false);
   // 切回频道秒切:本 Feed 实例是否已发过初次请求。首次 mount 时若 FEED_CACHE 够新就跳过 refetch。
   const didFetchRef = useRef(false);
+  // With optimistic start enabled, metadata reconciliation may remove a channel
+  // after useful content already committed. Keep only that committed content: a
+  // late response excluded in the same render cannot bypass metadata or set the latch.
+  const hasRenderedItemsRef = useRef(false);
+  const feedRenderState = resolveFeedRenderState({
+    enabled: OPTIMISTIC_FEED_START,
+    metadataPlaceholder: Boolean(placeholderFromMetadata),
+    itemCount: items.length,
+    hadRenderedItems: hasRenderedItemsRef.current,
+  });
+  const placeholder = feedRenderState.placeholder;
+  useEffect(() => {
+    if (feedRenderState.nextHadRenderedItems) {
+      hasRenderedItemsRef.current = feedRenderState.nextHadRenderedItems;
+    }
+  }, [feedRenderState.nextHadRenderedItems]);
   const placeholderRef = useRef(Boolean(placeholder));
   placeholderRef.current = Boolean(placeholder);
   const isCurrentFeedEligible = useCallback(() => (

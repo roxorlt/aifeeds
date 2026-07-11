@@ -24,6 +24,11 @@ import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { shouldReduceMotion, watchTransformTransition } from "./lib/motion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { track, EVENTS } from "./lib/telemetry";
+import {
+  OPTIMISTIC_FEED_START,
+  resolveChannelLive,
+  type FeedMetadataState,
+} from "./lib/feedAvailability";
 import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
@@ -125,12 +130,6 @@ function SearchEntryButton() {
 type MergedSource = "blog,podcast";
 const OFFICIAL_NEWS: MergedSource = "blog,podcast";
 
-// 列 / chip 的 source_type 可能是逗号复合值（「官方新闻」= "blog,podcast"）。
-// 任一子源有数据即视为该频道有数据（非 placeholder）。
-function channelHasData(live: Set<SourceType>, sourceType: string): boolean {
-  return sourceType.split(",").some((s) => live.has(s as SourceType));
-}
-
 interface SourceConfig {
   source_type: SourceType | MergedSource;
   title: string;
@@ -209,6 +208,7 @@ function ChannelSkeletonPanel({ filterKey }: { filterKey: string }) {
 function DashboardHome() {
   const [sources, setSources] = useState<Source[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [metadataState, setMetadataState] = useState<FeedMetadataState>("pending");
   // 反馈 #7：冷启动落在 deep link 上时，初始 filter 跟着对应 tab，避免关掉
   // drawer 后用户看到 X 流（mobile 默认）以为没回到 GH/PH。
   // 仅初次构造时读 pathname；后续用户切 tab / 直接打 / 都正常工作。
@@ -254,8 +254,24 @@ function DashboardHome() {
       : storedFilter;
 
   useEffect(() => {
-    fetchSources().then(setSources).catch(() => {});
-    fetchStats().then(setStats).catch(() => {});
+    let cancelled = false;
+    setMetadataState("pending");
+
+    const sourcesRequest = fetchSources().then((nextSources) => {
+      if (!cancelled) setSources(nextSources);
+    });
+    const statsRequest = fetchStats().then((nextStats) => {
+      if (!cancelled) setStats(nextStats);
+    });
+
+    void Promise.allSettled([sourcesRequest, statsRequest]).then((results) => {
+      if (cancelled) return;
+      setMetadataState(results.every((result) => result.status === "fulfilled") ? "resolved" : "failed");
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [refreshTick]);
 
   // 点击只移动单一 pill；width 在切换时即时更新，不进入 transition。
@@ -763,6 +779,11 @@ function DashboardHome() {
       stats ? (Object.keys(stats.by_source) as SourceType[]) : [],
     ),
   );
+  const isChannelLive = (sourceType: string): boolean => resolveChannelLive(sourceType, {
+    enabled: OPTIMISTIC_FEED_START,
+    metadataState,
+    live: liveSourceTypes,
+  });
 
   // 空闲时后台预取其余频道首页(写 FEED_CACHE):首次横划切换、以及扫码/分享落地抽屉后
   // 关掉抽屉看到的底层流都直接 hydrate 秒开。用 ref 取 fire 时最新的 liveSourceTypes(它每次
@@ -921,7 +942,7 @@ function DashboardHome() {
                 </div>
                 {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
-                const hasData = channelHasData(liveSourceTypes, key);
+                const hasData = isChannelLive(key);
                 return (
                   <button
                     key={key}
@@ -993,7 +1014,11 @@ function DashboardHome() {
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
           {visibleColumns.map((col) => {
-            const isPlaceholder = !channelHasData(liveSourceTypes, col.source_type);
+            const isPlaceholder = !resolveChannelLive(col.source_type, {
+              enabled: OPTIMISTIC_FEED_START,
+              metadataState,
+              live: liveSourceTypes,
+            });
             return (
               // 列内任意 click 都标记该列为 lastClickedColumnId，让 VideoCoordinator
               // 在多列同时有视频候选时优先选这列（设计文档 §2.2）。capture 阶段抓
