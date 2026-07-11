@@ -19,14 +19,14 @@
 //   8. Top 评论 (10，maker reply 嵌套)
 //   9. 更多 (论坛 / 类似产品出链 + Pricing chips)
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
 import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { fetchItems } from "../api";
 
 // 抽屉 gallery 内单个直链 mp4 视频 — hook 接 VideoCoordinator
@@ -189,7 +189,7 @@ export function PhDrawerBody({ item }: Props) {
 
   const makers = (extra.makers as Array<{ name?: string; handle?: string; avatar_url?: string; profile_url?: string }>) || [];
   const hunter = (extra.hunter as { name?: string; handle?: string; avatar_url?: string }) || null;
-  const makerHandles = useMemo(() => new Set(makers.map((m) => m.handle).filter(Boolean) as string[]), [makers]);
+  const makerHandles = new Set(makers.map((m) => m.handle).filter(Boolean) as string[]);
 
   const makerPost = (extra.maker_post as PhComment) || null;
   const makerPostText = (extra.maker_post_text as string) || makerPost?.text || "";

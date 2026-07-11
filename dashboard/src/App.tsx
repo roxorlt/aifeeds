@@ -1,5 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Feed, SkeletonCard, prefetchChannels, type FeedHandle } from "./components/Feed";
+import {
+  forwardRef,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type UIEvent as ReactUIEvent,
+} from "react";
+import { Feed, SkeletonCard, prefetchChannel, type FeedHandle } from "./components/Feed";
 import { SourceIcon, IconSearch } from "./components/icons";
 import { DrawerProvider } from "./lib/drawer";
 
@@ -13,13 +22,14 @@ const TweetDrawer = lazy(() =>
 // PR3 quote 嵌套小卡点击 → 站内 modal。轻量(无 markdown 依赖),不 lazy
 import { QuoteSnapshotModal } from "./components/QuoteSnapshotModal";
 
-import { fetchSources, fetchStats, API_BASE } from "./api";
-import type { Source, SourceType, Stats } from "./types";
+import { fetchFeedManifest } from "./api";
+import { buildPublicWorkerUrl } from "./lib/apiBase";
+import type { FeedManifest, SourceType } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
 import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordinator";
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
-import { useDrawer } from "./lib/drawer";
+import { useDrawer } from "./lib/drawerContext";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
 import { shouldReduceMotion, watchTransformTransition } from "./lib/motion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
@@ -29,6 +39,13 @@ import {
   resolveChannelLive,
   type FeedMetadataState,
 } from "./lib/feedAvailability";
+import {
+  bindQueueToVisibility,
+  canStartBackgroundPrefetch,
+  createBackgroundQueue,
+  getImmediateColumnCount,
+  waitForBackgroundReadiness,
+} from "./lib/feedScheduling";
 import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
@@ -126,7 +143,7 @@ function SearchEntryButton() {
 
 // 「官方新闻」合并频道（D7）：逗号拼 blog+podcast 的复合 filter 值。worker
 // /api/items?source_type=blog,podcast 已支持；这是 FE 顶部入口专用的复合值，
-// 不是单个 SourceType。fetchItems 调用时拆成数组传（buildQuery 会 join 回逗号）。
+// 不是单个 SourceType；fetchItems 的 buildItemsPath 会把它规范化为稳定路径。
 type MergedSource = "blog,podcast";
 const OFFICIAL_NEWS: MergedSource = "blog,podcast";
 
@@ -134,6 +151,145 @@ interface SourceConfig {
   source_type: SourceType | MergedSource;
   title: string;
 }
+
+function readCurrentConnection(): { saveData?: boolean; effectiveType?: string } | undefined {
+  return (navigator as Navigator & {
+    connection?: { saveData?: boolean; effectiveType?: string };
+  }).connection;
+}
+
+type DeferredFeedProps = {
+  sourceType: SourceType | MergedSource;
+  title: string;
+  placeholder: boolean;
+  refreshTick: number;
+  onInitialRequestStart?: () => void;
+  immediate: boolean;
+  mediaColumnIndex: number;
+  mediaColumnImmediate: boolean;
+  observationEnabled: boolean;
+};
+
+// All below-fold reveals share one scheduler. A slot stays occupied until the
+// mounted Feed's first authoritative read settles, so one intersection frame
+// cannot fan out into several competing critical list requests.
+const deferredFeedMountQueue = createBackgroundQueue();
+
+// PC only mounts the responsive first row on the first commit. Lower rows keep a
+// stable 70vh footprint but contain no Feed/media until the user has actually
+// scrolled and the shell approaches the viewport. Once mounted, a column never
+// unmounts; a wider resize may only promote more columns.
+const DeferredFeed = forwardRef<FeedHandle, DeferredFeedProps>(function DeferredFeed(
+  {
+    immediate,
+    mediaColumnIndex,
+    mediaColumnImmediate,
+    observationEnabled,
+    sourceType,
+    title,
+    placeholder,
+    refreshTick,
+    onInitialRequestStart,
+  },
+  ref,
+) {
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const settleDeferredMountRef = useRef<(() => void) | null>(null);
+  const settleDeferredMount = useCallback(() => {
+    settleDeferredMountRef.current?.();
+  }, []);
+  const [mounted, setMounted] = useState(
+    () => immediate || typeof IntersectionObserver === "undefined",
+  );
+
+  useEffect(() => () => settleDeferredMount(), [settleDeferredMount]);
+
+  useEffect(() => {
+    if (mounted || immediate) return;
+    // Correctness fallback comes before the scroll gate: the state initializer
+    // already mounts every feed in old WebViews without IntersectionObserver.
+    if (typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    if (!observationEnabled) return;
+    const shell = shellRef.current;
+    if (!shell) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      void deferredFeedMountQueue.enqueue(() => new Promise<void>((resolve) => {
+        if (disposed) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const timeout = window.setTimeout(finish, 12_000);
+        function finish() {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          if (settleDeferredMountRef.current === finish) {
+            settleDeferredMountRef.current = null;
+          }
+          resolve();
+        }
+        settleDeferredMountRef.current = finish;
+        setMounted(true);
+      })).catch(() => {});
+    }, {
+      root: null,
+      rootMargin: "200px 0px",
+    });
+    let disposed = false;
+    observer.observe(shell);
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
+  }, [immediate, mounted, observationEnabled]);
+
+  if (mounted || immediate) {
+    return (
+      <Feed
+        ref={ref}
+        sourceType={sourceType}
+        title={title}
+        placeholder={placeholder}
+        refreshTick={refreshTick}
+        onInitialRequestStart={onInitialRequestStart}
+        onInitialRequestSettled={settleDeferredMount}
+        mediaColumnIndex={mediaColumnIndex}
+        mediaColumnImmediate={mediaColumnImmediate}
+      />
+    );
+  }
+
+  return (
+    <div
+      ref={shellRef}
+      data-deferred-feed-shell={sourceType}
+      className="h-[70vh] overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm"
+      aria-label={`${title}待加载`}
+    >
+      <div className="flex items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+        <SourceIcon
+          source_type={sourceType as SourceType}
+          className="h-4 w-4 shrink-0 fill-current text-neutral-400"
+        />
+        <span className="truncate text-sm font-semibold text-neutral-500">{title}</span>
+      </div>
+      <div className="space-y-4 p-4" aria-hidden>
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div key={index} className="space-y-2 border-b border-neutral-100 pb-4">
+            <div className="h-3 w-1/3 rounded bg-neutral-100" />
+            <div className="h-3 w-full rounded bg-neutral-100" />
+            <div className="h-3 w-2/3 rounded bg-neutral-100" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
 
 // 抽屉打开 / 关闭时同步 VideoCoordinator 的 mode（feed ↔ drawer）。
 // 必须在 DrawerProvider 内部渲染才能用 useDrawer。无 UI 输出。
@@ -206,8 +362,7 @@ function ChannelSkeletonPanel({ filterKey }: { filterKey: string }) {
 }
 
 function DashboardHome() {
-  const [sources, setSources] = useState<Source[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
+  const [manifest, setManifest] = useState<FeedManifest | null>(null);
   const [metadataState, setMetadataState] = useState<FeedMetadataState>("pending");
   // 反馈 #7：冷启动落在 deep link 上时，初始 filter 跟着对应 tab，避免关掉
   // drawer 后用户看到 X 流（mobile 默认）以为没回到 GH/PH。
@@ -224,9 +379,23 @@ function DashboardHome() {
     return "all";
   })();
   const [storedFilter, setFilter] = useState<FilterKey>(initialFilter);
-  const [refreshTick, _setRefreshTick] = useState(0);
+  const [refreshTick] = useState(0);
+  const [feedRequestStartedForTick, setFeedRequestStartedForTick] = useState<number | null>(null);
+  const handleInitialFeedRequestStart = useCallback(() => {
+    setFeedRequestStartedForTick((startedTick) => (
+      startedTick === refreshTick ? startedTick : refreshTick
+    ));
+  }, [refreshTick]);
+  const shouldLoadManifest = OPTIMISTIC_FEED_START
+    && feedRequestStartedForTick === refreshTick;
 
   const isNarrow = useIsNarrow();
+  const [immediateColumnCount, setImmediateColumnCount] = useState(() => (
+    typeof window === "undefined" ? 1 : getImmediateColumnCount(window.innerWidth)
+  ));
+  const [pageHasScrolled, setPageHasScrolled] = useState(() => (
+    typeof window !== "undefined" && (window.scrollY > 0 || getScrollY() > 0)
+  ));
   const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
   const lastInteractedColumnRef = useRef<string | null>(null);
   // PM 2026-05-19:选中 tab 自动 scrollIntoView 居中 — chip rail 横向滚动容器,
@@ -245,6 +414,44 @@ function DashboardHome() {
   // 识别 horizontal-dominant swipe 切上/下一个 filter chip
   const mainRef = useRef<HTMLElement | null>(null);
 
+  useEffect(() => {
+    const update = () => setImmediateColumnCount((current) => (
+      Math.max(current, getImmediateColumnCount(window.innerWidth))
+    ));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  useEffect(() => {
+    if (pageHasScrolled) return;
+    const unlockAfterRealScroll = () => {
+      if (window.scrollY > 0 || getScrollY() > 0) setPageHasScrolled(true);
+    };
+    // History/BFCache restoration may happen just after the first render.
+    unlockAfterRealScroll();
+    const frame = window.requestAnimationFrame(unlockAfterRealScroll);
+    const removeScroll = addScrollRootListener(unlockAfterRealScroll);
+    window.addEventListener("pageshow", unlockAfterRealScroll);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      removeScroll();
+      window.removeEventListener("pageshow", unlockAfterRealScroll);
+    };
+  }, [isNarrow, pageHasScrolled]);
+
+  const unlockDeferredFeedsFromColumnScroll = useCallback((event: ReactUIEvent<HTMLElement>) => {
+    if (pageHasScrolled) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      target.classList.contains("feed-body") &&
+      target.scrollTop > 0
+    ) {
+      setPageHasScrolled(true);
+    }
+  }, [pageHasScrolled]);
+
   // Derived filter: PC always shows "all" (chips hidden); mobile coerces
   // "all" → "x_list" since the "all" chip isn't rendered on narrow.
   const filter: FilterKey = !isNarrow
@@ -254,25 +461,20 @@ function DashboardHome() {
       : storedFilter;
 
   useEffect(() => {
-    let cancelled = false;
+    if (!shouldLoadManifest) return;
+    const controller = new AbortController();
     setMetadataState("pending");
-
-    const sourcesRequest = fetchSources().then((nextSources) => {
-      if (!cancelled) setSources(nextSources);
-    });
-    const statsRequest = fetchStats().then((nextStats) => {
-      if (!cancelled) setStats(nextStats);
-    });
-
-    void Promise.allSettled([sourcesRequest, statsRequest]).then((results) => {
-      if (cancelled) return;
-      setMetadataState(results.every((result) => result.status === "fulfilled") ? "resolved" : "failed");
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshTick]);
+    void fetchFeedManifest(controller.signal)
+      .then((nextManifest) => {
+        if (controller.signal.aborted) return;
+        setManifest(nextManifest);
+        setMetadataState("resolved");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setMetadataState("failed");
+      });
+    return () => controller.abort();
+  }, [refreshTick, shouldLoadManifest]);
 
   // 点击只移动单一 pill；width 在切换时即时更新，不进入 transition。
   const resetInkToActive = useCallback((key: string, withTransition: boolean) => {
@@ -772,41 +974,50 @@ function DashboardHome() {
     }
   }, []);
 
-  // Derive which source types have live data
-  const liveSourceTypes = new Set(
-    sources.map((s) => s.source_type).concat(
-      // Also consider source_type present in stats
-      stats ? (Object.keys(stats.by_source) as SourceType[]) : [],
-    ),
-  );
+  const liveSourceTypes = new Set(manifest?.live_source_types ?? []);
   const isChannelLive = (sourceType: string): boolean => resolveChannelLive(sourceType, {
     enabled: OPTIMISTIC_FEED_START,
     metadataState,
     live: liveSourceTypes,
   });
 
-  // 空闲时后台预取其余频道首页(写 FEED_CACHE):首次横划切换、以及扫码/分享落地抽屉后
-  // 关掉抽屉看到的底层流都直接 hydrate 秒开。用 ref 取 fire 时最新的 liveSourceTypes(它每次
-  // render 都新建,不能进 deps);[] deps 只跑一次;2.5s 延迟 + requestIdleCallback 不抢首屏资源。
-  const liveRef = useRef(liveSourceTypes);
-  liveRef.current = liveSourceTypes;
+  // Candidates come from the public UI registry (including the merged news
+  // channel exactly once), not raw manifest rows. The ref is read only after the
+  // readiness gate, so manifest reconciliation can update it without restarting
+  // the page-level queue.
+  const prefetchCandidates = SOURCE_COLUMNS
+    .filter((column) => isChannelLive(column.source_type))
+    .map((column) => column.source_type);
+  const prefetchCandidatesRef = useRef(prefetchCandidates);
+  prefetchCandidatesRef.current = prefetchCandidates;
   useEffect(() => {
-    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number };
-    const idle = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 0));
-    const t = window.setTimeout(() => {
-      idle(() => {
-        const live = liveRef.current;
-        if (live.size > 0) {
-          // blog/podcast 折叠成「官方新闻」复合值预取:Feed 的 FEED_CACHE key 是
-          // 列的 sourceType("blog,podcast"),按单源 key 预取写进缓存永远 miss
-          // (2026-06-11 C 端速度核查发现)。其余源 key 即 source_type,原样。
-          const list: SourceType[] = [...live].filter((s) => s !== "blog" && s !== "podcast");
-          if (live.has("blog") || live.has("podcast")) list.push(OFFICIAL_NEWS as unknown as SourceType);
-          prefetchChannels(list);
+    if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
+
+    const queue = createBackgroundQueue();
+    const unbindVisibility = bindQueueToVisibility(queue, document);
+    const controller = new AbortController();
+    let cancelled = false;
+    void waitForBackgroundReadiness({ signal: controller.signal }).then(async () => {
+      for (const sourceType of prefetchCandidatesRef.current) {
+        if (cancelled || !canStartBackgroundPrefetch(readCurrentConnection)) return;
+        try {
+          await queue.enqueue(async () => {
+            if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
+            if (!prefetchCandidatesRef.current.includes(sourceType)) return;
+            await prefetchChannel(sourceType);
+          });
+        } catch {
+          // Best-effort only; a mounted Feed remains the authoritative retry path.
         }
-      });
-    }, 2500);
-    return () => window.clearTimeout(t);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      queue.pause();
+      unbindVisibility();
+    };
   }, []);
 
   const visibleColumns = SOURCE_COLUMNS.filter((col) => {
@@ -826,8 +1037,7 @@ function DashboardHome() {
 
   const getTitleForColumn = (col: SourceConfig): string => {
     if (col.source_type === "x_list") {
-      const xSource = sources.find((s) => s.source_type === "x_list");
-      return xSource?.name || col.title;
+      return manifest?.labels.x_list || col.title;
     }
     return col.title;
   };
@@ -1010,10 +1220,11 @@ function DashboardHome() {
           滚动链穿透到浏览器, swipe 时只走 JS 不触发系统刷新动作) */}
       <main
         ref={mainRef}
+        onScrollCapture={unlockDeferredFeedsFromColumnScroll}
         className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16 max-md:touch-pan-y max-md:overscroll-y-contain"
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
-          {visibleColumns.map((col) => {
+          {visibleColumns.map((col, index) => {
             const isPlaceholder = !resolveChannelLive(col.source_type, {
               enabled: OPTIMISTIC_FEED_START,
               metadataState,
@@ -1033,15 +1244,20 @@ function DashboardHome() {
                   lastInteractedColumnRef.current = col.source_type;
                 }}
               >
-                <Feed
+                <DeferredFeed
                   ref={(h) => {
                     if (h) feedRefs.current.set(col.source_type, h);
                     else feedRefs.current.delete(col.source_type);
                   }}
+                  immediate={index < immediateColumnCount}
+                  mediaColumnIndex={index}
+                  mediaColumnImmediate={index < immediateColumnCount}
+                  observationEnabled={pageHasScrolled}
                   sourceType={col.source_type}
                   title={getTitleForColumn(col)}
                   placeholder={isPlaceholder}
                   refreshTick={refreshTick}
+                  onInitialRequestStart={OPTIMISTIC_FEED_START && !shouldLoadManifest ? handleInitialFeedRequestStart : undefined}
                 />
               </div>
             );
@@ -1088,7 +1304,7 @@ function ShareLanding() {
   const { token } = useParams<{ token: string }>();
   useEffect(() => {
     if (!token) return;
-    const target = `${API_BASE || 'https://api.ai-feeds.com'}/s/${encodeURIComponent(token)}`;
+    const target = buildPublicWorkerUrl(`/s/${encodeURIComponent(token)}`);
     window.location.replace(target);
   }, [token]);
   return (

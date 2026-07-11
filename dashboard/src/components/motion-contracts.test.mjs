@@ -65,9 +65,9 @@ test("toast entrance and exit are transition-based and interruptible", () => {
 });
 
 test("quote snapshot is a mobile sheet and a desktop modal", () => {
-  assert.match(quoteSnapshotModal, /useMotionDismiss\(close, "sheet", Boolean\(quote\)\)/);
+  assert.match(quoteSnapshotModal, /useMotionDismiss\(closeModal, "sheet", Boolean\(quote\)\)/);
   assert.match(quoteSnapshotModal, /motion-layer-adaptive/);
-  assert.match(quoteSnapshotModal, /if \(e\.key === "Escape"\) close\(\);/);
+  assert.match(quoteSnapshotModal, /if \(e\.key === "Escape"\) closeModal\(\);/);
   assert.match(
     css,
     /@media\s*\(min-width:\s*640px\)[\s\S]*\.motion-layer-adaptive\.motion-layer-sheet \.motion-layer-panel\s*\{[\s\S]*animation-name:\s*motion-modal-enter/,

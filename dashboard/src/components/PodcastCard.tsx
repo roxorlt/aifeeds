@@ -5,7 +5,7 @@
 // 叠加，右内容列。token 对齐 docs/frontend-ux-guidelines.md：
 //   - 卡片 px-4 py-3 hover:bg-neutral-50/60 border-b 无 shadow 无 rounded
 //   - byline：节目名 · 时间 ·（A 档）[有文字稿] chip
-//   - 单集标题 text-[15px] font-bold（2 行 clamp）/ ELI25 shownotes 摘要 text-[13px]（2 行）
+//   - 单集标题 text-[15px] font-bold（2 行 clamp）/ 紧凑摘要 text-[13px]（2 行）
 //   - 无互动数行（RSS 无播放量），用「单集时长」当 meta 替代
 //   - play 三角复用 PhCard 的 <path d="M8 5v14l11-7z"/>，严禁 ▶ emoji
 //
@@ -13,15 +13,19 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra } from "../types";
-import { cn, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
-import { useDrawer } from "../lib/drawer";
+import { buildResponsiveCardImage, cn, parseJsonField, timeAgo, variantsForCurrentCover } from "../lib/utils";
+import { useDrawer } from "../lib/drawerContext";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { IconAudioLines, IconClock, IconMic, IconUser } from "./icons";
 import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
   // 海报模式(PosterCanvas 截图):突出「这是音频」+ 主持/嘉宾,增信息量(2026-06-12 #2)。
   posterMode?: boolean;
 }
@@ -64,7 +68,7 @@ function PlayTriangle({ className }: { className?: string }) {
   );
 }
 
-// 海报里节目简介用纯文本（shownotes 是 markdown，海报不渲染 md，轻量去标记）。
+// 海报里节目简介用 list DTO 的紧凑 excerpt，轻量去除可能残留的 markdown 标记。
 function plainText(md: string): string {
   return md
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "")     // 图片
@@ -75,9 +79,14 @@ function plainText(md: string): string {
     .trim();
 }
 
-export function PodcastCard({ item, eager, posterMode }: Props) {
+export function PodcastCard({
+  item,
+  mediaPolicy = LAZY_MEDIA_LOAD_POLICY,
+  posterMode,
+}: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  const [coverVariantFailed, setCoverVariantFailed] = useState(false);
 
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
 
@@ -97,27 +106,31 @@ export function PodcastCard({ item, eager, posterMode }: Props) {
   // 单节点不成"轴"(烂源 VTT 偶发产物),≥2 才渲染。
   const timelineRaw = Array.isArray(extra.timeline) ? extra.timeline : [];
   const timeline = timelineRaw.length >= 2 ? timelineRaw : [];
-  // 单集标题优先中译；ELI25 shownotes 摘要优先 ai_summary_zh（§8.4.A）。
+  // 单集标题优先中译；摘要只消费 list DTO 的紧凑字段。
   const title = extra.title_zh || item.title || "";
   const summary =
     extra.ai_summary_zh ||
-    extra.shownotes_zh ||
-    extra.shownotes ||
+    extra.excerpt_zh ||
+    extra.excerpt ||
     item.content_translated ||
     item.content ||
     "";
-  // 海报「节目简介」用抓取的原文 shownotes（外文优先中译），与抽屉「节目简介」一致；
-  // 缺失时回退 ai_summary（概览），保证海报有一段描述。
+  // 海报「节目简介」同样使用紧凑字段，缺失时回退 ai_summary。
   const isForeign = (item.lang || "") !== "zh";
-  const shownotesRaw = isForeign
-    ? extra.shownotes_zh || extra.shownotes || ""
-    : extra.shownotes || "";
-  const posterDesc = plainText(shownotesRaw || extra.ai_summary_zh || extra.ai_summary || "");
+  const excerpt = isForeign
+    ? extra.excerpt_zh || extra.excerpt || ""
+    : extra.excerpt || extra.excerpt_zh || "";
+  const posterDesc = plainText(excerpt || extra.ai_summary_zh || extra.ai_summary || "");
 
   const time = timeAgo(item.published_at);
   const duration = formatDuration(extra.duration_sec);
 
   const coverImage = extra.cover_image || "";
+  const coverVariants = variantsForCurrentCover(
+    coverImage,
+    extra.cover_variant_source,
+    extra.cover_image_variants,
+  );
 
   function open() {
     drawer.openItem(item);
@@ -130,18 +143,42 @@ export function PodcastCard({ item, eager, posterMode }: Props) {
         "relative shrink-0 overflow-hidden rounded-xl bg-neutral-100",
         size === "poster" ? "h-28 w-28" : "h-[72px] w-[72px]",
       )}
+      data-feed-source={item.source_type}
+      data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
     >
-      {coverImage && !coverFailed ? (
-        <img
-          src={proxyImg(coverImage, size === "poster" ? 320 : 200)}
-          alt=""
-          loading={eager ? "eager" : "lazy"}
-          fetchPriority={eager ? "high" : undefined}
-          decoding="async"
-          className="h-full w-full object-cover"
-          onError={() => setCoverFailed(true)}
-        />
-      ) : (
+      {coverImage && !coverFailed ? (() => {
+        const source = buildResponsiveCardImage(coverImage, coverVariants, {
+          fallbackWidth: size === "poster" ? 320 : 200,
+          widths: size === "poster" ? [320, 400] : [200, 400],
+        });
+        const renderedSize = size === "poster" ? 112 : 72;
+        return (
+          <picture className="block h-full w-full">
+            {source.webpSrcSet && !coverVariantFailed && (
+              <source type="image/webp" srcSet={source.webpSrcSet} sizes={`${renderedSize}px`} />
+            )}
+            <img
+              src={source.fallbackSrc}
+              srcSet={source.srcSet}
+              sizes={`${renderedSize}px`}
+              width={renderedSize}
+              height={renderedSize}
+              alt=""
+              loading={mediaPolicy.loading}
+              fetchPriority={mediaPolicy.fetchPriority}
+              decoding="async"
+              className="h-full w-full object-cover"
+              onError={() => {
+                if (source.webpSrcSet && !coverVariantFailed) {
+                  setCoverVariantFailed(true);
+                } else {
+                  setCoverFailed(true);
+                }
+              }}
+            />
+          </picture>
+        );
+      })() : (
         <div
           className="flex h-full w-full items-center justify-center text-[22px] font-bold text-white"
           style={{ background: monoColor(showName || "podcast") }}

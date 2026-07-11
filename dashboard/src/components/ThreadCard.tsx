@@ -1,12 +1,17 @@
 import { useState } from "react";
 import type { Item } from "../types";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { TweetCard } from "./TweetCard";
 
 interface Props {
   items: Item[]; // sorted by published_at ascending (root first)
+  mediaPolicy: MediaLoadPolicy;
 }
 
-export function ThreadCard({ items }: Props) {
+export function ThreadCard({ items, mediaPolicy }: Props) {
   const [open, setOpen] = useState(false);
   const [root, ...rest] = items;
   const replyCount = rest.length;
@@ -20,6 +25,7 @@ export function ThreadCard({ items }: Props) {
         inThread
         siblings={items}
         hasThreadBelow={hasReplies}
+        mediaPolicy={mediaPolicy}
       />
       {hasReplies && open &&
         rest.map((it, idx) => (
@@ -31,6 +37,7 @@ export function ThreadCard({ items }: Props) {
             siblings={items}
             hasThreadAbove
             hasThreadBelow={idx < rest.length - 1}
+            mediaPolicy={LAZY_MEDIA_LOAD_POLICY}
           />
         ))}
       {hasReplies && (

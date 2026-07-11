@@ -14,8 +14,8 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-test("Task 4 keeps optimistic feed start disabled until the P1 atomic release", () => {
-  assert.equal(OPTIMISTIC_FEED_START, false);
+test("Task 6 enables optimistic feed start for the atomic P1 release", () => {
+  assert.equal(OPTIMISTIC_FEED_START, true);
   assert.deepEqual(DEFAULT_LIVE_CHANNELS, [
     "x_list",
     "blog,podcast",
@@ -192,7 +192,8 @@ test("App and Feed integrate availability without gating optimistic data on meta
     /resolveChannelLive\(col\.source_type, \{[\s\S]*?enabled: OPTIMISTIC_FEED_START/,
   );
   assert.match(appSource, /metadataState/);
-  assert.match(appSource, /results\.every\(\(result\) => result\.status === "fulfilled"\)/);
+  assert.match(appSource, /fetchFeedManifest\(controller\.signal\)/);
+  assert.doesNotMatch(appSource, /fetchSources|fetchStats/);
   assert.doesNotMatch(appSource, /const isPlaceholder = !channelHasData\(liveSourceTypes/);
   assert.match(feedSource, /hasRenderedItemsRef/);
   assert.match(feedSource, /resolveFeedRenderState\(\{/);

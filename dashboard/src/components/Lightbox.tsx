@@ -124,7 +124,9 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
           onClick={(e) => e.stopPropagation()}
           onError={() => {
             let host = "";
-            try { host = new URL(current.url).host; } catch {}
+            try { host = new URL(current.url).host; } catch {
+              // 非法 URL 仍按空 host 上报，图片降级流程继续执行。
+            }
             track(EVENTS.IMAGE_LOAD_ERROR, {
               url_host: host,
               source: "lightbox-video",
@@ -139,7 +141,9 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
           onClick={(e) => e.stopPropagation()}
           onError={() => {
             let host = "";
-            try { host = new URL(current.url).host; } catch {}
+            try { host = new URL(current.url).host; } catch {
+              // 非法 URL 仍按空 host 上报，图片降级流程继续执行。
+            }
             track(EVENTS.IMAGE_LOAD_ERROR, {
               url_host: host,
               source: "lightbox",

@@ -1,5 +1,6 @@
-import type { Item, ItemExtra } from "../types";
-import { resolveAssetUrl } from "./asset";
+import type { CardImageVariant, Item, ItemExtra } from "../types";
+import { resolveAssetUrl } from "./asset.ts";
+import { PUBLIC_WORKER_BASE } from "./apiBase.ts";
 
 export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
@@ -150,9 +151,11 @@ const PROXY_HOSTS = new Set([
   "raw.githubusercontent.com",        // GH README 内嵌 image / assets
   "user-images.githubusercontent.com", // GH 老版 user-attachments
   "github.com",                       // /user-attachments/ 路径(新版)
+  "cdn.huodongxing.com",
+  "wimg.huodongxing.com",
+  "nscdn.huodongxing.com",
 ]);
-const PROXY_BASE =
-  import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
+const PROXY_BASE = PUBLIC_WORKER_BASE;
 
 // width: 物理像素 hint。worker 后端走 CF cdn-cgi/image 缩到该宽度，
 // 高度按比例。GH 头像 460×460 jpeg 实测：?w=80 → 2.5KB（省 91%）/
@@ -187,6 +190,95 @@ export function proxyImg(
     // malformed URL — leave as-is and let <img> onError handle it
   }
   return url;
+}
+
+export interface ResponsiveCardImageSource {
+  /** Original or controlled-proxy fallback consumed by the <img>. */
+  fallbackSrc: string;
+  /** Accept-negotiated /img widths for legacy allowlisted external assets. */
+  srcSet?: string;
+  /** Static ingestion-time WebP widths for a <source type="image/webp">. */
+  webpSrcSet?: string;
+}
+
+export function variantsForCurrentCover(
+  currentCover: string | null | undefined,
+  variantSource: string | null | undefined,
+  variants: readonly CardImageVariant[] | null | undefined,
+): readonly CardImageVariant[] | undefined {
+  if (!currentCover || !variantSource || !variants?.length) return undefined;
+  return resolveAssetUrl(currentCover) === resolveAssetUrl(variantSource)
+    ? variants
+    : undefined;
+}
+
+/**
+ * Build a non-recursive responsive card-image source.
+ *
+ * Stored variants are served as a typed WebP `<source>` so an older browser
+ * can still use the original `<img src>`. Legacy third-party images use the
+ * strict Worker `/img` allowlist, whose response format is negotiated from the
+ * browser's Accept header. R2 originals deliberately get no synthetic srcset:
+ * the Worker must never fetch its own `/r/` route to resize it.
+ */
+export function buildResponsiveCardImage(
+  originalUrl: string | null | undefined,
+  variants?: readonly CardImageVariant[] | null,
+  options: {
+    fallbackWidth?: number;
+    widths?: readonly number[];
+    forceProxy?: boolean;
+  } = {},
+): ResponsiveCardImageSource {
+  const fallbackWidth = options.fallbackWidth ?? 400;
+  const widths = options.widths ?? [400, 800];
+  const fallbackSrc = proxyImg(originalUrl, fallbackWidth, {
+    force: options.forceProxy,
+  });
+
+  const seenVariantWidths = new Set<number>();
+  const validVariants = (variants || [])
+    .filter((variant) => {
+      if (variant?.format !== "webp") return false;
+      if (!Number.isFinite(variant.width) || variant.width < 16 || variant.width > 1600) return false;
+      if (seenVariantWidths.has(variant.width)) return false;
+      const value = String(variant.url || "");
+      if (!(value.startsWith("/r/") || /^https?:\/\//i.test(value))) return false;
+      seenVariantWidths.add(variant.width);
+      return true;
+    })
+    .sort((a, b) => a.width - b.width);
+
+  if (validVariants.length > 0) {
+    return {
+      fallbackSrc,
+      webpSrcSet: validVariants
+        .map((variant) => `${resolveAssetUrl(variant.url)} ${variant.width}w`)
+        .join(", "),
+    };
+  }
+
+  const seenUrls = new Set<string>();
+  const candidates = widths
+    .filter((width) => Number.isFinite(width) && width > 0)
+    .map((width) => ({
+      width: Math.min(1600, Math.round(width)),
+      url: proxyImg(originalUrl, Math.min(1600, Math.round(width)), {
+        force: options.forceProxy,
+      }),
+    }))
+    .filter(({ url }) => {
+      if (!url || seenUrls.has(url)) return false;
+      seenUrls.add(url);
+      return true;
+    });
+
+  // A direct/R2 URL is identical for every requested width. Returning a
+  // descriptor for it would imply the bytes were resized when they were not.
+  const srcSet = candidates.length > 1
+    ? candidates.map(({ url, width }) => `${url} ${width}w`).join(", ")
+    : undefined;
+  return { fallbackSrc, srcSet };
 }
 
 export function parseJsonField<T>(field: unknown): T | null {

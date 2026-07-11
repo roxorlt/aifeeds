@@ -17,6 +17,10 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { API_BASE } from "../api";
+import {
+  updateObservedImpressionElement,
+  type ImpressionElementRef,
+} from "./impressionElementLifecycle";
 
 const VISIBLE_THRESHOLD = 0.7;
 const MIN_VISIBLE_MS = 5000;
@@ -98,6 +102,24 @@ async function fireRefresh(itemId: string): Promise<void> {
 }
 
 /**
+ * Owns one card element's observer registration. React calls the old ref with
+ * null before calling the new itemId-bound ref with the same node, so an item
+ * identity change cancels the old dwell timer before starting a fresh one.
+ */
+export function updateImpressionElement(
+  node: Element | null,
+  itemId: string | null | undefined,
+  elRef: ImpressionElementRef,
+): void {
+  updateObservedImpressionElement(node, itemId, elRef, {
+    pending,
+    observe: (element) => ensureObserver().observe(element),
+    unobserve: (element) => observer?.unobserve(element),
+    clearTimer: (timer) => window.clearTimeout(timer),
+  });
+}
+
+/**
  * 卡片 root element 挂这个 ref → 进入视口 ≥ 500ms 触发 refresh.
  * 用法:
  *   const refreshRef = useImpressionRefresh(item.id);
@@ -109,41 +131,17 @@ export function useImpressionRefresh(
   itemId: string | null | undefined,
 ): React.RefCallback<Element> {
   const elRef = useRef<Element | null>(null);
-  const itemIdRef = useRef<string | null | undefined>(itemId);
-  itemIdRef.current = itemId;
 
   useEffect(() => {
     return () => {
-      const el = elRef.current;
-      if (el) {
-        const state = pending.get(el);
-        if (state?.timer != null) window.clearTimeout(state.timer);
-        pending.delete(el);
-        ensureObserver().unobserve(el);
-        elRef.current = null;
-      }
+      updateImpressionElement(null, null, elRef);
     };
   }, []);
 
-  return useCallback((node) => {
-    if (!node) {
-      const el = elRef.current;
-      if (el) {
-        const state = pending.get(el);
-        if (state?.timer != null) window.clearTimeout(state.timer);
-        pending.delete(el);
-        ensureObserver().unobserve(el);
-        elRef.current = null;
-      }
-      return;
-    }
-    // itemId 为空时不挂 observer (caller 用 disabled 语义关闭, 比如 embedded 卡片)
-    if (!itemIdRef.current) return;
-    if (elRef.current === node) return;
-    elRef.current = node;
-    pending.set(node, { itemId: itemIdRef.current, timer: null });
-    ensureObserver().observe(node);
-  }, []);
+  return useCallback(
+    (node) => updateImpressionElement(node, itemId, elRef),
+    [itemId],
+  );
 }
 
 /**

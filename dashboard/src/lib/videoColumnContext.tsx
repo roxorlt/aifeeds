@@ -13,15 +13,9 @@
 // 这样组件树里 video 不需要关心自己在哪——columnId 由 Provider 自动注入；
 // scroll listener 由 store 中心化管理（每 root 一个，不是每 video 一个）。
 
-import { createContext, useContext, useEffect, type ReactNode, type RefObject } from "react";
+import { useEffect, type ReactNode, type RefObject } from "react";
 import { useVideoCoordinator } from "./videoCoordinator";
-
-interface VideoColumnContextValue {
-  columnId: string;
-}
-
-const DEFAULT: VideoColumnContextValue = { columnId: "default" };
-const VideoColumnContext = createContext<VideoColumnContextValue>(DEFAULT);
+import { VideoColumnContext } from "./videoColumn";
 
 interface ProviderProps {
   columnId: string;
@@ -50,8 +44,4 @@ export function VideoColumnProvider({
       {children}
     </VideoColumnContext.Provider>
   );
-}
-
-export function useVideoColumn(): VideoColumnContextValue {
-  return useContext(VideoColumnContext);
 }

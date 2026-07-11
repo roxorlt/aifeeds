@@ -129,7 +129,6 @@ function log(event: string, payload?: Record<string, unknown>): void {
   if (!isDev) return;
   // 编码到一行，方便 console 抓取
   const safe = payload ? JSON.stringify(payload) : "";
-  // eslint-disable-next-line no-console
   console.log(`[VC] ${event} ${safe}`);
 }
 

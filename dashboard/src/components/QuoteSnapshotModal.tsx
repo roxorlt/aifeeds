@@ -1,8 +1,9 @@
-// PR3 嵌套引用小卡点击 → 站内 modal 显示 quote 完整内容
+// PR3 嵌套引用小卡点击 → 站内 modal 显示 list DTO 中可用的 quote 快照
 //
 // 数据源:QuoteOf snapshot(来自 extra.quote_of / extra.retweet_of.quote_of)
-// 不调 API。quote 推文可能不在 items 表(原 list 外账号),所以没独立 deeplink,
-// 走本 modal 显示快照即可。
+// 不调 API。quote 推文可能不在 items 表(原 list 外账号),所以没独立 deeplink。
+// list DTO 会截断嵌套正文并移除 X Article 全文；这里明确展示紧凑预览，完整内容
+// 通过「在 X 打开」读取，避免弹窗暗示本地仍持有已从列表契约移除的全文。
 //
 // 视觉:
 // - 移动端:从下方滑入,最大高度 90vh
@@ -12,34 +13,44 @@
 // - 媒体网格(quote.media images)
 // - "在 X 打开 ↗" 跳原推
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { proxyImg, timeAgo } from "../lib/utils";
 import { VerifiedBadge, IconShare } from "./icons";
-import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "../lib/tcoResolvedLink";
 import { XArticleCard } from "./XArticleCard";
 import { useMotionDismiss } from "../lib/motionLayer";
+import { activateModalFocus } from "../lib/modalFocus";
 
 export function QuoteSnapshotModal() {
   const quote = useQuoteSnapshotStore((s) => s.quote);
   const close = useQuoteSnapshotStore((s) => s.close);
-  const [showOriginal, setShowOriginal] = useState(false);
-  const { layerClassName, requestClose } = useMotionDismiss(close, "sheet", Boolean(quote));
+  const [originalQuote, setOriginalQuote] = useState<typeof quote>(null);
+  const showOriginal = originalQuote !== null && originalQuote === quote;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const modalOpen = Boolean(quote);
+  const closeModal = useCallback(() => {
+    setOriginalQuote(null);
+    close();
+  }, [close]);
+  const { layerClassName, requestClose } = useMotionDismiss(closeModal, "sheet", Boolean(quote));
 
-  // 每次新 quote 打开重置 toggle 到默认(译文优先)
   useEffect(() => {
-    if (quote) setShowOriginal(false);
-  }, [quote?.id]);
+    if (!modalOpen) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    return activateModalFocus(panel);
+  }, [modalOpen]);
 
   // ESC 关闭
   useEffect(() => {
     if (!quote) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") closeModal();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [quote, close]);
+  }, [quote, closeModal]);
 
   // body scroll lock 当 modal 打开
   useEffect(() => {
@@ -69,6 +80,7 @@ export function QuoteSnapshotModal() {
       className={`${layerClassName} motion-layer-adaptive fixed inset-0 z-[60] flex items-end justify-center sm:items-center`}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="quote-snapshot-title"
       onClick={requestClose}
     >
       {/* Backdrop */}
@@ -76,17 +88,22 @@ export function QuoteSnapshotModal() {
 
       {/* Panel */}
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="motion-layer-panel relative w-full max-w-[560px] overflow-hidden rounded-t-2xl bg-white shadow-xl sm:rounded-2xl sm:max-h-[85vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <header className="flex items-center justify-between border-b border-neutral-200 px-4 py-2.5">
           <div className="flex h-9 items-center">
-            <span className="text-sm font-semibold text-neutral-900">引用推文</span>
+            <span id="quote-snapshot-title" className="text-sm font-semibold text-neutral-900">
+              引用推文
+            </span>
           </div>
           <button
             type="button"
             onClick={requestClose}
+            data-modal-initial-focus
             className="-mr-1 flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
             aria-label="关闭"
           >
@@ -133,7 +150,7 @@ export function QuoteSnapshotModal() {
               <div className="flex shrink-0 gap-0 rounded-md border border-neutral-200 p-0.5">
                 <button
                   type="button"
-                  onClick={() => setShowOriginal(false)}
+                  onClick={() => setOriginalQuote(null)}
                   className={
                     !showOriginal
                       ? "rounded bg-neutral-100 px-2 py-0.5 text-[11px] font-semibold text-neutral-900"
@@ -144,7 +161,7 @@ export function QuoteSnapshotModal() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowOriginal(true)}
+                  onClick={() => setOriginalQuote(quote)}
                   className={
                     showOriginal
                       ? "rounded bg-neutral-100 px-2 py-0.5 text-[11px] font-semibold text-neutral-900"
@@ -164,7 +181,6 @@ export function QuoteSnapshotModal() {
               article={quote.x_article}
               resolvedUrl={quote.content_resolved_url}
               content={quote.content}
-              showBody
             />
           ) : (
             displayText && (

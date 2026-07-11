@@ -20,7 +20,7 @@ import {
 import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
 import {
@@ -35,6 +35,12 @@ import {
   OPTIMISTIC_FEED_START,
   resolveFeedRenderState,
 } from "../lib/feedAvailability";
+import {
+  hasListRequestForSource,
+  isFeedMounted,
+  registerMountedFeed,
+} from "../lib/feedScheduling";
+import { getMediaLoadPolicy } from "../lib/mediaPriority";
 
 // PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
 // <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
@@ -96,35 +102,36 @@ function readFeedCache(key: string, maxAgeMs: number = FEED_CACHE_TTL_MS): FeedC
   }
 }
 
-// 频道预取:空闲时后台拉其余频道首页写进 FEED_CACHE,让首次横划切换、以及扫码/分享落地
-// 抽屉后关掉抽屉看到的底层流都直接 hydrate 秒开(不再现拉显 skeleton)。limit 小(只为首屏
-// instant,真正 mount 时的 silent refetch 会补全量);已在 cache 的频道跳过;失败忽略。
+// 单频道后台预取由 App 的全局串行队列调度。每项真正执行时重新检查 mount/cache/in-flight，
+// 避免排队期间用户已经滚动挂载后再发重复请求。ClawHub/活动默认带筛选，而当前 cache key
+// 只有 sourceType；为避免错误 hydrate，本阶段不后台预取这两个频道。
 const PREFETCH_LIMIT = 12;
-export function prefetchChannels(sourceTypes: SourceType[]): void {
-  for (const st of sourceTypes) {
-    // TTL 感知:有"新鲜"缓存才跳过。localStorage 恢复的旧快照(显示用)不算,
-    // 仍然预取一份新的覆盖,保证横划切过去时内容是新的。
-    if (readFeedCache(st)) continue;
-    fetchItems({
-      source_type: st,
-      limit: PREFETCH_LIMIT,
-      sort: st === "clawhub" ? "stars" : (st as string) === "blog,podcast" ? "published_at" : undefined,
-    })
-      .then((res) => {
-        if (res.items.length > 0 && !readFeedCache(st)) {
-          setFeedCache(st, {
-            items: res.items,
-            nextCursor: res.next_cursor,
-            hasMore: res.has_more,
-            ts: Date.now(),
-            queryTimeMs: res.query_time_ms,
-          });
-        }
-      })
-      .catch(() => {
-        /* 预取失败忽略,真正切过去时会正常重拉 */
-      });
-  }
+// App's page-level scheduler must call the same cache-aware list path as Feed;
+// keeping this narrow export here avoids duplicating FEED_CACHE ownership.
+// eslint-disable-next-line react-refresh/only-export-components
+export async function prefetchChannel(
+  sourceType: SourceType | "blog,podcast",
+): Promise<void> {
+  if (sourceType === "clawhub" || sourceType === "huodongxing") return;
+  if (
+    isFeedMounted(sourceType)
+    || readFeedCache(sourceType)
+    || hasListRequestForSource(sourceType)
+  ) return;
+
+  const response = await fetchItems({
+    source_type: sourceType,
+    limit: PREFETCH_LIMIT,
+    sort: sourceType === "blog,podcast" ? "published_at" : undefined,
+  }, { purpose: "background" });
+  if (response.items.length === 0 || readFeedCache(sourceType)) return;
+  setFeedCache(sourceType, {
+    items: response.items,
+    nextCursor: response.next_cursor,
+    hasMore: response.has_more,
+    ts: Date.now(),
+    queryTimeMs: response.query_time_ms,
+  });
 }
 
 interface Props {
@@ -134,9 +141,13 @@ interface Props {
   title: string;
   placeholder?: boolean;
   refreshTick: number;
+  onInitialRequestStart?: () => void;
+  onInitialRequestSettled?: () => void;
+  mediaColumnIndex: number;
+  mediaColumnImmediate: boolean;
 }
 
-const INITIAL_LIMIT = 30;
+const INITIAL_LIMIT = 12;
 const LOAD_MORE_LIMIT = 30;
 const POLL_INTERVAL_MS = 30_000;
 const PULL_THRESHOLD = 60;
@@ -244,7 +255,16 @@ export interface FeedHandle {
 }
 
 export const Feed = forwardRef<FeedHandle, Props>(function Feed(
-  { sourceType, title, placeholder: placeholderFromMetadata, refreshTick },
+  {
+    sourceType,
+    title,
+    placeholder: placeholderFromMetadata,
+    refreshTick,
+    onInitialRequestStart,
+    onInitialRequestSettled,
+    mediaColumnIndex,
+    mediaColumnImmediate,
+  },
   ref,
 ) {
   // PM 2026-05-20:从 FEED_CACHE 拿之前缓存的 items,有 cache 时 mount 直接显
@@ -323,6 +343,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const isDraggingRef = useRef(false);
   // 切回频道秒切:本 Feed 实例是否已发过初次请求。首次 mount 时若 FEED_CACHE 够新就跳过 refetch。
   const didFetchRef = useRef(false);
+  // App withdraws the per-refresh unlock capability as soon as the first mounted
+  // Feed starts. Keeping the latest prop in a ref avoids restarting that in-flight
+  // request, while a later Feed remount sees undefined and may use the 60s cache skip.
+  const onInitialRequestStartRef = useRef(onInitialRequestStart);
+  onInitialRequestStartRef.current = onInitialRequestStart;
+  const onInitialRequestSettledRef = useRef(onInitialRequestSettled);
+  onInitialRequestSettledRef.current = onInitialRequestSettled;
   // With optimistic start enabled, metadata reconciliation may remove a channel
   // after useful content already committed. Keep only that committed content: a
   // late response excluded in the same render cannot bypass metadata or set the latch.
@@ -334,6 +361,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     hadRenderedItems: hasRenderedItemsRef.current,
   });
   const placeholder = feedRenderState.placeholder;
+  useEffect(() => {
+    if (placeholder) return;
+    return registerMountedFeed(sourceType);
+  }, [placeholder, sourceType]);
   useEffect(() => {
     if (feedRenderState.nextHadRenderedItems) {
       hasRenderedItemsRef.current = feedRenderState.nextHadRenderedItems;
@@ -434,21 +465,31 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   // Initial load + refresh on tick or sort change
   useEffect(() => {
-    if (placeholder) return;
+    if (placeholder) {
+      // A manifest change can turn a channel into a placeholder while its
+      // optimistic list request is still in flight. Keep the reveal slot until
+      // that request's finally handler runs; a never-started placeholder can
+      // release immediately.
+      if (!didFetchRef.current) onInitialRequestSettledRef.current?.();
+      return;
+    }
     // 切回频道秒切:本实例首次 mount + FEED_CACHE 够新(<60s)→ 不重拉,直接用 hydrate 的缓存。
     // 下拉刷新 / 换排序会让 deps 变,届时 didFetchRef 已 true → 照常拉新。
     if (!didFetchRef.current) {
       didFetchRef.current = true;
       const fresh = readFeedCache(sourceType);
-      if (items.length > 0 && fresh && !fresh.snapshot && Date.now() - fresh.ts < 60_000) return;
+      if (!onInitialRequestStartRef.current && fresh?.items.length && !fresh.snapshot && Date.now() - fresh.ts < 60_000) {
+        onInitialRequestSettledRef.current?.();
+        return;
+      }
     }
     let cancelled = false;
     // PM 2026-05-20:若已有 cache hydrate 的 items,后台静默 refetch
     // (loading=false,不显 skeleton);否则首次进 tab 显 skeleton
-    const hasHydrated = items.length > 0;
+    const hasHydrated = Boolean(readFeedCache(sourceType)?.items.length);
     if (!hasHydrated) setLoading(true);
     setError(null);
-    fetchItems({
+    const request = fetchItems({
       source_type: sourceType,
       limit: INITIAL_LIMIT,
       // 官方新闻必须显式 sort=published_at:默认 scraped_at 在批量回灌时同秒
@@ -459,7 +500,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       city: isHdx && hdxCity ? hdxCity : undefined,
       when: isHdx && hdxWhen ? hdxWhen : undefined,
       form: isHdx && hdxForm ? hdxForm : undefined,
-    })
+    });
+    onInitialRequestStartRef.current?.();
+    request
       .then((res) => {
         if (cancelled) return;
         feedReadySourceRef.current = feedResponseNetworkSource(res);
@@ -492,11 +535,14 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           ...readConnectionInfo(),
         });
       })
-      .finally(() => !cancelled && setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+        onInitialRequestSettledRef.current?.();
+      });
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory, chHideSuspicious, hdxCity, hdxWhen, hdxForm]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot, isClawhub, chSort, chCategory, chHideSuspicious, isHdx, hdxCity, hdxWhen, hdxForm]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -541,7 +587,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     } finally {
       setLoadingMore(false);
     }
-  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot, isHdx, hdxCity, hdxWhen, hdxForm]);
+  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot, isClawhub, chSort, chCategory, chHideSuspicious, isHdx, hdxCity, hdxWhen, hdxForm]);
 
   const retryLoadMore = useCallback(() => {
     consecutiveFailRef.current = 0;
@@ -731,7 +777,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           source_type: sourceType,
           since: lastScrapedAt.current,
           limit: 50,
-        });
+        }, { purpose: "background" });
         const existingIds = new Set([...items, ...pending].map((i) => i.id));
         const fresh = res.items.filter((i) => !existingIds.has(i.id));
         if (fresh.length > 0) {
@@ -897,7 +943,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       scrollRoot={isNarrowFeed ? null : feedBodyRef}
       hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
     >
-    <div ref={feedRootRef} data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
+    <div ref={feedRootRef} data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:h-[70vh] md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
           (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView
@@ -1090,16 +1136,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                   </div>,
                 );
               }
-              // 首屏前 3 张卡的封面图 eager + fetchPriority=high:浏览器对 lazy
-              // 图会刻意推迟,首屏可见图也跟着排队,LCP 白慢几百 ms。前 3 行
-              // 立即下载且插队;其余照旧 lazy(省流量)。ClawhubCard 只有小头像、
-              // ThreadCard 场景少,不传。
-              const eager = idx < 3;
+              const mediaPolicy = getMediaLoadPolicy({
+                columnIndex: mediaColumnIndex,
+                rowIndex: idx,
+                immediate: mediaColumnImmediate,
+              });
               nodes.push(
                 row.kind === "single" ? (
-                  <ItemCard key={row.item.id} item={row.item} eager={eager} />
+                  <ItemCard key={row.item.id} item={row.item} mediaPolicy={mediaPolicy} />
                 ) : (
-                  <ThreadCard key={`thread-${row.rootId}`} items={row.items} />
+                  <ThreadCard
+                    key={`thread-${row.rootId}`}
+                    items={row.items}
+                    mediaPolicy={mediaPolicy}
+                  />
                 ),
               );
               return nodes;

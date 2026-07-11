@@ -142,7 +142,9 @@ export function LoginModal() {
     return () => {
       cancelled = true;
       if (createdId && window.turnstile) {
-        try { window.turnstile.remove(createdId); } catch {}
+        try { window.turnstile.remove(createdId); } catch {
+          // widget 可能已被 Turnstile 自行移除，清理保持幂等。
+        }
       }
       setTurnstileWidgetId(null);
     };

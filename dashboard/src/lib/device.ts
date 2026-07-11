@@ -52,8 +52,12 @@ function getOrCreateSessionDid(): string {
  */
 export function resetDeviceId(): void {
   cachedDid = null;
-  try { localStorage.removeItem(DID_KEY); } catch {}
-  try { sessionStorage.removeItem(DID_KEY); } catch {}
+  try { localStorage.removeItem(DID_KEY); } catch {
+    // 隐私模式或存储策略可能拒绝访问，本地内存状态仍已重置。
+  }
+  try { sessionStorage.removeItem(DID_KEY); } catch {
+    // 隐私模式或存储策略可能拒绝访问，本地内存状态仍已重置。
+  }
 }
 
 /** 是否为 sessionStorage 兜底生成的临时 id（用于 telemetry 区分） */

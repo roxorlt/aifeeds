@@ -12,50 +12,64 @@
 //   ⑧ SKILL.md original (collapsible, v1 — empty until ZIP pipeline lands)
 //   ⑨ Footer
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Item } from "../types";
-import { fetchItem } from "../api";
+import type { ItemDetailResponse } from "../api";
 import { cn, formatCompact, parseJsonField, proxyImg } from "../lib/utils";
 
 // Markdown 渲染样式 — 跟 GithubDrawerBody 同款 token，保证 README 翻译后排版还原。
 // 各元素显式 className 而不是依赖 prose（项目没装 @tailwindcss/typography）。
 const CLAWHUB_MARKDOWN_COMPONENTS: Components = {
-  h1: ({ node: _node, ...props }) => (
-    <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
-  ),
-  h2: ({ node: _node, ...props }) => (
-    <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
-  ),
-  h3: ({ node: _node, ...props }) => (
-    <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
-  ),
-  h4: ({ node: _node, ...props }) => (
-    <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
-  ),
-  p: ({ node: _node, ...props }) => (
-    <p className="my-2 leading-relaxed text-neutral-700" {...props} />
-  ),
-  a: ({ node: _node, href, ...props }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-sky-600 hover:underline break-all"
-      onClick={(e) => e.stopPropagation()}
-      {...props}
-    />
-  ),
-  ul: ({ node: _node, ...props }) => (
-    <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
-  ),
-  ol: ({ node: _node, ...props }) => (
-    <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
-  ),
-  li: ({ node: _node, ...props }) => <li {...props} />,
-  code: ({ node: _node, className, children, ...props }) => {
+  h1: ({ node, ...props }) => {
+    void node;
+    return <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />;
+  },
+  h2: ({ node, ...props }) => {
+    void node;
+    return <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />;
+  },
+  h3: ({ node, ...props }) => {
+    void node;
+    return <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />;
+  },
+  h4: ({ node, ...props }) => {
+    void node;
+    return <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />;
+  },
+  p: ({ node, ...props }) => {
+    void node;
+    return <p className="my-2 leading-relaxed text-neutral-700" {...props} />;
+  },
+  a: ({ node, href, ...props }) => {
+    void node;
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-sky-600 hover:underline break-all"
+        onClick={(e) => e.stopPropagation()}
+        {...props}
+      />
+    );
+  },
+  ul: ({ node, ...props }) => {
+    void node;
+    return <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />;
+  },
+  ol: ({ node, ...props }) => {
+    void node;
+    return <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />;
+  },
+  li: ({ node, ...props }) => {
+    void node;
+    return <li {...props} />;
+  },
+  code: ({ node, className, children, ...props }) => {
+    void node;
     const isInline = !className?.includes("language-");
     if (isInline) {
       return (
@@ -70,36 +84,47 @@ const CLAWHUB_MARKDOWN_COMPONENTS: Components = {
       </code>
     );
   },
-  pre: ({ node: _node, ...props }) => (
-    <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
-  ),
-  blockquote: ({ node: _node, ...props }) => (
-    <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
-  ),
-  hr: ({ node: _node, ...props }) => (
-    <hr className="my-4 border-neutral-200" {...props} />
-  ),
-  img: ({ node: _node, src, alt, ...props }) => (
-    <img
-      src={typeof src === "string" ? src : undefined}
-      alt={alt}
-      className="my-2 max-w-full rounded-md border border-neutral-200"
-      loading="lazy"
-      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-      {...props}
-    />
-  ),
-  table: ({ node: _node, ...props }) => (
-    <div className="my-3 overflow-x-auto">
-      <table className="min-w-full border-collapse text-[12px]" {...props} />
-    </div>
-  ),
-  th: ({ node: _node, ...props }) => (
-    <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
-  ),
-  td: ({ node: _node, ...props }) => (
-    <td className="border border-neutral-200 px-2 py-1" {...props} />
-  ),
+  pre: ({ node, ...props }) => {
+    void node;
+    return <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />;
+  },
+  blockquote: ({ node, ...props }) => {
+    void node;
+    return <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />;
+  },
+  hr: ({ node, ...props }) => {
+    void node;
+    return <hr className="my-4 border-neutral-200" {...props} />;
+  },
+  img: ({ node, src, alt, ...props }) => {
+    void node;
+    return (
+      <img
+        src={typeof src === "string" ? src : undefined}
+        alt={alt}
+        className="my-2 max-w-full rounded-md border border-neutral-200"
+        loading="lazy"
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+        {...props}
+      />
+    );
+  },
+  table: ({ node, ...props }) => {
+    void node;
+    return (
+      <div className="my-3 overflow-x-auto">
+        <table className="min-w-full border-collapse text-[12px]" {...props} />
+      </div>
+    );
+  },
+  th: ({ node, ...props }) => {
+    void node;
+    return <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />;
+  },
+  td: ({ node, ...props }) => {
+    void node;
+    return <td className="border border-neutral-200 px-2 py-1" {...props} />;
+  },
 };
 import {
   IconStarFill,
@@ -201,6 +226,7 @@ interface ClawhubExtra {
   // v1 ZIP 流水线产出
   skill_md?: string;
   files_manifest?: Array<{ path: string; size: number }>;
+  readme_file?: string;
 }
 
 function relativeFromMs(ms: number | undefined): string {
@@ -227,6 +253,7 @@ function buildInstallCommand(entry: InstallEntry, slug: string): string {
 
 interface Props {
   item: Item;
+  metricsHistory?: ItemDetailResponse["metrics_history"];
 }
 
 // 趋势模块阈值：每天 phase 1 cron 跑 2 次（BJT 04:00 + 16:00）→ 2 行/天 ×
@@ -309,22 +336,13 @@ function StarsSparkline({ data }: { data: ClawhubMetricsSnapshot[] }) {
   );
 }
 
-export function ClawhubDrawerBody({ item }: Props) {
+export function ClawhubDrawerBody({ item, metricsHistory }: Props) {
   const extra = parseJsonField<ClawhubExtra>(item.extra) ?? ({} as ClawhubExtra);
   const metrics = parseJsonField<ClawhubMetrics>(item.metrics) ?? ({} as ClawhubMetrics);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-  const [history, setHistory] = useState<ClawhubMetricsSnapshot[]>([]);
-
-  // 拉 metrics_history 决定是否展示 30 天趋势区段（< 14 个采样点不展示）
-  useEffect(() => {
-    let cancelled = false;
-    fetchItem(item.id).then((resp) => {
-      if (cancelled) return;
-      const hist = resp.metrics_history as unknown as ClawhubMetricsSnapshot[] | undefined;
-      if (hist) setHistory(hist);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [item.id]);
+  // DrawerProvider 已持有唯一的 full-detail 响应；这里只消费其中的历史快照，
+  // 不再由 body 组件重复读取 /api/items/:id。
+  const history = (metricsHistory ?? []) as unknown as ClawhubMetricsSnapshot[];
 
   const historyCount = history.length;
   const showTrends = historyCount >= TRENDS_MIN_DATA_POINTS;
@@ -348,7 +366,7 @@ export function ClawhubDrawerBody({ item }: Props) {
   const summaryEn = extra.summary_en || "";
   const summaryZh = extra.summary_translated || "";
   // readme_file 暴露在 extra 但当前 UI 未直接展示，预留给未来「依据 SKILL.md 渲染」之类的提示
-  const _readmeFile = (extra as any).readme_file as string | undefined;
+  const _readmeFile = extra.readme_file;
   void _readmeFile;
   // 双门槛：> 200 字 + 跟 summary 不同 → 是真 README/SKILL.md 内容；否则按 summary 兜底
   const isReadme = readme.length > 200

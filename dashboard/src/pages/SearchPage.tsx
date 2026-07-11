@@ -59,7 +59,9 @@ export default function SearchPage() {
   // 结果页需 DrawerProvider：ItemCard 各源卡片内部 useDrawer() 打开抽屉，而 /search
   // 路由不在 DashboardHome 的 DrawerProvider 内。卡片点击 → drawer.openItem →
   // navigate 到 /t/:id 等深链（本组件随即卸载，落到 DashboardHome 由其 DrawerProvider
-  // 渲染真正的抽屉，返回键逐级回退免费获得）。q/source 变化经 useSearchParams →
+  // 渲染真正的抽屉）；fetchItem 的模块级 single-flight 让新 Provider 加入搜索页已经
+  // 发出的同 id 详情 GET，不会因 Provider 切换重复请求。返回键逐级回退免费获得。
+  // q/source 变化经 useSearchParams →
   // SearchGroups/SearchSourceList 的 useEffect 响应，父级不 key 重建，popstate 不重挂载。
   return (
     <DrawerProvider>

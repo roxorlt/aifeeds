@@ -17,11 +17,15 @@
 
 import { useState } from "react";
 import type { HuodongxingMetrics, HuodongxingOrganizer, Item, ItemExtra, MediaItem } from "../types";
-import { cn, parseJsonField } from "../lib/utils";
+import { buildResponsiveCardImage, cn, parseJsonField, proxyImg, variantsForCurrentCover } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
-import { resolveAssetUrl } from "../lib/asset";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import {
   formatEventLocation,
   formatEventPrice,
@@ -136,13 +140,16 @@ function ExtLinkIcon() {
 
 interface Props {
   item: Item;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
 }
 
-export function HuodongxingCard({ item, eager }: Props) {
+export function HuodongxingCard({
+  item,
+  mediaPolicy = LAZY_MEDIA_LOAD_POLICY,
+}: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  const [coverVariantFailed, setCoverVariantFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<HuodongxingMetrics>(item.metrics) ?? ({} as HuodongxingMetrics);
   const media = parseMedia(item.media);
@@ -162,10 +169,21 @@ export function HuodongxingCard({ item, eager }: Props) {
   // 封面用 drawer 头图同源字段 (extra.og_image → thumbnail_full → media role=thumbnail).
   // 流内 cover 跟抽屉头图视觉一致, 用户点开 drawer 也是同一张图
   const thumb = media.find((m) => (m as MediaItem & { role?: string }).role === "thumbnail");
-  const coverUrl =
-    (extra.og_image ? resolveAssetUrl(extra.og_image) : "") ||
-    (extra.thumbnail_full ? resolveAssetUrl(extra.thumbnail_full) : "") ||
-    (thumb?.url ? resolveAssetUrl(thumb.url) : "");
+  const coverUrl = extra.og_image || extra.thumbnail_full || thumb?.url || "";
+  const storedCoverVariants = variantsForCurrentCover(
+    coverUrl,
+    extra.card_thumbnail_variant_source,
+    extra.card_thumbnail_variants,
+  ) || (thumb?.url === coverUrl
+      ? thumb.card_variants
+      : undefined);
+  const coverSource = coverUrl
+    ? buildResponsiveCardImage(
+        coverUrl,
+        storedCoverVariants,
+        { fallbackWidth: 400 },
+      )
+    : null;
 
   // 正文：item.content (backend 写入 og:description 或正文首段 100 字)
   // 未来如 backend 加 ai_summary 字段，优先用之
@@ -173,7 +191,7 @@ export function HuodongxingCard({ item, eager }: Props) {
 
   const organizer = extra.organizer as HuodongxingOrganizer | undefined;
   const orgName = organizer?.name || item.author || "";
-  const orgAvatar = organizer?.avatar_url ? resolveAssetUrl(organizer.avatar_url) : "";
+  const orgAvatar = organizer?.avatar_url ? proxyImg(organizer.avatar_url, 80) : "";
   const orgFans = formatOrganizerFans(metrics.organizer_fans ?? organizer?.fans);
 
   function open(e: React.MouseEvent) {
@@ -196,20 +214,38 @@ export function HuodongxingCard({ item, eager }: Props) {
       {/* PM 2026-05-25:改 HfPaper 风格 — 顶部 16:9 cover + 紧凑信息.
           cover 取 drawer 头图同源 (extra.og_image / thumbnail_full), 跟用户
           点开抽屉看到的头图视觉一致 */}
-      {coverUrl && !coverFailed && (
+      {coverSource && !coverFailed && (
         <div className={cn(
           "mb-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100",
           isEnded && "opacity-60 grayscale-[.5]",
-        )}>
-          <img
-            src={coverUrl}
-            alt={title}
-            loading={eager ? "eager" : "lazy"}
-            fetchPriority={eager ? "high" : undefined}
-            decoding="async"
-            className="aspect-[16/9] w-full object-cover"
-            onError={() => setCoverFailed(true)}
-          />
+        )}
+          data-feed-source={item.source_type}
+          data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
+        >
+          <picture className="block">
+            {coverSource.webpSrcSet && !coverVariantFailed && (
+              <source type="image/webp" srcSet={coverSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 32px), 400px" />
+            )}
+            <img
+              src={coverSource.fallbackSrc}
+              srcSet={coverSource.srcSet}
+              sizes="(max-width: 640px) calc(100vw - 32px), 400px"
+              width={thumb?.width || 800}
+              height={thumb?.height || 450}
+              alt={title}
+              loading={mediaPolicy.loading}
+              fetchPriority={mediaPolicy.fetchPriority}
+              decoding="async"
+              className="aspect-[16/9] w-full object-cover"
+              onError={() => {
+                if (coverSource.webpSrcSet && !coverVariantFailed) {
+                  setCoverVariantFailed(true);
+                } else {
+                  setCoverFailed(true);
+                }
+              }}
+            />
+          </picture>
         </div>
       )}
 

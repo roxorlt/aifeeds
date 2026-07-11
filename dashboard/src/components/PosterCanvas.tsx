@@ -23,6 +23,8 @@ import { ClawhubCard } from "./ClawhubCard";
 import { HuodongxingCard } from "./HuodongxingCard";
 import { BlogCard } from "./BlogCard";
 import { PodcastCard } from "./PodcastCard";
+import { EAGER_MEDIA_LOAD_POLICY } from "../lib/mediaPriority";
+import type { PosterCanvasHandle } from "../lib/posterCapture";
 
 // AI-Feeds logo (square_bw_night 同款 — 跟 worker svg-template.ts 的
 // AI_FEEDS_LOGO_DATA_URL 完全一致,保证 og:image fallback 跟 c 端海报视觉对齐)
@@ -114,21 +116,21 @@ function PosterBody({ item, scale, flatTop }: { item: Item; scale: number; flatT
 function CardForItem({ item }: { item: Item }) {
   switch (item.source_type) {
     case "x_list":
-      return <TweetCard item={item} embedded hideThreadBanner posterMode />;
+      return <TweetCard item={item} embedded hideThreadBanner mediaPolicy={EAGER_MEDIA_LOAD_POLICY} posterMode />;
     case "github":
-      return <GithubCard item={item} />;
+      return <GithubCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} />;
     case "product_hunt":
-      return <PhCard item={item} />;
+      return <PhCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} />;
     case "hf_paper":
-      return <HfPaperCard item={item} />;
+      return <HfPaperCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} />;
     case "clawhub":
-      return <ClawhubCard item={item} />;
+      return <ClawhubCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} />;
     case "huodongxing":
-      return <HuodongxingCard item={item} />;
+      return <HuodongxingCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} />;
     case "blog":
-      return <BlogCard item={item} eager posterMode />;
+      return <BlogCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} posterMode />;
     case "podcast":
-      return <PodcastCard item={item} eager posterMode />;
+      return <PodcastCard item={item} mediaPolicy={EAGER_MEDIA_LOAD_POLICY} posterMode />;
     default:
       return (
         <div className="p-6 text-center text-sm text-neutral-500">
@@ -136,11 +138,6 @@ function CardForItem({ item }: { item: Item }) {
         </div>
       );
   }
-}
-
-interface PosterCanvasHandle {
-  /** 把当前 DOM 截图为 PNG blob (modern-screenshot 内部 await 字体/图片加载) */
-  capture: () => Promise<Blob>;
 }
 
 interface Props {
@@ -510,27 +507,4 @@ export const PosterCanvas = forwardRef<PosterCanvasHandle, Props>(function Poste
   );
 });
 
-// 把所有 props 整合的便利方法 — 用户身份从 authStore 拿,share_url 从 cachedShare 拿
-export interface RenderPosterArgs {
-  item: Item;
-  shareUrl: string;
-  sharerName: string;
-  sharerAvatarUrl?: string;
-}
-
-export type { PosterCanvasHandle };
-
-/**
- * 调用方拿到 blob 后自己决定下载 / Web Share / preview.
- * 内部:挂载 PosterCanvas 到一个临时 div(屏幕外),capture 后清理.
- *
- * 注意:必须在 React tree 内运行(因为 Card 用了 useDrawer 等 context).
- * 推荐用法是把 <PosterCanvas ref={...}/> 放进 ShareDialog 里持久挂载,
- * 然后调 ref.capture() — 这个函数仅作 fallback (off-tree 场景较少用到).
- */
-export async function capturePosterFromRef(
-  ref: React.RefObject<PosterCanvasHandle | null>,
-): Promise<Blob> {
-  if (!ref.current) throw new Error("PosterCanvas not mounted");
-  return ref.current.capture();
-}
+export type { PosterCanvasHandle, RenderPosterArgs } from "../lib/posterCapture";

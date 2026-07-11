@@ -7,10 +7,15 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:staging": "tsc -b && vite build --mode staging",
+    "build:perf-staging": "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build --mode staging",
+    "build:same-origin": "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build",
     "predeploy": "bash ../scripts/predeploy-check.sh",
     "deploy": "npm run build && wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=true",
     "predeploy:staging": "bash ../scripts/predeploy-check.sh",
     "deploy:staging": "npm run build:staging && wrangler pages deploy dist --project-name=xlist-dashboard-staging --branch=main --commit-dirty=true",
+    "deploy:same-origin": "node -e \"console.error('BLOCKED: same-origin production deploy requires explicit approval; follow docs/operations.md same-origin API runbook'); process.exit(1)\"",
+    "test:unit": "node --test",
+    "test:e2e": "playwright test e2e/home-performance.spec.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -31,6 +36,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "1.54.1",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",

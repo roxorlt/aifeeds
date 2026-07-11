@@ -13,16 +13,8 @@
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { XArticle } from "../types";
 import { proxyImg } from "../lib/utils";
+import { articleTier } from "../lib/xArticleTier";
 import { TcoResolvedLinkCard } from "./TcoResolvedLinkCard";
-
-export type ArticleTier = "rich" | "mid" | "basic";
-
-export function articleTier(a: XArticle | null | undefined): ArticleTier {
-  if (!a) return "basic";
-  if (a.fetched_at && a.title) return "rich";
-  if (a.fetch_failed_at && a.author_handle) return "mid";
-  return "basic";
-}
 
 interface Props {
   article: XArticle | null | undefined;

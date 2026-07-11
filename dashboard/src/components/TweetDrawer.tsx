@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { track, EVENTS } from "../lib/telemetry";
 import { TweetCard } from "./TweetCard";
 import { GithubDrawerBody } from "./GithubDrawerBody";
@@ -24,6 +24,7 @@ import {
   shouldCommitDismiss,
   shouldReduceMotion,
 } from "../lib/motion";
+import { activateModalFocus } from "../lib/modalFocus";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
 const DRAWER_ENTER_MS = 260;
@@ -31,8 +32,9 @@ const DRAWER_EXIT_MS = 200;
 
 export function TweetDrawer() {
   const { state, close, depth } = useDrawer();
-  const { item, siblings, siblings_has_more, loading, error } = state;
+  const { item, siblings, siblings_has_more, metrics_history, loading, error } = state;
   const open = Boolean(item) || loading || Boolean(error);
+  const activeItemId = item?.id ?? null;
   const isNarrow = useIsNarrow();
   // 顶栏左上：抽屉内下钻（depth>0，如点进 PH「同类产品」）→ 显示「←」返回上一条；
   // 否则保持原行为（窄屏「‹」返回流内、宽屏「✕」关闭）。
@@ -42,13 +44,13 @@ export function TweetDrawer() {
   // Scroll the URL-targeted tweet into view when opening into a thread where
   // the target isn't the root. X-style behavior for shared replies.
   useEffect(() => {
-    if (!item) return;
+    if (!activeItemId) return;
     const node = targetRef.current;
     if (!node) return;
     requestAnimationFrame(() => {
       node.scrollIntoView({ behavior: "auto", block: "start" });
     });
-  }, [item?.id]);
+  }, [activeItemId]);
 
   const asideRef = useRef<HTMLElement | null>(null);
   const backdropRef = useRef<HTMLDivElement | null>(null);
@@ -115,19 +117,30 @@ export function TweetDrawer() {
   // Tracks whether the in-body title (owner/repo for GH, etc.) has scrolled
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
-  const [titleHidden, setTitleHidden] = useState(false);
+  const [titleVisibility, setTitleVisibility] = useState<{
+    itemId: string;
+    hidden: boolean;
+  } | null>(null);
+  const titleHidden = titleVisibility?.itemId === activeItemId
+    ? titleVisibility.hidden
+    : false;
   const [shareOpen, setShareOpen] = useState(false);
-  // 同 itemId 不重复 createShare：缓存最近一次为该 item 创建的 token
-  const [shareCache, setShareCache] = useState<Record<string, CreateShareResponse>>({});
   const user = useAuthStore((s) => s.user);
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
+  const activeUserId = user?.id ?? null;
+  // 同一账号 + itemId 不重复 createShare。账号键属于状态本身，因此换号时
+  // 新 render 直接看见空 cache，不需要 effect 再触发一次清空 render。
+  const [shareCacheState, setShareCacheState] = useState<{
+    userId: string | null;
+    entries: Record<string, CreateShareResponse>;
+  }>({ userId: null, entries: {} });
+  const shareCache = shareCacheState.userId === activeUserId
+    ? shareCacheState.entries
+    : {};
 
   // PM 2026-05-22 反馈:换账号点同一 feed 分享时不应复用上一账号的 token
   // (token 跟 from_uid 绑定, 海报 footer 含分享人 name + avatar + token QR,
-  // user2 拿 user1 token 等于把 user1 信息分发出去)。监听 user.id 变化清 cache
-  useEffect(() => {
-    setShareCache({});
-  }, [user?.id]);
+  // user2 拿 user1 token 等于把 user1 信息分发出去)。
 
   const onClickShare = () => {
     if (!user) {
@@ -147,6 +160,13 @@ export function TweetDrawer() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, close]);
+
+  useEffect(() => {
+    if (!open) return;
+    const aside = asideRef.current;
+    if (!aside) return;
+    return activateModalFocus(aside);
+  }, [open]);
 
   // R21: 架构改造 mobile body 永久 fixed, scroll context 转到 #root.
   // drawer 打开 lock #root scroll (不是 body), 关闭 restore.
@@ -363,10 +383,10 @@ export function TweetDrawer() {
 
   // Watch when the in-body anchor title scrolls past the top of the
   // drawer body — flip `titleHidden` so the header surfaces a fallback
-  // title (owner/repo for GH). Resets to false on each item change.
+  // title (owner/repo for GH). State carries its item id, so a new item is
+  // false immediately without a synchronous reset effect.
   useEffect(() => {
-    setTitleHidden(false);
-    if (!open || !item) return;
+    if (!open || !activeItemId) return;
     const el = bodyScrollRef.current;
     if (!el) return;
     const anchor = el.querySelector<HTMLElement>("[data-drawer-title-anchor]");
@@ -376,12 +396,15 @@ export function TweetDrawer() {
       // Title is "above the screen" once the bottom of the anchor element
       // is above the scroller's visible top.
       const threshold = anchor.offsetTop + anchor.offsetHeight;
-      setTitleHidden(el.scrollTop > threshold);
+      setTitleVisibility({
+        itemId: activeItemId,
+        hidden: el.scrollTop > threshold,
+      });
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
-  }, [open, item?.id]);
+  }, [open, activeItemId]);
 
   if (!open) return null;
 
@@ -496,7 +519,12 @@ export function TweetDrawer() {
   };
 
   return (
-    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tweet-drawer-title"
+    >
       {/* Backdrop — opacity 跟 drag 联动让底层频道流自然透出, 配 aside slide */}
       <div
         ref={backdropRef}
@@ -510,6 +538,7 @@ export function TweetDrawer() {
       {/* Panel */}
       <aside
         ref={asideRef}
+        tabIndex={-1}
         // overflow-x-hidden + min-w-0 防御：
         //   - PC trackpad 双指横滑 / drawer 内某宽元素（长 URL、未处理的富文本图）
         //     会撑出 panel 宽 + 触发 horizontal scroll，视觉上 drawer 被拖偏。
@@ -535,6 +564,7 @@ export function TweetDrawer() {
             <button
               type="button"
               onClick={depth > 0 ? close : requestClose}
+              data-modal-initial-focus
               className="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
               aria-label={showBack ? "返回" : "关闭"}
             >
@@ -549,7 +579,10 @@ export function TweetDrawer() {
               button 等高 + flex items-center 让文字精确 cross-axis 居中,
               避免依赖 grid items-center 时 text line-box 默认 leading 偏移 */}
           <div className="flex h-10 min-w-0 items-center justify-center px-2">
-            <span className="truncate text-sm font-semibold text-neutral-900">
+            <span
+              id="tweet-drawer-title"
+              className="truncate text-sm font-semibold text-neutral-900"
+            >
               {headerTitle}
             </span>
           </div>
@@ -581,11 +614,11 @@ export function TweetDrawer() {
           {item ? (
             <>
               {isGithub ? (
-                <GithubDrawerBody item={item} />
+                <GithubDrawerBody item={item} metricsHistory={metrics_history} />
               ) : isPh ? (
                 <PhDrawerBody item={item} />
               ) : isClawhub ? (
-                <ClawhubDrawerBody item={item} />
+                <ClawhubDrawerBody item={item} metricsHistory={metrics_history} />
               ) : isHdx ? (
                 <HuodongxingDrawerBody item={item} />
               ) : isHfPaper ? (
@@ -643,7 +676,9 @@ export function TweetDrawer() {
                     rel="noopener noreferrer"
                     onClick={() => {
                       let host = "x.com";
-                      try { host = new URL(item.url!).host; } catch {}
+                      try { host = new URL(item.url!).host; } catch {
+                        // 非法 URL 仍按默认 x.com host 上报，外链本身保持可点击。
+                      }
                       track(EVENTS.EXTERNAL_LINK_CLICK, {
                         item_id: item.id,
                         target_url_host: host,
@@ -670,7 +705,13 @@ export function TweetDrawer() {
           open={shareOpen}
           item={item}
           cachedShare={shareCache[item.id] ?? null}
-          onShareCreated={(id, share) => setShareCache((prev) => ({ ...prev, [id]: share }))}
+          onShareCreated={(id, share) => setShareCacheState((prev) => ({
+            userId: activeUserId,
+            entries: {
+              ...(prev.userId === activeUserId ? prev.entries : {}),
+              [id]: share,
+            },
+          }))}
           onClose={() => setShareOpen(false)}
         />
       )}

@@ -1,4 +1,4 @@
-export const OPTIMISTIC_FEED_START = false;
+export const OPTIMISTIC_FEED_START = true;
 
 export const DEFAULT_LIVE_CHANNELS = [
   "x_list",

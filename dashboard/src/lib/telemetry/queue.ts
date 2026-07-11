@@ -166,7 +166,9 @@ function loadPending(): TelemetryEvent[] {
 }
 
 function clearPending(): void {
-  try { localStorage.removeItem(STORAGE_KEY); } catch {}
+  try { localStorage.removeItem(STORAGE_KEY); } catch {
+    // 存储不可用时仅放弃持久化清理，不影响内存队列。
+  }
 }
 
 // 仅测试用

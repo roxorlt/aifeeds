@@ -140,10 +140,14 @@ export function safeLcpDescriptor(entry: LcpEntryLike, pageOrigin?: string): Saf
     resource_kind: classifyResourceUrl(entry.url, pageOrigin).kind,
   };
 
-  const sourceType = safeAttribute(safeClosest(element), 'data-feed-source');
+  const mediaContext = safeClosest(element);
+  const sourceType = safeAttribute(mediaContext, 'data-feed-source');
   if (sourceType && SAFE_SOURCE_TYPES.has(sourceType)) detail.source_type = sourceType;
 
   let priority = safeAttribute(element, 'data-media-priority');
+  if (priority !== 'high' && priority !== 'eager' && priority !== 'lazy') {
+    priority = safeAttribute(mediaContext, 'data-media-priority');
+  }
   if (priority !== 'high' && priority !== 'eager' && priority !== 'lazy') {
     // Production cards already emit these native attributes. Read only their bounded
     // enum values; never inspect src/alt/title or any element text.

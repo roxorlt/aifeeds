@@ -88,9 +88,7 @@ export function HuodongxingColumnHeader({
     () => SECONDARY_CITIES.includes(city as (typeof SECONDARY_CITIES)[number]),
     [city],
   );
-  useEffect(() => {
-    if (isSecondary) setShowMore(true);
-  }, [isSecondary, open]);
+  const citiesExpanded = showMore || isSecondary;
 
   // outside click / Esc 关 popover
   useEffect(() => {
@@ -183,7 +181,7 @@ export function HuodongxingColumnHeader({
 
             {/* 更多 18 城（折叠） */}
             <div className="mt-2 border-t border-neutral-100 pt-2">
-              {!showMore ? (
+              {!citiesExpanded ? (
                 <button
                   type="button"
                   onClick={() => setShowMore(true)}
@@ -198,6 +196,7 @@ export function HuodongxingColumnHeader({
                       key={c}
                       type="button"
                       onClick={() => {
+                        setShowMore(true);
                         onCityChange(c);
                         requestClose();
                       }}

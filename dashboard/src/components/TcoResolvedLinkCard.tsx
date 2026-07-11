@@ -12,11 +12,7 @@
 //   const card = renderTcoLinkCardIfApplicable(content, resolvedUrl);
 //   return card ?? <span>{content}</span>;
 
-const TCO_ONLY_RE = /^\s*https?:\/\/t\.co\/\S+\s*$/i;
-
-export function isTcoOnly(content: string | null | undefined): boolean {
-  return typeof content === "string" && TCO_ONLY_RE.test(content);
-}
+import { isTcoOnly } from "../lib/tcoResolvedLink";
 
 // 从 resolved URL 推断显示文案。X Article URL 形如:
 // https://x.com/i/article/2055126803224883200 → "X 文章"

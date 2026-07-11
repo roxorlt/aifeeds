@@ -22,7 +22,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra } from "../types";
-import { fetchItem, addDubWishlist, getDubWishlistState } from "../api";
+import { addDubWishlist, getDubWishlistState } from "../api";
 import { cn, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { BrandPodcast, IconClock, IconMic, IconUser } from "./icons";
@@ -237,19 +237,8 @@ export function PodcastDrawerBody({ item }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // 列表已剥 shownotes/transcript 重字段且 refresh 端点不覆盖 podcast,
-  // 抽屉 mount 自拉完整 item 补 shownotes_zh / transcript_text_zh(同 BlogDrawerBody)。
-  const [fullItem, setFullItem] = useState<Item | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setFullItem(null);
-    fetchItem(item.id)
-      .then((resp) => {
-        if (!cancelled && resp.item) setFullItem(resp.item);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [item.id]);
+  // DrawerProvider 会把列表瘦 DTO 原地升级为 full-detail item；shownotes / transcript
+  // 直接来自更新后的 prop，不再由 body 重复读取 /api/items/:id。
 
   // 假门「翻译成中文音频」:点击只记需求(addDubWishlist),不真做配音。
   // 三种状态(2026-06-21 产品反馈:历史点过的不再展示,避免长期占位):
@@ -258,18 +247,25 @@ export function PodcastDrawerBody({ item }: Props) {
   //   added   → 本次会话刚点,显示「已加入」绿条给即时反馈
   //   hidden  → 以前点过(挂载查到),整块隐藏,什么都不显示
   // 区分「本次刚点」与「历史已点」:挂载查到已点 = hidden;只有按钮点击才进 added。
-  const [dubState, setDubState] = useState<"loading" | "button" | "added" | "hidden">("loading");
+  type SettledDubState = "button" | "added" | "hidden";
+  const [dubResult, setDubResult] = useState<{
+    itemId: string;
+    state: SettledDubState;
+  } | null>(null);
+  const dubState: "loading" | SettledDubState = dubResult?.itemId === item.id
+    ? dubResult.state
+    : "loading";
   useEffect(() => {
     let cancelled = false;
-    setDubState("loading");
     getDubWishlistState(item.id).then((wished) => {
-      if (!cancelled) setDubState(wished ? "hidden" : "button");
+      if (!cancelled) {
+        setDubResult({ itemId: item.id, state: wished ? "hidden" : "button" });
+      }
     });
     return () => { cancelled = true; };
   }, [item.id]);
 
-  const view = fullItem ?? item;
-  const extra = parseJsonField<ItemExtra>(view.extra) ?? ({} as ItemExtra);
+  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
 
   const pub = extra.publisher;
   const showName = extra.show_name || pub?.name || extra.source_company || item.author || "";
@@ -320,15 +316,13 @@ export function PodcastDrawerBody({ item }: Props) {
   const transcriptRaw = extra.transcript_text || "";
   const transcriptZh = extra.transcript_text_zh || "";
   const hasTranscript = !!(transcriptRaw || transcriptZh);
-  const [tTab, setTTab] = useState<"zh" | "orig">(
-    isForeign && transcriptZh ? "zh" : "orig",
-  );
-  // 同 BlogDrawerBody:首渲染时列表瘦 item 没有 transcript_text_zh(被剥),
-  // tTab 定格 "orig";full-fetch 回填后自动切译文(用户手动切过则尊重)。
-  const userSwitchedTTab = useRef(false);
-  useEffect(() => {
-    if (!userSwitchedTTab.current && isForeign && transcriptZh) setTTab("zh");
-  }, [isForeign, transcriptZh]);
+  const [transcriptTabChoice, setTranscriptTabChoice] = useState<{
+    itemId: string;
+    value: "zh" | "orig";
+  } | null>(null);
+  const tTab = transcriptTabChoice?.itemId === item.id
+    ? transcriptTabChoice.value
+    : (isForeign && transcriptZh ? "zh" : "orig");
   const [tOpen, setTOpen] = useState(false);
   const transcriptToShow = tTab === "zh" ? transcriptZh || transcriptRaw : transcriptRaw;
   // 文字稿规模提示（约 N 字，按默认展示文本估，round 到百位）
@@ -441,7 +435,7 @@ export function PodcastDrawerBody({ item }: Props) {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setDubState("added"); // 乐观更新;信号失败也静默,不打扰用户
+                      setDubResult({ itemId: item.id, state: "added" }); // 乐观更新;信号失败也静默,不打扰用户
                       void addDubWishlist(item.id);
                     }}
                     className="flex w-full items-center gap-2 rounded-md border border-neutral-300 px-3 py-2 text-left text-[13px] font-medium text-neutral-700 transition-colors hover:bg-neutral-50"
@@ -572,8 +566,7 @@ export function PodcastDrawerBody({ item }: Props) {
                   <LangToggle
                     value={tTab}
                     onChange={(v) => {
-                      userSwitchedTTab.current = true;
-                      setTTab(v);
+                      setTranscriptTabChoice({ itemId: item.id, value: v });
                     }}
                   />
                 </div>

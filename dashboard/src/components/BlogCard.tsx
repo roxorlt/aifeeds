@@ -16,16 +16,20 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra } from "../types";
-import { cn, htmlToPlainText, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { buildResponsiveCardImage, cn, htmlToPlainText, parseJsonField, timeAgo, variantsForCurrentCover } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { IconClock } from "./icons";
 import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
   // 海报模式(PosterCanvas 截图):标题/摘要不截断,信息更全(2026-06-12 #2)。
   posterMode?: boolean;
 }
@@ -51,9 +55,14 @@ function monoLetter(name: string): string {
   return ch ? ch.toUpperCase() : "?";
 }
 
-export function BlogCard({ item, eager, posterMode }: Props) {
+export function BlogCard({
+  item,
+  mediaPolicy = LAZY_MEDIA_LOAD_POLICY,
+  posterMode,
+}: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  const [coverVariantFailed, setCoverVariantFailed] = useState(false);
   // onLoad 后检测真实 natural dims，aspect 极端 / 太小视为低质图（同 GithubCard /
   // worker share/handlers.ts 门控），降级纯文字。
   const [coverRejected, setCoverRejected] = useState(false);
@@ -88,6 +97,17 @@ export function BlogCard({ item, eager, posterMode }: Props) {
       ? extra.reading_minutes
       : null;
   const coverImage = extra.cover_image || "";
+  const coverVariants = variantsForCurrentCover(
+    coverImage,
+    extra.cover_variant_source,
+    extra.cover_image_variants,
+  );
+  const coverSource = coverImage
+    ? buildResponsiveCardImage(coverImage, coverVariants, {
+        fallbackWidth: 240,
+        widths: [240, 400],
+      })
+    : null;
 
   function open() {
     drawer.openItem(item);
@@ -152,25 +172,44 @@ export function BlogCard({ item, eager, posterMode }: Props) {
         </div>
 
         {/* 右：~96×96 圆角缩略图（质量门控；无图则纯文字不留位） */}
-        {coverImage && !coverFailed && !coverRejected && (
-          <div className="h-24 w-24 shrink-0 overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100">
-            <img
-              src={proxyImg(coverImage, 240)}
-              alt=""
-              loading={eager ? "eager" : "lazy"}
-              fetchPriority={eager ? "high" : undefined}
-              decoding="async"
-              className="h-full w-full object-cover"
-              onError={() => setCoverFailed(true)}
-              onLoad={(e) => {
-                const w = e.currentTarget.naturalWidth;
-                const h = e.currentTarget.naturalHeight;
-                if (!w || !h) return;
-                const ar = w / h;
-                const maxDim = Math.max(w, h);
-                if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
-              }}
-            />
+        {coverSource && !coverFailed && !coverRejected && (
+          <div
+            className="h-24 w-24 shrink-0 overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100"
+            data-feed-source={item.source_type}
+            data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
+          >
+            <picture className="block h-full w-full">
+              {coverSource.webpSrcSet && !coverVariantFailed && (
+                <source type="image/webp" srcSet={coverSource.webpSrcSet} sizes="96px" />
+              )}
+              <img
+                src={coverSource.fallbackSrc}
+                srcSet={coverSource.srcSet}
+                sizes="96px"
+                width={96}
+                height={96}
+                alt=""
+                loading={mediaPolicy.loading}
+                fetchPriority={mediaPolicy.fetchPriority}
+                decoding="async"
+                className="h-full w-full object-cover"
+                onError={() => {
+                  if (coverSource.webpSrcSet && !coverVariantFailed) {
+                    setCoverVariantFailed(true);
+                  } else {
+                    setCoverFailed(true);
+                  }
+                }}
+                onLoad={(e) => {
+                  const w = e.currentTarget.naturalWidth;
+                  const h = e.currentTarget.naturalHeight;
+                  if (!w || !h) return;
+                  const ar = w / h;
+                  const maxDim = Math.max(w, h);
+                  if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
+                }}
+              />
+            </picture>
           </div>
         )}
       </div>

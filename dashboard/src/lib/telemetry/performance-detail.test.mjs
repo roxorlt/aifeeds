@@ -134,6 +134,35 @@ test("safe LCP priority reads bounded native image attributes used by production
   assert.equal(safeLcpDescriptor({ element: nativeEager, url: "" }, PAGE_ORIGIN).media_priority, "eager");
 });
 
+test("safe LCP priority reads eager-auto and lazy-auto labels from the nearest media wrapper", () => {
+  for (const loading of ["eager", "lazy"]) {
+    const wrapper = {
+      getAttribute(name) {
+        if (name === "data-feed-source") return "github";
+        if (name === "data-media-priority") return loading;
+        return null;
+      },
+    };
+    const element = {
+      tagName: "IMG",
+      getAttribute(name) {
+        if (name === "fetchpriority") return "auto";
+        return null;
+      },
+      closest(selector) {
+        return selector === "[data-feed-source]" ? wrapper : null;
+      },
+    };
+
+    assert.deepEqual(safeLcpDescriptor({ element, url: "" }, PAGE_ORIGIN), {
+      tag: "img",
+      resource_kind: "none",
+      source_type: "github",
+      media_priority: loading,
+    });
+  }
+});
+
 test("LCP enrichment uses the final entry supplied by web-vitals", () => {
   const node = (source) => ({
     tagName: "IMG",

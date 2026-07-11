@@ -103,7 +103,9 @@ export const useAuthStore = create<AuthStore>()(
   async logout() {
     try {
       await authApi.logout();
-    } catch {}
+    } catch {
+      // 服务端登出失败时仍清理本地会话，避免用户停留在已退出状态。
+    }
     set({ user: null });
   },
 
