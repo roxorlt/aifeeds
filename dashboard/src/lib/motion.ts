@@ -30,6 +30,27 @@ export interface DismissGesture {
   viewport: number;
 }
 
+export type ChannelSwipeIntent = "unknown" | "horizontal" | "vertical";
+
+/**
+ * Resolve a tab-swipe only when horizontal intent is materially stronger than
+ * page-scroll intent. Ambiguous diagonals keep native scrolling untouched; if
+ * they remain ambiguous beyond the short slop window, vertical wins because
+ * losing one tab swipe is less disruptive than hijacking a page scroll.
+ */
+export function resolveChannelSwipeIntent(
+  deltaX: number,
+  deltaY: number,
+): ChannelSwipeIntent {
+  const horizontal = Math.abs(deltaX);
+  const vertical = Math.abs(deltaY);
+  const travel = horizontal + vertical;
+  if (travel < 10) return "unknown";
+  if (horizontal > vertical * 1.25) return "horizontal";
+  if (vertical > horizontal * 1.25) return "vertical";
+  return travel >= 24 ? "vertical" : "unknown";
+}
+
 export function shouldCommitDismiss({
   distance,
   crossAxis,

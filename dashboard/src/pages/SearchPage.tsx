@@ -39,7 +39,6 @@ export default function SearchPage() {
       if (!t) return;
       addSearchHistory(t);
       track(EVENTS.SEARCH_SUBMIT, {
-        q: t,
         q_len: t.length,
         from: opts.from,
         mode: opts.source ? "list" : "grouped",

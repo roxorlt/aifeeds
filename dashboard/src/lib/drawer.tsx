@@ -161,9 +161,22 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         setState({ item, siblings, siblings_has_more, metrics_history, loading: false, error: null });
         if (addToSpotlight) setSpotlightItem(item);
       },
-      onError: (_loadedId, err: unknown) => {
-        const code = err instanceof ItemNotFoundError ? "not_found" : "network";
-        setState({ item: null, siblings: [], loading: false, error: code });
+      onError: (loadedId, err: unknown) => {
+        setState((current) => {
+          // DetailLoader already rejects stale tokens. Keep the id guard here
+          // as a second boundary so an old failure can never erase a newer
+          // optimistic entry if callback ownership changes in the future.
+          if (activeIdRef.current !== loadedId) return current;
+          if (err instanceof ItemNotFoundError) {
+            return { item: null, siblings: [], loading: false, error: "not_found" };
+          }
+          // A transport failure is not evidence that the optimistic list DTO
+          // disappeared. Keep the usable item and its navigation siblings.
+          if (current.item?.id === loadedId) {
+            return { ...current, loading: false, error: "network" };
+          }
+          return { item: null, siblings: [], loading: false, error: "network" };
+        });
       },
     });
   }, []);

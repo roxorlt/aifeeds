@@ -9,6 +9,7 @@ import { runDetailSingleFlight } from "./detailSingleFlight.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const apiSource = fs.readFileSync(path.join(here, "../api.ts"), "utf8");
+const drawerSource = fs.readFileSync(path.join(here, "drawer.tsx"), "utf8");
 
 function deferred() {
   let resolve;
@@ -66,4 +67,29 @@ test("detail single-flight is in-flight only and clears after settlement", async
 
   assert.equal(first, "first");
   assert.equal(second, "second");
+});
+
+test("an active optimistic drawer item survives a generic detail network failure", () => {
+  const errorHandler = drawerSource.slice(
+    drawerSource.indexOf("onError:"),
+    drawerSource.indexOf("},\n    });", drawerSource.indexOf("onError:")) + 2,
+  );
+
+  assert.match(errorHandler, /onError:\s*\(loadedId, err: unknown\)/);
+  assert.match(errorHandler, /setState\(\(current\)\s*=>/);
+  assert.match(errorHandler, /current\.item\?\.id\s*===\s*loadedId/);
+  assert.match(errorHandler, /\.\.\.current[\s\S]*loading:\s*false[\s\S]*error:\s*"network"/);
+});
+
+test("a definitive detail not-found still clears optimistic drawer content", () => {
+  const errorHandler = drawerSource.slice(
+    drawerSource.indexOf("onError:"),
+    drawerSource.indexOf("},\n    });", drawerSource.indexOf("onError:")) + 2,
+  );
+
+  assert.match(errorHandler, /err instanceof ItemNotFoundError/);
+  assert.match(
+    errorHandler,
+    /item:\s*null[\s\S]*siblings:\s*\[\][\s\S]*loading:\s*false[\s\S]*error:\s*"not_found"/,
+  );
 });

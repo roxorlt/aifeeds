@@ -4,6 +4,7 @@ import { proxyImg } from "../lib/utils";
 import { track, EVENTS } from "../lib/telemetry";
 import { useScrollLock, useTouchScrollGuard } from "../lib/useScrollLock";
 import { useMotionDismiss } from "../lib/motionLayer";
+import { activateModalFocus } from "../lib/modalFocus";
 
 interface Props {
   media: MediaItem[];
@@ -15,17 +16,32 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
   const [index, setIndex] = useState(startIndex);
   const overlayRef = useRef<HTMLDivElement>(null);
   const { layerClassName, requestClose } = useMotionDismiss(onClose, "lightbox");
+  const current = media[index];
+  const modalOpen = Boolean(current);
+  const escapeCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    escapeCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    return activateModalFocus(overlay, {
+      onEscape: () => escapeCloseRef.current(),
+    });
+  }, [modalOpen]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
       if (e.key === "ArrowRight")
         setIndex((i) => Math.min(media.length - 1, i + 1));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [media.length, onClose]);
+  }, [media.length]);
 
   // Lock page scroll + stop touch bleed while open.
   //
@@ -48,7 +64,6 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const current = media[index];
   if (!current) return null;
 
   const go = (delta: number) => (e: React.MouseEvent) => {
@@ -72,7 +87,11 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
   return (
     <div
       ref={overlayRef}
+      tabIndex={-1}
       className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/90`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="媒体预览"
       onClick={onOverlayClick}
       onPointerDown={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
@@ -80,6 +99,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
       <button
         type="button"
         onClick={onOverlayClick}
+        data-modal-initial-focus
         className="absolute right-4 top-4 text-2xl text-white/70 hover:text-white"
         aria-label="关闭"
       >

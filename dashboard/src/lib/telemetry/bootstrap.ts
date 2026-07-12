@@ -1,3 +1,5 @@
+import { classifyReferrer, safeAttributionSource, sanitizePagePath } from './privacy.ts';
+
 interface TelemetryBootstrapEvents {
   APP_OPEN: string;
   PAGE_VIEW: string;
@@ -14,7 +16,7 @@ interface TelemetryBootstrapDependencies {
   installApiTiming: () => unknown;
   installErrorHandlers: () => unknown;
   track: (type: string, payload?: Record<string, unknown>) => void;
-  location: { pathname: string; search: string };
+  location: { pathname: string; search: string; origin?: string };
   referrer: string;
 }
 
@@ -52,16 +54,16 @@ export function createTelemetryBootstrap(deps: TelemetryBootstrapDependencies): 
     const params = new URLSearchParams(deps.location.search);
     try {
       deps.track(deps.events.APP_OPEN, {
-        utm_source: params.get('utm_source') || undefined,
-        utm_campaign: params.get('utm_campaign') || undefined,
-        referrer: deps.referrer || undefined,
+        utm_source: safeAttributionSource(params.get('utm_source')),
+        utm_campaign: params.has('utm_campaign') ? 'present' : undefined,
+        referrer: classifyReferrer(deps.referrer, deps.location.origin),
       });
     } catch {
       // Keep the independent page_view attempt and the app startup alive.
     }
     try {
       deps.track(deps.events.PAGE_VIEW, {
-        path: deps.location.pathname + deps.location.search,
+        path: sanitizePagePath(deps.location.pathname),
       });
     } catch {
       // Best-effort telemetry only; never block React startup.

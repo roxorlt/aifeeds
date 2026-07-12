@@ -7,6 +7,8 @@ import {
   PERFORMANCE_EVENT_TYPES,
   handleTrack,
   prepareEventPayload,
+  sanitizeTelemetryPagePath,
+  sanitizeTelemetryReferrer,
 } from './track';
 import {
   DASHBOARD_HTML,
@@ -113,6 +115,85 @@ describe('performance event ingest', () => {
       edge_country: 'CN',
       edge_colo: 'HKG',
     });
+  });
+
+  it('strips query, hash, dynamic ids and raw referrers at the public ingest boundary', async () => {
+    expect(sanitizeTelemetryPagePath('/search?q=alice%40example.com&token=secret#private')).toBe('/search');
+    expect(sanitizeTelemetryPagePath('/t/private-item?from=user')).toBe('/t/:id');
+    expect(sanitizeTelemetryPagePath('/reset/alice@example.com')).toBe('/:other');
+    expect(sanitizeTelemetryReferrer('https://www.google.com/search?q=private')).toBe('search');
+    expect(sanitizeTelemetryReferrer('https://notgoogle.com/private')).toBe('external');
+    expect(sanitizeTelemetryReferrer('https://unknown.example/alice@example.com')).toBe('external');
+
+    const bound: unknown[][] = [];
+    const env = {
+      ORIGIN_SECRET: '',
+      DB: {
+        prepare: () => ({
+          bind: (...values: unknown[]) => {
+            bound.push(values);
+            return { values };
+          },
+        }),
+        batch: async () => [],
+      },
+    };
+    const request = new Request('https://api.ai-feeds.com/api/track', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Id': 'device-12345678',
+        Referer: 'https://unknown.example/path?email=alice@example.com',
+      },
+      body: JSON.stringify({
+        events: [{
+          type: 'page_view',
+          occurred_at: 1,
+          page_path: '/search?q=alice%40example.com&token=secret',
+          payload: { path: '/search?q=alice%40example.com&token=secret' },
+        }],
+      }),
+    });
+
+    const response = await handleTrack(request, env as never);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(bound[0][3]))).toEqual({ path: '/search' });
+    expect(bound[0][6]).toBe('external');
+    expect(bound[0][7]).toBe('/search');
+    expect(JSON.stringify(bound[0])).not.toMatch(/alice|secret|unknown\.example/);
+  });
+
+  it('sanitizes known sensitive payload fields even for untrusted telemetry clients', () => {
+    const appOpen = prepareEventPayload('app_open', {
+      utm_source: 'alice@example.com',
+      utm_campaign: 'private-token',
+      referrer: 'https://www.google.com/search?q=alice@example.com',
+    }, undefined);
+    expect(appOpen).toEqual({
+      ok: true,
+      value: JSON.stringify({ utm_source: 'other', utm_campaign: 'present', referrer: 'search' }),
+    });
+
+    const apiError = prepareEventPayload('api_error', {
+      endpoint: '/api/items/private-id?token=private-token',
+      error_msg: 'request failed for https://unknown.example/?email=alice@example.com',
+      status: 0,
+    }, undefined);
+    expect(apiError).toEqual({
+      ok: true,
+      value: JSON.stringify({ endpoint: 'item_detail', error_msg: 'request_error', status: 0 }),
+    });
+
+    const search = prepareEventPayload('search_submit', {
+      q: 'alice@example.com',
+      q_len: 9_999,
+      mode: 'grouped',
+    }, undefined);
+    expect(search).toEqual({
+      ok: true,
+      value: JSON.stringify({ q_len: 'alice@example.com'.length, mode: 'grouped' }),
+    });
+    expect(JSON.stringify([appOpen, apiError, search])).not.toMatch(/alice|private-token|unknown\.example/);
   });
 });
 

@@ -6,6 +6,7 @@ import { useVideoCoordinator } from "../lib/videoCoordinator";
 import { isWeChatBrowser } from "../lib/wechat";
 import { useFeedbackUnreadStore } from "../api";
 import { useMotionDismiss } from "../lib/motionLayer";
+import { focusModalTrigger } from "../lib/modalFocus";
 
 // 对话气泡 icon — lucide MessageSquare 同款，1.6 stroke 跟全站 icon 风格统一
 function IconMessageSquare({ className }: { className?: string }) {
@@ -55,6 +56,7 @@ export function UserMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const popRef = useRef<HTMLDivElement | null>(null);
+  const accountTriggerRef = useRef<HTMLButtonElement | null>(null);
   const { layerClassName, requestClose } = useMotionDismiss(
     () => setOpen(false),
     "popover",
@@ -99,6 +101,7 @@ export function UserMenu() {
 
   const trigger = user ? (
     <button
+      ref={accountTriggerRef}
       type="button"
       onClick={() => open ? requestClose() : setOpen(true)}
       className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-full hover:opacity-80"
@@ -116,6 +119,7 @@ export function UserMenu() {
     </button>
   ) : (
     <button
+      ref={accountTriggerRef}
       type="button"
       onClick={() => open ? requestClose() : setOpen(true)}
       className="flex h-8 w-8 shrink-0 items-center justify-center self-center rounded-md text-neutral-700 hover:bg-neutral-100 hover:text-neutral-900"
@@ -143,6 +147,7 @@ export function UserMenu() {
             <button
               type="button"
               onClick={() => {
+                focusModalTrigger(accountTriggerRef.current);
                 requestClose();
                 openLogin("manual");
               }}

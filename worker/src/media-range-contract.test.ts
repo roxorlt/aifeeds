@@ -36,15 +36,15 @@ describe('public media transport contract', () => {
   });
 
   test('/r keeps immutable still assets and byte-range audio/video seek', () => {
-    const start = source.indexOf('async function handleR2Asset');
-    const handler = source.slice(start);
+    const start = source.indexOf('function parseSingleByteRange');
+    const handlerAndHelpers = source.slice(start);
 
-    expect(handler).toMatch(/request\.headers\.get\('Range'\)/);
-    expect(handler).toMatch(/READMES\.get\(key, \{ range: rangeParsed \}\)/);
-    expect(handler).toMatch(/status: 206/);
-    expect(handler).toMatch(/Content-Range/);
-    expect(handler).toMatch(/Accept-Ranges/);
-    expect(handler).toMatch(/Timing-Allow-Origin', '\*'/);
-    expect(handler).toMatch(/max-age=31536000, immutable/);
+    expect(handlerAndHelpers).toMatch(/request\.headers\.get\('Range'\)/);
+    expect(handlerAndHelpers).toMatch(/READMES\.get\(key, \{ range: rangeParsed \}\)/);
+    expect(handlerAndHelpers).toMatch(/status: 206/);
+    expect(handlerAndHelpers).toMatch(/Content-Range/);
+    expect(handlerAndHelpers).toMatch(/Accept-Ranges/);
+    expect(handlerAndHelpers).toMatch(/Timing-Allow-Origin', '\*'/);
+    expect(handlerAndHelpers).toMatch(/max-age=31536000, immutable/);
   });
 });

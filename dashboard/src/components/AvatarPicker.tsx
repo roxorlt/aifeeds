@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_AVATAR_POOL, defaultAvatarUrl } from '../lib/defaultProfile';
 import { toast } from '../lib/toast';
 import { cn } from '../lib/utils';
 import { useMotionDismiss } from '../lib/motionLayer';
+import { activateModalFocus } from '../lib/modalFocus';
+import { useScrollLock } from '../lib/useScrollLock';
 
 interface Props {
   open: boolean;
@@ -15,6 +17,22 @@ export function AvatarPicker({ open, userId, currentSrc, onClose }: Props) {
   const initial = currentSrc || defaultAvatarUrl(userId);
   const [selected, setSelected] = useState<string>(initial);
   const { layerClassName, requestClose } = useMotionDismiss(onClose, 'modal', open);
+  useScrollLock(open);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const escapeCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    escapeCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    return activateModalFocus(panel, {
+      onEscape: () => escapeCloseRef.current(),
+    });
+  }, [open]);
 
   useEffect(() => {
     if (open) setSelected(initial);
@@ -28,17 +46,23 @@ export function AvatarPicker({ open, userId, currentSrc, onClose }: Props) {
   return (
     <div
       className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="avatar-picker-title"
       onClick={requestClose}
     >
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="motion-layer-panel w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-neutral-900">更换头像</h2>
+          <h2 id="avatar-picker-title" className="text-lg font-semibold text-neutral-900">更换头像</h2>
           <button
             type="button"
             onClick={requestClose}
+            data-modal-initial-focus
             className="-mr-2 rounded-md px-2 py-1 text-neutral-500 hover:bg-neutral-100"
             aria-label="关闭"
           >

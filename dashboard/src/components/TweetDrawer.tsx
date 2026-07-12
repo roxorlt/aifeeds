@@ -58,6 +58,7 @@ export function TweetDrawer() {
   const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
   const drawerWasOpenRef = useRef(false);
+  const escapeCloseRef = useRef(close);
 
   const applyDrawerPosition = useCallback((x: number, duration: number) => {
     const aside = asideRef.current;
@@ -153,19 +154,16 @@ export function TweetDrawer() {
   const dragStart = useRef<{ x: number; y: number; at: number; identifier: number } | null>(null);
 
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, close]);
+    escapeCloseRef.current = close;
+  }, [close]);
 
   useEffect(() => {
     if (!open) return;
     const aside = asideRef.current;
     if (!aside) return;
-    return activateModalFocus(aside);
+    return activateModalFocus(aside, {
+      onEscape: () => escapeCloseRef.current(),
+    });
   }, [open]);
 
   // R21: 架构改造 mobile body 永久 fixed, scroll context 转到 #root.

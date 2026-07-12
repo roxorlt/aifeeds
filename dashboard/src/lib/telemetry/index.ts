@@ -9,6 +9,7 @@ import { initSession, getSessionTokenHash, touchSession } from './session';
 import { installBeacon } from './beacon';
 import { EVENTS } from './event-types';
 import { createTelemetryLifecycle } from './runtime-state';
+import { sanitizePagePath } from './privacy.ts';
 import type { TelemetryEvent } from './types';
 
 export { EVENTS };
@@ -66,7 +67,7 @@ export function track(
     const event: TelemetryEvent = {
       type,
       occurred_at: options.occurredAt ?? Date.now(),
-      page_path: options.pagePath ?? getPagePath(),
+      page_path: sanitizePagePath(options.pagePath ?? getPagePath()),
     };
     if (payload && Object.keys(payload).length > 0) {
       event.payload = payload;
@@ -78,5 +79,5 @@ export function track(
 
 function getPagePath(): string {
   if (typeof window === 'undefined') return '';
-  return window.location.pathname + window.location.search;
+  return sanitizePagePath(window.location.pathname);
 }

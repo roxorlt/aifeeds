@@ -327,6 +327,82 @@ describe('feed handlers use list-only projections', () => {
     ]);
   });
 
+  test.each([
+    '2026-07-11T01:00:00Z',
+    '2026-07-11T09:00:00+08:00',
+  ])('news v2 cursor round-trips a stored RFC3339 item time: %s', async (publishedAt) => {
+    const row = {
+      id: 'blog:rfc3339-fixture',
+      source_type: 'blog',
+      source_id: 'rfc3339-fixture',
+      source_ref: 'fixture',
+      title: 'RFC3339 article',
+      content: 'Article',
+      content_translated: null,
+      author: 'Publisher',
+      handle: null,
+      url: 'https://example.com/rfc3339-article',
+      media: '[]',
+      metrics: '{}',
+      published_at: publishedAt,
+      scraped_at: '2026-07-11T02:00:00.000Z',
+      is_relevant: 1,
+      is_hot: 0,
+      matched_by: 'fixture',
+      lang: 'en',
+      extra: '{}',
+      _feed_rank_score: 42.5,
+      _untranslated_rank: 1,
+    };
+    const firstResponse = await handleItems(
+      new Request('https://api.ai-feeds.com/api/items?source_type=blog,podcast&limit=1'),
+      projectionEnv([], [[row, { ...row, id: 'podcast:more' }]]),
+    );
+    const firstPayload = await firstResponse.json() as { next_cursor: string };
+
+    expect(firstPayload.next_cursor.split('|')[3]).toBe(publishedAt);
+
+    const binds: unknown[][] = [];
+    const next = new URL('https://api.ai-feeds.com/api/items');
+    next.searchParams.set('source_type', 'blog,podcast');
+    next.searchParams.set('cursor', firstPayload.next_cursor);
+    const nextResponse = await handleItems(
+      new Request(next),
+      projectionEnv([], [], binds),
+    );
+
+    expect(nextResponse.status).toBe(200);
+    expect(binds[0].slice(-4, -2)).toEqual([publishedAt, publishedAt]);
+  });
+
+  test('pre-v2 four-part feed cursor preserves its frozen rank clock and keyset', async () => {
+    // dab085f^ emitted score|published_at|id|rank_time. This format can still
+    // be present in a browser/session while the deployment rolls forward.
+    const itemTime = '2026-07-11T01:00:00.000Z';
+    const rankTime = '2026-07-12T02:03:04.005Z';
+    const captured: string[] = [];
+    const binds: unknown[][] = [];
+    const url = new URL('https://api.ai-feeds.com/api/items');
+    url.searchParams.set('source_type', 'blog,podcast');
+    url.searchParams.set('cursor', `42.5|${itemTime}|blog:legacy-four|${rankTime}`);
+
+    const response = await handleItems(
+      new Request(url),
+      projectionEnv(captured, [], binds),
+    );
+
+    expect(response.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain(`julianday('${rankTime}')`);
+    expect(binds[0].slice(-6, -1)).toEqual([
+      42.5,
+      42.5,
+      itemTime,
+      itemTime,
+      'blog:legacy-four',
+    ]);
+  });
+
   test('hot v2 cursor freezes the score clock across pages', async () => {
     const captured: string[] = [];
     const row = {
@@ -485,5 +561,141 @@ describe('feed handlers use list-only projections', () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe('invalid_cursor');
     expect(captured).toHaveLength(0);
+  });
+
+  test.each([
+    // Ordinary translated-priority ordering: v2 and in-flight legacy cursors.
+    { label: 'ordinary empty cursor parameter', sourceType: 'x_list', sort: '', cursor: '' },
+    { label: 'ordinary v2 missing rank', sourceType: 'x_list', sort: '', cursor: 'v2||2026-07-11T00:00:00.000Z|x_list:item' },
+    { label: 'ordinary v2 partial rank', sourceType: 'x_list', sort: '', cursor: 'v2|1oops|2026-07-11T00:00:00.000Z|x_list:item' },
+    { label: 'ordinary v2 out-of-domain rank', sourceType: 'x_list', sort: '', cursor: 'v2|2|2026-07-11T00:00:00.000Z|x_list:item' },
+    { label: 'ordinary v2 invalid time', sourceType: 'x_list', sort: '', cursor: 'v2|1|not-a-date|x_list:item' },
+    { label: 'ordinary v2 missing id', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11T00:00:00.000Z|' },
+    { label: 'ordinary v2 extra segment', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11T00:00:00.000Z|x_list:item|extra' },
+    { label: 'ordinary legacy invalid time', sourceType: 'x_list', sort: '', cursor: 'not-a-date|x_list:item' },
+    { label: 'ordinary legacy parseable non-ISO time', sourceType: 'x_list', sort: '', cursor: '1|x_list:item' },
+    { label: 'ordinary legacy impossible calendar time', sourceType: 'x_list', sort: '', cursor: '2026-02-30T00:00:00.000Z|x_list:item' },
+    { label: 'ordinary legacy missing id', sourceType: 'x_list', sort: '', cursor: '2026-07-11T00:00:00.000Z|' },
+    { label: 'ordinary legacy extra segment', sourceType: 'x_list', sort: '', cursor: '2026-07-11T00:00:00.000Z|x_list:item|extra' },
+
+    // News feed ranking: v2 freezes its score clock; legacy remains readable.
+    { label: 'feed v2 partial score', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42oops|1|2026-07-11T00:00:00.000Z|blog:item|2026-07-12T00:00:00.000Z' },
+    { label: 'feed v2 partial rank', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|1oops|2026-07-11T00:00:00.000Z|blog:item|2026-07-12T00:00:00.000Z' },
+    { label: 'feed v2 out-of-domain rank', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|2|2026-07-11T00:00:00.000Z|blog:item|2026-07-12T00:00:00.000Z' },
+    { label: 'feed v2 invalid item time', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|1|not-a-date|blog:item|2026-07-12T00:00:00.000Z' },
+    { label: 'feed v2 missing id', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|1|2026-07-11T00:00:00.000Z||2026-07-12T00:00:00.000Z' },
+    { label: 'feed v2 invalid rank time', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|1|2026-07-11T00:00:00.000Z|blog:item|not-a-date' },
+    { label: 'feed v2 extra segment', sourceType: 'blog,podcast', sort: '', cursor: 'v2|42|1|2026-07-11T00:00:00.000Z|blog:item|2026-07-12T00:00:00.000Z|extra' },
+    { label: 'feed legacy invalid score', sourceType: 'blog,podcast', sort: '', cursor: 'nope|2026-07-11T00:00:00.000Z|blog:item' },
+    { label: 'feed legacy invalid time', sourceType: 'blog,podcast', sort: '', cursor: '42|not-a-date|blog:item' },
+    { label: 'feed legacy parseable non-ISO time', sourceType: 'blog,podcast', sort: '', cursor: '42|0|blog:item' },
+    { label: 'feed legacy missing id', sourceType: 'blog,podcast', sort: '', cursor: '42|2026-07-11T00:00:00.000Z|' },
+    { label: 'feed legacy invalid optional rank time', sourceType: 'blog,podcast', sort: '', cursor: '42|2026-07-11T00:00:00.000Z|blog:item|2026-02-30T00:00:00.000Z' },
+    { label: 'feed legacy fifth segment', sourceType: 'blog,podcast', sort: '', cursor: '42|2026-07-11T00:00:00.000Z|blog:item|2026-07-12T00:00:00.000Z|extra' },
+
+    // Hot ordering: both frozen-clock v2h and legacy score/id cursors.
+    { label: 'hot v2h partial score', sourceType: 'x_list', sort: 'hot', cursor: 'v2h|9oops|x_list:item|2026-07-12T00:00:00.000Z' },
+    { label: 'hot v2h parseable non-ISO rank time', sourceType: 'x_list', sort: 'hot', cursor: 'v2h|9|x_list:item|1' },
+    { label: 'hot v2h impossible calendar rank time', sourceType: 'x_list', sort: 'hot', cursor: 'v2h|9|x_list:item|2026-02-30T00:00:00.000Z' },
+    { label: 'hot legacy invalid score', sourceType: 'x_list', sort: 'hot', cursor: 'nope|x_list:item' },
+    { label: 'hot legacy missing id', sourceType: 'x_list', sort: 'hot', cursor: '9|' },
+    { label: 'hot legacy extra segment', sourceType: 'x_list', sort: 'hot', cursor: '9|x_list:item|extra' },
+  ])('$label fails closed before querying D1', async ({ sourceType, sort, cursor }) => {
+    const captured: string[] = [];
+    const url = new URL('https://api.ai-feeds.com/api/items');
+    url.searchParams.set('source_type', sourceType);
+    if (sort) url.searchParams.set('sort', sort);
+    url.searchParams.set('cursor', cursor);
+
+    const response = await handleItems(new Request(url), projectionEnv(captured));
+    const payload = await response.json() as { error?: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe('invalid_cursor');
+    expect(captured).toHaveLength(0);
+  });
+
+  test.each([
+    {
+      label: 'ordinary legacy',
+      sourceType: 'x_list',
+      sort: '',
+      cursor: '2026-07-11T00:00:00.000Z|x_list:legacy',
+      expectedTail: ['2026-07-11T00:00:00.000Z', '2026-07-11T00:00:00.000Z', 'x_list:legacy'],
+    },
+    {
+      label: 'feed-ranking legacy',
+      sourceType: 'blog,podcast',
+      sort: '',
+      cursor: '42.5|2026-07-11T00:00:00.000Z|blog:legacy',
+      expectedTail: [42.5, 42.5, '2026-07-11T00:00:00.000Z', '2026-07-11T00:00:00.000Z', 'blog:legacy'],
+    },
+    {
+      label: 'hot legacy',
+      sourceType: 'x_list',
+      sort: 'hot',
+      cursor: '9.25|x_list:legacy',
+      expectedTail: [9.25, 9.25, 'x_list:legacy'],
+    },
+  ])('$label cursor remains readable and reaches its keyset query', async ({
+    sourceType,
+    sort,
+    cursor,
+    expectedTail,
+  }) => {
+    const captured: string[] = [];
+    const binds: unknown[][] = [];
+    const url = new URL('https://api.ai-feeds.com/api/items');
+    url.searchParams.set('source_type', sourceType);
+    if (sort) url.searchParams.set('sort', sort);
+    url.searchParams.set('cursor', cursor);
+
+    const response = await handleItems(
+      new Request(url),
+      projectionEnv(captured, [], binds),
+    );
+
+    expect(response.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(binds).toHaveLength(1);
+    expect(binds[0].slice(-(expectedTail.length + 1), -1)).toEqual(expectedTail);
+  });
+
+  test.each([
+    {
+      label: 'ordinary',
+      sourceType: 'x_list',
+      orderColumn: 'scraped_at',
+      windowDays: 7,
+      windowBindIndex: 1,
+    },
+    {
+      label: 'feed-ranking',
+      sourceType: 'blog,podcast',
+      orderColumn: 'published_at',
+      windowDays: 30,
+      windowBindIndex: 2,
+    },
+  ])('$label request without a cursor keeps its default $windowDays-day SQL window', async ({
+    sourceType,
+    orderColumn,
+    windowDays,
+    windowBindIndex,
+  }) => {
+    const captured: string[] = [];
+    const binds: unknown[][] = [];
+    const before = Date.now();
+    const response = await handleItems(
+      new Request(`https://api.ai-feeds.com/api/items?source_type=${sourceType}`),
+      projectionEnv(captured, [], binds),
+    );
+    const after = Date.now();
+
+    expect(response.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain(`${orderColumn} >= ?`);
+    const actualWindow = Date.parse(String(binds[0][windowBindIndex]));
+    expect(actualWindow).toBeGreaterThanOrEqual(before - windowDays * 86_400_000);
+    expect(actualWindow).toBeLessThanOrEqual(after - windowDays * 86_400_000);
   });
 });

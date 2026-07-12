@@ -20,6 +20,8 @@ import { useAuthStore } from "../lib/authStore";
 import { avatarUrlOf, displayNameOf } from "../lib/defaultProfile";
 import type { Item } from "../types";
 import { useMotionDismiss } from "../lib/motionLayer";
+import { activateModalFocus } from "../lib/modalFocus";
+import { useScrollLock } from "../lib/useScrollLock";
 
 interface Props {
   open: boolean;
@@ -38,6 +40,7 @@ type Stage = "idle" | "creating" | "ready" | "error";
 export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }: Props) {
   const itemId = item.id;
   const { layerClassName, requestClose } = useMotionDismiss(onClose, "modal", open);
+  useScrollLock(open);
   // ⚠️ 所有 hooks 必须在任何 early-return 之前声明 (React Rules of Hooks)。
   const [stage, setStage] = useState<Stage>("idle");
   const [errMsg, setErrMsg] = useState<string>("");
@@ -49,6 +52,21 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
   // 防止重复触发 createShare 的 itemId 标记 (StrictMode 双 effect / 闪进闪出)
   const triggeredRef = useRef<string>("");
   const posterRef = useRef<PosterCanvasHandle>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const escapeCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    escapeCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    return activateModalFocus(panel, {
+      onEscape: () => escapeCloseRef.current(),
+    });
+  }, [open]);
 
   // 海报渲染需要完整 item:列表负载把 shownotes/transcript 等重字段剥了(LIST_HEAVY_EXTRA_KEYS),
   // 而 podcast 海报「节目简介」就用 shownotes。开 dialog 时拉一次完整 item,拉到前先用列表
@@ -242,16 +260,25 @@ export function ShareDialog({ open, item, cachedShare, onShareCreated, onClose }
 
   return (
     <>
-      <div className={`${layerClassName} fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4`} onClick={requestClose}>
+      <div
+        className={`${layerClassName} fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="share-dialog-title"
+        onClick={requestClose}
+      >
         <div
+          ref={panelRef}
+          tabIndex={-1}
           className="motion-layer-panel flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
           onClick={(e) => e.stopPropagation()}
         >
           <header className="flex items-center justify-between border-b border-neutral-100 px-5 py-3">
-            <h3 className="text-sm font-semibold text-neutral-900">分享</h3>
+            <h3 id="share-dialog-title" className="text-sm font-semibold text-neutral-900">分享</h3>
             <button
               type="button"
               onClick={requestClose}
+              data-modal-initial-focus
               className="rounded-md px-2 py-1 text-neutral-500 hover:bg-neutral-100"
               aria-label="关闭"
             >

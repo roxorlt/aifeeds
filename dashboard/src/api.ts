@@ -15,6 +15,7 @@ import { useAuthStore } from "./lib/authStore";
 import { API_BASE } from "./lib/apiBase";
 import { consumeFeedPrefetch } from "./lib/feed-prefetch";
 import { runDetailSingleFlight } from "./lib/detailSingleFlight";
+import { safeApiEndpoint } from "./lib/telemetry/privacy.ts";
 import {
   buildItemsPath,
   executeRequestWithPolicy,
@@ -161,7 +162,7 @@ async function apiFetch(
     onFinalResult: (response, attempts) => {
       if (!response.ok && response.status >= 400) {
         track(EVENTS.API_ERROR, {
-          endpoint: path,
+          endpoint: safeApiEndpoint(path),
           status: response.status,
           attempts,
         });
@@ -175,11 +176,11 @@ async function apiFetch(
       const isAbort = error instanceof Error && (error.name === 'AbortError' || /aborted|abort/i.test(rawMsg));
       const isCorsOrNet = error instanceof TypeError && /failed to fetch|fetch/i.test(rawMsg);
       track(EVENTS.API_ERROR, {
-        endpoint: path,
+        endpoint: safeApiEndpoint(path),
         status: 0,
         error_msg: isAbort
           ? `timeout_${timeoutMs}ms`
-          : (isCorsOrNet ? 'cors_or_network' : rawMsg),
+          : (isCorsOrNet ? 'cors_or_network' : 'request_error'),
         attempts,
       });
     },

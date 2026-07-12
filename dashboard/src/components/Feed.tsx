@@ -41,6 +41,11 @@ import {
   registerMountedFeed,
 } from "../lib/feedScheduling";
 import { getMediaLoadPolicy } from "../lib/mediaPriority";
+import { newestScrapedAt } from "../lib/feedFreshness";
+import {
+  resolveChannelSwipeIntent,
+  type ChannelSwipeIntent,
+} from "../lib/motion";
 
 // PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
 // <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
@@ -287,7 +292,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [loading, setLoading] = useState(!cachedInit);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastScrapedAt = useRef<string | null>(null);
+  const lastScrapedAt = useRef<string | null>(newestScrapedAt(cachedInit?.items ?? []));
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(cachedInit?.nextCursor ?? null);
   const [hasMore, setHasMore] = useState(cachedInit?.hasMore ?? true);
@@ -344,7 +349,9 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
   const pullIndicatorRef = useRef<HTMLDivElement | null>(null);
   const pullLabelRef = useRef<HTMLSpanElement | null>(null);
-  const pullStartY = useRef<number | null>(null);
+  const pullStart = useRef<{ x: number; y: number } | null>(null);
+  const pullTouchId = useRef<number | null>(null);
+  const pullIntent = useRef<ChannelSwipeIntent>("unknown");
   const pullYRef = useRef(0);
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
@@ -519,7 +526,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         setPending([]);
         setNextCursor(res.next_cursor);
         setHasMore(res.has_more);
-        lastScrapedAt.current = res.items[0]?.scraped_at || null;
+        lastScrapedAt.current = newestScrapedAt(res.items);
         // 写入 FEED_CACHE,下次 mount 时直接 hydrate(不 skeleton)
         setFeedCache(sourceType, {
           items: itemsToShow,
@@ -660,18 +667,36 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   useEffect(() => {
     if (placeholder) return;
     // Only activate PRR on mobile — PC uses bounded cell scroll, no pull gesture
-    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    if (!isNarrowFeed) return;
 
     // R21: mobile body fixed 架构后 window.scrollY 永远 0, 用 getScrollY 兜底
     const isAtTop = () => {
       const root = document.getElementById("root");
-      const isNarrow = window.matchMedia("(max-width: 767px)").matches;
-      return (isNarrow && root ? root.scrollTop : window.scrollY) <= 0;
+      return (root ? root.scrollTop : window.scrollY) <= 0;
     };
 
+    const resetPullGesture = (animate: boolean) => {
+      pullStart.current = null;
+      pullTouchId.current = null;
+      pullIntent.current = "unknown";
+      pullYRef.current = 0;
+      isDraggingRef.current = false;
+      if (!isRefreshingPull) updatePullIndicator(0, animate);
+    };
+
+    const findPullTouch = (touches: TouchList) => (
+      pullTouchId.current === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === pullTouchId.current)
+    );
+
     const onStart = (e: TouchEvent) => {
+      if (isRefreshingPull) {
+        resetPullGesture(false);
+        return;
+      }
       if (e.touches.length !== 1) {
-        pullStartY.current = null;
+        resetPullGesture(true);
         return;
       }
       // Skip when touch starts in any non-feed zone — drawer, app header,
@@ -685,33 +710,47 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         target?.closest('[role="dialog"]') ||
         target?.closest("[data-no-page-scroll]")
       ) {
-        pullStartY.current = null;
+        resetPullGesture(true);
         return;
       }
       if (isAtTop()) {
-        pullStartY.current = e.touches[0].clientY;
+        const touch = e.touches[0];
+        pullStart.current = { x: touch.clientX, y: touch.clientY };
+        pullTouchId.current = touch.identifier;
+        pullIntent.current = "unknown";
+        pullYRef.current = 0;
         isDraggingRef.current = false;
       } else {
-        pullStartY.current = null;
+        resetPullGesture(true);
       }
     };
     const onMove = (e: TouchEvent) => {
-      if (pullStartY.current === null) return;
+      const start = pullStart.current;
+      if (!start) return;
       if (e.touches.length !== 1) {
-        pullStartY.current = null;
-        pullYRef.current = 0;
-        isDraggingRef.current = false;
-        updatePullIndicator(0, true);
+        resetPullGesture(true);
+        return;
+      }
+      const touch = findPullTouch(e.touches);
+      if (!touch) {
+        resetPullGesture(true);
         return;
       }
       if (!isAtTop()) {
-        pullStartY.current = null;
-        pullYRef.current = 0;
-        isDraggingRef.current = false;
-        updatePullIndicator(0, true);
+        resetPullGesture(true);
         return;
       }
-      const dy = e.touches[0].clientY - pullStartY.current;
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      if (pullIntent.current === "unknown") {
+        const intent = resolveChannelSwipeIntent(dx, dy);
+        if (intent === "unknown") return;
+        if (intent === "horizontal" || dy <= 0) {
+          resetPullGesture(true);
+          return;
+        }
+        pullIntent.current = "vertical";
+      }
       if (dy > 0) {
         if (e.cancelable) e.preventDefault();
         isDraggingRef.current = true;
@@ -720,32 +759,46 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         updatePullIndicator(next, false);
       }
     };
-    const onEnd = () => {
+    const onEnd = (e: TouchEvent) => {
+      const activeTouchEnded = pullTouchId.current !== null
+        && Array.from(e.changedTouches).some((touch) => touch.identifier === pullTouchId.current);
       const shouldRefresh =
-        pullStartY.current !== null &&
+        activeTouchEnded &&
+        e.touches.length === 0 &&
+        pullStart.current !== null &&
+        pullIntent.current === "vertical" &&
         pullYRef.current > PULL_THRESHOLD &&
         !loadingRef.current;
       if (shouldRefresh) {
         setIsRefreshingPull(true);
+        // Cached feeds deliberately avoid toggling loading in the fetch effect.
+        // Enter it here so the refresh indicator stays mounted until that exact
+        // retry request reaches its finally handler.
+        setLoading(true);
         setRetryTick((t) => t + 1);
       }
       pullYRef.current = 0;
       isDraggingRef.current = false;
       if (!shouldRefresh) updatePullIndicator(0, true);
-      pullStartY.current = null;
+      pullStart.current = null;
+      pullTouchId.current = null;
+      pullIntent.current = "unknown";
+    };
+    const onCancel = () => {
+      resetPullGesture(true);
     };
 
     window.addEventListener("touchstart", onStart, { passive: true });
     window.addEventListener("touchmove", onMove, { passive: false });
     window.addEventListener("touchend", onEnd);
-    window.addEventListener("touchcancel", onEnd);
+    window.addEventListener("touchcancel", onCancel);
     return () => {
       window.removeEventListener("touchstart", onStart);
       window.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onEnd);
-      window.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("touchcancel", onCancel);
     };
-  }, [placeholder, updatePullIndicator]);
+  }, [placeholder, updatePullIndicator, isRefreshingPull, isNarrowFeed]);
 
   // Hot mode: if the initial fetch or a page-load returns items that all get
   // filtered out as "seen", items becomes empty but hasMore is still true.
@@ -789,7 +842,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         const fresh = res.items.filter((i) => !existingIds.has(i.id));
         if (fresh.length > 0) {
           setPending((prev) => [...fresh, ...prev]);
-          lastScrapedAt.current = fresh[0].scraped_at;
+          lastScrapedAt.current = newestScrapedAt(fresh) ?? lastScrapedAt.current;
         }
       } catch {
         // Silent fail — next poll will retry
@@ -816,7 +869,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           setNextCursor(res.next_cursor);
           setHasMore(res.has_more);
           if (res.items.length > 0) {
-            lastScrapedAt.current = res.items[0].scraped_at;
+            lastScrapedAt.current = newestScrapedAt(res.items);
           }
           scrollFeedOrPage(feedBodyRef.current);
         })

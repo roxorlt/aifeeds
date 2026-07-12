@@ -40,8 +40,30 @@ test("global telemetry initializes before an immediately replayed buffered API e
   assert.ok(events.some((event) => event.type === "perf_api"));
   assert.ok(events.some((event) => event.type === "app_open"));
   assert.deepEqual(events.find((event) => event.type === "page_view")?.payload, {
-    path: "/settings?tab=account",
+    path: "/settings",
   });
+});
+
+test("startup attribution stores categories instead of raw query or referrer text", () => {
+  const tracked = [];
+  const bootstrap = createTelemetryBootstrap(bootstrapDeps({
+    location: {
+      pathname: "/search",
+      search: "?q=alice%40example.com&utm_source=newsletter&utm_campaign=private-token",
+    },
+    referrer: "https://www.google.com/search?q=alice%40example.com",
+    track: (type, payload) => tracked.push({ type, payload }),
+  }));
+
+  bootstrap();
+  assert.deepEqual(tracked, [
+    {
+      type: "app_open",
+      payload: { utm_source: "newsletter", utm_campaign: "present", referrer: "search" },
+    },
+    { type: "page_view", payload: { path: "/search" } },
+  ]);
+  assert.doesNotMatch(JSON.stringify(tracked), /alice|private-token|google\.com/);
 });
 
 function bootstrapDeps(overrides = {}) {

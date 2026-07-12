@@ -15,6 +15,7 @@ type MockOptions = {
   saveData?: boolean;
   pendingManifest?: boolean;
   pendingCard?: boolean;
+  pendingRefresh?: boolean;
   failManifest?: boolean;
   failFirstList?: boolean;
   videoPosterFixture?: boolean;
@@ -32,6 +33,7 @@ type MockState = {
   maxConcurrentLists: number;
   releaseManifest: () => void;
   releaseCards: () => void;
+  releaseRefresh: () => void;
 };
 
 function sourceFromQuery(value: string | null): string {
@@ -266,6 +268,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
     maxConcurrentLists: 0,
     releaseManifest: () => {},
     releaseCards: () => {},
+    releaseRefresh: () => {},
   };
   let concurrentLists = 0;
   let manifestReleased = !options.pendingManifest;
@@ -287,6 +290,16 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
   state.releaseCards = () => {
     cardsReleased = true;
     resolveCards?.();
+  };
+  let refreshReleased = !options.pendingRefresh;
+  let resolveRefresh: (() => void) | null = null;
+  const refreshGate = new Promise<void>((resolve) => {
+    resolveRefresh = resolve;
+    if (refreshReleased) resolve();
+  });
+  state.releaseRefresh = () => {
+    refreshReleased = true;
+    resolveRefresh?.();
   };
 
   await page.addInitScript(({ saveData, disableVideoAutoplay }) => {
@@ -401,6 +414,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
       concurrentLists++;
       state.maxConcurrentLists = Math.max(state.maxConcurrentLists, concurrentLists);
       try {
+        if (options.pendingRefresh && state.listAttempts > 1) await refreshGate;
         await new Promise((resolve) => setTimeout(resolve, 25));
         if (options.failFirstList && state.listAttempts === 1) {
           await fulfillJson(route, { error: "temporary" }, 503);
@@ -603,6 +617,203 @@ test("save-data blocks deferred fonts and background channel prefetch", async ({
   await page.waitForTimeout(300);
   expect(state.listRequests).toHaveLength(1);
   expect(state.fontRequests).toHaveLength(0);
+});
+
+test("mobile modal locks and restores the real page scroller", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real iOS-engine project is sufficient");
+  await installMocks(page);
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "登录 / 注册" });
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => page.locator("#root").evaluate((node) => (
+    (node as HTMLElement).style.overflow
+  ))).toBe("hidden");
+  await expect.poll(() => page.locator("body").evaluate((node) => (
+    (node as HTMLElement).style.overflow
+  ))).toBe("hidden");
+
+  await page.setViewportSize({ width: 900, height: 700 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(false);
+  await expect(page.locator("#root")).toHaveCSS("overflow", "hidden");
+  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
+
+  await dialog.getByRole("button", { name: "关闭" }).click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => page.locator("#root").evaluate((node) => (
+    (node as HTMLElement).style.overflow
+  ))).toBe("");
+  await expect.poll(() => page.locator("body").evaluate((node) => (
+    (node as HTMLElement).style.overflow
+  ))).toBe("");
+});
+
+test("a cancelled vertical pull never commits a refresh", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real iOS-engine project is sufficient");
+  const state = await installMocks(page, { saveData: true });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+  const attemptsBefore = state.listAttempts;
+
+  const opacityBeforeCancel = await page.evaluate(() => {
+    const target = document.querySelector('[data-feed-source="x_list"] .feed-body');
+    const indicator = document.querySelector('[data-feed-source="x_list"] .motion-pull-indicator');
+    const root = document.getElementById("root");
+    if (!(target instanceof HTMLElement) || !(indicator instanceof HTMLElement) || !root) {
+      throw new Error("pull-to-refresh fixture is not visible");
+    }
+    root.scrollTop = 0;
+    const makeTouch = (y: number) => ({
+      identifier: 77,
+      target,
+      clientX: 180,
+      clientY: y,
+      pageX: 180,
+      pageY: y,
+      screenX: 180,
+      screenY: y,
+      radiusX: 2,
+      radiusY: 2,
+      force: 1,
+    });
+    const dispatch = (type: "touchstart" | "touchmove" | "touchcancel", y: number) => {
+      const changed = makeTouch(y);
+      const active = type === "touchcancel" ? [] : [changed];
+      const event = new TouchEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        touches: { value: active },
+        targetTouches: { value: active },
+        changedTouches: { value: [changed] },
+      });
+      target.dispatchEvent(event);
+    };
+    dispatch("touchstart", 100);
+    dispatch("touchmove", 300);
+    const opacity = indicator.style.opacity;
+    dispatch("touchcancel", 300);
+    return opacity;
+  });
+
+  expect(opacityBeforeCancel).toBe("1");
+  await expect(page.locator('[data-feed-source="x_list"] .motion-pull-indicator'))
+    .toHaveCSS("opacity", "0");
+  await page.waitForTimeout(150);
+  expect(state.listAttempts).toBe(attemptsBefore);
+});
+
+test("a committed pull stays visibly refreshing until its request settles", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real iOS-engine project is sufficient");
+  const state = await installMocks(page, { saveData: true, pendingRefresh: true });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+  const attemptsBefore = state.listAttempts;
+
+  await page.evaluate(() => {
+    const target = document.querySelector('[data-feed-source="x_list"] .feed-body');
+    const root = document.getElementById("root");
+    if (!(target instanceof HTMLElement) || !root) throw new Error("pull-to-refresh fixture is not visible");
+    root.scrollTop = 0;
+    const makeTouch = (y: number) => ({
+      identifier: 78,
+      target,
+      clientX: 180,
+      clientY: y,
+      pageX: 180,
+      pageY: y,
+      screenX: 180,
+      screenY: y,
+      radiusX: 2,
+      radiusY: 2,
+      force: 1,
+    });
+    const dispatch = (type: "touchstart" | "touchmove" | "touchend", y: number) => {
+      const changed = makeTouch(y);
+      const active = type === "touchend" ? [] : [changed];
+      const event = new TouchEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        touches: { value: active },
+        targetTouches: { value: active },
+        changedTouches: { value: [changed] },
+      });
+      target.dispatchEvent(event);
+    };
+    dispatch("touchstart", 100);
+    dispatch("touchmove", 350);
+    dispatch("touchend", 350);
+  });
+
+  await expect.poll(() => state.listAttempts).toBe(attemptsBefore + 1);
+  const indicator = page.locator('[data-feed-source="x_list"] .motion-pull-indicator');
+  await expect(indicator).toContainText("正在刷新");
+  await expect(indicator).toHaveCSS("opacity", "1");
+  await page.waitForTimeout(200);
+  await expect(indicator).toContainText("正在刷新");
+  await expect(indicator).toHaveCSS("opacity", "1");
+
+  state.releaseRefresh();
+  await expect(indicator).toHaveCSS("opacity", "0");
+});
+
+test("pull-to-refresh listeners follow the live responsive breakpoint", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("desktop-chromium"), "one responsive Chromium project is sufficient");
+  const state = await installMocks(page, { saveData: true });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+
+  const dispatchPull = () => page.evaluate(() => {
+    const target = document.querySelector('[data-feed-source="x_list"] .feed-body');
+    const root = document.getElementById("root");
+    if (!(target instanceof HTMLElement) || !root) throw new Error("pull-to-refresh fixture is not visible");
+    root.scrollTop = 0;
+    const makeTouch = (y: number) => ({
+      identifier: 79,
+      target,
+      clientX: 180,
+      clientY: y,
+      pageX: 180,
+      pageY: y,
+      screenX: 180,
+      screenY: y,
+      radiusX: 2,
+      radiusY: 2,
+      force: 1,
+    });
+    const dispatch = (type: "touchstart" | "touchmove" | "touchend", y: number) => {
+      const changed = makeTouch(y);
+      const active = type === "touchend" ? [] : [changed];
+      const event = new TouchEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        touches: { value: active },
+        targetTouches: { value: active },
+        changedTouches: { value: [changed] },
+      });
+      target.dispatchEvent(event);
+    };
+    dispatch("touchstart", 100);
+    dispatch("touchmove", 350);
+    dispatch("touchend", 350);
+  });
+
+  const desktopAttempts = state.listAttempts;
+  await dispatchPull();
+  await page.waitForTimeout(100);
+  expect(state.listAttempts).toBe(desktopAttempts);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(true);
+  await dispatchPull();
+  await expect.poll(() => state.listAttempts).toBe(desktopAttempts + 1);
+
+  await page.setViewportSize({ width: 900, height: 700 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(false);
+  await expect(page.locator('[data-feed-source="x_list"] .motion-pull-indicator')).toHaveCSS("opacity", "0");
+  const restoredDesktopAttempts = state.listAttempts;
+  await dispatchPull();
+  await page.waitForTimeout(100);
+  expect(state.listAttempts).toBe(restoredDesktopAttempts);
 });
 
 test("slow transient failures recover without concurrent duplicate list reads", async ({ page }, testInfo) => {

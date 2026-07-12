@@ -13,6 +13,83 @@ export const PERFORMANCE_EVENT_TYPES = [
 const PERFORMANCE_EVENT_TYPE_SET = new Set<string>(PERFORMANCE_EVENT_TYPES);
 const NETWORK_EFFECTIVE_TYPES = new Set(['slow-2g', '2g', '3g', '4g']);
 
+const STATIC_TELEMETRY_PAGE_PATHS = new Set([
+  '/',
+  '/search',
+  '/settings',
+  '/settings/account',
+  '/feedback',
+  '/subscribe',
+  '/me/subscription',
+  '/daily',
+  '/privacy',
+  '/terms',
+]);
+
+const REFERRER_CATEGORIES = new Set([
+  'direct',
+  'same_origin',
+  'search',
+  'social',
+  'external',
+]);
+
+const SEARCH_REFERRER_HOSTS = [
+  'google.com',
+  'google.cn',
+  'google.co.uk',
+  'bing.com',
+  'baidu.com',
+  'baidu.cn',
+  'so.com',
+  'sogou.com',
+  'duckduckgo.com',
+];
+
+const SOCIAL_REFERRER_HOSTS = [
+  'x.com',
+  'twitter.com',
+  't.co',
+  'weixin.qq.com',
+  'mp.weixin.qq.com',
+  'facebook.com',
+  'linkedin.com',
+];
+
+const ATTRIBUTION_SOURCES = new Set([
+  'newsletter',
+  'email',
+  'search',
+  'social',
+  'github',
+  'product_hunt',
+  'direct',
+]);
+
+const API_ENDPOINT_CATEGORIES = new Set([
+  'items',
+  'item_detail',
+  'feed_manifest',
+  'sources',
+  'stats',
+  'search',
+  'auth',
+  'favorites',
+  'subscriptions',
+  'feedback',
+  'share',
+  'refresh',
+  'track',
+  'other_api',
+]);
+
+const API_ERROR_MESSAGE_CATEGORIES = new Set([
+  'timeout_5000ms',
+  'timeout_15000ms',
+  'cors_or_network',
+  'request_error',
+]);
+
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
   'app_open', 'page_view', 'session_start', 'session_end',
@@ -56,6 +133,114 @@ export type PreparedEventPayload =
   | { ok: true; value: string | null }
   | { ok: false; error: 'payload too large' };
 
+function parseTelemetryUrl(raw: unknown): URL | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim().slice(0, 2048);
+  if (!value) return null;
+  try {
+    return new URL(value, 'https://telemetry.invalid');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collapse a possibly identifying URL into a stable route template. The public
+ * telemetry endpoint must never persist queries, fragments, content ids, share
+ * tokens, account names, or repository names as an analytics dimension.
+ */
+export function sanitizeTelemetryPagePath(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const url = parseTelemetryUrl(raw);
+  if (!url) return '/:other';
+
+  const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  if (STATIC_TELEMETRY_PAGE_PATHS.has(pathname)) return pathname;
+
+  const parts = pathname.split('/').filter(Boolean);
+  if (parts.length === 2 && ['t', 'c', 'h', 'e', 'o', 's'].includes(parts[0])) {
+    return parts[0] === 's' ? '/s/:token' : `/${parts[0]}/:id`;
+  }
+  if (parts.length === 3 && parts[0] === 'g') return '/g/:owner/:repo';
+  if (parts.length === 3 && parts[0] === 'ph') return '/ph/:slug/:date';
+  if (parts.length === 2 && parts[0] === 'daily') return '/daily/:page';
+
+  return '/:other';
+}
+
+function isHostOrSubdomain(hostname: string, parent: string): boolean {
+  return hostname === parent || hostname.endsWith(`.${parent}`);
+}
+
+/** Reduce a raw Referer value to a non-identifying acquisition category. */
+export function sanitizeTelemetryReferrer(raw: unknown, pageOrigin?: string): string {
+  if (typeof raw !== 'string' || !raw.trim()) return 'direct';
+  const normalized = raw.trim().toLowerCase();
+  if (REFERRER_CATEGORIES.has(normalized)) return normalized;
+
+  const referrer = parseTelemetryUrl(raw);
+  if (!referrer) return 'external';
+
+  if (pageOrigin) {
+    try {
+      if (referrer.origin === new URL(pageOrigin).origin) return 'same_origin';
+    } catch {
+      // An invalid comparison origin cannot make an untrusted referrer safe.
+    }
+  }
+
+  const hostname = referrer.hostname.toLowerCase();
+  if (isHostOrSubdomain(hostname, 'ai-feeds.com')) return 'same_origin';
+  if (SEARCH_REFERRER_HOSTS.some((host) => isHostOrSubdomain(hostname, host))) return 'search';
+  if (SOCIAL_REFERRER_HOSTS.some((host) => isHostOrSubdomain(hostname, host))) return 'social';
+  return 'external';
+}
+
+function sanitizeAttributionSource(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!normalized) return undefined;
+  return ATTRIBUTION_SOURCES.has(normalized) ? normalized : 'other';
+}
+
+function sanitizeApiEndpoint(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const normalized = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (API_ENDPOINT_CATEGORIES.has(normalized)) return normalized;
+
+  const url = parseTelemetryUrl(raw);
+  if (!url) return 'other_api';
+  const parts = url.pathname.split('/').filter(Boolean);
+  const apiIndex = parts.indexOf('api');
+  const route = apiIndex >= 0 ? parts.slice(apiIndex + 1) : parts;
+  const root = route[0] ?? '';
+
+  if (root === 'items') return route.length > 1 ? 'item_detail' : 'items';
+  if (root === 'feed-manifest' || root === 'feed_manifest') return 'feed_manifest';
+  if (root === 'sources') return 'sources';
+  if (root === 'stats') return 'stats';
+  if (root === 'search') return 'search';
+  if (root === 'auth') return 'auth';
+  if (root === 'favorites') return 'favorites';
+  if (root === 'subscriptions' || root === 'subscription' || root === 'subscribe') return 'subscriptions';
+  if (root === 'feedback') return 'feedback';
+  if (root === 'share') return 'share';
+  if (root === 'refresh') return 'refresh';
+  if (root === 'track') return 'track';
+  return 'other_api';
+}
+
+function normalizeSearchQueryLength(payload: Record<string, unknown>): void {
+  const rawQuery = payload.q;
+  const rawLength = typeof rawQuery === 'string' ? rawQuery.length : payload.q_len;
+  delete payload.q;
+  if (typeof rawLength !== 'number' || !Number.isFinite(rawLength) || rawLength < 0) {
+    delete payload.q_len;
+    return;
+  }
+  payload.q_len = Math.min(256, Math.floor(rawLength));
+}
+
 function trustedEdgeCode(value: unknown, pattern: RegExp): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.toUpperCase();
@@ -69,6 +254,47 @@ export function prepareEventPayload(
   maxBytes: number = MAX_PAYLOAD_BYTES,
 ): PreparedEventPayload {
   let payload = clientPayload;
+  if (clientPayload && eventType === 'page_view') {
+    payload = { ...clientPayload };
+    if (Object.prototype.hasOwnProperty.call(payload, 'path')) {
+      const safePath = sanitizeTelemetryPagePath(payload.path);
+      if (safePath) payload.path = safePath;
+      else delete payload.path;
+    }
+  } else if (clientPayload && eventType === 'app_open') {
+    payload = { ...clientPayload };
+    if (Object.prototype.hasOwnProperty.call(payload, 'utm_source')) {
+      const safeSource = sanitizeAttributionSource(payload.utm_source);
+      if (safeSource) payload.utm_source = safeSource;
+      else delete payload.utm_source;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'utm_campaign')) {
+      if (typeof payload.utm_campaign === 'string' && payload.utm_campaign.trim()) {
+        payload.utm_campaign = 'present';
+      } else {
+        delete payload.utm_campaign;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'referrer')) {
+      payload.referrer = sanitizeTelemetryReferrer(payload.referrer);
+    }
+  } else if (clientPayload && eventType === 'api_error') {
+    payload = { ...clientPayload };
+    if (Object.prototype.hasOwnProperty.call(payload, 'endpoint')) {
+      const safeEndpoint = sanitizeApiEndpoint(payload.endpoint);
+      if (safeEndpoint) payload.endpoint = safeEndpoint;
+      else delete payload.endpoint;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'error_msg')) {
+      payload.error_msg = typeof payload.error_msg === 'string'
+        && API_ERROR_MESSAGE_CATEGORIES.has(payload.error_msg)
+        ? payload.error_msg
+        : 'request_error';
+    }
+  } else if (clientPayload && (eventType === 'search_submit' || eventType === 'search_empty')) {
+    payload = { ...clientPayload };
+    normalizeSearchQueryLength(payload);
+  }
   if (PERFORMANCE_EVENT_TYPE_SET.has(eventType)) {
     // edge_* 只信 Worker request.cf。客户端同名值即使 cf 缺失也要删除，避免伪造 cohort。
     payload = { ...(clientPayload ?? {}) };
@@ -139,7 +365,7 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
   // 4. 抽出 IP / UA / Referer (从请求 headers)
   const ip = getClientIp(request, env);
   const ua = request.headers.get('User-Agent') || '';
-  const referer = request.headers.get('Referer') || '';
+  const referer = sanitizeTelemetryReferrer(request.headers.get('Referer'));
   const ingestedAt = Date.now();
   const cf = (request as Request & { cf?: EdgeCfProperties }).cf;
 
@@ -180,7 +406,7 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
         ip,
         ua,
         referer,
-        e.page_path || null,
+        sanitizeTelemetryPagePath(e.page_path),
         e.occurred_at,
         ingestedAt,
       ),

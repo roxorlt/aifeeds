@@ -5,6 +5,7 @@ import {
   DRAWER_EASE,
   EASE_OUT,
   MOTION_DURATION,
+  resolveChannelSwipeIntent,
   shouldCommitDismiss,
   shouldReduceMotion,
 } from "./motion.ts";
@@ -39,4 +40,12 @@ test("dismiss rejects reverse, vertical, and slow short gestures", () => {
   assert.equal(shouldCommitDismiss({ distance: -120, crossAxis: 2, elapsedMs: 100, viewport: 390 }), false);
   assert.equal(shouldCommitDismiss({ distance: 40, crossAxis: 50, elapsedMs: 100, viewport: 390 }), false);
   assert.equal(shouldCommitDismiss({ distance: 30, crossAxis: 3, elapsedMs: 500, viewport: 390 }), false);
+});
+
+test("channel swipe waits for clear horizontal intent and favors page scroll on a diagonal", () => {
+  assert.equal(resolveChannelSwipeIntent(4, 3), "unknown");
+  assert.equal(resolveChannelSwipeIntent(18, 8), "horizontal");
+  assert.equal(resolveChannelSwipeIntent(8, 18), "vertical");
+  assert.equal(resolveChannelSwipeIntent(13, 12), "vertical");
+  assert.equal(resolveChannelSwipeIntent(7, 6), "unknown");
 });

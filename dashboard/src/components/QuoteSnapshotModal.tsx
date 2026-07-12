@@ -21,6 +21,7 @@ import { isTcoOnly } from "../lib/tcoResolvedLink";
 import { XArticleCard } from "./XArticleCard";
 import { useMotionDismiss } from "../lib/motionLayer";
 import { activateModalFocus } from "../lib/modalFocus";
+import { useScrollLock } from "../lib/useScrollLock";
 
 export function QuoteSnapshotModal() {
   const quote = useQuoteSnapshotStore((s) => s.quote);
@@ -34,33 +35,21 @@ export function QuoteSnapshotModal() {
     close();
   }, [close]);
   const { layerClassName, requestClose } = useMotionDismiss(closeModal, "sheet", Boolean(quote));
+  const escapeCloseRef = useRef(closeModal);
+  useScrollLock(modalOpen);
+
+  useEffect(() => {
+    escapeCloseRef.current = closeModal;
+  }, [closeModal]);
 
   useEffect(() => {
     if (!modalOpen) return;
     const panel = panelRef.current;
     if (!panel) return;
-    return activateModalFocus(panel);
+    return activateModalFocus(panel, {
+      onEscape: () => escapeCloseRef.current(),
+    });
   }, [modalOpen]);
-
-  // ESC 关闭
-  useEffect(() => {
-    if (!quote) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeModal();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [quote, closeModal]);
-
-  // body scroll lock 当 modal 打开
-  useEffect(() => {
-    if (!quote) return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [quote]);
 
   if (!quote) return null;
 

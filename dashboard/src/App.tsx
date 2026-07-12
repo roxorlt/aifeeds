@@ -31,7 +31,8 @@ import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordi
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
 import { useDrawer } from "./lib/drawerContext";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
-import { shouldReduceMotion, watchTransformTransition } from "./lib/motion";
+import { resolveChannelSwipeIntent, watchTransformTransition } from "./lib/motion";
+import { useReducedMotion } from "./lib/useReducedMotion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
 import { track, EVENTS } from "./lib/telemetry";
 import {
@@ -390,6 +391,7 @@ function DashboardHome() {
     && feedRequestStartedForTick === refreshTick;
 
   const isNarrow = useIsNarrow();
+  const reduceMotion = useReducedMotion();
   const [immediateColumnCount, setImmediateColumnCount] = useState(() => (
     typeof window === "undefined" ? 1 : getImmediateColumnCount(window.innerWidth)
   ));
@@ -521,13 +523,13 @@ function DashboardHome() {
         `[data-chip-key="${filter}"]`,
       );
       chip?.scrollIntoView({
-        behavior: shouldReduceMotion() ? "auto" : "smooth",
+        behavior: reduceMotion ? "auto" : "smooth",
         block: "nearest",
         inline: "center",
       });
     });
     return () => cancelAnimationFrame(raf);
-  }, [filter, isNarrow]);
+  }, [filter, isNarrow, reduceMotion]);
 
   // PM 2026-05-27 v5: filter 切换后 pillA slide 到新 active chip + 重置 pillB/bridge.
   // - chip click 走 switchChannel → setFilter → 此 effect → pillA transition slide 过去;
@@ -539,12 +541,12 @@ function DashboardHome() {
     const raf = requestAnimationFrame(() => {
       resetInkToActive(
         filter,
-        !isFirstPillSyncRef.current && !shouldReduceMotion(),
+        !isFirstPillSyncRef.current && !reduceMotion,
       );
       isFirstPillSyncRef.current = false;
     });
     return () => cancelAnimationFrame(raf);
-  }, [filter, isNarrow, resetInkToActive]);
+  }, [filter, isNarrow, reduceMotion, resetInkToActive]);
 
   // 横滑时只挂相邻 panel；top 在开始横滑时由当前 Header 可见比例确定，
   // 避免 Header 已隐藏时被强制弹回或留下 49px 空白。
@@ -564,20 +566,19 @@ function DashboardHome() {
       h.style.transform = `translateY(${-ratio * 100}%)`;
       h.style.opacity = `${1 - ratio}`;
     };
-    if (!isNarrow || shouldReduceMotion()) {
+    if (!isNarrow || reduceMotion) {
       hideRatioRef.current = 0;
       apply(0);
       return;
     }
     const TOP_ZONE = 50;
     const HEADER_H = 49;
-    let ticking = false;
+    let scrollRaf: number | null = null;
     let lastY = getScrollY();
     const handler = () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        ticking = false;
+      if (scrollRaf !== null) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = null;
         const y = getScrollY();
         const delta = y - lastY;
         lastY = y;
@@ -593,8 +594,15 @@ function DashboardHome() {
         }
       });
     };
-    return addScrollRootListener(handler);
-  }, [isNarrow]);
+    const removeScrollListener = addScrollRootListener(handler);
+    return () => {
+      removeScrollListener();
+      if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
+      scrollRaf = null;
+      hideRatioRef.current = 0;
+      apply(0);
+    };
+  }, [isNarrow, reduceMotion]);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
     setFilter(nextFilter as typeof filter);
@@ -620,9 +628,9 @@ function DashboardHome() {
 
     let startX = 0, startY = 0, startT = 0;
     let active = false;
+    let activeTouchId: number | null = null;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
     let currentSide: 'left' | 'right' | null = null;
-    const reduceMotion = shouldReduceMotion();
     let disposePendingSettle: (() => void) | null = null;
     let postSwitchRaf = 0;
     // R22: 删 lockBody/unlockBody. 架构改造后 PTR 不存在 (body 永久 fixed),
@@ -682,8 +690,28 @@ function DashboardHome() {
         },
       });
     };
+    const findActiveTouch = (touches: TouchList) => (
+      activeTouchId === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === activeTouchId)
+    );
+    const cancelSwipeGesture = () => {
+      cancelPendingSettle();
+      resetTransform();
+      if (direction === 'horizontal') {
+        resetInkToActive(filterRef.current, false);
+      }
+      active = false;
+      activeTouchId = null;
+      direction = 'unknown';
+      cleanupAdjacent();
+    };
 
     const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        cancelSwipeGesture();
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (!target) return;
       if (target.closest('[data-drawer-panel]')) return;
@@ -698,6 +726,7 @@ function DashboardHome() {
       startX = t0.clientX;
       startY = t0.clientY;
       startT = Date.now();
+      activeTouchId = t0.identifier;
       direction = 'unknown';
       currentSide = null;
       active = true;
@@ -708,32 +737,37 @@ function DashboardHome() {
     };
     const onMove = (e: TouchEvent) => {
       if (!active) return;
-      const t = e.touches[0];
+      if (e.touches.length !== 1) {
+        cancelSwipeGesture();
+        return;
+      }
+      const t = findActiveTouch(e.touches);
+      if (!t) {
+        cancelSwipeGesture();
+        return;
+      }
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
-      const absDx = Math.abs(dx), absDy = Math.abs(dy);
       // R23 (2026-05-28): 删掉方向锁定前的首帧 preventDefault.
       // 它是 R17 为防"斜滑触发系统下拉刷新"加的, 但 R22 把 mobile body 改成
       // 永久 fixed (index.css max-md:overflow:hidden) 之后 pull-to-refresh 物理上
       // 已不存在 —— R22 删了配套的 onStart lockBody, 却漏删了这里的 preventDefault.
-      // 残留的它反而拦了慢速纵滑的头几帧 (absDx+absDy<10 窗口内): iOS Safari 一旦
+      // 残留的它反而拦了慢速纵滑的头几帧:iOS Safari 一旦
       // 在手势早期帧收到 preventDefault, 就判定该手势被 JS 接管, 即便后续锁定为
       // vertical 也不再启动 native scroll → 表现为"滑动偶尔不响应, 要反复多次才滚".
-      // 横滑不受影响: 锁定为 horizontal 后下方 L532 仍 preventDefault 跟手.
+      // resolveChannelSwipeIntent 会等到横向意图明显强于纵向才接管；持续模糊的
+      // 对角线最终按纵滑处理。横滑锁定后下方仍 preventDefault 跟手.
       if (direction === 'unknown') {
-        if (absDx + absDy < 10) {
-          // 抖动阈值内, 还没法判方向, 直接 return 等下一帧 (不 preventDefault,
-          // 让 #root native vertical scroll 能正常启动)
-          return;
-        }
-        if (absDx > absDy) {
-          direction = 'horizontal';
-        } else {
+        const intent = resolveChannelSwipeIntent(dx, dy);
+        if (intent === 'unknown') return;
+        if (intent === 'vertical') {
           direction = 'vertical';
           active = false;
+          activeTouchId = null;
           // R22: vertical lock, JS 不动 main, #root native scroll 接管
           return;
         }
+        direction = 'horizontal';
       }
       if (direction === 'horizontal') {
         // R22: 架构改造后 PTR 不存在 (body 永久 fixed), 不再需要 preventDefault
@@ -771,13 +805,20 @@ function DashboardHome() {
     };
     const onEnd = (e: TouchEvent) => {
       if (!active || direction !== 'horizontal') {
-        active = false;
-        resetTransform();
-        cleanupAdjacent();
+        cancelSwipeGesture();
+        return;
+      }
+      if (e.touches.length !== 0) {
+        cancelSwipeGesture();
+        return;
+      }
+      const t = findActiveTouch(e.changedTouches);
+      if (!t) {
+        cancelSwipeGesture();
         return;
       }
       active = false;
-      const t = e.changedTouches[0];
+      activeTouchId = null;
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const dt = Date.now() - startT;
@@ -860,18 +901,11 @@ function DashboardHome() {
         });
       });
     };
-    const onCancel = () => {
-      cancelPendingSettle();
-      if (active && direction === 'horizontal' && !reduceMotion) {
-        applyMainTransform(0, true);
-        applyAdjacentTransform(0, true);
-        // 墨汁动效回弹到原 chip
-        resetInkToActive(filterRef.current, true);
-      }
-      active = false;
-      direction = 'unknown';
-      currentSide = null;
-      setSwipeAdjacent(null);
+    const onCancel = (e: TouchEvent) => {
+      // A cancel for an unrelated touch still invalidates the gesture, but the
+      // lookup ensures we never accidentally substitute changedTouches[0].
+      if (activeTouchId !== null) findActiveTouch(e.changedTouches);
+      cancelSwipeGesture();
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
@@ -881,14 +915,13 @@ function DashboardHome() {
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
-      cancelPendingSettle();
-      resetTransform();
+      cancelSwipeGesture();
       el.removeEventListener('touchstart', onStart);
       el.removeEventListener('touchmove', onMove);
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };
-  }, [isNarrow, renderInkBetween, resetInkToActive]);
+  }, [isNarrow, reduceMotion, renderInkBetween, resetInkToActive]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores
@@ -910,17 +943,42 @@ function DashboardHome() {
     let startX = 0;
     let startY = 0;
     let direction: "h" | "v" | null = null;
+    let guardTouchId: number | null = null;
+
+    const findGuardTouch = (touches: TouchList) => (
+      guardTouchId === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === guardTouchId)
+    );
+    const resetGuardGesture = () => {
+      target = null;
+      guardTouchId = null;
+      direction = null;
+    };
 
     const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        resetGuardGesture();
+        return;
+      }
       target = e.target as Element | null;
       const t = e.touches[0];
+      guardTouchId = t.identifier;
       startX = t.clientX;
       startY = t.clientY;
       direction = null;
     };
     const onMove = (e: TouchEvent) => {
       if (!target) return;
-      const t = e.touches[0];
+      if (e.touches.length !== 1) {
+        resetGuardGesture();
+        return;
+      }
+      const t = findGuardTouch(e.touches);
+      if (!t) {
+        resetGuardGesture();
+        return;
+      }
       const dx = Math.abs(t.clientX - startX);
       const dy = Math.abs(t.clientY - startY);
       if (direction === null && (dx > 8 || dy > 8)) {
@@ -934,9 +992,9 @@ function DashboardHome() {
         if (e.cancelable) e.preventDefault();
       }
     };
-    const onEnd = () => {
-      target = null;
-      direction = null;
+    const onEnd = (e: TouchEvent) => {
+      if (guardTouchId !== null) findGuardTouch(e.changedTouches);
+      resetGuardGesture();
     };
 
     window.addEventListener("touchstart", onStart, { passive: true });

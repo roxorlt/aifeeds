@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuthStore } from '../lib/authStore';
 import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
 import { toast } from '../lib/toast';
 import { useMotionDismiss } from '../lib/motionLayer';
+import { activateModalFocus } from '../lib/modalFocus';
+import { useScrollLock } from '../lib/useScrollLock';
 
 interface Props {
   open: boolean;
@@ -19,6 +21,26 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const { layerClassName, requestClose } = useMotionDismiss(onClose, 'modal', open);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const modalOpen = open && user !== null;
+  useScrollLock(modalOpen);
+  const escapeCloseRef = useRef(onClose);
+  const dismissAllowedRef = useRef(true);
+
+  useEffect(() => {
+    escapeCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    return activateModalFocus(panel, {
+      onEscape: () => {
+        if (dismissAllowedRef.current) escapeCloseRef.current();
+      },
+    });
+  }, [modalOpen]);
 
   if (!open || !user) return null;
 
@@ -30,6 +52,7 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
       setErrorMsg('请输入完整 11 位手机号');
       return;
     }
+    dismissAllowedRef.current = false;
     setLoading(true);
     try {
       await deleteAct(phoneInput);
@@ -47,17 +70,25 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
         setErrorMsg(a.message || '注销失败');
       }
     } finally {
+      dismissAllowedRef.current = true;
       setLoading(false);
     }
   };
 
   return (
-    <div className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4`}>
+    <div
+      className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-account-confirm-title"
+    >
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className="motion-layer-panel w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-2 text-lg font-semibold text-neutral-900">确认注销账号？</h2>
+        <h2 id="delete-account-confirm-title" className="mb-2 text-lg font-semibold text-neutral-900">确认注销账号？</h2>
         <p className="mb-2 text-sm text-neutral-700">注销后将永久失去：</p>
         <ul className="mb-3 ml-4 list-disc text-sm text-neutral-700">
           <li>收藏的所有内容</li>
@@ -74,8 +105,8 @@ export function DeleteAccountConfirm({ open, onClose, onSuccess }: Props) {
           value={phoneInput}
           onChange={(e) => setPhoneInput(e.target.value.replace(/\D/g, '').slice(0, 11))}
           placeholder="请输入要注销账号的登录手机号"
+          data-modal-initial-focus
           className="w-full rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none"
-          autoFocus
         />
         {errorMsg && <p className="mt-1 text-xs text-rose-600">{errorMsg}</p>}
 
