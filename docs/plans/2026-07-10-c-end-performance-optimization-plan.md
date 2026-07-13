@@ -20,7 +20,8 @@ Vitest、Node test、Playwright（Chromium/WebKit）/Chrome DevTools。
 ## 实施规则
 
 - 不把本计划一次性合成一个发布。顺序为 P0 观测 → P1 关键路径 → P2 同源/查询/图片 →
-  P3 地域实验；每阶段至少观察 48 小时。
+  P3 地域实验；每阶段至少观察 48 小时。该观察窗口属于生产灰度后的效果验收，不阻塞
+  本地代码交付、分支提交或 staging 前的准备工作。
 - 每个行为改动先有失败测试；每个生产 nginx/D1 动作先 staging、备份、验证、再单独获准上线。
 - 任何阶段若错误率增加 >0.5 个百分点、LCP P75 恶化 >10%、登录/分享/深链回归，立即回滚
   当前阶段，不在坏版本上叠加下一项。
@@ -258,7 +259,18 @@ git commit -m "fix: report only measurable worker timing"
 **Files:**
 
 - Create: `deploy/nginx/aifeeds-performance-log.conf`
+- Create: `deploy/nginx/aifeeds-performance.logrotate`
+- Create: `deploy/nginx/check-nginx-request-id.py`
+- Create: `deploy/nginx/insert-nginx-request-id.py`
+- Create: `deploy/nginx/verify-nginx-request-id-diff.py`
+- Create: `deploy/nginx/install-aifeeds-performance-log.sh`
+- Create: `deploy/nginx/rollback-aifeeds-performance-log.sh`
+- Create: `deploy/nginx/install-aifeeds-performance-log.integration.test.sh`
+- Create: `deploy/nginx/test-fixtures/gl-a-installer/*`
+- Create: `deploy/systemd/aifeeds-performance-logrotate.service`
+- Create: `deploy/systemd/aifeeds-performance-logrotate.timer`
 - Modify: `docs/operations.md`
+- Modify: `docs/reviews/c-end-perf-staging-change-packet.md`
 
 **Step 1: Inspect live block names without printing secrets**
 
@@ -277,32 +289,219 @@ The snippet must log JSON-safe values for:
 ```nginx
 $request_id $host $uri $status $request_time
 $upstream_connect_time $upstream_header_time $upstream_response_time
-$upstream_cache_status $bytes_sent $http_user_agent
+$upstream_cache_status $bytes_sent $aifeeds_client_class
 ```
 
-Use `$uri`, not `$request_uri`, so query values never enter this performance log. Do not log Cookie,
-Authorization, `X-Origin-Secret`, phone or email. In proxied locations set
+Use a route-bucket map sourced from `$uri`, never raw `$uri` or `$request_uri`: dynamic ids/assets/tokens and all
+unknown paths must collapse to fixed categories. Map raw `$http_user_agent` to a fixed coarse client class and do
+not persist the original string. Do not log Cookie, Authorization, `X-Origin-Secret`, phone or email. In proxied locations set
 `proxy_set_header X-Request-Id $request_id`; Worker must validate/echo it per Task 2. Document log rotation and
 the exact rollback file.
 
-**Step 3: Validate as a logging-only VPS change**
+**Step 3: Validate as a split logging-only VPS change**
 
 The current staging domains do not traverse this VPS, so do not claim they validate this config. After explicit
-approval, back up the live config, enable only the new log format on the VPS, then:
+approval, GL-a backs up the live config and installs only the new log format, upstream request-id propagation and
+dedicated rotation timer. A 2026-07-12 read-only check proved that neither production nor staging Worker currently
+echoes `X-Request-Id`/`Server-Timing`; therefore GL-a must not require or claim Worker join. It instead requires an
+exact unique `perf_probe`, JSON/timing schema validation, semantic proof that the site changed by only seven
+request-id lines, and a real forced rotation whose new inode continues receiving records.
+
+The VPS has no active cron or global logrotate timer, so a versioned dedicated five-minute systemd timer is part of
+GL-a. The log uses a 64 KiB/5 second buffer, daily rotation, `maxsize 50M`, mode `0640 www-data:adm`, and 14 files.
+Do not enable the global timer as an incidental side effect.
+
+Before the first remote write, persist a unique operation id, the frozen G0 commit, and an immutable 0600 copy of
+the exact rollback helper in the evidence directory. The installer must accept that operation id rather than create
+one remotely and must bind `operation_id`, `g0_commit`, and `rollback_helper_sha256` into both journal and summary.
+Recovery may fetch only the exact journal derived from that known id; normal summary wins over a recovery record
+unless recovery mode is explicit, and rollback uploads only the hash-matching evidence copy.
+The installer must fsync an `initializing` intent before creating its site candidate/backup, a `prepared` record before
+creating the backup, and `mutation_started` before any runtime candidate or final write. Site and runtime candidates
+must be operation-bound, created beside their final paths, verified, and atomically renamed on the same filesystem.
+Journal every installed artifact hash and candidate path, re-check the enabled-site target around every site
+move/reload, and stop without cleanup on unknown site, symlink, or artifact drift. Early recovery may tolerate a
+missing backup only while the live site still equals the recorded base; terminal `rolled_back` evidence is immutable.
+
+After G1 deploys the staging Worker and G7b creates the perf-staging TLS/same-origin route, GL-b performs the
+read-only response-id join on `perf-staging.ai-feeds.com`; only then may G8 continue. Do not deploy the production
+Worker early or add an nginx response header to fake this proof.
+
+GL-a still requires:
+
+- a **C journal update CAS active** contract with consumer activation active and harness name/count freeze frozen. Source and
+  rollback journals each have operation-bound F, `${F}.tmp`, and `${F}.previous-update-gl-a-<operation-id>`; source F
+  is `/var/backups/aifeeds-performance-log/transaction-<operation-id>.json` and rollback F is
+  `/var/backups/aifeeds-performance-log/rollback-transaction-<operation-id>.json`. Every version embeds
+  `journal_update={schema:1,revision:N,self_dev:D,self_ino:I,predecessor:null|{revision:N-1,sha256,dev,ino}}`;
+  only fresh initializing/prepared genesis may use revision 0/null predecessor. T is created with
+  `O_EXCL|O_NOFOLLOW`; its self identity comes from the same write fd, and full write plus fsync(fd)+fsync(parent)
+  precedes recoverability. Source legacy genesis trusts the CLI-supplied external hash and is accepted only when that
+  hash and the complete business schema match; rollback legacy genesis has no externally trusted hash and is rejected
+  fail closed. A legacy orphan tmp cannot authenticate itself. S0 is F-only, S1 F+T, S2 P+T, and S3 P+F.
+  S4=F(new)+C(cleanup tombstone), P absent. Recovery exact-validates physical C against F.predecessor, then uses
+  held-dirfd unlink after a final pathname/held-FD identity check, fsyncs the parent, and returns to S0. S1–S4 trust
+  only successor-embedded self/predecessor plus a legal semantic transition, use NOREPLACE and fsync the parent.
+  Symlinks, revision jumps or regression, semantic inverse, same-hash different-inode, conflicting F/T/P/C, and invalid/partial T are preserved and
+  fail closed—never removed, truncated, rerendered, or adopted by pathname. Automatic recovery settles source before
+  reading phase or mutating live state; manual settles source, then rollback, before terminal-pair preparation.
+  Journal `.previous-update-*` and marker `.previous-terminal-*` are distinct protocols. A read-only consumer accepts
+  only S0 and reports any T/P/cleanup residue as `recovery_required`. Terminal prepared, one-side, and two-side
+  publication windows retain both journal predecessors; normal cleanup resumes only after the committed marker is durable;
+- an immutable 14-slot runtime cleanup plan shared by automatic and manual rollback. Its canonical items,
+  `plan_sha256`, cursor, and `cursor_state` live in the rollback journal. Each item durably records `detaching` before
+  an exact NOREPLACE tombstone rename and `detached` before unlink; `runtime_removed` is legal only after all 14 slots
+  reach `complete` and physical runtime residue is zero. Re-entry resumes the recorded cursor. Plan drift, unknown
+  tombstones, and `rollback_failed.failed_from` drift preserve evidence and fail closed. Legacy `runtime_removed`
+  records without the cleanup object are compatibility inputs: both automatic and manual paths still execute the
+  current 14-slot plan and prove zero residue instead of treating the legacy phase as cleanup authority. The rebuilt
+  plan records `compatibility_mode=legacy_runtime_removed`, preserves any `rollback_failed` wrapper while its cursor
+  advances, and installer retry detects the exact current-operation journal namespace before live absence checks.
+  The log slot remains an exact `archive_handoff` until daemon reload succeeds; a reload failure keeps that inode and
+  records no premature archive-manifest evidence;
+- a frozen integration matrix of 135 scenarios (95 old + 40 new). The 40 C scenario names are:
+  - source journal: `journal-source-g-reentry`, `journal-source-s1-reentry`, `journal-source-s2-reentry`,
+    `journal-source-s3-reentry`, `journal-source-s4-reentry`, `journal-source-semantic-drift`,
+    `journal-source-samebytes-predecessor`, `journal-source-partial-tmp`, `journal-source-p-only`,
+    `journal-source-all-three`, `journal-source-unknown-cleanup`;
+  - rollback journal: `journal-rollback-g-reentry`, `journal-rollback-s1-reentry`, `journal-rollback-s2-reentry`,
+    `journal-rollback-s3-reentry`, `journal-rollback-s4-reentry`, `journal-rollback-semantic-drift`,
+    `journal-rollback-samebytes-predecessor`, `journal-rollback-partial-tmp`, `journal-rollback-p-only`,
+    `journal-rollback-all-three`, `journal-rollback-unknown-cleanup`;
+  - terminal pair and cleanup: `terminal-pair-zero-side-reentry`, `terminal-pair-one-side-reentry`,
+    `terminal-pair-two-side-reentry`, `terminal-pair-pre-marker-reentry`, `cleanup-manual-detaching-reentry`,
+    `cleanup-manual-detached-reentry`, `cleanup-automatic-detaching-reentry`,
+    `cleanup-automatic-detached-reentry`, `cleanup-manual-unknown-tombstone`,
+    `cleanup-automatic-unknown-tombstone`, `cleanup-manual-plan-drift`, `cleanup-automatic-plan-drift`,
+    `cleanup-manual-failed-from-drift`, `cleanup-automatic-failed-from-drift`;
+  - legacy compatibility: `journal-source-legacy-genesis`, `journal-rollback-legacy-genesis-rejected`,
+    `cleanup-manual-legacy-runtime-removed`, `cleanup-automatic-legacy-runtime-removed`;
+- an operation-bound 0600 forward installation transcript plus a no-clobber, operation+attempt bound
+  manual rollback attempt transcript for every invocation. Both capture remote stdout/stderr into a private tmp, capture
+  `PIPESTATUS` immediately, publish a 0600 final, and only then enforce the SSH/tee statuses;
+- forward transcript, forward summary, manual transcript, and manual summary all use same-parent NOREPLACE publication,
+  followed by an fsync of the parent directory. A publish collision preserves both the owned tmp and unknown destination.
+  Every tmp comes from an O_EXCL `mktemp` allocation; only its immediately recorded dev/ino authorizes failure cleanup,
+  never the current pathname, matching bytes, or matching hash;
+- log rollback via same-directory NOREPLACE quarantine, followed by writable FD quiescence. Production waits up
+  to 60s; timeout preserves the quarantine and operation-bound archive manifest, fails closed, and resumes only
+  with the same operation id. The manifest is terminal only after inventory completion, exact destination SHA/size
+  validation, an exact bidirectional audit-file/destination set match, and absence of every
+  source/quarantine/candidate. Schema 2 generations permit only append, seal, one-entry quiesce, copy, or archive
+  successors. Its exact top-level keys are
+  `{schema,operation_id,generation,previous_manifest_sha256,previous_manifest_dev,previous_manifest_ino,inventory_complete,empty_inventory,entries}`.
+  Generation 0 has a null predecessor triple; every later successor persists the predecessor raw SHA/dev/ino captured
+  from one stable file descriptor. A cross-filesystem entry advances
+  `journaled → quiescent → copied → archived`; same-filesystem skips copied. Before final publication, crossfs
+  journals `candidate_dev`/`candidate_ino`; after publication it records `destination_dev`/`destination_ino`, which
+  must equal the candidate inode. A samefs destination equals the source inode. Terminal generation is
+  `3 * N + 1 + count(entries has candidate_dev)` (`4 * N + 1` when all entries are crossfs). A samebytes different
+  inode/unknown identity fails closed. Unjournaled candidates, candidate/destination conflicts or joint absence, and
+  any candidate/cleanup/unknown audit residue are never adopted. Every terminal destination physical dev/ino equals
+  its recorded destination. Final/tmp/operation-bound previous publish through a three-path NOREPLACE recovery.
+  P+T and P+F trust only the successor-embedded predecessor triple and then prove physical P exact. P-only,
+  invalid/unrelated T/F, or same-hash different-inode state is preserved and fails closed. Both terminal journals and
+  the summary bind the final manifest SHA, generation,
+  and entry count. A read-only held-fingerprint dispatcher treats F=final, T=tmp, P=previous, and C=the
+  operation-bound private cleanup directory. It accepts only `∅`, `T(genesis)`, `F`, `F+T`, `P+T`, `P+F`,
+  `F+C(payload)`, and `F+C(empty)`. F/T/P and C payload captures use `O_NOFOLLOW`, root:root/0600, `nlink=1`, and
+  exact `{dev,ino,mtime_ns,sha256,size}` fingerprints, rejecting duplicate keys and non-finite JSON. Successor,
+  reachability, and immutable log-handoff checks use those fingerprints and recapture every initially present path
+  unchanged before publish/cleanup; a journaled live log may only grow on the same inode, while later states are
+  content-frozen. C is removed only through held parent/dirfd exact unlink/rmdir. A zero-write sentinel is set before
+  the first archive capture and cleared only after all final recaptures; while set, the failure trap exits before
+  summary removal, `rollback_failed`, or namespace cleanup, so repeated preflight failure cannot change F/T/P/C;
+- a runtime artifact manifest that is not a standalone artifact: it is the source transaction journal fields
+  `runtime_artifacts` and `runtime_artifacts_sealed`; no independent runtime manifest path/SHA/generation/count exists.
+  All 8 candidates persist dev, ino, sha256, and metadata, and the complete inventory is sealed before any final
+  publication. Exact-identity operation-bound tombstones clean up the 7 immutable finals and all 8 candidates; the
+  live log is handed to the archive manifest instead. `rotation_state_identity` binds the exclusive operation-bound
+  directory candidate plus a stable ledger anchor with path/dev/ino/mode/`genesis_record_sha256`; `rotation_state_snapshot`
+  verifies generation, `tail_record_sha256`, ledger SHA/size, and the current status identity. The timer's only writer
+  is a root-only `rotation-wrapper`; it serializes exclusively on the authority-bound ledger inode FD flock and appends
+  a verifiable tail to that same ledger. The legacy `/run/aifeeds-performance-log-rotation.lock` argument is
+  compatibility-only and ignored: it is not an authority domain and not a serialization domain. The install-time
+  status inode/hash is not permanent identity, and manual recovery never recaptures or adopts
+  the current status path. The dynamically rendered systemd service `ExecStart` fixes the operation id, then anchor,
+  checker, config, and logrotate authority groups in that order; the config triple is immediately followed by the
+  logrotate triple, and every group binds exact path/dev/ino/SHA. The external authority is exactly
+  `/var/backups/aifeeds-performance-log/rotation-anchor-<operation-id>.json`, never selected by a directory scan.
+  Source/rollback journals and forward/manual summaries mirror the exact 9-key
+  `rotation_anchor_identity={state,path,sha256,size,uid,gid,mode,dev,ino}` state machine
+  `allocated → prepared → sealed`. `allocated` binds the O_EXCL empty-file SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, size=0, and inode. `prepared` persists
+  the expected final target SHA/size while the physical inode may still be empty. Only after filling and fsyncing that
+  same inode may `sealed` require the physical path/dev/ino/SHA/size to be exact. The canonical authority payload uses
+  schema 2 and exactly `{schema,operation_id,directory,provenance,checker,config,logrotate}` at top level:
+  directory/provenance bind the state
+  directory and ledger genesis. Their exact nested keys are directory=`{path,uid,gid,mode,dev,ino}`,
+  provenance=`{path,uid,gid,mode,dev,ino,genesis_record_sha256}`, and
+  checker/config=`{path,sha256,size,uid,gid,mode,dev,ino}`. The logrotate entry has exact nested keys
+  `{path,sha256,size,uid,gid,mode,dev,ino}`, fixes `/usr/sbin/logrotate`, and requires root:root mode 0755.
+  Automatic and manual callers use a sealed-anchor extractor: it opens the exact anchor once with `O_NOFOLLOW`,
+  validates its canonical bytes and full identity, and extracts logrotate authority only from held-FD bytes; the
+  checker opens every authorized resource as a held-FD and performs a final pathname/held-FD identity exact check
+  before mutation. Checker/config candidate
+  identities are journaled first; only after ledger initialization and anchor sealing is the service candidate rendered
+  last. A committed terminal must be sealed. A rolled_back terminal may be null only when the anchor was never allocated;
+  otherwise it retains the last identity evidence (`allocated`, `prepared`, or `sealed`) without falsely promoting the
+  state, while the pathname is absent/deleted. Manual recovery must stop the
+  timer/service and prove quiescence before invoking `rotation-recover` with the fixed authority; bare logrotate and
+  current-path adoption are forbidden.
+  `site_backup_identity` is persisted before copy and binds the `O_EXCL`
+  inode. The pre-mutation base SITE identity binds the original site dev/inode; the committed installed SITE identity
+  binds the installer candidate dev/inode; the rolled_back base SITE identity binds the journaled rollback candidate dev/inode
+  after a backup-copy restore publication, otherwise the original site dev/inode. A copy need not preserve the
+  original inode. Every phase accepts only its recorded identity
+  and must never derive identity from the current path; same bytes or hash alone never authorize adoption. Manual recovery must never derive or
+  adopt unknown identity. Terminal physical finals/candidates and rotation
+  cleanup must have zero residue. Pair-free source-only `rolled_back` is a narrow exception: only effective
+  `initializing`/`prepared` may transition, both pair fields stay absent, and the exact delta is phase, origin, plus
+  archive SHA/generation/count for an operation-bound generation-1 empty terminal manifest. A recorded non-absent
+  installer candidate may be physically absent only when two identical held captures prove exact schema 2,
+  root:root/0600, `nlink=1`, generation 1, complete/empty inventory and zero entries, with candidate/tmp/previous
+  absent before and after; this is the `prelive empty manifest` contract;
+- an operation-bound terminal pair marker that advances `prepared → committed`. Prepared embeds exact
+  `source_before_authority` and `rollback_before_authority` objects with
+  `{raw_base64,sha256,dev,ino}`, in addition to before/target hashes. Source raw matches the CLI-trusted SHA;
+  rollback raw is canonical at effective `logs_archived`; both targets are reconstructed as the sole legal CAS
+  successors and remain named `source_target_sha256` and `rollback_target_sha256`. Both predecessors remain through prepared/one-side/two-side publication and are cleaned only after
+  committed is durable. Committed binds `prepared_marker_sha256` and both terminal SHAs; validation reconstructs
+  prepared from committed bytes, recomputes its SHA, and proves terminal SHA equals target SHA. The committed marker
+  physical chain also reconciles both physical journals and the summary. Prepared is not
+  business authority, and recovery accepts only exact before/target states;
+- a canonical recovery bundle that validates the captured journal record and SHA inside a private directory and,
+  for rolled_back, copies and locally reconciles the exact remote archive manifest path/SHA/generation/count.
+  Publish uses same-parent Darwin `renamex_np(RENAME_EXCL)` or Linux `renameat2(RENAME_NOREPLACE)`; failure keeps
+  the private tmp and unknown destination. After rename, `fsync` the destination parent directory before declaring
+  durable publication; automatic terminal reconciliation is never inferred from transcript substring alone;
 
 ```bash
 nginx -t
 systemctl reload nginx
-curl -sS -D - -o /dev/null https://ai-feeds.com/
-curl -sS -D - -o /dev/null 'https://api.ai-feeds.com/api/items?source_type=x_list&limit=1'
+curl -fsS --connect-timeout 5 --max-time 15 -o /dev/null https://ai-feeds.com/
+curl -fsS --connect-timeout 5 --max-time 15 -o /dev/null \
+  'https://api.ai-feeds.com/api/items?source_type=x_list&limit=1'
 ```
 
-Expected: nginx config valid; new log contains connect/header/response timings and request id.
+Expected: nginx config valid; GL-a unique/rotation probes pass; GL-b later proves the staging Worker response id
+joins the same nginx row.
+
+Before any upload, run all versioned helper tests and parse the transactional shell:
+
+```bash
+python3 deploy/nginx/check-nginx-request-id.test.py
+python3 deploy/nginx/insert-nginx-request-id.test.py
+python3 deploy/nginx/verify-nginx-request-id-diff.test.py
+bash -n deploy/nginx/install-aifeeds-performance-log.sh
+bash -n deploy/nginx/rollback-aifeeds-performance-log.sh
+bash deploy/nginx/install-aifeeds-performance-log.integration.test.sh
+```
 
 **Step 4: Commit the versioned config and runbook**
 
 ```bash
-git add deploy/nginx/aifeeds-performance-log.conf docs/operations.md
+git add deploy/nginx deploy/systemd docs/operations.md docs/reviews/c-end-perf-staging-change-packet.md
 git commit -m "ops: add nginx upstream timing logs"
 ```
 
@@ -1127,7 +1326,9 @@ Use the rollout template to record:
 **Step 6: Production rollout gates**
 
 Roll out one phase at a time. Observe ≥48 hours and ≥100 LCP samples in each primary real-user cohort before
-declaring success. Target:
+declaring success or advancing to the next production phase. This post-deploy observation runs separately from
+local delivery: once G0, automated tests, cross-device functional checks and independent review pass, the local
+branch may be delivered without waiting for RUM. Target:
 
 ```text
 desktop all-clean LCP P75 <= 3.5s
@@ -1183,7 +1384,14 @@ git commit -m "docs: define geo routing performance experiment"
 
 ## 最终完成条件
 
-本计划只有在以下全部成立时才算完成：
+交付分两层记录：
+
+- **本地代码交付完成：** G0、自动化测试、PC/移动端功能检查、构建和独立复审通过，分支可提交；
+  不等待生产 RUM。
+- **生产效果验收完成：** 获得单独上线授权并完成灰度后，按阶段累计 ≥48 小时且主真实用户队列
+  ≥100 个 LCP 样本。该门槛只决定是否确认收益和推进下一生产阶段。
+
+本地代码交付按上方第一层判定；生产效果验收只有在以下全部成立时才算完成：
 
 1. PC 与移动端功能矩阵无回归；
 2. 列表/详情数据契约测试证明没有把抽屉全文删掉；

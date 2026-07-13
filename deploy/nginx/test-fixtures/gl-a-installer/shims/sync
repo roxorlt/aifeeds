@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+state_dir=/tmp/gl-a-test
+target=${2:-}
+
+fingerprint() {
+    local path=$1
+    printf '%s:%s:%s' \
+        "$(sha256sum "$path" | awk '{print $1}')" \
+        "$(stat -c '%d' "$path")" \
+        "$(stat -c '%i' "$path")"
+}
+
+replace_with_unknown_preserving_original() {
+    local path=$1 label=$2
+    local preserved="$state_dir/${label}.preserved"
+    local uid gid mode
+    uid=$(stat -c '%u' "$path")
+    gid=$(stat -c '%g' "$path")
+    mode=$(stat -c '%a' "$path")
+    test "$(stat -c '%d' "$path")" = "$(stat -c '%d' "$state_dir")"
+    fingerprint "$path" > "$state_dir/${label}.expected.fingerprint"
+    /usr/bin/mv "$path" "$preserved"
+    printf 'unknown takeover for %s\n' "$label" > "$path"
+    chown "$uid:$gid" "$path"
+    chmod "$mode" "$path"
+    fingerprint "$path" > "$state_dir/${label}.unknown.fingerprint"
+    printf '%s\n' "$preserved" > "$state_dir/${label}.preserved.path"
+}
+
+replace_with_same_bytes_preserving_original() {
+    local path=$1 label=$2
+    local preserved="${path%/*}/.${path##*/}.preserved-gl-a-test-${label}"
+    local uid gid mode
+    uid=$(stat -c '%u' "$path")
+    gid=$(stat -c '%g' "$path")
+    mode=$(stat -c '%a' "$path")
+    test ! -e "$preserved" && test ! -L "$preserved"
+    test "$(stat -c '%d' "$path")" = "$(stat -c '%d' "${path%/*}")"
+    fingerprint "$path" > "$state_dir/${label}.expected.fingerprint"
+    /usr/bin/mv "$path" "$preserved"
+    /usr/bin/cp "$preserved" "$path"
+    chown "$uid:$gid" "$path"
+    chmod "$mode" "$path"
+    fingerprint "$path" > "$state_dir/${label}.unknown.fingerprint"
+    printf '%s\n' "$preserved" > "$state_dir/${label}.preserved.path"
+}
+
+directory_fingerprint() {
+    local path=$1
+    printf '%s:%s:%s:%s:%s' \
+        "$(stat -c '%d' "$path")" "$(stat -c '%i' "$path")" \
+        "$(stat -c '%u' "$path")" "$(stat -c '%g' "$path")" "$(stat -c '%a' "$path")"
+}
+
+replace_directory_with_unknown_preserving_original() {
+    local path=$1 label=$2
+    local preserved="$state_dir/${label}.preserved"
+    directory_fingerprint "$path" > "$state_dir/${label}.expected.fingerprint"
+    /usr/bin/mv "$path" "$preserved"
+    mkdir -m 0750 "$path"
+    chown root:root "$path"
+    printf 'unknown rotation directory takeover\n' > "$path/unknown"
+    chmod 0600 "$path/unknown"
+    directory_fingerprint "$path" > "$state_dir/${label}.unknown.fingerprint"
+    fingerprint "$path/unknown" > "$state_dir/${label}.unknown-file.fingerprint"
+    printf '%s\n' "$preserved" > "$state_dir/${label}.preserved.path"
+}
+
+cleanup_payload_kind=''
+case "$target" in
+    /var/backups/aifeeds-performance-log/audit-*/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=archive-manifest
+        ;;
+    /var/log/nginx/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=log-quarantine
+        ;;
+    /etc/nginx/sites-available/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=site-displaced
+        ;;
+    /etc/nginx/conf.d/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=runtime-artifact
+        ;;
+    /var/lib/aifeeds-performance-logrotate/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=rotation-status
+        ;;
+    /var/backups/aifeeds-performance-log/.cleanup-gl-a-*/payload)
+        cleanup_payload_kind=terminal-previous
+        ;;
+esac
+
+# Fault hooks below observe or mutate only after the product's durability
+# request has completed successfully.  A failing real sync must fail closed.
+/usr/bin/sync "$@"
+
+if [ "${1:-}" = -f ]; then
+    case "$scenario:$target" in
+        crossfs-candidate-samebytes-takeover:/var/backups/aifeeds-performance-log/audit-*/aifeeds-performance.jsonl*.candidate-gl-a-*)
+            if mkdir "$state_dir/crossfs-candidate-samebytes-once" 2>/dev/null; then
+                replace_with_same_bytes_preserving_original "$target" crossfs-candidate-samebytes
+                : > "$state_dir/crossfs-candidate-samebytes-takeover-hit"
+            fi
+            ;;
+    esac
+    case "$scenario:$target" in
+        manual-recovery-prepared:/var/backups/aifeeds-performance-log/transaction-*.json)
+            if jq -e '.phase == "prepared" and .installer_candidate_dev != null and .site_backup_identity == null' \
+                "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/prepared-barrier-once" 2>/dev/null; then
+                : > "$state_dir/prepared-barrier-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+        prelive-prepared-auto-rollback:/var/backups/aifeeds-performance-log/transaction-*.json|prelive-prepared-delete-crash-reentry:/var/backups/aifeeds-performance-log/transaction-*.json)
+            if jq -e '.phase == "prepared" and .installer_candidate_dev != null and .site_backup_identity == null' \
+                "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/prelive-prepared-failure-once" 2>/dev/null; then
+                : > "$state_dir/prelive-prepared-failure-hit"
+                printf 'injected prepared pre-backup failure\n' >&2
+                exit 91
+            fi
+            ;;
+    esac
+    case "$scenario:$target" in
+        crossfs-destination-samebytes-takeover:/var/backups/aifeeds-performance-log/audit-*/archive-manifest.json|crossfs-copied-crash-reentry:/var/backups/aifeeds-performance-log/audit-*/archive-manifest.json)
+            if jq -e 'any(.entries[]; .state == "copied")' "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/${scenario}-once" 2>/dev/null; then
+                candidate=$(jq -er '.entries[] | select(.state == "copied") | .candidate' "$target")
+                destination=$(jq -er '.entries[] | select(.state == "copied") | .destination' "$target")
+                test -f "$candidate"
+                if [ "$scenario" = crossfs-destination-samebytes-takeover ]; then
+                    fingerprint "$candidate" > "$state_dir/crossfs-destination.candidate.fingerprint"
+                    /usr/bin/cp "$candidate" "$destination"
+                    chown root:root "$destination"
+                    chmod 0600 "$destination"
+                    fingerprint "$destination" > "$state_dir/crossfs-destination.unknown.fingerprint"
+                    : > "$state_dir/crossfs-destination-samebytes-takeover-hit"
+                else
+                    : > "$state_dir/crossfs-copied-crash-reentry-ready"
+                    while :; do sleep 1; done
+                fi
+            fi
+            ;;
+        manual-recovery-partial-backup:/var/backups/aifeeds-performance-log/transaction-*.json)
+            if jq -e '.phase == "prepared" and .site_backup_identity != null' "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/partial-backup-barrier-once" 2>/dev/null; then
+                backup=$(jq -er '.site_backup' "$target")
+                test "$(stat -c '%d %i' "$backup")" = \
+                    "$(jq -r '.site_backup_identity | [.dev,.ino] | map(tostring) | join(" ")' "$target")"
+                /usr/bin/head -c 37 /etc/nginx/sites-available/aifeeds.conf > "$backup"
+                test -s "$backup"
+                test "$(sha256sum "$backup" | awk '{print $1}')" != \
+                    "$(jq -er '.site_backup_sha256' "$target")"
+                : > "$state_dir/partial-backup-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+        partial-backup-destination-takeover:/var/backups/aifeeds-performance-log/transaction-*.json)
+            if jq -e '.phase == "prepared" and .site_backup_identity != null' "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/partial-backup-destination-takeover-once" 2>/dev/null; then
+                backup=$(jq -er '.site_backup' "$target")
+                replace_with_unknown_preserving_original "$backup" partial-backup-destination
+                chmod 0600 "$backup"
+                fingerprint "$backup" > "$state_dir/partial-backup-destination.unknown.fingerprint"
+                : > "$state_dir/partial-backup-destination-takeover-hit"
+            fi
+            ;;
+        rotation-directory-candidate-takeover:/var/backups/aifeeds-performance-log/transaction-*.json)
+            if jq -e '.phase == "mutation_started" and .rotation_state_identity != null' \
+                "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/rotation-directory-candidate-takeover-once" 2>/dev/null; then
+                rotation_candidate=$(jq -er '.rotation_state_identity.directory.candidate' "$target")
+                replace_directory_with_unknown_preserving_original \
+                    "$rotation_candidate" rotation-directory-candidate
+                : > "$state_dir/rotation-directory-candidate-takeover-hit"
+            fi
+            ;;
+        manual-recovery-restore-candidate:/var/backups/aifeeds-performance-log/rollback-transaction-*.json)
+            if [ -e "$state_dir/restore-candidate-manual-phase-enabled" ] \
+                && jq -e '.phase == "prepared" and .rollback_candidate_dev != null and .rollback_candidate_ino != null' \
+                "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/restore-candidate-barrier-once" 2>/dev/null; then
+                source_journal=$(jq -er '.source_journal' "$target")
+                rollback_candidate=$(jq -er '.rollback_candidate' "$target")
+                test -f "$source_journal"
+                test -f "$rollback_candidate"
+                test "$(stat -c '%d %i' "$rollback_candidate")" = \
+                    "$(jq -r '[.rollback_candidate_dev,.rollback_candidate_ino] | map(tostring) | join(" ")' "$target")"
+                test "$(sha256sum "$rollback_candidate" | awk '{print $1}')" = \
+                    "$(jq -er '.site_backup_sha256' "$source_journal")"
+                : > "$state_dir/restore-candidate-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+    esac
+    case "$target" in
+        /etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-*)
+            journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+                -type f -name 'transaction-*.json' -print -quit)
+            if [ -n "$journal" ] \
+                && mkdir "$state_dir/mutation-started-check-once" 2>/dev/null; then
+                operation_id=$(jq -er '.operation_id' "$journal")
+                site_candidate=$(jq -er '.installer_candidate' "$journal")
+                backup=$(jq -er '.site_backup' "$journal")
+                jq -e '.schema == 1 and .gate == "GL-a" and .phase == "mutation_started"' \
+                    "$journal" >/dev/null
+                test "$target" = \
+                    "/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-${operation_id}"
+                test ! -e /etc/nginx/conf.d/aifeeds-performance-log.conf
+                test -f "$target"
+                test ! -L "$target"
+                test "$(stat -c '%u %g %a' "$target")" = '0 0 644'
+                test "$(sha256sum "$target" | awk '{print $1}')" = \
+                    "$(jq -er '.artifacts_sha256.format' "$journal")"
+                test -f "$site_candidate"
+                test "$(sha256sum "$site_candidate" | awk '{print $1}')" = \
+                    "$(jq -er '.installed_site_sha256' "$journal")"
+                test -f "$backup"
+                test "$(sha256sum "$backup" | awk '{print $1}')" = \
+                    "$(jq -er '.site_backup_sha256' "$journal")"
+                : > "$state_dir/mutation-started-verified"
+                if [ "$scenario" = manual-recovery-mutation-started ]; then
+                    : > "$state_dir/mutation-started-format-ready"
+                    while :; do sleep 1; done
+                fi
+            fi
+            ;;
+    esac
+    case "$scenario:$target" in
+        artifact-install-candidate-takeover:/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-*)
+            if mkdir "$state_dir/artifact-install-candidate-takeover-once" 2>/dev/null; then
+                replace_with_unknown_preserving_original "$target" artifact-install-candidate
+                chmod 0600 "$target"
+                fingerprint "$target" > "$state_dir/artifact-install-candidate.unknown.fingerprint"
+                : > "$state_dir/artifact-install-candidate-takeover-hit"
+            fi
+            ;;
+        artifact-install-candidate-samebytes:/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-*)
+            if mkdir "$state_dir/artifact-install-candidate-samebytes-once" 2>/dev/null; then
+                replace_with_same_bytes_preserving_original "$target" artifact-install-candidate-samebytes
+                : > "$state_dir/artifact-install-candidate-samebytes-hit"
+            fi
+            ;;
+        artifact-candidate-delete-crash-reentry:/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-*)
+            if mkdir "$state_dir/artifact-candidate-source-barrier-once" 2>/dev/null; then
+                : > "$state_dir/artifact-candidate-source-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+        artifact-install-destination-takeover:/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-*)
+            if mkdir "$state_dir/artifact-install-destination-takeover-once" 2>/dev/null; then
+                destination=/etc/nginx/conf.d/aifeeds-performance-log.conf
+                fingerprint "$target" > "$state_dir/artifact-install-destination.candidate.fingerprint"
+                printf '# unknown destination takeover\n' > "$destination"
+                chown root:root "$destination"
+                chmod 0644 "$destination"
+                fingerprint "$destination" > "$state_dir/artifact-install-destination.unknown.fingerprint"
+                : > "$state_dir/artifact-install-destination-takeover-hit"
+            fi
+            ;;
+        archive-manifest-previous-internal-drift:/var/backups/aifeeds-performance-log/audit-*/archive-manifest.json.previous-gl-a-*)
+            if [ -e "$state_dir/archive-manifest-previous-internal-drift-armed" ] \
+                && mkdir "$state_dir/archive-manifest-previous-internal-drift-once" 2>/dev/null; then
+                preserved="${target}.preserved-gl-a-test-internal"
+                test ! -e "$preserved" && test ! -L "$preserved"
+                fingerprint "$target" > "$state_dir/archive-manifest-previous-internal.expected.fingerprint"
+                /usr/bin/mv "$target" "$preserved"
+                /usr/bin/cp "$preserved" "$target"
+                chown root:root "$target"
+                chmod 0600 "$target"
+                fingerprint "$target" > "$state_dir/archive-manifest-previous-internal.unknown.fingerprint"
+                printf '%s\n' "$preserved" > "$state_dir/archive-manifest-previous-internal.preserved.path"
+                : > "$state_dir/archive-manifest-previous-internal-drift-hit"
+            fi
+            ;;
+        terminal-source-destination-drift:/var/backups/aifeeds-performance-log/transaction-*.json.previous-terminal-gl-a-*)
+            if mkdir "$state_dir/terminal-source-destination-drift-once" 2>/dev/null; then
+                final=${target%.previous-terminal-gl-a-*}
+                printf 'unknown source journal destination\n' > "$final"
+                chmod 0600 "$final"
+                fingerprint "$target" > "$state_dir/terminal-source.previous.fingerprint"
+                fingerprint "$final" > "$state_dir/terminal-source.unknown.fingerprint"
+                : > "$state_dir/terminal-source-destination-drift-hit"
+            fi
+            ;;
+        terminal-rollback-destination-drift:/var/backups/aifeeds-performance-log/rollback-transaction-*.json.previous-terminal-gl-a-*)
+            if mkdir "$state_dir/terminal-rollback-destination-drift-once" 2>/dev/null; then
+                final=${target%.previous-terminal-gl-a-*}
+                printf 'unknown rollback journal destination\n' > "$final"
+                chmod 0600 "$final"
+                fingerprint "$target" > "$state_dir/terminal-rollback.previous.fingerprint"
+                fingerprint "$final" > "$state_dir/terminal-rollback.unknown.fingerprint"
+                : > "$state_dir/terminal-rollback-destination-drift-hit"
+            fi
+            ;;
+        terminal-pair-committed-tmp-drift:/var/backups/aifeeds-performance-log/rollback-commit-*.json.tmp)
+            if jq -e '.phase == "committed"' "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/terminal-pair-committed-tmp-drift-once" 2>/dev/null; then
+                preserved="$state_dir/terminal-pair-committed-tmp.preserved"
+                fingerprint "$target" > "$state_dir/terminal-pair-committed-tmp.expected.fingerprint"
+                /usr/bin/mv "$target" "$preserved"
+                jq '.source_before_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+                    "$preserved" > "$target"
+                chmod 0600 "$target"
+                fingerprint "$target" > "$state_dir/terminal-pair-committed-tmp.unknown.fingerprint"
+                printf '%s\n' "$preserved" > "$state_dir/terminal-pair-committed-tmp.preserved.path"
+                : > "$state_dir/terminal-pair-committed-tmp-drift-hit"
+            fi
+            ;;
+        terminal-pair-internal-marker-drift:/var/backups/aifeeds-performance-log/rollback-commit-*.json)
+            if jq -e '.phase == "committed"' "$target" >/dev/null 2>&1 \
+                && mkdir "$state_dir/terminal-pair-internal-marker-drift-once" 2>/dev/null; then
+                source_journal=$(jq -er '.source_journal' "$target")
+                printf ' \n' >> "$source_journal"
+                fingerprint "$source_journal" > "$state_dir/terminal-pair-internal.source.fingerprint"
+                fingerprint "$target" > "$state_dir/terminal-pair-internal.marker.fingerprint"
+                : > "$state_dir/terminal-pair-internal-marker-drift-hit"
+            fi
+            ;;
+    esac
+
+    case "$scenario:$cleanup_payload_kind" in
+        archive-manifest-delete-takeover:archive-manifest|log-quarantine-delete-takeover:log-quarantine|site-displaced-delete-takeover:site-displaced)
+            if mkdir "$state_dir/${scenario}-once" 2>/dev/null; then
+                replace_with_unknown_preserving_original "$target" "$scenario"
+                : > "$state_dir/${scenario}-hit"
+            fi
+            ;;
+        archive-manifest-delete-crash-reentry:archive-manifest|log-quarantine-delete-crash-reentry:log-quarantine|crossfs-published-crash-reentry:log-quarantine|site-displaced-delete-crash-reentry:site-displaced|prelive-prepared-delete-crash-reentry:site-displaced|terminal-previous-delete-crash-reentry:terminal-previous|artifact-final-delete-crash-reentry:runtime-artifact|artifact-candidate-delete-crash-reentry:runtime-artifact)
+            if mkdir "$state_dir/${scenario}-once" 2>/dev/null; then
+                fingerprint "$target" > "$state_dir/${scenario}.payload.fingerprint"
+                printf '%s\n' "$target" > "$state_dir/${scenario}.payload.path"
+                : > "$state_dir/${scenario}-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+    esac
+fi
+
+if [ "${1:-}" = -f ]; then
+    case "$scenario:$target" in
+        site-cas-internal-displaced-drift:/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-*)
+            if mkdir "$state_dir/site-internal-displaced-once" 2>/dev/null; then
+                printf '\n# internal displaced drift\n' >> "$target"
+                : > "$state_dir/site-cas-internal-displaced-drift-injected"
+            fi
+            ;;
+        site-cas-internal-candidate-drift:/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-*)
+            displaced=${target%.candidate-gl-a-*}.rollback-gl-a-${target##*.candidate-gl-a-}
+            if [ -e "$displaced" ] && [ ! -e /etc/nginx/sites-available/aifeeds.conf ] \
+                && mkdir "$state_dir/site-internal-candidate-once" 2>/dev/null; then
+                printf '\n# internal candidate drift\n' >> "$target"
+                : > "$state_dir/site-cas-internal-candidate-drift-injected"
+            fi
+            ;;
+        manual-site-cas-internal-displaced-drift:/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-*)
+            operation_id=${target##*.candidate-gl-a-}
+            if [ -e "/var/backups/aifeeds-performance-log/rollback-transaction-${operation_id}.json" ] \
+                && [ ! -e /etc/nginx/sites-available/aifeeds.conf ] \
+                && mkdir "$state_dir/manual-site-internal-displaced-once" 2>/dev/null; then
+                printf '\n# manual internal displaced drift\n' >> "$target"
+                : > "$state_dir/manual-site-cas-internal-displaced-drift-injected"
+            fi
+            ;;
+        manual-site-cas-internal-candidate-drift:/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-*)
+            operation_id=${target##*.rollback-gl-a-}
+            displaced="/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-${operation_id}"
+            if [ -e "/var/backups/aifeeds-performance-log/rollback-transaction-${operation_id}.json" ] \
+                && [ -e "$displaced" ] && [ ! -e /etc/nginx/sites-available/aifeeds.conf ] \
+                && mkdir "$state_dir/manual-site-internal-candidate-once" 2>/dev/null; then
+                printf '\n# manual internal candidate drift\n' >> "$target"
+                : > "$state_dir/manual-site-cas-internal-candidate-drift-injected"
+            fi
+            ;;
+        restore-site-absent-samebytes-crash-reentry:/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-*)
+            operation_id=${target##*.candidate-gl-a-}
+            rollback_candidate="/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-${operation_id}"
+            rollback_journal="/var/backups/aifeeds-performance-log/rollback-transaction-${operation_id}.json"
+            if [ -f "$rollback_journal" ] && [ -f "$rollback_candidate" ] \
+                && [ ! -e /etc/nginx/sites-available/aifeeds.conf ] \
+                && mkdir "$state_dir/restore-site-absent-samebytes-once" 2>/dev/null; then
+                replace_with_same_bytes_preserving_original \
+                    "$rollback_candidate" restore-site-absent.rollback
+                replace_with_same_bytes_preserving_original \
+                    "$target" restore-site-absent.installer
+                test -s "$state_dir/restore-site-absent.rollback.expected.fingerprint"
+                test -s "$state_dir/restore-site-absent.installer.expected.fingerprint"
+                : > "$state_dir/restore-site-absent-samebytes-ready"
+                while :; do sleep 1; done
+            fi
+            ;;
+    esac
+fi
+
+if [ "$scenario" = manual-recovery-site-swapped ] \
+    && [ "${1:-}" = -f ] \
+    && [ "$target" = /etc/nginx/sites-available/aifeeds.conf ] \
+    && mkdir "$state_dir/site-swapped-barrier-once" 2>/dev/null; then
+    journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+    test -n "$journal"
+    jq -e '.schema == 1 and .gate == "GL-a" and .phase == "mutation_started"' \
+        "$journal" >/dev/null
+    test "$(sha256sum "$target" | awk '{print $1}')" = \
+        "$(jq -er '.installed_site_sha256' "$journal")"
+    test ! -e "$(jq -er '.installer_candidate' "$journal")"
+    test ! -L "$(jq -er '.installer_candidate' "$journal")"
+    rollback_candidate="$(jq -er '.rollback_candidate' "$journal")"
+    test -f "$rollback_candidate"
+    test ! -L "$rollback_candidate"
+    test "$(sha256sum "$rollback_candidate" | awk '{print $1}')" = \
+        "$(jq -er '.site_backup_sha256' "$journal")"
+    test "$(stat -c '%d %i' "$rollback_candidate")" = \
+        "$(jq -er '.original_site_dev' "$journal") $(jq -er '.original_site_ino' "$journal")"
+    : > "$state_dir/site-swapped-ready"
+    while :; do sleep 1; done
+fi
+
+if [ "$scenario" = manual-recovery-restore-candidate ] \
+    && [ -e "$state_dir/restore-candidate-manual-phase-enabled" ] \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-*) true ;; *) false ;; esac \
+    && mkdir "$state_dir/restore-candidate-barrier-once" 2>/dev/null; then
+    source_journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+    rollback_journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'rollback-transaction-*.json' -print -quit)
+    test -f "$source_journal"
+    test -f "$rollback_journal"
+    jq -e '.phase == "prepared"' "$rollback_journal" >/dev/null
+    test "$(sha256sum "$target" | awk '{print $1}')" = \
+        "$(jq -er '.site_backup_sha256' "$source_journal")"
+    : > "$state_dir/restore-candidate-ready"
+    while :; do sleep 1; done
+fi
+
+if [ "$scenario" = manual-recovery-audit-log ] \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/audit-*/archive-manifest.json) true ;; *) false ;; esac \
+    && jq -e 'any(.entries[]; .source == "/var/log/nginx/aifeeds-performance.jsonl" and .state == "archived")' \
+        "$target" >/dev/null 2>&1 \
+    && mkdir "$state_dir/audit-log-barrier-once" 2>/dev/null; then
+    : > "$state_dir/audit-log-ready"
+    while :; do sleep 1; done
+fi
+
+if [ "$scenario" = manual-recovery-terminal-pair-marker ] \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/rollback-commit-*.json.tmp) true ;; *) false ;; esac \
+    && jq -e '.phase == "prepared"' "$target" >/dev/null 2>&1 \
+    && mkdir "$state_dir/terminal-pair-marker-barrier-once" 2>/dev/null; then
+    : > "$state_dir/terminal-pair-marker-ready"
+    while :; do sleep 1; done
+fi
+
+if [ "$scenario" = terminal-pair-committed-marker-tmp ] \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/rollback-commit-*.json.tmp) true ;; *) false ;; esac \
+    && jq -e '.phase == "committed"' "$target" >/dev/null 2>&1 \
+    && mkdir "$state_dir/terminal-pair-committed-marker-tmp-once" 2>/dev/null; then
+    : > "$state_dir/terminal-pair-committed-marker-tmp-ready"
+    while :; do sleep 1; done
+fi
+
+if case "$scenario" in archive-manifest-tmp-takeover|archive-manifest-stale-tmp|archive-manifest-regressive-tmp|archive-manifest-unknown-final|archive-manifest-orphan-audit|archive-manifest-previous-internal-drift|archive-manifest-previous-restart-samebytes) true ;; *) false ;; esac \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/audit-*/archive-manifest.json.tmp) true ;; *) false ;; esac \
+    && jq -e 'any(.entries[]; .state == "quiescent")' "$target" >/dev/null 2>&1 \
+    && [ -f "${target%.tmp}" ] \
+    && mkdir "$state_dir/archive-manifest-tmp-barrier-once" 2>/dev/null; then
+    : > "$state_dir/archive-manifest-tmp-ready"
+    while :; do sleep 1; done
+fi
+
+if case "$scenario" in archive-manifest-previous-takeover|archive-manifest-three-way-conflict) true ;; *) false ;; esac \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/audit-*/archive-manifest.json) true ;; *) false ;; esac; then
+    audit_dir=${target%/*}
+    operation_id=${audit_dir##*/audit-}
+    previous="${target}.previous-gl-a-${operation_id}"
+    tmp="${target}.tmp"
+    if [ -f "$previous" ] && [ ! -e "$tmp" ] \
+        && [ "$(jq -er '.generation' "$target")" -eq \
+            "$(( $(jq -er '.generation' "$previous") + 1 ))" ] \
+        && [ "$(jq -er '.previous_manifest_sha256' "$target")" = \
+            "$(sha256sum "$previous" | awk '{print $1}')" ] \
+        && [ "$(jq -r '[.previous_manifest_dev,.previous_manifest_ino] |
+            map(tostring) | join(" ")' "$target")" = "$(stat -c '%d %i' "$previous")" ] \
+        && mkdir "$state_dir/archive-manifest-previous-barrier-once" 2>/dev/null; then
+        : > "$state_dir/archive-manifest-previous-ready"
+        while :; do sleep 1; done
+    fi
+fi
+
+if [ "${1:-}" = -f ] \
+    && [ "$target" = /etc/systemd/system/aifeeds-performance-logrotate.timer ]; then
+    journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+    case "$scenario" in
+        site-cas-live-drift)
+            if mkdir "$state_dir/site-live-drift-once" 2>/dev/null; then
+                printf '\n# concurrent live drift\n' >> /etc/nginx/sites-available/aifeeds.conf
+                : > "$state_dir/site-live-drift-injected"
+            fi
+            ;;
+        site-cas-candidate-drift)
+            if mkdir "$state_dir/site-candidate-drift-once" 2>/dev/null; then
+                candidate="$(jq -er '.installer_candidate' "$journal")"
+                printf '\n# concurrent candidate drift\n' >> "$candidate"
+                : > "$state_dir/site-candidate-drift-injected"
+            fi
+            ;;
+    esac
+fi
+
+if [ "$scenario" = manual-cleanup-drift ] \
+    && [ "${1:-}" = -f ] \
+    && case "$target" in /var/backups/aifeeds-performance-log/rollback-transaction-*.json) true ;; *) false ;; esac \
+    && jq -e '.phase == "site_restored"' "$target" >/dev/null 2>&1 \
+    && mkdir "$state_dir/cleanup-drift-barrier-once" 2>/dev/null; then
+    : > "$state_dir/cleanup-drift-ready"
+    while :; do sleep 1; done
+fi
+
+# A false hook predicate must never leak a nonzero status to the product.
+exit 0

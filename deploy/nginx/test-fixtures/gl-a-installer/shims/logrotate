@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${GL_A_SCENARIO:?}" = logrotate-fail ]; then
+    for argument in "$@"; do
+        if [ "$argument" = -f ]; then
+            : > /tmp/gl-a-test/logrotate-force-injected
+            printf 'injected logrotate force failure\n' >&2
+            exit 91
+        fi
+    done
+fi
+
+exec /usr/sbin/logrotate "$@"

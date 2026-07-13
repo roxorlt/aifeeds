@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the AI Feeds performance log rotation policy every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+Persistent=true
+RandomizedDelaySec=30s
+Unit=aifeeds-performance-logrotate.service
+
+[Install]
+WantedBy=timers.target

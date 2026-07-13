@@ -37,7 +37,7 @@
 | Gate | 动作 | 外部状态 | 通过标准 | 失败/停止 |
 |---|---|---|---|---|
 | G0 | 本地测试、构建、变更单复核 | 无写 | 全绿、git clean | 任一失败不进入远端 |
-| GL | Task 3 performance log/request-id | production VPS/nginx 写 | JSONL、join、logrotate 全绿 | 精确备份回滚 |
+| GL-a | Task 3 performance log/request-id 安装 | production VPS/nginx 写 | JSONL、唯一 probe、真实轮转全绿 | 事务恢复精确备份 |
 | G1 | 部署当前 Worker 到 staging | Worker 写 | 新 version 健康、smoke 2xx | 5xx/契约回归立即 rollback |
 | G2 | staging 应用 migration 028 | D1 schema 写 | 两个索引存在且 EXPLAIN 命中 | apply/plan 异常即 DROP 两索引 |
 | G3 | 两个 backfill dry-run | 远端只读计算 | 契约合法、errors/conflicts=0 | 非 2xx/非 JSON/游标停滞即停 |
@@ -49,9 +49,10 @@
 | G6 | 创建 DNS-only A 记录 | DNS 写 | 唯一精确记录，解析为 VPS IP | 多记录/已有记录立即停 |
 | G7a | 安装 HTTP-01 bootstrap | VPS/nginx 写 | `nginx -t` + HTTP challenge 可达 | 恢复/移除新站点 |
 | G7b | 签证书并安装 final server | ACME/VPS 写 | TLS、页面、API smoke 全绿 | 恢复 bootstrap 或移除站点 |
+| GL-b | staging Worker → nginx request-id join | 远端只读 | Worker 回显与 nginx join 全绿 | 停止 G8；仅调用被定位 gate 原审批已授权的精确 rollback，否则另行审批 |
 | G8 | 五设备功能/性能验收 | 测试账号写 | 矩阵全绿、有可 join 证据 | 任一 auth/cache/Range 回归即停 |
 
-GL、G1、G2、G4a、G4b1、G4b2、G5、G6c、G6、G7a、G7b 和 G8 的测试账号写入是不同审批边界。dry-run 通过
+GL-a、G1、G2、G4a、G4b1、G4b2、G5、G6c、G6、G7a、G7b 和 G8 的测试账号写入是不同审批边界。dry-run 通过
 不自动授权 write；staging 通过不自动授权 production。
 
 ## 3. G0：本地冻结与证据目录
@@ -115,6 +116,11 @@ node --test \
   deploy/nginx/*.test.mjs \
   scripts/ci/performance-validation-contract.test.mjs
 python3 deploy/nginx/check-nginx-request-id.test.py
+python3 deploy/nginx/insert-nginx-request-id.test.py
+python3 deploy/nginx/verify-nginx-request-id-diff.test.py
+bash -n deploy/nginx/install-aifeeds-performance-log.sh
+bash -n deploy/nginx/rollback-aifeeds-performance-log.sh
+bash deploy/nginx/install-aifeeds-performance-log.integration.test.sh
 ```
 
 继续前必须确认 `git status --short` 为空，HEAD 包含最新 `origin/main`。不得用
@@ -124,19 +130,204 @@ python3 deploy/nginx/check-nginx-request-id.test.py
 并证明当前 clean HEAD 等于 G0 冻结 commit。任何一项不成立就重跑 G0，不沿用旧证据。紧急回滚和
 定向清理不得被本地 dirty tree 阻塞，但仍须校验 evidence pointer、精确远端对象 id 与 ownership。
 
-## 3.1 GL：Task 3 nginx 分段日志
+## 3.1 GL-a / GL-b：Task 3 nginx 分段日志
 
 G8 的 nginx `upstream_connect_time`、`upstream_header_time`、`upstream_response_time` 与
 `request_time` 证据来自全局 http-context
 `deploy/nginx/aifeeds-performance-log.conf`，不是 perf-staging server 自己生成。它的 host map 已含
-`perf-staging.ai-feeds.com`。在该 logging-only 变更按 `docs/operations.md`「上游分段性能日志」的
-完整流程获批、安装、轮转并通过 request-id join 之前，不得进入 G7/G8，也不得只凭 curl
-`Server-Timing` 宣称 nginx 分段观测完成。
+`perf-staging.ai-feeds.com`。
 
-该 gate 是 production VPS/nginx 写：必须使用 runbook 中的精确 site backup，逐个 proxy location
-加同层 `X-Request-Id`，通过版本化 checker、`logrotate -d`、`nginx -t` 后才 reload。回滚恢复该次
-打印的精确 backup，并移除新 format/rotate/checker；日志按审批决定保留复盘或另行删除。GL 不授权
-Pages、DNS、证书、staging Worker/D1/R2 或任何业务 rollout。
+2026-07-12 的无凭据只读探测确认：production 和 staging API 均尚未回显 `X-Request-Id`、
+`Server-Timing` 或 `Timing-Allow-Origin`；实现只在当前未发布分支。原先要求 GL 在 G1/G7 前完成
+production Worker join 会形成顺序环，因此拆分为：
+
+- **GL-a** 是 production VPS/nginx 写，只安装日志、同层 request-id、专用轮转 timer；通过标准是
+  JSONL schema、唯一 probe、front/API 精确 200、强制轮转后新文件继续收日志。GL-a 的唯一 probe
+  证明 nginx 请求与 timing 可关联，但不宣称 Worker 已回显。
+- **GL-b** 是 G1 + G7b 后、G8 前的匿名远端只读验证，以唯一 `perf_probe` 证明 staging Worker 响应
+  `X-Request-Id` 与 nginx 记录一致。GL-b request-id join 通过后才能进入 G8；G8 的 10.1c 再把该证明
+  扩展到五设备 browser request ids。
+
+GL-a 必须按 `docs/operations.md` 修订 runbook 使用 root-owned `/run` 私有目录、
+`sha256sum -c SHA256SUMS`、精确 site backup、`verify-nginx-request-id-diff.py`、精确 7 个 proxy
+结构检查、`maxsize 50M` 与 `aifeeds-performance-logrotate.timer`。轮转规则位于全局 include 之外的
+`/etc/aifeeds-performance-logrotate.conf`，专用 timer 每五分钟使用独立 state 检查；安装前至少保留
+5 GiB 空间和 10 万个 inode。`logrotate -d` 只检查语法；必须再
+执行受控 `logrotate -f -s` 并用 rotation probe 证明 USR1 后的新 base log 可写。任何失败由事务 trap
+恢复该次精确 backup。安装器必须先持有 `/run/aifeeds-performance-log.lock` 的非阻塞 flock；轮转
+service 使用 `StateDirectory=aifeeds-performance-logrotate` 并实际启动验证；还必须在正式 state 下对
+刚超过 50 MiB 的稀疏测试日志完成一次真实 maxsize rotation，并用新 probe 证明 sandbox 内
+rename/USR1/reopen 成功。只有 site 与 backup 逐字一致、
+artifacts/state 全部消失且 timer inactive/disabled，自动回滚才可标 pass；日志按审批决定保留复盘或另行删除。
+含回源凭据的 site backup 只能位于 root-only 0700 `/var/backups/aifeeds-performance-log`；文件用
+`cp -a` 保留原 site 的 ACL/xattr 与 uid/gid/mode，机密性由不可遍历的父目录保证；
+GL-a summary 必须记录并校验 `site_backup_sha256`、`installed_site_sha256` 和原 site uid/gid/mode。人工回滚
+从该 summary 读取精确值、持有同一 flock，并先证明 current site 未发生漂移；否则停止，不得覆盖后续合法变更。
+GL-a 在任何远端写之前还必须把唯一 operation id 与该 G0 commit 的 rollback helper 0600 不可变副本保存到
+evidence；installer 只接受这个预生成 id，并把 `operation_id`、`g0_commit`、`rollback_helper_sha256` 写进
+journal/summary。异常采证只能按这个已知 id 精确抓一份 journal；人工回滚默认优先正常 summary，只有 summary
+缺失或显式 recovery mode 才使用 identity/phase/SHA 都匹配的 recovery record，且只上传 evidence 中该 helper。
+安装器在 site candidate/backup 前先 `fsync initializing`，在 backup 前再 `fsync prepared`，并在任何
+runtime candidate/final 写入前 `fsync mutation_started`；SITE 与八个 runtime candidate 都位于各自 final
+同目录，journal 的 `artifact_candidates` 精确绑定路径，校验 hash/metadata 后才同盘原子 rename。七个版本化
+artifact 的 SHA 写入所有 journal/summary；因此崩溃只会留下可识别、可清理的本事务 candidate。人工恢复仅允许
+`initializing/prepared` + live base 在 backup 缺失时继续，partial backup 移入 root-only audit。installer/helper
+在每次 site move/reload 前后和终态复核 enabled symlink 精确 target；普通 site preflight 在创建 rollback
+journal 前失败时保持 zero-write，既有 `rolled_back` 永不被重写。archive read-only preflight 另在首次
+capture 前置零写 sentinel；只有 topology、reachability、handoff 与最终 recapture 全部通过后才清除。
+sentinel 尚未清除时发生失败，failure trap 必须在删除 summary、写 `rollback_failed` 或改动 cleanup namespace
+之前退出；重复失败不得改变 F/T/P/C 的 bytes、inode 或 namespace。
+安装器还会在每个 reload、probe、轮转、timer 之后
+重新核对 live site 的 candidate hash 与语义 diff。自动回滚只允许 current site 等于本事务 baseline 或
+candidate；未知 hash 立即转 `rollback_failed`，不得覆盖 Certbot/人工并发修改。回滚日志移动到该事务的
+root-only audit 目录，canonical log 路径必须消失；非终态 journal 会阻断下一次安装并要求显式恢复。
+**C journal update CAS active（consumer activation active / harness name-count freeze frozen）**：source 与 rollback
+journal 各使用 operation-bound F、`${F}.tmp` 和 `${F}.previous-update-gl-a-<operation-id>`；source F 为
+`/var/backups/aifeeds-performance-log/transaction-<operation-id>.json`，rollback F 为
+`/var/backups/aifeeds-performance-log/rollback-transaction-<operation-id>.json`。每版内嵌
+`journal_update={schema:1,revision:N,self_dev:D,self_ino:I,predecessor:null|{revision:N-1,sha256,dev,ino}}`；
+只有 fresh initializing/prepared genesis 允许 revision 0/null predecessor。T 由 `O_EXCL|O_NOFOLLOW` 创建，
+self identity 来自同一写 fd，完整写、fsync(fd)+fsync(parent) 后才可恢复。Source legacy genesis trusts the
+CLI-supplied external hash and is accepted only when that hash and the complete business schema match；rollback legacy
+genesis has no externally trusted hash and is rejected fail closed。legacy orphan tmp 不能自证。
+S0=F-only；S1=F+T；S2=P+T；S3=P+F。S4=F(new)+C(cleanup tombstone), P absent。Recovery exact-validates
+physical C against F.predecessor, then uses held-dirfd unlink after a final pathname/held-FD identity check, fsyncs
+the parent, and returns to S0。S1–S4 只信 successor 内嵌 self/predecessor 和合法业务 transition，使用
+NOREPLACE 并 fsync parent；symlink、revision 跳跃/回退、semantic inverse、same-hash different-inode、
+F/T/P/C 冲突或 invalid/partial T 全部原样保留 fail closed，禁止 rm/truncate/re-render/pathname adoption。自动恢复
+在读 source phase 或任何 live mutation 前 settle source；manual 先 settle source，再 settle rollback，最后才建立
+terminal pair。journal `.previous-update-*` 不得与 marker `.previous-terminal-*` 混用。本地只读 consumer 只接受
+S0；其他 residue 仅报 `recovery_required`。terminal prepared、单边和双边发布窗口必须保留两侧 predecessor，
+只有 committed marker durable 后才能执行普通 cleanup。
+
+The 14-slot runtime cleanup plan is immutable and shared by automatic and manual rollback. Its canonical items,
+`plan_sha256`, cursor, and `cursor_state` live in the rollback journal. Each item durably records `detaching` before
+an exact NOREPLACE tombstone rename and `detached` before unlink; `runtime_removed` is legal only after all 14 slots
+reach `complete` and physical runtime residue is zero. Re-entry resumes the recorded cursor. Plan drift, unknown
+tombstones, and `rollback_failed.failed_from` drift preserve evidence and fail closed. Legacy `runtime_removed`
+records without the cleanup object are compatibility inputs: both automatic and manual paths still execute the
+current 14-slot plan and prove zero residue instead of treating the legacy phase as cleanup authority. The rebuilt
+plan records `compatibility_mode=legacy_runtime_removed`, preserves any `rollback_failed` wrapper while advancing,
+and same-operation installer retry returns `recovery_required` before live runtime-absence checks. The log slot stays
+an exact `archive_handoff` until daemon reload succeeds; reload failure retains that inode without claiming archive
+manifest evidence.
+
+The frozen integration matrix is 135 scenarios (95 old + 40 new). The 40 C scenario names are:
+
+- source journal: `journal-source-g-reentry`, `journal-source-s1-reentry`, `journal-source-s2-reentry`,
+  `journal-source-s3-reentry`, `journal-source-s4-reentry`, `journal-source-semantic-drift`,
+  `journal-source-samebytes-predecessor`, `journal-source-partial-tmp`, `journal-source-p-only`,
+  `journal-source-all-three`, `journal-source-unknown-cleanup`;
+- rollback journal: `journal-rollback-g-reentry`, `journal-rollback-s1-reentry`, `journal-rollback-s2-reentry`,
+  `journal-rollback-s3-reentry`, `journal-rollback-s4-reentry`, `journal-rollback-semantic-drift`,
+  `journal-rollback-samebytes-predecessor`, `journal-rollback-partial-tmp`, `journal-rollback-p-only`,
+  `journal-rollback-all-three`, `journal-rollback-unknown-cleanup`;
+- terminal pair and cleanup: `terminal-pair-zero-side-reentry`, `terminal-pair-one-side-reentry`,
+  `terminal-pair-two-side-reentry`, `terminal-pair-pre-marker-reentry`, `cleanup-manual-detaching-reentry`,
+  `cleanup-manual-detached-reentry`, `cleanup-automatic-detaching-reentry`,
+  `cleanup-automatic-detached-reentry`, `cleanup-manual-unknown-tombstone`,
+  `cleanup-automatic-unknown-tombstone`, `cleanup-manual-plan-drift`, `cleanup-automatic-plan-drift`,
+  `cleanup-manual-failed-from-drift`, `cleanup-automatic-failed-from-drift`;
+- legacy compatibility: `journal-source-legacy-genesis`, `journal-rollback-legacy-genesis-rejected`,
+  `cleanup-manual-legacy-runtime-removed`, `cleanup-automatic-legacy-runtime-removed`.
+前向安装必须保留 operation-bound transcript；每次人工回滚则生成新的 operation+attempt bound
+manual rollback attempt transcript，final 文件不得覆盖既有 attempt。两者都把远端 stdout/stderr 合并写入私有 tmp，
+立即捕获 `PIPESTATUS`，将 tmp 设为 0600 并原子发布 final 后，才检查 SSH 与 tee 的独立退出码；失败证据
+不得随远端 staging 清理而丢失。
+本地 evidence 的 forward transcript、forward summary、manual transcript 和 manual summary 全部走
+same-parent NOREPLACE publication；成功后必须 fsync parent directory。publish collision 同时保留 owned tmp
+与 unknown destination，禁止覆盖。tmp 只由 `mktemp` 的 O_EXCL allocation 创建，只有即时记录的
+recorded dev/ino 可以授权 failure cleanup；pathname、同内容或同 hash 不能用于重新认领或删除。
+日志撤销
+先把 canonical inode NOREPLACE 隔离到同目录 quarantine，再等待所有 writable FD 消失并连续稳定；
+生产 deadline 为 60 秒，超时保留 quarantine/manifest 并失败关闭，同 operation id 重入继续。
+operation-bound archive manifest 必须持久记录每个 source/quarantine/destination/candidate、inode/权限及
+quiescent 后的 SHA/size；crossfs schema 2 严格推进
+`journaled → quiescent → copied → archived`，samefs 跳过 copied。crossfs final publish 前先 journal
+`candidate_dev`/`candidate_ino`，publish 后再记录 `destination_dev`/`destination_ino`，且 destination 必须等于
+candidate inode；samefs destination 必须等于 source inode。terminal generation 为
+`3 * N + 1 + count(entries has candidate_dev)`（全 crossfs 是 `4 * N + 1`）。samebytes different inode/unknown
+identity 必须 fail closed；未 journal candidate、candidate+destination 冲突或同时缺失，以及任何
+candidate/cleanup/unknown audit residue 都拒绝接管。terminal destination 的 physical dev/ino 必须等于
+recorded destination。schema 2 generation 只允许 append/seal/quiesce/copy/archive 五类 successor；top-level
+exact keys 为
+`{schema,operation_id,generation,previous_manifest_sha256,previous_manifest_dev,previous_manifest_ino,inventory_complete,empty_inventory,entries}`。
+generation 0 predecessor triple 全 null；以后每版从 stable fd capture 持久 predecessor raw SHA/dev/ino 三元组。
+final/tmp/operation-bound previous 用三路径 NOREPLACE 接管；P+T/P+F 只信 T/F successor 内嵌 triple 并验证物理 P，
+P-only、invalid/unrelated T/F 或 same-hash different-inode 原样保留、fail closed。只有 inventory complete、audit
+canonical 文件集合与 destinations 双向相等且 source/quarantine/candidate 消失才是 terminal。terminal
+journals/summary 必须镜像 manifest SHA/generation/entry count；stale/regressive/unknown/orphan 状态全部保留失败。
+Archive manifest namespace recovery 由 read-only held-fingerprint dispatcher 决策（其 F/T/P/C 与 journal CAS
+cleanup namespace 不同）：F=final、T=tmp、P=previous、C=operation-bound private cleanup directory。只接受
+`∅`、`T(genesis)`、`F`、`F+T`、`P+T`、`P+F`、`F+C(payload)`、`F+C(empty)`；其他组合全部保留并 fail
+closed。F/T/P 与 C payload 均用 `O_NOFOLLOW` held-FD 捕获，要求 root:root/0600、`nlink=1`，指纹精确为
+`{dev,ino,mtime_ns,sha256,size}`，并拒绝 duplicate keys/non-finite JSON。dispatcher 以 held fingerprints 验证
+successor、physical reachability 与 immutable runtime-cleanup log handoff，逐路径 recapture unchanged 后才允许
+publish/cleanup；`journaled` live log 只允许同 inode 尾部增长，quiescent/copied/archived 内容冻结。C
+payload/empty directory 仅通过 held parent/dirfd exact unlink/rmdir 清理。
+这里的 runtime artifact manifest 不是独立文件，而是 source transaction journal 字段
+`runtime_artifacts` 与 `runtime_artifacts_sealed`；no independent runtime manifest path/SHA/generation/count
+存在。8 candidates 各自先持久化 dev、ino、sha256 和 metadata，完整 inventory sealed before any final
+publication。7 immutable finals 与 all 8 candidates 只通过 exact-identity operation-bound tombstone 清理；
+live log handed to the archive manifest，不进入 immutable-final tombstone。`rotation_state_identity` 绑定
+operation-bound directory candidate 与稳定 ledger anchor 的 path/dev/ino/mode/`genesis_record_sha256`；
+`rotation_state_snapshot` 验证 generation、`tail_record_sha256`、ledger SHA/size 与当代 status identity。
+timer 只能调用 root-only `rotation-wrapper`；唯一锁域是 authority-bound ledger inode FD flock，并只向该 ledger
+追加可验证 tail。legacy `/run/aifeeds-performance-log-rotation.lock` 参数 compatibility-only 且被忽略：它
+is not an authority domain and not a serialization domain；
+安装时旧 status inode/hash 不是永久 identity，manual helper 禁止从 current status path 重新 capture/adopt。
+动态 service `ExecStart` 固定 operation id、anchor、checker、config、logrotate 五组 authority 参数，顺序不可变；
+config triple 后必须紧跟 logrotate triple，每组都绑定 exact path/dev/ino/SHA。外部 authority 只能是
+`/var/backups/aifeeds-performance-log/rotation-anchor-<operation-id>.json`，不得扫描选择。各 journal/summary 镜像
+exact 9-key `rotation_anchor_identity={state,path,sha256,size,uid,gid,mode,dev,ino}`，严格推进
+`allocated → prepared → sealed`：`allocated` 记录 O_EXCL empty-file SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`、size=0、dev/ino；`prepared` 先记录
+expected final target SHA/size（physical inode 仍可 empty）；写入原 inode 并 fsync 后，`sealed` 才要求 physical
+path/dev/ino/SHA/size exact。canonical authority payload 使用 schema 2，exact top-level keys 为
+`{schema,operation_id,directory,provenance,checker,config,logrotate}`；directory/provenance 绑定 state directory 与 ledger
+genesis；exact nested keys 为 directory=`{path,uid,gid,mode,dev,ino}`、
+provenance=`{path,uid,gid,mode,dev,ino,genesis_record_sha256}`、checker/config=
+`{path,sha256,size,uid,gid,mode,dev,ino}`。logrotate 使用 exact nested keys
+`{path,sha256,size,uid,gid,mode,dev,ino}`，固定 `/usr/sbin/logrotate`，且必须为 root:root mode 0755。
+automatic/manual caller 使用 sealed-anchor extractor：以 `O_NOFOLLOW` 单次打开 exact anchor，验证 canonical bytes 与
+full identity，只从 held-FD bytes 提取 logrotate authority；checker 把全部资源保持为 held-FD，并在 mutation 前执行
+final pathname/held-FD identity exact check。checker/config candidate identity 必须先 journal；
+ledger 初始化与 anchor 封存后才最后渲染 service candidate。committed terminal 必须 sealed；rolled_back 早期
+未分配可 null，否则 retain last identity evidence（allocated、prepared 或 sealed，禁止伪写升级）且 pathname
+必须 absent/deleted。人工恢复先 stop timer/service
+并确认静止，再以固定 authority 调用 `rotation-recover`，不得运行裸 logrotate 或按 current path 重新认领。
+`site_backup_identity` 在 copy 前持久化并绑定
+`O_EXCL` inode。pre-mutation base SITE identity 绑定 original site dev/inode；committed installed SITE identity
+绑定 installer candidate dev/inode；rolled_back base SITE identity 绑定 journaled rollback candidate dev/inode，
+otherwise 绑定 original site dev/inode；因为 backup copy 不保证 original inode。Every phase accepts only its recorded identity and must never derive identity
+from the current path；同内容或同 hash 不足以接管。manual recovery must never derive or adopt unknown identity。Terminal physical finals/candidates
+and rotation cleanup must have zero residue。pair-free source-only `rolled_back` 是窄特例：只允许 effective
+`initializing`/`prepared`→`rolled_back`，`rollback_journal`/`rollback_commit_marker` 必须同时 absent，业务
+delta 恰为 `phase`、`rollback_origin_phase` 与三项
+`log_archive_manifest_{sha256,generation,entry_count}`；manifest 必须是 generation 1、entry count 0 的
+operation-bound empty terminal manifest。若已记录非 `absent` installer candidate hash 但 pathname absent，
+只有同一路径两次相同 held-FD capture（schema 2 exact keys、root:root/0600、`nlink=1`、generation 1、
+inventory/empty true、entries 空）且 candidate/tmp/previous 前后均 absent 才能授权该缺失；这就是
+`prelive empty manifest` 契约。
+
+人工 source/rollback 终态由 terminal pair marker 执行 `prepared → committed`。prepared marker 嵌入 exact
+`source_before_authority`/`rollback_before_authority={raw_base64,sha256,dev,ino}`，source raw 匹配 CLI-trusted SHA，
+rollback raw canonical 且 effective phase 为 `logs_archived`；两侧 target 必须从 before authority 重建为唯一合法
+CAS successor，并仍以 `source_target_sha256`/`rollback_target_sha256` 精确命名。prepared、单边和双边发布窗口保留两侧 predecessor，committed marker durable 后才清理。
+committed marker 绑定 `prepared_marker_sha256` 与两侧 terminal SHA；validator 从 committed bytes 还原 prepared
+marker、复算 SHA，并证明 terminal SHA 等于 target SHA；committed marker 的 physical chain 同时对账两侧
+物理 journal 与 summary。prepared marker 不是业务 authority；恢复只接受精确
+before/target，tmp/prepared 或第三种 SHA 全部失败关闭。
+异常采证的 record 与 SHA 必须先在隐藏 0700 目录内完整校验；rolled_back 还要精确复制远端 archive manifest
+进 bundle 并本地复算 path/SHA/generation/count。canonical recovery bundle 仅用同父目录 Darwin
+`renamex_np(RENAME_EXCL)` 或 Linux `renameat2(RENAME_NOREPLACE)` 发布，失败保留 tmp/unknown destination；
+成功 rename 后还要 `fsync` destination parent directory 才是 durable publish。人工回滚只消费完整 bundle，
+绝不消费两个独立路径或只凭 transcript substring 判断 automatic terminal。
+
+GL-a 不授权 Pages、DNS、证书、staging Worker/D1/R2 或业务 rollout；GL-b 不产生远端写入，也不授权
+G8 测试账号写入。
+GL-a 最终审批还必须绑定低流量窗口、执行人、rollback owner 和 `rollback_failed` on-call 升级联系人；
+缺任一项即保持 NO-GO。
 
 ## 4. G1：staging Worker 部署
 
@@ -1108,7 +1299,7 @@ unset CF_DNS_API_TOKEN
 
 ## 9. G7：HTTP-01、证书与 final nginx
 
-前置：GL 必须已经安装并验证；否则即使 TLS/页面/API smoke 成功，也不进入 G8。
+前置：GL-a 必须已经安装并验证；否则即使 TLS/页面/API smoke 成功，也不进入 G8。
 
 两个仓库模板均无 secret：
 
@@ -1133,16 +1324,18 @@ test -z "$(git status --porcelain)"
 cd "$REPO_ROOT"
 VPS=root@154.12.188.231
 SSH_KEY=~/.ssh/aifeeds-hk.pem
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 BOOTSTRAP_TEMPLATE=deploy/nginx/aifeeds-perf-staging-bootstrap.conf
 BOOTSTRAP_SHA256="$(shasum -a 256 "$BOOTSTRAP_TEMPLATE" | awk '{print $1}')"
 printf '%s  %s\n' "$BOOTSTRAP_SHA256" "$(basename "$BOOTSTRAP_TEMPLATE")" \
   > "$EVIDENCE/nginx-bootstrap-local.sha256"
-REMOTE_STAGE="$(ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-  'set -eu; umask 077; d=$(mktemp -d /run/aifeeds-perf-staging.XXXXXX); chmod 700 "$d"; printf "%s\n" "$d"')"
+REMOTE_STAGE="$(ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s bash -c 'set -eu; umask 077; d=\$(mktemp -d /run/aifeeds-perf-staging.XXXXXX); chmod 700 \"\$d\"; printf \"%s\\n\" \"\$d\"'")"
 printf '%s' "$REMOTE_STAGE" | grep -Eq '^/run/aifeeds-perf-staging\.[A-Za-z0-9]{6}$'
 cleanup_stage() {
-  ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-    "case '$REMOTE_STAGE' in /run/aifeeds-perf-staging.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac"
+  ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+    "timeout 30s bash -c \"case '$REMOTE_STAGE' in /run/aifeeds-perf-staging.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac\""
 }
 on_stage_exit() {
   rc=$?
@@ -1157,16 +1350,19 @@ trap on_stage_exit EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-scp -o ConnectTimeout=10 -i "$SSH_KEY" "$BOOTSTRAP_TEMPLATE" "$VPS:$REMOTE_STAGE/"
-ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" "chmod 600 '$REMOTE_STAGE/$(basename "$BOOTSTRAP_TEMPLATE")'"
-REMOTE_SHA256="$(ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-  "set -eu; f='$REMOTE_STAGE/$(basename "$BOOTSTRAP_TEMPLATE")'; \
-   test -f \"\$f\"; test ! -L \"\$f\"; test \"\$(stat -c '%u:%a' \"\$f\")\" = 0:600; \
-   sha256sum \"\$f\" | awk '{print \$1}'")"
+scp "${SSH_OPTS[@]}" -i "$SSH_KEY" "$BOOTSTRAP_TEMPLATE" "$VPS:$REMOTE_STAGE/"
+ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s chmod 600 '$REMOTE_STAGE/$(basename "$BOOTSTRAP_TEMPLATE")'"
+REMOTE_SHA_LINE="$(ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s bash -c 'set -eu; f=\$1; test -f \"\$f\"; test ! -L \"\$f\"; \
+   test \"\$(stat -c \"%u:%a\" \"\$f\")\" = 0:600; sha256sum \"\$f\"' \
+   _ '$REMOTE_STAGE/$(basename "$BOOTSTRAP_TEMPLATE")'")"
+REMOTE_SHA256="${REMOTE_SHA_LINE%% *}"
 test "$REMOTE_SHA256" = "$BOOTSTRAP_SHA256"
 printf '%s\n' "$REMOTE_SHA256" > "$EVIDENCE/nginx-bootstrap-remote.sha256"
 
-ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" bash -s -- "$REMOTE_STAGE" "$BOOTSTRAP_SHA256" \
+ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  timeout --signal=TERM --kill-after=30s 5m bash -s -- "$REMOTE_STAGE" "$BOOTSTRAP_SHA256" \
   > "$EVIDENCE/nginx-bootstrap.stdout" 2> "$EVIDENCE/nginx-bootstrap.stderr" <<'REMOTE'
 set -eu
 set -o pipefail
@@ -1279,11 +1475,14 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 . "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
 test "$(cat "$EVIDENCE/commit.txt")" = "$(git rev-parse HEAD)"
 test -z "$(git status --porcelain)"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 CHALLENGE_NAME="probe-$(openssl rand -hex 12)"
 CHALLENGE_VALUE="$(openssl rand -hex 32)"
 REMOTE_PROBE="/var/www/aifeeds-certbot/.well-known/acme-challenge/$CHALLENGE_NAME"
 cleanup_probe() {
-  ssh -o ConnectTimeout=10 -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 "rm -f '$REMOTE_PROBE'"
+  ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+    "timeout 30s rm -f -- '$REMOTE_PROBE'"
 }
 on_probe_exit() {
   rc=$?
@@ -1298,8 +1497,8 @@ trap on_probe_exit EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-ssh -o ConnectTimeout=10 -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
-  "umask 022; printf '%s' '$CHALLENGE_VALUE' > '$REMOTE_PROBE'"
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "timeout 30s bash -c \"umask 022; printf '%s' '$CHALLENGE_VALUE' > '$REMOTE_PROBE'\""
 ACTUAL_CHALLENGE="$(curl -fsS --connect-timeout 10 --max-time 30 \
   "http://perf-staging.ai-feeds.com/.well-known/acme-challenge/$CHALLENGE_NAME")"
 test "$ACTUAL_CHALLENGE" = "$CHALLENGE_VALUE"
@@ -1318,7 +1517,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 . "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
 test "$(cat "$EVIDENCE/commit.txt")" = "$(git rev-parse HEAD)"
 test -z "$(git status --porcelain)"
-ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 '
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  timeout --signal=TERM --kill-after=30s 10m bash -s <<'REMOTE'
   set -eu
   exec 9>/run/lock/aifeeds-perf-staging-nginx.lock
   flock -n 9
@@ -1326,13 +1528,13 @@ ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 '
   test -s /etc/ssl/certs/ca-certificates.crt
   test -s /etc/letsencrypt/options-ssl-nginx.conf
   test -s /etc/letsencrypt/ssl-dhparams.pem
-  certbot certonly --webroot \
+  timeout --signal=TERM --kill-after=30s 8m certbot certonly --webroot \
     -w /var/www/aifeeds-certbot \
     -d perf-staging.ai-feeds.com \
     --non-interactive --agree-tos --no-eff-email
   test -s /etc/letsencrypt/live/perf-staging.ai-feeds.com/fullchain.pem
   test -s /etc/letsencrypt/live/perf-staging.ai-feeds.com/privkey.pem
-'
+REMOTE
 ```
 
 安装 final 到未启用文件，再原子切换 symlink。任何语法、reload 或 smoke 失败都会自动恢复
@@ -1349,18 +1551,20 @@ test -z "$(git status --porcelain)"
 cd "$REPO_ROOT"
 VPS=root@154.12.188.231
 SSH_KEY=~/.ssh/aifeeds-hk.pem
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 FINAL_TEMPLATE=deploy/nginx/aifeeds-perf-staging-server.conf
 FINAL_SHA256="$(shasum -a 256 "$FINAL_TEMPLATE" | awk '{print $1}')"
 BOOTSTRAP_SHA256="$(cat "$EVIDENCE/nginx-bootstrap-remote.sha256")"
 printf '%s' "$BOOTSTRAP_SHA256" | grep -Eq '^[a-f0-9]{64}$'
 printf '%s  %s\n' "$FINAL_SHA256" "$(basename "$FINAL_TEMPLATE")" \
   > "$EVIDENCE/nginx-final-local.sha256"
-REMOTE_STAGE="$(ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-  'set -eu; umask 077; d=$(mktemp -d /run/aifeeds-perf-staging.XXXXXX); chmod 700 "$d"; printf "%s\n" "$d"')"
+REMOTE_STAGE="$(ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s bash -c 'set -eu; umask 077; d=\$(mktemp -d /run/aifeeds-perf-staging.XXXXXX); chmod 700 \"\$d\"; printf \"%s\\n\" \"\$d\"'")"
 printf '%s' "$REMOTE_STAGE" | grep -Eq '^/run/aifeeds-perf-staging\.[A-Za-z0-9]{6}$'
 cleanup_stage() {
-  ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-    "case '$REMOTE_STAGE' in /run/aifeeds-perf-staging.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac"
+  ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+    "timeout 30s bash -c \"case '$REMOTE_STAGE' in /run/aifeeds-perf-staging.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac\""
 }
 on_stage_exit() {
   rc=$?
@@ -1375,16 +1579,20 @@ trap on_stage_exit EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-scp -o ConnectTimeout=10 -i "$SSH_KEY" "$FINAL_TEMPLATE" "$VPS:$REMOTE_STAGE/"
-ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" "chmod 600 '$REMOTE_STAGE/$(basename "$FINAL_TEMPLATE")'"
-REMOTE_SHA256="$(ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" \
-  "set -eu; f='$REMOTE_STAGE/$(basename "$FINAL_TEMPLATE")'; \
-   test -f \"\$f\"; test ! -L \"\$f\"; test \"\$(stat -c '%u:%a' \"\$f\")\" = 0:600; \
-   sha256sum \"\$f\" | awk '{print \$1}'")"
+scp "${SSH_OPTS[@]}" -i "$SSH_KEY" "$FINAL_TEMPLATE" "$VPS:$REMOTE_STAGE/"
+ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s chmod 600 '$REMOTE_STAGE/$(basename "$FINAL_TEMPLATE")'"
+REMOTE_SHA_LINE="$(ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  "timeout 30s bash -c 'set -eu; f=\$1; test -f \"\$f\"; test ! -L \"\$f\"; \
+   test \"\$(stat -c \"%u:%a\" \"\$f\")\" = 0:600; sha256sum \"\$f\"' \
+   _ '$REMOTE_STAGE/$(basename "$FINAL_TEMPLATE")'")"
+REMOTE_SHA256="${REMOTE_SHA_LINE%% *}"
 test "$REMOTE_SHA256" = "$FINAL_SHA256"
 printf '%s\n' "$REMOTE_SHA256" > "$EVIDENCE/nginx-final-remote.sha256"
 
-ssh -o ConnectTimeout=10 -i "$SSH_KEY" "$VPS" bash -s -- "$REMOTE_STAGE" "$FINAL_SHA256" "$BOOTSTRAP_SHA256" \
+ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" "$VPS" \
+  timeout --signal=TERM --kill-after=30s 5m bash -s -- \
+  "$REMOTE_STAGE" "$FINAL_SHA256" "$BOOTSTRAP_SHA256" \
   > "$EVIDENCE/nginx-final.stdout" 2> "$EVIDENCE/nginx-final.stderr" <<'REMOTE'
 set -eu
 set -o pipefail
@@ -1492,6 +1700,8 @@ set -o pipefail
 umask 077
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 . "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 BOOTSTRAP_SHA256="$(cat "$EVIDENCE/nginx-bootstrap-remote.sha256")"
 printf '%s' "$BOOTSTRAP_SHA256" | grep -Eq '^[a-f0-9]{64}$'
 if [ -f "$EVIDENCE/nginx-final-remote.sha256" ]; then
@@ -1500,7 +1710,8 @@ if [ -f "$EVIDENCE/nginx-final-remote.sha256" ]; then
 else
   FINAL_SHA256=absent
 fi
-ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 bash -s -- \
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  timeout --signal=TERM --kill-after=30s 5m bash -s -- \
   "$BOOTSTRAP_SHA256" "$FINAL_SHA256" \
   > "$EVIDENCE/nginx-rollback.stdout" 2> "$EVIDENCE/nginx-rollback.stderr" <<'REMOTE'
   set -eu
@@ -1583,6 +1794,151 @@ REMOTE
 
 证书和 webroot 可暂留用于审计；删除证书、DNS 或 Pages 是各自独立动作，不和 nginx 回滚绑在一个
 命令中。
+
+### 9.3 GL-b：staging Worker → nginx request-id join
+
+G1 和 G7b 都通过后、G8 测试账号写入前，先用匿名同源 API 做一次只读 join。GL-b 不复用生产 API：
+生产 Worker 尚未发布本分支，不能作为 staging-first 的前置条件。响应头只写 0600 临时文件，远端
+JSONL 只通过管道进入 `jq`，不落本地原始日志：
+
+```bash
+set -eu
+set -o pipefail
+umask 077
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+. "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+test "$(cat "$EVIDENCE/commit.txt")" = "$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+RAW_DIR="$(mktemp -d "${TMPDIR:-/private/tmp}/aifeeds-perf-gl-b.XXXXXX")"
+chmod 700 "$RAW_DIR"
+cleanup_raw() { rm -rf "$RAW_DIR"; }
+trap cleanup_raw EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+DIRECT_RID="diag-$(openssl rand -hex 8)"
+printf '%s' "$DIRECT_RID" | grep -Eq '^diag-[a-f0-9]{16}$'
+: > "$RAW_DIR/direct-headers"
+set +e
+DIRECT_STATUS="$(curl -sS --connect-timeout 10 --max-time 30 \
+  -H "X-Request-Id: $DIRECT_RID" \
+  -D "$RAW_DIR/direct-headers" -o /dev/null -w '%{http_code}' \
+  'https://staging-api.ai-feeds.com/api/items?source_type=x_list&limit=1')"
+DIRECT_CURL_RC=$?
+set -e
+DIRECT_ECHO="$(tr -d '\r' < "$RAW_DIR/direct-headers" 2>/dev/null \
+  | awk -F': ' 'tolower($1)=="x-request-id" {print $2; exit}')"
+DIRECT_HEADER_PRESENT=false
+DIRECT_ECHO_MATCHES=false
+if printf '%s' "$DIRECT_ECHO" | grep -Eq '^[A-Za-z0-9._:-]{8,128}$'; then
+  DIRECT_HEADER_PRESENT=true
+  if [ "$DIRECT_ECHO" = "$DIRECT_RID" ]; then DIRECT_ECHO_MATCHES=true; fi
+fi
+
+PROBE="upstream-$(date +%s)-$(openssl rand -hex 4)"
+printf '%s' "$PROBE" | grep -Eq '^upstream-[0-9]{10,16}-[a-f0-9]{8}$'
+: > "$RAW_DIR/perf-headers"
+set +e
+PERF_STATUS="$(curl -sS --connect-timeout 10 --max-time 30 \
+  -H "X-Aifeeds-Perf-Probe: $PROBE" \
+  -D "$RAW_DIR/perf-headers" -o /dev/null -w '%{http_code}' \
+  'https://perf-staging.ai-feeds.com/api/items?source_type=x_list&limit=1')"
+PERF_CURL_RC=$?
+set -e
+PERF_RID="$(tr -d '\r' < "$RAW_DIR/perf-headers" 2>/dev/null \
+  | awk -F': ' 'tolower($1)=="x-request-id" {print $2; exit}')"
+PERF_HEADER_PRESENT=false
+if printf '%s' "$PERF_RID" | grep -Eq '^[A-Za-z0-9._:-]{8,128}$'; then
+  PERF_HEADER_PRESENT=true
+fi
+
+printf '%s\n' \
+  '{"probe_row_count":0,"nginx_request_id_present":false,"request_id_join":false,"nginx_status_ok":false,"timing_fields_valid":false}' \
+  > "$RAW_DIR/log-summary.json"
+LOG_FETCH_OK=false
+LAST_LOG_FETCH_RC=1
+LOG_FETCH_ATTEMPTS=0
+attempt=1
+while [ "$attempt" -le 12 ]; do
+  LOG_FETCH_ATTEMPTS=$attempt
+  set +e
+  ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+    'timeout 15s tail -n 2000 /var/log/nginx/aifeeds-performance.jsonl' \
+    | jq -s --arg probe "$PROBE" --arg rid "$PERF_RID" '
+      [ .[] | select(.host == "perf-staging.ai-feeds.com" and .perf_probe == $probe) ] as $rows |
+      def timing_shape:
+        type == "string" and test("^[0-9]+([.][0-9]+)?((, ?| ?: ?)[0-9]+([.][0-9]+)?)*$");
+      {probe_row_count:($rows | length),
+       nginx_request_id_present:(($rows | length) == 1 and
+         ($rows[0].request_id | type) == "string" and
+         ($rows[0].request_id | test("^[A-Za-z0-9._:-]{8,128}$"))),
+       request_id_join:(($rows | length) == 1 and $rid != "" and $rows[0].request_id == $rid),
+       nginx_status_ok:(($rows | length) == 1 and $rows[0].status == "200"),
+       timing_fields_valid:(($rows | length) == 1 and all($rows[];
+         (.request_time | timing_shape) and
+         (.upstream_connect_time | timing_shape) and
+         (.upstream_header_time | timing_shape) and
+         (.upstream_response_time | timing_shape)))}
+    ' > "$RAW_DIR/log-summary-attempt.json"
+  LOG_FETCH_RC=$?
+  set -e
+  LAST_LOG_FETCH_RC=$LOG_FETCH_RC
+  if [ "$LOG_FETCH_RC" = 0 ] \
+    && jq -e 'type == "object" and has("probe_row_count")' "$RAW_DIR/log-summary-attempt.json" >/dev/null; then
+    mv -f "$RAW_DIR/log-summary-attempt.json" "$RAW_DIR/log-summary.json"
+    LOG_FETCH_OK=true
+    if jq -e '.probe_row_count == 1' "$RAW_DIR/log-summary.json" >/dev/null; then break; fi
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+rm -f "$RAW_DIR/log-summary-attempt.json"
+jq -nc \
+  --arg direct_status "$DIRECT_STATUS" --arg perf_status "$PERF_STATUS" \
+  --argjson direct_curl_rc "$DIRECT_CURL_RC" --argjson perf_curl_rc "$PERF_CURL_RC" \
+  --argjson direct_header_present "$DIRECT_HEADER_PRESENT" \
+  --argjson direct_echo_matches "$DIRECT_ECHO_MATCHES" \
+  --argjson perf_header_present "$PERF_HEADER_PRESENT" \
+  --argjson nginx_log_fetch_ok "$LOG_FETCH_OK" \
+  --argjson last_log_fetch_rc "$LAST_LOG_FETCH_RC" \
+  --argjson log_fetch_attempts "$LOG_FETCH_ATTEMPTS" \
+  --slurpfile log "$RAW_DIR/log-summary.json" '
+    {schema:1,gate:"GL-b",direct_status:$direct_status,perf_status:$perf_status,
+     direct_transport_ok:($direct_curl_rc == 0),perf_transport_ok:($perf_curl_rc == 0),
+     direct_worker_header_present:$direct_header_present,direct_worker_echo_matches:$direct_echo_matches,
+     perf_worker_header_present:$perf_header_present,nginx_log_fetch_ok:$nginx_log_fetch_ok,
+     last_log_fetch_rc:$last_log_fetch_rc,log_fetch_attempts:$log_fetch_attempts} + $log[0]' \
+  > "$RAW_DIR/summary.json"
+install -m 0600 "$RAW_DIR/summary.json" "$EVIDENCE/gl-b-request-id-join.json"
+jq -e '.direct_transport_ok == true and .direct_status == "200" and
+  .direct_worker_header_present == true and .direct_worker_echo_matches == true and
+  .perf_transport_ok == true and .perf_status == "200" and .perf_worker_header_present == true and
+  .nginx_log_fetch_ok == true and .probe_row_count == 1 and
+  .nginx_request_id_present == true and .request_id_join == true and
+  .nginx_status_ok == true and .timing_fields_valid == true' \
+  "$EVIDENCE/gl-b-request-id-join.json" >/dev/null
+cleanup_raw
+trap - EXIT HUP INT TERM
+```
+
+GL-b 失败就停止 G8，并按三类证据归因：
+
+- **无 Worker header**：直接探测 `staging-api.ai-feeds.com`。只有 `direct_transport_ok=true`、状态精确
+  200 且仍没有 `X-Request-Id` 时才定位为 G1/Worker；网络/DNS/边缘错误先归对应链路。直连有头、
+  perf-staging 精确 200 但没头时定位为 G7b 的响应头转发。
+- **无 nginx row**：只有 `nginx_log_fetch_ok=true` 且响应有合法 header，但唯一 `perf_probe` 没有对应
+  JSONL 行时，才先核对 GL-a 的
+  host map、日志文件/缓冲、timer 与当前 nginx 配置，再核对 G7 host 路由。
+- **request-id 不一致**：用上面两次等价的匿名只读探测判断。直连探测显式传入受限诊断 ID 并要求
+  Worker 原样回显；perf-staging 探测则比较 Worker 响应头与同一 `perf_probe` 的 nginx-generated ID，
+  从而区分 G1 回显实现和 G7 request-id 注入/转发。
+
+禁止盲目回滚 G1、G7 或 GL-a；先归因，只能调用被证据定位 gate 在其原审批中已授权的精确 rollback，
+没有预授权就另行审批。GL-b 自身是只读 gate，不授权任何写回滚。不得修改生产 Worker、伪造响应头或把
+缺失 join 标成 N/A。成功和失败都会保留一份不含 request-id 原值的 0600 结构化 summary。
 
 ## 10. G8：功能、性能与退出条件
 
@@ -1903,7 +2259,7 @@ test "$PLAYWRIGHT_STATUS" = 0
 五设备 matrix 使用同一专用 identity 和一次性 context，但不打印 Cookie/storage state。命令返回时所有
 browser/context 已关闭；之后再进入 10.2，由清理 gate 验证 logout 或已被浏览器撤销的 session。
 
-### 10.1c nginx → Worker request-id / perf-probe join
+### 10.1c GL-b 的五设备扩展：nginx → Worker request-id / perf-probe join
 
 Playwright 成功后，使用同一个受限 probe 发一个无 Cookie 的同源 API GET，再只读 VPS 性能日志。
 远端原始 JSONL 不落本地磁盘、不写入 evidence；`jq` 只输出行数、join boolean 和该条请求的四段
@@ -1917,6 +2273,10 @@ set +x
 umask 077
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 . "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+test "$(cat "$EVIDENCE/commit.txt")" = "$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
 E2E_PERF_PROBE="$(cat "$EVIDENCE/playwright-perf-probe.txt")"
 printf '%s' "$E2E_PERF_PROBE" | grep -Eq '^upstream-[0-9]{10,16}-[a-f0-9]{8}$'
 RAW_DIR="$(mktemp -d "${TMPDIR:-/private/tmp}/aifeeds-perf-join.XXXXXX")"
@@ -1957,8 +2317,8 @@ printf '%s' "$JOIN_REQUEST_ID" | grep -Eq '^[A-Za-z0-9._:-]{8,128}$'
 
 attempt=1
 while [ "$attempt" -le 12 ]; do
-  if ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
-    'tail -n 20000 /var/log/nginx/aifeeds-performance.jsonl' \
+  if ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+    'timeout 15s tail -n 20000 /var/log/nginx/aifeeds-performance.jsonl' \
     | jq -s --slurpfile browser "$RAW_DIR/browser-request-ids.json" \
       --arg probe "$E2E_PERF_PROBE" --arg rid "$JOIN_REQUEST_ID" '
       [ .[] | select(.host == "perf-staging.ai-feeds.com" and .perf_probe == $probe) ] as $rows |

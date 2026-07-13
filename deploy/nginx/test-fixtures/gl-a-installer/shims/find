@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+state_dir=/tmp/gl-a-test
+
+if [ "$scenario" = negative-probe-find-error ] \
+    && [ -e "$state_dir/negative-find-window" ] \
+    && [ "$#" -eq 6 ] \
+    && [ "$1" = /var/log/nginx ] \
+    && [ "$2" = -maxdepth ] \
+    && [ "$3" = 1 ] \
+    && [ "$4" = -name ] \
+    && [ "$5" = 'aifeeds-performance.jsonl*' ] \
+    && [ "$6" = -print0 ]; then
+    count=0
+    if [ -f "$state_dir/negative-find.count" ]; then
+        read -r count < "$state_dir/negative-find.count"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$state_dir/negative-find.count"
+    if [ "$count" -ge 2 ]; then
+        : > "$state_dir/negative-find-error-hit"
+        exit 2
+    fi
+fi
+
+if [ "$scenario" = preflight-journal-find-error ] \
+    && [ "${1:-}" = /var/backups/aifeeds-performance-log ]; then
+    : > "$state_dir/preflight-journal-find-error-hit"
+    exit 2
+fi
+
+exec /usr/bin/find "$@"
