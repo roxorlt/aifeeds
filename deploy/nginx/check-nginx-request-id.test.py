@@ -63,6 +63,23 @@ FD_AWARE_APPEND_STATUS = textwrap.dedent(
 )
 
 
+def make_rotation_state_directory(path: Path) -> None:
+    path.mkdir(mode=0o750)
+    path.chmod(0o750)
+
+
+class TestFixturePermissions(unittest.TestCase):
+    def test_rotation_state_directory_mode_is_umask_independent(self) -> None:
+        previous_umask = os.umask(0o077)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                state_dir = Path(temporary) / "state"
+                make_rotation_state_directory(state_dir)
+                self.assertEqual(state_dir.stat().st_mode & 0o777, 0o750)
+        finally:
+            os.umask(previous_umask)
+
+
 class CheckerCliTests(unittest.TestCase):
     def test_accepts_stdin_and_reports_counts_without_config_values(self) -> None:
         result = run_checker(VALID_CONFIG)
@@ -461,7 +478,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             config = root / "rotate.conf"
             config.write_text("fixture\n", encoding="utf-8")
             fake_logrotate = root / "fake-logrotate.py"
@@ -513,7 +530,7 @@ class RotationProvenanceTests(unittest.TestCase):
     def test_ledger_same_byte_replacement_is_not_adopted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             anchor = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -533,7 +550,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(status=status_mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 anchor = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -581,7 +598,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             anchor = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -619,7 +636,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             anchor = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -654,7 +671,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -692,7 +709,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -733,7 +750,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -798,7 +815,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -860,7 +877,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -911,7 +928,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -939,7 +956,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1019,7 +1036,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -1068,7 +1085,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1104,7 +1121,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -1160,7 +1177,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1200,7 +1217,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1245,7 +1262,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1433,7 +1450,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1450,7 +1467,7 @@ class RotationProvenanceTests(unittest.TestCase):
                     return
                 injected = True
                 os.rename(state_dir, detached)
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 replacement_ledger = state_dir / CHECKER_MODULE.ROTATION_LEDGER_NAME
                 replacement_ledger.write_bytes(
                     (detached / CHECKER_MODULE.ROTATION_LEDGER_NAME).read_bytes()
@@ -1480,7 +1497,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1532,7 +1549,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1619,7 +1636,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1659,7 +1676,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1706,7 +1723,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1778,7 +1795,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1820,7 +1837,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1880,7 +1897,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1929,7 +1946,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -1990,7 +2007,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -2042,7 +2059,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(status=status_mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2090,7 +2107,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -2161,7 +2178,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(barrier=barrier), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 anchor = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2214,7 +2231,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(barrier=barrier), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2278,7 +2295,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2344,7 +2361,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(runner=runner.__name__), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2405,7 +2422,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(barrier=barrier), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2474,7 +2491,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(state=state_name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2552,7 +2569,7 @@ class RotationProvenanceTests(unittest.TestCase):
                     tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2634,7 +2651,7 @@ class RotationProvenanceTests(unittest.TestCase):
     def test_record_schema_rejects_extra_or_missing_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             anchor = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
@@ -2663,7 +2680,7 @@ class RotationProvenanceTests(unittest.TestCase):
         for poisoned in (None, [], "scalar", 7):
             with self.subTest(value=poisoned), tempfile.TemporaryDirectory() as temporary:
                 state_dir = Path(temporary) / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 anchor = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2678,7 +2695,7 @@ class RotationProvenanceTests(unittest.TestCase):
     def test_genesis_ledger_append_retries_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             real_write = CHECKER_MODULE.os.write
 
             def partial_write(descriptor: int, payload: bytes | memoryview) -> int:
@@ -2708,7 +2725,7 @@ class RotationProvenanceTests(unittest.TestCase):
         for field, poisoned in mutations:
             with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
                 state_dir = Path(temporary) / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 anchor = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2733,7 +2750,7 @@ class RotationProvenanceTests(unittest.TestCase):
                         tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     state_dir = root / "state"
-                    state_dir.mkdir(mode=0o750)
+                    make_rotation_state_directory(state_dir)
                     provenance = CHECKER_MODULE.initialize_rotation_provenance(
                         state_dir, self.operation_id, state_dir
                     )
@@ -2789,7 +2806,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 provenance = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2829,7 +2846,7 @@ class RotationProvenanceTests(unittest.TestCase):
             with self.subTest(exit_mode=exit_mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 state_dir = root / "state"
-                state_dir.mkdir(mode=0o750)
+                make_rotation_state_directory(state_dir)
                 anchor = CHECKER_MODULE.initialize_rotation_provenance(
                     state_dir, self.operation_id, state_dir
                 )
@@ -2874,7 +2891,7 @@ class RotationProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "state"
-            state_dir.mkdir(mode=0o750)
+            make_rotation_state_directory(state_dir)
             provenance = CHECKER_MODULE.initialize_rotation_provenance(
                 state_dir, self.operation_id, state_dir
             )
