@@ -55,12 +55,18 @@ sqliteTest('SQLite plan loses the ClawHub temp sort after migration', () => {
       source_type TEXT NOT NULL,
       is_relevant INTEGER,
       deleted_at INTEGER,
+      content_translated TEXT,
+      published_at TEXT,
       metrics TEXT,
       extra TEXT
     );
+    CREATE INDEX idx_items_feed_src_pub
+      ON items(source_type, is_relevant, (content_translated IS NULL), published_at DESC, id DESC);
   `);
   const insert = db.prepare(
-    'INSERT INTO items (id, source_type, is_relevant, deleted_at, metrics, extra) VALUES (?, ?, ?, ?, ?, ?)',
+    `INSERT INTO items
+      (id, source_type, is_relevant, deleted_at, content_translated, published_at, metrics, extra)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (let index = 0; index < 2_000; index++) {
     insert.run(
@@ -68,6 +74,8 @@ sqliteTest('SQLite plan loses the ClawHub temp sort after migration', () => {
       'clawhub',
       1,
       null,
+      null,
+      '2026-07-10T00:00:00.000Z',
       JSON.stringify({ stars: (index * 37) % 997 }),
       JSON.stringify({
         category: index % 2 === 0 ? 'mcp-tools' : 'automation',

@@ -13,6 +13,8 @@
 -- Default `category=all&sort=stars`, excluding suspicious skills.
 CREATE INDEX IF NOT EXISTS idx_items_clawhub_feed_stars
 ON items (
+  source_type ASC,
+  is_relevant ASC,
   CAST(json_extract(metrics, '$.stars') AS INTEGER) DESC,
   id ASC
 )
@@ -26,6 +28,8 @@ WHERE source_type = 'clawhub'
 -- so SQLite can equality-constrain it and then stream stars/id in index order.
 CREATE INDEX IF NOT EXISTS idx_items_clawhub_category_stars
 ON items (
+  source_type ASC,
+  is_relevant ASC,
   json_extract(extra, '$.category') ASC,
   CAST(json_extract(metrics, '$.stars') AS INTEGER) DESC,
   id ASC
