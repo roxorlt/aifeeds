@@ -30,6 +30,12 @@ const HOT_EXPR = `((COALESCE(CAST(json_extract(metrics,'$.likes') AS INTEGER),0)
    + 3*COALESCE(CAST(json_extract(metrics,'$.replies') AS INTEGER),0))
   * 1.0 / POW((julianday('now')-julianday(published_at))*24+2, 1.5))`;
 
+export const GITHUB_CANDIDATE_TIME_EXPR = `COALESCE(
+          datetime(CAST(json_extract(extra,'$.last_seen_on_trending_at') AS INTEGER), 'unixepoch'),
+          datetime(json_extract(extra,'$.trending_date_str')),
+          datetime(scraped_at)
+        )`;
+
 // 跨天去重(2026-06-24):排除「今天之前」已进过 digest_pool(= node-run 已推送过)的 item,
 // 确保每天推送不含前几天推过的同一条(如 6/23 推过的「MiniMax 语音 2.8」6/24 不再重复)。
 // 账本 = digest_pool(node-run 每档每源写入的榜单 item_ids,JSON 数组)。只需回看选品窗:
@@ -164,14 +170,20 @@ export async function selectTopForSource(
     windowDays = 3;
   }
 
-  // 时间窗:默认锚到 now(逐字节保持原样);传 asOfDate=D 时锚到 D 日 00:00 UTC(= D 日晨 8 点 BJT
+  // GH 的 scraped_at 是首次入库时间，repo 再次上 trending 时保持不变；选品时间改读显式
+  // last_seen_on_trending_at，并兼容历史 trending_date_str / scraped_at。其它源仍用 scraped_at。
+  const candidateTimeExpr = source === 'gh'
+    ? GITHUB_CANDIDATE_TIME_EXPR
+    : 'datetime(scraped_at)';
+
+  // 时间窗:默认锚到 now;传 asOfDate=D 时锚到 D 日 00:00 UTC(= D 日晨 8 点 BJT
   // 自然跑时刻),使 anchored(D) 严格等于当日自然跑窗口 —— 上界=datetime(D)(绝不加 '+1 day',
   // 否则整窗后移一天),下界回退 windowDays 天。回填历史页时才不选出"当下"的热点。
   const asOf = options.asOfDate;
   const windowClause = asOf
-    ? `datetime(scraped_at) >= datetime(?, '-${windowDays} day')
-      AND datetime(scraped_at) < datetime(?)`
-    : `datetime(scraped_at) >= datetime('now','-${windowDays} day')`;
+    ? `${candidateTimeExpr} >= datetime(?, '-${windowDays} day')
+      AND ${candidateTimeExpr} < datetime(?)`
+    : `${candidateTimeExpr} >= datetime('now','-${windowDays} day')`;
   const sql = `SELECT id FROM items
     WHERE source_type = ?
       AND ${windowClause}

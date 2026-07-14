@@ -212,6 +212,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   }
 
   const nowIso = new Date().toISOString();
+  const nowUnix = Math.floor(Date.now() / 1000);
   const today = bjtDateStr();
   const stmts: D1PreparedStatement[] = [];
 
@@ -223,8 +224,8 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
       sponsor: r.sponsor,
       contributors_inline: r.contributorsInline,
       trending_date_str: today,
-      first_trending_at: Math.floor(Date.now() / 1000),
-      last_seen_on_trending_at: Math.floor(Date.now() / 1000),
+      first_trending_at: nowUnix,
+      last_seen_on_trending_at: nowUnix,
     };
     const metrics = {
       stars: r.totalStars,
@@ -261,7 +262,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
         JSON.stringify(metrics),
         nowIso,
         JSON.stringify(extra),
-        Math.floor(Date.now() / 1000),
+        nowUnix,
         today,
       ),
     );
@@ -273,7 +274,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
-        Math.floor(Date.now() / 1000),
+        nowUnix,
         today,
         r.totalStars,
         r.todayStars,
@@ -283,10 +284,9 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   }
 
   try {
-    const results = await env.DB.batch(stmts);
-    for (const res of results) {
-      if (res.meta?.changes && res.meta.changes > 0) counts.inserted++;
-    }
+    await env.DB.batch(stmts);
+    counts.inserted = allRepoIds.length - existingIds.size;
+    counts.updated_seen = existingIds.size;
   } catch (e) {
     console.error("[github-fetch] D1 batch error:", e);
     counts.errors++;

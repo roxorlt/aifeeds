@@ -4,7 +4,8 @@ import type { Env } from '../index';
 import type { DigestSource } from './config';
 
 // Controller Amendment 验证:selectTopForSource 增加可选日期锚点 asOfDate。
-// 核心约束——不传 asOfDate 时生成的 SQL/绑定参数与改动前逐字节一致(Phase 1 邮件路径零影响)。
+// GH 再次上榜不会改写首次入库 scraped_at，因此时间锚点必须优先读取
+// last_seen_on_trending_at；其它源仍保持 scraped_at 窗口语义。
 
 interface Captured {
   sql: string;
@@ -46,30 +47,27 @@ async function capture(source: DigestSource, options?: { asOfDate?: string }) {
 }
 
 describe('selectTopForSource asOfDate 锚点', () => {
-  // ── 默认路径逐字节一致(改动前后不变)──
+  // ── 默认路径 ──
 
   test('gh 默认不传 asOfDate:SQL 窗口用 now,binds = [sourceType, limit]', async () => {
     const caps = await capture('gh');
     const c = caps[caps.length - 1];
-    expect(c.sql).toContain("AND datetime(scraped_at) >= datetime('now','-1 day')");
+    expect(c.sql).toContain("json_extract(extra,'$.last_seen_on_trending_at')");
+    expect(c.sql).toContain("datetime(json_extract(extra,'$.trending_date_str'))");
+    expect(c.sql).toContain("datetime(scraped_at)");
+    expect(c.sql).toContain(">= datetime('now','-1 day')");
     expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain('datetime(?,');
     expect(c.binds).toEqual(['github', 20]);
   });
 
-  test('gh 默认 SQL 与改动前逐字节一致(整串比对)', async () => {
+  test('gh 默认 SQL 使用 current-trending 时间表达式且其它排序/过滤不变', async () => {
     const caps = await capture('gh');
     const c = caps[caps.length - 1];
-    // 改动前 selectTopForSource 对 gh 产出的原始 SQL(windowDays=1、extraWhere=AND is_relevant=1、
-    // wcGate 空 → `${extraWhere} ${wcGate}` 末尾有一个尾随空格)。逐字节复刻。
-    const expected =
-      'SELECT id FROM items\n' +
-      '    WHERE source_type = ?\n' +
-      "      AND datetime(scraped_at) >= datetime('now','-1 day')\n" +
-      '      AND deleted_at IS NULL AND is_relevant = 1 \n' +
-      "    ORDER BY CAST(json_extract(metrics,'$.today_stars') AS INTEGER) DESC\n" +
-      '    LIMIT ?';
-    expect(c.sql).toBe(expected);
+    expect(c.sql).toContain('COALESCE(');
+    expect(c.sql).toContain("datetime(CAST(json_extract(extra,'$.last_seen_on_trending_at') AS INTEGER), 'unixepoch')");
+    expect(c.sql).toContain('AND deleted_at IS NULL AND is_relevant = 1');
+    expect(c.sql).toContain("ORDER BY CAST(json_extract(metrics,'$.today_stars') AS INTEGER) DESC");
     expect(c.binds).toEqual(['github', 20]);
   });
 
@@ -94,8 +92,9 @@ describe('selectTopForSource asOfDate 锚点', () => {
   test('gh 传 asOfDate:窗口锚到该日晨自然跑窗口(上界 datetime(?) 无 +1 day / 下界回退 windowDays),binds 带日期', async () => {
     const caps = await capture('gh', { asOfDate: '2026-07-01' });
     const c = caps[caps.length - 1];
-    expect(c.sql).toContain("datetime(scraped_at) < datetime(?)");
-    expect(c.sql).toContain("datetime(scraped_at) >= datetime(?, '-1 day')");
+    expect(c.sql).toContain("json_extract(extra,'$.last_seen_on_trending_at')");
+    expect(c.sql).toContain(") < datetime(?)");
+    expect(c.sql).toContain(") >= datetime(?, '-1 day')");
     expect(c.sql).not.toContain("'+1 day'");
     expect(c.sql).not.toContain("datetime('now'");
     expect(c.binds).toEqual(['github', '2026-07-01', '2026-07-01', 20]);
@@ -138,12 +137,13 @@ describe('selectTopForSource asOfDate 锚点', () => {
       // news 走 selectNewsByScore(主查询 = caps[0]);其余源单条查询 = caps[last]。
       const anchoredSql = source === 'news' ? anchoredCaps[0].sql : anchoredCaps[anchoredCaps.length - 1].sql;
       const defaultSql = source === 'news' ? defaultCaps[0].sql : defaultCaps[defaultCaps.length - 1].sql;
+      const timeExprTail = source === 'gh' ? ')' : 'datetime(scraped_at)';
       // 上界恰为 datetime(?),绝不带 '+1 day'
-      expect(anchoredSql).toContain('datetime(scraped_at) < datetime(?)');
+      expect(anchoredSql).toContain(`${timeExprTail} < datetime(?)`);
       expect(anchoredSql).not.toContain("'+1 day'");
       // 下界偏移 '-N day' 锚定路径与默认路径逐字一致(仅锚点由 ? / 'now' 不同)
-      expect(anchoredSql).toContain(`datetime(scraped_at) >= datetime(?, '-${windowDays} day')`);
-      expect(defaultSql).toContain(`datetime(scraped_at) >= datetime('now','-${windowDays} day')`);
+      expect(anchoredSql).toContain(`${timeExprTail} >= datetime(?, '-${windowDays} day')`);
+      expect(defaultSql).toContain(`${timeExprTail} >= datetime('now','-${windowDays} day')`);
     }
   });
 });

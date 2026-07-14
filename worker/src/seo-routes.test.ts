@@ -10,6 +10,7 @@ interface DailyPageRow {
   title: string;
   item_count: number;
   generated_at: string;
+  lastmod?: string | null;
 }
 
 // 有序 daily_pages 行(测试传入即视为最终顺序;handler SQL 用 ORDER BY date DESC)。
@@ -73,6 +74,7 @@ describe('isSeoPath', () => {
     expect(isSeoPath('/daily/abc')).toBe(true);
     expect(isSeoPath('/robots.txt')).toBe(true);
     expect(isSeoPath('/sitemap.xml')).toBe(true);
+    expect(isSeoPath('/video-sitemap.xml')).toBe(true);
     expect(isSeoPath('/llms.txt')).toBe(true);
     expect(isSeoPath('/abc123def.txt')).toBe(true); // indexnow key 文件(根目录 .txt)
   });
@@ -183,13 +185,25 @@ interface ItemPageRow {
   generated_at: string;
   status?: string;
 }
+interface VideoRow {
+  date: string;
+  title: string;
+  description: string;
+  duration_seconds: number;
+  mp4_key: string;
+  poster_key: string;
+  uploaded_at: string;
+  updated_at: string;
+}
 function makeSitemapDb({
   daily = [],
   items = [],
+  videos = [],
   counts = null,
 }: {
   daily?: DailyPageRow[];
   items?: ItemPageRow[];
+  videos?: VideoRow[];
   counts?: Record<string, number> | null;
 }) {
   return {
@@ -201,6 +215,9 @@ function makeSitemapDb({
           return stmt;
         },
         async all<T>() {
+          if (/FROM daily_videos/i.test(sql)) {
+            return { results: [...videos] as unknown as T[] };
+          }
           if (/GROUP BY source/i.test(sql)) {
             const map = new Map<string, { source: string; c: number; m: string }>();
             if (counts) {
@@ -275,6 +292,7 @@ describe('handleSeoRoute /sitemap.xml (sitemap-index)', () => {
     expect(xml.startsWith('<?xml')).toBe(true);
     expect(xml).toContain('<sitemapindex');
     expect(xml).toContain(`<loc>${SITE}/sitemap-daily.xml</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/video-sitemap.xml</loc>`);
     for (const s of ['x', 'gh', 'ph', 'hf-paper', 'news']) {
       expect(xml).toContain(`<loc>${SITE}/sitemap-${s}.xml</loc>`);
     }
@@ -296,6 +314,74 @@ describe('handleSeoRoute /sitemap.xml (sitemap-index)', () => {
     expect(xml).not.toContain('sitemap-x-4.xml'); // 120001 → 恰 3 片
     expect(xml).not.toContain('sitemap-gh-2.xml'); // 其它源 count 0 → 仅 page1
   });
+
+  test('回填旧日报视频时以所有日报中最大的 lastmod 更新日报 sitemap 条目', async () => {
+    const newestDate = mkRow('2026-07-14');
+    const backfilledOldDate = { ...mkRow('2026-06-20'), lastmod: '2026-07-15T09:10:11.000Z' };
+    const resp = await handleSeoRoute(
+      req('/sitemap.xml'),
+      makeEnv({}, makeSitemapDb({ daily: [newestDate, backfilledOldDate] })),
+    );
+    const xml = await resp!.text();
+    const dailyEntry = xml.slice(xml.indexOf(`${SITE}/sitemap-daily.xml`) - 60, xml.indexOf(`${SITE}/sitemap-daily.xml`) + 160);
+    expect(dailyEntry).toContain('<lastmod>2026-07-15</lastmod>');
+  });
+});
+
+describe('handleSeoRoute /video-sitemap.xml', () => {
+  test('emits escaped Google video entries with landing/content/poster/publication/duration fields', async () => {
+    const video: VideoRow = {
+      date: '2026-07-14',
+      title: 'AI & <模型> "日报"',
+      description: 'A & B < C > D',
+      duration_seconds: 125.25,
+      mp4_key: 'daily-video/2026-07-14/a&b.mp4',
+      poster_key: 'daily-video/2026-07-14/poster.jpg',
+      uploaded_at: '2026-07-14T08:09:10.000Z',
+      updated_at: '2026-07-14T09:10:11.000Z',
+    };
+    const resp = await handleSeoRoute(
+      req('/video-sitemap.xml'),
+      makeEnv({}, makeSitemapDb({ videos: [video] })),
+    );
+    expect(resp!.status).toBe(200);
+    expect(resp!.headers.get('Content-Type')).toContain('application/xml');
+    const xml = await resp!.text();
+    expect(xml).toContain('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
+    expect(xml).toContain(`<loc>${SITE}/daily/2026-07-14</loc>`);
+    expect(xml).toContain(`<video:thumbnail_loc>${API}/r/${video.poster_key}</video:thumbnail_loc>`);
+    expect(xml).toContain('<video:title>AI &amp; &lt;模型&gt; &quot;日报&quot;</video:title>');
+    expect(xml).toContain('<video:description>A &amp; B &lt; C &gt; D</video:description>');
+    expect(xml).toContain(`<video:content_loc>${API}/r/daily-video/2026-07-14/a&amp;b.mp4</video:content_loc>`);
+    expect(xml).toContain('<video:publication_date>2026-07-14T08:00:00+08:00</video:publication_date>');
+    expect(xml).toContain('<video:duration>125</video:duration>');
+  });
+
+  test('description is truncated to 2048 characters before XML escaping', async () => {
+    const description = `${'长'.repeat(2047)}&<尾`;
+    const video: VideoRow = {
+      date: '2026-07-14', title: '长描述', description, duration_seconds: 60,
+      mp4_key: 'daily-video/2026-07-14/a.mp4',
+      poster_key: 'daily-video/2026-07-14/b.jpg',
+      uploaded_at: '2026-07-20T00:00:00.000Z',
+      updated_at: '2026-07-20T00:00:00.000Z',
+    };
+    const resp = await handleSeoRoute(
+      req('/video-sitemap.xml'),
+      makeEnv({}, makeSitemapDb({ videos: [video] })),
+    );
+    const xml = await resp!.text();
+    expect(xml).toContain(`<video:description>${'长'.repeat(2047)}&amp;</video:description>`);
+    expect(xml).not.toContain('&lt;尾');
+  });
+
+  test('empty table still returns a valid namespaced urlset', async () => {
+    const resp = await handleSeoRoute(req('/video-sitemap.xml'), makeEnv({}, makeSitemapDb({})));
+    const xml = await resp!.text();
+    expect(resp!.status).toBe(200);
+    expect(xml).toContain('<urlset');
+    expect(xml).not.toContain('<url>');
+  });
 });
 
 describe('handleSeoRoute /sitemap-daily.xml (日报片回归)', () => {
@@ -316,6 +402,30 @@ describe('handleSeoRoute /sitemap-daily.xml (日报片回归)', () => {
     expect(xml).toContain(`<loc>${SITE}/daily/</loc>`);
     expect(xml).toContain(`<loc>${SITE}/daily/2026-07-06</loc>`);
     expect(xml).toContain('<lastmod>2026-07-06</lastmod>');
+  });
+
+  test('video publish lastmod overrides the original generated_at', async () => {
+    const row = { ...mkRow('2026-07-06'), lastmod: '2026-07-14T09:10:11.000Z' };
+    const resp = await handleSeoRoute(
+      req('/sitemap-daily.xml'),
+      makeEnv({}, makeSitemapDb({ daily: [row] })),
+    );
+    const xml = await resp!.text();
+    expect(xml).toContain(`<loc>${SITE}/daily/2026-07-06</loc><lastmod>2026-07-14</lastmod>`);
+  });
+
+  test('首页和归档 lastmod 使用所有日报中的最大值而不是日期最新一行', async () => {
+    const rows = [
+      mkRow('2026-07-14'),
+      { ...mkRow('2026-06-20'), lastmod: '2026-07-15T09:10:11.000Z' },
+    ];
+    const resp = await handleSeoRoute(
+      req('/sitemap-daily.xml'),
+      makeEnv({}, makeSitemapDb({ daily: rows })),
+    );
+    const xml = await resp!.text();
+    expect(xml).toContain(`<loc>${SITE}/</loc><lastmod>2026-07-15</lastmod>`);
+    expect(xml).toContain(`<loc>${SITE}/daily/</loc><lastmod>2026-07-15</lastmod>`);
   });
 
   test('空表 → 仅 / 与 /daily/ 两条', async () => {

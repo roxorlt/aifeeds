@@ -17,6 +17,7 @@ import { renderItem, clampSentences, itemPagePath, type RenderRow, type Rendered
 import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
+import type { DailyVideoRow } from './daily-video';
 
 // 日报页展示源与顺序:沿用 DIGEST_SOURCE_ORDER 剔除 clawhub(2026-06-21 退出订阅日报)。
 export const DAILY_PAGE_SOURCES: DigestSource[] = DIGEST_SOURCE_ORDER.filter((s) => s !== 'clawhub');
@@ -172,6 +173,120 @@ function jsonLdSafe(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+export const DAILY_VIDEO_PLAYER_START = '<!-- daily-video:player:start -->';
+export const DAILY_VIDEO_PLAYER_END = '<!-- daily-video:player:end -->';
+export const DAILY_VIDEO_JSON_LD_START = '<!-- daily-video:json-ld:start -->';
+export const DAILY_VIDEO_JSON_LD_END = '<!-- daily-video:json-ld:end -->';
+
+export function formatVideoDuration(seconds: number): string {
+  const rounded = Math.round(seconds * 1000) / 1000;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded - hours * 3600) / 60);
+  const secs = Math.round((rounded - hours * 3600 - minutes * 60) * 1000) / 1000;
+  return `PT${hours ? `${hours}H` : ''}${minutes ? `${minutes}M` : ''}${secs}S`;
+}
+
+export function dailyVideoPublicationDate(date: string): string {
+  return `${date}T08:00:00+08:00`;
+}
+
+function dailyVideoUrls(video: DailyVideoRow, env: Env) {
+  const { apiBase, siteBase } = getBases(env);
+  return {
+    page: `${siteBase}/daily/${video.date}`,
+    mp4: `${apiBase}/r/${video.mp4_key}`,
+    poster: `${apiBase}/r/${video.poster_key}`,
+    vtt: `${apiBase}/r/${video.vtt_key}`,
+  };
+}
+
+export function dailyVideoObject(video: DailyVideoRow, env: Env): Record<string, unknown> {
+  const urls = dailyVideoUrls(video, env);
+  return {
+    '@type': 'VideoObject',
+    '@id': `${urls.page}#video`,
+    name: video.title,
+    description: video.description,
+    thumbnailUrl: urls.poster,
+    uploadDate: dailyVideoPublicationDate(video.date),
+    duration: formatVideoDuration(video.duration_seconds),
+    contentUrl: urls.mp4,
+  };
+}
+
+function dailyVideoPlayer(video: DailyVideoRow, env: Env): string {
+  const urls = dailyVideoUrls(video, env);
+  return `<section class="daily-video" aria-label="本期视频" style="margin:20px 0 28px">
+<video controls playsinline preload="metadata" poster="${escapeHtml(urls.poster)}" style="display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;border-radius:8px">
+<source src="${escapeHtml(urls.mp4)}" type="video/mp4">
+<track kind="captions" src="${escapeHtml(urls.vtt)}" srclang="zh-CN" label="中文" default>
+您的浏览器不支持 HTML5 视频。
+</video>
+</section>`;
+}
+
+function marked(start: string, content: string, end: string): string {
+  return `${start}${content}${end}`;
+}
+
+function replaceMarked(html: string, start: string, end: string, replacement: string): string | null {
+  const from = html.indexOf(start);
+  if (from < 0) return null;
+  const to = html.indexOf(end, from + start.length);
+  if (to < 0) throw new Error(`unterminated daily video marker: ${start}`);
+  return html.slice(0, from) + replacement + html.slice(to + end.length);
+}
+
+function mergeVideoIntoJsonLd(value: unknown, videoNode: Record<string, unknown>): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { '@context': 'https://schema.org', '@graph': [videoNode] };
+  }
+  const root = value as Record<string, unknown>;
+  const context = root['@context'] ?? 'https://schema.org';
+  if (Array.isArray(root['@graph'])) {
+    const graph = (root['@graph'] as unknown[]).filter((node) => {
+      if (!node || typeof node !== 'object') return true;
+      return (node as Record<string, unknown>)['@type'] !== 'VideoObject';
+    });
+    return { ...root, '@context': context, '@graph': [...graph, videoNode] };
+  }
+  const { ['@context']: _context, ...originalNode } = root;
+  return { '@context': context, '@graph': [originalNode, videoNode] };
+}
+
+// 历史页只替换两个稳定 marker 区块。首次调用把原 JSON-LD script 整体包入 marker 并
+// 合并 VideoObject；后续调用只替换 marker 内部，marker 外原快照保持逐字节不变。
+export function patchDailyPageVideoHtml(html: string, video: DailyVideoRow, env: Env): string {
+  const playerBlock = marked(
+    DAILY_VIDEO_PLAYER_START,
+    dailyVideoPlayer(video, env),
+    DAILY_VIDEO_PLAYER_END,
+  );
+  let next = replaceMarked(html, DAILY_VIDEO_PLAYER_START, DAILY_VIDEO_PLAYER_END, playerBlock);
+  if (next === null) {
+    const mainAt = html.indexOf('<main>');
+    if (mainAt < 0) throw new Error('daily page has no <main> element');
+    const insertAt = mainAt + '<main>'.length;
+    next = html.slice(0, insertAt) + playerBlock + html.slice(insertAt);
+  }
+
+  const scriptRe = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i;
+  const script = next.match(scriptRe);
+  if (!script) throw new Error('daily page has no JSON-LD script');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(script[1]);
+  } catch {
+    throw new Error('daily page JSON-LD is invalid');
+  }
+  const merged = mergeVideoIntoJsonLd(parsed, dailyVideoObject(video, env));
+  const jsonScript = `<script type="application/ld+json">${jsonLdSafe(merged)}</script>`;
+  const jsonBlock = marked(DAILY_VIDEO_JSON_LD_START, jsonScript, DAILY_VIDEO_JSON_LD_END);
+  const withReplacedMarker = replaceMarked(next, DAILY_VIDEO_JSON_LD_START, DAILY_VIDEO_JSON_LD_END, jsonBlock);
+  if (withReplacedMarker !== null) return withReplacedMarker;
+  return next.replace(scriptRe, jsonBlock);
+}
+
 // ── 公共 SEO 页骨架(日报页 + item 单页共用)───────────────────────────────────────
 // head(title/description/canonical/OG/单 JSON-LD 数据岛/内联 CSS)+ <html> 外壳。
 // bodyHtml 为 <body> 内的完整内容(调用方自带 .wrap 容器)。零可执行 <script>:唯一 <script>
@@ -271,7 +386,7 @@ function renderArticle(item: RenderedItem, siteBase: string): string {
   return parts.join('');
 }
 
-export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
+export function renderDailyPageHtml(data: DailyPageData, env: Env, video: DailyVideoRow | null = null): string {
   const { siteBase } = getBases(env);
   const dailyBase = `${siteBase}/daily`;
   const pageUrl = `${dailyBase}/${data.date}`;
@@ -332,6 +447,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
           itemListElement,
         },
       },
+      ...(video ? [dailyVideoObject(video, env)] : []),
     ],
   };
 
@@ -354,13 +470,16 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env): string {
   const h1Text = data.subject ? `AI 日报 ${data.date} · ${data.subject}` : `AI 日报 ${data.date}`;
 
   // SSR 骨架抽取:head/OG/canonical/CSS/html 外壳统一走 renderSeoPageShell,本函数只拼 body。
+  const playerHtml = video
+    ? marked(DAILY_VIDEO_PLAYER_START, dailyVideoPlayer(video, env), DAILY_VIDEO_PLAYER_END)
+    : '';
   const bodyHtml = `<div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
 <h1>${escapeHtml(h1Text)}</h1>
 <nav class="nav">${nav.join('')}</nav>
 </header>
-<main>${sectionsHtml}</main>
+<main>${playerHtml}${sectionsHtml}</main>
 <footer>
 <a href="${siteBase}/subscribe">订阅每日邮件</a>
 <a href="${siteBase}/">进站看全部</a>

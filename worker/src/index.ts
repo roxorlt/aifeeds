@@ -95,6 +95,8 @@ import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
 import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
+import { drainDailyVideoGc, handleDailyVideoUpload } from './digest/daily-video';
+import { rebuildDigestPoolSnapshot } from './digest/pool-rebuild';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
@@ -102,6 +104,12 @@ import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
 import { runHfDailyFetch, triggerHfPaperWorkflowForItem } from './scrapers/hf-paper';
+import { routeSourceCronActions, type SourceCronAction } from './ops/cron-routing';
+import {
+  drainGithubPending,
+  drainHfPending,
+  getSourceReadiness,
+} from './ops/source-pipeline';
 import { notifyCronSummary, sendDailyWarningDigest, runDailyHealthChecks } from './notifier';
 import {
   handleHuodongxingPoc,
@@ -405,6 +413,105 @@ function withCors(resp: Response, request: Request, env: Env): Response {
   return new Response(resp.body, { status: resp.status, headers: newHeaders });
 }
 
+// 互相重叠的 source cron 必须作为独立 action 执行，不能再放进下方带大量 early-return
+// 的 legacy mode dispatcher。这样 :20/:50 的 HDX、HF、blog/weibo/podcast 不会彼此遮蔽。
+async function runScheduledSourceAction(env: Env, action: SourceCronAction): Promise<void> {
+  switch (action) {
+    case 'daily-video-gc': {
+      const result = await recordCronRun(
+        env,
+        { name: 'daily-video-gc', source: 'daily-video', category: 'cleanup' },
+        () => drainDailyVideoGc(env, { limit: 100 }),
+      );
+      console.log('[cron] daily-video-gc:', JSON.stringify(result));
+      return;
+    }
+    case 'github-pending-drain': {
+      const result = await recordCronRun(
+        env,
+        { name: 'github-pending-drain', source: 'github', category: 'backfill' },
+        () => drainGithubPending(env, { limit: 20 }),
+      );
+      console.log('[cron] github-pending-drain:', JSON.stringify(result));
+      return;
+    }
+    case 'hf-pending-drain': {
+      const result = await recordCronRun(
+        env,
+        { name: 'hf-pending-drain', source: 'hf', category: 'backfill' },
+        () => drainHfPending(env, { limit: 20 }),
+      );
+      console.log('[cron] hf-pending-drain:', JSON.stringify(result));
+      return;
+    }
+    case 'source-readiness-snapshot': {
+      const result = await getSourceReadiness(env);
+      console.log('[cron] source-readiness-snapshot:', JSON.stringify(result));
+      if (result.github.ready < 1 || result.hfPaper.ready < 1) {
+        await notifyCronSummary(env, '08:00 日报源就绪告警', {
+          github_ready: result.github.ready,
+          github_pending: result.github.pending,
+          github_oldest_pending_seconds: result.github.oldestAge,
+          hf_ready: result.hfPaper.ready,
+          hf_pending: result.hfPaper.pending,
+          hf_oldest_pending_seconds: result.hfPaper.oldestAge,
+        });
+      }
+      return;
+    }
+    case 'hf-daily-fetch': {
+      const result = await recordCronRun(
+        env,
+        { name: 'hf-daily-fetch', source: 'hf', category: 'fetch' },
+        () => runHfDailyFetch(env),
+      );
+      console.log('[cron] hf-daily-fetch result:', JSON.stringify(result));
+      await notifyCronSummary(env, 'HF Daily Papers 每日抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+    case 'hdx-auto-drain': {
+      if (!env.HUODONGXING_DETAIL_WORKFLOW) return;
+      const result = await recordCronRun(
+        env,
+        { name: 'hdx-auto-drain', source: 'hdx', category: 'enrich' },
+        () => drainHdxPendingWorkflows(env, 25, 3),
+      );
+      console.log('[cron] hdx-auto-drain result:', JSON.stringify(result));
+      return;
+    }
+    case 'weibo-hot-fetch': {
+      const result = await recordCronRun(
+        env,
+        { name: 'weibo-hot-fetch', source: 'blog', category: 'fetch' },
+        () => runBlogFetch(env, { feedKeys: ['weibo-hot-tech'] }),
+      );
+      console.log('[cron] weibo-hot-fetch result:', JSON.stringify(result));
+      await notifyCronSummary(env, '微博热搜抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+    case 'blog-fetch': {
+      const result = await recordCronRun(
+        env,
+        { name: 'blog-fetch', source: 'blog', category: 'fetch' },
+        () => runBlogFetch(env),
+      );
+      console.log('[cron] blog-fetch result:', JSON.stringify(result));
+      await notifyCronSummary(env, '厂商博客抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+    case 'podcast-fetch': {
+      const result = await recordCronRun(
+        env,
+        { name: 'podcast-fetch', source: 'podcast', category: 'fetch' },
+        () => runPodcastFetch(env),
+      );
+      console.log('[cron] podcast-fetch result:', JSON.stringify(result));
+      await notifyCronSummary(env, 'AI 播客抓取', result as unknown as Record<string, unknown>);
+      return;
+    }
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -484,6 +591,12 @@ export default {
       // item SSR 静态页 /i/:source/*(每条内容独立实体页)。bot gate 豁免同 isSeoPath(见上)。
       const itemResp = await handleItemRoute(request, env);
       if (itemResp) return itemResp;
+
+      // HK 日报渲染机在视频完成并通过质量门后上传 MP4/16:9 封面/VTT。
+      // handler 内部使用 X_CARD_SHARED_TOKEN Bearer 鉴权并负责 R2/D1/静态页 SEO 更新。
+      if (path === '/api/digest/daily-video') {
+        return handleDailyVideoUpload(request, env);
+      }
 
       if (path === '/api/ingest' && request.method === 'POST') {
         return handleIngest(request, env);
@@ -879,16 +992,9 @@ export default {
           force,
         }, 200, request, env);
       }
-      // ─── GH Workflow 一次性 drain pending（迁移后兜底） ───────────
+      // ─── GH Workflow 手动 drain（与自动 source pipeline 共用） ────
       // POST /api/admin/gh-trigger-pending-workflows-now?limit=N
       //
-      // 扫两类 item：
-      //   (a) extra.gh_pending=true — Phase 1 写完 stub 但还没跑 Workflow（正常 pending）
-      //   (b) is_relevant IS NULL — 已 enrich 但 LLM 判别失败的「卡死」item
-      //       (老 preempt 流程下，LLM 失败时 gh_pending 被清成 0，留下 NULL is_relevant)
-      //
-      // Workflow 完全幂等：step 1 重写 metadata、step 2 重新 LLM、step 3/4 幂等。
-      // 已存在 instance ID 自动跳过（同 itemId 不会被多次创建实例）。
       if (path === '/api/admin/gh-trigger-pending-workflows-now' && request.method === 'POST') {
         if (!(await checkAdminAuth(request, env))) {
           return new Response('Unauthorized', {
@@ -897,42 +1003,8 @@ export default {
           });
         }
         const u = new URL(request.url);
-        const limit = Math.min(parseInt(u.searchParams.get('limit') || '50', 10), 400);
-        if (!env.GITHUB_PIPELINE_WORKFLOW) {
-          return jsonResponse({ error: 'GITHUB_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
-        }
-        // 扩 drain SQL：覆盖 4 种 stuck（pending / 未分类 / README 没译 / R2 没迁）
-        // + marker filter (30min 内已触发的 skip)
-        const pending = await env.DB.prepare(
-          `SELECT id FROM items
-            WHERE source_type='github'
-              AND deleted_at IS NULL
-              AND (
-                COALESCE(json_extract(extra, '$.gh_pending'), 0) IN (1, 'true')               -- 初始 pending
-                OR is_relevant IS NULL                                                          -- 未分类
-                OR (is_relevant=1 AND json_extract(extra, '$.readme_translated') IS NULL
-                    AND COALESCE(json_extract(extra, '$.readme_lang'), 'other') != 'zh'
-                    AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)                    -- README 没翻译
-                OR (is_relevant=1 AND json_extract(extra, '$.r2_migrated_at') IS NULL
-                    AND json_extract(extra, '$.readme_excerpt') IS NOT NULL)                    -- R2 资源没迁
-              )
-              AND (
-                json_extract(extra, '$.workflow_triggered_at') IS NULL
-                OR json_extract(extra, '$.workflow_triggered_at') < strftime('%s','now','-30 minutes')
-              )
-            ORDER BY scraped_at ASC
-            LIMIT ?`,
-        ).bind(limit).all<{ id: string }>();
-        let triggered = 0;
-        let skipped = 0;
-        let failed = 0;
-        for (const r of pending.results) {
-          const result = await triggerGhWorkflowForItem(env, r.id);
-          if (result === 'triggered') triggered++;
-          else if (result === 'already_exists') skipped++;
-          else failed++;
-        }
-        return jsonResponse({ found: pending.results.length, triggered, skipped, failed }, 200, request, env);
+        const limit = Math.min(Math.max(parseInt(u.searchParams.get('limit') || '50', 10), 1), 200);
+        return jsonResponse(await drainGithubPending(env, { limit }), 200, request, env);
       }
       // ─── 阶段 6 PH workflow drain ──────────────────────────────
       // POST /api/admin/ph-trigger-pending-workflows-now?limit=N (上限 400)
@@ -1665,6 +1737,16 @@ export default {
     const minute = utc.getUTCMinutes();
     const hour = utc.getUTCHours();
 
+    // source 任务独立调度：一个 cron tick 可以同时命中多个 action；每个 action 都注册
+    // 自己的 waitUntil，legacy dispatcher 中任何 return 都不能再遮蔽它们。
+    const sourceActions = routeSourceCronActions({ utcHour: hour, utcMinute: minute });
+    for (const action of sourceActions) {
+      ctx.waitUntil(
+        runScheduledSourceAction(env, action)
+          .catch((error) => console.error(`[cron] source action ${action} failed:`, error)),
+      );
+    }
+
     // digest 推送节点:UTC 0/4/9 (= BJT 8/12/17),minute=0。独立触发 node-run workflow
     // (不占 X mode rotation);instance id 唯一 = 同节点同天幂等防重复 create。
     const digestSlotBjt =
@@ -1812,16 +1894,6 @@ export default {
       ((hour === 20 || hour === 8) && minute >= 35) ||
       ((hour === 21 || hour === 9) && minute <= 5);
 
-    // Huodongxing detail-enrich slots: minute=20/50（2 tick/h，1/6 cycle 占用率）
-    // 阶段 5 cutover (2026-05-16) 把这里改成 workflow auto-drain：
-    //   - 之前是 legacy batch（runHuodongxingDetailEnrich），单 tick batch=3 + 5s 节流
-    //   - 阶段 5 改 workflow 后 cutover 漏了 cron 自动 drain，老 backlog 卡 loading
-    //   - 2026-05-17 补：cron tick 触发 25 个 pending workflow instance（throttleSec
-    //     3s 错开 0/3/6...72s 启动 detail fetch 避免 site WAF），48 tick × 25 = 1200/day
-    //     容量，存量 600+ 半天清完，增量 +150/天稳跑赢。
-    //   - 治本 marker filter 跟 admin endpoint 共用（30min 窗口内已触发的跳过）
-    const isHdxEnrichSlot = minute === 20 || minute === 50;
-
     // Huodongxing 历史活动 sweep：BJT 03:00 (UTC 19:00)，每日清扫一次
     const isHdxSweepSlot = hour === 19 && minute === 0;
 
@@ -1839,13 +1911,6 @@ export default {
     // prod 6000+ 老数据 ~7 天 backfill 完。OPS 一次性跑批可走
     // POST /api/enrich/run?mode=backfill-x-workflow&limit=200 加速。
     const isXBackfillWorkflowSlot = minute === 10 || minute === 40;
-
-    // HF Paper backfill 兜底(2026-05-19 Phase 4):
-    // :20 / :50 (30min cadence) 扫 stuck items 重 trigger workflow,limit=20 + 3s throttle
-    // = ~60s wall。48 tick × 20 = 960/day capacity。HF daily 50/天,容量充足。
-    // input-hash idempotency 保证 deep_analysis pro 不重跑(figure / ar5iv / discussion
-    // fetch step 仍跑,免费)。OPS 跑批走 /api/enrich/run?mode=backfill-hf-paper-workflow&limit=200
-    const isHfBackfillWorkflowSlot = minute === 20 || minute === 50;
 
     // X thread_root_id 反向重建（2026-05-17 task #34）:2026-05-06 切 ScrapeBadger
     // 后 ingest 不再写 extra.thread_root_id(SB API 不返 thread 关系),导致 prod
@@ -1908,24 +1973,8 @@ export default {
             await notifyCronSummary(env, 'PH 每日抓取', r as unknown as Record<string, unknown>);
             return;
           }
-          // ─── HF Daily Papers fetch (UTC 00:00 = BJT 08:00, 1 BJT day) ───
-          // HF Daily 在 UTC 00:00 出新榜,北京 08:00 早上看就有当天 papers。
-          // KV sentinel on BJT date — 防 cron 同日重复跑(force=1 admin endpoint 覆盖)。
-          // 单次 ~50 details + 1 arxiv batch + 50 ingest + 50 trigger ≈ 110 subreq,
-          // 在 paid 1000/invocation cap 内宽松。
-          // 8 段 deep_analysis pro reasoning 在 workflow 异步跑,不阻塞 cron tick。
-          // Phase 8 通知:result 含 list_size / fetched_details / fetched_categories /
-          // ingested / triggered / duration_ms,notifyCronSummary 自动展开成 markdown。
-          if (hour === 0 && minute >= 0 && minute < 5) {
-            const r = await recordCronRun(
-              env,
-              { name: 'hf-daily-fetch', source: 'hf', category: 'fetch' },
-              () => runHfDailyFetch(env),
-            );
-            console.log(`[cron] hf-daily-fetch result:`, JSON.stringify(r));
-            await notifyCronSummary(env, 'HF Daily Papers 每日抓取', r as unknown as Record<string, unknown>);
-            return;
-          }
+          // HF Daily Papers 已移到独立 source action：UTC 00:05（BJT 08:05）。
+          // 08:00 digest 使用前一批已完成数据，不再与“刚抓到但尚未 enrich”的新榜竞态。
           // ─── Daily warning digest + health checks (UTC 23:00 = BJT 07:00) ─
           // 2026-05-25 告警分级 Phase A:flush KV 攒批 warning,推一次合并日报。
           // 2026-05-27 Phase B:同 tick 跑 daily health checks(翻译失败率 +
@@ -2090,69 +2139,8 @@ export default {
             console.log(`[cron] hdx-sweep result:`, JSON.stringify(r));
             return;
           }
-          // ─── 官方新闻：微博热搜雷达 fetch ───
-          // :20 奇数 UTC 时 + :50 全时；再叠加下面全量 blog 的 :20 偶数 UTC 时，
-          // weibo-hot-tech 合计 30min cadence。只跑该源，不把其它官方博客一起加频。
-          const isWeiboHotFetchSlot = minute === 50 || (minute === 20 && hour % 2 !== 0);
-          if (isWeiboHotFetchSlot) {
-            const r = await recordCronRun(
-              env,
-              { name: 'weibo-hot-fetch', source: 'blog', category: 'fetch' },
-              () => runBlogFetch(env, { feedKeys: ['weibo-hot-tech'] }),
-            );
-            console.log(`[cron] weibo-hot-fetch result:`, JSON.stringify(r));
-            await notifyCronSummary(env, '微博热搜抓取', r as unknown as Record<string, unknown>);
-            return;
-          }
-
-          // ─── 官方新闻：blog 厂商博客 fetch (Phase 1, 2026-06-09 §7.2) ───
-          // :20 偶数 UTC 时(12x/天，cadence ~2h)。INSERT OR IGNORE stub + 立即 trigger
-          // workflow(catch-up 分流余者 pending，但 per-feed COLD_START_MAX=10 < 阈值 50，
-          // 实际几乎不进 pending)。整轮成功推进 sources.cursor(seen-set)。
-          // ⚠️ 必须放在 isHdxEnrichSlot(:20/:50)hdx-drain check 之前 —— 那块带 return，
-          //    放它后面会把本 slot shadow 掉。被偷的 12 个 :20 even-hour tick，hdx-drain
-          //    仍有 :50 全时 + :20 奇数时共 36 tick/天兜底，容量充足。
-          const isBlogFetchSlot = minute === 20 && hour % 2 === 0;
-          if (isBlogFetchSlot) {
-            const r = await recordCronRun(
-              env,
-              { name: 'blog-fetch', source: 'blog', category: 'fetch' },
-              () => runBlogFetch(env),
-            );
-            console.log(`[cron] blog-fetch result:`, JSON.stringify(r));
-            await notifyCronSummary(env, '厂商博客抓取', r as unknown as Record<string, unknown>);
-            return;
-          }
-          // ─── 官方新闻：podcast AI 播客 fetch (Phase 1, 2026-06-09 §7.2) ───
-          // :50 UTC {1,7,13,19}(4x/天，cadence ~6h)。同 blog：stub + 立即 trigger。
-          // 放 hdx-drain :50 check 之前防 shadow；偷的 4 个 :50 tick，hdx-drain 仍充裕。
-          const isPodcastFetchSlot =
-            minute === 50 && (hour === 1 || hour === 7 || hour === 13 || hour === 19);
-          if (isPodcastFetchSlot) {
-            const r = await recordCronRun(
-              env,
-              { name: 'podcast-fetch', source: 'podcast', category: 'fetch' },
-              () => runPodcastFetch(env),
-            );
-            console.log(`[cron] podcast-fetch result:`, JSON.stringify(r));
-            await notifyCronSummary(env, 'AI 播客抓取', r as unknown as Record<string, unknown>);
-            return;
-          }
-          // 阶段 5 (2026-05-16): huodongxing detail enrich 迁 CF Workflow
-          // (HuodongxingDetailWorkflow)。runHuodongxingFetchList 对每条新事件
-          // 触发 instance，5s/instance throttleSec 错开避免 site rate limit。
-          // 2026-05-17 补：cron auto-drain 处理 cutover 前 backlog + 触发失败的 retry。
-          // SQL 跟 admin /api/admin/hdx-trigger-pending-workflows-now 共用（marker
-          // 30min 窗口 filter），单 tick limit 25 → 48 tick × 25 = 1200/天 capacity。
-          if (isHdxEnrichSlot && env.HUODONGXING_DETAIL_WORKFLOW) {
-            const r = await recordCronRun(
-              env,
-              { name: 'hdx-auto-drain', source: 'hdx', category: 'enrich' },
-              () => drainHdxPendingWorkflows(env, 25, 3),
-            );
-            console.log(`[cron] hdx-auto-drain result:`, JSON.stringify(r));
-            return;
-          }
+          // 微博/blog/podcast/HDX drain 已迁到独立 source action。
+          // 同一分钟所有命中项都会执行，不再依赖这里的分支顺序和 early return。
           // X tweets 截断 backfill 兜底（2026-05-17）：workflow step 0 治本但旧
           // ingest 漏检的 ~500 条靠这个 cron tick 慢慢消化（也覆盖 workflow trigger 失败的 case）。
           if (isXBackfillTruncatedSlot) {
@@ -2282,60 +2270,7 @@ export default {
             console.log(`[cron] x-backfill-workflow result:`, JSON.stringify(r));
             return;
           }
-          // HF Paper backfill 兜底(2026-05-19 Phase 4)
-          // :20 / :50 30min cadence 扫 stuck items 重 trigger workflow,
-          // input-hash idempotency 保证 deep_analysis pro 不重跑(figure / discussion fetch
-          // 仍跑免费),只补缺失。inline 跟 /api/enrich/run?mode=backfill-hf-paper-workflow 一份逻辑
-          if (isHfBackfillWorkflowSlot) {
-            if (!env.HF_PAPER_PIPELINE_WORKFLOW) {
-              console.warn('[cron] hf-backfill-workflow: HF_PAPER_PIPELINE_WORKFLOW binding missing');
-              return;
-            }
-            const r = await recordCronRun(
-              env,
-              { name: 'hf-backfill-workflow', source: 'hf', category: 'backfill' },
-              async () => {
-                const t0 = Date.now();
-                const pending = await env.DB.prepare(
-                  `SELECT id, extra FROM items
-                    WHERE source_type='hf_paper'
-                      AND deleted_at IS NULL
-                      AND json_extract(extra, '$.workflow_completed_at') IS NULL
-                      AND (
-                        json_extract(extra, '$.workflow_triggered_at') IS NULL
-                        OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
-                      )
-                    ORDER BY published_at DESC
-                    LIMIT 20`,
-                ).all<{ id: string; extra: string | null }>();
-                let triggered = 0, skipped = 0, failed = 0;
-                for (let i = 0; i < pending.results.length; i++) {
-                  const row = pending.results[i];
-                  let extraObj: Record<string, unknown> = {};
-                  try { extraObj = JSON.parse(row.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
-                  const arxivId = String(row.id).replace(/^hf_paper:/, '');
-                  const result = await triggerHfPaperWorkflowForItem(env, row.id, arxivId, {
-                    hasGhRepo: !!extraObj.github_repo,
-                    hasProjectPage: !!extraObj.project_page,
-                    hasDiscussionId: !!extraObj.discussion_id,
-                  });
-                  if (result === 'triggered') triggered++;
-                  else if (result === 'already_exists') skipped++;
-                  else failed++;
-                  if (i < pending.results.length - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, 3000));
-                  }
-                }
-                return {
-                  found: pending.results.length,
-                  triggered, skipped, failed,
-                  elapsed_ms: Date.now() - t0,
-                };
-              },
-            );
-            console.log(`[cron] hf-backfill-workflow result:`, JSON.stringify(r));
-            return;
-          }
+          // HF backlog 已迁到独立 source action，复用 source-pipeline helper。
           // 老 batch runHuodongxingDetailEnrich 保留作 admin fallback
           // (/api/admin/hdx-enrich-now)，不在 cron 跑。
           // GH 抓取链已迁 CF Workflow (worker/src/workflows/github-pipeline.ts)。
@@ -4010,70 +3945,40 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       }, 500, request, env);
     }
   }
-  // Phase 4:HF Paper backfill — 扫 stuck items 重 trigger workflow
-  // SOP §1.6 模板;按 published_at DESC 优先最新 paper
-  // 30min triggered marker filter 防重复;input-hash idempotency 在 workflow step 内
-  // 防重跑 deep_analysis pro(figure / discussion / ar5iv fetch 仍跑,免费)
+  // GH/HF source pipeline 手动入口：与 cron 共用同一套 stuck 判定、1h retry generation
+  // 和可观测结果，避免历史 admin SQL 与自动自愈逻辑再次漂移。
+  if (mode === 'source-pipeline-readiness') {
+    return jsonResponse({ mode, ...(await getSourceReadiness(env)) }, 200, request, env);
+  }
+  if (mode === 'source-pipeline-drain') {
+    const source = url.searchParams.get('source') || 'all';
+    if (!['github', 'hf-paper', 'all'].includes(source)) {
+      return jsonResponse({ error: 'bad source, expect github|hf-paper|all' }, 400, request, env);
+    }
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '20', 10), 1), 200);
+    const result: Record<string, unknown> = { mode, source, limit };
+    if (source === 'github' || source === 'all') result.github = await drainGithubPending(env, { limit });
+    if (source === 'hf-paper' || source === 'all') result.hfPaper = await drainHfPending(env, { limit });
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'daily-digest-rescore') {
+    // 只重算今天 08:00 digest_pool，不创建 deliver workflow、不重发订阅邮件、也不自动推 HK。
+    // 运维顺序应为 rescore 成功后显式调用 daily-codex-push，避免半成品快照被下游消费。
+    const date = url.searchParams.get('date') || bjtDateStr();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
+    if (date !== bjtDateStr()) {
+      return jsonResponse({ error: 'daily-digest-rescore only supports current BJT date' }, 400, request, env);
+    }
+    const result = await rebuildDigestPoolSnapshot(env, { slotHourBjt: 8, date });
+    return jsonResponse({ ok: true, mode, emails_sent: 0, codex_pushed: false, ...result }, 200, request, env);
+  }
+  // 兼容旧 OPS 命令名，但实现统一走新的 bounded drain。
   if (mode === 'backfill-hf-paper-workflow') {
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200);
-    const throttleMs = Math.max(parseInt(url.searchParams.get('throttle_ms') || '3000'), 0);
-    if (!env.HF_PAPER_PIPELINE_WORKFLOW) {
-      return jsonResponse({ error: 'HF_PAPER_PIPELINE_WORKFLOW binding missing' }, 500, request, env);
-    }
-    const t0 = Date.now();
-    const pending = await env.DB.prepare(
-      `SELECT id, extra FROM items
-        WHERE source_type='hf_paper'
-          AND deleted_at IS NULL
-          AND json_extract(extra, '$.workflow_completed_at') IS NULL
-          AND (
-            json_extract(extra, '$.workflow_triggered_at') IS NULL
-            OR CAST(json_extract(extra, '$.workflow_triggered_at') AS INTEGER) < strftime('%s','now','-30 minutes')
-          )
-        ORDER BY published_at DESC
-        LIMIT ?`,
-    ).bind(limit).all<{ id: string; extra: string | null }>();
-
-    let triggered = 0, skipped = 0, failed = 0;
-    let totalAnalysisTokens = 0;
-    let sampledTokens = 0;
-    for (let i = 0; i < pending.results.length; i++) {
-      const r = pending.results[i];
-      let extraObj: Record<string, unknown> = {};
-      try { extraObj = JSON.parse(r.extra || '{}') as Record<string, unknown>; } catch { /* ignore */ }
-      const arxivId = String(r.id).replace(/^hf_paper:/, '');
-      const result = await triggerHfPaperWorkflowForItem(env, r.id, arxivId, {
-        hasGhRepo: !!extraObj.github_repo,
-        hasProjectPage: !!extraObj.project_page,
-        hasDiscussionId: !!extraObj.discussion_id,
-      });
-      if (result === 'triggered') triggered++;
-      else if (result === 'already_exists') skipped++;
-      else failed++;
-      if (throttleMs > 0 && i < pending.results.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, throttleMs));
-      }
-    }
-    // sample deep_analysis token usage 给 OPS 月度成本校准
-    // 拿最近 24h workflow_completed 的 N 条,看 deep_analysis 总 token 估算
-    const tokenSample = await env.DB.prepare(
-      `SELECT json_extract(extra, '$.deep_analysis_input_hash') AS hash
-        FROM items WHERE source_type='hf_paper'
-          AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
-          AND json_extract(extra, '$.deep_analysis_input_hash') IS NOT NULL
-        ORDER BY scraped_at DESC LIMIT 10`,
-    ).all<{ hash: string | null }>();
-    sampledTokens = tokenSample.results.length;
-    // 注:实际 token usage 由 CF AI Gateway 统计;这里 placeholder count 已 hash 数
-
-    return jsonResponse({
-      mode: 'backfill-hf-paper-workflow',
-      found: pending.results.length,
-      triggered, skipped, failed,
-      sampled_completed_paper: sampledTokens,
-      elapsed_ms: Date.now() - t0,
-      estimated_workflow_completion_min: Math.ceil((triggered * 60) / 60),  // ~60s/paper serial step
-    }, 200, request, env);
+    const result = await drainHfPending(env, { limit });
+    return jsonResponse({ mode: 'backfill-hf-paper-workflow', ...result }, 200, request, env);
   }
   // 官方新闻手动 fetch 入口(SOP Phase 4 跑批入口):staging crons=[] 没法等
   // cron slot(:20/:50),验证/回灌经此手动拉。与 cron 同一函数,幂等
@@ -5395,6 +5300,8 @@ function isBlockedBot(ua: string): boolean {
 //      here breaks BE/OPS smoke tests without any security benefit.
 function isBotGateExempt(path: string, method: string): boolean {
   if (path === '/api/ingest' || path === '/api/track') return true;
+  // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
+  if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/api/items' || path === '/api/sources' || path === '/api/stats') return true;
     if (path === '/img' || path.startsWith('/r/')) return true;

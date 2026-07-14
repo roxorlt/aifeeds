@@ -12,6 +12,8 @@
 import type { Env } from './index';
 import { getBases } from './digest/lib';
 import { escapeHtml } from './digest/templates';
+import type { DailyVideoRow } from './digest/daily-video';
+import { dailyVideoPublicationDate } from './digest/daily-page';
 
 // 根目录单段 .txt 文件(robots.txt / llms.txt / <indexnow-key>.txt)。sitemap.xml 另判。
 const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
@@ -50,6 +52,7 @@ export function isSeoPath(pathname: string): boolean {
   // item SSR 静态页 /i/…（伺服由 seo/item-routes.ts handleItemRoute 出）。裸 /i 不放行。
   if (pathname.startsWith('/i/')) return true;
   if (pathname === '/sitemap.xml') return true;
+  if (pathname === '/video-sitemap.xml') return true;
   if (SITEMAP_SHARD_RE.test(pathname)) return true;
   if (ROOT_TXT_RE.test(pathname)) return true;
   return false;
@@ -95,14 +98,35 @@ interface DailyPageRow {
   title: string;
   item_count: number;
   generated_at: string;
+  lastmod?: string | null;
 }
 
 async function loadDailyPages(env: Env, limit?: number): Promise<DailyPageRow[]> {
   const sql =
-    `SELECT date, title, item_count, generated_at FROM daily_pages ORDER BY date DESC` +
+    `SELECT date, title, item_count, generated_at, COALESCE(lastmod, generated_at) AS lastmod
+       FROM daily_pages ORDER BY date DESC` +
     (limit ? ` LIMIT ${limit}` : '');
   const r = await env.DB.prepare(sql).all<DailyPageRow>();
   return r.results || [];
+}
+
+async function loadDailyVideos(env: Env): Promise<DailyVideoRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT date, title, description, duration_seconds,
+            mp4_key, mp4_sha256, mp4_size,
+            poster_key, poster_sha256, poster_size,
+            vtt_key, vtt_sha256, vtt_size,
+            uploaded_at, updated_at
+       FROM daily_videos ORDER BY date DESC`,
+  ).all<DailyVideoRow>();
+  return result.results || [];
+}
+
+function latestDailyPageModified(rows: DailyPageRow[]): string | null {
+  return rows.reduce<string | null>((latest, row) => {
+    const value = row.lastmod || row.generated_at;
+    return !latest || value > latest ? value : latest;
+  }, null);
 }
 
 // ── /daily/:date 伺服 ──────────────────────────────────────────
@@ -257,10 +281,17 @@ Sitemap: ${siteBase}/sitemap.xml
 async function sitemapIndexResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
   const daily = await loadDailyPages(env); // date DESC
-  const dailyMod = daily.length ? dateOnly(daily[0].generated_at) : null;
+  const latestDailyMod = latestDailyPageModified(daily);
+  const dailyMod = latestDailyMod ? dateOnly(latestDailyMod) : null;
+  const videos = await loadDailyVideos(env);
+  const videoMod = videos.reduce<string | null>((latest, row) => {
+    const value = row.updated_at || row.uploaded_at;
+    return !latest || value > latest ? value : latest;
+  }, null);
 
   const entries: string[] = [];
   entries.push(sitemapEntry(`${siteBase}/sitemap-daily.xml`, dailyMod));
+  entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
 
   // 各源 live 计数 + 最新 generated_at,据此算续片数(ceil(count/5万)),空源仍列 page1。
   const countRes = await env.DB.prepare(
@@ -293,15 +324,43 @@ ${entries.join('\n')}
 async function dailySitemapResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
   const rows = await loadDailyPages(env); // date DESC
-  const latestMod = rows.length ? dateOnly(rows[0].generated_at) : dateOnly(new Date().toISOString());
+  const latestDailyMod = latestDailyPageModified(rows);
+  const latestMod = latestDailyMod ? dateOnly(latestDailyMod) : dateOnly(new Date().toISOString());
 
   const urls: string[] = [];
   urls.push(urlEntry(`${siteBase}/`, latestMod, 'daily'));
   urls.push(urlEntry(`${siteBase}/daily/`, latestMod, 'daily'));
   for (const row of rows) {
-    urls.push(urlEntry(`${siteBase}/daily/${row.date}`, dateOnly(row.generated_at), 'monthly'));
+    urls.push(urlEntry(`${siteBase}/daily/${row.date}`, dateOnly(row.lastmod || row.generated_at), 'monthly'));
   }
   return urlsetResponse(urls);
+}
+
+// ── /video-sitemap.xml ─────────────────────────────────────────
+// Google video sitemap:landing page 是日报页，媒体/封面走 API /r/（已支持 Range）。
+async function videoSitemapResponse(env: Env): Promise<Response> {
+  const { apiBase, siteBase } = getBases(env);
+  const rows = await loadDailyVideos(env);
+  const urls = rows.map((row) => {
+    const duration = Math.max(1, Math.min(28800, Math.round(Number(row.duration_seconds))));
+    return `  <url>
+    <loc>${xmlEscape(`${siteBase}/daily/${row.date}`)}</loc>
+    <video:video>
+      <video:thumbnail_loc>${xmlEscape(`${apiBase}/r/${row.poster_key}`)}</video:thumbnail_loc>
+      <video:title>${xmlEscape(row.title)}</video:title>
+      <video:description>${xmlEscape(truncateUnicode(row.description, 2048))}</video:description>
+      <video:content_loc>${xmlEscape(`${apiBase}/r/${row.mp4_key}`)}</video:content_loc>
+      <video:publication_date>${xmlEscape(dailyVideoPublicationDate(row.date))}</video:publication_date>
+      <video:duration>${duration}</video:duration>
+    </video:video>
+  </url>`;
+  });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">
+${urls.join('\n')}
+</urlset>
+`;
+  return xmlResponse(xml, 200);
 }
 
 // ── /sitemap-<source>.xml(内容片)───────────────────────────────
@@ -346,14 +405,27 @@ function dateOnly(iso: string): string {
   return String(iso).slice(0, 10);
 }
 
+function xmlEscape(value: unknown): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function truncateUnicode(value: string, maxChars: number): string {
+  return Array.from(value).slice(0, maxChars).join('');
+}
+
 function urlEntry(loc: string, lastmod: string, changefreq: string): string {
-  return `  <url><loc>${loc}</loc><lastmod>${lastmod}</lastmod><changefreq>${changefreq}</changefreq></url>`;
+  return `  <url><loc>${xmlEscape(loc)}</loc><lastmod>${xmlEscape(lastmod)}</lastmod><changefreq>${xmlEscape(changefreq)}</changefreq></url>`;
 }
 
 function sitemapEntry(loc: string, lastmod: string | null): string {
   return lastmod
-    ? `  <sitemap><loc>${loc}</loc><lastmod>${lastmod}</lastmod></sitemap>`
-    : `  <sitemap><loc>${loc}</loc></sitemap>`;
+    ? `  <sitemap><loc>${xmlEscape(loc)}</loc><lastmod>${xmlEscape(lastmod)}</lastmod></sitemap>`
+    : `  <sitemap><loc>${xmlEscape(loc)}</loc></sitemap>`;
 }
 
 // ── llms.txt ───────────────────────────────────────────────────
@@ -423,6 +495,7 @@ export async function handleSeoRoute(request: Request, env: Env): Promise<Respon
   if (pathname === '/robots.txt') return robotsResponse(env);
   if (pathname === '/llms.txt') return llmsResponse(env);
   if (pathname === '/sitemap.xml') return sitemapIndexResponse(env);
+  if (pathname === '/video-sitemap.xml') return videoSitemapResponse(env);
   // 日报片(须在通用分片正则前判,daily 也匹配 SITEMAP_SHARD_RE)。
   if (pathname === '/sitemap-daily.xml') return dailySitemapResponse(env);
   // /sitemap-<source>.xml、/sitemap-<source>-<n>.xml → 内容片;未知源/非法后缀 → 404 xml。
