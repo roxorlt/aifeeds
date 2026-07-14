@@ -93,7 +93,10 @@ case "$command" in
         fi
         if [ ! -e /etc/systemd/system/aifeeds-performance-logrotate.timer ]; then
             [ "$quiet" -eq 1 ] || printf 'not-found\n'
-            exit 1
+            # Real systemd returns EXIT_UNKNOWN (4) when the unit does not
+            # exist.  Keep the fixture aligned with the production host so
+            # pre-publication recovery exercises that control-plane state.
+            exit 4
         fi
         if [ -e "$state_dir/timer.enabled" ]; then
             [ "$quiet" -eq 1 ] || printf 'enabled\n'

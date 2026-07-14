@@ -1326,8 +1326,10 @@ timer_is_disabled() {
     local state
     local rc
     if state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null)"; then rc=0; else rc=$?; fi
-    test "$rc" -eq 1
-    case "$state" in disabled|not-found) ;; *) return 1 ;; esac
+    case "$rc:$state" in
+        1:disabled|1:not-found|4:not-found) ;;
+        *) return 1 ;;
+    esac
 }
 
 quiesce_rotation_control_plane() {

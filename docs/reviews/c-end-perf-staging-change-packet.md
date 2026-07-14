@@ -6,6 +6,11 @@
 它不授权任何外部变更；每个远端写动作仍需单独审批，且只有审批覆盖的那一步可以执行。命令不得
 输出 token、Cookie、验证码、用户内容或渲染后的回源密钥。
 
+2026-07-14 的当前 production PageSpeed 双端基线与 Fable 分析复核见
+[`2026-07-14-pagespeed-insights-review.md`](./2026-07-14-pagespeed-insights-review.md)。当前移动端
+LCP 约 13.0s、主线程约 8.3s，桌面端 LCP 约 3.0s；G8 不能只验证网络与图片预算，还必须保留移动端
+JS/布局 CPU、viewport/anchor/a11y、媒体代理错误的停止线。单次 lab 仍不替代上线后的 RUM。
+
 ## 1. 已采证事实与固定决策
 
 - 目标 Worker：`xlist-api-staging`，公网身份 `staging-api.ai-feeds.com`，直接 upstream
@@ -118,6 +123,7 @@ node --test \
 python3 deploy/nginx/check-nginx-request-id.test.py
 python3 deploy/nginx/insert-nginx-request-id.test.py
 python3 deploy/nginx/verify-nginx-request-id-diff.test.py
+python3 deploy/nginx/systemctl-not-found-compat.test.py
 bash -n deploy/nginx/install-aifeeds-performance-log.sh
 bash -n deploy/nginx/rollback-aifeeds-performance-log.sh
 bash deploy/nginx/install-aifeeds-performance-log.integration.test.sh
@@ -230,6 +236,31 @@ The frozen integration matrix is 135 scenarios (95 old + 40 new). The 40 C scena
   `cleanup-manual-failed-from-drift`, `cleanup-automatic-failed-from-drift`;
 - legacy compatibility: `journal-source-legacy-genesis`, `journal-rollback-legacy-genesis-rejected`,
   `cleanup-manual-legacy-runtime-removed`, `cleanup-automatic-legacy-runtime-removed`.
+
+### 3.1.1 2026-07-14 旧 GL-a 异常恢复重入
+
+首次执行清单 SHA `69694fc5143521955861d1d8dc933479213d9a692bc231c91f2b8b85185afcb9`
+在任何业务 mutation 之前安全失败。生产 `systemctl is-enabled
+aifeeds-performance-logrotate.timer` 对不存在 unit 返回 `rc=4`、stdout 精确为 `not-found\n`、stderr 为空；
+冻结的旧 rollback helper 只接受 rc 1，因而在 `quiesce_rotation_control_plane` 停止。站点、source/rollback
+journal 与 operation candidates 均未改变；只有获批的 exceptional authority 被持久化。
+
+旧 operation 不允许换成新 helper 绕过已经持久化的 authority。获批重入使用 root-only `/run` 目录内的
+临时 `systemctl` PATH 适配器，并遵守以下固定边界：
+
+- 只在 argv 精确等于 `is-enabled aifeeds-performance-logrotate.timer`，真实程序返回 rc 4、stdout
+  精确等于 `not-found\n` 且 stderr 为空时，把进程返回码映射为 1；输出字节不变；
+- 其他 argv 直接 `execve` 到固定 `/usr/bin/systemctl`，不捕获、不翻译；
+- 执行器在调用 helper 前固定适配器、`/usr/bin/systemctl`、`/usr/bin/python3` 链接及解释器真实目标的
+  owner/mode/SHA；任何漂移即停止；
+- PATH 改动只作用于这一次旧 helper 子进程；post-check 使用正常 PATH；适配器不安装到 `/usr/local`、
+  `/etc` 或 systemd，不常驻；
+- 旧 recovery executor/helper、既有 authority、source/rollback journal 的 SHA 继续逐项复核。适配器只能
+  让旧 helper 识别真实的“unit 不存在”，不能改变它的 CAS、站点、候选、receipt 或终态校验。
+
+本地新 helper 同时原生接受 `1:disabled`、`1:not-found` 和生产实测的 `4:not-found`，仍拒绝
+`4:failed`。它只用于旧 operation 清理完成后的下一次新 GL-a，不替代上述旧 helper 重入。
+
 前向安装必须保留 operation-bound transcript；每次人工回滚则生成新的 operation+attempt bound
 manual rollback attempt transcript，final 文件不得覆盖既有 attempt。两者都把远端 stdout/stderr 合并写入私有 tmp，
 立即捕获 `PIPESTATUS`，将 tmp 设为 0600 并原子发布 final 后，才检查 SSH 与 tee 的独立退出码；失败证据
