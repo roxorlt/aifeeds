@@ -43,8 +43,7 @@ test("video poster source chooses the smallest valid WebP above the target then 
     undefined,
     { forceProxy: true },
   );
-  assert.match(fallback || "", /^https:\/\/api\.ai-feeds\.com\/img\?/);
-  assert.match(fallback || "", /w=400/);
+  assert.equal(fallback, "https://example.com/link-poster.jpg");
   assert.equal(resolvePoster(undefined, [{ url: "/r/stale.webp", width: 400, format: "webp" }]), undefined);
 });
 

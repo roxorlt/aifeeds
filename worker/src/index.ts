@@ -810,6 +810,9 @@ export default {
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
       }
+      if (path === '/media' && request.method === 'GET') {
+        return handleImageProxy(request, 'video');
+      }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
       }
@@ -5646,7 +5649,10 @@ function isAllowedImageProxyTarget(target: URL): boolean {
     ALLOWED_IMG_HOSTS.has(target.hostname);
 }
 
-async function handleImageProxy(request: Request): Promise<Response> {
+async function handleImageProxy(
+  request: Request,
+  requestedKind: 'image' | 'video' = 'image',
+): Promise<Response> {
   const url = new URL(request.url);
   const target = url.searchParams.get('url');
   if (!target) return new Response('missing url', { status: 400 });
@@ -5659,6 +5665,9 @@ async function handleImageProxy(request: Request): Promise<Response> {
   }
   if (!isAllowedImageProxyTarget(targetUrl)) {
     return new Response('host not allowed', { status: 403 });
+  }
+  if (requestedKind === 'video' && targetUrl.hostname !== 'video.twimg.com') {
+    return new Response('video host not allowed', { status: 403 });
   }
   const isVideo = targetUrl.hostname === 'video.twimg.com';
 
@@ -5735,6 +5744,9 @@ async function handleImageProxy(request: Request): Promise<Response> {
     if (!isAllowedImageProxyTarget(redirected)) {
       return new Response('redirect host not allowed', { status: 403 });
     }
+    if (requestedKind === 'video' && redirected.hostname !== 'video.twimg.com') {
+      return new Response('video redirect host not allowed', { status: 403 });
+    }
     currentTarget = redirected;
   }
   if (!upstream) return new Response('upstream failed', { status: 502 });
@@ -5801,7 +5813,7 @@ function isBotGateExempt(path: string, method: string): boolean {
   if (path === '/api/ingest' || path === '/api/track') return true;
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/api/items' || path === '/api/feed-manifest' || path === '/api/sources' || path === '/api/stats') return true;
-    if (path === '/img' || path.startsWith('/r/')) return true;
+    if (path === '/img' || path === '/media' || path.startsWith('/r/')) return true;
     // /api/digest/daily:Bearer key 鉴权(handler 内校验),受信设备 agent 调用 UA 可能非浏览器,不卡 UA 闸
     if (path === '/api/digest/daily') return true;
     // PM 2026-05-25:/s/<token> 是分享二维码扫码命中点,微信内置浏览器 / 二维码

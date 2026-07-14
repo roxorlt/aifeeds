@@ -55,7 +55,7 @@ export function resolveApiBase({
 }
 
 // Absolute Worker origin for public routes that the site-origin nginx route
-// intentionally does not proxy (/s, /r, /img). Unlike API_BASE, the explicit
+// intentionally does not proxy (/s, /r, /img, /media). Unlike API_BASE, the explicit
 // same-origin flag never collapses this value to an empty string.
 export function resolvePublicWorkerBase({
   hostname = "",

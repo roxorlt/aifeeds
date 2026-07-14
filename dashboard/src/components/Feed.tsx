@@ -1234,13 +1234,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             {hasMore && !loadMoreCoolingDown && (
               <div
                 ref={sentinelRef}
-                className="py-4 text-center text-xs text-neutral-400"
+                className="py-4 text-center text-xs text-neutral-600"
               >
                 {loadingMore ? "加载中…" : "\u00A0"}
               </div>
             )}
             {!hasMore && items.length > 0 && (
-              <div className="py-4 text-center text-xs text-neutral-400">
+              <div className="py-4 text-center text-xs text-neutral-600">
                 已到底
               </div>
             )}

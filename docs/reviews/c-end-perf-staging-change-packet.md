@@ -2233,6 +2233,17 @@ decode，可见 video poster 的真实请求也必须完成；400/800 请求不�
 移动 swipe 后 blog/podcast 的 96/72px 封面必须关联 w400 请求，且 w800=0；DPR 2/3 不应成为浪费
 带宽的理由。
 
+PageSpeed 质量回归同样属于 G8 硬门禁：viewport 必须允许缩放；DOM 中不得存在空 href 或可见无名
+button；视频元素不得使用 `/img`，图片 `/img` target 不得是视频；Product Hunt imgix avatar 必须带
+16–96px 的有界宽高且 desktop 必须观察到实际样本；cold/warm 期间任何 `/img` 403 都失败。官方
+`@axe-core/playwright` 固定版本在五设备逐一执行 `color-contrast` 与 `nested-interactive`，evidence 只保留
+rule id/node count，不记录节点文本或 HTML。staging Worker `/media` 还必须用版本化的公开视频样本发
+`Range: bytes=0-1023`，断言 206、`Content-Length: 1024`、`Content-Range`、`Accept-Ranges: bytes`、
+`Content-Type: video/mp4` 与 `Cache-Control: no-store`；生产 Worker/nginx 上线后重复同一 smoke。
+匿名 `/api/auth/me` 必须返回
+`200 {"user":null}`、带 `Cache-Control: private, no-store` 且不得为 CF cache HIT；这不会改变需登录接口
+的 401 契约。
+
 Chromium 先等 expected Feed、图片和 video poster 稳定，再用非输入的 `aifeeds:lcp-settled` 事件冻结并
 drain LCP observer，不发送会截断 LCP 或触发字体的真实键盘输入。随后用非受信任 synthetic pointerdown
 启动既有 deferred font gate，等待三个 stylesheet、`document.fonts.ready`、可见媒体与布局稳定，最后才用

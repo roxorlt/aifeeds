@@ -409,9 +409,13 @@ export async function handleMe(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const responseHeaders = { 'Cache-Control': 'private, no-store' };
   const auth = await authenticate(request, env, ctx);
   if (auth.kind !== 'authenticated') {
-    return jsonErr('not authenticated', 401);
+    // Session discovery is public and nullable. Returning 200 for a normal
+    // anonymous visit avoids turning expected state into a browser console
+    // error; endpoints that require authentication continue to return 401.
+    return jsonOk({ user: null }, responseHeaders);
   }
   const user = await getUserById(env, auth.userId);
   if (!user) {
@@ -459,7 +463,7 @@ export async function handleMe(
       phone_masked: ident?.provider === 'phone' ? identityMasked : null,
       preferences,
     },
-  });
+  }, responseHeaders);
 }
 
 // ─── PUT /api/auth/me/preferences ────────────────────────

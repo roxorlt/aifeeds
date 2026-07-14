@@ -24,7 +24,7 @@ vi.mock('./sms', () => ({
 }));
 
 import { handleEmailSend } from './email-handlers';
-import { handleSmsSend } from './handlers';
+import { handleMe, handleSmsSend } from './handlers';
 
 function makeRequest(body: Record<string, unknown>): Request {
   return new Request('https://api.example.com/api/auth/sms/send', {
@@ -115,5 +115,21 @@ describe('handleSmsSend feature flag', () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: 'invalid email' });
+  });
+});
+
+describe('handleMe anonymous discovery', () => {
+  it('returns a successful nullable session result instead of a console-visible 401', async () => {
+    const { env, ctx } = makeRuntime();
+    const response = await handleMe(
+      new Request('https://api.example.com/api/auth/me'),
+      env as never,
+      ctx as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    await expect(response.json()).resolves.toEqual({ user: null });
+    expect(env.DB.prepare).not.toHaveBeenCalled();
   });
 });

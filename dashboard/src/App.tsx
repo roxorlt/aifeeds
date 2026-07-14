@@ -1322,7 +1322,7 @@ function DashboardHome() {
           })}
         </div>
 
-        <footer className="mt-6 text-center text-xs text-neutral-400">
+        <footer className="mt-6 text-center text-xs text-neutral-600">
           Built by{" "}
           <a
             href="https://blog.ai-feeds.com/"

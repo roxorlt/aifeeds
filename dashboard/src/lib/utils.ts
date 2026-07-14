@@ -162,10 +162,9 @@ const PROXY_BASE = PUBLIC_WORKER_BASE;
 // ?w=400 → 18KB（省 37%）/ 不传 → passthrough 原图。
 // 物理像素而非 CSS 像素：所有 DPR 共享同一 CF cache entry，命中率最高。
 // 调用方按场景档位传：头像 80 / 卡片缩略图 400 / 详情大图 800。
-// video.twimg.com 不要传 width（worker /img 会 short-circuit 跳过 cf.image）。
-// force: 默认只对 PROXY_HOSTS allowlist 域名走代理（GFW / 不稳定源用）；
-// LinkCard 等 og:image 任意外链场景传 force=true，让所有域都走 cf.image
-// + R2 缓存（避免 CN 网络直拉外链慢导致滑动卡顿）。
+// video.twimg.com 不要传 width；视频使用 proxyVideo() 的专用 /media 路径。
+// force 是旧调用方兼容参数，不能扩大 Worker 的安全 allowlist。未知域必须直连，
+// 否则前端生成的 /img URL 会被 Worker 必然以 403 拒绝。
 export function proxyImg(
   url: string | null | undefined,
   width?: number,
@@ -179,9 +178,10 @@ export function proxyImg(
   url = resolveAssetUrl(url);
   try {
     const u = new URL(url);
-    if (opts.force || PROXY_HOSTS.has(u.hostname)) {
+    void opts.force;
+    if (PROXY_HOSTS.has(u.hostname) && u.hostname !== "video.twimg.com") {
       const params = new URLSearchParams({ url });
-      if (width && u.hostname !== "video.twimg.com") {
+      if (width) {
         params.set("w", String(width));
       }
       return `${PROXY_BASE}/img?${params.toString()}`;
@@ -190,6 +190,47 @@ export function proxyImg(
     // malformed URL — leave as-is and let <img> onError handle it
   }
   return url;
+}
+
+/**
+ * Keep byte-range video transport separate from image transforms. Existing R2
+ * assets remain direct; only legacy video.twimg.com URLs need the Worker proxy.
+ */
+export function proxyVideo(url: string | null | undefined): string {
+  if (!url) return "";
+  const resolved = resolveAssetUrl(url);
+  try {
+    const target = new URL(resolved);
+    if (target.protocol === "https:" && target.hostname === "video.twimg.com") {
+      return `${PROXY_BASE}/media?${new URLSearchParams({ url: resolved }).toString()}`;
+    }
+  } catch {
+    // Let the media element expose a normal load failure for malformed input.
+  }
+  return resolved;
+}
+
+/** Bound Product Hunt/imgix profile images to their rendered physical size. */
+export function optimizedAvatarUrl(
+  url: string | null | undefined,
+  width: number,
+): string {
+  if (!url) return "";
+  const resolved = resolveAssetUrl(url);
+  const boundedWidth = Math.min(256, Math.max(16, Math.round(width)));
+  try {
+    const target = new URL(resolved);
+    if (target.protocol === "https:" && target.hostname.endsWith(".imgix.net")) {
+      target.searchParams.set("w", String(boundedWidth));
+      target.searchParams.set("h", String(boundedWidth));
+      target.searchParams.set("fit", "crop");
+      target.searchParams.set("auto", "format,compress");
+      return target.toString();
+    }
+  } catch {
+    return resolved;
+  }
+  return proxyImg(resolved, boundedWidth);
 }
 
 export interface ResponsiveCardImageSource {

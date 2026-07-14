@@ -1,6 +1,6 @@
 # 2026-07-14 首页 PageSpeed Insights 复核
 
-状态：`CURRENT PRODUCTION BASELINE / PLAN INPUT`
+状态：`LOCAL FIXES VERIFIED / STAGING PERFORMANCE PENDING`
 
 ## 1. 结论
 
@@ -109,8 +109,24 @@ PageSpeed 还记录：
 - 字体延迟到交互或 load 后 10 秒再 idle，省流量/弱网跳过；
 - feed-ready、LCP、媒体与服务端分段遥测。
 
-尚未由现有代码或测试充分关闭的项目：viewport 缩放锁、PH avatar 尺寸、视频/403 图片代理降级、匿名
-401 控制台噪声、移动不可抓取链接、剩余对比度/按钮名称，以及移动端关键 JS/布局 CPU。
+2026-07-14 的 PageSpeed 补充批次已在本地实现并由契约、单元和五设备浏览器测试覆盖：
+
+- viewport 不再禁止缩放；
+- Product Hunt imgix maker avatar 按实际物理尺寸请求；
+- `video.twimg.com` 改走支持 Range 的专用 `/media` 代理，视频不再进入图片变换路径；
+- 图片代理前端 allowlist 与 Worker 对齐，未知 CloudFront/OG 图片不再生成必然 403 的 `/img` URL；
+- 匿名 `/api/auth/me` 改为成功的 nullable session discovery，需登录的写接口仍保持 401；
+- 无目标 URL 的 link/X article 卡片改为非锚点容器，移动端不再输出空 `href`；
+- 可见媒体按钮补名称，并提高排序、链接、底部状态和 footer 文字对比度；
+- video controls 与“展开全文”不再嵌套在外部链接内，本地 axe 的 `color-contrast` 与
+  `nested-interactive` 两条 PageSpeed 同源规则均通过；
+- `/media` 已有 mock upstream 的 Worker 运行时 Range/206 测试；staging 与生产发布后仍必须各跑一次
+  真实 0–1023 bytes 全链路 smoke。
+
+本地 dashboard 单测 246 项、Worker 单测 677 项以及 desktop/tablet/iPhone Chromium、iPhone WebKit、
+Android Chromium 五设备矩阵均通过。这些证据能关闭契约和交互回归，但不能证明真实远端 LCP 收益。
+当前唯一仍待充分关闭的 PageSpeed 风险是移动端关键 JS/布局 CPU 与最终 LCP，必须在部署本 commit 后的
+perf-staging 真实链路完成 cold/warm trace 才能判定。
 
 ## 6. 发布与验收调整
 
@@ -126,6 +142,12 @@ PageSpeed 还记录：
 
 生产 RUM 继续作为上线后的非阻塞观察任务：每阶段观察至少 48 小时且至少 100 个 LCP 样本，再决定
 扩大或回滚；它不阻塞本地代码交付和 staging 验收。
+
+远端五设备门禁已经把上述质量项固化为可执行断言：允许缩放、trim 后空 href 为 0、可见无名按钮为
+0、axe `color-contrast` / `nested-interactive` 为 0、视频经 `/img` 为 0、图片代理目标为视频为 0、
+desktop PH imgix avatar 样本数大于 0 且超尺寸为 0、cold/warm 周期内 `/img` 403 为 0，以及 staging
+Worker `/media` 真实 Range 返回 206/1024 bytes/no-store。最终 go/no-go 仍同时受 cold feed-ready
+≤5s / LCP ≤7s、warm feed-ready ≤3s / LCP ≤5s 的灾难性回归硬顶约束。
 
 ## 7. 后续首页 SSR/瀑布流改版约束
 

@@ -3,7 +3,7 @@ import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import { useImpressionRefresh, mergeRefs } from "../lib/impressionRefresh";
 import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
-import { buildResponsiveCardImage, cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { buildResponsiveCardImage, cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, proxyVideo, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
 import { useDeferredVideoPoster } from "../lib/useDeferredVideoPoster";
@@ -182,14 +182,14 @@ function renderRichText(text: string, terms: string[] = []): ReactNode[] {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="text-sky-600 hover:underline break-all"
+          className="text-sky-700 hover:underline break-all"
         >
           {display}
         </a>,
       );
     } else if (tag) {
       out.push(
-        <span key={key++} className="text-sky-600">
+        <span key={key++} className="text-sky-700">
           {tag}
         </span>,
       );
@@ -201,7 +201,7 @@ function renderRichText(text: string, terms: string[] = []): ReactNode[] {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="text-sky-600 hover:underline"
+          className="text-sky-700 hover:underline"
         >
           {mention}
         </a>,
@@ -367,7 +367,7 @@ function TweetMediaTile({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <VideoPlayer
-          src={proxyImg(first.url)}
+          src={proxyVideo(first.url)}
           poster={first.poster}
           posterVariants={first.poster_variants}
           mediaPolicy={mediaPolicy}
@@ -391,6 +391,7 @@ function TweetMediaTile({
     return (
       <button
         type="button"
+        aria-label="查看媒体大图"
         onClick={(e) => {
           e.stopPropagation();
           onClickImage(0);
@@ -793,7 +794,7 @@ export function TweetCard({
                 </div>
                 <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
                   {replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
-                  {replyOf.handle && replyOf.published_at && <span className="shrink-0 text-neutral-400">·</span>}
+                  {replyOf.handle && replyOf.published_at && <span className="shrink-0 text-neutral-500">·</span>}
                   {replyOf.published_at && (
                     <span className="shrink-0 whitespace-nowrap">
                       {posterMode ? formatBjtMdHm(replyOf.published_at) : timeAgo(replyOf.published_at)}
@@ -880,13 +881,13 @@ export function TweetCard({
             {/* Row 2: @handle · 时间 · 原文按钮 */}
             <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
               {handle && <span className="truncate">@{handle}</span>}
-              {handle && <span className="shrink-0 text-neutral-400">·</span>}
+              {handle && <span className="shrink-0 text-neutral-500">·</span>}
               <span className="shrink-0 whitespace-nowrap">
                 {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
               </span>
               {!posterMode && showLangButton && (
                 <>
-                  <span className="shrink-0 text-neutral-400">·</span>
+                  <span className="shrink-0 text-neutral-500">·</span>
                   <button
                     type="button"
                     disabled={translating}
@@ -958,7 +959,7 @@ export function TweetCard({
                 e.stopPropagation();
                 setExpanded((v) => !v);
               }}
-              className="mt-0.5 text-[14px] text-sky-600 hover:underline"
+              className="mt-0.5 text-[14px] text-sky-700 hover:underline"
             >
               {expanded ? "收起" : "展开"}
             </button>
@@ -987,7 +988,7 @@ export function TweetCard({
           {quoteOf ? (
             <QuotedTweet quote={quoteOf} posterMode={posterMode} />
           ) : hasQuotePlaceholder ? (
-            <div className="mt-2.5 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-[13px] text-neutral-400">
+            <div className="mt-2.5 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-[13px] text-neutral-600">
               引用的推文已不可用
             </div>
           ) : null}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildResponsiveCardImage, variantsForCurrentCover } from "./utils.ts";
+import { buildResponsiveCardImage, optimizedAvatarUrl, proxyImg, proxyVideo, variantsForCurrentCover } from "./utils.ts";
 
 test("stored WebP variants are sorted into a typed picture source with original fallback", () => {
   const result = buildResponsiveCardImage(
@@ -63,4 +63,33 @@ test("scalar variants are ignored after a cover replacement and accept equivalen
     ),
     variants,
   );
+});
+
+test("unknown external still images fall back to their direct URL instead of a guaranteed /img 403", () => {
+  assert.equal(
+    proxyImg("https://d111111abcdef8.cloudfront.net/cover.jpg", 400, { force: true }),
+    "https://d111111abcdef8.cloudfront.net/cover.jpg",
+  );
+});
+
+test("legacy X video uses the dedicated media endpoint while R2 video stays direct", () => {
+  assert.match(
+    proxyVideo("https://video.twimg.com/ext_tw_video/example.mp4"),
+    /^https:\/\/api\.ai-feeds\.com\/media\?/,
+  );
+  assert.equal(
+    proxyVideo("/r/x/example.mp4"),
+    "https://api.ai-feeds.com/r/x/example.mp4",
+  );
+});
+
+test("imgix avatars replace original-size parameters with a bounded crop", () => {
+  const result = new URL(optimizedAvatarUrl(
+    "https://ph-avatars.imgix.net/original.png?auto=format&fit=max&w=2801",
+    48,
+  ));
+  assert.equal(result.searchParams.get("w"), "48");
+  assert.equal(result.searchParams.get("h"), "48");
+  assert.equal(result.searchParams.get("fit"), "crop");
+  assert.equal(result.searchParams.get("auto"), "format,compress");
 });

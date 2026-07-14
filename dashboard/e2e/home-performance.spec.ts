@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 const LIVE_SOURCES = [
   "x_list",
@@ -47,7 +48,7 @@ function cardImage(source: string): string {
 function posterRequestKey(raw: string): string | null {
   const url = new URL(raw);
   if (url.pathname.startsWith("/r/e2e/video-posters/")) return url.pathname;
-  if (url.pathname === "/img" && (url.searchParams.get("url") || "").includes("e2e-link-poster")) {
+  if (url.hostname === "example.com" && url.pathname === "/e2e-link-poster.jpg") {
     return "link-poster";
   }
   return null;
@@ -457,7 +458,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
       return;
     }
     if (url.pathname === "/api/auth/me") {
-      await fulfillJson(route, { error: "unauthorized" }, 401);
+      await fulfillJson(route, { user: null });
       return;
     }
     if (url.pathname.startsWith("/api/")) {
@@ -573,6 +574,22 @@ test("first usable feed obeys the cross-device request and media budgets", async
     await page.evaluate(() => window.scrollTo(0, Math.max(900, document.body.scrollHeight * 0.55)));
     await expect.poll(() => state.listRequests.length).toBeGreaterThan(budget);
   }
+});
+
+test("PageSpeed contrast and nested-interactive rules pass on a representative feed", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("desktop-"), "remote staging repeats this gate on all five devices");
+  await installMocks(page, { videoPosterFixture: true });
+  await page.goto("/");
+  await expect(page.getByText("Poster fixture eager", { exact: false }).first()).toBeVisible();
+
+  const result = await new AxeBuilder({ page })
+    .withRules(["color-contrast", "nested-interactive"])
+    .analyze();
+  const safeSummary = result.violations.map((violation) => ({
+    id: violation.id,
+    nodeCount: violation.nodes.length,
+  }));
+  expect(safeSummary).toEqual([]);
 });
 
 test("card media reserves its geometry across DPR 1/2/3", async ({ page }, testInfo) => {
@@ -911,7 +928,7 @@ test("lazy video posters wait for their feed viewport or explicit play intent", 
   await linkVideo.evaluate((node) => {
     node.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
   });
-  await expect(linkVideo).toHaveAttribute("poster", /\/img\?.*w=400/);
+  await expect(linkVideo).toHaveAttribute("poster", "https://example.com/e2e-link-poster.jpg");
   await expect.poll(() => state.posterRequests).toEqual([
     "/r/e2e/video-posters/eager-400.webp",
     "link-poster",

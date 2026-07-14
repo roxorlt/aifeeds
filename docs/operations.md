@@ -349,10 +349,11 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - 同理 `hf_paper:`(`/h/`)、`github:`(`/g/`)、`product_hunt:`(`/ph/`)、
   `clawhub:`(`/c/`)、`huodongxing:`(`/e/`)
 
-**c 端 `authStore.hydrate` 401 不再清 user**
+**c 端 nullable session discovery 与 `authStore.hydrate` 降级**
 (`dashboard/src/lib/authStore.ts`):
-- 老逻辑 `/api/auth/me` 401 立即清 user → 每次发版用户假掉登录态
-- 改成所有 hydrate 错误都保留 persisted user(乐观信任 localStorage)
+- 匿名 `GET /api/auth/me` 是公开的 session discovery，返回 `200 {"user":null}`，避免把正常匿名访问
+  记成浏览器控制台错误；需要登录的 subscription/feedback/logout 等接口仍保持 401
+- hydrate 的网络或服务错误保留 persisted user(乐观信任 localStorage)，正常的 `user:null` 则清空旧状态
 - 真 cookie 失效兜底:用户后续 action 仍会自然 401 → openLoginModal 弹登录
 
 **sharer 默认 profile 复用** (`dashboard/src/lib/defaultProfile.ts`):
@@ -438,9 +439,11 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - `GET /sitemap.xml` 已改 sitemap-index；`GET /sitemap-<source>.xml`（超 5 万续 `-2 -3…`）为各源实际 URL 列表，正则见 `worker/src/seo-routes.ts` 的 `SITEMAP_SHARD_RE`
 - 主域经香港 nginx 转发：同上 regex location 已扩至含 `i/.*` 与 `sitemap-[a-z0-9-]+\.xml`（§6b 七续），权威副本 [`deploy/nginx/aifeeds-seo-location.conf`](../deploy/nginx/aifeeds-seo-location.conf)
 
-**`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
+**`/img` 图片代理与 `/media` 视频兼容代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换；
+2026-07-14 拆分视频路由）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
-- 白名单：`pbs.twimg.com` / `abs.twimg.com` / `video.twimg.com` / `avatars.githubusercontent.com`（防被当开放代理滥用）
+- 前后端使用同一收敛方向的 host allowlist；旧 `force` 参数不再扩大白名单，未知 OG/CloudFront 图片
+  保持直连并由卡片 `onError` 稳定降级，防止生成必然 403 的 `/img` URL 或把端点变成开放代理
 - CDN 边缘缓存：`cacheTtl=86400` + `Cache-Control: max-age=604800, immutable`
 - 命中 GFW 封锁的 CN 用户借此恢复图片加载
 - **2026-05-16 边缘 transform**（CF 迁移阶段 2）：
@@ -448,7 +451,10 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - 查询参数：`?w=` resize 宽度（可选）/ `?q=` quality（默认 85）/ format=auto（按 Accept 自动 webp/avif）
   - prod 实测：avatar 28573B (460x460 jpeg) → 2532B (80x80, w=80) 省 91%；→ 18074B (400x400, w=400) 省 37%
   - ⚠️ format=auto 实测未强转 webp（仍返 jpeg），可能 CF cf.image 默认行为，后续视效果调整
-  - video（`video.twimg.com`）保持原反代 + Range 转发，不走 cf.image（CF 只支持图片 transform）
+  - 新前端只把 legacy `video.twimg.com` 发往专用 `/media`；该路由只接受这个精确 host，逐跳复验 redirect，
+    透传 Range/206、`Content-Range`、`Accept-Ranges` 并返回 `Cache-Control: no-store`，不走 cf.image
+  - `/img` 暂保留旧客户端 video 兼容，但新页面的 video `/img` 数量必须为 0；staging 与生产发布后都要用
+    0–1023 bytes smoke 验证实际返回 206/1024 bytes，防止重现 2026-06-09 的全量视频回源事故
   - zone toggle：OPS 2026-05-16 已 enable `image_resizing`（PATCH `/zones/{zone_id}/settings/image_resizing`）
 
 **`/api/items` 热度排序**（2026-04-21 上线）：
@@ -2924,7 +2930,8 @@ version、request id、状态码和浏览器网络证据，但不得记录验证
   与 React 请求归一化后只有一次；响应保留 `Server-Timing` 和与 nginx/Worker 可 join 的
   `X-Request-Id`。
 - 匿名面：首页/feed、manifest、搜索与 suggest；列表一次失败后的正常恢复；无权限写操作仍返回
-  原有状态，不因 nginx 变成 HTML/缓存响应。
+  原有状态，不因 nginx 变成 HTML/缓存响应。匿名 `/api/auth/me` 必须返回 `200 {"user":null}` 且不得
+  命中共享缓存；需要登录的接口仍按原契约返回 401。
 - 既有登录：带已有 Cookie 打 `/api/auth/me`，身份保持且响应 `Set-Cookie` 属性未被 nginx 改写；
   刷新、开新 tab 和 PC/移动端切换后仍登录。
 - 邮件验证码：`/api/auth/email/send` → `/api/auth/login` → `/api/auth/me` → `/api/auth/logout`

@@ -5,6 +5,7 @@ import {
   type Page,
   type Request as PlaywrightRequest,
 } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -20,6 +21,10 @@ import { join } from "node:path";
 
 const PERF_ORIGIN = "https://perf-staging.ai-feeds.com";
 const WORKER_ASSET_ORIGIN = "https://staging-api.ai-feeds.com";
+const MEDIA_RANGE_FIXTURES = [
+  "https://video.twimg.com/amplify_video/2076702860364886016/vid/avc1/3840x2160/BwwHYBEeqpBduuC3.mp4",
+  "https://video.twimg.com/amplify_video/2076713390454792192/vid/avc1/3168x2160/MtKXLM2wuyt1RLjQ.mp4",
+] as const;
 const PERF_PATH = "/?codex_perf_probe=1";
 const remoteEnabled = process.env.E2E_REMOTE === "1";
 const browserUserAgent =
@@ -1062,6 +1067,77 @@ test.describe("perf-staging remote acceptance", () => {
     await expect(page.locator('[data-feed-source="x_list"]')).toBeVisible();
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
+    const pageQuality = await page.evaluate(() => {
+      const viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')?.content || "";
+      const viewportDirectives = new Map(viewport.split(",").map((directive) => {
+        const [rawKey, ...rawValue] = directive.trim().split("=");
+        return [rawKey.toLowerCase(), rawValue.join("=").trim().toLowerCase()];
+      }));
+      const labelledByText = (element: Element): string => (element.getAttribute("aria-labelledby") || "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent?.trim() || "")
+        .join(" ")
+        .trim();
+      const namelessButtons = [...document.querySelectorAll<HTMLButtonElement>("button")]
+        .filter((button) => {
+          if (button.hidden || button.getClientRects().length === 0 || button.closest('[aria-hidden="true"]')) return false;
+          return !(
+            button.getAttribute("aria-label")?.trim()
+            || labelledByText(button)
+            || button.getAttribute("title")?.trim()
+            || button.textContent?.trim()
+            || button.querySelector<HTMLImageElement>('img[alt]:not([alt=""])')?.alt.trim()
+          );
+        }).length;
+      const videoViaImageProxy = [...document.querySelectorAll<HTMLVideoElement>("video[src]")]
+        .filter((video) => new URL(video.currentSrc || video.src, location.href).pathname === "/img")
+        .length;
+      const imageProxyTargetsVideo = [...document.querySelectorAll<HTMLImageElement>("img[src]")]
+        .filter((image) => {
+          const url = new URL(image.currentSrc || image.src, location.href);
+          if (url.pathname !== "/img") return false;
+          return /\.(?:mp4|mov|webm)(?:$|[?#])/i.test(url.searchParams.get("url") || "");
+        }).length;
+      const phAvatars = [...document.querySelectorAll<HTMLImageElement>('img.rounded-full')]
+        .map((image) => new URL(image.currentSrc || image.src, location.href))
+        .filter((url) => url.hostname.endsWith(".imgix.net"));
+      return {
+        viewportAllowsZoom: !["no", "0"].includes(viewportDirectives.get("user-scalable") || "")
+          && (!viewportDirectives.has("maximum-scale")
+            || Number(viewportDirectives.get("maximum-scale")) > 1),
+        anchorsWithoutHref: [...document.querySelectorAll<HTMLAnchorElement>("a")]
+          .filter((anchor) => !anchor.getAttribute("href")?.trim()).length,
+        namelessButtons,
+        videoViaImageProxy,
+        imageProxyTargetsVideo,
+        oversizedPhAvatars: phAvatars.filter((url) => {
+          const width = Number(url.searchParams.get("w"));
+          const height = Number(url.searchParams.get("h"));
+          return !Number.isFinite(width) || width < 16 || width > 96
+            || !Number.isFinite(height) || height < 16 || height > 96;
+        }).length,
+        phAvatarCount: phAvatars.length,
+      };
+    });
+    const { phAvatarCount, ...pageQualityAssertions } = pageQuality;
+    expect(pageQualityAssertions).toEqual({
+      viewportAllowsZoom: true,
+      anchorsWithoutHref: 0,
+      namelessButtons: 0,
+      videoViaImageProxy: 0,
+      imageProxyTargetsVideo: 0,
+      oversizedPhAvatars: 0,
+    });
+    if (testInfo.project.name.startsWith("desktop-")) expect(phAvatarCount).toBeGreaterThan(0);
+    const axeResult = await new AxeBuilder({ page })
+      .withRules(["color-contrast", "nested-interactive"])
+      .analyze();
+    const axeViolationSummary = axeResult.violations.map((violation) => ({
+      id: violation.id,
+      nodeCount: violation.nodes.length,
+    }));
+    expect(axeViolationSummary).toEqual([]);
     const cold = await captureSafePagePerformance(page, mediaRequestRecords);
     const coldListSources = await safeListSourcesBeforeContentionCutoff(page);
     expect(forbiddenApiRequestCount).toBe(0);
@@ -1139,6 +1215,13 @@ test.describe("perf-staging remote acceptance", () => {
     expect(warm.navigation.workerStartMs).toBeGreaterThan(0);
     expect(warm.navigation.swControllerPresent).toBe(true);
     expect(warm.navigation.transferBytes).toBe(0);
+    expect(mediaRequestRecords.filter((record) => {
+      try {
+        return new URL(record.url).pathname === "/img" && record.httpStatus === 403;
+      } catch {
+        return false;
+      }
+    })).toHaveLength(0);
     const listTransferBudget = isMobileProject(testInfo.project.name) ? 100 * 1024 : 250 * 1024;
     expect(coldListSources).toEqual(expectedSources);
     expect(warmListSources).toEqual(expectedSources);
@@ -1302,8 +1385,49 @@ test.describe("perf-staging remote acceptance", () => {
     expect(/^[A-Za-z0-9._:-]{8,128}$/.test(search.headers()["x-request-id"] || "")).toBe(true);
 
     const me = await request.get("/api/auth/me", { headers: apiHeaders });
-    expect(me.status()).toBe(401);
+    expect(me.status()).toBe(200);
+    expect(await parseJsonWithoutBodyLeak(me)).toEqual({ user: null });
+    expect(me.headers()["cache-control"] || "").toContain("no-store");
     expect(me.headers()["cf-cache-status"]?.toUpperCase() === "HIT").toBe(false);
+
+    let mediaRangeSummary: {
+      status: number;
+      contentLength: string | null;
+      contentRange: string | null;
+      acceptRanges: string | null;
+      cacheControl: string | null;
+      contentType: string | null;
+    } | null = null;
+    for (const fixture of MEDIA_RANGE_FIXTURES) {
+      const mediaResponse = await fetch(
+        `${WORKER_ASSET_ORIGIN}/media?${new URLSearchParams({ url: fixture })}`,
+        {
+          headers: { Range: "bytes=0-1023", "User-Agent": browserUserAgent },
+          signal: AbortSignal.timeout(20_000),
+        },
+      );
+      const candidate = {
+        status: mediaResponse.status,
+        contentLength: mediaResponse.headers.get("content-length"),
+        contentRange: mediaResponse.headers.get("content-range"),
+        acceptRanges: mediaResponse.headers.get("accept-ranges"),
+        cacheControl: mediaResponse.headers.get("cache-control"),
+        contentType: mediaResponse.headers.get("content-type"),
+      };
+      await mediaResponse.body?.cancel();
+      if (candidate.status === 206) {
+        mediaRangeSummary = candidate;
+        break;
+      }
+    }
+    expect(mediaRangeSummary).toEqual({
+      status: 206,
+      contentLength: "1024",
+      contentRange: expect.stringMatching(/^bytes 0-1023\/[1-9][0-9]*$/),
+      acceptRanges: "bytes",
+      cacheControl: "no-store",
+      contentType: expect.stringMatching(/^video\/mp4(?:;|$)/),
+    });
 
     const sms = await request.post("/api/auth/sms/send", { headers: apiHeaders, data: {} });
     expect(sms.status()).toBe(403);

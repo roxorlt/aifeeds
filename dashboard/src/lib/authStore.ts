@@ -82,6 +82,7 @@ export const useAuthStore = create<AuthStore>()(
     let full = user;
     try {
       const me = await authApi.fetchMe();
+      if (!me.user) throw new Error('[auth] post-login session discovery returned anonymous');
       full = me.user;
     } catch (e) {
       // /api/auth/me 临时挂了：降级用 login 响应（少 phone_masked，下次 hydrate 补）。

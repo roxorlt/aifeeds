@@ -18,7 +18,7 @@ export function SortSelector({ value, onChange }: Props) {
       "transition-colors",
       value === mode
         ? "font-semibold text-neutral-900"
-        : "text-neutral-400 group-hover:text-neutral-700",
+        : "text-neutral-600 group-hover:text-neutral-800",
     );
   return (
     <button
@@ -28,10 +28,10 @@ export function SortSelector({ value, onChange }: Props) {
         onChange(value === "hot" ? "time" : "hot");
       }}
       className="group inline-flex items-center text-[11px]"
-      aria-label={`排序方式（当前 ${LABELS[value]}，点击切换）`}
+      aria-label={`排序方式：热度 / 时间（当前 ${LABELS[value]}）`}
     >
       <span className={cls("hot")}>{LABELS.hot}</span>
-      <span className="text-neutral-300">|</span>
+      <span className="text-neutral-500">|</span>
       <span className={cls("time")}>{LABELS.time}</span>
     </button>
   );

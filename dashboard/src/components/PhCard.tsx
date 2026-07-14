@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { buildResponsiveCardImage, formatCompact, parseJsonField } from "../lib/utils";
+import { buildResponsiveCardImage, formatCompact, optimizedAvatarUrl, parseJsonField } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
@@ -291,7 +291,7 @@ export function PhCard({ item, mediaPolicy = LAZY_MEDIA_LOAD_POLICY }: Props) {
             {visibleMakers.length > 0 && (
               <span className="flex shrink-0 -space-x-1.5">
                 {visibleMakers.map((m, i) => {
-                  const src = resolveAssetUrl(m.avatar_url);
+                  const src = optimizedAvatarUrl(m.avatar_url, 48);
                   return src ? (
                     <img
                       key={m.handle || i}
