@@ -181,12 +181,12 @@ export async function generateCardImageVariants(
         redirect: 'error',
         headers: { ...sourceHeaders, Accept: 'image/*' },
       });
-      if (!probe.ok) return [];
-      sourceContentType = probe.headers.get('content-type');
+      if (probe.ok) sourceContentType = probe.headers.get('content-type');
     } catch {
-      return [];
+      // HEAD is advisory. Some otherwise valid image origins reject HEAD from
+      // edge networks; the bounded transform GET below remains authoritative.
     }
-    if (!sourceContentType || !isEligibleCardImageSource({ ...source, sourceContentType })) {
+    if (sourceContentType && !isEligibleCardImageSource({ ...source, sourceContentType })) {
       return [];
     }
   }

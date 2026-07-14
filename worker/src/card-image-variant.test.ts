@@ -152,6 +152,34 @@ describe('card image variant generation', () => {
     expect(bucket.put).not.toHaveBeenCalled();
   });
 
+  test('continues to bounded transforms when an origin rejects the advisory HEAD probe', async () => {
+    const bucket = {
+      put: vi.fn(async () => ({} as R2Object)),
+    } as unknown as R2Bucket;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'HEAD') return new Response(null, { status: 405 });
+      const width = Number((init as RequestInit & {
+        cf?: { image?: { width?: number } };
+      }).cf?.image?.width);
+      return webpResponse(`webp-${width}`);
+    });
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://cdn.example.com/head-not-supported',
+      sourcePrefix: 'x',
+      mediaKind: 'image',
+      sourceWidth: 1200,
+      sourceHeight: 600,
+    }, { fetcher });
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(variants.map(({ width, height }) => ({ width, height }))).toEqual([
+      { width: 400, height: 200 },
+      { width: 800, height: 400 },
+    ]);
+    expect(bucket.put).toHaveBeenCalledTimes(2);
+  });
+
   test('fails open to the legacy original when transforms are unsupported', async () => {
     const bucket = { put: vi.fn() } as unknown as R2Bucket;
     const fetcher = vi.fn(async () => new Response('jpeg', {
