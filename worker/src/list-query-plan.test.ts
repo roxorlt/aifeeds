@@ -10,6 +10,7 @@ const CLAWHUB_PREDICATE = `
   source_type = 'clawhub'
   AND is_relevant = 1
   AND deleted_at IS NULL
+  AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
   AND COALESCE(json_extract(extra, '$.is_suspicious'), 0) = 0
 `;
 const STARS_EXPR = `CAST(json_extract(metrics, '$.stars') AS INTEGER)`;
@@ -31,6 +32,7 @@ describe('028 ClawHub feed indexes', () => {
     ]);
     expect(normalized(sql)).toContain(normalized(STARS_EXPR));
     expect(normalized(sql)).toContain(normalized(CLAWHUB_PREDICATE));
+    expect(sql.match(/workflow_completed_at'\) IS NOT NULL/g)).toHaveLength(2);
     expect(sql).not.toMatch(/idx_items_(?:product_hunt|github|huodongxing|hf|news)/i);
   });
 
@@ -70,6 +72,7 @@ sqliteTest('SQLite plan loses the ClawHub temp sort after migration', () => {
       JSON.stringify({
         category: index % 2 === 0 ? 'mcp-tools' : 'automation',
         is_suspicious: 0,
+        workflow_completed_at: '2026-07-10T00:00:00.000Z',
       }),
     );
   }

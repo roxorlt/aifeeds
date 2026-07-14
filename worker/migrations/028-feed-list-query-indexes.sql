@@ -19,6 +19,7 @@ ON items (
 WHERE source_type = 'clawhub'
   AND is_relevant = 1
   AND deleted_at IS NULL
+  AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
   AND COALESCE(json_extract(extra, '$.is_suspicious'), 0) = 0;
 
 -- Default stars order under a concrete category filter. Category comes first
@@ -32,4 +33,5 @@ ON items (
 WHERE source_type = 'clawhub'
   AND is_relevant = 1
   AND deleted_at IS NULL
+  AND json_extract(extra, '$.workflow_completed_at') IS NOT NULL
   AND COALESCE(json_extract(extra, '$.is_suspicious'), 0) = 0;
