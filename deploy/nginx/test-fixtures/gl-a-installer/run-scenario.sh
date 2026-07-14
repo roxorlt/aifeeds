@@ -3,7 +3,7 @@ set -euo pipefail
 
 scenario=${1:?scenario required}
 case "$scenario" in
-    success|reload-fail|probe-missing|logrotate-fail|service-fail-status-tmp|timer-partial-fail|term|rollback-daemon-reload-fail|concurrent-lock|manual-rollback-committed|manual-recovery-prepared|manual-recovery-initializing|manual-recovery-mutation-started|manual-recovery-site-swapped|manual-recovery-restore-candidate|manual-recovery-audit-log|systemctl-is-active-error|systemctl-is-enabled-error|negative-probe-grep-error|negative-probe-find-error|reinstall-after-auto-rollback|terminal-pair-tamper|manual-cleanup-drift|enabled-site-retarget-drift|manual-artifact-drift-terminal|manual-recovery-partial-backup|installer-journal-tmp-takeover|rollback-journal-tmp-takeover|systemd-missing-unit|site-cas-live-drift|site-cas-candidate-drift|manual-recovery-log-writer-tail|manual-recovery-log-writer-timeout|manual-recovery-terminal-pair-marker|preflight-journal-find-error|preflight-include-grep-error|archive-manifest-tmp-takeover|site-cas-internal-displaced-drift|site-cas-internal-candidate-drift|manual-site-cas-internal-candidate-drift|manual-site-cas-internal-displaced-drift|archive-manifest-stale-tmp|archive-manifest-regressive-tmp|archive-manifest-unknown-final|archive-manifest-orphan-audit|cross-filesystem-audit|terminal-pair-source-only|terminal-pair-rollback-only|terminal-pair-committed-marker-tmp|archive-manifest-previous-takeover|archive-manifest-three-way-conflict|artifact-install-candidate-takeover|artifact-install-destination-takeover|archive-manifest-previous-unknown-only|archive-manifest-previous-internal-drift|terminal-pair-internal-marker-drift|terminal-source-post-marker-check-drift|prelive-initializing-auto-rollback|prelive-prepared-auto-rollback|archive-manifest-delete-takeover|log-quarantine-delete-takeover|site-displaced-delete-takeover|archive-manifest-delete-crash-reentry|log-quarantine-delete-crash-reentry|site-displaced-delete-crash-reentry|terminal-pair-committed-tmp-drift|terminal-source-destination-drift|terminal-rollback-destination-drift|terminal-previous-delete-crash-reentry|prelive-initializing-validation-fail|prelive-prepared-delete-crash-reentry) ;;
+    preflight-logrotate-missing|recovery-logrotate-installed-after-failure|exceptional-recovery-initialized-candidate|exceptional-authority-pre-copy-crash-reentry|exceptional-authority-post-copy-crash-reentry|exceptional-authority-pre-rename-crash-reentry|exceptional-authority-post-rename-crash-reentry|exceptional-receipt-pre-copy-crash-reentry|exceptional-receipt-post-copy-crash-reentry|exceptional-receipt-pre-rename-crash-reentry|exceptional-receipt-post-rename-crash-reentry|success|reload-fail|probe-missing|logrotate-fail|service-fail-status-tmp|timer-partial-fail|term|rollback-daemon-reload-fail|concurrent-lock|manual-rollback-committed|manual-recovery-prepared|manual-recovery-initializing|manual-recovery-mutation-started|manual-recovery-site-swapped|manual-recovery-restore-candidate|manual-recovery-audit-log|systemctl-is-active-error|systemctl-is-enabled-error|negative-probe-grep-error|negative-probe-find-error|reinstall-after-auto-rollback|terminal-pair-tamper|manual-cleanup-drift|enabled-site-retarget-drift|manual-artifact-drift-terminal|manual-recovery-partial-backup|installer-journal-tmp-takeover|rollback-journal-tmp-takeover|systemd-missing-unit|site-cas-live-drift|site-cas-candidate-drift|manual-recovery-log-writer-tail|manual-recovery-log-writer-timeout|manual-recovery-terminal-pair-marker|preflight-journal-find-error|preflight-include-grep-error|archive-manifest-tmp-takeover|site-cas-internal-displaced-drift|site-cas-internal-candidate-drift|manual-site-cas-internal-candidate-drift|manual-site-cas-internal-displaced-drift|archive-manifest-stale-tmp|archive-manifest-regressive-tmp|archive-manifest-unknown-final|archive-manifest-orphan-audit|cross-filesystem-audit|terminal-pair-source-only|terminal-pair-rollback-only|terminal-pair-committed-marker-tmp|archive-manifest-previous-takeover|archive-manifest-three-way-conflict|artifact-install-candidate-takeover|artifact-install-destination-takeover|archive-manifest-previous-unknown-only|archive-manifest-previous-internal-drift|terminal-pair-internal-marker-drift|terminal-source-post-marker-check-drift|prelive-initializing-auto-rollback|prelive-prepared-auto-rollback|archive-manifest-delete-takeover|log-quarantine-delete-takeover|site-displaced-delete-takeover|archive-manifest-delete-crash-reentry|log-quarantine-delete-crash-reentry|site-displaced-delete-crash-reentry|terminal-pair-committed-tmp-drift|terminal-source-destination-drift|terminal-rollback-destination-drift|terminal-previous-delete-crash-reentry|prelive-initializing-validation-fail|prelive-prepared-delete-crash-reentry) ;;
     artifact-install-candidate-samebytes|artifact-final-delete-takeover|artifact-final-delete-crash-reentry|artifact-candidate-delete-crash-reentry|rotation-status-delete-takeover|rotation-status-delete-crash-reentry|partial-backup-destination-takeover|rotation-directory-candidate-takeover|restore-site-absent-samebytes-crash-reentry|crossfs-candidate-samebytes-takeover|crossfs-destination-samebytes-takeover|crossfs-copied-crash-reentry|crossfs-published-crash-reentry|archive-manifest-previous-valid-only|archive-manifest-previous-restart-samebytes|proc-quiescence-permission-denied|rotation-config-samebytes-takeover|rotation-logrotate-samebytes-takeover|rotation-anchor-samebytes-takeover|rotation-ledger-samebytes-takeover|rotation-child-nonzero|rotation-child-sigkill) ;;
     journal-source-g-reentry|journal-source-s1-reentry|journal-source-s2-reentry|journal-source-s3-reentry|journal-source-s4-reentry|journal-source-semantic-drift|journal-source-samebytes-predecessor|journal-source-partial-tmp|journal-source-p-only|journal-source-all-three|journal-source-unknown-cleanup|journal-rollback-g-reentry|journal-rollback-s1-reentry|journal-rollback-s2-reentry|journal-rollback-s3-reentry|journal-rollback-s4-reentry|journal-rollback-semantic-drift|journal-rollback-samebytes-predecessor|journal-rollback-partial-tmp|journal-rollback-p-only|journal-rollback-all-three|journal-rollback-unknown-cleanup|terminal-pair-zero-side-reentry|terminal-pair-one-side-reentry|terminal-pair-two-side-reentry|terminal-pair-pre-marker-reentry|terminal-source-p-bound-target-drift|terminal-source-c-bound-target-drift|cleanup-manual-detaching-reentry|cleanup-manual-detached-reentry|cleanup-automatic-detaching-reentry|cleanup-automatic-detached-reentry|cleanup-manual-unknown-tombstone|cleanup-automatic-unknown-tombstone|cleanup-manual-plan-drift|cleanup-automatic-plan-drift|cleanup-manual-failed-from-drift|cleanup-automatic-failed-from-drift|journal-source-legacy-genesis|journal-rollback-legacy-genesis-rejected|cleanup-manual-legacy-runtime-removed|cleanup-automatic-legacy-runtime-removed) ;;
     *) printf 'unknown scenario: %s\n' "$scenario" >&2; exit 64 ;;
@@ -146,13 +146,29 @@ for payload in "${payloads[@]}"; do
     esac
     install -o root -g root -m 0600 "$source_path" "$staging/$payload"
 done
+case "$scenario" in
+    exceptional-*)
+        printf '\n# fixture legacy helper variant\n' >> "$staging/rollback-aifeeds-performance-log.sh"
+        export GL_A_TEST_INITIALIZED_CANDIDATE_RECOVERY_FAIL=1
+        ;;
+esac
 (
     cd "$staging"
     sha256sum "${payloads[@]}" > SHA256SUMS
 )
 chmod 0600 "$staging/SHA256SUMS"
-test "$(sha256sum "$staging/rollback-aifeeds-performance-log.sh" | awk '{print $1}')" = \
-    "$rollback_helper_sha" || fail staged-rollback-helper-sha
+staged_rollback_helper_sha=$(sha256sum "$staging/rollback-aifeeds-performance-log.sh" \
+    | awk '{print $1}')
+case "$scenario" in
+    exceptional-*)
+        test "$staged_rollback_helper_sha" != "$rollback_helper_sha" \
+            || fail staged-legacy-helper-sha-not-distinct
+        ;;
+    *)
+        test "$staged_rollback_helper_sha" = "$rollback_helper_sha" \
+            || fail staged-rollback-helper-sha
+        ;;
+esac
 artifacts_sha256_json=$(jq -nc \
     --arg format "$(sha256sum "$staging/aifeeds-performance-log.conf" | awk '{print $1}')" \
     --arg rotate "$(sha256sum "$staging/aifeeds-performance.logrotate" | awk '{print $1}')" \
@@ -182,6 +198,16 @@ run_installer() {
     local destination=$1
     set +e
     /bin/bash "$installer" "$staging" "$operation_id" "$g0_commit" > "$destination" 2>&1
+    local result=$?
+    set -e
+    printf '%s' "$result"
+}
+
+run_installer_for_operation() {
+    local destination=$1 requested_operation_id=$2
+    set +e
+    /bin/bash "$installer" "$staging" "$requested_operation_id" "$g0_commit" \
+        > "$destination" 2>&1
     local result=$?
     set -e
     printf '%s' "$result"
@@ -588,6 +614,10 @@ paths.update((
     marker,
     marker + ".tmp",
     marker + f".previous-terminal-gl-a-{operation_id}",
+    f"{backup}/exceptional-recovery-authority-{operation_id}.json",
+    f"{backup}/exceptional-recovery-authority-{operation_id}.json.candidate-gl-a-{operation_id}",
+    f"{backup}/exceptional-recovery-receipt-{operation_id}.json",
+    f"{backup}/exceptional-recovery-receipt-{operation_id}.json.candidate-gl-a-{operation_id}",
 ))
 paths.update((
     "/root/gl-a-secret-canary",
@@ -710,6 +740,39 @@ run_c_negative_twice_stable() {
     ! grep -Fq 'manual_rollback=pass' "$manual_reentry_output" || fail c-negative-reentry-false-pass
     after=$(c_namespace_fingerprint)
     test "$after" = "$before" || fail c-negative-namespace-changed-on-second-failure
+}
+
+run_exceptional_rollback() {
+    local destination=$1 authority=${2:-}
+    local -a arguments=(
+        "$staging" "$recovery_backup" "$recovery_backup_sha"
+        "$recovery_installed_sha" "$recovery_site_uid" "$recovery_site_gid"
+        "$recovery_site_mode" "$recovery_source_journal" "$recovery_source_sha"
+    )
+    if [ -n "$authority" ]; then arguments+=("$authority"); fi
+    set +e
+    /bin/bash "$rollback_helper" "${arguments[@]}" > "$destination" 2>&1
+    manual_rc=$?
+    set -e
+}
+
+assert_exceptional_rejection_stable() {
+    local label=$1 authority=${2:-} before after destination
+    destination="$test_root/exceptional-reject-${label}.out"
+    before=$(c_namespace_fingerprint)
+    run_exceptional_rollback "$destination" "$authority"
+    test "$manual_rc" -ne 0 || fail "exceptional-reject-${label}-false-success"
+    ! grep -Fq 'manual_rollback=pass' "$destination" \
+        || fail "exceptional-reject-${label}-false-pass"
+    after=$(c_namespace_fingerprint)
+    test "$after" = "$before" || fail "exceptional-reject-${label}-mutation"
+}
+
+rewrite_exceptional_authority() {
+    local filter=$1 temporary="${exceptional_authority}.rewrite"
+    jq -cS "$filter" "$exceptional_authority" > "$temporary"
+    chmod 0600 "$temporary"
+    mv "$temporary" "$exceptional_authority"
 }
 
 run_manual_failure_twice_stable() {
@@ -2868,6 +2931,121 @@ exercise_rotation_child_failure() {
 }
 
 case "$scenario" in
+    exceptional-*)
+        cp -a /usr/sbin/logrotate "$test_root/logrotate.restore"
+        rc=$(run_installer "$output")
+        test "$rc" -ne 0 || fail exceptional-forward-false-success
+        grep -Fq 'automatic_rollback=failed ' "$output" \
+            || fail exceptional-forward-rollback-not-failed
+        test -e "$test_root/initialized-candidate-recovery-fail-hit" \
+            || fail exceptional-legacy-fault-not-hit
+        unset GL_A_TEST_INITIALIZED_CANDIDATE_RECOVERY_FAIL
+        /usr/bin/install -o root -g root -m 0755 "$test_root/logrotate.restore" \
+            /usr/sbin/logrotate
+        recovery_source_journal="/var/backups/aifeeds-performance-log/transaction-${operation_id}.json"
+        recovery_rollback_journal="/var/backups/aifeeds-performance-log/rollback-transaction-${operation_id}.json"
+        jq -e '.phase == "mutation_started"' "$recovery_source_journal" >/dev/null \
+            || fail exceptional-source-not-mutation-started
+        jq -e '.phase == "rollback_failed" and .failed_from == "prepared"' \
+            "$recovery_rollback_journal" >/dev/null \
+            || fail exceptional-rollback-not-prepared-failure
+        recovery_backup=$(jq -er '.site_backup' "$recovery_source_journal")
+        recovery_backup_sha=$(jq -er '.site_backup_sha256' "$recovery_source_journal")
+        recovery_installed_sha=$(jq -er '.installed_site_sha256' "$recovery_source_journal")
+        recovery_site_uid=$(jq -er '.original_site_uid' "$recovery_source_journal")
+        recovery_site_gid=$(jq -er '.original_site_gid' "$recovery_source_journal")
+        recovery_site_mode=$(jq -er '.original_site_mode' "$recovery_source_journal")
+        recovery_source_sha=$(sha256sum "$recovery_source_journal" | awk '{print $1}')
+        recovery_rollback_sha=$(sha256sum "$recovery_rollback_journal" | awk '{print $1}')
+        transaction_helper_sha=$(jq -er '.rollback_helper_sha256' "$recovery_source_journal")
+        test "$transaction_helper_sha" != "$rollback_helper_sha" \
+            || fail exceptional-helper-sha-not-distinct
+        exceptional_authority="$staging/exceptional-recovery-authority-${operation_id}.json"
+        jq -ncS \
+            --arg operation_id "$operation_id" --arg g0_commit "$g0_commit" \
+            --arg source_journal "$recovery_source_journal" \
+            --arg source_journal_sha256 "$recovery_source_sha" \
+            --arg rollback_journal "$recovery_rollback_journal" \
+            --arg rollback_journal_sha256 "$recovery_rollback_sha" \
+            --arg transaction_helper_sha256 "$transaction_helper_sha" \
+            --arg recovery_executor_sha256 "$rollback_helper_sha" \
+            --arg approval_evidence_sha256 "$(printf fixture-approval | sha256sum | awk '{print $1}')" '
+            {schema:1,gate:"GL-a-exceptional-recovery",phase:"authorized",
+             operation_id:$operation_id,g0_commit:$g0_commit,
+             source_journal:$source_journal,source_journal_sha256:$source_journal_sha256,
+             rollback_journal:$rollback_journal,rollback_journal_sha256:$rollback_journal_sha256,
+             transaction_helper_sha256:$transaction_helper_sha256,
+             recovery_executor_sha256:$recovery_executor_sha256,
+             defect:"initialized_rotation_candidate_prepublication",
+             operator:"Codex",independent_rollback_owner:"roxor",
+             approved_utc:"2026-07-14T00:00:00Z",
+             approval_evidence_sha256:$approval_evidence_sha256}' \
+            > "$exceptional_authority"
+        chmod 0600 "$exceptional_authority"
+        if [ "$scenario" = exceptional-recovery-initialized-candidate ]; then
+            cp -a "$exceptional_authority" "${exceptional_authority}.valid"
+
+            assert_exceptional_rejection_stable no-authority
+
+            rewrite_exceptional_authority '.operation_id = "20260712000000-deadbeef"'
+            assert_exceptional_rejection_stable wrong-operation "$exceptional_authority"
+            cp -a "${exceptional_authority}.valid" "$exceptional_authority"
+
+            rewrite_exceptional_authority '.source_journal_sha256 = ("b" * 64)'
+            assert_exceptional_rejection_stable wrong-source-sha "$exceptional_authority"
+            cp -a "${exceptional_authority}.valid" "$exceptional_authority"
+
+            rewrite_exceptional_authority '.rollback_journal_sha256 = ("c" * 64)'
+            assert_exceptional_rejection_stable wrong-rollback-sha "$exceptional_authority"
+            cp -a "${exceptional_authority}.valid" "$exceptional_authority"
+
+            rewrite_exceptional_authority \
+                '.recovery_executor_sha256 = .transaction_helper_sha256'
+            assert_exceptional_rejection_stable equal-helper-shas "$exceptional_authority"
+            cp -a "${exceptional_authority}.valid" "$exceptional_authority"
+
+            chmod 0644 "$exceptional_authority"
+            assert_exceptional_rejection_stable wrong-metadata "$exceptional_authority"
+            chmod 0600 "$exceptional_authority"
+
+            mv "$exceptional_authority" "${exceptional_authority}.symlink-target"
+            ln -s "${exceptional_authority}.symlink-target" "$exceptional_authority"
+            assert_exceptional_rejection_stable symlink-input "$exceptional_authority"
+            rm -f "$exceptional_authority"
+            mv "${exceptional_authority}.symlink-target" "$exceptional_authority"
+
+            rewrite_exceptional_authority '.unknown = true'
+            assert_exceptional_rejection_stable unknown-key "$exceptional_authority"
+            mv "${exceptional_authority}.valid" "$exceptional_authority"
+            chmod 0600 "$exceptional_authority"
+        else
+            exceptional_artifact=${scenario#exceptional-}
+            exceptional_artifact=${exceptional_artifact%%-*}
+            exceptional_point=${scenario#exceptional-${exceptional_artifact}-}
+            exceptional_point=${exceptional_point%-crash-reentry}
+            export GL_A_TEST_EXCEPTIONAL_PUBLICATION_CRASH="${exceptional_artifact}:${exceptional_point}"
+            manual_crash_output="$test_root/exceptional-crash.out"
+            run_exceptional_rollback "$manual_crash_output" "$exceptional_authority"
+            test "$manual_rc" -eq 137 || fail "exceptional-crash-rc-$manual_rc"
+            test -d "/tmp/gl-a-test/exceptional-${exceptional_artifact}-${exceptional_point}-crash-hit" \
+                || fail exceptional-crash-hook-not-hit
+            unset GL_A_TEST_EXCEPTIONAL_PUBLICATION_CRASH
+        fi
+
+        manual_output="$test_root/exceptional-recovery.out"
+        run_exceptional_rollback "$manual_output" "$exceptional_authority"
+        test "$manual_rc" -eq 0 || fail "exceptional-recovery-rc-$manual_rc"
+        ;;
+    recovery-logrotate-installed-after-failure)
+        rc=$(run_installer "$output")
+        test "$rc" -ne 0 || fail recovery-logrotate-forward-false-success
+        test -e "$test_root/logrotate-removed-after-preflight" \
+            || fail recovery-logrotate-removal-not-injected
+        ;;
+    preflight-logrotate-missing)
+        rm -f /usr/sbin/logrotate
+        rc=$(run_installer "$output")
+        ;;
     journal-source-legacy-genesis)
         exercise_source_legacy_genesis
         ;;
@@ -5427,6 +5605,136 @@ if [ -n "${c_case_terminal+x}" ]; then
     fi
 else
 case "$scenario" in
+    exceptional-*)
+        assert_exact_terminal_pair "$operation_id"
+        exceptional_authority_final="/var/backups/aifeeds-performance-log/exceptional-recovery-authority-${operation_id}.json"
+        exceptional_receipt="/var/backups/aifeeds-performance-log/exceptional-recovery-receipt-${operation_id}.json"
+        test -f "$exceptional_authority_final" && test ! -L "$exceptional_authority_final" \
+            || fail exceptional-authority-not-durable
+        test -f "$exceptional_receipt" && test ! -L "$exceptional_receipt" \
+            || fail exceptional-receipt-missing
+        test ! -e "$staging/.exceptional-recovery-receipt-${operation_id}.render" \
+            && test ! -L "$staging/.exceptional-recovery-receipt-${operation_id}.render" \
+            || fail exceptional-receipt-render-remained
+        test "$(stat -c '%u %g %a %h' "$exceptional_receipt")" = '0 0 600 1' \
+            || fail exceptional-receipt-metadata
+        terminal_source_sha=$(sha256sum "$recovery_source_journal" | awk '{print $1}')
+        terminal_rollback_sha=$(sha256sum "$recovery_rollback_journal" | awk '{print $1}')
+        terminal_marker="/var/backups/aifeeds-performance-log/rollback-commit-${operation_id}.json"
+        terminal_marker_sha=$(sha256sum "$terminal_marker" | awk '{print $1}')
+        jq -e \
+            --arg operation_id "$operation_id" \
+            --arg authority "$exceptional_authority_final" \
+            --arg authority_sha "$(sha256sum "$exceptional_authority_final" | awk '{print $1}')" \
+            --arg source "$recovery_source_journal" \
+            --arg source_before "$recovery_source_sha" \
+            --arg source_terminal "$terminal_source_sha" \
+            --arg rollback "$recovery_rollback_journal" \
+            --arg rollback_before "$recovery_rollback_sha" \
+            --arg rollback_terminal "$terminal_rollback_sha" \
+            --arg marker "$terminal_marker" --arg marker_sha "$terminal_marker_sha" \
+            --arg transaction_helper "$transaction_helper_sha" \
+            --arg executor "$rollback_helper_sha" '
+            (keys | sort) == ["authority","authority_sha256","gate","operation_id","phase",
+                              "recovery_executor_sha256","rollback_before_sha256",
+                              "rollback_commit_marker","rollback_commit_marker_sha256",
+                              "rollback_journal","rollback_terminal_sha256","schema",
+                              "source_before_sha256","source_journal","source_terminal_sha256",
+                              "transaction_helper_sha256"] and
+            .schema == 1 and .gate == "GL-a-exceptional-recovery" and
+            .phase == "committed" and .operation_id == $operation_id and
+            .authority == $authority and .authority_sha256 == $authority_sha and
+            .source_journal == $source and .source_before_sha256 == $source_before and
+            .source_terminal_sha256 == $source_terminal and
+            .rollback_journal == $rollback and .rollback_before_sha256 == $rollback_before and
+            .rollback_terminal_sha256 == $rollback_terminal and
+            .rollback_commit_marker == $marker and
+            .rollback_commit_marker_sha256 == $marker_sha and
+            .transaction_helper_sha256 == $transaction_helper and
+            .recovery_executor_sha256 == $executor
+        ' "$exceptional_receipt" >/dev/null || fail exceptional-receipt-contract
+        terminal_namespace_before=$(terminal_pair_namespace_fingerprint "$operation_id")
+        receipt_fingerprint=$(file_identity_fingerprint "$exceptional_receipt")
+        manual_reentry_output="$test_root/exceptional-reentry.out"
+        set +e
+        /bin/bash "$rollback_helper" \
+            "$staging" "$recovery_backup" "$recovery_backup_sha" \
+            "$recovery_installed_sha" "$recovery_site_uid" "$recovery_site_gid" \
+            "$recovery_site_mode" "$recovery_source_journal" "$recovery_source_sha" \
+            "$exceptional_authority" > "$manual_reentry_output" 2>&1
+        manual_reentry_rc=$?
+        set -e
+        test "$manual_reentry_rc" -eq 0 || fail "exceptional-reentry-rc-$manual_reentry_rc"
+        grep -Fq 'manual_rollback=pass resumed=1' "$manual_reentry_output" \
+            || fail exceptional-reentry-pass-marker
+        test "$(terminal_pair_namespace_fingerprint "$operation_id")" = \
+            "$terminal_namespace_before" || fail exceptional-reentry-terminal-changed
+        assert_file_identity_fingerprint "$exceptional_receipt" "$receipt_fingerprint" \
+            exceptional-reentry-receipt
+        test "$(jq -er '.rollback_helper_sha256' "$recovery_source_journal")" = \
+            "$transaction_helper_sha" || fail exceptional-source-helper-binding-changed
+        cmp -s "$test_root/aifeeds.conf.original" /etc/nginx/sites-available/aifeeds.conf \
+            || fail exceptional-site-not-base
+        assert_artifact_candidates_absent
+        test ! -e "/var/lib/aifeeds-performance-logrotate.candidate-gl-a-${operation_id}" \
+            || fail exceptional-rotation-candidate-remained
+        assert_nginx_active
+        if [ "$scenario" = exceptional-recovery-initialized-candidate ]; then
+            closure_operation_id=20260714000000-89abcdef
+            closure_output="$test_root/exceptional-installer-closure.out"
+
+            mv "$exceptional_receipt" "$test_root/exceptional-receipt.preserved"
+            closure_rc=$(run_installer_for_operation "$closure_output" "$closure_operation_id")
+            test "$closure_rc" -eq 76 || fail "exceptional-authority-only-rc-$closure_rc"
+            grep -Fq 'ERROR recovery_required=1' "$closure_output" \
+                || fail exceptional-authority-only-marker
+            mv "$test_root/exceptional-receipt.preserved" "$exceptional_receipt"
+
+            mv "$exceptional_authority_final" "$test_root/exceptional-authority.preserved"
+            closure_rc=$(run_installer_for_operation "$closure_output" "$closure_operation_id")
+            test "$closure_rc" -eq 76 || fail "exceptional-receipt-only-rc-$closure_rc"
+            grep -Fq 'ERROR recovery_required=1' "$closure_output" \
+                || fail exceptional-receipt-only-marker
+            mv "$test_root/exceptional-authority.preserved" "$exceptional_authority_final"
+
+            mv "$exceptional_receipt" "$test_root/exceptional-receipt.preserved"
+            jq -cS '.source_terminal_sha256 = ("d" * 64)' \
+                "$test_root/exceptional-receipt.preserved" > "$exceptional_receipt"
+            chown root:root "$exceptional_receipt"
+            chmod 0600 "$exceptional_receipt"
+            closure_rc=$(run_installer_for_operation "$closure_output" "$closure_operation_id")
+            test "$closure_rc" -eq 76 || fail "exceptional-receipt-drift-rc-$closure_rc"
+            grep -Fq 'ERROR recovery_required=1' "$closure_output" \
+                || fail exceptional-receipt-drift-marker
+            rm -f "$exceptional_receipt"
+            mv "$test_root/exceptional-receipt.preserved" "$exceptional_receipt"
+
+            rm -f /usr/sbin/logrotate
+            closure_rc=$(run_installer_for_operation "$closure_output" "$closure_operation_id")
+            test "$closure_rc" -eq 69 || fail "exceptional-closed-preflight-rc-$closure_rc"
+            grep -Fxq 'ERROR dependency=logrotate path=/usr/sbin/logrotate' "$closure_output" \
+                || fail exceptional-closed-preflight-marker
+            test ! -e "/var/backups/aifeeds-performance-log/transaction-${closure_operation_id}.json" \
+                || fail exceptional-closed-new-journal
+            test ! -e "/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-${closure_operation_id}" \
+                || fail exceptional-closed-new-candidate
+        fi
+        ;;
+    preflight-logrotate-missing)
+        test "$rc" -ne 0 || fail preflight-logrotate-false-success
+        grep -Fxq 'ERROR dependency=logrotate path=/usr/sbin/logrotate' "$output" \
+            || fail preflight-logrotate-error-marker
+        cmp -s "$test_root/aifeeds.conf.original" /etc/nginx/sites-available/aifeeds.conf \
+            || fail preflight-logrotate-site-mutated
+        test ! -e /var/backups/aifeeds-performance-log \
+            || fail preflight-logrotate-backup-namespace-created
+        test ! -L /var/backups/aifeeds-performance-log \
+            || fail preflight-logrotate-backup-namespace-symlink
+        test ! -e "/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-${operation_id}" \
+            || fail preflight-logrotate-site-candidate-created
+        assert_artifact_candidates_absent
+        assert_nginx_active
+        ;;
     proc-quiescence-permission-denied)
         assert_file_identity_fingerprint "$probe_target" "$probe_fingerprint" \
             proc-permission-terminal-target

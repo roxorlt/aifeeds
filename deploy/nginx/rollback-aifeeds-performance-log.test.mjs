@@ -18,7 +18,8 @@ test('manual GL-a rollback is journaled, resumable, and drift-safe', () => {
     'LOCK=/run/aifeeds-performance-log.lock',
     'flock -n 9',
     'SOURCE_JOURNAL_SHA256',
-    'ROLLBACK_HELPER_SHA256="$(sha256sum "$0"',
+    'ROLLBACK_EXECUTOR_SHA256="$(sha256sum "$0"',
+    'ROLLBACK_HELPER_SHA256=$ROLLBACK_EXECUTOR_SHA256',
     'G0_COMMIT="$(jq -er \'.g0_commit\'',
     'operation_id',
     'rollback_helper_sha256',
@@ -214,15 +215,17 @@ test('manual rollback treats systemd and negative-probe query errors as failures
   );
 });
 
-test('manual crash reentry accepts absent rotation state only after a durable cleanup phase', () => {
+test('manual crash reentry accepts only an exact initialized candidate or a durable cleanup phase', () => {
   const persist = script.match(/persist_rotation_state_identity\(\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
   assert.ok(script.includes('RESUME_ROLLBACK_PHASE'));
+  assert.match(persist, /ROTATE_STATE_DIR_CANDIDATE/);
+  assert.match(persist, /ROTATION_STATE_SNAPSHOT_JSON" = null/);
+  assert.match(persist, /RUNTIME_ARTIFACTS_SEALED" = false/);
+  assert.match(persist, /mutation_started:none\|mutation_started:prepared/);
+  assert.match(persist, /rotation-verify-initialized/);
+  assert.match(persist, /case "\$phase" in prepared\|rollback_failed/);
   assert.match(persist, /runtime_removed\|nginx_reloaded\|logs_archived/);
   assert.match(persist, /ROTATION_STATE_SNAPSHOT_JSON/);
-  assert.doesNotMatch(
-    persist.slice(0, persist.indexOf('return 0')),
-    /rollback_failed/,
-  );
 });
 
 test('manual rollback accepts inactive missing units but rejects rc4 control-plane failures', () => {

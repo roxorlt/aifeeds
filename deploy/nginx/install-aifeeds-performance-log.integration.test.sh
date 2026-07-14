@@ -47,6 +47,40 @@ test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontaine
 docker_server_os="$(docker info --format '{{.OSType}}')"
 readonly docker_server_os
 
+printf 'GL-a installer dependency preflight: logrotate-missing\n'
+docker run --rm --network none --cap-add SYS_PTRACE --security-opt no-new-privileges \
+    --mount "type=bind,src=$SNAPSHOT_ROOT/deploy/nginx,dst=/workspace/deploy/nginx,readonly" \
+    --mount "type=bind,src=$SNAPSHOT_ROOT/deploy/systemd,dst=/workspace/deploy/systemd,readonly" \
+    "$IMAGE" \
+    /workspace/deploy/nginx/test-fixtures/gl-a-installer/run-scenario.sh \
+    preflight-logrotate-missing
+printf 'GL-a installer dependency preflight: pass\n'
+
+independent_recovery_scenarios=(
+    recovery-logrotate-installed-after-failure
+    exceptional-recovery-initialized-candidate
+    exceptional-authority-pre-copy-crash-reentry
+    exceptional-authority-post-copy-crash-reentry
+    exceptional-authority-pre-rename-crash-reentry
+    exceptional-authority-post-rename-crash-reentry
+    exceptional-receipt-pre-copy-crash-reentry
+    exceptional-receipt-post-copy-crash-reentry
+    exceptional-receipt-pre-rename-crash-reentry
+    exceptional-receipt-post-rename-crash-reentry
+)
+independent_recovery_passed=0
+for scenario in "${independent_recovery_scenarios[@]}"; do
+    printf 'GL-a installer independent recovery: %s\n' "$scenario"
+    docker run --rm --network none --cap-add SYS_PTRACE --security-opt no-new-privileges \
+        --mount "type=bind,src=$SNAPSHOT_ROOT/deploy/nginx,dst=/workspace/deploy/nginx,readonly" \
+        --mount "type=bind,src=$SNAPSHOT_ROOT/deploy/systemd,dst=/workspace/deploy/systemd,readonly" \
+        "$IMAGE" \
+        /workspace/deploy/nginx/test-fixtures/gl-a-installer/run-scenario.sh "$scenario"
+    independent_recovery_passed=$((independent_recovery_passed + 1))
+done
+printf 'GL-a installer independent recovery: %s/%s scenarios passed\n' \
+    "$independent_recovery_passed" "${#independent_recovery_scenarios[@]}"
+
 scenarios=(
     success
     reload-fail

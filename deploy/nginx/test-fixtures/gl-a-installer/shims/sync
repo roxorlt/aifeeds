@@ -221,6 +221,14 @@ if [ "${1:-}" = -f ]; then
                 test "$(sha256sum "$backup" | awk '{print $1}')" = \
                     "$(jq -er '.site_backup_sha256' "$journal")"
                 : > "$state_dir/mutation-started-verified"
+                if [ ! -e "$state_dir/logrotate-removed-after-preflight" ]; then
+                    case "$scenario" in
+                        recovery-logrotate-installed-after-failure|exceptional-*)
+                            rm -f /usr/sbin/logrotate
+                            : > "$state_dir/logrotate-removed-after-preflight"
+                            ;;
+                    esac
+                fi
                 if [ "$scenario" = manual-recovery-mutation-started ]; then
                     : > "$state_dir/mutation-started-format-ready"
                     while :; do sleep 1; done

@@ -1671,7 +1671,10 @@ test('fault matrix covers real partial writes, journal CAS, 14-slot cleanup, and
     assert.ok(integration.includes(scenario), `integration matrix missing ${scenario}`);
     assert.ok(scenarioRunner.includes(scenario), `scenario runner missing ${scenario}`);
   }
-  const matrix = integration.match(/scenarios=\(\n([\s\S]*?)\n\)/)?.[1]
+  const independentRecovery = integration.match(
+    /^independent_recovery_scenarios=\(\n([\s\S]*?)\n\)/m,
+  )?.[1].split('\n').map((line) => line.trim()).filter(Boolean) ?? [];
+  const matrix = integration.match(/^scenarios=\(\n([\s\S]*?)\n\)/m)?.[1]
     .split('\n').map((line) => line.trim()).filter(Boolean) ?? [];
   const allowlistBlock = scenarioRunner.match(/case "\$scenario" in\n([\s\S]*?)\n\s+\*\)/)?.[1] ?? '';
   const allowlist = [...allowlistBlock.matchAll(/^\s+([^*\n][^)]*)\) ;;/gm)]
@@ -1679,7 +1682,14 @@ test('fault matrix covers real partial writes, journal CAS, 14-slot cleanup, and
   assert.equal(matrix.length, 135, 'GL-a matrix count drifted');
   assert.equal(matrix.length - cJournalCleanupScenarios.length, 95, 'GL-a legacy matrix baseline drifted');
   assert.equal(new Set(matrix).size, matrix.length, 'GL-a matrix contains duplicate scenarios');
-  assert.deepEqual([...allowlist].sort(), [...matrix].sort(), 'runner allowlist must equal host matrix');
+  assert.equal(independentRecovery.length, 10, 'independent recovery contract count drifted');
+  assert.equal(new Set(independentRecovery).size, independentRecovery.length,
+    'independent recovery contracts contain duplicates');
+  assert.deepEqual(
+    [...allowlist].sort(),
+    [...matrix, ...independentRecovery, 'preflight-logrotate-missing'].sort(),
+    'runner allowlist must equal frozen matrix plus independent contracts',
+  );
   assert.match(integration, /scenario_count=\$\{#scenarios\[@\]\}/);
   assert.match(integration, /scenario_passed=\$\(\(scenario_passed \+ 1\)\)/);
   assert.match(integration, /%s\/%s scenarios passed/);

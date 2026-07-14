@@ -22,7 +22,7 @@ LOCK=/run/aifeeds-performance-log.lock
 BACKUP_DIR=/var/backups/aifeeds-performance-log
 
 test "$(id -u)" = 0
-test "$#" = 9
+case "$#" in 9|10) ;; *) exit 2 ;; esac
 OUTPUT_DIR=$1
 BACKUP=$2
 BACKUP_SHA256=$3
@@ -32,6 +32,7 @@ SITE_GID=$6
 SITE_MODE=$7
 SOURCE_JOURNAL=$8
 SOURCE_JOURNAL_EXTERNAL_SHA256=$9
+EXCEPTIONAL_AUTHORITY_INPUT=${10:-}
 SOURCE_JOURNAL_SHA256=$SOURCE_JOURNAL_EXTERNAL_SHA256
 SOURCE_JOURNAL_SETTLED_SHA256=''
 
@@ -74,8 +75,9 @@ EXPECTED_ARTIFACT_CANDIDATES_JSON="$(jq -nc \
     --arg service "$SERVICE_CANDIDATE" --arg timer "$TIMER_CANDIDATE" \
     '{format:$format,rotate:$rotate,log:$log,checker:$checker,diff_checker:$diff_checker,
       inserter:$inserter,service:$service,timer:$timer}')"
-ROLLBACK_HELPER_SHA256="$(sha256sum "$0" | awk '{print $1}')"
-printf '%s' "$ROLLBACK_HELPER_SHA256" | grep -Eq '^[a-f0-9]{64}$'
+ROLLBACK_EXECUTOR_SHA256="$(sha256sum "$0" | awk '{print $1}')"
+ROLLBACK_HELPER_SHA256=$ROLLBACK_EXECUTOR_SHA256
+printf '%s' "$ROLLBACK_EXECUTOR_SHA256" | grep -Eq '^[a-f0-9]{64}$'
 ROLLBACK_JOURNAL="${BACKUP_DIR}/rollback-transaction-${TRANSACTION_ID}.json"
 SOURCE_JOURNAL_TMP="${SOURCE_JOURNAL}.tmp"
 ROLLBACK_JOURNAL_TMP="${ROLLBACK_JOURNAL}.tmp"
@@ -84,6 +86,11 @@ ROLLBACK_JOURNAL_PREVIOUS_UPDATE="${ROLLBACK_JOURNAL}.previous-update-gl-a-${TRA
 ROLLBACK_COMMIT_MARKER="${BACKUP_DIR}/rollback-commit-${TRANSACTION_ID}.json"
 ROLLBACK_COMMIT_MARKER_TMP="${ROLLBACK_COMMIT_MARKER}.tmp"
 ROLLBACK_COMMIT_MARKER_PREVIOUS="${ROLLBACK_COMMIT_MARKER}.previous-terminal-gl-a-${TRANSACTION_ID}"
+EXCEPTIONAL_AUTHORITY="${BACKUP_DIR}/exceptional-recovery-authority-${TRANSACTION_ID}.json"
+EXCEPTIONAL_AUTHORITY_CANDIDATE="${EXCEPTIONAL_AUTHORITY}.candidate-gl-a-${TRANSACTION_ID}"
+EXCEPTIONAL_RECEIPT="${BACKUP_DIR}/exceptional-recovery-receipt-${TRANSACTION_ID}.json"
+EXCEPTIONAL_RECEIPT_CANDIDATE="${EXCEPTIONAL_RECEIPT}.candidate-gl-a-${TRANSACTION_ID}"
+EXCEPTIONAL_RECEIPT_RENDER="${OUTPUT_DIR}/.exceptional-recovery-receipt-${TRANSACTION_ID}.render"
 AUDIT_DIR="${BACKUP_DIR}/audit-${TRANSACTION_ID}"
 ARCHIVE_MANIFEST="${AUDIT_DIR}/archive-manifest.json"
 ARCHIVE_MANIFEST_TMP="${ARCHIVE_MANIFEST}.tmp"
@@ -135,6 +142,10 @@ RUNTIME_CLEANUP_JSON='null'
 TERMINAL_RECOVERY_PENDING=0
 ARCHIVE_READ_ONLY_PREFLIGHT_FAILED=0
 RUNTIME_CLEANUP_READ_ONLY_PREFLIGHT_FAILED=0
+EXCEPTIONAL_RECOVERY=0
+EXCEPTIONAL_AUTHORITY_SHA256=''
+EXCEPTIONAL_SOURCE_BEFORE_SHA256=''
+EXCEPTIONAL_ROLLBACK_BEFORE_SHA256=''
 
 test ! -L "$SUMMARY_TMP"
 test ! -L "$SUMMARY"
@@ -1748,8 +1759,65 @@ run_rotation_authorized_command() {
 }
 
 persist_rotation_state_identity() {
-    local phase dir_dev dir_ino provenance snapshot
+    local phase dir_dev dir_ino provenance snapshot checker_path checker_entry
     if [ ! -e "$ROTATE_STATE_DIR" ] && [ ! -L "$ROTATE_STATE_DIR" ]; then
+        if [ -e "$ROTATE_STATE_DIR_CANDIDATE" ] \
+            || [ -L "$ROTATE_STATE_DIR_CANDIDATE" ]; then
+            if [ "${GL_A_TEST_INITIALIZED_CANDIDATE_RECOVERY_FAIL:-}" = 1 ]; then
+                test -d /workspace/deploy/nginx/test-fixtures/gl-a-installer || return 1
+                : > /tmp/gl-a-test/initialized-candidate-recovery-fail-hit
+                return 1
+            fi
+            test "$ROTATION_STATE_IDENTITY_JSON" != null || return 1
+            test "$ROTATION_STATE_SNAPSHOT_JSON" = null || return 1
+            test "$RUNTIME_ARTIFACTS_SEALED" = false || return 1
+            test "$(jq -er '.state' <<< "$ROTATION_ANCHOR_IDENTITY_JSON")" = allocated \
+                || return 1
+            case "$SOURCE_ORIGIN_PHASE:$RESUME_ROLLBACK_PHASE" in
+                mutation_started:none|mutation_started:prepared) ;;
+                *) return 1 ;;
+            esac
+            rotation_state_candidate_is_owned_or_absent || return 1
+            checker_path=$CHECKER
+            if [ ! -e "$checker_path" ] && [ ! -L "$checker_path" ]; then
+                checker_path=$CHECKER_CANDIDATE
+            fi
+            checker_entry="$(runtime_artifact_entry_for_path "$checker_path")" || return 1
+            path_matches_exact_identity "$checker_path" \
+                "$(jq -er '.sha256' <<< "$checker_entry")" \
+                "$(jq -er '.uid' <<< "$checker_entry")" \
+                "$(jq -er '.gid' <<< "$checker_entry")" \
+                "$(jq -er '.mode' <<< "$checker_entry")" \
+                "$(jq -er '.dev' <<< "$checker_entry")" \
+                "$(jq -er '.ino' <<< "$checker_entry")" || return 1
+            provenance="$(jq -cer '.provenance' <<< "$ROTATION_STATE_IDENTITY_JSON")" \
+                || return 1
+            snapshot="$("$checker_path" rotation-verify-initialized "$TRANSACTION_ID" \
+                "$ROTATE_STATE_DIR_CANDIDATE" "$(jq -er '.dev' <<< "$provenance")" \
+                "$(jq -er '.ino' <<< "$provenance")" \
+                "$(jq -er '.genesis_record_sha256' <<< "$provenance")")" || return 1
+            jq -e --arg candidate_path \
+                "${ROTATE_STATE_DIR_CANDIDATE}/${ROTATE_PROVENANCE##*/}" \
+                --argjson dev "$(jq -er '.dev' <<< "$provenance")" \
+                --argjson ino "$(jq -er '.ino' <<< "$provenance")" \
+                --arg genesis "$(jq -er '.genesis_record_sha256' <<< "$provenance")" '
+                (keys | sort) == ["generation","ledger","status","tail_record_sha256"] and
+                .generation == 0 and .status == null and
+                .tail_record_sha256 == $genesis and
+                .ledger.path == $candidate_path and
+                .ledger.dev == $dev and .ledger.ino == $ino and
+                .ledger.uid == 0 and .ledger.gid == 0 and .ledger.mode == "600" and
+                (.ledger.sha256 | test("^[a-f0-9]{64}$")) and
+                (.ledger.size | type == "number" and . > 0 and . == floor)
+            ' <<< "$snapshot" >/dev/null || return 1
+            ROTATION_STATE_SNAPSHOT_JSON="$(jq -cS --arg path "$ROTATE_PROVENANCE" \
+                '.ledger.path = $path' <<< "$snapshot")" || return 1
+            phase="$(jq -er '.phase' "$ROLLBACK_JOURNAL")" || return 1
+            case "$phase" in prepared|rollback_failed) ;; *) return 1 ;; esac
+            write_rollback_journal "$phase"
+            rotation_state_candidate_is_owned_or_absent
+            return
+        fi
         if [ "$ROTATION_STATE_IDENTITY_JSON" != null ]; then
             case "$RESUME_ROLLBACK_PHASE" in
                 runtime_removed|nginx_reloaded|logs_archived) ;;
@@ -2263,6 +2331,16 @@ def prelive_empty_manifest_authorizes_installer_absence(business, installer_cand
 def expected_cleanup_items(business, cleanup_value):
     actual_items = cleanup_value["items"]
     legacy_compatibility = cleanup_value.get("compatibility_mode") == "legacy_runtime_removed"
+    rotation_snapshot = business["rotation_state_snapshot"]
+    rotation_anchor = business["rotation_anchor_identity"]
+    prepublication_runtime = (
+        business["runtime_artifacts_sealed"] is False
+        and isinstance(rotation_snapshot, dict)
+        and rotation_snapshot.get("generation") == 0
+        and rotation_snapshot.get("status") is None
+        and isinstance(rotation_anchor, dict)
+        and rotation_anchor.get("state") == "allocated"
+    )
     result = []
     installer_candidate = f"/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-{operation_id}"
 
@@ -2314,6 +2392,10 @@ def expected_cleanup_items(business, cleanup_value):
             add(slot, "assert_absent", "file", [entry["candidate"], entry["final"]], None, None)
             return
         identity = cleanup_file_identity(entry)
+        if name == "log" and prepublication_runtime:
+            paths = [entry["candidate"], entry["final"]]
+            add(slot, "delete", "file", paths, entry["candidate"], identity)
+            return
         if name == "log":
             log_identity = actual_items[len(result)]["identity"]
             identity = cleanup_handoff_identity({
@@ -2510,9 +2592,18 @@ def validate_runtime_cleanup(cleanup_value, business):
             item["slot"] == "log" and item["selected_path"] is not None
         ) and item["action"] == "archive_handoff":
             fail("runtime cleanup archive action drift")
-        if item["slot"] == "log" and item["selected_path"] is not None \
-                and item["action"] != "archive_handoff":
-            fail("runtime cleanup log action drift")
+        if item["slot"] == "log" and item["selected_path"] is not None:
+            prepublication_log = (
+                business["runtime_artifacts_sealed"] is False
+                and isinstance(business["rotation_state_snapshot"], dict)
+                and business["rotation_state_snapshot"].get("generation") == 0
+                and business["rotation_state_snapshot"].get("status") is None
+                and isinstance(business["rotation_anchor_identity"], dict)
+                and business["rotation_anchor_identity"].get("state") == "allocated"
+            )
+            expected_log_action = "delete" if prepublication_log else "archive_handoff"
+            if item["action"] != expected_log_action:
+                fail("runtime cleanup log action drift")
         if not isinstance(item["paths"], list) or len(item["paths"]) not in {1, 2} \
                 or len(set(item["paths"])) != len(item["paths"]) \
                 or not all(isinstance(path, str) and path.startswith("/") for path in item["paths"]):
@@ -3083,7 +3174,22 @@ def validate_rollback_delta(old, new, old_effective, direct_next, changed):
         allowed_failure = {"phase", "failed_from"}
         if old.get("phase") == "rollback_failed":
             allowed_failure = {"runtime_cleanup"}
-        if logical != allowed_failure and logical != set():
+            initialized_candidate_snapshot = (
+                logical == {"rotation_state_snapshot"}
+                and old.get("failed_from") == "prepared"
+                and old.get("source_origin_phase") == "mutation_started"
+                and old.get("rotation_state_snapshot") is None
+                and isinstance(new.get("rotation_state_snapshot"), dict)
+                and new["rotation_state_snapshot"].get("generation") == 0
+                and new["rotation_state_snapshot"].get("status") is None
+                and new.get("runtime_artifacts_sealed") is False
+                and isinstance(new.get("rotation_anchor_identity"), dict)
+                and new["rotation_anchor_identity"].get("state") == "allocated"
+            )
+        else:
+            initialized_candidate_snapshot = False
+        if logical != allowed_failure and logical != set() \
+                and not initialized_candidate_snapshot:
             fail("semantic rollback failure wrapper drift")
         return
     new_phase = new["phase"]
@@ -6298,6 +6404,13 @@ if item["action"] == "assert_absent":
         raise RuntimeError("runtime cleanup absent log handoff drift")
     raise SystemExit(0)
 
+if item["action"] == "delete":
+    if item["selected_path"] != runtime_candidate_path \
+            or item["paths"] != [runtime_candidate_path, log_path] \
+            or entries or exists(log_path):
+        raise RuntimeError("runtime cleanup candidate log delete drift")
+    raise SystemExit(0)
+
 if item["action"] != "archive_handoff" or item["selected_path"] != log_path \
         or item["paths"] != [runtime_candidate_path, log_path] \
         or exists(runtime_candidate_path) or exists(item["tombstone"]):
@@ -6689,7 +6802,8 @@ build_runtime_cleanup_plan() {
     fi
     python3 - "$TRANSACTION_ID" "$SOURCE_ORIGIN_PHASE" "$RUNTIME_ARTIFACTS_JSON" \
         "$ROTATION_STATE_IDENTITY_JSON" "$ROTATION_STATE_SNAPSHOT_JSON" \
-        "$ROTATION_ANCHOR_IDENTITY_JSON" "$INSTALLER_CANDIDATE" "$INSTALLED_SITE_SHA256" \
+        "$ROTATION_ANCHOR_IDENTITY_JSON" "$RUNTIME_ARTIFACTS_SEALED" \
+        "$INSTALLER_CANDIDATE" "$INSTALLED_SITE_SHA256" \
         "$SITE_UID" "$SITE_GID" "$SITE_MODE" "$INSTALLER_CANDIDATE_DEV" \
         "$INSTALLER_CANDIDATE_INO" "$ROLLBACK_CANDIDATE" "$ROLLBACK_CANDIDATE_DEV" \
         "$ROLLBACK_CANDIDATE_INO" "$BACKUP_SHA256" \
@@ -6701,15 +6815,18 @@ import stat
 import sys
 
 (operation_id, source_phase, runtime_json, state_json, snapshot_json, anchor_json,
- installer_candidate, installed_sha256, site_uid, site_gid, site_mode,
- installer_dev, installer_ino, restore_candidate, restore_dev, restore_ino) = sys.argv[1:17]
-restore_sha256 = sys.argv[17]
-allow_recorded_installer_absence = sys.argv[18] == "1"
-allow_legacy_recorded_absence = sys.argv[19] == "1"
+ runtime_sealed_raw, installer_candidate, installed_sha256, site_uid, site_gid, site_mode,
+ installer_dev, installer_ino, restore_candidate, restore_dev, restore_ino) = sys.argv[1:18]
+restore_sha256 = sys.argv[18]
+allow_recorded_installer_absence = sys.argv[19] == "1"
+allow_legacy_recorded_absence = sys.argv[20] == "1"
 runtime = json.loads(runtime_json)
 state_identity = json.loads(state_json)
 snapshot = json.loads(snapshot_json)
 anchor = json.loads(anchor_json)
+runtime_sealed = json.loads(runtime_sealed_raw)
+if not isinstance(runtime_sealed, bool):
+    raise RuntimeError("runtime seal type drift")
 site_uid, site_gid = int(site_uid), int(site_gid)
 EXPECTED_SLOTS = [
     "site_installer", "site_restore", "timer", "service", "rotation_status",
@@ -6962,7 +7079,21 @@ add_runtime("rotate", "rotate")
 add_runtime("format", "format")
 add_runtime("diff_checker", "diff_checker")
 add_runtime("inserter", "inserter")
-add_runtime("log", "log", "archive_handoff")
+prepublication_runtime = (
+    runtime_sealed is False
+    and isinstance(snapshot, dict)
+    and snapshot.get("generation") == 0
+    and snapshot.get("status") is None
+    and isinstance(anchor, dict)
+    and anchor.get("state") == "allocated"
+)
+if prepublication_runtime:
+    log_entry = runtime_by_name.get("log")
+    if log_entry is None or absent(log_entry["candidate"]) or not absent(log_entry["final"]):
+        raise RuntimeError("prepublication runtime log topology drift")
+    add_runtime("log", "log", "delete")
+else:
+    add_runtime("log", "log", "archive_handoff")
 
 if len(items) != 14:
     raise RuntimeError("runtime cleanup plan must contain 14 slots")
@@ -7391,6 +7522,16 @@ terminal_pair_test_failure() {
     fi
 }
 
+exceptional_publication_test_crash() {
+    local artifact=$1 point=$2 spec=${GL_A_TEST_EXCEPTIONAL_PUBLICATION_CRASH:-}
+    [ "$spec" = "${artifact}:${point}" ] || return 0
+    test -d /workspace/deploy/nginx/test-fixtures/gl-a-installer \
+        || { printf 'exceptional publication test hook outside fixture\n' >&2; return 1; }
+    if mkdir "/tmp/gl-a-test/exceptional-${artifact}-${point}-crash-hit" 2>/dev/null; then
+        kill -KILL "$$"
+    fi
+}
+
 assert_site_base_unchanged() {
     assert_enabled_site_target
     formal_site_matches_state "$SITE" base
@@ -7498,6 +7639,213 @@ assert_terminal_manifest_journal_mirror() {
     done
 }
 
+prevalidate_exceptional_authority() {
+    local transaction_helper_sha source_sha rollback_sha authority_sha
+    local source_before_sha rollback_before_sha terminal_state=0
+    if [ -z "$EXCEPTIONAL_AUTHORITY_INPUT" ]; then return 0; fi
+    test "$EXCEPTIONAL_AUTHORITY_INPUT" = \
+        "${OUTPUT_DIR}/exceptional-recovery-authority-${TRANSACTION_ID}.json"
+    test -f "$EXCEPTIONAL_AUTHORITY_INPUT"
+    test ! -L "$EXCEPTIONAL_AUTHORITY_INPUT"
+    test "$(stat -c '%u %g %a %h' "$EXCEPTIONAL_AUTHORITY_INPUT")" = '0 0 600 1'
+    authority_sha="$(sha256sum "$EXCEPTIONAL_AUTHORITY_INPUT" | awk '{print $1}')"
+    printf '%s' "$authority_sha" | grep -Eq '^[a-f0-9]{64}$'
+    source_sha="$(sha256sum "$SOURCE_JOURNAL" | awk '{print $1}')"
+    rollback_sha="$(sha256sum "$ROLLBACK_JOURNAL" | awk '{print $1}')"
+    source_before_sha="$(jq -er '.source_journal_sha256' \
+        "$EXCEPTIONAL_AUTHORITY_INPUT")"
+    rollback_before_sha="$(jq -er '.rollback_journal_sha256' \
+        "$EXCEPTIONAL_AUTHORITY_INPUT")"
+    transaction_helper_sha="$(jq -er '.transaction_helper_sha256' \
+        "$EXCEPTIONAL_AUTHORITY_INPUT")"
+    jq -e \
+        --arg operation_id "$TRANSACTION_ID" \
+        --arg source_journal "$SOURCE_JOURNAL" \
+        --arg source_journal_sha256 "$source_before_sha" \
+        --arg rollback_journal "$ROLLBACK_JOURNAL" \
+        --arg rollback_journal_sha256 "$rollback_before_sha" \
+        --arg transaction_helper_sha256 "$transaction_helper_sha" \
+        --arg recovery_executor_sha256 "$ROLLBACK_EXECUTOR_SHA256" '
+        (keys | sort) == ["approval_evidence_sha256","approved_utc","defect","g0_commit",
+                          "gate","independent_rollback_owner","operation_id","operator","phase",
+                          "recovery_executor_sha256","rollback_journal","rollback_journal_sha256",
+                          "schema","source_journal","source_journal_sha256",
+                          "transaction_helper_sha256"] and
+        .schema == 1 and .gate == "GL-a-exceptional-recovery" and
+        .phase == "authorized" and .operation_id == $operation_id and
+        (.g0_commit | test("^[a-f0-9]{40}$")) and
+        .source_journal == $source_journal and
+        .source_journal_sha256 == $source_journal_sha256 and
+        .rollback_journal == $rollback_journal and
+        .rollback_journal_sha256 == $rollback_journal_sha256 and
+        .transaction_helper_sha256 == $transaction_helper_sha256 and
+        .recovery_executor_sha256 == $recovery_executor_sha256 and
+        .transaction_helper_sha256 != .recovery_executor_sha256 and
+        .defect == "initialized_rotation_candidate_prepublication" and
+        .operator == "Codex" and .independent_rollback_owner == "roxor" and
+        (.approved_utc | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+        (.approval_evidence_sha256 | test("^[a-f0-9]{64}$"))
+    ' "$EXCEPTIONAL_AUTHORITY_INPUT" >/dev/null
+    test "$SOURCE_JOURNAL_EXTERNAL_SHA256" = "$source_before_sha"
+    test "$(jq -er '.operation_id' "$SOURCE_JOURNAL")" = "$TRANSACTION_ID"
+    test "$(jq -er '.g0_commit' "$SOURCE_JOURNAL")" = \
+        "$(jq -er '.g0_commit' "$EXCEPTIONAL_AUTHORITY_INPUT")"
+    test "$(jq -er '.rollback_helper_sha256' "$SOURCE_JOURNAL")" = \
+        "$transaction_helper_sha"
+    test "$(jq -er '.operation_id' "$ROLLBACK_JOURNAL")" = "$TRANSACTION_ID"
+    test "$(jq -er '.rollback_helper_sha256' "$ROLLBACK_JOURNAL")" = \
+        "$transaction_helper_sha"
+    if [ "$source_sha:$rollback_sha" = "$source_before_sha:$rollback_before_sha" ]; then
+        test "$(jq -er '.phase' "$SOURCE_JOURNAL")" = mutation_started
+        test "$(jq -er '.phase' "$ROLLBACK_JOURNAL")" = rollback_failed
+        test "$(jq -er '.failed_from' "$ROLLBACK_JOURNAL")" = prepared
+    else
+        test "$(jq -er '.phase' "$SOURCE_JOURNAL")" = rolled_back
+        test "$(jq -er '.phase' "$ROLLBACK_JOURNAL")" = rolled_back
+        test -f "$ROLLBACK_COMMIT_MARKER"
+        test ! -L "$ROLLBACK_COMMIT_MARKER"
+        test "$(jq -er '.phase' "$ROLLBACK_COMMIT_MARKER")" = committed
+        test "$(jq -er '.source_journal_terminal_sha256' "$ROLLBACK_COMMIT_MARKER")" = \
+            "$source_sha"
+        test "$(jq -er '.rollback_journal_terminal_sha256' "$ROLLBACK_COMMIT_MARKER")" = \
+            "$rollback_sha"
+        test -f "$EXCEPTIONAL_AUTHORITY"
+        test ! -L "$EXCEPTIONAL_AUTHORITY"
+        test "$(sha256sum "$EXCEPTIONAL_AUTHORITY" | awk '{print $1}')" = "$authority_sha"
+        terminal_state=1
+    fi
+    for residue in "$SOURCE_JOURNAL_TMP" "$SOURCE_JOURNAL_PREVIOUS_UPDATE" \
+        "${SOURCE_JOURNAL_PREVIOUS_UPDATE}.cleanup" "$ROLLBACK_JOURNAL_TMP" \
+        "$ROLLBACK_JOURNAL_PREVIOUS_UPDATE" "${ROLLBACK_JOURNAL_PREVIOUS_UPDATE}.cleanup" \
+        "$ROLLBACK_COMMIT_MARKER_TMP" "$ROLLBACK_COMMIT_MARKER_PREVIOUS"; do
+        test ! -e "$residue"
+        test ! -L "$residue"
+    done
+    if [ "$terminal_state" -eq 0 ]; then
+        test ! -e "$ROLLBACK_COMMIT_MARKER"
+        test ! -L "$ROLLBACK_COMMIT_MARKER"
+    fi
+    ROLLBACK_HELPER_SHA256=$transaction_helper_sha
+    EXCEPTIONAL_AUTHORITY_SHA256=$authority_sha
+    EXCEPTIONAL_SOURCE_BEFORE_SHA256=$source_before_sha
+    EXCEPTIONAL_ROLLBACK_BEFORE_SHA256=$rollback_before_sha
+    EXCEPTIONAL_RECOVERY=1
+}
+
+persist_exceptional_authority() {
+    local input_dev input_ino candidate_identity
+    if [ "$EXCEPTIONAL_RECOVERY" -ne 1 ]; then return 0; fi
+    test -f "$EXCEPTIONAL_AUTHORITY_INPUT"
+    test ! -L "$EXCEPTIONAL_AUTHORITY_INPUT"
+    test "$(sha256sum "$EXCEPTIONAL_AUTHORITY_INPUT" | awk '{print $1}')" = \
+        "$EXCEPTIONAL_AUTHORITY_SHA256"
+    if [ -e "$EXCEPTIONAL_AUTHORITY" ] || [ -L "$EXCEPTIONAL_AUTHORITY" ]; then
+        test ! -e "$EXCEPTIONAL_AUTHORITY_CANDIDATE"
+        test ! -L "$EXCEPTIONAL_AUTHORITY_CANDIDATE"
+        path_matches_exact "$EXCEPTIONAL_AUTHORITY" "$EXCEPTIONAL_AUTHORITY_SHA256" 0 0 600
+        return
+    fi
+    if [ -e "$EXCEPTIONAL_AUTHORITY_CANDIDATE" ] \
+        || [ -L "$EXCEPTIONAL_AUTHORITY_CANDIDATE" ]; then
+        path_matches_exact "$EXCEPTIONAL_AUTHORITY_CANDIDATE" \
+            "$EXCEPTIONAL_AUTHORITY_SHA256" 0 0 600
+    else
+        exceptional_publication_test_crash authority pre-copy
+        input_dev="$(stat -c '%d' "$EXCEPTIONAL_AUTHORITY_INPUT")"
+        input_ino="$(stat -c '%i' "$EXCEPTIONAL_AUTHORITY_INPUT")"
+        candidate_identity="$(copy_file_no_replace "$EXCEPTIONAL_AUTHORITY_INPUT" \
+            "$EXCEPTIONAL_AUTHORITY_CANDIDATE" "$EXCEPTIONAL_AUTHORITY_SHA256" \
+            0 0 600 "$input_dev" "$input_ino")"
+        printf '%s' "$candidate_identity" | grep -Eq '^[0-9]+:[0-9]+$'
+        exceptional_publication_test_crash authority post-copy
+    fi
+    sync -f "$EXCEPTIONAL_AUTHORITY_CANDIDATE"
+    exceptional_publication_test_crash authority pre-rename
+    rename_no_replace "$EXCEPTIONAL_AUTHORITY_CANDIDATE" "$EXCEPTIONAL_AUTHORITY"
+    exceptional_publication_test_crash authority post-rename
+    sync -f "$EXCEPTIONAL_AUTHORITY"
+    sync -f "$BACKUP_DIR"
+    path_matches_exact "$EXCEPTIONAL_AUTHORITY" "$EXCEPTIONAL_AUTHORITY_SHA256" 0 0 600
+}
+
+persist_exceptional_receipt() {
+    local source_terminal_sha=$1 rollback_terminal_sha=$2 marker_sha=$3
+    local receipt_json receipt_sha render_dev render_ino candidate_identity
+    if [ "$EXCEPTIONAL_RECOVERY" -ne 1 ]; then return 0; fi
+    path_matches_exact "$EXCEPTIONAL_AUTHORITY" "$EXCEPTIONAL_AUTHORITY_SHA256" 0 0 600
+    receipt_json="$(jq -ncS \
+        --arg operation_id "$TRANSACTION_ID" \
+        --arg authority "$EXCEPTIONAL_AUTHORITY" \
+        --arg authority_sha256 "$EXCEPTIONAL_AUTHORITY_SHA256" \
+        --arg source_journal "$SOURCE_JOURNAL_FINAL" \
+        --arg source_before_sha256 "$EXCEPTIONAL_SOURCE_BEFORE_SHA256" \
+        --arg source_terminal_sha256 "$source_terminal_sha" \
+        --arg rollback_journal "$ROLLBACK_JOURNAL_FINAL" \
+        --arg rollback_before_sha256 "$EXCEPTIONAL_ROLLBACK_BEFORE_SHA256" \
+        --arg rollback_terminal_sha256 "$rollback_terminal_sha" \
+        --arg rollback_commit_marker "$ROLLBACK_COMMIT_MARKER" \
+        --arg rollback_commit_marker_sha256 "$marker_sha" \
+        --arg transaction_helper_sha256 "$ROLLBACK_HELPER_SHA256" \
+        --arg recovery_executor_sha256 "$ROLLBACK_EXECUTOR_SHA256" '
+        {schema:1,gate:"GL-a-exceptional-recovery",phase:"committed",
+         operation_id:$operation_id,authority:$authority,authority_sha256:$authority_sha256,
+         source_journal:$source_journal,source_before_sha256:$source_before_sha256,
+         source_terminal_sha256:$source_terminal_sha256,
+         rollback_journal:$rollback_journal,rollback_before_sha256:$rollback_before_sha256,
+         rollback_terminal_sha256:$rollback_terminal_sha256,
+         rollback_commit_marker:$rollback_commit_marker,
+         rollback_commit_marker_sha256:$rollback_commit_marker_sha256,
+         transaction_helper_sha256:$transaction_helper_sha256,
+         recovery_executor_sha256:$recovery_executor_sha256}')" || return 1
+    receipt_sha="$(printf '%s\n' "$receipt_json" | sha256sum | awk '{print $1}')"
+    if [ -e "$EXCEPTIONAL_RECEIPT" ] || [ -L "$EXCEPTIONAL_RECEIPT" ]; then
+        test ! -e "$EXCEPTIONAL_RECEIPT_CANDIDATE"
+        test ! -L "$EXCEPTIONAL_RECEIPT_CANDIDATE"
+        path_matches_exact "$EXCEPTIONAL_RECEIPT" "$receipt_sha" 0 0 600
+        if [ -e "$EXCEPTIONAL_RECEIPT_RENDER" ] \
+            || [ -L "$EXCEPTIONAL_RECEIPT_RENDER" ]; then
+            path_matches_exact "$EXCEPTIONAL_RECEIPT_RENDER" "$receipt_sha" 0 0 600
+            rm -f "$EXCEPTIONAL_RECEIPT_RENDER"
+            sync -f "$OUTPUT_DIR"
+        fi
+        return
+    fi
+    if [ -e "$EXCEPTIONAL_RECEIPT_CANDIDATE" ] \
+        || [ -L "$EXCEPTIONAL_RECEIPT_CANDIDATE" ]; then
+        path_matches_exact "$EXCEPTIONAL_RECEIPT_CANDIDATE" "$receipt_sha" 0 0 600
+    else
+        if [ -e "$EXCEPTIONAL_RECEIPT_RENDER" ] \
+            || [ -L "$EXCEPTIONAL_RECEIPT_RENDER" ]; then
+            path_matches_exact "$EXCEPTIONAL_RECEIPT_RENDER" "$receipt_sha" 0 0 600
+        else
+            printf '%s\n' "$receipt_json" > "$EXCEPTIONAL_RECEIPT_RENDER"
+            chmod 0600 "$EXCEPTIONAL_RECEIPT_RENDER"
+            sync -f "$EXCEPTIONAL_RECEIPT_RENDER"
+        fi
+        exceptional_publication_test_crash receipt pre-copy
+        render_dev="$(stat -c '%d' "$EXCEPTIONAL_RECEIPT_RENDER")"
+        render_ino="$(stat -c '%i' "$EXCEPTIONAL_RECEIPT_RENDER")"
+        candidate_identity="$(copy_file_no_replace "$EXCEPTIONAL_RECEIPT_RENDER" \
+            "$EXCEPTIONAL_RECEIPT_CANDIDATE" "$receipt_sha" 0 0 600 \
+            "$render_dev" "$render_ino")"
+        printf '%s' "$candidate_identity" | grep -Eq '^[0-9]+:[0-9]+$'
+        exceptional_publication_test_crash receipt post-copy
+    fi
+    if [ -e "$EXCEPTIONAL_RECEIPT_RENDER" ] \
+        || [ -L "$EXCEPTIONAL_RECEIPT_RENDER" ]; then
+        path_matches_exact "$EXCEPTIONAL_RECEIPT_RENDER" "$receipt_sha" 0 0 600
+        rm -f "$EXCEPTIONAL_RECEIPT_RENDER"
+        sync -f "$OUTPUT_DIR"
+    fi
+    sync -f "$EXCEPTIONAL_RECEIPT_CANDIDATE"
+    exceptional_publication_test_crash receipt pre-rename
+    rename_no_replace "$EXCEPTIONAL_RECEIPT_CANDIDATE" "$EXCEPTIONAL_RECEIPT"
+    exceptional_publication_test_crash receipt post-rename
+    sync -f "$EXCEPTIONAL_RECEIPT"
+    sync -f "$BACKUP_DIR"
+    path_matches_exact "$EXCEPTIONAL_RECEIPT" "$receipt_sha" 0 0 600
+}
+
 validate_committed_terminal_pair_physical_chain() {
     local source_journal_terminal_sha256
     local rollback_journal_terminal_sha256
@@ -7551,6 +7899,8 @@ emit_summary() {
     log_archive_manifest_generation="$TERMINAL_ARCHIVE_MANIFEST_GENERATION"
     log_archive_manifest_entry_count="$TERMINAL_ARCHIVE_MANIFEST_ENTRY_COUNT"
     if [ -f "$BACKUP" ] && [ ! -L "$BACKUP" ]; then backup_present=true; fi
+    persist_exceptional_receipt "$source_terminal_sha256" "$rollback_journal_sha256" \
+        "$rollback_commit_marker_sha256"
     jq -nc \
         --arg backup_sha256 "$BACKUP_SHA256" \
         --arg operation_id "$TRANSACTION_ID" \
@@ -7637,6 +7987,8 @@ mark_failure() {
     printf 'manual_rollback=failed\n'
     exit "$rc"
 }
+
+prevalidate_exceptional_authority
 
 trap mark_failure EXIT
 trap 'exit 129' HUP
@@ -8045,6 +8397,7 @@ case "$SOURCE_ORIGIN_PHASE" in
         ;;
 esac
 
+persist_exceptional_authority
 write_rollback_journal prepared
 
 quiesce_rotation_control_plane

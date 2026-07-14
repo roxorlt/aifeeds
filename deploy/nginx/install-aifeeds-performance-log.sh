@@ -3277,7 +3277,22 @@ def validate_rollback_delta(old, new, old_effective, direct_next, changed):
         allowed_failure = {"phase", "failed_from"}
         if old.get("phase") == "rollback_failed":
             allowed_failure = {"runtime_cleanup"}
-        if logical != allowed_failure and logical != set():
+            initialized_candidate_snapshot = (
+                logical == {"rotation_state_snapshot"}
+                and old.get("failed_from") == "prepared"
+                and old.get("source_origin_phase") == "mutation_started"
+                and old.get("rotation_state_snapshot") is None
+                and isinstance(new.get("rotation_state_snapshot"), dict)
+                and new["rotation_state_snapshot"].get("generation") == 0
+                and new["rotation_state_snapshot"].get("status") is None
+                and new.get("runtime_artifacts_sealed") is False
+                and isinstance(new.get("rotation_anchor_identity"), dict)
+                and new["rotation_anchor_identity"].get("state") == "allocated"
+            )
+        else:
+            initialized_candidate_snapshot = False
+        if logical != allowed_failure and logical != set() \
+                and not initialized_candidate_snapshot:
             fail("semantic rollback failure wrapper drift")
         return
     new_phase = new["phase"]
@@ -5244,6 +5259,14 @@ if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
     rm -f "$FIND_JOURNAL_INVENTORY"
 fi
 
+if [ ! -f "$ROTATION_LOGROTATE" ] || [ -L "$ROTATION_LOGROTATE" ] \
+    || [ ! -s "$ROTATION_LOGROTATE" ] \
+    || [ "$(stat -c '%U %G %a' "$ROTATION_LOGROTATE" 2>/dev/null || true)" != \
+        'root root 755' ]; then
+    printf 'ERROR dependency=logrotate path=%s\n' "$ROTATION_LOGROTATE"
+    exit 69
+fi
+
 settle_journal_update "$JOURNAL" "$JOURNAL_PREVIOUS_UPDATE" source ""
 
 test -f "$SITE"
@@ -5726,6 +5749,93 @@ validate_terminal_runtime_residue() {
     assert_no_operation_cleanup_dirs_for_transaction "$transaction_id" "$audit_dir"
 }
 
+validate_exceptional_recovery_closure() {
+    local transaction_id=$1
+    local source_path="${BACKUP_DIR}/transaction-${transaction_id}.json"
+    local rollback_path="${BACKUP_DIR}/rollback-transaction-${transaction_id}.json"
+    local marker_path="${BACKUP_DIR}/rollback-commit-${transaction_id}.json"
+    local authority="${BACKUP_DIR}/exceptional-recovery-authority-${transaction_id}.json"
+    local receipt="${BACKUP_DIR}/exceptional-recovery-receipt-${transaction_id}.json"
+    local authority_candidate="${authority}.candidate-gl-a-${transaction_id}"
+    local receipt_candidate="${receipt}.candidate-gl-a-${transaction_id}"
+    local authority_present=0 receipt_present=0
+    local authority_sha source_sha rollback_sha marker_sha
+    printf '%s' "$transaction_id" | grep -Eq '^[0-9]{14}-[a-f0-9]{8}$' || return 1
+    for candidate in "$authority_candidate" "$receipt_candidate"; do
+        test ! -e "$candidate" && test ! -L "$candidate" || return 1
+    done
+    if [ -e "$authority" ] || [ -L "$authority" ]; then authority_present=1; fi
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then receipt_present=1; fi
+    if [ "$authority_present:$receipt_present" = 0:0 ]; then return 0; fi
+    test "$authority_present:$receipt_present" = 1:1 || return 1
+    for evidence in "$source_path" "$rollback_path" "$marker_path" "$authority" "$receipt"; do
+        journal_metadata_is_private "$evidence" || return 1
+        test "$(stat -c '%h' "$evidence")" = 1 || return 1
+    done
+    authority_sha="$(sha256sum "$authority" | awk '{print $1}')" || return 1
+    source_sha="$(sha256sum "$source_path" | awk '{print $1}')" || return 1
+    rollback_sha="$(sha256sum "$rollback_path" | awk '{print $1}')" || return 1
+    marker_sha="$(sha256sum "$marker_path" | awk '{print $1}')" || return 1
+    jq -e \
+        --arg operation_id "$transaction_id" \
+        --arg source "$source_path" --arg rollback "$rollback_path" \
+        --arg transaction_helper "$(jq -er '.rollback_helper_sha256' "$source_path")" \
+        --arg g0_commit "$(jq -er '.g0_commit' "$source_path")" '
+        (keys | sort) == ["approval_evidence_sha256","approved_utc","defect","g0_commit",
+                          "gate","independent_rollback_owner","operation_id","operator","phase",
+                          "recovery_executor_sha256","rollback_journal","rollback_journal_sha256",
+                          "schema","source_journal","source_journal_sha256",
+                          "transaction_helper_sha256"] and
+        .schema == 1 and .gate == "GL-a-exceptional-recovery" and
+        .phase == "authorized" and .operation_id == $operation_id and
+        .g0_commit == $g0_commit and .source_journal == $source and
+        .rollback_journal == $rollback and
+        (.source_journal_sha256 | test("^[a-f0-9]{64}$")) and
+        (.rollback_journal_sha256 | test("^[a-f0-9]{64}$")) and
+        .transaction_helper_sha256 == $transaction_helper and
+        (.recovery_executor_sha256 | test("^[a-f0-9]{64}$")) and
+        .recovery_executor_sha256 != .transaction_helper_sha256 and
+        .defect == "initialized_rotation_candidate_prepublication" and
+        .operator == "Codex" and .independent_rollback_owner == "roxor" and
+        (.approved_utc | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+        (.approval_evidence_sha256 | test("^[a-f0-9]{64}$"))
+    ' "$authority" >/dev/null || return 1
+    test "$(jq -er '.rollback_helper_sha256' "$rollback_path")" = \
+        "$(jq -er '.transaction_helper_sha256' "$authority")" || return 1
+    test "$(jq -er '.g0_commit' "$rollback_path")" = \
+        "$(jq -er '.g0_commit' "$authority")" || return 1
+    jq -e \
+        --arg operation_id "$transaction_id" \
+        --arg authority "$authority" --arg authority_sha "$authority_sha" \
+        --arg source "$source_path" \
+        --arg source_before "$(jq -er '.source_journal_sha256' "$authority")" \
+        --arg source_terminal "$source_sha" \
+        --arg rollback "$rollback_path" \
+        --arg rollback_before "$(jq -er '.rollback_journal_sha256' "$authority")" \
+        --arg rollback_terminal "$rollback_sha" \
+        --arg marker "$marker_path" --arg marker_sha "$marker_sha" \
+        --arg transaction_helper "$(jq -er '.transaction_helper_sha256' "$authority")" \
+        --arg executor "$(jq -er '.recovery_executor_sha256' "$authority")" '
+        (keys | sort) == ["authority","authority_sha256","gate","operation_id","phase",
+                          "recovery_executor_sha256","rollback_before_sha256",
+                          "rollback_commit_marker","rollback_commit_marker_sha256",
+                          "rollback_journal","rollback_terminal_sha256","schema",
+                          "source_before_sha256","source_journal","source_terminal_sha256",
+                          "transaction_helper_sha256"] and
+        .schema == 1 and .gate == "GL-a-exceptional-recovery" and
+        .phase == "committed" and .operation_id == $operation_id and
+        .authority == $authority and .authority_sha256 == $authority_sha and
+        .source_journal == $source and .source_before_sha256 == $source_before and
+        .source_terminal_sha256 == $source_terminal and
+        .rollback_journal == $rollback and .rollback_before_sha256 == $rollback_before and
+        .rollback_terminal_sha256 == $rollback_terminal and
+        .rollback_commit_marker == $marker and
+        .rollback_commit_marker_sha256 == $marker_sha and
+        .transaction_helper_sha256 == $transaction_helper and
+        .recovery_executor_sha256 == $executor
+    ' "$receipt" >/dev/null || return 1
+}
+
 validate_terminal_rollback_journal() {
     local path=$1
     local transaction_id=$2
@@ -5936,11 +6046,14 @@ validate_terminal_source_journal() {
             test ! -L "$marker_path" || return 1
         fi
     fi
+    validate_exceptional_recovery_closure "$transaction_id" || return 1
 }
 
 write_find_inventory "$FIND_JOURNAL_INVENTORY" "$BACKUP_DIR" -maxdepth 1 \
     \( -name 'transaction-*.json*' -o -name 'rollback-transaction-*.json*' \
-       -o -name 'rollback-commit-*.json*' \)
+       -o -name 'rollback-commit-*.json*' \
+       -o -name 'exceptional-recovery-authority-*.json*' \
+       -o -name 'exceptional-recovery-receipt-*.json*' \)
 while IFS= read -r -d '' existing_journal; do
     existing_basename="${existing_journal##*/}"
     case "$existing_basename" in
@@ -5960,6 +6073,17 @@ while IFS= read -r -d '' existing_journal; do
             ;;
         transaction-*.json)
             validate_terminal_source_journal "$existing_journal" || {
+                printf 'ERROR recovery_required=1 journal=%s phase=invalid\n' "$existing_journal"
+                exit 76
+            }
+            ;;
+        exceptional-recovery-authority-*.json|exceptional-recovery-receipt-*.json)
+            existing_id="${existing_basename#exceptional-recovery-authority-}"
+            if [ "$existing_id" = "$existing_basename" ]; then
+                existing_id="${existing_basename#exceptional-recovery-receipt-}"
+            fi
+            existing_id="${existing_id%.json}"
+            validate_exceptional_recovery_closure "$existing_id" || {
                 printf 'ERROR recovery_required=1 journal=%s phase=invalid\n' "$existing_journal"
                 exit 76
             }
