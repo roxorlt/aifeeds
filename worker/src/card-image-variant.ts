@@ -178,7 +178,7 @@ export async function generateCardImageVariants(
     try {
       const probe = await fetcher(source.sourceUrl, {
         method: 'HEAD',
-        redirect: 'error',
+        redirect: 'manual',
         headers: { ...sourceHeaders, Accept: 'image/*' },
       });
       if (probe.ok) sourceContentType = probe.headers.get('content-type');
@@ -200,7 +200,7 @@ export async function generateCardImageVariants(
       const response = await fetcher(source.sourceUrl, {
         // A redirect could turn a validated external URL into a self-fetch.
         // Skip that optimization and retain the original fallback instead.
-        redirect: 'error',
+        redirect: 'manual',
         headers: {
           ...sourceHeaders,
           Accept: 'image/webp',

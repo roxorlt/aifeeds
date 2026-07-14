@@ -173,6 +173,11 @@ describe('card image variant generation', () => {
     }, { fetcher });
 
     expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.map(([, init]) => init?.redirect)).toEqual([
+      'manual',
+      'manual',
+      'manual',
+    ]);
     expect(variants.map(({ width, height }) => ({ width, height }))).toEqual([
       { width: 400, height: 200 },
       { width: 800, height: 400 },
