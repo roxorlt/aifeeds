@@ -11,6 +11,8 @@
 
 历史：2026-07-11（增加香港 nginx 上游 connect/header/response 分段性能日志的版本化配置与审批后部署/轮转/回滚手册；本次未部署）
 
+历史：2026-07-14（GL-a 首次操作因生产缺少 logrotate 留在 `rollback_failed(prepared)`；本地完成 initialized-candidate 正常恢复修复和可审计 exceptional recovery，独立恢复 10/10、冻结矩阵 135/135 全绿；生产事务尚未按新 helper 对账，禁止启动新 GL-a operation）
+
 历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
 
 历史：2026-07-11（新增同源 API 的本地构建开关、版本化 nginx location 与 perf-staging/生产切换回滚手册；当前未部署）
@@ -1094,10 +1096,14 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 **VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
 
 <!-- aifeeds-performance-log:start -->
-#### 上游分段性能日志（2026-07-12，GL-a / GL-b 修订版，尚未部署）
+#### 上游分段性能日志（2026-07-14，GL-a / GL-b 修订版，生产旧事务待对账）
 
 **状态与根因**：本次提交版本化 performance log、logrotate、专用 systemd timer、三个安全检查器、
-事务安装器和本运行手册，尚未复制到 VPS 或 reload。2026-07-12 的受限只读复核确认：
+事务安装器和本运行手册。首次 GL-a operation `20260714011642-a33e7d4d` 在 production 缺少
+`/usr/sbin/logrotate` 时已进入 `mutation_started`，自动回滚又因旧 helper 不理解“已初始化但尚未发布的
+rotation-state candidate”而停在 `rollback_failed(failed_from=prepared)`。live site 仍是 base、Nginx/front/API
+健康、全局 `logrotate.timer` 未启用；在旧事务生成 committed exceptional receipt 前，installer 必须持续
+返回 `recovery_required`，不得创建新 operation。2026-07-12 的受限只读复核还确认：
 
 - 生效入口是 `/etc/nginx/sites-enabled/aifeeds.conf`，精确指向
   `/etc/nginx/sites-available/aifeeds.conf`；front/API/fonts 共 7 个直接 `proxy_pass`；
@@ -1120,6 +1126,13 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 
 VPS 上没有 `staging.ai-feeds.com` / `staging-api.ai-feeds.com` server block，它们不经过香港 VPS。
 GL-b 只能在隔离 perf-staging 拓扑形成后执行。
+
+**依赖硬门禁**：任何新 GL-a 写操作前，必须先证明 `jq` 可执行，并证明 `/usr/sbin/logrotate` 是
+非 symlink、非空、`root:root 0755` 的 regular file。依赖检查位于新 journal/backup/candidate 首次写入前；
+缺失或 metadata 不符统一以 rc 69 和
+`ERROR dependency=logrotate path=/usr/sbin/logrotate` 停止。只启用本项目的
+`aifeeds-performance-logrotate.timer`；系统全局 `logrotate.timer` 必须保持 inactive/disabled，安装依赖不得
+把它作为附带动作启用。
 
 **配置与隐私**：`deploy/nginx/aifeeds-performance-log.conf` 安装到
 `/etc/nginx/conf.d/aifeeds-performance-log.conf`，只含 http-context 合法的 `map`、`log_format` 和条件日志：
@@ -2093,6 +2106,30 @@ fsync 一个以原 transaction id 命名的可重入 rollback journal；部分 a
 尚未创建；同一窗口留下的精确 partial backup 会在任何其他写之前移入本事务 root-only audit。较晚 phase
 缺 backup、enabled-site retarget、artifact hash 漂移或未知 site hash 一律停止。终态 summary 记录 source/
 rollback journal 的最终 SHA 与 `backup_present`，重入不得把 `rolled_back` 改写为 `rollback_failed`。
+
+**可审计 exceptional recovery（仅用于已绑定旧 helper SHA 的已知缺陷）**：普通 helper 调用仍为九个
+参数，并要求当前执行器 SHA 等于 transaction journals 的 `rollback_helper_sha256`。只有 defect 精确为
+`initialized_rotation_candidate_prepublication` 时，才允许增加第十个 authority 文件。authority 必须位于
+该次 root-only staging 目录，且为 non-symlink `root:root 0600` regular file；它严格绑定 operation/G0、
+source 与 rollback journal 路径及恢复前 SHA、transaction helper SHA、当前 recovery executor SHA、
+operator、独立 rollback owner、UTC 批准时间和批准证据 SHA。transaction helper 与 executor SHA 必须不同；
+terminal journals 继续保留 transaction helper，不得把新版执行器冒充旧 helper。
+
+新版 helper 在任何 journal/runtime mutation 前完成 authority、两个 journals、live base site 和自身 SHA
+校验，并用 NOREPLACE + fsync 将原字节固化为
+`exceptional-recovery-authority-<operation>.json`。成功完成原有 cleanup plan、terminal pair 和 committed
+marker 后，再原子发布 `exceptional-recovery-receipt-<operation>.json`；receipt 绑定 authority SHA、恢复前
+source/rollback SHA、transaction/executor 双 SHA，以及终态 source、rollback、marker 三个 SHA。authority
+存在但 receipt 缺失、receipt 孤立、candidate 残留、哈希漂移或 journals 仍非终态时，installer 一律
+`recovery_required`。同一 authority 重入只能补齐 owned candidate/缺失 receipt，不能覆盖未知 final；成功
+重入的 terminal namespace 和 receipt inode/hash 均不变化。该模式不是通用 SHA 绕过，不接受其他 defect、
+未知字段、错 operation、错 SHA、symlink 或宽松 metadata。
+
+本地独立恢复契约不计入冻结的 135 场矩阵：1 个依赖预检，外加 10 个恢复场景（initialized-candidate
+普通回滚、exceptional 正向/负向/installer closure，以及 authority/receipt 各四个 publication crash
+重入）。2026-07-14 结果为 independent 10/10、matrix 135/135、skip 0。生产恢复仍需在 fresh clean G0、
+只读复核与精确命令展示后单独批准；未批准前不得上传或调用新版 exceptional helper。
+
 日志撤销先把 canonical log 以 `RENAME_NOREPLACE` 移到同目录、与 operation id 绑定的 quarantine，
 再等待所有日志 writable FD 消失且 size/mtime 连续稳定；生产等待上限为 60 秒。超时、`/proc`
 扫描权限错误或 identity 漂移都必须保留 quarantine 和 archive manifest、失败关闭；后续使用同一

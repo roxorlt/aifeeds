@@ -886,13 +886,21 @@ test('GL-a executable runbooks keep exactly 29 syntax-valid bash fences', () => 
 
 test('GL-a integration matrix derives and reports its current scenario count dynamically', () => {
   const block = installerIntegrationHarness.match(
-    /scenarios=\(\n([\s\S]*?)^\)\n\nscenario_count=/m,
+    /^scenarios=\(\n([\s\S]*?)^\)\n\nscenario_count=/m,
+  )?.[1] ?? '';
+  const independentBlock = installerIntegrationHarness.match(
+    /^independent_recovery_scenarios=\(\n([\s\S]*?)^\)/m,
   )?.[1] ?? '';
   const scenarios = block.split('\n').map((line) => line.trim()).filter(Boolean);
+  const independentScenarios = independentBlock.split('\n')
+    .map((line) => line.trim()).filter(Boolean);
   assert.equal(cJournalCleanupScenarios.length, 40, 'C journal/cleanup scenario contract drifted');
   assert.equal(scenarios.length, 135, 'update the contract deliberately when the integration matrix changes');
   assert.equal(scenarios.length - cJournalCleanupScenarios.length, 95, 'legacy matrix baseline drifted');
   assert.equal(new Set(scenarios).size, scenarios.length, 'integration scenarios must be unique');
+  assert.equal(independentScenarios.length, 10, 'independent recovery contract count drifted');
+  assert.equal(new Set(independentScenarios).size, independentScenarios.length,
+    'independent recovery contracts must be unique');
   for (const scenario of cJournalCleanupScenarios) {
     assert.ok(scenarios.includes(scenario), `integration matrix missing ${scenario}`);
   }

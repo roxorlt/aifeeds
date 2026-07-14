@@ -10,6 +10,12 @@
 引入全局请求/媒体预算并建立 list 专用 DTO；再通过主域同源 API 消除第二次 TLS。SQL、图片和地域
 路由只在新分段数据证明仍是主要段时实施，所有阶段独立灰度和回滚。
 
+> 2026-07-14 执行更新：本地动效/性能实现不再等待生产 RUM 才交付；RUM 保持为上线后的阶段观察门。
+> 首次 GL-a 因 production 缺少 logrotate 和旧 helper 的 initialized-candidate 恢复缺口停在
+> `rollback_failed(prepared)`。已在 `codex/fix-motion-system` 完成依赖前置门、正常候选恢复和可审计
+> exceptional authority/receipt 闭环；本地独立恢复 10/10、冻结 matrix 135/135、0 skip。production 旧事务
+> 尚未对账，新 exceptional 命令仍需在 clean G0 与只读复核后单独批准。
+
 **Tech Stack:** React 19、TypeScript、Vite、Cloudflare Worker/D1/R2、nginx、Web Vitals、
 Vitest、Node test、Playwright（Chromium/WebKit）/Chrome DevTools。
 

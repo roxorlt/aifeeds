@@ -161,7 +161,7 @@ Run the rollback shell tests and checker Python tests. Expected: all pass with n
 - Modify: `docs/operations.md`
 - Modify: `TODO.md`
 - Modify: `docs/plans/2026-07-10-c-end-performance-optimization-plan.md`
-- Modify: `scripts/run-aifeeds-perf-gates.sh`
+- Create: `scripts/run-aifeeds-perf-gates.sh`
 
 **Step 1: Document the dependency invariant**
 
@@ -226,4 +226,3 @@ remote write path and stop condition.
 **Step 4: Request separate production authorization**
 
 Do not execute the new exceptional recovery command until the user approves that exact reviewed command.
-
