@@ -11,6 +11,7 @@ import { selectTopForSource } from './selection';
 import type { Env } from '../index';
 import type { DigestSource } from './config';
 import type { RenderRow } from './render';
+import type { DailyVideoRow } from './daily-video';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
@@ -39,9 +40,10 @@ interface DailyPageRow {
   title: string;
   item_count: number;
   generated_at: string;
+  lastmod?: string;
 }
 
-function makeStatefulDb(opts: { rowsById?: Map<string, RenderRow>; backfillDates?: string[] } = {}) {
+function makeStatefulDb(opts: { rowsById?: Map<string, RenderRow>; backfillDates?: string[]; video?: DailyVideoRow | null } = {}) {
   const rowsById = opts.rowsById ?? new Map<string, RenderRow>();
   const dailyPages = new Map<string, DailyPageRow>();
   const insertRuns: Array<{ date: string }> = [];
@@ -67,6 +69,7 @@ function makeStatefulDb(opts: { rowsById?: Map<string, RenderRow>; backfillDates
         },
         async first<T>() {
           if (/_subject/.test(sql)) return null as T | null; // 触发 fallback subject
+          if (/FROM daily_videos/i.test(sql)) return (opts.video ?? null) as T | null;
           if (/daily_pages/i.test(sql)) {
             const target = String(binds[0]);
             const dates = [...dailyPages.keys()].sort();
@@ -83,8 +86,8 @@ function makeStatefulDb(opts: { rowsById?: Map<string, RenderRow>; backfillDates
         },
         async run() {
           if (/INSERT INTO daily_pages/i.test(sql)) {
-            const [date, title, item_count, generated_at] = binds as [string, string, number, string];
-            dailyPages.set(date, { date, title, item_count, generated_at });
+            const [date, title, item_count, generated_at, lastmod] = binds as [string, string, number, string, string?];
+            dailyPages.set(date, { date, title, item_count, generated_at, lastmod });
             insertRuns.push({ date });
           }
           return { success: true };
@@ -146,11 +149,35 @@ describe('generateDailyPage', () => {
     expect(r2.store.has('daily/2026-07-04.html')).toBe(true);
     expect(db._dailyPages.get('2026-07-04')?.item_count).toBe(1);
     expect(db._dailyPages.get('2026-07-04')?.title).toContain('AI 日报 2026-07-04');
+    expect(db._dailyPages.get('2026-07-04')?.lastmod).toBe(db._dailyPages.get('2026-07-04')?.generated_at);
 
     // 二次调用同日期:UPSERT 覆盖,不新增行
     await generateDailyPage(env, '2026-07-04');
     expect(db._dailyPages.size).toBe(1);
     expect(db._insertRuns.filter((r) => r.date === '2026-07-04').length).toBe(2); // 两次 UPSERT
+  });
+
+  test('future page generation loads daily_videos and renders the native player + VideoObject', async () => {
+    setSelection({ x: ['x_list:1'] });
+    const rowsById = new Map([['x_list:1', mkRow('x_list:1', 1)]]);
+    const video: DailyVideoRow = {
+      date: '2026-07-04', title: '视频标题', description: '视频描述', duration_seconds: 61,
+      mp4_key: 'daily-video/2026-07-04/a.mp4', mp4_sha256: 'a', mp4_size: 10,
+      poster_key: 'daily-video/2026-07-04/b.jpg', poster_sha256: 'b', poster_size: 10,
+      vtt_key: 'daily-video/2026-07-04/c.vtt', vtt_sha256: 'c', vtt_size: 10,
+      uploaded_at: '2026-07-04T02:03:04.000Z', updated_at: '2026-07-04T02:03:04.000Z',
+    };
+    const db = makeStatefulDb({ rowsById, video });
+    const r2 = makeR2();
+
+    await generateDailyPage(makeEnv(db, r2), '2026-07-04');
+    const html = r2.store.get('daily/2026-07-04.html')!;
+    expect(html).toContain('<video controls playsinline preload="metadata"');
+    expect(html).toContain(`${API}/r/${video.mp4_key}`);
+    const ld = JSON.parse(html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)![1]);
+    expect(ld['@graph'].find((node: any) => node['@type'] === 'VideoObject')).toMatchObject({
+      name: '视频标题', duration: 'PT1M1S',
+    });
   });
 
   test('存在前日 → 前日页面被重渲染,其 HTML 含指向本日的链接', async () => {

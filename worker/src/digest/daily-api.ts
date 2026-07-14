@@ -20,7 +20,7 @@ import {
 } from './config';
 import { selectTopForSource, excludeStalePushes } from './selection';
 import { curateSource } from './llm-curate';
-import { fetchCandidates } from './node-run';
+import { fetchCandidates } from './pool-rebuild';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { bjtDateStr, getBases } from './lib';
 import { SOURCE_LABELS } from './templates';

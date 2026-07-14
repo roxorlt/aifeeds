@@ -7,10 +7,16 @@ vi.mock('./selection', () => ({
 
 import {
   buildDailyPageData,
+  DAILY_VIDEO_JSON_LD_END,
+  DAILY_VIDEO_JSON_LD_START,
+  DAILY_VIDEO_PLAYER_END,
+  DAILY_VIDEO_PLAYER_START,
+  patchDailyPageVideoHtml,
   renderDailyPageHtml,
   type DailyPageData,
   type DailyPageSection,
 } from './daily-page';
+import type { DailyVideoRow } from './daily-video';
 import { selectTopForSource } from './selection';
 import type { Env } from '../index';
 import { DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
@@ -51,6 +57,27 @@ function mkData(over: Partial<DailyPageData> = {}): DailyPageData {
     sections: [{ source: 'x', label: '动态', items: [mkItem()] }],
     prevDate: null,
     nextDate: null,
+    ...over,
+  };
+}
+
+function mkVideo(over: Partial<DailyVideoRow> = {}): DailyVideoRow {
+  return {
+    date: '2026-07-06',
+    title: 'AI 日报视频 & 今日精选',
+    description: '视频描述 <含重点>',
+    duration_seconds: 125.25,
+    mp4_key: 'daily-video/2026-07-06/video.mp4',
+    mp4_sha256: 'video',
+    mp4_size: 100,
+    poster_key: 'daily-video/2026-07-06/poster.jpg',
+    poster_sha256: 'poster',
+    poster_size: 20,
+    vtt_key: 'daily-video/2026-07-06/captions.vtt',
+    vtt_sha256: 'captions',
+    vtt_size: 10,
+    uploaded_at: '2026-07-06T01:02:03.000Z',
+    updated_at: '2026-07-06T01:02:03.000Z',
     ...over,
   };
 }
@@ -460,6 +487,74 @@ describe('renderDailyPageHtml', () => {
     );
     expect(html).toContain('<p class="summary">一句话新闻摘要。</p>');
     expect(html).toContain('<p class="summary-full">完全不同的图文扩展简介正文，与一句话摘要并非同一字段来源。</p>');
+  });
+});
+
+describe('daily video native rendering and historical marker patch', () => {
+  test('future render puts a native player before article sections and appends complete VideoObject', () => {
+    const video = mkVideo();
+    const html = renderDailyPageHtml(mkData(), envFixture(), video);
+    const playerAt = html.indexOf('class="daily-video"');
+    const firstArticleSectionAt = html.indexOf('<section><h2>');
+    expect(playerAt).toBeGreaterThan(0);
+    expect(playerAt).toBeLessThan(firstArticleSectionAt);
+    expect(html).toContain('<video controls playsinline preload="metadata"');
+    expect(html).toContain(`poster="${API}/r/${video.poster_key}"`);
+    expect(html).toContain(`<source src="${API}/r/${video.mp4_key}" type="video/mp4">`);
+    expect(html).toContain(`<track kind="captions" src="${API}/r/${video.vtt_key}" srclang="zh-CN" label="中文" default>`);
+
+    const ld = extractJsonLd(html);
+    const graph = ld['@graph'] as any[];
+    expect(graph.find((node) => node['@type'] === 'CollectionPage')).toBeTruthy();
+    expect(graph.find((node) => node['@type'] === 'VideoObject')).toEqual({
+      '@type': 'VideoObject',
+      '@id': `${SITE}/daily/2026-07-06#video`,
+      name: video.title,
+      description: video.description,
+      thumbnailUrl: `${API}/r/${video.poster_key}`,
+      uploadDate: '2026-07-06T08:00:00+08:00',
+      duration: 'PT2M5.25S',
+      contentUrl: `${API}/r/${video.mp4_key}`,
+    });
+  });
+
+  test('historical patch is byte-stable outside markers and idempotent', () => {
+    const original = renderDailyPageHtml(mkData(), envFixture());
+    const video = mkVideo();
+    const patched = patchDailyPageVideoHtml(original, video, envFixture());
+    const patchedAgain = patchDailyPageVideoHtml(patched, video, envFixture());
+    expect(patchedAgain).toBe(patched);
+    expect(patched.match(new RegExp(DAILY_VIDEO_PLAYER_START, 'g'))).toHaveLength(1);
+    expect(patched.match(new RegExp(DAILY_VIDEO_JSON_LD_START, 'g'))).toHaveLength(1);
+
+    const originalScript = original.match(/<script type="application\/ld\+json">[\s\S]*?<\/script>/)![0];
+    const restored = patched
+      .replace(`${DAILY_VIDEO_PLAYER_START}${patched.split(DAILY_VIDEO_PLAYER_START)[1].split(DAILY_VIDEO_PLAYER_END)[0]}${DAILY_VIDEO_PLAYER_END}`, '')
+      .replace(
+        `${DAILY_VIDEO_JSON_LD_START}${patched.split(DAILY_VIDEO_JSON_LD_START)[1].split(DAILY_VIDEO_JSON_LD_END)[0]}${DAILY_VIDEO_JSON_LD_END}`,
+        originalScript,
+      );
+    expect(restored).toBe(original);
+  });
+
+  test('patch converts a legacy single JSON-LD object to @graph without changing its semantics', () => {
+    const legacyNode = {
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      name: '历史日报',
+      mainEntity: { '@type': 'ItemList', numberOfItems: 7 },
+    };
+    const html = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify(legacyNode)}</script></head><body><main><p>历史正文</p></main></body></html>`;
+    const patched = patchDailyPageVideoHtml(html, mkVideo(), envFixture());
+    const ld = extractJsonLd(patched);
+    expect(ld['@context']).toBe('https://schema.org');
+    expect(ld['@graph'][0]).toEqual({
+      '@type': 'CollectionPage',
+      name: '历史日报',
+      mainEntity: { '@type': 'ItemList', numberOfItems: 7 },
+    });
+    expect(ld['@graph'][1]['@type']).toBe('VideoObject');
+    expect(patched).toContain('<p>历史正文</p>');
   });
 });
 

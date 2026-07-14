@@ -393,6 +393,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   }
 
   const nowIso = new Date().toISOString();
+  const nowUnix = Math.floor(Date.now() / 1000);
   const today = bjtDateStr();
   const stmts: D1PreparedStatement[] = [];
 
@@ -404,8 +405,8 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
       sponsor: r.sponsor,
       contributors_inline: r.contributorsInline,
       trending_date_str: today,
-      first_trending_at: Math.floor(Date.now() / 1000),
-      last_seen_on_trending_at: Math.floor(Date.now() / 1000),
+      first_trending_at: nowUnix,
+      last_seen_on_trending_at: nowUnix,
     };
     const metrics = {
       stars: r.totalStars,
@@ -442,7 +443,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
         JSON.stringify(metrics),
         nowIso,
         JSON.stringify(extra),
-        Math.floor(Date.now() / 1000),
+        nowUnix,
         today,
       ),
     );
@@ -454,7 +455,7 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
-        Math.floor(Date.now() / 1000),
+        nowUnix,
         today,
         r.totalStars,
         r.todayStars,
@@ -464,10 +465,9 @@ export async function runGithubFetchTrending(env: GithubEnv): Promise<{
   }
 
   try {
-    const results = await env.DB.batch(stmts);
-    for (const res of results) {
-      if (res.meta?.changes && res.meta.changes > 0) counts.inserted++;
-    }
+    await env.DB.batch(stmts);
+    counts.inserted = allRepoIds.length - existingIds.size;
+    counts.updated_seen = existingIds.size;
   } catch (e) {
     console.error("[github-fetch] D1 batch error:", e);
     counts.errors++;
@@ -1606,12 +1606,36 @@ export async function classifyGithubItemWithLlm(
 
   const llm = await callLlm(env, trending);
 
+  // null 表示缺 key、HTTP/网络失败、空响应或 JSON 不合法，绝不能等同 is_ai=0。
+  // 抛错让 Workflow step 的 retry 生效；失败标记保留在 D1，下一小时 source drain
+  // 会以新 instance id 自动重试，而不是留下“Workflow Completed / D1 NULL”的假成功。
+  if (llm.is_ai !== 0 && llm.is_ai !== 1) {
+    await env.DB.prepare(
+      `UPDATE items
+          SET extra = json_set(
+            coalesce(extra, '{}'),
+            '$.classification_failed_at', ?,
+            '$.classification_failure_count',
+              COALESCE(CAST(json_extract(extra, '$.classification_failure_count') AS INTEGER), 0) + 1,
+            '$.classification_failure_reason', ?
+          )
+        WHERE id = ?`,
+    ).bind(
+      new Date().toISOString(),
+      'llm_result_missing_or_invalid',
+      itemId,
+    ).run();
+    throw new Error(`github classification unresolved: ${itemId}`);
+  }
+
   // 读当前 extra 做 merge（其他字段保持不变）
   const row = await env.DB.prepare(
     `SELECT extra FROM items WHERE id = ?`,
   ).bind(itemId).first<{ extra: string | null }>();
   if (!row) throw new Error(`gh-workflow: item disappeared ${itemId}`);
-  const extra = row.extra ? JSON.parse(row.extra) : {};
+  const extra = (row.extra ? JSON.parse(row.extra) : {}) as Record<string, unknown>;
+  delete extra.classification_failed_at;
+  delete extra.classification_failure_reason;
 
   const newExtra = {
     ...extra,

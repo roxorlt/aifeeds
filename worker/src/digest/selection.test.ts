@@ -1,5 +1,4 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
+import { assert, test } from 'vitest';
 
 import {
   applyNewsEditorialReviewDecisions,
@@ -7,8 +6,43 @@ import {
   foldNewsEventsForDigest,
   scoreNewsCandidatesForDigest,
   suppressCrossDayRepeatedNewsEvents,
+  selectTopForSource,
   type NewsCandidateForScoring,
 } from './selection';
+
+test('selectTopForSource uses GitHub current-trending time with asOfDate instead of stale scraped_at alone', async () => {
+  let sql = '';
+  let binds: unknown[] = [];
+  const db = {
+    prepare(nextSql: string) {
+      sql = nextSql;
+      const statement = {
+        bind(...nextBinds: unknown[]) {
+          binds = nextBinds;
+          return statement;
+        },
+        async all<T>() {
+          return { results: [] as T[] };
+        },
+      };
+      return statement;
+    },
+  };
+
+  await selectTopForSource(
+    { DB: db } as never,
+    'gh',
+    20,
+    { asOfDate: '2026-07-14' },
+  );
+
+  assert.match(sql, /last_seen_on_trending_at/);
+  assert.match(sql, /trending_date_str/);
+  assert.match(sql, /scraped_at/);
+  assert.match(sql, /unixepoch/);
+  assert.match(sql, /< datetime\(\?\)/);
+  assert.deepEqual(binds, ['github', '2026-07-14', '2026-07-14', 20]);
+});
 
 const nowMs = Date.parse('2026-06-25T00:34:56.000Z');
 

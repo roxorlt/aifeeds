@@ -8,6 +8,7 @@
 import type { Env } from '../index';
 import { buildDailyPageData, renderDailyPageHtml, type DailyPageData } from './daily-page';
 import { getBases, bjtDateStr } from './lib';
+import { loadDailyVideo } from './daily-video';
 
 const INDEXNOW_ENDPOINT = 'https://api.indexnow.org/indexnow';
 
@@ -30,17 +31,20 @@ function countItems(data: DailyPageData): number {
 // R2 快照 + D1 索引 UPSERT(幂等:同 date 覆盖同一 key / 同一行)。
 async function persistPage(env: Env, data: DailyPageData): Promise<number> {
   const itemCount = countItems(data);
-  const html = renderDailyPageHtml(data, env);
+  const video = await loadDailyVideo(env, data.date);
+  const html = renderDailyPageHtml(data, env, video);
   await env.READMES!.put(`daily/${data.date}.html`, html, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },
   });
+  const now = new Date().toISOString();
   await env.DB.prepare(
-    `INSERT INTO daily_pages (date, title, item_count, generated_at)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO daily_pages (date, title, item_count, generated_at, lastmod)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(date) DO UPDATE SET
-       title = excluded.title, item_count = excluded.item_count, generated_at = excluded.generated_at`,
+       title = excluded.title, item_count = excluded.item_count,
+       generated_at = excluded.generated_at, lastmod = excluded.lastmod`,
   )
-    .bind(data.date, pageTitle(data.date, data.subject), itemCount, new Date().toISOString())
+    .bind(data.date, pageTitle(data.date, data.subject), itemCount, now, now)
     .run();
   return itemCount;
 }
