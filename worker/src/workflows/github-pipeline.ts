@@ -45,8 +45,14 @@ export class GithubPipelineWorkflow extends WorkflowEntrypoint<Env, GithubPipeli
       return await classifyGithubItemWithLlm(this.env, itemId, meta);
     });
 
+    // classifyGithubItemWithLlm 对 null 会抛错触发 step retry；这里再做防御，避免未来
+    // helper 契约回归时把“未知”误当成“不相关”并让 Workflow 假成功。
+    if (llm.is_relevant !== 0 && llm.is_relevant !== 1) {
+      throw new Error(`github classification unresolved after quality gate: ${itemId}`);
+    }
+
     // is_relevant=0 早退，省 step 3-5
-    if (llm.is_relevant !== 1) {
+    if (llm.is_relevant === 0) {
       // 改判/不相关 → 下架 item 页（无行则 no-op；非阻塞）。
       await step.do('sync-item-page-gone', RETRY, () =>
         syncItemPageOnEnrichDone(this.env, itemId, false),

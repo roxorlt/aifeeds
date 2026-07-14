@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { runGithubFetchTrending } from './github';
+import { classifyGithubItemWithLlm, runGithubFetchTrending } from './github';
 
 const TRENDING_HTML = `
   <article class="Box-row">
@@ -60,5 +60,100 @@ describe('runGithubFetchTrending re-trending', () => {
     expect(upsert?.sql).not.toMatch(/scraped_at\s*=\s*excluded\.scraped_at/);
     expect(upsert?.binds.at(-2)).toBe(1_784_005_200);
     expect(result).toMatchObject({ parsed: 1, inserted: 0, updated_seen: 1, errors: 0 });
+  });
+});
+
+describe('GitHub workflow classification quality gate', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test('invalid/null LLM result is recorded and thrown so Workflow retries instead of treating it as irrelevant', async () => {
+    const writes: Array<{ sql: string; binds: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        let binds: unknown[] = [];
+        const statement = {
+          bind(...args: unknown[]) {
+            binds = args;
+            return statement;
+          },
+          async first<T>() {
+            if (/SELECT extra FROM items/i.test(sql)) return { extra: '{}' } as T;
+            return null as T | null;
+          },
+          async run() {
+            writes.push({ sql, binds: [...binds] });
+            return { success: true };
+          },
+        };
+        return statement;
+      },
+    };
+
+    await expect(classifyGithubItemWithLlm(
+      { DB: db as unknown as D1Database },
+      'github:owner/repo',
+      {
+        ownerRepo: 'owner/repo', owner: 'owner', repo: 'repo',
+        description: 'AI repo', language: 'TypeScript', totalStars: 100,
+        todayStars: 10, readme: '# repo', defaultBranch: 'main',
+      },
+    )).rejects.toThrow(/classification unresolved/);
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0].sql).toContain('classification_failed_at');
+    expect(writes[0].sql).toContain('classification_failure_count');
+    expect(writes[0].sql).not.toContain('SET is_relevant');
+  });
+
+  test('a valid retry persists the classification and clears transient failure markers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      choices: [{ message: { content: JSON.stringify({
+        is_ai: 1,
+        ai_category: 'tool',
+        ai_summary: '面向 AI 开发者的工具。',
+      }) } }],
+    })));
+    const writes: Array<{ sql: string; binds: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        let binds: unknown[] = [];
+        const statement = {
+          bind(...args: unknown[]) { binds = args; return statement; },
+          async first<T>() {
+            return {
+              extra: JSON.stringify({
+                gh_pending: true,
+                classification_failed_at: '2026-07-14T00:00:00.000Z',
+                classification_failure_reason: 'llm_result_missing_or_invalid',
+                classification_failure_count: 2,
+              }),
+            } as T;
+          },
+          async run() { writes.push({ sql, binds: [...binds] }); return { success: true }; },
+        };
+        return statement;
+      },
+    };
+
+    const result = await classifyGithubItemWithLlm(
+      { DB: db as unknown as D1Database, DEEPSEEK_API_KEY: 'test-key' },
+      'github:owner/repo',
+      {
+        ownerRepo: 'owner/repo', owner: 'owner', repo: 'repo',
+        description: 'AI repo', language: 'TypeScript', totalStars: 100,
+        todayStars: 10, readme: '# repo', defaultBranch: 'main',
+      },
+    );
+
+    expect(result).toEqual({ is_relevant: 1 });
+    expect(writes).toHaveLength(1);
+    expect(writes[0].binds[0]).toBe(1);
+    const savedExtra = JSON.parse(String(writes[0].binds[1]));
+    expect(savedExtra.gh_pending).toBe(false);
+    expect(savedExtra.classification_failed_at).toBeUndefined();
+    expect(savedExtra.classification_failure_reason).toBeUndefined();
+    expect(savedExtra.classification_failure_count).toBe(2);
   });
 });
