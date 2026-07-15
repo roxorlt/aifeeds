@@ -263,6 +263,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     const { env } = makeEnv([...siblings, target]);
     await migrateMediaForBlog(env, 'blog:small:new', {
       migrateCover: async () => '/r/blog/pic.jpg',
+      generateCoverVariants: async () => [],
     });
     expect(target.extra.cover_image).toBe('/r/blog/pic.jpg');
     expect(target.extra.cover_generic_cleared_hash).toBeUndefined();
