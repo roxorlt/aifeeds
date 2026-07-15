@@ -40,6 +40,8 @@ import {
   isNoCoverSource,
   noCoverSourcesSqlExclusion,
 } from "./cover-heuristics";
+import { isTheVergeAuthorProfileImage } from "./editorial-image";
+import { cleanBlogEditorialImages } from "./blog-editorial-image-cleanup";
 
 const R2_PREFIX_BLOG = "blog";
 const R2_PREFIX_PODCAST = "podcast";
@@ -421,6 +423,10 @@ export async function migrateMediaForBlog(
 
   const extra: BlogExtra = row.extra_raw ? JSON.parse(row.extra_raw) : {};
   if (extra.blog_media_r2_at) return { migrated: 0, marker }; // 已迁过早退（幂等）
+  // 部署切换瞬间可能已有「已抓正文、尚未跑 step4」的旧格式 item。迁 R2 前再做一次同源
+  // 强规则清理，避免头像先被内容寻址成 /r/hash、随后又被 body hero 回退选成封面。
+  const editorialCleanup = cleanBlogEditorialImages(extra);
+  const bodyForMigration = editorialCleanup.patch.body || extra.body;
 
   const nowIso = new Date().toISOString();
   const mapping = new Map<string, string>(); // 原始 URL → /r/key
@@ -444,9 +450,14 @@ export async function migrateMediaForBlog(
   let newCover: string | undefined;
   let coverRejected = false;
   let coverKeywordBlocked = false;
+  let coverEditorialBlocked = false;
   const cover = (extra.cover_image || "").trim();
   if (noCoverSrc) {
     // Fix B：源级 no-cover，跳过全部封面采用（护栏 / 正文回落一并跳过；落库统一清空）。
+  } else if (cover && isTheVergeAuthorProfileImage(cover)) {
+    // The Verge 会把 BLURPLE / chorus author_profile 署名头像暴露为正文或 RSS/OG 图。
+    // 必须在迁 R2 前拦截；一旦内容寻址为 /r/hash，URL 语义永久丢失。
+    coverEditorialBlocked = true;
   } else if (cover && !isAlreadyMigrated(cover)) {
     let coverBlocked = false;
     if (COVER_BLACKLIST.test(cover)) {
@@ -486,7 +497,7 @@ export async function migrateMediaForBlog(
   // ── 2. 正文 inline 资产（图过质量门控；直链视频仅过 size cap）──
   //   ⚠️ 顺序（Fix 1，2026-07-06）：正文 assets 迁 R2 必须排在下方「采用护栏」**之前**——
   //   护栏命中要就地从已迁 R2 的 body.assets 选正文 hero 回落，故先拿到各 asset 的 r2_url。
-  const assets: FeedBodyAsset[] = extra.body?.assets ? [...extra.body.assets] : [];
+  const assets: FeedBodyAsset[] = bodyForMigration?.assets ? [...bodyForMigration.assets] : [];
   const newAssets: FeedBodyAsset[] = [];
   for (const a of assets) {
     const next: FeedBodyAsset = { ...a };
@@ -535,7 +546,7 @@ export async function migrateMediaForBlog(
         pickBodyHeroCover({ body: { assets: newAssets } }, guardedHash) ||
         undefined;
     }
-  } else if (coverKeywordBlocked) {
+  } else if (coverKeywordBlocked || coverEditorialBlocked) {
     // 层 0 关键词命中：og 已不采，比照统计护栏就地从已迁 R2 的正文 assets 回落合格 hero
     // （qbitai 正文有真配图 → 采用；jiqizhixin 类图荒 → 空走 monogram）。无 clearedHash：
     // pickBodyHeroCover 内部黑名单已排除 logo/qrcode 类 asset，不需额外 hash 排除。
@@ -552,7 +563,8 @@ export async function migrateMediaForBlog(
 
   // ── 4. 正文 markdown 内嵌 URL 改写 ──
   const oldMd = extra.body_markdown || "";
-  const newMd = mapping.size ? rewriteMarkdownUrls(oldMd, mapping) : oldMd;
+  const cleanMd = editorialCleanup.patch.body_markdown ?? oldMd;
+  const newMd = mapping.size ? rewriteMarkdownUrls(cleanMd, mapping) : cleanMd;
 
   // ── 5. 落库（json_set 只改自己字段，防擦并行 enrich）──
   const patches: ExtraPatch[] = [{ path: "$.blog_media_r2_at", value: nowIso }];
@@ -578,7 +590,7 @@ export async function migrateMediaForBlog(
     }
     patches.push({ path: "$.cover_generic_cleared_hash", value: guardedHash });
     patches.push({ path: "$.cover_brandlogo_guarded_at", value: nowIso });
-  } else if (coverKeywordBlocked) {
+  } else if (coverKeywordBlocked || coverEditorialBlocked) {
     // 层 0 关键词命中：og 不采（也未迁 R2，无 R2 hash 可记）。就地正文 hero → 采用；
     // 否则空走 monogram。记 cover_keyword_blacklisted_at marker 供观测。
     if (bodyHeroCover) {
@@ -588,18 +600,36 @@ export async function migrateMediaForBlog(
     } else {
       patches.push({ path: "$.cover_image", value: "" });
     }
-    patches.push({ path: "$.cover_keyword_blacklisted_at", value: nowIso });
+    patches.push({
+      path: coverEditorialBlocked
+        ? "$.editorial_image_cover_blocked_at"
+        : "$.cover_keyword_blacklisted_at",
+      value: nowIso,
+    });
   } else if (coverRejected) {
     // 空串 = 渲染层 falsy 处理（等价无封面）；不保留外链，避免日报/卡片挂图。
     patches.push({ path: "$.cover_image", value: "" });
     patches.push({ path: "$.cover_rejected_at", value: nowIso });
   }
-  if (extra.body && assets.length) {
-    const newBody = { ...extra.body, assets: newAssets };
+  if (bodyForMigration && (assets.length || editorialCleanup.patch.body)) {
+    const newBody = { ...bodyForMigration, assets: newAssets };
     patches.push({ path: "$.body", value: JSON.stringify(newBody), json: true });
   }
   if (newMd !== oldMd) {
     patches.push({ path: "$.body_markdown", value: newMd });
+  }
+  if (editorialCleanup.patch.body_markdown_zh !== undefined) {
+    patches.push({
+      path: "$.body_markdown_zh",
+      value: editorialCleanup.patch.body_markdown_zh,
+    });
+  }
+  if (editorialCleanup.patch.editorial_image_blocked_urls !== undefined) {
+    patches.push({
+      path: "$.editorial_image_blocked_urls",
+      value: JSON.stringify(editorialCleanup.patch.editorial_image_blocked_urls),
+      json: true,
+    });
   }
   if (logoChanged && publisher) {
     patches.push({
