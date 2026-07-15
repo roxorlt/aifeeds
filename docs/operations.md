@@ -13,6 +13,8 @@
 
 历史：2026-07-14（GL-a 首次操作因生产缺少 logrotate 留在 `rollback_failed(prepared)`；本地完成 initialized-candidate 正常恢复修复和可审计 exceptional recovery，独立恢复 10/10、冻结矩阵 135/135 全绿；生产事务尚未按新 helper 对账，禁止启动新 GL-a operation）
 
+历史：2026-07-15（旧 GL-a 已完成 exceptional recovery 并终态对账；新 operation `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 会把三个 upstream timing 序列化为空串后自动回滚。source/rollback 均为 `rolled_back`、14/14 runtime cleanup 完成、site 恢复原 SHA、运行时残留为 0。validator 现仅在缓存 HIT/STALE/UPDATING/REVALIDATED 分支接受数字、`-` 或空串；非缓存与 API 仍必须为数字。再次执行须重新 clean G0、冻结新清单并单独批准）
+
 历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
 
 历史：2026-07-11（新增同源 API 的本地构建开关、版本化 nginx location 与 perf-staging/生产切换回滚手册；当前未部署）
@@ -1103,7 +1105,7 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 **VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
 
 <!-- aifeeds-performance-log:start -->
-#### 上游分段性能日志（2026-07-14，GL-a / GL-b 修订版，生产旧事务待对账）
+#### 上游分段性能日志（2026-07-15，GL-a / GL-b 修订版，最近一次生产尝试已自动回滚）
 
 **状态与根因**：本次提交版本化 performance log、logrotate、专用 systemd timer、三个安全检查器、
 事务安装器和本运行手册。首次 GL-a operation `20260714011642-a33e7d4d` 在 production 缺少
@@ -1120,6 +1122,13 @@ rotation-state candidate”而停在 `rollback_failed(failed_from=prepared)`。l
   当前未发布分支，不能要求 GL 在 Worker 部署前完成响应头 join；
 - VPS 20 GB 磁盘剩余约 11.8 GB；现有 access log 自 2026-06-02 起累计约 190 MB/73 万行；
   `logrotate.timer` 未启用、cron 未运行且没有 logrotate 状态文件，单放一份 logrotate 配置不会自动执行。
+
+2026-07-15 已用 exceptional authority/receipt 完成旧事务终态对账。后续 operation
+`20260715165904-2d2f27fe` 完成 site 精确七行变更、三次 front/API 200 probe 与 JSON schema 写入，但生产
+`upstream_cache_status=HIT` 的 front 行把 `upstream_connect_time`、`upstream_header_time`、
+`upstream_response_time` 记录为 `""`，而旧 validator 只接受数字或 `"-"`，因此安全触发自动回滚。
+终态 source/rollback 均为 `rolled_back`，14/14 runtime cleanup 完成，site、nginx 与 timer 均恢复，运行时和
+candidate 残留为 0。修订后的 validator 只在缓存命中类状态接受空串；非缓存 front 和 API 仍要求数字 timing。
 
 因此 Task 3 被拆成两个可证明的 gate：
 

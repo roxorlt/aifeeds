@@ -15,6 +15,12 @@
 > `rollback_failed(prepared)`。已在 `codex/fix-motion-system` 完成依赖前置门、正常候选恢复和可审计
 > exceptional authority/receipt 闭环；本地独立恢复 10/10、冻结 matrix 135/135、0 skip。production 旧事务
 > 尚未对账，新 exceptional 命令仍需在 clean G0 与只读复核后单独批准。
+>
+> 2026-07-15 执行更新：旧事务已 exceptional recovery 并终态对账。新 operation
+> `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 的三个 upstream timing 实际为 `""`、旧 validator
+> 只接受数字/`"-"` 后自动回滚；source/rollback 均为 `rolled_back`，14/14 cleanup 完成，site 恢复原 SHA，
+> runtime/candidate 残留为 0。修复仅允许缓存命中类 front timing 使用空串，非缓存与 API 继续要求数字；
+> 再次生产执行必须重跑 clean G0、生成新清单并单独批准。
 
 **Tech Stack:** React 19、TypeScript、Vite、Cloudflare Worker/D1/R2、nginx、Web Vitals、
 Vitest、Node test、Playwright（Chromium/WebKit）/Chrome DevTools。

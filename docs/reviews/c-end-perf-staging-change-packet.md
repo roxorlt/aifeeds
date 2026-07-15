@@ -355,6 +355,18 @@ before/target，tmp/prepared 或第三种 SHA 全部失败关闭。
 成功 rename 后还要 `fsync` destination parent directory 才是 durable publish。人工回滚只消费完整 bundle，
 绝不消费两个独立路径或只凭 transcript substring 判断 automatic terminal。
 
+### 3.1.2 2026-07-15 缓存 HIT timing 契约回滚
+
+获批 operation `20260715165904-2d2f27fe` 完成精确七行 site 变更与三轮 front/API 200 probe，但 production
+缓存 HIT 的 front JSON 行把三个 `upstream_*_time` 字段序列化为 `""`；旧 `probe_is_valid` 只允许数字或
+`"-"`，三轮均在该字段谓词失败并自动回滚。归档行的 host、route bucket、status、request-id 形状与 API
+数字 timing 均合法。回滚后 source/rollback 均为 `rolled_back`，14/14 runtime cleanup complete，原 site SHA、
+nginx active、timer inactive/disabled，runtime/candidate residue 为 0。
+
+修订契约只在 `HIT/STALE/UPDATING/REVALIDATED` 分支接受数字、`"-"` 或 `""`；非缓存 front 与 API 仍必须
+满足数字 timing 正则。新代码必须以生产形状的 jq 回归测试完成 red/green、重跑完整 G0 并生成新的
+operation/manifest/exact-command SHA；本次审批不得复用。
+
 GL-a 不授权 Pages、DNS、证书、staging Worker/D1/R2 或业务 rollout；GL-b 不产生远端写入，也不授权
 G8 测试账号写入。
 GL-a 最终审批还必须绑定低流量窗口、执行人、rollback owner 和 `rollback_failed` on-call 升级联系人；

@@ -6272,7 +6272,7 @@ probe_is_valid() {
         def timing_shape:
             type == "string" and test("^[0-9]+([.][0-9]+)?((, ?| ?: ?)[0-9]+([.][0-9]+)?)*$");
         def timing_or_cached_dash:
-            timing_shape or . == "-";
+            timing_shape or . == "-" or . == "";
         def exact_keys:
             (keys | sort) == (["bytes_sent", "client_class", "host", "perf_probe", "request_id",
               "request_time", "status", "timestamp", "upstream_cache_status",

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   closeSync,
   existsSync,
@@ -92,6 +92,9 @@ const quiescencePython = installer.match(
 const rollbackQuiescencePython = rollbackScript.match(
   /wait_for_writable_inode_quiescent\(\) \{[\s\S]*?<<'PY'\n([\s\S]*?)\nPY\n\}/,
 )?.[1] ?? '';
+const probeValidationFilter = installer.match(
+  /tail -n 2000 "\$LOG" \| jq -s -e --arg probe "\$expected_probe" '([\s\S]*?)' >\/dev\/null/,
+)?.[1] ?? '';
 
 function runQuiescence(path, timeoutSeconds) {
   const { dev, ino } = statSync(path);
@@ -150,6 +153,34 @@ function clientClassFor(userAgent) {
     if (defaultRule) fallback = defaultRule[1];
   }
   return fallback;
+}
+
+function probeRow(overrides = {}) {
+  return {
+    bytes_sent: '128',
+    client_class: 'other',
+    host: 'ai-feeds.com',
+    perf_probe: 'upstream-1773566418-a1b2c3d4',
+    request_id: '0123456789abcdef0123456789abcdef',
+    request_time: '0.000',
+    status: '200',
+    timestamp: '2026-07-15T09:20:18+00:00',
+    upstream_cache_status: 'HIT',
+    upstream_connect_time: '',
+    upstream_header_time: '',
+    upstream_response_time: '',
+    uri: '/',
+    ...overrides,
+  };
+}
+
+function validateProbeRows(rows) {
+  assert.ok(probeValidationFilter, 'installer probe jq filter must be extractable');
+  return spawnSync(
+    'jq',
+    ['-s', '-e', '--arg', 'probe', rows[0].perf_probe, probeValidationFilter],
+    { input: `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, encoding: 'utf8' },
+  );
 }
 
 test('performance log is a host-scoped http-context JSON include', () => {
@@ -223,6 +254,26 @@ test('client classification never persists attacker-controlled user-agent text',
   assert.equal(clientClassFor('Mozilla/5.0 (Linux; Android 15; Pixel 9)'), 'android');
   assert.equal(clientClassFor('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'), 'desktop');
   assert.equal(clientClassFor('alice@example.com private-token'), 'other');
+});
+
+test('probe validator accepts empty upstream timings only for cached front responses', () => {
+  const apiRow = probeRow({
+    host: 'api.ai-feeds.com',
+    uri: '/api/items',
+    upstream_cache_status: '',
+    upstream_connect_time: '0.007',
+    upstream_header_time: '0.253',
+    upstream_response_time: '0.253',
+  });
+
+  const cached = validateProbeRows([probeRow(), apiRow]);
+  assert.equal(cached.status, 0, cached.stderr);
+
+  const uncached = validateProbeRows([
+    probeRow({ upstream_cache_status: '' }),
+    apiRow,
+  ]);
+  assert.notEqual(uncached.status, 0, 'uncached empty upstream timings must remain invalid');
 });
 
 test('runbook scopes installation to aifeeds sites and documents safe join and staging limits', () => {
