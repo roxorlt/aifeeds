@@ -9,7 +9,7 @@
 - [x] 新内容在 HTML → Markdown 入库前过滤 `author_profile_images` / `BLURPLE` 作者头像
 - [x] 日报 cover/media 同时过滤原始 URL 与 R2 哈希别名，保留正常 hero、截图和人物新闻照片
 - [x] 新增存量清理 mode，同步修复 C 端正文原文/中译、封面与 body assets
-- [ ] 上线后按 runbook 先 dry-run，再清理生产存量并抽样验证 C 端与日报产物
+- [x] 上线后按 runbook 先 dry-run，再清理生产存量并抽样验证 C 端与日报产物（prod：扫描 48 篇、修正 41 篇、移除 82 个头像引用、冲突 0、复扫剩余 0；2026-07-15 日报图片/视频已重跑并验收）
 
 ---
 
