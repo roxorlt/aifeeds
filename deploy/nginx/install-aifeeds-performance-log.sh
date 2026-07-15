@@ -2459,6 +2459,16 @@ def prelive_empty_manifest_authorizes_installer_absence(business, installer_cand
 def expected_cleanup_items(business, cleanup_value):
     actual_items = cleanup_value["items"]
     legacy_compatibility = cleanup_value.get("compatibility_mode") == "legacy_runtime_removed"
+    rotation_snapshot = business["rotation_state_snapshot"]
+    rotation_anchor = business["rotation_anchor_identity"]
+    prepublication_runtime = (
+        business["runtime_artifacts_sealed"] is False
+        and isinstance(rotation_snapshot, dict)
+        and rotation_snapshot.get("generation") == 0
+        and rotation_snapshot.get("status") is None
+        and isinstance(rotation_anchor, dict)
+        and rotation_anchor.get("state") == "allocated"
+    )
     result = []
     installer_candidate = f"/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-{operation_id}"
 
@@ -2510,6 +2520,10 @@ def expected_cleanup_items(business, cleanup_value):
             add(slot, "assert_absent", "file", [entry["candidate"], entry["final"]], None, None)
             return
         identity = cleanup_file_identity(entry)
+        if name == "log" and prepublication_runtime:
+            paths = [entry["candidate"], entry["final"]]
+            add(slot, "delete", "file", paths, entry["candidate"], identity)
+            return
         if name == "log":
             log_identity = actual_items[len(result)]["identity"]
             identity = cleanup_handoff_identity({
@@ -2706,9 +2720,18 @@ def validate_runtime_cleanup(cleanup_value, business):
             item["slot"] == "log" and item["selected_path"] is not None
         ) and item["action"] == "archive_handoff":
             fail("runtime cleanup archive action drift")
-        if item["slot"] == "log" and item["selected_path"] is not None \
-                and item["action"] != "archive_handoff":
-            fail("runtime cleanup log action drift")
+        if item["slot"] == "log" and item["selected_path"] is not None:
+            prepublication_log = (
+                business["runtime_artifacts_sealed"] is False
+                and isinstance(business["rotation_state_snapshot"], dict)
+                and business["rotation_state_snapshot"].get("generation") == 0
+                and business["rotation_state_snapshot"].get("status") is None
+                and isinstance(business["rotation_anchor_identity"], dict)
+                and business["rotation_anchor_identity"].get("state") == "allocated"
+            )
+            expected_log_action = "delete" if prepublication_log else "archive_handoff"
+            if item["action"] != expected_log_action:
+                fail("runtime cleanup log action drift")
         if not isinstance(item["paths"], list) or len(item["paths"]) not in {1, 2} \
                 or len(set(item["paths"])) != len(item["paths"]) \
                 or not all(isinstance(path, str) and path.startswith("/") for path in item["paths"]):

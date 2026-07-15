@@ -5718,6 +5718,15 @@ case "$scenario" in
                 || fail exceptional-closed-new-journal
             test ! -e "/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-${closure_operation_id}" \
                 || fail exceptional-closed-new-candidate
+
+            /usr/bin/install -o root -g root -m 0755 "$test_root/logrotate.restore" \
+                /usr/sbin/logrotate
+            closure_rc=$(run_installer_for_operation "$closure_output" "$closure_operation_id")
+            test "$closure_rc" -eq 0 || fail "exceptional-closed-reinstall-rc-$closure_rc"
+            grep -Fq 'gl_a=pass ' "$closure_output" \
+                || fail exceptional-closed-reinstall-pass-marker
+            ! grep -Fq 'recovery_required=1' "$closure_output" \
+                || fail exceptional-closed-reinstall-false-recovery-required
         fi
         ;;
     preflight-logrotate-missing)
