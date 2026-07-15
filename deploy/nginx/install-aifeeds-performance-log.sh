@@ -5623,7 +5623,11 @@ runtime_artifacts_are_terminally_absent() {
         test ! -e "$path" && test ! -L "$path" || return 1
     done < <(jq -er '.artifact_candidates[]' "$source_path")
     no_performance_logs_present || return 1
-    terminal_formal_site_matches_state "$source_path" base
+    # A rolled-back journal proves the site state at that transaction's terminal
+    # boundary.  It does not own SITE forever: a later deployment may validly
+    # replace the live config.  The new operation validates SITE, its enabled
+    # target, nginx -t, and the exact candidate diff before any mutation.
+    return 0
 }
 
 assert_no_operation_cleanup_dirs_for_transaction() {

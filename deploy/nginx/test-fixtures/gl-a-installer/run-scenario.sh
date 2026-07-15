@@ -4890,6 +4890,15 @@ PY
         old_rollback_revision=$(jq -er '.journal_update.revision' "$old_rollback_journal")
         cmp -s "$test_root/aifeeds.conf.original" /etc/nginx/sites-available/aifeeds.conf \
             || fail reinstall-first-site-not-base
+        old_terminal_site_sha=$(sha256sum /etc/nginx/sites-available/aifeeds.conf \
+            | awk '{print $1}')
+        printf '\n# legitimate successor deployment\n' \
+            >> /etc/nginx/sites-available/aifeeds.conf
+        successor_site_sha=$(sha256sum /etc/nginx/sites-available/aifeeds.conf \
+            | awk '{print $1}')
+        test "$successor_site_sha" != "$old_terminal_site_sha" \
+            || fail reinstall-successor-site-not-changed
+        nginx -t >/dev/null || fail reinstall-successor-site-invalid
         secondary_operation_id='20260712000001-89abcdef'
         prepare_secondary_staging "$secondary_operation_id"
         secondary_output="$test_root/secondary-installer.out"
@@ -4940,6 +4949,9 @@ PY
             .transaction_journal == $journal and .transaction_journal_sha256 == $journal_sha
         ' "$secondary_staging/gl-a-summary.json" >/dev/null \
             || fail reinstall-secondary-summary-identity
+        grep -Fq '# legitimate successor deployment' \
+            /etc/nginx/sites-available/aifeeds.conf \
+            || fail reinstall-successor-site-lost
         rc=$secondary_rc
         ;;
     terminal-pair-tamper)

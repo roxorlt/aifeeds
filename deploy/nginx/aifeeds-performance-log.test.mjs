@@ -880,18 +880,29 @@ test('terminal scanner physically reconciles runtime artifacts, rotation, and ze
   const rollbackValidator = installer.match(
     /validate_terminal_rollback_journal\(\) \{([\s\S]*?)\n\}/,
   )?.[1] ?? '';
+  const terminalAbsent = installer.match(
+    /runtime_artifacts_are_terminally_absent\(\) \{([\s\S]*?)\n\}/,
+  )?.[1] ?? '';
+  const terminalCommitted = installer.match(
+    /runtime_artifacts_are_committed_exact\(\) \{([\s\S]*?)\n\}/,
+  )?.[1] ?? '';
 
   for (const required of [
     'runtime_artifacts',
     'runtime_artifacts_sealed',
     'rotation_state_identity',
     'path_matches_exact_identity',
-    'formal_site_matches_state',
     'assert_no_operation_cleanup_dirs_for_transaction',
   ]) assert.ok(residue.includes(required), `terminal physical reconciliation missing ${required}`);
   assert.match(residue, /committed[\s\S]*rolled_back/);
   assert.ok(residue.includes('runtime_artifacts_are_terminally_absent'));
   assert.ok(residue.includes('runtime_artifacts_are_committed_exact'));
+  assert.ok(terminalCommitted.includes('terminal_formal_site_matches_state "$source_path" installed'));
+  assert.doesNotMatch(
+    terminalAbsent,
+    /terminal_formal_site_matches_state/,
+    'a historical rolled-back transaction must not own a later live SITE deployment',
+  );
   for (const required of [
     'runtime_artifacts',
     'runtime_artifacts_sealed',
@@ -2424,7 +2435,7 @@ test('site-absent local conflict keeps the running nginx process without requiri
   assert.doesNotMatch(nginxActiveArm, /restore-site-absent-samebytes-crash-reentry/);
 });
 
-test('reinstall accepts an exact prior terminal pair without mutating its namespace', () => {
+test('reinstall accepts an exact prior terminal pair after a successor site deployment', () => {
   const scenario = scenarioRunner.match(
     /reinstall-after-auto-rollback\)([\s\S]*?)\n\s*;;/,
   )?.[1] ?? '';
@@ -2440,6 +2451,9 @@ test('reinstall accepts an exact prior terminal pair without mutating its namesp
     'reinstall-old-terminal-namespace-changed',
     'reinstall-old-source-revision-changed',
     'reinstall-old-rollback-revision-changed',
+    'reinstall-successor-site-not-changed',
+    'reinstall-successor-site-invalid',
+    'reinstall-successor-site-lost',
     'assert_cas_namespace "$secondary_journal" F "$secondary_operation_id"',
     'reinstall-secondary-summary-identity',
     'secondary_rollback=',
