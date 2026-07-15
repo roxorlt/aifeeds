@@ -13,6 +13,7 @@
 
 import type { Env } from "../index";
 import type { FeedBodyAsset, FeedBodyMeta, FeedDef, FetchStrategy } from "./types";
+import { isTheVergeAuthorProfileImage } from "./editorial-image";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // canonicalize — §5.6
@@ -361,7 +362,7 @@ export function extractPageMeta(html: string, baseUrl: string): PageMeta {
 /**
  * 由 fetchStrategy + 详情页 meta 决定要落库的 SQL 片段（Fix 1，2026-07-06）。
  *
- * 封面（og:image）**放开到全部 blog 源**：历史上只有 page-scrape 才采用 res.meta.cover，
+ * 封面（og:image）**放开到全部 blog 源**（The Verge 作者头像强特征除外）：历史上只有 page-scrape 才采用 res.meta.cover，
  * native 源（如 The Verge）把抓到的 og:image 算出来又丢掉，导致下游回退到「正文首图」
  * （常是作者署名头像）。现改为任意策略只要有 meta.cover 就采用。
  *   - 幂等：`COALESCE(NULLIF(cover_image, ''), ?)` —— 已有合格 cover_image 不覆盖；
@@ -382,7 +383,8 @@ export function buildBlogPageMetaPatch(
   const binds: unknown[] = [];
   if (!meta) return { sets, binds };
 
-  // 封面：全部 blog 源都采用 og:image（幂等，不覆盖已有合格 cover_image）。
+  // 封面：全部 blog 源都采用 og:image（幂等，不覆盖已有合格 cover_image）；The Verge
+  // author_profile_images / BLURPLE 是署名头像，必须在落库及迁 R2 前丢弃。
   //
   // Fix B（2026-07-06，workflow 重跑防护）：一旦 R2 迁移 marker `blog_media_r2_at`
   // 已置位，cover 槽即由 migrateMediaForBlog 独占——此处**绝不**把 og 外链回写进
@@ -390,7 +392,7 @@ export function buildBlogPageMetaPatch(
   // og 外链，而 step4 migrateMediaForBlog 因 marker 已置位直接幂等早退（media-r2.ts），
   // 外链永久滞留、前端直出（防盗链风险）。CASE 守卫：marker 已置位 → 保留原值（'' 或
   // /r/）；marker 未置位（首轮）才允许 og 外链落位（随后 step4 过质量门迁 R2）。
-  if (meta.cover) {
+  if (meta.cover && !isTheVergeAuthorProfileImage(meta.cover)) {
     sets.push(
       "extra = json_set(coalesce(extra,'{}'), '$.cover_image', " +
         "COALESCE(" +
@@ -571,7 +573,7 @@ export function htmlToMarkdown(
   // img → markdown（解析绝对 URL）
   html = html.replace(/<img\b[^>]*>/gi, (tag) => {
     const src = resolveUrl(attrIn(tag, "src") || attrIn(tag, "data-src") || "", baseUrl);
-    if (!src) return "";
+    if (!src || isTheVergeAuthorProfileImage(src)) return "";
     const alt = attrIn(tag, "alt") || "";
     return `\n\n![${alt}](${src})\n\n`;
   });
@@ -638,7 +640,12 @@ function collectAssetsFromHtml(html: string, baseUrl: string): FeedBodyAsset[] {
       attrIn(m[0], "src") || attrIn(m[0], "data-src") || "",
       baseUrl,
     );
-    if (src && /^https?:/i.test(src) && !seen.has(src)) {
+    if (
+      src &&
+      /^https?:/i.test(src) &&
+      !isTheVergeAuthorProfileImage(src) &&
+      !seen.has(src)
+    ) {
       seen.add(src);
       out.push({ url: src, kind: "image", role: "inline" });
     }

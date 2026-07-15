@@ -87,6 +87,7 @@ import {
 import { feedNewsRankSqlExpression } from './feeds/ranking';
 import { migrateAudioForPodcast, runCoverQualitySweep, runBlogCoverGenericSweep, runBlogCoverOgBackfill, runBlogCoverBodyHeroBackfill } from './feeds/media-r2';
 import { runBlogBodyRedecode } from './feeds/blog-body-redecode';
+import { runTheVergeEditorialImageCleanup } from './feeds/blog-editorial-image-cleanup';
 import { runPhDescriptionTranslate } from './scrapers/ph-description-translate';
 import { feedsByKind } from './feeds/registry';
 import { fetchFeedXml, parseFeed } from './feeds/parse';
@@ -4556,6 +4557,15 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const dry = url.searchParams.get('dry') === '1';
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100'), 1), 500);
     const result = await runBlogBodyRedecode(env, { limit, dry });
+    return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
+  }
+  if (mode === 'the-verge-editorial-image-cleanup') {
+    // The Verge 作者署名头像存量清理：按原始 URL 的 author_profile_images / BLURPLE
+    // 特征剔除 body.assets，并利用原图→R2 映射同步清正文原文、中译和误用封面。
+    // 新增内容已在 htmlToMarkdown 入库前过滤；此入口只负责历史数据，一批一批调至 remaining=0。
+    const dry = url.searchParams.get('dry') === '1';
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100'), 1), 500);
+    const result = await runTheVergeEditorialImageCleanup(env, { limit, dry });
     return jsonResponse({ ok: true, dry, limit, ...result }, 200, request, env);
   }
   if (mode === 'ph-description-translate') {

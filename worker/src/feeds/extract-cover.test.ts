@@ -72,6 +72,23 @@ describe('buildBlogPageMetaPatch — og:image 采用条件', () => {
     const { binds } = buildBlogPageMetaPatch('page-scrape', { title: long });
     expect((binds[0] as string).length).toBe(300);
   });
+
+  test('The Verge 作者头像不能作为独立 og cover 落库', () => {
+    const { sets, binds } = buildBlogPageMetaPatch('native', {
+      cover:
+        'https://platform.theverge.com/wp-content/uploads/sites/2/chorus/author_profile_images/195810/EMMA_ROTH.0.jpg?quality=90&w=2400',
+    });
+    expect(sets).toEqual([]);
+    expect(binds).toEqual([]);
+  });
+
+  test('The Verge 正常 hero 仍可作为 og cover 落库', () => {
+    const hero =
+      'https://platform.theverge.com/wp-content/uploads/sites/2/2026/03/STK155_OPEN_AI_4_CVirginia_D.png?quality=90&w=2400';
+    const { sets, binds } = buildBlogPageMetaPatch('native', { cover: hero });
+    expect(sets).toHaveLength(1);
+    expect(binds).toEqual([hero]);
+  });
 });
 
 // ═══════════════ Fix B（审查修复）：workflow 重跑不回写 og 外链 ═══════════════

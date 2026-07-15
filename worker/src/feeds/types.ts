@@ -274,6 +274,12 @@ export interface FeedWorkflowMarkers {
   cover_brandlogo_guarded_at?: string;
   /** 正文 hero 存量回填游标（bodyhero-backfill，单调，处理必置位，无论 adopt/skip）。 */
   cover_bodyhero_backfilled_at?: string;
+  /** 正文作者头像/署名图存量清理游标（The Verge 首轮回填使用）。 */
+  editorial_image_cleaned_at?: string;
+  /** The Verge 独立 cover 命中作者头像强规则并在迁 R2 前被拒绝。 */
+  editorial_image_cover_blocked_at?: string;
+  /** 已确认的非正文图片 URL（含归一后的 /r/ 路径），供删除 asset 映射后继续兜底。 */
+  editorial_image_blocked_urls?: string[];
 }
 
 /** blog / podcast 共有的 enrich 产物（§8.4.A）。 */

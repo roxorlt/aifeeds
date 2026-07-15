@@ -6,6 +6,9 @@
 import type { DigestSource } from './config';
 import { stripLabelPrefix } from '../feeds/classify-translate';
 import { COVER_BLACKLIST, passesCoverSizeGate, isNoCoverSource } from '../feeds/cover-heuristics';
+import { isSkippableInlineImage, normalizeImageAlias } from '../feeds/editorial-image';
+
+export { isSkippableInlineImage } from '../feeds/editorial-image';
 
 export interface RenderRow {
   id: string;
@@ -245,8 +248,14 @@ interface CoverCandidate { r2: string; orig: string; width?: number; height?: nu
 function bodyCoverCandidates(ex: Record<string, unknown>, apiBase: string): CoverCandidate[] {
   const out: CoverCandidate[] = [];
   const seen = new Set<string>();
+  const blockedAliases = newsBlockedImageAliases(ex);
   const push = (r2: string, orig: string, width?: number, height?: number) => {
-    if (!r2 || seen.has(r2)) return;
+    if (
+      !r2
+      || seen.has(r2)
+      || isNewsImageBlocked(r2, blockedAliases)
+      || isNewsImageBlocked(orig, blockedAliases)
+    ) return;
     seen.add(r2);
     out.push({ r2, orig: orig || r2, width, height });
   };
@@ -281,6 +290,7 @@ function bodyCoverCandidates(ex: Record<string, unknown>, apiBase: string): Cove
 // news 封面质量门(仅日报静态页启用):R2 cover_image 直采,否则回退过滤后的 R2 正文图。
 function pickNewsCoverGated(ex: Record<string, unknown>, apiBase: string): string | null {
   const abs = (u: string): string => (u.startsWith('http') ? u : `${apiBase}${u}`);
+  const blockedAliases = newsBlockedImageAliases(ex);
   // 0. 源级 no-cover 短路(Fix 2,2026-07-07):NO_COVER_SOURCES 名单内源在任何数据形态下都不出封面
   //    —— 与 cover-heuristics 同口径的 srcKey(feed_key,退化 show_key/'blog')。是数据层三点之外的
   //    渲染层纵深:哪怕数据里意外残留 cover_image / 正文图,daily 页也硬约束为 monogram 兜底。
@@ -288,7 +298,7 @@ function pickNewsCoverGated(ex: Record<string, unknown>, apiBase: string): strin
   if (isNoCoverSource(srcKey)) return null;
   // 1. cover_image 仅当站内 R2 反代形态才直采(外链态视为无效,进回退链)。
   const cov = String((ex.cover_image as string) || '').trim();
-  if (cov && isInternalR2(cov, apiBase)) return abs(cov);
+  if (cov && isInternalR2(cov, apiBase) && !isNewsImageBlocked(cov, blockedAliases)) return abs(cov);
   // 2. 回退:按顺序取第一张通过黑名单 + 尺寸门的 R2 正文图。
   for (const c of bodyCoverCandidates(ex, apiBase)) {
     if (COVER_BLACKLIST.test(c.orig) || COVER_BLACKLIST.test(c.r2)) continue;
@@ -364,9 +374,13 @@ function pickCover(
       if (opts.newsCoverQualityGate) return pickNewsCoverGated(ex, apiBase);
       // 默认路径(daily-api / codex-push)保持原逻辑,逐字节不变:
       // 封面 = extra.cover_image,否则 media 第一张图,再否则正文 assets 第一张图。
+      const blockedAliases = newsBlockedImageAliases(ex);
       const cov = (ex.cover_image as string) || '';
-      if (cov) return abs(cov);
-      if (imgs.length) return abs(imgs[0].url as string);
+      if (cov && !isNewsImageBlocked(cov, blockedAliases)) return abs(cov);
+      const cleanMediaImage = imgs.find(
+        (img) => !isNewsImageBlocked(String(img.url || ''), blockedAliases),
+      );
+      if (cleanMediaImage) return abs(cleanMediaImage.url as string);
       const bodyImg = bodyImageAssets(ex)[0];
       return bodyImg ? abs(bodyImg.url) : null;
     }
@@ -446,10 +460,15 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
       break;
     case 'clawhub':
       break; // skill 无媒体
-    case 'news':
+    case 'news': {
       // 行业新闻:博客/播客正文图片(及视频)
+      const blockedAliases = newsBlockedImageAliases(ex);
       for (const m of arr) {
-        if (m.type === 'image' && m.url) out.push({ type: 'image', url: abs(m.url as string) });
+        if (
+          m.type === 'image'
+          && m.url
+          && !isNewsImageBlocked(String(m.url), blockedAliases)
+        ) out.push({ type: 'image', url: abs(m.url as string) });
         else if (m.type === 'video' && m.url) {
           const v: MediaAsset = { type: 'video', url: abs(m.url as string) };
           if (m.poster) v.poster = abs(m.poster as string);
@@ -460,6 +479,7 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
         out.push({ type: 'image', url: abs(m.url) });
       }
       break;
+    }
   }
   const seen = new Set<string>();
   return out.filter((a) => {
@@ -473,9 +493,10 @@ function buildMedia(source: DigestSource, row: RenderRow, ex: Record<string, unk
 function bodyImageAssets(ex: Record<string, unknown>): Array<{ url: string }> {
   const out: Array<{ url: string }> = [];
   const seen = new Set<string>();
+  const blockedAliases = newsBlockedImageAliases(ex);
   const add = (url: string) => {
     const u = String(url || '').trim();
-    if (!u || seen.has(u) || isSkippableInlineImage(u)) return;
+    if (!u || seen.has(u) || isNewsImageBlocked(u, blockedAliases)) return;
     seen.add(u);
     out.push({ url: u });
   };
@@ -502,6 +523,44 @@ function bodyImageAssets(ex: Record<string, unknown>): Array<{ url: string }> {
   return out;
 }
 
+// 原始作者头像迁进 R2 后，/r/<hash> 已不再带 author_profile/BLURPLE 字样；通过 body.assets
+// 里的原始 URL → r2_url 对应关系，把两种地址一起加入拒绝集合，防历史脏数据继续进日报。
+function newsBlockedImageAliases(ex: Record<string, unknown>): Set<string> {
+  const blocked = new Set<string>();
+  const add = (url: string) => {
+    const value = String(url || '').trim();
+    if (!value) return;
+    blocked.add(value);
+    const normalized = normalizeImageAlias(value);
+    if (normalized) blocked.add(normalized);
+  };
+  const persisted = ex.editorial_image_blocked_urls;
+  if (Array.isArray(persisted)) {
+    for (const url of persisted) if (typeof url === 'string') add(url);
+  }
+  const body = ex.body;
+  if (!body || typeof body !== 'object') return blocked;
+  const assets = (body as { assets?: unknown }).assets;
+  if (!Array.isArray(assets)) return blocked;
+  for (const asset of assets) {
+    if (!asset || typeof asset !== 'object') continue;
+    const original = String((asset as { url?: unknown }).url || '').trim();
+    if (!original || !isSkippableInlineImage(original)) continue;
+    add(original);
+    const r2 = String((asset as { r2_url?: unknown }).r2_url || '').trim();
+    add(r2);
+  }
+  return blocked;
+}
+
+function isNewsImageBlocked(url: string, blockedAliases: ReadonlySet<string>): boolean {
+  const value = String(url || '').trim();
+  if (!value) return true;
+  return isSkippableInlineImage(value)
+    || blockedAliases.has(value)
+    || blockedAliases.has(normalizeImageAlias(value));
+}
+
 function inlineImageUrls(text: string): string[] {
   const out: string[] = [];
   let m: RegExpExecArray | null;
@@ -519,36 +578,6 @@ function htmlDecode(s: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
-}
-
-// 署名头像 / 作者头像形态的 URL 模式清单（可配置，泛化不硬编码单站，Fix 2.2 2026-07-06）。
-// 背景：native blog 源无结构化封面时回退取「正文首图」，而作者署名头像常是正文第一张图
-//   （如 The Verge 的 TERRENCE_BLURPLE.jpg，"blurple" 是其品牌双色调头像特征）。
-// 依据调查报告的头像形态证据泛化：作者/头像路径关键词 + 已知品牌头像标记 + 小尺寸缩略图变体。
-// 正常题图（大尺寸、无这些标记）不受影响。
-const AVATAR_INLINE_PATTERNS: RegExp[] = [
-  // 路径 / 文件名里的头像语义关键词（authors/、_avatar、headshot、byline、gravatar 等）
-  /(^|[/_-])avatars?([/_.-]|$)/i,
-  /\/authors?\//i,
-  /author[_-]/i,
-  /head[_-]?shot/i,
-  /byline/i,
-  /contributor/i,
-  /profile[_-]?(pic|photo|image)/i,
-  /gravatar\.com/i,
-  // 已知品牌作者头像标记（The Verge "blurple" 双色调署名头像）
-  /blurple/i,
-  // 小尺寸缩略图变体（w/width=1..149）——头像常以小图请求，hero 一般 ≥600
-  /[?&](?:w|width)=(?:[1-9]\d?|1[0-4]\d)(?:\D|$)/i,
-];
-
-export function isSkippableInlineImage(url: string): boolean {
-  if (/\.svg(\?|$)/i.test(url)
-    || /(shields\.io|badgen\.net|badge\.fury|forthebadge|img\.shields)/i.test(url)
-    || /^data:/i.test(url)) {
-    return true;
-  }
-  return AVATAR_INLINE_PATTERNS.some((re) => re.test(url));
 }
 
 // 每源「最优加长字段」(静态日报页 SEO 扩展摘要用;news 源不走此处,由下方 excerpt_zh/shownotes_zh 分支处理)。
