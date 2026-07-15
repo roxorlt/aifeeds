@@ -22,6 +22,7 @@
 //     权威「已入库」集是 items 表存在性，seen-set 只作冷启动检测 + 可观测。
 
 import type { Env } from './index';
+import { isTheVergeAuthorProfileImage } from './feeds/editorial-image';
 import type {
   BlogExtra,
   BlogTriggerSignals,
@@ -229,7 +230,10 @@ async function ingestOneBlogFeed(
         guid: e.guid,
         canonical_url: e.canonicalUrl,
         url_hash: e.urlHash,
-        cover_image: e.p.cover_url || undefined, // 原始域名 URL，step4 再迁 R2
+        cover_image:
+          e.p.cover_url && !isTheVergeAuthorProfileImage(e.p.cover_url)
+            ? e.p.cover_url
+            : undefined, // 原始域名 URL，step4 再迁 R2；The Verge 署名头像在入库前拦截
         excerpt: e.p.summary || undefined,
         publisher: { name: feed.source_company, domain: publisherDomain },
         tags: e.p.tags,

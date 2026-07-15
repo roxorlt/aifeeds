@@ -94,4 +94,53 @@ describe('htmlToMarkdown — 实体编码 HTML 正确转换（Task 1 主修）',
     const { markdown } = htmlToMarkdown(input, 'https://ex.com/a');
     expect(markdown).toBe('x < y 的比较');
   });
+
+  test('The Verge 作者头像不进入正文 markdown 和 assets，正常题图保留', () => {
+    const authorProfile =
+      'https://platform.theverge.com/wp-content/uploads/sites/2/chorus/author_profile_images/195810/EMMA_ROTH.0.jpg?quality=90&w=2400';
+    const blurpleProfile =
+      'https://platform.theverge.com/wp-content/uploads/sites/2/2025/01/JAY_BLURPLE.jpg?quality=90&w=2400';
+    const hero =
+      'https://platform.theverge.com/wp-content/uploads/sites/2/2026/03/STK155_OPEN_AI_4_CVirginia_D.png?quality=90&w=2400';
+    const input = [
+      '<p>作者署名区</p>',
+      `<img src="${authorProfile}" alt="Emma Roth">`,
+      `<img src="${blurpleProfile}" alt="Jay Peters">`,
+      '<p>正文内容</p>',
+      `<img src="${hero}" alt="OpenAI hero">`,
+    ].join('');
+
+    const { markdown, assets } = htmlToMarkdown(input, 'https://www.theverge.com/');
+
+    expect(markdown).not.toContain('EMMA_ROTH');
+    expect(markdown).not.toContain('JAY_BLURPLE');
+    expect(markdown).toContain(hero);
+    expect(assets.map((asset) => asset.url)).toEqual([hero]);
+  });
+
+  test('入库过滤只针对作者头像，不误删正文 SVG 图和普通小尺寸图', () => {
+    const diagram = 'https://cdn.example.com/research/architecture.svg';
+    const thumbnail = 'https://cdn.example.com/article-step.jpg?w=120';
+    const { markdown, assets } = htmlToMarkdown(
+      `<p>正文图示</p><img src="${diagram}" alt="架构图"><img src="${thumbnail}" alt="步骤图">`,
+      'https://example.com/article',
+    );
+
+    expect(markdown).toContain(diagram);
+    expect(markdown).toContain(thumbnail);
+    expect(assets.map((asset) => asset.url)).toEqual([diagram, thumbnail]);
+  });
+
+  test('非 The Verge 来源即使图片路径含 authors/byline 也不做破坏性删除', () => {
+    const authorsFeature = 'https://news.example.com/images/authors-of-ai-feature.jpg';
+    const bylineProject = 'https://news.example.com/research/byline-project-cover.jpg';
+    const { markdown, assets } = htmlToMarkdown(
+      `<img src="${authorsFeature}" alt="专题人物"><img src="${bylineProject}" alt="项目封面">`,
+      'https://news.example.com/article',
+    );
+
+    expect(markdown).toContain(authorsFeature);
+    expect(markdown).toContain(bylineProject);
+    expect(assets.map((asset) => asset.url)).toEqual([authorsFeature, bylineProject]);
+  });
 });

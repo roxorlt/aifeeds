@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-15：The Verge 作者头像污染统一治理
+
+- [x] 新内容在 HTML → Markdown 入库前过滤 `author_profile_images` / `BLURPLE` 作者头像
+- [x] 日报 cover/media 同时过滤原始 URL 与 R2 哈希别名，保留正常 hero、截图和人物新闻照片
+- [x] 新增存量清理 mode，同步修复 C 端正文原文/中译、封面与 body assets
+- [ ] 上线后按 runbook 先 dry-run，再清理生产存量并抽样验证 C 端与日报产物
+
+---
+
 ## 改进 3：enrich daemon（已全量迁到 CF Worker）
 
 **状态**（2026-04-18 更新）：✅ 全部迁完。三个模式（backfill-quotes / refresh-metrics / fill-translations）均 deploy 到 CF Worker，`*/5` cron 内部按分钟分流。本地 `enrich_from_syndication.py` 只保留给 reclassify_affected 等特殊流程。

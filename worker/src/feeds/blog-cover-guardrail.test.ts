@@ -112,6 +112,7 @@ function makeEnv(items: FakeItem[], hasR2 = true) {
               paths.forEach((p, i) => {
                 const v = bound[i];
                 if (v === '' && p === 'cover_image') delete it.extra.cover_image;
+                else if (p === 'body' || p === 'publisher') it.extra[p] = JSON.parse(String(v));
                 else it.extra[p] = v;
               });
             }
@@ -280,6 +281,83 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     });
     expect(target.extra.cover_image).toBe('/r/blog/uniquehero.jpg');
     expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined();
+  });
+
+  test('The Verge BLURPLE 作者头像作为独立 cover 时不迁 R2，直接清空', async () => {
+    const target: FakeItem = {
+      id: 'blog:the-verge:avatar-cover',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'the-verge',
+        cover_image:
+          'https://platform.theverge.com/wp-content/uploads/sites/2/2025/01/JAY_BLURPLE.jpg?quality=90&w=2400',
+        body: { source: 'rss_full', extracted_at: 'x', assets: [] },
+      },
+    };
+    const { env } = makeEnv([target]);
+    let migrateCalls = 0;
+    await migrateMediaForBlog(env, target.id, {
+      migrateCover: async () => {
+        migrateCalls++;
+        return '/r/blog/should-not-exist.jpg';
+      },
+    });
+
+    expect(migrateCalls).toBe(0);
+    expect(target.extra.cover_image).toBeUndefined();
+    expect(target.extra.blog_media_r2_at).toBeTruthy();
+  });
+
+  test('The Verge 头像同时存在于 cover 与 body.assets 时跳过头像并回退到正文 hero', async () => {
+    const avatar =
+      'https://platform.theverge.com/wp-content/uploads/sites/2/2025/01/JAY_BLURPLE.jpg?quality=90&w=2400';
+    const target: FakeItem = {
+      id: 'blog:the-verge:avatar-cover-and-body',
+      source_type: 'blog',
+      extra: {
+        feed_key: 'the-verge',
+        cover_image: avatar,
+        body: {
+          source: 'rss_full',
+          extracted_at: 'x',
+          assets: [
+            {
+              url: avatar,
+              r2_url: '/r/blog/avatar-content-hash.jpg',
+              kind: 'image',
+              role: 'inline',
+              width: 800,
+              height: 800,
+            },
+            {
+              url: '/r/blog/real-hero.jpg',
+              r2_url: '/r/blog/real-hero.jpg',
+              kind: 'image',
+              role: 'inline',
+              width: 1600,
+              height: 900,
+            },
+          ],
+        },
+        body_markdown:
+          '![作者](/r/blog/avatar-content-hash.jpg)\n\n![题图](/r/blog/real-hero.jpg)',
+      },
+    };
+    const { env } = makeEnv([target]);
+    let migrateCalls = 0;
+    await migrateMediaForBlog(env, target.id, {
+      migrateCover: async () => {
+        migrateCalls++;
+        return '/r/blog/should-not-exist.jpg';
+      },
+    });
+
+    expect(migrateCalls).toBe(0);
+    expect(target.extra.cover_image).toBe('/r/blog/real-hero.jpg');
+    const body = target.extra.body as { assets: Array<{ url: string }> };
+    expect(body.assets.map((asset) => asset.url)).toEqual(['/r/blog/real-hero.jpg']);
+    expect(target.extra.body_markdown).not.toContain('avatar-content-hash');
+    expect(target.extra.editorial_image_blocked_urls).toContain('/r/blog/avatar-content-hash.jpg');
   });
 
   // ── Fix 1（Important 1）：护栏命中后 live 就地从正文 assets 回落 hero ──
