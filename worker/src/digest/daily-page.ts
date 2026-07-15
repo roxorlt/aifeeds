@@ -284,7 +284,11 @@ export function patchDailyPageVideoHtml(html: string, video: DailyVideoRow, env:
   const jsonBlock = marked(DAILY_VIDEO_JSON_LD_START, jsonScript, DAILY_VIDEO_JSON_LD_END);
   const withReplacedMarker = replaceMarked(next, DAILY_VIDEO_JSON_LD_START, DAILY_VIDEO_JSON_LD_END, jsonBlock);
   if (withReplacedMarker !== null) return withReplacedMarker;
-  return next.replace(scriptRe, jsonBlock);
+  // Use a replacer function so JSON-LD text such as "$10 million" stays literal.
+  // Passing jsonBlock as a replacement string makes String.replace interpret
+  // dollar-number sequences as capture-group substitutions and can duplicate the
+  // original JSON-LD inside itself.
+  return next.replace(scriptRe, () => jsonBlock);
 }
 
 // ── 公共 SEO 页骨架(日报页 + item 单页共用)───────────────────────────────────────
