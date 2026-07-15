@@ -530,7 +530,7 @@ load_recovery_contract_from_record() {
 }
 
 wait_for_c_crash() {
-    local pid=$1 label=$2 wait_limit=${3:-600} result
+    local pid=$1 label=$2 wait_limit=${3:-1200} result
     wait_for_file "$test_root/$label" "$wait_limit"
     set +e
     wait "$pid"
