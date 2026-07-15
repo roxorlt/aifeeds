@@ -388,12 +388,12 @@ trap 'exit 143' TERM
 cd "$REPO_ROOT"
 bash scripts/predeploy-check.sh
 cd "$REPO_ROOT/worker"
-WRANGLER_LOG=none npx wrangler secret list --env staging --format json \
+npx wrangler secret list --env staging --format json \
   > "$EVIDENCE/worker-staging-secret-names.json"
 jq -e '[.[].name] as $names |
   ($names | index("INGEST_TOKEN")) != null and ($names | index("DEV_TOKEN")) != null' \
   "$EVIDENCE/worker-staging-secret-names.json" >/dev/null
-WRANGLER_LOG=none npx wrangler deployments status --env staging --json \
+npx wrangler deployments status --env staging --json \
   > "$EVIDENCE/worker-before.json"
 OLD_WORKER_VERSION="$(jq -er \
   'select((.versions | length) == 1 and .versions[0].percentage == 100) | .versions[0].version_id' \
@@ -950,13 +950,13 @@ cd "$REPO_ROOT/dashboard"
 npm run build:perf-staging
 WRANGLER="$REPO_ROOT/worker/node_modules/.bin/wrangler"
 test -x "$WRANGLER"
-WRANGLER_LOG=none "$WRANGLER" pages project list --json > "$EVIDENCE/pages-projects-before.json"
+"$WRANGLER" pages project list --json > "$EVIDENCE/pages-projects-before.json"
 jq -e '[.[] | select(."Project Name" == "xlist-dashboard-perf")] | length == 0' \
   "$EVIDENCE/pages-projects-before.json" >/dev/null
 "$WRANGLER" pages project create xlist-dashboard-perf --production-branch=main \
   > "$EVIDENCE/pages-project-create.stdout" \
   2> "$EVIDENCE/pages-project-create.stderr"
-WRANGLER_LOG=none "$WRANGLER" pages project list --json > "$EVIDENCE/pages-projects-after.json"
+"$WRANGLER" pages project list --json > "$EVIDENCE/pages-projects-after.json"
 jq -e '[.[] | select(."Project Name" == "xlist-dashboard-perf")] as $matches |
   ($matches | length == 1) and
   ($matches[0]."Project Domains" | contains("xlist-dashboard-perf.pages.dev"))' \

@@ -972,6 +972,14 @@ test('nginx 1.24 keepalive experiment is blocked instead of installable', () => 
   assert.match(operations, /aifeeds-upstream-performance\.conf[\s\S]{0,160}?不得安装/);
 });
 
+test('perf-staging machine-readable Wrangler commands preserve stdout', () => {
+  assert.doesNotMatch(
+    perfStagingChangePacket,
+    /WRANGLER_LOG=none[^\n]*(?:--format json|--json)/,
+    'WRANGLER_LOG=none suppresses Wrangler 4.83 JSON stdout and creates empty evidence files',
+  );
+});
+
 test('perf-staging change packet is fail-closed and independently reversible', () => {
   const g7Section = perfStagingChangePacket.match(/## 9[.] G7[：:][\s\S]*?(?=\n### 9[.]3)/)?.[0] ?? '';
   const glbSection = perfStagingChangePacket
