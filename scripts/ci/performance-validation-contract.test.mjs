@@ -146,6 +146,72 @@ test('operations documents the active worker typecheck gate', () => {
   assert.match(operations, /Worker TypeScript baseline 已清零/);
 });
 
+test('GL-a forward summary validator accepts a valid unique runtime inventory', () => {
+  const operationId = '20990101000000-deadbeef';
+  const forwardFilter = extractJqFilterBefore(
+    operations,
+    '\n  "$LOCAL_SUMMARY_TMP" >/dev/null',
+  );
+  const runtimeDefinitions = forwardFilter.match(
+    /def positive_integer:[\s\S]*?(?=  def rotation_snapshot_is_valid:)/,
+  )?.[0] ?? '';
+  assert.ok(runtimeDefinitions, 'forward summary runtime validator must be extractable');
+
+  const names = [
+    'checker',
+    'diff_checker',
+    'format',
+    'inserter',
+    'log',
+    'rotate',
+    'service',
+    'timer',
+  ];
+  const summary = {
+    runtime_artifacts: names.map((name, index) => ({
+      candidate: `/runtime/${name}.candidate-gl-a-${operationId}`,
+      dev: index + 1,
+      final: `/runtime/${name}`,
+      gid: 0,
+      ino: index + 101,
+      mode: name === 'log' ? '640' : '644',
+      name,
+      sha256: 'a'.repeat(64),
+      uid: 0,
+    })),
+    runtime_artifacts_sealed: true,
+  };
+  const result = spawnSync(
+    'jq',
+    [
+      '--arg',
+      'operation_id',
+      operationId,
+      `${runtimeDefinitions}\nruntime_inventory_is_valid`,
+    ],
+    { input: JSON.stringify(summary), encoding: 'utf8' },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'true');
+});
+
+test('GL-a forward rotation verifier supplies the sealed logrotate identity', () => {
+  const forward = operations.match(
+    /\*\*GL-a 部署[\s\S]*?(?=\n本地在任何远端写之前)/,
+  )?.[0] ?? '';
+
+  assert.match(forward, /LOGROTATE_RUNTIME_ENTRY="\$\(ssh/);
+  assert.match(forward, /[.]logrotate/);
+  assert.match(forward, /[.]path == "\/usr\/sbin\/logrotate"/);
+  for (const field of ['dev', 'ino', 'sha256']) {
+    assert.ok(
+      forward.includes(`$(jq -er '.${field}' <<< "$LOGROTATE_RUNTIME_ENTRY")`),
+      `rotation-verify call omits logrotate ${field}`,
+    );
+  }
+});
+
 test('GL-a documents preserve both transcripts and fail closed on active log writers', () => {
   for (const [name, document] of [
     ['operations', operations],

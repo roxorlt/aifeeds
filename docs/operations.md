@@ -1425,8 +1425,10 @@ jq -e --arg operation_id "$OPERATION_ID" --arg g0_commit "$G0_COMMIT" \
     (.runtime_artifacts | type == "array") and (.runtime_artifacts | length) == 8 and
     ([.runtime_artifacts[].name] | sort) ==
       ["checker","diff_checker","format","inserter","log","rotate","service","timer"] and
-    ([.runtime_artifacts[].final] | length) == (unique | length) and
-    ([.runtime_artifacts[].candidate] | length) == (unique | length) and
+    ([.runtime_artifacts[].final] | length) ==
+      ([.runtime_artifacts[].final] | unique | length) and
+    ([.runtime_artifacts[].candidate] | length) ==
+      ([.runtime_artifacts[].candidate] | unique | length) and
     all(.runtime_artifacts[];
       (keys | sort) == ["candidate","dev","final","gid","ino","mode","name","sha256","uid"] and
       (.candidate | test("[.]candidate-gl-a-" + $operation_id + "$")) and
@@ -1526,6 +1528,15 @@ ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
      '0 0 600 $ROTATION_ANCHOR_DEV $ROTATION_ANCHOR_INO $ROTATION_ANCHOR_SIZE'; \
    test \"\$(timeout 15s sha256sum '$REMOTE_ROTATION_ANCHOR' | awk '{print \$1}')\" = \
      '$ROTATION_ANCHOR_SHA256'"
+LOGROTATE_RUNTIME_ENTRY="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231 "timeout 15s jq -cS '.logrotate' '$REMOTE_ROTATION_ANCHOR'")"
+jq -e '
+  (keys | sort) == ["dev","gid","ino","mode","path","sha256","size","uid"] and
+  .path == "/usr/sbin/logrotate" and .uid == 0 and .gid == 0 and .mode == "755" and
+  (.dev | type == "number" and . > 0 and . == floor) and
+  (.ino | type == "number" and . > 0 and . == floor) and
+  (.size | type == "number" and . > 0 and . == floor) and
+  (.sha256 | test("^[a-f0-9]{64}$"))' <<< "$LOGROTATE_RUNTIME_ENTRY" >/dev/null
 RECORDED_ROTATION_SNAPSHOT="$(jq -cS '.rotation_state_snapshot' "$LOCAL_SUMMARY_TMP")"
 CHECKER_RUNTIME_ENTRY="$(jq -cer '[.runtime_artifacts[] | select(.name == "checker")] |
   if length == 1 then .[0] else error("checker identity") end' "$LOCAL_SUMMARY_TMP")"
@@ -1541,7 +1552,10 @@ CURRENT_ROTATION_SNAPSHOT="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
     '$(jq -er '.sha256' <<< "$CHECKER_RUNTIME_ENTRY")' \
     '$(jq -er '.dev' <<< "$CONFIG_RUNTIME_ENTRY")' \
     '$(jq -er '.ino' <<< "$CONFIG_RUNTIME_ENTRY")' \
-    '$(jq -er '.sha256' <<< "$CONFIG_RUNTIME_ENTRY")'")"
+    '$(jq -er '.sha256' <<< "$CONFIG_RUNTIME_ENTRY")' \
+    '$(jq -er '.dev' <<< "$LOGROTATE_RUNTIME_ENTRY")' \
+    '$(jq -er '.ino' <<< "$LOGROTATE_RUNTIME_ENTRY")' \
+    '$(jq -er '.sha256' <<< "$LOGROTATE_RUNTIME_ENTRY")'")"
 jq -e --argjson recorded "$RECORDED_ROTATION_SNAPSHOT" '
   .generation >= $recorded.generation and
   .ledger.path == $recorded.ledger.path and
