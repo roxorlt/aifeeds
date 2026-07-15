@@ -556,6 +556,23 @@ describe('daily video native rendering and historical marker patch', () => {
     expect(ld['@graph'][1]['@type']).toBe('VideoObject');
     expect(patched).toContain('<p>历史正文</p>');
   });
+
+  test('historical patch preserves dollar-number sequences as JSON-LD data', () => {
+    const legacyNode = {
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      name: '历史日报',
+      description: "We're committing $10 million to AI research.",
+    };
+    const html = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify(legacyNode)}</script></head><body><main><p>历史正文</p></main></body></html>`;
+
+    const patched = patchDailyPageVideoHtml(html, mkVideo(), envFixture());
+    const ld = extractJsonLd(patched);
+
+    expect(ld['@graph'][0].description).toBe(legacyNode.description);
+    expect(ld['@graph'].filter((node: any) => node['@type'] === 'CollectionPage')).toHaveLength(1);
+    expect(ld['@graph'].filter((node: any) => node['@type'] === 'VideoObject')).toHaveLength(1);
+  });
 });
 
 // ── build 层:mock 选品 + mock env.DB ──
