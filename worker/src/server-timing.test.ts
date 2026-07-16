@@ -23,6 +23,7 @@ import {
   jsonResponse,
   type Env,
 } from './index';
+import worker from './index';
 
 describe('formatServerTiming', () => {
   it('formats only measurable D1 I/O metrics in a stable order', () => {
@@ -214,6 +215,91 @@ describe('jsonResponse performance headers', () => {
 
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('');
     expect(response.headers.has('Timing-Allow-Origin')).toBe(false);
+  });
+});
+
+describe('cached search response request ids', () => {
+  it.each([
+    '/api/search?q=AI',
+    '/api/search/suggest?prefix=AI',
+  ])('adds the current relay request id outside the Cache API for %s', async (path) => {
+    const cached = new Response(JSON.stringify({ cached: true }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=60',
+        'X-Request-Id': 'stale-cached-request-id',
+      },
+    });
+    vi.stubGlobal('caches', {
+      default: {
+        match: vi.fn(async () => cached.clone()),
+      },
+    });
+    const request = new Request(`https://api.ai-feeds.com${path}`, {
+      headers: {
+        Origin: 'https://ai-feeds.com',
+        'X-Request-Id': 'nginx-search-current',
+      },
+    });
+
+    try {
+      const response = await worker.fetch(
+        request,
+        {} as Env,
+        { waitUntil: vi.fn() } as unknown as ExecutionContext,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('X-Request-Id')).toBe('nginx-search-current');
+      expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://ai-feeds.com');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps request ids out of a newly cached search response', async () => {
+    const cachedPuts: Response[] = [];
+    const waits: Promise<unknown>[] = [];
+    vi.stubGlobal('caches', {
+      default: {
+        match: vi.fn(async () => undefined),
+        put: vi.fn(async (_key: Request, response: Response) => {
+          cachedPuts.push(response.clone());
+        }),
+      },
+    });
+    const statement = {
+      bind: vi.fn(() => statement),
+      all: vi.fn(async () => ({ results: [] })),
+    };
+    const env = {
+      DB: { prepare: vi.fn(() => statement) },
+      AUTH_KV: {
+        get: vi.fn(async () => '0'),
+        put: vi.fn(async () => undefined),
+      },
+    } as unknown as Env;
+    const ctx = {
+      waitUntil: (promise: Promise<unknown>) => waits.push(promise),
+    } as unknown as ExecutionContext;
+
+    try {
+      const response = await worker.fetch(
+        new Request('https://api.ai-feeds.com/api/search?q=AI', {
+          headers: { 'X-Request-Id': 'nginx-search-miss' },
+        }),
+        env,
+        ctx,
+      );
+      await Promise.all(waits);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('X-Request-Id')).toBe('nginx-search-miss');
+      expect(cachedPuts).toHaveLength(1);
+      expect(cachedPuts[0].headers.get('X-Request-Id')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

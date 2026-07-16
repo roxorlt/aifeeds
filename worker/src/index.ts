@@ -477,6 +477,18 @@ function withCors(resp: Response, request: Request, env: Env): Response {
   return new Response(resp.body, { status: resp.status, headers: newHeaders });
 }
 
+function withCorsAndRequestId(resp: Response, request: Request, env: Env): Response {
+  const newHeaders = new Headers(resp.headers);
+  for (const [k, v] of Object.entries(corsHeaders(request, env))) {
+    newHeaders.set(k, v);
+  }
+  newHeaders.set(
+    'X-Request-Id',
+    resolveRequestId(request.headers.get('X-Request-Id')),
+  );
+  return new Response(resp.body, { status: resp.status, headers: newHeaders });
+}
+
 // 互相重叠的 source cron 必须作为独立 action 执行，不能再放进下方带大量 early-return
 // 的 legacy mode dispatcher。这样 :20/:50 的 HDX、HF、blog/weibo/podcast 不会彼此遮蔽。
 async function runScheduledSourceAction(env: Env, action: SourceCronAction): Promise<void> {
@@ -670,10 +682,10 @@ export default {
       }
       // C 端搜索（bot gate 不豁免——保持被 UA 闸拦截，见 isBotGateExempt）。
       if (path === '/api/search' && request.method === 'GET') {
-        return withCors(await handleSearch(request, env, ctx), request, env);
+        return withCorsAndRequestId(await handleSearch(request, env, ctx), request, env);
       }
       if (path === '/api/search/suggest' && request.method === 'GET') {
-        return withCors(await handleSearchSuggest(request, env, ctx), request, env);
+        return withCorsAndRequestId(await handleSearchSuggest(request, env, ctx), request, env);
       }
       // POST /api/items/:id/refresh — drawer 打开时调用 on-demand enrich（PR6.6）
       const itemRefreshMatch = path.match(/^\/api\/items\/(.+)\/refresh$/);

@@ -1142,7 +1142,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           </div>
         )}
         {placeholder ? (
-          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-600">
             暂无数据源
           </div>
         ) : error ? (
@@ -1163,7 +1163,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             ))}
           </>
         ) : items.length === 0 ? (
-          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-600">
             {isHdx && (hdxWhen || hdxCity || hdxForm)
               ? hdxWhen
                 ? "该时段暂无活动"

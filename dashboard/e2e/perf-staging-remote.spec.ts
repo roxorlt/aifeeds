@@ -1099,9 +1099,9 @@ test.describe("perf-staging remote acceptance", () => {
           if (url.pathname !== "/img") return false;
           return /\.(?:mp4|mov|webm)(?:$|[?#])/i.test(url.searchParams.get("url") || "");
         }).length;
-      const phAvatars = [...document.querySelectorAll<HTMLImageElement>('img.rounded-full')]
-        .map((image) => new URL(image.currentSrc || image.src, location.href))
-        .filter((url) => url.hostname.endsWith(".imgix.net"));
+      const phAvatars = [...document.querySelectorAll<HTMLImageElement>(
+        '[data-feed-source="product_hunt"] img.rounded-full',
+      )].map((image) => new URL(image.currentSrc || image.src, location.href));
       return {
         viewportAllowsZoom: !["no", "0"].includes(viewportDirectives.get("user-scalable") || "")
           && (!viewportDirectives.has("maximum-scale")
@@ -1111,7 +1111,11 @@ test.describe("perf-staging remote acceptance", () => {
         namelessButtons,
         videoViaImageProxy,
         imageProxyTargetsVideo,
-        oversizedPhAvatars: phAvatars.filter((url) => {
+        invalidPhAvatars: phAvatars.filter((url) => {
+          const isR2Avatar = url.hostname === "staging-api.ai-feeds.com"
+            && /^\/r\/ph\/[a-f0-9]{64}\.(?:png|jpg|gif|webp|svg|avif|ico)$/i.test(url.pathname);
+          if (isR2Avatar) return false;
+          if (!url.hostname.endsWith(".imgix.net")) return true;
           const width = Number(url.searchParams.get("w"));
           const height = Number(url.searchParams.get("h"));
           return !Number.isFinite(width) || width < 16 || width > 96
@@ -1127,7 +1131,7 @@ test.describe("perf-staging remote acceptance", () => {
       namelessButtons: 0,
       videoViaImageProxy: 0,
       imageProxyTargetsVideo: 0,
-      oversizedPhAvatars: 0,
+      invalidPhAvatars: 0,
     });
     if (testInfo.project.name.startsWith("desktop-")) expect(phAvatarCount).toBeGreaterThan(0);
     const axeResult = await new AxeBuilder({ page })
@@ -1336,6 +1340,12 @@ test.describe("perf-staging remote acceptance", () => {
     await swipeToNextChannel(page, testInfo.project.name);
     await expect.poll(() => nextFeedStatuses.some((status) => status >= 200 && status < 300)).toBe(true);
     await expect(page.locator('[data-feed-source="blog,podcast"]')).toBeVisible();
+    const firstBlogImage = page.locator(
+      '[data-feed-source="blog,podcast"] img[data-media-priority], '
+      + '[data-feed-source="blog,podcast"] [data-media-priority] img',
+    ).first();
+    await expect(firstBlogImage).toBeAttached();
+    await firstBlogImage.scrollIntoViewIfNeeded();
     await settleVisibleCardMedia(page, mediaRequestRecords);
     const imageSummary = await page.evaluate(() => {
       const images = [...document.querySelectorAll<HTMLImageElement>(
