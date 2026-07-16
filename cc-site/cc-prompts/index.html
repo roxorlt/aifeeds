@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code 提示词库 · 中文版</title>
+<meta name="description" content="Claude Code 官方 Prompt Library 中文版：52 条官方提示词中英对照，可填写占位符、一键复制，按开发阶段与角色分类，支持中英文搜索。">
+<link rel="canonical" href="https://ai-feeds.cc/cc-prompts/">
+<meta property="og:title" content="Claude Code 提示词库 · 中文版">
+<meta property="og:description" content="52 条 Claude Code 官方提示词中英对照，可填写占位符、一键复制，按开发阶段与角色分类。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://ai-feeds.cc/cc-prompts/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90' fill='%23D97757'%3E✳%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  --accent: #D97757;
+  --accent-bg: rgba(217,119,87,0.07);
+  --bg: #ffffff;
+  --surface: #FAFAF7;
+  --sidebar-bg: #FAF9F5;
+  --border: #E8E6DC;
+  --border-subtle: rgba(31,30,29,0.08);
+  --text: #141413;
+  --text-2: #5E5D59;
+  --text-3: #73726C;
+  --text-4: #9C9A92;
+  --box-bg: #141413;
+  --box-text: #f0eee6;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Anthropic Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+html[data-theme="dark"] {
+  --bg: #1f1e1d;
+  --surface: #262624;
+  --sidebar-bg: #1a1918;
+  --border: #3d3d3a;
+  --border-subtle: rgba(240,238,230,0.08);
+  --text: #f0eee6;
+  --text-2: #bfbdb4;
+  --text-3: #91908a;
+  --text-4: #73726c;
+  --box-bg: #141413;
+  --box-text: #f0eee6;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) , html[data-theme="auto"] {
+    --bg: #1f1e1d;
+    --surface: #262624;
+    --sidebar-bg: #1a1918;
+    --border: #3d3d3a;
+    --border-subtle: rgba(240,238,230,0.08);
+    --text: #f0eee6;
+    --text-2: #bfbdb4;
+    --text-3: #91908a;
+    --text-4: #73726c;
+    --box-bg: #141413;
+    --box-text: #f0eee6;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--sans);
+  font-size: 16px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font-family: inherit; cursor: pointer; }
+code { font-family: var(--mono); }
+
+/* ---------- 布局 ---------- */
+.layout { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 272px; flex-shrink: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  position: sticky; top: 0; height: 100vh;
+  overflow-y: auto; padding: 20px 14px 20px 18px;
+  scrollbar-width: thin;
+}
+.content { flex: 1; min-width: 0; padding: 28px 40px 80px; }
+.container { max-width: 860px; margin: 0 auto; }
+
+/* ---------- 侧边栏 ---------- */
+.brand { display: flex; align-items: flex-start; gap: 10px; padding: 4px 6px 16px; }
+.brand-mark {
+  color: var(--accent); font-size: 22px; line-height: 1.15;
+  font-family: Georgia, serif;
+}
+.brand-name { font-size: 16.5px; font-weight: 600; line-height: 1.3; }
+.brand-sub { font-size: 12px; color: var(--text-4); margin-top: 2px; font-weight: 400; }
+.nav-h {
+  font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--text-4); margin: 18px 6px 6px; display: flex; align-items: baseline; gap: 6px;
+}
+.nav-h .en { font-size: 10px; letter-spacing: 0.05em; }
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  padding: 6px 10px; border: none; border-radius: 7px;
+  background: transparent; color: var(--text-2); font-size: 14px;
+  margin-bottom: 1px;
+}
+.nav-item:hover { background: var(--border-subtle); color: var(--text); }
+.nav-item.on { background: var(--accent-bg); color: var(--accent); font-weight: 500; }
+.nav-item .n {
+  margin-left: auto; font-size: 11.5px; color: var(--text-4);
+  background: var(--border-subtle); border-radius: 999px; padding: 1px 8px;
+}
+.nav-item.on .n { background: rgba(217,119,87,0.14); color: var(--accent); }
+.nav-item .star { color: var(--accent); }
+.role-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px; }
+.role-chip {
+  padding: 4px 11px; border: 1px solid var(--border); background: var(--bg);
+  font-size: 12.5px; color: var(--text-2); border-radius: 999px;
+}
+.role-chip:hover { background: var(--surface); }
+.role-chip.on { background: var(--text); border-color: var(--text); color: var(--bg); }
+.side-foot { margin-top: 26px; padding: 14px 6px 0; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-4); line-height: 1.9; }
+.theme-btn {
+  display: flex; align-items: center; gap: 6px; width: fit-content;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-2);
+  border-radius: 999px; padding: 4px 12px; font-size: 12.5px; margin-bottom: 8px;
+}
+.theme-btn:hover { background: var(--surface); }
+
+/* ---------- 顶部搜索 ---------- */
+.topbar { display: none; }
+.searchbox {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 18px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 12px;
+  margin-bottom: 20px;
+}
+.searchbox svg { color: var(--text-4); flex-shrink: 0; }
+.searchbox input {
+  flex: 1; border: none; outline: none; background: transparent;
+  font-size: 16px; color: var(--text); font-family: var(--sans);
+}
+.searchbox input::placeholder { color: var(--text-4); }
+.searchbox .count { font-size: 13.5px; color: var(--text-4); flex-shrink: 0; }
+.searchbox .clear-x {
+  border: none; background: none; color: var(--text-4); font-size: 15px; padding: 0 2px;
+  display: none;
+}
+.searchbox .clear-x:hover { color: var(--text-2); }
+
+/* ---------- 视图头 ---------- */
+.view-head { margin: 4px 0 22px; }
+.view-head h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
+.view-head .desc { font-size: 15px; color: var(--text-3); line-height: 1.7; }
+.group-h {
+  font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-4); margin: 26px 0 12px;
+}
+.group-h .phase { color: var(--text-3); }
+
+/* ---------- 卡片（复刻官方 .pl-card） ---------- */
+.card {
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  margin-bottom: 12px; background: var(--bg); overflow: hidden;
+  padding: 14px 18px;
+}
+.card.open { border-color: var(--border); background: var(--surface); }
+.card-head {
+  width: 100%; display: flex; align-items: baseline; gap: 12px;
+  border: none; background: transparent; text-align: left; padding: 0;
+}
+.card-title { flex: 1; font-size: 17px; font-weight: 500; color: var(--text); min-width: 0; }
+.card-title .en-sub { display: block; font-size: 12.5px; font-weight: 400; color: var(--text-4); margin-top: 2px; }
+.chip {
+  font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; flex-shrink: 0;
+  background: var(--accent-bg); color: var(--accent);
+}
+.preview {
+  display: block; font-family: var(--mono); font-size: 13px; color: var(--text-3);
+  margin-top: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.match-snip {
+  display: block; font-size: 13.5px; color: var(--text-3);
+  margin-top: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.match-snip mark { background: var(--accent-bg); color: var(--text); padding: 1px 2px; border-radius: 3px; }
+.card-body { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.lbl {
+  font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-4); margin: 12px 0 8px; display: flex; align-items: center; gap: 12px;
+}
+.lang-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.lang-seg button {
+  border: none; background: var(--bg); color: var(--text-3);
+  font-size: 11px; padding: 3px 10px; letter-spacing: 0.03em;
+}
+.lang-seg button.on { background: var(--accent); color: #fff; }
+.hint { font-size: 14px; color: var(--text-3); margin: 0 0 10px; line-height: 1.7; }
+.hint.strong { color: var(--text-2); }
+.needs-lbl {
+  display: inline-block; font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 2px 7px; margin-right: 6px;
+  border-radius: 4px; background: var(--accent-bg); color: var(--accent);
+}
+.hint-chip {
+  font-family: var(--mono); font-size: 0.92em;
+  background: var(--accent-bg); color: var(--accent);
+  border-bottom: 1.5px dashed var(--accent);
+  border-radius: 3px 3px 0 0; padding: 1px 5px;
+}
+.prompt-box {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; background: var(--box-bg); color: var(--box-text);
+  border-radius: 8px; font-family: var(--mono); font-size: 14.5px;
+}
+.prompt-box .caret { color: var(--accent); flex-shrink: 0; }
+.prompt-box code { flex: 1; background: none; padding: 0; color: inherit; white-space: pre-wrap; line-height: 1.95; word-break: break-word; }
+.slot {
+  font-family: var(--mono); font-size: inherit;
+  background: rgba(217,119,87,0.15); color: var(--box-text);
+  border: none; border-bottom: 1.5px dashed var(--accent);
+  border-radius: 4px 4px 0 0; padding: 2px 6px; margin: 0 1px;
+  outline: none; min-width: 6ch; max-width: 100%;
+  box-sizing: content-box; cursor: text;
+}
+.slot:hover { background: rgba(217,119,87,0.22); }
+.slot:focus { background: rgba(217,119,87,0.28); border-bottom-style: solid; }
+.slot::placeholder { color: rgba(240,238,230,0.45); font-style: italic; }
+.copy-btn {
+  font-size: 12.5px; padding: 6px 12px; border-radius: 6px;
+  background: var(--accent); color: #fff; border: none; flex-shrink: 0;
+  transition: background 0.15s;
+}
+.copy-btn.ok { background: #4a8c5c; }
+.teaches { font-size: 15px; color: var(--text-2); margin: 4px 0 0; line-height: 1.75; }
+.teaches code, .hint code, .next-box code {
+  background: var(--border-subtle); padding: 1px 5px; border-radius: 4px; font-size: 0.9em;
+}
+.next-box {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 14px 0 0; padding: 10px 12px;
+  background: var(--accent-bg); border-radius: 8px; font-size: 14px; line-height: 1.7;
+}
+.next-lbl {
+  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--accent); font-weight: 600; flex-shrink: 0;
+}
+.src-line { font-size: 13.5px; color: var(--text-4); margin: 14px 0 0; }
+.empty {
+  padding: 36px; text-align: center; color: var(--text-4);
+  border: 1px dashed var(--border); border-radius: 10px; margin-top: 20px;
+}
+
+/* ---------- 关于页 ---------- */
+.about { font-size: 15.5px; line-height: 1.85; color: var(--text-2); }
+.about h2 { font-size: 20px; color: var(--text); margin: 34px 0 12px; font-weight: 600; }
+.about p { margin: 0 0 14px; }
+.about ul { margin: 0 0 14px; padding-left: 22px; }
+.about li { margin-bottom: 6px; }
+.about strong { color: var(--text); }
+.about .prompt-box { margin: 12px 0 18px; font-size: 14px; }
+.about-meta {
+  margin-top: 40px; padding: 14px 18px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  font-size: 13px; color: var(--text-3); line-height: 2;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 900px) {
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    position: sticky; top: 0; z-index: 30;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+  }
+  .topbar .brand-name { font-size: 15px; }
+  .menu-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 10px; font-size: 15px; color: var(--text); }
+  .layout { display: block; }
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 40; height: 100%;
+    transform: translateX(-105%); transition: transform 0.22s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.15);
+  }
+  .sidebar.show { transform: translateX(0); }
+  .content { padding: 20px 16px 60px; }
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 35; display: none; }
+  .scrim.show { display: block; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="打开目录">☰</button>
+  <span class="brand-mark">✳</span><span class="brand-name">Claude Code 提示词库</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="brand-mark">✳</span>
+      <div>
+        <div class="brand-name">Claude Code 提示词库</div>
+        <div class="brand-sub" id="brandSub">中文版</div>
+      </div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <button class="theme-btn" id="themeBtn">🌗 主题：自动</button>
+      <button class="theme-btn" id="langBtn">🌐 Prompt 默认：英文</button>
+    </div>
+  </aside>
+  <main class="content">
+    <div class="container">
+      <div class="searchbox">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input type="text" id="q" placeholder="搜索提示词（支持中英文关键词）…" aria-label="搜索提示词">
+        <button class="clear-x" id="clearX" aria-label="清空搜索">✕</button>
+        <span class="count" id="count"></span>
+      </div>
+      <div id="view"><div class="view-head"><h1>Claude Code 官方提示词库 · 中文版</h1><div class="desc">52 条官方提示词中英对照，按开发阶段（发现 → 设计 → 构建 → 交付 → 运维）与角色分类，可填写占位符、一键复制。数据来自 <a href="https://code.claude.com/docs/en/prompt-library">code.claude.com 官方 Prompt library</a>。</div></div><div class="group-h"><span class="phase">发现</span> · 入门</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">在新仓库中快速上手<span class="en-sub">Get oriented in a new repository</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>give me an overview of this codebase: architecture, key directories, and how the pieces connect</code></div><div class="prompt-box"><span class="caret">❯</span><code>给我概述一下这个代码库：架构、关键目录，以及各部分如何连接</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">描述你想知道什么，而不是要读哪些文件。Claude 会自行探索项目，并返回各部分如何组合的摘要。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>运行 <code>/init</code> 设置 <code>CLAUDE.md</code>，让 Claude 在每个会话中都记住这些信息</span></div></div></article><div class="group-h"><span class="phase">发现</span> · 理解</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">解释不熟悉的代码<span class="en-sub">Explain unfamiliar code</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>explain what src/scheduler/queue.ts does and how data flows through it. write it up as an HTML page with a diagram, then open it in my browser</code></div><div class="prompt-box"><span class="caret">❯</span><code>解释 src/scheduler/queue.ts 的作用以及数据如何流经它。以 包含图表的 HTML 页面，然后在浏览器中打开 形式输出</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指定文件并说明你想要的回答格式。可以将 HTML 页面替换为图表、要点列表或任何适合你学习方式的格式。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>设置输出风格，让 Claude 始终以你偏好的格式解释</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">查找某件事发生的位置<span class="en-sub">Find where something happens</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>where do we validate uploaded file types?</code></div><div class="prompt-box"><span class="caret">❯</span><code>我们在哪里 验证上传的文件类型？</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">根据行为而不是文件名搜索。即使你不知道文件叫什么或位于哪个目录，搜索也能生效。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">删除前检查哪些会受影响<span class="en-sub">Check what breaks before you delete</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>what would break if I deleted the retryWithBackoff helper?</code></div><div class="prompt-box"><span class="caret">❯</span><code>如果我删除 retryWithBackoff 辅助函数，哪些地方会出问题？</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在移除任何内容前先询问。调用方列表和下游影响会告诉你，这只是一行代码清理，还是需要协调的变更。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">追溯代码演变过程<span class="en-sub">Trace how code evolved</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>look through the commit history of internal/auth/session.go and summarize how it evolved and why</code></div><div class="prompt-box"><span class="caret">❯</span><code>查看 internal/auth/session.go 的提交历史，总结其演变过程及原因</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">当问题是“为什么”而非“是什么”时，直接指向提交历史。Claude 会读取你使用的版本控制的日志和 blame 信息，解释当前实现背后的决策。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">开始前评估变更范围<span class="en-sub">Scope a change before you start</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>which files would I need to touch to add a dark mode toggle to settings?</code></div><div class="prompt-box"><span class="caret">❯</span><code>我需要修改哪些文件才能 在设置中添加深色模式开关？</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在将工作纳入路线图之前，先评估工作量。文件列表会告诉你这是影响单个组件还是跨组件的变更。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">向代码库提问产品问题<span class="en-sub">Ask the codebase a product question</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>I am a PM. walk me through what happens when a user clicks Export to PDF, from the UI down to the result</code></div><div class="prompt-box"><span class="caret">❯</span><code>我是一名 产品经理。请带我走查一下，当用户 点击导出为 PDF 时，从 UI 到结果的全过程是怎样的</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">说明你的角色，这样回答会匹配正确的层次。Claude 会根据源代码解释产品实际做了什么，你无需亲自阅读代码。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>设置输出风格，让 Claude 始终以此层次回答问题</span></div></div></article><div class="group-h"><span class="phase">设计</span> · 规划</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">在动代码之前规划多文件变更<span class="en-sub">Plan a multi-file change before touching code</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>plan how to refactor the payment module to support multiple currencies. list the files you would change, but don't edit anything yet</code></div><div class="prompt-box"><span class="caret">❯</span><code>规划如何重构 支付模块 以实现 支持多种货币。列出要修改的文件，但暂时不要编辑任何内容</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">加上“暂时不要编辑”可以将探索与变更分开，让你在代码变动前看到方案。要在每个提示中默认采用先计划模式，可以按 Shift+Tab 进入 <a href="https://code.claude.com/docs/en/permission-modes#analyze-before-you-edit-with-plan-mode">计划模式</a>。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">通过访谈起草规范<span class="en-sub">Draft a spec by interview</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>I want to build per-workspace rate limits. interview me about implementation, UX, edge cases, and tradeoffs until we have covered everything, then write the spec to SPEC.md</code></div><div class="prompt-box"><span class="caret">❯</span><code>我想构建 每个工作区的速率限制。请就实现、UX、边缘情况和权衡对我进行访谈，直到我们覆盖所有内容，然后将规范写入 SPEC.md</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">要求接受访谈，而不是自己写规范。Claude 会向你提出结构化问题，直到需求完整，然后将结果写入文件。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将你的访谈问题保存为 <code>/spec</code> 技能，让每个规范都以相同方式开始</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">将会议转化为工单<span class="en-sub">Turn a meeting into tickets</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read @meeting-notes.md and write up the action items, then create a Linear ticket for each with acceptance criteria</code></div><div class="prompt-box"><span class="caret">❯</span><code>阅读 @meeting-notes.md 并撰写行动项，然后为每个行动项创建一个 Linear 工单，并附上验收标准</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">跳过转录步骤。Claude 通过 <a href="https://code.claude.com/docs/en/mcp">MCP</a> 从非结构化输入中提取行动项，并直接写入你的追踪器，这样你只需审核工单，而非会议记录。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将此保存为 <code>/tickets</code> 技能</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">在构建之前梳理边界情况<span class="en-sub">Map edge cases before building</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>list the error states, empty states, and edge cases for the file upload flow that the design needs to cover</code></div><div class="prompt-box"><span class="caret">❯</span><code>列出 文件上传流程 需要覆盖的错误状态、空状态和边界情况</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">询问缺失的部分，而非已有的部分。Claude 会列出快乐路径设计往往忽略的错误状态、空状态和边界情况。</div></div></article><div class="group-h"><span class="phase">设计</span> · 原型</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">将模型转化为可运行的原型<span class="en-sub">Turn a mockup into a working prototype</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>here is a mockup. build a working prototype I can click through, matching the layout and states shown</code></div><div class="prompt-box"><span class="caret">❯</span><code>这是一个模型。构建一个我可以点击交互的可运行原型，匹配所示的布局和状态</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">可点击的原型能回答静态模型无法回答的问题。将可运行的代码交给工程团队，而无需在文档中解释交互细节。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据截图实现并自我检查<span class="en-sub">Implement from a screenshot and self-check</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>implement this design, then take a screenshot of the result, compare it to the original, and fix any differences</code></div><div class="prompt-box"><span class="caret">❯</span><code>实现此设计，然后截取结果截图，将其与原图对比，并修复任何差异</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">这为 Claude 提供了一个验证循环：它进行渲染，与源图像对比，然后迭代，而无需你逐一指出差距。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>使用 <code>/goal</code> 让 Claude 持续迭代，直到截图匹配为止</span></div></div></article><div class="group-h"><span class="phase">构建</span> · 实现</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">遵循现有模式<span class="en-sub">Follow an existing pattern</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>look at how the GitHub webhook handler is implemented to understand the pattern, then build a Stripe webhook handler the same way</code></div><div class="prompt-box"><span class="caret">❯</span><code>查看 GitHub webhook 处理器 是如何实现的以理解其模式，然后以相同的方式构建 一个 Stripe webhook 处理器</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指向你认可的已有代码。如果没有参考，Claude 会默认采用通用最佳实践。有了参考，它会匹配你的代码库实际使用的约定。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>要求 Claude 将所遵循的模式写入 <code>CLAUDE.md</code>，以便未来的会话无需参考即可匹配</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">为未文档化的代码生成文档<span class="en-sub">Generate docs for undocumented code</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>find the public functions in src/auth/ without JSDoc comments and add them, matching the style already used in the file</code></div><div class="prompt-box"><span class="caret">❯</span><code>查找 src/auth/ 中的公共函数 中缺少 JSDoc 注释的代码，并添加注释，匹配文件中已使用的风格</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指定范围和格式。Claude 会找到缺失的部分，并匹配文件中已有的注释风格，因此新文档读起来会与其余部分一致。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">添加一个小而明确的功能<span class="en-sub">Add a small, well-defined feature</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>add a /health endpoint that returns the app version and uptime</code></div><div class="prompt-box"><span class="caret">❯</span><code>添加一个返回 应用版本和正常运行时长 的 /health 端点</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">说明输入和输出，而非如何构建。Claude 会找到类似代码所在的位置，并将你的代码添加在旁边。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">从零开始构建一个小的内部工具<span class="en-sub">Build a small internal tool from scratch</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>create a drag-and-drop Kanban board with three columns using HTML, CSS, and vanilla JavaScript, then open it in my browser</code></div><div class="prompt-box"><span class="caret">❯</span><code>使用 HTML、CSS 和原生 JavaScript 创建一个 带有三列的拖放式看板，然后在浏览器中打开它</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">你不需要项目、框架或构建步骤。描述这个工具，并让 Claude 打开它，这样你就能立即看到它运行。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">端到端地处理一个问题<span class="en-sub">Work an issue end to end</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read issue #312, implement the fix, and run the tests</code></div><div class="prompt-box"><span class="caret">❯</span><code>阅读 issue #312，实现修复，并运行测试</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">提供问题编号，而非摘要。Claude 会自行阅读完整的工单，因此你可能忘记提及的需求都会被纳入，并在报告前验证变更。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">查找并更新代码库中的文案<span class="en-sub">Find and update copy across the codebase</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>find every place we say &quot;Sign up free&quot; or a close variant, show me each one in context, then update them all to &quot;Start free trial&quot;. leave tests and the changelog alone</code></div><div class="prompt-box"><span class="caret">❯</span><code>找出所有说“免费注册”或相似措辞的地方，在上下文中显示每个，然后把它们全部更新为“开始免费试用”。测试和变更日志不要动</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">要求变体并说明哪些要跳过。Claude 能找到字面搜索会遗漏的措辞，并保持测试固件和历史记录原样，这样你只审查用户真正看到的文案。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据以往示例起草文档<span class="en-sub">Draft a document from past examples</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read the privacy impact assessments in legal/pia/ to learn the structure and voice, then draft a new one for the new analytics integration</code></div><div class="prompt-box"><span class="caret">❯</span><code>阅读 legal/pia/ 里的 隐私影响评估 来学习结构和语调，然后为 新的分析集成 起草一份新的</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指向已完成工作的文件夹，而不是描述你的风格。Claude 从你已经发布的内容中学习结构和语调，这样初稿读起来就像是你的作品。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将语调保存为 skill，这样每个草稿都从这里开始</span></div></div></article><div class="group-h"><span class="phase">构建</span> · 测试</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">编写测试，运行它们，修复失败<span class="en-sub">Write tests, run them, fix failures</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>write tests for app/parsers/feed.py, run them, and fix any failures</code></div><div class="prompt-box"><span class="caret">❯</span><code>为 app/parsers/feed.py 编写测试，运行它们，并修复任何失败</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">要求一步完成编写、运行和修复，让 Claude 迭代执行，无需等待指令。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>运行 <code>/init</code>，让 Claude 自动学习你的测试命令</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据测试驱动实现<span class="en-sub">Drive implementation from tests</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>write tests for the password reset flow first, then implement it until they pass</code></div><div class="prompt-box"><span class="caret">❯</span><code>先为 密码重置流程 编写测试，然后实现它直到测试通过</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">测试驱动开发：测试定义了工作完成的标准，Claude 会迭代实现直到测试全部通过。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据覆盖率报告填补空缺<span class="en-sub">Fill gaps from a coverage report</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read coverage/coverage-summary.json and add tests for the lowest-covered files until each is above 80%</code></div><div class="prompt-box"><span class="caret">❯</span><code>读取 coverage/coverage-summary.json，为覆盖率最低的文件添加测试，直至每个文件高于 80%</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指向覆盖率报告，而不是猜测哪些未测试。Claude 读取实际数字，为最需要测试的文件编写测试。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将此设为 <code>/goal</code>，这样 Claude 会持续编写测试，直到覆盖率达到目标</span></div></div></article><div class="group-h"><span class="phase">构建</span> · 重构</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">跨代码库迁移模式<span class="en-sub">Migrate a pattern across the codebase</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>migrate everything from the old logging API to the structured logger: identify every place that needs to change, then make the changes</code></div><div class="prompt-box"><span class="caret">❯</span><code>把所有从 旧的日志 API 迁移到 结构化日志记录器：先找出每一处需要变更的地方，然后做出变更</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">描述旧模式和新模式。要求 Claude 先找出所有位置，确保调用点在响应中列出，这样你能检查是否有遗漏。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">将代码移植到另一种语言<span class="en-sub">Port code to another language</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>port this Python module to Rust, keeping the same public API and test behavior</code></div><div class="prompt-box"><span class="caret">❯</span><code>将 这个 Python 模块 移植到 Rust，保持相同的 公共 API 和测试行为</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">说明要保留什么，而不仅仅是目标语言。指明必须保持不变的 API 或行为，为 Claude 提供了一个检验移植的契约。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">针对可衡量的目标进行优化<span class="en-sub">Optimize against a measurable target</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>optimize the search query to bring p95 latency from 2s down to under 500ms</code></div><div class="prompt-box"><span class="caret">❯</span><code>优化 搜索查询，让 p95 延迟 从 2秒 降至 500毫秒 以下</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指明指标和目标，给 Claude 一个明确的完成定义。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将此设为 <code>/goal</code>，这样 Claude 会不断测量并迭代，直到达到该数值</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">修复一个精确的视觉 Bug<span class="en-sub">Fix a precise visual bug</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>the login button extends 20px beyond the card border on mobile. fix it.</code></div><div class="prompt-box"><span class="caret">❯</span><code>登录按钮 在 移动端 上超出了 卡片边框 20px，修复它。</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">精确的视觉反馈能得到精确的修复。说明具体元素、尺寸和视口。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>添加一个预览工具，这样 Claude 可以自行截图并验证修复</span></div></div></article><div class="group-h"><span class="phase">构建</span> · 审查</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">提交前检查你的更改<span class="en-sub">Review your changes before you commit</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>review my uncommitted changes and flag anything that looks risky before I commit</code></div><div class="prompt-box"><span class="caret">❯</span><code>在提交前，检查我未提交的更改，并将任何看起来有风险的地方标记出来</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在修复成本还很低时尽早发现问题。Claude 会完整读取已更改的文件，而不仅仅是差异行，因此能发现快速自查时遗漏的问题。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>用一条命令运行 <code>/code-review</code> 执行相同的检查</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">审查一个拉取请求<span class="en-sub">Review a pull request</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>review PR #247 and summarize what changed, then list any concerns</code></div><div class="prompt-box"><span class="caret">❯</span><code>审查 PR #247，总结变更内容，然后列出所有问题</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">Claude 在上下文中结合整个代码库进行审查，而不仅仅是差异内容。它会读取变更的代码及其调用的部分，因此能捕获仅查看差异的审查所遗漏的问题。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>使用 Code Review 对每个 PR 启用此功能</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">在应用前审查基础设施变更<span class="en-sub">Review infrastructure changes before applying</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>here is my Terraform plan output. what is this going to do, and is anything here going to cause problems?</code></div><div class="prompt-box"><span class="caret">❯</span><code>这是我的 Terraform plan 输出。这将会执行什么操作？其中是否存在会导致问题的内容？</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">Plan 输出内容密集且难以浏览。粘贴它后，在应用之前，你能获得一个用通俗语言总结的实际将要变更的内容。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">使用子代理运行安全审查<span class="en-sub">Run a security review with a subagent</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>use a subagent to review src/api/ for security issues and report what it finds</code></div><div class="prompt-box"><span class="caret">❯</span><code>使用一个子代理审查 src/api/ 中的安全问题，并报告发现的问题</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">一个<a href="https://code.claude.com/docs/en/sub-agents">子代理</a>会在自己的上下文窗口中运行审计，并返回摘要，因此长时间的安全审查不会填满你的主会话。内置的通用子代理无需额外设置即可处理此任务。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>设置一个你的整个团队都可以使用的专用安全审查子代理</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">在正式审查之前发现问题<span class="en-sub">Catch issues before formal review</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>review launch-post.md for unsupported claims, missing attributions, and brand-guideline issues and list anything I should fix before it goes to legal</code></div><div class="prompt-box"><span class="caret">❯</span><code>审查 launch-post.md 中是否存在 无根据的声明、缺失的署名以及品牌指南问题，并列出在发送给 法务 之前我应该修复的所有内容</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在人工投入时间之前，先进行一次初步审查。明确指出你想检查的问题，让审查更有针对性，然后修复发现的问题，发送更干净的草稿。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将你的审查检查清单捕获为团队可运行的技能</span></div></div></article><div class="group-h"><span class="phase">构建</span> · 引导</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">纠正错误的方法<span class="en-sub">Course-correct a wrong approach</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>that is not right: the function signature needs to stay backward-compatible. try a different approach</code></div><div class="prompt-box"><span class="caret">❯</span><code>那不正确：函数签名需要保持向后兼容。尝试一种不同的方法</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">指出 Claude 遗漏的具体约束，而不仅仅是说它错了。一个具体的理由能为 Claude 提供重试时需满足的明确约束，而不是再次猜测。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>按两下 <code>Esc</code> 打开回退菜单并恢复代码和对话，使重试从一个干净的状态开始</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">缩小变更范围<span class="en-sub">Narrow the scope of a change</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>that is too much. keep only the changes to the validation logic in src/forms/ and undo your other edits</code></div><div class="prompt-box"><span class="caret">❯</span><code>这范围太大了。仅保留对 src/forms/ 中的校验逻辑 所做的更改，并撤销你的其他编辑</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">当方向正确但变更范围过大时，让 Claude 保留其中一部分，而不是全部回退。明确边界可以防止小修复演变成重构。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">将一条纠正转化为规则<span class="en-sub">Turn a correction into a rule</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>you keep using default exports when this project uses named exports. add a rule to CLAUDE.md so this stops happening</code></div><div class="prompt-box"><span class="caret">❯</span><code>你总是 在本项目使用命名导出时却使用了默认导出。在 CLAUDE.md 中添加一条规则，以避免这种情况再次发生</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">聊天中的纠正不会与你的团队共享。项目 <a href="https://code.claude.com/docs/en/memory">CLAUDE.md</a> 中的规则一旦提交即被共享，Claude 会在每个会话开始时读取它。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>打开 <code>/memory</code> 查看 Claude 写的内容</span></div></div></article><div class="group-h"><span class="phase">交付</span> · Git</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">解决合并冲突<span class="en-sub">Resolve merge conflicts</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>resolve the merge conflicts in this branch and explain what you kept from each side</code></div><div class="prompt-box"><span class="caret">❯</span><code>解决此分支中的合并冲突，并说明你保留了各方的哪些内容</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">说明你想要的最终状态，而不是保留哪些冲突标记。询问推理过程能让合并变得可审查，而不是一个黑盒。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">生成提交信息并提交<span class="en-sub">Commit with a generated message</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>commit these changes with a message that summarizes what I did</code></div><div class="prompt-box"><span class="caret">❯</span><code>提交这些更改，并用一条概括我所做操作的信息作为提交信息</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">让 Claude 从差异中推导提交信息。它会匹配你仓库现有的提交风格。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据工单发起拉取请求<span class="en-sub">Open a pull request from a ticket</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>find the Linear ticket about the login timeout and open a PR that implements it</code></div><div class="prompt-box"><span class="caret">❯</span><code>找到关于 登录超时 的 Linear 工单，并打开一个实现它的 PR</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">省去在工单跟踪器、编辑器和 GitHub 之间切换上下文的麻烦。一条提示词即可读取规范、进行更改并打开 PR。</div></div></article><div class="group-h"><span class="phase">交付</span> · 发布</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">从 git 历史起草发布说明<span class="en-sub">Draft release notes from git history</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>compare v2.3.0 to v2.4.0 and draft release notes grouped by feature, fix, and breaking change</code></div><div class="prompt-box"><span class="caret">❯</span><code>比较 v2.3.0 到 v2.4.0，并起草按功能、修复和破坏性更改分组的发布说明</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">提供两个参考点和你想要的结构。Claude 读取它们之间的提交日志并起草一份你可以编辑的变更日志。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>将其保存为 <code>/changelog</code> 技能</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">编写 CI 工作流<span class="en-sub">Write a CI workflow</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>write a GitHub Actions workflow that runs the tests and deploys to staging on every push to main</code></div><div class="prompt-box"><span class="caret">❯</span><code>编写一个 GitHub Actions 工作流，在每次推送到 main 时 运行测试并部署到预发布环境</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">描述它应该在何时运行以及做什么；YAML 将为你生成，并与项目的构建和测试命令相匹配。</div></div></article><div class="group-h"><span class="phase">运维</span> · 调试</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">查找并修复失败的测试<span class="en-sub">Find and fix a failing test</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>the UserAuth test is failing, find out why and fix it</code></div><div class="prompt-box"><span class="caret">❯</span><code>UserAuth 测试失败了，找出原因并修复它</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">描述症状；你无需知道哪个文件出了问题。Claude 会运行测试来观察失败，追踪到源代码并修复它。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">排查报告的错误<span class="en-sub">Investigate a reported error</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>users are seeing 500 errors on /api/settings. investigate and tell me what is going on</code></div><div class="prompt-box"><span class="caret">❯</span><code>用户在 /api/settings 上看到了 500 错误。请调查并告诉我发生了什么</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">描述症状和位置；Claude 会读取相关代码路径并追踪可能的原因。如果你有堆栈跟踪或日志，请粘贴过来。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>在你的操作手册中放置一个深度链接，点击即可用预先填好此提示词的 Claude 打开</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">从根本上修复构建错误<span class="en-sub">Fix a build error at the root</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>here is a build error. fix the root cause and verify the build succeeds</code></div><div class="prompt-box"><span class="caret">❯</span><code>这里有一个构建错误。修复根本原因并验证构建成功</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">要求根本原因和验证可以防止仅压制错误而没有修复的表面补丁。</div></div></article><div class="group-h"><span class="phase">运维</span> · 事件</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">排查生产事件<span class="en-sub">Investigate a production incident</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>the checkout endpoint started returning 500s an hour ago. check the logs, recent deploys, and config changes, then tell me the most likely cause</code></div><div class="prompt-box"><span class="caret">❯</span><code>结账端点一小时前开始返回 500 错误。检查日志、最近的部署和配置更改，然后告诉我最可能的原因</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">列出要关联的证据来源，而不是要采取的步骤。Claude 会一起读取日志、git 历史和配置以缩小原因范围。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>通过 MCP 连接 Sentry 或你的日志存储</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据控制台截图诊断<span class="en-sub">Diagnose from a console screenshot</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>here is a screenshot of the GCP Kubernetes dashboard. walk me through why this pod is failing and give me the exact commands to fix it</code></div><div class="prompt-box"><span class="caret">❯</span><code>这是 GCP Kubernetes 仪表板 的截图。请带我了解为什么 这个 Pod 失败，并给我修复它的确切命令</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">云控制台会向你展示问题，但不会显示修复命令。Claude 会读取截图并将仪表板信息翻译成需要运行的 kubectl、gcloud 或 aws 命令。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">用通俗英语查询日志<span class="en-sub">Query logs in plain English</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>show me all failed logins for the auth service over the past 24 hours. write the query, run it, and tell me what stands out</code></div><div class="prompt-box"><span class="caret">❯</span><code>显示 失败的登录尝试 在 auth 服务 上的所有记录，时间范围为 过去 24 小时。写出查询语句，运行它，然后告诉我有什么突出之处</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">用提问代替写 SQL。Claude 会构建查询，在你连接的日志上运行，并同时显示查询语句和结果，以便你检查运行了什么。</div></div></article><div class="group-h"><span class="phase">运维</span> · 数据</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">分析数据文件<span class="en-sub">Analyze a data file</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read @reports/q1-signups.csv, summarize the key patterns, and write the results to an HTML page with charts, then open it in my browser</code></div><div class="prompt-box"><span class="caret">❯</span><code>读取 @reports/q1-signups.csv，总结关键模式，并将结果写入 一个带图表的 HTML 页面，然后在浏览器中打开它</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">一次性问题不需要写一次性脚本。只需指向项目文件夹中的文件，Claude 会直接读取、发现模式，并将输出写到你指定的位置。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>通过 MCP 连接数据源，而不是导出文件</span></div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">根据表现数据生成变体<span class="en-sub">Generate variations from performance data</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>read @ads-performance.csv, find the underperforming headlines, and generate 20 new variations that stay under 90 characters</code></div><div class="prompt-box"><span class="caret">❯</span><code>读取 @ads-performance.csv，找出表现不佳的 标题，并生成 20 个新的变体，每个不超过 90 个字符</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在开始时说明限制，这样生成内容会保持在限制内。Claude 读取指标，选择要替换的内容，并生成符合要求的替代方案。</div><div class="next-box"><span class="next-lbl">固化下来</span><span>通过 MCP 连接广告平台，而不是导出文件</span></div></div></article><div class="group-h"><span class="phase">运维</span> · 自动化</div><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">将重复任务变成技能<span class="en-sub">Turn a recurring task into a skill</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>create a /ship skill for this project that runs the linter and tests, then drafts a commit message</code></div><div class="prompt-box"><span class="caret">❯</span><code>为此项目创建一个 /ship 技能，该技能会 运行 linter 和测试，然后草拟提交信息</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">一次命名步骤，之后作为命令复用。Claude 会编写一个<a href="https://code.claude.com/docs/en/skills">技能</a>，你团队中的任何人都可以运行。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">为重复行为添加钩子<span class="en-sub">Add a hook for repeat behavior</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>write a hook that runs prettier after every edit to a .ts or .tsx file</code></div><div class="prompt-box"><span class="caret">❯</span><code>编写一个钩子，在每次 编辑 .ts 或 .tsx 文件 后 运行 prettier</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">钩子使行为自动化，无需每次记住去执行。描述触发条件和操作，Claude 会编写 <a href="https://code.claude.com/docs/en/hooks">hook</a> 配置。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">通过 MCP 连接工具<span class="en-sub">Connect a tool with MCP</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>set up the Sentry MCP server so you can read my error reports directly</code></div><div class="prompt-box"><span class="caret">❯</span><code>设置 Sentry MCP 服务器，以便你直接读取我的 错误报告</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">只需连接一次数据源，而不是每次会话都粘贴数据。在 <a href="https://code.claude.com/docs/en/mcp">MCP</a> 设置之后，Claude 在你询问时会直接从工具读取。</div></div></article><article class="card open"><h3 class="card-title" style="margin:0;font-size:17px">记录下次需要记住的内容<span class="en-sub">Capture what to remember for next time</span></h3><div class="card-body"><div class="prompt-box" style="margin-bottom:10px"><span class="caret">❯</span><code>summarize what we did this session and suggest what to add to CLAUDE.md</code></div><div class="prompt-box"><span class="caret">❯</span><code>总结我们这次会话做了什么，并建议将哪些内容添加到 CLAUDE.md 中</code></div><div class="lbl">为什么这样写有效</div><div class="teaches">在遗忘之前提问。Claude 知道它在此次会话中需要弄清楚什么，并提议 <a href="https://code.claude.com/docs/en/memory">CLAUDE.md</a> 条目，以便下次会话开始时就有相关上下文。</div></div></article></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-library","fetched_at":"2026-07-16","count":52,"translated_at":"2026-07-16","translator":"deepseek-v4-pro"},"labels":{"startHere":"Start here","startHereHeader":"Five prompts to try first","showAll":"Show all {n} prompts","search":"Search prompts…","clear":"Clear","prompt":"prompt","prompts":"prompts","noMatch":"No prompts match","fillAndCopy":"Fill in and copy","copyThis":"Copy this prompt","hintBefore":"Type in the","hintChip":"highlighted","hintAfter":"fields to customize, then copy.","copy":"Copy","copied":"Copied","whyWorks":"Why this works","makeItStick":"Make it stick","from":"From","paste":{"mockup":"Paste, drag, or @-mention your mockup image, then send this:","design":"Paste, drag, or @-mention your design image, then send this:","screenshot":"Paste, drag, or @-mention your screenshot, then send this:","plan":"Paste your plan output into the prompt first, then send this:","error":"Paste the error output into the prompt first, then send this:","csv":"Drag your file into the prompt, or replace the path below with an @-mention of your own:"},"needsLabel":"Needs","needs":{"tracker":"your issue tracker added as a [claude.ai connector](/en/mcp#use-mcp-servers-from-claude-ai) or [MCP server](/en/mcp).","gh":"the [gh CLI](https://cli.github.com) authenticated, or GitHub added as a [claude.ai connector](/en/mcp#use-mcp-servers-from-claude-ai).","browser":"a way for Claude to render and screenshot the result. The [Desktop app](/en/desktop#preview-your-app) has this built in. In the terminal, install the [Chrome extension](/en/chrome) or a Playwright [MCP](/en/mcp) server.","db":"your data warehouse or log store added as a [claude.ai connector](/en/mcp#use-mcp-servers-from-claude-ai) or [MCP server](/en/mcp)."}},"tagLabels":{"understand":"Understand","plan":"Plan","prototype":"Prototype","build":"Build","test":"Test","refactor":"Refactor","review":"Review","steer":"Steer","debug":"Debug","git":"Git","release":"Release","data":"Data","automate":"Automate","pm":"Product","design":"Design","docs":"Docs","marketing":"Marketing","security":"Security","ops":"On-call"},"phaseLabels":{"discover":"Discover","design":"Design","build":"Build","ship":"Ship","operate":"Operate"},"sourceLabels":{"workflows":"Common workflows","teams":"How Anthropic teams use Claude Code","legal":"How Anthropic uses Claude in Legal","cybersecurity":"How Anthropic uses Claude in Cybersecurity","best-practices":"Best practices","ebook":"Scaling agentic coding guide"},"catLabels":{"Onboard":"Onboard","Understand":"Understand","Plan":"Plan","Prototype":"Prototype","Implement":"Implement","Test":"Test","Refactor":"Refactor","Review":"Review","Steer":"Steer","Git":"Git","Release":"Release","Debug":"Debug","Incident":"Incident","Data":"Data","Automate":"Automate"},"catTag":{"Onboard":"understand","Understand":"understand","Plan":"plan","Prototype":"prototype","Implement":"build","Test":"test","Refactor":"refactor","Review":"review","Steer":"steer","Git":"git","Release":"release","Debug":"debug","Incident":"debug","Data":"data","Automate":"automate"},"sourceHrefs":{"workflows":"/en/common-workflows","teams":"https://claude.com/blog/how-anthropic-teams-use-claude-code","legal":"https://claude.com/blog/how-anthropic-uses-claude-legal","cybersecurity":"https://claude.com/blog/how-anthropic-uses-claude-cybersecurity","best-practices":"/en/best-practices","ebook":"https://resources.anthropic.com/hubfs/Scaling%20agentic%20coding%20across%20your%20organization.pdf"},"prose":{"intro":"This is a library of prompts to copy into Claude Code. Use it to explore ways of working you haven't tried, or when you're not sure where to start.\n\nThe prompts are collected from various Anthropic guides, including [Common workflows](/en/common-workflows), [Best practices](/en/best-practices), and [How Anthropic teams use Claude Code](https://claude.com/blog/how-anthropic-teams-use-claude-code). They're starting points rather than scripts. Open **Why this works** under any prompt to see the pattern behind it so you can write your own.","patterns":"## What makes these prompts work\n\nThe prompts above share a few patterns. Recognizing them helps you adapt any prompt here to your own task.\n\n**Describe the outcome, not the steps.** Say what you want and let Claude find the files. The prompt below works without naming a single file path.\n\n```text theme={null}\nadd rate limiting to the public API and make sure existing tests still pass\n```\n\n**Give it a way to check its own work.** Ask for run, test, compare, or verify in the same prompt so Claude iterates instead of stopping after one attempt.\n\n```text theme={null}\nwrite the migration, run it against the dev database, and confirm the schema matches\n```\n\n**Point at a reference.** Name an existing file, test, or pattern to match so the new code is consistent with what you already have.\n\n```text theme={null}\nadd a settings page that follows the same layout as the profile page\n```\n\n**State the measurable target.** When the goal is performance or coverage, give the metric and threshold so completion is unambiguous.\n\n```text theme={null}\nget the bundle size under 200KB and show me what you removed\n```\n\n**Give it the artifact.** Paste errors, logs, screenshots, and plan output directly in the prompt, or type `@` to reference a file. Claude reads the source instead of your description of it.\n\n```text theme={null}\nwhy is the build failing? @build.log\n```\n\n**Say how you want the answer.** Name the format, length, or audience so the explanation fits how you'll use it. To make a format the default for every response, set an [output style](/en/output-styles).\n\n```text theme={null}\nexplain how the payment retry logic works as an HTML page with a diagram, then open it in my browser\n```\n\nFor more on each pattern, see [best practices](/en/best-practices).","sources":"## Where these come from\n\nThese prompts are based on patterns from published Anthropic resources. Each card links to its source:\n\n* [Common workflows](/en/common-workflows): step-by-step guides for the core tasks\n* [Best practices](/en/best-practices): prompting patterns and project setup\n* [How Anthropic teams use Claude Code](https://claude.com/blog/how-anthropic-teams-use-claude-code): real workflows from engineering, product, design, and data teams, with deep dives on [legal](https://claude.com/blog/how-anthropic-uses-claude-legal), [marketing](https://claude.com/blog/how-anthropic-uses-claude-marketing), and [cybersecurity](https://claude.com/blog/how-anthropic-uses-claude-cybersecurity)\n* [Scaling agentic coding guide](https://resources.anthropic.com/hubfs/Scaling%20agentic%20coding%20across%20your%20organization.pdf): the enterprise adoption guide\n\nFor video walkthroughs of these patterns, see the free [Claude Code in Action](https://anthropic.skilljar.com/claude-code-in-action) course on Anthropic Academy.","related":"## Related resources\n\nThe prompts on this page are starting points. Once one works for your project, the next step is making it repeatable: save it as a [skill](/en/skills) so anyone on your team can run it as a `/command`, and record the conventions Claude learned in [CLAUDE.md](/en/memory) so every session starts with that context instead of Claude relearning it. For larger or riskier changes, [plan mode](/en/permission-modes#analyze-before-you-edit-with-plan-mode) shows you the file list before any edits happen.\n\nIf you're introducing Claude Code across a team, see [administration](/en/admin-setup) for managed settings and policy, and [costs and usage](/en/costs) for how this work is billed on your plan."},"prompts":[{"id":"get-oriented-in-a","sdlc":"discover","cat":"Onboard","startN":1,"roles":[],"prompt":"give me an overview of this codebase: architecture, key directories, and how the pieces connect","nextHref":"/en/memory","src":"workflows","title":"Get oriented in a new repository","teaches":"Describe what you want to know, not which files to read. Claude explores the project on its own and returns a summary of how it fits together.","next":"Run `/init` to set up `CLAUDE.md` so Claude remembers this every session","zh":{"title":"在新仓库中快速上手","prompt":"给我概述一下这个代码库：架构、关键目录，以及各部分如何连接","teaches":"描述你想知道什么，而不是要读哪些文件。Claude 会自行探索项目，并返回各部分如何组合的摘要。","next":"运行 `/init` 设置 `CLAUDE.md`，让 Claude 在每个会话中都记住这些信息"}},{"id":"explain-unfamiliar-code","sdlc":"discover","cat":"Understand","roles":[],"prompt":"explain what {path} does and how data flows through it. write it up as {format}","slots":{"path":"src/scheduler/queue.ts","format":"an HTML page with a diagram, then open it in my browser"},"nextHref":"/en/output-styles","src":"workflows","title":"Explain unfamiliar code","teaches":"Name the file and say what format you want the answer in. Swap the HTML page for a diagram, bullet points, or whatever fits how you learn.","next":"Set an output style so Claude always explains in your preferred format","zh":{"title":"解释不熟悉的代码","prompt":"解释 {path} 的作用以及数据如何流经它。以 {format} 形式输出","slots":{"path":"src/scheduler/queue.ts","format":"包含图表的 HTML 页面，然后在浏览器中打开"},"teaches":"指定文件并说明你想要的回答格式。可以将 HTML 页面替换为图表、要点列表或任何适合你学习方式的格式。","next":"设置输出风格，让 Claude 始终以你偏好的格式解释"}},{"id":"find-where-something-happens","sdlc":"discover","cat":"Understand","startN":2,"roles":[],"prompt":"where do we {behavior}?","slots":{"behavior":"validate uploaded file types"},"src":"workflows","title":"Find where something happens","teaches":"Search by behavior instead of by filename. The search works even when you don't know what the file is called or which directory it lives in.","zh":{"title":"查找某件事发生的位置","prompt":"我们在哪里 {behavior}？","slots":{"behavior":"验证上传的文件类型"},"teaches":"根据行为而不是文件名搜索。即使你不知道文件叫什么或位于哪个目录，搜索也能生效。"}},{"id":"see-what-depends-on","sdlc":"discover","cat":"Understand","roles":[],"prompt":"what would break if I deleted {target}?","slots":{"target":"the retryWithBackoff helper"},"src":"workflows","title":"Check what breaks before you delete","teaches":"Ask before you remove anything. The list of callers and downstream effects tells you whether you're looking at a one-line cleanup or a change you need to coordinate.","zh":{"title":"删除前检查哪些会受影响","prompt":"如果我删除 {target}，哪些地方会出问题？","slots":{"target":"retryWithBackoff 辅助函数"},"teaches":"在移除任何内容前先询问。调用方列表和下游影响会告诉你，这只是一行代码清理，还是需要协调的变更。"}},{"id":"trace-how-code-evolved","sdlc":"discover","cat":"Understand","roles":[],"prompt":"look through the commit history of {path} and summarize how it evolved and why","slots":{"path":"internal/auth/session.go"},"src":"best-practices","title":"Trace how code evolved","teaches":"Point at commit history when the question is why, not what. Claude reads the log and blame for whatever version control you use and explains the decisions behind the current implementation.","zh":{"title":"追溯代码演变过程","prompt":"查看 {path} 的提交历史，总结其演变过程及原因","slots":{"path":"internal/auth/session.go"},"teaches":"当问题是“为什么”而非“是什么”时，直接指向提交历史。Claude 会读取你使用的版本控制的日志和 blame 信息，解释当前实现背后的决策。"}},{"id":"scope-a-change-before","sdlc":"discover","cat":"Understand","roles":["pm","design"],"prompt":"which files would I need to touch to {change}?","slots":{"change":"add a dark mode toggle to settings"},"src":"teams","title":"Scope a change before you start","teaches":"Size the work before you commit it to a roadmap. The file list tells you whether you're looking at one component or a cross-cutting change.","zh":{"title":"开始前评估变更范围","prompt":"我需要修改哪些文件才能 {change}？","slots":{"change":"在设置中添加深色模式开关"},"teaches":"在将工作纳入路线图之前，先评估工作量。文件列表会告诉你这是影响单个组件还是跨组件的变更。"}},{"id":"ask-the-codebase-a","sdlc":"discover","cat":"Understand","roles":["pm"],"prompt":"I am a {role}. walk me through what happens when a user {action}, from the UI down to the result","slots":{"role":"PM","action":"clicks Export to PDF"},"nextHref":"/en/output-styles","src":"teams","title":"Ask the codebase a product question","teaches":"State your role so the answer is pitched at the right level. Claude explains what the product actually does from the source code, without you needing to read it.","next":"Set an output style so Claude always pitches answers at this level","zh":{"title":"向代码库提问产品问题","prompt":"我是一名 {role}。请带我走查一下，当用户 {action} 时，从 UI 到结果的全过程是怎样的","slots":{"role":"产品经理","action":"点击导出为 PDF"},"teaches":"说明你的角色，这样回答会匹配正确的层次。Claude 会根据源代码解释产品实际做了什么，你无需亲自阅读代码。","next":"设置输出风格，让 Claude 始终以此层次回答问题"}},{"id":"plan-a-multi-file","sdlc":"design","cat":"Plan","roles":["pm","design"],"prompt":"plan how to refactor the {target} to {goal}. list the files you would change, but don't edit anything yet","slots":{"target":"payment module","goal":"support multiple currencies"},"src":"workflows","title":"Plan a multi-file change before touching code","teaches":"Adding \"don't edit yet\" separates exploration from changes, so you see the approach before any code moves. To make plan-first the default on every prompt, press Shift+Tab for [plan mode](/en/permission-modes#analyze-before-you-edit-with-plan-mode).","zh":{"title":"在动代码之前规划多文件变更","prompt":"规划如何重构 {target} 以实现 {goal}。列出要修改的文件，但暂时不要编辑任何内容","slots":{"target":"支付模块","goal":"支持多种货币"},"teaches":"加上“暂时不要编辑”可以将探索与变更分开，让你在代码变动前看到方案。要在每个提示中默认采用先计划模式，可以按 Shift+Tab 进入 [计划模式](/en/permission-modes#analyze-before-you-edit-with-plan-mode)。"}},{"id":"draft-a-spec-by","sdlc":"design","cat":"Plan","roles":["pm"],"prompt":"I want to build {feature}. interview me about implementation, UX, edge cases, and tradeoffs until we have covered everything, then write the spec to SPEC.md","slots":{"feature":"per-workspace rate limits"},"nextHref":"/en/skills","src":"best-practices","title":"Draft a spec by interview","teaches":"Ask to be interviewed instead of writing the spec yourself. Claude asks you structured questions until the requirements are complete, then writes the result to a file.","next":"Save your interview questions as a `/spec` skill so every spec starts the same way","zh":{"title":"通过访谈起草规范","prompt":"我想构建 {feature}。请就实现、UX、边缘情况和权衡对我进行访谈，直到我们覆盖所有内容，然后将规范写入 SPEC.md","slots":{"feature":"每个工作区的速率限制"},"teaches":"要求接受访谈，而不是自己写规范。Claude 会向你提出结构化问题，直到需求完整，然后将结果写入文件。","next":"将你的访谈问题保存为 `/spec` 技能，让每个规范都以相同方式开始"}},{"id":"turn-a-meeting-into","sdlc":"design","cat":"Plan","roles":["pm"],"prompt":"read {input} and write up the action items, then create a {tracker} ticket for each with acceptance criteria","slots":{"input":"@meeting-notes.md","tracker":"Linear"},"needs":"tracker","nextHref":"/en/skills","src":"teams","title":"Turn a meeting into tickets","teaches":"Skip the transcription step. Claude pulls action items from the unstructured input and writes them straight into your tracker via [MCP](/en/mcp), so you review the tickets, not the transcript.","next":"Save this as a `/tickets` skill","zh":{"title":"将会议转化为工单","prompt":"阅读 {input} 并撰写行动项，然后为每个行动项创建一个 {tracker} 工单，并附上验收标准","slots":{"input":"@meeting-notes.md","tracker":"Linear"},"teaches":"跳过转录步骤。Claude 通过 [MCP](/en/mcp) 从非结构化输入中提取行动项，并直接写入你的追踪器，这样你只需审核工单，而非会议记录。","next":"将此保存为 `/tickets` 技能"}},{"id":"map-edge-cases-before","sdlc":"design","cat":"Plan","roles":["design","pm"],"prompt":"list the error states, empty states, and edge cases for {feature} that the design needs to cover","slots":{"feature":"the file upload flow"},"src":"teams","title":"Map edge cases before building","teaches":"Ask for what's missing, not what's there. Claude lists the error states, empty states, and edge cases a happy-path design tends to skip.","zh":{"title":"在构建之前梳理边界情况","prompt":"列出 {feature} 需要覆盖的错误状态、空状态和边界情况","slots":{"feature":"文件上传流程"},"teaches":"询问缺失的部分，而非已有的部分。Claude 会列出快乐路径设计往往忽略的错误状态、空状态和边界情况。"}},{"id":"turn-a-mockup-into","sdlc":"design","cat":"Prototype","roles":["design","pm","marketing"],"paste":"mockup","prompt":"here is a mockup. build a working prototype I can click through, matching the layout and states shown","src":"teams","title":"Turn a mockup into a working prototype","teaches":"A clickable prototype answers questions a static mockup can't. Hand the working code to engineering instead of explaining the interactions in a doc.","zh":{"title":"将模型转化为可运行的原型","prompt":"这是一个模型。构建一个我可以点击交互的可运行原型，匹配所示的布局和状态","teaches":"可点击的原型能回答静态模型无法回答的问题。将可运行的代码交给工程团队，而无需在文档中解释交互细节。"}},{"id":"implement-from-a-screenshot","sdlc":"design","cat":"Prototype","roles":["design"],"paste":"design","needs":"browser","prompt":"implement this design, then take a screenshot of the result, compare it to the original, and fix any differences","nextHref":"/en/goal","src":"best-practices","title":"Implement from a screenshot and self-check","teaches":"This gives Claude a verification loop: it renders, compares against the source image, and iterates without you pointing out each gap.","next":"Use `/goal` to keep Claude iterating until the screenshots match","zh":{"title":"根据截图实现并自我检查","prompt":"实现此设计，然后截取结果截图，将其与原图对比，并修复任何差异","teaches":"这为 Claude 提供了一个验证循环：它进行渲染，与源图像对比，然后迭代，而无需你逐一指出差距。","next":"使用 `/goal` 让 Claude 持续迭代，直到截图匹配为止"}},{"id":"follow-an-existing-pattern","sdlc":"build","cat":"Implement","roles":[],"prompt":"look at how {example} is implemented to understand the pattern, then build {new} the same way","slots":{"example":"the GitHub webhook handler","new":"a Stripe webhook handler"},"nextHref":"/en/memory","src":"best-practices","title":"Follow an existing pattern","teaches":"Point at code you already like. Without a reference, Claude defaults to general best practices. With one, it matches the conventions your codebase actually uses.","next":"Ask Claude to write the pattern it followed into `CLAUDE.md` so future sessions match it without the reference","zh":{"title":"遵循现有模式","prompt":"查看 {example} 是如何实现的以理解其模式，然后以相同的方式构建 {new}","slots":{"example":"GitHub webhook 处理器","new":"一个 Stripe webhook 处理器"},"teaches":"指向你认可的已有代码。如果没有参考，Claude 会默认采用通用最佳实践。有了参考，它会匹配你的代码库实际使用的约定。","next":"要求 Claude 将所遵循的模式写入 `CLAUDE.md`，以便未来的会话无需参考即可匹配"}},{"id":"generate-docs-for-code","sdlc":"build","cat":"Implement","roles":["docs"],"prompt":"find {scope} without {format} comments and add them, matching the style already used in the file","slots":{"scope":"the public functions in src/auth/","format":"JSDoc"},"src":"workflows","title":"Generate docs for undocumented code","teaches":"Name the scope and the format. Claude finds what's missing and matches the comment style already in the file, so the new docs read like the rest.","zh":{"title":"为未文档化的代码生成文档","prompt":"查找 {scope} 中缺少 {format} 注释的代码，并添加注释，匹配文件中已使用的风格","slots":{"scope":"src/auth/ 中的公共函数","format":"JSDoc"},"teaches":"指定范围和格式。Claude 会找到缺失的部分，并匹配文件中已有的注释风格，因此新文档读起来会与其余部分一致。"}},{"id":"add-a-small-well","sdlc":"build","cat":"Implement","roles":[],"prompt":"add a {endpoint} endpoint that returns {payload}","slots":{"endpoint":"/health","payload":"the app version and uptime"},"src":"workflows","title":"Add a small, well-defined feature","teaches":"State the inputs and outputs, not how to build it. Claude finds where similar code lives and adds yours alongside it.","zh":{"title":"添加一个小而明确的功能","prompt":"添加一个返回 {payload} 的 {endpoint} 端点","slots":{"endpoint":"/health","payload":"应用版本和正常运行时长"},"teaches":"说明输入和输出，而非如何构建。Claude 会找到类似代码所在的位置，并将你的代码添加在旁边。"}},{"id":"build-a-small-internal","sdlc":"build","cat":"Implement","roles":["pm","design","marketing","docs"],"prompt":"create a {tool} using HTML, CSS, and vanilla JavaScript, then open it in my browser","slots":{"tool":"drag-and-drop Kanban board with three columns"},"src":"teams","title":"Build a small internal tool from scratch","teaches":"You don't need a project, a framework, or a build step. Describe the tool and ask Claude to open it so you see it working immediately.","zh":{"title":"从零开始构建一个小的内部工具","prompt":"使用 HTML、CSS 和原生 JavaScript 创建一个 {tool}，然后在浏览器中打开它","slots":{"tool":"带有三列的拖放式看板"},"teaches":"你不需要项目、框架或构建步骤。描述这个工具，并让 Claude 打开它，这样你就能立即看到它运行。"}},{"id":"work-an-issue-end","sdlc":"build","cat":"Implement","roles":[],"prompt":"read issue #{issue}, implement the fix, and run the tests","slots":{"issue":"312"},"needs":"gh","src":"workflows","title":"Work an issue end to end","teaches":"Give the issue number, not a summary. Claude reads the full ticket itself, so requirements you'd forget to mention come through, and it validates the change before reporting back.","zh":{"title":"端到端地处理一个问题","prompt":"阅读 issue #{issue}，实现修复，并运行测试","slots":{"issue":"312"},"teaches":"提供问题编号，而非摘要。Claude 会自行阅读完整的工单，因此你可能忘记提及的需求都会被纳入，并在报告前验证变更。"}},{"id":"find-and-update-copy","sdlc":"build","cat":"Implement","roles":["design","docs","marketing"],"prompt":"find every place we say \"{copy}\" or a close variant, show me each one in context, then update them all to \"{new}\". leave tests and the changelog alone","slots":{"copy":"Sign up free","new":"Start free trial"},"src":"teams","title":"Find and update copy across the codebase","teaches":"Ask for variants and say what to skip. Claude finds phrasings a literal search would miss and leaves test fixtures and history untouched, so you review only the copy users actually see.","zh":{"title":"查找并更新代码库中的文案","prompt":"找出所有说“{copy}”或相似措辞的地方，在上下文中显示每个，然后把它们全部更新为“{new}”。测试和变更日志不要动","slots":{"copy":"免费注册","new":"开始免费试用"},"teaches":"要求变体并说明哪些要跳过。Claude 能找到字面搜索会遗漏的措辞，并保持测试固件和历史记录原样，这样你只审查用户真正看到的文案。"}},{"id":"draft-from-past-examples","sdlc":"build","cat":"Implement","roles":["docs","marketing","pm"],"prompt":"read the {examples} in {folder} to learn the structure and voice, then draft a new one for {topic}","slots":{"examples":"privacy impact assessments","folder":"legal/pia/","topic":"the new analytics integration"},"nextHref":"/en/skills","src":"legal","title":"Draft a document from past examples","teaches":"Point at a folder of finished work instead of describing your style. Claude learns the structure and voice from what you've already shipped, so the first draft reads like one of yours.","next":"Save the voice as a skill so every draft starts there","zh":{"title":"根据以往示例起草文档","prompt":"阅读 {folder} 里的 {examples} 来学习结构和语调，然后为 {topic} 起草一份新的","slots":{"examples":"隐私影响评估","folder":"legal/pia/","topic":"新的分析集成"},"teaches":"指向已完成工作的文件夹，而不是描述你的风格。Claude 从你已经发布的内容中学习结构和语调，这样初稿读起来就像是你的作品。","next":"将语调保存为 skill，这样每个草稿都从这里开始"}},{"id":"write-tests-run-them","sdlc":"build","cat":"Test","startN":4,"roles":[],"prompt":"write tests for {path}, run them, and fix any failures","slots":{"path":"app/parsers/feed.py"},"nextHref":"/en/memory","src":"workflows","title":"Write tests, run them, fix failures","teaches":"Ask for write, run, and fix together so Claude iterates without stopping for instructions.","next":"Run `/init` so Claude learns your test command automatically","zh":{"title":"编写测试，运行它们，修复失败","prompt":"为 {path} 编写测试，运行它们，并修复任何失败","slots":{"path":"app/parsers/feed.py"},"teaches":"要求一步完成编写、运行和修复，让 Claude 迭代执行，无需等待指令。","next":"运行 `/init`，让 Claude 自动学习你的测试命令"}},{"id":"drive-implementation-from-tests","sdlc":"build","cat":"Test","roles":[],"prompt":"write tests for {feature} first, then implement it until they pass","slots":{"feature":"the password reset flow"},"src":"ebook","title":"Drive implementation from tests","teaches":"Test-driven development: the tests define when the work is complete, and Claude iterates on the implementation until they pass.","zh":{"title":"根据测试驱动实现","prompt":"先为 {feature} 编写测试，然后实现它直到测试通过","slots":{"feature":"密码重置流程"},"teaches":"测试驱动开发：测试定义了工作完成的标准，Claude 会迭代实现直到测试全部通过。"}},{"id":"fill-gaps-from-a","sdlc":"build","cat":"Test","roles":[],"prompt":"read {report} and add tests for the lowest-covered files until each is above {target}%","slots":{"report":"coverage/coverage-summary.json","target":"80"},"nextHref":"/en/goal","src":"workflows","title":"Fill gaps from a coverage report","teaches":"Point at the coverage report instead of guessing what's untested. Claude reads the actual numbers and writes tests for the files that need them most.","next":"Set this as a `/goal` so Claude keeps writing tests until coverage hits the target","zh":{"title":"根据覆盖率报告填补空缺","prompt":"读取 {report}，为覆盖率最低的文件添加测试，直至每个文件高于 {target}%","slots":{"report":"coverage/coverage-summary.json","target":"80"},"teaches":"指向覆盖率报告，而不是猜测哪些未测试。Claude 读取实际数字，为最需要测试的文件编写测试。","next":"将此设为 `/goal`，这样 Claude 会持续编写测试，直到覆盖率达到目标"}},{"id":"migrate-a-pattern-across","sdlc":"build","cat":"Refactor","roles":[],"prompt":"migrate everything from {from} to {to}: identify every place that needs to change, then make the changes","slots":{"from":"the old logging API","to":"the structured logger"},"src":"workflows","title":"Migrate a pattern across the codebase","teaches":"Describe the old pattern and the new one. Asking Claude to identify every place first means the call sites are listed in the response, so you can check none were missed.","zh":{"title":"跨代码库迁移模式","prompt":"把所有从 {from} 迁移到 {to}：先找出每一处需要变更的地方，然后做出变更","slots":{"from":"旧的日志 API","to":"结构化日志记录器"},"teaches":"描述旧模式和新模式。要求 Claude 先找出所有位置，确保调用点在响应中列出，这样你能检查是否有遗漏。"}},{"id":"port-code-between-languages","sdlc":"build","cat":"Refactor","roles":[],"prompt":"port {source} to {target}, keeping the same {keep}","slots":{"source":"this Python module","target":"Rust","keep":"public API and test behavior"},"src":"teams","title":"Port code to another language","teaches":"Say what to preserve, not just the target language. Naming the API or behavior that must stay the same gives Claude a contract to check the port against.","zh":{"title":"将代码移植到另一种语言","prompt":"将 {source} 移植到 {target}，保持相同的 {keep}","slots":{"source":"这个 Python 模块","target":"Rust","keep":"公共 API 和测试行为"},"teaches":"说明要保留什么，而不仅仅是目标语言。指明必须保持不变的 API 或行为，为 Claude 提供了一个检验移植的契约。"}},{"id":"optimize-against-a-measurable","sdlc":"build","cat":"Refactor","roles":["data"],"prompt":"optimize {target} to bring {metric} from {current} down to under {goal}","slots":{"target":"the search query","metric":"p95 latency","current":"2s","goal":"500ms"},"nextHref":"/en/goal","src":"ebook","title":"Optimize against a measurable target","teaches":"Stating the metric and target gives Claude a clear definition of done.","next":"Set this as a `/goal` so Claude keeps measuring and iterating until it hits the number","zh":{"title":"针对可衡量的目标进行优化","prompt":"优化 {target}，让 {metric} 从 {current} 降至 {goal} 以下","slots":{"target":"搜索查询","metric":"p95 延迟","current":"2秒","goal":"500毫秒"},"teaches":"指明指标和目标，给 Claude 一个明确的完成定义。","next":"将此设为 `/goal`，这样 Claude 会不断测量并迭代，直到达到该数值"}},{"id":"fix-a-precise-visual","sdlc":"build","cat":"Refactor","roles":["design"],"prompt":"the {element} extends {amount} beyond the {container} on {viewport}. fix it.","slots":{"element":"login button","amount":"20px","container":"card border","viewport":"mobile"},"nextHref":"/en/desktop#preview-your-app","src":"ebook","title":"Fix a precise visual bug","teaches":"Precise visual feedback gets a precise fix. State the exact element, measurement, and viewport.","next":"Add a preview tool so Claude screenshots and verifies the fix itself","zh":{"title":"修复一个精确的视觉 Bug","prompt":"{element} 在 {viewport} 上超出了 {container} {amount}，修复它。","slots":{"element":"登录按钮","amount":"20px","container":"卡片边框","viewport":"移动端"},"teaches":"精确的视觉反馈能得到精确的修复。说明具体元素、尺寸和视口。","next":"添加一个预览工具，这样 Claude 可以自行截图并验证修复"}},{"id":"review-your-changes-before","sdlc":"build","cat":"Review","startN":5,"roles":[],"prompt":"review my uncommitted changes and flag anything that looks risky before I commit","nextHref":"/en/commands","src":"workflows","title":"Review your changes before you commit","teaches":"Catch problems while they're still cheap to fix. Claude reads the changed files in full, not just the diff lines, so it spots issues a quick self-review misses.","next":"Run `/code-review` for the same check in one command","zh":{"title":"提交前检查你的更改","prompt":"在提交前，检查我未提交的更改，并将任何看起来有风险的地方标记出来","teaches":"在修复成本还很低时尽早发现问题。Claude 会完整读取已更改的文件，而不仅仅是差异行，因此能发现快速自查时遗漏的问题。","next":"用一条命令运行 `/code-review` 执行相同的检查"}},{"id":"review-a-pull-request","sdlc":"build","cat":"Review","roles":[],"prompt":"review PR #{pr} and summarize what changed, then list any concerns","slots":{"pr":"247"},"needs":"gh","nextHref":"/en/code-review","src":"workflows","title":"Review a pull request","teaches":"Claude reviews with the whole codebase in context, not just the diff. It reads the changed code and what it calls, so it catches problems a diff-only review would miss.","next":"Turn this on for every PR with Code Review","zh":{"title":"审查一个拉取请求","prompt":"审查 PR #{pr}，总结变更内容，然后列出所有问题","slots":{"pr":"247"},"teaches":"Claude 在上下文中结合整个代码库进行审查，而不仅仅是差异内容。它会读取变更的代码及其调用的部分，因此能捕获仅查看差异的审查所遗漏的问题。","next":"使用 Code Review 对每个 PR 启用此功能"}},{"id":"review-infrastructure-changes-before","sdlc":"build","cat":"Review","roles":["security","ops"],"paste":"plan","prompt":"here is my Terraform plan output. what is this going to do, and is anything here going to cause problems?","src":"teams","title":"Review infrastructure changes before applying","teaches":"Plan output is dense and hard to scan. Pasting it gets you a plain-language summary of what's actually going to change before you apply it.","zh":{"title":"在应用前审查基础设施变更","prompt":"这是我的 Terraform plan 输出。这将会执行什么操作？其中是否存在会导致问题的内容？","teaches":"Plan 输出内容密集且难以浏览。粘贴它后，在应用之前，你能获得一个用通俗语言总结的实际将要变更的内容。"}},{"id":"run-a-security-review","sdlc":"build","cat":"Review","roles":["security"],"prompt":"use a subagent to review {path} for security issues and report what it finds","slots":{"path":"src/api/"},"nextHref":"/en/sub-agents","src":"best-practices","title":"Run a security review with a subagent","teaches":"A [subagent](/en/sub-agents) runs the audit in its own context window and reports back a summary, so a long security review doesn't fill up your main session. The built-in general-purpose subagent handles this without extra setup.","next":"Set up a dedicated security-review subagent your whole team can use","zh":{"title":"使用子代理运行安全审查","prompt":"使用一个子代理审查 {path} 中的安全问题，并报告发现的问题","slots":{"path":"src/api/"},"teaches":"一个[子代理](/en/sub-agents)会在自己的上下文窗口中运行审计，并返回摘要，因此长时间的安全审查不会填满你的主会话。内置的通用子代理无需额外设置即可处理此任务。","next":"设置一个你的整个团队都可以使用的专用安全审查子代理"}},{"id":"review-content-before-sending","sdlc":"build","cat":"Review","roles":["marketing","docs"],"prompt":"review {file} for {concerns} and list anything I should fix before it goes to {reviewer}","slots":{"file":"launch-post.md","concerns":"unsupported claims, missing attributions, and brand-guideline issues","reviewer":"legal"},"nextHref":"/en/skills","src":"legal","title":"Catch issues before formal review","teaches":"Get a first pass before a human spends time on it. Name the concerns you want checked so the review is focused, then fix what it finds and send a cleaner draft.","next":"Capture your review checklist as a skill your whole team can run","zh":{"title":"在正式审查之前发现问题","prompt":"审查 {file} 中是否存在 {concerns}，并列出在发送给 {reviewer} 之前我应该修复的所有内容","slots":{"file":"launch-post.md","concerns":"无根据的声明、缺失的署名以及品牌指南问题","reviewer":"法务"},"teaches":"在人工投入时间之前，先进行一次初步审查。明确指出你想检查的问题，让审查更有针对性，然后修复发现的问题，发送更干净的草稿。","next":"将你的审查检查清单捕获为团队可运行的技能"}},{"id":"course-correct-a-wrong","sdlc":"build","cat":"Steer","roles":[],"prompt":"that is not right: {feedback}. try a different approach","slots":{"feedback":"the function signature needs to stay backward-compatible"},"nextHref":"/en/checkpointing","src":"best-practices","title":"Course-correct a wrong approach","teaches":"Name the constraint Claude missed, not just that it's wrong. A specific reason gives Claude a concrete constraint to satisfy on the retry, instead of guessing again.","next":"Press `Esc` twice to open the rewind menu and restore code and conversation so the retry starts clean","zh":{"title":"纠正错误的方法","prompt":"那不正确：{feedback}。尝试一种不同的方法","slots":{"feedback":"函数签名需要保持向后兼容"},"teaches":"指出 Claude 遗漏的具体约束，而不仅仅是说它错了。一个具体的理由能为 Claude 提供重试时需满足的明确约束，而不是再次猜测。","next":"按两下 `Esc` 打开回退菜单并恢复代码和对话，使重试从一个干净的状态开始"}},{"id":"narrow-the-scope-of","sdlc":"build","cat":"Steer","roles":[],"prompt":"that is too much. keep only the changes to {scope} and undo your other edits","slots":{"scope":"the validation logic in src/forms/"},"src":"best-practices","title":"Narrow the scope of a change","teaches":"When the direction is right but the change went too broad, ask Claude to keep part of it rather than rewinding everything. A stated boundary keeps a small fix from becoming a refactor.","zh":{"title":"缩小变更范围","prompt":"这范围太大了。仅保留对 {scope} 所做的更改，并撤销你的其他编辑","slots":{"scope":"src/forms/ 中的校验逻辑"},"teaches":"当方向正确但变更范围过大时，让 Claude 保留其中一部分，而不是全部回退。明确边界可以防止小修复演变成重构。"}},{"id":"turn-a-correction-into","sdlc":"build","cat":"Steer","roles":[],"prompt":"you keep {mistake}. add a rule to CLAUDE.md so this stops happening","slots":{"mistake":"using default exports when this project uses named exports"},"nextHref":"/en/memory","src":"best-practices","title":"Turn a correction into a rule","teaches":"A correction in chat isn't shared with your team. A rule in the project's [CLAUDE.md](/en/memory) is shared once you commit it, and Claude reads it at the start of every session.","next":"Open `/memory` to review what Claude wrote","zh":{"title":"将一条纠正转化为规则","prompt":"你总是 {mistake}。在 CLAUDE.md 中添加一条规则，以避免这种情况再次发生","slots":{"mistake":"在本项目使用命名导出时却使用了默认导出"},"teaches":"聊天中的纠正不会与你的团队共享。项目 [CLAUDE.md](/en/memory) 中的规则一旦提交即被共享，Claude 会在每个会话开始时读取它。","next":"打开 `/memory` 查看 Claude 写的内容"}},{"id":"resolve-merge-conflicts","sdlc":"ship","cat":"Git","roles":[],"prompt":"resolve the merge conflicts in this branch and explain what you kept from each side","src":"workflows","title":"Resolve merge conflicts","teaches":"Say what state you want, not which markers to keep. Asking for the reasoning makes the merge reviewable instead of a black box.","zh":{"title":"解决合并冲突","prompt":"解决此分支中的合并冲突，并说明你保留了各方的哪些内容","teaches":"说明你想要的最终状态，而不是保留哪些冲突标记。询问推理过程能让合并变得可审查，而不是一个黑盒。"}},{"id":"commit-with-a-generated","sdlc":"ship","cat":"Git","roles":[],"prompt":"commit these changes with a message that summarizes what I did","src":"workflows","title":"Commit with a generated message","teaches":"Let Claude derive the message from the diff. It matches your repository's existing commit style.","zh":{"title":"生成提交信息并提交","prompt":"提交这些更改，并用一条概括我所做操作的信息作为提交信息","teaches":"让 Claude 从差异中推导提交信息。它会匹配你仓库现有的提交风格。"}},{"id":"open-a-pull-request","sdlc":"ship","cat":"Git","roles":[],"prompt":"find the {tracker} ticket about {topic} and open a PR that implements it","slots":{"tracker":"Linear","topic":"the login timeout"},"needs":"tracker","src":"workflows","title":"Open a pull request from a ticket","teaches":"Skip the context switch between tracker, editor, and GitHub. One prompt reads the spec, makes the change, and opens the PR.","zh":{"title":"根据工单发起拉取请求","prompt":"找到关于 {topic} 的 {tracker} 工单，并打开一个实现它的 PR","slots":{"tracker":"Linear","topic":"登录超时"},"teaches":"省去在工单跟踪器、编辑器和 GitHub 之间切换上下文的麻烦。一条提示词即可读取规范、进行更改并打开 PR。"}},{"id":"draft-release-notes-from","sdlc":"ship","cat":"Release","roles":["pm","docs","marketing"],"prompt":"compare {from} to {to} and draft release notes grouped by feature, fix, and breaking change","slots":{"from":"v2.3.0","to":"v2.4.0"},"nextHref":"/en/skills","src":"workflows","title":"Draft release notes from git history","teaches":"Give two reference points and the structure you want. Claude reads the commit log between them and drafts a changelog you can edit.","next":"Save this as a `/changelog` skill","zh":{"title":"从 git 历史起草发布说明","prompt":"比较 {from} 到 {to}，并起草按功能、修复和破坏性更改分组的发布说明","slots":{"from":"v2.3.0","to":"v2.4.0"},"teaches":"提供两个参考点和你想要的结构。Claude 读取它们之间的提交日志并起草一份你可以编辑的变更日志。","next":"将其保存为 `/changelog` 技能"}},{"id":"write-a-ci-workflow","sdlc":"ship","cat":"Release","roles":["ops"],"prompt":"write a GitHub Actions workflow that {steps} on every push to {branch}","slots":{"steps":"runs the tests and deploys to staging","branch":"main"},"src":"workflows","title":"Write a CI workflow","teaches":"Describe when it should run and what it should do; the YAML is generated for you, matched to your project's build and test commands.","zh":{"title":"编写 CI 工作流","prompt":"编写一个 GitHub Actions 工作流，在每次推送到 {branch} 时 {steps}","slots":{"steps":"运行测试并部署到预发布环境","branch":"main"},"teaches":"描述它应该在何时运行以及做什么；YAML 将为你生成，并与项目的构建和测试命令相匹配。"}},{"id":"find-and-fix-a","sdlc":"operate","cat":"Debug","startN":3,"roles":[],"prompt":"the {test} test is failing, find out why and fix it","slots":{"test":"UserAuth"},"src":"workflows","title":"Find and fix a failing test","teaches":"Describe the symptom; you don't need to know which file is broken. Claude runs the test to see the failure, traces it into source, and fixes it.","zh":{"title":"查找并修复失败的测试","prompt":"{test} 测试失败了，找出原因并修复它","slots":{"test":"UserAuth"},"teaches":"描述症状；你无需知道哪个文件出了问题。Claude 会运行测试来观察失败，追踪到源代码并修复它。"}},{"id":"investigate-a-reported-error","sdlc":"operate","cat":"Debug","roles":["ops"],"prompt":"users are seeing {symptom} on {where}. investigate and tell me what is going on","slots":{"symptom":"500 errors","where":"/api/settings"},"nextHref":"/en/web-quickstart#pre-fill-sessions","src":"workflows","title":"Investigate a reported error","teaches":"Describe the symptom and location; Claude reads the relevant code path and traces likely causes. Paste stack traces or logs if you have them.","next":"Put a deeplink in your runbook that opens Claude with this prompt pre-filled","zh":{"title":"排查报告的错误","prompt":"用户在 {where} 上看到了 {symptom}。请调查并告诉我发生了什么","slots":{"symptom":"500 错误","where":"/api/settings"},"teaches":"描述症状和位置；Claude 会读取相关代码路径并追踪可能的原因。如果你有堆栈跟踪或日志，请粘贴过来。","next":"在你的操作手册中放置一个深度链接，点击即可用预先填好此提示词的 Claude 打开"}},{"id":"fix-a-build-error","sdlc":"operate","cat":"Debug","roles":["ops"],"paste":"error","prompt":"here is a build error. fix the root cause and verify the build succeeds","src":"best-practices","title":"Fix a build error at the root","teaches":"Asking for root cause and verification prevents surface-level patches that suppress the error without fixing it.","zh":{"title":"从根本上修复构建错误","prompt":"这里有一个构建错误。修复根本原因并验证构建成功","teaches":"要求根本原因和验证可以防止仅压制错误而没有修复的表面补丁。"}},{"id":"investigate-a-production-incident","sdlc":"operate","cat":"Incident","roles":["ops","security"],"prompt":"{symptom}. check the logs, recent deploys, and config changes, then tell me the most likely cause","slots":{"symptom":"the checkout endpoint started returning 500s an hour ago"},"nextHref":"/en/mcp","src":"workflows","title":"Investigate a production incident","teaches":"List the evidence sources to correlate, not the steps to take. Claude reads logs, git history, and config together to narrow the cause.","next":"Connect Sentry or your log store via MCP","zh":{"title":"排查生产事件","prompt":"{symptom}。检查日志、最近的部署和配置更改，然后告诉我最可能的原因","slots":{"symptom":"结账端点一小时前开始返回 500 错误"},"teaches":"列出要关联的证据来源，而不是要采取的步骤。Claude 会一起读取日志、git 历史和配置以缩小原因范围。","next":"通过 MCP 连接 Sentry 或你的日志存储"}},{"id":"diagnose-from-a-console","sdlc":"operate","cat":"Incident","roles":["ops","data"],"paste":"screenshot","prompt":"here is a screenshot of {console}. walk me through why {resource} is failing and give me the exact commands to fix it","slots":{"console":"the GCP Kubernetes dashboard","resource":"this pod"},"src":"teams","title":"Diagnose from a console screenshot","teaches":"Cloud consoles show you the problem but not the commands to fix it. Claude reads the screenshot and translates the dashboard into the kubectl, gcloud, or aws commands to run.","zh":{"title":"根据控制台截图诊断","prompt":"这是 {console} 的截图。请带我了解为什么 {resource} 失败，并给我修复它的确切命令","slots":{"console":"GCP Kubernetes 仪表板","resource":"这个 Pod"},"teaches":"云控制台会向你展示问题，但不会显示修复命令。Claude 会读取截图并将仪表板信息翻译成需要运行的 kubectl、gcloud 或 aws 命令。"}},{"id":"query-logs-in-plain","sdlc":"operate","cat":"Incident","roles":["security","ops","data"],"prompt":"show me all {events} for {scope} over {timeframe}. write the query, run it, and tell me what stands out","slots":{"events":"failed logins","scope":"the auth service","timeframe":"the past 24 hours"},"needs":"db","src":"cybersecurity","title":"Query logs in plain English","teaches":"Ask the question instead of writing the SQL. Claude builds the query, runs it against your connected logs, and shows both the query and the result so you can check what ran.","zh":{"title":"用通俗英语查询日志","prompt":"显示 {events} 在 {scope} 上的所有记录，时间范围为 {timeframe}。写出查询语句，运行它，然后告诉我有什么突出之处","slots":{"events":"失败的登录尝试","scope":"auth 服务","timeframe":"过去 24 小时"},"teaches":"用提问代替写 SQL。Claude 会构建查询，在你连接的日志上运行，并同时显示查询语句和结果，以便你检查运行了什么。"}},{"id":"analyze-a-data-file","sdlc":"operate","cat":"Data","roles":["data","pm","marketing"],"paste":"csv","prompt":"read {file}, summarize the key patterns, and write the results to {output}","slots":{"file":"@reports/q1-signups.csv","output":"an HTML page with charts, then open it in my browser"},"nextHref":"/en/mcp","src":"teams","title":"Analyze a data file","teaches":"A one-off question doesn't need a one-off script. Point at a file in your project folder and Claude reads it directly, finds the patterns, and writes the output where you ask.","next":"Connect the data source via MCP instead of exporting files","zh":{"title":"分析数据文件","prompt":"读取 {file}，总结关键模式，并将结果写入 {output}","slots":{"file":"@reports/q1-signups.csv","output":"一个带图表的 HTML 页面，然后在浏览器中打开它"},"teaches":"一次性问题不需要写一次性脚本。只需指向项目文件夹中的文件，Claude 会直接读取、发现模式，并将输出写到你指定的位置。","next":"通过 MCP 连接数据源，而不是导出文件"}},{"id":"generate-variations-from-performance","sdlc":"operate","cat":"Data","roles":["marketing","data"],"paste":"csv","prompt":"read {file}, find the underperforming {items}, and generate {n} new variations that stay under {limit} characters","slots":{"file":"@ads-performance.csv","items":"headlines","n":"20","limit":"90"},"nextHref":"/en/mcp","src":"teams","title":"Generate variations from performance data","teaches":"State the constraint at the start so generation stays within the limit. Claude reads the metrics, picks what to replace, and produces alternatives that fit.","next":"Connect the ad platform via MCP instead of exporting a file","zh":{"title":"根据表现数据生成变体","prompt":"读取 {file}，找出表现不佳的 {items}，并生成 {n} 个新的变体，每个不超过 {limit} 个字符","slots":{"file":"@ads-performance.csv","items":"标题","n":"20","limit":"90"},"teaches":"在开始时说明限制，这样生成内容会保持在限制内。Claude 读取指标，选择要替换的内容，并生成符合要求的替代方案。","next":"通过 MCP 连接广告平台，而不是导出文件"}},{"id":"turn-a-recurring-task","sdlc":"operate","cat":"Automate","roles":[],"prompt":"create a /{name} skill for this project that {steps}","slots":{"name":"ship","steps":"runs the linter and tests, then drafts a commit message"},"src":"workflows","title":"Turn a recurring task into a skill","teaches":"Name the steps once; reuse them as a command. Claude writes a [skill](/en/skills) anyone on your team can run.","zh":{"title":"将重复任务变成技能","prompt":"为此项目创建一个 /{name} 技能，该技能会 {steps}","slots":{"name":"ship","steps":"运行 linter 和测试，然后草拟提交信息"},"teaches":"一次命名步骤，之后作为命令复用。Claude 会编写一个[技能](/en/skills)，你团队中的任何人都可以运行。"}},{"id":"add-a-hook-for","sdlc":"operate","cat":"Automate","roles":[],"prompt":"write a hook that {action} after every {event}","slots":{"action":"runs prettier","event":"edit to a .ts or .tsx file"},"src":"best-practices","title":"Add a hook for repeat behavior","teaches":"Hooks make a behavior automatic instead of something you have to remember to ask for. Describe the trigger and action and Claude writes the [hook](/en/hooks) configuration.","zh":{"title":"为重复行为添加钩子","prompt":"编写一个钩子，在每次 {event} 后 {action}","slots":{"action":"运行 prettier","event":"编辑 .ts 或 .tsx 文件"},"teaches":"钩子使行为自动化，无需每次记住去执行。描述触发条件和操作，Claude 会编写 [hook](/en/hooks) 配置。"}},{"id":"connect-a-tool-with","sdlc":"operate","cat":"Automate","roles":[],"prompt":"set up the {server} MCP server so you can read my {data} directly","slots":{"server":"Sentry","data":"error reports"},"src":"workflows","title":"Connect a tool with MCP","teaches":"Connect the source once instead of pasting data every session. After [MCP](/en/mcp) setup, Claude reads from the tool directly when you ask about it.","zh":{"title":"通过 MCP 连接工具","prompt":"设置 {server} MCP 服务器，以便你直接读取我的 {data}","slots":{"server":"Sentry","data":"错误报告"},"teaches":"只需连接一次数据源，而不是每次会话都粘贴数据。在 [MCP](/en/mcp) 设置之后，Claude 在你询问时会直接从工具读取。"}},{"id":"capture-what-to-remember","sdlc":"operate","cat":"Automate","roles":["pm","docs"],"prompt":"summarize what we did this session and suggest what to add to CLAUDE.md","src":"teams","title":"Capture what to remember for next time","teaches":"Ask before you forget. Claude knows what it had to figure out this session and proposes [CLAUDE.md](/en/memory) entries so the next session starts with that context.","zh":{"title":"记录下次需要记住的内容","prompt":"总结我们这次会话做了什么，并建议将哪些内容添加到 CLAUDE.md 中","teaches":"在遗忘之前提问。Claude 知道它在此次会话中需要弄清楚什么，并提议 [CLAUDE.md](/en/memory) 条目，以便下次会话开始时就有相关上下文。"}}],"zh":{"labels":{"startHere":"从这里开始","startHereHeader":"先试这五个提示词","showAll":"显示全部 {n} 个提示词","search":"搜索提示词…","clear":"清除","prompt":"提示词","prompts":"提示词","noMatch":"无匹配提示词","fillAndCopy":"填写并复制","copyThis":"复制此提示词","hintBefore":"在","hintChip":"高亮","hintAfter":"字段中进行自定义，然后复制。","copy":"复制","copied":"已复制","whyWorks":"为什么这有效","makeItStick":"让它生效","from":"来自","paste":{"mockup":"粘贴、拖放或 @-提及你的模型图片，然后发送此提示：","design":"粘贴、拖放或 @-提及你的设计图片，然后发送此提示：","screenshot":"粘贴、拖放或 @-提及你的截图，然后发送此提示：","plan":"先将你的计划输出粘贴到提示词中，然后发送此提示：","error":"先将错误输出粘贴到提示词中，然后发送此提示：","csv":"将你的文件拖入提示词，或用 @-提及替换下方路径："},"needsLabel":"所需条件","needs":{"tracker":"你的问题跟踪器作为 [claude.ai 连接器](/en/mcp#use-mcp-servers-from-claude-ai) 或 [MCP 服务器](/en/mcp) 添加。","gh":"已验证的 [gh CLI](https://cli.github.com)，或将 GitHub 作为 [claude.ai 连接器](/en/mcp#use-mcp-servers-from-claude-ai) 添加。","browser":"一种让 Claude 渲染结果并截图的方式。[桌面应用](/en/desktop#preview-your-app) 内置了此功能。在终端中，安装 [Chrome 扩展](/en/chrome) 或 Playwright [MCP](/en/mcp) 服务器。","db":"你的数据仓库或日志存储作为 [claude.ai 连接器](/en/mcp#use-mcp-servers-from-claude-ai) 或 [MCP 服务器](/en/mcp) 添加。"}},"tagLabels":{"understand":"理解","plan":"规划","prototype":"原型","build":"构建","test":"测试","refactor":"重构","review":"审查","steer":"引导","debug":"调试","git":"Git","release":"发布","data":"数据","automate":"自动化","pm":"产品","design":"设计","docs":"文档","marketing":"营销","security":"安全","ops":"值班"},"phaseLabels":{"discover":"发现","design":"设计","build":"构建","ship":"交付","operate":"运维"},"sourceLabels":{"workflows":"常见工作流","teams":"Anthropic 团队如何使用 Claude Code","legal":"Anthropic 法务团队如何使用 Claude","cybersecurity":"Anthropic 网络安全团队如何使用 Claude","best-practices":"最佳实践","ebook":"规模化智能体编码指南"},"catLabels":{"Onboard":"入门","Understand":"理解","Plan":"规划","Prototype":"原型","Implement":"实现","Test":"测试","Refactor":"重构","Review":"审查","Steer":"引导","Git":"Git","Release":"发布","Debug":"调试","Incident":"事件","Data":"数据","Automate":"自动化"},"prose":{"intro":"这是一个提示词库，可复制到 Claude Code 中使用。用它来探索你尚未尝试的工作方式，或者在你不知道从何入手时使用。\n\n这些提示词收集自多份 Anthropic 指南，包括[常见工作流](/en/common-workflows)、[最佳实践](/en/best-practices)和[Anthropic 团队如何使用 Claude Code](https://claude.com/blog/how-anthropic-teams-use-claude-code)。它们是切入点而非脚本。在任意提示词下展开**为什么这样有效**，即可了解背后的模式，从而编写你自己的提示词。","patterns":"## 这些提示词为何有效\n\n上面的提示词共享了一些模式。识别这些模式有助于你将此处的任何提示词适配到自己的任务。\n\n**描述结果，而非步骤。** 说出你想要什么，让 Claude 查找文件。下面的提示词无需指定任何文件路径即可生效。\n\n```text theme={null}\n为公共 API 添加速率限制，并确保现有测试仍然通过\n```\n\n**给它一个检查自己工作的方式。** 在同一提示中要求运行、测试、比较或验证，以便 Claude 进行迭代，而不是在一次尝试后就停止。\n\n```text theme={null}\n编写迁移脚本，针对开发数据库运行，并确认模式匹配\n```\n\n**指明参照物。** 说出一个现有的文件、测试或模式作为匹配目标，这样新代码就能与你已有的代码保持一致。\n\n```text theme={null}\n添加一个设置页面，遵循与个人资料页面相同的布局\n```\n\n**陈述可衡量的目标。** 当目标是性能或覆盖率时，给出指标和阈值，这样完成情况就一目了然。\n\n```text theme={null}\n将打包体积控制在 200KB 以下，并展示你移除了哪些内容\n```\n\n**给它制品（artifact）。** 直接在提示中粘贴错误、日志、截图和计划输出，或者输入 `@` 引用文件。Claude 会读取源内容，而不是你的描述。\n\n```text theme={null}\n为什么构建失败了？ @build.log\n```\n\n**说明你想要的回答方式。** 指明格式、长度或受众，这样解释就符合你将如何使用它。要让某种格式成为默认回答格式，可设置[输出风格](/en/output-styles)。\n\n```text theme={null}\n将支付重试逻辑的工作原理生成一个带示意图的 HTML 页面，然后在浏览器中打开它\n```\n\n有关每种模式的更多信息，请参见[最佳实践](/en/best-practices)。","sources":"## 这些提示词来自何处\n\n这些提示词基于已发布的 Anthropic 资源中的模式。每张卡片都链接到其来源：\n\n* [常见工作流](/en/common-workflows)：核心任务的分步指南\n* [最佳实践](/en/best-practices)：提示词模式与项目设置\n* [Anthropic 团队如何使用 Claude Code](https://claude.com/blog/how-anthropic-teams-use-claude-code)：来自工程、产品、设计和数据团队的真实工作流，并深入探讨了[法律](https://claude.com/blog/how-anthropic-uses-claude-legal)、[市场营销](https://claude.com/blog/how-anthropic-uses-claude-marketing)和[网络安全](https://claude.com/blog/how-anthropic-uses-claude-cybersecurity)领域\n* [规模化智能编码指南](https://resources.anthropic.com/hubfs/Scaling%20agentic%20coding%20across%20your%20organization.pdf)：企业采用指南\n\n有关这些模式的视频讲解，请观看 Anthropic Academy 上的免费课程 [Claude Code 实践](https://anthropic.skilljar.com/claude-code-in-action)。","related":"## 相关资源\n\n本页面上的提示词是切入点。一旦某个提示词在你的项目中可行，下一步就是让它可重复使用：将其保存为[技能](/en/skills)，这样团队中的任何人都可以将其作为 `/command` 运行，并在 [CLAUDE.md](/en/memory) 中记录 Claude 学到的约定，这样每个会话都会以这些上下文开始，而无需 Claude 重新学习。对于更大或风险更高的更改，[计划模式](/en/permission-modes#analyze-before-you-edit-with-plan-mode) 会在任何编辑发生之前显示文件列表。\n\n如果你要在团队中推广使用 Claude Code，请参阅[管理](/en/admin-setup)了解托管设置和策略，以及[费用与用量](/en/costs)了解此项工作如何在你的方案中计费。"}}};
+</script>
+<script>
+(function () {
+  'use strict';
+  const Z = DATA.zh;
+  const PROMPTS = DATA.prompts;
+  const DOCS = 'https://code.claude.com/docs';
+  const $ = (sel, el) => (el || document).querySelector(sel);
+
+  const abs = (h) => !h ? '' : (h[0] === '/' && h[1] !== '/' ? DOCS + h : h);
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // markdown 链接 + 反引号 → HTML（先转义再替换）
+  const rich = (s) => esc(s)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `<a href="${abs(u)}" target="_blank" rel="noopener">${t}</a>`)
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  /* ---------- 状态 ---------- */
+  let route = { view: 'start' };      // start | all | about | cat:<Cat> | role:<r>
+  let query = '';
+  let openId = null;
+  const langOf = {};                   // 每张卡片的语言覆盖：en | zh
+  const fills = {};                    // 'id|lang|key' -> 用户填写值
+  let defaultLang = localStorage.getItem('ccpl-lang') === 'zh' ? 'zh' : 'en';  // 全局 prompt 默认语言
+  const cardLang = (p) => langOf[p.id] || defaultLang;
+
+  /* ---------- 组装 ---------- */
+  const promptTextOf = (p, lang) => lang === 'zh' ? p.zh.prompt : p.prompt;
+  const slotsOf = (p, lang) => (lang === 'zh' ? p.zh.slots : p.slots) || {};
+  const fillKey = (p, lang, k) => p.id + '|' + lang + '|' + k;
+  const fillOf = (p, lang, k) => {
+    const v = fills[fillKey(p, lang, k)];
+    return v !== undefined && v !== '' ? v : (slotsOf(p, lang)[k] || '');
+  };
+  const assemble = (p, lang) => promptTextOf(p, lang).replace(/\{(\w+)\}/g, (_, k) => fillOf(p, lang, k) || k);
+  const previewText = (p, lang) => promptTextOf(p, lang).replace(/\{(\w+)\}/g, (_, k) => slotsOf(p, lang)[k] || k);
+  const widthFor = (s) => ((s || '').length + 3) + 'ch';
+
+  /* ---------- 搜索索引 ---------- */
+  const hayOf = (p) => [
+    p.title, p.zh.title, previewText(p, 'en'), previewText(p, 'zh'),
+    p.teaches, p.zh.teaches, p.next || '', (p.zh.next || ''),
+    Z.catLabels[p.cat] || p.cat, p.cat, (p.roles || []).map(r => Z.tagLabels[r] || r).join(' ')
+  ].join(' ¶ ').toLowerCase();
+  const HAY = {};
+  PROMPTS.forEach(p => { HAY[p.id] = hayOf(p); });
+
+  /* ---------- 目录结构 ---------- */
+  const phases = ['discover', 'design', 'build', 'ship', 'operate'];
+  const catsByPhase = {};
+  PROMPTS.forEach(p => {
+    (catsByPhase[p.sdlc] = catsByPhase[p.sdlc] || []).includes(p.cat) || catsByPhase[p.sdlc].push(p.cat);
+  });
+  const catCount = {};
+  PROMPTS.forEach(p => { catCount[p.cat] = (catCount[p.cat] || 0) + 1; });
+  const ROLES = ['pm', 'design', 'docs', 'marketing', 'security', 'ops', 'data'];
+  const roleCount = {};
+  PROMPTS.forEach(p => (p.roles || []).forEach(r => { roleCount[r] = (roleCount[r] || 0) + 1; }));
+
+  /* ---------- 侧边栏 ---------- */
+  function renderNav() {
+    let h = '';
+    h += '<div class="nav-h">开始</div>';
+    h += navItem('about', '关于本库', null, '📖');
+    h += navItem('start', '新手入门', 5, '★');
+    h += navItem('all', '全部提示词', PROMPTS.length);
+    for (const ph of phases) {
+      h += `<div class="nav-h">${esc(Z.phaseLabels[ph] || ph)} <span class="en">${esc(DATA.phaseLabels[ph] || ph)}</span></div>`;
+      for (const cat of catsByPhase[ph]) {
+        h += navItem('cat:' + cat, (Z.catLabels[cat] || cat), catCount[cat]);
+      }
+    }
+    h += '<div class="nav-h">按角色 <span class="en">Roles</span></div><div class="role-chips">';
+    for (const r of ROLES) {
+      const on = route.view === 'role:' + r ? ' on' : '';
+      h += `<button class="role-chip${on}" data-nav="role:${r}">${esc(Z.tagLabels[r] || r)} ${roleCount[r] || 0}</button>`;
+    }
+    h += '</div>';
+    $('#nav').innerHTML = h;
+  }
+  function navItem(key, label, n, mark) {
+    const on = route.view === key && !query ? ' on' : '';
+    return `<button class="nav-item${on}" data-nav="${key}">` +
+      (mark === '★' ? '<span class="star">★</span>' : '') +
+      `<span>${esc(label)}</span>` +
+      (n != null ? `<span class="n">${n}</span>` : '') + '</button>';
+  }
+
+  /* ---------- 卡片 ---------- */
+  function promptBodyHtml(p, lang) {
+    const tpl = promptTextOf(p, lang);
+    const slots = slotsOf(p, lang);
+    if (!p.slots) return `<code>${esc(tpl)}</code>`;
+    const parts = tpl.split(/(\{\w+\})/g);
+    let h = '<code>';
+    for (const part of parts) {
+      const m = part.match(/^\{(\w+)\}$/);
+      if (!m) { h += `<span>${esc(part)}</span>`; continue; }
+      const k = m[1];
+      const cur = fills[fillKey(p, lang, k)] || '';
+      const ph = slots[k] || k;
+      h += `<input type="text" class="slot" data-slot="${esc(k)}" value="${esc(cur)}" placeholder="${esc(ph)}"` +
+        ` style="width:${widthFor(cur || ph)}" aria-label="${esc(k)}">`;
+    }
+    return h + '</code>';
+  }
+
+  function cardHtml(p) {
+    const open = openId === p.id;
+    const lang = cardLang(p);
+    const snip = query ? matchSnippet(p) : null;
+    let h = `<div class="card${open ? ' open' : ''}" data-id="${p.id}">`;
+    h += `<button type="button" class="card-head" data-act="toggle" aria-expanded="${open}">`;
+    h += `<span class="card-title">${esc(p.zh.title)}<span class="en-sub">${esc(p.title)}</span></span>`;
+    if (p.startN) h += `<span class="chip">新手入门 · ${p.startN}</span>`;
+    h += '</button>';
+    h += snip ? `<div class="match-snip">${snip}</div>`
+              : `<code class="preview">${esc(previewText(p, lang))}</code>`;
+    if (open) {
+      h += '<div class="card-body">';
+      h += `<div class="lbl"><span>${p.slots ? '填写并复制' : '复制这条提示词'}</span>` +
+        `<span class="lang-seg">` +
+        `<button data-act="lang" data-lang="en" class="${lang === 'en' ? 'on' : ''}">英文原文</button>` +
+        `<button data-act="lang" data-lang="zh" class="${lang === 'zh' ? 'on' : ''}">中文译文</button>` +
+        `</span></div>`;
+      if (p.needs && Z.labels.needs && Z.labels.needs[p.needs])
+        h += `<div class="hint strong"><span class="needs-lbl">前置条件</span>${rich(Z.labels.needs[p.needs])}</div>`;
+      if (p.paste && Z.labels.paste && Z.labels.paste[p.paste])
+        h += `<div class="hint strong">${rich(Z.labels.paste[p.paste])}</div>`;
+      if (p.slots)
+        h += `<div class="hint">在<span class="hint-chip">高亮</span>字段中填入你自己的内容，然后复制。</div>`;
+      h += `<div class="prompt-box"><span class="caret">❯</span>${promptBodyHtml(p, lang)}` +
+        `<button type="button" class="copy-btn" data-act="copy">复制</button></div>`;
+      h += `<div class="lbl">为什么这样写有效</div><div class="teaches">${rich(p.zh.teaches)}</div>`;
+      if (p.nextHref && p.zh.next)
+        h += `<div class="next-box"><span class="next-lbl">固化下来</span>` +
+          `<a href="${abs(p.nextHref)}" target="_blank" rel="noopener">${rich(p.zh.next)} →</a></div>`;
+      const srcLabel = Z.sourceLabels[p.src];
+      const srcHref = DATA.sourceHrefs[p.src];
+      if (srcLabel)
+        h += `<div class="src-line">来自 ${srcHref ? `<a href="${abs(srcHref)}" target="_blank" rel="noopener">${esc(srcLabel)}</a>` : esc(srcLabel)}</div>`;
+      h += '</div>';
+    }
+    return h + '</div>';
+  }
+
+  function matchSnippet(p) {
+    const ql = query.toLowerCase();
+    if (p.zh.title.toLowerCase().includes(ql) || p.title.toLowerCase().includes(ql)) return null;
+    const hay = HAY[p.id];
+    const at = hay.indexOf(ql);
+    if (at < 0) return null;
+    const lo = Math.max(0, at - 26), hi = Math.min(hay.length, at + ql.length + 60);
+    return (lo > 0 ? '…' : '') + esc(hay.slice(lo, at)) +
+      '<mark>' + esc(hay.slice(at, at + ql.length)) + '</mark>' +
+      esc(hay.slice(at + ql.length, hi)) + (hi < hay.length ? '…' : '');
+  }
+
+  /* ---------- 结果集 ---------- */
+  function currentList() {
+    const ql = query.toLowerCase();
+    if (ql) return PROMPTS.filter(p => HAY[p.id].includes(ql));
+    if (route.view === 'start') return PROMPTS.filter(p => p.startN).sort((a, b) => a.startN - b.startN);
+    if (route.view.startsWith('cat:')) return PROMPTS.filter(p => p.cat === route.view.slice(4));
+    if (route.view.startsWith('role:')) {
+      const r = route.view.slice(5);
+      return PROMPTS.filter(p => (p.roles || []).includes(r));
+    }
+    return PROMPTS.slice();
+  }
+
+  function groupedHtml(list) {
+    if (!list.length) return `<div class="empty">没有匹配的提示词${query ? '：<code>' + esc(query) + '</code>' : ''}</div>`;
+    const groups = [];
+    for (const p of list) {
+      const key = p.sdlc + '|' + p.cat;
+      let g = groups[groups.length - 1];
+      if (!g || g.key !== key) { g = { key, sdlc: p.sdlc, cat: p.cat, items: [] }; groups.push(g); }
+      g.items.push(p);
+    }
+    return groups.map(g =>
+      `<div class="group-h"><span class="phase">${esc(Z.phaseLabels[g.sdlc] || g.sdlc)}</span> · ${esc(Z.catLabels[g.cat] || g.cat)}</div>` +
+      g.items.map(cardHtml).join('')
+    ).join('');
+  }
+
+  /* ---------- 视图 ---------- */
+  const VIEW_HEADS = {
+    start: ['新手入门', '还没用过 Claude Code？先从这五条提示词开始，按顺序试一遍。'],
+    all: ['全部提示词', '按软件开发生命周期分组：发现 → 设计 → 构建 → 交付 → 运维。点击卡片展开，填入自己的内容后一键复制。'],
+  };
+  function viewHeadHtml(list) {
+    if (query) return `<div class="view-head"><h1>搜索结果</h1><div class="desc">关键词 <code>${esc(query)}</code>，共 ${list.length} 条。</div></div>`;
+    if (route.view === 'about') return '';
+    if (route.view.startsWith('cat:')) {
+      const cat = route.view.slice(4);
+      return `<div class="view-head"><h1>${esc(Z.catLabels[cat] || cat)} <span style="color:var(--text-4);font-size:16px;font-weight:400">${esc(cat)}</span></h1></div>`;
+    }
+    if (route.view.startsWith('role:')) {
+      const r = route.view.slice(5);
+      return `<div class="view-head"><h1>角色：${esc(Z.tagLabels[r] || r)}</h1><div class="desc">适合${esc(Z.tagLabels[r] || r)}角色使用的提示词（同一条可能属于多个角色）。</div></div>`;
+    }
+    const hd = VIEW_HEADS[route.view];
+    return hd ? `<div class="view-head"><h1>${hd[0]}</h1><div class="desc">${hd[1]}</div></div>` : '';
+  }
+
+  /* ---------- 关于页（迷你 markdown 渲染） ---------- */
+  function mdToHtml(md) {
+    const out = [];
+    const parts = md.split(/```[^\n]*\n([\s\S]*?)```/g);
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        out.push(`<div class="prompt-box"><span class="caret">❯</span><code>${esc(parts[i].trim())}</code>` +
+          `<button type="button" class="copy-btn" data-act="copy-static">复制</button></div>`);
+        continue;
+      }
+      const blocks = parts[i].split(/\n\s*\n/);
+      for (const b of blocks) {
+        const t = b.trim();
+        if (!t) continue;
+        if (/^##\s/.test(t)) { out.push(`<h2>${inline(t.replace(/^##\s+/, ''))}</h2>`); continue; }
+        if (/^\*\s/.test(t)) {
+          out.push('<ul>' + t.split(/\n/).map(li => `<li>${inline(li.replace(/^\*\s+/, ''))}</li>`).join('') + '</ul>');
+          continue;
+        }
+        out.push(`<p>${inline(t.replace(/\n/g, ' '))}</p>`);
+      }
+    }
+    return out.join('\n');
+    function inline(s) {
+      return esc(s)
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t2, u) => `<a href="${abs(u)}" target="_blank" rel="noopener">${t2}</a>`)
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    }
+  }
+  function aboutHtml() {
+    const P = Z.prose;
+    return `<div class="view-head"><h1>关于本库</h1></div><div class="about">` +
+      mdToHtml(P.intro) + mdToHtml(P.patterns) + mdToHtml(P.sources) + mdToHtml(P.related) +
+      `<div class="about-meta">本页为 <a href="${DATA.meta.source_url}" target="_blank" rel="noopener">code.claude.com 官方 Prompt library</a> 的中文版本地镜像 · ` +
+      `共 ${PROMPTS.length} 条提示词 · 抓取于 ${DATA.meta.fetched_at} · 由 ${esc(DATA.meta.translator || 'DeepSeek')} 翻译 · ` +
+      `复制按钮默认复制英文原文，可切换中文译文。</div></div>`;
+  }
+
+  /* ---------- 渲染 ---------- */
+  function render() {
+    renderNav();
+    const list = currentList();
+    $('#count').textContent = list.length + ' 条';
+    $('#clearX').style.display = query ? 'block' : 'none';
+    const v = $('#view');
+    if (!query && route.view === 'about') { v.innerHTML = aboutHtml(); return; }
+    v.innerHTML = viewHeadHtml(list) + groupedHtml(list);
+  }
+
+  /* ---------- 复制 ---------- */
+  function doCopy(text, btn) {
+    const done = () => {
+      btn.textContent = '已复制 ✓'; btn.classList.add('ok');
+      setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => { fallbackCopy(text); done(); });
+    } else { fallbackCopy(text); done(); }
+  }
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+  }
+
+  /* ---------- 事件 ---------- */
+  document.addEventListener('click', (e) => {
+    const nav = e.target.closest('[data-nav]');
+    if (nav) {
+      query = ''; $('#q').value = '';
+      location.hash = '#/' + nav.dataset.nav.replace(':', '/');
+      closeSidebar();
+      return;
+    }
+    const actEl = e.target.closest('[data-act]');
+    if (!actEl) return;
+    const act = actEl.dataset.act;
+    if (act === 'copy-static') {
+      doCopy(actEl.parentElement.querySelector('code').textContent, actEl);
+      return;
+    }
+    const card = actEl.closest('.card');
+    if (!card) return;
+    const p = PROMPTS.find(x => x.id === card.dataset.id);
+    if (act === 'toggle') {
+      openId = openId === p.id ? null : p.id;
+      render();
+      if (openId) {
+        const el = document.querySelector(`.card[data-id="${openId}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
+      }
+    } else if (act === 'lang') {
+      langOf[p.id] = actEl.dataset.lang;
+      render();
+    } else if (act === 'copy') {
+      doCopy(assemble(p, cardLang(p)), actEl);
+    }
+  });
+
+  // slot 输入：记录填写值 + 自适应宽度；阻止冒泡触发折叠
+  document.addEventListener('input', (e) => {
+    const inp = e.target;
+    if (!inp.classList || !inp.classList.contains('slot')) return;
+    const card = inp.closest('.card');
+    const p = PROMPTS.find(x => x.id === card.dataset.id);
+    fills[fillKey(p, cardLang(p), inp.dataset.slot)] = inp.value;
+    inp.style.width = widthFor(inp.value || inp.placeholder);
+  });
+  document.addEventListener('focusin', (e) => {
+    if (e.target.classList && e.target.classList.contains('slot')) e.target.select();
+  });
+
+  // 搜索
+  let debounce = null;
+  $('#q').addEventListener('input', (e) => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { query = e.target.value.trim(); openId = null; render(); }, 120);
+  });
+  $('#clearX').addEventListener('click', () => { query = ''; $('#q').value = ''; render(); });
+
+  // hash 路由
+  function applyHash() {
+    const h = location.hash.replace(/^#\//, '');
+    if (!h) { route.view = 'start'; }
+    else if (h === 'about' || h === 'start' || h === 'all') route.view = h;
+    else if (h.startsWith('cat/')) route.view = 'cat:' + decodeURIComponent(h.slice(4));
+    else if (h.startsWith('role/')) route.view = 'role:' + h.slice(5);
+    openId = null;
+    render();
+    $('.content').scrollTop = 0; window.scrollTo(0, 0);
+  }
+  window.addEventListener('hashchange', applyHash);
+
+  // 主题
+  const THEMES = [['auto', '🌗 主题：自动'], ['light', '☀️ 主题：浅色'], ['dark', '🌙 主题：深色']];
+  let themeIdx = Math.max(0, THEMES.findIndex(t => t[0] === (localStorage.getItem('ccpl-theme') || 'auto')));
+  function applyTheme() {
+    const [name, label] = THEMES[themeIdx];
+    document.documentElement.setAttribute('data-theme', name);
+    $('#themeBtn').textContent = label;
+    localStorage.setItem('ccpl-theme', name);
+  }
+  $('#themeBtn').addEventListener('click', () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); });
+
+  // Prompt 默认语言（全局；切换时清掉单卡覆盖，让默认立即生效）
+  function applyLangBtn() {
+    $('#langBtn').textContent = defaultLang === 'zh' ? '🌐 Prompt 默认：中文' : '🌐 Prompt 默认：英文';
+    localStorage.setItem('ccpl-lang', defaultLang);
+  }
+  $('#langBtn').addEventListener('click', () => {
+    defaultLang = defaultLang === 'zh' ? 'en' : 'zh';
+    Object.keys(langOf).forEach(k => delete langOf[k]);
+    applyLangBtn();
+    render();
+  });
+
+  // 移动端侧边栏
+  function closeSidebar() { $('#sidebar').classList.remove('show'); $('#scrim').classList.remove('show'); }
+  $('#menuBtn').addEventListener('click', () => { $('#sidebar').classList.add('show'); $('#scrim').classList.add('show'); });
+  $('#scrim').addEventListener('click', closeSidebar);
+
+  // 初始化
+  $('#brandSub').textContent = `中文版 · 共 ${PROMPTS.length} 条`;
+  applyTheme();
+  applyLangBtn();
+  applyHash();
+})();
+</script>
+</body>
+</html>
