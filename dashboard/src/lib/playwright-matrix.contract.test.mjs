@@ -66,6 +66,8 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /E2E_COOKIE_JAR/);
   assert.match(remoteSpec, /E2E_EXPECTED_UID/);
   assert.match(remoteSpec, /E2E_EXPECTED_DID/);
+  assert.match(remoteSpec, /E2E_EXPECTED_X_FIXTURE_ID/);
+  assert.match(remoteSpec, /E2E_EXPECTED_BLOG_FIXTURE_ID/);
   assert.match(remoteSpec, /E2E_PERF_PROBE/);
   assert.match(remoteSpec, /X-Aifeeds-Perf-Probe/);
   assert.match(remoteSpec, /codex_perf_probe=1/);
@@ -93,6 +95,10 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
     /const activeBlogFeed = await expectFeedColumnInViewport\(page, "blog,podcast"\)/);
   assert.match(remoteSpec, /activeBlogFeed\.locator\(/);
   assert.match(remoteSpec, /activeFeed\?\.querySelectorAll/);
+  assert.match(remoteSpec, /expectedSyntheticFixtureId/);
+  assert.match(remoteSpec, /source_type=x_list&limit=12/);
+  assert.match(remoteSpec, /source_type=blog%2Cpodcast&limit=12&sort=published_at/);
+  assert.match(remoteSpec, /items\.some\(\(item\) => item\.id === expectedFixtureId\)/);
   assert.match(remoteSpec,
     /expect\.poll\(\(\) => firstBlogImage\.evaluate[\s\S]{0,160}?currentSrc/);
   assert.match(remoteSpec, /variantSummary\.width400Count/);
@@ -162,6 +168,11 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /lstatSync/);
   assert.match(remoteSpec, /0o077/);
   assert.match(remoteSpec, /staging-api\.ai-feeds\.com/);
+  assert.match(remoteSpec,
+    /request\.get\(`\/api\/items\/\$\{encodeURIComponent\(expectedXFixtureId\)\}`/);
+  assert.doesNotMatch(remoteSpec,
+    /findRangeAsset\(await parseJsonWithoutBodyLeak\(xFeed\),\s*["']video["']\)/,
+    "Range validation must resolve the owned synthetic X fixture by exact id");
   assert.match(remoteSpec, /server-timing/i);
   assert.match(remoteSpec, /new TouchEvent\(type/);
   assert.match(remoteSpec, /newCDPSession/);

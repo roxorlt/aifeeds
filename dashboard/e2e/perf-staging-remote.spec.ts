@@ -1,6 +1,7 @@
 import {
   expect,
   test,
+  type APIRequestContext,
   type APIResponse,
   type Locator,
   type Page,
@@ -123,6 +124,48 @@ function expectedInitialListSources(project: string): string[] {
   if (isMobileProject(project)) return ["x_list"];
   if (project === "tablet-chromium") return ["blog,podcast", "x_list"];
   return ["blog,podcast", "product_hunt", "x_list"];
+}
+
+type SyntheticFixtureEnv =
+  | "E2E_EXPECTED_X_FIXTURE_ID"
+  | "E2E_EXPECTED_BLOG_FIXTURE_ID";
+
+function expectedSyntheticFixtureId(
+  envName: SyntheticFixtureEnv,
+  sourceType: "x_list" | "blog",
+): string {
+  const value = process.env[envName]?.trim() || "";
+  const expected = new RegExp(`^${sourceType}:perf-staging-[a-f0-9]{20}$`);
+  if (!expected.test(value)) {
+    throw new Error(`${envName} must identify the owned ${sourceType} perf-staging fixture`);
+  }
+  return value;
+}
+
+async function expectSyntheticFixtureInUiList(
+  request: APIRequestContext,
+  path: string,
+  envName: SyntheticFixtureEnv,
+  sourceType: "x_list" | "blog",
+): Promise<string> {
+  const expectedFixtureId = expectedSyntheticFixtureId(envName, sourceType);
+  const response = await request.get(path, {
+    headers: {
+      Origin: PERF_ORIGIN,
+      "User-Agent": browserUserAgent,
+      "X-Aifeeds-Perf-Probe": process.env.E2E_PERF_PROBE!,
+    },
+  });
+  expect(response.ok(), `${sourceType} fixture list request must succeed`).toBe(true);
+  const payload = await parseJsonWithoutBodyLeak(response) as {
+    items?: Array<{ id?: string }>;
+  } | null;
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  expect(
+    items.some((item) => item.id === expectedFixtureId),
+    `${sourceType} fixture must be visible in the exact UI list window`,
+  ).toBe(true);
+  return expectedFixtureId;
 }
 
 async function expectFeedColumnInViewport(page: Page, source: string): Promise<Locator> {
@@ -1054,7 +1097,13 @@ test.describe("perf-staging remote acceptance", () => {
     }, { deviceId: expectedDeviceId, probe: perfProbe });
   });
 
-  test("five-device home uses the same-origin API and publishes timing evidence", async ({ page }, testInfo) => {
+  test("five-device home uses the same-origin API and publishes timing evidence", async ({ page, request }, testInfo) => {
+    await expectSyntheticFixtureInUiList(
+      request,
+      "/api/items?source_type=x_list&limit=12",
+      "E2E_EXPECTED_X_FIXTURE_ID",
+      "x_list",
+    );
     const mediaRequestRecords = trackSafeMediaRequests(page);
     const expectedSources = expectedInitialListSources(testInfo.project.name);
     const listResponseStatuses: SafeListResponseStatus[] = [];
@@ -1358,8 +1407,14 @@ test.describe("perf-staging remote acceptance", () => {
     expect(second).toEqual({ status: 200, idMatches: true });
   });
 
-  test("mobile projects switch the live remote feed with a touch swipe", async ({ page }, testInfo) => {
+  test("mobile projects switch the live remote feed with a touch swipe", async ({ page, request }, testInfo) => {
     test.skip(!isMobileProject(testInfo.project.name), "mobile interaction only");
+    await expectSyntheticFixtureInUiList(
+      request,
+      "/api/items?source_type=blog%2Cpodcast&limit=12&sort=published_at",
+      "E2E_EXPECTED_BLOG_FIXTURE_ID",
+      "blog",
+    );
     const mediaRequestRecords = trackSafeMediaRequests(page);
     const nextFeedStatuses: number[] = [];
     page.on("response", (response) => {
@@ -1593,11 +1648,18 @@ test.describe("perf-staging remote acceptance", () => {
       expect((await response.text()).includes('<div id="root">')).toBe(true);
     }
 
-    const xFeed = await request.get("/api/items?source_type=x_list&limit=200", { headers: apiHeaders });
     const podcastFeed = await request.get("/api/items?source_type=podcast&limit=50", { headers: apiHeaders });
-    expect(xFeed.ok()).toBe(true);
     expect(podcastFeed.ok()).toBe(true);
-    const videoUrl = findRangeAsset(await parseJsonWithoutBodyLeak(xFeed), "video");
+    const expectedXFixtureId = expectedSyntheticFixtureId(
+      "E2E_EXPECTED_X_FIXTURE_ID",
+      "x_list",
+    );
+    const xFixture = await requestWithoutUrlLeak(() => (
+      request.get(`/api/items/${encodeURIComponent(expectedXFixtureId)}`, { headers: apiHeaders })
+    ));
+    requireResponse(xFixture, "owned synthetic X fixture detail request failed");
+    expect(xFixture.ok()).toBe(true);
+    const videoUrl = findRangeAsset(await parseJsonWithoutBodyLeak(xFixture), "video");
     const podcastList = await parseJsonWithoutBodyLeak(podcastFeed) as { items?: Array<{ id?: string }> } | null;
     let audioUrl: string | null = null;
     for (const item of (podcastList?.items || []).slice(0, 20)) {
