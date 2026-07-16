@@ -5,7 +5,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createDetailLoader } from "./detailLoader.ts";
-import { runDetailSingleFlight } from "./detailSingleFlight.ts";
+import {
+  DETAIL_ROUTE_HANDOFF_GRACE_MS,
+  runDetailSingleFlight,
+} from "./detailSingleFlight.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const apiSource = fs.readFileSync(path.join(here, "../api.ts"), "utf8");
@@ -59,14 +62,32 @@ test("a provider transition joins one global same-id detail network request", as
   assert.deepEqual(applied, ["dashboard-provider"]);
 });
 
-test("detail single-flight is in-flight only and clears after settlement", async () => {
-  const id = "hf_paper:cleanup";
-  const first = await runDetailSingleFlight(id, async () => "first");
+test("a just-settled detail remains joinable during the route handoff grace", async () => {
+  const id = "hf_paper:route-handoff";
+  let networkRequests = 0;
+  const firstPromise = runDetailSingleFlight(id, async () => {
+    networkRequests += 1;
+    return "first";
+  });
+  assert.equal(await firstPromise, "first");
   await Promise.resolve();
-  const second = await runDetailSingleFlight(id, async () => "second");
 
-  assert.equal(first, "first");
-  assert.equal(second, "second");
+  const destinationPromise = runDetailSingleFlight(id, async () => {
+    networkRequests += 1;
+    return "duplicate";
+  });
+
+  assert.equal(destinationPromise, firstPromise);
+  assert.equal(await destinationPromise, "first");
+  assert.equal(networkRequests, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, DETAIL_ROUTE_HANDOFF_GRACE_MS + 25));
+  const later = await runDetailSingleFlight(id, async () => {
+    networkRequests += 1;
+    return "fresh";
+  });
+  assert.equal(later, "fresh");
+  assert.equal(networkRequests, 2);
 });
 
 test("an active optimistic drawer item survives a generic detail network failure", () => {

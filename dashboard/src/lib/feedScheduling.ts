@@ -68,12 +68,14 @@ export function getImmediateColumnCount(width: number): number {
   return 3;
 }
 
-export function createSingleFlightRegistry() {
+export function createSingleFlightRegistry(options: { successRetentionMs?: number } = {}) {
   type Entry = {
     request: Promise<unknown>;
     priority: { current?: RequestPurpose };
+    clearTimer?: ReturnType<typeof setTimeout>;
   };
   const inFlight = new Map<string, Entry>();
+  const successRetentionMs = Math.max(0, options.successRetentionMs ?? 0);
 
   function run<T>(path: string, factory: () => Promise<T>): Promise<T>;
   function run<T>(
@@ -119,7 +121,17 @@ export function createSingleFlightRegistry() {
     const clear = () => {
       if (inFlight.get(path) === entry) inFlight.delete(path);
     };
-    void request.then(clear, clear);
+    const clearAfterSuccess = () => {
+      if (successRetentionMs === 0) {
+        clear();
+        return;
+      }
+      const timer = setTimeout(clear, successRetentionMs);
+      if (inFlight.get(path) === entry) entry.clearTimer = timer;
+    };
+    // Failures are never retained. A successful result may stay joinable for a
+    // short consumer handoff window (used by route-local detail providers).
+    void request.then(clearAfterSuccess, clear);
     return request;
   }
 
@@ -138,6 +150,8 @@ export function createSingleFlightRegistry() {
       return false;
     },
     clear(path: string): void {
+      const entry = inFlight.get(path);
+      if (entry?.clearTimer) clearTimeout(entry.clearTimer);
       inFlight.delete(path);
     },
   };
