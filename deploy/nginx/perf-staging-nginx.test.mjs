@@ -52,7 +52,7 @@ test('aifeeds perf-staging server pins the isolated public and upstream staging 
     'include /etc/letsencrypt/options-ssl-nginx.conf;',
     'ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;',
     'set $aifeeds_pages_host xlist-dashboard-perf.pages.dev;',
-    'set $aifeeds_worker_host xlist-api-staging.ltsms86.workers.dev;',
+    'set $aifeeds_worker_host staging-api.ai-feeds.com;',
   ]) {
     assert.ok(config.includes(required), `TLS template missing: ${required}`);
   }
@@ -73,9 +73,14 @@ test('aifeeds perf-staging server resolves both upstreams and preserves path plu
   );
   assert.doesNotMatch(
     config,
-    /proxy_pass\s+https:\/\/(?:xlist-dashboard-perf\.pages\.dev|xlist-api-staging\.ltsms86\.workers\.dev)/,
+    /proxy_pass\s+https:\/\/(?:xlist-dashboard-perf\.pages\.dev|staging-api\.ai-feeds\.com)/,
   );
   assert.doesNotMatch(config, /proxy_pass\s+https:\/\/\$aifeeds_(?:worker|pages)_host\/?;/);
+  assert.doesNotMatch(
+    config,
+    /xlist-api-staging\.ltsms86\.workers\.dev/,
+    'the workers.dev deployment identity is not the routed staging API origin',
+  );
 
   for (const upstream of ['worker', 'pages']) {
     assert.match(
@@ -162,7 +167,7 @@ test('SEO regex routes only authoritative public paths to the staging Worker', (
   assert.doesNotMatch(config, /location\s+(?:(?:=|\^~)\s+)?\/i(?:\s|\{)/);
 
   for (const required of [
-    'set $aifeeds_worker_host xlist-api-staging.ltsms86.workers.dev;',
+    'set $aifeeds_worker_host staging-api.ai-feeds.com;',
     'proxy_pass https://$aifeeds_worker_host$request_uri;',
     'proxy_set_header Host $aifeeds_worker_host;',
     'proxy_ssl_server_name on;',

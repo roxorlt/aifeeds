@@ -13,8 +13,9 @@ JS/布局 CPU、viewport/anchor/a11y、媒体代理错误的停止线。单次 l
 
 ## 1. 已采证事实与固定决策
 
-- 目标 Worker：`xlist-api-staging`，公网身份 `staging-api.ai-feeds.com`，直接 upstream
-  `xlist-api-staging.ltsms86.workers.dev`。
+- 目标 Worker：`xlist-api-staging`，已验证的公网与 nginx upstream 均为
+  `staging-api.ai-feeds.com`。`xlist-api-staging.ltsms86.workers.dev` 只作为部署身份；2026-07-16
+  现场验证其 `/api/*` 返回 404，不能作为 perf-staging API upstream。
 - 目标 D1：`xlist-staging`；目标 R2：`xlist-readme-assets-staging`。
 - 专用 Pages 项目：`xlist-dashboard-perf`，upstream
   `xlist-dashboard-perf.pages.dev`；不得覆盖 `xlist-dashboard-staging`。

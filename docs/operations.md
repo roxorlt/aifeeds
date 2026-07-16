@@ -2925,8 +2925,10 @@ perf-staging 不渲染这个含 secret 占位符的通用 location，而使用�
 [`deploy/nginx/aifeeds-perf-staging-bootstrap.conf`](../deploy/nginx/aifeeds-perf-staging-bootstrap.conf)
 只开放 HTTP-01；签发后替换为
 [`deploy/nginx/aifeeds-perf-staging-server.conf`](../deploy/nginx/aifeeds-perf-staging-server.conf)。后者在
-nginx 1.24 上用 `resolver` + 变量 `proxy_pass` 让 Pages/Worker hostname 每 30 秒安全重解析，API
-route 固定 `X-Forwarded-Host: staging-api.ai-feeds.com`，不发送 `X-Origin-Secret`，且页面/API 都
+nginx 1.24 上用 `resolver` + 变量 `proxy_pass` 让 Pages/Worker hostname 每 30 秒安全重解析。Worker
+upstream 使用已验证的 `staging-api.ai-feeds.com`；`xlist-api-staging.ltsms86.workers.dev` 的
+`/api/*` 在 2026-07-16 现场返回 404，只是部署身份，不能用于此链路。API route 固定
+`X-Forwarded-Host: staging-api.ai-feeds.com`，不发送 `X-Origin-Secret`，且页面/API 都
 显式禁用 cache；SPA fallback 前另有与生产同形的 `/daily`、`/i/*`、robots/sitemap/llms Worker
 route，防止 SEO 页面被 Pages 壳吞掉，裸 `/i` 则仍交给 SPA。两者都必须先 `nginx -t`，成功后才
 reload。所有 public TLS upstream 都用系统 CA 验证；Pages fallback 明确清空 Cookie、Authorization
