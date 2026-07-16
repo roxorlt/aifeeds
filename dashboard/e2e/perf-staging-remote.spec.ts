@@ -152,6 +152,7 @@ async function readSyntheticFixtureFromUiResponse(
   response: APIResponse | PlaywrightResponse,
   envName: SyntheticFixtureEnv,
   sourceType: "x_list" | "blog",
+  options: { requireFirst?: boolean } = {},
 ): Promise<SyntheticFixtureItem> {
   const expectedFixtureId = expectedSyntheticFixtureId(envName, sourceType);
   const url = new URL(response.url());
@@ -165,6 +166,12 @@ async function readSyntheticFixtureFromUiResponse(
     items?: SyntheticFixtureItem[];
   } | null;
   const items = Array.isArray(payload?.items) ? payload.items : [];
+  if (options.requireFirst) {
+    expect(
+      items[0]?.id,
+      sourceType + " fixture must be the first row so cold media stays user-visible",
+    ).toBe(expectedFixtureId);
+  }
   const fixture = items.find((item) => item.id === expectedFixtureId);
   expect(fixture, sourceType + " fixture must be visible in the page's exact UI list response").toBeTruthy();
   return fixture!;
@@ -208,10 +215,15 @@ async function expectExactFixtureImage(
   feed: Locator,
   originalPath: string,
   variantPath: string,
+  options: { viewportMode: "already-in-viewport" | "scroll-into-viewport" },
 ): Promise<Locator> {
   const image = feed.locator('img[src="' + WORKER_ASSET_ORIGIN + originalPath + '"]');
   await expect(image).toHaveCount(1);
+  if (options.viewportMode === "scroll-into-viewport") {
+    await image.scrollIntoViewIfNeeded();
+  }
   await expect(image).toBeVisible();
+  await expect(image).toBeInViewport();
   await expect.poll(() => image.evaluate((element: HTMLImageElement) => {
     if (!element.currentSrc) return "";
     return new URL(element.currentSrc, location.href).pathname;
@@ -1203,6 +1215,7 @@ test.describe("perf-staging remote acceptance", () => {
       listResponse,
       "E2E_EXPECTED_X_FIXTURE_ID",
       "x_list",
+      { requireFirst: true },
     );
     const expectedXImageWidth = testInfo.project.name === "desktop-chromium" ? 400 : 800;
     const expectedXImage = exactFixtureImagePaths(xFixture, "x_list", expectedXImageWidth);
@@ -1216,6 +1229,7 @@ test.describe("perf-staging remote acceptance", () => {
       activeXFeed,
       expectedXImage.originalPath,
       expectedXImage.variantPath,
+      { viewportMode: "already-in-viewport" },
     );
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
@@ -1502,6 +1516,7 @@ test.describe("perf-staging remote acceptance", () => {
       activeBlogFeed,
       expectedBlogImage.originalPath,
       expectedBlogImagePath,
+      { viewportMode: "scroll-into-viewport" },
     );
     const exactBlogRequests = () => mediaRequestRecords.slice(swipeMediaRequestBaseline)
       .filter((record) => {

@@ -48,6 +48,10 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   const remoteRunnerPath = path.join(dashboard, "scripts/run-perf-staging-e2e.sh");
   assert.equal(fs.existsSync(remoteRunnerPath), true, "remote perf-staging runner must exist");
   const remoteRunner = fs.readFileSync(remoteRunnerPath, "utf8");
+  const stagingRunbook = fs.readFileSync(
+    path.join(root, "docs/reviews/c-end-perf-staging-change-packet.md"),
+    "utf8",
+  );
 
   assert.match(config, /E2E_BASE_URL/);
   assert.match(config, /E2E_OUTPUT_DIR/);
@@ -70,6 +74,9 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteRunner, /x_list:perf-staging-\[a-f0-9\]\{20\}/);
   assert.match(remoteRunner, /blog:perf-staging-\[a-f0-9\]\{20\}/);
   assert.match(remoteRunner, /exec npx playwright test e2e\/perf-staging-remote\.spec\.ts/);
+  assert.match(stagingRunbook, /FIXTURES="\$EVIDENCE\/synthetic-feed-fixtures\.json"/);
+  assert.match(stagingRunbook, /E2E_EXPECTED_X_FIXTURE_ID="\$X_FIXTURE_ID"/);
+  assert.match(stagingRunbook, /E2E_EXPECTED_BLOG_FIXTURE_ID="\$BLOG_FIXTURE_ID"/);
   assert.match(remoteSpec, /E2E_REMOTE/);
   assert.match(remoteSpec, /E2E_COOKIE_JAR/);
   assert.match(remoteSpec, /E2E_EXPECTED_UID/);
@@ -113,6 +120,11 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /items\.find\(\(item\) => item\.id === expectedFixtureId\)/);
   assert.match(remoteSpec, /const blogResponsePromise = page\.waitForResponse/);
   assert.match(remoteSpec, /expectExactFixtureImage/);
+  assert.match(remoteSpec, /requireFirst:\s*true/);
+  assert.match(remoteSpec, /viewportMode:\s*"already-in-viewport"/);
+  assert.match(remoteSpec, /viewportMode:\s*"scroll-into-viewport"/);
+  assert.match(remoteSpec, /scrollIntoViewIfNeeded\(\)/);
+  assert.match(remoteSpec, /toBeInViewport\(\)/);
   assert.match(remoteSpec, /expectedBlogImagePath/);
   assert.match(remoteSpec, /currentSrc[\s\S]{0,160}?toBe\(variantPath\)/);
   assert.match(remoteSpec, /mediaRequestRecords\.slice\(swipeMediaRequestBaseline\)/);

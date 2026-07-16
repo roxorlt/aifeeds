@@ -2299,8 +2299,15 @@ test -z "$(git status --porcelain)"
 TEST_UID="$(jq -er '.user_id' "$EVIDENCE/test-account-ownership.json")"
 TEST_DID="$(jq -er '.device_id' "$EVIDENCE/test-account-ownership.json")"
 COOKIE_JAR="$(jq -er '.cookie_jar' "$EVIDENCE/test-account-ownership.json")"
+FIXTURES="$EVIDENCE/synthetic-feed-fixtures.json"
+test -f "$FIXTURES"
+test ! -L "$FIXTURES"
+X_FIXTURE_ID="$(jq -er '.x.id' "$FIXTURES")"
+BLOG_FIXTURE_ID="$(jq -er '.blog.id' "$FIXTURES")"
 printf '%s' "$TEST_UID" | grep -Eq '^[A-Za-z0-9_-]{14}$'
 printf '%s' "$TEST_DID" | grep -Eq '^perf-[a-f0-9]{24}$'
+printf '%s' "$X_FIXTURE_ID" | grep -Eq '^x_list:perf-staging-[a-f0-9]{20}$'
+printf '%s' "$BLOG_FIXTURE_ID" | grep -Eq '^blog:perf-staging-[a-f0-9]{20}$'
 case "$COOKIE_JAR" in /private/tmp/aifeeds-perf-staging-*.cookies) ;; *) exit 1 ;; esac
 test -f "$COOKIE_JAR"
 test "$(stat -f '%Lp' "$COOKIE_JAR")" = 600
@@ -2312,6 +2319,8 @@ cd "$REPO_ROOT/dashboard"
 set +e
 PLAYWRIGHT_NO_COPY_PROMPT=1 \
   E2E_COOKIE_JAR="$COOKIE_JAR" E2E_EXPECTED_UID="$TEST_UID" E2E_EXPECTED_DID="$TEST_DID" \
+  E2E_EXPECTED_X_FIXTURE_ID="$X_FIXTURE_ID" \
+  E2E_EXPECTED_BLOG_FIXTURE_ID="$BLOG_FIXTURE_ID" \
   E2E_PERF_PROBE="$E2E_PERF_PROBE" \
   E2E_OUTPUT_DIR="$EVIDENCE/playwright" \
   npm run test:e2e:perf-staging \
