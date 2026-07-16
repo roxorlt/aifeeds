@@ -84,7 +84,9 @@ function persistStored(): void {
   if (!current) return;
   try {
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(current));
-  } catch {}
+  } catch {
+    // sessionStorage 不可用时保留当前内存会话。
+  }
 }
 
 function loadStored(): SessionState | null {

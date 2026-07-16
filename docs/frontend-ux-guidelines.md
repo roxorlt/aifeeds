@@ -102,8 +102,19 @@
 
 ### 转场
 
-- 全局：`transition-colors`（不要 `transition-all`）
-- Modal 显隐 / 页面切换：当前不加动画（YAGNI），等真有需要再上
+- 全局默认仍用 `transition-colors`，禁止 `transition-all`。
+- 只动画 `transform` 与 `opacity`；不要动画 `width / height / margin / padding / top / left`。
+- 进入/退出：`cubic-bezier(0.23, 1, 0.32, 1)`；在屏位置移动：
+  `cubic-bezier(0.77, 0, 0.175, 1)`；Drawer：
+  `cubic-bezier(0.32, 0.72, 0, 1)`。
+- 高频频道/搜索/排序直接响应，不用骨架或页面转场模拟等待。小 Popover 125–200ms，
+  Dropdown 150–250ms，Modal/Drawer 200–500ms，普通 UI 必须低于 300ms。
+- Popover 从触发器方向设置 `transform-origin`，使用 `scale(.95–.97)+opacity`，禁止
+  `scale(0)`；居中 Modal 保持 center origin。
+- 触控手势必须跟手、可中断，支持速度阈值、边界阻尼和多指保护；业务 close 在退出完成后执行。
+- `prefers-reduced-motion` 下保留 opacity/color，移除位移、旋转、脉冲和平滑滚动。
+- Hover 位移必须放在 `@media (hover: hover) and (pointer: fine)` 中。
+- 键盘高频动作不等待动画，例如 Escape 立即关闭 Lightbox/Drawer。
 
 ---
 
@@ -332,6 +343,6 @@
 - [ ] 错误：行内紧挨输入框（`mt-1 text-xs text-rose-600`）
 - [ ] 移动端：input 用 `text-base`（≥ 16px 防 iOS zoom）
 - [ ] 阴影：卡片不用，模态 `shadow-xl`，下拉 `shadow-lg`
-- [ ] 转场：仅 `transition-colors`，不用 `transition-all`
+- [ ] 转场：不用 `transition-all`；位移动效仅 `transform/opacity`，并覆盖 reduced-motion
 
 如果业务确实需要规范外的元素（新色 / 新字号 / 新组件），先在本文档讨论 + 加进去，再实施。

@@ -14,7 +14,7 @@
 
 import { useEffect, useRef } from "react";
 import { useVideoCoordinator } from "./videoCoordinator";
-import { useVideoColumn } from "./videoColumnContext";
+import { useVideoColumn } from "./videoColumn";
 import { getProgress, saveProgress } from "./videoProgress";
 
 export interface UseCoordinatedVideoOptions {
@@ -42,7 +42,6 @@ const isDev = (() => {
 
 function log(event: string, payload?: Record<string, unknown>): void {
   if (!isDev) return;
-  // eslint-disable-next-line no-console
   console.log(`[VC.hook] ${event} ${payload ? JSON.stringify(payload) : ""}`);
 }
 

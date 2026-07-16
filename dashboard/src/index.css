@@ -86,6 +86,175 @@ body {
   display: none;
 }
 
+/* 高频卡片浏览只给精细指针一个很轻的空间反馈，触屏不触发伪 hover。 */
+.motion-card-media {
+  transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+@media (hover: hover) and (pointer: fine) {
+  .motion-card-media:hover {
+    transform: scale(1.01);
+  }
+}
+
+/* Layer motion: one entrance/exit grammar for popovers, modals, sheets and
+   media viewers. Opacity is carried by the backdrop/root; only compositor
+   transforms are used for the foreground panel. */
+@keyframes motion-layer-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes motion-modal-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes motion-popover-enter {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes motion-sheet-enter {
+  from { opacity: 1; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes motion-lightbox-enter {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.motion-layer {
+  opacity: 1;
+  animation: motion-layer-enter 220ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  transition: opacity 220ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.motion-layer-panel {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  animation: motion-modal-enter 220ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  transition:
+    opacity 220ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 220ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.motion-layer-popover {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: top right;
+  animation: motion-popover-enter 160ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  transition:
+    opacity 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.motion-layer-sheet .motion-layer-panel {
+  transform: translateY(0);
+  animation-name: motion-sheet-enter;
+}
+.motion-layer-lightbox .motion-layer-panel {
+  animation-name: motion-lightbox-enter;
+}
+
+.motion-layer-leaving {
+  opacity: 0;
+  animation: none;
+  pointer-events: none;
+  transition-duration: 200ms;
+}
+.motion-layer-leaving .motion-layer-panel {
+  opacity: 0;
+  transform: translateY(8px) scale(0.97);
+  animation: none;
+  transition-duration: 200ms;
+}
+.motion-layer-popover.motion-layer-leaving {
+  transform: translateY(-4px) scale(0.96);
+  transition-duration: 125ms;
+}
+.motion-layer-sheet.motion-layer-leaving .motion-layer-panel {
+  opacity: 1;
+  transform: translateY(20px);
+}
+.motion-layer-lightbox.motion-layer-leaving .motion-layer-panel {
+  transform: scale(0.96);
+}
+
+/* Quote snapshots remain bottom sheets on narrow screens, but use centered
+   modal motion once their layout moves to the center of the viewport. */
+@media (min-width: 640px) {
+  .motion-layer-adaptive.motion-layer-sheet .motion-layer-panel {
+    animation-name: motion-modal-enter;
+  }
+  .motion-layer-adaptive.motion-layer-sheet.motion-layer-leaving .motion-layer-panel {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+
+.motion-toast {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.motion-toast[data-mounted="false"] {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+  pointer-events: none;
+}
+.motion-toast[data-leaving="true"] {
+  transition-duration: 110ms;
+}
+
+/* Reduced motion 保留短促颜色/透明度反馈，只去掉位移和无限循环。
+   不再用全局近零时长：它会连 hover/focus 的颜色反馈与 modal/toast 淡入淡出
+   一起抹掉，视觉上反而像状态瞬移。 */
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+  .animate-spin,
+  .animate-pulse {
+    animation: none !important;
+  }
+  .motion-card-media {
+    transform: none !important;
+    transition-property: opacity, color, background-color !important;
+    transition-duration: 120ms !important;
+  }
+  .motion-layer,
+  .motion-layer-panel,
+  .motion-layer-popover {
+    transform: none !important;
+    transition-property: opacity, color, background-color !important;
+    transition-duration: 120ms !important;
+  }
+  .motion-layer,
+  .motion-layer-popover {
+    animation: motion-layer-enter 120ms cubic-bezier(0.23, 1, 0.32, 1) both !important;
+  }
+  .motion-layer-panel {
+    animation: none !important;
+  }
+  .motion-layer-leaving,
+  .motion-layer-popover.motion-layer-leaving {
+    animation: none !important;
+  }
+  .motion-toast {
+    transform: none !important;
+    transition-property: opacity, color, background-color !important;
+    transition-duration: 120ms !important;
+  }
+  .motion-channel-pill {
+    transition: none !important;
+  }
+  .motion-pull-indicator {
+    transform: none !important;
+    transition-property: opacity, color, background-color !important;
+    transition-duration: 120ms !important;
+  }
+}
+
 /* PH 评论富文本渲染（DOMPurify 清洗后输出的 HTML）
    段落 / 链接 / 列表 / 图片基础排版，保持跟纯文本评论同一视觉密度 */
 .ph-comment-html {

@@ -21,6 +21,20 @@ export interface MediaItem {
   poster?: string;
   // PH gallery role: "logo" | "gallery" | undefined（旧 X 数据无此字段）
   role?: string;
+  // Ingestion-time, content-addressed WebP card variants. The original url is
+  // deliberately retained as the detail/lightbox and legacy fallback.
+  card_variants?: CardImageVariant[];
+  // Video bytes are never transformed; only an external still poster may have
+  // its own variants.
+  poster_variants?: CardImageVariant[];
+}
+
+export interface CardImageVariant {
+  url: string;
+  width: number;
+  height?: number;
+  format: "webp";
+  bytes?: number;
 }
 
 export interface Metrics {
@@ -169,6 +183,10 @@ export interface ItemExtra {
   llm_called_at?: number;
   readme_excerpt?: string;
   readme_translated?: string | null;
+  // Feed list DTO 派生的首张可用封面；详情仍保留完整 README 字段。
+  cover_url?: string;
+  cover_variants?: CardImageVariant[];
+  cover_variant_source?: string;
   contributors_inline?: Array<{ login: string; avatar_url: string }>;
   contributors_count?: number | null;
   sponsor?: number;
@@ -229,6 +247,8 @@ export interface ItemExtra {
   contact?: HuodongxingContact;
   thumbnail_full?: string | null;             // 大图原 URL（可能尚未迁 R2）
   og_image?: string | null;                   // 主图 og:image
+  card_thumbnail_variants?: CardImageVariant[];
+  card_thumbnail_variant_source?: string;
   organizer_ids?: number[];                   // 主办方数字 ID 数组（备用）
   create_date?: string | null;                // 活动创建日期
   update_date?: string | null;                // 活动更新日期
@@ -273,6 +293,7 @@ export interface ItemExtra {
   source_company?: string;                    // 'OpenAI' / 'Lex Fridman'
   publisher?: BlogPublisher;                  // 出品方品牌（name + 迁 R2 logo）
   cover_image?: string;                       // 封面（迁 R2 后为 /r/ 路径）
+  cover_image_variants?: CardImageVariant[];
   // ai_summary_zh / title_zh 复用上方 HF 已声明字段（ELI25 摘要 + 标题中译）
   // 跨源去重：次源写 dedup_of 指主源；handleItems 用 dedup_of IS NULL 隐藏
   dedup_of?: string | null;
@@ -545,6 +566,12 @@ export interface Source {
 
 export interface SourcesResponse {
   sources: Source[];
+}
+
+export interface FeedManifest {
+  live_source_types: SourceType[];
+  labels: Partial<Record<SourceType, string>>;
+  generated_at: string;
 }
 
 export interface Stats {

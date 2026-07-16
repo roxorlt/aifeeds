@@ -130,7 +130,7 @@ export async function login(identifier: string, code: string): Promise<LoginResp
   return parseOrThrow(res);
 }
 
-export async function fetchMe(): Promise<{ user: User }> {
+export async function fetchMe(): Promise<{ user: User | null }> {
   const res = await authFetch('/api/auth/me');
   return parseOrThrow(res);
 }

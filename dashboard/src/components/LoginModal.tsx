@@ -5,6 +5,9 @@ import { AuthError } from '../lib/auth';
 import { track, EVENTS } from '../lib/telemetry';
 import { toast } from '../lib/toast';
 import { isWeChatBrowser } from '../lib/wechat';
+import { useMotionDismiss } from '../lib/motionLayer';
+import { activateModalFocus } from '../lib/modalFocus';
+import { useScrollLock } from '../lib/useScrollLock';
 
 const TURNSTILE_SITE_KEY = '0x4AAAAAADJyUx6JD4IMD_1i'; // ai-feeds-login-v3 widget
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
@@ -59,6 +62,8 @@ export function LoginModal() {
   const trigger = useAuthStore((s) => s.loginTrigger);
   const closeModal = useAuthStore((s) => s.closeLoginModal);
   const onLoginSuccess = useAuthStore((s) => s.onLoginSuccess);
+  const { layerClassName, requestClose } = useMotionDismiss(closeModal, 'modal', open);
+  useScrollLock(open);
 
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -72,6 +77,21 @@ export function LoginModal() {
   const [cooldownSec, setCooldownSec] = useState(0);
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const escapeCloseRef = useRef(closeModal);
+
+  useEffect(() => {
+    escapeCloseRef.current = closeModal;
+  }, [closeModal]);
+
+  useEffect(() => {
+    if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    return activateModalFocus(panel, {
+      onEscape: () => escapeCloseRef.current(),
+    });
+  }, [open]);
 
   // open 改 true：上报埋点 + reset 状态
   useEffect(() => {
@@ -140,7 +160,9 @@ export function LoginModal() {
     return () => {
       cancelled = true;
       if (createdId && window.turnstile) {
-        try { window.turnstile.remove(createdId); } catch {}
+        try { window.turnstile.remove(createdId); } catch {
+          // widget 可能已被 Turnstile 自行移除，清理保持幂等。
+        }
       }
       setTurnstileWidgetId(null);
     };
@@ -227,16 +249,23 @@ export function LoginModal() {
   const loginDisabled = loading || !codeSent || code.length !== 6;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+    <div
+      className={`${layerClassName} fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="login-modal-title"
+    >
       <div
-        className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
+        ref={panelRef}
+        tabIndex={-1}
+        className="motion-layer-panel w-full max-w-sm rounded-xl bg-white p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-neutral-900">登录 / 注册</h2>
+          <h2 id="login-modal-title" className="text-lg font-semibold text-neutral-900">登录 / 注册</h2>
           <button
             type="button"
-            onClick={closeModal}
+            onClick={requestClose}
             className="-mr-2 rounded-md px-2 py-1 text-neutral-500 hover:bg-neutral-100"
             aria-label="关闭"
           >
@@ -253,8 +282,8 @@ export function LoginModal() {
             onChange={(e) => setEmail(e.target.value.slice(0, 254))}
             placeholder="请输入邮箱"
             disabled={codeSent && cooldownSec > 0}
+            data-modal-initial-focus
             className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-base placeholder:text-sm placeholder:text-neutral-400 focus:border-neutral-900 focus:outline-none disabled:bg-neutral-50 disabled:text-neutral-500"
-            autoFocus
             autoComplete="email"
           />
           <button

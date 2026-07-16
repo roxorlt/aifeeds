@@ -48,6 +48,19 @@ import {
 import type { XCookieBlob } from './x-graphql';
 import { authenticate } from './auth/session';
 import { handleTrack } from './track';
+import {
+  d1DurationMs,
+  formatServerTiming,
+  resolveRequestId,
+} from './server-timing';
+import {
+  buildImageProxyCacheKey,
+  negotiateImageFormat,
+  normalizeImageProxyQuality,
+  normalizeImageProxyWidth,
+} from './card-image-variant';
+import { runCardImageVariantBackfill } from './card-image-variant-backfill';
+import { buildFeedManifest } from './feed-manifest';
 import { handleDubWishlistAdd, handleDubWishlistState } from './dub-wishlist';
 import {
   handleFeedbackSubmit,
@@ -61,6 +74,7 @@ import {
 import {
   runGithubFetchTrending,
   runGithubEnrichPending,
+  runGithubCoverBackfill,
   runGithubReadmeTranslate,
   runGithubR2Migrate,
   triggerGhWorkflowForItem,
@@ -165,6 +179,14 @@ import { syncSearchIndex, reconcileSearchIndex, handleSearchReindex } from './se
 import { rebuildSearchTerms } from './search/terms';
 import { handleSearch, handleSearchSuggest } from './search/handlers';
 import { parseItemRow } from './item-row';
+import { toListItem } from './list-item';
+import {
+  buildListProjection,
+  buildListSelect,
+  filterListProjectionSources,
+  selectProjectedListColumns,
+  type HiddenListProjection,
+} from './list-query';
 import {
   handleShareCreate,
   handleSharePoster,
@@ -193,6 +215,7 @@ const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:a
 export interface Env {
   DB: D1Database;
   AUTH_KV: KVNamespace;
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
   INGEST_TOKEN: string;
   DEEPSEEK_API_KEY?: string;
   // GITHUB_TOKEN: optional PAT (public_repo scope). Lifts API rate limit
@@ -396,14 +419,55 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   return headers;
 }
 
-function jsonResponse(data: unknown, status: number, request: Request, env: Env): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      ...corsHeaders(request, env),
-    },
-  });
+export type JsonResponseOptions = {
+  headers?: HeadersInit;
+  timings?: Record<string, number>;
+  requestId?: string;
+  generateRequestId?: () => string;
+};
+
+function mergeVary(headers: Headers, value: string): void {
+  const values = new Set(
+    (headers.get('Vary') || '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
+  values.add(value);
+  headers.set('Vary', [...values].join(', '));
+}
+
+export function jsonResponse(
+  data: unknown,
+  status: number,
+  request: Request,
+  env: Env,
+  options: JsonResponseOptions = {},
+): Response {
+  const isTimed = options.timings !== undefined;
+  const body = JSON.stringify(data);
+
+  const headers = new Headers(options.headers);
+  headers.set('Content-Type', 'application/json');
+  for (const [name, value] of Object.entries(corsHeaders(request, env))) {
+    if (name.toLowerCase() === 'vary') mergeVary(headers, value);
+    else headers.set(name, value);
+  }
+  const requestId = resolveRequestId(
+    options.requestId ?? request.headers.get('X-Request-Id'),
+    options.generateRequestId,
+  );
+  headers.set('X-Request-Id', requestId);
+
+  if (!isTimed) return new Response(body, { status, headers });
+
+  const allowedOrigin = headers.get('Access-Control-Allow-Origin');
+  headers.delete('Timing-Allow-Origin');
+  if (allowedOrigin) headers.set('Timing-Allow-Origin', allowedOrigin);
+
+  const serverTiming = formatServerTiming(options.timings ?? {});
+  if (serverTiming) headers.set('Server-Timing', serverTiming);
+  return new Response(body, { status, headers });
 }
 
 function withCors(resp: Response, request: Request, env: Env): Response {
@@ -411,6 +475,18 @@ function withCors(resp: Response, request: Request, env: Env): Response {
   for (const [k, v] of Object.entries(corsHeaders(request, env))) {
     newHeaders.set(k, v);
   }
+  return new Response(resp.body, { status: resp.status, headers: newHeaders });
+}
+
+function withCorsAndRequestId(resp: Response, request: Request, env: Env): Response {
+  const newHeaders = new Headers(resp.headers);
+  for (const [k, v] of Object.entries(corsHeaders(request, env))) {
+    newHeaders.set(k, v);
+  }
+  newHeaders.set(
+    'X-Request-Id',
+    resolveRequestId(request.headers.get('X-Request-Id')),
+  );
   return new Response(resp.body, { status: resp.status, headers: newHeaders });
 }
 
@@ -607,10 +683,10 @@ export default {
       }
       // C 端搜索（bot gate 不豁免——保持被 UA 闸拦截，见 isBotGateExempt）。
       if (path === '/api/search' && request.method === 'GET') {
-        return withCors(await handleSearch(request, env, ctx), request, env);
+        return withCorsAndRequestId(await handleSearch(request, env, ctx), request, env);
       }
       if (path === '/api/search/suggest' && request.method === 'GET') {
-        return withCors(await handleSearchSuggest(request, env, ctx), request, env);
+        return withCorsAndRequestId(await handleSearchSuggest(request, env, ctx), request, env);
       }
       // POST /api/items/:id/refresh — drawer 打开时调用 on-demand enrich（PR6.6）
       const itemRefreshMatch = path.match(/^\/api\/items\/(.+)\/refresh$/);
@@ -633,6 +709,9 @@ export default {
       const itemByIdMatch = path.match(/^\/api\/items\/(.+)$/);
       if (itemByIdMatch && request.method === 'GET') {
         return handleItemById(request, env, decodeURIComponent(itemByIdMatch[1]));
+      }
+      if (path === '/api/feed-manifest' && request.method === 'GET') {
+        return handleFeedManifest(request, env);
       }
       if (path === '/api/sources' && request.method === 'GET') {
         return handleSources(request, env);
@@ -857,6 +936,9 @@ export default {
       }
       if (path === '/img' && request.method === 'GET') {
         return handleImageProxy(request);
+      }
+      if (path === '/media' && request.method === 'GET') {
+        return handleImageProxy(request, 'video', env.CF_VERSION_METADATA?.id);
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
@@ -2619,7 +2701,111 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
 
 // ─── GET /api/items ────────────────────────────────────────────
 
-async function handleItems(request: Request, env: Env): Promise<Response> {
+const CURSOR_NUMBER_PATTERN = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const CURSOR_ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const CURSOR_RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+function isFiniteCursorNumber(value: string | undefined): boolean {
+  if (!value || !CURSOR_NUMBER_PATTERN.test(value)) return false;
+  return Number.isFinite(Number(value));
+}
+
+function isCursorRank(value: string | undefined): boolean {
+  return value === '0' || value === '1';
+}
+
+function isCanonicalCursorTime(value: string | undefined): boolean {
+  if (!value || !CURSOR_ISO_UTC_PATTERN.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+// Item ordering values are emitted from the raw D1 TEXT column. Existing
+// producers use valid RFC3339 but do not all include milliseconds or `Z`, so
+// cursor input must accept that exact server output while still rejecting the
+// permissive non-dates accepted by Date.parse(). The frozen ranking clock is
+// generated by toISOString() and remains canonical-only above.
+function isCursorSortTime(value: string | undefined): boolean {
+  if (!value) return false;
+  const match = CURSOR_RFC3339_PATTERN.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+  if (
+    year < 1
+    || month < 1 || month > 12
+    || day < 1 || day > 31
+    || hour > 23 || minute > 59 || second > 59
+    || offsetHour > 23 || offsetMinute > 59
+  ) return false;
+  const local = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return local.getUTCFullYear() === year
+    && local.getUTCMonth() === month - 1
+    && local.getUTCDate() === day
+    && local.getUTCHours() === hour
+    && local.getUTCMinutes() === minute
+    && local.getUTCSeconds() === second
+    && Number.isFinite(Date.parse(value));
+}
+
+function isCursorId(value: string | undefined): boolean {
+  return Boolean(value?.trim());
+}
+
+function isValidGenericCursor(
+  parts: string[],
+  mode: 'ordinary' | 'feed-ranking' | 'hot',
+): boolean {
+  if (mode === 'hot') {
+    if (parts[0] === 'v2h') {
+      return parts.length === 4
+        && isFiniteCursorNumber(parts[1])
+        && isCursorId(parts[2])
+        && isCanonicalCursorTime(parts[3]);
+    }
+    return parts.length === 2
+      && isFiniteCursorNumber(parts[0])
+      && isCursorId(parts[1]);
+  }
+
+  if (mode === 'feed-ranking') {
+    if (parts[0] === 'v2') {
+      return parts.length === 6
+        && isFiniteCursorNumber(parts[1])
+        && isCursorRank(parts[2])
+        && isCursorSortTime(parts[3])
+        && isCursorId(parts[4])
+        && isCanonicalCursorTime(parts[5]);
+    }
+    return (parts.length === 3 || parts.length === 4)
+      && isFiniteCursorNumber(parts[0])
+      && isCursorSortTime(parts[1])
+      && isCursorId(parts[2])
+      && (parts.length === 3 || isCanonicalCursorTime(parts[3]));
+  }
+
+  if (parts[0] === 'v2') {
+    return parts.length === 4
+      && isCursorRank(parts[1])
+      && isCursorSortTime(parts[2])
+      && isCursorId(parts[3]);
+  }
+  return parts.length === 2
+    && isCursorSortTime(parts[0])
+    && isCursorId(parts[1]);
+}
+
+export async function handleItems(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const sourceType = url.searchParams.get('source_type');
   const since = url.searchParams.get('since');
@@ -2653,29 +2839,63 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   if (sourceType === 'huodongxing') {
     return handleHuodongxingFeed(request, env);
   }
+  // Validate every generic cursor before D1 work and before cursor presence can
+  // suppress the default time window. Versioned and legacy formats both have
+  // exact arity plus strict numeric/date ordering keys.
+  const types = sourceType ? sourceType.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const isFeedRanking = !isHot && types.length > 0 && types.every((t) => t === 'blog' || t === 'podcast');
+  const hasCursorParam = url.searchParams.has('cursor');
+  const cursorParts = cursor !== null ? cursor.split('|') : [];
+  if (hasCursorParam) {
+    const cursorMode = isHot ? 'hot' : isFeedRanking ? 'feed-ranking' : 'ordinary';
+    if (!isValidGenericCursor(cursorParts, cursorMode)) {
+      return jsonResponse({ error: 'invalid_cursor' }, 400, request, env);
+    }
+  }
   // Hot score: HN-style engagement with gravity decay so recent items win
   // but older high-engagement items can still bubble up.
   //   score = engagement / (age_hours + 2)^1.5
   // Paired with a 30d soft window (below) to keep the candidate set bounded
   // and let the pool feel rich without scanning the whole table.
+  const hotCursorRankNowCandidate = cursorParts[0] === 'v2h' ? cursorParts[3] : '';
+  const hotRankNowIso = isHot
+    ? hotCursorRankNowCandidate && isCanonicalCursorTime(hotCursorRankNowCandidate)
+      ? hotCursorRankNowCandidate
+      : new Date().toISOString()
+    : '';
+  const hotRankNowSql = hotRankNowIso ? `'${hotRankNowIso.replace(/'/g, "''")}'` : "'now'";
   const HOT_EXPR = `(
     (
       COALESCE(CAST(json_extract(metrics, '$.likes') AS INTEGER), 0) +
       2 * COALESCE(CAST(json_extract(metrics, '$.retweets') AS INTEGER), 0) +
       3 * COALESCE(CAST(json_extract(metrics, '$.replies') AS INTEGER), 0)
-    ) * 1.0 / POW((julianday('now') - julianday(published_at)) * 24 + 2, 1.5)
+    ) * 1.0 / POW(
+      MAX(
+        COALESCE((julianday(${hotRankNowSql}) - julianday(published_at)) * 24, 0),
+        0
+      ) + 2,
+      1.5
+    )
   )`;
   const conditions: string[] = [];
   const params: unknown[] = [];
 
   // Source type filter（types 提升到函数作用域:下方时间窗口判断官方新闻也要用）
-  const types = sourceType ? sourceType.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const isFeedRanking = !isHot && types.length > 0 && types.every((t) => t === 'blog' || t === 'podcast');
-  const cursorParts = cursor ? cursor.split('|') : [];
-  const cursorRankNow = cursorParts[3] && Number.isFinite(Date.parse(cursorParts[3])) ? cursorParts[3] : '';
+  const cursorIsV2 = cursorParts[0] === 'v2';
+  const cursorRankNowCandidate = cursorIsV2 ? cursorParts[5] : cursorParts[3];
+  const cursorRankNow = cursorRankNowCandidate
+    && isCanonicalCursorTime(cursorRankNowCandidate)
+    ? cursorRankNowCandidate
+    : '';
   const feedRankNowIso = isFeedRanking ? (cursorRankNow || new Date().toISOString()) : '';
   const feedRankNowSql = feedRankNowIso ? `'${feedRankNowIso.replace(/'/g, "''")}'` : "'now'";
   const FEED_RANK_EXPR = feedNewsRankSqlExpression(feedRankNowSql);
+  const untranslatedRankExpr = `(
+    content_translated IS NULL
+    AND json_extract(extra, '$.title_zh') IS NULL
+    AND json_extract(extra, '$.excerpt_zh') IS NULL
+    AND json_extract(extra, '$.ai_summary_zh') IS NULL
+  )`;
   if (isFeedRanking) {
     sort = 'published_at';
   }
@@ -2744,20 +2964,61 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Cursor pagination. Hot mode uses "score|id"; feed ranking uses
-  // "score|published_at|id|rank_time"; otherwise "time|id".
+  // Cursor pagination. New non-hot cursors are versioned because translated
+  // priority participates in ORDER BY and therefore must participate in the
+  // keyset. Legacy cursors remain readable for in-flight clients.
   if (cursor) {
-    const [a, b, c] = cursorParts;
-    if (isFeedRanking && a && b && c) {
-      conditions.push(`(${FEED_RANK_EXPR} < ? OR (${FEED_RANK_EXPR} = ? AND (${sort} < ? OR (${sort} = ? AND id < ?))))`);
-      params.push(parseFloat(a), parseFloat(a), b, b, c);
-    } else if (a && b) {
-      if (isHot) {
-        conditions.push(`(${HOT_EXPR} < ? OR (${HOT_EXPR} = ? AND id < ?))`);
-        params.push(parseFloat(a), parseFloat(a), b);
+    if (isFeedRanking) {
+      if (cursorIsV2) {
+        const [, scoreText, rankText, time, id] = cursorParts;
+        const score = Number.parseFloat(scoreText);
+        const rank = Number.parseInt(rankText, 10);
+        if (Number.isFinite(score) && Number.isFinite(rank) && time && id) {
+          conditions.push(`(
+            ${FEED_RANK_EXPR} < ?
+            OR (${FEED_RANK_EXPR} = ? AND (
+              ${untranslatedRankExpr} > ?
+              OR (${untranslatedRankExpr} = ? AND (
+                ${sort} < ? OR (${sort} = ? AND id < ?)
+              ))
+            ))
+          )`);
+          params.push(score, score, rank, rank, time, time, id);
+        }
       } else {
+        const [scoreText, time, id] = cursorParts;
+        const score = Number.parseFloat(scoreText);
+        if (Number.isFinite(score) && time && id) {
+          conditions.push(`(${FEED_RANK_EXPR} < ? OR (${FEED_RANK_EXPR} = ? AND (${sort} < ? OR (${sort} = ? AND id < ?))))`);
+          params.push(score, score, time, time, id);
+        }
+      }
+    } else if (isHot) {
+      const [scoreText, id] = cursorParts[0] === 'v2h'
+        ? [cursorParts[1], cursorParts[2]]
+        : cursorParts;
+      const score = Number.parseFloat(scoreText);
+      if (Number.isFinite(score) && id) {
+        conditions.push(`(${HOT_EXPR} < ? OR (${HOT_EXPR} = ? AND id < ?))`);
+        params.push(score, score, id);
+      }
+    } else if (cursorIsV2) {
+      const [, rankText, time, id] = cursorParts;
+      const rank = Number.parseInt(rankText, 10);
+      if (Number.isFinite(rank) && time && id) {
+        conditions.push(`(
+          ${untranslatedRankExpr} > ?
+          OR (${untranslatedRankExpr} = ? AND (
+            ${sort} < ? OR (${sort} = ? AND id < ?)
+          ))
+        )`);
+        params.push(rank, rank, time, time, id);
+      }
+    } else {
+      const [time, id] = cursorParts;
+      if (time && id) {
         conditions.push(`(${sort} < ? OR (${sort} = ? AND id < ?))`);
-        params.push(a, a, b);
+        params.push(time, time, id);
       }
     }
   }
@@ -2768,41 +3029,50 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
   // task #8 C 端展示策略：非 hot 模式下，已翻译 item 优先（content_translated IS
   // NOT NULL）。同时间戳内，已翻译靠前。降低用户「刷到一条英文 wait 翻译」体验。
   // hot 模式仍按 engagement score 排（翻译先后跟 hot score 无关）。
-  const untranslatedRankExpr = `(
-    content_translated IS NULL
-    AND json_extract(extra, '$.title_zh') IS NULL
-    AND json_extract(extra, '$.excerpt_zh') IS NULL
-    AND json_extract(extra, '$.ai_summary_zh') IS NULL
-  )`;
   const orderBy = isHot
-    ? `${HOT_EXPR} DESC, id DESC`
+    ? `_hot_score DESC, id DESC`
     : isFeedRanking
-      ? `${FEED_RANK_EXPR} DESC, ${untranslatedRankExpr} ASC, ${sort} DESC, id DESC`
-    : `${untranslatedRankExpr} ASC, ${sort} DESC, id DESC`;
-  const selectHotScore = isHot ? `, ${HOT_EXPR} AS hot_score` : '';
-  const selectFeedRankScore = isFeedRanking ? `, ${FEED_RANK_EXPR} AS feed_rank_score` : '';
-  const sql = `SELECT *${selectHotScore}${selectFeedRankScore} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
+      ? `_feed_rank_score DESC, _untranslated_rank ASC, ${sort} DESC, id DESC`
+    : `_untranslated_rank ASC, ${sort} DESC, id DESC`;
+  const additionalProjection: HiddenListProjection[] = [];
+  if (isHot) {
+    additionalProjection.push({ alias: '_hot_score', expression: HOT_EXPR });
+  }
+  if (isFeedRanking) {
+    additionalProjection.push({ alias: '_feed_rank_score', expression: FEED_RANK_EXPR });
+  }
+  if (!isHot) {
+    additionalProjection.push({ alias: '_untranslated_rank', expression: untranslatedRankExpr });
+  }
+  const projectionSources = types.length > 0
+    ? filterListProjectionSources(types)
+    : undefined;
+  const sql = `${buildListSelect({
+    sourceTypes: projectionSources,
+    additional: additionalProjection,
+  })} FROM items ${where} ORDER BY ${orderBy} LIMIT ?`;
   params.push(limit + 1);
 
-  const start = Date.now();
-  const result = await env.DB.prepare(sql).bind(...params).all();
-  const queryTime = Date.now() - start;
+  const statement = env.DB.prepare(sql).bind(...params);
+  const result = await statement.all();
+  const queryTime = d1DurationMs(result);
+  let threadQueryTime: number | undefined;
 
   const hasMore = result.results.length > limit;
   const items = hasMore ? result.results.slice(0, limit) : result.results;
 
   // Parse JSON fields for response
-  const parsed = items.map((r) => parseItemRow(r));
+  const parsed = items.map((r) => toListItem(r));
 
   // Build next cursor from last item
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
     nextCursor = isHot
-      ? `${last.hot_score}|${last.id}`
+      ? `v2h|${last._hot_score}|${last.id}|${hotRankNowIso}`
       : isFeedRanking
-        ? `${last.feed_rank_score}|${last[sort]}|${last.id}|${feedRankNowIso}`
-      : `${last[sort]}|${last.id}`;
+        ? `v2|${last._feed_rank_score}|${last._untranslated_rank}|${last[sort]}|${last.id}|${feedRankNowIso}`
+      : `v2|${last._untranslated_rank}|${last[sort]}|${last.id}`;
   }
 
   // B5: Thread completeness — 对 parsed 里 thread_root_id 非空的 item，
@@ -2825,8 +3095,8 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
       const rootsPh = rootsArr.map(() => '?').join(',');
       const seenArr = [...seenIds];
       const seenPh = seenArr.map(() => '?').join(',');
-      const extraRows = await env.DB.prepare(
-        `SELECT * FROM items
+      const threadStatement = env.DB.prepare(
+        `${buildListSelect({ sourceTypes: ['x_list'] })} FROM items
          WHERE source_type = 'x_list'
            AND deleted_at IS NULL
            AND extra ->> '$.thread_root_id' IN (${rootsPh})
@@ -2834,20 +3104,26 @@ async function handleItems(request: Request, env: Env): Promise<Response> {
          ORDER BY ${sort} DESC
          LIMIT 200`,
       )
-        .bind(...rootsArr, ...seenArr)
-        .all();
+        .bind(...rootsArr, ...seenArr);
+      const extraRows = await threadStatement.all();
+      threadQueryTime = d1DurationMs(extraRows);
       for (const r of extraRows.results) {
-        parsed.push(parseItemRow(r as Record<string, unknown>));
+        parsed.push(toListItem(r as Record<string, unknown>));
       }
     }
   }
 
-  return jsonResponse({
+  const payload = {
     items: parsed,
     next_cursor: nextCursor,
     has_more: hasMore,
     query_time_ms: queryTime,
-  }, 200, request, env);
+  };
+  const timings: Record<string, number> = { d1: queryTime };
+  if (threadQueryTime !== undefined) timings.thread_d1 = threadQueryTime;
+  return jsonResponse(payload, 200, request, env, {
+    timings,
+  });
 }
 
 // parseItemRow / LIST_HEAVY_EXTRA_KEYS 已抽到 ./item-row（供 /api/search 复用同款映射，
@@ -2884,16 +3160,22 @@ const CLAWHUB_SORT_DIR: Record<string, 'DESC' | 'ASC'> = {
   updated: 'DESC', name: 'ASC',
 };
 
-async function handleClawhubFeed(request: Request, env: Env): Promise<Response> {
+async function handleClawhubFeed(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
-  const sort = (url.searchParams.get('sort') || 'stars').toLowerCase();
+  const requestedSort = (url.searchParams.get('sort') || 'stars').toLowerCase();
+  const sort = Object.prototype.hasOwnProperty.call(CLAWHUB_SORT_EXPR, requestedSort)
+    ? requestedSort
+    : 'stars';
   const category = (url.searchParams.get('category') || 'all').toLowerCase();
   const includeSuspicious = url.searchParams.get('include_suspicious') === 'true';
 
-  const sortExpr = CLAWHUB_SORT_EXPR[sort] || CLAWHUB_SORT_EXPR.stars;
-  const sortDir = CLAWHUB_SORT_DIR[sort] || 'DESC';
+  const sortExpr = CLAWHUB_SORT_EXPR[sort];
+  const sortDir = CLAWHUB_SORT_DIR[sort];
 
   const conditions: string[] = [
     "source_type='clawhub'",
@@ -2939,40 +3221,46 @@ async function handleClawhubFeed(request: Request, env: Env): Promise<Response> 
 
   const where = conditions.join(' AND ');
   const sql = `
-    SELECT * FROM items
+    ${buildListSelect({
+      sourceTypes: ['clawhub'],
+      additional: [{ alias: '_sort_value', expression: sortExpr }],
+    })} FROM items
     WHERE ${where}
-    ORDER BY ${sortExpr} ${sortDir}, id ASC
+    ORDER BY _sort_value ${sortDir}, id ASC
     LIMIT ?
   `;
   params.push(limit + 1);
 
-  const start = Date.now();
-  const result = await env.DB.prepare(sql).bind(...params).all();
-  const queryTime = Date.now() - start;
+  const statement = env.DB.prepare(sql).bind(...params);
+  const result = await statement.all();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map((r) => parseItemRow(r));
+  const items = rows.map((r) => toListItem(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
-    const lastMetrics = last.metrics as Record<string, unknown> | null;
+    const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
     let cursorValue: string | number = '';
-    if (sort === 'stars') cursorValue = (lastMetrics?.stars as number) ?? 0;
-    else if (sort === 'downloads') cursorValue = (lastMetrics?.downloads as number) ?? 0;
-    else if (sort === 'installs') cursorValue = (lastMetrics?.installsCurrent as number) ?? 0;
-    else if (sort === 'updated') cursorValue = (last.published_at as string) ?? '';
-    else if (sort === 'name') cursorValue = ((last.title as string) ?? '').toLowerCase();
+    if (['stars', 'downloads', 'installs'].includes(sort)) {
+      cursorValue = (lastRaw._sort_value as number | null | undefined) ?? 0;
+    } else {
+      cursorValue = (lastRaw._sort_value as string | null | undefined) ?? '';
+    }
     nextCursor = `${cursorValue}|${last.id}`;
   }
 
-  return jsonResponse({
+  const payload = {
     items,
     next_cursor: nextCursor,
     has_more: hasMore,
     query_time_ms: queryTime,
-  }, 200, request, env);
+  };
+  return jsonResponse(payload, 200, request, env, {
+    timings: { d1: queryTime },
+  });
 }
 
 // ─── GET /api/items?source_type=huodongxing ─────────────────────
@@ -3057,7 +3345,10 @@ function computeWhenRange(when: string): { startIso: string; endIso: string } | 
   return null;
 }
 
-async function handleHuodongxingFeed(request: Request, env: Env): Promise<Response> {
+async function handleHuodongxingFeed(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
@@ -3150,18 +3441,39 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
           OR (COALESCE(json_extract(extra, '$.start_time'), '9999') = ? AND id > ?)
         ))
       )`);
-      params.push(nowIso, nowIso, nowIso, state, nowIso, nowIso, nowIso, state, startStr, startStr, idStr);
+      const cursorStart = startStr || '9999';
+      params.push(
+        nowIso,
+        nowIso,
+        nowIso,
+        state,
+        nowIso,
+        nowIso,
+        nowIso,
+        state,
+        cursorStart,
+        cursorStart,
+        idStr,
+      );
     }
   }
 
   const where = conditions.join(' AND ');
   const sql = `
-    SELECT *,
-      (${derivedState}) AS _state
+    ${buildListSelect({
+      sourceTypes: ['huodongxing'],
+      additional: [
+        { alias: '_state', expression: `(${derivedState})` },
+        {
+          alias: '_start_time',
+          expression: "COALESCE(json_extract(items.extra, '$.start_time'), '9999')",
+        },
+      ],
+    })}
       FROM items
      WHERE ${where}
      ORDER BY _state ASC,
-              COALESCE(json_extract(extra, '$.start_time'), '9999') ASC,
+              _start_time ASC,
               id ASC
      LIMIT ?
   `;
@@ -3169,33 +3481,32 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
   const orderParams = [nowIso, nowIso, nowIso];
   const finalParams = [...orderParams, ...params, limit + 1];
 
-  const start = Date.now();
-  const result = await env.DB.prepare(sql).bind(...finalParams).all();
-  const queryTime = Date.now() - start;
+  const statement = env.DB.prepare(sql).bind(...finalParams);
+  const result = await statement.all();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map((r) => parseItemRow(r));
+  const items = rows.map((r) => toListItem(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
     const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
-    const lastExtra = last.extra as Record<string, unknown> | null;
     const lastState = lastRaw._state ?? 9;
-    const lastStart =
-      lastExtra && typeof lastExtra === 'object'
-        ? (lastExtra.start_time as string | undefined) ?? ''
-        : '';
+    const lastStart = lastRaw._start_time ?? '9999';
     nextCursor = `${lastState}|${lastStart}|${last.id}`;
   }
 
-  return jsonResponse({
+  const payload = {
     items,
     next_cursor: nextCursor,
     has_more: hasMore,
     query_time_ms: queryTime,
-  }, 200, request, env);
+  };
+  return jsonResponse(payload, 200, request, env, {
+    timings: { d1: queryTime },
+  });
 }
 
 // ─── GET /api/items?source_type=github ─────────────────────────
@@ -3205,7 +3516,10 @@ async function handleHuodongxingFeed(request: Request, env: Env): Promise<Respon
 //     (newest day first; within day, top-rank repos by today_stars first)
 //   - optional ?pinned=gh:owner/repo to bubble a shared link to the top
 //   - cursor: "trending_date|rank|id" for cross-day pagination
-async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
+async function handleGithubFeed(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
@@ -3248,42 +3562,57 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
   const where = conditions.join(' AND ');
   // Pinned: bubble id to the top regardless of date/rank (share-link strong-insert).
   const pinExpr = pinned ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), ` : '';
-  if (pinned) params.unshift(pinned);
+  if (pinned) params.push(pinned);
 
   const sql = `
-    SELECT * FROM items
+    ${buildListSelect({
+      sourceTypes: ['github'],
+      additional: [
+        {
+          alias: '_trending_date_str',
+          expression: "json_extract(items.extra, '$.trending_date_str')",
+        },
+        {
+          alias: '_daily_rank',
+          expression: "CAST(json_extract(items.extra, '$.daily_rank') AS INTEGER)",
+        },
+      ],
+    })} FROM items
     WHERE ${where}
     ORDER BY ${pinExpr}
-             json_extract(extra, '$.trending_date_str') DESC,
-             CAST(json_extract(extra, '$.daily_rank') AS INTEGER) ASC,
+             _trending_date_str DESC,
+             _daily_rank ASC,
              id ASC
     LIMIT ?
   `;
   params.push(limit + 1);
 
-  const start = Date.now();
-  const result = await env.DB.prepare(sql).bind(...params).all();
-  const queryTime = Date.now() - start;
+  const statement = env.DB.prepare(sql).bind(...params);
+  const result = await statement.all();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
-  const items = rows.map((r) => parseItemRow(r));
+  const items = rows.map((r) => toListItem(r));
 
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
-    const lastExtra = last.extra as Record<string, unknown> | null;
-    const lastDate = lastExtra && typeof lastExtra === 'object' ? lastExtra.trending_date_str : null;
-    const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
+    const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
+    const lastDate = lastRaw._trending_date_str;
+    const lastRank = lastRaw._daily_rank;
     nextCursor = `${lastDate ?? ''}|${lastRank ?? 'null'}|${last.id}`;
   }
 
-  return jsonResponse({
+  const payload = {
     items,
     next_cursor: nextCursor,
     has_more: hasMore,
     query_time_ms: queryTime,
-  }, 200, request, env);
+  };
+  return jsonResponse(payload, 200, request, env, {
+    timings: { d1: queryTime },
+  });
 }
 
 // ─── Product Hunt feed ────────────────────────────────────────
@@ -3297,7 +3626,10 @@ async function handleGithubFeed(request: Request, env: Env): Promise<Response> {
 // 用：PH dailyRank 实测有重复值 + 跳号（4,4 / 5,5 / 6→8→7→14...），原因
 // 不明但前端要看到连续 1,2,3 序号。前端用 extra.display_rank 显示，daily_rank
 // 仍保留供调试。子查询不带 cursor 过滤，cursor 应用在外层不影响 ROW_NUMBER。
-async function handlePhFeed(request: Request, env: Env): Promise<Response> {
+async function handlePhFeed(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 200);
   const cursor = url.searchParams.get('cursor');
@@ -3328,7 +3660,7 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
 
   const cursorWhere = cursorConditions.length > 0 ? `WHERE ${cursorConditions.join(' AND ')}` : '';
   const pinExpr = pinned ? `(CASE WHEN id = ? THEN 0 ELSE 1 END), ` : '';
-  if (pinned) params.unshift(pinned);
+  if (pinned) params.push(pinned);
 
   // 子查询给每行打 display_rank（同日内连续编号，绕过 PH dailyRank 跳号）。
   // 子查询不带 cursor 过滤，否则 ROW_NUMBER 会被分页边界破坏（同日跨页时从 1 重启）。
@@ -3337,9 +3669,14 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
     ? "AND json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL"
     : '';
   const sql = `
-    SELECT * FROM (
+    SELECT
+      ${selectProjectedListColumns('sub')},
+      sub.launch_date_pt AS _launch_date_pt,
+      sub.daily_rank_int AS _daily_rank_int,
+      sub.display_rank AS _display_rank
+    FROM (
       SELECT
-        items.*,
+        ${buildListProjection({ sourceTypes: ['product_hunt'] })},
         json_extract(items.extra, '$.launch_date_pt') AS launch_date_pt,
         CAST(json_extract(items.extra, '$.daily_rank') AS INTEGER) AS daily_rank_int,
         ROW_NUMBER() OVER (
@@ -3356,22 +3693,22 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
     ) sub
     ${cursorWhere}
     ORDER BY ${pinExpr}
-             launch_date_pt DESC,
-             display_rank ASC
+             _launch_date_pt DESC,
+             _display_rank ASC
     LIMIT ?
   `;
   params.push(limit + 1);
 
-  const start = Date.now();
-  const result = await env.DB.prepare(sql).bind(...params).all();
-  const queryTime = Date.now() - start;
+  const statement = env.DB.prepare(sql).bind(...params);
+  const result = await statement.all();
+  const queryTime = d1DurationMs(result);
 
   const hasMore = result.results.length > limit;
   const rows = hasMore ? result.results.slice(0, limit) : result.results;
   const items = rows.map((row) => {
-    const item = parseItemRow(row);
+    const item = toListItem(row);
     // 把 display_rank 从 row 顶层字段塞到 extra 里供前端用
-    const displayRank = (row as Record<string, unknown>).display_rank;
+    const displayRank = (row as Record<string, unknown>)._display_rank;
     if (displayRank !== null && displayRank !== undefined && item.extra && typeof item.extra === 'object') {
       (item.extra as Record<string, unknown>).display_rank = displayRank;
     }
@@ -3381,18 +3718,21 @@ async function handlePhFeed(request: Request, env: Env): Promise<Response> {
   let nextCursor: string | null = null;
   if (hasMore && items.length > 0) {
     const last = items[items.length - 1] as Record<string, unknown>;
-    const lastExtra = last.extra as Record<string, unknown> | null;
-    const lastDate = lastExtra && typeof lastExtra === 'object' ? lastExtra.launch_date_pt : null;
-    const lastRank = lastExtra && typeof lastExtra === 'object' ? lastExtra.daily_rank : null;
+    const lastRaw = rows[rows.length - 1] as Record<string, unknown>;
+    const lastDate = lastRaw._launch_date_pt;
+    const lastRank = lastRaw._daily_rank_int;
     nextCursor = `${lastDate ?? ''}|${lastRank ?? 'null'}|${last.id}`;
   }
 
-  return jsonResponse({
+  const payload = {
     items,
     next_cursor: nextCursor,
     has_more: hasMore,
     query_time_ms: queryTime,
-  }, 200, request, env);
+  };
+  return jsonResponse(payload, 200, request, env, {
+    timings: { d1: queryTime },
+  });
 }
 
 // ─── POST /api/items/:id/refresh ──────────────────────────────
@@ -3687,7 +4027,7 @@ async function handleItemTranslateNow(
 // Returns { item, siblings } where siblings are thread members
 // (same extra.thread_root_id, ordered by published_at ASC) if any.
 
-async function handleItemById(request: Request, env: Env, id: string): Promise<Response> {
+export async function handleItemById(request: Request, env: Env, id: string): Promise<Response> {
   // 取数体已抽成可复用的 fetchItemRow（同一句 SELECT * FROM items WHERE id = ?）；
   // 本处仍需按 Record 访问全部列（cn_sensitive 过滤 / parseItemRow / thread 组装）。
   const item = (await fetchItemRow(env, id)) as unknown as Record<string, unknown> | null;
@@ -3724,7 +4064,7 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
        LIMIT ?`
     ).bind(parsedItem.source_type, threadRootId, SIBLINGS_MAX + 1).all();
     siblingsHasMore = result.results.length > SIBLINGS_MAX;
-    siblings = result.results.slice(0, SIBLINGS_MAX).map((r) => parseItemRow(r));
+    siblings = result.results.slice(0, SIBLINGS_MAX).map((r) => parseItemRow(r, true));
   }
 
   // For GitHub / ClawHub items, attach metrics_history (last 30 days) so drawer can
@@ -3765,6 +4105,21 @@ async function handleItemById(request: Request, env: Env, id: string): Promise<R
     siblings_has_more: siblingsHasMore,
     metrics_history: metricsHistory,
   }, 200, request, env);
+}
+
+// ─── GET /api/feed-manifest ─────────────────────────────────────
+
+export async function handleFeedManifest(
+  request: Request,
+  env: Env,
+  now: () => Date = () => new Date(),
+): Promise<Response> {
+  const manifest = await buildFeedManifest(env.DB, now);
+  return jsonResponse(manifest, 200, request, env, {
+    headers: {
+      'Cache-Control': 'public, max-age=60, s-maxage=300',
+    },
+  });
 }
 
 // ─── GET /api/sources ──────────────────────────────────────────
@@ -5013,6 +5368,35 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     const result = await runGithubEnrichPending(env, limit);
     return jsonResponse(result, 200, request, env);
   }
+  if (mode === 'github-cover-backfill') {
+    // Safe default: dry_run=1. Any write-mode invocation is a separately
+    // approved staging/production operation and is never triggered by cron.
+    const dryRun = url.searchParams.get('dry_run') !== '0';
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '100'), 1),
+      500,
+    );
+    const afterId = url.searchParams.get('after_id') || '';
+    const result = await runGithubCoverBackfill(env, { dryRun, limit, afterId });
+    return jsonResponse(result, 200, request, env);
+  }
+  if (mode === 'card-image-variant-backfill') {
+    // Explicit ops-only lane. It never runs from cron and defaults to a
+    // read-only inventory; dry_run=0 is a separately approved environment
+    // write because it creates R2 objects and updates D1 rows.
+    const dryRun = url.searchParams.get('dry_run') !== '0';
+    const limit = Math.min(
+      Math.max(parseInt(url.searchParams.get('limit') || '10'), 1),
+      25,
+    );
+    const afterId = url.searchParams.get('after_id') || '';
+    const result = await runCardImageVariantBackfill(env, {
+      dryRun,
+      limit,
+      afterId,
+    });
+    return jsonResponse(result, 200, request, env);
+  }
   if (mode === 'clawhub-fetch') {
     const result = await runClawhubFetchList(env);
     return jsonResponse(result, 200, request, env);
@@ -5172,10 +5556,32 @@ const ALLOWED_IMG_HOSTS = new Set([
   // 2026-05-20 FE 反馈:GH README / attachment 内嵌图片高频域(走 cf.image transform 提速)
   'raw.githubusercontent.com',           // README 内 ![](raw.githubusercontent.com/...) raw asset
   'user-images.githubusercontent.com',   // GH 老版 user-attachments 上传 image
+  'private-user-images.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'camo.githubusercontent.com',
   'github.com',                           // 新版 /user-attachments/ 路径(实际 redirect 到 githubusercontent)
+  // Huodongxing 列表图在大陆网络上延迟高且此前由浏览器直连。仍保持严格
+  // host allowlist，不接受任意 force/open-proxy URL。
+  'cdn.huodongxing.com',
+  'wimg.huodongxing.com',
+  'nscdn.huodongxing.com',
 ]);
 
-async function handleImageProxy(request: Request): Promise<Response> {
+const MAX_IMAGE_REDIRECTS = 3;
+const IMAGE_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function isAllowedImageProxyTarget(target: URL): boolean {
+  return target.protocol === 'https:' &&
+    !target.username &&
+    !target.password &&
+    ALLOWED_IMG_HOSTS.has(target.hostname);
+}
+
+async function handleImageProxy(
+  request: Request,
+  requestedKind: 'image' | 'video' = 'image',
+  workerVersion?: string,
+): Promise<Response> {
   const url = new URL(request.url);
   const target = url.searchParams.get('url');
   if (!target) return new Response('missing url', { status: 400 });
@@ -5186,9 +5592,13 @@ async function handleImageProxy(request: Request): Promise<Response> {
   } catch {
     return new Response('invalid url', { status: 400 });
   }
-  if (!ALLOWED_IMG_HOSTS.has(targetUrl.hostname)) {
+  if (!isAllowedImageProxyTarget(targetUrl)) {
     return new Response('host not allowed', { status: 403 });
   }
+  if (requestedKind === 'video' && targetUrl.hostname !== 'video.twimg.com') {
+    return new Response('video host not allowed', { status: 403 });
+  }
+  const isVideo = targetUrl.hostname === 'video.twimg.com';
 
   // 转发 Range header 给上游 — video seek 必需。
   // video.twimg.com / pbs.twimg.com 都支持 Range request；浏览器 <video>
@@ -5198,7 +5608,7 @@ async function handleImageProxy(request: Request): Promise<Response> {
     'User-Agent': 'Mozilla/5.0 (compatible; ai-feeds-img-proxy/1.0)',
   };
   const rangeHeader = request.headers.get('range');
-  if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+  if (isVideo && rangeHeader) upstreamHeaders['Range'] = rangeHeader;
   // 透传客户端 Accept — cf.image format=auto 需要靠 Accept 决定输出 webp/avif
   const acceptHeader = request.headers.get('accept');
   if (acceptHeader) upstreamHeaders['Accept'] = acceptHeader;
@@ -5217,39 +5627,58 @@ async function handleImageProxy(request: Request): Promise<Response> {
   // cacheKey 编入 format，防止跨 client 互污染（worker cache 是 binary blob，混 webp/jpeg
   // 会让老 Safari 拿到 webp cache 解码失败）。Response Vary: Accept 让 client / CDN
   // 知道按 Accept 分缓存。
-  const isVideo = targetUrl.hostname === 'video.twimg.com';
-  let cfOptions: { cf?: Record<string, unknown> };
-  if (isVideo) {
-    cfOptions = {};
-  } else {
-    const w = url.searchParams.get('w');
-    const q = parseInt(url.searchParams.get('q') || '85', 10);
-    const accept = request.headers.get('accept') || '';
-    let format: 'avif' | 'webp' | null = null;
-    if (/image\/avif/i.test(accept)) format = 'avif';
-    else if (/image\/webp/i.test(accept)) format = 'webp';
-    const imageOpts: Record<string, unknown> = { quality: q };
-    if (format) imageOpts.format = format;
-    if (w) imageOpts.width = parseInt(w, 10);
-    const cacheKey = `${url.origin}${url.pathname}${url.search}&_fmt=${format ?? 'orig'}`;
-    cfOptions = {
-      cf: {
-        image: imageOpts,
-        // 2026-05-19 FE 反馈:cacheTtl=86400 + cacheEverything=true 会把上游瞬态
-        // 502/404 也 cache 24h(典型 case:pbs.twimg.com/amplify_video_thumb/*
-        // 上游限流时 worker cache 5xx,后续 24h 一直返同 502)。
-        // 改 cacheTtlByStatus:2xx cache 24h / 3xx 5min / 4xx 1min / 5xx 不 cache。
-        cacheTtlByStatus: { '200-299': 86400, '300-399': 300, '400-499': 60, '500-599': 0 },
-        cacheEverything: true,
-        cacheKey,
-      },
-    };
-  }
+  const width = normalizeImageProxyWidth(url.searchParams.get('w'));
+  const quality = normalizeImageProxyQuality(url.searchParams.get('q'));
+  const accept = request.headers.get('accept') || '';
+  const format = negotiateImageFormat(accept);
+  const imageOpts: Record<string, unknown> = { quality };
+  if (format) imageOpts.format = format;
+  if (width) imageOpts.width = width;
 
-  const upstream = await fetch(targetUrl.toString(), {
-    ...cfOptions,
-    headers: upstreamHeaders,
-  });
+  // Cloudflare and upstream CDNs may return a small redirect chain. Following
+  // it implicitly would let an allowlisted URL redirect the Worker to an
+  // arbitrary/internal host, so every hop is resolved and checked explicitly.
+  let currentTarget = targetUrl;
+  let upstream: Response | null = null;
+  for (let hop = 0; hop <= MAX_IMAGE_REDIRECTS; hop++) {
+    const cfOptions: { cf?: Record<string, unknown> } = isVideo
+      ? {}
+      : {
+          cf: {
+            image: imageOpts,
+            // A redirect response and its destination must never share a
+            // cache key, otherwise a cached 3xx can replay on every hop.
+            cacheTtlByStatus: { '200-299': 86400, '300-399': 300, '400-499': 60, '500-599': 0 },
+            cacheEverything: true,
+            cacheKey: buildImageProxyCacheKey(url, currentTarget, width, quality, format),
+          },
+        };
+    upstream = await fetch(currentTarget.toString(), {
+      ...cfOptions,
+      headers: upstreamHeaders,
+      redirect: 'manual',
+    });
+    if (!IMAGE_REDIRECT_STATUSES.has(upstream.status)) break;
+    const location = upstream.headers.get('location');
+    if (!location) return new Response('upstream redirect missing location', { status: 502 });
+    if (hop === MAX_IMAGE_REDIRECTS) {
+      return new Response('too many upstream redirects', { status: 508 });
+    }
+    let redirected: URL;
+    try {
+      redirected = new URL(location, currentTarget);
+    } catch {
+      return new Response('invalid upstream redirect', { status: 502 });
+    }
+    if (!isAllowedImageProxyTarget(redirected)) {
+      return new Response('redirect host not allowed', { status: 403 });
+    }
+    if (requestedKind === 'video' && redirected.hostname !== 'video.twimg.com') {
+      return new Response('video redirect host not allowed', { status: 403 });
+    }
+    currentTarget = redirected;
+  }
+  if (!upstream) return new Response('upstream failed', { status: 502 });
 
   // 200 OK（无 Range 请求）或 206 Partial Content（有 Range 请求）都算成功
   if (!upstream.ok && upstream.status !== 206) {
@@ -5261,15 +5690,22 @@ async function handleImageProxy(request: Request): Promise<Response> {
   if (ct) headers.set('Content-Type', ct);
   // 透传 Range 相关响应头 — 让 <video> 知道源支持 seek
   const acceptRanges = upstream.headers.get('accept-ranges');
-  if (acceptRanges) headers.set('Accept-Ranges', acceptRanges);
   const contentLength = upstream.headers.get('content-length');
   if (contentLength) headers.set('Content-Length', contentLength);
   const contentRange = upstream.headers.get('content-range');
   if (contentRange) headers.set('Content-Range', contentRange);
+  if (acceptRanges) {
+    headers.set('Accept-Ranges', acceptRanges);
+  } else if (isVideo && upstream.status === 206 && contentRange) {
+    // A valid partial response proves byte-range support even when the origin
+    // omits the otherwise redundant Accept-Ranges header (video.twimg.com does).
+    headers.set('Accept-Ranges', 'bytes');
+  }
   // 图片可长期 cache；video 不设 immutable（避免浏览器把"无 Range"的完整流
   // 当成 immutable 缓存住，后续 Range 请求拿不到 partial 响应）
   if (isVideo) {
     headers.set('Cache-Control', 'no-store');
+    if (workerVersion) headers.set('X-Worker-Version', workerVersion);
   } else {
     headers.set('Cache-Control', 'public, max-age=604800, immutable');
     // 让 client / 中间 CDN 知道按 Accept 不同 cache（worker cacheKey 已按 format
@@ -5277,6 +5713,7 @@ async function handleImageProxy(request: Request): Promise<Response> {
     headers.set('Vary', 'Accept');
   }
   headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Timing-Allow-Origin', '*');
 
   return new Response(upstream.body, {
     status: upstream.status, // 转发 200 或 206
@@ -5313,8 +5750,8 @@ function isBotGateExempt(path: string, method: string): boolean {
   // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
   if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {
-    if (path === '/api/items' || path === '/api/sources' || path === '/api/stats') return true;
-    if (path === '/img' || path.startsWith('/r/')) return true;
+    if (path === '/api/items' || path === '/api/feed-manifest' || path === '/api/sources' || path === '/api/stats') return true;
+    if (path === '/img' || path === '/media' || path.startsWith('/r/')) return true;
     // /api/digest/daily:Bearer key 鉴权(handler 内校验),受信设备 agent 调用 UA 可能非浏览器,不卡 UA 闸
     if (path === '/api/digest/daily') return true;
     // PM 2026-05-25:/s/<token> 是分享二维码扫码命中点,微信内置浏览器 / 二维码
@@ -5328,6 +5765,7 @@ function isBotGateExempt(path: string, method: string): boolean {
 const R2_REFERER_ALLOW = new Set<string>([
   'ai-feeds.com', 'www.ai-feeds.com', 'api.ai-feeds.com', 'admin.ai-feeds.com',
   'staging.ai-feeds.com', 'staging-api.ai-feeds.com',
+  'perf-staging.ai-feeds.com',
   'twitter.com', 'x.com', 'mobile.twitter.com', 'mobile.x.com', 't.co',
   'producthunt.com', 'www.producthunt.com',
   'github.com', 'www.github.com',
@@ -5350,6 +5788,45 @@ function isAllowedR2Referer(referer: string): boolean {
 // Serve migrated README assets from R2 with long cache + CORS.
 // Key shape: gh/<owner>/<repo>/<sha256>.<ext>
 
+type SatisfiableByteRange = { offset: number; length: number };
+
+function parseSingleByteRange(value: string, size: number): SatisfiableByteRange | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(size) || size <= 0) {
+    return null;
+  }
+  const representationSize = BigInt(size);
+
+  if (match[1]) {
+    const requestedOffset = BigInt(match[1]);
+    if (requestedOffset >= representationSize) return null;
+    const offset = Number(requestedOffset);
+
+    if (!match[2]) return { offset, length: size - offset };
+    const requestedEnd = BigInt(match[2]);
+    if (requestedEnd < requestedOffset) return null;
+    const end = requestedEnd >= representationSize ? size - 1 : Number(requestedEnd);
+    return { offset, length: end - offset + 1 };
+  }
+
+  const requestedSuffix = BigInt(match[2]);
+  if (requestedSuffix <= 0n) return null;
+  const length = requestedSuffix >= representationSize ? size : Number(requestedSuffix);
+  return { offset: size - length, length };
+}
+
+function r2AssetHeaders(obj: R2Object): Headers {
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Timing-Allow-Origin', '*');
+  headers.set('Accept-Ranges', 'bytes');
+  // ETag from R2 lets browsers and CF edge revalidate.
+  if (obj.httpEtag) headers.set('ETag', obj.httpEtag);
+  return headers;
+}
+
 async function handleR2Asset(request: Request, env: Env, key: string): Promise<Response> {
   if (!env.READMES) return new Response('R2 not configured', { status: 503 });
   if (!key) return new Response('missing key', { status: 400 });
@@ -5371,46 +5848,34 @@ async function handleR2Asset(request: Request, env: Env, key: string): Promise<R
   // 无 Range 的图片等照旧 200 全量。⚠️ 经香港中转时 nginx 对 api 不缓存、Range
   // 透传(operations.md §6b;/img 视频曾因缓存剥 Range 翻车,/r/ 走 api 块无此问题)。
   const rangeHeader = request.headers.get('Range');
-  let obj: R2ObjectBody | null = null;
-  let rangeParsed: { offset: number; length?: number } | { suffix: number } | null = null;
-  if (rangeHeader) {
-    const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
-    if (m && (m[1] || m[2])) {
-      if (m[1]) {
-        const offset = parseInt(m[1], 10);
-        const end = m[2] ? parseInt(m[2], 10) : undefined;
-        rangeParsed = end !== undefined ? { offset, length: end - offset + 1 } : { offset };
-      } else {
-        rangeParsed = { suffix: parseInt(m[2], 10) };
-      }
-      try {
-        obj = await env.READMES.get(key, { range: rangeParsed });
-      } catch {
-        obj = null; // range 越界等 → 退回全量
-      }
+  if (request.method === 'HEAD' || rangeHeader !== null) {
+    const metadata = await env.READMES.head(key);
+    if (!metadata) return new Response('not found', { status: 404 });
+
+    const headers = r2AssetHeaders(metadata);
+    if (request.method === 'HEAD') {
+      headers.set('Content-Length', String(metadata.size));
+      return new Response(null, { status: 200, headers });
     }
-  }
-  const isRanged = !!(obj && rangeParsed);
-  if (!obj) obj = await env.READMES.get(key);
-  if (!obj) return new Response('not found', { status: 404 });
 
-  const headers = new Headers();
-  obj.writeHttpMetadata(headers);
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-  headers.set('Access-Control-Allow-Origin', '*');
-  headers.set('Accept-Ranges', 'bytes');
-  // ETag from R2 lets browsers and CF edge revalidate.
-  if (obj.httpEtag) headers.set('ETag', obj.httpEtag);
+    const rangeParsed = parseSingleByteRange(rangeHeader!, metadata.size);
+    if (!rangeParsed) {
+      headers.set('Content-Range', `bytes */${metadata.size}`);
+      return new Response(null, { status: 416, headers });
+    }
 
-  if (isRanged && obj.range) {
-    const total = obj.size;
-    const r = obj.range as { offset?: number; length?: number; suffix?: number };
-    const start = r.suffix !== undefined ? total - r.suffix : (r.offset ?? 0);
-    const length = r.suffix !== undefined ? r.suffix : (r.length ?? total - start);
-    const end = start + length - 1;
-    headers.set('Content-Range', `bytes ${start}-${end}/${total}`);
-    headers.set('Content-Length', String(length));
+    const obj = await env.READMES.get(key, { range: rangeParsed });
+    if (!obj) return new Response('not found', { status: 404 });
+
+    const start = rangeParsed.offset;
+    const end = start + rangeParsed.length - 1;
+    headers.set('Content-Range', `bytes ${start}-${end}/${metadata.size}`);
+    headers.set('Content-Length', String(rangeParsed.length));
     return new Response(obj.body, { status: 206, headers });
   }
-  return new Response(obj.body, { status: 200, headers });
+
+  const obj = await env.READMES.get(key);
+  if (!obj) return new Response('not found', { status: 404 });
+
+  return new Response(obj.body, { status: 200, headers: r2AssetHeaders(obj) });
 }

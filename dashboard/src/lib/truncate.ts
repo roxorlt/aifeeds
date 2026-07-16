@@ -66,7 +66,7 @@ export function smartTruncate(
   if (pause > 0) return window.slice(0, pause) + ellipsis;
 
   // 3a. 空格词边界
-  const space = findLast(/[\s ]/g, false);
+  const space = findLast(/[\s\u00a0]/g, false);
   if (space > 0) return window.slice(0, space) + ellipsis;
 
   // 3b. 中英文分界（中-英 或 英-中 之间是天然词边界）

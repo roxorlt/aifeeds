@@ -208,6 +208,14 @@ export interface FeedBodyAsset {
   height?: number;
 }
 
+export interface FeedCardImageVariant {
+  url: string;
+  width: number;
+  height?: number;
+  format: "webp";
+  bytes?: number;
+}
+
 /** 正文抓取结果元数据（写 extra.body）。 */
 export interface FeedBodyMeta {
   /** 正文来源：rss_full=feed 自带全文；static_extract=②静态抽取；browser_render=③无头；rss_summary_fallback=抓全文失败降级摘要。 */
@@ -316,6 +324,9 @@ export interface BlogExtra
 
   /** 封面（迁 R2 后改写为 /r/ 路径；迁移前是原始域名 URL）。 */
   cover_image?: string;
+  /** 与当前 cover_image 绑定的入库时 400/800 卡片 WebP。 */
+  cover_image_variants?: FeedCardImageVariant[];
+  cover_variant_source?: string;
   /** 正文 markdown 原文（step3 抓到才有；抓不到降级仅摘要也能上 feed）。 */
   body_markdown?: string;
   /** 正文 markdown 中译（ELI25，lazy，仅 relevant 非 dup 才译）。 */
@@ -363,6 +374,8 @@ export interface PodcastExtra
 
   /** 单集封面（迁 R2 后为 /r/ 路径）。 */
   cover_image?: string;
+  cover_image_variants?: FeedCardImageVariant[];
+  cover_variant_source?: string;
   /** shownotes markdown 原文。 */
   shownotes?: string;
   /** shownotes 中译（ELI25，eager）。 */

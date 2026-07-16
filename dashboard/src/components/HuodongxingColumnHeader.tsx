@@ -9,6 +9,7 @@
 // 城市列表与 worker/src/scrapers/huodongxing/cities.ts 保持一致；改这边时也要改那边。
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useMotionDismiss } from "../lib/motionLayer";
 
 export type HdxCity = string; // 24 城市之一，空字符串 = 全部
 export type HdxWhen = "" | "this" | "weekend" | "month";
@@ -76,22 +77,25 @@ export function HuodongxingColumnHeader({
   const [open, setOpen] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const popRef = useRef<HTMLDivElement | null>(null);
+  const { layerClassName, requestClose } = useMotionDismiss(
+    () => setOpen(false),
+    "popover",
+    open,
+  );
 
   // 选中次级城市时，自动把 "更多" 区展开（否则用户看不到当前选中态）
   const isSecondary = useMemo(
     () => SECONDARY_CITIES.includes(city as (typeof SECONDARY_CITIES)[number]),
     [city],
   );
-  useEffect(() => {
-    if (isSecondary) setShowMore(true);
-  }, [isSecondary, open]);
+  const citiesExpanded = showMore || isSecondary;
 
   // outside click / Esc 关 popover
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e: MouseEvent) => {
       if (!popRef.current) return;
-      if (!popRef.current.contains(e.target as Node)) setOpen(false);
+      if (!popRef.current.contains(e.target as Node)) requestClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -102,7 +106,7 @@ export function HuodongxingColumnHeader({
       document.removeEventListener("mousedown", onDocClick);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, requestClose]);
 
   const cityLabel = city || "全部";
 
@@ -116,7 +120,8 @@ export function HuodongxingColumnHeader({
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            setOpen((v) => !v);
+            if (open) requestClose();
+            else setOpen(true);
           }}
           className={CITY_BTN_CLASS}
           title="城市筛选"
@@ -143,7 +148,7 @@ export function HuodongxingColumnHeader({
           onClick={(e) => e.stopPropagation()}
           // right-0 锚到根容器右边（= column header 右 padding），向左展开
           // max-w 兜底，避免列宽极窄时（移动端单列）继续溢出
-          className="absolute right-0 top-full z-40 mt-1 w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-lg border border-neutral-200 bg-white p-2 shadow-lg"
+          className={`${layerClassName} absolute right-0 top-full z-40 mt-1 w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-lg border border-neutral-200 bg-white p-2 shadow-lg`}
           role="dialog"
           aria-label="选择城市"
         >
@@ -153,7 +158,7 @@ export function HuodongxingColumnHeader({
                 type="button"
                 onClick={() => {
                   onCityChange("");
-                  setOpen(false);
+                  requestClose();
                 }}
                 className={`${CHIP_BASE} ${!city ? CHIP_ACTIVE : CHIP_IDLE}`}
               >
@@ -165,7 +170,7 @@ export function HuodongxingColumnHeader({
                   type="button"
                   onClick={() => {
                     onCityChange(c);
-                    setOpen(false);
+                    requestClose();
                   }}
                   className={`${CHIP_BASE} ${city === c ? CHIP_ACTIVE : CHIP_IDLE}`}
                 >
@@ -176,7 +181,7 @@ export function HuodongxingColumnHeader({
 
             {/* 更多 18 城（折叠） */}
             <div className="mt-2 border-t border-neutral-100 pt-2">
-              {!showMore ? (
+              {!citiesExpanded ? (
                 <button
                   type="button"
                   onClick={() => setShowMore(true)}
@@ -191,8 +196,9 @@ export function HuodongxingColumnHeader({
                       key={c}
                       type="button"
                       onClick={() => {
+                        setShowMore(true);
                         onCityChange(c);
-                        setOpen(false);
+                        requestClose();
                       }}
                       className={`${CHIP_BASE} ${city === c ? CHIP_ACTIVE : CHIP_IDLE}`}
                     >

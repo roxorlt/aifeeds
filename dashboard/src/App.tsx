@@ -1,5 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Feed, SkeletonCard, prefetchChannels, type FeedHandle } from "./components/Feed";
+import {
+  forwardRef,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type UIEvent as ReactUIEvent,
+} from "react";
+import { Feed, SkeletonCard, prefetchChannel, type FeedHandle } from "./components/Feed";
 import { SourceIcon, IconSearch } from "./components/icons";
 import { DrawerProvider } from "./lib/drawer";
 
@@ -13,28 +22,31 @@ const TweetDrawer = lazy(() =>
 // PR3 quote 嵌套小卡点击 → 站内 modal。轻量(无 markdown 依赖),不 lazy
 import { QuoteSnapshotModal } from "./components/QuoteSnapshotModal";
 
-import { fetchSources, fetchStats, TRACK_ENDPOINT, API_BASE } from "./api";
-import type { Source, SourceType, Stats } from "./types";
+import { fetchFeedManifest } from "./api";
+import { buildPublicWorkerUrl } from "./lib/apiBase";
+import type { FeedManifest, SourceType } from "./types";
 import { cn } from "./lib/utils";
 import { useIsNarrow } from "./lib/breakpoint";
-import { useFancyAnimation } from "./lib/useFancyAnimation";
-import {
-  PILL_H,
-  computeOutPillSize,
-  computeInPillSize,
-  jitterAmpOut,
-  jitterAmpIn,
-  computeBridgeHalfH,
-  buildBridgePath,
-} from "./lib/inkPill";
 import { useVideoCoordinator, attachVisibilityListener } from "./lib/videoCoordinator";
 import { attachVideoPrefsSync } from "./lib/videoPrefsSync";
-import { useDrawer } from "./lib/drawer";
+import { useDrawer } from "./lib/drawerContext";
 import { scrollFeedOrPage, smoothScrollWindowToTop } from "./lib/scroll";
+import { resolveChannelSwipeIntent, watchTransformTransition } from "./lib/motion";
+import { useReducedMotion } from "./lib/useReducedMotion";
 import { addScrollRootListener, getScrollY } from "./lib/scrollRoot";
-import { initTelemetry, track, EVENTS } from "./lib/telemetry";
-import { installVitals, installNavTiming, installImgTiming } from "./lib/telemetry/vitals";
-import { installErrorHandlers } from "./lib/telemetry/errors";
+import { track, EVENTS } from "./lib/telemetry";
+import {
+  OPTIMISTIC_FEED_START,
+  resolveChannelLive,
+  type FeedMetadataState,
+} from "./lib/feedAvailability";
+import {
+  bindQueueToVisibility,
+  canStartBackgroundPrefetch,
+  createBackgroundQueue,
+  getImmediateColumnCount,
+  waitForBackgroundReadiness,
+} from "./lib/feedScheduling";
 import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
 import { SubscribeBanner } from "./components/SubscribeBanner";
@@ -132,20 +144,153 @@ function SearchEntryButton() {
 
 // 「官方新闻」合并频道（D7）：逗号拼 blog+podcast 的复合 filter 值。worker
 // /api/items?source_type=blog,podcast 已支持；这是 FE 顶部入口专用的复合值，
-// 不是单个 SourceType。fetchItems 调用时拆成数组传（buildQuery 会 join 回逗号）。
+// 不是单个 SourceType；fetchItems 的 buildItemsPath 会把它规范化为稳定路径。
 type MergedSource = "blog,podcast";
 const OFFICIAL_NEWS: MergedSource = "blog,podcast";
-
-// 列 / chip 的 source_type 可能是逗号复合值（「官方新闻」= "blog,podcast"）。
-// 任一子源有数据即视为该频道有数据（非 placeholder）。
-function channelHasData(live: Set<SourceType>, sourceType: string): boolean {
-  return sourceType.split(",").some((s) => live.has(s as SourceType));
-}
 
 interface SourceConfig {
   source_type: SourceType | MergedSource;
   title: string;
 }
+
+function readCurrentConnection(): { saveData?: boolean; effectiveType?: string } | undefined {
+  return (navigator as Navigator & {
+    connection?: { saveData?: boolean; effectiveType?: string };
+  }).connection;
+}
+
+type DeferredFeedProps = {
+  sourceType: SourceType | MergedSource;
+  title: string;
+  placeholder: boolean;
+  refreshTick: number;
+  onInitialRequestStart?: () => void;
+  immediate: boolean;
+  mediaColumnIndex: number;
+  mediaColumnImmediate: boolean;
+  observationEnabled: boolean;
+};
+
+// All below-fold reveals share one scheduler. A slot stays occupied until the
+// mounted Feed's first authoritative read settles, so one intersection frame
+// cannot fan out into several competing critical list requests.
+const deferredFeedMountQueue = createBackgroundQueue();
+
+// PC only mounts the responsive first row on the first commit. Lower rows keep a
+// stable 70vh footprint but contain no Feed/media until the user has actually
+// scrolled and the shell approaches the viewport. Once mounted, a column never
+// unmounts; a wider resize may only promote more columns.
+const DeferredFeed = forwardRef<FeedHandle, DeferredFeedProps>(function DeferredFeed(
+  {
+    immediate,
+    mediaColumnIndex,
+    mediaColumnImmediate,
+    observationEnabled,
+    sourceType,
+    title,
+    placeholder,
+    refreshTick,
+    onInitialRequestStart,
+  },
+  ref,
+) {
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const settleDeferredMountRef = useRef<(() => void) | null>(null);
+  const settleDeferredMount = useCallback(() => {
+    settleDeferredMountRef.current?.();
+  }, []);
+  const [mounted, setMounted] = useState(
+    () => immediate || typeof IntersectionObserver === "undefined",
+  );
+
+  useEffect(() => () => settleDeferredMount(), [settleDeferredMount]);
+
+  useEffect(() => {
+    if (mounted || immediate) return;
+    // Correctness fallback comes before the scroll gate: the state initializer
+    // already mounts every feed in old WebViews without IntersectionObserver.
+    if (typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    if (!observationEnabled) return;
+    const shell = shellRef.current;
+    if (!shell) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      void deferredFeedMountQueue.enqueue(() => new Promise<void>((resolve) => {
+        if (disposed) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const timeout = window.setTimeout(finish, 12_000);
+        function finish() {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          if (settleDeferredMountRef.current === finish) {
+            settleDeferredMountRef.current = null;
+          }
+          resolve();
+        }
+        settleDeferredMountRef.current = finish;
+        setMounted(true);
+      })).catch(() => {});
+    }, {
+      root: null,
+      rootMargin: "200px 0px",
+    });
+    let disposed = false;
+    observer.observe(shell);
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
+  }, [immediate, mounted, observationEnabled]);
+
+  if (mounted || immediate) {
+    return (
+      <Feed
+        ref={ref}
+        sourceType={sourceType}
+        title={title}
+        placeholder={placeholder}
+        refreshTick={refreshTick}
+        onInitialRequestStart={onInitialRequestStart}
+        onInitialRequestSettled={settleDeferredMount}
+        mediaColumnIndex={mediaColumnIndex}
+        mediaColumnImmediate={mediaColumnImmediate}
+      />
+    );
+  }
+
+  return (
+    <div
+      ref={shellRef}
+      data-deferred-feed-shell={sourceType}
+      className="h-[70vh] overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-sm"
+      aria-label={`${title}待加载`}
+    >
+      <div className="flex items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+        <SourceIcon
+          source_type={sourceType as SourceType}
+          className="h-4 w-4 shrink-0 fill-current text-neutral-400"
+        />
+        <span className="truncate text-sm font-semibold text-neutral-500">{title}</span>
+      </div>
+      <div className="space-y-4 p-4" aria-hidden>
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div key={index} className="space-y-2 border-b border-neutral-100 pb-4">
+            <div className="h-3 w-1/3 rounded bg-neutral-100" />
+            <div className="h-3 w-full rounded bg-neutral-100" />
+            <div className="h-3 w-2/3 rounded bg-neutral-100" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
 
 // 抽屉打开 / 关闭时同步 VideoCoordinator 的 mode（feed ↔ drawer）。
 // 必须在 DrawerProvider 内部渲染才能用 useDrawer。无 UI 输出。
@@ -179,6 +324,7 @@ const SOURCE_COLUMNS: SourceConfig[] = [
 ];
 
 type FilterKey = "all" | SourceType | MergedSource;
+const PILL_H = 26;
 
 const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "全部" },
@@ -217,8 +363,8 @@ function ChannelSkeletonPanel({ filterKey }: { filterKey: string }) {
 }
 
 function DashboardHome() {
-  const [sources, setSources] = useState<Source[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
+  const [manifest, setManifest] = useState<FeedManifest | null>(null);
+  const [metadataState, setMetadataState] = useState<FeedMetadataState>("pending");
   // 反馈 #7：冷启动落在 deep link 上时，初始 filter 跟着对应 tab，避免关掉
   // drawer 后用户看到 X 流（mobile 默认）以为没回到 GH/PH。
   // 仅初次构造时读 pathname；后续用户切 tab / 直接打 / 都正常工作。
@@ -234,10 +380,26 @@ function DashboardHome() {
     return "all";
   })();
   const [storedFilter, setFilter] = useState<FilterKey>(initialFilter);
-  const [refreshTick, _setRefreshTick] = useState(0);
+  const [refreshTick] = useState(0);
+  const [feedRequestStartedForTick, setFeedRequestStartedForTick] = useState<number | null>(null);
+  const handleInitialFeedRequestStart = useCallback(() => {
+    setFeedRequestStartedForTick((startedTick) => (
+      startedTick === refreshTick ? startedTick : refreshTick
+    ));
+  }, [refreshTick]);
+  const shouldLoadManifest = OPTIMISTIC_FEED_START
+    && feedRequestStartedForTick === refreshTick;
 
   const isNarrow = useIsNarrow();
+  const reduceMotion = useReducedMotion();
+  const [immediateColumnCount, setImmediateColumnCount] = useState(() => (
+    typeof window === "undefined" ? 1 : getImmediateColumnCount(window.innerWidth)
+  ));
+  const [pageHasScrolled, setPageHasScrolled] = useState(() => (
+    typeof window !== "undefined" && (window.scrollY > 0 || getScrollY() > 0)
+  ));
   const feedRefs = useRef<Map<string, FeedHandle | null>>(new Map());
+  const lastInteractedColumnRef = useRef<string | null>(null);
   // PM 2026-05-19:选中 tab 自动 scrollIntoView 居中 — chip rail 横向滚动容器,
   // filter 切到非可视 chip 时把它居中到 rail 中部,让用户知道这是 active(避免
   // 切了但用户看不到激活状态以为没动)。useEffect 跑在 filter 声明之后(挪到 L155+)
@@ -246,31 +408,51 @@ function DashboardHome() {
   // 这个 inline-flex 内, nav 自己 overflow-x-auto 自动 scroll 整个 wrapper, ink-layer
   // 跟 chip 共享同一 offsetParent → 完全不需要 JS 同步 scrollLeft
   const chipScrollContentRef = useRef<HTMLDivElement | null>(null);
-  // PM 2026-05-27 任务 2 v5 实现 (demo: docs/mocks/2026-05-27-channel-tab-ink.html):
-  //   - pillA: 出场 pill (无 swipe 时落 active chip 当 baseline);
-  //   - pillB: 入场 pill (fancy mode 才渲染, swipe 期间从 to-chip 中心扩展);
-  //   - bridgePath: 流体连线 SVG path (fancy mode 才渲染);
-  //   - inkLayer: 上述三者的容器, fancy mode 套 goo filter → metaball 合并液态.
-  // fancyAnim=false (低端设备 / prefers-reduced-motion) 走朴素: 只 pillA 单 pill 位置/宽度 lerp.
-  const inkLayerRef = useRef<HTMLDivElement | null>(null);
+  // 单一 active pill：点击时只做 transform 过渡，横滑时直接跟手。
+  // 宽度在目标变更时即时同步，不参与 transition，避免逐帧 layout。
   const pillARef = useRef<HTMLDivElement | null>(null);
-  const pillBRef = useRef<HTMLDivElement | null>(null);
-  const bridgePathRef = useRef<SVGPathElement | null>(null);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  // 之前用 chipRectsRef cache 想砍 touchmove DOM read, 但 cache stale 导致 pill
-  // 位置错 (PM 2026-05-27 反馈 chip 黑框跨"热门产品"末尾跟"活动"). 回滚直接 read DOM —
-  // browser 没改动 layout 时 offsetLeft 读取走 layout cache, 60Hz 4 次 read 实际成本
-  // 比想象低; pill 准确性 > 微小 perf 优化
-  const fancyAnim = useFancyAnimation();
-  const fancyAnimRef = useRef(fancyAnim);
-  fancyAnimRef.current = fancyAnim;
-  // swipe 状态: 让 fancy mode RAF loop 期间能持续重绘 (sin 波相位随时间演变)
-  const swipeStateRef = useRef<{ active: boolean; fromKey: string; toKey: string; progress: number }>({
-    active: false, fromKey: "", toKey: "", progress: 0,
-  });
   // PM 2026-05-20:#5 横划切 tab — feed 区域 main 上挂 touch listener,
   // 识别 horizontal-dominant swipe 切上/下一个 filter chip
   const mainRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const update = () => setImmediateColumnCount((current) => (
+      Math.max(current, getImmediateColumnCount(window.innerWidth))
+    ));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  useEffect(() => {
+    if (pageHasScrolled) return;
+    const unlockAfterRealScroll = () => {
+      if (window.scrollY > 0 || getScrollY() > 0) setPageHasScrolled(true);
+    };
+    // History/BFCache restoration may happen just after the first render.
+    unlockAfterRealScroll();
+    const frame = window.requestAnimationFrame(unlockAfterRealScroll);
+    const removeScroll = addScrollRootListener(unlockAfterRealScroll);
+    window.addEventListener("pageshow", unlockAfterRealScroll);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      removeScroll();
+      window.removeEventListener("pageshow", unlockAfterRealScroll);
+    };
+  }, [isNarrow, pageHasScrolled]);
+
+  const unlockDeferredFeedsFromColumnScroll = useCallback((event: ReactUIEvent<HTMLElement>) => {
+    if (pageHasScrolled) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      target.classList.contains("feed-body") &&
+      target.scrollTop > 0
+    ) {
+      setPageHasScrolled(true);
+    }
+  }, [pageHasScrolled]);
 
   // Derived filter: PC always shows "all" (chips hidden); mobile coerces
   // "all" → "x_list" since the "all" chip isn't rendered on narrow.
@@ -281,121 +463,56 @@ function DashboardHome() {
       : storedFilter;
 
   useEffect(() => {
-    fetchSources().then(setSources).catch(() => {});
-    fetchStats().then(setStats).catch(() => {});
-  }, [refreshTick]);
+    if (!shouldLoadManifest) return;
+    const controller = new AbortController();
+    setMetadataState("pending");
+    void fetchFeedManifest(controller.signal)
+      .then((nextManifest) => {
+        if (controller.signal.aborted) return;
+        setManifest(nextManifest);
+        setMetadataState("resolved");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setMetadataState("failed");
+      });
+    return () => controller.abort();
+  }, [refreshTick, shouldLoadManifest]);
 
-  // PM 2026-05-27 v5 helpers (chip click + swipe end reset baseline):
-  // resetInkToActive: pillA 落到 active chip (= 完整 chip.w/PILL_H 胶囊),
-  //                   pillB 隐藏, bridge 清空. 是"无 swipe 稳定态".
-  // renderInkBetween: swipe 期间根据 progress 0..1 在 from/to chip 之间
-  //                   渲染 fancy 流体动效 (出/入两阶段缩 + 流体连线), 或朴素
-  //                   单 pill lerp.
+  // 点击只移动单一 pill；width 在切换时即时更新，不进入 transition。
   const resetInkToActive = useCallback((key: string, withTransition: boolean) => {
     const pillA = pillARef.current;
-    const pillB = pillBRef.current;
-    const bridgePath = bridgePathRef.current;
     const chip = chipRefs.current[key];
     if (!pillA || !chip) return;
-    const trans = withTransition
-      ? "transform 220ms cubic-bezier(0.32, 0.72, 0, 1), width 220ms cubic-bezier(0.32, 0.72, 0, 1), height 220ms cubic-bezier(0.32, 0.72, 0, 1)"
-      : "none";
-    pillA.style.transition = trans;
+    delete pillA.dataset.swipeFrom;
+    pillA.style.transition = "none";
     pillA.style.width = `${chip.offsetWidth}px`;
     pillA.style.height = `${PILL_H}px`;
-    pillA.style.transform = `translate(${chip.offsetLeft}px, -50%)`;
-    if (pillB) {
-      pillB.style.transition = trans;
-      pillB.style.width = "0px";
-      pillB.style.height = "0px";
-    }
-    if (bridgePath) bridgePath.setAttribute("d", "");
+    pillA.style.transformOrigin = "left center";
+    pillA.style.transition = withTransition
+      ? "transform 160ms cubic-bezier(0.23, 1, 0.32, 1)"
+      : "none";
+    pillA.style.transform = `translateX(${chip.offsetLeft}px) translateY(-50%)`;
   }, []);
 
   const renderInkBetween = useCallback((fromKey: string, toKey: string, progress: number) => {
     const pillA = pillARef.current;
-    const pillB = pillBRef.current;
-    const bridgePath = bridgePathRef.current;
-    const inkLayer = inkLayerRef.current;
     const fromChip = chipRefs.current[fromKey];
     const toChip = chipRefs.current[toKey];
     if (!pillA || !fromChip || !toChip) return;
     const fromRect = { left: fromChip.offsetLeft, width: fromChip.offsetWidth };
     const toRect = { left: toChip.offsetLeft, width: toChip.offsetWidth };
-    const fancy = fancyAnimRef.current;
-
-    if (!fancy) {
-      // 朴素: 单 pill 在 from/to chip 之间 lerp 位置/宽度
-      const p = Math.max(0, Math.min(1, progress));
-      const lerp = (a: number, b: number) => a + (b - a) * p;
-      pillA.style.transition = "none";
-      pillA.style.transform = `translate(${lerp(fromRect.left, toRect.left)}px, -50%)`;
-      pillA.style.width = `${lerp(fromRect.width, toRect.width)}px`;
+    const p = Math.max(0, Math.min(1, progress));
+    const left = fromRect.left + (toRect.left - fromRect.left) * p;
+    const visualWidth = fromRect.width + (toRect.width - fromRect.width) * p;
+    if (pillA.dataset.swipeFrom !== fromKey) {
+      pillA.dataset.swipeFrom = fromKey;
+      pillA.style.width = `${fromRect.width}px`;
       pillA.style.height = `${PILL_H}px`;
-      return;
+      pillA.style.transformOrigin = "left center";
     }
-
-    // Fancy v5 流体动效
-    if (!pillB || !bridgePath || !inkLayer) return;
-    const fromCenter = fromRect.left + fromRect.width / 2;
-    const toCenter = toRect.left + toRect.width / 2;
-    const ymid = inkLayer.clientHeight / 2;
-    const now = performance.now();
-
-    // 出场 / 入场 pill 大小 (smoothstep ease) + 微小 jitter (关键帧 amp=0)
-    const out = computeOutPillSize(progress, fromRect.width);
-    const inS = computeInPillSize(progress, toRect.width);
-    const jOut = jitterAmpOut(progress);
-    const jIn = jitterAmpIn(progress);
-    const ow = Math.max(0, out.w + Math.sin(now / 850) * jOut);
-    const oh = Math.max(0, out.h + Math.cos(now / 720 + 1.2) * jOut * 0.8);
-    const bw = Math.max(0, inS.w + Math.sin(now / 920 + 2.1) * jIn);
-    const bh = Math.max(0, inS.h + Math.cos(now / 770 + 0.5) * jIn * 0.8);
-
     pillA.style.transition = "none";
-    pillA.style.width = `${ow}px`;
-    pillA.style.height = `${oh}px`;
-    pillA.style.transform = `translate(${fromCenter - ow / 2}px, -50%)`;
-    pillB.style.transition = "none";
-    pillB.style.width = `${bw}px`;
-    pillB.style.height = `${bh}px`;
-    pillB.style.transform = `translate(${toCenter - bw / 2}px, -50%)`;
-
-    // 流体连线
-    const halfH = computeBridgeHalfH(progress);
-    const reverse = toCenter < fromCenter;
-    let xL: number, xR: number, leftH: number, rightH: number;
-    if (!reverse) {
-      xL = fromCenter + ow / 2 - 3;
-      xR = toCenter - bw / 2 + 3;
-      leftH = oh;
-      rightH = bh;
-    } else {
-      xL = toCenter + bw / 2 - 3;
-      xR = fromCenter - ow / 2 + 3;
-      leftH = bh;
-      rightH = oh;
-    }
-    bridgePath.setAttribute("d", buildBridgePath({ xL, xR, leftH, rightH, halfH, ymid, now }));
+    pillA.style.transform = `translateX(${left}px) translateY(-50%) scaleX(${visualWidth / fromRect.width})`;
   }, []);
-
-  // PM 2026-05-27: ink-layer 现在跟 chips 在同一个 scroll-content wrapper 内,
-  // nav 的 overflow-x scroll 会自动带着 ink-layer + chips 一起移动, 不需要 JS sync
-
-  // PM 2026-05-27 v5: fancy mode swipe 期间 RAF 持续重绘 (流体连线 sin 波相位
-  // 随时间演变, 即使 progress 没变也得每帧 redraw). swipe end → swipeStateRef.active
-  // 翻 false 后 RAF 跳过 render, CSS transition 接管 220ms 收尾动画
-  useEffect(() => {
-    if (!isNarrow || !fancyAnim) return;
-    let raf = 0;
-    const tick = () => {
-      const s = swipeStateRef.current;
-      if (s.active) renderInkBetween(s.fromKey, s.toKey, s.progress);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [isNarrow, fancyAnim, renderInkBetween]);
 
   // PM 2026-05-19:active chip 自动 scrollIntoView 居中(声明位置必须在
   // `filter` derived state 之后,否则 TS 报 used-before-declaration)
@@ -405,10 +522,14 @@ function DashboardHome() {
       const chip = chipRailRef.current?.querySelector<HTMLButtonElement>(
         `[data-chip-key="${filter}"]`,
       );
-      chip?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      chip?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "nearest",
+        inline: "center",
+      });
     });
     return () => cancelAnimationFrame(raf);
-  }, [filter, isNarrow]);
+  }, [filter, isNarrow, reduceMotion]);
 
   // PM 2026-05-27 v5: filter 切换后 pillA slide 到新 active chip + 重置 pillB/bridge.
   // - chip click 走 switchChannel → setFilter → 此 effect → pillA transition slide 过去;
@@ -418,21 +539,18 @@ function DashboardHome() {
   useEffect(() => {
     if (!isNarrow) return;
     const raf = requestAnimationFrame(() => {
-      resetInkToActive(filter, !isFirstPillSyncRef.current);
+      resetInkToActive(
+        filter,
+        !isFirstPillSyncRef.current && !reduceMotion,
+      );
       isFirstPillSyncRef.current = false;
     });
     return () => cancelAnimationFrame(raf);
-  }, [filter, isNarrow, resetInkToActive]);
+  }, [filter, isNarrow, reduceMotion, resetInkToActive]);
 
-  // PM 2026-05-25 R10/R12: Channel Transition system
-  // - transitionActive: chip click 后的过渡 overlay (fade 220ms)
-  // - swipeAdjacent: swipe 期间 mount 邻居 panel (skeleton), 跟 main 同步 translate
-  //   让用户看到双 panel 紧贴跟手 (multi-column 效果, 不真 mount Feed 避免成本)
-  // R22: transition / adjacent state 加 key, 让 overlay / adjacent 能渲对应
-  // channel 的 header (SourceIcon + label), 跟 Feed mount 后的 header 视觉一致,
-  // 切换瞬间不再"跳一下"
-  const [transitionActive, setTransitionActive] = useState<{ key: string } | null>(null);
-  const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string } | null>(null);
+  // 横滑时只挂相邻 panel；top 在开始横滑时由当前 Header 可见比例确定，
+  // 避免 Header 已隐藏时被强制弹回或留下 49px 空白。
+  const [swipeAdjacent, setSwipeAdjacent] = useState<{ side: "left" | "right"; key: string; top: number } | null>(null);
   const adjacentRef = useRef<HTMLDivElement>(null);
   // PM 2026-05-27 任务 3: mobile 上推 feed 时 header 渐隐, 下拉时渐显 (iOS Safari /
   // Twitter mobile 同款). PC 不动 (header 永远显示).
@@ -448,20 +566,19 @@ function DashboardHome() {
       h.style.transform = `translateY(${-ratio * 100}%)`;
       h.style.opacity = `${1 - ratio}`;
     };
-    if (!isNarrow) {
+    if (!isNarrow || reduceMotion) {
       hideRatioRef.current = 0;
       apply(0);
       return;
     }
     const TOP_ZONE = 50;
     const HEADER_H = 49;
-    let ticking = false;
+    let scrollRaf: number | null = null;
     let lastY = getScrollY();
     const handler = () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        ticking = false;
+      if (scrollRaf !== null) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = null;
         const y = getScrollY();
         const delta = y - lastY;
         lastY = y;
@@ -477,26 +594,18 @@ function DashboardHome() {
         }
       });
     };
-    return addScrollRootListener(handler);
-  }, [isNarrow]);
-  // chip click / swipe 切 channel 时 header 强制显示 — overlay 用 top:49 hardcode header
-  // 高度做位置, header hidden 状态下切 channel 会留 49px 空白条. 切 channel 是 user
-  // 主动 interaction, 配合 show header 也符合 "看到新 channel 标识" 的直觉.
-  useEffect(() => {
-    if (transitionActive || swipeAdjacent) {
+    const removeScrollListener = addScrollRootListener(handler);
+    return () => {
+      removeScrollListener();
+      if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
+      scrollRaf = null;
       hideRatioRef.current = 0;
-      const h = headerRef.current;
-      if (h) {
-        h.style.transform = "translateY(0%)";
-        h.style.opacity = "1";
-      }
-    }
-  }, [transitionActive, swipeAdjacent]);
+      apply(0);
+    };
+  }, [isNarrow, reduceMotion]);
   const switchChannel = useCallback((nextFilter: string) => {
     if (nextFilter === filterRef.current) return;
-    setTransitionActive({ key: nextFilter });
     setFilter(nextFilter as typeof filter);
-    window.setTimeout(() => setTransitionActive(null), 220);
   }, []);
   const switchChannelRef = useRef(switchChannel);
   switchChannelRef.current = switchChannel;
@@ -519,8 +628,11 @@ function DashboardHome() {
 
     let startX = 0, startY = 0, startT = 0;
     let active = false;
+    let activeTouchId: number | null = null;
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
     let currentSide: 'left' | 'right' | null = null;
+    let disposePendingSettle: (() => void) | null = null;
+    let postSwitchRaf = 0;
     // R22: 删 lockBody/unlockBody. 架构改造后 PTR 不存在 (body 永久 fixed),
     // 不需要 swipe 期间额外 lock #root (反而拦了 vertical scroll, PM 反馈
     // "竖直方向无法上划"). horizontal swipe 期间 #root vertical scroll 跟
@@ -553,8 +665,53 @@ function DashboardHome() {
         adj.style.transform = '';
       }
     };
+    const cleanupAdjacent = () => {
+      currentSide = null;
+      setSwipeAdjacent(null);
+    };
+    const cancelPendingSettle = () => {
+      disposePendingSettle?.();
+      disposePendingSettle = null;
+      if (postSwitchRaf) cancelAnimationFrame(postSwitchRaf);
+      postSwitchRaf = 0;
+    };
+    const settleTransform = (onComplete: () => void) => {
+      cancelPendingSettle();
+      disposePendingSettle = watchTransformTransition(el, {
+        fallbackMs: 260,
+        onComplete: () => {
+          disposePendingSettle = null;
+          onComplete();
+        },
+        onCancel: () => {
+          disposePendingSettle = null;
+          resetTransform();
+          cleanupAdjacent();
+        },
+      });
+    };
+    const findActiveTouch = (touches: TouchList) => (
+      activeTouchId === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === activeTouchId)
+    );
+    const cancelSwipeGesture = () => {
+      cancelPendingSettle();
+      resetTransform();
+      if (direction === 'horizontal') {
+        resetInkToActive(filterRef.current, false);
+      }
+      active = false;
+      activeTouchId = null;
+      direction = 'unknown';
+      cleanupAdjacent();
+    };
 
     const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        cancelSwipeGesture();
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (!target) return;
       if (target.closest('[data-drawer-panel]')) return;
@@ -563,9 +720,13 @@ function DashboardHome() {
       if (target.closest('[data-no-swipe-tab]')) return;
       const t0 = e.touches[0];
       if (t0.clientX < 24) return;
+      cancelPendingSettle();
+      resetTransform();
+      cleanupAdjacent();
       startX = t0.clientX;
       startY = t0.clientY;
       startT = Date.now();
+      activeTouchId = t0.identifier;
       direction = 'unknown';
       currentSide = null;
       active = true;
@@ -576,38 +737,44 @@ function DashboardHome() {
     };
     const onMove = (e: TouchEvent) => {
       if (!active) return;
-      const t = e.touches[0];
+      if (e.touches.length !== 1) {
+        cancelSwipeGesture();
+        return;
+      }
+      const t = findActiveTouch(e.touches);
+      if (!t) {
+        cancelSwipeGesture();
+        return;
+      }
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
-      const absDx = Math.abs(dx), absDy = Math.abs(dy);
       // R23 (2026-05-28): 删掉方向锁定前的首帧 preventDefault.
       // 它是 R17 为防"斜滑触发系统下拉刷新"加的, 但 R22 把 mobile body 改成
       // 永久 fixed (index.css max-md:overflow:hidden) 之后 pull-to-refresh 物理上
       // 已不存在 —— R22 删了配套的 onStart lockBody, 却漏删了这里的 preventDefault.
-      // 残留的它反而拦了慢速纵滑的头几帧 (absDx+absDy<10 窗口内): iOS Safari 一旦
+      // 残留的它反而拦了慢速纵滑的头几帧:iOS Safari 一旦
       // 在手势早期帧收到 preventDefault, 就判定该手势被 JS 接管, 即便后续锁定为
       // vertical 也不再启动 native scroll → 表现为"滑动偶尔不响应, 要反复多次才滚".
-      // 横滑不受影响: 锁定为 horizontal 后下方 L532 仍 preventDefault 跟手.
+      // resolveChannelSwipeIntent 会等到横向意图明显强于纵向才接管；持续模糊的
+      // 对角线最终按纵滑处理。横滑锁定后下方仍 preventDefault 跟手.
       if (direction === 'unknown') {
-        if (absDx + absDy < 10) {
-          // 抖动阈值内, 还没法判方向, 直接 return 等下一帧 (不 preventDefault,
-          // 让 #root native vertical scroll 能正常启动)
-          return;
-        }
-        if (absDx > absDy) {
-          direction = 'horizontal';
-        } else {
+        const intent = resolveChannelSwipeIntent(dx, dy);
+        if (intent === 'unknown') return;
+        if (intent === 'vertical') {
           direction = 'vertical';
           active = false;
+          activeTouchId = null;
           // R22: vertical lock, JS 不动 main, #root native scroll 接管
           return;
         }
+        direction = 'horizontal';
       }
       if (direction === 'horizontal') {
         // R22: 架构改造后 PTR 不存在 (body 永久 fixed), 不再需要 preventDefault
         // + lockBody hack (它们反而拦了 #root native vertical scroll, 导致 PM
         // 反馈竖直方向上划失效). horizontal 锁定后只跟手 translate 即可.
         if (e.cancelable) e.preventDefault();
+        if (reduceMotion) return;
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
         const targetIdx = dx < 0 ? idx + 1 : idx - 1;
@@ -617,44 +784,41 @@ function DashboardHome() {
           const newSide: 'left' | 'right' = dx < 0 ? 'right' : 'left';
           if (currentSide !== newSide) {
             currentSide = newSide;
-            setSwipeAdjacent({ side: newSide, key: tabs[targetIdx].key });
+            setSwipeAdjacent({
+              side: newSide,
+              key: tabs[targetIdx].key,
+              top: Math.round((1 - hideRatioRef.current) * 49),
+            });
           }
         }
         // main 跟手 translate (边界 tab 阻尼 1/3)
         const dampened = atBoundary ? dx / 3 : dx;
         applyMainTransform(dampened, false);
         if (!atBoundary) applyAdjacentTransform(dampened, false);
-        // 墨汁动效: fancy 走 v5 两阶段缩 + 流体连线, 朴素走单 pill lerp
-        // progress 按 viewport 算 (main 滑 1 屏 = 切换完成).
-        // fancy mode 时同步给 swipeStateRef, RAF loop 每帧重绘 (sin 波随时间演变)
+        // 单一 pill 跟随横滑，仅写 transform。
         if (!atBoundary) {
           const w = window.innerWidth;
           const progress = Math.min(Math.abs(dx) / w, 1);
-          swipeStateRef.current = {
-            active: true,
-            fromKey: filterRef.current,
-            toKey: tabs[targetIdx].key,
-            progress,
-          };
           renderInkBetween(filterRef.current, tabs[targetIdx].key, progress);
         }
       }
     };
     const onEnd = (e: TouchEvent) => {
-      const cleanupAdjacent = () => {
-        currentSide = null;
-        setSwipeAdjacent(null);
-      };
-      // swipe 结束 → RAF loop 停渲染 (resetInkToActive 由 CSS transition 接管动画)
-      swipeStateRef.current.active = false;
       if (!active || direction !== 'horizontal') {
-        active = false;
-        resetTransform();
-        cleanupAdjacent();
+        cancelSwipeGesture();
+        return;
+      }
+      if (e.touches.length !== 0) {
+        cancelSwipeGesture();
+        return;
+      }
+      const t = findActiveTouch(e.changedTouches);
+      if (!t) {
+        cancelSwipeGesture();
         return;
       }
       active = false;
-      const t = e.changedTouches[0];
+      activeTouchId = null;
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const dt = Date.now() - startT;
@@ -677,18 +841,34 @@ function DashboardHome() {
         ? Math.min(idx + 1, tabs.length - 1)
         : Math.max(idx - 1, 0));
 
+      if (reduceMotion) {
+        resetTransform();
+        cleanupAdjacent();
+        if (shouldSwitch && nextIdx !== idx) {
+          const nextKey = tabs[nextIdx].key;
+          track(EVENTS.SOURCE_FILTER_CHANGE, {
+            from_id: cur,
+            to_id: nextKey,
+            method: 'swipe',
+          });
+          switchChannelRef.current(nextKey);
+          resetInkToActive(nextKey, false);
+        } else {
+          resetInkToActive(cur, false);
+        }
+        return;
+      }
+
       if (!shouldSwitch || nextIdx === idx) {
         // 弹回 0 — main + adjacent 同步 animate 回原位
         applyMainTransform(0, true);
         applyAdjacentTransform(0, true);
         // 墨汁动效回弹到 from-chip baseline (transition 220ms)
         resetInkToActive(cur, true);
-        const onTransitionEnd = () => {
-          el.removeEventListener('transitionend', onTransitionEnd);
+        settleTransform(() => {
           resetTransform();
           cleanupAdjacent();
-        };
-        el.addEventListener('transitionend', onTransitionEnd);
+        });
         return;
       }
       // animate 切换: main 滑到 ±width, adjacent 滑到 0 (屏内中央, 跟手紧贴)
@@ -700,8 +880,7 @@ function DashboardHome() {
       // 墨汁动效落到 to-chip baseline (跟 main 同 220ms 节奏 — useEffect [filter]
       // 也会 setFilter 后跑一次, 但状态已 reset 同位置, 重复 set 无视觉变化)
       resetInkToActive(tabs[nextIdx].key, true);
-      const onTransitionEnd = () => {
-        el.removeEventListener('transitionend', onTransitionEnd);
+      settleTransform(() => {
         track(EVENTS.SOURCE_FILTER_CHANGE, {
           from_id: cur,
           to_id: tabs[nextIdx].key,
@@ -713,27 +892,20 @@ function DashboardHome() {
         // 等 React commit 用 raf 双 buffer, 再 resetTransform + cleanup adjacent,
         // overlay 已经盖住 viewport 时 unmount 不闪
         switchChannelRef.current(tabs[nextIdx].key);
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
+        postSwitchRaf = requestAnimationFrame(() => {
+          postSwitchRaf = requestAnimationFrame(() => {
+            postSwitchRaf = 0;
             resetTransform();
             cleanupAdjacent();
           });
         });
-      };
-      el.addEventListener('transitionend', onTransitionEnd);
+      });
     };
-    const onCancel = () => {
-      swipeStateRef.current.active = false;
-      if (active && direction === 'horizontal') {
-        applyMainTransform(0, true);
-        applyAdjacentTransform(0, true);
-        // 墨汁动效回弹到原 chip
-        resetInkToActive(filterRef.current, true);
-      }
-      active = false;
-      direction = 'unknown';
-      currentSide = null;
-      setSwipeAdjacent(null);
+    const onCancel = (e: TouchEvent) => {
+      // A cancel for an unrelated touch still invalidates the gesture, but the
+      // lookup ensures we never accidentally substitute changedTouches[0].
+      if (activeTouchId !== null) findActiveTouch(e.changedTouches);
+      cancelSwipeGesture();
     };
 
     el.addEventListener('touchstart', onStart, { passive: true });
@@ -743,12 +915,13 @@ function DashboardHome() {
     el.addEventListener('touchend', onEnd, { passive: true });
     el.addEventListener('touchcancel', onCancel, { passive: true });
     return () => {
+      cancelSwipeGesture();
       el.removeEventListener('touchstart', onStart);
       el.removeEventListener('touchmove', onMove);
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };
-  }, [isNarrow]);
+  }, [isNarrow, reduceMotion, renderInkBetween, resetInkToActive]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores
@@ -770,17 +943,42 @@ function DashboardHome() {
     let startX = 0;
     let startY = 0;
     let direction: "h" | "v" | null = null;
+    let guardTouchId: number | null = null;
+
+    const findGuardTouch = (touches: TouchList) => (
+      guardTouchId === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === guardTouchId)
+    );
+    const resetGuardGesture = () => {
+      target = null;
+      guardTouchId = null;
+      direction = null;
+    };
 
     const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        resetGuardGesture();
+        return;
+      }
       target = e.target as Element | null;
       const t = e.touches[0];
+      guardTouchId = t.identifier;
       startX = t.clientX;
       startY = t.clientY;
       direction = null;
     };
     const onMove = (e: TouchEvent) => {
       if (!target) return;
-      const t = e.touches[0];
+      if (e.touches.length !== 1) {
+        resetGuardGesture();
+        return;
+      }
+      const t = findGuardTouch(e.touches);
+      if (!t) {
+        resetGuardGesture();
+        return;
+      }
       const dx = Math.abs(t.clientX - startX);
       const dy = Math.abs(t.clientY - startY);
       if (direction === null && (dx > 8 || dy > 8)) {
@@ -794,9 +992,9 @@ function DashboardHome() {
         if (e.cancelable) e.preventDefault();
       }
     };
-    const onEnd = () => {
-      target = null;
-      direction = null;
+    const onEnd = (e: TouchEvent) => {
+      if (guardTouchId !== null) findGuardTouch(e.changedTouches);
+      resetGuardGesture();
     };
 
     window.addEventListener("touchstart", onStart, { passive: true });
@@ -811,21 +1009,8 @@ function DashboardHome() {
     };
   }, [isNarrow]);
 
-  // Telemetry init（仅一次）
+  // PR5 share landing is route-specific; global telemetry initialization lives in main.tsx.
   useEffect(() => {
-    initTelemetry({ endpoint: TRACK_ENDPOINT });
-    installVitals();
-    installNavTiming();
-    installImgTiming();
-    installErrorHandlers();
-    track(EVENTS.APP_OPEN, {
-      utm_source: new URLSearchParams(window.location.search).get('utm_source') || undefined,
-      utm_campaign: new URLSearchParams(window.location.search).get('utm_campaign') || undefined,
-      referrer: document.referrer || undefined,
-    });
-    track(EVENTS.PAGE_VIEW, {
-      path: window.location.pathname + window.location.search,
-    });
     // PR5 landing 回流：从 /s/:token redirect 过来时 worker 加了
     // ?ref=share&token=<token>&from=<uid>，前端拿到 token 上报 landing
     // 让 worker 把当前 device_id 写入 share_relations.to_did + landed_at
@@ -847,36 +1032,50 @@ function DashboardHome() {
     }
   }, []);
 
-  // Derive which source types have live data
-  const liveSourceTypes = new Set(
-    sources.map((s) => s.source_type).concat(
-      // Also consider source_type present in stats
-      stats ? (Object.keys(stats.by_source) as SourceType[]) : [],
-    ),
-  );
+  const liveSourceTypes = new Set(manifest?.live_source_types ?? []);
+  const isChannelLive = (sourceType: string): boolean => resolveChannelLive(sourceType, {
+    enabled: OPTIMISTIC_FEED_START,
+    metadataState,
+    live: liveSourceTypes,
+  });
 
-  // 空闲时后台预取其余频道首页(写 FEED_CACHE):首次横划切换、以及扫码/分享落地抽屉后
-  // 关掉抽屉看到的底层流都直接 hydrate 秒开。用 ref 取 fire 时最新的 liveSourceTypes(它每次
-  // render 都新建,不能进 deps);[] deps 只跑一次;2.5s 延迟 + requestIdleCallback 不抢首屏资源。
-  const liveRef = useRef(liveSourceTypes);
-  liveRef.current = liveSourceTypes;
+  // Candidates come from the public UI registry (including the merged news
+  // channel exactly once), not raw manifest rows. The ref is read only after the
+  // readiness gate, so manifest reconciliation can update it without restarting
+  // the page-level queue.
+  const prefetchCandidates = SOURCE_COLUMNS
+    .filter((column) => isChannelLive(column.source_type))
+    .map((column) => column.source_type);
+  const prefetchCandidatesRef = useRef(prefetchCandidates);
+  prefetchCandidatesRef.current = prefetchCandidates;
   useEffect(() => {
-    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number };
-    const idle = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 0));
-    const t = window.setTimeout(() => {
-      idle(() => {
-        const live = liveRef.current;
-        if (live.size > 0) {
-          // blog/podcast 折叠成「官方新闻」复合值预取:Feed 的 FEED_CACHE key 是
-          // 列的 sourceType("blog,podcast"),按单源 key 预取写进缓存永远 miss
-          // (2026-06-11 C 端速度核查发现)。其余源 key 即 source_type,原样。
-          const list: SourceType[] = [...live].filter((s) => s !== "blog" && s !== "podcast");
-          if (live.has("blog") || live.has("podcast")) list.push(OFFICIAL_NEWS as unknown as SourceType);
-          prefetchChannels(list);
+    if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
+
+    const queue = createBackgroundQueue();
+    const unbindVisibility = bindQueueToVisibility(queue, document);
+    const controller = new AbortController();
+    let cancelled = false;
+    void waitForBackgroundReadiness({ signal: controller.signal }).then(async () => {
+      for (const sourceType of prefetchCandidatesRef.current) {
+        if (cancelled || !canStartBackgroundPrefetch(readCurrentConnection)) return;
+        try {
+          await queue.enqueue(async () => {
+            if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
+            if (!prefetchCandidatesRef.current.includes(sourceType)) return;
+            await prefetchChannel(sourceType);
+          });
+        } catch {
+          // Best-effort only; a mounted Feed remains the authoritative retry path.
         }
-      });
-    }, 2500);
-    return () => window.clearTimeout(t);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      queue.pause();
+      unbindVisibility();
+    };
   }, []);
 
   const visibleColumns = SOURCE_COLUMNS.filter((col) => {
@@ -896,8 +1095,7 @@ function DashboardHome() {
 
   const getTitleForColumn = (col: SourceConfig): string => {
     if (col.source_type === "x_list") {
-      const xSource = sources.find((s) => s.source_type === "x_list");
-      return xSource?.name || col.title;
+      return manifest?.labels.x_list || col.title;
     }
     return col.title;
   };
@@ -910,33 +1108,21 @@ function DashboardHome() {
     if (!pageAtTop) {
       return smoothScrollWindowToTop();
     }
-    // Already at page top → scroll all PC columns to top
-    feedRefs.current.forEach((handle) => handle?.scrollToTop());
+    // The last interacted column gets spatial continuity; other columns reset
+    // instantly so one app-bar click never starts seven competing animations.
+    const preferred = lastInteractedColumnRef.current;
+    const animatedColumnId = preferred && feedRefs.current.has(preferred)
+      ? preferred
+      : visibleColumns[0]?.source_type;
+    feedRefs.current.forEach((handle, columnId) => {
+      handle?.scrollToTop({ instant: columnId !== animatedColumnId });
+    });
   }
 
   return (
     <DrawerProvider>
     <DrawerModeSync />
     <div className="min-h-screen bg-neutral-50">
-      {/* SVG defs for chip 墨汁动效 goo filter — 全局一份, 仅 fancy mode 引用.
-          feGaussianBlur stdDeviation=6 + feColorMatrix alpha 高对比度 → 两个相邻
-          黑色形状在边界处 metaball 自然合并, 远了各自独立. */}
-      {fancyAnim && (
-        <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden>
-          <defs>
-            <filter id="chip-goo">
-              <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
-              <feColorMatrix
-                in="blur"
-                mode="matrix"
-                values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -10"
-                result="goo"
-              />
-              <feBlend in="SourceGraphic" in2="goo" />
-            </filter>
-          </defs>
-        </svg>
-      )}
       {/* Top bar */}
       {/* PM 2026-05-27 任务 3 v3 反馈: 频道流惯性 momentum 没了 — 根因是 mobile
           sticky header + RAF 每帧 set transform, iOS 把 #root scroll 的 momentum
@@ -997,50 +1183,34 @@ function DashboardHome() {
               ref={chipRailRef}
               className="chips-rail min-w-0 self-stretch overflow-x-auto"
             >
-              {/* Inner scroll content — relative parent for ink-layer + chips.
+              {/* Inner scroll content — relative parent for active pill + chips.
                   inline-flex 让宽度跟 chip 内容紧凑 (= scroll content width),
-                  nav 自己 overflow-x-auto 自动 scroll 整个 inner div + ink-layer + chips.
-                  这样 ink-layer 是 absolute 相对 inner (= scroll content), 跟 chip
+                  nav 自己 overflow-x-auto 自动 scroll 整个 inner div + pill + chips.
+                  pill 是 absolute 相对 inner (= scroll content), 跟 chip
                   共享同一个 offsetParent (chip.offsetLeft 跟 pill.transform translateX
                   对齐), 完全不需要 JS 同步 scrollLeft */}
               <div
                 ref={chipScrollContentRef}
                 className="relative inline-flex h-full items-center gap-1"
               >
-                {/* 墨汁 ink layer — pillA (出场/baseline) + pillB (入场, fancy 才渲染)
-                    + bridge SVG path (流体连线, fancy 才渲染). 套 goo filter 让三者 metaball
-                    合并成液态. pointer-events-none 不拦 chip click. 初始 width:0 避免
-                    chip mount 前闪一帧 */}
                 <div
-                  ref={inkLayerRef}
                   className="pointer-events-none absolute inset-0 z-0"
-                  style={fancyAnim ? { filter: "url(#chip-goo)" } : undefined}
                   aria-hidden
                 >
-                  {fancyAnim && (
-                    <svg
-                      className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
-                      aria-hidden
-                    >
-                      <path ref={bridgePathRef} fill="#111" d="" />
-                    </svg>
-                  )}
-                  <div
-                    ref={pillARef}
-                    className="absolute top-1/2 rounded-full bg-neutral-900"
-                    style={{ width: 0, height: `${PILL_H}px`, transform: "translate(0px, -50%)" }}
+                      <div
+                        ref={pillARef}
+                        className="motion-channel-pill absolute top-1/2 rounded-full bg-neutral-900"
+                    style={{
+                      width: 0,
+                      height: `${PILL_H}px`,
+                      transform: "translateX(0px) translateY(-50%)",
+                      transformOrigin: "left center",
+                    }}
                   />
-                  {fancyAnim && (
-                    <div
-                      ref={pillBRef}
-                      className="absolute top-1/2 rounded-full bg-neutral-900"
-                      style={{ width: 0, height: 0, transform: "translate(0px, -50%)" }}
-                    />
-                  )}
                 </div>
                 {FILTER_CHIPS.filter((c) => c.key !== "all").map(({ key, label }) => {
                 const isActive = filter === key;
-                const hasData = channelHasData(liveSourceTypes, key);
+                const hasData = isChannelLive(key);
                 return (
                   <button
                     key={key}
@@ -1052,7 +1222,7 @@ function DashboardHome() {
                         scrollFeedOrPage(null);
                       } else {
                         track(EVENTS.SOURCE_FILTER_CHANGE, { from_id: storedFilter, to_id: key });
-                        // 走 CTS overlay 过渡, 避免 chip click 切换的 "空白帧"
+                        // 高频点击直接换内容，选中态 pill 自己做 160ms 位移。
                         switchChannel(key);
                       }
                     }}
@@ -1076,8 +1246,8 @@ function DashboardHome() {
       </header>
 
       {/* mobile-only spacer: header 改 fixed 后不占 layout 空间, 加 49px spacer
-          补齐 (跟 sticky 时一样让 main 内容从 49 起步, swipeAdjacent / transitionActive
-          overlay 的 top:49 hardcode 也无需变). PC sticky 自己占空间, 不需 spacer. */}
+          补齐 (跟 sticky 时一样让 main 内容从 49 起步). PC sticky 自己占空间,
+          不需 spacer. */}
       <div className="max-md:h-[49px] md:hidden" aria-hidden />
 
       {/* 未登录订阅引导横幅（每日首访展示，可关闭；登录用户不显示）。
@@ -1092,7 +1262,7 @@ function DashboardHome() {
           ref={adjacentRef}
           className="pointer-events-none fixed inset-x-0 z-30 overflow-hidden bg-white"
           style={{
-            top: 49,
+            top: swipeAdjacent.top,
             bottom: 0,
             transform: `translateX(${swipeAdjacent.side === 'right' ? '100%' : '-100%'})`,
           }}
@@ -1102,59 +1272,57 @@ function DashboardHome() {
         </div>
       )}
 
-      {/* Chip click transition overlay — R22 也加 header */}
-      {isNarrow && (
-        <div
-          className="pointer-events-none fixed inset-x-0 z-40 overflow-hidden bg-white"
-          style={{
-            top: 49,
-            bottom: 0,
-            opacity: transitionActive ? 1 : 0,
-            transition: transitionActive ? "none" : "opacity 220ms ease-out",
-          }}
-          aria-hidden
-        >
-          {transitionActive && <ChannelSkeletonPanel filterKey={transitionActive.key} />}
-        </div>
-      )}
-
       {/* 3-column grid — touch-pan-y (swiper.js / framer-motion 同款) +
           overscroll-y-contain (R16 PM 反馈: 顶部斜滑既切又下拉刷新, 加
           overscroll-behavior-y:contain 阻止 iOS / Android pull-to-refresh 跨域
           滚动链穿透到浏览器, swipe 时只走 JS 不触发系统刷新动作) */}
       <main
         ref={mainRef}
+        onScrollCapture={unlockDeferredFeedsFromColumnScroll}
         className="relative mx-auto max-w-[1280px] px-3 py-3 sm:px-8 sm:py-6 lg:px-16 max-md:touch-pan-y max-md:overscroll-y-contain"
       >
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
-          {visibleColumns.map((col) => {
-            const isPlaceholder = !channelHasData(liveSourceTypes, col.source_type);
+          {visibleColumns.map((col, index) => {
+            const isPlaceholder = !resolveChannelLive(col.source_type, {
+              enabled: OPTIMISTIC_FEED_START,
+              metadataState,
+              live: liveSourceTypes,
+            });
             return (
               // 列内任意 click 都标记该列为 lastClickedColumnId，让 VideoCoordinator
               // 在多列同时有视频候选时优先选这列（设计文档 §2.2）。capture 阶段抓
               // bubble 之前所有 click，包含 video element / chip / 卡片自身。
               <div
                 key={col.source_type}
-                onClickCapture={() =>
-                  useVideoCoordinator.getState().markColumnClick(col.source_type)
-                }
+                onPointerDownCapture={() => {
+                  lastInteractedColumnRef.current = col.source_type;
+                  useVideoCoordinator.getState().markColumnClick(col.source_type);
+                }}
+                onWheelCapture={() => {
+                  lastInteractedColumnRef.current = col.source_type;
+                }}
               >
-                <Feed
+                <DeferredFeed
                   ref={(h) => {
                     if (h) feedRefs.current.set(col.source_type, h);
                     else feedRefs.current.delete(col.source_type);
                   }}
+                  immediate={index < immediateColumnCount}
+                  mediaColumnIndex={index}
+                  mediaColumnImmediate={index < immediateColumnCount}
+                  observationEnabled={pageHasScrolled}
                   sourceType={col.source_type}
                   title={getTitleForColumn(col)}
                   placeholder={isPlaceholder}
                   refreshTick={refreshTick}
+                  onInitialRequestStart={OPTIMISTIC_FEED_START && !shouldLoadManifest ? handleInitialFeedRequestStart : undefined}
                 />
               </div>
             );
           })}
         </div>
 
-        <footer className="mt-6 text-center text-xs text-neutral-400">
+        <footer className="mt-6 text-center text-xs text-neutral-600">
           Built by{" "}
           <a
             href="https://blog.ai-feeds.com/"
@@ -1194,7 +1362,7 @@ function ShareLanding() {
   const { token } = useParams<{ token: string }>();
   useEffect(() => {
     if (!token) return;
-    const target = `${API_BASE || 'https://api.ai-feeds.com'}/s/${encodeURIComponent(token)}`;
+    const target = buildPublicWorkerUrl(`/s/${encodeURIComponent(token)}`);
     window.location.replace(target);
   }, [token]);
   return (

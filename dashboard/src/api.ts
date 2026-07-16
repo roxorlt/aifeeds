@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   Item,
   ItemsResponse,
+  FeedManifest,
   SearchResponse,
   SearchSuggestTerm,
   Source,
@@ -12,6 +13,16 @@ import { getDeviceId } from "./lib/device";
 import { track, EVENTS } from "./lib/telemetry";
 import { useAuthStore } from "./lib/authStore";
 import { API_BASE } from "./lib/apiBase";
+import { consumeFeedPrefetch } from "./lib/feed-prefetch";
+import { runDetailSingleFlight } from "./lib/detailSingleFlight";
+import { safeApiEndpoint } from "./lib/telemetry/privacy.ts";
+import {
+  buildItemsPath,
+  executeRequestWithPolicy,
+  runListSingleFlight,
+  type RequestPurpose,
+  type RequestPurposeSource,
+} from "./lib/feedScheduling";
 
 export interface MetricsSnapshotGh {
   captured_at: number;
@@ -66,28 +77,21 @@ function trigger401Login(): void {
 
 /**
  * 统一 fetch 包装：自动注入 X-Device-Id，失败上报 api_error，
- * AbortController 超时 + 指数 backoff 重试（移动端 / WeChat WebView
- * 的 fetch 抖动通常瞬时；快速失败 + 重试比单次长等待 UX 好）。
+ * AbortController 超时 + 有界重试。GET/HEAD 的关键读取最多重试一次，后台读取和
+ * 所有 mutation 默认不重试，避免弱网请求在后台占住十几秒。
  * 业务 endpoint（/api/items / /api/sources 等）走这个；
  * /api/track 自身不能走（会循环），用原生 fetch。
  */
 const FETCH_TIMEOUT_MS = 5000;
-// BE 2026-05-19 建议:retry 第三档拉长到 ≥ 2s 跨过 CF Workers deploy 切换窗口
-// (deploy 是 replace-style cutover,几秒切换里 in-flight 必然有损,旧 200/600ms
-// retry 间隔太短可能两次都撞在窗口里);加 ±20% jitter 避免雪崩 retry storm
-// (多 client 同步 retry 会瞬时叠加压力)。
-// 共 4 次 attempt(初次 + 3 次 retry),最坏 case 总耗时 ≈ 400+1500+2500+timeoutMs。
-// 调用方对延迟敏感的 endpoint 用 timeoutMs override 来截断。
-const RETRY_BACKOFFS_MS = [400, 1500, 2500] as const;
 
-function backoffWithJitter(baseMs: number): number {
-  // ±20% jitter:randomize within [base*0.8, base*1.2)
-  return Math.floor(baseMs * (0.8 + Math.random() * 0.4));
-}
+type ApiFetchInit = RequestInit & {
+  timeoutMs?: number;
+  requestPurpose?: RequestPurposeSource;
+};
 
 async function apiFetch(
   path: string,
-  init: RequestInit & { timeoutMs?: number } = {},
+  init: ApiFetchInit = {},
 ): Promise<Response> {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   const headers = new Headers(init.headers);
@@ -95,10 +99,17 @@ async function apiFetch(
   // Caller can override default 5s timeout per-call (e.g. refreshHfDiscussion
   // 跑评论 fetch + img R2 mirror + 翻译 ~8s,默认 5s 会 abort 掉)
   const timeoutMs = init.timeoutMs ?? FETCH_TIMEOUT_MS;
-  // 单独把 timeoutMs / signal 从 init 摘出来:timeoutMs 避免 fetch() 收到 unknown
-  // 属性;signal 单独接管(见 tryOnce),否则会被下方 ctrl.signal 覆盖而失效。
-  const { timeoutMs: _omit, signal: externalSignal, ...fetchInit } = init;
-  void _omit;
+  // 内部策略字段必须在调用原生 fetch 前剥离；signal 单独接管，联动每次 attempt
+  // 自己的 timeout controller。
+  const {
+    timeoutMs: _omitTimeout,
+    requestPurpose: _omitPurpose,
+    signal: externalSignal,
+    ...fetchInit
+  } = init;
+  void _omitTimeout;
+  const requestPurpose = _omitPurpose ?? "critical";
+  const method = fetchInit.method ?? "GET";
 
   // Each attempt is wrapped in its own AbortController so a single hung
   // request can't block the entire retry chain. WeChat WebView is known
@@ -132,70 +143,52 @@ async function apiFetch(
     trigger401Login();
   };
 
-  let res: Response | null = null;
-  let lastErr: unknown = null;
-
-  for (let attempt = 0; attempt <= RETRY_BACKOFFS_MS.length; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, backoffWithJitter(RETRY_BACKOFFS_MS[attempt - 1])));
-    }
-    try {
-      const r = await tryOnce();
-      // 5xx is retryable (idempotent GETs only)
-      if (r.status >= 500 && r.status < 600 && attempt < RETRY_BACKOFFS_MS.length) {
-        res = r;
-        lastErr = new Error(`HTTP ${r.status}`);
-        continue;
+  return executeRequestWithPolicy<Response>({
+    method,
+    purpose: requestPurpose,
+    signal: externalSignal ?? undefined,
+    attempt: tryOnce,
+    isRetryableResult: (response) => {
+      const retryable = response.status >= 500 && response.status < 600;
+      if (retryable) {
+        // This response will be discarded before the one allowed retry. Release
+        // its stream promptly instead of leaving the connection/body hanging.
+        const cancellation = response.body?.cancel();
+        void cancellation?.catch(() => {});
       }
-      // Final response (success / 4xx / final 5xx)
-      if (!r.ok && r.status >= 400) {
+      return retryable;
+    },
+    shouldStopOnError: () => externalSignal?.aborted === true,
+    onFinalResult: (response, attempts) => {
+      if (!response.ok && response.status >= 400) {
         track(EVENTS.API_ERROR, {
-          endpoint: path,
-          status: r.status,
-          attempts: attempt + 1,
+          endpoint: safeApiEndpoint(path),
+          status: response.status,
+          attempts,
         });
       }
-      handle401(r.status);
-      return r;
-    } catch (e) {
-      // catch path 覆盖:network fail / CORS preflight fail(TypeError:Failed to fetch)/
-      // AbortError(timeout)。这三种都走 retry — for loop 在 attempt < length 时
-      // 自然进入下一轮 attempt(无需显式 continue);只在最后一轮才 track + throw
-      lastErr = e;
-      // 外部 signal 主动取消（调用方 debounce 弃单等）→ 不 retry、不上报 api_error,
-      // 直接抛出让调用方按需忽略 AbortError。timeout 触发的内部 abort 不受此影响。
-      if (externalSignal?.aborted) throw e;
-      if (attempt >= RETRY_BACKOFFS_MS.length) {
-        // Every fetch attempt is wrapped in its own AbortController with a
-        // FETCH_TIMEOUT_MS timeout, so AbortError almost always means "timeout"
-        // rather than user cancellation. Normalize to a stable string so the
-        // admin dashboard can bucket timeouts separately from real errors.
-        const rawMsg = e instanceof Error ? e.message : String(e);
-        const isAbort = e instanceof Error && (e.name === 'AbortError' || /aborted|abort/i.test(rawMsg));
-        // CORS preflight failure / network unreachable / opaque fetch error 浏览器
-        // 统一抛 TypeError: "Failed to fetch",上报时归类 cors_or_network 便于
-        // admin dashboard 分桶(deploy 切换暂态 CORS fail 应该 < 1% 全部 attempts)
-        const isCorsOrNet = e instanceof TypeError && /failed to fetch|fetch/i.test(rawMsg);
-        track(EVENTS.API_ERROR, {
-          endpoint: path,
-          status: 0,
-          error_msg: isAbort
-            ? `timeout_${timeoutMs}ms`
-            : (isCorsOrNet ? 'cors_or_network' : rawMsg),
-          attempts: attempt + 1,
-        });
-        throw e;
-      }
-    }
-  }
-
-  // Unreachable in practice — loop either returns or throws. Keep TS happy.
-  if (res) return res;
-  throw lastErr;
+      handle401(response.status);
+    },
+    onFinalError: (error, attempts) => {
+      // 外部主动取消是调用方的控制流，不重试也不上报 api_error。
+      if (externalSignal?.aborted) return;
+      const rawMsg = error instanceof Error ? error.message : String(error);
+      const isAbort = error instanceof Error && (error.name === 'AbortError' || /aborted|abort/i.test(rawMsg));
+      const isCorsOrNet = error instanceof TypeError && /failed to fetch|fetch/i.test(rawMsg);
+      track(EVENTS.API_ERROR, {
+        endpoint: safeApiEndpoint(path),
+        status: 0,
+        error_msg: isAbort
+          ? `timeout_${timeoutMs}ms`
+          : (isCorsOrNet ? 'cors_or_network' : 'request_error'),
+        attempts,
+      });
+    },
+  });
 }
 
 export interface ItemsQuery {
-  // "blog,podcast" 为「官方新闻」合并频道哨兵值：buildQuery 透传为 source_type=blog,podcast，
+  // "blog,podcast" 为「官方新闻」合并频道哨兵值：buildItemsPath 规范化为 source_type=blog,podcast，
   // worker handleItems 按逗号 split 过滤（见设计文档 §10）。
   source_type?: SourceType | SourceType[] | "blog,podcast";
   since?: string;
@@ -216,44 +209,45 @@ export interface ItemsQuery {
   form?: "online" | "offline";
 }
 
-function buildQuery(params: Record<string, unknown>): string {
-  const qs = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v === undefined || v === null) continue;
-    if (Array.isArray(v)) {
-      qs.set(k, v.join(","));
-    } else {
-      qs.set(k, String(v));
+export type FetchItemsOptions = {
+  purpose?: RequestPurpose;
+};
+
+export function fetchItems(
+  query: ItemsQuery = {},
+  { purpose = "critical" }: FetchItemsOptions = {},
+): Promise<ItemsResponse> {
+  const path = buildItemsPath(query);
+  return runListSingleFlight(path, purpose, (readPurpose) => {
+    const fetchFromNetwork = async (): Promise<ItemsResponse> => {
+      const res = await apiFetch(path, { requestPurpose: readPurpose });
+      if (!res.ok) throw new Error(`fetchItems failed: ${res.status}`);
+      return res.json();
+    };
+    // index.html 在 JS 执行前启动默认 x_list。消费也必须在 single-flight factory
+    // 内，React StrictMode 的 setup-cleanup-setup 才会复用同一个 Promise。
+    const w = window as unknown as {
+      __feedPrefetch?: {
+        path: string;
+        promise: Promise<ItemsResponse | null>;
+        cancel: () => Promise<void>;
+      } | null;
+    };
+    const pf = w.__feedPrefetch;
+    if (pf && pf.path === path) {
+      w.__feedPrefetch = null;
+      return consumeFeedPrefetch(pf, fetchFromNetwork);
     }
-  }
-  const s = qs.toString();
-  return s ? `?${s}` : "";
+    return fetchFromNetwork();
+  });
 }
 
-export async function fetchItems(query: ItemsQuery = {}): Promise<ItemsResponse> {
-  const path = `/api/items${buildQuery(query as Record<string, unknown>)}`;
-  // 首屏冷启动:index.html 已在 JS 加载阶段并行预取默认 x_list feed。path 严格匹配就直接用
-  // 预取结果,省掉「等 JS 跑完才发请求」的串行等待;只用一次,失败/不匹配自动回退正常请求。
-  const w = window as unknown as {
-    __feedPrefetch?: { path: string; promise: Promise<ItemsResponse | null> } | null;
-  };
-  const pf = w.__feedPrefetch;
-  if (pf && pf.path === path) {
-    w.__feedPrefetch = null;
-    try {
-      // 跟 4.5s 超时赛跑:WeChat WebView 偶尔会把 fetch 丢掉永不 resolve,
-      // 那样直接 await 会把 feed 永久挂住 —— 超时就回退到带重试的正常请求。
-      const data = await Promise.race([
-        pf.promise,
-        new Promise<null>((r) => setTimeout(() => r(null), 4500)),
-      ]);
-      if (data && Array.isArray(data.items)) return data;
-    } catch {
-      /* fall through to normal fetch */
-    }
-  }
-  const res = await apiFetch(path);
-  if (!res.ok) throw new Error(`fetchItems failed: ${res.status}`);
+export async function fetchFeedManifest(signal?: AbortSignal): Promise<FeedManifest> {
+  const res = await apiFetch('/api/feed-manifest', {
+    requestPurpose: "background",
+    signal,
+  });
+  if (!res.ok) throw new Error(`fetchFeedManifest failed: ${res.status}`);
   return res.json();
 }
 
@@ -264,12 +258,14 @@ export async function fetchSources(): Promise<Source[]> {
   return data.sources || [];
 }
 
-export async function fetchItem(id: string): Promise<ItemDetailResponse> {
+export function fetchItem(id: string): Promise<ItemDetailResponse> {
   const path = `/api/items/${encodeURIComponent(id)}`;
-  const res = await apiFetch(path);
-  if (res.status === 404) throw new ItemNotFoundError(id);
-  if (!res.ok) throw new Error(`fetchItem failed: ${res.status}`);
-  return res.json();
+  return runDetailSingleFlight(id, async () => {
+    const res = await apiFetch(path);
+    if (res.status === 404) throw new ItemNotFoundError(id);
+    if (!res.ok) throw new Error(`fetchItem failed: ${res.status}`);
+    return res.json();
+  });
 }
 
 // PR6.6 on-demand refresh — drawer 打开时调一次。worker 端 KV throttle 5min。

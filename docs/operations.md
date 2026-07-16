@@ -9,6 +9,16 @@
 
 历史：2026-06-25（微博科技热搜源接入：HK RSSHub 新增 `/weibo/hot/tech`，Worker registry 新增 `blog:weibo-hot-tech`，cookie 只放 `.secrets/aifeeds-prod.env` 的 `WEIBO_COOKIES` 并由 Worker 以 `X-Weibo-Cookie` 转发；缺/失效 cookie 返回 401/403 并 PushDeer 告警。源总数 38→39；真实 200 验收需先补 `WEIBO_COOKIES`）
 
+历史：2026-07-11（增加香港 nginx 上游 connect/header/response 分段性能日志的版本化配置与审批后部署/轮转/回滚手册；本次未部署）
+
+历史：2026-07-14（GL-a 首次操作因生产缺少 logrotate 留在 `rollback_failed(prepared)`；本地完成 initialized-candidate 正常恢复修复和可审计 exceptional recovery，独立恢复 10/10、冻结矩阵 135/135 全绿；生产事务尚未按新 helper 对账，禁止启动新 GL-a operation）
+
+历史：2026-07-15（旧 GL-a 已完成 exceptional recovery 并终态对账；新 operation `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 会把三个 upstream timing 序列化为空串后自动回滚。source/rollback 均为 `rolled_back`、14/14 runtime cleanup 完成、site 恢复原 SHA、运行时残留为 0。validator 现仅在缓存 HIT/STALE/UPDATING/REVALIDATED 分支接受数字、`-` 或空串；非缓存与 API 仍必须为数字。再次执行须重新 clean G0、冻结新清单并单独批准）
+
+历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
+
+历史：2026-07-11（新增同源 API 的本地构建开关、版本化 nginx location 与 perf-staging/生产切换回滚手册；当前未部署）
+
 历史：2026-05-07（ClawHub v0 接入：第 4 个数据源，全云端无本地 launchd。Phase 1+2（fetchList / enrichPending）、`metrics_snapshots_clawhub` 表、`renderClawhubContent` SVG 模板、前端 `BrandClawhub` logo 都在这次落地）
 
 历史：2026-05-06（email 验证码登录上线：Resend HTTPS API + disposable 黑名单 + MX DoH 预校验 + 100/天 + 3000/月 cap，备案前 email 是主登录路径；SMS 通道保留 + `ENABLE_SMS_LOGIN=false` flag 隐藏，备案后翻 flag 恢复双通道。详见下方「3.6. Resend Email 服务」节）
@@ -291,13 +301,14 @@ npx wrangler deploy
 | 层 | 文件 | 触发 | 作用 |
 |----|------|------|------|
 | PR 软门槛 | `.github/workflows/pr-validation.yml` | `pull_request` | tsc / build / smoke,UI 红叉**不阻断 merge**(GitHub Free 限制下自然如此) |
-| Deploy 硬防线 | `deploy-worker.yml` / `deploy-dashboard.yml` 内 `validate-before-deploy` job | `push: [main, staging]` | 跟 deploy job 间 `needs:`,validate fail → deploy abort + PushDeer 推手机 |
+| Deploy 硬防线 | `deploy-worker.yml` / `deploy-dashboard.yml` 内 `validate-before-deploy` job | `push: [main, staging]` / 手动 dispatch | 跟 deploy job 间 `needs:`,validate fail → deploy abort + PushDeer 推手机；按实际 prod/staging 目标互斥，更新的 run 会取消同目标旧 run，手动 prod 只接受 `refs/heads/main` |
 
 **关键脚本**:
 - `scripts/ci/admin-dashboard-smoke.sh` — 静态 grep 拦 `document.write </script>` 这类已知坑;playwright 断言等 BE 给 admin-dashboard.ts 加 `data-testid` 后填(P0.5 增量)
 - `scripts/ci/pushdeer-notify.sh` — 守卫 `PUSHDEER_ADMIN_KEYS` 缺时静默 skip(不让缺 secret 把 abort 路径自己 abort)
 
-**Known issue**:`deploy-worker.yml` 的 validate tsc step 当前 `if: false`,因为 worker `main` 上有 ~20 个 tsc baseline errors(HF 接入新代码:`hf-paper-pipeline.ts` × 16 / `index.ts` × 2 / `ar5iv.ts` × 2)。BE 清零后删那一行即启用。`pr-validation.yml` 里 tsc 正常硬跑挂 UI 红叉。
+**当前状态（2026-07-11）**：Worker TypeScript baseline 已清零；`deploy-worker.yml` 与
+`pr-validation.yml` 都会硬跑 `npx tsc --noEmit`，不得恢复 `if: false` 或用软失败绕过。
 
 **GH Actions secret 同步规范**(强制约定):
 
@@ -340,10 +351,11 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - 同理 `hf_paper:`(`/h/`)、`github:`(`/g/`)、`product_hunt:`(`/ph/`)、
   `clawhub:`(`/c/`)、`huodongxing:`(`/e/`)
 
-**c 端 `authStore.hydrate` 401 不再清 user**
+**c 端 nullable session discovery 与 `authStore.hydrate` 降级**
 (`dashboard/src/lib/authStore.ts`):
-- 老逻辑 `/api/auth/me` 401 立即清 user → 每次发版用户假掉登录态
-- 改成所有 hydrate 错误都保留 persisted user(乐观信任 localStorage)
+- 匿名 `GET /api/auth/me` 是公开的 session discovery，返回 `200 {"user":null}`，避免把正常匿名访问
+  记成浏览器控制台错误；需要登录的 subscription/feedback/logout 等接口仍保持 401
+- hydrate 的网络或服务错误保留 persisted user(乐观信任 localStorage)，正常的 `user:null` 则清空旧状态
 - 真 cookie 失效兜底:用户后续 action 仍会自然 401 → openLoginModal 弹登录
 
 **sharer 默认 profile 复用** (`dashboard/src/lib/defaultProfile.ts`):
@@ -429,9 +441,11 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 - `GET /sitemap.xml` 已改 sitemap-index；`GET /sitemap-<source>.xml`（超 5 万续 `-2 -3…`）为各源实际 URL 列表，正则见 `worker/src/seo-routes.ts` 的 `SITEMAP_SHARD_RE`
 - 主域经香港 nginx 转发：同上 regex location 已扩至含 `i/.*` 与 `sitemap-[a-z0-9-]+\.xml`（§6b 七续），权威副本 [`deploy/nginx/aifeeds-seo-location.conf`](../deploy/nginx/aifeeds-seo-location.conf)
 
-**`/img` 图片代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换）：
+**`/img` 图片代理与 `/media` 视频兼容代理**（2026-04-20 上线，2026-05-16 加 cf.image 边缘转换；
+2026-07-14 拆分视频路由）：
 - 前端 `dashboard/src/lib/utils.ts` 的 `proxyImg()` 统一路由白名单域名到此端点
-- 白名单：`pbs.twimg.com` / `abs.twimg.com` / `video.twimg.com` / `avatars.githubusercontent.com`（防被当开放代理滥用）
+- 前后端使用同一收敛方向的 host allowlist；旧 `force` 参数不再扩大白名单，未知 OG/CloudFront 图片
+  保持直连并由卡片 `onError` 稳定降级，防止生成必然 403 的 `/img` URL 或把端点变成开放代理
 - CDN 边缘缓存：`cacheTtl=86400` + `Cache-Control: max-age=604800, immutable`
 - 命中 GFW 封锁的 CN 用户借此恢复图片加载
 - **2026-05-16 边缘 transform**（CF 迁移阶段 2）：
@@ -439,7 +453,10 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
   - 查询参数：`?w=` resize 宽度（可选）/ `?q=` quality（默认 85）/ format=auto（按 Accept 自动 webp/avif）
   - prod 实测：avatar 28573B (460x460 jpeg) → 2532B (80x80, w=80) 省 91%；→ 18074B (400x400, w=400) 省 37%
   - ⚠️ format=auto 实测未强转 webp（仍返 jpeg），可能 CF cf.image 默认行为，后续视效果调整
-  - video（`video.twimg.com`）保持原反代 + Range 转发，不走 cf.image（CF 只支持图片 transform）
+  - 新前端只把 legacy `video.twimg.com` 发往专用 `/media`；该路由只接受这个精确 host，逐跳复验 redirect，
+    透传 Range/206、`Content-Range`、`Accept-Ranges` 并返回 `Cache-Control: no-store`，不走 cf.image
+  - `/img` 暂保留旧客户端 video 兼容，但新页面的 video `/img` 数量必须为 0；staging 与生产发布后都要用
+    0–1023 bytes smoke 验证实际返回 206/1024 bytes，防止重现 2026-06-09 的全量视频回源事故
   - zone toggle：OPS 2026-05-16 已 enable `image_resizing`（PATCH `/zones/{zone_id}/settings/image_resizing`）
 
 **`/api/items` 热度排序**（2026-04-21 上线）：
@@ -1087,6 +1104,1979 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 
 **VPS**：DMIT `HKG.AS3.EB.TINYv2`（CN2/CMI 优化线路，月付）。Ubuntu 24.04，**1 核 / 1G / 磁盘 20G**。IP `154.12.188.231`。SSH `ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231`（备用 key `~/.ssh/aifeeds_hk`）。配置文件：反代 `/etc/nginx/sites-available/aifeeds.conf`（原始备份 `aifeeds.conf.bak-20260602-063922`）、缓存 / 限流区 `/etc/nginx/conf.d/aifeeds-perf.conf`、fail2ban `/etc/fail2ban/jail.local`。TLS 用 Let's Encrypt（certbot 自动续期）。
 
+<!-- aifeeds-performance-log:start -->
+#### 上游分段性能日志（2026-07-15，GL-a / GL-b 修订版，最近一次生产尝试已自动回滚）
+
+**状态与根因**：本次提交版本化 performance log、logrotate、专用 systemd timer、三个安全检查器、
+事务安装器和本运行手册。首次 GL-a operation `20260714011642-a33e7d4d` 在 production 缺少
+`/usr/sbin/logrotate` 时已进入 `mutation_started`，自动回滚又因旧 helper 不理解“已初始化但尚未发布的
+rotation-state candidate”而停在 `rollback_failed(failed_from=prepared)`。live site 仍是 base、Nginx/front/API
+健康、全局 `logrotate.timer` 未启用；在旧事务生成 committed exceptional receipt 前，installer 必须持续
+返回 `recovery_required`，不得创建新 operation。2026-07-12 的受限只读复核还确认：
+
+- 生效入口是 `/etc/nginx/sites-enabled/aifeeds.conf`，精确指向
+  `/etc/nginx/sites-available/aifeeds.conf`；front/API/fonts 共 7 个直接 `proxy_pass`；
+- 目标 site 的 `access_log_directives=0`、`include_count=4`；四条 include 均为
+  `/etc/letsencrypt/options-ssl-nginx.conf`，该文件内 access_log/proxy_pass/request-id 均为 0；
+- 生产和 staging API 均尚未回显 `X-Request-Id`、`Server-Timing`、`Timing-Allow-Origin`。实现只在
+  当前未发布分支，不能要求 GL 在 Worker 部署前完成响应头 join；
+- VPS 20 GB 磁盘剩余约 11.8 GB；现有 access log 自 2026-06-02 起累计约 190 MB/73 万行；
+  `logrotate.timer` 未启用、cron 未运行且没有 logrotate 状态文件，单放一份 logrotate 配置不会自动执行。
+
+2026-07-15 已用 exceptional authority/receipt 完成旧事务终态对账。后续 operation
+`20260715165904-2d2f27fe` 完成 site 精确七行变更、三次 front/API 200 probe 与 JSON schema 写入，但生产
+`upstream_cache_status=HIT` 的 front 行把 `upstream_connect_time`、`upstream_header_time`、
+`upstream_response_time` 记录为 `""`，而旧 validator 只接受数字或 `"-"`，因此安全触发自动回滚。
+终态 source/rollback 均为 `rolled_back`，14/14 runtime cleanup 完成，site、nginx 与 timer 均恢复，运行时和
+candidate 残留为 0。修订后的 validator 只在缓存命中类状态接受空串；非缓存 front 和 API 仍要求数字 timing。
+
+因此 Task 3 被拆成两个可证明的 gate：
+
+- **GL-a（production VPS/nginx 写）**：安装 JSONL、同层 upstream request-id header、64 KiB/5 秒日志缓冲、
+  专用五分钟 timer；验证唯一 probe、字段 schema、精确 2xx、强制轮转后新 inode 继续收日志。GL-a 不要求
+  尚未上线的 Worker 回显。
+- **GL-b（G1 + G7b 后远端只读）**：在 `perf-staging.ai-feeds.com` 上验证 staging Worker 回显与
+  nginx/Worker request-id join；五设备 browser 扩展属于 G8 的 10.1c。不得把 Worker join 伪装成 GL-a 已通过，
+  也不得为通过 GL-a
+  提前部署生产 Worker或由 nginx 伪造响应头。
+
+VPS 上没有 `staging.ai-feeds.com` / `staging-api.ai-feeds.com` server block，它们不经过香港 VPS。
+GL-b 只能在隔离 perf-staging 拓扑形成后执行。
+
+**依赖硬门禁**：任何新 GL-a 写操作前，必须先证明 `jq` 可执行，并证明 `/usr/sbin/logrotate` 是
+非 symlink、非空、`root:root 0755` 的 regular file。依赖检查位于新 journal/backup/candidate 首次写入前；
+缺失或 metadata 不符统一以 rc 69 和
+`ERROR dependency=logrotate path=/usr/sbin/logrotate` 停止。只启用本项目的
+`aifeeds-performance-logrotate.timer`；系统全局 `logrotate.timer` 必须保持 inactive/disabled，安装依赖不得
+把它作为附带动作启用。
+
+**配置与隐私**：`deploy/nginx/aifeeds-performance-log.conf` 安装到
+`/etc/nginx/conf.d/aifeeds-performance-log.conf`，只含 http-context 合法的 `map`、`log_format` 和条件日志：
+
+```nginx
+access_log /var/log/nginx/aifeeds-performance.jsonl aifeeds_performance buffer=64k flush=5s if=$aifeeds_performance_loggable;
+```
+
+host map 只允许 `ai-feeds.com`、`api.ai-feeds.com`、`fonts.ai-feeds.com` 和未来的
+`perf-staging.ai-feeds.com`。安全 URI map 只保留固定 route bucket；item id、资源 key、分享 token 和
+任何未知路径都归一化为 `:id`、`:asset`、`:token` 或 `/:other`。原始 User-Agent 也不落盘，只映射为
+`bot/iphone/ipad/android/desktop/other`。因此日志不含客户端可控 path/UA 原文、query、Cookie、
+Authorization、referer、回源密钥、手机号或邮箱。`X-Aifeeds-Perf-Probe` 只有严格匹配
+`upstream-<10~16 位时间戳>-<8 位十六进制>` 才进入日志。粗粒度 client class 仍按受限运维数据处理，
+文件固定为 `0640 www-data:adm`，每日轮转、`maxsize 50M`、保留 14 份；专用 timer 每五分钟检查，
+root、`adm` 组运维人员与文件 owner `www-data` 服务账号也可读，其他系统账号不可读；不会启用会
+影响其他服务的全局 logrotate timer。规则安装到 `/etc/aifeeds-performance-logrotate.conf`，刻意避开
+全局 `/etc/logrotate.d` include，防止全局与专用 timer 使用不同 state 对同一日志并发轮转。安装前还
+硬性要求 `/var/log/nginx` 至少有 5 GiB 可用空间和 10 万个可用 inode；两项数值写入 summary。
+
+每个含直接 `proxy_pass` 的 location 必须在原有同层 headers 旁新增且仅新增：
+
+```nginx
+proxy_set_header X-Request-Id $request_id;
+```
+
+版本化工具分别证明：插入前没有该 header、proxy 总数精确为 7、四条 include 只有已复核 Certbot 文件、
+server/location 没有低层 `access_log`、每个 proxy location 恰有一个合法 header，以及 candidate 相对
+backup 的唯一变化就是 7 行 header。结构检查器安装为
+`/usr/local/sbin/aifeeds-check-nginx-request-id`；任何一项不符都在 reload 前停止。
+
+安装器在读取远端状态前先持有固定 root-owned `/run/aifeeds-performance-log.lock`，执行非阻塞
+`flock -n 9`；
+并发执行、误双击或 SSH 重试只能有一个进入，另一个以 `deployment_lock=busy` 停止。logrotate service
+使用 `StateDirectory=aifeeds-performance-logrotate`，状态位于
+`/var/lib/aifeeds-performance-logrotate/status`；必须实际 `systemctl start` 一次 service 并验证
+`Result=success` 与非空 state，不能只看 timer 显示 active。
+随后用稀疏 `truncate` 把测试 base log 提升到刚超过 50 MiB，再由同一个受 sandbox 约束的 service 实际
+完成一次 maxsize rotation；必须验证 inode 改变和新的 `systemd_rotation_probe` 写入，避免只证明 state
+文件可创建却没证明 `ProtectSystem`/`ReadWritePaths` 下能 rename、USR1 与 reopen。
+
+**GL-a 部署（修订后必须重新取得单独批准）**：从 clean G0 commit 创建私有包并生成 Linux 可校验的
+manifest。批准记录必须同时写明低流量执行窗口、实际执行人、独立 rollback owner，以及
+`rollback_failed` 时升级的 on-call 联系人；任一空缺都不执行。不得使用固定 `/tmp` 文件名：
+
+```bash
+set -eu
+set -o pipefail
+umask 077
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+. "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+G0_COMMIT="$(cat "$EVIDENCE/commit.txt")"
+test "$G0_COMMIT" = "$(git rev-parse HEAD)"
+printf '%s' "$G0_COMMIT" | grep -Eq '^[a-f0-9]{40}$'
+test -z "$(git status --porcelain)"
+cd "$REPO_ROOT"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+publish_local_file_no_replace() {
+  local source=$1 destination=$2 expected_dev=$3 expected_ino=$4
+  test "$(dirname "$source")" = "$(dirname "$destination")"
+  python3 - "$source" "$destination" "$expected_dev" "$expected_ino" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+source, destination = map(os.fsencode, sys.argv[1:3])
+expected_dev, expected_ino = map(int, sys.argv[3:])
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (expected_dev, expected_ino):
+    raise RuntimeError("local evidence source identity changed")
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform == "darwin":
+    RENAME_EXCL = 0x00000004
+    renamex_np = libc.renamex_np
+    renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    renamex_np.restype = ctypes.c_int
+    result = renamex_np(source, destination, RENAME_EXCL)
+elif sys.platform.startswith("linux"):
+    AT_FDCWD = -100
+    RENAME_NOREPLACE = 1
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(AT_FDCWD, source, AT_FDCWD, destination, RENAME_NOREPLACE)
+else:
+    raise SystemExit(f"unsupported no-replace rename platform: {sys.platform}")
+if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), os.fsdecode(destination))
+after = os.lstat(destination)
+if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+    raise RuntimeError("published local evidence identity changed")
+parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+}
+remove_owned_local_tmp() {
+  local path=$1 expected_dev=$2 expected_ino=$3
+  python3 - "$path" "$expected_dev" "$expected_ino" <<'PY'
+import os
+import stat
+import sys
+
+path, expected_dev, expected_ino = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+except FileNotFoundError:
+    raise SystemExit(0)
+try:
+    value = os.fstat(descriptor)
+    current = os.lstat(path)
+    if not stat.S_ISREG(value.st_mode) or not stat.S_ISREG(current.st_mode):
+        raise RuntimeError("local evidence tmp is not regular")
+    if (value.st_dev, value.st_ino) != (expected_dev, expected_ino):
+        raise RuntimeError("local evidence tmp descriptor identity changed")
+    if (current.st_dev, current.st_ino) != (expected_dev, expected_ino):
+        raise RuntimeError("local evidence tmp pathname identity changed")
+finally:
+    os.close(descriptor)
+os.unlink(path)
+parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+}
+OPERATION_ID_FILE="$EVIDENCE/gl-a-operation-id.txt"
+if [ ! -e "$OPERATION_ID_FILE" ] && [ ! -L "$OPERATION_ID_FILE" ]; then
+  OPERATION_ID_TMP="$(mktemp "$EVIDENCE/.gl-a-operation-id.XXXXXX")"
+  printf '%s\n' "$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 4)" > "$OPERATION_ID_TMP"
+  chmod 0600 "$OPERATION_ID_TMP"
+  mv -f "$OPERATION_ID_TMP" "$OPERATION_ID_FILE"
+fi
+test -f "$OPERATION_ID_FILE"
+test ! -L "$OPERATION_ID_FILE"
+test "$(stat -f '%u' "$OPERATION_ID_FILE")" = "$(id -u)"
+test "$(stat -f '%Lp' "$OPERATION_ID_FILE")" = 600
+OPERATION_ID="$(cat "$OPERATION_ID_FILE")"
+printf '%s' "$OPERATION_ID" | grep -Eq '^[0-9]{14}-[a-f0-9]{8}$'
+IMMUTABLE_ROLLBACK_HELPER="$EVIDENCE/gl-a-rollback-helper-${OPERATION_ID}.sh"
+if [ ! -e "$IMMUTABLE_ROLLBACK_HELPER" ] && [ ! -L "$IMMUTABLE_ROLLBACK_HELPER" ]; then
+  install -m 0600 deploy/nginx/rollback-aifeeds-performance-log.sh \
+    "$IMMUTABLE_ROLLBACK_HELPER"
+fi
+test -f "$IMMUTABLE_ROLLBACK_HELPER"
+test ! -L "$IMMUTABLE_ROLLBACK_HELPER"
+test "$(stat -f '%u' "$IMMUTABLE_ROLLBACK_HELPER")" = "$(id -u)"
+test "$(stat -f '%Lp' "$IMMUTABLE_ROLLBACK_HELPER")" = 600
+cmp -s deploy/nginx/rollback-aifeeds-performance-log.sh "$IMMUTABLE_ROLLBACK_HELPER"
+ROLLBACK_HELPER_SHA256="$(shasum -a 256 "$IMMUTABLE_ROLLBACK_HELPER" | awk '{print $1}')"
+printf '%s' "$ROLLBACK_HELPER_SHA256" | grep -Eq '^[a-f0-9]{64}$'
+UPLOAD="$(mktemp -d "$EVIDENCE/gl-a-upload.XXXXXX")"
+chmod 0700 "$UPLOAD"
+
+install -m 0600 deploy/nginx/aifeeds-performance-log.conf "$UPLOAD/"
+install -m 0600 deploy/nginx/aifeeds-performance.logrotate "$UPLOAD/"
+install -m 0600 deploy/nginx/check-nginx-request-id.py "$UPLOAD/"
+install -m 0600 deploy/nginx/verify-nginx-request-id-diff.py "$UPLOAD/"
+install -m 0600 deploy/nginx/insert-nginx-request-id.py "$UPLOAD/"
+install -m 0600 deploy/nginx/install-aifeeds-performance-log.sh "$UPLOAD/"
+install -m 0600 "$IMMUTABLE_ROLLBACK_HELPER" \
+  "$UPLOAD/rollback-aifeeds-performance-log.sh"
+install -m 0600 deploy/systemd/aifeeds-performance-logrotate.service "$UPLOAD/"
+install -m 0600 deploy/systemd/aifeeds-performance-logrotate.timer "$UPLOAD/"
+(
+  cd "$UPLOAD"
+  shasum -a 256 \
+    aifeeds-performance-log.conf aifeeds-performance.logrotate \
+    check-nginx-request-id.py verify-nginx-request-id-diff.py insert-nginx-request-id.py \
+    install-aifeeds-performance-log.sh rollback-aifeeds-performance-log.sh \
+    aifeeds-performance-logrotate.service aifeeds-performance-logrotate.timer \
+    > SHA256SUMS
+)
+
+REMOTE_STAGE=''
+INSTALL_OUTPUT_TMP="$(mktemp "$EVIDENCE/.gl-a-install-summary.XXXXXX")"
+INSTALL_OUTPUT_FINAL="$EVIDENCE/gl-a-install-output-${OPERATION_ID}.txt"
+INSTALL_OUTPUT_TMP_DEV="$(stat -f '%d' "$INSTALL_OUTPUT_TMP")"
+INSTALL_OUTPUT_TMP_INO="$(stat -f '%i' "$INSTALL_OUTPUT_TMP")"
+INSTALL_OUTPUT_PUBLISH_ATTEMPTED=0
+LOCAL_SUMMARY_TMP="$(mktemp "$EVIDENCE/.gl-a-summary.XXXXXX")"
+LOCAL_SUMMARY_FINAL="$EVIDENCE/gl-a-summary.json"
+LOCAL_SUMMARY_TMP_DEV="$(stat -f '%d' "$LOCAL_SUMMARY_TMP")"
+LOCAL_SUMMARY_TMP_INO="$(stat -f '%i' "$LOCAL_SUMMARY_TMP")"
+LOCAL_SUMMARY_PUBLISH_ATTEMPTED=0
+cleanup_remote_stage_best_effort() {
+  if [ -n "$INSTALL_OUTPUT_TMP" ]; then
+    if [ "$INSTALL_OUTPUT_PUBLISH_ATTEMPTED" = 1 ]; then
+      printf 'install transcript publish collision; preserved owned tmp and unknown destination: %s %s\n' \
+        "$INSTALL_OUTPUT_TMP" "$INSTALL_OUTPUT_FINAL" >&2
+    else
+      remove_owned_local_tmp "$INSTALL_OUTPUT_TMP" "$INSTALL_OUTPUT_TMP_DEV" \
+        "$INSTALL_OUTPUT_TMP_INO" || printf 'preserved unowned install transcript tmp: %s\n' \
+        "$INSTALL_OUTPUT_TMP" >&2
+    fi
+  fi
+  if [ -n "$LOCAL_SUMMARY_TMP" ]; then
+    if [ "$LOCAL_SUMMARY_PUBLISH_ATTEMPTED" = 1 ]; then
+      printf 'forward summary publish collision; preserved owned tmp and unknown destination: %s %s\n' \
+        "$LOCAL_SUMMARY_TMP" "$LOCAL_SUMMARY_FINAL" >&2
+    else
+      remove_owned_local_tmp "$LOCAL_SUMMARY_TMP" "$LOCAL_SUMMARY_TMP_DEV" \
+        "$LOCAL_SUMMARY_TMP_INO" || printf 'preserved unowned forward summary tmp: %s\n' \
+        "$LOCAL_SUMMARY_TMP" >&2
+    fi
+  fi
+  case "$REMOTE_STAGE" in
+    /run/aifeeds-performance-log.*)
+      ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+        "rm -rf -- '$REMOTE_STAGE'" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+trap cleanup_remote_stage_best_effort EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+REMOTE_STAGE="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  'set -eu; umask 077; stage=$(mktemp -d /run/aifeeds-performance-log.XXXXXX); chmod 0700 "$stage"; printf "%s\n" "$stage"')"
+case "$REMOTE_STAGE" in /run/aifeeds-performance-log.*) ;; *) exit 1 ;; esac
+scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem "$UPLOAD"/* \
+  root@154.12.188.231:"$REMOTE_STAGE/"
+set +e
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "cd '$REMOTE_STAGE' && sha256sum -c SHA256SUMS && \
+   timeout --signal=TERM --kill-after=30s 10m bash install-aifeeds-performance-log.sh \
+     '$REMOTE_STAGE' '$OPERATION_ID' '$G0_COMMIT'" 2>&1 \
+  | tee "$INSTALL_OUTPUT_TMP"
+PIPE_RESULTS=("${PIPESTATUS[@]}")
+set -e
+test "${#PIPE_RESULTS[@]}" -eq 2
+INSTALL_SSH_RC="${PIPE_RESULTS[0]}"
+INSTALL_TEE_RC="${PIPE_RESULTS[1]}"
+chmod 0600 "$INSTALL_OUTPUT_TMP"
+INSTALL_OUTPUT_PUBLISH_ATTEMPTED=1
+publish_local_file_no_replace "$INSTALL_OUTPUT_TMP" "$INSTALL_OUTPUT_FINAL" \
+  "$INSTALL_OUTPUT_TMP_DEV" "$INSTALL_OUTPUT_TMP_INO"
+INSTALL_OUTPUT_TMP=''
+INSTALL_OUTPUT_PUBLISH_ATTEMPTED=0
+if [ "$INSTALL_TEE_RC" -ne 0 ]; then exit "$INSTALL_TEE_RC"; fi
+if [ "$INSTALL_SSH_RC" -ne 0 ]; then
+  printf 'GL-a install failed; transcript preserved at %s\n' "$INSTALL_OUTPUT_FINAL" >&2
+  exit "$INSTALL_SSH_RC"
+fi
+scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231:"$REMOTE_STAGE/gl-a-summary.json" "$LOCAL_SUMMARY_TMP"
+chmod 0600 "$LOCAL_SUMMARY_TMP"
+REMOTE_ROTATION_ANCHOR="/var/backups/aifeeds-performance-log/rotation-anchor-${OPERATION_ID}.json"
+jq -e --arg operation_id "$OPERATION_ID" --arg g0_commit "$G0_COMMIT" \
+  --arg rollback_helper_sha256 "$ROLLBACK_HELPER_SHA256" '
+  def positive_integer: type == "number" and . > 0 and . == floor;
+  def rotation_anchor_identity_is_valid:
+    .rotation_anchor_identity != null and
+    ((.rotation_anchor_identity | keys | sort) ==
+      ["dev","gid","ino","mode","path","sha256","size","state","uid"]) and
+    .rotation_anchor_identity.state == "sealed" and
+    .rotation_anchor_identity.path ==
+      ("/var/backups/aifeeds-performance-log/rotation-anchor-" + $operation_id + ".json") and
+    (.rotation_anchor_identity.sha256 | test("^[a-f0-9]{64}$")) and
+    (.rotation_anchor_identity.size | positive_integer) and
+    .rotation_anchor_identity.uid == 0 and .rotation_anchor_identity.gid == 0 and
+    .rotation_anchor_identity.mode == "600" and
+    (.rotation_anchor_identity.dev | positive_integer) and
+    (.rotation_anchor_identity.ino | positive_integer);
+  def runtime_inventory_is_valid:
+    (.runtime_artifacts | type == "array") and (.runtime_artifacts | length) == 8 and
+    ([.runtime_artifacts[].name] | sort) ==
+      ["checker","diff_checker","format","inserter","log","rotate","service","timer"] and
+    ([.runtime_artifacts[].final] | length) ==
+      ([.runtime_artifacts[].final] | unique | length) and
+    ([.runtime_artifacts[].candidate] | length) ==
+      ([.runtime_artifacts[].candidate] | unique | length) and
+    all(.runtime_artifacts[];
+      (keys | sort) == ["candidate","dev","final","gid","ino","mode","name","sha256","uid"] and
+      (.candidate | test("[.]candidate-gl-a-" + $operation_id + "$")) and
+      (.sha256 | test("^[a-f0-9]{64}$")) and (.mode | test("^[0-7]{3,4}$")) and
+      (.uid | type == "number" and . >= 0 and . == floor) and
+      (.gid | type == "number" and . >= 0 and . == floor) and
+      (.dev | positive_integer) and (.ino | positive_integer)) and
+    .runtime_artifacts_sealed == true;
+  def rotation_snapshot_is_valid:
+    .rotation_state_snapshot != null and
+    ((.rotation_state_snapshot | keys | sort) ==
+      ["generation","ledger","status","tail_record_sha256"]) and
+    (.rotation_state_snapshot.generation | type == "number" and . >= 0 and . == floor) and
+    (.rotation_state_snapshot.tail_record_sha256 | test("^[a-f0-9]{64}$")) and
+    ((.rotation_state_snapshot.ledger | keys | sort) ==
+      ["dev","gid","ino","mode","path","sha256","size","uid"]) and
+    .rotation_state_snapshot.ledger.path == .rotation_state_identity.provenance.path and
+    .rotation_state_snapshot.ledger.dev == .rotation_state_identity.provenance.dev and
+    .rotation_state_snapshot.ledger.ino == .rotation_state_identity.provenance.ino and
+    .rotation_state_snapshot.ledger.uid == .rotation_state_identity.provenance.uid and
+    .rotation_state_snapshot.ledger.gid == .rotation_state_identity.provenance.gid and
+    .rotation_state_snapshot.ledger.mode == .rotation_state_identity.provenance.mode and
+    (.rotation_state_snapshot.ledger.sha256 | test("^[a-f0-9]{64}$")) and
+    (.rotation_state_snapshot.ledger.size | positive_integer) and
+    (.rotation_state_snapshot.status == null or
+      (((.rotation_state_snapshot.status | keys | sort) ==
+       ["dev","gid","ino","mode","path","sha256","uid"]) and
+       .rotation_state_snapshot.status.path == "/var/lib/aifeeds-performance-logrotate/status" and
+       (.rotation_state_snapshot.status.uid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.gid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.mode | test("^[0-7]{3,4}$")) and
+       (.rotation_state_snapshot.status.sha256 | test("^[a-f0-9]{64}$")) and
+       (.rotation_state_snapshot.status.dev | positive_integer) and
+       (.rotation_state_snapshot.status.ino | positive_integer)));
+  def rotation_identity_is_valid:
+    .rotation_state_identity != null and
+    ((.rotation_state_identity | keys | sort) == ["directory","files","provenance"]) and
+    ((.rotation_state_identity.directory | keys | sort) ==
+      ["candidate","dev","gid","ino","mode","path","uid"]) and
+    .rotation_state_identity.directory.path == "/var/lib/aifeeds-performance-logrotate" and
+    .rotation_state_identity.directory.candidate ==
+      ("/var/lib/aifeeds-performance-logrotate.candidate-gl-a-" + $operation_id) and
+    .rotation_state_identity.directory.uid == 0 and .rotation_state_identity.directory.gid == 0 and
+    .rotation_state_identity.directory.mode == "750" and
+    (.rotation_state_identity.directory.dev | positive_integer) and
+    (.rotation_state_identity.directory.ino | positive_integer) and
+    .rotation_state_identity.files == [] and
+    ((.rotation_state_identity.provenance | keys | sort) ==
+      ["dev","genesis_record_sha256","gid","ino","mode","path","uid"]) and
+    .rotation_state_identity.provenance.path ==
+      "/var/lib/aifeeds-performance-logrotate/rotation-provenance.jsonl" and
+    .rotation_state_identity.provenance.uid == 0 and .rotation_state_identity.provenance.gid == 0 and
+    .rotation_state_identity.provenance.mode == "600" and
+    (.rotation_state_identity.provenance.dev | positive_integer) and
+    (.rotation_state_identity.provenance.ino | positive_integer) and
+    (.rotation_state_identity.provenance.genesis_record_sha256 | test("^[a-f0-9]{64}$")) and
+    rotation_snapshot_is_valid;
+  .schema == 1 and .gate == "GL-a" and .operation_id == $operation_id and
+  .g0_commit == $g0_commit and .rollback_helper_sha256 == $rollback_helper_sha256 and
+  ((.artifacts_sha256 | keys) == ["checker","diff_checker","format","inserter","rotate","service","timer"]) and
+  all(.artifacts_sha256[]; type == "string" and test("^[a-f0-9]{64}$")) and
+  ((.artifact_candidates | keys) == ["checker","diff_checker","format","inserter","log","rotate","service","timer"]) and
+  all(.artifact_candidates[]; type == "string" and test("[.]candidate-gl-a-" + $operation_id + "$")) and
+  .rollback_candidate == ("/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-" + $operation_id) and
+  (.site_backup | test("^/var/backups/aifeeds-performance-log/aifeeds[.]conf[.]bak-perf-[0-9]{14}-[a-f0-9]{8}$")) and
+  (.site_backup_sha256 | test("^[a-f0-9]{64}$")) and
+  ((.site_backup_identity | keys | sort) ==
+    ["dev","gid","ino","mode","path","sha256","staging_gid","staging_mode","staging_uid","uid"]) and
+  .site_backup_identity.path == .site_backup and
+  .site_backup_identity.sha256 == .site_backup_sha256 and
+  .site_backup_identity.uid == .original_site_uid and
+  .site_backup_identity.gid == .original_site_gid and
+  .site_backup_identity.mode == .original_site_mode and
+  .site_backup_identity.staging_uid == 0 and .site_backup_identity.staging_gid == 0 and
+  .site_backup_identity.staging_mode == "600" and
+  (.site_backup_identity.dev | type == "number" and . > 0 and . == floor) and
+  (.site_backup_identity.ino | type == "number" and . > 0 and . == floor) and
+  (.installed_site_sha256 | test("^[a-f0-9]{64}$")) and
+  (.transaction_journal | test("^/var/backups/aifeeds-performance-log/transaction-[0-9]{14}-[a-f0-9]{8}[.]json$")) and
+  (.transaction_journal_sha256 | test("^[a-f0-9]{64}$")) and
+  (.original_site_uid | type == "number") and (.original_site_gid | type == "number") and
+  (.original_site_mode | test("^[0-7]{3,4}$")) and
+  (.available_kib >= 5242880) and (.available_inodes >= 100000) and
+  .front_status == 200 and .api_status == 200 and
+  .json_schema == true and .unique_probe == true and .rotation_probe == true and
+  .systemd_rotation_probe == true and
+  .nginx_active == true and .timer_active == true and .worker_join == "deferred_to_GL-b" and
+  runtime_inventory_is_valid and rotation_identity_is_valid and rotation_anchor_identity_is_valid' \
+  "$LOCAL_SUMMARY_TMP" >/dev/null
+ROTATION_ANCHOR_DEV="$(jq -er '.rotation_anchor_identity.dev' "$LOCAL_SUMMARY_TMP")"
+ROTATION_ANCHOR_INO="$(jq -er '.rotation_anchor_identity.ino' "$LOCAL_SUMMARY_TMP")"
+ROTATION_ANCHOR_SIZE="$(jq -er '.rotation_anchor_identity.size' "$LOCAL_SUMMARY_TMP")"
+ROTATION_ANCHOR_SHA256="$(jq -er '.rotation_anchor_identity.sha256' "$LOCAL_SUMMARY_TMP")"
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "set -eu; test -f '$REMOTE_ROTATION_ANCHOR'; test ! -L '$REMOTE_ROTATION_ANCHOR'; \
+   test \"\$(stat -c '%u %g %a %d %i %s' '$REMOTE_ROTATION_ANCHOR')\" = \
+     '0 0 600 $ROTATION_ANCHOR_DEV $ROTATION_ANCHOR_INO $ROTATION_ANCHOR_SIZE'; \
+   test \"\$(timeout 15s sha256sum '$REMOTE_ROTATION_ANCHOR' | awk '{print \$1}')\" = \
+     '$ROTATION_ANCHOR_SHA256'"
+LOGROTATE_RUNTIME_ENTRY="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231 "timeout 15s jq -cS '.logrotate' '$REMOTE_ROTATION_ANCHOR'")"
+jq -e '
+  (keys | sort) == ["dev","gid","ino","mode","path","sha256","size","uid"] and
+  .path == "/usr/sbin/logrotate" and .uid == 0 and .gid == 0 and .mode == "755" and
+  (.dev | type == "number" and . > 0 and . == floor) and
+  (.ino | type == "number" and . > 0 and . == floor) and
+  (.size | type == "number" and . > 0 and . == floor) and
+  (.sha256 | test("^[a-f0-9]{64}$"))' <<< "$LOGROTATE_RUNTIME_ENTRY" >/dev/null
+RECORDED_ROTATION_SNAPSHOT="$(jq -cS '.rotation_state_snapshot' "$LOCAL_SUMMARY_TMP")"
+CHECKER_RUNTIME_ENTRY="$(jq -cer '[.runtime_artifacts[] | select(.name == "checker")] |
+  if length == 1 then .[0] else error("checker identity") end' "$LOCAL_SUMMARY_TMP")"
+CONFIG_RUNTIME_ENTRY="$(jq -cer '[.runtime_artifacts[] | select(.name == "rotate")] |
+  if length == 1 then .[0] else error("config identity") end' "$LOCAL_SUMMARY_TMP")"
+CURRENT_ROTATION_SNAPSHOT="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231 \
+  "timeout 15s /usr/local/sbin/aifeeds-check-nginx-request-id rotation-verify \
+    '$OPERATION_ID' '$REMOTE_ROTATION_ANCHOR' \
+    '$ROTATION_ANCHOR_DEV' '$ROTATION_ANCHOR_INO' '$ROTATION_ANCHOR_SHA256' \
+    '$(jq -er '.dev' <<< "$CHECKER_RUNTIME_ENTRY")' \
+    '$(jq -er '.ino' <<< "$CHECKER_RUNTIME_ENTRY")' \
+    '$(jq -er '.sha256' <<< "$CHECKER_RUNTIME_ENTRY")' \
+    '$(jq -er '.dev' <<< "$CONFIG_RUNTIME_ENTRY")' \
+    '$(jq -er '.ino' <<< "$CONFIG_RUNTIME_ENTRY")' \
+    '$(jq -er '.sha256' <<< "$CONFIG_RUNTIME_ENTRY")' \
+    '$(jq -er '.dev' <<< "$LOGROTATE_RUNTIME_ENTRY")' \
+    '$(jq -er '.ino' <<< "$LOGROTATE_RUNTIME_ENTRY")' \
+    '$(jq -er '.sha256' <<< "$LOGROTATE_RUNTIME_ENTRY")'")"
+jq -e --argjson recorded "$RECORDED_ROTATION_SNAPSHOT" '
+  .generation >= $recorded.generation and
+  .ledger.path == $recorded.ledger.path and
+  .ledger.dev == $recorded.ledger.dev and .ledger.ino == $recorded.ledger.ino and
+  .ledger.uid == $recorded.ledger.uid and .ledger.gid == $recorded.ledger.gid and
+  .ledger.mode == $recorded.ledger.mode and
+  (.ledger.sha256 | test("^[a-f0-9]{64}$")) and (.ledger.size | type == "number" and . > 0) and
+  (.tail_record_sha256 | test("^[a-f0-9]{64}$"))' <<< "$CURRENT_ROTATION_SNAPSHOT" >/dev/null
+LOCAL_SUMMARY_PUBLISH_ATTEMPTED=1
+publish_local_file_no_replace "$LOCAL_SUMMARY_TMP" "$LOCAL_SUMMARY_FINAL" \
+  "$LOCAL_SUMMARY_TMP_DEV" "$LOCAL_SUMMARY_TMP_INO"
+LOCAL_SUMMARY_TMP=''
+LOCAL_SUMMARY_PUBLISH_ATTEMPTED=0
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "case '$REMOTE_STAGE' in /run/aifeeds-performance-log.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac"
+REMOTE_STAGE=''
+trap - EXIT HUP INT TERM
+```
+
+本地在任何远端写之前把唯一 `OPERATION_ID=<timestamp>-<random>`、G0 commit 与该次
+rollback helper 的不可变 0600 副本持久化到同一 evidence 目录；远端 transaction id 由这个已知
+operation id 决定，而不是安装器写入后才随机生成。安装器内部使用 `sha256sum -c SHA256SUMS`
+二次核对，并把 `operation_id`、`g0_commit`、`rollback_helper_sha256` 同时写入 journal 与 summary。
+一个 evidence 目录和 operation id 只代表一次 forward attempt；一旦远端 journal 到达 `committed`、
+`rolled_back` 或 `rollback_failed`，禁止删除/改写旧 evidence 后复用。新的 forward attempt 必须重新取得
+对应审批、重跑 clean G0、创建新的 evidence 目录与 operation id；旧 transcript/journal/hash 永久保留复盘。
+它在 root-only 0700
+`/var/backups/aifeeds-performance-log` 中创建
+`aifeeds.conf.bak-perf-<timestamp>-<random>`。backup 用 `cp -a` 保留原 site 的 uid/gid/mode、ACL/xattr，
+机密性由不可遍历的 root-only 父目录保证；同时记录 `site_backup_sha256` 与
+`installed_site_sha256`，再运行：
+
+```bash
+python3 insert-nginx-request-id.py "$CANDIDATE" 7
+python3 check-nginx-request-id.py --expect-proxy-count 7 \
+  --allow-include /etc/letsencrypt/options-ssl-nginx.conf "$CANDIDATE"
+python3 verify-nginx-request-id-diff.py "$SITE" "$CANDIDATE" 7
+```
+
+只有 candidate 通过才安装 format/rotate/checker/timer。后续固定执行 `logrotate -d`、`nginx -t`、
+reload、nginx active、front/API 精确 200；同一个唯一 probe 必须恰好命中这两个 host 的两行。curl 使用
+`-fsS --connect-timeout 5 --max-time 15`，不把响应头或 `Set-Cookie` 打到终端。安装器用唯一 probe
+验证 JSON schema 和 timing 字符串，再执行真实轮转：
+
+```bash
+logrotate -f -s "$FORCE_ROTATE_STATE" "$ROTATE"
+rotation_probe="upstream-$(date +%s)-$(openssl rand -hex 4)"
+```
+
+必须证明 inode 已变化、USR1 后新 base log 仍收到 front/API 两行 `rotation_probe`、owner/mode 正确，
+最后才 `systemctl enable --now "$TIMER_UNIT"` 并证明专用 timer active。`logrotate -d` 只算语法检查，
+不能替代这次强制轮转。
+
+任何安装后步骤失败，EXIT trap 恢复本次精确 backup、移除本次 format/rotate/checkers/systemd units。
+journal/summary 还记录七个版本化 artifact 的 SHA-256；自动或人工回滚在停止 timer、恢复 site、归档日志或
+删除任何 artifact 前，必须逐个证明现存文件缺失或仍等于本事务 hash。enabled-site symlink 在入口、每次
+site move/reload 前后和终态都必须仍精确解析到目标 site。人工 helper 在创建 rollback journal 前发现未知
+site/artifact/symlink drift 时保持 source journal、summary 与远端运行时完全不变并立即停止；只有 rollback
+journal 已经开始后再失败才写 `rollback_failed`，不得继续清理造成运行时与磁盘配置分裂。
+只有 site 与 backup 逐字一致、所有 artifacts/state directory 都不存在、timer inactive 且 disabled/not-found、
+daemon-reload 和回滚 `nginx -t` 全部成功，才允许 reload 并复验 nginx active 与两个 200。输出必须含
+`automatic_rollback=pass`；若是 `automatic_rollback=failed`，立即按事件处理，不再执行任何前向 gate。
+
+正常路径的远端 staging 删除是硬门禁；上面的 `EXIT` trap 只负责异常退出时 best-effort 清理，不能把
+清理失败伪装成 GL-a 通过。
+
+日常查看只输出聚合，禁止展示 URI、UA 或 request id：
+
+```bash
+tail -n 1000 /var/log/nginx/aifeeds-performance.jsonl | jq -s '
+  group_by(.host)
+  | map({host: .[0].host, requests: length,
+         statuses: (group_by(.status) | map({status: .[0].status, requests: length}))})'
+```
+
+**GL-b**：仅在 G1 已部署当前 staging Worker、G7b 已形成 perf-staging TLS/同源链路后执行。使用
+`docs/reviews/c-end-perf-staging-change-packet.md` 的 9.3：响应头写入 0600 临时文件，从中提取
+`X-Request-Id`，以同一个 `perf_probe` 只读最近 JSONL，证明 staging Worker 回显值与 nginx
+`request_id` 一致。GL-b 是 G8 前的远端只读验证；G8 的 10.1c 再扩展到五设备 browser request ids。
+GL-b 失败时停止 G8，并先按证据归因：**无 Worker header** 时直接探测
+`staging-api.ai-feeds.com`；直连也缺头归 G1/Worker，直连有头而 perf-staging 缺头归 G7b 的响应头
+转发。**无 nginx row**（响应已有合法 header，但唯一 probe 没有对应 JSONL 行）先检查 GL-a 的 host
+map、日志文件/缓冲、timer 与当前 nginx 配置，再检查 G7 host 路由。**request-id 不一致**时对比同一
+语义的两次匿名只读探测：直连请求显式传入受限诊断 ID 并要求 Worker 原样回显，perf-staging 请求则
+比较响应头和同一 probe 的 nginx-generated ID，区分 G1 回显实现与 G7 的 request-id 注入/转发。禁止
+盲目回滚 G1、G7 或 GL-a；先归因，只调用被定位 gate 原审批已经授权的精确 rollback，未预授权就另行
+审批。GL-b 本身不授权远端写，也不把生产 Worker 纳入本次变更。
+
+安装器在第一次 mutation 前先 `fsync` 一份 root-only、路径已由本地 operation id 精确确定的
+`/var/backups/aifeeds-performance-log/transaction-<operation-id>.json`，随后只用
+`initializing → prepared → backup_created → mutation_started → mutated → timer_enabled → committed` 或
+`rolled_back/rollback_failed` 更新 phase。`initializing` 在 candidate/backup 之前 fsync，`prepared` 在
+backup 之前 fsync，`mutation_started` 在任何 runtime candidate/final 之前 fsync。SITE candidate 与
+restore candidate 均位于 `/etc/nginx/sites-available`，八个 runtime candidate 也分别位于各自 final 的
+同一目录；journal 精确绑定 `artifact_candidates`/`rollback_candidate`，完整 hash、metadata 与 `st_dev`
+通过后才同盘原子 rename。因此 SIGKILL 只会留下 operation-bound、可验证/可清理的安全 candidate，不会
+把跨 `/run`→`/etc` copy 伪装成原子 move。下一次
+运行发现非终态 journal 会以 `recovery_required` 停止，禁止覆盖半完成事务。
+
+**C journal update CAS active（consumer activation active / harness name-count freeze frozen）**：source journal 的
+F/T/P 精确为 `/var/backups/aifeeds-performance-log/transaction-<operation-id>.json`、`${F}.tmp`、
+`${F}.previous-update-gl-a-<operation-id>`；rollback journal 使用同样后缀，F 为
+`/var/backups/aifeeds-performance-log/rollback-transaction-<operation-id>.json`。每个新版本内嵌
+`journal_update={schema:1,revision:N,self_dev:D,self_ino:I,predecessor:null|{revision:N-1,sha256,dev,ino}}`；
+只有 fresh source `initializing` 和 fresh rollback `prepared` 可为 revision 0 + null predecessor。T 必须
+`O_EXCL|O_NOFOLLOW` 创建，`self_dev/self_ino` 来自同一写 fd 的 `fstat`；完整 canonical JSON 写完后执行
+fsync(fd)+fsync(parent)，才能成为恢复 authority。Source legacy genesis trusts the CLI-supplied external hash and is
+accepted only when that hash and the complete business schema match；rollback legacy genesis has no externally trusted hash and is
+rejected fail closed。legacy orphan tmp 不能自证。
+
+恢复状态严格为 S0–S4：S0=F-only stable；S1=F(old)+T(new)、P absent，先证明 T self 与物理 T 相等、F
+精确等于 T.predecessor 且业务 transition 合法，再 NOREPLACE F→P；S2=P(old)+T(new)、F absent，同样以
+T 内嵌 predecessor 证明 P 后 NOREPLACE T→F；S3=P(old)+F(new)、T absent，以 F 内嵌 predecessor 证明 P 后
+NOREPLACE P→C。S4=F(new)+C(cleanup tombstone), P absent。Recovery exact-validates physical C against
+F.predecessor, then uses held-dirfd unlink after a final pathname/held-FD identity check, fsyncs the parent, and
+returns to S0。每次 rename 后都 fsync parent。F/T/P/C 冲突、symlink、revision
+跳跃/回退、semantic inverse、same-hash different-inode，以及 O_EXCL 后崩溃留下的 invalid/partial T，全部
+保留原物并 fail closed；不得 rm、truncate、重 render、move 或从 pathname 反推 identity。成功重入只能留下
+exact F，T/P/tombstone 零残留，第二次重入不得改变 F hash/revision/dev/ino。
+
+自动恢复必须在读取 source phase 或任何 live mutation 前先完成 source S0–S4；人工 helper 也必须在读取/
+哈希 source 前先恢复 source update，再恢复 rollback 自身 update。terminal source T 先物化，rollback T 再引用
+source target hash，之后 prepared terminal-pair marker 才绑定两份 before/target；journal 的
+`.previous-update-gl-a-*` 绝不能与 marker 的 `.previous-terminal-gl-a-*` 混用。本地只读 consumer 最终只接受
+S0；看见 T/P/cleanup residue 只报告 `recovery_required`，不自行清理。terminal pair 发布是普通
+S3→S4 cleanup 的窄例外：prepared、单边和双边窗口必须保留两侧 predecessor，只有 committed marker durable
+后才能清除。
+
+The 14-slot runtime cleanup plan is immutable and shared by automatic and manual rollback. Its canonical items,
+`plan_sha256`, cursor, and `cursor_state` live in the rollback journal. Each item durably records `detaching` before
+an exact NOREPLACE tombstone rename and `detached` before unlink; `runtime_removed` is legal only after all 14 slots
+reach `complete` and physical runtime residue is zero. Re-entry resumes the recorded cursor. Plan drift, unknown
+tombstones, and `rollback_failed.failed_from` drift preserve evidence and fail closed. Legacy `runtime_removed`
+records without the cleanup object are compatibility inputs: both automatic and manual paths still execute the
+current 14-slot plan and prove zero residue instead of treating the legacy phase as cleanup authority. The rebuilt
+plan is marked `compatibility_mode=legacy_runtime_removed`; its progress remains wrapped by `runtime_removed` (or an
+existing `rollback_failed`) until complete. Installer retries scan the exact current-operation journal namespace
+before live runtime-absence checks, so durable recovery evidence returns `recovery_required`/76 instead of a bare rc=1.
+The log slot is an `archive_handoff`, not a delete: if daemon reload fails at `runtime_removed`, the exact live log
+inode remains bound in the failed rollback journal and no archive manifest is claimed until a later reload succeeds.
+
+The frozen integration matrix is 135 scenarios (95 old + 40 new). The 40 C scenario names are:
+
+- source journal: `journal-source-g-reentry`, `journal-source-s1-reentry`, `journal-source-s2-reentry`,
+  `journal-source-s3-reentry`, `journal-source-s4-reentry`, `journal-source-semantic-drift`,
+  `journal-source-samebytes-predecessor`, `journal-source-partial-tmp`, `journal-source-p-only`,
+  `journal-source-all-three`, `journal-source-unknown-cleanup`;
+- rollback journal: `journal-rollback-g-reentry`, `journal-rollback-s1-reentry`, `journal-rollback-s2-reentry`,
+  `journal-rollback-s3-reentry`, `journal-rollback-s4-reentry`, `journal-rollback-semantic-drift`,
+  `journal-rollback-samebytes-predecessor`, `journal-rollback-partial-tmp`, `journal-rollback-p-only`,
+  `journal-rollback-all-three`, `journal-rollback-unknown-cleanup`;
+- terminal pair and cleanup: `terminal-pair-zero-side-reentry`, `terminal-pair-one-side-reentry`,
+  `terminal-pair-two-side-reentry`, `terminal-pair-pre-marker-reentry`, `cleanup-manual-detaching-reentry`,
+  `cleanup-manual-detached-reentry`, `cleanup-automatic-detaching-reentry`,
+  `cleanup-automatic-detached-reentry`, `cleanup-manual-unknown-tombstone`,
+  `cleanup-automatic-unknown-tombstone`, `cleanup-manual-plan-drift`, `cleanup-automatic-plan-drift`,
+  `cleanup-manual-failed-from-drift`, `cleanup-automatic-failed-from-drift`;
+- legacy compatibility: `journal-source-legacy-genesis`, `journal-rollback-legacy-genesis-rejected`,
+  `cleanup-manual-legacy-runtime-removed`, `cleanup-automatic-legacy-runtime-removed`.
+
+若 SIGKILL、主机重启、
+SSH/SCP 异常或本地 summary 校验失败，先取得**只读采证批准**：在远端确认恰好一份与本次 operation id
+对应的 journal；将该 record 和远端 SHA-256 都写入隐藏的 0700 临时 bundle，完整校验后再用一次同父目录
+rename 发布 operation-bound canonical recovery bundle，不发布两个独立文件；不得用通配符选“最新”。
+`committed` journal 但本地 summary 丢失也走这条路径：先尝试从仍存在的私有 staging
+取回原 summary；取不到就精确回滚，不把缺少本地证据的线上状态宣称为通过。只读采证批准后严格按
+本地预先持久化的 operation id 执行，不列目录、不猜“最新”：
+
+```bash
+set -eu
+set -o pipefail
+umask 077
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+. "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+OPERATION_ID_FILE="$EVIDENCE/gl-a-operation-id.txt"
+test -f "$OPERATION_ID_FILE"
+test ! -L "$OPERATION_ID_FILE"
+test "$(stat -f '%u' "$OPERATION_ID_FILE")" = "$(id -u)"
+test "$(stat -f '%Lp' "$OPERATION_ID_FILE")" = 600
+OPERATION_ID="$(cat "$OPERATION_ID_FILE")"
+printf '%s' "$OPERATION_ID" | grep -Eq '^[0-9]{14}-[a-f0-9]{8}$'
+G0_COMMIT="$(cat "$EVIDENCE/commit.txt")"
+printf '%s' "$G0_COMMIT" | grep -Eq '^[a-f0-9]{40}$'
+IMMUTABLE_ROLLBACK_HELPER="$EVIDENCE/gl-a-rollback-helper-${OPERATION_ID}.sh"
+test -f "$IMMUTABLE_ROLLBACK_HELPER"
+test ! -L "$IMMUTABLE_ROLLBACK_HELPER"
+test "$(stat -f '%u' "$IMMUTABLE_ROLLBACK_HELPER")" = "$(id -u)"
+test "$(stat -f '%Lp' "$IMMUTABLE_ROLLBACK_HELPER")" = 600
+ROLLBACK_HELPER_SHA256="$(shasum -a 256 "$IMMUTABLE_ROLLBACK_HELPER" | awk '{print $1}')"
+printf '%s' "$ROLLBACK_HELPER_SHA256" | grep -Eq '^[a-f0-9]{64}$'
+REMOTE_JOURNAL="/var/backups/aifeeds-performance-log/transaction-${OPERATION_ID}.json"
+REMOTE_ARCHIVE_MANIFEST="/var/backups/aifeeds-performance-log/audit-${OPERATION_ID}/archive-manifest.json"
+REMOTE_ROTATION_ANCHOR="/var/backups/aifeeds-performance-log/rotation-anchor-${OPERATION_ID}.json"
+AUTO_ROLLBACK_TRANSCRIPT="$EVIDENCE/gl-a-install-output-${OPERATION_ID}.txt"
+RECOVERY_BUNDLE="$EVIDENCE/gl-a-recovery-bundle-${OPERATION_ID}"
+test ! -e "$RECOVERY_BUNDLE"
+test ! -L "$RECOVERY_BUNDLE"
+RECOVERY_BUNDLE_TMP="$(mktemp -d "$EVIDENCE/.gl-a-recovery-bundle.${OPERATION_ID}.XXXXXX")"
+chmod 0700 "$RECOVERY_BUNDLE_TMP"
+RECOVERY_RECORD="$RECOVERY_BUNDLE_TMP/record.json"
+RECOVERY_SHA="$RECOVERY_BUNDLE_TMP/record.sha256"
+RECOVERY_MANIFEST="$RECOVERY_BUNDLE_TMP/archive-manifest.json"
+RECOVERY_PUBLISH_ATTEMPTED=0
+cleanup_recovery_capture() {
+  case "$RECOVERY_BUNDLE_TMP" in
+    "$EVIDENCE"/.gl-a-recovery-bundle."$OPERATION_ID".*)
+      if [ "$RECOVERY_PUBLISH_ATTEMPTED" = 0 ]; then
+        rm -rf -- "$RECOVERY_BUNDLE_TMP"
+      else
+        printf 'recovery bundle publish failed; preserved tmp and destination: %s %s\n' \
+          "$RECOVERY_BUNDLE_TMP" "$RECOVERY_BUNDLE" >&2
+      fi
+      ;;
+  esac
+}
+trap cleanup_recovery_capture EXIT HUP INT TERM
+REMOTE_JOURNAL_SHA256="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231 \
+  "set -eu; test -f '$REMOTE_JOURNAL'; test ! -L '$REMOTE_JOURNAL'; \
+   test \"\$(stat -c '%U %G %a' '$REMOTE_JOURNAL')\" = 'root root 600'; \
+   timeout 15s sha256sum '$REMOTE_JOURNAL' | awk '{print \$1}'")"
+printf '%s' "$REMOTE_JOURNAL_SHA256" | grep -Eq '^[a-f0-9]{64}$'
+scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231:"$REMOTE_JOURNAL" "$RECOVERY_RECORD"
+chmod 0600 "$RECOVERY_RECORD"
+test "$(shasum -a 256 "$RECOVERY_RECORD" | awk '{print $1}')" = "$REMOTE_JOURNAL_SHA256"
+jq -e --arg operation_id "$OPERATION_ID" --arg g0_commit "$G0_COMMIT" \
+  --arg helper_sha "$ROLLBACK_HELPER_SHA256" --arg journal "$REMOTE_JOURNAL" \
+  --arg archive_manifest "$REMOTE_ARCHIVE_MANIFEST" '
+  def positive_integer: type == "number" and . > 0 and . == floor;
+  def runtime_inventory_is_valid:
+    (.runtime_artifacts | type == "array") and
+    (.runtime_artifacts | length) <= 8 and
+    ([.runtime_artifacts[].name] | length == (unique | length)) and
+    ([.runtime_artifacts[].final] | length == (unique | length)) and
+    ([.runtime_artifacts[].candidate] | length == (unique | length)) and
+    all(.runtime_artifacts[];
+      (keys | sort) == ["candidate","dev","final","gid","ino","mode","name","sha256","uid"] and
+      (.name == "checker" or .name == "diff_checker" or .name == "format" or
+       .name == "inserter" or .name == "log" or .name == "rotate" or
+       .name == "service" or .name == "timer") and
+      (.candidate | test("[.]candidate-gl-a-" + $operation_id + "$")) and
+      (.sha256 | test("^[a-f0-9]{64}$")) and (.mode | test("^[0-7]{3,4}$")) and
+      (.uid | type == "number" and . >= 0 and . == floor) and
+      (.gid | type == "number" and . >= 0 and . == floor) and
+      (.dev | positive_integer) and (.ino | positive_integer)) and
+    (.runtime_artifacts_sealed | type == "boolean") and
+    (if .runtime_artifacts_sealed then (.runtime_artifacts | length) == 8 and
+      ([.runtime_artifacts[].name] | sort) ==
+        ["checker","diff_checker","format","inserter","log","rotate","service","timer"]
+     else true end);
+  def rotation_anchor_identity_is_valid:
+    if .rotation_anchor_identity == null then true
+    else
+      ((.rotation_anchor_identity | keys | sort) ==
+        ["dev","gid","ino","mode","path","sha256","size","state","uid"]) and
+      .rotation_anchor_identity.path ==
+        ("/var/backups/aifeeds-performance-log/rotation-anchor-" + $operation_id + ".json") and
+      .rotation_anchor_identity.uid == 0 and .rotation_anchor_identity.gid == 0 and
+      .rotation_anchor_identity.mode == "600" and
+      (.rotation_anchor_identity.dev | positive_integer) and
+      (.rotation_anchor_identity.ino | positive_integer) and
+      ((.rotation_anchor_identity.state == "allocated" and
+        .rotation_anchor_identity.sha256 ==
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" and
+        .rotation_anchor_identity.size == 0) or
+       ((.rotation_anchor_identity.state == "prepared" or
+         .rotation_anchor_identity.state == "sealed") and
+        (.rotation_anchor_identity.sha256 | test("^[a-f0-9]{64}$")) and
+        (.rotation_anchor_identity.size | positive_integer)))
+    end;
+  def rotation_snapshot_is_valid:
+    .rotation_state_snapshot == null or
+    ((.rotation_state_snapshot | keys | sort) ==
+       ["generation","ledger","status","tail_record_sha256"] and
+     (.rotation_state_snapshot.generation | type == "number" and . >= 0 and . == floor) and
+     (.rotation_state_snapshot.tail_record_sha256 | test("^[a-f0-9]{64}$")) and
+     (.rotation_state_snapshot.ledger | keys | sort) ==
+       ["dev","gid","ino","mode","path","sha256","size","uid"] and
+     .rotation_state_snapshot.ledger.path == .rotation_state_identity.provenance.path and
+     .rotation_state_snapshot.ledger.dev == .rotation_state_identity.provenance.dev and
+     .rotation_state_snapshot.ledger.ino == .rotation_state_identity.provenance.ino and
+     .rotation_state_snapshot.ledger.uid == .rotation_state_identity.provenance.uid and
+     .rotation_state_snapshot.ledger.gid == .rotation_state_identity.provenance.gid and
+     .rotation_state_snapshot.ledger.mode == .rotation_state_identity.provenance.mode and
+     (.rotation_state_snapshot.ledger.sha256 | test("^[a-f0-9]{64}$")) and
+     (.rotation_state_snapshot.ledger.size | positive_integer) and
+     (.rotation_state_snapshot.status == null or
+      ((.rotation_state_snapshot.status | keys | sort) ==
+         ["dev","gid","ino","mode","path","sha256","uid"] and
+       .rotation_state_snapshot.status.path ==
+         "/var/lib/aifeeds-performance-logrotate/status" and
+       (.rotation_state_snapshot.status.uid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.gid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.mode | test("^[0-7]{3,4}$")) and
+       (.rotation_state_snapshot.status.sha256 | test("^[a-f0-9]{64}$")) and
+       (.rotation_state_snapshot.status.dev | positive_integer) and
+       (.rotation_state_snapshot.status.ino | positive_integer))));
+  def rotation_identity_is_valid:
+    if .rotation_state_identity == null then .rotation_state_snapshot == null
+    else
+      ((.rotation_state_identity | keys | sort) == ["directory","files","provenance"] and
+       (.rotation_state_identity.directory | keys | sort) ==
+         ["candidate","dev","gid","ino","mode","path","uid"] and
+       .rotation_state_identity.directory.path == "/var/lib/aifeeds-performance-logrotate" and
+       .rotation_state_identity.directory.candidate ==
+         ("/var/lib/aifeeds-performance-logrotate.candidate-gl-a-" + $operation_id) and
+       .rotation_state_identity.directory.uid == 0 and
+       .rotation_state_identity.directory.gid == 0 and
+       .rotation_state_identity.directory.mode == "750" and
+       (.rotation_state_identity.directory.dev | positive_integer) and
+       (.rotation_state_identity.directory.ino | positive_integer) and
+       .rotation_state_identity.files == [] and
+       (.rotation_state_identity.provenance | keys | sort) ==
+         ["dev","genesis_record_sha256","gid","ino","mode","path","uid"] and
+       .rotation_state_identity.provenance.path ==
+         "/var/lib/aifeeds-performance-logrotate/rotation-provenance.jsonl" and
+       .rotation_state_identity.provenance.uid == 0 and
+       .rotation_state_identity.provenance.gid == 0 and
+       .rotation_state_identity.provenance.mode == "600" and
+       (.rotation_state_identity.provenance.dev | positive_integer) and
+       (.rotation_state_identity.provenance.ino | positive_integer) and
+       (.rotation_state_identity.provenance.genesis_record_sha256 | test("^[a-f0-9]{64}$")) and
+       rotation_snapshot_is_valid)
+    end;
+  def backup_identity_is_valid:
+    .site_backup_identity == null or
+    ((.site_backup_identity | keys | sort) ==
+       ["dev","gid","ino","mode","path","sha256","staging_gid","staging_mode","staging_uid","uid"] and
+     .site_backup_identity.path == .site_backup and
+     .site_backup_identity.sha256 == .site_backup_sha256 and
+     .site_backup_identity.uid == .original_site_uid and
+     .site_backup_identity.gid == .original_site_gid and
+     .site_backup_identity.mode == .original_site_mode and
+     .site_backup_identity.staging_uid == 0 and .site_backup_identity.staging_gid == 0 and
+     .site_backup_identity.staging_mode == "600" and
+     (.site_backup_identity.dev | positive_integer) and
+     (.site_backup_identity.ino | positive_integer));
+  .schema == 1 and .gate == "GL-a" and .operation_id == $operation_id and
+  .g0_commit == $g0_commit and .rollback_helper_sha256 == $helper_sha and
+  .transaction_journal == $journal and
+  ((.artifacts_sha256 | keys) == ["checker","diff_checker","format","inserter","rotate","service","timer"]) and
+  all(.artifacts_sha256[]; type == "string" and test("^[a-f0-9]{64}$")) and
+  ((.artifact_candidates | keys) == ["checker","diff_checker","format","inserter","log","rotate","service","timer"]) and
+  all(.artifact_candidates[]; type == "string" and test("[.]candidate-gl-a-" + $operation_id + "$")) and
+  .rollback_candidate == ("/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-" + $operation_id) and
+  runtime_inventory_is_valid and rotation_identity_is_valid and backup_identity_is_valid and
+  rotation_anchor_identity_is_valid and
+  (if .phase == "committed" then
+     .rotation_anchor_identity != null and .rotation_anchor_identity.state == "sealed"
+   elif .phase == "rolled_back" then
+     (.rotation_anchor_identity == null or
+      .rotation_anchor_identity.state == "allocated" or
+      .rotation_anchor_identity.state == "prepared" or
+      .rotation_anchor_identity.state == "sealed")
+   else true end) and
+  (.phase == "initializing" or .phase == "prepared" or .phase == "backup_created" or
+   .phase == "mutation_started" or .phase == "mutated" or .phase == "timer_enabled" or
+   .phase == "committed" or .phase == "rollback_failed" or
+   (.phase == "rolled_back" and
+    (.rollback_origin_phase == "initializing" or .rollback_origin_phase == "prepared" or
+     .rollback_origin_phase == "backup_created" or .rollback_origin_phase == "mutation_started" or
+     .rollback_origin_phase == "mutated" or .rollback_origin_phase == "timer_enabled" or
+     .rollback_origin_phase == "committed") and
+    .log_archive_manifest == $archive_manifest and
+    (.log_archive_manifest_sha256 | test("^[a-f0-9]{64}$")) and
+    (.log_archive_manifest_generation | type == "number" and . >= 0 and . == floor) and
+    (.log_archive_manifest_entry_count | type == "number" and . >= 0 and . == floor) and
+    .log_archive_manifest_generation >= (3 * .log_archive_manifest_entry_count + 1) and
+    .log_archive_manifest_generation <= (4 * .log_archive_manifest_entry_count + 1) and
+    (has("rollback_journal") | not)))' "$RECOVERY_RECORD" >/dev/null
+RECOVERY_PHASE="$(jq -er '.phase' "$RECOVERY_RECORD")"
+if [ "$RECOVERY_PHASE" = committed ]; then
+  ROTATION_ANCHOR_DEV="$(jq -er '.rotation_anchor_identity.dev' "$RECOVERY_RECORD")"
+  ROTATION_ANCHOR_INO="$(jq -er '.rotation_anchor_identity.ino' "$RECOVERY_RECORD")"
+  ROTATION_ANCHOR_SIZE="$(jq -er '.rotation_anchor_identity.size' "$RECOVERY_RECORD")"
+  ROTATION_ANCHOR_SHA256="$(jq -er '.rotation_anchor_identity.sha256' "$RECOVERY_RECORD")"
+  ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+    "set -eu; test -f '$REMOTE_ROTATION_ANCHOR'; test ! -L '$REMOTE_ROTATION_ANCHOR'; \
+     test \"\$(stat -c '%u %g %a %d %i %s' '$REMOTE_ROTATION_ANCHOR')\" = \
+       '0 0 600 $ROTATION_ANCHOR_DEV $ROTATION_ANCHOR_INO $ROTATION_ANCHOR_SIZE'; \
+     test \"\$(timeout 15s sha256sum '$REMOTE_ROTATION_ANCHOR' | awk '{print \$1}')\" = \
+       '$ROTATION_ANCHOR_SHA256'"
+elif [ "$RECOVERY_PHASE" = rolled_back ]; then
+  ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+    "set -eu; test ! -e '$REMOTE_ROTATION_ANCHOR'; test ! -L '$REMOTE_ROTATION_ANCHOR'"
+fi
+if jq -e '.phase == "rolled_back"' "$RECOVERY_RECORD" >/dev/null; then
+  RECORDED_MANIFEST_SHA256="$(jq -er '.log_archive_manifest_sha256' "$RECOVERY_RECORD")"
+  RECORDED_MANIFEST_GENERATION="$(jq -er '.log_archive_manifest_generation' "$RECOVERY_RECORD")"
+  RECORDED_MANIFEST_ENTRY_COUNT="$(jq -er '.log_archive_manifest_entry_count' "$RECOVERY_RECORD")"
+  test "$(jq -er '.log_archive_manifest' "$RECOVERY_RECORD")" = "$REMOTE_ARCHIVE_MANIFEST"
+  REMOTE_MANIFEST_SHA256="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+    root@154.12.188.231 \
+    "set -eu; test -f '$REMOTE_ARCHIVE_MANIFEST'; test ! -L '$REMOTE_ARCHIVE_MANIFEST'; \
+     test \"\$(stat -c '%U %G %a' '$REMOTE_ARCHIVE_MANIFEST')\" = 'root root 600'; \
+     timeout 15s sha256sum '$REMOTE_ARCHIVE_MANIFEST' | awk '{print \$1}'")"
+  test "$REMOTE_MANIFEST_SHA256" = "$RECORDED_MANIFEST_SHA256"
+  scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+    root@154.12.188.231:"$REMOTE_ARCHIVE_MANIFEST" "$RECOVERY_MANIFEST"
+  chmod 0600 "$RECOVERY_MANIFEST"
+  test "$(shasum -a 256 "$RECOVERY_MANIFEST" | awk '{print $1}')" = "$RECORDED_MANIFEST_SHA256"
+  jq -e --arg operation_id "$OPERATION_ID" \
+    --argjson generation "$RECORDED_MANIFEST_GENERATION" \
+    --argjson entry_count "$RECORDED_MANIFEST_ENTRY_COUNT" '
+    .schema == 2 and .operation_id == $operation_id and
+    ((keys | sort) ==
+      ["empty_inventory","entries","generation","inventory_complete","operation_id",
+       "previous_manifest_dev","previous_manifest_ino","previous_manifest_sha256","schema"]) and
+    (.generation | type == "number" and . > 0 and . == floor) and
+    (.previous_manifest_sha256 | test("^[a-f0-9]{64}$")) and
+    (.previous_manifest_dev | type == "number" and . > 0 and . == floor) and
+    (.previous_manifest_ino | type == "number" and . > 0 and . == floor) and
+    .generation == $generation and (.entries | length) == $entry_count and
+    .inventory_complete == true and .empty_inventory == (($entry_count == 0)) and
+    .generation == (3 * (.entries | length) + 1 +
+      ([.entries[] | select(has("candidate_dev"))] | length)) and
+    all(.entries[]; . as $entry | ($entry.source | split("/") | last) as $name |
+      .state == "archived" and
+      ($entry.source | test("^/var/log/nginx/aifeeds-performance[.]jsonl([.][0-9]+([.]gz)?)?$")) and
+      $entry.quarantine == ("/var/log/nginx/." + $name + ".quarantine-gl-a-" + $operation_id) and
+      $entry.destination ==
+        ("/var/backups/aifeeds-performance-log/audit-" + $operation_id + "/" + $name) and
+      $entry.candidate == ($entry.destination + ".candidate-gl-a-" + $operation_id) and
+      ((keys | sort) ==
+        (if has("candidate_dev") then
+          ["candidate","candidate_dev","candidate_ino","destination","destination_dev","destination_ino","dev","final_mtime_s","final_sha256","final_size","gid","ino","mode","quarantine","source","state","uid"]
+         else
+          ["candidate","destination","destination_dev","destination_ino","dev","final_mtime_s","final_sha256","final_size","gid","ino","mode","quarantine","source","state","uid"]
+         end)) and
+      (.final_sha256 | test("^[a-f0-9]{64}$")) and
+      (.final_size | type == "number" and . >= 0 and . == floor) and
+      (.final_mtime_s | type == "number") and
+      (.dev | type == "number" and . > 0 and . == floor) and
+      (.ino | type == "number" and . > 0 and . == floor) and
+      (.destination_dev | type == "number" and . > 0 and . == floor) and
+      (.destination_ino | type == "number" and . > 0 and . == floor) and
+      (if has("candidate_dev") then
+         (.candidate_dev | type == "number" and . > 0 and . == floor) and
+         (.candidate_ino | type == "number" and . > 0 and . == floor) and
+         .destination_dev == .candidate_dev and .destination_ino == .candidate_ino
+       else .destination_dev == .dev and .destination_ino == .ino end))' \
+    "$RECOVERY_MANIFEST" >/dev/null
+  while IFS=$'\t' read -r destination destination_dev destination_ino final_sha256 final_size; do
+    ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+      "set -eu; test -f '$destination'; test ! -L '$destination'; \
+       test \"\$(stat -c '%U %G %a' '$destination')\" = 'root root 600'; \
+       test \"\$(stat -c '%d %i' '$destination')\" = '$destination_dev $destination_ino'; \
+       test \"\$(stat -c '%s' '$destination')\" = '$final_size'; \
+       test \"\$(sha256sum '$destination' | awk '{print \$1}')\" = '$final_sha256'"
+  done < <(jq -r '.entries[] |
+    [.destination,.destination_dev,.destination_ino,.final_sha256,.final_size] | @tsv' \
+    "$RECOVERY_MANIFEST")
+else
+  test ! -e "$RECOVERY_MANIFEST"
+  test ! -L "$RECOVERY_MANIFEST"
+fi
+printf '%s\n' "$REMOTE_JOURNAL_SHA256" > "$RECOVERY_SHA"
+chmod 0600 "$RECOVERY_SHA"
+test "$(stat -f '%Lp' "$RECOVERY_RECORD")" = 600
+test "$(stat -f '%Lp' "$RECOVERY_SHA")" = 600
+if [ -e "$RECOVERY_MANIFEST" ] || [ -L "$RECOVERY_MANIFEST" ]; then
+  test -f "$RECOVERY_MANIFEST"
+  test ! -L "$RECOVERY_MANIFEST"
+  test "$(stat -f '%Lp' "$RECOVERY_MANIFEST")" = 600
+fi
+RECOVERY_PUBLISH_ATTEMPTED=1
+test ! -e "$RECOVERY_BUNDLE"
+test ! -L "$RECOVERY_BUNDLE"
+test "$(dirname "$RECOVERY_BUNDLE_TMP")" = "$(dirname "$RECOVERY_BUNDLE")"
+python3 - "$RECOVERY_BUNDLE_TMP" "$RECOVERY_BUNDLE" <<'PY'
+import ctypes
+import os
+import sys
+
+source, destination = map(os.fsencode, sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform == "darwin":
+    RENAME_EXCL = 0x00000004
+    renamex_np = libc.renamex_np
+    renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    renamex_np.restype = ctypes.c_int
+    result = renamex_np(source, destination, RENAME_EXCL)
+elif sys.platform.startswith("linux"):
+    AT_FDCWD = -100
+    RENAME_NOREPLACE = 1
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(AT_FDCWD, source, AT_FDCWD, destination, RENAME_NOREPLACE)
+else:
+    raise SystemExit(f"unsupported no-replace rename platform: {sys.platform}")
+if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), os.fsdecode(destination))
+parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+RECOVERY_RECORD="$RECOVERY_BUNDLE/record.json"
+RECOVERY_SHA="$RECOVERY_BUNDLE/record.sha256"
+RECOVERY_MANIFEST="$RECOVERY_BUNDLE/archive-manifest.json"
+test -d "$RECOVERY_BUNDLE"
+test ! -L "$RECOVERY_BUNDLE"
+test "$(stat -f '%Lp' "$RECOVERY_BUNDLE")" = 700
+test "$(cat "$RECOVERY_SHA")" = "$REMOTE_JOURNAL_SHA256"
+test "$(shasum -a 256 "$RECOVERY_RECORD" | awk '{print $1}')" = "$REMOTE_JOURNAL_SHA256"
+if jq -e '.phase == "rolled_back"' "$RECOVERY_RECORD" >/dev/null; then
+  test -f "$RECOVERY_MANIFEST"
+  test ! -L "$RECOVERY_MANIFEST"
+  test "$(stat -f '%Lp' "$RECOVERY_MANIFEST")" = 600
+  test "$(shasum -a 256 "$RECOVERY_MANIFEST" | awk '{print $1}')" = "$RECORDED_MANIFEST_SHA256"
+  jq -e --arg operation_id "$OPERATION_ID" \
+    --argjson generation "$RECORDED_MANIFEST_GENERATION" \
+    --argjson entry_count "$RECORDED_MANIFEST_ENTRY_COUNT" '
+    .schema == 2 and .operation_id == $operation_id and
+    ((keys | sort) ==
+      ["empty_inventory","entries","generation","inventory_complete","operation_id",
+       "previous_manifest_dev","previous_manifest_ino","previous_manifest_sha256","schema"]) and
+    (.generation | type == "number" and . > 0 and . == floor) and
+    (.previous_manifest_sha256 | test("^[a-f0-9]{64}$")) and
+    (.previous_manifest_dev | type == "number" and . > 0 and . == floor) and
+    (.previous_manifest_ino | type == "number" and . > 0 and . == floor) and
+    .generation == $generation and (.entries | length) == $entry_count and
+    .inventory_complete == true and .empty_inventory == ($entry_count == 0) and
+    .generation == (3 * (.entries | length) + 1 +
+      ([.entries[] | select(has("candidate_dev"))] | length)) and
+    all(.entries[];
+      .state == "archived" and
+      (.destination_dev | type == "number" and . > 0 and . == floor) and
+      (.destination_ino | type == "number" and . > 0 and . == floor) and
+      (if has("candidate_dev") then
+         .destination_dev == .candidate_dev and .destination_ino == .candidate_ino
+       else .destination_dev == .dev and .destination_ino == .ino end))' \
+    "$RECOVERY_MANIFEST" >/dev/null
+  jq -e '(has("rollback_journal") | not)' "$RECOVERY_RECORD" >/dev/null
+  test -f "$AUTO_ROLLBACK_TRANSCRIPT"
+  test ! -L "$AUTO_ROLLBACK_TRANSCRIPT"
+  test "$(stat -f '%u' "$AUTO_ROLLBACK_TRANSCRIPT")" = "$(id -u)"
+  test "$(stat -f '%Lp' "$AUTO_ROLLBACK_TRANSCRIPT")" = 600
+  grep -Fq 'automatic_rollback=pass' "$AUTO_ROLLBACK_TRANSCRIPT"
+  printf 'GL-a automatic rollback terminal reconciled read-only; do not run manual rollback\n'
+else
+  test ! -e "$RECOVERY_MANIFEST"
+  test ! -L "$RECOVERY_MANIFEST"
+fi
+RECOVERY_BUNDLE_TMP=''
+RECOVERY_PUBLISH_ATTEMPTED=0
+trap - EXIT HUP INT TERM
+```
+
+上面的 `rolled_back` 分支只做终态对账：source journal 必须不引用 manual rollback journal，并精确绑定
+operation-bound archive manifest 的路径、SHA、generation 和 entry count；采证还会从该精确远端路径复制
+0600 manifest 进 canonical bundle，再对本地物理副本复算 SHA、schema、operation id、generation/count 与
+`generation == 3 * N + 1 + count(entries has candidate_dev)`。安装 transcript 中的
+`automatic_rollback=pass` 只是追加诊断门禁，不再是
+automatic terminal 的唯一证明。任一 manifest 对账失败，或非终态、`rollback_failed`、缺失本地成功
+transcript，都按事件处理；不得把已完成的自动回滚再次送入人工 helper。
+canonical recovery bundle 内固定包含 record 与其 SHA，`rolled_back` 时还包含已物理对账的 manifest；
+发布只允许同父目录的 Darwin `renamex_np(RENAME_EXCL)` 或 Linux `renameat2(RENAME_NOREPLACE)`。若原子
+NOREPLACE 成功，还必须 `fsync` destination parent directory 才算 durable；rename、parent fsync 或发布后
+校验失败都保留临时 bundle 和未知 destination，禁止 `mv -f`、删除或覆盖取巧。
+
+**精确人工/崩溃恢复回滚**：只使用版本化 `rollback-aifeeds-performance-log.sh`。它接受 base 与 candidate
+两种合法 live-site hash：base 不覆盖、candidate 才恢复 backup，未知 hash 立即停止。工具在第一次写前
+fsync 一个以原 transaction id 命名的可重入 rollback journal；部分 artifact/state 均按存在性撤销；成功
+后原子更新原 transaction journal 为 `rolled_back`。因此 `initializing`、`prepared`、`backup_created`、
+`mutation_started`、部分安装、`mutated`、`timer_enabled`、
+`rollback_failed` 和本地 summary 丢失的 `committed` 都使用同一状态机。真正恢复属于 production nginx
+写；installer 同时扫描原 transaction 与 rollback journal，任一非终态都保持 `recovery_required`。
+只有 origin phase 为 `initializing`/`prepared` 且 live site 仍等于记录的 base 时，helper 才允许 backup
+尚未创建；同一窗口留下的精确 partial backup 会在任何其他写之前移入本事务 root-only audit。较晚 phase
+缺 backup、enabled-site retarget、artifact hash 漂移或未知 site hash 一律停止。终态 summary 记录 source/
+rollback journal 的最终 SHA 与 `backup_present`，重入不得把 `rolled_back` 改写为 `rollback_failed`。
+
+**可审计 exceptional recovery（仅用于已绑定旧 helper SHA 的已知缺陷）**：普通 helper 调用仍为九个
+参数，并要求当前执行器 SHA 等于 transaction journals 的 `rollback_helper_sha256`。只有 defect 精确为
+`initialized_rotation_candidate_prepublication` 时，才允许增加第十个 authority 文件。authority 必须位于
+该次 root-only staging 目录，且为 non-symlink `root:root 0600` regular file；它严格绑定 operation/G0、
+source 与 rollback journal 路径及恢复前 SHA、transaction helper SHA、当前 recovery executor SHA、
+operator、独立 rollback owner、UTC 批准时间和批准证据 SHA。transaction helper 与 executor SHA 必须不同；
+terminal journals 继续保留 transaction helper，不得把新版执行器冒充旧 helper。
+
+新版 helper 在任何 journal/runtime mutation 前完成 authority、两个 journals、live base site 和自身 SHA
+校验，并用 NOREPLACE + fsync 将原字节固化为
+`exceptional-recovery-authority-<operation>.json`。成功完成原有 cleanup plan、terminal pair 和 committed
+marker 后，再原子发布 `exceptional-recovery-receipt-<operation>.json`；receipt 绑定 authority SHA、恢复前
+source/rollback SHA、transaction/executor 双 SHA，以及终态 source、rollback、marker 三个 SHA。authority
+存在但 receipt 缺失、receipt 孤立、candidate 残留、哈希漂移或 journals 仍非终态时，installer 一律
+`recovery_required`。同一 authority 重入只能补齐 owned candidate/缺失 receipt，不能覆盖未知 final；成功
+重入的 terminal namespace 和 receipt inode/hash 均不变化。该模式不是通用 SHA 绕过，不接受其他 defect、
+未知字段、错 operation、错 SHA、symlink 或宽松 metadata。
+
+本地独立恢复契约不计入冻结的 135 场矩阵：1 个依赖预检，外加 10 个恢复场景（initialized-candidate
+普通回滚、exceptional 正向/负向/installer closure，以及 authority/receipt 各四个 publication crash
+重入）。2026-07-14 结果为 independent 10/10、matrix 135/135、skip 0。生产恢复仍需在 fresh clean G0、
+只读复核与精确命令展示后单独批准；未批准前不得上传或调用新版 exceptional helper。
+
+日志撤销先把 canonical log 以 `RENAME_NOREPLACE` 移到同目录、与 operation id 绑定的 quarantine，
+再等待所有日志 writable FD 消失且 size/mtime 连续稳定；生产等待上限为 60 秒。超时、`/proc`
+扫描权限错误或 identity 漂移都必须保留 quarantine 和 archive manifest、失败关闭；后续使用同一
+operation id 重入继续，禁止直接删除 quarantine 或强杀旧 worker。
+archive manifest 是 operation-bound 的持久状态机：它在移动 live log 前记录 source/quarantine/
+destination/candidate、inode 与权限；quiescent 后补 final SHA/size，完成归档后才记 `archived` 和
+`inventory_complete`。schema 2 从 generation 0 genesis 开始；cross-filesystem 单 entry 严格走
+`journaled → quiescent → copied → archived`，same-filesystem 则从 quiescent 直接 archived。crossfs copy
+完成后、final publish 前先 journal `candidate_dev`/`candidate_ino`；publish 后再记录
+`destination_dev`/`destination_ino`，且它们必须等于 candidate inode。samefs destination identity 必须等于
+原 source dev/ino。terminal generation 是 `3 * N + 1 + count(entries has candidate_dev)`，全 crossfs 即
+`4 * N + 1`。copied candidate 或 destination 若 samebytes 但属于 different inode/unknown identity 必须
+fail closed；candidate+destination 冲突、二者同时缺失、未 journal candidate、任何 candidate/cleanup/unknown
+audit residue 都保留并拒绝接管。terminal destination 的 physical dev/ino 必须逐项等于 recorded destination。
+每次 successor 只允许 append、seal、quiesce、copy、archive 五类单一变化。schema 2 top-level exact keys 是
+`{schema,operation_id,generation,previous_manifest_sha256,previous_manifest_dev,previous_manifest_ino,inventory_complete,empty_inventory,entries}`：
+generation 0 的 predecessor SHA/dev/ino 三项全为 null；每个 generation>0 successor 都必须从 predecessor 的
+stable fd capture 同时持久化 raw SHA/dev/ino，禁止只凭 pathname 或 matching bytes/hash 接管。final/tmp/
+operation-bound previous 只按三路径 NOREPLACE 和物理副作用对账：P+T 或 P+F 状态只能读取 T/F successor 内嵌的
+predecessor triple，再证明物理 P 精确匹配；P-only、invalid/unrelated T/F、same-hash different-inode 全部原样
+保留并 fail closed。
+
+Archive manifest namespace recovery 另使用 read-only held-fingerprint dispatcher（此处 F/T/P/C 与 journal
+CAS 的 cleanup namespace 不同）：F=final、T=tmp、P=previous、C=operation-bound private cleanup directory。
+只接受 `∅`、`T(genesis)`、`F`、`F+T`、`P+T`、`P+F`、`F+C(payload)`、`F+C(empty)`；其余组合全部保留并
+fail closed。F/T/P 和 C payload 均以 `O_NOFOLLOW` held-FD 捕获，要求 root:root/0600、`nlink=1`，指纹精确为
+`{dev,ino,mtime_ns,sha256,size}`，同时拒绝 duplicate keys 与 non-finite JSON。dispatcher 只用这些 held
+fingerprints 验证 successor、物理 reachability 与 immutable runtime-cleanup log handoff，并逐路径 recapture
+unchanged 后才允许 publish/cleanup；`journaled` live log 只允许同 inode 尾部增长，quiescent/copied/archived
+内容必须冻结。C payload/empty directory 只能通过 held parent/dirfd exact unlink/rmdir 清理。
+
+Archive read-only preflight 在首次 capture 前置零写 sentinel，只有 topology、reachability、handoff 和最终
+recapture 全部通过后才清除。sentinel 未清除时发生失败，failure trap 必须在删除 summary、写
+`rollback_failed` 或改动 cleanup namespace 之前退出；重复失败不得改变 F/T/P/C 的 bytes、inode 或 namespace。
+只有 manifest tmp/previous 不存在、
+audit 目录 canonical 日志集合与 destinations 集合双向相等、每个 destination 的 root:root/0600、SHA/size
+与记录逐项相等，且 source/quarantine/candidate 全部消失，才是 terminal。两份 terminal journal 和
+summary 同时绑定该 manifest 的 SHA/generation/entry count；未知、回退、孤儿文件或物理漂移都保留并失败关闭。
+这里的 runtime artifact manifest 不是独立文件：它就是 source transaction journal 内的
+`runtime_artifacts` 与 `runtime_artifacts_sealed`；no independent runtime manifest path/SHA/generation/count
+存在。8 candidates 的每一项都先持久化 dev、ino、sha256 和 metadata，完整 inventory sealed before any final
+publication。删除时，7 immutable finals 与 all 8 candidates 分别走 exact-identity、operation-bound
+tombstone；live log 不进入这组 final tombstone，而是 handed to the archive manifest。
+`rotation_state_identity` 精确绑定 operation-bound directory candidate 与稳定 ledger anchor 的
+path/dev/ino/mode/`genesis_record_sha256`；`rotation_state_snapshot` 再验证 generation、
+`tail_record_sha256`、ledger SHA/size 和当代 status identity。root-only `rotation-wrapper` 是 timer 唯一 writer；
+唯一锁域是 authority-bound ledger inode FD flock，只允许向该 ledger 追加可验证 tail。legacy
+`/run/aifeeds-performance-log-rotation.lock` 参数 compatibility-only 且被忽略：它 is not an authority domain and
+not a serialization domain。安装时旧 status inode/hash
+不是永久 identity，manual helper 也不得从 current status path 重新 capture 或 adopt。
+动态 systemd service 的 `ExecStart` 固定 operation id、anchor、checker、config、logrotate 五组 authority 参数，
+顺序不可变；config triple 后紧跟 logrotate triple，每组都使用 exact path/dev/ino/SHA，禁止运行时扫描或重捕获。外部 authority 只能位于
+`/var/backups/aifeeds-performance-log/rotation-anchor-<operation-id>.json`。source/rollback journal、forward/manual
+summary 都镜像 exact 9-key `rotation_anchor_identity={state,path,sha256,size,uid,gid,mode,dev,ino}`，状态严格推进
+`allocated → prepared → sealed`：`allocated` 绑定 O_EXCL 创建的 empty-file SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`、size=0 与 inode；`prepared` 已持久化
+expected final target SHA/size，但 physical inode 此刻仍可为空；原 inode 填充并 fsync 后，`sealed` 才要求
+physical path/dev/ino/SHA/size exact。canonical authority payload 使用 schema 2，只允许 exact top-level
+`{schema,operation_id,directory,provenance,checker,config,logrotate}`：directory 绑定固定 state directory，provenance 绑定
+ledger genesis；其 exact nested keys 分别是 directory=`{path,uid,gid,mode,dev,ino}`、
+provenance=`{path,uid,gid,mode,dev,ino,genesis_record_sha256}`、checker/config=
+`{path,sha256,size,uid,gid,mode,dev,ino}`。logrotate 的 exact nested keys 为
+`{path,sha256,size,uid,gid,mode,dev,ino}`，固定 `/usr/sbin/logrotate`，并要求 root:root mode 0755。
+automatic/manual caller 使用 sealed-anchor extractor：以 `O_NOFOLLOW` 单次打开 exact anchor，验证 canonical bytes 与
+full identity，只从 held-FD bytes 提取 logrotate authority；checker 将全部资源保持为 held-FD，并在 mutation 前执行
+final pathname/held-FD identity exact check。checker/config candidate identity
+必须先 journal；rotation ledger 初始化、anchor 封存完成后，才最后动态渲染 service candidate。committed
+终态必须是 sealed；rolled_back 若早期从未分配可为 null，否则 retain last identity evidence，按崩溃点可为
+allocated、prepared 或 sealed，禁止把未完成状态伪写成 sealed，但 anchor pathname 必须 absent/deleted。人工恢复先 stop timer/service 并证明二者静止，再以固定 authority 参数调用
+`rotation-recover`；不得直接运行裸 logrotate 或从当前 ledger/status/anchor 路径认领身份。
+`site_backup_identity` 必须在 copy 前持久化并绑定 `O_EXCL` 分配出的 inode。pre-mutation base SITE identity
+绑定 original site dev/inode；committed installed SITE identity 绑定 installer candidate dev/inode；rolled_back
+base SITE identity 在 backup-copy restore 已发布时绑定 journaled rollback candidate dev/inode，otherwise 绑定 original site dev/inode；
+copy 恢复不保证 original inode。
+Every phase accepts only its recorded identity and must never derive identity from the current path；同内容或同 hash
+不足以接管。manual recovery must never
+derive or adopt unknown backup/runtime/rotation identity。Terminal physical finals/candidates and rotation cleanup
+must have zero residue，不能只凭一次 `test ! -e`。pair-free source-only `rolled_back` 是窄特例：只允许从
+effective `initializing`/`prepared` 转入，`rollback_journal` 与 `rollback_commit_marker` 必须同时 absent，业务
+delta 必须恰好包含 `phase`、`rollback_origin_phase` 和三项
+`log_archive_manifest_{sha256,generation,entry_count}`；manifest 必须是 generation 1、entry count 0 的
+operation-bound empty terminal manifest。若 journal 记录了非 `absent` 的 installer candidate hash、但
+candidate pathname 已 absent，则该 absence 只可由精确 operation path 上两次相同 held-FD capture 授权：
+schema 2 exact keys、root:root/0600、`nlink=1`、generation 1、`inventory_complete=true`、
+`empty_inventory=true`、`entries=[]`，且 candidate、manifest tmp、manifest previous 在 capture 前后均 absent。
+这就是 `prelive empty manifest` 契约。
+
+人工回滚的两个终态 journal 由 operation-bound terminal pair marker 协调，严格执行 `prepared → committed`。
+prepared marker 除 before/target SHA 外，还嵌入 `source_before_authority` 与 `rollback_before_authority`；两者 exact
+keys 均为 `{raw_base64,sha256,dev,ino}`。source raw 必须匹配 CLI-trusted SHA，rollback raw 必须 canonical 且
+effective phase 为 `logs_archived`；两份 terminal target 必须由这些 before authority 重建，并验证为各自唯一
+合法 CAS successor；对应字段仍精确命名为 `source_target_sha256` 与 `rollback_target_sha256`。prepared、单边和双边发布窗口均保留两侧 predecessor；只有 committed marker durable 后
+才清理。committed marker 另绑定 `prepared_marker_sha256` 与两侧 terminal SHA；validator 从 committed bytes
+还原 prepared marker、复算其 SHA，并证明 terminal SHA 等于 target SHA。prepared marker 本身不是业务
+authority；committed marker 的 physical chain 还必须对账两侧物理 journal 与 summary，恢复只接受精确
+before/target 状态。marker tmp/prepared、第三种 SHA 或链路不一致都阻断新事务，
+禁止从“看起来 rolled_back”的任意 JSON 推断完成。
+必须使用原 gate 审批已包含的精确 rollback 或重新取得批准。正常 committed summary 默认优先于
+recovery record；只有 summary 缺失，或操作者显式设置 `GL_A_RECOVERY_MODE=1`，才选择已按精确
+operation id 捕获的 recovery record。回滚不读取当前 checkout 的 helper，也不因紧急时工作树变脏而被
+阻断；它只上传 GL-a 前已固化在原 evidence 中、SHA 与 journal/summary 一致的不可变副本：
+
+```bash
+set -eu
+set -o pipefail
+umask 077
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+. "$REPO_ROOT/scripts/load-aifeeds-perf-evidence.sh"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+publish_local_file_no_replace() {
+  local source=$1 destination=$2 expected_dev=$3 expected_ino=$4
+  test "$(dirname "$source")" = "$(dirname "$destination")"
+  python3 - "$source" "$destination" "$expected_dev" "$expected_ino" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+source, destination = map(os.fsencode, sys.argv[1:3])
+expected_dev, expected_ino = map(int, sys.argv[3:])
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (expected_dev, expected_ino):
+    raise RuntimeError("local evidence source identity changed")
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform == "darwin":
+    RENAME_EXCL = 0x00000004
+    renamex_np = libc.renamex_np
+    renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    renamex_np.restype = ctypes.c_int
+    result = renamex_np(source, destination, RENAME_EXCL)
+elif sys.platform.startswith("linux"):
+    AT_FDCWD = -100
+    RENAME_NOREPLACE = 1
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(AT_FDCWD, source, AT_FDCWD, destination, RENAME_NOREPLACE)
+else:
+    raise SystemExit(f"unsupported no-replace rename platform: {sys.platform}")
+if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), os.fsdecode(destination))
+after = os.lstat(destination)
+if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+    raise RuntimeError("published local evidence identity changed")
+parent_fd = os.open(os.path.dirname(destination), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+}
+remove_owned_local_tmp() {
+  local path=$1 expected_dev=$2 expected_ino=$3
+  python3 - "$path" "$expected_dev" "$expected_ino" <<'PY'
+import os
+import stat
+import sys
+
+path, expected_dev, expected_ino = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+except FileNotFoundError:
+    raise SystemExit(0)
+try:
+    value = os.fstat(descriptor)
+    current = os.lstat(path)
+    if not stat.S_ISREG(value.st_mode) or not stat.S_ISREG(current.st_mode):
+        raise RuntimeError("local evidence tmp is not regular")
+    if (value.st_dev, value.st_ino) != (expected_dev, expected_ino):
+        raise RuntimeError("local evidence tmp descriptor identity changed")
+    if (current.st_dev, current.st_ino) != (expected_dev, expected_ino):
+        raise RuntimeError("local evidence tmp pathname identity changed")
+finally:
+    os.close(descriptor)
+os.unlink(path)
+parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+}
+G0_COMMIT="$(cat "$EVIDENCE/commit.txt")"
+printf '%s' "$G0_COMMIT" | grep -Eq '^[a-f0-9]{40}$'
+OPERATION_ID_FILE="$EVIDENCE/gl-a-operation-id.txt"
+test -f "$OPERATION_ID_FILE"
+test ! -L "$OPERATION_ID_FILE"
+test "$(stat -f '%u' "$OPERATION_ID_FILE")" = "$(id -u)"
+test "$(stat -f '%Lp' "$OPERATION_ID_FILE")" = 600
+OPERATION_ID="$(cat "$OPERATION_ID_FILE")"
+printf '%s' "$OPERATION_ID" | grep -Eq '^[0-9]{14}-[a-f0-9]{8}$'
+EXPECTED_LOG_ARCHIVE_MANIFEST="/var/backups/aifeeds-performance-log/audit-${OPERATION_ID}/archive-manifest.json"
+EXPECTED_ROLLBACK_COMMIT_MARKER="/var/backups/aifeeds-performance-log/rollback-commit-${OPERATION_ID}.json"
+REMOTE_ROTATION_ANCHOR="/var/backups/aifeeds-performance-log/rotation-anchor-${OPERATION_ID}.json"
+IMMUTABLE_ROLLBACK_HELPER="$EVIDENCE/gl-a-rollback-helper-${OPERATION_ID}.sh"
+test -f "$IMMUTABLE_ROLLBACK_HELPER"
+test ! -L "$IMMUTABLE_ROLLBACK_HELPER"
+test "$(stat -f '%u' "$IMMUTABLE_ROLLBACK_HELPER")" = "$(id -u)"
+test "$(stat -f '%Lp' "$IMMUTABLE_ROLLBACK_HELPER")" = 600
+ROLLBACK_HELPER_SHA256="$(shasum -a 256 "$IMMUTABLE_ROLLBACK_HELPER" | awk '{print $1}')"
+printf '%s' "$ROLLBACK_HELPER_SHA256" | grep -Eq '^[a-f0-9]{64}$'
+RECOVERY_MODE="${GL_A_RECOVERY_MODE:-0}"
+case "$RECOVERY_MODE" in 0|1) ;; *) exit 2 ;; esac
+if [ "$RECOVERY_MODE" = 0 ] && [ -f "$EVIDENCE/gl-a-summary.json" ]; then
+  RECORD="$EVIDENCE/gl-a-summary.json"
+  IS_RECOVERY_RECORD=0
+else
+  RECOVERY_BUNDLE="$EVIDENCE/gl-a-recovery-bundle-${OPERATION_ID}"
+  test -d "$RECOVERY_BUNDLE"
+  test ! -L "$RECOVERY_BUNDLE"
+  test "$(stat -f '%Lp' "$RECOVERY_BUNDLE")" = 700
+  RECOVERY_RECORD="$RECOVERY_BUNDLE/record.json"
+  RECOVERY_SHA="$RECOVERY_BUNDLE/record.sha256"
+  RECORD="$RECOVERY_RECORD"
+  IS_RECOVERY_RECORD=1
+fi
+test -f "$RECORD"
+test ! -L "$RECORD"
+test "$(stat -f '%Lp' "$RECORD")" = 600
+test "$(stat -f '%u' "$RECORD")" = "$(id -u)"
+SOURCE_JOURNAL="$(jq -er '.transaction_journal' "$RECORD")"
+if [ "$IS_RECOVERY_RECORD" = 1 ]; then
+  test -f "$RECOVERY_SHA"
+  test ! -L "$RECOVERY_SHA"
+  test "$(stat -f '%Lp' "$RECOVERY_SHA")" = 600
+  test "$(stat -f '%u' "$RECOVERY_SHA")" = "$(id -u)"
+  SOURCE_JOURNAL_SHA256="$(cat "$RECOVERY_SHA")"
+  test "$(shasum -a 256 "$RECORD" | awk '{print $1}')" = "$SOURCE_JOURNAL_SHA256"
+  jq -e '(.phase == "initializing" or .phase == "prepared" or .phase == "backup_created" or
+    .phase == "mutation_started" or .phase == "mutated" or .phase == "timer_enabled" or
+    .phase == "committed" or .phase == "rollback_failed")' "$RECORD" >/dev/null
+else
+  SOURCE_JOURNAL_SHA256="$(jq -er '.transaction_journal_sha256' "$RECORD")"
+fi
+jq -e --arg operation_id "$OPERATION_ID" --arg g0_commit "$G0_COMMIT" \
+  --arg helper_sha "$ROLLBACK_HELPER_SHA256" '
+  def positive_integer: type == "number" and . > 0 and . == floor;
+  def rotation_anchor_identity_is_valid:
+    if .rotation_anchor_identity == null then true
+    else
+      ((.rotation_anchor_identity | keys | sort) ==
+        ["dev","gid","ino","mode","path","sha256","size","state","uid"]) and
+      .rotation_anchor_identity.path ==
+        ("/var/backups/aifeeds-performance-log/rotation-anchor-" + $operation_id + ".json") and
+      .rotation_anchor_identity.uid == 0 and .rotation_anchor_identity.gid == 0 and
+      .rotation_anchor_identity.mode == "600" and
+      (.rotation_anchor_identity.dev | positive_integer) and
+      (.rotation_anchor_identity.ino | positive_integer) and
+      ((.rotation_anchor_identity.state == "allocated" and
+        .rotation_anchor_identity.sha256 ==
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" and
+        .rotation_anchor_identity.size == 0) or
+       ((.rotation_anchor_identity.state == "prepared" or
+         .rotation_anchor_identity.state == "sealed") and
+        (.rotation_anchor_identity.sha256 | test("^[a-f0-9]{64}$")) and
+        (.rotation_anchor_identity.size | positive_integer)))
+    end;
+  .schema == 1 and .gate == "GL-a" and .operation_id == $operation_id and
+  .g0_commit == $g0_commit and .rollback_helper_sha256 == $helper_sha and
+  ((.artifacts_sha256 | keys) == ["checker","diff_checker","format","inserter","rotate","service","timer"]) and
+  all(.artifacts_sha256[]; type == "string" and test("^[a-f0-9]{64}$")) and
+  ((.artifact_candidates | keys) == ["checker","diff_checker","format","inserter","log","rotate","service","timer"]) and
+  all(.artifact_candidates[]; type == "string" and test("[.]candidate-gl-a-" + $operation_id + "$")) and
+  .rollback_candidate == ("/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-" + $operation_id) and
+  rotation_anchor_identity_is_valid' \
+  "$RECORD" >/dev/null
+BACKUP="$(jq -er '.site_backup' "$RECORD")"
+BACKUP_SHA256="$(jq -er '.site_backup_sha256' "$RECORD")"
+INSTALLED_SITE_SHA256="$(jq -er '.installed_site_sha256' "$RECORD")"
+SITE_UID="$(jq -er '.original_site_uid' "$RECORD")"
+SITE_GID="$(jq -er '.original_site_gid' "$RECORD")"
+SITE_MODE="$(jq -er '.original_site_mode' "$RECORD")"
+printf '%s' "$BACKUP" \
+  | grep -Eq '^/var/backups/aifeeds-performance-log/aifeeds[.]conf[.]bak-perf-[0-9]{14}-[a-f0-9]{8}$'
+printf '%s' "$SOURCE_JOURNAL" \
+  | grep -Eq '^/var/backups/aifeeds-performance-log/transaction-[0-9]{14}-[a-f0-9]{8}[.]json$'
+printf '%s' "$BACKUP_SHA256$SOURCE_JOURNAL_SHA256" | grep -Eq '^[a-f0-9]{128}$'
+case "$INSTALLED_SITE_SHA256" in
+  absent) ;;
+  *) printf '%s' "$INSTALLED_SITE_SHA256" | grep -Eq '^[a-f0-9]{64}$' ;;
+esac
+printf '%s' "$SITE_UID:$SITE_GID:$SITE_MODE" | grep -Eq '^[0-9]+:[0-9]+:[0-7]{3,4}$'
+ROLLBACK_ATTEMPT_ID="$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 4)"
+printf '%s' "$ROLLBACK_ATTEMPT_ID" | grep -Eq '^[0-9]{14}-[a-f0-9]{8}$'
+ROLLBACK_SUMMARY="$EVIDENCE/gl-a-manual-rollback-summary-${OPERATION_ID}-${ROLLBACK_ATTEMPT_ID}.json"
+ROLLBACK_SUMMARY_TMP="$(mktemp "$EVIDENCE/.gl-a-manual-rollback-summary-${OPERATION_ID}-${ROLLBACK_ATTEMPT_ID}.XXXXXX")"
+ROLLBACK_SUMMARY_TMP_DEV="$(stat -f '%d' "$ROLLBACK_SUMMARY_TMP")"
+ROLLBACK_SUMMARY_TMP_INO="$(stat -f '%i' "$ROLLBACK_SUMMARY_TMP")"
+ROLLBACK_SUMMARY_PUBLISH_ATTEMPTED=0
+ROLLBACK_OUTPUT_TMP="$(mktemp "$EVIDENCE/.gl-a-manual-rollback-output-${OPERATION_ID}-${ROLLBACK_ATTEMPT_ID}.XXXXXX")"
+ROLLBACK_OUTPUT_FINAL="$EVIDENCE/gl-a-manual-rollback-output-${OPERATION_ID}-${ROLLBACK_ATTEMPT_ID}.txt"
+ROLLBACK_OUTPUT_TMP_DEV="$(stat -f '%d' "$ROLLBACK_OUTPUT_TMP")"
+ROLLBACK_OUTPUT_TMP_INO="$(stat -f '%i' "$ROLLBACK_OUTPUT_TMP")"
+ROLLBACK_OUTPUT_PUBLISH_ATTEMPTED=0
+REMOTE_STAGE=''
+cleanup_rollback_stage_best_effort() {
+  if [ -n "$ROLLBACK_SUMMARY_TMP" ]; then
+    if [ "$ROLLBACK_SUMMARY_PUBLISH_ATTEMPTED" = 1 ]; then
+      printf 'manual summary publish collision; preserved owned tmp and unknown destination: %s %s\n' \
+        "$ROLLBACK_SUMMARY_TMP" "$ROLLBACK_SUMMARY" >&2
+    else
+      remove_owned_local_tmp "$ROLLBACK_SUMMARY_TMP" "$ROLLBACK_SUMMARY_TMP_DEV" \
+        "$ROLLBACK_SUMMARY_TMP_INO" || printf 'preserved unowned manual summary tmp: %s\n' \
+        "$ROLLBACK_SUMMARY_TMP" >&2
+    fi
+  fi
+  if [ -n "$ROLLBACK_OUTPUT_TMP" ]; then
+    if [ "$ROLLBACK_OUTPUT_PUBLISH_ATTEMPTED" = 1 ]; then
+      printf 'manual transcript publish collision; preserved owned tmp and unknown destination: %s %s\n' \
+        "$ROLLBACK_OUTPUT_TMP" "$ROLLBACK_OUTPUT_FINAL" >&2
+    else
+      remove_owned_local_tmp "$ROLLBACK_OUTPUT_TMP" "$ROLLBACK_OUTPUT_TMP_DEV" \
+        "$ROLLBACK_OUTPUT_TMP_INO" || printf 'preserved unowned manual transcript tmp: %s\n' \
+        "$ROLLBACK_OUTPUT_TMP" >&2
+    fi
+  fi
+  case "$REMOTE_STAGE" in
+    /run/aifeeds-performance-log.*)
+      ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+        "rm -rf -- '$REMOTE_STAGE'" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+trap cleanup_rollback_stage_best_effort EXIT
+REMOTE_STAGE="$(ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  'set -eu; umask 077; stage=$(mktemp -d /run/aifeeds-performance-log.XXXXXX); chmod 0700 "$stage"; printf "%s\n" "$stage"')"
+case "$REMOTE_STAGE" in /run/aifeeds-performance-log.*) ;; *) exit 1 ;; esac
+scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem "$IMMUTABLE_ROLLBACK_HELPER" \
+  root@154.12.188.231:"$REMOTE_STAGE/"
+
+REMOTE_ROLLBACK_HELPER="$REMOTE_STAGE/${IMMUTABLE_ROLLBACK_HELPER##*/}"
+set +e
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "test \"\$(sha256sum '$REMOTE_ROLLBACK_HELPER' | awk '{print \$1}')\" = '$ROLLBACK_HELPER_SHA256' && \
+   timeout --signal=TERM --kill-after=30s 5m bash '$REMOTE_ROLLBACK_HELPER' '$REMOTE_STAGE' \
+     '$BACKUP' '$BACKUP_SHA256' '$INSTALLED_SITE_SHA256' '$SITE_UID' '$SITE_GID' '$SITE_MODE' \
+     '$SOURCE_JOURNAL' '$SOURCE_JOURNAL_SHA256'" 2>&1 \
+  | tee "$ROLLBACK_OUTPUT_TMP"
+ROLLBACK_PIPE_RESULTS=("${PIPESTATUS[@]}")
+set -e
+test "${#ROLLBACK_PIPE_RESULTS[@]}" -eq 2
+ROLLBACK_SSH_RC="${ROLLBACK_PIPE_RESULTS[0]}"
+ROLLBACK_TEE_RC="${ROLLBACK_PIPE_RESULTS[1]}"
+chmod 0600 "$ROLLBACK_OUTPUT_TMP"
+ROLLBACK_OUTPUT_PUBLISH_ATTEMPTED=1
+publish_local_file_no_replace "$ROLLBACK_OUTPUT_TMP" "$ROLLBACK_OUTPUT_FINAL" \
+  "$ROLLBACK_OUTPUT_TMP_DEV" "$ROLLBACK_OUTPUT_TMP_INO"
+test ! -e "$ROLLBACK_OUTPUT_TMP"
+test -f "$ROLLBACK_OUTPUT_FINAL"
+test ! -L "$ROLLBACK_OUTPUT_FINAL"
+test "$(stat -f '%Lp' "$ROLLBACK_OUTPUT_FINAL")" = 600
+ROLLBACK_OUTPUT_TMP=''
+ROLLBACK_OUTPUT_PUBLISH_ATTEMPTED=0
+if [ "$ROLLBACK_TEE_RC" -ne 0 ]; then exit "$ROLLBACK_TEE_RC"; fi
+if [ "$ROLLBACK_SSH_RC" -ne 0 ]; then
+  printf 'GL-a manual rollback failed; transcript preserved at %s\n' \
+    "$ROLLBACK_OUTPUT_FINAL" >&2
+  exit "$ROLLBACK_SSH_RC"
+fi
+scp "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem \
+  root@154.12.188.231:"$REMOTE_STAGE/gl-a-manual-rollback-summary.json" "$ROLLBACK_SUMMARY_TMP"
+chmod 0600 "$ROLLBACK_SUMMARY_TMP"
+jq -e --arg source "$SOURCE_JOURNAL" --arg operation_id "$OPERATION_ID" \
+  --arg g0_commit "$G0_COMMIT" --arg helper_sha "$ROLLBACK_HELPER_SHA256" \
+  --arg site_backup "$BACKUP" \
+  --arg log_archive_manifest "$EXPECTED_LOG_ARCHIVE_MANIFEST" \
+  --arg rollback_commit_marker "$EXPECTED_ROLLBACK_COMMIT_MARKER" '
+  def positive_integer: type == "number" and . > 0 and . == floor;
+  def rotation_anchor_identity_is_valid:
+    if .rotation_anchor_identity == null then true
+    else
+      ((.rotation_anchor_identity | keys | sort) ==
+        ["dev","gid","ino","mode","path","sha256","size","state","uid"]) and
+      .rotation_anchor_identity.path ==
+        ("/var/backups/aifeeds-performance-log/rotation-anchor-" + $operation_id + ".json") and
+      .rotation_anchor_identity.uid == 0 and .rotation_anchor_identity.gid == 0 and
+      .rotation_anchor_identity.mode == "600" and
+      (.rotation_anchor_identity.dev | positive_integer) and
+      (.rotation_anchor_identity.ino | positive_integer) and
+      ((.rotation_anchor_identity.state == "allocated" and
+        .rotation_anchor_identity.sha256 ==
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" and
+        .rotation_anchor_identity.size == 0) or
+       ((.rotation_anchor_identity.state == "prepared" or
+         .rotation_anchor_identity.state == "sealed") and
+        (.rotation_anchor_identity.sha256 | test("^[a-f0-9]{64}$")) and
+        (.rotation_anchor_identity.size | positive_integer)))
+    end;
+  def runtime_inventory_is_valid:
+    (.runtime_artifacts | type == "array") and
+    (.runtime_artifacts | length) <= 8 and
+    ([.runtime_artifacts[].name] | length == (unique | length)) and
+    ([.runtime_artifacts[].final] | length == (unique | length)) and
+    ([.runtime_artifacts[].candidate] | length == (unique | length)) and
+    all(.runtime_artifacts[];
+      (keys | sort) == ["candidate","dev","final","gid","ino","mode","name","sha256","uid"] and
+      (.name == "checker" or .name == "diff_checker" or .name == "format" or
+       .name == "inserter" or .name == "log" or .name == "rotate" or
+       .name == "service" or .name == "timer") and
+      (.candidate | test("[.]candidate-gl-a-" + $operation_id + "$")) and
+      (.sha256 | test("^[a-f0-9]{64}$")) and (.mode | test("^[0-7]{3,4}$")) and
+      (.uid | type == "number" and . >= 0 and . == floor) and
+      (.gid | type == "number" and . >= 0 and . == floor) and
+      (.dev | positive_integer) and (.ino | positive_integer)) and
+    (.runtime_artifacts_sealed | type == "boolean") and
+    (if .runtime_artifacts_sealed then (.runtime_artifacts | length) == 8 and
+      ([.runtime_artifacts[].name] | sort) ==
+        ["checker","diff_checker","format","inserter","log","rotate","service","timer"]
+     else true end);
+  def rotation_snapshot_is_valid:
+    .rotation_state_snapshot == null or
+    ((.rotation_state_snapshot | keys | sort) ==
+       ["generation","ledger","status","tail_record_sha256"] and
+     (.rotation_state_snapshot.generation | type == "number" and . >= 0 and . == floor) and
+     (.rotation_state_snapshot.tail_record_sha256 | test("^[a-f0-9]{64}$")) and
+     (.rotation_state_snapshot.ledger | keys | sort) ==
+       ["dev","gid","ino","mode","path","sha256","size","uid"] and
+     .rotation_state_snapshot.ledger.path == .rotation_state_identity.provenance.path and
+     .rotation_state_snapshot.ledger.dev == .rotation_state_identity.provenance.dev and
+     .rotation_state_snapshot.ledger.ino == .rotation_state_identity.provenance.ino and
+     .rotation_state_snapshot.ledger.uid == .rotation_state_identity.provenance.uid and
+     .rotation_state_snapshot.ledger.gid == .rotation_state_identity.provenance.gid and
+     .rotation_state_snapshot.ledger.mode == .rotation_state_identity.provenance.mode and
+     (.rotation_state_snapshot.ledger.sha256 | test("^[a-f0-9]{64}$")) and
+     (.rotation_state_snapshot.ledger.size | positive_integer) and
+     (.rotation_state_snapshot.status == null or
+      ((.rotation_state_snapshot.status | keys | sort) ==
+         ["dev","gid","ino","mode","path","sha256","uid"] and
+       .rotation_state_snapshot.status.path ==
+         "/var/lib/aifeeds-performance-logrotate/status" and
+       (.rotation_state_snapshot.status.uid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.gid | type == "number" and . >= 0 and . == floor) and
+       (.rotation_state_snapshot.status.mode | test("^[0-7]{3,4}$")) and
+       (.rotation_state_snapshot.status.sha256 | test("^[a-f0-9]{64}$")) and
+       (.rotation_state_snapshot.status.dev | positive_integer) and
+       (.rotation_state_snapshot.status.ino | positive_integer))));
+  def rotation_identity_is_valid:
+    if .rotation_state_identity == null then .rotation_state_snapshot == null
+    else
+      ((.rotation_state_identity | keys | sort) == ["directory","files","provenance"] and
+       (.rotation_state_identity.directory | keys | sort) ==
+         ["candidate","dev","gid","ino","mode","path","uid"] and
+       .rotation_state_identity.directory.path == "/var/lib/aifeeds-performance-logrotate" and
+       .rotation_state_identity.directory.candidate ==
+         ("/var/lib/aifeeds-performance-logrotate.candidate-gl-a-" + $operation_id) and
+       .rotation_state_identity.directory.uid == 0 and
+       .rotation_state_identity.directory.gid == 0 and
+       .rotation_state_identity.directory.mode == "750" and
+       (.rotation_state_identity.directory.dev | positive_integer) and
+       (.rotation_state_identity.directory.ino | positive_integer) and
+       .rotation_state_identity.files == [] and
+       (.rotation_state_identity.provenance | keys | sort) ==
+         ["dev","genesis_record_sha256","gid","ino","mode","path","uid"] and
+       .rotation_state_identity.provenance.path ==
+         "/var/lib/aifeeds-performance-logrotate/rotation-provenance.jsonl" and
+       .rotation_state_identity.provenance.uid == 0 and
+       .rotation_state_identity.provenance.gid == 0 and
+       .rotation_state_identity.provenance.mode == "600" and
+       (.rotation_state_identity.provenance.dev | positive_integer) and
+       (.rotation_state_identity.provenance.ino | positive_integer) and
+       (.rotation_state_identity.provenance.genesis_record_sha256 | test("^[a-f0-9]{64}$")) and
+       rotation_snapshot_is_valid)
+    end;
+  def backup_identity_is_valid:
+    .site_backup_identity == null or
+    ((.site_backup_identity | keys | sort) ==
+       ["dev","gid","ino","mode","path","sha256","staging_gid","staging_mode","staging_uid","uid"] and
+     .site_backup_identity.path == $site_backup and
+     .site_backup_identity.sha256 == .backup_sha256 and
+     .site_backup_identity.staging_uid == 0 and .site_backup_identity.staging_gid == 0 and
+     .site_backup_identity.staging_mode == "600" and
+     (.site_backup_identity.uid | type == "number" and . >= 0 and . == floor) and
+     (.site_backup_identity.gid | type == "number" and . >= 0 and . == floor) and
+     (.site_backup_identity.mode | test("^[0-7]{3,4}$")) and
+     (.site_backup_identity.dev | positive_integer) and
+     (.site_backup_identity.ino | positive_integer));
+  .schema == 1 and .gate == "GL-a-manual-rollback" and
+  .operation_id == $operation_id and .g0_commit == $g0_commit and
+  .rollback_helper_sha256 == $helper_sha and .site_restored == true and
+  ((.artifacts_sha256 | keys) == ["checker","diff_checker","format","inserter","rotate","service","timer"]) and
+  all(.artifacts_sha256[]; type == "string" and test("^[a-f0-9]{64}$")) and
+  ((.artifact_candidates | keys) == ["checker","diff_checker","format","inserter","log","rotate","service","timer"]) and
+  all(.artifact_candidates[]; type == "string" and test("[.]candidate-gl-a-" + $operation_id + "$")) and
+  .rollback_candidate == ("/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-" + $operation_id) and
+  runtime_inventory_is_valid and rotation_identity_is_valid and backup_identity_is_valid and
+  rotation_anchor_identity_is_valid and
+  .log_archive_manifest == $log_archive_manifest and
+  (.log_archive_manifest_sha256 | test("^[a-f0-9]{64}$")) and
+  (.log_archive_manifest_generation | type == "number" and . >= 0 and . == floor) and
+  (.log_archive_manifest_entry_count | type == "number" and . >= 0 and . == floor) and
+  .log_archive_manifest_generation >= (3 * .log_archive_manifest_entry_count + 1) and
+  .log_archive_manifest_generation <= (4 * .log_archive_manifest_entry_count + 1) and
+  .rollback_commit_marker == $rollback_commit_marker and
+  (.rollback_commit_marker_sha256 | test("^[a-f0-9]{64}$")) and
+  (.source_journal_terminal_sha256 | test("^[a-f0-9]{64}$")) and
+  (.rollback_journal_sha256 | test("^[a-f0-9]{64}$")) and
+  (.backup_present | type == "boolean") and
+  .metadata_restored == true and .timer_inactive == true and .service_inactive == true and
+  .nginx_active == true and .front_status == 200 and .api_status == 200 and
+  (.backup_sha256 | test("^[a-f0-9]{64}$")) and
+  (.source_journal == $source) and (.rollback_journal | test("^/var/backups/aifeeds-performance-log/rollback-transaction-"))' \
+  "$ROLLBACK_SUMMARY_TMP" >/dev/null
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "set -eu; test ! -e '$REMOTE_ROTATION_ANCHOR'; test ! -L '$REMOTE_ROTATION_ANCHOR'"
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "set -eu; for path in \
+    /etc/nginx/conf.d/aifeeds-performance-log.conf \
+    /etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-$OPERATION_ID \
+    /var/log/nginx/aifeeds-performance.jsonl \
+    /var/log/nginx/.aifeeds-performance.jsonl.candidate-gl-a-$OPERATION_ID \
+    /usr/local/sbin/aifeeds-check-nginx-request-id \
+    /usr/local/sbin/aifeeds-check-nginx-request-id.candidate-gl-a-$OPERATION_ID \
+    /usr/local/sbin/aifeeds-verify-nginx-request-id-diff \
+    /usr/local/sbin/aifeeds-verify-nginx-request-id-diff.candidate-gl-a-$OPERATION_ID \
+    /usr/local/sbin/aifeeds-insert-nginx-request-id \
+    /usr/local/sbin/aifeeds-insert-nginx-request-id.candidate-gl-a-$OPERATION_ID \
+    /etc/aifeeds-performance-logrotate.conf \
+    /etc/aifeeds-performance-logrotate.conf.candidate-gl-a-$OPERATION_ID \
+    /etc/systemd/system/aifeeds-performance-logrotate.service \
+    /etc/systemd/system/aifeeds-performance-logrotate.service.candidate-gl-a-$OPERATION_ID \
+    /etc/systemd/system/aifeeds-performance-logrotate.timer \
+    /etc/systemd/system/aifeeds-performance-logrotate.timer.candidate-gl-a-$OPERATION_ID \
+    /var/lib/aifeeds-performance-logrotate \
+    /var/lib/aifeeds-performance-logrotate.candidate-gl-a-$OPERATION_ID; do \
+      test ! -e \"\$path\"; test ! -L \"\$path\"; \
+   done; \
+   ! systemctl is-active --quiet aifeeds-performance-logrotate.timer; \
+   ! systemctl is-active --quiet aifeeds-performance-logrotate.service"
+ROLLBACK_SUMMARY_PUBLISH_ATTEMPTED=1
+publish_local_file_no_replace "$ROLLBACK_SUMMARY_TMP" "$ROLLBACK_SUMMARY" \
+  "$ROLLBACK_SUMMARY_TMP_DEV" "$ROLLBACK_SUMMARY_TMP_INO"
+ROLLBACK_SUMMARY_TMP=''
+ROLLBACK_SUMMARY_PUBLISH_ATTEMPTED=0
+ssh "${SSH_OPTS[@]}" -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 \
+  "case '$REMOTE_STAGE' in /run/aifeeds-performance-log.*) rm -rf -- '$REMOTE_STAGE' ;; *) exit 1 ;; esac"
+REMOTE_STAGE=''
+trap - EXIT
+```
+
+每次人工 helper 调用都会生成新的 operation+attempt bound `attempt transcript`；final 名称同时含
+operation id 与 attempt id，发布使用 no-clobber rename。远端 stdout/stderr 先写私有 tmp，立即捕获
+`PIPESTATUS`，再把 tmp 设为 0600 并发布 final，之后才执行 SSH/tee 退出码门禁，因此失败重试不会覆盖
+前一次 transcript。随后取回的 summary 还必须在本地 `jq` 中精确验证 operation-bound archive manifest
+和 terminal-pair commit marker 的路径及各自 64 位小写十六进制 SHA-256。
+本地 evidence 的 forward transcript、forward summary、manual transcript 和 manual summary 全部使用
+same-parent NOREPLACE publication，并在成功 rename 后对 parent directory 执行 fsync。publish collision
+必须同时保留 owned tmp 与 unknown destination，不允许覆盖或猜测接管。每个 tmp 由 `mktemp` 的 O_EXCL
+allocation 创建；只有随即记录的 recorded dev/ino 才能授权 failure cleanup，当前 pathname、同内容或同 hash
+都不是删除依据。
+
+回滚只撤销 nginx performance logging/request-id 传播与专用 timer，不改 Worker、Pages、DNS、证书或数据。
+root-only backup、事务 journal 与审计日志默认保留复盘；精确删除仍需另一次明确审批。
+<!-- aifeeds-performance-log:end -->
+
+<!-- aifeeds-list-projection:start -->
+#### C 端 list projection、GitHub 封面门禁与 ClawHub 索引（2026-07-11，本地完成，远端未执行）
+
+**当前状态**：`/api/items` 六类列表 SQL 已改为显式列 + source-specific compact `extra`；详情
+`/api/items/:id` 和搜索仍保留各自完整契约。排序/游标辅助列全部使用 `_` 前缀，只在 Worker
+内部生成 cursor，不进入 list JSON。普通列表和官方新闻的新 cursor 以 `v2|...` 开头并包含
+`_untranslated_rank`；旧 cursor 仍可读。Huodongxing 缺失开始时间统一使用与 ORDER BY 相同的
+`9999` key，GitHub/PH 的 `cursor+pinned` 参数顺序也已修正。Hot 列表的新 cursor 使用
+`v2h|score|id|rank_now`，后续页沿用第一页的冻结时间计算衰减分，避免边界 item 因时钟前进重复出现；
+未来或无法解析的发布时间按 `age_hours=0` 计算，保证 score 始终有限且由 `id` 完成稳定全序；格式、
+score、id 或 `rank_now` 非法的 `v2h` cursor 直接返回 `400 invalid_cursor`，不得静默退回第一页。
+旧 `score|id` cursor 仍可读。
+
+本次只完成代码、测试、本地 SQLite JSON1/EXPLAIN 验证；**未部署 Worker、未运行 staging/prod
+GitHub 回填、未对任何远端 D1 应用 migration 028**。下面每个远端写动作仍需独立审批。
+
+**GitHub `cover_url` 覆盖门禁**：新 enrich 在 README 抓取后写
+`cover_status='ok' + cover_url` 或 `cover_status='none'`，R2 rewrite 后再次计算最终 cover。
+README 的全部候选明确 404/空 2xx 才算 confirmed absent；网络错误、429、5xx 与其他非 404
+会抛出并保持 workflow 可重试，不能把瞬时失败固化为 `cover_status='none'`。
+列表 projection 只有看到可信 `cover_status IN ('ok','none')` 才不再携带隐藏 README；旧的非空
+但非法 `javascript:`/SVG/badge cover 不算完成。一次性 mode 默认 dry-run：
+
+```bash
+# staging dry-run：只报告 candidates/covers/none/remaining，零写
+curl -sS -X POST \
+  'https://staging-api.ai-feeds.com/api/enrich/run?mode=github-cover-backfill&dry_run=1&limit=100' \
+  -H "Authorization: Bearer $INGEST_TOKEN" | jq
+```
+
+写模式必须在 staging 单独获批后才把 `dry_run=0`，按返回的 `next_cursor` 传
+`after_id=<urlencoded id>` 分批继续；遇到 `errors>0` 或 `conflicts>0` 时 cursor 会归零，必须从头
+重扫。`complete=true` 不是“本页不足 limit”，而是全局 remaining COUNT=0 且无 error/conflict。
+候选范围严格为 GitHub feed 可见的 relevant、未删、非 sponsor、workflow-complete 行；UPDATE 用
+原 `extra` compare-and-swap，drawer 的 on-demand refresh 也只 `json_set` 局部字段，避免覆盖并发
+cover marker。生产回填需另一次生产数据审批；在 staging/production 各自 `complete=true` 前不得
+删除隐藏 README fallback。
+
+**migration 028 只优化已证实的 ClawHub 默认 SQL**：
+
+- `idx_items_clawhub_feed_stars`：`category=all&sort=stars`；
+- `idx_items_clawhub_category_stars`：具体 category equality + stars/id 顺序；
+- 两者都是 relevant、未删、非 suspicious 的 partial expression index；
+- 没有为 PH、news、X/HF、GH、HDX 新增索引。PH persisted rank 仍需单独版本化 cursor/重排设计；
+  news 的时间动态 score 也不能用静态索引假装解决。
+
+staging 获批后的顺序（当前未执行）：
+
+```bash
+cd worker
+npm test -- --run src/list-query-plan.test.ts
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --file=migrations/028-feed-list-query-indexes.sql
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --command="EXPLAIN QUERY PLAN SELECT id FROM items WHERE source_type='clawhub' AND is_relevant=1 AND deleted_at IS NULL AND COALESCE(json_extract(extra,'$.is_suspicious'),0)=0 ORDER BY CAST(json_extract(metrics,'$.stars') AS INTEGER) DESC,id ASC LIMIT 31"
+```
+
+验收必须同时记录默认 all/category 的 EXPLAIN、结果/next_cursor 对比、D1 P75、Worker
+`Server-Timing`、identity/gzip；要求 ClawHub 不再出现 `USE TEMP B-TREE FOR ORDER BY`，且结果和
+游标无回归。projection 后实测若 PH/news/X/HF 没超过计划阈值，禁止顺手加索引。
+
+生产 apply 仍需单独审批和已记录的 staging 证据。精确回滚 SQL：
+
+```sql
+DROP INDEX IF EXISTS idx_items_clawhub_feed_stars;
+DROP INDEX IF EXISTS idx_items_clawhub_category_stars;
+```
+
+回滚后重新跑两条 EXPLAIN 与列表 cursor smoke；索引回滚不要求回滚 compact DTO。若 DTO/字段或
+分页有回归，应回滚 Worker 版本，而不是删除索引来掩盖应用层问题。
+<!-- aifeeds-list-projection:end -->
+
+<!-- aifeeds-card-image-variants:start -->
+#### C 端卡片图片变体与第三方图片受控链路（2026-07-11，本地完成，远端写未执行）
+
+**选型证据**：只读生产 spike 用同一张 X 图片比较了原图与现有严格白名单 `/img`：原图
+622×1199、98,244 B、TTFB 约 0.95s；`w=400` 返回 400×771 AVIF、35,092 B，但冷 TTFB
+约 2.92s，warm 仍约 1.34s；`w=800` 因 `scale-down` 实际仍为 622×1199。视频 R2 Range
+请求返回 `206`、1024 B。结论是 `/img` 适合活动行/HF 等存量或第三方兜底，但不应把每张首屏图的
+冷转换放在用户请求上；新内容在外部资源迁 R2 时预生成 400/800 请求档的 WebP，记录**实际**输出
+宽高并内容寻址存入 `/r/<source>/card/`。未对 production/staging 发出任何写请求。
+
+**代码契约**：`worker/src/card-image-variant.ts` 只接受 HTTPS 静态图片，拒绝 GIF/SVG、音频、
+视频、私网、本站所有子域和 `*.workers.dev`，并以 `redirect=error` 防止首跳外链重定向回本服务。
+源 Content-Type 未知时先用同源 UA 做 HEAD 探测，无法确认静态类型就跳过；Cloudflare 转换固定
+`anim:false`，不会把动画带进卡片变体。
+每个 item 最多生成一个主视觉的两档变体，原图始终保留给详情、Lightbox 与旧浏览器。X 转推使用
+翻转后的 `retweet_of` 主视觉；视频只可能生成 poster 变体，mp4 不进入转换。PH 跳过 logo、avatar
+与视频 body；HF 兼容 `figure_image.raw_url`；博客在品牌图护栏/body hero 回落之后只处理最终采用
+封面；播客音频迁移完全不变。标量封面使用 `cover_variant_source` 绑定当前 cover，避免后续 sweep
+换图后误用旧变体。
+
+前端有变体时使用 `<picture><source type="image/webp">`，变体加载失败先移除 source 再重试原图；
+没有变体的 HF/活动行候选走 `/img` 的 400/800 受控 URL。`/img` host 白名单为活动行卡片新增
+`cdn.huodongxing.com`、`wimg.huodongxing.com`、`nscdn.huodongxing.com`，并为 GitHub 已知图片
+重定向链补充 `private-user-images.githubusercontent.com`、`objects.githubusercontent.com`、
+`camo.githubusercontent.com`。首跳和最多三次后续跳转都重新验证 HTTPS 与同一严格白名单，
+不允许借重定向访问私网或任意 host；每一跳按验证后的 `currentTarget` 生成独立 cache key，避免
+缓存的首跳 3xx 在最终 URL 上自我重放；宽度/质量均有限分桶，
+`Accept` 独立选择 AVIF/WebP 且 cache key 含格式。图片响应和 `/r` 增加
+`Timing-Allow-Origin`。`video.twimg.com` 才转发 `/img` Range 且不走 `cf.image`；`/r` 的 206、
+`Content-Range`、`Accept-Ranges` 与 hotlink gate 保持原契约。
+
+视频 poster 也服从页面媒体预算：只有首屏 `eager/high` 视频立即写入 `poster`，其余视频在距离
+当前滚动容器 200px 内或收到 hover、pointer、focus、play 等明确意图后才注入；PC 以各自
+`.feed-body` 为观察根，移动端以文档 viewport 为根。Tweet 视频优先使用精确 400px 的已存 WebP
+poster 变体（再退到不小于 400px 的最小合法档和受控 `/img?w=400`），LinkCard 始终使用受控
+代理；不得为了封面提前读取 mp4。Playwright 门禁同时统计 poster 网络请求，保证屏外 lazy
+poster 为零、意图只放行目标视频且不会请求 800px 档。
+
+**存量回填门禁**：ops mode 默认 dry-run、永不由 cron 调用：
+
+```bash
+# 只读 inventory；当前未执行远端请求
+curl -sS -X POST \
+  'https://staging-api.ai-feeds.com/api/enrich/run?mode=card-image-variant-backfill&dry_run=1&limit=10' \
+  -H "Authorization: Bearer $INGEST_TOKEN" | jq
+```
+
+写模式 `dry_run=0` 同时创建 R2 对象并 CAS 更新 D1，必须先单独取得 staging 数据写审批。它从仍
+保留的 HTTPS 原链、R2 对象 `src-url` metadata 或 HF `figure_image.raw_url` 恢复上游，并携带各源
+实时迁移使用的 User-Agent。标量封面与 `cover_variant_source` 失配时，即使 version=1 也重新进入；
+失败会清掉旧变体并绑定本次尝试的 cover，下一次换图仍可重跑但不会无限重下。恢复不到写
+`card_variant_status=source_unavailable` 终态，转换失败写 `transform_failed`，两者都写 version=1，
+不会永久重下；单行 malformed JSON 计入 errors 而不会让整批 500。每批最多 25，按
+`next_cursor` 继续；任何 conflict/error 都停止推进。staging 完成
+后必须抽验 source 绑定、400/800 实际字节/尺寸、DPR 1/2/3 清晰度、CLS、X 视频 seek 与播客音频
+seek，且典型 360–400 CSS px 卡图目标 ≤40 KiB；production 写需另一次审批。
+
+**回滚**：先回滚 Dashboard/Worker 到前一版本；原图字段未被删除，因此卡片会自然退回原图或
+受控 `/img`。变体对象是内容寻址且无业务唯一性约束，无需紧急删除。若要清理，只能在引用审计后
+删除独立的 `<source>/card/` key，禁止清共享 `/r` 音视频或 `/img` cache。D1 marker/variant 字段位于
+JSON，可保留；回滚代码会忽略它们。
+<!-- aifeeds-card-image-variants:end -->
+
+<!-- aifeeds-same-origin-api:start -->
+#### 同源 API perf staging 与生产切换（2026-07-12，执行包已版本化，当前未部署）
+
+**状态与权限边界**：本节只记录本地代码、构建脚本、版本化模板和未来操作步骤。精确命令、停止线
+与逐项回滚见
+[`docs/reviews/c-end-perf-staging-change-packet.md`](reviews/c-end-perf-staging-change-packet.md)。当前未创建
+`xlist-dashboard-perf` Pages 项目，未创建 `perf-staging.ai-feeds.com` DNS/证书，未复制
+[`deploy/nginx/aifeeds-api-location.conf`](../deploy/nginx/aifeeds-api-location.conf) 到 VPS，未执行
+`nginx -t` / reload，也未部署 staging 或 production。下列每类外部动作都必须先取得对应的
+**独立明确审批**；代码合并、构建成功或“继续计划”不构成 Pages、DNS、证书或 VPS 变更授权。
+
+现有 `staging.ai-feeds.com` / `staging-api.ai-feeds.com` 直接经过 Cloudflare，不经过香港 VPS，
+因此不能用它验证生产同源拓扑。实验必须使用隔离的 `perf-staging.ai-feeds.com`：页面壳经香港 VPS
+回源专用 `xlist-dashboard-perf.pages.dev`，同一 host 的 `/api/` 经香港 VPS 回源 staging Worker。
+**现有 staging 保持不变**，生产也继续使用 `https://api.ai-feeds.com`，直到各自路由存在且单独获批。
+
+**构建矩阵与解析优先级**：`VITE_API_SAME_ORIGIN=true` 明确优先于 `VITE_API_BASE`；因此专用
+perf build 即使读取 checked-in `.env.staging`，也使用相对 `/api`。host fallback 不能覆盖显式
+external base，避免普通 staging/Pages artifact 被误切同源。
+
+| 命令 / artifact | API base | 允许的承载面 |
+|---|---|---|
+| `npm run build` / `npm run deploy` | `https://api.ai-feeds.com` | 普通 production 与 production Pages preview |
+| `npm run build:staging` / `npm run deploy:staging` | `https://staging-api.ai-feeds.com` | 现有 staging 与 staging Pages preview |
+| `npm run build:perf-staging` | `''`（相对 `/api`） | 仅已具备 `/api/` route 的 `perf-staging.ai-feeds.com` |
+| `npm run build:same-origin` | `''`（相对 `/api`） | 仅生产 front `/api/` route 验收后生成本地产物 |
+| `npm run deploy:same-origin` | 固定 fail-closed（退出码非 0） | 不部署；只指向本节获批操作包，不能被 `SKIP_PREDEPLOY_CHECK` 绕过 |
+
+普通 localhost 继续用相对路径交给 Vite proxy。`www.ai-feeds.com` 正常在 nginx 先跳转，不作为
+应用承载面。专用 perf artifact 直接打开 `xlist-dashboard-perf.pages.dev` 时没有同源 `/api`，
+预期不能作为验收面；普通 production/staging Pages preview 则始终使用上表外域 API。
+HTML 的首流预取与应用 resolver 使用同一优先级：同源 build 请求相对
+`/api/items?source_type=x_list&limit=12`，不会预连 `api.ai-feeds.com`；external build 才动态加入
+对应 API origin 的 preconnect/dns-prefetch。
+
+2026-07-12 只读采证确认：`perf-staging.ai-feeds.com` 还没有 DNS 记录；生产主域和同 VPS 的隔离测试域
+均为 DNS-only A，故本实验也固定为 DNS-only A、TTL 120；VPS 是 nginx 1.24.0 / certbot 2.9.0，
+resolver 为 `1.1.1.1`、`1.0.0.1`；staging 未配置 `ORIGIN_SECRET`，Worker gate 关闭。这些事实只用于
+版本化变更单，没有创建记录、签证书或 reload。
+
+DNS credential 另有硬门：当前统一 env 的 `CLOUDFLARE_API_TOKEN` 按本章权限真值只有
+Worker/Pages/D1/KV/R2，没有 Zone/DNS；当前 env 也没有 `CF_OPS_API_TOKEN`。因此 DNS gate 是
+**BLOCKED**，不得拿 deployment token 试写，也不得静默读取历史 `.bak`。必须由 credential owner 在
+独立审批下提供精确 `ai-feeds.com` zone、最长 24 小时且只有 `Zone Read` + `DNS Edit` 的子 token，
+以 0600 临时文件交给变更单；创建和撤销子 token 与创建/删除 DNS record 是分开的审批边界。
+
+**版本化 nginx 模板**：通用生产 location 模板只能放在目标 public site front `server` 内、SPA `location /` 之前；
+不得放进现有 staging、admin、webhook、API 或其他 virtual host。它故意包含以下占位符，仓库中
+没有任何 secret：
+
+| 占位符 | perf staging 私有渲染值 | production 私有渲染值 |
+|---|---|---|
+| `__WORKER_UPSTREAM_HOST__` | staging Worker 的 workers.dev host | production Worker 的 workers.dev host |
+| `__PUBLIC_API_HOST__` | `staging-api.ai-feeds.com` | `api.ai-feeds.com` |
+| `__ORIGIN_SECRET__` | 以 staging Worker 实际 gate 配置为准 | prod `ORIGIN_SECRET`；只在私有 VPS 会话注入 |
+
+模板用无 URI 后缀的 `proxy_pass` 保留完整 `/api/...` 与 query；Cookie、Authorization、
+`X-Forwarded-*`、回源 gate 和 `X-Request-Id` 透传到 Worker，并显式保留响应的 `Set-Cookie`、
+`Server-Timing`、`X-Request-Id`。`proxy_cache off` + bypass/no-cache 防止 front 继承缓存后误存
+登录、favorite、subscription、feedback 或其他个性化/mutation 响应。不得在本任务顺手增加
+microcache、cookie rewrite、CORS header rewrite 或 admin/webhook 转发。
+
+模板不是可直接安装的配置。获批后的私有 VPS 会话必须先备份实际 site 文件，用不会回显值的方式
+对照现有 API location 的完整 `proxy_set_header`、body-size、timeout、buffering 与 SNI 设置；差异
+逐项解释后把占位符渲染到临时文件。禁止把 `nginx -T` 全文、`X-Origin-Secret`、Cookie、
+Authorization 或渲染后的配置复制到日志、PR 或本仓库。
+
+perf-staging 不渲染这个含 secret 占位符的通用 location，而使用两份无 secret、固定 staging 身份
+的完整配置：首次签证书前用
+[`deploy/nginx/aifeeds-perf-staging-bootstrap.conf`](../deploy/nginx/aifeeds-perf-staging-bootstrap.conf)
+只开放 HTTP-01；签发后替换为
+[`deploy/nginx/aifeeds-perf-staging-server.conf`](../deploy/nginx/aifeeds-perf-staging-server.conf)。后者在
+nginx 1.24 上用 `resolver` + 变量 `proxy_pass` 让 Pages/Worker hostname 每 30 秒安全重解析。Worker
+upstream 使用已验证的 `staging-api.ai-feeds.com`；`xlist-api-staging.ltsms86.workers.dev` 的
+`/api/*` 在 2026-07-16 现场返回 404，只是部署身份，不能用于此链路。API route 固定
+`X-Forwarded-Host: staging-api.ai-feeds.com`，不发送 `X-Origin-Secret`，且页面/API 都
+显式禁用 cache；SPA fallback 前另有与生产同形的 `/daily`、`/i/*`、robots/sitemap/llms Worker
+route，防止 SEO 页面被 Pages 壳吞掉，裸 `/i` 则仍交给 SPA。两者都必须先 `nginx -t`，成功后才
+reload。所有 public TLS upstream 都用系统 CA 验证；Pages fallback 明确清空 Cookie、Authorization
+和运维敏感头，不能把 `.ai-feeds.com` session 发给 pages.dev；API body 上限为 6 MiB，覆盖现有
+5 MiB feedback 图片加 multipart framing。
+
+**外部门禁与 perf staging 顺序（均未执行）**：
+
+1. 经 Cloudflare Pages 独立审批，创建专用项目 `xlist-dashboard-perf`，只部署已本地验证的
+   `npm run build:perf-staging` artifact；绝不覆盖 `xlist-dashboard-staging`。
+2. 经 DNS 与证书独立审批，把 `perf-staging.ai-feeds.com` 指向香港 VPS 并签发/安装仅该实验 host
+   所需证书；记录变更前值和逐项回滚值。
+3. 经 VPS/nginx 独立审批，在新的 perf-staging front server 中先放 `location ^~ /api/`，再放
+   Pages SPA fallback；私有渲染模板后先运行 `nginx -t`，成功才允许 reload。
+4. 仅在 DNS、证书、Pages、nginx 全部 ready 后从 `perf-staging.ai-feeds.com` 验收。任何直接 Pages
+   URL、现有 staging 或本地 proxy 的成功都不能替代这一拓扑验收。
+
+**完整验收矩阵**：desktop Chromium 1440×900、tablet Chromium 820×1180、iPhone-like Chromium
+390×844、iPhone WebKit 390×844、Android Chromium 412×915 都要跑匿名与登录态。每项记录
+commit、Pages deployment、nginx config backup、Worker
+version、request id、状态码和浏览器网络证据，但不得记录验证码、session Cookie 或用户内容。
+
+- 网络基线：首个 HTML 与 `/api/items` 复用 `perf-staging.ai-feeds.com` 的 HTTP/2/TLS session；
+  API connect/TLS 为 0 或可解释的复用值；没有指向 staging API origin 的 CORS OPTIONS；首流预取
+  与 React 请求归一化后只有一次；响应保留 `Server-Timing` 和与 nginx/Worker 可 join 的
+  `X-Request-Id`。
+- 匿名面：首页/feed、manifest、搜索与 suggest；列表一次失败后的正常恢复；无权限写操作仍返回
+  原有状态，不因 nginx 变成 HTML/缓存响应。匿名 `/api/auth/me` 必须返回 `200 {"user":null}` 且不得
+  命中共享缓存；需要登录的接口仍按原契约返回 401。
+- 既有登录：带已有 Cookie 打 `/api/auth/me`，身份保持且响应 `Set-Cookie` 属性未被 nginx 改写；
+  刷新、开新 tab 和 PC/移动端切换后仍登录。
+- 邮件验证码：`/api/auth/email/send` → `/api/auth/login` → `/api/auth/me` → `/api/auth/logout`
+  完整闭环。验证码只在受控测试账号和私有界面使用，不写验收日志。
+- SMS：保持当前产品开关禁用；本批次已把 `/api/auth/sms/send` 改为只有
+  `ENABLE_SMS_LOGIN === 'true'` 才继续，其他值在解析、Turnstile、DB、额度和 provider 前 fail-closed。
+  验收只提交空 JSON 并断言 `403 / reason=sms_disabled`，不得填手机号/验证码，也禁止临时打开通道。
+- 登录互动：subscription 读取/更新/退订、feedback 文本与允许大小的图片上传/mine/read/unread，逐项
+  验证 CSRF/Cookie、状态码和刷新后持久化；不得使用真实用户内容。`favorite` 记为 **N/A**：当前仓库
+  没有 `/api/favorites` route、favorites table 或收藏 UI，不能用不存在的能力伪造通过项。
+- 分享：`/api/share/create`、poster、landing 与 `/s/:token` 二维码/跳转；规范公开 URL 仍由
+  Worker 环境的 `SITE_BASE` / `API_BASE` 生成，不能变成 workers.dev 或 perf host。
+- SPA 深链族逐一冷开与刷新：`/t/:id`、`/g/:owner/:repo`、`/ph/:slug/:date`、`/c/:slug`、
+  `/e/:eventId`、`/h/:arxivId`、`/o`、`/o/:id`、`/s/:token`、`/search`、`/settings`、
+  `/settings/account`、`/feedback`、`/subscribe`、`/me/subscription`。
+- Worker/SEO 深链保持原路由：`/daily`、`/daily/:date`、`/i/` item pages、`/robots.txt`、
+  `/sitemap.xml`、sitemap shards、`/llms.txt` 和静态 hashed assets。`^~ /api/` 不得吞掉这些路径。
+- 错误/安全：401/403/404/429/5xx 不被缓存；Cookie 不串用户；CORS、字体和媒体 Range 行为与当前
+  staging 约定一致。**staging 限制必须显式记为 N/A**：该 Worker 未设 `ORIGIN_SECRET`，所以 gate
+  关闭，`getClientIp` 不信任 VPS 的 `X-Forwarded-For` 而回落到 Worker 看到的 VPS
+  `CF-Connecting-IP`；perf-staging 不能证明 production origin gate、真实访客 IP 或 per-IP 限流。
+  验收只用单个低频测试账号，生产 route 上线前必须在私有带 secret 链路另验这三项。
+
+验收至少比较 external staging 与 perf staging 的 cold/warm `perf_api` DNS/connect/TLS/request/total、
+`feed_ready`、FCP/LCP、transfer、错误率；预期因果信号是同源 API 不再支付第二次 TLS 且没有
+CORS OPTIONS。只跑 curl 或 synthetic 不能替代真机/浏览器功能矩阵，也不能冒充真实 RUM。
+
+**生产切换（另一次独立生产审批）**：
+
+1. 先备份 production front 配置，私有渲染 prod 占位符并加入 `/api/` location；当前 dashboard
+   仍是 external build，所以新增 route 此时没有用户流量。`nginx -t`、reload、匿名/auth header
+   smoke 全绿后再继续。
+2. `npm run deploy:same-origin` 默认永远拒绝生产发布；不得临时改 package script 或用
+   `SKIP_PREDEPLOY_CHECK` 绕过。获批操作包必须写明 exact clean `main` commit、已验收 route 的
+   request-id 证据、执行人与回滚人。只有该次审批覆盖的私有操作会话才执行：
+
+   ```bash
+   cd dashboard
+   npm run build:same-origin
+   npx wrangler pages deploy dist --project-name=xlist-dashboard --branch=main --commit-dirty=false
+   ```
+
+   部署后立即完成 items/manifest/search/auth/subscription/feedback/share/deep-link smoke，确认
+   request-id join、`Set-Cookie` / `Server-Timing` 和 API-origin OPTIONS=0。
+3. 单独观察至少 48 小时，按性能计划的 all-clean/engaged、PC/移动端和错误停止线判断；不得同时
+   叠加微缓存、地域路由或其他基础设施实验。
+
+**可执行回滚顺序**：应用回滚永远先于 route 删除，避免两个依赖必须在同一瞬间成功。
+
+1. 出现回归时**保留 `/api/` route**，停止其他变更；运行现有 `cd dashboard && npm run deploy`
+   重新构建/部署 external-API artifact。该 build 会恢复 `https://api.ai-feeds.com`，同时留下的
+   same-origin route 对用户无害。
+2. 验证首页/feed/search、`/api/auth/me`、邮件验证码、logout、subscription、feedback、
+   share 与全部深链已通过外域 API 恢复；确认错误率和 request waterfall 回到基线。
+3. external build 稳定后，才在另一次获批 VPS 动作中按部署时的精确 backup 或审查过的反向 diff
+   删除未使用的 production `/api/` location，执行 `nginx -t` 后 reload。不要用通配符猜 backup，
+   不要 purge 无关缓存。
+4. 若 route 本身导致 front 故障而 Pages external artifact 尚健康，可先用部署时精确备份恢复 nginx；
+   仍需验证 external API 完整功能。记录回滚时刻、原因、artifact 与 config version。
+
+perf staging 回滚彼此独立：Pages project、DNS/证书和 VPS server block 各自使用变更单中的精确旧值，
+不得借“清理实验”改现有 staging。删除任何外部资源同样需要明确审批。
+<!-- aifeeds-same-origin-api:end -->
+
+<!-- aifeeds-upstream-performance:start -->
+#### Worker upstream keepalive / list microcache 实验门禁（2026-07-12，keepalive BLOCKED）
+
+**结论先行**：当前不启用 keepalive，也不启用 microcache。Task 11 的 topology-faithful perf
+staging、Task 3 分段 nginx 日志以及 Task 9 远端 projection/index 时序证据均未部署；现有
+staging 不经过香港 VPS，不能提供可信 A/B。仓库中的
+[`deploy/nginx/aifeeds-upstream-performance.conf`](../deploy/nginx/aifeeds-upstream-performance.conf)
+含未渲染 resolver/upstream 占位符，**不得安装**，且明确 `proxy_cache off`。
+
+2026-07-12 已获批的只读 VPS 采证确认实际为 **nginx 1.24.0**。开源 nginx 只有从 **1.27.3** 起
+才支持本设计所需的 `upstream server ... resolve` 安全动态重解析；因此当前 keepalive A/B/A
+状态为 **BLOCKED**，不安装 template、不跑伪 A/B，也绝不固定 Cloudflare IP。计划中的预期收益仅
+20–30ms，不足以附带授权升级生产 nginx。纯函数能力门
+[`deploy/nginx/nginx-capability.mjs`](../deploy/nginx/nginx-capability.mjs) 会把 1.24.0 判为
+`resolver+variable-proxy_pass`，只有另行批准升级并验证至少 1.27.3 后才可重新打开本节实验。
+
+未来若能力门重新打开，命名 upstream 只替换 Task 11 私有渲染 location 的
+`proxy_pass`；真实 Worker hostname 仍分别写入 `Host` 和 `proxy_ssl_name`，origin secret、
+Cookie、Authorization、request id 与其他 header 完全沿用原 location。
+
+获批后的 perf-staging A/B 使用安全脚本（会拒绝 production、任意 host 与个性化 endpoint）：
+
+```bash
+node scripts/benchmark-aifeeds-upstream.mjs \
+  --url 'https://perf-staging.ai-feeds.com/api/items?source_type=x_list&limit=12' \
+  --warmup 20 --requests 100 --concurrency 1
+node scripts/benchmark-aifeeds-upstream.mjs \
+  --url 'https://perf-staging.ai-feeds.com/api/items?source_type=x_list&limit=12' \
+  --warmup 20 --requests 100 --concurrency 8
+```
+
+至少做 A/B/A 三轮并跨两个 resolver TTL；100% 2xx，P50/P95 的 nginx
+`upstream_connect_time` 与 `upstream_header_time` 都改善，`request_time` 不得恶化 >5%，稳定收益
+至少 15ms。收益 <10ms、仅单一分位改善、轮次反转或错误率增加 >0.5pp 均不采用。之后在隔离
+perf staging 观察 24 小时；生产仍需单独审批且不得与同源切换同批。
+
+脚本会给 warmup 使用独立 probe；输出的正式 `run_id` 只随 `requests` 正式样本发送。nginx 只接受
+该脚本生成的受限格式，并写入性能日志的 `perf_probe`。每个 A/B/A 输出必须单独保存，按其
+`run_id = perf_probe` 过滤日志后再计算 connect/header/request 分位，禁止把 warmup、相邻轮次或
+普通访客请求混在一起比较。若日志中正式 `run_id` 的数量与脚本 `requests` 对不上，先停止实验并查
+转发/轮转链路，不能用残缺样本下结论。
+
+microcache 只有 projection/index 后公开 list 的 D1+Worker P75 仍约 ≥150ms、占 API 总耗时
+≥25%，且 20 秒窗口存在足够重复请求时才进入另一份设计/评审。未来即使启用，也只能是两个 exact
+GET location（`/api/items`、`/api/feed-manifest`）和独立 cache zone/path；Authorization、任意
+Cookie、非 GET、cursor、pinned、未知参数、非 200、`Set-Cookie` 全部 bypass/no-store，禁止
+`use_stale`，禁止复用现有图片/字体 cache。cache HIT 必须隐藏填充请求的旧
+`X-Request-Id`/`Server-Timing`，重新输出本次 nginx request id 与真实 cache timing，否则三段
+观测会错误 join。
+
+回滚彼此独立：keepalive 只恢复原 workers.dev `proxy_pass` 并移除 upstream include；microcache
+若未来获批，只移除两个 exact location并清其独立目录。两者都不得删除 Task 11 同源 `/api/`
+route、回滚 Dashboard artifact或清 `/img`、`/r`、页面壳缓存。
+<!-- aifeeds-upstream-performance:end -->
+
 > **2026-06-09 首屏提速（根因 = nginx 还在 HTTP/1.1）**：perf_nav 埋点实测大陆冷加载 `tcp:969 tls:347 ttfb:1353 load:7638`、但 `下载≈0` —— 慢在「每个资源单独冷建连」，不是下载。修：① 三个 443 server 块 `listen 443 ssl;` → `listen 443 ssl http2;`（含 `hktest.conf` 一起改，否则 0.0.0.0:443 protocol options redefined warning）；② `nginx.conf` 取消注释 `gzip_vary/gzip_proxied any/gzip_comp_level 6/gzip_types ...text/css...` —— 让 VPS 给 R2 来的字体 CSS 压缩（106KB→37KB，CF Pages 的 JS/CSS 仍是 br 透传不受影响）。TLS1.3 + BBR+fq 早已开。备份 `*.bak-20260609-100702`，回滚 = `cp` 回去 + `nginx -t && systemctl reload nginx`。验证：`curl --http2 -I https://ai-feeds.com/` 看 `HTTP/2`、字体 `content-encoding: gzip`。
 >
 > **2026-06-09 续（封面图 + www 规范化）**：① api server 块加 `location /img { proxy_pass …workers.dev; proxy_cache aifeeds_cache; proxy_cache_valid 200 30d; proxy_cache_key "$scheme$request_method$host$request_uri"; … }` —— 封面图(cf.image 缩到 ~7KB、`immutable` 1 周)改在香港边缘缓存,不再每张回源 worker(实测 `X-Cache-Status: MISS→HIT`)。② `www.ai-feeds.com` 拆出独立 server 块 `return 301 https://ai-feeds.com$request_uri`(复用 ai-feeds.com 证书,SAN 已含 www),front 块 server_name 去掉 www —— 统一规范域名,省用户在两域间重复冷建连。备份 `*.bak-imgwww-<ts>`。配套前端加 `perf_img` 埋点(Resource Timing 采样 /img 资源,admin「页面打开耗时」卡多一根 IMG 柱)看真机图片加载耗时。
@@ -1162,6 +3152,52 @@ ssh -i ~/.ssh/aifeeds-hk.pem root@154.12.188.231 'fail2ban-client set nginx-limi
 > - **回滚**：`wrangler secret delete ORIGIN_SECRET`（prod）→ gate 代码 `if (env.ORIGIN_SECRET)` 立即跳过，秒回无闸状态 + IP 回落 CF-Connecting-IP。nginx 的注入行留着无害（worker 不校验即忽略）。
 > - **自查**：`curl -sI https://xlist-api.ltsms86.workers.dev/api/items`（直连无密钥应 **403**）；`curl https://api.ai-feeds.com/api/items`（经香港应 **200**）。
 > - **⚠️ 部署顺序硬要求**：改动这套时务必 ①先 nginx 注入头 → ②`wrangler secret put` → ③`wrangler deploy`。顺序颠倒（worker 先校验、nginx 还没注入）会让 prod api 瞬间全 403。
+
+### 6c. 地域路由实验门禁（2026-07-11，仅方案，当前禁止启动）
+
+完整预注册方案见
+[`docs/plans/c-end-geo-routing-experiment.md`](plans/c-end-geo-routing-experiment.md)。该文档和本节
+**没有**修改 TTL、DNS、CDN、custom domain、证书、nginx、Worker route 或生产流量；当前四个
+用户域名继续全量走香港 VPS。
+
+**当前状态：BLOCKED。** 服务端可信 `edge_country` / `edge_colo` 尚无足量稳定生产样本，
+跨四 host 的稳定 arm 分配/可信归因与 Cloudflare 直达候选链路也未完成验收。前端
+`mainland_hint` 只是 `Asia/Shanghai` 时区提示，**不是地理事实，严禁用作路由、实验分组或放量
+依据**。只有 DNS/CDN/Worker 服务端产生并校验的粗粒度国家/colo，以及未来单独评审的服务端
+网络分类，才可进入路由决策。
+
+启动前必须同时满足：
+
+- P0/P1/P2 逐阶段稳定至少 48 小时，最终版本形成连续 14 天基线；`all-clean`、`engaged`、
+  显式 `synthetic` 可分开查询，owner/synthetic 不混入主分析；
+- 拟开放地域满足固定样本门槛：P75 每个地域 × 设备 × arm 至少 200 个独立 LCP/cold-nav
+  会话，P95 每个地域 × arm 至少 500 个；移动端不足不得拿 desktop 外推；
+- A 为当前全量香港 control；B 仅让满足门槛的非大陆地理直达 Cloudflare，`CN`、未知地理和
+  经审批冻结的受保护网络仍走香港。非大陆按亚太、北美、欧洲、其他预注册大区分别分析，
+  单一国家单臂达到 200 时必须单列；全球平均不得掩盖任何地域恶化；
+- 路由层提供不可由客户端伪造的 `route_arm` / `route_generation` / 粗粒度 route geo，四个
+  host 同臂且分桶稳定；仅能做无法归因的 DNS round-robin 时不得启动；
+- 候选 host 已覆盖 PC/移动端证书/SNI、origin gate、Cookie、登录、搜索、反馈、分享、深链、
+  Service Worker、字体 CORS、图片与音视频 Range 的隔离验收；
+- 实验 owner、监控与回滚人在场，四 host 的当前 DNS/CDN/custom-domain/证书/TTL 值已受控留档，
+  且已取得**针对该次基础设施改动的独立明确审批**。代码合并或“继续执行计划”不构成授权。
+
+**指标与护栏**：主指标为各地域 cold nav `responseStart-startTime` 与 LCP 的 P75/P95，辅以
+`feed_ready`、FCP、`perf_api`、nginx/CDN/Worker/D1 分段。HTTP/API/前端错误率增加超过 0.5 个
+百分点、LCP P75 任一地域/设备恶化超过 10%、可用率低于 99.9% 或较 control 下降超过 0.1 个
+百分点、登录/分享/深链回归、证书/SNI/安全 gate/缓存串臂/Range 问题均触发停止或回滚。
+RUM 看不到 DNS 失败，必须同时看显式 synthetic 与服务端可用性；synthetic 只作护栏，不计入收益。
+
+**TTL、预热与推进**：若未来获批，实验 TTL 目标为 300 秒；降低 TTL 本身也在审批范围内，需在
+首次切流至少 24 小时前完成并等待 `max(24 小时, 2 × 旧 TTL)`。两臂只预热匿名公开且已证明
+缓存安全的壳/哈希资产/manifest/list，禁止预热或跨臂缓存个性化与 mutation；所有预热流量显式
+标 synthetic。真实流量只能按 5%（≥2h）→25%（≥24h）→50/50 推进，每次切权重后的
+`max(30 分钟, 2 × TTL)` 为 burn-in，不计入效果样本。
+
+**回滚**：启动前的独立变更单必须包含当时真实、逐 host 的精确恢复值和 custom-domain/证书
+操作顺序。触发时先把 treatment 归零或恢复全部旧值，核验 apex/www/API/fonts 与关键功能，等待
+至少 `2 × TTL` 并监控 60 分钟；除非确认坏缓存，不做全局 purge。实验达标也不自动授权全量，
+逐地域生产放量仍需新的明确审批。
 
 ### 7. CF 安全配置
 

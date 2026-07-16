@@ -10,21 +10,38 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { formatCompact, parseJsonField, proxyImg } from "../lib/utils";
+import { buildResponsiveCardImage, formatCompact, optimizedAvatarUrl, parseJsonField } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
 import { resolveAssetUrl } from "../lib/asset";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { HL } from "./search/highlight";
 
 // 选 PH cover：第一张非 logo 的 image，没有就用 video poster（YouTube 推 maxresdefault）。
 // 同 worker share/handlers.ts:492-515 的选取逻辑，保证流内 cover 跟分享海报 cover 一致。
-function selectPhCover(media: MediaItem[]): { url: string; isVideo: boolean } | null {
+function selectPhCover(media: MediaItem[]): {
+  url: string;
+  isVideo: boolean;
+  variants?: MediaItem["card_variants"];
+  width?: number;
+  height?: number;
+} | null {
   // 先 image (排除 logo)
   for (const m of media) {
     const role = (m as MediaItem & { role?: string }).role;
     if (m && m.type === "image" && role !== "logo" && typeof m.url === "string") {
-      return { url: m.url, isVideo: false };
+      return {
+        url: m.url,
+        isVideo: false,
+        variants: m.card_variants,
+        width: m.width,
+        height: m.height,
+      };
     }
   }
   // 再 video poster
@@ -35,7 +52,15 @@ function selectPhCover(media: MediaItem[]): { url: string; isVideo: boolean } | 
       if (!poster && mm.platform === "youtube" && mm.video_id) {
         poster = `https://img.youtube.com/vi/${mm.video_id}/maxresdefault.jpg`;
       }
-      if (poster) return { url: poster, isVideo: true };
+      if (poster) {
+        return {
+          url: poster,
+          isVideo: true,
+          variants: mm.poster_variants,
+          width: mm.width,
+          height: mm.height,
+        };
+      }
     }
   }
   return null;
@@ -83,19 +108,22 @@ interface Maker {
 
 interface Props {
   item: Item;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
 }
 
-export function PhCard({ item, eager }: Props) {
+export function PhCard({ item, mediaPolicy = LAZY_MEDIA_LOAD_POLICY }: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  const [coverVariantFailed, setCoverVariantFailed] = useState(false);
   // onLoad 后检测真实 natural dims（同 GithubCard / worker share/handlers.ts 门控）
   const [coverRejected, setCoverRejected] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<PhMetrics>(item.metrics) ?? ({} as PhMetrics);
   const media = parseMedia(item.media);
   const cover = selectPhCover(media);
+  const coverSource = cover
+    ? buildResponsiveCardImage(cover.url, cover.variants, { fallbackWidth: 400 })
+    : null;
 
   const name = item.title || "?";
   // 正文优先用 AI 解读（跟 GithubCard 一致 — feed 卡片用 ai_summary 信息
@@ -194,24 +222,44 @@ export function PhCard({ item, eager }: Props) {
           screenshot 但流内之前只展示 logo (40×40)，hero shot 完全没看到。
           这里跟分享海报 cover 用同一张图源 (worker share/handlers.ts:492-515)。
           视频用同样静态 poster，点 cover 打开抽屉看完整 gallery + 视频播放。 */}
-      {cover && !coverFailed && !coverRejected && (
-        <div className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100">
-          <img
-            src={proxyImg(resolveAssetUrl(cover.url) || cover.url, 400)}
-            alt=""
-            loading={eager ? "eager" : "lazy"}
-            fetchPriority={eager ? "high" : undefined}
-            className="aspect-[16/9] w-full object-cover"
-            onError={() => setCoverFailed(true)}
-            onLoad={(e) => {
-              const w = e.currentTarget.naturalWidth;
-              const h = e.currentTarget.naturalHeight;
-              if (!w || !h) return;
-              const ar = w / h;
-              const maxDim = Math.max(w, h);
-              if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
-            }}
-          />
+      {cover && coverSource && !coverFailed && !coverRejected && (
+        <div
+          className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100"
+          data-feed-source={item.source_type}
+          data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
+        >
+          <picture className="block">
+            {coverSource.webpSrcSet && !coverVariantFailed && (
+              <source type="image/webp" srcSet={coverSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 32px), 400px" />
+            )}
+            <img
+              src={coverSource.fallbackSrc}
+              srcSet={coverSource.srcSet}
+              sizes="(max-width: 640px) calc(100vw - 32px), 400px"
+              width={cover.width || 800}
+              height={cover.height || 450}
+              alt=""
+              loading={mediaPolicy.loading}
+              fetchPriority={mediaPolicy.fetchPriority}
+              decoding="async"
+              className="aspect-[16/9] w-full object-cover"
+              onError={() => {
+                if (coverSource.webpSrcSet && !coverVariantFailed) {
+                  setCoverVariantFailed(true);
+                } else {
+                  setCoverFailed(true);
+                }
+              }}
+              onLoad={(e) => {
+                const w = e.currentTarget.naturalWidth;
+                const h = e.currentTarget.naturalHeight;
+                if (!w || !h) return;
+                const ar = w / h;
+                const maxDim = Math.max(w, h);
+                if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
+              }}
+            />
+          </picture>
           {cover.isVideo && (
             <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <span className="flex h-12 w-12 items-center justify-center rounded-full bg-black/55 text-white">
@@ -243,7 +291,7 @@ export function PhCard({ item, eager }: Props) {
             {visibleMakers.length > 0 && (
               <span className="flex shrink-0 -space-x-1.5">
                 {visibleMakers.map((m, i) => {
-                  const src = resolveAssetUrl(m.avatar_url);
+                  const src = optimizedAvatarUrl(m.avatar_url, 48);
                   return src ? (
                     <img
                       key={m.handle || i}

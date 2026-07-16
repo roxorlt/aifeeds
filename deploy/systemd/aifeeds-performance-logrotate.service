@@ -1,0 +1,15 @@
+[Unit]
+Description=Rotate the AI Feeds performance log
+ConditionPathExists=/etc/aifeeds-performance-logrotate.conf
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/aifeeds-check-nginx-request-id rotation-wrapper @OPERATION_ID@ @ROTATION_ANCHOR_PATH@ @ROTATION_ANCHOR_DEV@ @ROTATION_ANCHOR_INO@ @ROTATION_ANCHOR_SHA256@ @CHECKER_DEV@ @CHECKER_INO@ @CHECKER_SHA256@ @ROTATE_CONFIG_DEV@ @ROTATE_CONFIG_INO@ @ROTATE_CONFIG_SHA256@ @LOGROTATE_DEV@ @LOGROTATE_INO@ @LOGROTATE_SHA256@
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=aifeeds-performance-logrotate
+StateDirectoryMode=0750
+ReadWritePaths=/var/log/nginx
+ReadOnlyPaths=@ROTATION_ANCHOR_PATH@

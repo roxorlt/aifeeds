@@ -1,0 +1,113 @@
+import { defineConfig } from "@playwright/test";
+
+const isCI = Boolean(process.env.CI);
+const requestedBaseURL = process.env.E2E_BASE_URL?.trim().replace(/\/+$/, "");
+const isRemote = Boolean(requestedBaseURL);
+const requestedOutputDir = process.env.E2E_OUTPUT_DIR?.trim().replace(/\/+$/, "");
+
+if (requestedBaseURL) {
+  const target = new URL(requestedBaseURL);
+  if (
+    target.protocol !== "https:" ||
+    target.hostname !== "perf-staging.ai-feeds.com" ||
+    target.port ||
+    target.pathname !== "/" ||
+    target.username ||
+    target.password ||
+    target.search ||
+    target.hash
+  ) {
+    throw new Error("E2E_BASE_URL must be exactly https://perf-staging.ai-feeds.com");
+  }
+}
+
+if (isRemote && !/^\/private\/tmp\/aifeeds-perf-staging-\d{8}T\d{6}-[A-Za-z0-9]{6}\/playwright$/.test(requestedOutputDir || "")) {
+  throw new Error("E2E_OUTPUT_DIR must be the active private perf-staging evidence directory");
+}
+if (!isRemote && requestedOutputDir) {
+  throw new Error("E2E_OUTPUT_DIR is only allowed for the exact remote perf-staging gate");
+}
+if (isRemote && process.env.PLAYWRIGHT_NO_COPY_PROMPT !== "1") {
+  throw new Error("PLAYWRIGHT_NO_COPY_PROMPT=1 is required to suppress remote page snapshots");
+}
+
+const baseURL = requestedBaseURL || "http://127.0.0.1:4173";
+const outputRoot = requestedOutputDir || "./output/playwright";
+const chromiumUserAgent =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36";
+
+export default defineConfig({
+  testDir: "./e2e",
+  outputDir: `${outputRoot}/test-results`,
+  fullyParallel: false,
+  forbidOnly: isCI || isRemote,
+  retries: isCI ? 1 : 0,
+  workers: isCI ? 2 : 1,
+  reporter: isRemote
+    ? [["line"]]
+    : isCI
+      ? [["line"], ["html", { outputFolder: `${outputRoot}/report`, open: "never" }]]
+      : [["list"], ["html", { outputFolder: `${outputRoot}/report`, open: "never" }]],
+  use: {
+    baseURL,
+    serviceWorkers: isRemote ? "allow" : "block",
+    trace: isRemote ? "off" : "retain-on-failure",
+    screenshot: isRemote ? "off" : "only-on-failure",
+    video: "off",
+  },
+  expect: { timeout: 8_000 },
+  timeout: 30_000,
+  projects: [
+    {
+      name: "desktop-chromium",
+      use: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, userAgent: chromiumUserAgent },
+    },
+    {
+      name: "tablet-chromium",
+      use: {
+        viewport: { width: 820, height: 1180 },
+        deviceScaleFactor: 2,
+        hasTouch: true,
+        userAgent: chromiumUserAgent,
+      },
+    },
+    {
+      name: "iphone-chromium",
+      use: {
+        viewport: { width: 390, height: 844 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      },
+    },
+    {
+      name: "iphone-webkit",
+      use: {
+        browserName: "webkit",
+        viewport: { width: 390, height: 844 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+      },
+    },
+    {
+      name: "android-chromium",
+      use: {
+        viewport: { width: 412, height: 915 },
+        deviceScaleFactor: 2,
+        isMobile: true,
+        hasTouch: true,
+        userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36",
+      },
+    },
+  ],
+  webServer: isRemote ? undefined : {
+    command: "npm run preview -- --host 127.0.0.1 --port 4173",
+    url: "http://127.0.0.1:4173",
+    reuseExistingServer: !isCI,
+    timeout: 30_000,
+  },
+});

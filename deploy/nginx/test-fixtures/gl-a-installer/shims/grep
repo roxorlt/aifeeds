@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+state_dir=/tmp/gl-a-test
+
+if [ "$scenario" = negative-probe-grep-error ] \
+    && [ -e "$state_dir/negative-probe-enabled" ]; then
+    probe=''
+    root=''
+    for argument in "$@"; do
+        case "$argument" in upstream-*) probe=$argument ;; esac
+        case "$argument" in /var/log/nginx|/var/backups/aifeeds-performance-log/audit-*) root=$argument ;; esac
+    done
+    if [ -n "$probe" ] && [ -n "$root" ]; then
+        : > "$state_dir/negative-grep-error-hit"
+        exit 2
+    fi
+fi
+
+if [ "$scenario" = preflight-include-grep-error ] \
+    && [ "${!#}" = /etc/letsencrypt/options-ssl-nginx.conf ]; then
+    : > "$state_dir/preflight-include-grep-error-hit"
+    exit 2
+fi
+
+exec /usr/bin/grep "$@"

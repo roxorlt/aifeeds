@@ -106,6 +106,81 @@ const OWNER_DEVICE_CTE = (() => {
 // 直接拼到 WHERE 子句的 fragment：device_id NOT IN (...owner devices...)
 const NOT_OWNER_SQL = `device_id NOT IN (${OWNER_DEVICE_CTE})`;
 
+export const PERFORMANCE_ENGAGEMENT_EVENTS = [
+  'item_click',
+  'item_open_drawer',
+  'image_lightbox_open',
+  'external_link_click',
+  'source_filter_change',
+  'sort_change',
+  'new_content_banner_click',
+  'search_submit',
+  'search_suggest_click',
+  'search_result_click',
+  'share_click',
+  'login_success',
+  'favorite_toggle',
+  'subscribe_toggle',
+] as const;
+
+export type PerformanceCohortName = 'all_clean' | 'engaged' | 'synthetic';
+
+export function performanceCohortWhere(cohort: PerformanceCohortName, alias: string = 'e'): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error('invalid SQL alias');
+  const syntheticMarker = `(
+    COALESCE(json_extract(${alias}.event_payload,'$.traffic_kind') = 'synthetic', 0)
+    OR instr(COALESCE(${alias}.page_path,''), 'codex_perf_probe') > 0
+  )`;
+  if (cohort === 'synthetic') return syntheticMarker;
+
+  const allClean = `
+    ${alias}.device_id NOT IN (${OWNER_DEVICE_CTE})
+    AND NOT ${syntheticMarker}
+  `;
+  if (cohort === 'all_clean') return allClean;
+
+  const actions = PERFORMANCE_ENGAGEMENT_EVENTS.map((event) => `'${event}'`).join(',');
+  return `
+    ${allClean}
+    AND EXISTS (
+      SELECT 1 FROM events action
+      WHERE action.device_id = ${alias}.device_id
+        AND action.event_type IN (${actions})
+        AND ABS(action.occurred_at - ${alias}.occurred_at) <= 30 * 60 * 1000
+        AND (
+          (${alias}.session_token_hash IS NOT NULL AND action.session_token_hash = ${alias}.session_token_hash)
+          OR (${alias}.session_token_hash IS NULL AND action.session_token_hash IS NULL)
+        )
+    )
+  `;
+}
+
+interface PerformanceCohortData {
+  overall: Array<{
+    metric: string;
+    p50: number | null;
+    p75: number | null;
+    p95: number | null;
+    samples: number | null;
+  }>;
+  slices: unknown[];
+}
+
+export function shapePerformanceAnalyticsOutput(
+  allClean: PerformanceCohortData,
+  engaged: PerformanceCohortData,
+  synthetic: PerformanceCohortData,
+) {
+  return {
+    all_clean: allClean,
+    engaged,
+    synthetic,
+    // Backward-compatible aliases consumed by the existing embedded dashboard JS.
+    overall: allClean.overall,
+    slices: allClean.slices,
+  };
+}
+
 // "真实用户" device 子查询 — 排除 itdog/ping 测速、link preview 爬虫、SEO 监控
 // 等"打开页面就走"的合成流量。判定:30 天内有 interact 事件 (点击/抽屉/视频/筛选/
 // impression 等) OR 总停留 > 5 秒。
@@ -387,56 +462,97 @@ async function metricSessionDuration(env: Env) {
   return { buckets: rs.results, avg_sec: overall?.avg_sec ?? 0, total_sessions: overall?.total_sessions ?? 0 };
 }
 
-// load-perf: 页面打开耗时。perf_nav 各相位 + FCP/LCP 的 p50/p75/p95（7 天窗口）。
-// pctl: 单个事件单个 payload 字段的分位数。SQLite 无内置 percentile —— 用 window
-// function 先按 v 升序编号（ROW_NUMBER），再挑第 ceil(pct*n) 名（CAST(pct*n AS INT)+1）。
-// path 来自下方 metricLoadPerf 的 hardcoded 名单（非用户输入），直接拼进 json_extract 安全。
-async function pctl(env: Env, eventType: string, path: string) {
-  const row = await env.DB.prepare(`
-    WITH vals AS (
-      SELECT CAST(json_extract(event_payload,'$.${path}') AS REAL) AS v
-      FROM events
-      WHERE event_type=? AND occurred_at > (strftime('%s','now')-7*86400)*1000
-        AND ${NOT_OWNER_SQL} AND json_extract(event_payload,'$.${path}') IS NOT NULL
-    ),
-    ranked AS (SELECT v, COUNT(*) OVER() AS n, ROW_NUMBER() OVER(ORDER BY v) AS rn FROM vals)
-    SELECT MAX(CASE WHEN rn=CAST(0.50*n AS INT)+1 THEN v END) AS p50,
-           MAX(CASE WHEN rn=CAST(0.75*n AS INT)+1 THEN v END) AS p75,
-           MAX(CASE WHEN rn=CAST(0.95*n AS INT)+1 THEN v END) AS p95,
-           MAX(n) AS samples FROM ranked
-  `).bind(eventType).first<{ p50: number; p75: number; p95: number; samples: number }>();
-  return row ?? { p50: 0, p75: 0, p95: 0, samples: 0 };
+const LOAD_PERF_METRICS: [string, string, string][] = [
+  ['ttfb', 'perf_nav', 'ttfb'], ['response', 'perf_nav', 'response'],
+  ['dom', 'perf_nav', 'dom_interactive'], ['dcl', 'perf_nav', 'dcl'],
+  ['fcp', 'perf_fcp', 'value'], ['lcp', 'perf_lcp', 'value'],
+  ['load', 'perf_nav', 'load'],
+  ['img', 'perf_img', 'dur'],
+];
+
+const LOAD_PERF_METRIC_DEFS_SQL = LOAD_PERF_METRICS
+  .map(([metric, eventType, jsonPath], order) =>
+    `('${metric}', '${eventType}', '${jsonPath}', ${order})`)
+  .join(',\n        ');
+
+async function loadPerformanceCohort(env: Env, cohort: PerformanceCohortName): Promise<PerformanceCohortData> {
+  const cohortWhere = performanceCohortWhere(cohort, 'e');
+  const [overall, slices] = await Promise.all([
+    env.DB.prepare(`
+      WITH metric_defs(metric, event_type, json_path, sort_order) AS (
+        VALUES ${LOAD_PERF_METRIC_DEFS_SQL}
+      ),
+      recent AS MATERIALIZED (
+        SELECT e.event_type, e.event_payload
+        FROM events e
+        WHERE e.event_type IN ('perf_nav', 'perf_fcp', 'perf_lcp', 'perf_img')
+          AND e.occurred_at > (strftime('%s','now')-7*86400)*1000
+          AND ${cohortWhere}
+      ),
+      vals AS (
+        SELECT defs.metric, defs.sort_order,
+               CAST(json_extract(recent.event_payload, '$.' || defs.json_path) AS REAL) AS v
+        FROM metric_defs defs
+        JOIN recent ON recent.event_type = defs.event_type
+        WHERE json_extract(recent.event_payload, '$.' || defs.json_path) IS NOT NULL
+      ),
+      ranked AS (
+        SELECT metric, sort_order, v,
+               COUNT(*) OVER(PARTITION BY metric) AS n,
+               ROW_NUMBER() OVER(PARTITION BY metric ORDER BY v) AS rn
+        FROM vals
+      )
+      -- Preserve the dashboard's historical floor(p*n)+1 selector exactly. Fixing
+      -- it to nearest-rank is a separate product-metric migration, not this query refactor.
+      SELECT defs.metric,
+             MAX(CASE WHEN ranked.rn=CAST(0.50*ranked.n AS INT)+1 THEN ranked.v END) AS p50,
+             MAX(CASE WHEN ranked.rn=CAST(0.75*ranked.n AS INT)+1 THEN ranked.v END) AS p75,
+             MAX(CASE WHEN ranked.rn=CAST(0.95*ranked.n AS INT)+1 THEN ranked.v END) AS p95,
+             MAX(ranked.n) AS samples
+      FROM metric_defs defs
+      LEFT JOIN ranked ON ranked.metric = defs.metric
+      GROUP BY defs.metric, defs.sort_order
+      ORDER BY defs.sort_order
+    `).all<{
+      metric: string;
+      p50: number | null;
+      p75: number | null;
+      p95: number | null;
+      samples: number | null;
+    }>(),
+    env.DB.prepare(`
+      WITH base AS (
+        SELECT CASE WHEN json_extract(e.event_payload,'$.is_wechat')=1 THEN 'wechat' ELSE 'other' END AS client,
+               CASE json_extract(e.event_payload,'$.nettype')
+                 WHEN 'slow-2g' THEN 'slow-2g'
+                 WHEN '2g' THEN '2g'
+                 WHEN '3g' THEN '3g'
+                 WHEN '4g' THEN '4g'
+                 ELSE 'unknown'
+               END AS net,
+               CAST(json_extract(e.event_payload,'$.load') AS REAL) AS load_ms,
+               CAST(json_extract(e.event_payload,'$.ttfb') AS REAL) AS ttfb_ms
+        FROM events e WHERE e.event_type='perf_nav'
+          AND e.occurred_at > (strftime('%s','now')-7*86400)*1000 AND ${cohortWhere})
+      SELECT client, net, COUNT(*) AS samples,
+             CAST(AVG(load_ms) AS INT) AS avg_load, CAST(AVG(ttfb_ms) AS INT) AS avg_ttfb
+      FROM base GROUP BY client, net HAVING samples >= 3 ORDER BY avg_load DESC
+    `).all(),
+  ]);
+  return { overall: overall.results, slices: slices.results };
 }
 
-async function metricLoadPerf(env: Env) {
+export async function metricLoadPerf(env: Env) {
   // 各里程碑 → [展示名, 事件类型, payload 字段]。perf_nav 拆相位（ttfb/dom/dcl/response/load），
   // FCP/LCP 来自 web-vitals 各自的 value 字段。
   // 按时间线顺序排:除 response(正文下载段)/img(单图,独立)外,其余都是
   // 「从点击起的累计时刻」,后一根天然 ≥ 前一根 — 总耗时 = load 那一根,不能相加。
-  const M: [string, string, string][] = [
-    ['ttfb', 'perf_nav', 'ttfb'], ['response', 'perf_nav', 'response'],
-    ['dom', 'perf_nav', 'dom_interactive'], ['dcl', 'perf_nav', 'dcl'],
-    ['fcp', 'perf_fcp', 'value'], ['lcp', 'perf_lcp', 'value'],
-    ['load', 'perf_nav', 'load'],
-    ['img', 'perf_img', 'dur'],
-  ];
-  const overall: Array<{ metric: string; p50: number; p75: number; p95: number; samples: number }> = [];
-  for (const [name, t, p] of M) overall.push({ metric: name, ...(await pctl(env, t, p)) });
-  // 切片：客户端（微信 vs 其他）× 网络（effectiveType，iOS 微信无 → unknown）。
-  // is_wechat 客户端发 JS boolean → JSON true/false → json_extract 返回 1/0，故 =1 正确。
-  const slices = await env.DB.prepare(`
-    WITH base AS (
-      SELECT CASE WHEN json_extract(event_payload,'$.is_wechat')=1 THEN 'wechat' ELSE 'other' END AS client,
-             COALESCE(json_extract(event_payload,'$.nettype'),'unknown') AS net,
-             CAST(json_extract(event_payload,'$.load') AS REAL) AS load_ms,
-             CAST(json_extract(event_payload,'$.ttfb') AS REAL) AS ttfb_ms
-      FROM events WHERE event_type='perf_nav'
-        AND occurred_at > (strftime('%s','now')-7*86400)*1000 AND ${NOT_OWNER_SQL})
-    SELECT client, net, COUNT(*) AS samples,
-           CAST(AVG(load_ms) AS INT) AS avg_load, CAST(AVG(ttfb_ms) AS INT) AS avg_ttfb
-    FROM base GROUP BY client, net HAVING samples >= 3 ORDER BY avg_load DESC
-  `).all();
-  return { overall, slices: slices.results };
+  // D1 executes queries on a single primary. Process cohorts sequentially and run
+  // only the two independent scans inside one cohort concurrently (6 queries total).
+  const allClean = await loadPerformanceCohort(env, 'all_clean');
+  const engaged = await loadPerformanceCohort(env, 'engaged');
+  const synthetic = await loadPerformanceCohort(env, 'synthetic');
+  return shapePerformanceAnalyticsOutput(allClean, engaged, synthetic);
 }
 
 async function metricErrors(env: Env) {
@@ -880,7 +996,7 @@ export async function serveAdminDashboardHtml(request: Request, env: Env): Promi
   });
 }
 
-const DASHBOARD_HTML = `<!doctype html>
+export const DASHBOARD_HTML = `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -910,6 +1026,16 @@ ${ADMIN_SHARED_CSS}
   .card .chart { width: 100%; height: 280px; }
   .card.wide { grid-column: 1 / -1; }
   .card .chart.tall { height: 360px; }
+
+  .perf-cohort-tabs { display: inline-flex; gap: 2px; margin: 2px 0 4px; padding: 3px;
+                      background: #0b0e14; border: 1px solid #1f2937; border-radius: 8px; }
+  .perf-cohort-btn { border: 0; border-radius: 5px; padding: 5px 10px; cursor: pointer;
+                     color: #9ca3af; background: transparent; font-size: 11px; }
+  .perf-cohort-btn:hover:not(:disabled) { color: #e6e8eb; background: #1a2230; }
+  .perf-cohort-btn.active { color: #e6e8eb; background: #2a3441; }
+  .perf-cohort-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 1px; }
+  .perf-cohort-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .perf-cohort-note { min-height: 18px; margin: 0 0 2px; color: #7c93b8; font-size: 11px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   thead th { text-align: left; padding: 6px 8px; color: #9ca3af; font-weight: 500;
@@ -1034,7 +1160,13 @@ ${adminNavHtml('dashboard')}
 
   <div class="card wide" data-testid="card-load-perf">
     <h2>🚀 页面打开耗时</h2>
-    <p class="hint">⚠️ 读法：柱子是「从点击到该节点」的累计时刻，互相包含、<b>不能相加</b> —— 总耗时只看「全就绪LOAD」一根；用户体感看「出内容FCP」。例外：「下载」「单图」是独立时长。7 天窗口 p50/p75/p95（ms）；下表按 客户端×网络 切片</p>
+    <p class="hint">⚠️ 读法：柱子是「从点击到该节点」的累计时刻，互相包含、<b>不能相加</b> —— 总耗时只看「全就绪LOAD」一根；用户体感看「出内容FCP」。例外：「下载」「单图」是独立时长。7 天窗口 p50/p75/p95（ms）；可切换真实全量、明确互动与显式测速 cohort。</p>
+    <div class="perf-cohort-tabs" id="perf-cohort-tabs" role="group" aria-label="性能样本 cohort">
+      <button type="button" class="perf-cohort-btn active" data-perf-cohort="all_clean" aria-pressed="true">真实全量</button>
+      <button type="button" class="perf-cohort-btn" data-perf-cohort="engaged" aria-pressed="false">明确互动</button>
+      <button type="button" class="perf-cohort-btn" data-perf-cohort="synthetic" aria-pressed="false">显式测速</button>
+    </div>
+    <p class="perf-cohort-note" id="perf-cohort-note">排除 owner 与显式测速，保留无互动的真实慢用户</p>
     <div class="chart tall" id="ch-load-perf"></div>
     <div style="overflow-x:auto;margin-top:12px"><table id="tbl-load-slice"><thead><tr>
       <th>客户端</th><th>网络</th><th class="num">avg load</th><th class="num">avg ttfb</th><th class="num">样本</th>
@@ -1212,6 +1344,8 @@ const EVENT_LABELS = {
   'video_autoplay_blocked': '自动播放被拦截',
   'video_play_start': '视频播放',
   'perf_lcp': '性能 · LCP',
+  'perf_api': '性能 · API',
+  'feed_ready': '性能 · 首流就绪',
   'perf_inp': '性能 · INP',
   'perf_cls': '性能 · CLS',
   'perf_ttfb': '性能 · TTFB',
@@ -1700,41 +1834,77 @@ async function loadLoadPerf() {
   const tb = document.querySelector('#tbl-load-slice tbody');
   try {
     const d = await getJson('/api/admin/analytics?metric=load-perf');
-    // 分位柱状：x = 里程碑（大写），P50/P75/P95 三组（快→慢用 绿/黄/红）
+    const legacyCohort = {
+      overall: Array.isArray(d.overall) ? d.overall : [],
+      slices: Array.isArray(d.slices) ? d.slices : [],
+    };
+    const cohorts = {
+      all_clean: d.all_clean || legacyCohort,
+      engaged: d.engaged || null,
+      synthetic: d.synthetic || null,
+    };
+    const cohortNotes = {
+      all_clean: '排除 owner 与显式测速，保留无互动的真实慢用户',
+      engaged: '真实全量中，同设备同 session 的 ±30 分钟内发生过明确操作',
+      synthetic: '仅 payload traffic_kind=synthetic 或 codex_perf_probe 路径',
+    };
+    const buttons = Array.from(document.querySelectorAll('[data-perf-cohort]'));
+    const note = document.getElementById('perf-cohort-note');
     const PERF_LABEL = { ttfb: '首字节TTFB', response: '下载(段)', dom: 'DOM就绪', dcl: '结构齐DCL', fcp: '出内容FCP', lcp: '主图LCP', load: '全就绪LOAD', img: '单图(独立)' };
-    const names = d.overall.map(r => PERF_LABEL[r.metric] || (r.metric || '').toUpperCase());
-    const p50 = d.overall.map(r => Math.round(r.p50 || 0));
-    const p75 = d.overall.map(r => Math.round(r.p75 || 0));
-    const p95 = d.overall.map(r => Math.round(r.p95 || 0));
-    chart.setOption({
-      backgroundColor: 'transparent',
-      grid: { left: 60, right: 30, top: 40, bottom: 30 },
-      tooltip: {
-        trigger: 'axis', axisPointer: { type: 'shadow' },
-        formatter: (params) => params[0].axisValue + '<br/>'
-          + params.map(p => p.marker + p.seriesName + ': <b>' + fmt(p.value) + 'ms</b>').join('<br/>'),
-      },
-      legend: { data: ['P50', 'P75', 'P95'], textStyle: { color: '#9ca3af' } },
-      xAxis: { type: 'category', data: names, axisLabel: { color: '#6b7280', fontSize: 10, interval: 0, rotate: 18 } },
-      yAxis: { type: 'value', name: 'ms', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
-      series: [
-        { name: 'P50', type: 'bar', data: p50, itemStyle: { color: COLORS[0] } },
-        { name: 'P75', type: 'bar', data: p75, itemStyle: { color: COLORS[2] } },
-        { name: 'P95', type: 'bar', data: p95, itemStyle: { color: COLORS[3] } },
-      ],
-    });
-    // 切片表：客户端 × 网络
-    if (!d.slices.length) {
-      tb.innerHTML = '<tr><td colspan="5" class="muted">暂无 perf_nav 样本（单切片需 ≥3 条）</td></tr>';
-    } else {
-      tb.innerHTML = d.slices.map(r =>
-        '<tr><td>' + (r.client === 'wechat' ? '微信' : '其他') + '</td>'
-        + '<td>' + (r.net || 'unknown') + '</td>'
-        + '<td class="num">' + fmt(r.avg_load) + 'ms</td>'
-        + '<td class="num">' + fmt(r.avg_ttfb) + 'ms</td>'
-        + '<td class="num">' + fmt(r.samples) + '</td></tr>'
-      ).join('');
+
+    function renderLoadPerfCohort(key) {
+      const cohort = cohorts[key];
+      if (!cohort) return;
+      buttons.forEach(function(button) {
+        const selected = button.getAttribute('data-perf-cohort') === key;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      if (note) note.textContent = cohortNotes[key] || '';
+
+      const overall = Array.isArray(cohort.overall) ? cohort.overall : [];
+      const names = overall.map(r => PERF_LABEL[r.metric] || (r.metric || '').toUpperCase());
+      const p50 = overall.map(r => Math.round(r.p50 || 0));
+      const p75 = overall.map(r => Math.round(r.p75 || 0));
+      const p95 = overall.map(r => Math.round(r.p95 || 0));
+      chart.setOption({
+        backgroundColor: 'transparent',
+        grid: { left: 60, right: 30, top: 40, bottom: 30 },
+        tooltip: {
+          trigger: 'axis', axisPointer: { type: 'shadow' },
+          formatter: (params) => params[0].axisValue + '<br/>'
+            + params.map(p => p.marker + p.seriesName + ': <b>' + fmt(p.value) + 'ms</b>').join('<br/>'),
+        },
+        legend: { data: ['P50', 'P75', 'P95'], textStyle: { color: '#9ca3af' } },
+        xAxis: { type: 'category', data: names, axisLabel: { color: '#6b7280', fontSize: 10, interval: 0, rotate: 18 } },
+        yAxis: { type: 'value', name: 'ms', axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#1f2937' } } },
+        series: [
+          { name: 'P50', type: 'bar', data: p50, itemStyle: { color: COLORS[0] } },
+          { name: 'P75', type: 'bar', data: p75, itemStyle: { color: COLORS[2] } },
+          { name: 'P95', type: 'bar', data: p95, itemStyle: { color: COLORS[3] } },
+        ],
+      }, true);
+
+      const slices = Array.isArray(cohort.slices) ? cohort.slices : [];
+      if (!slices.length) {
+        tb.innerHTML = '<tr><td colspan="5" class="muted">暂无 perf_nav 样本（单切片需 ≥3 条）</td></tr>';
+      } else {
+        tb.innerHTML = slices.map(r =>
+          '<tr><td>' + (r.client === 'wechat' ? '微信' : '其他') + '</td>'
+          + '<td>' + esc(r.net || 'unknown') + '</td>'
+          + '<td class="num">' + fmt(r.avg_load) + 'ms</td>'
+          + '<td class="num">' + fmt(r.avg_ttfb) + 'ms</td>'
+          + '<td class="num">' + fmt(r.samples) + '</td></tr>'
+        ).join('');
+      }
     }
+
+    buttons.forEach(function(button) {
+      const key = button.getAttribute('data-perf-cohort');
+      button.disabled = !cohorts[key];
+      button.addEventListener('click', function() { renderLoadPerfCohort(key); });
+    });
+    renderLoadPerfCohort('all_clean');
   } catch (e) {
     document.getElementById('ch-load-perf').innerHTML = '<div class="err">' + e.message + '</div>';
     tb.innerHTML = '<tr><td colspan="5" class="err">' + e.message + '</td></tr>';

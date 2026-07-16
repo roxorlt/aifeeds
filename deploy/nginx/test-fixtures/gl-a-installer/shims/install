@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+destination=${!#}
+state_dir=/tmp/gl-a-test
+
+readonly journal_dir=/var/backups/aifeeds-performance-log
+journal=''
+if [ -d "$journal_dir" ]; then
+    journal=$(find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+fi
+
+if [ -n "$journal" ]; then
+    format_candidate=$(jq -er '.artifact_candidates.format' "$journal")
+    if [ "$destination" = "$format_candidate" ] \
+        && mkdir "$state_dir/mutation-started-check-once" 2>/dev/null; then
+        operation_id=$(jq -er '.operation_id' "$journal")
+        site_candidate=$(jq -er '.installer_candidate' "$journal")
+        backup=$(jq -er '.site_backup' "$journal")
+        jq -e '.schema == 1 and .gate == "GL-a" and .phase == "mutation_started"' \
+            "$journal" >/dev/null
+        test "$format_candidate" = \
+            "/etc/nginx/conf.d/aifeeds-performance-log.conf.candidate-gl-a-${operation_id}"
+        test "$site_candidate" = \
+            "/etc/nginx/sites-available/aifeeds.conf.candidate-gl-a-${operation_id}"
+        test ! -e /etc/nginx/conf.d/aifeeds-performance-log.conf
+        test ! -L /etc/nginx/conf.d/aifeeds-performance-log.conf
+        test ! -e "$format_candidate"
+        test ! -L "$format_candidate"
+        test -f "$site_candidate"
+        test ! -L "$site_candidate"
+        test "$(stat -c '%d' "$site_candidate")" = \
+            "$(stat -c '%d' /etc/nginx/sites-available/aifeeds.conf)"
+        test "$(sha256sum "$site_candidate" | awk '{print $1}')" = \
+            "$(jq -er '.installed_site_sha256' "$journal")"
+        test -f "$backup"
+        test ! -L "$backup"
+        test "$(sha256sum "$backup" | awk '{print $1}')" = \
+            "$(jq -er '.site_backup_sha256' "$journal")"
+        : > "$state_dir/mutation-started-verified"
+
+        if [ "$scenario" = manual-recovery-mutation-started ]; then
+            /usr/bin/install "$@"
+            test -f "$format_candidate"
+            test ! -L "$format_candidate"
+            test "$(stat -c '%u %g %a' "$format_candidate")" = '0 0 600'
+            test "$(stat -c '%d' "$format_candidate")" = \
+                "$(stat -c '%d' /etc/nginx/conf.d)"
+            test "$(sha256sum "$format_candidate" | awk '{print $1}')" = \
+                "$(jq -er '.artifacts_sha256.format' "$journal")"
+            test ! -e /etc/nginx/conf.d/aifeeds-performance-log.conf
+            test ! -L /etc/nginx/conf.d/aifeeds-performance-log.conf
+            : > "$state_dir/mutation-started-format-ready"
+            while :; do sleep 1; done
+        fi
+    fi
+fi
+
+exec /usr/bin/install "$@"

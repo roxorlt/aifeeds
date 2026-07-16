@@ -82,6 +82,7 @@ export const useAuthStore = create<AuthStore>()(
     let full = user;
     try {
       const me = await authApi.fetchMe();
+      if (!me.user) throw new Error('[auth] post-login session discovery returned anonymous');
       full = me.user;
     } catch (e) {
       // /api/auth/me 临时挂了：降级用 login 响应（少 phone_masked，下次 hydrate 补）。
@@ -103,7 +104,9 @@ export const useAuthStore = create<AuthStore>()(
   async logout() {
     try {
       await authApi.logout();
-    } catch {}
+    } catch {
+      // 服务端登出失败时仍清理本地会话，避免用户停留在已退出状态。
+    }
     set({ user: null });
   },
 

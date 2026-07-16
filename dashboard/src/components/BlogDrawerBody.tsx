@@ -18,13 +18,12 @@
 // http(s) 透传 —— 不抄 GH 绑死 owner/repo/branch 的相对 URL 重写（相对 URL 已在
 // BE step3 按各 feed base 域解析成绝对，见 §9.2）。
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import type { Components } from "react-markdown";
 import type { Item, ItemExtra, MediaItem } from "../types";
-import { fetchItem } from "../api";
 import { cn, htmlToPlainText, parseJsonField, timeAgo } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { Lightbox } from "./Lightbox";
@@ -207,23 +206,9 @@ interface Props {
 }
 
 export function BlogDrawerBody({ item }: Props) {
-  // 列表 /api/items 已剥重字段(body_markdown/_zh 等,LIST_HEAVY_EXTRA_KEYS),
-  // 且 /api/items/:id/refresh 对 blog 返 unsupported_source(drawer 层不会补拉)。
-  // 抽屉 mount 自拉一次完整 item(单条接口走 parseItemRow(item, true))拿正文全文,
-  // 同 ClawhubDrawerBody 抽屉自 fetch 的先例。拉到前先渲染列表瘦 item(摘要可见)。
-  const [fullItem, setFullItem] = useState<Item | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setFullItem(null);
-    fetchItem(item.id)
-      .then((resp) => {
-        if (!cancelled && resp.item) setFullItem(resp.item);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [item.id]);
-  const view = fullItem ?? item;
-  const extra = parseJsonField<ItemExtra>(view.extra) ?? ({} as ItemExtra);
+  // DrawerProvider 会把列表瘦 DTO 原地升级为 full-detail item；body 直接消费
+  // 更新后的 prop，避免为正文再发一遍 /api/items/:id。
+  const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
 
   // publisher 头
   const pub = extra.publisher;
@@ -254,17 +239,15 @@ export function BlogDrawerBody({ item }: Props) {
   const bodyZh = extra.body_markdown_zh || "";
   const hasBody = !!(bodyRaw || bodyZh);
   const showTabs = isForeign; // 外文源出译/原 toggle；中文源不出
-  const [tab, setTab] = useState<"zh" | "orig">(
-    isForeign && bodyZh ? "zh" : "orig",
-  );
-  // useState 初始值只在首渲染求值 — 那时还是列表瘦 item(body_markdown_zh 被
-  // LIST_HEAVY_EXTRA_KEYS 剥掉,bodyZh 空)→ tab 定格 "orig";full-fetch 回填后
-  // 不会重算 → 外文源默认显英文(2026-06-11 验收实测)。译文到位且用户没手动
-  // 切过 → 自动切到译文。
-  const userSwitchedTab = useRef(false);
-  useEffect(() => {
-    if (!userSwitchedTab.current && isForeign && bodyZh) setTab("zh");
-  }, [isForeign, bodyZh]);
+  // 默认值从当前 full-detail 内容派生；只有用户明确切换后才按 itemId 记忆。
+  // 这样瘦 DTO → 完整 DTO 时会自然切到已就绪的译文，不需要 effect 同步 state。
+  const [tabChoice, setTabChoice] = useState<{
+    itemId: string;
+    value: "zh" | "orig";
+  } | null>(null);
+  const tab = tabChoice?.itemId === item.id
+    ? tabChoice.value
+    : (isForeign && bodyZh ? "zh" : "orig");
   const bodyToShow = tab === "zh" ? bodyZh || bodyRaw : bodyRaw;
 
   // Lightbox：封面（idx 0）+ 正文内联图，按序收集。React Compiler 自动 memo，
@@ -372,8 +355,7 @@ export function BlogDrawerBody({ item }: Props) {
               <LangToggle
                 value={tab}
                 onChange={(v) => {
-                  userSwitchedTab.current = true;
-                  setTab(v);
+                  setTabChoice({ itemId: item.id, value: v });
                 }}
               />
             )}

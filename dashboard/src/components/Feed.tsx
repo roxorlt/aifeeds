@@ -20,9 +20,32 @@ import {
 import type { ItemExtra } from "../types";
 import { scrollFeedOrPage, smoothScrollToTop } from "../lib/scroll";
 import { SortSelector, type SortMode } from "./SortSelector";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { subscribeItemUpdate } from "../lib/itemUpdateBus";
 import { track, EVENTS } from "../lib/telemetry";
+import {
+  createFeedReadyContender,
+  createFeedReadyScheduler,
+  isFeedRootEligible,
+  type FeedReadyDataSource,
+} from "../lib/telemetry/performance-detail";
+import { getPerformanceDeviceMeta } from "../lib/telemetry/vitals";
+import { feedResponseNetworkSource } from "../lib/feed-prefetch";
+import {
+  OPTIMISTIC_FEED_START,
+  resolveFeedRenderState,
+} from "../lib/feedAvailability";
+import {
+  hasListRequestForSource,
+  isFeedMounted,
+  registerMountedFeed,
+} from "../lib/feedScheduling";
+import { getMediaLoadPolicy } from "../lib/mediaPriority";
+import { newestScrapedAt } from "../lib/feedFreshness";
+import {
+  resolveChannelSwipeIntent,
+  type ChannelSwipeIntent,
+} from "../lib/motion";
 
 // PM 2026-05-20 反馈:mobile 两 tab 来回切每次都看骨架屏。原因 — App.tsx
 // <Feed key={col.source_type}> 切 tab 时 source 变 → key 变 → Feed re-mount →
@@ -41,6 +64,7 @@ type FeedCacheEntry = {
   hasMore: boolean;
   ts: number;
   snapshot?: boolean;
+  queryTimeMs?: number;
 };
 const FEED_CACHE = new Map<string, FeedCacheEntry>();
 const FEED_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -83,34 +107,36 @@ function readFeedCache(key: string, maxAgeMs: number = FEED_CACHE_TTL_MS): FeedC
   }
 }
 
-// 频道预取:空闲时后台拉其余频道首页写进 FEED_CACHE,让首次横划切换、以及扫码/分享落地
-// 抽屉后关掉抽屉看到的底层流都直接 hydrate 秒开(不再现拉显 skeleton)。limit 小(只为首屏
-// instant,真正 mount 时的 silent refetch 会补全量);已在 cache 的频道跳过;失败忽略。
+// 单频道后台预取由 App 的全局串行队列调度。每项真正执行时重新检查 mount/cache/in-flight，
+// 避免排队期间用户已经滚动挂载后再发重复请求。ClawHub/活动默认带筛选，而当前 cache key
+// 只有 sourceType；为避免错误 hydrate，本阶段不后台预取这两个频道。
 const PREFETCH_LIMIT = 12;
-export function prefetchChannels(sourceTypes: SourceType[]): void {
-  for (const st of sourceTypes) {
-    // TTL 感知:有"新鲜"缓存才跳过。localStorage 恢复的旧快照(显示用)不算,
-    // 仍然预取一份新的覆盖,保证横划切过去时内容是新的。
-    if (readFeedCache(st)) continue;
-    fetchItems({
-      source_type: st,
-      limit: PREFETCH_LIMIT,
-      sort: st === "clawhub" ? "stars" : (st as string) === "blog,podcast" ? "published_at" : undefined,
-    })
-      .then((res) => {
-        if (res.items.length > 0 && !readFeedCache(st)) {
-          setFeedCache(st, {
-            items: res.items,
-            nextCursor: res.next_cursor,
-            hasMore: res.has_more,
-            ts: Date.now(),
-          });
-        }
-      })
-      .catch(() => {
-        /* 预取失败忽略,真正切过去时会正常重拉 */
-      });
-  }
+// App's page-level scheduler must call the same cache-aware list path as Feed;
+// keeping this narrow export here avoids duplicating FEED_CACHE ownership.
+// eslint-disable-next-line react-refresh/only-export-components
+export async function prefetchChannel(
+  sourceType: SourceType | "blog,podcast",
+): Promise<void> {
+  if (sourceType === "clawhub" || sourceType === "huodongxing") return;
+  if (
+    isFeedMounted(sourceType)
+    || readFeedCache(sourceType)
+    || hasListRequestForSource(sourceType)
+  ) return;
+
+  const response = await fetchItems({
+    source_type: sourceType,
+    limit: PREFETCH_LIMIT,
+    sort: sourceType === "blog,podcast" ? "published_at" : undefined,
+  }, { purpose: "background" });
+  if (response.items.length === 0 || readFeedCache(sourceType)) return;
+  setFeedCache(sourceType, {
+    items: response.items,
+    nextCursor: response.next_cursor,
+    hasMore: response.has_more,
+    ts: Date.now(),
+    queryTimeMs: response.query_time_ms,
+  });
 }
 
 interface Props {
@@ -120,17 +146,41 @@ interface Props {
   title: string;
   placeholder?: boolean;
   refreshTick: number;
+  onInitialRequestStart?: () => void;
+  onInitialRequestSettled?: () => void;
+  mediaColumnIndex: number;
+  mediaColumnImmediate: boolean;
 }
 
-const INITIAL_LIMIT = 30;
+const INITIAL_LIMIT = 12;
 const LOAD_MORE_LIMIT = 30;
 const POLL_INTERVAL_MS = 30_000;
+const PULL_THRESHOLD = 60;
+const PULL_RESISTANCE = 2.5;
+const PULL_MAX = 110;
+const PULL_SLOT_HEIGHT = 46;
 // After this long of page-visible time, commit current top item to localStorage
 // as the new last-seen boundary. Next visit's waistband will sit just below it.
 // Commit the current top item as "seen" after this much *visible* page time.
 // Timer is paused while the tab is hidden — so if the user opens the tab but
 // never looks at it, last-seen stays where it was.
 const MARK_SEEN_DELAY_MS = 5_000;
+
+// 页面级 singleton：PC 多列同时 commit、mobile tab remount/refresh/load-more 都只能
+// 让最先实际 paint 的 Feed 上报一次。每列各排 RAF，StrictMode/卸载只 cancel 自己，
+// 不会误伤其它仍挂载的 contender。
+const feedReadyScheduler = createFeedReadyScheduler({
+  requestFrame: (callback) => window.requestAnimationFrame(callback),
+  cancelFrame: (id) => window.cancelAnimationFrame(id),
+  report: (payload) => {
+    try {
+      performance.mark("aifeeds:feed-ready");
+    } catch {
+      // The milestone remains telemetry-only on browsers without User Timing.
+    }
+    track(EVENTS.FEED_READY, payload);
+  },
+});
 
 // Network Information API is non-standard but supported on Chrome/Edge/
 // Android Chrome (i.e. the bulk of mobile traffic). Use it for telemetry
@@ -213,11 +263,20 @@ export function SkeletonCard() {
 }
 
 export interface FeedHandle {
-  scrollToTop: () => void;
+  scrollToTop: (options?: { instant?: boolean }) => void;
 }
 
 export const Feed = forwardRef<FeedHandle, Props>(function Feed(
-  { sourceType, title, placeholder, refreshTick },
+  {
+    sourceType,
+    title,
+    placeholder: placeholderFromMetadata,
+    refreshTick,
+    onInitialRequestStart,
+    onInitialRequestSettled,
+    mediaColumnIndex,
+    mediaColumnImmediate,
+  },
   ref,
 ) {
   // PM 2026-05-20:从 FEED_CACHE 拿之前缓存的 items,有 cache 时 mount 直接显
@@ -233,10 +292,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const [loading, setLoading] = useState(!cachedInit);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastScrapedAt = useRef<string | null>(null);
+  const lastScrapedAt = useRef<string | null>(newestScrapedAt(cachedInit?.items ?? []));
   const [retryTick, setRetryTick] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(cachedInit?.nextCursor ?? null);
   const [hasMore, setHasMore] = useState(cachedInit?.hasMore ?? true);
+  const feedReadySourceRef = useRef<FeedReadyDataSource>(
+    cachedInit ? (cachedInit.snapshot ? "local_snapshot" : "memory_cache") : "network",
+  );
+  const feedReadyQueryTimeRef = useRef<number | undefined>(
+    cachedInit?.snapshot ? undefined : cachedInit?.queryTimeMs,
+  );
   // Cooldown: after N consecutive load_more failures we stop auto-firing
   // loadMore via IntersectionObserver and show a manual retry button.
   // Telemetry showed bursts of 30+ failures in 45s on WeChat WebView —
@@ -277,18 +342,110 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // 不需要轮询 / 曝光过滤；worker 已经按"状态优先 + start_time ASC"排好。
   const isHdx = sourceType === "huodongxing";
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const feedRootRef = useRef<HTMLDivElement | null>(null);
   const feedBodyRef = useRef<HTMLDivElement | null>(null);
+  const [feedReadyEligible, setFeedReadyEligible] = useState(false);
   const isNarrowFeed = useIsNarrow();
-  const [pullY, setPullY] = useState(0);
   const [isRefreshingPull, setIsRefreshingPull] = useState(false);
-  const pullStartY = useRef<number | null>(null);
+  const pullIndicatorRef = useRef<HTMLDivElement | null>(null);
+  const pullLabelRef = useRef<HTMLSpanElement | null>(null);
+  const pullStart = useRef<{ x: number; y: number } | null>(null);
+  const pullTouchId = useRef<number | null>(null);
+  const pullIntent = useRef<ChannelSwipeIntent>("unknown");
   const pullYRef = useRef(0);
   const loadingRef = useRef(false);
   const isDraggingRef = useRef(false);
   // 切回频道秒切:本 Feed 实例是否已发过初次请求。首次 mount 时若 FEED_CACHE 够新就跳过 refetch。
   const didFetchRef = useRef(false);
+  // App withdraws the per-refresh unlock capability as soon as the first mounted
+  // Feed starts. Keeping the latest prop in a ref avoids restarting that in-flight
+  // request, while a later Feed remount sees undefined and may use the 60s cache skip.
+  const onInitialRequestStartRef = useRef(onInitialRequestStart);
+  onInitialRequestStartRef.current = onInitialRequestStart;
+  const onInitialRequestSettledRef = useRef(onInitialRequestSettled);
+  onInitialRequestSettledRef.current = onInitialRequestSettled;
+  // With optimistic start enabled, metadata reconciliation may remove a channel
+  // after useful content already committed. Keep only that committed content: a
+  // late response excluded in the same render cannot bypass metadata or set the latch.
+  const hasRenderedItemsRef = useRef(false);
+  const feedRenderState = resolveFeedRenderState({
+    enabled: OPTIMISTIC_FEED_START,
+    metadataPlaceholder: Boolean(placeholderFromMetadata),
+    itemCount: items.length,
+    hadRenderedItems: hasRenderedItemsRef.current,
+  });
+  const placeholder = feedRenderState.placeholder;
+  useEffect(() => {
+    if (placeholder) return;
+    return registerMountedFeed(sourceType);
+  }, [placeholder, sourceType]);
+  useEffect(() => {
+    if (feedRenderState.nextHadRenderedItems) {
+      hasRenderedItemsRef.current = feedRenderState.nextHadRenderedItems;
+    }
+  }, [feedRenderState.nextHadRenderedItems]);
+  const placeholderRef = useRef(Boolean(placeholder));
+  placeholderRef.current = Boolean(placeholder);
+  const isCurrentFeedEligible = useCallback(() => (
+    !placeholderRef.current && isFeedRootEligible(feedRootRef.current, {
+      documentVisible: document.visibilityState !== "hidden" && !document.hidden,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    })
+  ), []);
+  const feedReadyContenderRef = useRef<ReturnType<typeof createFeedReadyContender> | null>(null);
+  if (!feedReadyContenderRef.current) {
+    feedReadyContenderRef.current = createFeedReadyContender({
+      scheduler: feedReadyScheduler,
+      isEligible: isCurrentFeedEligible,
+    });
+  }
 
   const isHot = sortMode === "hot";
+
+  // Only a currently visible Feed may compete for the page-level milestone. IO handles
+  // PC grid rows and mobile tab transforms; visibilitychange covers background tabs.
+  // The live predicate is checked again inside RAF by createFeedReadyContender.
+  useEffect(() => {
+    const root = feedRootRef.current;
+    if (!root || placeholder) {
+      setFeedReadyEligible(false);
+      return;
+    }
+    const updateEligibility = () => setFeedReadyEligible(isCurrentFeedEligible());
+    updateEligibility();
+    document.addEventListener("visibilitychange", updateEligibility);
+    window.addEventListener("resize", updateEligibility);
+
+    let observer: IntersectionObserver | null = null;
+    const hasIntersectionObserver = typeof IntersectionObserver !== "undefined";
+    if (hasIntersectionObserver) {
+      observer = new IntersectionObserver(updateEligibility, { threshold: 0 });
+      observer.observe(root);
+    } else {
+      window.addEventListener("scroll", updateEligibility, { passive: true });
+    }
+    return () => {
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", updateEligibility);
+      window.removeEventListener("resize", updateEligibility);
+      if (!hasIntersectionObserver) window.removeEventListener("scroll", updateEligibility);
+    };
+  }, [placeholder, sourceType, isCurrentFeedEligible]);
+
+  // items 已在本次 commit 中成为非空后，再等一帧，记录用户真正看到首流的时刻。
+  // payload 在排帧时快照，避免 silent refetch 抢先改写 cache provenance。
+  useEffect(() => {
+    if (placeholder || items.length === 0 || !feedReadyEligible) return;
+    const queryTime = feedReadyQueryTimeRef.current;
+    return feedReadyContenderRef.current?.setup({
+      source_type: sourceType,
+      item_count: items.length,
+      data_source: feedReadySourceRef.current,
+      query_time_ms: Number.isFinite(queryTime) ? queryTime : undefined,
+      ...getPerformanceDeviceMeta(),
+    });
+  }, [placeholder, sourceType, items.length, feedReadyEligible]);
 
   // PM 2026-05-20:items / nextCursor / hasMore 变化时 sync 回 FEED_CACHE,
   // 让 loadMore append / drawer 单条更新 / refresh 拉新都被记住,切 tab
@@ -300,8 +457,15 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     // ts 保留已有值(= 数据真正从网络拿到的时间),不在 sync 时重新盖章 —— 否则
     // mount 时这个 effect 会把 localStorage 恢复的旧快照重新标成"新鲜",让下面
     // fetch effect 的 60s skip 误判,silent refetch 被跳过,用户停在旧内容上。
-    const prevTs = FEED_CACHE.get(sourceType)?.ts;
-    setFeedCache(sourceType, { items, nextCursor, hasMore, ts: prevTs ?? Date.now() });
+    const previous = FEED_CACHE.get(sourceType);
+    setFeedCache(sourceType, {
+      items,
+      nextCursor,
+      hasMore,
+      ts: previous?.ts ?? Date.now(),
+      snapshot: previous?.snapshot,
+      queryTimeMs: previous?.queryTimeMs,
+    });
   }, [sourceType, items, nextCursor, hasMore, placeholder]);
 
   // 订阅 drawer 单条更新：抽屉打开触发的 lazy-enrich 拿到 fresh.item 后，
@@ -315,21 +479,31 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
 
   // Initial load + refresh on tick or sort change
   useEffect(() => {
-    if (placeholder) return;
+    if (placeholder) {
+      // A manifest change can turn a channel into a placeholder while its
+      // optimistic list request is still in flight. Keep the reveal slot until
+      // that request's finally handler runs; a never-started placeholder can
+      // release immediately.
+      if (!didFetchRef.current) onInitialRequestSettledRef.current?.();
+      return;
+    }
     // 切回频道秒切:本实例首次 mount + FEED_CACHE 够新(<60s)→ 不重拉,直接用 hydrate 的缓存。
     // 下拉刷新 / 换排序会让 deps 变,届时 didFetchRef 已 true → 照常拉新。
     if (!didFetchRef.current) {
       didFetchRef.current = true;
       const fresh = readFeedCache(sourceType);
-      if (items.length > 0 && fresh && !fresh.snapshot && Date.now() - fresh.ts < 60_000) return;
+      if (!onInitialRequestStartRef.current && fresh?.items.length && !fresh.snapshot && Date.now() - fresh.ts < 60_000) {
+        onInitialRequestSettledRef.current?.();
+        return;
+      }
     }
     let cancelled = false;
     // PM 2026-05-20:若已有 cache hydrate 的 items,后台静默 refetch
     // (loading=false,不显 skeleton);否则首次进 tab 显 skeleton
-    const hasHydrated = items.length > 0;
+    const hasHydrated = Boolean(readFeedCache(sourceType)?.items.length);
     if (!hasHydrated) setLoading(true);
     setError(null);
-    fetchItems({
+    const request = fetchItems({
       source_type: sourceType,
       limit: INITIAL_LIMIT,
       // 官方新闻必须显式 sort=published_at:默认 scraped_at 在批量回灌时同秒
@@ -340,21 +514,26 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       city: isHdx && hdxCity ? hdxCity : undefined,
       when: isHdx && hdxWhen ? hdxWhen : undefined,
       form: isHdx && hdxForm ? hdxForm : undefined,
-    })
+    });
+    onInitialRequestStartRef.current?.();
+    request
       .then((res) => {
         if (cancelled) return;
+        feedReadySourceRef.current = feedResponseNetworkSource(res);
+        feedReadyQueryTimeRef.current = res.query_time_ms;
         const itemsToShow = res.items;
         setItems(itemsToShow);
         setPending([]);
         setNextCursor(res.next_cursor);
         setHasMore(res.has_more);
-        lastScrapedAt.current = res.items[0]?.scraped_at || null;
+        lastScrapedAt.current = newestScrapedAt(res.items);
         // 写入 FEED_CACHE,下次 mount 时直接 hydrate(不 skeleton)
         setFeedCache(sourceType, {
           items: itemsToShow,
           nextCursor: res.next_cursor,
           hasMore: res.has_more,
           ts: Date.now(),
+          queryTimeMs: res.query_time_ms,
         });
       })
       .catch((e) => {
@@ -370,11 +549,14 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           ...readConnectionInfo(),
         });
       })
-      .finally(() => !cancelled && setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+        onInitialRequestSettledRef.current?.();
+      });
     return () => {
       cancelled = true;
     };
-  }, [sourceType, placeholder, refreshTick, retryTick, isHot, chSort, chCategory, chHideSuspicious, hdxCity, hdxWhen, hdxForm]);
+  }, [sourceType, placeholder, refreshTick, retryTick, isHot, isClawhub, chSort, chCategory, chHideSuspicious, isHdx, hdxCity, hdxWhen, hdxForm]);
 
   const loadMore = useCallback(async () => {
     if (placeholder || loadingMore || !hasMore || !nextCursor) return;
@@ -419,7 +601,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     } finally {
       setLoadingMore(false);
     }
-  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot, isHdx, hdxCity, hdxWhen, hdxForm]);
+  }, [placeholder, loadingMore, hasMore, nextCursor, sourceType, isHot, isClawhub, chSort, chCategory, chHideSuspicious, isHdx, hdxCity, hdxWhen, hdxForm]);
 
   const retryLoadMore = useCallback(() => {
     consecutiveFailRef.current = 0;
@@ -452,9 +634,32 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     loadingRef.current = loading;
   }, [loading]);
 
-  const PULL_THRESHOLD = 60;
-  const PULL_RESISTANCE = 2.5;
-  const PULL_MAX = 110;
+  const updatePullIndicator = useCallback((value: number, animate: boolean, refreshing = false) => {
+    const indicator = pullIndicatorRef.current;
+    const label = pullLabelRef.current;
+    if (!indicator) return;
+    const progress = Math.min(value / PULL_THRESHOLD, 1);
+    indicator.style.transition = animate
+      ? "transform 180ms cubic-bezier(0.23, 1, 0.32, 1), opacity 150ms cubic-bezier(0.23, 1, 0.32, 1)"
+      : "none";
+    indicator.style.transform = `translateY(${-PULL_SLOT_HEIGHT + progress * PULL_SLOT_HEIGHT}px)`;
+    indicator.style.opacity = value > 0 || refreshing ? "1" : "0";
+    if (label) {
+      label.textContent = refreshing
+        ? "正在刷新"
+        : value > PULL_THRESHOLD
+          ? "松手刷新"
+          : "下拉刷新";
+    }
+  }, []);
+
+  useEffect(() => {
+    updatePullIndicator(
+      isRefreshingPull ? PULL_THRESHOLD : 0,
+      true,
+      isRefreshingPull,
+    );
+  }, [isRefreshingPull, updatePullIndicator]);
 
   // Native touch listeners so we can preventDefault in touchmove — React attaches
   // its synthetic touchmove as a passive listener, so the browser's own pull-down
@@ -462,16 +667,38 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   useEffect(() => {
     if (placeholder) return;
     // Only activate PRR on mobile — PC uses bounded cell scroll, no pull gesture
-    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    if (!isNarrowFeed) return;
 
     // R21: mobile body fixed 架构后 window.scrollY 永远 0, 用 getScrollY 兜底
     const isAtTop = () => {
       const root = document.getElementById("root");
-      const isNarrow = window.matchMedia("(max-width: 767px)").matches;
-      return (isNarrow && root ? root.scrollTop : window.scrollY) <= 0;
+      return (root ? root.scrollTop : window.scrollY) <= 0;
     };
 
+    const resetPullGesture = (animate: boolean) => {
+      pullStart.current = null;
+      pullTouchId.current = null;
+      pullIntent.current = "unknown";
+      pullYRef.current = 0;
+      isDraggingRef.current = false;
+      if (!isRefreshingPull) updatePullIndicator(0, animate);
+    };
+
+    const findPullTouch = (touches: TouchList) => (
+      pullTouchId.current === null
+        ? undefined
+        : Array.from(touches).find((touch) => touch.identifier === pullTouchId.current)
+    );
+
     const onStart = (e: TouchEvent) => {
+      if (isRefreshingPull) {
+        resetPullGesture(false);
+        return;
+      }
+      if (e.touches.length !== 1) {
+        resetPullGesture(true);
+        return;
+      }
       // Skip when touch starts in any non-feed zone — drawer, app header,
       // or column header. PRR is for the feed cards area only; firing it
       // from non-scroll zones would steal vertical motion and trigger
@@ -483,60 +710,95 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         target?.closest('[role="dialog"]') ||
         target?.closest("[data-no-page-scroll]")
       ) {
-        pullStartY.current = null;
+        resetPullGesture(true);
         return;
       }
       if (isAtTop()) {
-        pullStartY.current = e.touches[0].clientY;
+        const touch = e.touches[0];
+        pullStart.current = { x: touch.clientX, y: touch.clientY };
+        pullTouchId.current = touch.identifier;
+        pullIntent.current = "unknown";
+        pullYRef.current = 0;
         isDraggingRef.current = false;
       } else {
-        pullStartY.current = null;
+        resetPullGesture(true);
       }
     };
     const onMove = (e: TouchEvent) => {
-      if (pullStartY.current === null) return;
-      if (!isAtTop()) {
-        pullStartY.current = null;
-        pullYRef.current = 0;
-        isDraggingRef.current = false;
-        setPullY(0);
+      const start = pullStart.current;
+      if (!start) return;
+      if (e.touches.length !== 1) {
+        resetPullGesture(true);
         return;
       }
-      const dy = e.touches[0].clientY - pullStartY.current;
+      const touch = findPullTouch(e.touches);
+      if (!touch) {
+        resetPullGesture(true);
+        return;
+      }
+      if (!isAtTop()) {
+        resetPullGesture(true);
+        return;
+      }
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      if (pullIntent.current === "unknown") {
+        const intent = resolveChannelSwipeIntent(dx, dy);
+        if (intent === "unknown") return;
+        if (intent === "horizontal" || dy <= 0) {
+          resetPullGesture(true);
+          return;
+        }
+        pullIntent.current = "vertical";
+      }
       if (dy > 0) {
         if (e.cancelable) e.preventDefault();
         isDraggingRef.current = true;
         const next = Math.min(dy / PULL_RESISTANCE, PULL_MAX);
         pullYRef.current = next;
-        setPullY(next);
+        updatePullIndicator(next, false);
       }
     };
-    const onEnd = () => {
+    const onEnd = (e: TouchEvent) => {
+      const activeTouchEnded = pullTouchId.current !== null
+        && Array.from(e.changedTouches).some((touch) => touch.identifier === pullTouchId.current);
       const shouldRefresh =
-        pullStartY.current !== null &&
+        activeTouchEnded &&
+        e.touches.length === 0 &&
+        pullStart.current !== null &&
+        pullIntent.current === "vertical" &&
         pullYRef.current > PULL_THRESHOLD &&
         !loadingRef.current;
       if (shouldRefresh) {
         setIsRefreshingPull(true);
+        // Cached feeds deliberately avoid toggling loading in the fetch effect.
+        // Enter it here so the refresh indicator stays mounted until that exact
+        // retry request reaches its finally handler.
+        setLoading(true);
         setRetryTick((t) => t + 1);
       }
       pullYRef.current = 0;
       isDraggingRef.current = false;
-      setPullY(0);
-      pullStartY.current = null;
+      if (!shouldRefresh) updatePullIndicator(0, true);
+      pullStart.current = null;
+      pullTouchId.current = null;
+      pullIntent.current = "unknown";
+    };
+    const onCancel = () => {
+      resetPullGesture(true);
     };
 
     window.addEventListener("touchstart", onStart, { passive: true });
     window.addEventListener("touchmove", onMove, { passive: false });
     window.addEventListener("touchend", onEnd);
-    window.addEventListener("touchcancel", onEnd);
+    window.addEventListener("touchcancel", onCancel);
     return () => {
       window.removeEventListener("touchstart", onStart);
       window.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onEnd);
-      window.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("touchcancel", onCancel);
     };
-  }, [placeholder]);
+  }, [placeholder, updatePullIndicator, isRefreshingPull, isNarrowFeed]);
 
   // Hot mode: if the initial fetch or a page-load returns items that all get
   // filtered out as "seen", items becomes empty but hasMore is still true.
@@ -575,12 +837,12 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           source_type: sourceType,
           since: lastScrapedAt.current,
           limit: 50,
-        });
+        }, { purpose: "background" });
         const existingIds = new Set([...items, ...pending].map((i) => i.id));
         const fresh = res.items.filter((i) => !existingIds.has(i.id));
         if (fresh.length > 0) {
           setPending((prev) => [...fresh, ...prev]);
-          lastScrapedAt.current = fresh[0].scraped_at;
+          lastScrapedAt.current = newestScrapedAt(fresh) ?? lastScrapedAt.current;
         }
       } catch {
         // Silent fail — next poll will retry
@@ -607,7 +869,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
           setNextCursor(res.next_cursor);
           setHasMore(res.has_more);
           if (res.items.length > 0) {
-            lastScrapedAt.current = res.items[0].scraped_at;
+            lastScrapedAt.current = newestScrapedAt(res.items);
           }
           scrollFeedOrPage(feedBodyRef.current);
         })
@@ -727,7 +989,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   }, [rows, isHot]);
 
   useImperativeHandle(ref, () => ({
-    scrollToTop: () => smoothScrollToTop(feedBodyRef.current),
+    scrollToTop: (options) => smoothScrollToTop(
+      feedBodyRef.current,
+      options?.instant ? { duration: 0 } : {},
+    ),
   }));
 
   return (
@@ -738,7 +1003,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       scrollRoot={isNarrowFeed ? null : feedBodyRef}
       hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
     >
-    <div className="flex flex-col overflow-hidden bg-white md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
+    <div ref={feedRootRef} data-feed-source={sourceType} data-feed-column={sourceType} className="flex flex-col overflow-hidden bg-white md:h-[70vh] md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
           (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView
@@ -855,18 +1120,16 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       {/* Body */}
       <div
         ref={feedBodyRef}
-        className="feed-body md:flex-1 md:overflow-y-auto"
+        className="feed-body relative md:flex-1 md:overflow-y-auto"
         style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
       >
-        {(pullY > 0 || isRefreshingPull) && !placeholder && (
+        {!placeholder && (
           <div
-            className="flex items-end justify-center overflow-hidden text-[11px] text-neutral-400"
+            ref={pullIndicatorRef}
+            className="motion-pull-indicator pointer-events-none absolute inset-x-0 top-0 z-10 flex h-[46px] items-end justify-center pb-1.5 text-[11px] text-neutral-400"
             style={{
-              height: isRefreshingPull ? PULL_THRESHOLD : pullY,
-              paddingBottom: 6,
-              transition: isDraggingRef.current
-                ? "none"
-                : "height 200ms ease-out",
+              opacity: 0,
+              transform: `translateY(-${PULL_SLOT_HEIGHT}px)`,
             }}
           >
             <span
@@ -875,17 +1138,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                 isRefreshingPull && "animate-spin",
               )}
             >⟳</span>
-            <span>
-              {isRefreshingPull
-                ? "正在刷新"
-                : pullY > PULL_THRESHOLD
-                  ? "松手刷新"
-                  : "下拉刷新"}
-            </span>
+            <span ref={pullLabelRef}>下拉刷新</span>
           </div>
         )}
         {placeholder ? (
-          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-600">
             暂无数据源
           </div>
         ) : error ? (
@@ -906,7 +1163,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             ))}
           </>
         ) : items.length === 0 ? (
-          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-400">
+          <div className="flex min-h-[60vh] items-center justify-center text-sm text-neutral-600">
             {isHdx && (hdxWhen || hdxCity || hdxForm)
               ? hdxWhen
                 ? "该时段暂无活动"
@@ -939,16 +1196,20 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                   </div>,
                 );
               }
-              // 首屏前 3 张卡的封面图 eager + fetchPriority=high:浏览器对 lazy
-              // 图会刻意推迟,首屏可见图也跟着排队,LCP 白慢几百 ms。前 3 行
-              // 立即下载且插队;其余照旧 lazy(省流量)。ClawhubCard 只有小头像、
-              // ThreadCard 场景少,不传。
-              const eager = idx < 3;
+              const mediaPolicy = getMediaLoadPolicy({
+                columnIndex: mediaColumnIndex,
+                rowIndex: idx,
+                immediate: mediaColumnImmediate,
+              });
               nodes.push(
                 row.kind === "single" ? (
-                  <ItemCard key={row.item.id} item={row.item} eager={eager} />
+                  <ItemCard key={row.item.id} item={row.item} mediaPolicy={mediaPolicy} />
                 ) : (
-                  <ThreadCard key={`thread-${row.rootId}`} items={row.items} />
+                  <ThreadCard
+                    key={`thread-${row.rootId}`}
+                    items={row.items}
+                    mediaPolicy={mediaPolicy}
+                  />
                 ),
               );
               return nodes;
@@ -973,13 +1234,13 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             {hasMore && !loadMoreCoolingDown && (
               <div
                 ref={sentinelRef}
-                className="py-4 text-center text-xs text-neutral-400"
+                className="py-4 text-center text-xs text-neutral-600"
               >
                 {loadingMore ? "加载中…" : "\u00A0"}
               </div>
             )}
             {!hasMore && items.length > 0 && (
-              <div className="py-4 text-center text-xs text-neutral-400">
+              <div className="py-4 text-center text-xs text-neutral-600">
                 已到底
               </div>
             )}

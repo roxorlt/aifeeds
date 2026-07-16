@@ -13,34 +13,61 @@ import type { RefObject } from "react";
  *     - mobile  → #root (restore scrollTop on release)
  *     - desktop → <body> overflow:hidden (the wheel-scroll enforcer)
  *
- * It only toggles `overflow` (never position:fixed / top), so it composes
- * safely with the drawer's own lock already applied underneath: each consumer
- * captures and restores its own previous value, innermost-overlay-first. That
- * avoids the classic nested-lock bug where a second lock reads an already
- * position:fixed body (window.scrollY === 0) and restores to the wrong spot.
+ * Both possible page scrollers are locked for the lifetime of the overlay, so
+ * crossing the responsive breakpoint (rotation / split-screen resize) cannot
+ * expose a newly active unlocked scroller. A reference-counted target lock
+ * makes nested overlays safe even when React cleans them up out of order.
  */
+export interface ScrollLockTarget {
+  style: { overflow: string };
+  scrollTop: number;
+}
+
+interface ScrollLockState {
+  count: number;
+  previousOverflow: string;
+  previousScrollTop: number | null;
+}
+
+const targetLocks = new WeakMap<object, ScrollLockState>();
+
+export function acquireScrollLock(
+  target: ScrollLockTarget,
+  restoreScrollTop = false,
+): () => void {
+  let state = targetLocks.get(target);
+  if (!state) {
+    state = {
+      count: 0,
+      previousOverflow: target.style.overflow,
+      previousScrollTop: restoreScrollTop ? target.scrollTop : null,
+    };
+    targetLocks.set(target, state);
+  }
+  state.count += 1;
+  target.style.overflow = "hidden";
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    state.count -= 1;
+    if (state.count > 0 || targetLocks.get(target) !== state) return;
+    targetLocks.delete(target);
+    target.style.overflow = state.previousOverflow;
+    if (state.previousScrollTop !== null) target.scrollTop = state.previousScrollTop;
+  };
+}
+
 export function useScrollLock(active = true) {
   useEffect(() => {
     if (!active) return;
-    const isNarrow = window.matchMedia("(max-width: 767px)").matches;
+    const releases = [acquireScrollLock(document.body)];
     const root = document.getElementById("root");
+    if (root) releases.push(acquireScrollLock(root, true));
 
-    if (isNarrow && root) {
-      // mobile: #root is the scroll context — lock it, remember scrollTop.
-      const sy = root.scrollTop;
-      const prevOverflow = root.style.overflow;
-      root.style.overflow = "hidden";
-      return () => {
-        root.style.overflow = prevOverflow;
-        root.scrollTop = sy;
-      };
-    }
-
-    // desktop: <body> is the scroller — overflow:hidden stops wheel/trackpad.
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = prevOverflow;
+      for (let index = releases.length - 1; index >= 0; index -= 1) releases[index]();
     };
   }, [active]);
 }

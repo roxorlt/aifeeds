@@ -3,10 +3,12 @@ import { track, EVENTS } from "../lib/telemetry";
 import { useImpression } from "../lib/telemetry/impressions";
 import { useImpressionRefresh, mergeRefs } from "../lib/impressionRefresh";
 import type { Item, ItemExtra, LinkCard as LinkCardType, MediaItem, Metrics, QuoteOf } from "../types";
-import { cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { buildResponsiveCardImage, cn, formatBjtMdHm, formatNumber, parseJsonField, proxyImg, proxyVideo, timeAgo } from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
-import { useDrawer } from "../lib/drawer";
+import { useDeferredVideoPoster } from "../lib/useDeferredVideoPoster";
+import { resolveVideoPosterSource } from "../lib/videoPoster";
+import { useDrawer } from "../lib/drawerContext";
 import { translateNowItem, TranslateNowError } from "../api";
 import { dispatchItemUpdate } from "../lib/itemUpdateBus";
 import { toast } from "../lib/toast";
@@ -14,7 +16,7 @@ import { useAuthStore } from "../lib/authStore";
 import { Lightbox } from "./Lightbox";
 import { LinkCard } from "./LinkCard";
 import { QuotedTweet } from "./QuotedTweet";
-import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "../lib/tcoResolvedLink";
 import { isSelfLinkCard } from "../lib/linkCardFilter";
 import { XArticleCard } from "./XArticleCard";
 import {
@@ -26,6 +28,12 @@ import {
   VerifiedBadge,
 } from "./icons";
 import { useHighlightTerms, highlightNodes } from "./search/highlight";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  demoteMediaLoadPolicy,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 
 // Match URL | #hashtag (CJK + ASCII) | @mention
 const RICH_PATTERN =
@@ -37,12 +45,16 @@ const RICH_PATTERN =
 function VideoPlayer({
   src,
   poster,
+  posterVariants,
+  mediaPolicy,
   itemId,
   sourceType,
   onError,
 }: {
   src: string;
   poster?: string;
+  posterVariants?: MediaItem["poster_variants"];
+  mediaPolicy: MediaLoadPolicy;
   itemId: string;
   sourceType: string;
   onError: () => void;
@@ -54,6 +66,12 @@ function VideoPlayer({
   const effectiveTimerRef = useRef<number | null>(null);
   const effectiveReportedRef = useRef(false);
   const [showControls, setShowControls] = useState(false);
+  const posterSource = resolveVideoPosterSource(poster, posterVariants);
+  const { poster: deferredPoster, requestPoster } = useDeferredVideoPoster({
+    videoRef,
+    posterSource,
+    mediaPolicy,
+  });
 
   const { isActive, muted } = useCoordinatedVideo({
     videoId: `${sourceType}:${itemId}`,
@@ -96,7 +114,7 @@ function VideoPlayer({
     <video
       ref={videoRef}
       src={src}
-      poster={poster}
+      poster={deferredPoster}
       preload="none"
       controls={showControls}
       muted={muted}
@@ -104,10 +122,21 @@ function VideoPlayer({
       playsInline
       className="aspect-[16/9] w-full bg-black object-cover"
       // PC hover 显示播控浮层；mobile / touch 上 hover 不触发，仍靠 click toggle
-      onMouseEnter={() => setShowControls(true)}
+      onMouseEnter={() => {
+        requestPoster();
+        setShowControls(true);
+      }}
       onMouseLeave={() => setShowControls(false)}
-      onClick={() => setShowControls(true)}
-      onPlay={handlePlay}
+      onPointerDown={requestPoster}
+      onFocus={requestPoster}
+      onClick={() => {
+        requestPoster();
+        setShowControls(true);
+      }}
+      onPlay={() => {
+        requestPoster();
+        handlePlay();
+      }}
       onPause={clearEffectiveTimer}
       onEnded={clearEffectiveTimer}
       onError={onError}
@@ -153,14 +182,14 @@ function renderRichText(text: string, terms: string[] = []): ReactNode[] {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="text-sky-600 hover:underline break-all"
+          className="text-sky-700 hover:underline break-all"
         >
           {display}
         </a>,
       );
     } else if (tag) {
       out.push(
-        <span key={key++} className="text-sky-600">
+        <span key={key++} className="text-sky-700">
           {tag}
         </span>,
       );
@@ -172,7 +201,7 @@ function renderRichText(text: string, terms: string[] = []): ReactNode[] {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="text-sky-600 hover:underline"
+          className="text-sky-700 hover:underline"
         >
           {mention}
         </a>,
@@ -253,7 +282,7 @@ function TweetMediaTile({
   videoIdSuffix = "",
   onClickImage,
   posterMode,
-  eager,
+  mediaPolicy,
 }: {
   media: MediaItem[];
   itemId: string;
@@ -261,9 +290,10 @@ function TweetMediaTile({
   videoIdSuffix?: string;
   onClickImage: (idx: number) => void;
   posterMode?: boolean;
-  eager?: boolean;
+  mediaPolicy: MediaLoadPolicy;
 }) {
   const [failed, setFailed] = useState(false);
+  const [variantFailed, setVariantFailed] = useState(false);
   if (failed || media.length === 0) return null;
   const first = media[0];
   const mediaCount = media.length;
@@ -276,20 +306,41 @@ function TweetMediaTile({
   // "第一个附件取不到图就取第二个位置"),再缺失留灰底占位(不放 <img> 即不会卡)。
   if (posterMode && first.type === "video") {
     const firstImage = media.find((m) => m.type === "image" && m.url);
-    const coverUrl = first.poster
-      ? proxyImg(first.poster, 400)
-      : firstImage
-        ? proxyImg(firstImage.url, 400)
-        : "";
+    const coverMedia = first.poster
+      ? { url: first.poster, width: first.width, height: first.height }
+      : firstImage;
+    const coverVariants = first.poster ? first.poster_variants : firstImage?.card_variants;
+    const coverSource = coverMedia
+      ? buildResponsiveCardImage(coverMedia.url, coverVariants, { fallbackWidth: 400 })
+      : null;
     return (
-      <div className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black">
-        {coverUrl ? (
-          <img
-            src={coverUrl}
-            alt={first.alt || ""}
-            className="aspect-[16/9] w-full object-cover"
-            onError={() => setFailed(true)}
-          />
+      <div
+        className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
+        data-feed-source={sourceType}
+        data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
+      >
+        {coverSource ? (
+          <picture className="block">
+            {coverSource.webpSrcSet && !variantFailed && (
+              <source type="image/webp" srcSet={coverSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 32px), 400px" />
+            )}
+            <img
+              src={coverSource.fallbackSrc}
+              srcSet={coverSource.srcSet}
+              sizes="(max-width: 640px) calc(100vw - 32px), 400px"
+              width={coverMedia?.width || 800}
+              height={coverMedia?.height || 450}
+              alt={first.alt || ""}
+              loading={mediaPolicy.loading}
+              fetchPriority={mediaPolicy.fetchPriority}
+              decoding="async"
+              className="aspect-[16/9] w-full object-cover"
+              onError={() => {
+                if (coverSource.webpSrcSet && !variantFailed) setVariantFailed(true);
+                else setFailed(true);
+              }}
+            />
+          </picture>
         ) : (
           <div className="aspect-[16/9] w-full" />
         )}
@@ -309,13 +360,17 @@ function TweetMediaTile({
     return (
       <div
         className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-black"
+        data-feed-source={sourceType}
+        data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <VideoPlayer
-          src={proxyImg(first.url)}
-          poster={first.poster ? proxyImg(first.poster, 400) : undefined}
+          src={proxyVideo(first.url)}
+          poster={first.poster}
+          posterVariants={first.poster_variants}
+          mediaPolicy={mediaPolicy}
           itemId={`${itemId}${videoIdSuffix}`}
           sourceType={sourceType}
           onError={() => setFailed(true)}
@@ -330,25 +385,44 @@ function TweetMediaTile({
   }
 
   if (first.type === "image") {
+    const imageSource = buildResponsiveCardImage(first.url, first.card_variants, {
+      fallbackWidth: 400,
+    });
     return (
       <button
         type="button"
+        aria-label="查看媒体大图"
         onClick={(e) => {
           e.stopPropagation();
           onClickImage(0);
         }}
         className="relative mt-2.5 block w-full overflow-hidden rounded-2xl border border-neutral-200"
+        data-feed-source={sourceType}
+        data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
       >
         {/* PM 2026-05-22: 之前 aspect-[16/9] + object-cover 高图被裁切.
             改成宽度撑满 + 高度按图原比例自适应 (height: auto), 不裁不变形 */}
-        <img
-          src={proxyImg(first.url, 400)}
-          alt={first.alt || ""}
-          loading={eager ? "eager" : "lazy"}
-          fetchPriority={eager ? "high" : undefined}
-          className="w-full transition-transform hover:scale-[1.02]"
-          onError={() => setFailed(true)}
-        />
+        <picture className="block">
+          {imageSource.webpSrcSet && !variantFailed && (
+            <source type="image/webp" srcSet={imageSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 32px), 400px" />
+          )}
+          <img
+            src={imageSource.fallbackSrc}
+            srcSet={imageSource.srcSet}
+            sizes="(max-width: 640px) calc(100vw - 32px), 400px"
+            width={first.width || 800}
+            height={first.height || 450}
+            alt={first.alt || ""}
+            loading={mediaPolicy.loading}
+            fetchPriority={mediaPolicy.fetchPriority}
+            decoding="async"
+            className="motion-card-media w-full"
+            onError={() => {
+              if (imageSource.webpSrcSet && !variantFailed) setVariantFailed(true);
+              else setFailed(true);
+            }}
+          />
+        </picture>
         {mediaCount > 1 && (
           <span className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white">
             +{mediaCount - 1}
@@ -383,9 +457,7 @@ interface Props {
   // header 隐藏 @handle 跟"原文"按钮、时间用 MM-DD HH:MM 固定格式(而非
   // 易过期的"3 天前")、verified badge 跟昵称留更大 gap (海报字号放大场景)
   posterMode?: boolean;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,不参与 lazy
-  // 排队 — 否则浏览器会刻意推迟首屏可见图,LCP 白慢几百 ms
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
 }
 
 export function TweetCard({
@@ -397,7 +469,7 @@ export function TweetCard({
   hasThreadBelow,
   inThread,
   posterMode,
-  eager,
+  mediaPolicy = LAZY_MEDIA_LOAD_POLICY,
 }: Props) {
   const { openTweet } = useDrawer();
   const impressionRef = useImpression(() => {
@@ -657,6 +729,7 @@ export function TweetCard({
   const replyLightboxMedia = (replyOf?.media || []).filter(
     (m) => m.type === "image" || m.type === "video",
   );
+  const hasPrimaryMedia = lightboxMedia.length > 0;
 
   return (
     <article
@@ -721,7 +794,7 @@ export function TweetCard({
                 </div>
                 <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
                   {replyOf.handle && <span className="truncate">@{replyOf.handle}</span>}
-                  {replyOf.handle && replyOf.published_at && <span className="shrink-0 text-neutral-400">·</span>}
+                  {replyOf.handle && replyOf.published_at && <span className="shrink-0 text-neutral-500">·</span>}
                   {replyOf.published_at && (
                     <span className="shrink-0 whitespace-nowrap">
                       {posterMode ? formatBjtMdHm(replyOf.published_at) : timeAgo(replyOf.published_at)}
@@ -738,6 +811,7 @@ export function TweetCard({
                 sourceType={item.source_type}
                 videoIdSuffix="-replyOf"
                 onClickImage={(idx) => setReplyLightboxIndex(idx)}
+                mediaPolicy={LAZY_MEDIA_LOAD_POLICY}
                 posterMode={posterMode}
               />
               {replyOf.metrics && <MetricsRow metrics={replyOf.metrics} />}
@@ -807,13 +881,13 @@ export function TweetCard({
             {/* Row 2: @handle · 时间 · 原文按钮 */}
             <div className="mt-0.5 flex items-baseline gap-1 text-[13px] text-neutral-500">
               {handle && <span className="truncate">@{handle}</span>}
-              {handle && <span className="shrink-0 text-neutral-400">·</span>}
+              {handle && <span className="shrink-0 text-neutral-500">·</span>}
               <span className="shrink-0 whitespace-nowrap">
                 {posterMode ? formatBjtMdHm(displayTime) : timeAgo(displayTime)}
               </span>
               {!posterMode && showLangButton && (
                 <>
-                  <span className="shrink-0 text-neutral-400">·</span>
+                  <span className="shrink-0 text-neutral-500">·</span>
                   <button
                     type="button"
                     disabled={translating}
@@ -885,7 +959,7 @@ export function TweetCard({
                 e.stopPropagation();
                 setExpanded((v) => !v);
               }}
-              className="mt-0.5 text-[14px] text-sky-600 hover:underline"
+              className="mt-0.5 text-[14px] text-sky-700 hover:underline"
             >
               {expanded ? "收起" : "展开"}
             </button>
@@ -902,7 +976,7 @@ export function TweetCard({
             sourceType={item.source_type}
             onClickImage={(idx) => setLightboxIndex(idx)}
             posterMode={posterMode}
-            eager={eager}
+            mediaPolicy={mediaPolicy}
           />
 
           {/* F3: Reply parent 不再嵌套在 main media 之后（旧的 quote 视觉语言）。
@@ -914,7 +988,7 @@ export function TweetCard({
           {quoteOf ? (
             <QuotedTweet quote={quoteOf} posterMode={posterMode} />
           ) : hasQuotePlaceholder ? (
-            <div className="mt-2.5 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-[13px] text-neutral-400">
+            <div className="mt-2.5 rounded-2xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 text-[13px] text-neutral-600">
               引用的推文已不可用
             </div>
           ) : null}
@@ -924,7 +998,11 @@ export function TweetCard({
               (twitter.com/handle/status/<本 source_id>), 底部"打开 X 原文"
               已是同款入口, 重复展示无意义 */}
           {extra.link_card && !quoteOf && !isSelfLinkCard(extra.link_card, item.handle, item.source_id) && (
-            <LinkCard card={extra.link_card} eager={eager} />
+            <LinkCard
+              card={extra.link_card}
+              feedSource={item.source_type}
+              mediaPolicy={hasPrimaryMedia ? demoteMediaLoadPolicy(mediaPolicy) : mediaPolicy}
+            />
           )}
 
           {/* Metrics bar (read-only X-platform data, not interactive) */}

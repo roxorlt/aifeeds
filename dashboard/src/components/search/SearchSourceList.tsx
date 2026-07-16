@@ -63,7 +63,7 @@ export default function SearchSourceList({ q, source }: SearchSourceListProps) {
           mode: "list",
         });
         if (resp.items.length === 0) {
-          track(EVENTS.SEARCH_EMPTY, { q, mode: "list" });
+          track(EVENTS.SEARCH_EMPTY, { q_len: q.length, mode: "list" });
           setHasMore(false);
           setStatus("empty");
           return;

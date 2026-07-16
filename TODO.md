@@ -8,6 +8,24 @@
 
 ## 进行中
 
+### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
+
+- [x] PC/移动端动效与性能代码实施、本地契约和恢复设计完成；RUM 改为上线后观察任务，不阻塞本地交付。
+- [x] 定位 GL-a 首次失败根因：生产缺少 `/usr/sbin/logrotate`，旧 helper 无法恢复已初始化但未发布的
+  rotation-state candidate，旧 operation `20260714011642-a33e7d4d` 留在
+  `mutation_started` + `rollback_failed(prepared)`，live site 仍为 base。
+- [x] 本地实现依赖前置门、initialized-candidate 正常恢复、operation-bound exceptional authority、
+  transaction/executor 双 SHA、committed receipt、installer closure 与 8 个 publication crash 重入点。
+- [x] 2026-07-14 聚焦与完整回归：Python 74/74；Node 108 pass + 2 个既有环境 skip；独立恢复 10/10；
+  冻结 GL-a matrix 135/135、0 skip。
+- [ ] 在 clean commit 上运行完整 G0（dashboard/worker/root/GL-a），保存新的私有 evidence 目录。
+- [ ] 对 production 旧 operation 做一次只读复核，生成绑定实际 SHA/inode 的 recovery package 与精确命令；
+  **另行获得该精确命令批准前不得产生生产写**。
+- [ ] exceptional receipt 与旧 terminal pair 对账完成后，用新 operation id 重跑 GL-a；staging 全绿后再合并
+  main 触发生产发布，并做即时功能/性能验收。
+- [ ] 上线后 RUM 观察：每阶段/主 cohort 累计 ≥48h 且 ≥100 个 LCP 样本后才确认收益或推进下一阶段；
+  该项不回头阻塞本地代码交付。
+
 ### A4. C 端站内搜索（2026-07-06，branch `feat/c-search`，**staging 验收通过，待用户确认 → prod**）
 
 > 匿名可用站内搜索：入口放大镜 → 起始页（历史/热搜/源入口）→ suggestion → 分组结果页（每源 top3 + 「更多」）→ 单源无限滚动流 → 抽屉深链，返回键逐级回退。服务端 D1 FTS5 影子表 + 中文 bigram 预分词，索引/词表全靠 cron 增量维护、与主管线解耦。限流 search 12/min + suggest 40/min per device（KV fail-open）；admin 看板搜索区块（`?metric=search`）。

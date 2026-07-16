@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+destination=${!#}
+state_dir=/tmp/gl-a-test
+
+barrier() {
+    local expected_phase=$1
+    local marker=$2
+    local journal
+    local backup
+    journal=$(find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+    test -n "$journal"
+    jq -e --arg phase "$expected_phase" \
+        --arg destination "$destination" '
+        .schema == 1 and .gate == "GL-a" and .phase == $phase
+        and (if $phase == "initializing" then .installer_candidate != $destination
+             else .site_backup == $destination end)
+    ' "$journal" >/dev/null
+    backup=$(jq -er '.site_backup' "$journal")
+    test ! -e "$backup"
+    test ! -L "$backup"
+    case "$expected_phase" in
+        initializing)
+            test "$(jq -er '.installed_site_sha256' "$journal")" = absent
+            test ! -e "$(jq -er '.installer_candidate' "$journal")"
+            test ! -e "$destination"
+            ;;
+        prepared)
+            test -f "$(jq -er '.installer_candidate' "$journal")"
+            test "$(sha256sum "$(jq -er '.installer_candidate' "$journal")" | awk '{print $1}')" = \
+                "$(jq -er '.installed_site_sha256' "$journal")"
+            ;;
+    esac
+    : > "$state_dir/$marker"
+    while :; do sleep 1; done
+}
+
+restore_candidate_barrier() {
+    local source_journal
+    local rollback_journal
+    source_journal=$(find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'transaction-*.json' -print -quit)
+    rollback_journal=$(find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'rollback-transaction-*.json' -print -quit)
+    test -f "$source_journal"
+    test -f "$rollback_journal"
+    jq -e '.phase == "committed"' "$source_journal" >/dev/null
+    jq -e '.phase == "prepared"' "$rollback_journal" >/dev/null
+    test "$destination" = "$(jq -er '.rollback_candidate' "$source_journal")"
+    test ! -e "$destination"
+    test ! -L "$destination"
+    /usr/bin/cp "$@"
+    test -f "$destination"
+    test ! -L "$destination"
+    test "$(sha256sum "$destination" | awk '{print $1}')" = \
+        "$(jq -er '.site_backup_sha256' "$source_journal")"
+    test "$(stat -c '%u %g %a' "$destination")" = \
+        "$(jq -er '.original_site_uid' "$source_journal") $(jq -er '.original_site_gid' "$source_journal") $(jq -er '.original_site_mode' "$source_journal")"
+    : > "$state_dir/restore-candidate-ready"
+    while :; do sleep 1; done
+}
+
+case "$scenario:$destination" in
+    prelive-initializing-auto-rollback:/run/aifeeds-performance-log.prelive-initializing-auto-rollback/.aifeeds.conf.build-gl-a-*)
+        : > "$state_dir/prelive-initializing-failure-hit"
+        printf 'injected initializing copy failure\n' >&2
+        exit 90
+        ;;
+    prelive-prepared-auto-rollback:/var/backups/aifeeds-performance-log/aifeeds.conf.bak-perf-*|prelive-prepared-delete-crash-reentry:/var/backups/aifeeds-performance-log/aifeeds.conf.bak-perf-*)
+        : > "$state_dir/prelive-prepared-failure-hit"
+        printf 'injected prepared backup copy failure\n' >&2
+        exit 91
+        ;;
+    manual-recovery-initializing:/run/aifeeds-performance-log.manual-recovery-initializing/.aifeeds.conf.build-gl-a-*)
+        test ! -e "$destination"
+        barrier initializing initializing-barrier-ready
+        ;;
+    prelive-initializing-validation-fail:/run/aifeeds-performance-log.prelive-initializing-validation-fail/.aifeeds.conf.build-gl-a-*)
+        /usr/bin/cp "$@"
+        printf '\nthis is not valid nginx syntax {\n' >> "$destination"
+        : > "$state_dir/prelive-initializing-validation-failure-hit"
+        exit 0
+        ;;
+    manual-recovery-prepared:/var/backups/aifeeds-performance-log/aifeeds.conf.bak-perf-*)
+        test ! -e "$destination"
+        barrier prepared prepared-barrier-ready
+        ;;
+    manual-recovery-partial-backup:/var/backups/aifeeds-performance-log/aifeeds.conf.bak-perf-*)
+        if mkdir "$state_dir/partial-backup-barrier-once" 2>/dev/null; then
+            source_path=${@: -2:1}
+            test -f "$source_path"
+            /usr/bin/head -c 37 "$source_path" > "$destination"
+            chown --reference="$source_path" "$destination"
+            chmod --reference="$source_path" "$destination"
+            test -s "$destination"
+            test "$(sha256sum "$destination" | awk '{print $1}')" != \
+                "$(sha256sum "$source_path" | awk '{print $1}')"
+            : > "$state_dir/partial-backup-ready"
+            while :; do sleep 1; done
+        fi
+        ;;
+    manual-recovery-restore-candidate:/etc/nginx/sites-available/aifeeds.conf.rollback-gl-a-*)
+        if [ -e "$state_dir/restore-candidate-manual-phase-enabled" ] \
+            && mkdir "$state_dir/restore-candidate-barrier-once" 2>/dev/null; then
+            restore_candidate_barrier "$@"
+        fi
+        ;;
+esac
+
+exec /usr/bin/cp "$@"

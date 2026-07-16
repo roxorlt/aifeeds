@@ -56,6 +56,11 @@ export async function handleSmsSend(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  // Feature flag：备案前 phone 通道关闭；必须在验证码、限流、额度和 provider 之前短路。
+  if (env.ENABLE_SMS_LOGIN !== 'true') {
+    return jsonErr('sms login disabled', 403, { reason: 'sms_disabled' });
+  }
+
   // 1. 解析 + 字段校验
   const deviceId = request.headers.get('X-Device-Id');
   if (!deviceId || deviceId.length < 8 || deviceId.length > 64) {
@@ -404,9 +409,13 @@ export async function handleMe(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const responseHeaders = { 'Cache-Control': 'private, no-store' };
   const auth = await authenticate(request, env, ctx);
   if (auth.kind !== 'authenticated') {
-    return jsonErr('not authenticated', 401);
+    // Session discovery is public and nullable. Returning 200 for a normal
+    // anonymous visit avoids turning expected state into a browser console
+    // error; endpoints that require authentication continue to return 401.
+    return jsonOk({ user: null }, responseHeaders);
   }
   const user = await getUserById(env, auth.userId);
   if (!user) {
@@ -454,7 +463,7 @@ export async function handleMe(
       phone_masked: ident?.provider === 'phone' ? identityMasked : null,
       preferences,
     },
-  });
+  }, responseHeaders);
 }
 
 // ─── PUT /api/auth/me/preferences ────────────────────────

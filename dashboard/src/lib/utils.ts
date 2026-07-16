@@ -1,5 +1,6 @@
-import type { Item, ItemExtra } from "../types";
-import { resolveAssetUrl } from "./asset";
+import type { CardImageVariant, Item, ItemExtra } from "../types";
+import { resolveAssetUrl } from "./asset.ts";
+import { PUBLIC_WORKER_BASE } from "./apiBase.ts";
 
 export function cn(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
@@ -150,19 +151,20 @@ const PROXY_HOSTS = new Set([
   "raw.githubusercontent.com",        // GH README 内嵌 image / assets
   "user-images.githubusercontent.com", // GH 老版 user-attachments
   "github.com",                       // /user-attachments/ 路径(新版)
+  "cdn.huodongxing.com",
+  "wimg.huodongxing.com",
+  "nscdn.huodongxing.com",
 ]);
-const PROXY_BASE =
-  import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
+const PROXY_BASE = PUBLIC_WORKER_BASE;
 
 // width: 物理像素 hint。worker 后端走 CF cdn-cgi/image 缩到该宽度，
 // 高度按比例。GH 头像 460×460 jpeg 实测：?w=80 → 2.5KB（省 91%）/
 // ?w=400 → 18KB（省 37%）/ 不传 → passthrough 原图。
 // 物理像素而非 CSS 像素：所有 DPR 共享同一 CF cache entry，命中率最高。
 // 调用方按场景档位传：头像 80 / 卡片缩略图 400 / 详情大图 800。
-// video.twimg.com 不要传 width（worker /img 会 short-circuit 跳过 cf.image）。
-// force: 默认只对 PROXY_HOSTS allowlist 域名走代理（GFW / 不稳定源用）；
-// LinkCard 等 og:image 任意外链场景传 force=true，让所有域都走 cf.image
-// + R2 缓存（避免 CN 网络直拉外链慢导致滑动卡顿）。
+// video.twimg.com 不要传 width；视频使用 proxyVideo() 的专用 /media 路径。
+// force 是旧调用方兼容参数，不能扩大 Worker 的安全 allowlist。未知域必须直连，
+// 否则前端生成的 /img URL 会被 Worker 必然以 403 拒绝。
 export function proxyImg(
   url: string | null | undefined,
   width?: number,
@@ -176,9 +178,10 @@ export function proxyImg(
   url = resolveAssetUrl(url);
   try {
     const u = new URL(url);
-    if (opts.force || PROXY_HOSTS.has(u.hostname)) {
+    void opts.force;
+    if (PROXY_HOSTS.has(u.hostname) && u.hostname !== "video.twimg.com") {
       const params = new URLSearchParams({ url });
-      if (width && u.hostname !== "video.twimg.com") {
+      if (width) {
         params.set("w", String(width));
       }
       return `${PROXY_BASE}/img?${params.toString()}`;
@@ -187,6 +190,177 @@ export function proxyImg(
     // malformed URL — leave as-is and let <img> onError handle it
   }
   return url;
+}
+
+/**
+ * Keep byte-range video transport separate from image transforms. Existing R2
+ * assets remain direct; only legacy video.twimg.com URLs need the Worker proxy.
+ */
+export function proxyVideo(url: string | null | undefined): string {
+  if (!url) return "";
+  const resolved = resolveAssetUrl(url);
+  try {
+    const target = new URL(resolved);
+    if (target.protocol === "https:" && target.hostname === "video.twimg.com") {
+      return `${PROXY_BASE}/media?${new URLSearchParams({ url: resolved }).toString()}`;
+    }
+  } catch {
+    // Let the media element expose a normal load failure for malformed input.
+  }
+  return resolved;
+}
+
+/** Bound Product Hunt/imgix profile images to their rendered physical size. */
+export function optimizedAvatarUrl(
+  url: string | null | undefined,
+  width: number,
+): string {
+  if (!url) return "";
+  const resolved = resolveAssetUrl(url);
+  const boundedWidth = Math.min(256, Math.max(16, Math.round(width)));
+  try {
+    const target = new URL(resolved);
+    if (target.protocol === "https:" && target.hostname.endsWith(".imgix.net")) {
+      target.searchParams.set("w", String(boundedWidth));
+      target.searchParams.set("h", String(boundedWidth));
+      target.searchParams.set("fit", "crop");
+      target.searchParams.set("auto", "format,compress");
+      return target.toString();
+    }
+  } catch {
+    return resolved;
+  }
+  return proxyImg(resolved, boundedWidth);
+}
+
+export interface ResponsiveCardImageSource {
+  /** Original or controlled-proxy fallback consumed by the <img>. */
+  fallbackSrc: string;
+  /** Accept-negotiated /img widths for legacy allowlisted external assets. */
+  srcSet?: string;
+  /** Static ingestion-time WebP widths for a <source type="image/webp">. */
+  webpSrcSet?: string;
+}
+
+export function shouldRejectCardImage({
+  naturalWidth,
+  naturalHeight,
+  currentSrc,
+  variants,
+  minimumDimension = 240,
+}: {
+  naturalWidth: number;
+  naturalHeight: number;
+  currentSrc?: string | null;
+  variants?: readonly CardImageVariant[] | null;
+  minimumDimension?: number;
+}): boolean {
+  if (
+    !Number.isFinite(naturalWidth)
+    || !Number.isFinite(naturalHeight)
+    || naturalWidth <= 0
+    || naturalHeight <= 0
+  ) return false;
+
+  const resolvedCurrentSrc = resolveAssetUrl(currentSrc);
+  const selectedVariant = resolvedCurrentSrc
+    ? variants?.find((variant) => (
+        variant?.format === "webp"
+        && Number.isFinite(variant.width)
+        && variant.width >= 16
+        && variant.width <= 1600
+        && (variant.height === undefined
+          || (Number.isFinite(variant.height) && variant.height > 0 && variant.height <= 1600))
+        && resolveAssetUrl(variant.url) === resolvedCurrentSrc
+      ))
+    : undefined;
+  const sourceWidth = selectedVariant?.width ?? naturalWidth;
+  const sourceHeight = selectedVariant?.height
+    ?? (selectedVariant ? naturalHeight * (selectedVariant.width / naturalWidth) : naturalHeight);
+  const aspectRatio = sourceWidth / sourceHeight;
+  return aspectRatio > 2
+    || aspectRatio < 0.5
+    || Math.max(sourceWidth, sourceHeight) < minimumDimension;
+}
+
+export function variantsForCurrentCover(
+  currentCover: string | null | undefined,
+  variantSource: string | null | undefined,
+  variants: readonly CardImageVariant[] | null | undefined,
+): readonly CardImageVariant[] | undefined {
+  if (!currentCover || !variantSource || !variants?.length) return undefined;
+  return resolveAssetUrl(currentCover) === resolveAssetUrl(variantSource)
+    ? variants
+    : undefined;
+}
+
+/**
+ * Build a non-recursive responsive card-image source.
+ *
+ * Stored variants are served as a typed WebP `<source>` so an older browser
+ * can still use the original `<img src>`. Legacy third-party images use the
+ * strict Worker `/img` allowlist, whose response format is negotiated from the
+ * browser's Accept header. R2 originals deliberately get no synthetic srcset:
+ * the Worker must never fetch its own `/r/` route to resize it.
+ */
+export function buildResponsiveCardImage(
+  originalUrl: string | null | undefined,
+  variants?: readonly CardImageVariant[] | null,
+  options: {
+    fallbackWidth?: number;
+    widths?: readonly number[];
+    forceProxy?: boolean;
+  } = {},
+): ResponsiveCardImageSource {
+  const fallbackWidth = options.fallbackWidth ?? 400;
+  const widths = options.widths ?? [400, 800];
+  const fallbackSrc = proxyImg(originalUrl, fallbackWidth, {
+    force: options.forceProxy,
+  });
+
+  const seenVariantWidths = new Set<number>();
+  const validVariants = (variants || [])
+    .filter((variant) => {
+      if (variant?.format !== "webp") return false;
+      if (!Number.isFinite(variant.width) || variant.width < 16 || variant.width > 1600) return false;
+      if (seenVariantWidths.has(variant.width)) return false;
+      const value = String(variant.url || "");
+      if (!(value.startsWith("/r/") || /^https?:\/\//i.test(value))) return false;
+      seenVariantWidths.add(variant.width);
+      return true;
+    })
+    .sort((a, b) => a.width - b.width);
+
+  if (validVariants.length > 0) {
+    return {
+      fallbackSrc,
+      webpSrcSet: validVariants
+        .map((variant) => `${resolveAssetUrl(variant.url)} ${variant.width}w`)
+        .join(", "),
+    };
+  }
+
+  const seenUrls = new Set<string>();
+  const candidates = widths
+    .filter((width) => Number.isFinite(width) && width > 0)
+    .map((width) => ({
+      width: Math.min(1600, Math.round(width)),
+      url: proxyImg(originalUrl, Math.min(1600, Math.round(width)), {
+        force: options.forceProxy,
+      }),
+    }))
+    .filter(({ url }) => {
+      if (!url || seenUrls.has(url)) return false;
+      seenUrls.add(url);
+      return true;
+    });
+
+  // A direct/R2 URL is identical for every requested width. Returning a
+  // descriptor for it would imply the bytes were resized when they were not.
+  const srcSet = candidates.length > 1
+    ? candidates.map(({ url, width }) => `${url} ${width}w`).join(", ")
+    : undefined;
+  return { fallbackSrc, srcSet };
 }
 
 export function parseJsonField<T>(field: unknown): T | null {
