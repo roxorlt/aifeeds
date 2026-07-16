@@ -1059,6 +1059,26 @@ test('perf-staging machine-readable Wrangler commands preserve stdout', () => {
   );
 });
 
+test('perf-staging synthetic news fixture is rank-dominant in the exact UI list', () => {
+  assert.match(
+    perfStagingChangePacket,
+    /合成新闻 fixture[^\n]*综合排序[^\n]*确定性第一条/,
+  );
+  for (const rankSignal of [
+    '"ai_category":"model-release"',
+    '"source_company":"OpenAI"',
+    '"ai_summary_zh":',
+    '"body_markdown":',
+    '"likes":1000000',
+    'Sam Altman',
+  ]) {
+    assert.ok(
+      perfStagingChangePacket.includes(rankSignal),
+      `perf-staging rank-dominant fixture missing: ${rankSignal}`,
+    );
+  }
+});
+
 test('perf-staging change packet is fail-closed and independently reversible', () => {
   const g7Section = perfStagingChangePacket.match(/## 9[.] G7[：:][\s\S]*?(?=\n### 9[.]3)/)?.[0] ?? '';
   const glbSection = perfStagingChangePacket

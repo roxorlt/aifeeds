@@ -2241,6 +2241,26 @@ test "$SMS_HTTP" = 403
 jq -e '.reason == "sms_disabled"' "$EVIDENCE/test-sms-disabled.json" >/dev/null
 ```
 
+### 10.1a.1 合成新闻排序哨兵
+
+合成新闻 fixture 必须在 `blog,podcast` 综合排序中成为确定性第一条，不能只依赖最新
+`published_at`：否则真实内容的相关性、来源权威、影响力、热度和完整度仍可能把它挤出 UI 的
+`limit=12`，让媒体与移动 swipe 验收误报失败。固定排序载荷如下，执行脚本写入后还必须通过同一个
+`/api/items?source_type=blog%2Cpodcast&limit=12&sort=published_at` 断言第一条 ID 等于本轮 owned fixture：
+
+```json
+{
+  "title": "Sam Altman OpenAI launches AI model staging acceptance fixture",
+  "metrics": { "likes":1000000 },
+  "extra": {
+    "ai_category":"model-release",
+    "source_company":"OpenAI",
+    "ai_summary_zh":"Synthetic staging-only ranking summary.",
+    "body_markdown":"Synthetic staging-only ranking body."
+  }
+}
+```
+
 ### 10.1b 真实五设备 browser matrix
 
 本 gate 不复用会 mock `/api/**` 的本地 `home-performance.spec.ts`，而运行无 mock 的
