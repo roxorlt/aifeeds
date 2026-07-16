@@ -362,7 +362,10 @@ const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-libra
   };
   const assemble = (p, lang) => promptTextOf(p, lang).replace(/\{(\w+)\}/g, (_, k) => fillOf(p, lang, k) || k);
   const previewText = (p, lang) => promptTextOf(p, lang).replace(/\{(\w+)\}/g, (_, k) => slotsOf(p, lang)[k] || k);
-  const widthFor = (s) => ((s || '').length + 3) + 'ch';
+  // ch 单位按半角字符宽度计；CJK 与全角标点占 2ch，逐字符累加显示宽度
+  const CJK_RE = /[ᄀ-ᅟ⺀-鿿　-〿가-힣豈-﫿︰-﹏＀-｠￠-￦]/;
+  const displayWidth = (s) => { let w = 0; for (const c of (s || '')) w += CJK_RE.test(c) ? 2 : 1; return w; };
+  const widthFor = (s) => (displayWidth(s) + 3) + 'ch';
 
   /* ---------- 搜索索引 ---------- */
   const hayOf = (p) => [
