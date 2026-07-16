@@ -242,6 +242,47 @@ export interface ResponsiveCardImageSource {
   webpSrcSet?: string;
 }
 
+export function shouldRejectCardImage({
+  naturalWidth,
+  naturalHeight,
+  currentSrc,
+  variants,
+  minimumDimension = 240,
+}: {
+  naturalWidth: number;
+  naturalHeight: number;
+  currentSrc?: string | null;
+  variants?: readonly CardImageVariant[] | null;
+  minimumDimension?: number;
+}): boolean {
+  if (
+    !Number.isFinite(naturalWidth)
+    || !Number.isFinite(naturalHeight)
+    || naturalWidth <= 0
+    || naturalHeight <= 0
+  ) return false;
+
+  const resolvedCurrentSrc = resolveAssetUrl(currentSrc);
+  const selectedVariant = resolvedCurrentSrc
+    ? variants?.find((variant) => (
+        variant?.format === "webp"
+        && Number.isFinite(variant.width)
+        && variant.width >= 16
+        && variant.width <= 1600
+        && (variant.height === undefined
+          || (Number.isFinite(variant.height) && variant.height > 0 && variant.height <= 1600))
+        && resolveAssetUrl(variant.url) === resolvedCurrentSrc
+      ))
+    : undefined;
+  const sourceWidth = selectedVariant?.width ?? naturalWidth;
+  const sourceHeight = selectedVariant?.height
+    ?? (selectedVariant ? naturalHeight * (selectedVariant.width / naturalWidth) : naturalHeight);
+  const aspectRatio = sourceWidth / sourceHeight;
+  return aspectRatio > 2
+    || aspectRatio < 0.5
+    || Math.max(sourceWidth, sourceHeight) < minimumDimension;
+}
+
 export function variantsForCurrentCover(
   currentCover: string | null | undefined,
   variantSource: string | null | undefined,

@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildResponsiveCardImage, optimizedAvatarUrl, proxyImg, proxyVideo, variantsForCurrentCover } from "./utils.ts";
+import * as cardImage from "./utils.ts";
+
+const {
+  buildResponsiveCardImage,
+  optimizedAvatarUrl,
+  proxyImg,
+  proxyVideo,
+  variantsForCurrentCover,
+} = cardImage;
 
 test("stored WebP variants are sorted into a typed picture source with original fallback", () => {
   const result = buildResponsiveCardImage(
@@ -18,6 +26,68 @@ test("stored WebP variants are sorted into a typed picture source with original 
     "https://api.ai-feeds.com/r/x/card/w400.webp 400w, https://api.ai-feeds.com/r/x/card/w800.webp 800w",
   );
   assert.equal(result.srcSet, undefined);
+});
+
+test("responsive image quality uses matched source-variant pixels instead of density-corrected natural size", () => {
+  assert.equal(typeof cardImage.shouldRejectCardImage, "function");
+  assert.equal(cardImage.shouldRejectCardImage({
+    naturalWidth: 96,
+    naturalHeight: 61,
+    currentSrc: "https://api.ai-feeds.com/r/blog/card/w400.webp",
+    variants: [
+      { url: "/r/blog/card/w400.webp", width: 400, height: 258, format: "webp" },
+      { url: "/r/blog/card/w800.webp", width: 800, height: 517, format: "webp" },
+    ],
+    minimumDimension: 240,
+  }), false);
+  assert.equal(cardImage.shouldRejectCardImage({
+    naturalWidth: 96,
+    naturalHeight: 61,
+    currentSrc: "https://api.ai-feeds.com/r/blog/card/heightless.webp",
+    variants: [
+      { url: "/r/blog/card/heightless.webp", width: 400, format: "webp" },
+    ],
+    minimumDimension: 240,
+  }), false);
+});
+
+test("invalid matched variant metadata cannot bypass the natural-size quality gate", () => {
+  assert.equal(cardImage.shouldRejectCardImage({
+    naturalWidth: 96,
+    naturalHeight: 61,
+    currentSrc: "https://api.ai-feeds.com/r/blog/card/invalid.webp",
+    variants: [
+      { url: "/r/blog/card/invalid.webp", width: Number.NaN, format: "webp" },
+    ],
+    minimumDimension: 240,
+  }), true);
+});
+
+test("a non-matching currentSrc cannot borrow quality metadata from another variant", () => {
+  assert.equal(cardImage.shouldRejectCardImage({
+    naturalWidth: 96,
+    naturalHeight: 61,
+    currentSrc: "https://api.ai-feeds.com/r/blog/card/unowned.webp",
+    variants: [
+      { url: "/r/blog/card/w400.webp", width: 400, height: 258, format: "webp" },
+    ],
+    minimumDimension: 240,
+  }), true);
+});
+
+test("non-WebP and out-of-range variants cannot bypass the natural-size quality gate", () => {
+  for (const variant of [
+    { url: "/r/blog/card/invalid.webp", width: 400, height: 258, format: "avif" },
+    { url: "/r/blog/card/invalid.webp", width: 2_000, height: 1_300, format: "webp" },
+  ]) {
+    assert.equal(cardImage.shouldRejectCardImage({
+      naturalWidth: 96,
+      naturalHeight: 61,
+      currentSrc: "https://api.ai-feeds.com/r/blog/card/invalid.webp",
+      variants: [variant],
+      minimumDimension: 240,
+    }), true);
+  }
 });
 
 test("legacy allowlisted third-party images use bounded 400/800 controlled URLs", () => {

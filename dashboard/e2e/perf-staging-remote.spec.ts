@@ -636,33 +636,74 @@ async function settleVisibleCardMedia(
   if (!Number.isInteger(decodeTimeoutMs) || decodeTimeoutMs < 1 || decodeTimeoutMs > 5_000) {
     throw new Error("visible card image decode timeout contract mismatch");
   }
-  const visibleImageDecodeSucceeded = await page.evaluate(async (timeoutMs) => {
-    const visible = [...document.querySelectorAll<HTMLImageElement>(
-      'img[data-media-priority], [data-media-priority] img',
-    )].filter((image) => {
+  const unsettledVisibleImages = await page.evaluate(async (timeoutMs) => {
+    const deadline = performance.now() + timeoutMs;
+    const wait = (durationMs: number) => new Promise<void>((resolve) => {
+      window.setTimeout(resolve, durationMs);
+    });
+    const isVisible = (image: HTMLImageElement) => {
       const rect = image.getBoundingClientRect();
       return Boolean(image.currentSrc || image.src)
         && rect.bottom > 0 && rect.top < innerHeight
         && rect.right > 0 && rect.left < innerWidth;
-    });
-    const results = await Promise.all(visible.map((image) => new Promise<boolean>((resolve) => {
-      let settled = false;
-      let timer = 0;
-      const finish = (value: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      timer = window.setTimeout(() => finish(false), timeoutMs);
-      image.decode().then(
-        () => finish(image.complete && image.naturalWidth > 0 && image.naturalHeight > 0),
-        () => finish(false),
-      );
-    })));
-    return results.every(Boolean);
+    };
+    const safeLabel = (value: string | null | undefined, allowed: RegExp) => (
+      value && allowed.test(value) ? value : "unexpected"
+    );
+    let lastIssues: Array<{
+      feed: string;
+      priority: string;
+      state: "decode_failed" | "decode_pending" | "zero_dimension";
+    }> = [];
+
+    while (performance.now() < deadline) {
+      const visible = [...document.querySelectorAll<HTMLImageElement>(
+        'img[data-media-priority], [data-media-priority] img',
+      )].filter((image) => image.isConnected && isVisible(image));
+      const remainingMs = Math.max(1, deadline - performance.now());
+      const sampleMs = Math.min(100, remainingMs);
+      const results = await Promise.all(visible.map(async (image) => {
+        const decodeState = await Promise.race([
+          image.decode().then(
+            () => "decoded" as const,
+            () => "decode_failed" as const,
+          ),
+          wait(sampleMs).then(() => "decode_pending" as const),
+        ]);
+        if (!image.isConnected || !isVisible(image)) return null;
+        if (
+          decodeState === "decoded"
+          && image.complete
+          && image.naturalWidth > 0
+          && image.naturalHeight > 0
+        ) return null;
+        const container = image.closest<HTMLElement>("[data-media-priority]");
+        const state = image.complete && (image.naturalWidth === 0 || image.naturalHeight === 0)
+          ? "zero_dimension" as const
+          : decodeState === "decode_failed" ? "decode_failed" as const : "decode_pending" as const;
+        return {
+          feed: safeLabel(
+            image.dataset.feedSource || container?.dataset.feedSource,
+            /^[a-z][a-z0-9_,]{0,63}$/,
+          ),
+          priority: safeLabel(
+            image.dataset.mediaPriority || container?.dataset.mediaPriority,
+            /^(?:high|eager|lazy)$/,
+          ),
+          state,
+        };
+      }));
+      lastIssues = results.filter((issue): issue is NonNullable<typeof issue> => issue !== null);
+      if (lastIssues.length === 0) return lastIssues;
+      const afterSampleMs = deadline - performance.now();
+      if (afterSampleMs > 0) await wait(Math.min(50, afterSampleMs));
+    }
+    return lastIssues;
   }, decodeTimeoutMs);
-  expect(visibleImageDecodeSucceeded, "visible card image decode did not settle").toBe(true);
+  expect(
+    unsettledVisibleImages,
+    `visible card image decode did not settle: ${JSON.stringify(unsettledVisibleImages)}`,
+  ).toEqual([]);
   await expect.poll(() => page.evaluate((mediaRequests) => {
     const visiblePosters = [...document.querySelectorAll<HTMLVideoElement>("video[poster]")]
       .filter((video) => {
@@ -1985,6 +2026,73 @@ test("visible image decode timeout fails closed before LCP settles", async ({ pa
   expect(releaseImage).not.toBeNull();
   releaseImage!();
   await expect.poll(() => mediaRequestRecords[0]?.failed).toBe(true);
+});
+
+test("a card image removed by its error fallback does not block media settle", async ({ page }, testInfo) => {
+  test.skip(
+    process.env.E2E_COLLECTOR_SELF_TEST !== "1"
+      || testInfo.project.name !== "desktop-chromium",
+    "explicit Chromium collector fallback self-test",
+  );
+  const mediaRequestRecords = trackSafeMediaRequests(page);
+  let releaseImage: (() => void) | null = null;
+  await page.route("https://collector.invalid/image-error-fallback", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<img data-feed-source="product_hunt" data-media-priority="eager" width="320" height="180" src="https://assets.invalid/r/ph/${"f".repeat(64)}.jpg" onerror="this.remove()">`,
+    });
+  });
+  await page.route("https://assets.invalid/**", async (route) => {
+    await new Promise<void>((resolve) => {
+      releaseImage = resolve;
+    });
+    await route.abort("failed");
+  });
+  await page.goto("https://collector.invalid/image-error-fallback", { waitUntil: "domcontentloaded" });
+  await expect.poll(() => mediaRequestRecords.length).toBe(1);
+  let mediaSettled = false;
+  const settlePromise = settleVisibleCardMedia(page, mediaRequestRecords, 500).then(() => {
+    mediaSettled = true;
+  });
+  await page.waitForTimeout(50);
+  expect(mediaSettled).toBe(false);
+  expect(releaseImage).not.toBeNull();
+  releaseImage!();
+  await settlePromise;
+  expect(mediaSettled).toBe(true);
+  await expect(page.locator('img[data-feed-source="product_hunt"]')).toHaveCount(0);
+});
+
+test("a persistent broken card fails closed with allowlisted diagnostics", async ({ page }, testInfo) => {
+  test.skip(
+    process.env.E2E_COLLECTOR_SELF_TEST !== "1"
+      || testInfo.project.name !== "desktop-chromium",
+    "explicit Chromium collector diagnostic self-test",
+  );
+  const mediaRequestRecords = trackSafeMediaRequests(page);
+  const secret = "raw-current-src-must-not-leak";
+  await page.route("https://collector.invalid/persistent-broken-image", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<img data-feed-source="product_hunt?${secret}" data-media-priority="eager-${secret}" width="320" height="180" src="https://assets.invalid/${secret}.jpg">`,
+    });
+  });
+  await page.route("https://assets.invalid/**", async (route) => {
+    await route.abort("failed");
+  });
+  await page.goto("https://collector.invalid/persistent-broken-image", { waitUntil: "domcontentloaded" });
+  await expect.poll(() => mediaRequestRecords[0]?.failed).toBe(true);
+  const settleError = await settleVisibleCardMedia(page, mediaRequestRecords, 50).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(settleError).toBeInstanceOf(Error);
+  const message = settleError instanceof Error ? settleError.message : String(settleError);
+  expect(message).toContain('"feed":"unexpected"');
+  expect(message).toContain('"priority":"unexpected"');
+  expect(message).toContain('"state":"zero_dimension"');
+  expect(message).not.toContain(secret);
+  await expect(page.locator("img")).toHaveCount(1);
 });
 
 test("LCP and CLS observers freeze on separate non-input settle events", async ({ page }, testInfo) => {

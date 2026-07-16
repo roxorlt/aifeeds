@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra } from "../types";
-import { buildResponsiveCardImage, cn, htmlToPlainText, parseJsonField, timeAgo, variantsForCurrentCover } from "../lib/utils";
+import { buildResponsiveCardImage, cn, htmlToPlainText, parseJsonField, shouldRejectCardImage, timeAgo, variantsForCurrentCover } from "../lib/utils";
 import { resolveAssetUrl } from "../lib/asset";
 import { useDrawer } from "../lib/drawerContext";
 import {
@@ -63,8 +63,8 @@ export function BlogCard({
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
   const [coverVariantFailed, setCoverVariantFailed] = useState(false);
-  // onLoad 后检测真实 natural dims，aspect 极端 / 太小视为低质图（同 GithubCard /
-  // worker share/handlers.ts 门控），降级纯文字。
+  // 响应式 width descriptor 会把 naturalWidth 密度校正到 CSS slot；匹配到
+  // ingestion variant 时改用其真实像素尺寸做质量门控，否则回退 natural dims。
   const [coverRejected, setCoverRejected] = useState(false);
   const [logoFailed, setLogoFailed] = useState(false);
 
@@ -201,12 +201,12 @@ export function BlogCard({
                   }
                 }}
                 onLoad={(e) => {
-                  const w = e.currentTarget.naturalWidth;
-                  const h = e.currentTarget.naturalHeight;
-                  if (!w || !h) return;
-                  const ar = w / h;
-                  const maxDim = Math.max(w, h);
-                  if (ar > 2 || ar < 0.5 || maxDim < 240) setCoverRejected(true);
+                  if (shouldRejectCardImage({
+                    naturalWidth: e.currentTarget.naturalWidth,
+                    naturalHeight: e.currentTarget.naturalHeight,
+                    currentSrc: e.currentTarget.currentSrc,
+                    variants: coverVariants,
+                  })) setCoverRejected(true);
                 }}
               />
             </picture>
