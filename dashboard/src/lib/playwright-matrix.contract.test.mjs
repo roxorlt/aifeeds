@@ -9,6 +9,7 @@ const dashboard = path.resolve(here, "../..");
 const root = path.resolve(dashboard, "..");
 const config = fs.readFileSync(path.join(dashboard, "playwright.config.ts"), "utf8");
 const spec = fs.readFileSync(path.join(dashboard, "e2e/home-performance.spec.ts"), "utf8");
+const feed = fs.readFileSync(path.join(dashboard, "src/components/Feed.tsx"), "utf8");
 const prWorkflow = fs.readFileSync(path.join(root, ".github/workflows/pr-validation.yml"), "utf8");
 const deployWorkflow = fs.readFileSync(path.join(root, ".github/workflows/deploy-dashboard.yml"), "utf8");
 const packageJson = JSON.parse(fs.readFileSync(path.join(dashboard, "package.json"), "utf8"));
@@ -85,6 +86,15 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /image\.decode\(\)/);
   assert.match(remoteSpec, /failedCardVariantRequestCount/);
   assert.match(remoteSpec, /mobile projects switch[\s\S]{0,500}?trackSafeMediaRequests/);
+  assert.match(remoteSpec, /async function expectFeedColumnInViewport/);
+  assert.match(remoteSpec, /getBoundingClientRect\(\)/);
+  assert.match(remoteSpec, /matches\.length !== 1/);
+  assert.match(remoteSpec,
+    /const activeBlogFeed = await expectFeedColumnInViewport\(page, "blog,podcast"\)/);
+  assert.match(remoteSpec, /activeBlogFeed\.locator\(/);
+  assert.match(remoteSpec, /activeFeed\?\.querySelectorAll/);
+  assert.match(remoteSpec,
+    /expect\.poll\(\(\) => firstBlogImage\.evaluate[\s\S]{0,160}?currentSrc/);
   assert.match(remoteSpec, /variantSummary\.width400Count/);
   assert.match(remoteSpec, /expect\(variantSummary\.width800Count\)\.toBe\(0\)/);
   assert.match(remoteSpec, /HTMLVideoElement[\s\S]{0,120}?element\.poster/);
@@ -120,11 +130,28 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /safeVisibleCardVariantRequestSummary/);
   assert.match(remoteSpec, /mediaRequestRecords,\s*swipeMediaRequestBaseline/);
   assert.match(remoteSpec, /visibleVariantUrls\.has\(url\.href\)/);
+  assert.match(remoteSpec, /const column = image\.closest<HTMLElement>\("\[data-feed-column\]"\)/);
+  assert.match(remoteSpec, /column\?\.dataset\.feedColumn !== feedSource/);
+  const variantSummaryStart = remoteSpec.indexOf("async function safeVisibleCardVariantRequestSummary");
+  const variantSummaryEnd = remoteSpec.indexOf("async function", variantSummaryStart + 20);
+  const variantSummaryBlock = remoteSpec.slice(variantSummaryStart, variantSummaryEnd);
+  assert.match(variantSummaryBlock, /const columnRect = column\?\.getBoundingClientRect\(\)/);
+  assert.match(variantSummaryBlock, /columnRect\.right <= 0/);
+  assert.match(variantSummaryBlock, /columnRect\.left >= innerWidth/);
+  assert.match(variantSummaryBlock, /rect\.right <= 0/);
+  assert.match(variantSummaryBlock, /rect\.left >= innerWidth/);
+  assert.doesNotMatch(remoteSpec,
+    /image\.closest<HTMLElement>\("\[data-feed-source\]"\)\?\.dataset\.feedSource !== feedSource/);
   assert.match(remoteSpec, /url\.origin !== expectedAssetOrigin/);
   assert.match(remoteSpec, /listResponseStatuses/);
   assert.match(remoteSpec, /expectSuccessfulInitialListResponses/);
   assert.match(remoteSpec, /status\s*>=\s*200\s*&&\s*status\s*<\s*300/);
-  assert.match(remoteSpec, /for \(const source of expectedSources\)[\s\S]{0,260}?data-feed-source/);
+  assert.match(feed, /data-feed-column=\{sourceType\}/);
+  assert.match(remoteSpec,
+    /for \(const source of expectedSources\)[\s\S]{0,180}?expectFeedColumnInViewport\(page, source\)/);
+  assert.doesNotMatch(remoteSpec,
+    /page\.locator\(\s*[`'"]\[data-feed-source="(?:x_list|blog,podcast)"\][`'"]\s*\)/,
+    "feed-root visibility must not use the media telemetry attribute");
   assert.match(remoteSpec, /const publicHeaders/);
   assert.match(remoteSpec, /const apiHeaders/);
   assert.match(remoteSpec, /request\.get\("\/api\/search[^\n]*headers:\s*apiHeaders/);
@@ -138,4 +165,13 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /server-timing/i);
   assert.match(remoteSpec, /new TouchEvent\(type/);
   assert.match(remoteSpec, /newCDPSession/);
+  const mediaSettleStart = remoteSpec.indexOf("async function settleVisibleCardMedia");
+  const mediaSettleEnd = remoteSpec.indexOf("async function", mediaSettleStart + 20);
+  const mediaSettleBlock = remoteSpec.slice(mediaSettleStart, mediaSettleEnd);
+  assert.match(mediaSettleBlock, /rect\.right > 0 && rect\.left < innerWidth/);
+  assert.equal(
+    mediaSettleBlock.match(/rect\.right > 0 && rect\.left < innerWidth/g)?.length,
+    2,
+    "visible images and video posters must both intersect the horizontal viewport",
+  );
 });

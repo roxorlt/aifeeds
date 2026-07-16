@@ -1003,7 +1003,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       scrollRoot={isNarrowFeed ? null : feedBodyRef}
       hotZoneRatio={isNarrowFeed ? 0.6 : 0.5}
     >
-    <div ref={feedRootRef} data-feed-source={sourceType} className="flex flex-col overflow-hidden bg-white md:h-[70vh] md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
+    <div ref={feedRootRef} data-feed-source={sourceType} data-feed-column={sourceType} className="flex flex-col overflow-hidden bg-white md:h-[70vh] md:max-h-[70vh] md:rounded-lg md:border md:border-neutral-200 md:shadow-sm">
       {/* Header — marked `data-no-page-scroll` so the App-level touch
           handler blocks page-scroll initiation from this strip on mobile.
           (touch-action: pan-x is unreliable on iOS Safari / WeChat WebView

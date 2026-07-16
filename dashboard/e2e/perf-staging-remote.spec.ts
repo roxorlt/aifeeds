@@ -2,6 +2,7 @@ import {
   expect,
   test,
   type APIResponse,
+  type Locator,
   type Page,
   type Request as PlaywrightRequest,
 } from "@playwright/test";
@@ -124,6 +125,28 @@ function expectedInitialListSources(project: string): string[] {
   return ["blog,podcast", "product_hunt", "x_list"];
 }
 
+async function expectFeedColumnInViewport(page: Page, source: string): Promise<Locator> {
+  const columns = page.locator(`[data-feed-column="${source}"]`);
+  let matchedIndex = -1;
+  await expect.poll(async () => {
+    const matches = await columns.evaluateAll((elements) => elements.flatMap((element, index) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0
+        && rect.bottom > 0 && rect.top < innerHeight
+        && rect.right > 0 && rect.left < innerWidth
+        ? [index]
+        : [];
+    }));
+    if (matches.length !== 1) {
+      matchedIndex = -1;
+      return false;
+    }
+    matchedIndex = matches[0];
+    return true;
+  }).toBe(true);
+  return columns.nth(matchedIndex);
+}
+
 async function expectSuccessfulInitialListResponses(
   page: Page,
   listResponseStatuses: SafeListResponseStatus[],
@@ -136,7 +159,7 @@ async function expectSuccessfulInitialListResponses(
     return statuses.length > 0 && statuses.every((status) => status >= 200 && status < 300);
   })).toBe(true);
   for (const source of expectedSources) {
-    await expect(page.locator(`[data-feed-source="${source}"]`)).toBeVisible();
+    await expectFeedColumnInViewport(page, source);
   }
 }
 
@@ -204,12 +227,21 @@ async function safeVisibleCardVariantRequestSummary(
       [...document.querySelectorAll<HTMLImageElement>(
         'img[data-media-priority], [data-media-priority] img',
       )].flatMap((image) => {
+        const column = image.closest<HTMLElement>("[data-feed-column]");
+        const columnRect = column?.getBoundingClientRect();
         const rect = image.getBoundingClientRect();
         if (
-          image.closest<HTMLElement>("[data-feed-source]")?.dataset.feedSource !== feedSource
+          column?.dataset.feedColumn !== feedSource
+          || !columnRect
+          || columnRect.bottom <= 0
+          || columnRect.top >= innerHeight
+          || columnRect.right <= 0
+          || columnRect.left >= innerWidth
           || !image.currentSrc
           || rect.bottom <= 0
           || rect.top >= innerHeight
+          || rect.right <= 0
+          || rect.left >= innerWidth
         ) return [];
         try {
           const url = new URL(image.currentSrc, location.href);
@@ -481,7 +513,9 @@ async function settleVisibleCardMedia(
       'img[data-media-priority], [data-media-priority] img',
     )].filter((image) => {
       const rect = image.getBoundingClientRect();
-      return Boolean(image.currentSrc || image.src) && rect.bottom > 0 && rect.top < innerHeight;
+      return Boolean(image.currentSrc || image.src)
+        && rect.bottom > 0 && rect.top < innerHeight
+        && rect.right > 0 && rect.left < innerWidth;
     });
     const results = await Promise.all(visible.map((image) => new Promise<boolean>((resolve) => {
       let settled = false;
@@ -505,7 +539,9 @@ async function settleVisibleCardMedia(
     const visiblePosters = [...document.querySelectorAll<HTMLVideoElement>("video[poster]")]
       .filter((video) => {
         const rect = video.getBoundingClientRect();
-        return Boolean(video.poster) && rect.bottom > 0 && rect.top < innerHeight;
+        return Boolean(video.poster)
+          && rect.bottom > 0 && rect.top < innerHeight
+          && rect.right > 0 && rect.left < innerWidth;
       })
       .map((video) => new URL(video.poster, location.href).href);
     const navigationTimeOrigin = performance.timeOrigin;
@@ -1064,7 +1100,7 @@ test.describe("perf-staging remote acceptance", () => {
     const requestId = /^[A-Za-z0-9._:-]{8,128}$/.test(rawRequestId || "") ? rawRequestId : null;
     expect(serverTiming).not.toBeNull();
     expect(requestId).not.toBeNull();
-    await expect(page.locator('[data-feed-source="x_list"]')).toBeVisible();
+    await expectFeedColumnInViewport(page, "x_list");
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
     const pageQuality = await page.evaluate(() => {
@@ -1210,7 +1246,7 @@ test.describe("perf-staging remote acceptance", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     const warmListResponse = await warmListResponsePromise;
     expect(warmListResponse.ok()).toBe(true);
-    await expect(page.locator('[data-feed-source="x_list"]')).toBeVisible();
+    await expectFeedColumnInViewport(page, "x_list");
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
     const warm = await captureSafePagePerformance(page, mediaRequestRecords);
@@ -1335,25 +1371,35 @@ test.describe("perf-staging remote acceptance", () => {
       ) nextFeedStatuses.push(response.status());
     });
     await page.goto(PERF_PATH, { waitUntil: "domcontentloaded" });
-    await expect(page.locator('[data-feed-source="x_list"]')).toBeVisible();
+    await expectFeedColumnInViewport(page, "x_list");
     const swipeMediaRequestBaseline = mediaRequestRecords.length;
     await swipeToNextChannel(page, testInfo.project.name);
     await expect.poll(() => nextFeedStatuses.some((status) => status >= 200 && status < 300)).toBe(true);
-    await expect(page.locator('[data-feed-source="blog,podcast"]')).toBeVisible();
-    const firstBlogImage = page.locator(
-      '[data-feed-source="blog,podcast"] img[data-media-priority], '
-      + '[data-feed-source="blog,podcast"] [data-media-priority] img',
+    const activeBlogFeed = await expectFeedColumnInViewport(page, "blog,podcast");
+    const firstBlogImage = activeBlogFeed.locator(
+      'img[data-media-priority], [data-media-priority] img',
     ).first();
     await expect(firstBlogImage).toBeAttached();
     await firstBlogImage.scrollIntoViewIfNeeded();
+    await expect(firstBlogImage).toBeVisible();
+    await expect.poll(() => firstBlogImage.evaluate((image: HTMLImageElement) => (
+      Boolean(image.currentSrc || image.src)
+    ))).toBe(true);
     await settleVisibleCardMedia(page, mediaRequestRecords);
     const imageSummary = await page.evaluate(() => {
-      const images = [...document.querySelectorAll<HTMLImageElement>(
-        '[data-feed-source="blog,podcast"] img[data-media-priority], '
-        + '[data-feed-source="blog,podcast"] [data-media-priority] img',
-      )].filter((image) => {
+      const activeFeed = [...document.querySelectorAll<HTMLElement>(
+        '[data-feed-column="blog,podcast"]',
+      )].find((feed) => {
+        const rect = feed.getBoundingClientRect();
+        return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+      });
+      const images = [...(activeFeed?.querySelectorAll<HTMLImageElement>(
+        'img[data-media-priority], [data-media-priority] img',
+      ) || [])].filter((image) => {
         const rect = image.getBoundingClientRect();
-        return Boolean(image.currentSrc || image.src) && rect.bottom > 0 && rect.top < innerHeight;
+        return Boolean(image.currentSrc || image.src)
+          && rect.bottom > 0 && rect.top < innerHeight
+          && rect.right > 0 && rect.left < innerWidth;
       });
       return {
         count: images.length,
@@ -1685,7 +1731,7 @@ test("visible variant summary is scoped to the post-swipe feed and trusted origi
     if (route.request().resourceType() === "document") {
       await route.fulfill({
         contentType: "text/html",
-        body: '<main><section data-feed-source="x_list"><img id="x" data-media-priority="high" width="20" height="20"></section><section data-feed-source="blog,podcast"><img id="blog" data-media-priority="high" width="20" height="20"><img id="foreign" data-media-priority="high" width="20" height="20"></section></main>',
+        body: '<main><section data-feed-column="x_list" data-feed-source="x_list"><img id="x" data-media-priority="high" width="20" height="20"></section><section data-feed-column="blog,podcast" data-feed-source="blog,podcast"><img id="blog" data-media-priority="high" width="20" height="20"><img id="foreign" data-media-priority="high" width="20" height="20"></section><section data-feed-column="blog,podcast" data-feed-source="blog,podcast" style="position:absolute;left:200vw;top:0"><img id="offscreen" data-media-priority="high" width="20" height="20"></section></main>',
       });
       return;
     }
@@ -1708,10 +1754,12 @@ test("visible variant summary is scoped to the post-swipe feed and trusted origi
   await page.evaluate(() => {
     const blog = document.querySelector<HTMLImageElement>("#blog");
     const foreign = document.querySelector<HTMLImageElement>("#foreign");
+    const offscreen = document.querySelector<HTMLImageElement>("#offscreen");
     if (blog) blog.src = `https://assets.invalid/r/blog/card/${"b".repeat(64)}-w400.webp`;
     if (foreign) foreign.src = `https://other.invalid/r/blog/card/${"c".repeat(64)}-w400.webp`;
+    if (offscreen) offscreen.src = `https://assets.invalid/r/blog/card/${"d".repeat(64)}-w400.webp`;
   });
-  await expect.poll(() => mediaRequestRecords.length).toBe(3);
+  await expect.poll(() => mediaRequestRecords.length).toBe(4);
   await expect.poll(() => mediaRequestRecords.slice(swipeMediaRequestBaseline).every((record) => record.finished))
     .toBe(true);
   const summary = await safeVisibleCardVariantRequestSummary(
