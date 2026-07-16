@@ -1229,6 +1229,28 @@ test('perf-staging change packet is fail-closed and independently reversible', (
   assert.match(joinSection, /timeout 15s tail -n 20000/);
 });
 
+test('G7b waits for the correct SNI certificate after asynchronous nginx reload', () => {
+  const finalInstall = perfStagingChangePacket.match(
+    /安装 final 到未启用文件[\s\S]*?(?=\n立即回滚新站点时)/,
+  )?.[0] ?? '';
+  assert.ok(finalInstall, 'G7b final installation block must exist');
+  for (const required of [
+    'TLS_READY=0',
+    'TLS_ATTEMPT=0',
+    'while [ "$TLS_ATTEMPT" -lt 20 ]',
+    '--resolve perf-staging.ai-feeds.com:443:127.0.0.1',
+    'TLS_READY=1',
+    'test "$TLS_READY" = 1',
+  ]) {
+    assert.ok(finalInstall.includes(required), `G7b TLS readiness gate missing: ${required}`);
+  }
+  assert.ok(
+    finalInstall.indexOf('systemctl reload nginx') < finalInstall.indexOf('TLS_READY=0'),
+    'G7b must begin condition polling only after the final nginx reload is requested',
+  );
+  assert.match(finalInstall, /TLS_ATTEMPT=\$\(\(TLS_ATTEMPT \+ 1\)\)[\s\S]{0,80}?sleep 1/);
+});
+
 test('rollout evidence is privacy-safe and distinguishes cold from warm service worker', () => {
   assert.match(rolloutTemplate, /cold-warm-page-performance\.json/);
   assert.match(rolloutTemplate, /workerStart/);

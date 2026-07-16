@@ -1716,6 +1716,22 @@ rollback_needed=1
 activate_site "$FINAL_SITE"
 nginx -t
 systemctl reload nginx
+# systemd 的 nginx reload 只发送信号；旧 worker 可能在极短窗口内继续返回默认站点证书。
+# 轮询实际 SNI/证书与首页条件，达到条件后才做公网 smoke，不用固定等待猜测 worker 切换时序。
+TLS_READY=0
+TLS_ATTEMPT=0
+while [ "$TLS_ATTEMPT" -lt 20 ]; do
+  if curl -fsS --resolve perf-staging.ai-feeds.com:443:127.0.0.1 \
+    --connect-timeout 2 --max-time 5 -A "$BROWSER_UA" \
+    -D "$SMOKE_DIR/readiness.headers" -o /dev/null \
+    https://perf-staging.ai-feeds.com/; then
+    TLS_READY=1
+    break
+  fi
+  TLS_ATTEMPT=$((TLS_ATTEMPT + 1))
+  sleep 1
+done
+test "$TLS_READY" = 1
 curl -fsS --connect-timeout 10 --max-time 30 -A "$BROWSER_UA" \
   -D "$SMOKE_DIR/home.headers" -o /dev/null https://perf-staging.ai-feeds.com/
 curl -fsS --connect-timeout 10 --max-time 30 -A "$BROWSER_UA" \
