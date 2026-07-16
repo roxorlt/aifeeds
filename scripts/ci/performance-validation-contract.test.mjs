@@ -105,6 +105,19 @@ function extractJqFilterBefore(document, target, occurrence = 0) {
   return document.slice(filterStart, filterEnd);
 }
 
+test('staging release helpers retain media evidence and never duplicate Pages rollback', () => {
+  for (const script of [
+    'scripts/release/media-contract-evidence.test.sh',
+    'scripts/release/pages-rollback-policy.test.sh',
+  ]) {
+    const result = spawnSync('bash', [resolve(root, script)], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `${script}\n${result.stdout}\n${result.stderr}`);
+  }
+});
+
 test('dashboard deploy keeps the complete frontend gate ahead of deployment', () => {
   const workflow = readWorkflow('deploy-dashboard.yml');
 

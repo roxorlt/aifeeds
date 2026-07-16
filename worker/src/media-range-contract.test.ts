@@ -20,11 +20,16 @@ const source = fs.readFileSync(
   fileURLToPath(new NodeURL('./index.ts', import.meta.url)),
   'utf8',
 );
+const wranglerConfig = fs.readFileSync(
+  fileURLToPath(new NodeURL('../wrangler.toml', import.meta.url)),
+  'utf8',
+);
 
 describe('public media transport contract', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   test('/media advertises byte ranges when upstream returns a valid partial response', async () => {
+    const versionId = '11111111-2222-4333-8444-555555555555';
     const upstreamFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       expect(String(input)).toBe('https://video.twimg.com/ext_tw_video/range-fixture.mp4');
       expect(new Headers(init?.headers).get('Range')).toBe('bytes=0-1023');
@@ -47,7 +52,13 @@ describe('public media transport contract', () => {
         encodeURIComponent('https://video.twimg.com/ext_tw_video/range-fixture.mp4'),
         { headers: { Range: 'bytes=0-1023' } },
       ),
-      {} as Env,
+      {
+        CF_VERSION_METADATA: {
+          id: versionId,
+          tag: 'media-contract-test',
+          timestamp: '2026-07-16T00:00:00.000Z',
+        },
+      } as Env,
       {} as ExecutionContext,
     );
 
@@ -55,15 +66,25 @@ describe('public media transport contract', () => {
     expect(response.headers.get('Content-Length')).toBe('1024');
     expect(response.headers.get('Content-Range')).toBe('bytes 0-1023/4096');
     expect(response.headers.get('Accept-Ranges')).toBe('bytes');
+    expect(response.headers.get('X-Worker-Version')).toBe(versionId);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
     expect(new Uint8Array(await response.arrayBuffer())).toHaveLength(1024);
     expect(upstreamFetch).toHaveBeenCalledOnce();
   });
 
+  test('production and staging deployments bind Cloudflare version metadata', () => {
+    expect(wranglerConfig).toMatch(/\[version_metadata\]\s+binding = "CF_VERSION_METADATA"/);
+    expect(wranglerConfig).toMatch(
+      /\[env\.staging\.version_metadata\]\s+binding = "CF_VERSION_METADATA"/,
+    );
+  });
+
   test('/media is a dedicated video-only compatibility route', () => {
     expect(source).toMatch(/path === '\/media'/);
-    expect(source).toMatch(/handleImageProxy\(request, 'video'\)/);
+    expect(source).toMatch(
+      /handleImageProxy\(request, 'video', env\.CF_VERSION_METADATA\?\.id\)/,
+    );
     expect(source).toMatch(/requestedKind === 'video' && targetUrl\.hostname !== 'video\.twimg\.com'/);
     expect(source).toMatch(/requestedKind === 'video' && redirected\.hostname !== 'video\.twimg\.com'/);
   });

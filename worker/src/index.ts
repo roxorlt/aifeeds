@@ -215,6 +215,7 @@ const EVENT_FINGERPRINT_BACKFILL_KV_KEY = 'ops:feed-event-fingerprint-backfill:a
 export interface Env {
   DB: D1Database;
   AUTH_KV: KVNamespace;
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
   INGEST_TOKEN: string;
   DEEPSEEK_API_KEY?: string;
   // GITHUB_TOKEN: optional PAT (public_repo scope). Lifts API rate limit
@@ -937,7 +938,7 @@ export default {
         return handleImageProxy(request);
       }
       if (path === '/media' && request.method === 'GET') {
-        return handleImageProxy(request, 'video');
+        return handleImageProxy(request, 'video', env.CF_VERSION_METADATA?.id);
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
         return handleR2Asset(request, env, path.slice(3));
@@ -5579,6 +5580,7 @@ function isAllowedImageProxyTarget(target: URL): boolean {
 async function handleImageProxy(
   request: Request,
   requestedKind: 'image' | 'video' = 'image',
+  workerVersion?: string,
 ): Promise<Response> {
   const url = new URL(request.url);
   const target = url.searchParams.get('url');
@@ -5703,6 +5705,7 @@ async function handleImageProxy(
   // 当成 immutable 缓存住，后续 Range 请求拿不到 partial 响应）
   if (isVideo) {
     headers.set('Cache-Control', 'no-store');
+    if (workerVersion) headers.set('X-Worker-Version', workerVersion);
   } else {
     headers.set('Cache-Control', 'public, max-age=604800, immutable');
     // 让 client / 中间 CDN 知道按 Accept 不同 cache（worker cacheKey 已按 format
