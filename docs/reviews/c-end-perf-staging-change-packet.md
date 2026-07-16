@@ -2407,12 +2407,14 @@ for project in desktop-chromium tablet-chromium iphone-chromium iphone-webkit an
   test "$(stat -f '%u' "$file")" = "$(id -u)"
 done
 jq -s -e '
-  length == 5 and
-  ([.[].project] | unique | length) == 5 and
-  all(.[];
-    .schema == 1 and
-    (.project | test("^(desktop-chromium|tablet-chromium|iphone-chromium|iphone-webkit|android-chromium)$")) and
-    (.request_id | test("^[A-Za-z0-9._:-]{8,128}$")))
+  select(
+    length == 5 and
+    ([.[].project] | unique | length) == 5 and
+    all(.[];
+      .schema == 1 and
+      (.project | test("^(desktop-chromium|tablet-chromium|iphone-chromium|iphone-webkit|android-chromium)$")) and
+      (.request_id | test("^[A-Za-z0-9._:-]{8,128}$")))
+  )
 ' "$JOIN_DIR"/*.json > "$RAW_DIR/browser-request-ids.json"
 BROWSER_UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36'
 curl -fsS --connect-timeout 10 --max-time 30 -A "$BROWSER_UA" \

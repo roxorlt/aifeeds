@@ -118,6 +118,36 @@ test('staging release helpers retain media evidence and never duplicate Pages ro
   }
 });
 
+test('perf-staging browser request-id validation preserves five rows for nginx join', () => {
+  const joinSection = perfStagingChangePacket.match(
+    /### 10[.]1c[\s\S]*?(?=\n### 10[.]2)/,
+  )?.[0] ?? '';
+  const filter = joinSection.match(
+    /jq -s -e '\n([\s\S]*?)\n' "\$JOIN_DIR"\/\*[.]json > "\$RAW_DIR\/browser-request-ids[.]json"/,
+  )?.[1] ?? '';
+  assert.ok(filter, 'browser request-id jq filter must be extractable');
+
+  const projects = [
+    'desktop-chromium',
+    'tablet-chromium',
+    'iphone-chromium',
+    'iphone-webkit',
+    'android-chromium',
+  ];
+  const input = projects
+    .map((project, index) => JSON.stringify({
+      schema: 1,
+      project,
+      request_id: `request-${String(index + 1).padStart(4, '0')}`,
+    }))
+    .join('\n');
+  const result = spawnSync('jq', ['-s', '-e', filter], { input, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.ok(Array.isArray(output), `expected an array, received ${result.stdout.trim()}`);
+  assert.equal(output.length, 5);
+});
+
 test('dashboard deploy keeps the complete frontend gate ahead of deployment', () => {
   const workflow = readWorkflow('deploy-dashboard.yml');
 
