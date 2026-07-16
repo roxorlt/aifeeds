@@ -24,7 +24,7 @@ const source = fs.readFileSync(
 describe('public media transport contract', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  test('/media forwards a real byte range and preserves the partial response contract', async () => {
+  test('/media advertises byte ranges when upstream returns a valid partial response', async () => {
     const upstreamFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       expect(String(input)).toBe('https://video.twimg.com/ext_tw_video/range-fixture.mp4');
       expect(new Headers(init?.headers).get('Range')).toBe('bytes=0-1023');
@@ -36,7 +36,6 @@ describe('public media transport contract', () => {
           'Content-Type': 'video/mp4',
           'Content-Length': '1024',
           'Content-Range': 'bytes 0-1023/4096',
-          'Accept-Ranges': 'bytes',
         },
       });
     });

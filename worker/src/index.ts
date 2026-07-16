@@ -5676,11 +5676,17 @@ async function handleImageProxy(
   if (ct) headers.set('Content-Type', ct);
   // 透传 Range 相关响应头 — 让 <video> 知道源支持 seek
   const acceptRanges = upstream.headers.get('accept-ranges');
-  if (acceptRanges) headers.set('Accept-Ranges', acceptRanges);
   const contentLength = upstream.headers.get('content-length');
   if (contentLength) headers.set('Content-Length', contentLength);
   const contentRange = upstream.headers.get('content-range');
   if (contentRange) headers.set('Content-Range', contentRange);
+  if (acceptRanges) {
+    headers.set('Accept-Ranges', acceptRanges);
+  } else if (isVideo && upstream.status === 206 && contentRange) {
+    // A valid partial response proves byte-range support even when the origin
+    // omits the otherwise redundant Accept-Ranges header (video.twimg.com does).
+    headers.set('Accept-Ranges', 'bytes');
+  }
   // 图片可长期 cache；video 不设 immutable（避免浏览器把"无 Range"的完整流
   // 当成 immutable 缓存住，后续 Range 请求拿不到 partial 响应）
   if (isVideo) {
