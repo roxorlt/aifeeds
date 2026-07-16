@@ -1,11 +1,11 @@
 import {
   expect,
   test,
-  type APIRequestContext,
   type APIResponse,
   type Locator,
   type Page,
   type Request as PlaywrightRequest,
+  type Response as PlaywrightResponse,
 } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { randomBytes } from "node:crypto";
@@ -142,32 +142,91 @@ function expectedSyntheticFixtureId(
   return value;
 }
 
-async function expectSyntheticFixtureInUiList(
-  request: APIRequestContext,
-  path: string,
+type SyntheticFixtureItem = {
+  id?: string;
+  media?: unknown;
+  extra?: unknown;
+};
+
+async function readSyntheticFixtureFromUiResponse(
+  response: APIResponse | PlaywrightResponse,
   envName: SyntheticFixtureEnv,
   sourceType: "x_list" | "blog",
-): Promise<string> {
+): Promise<SyntheticFixtureItem> {
   const expectedFixtureId = expectedSyntheticFixtureId(envName, sourceType);
-  const response = await request.get(path, {
-    headers: {
-      Origin: PERF_ORIGIN,
-      "User-Agent": browserUserAgent,
-      "X-Aifeeds-Perf-Probe": process.env.E2E_PERF_PROBE!,
-    },
-  });
-  expect(response.ok(), `${sourceType} fixture list request must succeed`).toBe(true);
+  const url = new URL(response.url());
+  expect(url.origin).toBe(PERF_ORIGIN);
+  expect(url.pathname).toBe("/api/items");
+  expect(url.searchParams.get("source_type")).toBe(sourceType === "blog" ? "blog,podcast" : "x_list");
+  expect(url.searchParams.get("limit")).toBe("12");
+  if (sourceType === "blog") expect(url.searchParams.get("sort")).toBe("published_at");
+  expect(response.ok(), sourceType + " fixture list request must succeed").toBe(true);
   const payload = await parseJsonWithoutBodyLeak(response) as {
-    items?: Array<{ id?: string }>;
+    items?: SyntheticFixtureItem[];
   } | null;
   const items = Array.isArray(payload?.items) ? payload.items : [];
-  expect(
-    items.some((item) => item.id === expectedFixtureId),
-    `${sourceType} fixture must be visible in the exact UI list window`,
-  ).toBe(true);
-  return expectedFixtureId;
+  const fixture = items.find((item) => item.id === expectedFixtureId);
+  expect(fixture, sourceType + " fixture must be visible in the page's exact UI list response").toBeTruthy();
+  return fixture!;
 }
 
+function exactFixtureImagePaths(
+  fixture: SyntheticFixtureItem,
+  sourceType: "x_list" | "blog",
+  expectedWidth: 400 | 800,
+): { originalPath: string; variantPath: string } {
+  let originalPath = "";
+  let variants: unknown = null;
+  if (sourceType === "x_list") {
+    const media = Array.isArray(fixture.media) ? fixture.media : [];
+    const image = media.find((entry) => (
+      entry && typeof entry === "object" && (entry as Record<string, unknown>).type === "image"
+    )) as Record<string, unknown> | undefined;
+    originalPath = typeof image?.url === "string" ? image.url : "";
+    variants = image?.card_variants;
+  } else {
+    const extra = fixture.extra && typeof fixture.extra === "object" && !Array.isArray(fixture.extra)
+      ? fixture.extra as Record<string, unknown>
+      : {};
+    originalPath = typeof extra.cover_image === "string" ? extra.cover_image : "";
+    variants = extra.cover_image_variants;
+  }
+  const variant = (Array.isArray(variants) ? variants : []).find((entry) => (
+    entry && typeof entry === "object"
+    && (entry as Record<string, unknown>).width === expectedWidth
+    && (entry as Record<string, unknown>).format === "webp"
+  )) as Record<string, unknown> | undefined;
+  const variantPath = typeof variant?.url === "string" ? variant.url : "";
+  if (
+    !/^\/r\/[a-z]+\/[a-f0-9]{64}\.(?:jpg|jpeg|png|webp)$/.test(originalPath)
+    || !new RegExp("^/r/[a-z]+/card/[a-f0-9]{64}-w" + expectedWidth + "\\.webp$").test(variantPath)
+  ) throw new Error(sourceType + " fixture image contract mismatch");
+  return { originalPath, variantPath };
+}
+
+async function expectExactFixtureImage(
+  feed: Locator,
+  originalPath: string,
+  variantPath: string,
+): Promise<Locator> {
+  const image = feed.locator('img[src="' + WORKER_ASSET_ORIGIN + originalPath + '"]');
+  await expect(image).toHaveCount(1);
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => {
+    if (!element.currentSrc) return "";
+    return new URL(element.currentSrc, location.href).pathname;
+  })).toBe(variantPath);
+  const decoded = await image.evaluate(async (element: HTMLImageElement) => {
+    try {
+      await element.decode();
+    } catch {
+      return false;
+    }
+    return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
+  });
+  expect(decoded, "owned fixture image must decode").toBe(true);
+  return image;
+}
 async function expectFeedColumnInViewport(page: Page, source: string): Promise<Locator> {
   const columns = page.locator(`[data-feed-column="${source}"]`);
   let matchedIndex = -1;
@@ -862,7 +921,9 @@ function parseSafeServerTiming(value: string | undefined): { d1Ms: number; threa
   };
 }
 
-async function parseJsonWithoutBodyLeak(response: APIResponse): Promise<unknown | null> {
+async function parseJsonWithoutBodyLeak(
+  response: APIResponse | PlaywrightResponse,
+): Promise<unknown | null> {
   const body = await response.text();
   try {
     return JSON.parse(body) as unknown;
@@ -1097,13 +1158,7 @@ test.describe("perf-staging remote acceptance", () => {
     }, { deviceId: expectedDeviceId, probe: perfProbe });
   });
 
-  test("five-device home uses the same-origin API and publishes timing evidence", async ({ page, request }, testInfo) => {
-    await expectSyntheticFixtureInUiList(
-      request,
-      "/api/items?source_type=x_list&limit=12",
-      "E2E_EXPECTED_X_FIXTURE_ID",
-      "x_list",
-    );
+  test("five-device home uses the same-origin API and publishes timing evidence", async ({ page }, testInfo) => {
     const mediaRequestRecords = trackSafeMediaRequests(page);
     const expectedSources = expectedInitialListSources(testInfo.project.name);
     const listResponseStatuses: SafeListResponseStatus[] = [];
@@ -1144,12 +1199,24 @@ test.describe("perf-staging remote acceptance", () => {
 
     expect(listResponse.ok()).toBe(true);
     expect(new URL(listResponse.url()).origin).toBe(PERF_ORIGIN);
+    const xFixture = await readSyntheticFixtureFromUiResponse(
+      listResponse,
+      "E2E_EXPECTED_X_FIXTURE_ID",
+      "x_list",
+    );
+    const expectedXImageWidth = testInfo.project.name === "desktop-chromium" ? 400 : 800;
+    const expectedXImage = exactFixtureImagePaths(xFixture, "x_list", expectedXImageWidth);
     const serverTiming = parseSafeServerTiming(listResponse.headers()["server-timing"]);
     const rawRequestId = listResponse.headers()["x-request-id"];
     const requestId = /^[A-Za-z0-9._:-]{8,128}$/.test(rawRequestId || "") ? rawRequestId : null;
     expect(serverTiming).not.toBeNull();
     expect(requestId).not.toBeNull();
-    await expectFeedColumnInViewport(page, "x_list");
+    const activeXFeed = await expectFeedColumnInViewport(page, "x_list");
+    await expectExactFixtureImage(
+      activeXFeed,
+      expectedXImage.originalPath,
+      expectedXImage.variantPath,
+    );
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
     const pageQuality = await page.evaluate(() => {
@@ -1407,77 +1474,59 @@ test.describe("perf-staging remote acceptance", () => {
     expect(second).toEqual({ status: 200, idMatches: true });
   });
 
-  test("mobile projects switch the live remote feed with a touch swipe", async ({ page, request }, testInfo) => {
+  test("mobile projects switch the live remote feed with a touch swipe", async ({ page }, testInfo) => {
     test.skip(!isMobileProject(testInfo.project.name), "mobile interaction only");
-    await expectSyntheticFixtureInUiList(
-      request,
-      "/api/items?source_type=blog%2Cpodcast&limit=12&sort=published_at",
-      "E2E_EXPECTED_BLOG_FIXTURE_ID",
-      "blog",
-    );
     const mediaRequestRecords = trackSafeMediaRequests(page);
-    const nextFeedStatuses: number[] = [];
-    page.on("response", (response) => {
-      const url = new URL(response.url());
-      if (
-        url.origin === PERF_ORIGIN
-        && url.pathname === "/api/items"
-        && url.searchParams.get("source_type") === "blog,podcast"
-      ) nextFeedStatuses.push(response.status());
-    });
     await page.goto(PERF_PATH, { waitUntil: "domcontentloaded" });
     await expectFeedColumnInViewport(page, "x_list");
     const swipeMediaRequestBaseline = mediaRequestRecords.length;
-    await swipeToNextChannel(page, testInfo.project.name);
-    await expect.poll(() => nextFeedStatuses.some((status) => status >= 200 && status < 300)).toBe(true);
-    const activeBlogFeed = await expectFeedColumnInViewport(page, "blog,podcast");
-    const firstBlogImage = activeBlogFeed.locator(
-      'img[data-media-priority], [data-media-priority] img',
-    ).first();
-    await expect(firstBlogImage).toBeAttached();
-    await firstBlogImage.scrollIntoViewIfNeeded();
-    await expect(firstBlogImage).toBeVisible();
-    await expect.poll(() => firstBlogImage.evaluate((image: HTMLImageElement) => (
-      Boolean(image.currentSrc || image.src)
-    ))).toBe(true);
-    await settleVisibleCardMedia(page, mediaRequestRecords);
-    const imageSummary = await page.evaluate(() => {
-      const activeFeed = [...document.querySelectorAll<HTMLElement>(
-        '[data-feed-column="blog,podcast"]',
-      )].find((feed) => {
-        const rect = feed.getBoundingClientRect();
-        return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
-      });
-      const images = [...(activeFeed?.querySelectorAll<HTMLImageElement>(
-        'img[data-media-priority], [data-media-priority] img',
-      ) || [])].filter((image) => {
-        const rect = image.getBoundingClientRect();
-        return Boolean(image.currentSrc || image.src)
-          && rect.bottom > 0 && rect.top < innerHeight
-          && rect.right > 0 && rect.left < innerWidth;
-      });
-      return {
-        count: images.length,
-        decoded: images.filter((image) => image.complete && image.naturalWidth > 0).length,
-      };
+    const blogResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.origin === PERF_ORIGIN
+        && url.pathname === "/api/items"
+        && url.searchParams.get("source_type") === "blog,podcast"
+        && url.searchParams.get("limit") === "12"
+        && url.searchParams.get("sort") === "published_at";
     });
-    expect(imageSummary.count).toBeGreaterThan(0);
-    expect(imageSummary.decoded).toBe(imageSummary.count);
-    const summarizeVisibleVariants = () => safeVisibleCardVariantRequestSummary(
-      page,
-      mediaRequestRecords,
-      swipeMediaRequestBaseline,
-      "blog,podcast",
-      PERF_ORIGIN,
-      WORKER_ASSET_ORIGIN,
+    await swipeToNextChannel(page, testInfo.project.name);
+    const blogResponse = await blogResponsePromise;
+    const blogFixture = await readSyntheticFixtureFromUiResponse(
+      blogResponse,
+      "E2E_EXPECTED_BLOG_FIXTURE_ID",
+      "blog",
     );
-    await expect.poll(async () => (await summarizeVisibleVariants()).count).toBeGreaterThan(0);
-    await expect.poll(async () => (await summarizeVisibleVariants()).pendingCount).toBe(0);
-    const variantSummary = await summarizeVisibleVariants();
-    expect(variantSummary.count).toBeGreaterThan(0);
-    expect(variantSummary.width400Count).toBeGreaterThan(0);
-    expect(variantSummary.width800Count).toBe(0);
-    expect(variantSummary.failedCount).toBe(0);
+    const expectedBlogImage = exactFixtureImagePaths(blogFixture, "blog", 400);
+    const expectedBlogImagePath = expectedBlogImage.variantPath;
+    const activeBlogFeed = await expectFeedColumnInViewport(page, "blog,podcast");
+    await expectExactFixtureImage(
+      activeBlogFeed,
+      expectedBlogImage.originalPath,
+      expectedBlogImagePath,
+    );
+    const exactBlogRequests = () => mediaRequestRecords.slice(swipeMediaRequestBaseline)
+      .filter((record) => {
+        try {
+          const url = new URL(record.url);
+          return url.origin === WORKER_ASSET_ORIGIN && url.pathname === expectedBlogImagePath;
+        } catch {
+          return false;
+        }
+      });
+    await expect.poll(() => exactBlogRequests().some((record) => record.finished)).toBe(true);
+    const completedBlogRequests = exactBlogRequests();
+    expect(completedBlogRequests.length).toBeGreaterThan(0);
+    expect(completedBlogRequests.some((record) => (
+      !record.failed
+      && record.httpStatus !== null
+      && record.httpStatus >= 200
+      && record.httpStatus < 300
+    ))).toBe(true);
+    expect(completedBlogRequests.filter((record) => (
+      record.failed
+      || record.httpStatus === null
+      || record.httpStatus < 200
+      || record.httpStatus >= 300
+    ))).toHaveLength(0);
   });
 
   test("representative desktop validates API errors, search, SEO and SPA routing", async ({ request }, testInfo) => {
@@ -1659,7 +1708,12 @@ test.describe("perf-staging remote acceptance", () => {
     ));
     requireResponse(xFixture, "owned synthetic X fixture detail request failed");
     expect(xFixture.ok()).toBe(true);
-    const videoUrl = findRangeAsset(await parseJsonWithoutBodyLeak(xFixture), "video");
+    const xFixturePayload = await parseJsonWithoutBodyLeak(xFixture) as {
+      item?: SyntheticFixtureItem;
+    } | null;
+    if (!xFixturePayload?.item) throw new Error("owned synthetic X fixture detail is missing");
+    expect(xFixturePayload.item.id).toBe(expectedXFixtureId);
+    const videoUrl = findRangeAsset(xFixturePayload.item, "video");
     const podcastList = await parseJsonWithoutBodyLeak(podcastFeed) as { items?: Array<{ id?: string }> } | null;
     let audioUrl: string | null = null;
     for (const item of (podcastList?.items || []).slice(0, 20)) {

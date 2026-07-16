@@ -16,7 +16,7 @@
     "deploy:same-origin": "node -e \"console.error('BLOCKED: same-origin production deploy requires explicit approval; follow docs/operations.md same-origin API runbook'); process.exit(1)\"",
     "test:unit": "node --test",
     "test:e2e": "playwright test e2e/home-performance.spec.ts",
-    "test:e2e:perf-staging": "E2E_REMOTE=1 E2E_BASE_URL=https://perf-staging.ai-feeds.com playwright test e2e/perf-staging-remote.spec.ts",
+    "test:e2e:perf-staging": "bash scripts/run-perf-staging-e2e.sh",
     "lint": "eslint .",
     "preview": "vite preview"
   },

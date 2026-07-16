@@ -45,6 +45,9 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   const remoteSpecPath = path.join(dashboard, "e2e/perf-staging-remote.spec.ts");
   assert.equal(fs.existsSync(remoteSpecPath), true, "remote perf-staging spec must exist");
   const remoteSpec = fs.readFileSync(remoteSpecPath, "utf8");
+  const remoteRunnerPath = path.join(dashboard, "scripts/run-perf-staging-e2e.sh");
+  assert.equal(fs.existsSync(remoteRunnerPath), true, "remote perf-staging runner must exist");
+  const remoteRunner = fs.readFileSync(remoteRunnerPath, "utf8");
 
   assert.match(config, /E2E_BASE_URL/);
   assert.match(config, /E2E_OUTPUT_DIR/);
@@ -61,7 +64,12 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(config, /serviceWorkers:\s*isRemote\s*\?\s*["']allow["']/);
   assert.match(config, /reporter:\s*isRemote[\s\S]{0,60}?\[\["line"\]\]/);
   assert.match(config, /PLAYWRIGHT_NO_COPY_PROMPT/);
-  assert.match(packageJson.scripts["test:e2e:perf-staging"], /perf-staging-remote\.spec\.ts/);
+  assert.match(packageJson.scripts["test:e2e:perf-staging"], /scripts\/run-perf-staging-e2e\.sh/);
+  assert.match(remoteRunner, /E2E_EXPECTED_X_FIXTURE_ID/);
+  assert.match(remoteRunner, /E2E_EXPECTED_BLOG_FIXTURE_ID/);
+  assert.match(remoteRunner, /x_list:perf-staging-\[a-f0-9\]\{20\}/);
+  assert.match(remoteRunner, /blog:perf-staging-\[a-f0-9\]\{20\}/);
+  assert.match(remoteRunner, /exec npx playwright test e2e\/perf-staging-remote\.spec\.ts/);
   assert.match(remoteSpec, /E2E_REMOTE/);
   assert.match(remoteSpec, /E2E_COOKIE_JAR/);
   assert.match(remoteSpec, /E2E_EXPECTED_UID/);
@@ -93,16 +101,23 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /matches\.length !== 1/);
   assert.match(remoteSpec,
     /const activeBlogFeed = await expectFeedColumnInViewport\(page, "blog,podcast"\)/);
-  assert.match(remoteSpec, /activeBlogFeed\.locator\(/);
-  assert.match(remoteSpec, /activeFeed\?\.querySelectorAll/);
   assert.match(remoteSpec, /expectedSyntheticFixtureId/);
-  assert.match(remoteSpec, /source_type=x_list&limit=12/);
-  assert.match(remoteSpec, /source_type=blog%2Cpodcast&limit=12&sort=published_at/);
-  assert.match(remoteSpec, /items\.some\(\(item\) => item\.id === expectedFixtureId\)/);
-  assert.match(remoteSpec,
-    /expect\.poll\(\(\) => firstBlogImage\.evaluate[\s\S]{0,160}?currentSrc/);
-  assert.match(remoteSpec, /variantSummary\.width400Count/);
-  assert.match(remoteSpec, /expect\(variantSummary\.width800Count\)\.toBe\(0\)/);
+  assert.match(remoteSpec, /readSyntheticFixtureFromUiResponse/);
+  assert.match(remoteSpec, /readSyntheticFixtureFromUiResponse\(\s*listResponse/);
+  assert.match(remoteSpec, /readSyntheticFixtureFromUiResponse\(\s*blogResponse/);
+  assert.doesNotMatch(remoteSpec, /type APIRequestContext/);
+  assert.doesNotMatch(remoteSpec, /expectSyntheticFixtureInUiList\(\s*request/);
+  assert.match(remoteSpec, /url\.searchParams\.get\("source_type"\)/);
+  assert.match(remoteSpec, /url\.searchParams\.get\("limit"\)\)\.toBe\("12"\)/);
+  assert.match(remoteSpec, /url\.searchParams\.get\("sort"\)\)\.toBe\("published_at"\)/);
+  assert.match(remoteSpec, /items\.find\(\(item\) => item\.id === expectedFixtureId\)/);
+  assert.match(remoteSpec, /const blogResponsePromise = page\.waitForResponse/);
+  assert.match(remoteSpec, /expectExactFixtureImage/);
+  assert.match(remoteSpec, /expectedBlogImagePath/);
+  assert.match(remoteSpec, /currentSrc[\s\S]{0,160}?toBe\(variantPath\)/);
+  assert.match(remoteSpec, /mediaRequestRecords\.slice\(swipeMediaRequestBaseline\)/);
+  assert.match(remoteSpec, /url\.pathname === expectedBlogImagePath/);
+  assert.doesNotMatch(remoteSpec, /firstBlogImage/);
   assert.match(remoteSpec, /HTMLVideoElement[\s\S]{0,120}?element\.poster/);
   assert.match(remoteSpec, /renameSync\(temporary, file\)/);
   const settleStart = remoteSpec.indexOf("async function settleLcpAfterFeedReady");
@@ -173,6 +188,8 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.doesNotMatch(remoteSpec,
     /findRangeAsset\(await parseJsonWithoutBodyLeak\(xFeed\),\s*["']video["']\)/,
     "Range validation must resolve the owned synthetic X fixture by exact id");
+  assert.match(remoteSpec, /xFixturePayload\.item\.id\)\.toBe\(expectedXFixtureId\)/);
+  assert.match(remoteSpec, /findRangeAsset\(xFixturePayload\.item,\s*["']video["']\)/);
   assert.match(remoteSpec, /server-timing/i);
   assert.match(remoteSpec, /new TouchEvent\(type/);
   assert.match(remoteSpec, /newCDPSession/);
