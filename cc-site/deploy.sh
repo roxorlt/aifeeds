@@ -12,6 +12,11 @@ HOST="lighthouse@82.156.0.68"
 REMOTE_ROOT="/www/wwwroot/ai-feeds.cc"
 STAGING="/tmp/cc-site-staging"
 
+# SSH 连接复用：全程共享一条 TCP 连接，避免服务器对短时间内
+# 连续新建连接限流导致 scp "Connection closed"（2026-07-16 实际踩到）
+SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=accept-new
+  -o ControlMaster=auto -o ControlPath=/tmp/cc-site-ssh-mux-%r@%h:%p -o ControlPersist=120)
+
 if [[ ! -f "$KEY" ]]; then
   echo "ERROR: SSH key not found at $KEY" >&2
   exit 1
@@ -21,19 +26,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "▶ scp cc-site/ → $HOST:$STAGING/"
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "rm -rf $STAGING && mkdir -p $STAGING/assets $STAGING/cc-prompts"
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+ssh "${SSH_OPTS[@]}" "$HOST" "rm -rf $STAGING && mkdir -p $STAGING/assets $STAGING/cc-prompts"
+scp "${SSH_OPTS[@]}" \
   index.html privacy.html terms.html contact.html style.css sitemap.xml robots.txt \
   "$HOST:$STAGING/"
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+scp "${SSH_OPTS[@]}" \
   assets/gongan-icon.png \
   "$HOST:$STAGING/assets/"
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+scp "${SSH_OPTS[@]}" \
   cc-prompts/index.html \
   "$HOST:$STAGING/cc-prompts/"
 
 echo "▶ sudo cp → $REMOTE_ROOT/"
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
+ssh "${SSH_OPTS[@]}" "$HOST" "
   sudo mkdir -p $REMOTE_ROOT/assets $REMOTE_ROOT/cc-prompts
   sudo cp $STAGING/index.html $STAGING/privacy.html $STAGING/terms.html $STAGING/contact.html $STAGING/style.css $STAGING/sitemap.xml $STAGING/robots.txt $REMOTE_ROOT/
   sudo cp $STAGING/assets/gongan-icon.png $REMOTE_ROOT/assets/
