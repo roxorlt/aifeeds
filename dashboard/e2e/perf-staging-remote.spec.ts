@@ -120,6 +120,23 @@ function isMobileProject(name: string): boolean {
   return name.startsWith("iphone-") || name.startsWith("android-");
 }
 
+function expectWarmServiceWorkerNavigation(
+  sample: SafePagePerformance,
+  projectName: string,
+  navigationResponse: PlaywrightResponse | null,
+): void {
+  expect(navigationResponse, "warm navigation response must exist").not.toBeNull();
+  expect(navigationResponse!.ok()).toBe(true);
+  expect(new URL(navigationResponse!.url()).origin).toBe(PERF_ORIGIN);
+  expect(new URL(navigationResponse!.url()).pathname).toBe("/");
+  expect(navigationResponse!.fromServiceWorker()).toBe(true);
+  expect(sample.navigation.swControllerPresent).toBe(true);
+  expect(sample.navigation.transferBytes).toBe(0);
+  if (!projectName.includes("webkit")) {
+    expect(sample.navigation.workerStartMs).toBeGreaterThan(0);
+  }
+}
+
 function expectedInitialListSources(project: string): string[] {
   if (isMobileProject(project)) return ["x_list"];
   if (project === "tablet-chromium") return ["blog,podcast", "x_list"];
@@ -215,19 +232,12 @@ async function expectExactFixtureImage(
   feed: Locator,
   originalPath: string,
   variantPath: string,
-  options: { viewportMode: "already-in-viewport" | "scroll-into-viewport" },
 ): Promise<Locator> {
   const image = feed.locator('img[src="' + WORKER_ASSET_ORIGIN + originalPath + '"]');
   await expect(image).toHaveCount(1);
-  if (options.viewportMode === "scroll-into-viewport") {
-    await image.scrollIntoViewIfNeeded();
-  }
   await expect(image).toBeVisible();
   await expect(image).toBeInViewport();
-  await expect.poll(() => image.evaluate((element: HTMLImageElement) => {
-    if (!element.currentSrc) return "";
-    return new URL(element.currentSrc, location.href).pathname;
-  })).toBe(variantPath);
+  await expect(image).toHaveAttribute("loading", "eager");
   const decoded = await image.evaluate(async (element: HTMLImageElement) => {
     try {
       await element.decode();
@@ -237,6 +247,10 @@ async function expectExactFixtureImage(
     return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
   });
   expect(decoded, "owned fixture image must decode").toBe(true);
+  await expect.poll(() => image.evaluate((element: HTMLImageElement) => {
+    if (!element.currentSrc) return "";
+    return new URL(element.currentSrc, location.href).pathname;
+  })).toBe(variantPath);
   return image;
 }
 async function expectFeedColumnInViewport(page: Page, source: string): Promise<Locator> {
@@ -1229,7 +1243,6 @@ test.describe("perf-staging remote acceptance", () => {
       activeXFeed,
       expectedXImage.originalPath,
       expectedXImage.variantPath,
-      { viewportMode: "already-in-viewport" },
     );
     await expectSuccessfulInitialListResponses(page, listResponseStatuses, expectedSources);
     await settleLcpAfterFeedReady(page, mediaRequestRecords);
@@ -1373,7 +1386,7 @@ test.describe("perf-staging remote acceptance", () => {
     })).toBe(true);
     listResponseStatuses.length = 0;
     const warmListResponsePromise = waitForListResponse();
-    await page.reload({ waitUntil: "domcontentloaded" });
+    const warmNavigationResponse = await page.reload({ waitUntil: "domcontentloaded" });
     const warmListResponse = await warmListResponsePromise;
     expect(warmListResponse.ok()).toBe(true);
     await expectFeedColumnInViewport(page, "x_list");
@@ -1382,9 +1395,7 @@ test.describe("perf-staging remote acceptance", () => {
     const warm = await captureSafePagePerformance(page, mediaRequestRecords);
     const warmListSources = await safeListSourcesBeforeContentionCutoff(page);
     expect(cold.navigation.workerStartMs).toBe(0);
-    expect(warm.navigation.workerStartMs).toBeGreaterThan(0);
-    expect(warm.navigation.swControllerPresent).toBe(true);
-    expect(warm.navigation.transferBytes).toBe(0);
+    expectWarmServiceWorkerNavigation(warm, testInfo.project.name, warmNavigationResponse);
     expect(mediaRequestRecords.filter((record) => {
       try {
         return new URL(record.url).pathname === "/img" && record.httpStatus === 403;
@@ -1508,6 +1519,7 @@ test.describe("perf-staging remote acceptance", () => {
       blogResponse,
       "E2E_EXPECTED_BLOG_FIXTURE_ID",
       "blog",
+      { requireFirst: true },
     );
     const expectedBlogImage = exactFixtureImagePaths(blogFixture, "blog", 400);
     const expectedBlogImagePath = expectedBlogImage.variantPath;
@@ -1516,7 +1528,6 @@ test.describe("perf-staging remote acceptance", () => {
       activeBlogFeed,
       expectedBlogImage.originalPath,
       expectedBlogImagePath,
-      { viewportMode: "scroll-into-viewport" },
     );
     const exactBlogRequests = () => mediaRequestRecords.slice(swipeMediaRequestBaseline)
       .filter((record) => {

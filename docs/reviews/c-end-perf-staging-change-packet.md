@@ -2272,7 +2272,12 @@ request-id。它只在页面原生 fetch 发往 perf origin `/api/**` 时注入�
 `X-Aifeeds-Perf-Probe`（APIRequest fixture 显式加同一 header）；导航、R2、字体和第三方媒体不携带该
 header。页面从 `/?codex_perf_probe=1` 启动，使 telemetry 与 nginx API 日志进入 synthetic cohort。
 匿名性能用全新 context 的 cold 首航，先证明 `aifeeds-shell-*` CacheStorage 内已有 `/`，再 reload；
-warm 必须同时满足 Navigation Timing `workerStart>0`、controller 存在且 navigation transferSize=0。
+warm 在所有引擎都必须由 Playwright `Response.fromServiceWorker()` 直接证明导航响应来自 Service
+Worker，同时满足 controller 存在且 navigation transferSize=0；Chromium 还必须满足 Navigation Timing
+`workerStart>0`。仓库锁定的 Playwright WebKit 即使确由 Service Worker 返回导航，仍把 `workerStart`、
+`fetchStart` 和 `responseStart` 报为 0，因此不得伪造正值或把 Chromium 专属信号当作跨引擎硬门；
+WebKit 的证明链是 reload 前 shell cache 命中、reload response 的 Worker 来源、reload 后 controller
+存在和零传输。
 首屏 list 必须精确命中响应式 source 集合：desktop=`x_list + blog,podcast + product_hunt`、
 tablet=`x_list + blog,podcast`、mobile=`x_list`，不能把 1/2/3 只当上限；任何 LCP 前启动的下方行请求
 都失败。媒体竞争以 Playwright request start（包含采集时仍在下载的请求）计数；可见卡图必须全部
@@ -2280,7 +2285,10 @@ decode，可见 video poster 的真实请求也必须完成；400/800 请求不�
 `staging-api.ai-feeds.com`，不可误按页面 `perf-staging.ai-feeds.com` origin 统计。所有 expected source
 还必须各自收到 2xx 并呈现对应 Feed，不能用失败响应的 Resource Timing 冒充成功。
 移动 swipe 后 blog/podcast 的 96/72px 封面必须关联 w400 请求，且 w800=0；DPR 2/3 不应成为浪费
-带宽的理由。
+带宽的理由。owned blog fixture 必须是 exact UI response 第一条；对应首卡必须无需脚本滚动就位于
+首屏并标记 `loading="eager"`。验收先等待 `decode()` 成功，再核对 `currentSrc` 为精确 w400 variant，
+避免刚挂载频道中 source selection 尚未完成时的时序误报，也不得用 `scrollIntoViewIfNeeded()` 把
+非首屏媒体滚入视口后冒充首屏通过。
 
 PageSpeed 质量回归同样属于 G8 硬门禁：viewport 必须允许缩放；DOM 中不得存在空 href 或可见无名
 button；视频元素不得使用 `/img`，图片 `/img` target 不得是视频；Product Hunt imgix avatar 必须带

@@ -88,6 +88,25 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /codex_perf_probe=1/);
   assert.match(remoteSpec, /aifeeds:feed-ready/);
   assert.match(remoteSpec, /workerStartMs/);
+  const warmHelperStart = remoteSpec.indexOf("function expectWarmServiceWorkerNavigation");
+  const warmHelperEnd = remoteSpec.indexOf("function", warmHelperStart + 20);
+  const warmHelperBlock = remoteSpec.slice(warmHelperStart, warmHelperEnd);
+  assert.notEqual(warmHelperStart, -1);
+  assert.match(warmHelperBlock, /fromServiceWorker\(\)\)\.toBe\(true\)/);
+  assert.match(warmHelperBlock, /swControllerPresent\)\.toBe\(true\)/);
+  assert.match(warmHelperBlock, /transferBytes\)\.toBe\(0\)/);
+  assert.match(warmHelperBlock,
+    /if\s*\(!projectName\.includes\(["']webkit["']\)\)\s*\{[\s\S]{0,120}?workerStartMs\)\.toBeGreaterThan\(0\)/);
+  const homeTestStart = remoteSpec.indexOf('test("five-device home');
+  const homeTestEnd = remoteSpec.indexOf('test("the private synthetic login', homeTestStart);
+  const homeTestBlock = remoteSpec.slice(homeTestStart, homeTestEnd);
+  assert.notEqual(homeTestStart, -1);
+  assert.match(homeTestBlock, /const warmNavigationResponse = await page\.reload/);
+  assert.match(homeTestBlock,
+    /expectWarmServiceWorkerNavigation\(\s*warm,\s*testInfo\.project\.name,\s*warmNavigationResponse/);
+  assert.doesNotMatch(remoteSpec,
+    /expect\(warm\.navigation\.workerStartMs\)\.toBeGreaterThan\(0\)/,
+    "WebKit must prove warm Service Worker control without Chromium-only workerStart timing");
   assert.match(remoteSpec, /cold-warm-page-performance\.json/);
   assert.match(remoteSpec, /belowFoldMediaBeforeCutoffCount/);
   assert.match(remoteSpec, /request\.timing\(\)\.startTime/);
@@ -121,12 +140,15 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /const blogResponsePromise = page\.waitForResponse/);
   assert.match(remoteSpec, /expectExactFixtureImage/);
   assert.match(remoteSpec, /requireFirst:\s*true/);
-  assert.match(remoteSpec, /viewportMode:\s*"already-in-viewport"/);
-  assert.match(remoteSpec, /viewportMode:\s*"scroll-into-viewport"/);
-  assert.match(remoteSpec, /scrollIntoViewIfNeeded\(\)/);
-  assert.match(remoteSpec, /toBeInViewport\(\)/);
+  const mobileSwipeStart = remoteSpec.indexOf('test("mobile projects switch');
+  const mobileSwipeEnd = remoteSpec.indexOf('test("representative desktop', mobileSwipeStart);
+  const mobileSwipeBlock = remoteSpec.slice(mobileSwipeStart, mobileSwipeEnd);
+  assert.notEqual(mobileSwipeStart, -1);
+  assert.match(mobileSwipeBlock,
+    /readSyntheticFixtureFromUiResponse\(\s*blogResponse[\s\S]{0,180}?requireFirst:\s*true/);
+  assert.match(mobileSwipeBlock,
+    /await expectExactFixtureImage\(\s*activeBlogFeed,\s*expectedBlogImage\.originalPath,\s*expectedBlogImagePath/);
   assert.match(remoteSpec, /expectedBlogImagePath/);
-  assert.match(remoteSpec, /currentSrc[\s\S]{0,160}?toBe\(variantPath\)/);
   assert.match(remoteSpec, /mediaRequestRecords\.slice\(swipeMediaRequestBaseline\)/);
   assert.match(remoteSpec, /url\.pathname === expectedBlogImagePath/);
   assert.doesNotMatch(remoteSpec, /firstBlogImage/);
@@ -154,6 +176,20 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   assert.match(remoteSpec, /settleVisibleCardMedia/);
   assert.match(remoteSpec, /visibleImageDecodeSucceeded/);
   assert.match(remoteSpec, /visible card image decode did not settle/);
+  const exactImageStart = remoteSpec.indexOf("async function expectExactFixtureImage");
+  const exactImageEnd = remoteSpec.indexOf("async function", exactImageStart + 20);
+  const exactImageBlock = remoteSpec.slice(exactImageStart, exactImageEnd);
+  assert.match(exactImageBlock, /toBeInViewport\(\)/);
+  assert.match(exactImageBlock, /toHaveAttribute\("loading",\s*"eager"\)/);
+  assert.match(exactImageBlock, /currentSrc[\s\S]{0,160}?toBe\(variantPath\)/);
+  const decodeIndex = exactImageBlock.indexOf("element.decode()");
+  const currentSrcIndex = exactImageBlock.indexOf("element.currentSrc");
+  assert.notEqual(decodeIndex, -1);
+  assert.notEqual(currentSrcIndex, -1);
+  assert.ok(decodeIndex < currentSrcIndex,
+    "owned first-card media must decode before its exact currentSrc is asserted");
+  assert.doesNotMatch(exactImageBlock, /scrollIntoViewIfNeeded/,
+    "the owned rank-one fixture must already be in the first viewport");
   assert.match(remoteSpec, /HTMLVideoElement[\s\S]{0,300}?\.poster/);
   assert.match(remoteSpec, /aifeeds:cls-settled/);
   assert.match(remoteSpec, /data-aifeeds-deferred-font/);
