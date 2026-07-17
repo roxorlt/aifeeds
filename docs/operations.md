@@ -2800,17 +2800,22 @@ DROP INDEX IF EXISTS idx_items_clawhub_category_stars;
 冷转换放在用户请求上；新内容在外部资源迁 R2 时预生成 400/800 请求档的 WebP，记录**实际**输出
 宽高并内容寻址存入 `/r/<source>/card/`。未对 production/staging 发出任何写请求。
 
-**代码契约**：`worker/src/card-image-variant.ts` 只接受 HTTPS 静态图片，拒绝 GIF/SVG、音频、
-视频、私网、本站所有子域和 `*.workers.dev`，并以 `redirect=error` 防止首跳外链重定向回本服务。
-源 Content-Type 未知时先用同源 UA 做 HEAD 探测，无法确认静态类型就跳过；Cloudflare 转换固定
-`anim:false`，不会把动画带进卡片变体。
+**代码契约**：`worker/src/card-image-variant.ts` 只接受 HTTPS 图片，拒绝 SVG、音频、视频、
+私网、本站所有子域和 `*.workers.dev`，并以 `redirect=manual` 拒绝跟随首跳外链重定向。GIF
+只允许作为静态预览输入，Cloudflare 转换强制 `anim:false`；已识别 GIF 的输出必须能解析为
+VP8/VP8L/VP8X 单帧 WebP，否则一律丢弃。源 Content-Type 未知时先用同源 UA 做 HEAD 探测；
+HEAD 无法确认时仍允许普通静态图进入受限转换，但不会把无法验证的 GIF 预览标记为 ready。
 每个 item 最多生成一个主视觉的两档变体，原图始终保留给详情、Lightbox 与旧浏览器。X 转推使用
 翻转后的 `retweet_of` 主视觉；视频只可能生成 poster 变体，mp4 不进入转换。PH 跳过 logo、avatar
 与视频 body；HF 兼容 `figure_image.raw_url`；博客在品牌图护栏/body hero 回落之后只处理最终采用
 封面；播客音频迁移完全不变。标量封面使用 `cover_variant_source` 绑定当前 cover，避免后续 sweep
 换图后误用旧变体。
 
-前端有变体时使用 `<picture><source type="image/webp">`，变体加载失败先移除 source 再重试原图；
+前端普通静态图有变体时使用 `<picture><source type="image/webp">`，变体加载失败先移除 source
+再重试原图；PH GIF 则使用 `card_preview_status` 的静态专用路径，`<img>` fallback 本身也是
+400px WebP，绝不回落原 GIF。Feed 未交互只请求静态首帧；Drawer 初始静态首帧并显示“播放动图”，
+只有点击播放或进入 Lightbox 后才创建原 GIF `<img>`，失败回到静态首帧。旧数据在 marker 回填前
+也会按 `.gif` 后缀保守识别，PC/移动端均不会因发布时序短暂恢复原图首屏下载。
 没有变体的 HF/活动行候选走 `/img` 的 400/800 受控 URL。`/img` host 白名单为活动行卡片新增
 `cdn.huodongxing.com`、`wimg.huodongxing.com`、`nscdn.huodongxing.com`，并为 GitHub 已知图片
 重定向链补充 `private-user-images.githubusercontent.com`、`objects.githubusercontent.com`、
@@ -2841,8 +2846,10 @@ curl -sS -X POST \
 保留的 HTTPS 原链、R2 对象 `src-url` metadata 或 HF `figure_image.raw_url` 恢复上游，并携带各源
 实时迁移使用的 User-Agent。标量封面与 `cover_variant_source` 失配时，即使 version=1 也重新进入；
 失败会清掉旧变体并绑定本次尝试的 cover，下一次换图仍可重跑但不会无限重下。恢复不到写
-`card_variant_status=source_unavailable` 终态，转换失败写 `transform_failed`，两者都写 version=1，
-不会永久重下；单行 malformed JSON 计入 errors 而不会让整批 500。每批最多 25，按
+`card_variant_status=source_unavailable` 终态，转换失败写 `transform_failed`。普通来源写
+version=1；PH 写 version=2，使历史 version=1 GIF 重新进入一次，并在媒体项写
+`card_preview_status=ready|unavailable`，不会永久重下；单行 malformed JSON 计入 errors 而不会
+让整批 500。每批最多 25，按
 `next_cursor` 继续；任何 conflict/error 都停止推进。staging 完成
 后必须抽验 source 绑定、400/800 实际字节/尺寸、DPR 1/2/3 清晰度、CLS、X 视频 seek 与播客音频
 seek，且典型 360–400 CSS px 卡图目标 ≤40 KiB；production 写需另一次审批。

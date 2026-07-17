@@ -1,4 +1,4 @@
-import type { CardImageVariant, Item, ItemExtra } from "../types";
+import type { CardImageVariant, Item, ItemExtra, MediaItem } from "../types";
 import { resolveAssetUrl } from "./asset.ts";
 import { PUBLIC_WORKER_BASE } from "./apiBase.ts";
 
@@ -242,6 +242,13 @@ export interface ResponsiveCardImageSource {
   webpSrcSet?: string;
 }
 
+export function isAnimatedImageMedia(
+  media: Pick<MediaItem, "type" | "url" | "card_preview_status">,
+): boolean {
+  return media.type === "image"
+    && (media.card_preview_status !== undefined || /\.gif(?:$|[?#])/i.test(media.url));
+}
+
 export function shouldRejectCardImage({
   naturalWidth,
   naturalHeight,
@@ -310,11 +317,13 @@ export function buildResponsiveCardImage(
     fallbackWidth?: number;
     widths?: readonly number[];
     forceProxy?: boolean;
+    /** Never expose the original URL; use a verified stored WebP as <img> fallback. */
+    staticOnly?: boolean;
   } = {},
 ): ResponsiveCardImageSource {
   const fallbackWidth = options.fallbackWidth ?? 400;
   const widths = options.widths ?? [400, 800];
-  const fallbackSrc = proxyImg(originalUrl, fallbackWidth, {
+  const originalFallbackSrc = proxyImg(originalUrl, fallbackWidth, {
     force: options.forceProxy,
   });
 
@@ -333,12 +342,16 @@ export function buildResponsiveCardImage(
 
   if (validVariants.length > 0) {
     return {
-      fallbackSrc,
+      fallbackSrc: options.staticOnly
+        ? resolveAssetUrl(validVariants[0].url)
+        : originalFallbackSrc,
       webpSrcSet: validVariants
         .map((variant) => `${resolveAssetUrl(variant.url)} ${variant.width}w`)
         .join(", "),
     };
   }
+
+  if (options.staticOnly) return { fallbackSrc: "" };
 
   const seenUrls = new Set<string>();
   const candidates = widths
@@ -360,7 +373,7 @@ export function buildResponsiveCardImage(
   const srcSet = candidates.length > 1
     ? candidates.map(({ url, width }) => `${url} ${width}w`).join(", ")
     : undefined;
-  return { fallbackSrc, srcSet };
+  return { fallbackSrc: originalFallbackSrc, srcSet };
 }
 
 export function parseJsonField<T>(field: unknown): T | null {

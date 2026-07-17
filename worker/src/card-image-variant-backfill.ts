@@ -1,4 +1,5 @@
 import {
+  detectCardImageSourceContentType,
   generateCardImageVariants,
   type CardImageVariant,
   type CardImageVariantSource,
@@ -14,6 +15,7 @@ type MediaRecord = JsonRecord & {
   height?: number;
   card_variants?: CardImageVariant[];
   poster_variants?: CardImageVariant[];
+  card_preview_status?: 'ready' | 'unavailable';
 };
 
 export type CardVariantTarget = {
@@ -27,6 +29,7 @@ export type CardVariantTarget = {
   sourceRequestHeaders: Record<string, string>;
   apply: (variants: CardImageVariant[]) => void;
   markAttemptedWithoutVariants?: () => void;
+  markPreviewStatus?: (status: 'ready' | 'unavailable') => void;
 };
 
 const BROWSER_R2_USER_AGENT =
@@ -68,6 +71,14 @@ function mediaTarget(
     apply: (variants) => {
       entry[variantField] = variants;
     },
+    markAttemptedWithoutVariants: () => {
+      delete entry[variantField];
+    },
+    markPreviewStatus: field === 'url'
+      ? (status) => {
+          entry.card_preview_status = status;
+        }
+      : undefined,
   };
 }
 
@@ -165,7 +176,10 @@ const BACKFILL_PREDICATE = `
   AND deleted_at IS NULL
   AND CASE
     WHEN extra IS NULL OR json_valid(extra) = 0 THEN 1
-    WHEN COALESCE(json_extract(extra, '$.card_variant_version'), 0) < 1 THEN 1
+    WHEN source_type = 'product_hunt'
+      AND COALESCE(json_extract(extra, '$.card_variant_version'), 0) < 2 THEN 1
+    WHEN source_type <> 'product_hunt'
+      AND COALESCE(json_extract(extra, '$.card_variant_version'), 0) < 1 THEN 1
     WHEN source_type = 'github'
       AND json_type(extra, '$.cover_url') = 'text'
       AND length(trim(json_extract(extra, '$.cover_url'))) > 0
@@ -211,31 +225,49 @@ export type CardVariantBackfillResult = {
 type BackfillEnv = { DB: D1Database; READMES?: R2Bucket };
 
 type Generator = typeof generateCardImageVariants;
+type SourceContentTypeDetector = typeof detectCardImageSourceContentType;
 
 function r2Key(url: string): string | null {
   const marker = url.indexOf('/r/');
   return marker >= 0 ? url.slice(marker + 3) : null;
 }
 
+type RecoveredSource = {
+  url: string;
+  contentType?: string;
+};
+
+function looksLikeGif(url: string, contentType?: string): boolean {
+  return contentType?.split(';')[0].trim().toLowerCase() === 'image/gif'
+    || /\.gif(?:$|[?#])/i.test(url);
+}
+
 async function recoverExternalSource(
   bucket: R2Bucket,
   currentUrl: string,
   fallbackUrl?: string,
-): Promise<string | null> {
-  if (/^https:\/\//i.test(currentUrl) && !r2Key(currentUrl)) return currentUrl;
+): Promise<RecoveredSource | null> {
+  if (/^https:\/\//i.test(currentUrl) && !r2Key(currentUrl)) {
+    return { url: currentUrl };
+  }
   const key = r2Key(currentUrl);
   if (key) {
     try {
       const object = await bucket.head(key);
       const source = object?.customMetadata?.['src-url'];
-      if (typeof source === 'string' && /^https:\/\//i.test(source)) return source;
+      if (typeof source === 'string' && /^https:\/\//i.test(source)) {
+        return {
+          url: source,
+          contentType: object?.httpMetadata?.contentType,
+        };
+      }
     } catch {
       // A legacy object can lack metadata or be temporarily unavailable. The
       // source-specific fallback below remains bounded to an HTTPS URL.
     }
   }
   return typeof fallbackUrl === 'string' && /^https:\/\//i.test(fallbackUrl)
-    ? fallbackUrl
+    ? { url: fallbackUrl }
     : null;
 }
 
@@ -258,7 +290,10 @@ function parseExtra(raw: string | null): JsonRecord {
 export async function runCardImageVariantBackfill(
   env: BackfillEnv,
   options: CardVariantBackfillOptions = {},
-  deps: { generate?: Generator } = {},
+  deps: {
+    generate?: Generator;
+    detectSourceContentType?: SourceContentTypeDetector;
+  } = {},
 ): Promise<CardVariantBackfillResult> {
   const dryRun = options.dryRun !== false;
   const limit = Math.min(25, Math.max(1, Math.floor(options.limit ?? 10)));
@@ -290,6 +325,8 @@ export async function runCardImageVariantBackfill(
   const candidates = rows.results || [];
   result.picked = candidates.length;
   const generate = deps.generate ?? generateCardImageVariants;
+  const detectSourceContentType =
+    deps.detectSourceContentType ?? detectCardImageSourceContentType;
   let lastId: string | null = null;
 
   for (const row of candidates) {
@@ -300,6 +337,7 @@ export async function runCardImageVariantBackfill(
       const target = locateCardVariantTarget(row.source_type, media, extra);
       let status: 'ok' | 'none' | 'source_unavailable' | 'transform_failed' = 'none';
       let variants: CardImageVariant[] = [];
+      let gifPreview = target?.sourcePrefix === 'ph' && looksLikeGif(target.url);
 
       if (target?.existingVariants?.length) {
         result.resolvable++;
@@ -315,12 +353,28 @@ export async function runCardImageVariantBackfill(
           status = 'source_unavailable';
           result.source_unavailable++;
         } else {
+          if (
+            target.sourcePrefix === 'ph'
+            && !sourceUrl.contentType
+            && !gifPreview
+            && !looksLikeGif(sourceUrl.url)
+          ) {
+            sourceUrl.contentType = await detectSourceContentType({
+              sourceUrl: sourceUrl.url,
+              sourcePrefix: target.sourcePrefix,
+              mediaKind: 'image',
+              sourceRequestHeaders: target.sourceRequestHeaders,
+            }) ?? undefined;
+          }
+          gifPreview = target.sourcePrefix === 'ph'
+            && (gifPreview || looksLikeGif(sourceUrl.url, sourceUrl.contentType));
           result.resolvable++;
           if (!dryRun) {
             variants = await generate(env.READMES, {
-              sourceUrl,
+              sourceUrl: sourceUrl.url,
               sourcePrefix: target.sourcePrefix,
               mediaKind: 'image',
+              sourceContentType: sourceUrl.contentType,
               sourceWidth: target.width,
               sourceHeight: target.height,
               sourceRequestHeaders: target.sourceRequestHeaders,
@@ -333,9 +387,14 @@ export async function runCardImageVariantBackfill(
 
       result.would_update++;
       if (dryRun) continue;
-      if (target && status === 'ok') target.apply(variants);
-      else if (target) target.markAttemptedWithoutVariants?.();
-      extra.card_variant_version = 1;
+      if (target && status === 'ok') {
+        target.apply(variants);
+        if (gifPreview) target.markPreviewStatus?.('ready');
+      } else if (target) {
+        target.markAttemptedWithoutVariants?.();
+        if (gifPreview) target.markPreviewStatus?.('unavailable');
+      }
+      extra.card_variant_version = row.source_type === 'product_hunt' ? 2 : 1;
       extra.card_variant_status = status;
       extra.card_variant_attempted_at = new Date().toISOString();
 

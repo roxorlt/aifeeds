@@ -490,6 +490,7 @@ describe('toListItem source DTOs', () => {
           bytes: 24_000,
           internal_hash: 'must-not-leak',
         }],
+        card_preview_status: 'ready',
         private_original: 'must-not-leak',
       }]),
     }));
@@ -506,6 +507,7 @@ describe('toListItem source DTOs', () => {
         height: 250,
         format: 'webp',
       }],
+      card_preview_status: 'ready',
     }]);
     expectNoKeys(item, ['bytes', 'internal_hash', 'private_original']);
   });

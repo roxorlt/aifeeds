@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { MediaItem } from "../types";
-import { proxyImg } from "../lib/utils";
+import { buildResponsiveCardImage, isAnimatedImageMedia, proxyImg } from "../lib/utils";
 import { track, EVENTS } from "../lib/telemetry";
 import { useScrollLock, useTouchScrollGuard } from "../lib/useScrollLock";
 import { useMotionDismiss } from "../lib/motionLayer";
 import { activateModalFocus } from "../lib/modalFocus";
+import { useReducedMotion } from "../lib/useReducedMotion";
 
 interface Props {
   media: MediaItem[];
@@ -14,6 +15,9 @@ interface Props {
 
 export function Lightbox({ media, startIndex, onClose }: Props) {
   const [index, setIndex] = useState(startIndex);
+  const [animatedImageFailedUrl, setAnimatedImageFailedUrl] = useState<string | null>(null);
+  const [animatedImageRequestedUrl, setAnimatedImageRequestedUrl] = useState<string | null>(null);
+  const reduceMotion = useReducedMotion();
   const overlayRef = useRef<HTMLDivElement>(null);
   const { layerClassName, requestClose } = useMotionDismiss(onClose, "lightbox");
   const current = media[index];
@@ -65,6 +69,21 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
   }, []);
 
   if (!current) return null;
+  const isAnimatedImage = isAnimatedImageMedia(current);
+  const staticPreview = isAnimatedImage
+    ? buildResponsiveCardImage(current.url, current.card_variants, { staticOnly: true })
+    : null;
+  const animatedImageFailed = animatedImageFailedUrl === current.url;
+  const animatedImageWaitingForIntent = isAnimatedImage
+    && (reduceMotion || !staticPreview?.fallbackSrc)
+    && animatedImageRequestedUrl !== current.url;
+  const showStaticAnimatedPreview = animatedImageFailed || animatedImageWaitingForIntent;
+  const showAnimatedPlaceholder = isAnimatedImage
+    && showStaticAnimatedPreview
+    && !staticPreview?.fallbackSrc;
+  const imageSrc = showStaticAnimatedPreview && staticPreview?.fallbackSrc
+    ? staticPreview.fallbackSrc
+    : proxyImg(current.url);
 
   const go = (delta: number) => (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -100,7 +119,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
         type="button"
         onClick={onOverlayClick}
         data-modal-initial-focus
-        className="absolute right-4 top-4 text-2xl text-white/70 hover:text-white"
+        className="absolute right-4 top-4 z-10 text-2xl text-white/70 hover:text-white"
         aria-label="关闭"
       >
         ✕
@@ -112,7 +131,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
             type="button"
             onClick={go(-1)}
             disabled={index === 0}
-            className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-black/40 px-3 py-2 text-2xl text-white/80 hover:bg-black/60 disabled:opacity-30 sm:left-6"
+            className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/40 px-3 py-2 text-2xl text-white/80 hover:bg-black/60 disabled:opacity-30 sm:left-6"
             aria-label="上一张"
           >
             ‹
@@ -121,12 +140,12 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
             type="button"
             onClick={go(1)}
             disabled={index === media.length - 1}
-            className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-black/40 px-3 py-2 text-2xl text-white/80 hover:bg-black/60 disabled:opacity-30 sm:right-6"
+            className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/40 px-3 py-2 text-2xl text-white/80 hover:bg-black/60 disabled:opacity-30 sm:right-6"
             aria-label="下一张"
           >
             ›
           </button>
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/40 px-3 py-1 text-xs text-white/80">
+          <div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-black/40 px-3 py-1 text-xs text-white/80">
             {index + 1} / {media.length}
           </div>
         </>
@@ -139,7 +158,7 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
           poster={current.poster ? proxyImg(current.poster, 400) : undefined}
           className="motion-layer-panel max-h-[90vh] max-w-[92vw]"
           controls
-          autoPlay
+          autoPlay={!reduceMotion}
           playsInline
           onClick={(e) => e.stopPropagation()}
           onError={() => {
@@ -154,22 +173,47 @@ export function Lightbox({ media, startIndex, onClose }: Props) {
           }}
         />
       ) : (
-        <img
-          src={proxyImg(current.url)}
-          alt={current.alt || ""}
-          className="motion-layer-panel max-h-[90vh] max-w-[92vw] object-contain"
-          onClick={(e) => e.stopPropagation()}
-          onError={() => {
-            let host = "";
-            try { host = new URL(current.url).host; } catch {
-              // 非法 URL 仍按空 host 上报，图片降级流程继续执行。
-            }
-            track(EVENTS.IMAGE_LOAD_ERROR, {
-              url_host: host,
-              source: "lightbox",
-            });
-          }}
-        />
+        <>
+          {showAnimatedPlaceholder ? (
+            <div className="motion-layer-panel flex min-h-48 min-w-64 items-center justify-center rounded-md bg-neutral-900 px-6 text-center text-sm text-white/70">
+              动图预览暂不可用
+            </div>
+          ) : (
+            <img
+              src={imageSrc}
+              alt={current.alt || ""}
+              className="motion-layer-panel max-h-[90vh] max-w-[92vw] object-contain"
+              onClick={(e) => e.stopPropagation()}
+              onError={() => {
+                if (isAnimatedImage && !showStaticAnimatedPreview) {
+                  setAnimatedImageFailedUrl(current.url);
+                  return;
+                }
+                let host = "";
+                try { host = new URL(current.url).host; } catch {
+                  // 非法 URL 仍按空 host 上报，图片降级流程继续执行。
+                }
+                track(EVENTS.IMAGE_LOAD_ERROR, {
+                  url_host: host,
+                  source: "lightbox",
+                });
+              }}
+            />
+          )}
+          {animatedImageWaitingForIntent && (
+            <button
+              type="button"
+              className="absolute bottom-16 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/90 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-white"
+              onClick={(event) => {
+                event.stopPropagation();
+                setAnimatedImageFailedUrl(null);
+                setAnimatedImageRequestedUrl(current.url);
+              }}
+            >
+              播放动图
+            </button>
+          )}
+        </>
       )}
     </div>
   );

@@ -193,6 +193,7 @@ const LIST_MEDIA_FIELDS = [
   'alt',
   'poster',
   'card_variants',
+  'card_preview_status',
   'poster_variants',
   'role',
   // Product Hunt legacy/embed metadata used to derive a static poster.

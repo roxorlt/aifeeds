@@ -5,11 +5,23 @@ import * as cardImage from "./utils.ts";
 
 const {
   buildResponsiveCardImage,
+  isAnimatedImageMedia,
   optimizedAvatarUrl,
   proxyImg,
   proxyVideo,
   variantsForCurrentCover,
 } = cardImage;
+
+test("legacy GIF URLs are treated as animated before backfill adds explicit preview status", () => {
+  assert.equal(isAnimatedImageMedia({
+    type: "image",
+    url: "/r/ph/legacy.gif",
+  }), true);
+  assert.equal(isAnimatedImageMedia({
+    type: "image",
+    url: "/r/ph/still.webp",
+  }), false);
+});
 
 test("stored WebP variants are sorted into a typed picture source with original fallback", () => {
   const result = buildResponsiveCardImage(
@@ -26,6 +38,20 @@ test("stored WebP variants are sorted into a typed picture source with original 
     "https://api.ai-feeds.com/r/x/card/w400.webp 400w, https://api.ai-feeds.com/r/x/card/w800.webp 800w",
   );
   assert.equal(result.srcSet, undefined);
+});
+
+test("static-only previews use a stored WebP as img fallback and never expose the animated original", () => {
+  const result = buildResponsiveCardImage(
+    "/r/ph/large-animation.gif",
+    [
+      { url: "/r/ph/card/w800.webp", width: 800, format: "webp" },
+      { url: "/r/ph/card/w400.webp", width: 400, format: "webp" },
+    ],
+    { staticOnly: true },
+  );
+
+  assert.equal(result.fallbackSrc, "https://api.ai-feeds.com/r/ph/card/w400.webp");
+  assert.doesNotMatch(JSON.stringify(result), /large-animation\.gif/);
 });
 
 test("responsive image quality uses matched source-variant pixels instead of density-corrected natural size", () => {

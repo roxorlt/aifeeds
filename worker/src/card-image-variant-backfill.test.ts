@@ -313,6 +313,114 @@ describe('card variant backfill target selection', () => {
     expect(target?.url).toBe('/r/ph/gallery.jpg');
   });
 
+  test('Product Hunt recovers an existing R2 GIF source and records a no-fallback preview failure', async () => {
+    const original = '/r/ph/large-launch.gif';
+    const { env, calls } = fakeBackfillEnv([{
+      id: 'product_hunt:animated',
+      source_type: 'product_hunt',
+      media: JSON.stringify([{
+        type: 'image',
+        role: 'gallery',
+        url: original,
+      }]),
+      extra: JSON.stringify({ card_variant_version: 1 }),
+    }], {
+      remaining: 0,
+      metadataByKey: {
+        'ph/large-launch.gif': {
+          'src-url': 'https://ph-files.example/large-launch.gif',
+        },
+      },
+    });
+    const generatedSources: Array<Record<string, unknown>> = [];
+
+    const result = await runCardImageVariantBackfill(
+      env,
+      { dryRun: false, limit: 1 },
+      {
+        generate: async (_bucket, source) => {
+          generatedSources.push(source);
+          return [];
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ updated: 1, transform_failed: 1 });
+    expect(generatedSources[0]).toMatchObject({
+      sourceUrl: 'https://ph-files.example/large-launch.gif',
+      sourcePrefix: 'ph',
+    });
+    const update = calls.find((call) => /UPDATE items/.test(call.sql));
+    const writtenMedia = JSON.parse(String(update?.bound[0]));
+    const writtenExtra = JSON.parse(String(update?.bound[1]));
+    expect(writtenMedia[0]).toMatchObject({
+      url: original,
+      card_preview_status: 'unavailable',
+    });
+    expect(writtenMedia[0]).not.toHaveProperty('card_variants');
+    expect(writtenExtra.card_variant_version).toBe(2);
+  });
+
+  test.each([
+    ['ready', variants],
+    ['unavailable', []],
+  ] as const)(
+    'Product Hunt extensionless direct GIF records preview status %s before advancing to v2',
+    async (expectedStatus, generatedVariants) => {
+      const directUrl = 'https://ph-files.example/asset-without-extension';
+      const { env, calls } = fakeBackfillEnv([{
+        id: `product_hunt:extensionless-${expectedStatus}`,
+        source_type: 'product_hunt',
+        media: JSON.stringify([{
+          type: 'image',
+          role: 'gallery',
+          url: directUrl,
+        }]),
+        extra: JSON.stringify({ card_variant_version: 1 }),
+      }], { remaining: 0 });
+      const detectedSources: Array<Record<string, unknown>> = [];
+      const generatedSources: Array<Record<string, unknown>> = [];
+
+      const result = await runCardImageVariantBackfill(
+        env,
+        { dryRun: false, limit: 1 },
+        {
+          detectSourceContentType: async (source) => {
+            detectedSources.push(source);
+            return 'image/gif';
+          },
+          generate: async (_bucket, source) => {
+            generatedSources.push(source);
+            return [...generatedVariants];
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        updated: 1,
+        transform_failed: expectedStatus === 'unavailable' ? 1 : 0,
+      });
+      expect(detectedSources[0]).toMatchObject({
+        sourceUrl: directUrl,
+        sourcePrefix: 'ph',
+      });
+      expect(generatedSources[0]).toMatchObject({
+        sourceUrl: directUrl,
+        sourceContentType: 'image/gif',
+      });
+      const update = calls.find((call) => /UPDATE items/.test(call.sql));
+      const writtenMedia = JSON.parse(String(update?.bound[0]));
+      const writtenExtra = JSON.parse(String(update?.bound[1]));
+      expect(writtenMedia[0].card_preview_status).toBe(expectedStatus);
+      if (expectedStatus === 'ready') {
+        expect(writtenMedia[0].card_variants).toEqual(variants);
+      } else {
+        expect(writtenMedia[0]).not.toHaveProperty('card_variants');
+      }
+      expect(writtenExtra.card_variant_version).toBe(2);
+    },
+  );
+
   test('unsupported sources and source-less cards terminate without a transform target', () => {
     expect(locateCardVariantTarget('youtube', [], {})).toBeNull();
     expect(locateCardVariantTarget('hf_paper', [{ type: 'video', url: 'x.mp4' }], {})).toBeNull();
