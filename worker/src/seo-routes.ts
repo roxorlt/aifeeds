@@ -477,6 +477,12 @@ Sitemap: ${siteBase}/sitemap.xml
 // Task 6:3.2 万内容页 + 年增 5-7 万会破单文件 5 万上限,故 /sitemap.xml 改 sitemap-index。
 // 列:日报片 /sitemap-daily.xml(含首页/归档/全部日报页)+ 五源各 /sitemap-<source>.xml(超 5 万续 -2 -3)。
 // sitemapindex 只能容 <sitemap> 子节点(不能放 <url>),故首页/归档并入日报片的 <urlset>。
+const SITEMAP_ITEM_ELIGIBILITY = `p.status = 'live'
+  AND i.is_relevant = 1
+  AND i.deleted_at IS NULL
+  AND json_extract(i.extra, '$.dedup_of') IS NULL
+  AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
+
 async function sitemapIndexResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
   const daily = await loadDailyPages(env); // date DESC
@@ -493,9 +499,14 @@ async function sitemapIndexResponse(env: Env): Promise<Response> {
   entries.push(sitemapEntry(`${siteBase}/sitemap-archive.xml`, null));
   entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
 
-  // 各源 live 计数 + 最新 generated_at,据此算续片数(ceil(count/5万)),空源仍列 page1。
+  // 各源仍符合内容门禁的 live 页计数 + 最新 generated_at，据此算续片数
+  // (ceil(count/5万))，空源仍列 page1。JOIN items 防止陈旧 live 索引把已删除/去重/敏感项继续暴露。
   const countRes = await env.DB.prepare(
-    `SELECT source, COUNT(*) AS c, MAX(generated_at) AS m FROM item_pages WHERE status = 'live' GROUP BY source`,
+    `SELECT p.source, COUNT(*) AS c, MAX(p.generated_at) AS m
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE ${SITEMAP_ITEM_ELIGIBILITY}
+     GROUP BY p.source`,
   ).all<{ source: string; c: number; m: string | null }>();
   const counts = new Map<string, { c: number; m: string | null }>();
   for (const r of countRes.results || []) counts.set(r.source, { c: Number(r.c), m: r.m });
@@ -621,14 +632,18 @@ ${urls.join('\n')}
 }
 
 // ── /sitemap-<source>.xml(内容片)───────────────────────────────
-// 该源 item_pages(status=live)的 url_path,按 generated_at DESC 分页(page-1 → OFFSET)。
+// 该源 item_pages(status=live 且关联 item 仍符合内容门禁)的 url_path，
+// 按 generated_at DESC 分页(page-1 → OFFSET)。
 // lastmod = generated_at 日期部分;绝对 URL = SITE_BASE + url_path(url_path 存相对 /i/…)。
 async function sourceSitemapResponse(env: Env, source: string, page: number): Promise<Response> {
   const { siteBase } = getBases(env);
   const offset = (page - 1) * SITEMAP_SHARD_SIZE;
   const r = await env.DB.prepare(
-    `SELECT url_path, generated_at FROM item_pages WHERE source = ? AND status = 'live'
-     ORDER BY generated_at DESC, item_id ASC LIMIT ? OFFSET ?`,
+    `SELECT p.url_path, p.generated_at
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE p.source = ? AND ${SITEMAP_ITEM_ELIGIBILITY}
+     ORDER BY p.generated_at DESC, p.item_id ASC LIMIT ? OFFSET ?`,
   )
     .bind(source, SITEMAP_SHARD_SIZE, offset)
     .all<{ url_path: string; generated_at: string }>();

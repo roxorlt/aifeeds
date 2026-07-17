@@ -15,7 +15,8 @@ interface ItemSeed {
   id: string;
   source_type: string;
   is_relevant?: number;
-  published_at?: string;
+  published_at?: string | null;
+  scraped_at?: string | null;
   title?: string | null;
   content?: string | null;
   content_translated?: string | null;
@@ -38,7 +39,11 @@ function fullRow(s: ItemSeed): Record<string, unknown> {
     id: s.id,
     source_type: s.source_type,
     is_relevant: s.is_relevant ?? 1,
-    published_at: s.published_at ?? '2026-07-01T00:00:00Z',
+    published_at:
+      Object.prototype.hasOwnProperty.call(s, 'published_at')
+        ? s.published_at
+        : '2026-07-01T00:00:00Z',
+    scraped_at: s.scraped_at ?? '2026-07-01T00:00:00Z',
     title: s.title ?? `标题 ${s.id}`,
     content: s.content ?? `body ${s.id}`,
     content_translated: s.content_translated ?? `正文 ${s.id}`,
@@ -78,7 +83,10 @@ function makeDb(seed: ItemSeed[] = []) {
         if (cutoff == null) return !p; // 非 force：未生成才是候选
         return !p || String(p.generated_at) < cutoff; // force：无页 OR 页早于本轮 cutoff
       })
-      .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
+      .sort((a, b) => effectiveTime(b).localeCompare(effectiveTime(a)));
+
+  const effectiveTime = (r: Record<string, unknown>): string =>
+    String(r.published_at || r.scraped_at || '');
 
   const db = {
     _items: items,
@@ -120,7 +128,7 @@ function makeDb(seed: ItemSeed[] = []) {
             const mainId = String(binds[binds.length - 1]);
             const publishedAt = String(binds[binds.length - 2]);
             const sts = binds.slice(0, binds.length - 3).map(String);
-            const isNewer = /i\.published_at > \?/i.test(sql);
+            const isNewer = />\s*\?/i.test(sql);
             const res = items
               .filter(
                 (r) =>
@@ -130,13 +138,13 @@ function makeDb(seed: ItemSeed[] = []) {
                   !isDeduped(r) &&
                   pages.get(String(r.id))?.status === 'live' &&
                   (isNewer
-                    ? String(r.published_at) > publishedAt ||
-                      (String(r.published_at) === publishedAt && String(r.id) > mainId)
-                    : String(r.published_at) < publishedAt ||
-                      (String(r.published_at) === publishedAt && String(r.id) < mainId)),
+                    ? effectiveTime(r) > publishedAt ||
+                      (effectiveTime(r) === publishedAt && String(r.id) > mainId)
+                    : effectiveTime(r) < publishedAt ||
+                      (effectiveTime(r) === publishedAt && String(r.id) < mainId)),
               )
               .sort((a, b) => {
-                const byTime = String(a.published_at).localeCompare(String(b.published_at));
+                const byTime = effectiveTime(a).localeCompare(effectiveTime(b));
                 const byId = String(a.id).localeCompare(String(b.id));
                 return isNewer ? byTime || byId : -(byTime || byId);
               })
@@ -351,6 +359,35 @@ describe('generateItemPage', () => {
     const html = r2.store.get(itemPageR2Key(main)!)!;
     expect(html).toContain(itemPagePath(rel)!); // 同源相关内链指 /i/
     expect(html).not.toContain('/i/gh/a/b'); // 异源不混入
+  });
+
+  test('published_at 缺失时用 scraped_at 织入稳定邻居并生成月份归档链接', async () => {
+    const main = 'github:acme/main';
+    const rel = 'github:acme/older';
+    const db = makeDb([
+      {
+        id: main,
+        source_type: 'github',
+        is_relevant: 1,
+        published_at: null,
+        scraped_at: '2026-05-20T00:00:00Z',
+      },
+      {
+        id: rel,
+        source_type: 'github',
+        is_relevant: 1,
+        published_at: null,
+        scraped_at: '2026-05-19T00:00:00Z',
+      },
+    ]);
+    const r2 = makeR2();
+    seedPage(db, rel, 'gh', '2026-07-03T00:00:00Z');
+
+    await generateItemPage(makeEnv(db, r2), main);
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+
+    expect(html).toContain(itemPagePath(rel)!);
+    expect(html).toContain('https://ai-feeds.com/archive/gh/2026-05/');
   });
 
   test('相关内链排除 dedup 次源（I2）：同源 dedup 行不进 related', async () => {

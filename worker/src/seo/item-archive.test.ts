@@ -4,7 +4,10 @@ import {
   ARCHIVE_PAGE_SIZE,
   MAX_ARCHIVE_PAGE,
   archiveCanonicalPath,
+  archiveCountQuery,
   archiveItemsQuery,
+  archiveMonthsQuery,
+  archiveSitemapGroupsQuery,
   parseItemArchivePath,
 } from './item-archive';
 
@@ -83,7 +86,7 @@ describe('archiveItemsQuery', () => {
     expect(third.bindings).toEqual(['hf-paper', '2026-07', 100, 200]);
   });
 
-  test('复用 live/relevant/deleted/dedup/cn-sensitive gate，并稳定按 published_at + id 排序', () => {
+  test('复用 live/relevant/deleted/dedup/cn-sensitive gate，并稳定按有效时间 + id 排序', () => {
     const { sql } = archiveItemsQuery('x', '2026-07', 2);
 
     expect(sql).toMatch(/JOIN\s+item_pages\s+p\s+ON\s+p\.item_id\s*=\s*i\.id/i);
@@ -92,7 +95,10 @@ describe('archiveItemsQuery', () => {
     expect(sql).toMatch(/i\.deleted_at\s+IS\s+NULL/i);
     expect(sql).toContain("json_extract(i.extra, '$.dedup_of') IS NULL");
     expect(sql).toContain("COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1");
-    expect(sql).toMatch(/ORDER BY\s+i\.published_at\s+DESC,\s*i\.id\s+DESC/i);
+    expect(sql).toContain("COALESCE(NULLIF(i.published_at, ''), i.scraped_at) AS published_at");
+    expect(sql).toMatch(
+      /ORDER BY\s+COALESCE\(NULLIF\(i\.published_at,\s*''\),\s*i\.scraped_at\)\s+DESC,\s*i\.id\s+DESC/i,
+    );
   });
 
   test('列表链接只从 item_pages.url_path 取，不在查询层重拼 URL', () => {
@@ -100,5 +106,25 @@ describe('archiveItemsQuery', () => {
 
     expect(sql).toMatch(/SELECT[\s\S]*p\.url_path/i);
     expect(sql).not.toMatch(/['"]\/i\//);
+  });
+});
+
+describe('archive effective time', () => {
+  test('无 published_at 的历史项统一回退 scraped_at，月份列表、计数与 sitemap 不会漏项', () => {
+    const effectiveTime = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
+    const queries = [
+      archiveItemsQuery('gh', '2026-05', 1).sql,
+      archiveMonthsQuery('gh').sql,
+      archiveCountQuery('gh', '2026-05').sql,
+      archiveSitemapGroupsQuery().sql,
+    ];
+
+    for (const sql of queries) {
+      expect(sql).toContain(effectiveTime);
+    }
+    expect(archiveMonthsQuery('gh').sql).toContain(
+      `${effectiveTime} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'`,
+    );
+    expect(archiveSitemapGroupsQuery().sql).toContain(`substr(${effectiveTime}, 1, 7) AS month`);
   });
 });
