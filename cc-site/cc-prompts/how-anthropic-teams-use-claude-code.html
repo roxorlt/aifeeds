@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anthropic 团队如何使用 Claude Code · Claude Code 中文文档</title>
+<meta name="description" content="Anthropic 团队如何使用 Claude Code 中文版：工程、产品、设计、法务、营销团队的真实工作流。">
+<link rel="canonical" href="https://ai-feeds.cc/cc-prompts/how-anthropic-teams-use-claude-code.html">
+<meta property="og:title" content="Anthropic 团队如何使用 Claude Code · Claude Code 中文文档">
+<meta property="og:description" content="Anthropic 团队如何使用 Claude Code 中文版：工程、产品、设计、法务、营销团队的真实工作流。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://ai-feeds.cc/cc-prompts/how-anthropic-teams-use-claude-code.html">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90' fill='%23D97757'%3E✳%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  --accent: #D97757;
+  --accent-bg: rgba(217,119,87,0.07);
+  --bg: #ffffff;
+  --surface: #FAFAF7;
+  --sidebar-bg: #FAF9F5;
+  --border: #E8E6DC;
+  --border-subtle: rgba(31,30,29,0.08);
+  --text: #141413;
+  --text-2: #5E5D59;
+  --text-3: #73726C;
+  --text-4: #9C9A92;
+  --box-bg: #141413;
+  --box-text: #f0eee6;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Anthropic Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+html[data-theme="dark"] {
+  --bg: #1f1e1d; --surface: #262624; --sidebar-bg: #1a1918;
+  --border: #3d3d3a; --border-subtle: rgba(240,238,230,0.08);
+  --text: #f0eee6; --text-2: #bfbdb4; --text-3: #91908a; --text-4: #73726c;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]), html[data-theme="auto"] {
+    --bg: #1f1e1d; --surface: #262624; --sidebar-bg: #1a1918;
+    --border: #3d3d3a; --border-subtle: rgba(240,238,230,0.08);
+    --text: #f0eee6; --text-2: #bfbdb4; --text-3: #91908a; --text-4: #73726c;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font-family: var(--sans); font-size: 16px; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font-family: inherit; cursor: pointer; }
+code { font-family: var(--mono); }
+
+.layout { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 272px; flex-shrink: 0; background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  padding: 20px 14px 20px 18px; scrollbar-width: thin;
+}
+.content { flex: 1; min-width: 0; padding: 28px 40px 80px; }
+.container { max-width: 780px; margin: 0 auto; }
+.brand { display: flex; align-items: flex-start; gap: 10px; padding: 4px 6px 16px; color: var(--text); }
+.brand:hover { text-decoration: none; }
+.brand-mark { color: var(--accent); font-size: 22px; line-height: 1.15; font-family: Georgia, serif; }
+.brand-name { font-size: 16.5px; font-weight: 600; line-height: 1.3; }
+.brand-sub { font-size: 12px; color: var(--text-4); margin-top: 2px; font-weight: 400; }
+.nav-h { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-4); margin: 18px 6px 6px; }
+.nav-item {
+  display: block; padding: 6px 10px; border-radius: 7px;
+  color: var(--text-2); font-size: 14px; margin-bottom: 1px;
+}
+.nav-item:hover { background: var(--border-subtle); color: var(--text); text-decoration: none; }
+.nav-item.on { background: var(--accent-bg); color: var(--accent); font-weight: 500; }
+.toc a { display: block; padding: 4px 10px; font-size: 13px; color: var(--text-3); border-left: 2px solid var(--border); border-radius: 0; }
+.toc a.h3 { padding-left: 22px; font-size: 12.5px; }
+.toc a:hover { color: var(--text); text-decoration: none; border-left-color: var(--accent); }
+.side-foot { margin-top: 26px; padding: 14px 6px 0; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-4); line-height: 1.9; }
+.theme-btn {
+  display: flex; align-items: center; gap: 6px; width: fit-content;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-2);
+  border-radius: 999px; padding: 4px 12px; font-size: 12.5px; margin-bottom: 8px;
+}
+.theme-btn:hover { background: var(--surface); }
+
+/* ---------- 正文排版 ---------- */
+.doc { font-size: 15.5px; line-height: 1.9; color: var(--text-2); }
+.doc h1 { font-size: 27px; color: var(--text); margin: 4px 0 10px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.4; }
+.doc .doc-lede { font-size: 15.5px; color: var(--text-3); border-left: 3px solid var(--accent); padding: 2px 0 2px 14px; margin: 0 0 26px; }
+.doc h2 { font-size: 21px; color: var(--text); margin: 40px 0 14px; font-weight: 600; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.doc h3 { font-size: 17.5px; color: var(--text); margin: 30px 0 10px; font-weight: 600; }
+.doc h4 { font-size: 15.5px; color: var(--text); margin: 22px 0 8px; font-weight: 600; }
+.doc p { margin: 0 0 14px; }
+.doc ul, .doc ol { margin: 0 0 14px; padding-left: 24px; }
+.doc li { margin-bottom: 6px; }
+.doc li > ul, .doc li > ol { margin-top: 6px; }
+.doc strong { color: var(--text); }
+.doc hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+.doc img { max-width: 100%; border-radius: 8px; }
+.doc blockquote { margin: 0 0 14px; padding: 2px 0 2px 14px; border-left: 3px solid var(--border); color: var(--text-3); }
+.doc blockquote p { margin-bottom: 6px; }
+.doc code:not(pre code) { background: var(--border-subtle); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+.doc table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-size: 14px; display: block; overflow-x: auto; }
+.doc th, .doc td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+.doc th { background: var(--surface); color: var(--text); font-weight: 600; white-space: nowrap; }
+.codeblock { position: relative; margin: 0 0 16px; }
+.codeblock pre {
+  margin: 0; padding: 14px 16px; background: var(--box-bg); color: var(--box-text);
+  border-radius: 8px; overflow-x: auto; font-size: 13.5px; line-height: 1.7;
+}
+.codeblock pre code { background: none; padding: 0; color: inherit; }
+.codeblock .copy-btn {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 11.5px; padding: 4px 10px; border-radius: 6px;
+  background: rgba(240,238,230,0.12); color: #d9d7cf; border: none;
+  opacity: 0; transition: opacity 0.15s, background 0.15s;
+}
+.codeblock:hover .copy-btn { opacity: 1; }
+.codeblock .copy-btn:hover { background: var(--accent); color: #fff; }
+.codeblock .copy-btn.ok { background: #4a8c5c; color: #fff; opacity: 1; }
+
+/* 呼出块 */
+.callout { display: flex; gap: 10px; padding: 13px 16px; border-radius: 8px; margin: 0 0 16px; font-size: 14.5px; background: var(--accent-bg); border: 1px solid rgba(217,119,87,0.18); }
+.callout .co-icon { flex-shrink: 0; }
+.callout > div p:last-child { margin-bottom: 0; }
+.callout.note { background: var(--surface); border-color: var(--border); }
+.callout.warning { background: rgba(214,150,50,0.08); border-color: rgba(214,150,50,0.3); }
+
+/* 步骤 */
+ol.steps { counter-reset: step; list-style: none; padding-left: 0; margin: 0 0 20px; }
+ol.steps > li { counter-increment: step; position: relative; padding: 0 0 18px 44px; margin: 0; }
+ol.steps > li::before {
+  content: counter(step); position: absolute; left: 0; top: 0;
+  width: 28px; height: 28px; border-radius: 999px;
+  background: var(--accent-bg); color: var(--accent); font-weight: 600; font-size: 13.5px;
+  display: flex; align-items: center; justify-content: center;
+}
+ol.steps > li::after {
+  content: ''; position: absolute; left: 13.5px; top: 34px; bottom: 4px;
+  width: 1px; background: var(--border);
+}
+ol.steps > li:last-child::after { display: none; }
+.step-title { font-weight: 600; color: var(--text); margin: 3px 0 8px; font-size: 15.5px; }
+
+/* 卡片组 */
+.cardgroup { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin: 0 0 18px; }
+.cardlink { display: block; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--bg); }
+.cardlink:hover { border-color: var(--accent); text-decoration: none; background: var(--surface); }
+.cardlink .card-t { font-weight: 600; color: var(--text); margin-bottom: 4px; font-size: 15px; }
+.cardlink .card-d { font-size: 13.5px; color: var(--text-3); line-height: 1.6; }
+
+.doc-meta {
+  margin-top: 44px; padding: 14px 18px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  font-size: 13px; color: var(--text-3); line-height: 2;
+}
+
+.topbar { display: none; }
+@media (max-width: 900px) {
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    position: sticky; top: 0; z-index: 30;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+  }
+  .topbar .brand-name { font-size: 15px; }
+  .menu-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 10px; font-size: 15px; color: var(--text); }
+  .layout { display: block; }
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 40; height: 100%;
+    transform: translateX(-105%); transition: transform 0.22s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.15);
+  }
+  .sidebar.show { transform: translateX(0); }
+  .content { padding: 20px 16px 60px; }
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 35; display: none; }
+  .scrim.show { display: block; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="打开目录">☰</button>
+  <span class="brand-mark">✳</span><span class="brand-name">Claude Code 中文文档</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="./">
+      <span class="brand-mark">✳</span>
+      <div>
+        <div class="brand-name">Claude Code 提示词库</div>
+        <div class="brand-sub">中文版 · 参考文档</div>
+      </div>
+    </a>
+    <div class="nav-h">导航</div>
+    <a class="nav-item" href="./">✳ 提示词库</a>
+    <div class="nav-h">参考文档</div>
+    <a class="nav-item" href="common-workflows.html">常见工作流</a>
+    <a class="nav-item" href="best-practices.html">最佳实践</a>
+    <a class="nav-item on" href="how-anthropic-teams-use-claude-code.html">Anthropic 团队实践</a>
+    <div class="nav-h">本页目录</div>
+    <nav class="toc">
+      <a class="h3" href="#代码库导航与理解">代码库导航与理解</a>
+      <a class="h3" href="#测试与代码审查">测试与代码审查</a>
+      <a class="h3" href="#调试和故障排除">调试和故障排除</a>
+      <a class="h3" href="#原型设计和功能开发">原型设计和功能开发</a>
+      <a class="h3" href="#文档和知识管理">文档和知识管理</a>
+      <a class="h3" href="#自动化与工作流优化">自动化与工作流优化</a>
+      <a class="h3" href="#通过-claude-code-解锁新可能">通过 Claude Code 解锁新可能</a>
+    </nav>
+    <div class="side-foot">
+      <button class="theme-btn" id="themeBtn">🌗 主题：自动</button>
+      <div><a href="https://claude.com/blog/how-anthropic-teams-use-claude-code" target="_blank" rel="noopener">查看英文原文 ↗</a></div>
+    </div>
+  </aside>
+  <main class="content">
+    <div class="container">
+      <article class="doc">
+<h1 id="anthropic-团队如何使用-claude-code">Anthropic 团队如何使用 Claude Code</h1>
+<p>像 <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">Claude Code</a> 这样的智能编程工具可帮助开发者加速工作流程、自动化重复性任务，并应对复杂的编程项目。随着该领域的发展，我们每天都在从用户（包括我们自己的员工）那里了解到新的应用方式。</p>
+<p>为了了解更多，我们与 Anthropic 各部门的员工进行了座谈，了解他们在工作中如何使用 Claude Code。</p>
+<p>虽然他们的许多用例都在意料之中——调试、浏览代码库、管理工作流程——但其他一些用例却让我们感到惊讶。律师构建了电话树系统。营销人员在几秒钟内生成了数百个广告变体。数据科学家在不懂 JavaScript 的情况下创建了复杂的可视化图表。</p>
+<p>模式变得清晰起来：智能编程不仅加速了传统开发，还消融了技术与非技术工作之间的界限，将任何能够描述问题的人都转变为能够构建解决方案的人。</p>
+<p>以下是我们的发现。</p>
+<h3 id="代码库导航与理解"><strong>代码库导航与理解</strong></h3>
+<p>公司各个团队都使用 Claude Code 来帮助新员工，甚至长期员工快速熟悉我们的代码库。</p>
+<p>基础设施团队的新任数据科学家将整个代码库提供给 Claude Code，以快速提升生产率。Claude 会读取代码库中的 <code>CLAUDE.md</code> 文件，识别相关文件，解释数据管道依赖关系，并显示哪些上游数据源会输入到仪表板中，从而取代了传统的数据目录工具。</p>
+<p>我们的产品工程团队将 Claude Code 视为任何编程任务的“第一站”。他们让它识别需要检查哪些文件来进行错误修复、功能开发或分析，消除了在构建新功能之前手动收集上下文这一耗时的过程。</p>
+<h3 id="测试与代码审查"><strong>测试与代码审查</strong></h3>
+<p>智能编程工具因其能够自动化两项关键但繁琐的编程任务——编写单元测试和审查代码——而特别受欢迎。</p>
+<p>产品设计团队使用 Claude Code 为新功能编写全面的测试。他们通过 GitHub Actions 自动化了拉取请求评论，由 Claude 自动处理格式问题和测试用例重构。</p>
+<p>安全工程团队将其工作流程从“设计文档 → 粗糙的代码 → 重构 → 放弃测试”转变为向 Claude 请求伪代码，引导其进行测试驱动开发，并定期检查。这使得代码更可靠、可测试。</p>
+<p>智能编程还可用于将测试翻译成其他编程语言。例如，当推理团队需要用不熟悉的语言（如 Rust）测试功能时，他们会说明要测试什么，Claude 会以该代码库的原生语言编写逻辑。</p>
+<h3 id="调试和故障排除"><strong>调试和故障排除</strong></h3>
+<p>生产环境问题需要快速解决，但在压力下尝试理解不熟悉的代码往往会导致延迟。对于公司的许多团队来说，Claude Code 通过实时分析堆栈跟踪、文档和系统行为来加速诊断和修复。</p>
+<p>在处理事故时，安全工程团队将堆栈跟踪和文档输入 Claude Code，以跟踪代码库中的控制流。通常需要 10-15 分钟手动扫描的问题，现在的解决速度提高了 3 倍。</p>
+<p>借助 Claude Code，产品工程团队获得了在陌生代码库中解决 bug 的信心。他们询问 Claude：&quot;你能修复这个 bug 吗？这是我看到的行为&quot;，然后审查提出的解决方案，而无需依赖其他工程团队的协助。</p>
+<p>在一个案例中，当 Kubernetes 集群停止调度 Pod 时，数据基础设施团队使用 Claude Code 诊断问题。他们将仪表盘截图输入 Claude，Claude 逐菜单地引导他们浏览 Google Cloud 的 UI，直到他们发现 Pod IP 地址耗尽。Claude 随后提供了创建新 IP 池并将其添加到集群的确切命令，在系统中断期间为他们节省了宝贵的 20 分钟时间。</p>
+<h3 id="原型设计和功能开发"><strong>原型设计和功能开发</strong></h3>
+<p>传统上，构建新功能需要深厚的技术知识和大量的时间投入。Claude Code 使快速原型设计甚至完整的应用开发成为可能，让团队无论编程专业水平如何，都能快速验证想法。</p>
+<p>产品设计团队的成员会将 Figma 设计文件输入 Claude Code，然后设置自主循环，让 Claude Code 为新功能编写代码、运行测试并持续迭代。他们将抽象问题交给 Claude，让它自主工作，然后在最终优化之前审查解决方案。在一个案例中，他们让 Claude 以极少的人工审查为自己构建了 Vim 键位绑定。</p>
+<p>借助 Claude Code，产品设计团队发现了一个意想不到的用途：在设计阶段梳理错误状态、逻辑流程和系统状态以识别边缘情况，而不是在开发阶段才发现它们。这从根本上提高了他们最初的设计质量，并为他们在后续调试中节省了数小时的时间。</p>
+<p>尽管数据科学家并不精通 TypeScript，但他们使用 Claude Code 构建了完整的 React 应用程序，用于可视化 RL 模型性能。在沙盒环境中进行一次提示后，该工具便能在他们自己不理解代码的情况下，从零开始编写完整的 TypeScript 可视化。鉴于任务的简单性，如果第一次提示不够充分，他们会稍作调整并重试。</p>
+<h3 id="文档和知识管理"><strong>文档和知识管理</strong></h3>
+<p>技术文档通常分散在维基、代码注释和团队成员的头脑中。Claude Code 通过 MCP 和 CLAUDE.md 文件将这些知识整合成易于访问的格式，使每个需要的人都能获得这些专业知识。</p>
+<p>没有机器学习背景的推理团队成员依赖 Claude 来解释模型特定的函数。通常需要一个小时的谷歌搜索，现在只需要 10-20 分钟——研究时间减少了 80%。</p>
+<p>安全工程团队让 Claude 摄取多个文档源，以创建 markdown 运行手册和故障排除指南。这些浓缩的文档成为调试实际生产问题的上下文，这通常比搜索完整的知识库更高效。</p>
+<h3 id="自动化与工作流优化"><strong>自动化与工作流优化</strong></h3>
+<p>智能代理编码工具帮助团队构建自定义自动化，这些自动化以往需要专门的开发者资源或昂贵的软件。</p>
+<p>增长营销团队构建了一个代理式工作流，能处理包含数百个广告的 CSV 文件，识别表现不佳的广告，并在严格的字符限制内生成新的变体。借助两个专门的子代理，系统在几分钟内即可生成数百个新广告，而过去需要数小时。</p>
+<p>他们还开发了一个 Figma 插件，可以识别画框，并通过程序化替换标题和描述来生成多达 100 个广告变体，将数小时的复制粘贴工作缩短为每批广告仅仅半秒钟。</p>
+<p>在一个特别独特的用例中，法务团队创建了原型“电话路由系统”，帮助团队成员在 Anthropic 内部联系到合适的律师，展示了部门如何在没有传统开发资源的情况下构建自定义工具。</p>
+<h3 id="通过-claude-code-解锁新可能"><strong>通过 Claude Code 解锁新可能</strong></h3>
+<p>这些故事揭示了一个模式：当聚焦于 Claude Code 所能增强的人类工作流时，它的效果最好。最成功的团队将 Claude Code 视为思想伙伴，而不是代码生成器。</p>
+<p>他们探索可能性、快速制作原型，并在技术和非技术用户之间共享发现。这种人类与 AI 之间的协作方法正在创造我们才刚刚开始理解的机会。</p>
+
+        <div class="doc-meta">本页为 <a href="https://claude.com/blog/how-anthropic-teams-use-claude-code" target="_blank" rel="noopener">官方英文文档</a> 的中文译版（机器翻译 + 结构校验）· 译于 2026-07-17 · 以英文原文为准 · 返回 <a href="./">Claude Code 提示词库</a></div>
+      </article>
+    </div>
+  </main>
+</div>
+<script>
+(function () {
+  'use strict';
+  var $ = function (s) { return document.querySelector(s); };
+  // 主题（与提示词库共享 localStorage key）
+  var THEMES = [['auto', '🌗 主题：自动'], ['light', '☀️ 主题：浅色'], ['dark', '🌙 主题：深色']];
+  var idx = Math.max(0, THEMES.findIndex(function (t) { return t[0] === (localStorage.getItem('ccpl-theme') || 'auto'); }));
+  function applyTheme() {
+    document.documentElement.setAttribute('data-theme', THEMES[idx][0]);
+    $('#themeBtn').textContent = THEMES[idx][1];
+    localStorage.setItem('ccpl-theme', THEMES[idx][0]);
+  }
+  $('#themeBtn').addEventListener('click', function () { idx = (idx + 1) % THEMES.length; applyTheme(); });
+  applyTheme();
+  // 代码块复制
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.copy-btn');
+    if (!btn) return;
+    var text = btn.parentElement.querySelector('code').textContent;
+    var done = function () {
+      btn.textContent = '已复制 ✓'; btn.classList.add('ok');
+      setTimeout(function () { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done);
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta); done();
+    }
+  });
+  // 移动端侧边栏
+  $('#menuBtn').addEventListener('click', function () { $('#sidebar').classList.add('show'); $('#scrim').classList.add('show'); });
+  $('#scrim').addEventListener('click', function () { $('#sidebar').classList.remove('show'); $('#scrim').classList.remove('show'); });
+})();
+</script>
+</body>
+</html>

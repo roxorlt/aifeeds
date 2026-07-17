@@ -105,6 +105,8 @@ code { font-family: var(--mono); }
   margin-bottom: 1px;
 }
 .nav-item:hover { background: var(--border-subtle); color: var(--text); }
+a.nav-item { color: var(--text-2); }
+a.nav-item:hover { text-decoration: none; }
 .nav-item.on { background: var(--accent-bg); color: var(--accent); font-weight: 500; }
 .nav-item .n {
   margin-left: auto; font-size: 11.5px; color: var(--text-4);
@@ -336,11 +338,18 @@ const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-libra
   const DOCS = 'https://code.claude.com/docs';
   const $ = (sel, el) => (el || document).querySelector(sel);
 
-  const abs = (h) => !h ? '' : (h[0] === '/' && h[1] !== '/' ? DOCS + h : h);
+  // 已本地化的参考文档 → 站内相对链接（同标签页打开）
+  const LOCAL_DOCS = {
+    '/en/common-workflows': 'common-workflows.html',
+    '/en/best-practices': 'best-practices.html',
+    'https://claude.com/blog/how-anthropic-teams-use-claude-code': 'how-anthropic-teams-use-claude-code.html',
+  };
+  const abs = (h) => !h ? '' : (LOCAL_DOCS[h] || (h[0] === '/' && h[1] !== '/' ? DOCS + h : h));
+  const linkAttr = (href) => /^https?:/.test(href) ? ' target="_blank" rel="noopener"' : '';
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   // markdown 链接 + 反引号 → HTML（先转义再替换）
   const rich = (s) => esc(s)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `<a href="${abs(u)}" target="_blank" rel="noopener">${t}</a>`)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => { const h = abs(u); return `<a href="${h}"${linkAttr(h)}>${t}</a>`; })
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 
   /* ---------- 状态 ---------- */
@@ -395,6 +404,10 @@ const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-libra
     h += navItem('about', '关于本库', null, '📖');
     h += navItem('start', '新手入门', 5, '★');
     h += navItem('all', '全部提示词', PROMPTS.length);
+    h += '<div class="nav-h">参考文档 <span class="en">Docs</span></div>';
+    h += '<a class="nav-item" href="common-workflows.html">常见工作流</a>';
+    h += '<a class="nav-item" href="best-practices.html">最佳实践</a>';
+    h += '<a class="nav-item" href="how-anthropic-teams-use-claude-code.html">Anthropic 团队实践</a>';
     for (const ph of phases) {
       h += `<div class="nav-h">${esc(Z.phaseLabels[ph] || ph)} <span class="en">${esc(DATA.phaseLabels[ph] || ph)}</span></div>`;
       for (const cat of catsByPhase[ph]) {
@@ -463,13 +476,15 @@ const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-libra
       h += `<div class="prompt-box"><span class="caret">❯</span>${promptBodyHtml(p, lang)}` +
         `<button type="button" class="copy-btn" data-act="copy">复制</button></div>`;
       h += `<div class="lbl">为什么这样写有效</div><div class="teaches">${rich(p.zh.teaches)}</div>`;
-      if (p.nextHref && p.zh.next)
+      if (p.nextHref && p.zh.next) {
+        const nh = abs(p.nextHref);
         h += `<div class="next-box"><span class="next-lbl">固化下来</span>` +
-          `<a href="${abs(p.nextHref)}" target="_blank" rel="noopener">${rich(p.zh.next)} →</a></div>`;
+          `<a href="${nh}"${linkAttr(nh)}>${rich(p.zh.next)} →</a></div>`;
+      }
       const srcLabel = Z.sourceLabels[p.src];
-      const srcHref = DATA.sourceHrefs[p.src];
+      const sh = abs(DATA.sourceHrefs[p.src]);
       if (srcLabel)
-        h += `<div class="src-line">来自 ${srcHref ? `<a href="${abs(srcHref)}" target="_blank" rel="noopener">${esc(srcLabel)}</a>` : esc(srcLabel)}</div>`;
+        h += `<div class="src-line">来自 ${sh ? `<a href="${sh}"${linkAttr(sh)}>${esc(srcLabel)}</a>` : esc(srcLabel)}</div>`;
       h += '</div>';
     }
     return h + '</div>';
@@ -561,7 +576,7 @@ const DATA = {"meta":{"source_url":"https://code.claude.com/docs/en/prompt-libra
     function inline(s) {
       return esc(s)
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t2, u) => `<a href="${abs(u)}" target="_blank" rel="noopener">${t2}</a>`)
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t2, u) => { const h = abs(u); return `<a href="${h}"${linkAttr(h)}>${t2}</a>`; })
         .replace(/`([^`]+)`/g, '<code>$1</code>');
     }
   }

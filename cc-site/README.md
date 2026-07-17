@@ -13,6 +13,7 @@
 | `style.css` | 共用样式 |
 | `assets/gongan-icon.png` | 公安备案徽章（36×40） |
 | `cc-prompts/index.html` | Claude Code 官方提示词库中文版（自包含单文件，源头在 `~/brain/30-projects/cc-prompt-library/`，更新时重新 build 后复制过来） |
+| `cc-prompts/{common-workflows,best-practices,how-anthropic-teams-use-claude-code}.html` | 三份官方参考文档中文版（常见工作流 / 最佳实践 / Anthropic 团队实践），同一源头项目 build 产出 |
 | `sitemap.xml` | 站点地图（新增页面时记得加 URL） |
 | `robots.txt` | 爬虫规则 + sitemap 声明 |
 | `deploy.sh` | scp + chown + chmod 一键覆盖部署 |
