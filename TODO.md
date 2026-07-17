@@ -8,6 +8,20 @@
 
 ## 进行中
 
+### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
+
+- [x] 完成 GSC Unicode、sitemap/孤岛页/无出站链接、Product Hunt GIF、移动请求策略和
+  waterfall SSR 缓存的代码/线上证据归因；完整实施计划见
+  [`docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md`](docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md)。
+- [ ] **P0-A**：Unicode code-point 安全截断 + JSON-LD well-formed 边界兜底；精确重生 GSC
+  页面后用固定 cutoff 分源重灌存量快照。
+- [ ] **P0-B**：取得 Ahrefs 两条 5xx 的精确 URL/时间/响应，逐条复现并关闭
+  sitemap ↔ `item_pages` ↔ R2 完整性缺口。
+- [ ] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取
+  + load-more/polling 收紧。
+- [ ] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
+  perf-staging 做 classic/waterfall 同条件对照；RUM 继续作为上线后观察，不阻塞 staging。
+
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 
 - [x] **P0 `/api/items` 分页游标生产回归**（2026-07-17，branch
