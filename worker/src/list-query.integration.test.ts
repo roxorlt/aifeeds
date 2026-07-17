@@ -263,6 +263,62 @@ describe('feed handlers use list-only projections', () => {
     ]);
   });
 
+  test.each([
+    '2026-07-17 02:25:50',
+    '2026-07-17 02:25:50.123456789',
+  ])('ordinary SQLite datetime cursor emitted from D1 round-trips unchanged: %s', async (sqliteTime) => {
+    const row = {
+      id: 'x_list:sqlite-time',
+      source_type: 'x_list',
+      source_id: 'sqlite-time',
+      source_ref: 'fixture',
+      title: null,
+      content: 'SQLite datetime fixture',
+      content_translated: null,
+      author: 'author',
+      handle: 'author',
+      url: 'https://x.com/author/status/sqlite-time',
+      media: '[]',
+      metrics: '{}',
+      published_at: '2026-07-17T02:25:50.000Z',
+      scraped_at: sqliteTime,
+      is_relevant: 1,
+      is_hot: 0,
+      matched_by: 'fixture',
+      lang: 'en',
+      extra: '{}',
+      _untranslated_rank: 1,
+    };
+    const firstResponse = await handleItems(
+      new Request('https://api.ai-feeds.com/api/items?source_type=x_list&limit=1'),
+      projectionEnv([], [[row, { ...row, id: 'x_list:more' }]]),
+    );
+    const firstPayload = await firstResponse.json() as { next_cursor: string };
+
+    expect(firstPayload.next_cursor).toBe(`v2|1|${sqliteTime}|x_list:sqlite-time`);
+
+    const nextUrl = new URL('https://api.ai-feeds.com/api/items');
+    nextUrl.searchParams.set('source_type', 'x_list');
+    nextUrl.searchParams.set('limit', '1');
+    nextUrl.searchParams.set('cursor', firstPayload.next_cursor);
+    const captured: string[] = [];
+    const binds: unknown[][] = [];
+    const nextResponse = await handleItems(
+      new Request(nextUrl),
+      projectionEnv(captured, [], binds),
+    );
+
+    expect(nextResponse.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(binds[0].slice(-6, -1)).toEqual([
+      1,
+      1,
+      sqliteTime,
+      sqliteTime,
+      'x_list:sqlite-time',
+    ]);
+  });
+
   test('news v2 cursor carries score, untranslated rank, time, id, and frozen rank time', async () => {
     const captured: string[] = [];
     const row = {
@@ -570,6 +626,10 @@ describe('feed handlers use list-only projections', () => {
     { label: 'ordinary v2 partial rank', sourceType: 'x_list', sort: '', cursor: 'v2|1oops|2026-07-11T00:00:00.000Z|x_list:item' },
     { label: 'ordinary v2 out-of-domain rank', sourceType: 'x_list', sort: '', cursor: 'v2|2|2026-07-11T00:00:00.000Z|x_list:item' },
     { label: 'ordinary v2 invalid time', sourceType: 'x_list', sort: '', cursor: 'v2|1|not-a-date|x_list:item' },
+    { label: 'ordinary v2 impossible SQLite time', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-02-30 00:00:00|x_list:item' },
+    { label: 'ordinary v2 non-padded SQLite time', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-7-11 00:00:00|x_list:item' },
+    { label: 'ordinary v2 SQLite time with timezone suffix', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11 00:00:00Z|x_list:item' },
+    { label: 'ordinary v2 SQLite time with trailing text', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11 00:00:00extra|x_list:item' },
     { label: 'ordinary v2 missing id', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11T00:00:00.000Z|' },
     { label: 'ordinary v2 extra segment', sourceType: 'x_list', sort: '', cursor: 'v2|1|2026-07-11T00:00:00.000Z|x_list:item|extra' },
     { label: 'ordinary legacy invalid time', sourceType: 'x_list', sort: '', cursor: 'not-a-date|x_list:item' },

@@ -15,6 +15,11 @@
 
 历史：2026-07-15（旧 GL-a 已完成 exceptional recovery 并终态对账；新 operation `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 会把三个 upstream timing 序列化为空串后自动回滚。source/rollback 均为 `rolled_back`、14/14 runtime cleanup 完成、site 恢复原 SHA、运行时残留为 0。validator 现仅在缓存 HIT/STALE/UPDATING/REVALIDATED 分支接受数字、`-` 或空串；非缓存与 API 仍必须为数字。再次执行须重新 clean G0、冻结新清单并单独批准）
 
+历史：2026-07-17（外部 Mobile 合成测试稳定复现 `/api/items` 下一页 `400 invalid_cursor`：
+Worker 从 D1 原始 TEXT 生成 `v2|rank|sort_time|id`，生产 `sort_time` 为 SQLite datetime
+`YYYY-MM-DD HH:mm:ss`，而 7 月 13 日上线的输入校验只接受 RFC3339。修复必须保留原始排序键，
+严格同时接受 RFC3339 与 SQLite datetime；禁止只把输出格式化成 ISO 后继续和原 TEXT 做 keyset 比较）
+
 历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
 
 历史：2026-07-11（新增同源 API 的本地构建开关、版本化 nginx location 与 perf-staging/生产切换回滚手册；当前未部署）
@@ -2730,6 +2735,13 @@ root-only backup、事务 journal 与审计日志默认保留复盘；精确删�
 未来或无法解析的发布时间按 `age_hours=0` 计算，保证 score 始终有限且由 `id` 完成稳定全序；格式、
 score、id 或 `rank_now` 非法的 `v2h` cursor 直接返回 `400 invalid_cursor`，不得静默退回第一页。
 旧 `score|id` cursor 仍可读。
+
+**2026-07-17 cursor 生产回归与验收约束**：普通/官方新闻 cursor 的 item 排序时间直接来自
+D1 TEXT，合法输入格式包含 RFC3339 和 SQLite datetime `YYYY-MM-DD HH:mm:ss[.fraction]`；
+冻结的 `rank_now` 仍只接受 canonical `YYYY-MM-DDTHH:mm:ss.sssZ`。SQLite 格式必须严格补零、
+日历有效且不带 timezone suffix/尾随字符。发布 staging 与 production 后都必须执行同一只读验收：
+请求 X 首屏 → 原样回放响应中的 `next_cursor` → 两页均为 200、item id 非空且不重叠、无
+`invalid_cursor`；不能只检查首屏成功。
 
 本次只完成代码、测试、本地 SQLite JSON1/EXPLAIN 验证；**未部署 Worker、未运行 staging/prod
 GitHub 回填、未对任何远端 D1 应用 migration 028**。下面每个远端写动作仍需独立审批。
