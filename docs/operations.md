@@ -3628,8 +3628,10 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 |------|------|--------|
 | `/daily/:date` | R2 `daily/<date>.html` 快照命中 → 200；miss → noindex 404 页；日历越界 → 302 归档 | `public, max-age=3600` |
 | `/daily/` `/daily` | 从 `daily_pages` 表实时渲染归档索引（按月倒序） | `public, max-age=3600` |
+| `/archive/` `/archive/:source/` `/archive/:source/:yyyy-mm/[page]` | 从 `items` + `item_pages` 实时渲染五源分层归档；源仅 `x`/`gh`/`ph`/`paper`/`news`，每页 100，空月/越界页 noindex 404；资格 gate 与内容出口一致（live/relevant/未软删/非 dedup/非 `cn_sensitive`） | `public, max-age=3600` |
 | `/robots.txt` | 模板（决策 5 全放，仅 Disallow `/api/` `/admin` `/settings` `/me/` `/unsubscribe`；末行 `Sitemap:`） | `public, max-age=86400` |
 | `/sitemap.xml` | **sitemap-index**（2026-07-08 改），列全部分片 | `public, max-age=3600` |
+| `/sitemap-archive.xml` | 归档 index、五个 source、全部有效 month/page URL；不混入 item sitemap | `public, max-age=3600` |
 | `/sitemap-<source>.xml` | 各源 `item_pages`(status=live) 实际 URL 列表，每片 ≤5 万（超则续 `-2 -3…`）；分片有 `daily` / `x` / `gh` / `ph` / `hf-paper` / `news` 共 6 类；正则 `SITEMAP_SHARD_RE`（`worker/src/seo-routes.ts`） | `public, max-age=3600` |
 | `/llms.txt` | 模板（中英各一行定位 + 归档/订阅入口 + 最近 7 天日报） | `public, max-age=86400` |
 | `/<INDEXNOW_KEY>.txt` | IndexNow 域名归属校验文件（key 纯文本）；未配置 / key 不匹配的其它根级 `.txt` → 404 | `public, max-age=86400` |
@@ -3684,7 +3686,7 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ### 5. 香港 nginx 转发
 
-`ai-feeds.com` 灰云直连香港 VPS（`154.12.188.231`）。front server 块一个 **regex location** 把 `/daily(/.*)?`、`/i/.*`、`robots.txt`、`sitemap.xml`、`sitemap-<source>.xml` 分片、`llms.txt`、`<INDEXNOW_KEY>.txt` 转发到与 api 块同一 worker upstream（`xlist-api.ltsms86.workers.dev`），照 api 块注入全套头（`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `proxy_ssl_name/server_name`）。**故意不启用 proxy_cache**。完整正则 + 演进见上 §6b「六续」（daily + SEO 文件）/「七续」（扩 `/i/*` + sitemap 分片）。
+`ai-feeds.com` 灰云直连香港 VPS（`154.12.188.231`）。front server 块一个 **regex location** 把 `/daily(/.*)?`、`/archive(/.*)?`、`/i/.*`、`robots.txt`、`sitemap.xml`、`sitemap-<source>.xml` 分片、`llms.txt`、`<INDEXNOW_KEY>.txt` 转发到与 api 块同一 worker upstream（`xlist-api.ltsms86.workers.dev`），照 api 块注入全套头（`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `proxy_ssl_name/server_name`）。**故意不启用 proxy_cache**。完整正则 + 演进见上 §6b「六续」（daily + SEO 文件）/「七续」（扩 `/i/*` + sitemap 分片）。
 
 - **权威副本已版本化**：`deploy/nginx/aifeeds-seo-location.conf`（repo 内，含完整回滚 / 部署步骤注释）。**VPS 仍是实际生效配置**，改这个副本后须 SSH 同步 VPS → `nginx -t` → `systemctl reload nginx` → 清缓存（`rm -rf /var/cache/nginx/aifeeds/*`）。upstream / SNI / 注入头一律照现有 `/daily` location 的 proxy 体，别自己拼。
 - **回滚**：删该 location 块 + reload（worker 路由无状态；api 域 `/daily` `/i/` 等仍可直达不受影响）。
@@ -3697,7 +3699,19 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 2. **worker `isSeoPath()`**（`worker/src/seo-routes.ts`）—— 决定该路径豁不豁免 bot UA 闸
 3. **`dashboard/public/sw.js` 的 `isSeoPath()`** —— 决定 PWA SW 拦导航时透传还是喂缓存壳
 
-> ⚠️ **现状缺口**：sw.js 的 `isSeoPath()` 已含 `/daily`、`/sitemap.xml`、根级 `.txt`，但 **`/i/*` 分支尚未同步**（2026-07-08 记录，见 §6b 七续）。理论风险：老客户端 SW 拦 `/i/*` 导航时可能喂旧壳而非透传。属遗留低优（见 TODO §12 SEO 遗留低优），改前先注销 SW / 硬刷新验证实际影响。
+当前三层均包含 `/daily`、`/archive`、`/i/*`、sitemap 与根级 SEO 文本路径；契约测试覆盖 production 权威副本、perf-staging 模板和 Service Worker，避免新增 SSR 路由被 SPA 壳截获。
+
+### 6.1 内容归档与链接图验收
+
+- item 页相关内容只取同源、live、relevant、非 dedup、非软删/涉华敏感的稳定时间邻居：
+  以 `(published_at DESC, id DESC)` 为序，当前项前后各 3 条；不再让历史页永久指向
+  全站最新条目。
+- item 页 JSON-LD 第二级 breadcrumb 指向 SSR source archive，正文 header 同时链接 source/month
+  archive；Dashboard footer、classic `<noscript>` 与日报 footer 均提供 `/archive/` 普通链接。
+- 只读验收器：`node scripts/verify-item-link-graph.mjs --base-url https://ai-feeds.com`。它只抓
+  sitemap 与 archive HTML，不重复抓全部 item 正文；检查每个 sitemap item 至少一个 archive
+  入链、archive 目标完整、无链接指向 sitemap 外的 gone/404、无 PH canonical 重复，且
+  `/archive/` 到 item 的最大深度不超过 5。
 
 ### 7. 图片
 

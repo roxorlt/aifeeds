@@ -115,20 +115,32 @@ function makeDb(seed: ItemSeed[] = []) {
           return null as T | null;
         },
         async all<T>() {
-          if (/id != \?/i.test(sql)) {
-            // related：binds = [...sourceTypes, mainId]；SQL 含 dedup_of IS NULL → 排 dedup 次源。
+          if (/JOIN item_pages p ON p\.item_id = i\.id/i.test(sql) && /LIMIT 3/i.test(sql)) {
+            // 稳定时间邻居：binds = [...sourceTypes, publishedAt, publishedAt, mainId]。
             const mainId = String(binds[binds.length - 1]);
-            const sts = binds.slice(0, binds.length - 1).map(String);
+            const publishedAt = String(binds[binds.length - 2]);
+            const sts = binds.slice(0, binds.length - 3).map(String);
+            const isNewer = /i\.published_at > \?/i.test(sql);
             const res = items
               .filter(
                 (r) =>
                   sts.includes(String(r.source_type)) &&
                   String(r.id) !== mainId &&
                   Number(r.is_relevant) === 1 &&
-                  !isDeduped(r),
+                  !isDeduped(r) &&
+                  pages.get(String(r.id))?.status === 'live' &&
+                  (isNewer
+                    ? String(r.published_at) > publishedAt ||
+                      (String(r.published_at) === publishedAt && String(r.id) > mainId)
+                    : String(r.published_at) < publishedAt ||
+                      (String(r.published_at) === publishedAt && String(r.id) < mainId)),
               )
-              .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)))
-              .slice(0, 6);
+              .sort((a, b) => {
+                const byTime = String(a.published_at).localeCompare(String(b.published_at));
+                const byId = String(a.id).localeCompare(String(b.id));
+                return isNewer ? byTime || byId : -(byTime || byId);
+              })
+              .slice(0, 3);
             return { results: res as unknown as T[] };
           }
           if (/generated_at >= \?/i.test(sql)) {
@@ -334,6 +346,7 @@ describe('generateItemPage', () => {
       { id: 'github:a/b', source_type: 'github', is_relevant: 1 }, // 异源，不应进 related
     ]);
     const r2 = makeR2();
+    seedPage(db, rel, 'x', '2026-07-03T00:00:00Z');
     await generateItemPage(makeEnv(db, r2), main);
     const html = r2.store.get(itemPageR2Key(main)!)!;
     expect(html).toContain(itemPagePath(rel)!); // 同源相关内链指 /i/
@@ -357,10 +370,48 @@ describe('generateItemPage', () => {
       },
     ]);
     const r2 = makeR2();
+    seedPage(db, rel, 'x', '2026-07-04T00:00:00Z');
+    seedPage(db, dup, 'x', '2026-07-04T00:00:00Z');
     await generateItemPage(makeEnv(db, r2), main);
     const html = r2.store.get(itemPageR2Key(main)!)!;
     expect(html).toContain(itemPagePath(rel)!); // 正常同源进 related
     expect(html).not.toContain(itemPagePath(dup)!); // dedup 次源被排除
+  });
+
+  test('相关内链使用当前项前后各 3 个稳定时间邻居，而不是全站最新 5 条', async () => {
+    const main = 'x_list:main';
+    const candidates = [
+      ['x_list:newest-far', '2026-07-14T00:00:00Z'],
+      ['x_list:new-3', '2026-07-13T00:00:00Z'],
+      ['x_list:new-2', '2026-07-12T00:00:00Z'],
+      ['x_list:new-1', '2026-07-11T00:00:00Z'],
+      ['x_list:old-1', '2026-07-09T00:00:00Z'],
+      ['x_list:old-2', '2026-07-08T00:00:00Z'],
+      ['x_list:old-3', '2026-07-07T00:00:00Z'],
+      ['x_list:oldest-far', '2026-07-06T00:00:00Z'],
+    ] as const;
+    const db = makeDb([
+      { id: main, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-10T00:00:00Z' },
+      ...candidates.map(([id, published_at]) => ({
+        id,
+        source_type: 'x_list',
+        is_relevant: 1,
+        published_at,
+      })),
+    ]);
+    for (const [id] of candidates) {
+      seedPage(db, id, 'x', '2026-07-15T00:00:00Z');
+    }
+
+    const r2 = makeR2();
+    await generateItemPage(makeEnv(db, r2), main);
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+
+    for (const id of ['x_list:new-3', 'x_list:new-2', 'x_list:new-1', 'x_list:old-1', 'x_list:old-2', 'x_list:old-3']) {
+      expect(html, id).toContain(itemPagePath(id)!);
+    }
+    expect(html).not.toContain(itemPagePath('x_list:newest-far')!);
+    expect(html).not.toContain(itemPagePath('x_list:oldest-far')!);
   });
 });
 

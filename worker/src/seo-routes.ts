@@ -14,6 +14,20 @@ import { getBases } from './digest/lib';
 import { escapeHtml } from './digest/templates';
 import type { DailyVideoRow } from './digest/daily-video';
 import { dailyVideoPublicationDate } from './digest/daily-page';
+import {
+  ARCHIVE_PAGE_SIZE,
+  ARCHIVE_SOURCES,
+  ARCHIVE_SOURCE_LABELS,
+  archiveCanonicalPath,
+  archiveCountQuery,
+  archiveItemsQuery,
+  archiveMonthsQuery,
+  archiveSitemapGroupsQuery,
+  parseItemArchivePath,
+  type ArchiveItemRow,
+  type ArchiveSource,
+  type ItemArchiveRoute,
+} from './seo/item-archive';
 
 // 根目录单段 .txt 文件(robots.txt / llms.txt / <indexnow-key>.txt)。sitemap.xml 另判。
 const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
@@ -49,6 +63,7 @@ function parseSitemapShard(pathname: string): { source: string; page: number } |
 // 无 env 参数(签名固定),故 indexnow key 文件按"根目录 .txt"整体豁免,真实 key 校验在 handleSeoRoute。
 export function isSeoPath(pathname: string): boolean {
   if (pathname === '/daily' || pathname.startsWith('/daily/')) return true;
+  if (pathname === '/archive' || pathname.startsWith('/archive/')) return true;
   // item SSR 静态页 /i/…（伺服由 seo/item-routes.ts handleItemRoute 出）。裸 /i 不放行。
   if (pathname.startsWith('/i/')) return true;
   if (pathname === '/sitemap.xml') return true;
@@ -257,6 +272,190 @@ footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color
   return html(page, 200, 3600);
 }
 
+interface ArchiveMonthRow {
+  month: string;
+  item_count: number;
+}
+
+interface ArchiveSitemapGroup extends ArchiveMonthRow {
+  source: string;
+  lastmod?: string | null;
+}
+
+function archive404(env: Env): Response {
+  const { siteBase } = getBases(env);
+  return html(
+    `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>内容归档不存在 | AI Feeds</title>
+</head>
+<body><main><h1>内容归档不存在</h1><p><a href="${siteBase}/archive/">返回内容归档</a></p></main></body>
+</html>`,
+    404,
+    null,
+  );
+}
+
+function archiveShell(args: {
+  siteBase: string;
+  title: string;
+  description: string;
+  canonicalPath: string;
+  h1: string;
+  breadcrumb: Array<{ label: string; path: string }>;
+  body: string;
+}): Response {
+  const { siteBase, title, description, canonicalPath, h1, breadcrumb, body } = args;
+  const canonical = `${siteBase}${canonicalPath}`;
+  const crumbs = breadcrumb
+    .map(
+      (entry) =>
+        `<a href="${escapeHtml(`${siteBase}${entry.path}`)}">${escapeHtml(entry.label)}</a>`,
+    )
+    .join('<span aria-hidden="true">/</span>');
+  const page = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(description)}">
+<link rel="canonical" href="${escapeHtml(canonical)}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(description)}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="${escapeHtml(canonical)}">
+<style>
+:root{--text:#171717;--sub:#737373;--link:#0284c7;--border:#e5e5e5;--bg:#fafafa}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);line-height:1.6;
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:800px;margin:0 auto;padding:24px 16px 48px}.brand a{color:var(--text);font-weight:700}
+.breadcrumb{display:flex;gap:8px;flex-wrap:wrap;color:var(--sub);font-size:13px;margin:20px 0}
+h1{font-size:24px;margin:0 0 8px}.lede{color:var(--sub);margin:0 0 24px}
+.archive-list{list-style:none;padding:0;margin:0}.archive-item{padding:12px 0;border-bottom:1px solid var(--border)}
+.archive-item a{font-weight:600}.meta{color:var(--sub);font-size:13px;margin-top:4px}
+.source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:0;list-style:none}
+.source-grid a{display:block;border:1px solid var(--border);border-radius:8px;padding:14px;background:#fff}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:28px}
+.page-numbers{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}.page-numbers a,.page-numbers span{padding:2px 5px}
+footer{display:flex;gap:16px;flex-wrap:wrap;margin-top:40px;padding-top:20px;border-top:1px solid var(--border);font-size:14px}
+</style>
+</head>
+<body><div class="wrap">
+<header><div class="brand"><a href="${siteBase}/">AI Feeds</a></div></header>
+<nav class="breadcrumb" aria-label="面包屑">${crumbs}</nav>
+<main><h1>${escapeHtml(h1)}</h1><p class="lede">${escapeHtml(description)}</p>${body}</main>
+<footer><a href="${siteBase}/">进站看全部</a><a href="${siteBase}/daily/">历史日报</a><a href="${siteBase}/subscribe">订阅每日邮件</a></footer>
+</div></body></html>`;
+  return html(page, 200, 3600);
+}
+
+async function renderItemArchive(env: Env, route: ItemArchiveRoute): Promise<Response> {
+  const { siteBase } = getBases(env);
+  if (route.kind === 'index') {
+    const links = ARCHIVE_SOURCES.map(
+      (source) =>
+        `<li><a href="${siteBase}/archive/${source}/">${escapeHtml(ARCHIVE_SOURCE_LABELS[source])}</a></li>`,
+    ).join('');
+    return archiveShell({
+      siteBase,
+      title: '内容归档 | AI Feeds',
+      description: '按来源和月份浏览 AI Feeds 已发布的全部可索引内容。',
+      canonicalPath: archiveCanonicalPath(route),
+      h1: '内容归档',
+      breadcrumb: [{ label: 'AI Feeds', path: '/' }, { label: '内容归档', path: '/archive/' }],
+      body: `<ul class="source-grid">${links}</ul>`,
+    });
+  }
+
+  const label = ARCHIVE_SOURCE_LABELS[route.source];
+  if (route.kind === 'source') {
+    const query = archiveMonthsQuery(route.source);
+    const result = await env.DB.prepare(query.sql)
+      .bind(...query.bindings)
+      .all<ArchiveMonthRow>();
+    const links = (result.results || [])
+      .map(
+        (row) =>
+          `<li class="archive-item"><a href="${siteBase}/archive/${route.source}/${escapeHtml(row.month)}/">${escapeHtml(row.month)}</a><div class="meta">${Number(row.item_count)} 条内容</div></li>`,
+      )
+      .join('');
+    return archiveShell({
+      siteBase,
+      title: `${label}归档 | AI Feeds`,
+      description: `按月份浏览 AI Feeds 的${label}内容。`,
+      canonicalPath: archiveCanonicalPath(route),
+      h1: `${label}归档`,
+      breadcrumb: [
+        { label: 'AI Feeds', path: '/' },
+        { label: '内容归档', path: '/archive/' },
+        { label, path: archiveCanonicalPath(route) },
+      ],
+      body: links ? `<ul class="archive-list">${links}</ul>` : '<p>暂无内容。</p>',
+    });
+  }
+
+  const countQuery = archiveCountQuery(route.source, route.month);
+  const countRow = await env.DB.prepare(countQuery.sql)
+    .bind(...countQuery.bindings)
+    .first<{ item_count: number }>();
+  const itemCount = Number(countRow?.item_count ?? 0);
+  const totalPages = Math.ceil(itemCount / ARCHIVE_PAGE_SIZE);
+  if (!itemCount || route.page > totalPages) return archive404(env);
+
+  const itemQuery = archiveItemsQuery(route.source, route.month, route.page);
+  const result = await env.DB.prepare(itemQuery.sql)
+    .bind(...itemQuery.bindings)
+    .all<ArchiveItemRow>();
+  const rows = result.results || [];
+  if (!rows.length) return archive404(env);
+
+  const items = rows
+    .map((row) => {
+      const meta = [row.author, row.published_at ? dateOnly(row.published_at) : null]
+        .filter(Boolean)
+        .map((value) => escapeHtml(String(value)))
+        .join(' · ');
+      return `<li class="archive-item"><a href="${escapeHtml(`${siteBase}${row.url_path}`)}">${escapeHtml(row.title || row.id)}</a>${meta ? `<div class="meta">${meta}</div>` : ''}</li>`;
+    })
+    .join('');
+  const monthPath = `/archive/${route.source}/${route.month}/`;
+  const prev =
+    route.page > 1
+      ? `<a rel="prev" href="${siteBase}${route.page === 2 ? monthPath : `${monthPath}${route.page - 1}`}">← 上一页</a>`
+      : '<span></span>';
+  const next =
+    route.page < totalPages
+      ? `<a rel="next" href="${siteBase}${monthPath}${route.page + 1}">下一页 →</a>`
+      : '<span></span>';
+  const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1)
+    .map((page) => {
+      if (page === route.page) return `<span aria-current="page">${page}</span>`;
+      const path = page === 1 ? monthPath : `${monthPath}${page}`;
+      return `<a href="${siteBase}${path}">${page}</a>`;
+    })
+    .join('');
+  return archiveShell({
+    siteBase,
+    title: `${label} ${route.month}归档${route.page > 1 ? ` · 第 ${route.page} 页` : ''} | AI Feeds`,
+    description: `浏览 ${route.month} 发布的${label}内容，第 ${route.page} 页，共 ${itemCount} 条。`,
+    canonicalPath: archiveCanonicalPath(route),
+    h1: `${label} · ${route.month}`,
+    breadcrumb: [
+      { label: 'AI Feeds', path: '/' },
+      { label: '内容归档', path: '/archive/' },
+      { label, path: `/archive/${route.source}/` },
+      { label: route.month, path: monthPath },
+    ],
+    body: `<ul class="archive-list">${items}</ul><nav class="pager" aria-label="分页">${prev}<span class="page-numbers">${pageNumbers}</span>${next}</nav>`,
+  });
+}
+
 // ── robots.txt ─────────────────────────────────────────────────
 // 决策 5 全放(含训练爬虫),仅屏蔽无收录价值/带鉴权路径。Sitemap 绝对 URL 走 SITE_BASE。
 function robotsResponse(env: Env): Response {
@@ -291,6 +490,7 @@ async function sitemapIndexResponse(env: Env): Promise<Response> {
 
   const entries: string[] = [];
   entries.push(sitemapEntry(`${siteBase}/sitemap-daily.xml`, dailyMod));
+  entries.push(sitemapEntry(`${siteBase}/sitemap-archive.xml`, null));
   entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
 
   // 各源 live 计数 + 最新 generated_at,据此算续片数(ceil(count/5万)),空源仍列 page1。
@@ -317,6 +517,63 @@ ${entries.join('\n')}
 </sitemapindex>
 `;
   return xmlResponse(xml, 200);
+}
+
+function archiveSourceFromPageSource(source: string): ArchiveSource | null {
+  if (source === 'hf-paper') return 'paper';
+  return (ARCHIVE_SOURCES as readonly string[]).includes(source)
+    ? (source as ArchiveSource)
+    : null;
+}
+
+async function archiveSitemapResponse(env: Env): Promise<Response> {
+  const { siteBase } = getBases(env);
+  const query = archiveSitemapGroupsQuery();
+  const result = await env.DB.prepare(query.sql)
+    .bind(...query.bindings)
+    .all<ArchiveSitemapGroup>();
+  const groups = result.results || [];
+  const latest = groups.reduce<string | null>((current, row) => {
+    const value = row.lastmod || null;
+    return value && (!current || value > current) ? value : current;
+  }, null);
+  const urls: string[] = [urlEntry(`${siteBase}/archive/`, dateOnly(latest || new Date().toISOString()), 'daily')];
+
+  for (const source of ARCHIVE_SOURCES) {
+    const sourceGroups = groups.filter((row) => archiveSourceFromPageSource(row.source) === source);
+    const sourceLastmod = sourceGroups.reduce<string | null>((current, row) => {
+      const value = row.lastmod || null;
+      return value && (!current || value > current) ? value : current;
+    }, null);
+    urls.push(
+      urlEntry(
+        `${siteBase}/archive/${source}/`,
+        dateOnly(sourceLastmod || latest || new Date().toISOString()),
+        'weekly',
+      ),
+    );
+  }
+
+  for (const row of groups) {
+    const source = archiveSourceFromPageSource(row.source);
+    if (!source || !isValidArchiveGroup(row)) continue;
+    const pages = Math.ceil(Number(row.item_count) / ARCHIVE_PAGE_SIZE);
+    for (let page = 1; page <= pages; page++) {
+      const route: ItemArchiveRoute = { kind: 'month', source, month: row.month, page };
+      urls.push(
+        urlEntry(
+          `${siteBase}${archiveCanonicalPath(route)}`,
+          dateOnly(row.lastmod || new Date().toISOString()),
+          'weekly',
+        ),
+      );
+    }
+  }
+  return urlsetResponse(urls);
+}
+
+function isValidArchiveGroup(row: ArchiveSitemapGroup): boolean {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(row.month) && Number(row.item_count) > 0;
 }
 
 // ── /sitemap-daily.xml(日报片)──────────────────────────────────
@@ -492,10 +749,16 @@ export async function handleSeoRoute(request: Request, env: Env): Promise<Respon
   // /daily/<其它非法>(如 /daily/abc、/daily/2026-07)→ 302 归档
   if (pathname.startsWith('/daily/')) return redirectArchive(env);
 
+  if (pathname === '/archive' || pathname.startsWith('/archive/')) {
+    const route = parseItemArchivePath(pathname);
+    return route ? renderItemArchive(env, route) : archive404(env);
+  }
+
   if (pathname === '/robots.txt') return robotsResponse(env);
   if (pathname === '/llms.txt') return llmsResponse(env);
   if (pathname === '/sitemap.xml') return sitemapIndexResponse(env);
   if (pathname === '/video-sitemap.xml') return videoSitemapResponse(env);
+  if (pathname === '/sitemap-archive.xml') return archiveSitemapResponse(env);
   // 日报片(须在通用分片正则前判,daily 也匹配 SITEMAP_SHARD_RE)。
   if (pathname === '/sitemap-daily.xml') return dailySitemapResponse(env);
   // /sitemap-<source>.xml、/sitemap-<source>-<n>.xml → 内容片;未知源/非法后缀 → 404 xml。

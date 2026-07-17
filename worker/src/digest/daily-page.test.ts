@@ -297,11 +297,12 @@ describe('renderDailyPageHtml', () => {
     expect(withPrev).toContain('前一日');
   });
 
-  test('footer 含订阅 / 进站 / 归档三个入口(绝对 URL)', () => {
+  test('footer 含订阅 / 进站 / 日报归档 / 内容归档四个入口(绝对 URL)', () => {
     const html = renderDailyPageHtml(mkData(), envFixture());
     expect(html).toContain(`href="${SITE}/subscribe"`);
     expect(html).toContain(`href="${SITE}/"`);
     expect(html).toContain(`href="${SITE}/daily/"`);
+    expect(html).toContain(`href="${SITE}/archive/"`);
   });
 
   test('HTML 特殊字符转义(标题含 < & 不破坏结构)', () => {

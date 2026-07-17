@@ -1346,6 +1346,10 @@ function DashboardHome() {
           <a href="/daily/" className="hover:text-neutral-600 hover:underline">
             AI 日报
           </a>
+          <span className="mx-1.5">·</span>
+          <a href="/archive/" className="hover:text-neutral-600 hover:underline">
+            内容归档
+          </a>
         </footer>
       </main>
       <TweetDrawerGate />

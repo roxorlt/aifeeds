@@ -1,6 +1,6 @@
 # SEO 完整性与 C 端性能后续实施计划
 
-> 状态：`IMPLEMENTATION IN PROGRESS — BATCH A LOCAL VERIFICATION COMPLETE`
+> 状态：`IMPLEMENTATION IN PROGRESS — BATCH A/C LOCAL VERIFICATION COMPLETE`
 >
 > 本文只固化诊断、方案、实施顺序和验收门槛，不包含生产变更。执行时必须从最新
 > `origin/main` 为每个可独立回滚的批次建立分支，不把所有改动塞进一个大 PR。
