@@ -68,6 +68,113 @@ export function getImmediateColumnCount(width: number): number {
   return 3;
 }
 
+export function loadMoreLimitForViewport(width: number): 12 | 16 {
+  return width < 768 ? 12 : 16;
+}
+
+export function shouldPollFeed({
+  sourceType,
+  feedVisible,
+  documentVisible,
+  online,
+}: {
+  sourceType: string;
+  feedVisible: boolean;
+  documentVisible: boolean;
+  online: boolean;
+}): boolean {
+  return sourceType.split(",").includes("x_list")
+    && feedVisible
+    && documentVisible
+    && online;
+}
+
+export type AdjacentIntentDirection = "previous" | "next";
+
+export function adjacentSourceForIntent(
+  current: string,
+  direction: AdjacentIntentDirection,
+  orderedSources: readonly string[],
+): string | null {
+  const ordered = [...new Set(orderedSources.filter(Boolean))];
+  const currentIndex = ordered.indexOf(current);
+  if (currentIndex < 0) return null;
+  const targetIndex = currentIndex + (direction === "next" ? 1 : -1);
+  return ordered[targetIndex] ?? null;
+}
+
+type IntentPrefetchTask = (sourceType: string) => Promise<unknown> | unknown;
+type IntentScheduleHandle = ReturnType<typeof setTimeout> | unknown;
+
+export type IntentPrefetchController = {
+  request(sourceType: string, task: IntentPrefetchTask): boolean;
+  cancel(): void;
+  dispose(): void;
+};
+
+export function createIntentPrefetchController({
+  schedule = (callback) => setTimeout(callback, 0),
+  cancelScheduled = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}: {
+  schedule?: (callback: () => void) => IntentScheduleHandle;
+  cancelScheduled?: (handle: IntentScheduleHandle) => void;
+} = {}): IntentPrefetchController {
+  type QueuedIntent = {
+    sourceType: string;
+    task: IntentPrefetchTask;
+    handle: IntentScheduleHandle | null;
+  };
+  let queued: QueuedIntent | null = null;
+  let activeSource: string | null = null;
+  let disposed = false;
+
+  const clearQueued = () => {
+    if (queued?.handle !== null && queued?.handle !== undefined) {
+      cancelScheduled(queued.handle);
+    }
+    queued = null;
+  };
+  const startQueued = () => {
+    if (disposed || activeSource || !queued || queued.handle !== null) return;
+    const intent = queued;
+    intent.handle = schedule(() => {
+      if (disposed || queued !== intent) return;
+      queued = null;
+      activeSource = intent.sourceType;
+      void Promise.resolve(intent.task(intent.sourceType))
+        .catch(() => {
+          // Intent prefetch is best-effort; the mounted Feed remains authoritative.
+        })
+        .finally(() => {
+          if (activeSource === intent.sourceType) activeSource = null;
+          startQueued();
+        });
+    });
+  };
+
+  return {
+    request(sourceType, task) {
+      if (
+        disposed
+        || !sourceType
+        || activeSource === sourceType
+        || queued?.sourceType === sourceType
+      ) return false;
+      clearQueued();
+      queued = { sourceType, task, handle: null };
+      startQueued();
+      return true;
+    },
+    cancel() {
+      clearQueued();
+    },
+    dispose() {
+      disposed = true;
+      clearQueued();
+    },
+  };
+}
+
 export function createSingleFlightRegistry(options: { successRetentionMs?: number } = {}) {
   type Entry = {
     request: Promise<unknown>;

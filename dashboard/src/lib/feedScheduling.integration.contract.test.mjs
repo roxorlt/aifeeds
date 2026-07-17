@@ -36,7 +36,8 @@ test("apiFetch strips purpose from native fetch and uses the bounded method-safe
 
 test("initial/list pagination budgets and background reads are explicit", () => {
   assert.match(feed, /const INITIAL_LIMIT = 12/);
-  assert.match(feed, /const LOAD_MORE_LIMIT = 30/);
+  assert.match(feed, /loadMoreLimitForViewport\(window\.innerWidth\)/);
+  assert.doesNotMatch(feed, /const LOAD_MORE_LIMIT = 30/);
   assert.match(feed, /purpose:\s*["']background["']/,
     "polling or prefetch reads must opt out of retries");
   assert.match(html, /\/api\/items\?source_type=x_list&limit=12/);
@@ -93,28 +94,25 @@ test("deferred shells contain no Feed or media and lower columns mount only once
   assert.match(deferredBlock, /observer\.disconnect\(\)/);
 });
 
-test("background prefetch waits for readiness, stays serial, and pauses while hidden", () => {
-  assert.match(app, /waitForBackgroundReadiness/);
-  assert.match(app, /createBackgroundQueue/);
-  assert.match(app, /bindQueueToVisibility/);
+test("mobile prefetch is driven only by chip or adjacent-swipe intent", () => {
+  assert.match(app, /createIntentPrefetchController/);
+  assert.match(app, /adjacentSourceForIntent/);
   assert.match(app, /canStartBackgroundPrefetch/);
+  assert.match(app, /onPointerDown=\{\(\) => requestIntentPrefetch\(key\)\}/);
+  assert.match(app, /onFocus=\{\(\) => requestIntentPrefetch\(key\)\}/);
+  assert.match(app, /requestAdjacentIntentPrefetch/);
+  assert.doesNotMatch(app, /const prefetchCandidates = SOURCE_COLUMNS/);
+  assert.doesNotMatch(app, /waitForBackgroundReadiness/);
   assert.match(scheduling, /return !isBackgroundPrefetchDisabled\(readConnection\(\)\)/);
-  assert.match(app, /SOURCE_COLUMNS[\s\S]*?prefetch/);
-  assert.match(app, /prefetchCandidatesRef\.current\.includes\(sourceType\)/,
-    "queued work must recheck manifest reconciliation at execution time");
-  const backgroundBlock = app.slice(
-    app.indexOf("const prefetchCandidates = SOURCE_COLUMNS"),
-    app.indexOf("const visibleColumns = SOURCE_COLUMNS"),
-  );
-  assert.ok(
-    (backgroundBlock.match(/canStartBackgroundPrefetch\(readCurrentConnection\)/g) ?? []).length >= 3,
-    "connection must be read at effect setup, before enqueue, and inside the queued task",
-  );
-  assert.match(
-    backgroundBlock,
-    /queue\.enqueue\(async \(\) => \{[\s\S]*?canStartBackgroundPrefetch\(readCurrentConnection\)[\s\S]*?prefetchChannel/,
-  );
-  assert.doesNotMatch(app, /2500|prefetchChannels/);
+});
+
+test("X polling uses one cancellable recursive timer and live eligibility", () => {
+  assert.match(feed, /shouldPollFeed/);
+  assert.match(feed, /window\.setTimeout\(runPoll, POLL_INTERVAL_MS\)/);
+  assert.doesNotMatch(feed, /setInterval\(poll/);
+  assert.match(feed, /visibilitychange/);
+  assert.match(feed, /window\.addEventListener\(["']online["']/);
+  assert.match(feed, /window\.addEventListener\(["']offline["']/);
 });
 
 test("the atomic P1 switch removes the C sources and stats gate", () => {

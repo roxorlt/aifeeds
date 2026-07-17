@@ -1543,8 +1543,17 @@ test.describe("perf-staging remote acceptance", () => {
   test("mobile projects switch the live remote feed with a touch swipe", async ({ page }, testInfo) => {
     test.skip(!isMobileProject(testInfo.project.name), "mobile interaction only");
     const mediaRequestRecords = trackSafeMediaRequests(page);
+    const listSources: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.origin === PERF_ORIGIN && url.pathname === "/api/items") {
+        listSources.push(url.searchParams.get("source_type") || "x_list");
+      }
+    });
     await page.goto(PERF_PATH, { waitUntil: "domcontentloaded" });
     await expectFeedColumnInViewport(page, "x_list");
+    await page.waitForTimeout(500);
+    expect(listSources.filter((source) => source !== "x_list")).toHaveLength(0);
     const swipeMediaRequestBaseline = mediaRequestRecords.length;
     const blogResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -1556,6 +1565,7 @@ test.describe("perf-staging remote acceptance", () => {
     });
     await swipeToNextChannel(page, testInfo.project.name);
     const blogResponse = await blogResponsePromise;
+    expect(listSources.filter((source) => source === "blog,podcast")).toHaveLength(1);
     const blogFixture = await readSyntheticFixtureFromUiResponse(
       blogResponse,
       "E2E_EXPECTED_BLOG_FIXTURE_ID",

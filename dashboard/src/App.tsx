@@ -41,11 +41,11 @@ import {
   type FeedMetadataState,
 } from "./lib/feedAvailability";
 import {
-  bindQueueToVisibility,
+  adjacentSourceForIntent,
   canStartBackgroundPrefetch,
   createBackgroundQueue,
+  createIntentPrefetchController,
   getImmediateColumnCount,
-  waitForBackgroundReadiness,
 } from "./lib/feedScheduling";
 import { Routes, Route, Navigate, useParams, useNavigate } from "react-router";
 import { UserMenu } from "./components/UserMenu";
@@ -339,6 +339,7 @@ const FILTER_CHIPS: { key: FilterKey; label: string }[] = [
   { key: "clawhub", label: "龙虾技能" },
   { key: "youtube", label: "YouTube" },
 ];
+const INTENT_SOURCE_ORDER = SOURCE_COLUMNS.map((column) => column.source_type);
 
 // R22: skeleton + channel header 复用组件. swipe adjacent + chip overlay 都用,
 // 跟 Feed mount 后的 header (SourceIcon + label + border-b bg-neutral-50)
@@ -461,6 +462,47 @@ function DashboardHome() {
     : storedFilter === "all"
       ? "x_list"
       : storedFilter;
+  const liveSourceTypes = new Set(manifest?.live_source_types ?? []);
+  const isChannelLive = (sourceType: string): boolean => resolveChannelLive(sourceType, {
+    enabled: OPTIMISTIC_FEED_START,
+    metadataState,
+    live: liveSourceTypes,
+  });
+  const liveIntentSources = SOURCE_COLUMNS
+    .filter((column) => isChannelLive(column.source_type))
+    .map((column) => column.source_type);
+  const liveIntentSourcesRef = useRef<readonly string[]>(liveIntentSources);
+  liveIntentSourcesRef.current = liveIntentSources;
+  const intentPrefetchControllerRef = useRef<ReturnType<typeof createIntentPrefetchController> | null>(null);
+  if (!intentPrefetchControllerRef.current) {
+    intentPrefetchControllerRef.current = createIntentPrefetchController();
+  }
+  useEffect(() => () => intentPrefetchControllerRef.current?.cancel(), []);
+  const requestIntentPrefetch = useCallback((sourceType: string) => {
+    if (
+      !isNarrow
+      || sourceType === filterRef.current
+      || !liveIntentSourcesRef.current.includes(sourceType)
+      || !canStartBackgroundPrefetch(readCurrentConnection)
+    ) return;
+    intentPrefetchControllerRef.current?.request(sourceType, async (target) => {
+      if (
+        !liveIntentSourcesRef.current.includes(target)
+        || !canStartBackgroundPrefetch(readCurrentConnection)
+      ) return;
+      await prefetchChannel(target as SourceType | MergedSource);
+    });
+  }, [isNarrow]);
+  const requestAdjacentIntentPrefetch = useCallback((
+    direction: "previous" | "next",
+  ) => {
+    const target = adjacentSourceForIntent(
+      filterRef.current,
+      direction,
+      INTENT_SOURCE_ORDER,
+    );
+    if (target) requestIntentPrefetch(target);
+  }, [requestIntentPrefetch]);
 
   useEffect(() => {
     if (!shouldLoadManifest) return;
@@ -774,6 +816,7 @@ function DashboardHome() {
         // + lockBody hack (它们反而拦了 #root native vertical scroll, 导致 PM
         // 反馈竖直方向上划失效). horizontal 锁定后只跟手 translate 即可.
         if (e.cancelable) e.preventDefault();
+        requestAdjacentIntentPrefetch(dx < 0 ? "next" : "previous");
         if (reduceMotion) return;
         const tabs = FILTER_CHIPS.filter((c) => c.key !== 'all');
         const idx = tabs.findIndex((c) => c.key === filterRef.current);
@@ -921,7 +964,13 @@ function DashboardHome() {
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };
-  }, [isNarrow, reduceMotion, renderInkBetween, resetInkToActive]);
+  }, [
+    isNarrow,
+    reduceMotion,
+    renderInkBetween,
+    requestAdjacentIntentPrefetch,
+    resetInkToActive,
+  ]);
 
   // Block page-scroll initiation from non-scroll zones (top app bar,
   // feed column headers). iOS Safari / WeChat WebView ignores
@@ -1030,52 +1079,6 @@ function DashboardHome() {
         import('./lib/share').then(({ reportLanding }) => reportLanding(token));
       }
     }
-  }, []);
-
-  const liveSourceTypes = new Set(manifest?.live_source_types ?? []);
-  const isChannelLive = (sourceType: string): boolean => resolveChannelLive(sourceType, {
-    enabled: OPTIMISTIC_FEED_START,
-    metadataState,
-    live: liveSourceTypes,
-  });
-
-  // Candidates come from the public UI registry (including the merged news
-  // channel exactly once), not raw manifest rows. The ref is read only after the
-  // readiness gate, so manifest reconciliation can update it without restarting
-  // the page-level queue.
-  const prefetchCandidates = SOURCE_COLUMNS
-    .filter((column) => isChannelLive(column.source_type))
-    .map((column) => column.source_type);
-  const prefetchCandidatesRef = useRef(prefetchCandidates);
-  prefetchCandidatesRef.current = prefetchCandidates;
-  useEffect(() => {
-    if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
-
-    const queue = createBackgroundQueue();
-    const unbindVisibility = bindQueueToVisibility(queue, document);
-    const controller = new AbortController();
-    let cancelled = false;
-    void waitForBackgroundReadiness({ signal: controller.signal }).then(async () => {
-      for (const sourceType of prefetchCandidatesRef.current) {
-        if (cancelled || !canStartBackgroundPrefetch(readCurrentConnection)) return;
-        try {
-          await queue.enqueue(async () => {
-            if (!canStartBackgroundPrefetch(readCurrentConnection)) return;
-            if (!prefetchCandidatesRef.current.includes(sourceType)) return;
-            await prefetchChannel(sourceType);
-          });
-        } catch {
-          // Best-effort only; a mounted Feed remains the authoritative retry path.
-        }
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-      queue.pause();
-      unbindVisibility();
-    };
   }, []);
 
   const visibleColumns = SOURCE_COLUMNS.filter((col) => {
@@ -1217,6 +1220,8 @@ function DashboardHome() {
                     ref={(el) => { chipRefs.current[key] = el; }}
                     type="button"
                     data-chip-key={key}
+                    onPointerDown={() => requestIntentPrefetch(key)}
+                    onFocus={() => requestIntentPrefetch(key)}
                     onClick={() => {
                       if (isActive) {
                         scrollFeedOrPage(null);

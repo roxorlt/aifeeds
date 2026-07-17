@@ -116,6 +116,6 @@ test("runtime reduced-motion changes tear down active header and swipe movement"
   assert.match(source, /\[isNarrow, reduceMotion\]/);
   assert.match(
     source,
-    /\[isNarrow, reduceMotion, renderInkBetween, resetInkToActive\]/,
+    /\[\s*isNarrow,\s*reduceMotion,\s*renderInkBetween,\s*requestAdjacentIntentPrefetch,\s*resetInkToActive,\s*\]/,
   );
 });

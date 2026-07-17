@@ -38,7 +38,9 @@ import {
 import {
   hasListRequestForSource,
   isFeedMounted,
+  loadMoreLimitForViewport,
   registerMountedFeed,
+  shouldPollFeed,
 } from "../lib/feedScheduling";
 import { getMediaLoadPolicy } from "../lib/mediaPriority";
 import { newestScrapedAt } from "../lib/feedFreshness";
@@ -153,7 +155,6 @@ interface Props {
 }
 
 const INITIAL_LIMIT = 12;
-const LOAD_MORE_LIMIT = 30;
 const POLL_INTERVAL_MS = 30_000;
 const PULL_THRESHOLD = 60;
 const PULL_RESISTANCE = 2.5;
@@ -286,6 +287,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   const cachedInit = readFeedCache(sourceType, FEED_SNAP_MAX_AGE_MS);
   const [items, setItems] = useState<Item[]>(cachedInit?.items ?? []);
   const [pending, setPending] = useState<Item[]>([]);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
   // PM 2026-05-25 R11: 有 cache 不显 loading; 无 cache 初始 true 让 mount 那一帧
   // 立即显 skeleton (不留 mount → useEffect fetch 之间的空白帧, 配 channel
   // transition overlay fade-out 无缝衔接)
@@ -566,7 +571,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
       const res = await fetchItems({
         source_type: sourceType,
         cursor: nextCursor,
-        limit: LOAD_MORE_LIMIT,
+        limit: loadMoreLimitForViewport(window.innerWidth),
         sort: isClawhub ? chSort : (isHot ? "hot" : sourceType === "blog,podcast" ? "published_at" : undefined),
         category: isClawhub && chCategory !== "all" ? chCategory : undefined,
         include_suspicious: isClawhub && !chHideSuspicious ? true : undefined,
@@ -829,16 +834,43 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
   // since 两周前)去拉超大结果集 → 5s 超时报 api_error(2026-06-09 排查:超时 349 条几乎
   // 全是这些非实时源的 poll)。所以只对 x_list / 默认混合流轮询。
   useEffect(() => {
-    if (placeholder || (sourceType && !sourceType.includes('x_list'))) return;
-    const poll = async () => {
-      if (!lastScrapedAt.current) return;
+    if (placeholder) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    const eligible = () => shouldPollFeed({
+      sourceType,
+      feedVisible: feedReadyEligible,
+      documentVisible: document.visibilityState !== "hidden" && !document.hidden,
+      online: navigator.onLine,
+    });
+    const clearPollTimer = () => {
+      if (timer === null) return;
+      window.clearTimeout(timer);
+      timer = null;
+    };
+    const schedulePoll = () => {
+      clearPollTimer();
+      if (cancelled || !eligible()) return;
+      timer = window.setTimeout(runPoll, POLL_INTERVAL_MS);
+    };
+    async function runPoll() {
+      timer = null;
+      if (cancelled || !eligible()) return;
+      const since = lastScrapedAt.current;
+      if (!since) {
+        schedulePoll();
+        return;
+      }
       try {
         const res = await fetchItems({
           source_type: sourceType,
-          since: lastScrapedAt.current,
+          since,
           limit: 50,
         }, { purpose: "background" });
-        const existingIds = new Set([...items, ...pending].map((i) => i.id));
+        if (cancelled) return;
+        const existingIds = new Set(
+          [...itemsRef.current, ...pendingRef.current].map((i) => i.id),
+        );
         const fresh = res.items.filter((i) => !existingIds.has(i.id));
         if (fresh.length > 0) {
           setPending((prev) => [...fresh, ...prev]);
@@ -846,11 +878,23 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
         }
       } catch {
         // Silent fail — next poll will retry
+      } finally {
+        schedulePoll();
       }
+    }
+    const reschedulePoll = () => schedulePoll();
+    document.addEventListener("visibilitychange", reschedulePoll);
+    window.addEventListener("online", reschedulePoll);
+    window.addEventListener("offline", reschedulePoll);
+    schedulePoll();
+    return () => {
+      cancelled = true;
+      clearPollTimer();
+      document.removeEventListener("visibilitychange", reschedulePoll);
+      window.removeEventListener("online", reschedulePoll);
+      window.removeEventListener("offline", reschedulePoll);
     };
-    const id = setInterval(poll, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [sourceType, placeholder, items, pending]);
+  }, [sourceType, placeholder, feedReadyEligible]);
 
   const showPending = () => {
     if (isHot) {
@@ -1234,6 +1278,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
             {hasMore && !loadMoreCoolingDown && (
               <div
                 ref={sentinelRef}
+                data-load-more-sentinel
                 className="py-4 text-center text-xs text-neutral-600"
               >
                 {loadingMore ? "加载中…" : "\u00A0"}
