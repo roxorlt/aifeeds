@@ -65,11 +65,11 @@ Expected: all pass.
 
 **Files:**
 - Modify: `TODO.md`
-- Modify: `docs/operations.md`
+- Modify: `docs/plans/2026-07-17-item-cursor-compatibility-fix.md`
 
 **Step 1: Record root cause and rollout checks**
 
-Document the producer/consumer mismatch, exact accepted formats, and the requirement to replay a server-emitted cursor on staging and production.
+Document the producer/consumer mismatch, exact accepted formats, and the requirement to replay a server-emitted cursor on staging and production. Keep the urgent PR scoped away from `docs/operations.md`: touching that file triggers the existing performance-ops suite, whose Linux fixtures currently fail independently on hard-coded `/private/tmp` and unreadable `/proc/1/fd`.
 
 **Step 2: Run Worker gates**
 
@@ -109,3 +109,13 @@ Request the first X-list page, extract `next_cursor`, replay it unchanged, and r
 **Step 3: Merge through `main` and verify production**
 
 After staging is green, merge the reviewed commit through `main`, wait for the production Worker workflow, then repeat the same read-only two-page probe against `https://api.ai-feeds.com`.
+
+### Execution record (2026-07-17)
+
+- Regression test first failed with page two `400 invalid_cursor`, then passed after the minimal validator change.
+- Focused tests, full Worker suite (761 tests), TypeScript, Wrangler dry-run, gitleaks, and PR Worker CI passed.
+- PR: `#182`; staging Worker version: `57b55b48-c5ea-4609-8964-eef12e48363e`.
+- Staging pre-deploy strict SQLite cursor probe: `400 invalid_cursor`.
+- Staging post-deploy probes: valid SQLite cursor `200`; impossible date `400 invalid_cursor`; a cursor emitted by the staging Worker replayed at `200` with non-empty pages and zero overlapping IDs.
+- Staging had no items in the default seven-day window, so the first page used a strict synthetic boundary to expose older rows; the second page replayed the Worker-emitted cursor unchanged.
+- Production merge, main-CI deployment, and production two-page replay remain pending.
