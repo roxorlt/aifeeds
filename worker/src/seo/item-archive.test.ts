@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
 import {
   ARCHIVE_PAGE_SIZE,
@@ -96,8 +97,12 @@ describe('archiveItemsQuery', () => {
     expect(sql).toContain("json_extract(i.extra, '$.dedup_of') IS NULL");
     expect(sql).toContain("COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1");
     expect(sql).toContain("COALESCE(NULLIF(i.published_at, ''), i.scraped_at) AS published_at");
+    expect(sql).toMatch(/WHERE\s+p\.source\s*=\s*\?\s+AND/i);
     expect(sql).toMatch(
       /ORDER BY\s+COALESCE\(NULLIF\(i\.published_at,\s*''\),\s*i\.scraped_at\)\s+DESC,\s*i\.id\s+DESC/i,
+    );
+    expect(archiveItemsQuery('ph', '2026-07', 1).sql).toMatch(
+      /ORDER BY\s+published_at\s+DESC,\s*id\s+DESC/i,
     );
   });
 
@@ -125,6 +130,110 @@ describe('archive effective time', () => {
     expect(archiveMonthsQuery('gh').sql).toContain(
       `${effectiveTime} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'`,
     );
-    expect(archiveSitemapGroupsQuery().sql).toContain(`substr(${effectiveTime}, 1, 7) AS month`);
+    expect(archiveMonthsQuery('ph').sql).toContain(
+      "published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'",
+    );
+    expect(archiveSitemapGroupsQuery().sql).toContain('substr(published_at, 1, 7) AS month');
+  });
+});
+
+describe('archive canonical rows', () => {
+  test('同一 canonical 的历史 PH 行只归入最新代表记录所在月份，列表、计数和 sitemap 口径一致', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE items (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        title TEXT,
+        author TEXT,
+        published_at TEXT,
+        scraped_at TEXT NOT NULL,
+        is_relevant INTEGER NOT NULL,
+        deleted_at TEXT,
+        extra TEXT NOT NULL
+      );
+      CREATE TABLE item_pages (
+        item_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        url_path TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        status TEXT NOT NULL
+      );
+    `);
+
+    const insertItem = db.prepare(`
+      INSERT INTO items (
+        id, source_type, title, author, published_at, scraped_at, is_relevant, deleted_at, extra
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, NULL, '{}')
+    `);
+    const insertPage = db.prepare(`
+      INSERT INTO item_pages (item_id, source, url_path, generated_at, status)
+      VALUES (?, ?, ?, ?, 'live')
+    `);
+    const seed = (
+      id: string,
+      source: string,
+      urlPath: string,
+      publishedAt: string,
+      generatedAt = publishedAt,
+    ) => {
+      const sourceType = source === 'ph' ? 'product_hunt' : 'x_list';
+      insertItem.run(id, sourceType, id, 'tester', publishedAt, publishedAt);
+      insertPage.run(id, source, urlPath, generatedAt);
+    };
+
+    seed(
+      'product_hunt:repeat:2026-05-11',
+      'ph',
+      '/i/ph/repeat',
+      '2026-05-11T07:00:00Z',
+    );
+    seed(
+      'product_hunt:repeat:2026-06-12',
+      'ph',
+      '/i/ph/repeat',
+      '2026-06-12T07:00:00Z',
+    );
+    seed('product_hunt:unique:2026-07-01', 'ph', '/i/ph/unique', '2026-07-01T07:00:00Z');
+    seed('x_list:1', 'x', '/i/x/1', '2026-07-02T07:00:00Z');
+
+    const all = <T>(query: { sql: string; bindings: unknown[] }): T[] =>
+      db
+        .prepare(query.sql)
+        .all(...(query.bindings as SQLInputValue[])) as T[];
+    const first = <T>(query: { sql: string; bindings: unknown[] }): T | undefined =>
+      db
+        .prepare(query.sql)
+        .get(...(query.bindings as SQLInputValue[])) as T | undefined;
+
+    expect(all(archiveItemsQuery('ph', '2026-05', 1))).toEqual([]);
+    expect(
+      all<{ id: string }>(archiveItemsQuery('ph', '2026-06', 1)).map((row) => row.id),
+    ).toEqual(['product_hunt:repeat:2026-06-12']);
+
+    expect(all<{ month: string; item_count: number }>(archiveMonthsQuery('ph'))).toEqual([
+      { month: '2026-07', item_count: 1 },
+      { month: '2026-06', item_count: 1 },
+    ]);
+    expect(first<{ item_count: number }>(archiveCountQuery('ph', '2026-05'))?.item_count).toBe(0);
+    expect(first<{ item_count: number }>(archiveCountQuery('ph', '2026-06'))?.item_count).toBe(1);
+
+    const sitemapGroups = all<{
+      source: string;
+      month: string;
+      item_count: number;
+    }>(archiveSitemapGroupsQuery());
+    expect(sitemapGroups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: 'ph', month: '2026-06', item_count: 1 }),
+        expect.objectContaining({ source: 'ph', month: '2026-07', item_count: 1 }),
+        expect.objectContaining({ source: 'x', month: '2026-07', item_count: 1 }),
+      ]),
+    );
+    expect(sitemapGroups).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ source: 'ph', month: '2026-05' })]),
+    );
+
+    db.close();
   });
 });
