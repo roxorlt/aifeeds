@@ -362,10 +362,15 @@ describe('handleSeoRoute /robots.txt', () => {
 // sitemap 分片 mock：同时支持 daily_pages 与 item_pages（COUNT GROUP BY + 分页 SELECT）。
 // counts 传入时直接决定 GROUP BY 结果（模拟 >5 万而无需真造 5 万行）；否则从 items 数组统计。
 interface ItemPageRow {
+  item_id?: string;
   source: string;
   url_path: string;
   generated_at: string;
   status?: string;
+  is_relevant?: number;
+  deleted_at?: string | null;
+  dedup_of?: string | null;
+  cn_sensitive?: number;
 }
 interface VideoRow {
   date: string;
@@ -388,6 +393,18 @@ function makeSitemapDb({
   videos?: VideoRow[];
   counts?: Record<string, number> | null;
 }) {
+  const sitemapEligible = (it: ItemPageRow): boolean =>
+    (it.status || 'live') === 'live' &&
+    (it.is_relevant ?? 1) === 1 &&
+    (it.deleted_at ?? null) == null &&
+    (it.dedup_of ?? null) == null &&
+    (it.cn_sensitive ?? 0) !== 1;
+  const queryAppliesEligibility = (sql: string): boolean =>
+    /JOIN\s+items\s+i\s+ON\s+i\.id\s*=\s*p\.item_id/i.test(sql) &&
+    /i\.is_relevant\s*=\s*1/i.test(sql) &&
+    /i\.deleted_at\s+IS\s+NULL/i.test(sql) &&
+    /dedup_of/i.test(sql) &&
+    /cn_sensitive/i.test(sql);
   return {
     prepare(sql: string) {
       let binds: unknown[] = [];
@@ -400,7 +417,7 @@ function makeSitemapDb({
           if (/FROM daily_videos/i.test(sql)) {
             return { results: [...videos] as unknown as T[] };
           }
-          if (/GROUP BY source/i.test(sql)) {
+          if (/GROUP BY (?:p\.)?source/i.test(sql)) {
             const map = new Map<string, { source: string; c: number; m: string }>();
             if (counts) {
               for (const [source, c] of Object.entries(counts)) {
@@ -409,6 +426,7 @@ function makeSitemapDb({
             } else {
               for (const it of items) {
                 if ((it.status || 'live') !== 'live') continue;
+                if (queryAppliesEligibility(sql) && !sitemapEligible(it)) continue;
                 const e = map.get(it.source) || { source: it.source, c: 0, m: '' };
                 e.c += 1;
                 if (it.generated_at > e.m) e.m = it.generated_at;
@@ -421,6 +439,7 @@ function makeSitemapDb({
             const [source, limit, offset] = binds as [string, number, number];
             let rows = items
               .filter((it) => it.source === source && (it.status || 'live') === 'live')
+              .filter((it) => !queryAppliesEligibility(sql) || sitemapEligible(it))
               .sort((a, b) => (a.generated_at < b.generated_at ? 1 : -1));
             const off = Number(offset) || 0;
             const lim = limit == null ? rows.length : Number(limit);
@@ -640,6 +659,44 @@ describe('handleSeoRoute /sitemap-<source>.xml (内容片)', () => {
     expect(xml).not.toContain('/i/x/3'); // gone 排除
     expect(xml).not.toContain('/i/gh/'); // 异源不混入
     expect(xml).toContain('<lastmod>2026-07-06</lastmod>');
+  });
+
+  test('已 live 但不再符合内容门禁的陈旧页面不进入内容 sitemap', async () => {
+    const items: ItemPageRow[] = [
+      { ...mkItem('news', '/i/news/eligible'), item_id: 'blog:eligible' },
+      {
+        ...mkItem('news', '/i/news/sensitive'),
+        item_id: 'blog:sensitive',
+        cn_sensitive: 1,
+      },
+      {
+        ...mkItem('news', '/i/news/dedup'),
+        item_id: 'blog:dedup',
+        dedup_of: 'blog:eligible',
+      },
+      {
+        ...mkItem('news', '/i/news/deleted'),
+        item_id: 'blog:deleted',
+        deleted_at: '2026-07-16T00:00:00Z',
+      },
+      {
+        ...mkItem('news', '/i/news/irrelevant'),
+        item_id: 'blog:irrelevant',
+        is_relevant: 0,
+      },
+    ];
+
+    const resp = await handleSeoRoute(
+      req('/sitemap-news.xml'),
+      makeEnv({}, makeSitemapDb({ items })),
+    );
+    const xml = await resp!.text();
+    expect((xml.match(/<loc>/g) || []).length).toBe(1);
+    expect(xml).toContain(`${SITE}/i/news/eligible`);
+    expect(xml).not.toContain('/i/news/sensitive');
+    expect(xml).not.toContain('/i/news/dedup');
+    expect(xml).not.toContain('/i/news/deleted');
+    expect(xml).not.toContain('/i/news/irrelevant');
   });
 
   test('/sitemap-hf-paper.xml（源名含连字符）正确分片', async () => {

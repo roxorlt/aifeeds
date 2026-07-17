@@ -26,6 +26,7 @@ const PAGE_SOURCE: Record<ArchiveSource, string> = {
   paper: 'hf-paper',
   news: 'news',
 };
+const ARCHIVE_EFFECTIVE_TIME = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
 
 export const ARCHIVE_SOURCE_LABELS: Record<ArchiveSource, string> = {
   x: 'X 精选',
@@ -99,16 +100,17 @@ export function archiveItemsQuery(
 
   const offset = (page - 1) * ARCHIVE_PAGE_SIZE;
   return {
-    sql: `SELECT i.id, p.source, p.url_path, i.title, i.author, i.published_at
+    sql: `SELECT i.id, p.source, p.url_path, i.title, i.author,
+             ${ARCHIVE_EFFECTIVE_TIME} AS published_at
       FROM items i
       JOIN item_pages p ON p.item_id = i.id
-      WHERE p.source = ? AND substr(i.published_at, 1, 7) = ?
+      WHERE p.source = ? AND substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) = ?
         AND p.status = 'live'
         AND i.is_relevant = 1
         AND i.deleted_at IS NULL
         AND json_extract(i.extra, '$.dedup_of') IS NULL
         AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1
-      ORDER BY i.published_at DESC, i.id DESC
+      ORDER BY ${ARCHIVE_EFFECTIVE_TIME} DESC, i.id DESC
       LIMIT ? OFFSET ?`,
     bindings: [PAGE_SOURCE[source], month, ARCHIVE_PAGE_SIZE, offset],
   };
@@ -124,12 +126,12 @@ export function archiveMonthsQuery(
   source: ArchiveSource,
 ): { sql: string; bindings: [string] } {
   return {
-    sql: `SELECT substr(i.published_at, 1, 7) AS month, COUNT(*) AS item_count
+    sql: `SELECT substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) AS month, COUNT(*) AS item_count
       FROM items i
       JOIN item_pages p ON p.item_id = i.id
       WHERE p.source = ?
         AND ${ARCHIVE_ELIGIBILITY}
-        AND i.published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
+        AND ${ARCHIVE_EFFECTIVE_TIME} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
       GROUP BY month
       ORDER BY month DESC`,
     bindings: [PAGE_SOURCE[source]],
@@ -145,7 +147,7 @@ export function archiveCountQuery(
     sql: `SELECT COUNT(*) AS item_count
       FROM items i
       JOIN item_pages p ON p.item_id = i.id
-      WHERE p.source = ? AND substr(i.published_at, 1, 7) = ?
+      WHERE p.source = ? AND substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) = ?
         AND ${ARCHIVE_ELIGIBILITY}`,
     bindings: [PAGE_SOURCE[source], month],
   };
@@ -153,12 +155,12 @@ export function archiveCountQuery(
 
 export function archiveSitemapGroupsQuery(): { sql: string; bindings: [] } {
   return {
-    sql: `SELECT p.source, substr(i.published_at, 1, 7) AS month,
+    sql: `SELECT p.source, substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) AS month,
              COUNT(*) AS item_count, MAX(p.generated_at) AS lastmod
       FROM items i
       JOIN item_pages p ON p.item_id = i.id
       WHERE ${ARCHIVE_ELIGIBILITY}
-        AND i.published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
+        AND ${ARCHIVE_EFFECTIVE_TIME} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
       GROUP BY p.source, month
       ORDER BY p.source ASC, month DESC`,
     bindings: [],
