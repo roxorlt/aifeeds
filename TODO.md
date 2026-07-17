@@ -24,6 +24,8 @@
 - [x] 完成 cohort telemetry：performance `view_mode=classic|waterfall`，切换事件有限字段，Worker 丢弃伪造值。
 - [x] 完成本地生产链路 gate：HTTPS edge fixture 五项目 30/30；无 JS SSR、水合零 console error、CLS≤0.1、无横向溢出、`Secure` cookie、entry 隔离、故障回退全绿；经典首页回归 22 pass + 48 个按矩阵预期 skip。
 - [x] 完成 staging 一次性变更包：把 binding、两端同值 secret、flag、Worker→Pages 顺序、10-run 对照、kill switch 和独立回滚收敛为一次冻结授权；production 明确排除。
+- [x] 完成外部合成基线补充：DebugBear 移动/桌面 20 次生产样本已归档；新增只读、无 secret、
+  仅上传报告的 sitespeed.io GitHub Actions runner，移动/桌面各 5 次且不触发部署。
 - [ ] **经典版 RUM 前置门**：每阶段/主 cohort ≥48h 且 ≥100 个 LCP 样本；只阻塞 staging/production 远端写，不阻塞本地开发。
 - [ ] **单次 staging 执行**：RUM 门通过后，只读盘点远端配置并冻结一个清单；roxor 一次批准后由 Codex 完成配置、部署、五端验收、benchmark 和 kill-switch，不再逐条重复索权。
 - [ ] **production 后续决策**：仅在 staging 全绿后另行评审；不得把 staging 授权外推为合 main、production 配置或放量授权。

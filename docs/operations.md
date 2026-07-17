@@ -1048,6 +1048,10 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   [`reviews/waterfall-ssr-staging-change-packet.md`](reviews/waterfall-ssr-staging-change-packet.md)。
   该包要求经典版 RUM 观察完成、clean G0、一次冻结授权、五端验收、10-run 对照、kill-switch 演练；
   明确排除 production。
+- 外部合成观测：`.github/workflows/sitespeed-external.yml` 只在隔离 feature branch 新增该文件时
+  自动运行，也保留手动入口；GitHub 托管 runner 对生产首页执行移动/桌面各 5 次只读导航，只上传
+  14 天 artifact。workflow 固定 `contents: read`、不读取 secret、不包含部署或远端管理命令，不能替代
+  真实用户 RUM，只用于并行定位网络瀑布、资源体积与实验室指标。
 - 禁止在未下载/审阅远端 Pages 配置前新增 production Wrangler Pages 配置；一旦存在，该文件会成为
   Pages 项目配置事实源，可能覆盖 Dashboard 中已有 bindings/variables。
 
