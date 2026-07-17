@@ -132,6 +132,34 @@ DebugBear Mobile 的 10/10 样本均记录 3 个分页 400；Desktop 本轮没�
 
 本轮只完成定位，没有修改或发布代码。
 
+## sitespeed.io GitHub runner 复核
+
+提交 `e92ce74` 新增的只读 GitHub Actions workflow 已完成首次运行：
+<https://github.com/roxorlt/aifeeds/actions/runs/29559898108>。Mobile、Desktop 两个 job 均
+成功，各产生一个保留 14 天的完整 HTML/HAR/视频 artifact。
+
+测试固定使用 `sitespeedio/sitespeed.io:42.0.1`、Chrome、每端 5 次：
+
+- Mobile：Moto G4 模拟，1.6 Mbps 下行、750 Kbps 上行、150 ms RTT；
+- Desktop：10 Mbps 上下行、40 ms RTT；
+- 两端都只做网络整形，没有 CPU 降速；
+- runner 由 GitHub 托管，出口地域不固定，本机 Clash 完全未参与。
+
+| 设备 | n | LCP p50 / p75 | FCP p50 / p75 | feed-ready p50 / p75 | TTFB p50 / p75 | Speed Index p75 | CLS p75 | 总传输 p50 | 请求数 p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mobile | 5 | 3.272s / 3.276s | 3.168s / 3.172s | 3.240s / 3.240s | 1.313s / 1.316s | 4.057s | 0.071 | 0.843 MB | 46 |
+| Desktop | 5 | 4.344s / 4.464s | 2.120s / 2.140s | 2.191s / 2.195s | 0.805s / 0.823s | 3.196s | 0.031 | 7.012 MB | 88 |
+
+sitespeed.io 补强了两条 DebugBear 结论：
+
+1. Mobile 5/5 均为首条推文文本 LCP；每次仍恰好出现 3 个相同游标的分页 400，共 15 个。
+2. Desktop 的 p75 运行中，Product Hunt 卡片图片成为 LCP；同一 4.276 MB GIF 在 5/5
+   运行中都是最大资源，约占 p50 总传输的 61%。
+
+Mobile 与 DebugBear 的 LCP 接近，但 sitespeed.io 的 TTFB 明显更高；Desktop LCP 也因
+当次 Product Hunt 图片成为 LCP 而高于 DebugBear。因此这组数据用于持续复现瀑布、资源体积和
+错误请求，不与台湾/香港 DebugBear 样本混算一个分位数，也不冒充真实用户 RUM。
+
 ## 对发布门槛的影响
 
 1. 20 个外部 synthetic 样本足以替代“发布前等待 100 个真实 RUM”的机械门槛，但不能
