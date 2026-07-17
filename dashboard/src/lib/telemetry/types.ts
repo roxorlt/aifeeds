@@ -27,6 +27,7 @@ export type EventTypeName =
   | 'thread_expand' | 'image_lightbox_open' | 'external_link_click'
   // 筛选
   | 'source_filter_change' | 'sort_change' | 'new_content_banner_click'
+  | 'home_view_switch'
   // 分享
   | 'share_click' | 'share_landing'
   // 登录（PR2/3）

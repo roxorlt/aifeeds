@@ -29,6 +29,18 @@
     跑公开链接图验收，并在 2–4 周后复查 Ahrefs orphan 趋势。
 - [ ] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
   perf-staging 做 classic/waterfall 同条件对照；RUM 继续作为上线后观察，不阻塞 staging。
+  - [x] 既有隔离分支已完成同 URL 双版本路由、经典默认、cookie 权威偏好、SSR 首屏、
+    8 源 home feed、可访问视图切换、cohort telemetry、五设备本地 gate、DebugBear 基线与
+    只读 sitespeed.io workflow；设计与原始 staging 包见
+    [`docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md`](docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md)、
+    [`docs/plans/2026-07-17-waterfall-production-integration.md`](docs/plans/2026-07-17-waterfall-production-integration.md)、
+    [`docs/reviews/waterfall-ssr-staging-change-packet.md`](docs/reviews/waterfall-ssr-staging-change-packet.md)。
+  - [x] 2026-07-17 已把旧 waterfall 分支合入包含 A–E 本地封板代码的
+    `codex/waterfall-ssr-main-sync` 隔离分支。
+  - [ ] 把 30 秒被动 cache 升级为 fresh 60 秒、max-stale 10 分钟的手动 SWR，
+    完成并发 stale single-flight、失败保留好快照和诊断 header。
+  - [ ] 在 perf-staging 执行 classic/waterfall × mobile/desktop × cold/warm 对照；
+    staging 全绿后再进入 production 小流量 canary，RUM 作为上线后观察而非代码交付前置门。
 
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 

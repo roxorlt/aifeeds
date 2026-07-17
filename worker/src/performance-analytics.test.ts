@@ -40,14 +40,22 @@ describe('performance event ingest', () => {
     expect(prepared.ok).toBe(true);
     if (!prepared.ok || !prepared.value) throw new Error('missing payload');
     const payload = JSON.parse(prepared.value);
-    expect(payload).toEqual({ client_field: 'kept', edge_country: 'CN', edge_colo: 'HKG' });
+    expect(payload).toEqual({
+      client_field: 'kept',
+      view_mode: 'classic',
+      edge_country: 'CN',
+      edge_colo: 'HKG',
+    });
     expect(payload.city).toBeUndefined();
     expect(payload.latitude).toBeUndefined();
   });
 
   it('removes spoofed geography when request.cf has no trusted values', () => {
     const prepared = prepareEventPayload('perf_api', { edge_country: 'US', edge_colo: 'SJC' }, undefined);
-    expect(prepared).toEqual({ ok: true, value: '{}' });
+    expect(prepared).toEqual({
+      ok: true,
+      value: JSON.stringify({ view_mode: 'classic' }),
+    });
   });
 
   it('does not alter non-performance payloads and enforces size after enrichment', () => {
@@ -55,6 +63,48 @@ describe('performance event ingest', () => {
       .toEqual({ ok: true, value: '{"edge_country":"client-value"}' });
     expect(prepareEventPayload('perf_nav', { content: 'x'.repeat(80) }, { country: 'CN', colo: 'HKG' }, 64))
       .toEqual({ ok: false, error: 'payload too large' });
+  });
+
+  it('keeps only finite home view transitions', () => {
+    expect(prepareEventPayload('home_view_switch', {
+      from_view: 'classic',
+      to_view: 'waterfall',
+      entry: 'appbar',
+      raw_cookie: 'secret',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({
+        from_view: 'classic',
+        to_view: 'waterfall',
+        entry: 'appbar',
+      }),
+    });
+    expect(prepareEventPayload('home_view_switch', {
+      from_view: '<script>',
+      to_view: 'other',
+      entry: 'raw-url',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({
+        from_view: 'unknown',
+        to_view: 'unknown',
+        entry: 'unknown',
+      }),
+    });
+    expect(prepareEventPayload('perf_lcp', {
+      value: 1_200,
+      view_mode: 'waterfall',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({ value: 1_200, view_mode: 'waterfall' }),
+    });
+    expect(prepareEventPayload('perf_lcp', {
+      value: 1_200,
+      view_mode: 'forged',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({ value: 1_200, view_mode: 'classic' }),
+    });
   });
 
   it('normalizes untrusted performance nettype while preserving Network Information API enums', () => {
@@ -68,11 +118,17 @@ describe('performance event ingest', () => {
 
     for (const nettype of ['slow-2g', '2g', '3g', '4g']) {
       const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
-      expect(prepared).toEqual({ ok: true, value: JSON.stringify({ nettype }) });
+      expect(prepared).toEqual({
+        ok: true,
+        value: JSON.stringify({ nettype, view_mode: 'classic' }),
+      });
     }
     for (const nettype of ['4G', '', 4, { value: '4g' }]) {
       const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
-      expect(prepared).toEqual({ ok: true, value: '{}' });
+      expect(prepared).toEqual({
+        ok: true,
+        value: JSON.stringify({ view_mode: 'classic' }),
+      });
     }
   });
 
@@ -112,6 +168,7 @@ describe('performance event ingest', () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(String(bound[0][3]))).toEqual({
       endpoint: 'items',
+      view_mode: 'classic',
       edge_country: 'CN',
       edge_colo: 'HKG',
     });

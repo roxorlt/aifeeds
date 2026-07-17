@@ -166,10 +166,17 @@ export function safeLcpDescriptorFromMetric(metric: MetricWithEntries, pageOrigi
   return safeLcpDescriptor(entries[entries.length - 1] ?? {}, pageOrigin);
 }
 
-export type ApiEndpointCategory = 'items' | 'feed_manifest' | 'sources' | 'stats' | 'auth_me';
+export type ApiEndpointCategory =
+  | 'items'
+  | 'home_feed'
+  | 'feed_manifest'
+  | 'sources'
+  | 'stats'
+  | 'auth_me';
 
 const API_ENDPOINTS = new Map<string, ApiEndpointCategory>([
   ['/api/items', 'items'],
+  ['/_home/feed', 'home_feed'],
   ['/api/feed-manifest', 'feed_manifest'],
   ['/api/sources', 'sources'],
   ['/api/stats', 'stats'],

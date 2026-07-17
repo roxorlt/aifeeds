@@ -3,7 +3,12 @@ import { defineConfig } from "@playwright/test";
 const isCI = Boolean(process.env.CI);
 const requestedBaseURL = process.env.E2E_BASE_URL?.trim().replace(/\/+$/, "");
 const isRemote = Boolean(requestedBaseURL);
+const isWaterfallE2E = process.env.WATERFALL_E2E === "1";
 const requestedOutputDir = process.env.E2E_OUTPUT_DIR?.trim().replace(/\/+$/, "");
+
+if (isRemote && isWaterfallE2E) {
+  throw new Error("WATERFALL_E2E is local-only and cannot target a remote host");
+}
 
 if (requestedBaseURL) {
   const target = new URL(requestedBaseURL);
@@ -31,7 +36,8 @@ if (isRemote && process.env.PLAYWRIGHT_NO_COPY_PROMPT !== "1") {
   throw new Error("PLAYWRIGHT_NO_COPY_PROMPT=1 is required to suppress remote page snapshots");
 }
 
-const baseURL = requestedBaseURL || "http://127.0.0.1:4173";
+const baseURL = requestedBaseURL
+  || (isWaterfallE2E ? "https://localhost:4187" : "http://127.0.0.1:4173");
 const outputRoot = requestedOutputDir || "./output/playwright";
 const chromiumUserAgent =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
@@ -51,6 +57,7 @@ export default defineConfig({
       : [["list"], ["html", { outputFolder: `${outputRoot}/report`, open: "never" }]],
   use: {
     baseURL,
+    ignoreHTTPSErrors: isWaterfallE2E,
     serviceWorkers: isRemote ? "allow" : "block",
     trace: isRemote ? "off" : "retain-on-failure",
     screenshot: isRemote ? "off" : "only-on-failure",
@@ -105,9 +112,14 @@ export default defineConfig({
     },
   ],
   webServer: isRemote ? undefined : {
-    command: "npm run preview -- --host 127.0.0.1 --port 4173",
-    url: "http://127.0.0.1:4173",
-    reuseExistingServer: !isCI,
+    command: isWaterfallE2E
+      ? "node scripts/waterfall-edge-fixture.mjs"
+      : "npm run preview -- --host 127.0.0.1 --port 4173",
+    url: isWaterfallE2E
+      ? "https://127.0.0.1:4187"
+      : "http://127.0.0.1:4173",
+    ignoreHTTPSErrors: isWaterfallE2E,
+    reuseExistingServer: isWaterfallE2E ? false : !isCI,
     timeout: 30_000,
   },
 });

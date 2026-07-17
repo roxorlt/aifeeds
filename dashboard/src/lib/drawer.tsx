@@ -11,6 +11,7 @@ import { fetchItem, ItemNotFoundError, type ItemDetailResponse } from "../api";
 import { dispatchItemUpdate, subscribeItemUpdate } from "./itemUpdateBus";
 import { createDetailLoader, type DetailLoader } from "./detailLoader";
 import { DrawerContext } from "./drawerContext";
+import { homePathForItem } from "../home/itemPath";
 
 export interface DrawerState {
   item: Item | null;
@@ -95,38 +96,6 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
   return null;
 }
 
-// item → 抽屉 deep-link 路径（跟 parseDeepLinkFromPath 互逆）。openItem / pushItem 共用。
-function urlForItem(item: Item): string | null {
-  switch (item.source_type) {
-    case "x_list":
-      return `/t/${encodeURIComponent(item.source_id)}`;
-    case "github": {
-      // /g/:owner/:repo（两段，跟 github.com URL 同形）
-      const [owner, repo] = item.source_id.split("/");
-      return owner && repo ? `/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` : null;
-    }
-    case "product_hunt": {
-      // /ph/:slug/:date — source_id 是 <slug>:<launch_date> 复合键
-      const [slug, date] = item.source_id.split(":");
-      return slug && date ? `/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}` : null;
-    }
-    case "clawhub":
-      return `/c/${encodeURIComponent(item.source_id)}`;
-    case "huodongxing":
-      return `/e/${encodeURIComponent(item.source_id)}`;
-    case "hf_paper":
-      return `/h/${encodeURIComponent(item.source_id)}`;
-    case "blog":
-    case "podcast":
-      // /o/:id 用完整 composite id(blog:<feed>:<hash>),parse 侧 decode 即还原。
-      // 没这分支时 openItem 不 push 历史,close() navigate(-1) 会把进站前历史
-      // 退出去(用户实测「返回变 chrome 启动页」,2026-06-11)。
-      return `/o/${encodeURIComponent(item.id)}`;
-    default:
-      return null;
-  }
-}
-
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DrawerState>({
     item: null,
@@ -209,7 +178,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       setState({ item, siblings, loading: false, error: null });
       // B2: 同 openTweet 不强插 spotlight
       void startDetailLoad(item.id, false).catch(() => {});
-      const url = urlForItem(item);
+      const url = homePathForItem(item);
       if (url) navigate(url);
       // Future sources: youtube / podcast / arxiv — 在 urlForItem 里补 URL 形式。
     },
@@ -220,7 +189,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   // 跟 openItem 一样 optimistic，并立即拉完整详情；覆盖层不向流内插 spotlight。
   const pushItem = useCallback(
     (item: Item) => {
-      const url = urlForItem(item);
+      const url = homePathForItem(item);
       if (!url) return;
       setState({ item, siblings: [], loading: false, error: null });
       void startDetailLoad(item.id, false).catch(() => {});

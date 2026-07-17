@@ -34,8 +34,8 @@ jobs:
       admin_dashboard: ${{ steps.filter.outputs.admin_dashboard }}
       performance_ops: ${{ steps.filter.outputs.performance_ops }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -51,6 +51,7 @@ jobs:
               - 'scripts/benchmark-aifeeds-upstream*'
               - 'scripts/run-aifeeds-staging-backfill*'
               - 'scripts/ci/performance-validation-contract.test.mjs'
+              - 'scripts/ci/sitespeed-external-workflow.contract.test.mjs'
               - 'docs/operations.md'
               - 'docs/plans/2026-07-10-c-end-performance-optimization-plan.md'
               - 'docs/reviews/c-end-perf-staging-change-packet.md'
@@ -62,8 +63,8 @@ jobs:
     if: needs.detect-changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -88,8 +89,8 @@ jobs:
     if: needs.detect-changes.outputs.dashboard == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -99,7 +100,7 @@ jobs:
         run: npm ci
       - name: Cache pinned Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-webkit-${{ hashFiles('dashboard/package-lock.json') }}
@@ -125,7 +126,7 @@ jobs:
         run: npm run test:e2e
       - name: Upload Playwright diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dashboard-playwright-${{ github.run_id }}
           path: dashboard/output/playwright/**
@@ -137,8 +138,8 @@ jobs:
     if: needs.detect-changes.outputs.admin_dashboard == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -154,8 +155,8 @@ jobs:
     if: needs.detect-changes.outputs.performance_ops == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - name: Validate benchmark, nginx templates, and deployment gates
@@ -165,6 +166,8 @@ jobs:
           scripts/run-aifeeds-staging-backfill.test.mjs
           deploy/nginx/*.test.mjs
           scripts/ci/performance-validation-contract.test.mjs
+          scripts/ci/actions-node24-contract.test.mjs
+          scripts/ci/sitespeed-external-workflow.contract.test.mjs
       - name: Validate nginx performance deployment helpers
         run: |
           python3 deploy/nginx/check-nginx-request-id.test.py

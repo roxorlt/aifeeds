@@ -188,6 +188,10 @@ import {
   type HiddenListProjection,
 } from './list-query';
 import {
+  handleHomeFeed,
+  isHomeRendererRequest,
+} from './home-feed';
+import {
   handleShareCreate,
   handleSharePoster,
   handleShareRedirect,
@@ -278,6 +282,9 @@ export interface Env {
   // (防白嫖额度 / 绕过 VPS 限流) (2) getClientIp 信任 X-Forwarded-For 取真实访客 IP。
   // 仅 prod 设置(staging 不设 = 该 gate 关闭)。存 .secrets/aifeeds-prod.env,wrangler secret put 注入。
   ORIGIN_SECRET?: string;
+  // Pages Function waterfall SSR -> Worker service call. This scoped secret is
+  // accepted only for GET /api/home-feed and is revalidated by its handler.
+  HOME_RENDERER_TOKEN?: string;
   // PR-EmailAuth：Resend + email 风控配置
   RESEND_API_KEY?: string;              // wrangler secret put 设置（不入 git）
   EMAIL_DAILY_CAP?: string;             // 默认 100（Resend free 100/天）
@@ -613,6 +620,7 @@ export default {
         url.hostname === 'admin.ai-feeds.com' ||
         path === '/api/webhook/resend' ||
         path === '/api/digest/return' ||
+        isHomeRendererRequest(request, env.HOME_RENDERER_TOKEN) ||
         (!!env.DEV_TOKEN && request.headers.get('X-Dev-Token') === env.DEV_TOKEN);
       if (!viaRelay && !exempt) {
         return new Response('Forbidden', {
@@ -680,6 +688,9 @@ export default {
       }
       if (path === '/api/items' && request.method === 'GET') {
         return handleItems(request, env);
+      }
+      if (path === '/api/home-feed' && request.method === 'GET') {
+        return handleHomeFeed(request, env);
       }
       // C 端搜索（bot gate 不豁免——保持被 UA 闸拦截，见 isBotGateExempt）。
       if (path === '/api/search' && request.method === 'GET') {
@@ -5788,6 +5799,7 @@ function isBotGateExempt(path: string, method: string): boolean {
   // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
   if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {
+    if (path === '/api/home-feed') return true;
     if (path === '/api/items' || path === '/api/feed-manifest' || path === '/api/sources' || path === '/api/stats') return true;
     if (path === '/img' || path === '/media' || path.startsWith('/r/')) return true;
     // /api/digest/daily:Bearer key 鉴权(handler 内校验),受信设备 agent 调用 UA 可能非浏览器,不卡 UA 闸

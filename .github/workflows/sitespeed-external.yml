@@ -1,0 +1,73 @@
+name: External sitespeed.io baseline
+
+on:
+  push:
+    branches:
+      - 'codex/waterfall-ssr-rum-parallel'
+    paths:
+      - '.github/workflows/sitespeed-external.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sitespeed-external-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Measure ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: mobile
+            mobile_args: --mobile
+            downstream_kbps: 1600
+            upstream_kbps: 750
+            latency_ms: 150
+          - mode: desktop
+            mobile_args: ''
+            downstream_kbps: 10240
+            upstream_kbps: 10240
+            latency_ms: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare Linux traffic shaping
+        run: sudo modprobe ifb numifbs=1
+
+      - name: Run five read-only measurements
+        run: >-
+          docker run
+          --rm
+          --shm-size=2g
+          --cap-add=NET_ADMIN
+          -v "${{ github.workspace }}:/sitespeed.io"
+          sitespeedio/sitespeed.io:42.0.1
+          https://ai-feeds.com/
+          -b chrome
+          -n 5
+          ${{ matrix.mobile_args }}
+          --browsertime.connectivity.engine throttle
+          --browsertime.connectivity.profile custom
+          --browsertime.connectivity.downstreamKbps ${{ matrix.downstream_kbps }}
+          --browsertime.connectivity.upstreamKbps ${{ matrix.upstream_kbps }}
+          --browsertime.connectivity.latency ${{ matrix.latency_ms }}
+          --video true
+          --visualMetrics true
+          --summary
+          --utc true
+          --outputFolder /sitespeed.io/output/sitespeed-${{ matrix.mode }}
+
+      - name: Upload sitespeed.io report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sitespeed-${{ matrix.mode }}-${{ github.run_id }}
+          path: output/sitespeed-${{ matrix.mode }}/**
+          if-no-files-found: warn
+          retention-days: 14

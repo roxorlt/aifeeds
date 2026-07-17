@@ -16,6 +16,7 @@ import {
   installApiResourceObserver,
   safeLcpDescriptorFromMetric,
 } from './performance-detail';
+import { resolveTelemetryHomeView } from './home-view-mode';
 
 const SAMPLE_RATE = 1.0;  // 初期 100%,数据足后调回 0.1
 
@@ -38,6 +39,7 @@ export function getPerformanceDeviceMeta(): Record<string, unknown> {
   const c = nav.connection;
   const ua = navigator.userAgent;
   return {
+    view_mode: resolveTelemetryHomeView(document.documentElement),
     // 网络（⚠️ iOS 微信 WKWebView 无 navigator.connection → 这几项 undefined,
     // admin 切片时 nettype=NULL 要单独归一桶,不能丢）
     nettype: c?.effectiveType,
