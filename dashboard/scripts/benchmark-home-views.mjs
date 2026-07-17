@@ -177,14 +177,18 @@ async function readPageMetrics(page) {
     const transferred = resources.reduce((sum, entry) => sum + (entry.transferSize || entry.encodedBodySize || 0), 0)
       + (navigation?.transferSize || navigation?.encodedBodySize || 0);
     return {
-      mode: document.documentElement.dataset.viewMode || "unknown",
+      mode: document.documentElement.dataset.homeView || "unknown",
       ttfb_ms: navigation ? navigation.responseStart - navigation.startTime : 0,
       fcp_ms: paints["first-contentful-paint"] || 0,
       lcp_ms: globalThis.__aifeedsHomePerf?.lcp || 0,
       cls: globalThis.__aifeedsHomePerf?.cls || 0,
       requests: resources.length + (navigation ? 1 : 0),
       transfer_kb: transferred / 1024,
-      ssr_articles: document.querySelectorAll('[data-rendered="server"] article').length,
+      ssr_articles: document.querySelectorAll(".waterfall-grid article").length,
+      horizontal_overflow_px: Math.max(
+        0,
+        document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      ),
     };
   });
 }

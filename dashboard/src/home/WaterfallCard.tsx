@@ -65,6 +65,7 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     <li
       ref={cardRef}
       className="waterfall-card"
+      data-item-id={item.id}
       data-source={item.source_type}
       style={{
         "--waterfall-row-span": masonryRowSpan(estimatedHeight),
