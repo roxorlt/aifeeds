@@ -18,7 +18,7 @@
 import type { Env } from '../index';
 import type { DigestSource } from '../digest/config';
 import { getBases } from '../digest/lib';
-import { clampSentences, cleanText, type RenderRow } from '../digest/render';
+import { clampSentences, cleanText, truncateCodePoints, type RenderRow } from '../digest/render';
 import { escapeHtml } from '../digest/templates';
 import { markdownToSafeHtml } from './markdown-html';
 
@@ -100,7 +100,7 @@ export function itemIndexableText(source: DigestSource, row: RenderRow, env: Env
     default:
       push(row.content_translated || row.content);
   }
-  return bits.join(' ').slice(0, INDEXABLE_MAX);
+  return truncateCodePoints(bits.join(' '), INDEXABLE_MAX);
 }
 
 // ── 分源渲染器 ─────────────────────────────────────────────────────────────────

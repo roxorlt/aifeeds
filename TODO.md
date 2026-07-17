@@ -15,6 +15,9 @@
   [`docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md`](docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md)。
 - [ ] **P0-A**：Unicode code-point 安全截断 + JSON-LD well-formed 边界兜底；精确重生 GSC
   页面后用固定 cutoff 分源重灌存量快照。
+  - [x] 代码与 TDD：共享 code-point helper、JSON-LD 序列化兜底、4,000 字 articleBody
+    边界、严格鉴权单页重生 mode；Worker 47 files / 775 tests 与 `tsc --noEmit` 全绿。
+  - [ ] staging / production：精确页重生、固定 cutoff 五源重灌、Unicode 抽样与 GSC 验证。
 - [ ] **P0-B**：取得 Ahrefs 两条 5xx 的精确 URL/时间/响应，逐条复现并关闭
   sitemap ↔ `item_pages` ↔ R2 完整性缺口。
 - [ ] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取

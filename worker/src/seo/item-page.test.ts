@@ -47,8 +47,63 @@ function extractJsonLd(html: string): { '@graph': Array<Record<string, unknown>>
 function graphTypes(html: string): string[] {
   return extractJsonLd(html)['@graph'].map((g) => String(g['@type']));
 }
+function collectStrings(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const entry of value) collectStrings(entry, out);
+  } else if (value && typeof value === 'object') {
+    for (const entry of Object.values(value)) collectStrings(entry, out);
+  }
+  return out;
+}
+function hasLoneSurrogate(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      i++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 describe('renderItemPageHtml', () => {
+  test('description 的 150 code point 边界保留完整 emoji', () => {
+    const summary = 'a'.repeat(149) + '🔥' + 'tail';
+    const html = renderItemPageHtml(
+      mkRow({ content_translated: summary, extra: JSON.stringify({ ai_summary: '标题' }) }),
+      envFixture(),
+    );
+    const article = extractJsonLd(html)['@graph'].find((g) => g['@type'] === 'Article')!;
+
+    expect(article.description).toBe('a'.repeat(149) + '🔥…');
+    expect(hasLoneSurrogate(String(article.description))).toBe(false);
+  });
+
+  test('JSON-LD 边界修复任意上游孤立 surrogate，并安全转义内联脚本字符', () => {
+    const html = renderItemPageHtml(
+      mkRow({
+        author: '作者\ud83d\u2028\u2029',
+        content_translated: '正文内容',
+        extra: JSON.stringify({ ai_summary: '标题</script>\udc00' }),
+      }),
+      envFixture(),
+    );
+    const jsonText = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)![1];
+    const jsonLd = extractJsonLd(html);
+
+    expect(collectStrings(jsonLd).some(hasLoneSurrogate)).toBe(false);
+    expect(collectStrings(jsonLd).join(' ')).toContain('\ufffd');
+    expect(jsonText).not.toContain('</script>');
+    expect(jsonText).toContain('\\u003c');
+    expect(jsonText).toContain('\\u2028');
+    expect(jsonText).toContain('\\u2029');
+  });
+
   test('唯一 h1 + canonical 为 /i/ self + JSON-LD @graph 含 Article/BreadcrumbList/Organization', () => {
     const html = renderItemPageHtml(mkRow(), envFixture());
     expect((html.match(/<h1[\s>]/g) || []).length).toBe(1);

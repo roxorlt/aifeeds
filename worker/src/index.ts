@@ -113,7 +113,7 @@ import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
 import { drainDailyVideoGc, handleDailyVideoUpload } from './digest/daily-video';
 import { rebuildDigestPoolSnapshot } from './digest/pool-rebuild';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
-import { backfillItemPages } from './seo/item-page-run';
+import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
@@ -4844,6 +4844,38 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await generateDailyPage(env, dateParam, { dry });
     return jsonResponse({ ok: true, ...result }, 200, request, env);
+  }
+  if (mode === 'item-page-regenerate') {
+    // 精确重生一个 item SSR 快照。只接受五类出页源的 composite id，不接受 URL/R2 key，
+    // 防止这个运维入口演变成任意对象写入或开放式抓取器。
+    const id = url.searchParams.get('id') || '';
+    const separator = id.indexOf(':');
+    const prefix = separator > 0 ? id.slice(0, separator) : '';
+    const suffix = separator > 0 ? id.slice(separator + 1) : '';
+    const validPrefixes = new Set(['x_list', 'github', 'product_hunt', 'hf_paper', 'blog', 'podcast']);
+    if (
+      !suffix
+      || id.length > 512
+      || id !== id.trim()
+      || /[\u0000-\u001f\u007f]/.test(id)
+      || !validPrefixes.has(prefix)
+    ) {
+      return jsonResponse(
+        { error: 'bad id, expect a supported composite item id (max 512 chars)' },
+        400,
+        request,
+        env,
+      );
+    }
+    const result = await generateItemPage(env, id, { force: true });
+    return jsonResponse({
+      ok: true,
+      mode: 'item-page-regenerate',
+      item_id: result.itemId,
+      skipped: result.skipped,
+      reason: result.reason || 'generated',
+      generated_at: new Date().toISOString(),
+    }, 200, request, env);
   }
   if (mode === 'item-page-backfill') {
     // item SSR 静态页存量分源回填(设计 §4.3)。按源扫 is_relevant=1 且未在 item_pages 的 item →
