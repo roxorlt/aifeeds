@@ -57,6 +57,24 @@ describe('performance event ingest', () => {
       .toEqual({ ok: false, error: 'payload too large' });
   });
 
+  it('keeps only finite home view transitions', () => {
+    expect(prepareEventPayload('home_view_switch', {
+      from: 'classic',
+      to: 'waterfall',
+      raw_cookie: 'secret',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({ from: 'classic', to: 'waterfall' }),
+    });
+    expect(prepareEventPayload('home_view_switch', {
+      from: '<script>',
+      to: 'other',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({ from: 'unknown', to: 'unknown' }),
+    });
+  });
+
   it('normalizes untrusted performance nettype while preserving Network Information API enums', () => {
     const attack = '<img src=x onerror="globalThis.__adminXss=1">';
     const malicious = prepareEventPayload('perf_nav', { nettype: attack, load: 120 }, undefined);

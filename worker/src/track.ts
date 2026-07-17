@@ -89,6 +89,7 @@ const API_ERROR_MESSAGE_CATEGORIES = new Set([
   'cors_or_network',
   'request_error',
 ]);
+const HOME_VIEW_MODES = new Set(['classic', 'waterfall']);
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
@@ -97,7 +98,7 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'item_impression', 'item_click', 'item_open_drawer', 'item_close_drawer',
   'thread_expand', 'image_lightbox_open', 'external_link_click',
   // 筛选
-  'source_filter_change', 'sort_change', 'new_content_banner_click',
+  'source_filter_change', 'sort_change', 'new_content_banner_click', 'home_view_switch',
   // 分享
   'share_click', 'share_landing',
   // 登录（PR2/3 才会真发，但白名单提前留好）
@@ -291,6 +292,15 @@ export function prepareEventPayload(
         ? payload.error_msg
         : 'request_error';
     }
+  } else if (clientPayload && eventType === 'home_view_switch') {
+    payload = {
+      from: typeof clientPayload.from === 'string' && HOME_VIEW_MODES.has(clientPayload.from)
+        ? clientPayload.from
+        : 'unknown',
+      to: typeof clientPayload.to === 'string' && HOME_VIEW_MODES.has(clientPayload.to)
+        ? clientPayload.to
+        : 'unknown',
+    };
   } else if (clientPayload && (eventType === 'search_submit' || eventType === 'search_empty')) {
     payload = { ...clientPayload };
     normalizeSearchQueryLength(payload);

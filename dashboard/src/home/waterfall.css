@@ -1,0 +1,204 @@
+:root {
+  --waterfall-row: 8px;
+  --waterfall-gap: 12px;
+}
+
+.waterfall-main {
+  width: min(1400px, calc(100% - 40px));
+  margin: 0 auto 72px;
+}
+
+.waterfall-intro {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  padding: 38px 0 24px;
+}
+
+.waterfall-intro p {
+  margin: 0;
+  color: #525252;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.waterfall-intro h1 {
+  max-width: 680px;
+  margin: 6px 0 0;
+  color: #171717;
+  font-size: clamp(32px, 4vw, 58px);
+  font-weight: 650;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+}
+
+.waterfall-intro > span {
+  color: #737373;
+  font-size: 12px;
+}
+
+.waterfall-grid {
+  display: grid;
+  grid-auto-rows: var(--waterfall-row);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--waterfall-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.waterfall-card {
+  grid-row-end: span var(--waterfall-row-span);
+  min-width: 0;
+  overflow: hidden;
+  align-self: start;
+  border: 1px solid #d4d4d4;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.waterfall-card article {
+  min-width: 0;
+}
+
+.waterfall-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px 0;
+  color: #737373;
+  font-size: 11px;
+}
+
+.waterfall-card__meta span {
+  color: #404040;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.waterfall-card__link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.waterfall-card__link h2 {
+  margin: 10px 16px 7px;
+  color: #171717;
+  font-size: 17px;
+  letter-spacing: -0.025em;
+  line-height: 1.38;
+}
+
+.waterfall-card__link p {
+  margin: 0;
+  padding: 0 16px 16px;
+  color: #404040;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.waterfall-card__link img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-top: 1px solid #e5e5e5;
+  background: #f5f5f5;
+}
+
+.waterfall-card__link:focus-visible {
+  outline: 2px solid #171717;
+  outline-offset: -3px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .waterfall-card {
+    transition: border-color 140ms ease, background-color 140ms ease;
+  }
+
+  .waterfall-card:hover {
+    border-color: #a3a3a3;
+    background: #fafafa;
+  }
+}
+
+.waterfall-pagination {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 28px 0 0;
+  color: #737373;
+  font-size: 12px;
+}
+
+.waterfall-pagination button {
+  min-block-size: 44px;
+  border: 1px solid #d4d4d4;
+  border-radius: 7px;
+  background: #fff;
+  padding: 0 18px;
+  color: #262626;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.waterfall-pagination button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.waterfall-pagination p {
+  margin: 0;
+}
+
+@media (max-width: 1023px) {
+  .waterfall-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .waterfall-main {
+    width: 100%;
+    margin-bottom: 52px;
+  }
+
+  .waterfall-intro {
+    display: block;
+    padding: 24px 16px 18px;
+  }
+
+  .waterfall-intro h1 {
+    font-size: 34px;
+  }
+
+  .waterfall-intro > span {
+    display: block;
+    margin-top: 10px;
+  }
+
+  .waterfall-grid {
+    display: block;
+  }
+
+  .waterfall-card {
+    margin-bottom: 10px;
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+  .waterfall-card__link h2 {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waterfall-card {
+    transition-duration: 0ms;
+  }
+}

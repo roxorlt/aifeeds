@@ -62,6 +62,7 @@ const Feedback = lazy(() => import("./pages/Feedback").then((m) => ({ default: m
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 import { useAuthStore } from "./lib/authStore";
 import { useToastStore } from "./lib/toast";
+import { HomeViewSwitch } from "./home/HomeViewSwitch";
 
 // LoginModal 拖入 Turnstile 校验 + auth 表单逻辑。99% 已登录用户首屏永远
 // 不会触发它 → lazy + Gate：loginModalOpen === false 时根本不挂 lazy 组件，
@@ -1240,6 +1241,7 @@ function DashboardHome() {
             </nav>
           )}
 
+          <HomeViewSwitch current="classic" />
           <SearchEntryButton />
           <UserMenu />
         </div>

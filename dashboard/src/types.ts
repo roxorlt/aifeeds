@@ -521,6 +521,11 @@ export interface ItemsResponse {
   query_time_ms?: number;
 }
 
+export interface HomeFeedResponse extends ItemsResponse {
+  view_mode: "waterfall";
+  generated_at: string;
+}
+
 // ── 搜索 API 契约（Task 6 定稿，字段名与 worker/src/search/handlers.ts 对齐）──
 // GET /api/search?q=            → grouped（每源 total + 预览 items）
 // GET /api/search?q=&source=&cursor=&limit= → list（单源分页流）

@@ -21,6 +21,7 @@ export const EVENTS = {
   SOURCE_FILTER_CHANGE: 'source_filter_change',
   SORT_CHANGE: 'sort_change',
   NEW_CONTENT_BANNER_CLICK: 'new_content_banner_click',
+  HOME_VIEW_SWITCH: 'home_view_switch',
   // 分享
   SHARE_CLICK: 'share_click',
   SHARE_LANDING: 'share_landing',
