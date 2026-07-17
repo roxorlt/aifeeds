@@ -70,6 +70,10 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, 'index.html'),
+          waterfall: path.resolve(__dirname, 'waterfall.html'),
+        },
         output: {
           // react 生态拆成独立 chunk：它很少变，发版后浏览器跨版本命中缓存，
           // 回访不用每次重下整包（首屏总量不变，纯为二次/回访提速）。
