@@ -10,13 +10,15 @@
 
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 
-- [ ] **P0 `/api/items` 分页游标生产回归**（2026-07-17，branch
+- [x] **P0 `/api/items` 分页游标生产回归**（2026-07-17，branch
   `codex/fix-item-cursor-compat`）：生产 D1 的 `scraped_at` 可为 SQLite datetime
   `YYYY-MM-DD HH:mm:ss`，Worker 直接把该 TEXT 排序键写入 `v2` cursor，却只接受 RFC3339，
   导致服务端生成的 X 下一页 cursor 被同版本以 `400 invalid_cursor` 拒绝。严格格式兼容、
-  Worker 全量 gate 和 staging 双页回放已通过（staging version
+  Worker 全量 gate、staging 双页回放和 production 验收均通过。staging version
   `57b55b48-c5ea-4609-8964-eef12e48363e`：合法 SQLite cursor `200`、非法日期 `400`、
-  服务端生成 cursor 原样回放 `200` 且两页 ID 无重叠）；待 production 双页验收后关闭。
+  服务端生成 cursor 原样回放 `200` 且两页 ID 无重叠。PR `#182` 合入 main
+  `c2aad3699d135dc4c827b7f8c6d47f7be5522a75`，Deploy Worker run `29567092210` 成功；
+  production X 标准请求两页 `200 → 200`、12/15 条、ID 重叠 0、无 `invalid_cursor`。
 - [x] PC/移动端动效与性能代码实施、本地契约和恢复设计完成；RUM 改为上线后观察任务，不阻塞本地交付。
 - [x] 定位 GL-a 首次失败根因：生产缺少 `/usr/sbin/logrotate`，旧 helper 无法恢复已初始化但未发布的
   rotation-state candidate，旧 operation `20260714011642-a33e7d4d` 留在

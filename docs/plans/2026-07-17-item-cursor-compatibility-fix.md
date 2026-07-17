@@ -118,4 +118,7 @@ After staging is green, merge the reviewed commit through `main`, wait for the p
 - Staging pre-deploy strict SQLite cursor probe: `400 invalid_cursor`.
 - Staging post-deploy probes: valid SQLite cursor `200`; impossible date `400 invalid_cursor`; a cursor emitted by the staging Worker replayed at `200` with non-empty pages and zero overlapping IDs.
 - Staging had no items in the default seven-day window, so the first page used a strict synthetic boundary to expose older rows; the second page replayed the Worker-emitted cursor unchanged.
-- Production merge, main-CI deployment, and production two-page replay remain pending.
+- PR `#182` merged to main as `c2aad3699d135dc4c827b7f8c6d47f7be5522a75`; Deploy Worker run `29567092210` passed validation, dry-run, dashboard smoke, and production deployment.
+- The first public replay immediately after the workflow completed still returned the old `400`, while a direct origin-gated Worker replay was already `200`. After the short propagation window, the same public URL returned `200`; response headers did not prove an nginx cache hit, so this is recorded as transient propagation rather than a confirmed cache incident.
+- Final production standard-URL replay passed without cache-busting parameters: page one `200` with 12 items, page two `200` with 15 items, `invalid_cursor` absent, and zero overlapping IDs.
+- All tasks in this cursor compatibility plan are complete.
