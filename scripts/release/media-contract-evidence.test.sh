@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CAPTURE="$ROOT/scripts/release/media-contract-evidence.sh"
-RAW="$(mktemp -d /private/tmp/aifeeds-media-contract-test.XXXXXX)"
+RAW="$(mktemp -d "${TMPDIR:-/tmp}/aifeeds-media-contract-test.XXXXXX")"
 trap 'rm -rf "$RAW"' EXIT HUP INT TERM
 
 head -c 1024 /dev/zero > "$RAW/body.bin"

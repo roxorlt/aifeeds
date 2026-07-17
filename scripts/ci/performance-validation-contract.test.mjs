@@ -26,6 +26,10 @@ const rolloutTemplate = readFileSync(
   resolve(root, 'docs/reviews/c-end-performance-rollout-template.md'),
   'utf8',
 );
+const mediaContractEvidenceTest = readFileSync(
+  resolve(root, 'scripts/release/media-contract-evidence.test.sh'),
+  'utf8',
+);
 
 const cJournalCleanupScenarios = Object.freeze([
   'journal-source-g-reentry',
@@ -84,6 +88,11 @@ function assertProductionRefGuard(workflow) {
   );
   assert.match(workflow, /exit 1/);
 }
+
+test('media contract test uses the runner temp directory instead of a macOS-only path', () => {
+  assert.match(mediaContractEvidenceTest, /\$\{TMPDIR:-\/tmp\}/);
+  assert.doesNotMatch(mediaContractEvidenceTest, /\/private\/tmp/);
+});
 
 function extractBashFences(document) {
   return [...document.matchAll(/^```bash\n([\s\S]*?)^```$/gm)].map((match) => match[1]);
