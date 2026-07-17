@@ -228,5 +228,30 @@ describe('renderItemPageHtml', () => {
     expect(html).toContain(`href="${SITE}/subscribe"`);
     expect(html).toContain(`href="${SITE}/"`);
     expect(html).toContain(`href="${SITE}/daily/"`);
+    expect(html).toContain(`href="${SITE}/archive/"`);
+  });
+
+  test('item 页和 JSON-LD 面包屑链接到 SSR source/month archive，不再指向 SPA query', () => {
+    const html = renderItemPageHtml(mkRow(), envFixture());
+    expect(html).toContain(`href="${SITE}/archive/x/"`);
+    expect(html).toContain(`href="${SITE}/archive/x/2026-07/"`);
+    expect(html).not.toContain(`${SITE}/?source=x`);
+
+    const breadcrumb = extractJsonLd(html)['@graph'].find(
+      (entry) => entry['@type'] === 'BreadcrumbList',
+    )!;
+    const items = breadcrumb.itemListElement as Array<Record<string, unknown>>;
+    expect(items[1].item).toBe(`${SITE}/archive/x/`);
+  });
+
+  test('hf-paper archive 的公开路径使用 /archive/paper/', () => {
+    const html = renderItemPageHtml(
+      mkRow({
+        id: 'hf_paper:2607.12345',
+        extra: JSON.stringify({ title_zh: '论文标题', summary_zh: '论文摘要' }),
+      }),
+      envFixture(),
+    );
+    expect(html).toContain(`${SITE}/archive/paper/`);
   });
 });

@@ -80,25 +80,46 @@ function isDedupSuppressed(extra: string | null | undefined): boolean {
   }
 }
 
-// 同源近期相关内链（3-5 条）：同 source_type、relevant、非 dedup 次源、排除自身、按发布时间倒序取 6 条，
-// 各自 renderItem 成 RenderedItem 传给渲染器（渲染器只用 item_id + title 织 /i/ 内链）。
-// dedup 次源排除（I2）：避免织出指向被隐藏次源 /i/ 页的软 404 内链 / 触发按需生成。
-async function fetchRelated(env: Env, mainId: string, source: DigestSource): Promise<RenderedItem[]> {
+// 同源稳定时间邻居：按 (published_at 回退 scraped_at DESC, id DESC) 的主时间线，取当前项前后各 3 条。
+// 只织入已经 live 且仍 relevant/未软删/非 dedup/非涉华敏感的页面，避免历史页长期指向
+// “全站最新 5 条”而形成不稳定链接图，也避免链接到 gone/404。
+async function fetchRelated(
+  env: Env,
+  main: RenderRow & { published_at?: string | null; scraped_at?: string | null },
+  source: DigestSource,
+): Promise<RenderedItem[]> {
   const sts = SOURCE_TYPES[source];
-  if (!sts.length) return [];
+  const effectiveAt = String(main.published_at || main.scraped_at || '').trim();
+  if (!sts.length || !effectiveAt) return [];
   const ph = sts.map(() => '?').join(',');
-  const rows = await env.DB.prepare(
-    `SELECT * FROM items
-      WHERE source_type IN (${ph}) AND id != ? AND is_relevant = 1
-        AND json_extract(extra, '$.dedup_of') IS NULL
-      ORDER BY published_at DESC
-      LIMIT 6`,
+  const candidateTime = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
+  const gates = `p.status = 'live'
+        AND i.is_relevant = 1
+        AND i.deleted_at IS NULL
+        AND json_extract(i.extra, '$.dedup_of') IS NULL
+        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
+  const newer = await env.DB.prepare(
+    `SELECT i.* FROM items i
+      JOIN item_pages p ON p.item_id = i.id
+      WHERE i.source_type IN (${ph}) AND ${gates}
+        AND (${candidateTime} > ? OR (${candidateTime} = ? AND i.id > ?))
+      ORDER BY ${candidateTime} ASC, i.id ASC
+      LIMIT 3`,
   )
-    .bind(...sts, mainId)
+    .bind(...sts, effectiveAt, effectiveAt, main.id)
+    .all<RenderRow>();
+  const older = await env.DB.prepare(
+    `SELECT i.* FROM items i
+      JOIN item_pages p ON p.item_id = i.id
+      WHERE i.source_type IN (${ph}) AND ${gates}
+        AND (${candidateTime} < ? OR (${candidateTime} = ? AND i.id < ?))
+      ORDER BY ${candidateTime} DESC, i.id DESC
+      LIMIT 3`,
+  )
+    .bind(...sts, effectiveAt, effectiveAt, main.id)
     .all<RenderRow>();
   const { apiBase } = getBases(env);
-  return (rows.results || [])
-    .slice(0, 5)
+  return [...(newer.results || []).reverse(), ...(older.results || [])]
     .map((r, i) => renderItem(source, r, i + 1, apiBase));
 }
 
@@ -134,7 +155,7 @@ export async function generateItemPage(
 
   if (opts.dry) return { itemId: id, skipped: false, reason: 'dry' };
 
-  const related = await fetchRelated(env, id, source);
+  const related = await fetchRelated(env, row, source);
   const html = renderItemPageHtml(row, env, related);
   await env.READMES!.put(key, html, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },

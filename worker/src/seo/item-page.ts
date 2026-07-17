@@ -87,6 +87,10 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const summaryFull = item.summary_full || item.summary || '';
   const description = clampSentences(summaryFull, ITEM_DESC_MAX);
   const datePublished = (r.published_at || r.scraped_at || '').trim();
+  const archiveSource = source === 'hf-paper' ? 'paper' : source;
+  const sourceArchiveUrl = `${siteBase}/archive/${archiveSource}/`;
+  const archiveMonth = datePublished.match(/^(\d{4}-(?:0[1-9]|1[0-2]))/)?.[1] || null;
+  const monthArchiveUrl = archiveMonth ? `${sourceArchiveUrl}${archiveMonth}/` : null;
 
   // 分源混合正文:gh/hf/ph/x 全文,blog/podcast 摘要+分析+短摘录(见 item-body.ts)。净化后零可执行 script。
   const bodyContent = renderItemBody(source, row, env);
@@ -95,7 +99,6 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const articleBody = itemIndexableText(source, row, env);
 
   // ── JSON-LD @graph:Article + BreadcrumbList(首页→源频道→本条) + Organization ──
-  const channelUrl = `${siteBase}/?source=${encodeURIComponent(source)}`;
   const article: Record<string, unknown> = {
     '@type': 'Article',
     headline: item.title,
@@ -111,7 +114,7 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
     '@type': 'BreadcrumbList',
     itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'AI Feeds', item: `${siteBase}/` },
-      { '@type': 'ListItem', position: 2, name: label, item: channelUrl },
+      { '@type': 'ListItem', position: 2, name: label, item: sourceArchiveUrl },
       { '@type': 'ListItem', position: 3, name: item.title, item: canonical },
     ],
   };
@@ -144,12 +147,14 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const coverHtml = item.cover
     ? `<img class="cover" src="${escapeHtml(item.cover)}" alt="${escapeHtml(item.title)}" loading="lazy">`
     : '';
+  const archiveLinks = `<nav class="nav" aria-label="内容归档"><a href="${escapeHtml(sourceArchiveUrl)}">${escapeHtml(label)}归档</a>${monthArchiveUrl ? `<a href="${escapeHtml(monthArchiveUrl)}">${escapeHtml(archiveMonth!)}归档</a>` : ''}</nav>`;
 
   const bodyHtml = `<style>${ITEM_BODY_STYLE}</style>
 <div class="wrap">
 <header>
 <div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
 <div class="date">${escapeHtml(label)}</div>
+${archiveLinks}
 </header>
 <main>
 <article>
@@ -165,6 +170,7 @@ ${relatedHtml}
 <a href="${siteBase}/subscribe">订阅每日邮件</a>
 <a href="${siteBase}/">进站看全部</a>
 <a href="${siteBase}/daily/">历史日报</a>
+<a href="${siteBase}/archive/">内容归档</a>
 </footer>
 </div>`;
 

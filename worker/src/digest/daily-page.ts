@@ -502,6 +502,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env, video: DailyV
 <a href="${siteBase}/subscribe">订阅每日邮件</a>
 <a href="${siteBase}/">进站看全部</a>
 <a href="${dailyBase}/">历史日报</a>
+<a href="${siteBase}/archive/">内容归档</a>
 </footer>
 </div>`;
 

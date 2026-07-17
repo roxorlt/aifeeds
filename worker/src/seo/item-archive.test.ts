@@ -1,0 +1,130 @@
+import { describe, expect, test } from 'vitest';
+
+import {
+  ARCHIVE_PAGE_SIZE,
+  MAX_ARCHIVE_PAGE,
+  archiveCanonicalPath,
+  archiveCountQuery,
+  archiveItemsQuery,
+  archiveMonthsQuery,
+  archiveSitemapGroupsQuery,
+  parseItemArchivePath,
+} from './item-archive';
+
+describe('parseItemArchivePath', () => {
+  test('只接受 index、已知 source、真实月份与有上限的正整数 page', () => {
+    expect(parseItemArchivePath('/archive/')).toEqual({ kind: 'index' });
+    expect(parseItemArchivePath('/archive/x/')).toEqual({ kind: 'source', source: 'x' });
+    expect(parseItemArchivePath('/archive/gh/2026-07/')).toEqual({
+      kind: 'month',
+      source: 'gh',
+      month: '2026-07',
+      page: 1,
+    });
+    expect(parseItemArchivePath('/archive/paper/2024-02/9')).toEqual({
+      kind: 'month',
+      source: 'paper',
+      month: '2024-02',
+      page: 9,
+    });
+    expect(parseItemArchivePath(`/archive/news/2026-01/${MAX_ARCHIVE_PAGE}`)).toEqual({
+      kind: 'month',
+      source: 'news',
+      month: '2026-01',
+      page: MAX_ARCHIVE_PAGE,
+    });
+
+    for (const path of [
+      '/archive/unknown/',
+      '/archive/hf-paper/',
+      '/archive/x/2026-00/',
+      '/archive/x/2026-13/',
+      '/archive/x/0000-01/',
+      '/archive/x/2026-1/',
+      '/archive/x/2026-01/0',
+      '/archive/x/2026-01/-1',
+      '/archive/x/2026-01/1.5',
+      `/archive/x/2026-01/${MAX_ARCHIVE_PAGE + 1}`,
+      '/archive/x/2026-01/2/extra',
+    ]) {
+      expect(parseItemArchivePath(path), path).toBeNull();
+    }
+  });
+
+  test('无尾斜杠也解析为同一逻辑页面，交给 canonical 收敛', () => {
+    expect(parseItemArchivePath('/archive')).toEqual({ kind: 'index' });
+    expect(parseItemArchivePath('/archive/ph')).toEqual({ kind: 'source', source: 'ph' });
+    expect(parseItemArchivePath('/archive/news/2026-07')).toEqual({
+      kind: 'month',
+      source: 'news',
+      month: '2026-07',
+      page: 1,
+    });
+  });
+});
+
+describe('archiveCanonicalPath', () => {
+  test('page 1 不产生重复 /1，page 2+ 保留页码', () => {
+    expect(archiveCanonicalPath({ kind: 'index' })).toBe('/archive/');
+    expect(archiveCanonicalPath({ kind: 'source', source: 'x' })).toBe('/archive/x/');
+    expect(
+      archiveCanonicalPath({ kind: 'month', source: 'ph', month: '2026-07', page: 1 }),
+    ).toBe('/archive/ph/2026-07/');
+    expect(
+      archiveCanonicalPath({ kind: 'month', source: 'ph', month: '2026-07', page: 2 }),
+    ).toBe('/archive/ph/2026-07/2');
+  });
+});
+
+describe('archiveItemsQuery', () => {
+  test('每页固定 100，offset 由 page 单调推进，paper 映射 item_pages 的 hf-paper', () => {
+    expect(ARCHIVE_PAGE_SIZE).toBe(100);
+    const first = archiveItemsQuery('paper', '2026-07', 1);
+    const third = archiveItemsQuery('paper', '2026-07', 3);
+
+    expect(first.bindings).toEqual(['hf-paper', '2026-07', 100, 0]);
+    expect(third.bindings).toEqual(['hf-paper', '2026-07', 100, 200]);
+  });
+
+  test('复用 live/relevant/deleted/dedup/cn-sensitive gate，并稳定按有效时间 + id 排序', () => {
+    const { sql } = archiveItemsQuery('x', '2026-07', 2);
+
+    expect(sql).toMatch(/JOIN\s+item_pages\s+p\s+ON\s+p\.item_id\s*=\s*i\.id/i);
+    expect(sql).toMatch(/p\.status\s*=\s*'live'/i);
+    expect(sql).toMatch(/i\.is_relevant\s*=\s*1/i);
+    expect(sql).toMatch(/i\.deleted_at\s+IS\s+NULL/i);
+    expect(sql).toContain("json_extract(i.extra, '$.dedup_of') IS NULL");
+    expect(sql).toContain("COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1");
+    expect(sql).toContain("COALESCE(NULLIF(i.published_at, ''), i.scraped_at) AS published_at");
+    expect(sql).toMatch(
+      /ORDER BY\s+COALESCE\(NULLIF\(i\.published_at,\s*''\),\s*i\.scraped_at\)\s+DESC,\s*i\.id\s+DESC/i,
+    );
+  });
+
+  test('列表链接只从 item_pages.url_path 取，不在查询层重拼 URL', () => {
+    const { sql } = archiveItemsQuery('news', '2026-07', 1);
+
+    expect(sql).toMatch(/SELECT[\s\S]*p\.url_path/i);
+    expect(sql).not.toMatch(/['"]\/i\//);
+  });
+});
+
+describe('archive effective time', () => {
+  test('无 published_at 的历史项统一回退 scraped_at，月份列表、计数与 sitemap 不会漏项', () => {
+    const effectiveTime = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
+    const queries = [
+      archiveItemsQuery('gh', '2026-05', 1).sql,
+      archiveMonthsQuery('gh').sql,
+      archiveCountQuery('gh', '2026-05').sql,
+      archiveSitemapGroupsQuery().sql,
+    ];
+
+    for (const sql of queries) {
+      expect(sql).toContain(effectiveTime);
+    }
+    expect(archiveMonthsQuery('gh').sql).toContain(
+      `${effectiveTime} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'`,
+    );
+    expect(archiveSitemapGroupsQuery().sql).toContain(`substr(${effectiveTime}, 1, 7) AS month`);
+  });
+});

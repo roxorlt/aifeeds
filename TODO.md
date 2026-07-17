@@ -22,6 +22,11 @@
   sitemap ↔ `item_pages` ↔ R2 完整性缺口。
 - [ ] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取
   + load-more/polling 收紧。
+  - [x] P1-C 本地代码与 TDD：五源 source/month/page SSR 归档、独立 archive sitemap、
+    item 稳定时间邻居、首页/日报入口、nginx/SW 三层路由、只读链接图验收器；Worker
+    48 files / 789 tests、TypeScript、Dashboard build 与相关 Node contracts 全绿。
+  - [ ] P1-C staging / production：同步 nginx 运行时配置、发布 Worker + Dashboard，
+    跑公开链接图验收，并在 2–4 周后复查 Ahrefs orphan 趋势。
 - [ ] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
   perf-staging 做 classic/waterfall 同条件对照；RUM 继续作为上线后观察，不阻塞 staging。
 
