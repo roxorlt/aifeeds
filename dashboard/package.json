@@ -17,6 +17,8 @@
     "test:unit": "node --test",
     "test:e2e": "playwright test e2e/home-performance.spec.ts",
     "test:e2e:perf-staging": "bash scripts/run-perf-staging-e2e.sh",
+    "prototype:waterfall": "node prototypes/waterfall-ssr/server.mjs",
+    "benchmark:home-views": "node scripts/benchmark-home-views.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },
