@@ -13,7 +13,14 @@
 import type { Env } from '../index';
 import { DIGEST_SOURCE_ORDER, DAILY_PAGE_PER_SOURCE_LIMIT, DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { selectTopForSource, type SelectTopOptions } from './selection';
-import { renderItem, clampSentences, itemPagePath, type RenderRow, type RenderedItem } from './render';
+import {
+  renderItem,
+  clampSentences,
+  itemPagePath,
+  wellFormedText,
+  type RenderRow,
+  type RenderedItem,
+} from './render';
 import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
@@ -168,9 +175,16 @@ footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);
   color:var(--sub);font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
 `.trim();
 
-// JSON-LD 安全内联:< 转义 `<` 防 </script> 越权,同时保持合法 JSON(解析后还原为 `<`)。
+// JSON-LD 安全内联：序列化边界兜底修复上游孤立 surrogate，并转义会破坏
+// script 数据岛边界/兼容性的字符；JSON.parse 后仍还原为原始 Unicode 标量。
 function jsonLdSafe(value: unknown): string {
-  return JSON.stringify(value).replace(/</g, '\\u003c');
+  return JSON.stringify(
+    value,
+    (_key, current) => (typeof current === 'string' ? wellFormedText(current) : current),
+  )
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 export const DAILY_VIDEO_PLAYER_START = '<!-- daily-video:player:start -->';

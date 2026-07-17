@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -107,6 +108,27 @@ function runQuiescence(path, timeoutSeconds) {
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   return new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
 }
+
+function canScanEveryProcFdDirectory() {
+  if (!existsSync('/proc')) return false;
+  try {
+    const processes = readdirSync('/proc', { withFileTypes: true });
+    for (const process of processes) {
+      if (!process.name.match(/^\d+$/)) continue;
+      try {
+        readdirSync(resolve('/proc', process.name, 'fd'));
+      } catch (error) {
+        if (error && typeof error === 'object' && error.code === 'ENOENT') continue;
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const canRunProcQuiescenceIntegration = canScanEveryProcFdDirectory();
 
 function performanceRunbook() {
   const start = '<!-- aifeeds-performance-log:start -->';
@@ -2631,7 +2653,7 @@ test('journal predecessor cleanup keeps a held descriptor and private dirfd thro
 });
 
 test('writable-fd quiescence waits for a delayed tail before succeeding', {
-  skip: !existsSync('/proc/self/fd'),
+  skip: !canRunProcQuiescenceIntegration,
 }, async () => {
   assert.ok(quiescencePython.includes('fdinfo'));
   const directory = mkdtempSync(resolve(tmpdir(), 'aifeeds-quiescence-'));
@@ -2653,7 +2675,7 @@ test('writable-fd quiescence waits for a delayed tail before succeeding', {
 });
 
 test('writable-fd quiescence times out without deleting an active inode', {
-  skip: !existsSync('/proc/self/fd'),
+  skip: !canRunProcQuiescenceIntegration,
 }, async () => {
   const directory = mkdtempSync(resolve(tmpdir(), 'aifeeds-quiescence-timeout-'));
   const path = resolve(directory, 'active.log');

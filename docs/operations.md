@@ -3645,6 +3645,13 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 **SEO 页生成 / 回填**：
 
 - `mode=daily-page`（今日）｜ `&date=YYYY-MM-DD`（指定历史日）｜ `&backfill=1`（遍历 digest_pool 全部历史日逐日回填）｜ 追加 `&dry=1` 只算不落盘。不受 `DAILY_PAGE_ENABLED` 限制。细节见「每日静态日报页 Phase 4」。
+- **`mode=item-page-regenerate&id=<composite-id>`**（精确重生一条 `/i/` 页）：
+  - 只接受 `x_list|github|product_hunt|hf_paper|blog|podcast` 六种真实 `source_type`
+    前缀的 composite id，长度上限 512；不接受 URL、R2 key、ClawHub 或任意路径。
+  - 复用 `generateItemPage()` 的 relevant、dedup 与支持源 gate，不会绕过内容资格，也不会
+    扫描其它 item。返回 `item_id`、`skipped`、`reason`、`generated_at`。
+  - 适合 GSC 指向单页、R2 单对象修复和全量重灌前 smoke；示例：
+    `POST /api/enrich/run?mode=item-page-regenerate&id=x_list%3A2061451225762046411`。
 - **`mode=item-page-backfill&source=<x|gh|ph|hf-paper|news>`**（`/i/` 页主力回填）：
   - `&limit=N`（每批，默认小值；**x 源 limit 必须 ≤100**，见 §4）｜ `&dry=1`（零写，返回 `scanned`/`generated`/`remaining`）
   - `&force=1`：连**已存在**的页也重渲染覆盖（升级存量薄页 → 全文版 / 换渲染器后刷存量）。不带 `force` 时走存在性游标（`NOT EXISTS item_pages`），只补缺页。
@@ -3664,12 +3671,16 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 > 复用脚本 `force-backfill-src.sh <source> [limit]`（job tmp，含 error/stall 守卫 + cutoff 线程化）。2026-07-09 五源 force 全量重灌（薄页 → 全文版）即按此跑到各源 `remaining=0`。
 
-1. **force 重灌必须用 cutoff loop 收敛** —— `force=1` 会重渲染已存在的行，靠 `generated_at >= cutoff` 退出候选实现单调收敛。**每批把上一批响应里的 `cutoff` 原样回传下一批**（脚本把 `:`→`%3A` URL 编码）；首批不带 cutoff（worker 取 now 为 campaign 锚点）。**漏传 cutoff → 每批重扫同一批行、`remaining` 不降、永不收敛**。中途改脚本续跑时用同一 seed cutoff，跳过已重灌行，无重复。
-2. **x 大盘 `limit` 必须 ≤100** —— x 单条含引用/推文串串渲染，`limit=200` 每批渲染太重 → worker CPU 吃紧、~25% 空响应超时。gh/ph/hf 在 100 全 0 错误；x 用 200 撞超时后切回 100 全程 0 新错误。**再跑 x 大盘直接 100，勿用 200**。
-3. **直连 `xlist-api.ltsms86.workers.dev` + `X-Dev-Token` 绕香港 60s** —— 经 `api.ai-feeds.com` 走香港 nginx，item-page 渲染 wall-clock 常 >60s → 客户端 504 / `curl exit28`，但 **worker 后台仍会跑完**。直连 workers.dev（附 `Authorization: Bearer $INGEST_TOKEN` + `X-Dev-Token: $DEV_TOKEN`）绕过；批 100 实测 ~32s 无 504。**若仍走香港看到 504/000，别当失败**，按响应 `remaining` 递减核对进度（或 `SELECT count(*) FROM item_pages GROUP BY source`），worker 大概率已写。
-4. **长任务用 `nohup` 脱离 harness 后台更稳** —— harness 后台任务曾被杀一次（疑后台运行时上限）；`nohup` 脱离进程 + 同 cutoff 无缝续跑。
-5. **`remaining` 卡固定值不降 = 疑脏 id，人工排查** —— 若 `scanned>0` 但 `generated=0` 且 `remaining` 连续不缩，脚本 stall 守卫会 break：多半是 `source_type∈五源` 但 composite id 前缀与源不匹配的脏行。人工 `SELECT` 排查，别硬刷爆 API。
-6. **news 前确认 C1 dedup 门** —— news（=blog+podcast 虚拟源）跑前确认 dedup 次源（`extra.dedup_of` 非空）在扫描谓词里被排除：次源自动 `skipped`、不进 `scanned`、不出重复页、不入 sitemap（2026-07-09 实测 `podcast:gradient-dissent:…` dedup 次源 item_pages 计数 = 0）。
+1. **先精确重生目标页再开全量 campaign** —— 用 `item-page-regenerate` 重生 GSC/Ahrefs
+   指向的 composite id，拉取 HTML 并解析 JSON-LD；确认目标页 200、全部字符串无孤立
+   surrogate、`skipped=false` 后才进入 force loop。这个 mode 只写一个 R2 快照和一行
+   `item_pages`，不能替代后续存量重灌。
+2. **force 重灌必须用 cutoff loop 收敛** —— `force=1` 会重渲染已存在的行，靠 `generated_at >= cutoff` 退出候选实现单调收敛。**每批把上一批响应里的 `cutoff` 原样回传下一批**（脚本把 `:`→`%3A` URL 编码）；首批不带 cutoff（worker 取 now 为 campaign 锚点）。**漏传 cutoff → 每批重扫同一批行、`remaining` 不降、永不收敛**。中途改脚本续跑时用同一 seed cutoff，跳过已重灌行，无重复。
+3. **x 大盘 `limit` 必须 ≤100** —— x 单条含引用/推文串串渲染，`limit=200` 每批渲染太重 → worker CPU 吃紧、~25% 空响应超时。gh/ph/hf 在 100 全 0 错误；x 用 200 撞超时后切回 100 全程 0 新错误。**再跑 x 大盘直接 100，勿用 200**。
+4. **直连 `xlist-api.ltsms86.workers.dev` + `X-Dev-Token` 绕香港 60s** —— 经 `api.ai-feeds.com` 走香港 nginx，item-page 渲染 wall-clock 常 >60s → 客户端 504 / `curl exit28`，但 **worker 后台仍会跑完**。直连 workers.dev（附 `Authorization: Bearer $INGEST_TOKEN` + `X-Dev-Token: $DEV_TOKEN`）绕过；批 100 实测 ~32s 无 504。**若仍走香港看到 504/000，别当失败**，按响应 `remaining` 递减核对进度（或 `SELECT count(*) FROM item_pages GROUP BY source`），worker 大概率已写。
+5. **长任务用 `nohup` 脱离 harness 后台更稳** —— harness 后台任务曾被杀一次（疑后台运行时上限）；`nohup` 脱离进程 + 同 cutoff 无缝续跑。
+6. **`remaining` 卡固定值不降 = 疑脏 id，人工排查** —— 若 `scanned>0` 但 `generated=0` 且 `remaining` 连续不缩，脚本 stall 守卫会 break：多半是 `source_type∈五源` 但 composite id 前缀与源不匹配的脏行。人工 `SELECT` 排查，别硬刷爆 API。
+7. **news 前确认 C1 dedup 门** —— news（=blog+podcast 虚拟源）跑前确认 dedup 次源（`extra.dedup_of` 非空）在扫描谓词里被排除：次源自动 `skipped`、不进 `scanned`、不出重复页、不入 sitemap（2026-07-09 实测 `podcast:gradient-dissent:…` dedup 次源 item_pages 计数 = 0）。
 
 ### 5. 香港 nginx 转发
 

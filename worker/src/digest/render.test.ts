@@ -1,7 +1,36 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 
-import { renderItem, type RenderRow } from './render';
+import { clampSentences, renderItem, type RenderRow } from './render';
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      i++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+test('clampSentences truncates on Unicode code-point boundaries', () => {
+  const value = 'a'.repeat(149) + '🔥' + 'tail';
+  const result = clampSentences(value, 150);
+
+  assert.equal(result, 'a'.repeat(149) + '🔥…');
+  assert.equal(hasLoneSurrogate(result), false);
+});
+
+test('clampSentences replaces an upstream lone surrogate even when no truncation is needed', () => {
+  const result = clampSentences('prefix \ud83d suffix', 100);
+
+  assert.equal(result, 'prefix \ufffd suffix');
+  assert.equal(hasLoneSurrogate(result), false);
+});
 
 test('renderItem uses blog body assets as news cover and media when row media is empty', () => {
   const row: RenderRow = {
