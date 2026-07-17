@@ -21,6 +21,9 @@ test("switching persists one bounded cookie, emits a finite event, and navigates
   assert.match(viewSwitch, /document\.cookie = serializeHomeViewCookie\(mode\)/);
   assert.match(viewSwitch, /persistHomeView\(nextMode\)/);
   assert.match(viewSwitch, /EVENTS\.HOME_VIEW_SWITCH/);
+  assert.match(viewSwitch, /from_view: current/);
+  assert.match(viewSwitch, /to_view: nextMode/);
+  assert.match(viewSwitch, /entry: "appbar"/);
   assert.match(viewSwitch, /window\.location\.assign/);
   assert.doesNotMatch(viewSwitch, /location\.reload/);
 });

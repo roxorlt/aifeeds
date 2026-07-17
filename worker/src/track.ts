@@ -90,6 +90,7 @@ const API_ERROR_MESSAGE_CATEGORIES = new Set([
   'request_error',
 ]);
 const HOME_VIEW_MODES = new Set(['classic', 'waterfall']);
+const HOME_VIEW_ENTRIES = new Set(['appbar']);
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
@@ -294,11 +295,17 @@ export function prepareEventPayload(
     }
   } else if (clientPayload && eventType === 'home_view_switch') {
     payload = {
-      from: typeof clientPayload.from === 'string' && HOME_VIEW_MODES.has(clientPayload.from)
-        ? clientPayload.from
+      from_view: typeof clientPayload.from_view === 'string'
+        && HOME_VIEW_MODES.has(clientPayload.from_view)
+        ? clientPayload.from_view
         : 'unknown',
-      to: typeof clientPayload.to === 'string' && HOME_VIEW_MODES.has(clientPayload.to)
-        ? clientPayload.to
+      to_view: typeof clientPayload.to_view === 'string'
+        && HOME_VIEW_MODES.has(clientPayload.to_view)
+        ? clientPayload.to_view
+        : 'unknown',
+      entry: typeof clientPayload.entry === 'string'
+        && HOME_VIEW_ENTRIES.has(clientPayload.entry)
+        ? clientPayload.entry
         : 'unknown',
     };
   } else if (clientPayload && (eventType === 'search_submit' || eventType === 'search_empty')) {
@@ -315,6 +322,10 @@ export function prepareEventPayload(
     if (typeof payload.nettype !== 'string' || !NETWORK_EFFECTIVE_TYPES.has(payload.nettype)) {
       delete payload.nettype;
     }
+    payload.view_mode = typeof payload.view_mode === 'string'
+      && HOME_VIEW_MODES.has(payload.view_mode)
+      ? payload.view_mode
+      : 'classic';
     const country = trustedEdgeCode(cf?.country, /^[A-Z0-9]{2}$/);
     const colo = trustedEdgeCode(cf?.colo, /^[A-Z0-9]{3}$/);
     if (country) payload.edge_country = country;

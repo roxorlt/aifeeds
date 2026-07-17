@@ -36,7 +36,11 @@ export function HomeViewSwitch({
     if (switching || nextMode === current) return;
     setSwitching(true);
     persistHomeView(nextMode);
-    track(EVENTS.HOME_VIEW_SWITCH, { from: current, to: nextMode });
+    track(EVENTS.HOME_VIEW_SWITCH, {
+      from_view: current,
+      to_view: nextMode,
+      entry: "appbar",
+    });
     const target = new URL(window.location.href);
     target.searchParams.set("view", nextMode);
     target.searchParams.delete("from");
