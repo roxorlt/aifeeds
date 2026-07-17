@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   assertSafeOutputPath,
   assertSafeViewUrl,
+  benchmarkNavigationTarget,
   parseCliArgs,
   renderMarkdown,
   summarizeValues,
@@ -17,6 +18,33 @@ test("view benchmark refuses production and arbitrary hosts", () => {
   assert.throws(() => assertSafeViewUrl("file:///tmp/index.html"), /refusing protocol/i);
   assert.throws(() => assertSafeViewUrl("https://user:secret@staging.ai-feeds.com/"), /credentials/i);
   assert.throws(() => assertSafeViewUrl("https://staging.ai-feeds.com/search"), /refusing path/i);
+});
+
+test("benchmark measures the canonical cookie path instead of a cache-bypassing view query", () => {
+  assert.deepEqual(
+    benchmarkNavigationTarget("https://staging.ai-feeds.com/?view=waterfall", "waterfall"),
+    {
+      navigationUrl: "https://staging.ai-feeds.com/",
+      cookieUrl: "https://staging.ai-feeds.com/",
+      cookieValue: "waterfall",
+    },
+  );
+  assert.deepEqual(
+    benchmarkNavigationTarget("https://staging.ai-feeds.com/", "classic"),
+    {
+      navigationUrl: "https://staging.ai-feeds.com/",
+      cookieUrl: "https://staging.ai-feeds.com/",
+      cookieValue: "classic",
+    },
+  );
+  assert.throws(
+    () => benchmarkNavigationTarget("https://staging.ai-feeds.com/?view=classic", "waterfall"),
+    /does not match/i,
+  );
+  assert.throws(
+    () => benchmarkNavigationTarget("https://staging.ai-feeds.com/?view=waterfall&raw=1", "waterfall"),
+    /only the finite view query/i,
+  );
 });
 
 test("summary uses deterministic nearest-rank percentiles", () => {

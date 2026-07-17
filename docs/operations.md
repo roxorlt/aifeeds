@@ -15,7 +15,7 @@
 
 历史：2026-07-15（旧 GL-a 已完成 exceptional recovery 并终态对账；新 operation `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 会把三个 upstream timing 序列化为空串后自动回滚。source/rollback 均为 `rolled_back`、14/14 runtime cleanup 完成、site 恢复原 SHA、运行时残留为 0。validator 现仅在缓存 HIT/STALE/UPDATING/REVALIDATED 分支接受数字、`-` 或空串；非缓存与 API 仍必须为数字。再次执行须重新 clean G0、冻结新清单并单独批准）
 
-历史：2026-07-17（首页经典版/瀑布版并行的生产集成代码与本地五设备 SSR gate 在隔离分支完成；功能默认关闭、异常 fail-open 到经典版。当前未合 main、未推送、未改 staging/production；staging 只允许按一次性变更包在经典版 RUM 窗口后执行）
+历史：2026-07-17（首页经典版/瀑布版并行的生产集成代码与本地五设备 SSR gate 在隔离分支完成；功能默认关闭、异常 fail-open 到经典版。当前未合 main、未推送、未改 staging/production；staging 按一次性变更包执行，RUM 是上线后观察而非发布前置门）
 
 历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
 
@@ -1029,7 +1029,8 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 
 #### 5a. 首页经典版/瀑布版 SSR 并行（2026-07-17，默认关闭）
 
-- 当前状态：只存在于 `codex/waterfall-ssr-rum-parallel`；未合 `main`，staging/production 均未配置。
+- 当前状态：旧实现已同步到包含 A–E 本地封板代码的 `codex/waterfall-ssr-main-sync`；
+  手动 SWR 与 SSR 状态遥测已完成本地 G0，尚未合 `main`，staging/production 均未配置。
 - 经典入口：`index.html` / `main.tsx`；瀑布入口：`waterfall.html` / `waterfall-main.tsx`，两者独立下载。
 - Pages Function 只覆盖 `/`、既有详情深链与 `/_home/feed`；静态资源、搜索、设置、auth、daily 与 API
   不进入 SSR runtime。
@@ -1038,16 +1039,32 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   `aifeeds_view=classic|waterfall` 的 `Secure; SameSite=Lax` cookie 保持偏好。
 - Pages `HOME_API` Service Binding 只调用 Worker `/api/home-feed`；两端
   `HOME_RENDERER_TOKEN` 必须同值且仅允许该 GET 路径豁免 origin gate。
+- 仅无 query、无登录 cookie 的匿名根路径共享 public waterfall 快照。Cache API 对象保留 24 小时：
+  `age <= 60s` 直接返回 fresh；`60s < age <= 10min` 立即返回 stale 并用 `waitUntil()` 后台刷新；
+  同一 isolate/PoP 刷新 single-flight；刷新失败保留最后好快照；超过 10 分钟刷新失败则 classic fail-open。
+  Cache API 是 PoP-local，外部预热不能当成全局正确性依赖。
+- Vite 先保留 `waterfall.html` 的 identity 槽；构建完成后，stamper 把槽归一并对整个 `dist`
+  artifact graph（路径、HTML 与哈希资源内容）做确定性 SHA-256，再写入唯一的
+  `aifeeds-build-id`。Cache key 同时包含该 final-artifact identity 与请求 hostname；因此同一 commit
+  的 external/same-origin 或其它 mode/env 产物也不会复用旧 HTML。独立 verifier 会归一 identity
+  槽并复算整个 artifact graph，值不匹配、placeholder 残留、缺失或非法时构建失败；运行时仍直接
+  classic fail-open。相同 artifact 重复构建必须得到相同 identity，回滚到同一 artifact 也回到同一 namespace。
 - binding、API、模板、JSON 或 renderer 任一异常都清瀑布 cookie 并返回经典首页；
-  `X-AIFeeds-Home-SSR` 标记 `disabled|classic|waterfall|waterfall-cache|feed|fallback|pass`。
+  `X-AIFeeds-Home-SSR` 标记 `disabled|classic|waterfall|waterfall-cache|waterfall-stale|feed|fallback|pass`；
+  cache hit 另带 `X-AIFeeds-Home-Freshness: fresh|stale` 与有界秒数
+  `X-AIFeeds-Home-Age`。前端性能事件携带有限 `ssr_state=classic|generated|fresh|stale|fallback`，
+  Worker 对缺失/伪造值统一收敛为 `classic`。
 - kill switch：移除 `HOME_EXPERIENCE_ENABLED` 或改为非 `true` 值。关闭后必须再验证 query/cookie
   均回经典版且 `/_home/feed` 不开放。
 - 没有 D1 migration；回滚仍须按顺序关 flag、回退 Pages deployment、回退 Worker version、
   恢复 bindings/secrets，不能只停在“flag 已关”。
 - staging 唯一执行入口：
   [`reviews/waterfall-ssr-staging-change-packet.md`](reviews/waterfall-ssr-staging-change-packet.md)。
-  该包要求经典版 RUM 观察完成、clean G0、一次冻结授权、五端验收、10-run 对照、kill-switch 演练；
-  明确排除 production。
+  该包要求 clean G0、一次冻结授权、五端验收、10-run 对照与 kill-switch 演练；RUM 作为上线后
+  观察，不阻塞 staging 或代码交付；staging 包本身明确排除 production。
+- 双视图 benchmark 的 `?view=` 只校验目标 cohort；实际测量写有限 `aifeeds_view` cookie 后访问
+  canonical `/`，从而覆盖真实 opt-in 用户的 SWR 路径。报告逐样本记录 DOM `ssr_state`、
+  SSR/freshness header 与 age；浏览器 warm 和 edge fresh 必须分开解释。
 - 外部合成观测：`.github/workflows/sitespeed-external.yml` 只在隔离 feature branch 新增该文件时
   自动运行，也保留手动入口；GitHub 托管 runner 对生产首页执行移动/桌面各 5 次只读导航，只上传
   14 天 artifact。workflow 固定 `contents: read`、不读取 secret、不包含部署或远端管理命令，不能替代

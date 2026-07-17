@@ -1,16 +1,16 @@
 # 首页瀑布流 SSR staging 变更包
 
-状态：`PREPARED / NOT APPLIED`
+状态：`LOCAL G0 COMPLETE / NOT APPLIED`
 
-当前决定：`NO-GO`（等待经典版 RUM 观察窗结束与 staging 现状只读盘点）
+当前决定：`NO-GO`（本地独立复审已 GO；等待集成分支冻结、staging 现状只读盘点与远端 G0）
 
 本变更包把首页经典版/瀑布版并行方案的 staging 配置、部署、验收、kill switch 和回滚收敛为一次
-可审阅操作。它不授权当前执行，不包含生产，不允许合并 `main`，也不允许把 staging 通过自动解释为
-生产放量批准。
+可审阅操作。用户已授权持续完成计划内开发、测试与发布；本文件仍不包含 production，也不允许把
+staging 通过自动解释为生产放量。RUM 是 production 上线后的观察任务，不是 staging 或代码交付门。
 
 ## 1. 范围与风险
 
-- 分支：`codex/waterfall-ssr-rum-parallel`。
+- 分支：`codex/waterfall-ssr-main-sync`。
 - 服务：`xlist-api-staging` 与 `xlist-dashboard-staging`。
 - 用户面：staging 匿名首页；无偏好时仍为经典版，瀑布版只由显式 `?view=waterfall` 或有效 cookie 进入。
 - 数据面：只读现有 `items`；没有 D1 migration、回填或写入。
@@ -54,8 +54,10 @@ roxor 只需批准这一个冻结清单。该批准同时覆盖清单内的 stag
 
 进入 staging 写操作前必须同时满足：
 
-- 当前经典版 RUM 观察窗完成；主 cohort 每阶段累计至少 48 小时且至少 100 个 LCP 样本。
 - 分支包含最新 `origin/main`，工作区 clean，冻结 commit 后不再修改代码。
+- `dist/waterfall.html` 有且仅有一个 64 位 `aifeeds-build-id`，placeholder 已消失；verifier 归一
+  identity 槽后复算整个 `dist` artifact graph 并与该值完全一致。相同 artifact 重复构建 identity
+  稳定；同一 commit 的不同 mode/env 产物 identity 不同；回滚同一 artifact 能回到对应 namespace。
 - Dashboard：lint、全量 unit、build、Functions tests/typecheck、经典首页 E2E 全绿。
 - 瀑布流本地 HTTPS fixture：五项目 30/30 全绿，覆盖无 JS SSR、水合、CLS、键盘、触控、
   `Secure` cookie、加载更多、Drawer 与 fail-open。
@@ -65,6 +67,12 @@ roxor 只需批准这一个冻结清单。该批准同时覆盖清单内的 stag
   必须在证据中解释并审阅，不能静默接受。
 
 任一项失败为 `NO-GO`，不得靠跳过测试或复用旧 evidence 继续。
+
+2026-07-17 本地 G0 证据：Dashboard unit `329/329`、Functions `23/23`、Worker
+`812/812`、root contracts `187 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
+`32 pass / 83 role-skips`；lint、production build、构建身份 verifier 与相关 typecheck 均通过。
+首次浏览器命令只因受限执行环境拒绝监听 `127.0.0.1:4187` 而未启动测试；在允许本地监听后，
+同一未修改测试命令全绿，不计作产品失败。
 
 ## 5. 配置与部署顺序
 
@@ -104,6 +112,9 @@ npm run benchmark:home-views -- \
   --output "output/home-view-benchmarks/staging-gate"
 ```
 
+- 两个 `?view=` 只用于校验有限 cohort；benchmark 会写入对应 `aifeeds_view` cookie 后访问 canonical
+  `/`，避免 QA query 绕过公共 SWR。每条样本必须保留 `ssr_state`、`X-AIFeeds-Home-SSR`、
+  freshness 与 age，不能把浏览器 warm 冒充 edge fresh。
 - benchmark 定义的 desktop/mobile × view 各至少 10 次 cold 样本，并保留 warm 样本作诊断。
 - 每个设备 waterfall p75 LCP 不得比 classic p75 差超过 10%。
 - 每个设备/view CLS p75 `<=0.1`，横向溢出为 0。
@@ -151,6 +162,7 @@ kill switch 任一步失败为 `NO-GO`，直接执行第 8 节完整回滚。
 - Support/用户侧：staging 为 opt-in，无生产用户动作；若 staging 链接用于验收，明确“经典版为默认，
   瀑布版为实验入口”。
 
-当前最终决定：`NO-GO`。理由是经典版 RUM 窗口尚未在本变更包中记录为完成，且 staging 远端 binding
-现状与回滚对象尚未冻结。两项完成、G0 全绿并取得第 3 节一次性授权后，决定可升级为
-`GO WITH CONDITIONS`；staging 全绿仍不等于 production `GO`。
+当前最终决定：`NO-GO`。本地独立复审已 `GO`（Critical/Important 均为 0）；集成分支冻结，以及
+staging 远端 binding 现状与回滚对象记录尚未完成。分支冻结、远端只读盘点和远端 G0 全绿后，决定可升级为
+`GO WITH CONDITIONS`；staging 全绿仍不等于 production `GO`。生产上线后再按
+`view_mode × ssr_state × device × region` 累积 RUM，样本门槛只用于确认长期收益或后续扩大默认范围。

@@ -68,6 +68,31 @@ export function assertSafeViewUrl(value) {
   return url;
 }
 
+export function benchmarkNavigationTarget(value, view) {
+  if (view !== "classic" && view !== "waterfall") {
+    throw new Error("benchmark view must be classic or waterfall");
+  }
+  const url = assertSafeViewUrl(value);
+  const queryKeys = [...url.searchParams.keys()];
+  if (
+    queryKeys.length > 1
+    || (queryKeys.length === 1 && queryKeys[0] !== "view")
+  ) {
+    throw new Error("benchmark accepts only the finite view query");
+  }
+  const queryView = url.searchParams.get("view");
+  if (queryView !== null && queryView !== view) {
+    throw new Error("benchmark URL view does not match the requested cohort");
+  }
+  url.search = "";
+  url.hash = "";
+  return {
+    navigationUrl: url.href,
+    cookieUrl: url.href,
+    cookieValue: view,
+  };
+}
+
 export function assertSafeOutputPath(value, cwd = process.cwd()) {
   const allowedRoot = path.resolve(cwd, "output/home-view-benchmarks");
   const resolved = path.resolve(cwd, value);
@@ -178,6 +203,7 @@ async function readPageMetrics(page) {
       + (navigation?.transferSize || navigation?.encodedBodySize || 0);
     return {
       mode: document.documentElement.dataset.homeView || "unknown",
+      ssr_state: document.documentElement.dataset.homeSsr || "classic",
       ttfb_ms: navigation ? navigation.responseStart - navigation.startTime : 0,
       fcp_ms: paints["first-contentful-paint"] || 0,
       lcp_ms: globalThis.__aifeedsHomePerf?.lcp || 0,
@@ -196,15 +222,39 @@ async function readPageMetrics(page) {
 async function measureOne(browser, { url, view, device, cache }) {
   const context = await browser.newContext(DEVICES[device]);
   await installObservers(context);
+  const target = benchmarkNavigationTarget(url, view);
+  await context.addCookies([{
+    name: "aifeeds_view",
+    value: target.cookieValue,
+    url: target.cookieUrl,
+    sameSite: "Lax",
+  }]);
   const page = await context.newPage();
   try {
-    if (cache === "warm") await page.goto(url, { waitUntil: "load", timeout: 30_000 });
-    await page.goto(url, { waitUntil: "load", timeout: 30_000 });
+    if (cache === "warm") {
+      await page.goto(target.navigationUrl, { waitUntil: "load", timeout: 30_000 });
+    }
+    const response = await page.goto(target.navigationUrl, { waitUntil: "load", timeout: 30_000 });
+    const headers = response ? await response.allHeaders() : {};
     const metrics = await readPageMetrics(page);
+    if (metrics.mode !== view) {
+      throw new Error(`expected ${view} document, received ${metrics.mode}`);
+    }
+    if (view === "waterfall" && metrics.ssr_articles < 12) {
+      throw new Error(`waterfall SSR returned only ${metrics.ssr_articles} articles`);
+    }
+    if (metrics.horizontal_overflow_px > 0) {
+      throw new Error(`horizontal overflow: ${metrics.horizontal_overflow_px}px`);
+    }
+    const rawAge = Number.parseInt(headers["x-aifeeds-home-age"] ?? "", 10);
     return {
       view,
       device,
       cache,
+      navigation_url: target.navigationUrl,
+      ssr_header: headers["x-aifeeds-home-ssr"] ?? "missing",
+      ssr_freshness: headers["x-aifeeds-home-freshness"] ?? "missing",
+      ssr_age_seconds: Number.isFinite(rawAge) ? rawAge : null,
       ...Object.fromEntries(Object.entries(metrics).map(([key, value]) => [key, typeof value === "number" ? round(value) : value])),
     };
   } finally {

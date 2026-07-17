@@ -37,8 +37,14 @@
     [`docs/reviews/waterfall-ssr-staging-change-packet.md`](docs/reviews/waterfall-ssr-staging-change-packet.md)。
   - [x] 2026-07-17 已把旧 waterfall 分支合入包含 A–E 本地封板代码的
     `codex/waterfall-ssr-main-sync` 隔离分支。
-  - [ ] 把 30 秒被动 cache 升级为 fresh 60 秒、max-stale 10 分钟的手动 SWR，
-    完成并发 stale single-flight、失败保留好快照和诊断 header。
+  - [x] 已把 30 秒被动 cache 升级为 fresh 60 秒、max-stale 10 分钟、retention 24 小时的
+    手动 SWR：并发 stale single-flight、失败保留好快照、超窗同步刷新后 classic fail-open、
+    final-artifact+hostname 隔离 cache namespace、`freshness/age` 诊断 header 与
+    `generated|fresh|stale|fallback` 有限遥测均有 TDD。
+  - [x] F 已用 final-artifact identity + hostname 隔离 cache namespace 修复跨部署旧 HTML 风险，并重跑
+    最终本地 G0：Dashboard 329/329、Functions 23/23、Worker 812/812、root contracts 187 pass/2 skips、
+    waterfall 五设备 30/30、classic 32 pass / 83 role-skips 全绿；同一独立 reviewer 三轮复审最终
+    `GO`（Critical/Important 均为 0），唯一 `build:ssr` finalize minor 也已修复并复验。
   - [ ] 在 perf-staging 执行 classic/waterfall × mobile/desktop × cold/warm 对照；
     staging 全绿后再进入 production 小流量 canary，RUM 作为上线后观察而非代码交付前置门。
 

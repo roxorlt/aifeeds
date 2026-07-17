@@ -49,7 +49,9 @@ test("image timing keeps its sampling while excluding same-origin static assets"
 
 test("every performance device payload carries a finite home view cohort", () => {
   assert.match(vitals, /resolveTelemetryHomeView\(document\.documentElement\)/);
+  assert.match(vitals, /resolveTelemetryHomeSsrState\(document\.documentElement\)/);
   assert.match(vitals, /view_mode:/);
+  assert.match(vitals, /ssr_state:/);
   assert.equal(
     (vitals.match(/\.\.\.getPerformanceDeviceMeta\(\)/g) ?? []).length >= 3,
     true,

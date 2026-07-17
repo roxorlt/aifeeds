@@ -9,10 +9,16 @@ import {
 
 export const SSR_MARKUP_SENTINEL = "<!--__AIFEEDS_SSR_MARKUP__-->";
 export const INITIAL_DATA_SENTINEL = "__AIFEEDS_INITIAL_DATA__";
+type HomeSsrState = "classic" | "generated" | "fresh" | "stale" | "fallback";
 
 const HOME_FEED_PATH = "/_home/feed";
 const HOME_API_TIMEOUT_MS = 2_000;
-const HOME_CACHE_TTL_SECONDS = 30;
+const HOME_CACHE_FRESH_SECONDS = 60;
+const HOME_CACHE_MAX_STALE_SECONDS = 10 * 60;
+const HOME_CACHE_RETENTION_SECONDS = 24 * 60 * 60;
+const HOME_CACHE_GENERATED_AT = "X-AIFeeds-Home-Generated-At";
+const HOME_CACHE_AGE = "X-AIFeeds-Home-Age";
+const HOME_CACHE_FRESHNESS = "X-AIFeeds-Home-Freshness";
 
 export type FetchBinding = Readonly<{
   fetch(request: Request): Promise<Response>;
@@ -34,7 +40,30 @@ export type HomeRuntimeDeps = Readonly<{
   renderWaterfall(data: HomeFeedResponse, location: string): Promise<string>;
   cache?: HomeRuntimeCache;
   waitUntil?(promise: Promise<unknown>): void;
+  now?(): number;
 }>;
+
+type GeneratedWaterfall = Readonly<{
+  html: string;
+  headers: Headers;
+  generatedAtMs: number;
+}>;
+
+type WaterfallTemplate = Readonly<{
+  html: string;
+  headers: Headers;
+  buildIdentity: string;
+}>;
+
+type WaterfallRefreshFlight = Readonly<{
+  generated: Promise<GeneratedWaterfall>;
+  completed: Promise<void>;
+}>;
+
+const waterfallRefreshFlights = new WeakMap<
+  HomeRuntimeCache,
+  Map<string, WaterfallRefreshFlight>
+>();
 
 function htmlHeaders(source?: Headers): Headers {
   const headers = new Headers(source);
@@ -62,12 +91,23 @@ function responseForMethod(
   return new Response(request.method === "HEAD" ? null : body, init);
 }
 
-function injectHomeMetadata(html: string, mode: "classic" | "waterfall"): string {
+function stampHomeSsrState(html: string, state: HomeSsrState): string {
+  if (/data-home-ssr="[^"]*"/iu.test(html)) {
+    return html.replace(/data-home-ssr="[^"]*"/iu, `data-home-ssr="${state}"`);
+  }
+  return html.replace(/<html\b/iu, `<html data-home-ssr="${state}"`);
+}
+
+function injectHomeMetadata(
+  html: string,
+  mode: "classic" | "waterfall",
+  state: HomeSsrState = mode === "waterfall" ? "generated" : "classic",
+): string {
   if (!/<html\b/iu.test(html)) throw new Error("missing html element");
-  return html.replace(
+  return stampHomeSsrState(html.replace(
     /<html\b/iu,
     `<html data-home-view-available="true" data-home-view="${mode}"`,
-  );
+  ), state);
 }
 
 function safeInitialJson(data: HomeFeedResponse): string {
@@ -100,7 +140,13 @@ async function classicResponse(
   try {
     const asset = await env.ASSETS.fetch(assetRequest(request, "/index.html"));
     let html = await asset.text();
-    if (available) html = injectHomeMetadata(html, "classic");
+    if (available) {
+      html = injectHomeMetadata(
+        html,
+        "classic",
+        diagnostic === "fallback" ? "fallback" : "classic",
+      );
+    }
     const headers = htmlHeaders(asset.headers);
     headers.set("X-AIFeeds-Home-SSR", diagnostic);
     headers.set("Cache-Control", "private, no-store");
@@ -111,9 +157,16 @@ async function classicResponse(
     headers.set("X-AIFeeds-Home-SSR", diagnostic);
     headers.set("Cache-Control", "private, no-store");
     if (diagnostic === "fallback") headers.set("Set-Cookie", expireHomeViewCookie());
+    const fallbackHtml = available
+      ? injectHomeMetadata(
+          "<!doctype html><html lang=\"zh-CN\"><body><a href=\"/\">返回经典首页</a></body></html>",
+          "classic",
+          diagnostic === "fallback" ? "fallback" : "classic",
+        )
+      : "<!doctype html><html lang=\"zh-CN\"><body><a href=\"/\">返回经典首页</a></body></html>";
     return responseForMethod(
       request,
-      "<!doctype html><html lang=\"zh-CN\"><body><a href=\"/\">返回经典首页</a></body></html>",
+      fallbackHtml,
       { status: 200, headers },
     );
   }
@@ -160,23 +213,196 @@ async function fetchHomeFeed(
   return { data, response };
 }
 
-function waterfallCacheRequest(): Request {
-  return new Request("https://aifeeds-home-cache.invalid/waterfall-root-v1");
+function waterfallCacheRequest(
+  request: Request,
+  buildIdentity: string,
+): Request {
+  const hostname = encodeURIComponent(new URL(request.url).hostname.toLowerCase());
+  return new Request(
+    `https://aifeeds-home-cache.invalid/${buildIdentity}/${hostname}/waterfall-root`,
+  );
+}
+
+function nowMs(deps: HomeRuntimeDeps): number {
+  const value = deps.now?.() ?? Date.now();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function publicWaterfallCacheEligible(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const url = new URL(request.url);
+  if (url.pathname !== "/" || url.search !== "") return false;
+  const cookie = request.headers.get("Cookie") ?? "";
+  return !/(?:^|;\s*)xlist_sid(?:_stg)?=/u.test(cookie);
+}
+
+function cacheAgeSeconds(response: Response, currentTimeMs: number): number | null {
+  const generatedAt = Date.parse(response.headers.get(HOME_CACHE_GENERATED_AT) ?? "");
+  if (!Number.isFinite(generatedAt)) return null;
+  return Math.max(0, Math.floor((currentTimeMs - generatedAt) / 1_000));
 }
 
 async function cachedWaterfall(
   request: Request,
   deps: HomeRuntimeDeps,
-): Promise<Response | null> {
-  if (!deps.cache || new URL(request.url).pathname !== "/") return null;
-  const cached = await deps.cache.match(waterfallCacheRequest());
-  if (!cached) return null;
+  cacheRequest: Request,
+): Promise<{ response: Response; ageSeconds: number } | null> {
+  if (!deps.cache || !publicWaterfallCacheEligible(request)) return null;
+  let cached: Response | undefined;
+  try {
+    cached = await deps.cache.match(cacheRequest);
+  } catch {
+    return null;
+  }
+  if (!cached || cached.status !== 200) return null;
+  const ageSeconds = cacheAgeSeconds(cached, nowMs(deps));
+  if (ageSeconds === null) return null;
   const headers = htmlHeaders(cached.headers);
+  const freshness: "fresh" | "stale" = ageSeconds <= HOME_CACHE_FRESH_SECONDS
+    ? "fresh"
+    : "stale";
+  headers.set(
+    "X-AIFeeds-Home-SSR",
+    freshness === "fresh" ? "waterfall-cache" : "waterfall-stale",
+  );
+  headers.set(HOME_CACHE_FRESHNESS, freshness);
+  headers.set(HOME_CACHE_AGE, String(Math.min(ageSeconds, HOME_CACHE_RETENTION_SECONDS)));
+  headers.set("Cache-Control", "private, no-store");
+  return {
+    ageSeconds,
+    response: responseForMethod(request, stampHomeSsrState(await cached.text(), freshness), {
+      status: cached.status,
+      headers,
+    }),
+  };
+}
+
+async function loadWaterfallTemplate(
+  request: Request,
+  env: HomeRuntimeEnv,
+): Promise<WaterfallTemplate> {
+  const templateResponse = await env.ASSETS.fetch(assetRequest(request, "/waterfall.html"));
+  if (!templateResponse.ok) throw new Error("waterfall template unavailable");
+  const html = await templateResponse.text();
+  if (
+    !html.includes(SSR_MARKUP_SENTINEL)
+    || !html.includes(INITIAL_DATA_SENTINEL)
+  ) {
+    throw new Error("waterfall template markers missing");
+  }
+  const buildIdentity = html.match(
+    /<meta\s+name=["']aifeeds-build-id["']\s+content=["']([a-f0-9]{64})["'][^>]*>/iu,
+  )?.[1];
+  if (!buildIdentity) throw new Error("waterfall build identity missing");
+  return {
+    html,
+    headers: htmlHeaders(templateResponse.headers),
+    buildIdentity,
+  };
+}
+
+async function generateWaterfall(
+  request: Request,
+  env: HomeRuntimeEnv,
+  deps: HomeRuntimeDeps,
+  template: WaterfallTemplate,
+): Promise<GeneratedWaterfall> {
+  const url = new URL(request.url);
+  const { data, response: apiResponse } = await fetchHomeFeed(
+    env,
+    boundedFeedSearch(new URL("https://internal/?limit=24")),
+  );
+  const markup = await deps.renderWaterfall(data, `${url.pathname}${url.search}`);
+  const html = injectHomeMetadata(
+    template.html
+      .replace(SSR_MARKUP_SENTINEL, markup)
+      .replace(INITIAL_DATA_SENTINEL, safeInitialJson(data)),
+    "waterfall",
+  );
+  const headers = htmlHeaders(template.headers);
+  const apiTiming = apiResponse.headers.get("Server-Timing");
+  if (apiTiming) headers.set("Server-Timing", apiTiming);
+  return {
+    html,
+    headers,
+    generatedAtMs: nowMs(deps),
+  };
+}
+
+function cacheResponse(generated: GeneratedWaterfall): Response {
+  const headers = htmlHeaders(generated.headers);
   headers.set("X-AIFeeds-Home-SSR", "waterfall-cache");
-  return responseForMethod(request, await cached.text(), {
-    status: cached.status,
+  headers.set(
+    "Cache-Control",
+    `public, max-age=0, s-maxage=${HOME_CACHE_RETENTION_SECONDS}`,
+  );
+  headers.set(HOME_CACHE_GENERATED_AT, new Date(generated.generatedAtMs).toISOString());
+  headers.delete(HOME_CACHE_AGE);
+  headers.delete(HOME_CACHE_FRESHNESS);
+  return new Response(generated.html, {
+    status: 200,
     headers,
   });
+}
+
+function startWaterfallRefresh(
+  request: Request,
+  env: HomeRuntimeEnv,
+  deps: HomeRuntimeDeps,
+  template: WaterfallTemplate,
+  cacheRequest: Request,
+): { flight: WaterfallRefreshFlight; started: boolean } {
+  const cache = deps.cache;
+  if (!cache) throw new Error("waterfall cache unavailable");
+  let flights = waterfallRefreshFlights.get(cache);
+  if (!flights) {
+    flights = new Map();
+    waterfallRefreshFlights.set(cache, flights);
+  }
+  const flightKey = cacheRequest.url;
+  const active = flights.get(flightKey);
+  if (active) return { flight: active, started: false };
+
+  const generated = generateWaterfall(request, env, deps, template);
+  const completed = generated
+    .then(async (value) => {
+      await cache.put(cacheRequest, cacheResponse(value));
+    })
+    .finally(() => {
+      const activeFlights = waterfallRefreshFlights.get(cache);
+      if (activeFlights?.get(flightKey) === flight) {
+        activeFlights.delete(flightKey);
+        if (activeFlights.size === 0) waterfallRefreshFlights.delete(cache);
+      }
+    });
+  const flight: WaterfallRefreshFlight = { generated, completed };
+  flights.set(flightKey, flight);
+  return { flight, started: true };
+}
+
+function keepRefreshAlive(
+  deps: HomeRuntimeDeps,
+  flight: WaterfallRefreshFlight,
+  started: boolean,
+): void {
+  if (!started) return;
+  const guarded = flight.completed.catch(() => {
+    // Keep the last known-good snapshot. The next request may retry.
+  });
+  if (deps.waitUntil) deps.waitUntil(guarded);
+  else void guarded;
+}
+
+function generatedWaterfallResponse(
+  request: Request,
+  generated: GeneratedWaterfall,
+): Response {
+  const headers = htmlHeaders(generated.headers);
+  headers.set("X-AIFeeds-Home-SSR", "waterfall");
+  headers.set(HOME_CACHE_FRESHNESS, "generated");
+  headers.set(HOME_CACHE_AGE, "0");
+  headers.set("Cache-Control", "private, no-store");
+  return responseForMethod(request, generated.html, { status: 200, headers });
 }
 
 async function renderWaterfallResponse(
@@ -184,50 +410,29 @@ async function renderWaterfallResponse(
   env: HomeRuntimeEnv,
   deps: HomeRuntimeDeps,
 ): Promise<Response> {
-  const cacheHit = await cachedWaterfall(request, deps);
-  if (cacheHit) return cacheHit;
-
-  const url = new URL(request.url);
-  const [{ data, response: apiResponse }, templateResponse] = await Promise.all([
-    fetchHomeFeed(env, boundedFeedSearch(new URL("https://internal/?limit=24"))),
-    env.ASSETS.fetch(assetRequest(request, "/waterfall.html")),
-  ]);
-  if (!templateResponse.ok) throw new Error("waterfall template unavailable");
-  const template = await templateResponse.text();
-  if (
-    !template.includes(SSR_MARKUP_SENTINEL)
-    || !template.includes(INITIAL_DATA_SENTINEL)
-  ) {
-    throw new Error("waterfall template markers missing");
-  }
-
-  const markup = await deps.renderWaterfall(data, `${url.pathname}${url.search}`);
-  const html = injectHomeMetadata(
-    template
-      .replace(SSR_MARKUP_SENTINEL, markup)
-      .replace(INITIAL_DATA_SENTINEL, safeInitialJson(data)),
-    "waterfall",
-  );
-  const headers = htmlHeaders(templateResponse.headers);
-  headers.set("X-AIFeeds-Home-SSR", "waterfall");
-  headers.set(
-    "Cache-Control",
-    `public, max-age=0, s-maxage=${HOME_CACHE_TTL_SECONDS}`,
-  );
-  const apiTiming = apiResponse.headers.get("Server-Timing");
-  if (apiTiming) headers.set("Server-Timing", apiTiming);
-  const response = responseForMethod(request, html, { status: 200, headers });
-
-  if (deps.cache && url.pathname === "/" && request.method === "GET") {
-    const cacheHeaders = new Headers(headers);
-    cacheHeaders.set("X-AIFeeds-Home-SSR", "waterfall-cache");
-    const put = deps.cache.put(
-      waterfallCacheRequest(),
-      new Response(html, { status: 200, headers: cacheHeaders }),
+  const template = await loadWaterfallTemplate(request, env);
+  if (!deps.cache || !publicWaterfallCacheEligible(request)) {
+    return generatedWaterfallResponse(
+      request,
+      await generateWaterfall(request, env, deps, template),
     );
-    deps.waitUntil?.(put);
   }
-  return response;
+
+  const cacheRequest = waterfallCacheRequest(request, template.buildIdentity);
+  const cached = await cachedWaterfall(request, deps, cacheRequest);
+  if (cached && cached.ageSeconds <= HOME_CACHE_FRESH_SECONDS) {
+    return cached.response;
+  }
+  if (cached && cached.ageSeconds <= HOME_CACHE_MAX_STALE_SECONDS) {
+    const refresh = startWaterfallRefresh(request, env, deps, template, cacheRequest);
+    keepRefreshAlive(deps, refresh.flight, refresh.started);
+    return cached.response;
+  }
+
+  const refresh = startWaterfallRefresh(request, env, deps, template, cacheRequest);
+  keepRefreshAlive(deps, refresh.flight, refresh.started);
+  const generated = await refresh.flight.generated;
+  return generatedWaterfallResponse(request, generated);
 }
 
 async function proxyHomeFeed(

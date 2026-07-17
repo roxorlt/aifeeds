@@ -90,6 +90,7 @@ const API_ERROR_MESSAGE_CATEGORIES = new Set([
   'request_error',
 ]);
 const HOME_VIEW_MODES = new Set(['classic', 'waterfall']);
+const HOME_SSR_STATES = new Set(['classic', 'generated', 'fresh', 'stale', 'fallback']);
 const HOME_VIEW_ENTRIES = new Set(['appbar']);
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
@@ -325,6 +326,10 @@ export function prepareEventPayload(
     payload.view_mode = typeof payload.view_mode === 'string'
       && HOME_VIEW_MODES.has(payload.view_mode)
       ? payload.view_mode
+      : 'classic';
+    payload.ssr_state = typeof payload.ssr_state === 'string'
+      && HOME_SSR_STATES.has(payload.ssr_state)
+      ? payload.ssr_state
       : 'classic';
     const country = trustedEdgeCode(cf?.country, /^[A-Z0-9]{2}$/);
     const colo = trustedEdgeCode(cf?.colo, /^[A-Z0-9]{3}$/);

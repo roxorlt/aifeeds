@@ -43,6 +43,7 @@ describe('performance event ingest', () => {
     expect(payload).toEqual({
       client_field: 'kept',
       view_mode: 'classic',
+      ssr_state: 'classic',
       edge_country: 'CN',
       edge_colo: 'HKG',
     });
@@ -54,7 +55,7 @@ describe('performance event ingest', () => {
     const prepared = prepareEventPayload('perf_api', { edge_country: 'US', edge_colo: 'SJC' }, undefined);
     expect(prepared).toEqual({
       ok: true,
-      value: JSON.stringify({ view_mode: 'classic' }),
+      value: JSON.stringify({ view_mode: 'classic', ssr_state: 'classic' }),
     });
   });
 
@@ -96,14 +97,46 @@ describe('performance event ingest', () => {
       view_mode: 'waterfall',
     }, undefined)).toEqual({
       ok: true,
-      value: JSON.stringify({ value: 1_200, view_mode: 'waterfall' }),
+      value: JSON.stringify({
+        value: 1_200,
+        view_mode: 'waterfall',
+        ssr_state: 'classic',
+      }),
     });
     expect(prepareEventPayload('perf_lcp', {
       value: 1_200,
       view_mode: 'forged',
     }, undefined)).toEqual({
       ok: true,
-      value: JSON.stringify({ value: 1_200, view_mode: 'classic' }),
+      value: JSON.stringify({
+        value: 1_200,
+        view_mode: 'classic',
+        ssr_state: 'classic',
+      }),
+    });
+    expect(prepareEventPayload('perf_lcp', {
+      value: 1_200,
+      view_mode: 'waterfall',
+      ssr_state: 'stale',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({
+        value: 1_200,
+        view_mode: 'waterfall',
+        ssr_state: 'stale',
+      }),
+    });
+    expect(prepareEventPayload('perf_lcp', {
+      value: 1_200,
+      view_mode: 'waterfall',
+      ssr_state: '<script>',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({
+        value: 1_200,
+        view_mode: 'waterfall',
+        ssr_state: 'classic',
+      }),
     });
   });
 
@@ -120,14 +153,18 @@ describe('performance event ingest', () => {
       const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
       expect(prepared).toEqual({
         ok: true,
-        value: JSON.stringify({ nettype, view_mode: 'classic' }),
+        value: JSON.stringify({
+          nettype,
+          view_mode: 'classic',
+          ssr_state: 'classic',
+        }),
       });
     }
     for (const nettype of ['4G', '', 4, { value: '4g' }]) {
       const prepared = prepareEventPayload('perf_nav', { nettype }, undefined);
       expect(prepared).toEqual({
         ok: true,
-        value: JSON.stringify({ view_mode: 'classic' }),
+        value: JSON.stringify({ view_mode: 'classic', ssr_state: 'classic' }),
       });
     }
   });
@@ -169,6 +206,7 @@ describe('performance event ingest', () => {
     expect(JSON.parse(String(bound[0][3]))).toEqual({
       endpoint: 'items',
       view_mode: 'classic',
+      ssr_state: 'classic',
       edge_country: 'CN',
       edge_colo: 'HKG',
     });

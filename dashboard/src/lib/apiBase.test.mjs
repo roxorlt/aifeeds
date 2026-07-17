@@ -119,18 +119,29 @@ test("request and public Worker bases keep share targets in the correct environm
   }
 });
 
-test("package scripts define isolated perf and production same-origin builds without changing normal builds", () => {
+test("package scripts define isolated perf and production same-origin builds with home identity verification", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(dashboardRoot, "package.json"), "utf8"));
 
-  assert.equal(pkg.scripts.build, "tsc -b && vite build");
-  assert.equal(pkg.scripts["build:staging"], "tsc -b && vite build --mode staging");
+  const finalizeHomeBuildIdentity =
+    " && npm run stamp:home-build-id && npm run verify:home-build-id";
+  assert.equal(pkg.scripts["stamp:home-build-id"], "node scripts/stamp-home-build-identity.mjs");
+  assert.equal(pkg.scripts["verify:home-build-id"], "node scripts/verify-home-build-identity.mjs");
+  assert.equal(pkg.scripts.build, `tsc -b && vite build${finalizeHomeBuildIdentity}`);
+  assert.equal(
+    pkg.scripts["build:staging"],
+    `tsc -b && vite build --mode staging${finalizeHomeBuildIdentity}`,
+  );
   assert.equal(
     pkg.scripts["build:perf-staging"],
-    "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build --mode staging",
+    `VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build --mode staging${finalizeHomeBuildIdentity}`,
   );
   assert.equal(
     pkg.scripts["build:same-origin"],
-    "VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build",
+    `VITE_API_SAME_ORIGIN=true tsc -b && VITE_API_SAME_ORIGIN=true vite build${finalizeHomeBuildIdentity}`,
+  );
+  assert.equal(
+    pkg.scripts["build:ssr"],
+    `npm run typecheck:functions && vite build${finalizeHomeBuildIdentity}`,
   );
   assert.equal(pkg.scripts["predeploy:same-origin"], undefined);
   assert.doesNotMatch(pkg.scripts["deploy:same-origin"], /wrangler|npm run build/);

@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Turn the validated classic/waterfall prototype into a production-integrable, default-off Cloudflare Pages SSR experience without merging, pushing, staging, or production deployment during the current RUM window.
+**Goal:** Turn the validated classic/waterfall prototype into a production-integrable, default-off Cloudflare Pages SSR experience. The original local-only freeze has since been superseded by the approved A–G follow-up plan; RUM is now a post-release observation task rather than a staging/code-delivery prerequisite.
 
 **Architecture:** The existing `index.html` and `main.tsx` remain the classic entry. A second `waterfall.html` and `waterfall-main.tsx` form an independently downloadable SSR/hydration entry. A narrowly routed Pages Function selects the experience from a bounded query/cookie only when `HOME_EXPERIENCE_ENABLED=true`, calls the API Worker through a `HOME_API` Service Binding, renders public waterfall HTML, and fails open to the classic asset on any binding, data, template, or rendering failure. The Worker exposes a token-scoped mixed-source `/api/home-feed` endpoint with stable cursor pagination and bounded per-source candidates.
 
@@ -223,7 +223,7 @@ Add `waterfall.html` as a Vite HTML input. Its root and JSON data island contain
 
 **Step 4: Implement Pages Function**
 
-Use `HOME_EXPERIENCE_ENABLED`, `HOME_API`, and `HOME_RENDERER_TOKEN`. Render React with the edge server API, retrieve static templates through `ASSETS.fetch`, use a 30-second shared cache only for public waterfall HTML, set `X-AIFeeds-Home-SSR` diagnostics, and fail open on every exceptional path.
+Use `HOME_EXPERIENCE_ENABLED`, `HOME_API`, and `HOME_RENDERER_TOKEN`. Render React with the edge server API, retrieve static templates through `ASSETS.fetch`, and use the final-artifact- and hostname-namespaced manual SWR cache only for public waterfall HTML (`fresh=60s`, `max-stale=10min`, `retention=24h`). The final-artifact identity is stamped only after Vite emits the complete `dist` graph and is independently recomputed by the verifier, so two mode/env builds of the same commit cannot share stale HTML. Set `X-AIFeeds-Home-SSR` diagnostics and fail open on every exceptional path. A missing/invalid build identity must fail open instead of reusing an unversioned cache key.
 
 `_routes.json` must invoke Functions only for `/` and the existing drawer deep-link patterns; static assets, search, settings, auth, daily pages, and APIs remain static/independent.
 
@@ -345,7 +345,7 @@ Production remains explicitly excluded.
 
 Require:
 
-- current classic RUM window complete;
+- RUM collection is configured as a post-release observation and does not block staging;
 - staging per device/view at least 10 cold runs;
 - waterfall p75 LCP no worse than classic by more than 10%;
 - CLS `<=0.1`;
