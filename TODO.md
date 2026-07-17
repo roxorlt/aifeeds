@@ -8,6 +8,19 @@
 
 ## 进行中
 
+### A6. 首页瀑布流 SSR 与经典版并行原型（2026-07-17，branch `codex/waterfall-ssr-rum-parallel`）
+
+> 与 A5 上线后 RUM 并行，只做本地/隔离环境工作；当前生产仍默认经典版且保持冻结。
+> 设计：[docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md](docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md) ·
+> 实施计划：[docs/plans/2026-07-17-waterfall-ssr-rum-parallel-implementation-plan.md](docs/plans/2026-07-17-waterfall-ssr-rum-parallel-implementation-plan.md)
+
+- [x] 确定同 URL 双版本方案：无偏好时经典版；query 仅作 QA 覆盖；cookie 作为 SSR 权威偏好；用户切换后重载一次，保证 HTML、bundle 与 RUM cohort 一致。
+- [x] 完成本地 SSR 原型：经典来源分栏 + PC 三列/平板两列/移动单列瀑布；首屏 HTML 直接含 9 张卡片和安全初始 JSON；PC/移动切换、cookie 持久化和 reduced-motion 契约已验证。
+- [x] 完成安全的双视图基准 CLI：只允许 localhost/staging/perf-staging，拒绝生产域名；覆盖新/旧 × PC/移动 × 冷/热并输出 JSON/Markdown。
+- [x] GitHub Actions JavaScript runtime 升至 Node 24 major（checkout v5 / setup-node v5 / cache v5 / upload-artifact v6 / paths-filter v4），应用 Node 仍保持 22，并新增静态契约。
+- [x] 本地验证：新增测试 15/15、Dashboard 全量单测 266/266、lint、build、现有五设备 E2E 22 pass + 48 个按矩阵预期 skip；原型真实基准 8/8 组合有非零 LCP 与正确视图标签。
+- [ ] **RUM 后续门**：当前经典版观察窗完成后，再评审真实首页数据聚合接口、Cloudflare 文档渲染形态、可访问 masonry、`view_mode` 生产埋点与 staging opt-in；未另行批准前不合 main、不发布 Dashboard。
+
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 
 - [x] PC/移动端动效与性能代码实施、本地契约和恢复设计完成；RUM 改为上线后观察任务，不阻塞本地交付。
