@@ -34,7 +34,7 @@ scp "${SSH_OPTS[@]}" \
   assets/gongan-icon.png \
   "$HOST:$STAGING/assets/"
 scp "${SSH_OPTS[@]}" \
-  cc-prompts/index.html \
+  cc-prompts/*.html \
   "$HOST:$STAGING/cc-prompts/"
 
 echo "▶ sudo cp → $REMOTE_ROOT/"
@@ -42,15 +42,15 @@ ssh "${SSH_OPTS[@]}" "$HOST" "
   sudo mkdir -p $REMOTE_ROOT/assets $REMOTE_ROOT/cc-prompts
   sudo cp $STAGING/index.html $STAGING/privacy.html $STAGING/terms.html $STAGING/contact.html $STAGING/style.css $STAGING/sitemap.xml $STAGING/robots.txt $REMOTE_ROOT/
   sudo cp $STAGING/assets/gongan-icon.png $REMOTE_ROOT/assets/
-  sudo cp $STAGING/cc-prompts/index.html $REMOTE_ROOT/cc-prompts/
+  sudo cp $STAGING/cc-prompts/*.html $REMOTE_ROOT/cc-prompts/
   sudo chown www:www \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/sitemap.xml $REMOTE_ROOT/robots.txt \
-    $REMOTE_ROOT/assets/gongan-icon.png $REMOTE_ROOT/cc-prompts $REMOTE_ROOT/cc-prompts/index.html
+    $REMOTE_ROOT/assets/gongan-icon.png $REMOTE_ROOT/cc-prompts $REMOTE_ROOT/cc-prompts/*.html
   sudo chmod 644 \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/sitemap.xml $REMOTE_ROOT/robots.txt \
-    $REMOTE_ROOT/assets/gongan-icon.png $REMOTE_ROOT/cc-prompts/index.html
+    $REMOTE_ROOT/assets/gongan-icon.png $REMOTE_ROOT/cc-prompts/*.html
   sudo chmod 755 $REMOTE_ROOT/cc-prompts
   rm -rf $STAGING
 "
@@ -58,7 +58,7 @@ ssh "${SSH_OPTS[@]}" "$HOST" "
 echo "▶ smoke test"
 SCHEME=https
 curl -skI --max-time 5 https://ai-feeds.cc/ >/dev/null 2>&1 || SCHEME=http
-for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /style.css /cc-prompts/ /sitemap.xml /robots.txt; do
+for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /style.css /cc-prompts/ /cc-prompts/common-workflows.html /cc-prompts/best-practices.html /cc-prompts/how-anthropic-teams-use-claude-code.html /sitemap.xml /robots.txt; do
   code=$(curl -sk -o /dev/null -w '%{http_code}' "$SCHEME://ai-feeds.cc$path")
   echo "  $SCHEME://ai-feeds.cc$path → $code"
 done
