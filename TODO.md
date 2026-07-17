@@ -8,18 +8,25 @@
 
 ## 进行中
 
-### A6. 首页瀑布流 SSR 与经典版并行原型（2026-07-17，branch `codex/waterfall-ssr-rum-parallel`）
+### A6. 首页瀑布流 SSR 与经典版并行（2026-07-17，branch `codex/waterfall-ssr-rum-parallel`）
 
-> 与 A5 上线后 RUM 并行，只做本地/隔离环境工作；当前生产仍默认经典版且保持冻结。
+> 与 A5 上线后 RUM 并行；生产集成代码已在隔离分支完成，当前 staging/production 仍未配置、未部署。
 > 设计：[docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md](docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md) ·
-> 实施计划：[docs/plans/2026-07-17-waterfall-ssr-rum-parallel-implementation-plan.md](docs/plans/2026-07-17-waterfall-ssr-rum-parallel-implementation-plan.md)
+> 实施计划：[docs/plans/2026-07-17-waterfall-production-integration.md](docs/plans/2026-07-17-waterfall-production-integration.md) ·
+> staging 变更包：[docs/reviews/waterfall-ssr-staging-change-packet.md](docs/reviews/waterfall-ssr-staging-change-packet.md)
 
 - [x] 确定同 URL 双版本方案：无偏好时经典版；query 仅作 QA 覆盖；cookie 作为 SSR 权威偏好；用户切换后重载一次，保证 HTML、bundle 与 RUM cohort 一致。
 - [x] 完成本地 SSR 原型：经典来源分栏 + PC 三列/平板两列/移动单列瀑布；首屏 HTML 直接含 9 张卡片和安全初始 JSON；PC/移动切换、cookie 持久化和 reduced-motion 契约已验证。
 - [x] 完成安全的双视图基准 CLI：只允许 localhost/staging/perf-staging，拒绝生产域名；覆盖新/旧 × PC/移动 × 冷/热并输出 JSON/Markdown。
 - [x] GitHub Actions JavaScript runtime 升至 Node 24 major（checkout v5 / setup-node v5 / cache v5 / upload-artifact v6 / paths-filter v4），应用 Node 仍保持 22，并新增静态契约。
-- [x] 本地验证：新增测试 15/15、Dashboard 全量单测 266/266、lint、build、现有五设备 E2E 22 pass + 48 个按矩阵预期 skip；原型真实基准 8/8 组合有非零 LCP 与正确视图标签。
-- [ ] **RUM 后续门**：当前经典版观察窗完成后，再评审真实首页数据聚合接口、Cloudflare 文档渲染形态、可访问 masonry、`view_mode` 生产埋点与 staging opt-in；未另行批准前不合 main、不发布 Dashboard。
+- [x] 完成生产接口与 SSR：8 源有界候选/稳定游标、token-scoped Worker endpoint、Pages Service Binding runtime、独立 entry、30 秒公共 SSR cache、异常全量 fail-open。
+- [x] 完成可访问 UI：单一 DOM 顺序、PC 三列/平板两列/移动单列、44px 触控菜单、键盘切换、reduced-motion、加载更多与现有 Drawer 深链。
+- [x] 完成 cohort telemetry：performance `view_mode=classic|waterfall`，切换事件有限字段，Worker 丢弃伪造值。
+- [x] 完成本地生产链路 gate：HTTPS edge fixture 五项目 30/30；无 JS SSR、水合零 console error、CLS≤0.1、无横向溢出、`Secure` cookie、entry 隔离、故障回退全绿；经典首页回归 22 pass + 48 个按矩阵预期 skip。
+- [x] 完成 staging 一次性变更包：把 binding、两端同值 secret、flag、Worker→Pages 顺序、10-run 对照、kill switch 和独立回滚收敛为一次冻结授权；production 明确排除。
+- [ ] **经典版 RUM 前置门**：每阶段/主 cohort ≥48h 且 ≥100 个 LCP 样本；只阻塞 staging/production 远端写，不阻塞本地开发。
+- [ ] **单次 staging 执行**：RUM 门通过后，只读盘点远端配置并冻结一个清单；roxor 一次批准后由 Codex 完成配置、部署、五端验收、benchmark 和 kill-switch，不再逐条重复索权。
+- [ ] **production 后续决策**：仅在 staging 全绿后另行评审；不得把 staging 授权外推为合 main、production 配置或放量授权。
 
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 
