@@ -209,8 +209,16 @@ function homeSummary(item: Item, extra: ItemExtra): string {
 }
 
 function homeMeta(item: Item): string {
-  const date = item.published_at ?? item.scraped_at;
-  const parsed = Date.parse(date);
+  const rawDate = item.published_at ?? item.scraped_at;
+  const normalized = rawDate.includes("T")
+    ? rawDate
+    : rawDate.replace(" ", "T");
+  const withTimeZone = /Z$|[+-]\d{2}:?\d{2}$/iu.test(normalized)
+    ? normalized
+    : /^\d{4}-\d{2}-\d{2}$/u.test(normalized)
+      ? `${normalized}T00:00:00Z`
+      : `${normalized}Z`;
+  const parsed = Date.parse(withTimeZone);
   if (!Number.isFinite(parsed)) return "";
   return new Date(parsed).toISOString().slice(0, 10);
 }

@@ -65,6 +65,25 @@ test("card presentation is source-aware and only selects bounded internal image 
   assert.equal(JSON.stringify(model).includes("javascript:"), false);
 });
 
+test("card dates are identical across the edge UTC and browser local time zones", () => {
+  const previousTimeZone = process.env.TZ;
+  const item = {
+    ...fixture,
+    published_at: "2026-07-18 07:08:43",
+  };
+  try {
+    process.env.TZ = "UTC";
+    const edgeMeta = getHomeCardModel(item).meta;
+    process.env.TZ = "Asia/Shanghai";
+    const browserMeta = getHomeCardModel(item).meta;
+    assert.equal(edgeMeta, "2026-07-18");
+    assert.equal(browserMeta, edgeMeta);
+  } finally {
+    if (previousTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimeZone;
+  }
+});
+
 test("client pagination is same-origin, bounded, abortable, and cursor-aware", async () => {
   assert.equal(buildHomeFeedClientPath(null, 1), "/_home/feed?limit=12");
   assert.equal(
