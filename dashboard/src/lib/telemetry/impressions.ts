@@ -12,12 +12,14 @@ interface PendingObservation {
   element: Element;
   enteredAt: number;
   fired: boolean;
+  visible: boolean;
+  visibilityCycle: number;
+  onFire: () => void;
 }
 
 const pending = new WeakMap<Element, PendingObservation>();
 
 let observer: IntersectionObserver | null = null;
-let onImpressionCallback: ((el: Element) => void) | null = null;
 
 function ensureObserver(): IntersectionObserver {
   if (observer) return observer;
@@ -29,17 +31,33 @@ function ensureObserver(): IntersectionObserver {
         if (!state) continue;
         if (state.fired) continue;
 
-        if (entry.isIntersecting) {
+        const sufficientlyVisible =
+          entry.isIntersecting && entry.intersectionRatio >= VISIBLE_THRESHOLD;
+        if (!sufficientlyVisible) {
+          state.visible = false;
+          state.enteredAt = 0;
+          state.visibilityCycle += 1;
+          continue;
+        }
+
+        if (!state.visible) {
+          state.visible = true;
           state.enteredAt = now;
+          const visibilityCycle = state.visibilityCycle;
           // 1s 后检查是否还在视口里
           setTimeout(() => {
-            if (!state.fired && pending.get(entry.target) === state) {
+            if (
+              !state.fired
+              && state.visible
+              && state.visibilityCycle === visibilityCycle
+              && pending.get(entry.target) === state
+            ) {
               const stillIn = entry.target.getBoundingClientRect();
               const inViewport =
                 stillIn.top < window.innerHeight && stillIn.bottom > 0;
               if (inViewport && Date.now() - state.enteredAt >= MIN_VISIBLE_MS) {
                 state.fired = true;
-                onImpressionCallback?.(entry.target);
+                state.onFire();
               }
             }
           }, MIN_VISIBLE_MS);
@@ -51,8 +69,25 @@ function ensureObserver(): IntersectionObserver {
   return observer;
 }
 
-export function setImpressionHandler(handler: (el: Element) => void): void {
-  onImpressionCallback = handler;
+export function observeImpression(element: Element, onFire: () => void): () => void {
+  const state: PendingObservation = {
+    element,
+    enteredAt: 0,
+    fired: false,
+    visible: false,
+    visibilityCycle: 0,
+    onFire,
+  };
+  pending.set(element, state);
+  const impressionObserver = ensureObserver();
+  impressionObserver.observe(element);
+
+  return () => {
+    impressionObserver.unobserve(element);
+    if (pending.get(element) === state) {
+      pending.delete(element);
+    }
+  };
 }
 
 /**
@@ -64,38 +99,33 @@ export function setImpressionHandler(handler: (el: Element) => void): void {
 export function useImpression(onFire: () => void): React.RefCallback<Element> {
   const firedRef = useRef(false);
   const elRef = useRef<Element | null>(null);
+  const onFireRef = useRef(onFire);
+  const stopRef = useRef<(() => void) | null>(null);
+  onFireRef.current = onFire;
 
-  useEffect(() => {
-    const ob = ensureObserver();
-    return () => {
-      if (elRef.current) ob.unobserve(elRef.current);
-    };
+  useEffect(() => () => {
+    stopRef.current?.();
+    stopRef.current = null;
+    elRef.current = null;
   }, []);
 
   return (node) => {
     if (!node) {
-      if (elRef.current) {
-        ensureObserver().unobserve(elRef.current);
-        pending.delete(elRef.current);
-        elRef.current = null;
-      }
+      stopRef.current?.();
+      stopRef.current = null;
+      elRef.current = null;
       return;
     }
     if (elRef.current === node) return;
     if (firedRef.current) return;
 
+    stopRef.current?.();
     elRef.current = node;
-    pending.set(node, {
-      element: node,
-      enteredAt: 0,
-      fired: false,
-    });
-    setImpressionHandler((el) => {
-      if (el === node && !firedRef.current) {
+    stopRef.current = observeImpression(node, () => {
+      if (!firedRef.current) {
         firedRef.current = true;
-        onFire();
+        onFireRef.current();
       }
     });
-    ensureObserver().observe(node);
   };
 }
