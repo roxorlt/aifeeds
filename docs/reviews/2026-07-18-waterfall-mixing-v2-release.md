@@ -2,7 +2,7 @@
 
 日期：2026-07-18
 
-状态：`STAGING GO / PR CI PENDING`
+状态：`PRODUCTION GO / RUM OBSERVING`
 
 分支：`codex/waterfall-compact-card-prototype`
 
@@ -33,7 +33,7 @@
 
 2026-07-18 在同一工作树完成：
 
-- Dashboard unit：`348/348`。
+- Dashboard unit：主批次 `348/348`；query 续页 hotfix 后 `349/349`。
 - Worker Vitest：`50 files / 834 tests`。
 - 根目录/运维 contracts：`175 pass / 2 environment-skips`。
 - waterfall 本地 HTTPS 五设备：`30/30`。
@@ -65,7 +65,7 @@
   desktop warm `300/292ms`（`+2.7%`），mobile warm `280/276ms`（`+1.4%`）；
   waterfall CLS p75 `0`、请求数 p50 `16 vs 24`、传输 p50 约
   `135.77–139.58KB vs 317.41–323.27KB`。
-- staging 决定：`GO`。尚未完成的发布门只有 PR 全绿、合入 `main`、生产工作流和生产即时验收。
+- staging 决定：`GO`。
 
 部署前必须冻结并记录：
 
@@ -101,3 +101,26 @@
   独立接管。
 - RUM 按 `view_mode × ssr_state × device × region` 观察 7–14 天；48 小时/100 LCP 样本只用于
   判断长期收益与是否另开正式个性化过滤，不阻塞本次代码和 opt-in 发布终态。
+
+## 6. 生产执行结果
+
+- 主 PR：[#195](https://github.com/roxorlt/aifeeds/pull/195)，合入 `main`
+  `2c8bbe016853d47b9e562368eaff3d9ee7c790c9`。生产 Worker version
+  `503a8fb9-b089-4e90-a01c-31e4853d653c`、首轮 Pages deployment
+  `aec54371-f004-4bd6-9235-5a124ddb726f`；两个生产工作流均成功。
+- 首轮生产即时门发现：通过站内切换进入的 cookie 用户续页为 `200`、24→48 条、v2；但无 cookie
+  直接访问 `?view=waterfall` 后，客户端请求 `/_home/feed` 时丢失 query 偏好并收到 `404`。
+  根因不是 v2 cursor 或 Worker SQL，而是成功的 query SSR 没有持久化有限视图 cookie。
+- hotfix `71000bf9ec761e82e4f63afcef8551b541225326` 采用 TDD：先固定
+  `Set-Cookie=null` 红测，再只对有效且与实际渲染一致的 `classic|waterfall` query 写 bounded
+  cookie；无效 query 不持久化，fallback 仍优先清 cookie。主批次外本地门为 Dashboard
+  `349/349`、lint、Functions typecheck、production build、五设备 `30/30`。
+- hotfix staging Pages `e32effce-3437-45b2-a001-9d14769701f4`，更新后的五设备远端门
+  `20/20`；PR [#196](https://github.com/roxorlt/aifeeds/pull/196) 全绿后合入 `main`
+  `7a6deaa9e4c61f980362e3d9d8c0a8877e7970d0`。
+- 最终生产 Pages deployment `57243fcc-5dee-4998-b2b4-a35012a597e7`。无 cookie query 直链
+  返回 `HTTP 200`、`SSR=waterfall`、`ranking_version=2` 和精确 waterfall cookie；五设备
+  `20/20` 覆盖 no-JS SSR、2/3/5 列、无侧栏/分类 Tab、hydration/CLS、续页 `200` 与切回
+  classic。无 cookie 默认首页仍为 `HTTP 200`、`SSR=classic`。
+- 最终决定：`GO`。经典版继续默认，瀑布版 opt-in，曝光规则继续 shadow-only；RUM/外部合成观察
+  是非阻塞上线后任务，不改变本次开发、测试、staging 与生产发布已完成的状态。
