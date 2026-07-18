@@ -106,6 +106,7 @@ describe("home feed request contract", () => {
     Buffer.from(JSON.stringify({ version: 2, asOf: NOW, score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: "tomorrow", score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1.2, sortTime: NOW, id: "x" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1, sortTime: "2026-02-31 03:04:05", id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1, sortTime: NOW, id: "" })).toString("base64url"),
   ])("malformed cursor is rejected before query construction: %s", (cursor) => {
     expect(() => parseHomeFeedRequest(
@@ -240,6 +241,33 @@ describe("home feed handler and origin scope", () => {
     expect(typeof body.next_cursor).toBe("string");
     expect(JSON.stringify(body)).not.toContain("_home_score");
     expect(fake.captures.sql).not.toMatch(/\bSELECT\s+\*/i);
+  });
+
+  test("D1 naive sort timestamps emit an exact cursor that can be replayed", async () => {
+    const rows = Array.from({ length: 13 }, (_, index) => makeRow(index));
+    rows[11] = {
+      ...rows[11],
+      _sort_time: "2026-07-17 03:11:00",
+    };
+    const fake = fakeDb(rows);
+    const response = await handleHomeFeed(
+      new Request("https://worker/api/home-feed?limit=12", {
+        headers: { "X-Home-Renderer-Token": "right" },
+      }),
+      {
+        DB: fake.db as unknown as D1Database,
+        HOME_RENDERER_TOKEN: "right",
+      },
+      NOW,
+    );
+    const body = await response.json() as { next_cursor: string | null };
+
+    expect(typeof body.next_cursor).toBe("string");
+    const replay = parseHomeFeedRequest(
+      new URL(`https://worker/api/home-feed?cursor=${encodeURIComponent(body.next_cursor!)}`),
+      "2027-01-01T00:00:00.000Z",
+    );
+    expect(replay.cursor?.sortTime).toBe("2026-07-17 03:11:00");
   });
 
   test("scoped renderer token bypasses the production origin gate only for home-feed", async () => {
