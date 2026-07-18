@@ -17,7 +17,9 @@ async function setWaterfallCookie(page: Page): Promise<void> {
 async function settleLayout(page: Page): Promise<void> {
   await page.evaluate(async () => {
     await document.fonts.ready;
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => (
+      requestAnimationFrame(() => resolve())
+    )));
   });
   await page.waitForTimeout(250);
 }
