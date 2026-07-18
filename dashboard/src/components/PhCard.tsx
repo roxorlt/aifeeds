@@ -10,7 +10,13 @@
 
 import { useState } from "react";
 import type { Item, ItemExtra, MediaItem, PhMetrics } from "../types";
-import { buildResponsiveCardImage, formatCompact, optimizedAvatarUrl, parseJsonField } from "../lib/utils";
+import {
+  buildResponsiveCardImage,
+  formatCompact,
+  isAnimatedImageMedia,
+  optimizedAvatarUrl,
+  parseJsonField,
+} from "../lib/utils";
 import { smartTruncate } from "../lib/truncate";
 import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
@@ -28,6 +34,7 @@ function selectPhCover(media: MediaItem[]): {
   url: string;
   isVideo: boolean;
   variants?: MediaItem["card_variants"];
+  cardPreviewStatus?: MediaItem["card_preview_status"];
   width?: number;
   height?: number;
 } | null {
@@ -35,10 +42,14 @@ function selectPhCover(media: MediaItem[]): {
   for (const m of media) {
     const role = (m as MediaItem & { role?: string }).role;
     if (m && m.type === "image" && role !== "logo" && typeof m.url === "string") {
+      const animated = isAnimatedImageMedia(m);
+      if (m.card_preview_status === "unavailable") continue;
+      if (animated && !m.card_variants?.length) continue;
       return {
         url: m.url,
         isVideo: false,
         variants: m.card_variants,
+        cardPreviewStatus: animated ? "ready" : undefined,
         width: m.width,
         height: m.height,
       };
@@ -122,7 +133,10 @@ export function PhCard({ item, mediaPolicy = LAZY_MEDIA_LOAD_POLICY }: Props) {
   const media = parseMedia(item.media);
   const cover = selectPhCover(media);
   const coverSource = cover
-    ? buildResponsiveCardImage(cover.url, cover.variants, { fallbackWidth: 400 })
+    ? buildResponsiveCardImage(cover.url, cover.variants, {
+        fallbackWidth: 400,
+        staticOnly: cover.cardPreviewStatus === "ready",
+      })
     : null;
 
   const name = item.title || "?";
@@ -222,7 +236,7 @@ export function PhCard({ item, mediaPolicy = LAZY_MEDIA_LOAD_POLICY }: Props) {
           screenshot 但流内之前只展示 logo (40×40)，hero shot 完全没看到。
           这里跟分享海报 cover 用同一张图源 (worker share/handlers.ts:492-515)。
           视频用同样静态 poster，点 cover 打开抽屉看完整 gallery + 视频播放。 */}
-      {cover && coverSource && !coverFailed && !coverRejected && (
+      {cover && coverSource?.fallbackSrc && !coverFailed && !coverRejected && (
         <div
           className="relative mt-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100"
           data-feed-source={item.source_type}
@@ -244,6 +258,10 @@ export function PhCard({ item, mediaPolicy = LAZY_MEDIA_LOAD_POLICY }: Props) {
               decoding="async"
               className="aspect-[16/9] w-full object-cover"
               onError={() => {
+                if (cover.cardPreviewStatus === "ready") {
+                  setCoverFailed(true);
+                  return;
+                }
                 if (coverSource.webpSrcSet && !coverVariantFailed) {
                   setCoverVariantFailed(true);
                 } else {

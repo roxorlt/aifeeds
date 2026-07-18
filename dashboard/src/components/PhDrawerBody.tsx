@@ -22,7 +22,15 @@
 import { useEffect, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
-import { cn, formatCompact, optimizedAvatarUrl, ordinal, parseJsonField } from "../lib/utils";
+import {
+  buildResponsiveCardImage,
+  cn,
+  formatCompact,
+  isAnimatedImageMedia,
+  optimizedAvatarUrl,
+  ordinal,
+  parseJsonField,
+} from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
@@ -56,6 +64,72 @@ function PhGalleryVideo({
       playsInline
       loop
     />
+  );
+}
+
+function PhAnimatedGalleryImage({
+  media,
+  onOpen,
+}: {
+  media: MediaItem;
+  onOpen: () => void;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const preview = buildResponsiveCardImage(media.url, media.card_variants, {
+    staticOnly: true,
+  });
+
+  if (!preview.fallbackSrc) {
+    return (
+      <div className="flex h-44 w-72 shrink-0 snap-start items-center justify-center rounded-md bg-neutral-100 px-4 text-center text-[13px] text-neutral-500">
+        动图预览暂不可用
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-44 w-72 shrink-0 snap-start overflow-hidden rounded-md bg-neutral-200">
+      {playing ? (
+        <img
+          src={resolveAssetUrl(media.url)}
+          className="h-full w-full cursor-zoom-in object-cover"
+          alt=""
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+          onError={() => setPlaying(false)}
+        />
+      ) : (
+        <picture className="block h-full w-full">
+          {preview.webpSrcSet && (
+            <source type="image/webp" srcSet={preview.webpSrcSet} sizes="288px" />
+          )}
+          <img
+            src={preview.fallbackSrc}
+            className="h-full w-full cursor-zoom-in object-cover"
+            loading="lazy"
+            alt=""
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen();
+            }}
+          />
+        </picture>
+      )}
+      {!playing && (
+        <button
+          type="button"
+          className="absolute bottom-2 right-2 rounded-full bg-black/65 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-black/75"
+          onClick={(event) => {
+            event.stopPropagation();
+            setPlaying(true);
+          }}
+        >
+          播放动图
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -240,6 +314,7 @@ export function PhDrawerBody({ item }: Props) {
   // Lightbox
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const lightboxMedia = galleryItems.map((m) => ({
+    ...m,
     type: m.type === "video" ? "video" : "image",
     url: resolveAssetUrl(m.url),
   } as MediaItem));
@@ -379,6 +454,19 @@ export function PhDrawerBody({ item }: Props) {
                 }
                 return m.type === "video" ? (
                   <PhGalleryVideo key={i} src={url} itemId={item.id} slot={i} />
+                ) : isAnimatedImageMedia(m) && m.card_variants?.length ? (
+                  <PhAnimatedGalleryImage
+                    key={`${item.id}:${m.url}`}
+                    media={m}
+                    onOpen={() => setLightboxIndex(i)}
+                  />
+                ) : isAnimatedImageMedia(m) ? (
+                  <div
+                    key={i}
+                    className="flex h-44 w-72 shrink-0 snap-start items-center justify-center rounded-md bg-neutral-100 px-4 text-center text-[13px] text-neutral-500"
+                  >
+                    动图预览暂不可用
+                  </div>
                 ) : (
                   <img
                     key={i}

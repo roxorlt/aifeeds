@@ -1,7 +1,9 @@
 /**
  * Right-sized card images generated while an external asset is ingested.
  *
- * The source must be an external still image. In particular, this module never
+ * The source must be an external image. Animated GIF inputs are accepted only
+ * because every transform explicitly requests a single static frame. This
+ * module never
  * fetches our own `/r/` URLs: doing that from the Worker can recurse through the
  * Hong Kong relay and back into the same Worker. Original objects remain the
  * detail/lightbox and legacy fallback; these variants are an optional compact
@@ -25,6 +27,7 @@ const TRANSFORMABLE_SOURCE_TYPES = new Set([
   'image/png',
   'image/webp',
   'image/avif',
+  'image/gif',
 ]);
 
 function isPrivateOrLoopbackHost(hostname: string): boolean {
@@ -80,6 +83,36 @@ type CardImageFetcher = (
   init?: ImageTransformInit,
 ) => Promise<Response>;
 
+export async function detectCardImageSourceContentType(
+  source: CardImageVariantSource,
+  deps: { fetcher?: CardImageFetcher } = {},
+): Promise<string | null> {
+  if (!isEligibleCardImageSource({
+    sourceUrl: source.sourceUrl,
+    mediaKind: 'image',
+    sourceContentType: null,
+  })) return null;
+  const fetcher = deps.fetcher ?? (fetch as unknown as CardImageFetcher);
+  const sourceHeaders = {
+    ...source.sourceRequestHeaders,
+    'User-Agent': source.sourceRequestHeaders?.['User-Agent'] ||
+      source.sourceRequestHeaders?.['user-agent'] ||
+      'ai-feeds-card-image-variant/1.0',
+  };
+  try {
+    const response = await fetcher(source.sourceUrl, {
+      method: 'HEAD',
+      redirect: 'manual',
+      headers: { ...sourceHeaders, Accept: 'image/*' },
+    });
+    if (!response.ok) return null;
+    const contentType = response.headers.get('content-type')?.trim();
+    return contentType || null;
+  } catch {
+    return null;
+  }
+}
+
 export function isEligibleCardImageSource(
   source: Pick<CardImageVariantSource, 'sourceUrl' | 'mediaKind' | 'sourceContentType'>,
 ): boolean {
@@ -108,7 +141,7 @@ export function isEligibleCardImageSource(
     hostname.endsWith('.ai-feeds.com') ||
     hostname.endsWith('.workers.dev')
   ) return false;
-  if (/\.(?:gif|svg)(?:$|[?#])/i.test(url.pathname)) return false;
+  if (/\.svg(?:$|[?#])/i.test(url.pathname)) return false;
   return true;
 }
 
@@ -130,34 +163,84 @@ function readAscii(bytes: Uint8Array, offset: number, length: number): string {
   return String.fromCharCode(...bytes.subarray(offset, offset + length));
 }
 
-function probeWebpDimensions(data: ArrayBuffer): { width: number; height: number } | undefined {
+function readUint32Le(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]
+    | (bytes[offset + 1] << 8)
+    | (bytes[offset + 2] << 16)
+    | (bytes[offset + 3] << 24)
+  ) >>> 0;
+}
+
+function probeWebp(
+  data: ArrayBuffer,
+): { width: number; height: number; animated: boolean } | undefined {
   const bytes = new Uint8Array(data);
-  if (bytes.length < 30 || readAscii(bytes, 0, 4) !== 'RIFF' || readAscii(bytes, 8, 4) !== 'WEBP') {
+  if (
+    bytes.length < 20
+    || readAscii(bytes, 0, 4) !== 'RIFF'
+    || readAscii(bytes, 8, 4) !== 'WEBP'
+    || readUint32Le(bytes, 4) + 8 !== bytes.length
+  ) {
     return undefined;
   }
-  const chunk = readAscii(bytes, 12, 4);
-  if (chunk === 'VP8X') {
-    const width = 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16);
-    const height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
-    return width > 0 && height > 0 ? { width, height } : undefined;
+  let offset = 12;
+  let extendedDimensions: { width: number; height: number } | undefined;
+  let imageDimensions: { width: number; height: number } | undefined;
+  let animated = false;
+
+  while (offset < bytes.length) {
+    if (offset + 8 > bytes.length) return undefined;
+    const chunk = readAscii(bytes, offset, 4);
+    const chunkSize = readUint32Le(bytes, offset + 4);
+    const payload = offset + 8;
+    const payloadEnd = payload + chunkSize;
+    const paddedEnd = payloadEnd + (chunkSize & 1);
+    if (payloadEnd < payload || paddedEnd > bytes.length) return undefined;
+
+    if (chunk === 'VP8X') {
+      if (chunkSize < 10) return undefined;
+      animated ||= Boolean(bytes[payload] & 0x02);
+      extendedDimensions = {
+        width: 1 + bytes[payload + 4] + (bytes[payload + 5] << 8) + (bytes[payload + 6] << 16),
+        height: 1 + bytes[payload + 7] + (bytes[payload + 8] << 8) + (bytes[payload + 9] << 16),
+      };
+    } else if (chunk === 'VP8L') {
+      if (chunkSize < 5 || bytes[payload] !== 0x2f) return undefined;
+      imageDimensions = {
+        width: 1 + bytes[payload + 1] + ((bytes[payload + 2] & 0x3f) << 8),
+        height: 1 + (bytes[payload + 2] >>> 6) + (bytes[payload + 3] << 2)
+          + ((bytes[payload + 4] & 0x0f) << 10),
+      };
+    } else if (chunk === 'VP8 ') {
+      if (
+        chunkSize < 10
+        || bytes[payload + 3] !== 0x9d
+        || bytes[payload + 4] !== 0x01
+        || bytes[payload + 5] !== 0x2a
+      ) return undefined;
+      imageDimensions = {
+        width: (bytes[payload + 6] | (bytes[payload + 7] << 8)) & 0x3fff,
+        height: (bytes[payload + 8] | (bytes[payload + 9] << 8)) & 0x3fff,
+      };
+    } else if (chunk === 'ANIM' || chunk === 'ANMF') {
+      animated = true;
+    }
+    offset = paddedEnd;
   }
-  if (chunk === 'VP8L' && bytes.length >= 25 && bytes[20] === 0x2f) {
-    const width = 1 + bytes[21] + ((bytes[22] & 0x3f) << 8);
-    const height = 1 + (bytes[22] >>> 6) + (bytes[23] << 2) + ((bytes[24] & 0x0f) << 10);
-    return { width, height };
-  }
+
+  // A VP8X container header only describes canvas features; it is not an
+  // image. Require a complete top-level VP8/VP8L payload so truncated or
+  // header-only transform responses can never be persisted as GIF previews.
+  const dimensions = extendedDimensions ?? imageDimensions;
   if (
-    chunk === 'VP8 ' &&
-    bytes.length >= 30 &&
-    bytes[23] === 0x9d &&
-    bytes[24] === 0x01 &&
-    bytes[25] === 0x2a
-  ) {
-    const width = (bytes[26] | (bytes[27] << 8)) & 0x3fff;
-    const height = (bytes[28] | (bytes[29] << 8)) & 0x3fff;
-    return width > 0 && height > 0 ? { width, height } : undefined;
-  }
-  return undefined;
+    offset !== bytes.length
+    || !imageDimensions
+    || !dimensions
+    || dimensions.width <= 0
+    || dimensions.height <= 0
+  ) return undefined;
+  return { ...dimensions, animated };
 }
 
 export async function generateCardImageVariants(
@@ -175,21 +258,17 @@ export async function generateCardImageVariants(
   };
   let sourceContentType = source.sourceContentType;
   if (!sourceContentType) {
-    try {
-      const probe = await fetcher(source.sourceUrl, {
-        method: 'HEAD',
-        redirect: 'manual',
-        headers: { ...sourceHeaders, Accept: 'image/*' },
-      });
-      if (probe.ok) sourceContentType = probe.headers.get('content-type');
-    } catch {
-      // HEAD is advisory. Some otherwise valid image origins reject HEAD from
-      // edge networks; the bounded transform GET below remains authoritative.
-    }
+    sourceContentType = await detectCardImageSourceContentType(source, { fetcher });
     if (sourceContentType && !isEligibleCardImageSource({ ...source, sourceContentType })) {
       return [];
     }
   }
+  const normalizedSourceContentType = (sourceContentType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  const sourceIsGif = normalizedSourceContentType === 'image/gif'
+    || /\.gif(?:$|[?#])/i.test(source.sourceUrl);
   const variants: CardImageVariant[] = [];
   const storedWidths = new Set<number>();
 
@@ -232,12 +311,18 @@ export async function generateCardImageVariants(
       // dimensions first; source metadata is only a fallback for encoders whose
       // container shape we cannot parse. This prevents an `800w` descriptor from
       // describing a 622px response.
-      const transformedDimensions = probeWebpDimensions(body);
+      const transformed = probeWebp(body);
+      // A GIF preview is a hard safety boundary, not a best-effort descriptor:
+      // only a parseable, explicitly single-frame WebP may be persisted/marked
+      // ready. Ordinary still-image migrations keep the historical dimension
+      // fallback for older Cloudflare encoders.
+      if (sourceIsGif && (!transformed || transformed.animated)) continue;
+      if (transformed?.animated) continue;
       const knownSourceWidth = Number(source.sourceWidth);
-      const actualWidth = transformedDimensions?.width ?? (knownSourceWidth > 0
+      const actualWidth = transformed?.width ?? (knownSourceWidth > 0
         ? Math.max(1, Math.round(Math.min(width, knownSourceWidth)))
         : width);
-      const actualHeight = transformedDimensions?.height ?? projectedHeight(source, actualWidth);
+      const actualHeight = transformed?.height ?? projectedHeight(source, actualWidth);
       if (storedWidths.has(actualWidth)) continue;
 
       const hash = await sha256Hex(body);

@@ -17,11 +17,26 @@ function webpResponse(body: string, status = 200): Response {
   });
 }
 
-function webpVp8xResponse(width: number, height: number): Response {
+const STATIC_WEBP_400 =
+  'UklGRuAAAABXRUJQVlA4INQAAABQFwCdASqQAeEAPp1OpE4lpCOiICgAsBOJaW7hd2EbQAnsA99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ychvAA/v+4+QAAAAAAAAAAAAAAAA==';
+const STATIC_WEBP_WITH_TRAILING_BYTES_800 =
+  'UklGRsoCAABXRUJQVlA4IL4CAAAwUQCdASogA8IBPp1OpE4lpCOiIAgAsBOJaW7hd2EbQAnsA99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32ych77ZOQ99snIe+2TkPfbJyHvtk5D32rAAP7/uPkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
+const STATIC_WEBP_800 =
+  'UklGRjIAAABXRUJQVlA4TCUAAAAvH0NwAAdQ6lKXuv8BAEX6/58i+p/63//+97///e9///vf/9ADAA==';
+
+function realStaticWebpResponse(width: 400 | 800 = 400): Response {
+  return new Response(Buffer.from(width === 400 ? STATIC_WEBP_400 : STATIC_WEBP_800, 'base64'), {
+    headers: { 'content-type': 'image/webp' },
+  });
+}
+
+function webpVp8xResponse(width: number, height: number, animated = false): Response {
   const bytes = new Uint8Array(30);
   bytes.set(new TextEncoder().encode('RIFF'), 0);
   bytes.set(new TextEncoder().encode('WEBP'), 8);
   bytes.set(new TextEncoder().encode('VP8X'), 12);
+  if (animated) bytes[20] = 0x02;
   const w = width - 1;
   const h = height - 1;
   bytes[24] = w & 0xff;
@@ -61,10 +76,17 @@ describe('card image variant eligibility', () => {
     }
   });
 
+  test('accepts GIF only as a static transform input', () => {
+    expect(isEligibleCardImageSource({
+      sourceUrl: 'https://cdn.example.com/launch.gif',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    })).toBe(true);
+  });
+
   test.each([
     ['video', 'video/mp4'],
     ['audio', 'audio/mpeg'],
-    ['image', 'image/gif'],
     ['image', 'image/svg+xml'],
   ] as const)('never transforms %s / %s assets', (mediaKind, sourceContentType) => {
     expect(isEligibleCardImageSource({
@@ -134,11 +156,18 @@ describe('card image variant generation', () => {
     }
   });
 
-  test('probes an unknown source type and rejects extensionless GIF before transforming', async () => {
-    const bucket = { put: vi.fn() } as unknown as R2Bucket;
+  test('probes an extensionless GIF and transforms it with animation disabled', async () => {
+    const bucket = {
+      put: vi.fn(async () => ({} as R2Object)),
+    } as unknown as R2Bucket;
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(init?.method).toBe('HEAD');
-      return new Response(null, { headers: { 'content-type': 'image/gif' } });
+      if (init?.method === 'HEAD') {
+        return new Response(null, { headers: { 'content-type': 'image/gif' } });
+      }
+      expect((init as RequestInit & {
+        cf?: { image?: { anim?: boolean } };
+      }).cf?.image?.anim).toBe(false);
+      return realStaticWebpResponse();
     });
 
     const variants = await generateCardImageVariants(bucket, {
@@ -147,8 +176,71 @@ describe('card image variant generation', () => {
       mediaKind: 'image',
     }, { fetcher });
 
+    expect(variants).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(bucket.put).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects an animated WebP response even when the transform endpoint labels it WebP', async () => {
+    const bucket = { put: vi.fn() } as unknown as R2Bucket;
+    const fetcher = vi.fn(async () => webpVp8xResponse(400, 225, true));
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://cdn.example.com/launch.gif',
+      sourcePrefix: 'ph',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
     expect(variants).toEqual([]);
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(bucket.put).not.toHaveBeenCalled();
+  });
+
+  test('rejects malformed WebP bytes for a GIF static preview', async () => {
+    const bucket = { put: vi.fn() } as unknown as R2Bucket;
+    const fetcher = vi.fn(async () => webpResponse('not-a-webp-container'));
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://cdn.example.com/launch.gif',
+      sourcePrefix: 'ph',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
+    expect(variants).toEqual([]);
+    expect(bucket.put).not.toHaveBeenCalled();
+  });
+
+  test('rejects a truncated VP8X-only container for a GIF static preview', async () => {
+    const bucket = { put: vi.fn() } as unknown as R2Bucket;
+    const fetcher = vi.fn(async () => webpVp8xResponse(400, 225));
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://cdn.example.com/launch.gif',
+      sourcePrefix: 'ph',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
+    expect(variants).toEqual([]);
+    expect(bucket.put).not.toHaveBeenCalled();
+  });
+
+  test('rejects a WebP RIFF container with bytes beyond its declared boundary', async () => {
+    const bucket = { put: vi.fn() } as unknown as R2Bucket;
+    const fetcher = vi.fn(async () => new Response(
+      Buffer.from(STATIC_WEBP_WITH_TRAILING_BYTES_800, 'base64'),
+      { headers: { 'content-type': 'image/webp' } },
+    ));
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://cdn.example.com/launch.gif',
+      sourcePrefix: 'ph',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
+    expect(variants).toEqual([]);
     expect(bucket.put).not.toHaveBeenCalled();
   });
 
@@ -244,8 +336,8 @@ describe('card image variant generation', () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const requested = (init as RequestInit & { cf?: { image?: { width?: number } } }).cf?.image?.width;
       return requested === 400
-        ? webpVp8xResponse(400, 257)
-        : webpVp8xResponse(622, 399);
+        ? realStaticWebpResponse(400)
+        : realStaticWebpResponse(800);
     });
 
     const variants = await generateCardImageVariants(bucket, {
@@ -256,8 +348,8 @@ describe('card image variant generation', () => {
     }, { fetcher });
 
     expect(variants.map(({ width, height }) => ({ width, height }))).toEqual([
-      { width: 400, height: 257 },
-      { width: 622, height: 399 },
+      { width: 400, height: 225 },
+      { width: 800, height: 450 },
     ]);
   });
 });

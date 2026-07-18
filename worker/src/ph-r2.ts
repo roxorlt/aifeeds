@@ -81,7 +81,11 @@ async function migrateOne(
   env: Env,
   asset: AssetRequest,
   withCardVariants = false,
-): Promise<{ url: string; variants: CardImageVariant[] } | null> {
+): Promise<{
+  url: string;
+  variants: CardImageVariant[];
+  cardPreviewStatus?: 'ready' | 'unavailable';
+} | null> {
   if (!env.READMES) return null;
   if (isAlreadyMigrated(asset.url)) return { url: asset.url, variants: [] };
   try {
@@ -120,7 +124,13 @@ async function migrateOne(
           sourceRequestHeaders: { 'User-Agent': PH_R2_USER_AGENT },
         })
       : [];
-    return { url: `/r/${key}`, variants };
+    return {
+      url: `/r/${key}`,
+      variants,
+      cardPreviewStatus: withCardVariants && ctLower === 'image/gif'
+        ? (variants.length > 0 ? 'ready' : 'unavailable')
+        : undefined,
+    };
   } catch (e) {
     console.error(`[ph-r2-migrate] asset error ${asset.url}:`, e);
     return null;
@@ -146,6 +156,7 @@ interface MediaItem {
   width?: number;
   height?: number;
   card_variants?: CardImageVariant[];
+  card_preview_status?: 'ready' | 'unavailable';
   [k: string]: unknown;
 }
 
@@ -239,6 +250,7 @@ function rewriteAllUrls(
   extra: PhExtra,
   mapping: Map<string, string>,
   variantMapping: Map<string, CardImageVariant[]>,
+  previewStatusMapping: Map<string, 'ready' | 'unavailable'>,
 ): { media: MediaItem[]; extra: PhExtra } {
   const newMedia = media.map((m) => {
     const next = m.url && mapping.has(m.url)
@@ -246,6 +258,10 @@ function rewriteAllUrls(
       : { ...m };
     if (m.url && variantMapping.has(m.url)) {
       next.card_variants = variantMapping.get(m.url)!;
+    }
+    if (m.url && previewStatusMapping.has(m.url)) {
+      next.card_preview_status = previewStatusMapping.get(m.url)!;
+      if (next.card_preview_status === 'unavailable') delete next.card_variants;
     }
     return next;
   });
@@ -282,6 +298,7 @@ async function migratePhRow(
 
   const mapping = new Map<string, string>();
   const variantMapping = new Map<string, CardImageVariant[]>();
+  const previewStatusMapping = new Map<string, 'ready' | 'unavailable'>();
   let migrated = 0;
   let failed = 0;
   for (const asset of all) {
@@ -290,6 +307,9 @@ async function migratePhRow(
       mapping.set(asset.url, result.url);
       if (result.variants.length > 0) {
         variantMapping.set(asset.url, result.variants);
+      }
+      if (result.cardPreviewStatus) {
+        previewStatusMapping.set(asset.url, result.cardPreviewStatus);
       }
       migrated++;
     } else {
@@ -302,14 +322,18 @@ async function migratePhRow(
     extra,
     mapping,
     variantMapping,
+    previewStatusMapping,
   );
   const newExtra: PhExtra = {
     ...rewrittenExtra,
     r2_migrated_at: new Date().toISOString(),
   };
   if (variantMapping.size > 0) {
-    newExtra.card_variant_version = 1;
+    newExtra.card_variant_version = 2;
     newExtra.card_variant_status = 'ok';
+  } else if (previewStatusMapping.size > 0) {
+    newExtra.card_variant_version = 2;
+    newExtra.card_variant_status = 'transform_failed';
   }
   await env.DB.prepare(
     `UPDATE items SET media = ?, extra = ? WHERE id = ?`,

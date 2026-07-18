@@ -24,6 +24,9 @@ export interface MediaItem {
   // Ingestion-time, content-addressed WebP card variants. The original url is
   // deliberately retained as the detail/lightbox and legacy fallback.
   card_variants?: CardImageVariant[];
+  // Product Hunt animated originals must never be used as an implicit list
+  // fallback. "ready" means card_variants is a verified static WebP preview.
+  card_preview_status?: "ready" | "unavailable";
   // Video bytes are never transformed; only an external still poster may have
   // its own variants.
   poster_variants?: CardImageVariant[];

@@ -20,6 +20,7 @@ type MockOptions = {
   failManifest?: boolean;
   failFirstList?: boolean;
   videoPosterFixture?: boolean;
+  gifPreviewFixture?: boolean;
   imageFallbackFixture?: "fallback-succeeds" | "fallback-fails";
 };
 
@@ -29,6 +30,8 @@ type MockState = {
   detailRequests: string[];
   posterRequests: string[];
   imageFallbackRequests: string[];
+  gifOriginalRequests: string[];
+  gifPreviewRequests: string[];
   searchRequests: string[];
   listAttempts: number;
   maxConcurrentLists: number;
@@ -156,6 +159,58 @@ function makeItem(requestedSource: string) {
   return base;
 }
 
+function makeGifPreviewItem(
+  suffix = "animated",
+  title = "Fixture Product Hunt GIF",
+) {
+  return {
+    ...makeItem("product_hunt"),
+    id: `product_hunt:${suffix}`,
+    source_id: suffix,
+    title,
+    extra: {
+      launch_date_pt: "2026-07-11",
+      daily_rank: suffix === "animated" ? 1 : 2,
+      ai_summary: `${title} summary`,
+      ai_category: "ai_image_gen",
+      topics: ["design-tools"],
+    },
+    media: [
+      {
+        type: "image",
+        role: "gallery",
+        url: `/r/e2e/ph/large-animation-${suffix}.gif`,
+        width: 800,
+        height: 450,
+        card_preview_status: "ready",
+        card_variants: [
+          {
+            url: `/r/e2e/ph/card/large-animation-${suffix}-w400.webp`,
+            width: 400,
+            height: 225,
+            format: "webp",
+          },
+        ],
+      },
+      {
+        type: "image",
+        role: "gallery",
+        url: "/e2e/ph/static-neighbor.svg",
+        width: 800,
+        height: 450,
+      },
+      {
+        type: "image",
+        role: "gallery",
+        url: "/r/e2e/ph/large-animation-unavailable.gif",
+        width: 800,
+        height: 450,
+        card_preview_status: "unavailable",
+      },
+    ],
+  };
+}
+
 function makeVideoPosterItems() {
   const base = makeItem("x_list");
   const item = (suffix: string, overrides: Record<string, unknown> = {}) => ({
@@ -264,6 +319,8 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
     detailRequests: [],
     posterRequests: [],
     imageFallbackRequests: [],
+    gifOriginalRequests: [],
+    gifPreviewRequests: [],
     searchRequests: [],
     listAttempts: 0,
     maxConcurrentLists: 0,
@@ -347,6 +404,18 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
     ) {
       state.imageFallbackRequests.push(url.pathname);
     }
+    if (
+      request.method() === "GET"
+      && /^\/r\/e2e\/ph\/large-animation-[^/]+\.gif$/.test(url.pathname)
+    ) {
+      state.gifOriginalRequests.push(url.pathname);
+    }
+    if (
+      request.method() === "GET"
+      && /^\/r\/e2e\/ph\/card\/large-animation-[^/]+-w400\.webp$/.test(url.pathname)
+    ) {
+      state.gifPreviewRequests.push(url.pathname);
+    }
     if (request.method() === "GET" && url.pathname === "/api/search") {
       state.searchRequests.push(`${url.pathname}${url.search}`);
     }
@@ -369,6 +438,14 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
       });
       return;
     }
+    if (url.pathname === "/e2e/ph/static-neighbor.svg") {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450"><rect width="800" height="450" fill="#b8d5c7"/></svg>',
+      });
+      return;
+    }
     if (url.pathname === "/r/e2e/card-variants/broken.webp") {
       await route.fulfill({ status: 503, contentType: "text/plain", body: "broken variant" });
       return;
@@ -383,6 +460,22 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
           body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500"><rect width="800" height="500" fill="#b8d5c7"/></svg>',
         });
       }
+      return;
+    }
+    if (/^\/r\/e2e\/ph\/card\/large-animation-[^/]+-w400\.webp$/.test(url.pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="225"><rect width="400" height="225" fill="#c4b5fd"/></svg>',
+      });
+      return;
+    }
+    if (url.pathname === "/r/e2e/ph/large-animation.gif") {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/gif",
+        body: Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"),
+      });
       return;
     }
     if (posterRequestKey(request.url())) {
@@ -427,6 +520,11 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
             ? makeVideoPosterItems()
             : options.imageFallbackFixture && requestedSource === "x_list"
               ? [makeImageFallbackItem()]
+              : options.gifPreviewFixture && requestedSource === "product_hunt"
+                ? [
+                    makeGifPreviewItem(),
+                    makeGifPreviewItem("animated-related", "Fixture Related Product Hunt GIF"),
+                  ]
             : [makeItem(requestedSource)],
           next_cursor: null,
           has_more: false,
@@ -446,8 +544,13 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
       return;
     }
     if (request.method() === "GET" && url.pathname.startsWith("/api/items/")) {
+      const requestedGifItem = url.pathname.includes("animated-related")
+        ? makeGifPreviewItem("animated-related", "Fixture Related Product Hunt GIF")
+        : makeGifPreviewItem();
       await fulfillJson(route, {
-        item: makeGithubDetail(),
+        item: options.gifPreviewFixture && url.pathname.includes("product_hunt")
+          ? requestedGifItem
+          : makeGithubDetail(),
         siblings: [],
         siblings_has_more: false,
       });
@@ -634,6 +737,75 @@ test("save-data blocks deferred fonts and background channel prefetch", async ({
   await page.waitForTimeout(300);
   expect(state.listRequests).toHaveLength(1);
   expect(state.fontRequests).toHaveLength(0);
+});
+
+test("Product Hunt GIF stays static until explicit playback intent", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const state = await installMocks(page, { gifPreviewFixture: true, saveData: true });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+
+  await page.locator('[data-chip-key="product_hunt"]').click();
+  await expect(page.getByText("Fixture Product Hunt GIF", { exact: true }).first()).toBeVisible();
+  await expect.poll(() => state.gifPreviewRequests.length).toBeGreaterThan(0);
+  expect(state.gifOriginalRequests).toHaveLength(0);
+
+  await page.getByText("Fixture Product Hunt GIF", { exact: true }).first().click();
+  await expect(page.getByText("截图与视频", { exact: true })).toBeVisible();
+  expect(state.gifOriginalRequests).toHaveLength(0);
+
+  await page.locator('img[src*="large-animation-animated-w400.webp"]').last().click();
+  await expect(page.getByRole("dialog", { name: "媒体预览" })).toBeVisible();
+  expect(state.gifOriginalRequests).toHaveLength(0);
+
+  await page.getByRole("button", { name: "播放动图" }).last().click();
+  await expect.poll(() => state.gifOriginalRequests.length).toBe(1);
+});
+
+test("Product Hunt GIF playback intent never leaks into a related item", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page, { gifPreviewFixture: true, saveData: true });
+  await page.goto("/");
+  await page.locator('[data-chip-key="product_hunt"]').click();
+  await page.getByText("Fixture Product Hunt GIF", { exact: true }).first().click();
+  await expect(page.getByText("截图与视频", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "播放动图" }).first().click();
+  await expect.poll(() => state.gifOriginalRequests).toEqual([
+    "/r/e2e/ph/large-animation-animated.gif",
+  ]);
+
+  await page.getByRole("button", { name: "Fixture Related Product Hunt GIF" }).click();
+  await expect(
+    page.getByText("Fixture Related Product Hunt GIF", { exact: true }).first(),
+  ).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(state.gifOriginalRequests).toEqual([
+    "/r/e2e/ph/large-animation-animated.gif",
+  ]);
+});
+
+test("preview-less Product Hunt GIF stays gated when reached through Lightbox navigation", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page, { gifPreviewFixture: true, saveData: true });
+  await page.goto("/");
+  await page.locator('[data-chip-key="product_hunt"]').click();
+  await page.getByText("Fixture Product Hunt GIF", { exact: true }).first().click();
+  await expect(page.getByText("截图与视频", { exact: true })).toBeVisible();
+
+  await page.locator('img[src*="/e2e/ph/static-neighbor.svg"]').first().click();
+  await expect(page.getByRole("dialog", { name: "媒体预览" })).toBeVisible();
+  await page.getByRole("button", { name: "下一张" }).click();
+  await expect(page.getByText("动图预览暂不可用", { exact: true }).last()).toBeVisible();
+  expect(state.gifOriginalRequests).not.toContain(
+    "/r/e2e/ph/large-animation-unavailable.gif",
+  );
+
+  await page.getByRole("button", { name: "播放动图" }).last().click();
+  await expect.poll(() => state.gifOriginalRequests).toContain(
+    "/r/e2e/ph/large-animation-unavailable.gif",
+  );
 });
 
 test("mobile modal locks and restores the real page scroller", async ({ page }, testInfo) => {
