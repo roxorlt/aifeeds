@@ -10,10 +10,10 @@ const INITIAL_IDS = [
   "hf_paper:2607.00006",
   "huodongxing:5859894940007",
   "clawhub:fixture-08",
-  "x_list:fixture-09",
-  "blog:fixture-10",
-  "podcast:fixture-11",
-  "github:fixture-owner/repo-12",
+  "youtube:fixture-09",
+  "x_list:fixture-10",
+  "blog:fixture-11",
+  "podcast:fixture-12",
 ] as const;
 
 test.skip(process.env.WATERFALL_E2E !== "1", "production waterfall fixture is an explicit local-only gate");
@@ -84,6 +84,8 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
   const response = await page.goto("/?view=waterfall", { waitUntil: "load" });
   expect(response?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
   await expect(page.locator(".waterfall-card")).toHaveCount(12);
+  await expect(page.locator(".waterfall-intro")).toHaveCount(0);
+  await expect(page.locator(".waterfall-main [role=tablist], .waterfall-main .chips")).toHaveCount(0);
   await settleLayout(page);
 
   expect(errors).toEqual([]);
@@ -104,15 +106,36 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
       ? 1
       : style.gridTemplateColumns.split(" ").filter(Boolean).length;
   });
-  expect(columnCount).toBe(width >= 1024 ? 3 : width >= 768 ? 2 : 1);
+  expect(columnCount).toBe(
+    width >= 1600 ? 6
+      : width >= 1280 ? 5
+        : width >= 1024 ? 4
+          : width >= 768 ? 3
+            : 2,
+  );
+  await expect(page.locator(".waterfall-card").first()).toHaveCSS("border-radius", "10px");
 
   const layout = await page.evaluate(() => ({
     cls: globalThis.__waterfallCls ?? 0,
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,
   }));
+  const mediaSlack = await page.locator(".waterfall-card:has(.waterfall-card__image)").first().evaluate((card) => {
+    const style = getComputedStyle(card);
+    const span = Number.parseInt(style.getPropertyValue("--waterfall-row-span"), 10);
+    const root = getComputedStyle(document.documentElement);
+    const row = Number.parseFloat(root.getPropertyValue("--waterfall-row"));
+    const gap = Number.parseFloat(root.getPropertyValue("--waterfall-gap"));
+    const allocated = span * row + Math.max(0, span - 1) * gap;
+    return allocated - card.getBoundingClientRect().height;
+  });
+  expect(await page.locator(".waterfall-card__image").first().evaluate((image) => {
+    const element = image as HTMLImageElement;
+    return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
+  })).toBe(true);
   expect(layout.cls).toBeLessThanOrEqual(0.1);
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+  expect(mediaSlack).toBeLessThanOrEqual(100);
 });
 
 test("classic entry never requests the waterfall entry", async ({ page }) => {

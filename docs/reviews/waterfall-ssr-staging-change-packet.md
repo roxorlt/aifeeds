@@ -8,6 +8,10 @@
 可审阅操作。用户已授权持续完成计划内开发、测试与发布；本文件仍不包含 production，也不允许把
 staging 通过自动解释为生产放量。RUM 是 production 上线后的观察任务，不是 staging 或代码交付门。
 
+> 2026-07-18 后续视觉/混排 v2 是新的同步发布批次，不复用本页旧 deployment/version 作为新证据。
+> 新批次的范围、兼容矩阵、本地门与回滚条件见
+> [`2026-07-18-waterfall-mixing-v2-release.md`](2026-07-18-waterfall-mixing-v2-release.md)。
+
 ## 0. 执行结果
 
 - staging Worker 最终版本：`456c41a4-ec56-4a44-87a4-ddffb8a0ae30`。

@@ -66,6 +66,42 @@ describe('performance event ingest', () => {
       .toEqual({ ok: false, error: 'payload too large' });
   });
 
+  it('bounds waterfall impression shadow dimensions at the public ingest boundary', () => {
+    expect(prepareEventPayload('item_impression', {
+      item_id: 'github:openai/codex',
+      source: 'github',
+      family: 'project',
+      view_mode: 'waterfall',
+      shadow_filter_reason: 'consumed_cooldown',
+      shadow_rule_version: 'waterfall-exposure-shadow-v1',
+      shadow_disposition: 'hide',
+      raw_cookie: 'secret',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({
+        item_id: 'github:openai/codex',
+        source: 'github',
+        family: 'project',
+        view_mode: 'waterfall',
+        shadow_filter_reason: 'consumed_cooldown',
+        shadow_rule_version: 'waterfall-exposure-shadow-v1',
+        shadow_disposition: 'hide',
+      }),
+    });
+    expect(prepareEventPayload('item_impression', {
+      item_id: 'x_list:fixture',
+      source: '<script>',
+      family: 'forged',
+      view_mode: 'other',
+      shadow_filter_reason: 'arbitrary',
+      shadow_rule_version: 'forged',
+      shadow_disposition: 'remove',
+    }, undefined)).toEqual({
+      ok: true,
+      value: JSON.stringify({ item_id: 'x_list:fixture' }),
+    });
+  });
+
   it('keeps only finite home view transitions', () => {
     expect(prepareEventPayload('home_view_switch', {
       from_view: 'classic',
@@ -215,6 +251,7 @@ describe('performance event ingest', () => {
   it('strips query, hash, dynamic ids and raw referrers at the public ingest boundary', async () => {
     expect(sanitizeTelemetryPagePath('/search?q=alice%40example.com&token=secret#private')).toBe('/search');
     expect(sanitizeTelemetryPagePath('/t/private-item?from=user')).toBe('/t/:id');
+    expect(sanitizeTelemetryPagePath('/y/private-video?from=waterfall')).toBe('/y/:id');
     expect(sanitizeTelemetryPagePath('/reset/alice@example.com')).toBe('/:other');
     expect(sanitizeTelemetryReferrer('https://www.google.com/search?q=private')).toBe('search');
     expect(sanitizeTelemetryReferrer('https://notgoogle.com/private')).toBe('external');

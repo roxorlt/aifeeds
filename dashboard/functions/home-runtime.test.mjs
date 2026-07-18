@@ -37,6 +37,7 @@ const ITEM = {
 function feed(overrides = {}) {
   return {
     view_mode: "waterfall",
+    ranking_version: 2,
     items: [ITEM],
     next_cursor: null,
     has_more: false,

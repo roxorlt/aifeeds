@@ -176,6 +176,18 @@ function activeWithin(timestamp: number | undefined, cooldownMs: number, now: nu
     && now - timestamp < cooldownMs;
 }
 
+function isExpiredEvent(extra: ItemExtra, now: number): boolean {
+  if (!extra.detail_enriched_at && !extra.start_time && !extra.end_time) return false;
+  if (extra.status === "historical") return true;
+  const start = extra.start_time ? Date.parse(extra.start_time) : Number.NaN;
+  const end = extra.end_time ? Date.parse(extra.end_time) : Number.NaN;
+  if (Number.isFinite(end) && end < now) return true;
+  return Number.isFinite(start)
+    && start <= now
+    && !Number.isFinite(end)
+    && now - start >= DAY_MS;
+}
+
 export function evaluateExposureShadow(
   item: Pick<Item, "id" | "source_type" | "extra">,
   history: ExposureHistory,
@@ -188,8 +200,7 @@ export function evaluateExposureShadow(
   } as const;
 
   if (family === "event") {
-    const endTime = Date.parse(parseExtra(item.extra).end_time ?? "");
-    if (Number.isFinite(endTime) && endTime <= now) {
+    if (isExpiredEvent(parseExtra(item.extra), now)) {
       return { ...base, disposition: "hide", reason: "event_expired" };
     }
   }
@@ -264,4 +275,22 @@ export function saveExposureHistory(storage: StorageLike, history: ExposureHisto
   } catch {
     // Tracking must remain fail-open when storage is blocked or full.
   }
+}
+
+export function evaluateAndRecordExposure(
+  storage: StorageLike,
+  item: Pick<Item, "id" | "source_type" | "extra">,
+  kind: ExposureKind,
+  now = Date.now(),
+): ShadowDecision {
+  const history = loadExposureHistory(storage, now);
+  const decision = evaluateExposureShadow(item, history, now);
+  const next = recordExposure(history, {
+    at: now,
+    family: decision.family,
+    itemId: item.id,
+    kind,
+  });
+  saveExposureHistory(storage, next);
+  return decision;
 }

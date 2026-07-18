@@ -25,6 +25,8 @@ export function homePathForItem(item: Item): string | null {
     case "blog":
     case "podcast":
       return `/o/${encodeURIComponent(item.id)}`;
+    case "youtube":
+      return `/y/${encodeURIComponent(item.source_id)}`;
     default:
       return null;
   }

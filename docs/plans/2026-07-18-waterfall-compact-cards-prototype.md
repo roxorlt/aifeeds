@@ -1,6 +1,6 @@
 # Waterfall Compact Cards Prototype Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Codex:** REQUIRED SKILL: Use `executing-plans` to implement this plan task-by-task.
 
 **Goal:** Build one dependency-free local HTML page that lets the user visually approve the AI Feeds compact masonry design at 1440px desktop and 390px mobile widths.
 
@@ -64,4 +64,3 @@ Return the local page and rendered screenshots for user review.
 **Step 2: Hold production implementation**
 
 Do not modify `WaterfallHome.tsx`, `WaterfallCard.tsx`, `waterfall.css`, tests, or deployment configuration until the prototype direction is approved.
-

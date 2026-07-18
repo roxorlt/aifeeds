@@ -5,6 +5,7 @@ import {
   EXPOSURE_SHADOW_MAX_ITEMS,
   EXPOSURE_SHADOW_RULE_VERSION,
   createExposureHistory,
+  evaluateAndRecordExposure,
   evaluateExposureShadow,
   homeFamilyForSource,
   loadExposureHistory,
@@ -109,17 +110,23 @@ test("family-specific impression and consumption cooldowns remain distinct", () 
 });
 
 test("ended events are shadow-hidden even without exposure history", () => {
-  const decision = evaluateExposureShadow(
-    {
-      id: "huodongxing:ended",
-      source_type: "huodongxing",
-      extra: JSON.stringify({ end_time: "2026-07-18T10:00:00.000Z" }),
-    },
-    createExposureHistory(),
-    NOW,
-  );
-  assert.equal(decision.disposition, "hide");
-  assert.equal(decision.reason, "event_expired");
+  for (const extra of [
+    { end_time: "2026-07-18T10:00:00.000Z", detail_enriched_at: NOW - DAY },
+    { status: "historical", detail_enriched_at: NOW - DAY },
+    { start_time: "2026-07-17T10:00:00.000Z", detail_enriched_at: NOW - 2 * DAY },
+  ]) {
+    const decision = evaluateExposureShadow(
+      {
+        id: "huodongxing:ended",
+        source_type: "huodongxing",
+        extra: JSON.stringify(extra),
+      },
+      createExposureHistory(),
+      NOW,
+    );
+    assert.equal(decision.disposition, "hide");
+    assert.equal(decision.reason, "event_expired");
+  }
 });
 
 test("history is TTL-pruned, bounded to 256 items, and fails open on broken storage", () => {
@@ -161,4 +168,24 @@ test("history is TTL-pruned, bounded to 256 items, and fails open on broken stor
   };
   assert.doesNotThrow(() => saveExposureHistory(brokenWriteStorage, history));
   assert.deepEqual(loadExposureHistory(brokenWriteStorage, NOW), createExposureHistory());
+});
+
+test("evaluate-and-record returns the prior decision and persists the new signal", () => {
+  let raw = null;
+  const storage = {
+    getItem() {
+      return raw;
+    },
+    setItem(_key, value) {
+      raw = value;
+    },
+  };
+  const item = { id: "github:fixture", source_type: "github" };
+  const first = evaluateAndRecordExposure(storage, item, "impression", NOW);
+  assert.equal(first.reason, "none");
+  const second = evaluateAndRecordExposure(storage, item, "impression", NOW + HOUR);
+  assert.equal(second.reason, "impression_cooldown");
+  evaluateAndRecordExposure(storage, item, "consumed", NOW + 2 * HOUR);
+  const history = loadExposureHistory(storage, NOW + 2 * HOUR);
+  assert.equal(history.entries[0].consumedAt, NOW + 2 * HOUR);
 });

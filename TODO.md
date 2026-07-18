@@ -58,7 +58,15 @@
     [`docs/plans/2026-07-18-waterfall-compact-cards-design.md`](docs/plans/2026-07-18-waterfall-compact-cards-design.md)、
     [`docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md`](docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md)、
     [`docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html`](docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html)。
-    当前进入本地 TDD，尚未触碰 production。
+    - [x] 本地 TDD 与视觉封板：九源紧凑卡、YouTube 深链、移动双列、PC 3–6 列、无侧栏/
+      无分类 Tab、v2 公共排序、v1 游标兼容、全源曝光 observer 与只记录 shadow 已完成。
+    - [x] 本地最终门：Dashboard `346/346`、Worker `832/832`、root contracts
+      `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
+      `32 pass / 83 role-skips`；lint、Dashboard/Functions/Worker TypeScript、production build
+      与 PC/移动视觉截图均通过。
+    - [ ] 推送 feature branch，完成同步 staging Worker/Pages、九源/分页/shadow/性能门；
+      通过后合入 `main` 触发生产发布并做即时冒烟。发布清单见
+      [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。
   - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
     异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
 

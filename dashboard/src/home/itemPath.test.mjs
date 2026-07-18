@@ -30,10 +30,11 @@ test("every drawer-supported source maps to its canonical path", () => {
     homePathForItem(item("podcast", "ignored", "podcast:latent-space:ep 1")),
     "/o/podcast%3Alatent-space%3Aep%201",
   );
+  assert.equal(homePathForItem(item("youtube", "video id")), "/y/video%20id");
 });
 
 test("malformed composite ids and unsupported sources have no home path", () => {
   assert.equal(homePathForItem(item("github", "owner-only")), null);
   assert.equal(homePathForItem(item("product_hunt", "slug-only")), null);
-  assert.equal(homePathForItem(item("youtube", "video")), null);
+  assert.equal(homePathForItem(item("arxiv", "2607.12345")), null);
 });

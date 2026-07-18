@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 vi.mock("cloudflare:workers", () => ({
   WorkflowEntrypoint: class {
@@ -66,6 +67,82 @@ function fakeDb(rows = Array.from({ length: 13 }, (_, index) => makeRow(index)))
     return { bind };
   });
   return { db: { prepare }, captures, prepare, bind, all };
+}
+
+function sqliteHomeFeedFixture(): DatabaseSync {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_ref TEXT,
+      title TEXT,
+      content TEXT,
+      content_translated TEXT,
+      author TEXT,
+      handle TEXT,
+      url TEXT,
+      media TEXT,
+      metrics TEXT,
+      published_at TEXT,
+      scraped_at TEXT NOT NULL,
+      is_relevant INTEGER DEFAULT 1,
+      is_hot INTEGER DEFAULT 0,
+      matched_by TEXT,
+      lang TEXT,
+      extra TEXT,
+      deleted_at INTEGER
+    )
+  `);
+  const insert = db.prepare(`
+    INSERT INTO items (
+      id, source_type, source_id, title, content, media, metrics,
+      published_at, scraped_at, is_relevant, is_hot, lang, extra
+    ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, 1, ?, 'zh', ?)
+  `);
+  let minuteOffset = 0;
+  for (const sourceType of HOME_FEED_SOURCES) {
+    for (let sourceIndex = 0; sourceIndex < 4; sourceIndex += 1) {
+      const timestamp = new Date(Date.parse(NOW) - minuteOffset * 60_000).toISOString();
+      const popularity = (4 - sourceIndex) * 100;
+      const metrics = sourceType === "github"
+        ? { today_stars: popularity }
+        : sourceType === "product_hunt"
+          ? { votes: popularity, comments: sourceIndex }
+          : sourceType === "hf_paper"
+            ? { upvotes: popularity }
+            : sourceType === "clawhub"
+              ? { downloads: popularity * 10 }
+              : sourceType === "youtube"
+                ? { views: popularity * 100 }
+                : sourceType === "x_list"
+                  ? { likes: popularity }
+                  : {};
+      insert.run(
+        `${sourceType}:sqlite-${sourceIndex}`,
+        sourceType,
+        `sqlite-${sourceIndex}`,
+        `${sourceType} ${sourceIndex}`,
+        "fixture",
+        JSON.stringify(metrics),
+        timestamp,
+        timestamp,
+        sourceIndex === 0 && sourceType === "x_list" ? 1 : 0,
+        JSON.stringify({ workflow_completed_at: timestamp }),
+      );
+      minuteOffset += 7;
+    }
+  }
+  return db;
+}
+
+function executeHomeFeedSql(
+  db: DatabaseSync,
+  request: Parameters<typeof buildHomeFeedQuery>[0],
+): Record<string, unknown>[] {
+  const query = buildHomeFeedQuery(request);
+  return db.prepare(query.sql).all(...query.params as SQLInputValue[]) as Record<string, unknown>[];
 }
 
 describe("home feed request contract", () => {
@@ -201,6 +278,72 @@ describe("home feed SQL", () => {
       workflowCompletedFilter: false,
     });
     expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
+    expect(sql).not.toContain("'youtube'");
+  });
+
+  test("v2 executes on SQLite with deterministic replay and non-overlapping keyset pages", () => {
+    const db = sqliteHomeFeedFixture();
+    try {
+      const request = {
+        limit: 12,
+        asOf: NOW,
+        cursor: null,
+        workflowCompletedFilter: true,
+      };
+      const first = executeHomeFeedSql(db, request);
+      const replay = executeHomeFeedSql(db, request);
+      expect(first.map((row) => [row.id, row._home_score, row._sort_time]))
+        .toEqual(replay.map((row) => [row.id, row._home_score, row._sort_time]));
+      expect(first).toHaveLength(13);
+
+      const visibleFirst = first.slice(0, 12);
+      const last = visibleFirst.at(-1);
+      if (
+        !last
+        || !Number.isSafeInteger(last._home_score)
+        || typeof last._sort_time !== "string"
+        || typeof last.id !== "string"
+      ) {
+        throw new Error("invalid SQLite home-feed cursor row");
+      }
+      const second = executeHomeFeedSql(db, {
+        ...request,
+        cursor: {
+          version: 2,
+          asOf: NOW,
+          score: last._home_score as number,
+          sortTime: last._sort_time,
+          id: last.id,
+        },
+      });
+      const firstIds = new Set(visibleFirst.map((row) => row.id));
+      expect(second.some((row) => firstIds.has(row.id))).toBe(false);
+      expect(new Set(visibleFirst.map((row) => row.source_type)).size).toBeGreaterThanOrEqual(6);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("legacy v1 executes against the original eight-source universe", () => {
+    const db = sqliteHomeFeedFixture();
+    try {
+      const rows = executeHomeFeedSql(db, {
+        limit: 48,
+        asOf: NOW,
+        cursor: {
+          version: 1,
+          asOf: NOW,
+          score: Number.MAX_SAFE_INTEGER,
+          sortTime: NOW,
+          id: "zzzz",
+        },
+        workflowCompletedFilter: false,
+      });
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.some((row) => row.source_type === "youtube")).toBe(false);
+    } finally {
+      db.close();
+    }
   });
 });
 

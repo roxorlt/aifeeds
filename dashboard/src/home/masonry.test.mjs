@@ -39,8 +39,10 @@ test("hydration may grow an underestimated card but never shrinks the server spa
 test("SSR estimates are deterministic and media creates a taller card", () => {
   const textHeight = estimateMasonryHeight(item);
   const mediaHeight = estimateMasonryHeight(item, { aspectRatio: 16 / 9 });
+  const squareMediaHeight = estimateMasonryHeight(item, { aspectRatio: 1 });
   assert.equal(textHeight, estimateMasonryHeight(item));
   assert.ok(textHeight > 100);
   assert.ok(mediaHeight > textHeight);
+  assert.equal(squareMediaHeight - textHeight, 200);
   assert.ok(masonryRowSpan(mediaHeight) >= masonryRowSpan(textHeight));
 });

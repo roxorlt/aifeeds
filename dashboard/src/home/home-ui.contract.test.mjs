@@ -42,12 +42,45 @@ test("cards retain no-JS deep links and only enhance unmodified primary clicks",
   assert.match(card, /href=\{path\}/);
   assert.match(card, /event\.button !== 0/);
   assert.match(card, /event\.metaKey/);
+  assert.match(card, /EVENTS\.ITEM_CLICK/);
+  assert.match(card, /recordSignal\("consumed"\)/);
   assert.match(card, /openItem\(item, siblings\)/);
 });
 
-test("mobile waterfall is one normal-flow column", () => {
+test("every waterfall card reports one shadow-only impression without filtering the DOM", () => {
+  assert.match(card, /useImpression/);
+  assert.match(card, /EVENTS\.ITEM_IMPRESSION/);
+  assert.match(card, /view_mode:\s*"waterfall"/);
+  assert.match(card, /shadow_filter_reason:/);
+  assert.match(card, /shadow_rule_version:/);
+  assert.match(card, /shadow_disposition:/);
+  assert.doesNotMatch(home, /items\.filter|shadow.*(?:hide|remove)/i);
+});
+
+test("waterfall is 2/3/4/5/6 columns with independent cards and no category chrome", () => {
+  assert.match(css, /\.waterfall-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,/);
   assert.match(
     css,
-    /@media\s*\(max-width:\s*767px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*display:\s*block/,
+    /@media\s*\(min-width:\s*768px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(3,/,
   );
+  assert.match(
+    css,
+    /@media\s*\(min-width:\s*1024px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(4,/,
+  );
+  assert.match(
+    css,
+    /@media\s*\(min-width:\s*1280px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(5,/,
+  );
+  assert.match(
+    css,
+    /@media\s*\(min-width:\s*1600px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(6,/,
+  );
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border:\s*1px solid/);
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border-radius:\s*10px/);
+  assert.match(css, /\.waterfall-card__identity\s*\{[\s\S]*font-size:\s*11px/);
+  assert.match(css, /\.waterfall-card__identity-copy small\s*\{[\s\S]*font-size:\s*11px/);
+  assert.match(css, /\.waterfall-card__link p\s*\{[\s\S]*font-size:\s*13px/);
+  assert.doesNotMatch(css, /\.waterfall-card\[data-source=.*\.waterfall-card__source-icon/);
+  assert.doesNotMatch(css, /\.waterfall-grid\s*\{[\s\S]{0,160}?display:\s*block/);
+  assert.doesNotMatch(home, /waterfall-intro|分类|category|sidebar/i);
 });

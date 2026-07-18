@@ -413,6 +413,7 @@ export function TweetDrawer() {
   const isHfPaper = item?.source_type === "hf_paper";
   const isBlog = item?.source_type === "blog";
   const isPodcast = item?.source_type === "podcast";
+  const isYoutube = item?.source_type === "youtube";
   const threadMembers =
     item && !isGithub && !isPh && !isClawhub && !isHdx && !isHfPaper && !isBlog && !isPodcast
       ? resolveThreadMembers(item, siblings)
@@ -429,6 +430,7 @@ export function TweetDrawer() {
   // blog/podcast：item.title 已是中译标题,drawer header 滚动后 reveal。
   const blogName = isBlog ? (item?.title || "") : "";
   const podcastName = isPodcast ? (item?.title || "") : "";
+  const youtubeName = isYoutube ? (item?.title || "") : "";
   // Default title is generic ("项目详情" / "推文详情" / etc.). Once the body's
   // own title element scrolls past the top, the header takes over and
   // displays the actual identifier (owner/repo for GH, name for PH).
@@ -439,6 +441,7 @@ export function TweetDrawer() {
   const defaultHfTitle = "论文详情";
   const defaultBlogTitle = "博客详情";
   const defaultPodcastTitle = "播客详情";
+  const defaultYoutubeTitle = "视频详情";
   const headerTitle = item
     ? isGithub
       ? titleHidden
@@ -468,6 +471,10 @@ export function TweetDrawer() {
                   ? titleHidden
                     ? podcastName || defaultPodcastTitle
                     : defaultPodcastTitle
+                  : isYoutube
+                    ? titleHidden
+                      ? youtubeName || defaultYoutubeTitle
+                      : defaultYoutubeTitle
                   : threadMembers.length > 1
                     ? `Thread · ${threadMembers.length} 条`
                     : "推文详情"
@@ -490,6 +497,8 @@ export function TweetDrawer() {
               ? "阅读原文 ↗"
               : isPodcast
                 ? "在原平台收听 ↗"
+                : isYoutube
+                  ? "在 YouTube 打开 ↗"
                 : "打开X原文 ↗";
   const externalLinkTitle = isGithub
     ? "在 GitHub 打开"
@@ -505,6 +514,8 @@ export function TweetDrawer() {
               ? "在原博客打开"
               : isPodcast
                 ? "在播客平台打开"
+                : isYoutube
+                  ? "在 YouTube 打开"
                 : "在 x.com 打开";
 
   // Double-tap on the title bar (excluding the back / external-link buttons)

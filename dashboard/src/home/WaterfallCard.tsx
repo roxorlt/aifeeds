@@ -1,11 +1,19 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   type MouseEvent,
 } from "react";
 import { SourceIcon } from "../components/icons";
 import { useDrawer } from "../lib/drawerContext";
+import { EVENTS, track } from "../lib/telemetry";
+import { useImpression } from "../lib/telemetry/impressions";
 import type { Item } from "../types";
+import {
+  createExposureHistory,
+  evaluateAndRecordExposure,
+  evaluateExposureShadow,
+} from "./exposureShadow";
 import { homePathForItem } from "./itemPath";
 import {
   estimateMasonryHeight,
@@ -35,6 +43,31 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     },
     aspectRatio ? { aspectRatio } : null,
   );
+  const recordSignal = (kind: "impression" | "consumed") => {
+    const neutral = evaluateExposureShadow(item, createExposureHistory());
+    if (typeof window === "undefined") return neutral;
+    try {
+      return evaluateAndRecordExposure(window.localStorage, item, kind);
+    } catch {
+      return neutral;
+    }
+  };
+  const impressionRef = useImpression(() => {
+    const decision = recordSignal("impression");
+    track(EVENTS.ITEM_IMPRESSION, {
+      item_id: item.id,
+      source: item.source_type,
+      family: decision.family,
+      view_mode: "waterfall",
+      shadow_filter_reason: decision.reason,
+      shadow_rule_version: decision.ruleVersion,
+      shadow_disposition: decision.disposition,
+    });
+  });
+  const setCardRef = useCallback((node: HTMLLIElement | null) => {
+    cardRef.current = node;
+    impressionRef(node);
+  }, [impressionRef]);
 
   useEffect(() => {
     const element = cardRef.current;
@@ -62,7 +95,15 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     if (
       event.defaultPrevented
       || event.button !== 0
-      || event.metaKey
+    ) return;
+    recordSignal("consumed");
+    track(EVENTS.ITEM_CLICK, {
+      item_id: item.id,
+      source: item.source_type,
+      view_mode: "waterfall",
+    });
+    if (
+      event.metaKey
       || event.ctrlKey
       || event.shiftKey
       || event.altKey
@@ -87,7 +128,7 @@ export function WaterfallCard({ item, siblings, position }: Props) {
 
   return (
     <li
-      ref={cardRef}
+      ref={setCardRef}
       className="waterfall-card"
       data-item-id={item.id}
       data-source={item.source_type}

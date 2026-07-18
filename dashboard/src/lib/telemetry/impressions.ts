@@ -3,7 +3,7 @@
 //   - 进入视口 ≥ 1s 才算 impression（防滚动飞掠误报）
 //   - 同一 element 在同一会话只算一次
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 const MIN_VISIBLE_MS = 1_000;
 const VISIBLE_THRESHOLD = 0.5;  // 50% 进入视口才算可见
@@ -101,7 +101,10 @@ export function useImpression(onFire: () => void): React.RefCallback<Element> {
   const elRef = useRef<Element | null>(null);
   const onFireRef = useRef(onFire);
   const stopRef = useRef<(() => void) | null>(null);
-  onFireRef.current = onFire;
+
+  useEffect(() => {
+    onFireRef.current = onFire;
+  }, [onFire]);
 
   useEffect(() => () => {
     stopRef.current?.();
@@ -109,7 +112,7 @@ export function useImpression(onFire: () => void): React.RefCallback<Element> {
     elRef.current = null;
   }, []);
 
-  return (node) => {
+  return useCallback((node) => {
     if (!node) {
       stopRef.current?.();
       stopRef.current = null;
@@ -127,5 +130,5 @@ export function useImpression(onFire: () => void): React.RefCallback<Element> {
         onFireRef.current();
       }
     });
-  };
+  }, []);
 }

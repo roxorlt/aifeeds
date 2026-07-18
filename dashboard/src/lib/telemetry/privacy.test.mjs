@@ -17,6 +17,7 @@ const searchList = fs.readFileSync(new URL("../../components/search/SearchSource
 test("page paths discard queries, hashes, and dynamic route identifiers", () => {
   assert.equal(sanitizePagePath("/search?q=alice%40example.com&token=secret#private"), "/search");
   assert.equal(sanitizePagePath("/t/private-item-id?from=user"), "/t/:id");
+  assert.equal(sanitizePagePath("/y/private-video-id?from=waterfall"), "/y/:id");
   assert.equal(sanitizePagePath("/g/private-owner/private-repo"), "/g/:owner/:repo");
   assert.equal(sanitizePagePath("/reset/alice@example.com"), "/:other");
   assert.equal(sanitizePagePath("https://ai-feeds.com/settings/account?tab=security"), "/settings/account");

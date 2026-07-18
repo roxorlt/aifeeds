@@ -1,6 +1,6 @@
 # Waterfall Mixing and Exposure Shadow Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Codex:** REQUIRED SKILL: Use `executing-plans` to implement this plan task-by-task.
 
 **Goal:** 把 opt-in 瀑布流改成移动双列、PC 自适应多列、无侧栏与无分类 Tab 的来源感知紧凑卡片流，并上线确定性的全源公共混排和只记录不隐藏的曝光影子规则。
 
@@ -9,6 +9,14 @@
 **Tech Stack:** Cloudflare Workers + D1/TypeScript、React 19、Vite SSR、CSS masonry row-span、Node test runner、Vitest、Playwright。
 
 ---
+
+## Execution status
+
+- Tasks 1–9：完成。Dashboard `346/346`、Worker `832/832`、root contracts
+  `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
+  `32 pass / 83 role-skips`；lint、类型检查、production build 与双端截图均通过。
+- Task 10：进行中。feature branch 尚未合入 `main`；staging/production 事实只在远端门通过后更新。
+- 曝光过滤仍为 shadow-only；7–14 天 RUM 只决定后续是否单独开启个性化过滤，不阻塞本次 opt-in 发布。
 
 ## Guardrails
 

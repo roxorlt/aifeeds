@@ -16,6 +16,17 @@ export const HOME_FEED_SOURCES = [
   'youtube',
 ] as const;
 
+const LEGACY_HOME_FEED_SOURCES = [
+  'x_list',
+  'blog',
+  'podcast',
+  'github',
+  'product_hunt',
+  'hf_paper',
+  'huodongxing',
+  'clawhub',
+] as const;
+
 const DEFAULT_LIMIT = 24;
 const MIN_LIMIT = 12;
 const MAX_LIMIT = 48;
@@ -196,8 +207,11 @@ export function parseHomeFeedRequest(
   };
 }
 
-function candidateSql(workflowCompletedFilter: boolean): string {
-  const sourceList = HOME_FEED_SOURCES.map((source) => `'${source}'`).join(', ');
+function candidateSql(
+  workflowCompletedFilter: boolean,
+  sourceTypes: readonly string[],
+): string {
+  const sourceList = sourceTypes.map((source) => `'${source}'`).join(', ');
   const workflowCondition = workflowCompletedFilter
     ? "\n          AND (items.source_type != 'x_list' OR json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL)"
     : '';
@@ -251,16 +265,19 @@ export function buildHomeFeedQuery({
   }
   params.push(limit + 1);
 
+  const rankingVersion = cursor?.version ?? 2;
+  const sourceTypes = rankingVersion === 1
+    ? LEGACY_HOME_FEED_SOURCES
+    : HOME_FEED_SOURCES;
   const projected = buildListProjection({
     tableAlias: 'items',
-    sourceTypes: HOME_FEED_SOURCES,
+    sourceTypes,
   });
-  const rankingVersion = cursor?.version ?? 2;
   if (rankingVersion === 1) {
     const rankedColumns = selectProjectedListColumns('ranked');
     const scoredColumns = selectProjectedListColumns('scored');
     const sql = `WITH candidate_ids AS (
-      ${candidateSql(workflowCompletedFilter)}
+      ${candidateSql(workflowCompletedFilter, sourceTypes)}
     ),
     ranked AS (
       SELECT
@@ -305,7 +322,7 @@ export function buildHomeFeedQuery({
   const scoredColumns = selectProjectedListColumns('scored');
 
   const sql = `WITH candidate_ids AS (
-      ${candidateSql(workflowCompletedFilter)}
+      ${candidateSql(workflowCompletedFilter, sourceTypes)}
     ),
     base_ranked AS (
       SELECT

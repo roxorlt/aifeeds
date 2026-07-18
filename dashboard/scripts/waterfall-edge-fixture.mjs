@@ -15,6 +15,21 @@ const rendererUrl = pathToFileURL(path.join(dashboard, "dist-ssr/render-waterfal
 const { renderWaterfall } = await import(rendererUrl.href);
 const PORT = 4187;
 const ORIGIN = `https://localhost:${PORT}`;
+const SQUARE_COVER = `
+  <svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+    <defs>
+      <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#eef2ff"/>
+        <stop offset="1" stop-color="#dbeafe"/>
+      </linearGradient>
+    </defs>
+    <rect width="640" height="640" rx="40" fill="url(#background)"/>
+    <circle cx="320" cy="268" r="132" fill="#ffffff" fill-opacity=".82"/>
+    <path d="M238 300l58-58 48 48 38-38 66 66H238z" fill="#6366f1"/>
+    <text x="320" y="460" text-anchor="middle" font-family="system-ui, sans-serif"
+      font-size="40" font-weight="700" fill="#1e293b">AI Feeds</text>
+  </svg>
+`;
 const SOURCES = Object.freeze([
   "x_list",
   "blog",
@@ -24,6 +39,7 @@ const SOURCES = Object.freeze([
   "hf_paper",
   "huodongxing",
   "clawhub",
+  "youtube",
 ]);
 
 function fixtureNumber(value) {
@@ -66,6 +82,14 @@ function fixtureItem(number) {
     extra: {
       title_zh: `本地边缘验收条目 ${fixtureNumber(number)}`,
       ai_summary_zh: longTail,
+      ...(number === 2 ? {
+        cover_variants: [{
+          url: "/r/waterfall-fixture-square.webp",
+          width: 640,
+          height: 640,
+          format: "webp",
+        }],
+      } : {}),
     },
   };
 }
@@ -108,6 +132,7 @@ function homeFeedPage(cursor) {
   const pageTwo = cursor === "fixture-page-2";
   return {
     view_mode: "waterfall",
+    ranking_version: 2,
     generated_at: "2026-07-17T08:00:00.000Z",
     items: pageTwo ? allItems.slice(12) : allItems.slice(0, 12),
     next_cursor: pageTwo ? null : "fixture-page-2",
@@ -128,7 +153,11 @@ const CONTENT_TYPES = Object.freeze({
 async function assetResponse(request) {
   const url = new URL(request.url);
   const decoded = decodeURIComponent(url.pathname);
-  const pathname = decoded === "/" ? "/index.html" : decoded;
+  const pathname = decoded === "/"
+    ? "/index.html"
+    : decoded === "/waterfall"
+      ? "/waterfall.html"
+      : decoded;
   const relative = path.posix.normalize(pathname).replace(/^\/+/u, "");
   const absolute = path.resolve(dist, relative);
   if (absolute !== dist && !absolute.startsWith(`${dist}${path.sep}`)) {
@@ -196,7 +225,7 @@ async function apiResponse(request) {
 function isHomeRuntimePath(pathname) {
   return pathname === "/"
     || pathname === "/_home/feed"
-    || /^\/(?:t|c|e|h|o)\/[^/]+$/u.test(pathname)
+    || /^\/(?:t|c|e|h|o|y)\/[^/]+$/u.test(pathname)
     || /^\/(?:g|ph)\/[^/]+\/[^/]+$/u.test(pathname);
 }
 
@@ -230,7 +259,13 @@ const server = createServer(await localTlsOptions(), async (req, res) => {
     if (url.pathname.startsWith("/api/")) {
       response = await apiResponse(request);
     } else if (url.pathname.startsWith("/r/")) {
-      response = new Response("", { status: 204, headers: { "Content-Type": "image/webp" } });
+      response = new Response(SQUARE_COVER, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
     } else if (isHomeRuntimePath(url.pathname)) {
       const failHomeApi = url.searchParams.get("fixture_api") === "fail";
       response = await handleHomeRuntime(request, {

@@ -60,7 +60,7 @@ export function sanitizePagePath(raw: string): string {
   if (STATIC_PAGE_PATHS.has(pathname)) return pathname;
 
   const parts = pathname.split('/').filter(Boolean);
-  if (parts.length === 2 && ['t', 'c', 'h', 'e', 'o', 's'].includes(parts[0])) {
+  if (parts.length === 2 && ['t', 'c', 'h', 'e', 'o', 'y', 's'].includes(parts[0])) {
     return parts[0] === 's' ? '/s/:token' : `/${parts[0]}/:id`;
   }
   if (parts.length === 3 && parts[0] === 'g') return '/g/:owner/:repo';

@@ -62,5 +62,6 @@ export function isHomeExperiencePath(pathname: string): boolean {
     || /^\/c\/[^/]+$/.test(pathname)
     || /^\/e\/[^/]+$/.test(pathname)
     || /^\/h\/[^/]+$/.test(pathname)
-    || /^\/o\/[^/]+$/.test(pathname);
+    || /^\/o\/[^/]+$/.test(pathname)
+    || /^\/y\/[^/]+$/.test(pathname);
 }

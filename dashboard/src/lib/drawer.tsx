@@ -84,6 +84,12 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const arxivId = decodeURIComponent(hfMatch[1]);
     return { compositeId: `hf_paper:${arxivId}` };
   }
+  // /y/:video_id → youtube:<video_id>
+  const youtubeMatch = pathname.match(/^\/y\/([^/]+)$/);
+  if (youtubeMatch) {
+    const videoId = decodeURIComponent(youtubeMatch[1]);
+    return { compositeId: `youtube:${videoId}` };
+  }
   // /o/:id → 官方新闻(blog/podcast)。:id 是完整 composite id(blog:<feed>:<hash>),
   // 前缀校验防把裸 /o/ 频道或非法值当 item 深链。
   const oMatch = pathname.match(/^\/o\/([^/]+)$/);
@@ -180,7 +186,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       void startDetailLoad(item.id, false).catch(() => {});
       const url = homePathForItem(item);
       if (url) navigate(url);
-      // Future sources: youtube / podcast / arxiv — 在 urlForItem 里补 URL 形式。
+      // Future source: legacy arxiv — 在 homePathForItem 里补 URL 形式。
     },
     [navigate, startDetailLoad],
   );
