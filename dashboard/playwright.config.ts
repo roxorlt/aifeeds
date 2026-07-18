@@ -4,17 +4,23 @@ const isCI = Boolean(process.env.CI);
 const requestedBaseURL = process.env.E2E_BASE_URL?.trim().replace(/\/+$/, "");
 const isRemote = Boolean(requestedBaseURL);
 const isWaterfallE2E = process.env.WATERFALL_E2E === "1";
+const isWaterfallStagingRemote = process.env.WATERFALL_STAGING_REMOTE === "1";
 const requestedOutputDir = process.env.E2E_OUTPUT_DIR?.trim().replace(/\/+$/, "");
 
 if (isRemote && isWaterfallE2E) {
   throw new Error("WATERFALL_E2E is local-only and cannot target a remote host");
+}
+if (isWaterfallStagingRemote && !isRemote) {
+  throw new Error("WATERFALL_STAGING_REMOTE requires an exact remote staging host");
 }
 
 if (requestedBaseURL) {
   const target = new URL(requestedBaseURL);
   if (
     target.protocol !== "https:" ||
-    target.hostname !== "perf-staging.ai-feeds.com" ||
+    target.hostname !== (isWaterfallStagingRemote
+      ? "staging.ai-feeds.com"
+      : "perf-staging.ai-feeds.com") ||
     target.port ||
     target.pathname !== "/" ||
     target.username ||
@@ -22,11 +28,16 @@ if (requestedBaseURL) {
     target.search ||
     target.hash
   ) {
-    throw new Error("E2E_BASE_URL must be exactly https://perf-staging.ai-feeds.com");
+    throw new Error(isWaterfallStagingRemote
+      ? "E2E_BASE_URL must be exactly https://staging.ai-feeds.com"
+      : "E2E_BASE_URL must be exactly https://perf-staging.ai-feeds.com");
   }
 }
 
-if (isRemote && !/^\/private\/tmp\/aifeeds-perf-staging-\d{8}T\d{6}-[A-Za-z0-9]{6}\/playwright$/.test(requestedOutputDir || "")) {
+const remoteOutputPattern = isWaterfallStagingRemote
+  ? /^\/private\/tmp\/aifeeds-waterfall-staging\.[A-Za-z0-9]+\/playwright$/
+  : /^\/private\/tmp\/aifeeds-perf-staging-\d{8}T\d{6}-[A-Za-z0-9]{6}\/playwright$/;
+if (isRemote && !remoteOutputPattern.test(requestedOutputDir || "")) {
   throw new Error("E2E_OUTPUT_DIR must be the active private perf-staging evidence directory");
 }
 if (!isRemote && requestedOutputDir) {

@@ -33,6 +33,7 @@ test("waterfall preserves one ordered DOM list and never uses dense placement", 
   assert.match(home, /items\.map\(\(item/);
   assert.match(card, /<li/);
   assert.match(card, /ResizeObserver/);
+  assert.match(card, /nonShrinkingMasonrySpan/);
   assert.doesNotMatch(home, /columns\.map|columnItems/);
   assert.doesNotMatch(css, /grid-auto-flow:\s*dense/);
 });

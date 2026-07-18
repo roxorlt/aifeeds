@@ -10,6 +10,7 @@ import { homePathForItem } from "./itemPath";
 import {
   estimateMasonryHeight,
   masonryRowSpan,
+  nonShrinkingMasonrySpan,
 } from "./masonry";
 
 type Props = Readonly<{
@@ -38,9 +39,17 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     const element = cardRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
     const updateSpan = () => {
-      element.style.setProperty("--waterfall-row-span", String(
-        masonryRowSpan(element.getBoundingClientRect().height),
-      ));
+      const currentSpan = Number.parseInt(
+        element.style.getPropertyValue("--waterfall-row-span"),
+        10,
+      );
+      const nextSpan = nonShrinkingMasonrySpan(
+        currentSpan,
+        element.getBoundingClientRect().height,
+      );
+      if (nextSpan !== currentSpan) {
+        element.style.setProperty("--waterfall-row-span", String(nextSpan));
+      }
     };
     updateSpan();
     const observer = new ResizeObserver(updateSpan);

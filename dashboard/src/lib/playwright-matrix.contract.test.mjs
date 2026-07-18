@@ -263,6 +263,27 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
   );
 });
 
+test("waterfall staging has an exact-host five-device remote browser gate", () => {
+  const remoteSpecPath = path.join(dashboard, "e2e/waterfall-staging-remote.spec.ts");
+  const remoteRunnerPath = path.join(dashboard, "scripts/run-waterfall-staging-e2e.sh");
+  assert.equal(fs.existsSync(remoteSpecPath), true);
+  assert.equal(fs.existsSync(remoteRunnerPath), true);
+  const remoteSpec = fs.readFileSync(remoteSpecPath, "utf8");
+  const remoteRunner = fs.readFileSync(remoteRunnerPath, "utf8");
+
+  assert.match(config, /WATERFALL_STAGING_REMOTE/);
+  assert.match(config, /staging\.ai-feeds\.com/);
+  assert.match(config, /aifeeds-waterfall-staging/);
+  assert.match(packageJson.scripts["test:e2e:waterfall-staging"], /run-waterfall-staging-e2e\.sh/);
+  assert.match(remoteRunner, /E2E_BASE_URL=https:\/\/staging\.ai-feeds\.com/);
+  assert.match(remoteRunner, /PLAYWRIGHT_NO_COPY_PROMPT=1/);
+  assert.match(remoteRunner, /waterfall-staging-remote\.spec\.ts/);
+  assert.match(remoteSpec, /staging SSR contains at least 12 cards before JavaScript/);
+  assert.match(remoteSpec, /staging hydration is clean and responsive within the CLS budget/);
+  assert.match(remoteSpec, /staging load more appends a bounded page/);
+  assert.match(remoteSpec, /staging view switch persists classic/);
+});
+
 test("waterfall SSR has a local-only five-device edge fixture and browser budget gate", () => {
   const waterfallSpecPath = path.join(dashboard, "e2e/waterfall-home.spec.ts");
   const edgeFixturePath = path.join(dashboard, "scripts/waterfall-edge-fixture.mjs");

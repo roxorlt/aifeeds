@@ -2,6 +2,7 @@ import type { Item } from "../types";
 
 export const MASONRY_ROW_PX = 8;
 export const MASONRY_GAP_PX = 12;
+export const MASONRY_SSR_SAFETY_PX = MASONRY_ROW_PX + MASONRY_GAP_PX;
 
 export function masonryRowSpan(
   measuredHeight: number,
@@ -12,6 +13,16 @@ export function masonryRowSpan(
   const safeRow = Math.max(1, rowHeight);
   const safeGap = Math.max(0, gap);
   return Math.max(1, Math.ceil((measuredHeight + safeGap) / (safeRow + safeGap)));
+}
+
+export function nonShrinkingMasonrySpan(
+  currentSpan: number,
+  measuredHeight: number,
+): number {
+  const measuredSpan = masonryRowSpan(measuredHeight);
+  return Number.isSafeInteger(currentSpan) && currentSpan > 0
+    ? Math.max(currentSpan, measuredSpan)
+    : measuredSpan;
 }
 
 function textLines(value: string | null | undefined, charactersPerLine: number): number {
@@ -32,5 +43,9 @@ export function estimateMasonryHeight(
   const mediaHeight = media && Number.isFinite(media.aspectRatio) && media.aspectRatio > 0
     ? Math.min(360, Math.max(150, 360 / media.aspectRatio))
     : 0;
-  return 76 + (titleLines * 25) + (summaryLines * 23) + mediaHeight;
+  return 76
+    + (titleLines * 25)
+    + (summaryLines * 23)
+    + mediaHeight
+    + MASONRY_SSR_SAFETY_PX;
 }
