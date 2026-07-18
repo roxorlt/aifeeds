@@ -6,14 +6,18 @@ import {
   buildItemsPath,
   canStartBackgroundPrefetch,
   createBackgroundQueue,
+  createIntentPrefetchController,
   createSingleFlightRegistry,
   executeRequestWithPolicy,
+  adjacentSourceForIntent,
   getImmediateColumnCount,
   getRequestAttemptBudget,
   itemsPathMatchesSource,
   isBackgroundPrefetchDisabled,
+  loadMoreLimitForViewport,
   registerMountedFeed,
   isFeedMounted,
+  shouldPollFeed,
   waitForBackgroundReadiness,
 } from "./feedScheduling.ts";
 
@@ -34,6 +38,111 @@ test("responsive first row mounts 1, 2, then 3 columns", () => {
   assert.equal(getImmediateColumnCount(1023), 2);
   assert.equal(getImmediateColumnCount(1024), 3);
   assert.equal(getImmediateColumnCount(1440), 3);
+});
+
+test("load-more uses a bounded mobile and desktop request budget", () => {
+  assert.equal(loadMoreLimitForViewport(0), 12);
+  assert.equal(loadMoreLimitForViewport(767), 12);
+  assert.equal(loadMoreLimitForViewport(768), 16);
+  assert.equal(loadMoreLimitForViewport(1440), 16);
+});
+
+test("polling is limited to a visible, online X feed in a visible document", () => {
+  assert.equal(shouldPollFeed({
+    sourceType: "x_list",
+    feedVisible: true,
+    documentVisible: true,
+    online: true,
+  }), true);
+  for (const override of [
+    { sourceType: "github" },
+    { feedVisible: false },
+    { documentVisible: false },
+    { online: false },
+  ]) {
+    assert.equal(shouldPollFeed({
+      sourceType: "x_list",
+      feedVisible: true,
+      documentVisible: true,
+      online: true,
+      ...override,
+    }), false);
+  }
+});
+
+test("adjacent intent preserves physical tab order even when a target is unavailable", () => {
+  const orderedSources = ["x_list", "blog,podcast", "product_hunt", "github"];
+  assert.equal(adjacentSourceForIntent("x_list", "next", orderedSources), "blog,podcast");
+  assert.equal(adjacentSourceForIntent("product_hunt", "previous", orderedSources), "blog,podcast");
+  assert.equal(adjacentSourceForIntent("github", "next", orderedSources), null);
+  assert.equal(adjacentSourceForIntent("missing", "next", orderedSources), null);
+  assert.equal(adjacentSourceForIntent("x_list", "previous", orderedSources), null);
+});
+
+test("intent prefetch deduplicates a target and cancels superseded queued intent", async () => {
+  const scheduled = new Map();
+  const cancelled = [];
+  let nextHandle = 0;
+  const controller = createIntentPrefetchController({
+    schedule(callback) {
+      const handle = ++nextHandle;
+      scheduled.set(handle, callback);
+      return handle;
+    },
+    cancelScheduled(handle) {
+      cancelled.push(handle);
+      scheduled.delete(handle);
+    },
+  });
+  const calls = [];
+
+  assert.equal(controller.request("github", async (source) => calls.push(source)), true);
+  assert.equal(controller.request("github", async (source) => calls.push(source)), false);
+  assert.equal(controller.request("hf_paper", async (source) => calls.push(source)), true);
+  assert.deepEqual(cancelled, [1]);
+  assert.equal(scheduled.size, 1);
+
+  const run = [...scheduled.values()][0];
+  scheduled.clear();
+  run();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["hf_paper"]);
+
+  controller.cancel();
+  assert.equal(scheduled.size, 0);
+});
+
+test("intent prefetch retains only the latest queued target while another target runs", async () => {
+  const scheduled = [];
+  const gate = deferred();
+  const calls = [];
+  const controller = createIntentPrefetchController({
+    schedule(callback) {
+      scheduled.push(callback);
+      return callback;
+    },
+    cancelScheduled() {},
+  });
+
+  controller.request("github", async (source) => {
+    calls.push(`${source}:start`);
+    await gate.promise;
+    calls.push(`${source}:end`);
+  });
+  scheduled.shift()();
+  await Promise.resolve();
+
+  controller.request("product_hunt", async (source) => calls.push(source));
+  controller.request("hf_paper", async (source) => calls.push(source));
+  assert.equal(scheduled.length, 0, "queued intent must wait behind the active request");
+  gate.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(scheduled.length, 1);
+  scheduled.shift()();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["github:start", "github:end", "hf_paper"]);
 });
 
 test("items paths use a stable order, encoding, and canonical composite source", () => {

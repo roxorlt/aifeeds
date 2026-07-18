@@ -21,6 +21,9 @@ type MockOptions = {
   failFirstList?: boolean;
   videoPosterFixture?: boolean;
   gifPreviewFixture?: boolean;
+  paginationFixture?: boolean;
+  effectiveType?: string;
+  liveSources?: readonly string[];
   imageFallbackFixture?: "fallback-succeeds" | "fallback-fails";
 };
 
@@ -211,6 +214,17 @@ function makeGifPreviewItem(
   };
 }
 
+function makePaginatedItems(requestedSource: string, page: number): ReturnType<typeof makeItem>[] {
+  return Array.from({ length: 12 }, (_, index) => ({
+    ...makeItem(requestedSource),
+    id: `${requestedSource}:page-${page}-${index}`,
+    source_id: `${requestedSource}-page-${page}-${index}`,
+    title: `Fixture ${requestedSource} page ${page} item ${index}`,
+    content: `Fixture ${requestedSource} page ${page} item ${index} body`,
+    scraped_at: `2026-07-${String(12 - page).padStart(2, "0")} ${String(23 - index).padStart(2, "0")}:00:00`,
+  }));
+}
+
 function makeVideoPosterItems() {
   const base = makeItem("x_list");
   const item = (suffix: string, overrides: Record<string, unknown> = {}) => ({
@@ -360,7 +374,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
     resolveRefresh?.();
   };
 
-  await page.addInitScript(({ saveData, disableVideoAutoplay }) => {
+  await page.addInitScript(({ saveData, effectiveType, disableVideoAutoplay }) => {
     localStorage.clear();
     sessionStorage.clear();
     if (disableVideoAutoplay) {
@@ -369,10 +383,10 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
         version: 0,
       }));
     }
-    if (saveData) {
+    if (saveData || effectiveType) {
       const connection = {
-        saveData: true,
-        effectiveType: "4g",
+        saveData,
+        effectiveType: effectiveType || "4g",
         addEventListener() {},
         removeEventListener() {},
       };
@@ -383,6 +397,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
     }
   }, {
     saveData: Boolean(options.saveData),
+    effectiveType: options.effectiveType,
     disableVideoAutoplay: Boolean(options.videoPosterFixture),
   });
 
@@ -497,7 +512,7 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
       }
       await manifestGate;
       await fulfillJson(route, {
-        live_source_types: [...LIVE_SOURCES],
+        live_source_types: options.liveSources ?? [...LIVE_SOURCES],
         labels: { x_list: "动态" },
         generated_at: "2026-07-11T08:00:00.000Z",
       });
@@ -515,19 +530,22 @@ async function installMocks(page: Page, options: MockOptions = {}): Promise<Mock
           return;
         }
         const requestedSource = sourceFromQuery(url.searchParams.get("source_type"));
+        const cursor = url.searchParams.get("cursor");
         await fulfillJson(route, {
-          items: options.videoPosterFixture && requestedSource === "x_list"
-            ? makeVideoPosterItems()
-            : options.imageFallbackFixture && requestedSource === "x_list"
-              ? [makeImageFallbackItem()]
-              : options.gifPreviewFixture && requestedSource === "product_hunt"
-                ? [
-                    makeGifPreviewItem(),
-                    makeGifPreviewItem("animated-related", "Fixture Related Product Hunt GIF"),
-                  ]
-            : [makeItem(requestedSource)],
-          next_cursor: null,
-          has_more: false,
+          items: options.paginationFixture
+            ? makePaginatedItems(requestedSource, cursor ? 2 : 1)
+            : options.videoPosterFixture && requestedSource === "x_list"
+              ? makeVideoPosterItems()
+              : options.imageFallbackFixture && requestedSource === "x_list"
+                ? [makeImageFallbackItem()]
+                : options.gifPreviewFixture && requestedSource === "product_hunt"
+                  ? [
+                      makeGifPreviewItem(),
+                      makeGifPreviewItem("animated-related", "Fixture Related Product Hunt GIF"),
+                    ]
+                  : [makeItem(requestedSource)],
+          next_cursor: options.paginationFixture && !cursor ? "page-2" : null,
+          has_more: Boolean(options.paginationFixture && !cursor),
           query_time_ms: 12,
         });
       } finally {
@@ -671,8 +689,13 @@ test("first usable feed obeys the cross-device request and media budgets", async
 
   if (testInfo.project.name.includes("iphone") || testInfo.project.name.includes("android")) {
     await expect(page.locator('[data-chip-key="x_list"]')).toBeVisible();
+    const beforeSwipe = state.listRequests.length;
     await swipeToNextChannel(page, testInfo.project.name);
     await expect(page.getByText("Fixture blog,podcast", { exact: false }).first()).toBeVisible();
+    await expect.poll(() => state.listRequests.length).toBe(beforeSwipe + 1);
+    expect(state.listRequests.filter((path) => (
+      new URL(path, "https://e2e.invalid").searchParams.get("source_type") === "blog,podcast"
+    ))).toHaveLength(1);
   } else {
     await page.evaluate(() => window.scrollTo(0, Math.max(900, document.body.scrollHeight * 0.55)));
     await expect.poll(() => state.listRequests.length).toBeGreaterThan(budget);
@@ -734,9 +757,140 @@ test("save-data blocks deferred fonts and background channel prefetch", async ({
     window.dispatchEvent(new Event("aifeeds:lcp-settled"));
     window.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
   });
+  await page.locator('[data-chip-key="product_hunt"]').dispatchEvent("pointerdown");
   await page.waitForTimeout(300);
   expect(state.listRequests).toHaveLength(1);
   expect(state.fontRequests).toHaveLength(0);
+});
+
+test("mobile stays on one source for ten seconds without interaction", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page);
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+  await page.waitForTimeout(10_100);
+  expect(state.listRequests).toHaveLength(1);
+});
+
+test("chip intent prefetch and subsequent mount share one network flight", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page);
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+
+  const chip = page.locator('[data-chip-key="product_hunt"]');
+  await chip.dispatchEvent("pointerdown");
+  await expect.poll(() => state.listRequests.length).toBe(2);
+  expect(state.listRequests.filter((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.get("source_type") === "product_hunt"
+  ))).toHaveLength(1);
+
+  await chip.click();
+  await expect(page.getByText("Fixture product_hunt", { exact: false }).first()).toBeVisible();
+  await page.waitForTimeout(100);
+  expect(state.listRequests.filter((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.get("source_type") === "product_hunt"
+  ))).toHaveLength(1);
+});
+
+test("3g blocks intent prefetch", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page, { effectiveType: "3g" });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+  await page.locator('[data-chip-key="github"]').dispatchEvent("pointerdown");
+  await page.waitForTimeout(200);
+  expect(state.listRequests).toHaveLength(1);
+});
+
+test("swipe intent never skips an unavailable physical neighbour", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  const state = await installMocks(page, {
+    liveSources: LIVE_SOURCES.filter((source) => source !== "product_hunt"),
+  });
+  const manifestResponse = page.waitForResponse((response) => (
+    new URL(response.url()).pathname === "/api/feed-manifest"
+  ));
+  await page.goto("/");
+  await manifestResponse;
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+
+  await page.locator('[data-chip-key="blog,podcast"]').click();
+  await expect(page.getByText("Fixture blog,podcast", { exact: false }).first()).toBeVisible();
+  const requestsBeforeSwipe = state.listRequests.length;
+  await swipeToNextChannel(page, testInfo.project.name);
+  await expect(page.locator('[data-chip-key="product_hunt"]')).toHaveClass(/text-white/);
+  await page.waitForTimeout(200);
+
+  const swipeSources = state.listRequests.slice(requestsBeforeSwipe).map((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.get("source_type")
+  ));
+  expect(swipeSources).not.toContain("product_hunt");
+  expect(swipeSources).not.toContain("github");
+});
+
+test("load-more uses 12 items on mobile and 16 on desktop", async ({ page }, testInfo) => {
+  const isMobile = testInfo.project.name.startsWith("iphone-webkit");
+  const isDesktop = testInfo.project.name === "desktop-chromium";
+  test.skip(!isMobile && !isDesktop, "one mobile and one desktop engine cover the responsive budgets");
+  const state = await installMocks(page, { paginationFixture: true });
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list page 1", { exact: false }).first()).toBeVisible();
+
+  const sentinel = page.locator('[data-feed-source="x_list"] [data-load-more-sentinel]');
+  await expect(sentinel).toBeAttached();
+  await page.evaluate(() => {
+    document.querySelector('[data-feed-source="x_list"] [data-load-more-sentinel]')
+      ?.scrollIntoView({ block: "center" });
+  });
+  await expect.poll(() => state.listRequests.some((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.get("cursor") === "page-2"
+  ))).toBe(true);
+  const loadMorePath = state.listRequests.find((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.get("source_type") === "x_list"
+    && new URL(path, "https://e2e.invalid").searchParams.get("cursor") === "page-2"
+  ));
+  expect(new URL(loadMorePath!, "https://e2e.invalid").searchParams.get("limit"))
+    .toBe(isMobile ? "12" : "16");
+});
+
+test("hidden X feed does not poll and visibility restore waits a full interval", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("iphone-webkit"), "one real mobile engine is sufficient");
+  await page.clock.install({ time: new Date("2026-07-17T10:00:00Z") });
+  const state = await installMocks(page);
+  await page.goto("/");
+  await expect(page.getByText("Fixture x_list", { exact: false }).first()).toBeVisible();
+  await page.clock.pauseAt(new Date("2026-07-17T10:00:01Z"));
+
+  await page.evaluate(() => {
+    const target = window as typeof window & { __e2eHidden?: boolean };
+    target.__e2eHidden = true;
+    Object.defineProperties(document, {
+      hidden: { configurable: true, get: () => target.__e2eHidden },
+      visibilityState: {
+        configurable: true,
+        get: () => target.__e2eHidden ? "hidden" : "visible",
+      },
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(60_000);
+  expect(state.listRequests.filter((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.has("since")
+  ))).toHaveLength(0);
+
+  await page.evaluate(() => {
+    (window as typeof window & { __e2eHidden?: boolean }).__e2eHidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(29_000);
+  expect(state.listRequests.filter((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.has("since")
+  ))).toHaveLength(0);
+  await page.clock.fastForward(1_000);
+  await expect.poll(() => state.listRequests.filter((path) => (
+    new URL(path, "https://e2e.invalid").searchParams.has("since")
+  )).length).toBe(1);
 });
 
 test("Product Hunt GIF stays static until explicit playback intent", async ({ page }, testInfo) => {
