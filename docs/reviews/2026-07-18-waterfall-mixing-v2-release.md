@@ -2,7 +2,7 @@
 
 日期：2026-07-18
 
-状态：`LOCAL GO / STAGING PENDING`
+状态：`STAGING GO / PR CI PENDING`
 
 分支：`codex/waterfall-compact-card-prototype`
 
@@ -46,6 +46,26 @@
 - 已知非阻塞告警：既有 `TweetDrawer` minified chunk 大于 500KB；本批次未扩大该边界。
 
 ## 4. staging 同步门
+
+2026-07-18 已完成同步 staging，最终对象与结果如下：
+
+- 冻结源码：`7327fba5e687a7bcf664dea3ce7ef9c333a8aeb3`。
+- Pages deployment：`7faca6bb-a1df-42e4-8015-e5eebb8c949d`，构建身份
+  `0bb5cad1463328541fbee34e41117920648781f725783d20570a7bcc3b0811a9`。
+- Worker version：`f4ee4d50-05f8-4304-88e4-697e1b1f3255`。
+- 新 Pages + 旧 Worker 返回 legacy v1；旧 Pages + 新 Worker 保持 v1/八源；新 Pages + 新
+  Worker 返回 v2。v1 cursor 重放继续为 v1 且无 YouTube，v2 两页各 24 条且 ID 重叠为 0。
+- 九源临时夹具只用于 staging 验收；九个 source 均出现后已删除，复核
+  `fixture_count=0`。清理后真实数据请求仍为 HTTP 200、`SSR=waterfall`、
+  `ranking_version=2`，且不存在夹具标记。
+- desktop 1440、tablet 820、iPhone Chromium/WebKit 390、Android 412 的远端门
+  `20/20` 通过；密集 CJK row-span 修复后无越轨、横向溢出或 CLS。
+- 每个 view/device/cache 各 10 次的性能门通过：desktop cold waterfall/classic LCP p75
+  `1556/1872ms`（`-16.9%`），mobile cold `1532/1844ms`（`-16.9%`）；
+  desktop warm `300/292ms`（`+2.7%`），mobile warm `280/276ms`（`+1.4%`）；
+  waterfall CLS p75 `0`、请求数 p50 `16 vs 24`、传输 p50 约
+  `135.77–139.58KB vs 317.41–323.27KB`。
+- staging 决定：`GO`。尚未完成的发布门只有 PR 全绿、合入 `main`、生产工作流和生产即时验收。
 
 部署前必须冻结并记录：
 

@@ -15,7 +15,8 @@
 - Tasks 1–9：完成。Dashboard `348/348`、Worker `834/834`、root contracts
   `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
   `32 pass / 83 role-skips`；lint、类型检查、production build 与双端截图均通过。
-- Task 10：进行中。feature branch 尚未合入 `main`；staging/production 事实只在远端门通过后更新。
+- Task 10：进行中。staging 同步、滚动兼容矩阵、九源/分页、五设备和 10-run 性能门已通过；
+  临时九源夹具已清理且复核为 0。feature branch 尚未合入 `main`，生产尚未发布。
 - 曝光过滤仍为 shadow-only；7–14 天 RUM 只决定后续是否单独开启个性化过滤，不阻塞本次 opt-in 发布。
 
 ## Guardrails

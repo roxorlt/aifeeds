@@ -70,8 +70,9 @@
       staging 固定先 Pages、后 Worker。
     - [x] staging 真实中文资讯卡补充证据：两张 no-JS 卡片比旧 row-span 预留高约 16px；
       已添加密集 CJK 回归 fixture，并为 SSR 估算增加一个完整 grid row 的换行缓冲。
-    - [ ] 推送 feature branch，完成同步 staging Worker/Pages、九源/分页/shadow/性能门；
-      通过后合入 `main` 触发生产发布并做即时冒烟。发布清单见
+    - [x] feature branch 已推送；同步 staging Worker/Pages、滚动兼容矩阵、九源/分页/shadow、
+      五设备 `20/20` 与每格 10 次性能门均通过；九源临时夹具已删除并复核为 0。
+    - [ ] PR 全绿后合入 `main` 触发生产发布并做即时冒烟。发布清单见
       [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。
   - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
     异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
