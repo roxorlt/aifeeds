@@ -340,32 +340,6 @@
       padding: 20px 24px 54px;
     }
 
-    .feed-tools {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      min-height: 36px;
-      gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    .feed-tools__title {
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-    }
-
-    .feed-tools h1 {
-      margin: 0;
-      font-size: 18px;
-      letter-spacing: -.025em;
-    }
-
-    .feed-tools__title span {
-      color: var(--muted);
-      font-size: 11px;
-    }
-
     .masonry {
       display: grid;
       grid-auto-rows: 8px;
@@ -766,12 +740,6 @@
       padding: 10px 12px 40px;
     }
 
-    .app-canvas--mobile .feed-tools { display: none; }
-
-    .app-canvas--mobile .feed-tools__title {
-      display: none;
-    }
-
     .app-canvas--mobile .masonry {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
@@ -1015,9 +983,6 @@
           </div>
           <div class="app-shell">
             <section class="feed-main">
-              <div class="feed-tools">
-                <div class="feed-tools__title"><h1>今日值得看</h1><span>全来源混排 · 持续更新</span></div>
-              </div>
               <ol class="masonry" data-canvas="desktop"></ol>
             </section>
           </div>
