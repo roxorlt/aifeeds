@@ -37,6 +37,10 @@ test("apiFetch strips purpose from native fetch and uses the bounded method-safe
 test("initial/list pagination budgets and background reads are explicit", () => {
   assert.match(feed, /const INITIAL_LIMIT = 12/);
   assert.match(feed, /loadMoreLimitForViewport\(window\.innerWidth\)/);
+  assert.match(feed, /if \(placeholder \|\| !hasMore \|\| isNarrowFeed\) return;/,
+    "mobile must not attach an automatic infinite-scroll observer");
+  assert.match(feed, /加载更多/,
+    "mobile pagination must remain available through explicit user intent");
   assert.doesNotMatch(feed, /const LOAD_MORE_LIMIT = 30/);
   assert.match(feed, /purpose:\s*["']background["']/,
     "polling or prefetch reads must opt out of retries");

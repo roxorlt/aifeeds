@@ -124,7 +124,7 @@ function makeArchiveDb(seed: ArchiveSeed[]) {
               })) as T[],
             };
           }
-          if (/GROUP BY p\.source,\s*month/i.test(sql)) {
+          if (/GROUP BY (?:p\.)?source,\s*month/i.test(sql)) {
             const groups = new Map<string, { source: string; month: string; item_count: number }>();
             for (const row of seed) {
               const month = row.published_at.slice(0, 7);
@@ -400,11 +400,33 @@ function makeSitemapDb({
     (it.dedup_of ?? null) == null &&
     (it.cn_sensitive ?? 0) !== 1;
   const queryAppliesEligibility = (sql: string): boolean =>
-    /JOIN\s+items\s+i\s+ON\s+i\.id\s*=\s*p\.item_id/i.test(sql) &&
+    /\bitems\s+i\b/i.test(sql) &&
+    /\bitem_pages\s+p\b/i.test(sql) &&
     /i\.is_relevant\s*=\s*1/i.test(sql) &&
     /i\.deleted_at\s+IS\s+NULL/i.test(sql) &&
     /dedup_of/i.test(sql) &&
     /cn_sensitive/i.test(sql);
+  const queryUsesCanonicalRows = (sql: string): boolean =>
+    /COUNT\(\s*DISTINCT\s+p\.url_path\s*\)/i.test(sql) ||
+    /GROUP BY\s+p\.url_path/i.test(sql);
+  const rowsForQuery = (sql: string): ItemPageRow[] => {
+    const eligibleRows = queryAppliesEligibility(sql) ? items.filter(sitemapEligible) : items;
+    if (!queryUsesCanonicalRows(sql)) return eligibleRows;
+    const latestByPath = new Map<string, ItemPageRow>();
+    for (const item of eligibleRows) {
+      const key = `${item.source}\0${item.url_path}`;
+      const current = latestByPath.get(key);
+      if (
+        !current ||
+        item.generated_at > current.generated_at ||
+        (item.generated_at === current.generated_at &&
+          String(item.item_id || '') > String(current.item_id || ''))
+      ) {
+        latestByPath.set(key, item);
+      }
+    }
+    return [...latestByPath.values()];
+  };
   return {
     prepare(sql: string) {
       let binds: unknown[] = [];
@@ -424,7 +446,7 @@ function makeSitemapDb({
                 map.set(source, { source, c, m: '2026-07-06T09:00:00.000Z' });
               }
             } else {
-              for (const it of items) {
+              for (const it of rowsForQuery(sql)) {
                 if ((it.status || 'live') !== 'live') continue;
                 if (queryAppliesEligibility(sql) && !sitemapEligible(it)) continue;
                 const e = map.get(it.source) || { source: it.source, c: 0, m: '' };
@@ -435,9 +457,9 @@ function makeSitemapDb({
             }
             return { results: [...map.values()] as unknown as T[] };
           }
-          if (/FROM item_pages/i.test(sql)) {
+          if (/item_pages/i.test(sql)) {
             const [source, limit, offset] = binds as [string, number, number];
-            let rows = items
+            let rows = rowsForQuery(sql)
               .filter((it) => it.source === source && (it.status || 'live') === 'live')
               .filter((it) => !queryAppliesEligibility(sql) || sitemapEligible(it))
               .sort((a, b) => (a.generated_at < b.generated_at ? 1 : -1));
@@ -710,6 +732,62 @@ describe('handleSeoRoute /sitemap-<source>.xml (内容片)', () => {
     expect((xml.match(/<loc>/g) || []).length).toBe(2);
     expect(xml).toContain(`<loc>${SITE}/i/paper/2501.1</loc>`);
     expect(xml).toContain(`<loc>${SITE}/i/paper/2502.2</loc>`);
+  });
+
+  test('同一 PH canonical 的多日期记录只输出最新代表行一次', async () => {
+    const items: ItemPageRow[] = [
+      {
+        ...mkItem('ph', '/i/ph/repeat', '2026-05-11T07:00:00Z'),
+        item_id: 'product_hunt:repeat:2026-05-11',
+      },
+      {
+        ...mkItem('ph', '/i/ph/repeat', '2026-06-12T07:00:00Z'),
+        item_id: 'product_hunt:repeat:2026-06-12',
+      },
+      {
+        ...mkItem('ph', '/i/ph/repeat', '2026-07-13T07:00:00Z'),
+        item_id: 'product_hunt:repeat:2026-07-13',
+        cn_sensitive: 1,
+      },
+    ];
+    const resp = await handleSeoRoute(
+      req('/sitemap-ph.xml'),
+      makeEnv({}, makeSitemapDb({ items })),
+    );
+    const xml = await resp!.text();
+
+    expect((xml.match(new RegExp(`<loc>${SITE}/i/ph/repeat</loc>`, 'g')) || []).length).toBe(1);
+    expect(xml).toContain('<lastmod>2026-06-12</lastmod>');
+  });
+
+  test('sitemap index 先按 canonical URL 去重再统计分片', async () => {
+    const db = {
+      prepare(sql: string) {
+        const stmt = {
+          bind() {
+            return stmt;
+          },
+          async all<T>() {
+            if (/GROUP BY p\.source/i.test(sql)) {
+              expect(sql).toMatch(/COUNT\(\s*DISTINCT\s+p\.url_path\s*\)/i);
+              return {
+                results: [{ source: 'ph', c: 1, m: '2026-06-12T07:00:00Z' }] as T[],
+              };
+            }
+            return { results: [] as T[] };
+          },
+          async first<T>() {
+            return null as T | null;
+          },
+          async run() {
+            return { success: true };
+          },
+        };
+        return stmt;
+      },
+    };
+    const resp = await handleSeoRoute(req('/sitemap.xml'), makeEnv({}, db));
+    expect(resp!.status).toBe(200);
   });
 
   test('续片路径 /sitemap-x-2.xml 走第 2 页（OFFSET 生效，越界返回空 urlset）', async () => {

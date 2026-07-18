@@ -580,10 +580,6 @@ POST /api/enrich/run?mode=item-page-regenerate&id=x_list:2061451225762046411
 
 ## 8. 批次 D：Product Hunt GIF 静态首帧
 
-**执行状态（2026-07-17）**：D1–D3 已按 RED→GREEN 完成本地实现；Worker 全量 49 files /
-793 tests、Dashboard 258 tests、TypeScript 与 production build 通过。D4 等待该批次在最新
-`main` 上完成 staging 小批回填、网络验收和生产发布后关闭。
-
 ### Task D1：变体生成 RED tests
 
 **Files**

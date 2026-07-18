@@ -837,12 +837,20 @@ test("load-more uses 12 items on mobile and 16 on desktop", async ({ page }, tes
   await page.goto("/");
   await expect(page.getByText("Fixture x_list page 1", { exact: false }).first()).toBeVisible();
 
-  const sentinel = page.locator('[data-feed-source="x_list"] [data-load-more-sentinel]');
-  await expect(sentinel).toBeAttached();
-  await page.evaluate(() => {
-    document.querySelector('[data-feed-source="x_list"] [data-load-more-sentinel]')
-      ?.scrollIntoView({ block: "center" });
-  });
+  if (isMobile) {
+    await page.waitForTimeout(500);
+    expect(state.listRequests.some((path) => (
+      new URL(path, "https://e2e.invalid").searchParams.get("cursor") === "page-2"
+    ))).toBe(false);
+    await page.getByRole("button", { name: "加载更多" }).click();
+  } else {
+    const sentinel = page.locator('[data-feed-source="x_list"] [data-load-more-sentinel]');
+    await expect(sentinel).toBeAttached();
+    await page.evaluate(() => {
+      document.querySelector('[data-feed-source="x_list"] [data-load-more-sentinel]')
+        ?.scrollIntoView({ block: "center" });
+    });
+  }
   await expect.poll(() => state.listRequests.some((path) => (
     new URL(path, "https://e2e.invalid").searchParams.get("cursor") === "page-2"
   ))).toBe(true);
