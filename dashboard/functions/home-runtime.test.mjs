@@ -166,6 +166,50 @@ test("classic mode receives only bounded availability metadata", async () => {
   assert.equal(fixture.calls.render, 0);
 });
 
+test("valid query overrides persist the selected view for same-origin pagination", async () => {
+  const waterfall = harness({
+    pathname: "/?view=waterfall",
+    cookie: "",
+  });
+  const waterfallResponse = await handleHomeRuntime(
+    waterfall.request,
+    waterfall.env,
+    waterfall.deps,
+  );
+  assert.equal(waterfallResponse.headers.get("X-AIFeeds-Home-SSR"), "waterfall");
+  assert.equal(
+    waterfallResponse.headers.get("Set-Cookie"),
+    "aifeeds_view=waterfall; Path=/; Max-Age=15552000; SameSite=Lax; Secure",
+  );
+
+  const classic = harness({
+    pathname: "/?view=classic",
+    cookie: "",
+  });
+  const classicResponse = await handleHomeRuntime(
+    classic.request,
+    classic.env,
+    classic.deps,
+  );
+  assert.equal(classicResponse.headers.get("X-AIFeeds-Home-SSR"), "classic");
+  assert.equal(
+    classicResponse.headers.get("Set-Cookie"),
+    "aifeeds_view=classic; Path=/; Max-Age=15552000; SameSite=Lax; Secure",
+  );
+
+  const invalid = harness({
+    pathname: "/?view=invalid",
+    cookie: "",
+  });
+  const invalidResponse = await handleHomeRuntime(
+    invalid.request,
+    invalid.env,
+    invalid.deps,
+  );
+  assert.equal(invalidResponse.headers.get("X-AIFeeds-Home-SSR"), "classic");
+  assert.equal(invalidResponse.headers.get("Set-Cookie"), null);
+});
+
 test("waterfall renders safe JSON and meaningful server markup", async () => {
   const fixture = harness();
   const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
