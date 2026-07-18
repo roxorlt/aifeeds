@@ -509,7 +509,11 @@ export async function handleHomeRuntime(
 
   try {
     return await renderWaterfallResponse(request, env, deps);
-  } catch {
+  } catch (error) {
+    const reason = error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : "unknown_error";
+    console.error("home_waterfall_fallback", reason);
     return classicResponse(request, env, "fallback", true);
   }
 }
