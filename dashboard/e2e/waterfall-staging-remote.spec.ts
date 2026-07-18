@@ -148,12 +148,13 @@ test("staging hydration is clean and responsive within the CLS budget", async ({
 });
 
 test("staging load more appends a bounded page without document navigation", async ({ page }) => {
-  await setWaterfallCookie(page);
   let documentRequests = 0;
   page.on("request", (request) => {
     if (request.resourceType() === "document") documentRequests += 1;
   });
-  await page.goto("/", { waitUntil: "load" });
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  const cookies = await page.context().cookies(STAGING_ORIGIN);
+  expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("waterfall");
   const before = await page.locator(".waterfall-card").count();
   expect(before).toBeGreaterThanOrEqual(12);
   await page.getByRole("button", { name: "加载更多" }).click();

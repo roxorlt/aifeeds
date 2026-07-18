@@ -186,8 +186,9 @@ test("prefers-reduced-motion and keyboard switch use one document navigation", a
 });
 
 test("load more preserves order and Drawer deep link opens without a document navigation", async ({ page }) => {
-  await setWaterfallCookie(page);
   await page.goto("/?view=waterfall", { waitUntil: "load" });
+  const cookies = await page.context().cookies(BASE_URL);
+  expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("waterfall");
   await page.getByRole("button", { name: "加载更多" }).click();
   await expect(page.locator(".waterfall-card")).toHaveCount(20);
   await page.locator(".waterfall-card__link").first().click();

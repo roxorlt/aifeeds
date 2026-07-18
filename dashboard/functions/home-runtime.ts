@@ -4,7 +4,10 @@ import {
   expireHomeViewCookie,
   isHomeExperienceEnabled,
   isHomeExperiencePath,
+  isHomeViewMode,
   resolveHomeView,
+  serializeHomeViewCookie,
+  type HomeViewMode,
 } from "../src/home/viewMode.ts";
 
 export const SSR_MARKUP_SENTINEL = "<!--__AIFEEDS_SSR_MARKUP__-->";
@@ -91,6 +94,17 @@ function responseForMethod(
   return new Response(request.method === "HEAD" ? null : body, init);
 }
 
+function persistExplicitQueryView(
+  request: Request,
+  headers: Headers,
+  renderedMode: HomeViewMode,
+): void {
+  const queryMode = new URL(request.url).searchParams.get("view");
+  if (isHomeViewMode(queryMode) && queryMode === renderedMode) {
+    headers.set("Set-Cookie", serializeHomeViewCookie(queryMode));
+  }
+}
+
 function stampHomeSsrState(html: string, state: HomeSsrState): string {
   if (/data-home-ssr="[^"]*"/iu.test(html)) {
     return html.replace(/data-home-ssr="[^"]*"/iu, `data-home-ssr="${state}"`);
@@ -151,12 +165,14 @@ async function classicResponse(
     headers.set("X-AIFeeds-Home-SSR", diagnostic);
     headers.set("Cache-Control", "private, no-store");
     if (diagnostic === "fallback") headers.set("Set-Cookie", expireHomeViewCookie());
+    else if (available) persistExplicitQueryView(request, headers, "classic");
     return responseForMethod(request, html, { status: 200, headers });
   } catch {
     const headers = htmlHeaders();
     headers.set("X-AIFeeds-Home-SSR", diagnostic);
     headers.set("Cache-Control", "private, no-store");
     if (diagnostic === "fallback") headers.set("Set-Cookie", expireHomeViewCookie());
+    else if (available) persistExplicitQueryView(request, headers, "classic");
     const fallbackHtml = available
       ? injectHomeMetadata(
           "<!doctype html><html lang=\"zh-CN\"><body><a href=\"/\">返回经典首页</a></body></html>",
@@ -406,6 +422,7 @@ function generatedWaterfallResponse(
   headers.set(HOME_CACHE_FRESHNESS, "generated");
   headers.set(HOME_CACHE_AGE, "0");
   headers.set("Cache-Control", "private, no-store");
+  persistExplicitQueryView(request, headers, "waterfall");
   return responseForMethod(request, generated.html, { status: 200, headers });
 }
 
