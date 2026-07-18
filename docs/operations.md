@@ -3,7 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-06-02（香港中转加速上线：前端 / api / fonts 改走香港 VPS 反代，绕开 CF 中国无节点的慢，itdog 全国平均访问 1.46s→0.87s、电信快 3 倍。详见 §6 自定义域名与 DNS + §6b 香港中转加速节）
+最后更新：2026-07-18（首页瀑布流 SSR opt-in 生产发布、经典默认、手动 SWR、五设备验收与回滚点已写入 §5a）
 
 历史：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
 
@@ -16,6 +16,8 @@
 历史：2026-07-15（旧 GL-a 已完成 exceptional recovery 并终态对账；新 operation `20260715165904-2d2f27fe` 在唯一 probe 发现生产缓存 HIT 会把三个 upstream timing 序列化为空串后自动回滚。source/rollback 均为 `rolled_back`、14/14 runtime cleanup 完成、site 恢复原 SHA、运行时残留为 0。validator 现仅在缓存 HIT/STALE/UPDATING/REVALIDATED 分支接受数字、`-` 或空串；非缓存与 API 仍必须为数字。再次执行须重新 clean G0、冻结新清单并单独批准）
 
 历史：2026-07-17（首页经典版/瀑布版并行的生产集成代码与本地五设备 SSR gate 在隔离分支完成；功能默认关闭、异常 fail-open 到经典版。当前未合 main、未推送、未改 staging/production；staging 按一次性变更包执行，RUM 是上线后观察而非发布前置门）
+
+历史：2026-07-18（首页瀑布流 SSR 已合入 `main` 并完成 staging/production 发布：默认访客仍为经典版，瀑布版仅显式 query/cookie opt-in；手动 SWR、五设备生产 20/20、续页游标、hydration 和 nginx 缓存隔离均验收通过。RUM/GSC/Ahrefs 继续作为非阻塞观察项）
 
 历史：2026-07-11（新增 C 端地域路由独立 A/B 实验门禁与预注册方案；当前 BLOCKED，未改 TTL/DNS/CDN/生产流量）
 
@@ -1027,10 +1029,12 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 - **API base**：`dashboard/src/api.ts` 默认指向 `https://api.ai-feeds.com`（可用 `VITE_API_BASE` 覆盖）
 - **部署命令**：`cd dashboard && npm run build && npx wrangler pages deploy dist --project-name=xlist-dashboard`
 
-#### 5a. 首页经典版/瀑布版 SSR 并行（2026-07-17，默认关闭）
+#### 5a. 首页经典版/瀑布版 SSR 并行（2026-07-18，生产已上线、经典版默认）
 
-- 当前状态：旧实现已同步到包含 A–E 本地封板代码的 `codex/waterfall-ssr-main-sync`；
-  手动 SWR 与 SSR 状态遥测已完成本地 G0，尚未合 `main`，staging/production 均未配置。
+- 当前状态：代码已合入 `main` `7c660e7ea31b367f66fadb6956273b3c54a76656`。生产 Worker
+  version 为 `0d0e09e6-63c6-4d0d-a1c7-bce45f615ebb`；生产 Pages deployment 为
+  `https://5ef13c30.xlist-dashboard.pages.dev`（source `6b981b2`；其后 `7c660e7` 只改 Worker，
+  Dashboard artifact 不变）。默认匿名访问仍返回经典版，瀑布版只由显式 query/cookie opt-in。
 - 经典入口：`index.html` / `main.tsx`；瀑布入口：`waterfall.html` / `waterfall-main.tsx`，两者独立下载。
 - Pages Function 只覆盖 `/`、既有详情深链与 `/_home/feed`；静态资源、搜索、设置、auth、daily 与 API
   不进入 SSR runtime。
@@ -1058,10 +1062,18 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   均回经典版且 `/_home/feed` 不开放。
 - 没有 D1 migration；回滚仍须按顺序关 flag、回退 Pages deployment、回退 Worker version、
   恢复 bindings/secrets，不能只停在“flag 已关”。
-- staging 唯一执行入口：
+- 生产回滚点：Pages `a359d6ff-9b91-4a0f-a130-abf55537d5cc`；Worker
+  `244711bd-28c4-4545-a6cb-a0f857916ea4`（瀑布发布前），或仅回退 cursor hotfix 时使用
+  `a37ef6a6-b926-4cbe-8f0d-3cdf12e4bbd5`。香港 nginx 备份为
+  `/etc/nginx/sites-available/aifeeds.conf.bak-waterfall-20260718T075759Z-2c50e77c`；安装后配置 SHA-256
+  `0446c7076e8ca1dfdf1e591e74dd6a559a9599791fd2659589edba80f36c2214`。
+- nginx 对无 query/cookie 的默认匿名首页继续使用经典缓存；`?view=classic|waterfall`、
+  `aifeeds_view` cookie、session/auth cookie 均 `BYPASS`，禁止 cohort 之间共享 nginx body。
+- staging 执行记录：
   [`reviews/waterfall-ssr-staging-change-packet.md`](reviews/waterfall-ssr-staging-change-packet.md)。
-  该包要求 clean G0、一次冻结授权、五端验收、10-run 对照与 kill-switch 演练；RUM 作为上线后
-  观察，不阻塞 staging 或代码交付；staging 包本身明确排除 production。
+  生产发布证据：
+  [`reviews/2026-07-18-waterfall-ssr-production-release.md`](reviews/2026-07-18-waterfall-ssr-production-release.md)。
+  RUM 作为上线后观察，不阻塞 staging、生产 opt-in canary 或代码交付。
 - 双视图 benchmark 的 `?view=` 只校验目标 cohort；实际测量写有限 `aifeeds_view` cookie 后访问
   canonical `/`，从而覆盖真实 opt-in 用户的 SWR 路径。报告逐样本记录 DOM `ssr_state`、
   SSR/freshness header 与 age；浏览器 warm 和 edge fresh 必须分开解释。

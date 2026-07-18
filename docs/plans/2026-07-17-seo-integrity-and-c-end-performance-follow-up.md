@@ -1,9 +1,27 @@
 # SEO 完整性与 C 端性能后续实施计划
 
-> 状态：`IMPLEMENTATION IN PROGRESS — BATCH A/C LOCAL VERIFICATION COMPLETE`
+> 状态：`IMPLEMENTATION/TEST/ROLLOUT COMPLETE FOR A/C/D/E/F — B AWAITS EXACT AHREFS URLS; G IS POST-RELEASE OBSERVATION`
 >
 > 本文只固化诊断、方案、实施顺序和验收门槛，不包含生产变更。执行时必须从最新
 > `origin/main` 为每个可独立回滚的批次建立分支，不把所有改动塞进一个大 PR。
+
+## 0. 2026-07-18 执行终态
+
+本计划中能够由代码、staging 和生产发布直接完成的工作已经执行完毕；不能靠一次发布即时完成的
+外部复验被明确拆成观察项，不再阻塞代码交付或当前生产 canary。
+
+| 批次 | 终态 | 说明 |
+|---|---|---|
+| A | 已完成开发、测试与生产修复 | Unicode code-point 安全截断、JSON-LD well-formed 兜底、精确页与存量快照重生已完成；GSC “验证修复”结果由 Google 异步返回。 |
+| B | 等待不可替代的外部输入 | Ahrefs 报告中的两条精确 5xx URL、抓取时间和响应链尚未取得；禁止在没有证据时猜测性吞错或伪造 200。 |
+| C | 已完成开发、测试与生产发布 | 五源 SSR 分层归档、archive sitemap、稳定时间邻居、首页/日报入口和链接图验收已上线；Ahrefs orphan 趋势需等待复抓。 |
+| D | 已完成开发、测试与生产发布 | Product Hunt GIF 列表静态预览与按意图加载已上线，首屏不再自动请求已知 4.276 MB GIF。 |
+| E | 已完成开发、测试与生产发布 | 移动端按意图预取、有限 load-more、可见性约束 X polling 与自动分页修复已上线。 |
+| F | 已完成开发、staging A/B 与生产 canary | waterfall SSR 已合入 `main`，手动 SWR、经典版默认、新旧版切换和五设备生产验收均通过；详见发布证据。 |
+| G | 上线后观察任务 | 按源索引质量、RUM 和 2–4 周抓取趋势达到样本后再决定 noindex/retention；本轮未做批量 noindex/410。 |
+
+F 的发布证据见
+[`docs/reviews/2026-07-18-waterfall-ssr-production-release.md`](../reviews/2026-07-18-waterfall-ssr-production-release.md)。
 
 ## 1. 目标
 
