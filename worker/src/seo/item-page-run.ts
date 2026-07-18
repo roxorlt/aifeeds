@@ -80,18 +80,19 @@ function isDedupSuppressed(extra: string | null | undefined): boolean {
   }
 }
 
-// 同源稳定时间邻居：按 (published_at DESC, id DESC) 的主时间线，取当前项前后各 3 条。
+// 同源稳定时间邻居：按 (published_at 回退 scraped_at DESC, id DESC) 的主时间线，取当前项前后各 3 条。
 // 只织入已经 live 且仍 relevant/未软删/非 dedup/非涉华敏感的页面，避免历史页长期指向
 // “全站最新 5 条”而形成不稳定链接图，也避免链接到 gone/404。
 async function fetchRelated(
   env: Env,
-  main: RenderRow & { published_at?: string | null },
+  main: RenderRow & { published_at?: string | null; scraped_at?: string | null },
   source: DigestSource,
 ): Promise<RenderedItem[]> {
   const sts = SOURCE_TYPES[source];
-  const publishedAt = String(main.published_at || '').trim();
-  if (!sts.length || !publishedAt) return [];
+  const effectiveAt = String(main.published_at || main.scraped_at || '').trim();
+  if (!sts.length || !effectiveAt) return [];
   const ph = sts.map(() => '?').join(',');
+  const candidateTime = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
   const gates = `p.status = 'live'
         AND i.is_relevant = 1
         AND i.deleted_at IS NULL
@@ -101,21 +102,21 @@ async function fetchRelated(
     `SELECT i.* FROM items i
       JOIN item_pages p ON p.item_id = i.id
       WHERE i.source_type IN (${ph}) AND ${gates}
-        AND (i.published_at > ? OR (i.published_at = ? AND i.id > ?))
-      ORDER BY i.published_at ASC, i.id ASC
+        AND (${candidateTime} > ? OR (${candidateTime} = ? AND i.id > ?))
+      ORDER BY ${candidateTime} ASC, i.id ASC
       LIMIT 3`,
   )
-    .bind(...sts, publishedAt, publishedAt, main.id)
+    .bind(...sts, effectiveAt, effectiveAt, main.id)
     .all<RenderRow>();
   const older = await env.DB.prepare(
     `SELECT i.* FROM items i
       JOIN item_pages p ON p.item_id = i.id
       WHERE i.source_type IN (${ph}) AND ${gates}
-        AND (i.published_at < ? OR (i.published_at = ? AND i.id < ?))
-      ORDER BY i.published_at DESC, i.id DESC
+        AND (${candidateTime} < ? OR (${candidateTime} = ? AND i.id < ?))
+      ORDER BY ${candidateTime} DESC, i.id DESC
       LIMIT 3`,
   )
-    .bind(...sts, publishedAt, publishedAt, main.id)
+    .bind(...sts, effectiveAt, effectiveAt, main.id)
     .all<RenderRow>();
   const { apiBase } = getBases(env);
   return [...(newer.results || []).reverse(), ...(older.results || [])]

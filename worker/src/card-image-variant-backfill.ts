@@ -170,6 +170,15 @@ const SUPPORTED_SOURCES = [
   'podcast',
 ] as const;
 
+export type CardVariantBackfillSource = typeof SUPPORTED_SOURCES[number];
+
+export function isCardVariantBackfillSource(
+  value: string | null,
+): value is CardVariantBackfillSource {
+  return typeof value === 'string'
+    && (SUPPORTED_SOURCES as readonly string[]).includes(value);
+}
+
 const BACKFILL_PREDICATE = `
   source_type IN (${SUPPORTED_SOURCES.map((source) => `'${source}'`).join(',')})
   AND is_relevant = 1
@@ -205,6 +214,7 @@ export type CardVariantBackfillOptions = {
   dryRun?: boolean;
   limit?: number;
   afterId?: string;
+  sourceType?: CardVariantBackfillSource;
 };
 
 export type CardVariantBackfillResult = {
@@ -298,6 +308,8 @@ export async function runCardImageVariantBackfill(
   const dryRun = options.dryRun !== false;
   const limit = Math.min(25, Math.max(1, Math.floor(options.limit ?? 10)));
   const afterId = options.afterId || '';
+  const sourceType = options.sourceType;
+  const sourceFilter = sourceType ? '\n        AND source_type = ?' : '';
   const result: CardVariantBackfillResult = {
     dry_run: dryRun,
     picked: 0,
@@ -316,12 +328,13 @@ export async function runCardImageVariantBackfill(
 
   const rows = await env.DB.prepare(
     `SELECT id, source_type, media, extra
-       FROM items
+      FROM items
       WHERE ${BACKFILL_PREDICATE}
+        ${sourceFilter}
         AND id > ?
       ORDER BY id
       LIMIT ?`,
-  ).bind(afterId, limit).all<BackfillRow>();
+  ).bind(...(sourceType ? [sourceType] : []), afterId, limit).all<BackfillRow>();
   const candidates = rows.results || [];
   result.picked = candidates.length;
   const generate = deps.generate ?? generateCardImageVariants;
@@ -419,8 +432,14 @@ export async function runCardImageVariantBackfill(
     }
   }
 
-  const remaining = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM items WHERE ${BACKFILL_PREDICATE}`,
+  const remainingStatement = env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM items
+      WHERE ${BACKFILL_PREDICATE}
+        ${sourceFilter}`,
+  );
+  const remaining = await (sourceType
+    ? remainingStatement.bind(sourceType)
+    : remainingStatement
   ).first<{ n: number }>();
   result.remaining = remaining?.n ?? 0;
   result.complete = !dryRun && result.remaining === 0 && result.errors === 0 && result.conflicts === 0;

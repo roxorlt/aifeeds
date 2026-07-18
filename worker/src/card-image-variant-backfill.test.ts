@@ -4,6 +4,7 @@ import { fileURLToPath, URL as NodeURL } from 'node:url';
 
 import type { CardImageVariant } from './card-image-variant';
 import {
+  isCardVariantBackfillSource,
   locateCardVariantTarget,
   runCardImageVariantBackfill,
 } from './card-image-variant-backfill';
@@ -245,6 +246,37 @@ describe('card variant backfill target selection', () => {
     expect(result.next_cursor).toBeNull();
   });
 
+  test('a source-scoped run filters both selection and remaining inventory', async () => {
+    const { env, calls } = fakeBackfillEnv([{
+      id: 'product_hunt:scoped',
+      source_type: 'product_hunt',
+      media: JSON.stringify([{
+        type: 'image',
+        role: 'gallery',
+        url: 'https://ph-files.imgix.net/scoped.jpg',
+      }]),
+      extra: '{}',
+    }], { remaining: 1 });
+
+    await runCardImageVariantBackfill(env, {
+      dryRun: true,
+      limit: 1,
+      sourceType: 'product_hunt',
+    });
+
+    expect(calls[0].sql).toContain('AND source_type = ?');
+    expect(calls[0].bound).toEqual(['product_hunt', '', 1]);
+    expect(calls.at(-1)?.sql).toContain('AND source_type = ?');
+    expect(calls.at(-1)?.bound).toEqual(['product_hunt']);
+  });
+
+  test('the source scope accepts only the exact backfill allowlist', () => {
+    expect(isCardVariantBackfillSource('product_hunt')).toBe(true);
+    expect(isCardVariantBackfillSource('x_list')).toBe(true);
+    expect(isCardVariantBackfillSource('product_hunt.evil')).toBe(false);
+    expect(isCardVariantBackfillSource('')).toBe(false);
+  });
+
   test('HF legacy figure falls back to extra.figure_image.raw_url when R2 metadata is absent', async () => {
     const { env } = fakeBackfillEnv([{
       id: 'hf:figure',
@@ -439,6 +471,8 @@ describe('card variant backfill target selection', () => {
 
     expect(handler).toContain("mode === 'card-image-variant-backfill'");
     expect(handler).toContain("get('dry_run') !== '0'");
+    expect(handler).toContain("get('source')");
+    expect(handler).toContain('isCardVariantBackfillSource');
     expect(scheduled).not.toContain('runCardImageVariantBackfill(');
   });
 });
