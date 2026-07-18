@@ -94,7 +94,10 @@ function isHomeFeedResponse(value: unknown): value is HomeFeedResponse {
 
 export function parseInitialHomeFeed(rawJson: string): HomeFeedResponse {
   try {
-    const value: unknown = JSON.parse(rawJson);
+    const parsed: unknown = JSON.parse(rawJson);
+    const value: unknown = isRecord(parsed) && parsed.ranking_version === undefined
+      ? { ...parsed, ranking_version: 1 }
+      : parsed;
     if (!isHomeFeedResponse(value)) throw new Error("shape");
     return value;
   } catch {

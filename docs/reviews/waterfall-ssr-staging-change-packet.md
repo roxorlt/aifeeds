@@ -12,8 +12,9 @@ staging 通过自动解释为生产放量。RUM 是 production 上线后的观�
 > 新批次的范围、兼容矩阵、本地门与回滚条件见
 > [`2026-07-18-waterfall-mixing-v2-release.md`](2026-07-18-waterfall-mixing-v2-release.md)。
 > v2 批次不得沿用本页初次上线的 Worker → Pages 顺序：新 Pages 先发送
-> `X-Home-Ranking-Version: 2`，验证其与旧 Worker 的 v1 响应兼容后再发布新 Worker；新 Worker
-> 对无协商头的旧 Pages 保持 v1/八源。该协议也保护生产两个并发 CI 工作流的任意完成顺序。
+> `X-Home-Ranking-Version: 2`，并把旧 Worker 省略的 `ranking_version` 精确归一为 legacy v1；
+> 验证该中间态后再发布新 Worker。新 Worker 对无协商头的旧 Pages 保持显式 v1/八源。该协议也
+> 保护生产两个并发 CI 工作流的任意完成顺序。
 
 ## 0. 执行结果
 

@@ -20,8 +20,9 @@
   `ranking_version=2`、九源及 live YouTube。
 - 旧 Pages 不发送协商头；新 Worker 必须对它返回 `ranking_version=1` 和原八源候选集。因此
   `旧 Pages + 新 Worker` 不会把 YouTube 交给不认识该 source 的旧 renderer，也不会退回经典版。
-- `新 Pages + 旧 Worker` 中旧 Worker 忽略协商头并返回 v1；新 Pages 同时接受合法 v1/v2。
-  `新 Pages + 新 Worker` 才进入 v2。此矩阵是滚动发布和回滚的兼容边界。
+- `新 Pages + 旧 Worker` 中旧 Worker 忽略协商头且没有 `ranking_version` 字段；新 Pages 把
+  “字段缺失”精确归一为 legacy v1，同时仍拒绝其它非法版本。`新 Pages + 新 Worker` 才进入
+  显式 v2。此矩阵是滚动发布和回滚的兼容边界。
 - v2 在固定 `asOf` 内计算内容家族/来源重复惩罚、来源内年龄归一热度和稳定 keyset。
 - 已打开页面携带的 v1 cursor 继续使用原八源候选集和原 v1 分数，响应保持
   `ranking_version=1`；cursor version 优先于协商头，禁止把 v1 cursor 悄悄升级到 v2。
@@ -32,7 +33,7 @@
 
 2026-07-18 在同一工作树完成：
 
-- Dashboard unit：`346/346`。
+- Dashboard unit：`347/347`。
 - Worker Vitest：`50 files / 834 tests`。
 - 根目录/运维 contracts：`175 pass / 2 environment-skips`。
 - waterfall 本地 HTTPS 五设备：`30/30`。
@@ -53,7 +54,8 @@
 
 验收必须覆盖：
 
-- 新 Pages + 旧 Worker 返回 v1 且不 fallback；再发布新 Worker 后同一 fresh 请求返回 v2；
+- 新 Pages + 旧 Worker 的缺版本 legacy 响应归一为 v1 且不 fallback；再发布新 Worker 后同一
+  fresh 请求返回显式 v2；
 - 旧 Pages 语义（不带 `X-Home-Ranking-Version`）调用新 Worker 时仍返回 v1/八源；
 - `/api/home-feed` 首屏 `ranking_version=2`、九源 live gating、固定 cursor 重放和跨页零重复；
 - 人工构造/保留的 v1 cursor 仍返回 v1 且不出现 YouTube；

@@ -186,6 +186,23 @@ test("waterfall renders safe JSON and meaningful server markup", async () => {
   assert.deepEqual(fixture.calls.assets, ["/waterfall"]);
 });
 
+test("new Pages normalizes a legacy Worker response without ranking_version to v1", async () => {
+  const { ranking_version: _rankingVersion, ...legacyFeed } = feed();
+  const fixture = harness({
+    apiResponse: Response.json(legacyFeed),
+    render: async (data) => {
+      assert.equal(data.ranking_version, 1);
+      return "<main><article>Legacy v1 card</article></main>";
+    },
+  });
+  const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
+  const html = await response.text();
+
+  assert.equal(response.headers.get("X-AIFeeds-Home-SSR"), "waterfall");
+  assert.match(html, /Legacy v1 card/);
+  assert.match(html, /"ranking_version":1/);
+});
+
 for (const [name, options] of [
   ["missing binding", { token: "" }],
   ["non-200 API", { apiResponse: Response.json({ error: "no" }, { status: 503 }) }],

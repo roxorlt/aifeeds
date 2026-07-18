@@ -54,9 +54,9 @@ test("initial data accepts only the waterfall JSON contract", () => {
     /initial home feed/i,
   );
   const { ranking_version: _rankingVersion, ...withoutRankingVersion } = response();
-  assert.throws(
-    () => parseInitialHomeFeed(JSON.stringify(withoutRankingVersion)),
-    /initial home feed/i,
+  assert.deepEqual(
+    parseInitialHomeFeed(JSON.stringify(withoutRankingVersion)),
+    { ...withoutRankingVersion, ranking_version: 1 },
   );
 });
 
