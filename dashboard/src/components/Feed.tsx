@@ -614,9 +614,11 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     void loadMore();
   }, [loadMore]);
 
-  // IntersectionObserver for infinite scroll
+  // Desktop keeps one-column-at-a-time infinite scroll. Mobile requires an
+  // explicit button so a short first page cannot leave the sentinel visible
+  // and cascade through the entire feed without user intent.
   useEffect(() => {
-    if (placeholder || !hasMore) return;
+    if (placeholder || !hasMore || isNarrowFeed) return;
     const el = sentinelRef.current;
     if (!el) return;
     const scrollRoot = el.closest(".feed-body");
@@ -628,7 +630,7 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [placeholder, hasMore, loadMore]);
+  }, [placeholder, hasMore, isNarrowFeed, loadMore]);
 
   // Release the pull spinner once the refresh actually completes.
   useEffect(() => {
@@ -1258,11 +1260,10 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
               );
               return nodes;
             })}
-            {/* Infinite scroll sentinel — replaced by a manual retry button
-                once we've hit the consecutive-failure threshold. WeChat
-                WebView gives bursts of "Load failed" that stop the
-                IntersectionObserver from being a useful auto-trigger
-                (telemetry showed 30+ failures in 45s). */}
+            {/* Mobile pagination is always explicit. Desktop keeps its bounded
+                sentinel; either path becomes a manual retry after repeated
+                failures. WeChat WebView telemetry previously showed 30+
+                failed observer retries in 45s. */}
             {hasMore && loadMoreCoolingDown && (
               <div className="flex flex-col items-center gap-2 py-4 text-center text-xs">
                 <span className="text-neutral-500">网络不稳定，加载失败</span>
@@ -1275,7 +1276,19 @@ export const Feed = forwardRef<FeedHandle, Props>(function Feed(
                 </button>
               </div>
             )}
-            {hasMore && !loadMoreCoolingDown && (
+            {hasMore && !loadMoreCoolingDown && isNarrowFeed && (
+              <div className="flex justify-center py-4">
+                <button
+                  type="button"
+                  onClick={() => void loadMore()}
+                  disabled={loadingMore}
+                  className="rounded-full border border-neutral-200 bg-white px-4 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-wait disabled:text-neutral-400"
+                >
+                  {loadingMore ? "加载中…" : "加载更多"}
+                </button>
+              </div>
+            )}
+            {hasMore && !loadMoreCoolingDown && !isNarrowFeed && (
               <div
                 ref={sentinelRef}
                 data-load-more-sentinel
