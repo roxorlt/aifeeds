@@ -59,7 +59,10 @@ import {
   normalizeImageProxyQuality,
   normalizeImageProxyWidth,
 } from './card-image-variant';
-import { runCardImageVariantBackfill } from './card-image-variant-backfill';
+import {
+  isCardVariantBackfillSource,
+  runCardImageVariantBackfill,
+} from './card-image-variant-backfill';
 import { buildFeedManifest } from './feed-manifest';
 import { handleDubWishlistAdd, handleDubWishlistState } from './dub-wishlist';
 import {
@@ -5428,10 +5431,18 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       25,
     );
     const afterId = url.searchParams.get('after_id') || '';
+    const requestedSource = url.searchParams.get('source');
+    const sourceType = isCardVariantBackfillSource(requestedSource)
+      ? requestedSource
+      : undefined;
+    if (requestedSource && !sourceType) {
+      return jsonResponse({ error: 'invalid card variant source' }, 400, request, env);
+    }
     const result = await runCardImageVariantBackfill(env, {
       dryRun,
       limit,
       afterId,
+      sourceType,
     });
     return jsonResponse(result, 200, request, env);
   }
