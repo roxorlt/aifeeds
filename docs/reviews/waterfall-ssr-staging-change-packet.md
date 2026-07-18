@@ -1,12 +1,26 @@
 # 首页瀑布流 SSR staging 变更包
 
-状态：`LOCAL G0 COMPLETE / NOT APPLIED`
+状态：`STAGING APPLIED AND PASSED / PRODUCTION FOLLOW-UP COMPLETED`
 
-当前决定：`NO-GO`（本地独立复审已 GO；等待集成分支冻结、staging 现状只读盘点与远端 G0）
+当前决定：`GO — completed 2026-07-18`
 
 本变更包把首页经典版/瀑布版并行方案的 staging 配置、部署、验收、kill switch 和回滚收敛为一次
 可审阅操作。用户已授权持续完成计划内开发、测试与发布；本文件仍不包含 production，也不允许把
 staging 通过自动解释为生产放量。RUM 是 production 上线后的观察任务，不是 staging 或代码交付门。
+
+## 0. 执行结果
+
+- staging Worker 最终版本：`456c41a4-ec56-4a44-87a4-ddffb8a0ae30`。
+- staging Pages 验收 deployment：`https://219a1609.xlist-dashboard-staging.pages.dev`。
+- 五设备远端功能门：desktop Chromium、tablet Chromium、iPhone Chromium、iPhone WebKit、
+  Android Chromium 共 `20/20` 通过；覆盖 SSR、hydration/CLS、加载更多与视图切换。
+- kill switch 已在 staging 演练：关闭后 query/cookie 均回经典版且 `/_home/feed` 关闭，恢复后重新全绿。
+- classic/waterfall 同条件 benchmark：每个 view/device/cache `10` 次；waterfall 的 desktop cold
+  LCP p75 `1580ms`（classic `1728ms`，`-8.6%`），mobile cold `1540ms`
+  （classic `1848ms`，`-16.7%`），mobile warm `296ms`（classic `560ms`，`-47.1%`）；
+  waterfall CLS p75 `0`，请求数 `15 vs 24`，cold transfer `130.5KB vs 322.9KB`。
+- staging 通过后按独立生产清单发布；生产对象、回滚点和最终验收见
+  [`2026-07-18-waterfall-ssr-production-release.md`](2026-07-18-waterfall-ssr-production-release.md)。
 
 ## 1. 范围与风险
 
@@ -162,7 +176,7 @@ kill switch 任一步失败为 `NO-GO`，直接执行第 8 节完整回滚。
 - Support/用户侧：staging 为 opt-in，无生产用户动作；若 staging 链接用于验收，明确“经典版为默认，
   瀑布版为实验入口”。
 
-当前最终决定：`NO-GO`。本地独立复审已 `GO`（Critical/Important 均为 0）；集成分支冻结，以及
-staging 远端 binding 现状与回滚对象记录尚未完成。分支冻结、远端只读盘点和远端 G0 全绿后，决定可升级为
-`GO WITH CONDITIONS`；staging 全绿仍不等于 production `GO`。生产上线后再按
-`view_mode × ssr_state × device × region` 累积 RUM，样本门槛只用于确认长期收益或后续扩大默认范围。
+当前最终决定：`GO`。本地 G0、远端配置盘点、staging 五设备功能门、10-run 对照和 kill-switch
+演练均已完成；随后生产按独立冻结清单发布并通过五设备验收。生产上线后继续按
+`view_mode × ssr_state × device × region` 累积 RUM，样本门槛只用于确认长期收益或后续扩大默认范围，
+不反向改变本次代码与 opt-in canary 的完成状态。

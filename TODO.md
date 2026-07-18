@@ -13,21 +13,22 @@
 - [x] 完成 GSC Unicode、sitemap/孤岛页/无出站链接、Product Hunt GIF、移动请求策略和
   waterfall SSR 缓存的代码/线上证据归因；完整实施计划见
   [`docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md`](docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md)。
-- [ ] **P0-A**：Unicode code-point 安全截断 + JSON-LD well-formed 边界兜底；精确重生 GSC
+- [x] **P0-A**：Unicode code-point 安全截断 + JSON-LD well-formed 边界兜底；精确重生 GSC
   页面后用固定 cutoff 分源重灌存量快照。
   - [x] 代码与 TDD：共享 code-point helper、JSON-LD 序列化兜底、4,000 字 articleBody
     边界、严格鉴权单页重生 mode；Worker 47 files / 775 tests 与 `tsc --noEmit` 全绿。
-  - [ ] staging / production：精确页重生、固定 cutoff 五源重灌、Unicode 抽样与 GSC 验证。
+  - [x] staging / production：精确页重生、固定 cutoff 五源重灌与 Unicode 抽样完成；GSC
+    “验证修复”由 Google 异步复抓，不阻塞发布终态。
 - [ ] **P0-B**：取得 Ahrefs 两条 5xx 的精确 URL/时间/响应，逐条复现并关闭
   sitemap ↔ `item_pages` ↔ R2 完整性缺口。
-- [ ] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取
+- [x] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取
   + load-more/polling 收紧。
   - [x] P1-C 本地代码与 TDD：五源 source/month/page SSR 归档、独立 archive sitemap、
     item 稳定时间邻居、首页/日报入口、nginx/SW 三层路由、只读链接图验收器；Worker
     48 files / 789 tests、TypeScript、Dashboard build 与相关 Node contracts 全绿。
-  - [ ] P1-C staging / production：同步 nginx 运行时配置、发布 Worker + Dashboard，
-    跑公开链接图验收，并在 2–4 周后复查 Ahrefs orphan 趋势。
-- [ ] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
+  - [x] P1-C/D/E staging / production：nginx、Worker、Dashboard、静态 GIF 预览、移动请求预算与
+    公开链接图验收已发布；2–4 周后的 Ahrefs orphan 趋势保留为观察项。
+- [x] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
   perf-staging 做 classic/waterfall 同条件对照；RUM 继续作为上线后观察，不阻塞 staging。
   - [x] 既有隔离分支已完成同 URL 双版本路由、经典默认、cookie 权威偏好、SSR 首屏、
     8 源 home feed、可访问视图切换、cohort telemetry、五设备本地 gate、DebugBear 基线与
@@ -45,8 +46,13 @@
     最终本地 G0：Dashboard 329/329、Functions 23/23、Worker 812/812、root contracts 187 pass/2 skips、
     waterfall 五设备 30/30、classic 32 pass / 83 role-skips 全绿；同一独立 reviewer 三轮复审最终
     `GO`（Critical/Important 均为 0），唯一 `build:ssr` finalize minor 也已修复并复验。
-  - [ ] 在 perf-staging 执行 classic/waterfall × mobile/desktop × cold/warm 对照；
-    staging 全绿后再进入 production 小流量 canary，RUM 作为上线后观察而非代码交付前置门。
+  - [x] perf-staging classic/waterfall × mobile/desktop × cold/warm 每格 10 次完成：waterfall
+    mobile cold LCP p75 `1540ms vs 1848ms`，desktop cold `1580ms vs 1728ms`，CLS p75 `0`；
+    staging 五设备 `20/20`、生产五设备 `20/20`，生产默认仍为 classic，waterfall 仅 opt-in。
+  - [x] 发布后 DebugBear：台湾/香港 Mobile classic/waterfall 各 5 次；waterfall LCP p75 分别改善
+    `28.6%` / `16.7%`，CLS p75 `0`，代表瀑布 `0` 个 4xx/5xx/GIF 请求。
+  - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
+    异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
 
 ### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
 
