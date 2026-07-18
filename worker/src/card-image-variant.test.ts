@@ -235,6 +235,49 @@ describe('card image variant generation', () => {
     ]);
   });
 
+  test.each([
+    {
+      label: 'a lookalike subdomain',
+      sourceUrl: 'https://ph-files.imgix.net.evil.example/launch.gif?auto=format',
+      sourcePrefix: 'ph',
+    },
+    {
+      label: 'a lookalike prefixed hostname',
+      sourceUrl: 'https://evil-ph-files.imgix.net/launch.gif?auto=format',
+      sourcePrefix: 'ph',
+    },
+    {
+      label: 'a non-Product-Hunt source',
+      sourceUrl: 'https://ph-files.imgix.net/launch.gif?auto=format',
+      sourcePrefix: 'x',
+    },
+  ] as const)('does not rewrite Product Hunt GIF parameters for $label', async ({
+    sourceUrl,
+    sourcePrefix,
+  }) => {
+    const bucket = {
+      put: vi.fn(async () => ({} as R2Object)),
+    } as unknown as R2Bucket;
+    const requestedUrls: string[] = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrls.push(String(input));
+      const width = Number((init as RequestInit & {
+        cf?: { image?: { width?: number } };
+      }).cf?.image?.width);
+      return realStaticWebpResponse(width === 800 ? 800 : 400);
+    });
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl,
+      sourcePrefix,
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
+    expect(variants.map(({ width }) => width)).toEqual([400, 800]);
+    expect(requestedUrls).toEqual([sourceUrl, sourceUrl]);
+  });
+
   test('rejects an animated WebP response even when the transform endpoint labels it WebP', async () => {
     const bucket = { put: vi.fn() } as unknown as R2Bucket;
     const fetcher = vi.fn(async () => webpVp8xResponse(400, 225, true));
