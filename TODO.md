@@ -51,6 +51,10 @@
     staging 五设备 `20/20`、生产五设备 `20/20`，生产默认仍为 classic，waterfall 仅 opt-in。
   - [x] 发布后 DebugBear：台湾/香港 Mobile classic/waterfall 各 5 次；waterfall LCP p75 分别改善
     `28.6%` / `16.7%`，CLS p75 `0`，代表瀑布 `0` 个 4xx/5xx/GIF 请求。
+  - [ ] 瀑布流视觉修订：现有 production opt-in 版本的“移动单列 + PC 固定三列 + 通用文本卡”
+    不符合目标；已完成移动 390px 双列、PC 1440px 五列、来源感知紧凑经典卡的
+    [本地视觉原型](docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html)，待用户确认后再改
+    React、测试与 staging，未触碰 production。
   - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
     异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
 
