@@ -89,6 +89,9 @@ const API_ERROR_MESSAGE_CATEGORIES = new Set([
   'cors_or_network',
   'request_error',
 ]);
+const HOME_VIEW_MODES = new Set(['classic', 'waterfall']);
+const HOME_SSR_STATES = new Set(['classic', 'generated', 'fresh', 'stale', 'fallback']);
+const HOME_VIEW_ENTRIES = new Set(['appbar']);
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
@@ -97,7 +100,7 @@ const EVENT_TYPE_WHITELIST = new Set<string>([
   'item_impression', 'item_click', 'item_open_drawer', 'item_close_drawer',
   'thread_expand', 'image_lightbox_open', 'external_link_click',
   // 筛选
-  'source_filter_change', 'sort_change', 'new_content_banner_click',
+  'source_filter_change', 'sort_change', 'new_content_banner_click', 'home_view_switch',
   // 分享
   'share_click', 'share_landing',
   // 登录（PR2/3 才会真发，但白名单提前留好）
@@ -291,6 +294,21 @@ export function prepareEventPayload(
         ? payload.error_msg
         : 'request_error';
     }
+  } else if (clientPayload && eventType === 'home_view_switch') {
+    payload = {
+      from_view: typeof clientPayload.from_view === 'string'
+        && HOME_VIEW_MODES.has(clientPayload.from_view)
+        ? clientPayload.from_view
+        : 'unknown',
+      to_view: typeof clientPayload.to_view === 'string'
+        && HOME_VIEW_MODES.has(clientPayload.to_view)
+        ? clientPayload.to_view
+        : 'unknown',
+      entry: typeof clientPayload.entry === 'string'
+        && HOME_VIEW_ENTRIES.has(clientPayload.entry)
+        ? clientPayload.entry
+        : 'unknown',
+    };
   } else if (clientPayload && (eventType === 'search_submit' || eventType === 'search_empty')) {
     payload = { ...clientPayload };
     normalizeSearchQueryLength(payload);
@@ -305,6 +323,14 @@ export function prepareEventPayload(
     if (typeof payload.nettype !== 'string' || !NETWORK_EFFECTIVE_TYPES.has(payload.nettype)) {
       delete payload.nettype;
     }
+    payload.view_mode = typeof payload.view_mode === 'string'
+      && HOME_VIEW_MODES.has(payload.view_mode)
+      ? payload.view_mode
+      : 'classic';
+    payload.ssr_state = typeof payload.ssr_state === 'string'
+      && HOME_SSR_STATES.has(payload.ssr_state)
+      ? payload.ssr_state
+      : 'classic';
     const country = trustedEdgeCode(cf?.country, /^[A-Z0-9]{2}$/);
     const colo = trustedEdgeCode(cf?.colo, /^[A-Z0-9]{3}$/);
     if (country) payload.edge_country = country;

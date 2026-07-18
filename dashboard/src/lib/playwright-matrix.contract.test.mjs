@@ -262,3 +262,59 @@ test("perf staging has an exact-host five-device remote browser gate", () => {
     "visible images and video posters must both intersect the horizontal viewport",
   );
 });
+
+test("waterfall staging has an exact-host five-device remote browser gate", () => {
+  const remoteSpecPath = path.join(dashboard, "e2e/waterfall-staging-remote.spec.ts");
+  const remoteRunnerPath = path.join(dashboard, "scripts/run-waterfall-staging-e2e.sh");
+  assert.equal(fs.existsSync(remoteSpecPath), true);
+  assert.equal(fs.existsSync(remoteRunnerPath), true);
+  const remoteSpec = fs.readFileSync(remoteSpecPath, "utf8");
+  const remoteRunner = fs.readFileSync(remoteRunnerPath, "utf8");
+
+  assert.match(config, /WATERFALL_STAGING_REMOTE/);
+  assert.match(config, /staging\.ai-feeds\.com/);
+  assert.match(config, /aifeeds-waterfall-staging/);
+  assert.match(packageJson.scripts["test:e2e:waterfall-staging"], /run-waterfall-staging-e2e\.sh/);
+  assert.match(remoteRunner, /E2E_BASE_URL=https:\/\/staging\.ai-feeds\.com/);
+  assert.match(remoteRunner, /PLAYWRIGHT_NO_COPY_PROMPT=1/);
+  assert.match(remoteRunner, /waterfall-staging-remote\.spec\.ts/);
+  assert.match(remoteSpec, /staging SSR contains at least 12 cards before JavaScript/);
+  assert.match(remoteSpec, /staging hydration is clean and responsive within the CLS budget/);
+  assert.match(remoteSpec, /staging load more appends a bounded page/);
+  assert.match(remoteSpec, /staging view switch persists classic/);
+});
+
+test("waterfall SSR has a local-only five-device edge fixture and browser budget gate", () => {
+  const waterfallSpecPath = path.join(dashboard, "e2e/waterfall-home.spec.ts");
+  const edgeFixturePath = path.join(dashboard, "scripts/waterfall-edge-fixture.mjs");
+  assert.equal(fs.existsSync(waterfallSpecPath), true, "waterfall browser spec must exist");
+  assert.equal(fs.existsSync(edgeFixturePath), true, "local waterfall edge fixture must exist");
+
+  const waterfallSpec = fs.readFileSync(waterfallSpecPath, "utf8");
+  const edgeFixture = fs.readFileSync(edgeFixturePath, "utf8");
+  assert.match(config, /WATERFALL_E2E/);
+  assert.match(config, /waterfall-edge-fixture\.mjs/);
+  assert.match(config, /ignoreHTTPSErrors:\s*isWaterfallE2E/);
+  assert.match(packageJson.scripts["test:e2e:waterfall"], /waterfall-home\.spec\.ts/);
+  assert.match(packageJson.scripts["build:e2e:waterfall"], /--ssr functions\/render-waterfall\.tsx/);
+  assert.match(edgeFixture, /handleHomeRuntime/);
+  assert.match(edgeFixture, /HOME_EXPERIENCE_ENABLED:\s*"true"/);
+  assert.match(edgeFixture, /HOME_API/);
+  assert.match(edgeFixture, /fixture_api/);
+  assert.match(edgeFixture, /createServer\(await localTlsOptions\(\)/);
+  assert.match(waterfallSpec, /javaScriptEnabled:\s*false/);
+  assert.match(waterfallSpec, /SSR HTML has at least 12 cards before JavaScript/);
+  assert.match(waterfallSpec, /hydration has no console errors/);
+  assert.match(waterfallSpec, /prefers-reduced-motion/);
+  assert.match(waterfallSpec, /keyboard/);
+  assert.match(waterfallSpec, /toBeGreaterThanOrEqual\(44\)/);
+  assert.match(waterfallSpec, /toBeLessThanOrEqual\(0\.1\)/);
+  assert.match(waterfallSpec, /scrollWidth/);
+  assert.match(waterfallSpec, /load more/);
+  assert.match(waterfallSpec, /Drawer deep link/);
+  assert.match(waterfallSpec, /document navigation/);
+  assert.match(waterfallSpec, /aifeeds_view/);
+  assert.match(waterfallSpec, /x-aifeeds-home-ssr/i);
+  assert.match(waterfallSpec, /classic entry never requests the waterfall entry/);
+  assert.match(waterfallSpec, /waterfall entry never requests the classic entry/);
+});

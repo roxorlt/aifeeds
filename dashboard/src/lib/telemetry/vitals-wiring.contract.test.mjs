@@ -46,3 +46,14 @@ test("image timing keeps its sampling while excluding same-origin static assets"
   assert.match(vitals, /Math\.random\(\) >= IMG_SAMPLE/);
   assert.match(vitals, /resource\.kind === 'none' \|\| resource\.kind === 'static_asset'/);
 });
+
+test("every performance device payload carries a finite home view cohort", () => {
+  assert.match(vitals, /resolveTelemetryHomeView\(document\.documentElement\)/);
+  assert.match(vitals, /resolveTelemetryHomeSsrState\(document\.documentElement\)/);
+  assert.match(vitals, /view_mode:/);
+  assert.match(vitals, /ssr_state:/);
+  assert.equal(
+    (vitals.match(/\.\.\.getPerformanceDeviceMeta\(\)/g) ?? []).length >= 3,
+    true,
+  );
+});
