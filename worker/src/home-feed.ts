@@ -151,26 +151,28 @@ export function parseHomeFeedRequest(
   };
 }
 
-function candidateSql(
-  source: typeof HOME_FEED_SOURCES[number],
-  workflowCompletedFilter: boolean,
-): string {
-  const workflowCondition = source === 'x_list' && workflowCompletedFilter
-    ? "\n          AND json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL"
+function candidateSql(workflowCompletedFilter: boolean): string {
+  const sourceList = HOME_FEED_SOURCES.map((source) => `'${source}'`).join(', ');
+  const workflowCondition = workflowCompletedFilter
+    ? "\n          AND (items.source_type != 'x_list' OR json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL)"
     : '';
   return `SELECT id FROM (
-        SELECT items.id
+        SELECT
+          items.id,
+          ROW_NUMBER() OVER (
+            PARTITION BY items.source_type
+            ORDER BY COALESCE(items.published_at, items.scraped_at) DESC, items.id DESC
+          ) AS _candidate_rank
         FROM items
-        WHERE items.source_type = '${source}'
+        WHERE items.source_type IN (${sourceList})
           AND items.deleted_at IS NULL
           AND items.is_relevant = 1
           AND json_extract(items.extra, '$.dedup_of') IS NULL
           AND COALESCE(json_extract(items.extra, '$.cn_sensitive'), 0) != 1
           AND strftime('%s', COALESCE(items.published_at, items.scraped_at)) <= strftime('%s', ?)
           AND strftime('%s', COALESCE(items.published_at, items.scraped_at)) >= strftime('%s', ?, '-${CANDIDATE_WINDOW_DAYS} days')${workflowCondition}
-        ORDER BY COALESCE(items.published_at, items.scraped_at) DESC, items.id DESC
-        LIMIT ${CANDIDATES_PER_SOURCE}
-      )`;
+      )
+      WHERE _candidate_rank <= ${CANDIDATES_PER_SOURCE}`;
 }
 
 export function buildHomeFeedQuery({
@@ -179,13 +181,7 @@ export function buildHomeFeedQuery({
   cursor,
   workflowCompletedFilter,
 }: HomeFeedRequest & { workflowCompletedFilter: boolean }): HomeFeedQuery {
-  const candidateParts = HOME_FEED_SOURCES.map((source) => (
-    candidateSql(source, workflowCompletedFilter)
-  ));
-  const params: unknown[] = [];
-  for (let index = 0; index < HOME_FEED_SOURCES.length; index += 1) {
-    params.push(asOf, asOf);
-  }
+  const params: unknown[] = [asOf, asOf];
 
   const cursorWhere = cursor
     ? `AND (
@@ -218,7 +214,7 @@ export function buildHomeFeedQuery({
   const scoredColumns = selectProjectedListColumns('scored');
 
   const sql = `WITH candidate_ids AS (
-      ${candidateParts.join('\n      UNION ALL\n      ')}
+      ${candidateSql(workflowCompletedFilter)}
     ),
     ranked AS (
       SELECT

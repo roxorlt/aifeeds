@@ -125,7 +125,10 @@ describe("home feed SQL", () => {
     });
 
     for (const source of HOME_FEED_SOURCES) expect(sql).toContain(`'${source}'`);
-    expect(sql.match(/LIMIT 48/g)).toHaveLength(HOME_FEED_SOURCES.length);
+    expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type[\s\S]*AS _candidate_rank/i);
+    expect(sql).toContain("_candidate_rank <= 48");
+    expect(sql).not.toMatch(/\bUNION(?:\s+ALL)?\b/i);
+    expect(params.filter((value) => value === NOW)).toHaveLength(2);
     expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type/i);
     expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
     expect(sql).toContain("json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL");
