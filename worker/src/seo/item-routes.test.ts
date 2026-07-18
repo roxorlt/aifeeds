@@ -1,4 +1,5 @@
 import { describe, test, expect, vi } from 'vitest';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
 import { handleItemRoute } from './item-routes';
 import { isSeoPath } from '../seo-routes';
@@ -20,8 +21,11 @@ function makeDb(seed: DbSeed = {}) {
   const items = new Map(Object.entries(seed.items ?? {}));
   const pages = new Map(Object.entries(seed.pages ?? {}));
   const phByPattern = new Map(Object.entries(seed.phByPattern ?? {}));
+  const queries: string[] = [];
   return {
+    queries,
     prepare(sql: string) {
+      queries.push(sql);
       let binds: unknown[] = [];
       const stmt = {
         bind(...a: unknown[]) {
@@ -68,6 +72,24 @@ function makeR2(seed: Record<string, string> = {}) {
 
 function makeEnv(db: unknown, r2: unknown): Env {
   return { SITE_BASE: SITE, API_BASE: API, DB: db, READMES: r2 } as unknown as Env;
+}
+
+function sqliteD1(db: DatabaseSync) {
+  return {
+    prepare(sql: string) {
+      let bindings: SQLInputValue[] = [];
+      const stmt = {
+        bind(...values: unknown[]) {
+          bindings = values as SQLInputValue[];
+          return stmt;
+        },
+        async first<T>() {
+          return (db.prepare(sql).get(...bindings) ?? null) as T | null;
+        },
+      };
+      return stmt;
+    },
+  };
 }
 
 function req(path: string, method = 'GET'): Request {
@@ -192,6 +214,145 @@ describe('handleItemRoute', () => {
     const res = await handleItemRoute(req('/i/ph/coolslug'), makeEnv(db, r2));
     expect(res!.status).toBe(200);
     expect(await res!.text()).toContain('PH-LATEST');
+    expect(db.queries.find((sql) => /FROM items/i.test(sql) && /LIKE/i.test(sql))).toMatch(
+      /ORDER BY\s+CASE WHEN p\.status = 'live' THEN 0 ELSE 1 END ASC,\s*COALESCE\(NULLIF\(i\.published_at,\s*''\),\s*i\.scraped_at\)\s+DESC,\s*i\.id\s+DESC/i,
+    );
+  });
+
+  test('PH canonical 解析与归档共用 eligible/live-or-missing 候选集和 effective time 排序', async () => {
+    const sqlite = new DatabaseSync(':memory:');
+    sqlite.exec(`
+      CREATE TABLE items (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        published_at TEXT,
+        scraped_at TEXT NOT NULL,
+        is_relevant INTEGER NOT NULL,
+        deleted_at TEXT,
+        extra TEXT NOT NULL
+      );
+      CREATE TABLE item_pages (
+        item_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        url_path TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        status TEXT NOT NULL
+      );
+    `);
+    const insertItem = sqlite.prepare(`
+      INSERT INTO items (
+        id, source_type, published_at, scraped_at, is_relevant, deleted_at, extra
+      ) VALUES (?, 'product_hunt', ?, ?, ?, NULL, ?)
+    `);
+    const insertPage = sqlite.prepare(`
+      INSERT INTO item_pages (item_id, source, url_path, generated_at, status)
+      VALUES (?, 'ph', ?, ?, ?)
+    `);
+    const seed = (
+      id: string,
+      publishedAt: string | null,
+      scrapedAt: string,
+      relevant: number,
+      status: 'live' | 'gone' | 'missing',
+    ) => {
+      const slug = id.split(':')[1];
+      insertItem.run(id, publishedAt, scrapedAt, relevant, '{"cn_sensitive":0}');
+      if (status !== 'missing') insertPage.run(id, `/i/ph/${slug}`, scrapedAt, status);
+    };
+
+    seed(
+      'product_hunt:eligible-fallback:2026-05-01',
+      '2026-05-01T07:00:00Z',
+      '2026-05-01T07:00:00Z',
+      1,
+      'live',
+    );
+    seed(
+      'product_hunt:eligible-fallback:2026-06-01',
+      '2026-06-01T07:00:00Z',
+      '2026-06-01T07:00:00Z',
+      0,
+      'live',
+    );
+    seed(
+      'product_hunt:gone-fallback:2026-05-01',
+      '2026-05-01T07:00:00Z',
+      '2026-05-01T07:00:00Z',
+      1,
+      'live',
+    );
+    seed(
+      'product_hunt:gone-fallback:2026-06-01',
+      '2026-06-01T07:00:00Z',
+      '2026-06-01T07:00:00Z',
+      1,
+      'gone',
+    );
+    seed(
+      'product_hunt:null-time:2026-05-01',
+      '2026-05-01T07:00:00Z',
+      '2026-05-01T07:00:00Z',
+      1,
+      'live',
+    );
+    seed(
+      'product_hunt:null-time:2026-06-01',
+      null,
+      '2026-06-01T07:00:00Z',
+      1,
+      'live',
+    );
+    seed(
+      'product_hunt:missing-fallback:2026-05-01',
+      '2026-05-01T07:00:00Z',
+      '2026-05-01T07:00:00Z',
+      1,
+      'live',
+    );
+    seed(
+      'product_hunt:missing-fallback:2026-06-01',
+      '2026-06-01T07:00:00Z',
+      '2026-06-01T07:00:00Z',
+      1,
+      'missing',
+    );
+    seed(
+      'product_hunt:missing-only:2026-06-01',
+      '2026-06-01T07:00:00Z',
+      '2026-06-01T07:00:00Z',
+      1,
+      'missing',
+    );
+
+    const r2 = makeR2({
+      [itemPageR2Key('product_hunt:eligible-fallback:2026-05-01')!]: 'ELIGIBLE-OLD',
+      [itemPageR2Key('product_hunt:gone-fallback:2026-05-01')!]: 'GONE-OLD',
+      [itemPageR2Key('product_hunt:null-time:2026-06-01')!]: 'NULL-TIME-NEW',
+      [itemPageR2Key('product_hunt:missing-fallback:2026-05-01')!]: 'MISSING-OLD',
+    });
+    const env = makeEnv(sqliteD1(sqlite), r2);
+
+    expect(await (await handleItemRoute(req('/i/ph/eligible-fallback'), env))!.text()).toContain(
+      'ELIGIBLE-OLD',
+    );
+    expect(await (await handleItemRoute(req('/i/ph/gone-fallback'), env))!.text()).toContain(
+      'GONE-OLD',
+    );
+    expect(await (await handleItemRoute(req('/i/ph/null-time'), env))!.text()).toContain(
+      'NULL-TIME-NEW',
+    );
+    expect(await (await handleItemRoute(req('/i/ph/missing-fallback'), env))!.text()).toContain(
+      'MISSING-OLD',
+    );
+    const missingOnlyId = 'product_hunt:missing-only:2026-06-01';
+    const generate = vi.fn(async (_env: Env, id: string): Promise<ItemPageRunResult> => {
+      await r2.put(itemPageR2Key(id)!, 'MISSING-ONLY-GENERATED');
+      return { itemId: id, skipped: false };
+    });
+    const missingOnly = await handleItemRoute(req('/i/ph/missing-only'), env, generate);
+    expect(generate).toHaveBeenCalledWith(env, missingOnlyId);
+    expect(await missingOnly!.text()).toContain('MISSING-ONLY-GENERATED');
+    sqlite.close();
   });
 
   test('/i/ph/:slug slug 无匹配行 → 404', async () => {

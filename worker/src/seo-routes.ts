@@ -18,6 +18,7 @@ import {
   ARCHIVE_PAGE_SIZE,
   ARCHIVE_SOURCES,
   ARCHIVE_SOURCE_LABELS,
+  ITEM_PAGE_ELIGIBILITY,
   archiveCanonicalPath,
   archiveCountQuery,
   archiveItemsQuery,
@@ -493,9 +494,14 @@ async function sitemapIndexResponse(env: Env): Promise<Response> {
   entries.push(sitemapEntry(`${siteBase}/sitemap-archive.xml`, null));
   entries.push(sitemapEntry(`${siteBase}/video-sitemap.xml`, videoMod ? dateOnly(videoMod) : null));
 
-  // 各源 live 计数 + 最新 generated_at,据此算续片数(ceil(count/5万)),空源仍列 page1。
+  // 各源仍符合内容门禁的 live 页计数 + 最新 generated_at，据此算续片数
+  // (ceil(count/5万))，空源仍列 page1。JOIN items 防止陈旧 live 索引把已删除/去重/敏感项继续暴露。
   const countRes = await env.DB.prepare(
-    `SELECT source, COUNT(*) AS c, MAX(generated_at) AS m FROM item_pages WHERE status = 'live' GROUP BY source`,
+    `SELECT p.source, COUNT(DISTINCT p.url_path) AS c, MAX(p.generated_at) AS m
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE ${ITEM_PAGE_ELIGIBILITY}
+     GROUP BY p.source`,
   ).all<{ source: string; c: number; m: string | null }>();
   const counts = new Map<string, { c: number; m: string | null }>();
   for (const r of countRes.results || []) counts.set(r.source, { c: Number(r.c), m: r.m });
@@ -621,14 +627,19 @@ ${urls.join('\n')}
 }
 
 // ── /sitemap-<source>.xml(内容片)───────────────────────────────
-// 该源 item_pages(status=live)的 url_path,按 generated_at DESC 分页(page-1 → OFFSET)。
+// 该源 item_pages(status=live 且关联 item 仍符合内容门禁)的 url_path，
+// 按 generated_at DESC 分页(page-1 → OFFSET)。
 // lastmod = generated_at 日期部分;绝对 URL = SITE_BASE + url_path(url_path 存相对 /i/…)。
 async function sourceSitemapResponse(env: Env, source: string, page: number): Promise<Response> {
   const { siteBase } = getBases(env);
   const offset = (page - 1) * SITEMAP_SHARD_SIZE;
   const r = await env.DB.prepare(
-    `SELECT url_path, generated_at FROM item_pages WHERE source = ? AND status = 'live'
-     ORDER BY generated_at DESC, item_id ASC LIMIT ? OFFSET ?`,
+    `SELECT p.url_path, MAX(p.generated_at) AS generated_at
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE p.source = ? AND ${ITEM_PAGE_ELIGIBILITY}
+     GROUP BY p.url_path
+     ORDER BY generated_at DESC, p.url_path ASC LIMIT ? OFFSET ?`,
   )
     .bind(source, SITEMAP_SHARD_SIZE, offset)
     .all<{ url_path: string; generated_at: string }>();

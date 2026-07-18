@@ -26,6 +26,39 @@ const PAGE_SOURCE: Record<ArchiveSource, string> = {
   paper: 'hf-paper',
   news: 'news',
 };
+const ARCHIVE_EFFECTIVE_TIME = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
+export const ITEM_ELIGIBILITY = `i.is_relevant = 1
+        AND i.deleted_at IS NULL
+        AND json_extract(i.extra, '$.dedup_of') IS NULL
+        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
+export const ITEM_PAGE_ELIGIBILITY = `p.status = 'live'
+        AND ${ITEM_ELIGIBILITY}`;
+
+// 一个公开 url_path 只能对应一个 canonical。PH 可能在不同日期重复上榜，但公开路由
+// `/i/ph/:slug` 会选择 published_at 最新的 item；所有 sitemap / archive 查询必须使用
+// 同一代表行，否则同一 URL 会重复出现，且月份、分页计数会互相漂移。
+// 只有 PH 允许多个 item 共享公开 url_path，因此窗口严格限制在 PH 子集；其他四源沿用
+// 直接查询，避免每个归档请求都对 3 万+ X 行做无意义的窗口排序。
+function canonicalPhItemPagesCte(sourceBinding: boolean): string {
+  const sourceFilter = sourceBinding
+    ? 'i.source_type = ?'
+    : "i.source_type = 'product_hunt'";
+  return `WITH canonical_ph_item_pages AS (
+      SELECT i.id, p.source, p.url_path, i.title, i.author,
+        ${ARCHIVE_EFFECTIVE_TIME} AS published_at,
+        p.generated_at, p.status,
+        ROW_NUMBER() OVER (
+          PARTITION BY substr(i.id, 14, instr(substr(i.id, 14), ':') - 1)
+          ORDER BY CASE WHEN p.status = 'live' THEN 0 ELSE 1 END ASC,
+            ${ARCHIVE_EFFECTIVE_TIME} DESC, i.id DESC
+        ) AS canonical_rank
+      FROM items i
+      LEFT JOIN item_pages p ON p.item_id = i.id
+      WHERE ${sourceFilter} AND
+        ${ITEM_ELIGIBILITY}
+        AND (p.status = 'live' OR p.status IS NULL)
+    )`;
+}
 
 export const ARCHIVE_SOURCE_LABELS: Record<ArchiveSource, string> = {
   x: 'X 精选',
@@ -98,41 +131,58 @@ export function archiveItemsQuery(
   }
 
   const offset = (page - 1) * ARCHIVE_PAGE_SIZE;
+  const canonicalPh = source === 'ph';
   return {
-    sql: `SELECT i.id, p.source, p.url_path, i.title, i.author, i.published_at
+    sql: canonicalPh
+      ? `${canonicalPhItemPagesCte(true)}
+      SELECT id, source, url_path, title, author, published_at
+      FROM canonical_ph_item_pages
+      WHERE canonical_rank = 1 AND status = 'live'
+        AND substr(published_at, 1, 7) = ?
+      ORDER BY published_at DESC, id DESC
+      LIMIT ? OFFSET ?`
+      : `SELECT i.id, p.source, p.url_path, i.title, i.author,
+             ${ARCHIVE_EFFECTIVE_TIME} AS published_at
       FROM items i
       JOIN item_pages p ON p.item_id = i.id
-      WHERE p.source = ? AND substr(i.published_at, 1, 7) = ?
-        AND p.status = 'live'
-        AND i.is_relevant = 1
-        AND i.deleted_at IS NULL
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1
-      ORDER BY i.published_at DESC, i.id DESC
+      WHERE p.source = ? AND substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) = ?
+        AND ${ITEM_PAGE_ELIGIBILITY}
+      ORDER BY ${ARCHIVE_EFFECTIVE_TIME} DESC, i.id DESC
       LIMIT ? OFFSET ?`,
-    bindings: [PAGE_SOURCE[source], month, ARCHIVE_PAGE_SIZE, offset],
+    bindings: [
+      canonicalPh ? 'product_hunt' : PAGE_SOURCE[source],
+      month,
+      ARCHIVE_PAGE_SIZE,
+      offset,
+    ],
   };
 }
-
-const ARCHIVE_ELIGIBILITY = `p.status = 'live'
-        AND i.is_relevant = 1
-        AND i.deleted_at IS NULL
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
 
 export function archiveMonthsQuery(
   source: ArchiveSource,
 ): { sql: string; bindings: [string] } {
+  if (source !== 'ph') {
+    return {
+      sql: `SELECT substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) AS month, COUNT(*) AS item_count
+        FROM items i
+        JOIN item_pages p ON p.item_id = i.id
+        WHERE p.source = ?
+          AND ${ITEM_PAGE_ELIGIBILITY}
+          AND ${ARCHIVE_EFFECTIVE_TIME} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
+        GROUP BY month
+        ORDER BY month DESC`,
+      bindings: [PAGE_SOURCE[source]],
+    };
+  }
   return {
-    sql: `SELECT substr(i.published_at, 1, 7) AS month, COUNT(*) AS item_count
-      FROM items i
-      JOIN item_pages p ON p.item_id = i.id
-      WHERE p.source = ?
-        AND ${ARCHIVE_ELIGIBILITY}
-        AND i.published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
+    sql: `${canonicalPhItemPagesCte(true)}
+      SELECT substr(published_at, 1, 7) AS month, COUNT(*) AS item_count
+      FROM canonical_ph_item_pages
+      WHERE canonical_rank = 1 AND status = 'live'
+        AND published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
       GROUP BY month
       ORDER BY month DESC`,
-    bindings: [PAGE_SOURCE[source]],
+    bindings: ['product_hunt'],
   };
 }
 
@@ -141,26 +191,45 @@ export function archiveCountQuery(
   month: string,
 ): { sql: string; bindings: [string, string] } {
   if (!isArchiveMonth(month)) throw new Error('invalid archive month');
+  if (source !== 'ph') {
+    return {
+      sql: `SELECT COUNT(*) AS item_count
+        FROM items i
+        JOIN item_pages p ON p.item_id = i.id
+        WHERE p.source = ? AND substr(${ARCHIVE_EFFECTIVE_TIME}, 1, 7) = ?
+          AND ${ITEM_PAGE_ELIGIBILITY}`,
+      bindings: [PAGE_SOURCE[source], month],
+    };
+  }
   return {
-    sql: `SELECT COUNT(*) AS item_count
-      FROM items i
-      JOIN item_pages p ON p.item_id = i.id
-      WHERE p.source = ? AND substr(i.published_at, 1, 7) = ?
-        AND ${ARCHIVE_ELIGIBILITY}`,
-    bindings: [PAGE_SOURCE[source], month],
+    sql: `${canonicalPhItemPagesCte(true)}
+      SELECT COUNT(*) AS item_count
+      FROM canonical_ph_item_pages
+      WHERE canonical_rank = 1 AND status = 'live'
+        AND substr(published_at, 1, 7) = ?`,
+    bindings: ['product_hunt', month],
   };
 }
 
 export function archiveSitemapGroupsQuery(): { sql: string; bindings: [] } {
   return {
-    sql: `SELECT p.source, substr(i.published_at, 1, 7) AS month,
-             COUNT(*) AS item_count, MAX(p.generated_at) AS lastmod
-      FROM items i
-      JOIN item_pages p ON p.item_id = i.id
-      WHERE ${ARCHIVE_ELIGIBILITY}
-        AND i.published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
-      GROUP BY p.source, month
-      ORDER BY p.source ASC, month DESC`,
+    sql: `${canonicalPhItemPagesCte(false)},
+      canonical_item_pages AS (
+        SELECT p.source, ${ARCHIVE_EFFECTIVE_TIME} AS published_at, p.generated_at
+        FROM items i
+        JOIN item_pages p ON p.item_id = i.id
+        WHERE p.source <> 'ph' AND ${ITEM_PAGE_ELIGIBILITY}
+        UNION ALL
+        SELECT source, published_at, generated_at
+        FROM canonical_ph_item_pages
+        WHERE canonical_rank = 1 AND status = 'live'
+      )
+      SELECT source, substr(published_at, 1, 7) AS month,
+             COUNT(*) AS item_count, MAX(generated_at) AS lastmod
+      FROM canonical_item_pages
+      WHERE published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'
+      GROUP BY source, month
+      ORDER BY source ASC, month DESC`,
     bindings: [],
   };
 }
