@@ -61,7 +61,7 @@ function harness({
       fetch: async (request) => {
         const path = new URL(request.url).pathname;
         calls.assets.push(path);
-        if (path === "/waterfall.html") return new Response(template, {
+        if (path === "/waterfall") return new Response(template, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
         return new Response("<!doctype html><html><body>classic</body></html>", {
@@ -174,6 +174,7 @@ test("waterfall renders safe JSON and meaningful server markup", async () => {
   assert.match(json, /\\u2029/);
   assert.equal(fixture.calls.api, 1);
   assert.equal(fixture.calls.render, 1);
+  assert.deepEqual(fixture.calls.assets, ["/waterfall"]);
 });
 
 for (const [name, options] of [

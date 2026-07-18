@@ -281,7 +281,10 @@ async function loadWaterfallTemplate(
   request: Request,
   env: HomeRuntimeEnv,
 ): Promise<WaterfallTemplate> {
-  const templateResponse = await env.ASSETS.fetch(assetRequest(request, "/waterfall.html"));
+  // Cloudflare Pages canonicalizes HTML assets to extensionless clean URLs.
+  // Asking ASSETS for /waterfall.html returns a 308, which must not make an
+  // otherwise healthy waterfall request fail open to classic mode.
+  const templateResponse = await env.ASSETS.fetch(assetRequest(request, "/waterfall"));
   if (!templateResponse.ok) throw new Error("waterfall template unavailable");
   const html = await templateResponse.text();
   if (
