@@ -402,7 +402,10 @@ describe("home feed handler and origin scope", () => {
     const fake = fakeDb();
     const response = await handleHomeFeed(
       new Request("https://worker/api/home-feed?limit=12", {
-        headers: { "X-Home-Renderer-Token": "right" },
+        headers: {
+          "X-Home-Renderer-Token": "right",
+          "X-Home-Ranking-Version": "2",
+        },
       }),
       {
         DB: fake.db as unknown as D1Database,
@@ -424,6 +427,52 @@ describe("home feed handler and origin scope", () => {
     expect(typeof body.next_cursor).toBe("string");
     expect(JSON.stringify(body)).not.toContain("_home_score");
     expect(fake.captures.sql).not.toMatch(/\bSELECT\s+\*/i);
+  });
+
+  test("a legacy renderer without negotiation stays on v1 and excludes YouTube", async () => {
+    const fake = fakeDb();
+    const response = await handleHomeFeed(
+      new Request("https://worker/api/home-feed?limit=12", {
+        headers: { "X-Home-Renderer-Token": "right" },
+      }),
+      {
+        DB: fake.db as unknown as D1Database,
+        HOME_RENDERER_TOKEN: "right",
+      },
+      NOW,
+    );
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(body.ranking_version).toBe(1);
+    expect(fake.captures.sql).not.toContain("'youtube'");
+  });
+
+  test("an existing cursor keeps its ranking version even when the renderer requests v2", async () => {
+    const fake = fakeDb();
+    const cursor = encodeHomeFeedCursor({
+      version: 1,
+      asOf: NOW,
+      score: 1_752_720_000,
+      sortTime: "2026-07-17T03:04:05.000Z",
+      id: "github:openai/codex",
+    });
+    const response = await handleHomeFeed(
+      new Request(`https://worker/api/home-feed?limit=12&cursor=${encodeURIComponent(cursor)}`, {
+        headers: {
+          "X-Home-Renderer-Token": "right",
+          "X-Home-Ranking-Version": "2",
+        },
+      }),
+      {
+        DB: fake.db as unknown as D1Database,
+        HOME_RENDERER_TOKEN: "right",
+      },
+      NOW,
+    );
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(body.ranking_version).toBe(1);
+    expect(fake.captures.sql).not.toContain("'youtube'");
   });
 
   test("D1 naive sort timestamps emit an exact cursor that can be replayed", async () => {

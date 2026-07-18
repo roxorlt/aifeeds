@@ -81,6 +81,7 @@ function harness({
       fetch: async (request) => {
         calls.api += 1;
         assert.equal(request.headers.get("X-Home-Renderer-Token"), token);
+        assert.equal(request.headers.get("X-Home-Ranking-Version"), "2");
         if (apiFetch) return apiFetch(request);
         return apiResponse.clone();
       },

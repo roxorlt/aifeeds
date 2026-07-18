@@ -16,19 +16,24 @@
 
 ## 2. Worker/Dashboard 滚动兼容
 
-- 新的无 cursor 请求使用 `ranking_version=2`，候选包含九源及 live YouTube。
+- 新 Pages 对无 cursor 请求发送 `X-Home-Ranking-Version: 2`，新 Worker 才使用
+  `ranking_version=2`、九源及 live YouTube。
+- 旧 Pages 不发送协商头；新 Worker 必须对它返回 `ranking_version=1` 和原八源候选集。因此
+  `旧 Pages + 新 Worker` 不会把 YouTube 交给不认识该 source 的旧 renderer，也不会退回经典版。
+- `新 Pages + 旧 Worker` 中旧 Worker 忽略协商头并返回 v1；新 Pages 同时接受合法 v1/v2。
+  `新 Pages + 新 Worker` 才进入 v2。此矩阵是滚动发布和回滚的兼容边界。
 - v2 在固定 `asOf` 内计算内容家族/来源重复惩罚、来源内年龄归一热度和稳定 keyset。
 - 已打开页面携带的 v1 cursor 继续使用原八源候选集和原 v1 分数，响应保持
-  `ranking_version=1`；禁止把 v1 cursor 悄悄升级到 v2。
-- Dashboard 同时接受 v1/v2；新 Dashboard 对旧 Worker 的缺失/非法 v2 响应保持既有 fail-open。
-- 发布顺序固定为 staging Worker → staging Pages；生产仍只允许 `main` 的 CI 工作流发布。
+  `ranking_version=1`；cursor version 优先于协商头，禁止把 v1 cursor 悄悄升级到 v2。
+- staging 固定先 Pages、后 Worker，并在两步之间验证 v1；生产仍只允许 `main` 的两个 CI
+  工作流发布，协商矩阵保证其并发先后均安全。
 
 ## 3. 本地 G0
 
 2026-07-18 在同一工作树完成：
 
 - Dashboard unit：`346/346`。
-- Worker Vitest：`50 files / 832 tests`。
+- Worker Vitest：`50 files / 834 tests`。
 - 根目录/运维 contracts：`175 pass / 2 environment-skips`。
 - waterfall 本地 HTTPS 五设备：`30/30`。
 - classic 五设备角色矩阵：`32 pass / 83 role-skips`。
@@ -48,6 +53,8 @@
 
 验收必须覆盖：
 
+- 新 Pages + 旧 Worker 返回 v1 且不 fallback；再发布新 Worker 后同一 fresh 请求返回 v2；
+- 旧 Pages 语义（不带 `X-Home-Ranking-Version`）调用新 Worker 时仍返回 v1/八源；
 - `/api/home-feed` 首屏 `ranking_version=2`、九源 live gating、固定 cursor 重放和跨页零重复；
 - 人工构造/保留的 v1 cursor 仍返回 v1 且不出现 YouTube；
 - desktop 1440、tablet 820、iPhone Chromium/WebKit 390、Android 412 五设备全绿；

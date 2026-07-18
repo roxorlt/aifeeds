@@ -38,6 +38,7 @@ const MAX_HEAT_BONUS_SECONDS = 7_200;
 const NEUTRAL_HEAT_BONUS_SECONDS = 3_600;
 const CANDIDATE_WINDOW_DAYS = 30;
 const MAX_CURSOR_LENGTH = 1_024;
+const HOME_RANKING_VERSION_HEADER = 'X-Home-Ranking-Version';
 const CURSOR_RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const CURSOR_SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?$/;
 
@@ -239,7 +240,11 @@ export function buildHomeFeedQuery({
   asOf,
   cursor,
   workflowCompletedFilter,
-}: HomeFeedRequest & { workflowCompletedFilter: boolean }): HomeFeedQuery {
+  rankingVersion,
+}: HomeFeedRequest & {
+  workflowCompletedFilter: boolean;
+  rankingVersion?: 1 | 2;
+}): HomeFeedQuery {
   const params: unknown[] = [asOf, asOf];
 
   const cursorWhere = cursor
@@ -265,15 +270,15 @@ export function buildHomeFeedQuery({
   }
   params.push(limit + 1);
 
-  const rankingVersion = cursor?.version ?? 2;
-  const sourceTypes = rankingVersion === 1
+  const selectedRankingVersion = cursor?.version ?? rankingVersion ?? 2;
+  const sourceTypes = selectedRankingVersion === 1
     ? LEGACY_HOME_FEED_SOURCES
     : HOME_FEED_SOURCES;
   const projected = buildListProjection({
     tableAlias: 'items',
     sourceTypes,
   });
-  if (rankingVersion === 1) {
+  if (selectedRankingVersion === 1) {
     const rankedColumns = selectProjectedListColumns('ranked');
     const scoredColumns = selectProjectedListColumns('scored');
     const sql = `WITH candidate_ids AS (
@@ -541,16 +546,18 @@ export async function handleHomeFeed(
     throw error;
   }
 
+  const rankingVersion = parsed.cursor?.version
+    ?? (request.headers.get(HOME_RANKING_VERSION_HEADER) === '2' ? 2 : 1);
   const query = buildHomeFeedQuery({
     ...parsed,
     workflowCompletedFilter: env.WORKFLOW_COMPLETED_FILTER === 'true',
+    rankingVersion,
   });
   const result = await env.DB.prepare(query.sql).bind(...query.params).all();
   const rows = (result.results ?? []) as Record<string, unknown>[];
   const hasMore = rows.length > parsed.limit;
   const visibleRows = rows.slice(0, parsed.limit);
   const lastRow = hasMore ? visibleRows.at(-1) : undefined;
-  const rankingVersion = parsed.cursor?.version ?? 2;
   const nextCursor = lastRow
     && Number.isSafeInteger(lastRow._home_score)
     && isCursorSortTime(lastRow._sort_time)

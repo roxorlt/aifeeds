@@ -1078,10 +1078,12 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   canonical `/`，从而覆盖真实 opt-in 用户的 SWR 路径。报告逐样本记录 DOM `ssr_state`、
   SSR/freshness header 与 age；浏览器 warm 和 edge fresh 必须分开解释。
 - 瀑布流视觉/混排 v2 候选保持相同 classic-default/opt-in 边界：移动端双列，PC 3–6 列，无侧栏和
-  分类 Tab；Worker 新请求返回 `ranking_version=2`，旧页面携带的 v1 cursor 继续按原八源排序完成
-  翻页，避免滚动发布期间错页。v2 在固定 `asOf` 下使用隐藏内容家族、来源内年龄归一热度和稳定
-  keyset，并加入 live YouTube。设备曝光历史目前只上报有限枚举的 shadow decision，不删除、不重排
-  SSR 或 hydrated DOM；正式个性化过滤必须另开 feature flag 和发布计划。
+  分类 Tab。Pages 的 HOME_API 请求用 `X-Home-Ranking-Version: 2` 显式协商；新 Worker 对没有该
+  头的旧 Pages 只返回 v1/原八源，旧 Worker 则会忽略该头并继续返回 v1，因此 Pages/Worker 并发
+  发布和任一侧回滚都不会把 YouTube 交给旧 renderer。cursor version 永远优先于协商头，旧页面
+  携带的 v1 cursor 继续按原八源排序翻页。v2 在固定 `asOf` 下使用隐藏内容家族、来源内年龄归一
+  热度和稳定 keyset，并加入 live YouTube。设备曝光历史目前只上报有限枚举的 shadow decision，
+  不删除、不重排 SSR 或 hydrated DOM；正式个性化过滤必须另开 feature flag 和发布计划。
 - 外部合成观测：`.github/workflows/sitespeed-external.yml` 只在隔离 feature branch 新增该文件时
   自动运行，也保留手动入口；GitHub 托管 runner 对生产首页执行移动/桌面各 5 次只读导航，只上传
   14 天 artifact。workflow 固定 `contents: read`、不读取 secret、不包含部署或远端管理命令，不能替代

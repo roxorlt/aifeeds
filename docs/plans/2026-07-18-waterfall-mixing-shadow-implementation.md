@@ -12,7 +12,7 @@
 
 ## Execution status
 
-- Tasks 1–9：完成。Dashboard `346/346`、Worker `832/832`、root contracts
+- Tasks 1–9：完成。Dashboard `346/346`、Worker `834/834`、root contracts
   `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
   `32 pass / 83 role-skips`；lint、类型检查、production build 与双端截图均通过。
 - Task 10：进行中。feature branch 尚未合入 `main`；staging/production 事实只在远端门通过后更新。
@@ -167,7 +167,9 @@
 
 **Steps:**
 
-1. 推送 feature branch，运行 CI，并部署到 perf-staging。
+1. 推送 feature branch，运行 CI，并部署到 perf-staging。Pages 请求用
+   `X-Home-Ranking-Version: 2` 显式协商；无协商头的新 Worker 只返回 v1/八源。staging
+   先 Pages、后 Worker 并验证中间态，生产并发工作流由同一兼容矩阵保护。
 2. 在 staging 对 classic/waterfall × mobile/desktop 做功能、视觉、SSR、查询延迟和 synthetic 对照。
 3. 确认公共混排 v2 生效、YouTube live gating 正确、shadow 只记录不隐藏，随后按既有 release gate 合入 main。
 4. 生产保持 classic 默认、waterfall opt-in；即时冒烟和性能验证通过后关闭发布任务。

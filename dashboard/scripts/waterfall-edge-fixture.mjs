@@ -274,6 +274,7 @@ const server = createServer(await localTlsOptions(), async (req, res) => {
           async fetch(apiRequest) {
             if (
               apiRequest.headers.get("X-Home-Renderer-Token") !== "local-renderer-token"
+              || apiRequest.headers.get("X-Home-Ranking-Version") !== "2"
               || failHomeApi
             ) {
               return json({ error: "fixture home API unavailable" }, 503);
