@@ -13,20 +13,37 @@ export const HOME_FEED_SOURCES = [
   'hf_paper',
   'huodongxing',
   'clawhub',
+  'youtube',
+] as const;
+
+const LEGACY_HOME_FEED_SOURCES = [
+  'x_list',
+  'blog',
+  'podcast',
+  'github',
+  'product_hunt',
+  'hf_paper',
+  'huodongxing',
+  'clawhub',
 ] as const;
 
 const DEFAULT_LIMIT = 24;
 const MIN_LIMIT = 12;
 const MAX_LIMIT = 48;
 const CANDIDATES_PER_SOURCE = 48;
-const SOURCE_REPEAT_PENALTY_SECONDS = 10_800;
+const LEGACY_SOURCE_REPEAT_PENALTY_SECONDS = 10_800;
+const FAMILY_REPEAT_PENALTY_SECONDS = 7_200;
+const SOURCE_REPEAT_PENALTY_SECONDS = 3_600;
+const MAX_HEAT_BONUS_SECONDS = 7_200;
+const NEUTRAL_HEAT_BONUS_SECONDS = 3_600;
 const CANDIDATE_WINDOW_DAYS = 30;
 const MAX_CURSOR_LENGTH = 1_024;
+const HOME_RANKING_VERSION_HEADER = 'X-Home-Ranking-Version';
 const CURSOR_RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const CURSOR_SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?$/;
 
 export type HomeFeedCursor = Readonly<{
-  version: 1;
+  version: 1 | 2;
   asOf: string;
   score: number;
   sortTime: string;
@@ -138,7 +155,7 @@ function validateCursor(value: unknown): HomeFeedCursor {
   }
   const cursor = value as Record<string, unknown>;
   if (
-    cursor.version !== 1
+    (cursor.version !== 1 && cursor.version !== 2)
     || !isCanonicalIsoDate(cursor.asOf)
     || !Number.isSafeInteger(cursor.score)
     || !isCursorSortTime(cursor.sortTime)
@@ -149,7 +166,7 @@ function validateCursor(value: unknown): HomeFeedCursor {
     throw new HomeFeedInputError();
   }
   return {
-    version: 1,
+    version: cursor.version,
     asOf: cursor.asOf,
     score: cursor.score as number,
     sortTime: cursor.sortTime,
@@ -191,8 +208,11 @@ export function parseHomeFeedRequest(
   };
 }
 
-function candidateSql(workflowCompletedFilter: boolean): string {
-  const sourceList = HOME_FEED_SOURCES.map((source) => `'${source}'`).join(', ');
+function candidateSql(
+  workflowCompletedFilter: boolean,
+  sourceTypes: readonly string[],
+): string {
+  const sourceList = sourceTypes.map((source) => `'${source}'`).join(', ');
   const workflowCondition = workflowCompletedFilter
     ? "\n          AND (items.source_type != 'x_list' OR json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL)"
     : '';
@@ -220,7 +240,11 @@ export function buildHomeFeedQuery({
   asOf,
   cursor,
   workflowCompletedFilter,
-}: HomeFeedRequest & { workflowCompletedFilter: boolean }): HomeFeedQuery {
+  rankingVersion,
+}: HomeFeedRequest & {
+  workflowCompletedFilter: boolean;
+  rankingVersion?: 1 | 2;
+}): HomeFeedQuery {
   const params: unknown[] = [asOf, asOf];
 
   const cursorWhere = cursor
@@ -246,15 +270,19 @@ export function buildHomeFeedQuery({
   }
   params.push(limit + 1);
 
+  const selectedRankingVersion = cursor?.version ?? rankingVersion ?? 2;
+  const sourceTypes = selectedRankingVersion === 1
+    ? LEGACY_HOME_FEED_SOURCES
+    : HOME_FEED_SOURCES;
   const projected = buildListProjection({
     tableAlias: 'items',
-    sourceTypes: HOME_FEED_SOURCES,
+    sourceTypes,
   });
-  const rankedColumns = selectProjectedListColumns('ranked');
-  const scoredColumns = selectProjectedListColumns('scored');
-
-  const sql = `WITH candidate_ids AS (
-      ${candidateSql(workflowCompletedFilter)}
+  if (selectedRankingVersion === 1) {
+    const rankedColumns = selectProjectedListColumns('ranked');
+    const scoredColumns = selectProjectedListColumns('scored');
+    const sql = `WITH candidate_ids AS (
+      ${candidateSql(workflowCompletedFilter, sourceTypes)}
     ),
     ranked AS (
       SELECT
@@ -272,8 +300,195 @@ export function buildHomeFeedQuery({
       SELECT
         ${rankedColumns},
         _sort_time,
-        _sort_epoch - ((_source_rank - 1) * ${SOURCE_REPEAT_PENALTY_SECONDS}) AS _home_score
+        _sort_epoch - ((_source_rank - 1) * ${LEGACY_SOURCE_REPEAT_PENALTY_SECONDS}) AS _home_score
       FROM ranked
+    )
+    SELECT
+      ${scoredColumns},
+      _home_score,
+      _sort_time
+    FROM scored
+    WHERE 1 = 1
+      ${cursorWhere}
+    ORDER BY _home_score DESC, _sort_time DESC, id DESC
+    LIMIT ?`;
+
+    return { sql, params };
+  }
+
+  // The third frozen asOf parameter is used only for age-normalized heat.
+  // Keeping it in the cursor makes percentile replay deterministic.
+  params.splice(2, 0, asOf);
+  const baseColumns = selectProjectedListColumns('base_ranked');
+  const agedColumns = selectProjectedListColumns('aged');
+  const signaledColumns = selectProjectedListColumns('signaled');
+  const diversifiedColumns = selectProjectedListColumns('diversified');
+  const bonusedColumns = selectProjectedListColumns('bonused');
+  const scoredColumns = selectProjectedListColumns('scored');
+
+  const sql = `WITH candidate_ids AS (
+      ${candidateSql(workflowCompletedFilter, sourceTypes)}
+    ),
+    base_ranked AS (
+      SELECT
+        ${projected},
+        COALESCE(items.published_at, items.scraped_at) AS _sort_time,
+        CAST(strftime('%s', COALESCE(items.published_at, items.scraped_at)) AS INTEGER) AS _sort_epoch,
+        CAST(strftime('%s', ?) AS INTEGER) AS _as_of_epoch,
+        CASE items.source_type
+          WHEN 'x_list' THEN 'dynamic'
+          WHEN 'github' THEN 'project'
+          WHEN 'product_hunt' THEN 'project'
+          WHEN 'clawhub' THEN 'project'
+          WHEN 'hf_paper' THEN 'research'
+          WHEN 'blog' THEN 'official'
+          WHEN 'podcast' THEN 'official'
+          WHEN 'huodongxing' THEN 'event'
+          WHEN 'youtube' THEN 'video'
+          ELSE 'dynamic'
+        END AS _home_family,
+        ROW_NUMBER() OVER (
+          PARTITION BY items.source_type
+          ORDER BY COALESCE(items.published_at, items.scraped_at) DESC, items.id DESC
+        ) AS _source_rank
+      FROM items
+      INNER JOIN candidate_ids ON candidate_ids.id = items.id
+    ),
+    aged AS (
+      SELECT
+        ${baseColumns},
+        _sort_time,
+        _sort_epoch,
+        _home_family,
+        _source_rank,
+        MAX(0, (_as_of_epoch - _sort_epoch) / 3600.0) AS _age_hours
+      FROM base_ranked
+    ),
+    signaled AS (
+      SELECT
+        ${agedColumns},
+        _sort_time,
+        _sort_epoch,
+        _home_family,
+        _source_rank,
+        CASE aged.source_type
+          WHEN 'x_list' THEN
+            CASE WHEN
+              json_type(aged.metrics, '$.likes') IS NOT NULL
+              OR json_type(aged.metrics, '$.bookmarks') IS NOT NULL
+              OR json_type(aged.metrics, '$.replies') IS NOT NULL
+              OR json_type(aged.metrics, '$.retweets') IS NOT NULL
+              OR aged.is_hot = 1
+            THEN (
+              COALESCE(json_extract(aged.metrics, '$.likes'), 0)
+              + COALESCE(json_extract(aged.metrics, '$.bookmarks'), 0) * 10
+              + COALESCE(json_extract(aged.metrics, '$.replies'), 0) * 13.5
+              + COALESCE(json_extract(aged.metrics, '$.retweets'), 0) * 20
+              + CASE WHEN aged.is_hot = 1 THEN 25 ELSE 0 END
+            ) / (_age_hours + 2)
+            ELSE NULL END
+          WHEN 'github' THEN
+            CASE
+              WHEN json_type(aged.metrics, '$.today_stars') IS NOT NULL
+                THEN MAX(0, json_extract(aged.metrics, '$.today_stars'))
+              WHEN json_type(aged.extra, '$.daily_rank') IS NOT NULL
+                THEN MAX(1, 101 - MIN(100, json_extract(aged.extra, '$.daily_rank')))
+              ELSE NULL
+            END
+          WHEN 'product_hunt' THEN
+            CASE WHEN
+              json_type(aged.metrics, '$.votes') IS NOT NULL
+              OR json_type(aged.metrics, '$.comments') IS NOT NULL
+            THEN (
+              COALESCE(json_extract(aged.metrics, '$.votes'), 0)
+              + COALESCE(json_extract(aged.metrics, '$.comments'), 0) * 3
+            ) / (_age_hours + 6)
+            ELSE NULL END
+          WHEN 'hf_paper' THEN
+            CASE WHEN
+              json_type(aged.metrics, '$.upvotes') IS NOT NULL
+              OR json_type(aged.metrics, '$.num_comments') IS NOT NULL
+              OR json_type(aged.metrics, '$.github_stars') IS NOT NULL
+            THEN (
+              COALESCE(json_extract(aged.metrics, '$.upvotes'), 0)
+              + COALESCE(json_extract(aged.metrics, '$.num_comments'), 0) * 2
+              + COALESCE(json_extract(aged.metrics, '$.github_stars'), 0) * 0.05
+            ) / (_age_hours + 6)
+            ELSE NULL END
+          WHEN 'clawhub' THEN
+            CASE WHEN
+              json_type(aged.metrics, '$.stars') IS NOT NULL
+              OR json_type(aged.metrics, '$.downloads') IS NOT NULL
+              OR json_type(aged.metrics, '$.installsCurrent') IS NOT NULL
+            THEN (
+              COALESCE(json_extract(aged.metrics, '$.stars'), 0) * 10
+              + COALESCE(json_extract(aged.metrics, '$.downloads'), 0) * 0.05
+              + COALESCE(json_extract(aged.metrics, '$.installsCurrent'), 0) * 2
+            ) / (_age_hours + 24)
+            ELSE NULL END
+          WHEN 'youtube' THEN
+            CASE WHEN
+              json_type(aged.metrics, '$.views') IS NOT NULL
+              OR json_type(aged.metrics, '$.likes') IS NOT NULL
+            THEN (
+              COALESCE(json_extract(aged.metrics, '$.views'), 0) * 0.01
+              + COALESCE(json_extract(aged.metrics, '$.likes'), 0)
+            ) / (_age_hours + 6)
+            ELSE NULL END
+          ELSE NULL
+        END AS _heat_signal
+      FROM aged
+    ),
+    diversified AS (
+      SELECT
+        ${signaledColumns},
+        _sort_time,
+        _sort_epoch,
+        _home_family,
+        _source_rank,
+        _heat_signal,
+        ROW_NUMBER() OVER (
+          PARTITION BY _home_family
+          ORDER BY _sort_time DESC, id DESC
+        ) AS _family_rank,
+        COUNT(_heat_signal) OVER (
+          PARTITION BY source_type
+        ) AS _heat_count,
+        RANK() OVER (
+          PARTITION BY source_type
+          ORDER BY
+            CASE WHEN _heat_signal IS NULL THEN 1 ELSE 0 END ASC,
+            _heat_signal ASC
+        ) AS _heat_rank
+      FROM signaled
+    ),
+    bonused AS (
+      SELECT
+        ${diversifiedColumns},
+        _sort_time,
+        _sort_epoch,
+        _source_rank,
+        _family_rank,
+        CASE
+          WHEN _heat_signal IS NULL THEN ${NEUTRAL_HEAT_BONUS_SECONDS}
+          WHEN _heat_count <= 1 THEN ${NEUTRAL_HEAT_BONUS_SECONDS}
+          ELSE CAST(ROUND(
+            MIN(${MAX_HEAT_BONUS_SECONDS}, MAX(0,
+              ((_heat_rank - 1) * 1.0 / (_heat_count - 1)) * ${MAX_HEAT_BONUS_SECONDS}
+            ))
+          ) AS INTEGER)
+        END AS _heat_bonus
+      FROM diversified
+    ),
+    scored AS (
+      SELECT
+        ${bonusedColumns},
+        _sort_time,
+        _sort_epoch
+          - ((_family_rank - 1) * ${FAMILY_REPEAT_PENALTY_SECONDS})
+          - ((_source_rank - 1) * ${SOURCE_REPEAT_PENALTY_SECONDS})
+          + _heat_bonus AS _home_score
+      FROM bonused
     )
     SELECT
       ${scoredColumns},
@@ -331,9 +546,12 @@ export async function handleHomeFeed(
     throw error;
   }
 
+  const rankingVersion = parsed.cursor?.version
+    ?? (request.headers.get(HOME_RANKING_VERSION_HEADER) === '2' ? 2 : 1);
   const query = buildHomeFeedQuery({
     ...parsed,
     workflowCompletedFilter: env.WORKFLOW_COMPLETED_FILTER === 'true',
+    rankingVersion,
   });
   const result = await env.DB.prepare(query.sql).bind(...query.params).all();
   const rows = (result.results ?? []) as Record<string, unknown>[];
@@ -345,7 +563,7 @@ export async function handleHomeFeed(
     && isCursorSortTime(lastRow._sort_time)
     && typeof lastRow.id === 'string'
     ? encodeHomeFeedCursor({
-      version: 1,
+      version: rankingVersion,
       asOf: parsed.asOf,
       score: lastRow._home_score as number,
       sortTime: lastRow._sort_time,
@@ -358,6 +576,7 @@ export async function handleHomeFeed(
 
   return jsonResponse({
     view_mode: 'waterfall',
+    ranking_version: rankingVersion,
     items: visibleRows.map((row) => toListItem(row)),
     next_cursor: nextCursor,
     has_more: hasMore,

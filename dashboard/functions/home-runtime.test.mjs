@@ -37,6 +37,7 @@ const ITEM = {
 function feed(overrides = {}) {
   return {
     view_mode: "waterfall",
+    ranking_version: 2,
     items: [ITEM],
     next_cursor: null,
     has_more: false,
@@ -80,6 +81,7 @@ function harness({
       fetch: async (request) => {
         calls.api += 1;
         assert.equal(request.headers.get("X-Home-Renderer-Token"), token);
+        assert.equal(request.headers.get("X-Home-Ranking-Version"), "2");
         if (apiFetch) return apiFetch(request);
         return apiResponse.clone();
       },
@@ -182,6 +184,23 @@ test("waterfall renders safe JSON and meaningful server markup", async () => {
   assert.equal(fixture.calls.api, 1);
   assert.equal(fixture.calls.render, 1);
   assert.deepEqual(fixture.calls.assets, ["/waterfall"]);
+});
+
+test("new Pages normalizes a legacy Worker response without ranking_version to v1", async () => {
+  const { ranking_version: _rankingVersion, ...legacyFeed } = feed();
+  const fixture = harness({
+    apiResponse: Response.json(legacyFeed),
+    render: async (data) => {
+      assert.equal(data.ranking_version, 1);
+      return "<main><article>Legacy v1 card</article></main>";
+    },
+  });
+  const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
+  const html = await response.text();
+
+  assert.equal(response.headers.get("X-AIFeeds-Home-SSR"), "waterfall");
+  assert.match(html, /Legacy v1 card/);
+  assert.match(html, /"ranking_version":1/);
 });
 
 for (const [name, options] of [

@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 vi.mock("cloudflare:workers", () => ({
   WorkflowEntrypoint: class {
@@ -68,6 +69,82 @@ function fakeDb(rows = Array.from({ length: 13 }, (_, index) => makeRow(index)))
   return { db: { prepare }, captures, prepare, bind, all };
 }
 
+function sqliteHomeFeedFixture(): DatabaseSync {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_ref TEXT,
+      title TEXT,
+      content TEXT,
+      content_translated TEXT,
+      author TEXT,
+      handle TEXT,
+      url TEXT,
+      media TEXT,
+      metrics TEXT,
+      published_at TEXT,
+      scraped_at TEXT NOT NULL,
+      is_relevant INTEGER DEFAULT 1,
+      is_hot INTEGER DEFAULT 0,
+      matched_by TEXT,
+      lang TEXT,
+      extra TEXT,
+      deleted_at INTEGER
+    )
+  `);
+  const insert = db.prepare(`
+    INSERT INTO items (
+      id, source_type, source_id, title, content, media, metrics,
+      published_at, scraped_at, is_relevant, is_hot, lang, extra
+    ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, 1, ?, 'zh', ?)
+  `);
+  let minuteOffset = 0;
+  for (const sourceType of HOME_FEED_SOURCES) {
+    for (let sourceIndex = 0; sourceIndex < 4; sourceIndex += 1) {
+      const timestamp = new Date(Date.parse(NOW) - minuteOffset * 60_000).toISOString();
+      const popularity = (4 - sourceIndex) * 100;
+      const metrics = sourceType === "github"
+        ? { today_stars: popularity }
+        : sourceType === "product_hunt"
+          ? { votes: popularity, comments: sourceIndex }
+          : sourceType === "hf_paper"
+            ? { upvotes: popularity }
+            : sourceType === "clawhub"
+              ? { downloads: popularity * 10 }
+              : sourceType === "youtube"
+                ? { views: popularity * 100 }
+                : sourceType === "x_list"
+                  ? { likes: popularity }
+                  : {};
+      insert.run(
+        `${sourceType}:sqlite-${sourceIndex}`,
+        sourceType,
+        `sqlite-${sourceIndex}`,
+        `${sourceType} ${sourceIndex}`,
+        "fixture",
+        JSON.stringify(metrics),
+        timestamp,
+        timestamp,
+        sourceIndex === 0 && sourceType === "x_list" ? 1 : 0,
+        JSON.stringify({ workflow_completed_at: timestamp }),
+      );
+      minuteOffset += 7;
+    }
+  }
+  return db;
+}
+
+function executeHomeFeedSql(
+  db: DatabaseSync,
+  request: Parameters<typeof buildHomeFeedQuery>[0],
+): Record<string, unknown>[] {
+  const query = buildHomeFeedQuery(request);
+  return db.prepare(query.sql).all(...query.params as SQLInputValue[]) as Record<string, unknown>[];
+}
+
 describe("home feed request contract", () => {
   test("limits clamp to 12..48 and a fresh request freezes the supplied clock", () => {
     expect(parseHomeFeedRequest(new URL("https://internal/api/home-feed?limit=1"), NOW)).toEqual({
@@ -81,7 +158,7 @@ describe("home feed request contract", () => {
 
   test("cursor round-trips a frozen as-of and strict keyset values", () => {
     const encoded = encodeHomeFeedCursor({
-      version: 1,
+      version: 2,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -93,7 +170,7 @@ describe("home feed request contract", () => {
     );
     expect(parsed.asOf).toBe(NOW);
     expect(parsed.cursor).toEqual({
-      version: 1,
+      version: 2,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -103,7 +180,7 @@ describe("home feed request contract", () => {
 
   test.each([
     "not-base64",
-    Buffer.from(JSON.stringify({ version: 2, asOf: NOW, score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ version: 3, asOf: NOW, score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: "tomorrow", score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1.2, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1, sortTime: "2026-02-31 03:04:05", id: "x" })).toString("base64url"),
@@ -114,10 +191,24 @@ describe("home feed request contract", () => {
       NOW,
     )).toThrow(/invalid home feed cursor/i);
   });
+
+  test("legacy v1 cursors remain replayable during the rolling deployment", () => {
+    const encoded = encodeHomeFeedCursor({
+      version: 1,
+      asOf: NOW,
+      score: 1_752_720_000,
+      sortTime: "2026-07-17T03:04:05.000Z",
+      id: "github:openai/codex",
+    });
+    expect(parseHomeFeedRequest(
+      new URL(`https://internal/api/home-feed?cursor=${encodeURIComponent(encoded)}`),
+      "2027-01-01T00:00:00.000Z",
+    ).cursor?.version).toBe(1);
+  });
 });
 
 describe("home feed SQL", () => {
-  test("bounds each source before deterministic diversity scoring", () => {
+  test("bounds each source before deterministic family and source-aware scoring", () => {
     const { sql, params } = buildHomeFeedQuery({
       limit: 24,
       asOf: NOW,
@@ -125,13 +216,22 @@ describe("home feed SQL", () => {
       workflowCompletedFilter: true,
     });
 
+    expect(HOME_FEED_SOURCES).toContain("youtube");
     for (const source of HOME_FEED_SOURCES) expect(sql).toContain(`'${source}'`);
     expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type[\s\S]*AS _candidate_rank/i);
     expect(sql).toContain("_candidate_rank <= 48");
     expect(sql).not.toMatch(/\bUNION(?:\s+ALL)?\b/i);
-    expect(params.filter((value) => value === NOW)).toHaveLength(2);
+    expect(params.filter((value) => value === NOW)).toHaveLength(3);
     expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type/i);
-    expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
+    expect(sql).toMatch(/PARTITION BY _home_family[\s\S]*AS _family_rank/i);
+    expect(sql).toMatch(/CASE\s+aged\.source_type[\s\S]*AS _heat_signal/i);
+    expect(sql).toMatch(/COUNT\(_heat_signal\)\s+OVER\s*\(\s*PARTITION BY source_type\s*\)/i);
+    expect(sql).toMatch(/RANK\(\)\s+OVER\s*\([\s\S]*PARTITION BY source_type[\s\S]*_heat_signal ASC[\s\S]*AS _heat_rank/i);
+    expect(sql).toMatch(
+      /_sort_epoch\s*-\s*\(\(_family_rank\s*-\s*1\)\s*\*\s*7200\)\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*3600\)\s*\+\s*_heat_bonus/i,
+    );
+    expect(sql).toMatch(/WHEN _heat_signal IS NULL THEN 3600/i);
+    expect(sql).toMatch(/MIN\(7200,\s*MAX\(0,/i);
     expect(sql).toContain("json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL");
     expect(sql).toContain("json_extract(items.extra, '$.dedup_of') IS NULL");
     expect(sql).toContain("COALESCE(json_extract(items.extra, '$.cn_sensitive'), 0) != 1");
@@ -142,7 +242,7 @@ describe("home feed SQL", () => {
 
   test("cursor query uses score, sort time, and id as one stable keyset", () => {
     const cursor = {
-      version: 1 as const,
+      version: 2 as const,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -162,6 +262,88 @@ describe("home feed SQL", () => {
       cursor.id,
     ]));
     expect(sql).not.toContain("workflow_completed_at");
+  });
+
+  test("a legacy v1 cursor uses the former score while v2 remains the fresh default", () => {
+    const { sql } = buildHomeFeedQuery({
+      limit: 12,
+      asOf: NOW,
+      cursor: {
+        version: 1,
+        asOf: NOW,
+        score: 1_752_720_000,
+        sortTime: "2026-07-17T03:04:05.000Z",
+        id: "x_list:legacy",
+      },
+      workflowCompletedFilter: false,
+    });
+    expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
+    expect(sql).not.toContain("'youtube'");
+  });
+
+  test("v2 executes on SQLite with deterministic replay and non-overlapping keyset pages", () => {
+    const db = sqliteHomeFeedFixture();
+    try {
+      const request = {
+        limit: 12,
+        asOf: NOW,
+        cursor: null,
+        workflowCompletedFilter: true,
+      };
+      const first = executeHomeFeedSql(db, request);
+      const replay = executeHomeFeedSql(db, request);
+      expect(first.map((row) => [row.id, row._home_score, row._sort_time]))
+        .toEqual(replay.map((row) => [row.id, row._home_score, row._sort_time]));
+      expect(first).toHaveLength(13);
+
+      const visibleFirst = first.slice(0, 12);
+      const last = visibleFirst.at(-1);
+      if (
+        !last
+        || !Number.isSafeInteger(last._home_score)
+        || typeof last._sort_time !== "string"
+        || typeof last.id !== "string"
+      ) {
+        throw new Error("invalid SQLite home-feed cursor row");
+      }
+      const second = executeHomeFeedSql(db, {
+        ...request,
+        cursor: {
+          version: 2,
+          asOf: NOW,
+          score: last._home_score as number,
+          sortTime: last._sort_time,
+          id: last.id,
+        },
+      });
+      const firstIds = new Set(visibleFirst.map((row) => row.id));
+      expect(second.some((row) => firstIds.has(row.id))).toBe(false);
+      expect(new Set(visibleFirst.map((row) => row.source_type)).size).toBeGreaterThanOrEqual(6);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("legacy v1 executes against the original eight-source universe", () => {
+    const db = sqliteHomeFeedFixture();
+    try {
+      const rows = executeHomeFeedSql(db, {
+        limit: 48,
+        asOf: NOW,
+        cursor: {
+          version: 1,
+          asOf: NOW,
+          score: Number.MAX_SAFE_INTEGER,
+          sortTime: NOW,
+          id: "zzzz",
+        },
+        workflowCompletedFilter: false,
+      });
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.some((row) => row.source_type === "youtube")).toBe(false);
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -220,7 +402,10 @@ describe("home feed handler and origin scope", () => {
     const fake = fakeDb();
     const response = await handleHomeFeed(
       new Request("https://worker/api/home-feed?limit=12", {
-        headers: { "X-Home-Renderer-Token": "right" },
+        headers: {
+          "X-Home-Renderer-Token": "right",
+          "X-Home-Ranking-Version": "2",
+        },
       }),
       {
         DB: fake.db as unknown as D1Database,
@@ -235,12 +420,59 @@ describe("home feed handler and origin scope", () => {
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("Server-Timing")).toBe("d1;dur=4.25");
     expect(body.view_mode).toBe("waterfall");
+    expect(body.ranking_version).toBe(2);
     expect(body.generated_at).toBe(NOW);
     expect((body.items as unknown[])).toHaveLength(12);
     expect(body.has_more).toBe(true);
     expect(typeof body.next_cursor).toBe("string");
     expect(JSON.stringify(body)).not.toContain("_home_score");
     expect(fake.captures.sql).not.toMatch(/\bSELECT\s+\*/i);
+  });
+
+  test("a legacy renderer without negotiation stays on v1 and excludes YouTube", async () => {
+    const fake = fakeDb();
+    const response = await handleHomeFeed(
+      new Request("https://worker/api/home-feed?limit=12", {
+        headers: { "X-Home-Renderer-Token": "right" },
+      }),
+      {
+        DB: fake.db as unknown as D1Database,
+        HOME_RENDERER_TOKEN: "right",
+      },
+      NOW,
+    );
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(body.ranking_version).toBe(1);
+    expect(fake.captures.sql).not.toContain("'youtube'");
+  });
+
+  test("an existing cursor keeps its ranking version even when the renderer requests v2", async () => {
+    const fake = fakeDb();
+    const cursor = encodeHomeFeedCursor({
+      version: 1,
+      asOf: NOW,
+      score: 1_752_720_000,
+      sortTime: "2026-07-17T03:04:05.000Z",
+      id: "github:openai/codex",
+    });
+    const response = await handleHomeFeed(
+      new Request(`https://worker/api/home-feed?limit=12&cursor=${encodeURIComponent(cursor)}`, {
+        headers: {
+          "X-Home-Renderer-Token": "right",
+          "X-Home-Ranking-Version": "2",
+        },
+      }),
+      {
+        DB: fake.db as unknown as D1Database,
+        HOME_RENDERER_TOKEN: "right",
+      },
+      NOW,
+    );
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(body.ranking_version).toBe(1);
+    expect(fake.captures.sql).not.toContain("'youtube'");
   });
 
   test("D1 naive sort timestamps emit an exact cursor that can be replayed", async () => {

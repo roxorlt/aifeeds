@@ -15,6 +15,7 @@ const HOME_SOURCES = new Set<SourceType>([
   "hf_paper",
   "huodongxing",
   "clawhub",
+  "youtube",
 ]);
 
 const SOURCE_LABELS: Readonly<Record<string, string>> = {
@@ -26,6 +27,7 @@ const SOURCE_LABELS: Readonly<Record<string, string>> = {
   hf_paper: "AI 论文",
   huodongxing: "AI 活动",
   clawhub: "ClawHub",
+  youtube: "YouTube",
 };
 
 export type HomeCardImage = Readonly<{
@@ -79,6 +81,7 @@ function isNullableString(value: unknown): value is string | null {
 
 function isHomeFeedResponse(value: unknown): value is HomeFeedResponse {
   if (!isRecord(value) || value.view_mode !== "waterfall") return false;
+  if (value.ranking_version !== 1 && value.ranking_version !== 2) return false;
   if (!Array.isArray(value.items) || value.items.length > 48 || !value.items.every(isHomeItem)) {
     return false;
   }
@@ -91,7 +94,10 @@ function isHomeFeedResponse(value: unknown): value is HomeFeedResponse {
 
 export function parseInitialHomeFeed(rawJson: string): HomeFeedResponse {
   try {
-    const value: unknown = JSON.parse(rawJson);
+    const parsed: unknown = JSON.parse(rawJson);
+    const value: unknown = isRecord(parsed) && parsed.ranking_version === undefined
+      ? { ...parsed, ranking_version: 1 }
+      : parsed;
     if (!isHomeFeedResponse(value)) throw new Error("shape");
     return value;
   } catch {

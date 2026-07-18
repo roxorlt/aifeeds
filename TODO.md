@@ -51,6 +51,29 @@
     staging 五设备 `20/20`、生产五设备 `20/20`，生产默认仍为 classic，waterfall 仅 opt-in。
   - [x] 发布后 DebugBear：台湾/香港 Mobile classic/waterfall 各 5 次；waterfall LCP p75 分别改善
     `28.6%` / `16.7%`，CLS p75 `0`，代表瀑布 `0` 个 4xx/5xx/GIF 请求。
+  - [ ] 瀑布流视觉与混排修订：用户已确认移动 390px 双列、PC 自适应 3–6 列且无左侧栏，
+    两端均无分类 Tab、所有来源完全混排；卡片使用来源感知紧凑经典结构。公共排序同时加入
+    隐藏内容家族去连排、来源内热度归一和稳定分页，设备曝光第一阶段只记录
+    `would_filter`、不实际隐藏。设计、实施清单与双端样例见
+    [`docs/plans/2026-07-18-waterfall-compact-cards-design.md`](docs/plans/2026-07-18-waterfall-compact-cards-design.md)、
+    [`docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md`](docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md)、
+    [`docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html`](docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html)。
+    - [x] 本地 TDD 与视觉封板：九源紧凑卡、YouTube 深链、移动双列、PC 3–6 列、无侧栏/
+      无分类 Tab、v2 公共排序、v1 游标兼容、全源曝光 observer 与只记录 shadow 已完成。
+    - [x] 本地最终门：Dashboard `348/348`、Worker `834/834`、root contracts
+      `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
+      `32 pass / 83 role-skips`；lint、Dashboard/Functions/Worker TypeScript、production build
+      与 PC/移动视觉截图均通过。
+    - [x] 滚动兼容保护：新 Pages 用 `X-Home-Ranking-Version: 2` 显式协商；新 Worker 对旧
+      Pages（无协商头）保持 v1/八源，cursor version 优先，避免先发 Worker 时旧 renderer 因
+      YouTube source 退回经典版；新 Pages 将旧 Worker 缺失的 ranking version 精确归一为 v1；
+      staging 固定先 Pages、后 Worker。
+    - [x] staging 真实中文资讯卡补充证据：两张 no-JS 卡片比旧 row-span 预留高约 16px；
+      已添加密集 CJK 回归 fixture，并为 SSR 估算增加一个完整 grid row 的换行缓冲。
+    - [x] feature branch 已推送；同步 staging Worker/Pages、滚动兼容矩阵、九源/分页/shadow、
+      五设备 `20/20` 与每格 10 次性能门均通过；九源临时夹具已删除并复核为 0。
+    - [ ] PR 全绿后合入 `main` 触发生产发布并做即时冒烟。发布清单见
+      [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。
   - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
     异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
 

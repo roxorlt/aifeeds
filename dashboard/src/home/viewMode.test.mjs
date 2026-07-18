@@ -91,6 +91,7 @@ test("only root and existing drawer deep links belong to the home experience", (
     "/e/123",
     "/h/2607.12345",
     "/o/blog%3Aopenai%3Aabc",
+    "/y/private-video-id",
   ]) {
     assert.equal(isHomeExperiencePath(path), true, path);
   }

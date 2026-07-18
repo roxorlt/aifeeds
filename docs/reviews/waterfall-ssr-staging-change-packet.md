@@ -8,7 +8,30 @@
 可审阅操作。用户已授权持续完成计划内开发、测试与发布；本文件仍不包含 production，也不允许把
 staging 通过自动解释为生产放量。RUM 是 production 上线后的观察任务，不是 staging 或代码交付门。
 
+> 2026-07-18 后续视觉/混排 v2 是新的同步发布批次，不复用本页旧 deployment/version 作为新证据。
+> 新批次的范围、兼容矩阵、本地门与回滚条件见
+> [`2026-07-18-waterfall-mixing-v2-release.md`](2026-07-18-waterfall-mixing-v2-release.md)。
+> v2 批次不得沿用本页初次上线的 Worker → Pages 顺序：新 Pages 先发送
+> `X-Home-Ranking-Version: 2`，并把旧 Worker 省略的 `ranking_version` 精确归一为 legacy v1；
+> 验证该中间态后再发布新 Worker。新 Worker 对无协商头的旧 Pages 保持显式 v1/八源。该协议也
+> 保护生产两个并发 CI 工作流的任意完成顺序。
+
 ## 0. 执行结果
+
+### 视觉/混排 v2 后续批次（2026-07-18）
+
+- 冻结源码：`7327fba5e687a7bcf664dea3ce7ef9c333a8aeb3`。
+- staging Pages：`7faca6bb-a1df-42e4-8015-e5eebb8c949d`；build identity
+  `0bb5cad1463328541fbee34e41117920648781f725783d20570a7bcc3b0811a9`。
+- staging Worker：`f4ee4d50-05f8-4304-88e4-697e1b1f3255`。
+- 先 Pages、后 Worker 的中间态以及旧 Pages + 新 Worker 反向矩阵均保持 v1；最终组合进入 v2。
+  v1 cursor 继续八源重放，v2 连续两页各 24 条且零重复。
+- 五设备远端门 `20/20`；九源 fixture 验证后已删除并复核 `fixture_count=0`，清理后真实数据仍
+  HTTP 200、`SSR=waterfall`、`ranking_version=2`。
+- 每格 10 次性能门通过：waterfall 相对 classic 的 desktop/mobile cold LCP p75 均改善
+  `16.9%`，warm 回归分别仅 `2.7%`/`1.4%`；waterfall CLS p75 `0`、请求 p50
+  `16 vs 24`、传输 p50 约减少 `56%`。
+- v2 staging 决定：`GO`。该结果允许进入 PR/main 门，但不代表生产已经发布。
 
 - staging Worker 最终版本：`456c41a4-ec56-4a44-87a4-ddffb8a0ae30`。
 - staging Pages 验收 deployment：`https://219a1609.xlist-dashboard-staging.pages.dev`。

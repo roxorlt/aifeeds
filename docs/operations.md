@@ -1077,6 +1077,20 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
 - 双视图 benchmark 的 `?view=` 只校验目标 cohort；实际测量写有限 `aifeeds_view` cookie 后访问
   canonical `/`，从而覆盖真实 opt-in 用户的 SWR 路径。报告逐样本记录 DOM `ssr_state`、
   SSR/freshness header 与 age；浏览器 warm 和 edge fresh 必须分开解释。
+- 瀑布流视觉/混排 v2 候选保持相同 classic-default/opt-in 边界：移动端双列，PC 3–6 列，无侧栏和
+  分类 Tab。Pages 的 HOME_API 请求用 `X-Home-Ranking-Version: 2` 显式协商；新 Worker 对没有该
+  头的旧 Pages 只返回显式 v1/原八源；旧 Worker 会忽略该头且省略 `ranking_version`，新 Pages
+  仅把该字段缺失归一为 legacy v1，同时拒绝其它非法版本。因此 Pages/Worker 并发发布和任一侧
+  回滚都不会把 YouTube 交给旧 renderer。cursor version 永远优先于协商头，旧页面携带的 v1
+  cursor 继续按原八源排序翻页。v2 在固定 `asOf` 下使用隐藏内容家族、来源内年龄归一热度和稳定
+  keyset，并加入 live YouTube。设备曝光历史目前只上报有限枚举的 shadow decision，不删除、
+  不重排 SSR 或 hydrated DOM；正式个性化过滤必须另开 feature flag 和发布计划。
+- 视觉/混排 v2 staging 已在源码 `7327fba5e687a7bcf664dea3ce7ef9c333a8aeb3` 通过：
+  Pages `7faca6bb-a1df-42e4-8015-e5eebb8c949d`、Worker
+  `f4ee4d50-05f8-4304-88e4-697e1b1f3255`；滚动兼容矩阵、v1/v2 cursor、九源临时 fixture、
+  清理后 `fixture_count=0`、五设备 `20/20` 均通过。10-run 性能门中 waterfall 相对 classic
+  的 desktop/mobile cold LCP p75 均改善 `16.9%`，warm 回归仅 `2.7%`/`1.4%`，CLS p75 `0`。
+  此记录只代表 v2 staging `GO`；在 PR 全绿、合入 main 和生产即时门完成前不得写成已生产发布。
 - 外部合成观测：`.github/workflows/sitespeed-external.yml` 只在隔离 feature branch 新增该文件时
   自动运行，也保留手动入口；GitHub 托管 runner 对生产首页执行移动/桌面各 5 次只读导航，只上传
   14 天 artifact。workflow 固定 `contents: read`、不读取 secret、不包含部署或远端管理命令，不能替代

@@ -526,6 +526,7 @@ export interface ItemsResponse {
 
 export interface HomeFeedResponse extends ItemsResponse {
   view_mode: "waterfall";
+  ranking_version: 1 | 2;
   generated_at: string;
 }
 

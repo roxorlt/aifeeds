@@ -66,7 +66,7 @@
 .waterfall-brand small {
   overflow: hidden;
   color: #737373;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -95,45 +95,15 @@
 }
 
 .waterfall-main {
-  width: min(1400px, calc(100% - 40px));
-  margin: 0 auto 72px;
-}
-
-.waterfall-intro {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  padding: 38px 0 24px;
-}
-
-.waterfall-intro p {
-  margin: 0;
-  color: #525252;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.waterfall-intro h1 {
-  max-width: 680px;
-  margin: 6px 0 0;
-  color: #171717;
-  font-size: clamp(32px, 4vw, 58px);
-  font-weight: 650;
-  letter-spacing: -0.055em;
-  line-height: 0.98;
-}
-
-.waterfall-intro > span {
-  color: #737373;
-  font-size: 12px;
+  width: min(1240px, calc(100% - 24px));
+  margin: 0 auto 60px;
+  padding-top: 16px;
 }
 
 .waterfall-grid {
   display: grid;
   grid-auto-rows: var(--waterfall-row);
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--waterfall-gap);
   margin: 0;
   padding: 0;
@@ -145,29 +115,13 @@
   min-width: 0;
   overflow: hidden;
   align-self: start;
-  border: 1px solid #d4d4d4;
-  border-radius: 4px;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
   background: #fff;
 }
 
 .waterfall-card article {
   min-width: 0;
-}
-
-.waterfall-card__meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 14px 16px 0;
-  color: #737373;
-  font-size: 11px;
-}
-
-.waterfall-card__meta span {
-  color: #404040;
-  font-weight: 700;
-  letter-spacing: 0.04em;
 }
 
 .waterfall-card__link {
@@ -176,33 +130,140 @@
   text-decoration: none;
 }
 
+.waterfall-card__body {
+  min-width: 0;
+  padding: 10px;
+}
+
+.waterfall-card__identity {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+  color: #737373;
+  font-size: 11px;
+}
+
+.waterfall-card__source-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: #404040;
+  background: #f1f1f1;
+}
+
+.waterfall-card__source-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.waterfall-card__identity-copy {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.waterfall-card__identity-copy strong,
+.waterfall-card__identity-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waterfall-card__identity-copy strong {
+  color: #404040;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.waterfall-card__identity-copy small {
+  color: #8a8a8a;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.waterfall-card__identity time {
+  align-self: start;
+  padding-top: 1px;
+  white-space: nowrap;
+}
+
 .waterfall-card__link h2 {
-  margin: 10px 16px 7px;
+  display: -webkit-box;
+  margin: 0 0 6px;
+  overflow: hidden;
   color: #171717;
-  font-size: 17px;
-  letter-spacing: -0.025em;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   line-height: 1.38;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .waterfall-card__link p {
+  display: -webkit-box;
   margin: 0;
-  padding: 0 16px 16px;
+  overflow: hidden;
   color: #404040;
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
 }
 
-.waterfall-card__link img {
+.waterfall-card__image {
   display: block;
   width: 100%;
   height: auto;
-  border-top: 1px solid #e5e5e5;
+  object-fit: cover;
   background: #f5f5f5;
+}
+
+.waterfall-card__link > .waterfall-card__image {
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.waterfall-card__body > .waterfall-card__image {
+  width: calc(100% + 20px);
+  max-width: none;
+  margin: 10px -10px 0;
+  border-top: 1px solid #e5e5e5;
+}
+
+.waterfall-card__metrics {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #ededed;
+  color: #737373;
+  font-size: 11px;
+}
+
+.waterfall-card__metrics span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waterfall-card__metrics b {
+  color: #525252;
+  font-weight: 650;
 }
 
 .waterfall-card__link:focus-visible {
   outline: 2px solid #171717;
-  outline-offset: -3px;
+  outline-offset: -2px;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -246,9 +307,31 @@
   margin: 0;
 }
 
-@media (max-width: 1023px) {
+@media (min-width: 768px) {
   .waterfall-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .waterfall-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1280px) {
+  .waterfall-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1600px) {
+  .waterfall-main {
+    width: min(1490px, calc(100% - 24px));
+  }
+
+  .waterfall-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 }
 
@@ -263,37 +346,8 @@
   }
 
   .waterfall-main {
-    width: 100%;
     margin-bottom: 52px;
-  }
-
-  .waterfall-intro {
-    display: block;
-    padding: 24px 16px 18px;
-  }
-
-  .waterfall-intro h1 {
-    font-size: 34px;
-  }
-
-  .waterfall-intro > span {
-    display: block;
-    margin-top: 10px;
-  }
-
-  .waterfall-grid {
-    display: block;
-  }
-
-  .waterfall-card {
-    margin-bottom: 10px;
-    border-right: 0;
-    border-left: 0;
-    border-radius: 0;
-  }
-
-  .waterfall-card__link h2 {
-    font-size: 16px;
+    padding-top: 12px;
   }
 }
 

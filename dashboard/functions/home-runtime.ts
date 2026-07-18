@@ -200,6 +200,7 @@ async function fetchHomeFeed(
         headers: {
           Accept: "application/json",
           "X-Home-Renderer-Token": env.HOME_RENDERER_TOKEN,
+          "X-Home-Ranking-Version": "2",
         },
         signal: controller.signal,
       },

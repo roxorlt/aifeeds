@@ -92,6 +92,34 @@ const API_ERROR_MESSAGE_CATEGORIES = new Set([
 const HOME_VIEW_MODES = new Set(['classic', 'waterfall']);
 const HOME_SSR_STATES = new Set(['classic', 'generated', 'fresh', 'stale', 'fallback']);
 const HOME_VIEW_ENTRIES = new Set(['appbar']);
+const IMPRESSION_SOURCES = new Set([
+  'x_list',
+  'youtube',
+  'podcast',
+  'product_hunt',
+  'huodongxing',
+  'github',
+  'arxiv',
+  'clawhub',
+  'hf_paper',
+  'blog',
+]);
+const IMPRESSION_FAMILIES = new Set([
+  'dynamic',
+  'project',
+  'research',
+  'official',
+  'event',
+  'video',
+]);
+const SHADOW_FILTER_REASONS = new Set([
+  'none',
+  'impression_cooldown',
+  'consumed_cooldown',
+  'event_expired',
+]);
+const SHADOW_DISPOSITIONS = new Set(['none', 'soft_demote', 'hide']);
+const EXPOSURE_SHADOW_RULE_VERSION = 'waterfall-exposure-shadow-v1';
 
 const EVENT_TYPE_WHITELIST = new Set<string>([
   // 导航
@@ -161,7 +189,7 @@ export function sanitizeTelemetryPagePath(raw: unknown): string | null {
   if (STATIC_TELEMETRY_PAGE_PATHS.has(pathname)) return pathname;
 
   const parts = pathname.split('/').filter(Boolean);
-  if (parts.length === 2 && ['t', 'c', 'h', 'e', 'o', 's'].includes(parts[0])) {
+  if (parts.length === 2 && ['t', 'c', 'h', 'e', 'o', 'y', 's'].includes(parts[0])) {
     return parts[0] === 's' ? '/s/:token' : `/${parts[0]}/:id`;
   }
   if (parts.length === 3 && parts[0] === 'g') return '/g/:owner/:repo';
@@ -244,6 +272,42 @@ function normalizeSearchQueryLength(payload: Record<string, unknown>): void {
   payload.q_len = Math.min(256, Math.floor(rawLength));
 }
 
+function sanitizeItemImpression(payload: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  if (
+    typeof payload.item_id === 'string'
+    && payload.item_id.length > 0
+    && payload.item_id.length <= 512
+  ) {
+    safe.item_id = payload.item_id;
+  }
+  if (typeof payload.source === 'string' && IMPRESSION_SOURCES.has(payload.source)) {
+    safe.source = payload.source;
+  }
+  if (typeof payload.family === 'string' && IMPRESSION_FAMILIES.has(payload.family)) {
+    safe.family = payload.family;
+  }
+  if (typeof payload.view_mode === 'string' && HOME_VIEW_MODES.has(payload.view_mode)) {
+    safe.view_mode = payload.view_mode;
+  }
+  if (
+    typeof payload.shadow_filter_reason === 'string'
+    && SHADOW_FILTER_REASONS.has(payload.shadow_filter_reason)
+  ) {
+    safe.shadow_filter_reason = payload.shadow_filter_reason;
+  }
+  if (payload.shadow_rule_version === EXPOSURE_SHADOW_RULE_VERSION) {
+    safe.shadow_rule_version = payload.shadow_rule_version;
+  }
+  if (
+    typeof payload.shadow_disposition === 'string'
+    && SHADOW_DISPOSITIONS.has(payload.shadow_disposition)
+  ) {
+    safe.shadow_disposition = payload.shadow_disposition;
+  }
+  return safe;
+}
+
 function trustedEdgeCode(value: unknown, pattern: RegExp): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.toUpperCase();
@@ -309,6 +373,8 @@ export function prepareEventPayload(
         ? clientPayload.entry
         : 'unknown',
     };
+  } else if (clientPayload && eventType === 'item_impression') {
+    payload = sanitizeItemImpression(clientPayload);
   } else if (clientPayload && (eventType === 'search_submit' || eventType === 'search_empty')) {
     payload = { ...clientPayload };
     normalizeSearchQueryLength(payload);

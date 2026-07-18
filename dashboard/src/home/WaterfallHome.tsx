@@ -37,13 +37,6 @@ export function WaterfallHome({ initialData }: Props) {
 
   return (
     <main id="content" className="waterfall-main">
-      <header className="waterfall-intro">
-        <div>
-          <p>今日 AI 动态</p>
-          <h1>一个连续的信息流</h1>
-        </div>
-        <span>综合时间、来源与信息密度</span>
-      </header>
       <ol className="waterfall-grid" aria-label="AI 动态瀑布流">
         {items.map((item, position) => (
           <WaterfallCard
