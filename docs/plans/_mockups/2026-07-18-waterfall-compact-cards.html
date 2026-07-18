@@ -330,51 +330,13 @@
     }
 
     .app-shell {
-      display: grid;
-      grid-template-columns: 176px minmax(0, 1fr);
-    }
-
-    .sidebar {
-      min-height: 918px;
-      padding: 18px 12px;
-      border-right: 1px solid var(--line);
-      background: rgba(255, 255, 255, .62);
-    }
-
-    .nav-label {
-      margin: 18px 10px 7px;
-      color: var(--soft);
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-    }
-
-    .nav-item {
-      display: flex;
-      align-items: center;
-      height: 38px;
-      gap: 10px;
-      padding: 0 10px;
-      border-radius: 8px;
-      color: #525252;
-      font-size: 13px;
-      font-weight: 500;
-    }
-
-    .nav-item svg {
-      width: 17px;
-      height: 17px;
-    }
-
-    .nav-item--active {
-      color: var(--ink);
-      background: #ededed;
-      font-weight: 700;
+      display: block;
     }
 
     .feed-main {
+      width: min(100%, 1240px);
       min-width: 0;
+      margin: 0 auto;
       padding: 20px 24px 54px;
     }
 
@@ -402,29 +364,6 @@
     .feed-tools__title span {
       color: var(--muted);
       font-size: 11px;
-    }
-
-    .chips {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .chip {
-      height: 30px;
-      padding: 0 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      color: var(--muted);
-      background: white;
-      font-size: 11px;
-      font-weight: 600;
-    }
-
-    .chip--active {
-      border-color: var(--ink);
-      color: white;
-      background: var(--ink);
     }
 
     .masonry {
@@ -798,8 +737,7 @@
 
     .mobile-appbar { display: none; }
 
-    .app-canvas--mobile .desktop-appbar,
-    .app-canvas--mobile .sidebar {
+    .app-canvas--mobile .desktop-appbar {
       display: none;
     }
 
@@ -828,29 +766,10 @@
       padding: 10px 12px 40px;
     }
 
-    .app-canvas--mobile .feed-tools {
-      display: block;
-      margin-bottom: 11px;
-    }
+    .app-canvas--mobile .feed-tools { display: none; }
 
     .app-canvas--mobile .feed-tools__title {
       display: none;
-    }
-
-    .app-canvas--mobile .chips {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 5px;
-    }
-
-    .app-canvas--mobile .chip {
-      min-width: 0;
-      height: 28px;
-      padding: 0 4px;
-      overflow: hidden;
-      font-size: 10px;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
 
     .app-canvas--mobile .masonry {
@@ -978,8 +897,7 @@
 
     @media (hover: hover) and (pointer: fine) {
       .review-switch button:hover,
-      .icon-button:hover,
-      .chip:hover {
+      .icon-button:hover {
         background: #ededed;
       }
     }
@@ -1078,7 +996,7 @@
       <header class="review-section__head">
         <div>
           <h2>PC 端 · 1440px</h2>
-          <p>左侧导航 + 五列内容区；更宽屏幕最多扩展为六列。</p>
+          <p>无左侧栏、无分类 Tab；所有来源完全混排，更宽屏幕最多扩展为六列。</p>
         </div>
         <output class="measure" id="desktop-measure">测量中</output>
       </header>
@@ -1096,28 +1014,9 @@
             </div>
           </div>
           <div class="app-shell">
-            <aside class="sidebar" aria-label="主导航">
-              <div class="nav-item nav-item--active"><svg><use href="#i-home"></use></svg>首页</div>
-              <div class="nav-item"><svg><use href="#i-clock"></use></svg>稍后阅读</div>
-              <div class="nav-item"><svg><use href="#i-bookmark"></use></svg>我的收藏</div>
-              <div class="nav-label">视图</div>
-              <div class="nav-item"><svg><use href="#i-grid"></use></svg>瀑布流</div>
-              <div class="nav-label">内容来源</div>
-              <div class="nav-item">X 动态</div>
-              <div class="nav-item">开源项目</div>
-              <div class="nav-item">论文</div>
-              <div class="nav-item">官方新闻</div>
-            </aside>
             <section class="feed-main">
               <div class="feed-tools">
-                <div class="feed-tools__title"><h1>今日 AI 动态</h1><span>按时间更新</span></div>
-                <div class="chips" aria-label="内容筛选">
-                  <button class="chip chip--active">全部</button>
-                  <button class="chip">X</button>
-                  <button class="chip">GitHub</button>
-                  <button class="chip">论文</button>
-                  <button class="chip">官方</button>
-                </div>
+                <div class="feed-tools__title"><h1>今日值得看</h1><span>全来源混排 · 持续更新</span></div>
               </div>
               <ol class="masonry" data-canvas="desktop"></ol>
             </section>
@@ -1147,16 +1046,6 @@
         </div>
         <div class="app-shell">
           <section class="feed-main">
-            <div class="feed-tools">
-              <div class="feed-tools__title"><h1>今日 AI 动态</h1><span>按时间更新</span></div>
-              <div class="chips" aria-label="内容筛选">
-                <button class="chip chip--active">全部</button>
-                <button class="chip">X</button>
-                <button class="chip">GitHub</button>
-                <button class="chip">论文</button>
-                <button class="chip">官方</button>
-              </div>
-            </div>
             <ol class="masonry" data-canvas="mobile"></ol>
           </section>
         </div>
