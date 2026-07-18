@@ -1090,7 +1090,15 @@ source .secrets/aifeeds-prod.env   # 或 aifeeds-staging.env
   `f4ee4d50-05f8-4304-88e4-697e1b1f3255`；滚动兼容矩阵、v1/v2 cursor、九源临时 fixture、
   清理后 `fixture_count=0`、五设备 `20/20` 均通过。10-run 性能门中 waterfall 相对 classic
   的 desktop/mobile cold LCP p75 均改善 `16.9%`，warm 回归仅 `2.7%`/`1.4%`，CLS p75 `0`。
-  此记录只代表 v2 staging `GO`；在 PR 全绿、合入 main 和生产即时门完成前不得写成已生产发布。
+  主 PR #195 已合入 `main` `2c8bbe016853d47b9e562368eaff3d9ee7c790c9`，生产 Worker
+  `503a8fb9-b089-4e90-a01c-31e4853d653c`。
+- 生产即时门发现无 cookie 的 `?view=waterfall` 虽能 SSR，但续页 `/_home/feed` 因 query 偏好
+  未持久化而返回 404；cookie 用户不受影响。hotfix #196 只对有效且实际渲染一致的 view query
+  写有限 cookie，无效值不持久化、fallback 仍清 cookie。hotfix staging Pages
+  `e32effce-3437-45b2-a001-9d14769701f4` 五设备 `20/20` 后合入 `main`
+  `7a6deaa9e4c61f980362e3d9d8c0a8877e7970d0`；最终生产 Pages
+  `57243fcc-5dee-4998-b2b4-a35012a597e7` 五设备 `20/20`。默认首页仍为 classic，瀑布只 opt-in，
+  曝光仍 shadow-only；RUM 是非阻塞上线后观察项。
 - 外部合成观测：`.github/workflows/sitespeed-external.yml` 只在隔离 feature branch 新增该文件时
   自动运行，也保留手动入口；GitHub 托管 runner 对生产首页执行移动/桌面各 5 次只读导航，只上传
   14 天 artifact。workflow 固定 `contents: read`、不读取 secret、不包含部署或远端管理命令，不能替代

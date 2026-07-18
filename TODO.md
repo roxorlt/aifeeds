@@ -51,7 +51,7 @@
     staging 五设备 `20/20`、生产五设备 `20/20`，生产默认仍为 classic，waterfall 仅 opt-in。
   - [x] 发布后 DebugBear：台湾/香港 Mobile classic/waterfall 各 5 次；waterfall LCP p75 分别改善
     `28.6%` / `16.7%`，CLS p75 `0`，代表瀑布 `0` 个 4xx/5xx/GIF 请求。
-  - [ ] 瀑布流视觉与混排修订：用户已确认移动 390px 双列、PC 自适应 3–6 列且无左侧栏，
+  - [x] 瀑布流视觉与混排修订：用户已确认移动 390px 双列、PC 自适应 3–6 列且无左侧栏，
     两端均无分类 Tab、所有来源完全混排；卡片使用来源感知紧凑经典结构。公共排序同时加入
     隐藏内容家族去连排、来源内热度归一和稳定分页，设备曝光第一阶段只记录
     `would_filter`、不实际隐藏。设计、实施清单与双端样例见
@@ -72,7 +72,10 @@
       已添加密集 CJK 回归 fixture，并为 SSR 估算增加一个完整 grid row 的换行缓冲。
     - [x] feature branch 已推送；同步 staging Worker/Pages、滚动兼容矩阵、九源/分页/shadow、
       五设备 `20/20` 与每格 10 次性能门均通过；九源临时夹具已删除并复核为 0。
-    - [ ] PR 全绿后合入 `main` 触发生产发布并做即时冒烟。发布清单见
+    - [x] PR #195 合入并完成 Worker/Pages 生产发布；即时门发现 query 直链续页 404 后，以
+      red→green hotfix #196 持久化有效 query 偏好。hotfix staging/production 五设备均
+      `20/20`，最终生产 Pages `57243fcc-5dee-4998-b2b4-a35012a597e7`、Worker
+      `503a8fb9-b089-4e90-a01c-31e4853d653c`；默认仍为 classic。发布清单见
       [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。
   - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
     异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
