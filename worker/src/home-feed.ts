@@ -22,6 +22,8 @@ const CANDIDATES_PER_SOURCE = 48;
 const SOURCE_REPEAT_PENALTY_SECONDS = 10_800;
 const CANDIDATE_WINDOW_DAYS = 30;
 const MAX_CURSOR_LENGTH = 1_024;
+const CURSOR_RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const CURSOR_SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?$/;
 
 export type HomeFeedCursor = Readonly<{
   version: 1;
@@ -59,6 +61,44 @@ function isCanonicalIsoDate(value: unknown): value is string {
   if (typeof value !== 'string' || value.length < 20 || value.length > 32) return false;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+// Cursor ordering must replay the exact TEXT value emitted by D1. Producers
+// currently use both RFC3339 and SQLite-style UTC timestamps, so accept those
+// two strict shapes without broadening validation to Date.parse()'s aliases.
+function isCursorSortTime(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const sqliteMatch = CURSOR_SQLITE_DATETIME_PATTERN.exec(value);
+  const match = CURSOR_RFC3339_PATTERN.exec(value) ?? sqliteMatch;
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+  if (
+    year < 1
+    || month < 1 || month > 12
+    || day < 1 || day > 31
+    || hour > 23 || minute > 59 || second > 59
+    || offsetHour > 23 || offsetMinute > 59
+  ) return false;
+  const local = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return local.getUTCFullYear() === year
+    && local.getUTCMonth() === month - 1
+    && local.getUTCDate() === day
+    && local.getUTCHours() === hour
+    && local.getUTCMinutes() === minute
+    && local.getUTCSeconds() === second
+    && Number.isFinite(Date.parse(
+      sqliteMatch
+        ? `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}Z`
+        : value,
+    ));
 }
 
 function encodeBase64Url(value: string): string {
@@ -101,7 +141,7 @@ function validateCursor(value: unknown): HomeFeedCursor {
     cursor.version !== 1
     || !isCanonicalIsoDate(cursor.asOf)
     || !Number.isSafeInteger(cursor.score)
-    || !isCanonicalIsoDate(cursor.sortTime)
+    || !isCursorSortTime(cursor.sortTime)
     || typeof cursor.id !== 'string'
     || cursor.id.length < 1
     || cursor.id.length > 512
@@ -302,7 +342,7 @@ export async function handleHomeFeed(
   const lastRow = hasMore ? visibleRows.at(-1) : undefined;
   const nextCursor = lastRow
     && Number.isSafeInteger(lastRow._home_score)
-    && isCanonicalIsoDate(lastRow._sort_time)
+    && isCursorSortTime(lastRow._sort_time)
     && typeof lastRow.id === 'string'
     ? encodeHomeFeedCursor({
       version: 1,
