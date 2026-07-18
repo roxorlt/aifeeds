@@ -181,6 +181,60 @@ describe('card image variant generation', () => {
     expect(bucket.put).toHaveBeenCalledTimes(1);
   });
 
+  test('requests Product Hunt imgix GIFs as bounded first-frame WebP sources', async () => {
+    const bucket = {
+      put: vi.fn(async () => ({} as R2Object)),
+    } as unknown as R2Bucket;
+    const requestedUrls: string[] = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrls.push(String(input));
+      const width = Number((init as RequestInit & {
+        cf?: { image?: { width?: number } };
+      }).cf?.image?.width);
+      return realStaticWebpResponse(width === 800 ? 800 : 400);
+    });
+
+    const variants = await generateCardImageVariants(bucket, {
+      sourceUrl: 'https://ph-files.imgix.net/launch.gif?auto=format&dpr=3',
+      sourcePrefix: 'ph',
+      mediaKind: 'image',
+      sourceContentType: 'image/gif',
+    }, { fetcher });
+
+    expect(variants.map(({ width }) => width)).toEqual([400, 800]);
+    expect(requestedUrls.map((value) => {
+      const url = new URL(value);
+      return {
+        host: url.hostname,
+        auto: url.searchParams.get('auto'),
+        dpr: url.searchParams.get('dpr'),
+        fm: url.searchParams.get('fm'),
+        frame: url.searchParams.get('frame'),
+        q: url.searchParams.get('q'),
+        w: url.searchParams.get('w'),
+      };
+    })).toEqual([
+      {
+        host: 'ph-files.imgix.net',
+        auto: null,
+        dpr: '1',
+        fm: 'webp',
+        frame: '1',
+        q: '82',
+        w: '400',
+      },
+      {
+        host: 'ph-files.imgix.net',
+        auto: null,
+        dpr: '1',
+        fm: 'webp',
+        frame: '1',
+        q: '82',
+        w: '800',
+      },
+    ]);
+  });
+
   test('rejects an animated WebP response even when the transform endpoint labels it WebP', async () => {
     const bucket = { put: vi.fn() } as unknown as R2Bucket;
     const fetcher = vi.fn(async () => webpVp8xResponse(400, 225, true));

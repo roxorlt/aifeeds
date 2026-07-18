@@ -152,6 +152,29 @@ function projectedHeight(source: CardImageVariantSource, width: number): number 
   return Math.max(1, Math.round((width * sourceHeight) / sourceWidth));
 }
 
+function phGifStaticPreviewUrl(
+  source: CardImageVariantSource,
+  width: number,
+): string {
+  if (source.sourcePrefix !== 'ph') return source.sourceUrl;
+  let url: URL;
+  try {
+    url = new URL(source.sourceUrl);
+  } catch {
+    return source.sourceUrl;
+  }
+  if (url.hostname.toLowerCase().replace(/\.+$/, '') !== 'ph-files.imgix.net') {
+    return source.sourceUrl;
+  }
+  url.searchParams.delete('auto');
+  url.searchParams.set('dpr', '1');
+  url.searchParams.set('fm', 'webp');
+  url.searchParams.set('frame', '1');
+  url.searchParams.set('q', String(CARD_IMAGE_QUALITY));
+  url.searchParams.set('w', String(width));
+  return url.toString();
+}
+
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(digest))
@@ -276,7 +299,10 @@ export async function generateCardImageVariants(
   // external subrequests and never fans out across every inline image.
   for (const width of CARD_IMAGE_WIDTHS) {
     try {
-      const response = await fetcher(source.sourceUrl, {
+      const transformSourceUrl = sourceIsGif
+        ? phGifStaticPreviewUrl(source, width)
+        : source.sourceUrl;
+      const response = await fetcher(transformSourceUrl, {
         // A redirect could turn a validated external URL into a self-fetch.
         // Skip that optimization and retain the original fallback instead.
         redirect: 'manual',
