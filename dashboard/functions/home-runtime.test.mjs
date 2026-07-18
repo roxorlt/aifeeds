@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -18,6 +19,12 @@ function cacheKey(buildId = BUILD_ID_A, hostname = "ai-feeds.com") {
 const TEMPLATE = templateFor(BUILD_ID_A);
 const CACHE_KEY = cacheKey();
 const NOW_MS = Date.parse("2026-07-17T10:00:00.000Z");
+
+test("Wrangler Pages bundle uses the automatic JSX runtime", async () => {
+  const raw = await readFile(new URL("../tsconfig.json", import.meta.url), "utf8");
+  const config = JSON.parse(raw);
+  assert.equal(config.compilerOptions?.jsx, "react-jsx");
+});
 
 const ITEM = {
   id: "blog:openai:fixture",
