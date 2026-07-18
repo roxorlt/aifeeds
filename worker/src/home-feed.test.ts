@@ -81,7 +81,7 @@ describe("home feed request contract", () => {
 
   test("cursor round-trips a frozen as-of and strict keyset values", () => {
     const encoded = encodeHomeFeedCursor({
-      version: 1,
+      version: 2,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -93,7 +93,7 @@ describe("home feed request contract", () => {
     );
     expect(parsed.asOf).toBe(NOW);
     expect(parsed.cursor).toEqual({
-      version: 1,
+      version: 2,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -103,7 +103,7 @@ describe("home feed request contract", () => {
 
   test.each([
     "not-base64",
-    Buffer.from(JSON.stringify({ version: 2, asOf: NOW, score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ version: 3, asOf: NOW, score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: "tomorrow", score: 1, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1.2, sortTime: NOW, id: "x" })).toString("base64url"),
     Buffer.from(JSON.stringify({ version: 1, asOf: NOW, score: 1, sortTime: "2026-02-31 03:04:05", id: "x" })).toString("base64url"),
@@ -114,10 +114,24 @@ describe("home feed request contract", () => {
       NOW,
     )).toThrow(/invalid home feed cursor/i);
   });
+
+  test("legacy v1 cursors remain replayable during the rolling deployment", () => {
+    const encoded = encodeHomeFeedCursor({
+      version: 1,
+      asOf: NOW,
+      score: 1_752_720_000,
+      sortTime: "2026-07-17T03:04:05.000Z",
+      id: "github:openai/codex",
+    });
+    expect(parseHomeFeedRequest(
+      new URL(`https://internal/api/home-feed?cursor=${encodeURIComponent(encoded)}`),
+      "2027-01-01T00:00:00.000Z",
+    ).cursor?.version).toBe(1);
+  });
 });
 
 describe("home feed SQL", () => {
-  test("bounds each source before deterministic diversity scoring", () => {
+  test("bounds each source before deterministic family and source-aware scoring", () => {
     const { sql, params } = buildHomeFeedQuery({
       limit: 24,
       asOf: NOW,
@@ -125,13 +139,22 @@ describe("home feed SQL", () => {
       workflowCompletedFilter: true,
     });
 
+    expect(HOME_FEED_SOURCES).toContain("youtube");
     for (const source of HOME_FEED_SOURCES) expect(sql).toContain(`'${source}'`);
     expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type[\s\S]*AS _candidate_rank/i);
     expect(sql).toContain("_candidate_rank <= 48");
     expect(sql).not.toMatch(/\bUNION(?:\s+ALL)?\b/i);
-    expect(params.filter((value) => value === NOW)).toHaveLength(2);
+    expect(params.filter((value) => value === NOW)).toHaveLength(3);
     expect(sql).toMatch(/ROW_NUMBER\(\)\s+OVER\s*\(\s*PARTITION BY items\.source_type/i);
-    expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
+    expect(sql).toMatch(/PARTITION BY _home_family[\s\S]*AS _family_rank/i);
+    expect(sql).toMatch(/CASE\s+aged\.source_type[\s\S]*AS _heat_signal/i);
+    expect(sql).toMatch(/COUNT\(_heat_signal\)\s+OVER\s*\(\s*PARTITION BY source_type\s*\)/i);
+    expect(sql).toMatch(/RANK\(\)\s+OVER\s*\([\s\S]*PARTITION BY source_type[\s\S]*_heat_signal ASC[\s\S]*AS _heat_rank/i);
+    expect(sql).toMatch(
+      /_sort_epoch\s*-\s*\(\(_family_rank\s*-\s*1\)\s*\*\s*7200\)\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*3600\)\s*\+\s*_heat_bonus/i,
+    );
+    expect(sql).toMatch(/WHEN _heat_signal IS NULL THEN 3600/i);
+    expect(sql).toMatch(/MIN\(7200,\s*MAX\(0,/i);
     expect(sql).toContain("json_extract(items.extra, '$.workflow_completed_at') IS NOT NULL");
     expect(sql).toContain("json_extract(items.extra, '$.dedup_of') IS NULL");
     expect(sql).toContain("COALESCE(json_extract(items.extra, '$.cn_sensitive'), 0) != 1");
@@ -142,7 +165,7 @@ describe("home feed SQL", () => {
 
   test("cursor query uses score, sort time, and id as one stable keyset", () => {
     const cursor = {
-      version: 1 as const,
+      version: 2 as const,
       asOf: NOW,
       score: 1_752_720_000,
       sortTime: "2026-07-17T03:04:05.000Z",
@@ -162,6 +185,22 @@ describe("home feed SQL", () => {
       cursor.id,
     ]));
     expect(sql).not.toContain("workflow_completed_at");
+  });
+
+  test("a legacy v1 cursor uses the former score while v2 remains the fresh default", () => {
+    const { sql } = buildHomeFeedQuery({
+      limit: 12,
+      asOf: NOW,
+      cursor: {
+        version: 1,
+        asOf: NOW,
+        score: 1_752_720_000,
+        sortTime: "2026-07-17T03:04:05.000Z",
+        id: "x_list:legacy",
+      },
+      workflowCompletedFilter: false,
+    });
+    expect(sql).toMatch(/_sort_epoch\s*-\s*\(\(_source_rank\s*-\s*1\)\s*\*\s*10800\)/i);
   });
 });
 
@@ -235,6 +274,7 @@ describe("home feed handler and origin scope", () => {
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("Server-Timing")).toBe("d1;dur=4.25");
     expect(body.view_mode).toBe("waterfall");
+    expect(body.ranking_version).toBe(2);
     expect(body.generated_at).toBe(NOW);
     expect((body.items as unknown[])).toHaveLength(12);
     expect(body.has_more).toBe(true);

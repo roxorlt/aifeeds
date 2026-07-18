@@ -29,6 +29,7 @@ const fixture = {
 function response(items = [fixture]) {
   return {
     view_mode: "waterfall",
+    ranking_version: 2,
     items,
     next_cursor: "next",
     has_more: true,
@@ -48,6 +49,28 @@ test("initial data accepts only the waterfall JSON contract", () => {
     () => parseInitialHomeFeed(JSON.stringify({ ...response(), items: [{ id: "<script>" }] })),
     /initial home feed/i,
   );
+  assert.throws(
+    () => parseInitialHomeFeed(JSON.stringify({ ...response(), ranking_version: 3 })),
+    /initial home feed/i,
+  );
+  const { ranking_version: _rankingVersion, ...withoutRankingVersion } = response();
+  assert.throws(
+    () => parseInitialHomeFeed(JSON.stringify(withoutRankingVersion)),
+    /initial home feed/i,
+  );
+});
+
+test("YouTube is accepted as a live ninth source and has a stable label", () => {
+  const youtube = {
+    ...fixture,
+    id: "youtube:fixture",
+    source_type: "youtube",
+    source_id: "fixture-video",
+    title: "Agent systems in production",
+  };
+  const parsed = parseInitialHomeFeed(JSON.stringify(response([youtube])));
+  assert.equal(parsed.items[0].source_type, "youtube");
+  assert.equal(getHomeCardModel(youtube).sourceLabel, "YouTube");
 });
 
 test("card presentation is source-aware and only selects bounded internal image variants", () => {

@@ -73,7 +73,8 @@
 4. 使用确定性分数：
    `sort_epoch - (family_rank - 1) * 7200 - (source_rank - 1) * 3600 + heat_bonus`
    ，其中 `0 <= heat_bonus <= 7200`，缺数据使用中性 3600。
-5. 升级游标/响应 ranking version；旧游标收到明确 expired 响应，Dashboard 可安全刷新首屏，不静默错页。
+5. 升级游标/响应 ranking version；新请求使用 v2，滚动发布前已打开页面的 v1
+   游标继续按旧分数完成翻页并保持 v1，避免发布瞬间报错、错页或强制刷新。
 6. 重跑定向与 worker 全量测试，记录查询时间回归。
 
 ## Task 5: 补齐 YouTube 与家族契约
@@ -163,4 +164,3 @@
 3. 确认公共混排 v2 生效、YouTube live gating 正确、shadow 只记录不隐藏，随后按既有 release gate 合入 main。
 4. 生产保持 classic 默认、waterfall opt-in；即时冒烟和性能验证通过后关闭发布任务。
 5. 生产 shadow 观察 7–14 天是发布后非阻塞任务；正式个性化过滤必须另开 feature flag、单独计划与批准。
-

@@ -3,15 +3,16 @@ import {
   useRef,
   type MouseEvent,
 } from "react";
+import { SourceIcon } from "../components/icons";
 import { useDrawer } from "../lib/drawerContext";
 import type { Item } from "../types";
-import { getHomeCardModel } from "./homeData";
 import { homePathForItem } from "./itemPath";
 import {
   estimateMasonryHeight,
   masonryRowSpan,
   nonShrinkingMasonrySpan,
 } from "./masonry";
+import { getWaterfallCardModel } from "./waterfallCardModel";
 
 type Props = Readonly<{
   item: Item;
@@ -22,7 +23,7 @@ type Props = Readonly<{
 export function WaterfallCard({ item, siblings, position }: Props) {
   const { openItem } = useDrawer();
   const cardRef = useRef<HTMLLIElement>(null);
-  const model = getHomeCardModel(item);
+  const model = getWaterfallCardModel(item);
   const path = homePathForItem(item) ?? "/";
   const aspectRatio = model.image ? model.image.width / model.image.height : null;
   const estimatedHeight = estimateMasonryHeight(
@@ -70,6 +71,20 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     openItem(item, siblings);
   };
 
+  const image = model.image ? (
+    <img
+      className="waterfall-card__image"
+      src={model.image.src}
+      width={model.image.width}
+      height={model.image.height}
+      alt={model.image.alt}
+      loading={position < 4 ? "eager" : "lazy"}
+      fetchPriority={position < 2 ? "high" : "auto"}
+      decoding="async"
+    />
+  ) : null;
+  const accessibleTitle = model.title || model.summary || model.identity;
+
   return (
     <li
       ref={cardRef}
@@ -81,29 +96,38 @@ export function WaterfallCard({ item, siblings, position }: Props) {
       } as React.CSSProperties}
     >
       <article>
-        <header className="waterfall-card__meta">
-          <span>{model.sourceLabel}</span>
-          <time dateTime={item.published_at ?? item.scraped_at}>{model.meta}</time>
-        </header>
         <a
           className="waterfall-card__link"
           href={path}
           onClick={handleClick}
-          aria-label={`${model.title}，打开详情`}
+          aria-label={`${accessibleTitle}，打开详情`}
         >
-          <h2>{model.title}</h2>
-          {model.summary && <p>{model.summary}</p>}
-          {model.image && (
-            <img
-              src={model.image.src}
-              width={model.image.width}
-              height={model.image.height}
-              alt={model.image.alt}
-              loading={position < 4 ? "eager" : "lazy"}
-              fetchPriority={position < 2 ? "high" : "auto"}
-              decoding="async"
-            />
-          )}
+          {model.mediaPosition === "before_text" ? image : null}
+          <div className="waterfall-card__body">
+            <header className="waterfall-card__identity">
+              <span className="waterfall-card__source-icon" aria-hidden="true">
+                <SourceIcon source_type={item.source_type} />
+              </span>
+              <span className="waterfall-card__identity-copy">
+                <strong>{model.identity}</strong>
+                {model.secondaryIdentity && <small>{model.secondaryIdentity}</small>}
+              </span>
+              <time dateTime={item.published_at ?? item.scraped_at}>{model.meta}</time>
+            </header>
+            {model.title && <h2>{model.title}</h2>}
+            {model.summary && <p>{model.summary}</p>}
+            {model.mediaPosition === "after_text" ? image : null}
+            {model.metrics.length > 0 && (
+              <footer className="waterfall-card__metrics" aria-label="内容指标">
+                {model.metrics.map((metric) => (
+                  <span key={`${metric.label}:${metric.value}`}>
+                    <b>{metric.label}</b>
+                    {metric.value}
+                  </span>
+                ))}
+              </footer>
+            )}
+          </div>
         </a>
       </article>
     </li>
