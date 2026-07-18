@@ -60,7 +60,7 @@
     [`docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html`](docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html)。
     - [x] 本地 TDD 与视觉封板：九源紧凑卡、YouTube 深链、移动双列、PC 3–6 列、无侧栏/
       无分类 Tab、v2 公共排序、v1 游标兼容、全源曝光 observer 与只记录 shadow 已完成。
-    - [x] 本地最终门：Dashboard `347/347`、Worker `834/834`、root contracts
+    - [x] 本地最终门：Dashboard `348/348`、Worker `834/834`、root contracts
       `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
       `32 pass / 83 role-skips`；lint、Dashboard/Functions/Worker TypeScript、production build
       与 PC/移动视觉截图均通过。
@@ -68,6 +68,8 @@
       Pages（无协商头）保持 v1/八源，cursor version 优先，避免先发 Worker 时旧 renderer 因
       YouTube source 退回经典版；新 Pages 将旧 Worker 缺失的 ranking version 精确归一为 v1；
       staging 固定先 Pages、后 Worker。
+    - [x] staging 真实中文资讯卡补充证据：两张 no-JS 卡片比旧 row-span 预留高约 16px；
+      已添加密集 CJK 回归 fixture，并为 SSR 估算增加一个完整 grid row 的换行缓冲。
     - [ ] 推送 feature branch，完成同步 staging Worker/Pages、九源/分页/shadow/性能门；
       通过后合入 `main` 触发生产发布并做即时冒烟。发布清单见
       [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。

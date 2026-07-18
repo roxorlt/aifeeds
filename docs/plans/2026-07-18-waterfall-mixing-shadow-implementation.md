@@ -12,7 +12,7 @@
 
 ## Execution status
 
-- Tasks 1–9：完成。Dashboard `347/347`、Worker `834/834`、root contracts
+- Tasks 1–9：完成。Dashboard `348/348`、Worker `834/834`、root contracts
   `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
   `32 pass / 83 role-skips`；lint、类型检查、production build 与双端截图均通过。
 - Task 10：进行中。feature branch 尚未合入 `main`；staging/production 事实只在远端门通过后更新。

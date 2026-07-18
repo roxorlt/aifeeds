@@ -4,6 +4,10 @@ export const MASONRY_ROW_PX = 8;
 export const MASONRY_GAP_PX = 12;
 export const MASONRY_SSR_SAFETY_PX = MASONRY_ROW_PX + MASONRY_GAP_PX;
 const MASONRY_ESTIMATED_CARD_WIDTH_PX = 220;
+// Edge font metrics and CJK wrapping can consume one more visual line than
+// the character-count estimate. Reserve one complete grid row so no-JS SSR
+// cards never paint beyond their allocated masonry track.
+const MASONRY_SSR_WRAP_BUFFER_PX = MASONRY_ROW_PX + MASONRY_GAP_PX;
 
 export function masonryRowSpan(
   measuredHeight: number,
@@ -52,5 +56,6 @@ export function estimateMasonryHeight(
     + (titleLines * 25)
     + (summaryLines * 23)
     + mediaHeight
-    + MASONRY_SSR_SAFETY_PX;
+    + MASONRY_SSR_SAFETY_PX
+    + MASONRY_SSR_WRAP_BUFFER_PX;
 }

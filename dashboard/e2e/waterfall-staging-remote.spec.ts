@@ -130,7 +130,13 @@ test("staging hydration is clean and responsive within the CLS budget", async ({
       ? 1
       : style.gridTemplateColumns.split(" ").filter(Boolean).length;
   });
-  expect(columnCount).toBe(width >= 1024 ? 3 : width >= 768 ? 2 : 1);
+  expect(columnCount).toBe(
+    width >= 1600 ? 6
+      : width >= 1280 ? 5
+        : width >= 1024 ? 4
+          : width >= 768 ? 3
+            : 2,
+  );
   const layout = await page.evaluate(() => ({
     cls: globalThis.__waterfallStagingCls,
     shifts: globalThis.__waterfallStagingShifts,

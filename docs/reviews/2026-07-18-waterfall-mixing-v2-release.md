@@ -33,7 +33,7 @@
 
 2026-07-18 在同一工作树完成：
 
-- Dashboard unit：`347/347`。
+- Dashboard unit：`348/348`。
 - Worker Vitest：`50 files / 834 tests`。
 - 根目录/运维 contracts：`175 pass / 2 environment-skips`。
 - waterfall 本地 HTTPS 五设备：`30/30`。
@@ -41,6 +41,8 @@
 - Dashboard lint、Dashboard/Functions/Worker TypeScript、production build：通过。
 - 视觉检查：1440px PC 五列、390px 移动双列；无分类 Tab、无侧栏、无破图和横向溢出。
 - 图片夹具先以空响应触发 `naturalWidth=0` 红测，再改为可解码方图并用同一断言转绿。
+- staging 真实中文资讯卡暴露 no-JS SSR 比 row-span 预留高约 16px；已用失败回归测试固定该
+  CJK 换行密度，并额外预留一个完整 grid row，避免卡片越过 masonry track。
 - 已知非阻塞告警：既有 `TweetDrawer` minified chunk 大于 500KB；本批次未扩大该边界。
 
 ## 4. staging 同步门
