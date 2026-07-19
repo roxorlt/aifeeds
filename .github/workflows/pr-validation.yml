@@ -173,6 +173,8 @@ jobs:
           python3 deploy/nginx/check-nginx-request-id.test.py
           python3 deploy/nginx/insert-nginx-request-id.test.py
           python3 deploy/nginx/verify-nginx-request-id-diff.test.py
+          bash -n deploy/nginx/aifeeds-image-format-cache-apply.sh
+          bash -n deploy/nginx/aifeeds-image-format-cache-rollback.sh
           bash -n deploy/nginx/install-aifeeds-performance-log.sh
           bash -n deploy/nginx/rollback-aifeeds-performance-log.sh
           bash -n deploy/nginx/install-aifeeds-performance-log.integration.test.sh
