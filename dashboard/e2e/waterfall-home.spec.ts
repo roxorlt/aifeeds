@@ -227,6 +227,29 @@ test("mobile app bar follows upward and downward scroll while desktop stays stic
   expect(await readHeader()).toEqual({ transform: "matrix(1, 0, 0, 1, 0, 0)", opacity: 1 });
 });
 
+test("pagination observer follows the responsive scroll root across rotation", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 300 });
+  await page.addInitScript(() => {
+    const NativeIntersectionObserver = window.IntersectionObserver;
+    globalThis.__waterfallObserverRoots = [];
+    class TrackingIntersectionObserver extends NativeIntersectionObserver {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        globalThis.__waterfallObserverRoots.push(
+          options?.root instanceof HTMLElement ? options.root.id : "viewport",
+        );
+        super(callback, options);
+      }
+    }
+    window.IntersectionObserver = TrackingIntersectionObserver;
+  });
+
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallObserverRoots.at(-1))).toBe("root");
+  await page.setViewportSize({ width: 900, height: 300 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(false);
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallObserverRoots.at(-1))).toBe("viewport");
+});
+
 test("a controlled service worker cannot reset a persisted waterfall preference", async ({ page }) => {
   await page.goto("/?view=classic", { waitUntil: "load" });
   const registration = await page.evaluate(async () => {
@@ -402,4 +425,5 @@ test("API fail-open returns classic HTML and expires aifeeds_view", async ({ pag
 declare global {
   // Browser-only local fixture metric, installed before navigation.
   var __waterfallCls: number | undefined;
+  var __waterfallObserverRoots: string[];
 }

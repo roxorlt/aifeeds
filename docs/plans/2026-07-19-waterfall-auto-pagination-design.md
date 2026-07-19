@@ -17,6 +17,7 @@
 
 - `WaterfallHome` 在分页区域挂一个稳定哨兵，使用 `getIntersectionRoot()`：移动端观察 `#root`，
   PC 观察 viewport。
+- 订阅 `767px` 响应式断点；设备旋转或窗口跨断点时销毁旧观察器，并按新的滚动根重建。
 - 观察器在 hydration 后立即启用；如果首屏内容不足、哨兵本来就在临近区域，也应直接补足下一页，
   不能依赖一次实际上不会发生的 scroll 事件。
 - 哨兵进入距视口约 `600px` 的区域时调用现有 `fetchHomeFeedPage()`，每页仍为 24 条。

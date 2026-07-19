@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { HomeFeedResponse, Item } from "../types";
+import { useIsNarrow } from "../lib/breakpoint";
 import { getIntersectionRoot } from "../lib/scrollRoot";
 import { fetchHomeFeedPage } from "./homeData";
 import { WaterfallCard } from "./WaterfallCard";
@@ -25,6 +26,7 @@ export function WaterfallHome({ initialData }: Props) {
   const gridRef = useRef<HTMLOListElement>(null);
   const paginationRef = useRef<HTMLDivElement>(null);
   const loadingRef = useRef(false);
+  const isNarrow = useIsNarrow();
   const [items, setItems] = useState(initialData.items);
   const [cursor, setCursor] = useState(initialData.next_cursor);
   const [hasMore, setHasMore] = useState(initialData.has_more);
@@ -119,7 +121,7 @@ export function WaterfallHome({ initialData }: Props) {
       document.removeEventListener("visibilitychange", recheck);
       window.removeEventListener("online", recheck);
     };
-  }, [cursor, error, hasMore, loadMore]);
+  }, [cursor, error, hasMore, isNarrow, loadMore]);
 
   return (
     <main id="content" className="waterfall-main">

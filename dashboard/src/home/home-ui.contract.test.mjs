@@ -7,6 +7,7 @@ const viewSwitch = read("./HomeViewSwitch.tsx");
 const home = read("./WaterfallHome.tsx");
 const card = read("./WaterfallCard.tsx");
 const shell = read("./WaterfallShell.tsx");
+const breakpoint = read("../lib/breakpoint.ts");
 const css = `${read("./waterfall.css")}\n${read("./home-view-switch.css")}`;
 const template = read("../../waterfall.html");
 
@@ -54,6 +55,7 @@ test("waterfall preserves one ordered DOM list and never uses dense placement", 
 
 test("waterfall auto-loads near the footer while preserving a manual failure fallback", () => {
   assert.match(home, /getIntersectionRoot/);
+  assert.match(home, /useIsNarrow/);
   assert.match(home, /new IntersectionObserver/);
   assert.match(home, /rootMargin:\s*"600px 0px"/);
   assert.match(home, /loadingRef/);
@@ -61,7 +63,10 @@ test("waterfall auto-loads near the footer while preserving a manual failure fal
   assert.match(home, /navigator\.onLine === false/);
   assert.match(home, /if \(error\) return/);
   assert.match(home, /ref=\{paginationRef\}/);
+  assert.match(home, /\[cursor, error, hasMore, isNarrow, loadMore\]/);
   assert.match(home, /error \? "重试加载" : "加载更多"/);
+  assert.match(breakpoint, /window\.addEventListener\("resize", update\)/);
+  assert.match(breakpoint, /window\.removeEventListener\("resize", update\)/);
 });
 
 test("hydration keeps SSR visible and safely reconciles compact measured spans", () => {
