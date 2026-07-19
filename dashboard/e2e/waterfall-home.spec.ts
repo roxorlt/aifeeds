@@ -84,7 +84,7 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
 
   const response = await page.goto("/?view=waterfall", { waitUntil: "load" });
   expect(response?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
-  await expect(page.locator(".waterfall-card")).toHaveCount(12);
+  await expect.poll(() => page.locator(".waterfall-card").count()).toBeGreaterThanOrEqual(12);
   await expect(page.locator(".waterfall-intro")).toHaveCount(0);
   await expect(page.locator(".waterfall-main [role=tablist], .waterfall-main .chips")).toHaveCount(0);
   await settleLayout(page);
@@ -96,9 +96,11 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
     "waterfall entry never requests the classic entry",
   ).toBe(false);
   await expect(page.locator(".waterfall-card").first()).toHaveAttribute("data-item-id", INITIAL_IDS[0]);
-  expect(await page.locator(".waterfall-card").evaluateAll((cards) => (
+  const hydratedIds = await page.locator(".waterfall-card").evaluateAll((cards) => (
     cards.map((card) => card.getAttribute("data-item-id"))
-  ))).toEqual([...INITIAL_IDS]);
+  ));
+  expect(hydratedIds.slice(0, INITIAL_IDS.length)).toEqual([...INITIAL_IDS]);
+  expect(new Set(hydratedIds).size).toBe(hydratedIds.length);
 
   const width = testInfo.project.use.viewport?.width ?? 1440;
   const columnCount = await page.locator(".waterfall-grid").evaluate((grid) => {
@@ -225,6 +227,29 @@ test("mobile app bar follows upward and downward scroll while desktop stays stic
   expect(await readHeader()).toEqual({ transform: "matrix(1, 0, 0, 1, 0, 0)", opacity: 1 });
 });
 
+test("pagination observer follows the responsive scroll root across rotation", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 300 });
+  await page.addInitScript(() => {
+    const NativeIntersectionObserver = window.IntersectionObserver;
+    globalThis.__waterfallObserverRoots = [];
+    class TrackingIntersectionObserver extends NativeIntersectionObserver {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        globalThis.__waterfallObserverRoots.push(
+          options?.root instanceof HTMLElement ? options.root.id : "viewport",
+        );
+        super(callback, options);
+      }
+    }
+    window.IntersectionObserver = TrackingIntersectionObserver;
+  });
+
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallObserverRoots.at(-1))).toBe("root");
+  await page.setViewportSize({ width: 900, height: 300 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(false);
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallObserverRoots.at(-1))).toBe("viewport");
+});
+
 test("a controlled service worker cannot reset a persisted waterfall preference", async ({ page }) => {
   await page.goto("/?view=classic", { waitUntil: "load" });
   const registration = await page.evaluate(async () => {
@@ -341,15 +366,49 @@ test("prefers-reduced-motion and keyboard switch use one document navigation", a
   expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("classic");
 });
 
-test("load more preserves order and Drawer deep link opens without a document navigation", async ({ page }) => {
+test("load more triggers near the footer once and Drawer deep link opens without a document navigation", async ({ page }) => {
+  const paginationRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/_home/feed") {
+      paginationRequests.push(url.toString());
+    }
+  });
   await page.goto("/?view=waterfall", { waitUntil: "load" });
   const cookies = await page.context().cookies(BASE_URL);
   expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("waterfall");
-  await page.getByRole("button", { name: "加载更多" }).click();
+  await page.locator(".waterfall-pagination").scrollIntoViewIfNeeded();
   await expect(page.locator(".waterfall-card")).toHaveCount(20);
+  await page.waitForTimeout(250);
+  expect(paginationRequests).toHaveLength(1);
   await page.locator(".waterfall-card__link").first().click();
   await expect(page).toHaveURL(/\/t\/fixture-01$/u);
   await expect(page.getByRole("dialog")).toBeVisible();
+});
+
+test("a failed automatic page pauses until the manual retry succeeds", async ({ page }) => {
+  let attempts = 0;
+  let shouldFail = true;
+  await page.route("**/_home/feed?**", async (route) => {
+    attempts += 1;
+    if (shouldFail) {
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await page.locator(".waterfall-pagination").scrollIntoViewIfNeeded();
+  const retry = page.getByRole("button", { name: "重试加载" });
+  await expect(retry).toBeVisible();
+  await page.waitForTimeout(250);
+  expect(attempts).toBe(1);
+
+  shouldFail = false;
+  await retry.click();
+  await expect(page.locator(".waterfall-card")).toHaveCount(20);
+  expect(attempts).toBe(2);
 });
 
 test("API fail-open returns classic HTML and expires aifeeds_view", async ({ page }) => {
@@ -366,4 +425,5 @@ test("API fail-open returns classic HTML and expires aifeeds_view", async ({ pag
 declare global {
   // Browser-only local fixture metric, installed before navigation.
   var __waterfallCls: number | undefined;
+  var __waterfallObserverRoots: string[];
 }

@@ -147,20 +147,48 @@ test("staging hydration is clean and responsive within the CLS budget", async ({
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
 });
 
-test("staging load more appends a bounded page without document navigation", async ({ page }) => {
+test("staging loads a bounded page near the footer without document navigation", async ({ page }) => {
   let documentRequests = 0;
+  let paginationRequests = 0;
   page.on("request", (request) => {
     if (request.resourceType() === "document") documentRequests += 1;
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/_home/feed") paginationRequests += 1;
   });
   await page.goto("/?view=waterfall", { waitUntil: "load" });
   const cookies = await page.context().cookies(STAGING_ORIGIN);
   expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("waterfall");
   const before = await page.locator(".waterfall-card").count();
   expect(before).toBeGreaterThanOrEqual(12);
-  await page.getByRole("button", { name: "加载更多" }).click();
+  await page.locator(".waterfall-pagination").scrollIntoViewIfNeeded();
   await expect.poll(() => page.locator(".waterfall-card").count()).toBeGreaterThan(before);
   expect(await page.locator(".waterfall-card").count()).toBeLessThanOrEqual(before + 24);
+  expect(paginationRequests).toBeGreaterThanOrEqual(1);
+  expect(paginationRequests).toBeLessThanOrEqual(2);
   expect(documentRequests).toBe(1);
+});
+
+test("staging pagination observer follows the responsive scroll root", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 300 });
+  await page.addInitScript(() => {
+    const NativeIntersectionObserver = window.IntersectionObserver;
+    globalThis.__waterfallStagingObserverRoots = [];
+    class TrackingIntersectionObserver extends NativeIntersectionObserver {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        globalThis.__waterfallStagingObserverRoots.push(
+          options?.root instanceof HTMLElement ? options.root.id : "viewport",
+        );
+        super(callback, options);
+      }
+    }
+    window.IntersectionObserver = TrackingIntersectionObserver;
+  });
+
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallStagingObserverRoots.at(-1))).toBe("root");
+  await page.setViewportSize({ width: 900, height: 300 });
+  await expect.poll(() => page.evaluate(() => window.matchMedia("(max-width: 767px)").matches)).toBe(false);
+  await expect.poll(() => page.evaluate(() => globalThis.__waterfallStagingObserverRoots.at(-1))).toBe("viewport");
 });
 
 test("staging view switch persists classic and performs one navigation", async ({ page }) => {
@@ -187,6 +215,7 @@ test("staging view switch persists classic and performs one navigation", async (
 
 declare global {
   var __waterfallStagingCls: number;
+  var __waterfallStagingObserverRoots: string[];
   var __waterfallStagingShifts: Array<{
     value: number;
     sources: Array<{

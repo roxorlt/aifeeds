@@ -1,5 +1,7 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { HomeFeedResponse, Item } from "../types";
+import { useIsNarrow } from "../lib/breakpoint";
+import { getIntersectionRoot } from "../lib/scrollRoot";
 import { fetchHomeFeedPage } from "./homeData";
 import { WaterfallCard } from "./WaterfallCard";
 import { getWaterfallCardModel } from "./waterfallCardModel";
@@ -22,6 +24,9 @@ function appendUnique(current: Item[], incoming: Item[]): Item[] {
 
 export function WaterfallHome({ initialData }: Props) {
   const gridRef = useRef<HTMLOListElement>(null);
+  const paginationRef = useRef<HTMLDivElement>(null);
+  const loadingRef = useRef(false);
+  const isNarrow = useIsNarrow();
   const [items, setItems] = useState(initialData.items);
   const [cursor, setCursor] = useState(initialData.next_cursor);
   const [hasMore, setHasMore] = useState(initialData.has_more);
@@ -59,8 +64,9 @@ export function WaterfallHome({ initialData }: Props) {
     };
   }, [items.length]);
 
-  const loadMore = async () => {
-    if (!hasMore || !cursor || loading) return;
+  const loadMore = useCallback(async () => {
+    if (!hasMore || !cursor || loadingRef.current) return;
+    loadingRef.current = true;
     setLoading(true);
     setError(false);
     try {
@@ -71,9 +77,51 @@ export function WaterfallHome({ initialData }: Props) {
     } catch {
       setError(true);
     } finally {
+      loadingRef.current = false;
       setLoading(false);
     }
-  };
+  }, [cursor, hasMore]);
+
+  useEffect(() => {
+    if (!hasMore || !cursor) return undefined;
+    if (error) return undefined;
+    if (typeof IntersectionObserver === "undefined") return undefined;
+    const pagination = paginationRef.current;
+    if (!pagination) return undefined;
+
+    const root = getIntersectionRoot();
+    let observer: IntersectionObserver | null = null;
+
+    const canAutoLoad = () => {
+      if (document.visibilityState !== "visible") return false;
+      if (navigator.onLine === false) return false;
+      return true;
+    };
+
+    observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && canAutoLoad()) {
+          void loadMore();
+        }
+      },
+      { root, rootMargin: "600px 0px" },
+    );
+    observer.observe(pagination);
+
+    const recheck = () => {
+      if (!observer || !canAutoLoad()) return;
+      observer.unobserve(pagination);
+      observer.observe(pagination);
+    };
+    document.addEventListener("visibilitychange", recheck);
+    window.addEventListener("online", recheck);
+
+    return () => {
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", recheck);
+      window.removeEventListener("online", recheck);
+    };
+  }, [cursor, error, hasMore, isNarrow, loadMore]);
 
   return (
     <main id="content" className="waterfall-main">
@@ -87,7 +135,7 @@ export function WaterfallHome({ initialData }: Props) {
           />
         ))}
       </ol>
-      <div className="waterfall-pagination">
+      <div ref={paginationRef} className="waterfall-pagination">
         {hasMore && cursor ? (
           <button type="button" onClick={loadMore} disabled={loading}>
             {loading ? "正在加载…" : error ? "重试加载" : "加载更多"}

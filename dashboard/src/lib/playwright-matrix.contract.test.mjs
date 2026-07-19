@@ -280,7 +280,10 @@ test("waterfall staging has an exact-host five-device remote browser gate", () =
   assert.match(remoteRunner, /waterfall-staging-remote\.spec\.ts/);
   assert.match(remoteSpec, /staging SSR contains at least 12 cards before JavaScript/);
   assert.match(remoteSpec, /staging hydration is clean and responsive within the CLS budget/);
-  assert.match(remoteSpec, /staging load more appends a bounded page/);
+  assert.match(remoteSpec, /staging loads a bounded page near the footer/);
+  assert.match(remoteSpec, /scrollIntoViewIfNeeded/);
+  assert.match(remoteSpec, /paginationRequests/);
+  assert.match(remoteSpec, /staging pagination observer follows the responsive scroll root/);
   assert.match(remoteSpec, /staging view switch persists classic/);
 });
 
