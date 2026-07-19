@@ -5,6 +5,8 @@ import type {
   ItemExtra,
   SourceType,
 } from "../types";
+import { resolveAssetUrl } from "../lib/asset.ts";
+import { proxyImg } from "../lib/utils.ts";
 
 const HOME_SOURCES = new Set<SourceType>([
   "x_list",
@@ -35,6 +37,7 @@ export type HomeCardImage = Readonly<{
   width: number;
   height: number;
   alt: string;
+  crop?: boolean;
 }>;
 
 export type HomeCardModel = Readonly<{
@@ -158,9 +161,10 @@ function safeVariant(value: unknown): CardImageVariant | null {
 function firstVariantGroup(item: Item): unknown[] {
   const extra = itemExtra(item);
   const mediaGroups = Array.isArray(item.media)
-    ? item.media.flatMap((entry) => (
-      Array.isArray(entry.card_variants) ? [entry.card_variants] : []
-    ))
+    ? item.media.flatMap((entry) => [
+      ...(Array.isArray(entry.card_variants) ? [entry.card_variants] : []),
+      ...(Array.isArray(entry.poster_variants) ? [entry.poster_variants] : []),
+    ])
     : [];
   return [
     extra.cover_variants,
@@ -168,6 +172,126 @@ function firstVariantGroup(item: Item): unknown[] {
     extra.card_thumbnail_variants,
     ...mediaGroups,
   ].filter(Array.isArray);
+}
+
+type RawImageCandidate = Readonly<{
+  url: unknown;
+  width?: unknown;
+  height?: unknown;
+}>;
+
+function safeRawImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  if (safeR2Url(value)) return value;
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:"
+      || url.username
+      || url.password
+      || url.port
+    ) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function boundedDimension(value: unknown, fallback: number): number {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 80
+    && value <= 6_000
+    ? Math.round(value)
+    : fallback;
+}
+
+function rawMediaCandidates(item: Item): RawImageCandidate[] {
+  if (!Array.isArray(item.media)) return [];
+  const candidates: RawImageCandidate[] = [];
+  for (const entry of item.media) {
+    if (!isRecord(entry)) continue;
+    const role = typeof entry.role === "string" ? entry.role : "";
+    if (role === "logo" || role === "organizer_avatar") continue;
+    if (entry.type === "video") {
+      candidates.push({
+        url: entry.poster,
+        width: entry.width,
+        height: entry.height,
+      });
+      continue;
+    }
+    const isImage = entry.type === "image" || role === "thumbnail" || role === "cover";
+    const isAnimated = (
+      entry.card_preview_status !== undefined
+      || (typeof entry.url === "string" && /\.gif(?:$|[?#])/iu.test(entry.url))
+    );
+    if (!isImage || isAnimated || entry.card_preview_status === "unavailable") continue;
+    candidates.push({
+      url: entry.url,
+      width: entry.width,
+      height: entry.height,
+    });
+  }
+  return candidates;
+}
+
+function sourceCoverCandidates(item: Item): RawImageCandidate[] {
+  const extra = itemExtra(item) as Record<string, unknown>;
+  switch (item.source_type) {
+    case "github":
+      return [{ url: extra.cover_url }];
+    case "blog":
+    case "podcast":
+      return [{ url: extra.cover_image }];
+    case "huodongxing":
+      return [
+        { url: extra.og_image },
+        { url: extra.thumbnail_full },
+        { url: extra.card_thumbnail },
+      ];
+    case "hf_paper": {
+      const figure = isRecord(extra.figure_image) ? extra.figure_image : {};
+      return [{
+        url: figure.src_url,
+        width: figure.width,
+        height: figure.height,
+      }];
+    }
+    default:
+      return [];
+  }
+}
+
+function pickRawImage(item: Item, alt: string): HomeCardImage | null {
+  const candidates = [
+    ...sourceCoverCandidates(item),
+    ...rawMediaCandidates(item),
+  ];
+  for (const candidate of candidates) {
+    const url = safeRawImageUrl(candidate.url);
+    if (!url || /\.gif(?:$|[?#])/iu.test(url)) continue;
+    const src = proxyImg(url, 640);
+    if (!src || (!safeR2Url(url) && src === url)) continue;
+    const hasDimensions = (
+      typeof candidate.width === "number"
+      && Number.isFinite(candidate.width)
+      && candidate.width >= 80
+      && candidate.width <= 6_000
+      && typeof candidate.height === "number"
+      && Number.isFinite(candidate.height)
+      && candidate.height >= 80
+      && candidate.height <= 6_000
+    );
+    return {
+      src,
+      width: boundedDimension(candidate.width, 800),
+      height: boundedDimension(candidate.height, 450),
+      alt,
+      ...(hasDimensions ? {} : { crop: true }),
+    };
+  }
+  return null;
 }
 
 function pickSafeImage(item: Item, alt: string): HomeCardImage | null {
@@ -180,13 +304,13 @@ function pickSafeImage(item: Item, alt: string): HomeCardImage | null {
     const selected = variants.find((variant) => variant.width >= 640) ?? variants.at(-1);
     if (!selected?.height) continue;
     return {
-      src: selected.url,
+      src: resolveAssetUrl(selected.url),
       width: selected.width,
       height: selected.height,
       alt,
     };
   }
-  return null;
+  return pickRawImage(item, alt);
 }
 
 function homeTitle(item: Item, extra: ItemExtra): string {

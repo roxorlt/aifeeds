@@ -19,7 +19,7 @@
     "typecheck:functions": "tsc -p tsconfig.functions.json",
     "build:ssr": "npm run typecheck:functions && vite build && npm run stamp:home-build-id && npm run verify:home-build-id",
     "test:e2e": "playwright test e2e/home-performance.spec.ts",
-    "build:e2e:waterfall": "npm run build && npm run typecheck:functions && vite build --ssr functions/render-waterfall.tsx --outDir dist-ssr --emptyOutDir",
+    "build:e2e:waterfall": "VITE_API_BASE=https://localhost:4187 npm run build && npm run typecheck:functions && VITE_API_BASE=https://localhost:4187 vite build --ssr functions/render-waterfall.tsx --outDir dist-ssr --emptyOutDir",
     "test:e2e:waterfall": "npm run build:e2e:waterfall && WATERFALL_E2E=1 playwright test e2e/waterfall-home.spec.ts",
     "test:e2e:waterfall-staging": "bash scripts/run-waterfall-staging-e2e.sh",
     "test:e2e:perf-staging": "bash scripts/run-perf-staging-e2e.sh",

@@ -1,6 +1,6 @@
 :root {
-  --waterfall-row: 8px;
-  --waterfall-gap: 12px;
+  --waterfall-row: 1px;
+  --waterfall-gap: 8px;
 }
 
 .waterfall-page {
