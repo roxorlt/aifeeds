@@ -3,6 +3,7 @@ import { describe, test, expect } from 'vitest';
 import { renderItemPageHtml } from './item-page';
 import type { Env } from '../index';
 import type { RenderRow, RenderedItem } from '../digest/render';
+import { ccItemPageProfile } from '../cc-mirror/profile';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
@@ -253,5 +254,102 @@ describe('renderItemPageHtml', () => {
       envFixture(),
     );
     expect(html).toContain(`${SITE}/archive/paper/`);
+  });
+
+  test('.cc profile 自 canonical、站内相关链接留在 .cc，CTA 由用户点击前往 .com 并带 UTM', () => {
+    const ccEnv = {
+      SITE_BASE: SITE,
+      CC_SITE_BASE: 'https://www.ai-feeds.cc/',
+      API_BASE: API,
+    } as Env;
+    const html = renderItemPageHtml(
+      mkRow(),
+      ccEnv,
+      [mkRelated('github:acme/tool', '相关仓库')],
+      ccItemPageProfile(ccEnv),
+    );
+    const jsonLd = extractJsonLd(html);
+    const strings = collectStrings(jsonLd);
+
+    expect(html).toContain('<title>推文要点标题 | AI源信</title>');
+    expect(html).toContain('<div class="brand"><a href="https://www.ai-feeds.cc/">AI源信</a></div>');
+    expect(html).toContain('<link rel="canonical" href="https://www.ai-feeds.cc/i/x/1890">');
+    expect(html).toContain('<meta property="og:url" content="https://www.ai-feeds.cc/i/x/1890">');
+    expect(strings).toContain('https://www.ai-feeds.cc/i/x/1890');
+    expect(strings).toContain('https://www.ai-feeds.cc/archive/x/');
+    expect(html).toContain('https://www.ai-feeds.cc/i/gh/acme/tool');
+    expect(html).toMatch(
+      /href="https:\/\/ai-feeds\.com\/t\/1890\?utm_source=ai-feeds\.cc&amp;utm_medium=referral&amp;utm_campaign=cc_content_mirror"/,
+    );
+    expect(stripJsonLd(html)).not.toMatch(
+      /<meta[^>]+http-equiv=["']?refresh|window\.location|location\.(?:href|replace|assign)/i,
+    );
+    expect((html.match(/<script/g) || []).length).toBe(1);
+  });
+
+  test('.cc profile 固定展示备案、法律与联系信息，原文 URL 保持来源站', () => {
+    const ccEnv = { SITE_BASE: SITE, API_BASE: API } as Env;
+    const html = renderItemPageHtml(
+      mkRow({ url: 'https://publisher.example/original-story' }),
+      ccEnv,
+      [],
+      ccItemPageProfile(ccEnv),
+    );
+
+    expect(html).toContain('京ICP备2025123594号-2');
+    expect(html).toContain('京公网安备11010802048455号');
+    expect(html).toContain('support@ai-feeds.cc');
+    expect(html).toContain('href="https://ai-feeds.cc/privacy.html"');
+    expect(html).toContain('href="https://ai-feeds.cc/terms.html"');
+    expect(html).toContain('href="https://ai-feeds.cc/contact.html"');
+    expect(html).toContain('href="https://publisher.example/original-story"');
+  });
+
+  test('.cc blog JSON-LD articleBody 只来自已审核可见短文本，不泄露可见截断后的敏感尾段', () => {
+    const hiddenMarker = 'BLOG_AFTER_VISIBLE_SUMMARY_SENSITIVE_MARKER';
+    const row = mkRow({
+      id: 'blog:hash-cc',
+      title: 'raw title',
+      content_translated: null,
+      url: 'https://theverge.com/ai/story',
+      extra: JSON.stringify({
+        feed_key: 'the-verge',
+        title_zh: '新闻标题',
+        ai_summary_zh: '中性 AI 新闻摘要。',
+        excerpt_zh: `${'可见编辑要点。'.repeat(70)}${hiddenMarker}`,
+      }),
+    });
+    const html = renderItemPageHtml(row, envFixture(), [], ccItemPageProfile(envFixture()));
+    const article = extractJsonLd(html)['@graph'].find((g) => g['@type'] === 'Article')!;
+
+    expect(html).toContain('中性 AI 新闻摘要。');
+    expect(html).not.toContain(hiddenMarker);
+    expect(String(article.articleBody)).not.toContain(hiddenMarker);
+  });
+
+  test('.cc podcast 页面与 JSON-LD 都不包含 transcript；默认 .com 行为仍保留 AI Feeds profile', () => {
+    const transcriptMarker = 'PODCAST_TRANSCRIPT_SENSITIVE_MARKER';
+    const row = mkRow({
+      id: 'podcast:episode-cc',
+      title: 'Podcast',
+      content_translated: null,
+      extra: JSON.stringify({
+        show_key: 'practical-ai',
+        title_zh: '播客标题',
+        ai_summary_zh: '中性播客摘要。',
+        shownotes_zh: '<p>节目简介短摘录。</p>',
+        transcript_text_zh: transcriptMarker,
+      }),
+    });
+    const ccHtml = renderItemPageHtml(row, envFixture(), [], ccItemPageProfile(envFixture()));
+    const comHtml = renderItemPageHtml(mkRow(), envFixture());
+    const article = extractJsonLd(ccHtml)['@graph'].find((g) => g['@type'] === 'Article')!;
+
+    expect(ccHtml).toContain('节目简介短摘录');
+    expect(ccHtml).not.toContain(transcriptMarker);
+    expect(String(article.articleBody)).not.toContain(transcriptMarker);
+    expect(comHtml).toContain('<title>推文要点标题 | AI Feeds</title>');
+    expect(comHtml).toContain('<div class="brand"><a href="https://ai-feeds.com/">AI Feeds</a></div>');
+    expect(comHtml).not.toContain('cc_content_mirror');
   });
 });

@@ -26,8 +26,20 @@ export interface CcReviewResult {
   flags: CcRiskFlags;
   reason: string;
   reused: boolean;
-  reviewTextHash?: string | null;
+  reviewTextHash: string | null;
 }
+
+export type CcPassSnapshot =
+  | {
+      ok: true;
+      row: RenderRow;
+      reviewTextHash: string;
+    }
+  | {
+      ok: false;
+      reason: string;
+      reviewTextHash: string | null;
+    };
 
 type ReviewableRow = RenderRow & {
   source_type: string;
@@ -334,6 +346,89 @@ export async function reviewCcItem(
     opts.dry === true,
   );
   return baseResult;
+}
+
+// A pass result is approval of one exact renderer-derived text snapshot, not of
+// an item id forever. Call this immediately before rendering/writing R2 so a
+// concurrent enrichment, deletion, source-policy change, or manual deny cannot
+// publish content that was not the content reviewed above.
+export async function bindCcPassToCurrentRow(
+  env: Env,
+  itemId: string,
+  expectedReviewTextHash: string | null,
+): Promise<CcPassSnapshot> {
+  if (!expectedReviewTextHash) {
+    return {
+      ok: false,
+      reason: "missing-review-text-hash",
+      reviewTextHash: null,
+    };
+  }
+
+  const row = (await fetchItemRow(env, itemId)) as ReviewableRow | null;
+  const hardGate = evaluateHardGate(row);
+  if (hardGate) {
+    return {
+      ok: false,
+      reason: hardGate.reason,
+      reviewTextHash: hardGate.reviewTextHash,
+    };
+  }
+  const candidate = row!;
+
+  const sourceDecision = resolveCcSourcePolicy(candidate);
+  if (sourceDecision.policy === "deny") {
+    return {
+      ok: false,
+      reason: `source-deny:${sourceDecision.reason}`,
+      reviewTextHash: null,
+    };
+  }
+
+  const override = await env.DB.prepare(
+    `SELECT action, reason
+     FROM cc_item_overrides
+     WHERE item_id = ?`,
+  )
+    .bind(itemId)
+    .first<OverrideRow>();
+  if (override?.action === "deny") {
+    return {
+      ok: false,
+      reason: "override-deny",
+      reviewTextHash: null,
+    };
+  }
+
+  const reviewText = buildCcReviewText(candidate, env);
+  const currentHash = await sha256Hex(reviewText.hashInput);
+  if (reviewText.renderError) {
+    return {
+      ok: false,
+      reason: `render-failed:${reviewText.renderError}`,
+      reviewTextHash: currentHash,
+    };
+  }
+  if (!reviewText.text) {
+    return {
+      ok: false,
+      reason: "empty-review-text",
+      reviewTextHash: currentHash,
+    };
+  }
+  if (currentHash !== expectedReviewTextHash) {
+    return {
+      ok: false,
+      reason: "review-text-hash-mismatch",
+      reviewTextHash: currentHash,
+    };
+  }
+
+  return {
+    ok: true,
+    row: candidate,
+    reviewTextHash: currentHash,
+  };
 }
 
 async function revalidateAfterModel(

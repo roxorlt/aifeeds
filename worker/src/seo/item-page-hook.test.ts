@@ -8,8 +8,21 @@ vi.mock('./item-page-run', () => ({
   generateItemPage: vi.fn(async () => ({ itemId: '', skipped: false })),
   markItemPageGone: vi.fn(async () => {}),
 }));
+vi.mock('../cc-mirror/page-run', () => ({
+  syncCcItemPage: vi.fn(async () => ({
+    itemId: '',
+    status: 'live',
+    reason: 'test',
+    eventCreated: true,
+  })),
+  markCcItemPageGone: vi.fn(async () => {}),
+}));
 
 import { generateItemPage, markItemPageGone } from './item-page-run';
+import {
+  syncCcItemPage,
+  markCcItemPageGone as markCcItemPageGoneMirror,
+} from '../cc-mirror/page-run';
 import { syncItemPageOnEnrichDone } from './item-page-hook';
 import { itemPagePath } from '../digest/render';
 import type { Env } from '../index';
@@ -66,6 +79,56 @@ describe('syncItemPageOnEnrichDone', () => {
       syncItemPageOnEnrichDone(env, 'x_list:1', false),
     ).resolves.toBeUndefined();
     expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  test('CC_MIRROR_ENABLED 未开启时不触碰 .cc 生命周期', async () => {
+    await syncItemPageOnEnrichDone(env, 'github:acme/tool', true);
+    expect(syncCcItemPage).not.toHaveBeenCalled();
+    expect(markCcItemPageGoneMirror).not.toHaveBeenCalled();
+  });
+
+  test('CC_MIRROR_ENABLED=1 时 relevant 内容在 .com 收尾后同步 .cc', async () => {
+    const ccEnv = { CC_MIRROR_ENABLED: '1' } as Env;
+    const id = 'github:acme/tool';
+
+    await syncItemPageOnEnrichDone(ccEnv, id, true);
+
+    expect(generateItemPage).toHaveBeenCalledWith(ccEnv, id);
+    expect(syncCcItemPage).toHaveBeenCalledWith(ccEnv, id);
+    expect(markCcItemPageGoneMirror).not.toHaveBeenCalled();
+  });
+
+  test('CC_MIRROR_ENABLED=1 时 relevant=false 同时下架 .com 与 .cc', async () => {
+    const ccEnv = { CC_MIRROR_ENABLED: '1' } as Env;
+    const id = 'blog:openai:item-1';
+
+    await syncItemPageOnEnrichDone(ccEnv, id, false);
+
+    expect(markItemPageGone).toHaveBeenCalledWith(ccEnv, id);
+    expect(markCcItemPageGoneMirror).toHaveBeenCalledWith(
+      ccEnv,
+      id,
+      'enrich-not-relevant',
+    );
+    expect(syncCcItemPage).not.toHaveBeenCalled();
+  });
+
+  test('.cc 同步异常仅打 [cc-mirror] 日志，不影响已完成的 .com enrich 收尾', async () => {
+    const ccEnv = { CC_MIRROR_ENABLED: '1' } as Env;
+    const id = 'github:acme/tool';
+    vi.mocked(syncCcItemPage).mockRejectedValueOnce(new Error('cc R2 down'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      syncItemPageOnEnrichDone(ccEnv, id, true),
+    ).resolves.toBeUndefined();
+
+    expect(generateItemPage).toHaveBeenCalledWith(ccEnv, id);
+    expect(errSpy).toHaveBeenCalledWith(
+      `[cc-mirror] ${id}: sync failed (non-blocking)`,
+      expect.any(Error),
+    );
     errSpy.mockRestore();
   });
 });
