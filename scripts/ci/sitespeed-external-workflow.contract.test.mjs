@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const workflowPath = path.join(root, ".github/workflows/sitespeed-external.yml");
 const workflow = existsSync(workflowPath) ? readFileSync(workflowPath, "utf8") : "";
+const prValidation = readFileSync(path.join(root, ".github/workflows/pr-validation.yml"), "utf8");
 
 test("external sitespeed workflow exists", () => {
   assert.ok(workflow, ".github/workflows/sitespeed-external.yml must exist");
@@ -61,4 +62,31 @@ test("external sitespeed workflow can only read repository content and upload re
   assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./);
   assert.doesNotMatch(workflow, /\b(?:wrangler|deploy|scp|ssh|rsync|git\s+push|curl)\b/i);
   assert.doesNotMatch(workflow, /\b(?:PUT|PATCH|DELETE)\b/);
+});
+
+test("sitespeed workflow changes use a lightweight contract gate instead of nginx fault injection", () => {
+  assert.match(
+    prValidation,
+    /workflow_contracts:\s*\$\{\{\s*steps\.filter\.outputs\.workflow_contracts\s*\}\}/,
+  );
+
+  const filters = prValidation.slice(
+    prValidation.indexOf("filters: |"),
+    prValidation.indexOf("\n  validate-worker:"),
+  );
+  const performanceFilter = filters.slice(
+    filters.indexOf("performance_ops:"),
+    filters.indexOf("workflow_contracts:"),
+  );
+  const workflowFilter = filters.slice(filters.indexOf("workflow_contracts:"));
+
+  assert.doesNotMatch(performanceFilter, /sitespeed-external/);
+  assert.doesNotMatch(performanceFilter, /\.github\/workflows\/\*\*/);
+  assert.match(workflowFilter, /scripts\/ci\/sitespeed-external-workflow\.contract\.test\.mjs/);
+  assert.match(workflowFilter, /\.github\/workflows\/\*\*/);
+
+  assert.match(
+    prValidation,
+    /validate-workflow-contracts:[\s\S]*?if:\s*needs\.detect-changes\.outputs\.workflow_contracts == 'true'[\s\S]*?scripts\/ci\/sitespeed-external-workflow\.contract\.test\.mjs/,
+  );
 });
