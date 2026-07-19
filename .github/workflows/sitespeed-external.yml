@@ -17,13 +17,18 @@ concurrency:
 
 jobs:
   measure:
-    name: Measure ${{ matrix.mode }}
+    name: Measure ${{ matrix.cohort.name }} / ${{ matrix.device.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
+        cohort:
+          - name: classic
+            url: https://ai-feeds.com/?view=classic
+          - name: waterfall
+            url: https://ai-feeds.com/?view=waterfall
+        device:
           - mode: mobile
             mobile_args: --mobile
             downstream_kbps: 1600
@@ -48,26 +53,55 @@ jobs:
           --cap-add=NET_ADMIN
           -v "${{ github.workspace }}:/sitespeed.io"
           sitespeedio/sitespeed.io:42.0.1
-          https://ai-feeds.com/
+          ${{ matrix.cohort.url }}
           -b chrome
           -n 5
-          ${{ matrix.mobile_args }}
+          ${{ matrix.device.mobile_args }}
           --browsertime.connectivity.engine throttle
           --browsertime.connectivity.profile custom
-          --browsertime.connectivity.downstreamKbps ${{ matrix.downstream_kbps }}
-          --browsertime.connectivity.upstreamKbps ${{ matrix.upstream_kbps }}
-          --browsertime.connectivity.latency ${{ matrix.latency_ms }}
+          --browsertime.connectivity.downstreamKbps ${{ matrix.device.downstream_kbps }}
+          --browsertime.connectivity.upstreamKbps ${{ matrix.device.upstream_kbps }}
+          --browsertime.connectivity.latency ${{ matrix.device.latency_ms }}
+          --browsertime.block 'https://api.ai-feeds.com/api/track*'
+          --browsertime.block 'https://api.ai-feeds.com/api/items/*/refresh*'
           --video true
           --visualMetrics true
           --summary
           --utc true
-          --outputFolder /sitespeed.io/output/sitespeed-${{ matrix.mode }}
+          --outputFolder /sitespeed.io/output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}
+
+      - name: Verify browser traffic stayed read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}"
+          mapfile -t hars < <(find "$report_dir" -type f -name browsertime.har -print)
+          if [[ "${#hars[@]}" -ne 1 ]]; then
+            echo "expected exactly one browsertime.har, found ${#hars[@]}" >&2
+            exit 1
+          fi
+          mutations="$(
+            jq -r '
+              .log.entries[]
+              | select(
+                  (.request.method | ascii_upcase) as $method
+                  | $method != "GET" and $method != "HEAD" and $method != "OPTIONS"
+                )
+              | [.request.method, .request.url]
+              | @tsv
+            ' "${hars[0]}"
+          )"
+          if [[ -n "$mutations" ]]; then
+            echo "browser issued non-read-only requests:" >&2
+            echo "$mutations" >&2
+            exit 1
+          fi
 
       - name: Upload sitespeed.io report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: sitespeed-${{ matrix.mode }}-${{ github.run_id }}
-          path: output/sitespeed-${{ matrix.mode }}/**
+          name: sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}/**
           if-no-files-found: warn
           retention-days: 14
