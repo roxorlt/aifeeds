@@ -52,6 +52,8 @@ function harness({
   cookie = "aifeeds_view=waterfall",
   apiResponse = Response.json(feed()),
   template = TEMPLATE,
+  classicTemplate = "<!doctype html><html><head><link rel=\"canonical\" href=\"https://ai-feeds.com/\"></head><body>classic</body></html>",
+  classicAssetError = false,
   render = async () => "<main><article>SSR card</article></main>",
   pathname = "/",
   method = "GET",
@@ -72,7 +74,8 @@ function harness({
         if (path === "/waterfall") return new Response(template, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
-        return new Response("<!doctype html><html><body>classic</body></html>", {
+        if (classicAssetError) throw new Error("classic asset unavailable");
+        return new Response(classicTemplate, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       },
@@ -164,6 +167,95 @@ test("classic mode receives only bounded availability metadata", async () => {
   assert.match(html, /data-home-view="classic"/);
   assert.equal(fixture.calls.api, 0);
   assert.equal(fixture.calls.render, 0);
+});
+
+test("classic deep links canonicalize to their matching indexable item pages", async () => {
+  const cases = [
+    ["/t/2019483340114653511", "/i/x/2019483340114653511"],
+    ["/g/PaddlePaddle/PaddleOCR", "/i/gh/PaddlePaddle/PaddleOCR"],
+    ["/ph/foglamp/2026-06-19", "/i/ph/foglamp"],
+    ["/h/2607.00248", "/i/paper/2607.00248"],
+    [
+      "/o/blog%3Anvidia%3A49e2c53cd469be83",
+      "/i/news/blog%3Anvidia%3A49e2c53cd469be83",
+    ],
+  ];
+
+  for (const [pathname, canonicalPath] of cases) {
+    const fixture = harness({ pathname, cookie: "aifeeds_view=classic" });
+    const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
+    const html = await response.text();
+    assert.match(
+      html,
+      new RegExp(`<link rel="canonical" href="https://ai-feeds\\.com${canonicalPath}">`),
+    );
+    assert.doesNotMatch(html, /<link rel="canonical" href="https:\/\/ai-feeds\.com\/">/);
+  }
+});
+
+test("non-indexable and malformed deep links retain the homepage canonical", async () => {
+  const paths = [
+    "/",
+    "/c/agent-kit",
+    "/e/5859894940100",
+    "/y/video-id",
+    "/o/not-a-news-item",
+    "/t/%E0%A4%A",
+  ];
+
+  for (const pathname of paths) {
+    const fixture = harness({ pathname, cookie: "aifeeds_view=classic" });
+    const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
+    assert.match(
+      await response.text(),
+      /<link rel="canonical" href="https:\/\/ai-feeds\.com\/">/,
+    );
+  }
+});
+
+test("asset failure fallback still exposes the matching item canonical", async () => {
+  const fixture = harness({
+    pathname: "/h/2607.00248",
+    cookie: "aifeeds_view=classic",
+    classicAssetError: true,
+  });
+  const response = await handleHomeRuntime(fixture.request, fixture.env, fixture.deps);
+  assert.match(
+    await response.text(),
+    /<link rel="canonical" href="https:\/\/ai-feeds\.com\/i\/paper\/2607\.00248">/,
+  );
+});
+
+test("waterfall deep links get their own canonical without changing the root template", async () => {
+  const template = TEMPLATE.replace(
+    "</head>",
+    "<link rel=\"canonical\" href=\"https://ai-feeds.com/\"></head>",
+  );
+  const deepLink = harness({
+    pathname: "/h/2607.00248",
+    template,
+  });
+  const deepLinkResponse = await handleHomeRuntime(
+    deepLink.request,
+    deepLink.env,
+    deepLink.deps,
+  );
+  const deepLinkHtml = await deepLinkResponse.text();
+  assert.equal(deepLinkResponse.headers.get("X-AIFeeds-Home-SSR"), "waterfall");
+  assert.match(
+    deepLinkHtml,
+    /<link rel="canonical" href="https:\/\/ai-feeds\.com\/i\/paper\/2607\.00248">/,
+  );
+  assert.doesNotMatch(
+    deepLinkHtml,
+    /<link rel="canonical" href="https:\/\/ai-feeds\.com\/">/,
+  );
+  assert.equal(deepLink.calls.api, 1);
+  assert.equal(deepLink.calls.render, 1);
+  assert.match(
+    template,
+    /<link rel="canonical" href="https:\/\/ai-feeds\.com\/">/,
+  );
 });
 
 test("valid query overrides persist the selected view for same-origin pagination", async () => {

@@ -22,6 +22,7 @@ const HOME_CACHE_RETENTION_SECONDS = 24 * 60 * 60;
 const HOME_CACHE_GENERATED_AT = "X-AIFeeds-Home-Generated-At";
 const HOME_CACHE_AGE = "X-AIFeeds-Home-Age";
 const HOME_CACHE_FRESHNESS = "X-AIFeeds-Home-Freshness";
+const PUBLIC_SITE_ORIGIN = "https://ai-feeds.com";
 
 export type FetchBinding = Readonly<{
   fetch(request: Request): Promise<Response>;
@@ -124,6 +125,74 @@ function injectHomeMetadata(
   ), state);
 }
 
+function safePathSegment(raw: string): string | null {
+  try {
+    return encodeURIComponent(decodeURIComponent(raw));
+  } catch {
+    return null;
+  }
+}
+
+function indexedItemPath(pathname: string): string | null {
+  const x = pathname.match(/^\/t\/([^/]+)$/u);
+  if (x) {
+    const id = safePathSegment(x[1]);
+    return id ? `/i/x/${id}` : null;
+  }
+
+  const github = pathname.match(/^\/g\/([^/]+)\/([^/]+)$/u);
+  if (github) {
+    const owner = safePathSegment(github[1]);
+    const repo = safePathSegment(github[2]);
+    return owner && repo ? `/i/gh/${owner}/${repo}` : null;
+  }
+
+  const productHunt = pathname.match(/^\/ph\/([^/]+)\/[^/]+$/u);
+  if (productHunt) {
+    const slug = safePathSegment(productHunt[1]);
+    return slug ? `/i/ph/${slug}` : null;
+  }
+
+  const paper = pathname.match(/^\/h\/([^/]+)$/u);
+  if (paper) {
+    const id = safePathSegment(paper[1]);
+    return id ? `/i/paper/${id}` : null;
+  }
+
+  const news = pathname.match(/^\/o\/([^/]+)$/u);
+  if (news) {
+    let itemId: string;
+    try {
+      itemId = decodeURIComponent(news[1]);
+    } catch {
+      return null;
+    }
+    if (!/^(?:blog|podcast):/u.test(itemId)) return null;
+    return `/i/news/${encodeURIComponent(itemId)}`;
+  }
+
+  return null;
+}
+
+function injectIndexedItemCanonical(html: string, request: Request): string {
+  const itemPath = indexedItemPath(new URL(request.url).pathname);
+  if (!itemPath) return html;
+  const canonical = `${PUBLIC_SITE_ORIGIN}${itemPath}`;
+  const canonicalTag = /<link\b(?=[^>]*\brel=["']canonical["'])[^>]*>/iu;
+  if (!canonicalTag.test(html)) {
+    const tag = `<link rel="canonical" href="${canonical}">`;
+    if (/<\/head>/iu.test(html)) {
+      return html.replace(/<\/head>/iu, `${tag}\n</head>`);
+    }
+    return html.replace(/<html\b[^>]*>/iu, (root) => `${root}<head>${tag}</head>`);
+  }
+  return html.replace(canonicalTag, (tag) => {
+    const href = /\bhref=(["'])[^"']*\1/iu;
+    if (href.test(tag)) return tag.replace(href, `href="${canonical}"`);
+    return tag.replace(/\/?>$/u, (end) => ` href="${canonical}"${end}`);
+  });
+}
+
 function safeInitialJson(data: HomeFeedResponse): string {
   return JSON.stringify(data)
     .replace(/</gu, "\\u003c")
@@ -161,6 +230,7 @@ async function classicResponse(
         diagnostic === "fallback" ? "fallback" : "classic",
       );
     }
+    html = injectIndexedItemCanonical(html, request);
     const headers = htmlHeaders(asset.headers);
     headers.set("X-AIFeeds-Home-SSR", diagnostic);
     headers.set("Cache-Control", "private, no-store");
@@ -182,7 +252,7 @@ async function classicResponse(
       : "<!doctype html><html lang=\"zh-CN\"><body><a href=\"/\">返回经典首页</a></body></html>";
     return responseForMethod(
       request,
-      fallbackHtml,
+      injectIndexedItemCanonical(fallbackHtml, request),
       { status: 200, headers },
     );
   }
@@ -423,7 +493,11 @@ function generatedWaterfallResponse(
   headers.set(HOME_CACHE_AGE, "0");
   headers.set("Cache-Control", "private, no-store");
   persistExplicitQueryView(request, headers, "waterfall");
-  return responseForMethod(request, generated.html, { status: 200, headers });
+  return responseForMethod(
+    request,
+    injectIndexedItemCanonical(generated.html, request),
+    { status: 200, headers },
+  );
 }
 
 async function renderWaterfallResponse(
