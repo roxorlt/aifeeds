@@ -377,6 +377,8 @@ function synthFeed(
     source_company: '',
     name: '',
     region: 'foreign',
+    cc_policy: 'deny',
+    editorial_type: 'official',
     via: 'native',
     feed_url: '',
     cadence_hours: 2,

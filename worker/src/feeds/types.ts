@@ -22,6 +22,16 @@ export type FeedKind = "blog" | "podcast";
 /** 国内外（registry 存但 v1 不参与调度，留作 v2 作息分段开关位，见 §7.3）。 */
 export type FeedRegion = "foreign" | "domestic";
 
+/** `.cc` 内容镜像对单一来源采取的发行策略。 */
+export type CcSourcePolicy = "allow" | "manual" | "deny";
+
+/** 来源的真实编辑主体类型；传输 RSS 的中间服务不改变此分类。 */
+export type EditorialType =
+  | "official"
+  | "third-party-media"
+  | "independent"
+  | "radar";
+
 /** feed XML 怎么 GET 回来：native=CF Worker 直连；rsshub=经 token-gated nginx 转发（Phase 2）。 */
 export type FeedVia = "native" | "rsshub";
 
@@ -94,6 +104,10 @@ export interface FeedDef {
   /** sources.name 用的人类可读名，如 'OpenAI Blog' / 'Lex Fridman Podcast'。 */
   name: string;
   region: FeedRegion;
+  /** `.cc` 镜像的显式来源准入策略；不得按 region 或域名推导。 */
+  cc_policy: CcSourcePolicy;
+  /** 内容的真实编辑主体分类，不受 RSS bridge / RSSHub 等传输方式影响。 */
+  editorial_type: EditorialType;
   via: FeedVia;
   /**
    * via='native' → 完整 feed 直链（CF Worker fetch 用）；
