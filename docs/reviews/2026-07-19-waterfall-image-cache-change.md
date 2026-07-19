@@ -2,10 +2,14 @@
 
 ## 结论
 
-瀑布流前端已使用 400/800 响应式候选并优先加载前两张真实封面，但生产香港 Nginx 的
-`/img` 二级缓存键没有区分 Worker 根据 `Accept` 协商出的 AVIF、WebP 与原图。相同 URL 先被
-JPEG/PNG 写入缓存后，支持现代格式的浏览器也会命中较大的旧格式；本次只修正这一层缓存身份，
-不改图片白名单、视频 Range、Worker 转码参数或业务数据。
+瀑布流前端已使用 400/800 响应式候选并优先加载前两张真实封面。生产香港 Nginx 的 `/img`
+二级缓存键此前没有区分 AVIF、WebP 与原图，这是一项确定的缓存正确性问题，本变更修正这一层
+缓存身份，不改图片白名单、视频 Range、Worker 转码参数或业务数据。
+
+激活后通过 `BYPASS` 进一步采证发现，生产 `Nginx → workers.dev` 路径的 Worker 转换本身也
+没有发生，三种 Accept 均返回原 JPEG/PNG；所以缓存键不是“图片慢”的唯一根因。完整对照和
+专用 Worker custom domain 修复见
+[`2026-07-19-production-image-transform-root-cause.md`](2026-07-19-production-image-transform-root-cause.md)。
 
 ## 只读生产基线
 
@@ -144,4 +148,18 @@ bash /tmp/aifeeds-image-format-cache-rollback.sh \
 
 ## 执行记录
 
-当前状态：执行物和回滚已准备、测试通过；生产执行结果将在 staging 全绿并完成生产激活后追加。
+2026-07-19 已执行：
+
+```text
+apply_script_sha=3ecba8fb157997346ac38200ed31d65f8c0d65559c2a96b02e6b6c17248f3fca
+rollback_script_sha=54ea3e643c155d3bb67b8c1557de706e3d2fe112aa49b9651cb089c464ec3245
+purged_img_cache_files=51
+backup_dir=/root/aifeeds-image-format-cache-20260719T081811Z
+site_sha=9303f443c9530a06ae2339c735151206a2011d65e03fdfebcf96c123a5c8dfb3
+perf_sha=55630f8c73aa8ee9cce056daa064788d57cbc54be48a354b3f163f6441ba6837
+```
+
+apply 的 checksum、两次 `nginx -t`、定向清理和 reload 全部成功。三组缓存均独立出现
+`MISS→HIT`，证明格式桶生效；但上游 body 相同。显式 q 权重使 Nginx 返回 `BYPASS` 后，三组
+仍返回同一个 800px JPEG，最终把未转换根因锁定到生产 Worker 调用拓扑，后续按上方根因文档
+继续修复。

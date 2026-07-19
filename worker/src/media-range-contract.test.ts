@@ -80,6 +80,19 @@ describe('public media transport contract', () => {
     );
   });
 
+  test('production preserves admin and adds a dedicated image-transform custom domain', () => {
+    const productionConfig = wranglerConfig.split('[env.staging]')[0];
+    expect(productionConfig).toMatch(
+      /\[\[routes\]\]\s+pattern = "admin\.ai-feeds\.com"\s+custom_domain = true/,
+    );
+    expect(productionConfig).toMatch(
+      /\[\[routes\]\]\s+pattern = "image-api\.ai-feeds\.com"\s+custom_domain = true/,
+    );
+    expect(wranglerConfig).toMatch(
+      /\[\[env\.staging\.routes\]\]\s+pattern = "staging-api\.ai-feeds\.com"\s+custom_domain = true/,
+    );
+  });
+
   test('/media is a dedicated video-only compatibility route', () => {
     expect(source).toMatch(/path === '\/media'/);
     expect(source).toMatch(
