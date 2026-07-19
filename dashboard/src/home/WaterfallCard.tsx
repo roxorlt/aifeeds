@@ -1,7 +1,8 @@
 import {
   useCallback,
-  useEffect,
+  useLayoutEffect,
   useRef,
+  useState,
   type MouseEvent,
 } from "react";
 import { SourceIcon } from "../components/icons";
@@ -18,7 +19,6 @@ import { homePathForItem } from "./itemPath";
 import {
   estimateMasonryHeight,
   masonryRowSpan,
-  nonShrinkingMasonrySpan,
 } from "./masonry";
 import { getWaterfallCardModel } from "./waterfallCardModel";
 
@@ -30,7 +30,8 @@ type Props = Readonly<{
 
 export function WaterfallCard({ item, siblings, position }: Props) {
   const { openItem } = useDrawer();
-  const cardRef = useRef<HTMLLIElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [imageFailed, setImageFailed] = useState(false);
   const model = getWaterfallCardModel(item);
   const path = homePathForItem(item) ?? "/";
   const aspectRatio = model.image ? model.image.width / model.image.height : null;
@@ -65,31 +66,20 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     });
   });
   const setCardRef = useCallback((node: HTMLLIElement | null) => {
-    cardRef.current = node;
     impressionRef(node);
   }, [impressionRef]);
 
-  useEffect(() => {
-    const element = cardRef.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const updateSpan = () => {
-      const currentSpan = Number.parseInt(
-        element.style.getPropertyValue("--waterfall-row-span"),
-        10,
-      );
-      const nextSpan = nonShrinkingMasonrySpan(
-        currentSpan,
-        element.getBoundingClientRect().height,
-      );
-      if (nextSpan !== currentSpan) {
-        element.style.setProperty("--waterfall-row-span", String(nextSpan));
-      }
-    };
-    updateSpan();
-    const observer = new ResizeObserver(updateSpan);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+  useLayoutEffect(() => {
+    const image = imageRef.current;
+    if (image?.complete && image.naturalWidth === 0) {
+      image.hidden = true;
+      const frame = window.requestAnimationFrame(() => {
+        setImageFailed(true);
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [model.image?.src]);
 
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
     if (
@@ -112,8 +102,9 @@ export function WaterfallCard({ item, siblings, position }: Props) {
     openItem(item, siblings);
   };
 
-  const image = model.image ? (
+  const image = model.image && !imageFailed ? (
     <img
+      ref={imageRef}
       className="waterfall-card__image"
       src={model.image.src}
       width={model.image.width}
@@ -122,6 +113,11 @@ export function WaterfallCard({ item, siblings, position }: Props) {
       loading={position < 4 ? "eager" : "lazy"}
       fetchPriority={position < 2 ? "high" : "auto"}
       decoding="async"
+      style={model.image.crop ? { aspectRatio: "16 / 9" } : undefined}
+      onError={(event) => {
+        event.currentTarget.hidden = true;
+        setImageFailed(true);
+      }}
     />
   ) : null;
   const accessibleTitle = model.title || model.summary || model.identity;

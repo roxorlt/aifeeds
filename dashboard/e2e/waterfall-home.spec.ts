@@ -49,6 +49,7 @@ test("SSR HTML has at least 12 cards before JavaScript", async ({ browser }, tes
     expect(response?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
     await expect(page.locator(".waterfall-grid article")).toHaveCount(12);
     expect(await page.locator("#aifeeds-initial-data").textContent()).toContain('"view_mode":"waterfall"');
+    await expect(page.locator(".waterfall-main")).toHaveCSS("opacity", "1");
   } finally {
     await context.close();
   }
@@ -129,13 +130,61 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
     const allocated = span * row + Math.max(0, span - 1) * gap;
     return allocated - card.getBoundingClientRect().height;
   });
+  const maximumVisualGap = await page.locator(".waterfall-grid").evaluate((grid) => {
+    const columns = new Map<number, DOMRect[]>();
+    for (const card of grid.querySelectorAll(".waterfall-card")) {
+      const rect = card.getBoundingClientRect();
+      const column = columns.get(Math.round(rect.left)) ?? [];
+      column.push(rect);
+      columns.set(Math.round(rect.left), column);
+    }
+    let maximum = 0;
+    for (const cards of columns.values()) {
+      cards.sort((left, right) => left.top - right.top);
+      for (let index = 1; index < cards.length; index += 1) {
+        maximum = Math.max(
+          maximum,
+          cards[index].top - cards[index - 1].bottom,
+        );
+      }
+    }
+    return maximum;
+  });
   expect(await page.locator(".waterfall-card__image").first().evaluate((image) => {
     const element = image as HTMLImageElement;
     return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
   })).toBe(true);
   expect(layout.cls).toBeLessThanOrEqual(0.1);
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
-  expect(mediaSlack).toBeLessThanOrEqual(100);
+  expect(mediaSlack).toBeLessThan(9);
+  expect(maximumVisualGap).toBeLessThan(17);
+});
+
+test("a failed cover collapses and the grid returns to compact spacing", async ({ page }) => {
+  await setWaterfallCookie(page);
+  await page.route("**/r/waterfall-fixture-square.webp", (route) => route.abort());
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await settleLayout(page);
+
+  await expect(page.locator(".waterfall-card__image")).toHaveCount(0);
+  const maximumVisualGap = await page.locator(".waterfall-grid").evaluate((grid) => {
+    const columns = new Map<number, DOMRect[]>();
+    for (const card of grid.querySelectorAll(".waterfall-card")) {
+      const rect = card.getBoundingClientRect();
+      const column = columns.get(Math.round(rect.left)) ?? [];
+      column.push(rect);
+      columns.set(Math.round(rect.left), column);
+    }
+    let maximum = 0;
+    for (const cards of columns.values()) {
+      cards.sort((left, right) => left.top - right.top);
+      for (let index = 1; index < cards.length; index += 1) {
+        maximum = Math.max(maximum, cards[index].top - cards[index - 1].bottom);
+      }
+    }
+    return maximum;
+  });
+  expect(maximumVisualGap).toBeLessThan(17);
 });
 
 test("classic entry never requests the waterfall entry", async ({ page }) => {

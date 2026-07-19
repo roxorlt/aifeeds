@@ -79,13 +79,105 @@ test("card presentation is source-aware and only selects bounded internal image 
   assert.equal(model.title, "中文标题");
   assert.equal(model.summary, "更适合卡片的中文摘要");
   assert.deepEqual(model.image, {
-    src: "/r/blog/card/fixture-400.webp",
+    src: "https://api.ai-feeds.com/r/blog/card/fixture-400.webp",
     width: 400,
     height: 225,
     alt: "中文标题",
   });
   assert.equal(JSON.stringify(model).includes("third-party.example"), false);
   assert.equal(JSON.stringify(model).includes("javascript:"), false);
+});
+
+test("cards fall back to safe source media when ingestion-time variants are not ready", () => {
+  const xImage = getHomeCardModel({
+    ...fixture,
+    id: "x_list:image",
+    source_type: "x_list",
+    media: [{
+      type: "image",
+      url: "/r/x/fallback.jpg",
+      width: 880,
+      height: 1068,
+    }],
+    extra: {},
+  });
+  assert.deepEqual(xImage.image, {
+    src: "https://api.ai-feeds.com/r/x/fallback.jpg",
+    width: 880,
+    height: 1068,
+    alt: "Original title",
+  });
+
+  const eventImage = getHomeCardModel({
+    ...fixture,
+    id: "huodongxing:event",
+    source_type: "huodongxing",
+    media: [{ role: "thumbnail", url: "https://cdn.huodongxing.com/event.jpg" }],
+    extra: {
+      og_image: "https://wimg.huodongxing.com/event.jpg",
+    },
+  });
+  assert.deepEqual(eventImage.image, {
+    src: "https://api.ai-feeds.com/img?url=https%3A%2F%2Fwimg.huodongxing.com%2Fevent.jpg&w=640",
+    width: 800,
+    height: 450,
+    alt: "Original title",
+    crop: true,
+  });
+
+  const videoPoster = getHomeCardModel({
+    ...fixture,
+    id: "x_list:video",
+    source_type: "x_list",
+    media: [{
+      type: "video",
+      url: "https://video.twimg.com/video.mp4",
+      poster: "/r/x/poster.jpg",
+      width: 1280,
+      height: 720,
+    }],
+    extra: {},
+  });
+  assert.equal(videoPoster.image?.src, "https://api.ai-feeds.com/r/x/poster.jpg");
+  assert.equal(videoPoster.image?.width, 1280);
+  assert.equal(videoPoster.image?.height, 720);
+});
+
+test("raw animated and unsafe media never bypass the verified static preview contract", () => {
+  const model = getHomeCardModel({
+    ...fixture,
+    id: "product_hunt:animated",
+    source_type: "product_hunt",
+    media: [
+      {
+        type: "image",
+        url: "https://ph-files.imgix.net/demo.gif",
+        width: 1200,
+        height: 800,
+        card_preview_status: "unavailable",
+      },
+      {
+        type: "image",
+        url: "javascript:alert(1)",
+        width: 1200,
+        height: 800,
+      },
+    ],
+    extra: {},
+  });
+  assert.equal(model.image, null);
+});
+
+test("unproxied third-party covers never load directly in waterfall cards", () => {
+  const model = getHomeCardModel({
+    ...fixture,
+    id: "blog:unproxied-cover",
+    extra: {
+      cover_image: "https://third-party.example/cover.jpg",
+    },
+    media: [],
+  });
+  assert.equal(model.image, null);
 });
 
 test("card dates are identical across the edge UTC and browser local time zones", () => {

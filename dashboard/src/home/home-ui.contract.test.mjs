@@ -7,6 +7,7 @@ const viewSwitch = read("./HomeViewSwitch.tsx");
 const home = read("./WaterfallHome.tsx");
 const card = read("./WaterfallCard.tsx");
 const css = `${read("./waterfall.css")}\n${read("./home-view-switch.css")}`;
+const template = read("../../waterfall.html");
 
 test("classic switch is fail-closed and has separate desktop and 44px mobile controls", () => {
   assert.match(viewSwitch, /data-home-view-available/);
@@ -32,10 +33,19 @@ test("waterfall preserves one ordered DOM list and never uses dense placement", 
   assert.match(home, /<ol[^>]+className="waterfall-grid"/);
   assert.match(home, /items\.map\(\(item/);
   assert.match(card, /<li/);
-  assert.match(card, /ResizeObserver/);
-  assert.match(card, /nonShrinkingMasonrySpan/);
+  assert.match(home, /ResizeObserver/);
+  assert.match(card, /masonryRowSpan/);
   assert.doesNotMatch(home, /columns\.map|columnItems/);
   assert.doesNotMatch(css, /grid-auto-flow:\s*dense/);
+});
+
+test("hydration keeps SSR visible and safely reconciles compact measured spans", () => {
+  assert.match(home, /__aifeedsLayoutWaterfall/);
+  assert.match(template, /getBoundingClientRect\(\)\.height[\s\S]*waterfall-main\.tsx/);
+  assert.match(template, /--waterfall-row-span/);
+  assert.doesNotMatch(css, /waterfall-hydrating[\s\S]*opacity:\s*0/);
+  assert.match(card, /naturalWidth === 0/);
+  assert.match(card, /setImageFailed\(true\)/);
 });
 
 test("cards retain no-JS deep links and only enhance unmodified primary clicks", () => {
