@@ -155,3 +155,23 @@ JPEG: image/jpeg, MISS -> HIT, 11,794 B
 
 后续修复在 production 与 staging 配置中都显式声明 `workers_dev = true`，并新增契约测试。
 该配置必须与自定义域 route 一起保留；以后 route 变更不能依赖 Wrangler 的推断默认值。
+
+修复已通过 PR `#202` 合入并再次发布：
+
+```text
+main merge: e839749eca48a2ac6007bc57f569aa768c928d6b
+production Worker run: 29680779184
+xlist-api workers.dev enabled: true
+```
+
+发布后 Cloudflare API 与公网/VPS 双路径均确认 relay 保持开启，上述四个一般 API 全部为 `200`。
+同时再次验证图片三种格式的内容类型、尺寸、字节数和独立缓存命中均正确。
+
+视频回归使用当前生产 `video.twimg.com` 样本请求前 1,024 B：
+
+```text
+/img:   206, video/mp4, BYPASS, Content-Range bytes 0-1023/129081433
+/media: 206, video/mp4,         Content-Range bytes 0-1023/129081433
+```
+
+这证明图片转换上游修复没有把视频误送入图片变换，也没有破坏 Range 透传。

@@ -156,10 +156,33 @@ proxy_cache_key "$scheme$request_method$host$request_uri";
 可能先被不带现代图片 Accept 的客户端写入 JPEG，之后把相同 URL 的 JPEG 返回给支持 AVIF/WebP
 的浏览器。生产抽样中，带现代浏览器 Accept 的请求仍命中约 152KB JPEG，确认不是前端主观感觉。
 
-前端响应式候选和预连接已在本分支完成；Nginx 的格式缓存键修复仍需按单独生产清单执行和回滚验证。
+前端响应式候选和预连接已随 PR `#200` 上线。后续生产清单已完成 Nginx 格式缓存桶和
+Cloudflare 图片转换上游修复；正式 `/img` 当前分别返回约 10KB AVIF、11KB WebP 和 12KB JPEG，
+并能按格式独立 MISS→HIT。完整根因和回滚证据见
+[`2026-07-19-production-image-transform-root-cause.md`](./2026-07-19-production-image-transform-root-cause.md)。
 
-## 当前限制
+## 生产完成证据
 
-- 本地 fixture 图片是确定性 SVG 内容，用于布局、优先级和响应式选择，不用于模拟公网图片 TTFB。
-- RUM 继续作为上线后的观察任务，不阻塞本轮代码交付。
-- 生产 Nginx 变更和生产部署证据将在执行后追加。
+- PR `#200` 合入 `main`：`5b93e99`；
+- Dashboard production workflow：`29679356914`，成功；
+- 生产构建身份：`6b02081b314f...`；
+- Desktop Chromium、Tablet Chromium、iPhone Chromium、iPhone WebKit、Android Chromium
+  五设备生产冒烟均通过；
+- desktop 为 5 列、tablet 为 3 列、移动端为 2 列，首屏分别得到 24 张卡和真实封面；
+- 移动端顶栏上推隐藏、下拉恢复；刷新、冷启动和 Service Worker 控制后仍保持 waterfall 选择；
+- 生产浏览器矩阵 console error 为 `0`；
+- Service Worker 控制下的 `/` 与 `/c/clawseccheck` 均返回 waterfall DOM，没有被旧经典壳覆盖；
+- 视频经 `/img` 与 `/media` 的 `Range: bytes=0-1023` 均返回 `206 video/mp4`、正确
+  `Content-Range` 和 1,024 B，不受图片变更影响。
+
+外部 sitespeed.io 又以只读 HAR 门完成 classic/waterfall × desktop/mobile 各 5 次生产冷加载。
+waterfall desktop LCP 相对改善 `42.6%`，mobile 改善 `25.1%`，两端 CLS 均为 `0`；详见
+[`2026-07-19-sitespeed-view-matrix.md`](./2026-07-19-sitespeed-view-matrix.md)。
+
+## 当前限制与非阻塞观察
+
+- 本地 fixture 图片是确定性 SVG 内容，用于布局、优先级和响应式选择，不用于模拟公网图片 TTFB；
+  公网性能已由上述生产图片验证和外部 sitespeed 补足。
+- classic desktop 仍有若干 Product Hunt 原始大图和两个较小动画 logo；这不是已修复的
+  4.276MB GIF 回归，已单列为后续 P1 媒体预算。
+- RUM 继续作为上线后的观察任务，不阻塞本轮代码交付、生产发布或计划终态。
