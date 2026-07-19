@@ -38,6 +38,11 @@
   background: rgb(250 250 250 / 94%);
   padding: 9px max(20px, calc((100vw - 1400px) / 2));
   backdrop-filter: blur(14px);
+  will-change: transform;
+}
+
+.waterfall-appbar-spacer {
+  display: none;
 }
 
 .waterfall-brand {
@@ -337,8 +342,15 @@
 
 @media (max-width: 767px) {
   .waterfall-appbar {
+    position: fixed;
+    inset: 0 0 auto;
     min-height: 54px;
     padding: 5px 12px;
+  }
+
+  .waterfall-appbar-spacer {
+    display: block;
+    height: 54px;
   }
 
   .waterfall-brand small {
@@ -352,6 +364,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .waterfall-appbar {
+    transform: none !important;
+    opacity: 1 !important;
+  }
+
   .waterfall-card {
     transition-duration: 0ms;
   }

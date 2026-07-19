@@ -32,3 +32,14 @@ test("service worker leaves archive navigations to the Worker instead of the SPA
       serviceWorker.indexOf('if (req.mode === "navigate")'),
   );
 });
+
+test("service worker leaves the homepage to SSR so the persisted view cookie stays authoritative", () => {
+  assert.match(
+    serviceWorker,
+    /if\s*\(url\.pathname === "\/"\)\s*return;/,
+  );
+  assert.ok(
+    serviceWorker.indexOf('url.pathname === "/"') <
+      serviceWorker.indexOf('if (req.mode === "navigate")'),
+  );
+});

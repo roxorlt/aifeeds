@@ -6,6 +6,7 @@ const read = (name) => fs.readFileSync(new URL(name, import.meta.url), "utf8");
 const viewSwitch = read("./HomeViewSwitch.tsx");
 const home = read("./WaterfallHome.tsx");
 const card = read("./WaterfallCard.tsx");
+const shell = read("./WaterfallShell.tsx");
 const css = `${read("./waterfall.css")}\n${read("./home-view-switch.css")}`;
 const template = read("../../waterfall.html");
 
@@ -27,6 +28,18 @@ test("switching persists one bounded cookie, emits a finite event, and navigates
   assert.match(viewSwitch, /entry: "appbar"/);
   assert.match(viewSwitch, /window\.location\.assign/);
   assert.doesNotMatch(viewSwitch, /location\.reload/);
+});
+
+test("waterfall restores the mobile follow-scroll app bar without moving it on desktop", () => {
+  assert.match(shell, /useReducedMotion/);
+  assert.match(shell, /useIsNarrow/);
+  assert.match(shell, /addScrollRootListener/);
+  assert.match(shell, /getScrollY/);
+  assert.match(shell, /requestAnimationFrame/);
+  assert.match(shell, /nextWaterfallHeaderRatio/);
+  assert.match(shell, /ref=\{headerRef\}/);
+  assert.match(css, /@media\s*\(max-width:\s*767px\)[\s\S]*\.waterfall-appbar\s*\{[\s\S]*position:\s*fixed/);
+  assert.match(css, /\.waterfall-appbar-spacer/);
 });
 
 test("waterfall preserves one ordered DOM list and never uses dense placement", () => {
