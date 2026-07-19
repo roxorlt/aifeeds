@@ -52,6 +52,7 @@ export async function callDeepSeek(
     jsonMode?: boolean;
     temperature?: number;
     timeoutMs?: number;
+    systemPrompt?: string;
   } = {},
 ): Promise<DeepSeekResult> {
   const maxTokens = opts.maxTokens ?? 4096;
@@ -61,7 +62,12 @@ export async function callDeepSeek(
 
   const body: Record<string, unknown> = {
     model,
-    messages: [{ role: 'user', content: prompt }],
+    messages: opts.systemPrompt
+      ? [
+          { role: 'system', content: opts.systemPrompt },
+          { role: 'user', content: prompt },
+        ]
+      : [{ role: 'user', content: prompt }],
     temperature,
     max_tokens: maxTokens,
   };
@@ -118,6 +124,7 @@ export async function callDeepSeekJson<T = unknown>(
     maxTokens?: number;
     timeoutMs?: number;
     retries?: number;        // 默认 1 次(总 2 attempts)
+    systemPrompt?: string;
   } = {},
 ): Promise<{ data: T | null; usage?: DeepSeekUsage; error?: string }> {
   const retries = opts.retries ?? 1;
