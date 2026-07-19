@@ -2,6 +2,48 @@ import { describe, expect, it } from "vitest";
 import { FEED_REGISTRY } from "../feeds/registry";
 import { resolveCcSourcePolicy } from "./source-policy";
 
+const EXPECTED_FEED_POLICIES = [
+  ["blog", "openai", "allow", "official"],
+  ["blog", "google", "allow", "official"],
+  ["blog", "microsoft-research", "allow", "official"],
+  ["blog", "nvidia", "allow", "official"],
+  ["blog", "huggingface", "allow", "official"],
+  ["blog", "anthropic", "allow", "official"],
+  ["blog", "mistral", "allow", "official"],
+  ["blog", "stability", "allow", "official"],
+  ["blog", "together", "allow", "official"],
+  ["blog", "midjourney", "allow", "official"],
+  ["blog", "ai21", "allow", "official"],
+  ["blog", "cohere", "allow", "official"],
+  ["blog", "databricks", "allow", "official"],
+  ["blog", "minimax", "allow", "official"],
+  ["blog", "techcrunch", "allow", "third-party-media"],
+  ["blog", "the-verge", "allow", "third-party-media"],
+  ["blog", "mit-tech-review", "allow", "third-party-media"],
+  ["blog", "qwen", "deny", "official"],
+  ["blog", "meituan-tech", "deny", "official"],
+  ["blog", "minicpm", "deny", "official"],
+  ["blog", "qbitai", "deny", "third-party-media"],
+  ["blog", "jiqizhixin", "deny", "third-party-media"],
+  ["blog", "aiera", "deny", "third-party-media"],
+  ["blog", "weibo-hot-tech", "deny", "radar"],
+  ["podcast", "msr-podcast", "allow", "official"],
+  ["podcast", "openai-podcast", "allow", "official"],
+  ["podcast", "practical-ai", "allow", "independent"],
+  ["podcast", "latent-space", "allow", "independent"],
+  ["podcast", "no-priors", "allow", "independent"],
+  ["podcast", "eye-on-ai", "allow", "independent"],
+  ["podcast", "cognitive-revolution", "allow", "independent"],
+  ["podcast", "mlst", "allow", "independent"],
+  ["podcast", "gradient-dissent", "allow", "independent"],
+  ["podcast", "last-week-in-ai", "manual", "independent"],
+  ["podcast", "lex-fridman", "manual", "independent"],
+  ["podcast", "guigu101", "deny", "independent"],
+  ["podcast", "onboard", "deny", "independent"],
+  ["podcast", "ai-qianxian", "deny", "independent"],
+  ["podcast", "zhangxiaojun", "deny", "independent"],
+] as const;
+
 function policyFor(kind: "blog" | "podcast", key: string) {
   const feed = FEED_REGISTRY.find(
     (candidate) => candidate.kind === kind && candidate.key === key,
@@ -11,6 +53,24 @@ function policyFor(kind: "blog" | "podcast", key: string) {
 }
 
 describe("cc feed registry policy", () => {
+  it("matches the complete curated source policy matrix", () => {
+    const expected = EXPECTED_FEED_POLICIES.map(
+      ([kind, key, policy, editorialType]) => ({
+        id: `${kind}:${key}`,
+        policy,
+        editorialType,
+      }),
+    ).sort((left, right) => left.id.localeCompare(right.id));
+
+    const actual = FEED_REGISTRY.map((feed) => ({
+      id: `${feed.kind}:${feed.key}`,
+      policy: feed.cc_policy,
+      editorialType: feed.editorial_type,
+    })).sort((left, right) => left.id.localeCompare(right.id));
+
+    expect(actual).toEqual(expected);
+  });
+
   it("requires every registered feed to declare a policy and editorial type", () => {
     for (const feed of FEED_REGISTRY) {
       expect(
