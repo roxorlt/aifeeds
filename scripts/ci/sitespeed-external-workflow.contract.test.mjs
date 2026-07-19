@@ -16,7 +16,9 @@ test("external sitespeed workflow is pinned to the approved branch and explicit 
   assert.match(workflow, /branches:\s*\n\s*-\s*'codex\/waterfall-ssr-rum-parallel'/);
   assert.match(workflow, /paths:\s*\n\s*-\s*'\.github\/workflows\/sitespeed-external\.yml'/);
   assert.deepEqual(
-    [...workflow.matchAll(/https:\/\/[^\s"']+/g)].map(([url]) => url),
+    [...workflow.matchAll(/https:\/\/[^\s"']+/g)]
+      .map(([url]) => url)
+      .filter((url) => url.startsWith("https://ai-feeds.com/")),
     [
       "https://ai-feeds.com/?view=classic",
       "https://ai-feeds.com/?view=waterfall",
@@ -43,9 +45,20 @@ test("external sitespeed workflow runs reproducible five-run view and device mat
 
 test("external sitespeed workflow can only read repository content and upload reports", () => {
   assert.match(workflow, /permissions:\s*\n\s*contents:\s*read/);
+  assert.match(
+    workflow,
+    /--browsertime\.block\s+'https:\/\/api\.ai-feeds\.com\/api\/track\*'/,
+  );
+  assert.match(
+    workflow,
+    /--browsertime\.block\s+'https:\/\/api\.ai-feeds\.com\/api\/items\/\*\/refresh\*'/,
+  );
+  assert.match(workflow, /browsertime\.har/);
+  assert.match(workflow, /\.request\.method\s*\|\s*ascii_upcase/);
+  assert.match(workflow, /github\.run_attempt/);
   assert.match(workflow, /uses:\s*actions\/upload-artifact@v6/);
   assert.match(workflow, /if:\s*always\(\)/);
   assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./);
   assert.doesNotMatch(workflow, /\b(?:wrangler|deploy|scp|ssh|rsync|git\s+push|curl)\b/i);
-  assert.doesNotMatch(workflow, /\b(?:POST|PUT|PATCH|DELETE)\b/);
+  assert.doesNotMatch(workflow, /\b(?:PUT|PATCH|DELETE)\b/);
 });

@@ -62,17 +62,46 @@ jobs:
           --browsertime.connectivity.downstreamKbps ${{ matrix.device.downstream_kbps }}
           --browsertime.connectivity.upstreamKbps ${{ matrix.device.upstream_kbps }}
           --browsertime.connectivity.latency ${{ matrix.device.latency_ms }}
+          --browsertime.block 'https://api.ai-feeds.com/api/track*'
+          --browsertime.block 'https://api.ai-feeds.com/api/items/*/refresh*'
           --video true
           --visualMetrics true
           --summary
           --utc true
           --outputFolder /sitespeed.io/output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}
 
+      - name: Verify browser traffic stayed read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}"
+          mapfile -t hars < <(find "$report_dir" -type f -name browsertime.har -print)
+          if [[ "${#hars[@]}" -ne 1 ]]; then
+            echo "expected exactly one browsertime.har, found ${#hars[@]}" >&2
+            exit 1
+          fi
+          mutations="$(
+            jq -r '
+              .log.entries[]
+              | select(
+                  (.request.method | ascii_upcase) as $method
+                  | $method != "GET" and $method != "HEAD" and $method != "OPTIONS"
+                )
+              | [.request.method, .request.url]
+              | @tsv
+            ' "${hars[0]}"
+          )"
+          if [[ -n "$mutations" ]]; then
+            echo "browser issued non-read-only requests:" >&2
+            echo "$mutations" >&2
+            exit 1
+          fi
+
       - name: Upload sitespeed.io report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}-${{ github.run_id }}
+          name: sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: output/sitespeed-${{ matrix.cohort.name }}-${{ matrix.device.mode }}/**
           if-no-files-found: warn
           retention-days: 14
