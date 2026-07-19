@@ -10,6 +10,10 @@ import type { ItemPageRunResult } from './item-page-run';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
+const sensitiveExtra = JSON.stringify({
+  cn_sensitive: 1,
+  workflow_completed_at: '2026-07-20T00:00:00Z',
+});
 
 // ── 有状态 D1 mock：items（按 id / PH LIKE 查）+ item_pages（按 item_id 查 status）──
 interface DbSeed {
@@ -186,6 +190,29 @@ describe('handleItemRoute', () => {
     const res = await handleItemRoute(req('/i/x/8'), makeEnv(db, r2));
     expect(res!.status).toBe(410);
     expect(await res!.text()).toContain('noindex');
+  });
+
+  test('cn_sensitive=1 → 即使 live 且 R2 有旧快照也返回 410 + noindex + no-store', async () => {
+    const id = 'blog:sensitive';
+    const key = itemPageR2Key(id)!;
+    const db = makeDb({
+      items: { [id]: { is_relevant: 1, extra: sensitiveExtra } },
+      pages: { [id]: 'live' },
+    });
+    const r2 = makeR2({ [key]: '<!doctype html><title>旧敏感快照</title>' });
+    const generate = vi.fn();
+
+    const res = await handleItemRoute(
+      req(`/i/news/${encodeURIComponent(id)}`),
+      makeEnv(db, r2),
+      generate,
+    );
+
+    expect(res!.status).toBe(410);
+    expect(res!.headers.get('Cache-Control')).toContain('no-store');
+    expect(res!.headers.get('X-Robots-Tag')).toBe('noindex');
+    expect(await res!.text()).toContain('name="robots" content="noindex"');
+    expect(generate).not.toHaveBeenCalled();
   });
 
   test('id 无对应 item → 404（含返回首页链接）', async () => {

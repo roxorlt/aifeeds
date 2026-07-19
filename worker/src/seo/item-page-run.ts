@@ -7,8 +7,9 @@
 // - item_pages.source 存 DigestSource 口径（x|gh|ph|hf-paper|news），与 R2 前缀（x/gh/ph/paper/news）
 //   是两命名空间：item_pages 表按 item_id 存、R2 按 itemPageR2Key 算 —— 别混用
 //
-// 出页 5 类源（x/gh/ph/hf-paper/news）且 is_relevant=1 才出页；clawhub / huodongxing / 未知源
-// 与非 relevant 一律 skipped 零写（itemPageR2Key 对不可出页源返回 null，即生成层的源 gate）。
+// 出页 5 类源（x/gh/ph/hf-paper/news）且 is_relevant=1、cn_sensitive!=1 才出页；
+// clawhub / huodongxing / 未知源、非 relevant 与涉华敏感条目一律 skipped 零写
+//（itemPageR2Key 对不可出页源返回 null，即生成层的源 gate）。
 
 import type { Env } from '../index';
 import type { DigestSource } from '../digest/config';
@@ -42,6 +43,18 @@ const SOURCE_TYPES: Record<DigestSource, string[]> = {
   news: ['blog', 'podcast'],
   clawhub: ['clawhub'], // 占位：不出页，但让映射类型完整
 };
+
+const CN_SENSITIVE_ELIGIBILITY =
+  "COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1";
+
+export function isCnSensitive(extra: string | null | undefined): boolean {
+  if (!extra) return false;
+  try {
+    return (JSON.parse(extra) as { cn_sensitive?: unknown }).cn_sensitive === 1;
+  } catch {
+    return false;
+  }
+}
 
 // composite id 的 source_type 前缀 → DigestSource（与 item-page.ts digestSourceForId 同口径）。
 // 出页 5 类返回对应 DigestSource；clawhub 返回 'clawhub'（后续被 itemPageR2Key null gate 挡）；
@@ -97,7 +110,7 @@ async function fetchRelated(
         AND i.is_relevant = 1
         AND i.deleted_at IS NULL
         AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
+        AND ${CN_SENSITIVE_ELIGIBILITY}`;
   const newer = await env.DB.prepare(
     `SELECT i.* FROM items i
       JOIN item_pages p ON p.item_id = i.id
@@ -123,7 +136,7 @@ async function fetchRelated(
     .map((r, i) => renderItem(source, r, i + 1, apiBase));
 }
 
-// 单条内容静态页生成。fetchItemRow → is_relevant!=1 或源∉五源 → skipped 零写；
+// 单条内容静态页生成。fetchItemRow → is_relevant!=1、cn_sensitive=1 或源∉五源 → skipped 零写；
 // 否则查同源相关 3-5 条 → renderItemPageHtml → R2 put(itemPageR2Key) → item_pages upsert(status=live)。
 // 幂等：同 id 二次生成 UPSERT 覆盖（R2 同 key 覆盖 + item_pages 不新增行）；dry 零写不调 R2/D1 写。
 //
@@ -138,6 +151,9 @@ export async function generateItemPage(
   const row = (await fetchItemRow(env, id)) as (RenderRow & { is_relevant?: number }) | null;
   if (!row) return { itemId: id, skipped: true, reason: 'not-found' };
   if (Number(row.is_relevant) !== 1) return { itemId: id, skipped: true, reason: 'not-relevant' };
+  if (isCnSensitive(row.extra)) {
+    return { itemId: id, skipped: true, reason: 'cn-sensitive' };
+  }
 
   // dedup 门（C1，一处堵三路）：extra.dedup_of 非空 → 是被主源隐藏的 dedup 次源，零写跳过。
   // 主源亦是 backfill / 按需兜底 / 相关内链引导 三路调用的公共出口，此处堵死避免重复内容页侵蚀 SEO。
@@ -188,7 +204,8 @@ export async function markItemPageGone(env: Env, id: string): Promise<void> {
   await env.DB.prepare(`UPDATE item_pages SET status = 'gone' WHERE item_id = ?`).bind(id).run();
 }
 
-// 存量分源回填：按 source 扫 is_relevant=1 且未在 item_pages 的 item → generateItemPage。
+// 存量分源回填：按 source 扫 is_relevant=1、cn_sensitive!=1 且未在 item_pages 的 item
+// → generateItemPage。
 // 分批（默认 300）；item_pages 存在性即退出游标（生成即入表，下批天然排除，游标单调）；
 // dry 零写（不写 → 游标不推进，remaining 反映全量待办）。经香港 60s 提断按行数核对（同 daily backfill 教训）。
 //
@@ -223,6 +240,7 @@ export async function backfillItemPages(
     `SELECT i.id FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
         AND json_extract(i.extra, '$.dedup_of') IS NULL
+        AND ${CN_SENSITIVE_ELIGIBILITY}
         AND ${doneClause}
       ORDER BY i.published_at DESC
       LIMIT ?`,
@@ -242,6 +260,7 @@ export async function backfillItemPages(
     `SELECT COUNT(*) AS n FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
         AND json_extract(i.extra, '$.dedup_of') IS NULL
+        AND ${CN_SENSITIVE_ELIGIBILITY}
         AND ${doneClause}`,
   )
     .bind(...sts, ...selectExtra)
@@ -254,4 +273,56 @@ export async function backfillItemPages(
   };
   if (force) result.cutoff = cutoff; // 供调用方跨批续传，维持同一 campaign
   return result;
+}
+
+const LIVE_PAGE_COMPLIANCE_VIOLATION = `p.status = 'live'
+        AND (
+          COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) = 1
+          OR COALESCE(i.is_relevant, 0) != 1
+          OR i.deleted_at IS NOT NULL
+          OR json_extract(i.extra, '$.dedup_of') IS NOT NULL
+        )`;
+
+// 存量合规 reconciliation：把已经 live、但当前已涉华敏感/不相关/软删/dedup 的页面置 gone。
+// dry 只扫描不写；remaining 始终在本轮动作之后重算，便于管理员按批次运行直至收敛到 0。
+export async function reconcileItemPageCompliance(
+  env: Env,
+  opts: { limit?: number; dry?: boolean } = {},
+): Promise<{ scanned: number; markedGone: number; remaining: number }> {
+  const limit = Math.min(Math.max(opts.limit ?? 300, 1), 1000);
+  const rows = await env.DB.prepare(
+    `SELECT p.item_id
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE ${LIVE_PAGE_COMPLIANCE_VIOLATION}
+     ORDER BY p.item_id ASC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{ item_id: string }>();
+  const ids = (rows.results || []).map((row) => row.item_id);
+
+  let markedGone = 0;
+  if (!opts.dry && ids.length > 0) {
+    const placeholders = ids.map(() => '?').join(',');
+    await env.DB.prepare(
+      `UPDATE item_pages SET status = 'gone' WHERE item_id IN (${placeholders})`,
+    )
+      .bind(...ids)
+      .run();
+    markedGone = ids.length;
+  }
+
+  const count = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+     FROM item_pages p
+     JOIN items i ON i.id = p.item_id
+     WHERE ${LIVE_PAGE_COMPLIANCE_VIOLATION}`,
+  ).first<{ n: number }>();
+
+  return {
+    scanned: ids.length,
+    markedGone,
+    remaining: Number(count?.n ?? 0),
+  };
 }

@@ -24,7 +24,11 @@ import type { Env } from '../index';
 import { getBases } from '../digest/lib';
 import { fetchItemRow } from '../digest/item-fetch';
 import { itemPageR2Key } from '../digest/render';
-import { generateItemPage as defaultGenerate, type ItemPageRunResult } from './item-page-run';
+import {
+  generateItemPage as defaultGenerate,
+  isCnSensitive,
+  type ItemPageRunResult,
+} from './item-page-run';
 import { ITEM_ELIGIBILITY } from './item-archive';
 
 // R2-miss 兜底生成器。默认走 Task 4 的 generateItemPage；测试用依赖注入替身（避免 vi.mock hoist）。
@@ -115,7 +119,11 @@ function statusPage(env: Env, status: 410 | 404): Response {
 </html>`;
   return new Response(body, {
     status,
-    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Robots-Tag': 'noindex',
+    },
   });
 }
 
@@ -156,9 +164,12 @@ export async function handleItemRoute(
     .first<{ status: string }>();
   const status = statusRow?.status;
   const relevant = Number(row.is_relevant) === 1;
+  const sensitive = isCnSensitive(
+    typeof row.extra === 'string' ? row.extra : null,
+  );
 
-  // 下架 / 非 relevant → 410 noindex no-store。
-  if (status === 'gone' || !relevant) return statusPage(env, 410);
+  // 下架 / 非 relevant / 涉华敏感 → 410 noindex no-store。先于 R2 读取，旧快照也不可透出。
+  if (status === 'gone' || !relevant || sensitive) return statusPage(env, 410);
 
   // live（或尚无 item_pages 行）且 relevant：读 R2 快照。
   const key = itemPageR2Key(compositeId);
