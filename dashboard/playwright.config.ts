@@ -69,7 +69,7 @@ export default defineConfig({
   use: {
     baseURL,
     ignoreHTTPSErrors: isWaterfallE2E,
-    serviceWorkers: isRemote ? "allow" : "block",
+    serviceWorkers: isRemote ? "allow" : isWaterfallE2E ? "allow" : "block",
     trace: isRemote ? "off" : "retain-on-failure",
     screenshot: isRemote ? "off" : "only-on-failure",
     video: "off",
@@ -79,7 +79,12 @@ export default defineConfig({
   projects: [
     {
       name: "desktop-chromium",
-      use: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, userAgent: chromiumUserAgent },
+      use: {
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 1,
+        userAgent: chromiumUserAgent,
+        launchOptions: { args: ["--ignore-certificate-errors"] },
+      },
     },
     {
       name: "tablet-chromium",
@@ -88,6 +93,7 @@ export default defineConfig({
         deviceScaleFactor: 2,
         hasTouch: true,
         userAgent: chromiumUserAgent,
+        launchOptions: { args: ["--ignore-certificate-errors"] },
       },
     },
     {
@@ -98,6 +104,7 @@ export default defineConfig({
         isMobile: true,
         hasTouch: true,
         userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+        launchOptions: { args: ["--ignore-certificate-errors"] },
       },
     },
     {
@@ -119,6 +126,7 @@ export default defineConfig({
         isMobile: true,
         hasTouch: true,
         userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36",
+        launchOptions: { args: ["--ignore-certificate-errors"] },
       },
     },
   ],

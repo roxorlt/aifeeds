@@ -154,15 +154,118 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
     const element = image as HTMLImageElement;
     return element.complete && element.naturalWidth > 0 && element.naturalHeight > 0;
   })).toBe(true);
+  const mediaPolicies = await page.locator(".waterfall-card__image").evaluateAll((images) => (
+    images.map((image) => ({
+      loading: (image as HTMLImageElement).loading,
+      fetchPriority: (image as HTMLImageElement).fetchPriority,
+      srcSet: (image as HTMLImageElement).srcset,
+    }))
+  ));
+  expect(mediaPolicies[0]).toMatchObject({
+    loading: "eager",
+    fetchPriority: "high",
+  });
+  if (mediaPolicies[1]) {
+    expect(mediaPolicies[1]).toMatchObject({
+      loading: "eager",
+      fetchPriority: "auto",
+    });
+  }
+  expect(mediaPolicies.slice(2).every((policy) => (
+    policy.loading === "lazy" && policy.fetchPriority === "auto"
+  ))).toBe(true);
+  expect(mediaPolicies.some((policy) => policy.srcSet.includes("400w"))).toBe(true);
+  expect(await page.locator('link[rel="preconnect"]').evaluateAll((links, expectedOrigin) => (
+    links.some((link) => new URL((link as HTMLLinkElement).href).origin === expectedOrigin)
+  ), BASE_URL)).toBe(true);
   expect(layout.cls).toBeLessThanOrEqual(0.1);
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
   expect(mediaSlack).toBeLessThan(9);
   expect(maximumVisualGap).toBeLessThan(17);
 });
 
+test("mobile app bar follows upward and downward scroll while desktop stays sticky", async ({ page }) => {
+  await setWaterfallCookie(page);
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await settleLayout(page);
+  const width = page.viewportSize()?.width ?? 1440;
+  const readHeader = () => page.locator(".waterfall-appbar").evaluate((header) => {
+    const style = getComputedStyle(header);
+    return { transform: style.transform, opacity: Number.parseFloat(style.opacity) };
+  });
+
+  if (width >= 768) {
+    await page.evaluate(() => window.scrollTo(0, 400));
+    await page.waitForTimeout(50);
+    const header = await readHeader();
+    expect(["none", "matrix(1, 0, 0, 1, 0, 0)"]).toContain(header.transform);
+    expect(header.opacity).toBe(1);
+    return;
+  }
+
+  const setRootScroll = async (top: number) => {
+    await page.locator("#root").evaluate((root, value) => {
+      root.scrollTop = value;
+    }, top);
+    await page.evaluate(() => new Promise<void>((resolve) => (
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    )));
+  };
+  await setRootScroll(160);
+  let header = await readHeader();
+  expect(header.opacity).toBeLessThanOrEqual(0.01);
+  expect(header.transform).not.toBe("none");
+
+  await setRootScroll(133);
+  header = await readHeader();
+  expect(header.opacity).toBeGreaterThan(0.45);
+  expect(header.opacity).toBeLessThan(0.55);
+
+  await setRootScroll(0);
+  expect(await readHeader()).toEqual({ transform: "matrix(1, 0, 0, 1, 0, 0)", opacity: 1 });
+});
+
+test("a controlled service worker cannot reset a persisted waterfall preference", async ({ page }) => {
+  await page.goto("/?view=classic", { waitUntil: "load" });
+  const registration = await page.evaluate(async () => {
+    if (!("serviceWorker" in navigator)) {
+      return { ready: false, secure: globalThis.isSecureContext, error: "unsupported" };
+    }
+    try {
+      await navigator.serviceWorker.register("/sw.js");
+      await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, reject) => window.setTimeout(
+          () => reject(new Error("service worker ready timeout")),
+          5_000,
+        )),
+      ]);
+      return { ready: true, secure: globalThis.isSecureContext, error: null };
+    } catch (error) {
+      return {
+        ready: false,
+        secure: globalThis.isSecureContext,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      };
+    }
+  });
+  expect(registration).toEqual({ ready: true, secure: true, error: null });
+  await page.goto("/?view=waterfall", { waitUntil: "load" });
+  await expect(page.locator("html")).toHaveAttribute("data-home-view", "waterfall");
+
+  const coldPage = await page.context().newPage();
+  try {
+    const response = await coldPage.goto("/", { waitUntil: "load" });
+    expect(response?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
+    await expect(coldPage.locator("html")).toHaveAttribute("data-home-view", "waterfall");
+  } finally {
+    await coldPage.close();
+  }
+});
+
 test("a failed cover collapses and the grid returns to compact spacing", async ({ page }) => {
   await setWaterfallCookie(page);
-  await page.route("**/r/waterfall-fixture-square.webp", (route) => route.abort());
+  await page.route("**/r/waterfall-fixture-square*.webp", (route) => route.abort());
   await page.goto("/?view=waterfall", { waitUntil: "load" });
   await settleLayout(page);
 
