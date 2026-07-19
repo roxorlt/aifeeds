@@ -38,3 +38,11 @@
 - Playwright：按钮在自动触发前仍可见，分页后 Drawer 深链交互保持不变。
 - 契约测试：移动端使用项目滚动根、存在有界 root margin、失败后不自动重试、保留手动按钮。
 - 完整 Dashboard 单测、lint、SSR build 和五设备 waterfall 浏览器矩阵。
+
+## 发布结果
+
+- PR #206 合入 `main`，merge commit `cf0223e11c51eec4e7fa98051494b603d815cae6`。
+- 本地：368/368 单测、lint、SSR build、55/55 五设备 Playwright。
+- staging：25/25 五设备远程矩阵，包含自动分页和移动/PC observer 根切换。
+- production：GitHub Actions run `29685573287` 成功；桌面 Chromium、移动 WebKit 均从 24 张
+  自动追加至 48 张，各新增 1 次分页 GET；移动 `#root` → PC viewport 重绑定通过。
