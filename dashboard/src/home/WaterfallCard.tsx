@@ -131,12 +131,23 @@ export function WaterfallCard({ item, siblings, mediaRank }: Props) {
       }}
     />
   ) : null;
+  const hasVisibleMedia = Boolean(image);
+  const cardClassName = [
+    "waterfall-card",
+    hasVisibleMedia ? "waterfall-card--with-media" : "waterfall-card--text-only",
+    hasVisibleMedia && model.mediaPosition === "before_text"
+      ? "waterfall-card--media-before"
+      : "",
+    hasVisibleMedia && model.mediaPosition === "after_text"
+      ? "waterfall-card--media-after"
+      : "",
+  ].filter(Boolean).join(" ");
   const accessibleTitle = model.title || model.summary || model.identity;
 
   return (
     <li
       ref={setCardRef}
-      className="waterfall-card"
+      className={cardClassName}
       data-item-id={item.id}
       data-source={item.source_type}
       style={{

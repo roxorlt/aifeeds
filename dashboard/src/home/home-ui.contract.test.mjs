@@ -116,11 +116,28 @@ test("waterfall is 2/3/4/5/6 columns with independent cards and no category chro
     /@media\s*\(min-width:\s*1600px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(6,/,
   );
   assert.match(css, /\.waterfall-card\s*\{[\s\S]*border:\s*1px solid/);
-  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border-radius:\s*10px/);
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border-radius:\s*12px/);
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*box-shadow:/);
+  assert.match(card, /waterfall-card--with-media/);
+  assert.match(card, /waterfall-card--text-only/);
+  assert.match(card, /waterfall-card--media-before/);
+  assert.match(card, /waterfall-card--media-after/);
   assert.match(css, /\.waterfall-card__identity\s*\{[\s\S]*font-size:\s*11px/);
   assert.match(css, /\.waterfall-card__identity-copy small\s*\{[\s\S]*font-size:\s*11px/);
   assert.match(css, /\.waterfall-card__link p\s*\{[\s\S]*font-size:\s*13px/);
   assert.doesNotMatch(css, /\.waterfall-card\[data-source=.*\.waterfall-card__source-icon/);
   assert.doesNotMatch(css, /\.waterfall-grid\s*\{[\s\S]{0,160}?display:\s*block/);
   assert.doesNotMatch(home, /waterfall-intro|分类|category|sidebar/i);
+});
+
+test("approved card polish preserves readable hierarchy and restrained motion", () => {
+  assert.match(css, /\.waterfall-card--media-before\s+\.waterfall-card__link p/);
+  assert.match(css, /\.waterfall-card--text-only\s+\.waterfall-card__link p/);
+  assert.match(css, /\.waterfall-card__metrics\s*\{[\s\S]*border-radius:/);
+  assert.match(css, /\.waterfall-card__link:focus-visible\s*\{[\s\S]*outline:/);
+  assert.match(
+    css,
+    /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)[\s\S]*\.waterfall-card:hover\s*\{[\s\S]*transform:\s*translateY\(-2px\)/,
+  );
+  assert.doesNotMatch(css, /animation:\s*[^;]*(?:infinite|linear)/);
 });

@@ -114,7 +114,7 @@ test("hydration has no console errors and meets responsive CLS budgets", async (
           : width >= 768 ? 3
             : 2,
   );
-  await expect(page.locator(".waterfall-card").first()).toHaveCSS("border-radius", "10px");
+  await expect(page.locator(".waterfall-card").first()).toHaveCSS("border-radius", "12px");
 
   const layout = await page.evaluate(() => ({
     cls: globalThis.__waterfallCls ?? 0,
