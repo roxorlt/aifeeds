@@ -34,6 +34,7 @@ const SOURCE_LABELS: Readonly<Record<string, string>> = {
 
 export type HomeCardImage = Readonly<{
   src: string;
+  srcSet?: string;
   width: number;
   height: number;
   alt: string;
@@ -273,6 +274,15 @@ function pickRawImage(item: Item, alt: string): HomeCardImage | null {
     if (!url || /\.gif(?:$|[?#])/iu.test(url)) continue;
     const src = proxyImg(url, 640);
     if (!src || (!safeR2Url(url) && src === url)) continue;
+    const source400 = proxyImg(url, 400);
+    const source800 = proxyImg(url, 800);
+    const srcSet = (
+      source400
+      && source800
+      && source400 !== source800
+    )
+      ? `${source400} 400w, ${source800} 800w`
+      : undefined;
     const hasDimensions = (
       typeof candidate.width === "number"
       && Number.isFinite(candidate.width)
@@ -285,6 +295,7 @@ function pickRawImage(item: Item, alt: string): HomeCardImage | null {
     );
     return {
       src,
+      ...(srcSet ? { srcSet } : {}),
       width: boundedDimension(candidate.width, 800),
       height: boundedDimension(candidate.height, 450),
       alt,
@@ -303,8 +314,14 @@ function pickSafeImage(item: Item, alt: string): HomeCardImage | null {
     if (variants.length === 0) continue;
     const selected = variants.find((variant) => variant.width >= 640) ?? variants.at(-1);
     if (!selected?.height) continue;
+    const srcSet = variants.length > 1
+      ? variants
+        .map((variant) => `${resolveAssetUrl(variant.url)} ${variant.width}w`)
+        .join(", ")
+      : undefined;
     return {
       src: resolveAssetUrl(selected.url),
+      ...(srcSet ? { srcSet } : {}),
       width: selected.width,
       height: selected.height,
       alt,

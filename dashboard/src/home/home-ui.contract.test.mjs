@@ -70,6 +70,14 @@ test("waterfall warms the correct API origin and prioritizes actual covers inste
   assert.doesNotMatch(card, /position < [24]/);
 });
 
+test("waterfall images expose responsive candidates sized to every column breakpoint", () => {
+  assert.match(card, /srcSet=\{model\.image\.srcSet\}/);
+  assert.match(card, /sizes=\{WATERFALL_IMAGE_SIZES\}/);
+  assert.match(card, /max-width: 767px/);
+  assert.match(card, /max-width: 1023px/);
+  assert.match(card, /max-width: 1279px/);
+});
+
 test("cards retain no-JS deep links and only enhance unmodified primary clicks", () => {
   assert.match(card, /href=\{path\}/);
   assert.match(card, /event\.button !== 0/);

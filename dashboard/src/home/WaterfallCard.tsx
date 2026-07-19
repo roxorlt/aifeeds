@@ -29,6 +29,13 @@ type Props = Readonly<{
   mediaRank: number | null;
 }>;
 
+const WATERFALL_IMAGE_SIZES = [
+  "(max-width: 767px) calc((100vw - 32px) / 2)",
+  "(max-width: 1023px) calc((100vw - 40px) / 3)",
+  "(max-width: 1279px) calc((100vw - 48px) / 4)",
+  "242px",
+].join(", ");
+
 export function WaterfallCard({ item, siblings, mediaRank }: Props) {
   const { openItem } = useDrawer();
   const imageRef = useRef<HTMLImageElement>(null);
@@ -109,6 +116,8 @@ export function WaterfallCard({ item, siblings, mediaRank }: Props) {
       ref={imageRef}
       className="waterfall-card__image"
       src={model.image.src}
+      srcSet={model.image.srcSet}
+      sizes={WATERFALL_IMAGE_SIZES}
       width={model.image.width}
       height={model.image.height}
       alt={model.image.alt}
