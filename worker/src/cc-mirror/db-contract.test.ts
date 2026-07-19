@@ -159,13 +159,22 @@ describe('029 cc content mirror DB contract', () => {
     const initialSeqs = db.prepare('SELECT seq FROM cc_page_events ORDER BY seq').all()
       .map((row) => Number((row as { seq: unknown }).seq));
     expect(initialSeqs).toEqual([1, 2, 3]);
+    const sequenceState = (): number | null => {
+      const row = db.prepare(
+        `SELECT seq FROM sqlite_sequence WHERE name = 'cc_page_events'`,
+      ).get() as { seq?: unknown } | undefined;
+      return row?.seq === undefined ? null : Number(row.seq);
+    };
+    expect(sequenceState()).toBe(3);
 
-    db.prepare('DELETE FROM cc_page_events WHERE seq = 2').run();
+    db.prepare('DELETE FROM cc_page_events WHERE seq = 3').run();
+    expect(sequenceState()).toBe(3);
     insert.run('github:three', 'upsert', 'hash-3', '2026-07-20T01:03:00.000Z');
 
     const finalSeqs = db.prepare('SELECT seq FROM cc_page_events ORDER BY seq').all()
       .map((row) => Number((row as { seq: unknown }).seq));
-    expect(finalSeqs).toEqual([1, 3, 4]);
+    expect(finalSeqs).toEqual([1, 2, 4]);
+    expect(sequenceState()).toBe(4);
     db.close();
   });
 
