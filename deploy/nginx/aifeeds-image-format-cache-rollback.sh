@@ -21,10 +21,13 @@ esac
 [[ -f "$backup_dir/aifeeds.conf" ]]
 [[ -f "$backup_dir/aifeeds-perf.conf" ]]
 [[ -f "$backup_dir/manifest.sha256" ]]
+[[ -f "$backup_dir/activated.sha256" ]]
 (
   cd "$backup_dir"
   sha256sum -c manifest.sha256
 )
+# Refuse to erase any configuration change made after this exact apply.
+sha256sum -c "$backup_dir/activated.sha256"
 grep -Fq 'map $http_accept $aifeeds_image_format' "$PERF_CONFIG"
 grep -Fq 'map $http_accept $aifeeds_image_format_skip_cache' "$PERF_CONFIG"
 grep -Fq '$request_uri|fmt=$aifeeds_image_format' "$SITE_CONFIG"
@@ -46,17 +49,32 @@ chmod 700 "$rescue_dir"
 install -m 600 "$SITE_CONFIG" "$rescue_dir/aifeeds.conf"
 install -m 600 "$PERF_CONFIG" "$rescue_dir/aifeeds-perf.conf"
 
+changed=0
+restore_on_error() {
+  local status=$?
+  trap - ERR
+  if ((changed)); then
+    install -m 600 "$rescue_dir/aifeeds.conf" "$SITE_CONFIG"
+    install -m 600 "$rescue_dir/aifeeds-perf.conf" "$PERF_CONFIG"
+    if nginx -t && systemctl reload nginx; then
+      echo "rollback_failed: restored pre-rollback configs after status $status" >&2
+    else
+      echo "rollback_failed: pre-rollback config restore or reload also failed" >&2
+    fi
+  else
+    echo "rollback_failed: no production config was overwritten" >&2
+  fi
+  exit "$status"
+}
+trap restore_on_error ERR
+
+changed=1
 install -m 600 "$backup_dir/aifeeds.conf" "$SITE_CONFIG"
 install -m 600 "$backup_dir/aifeeds-perf.conf" "$PERF_CONFIG"
-if ! nginx -t; then
-  install -m 600 "$rescue_dir/aifeeds.conf" "$SITE_CONFIG"
-  install -m 600 "$rescue_dir/aifeeds-perf.conf" "$PERF_CONFIG"
-  nginx -t
-  echo "rollback validation failed; restored pre-rollback configs" >&2
-  exit 1
-fi
-
+nginx -t
 purge_image_cache
 systemctl reload nginx
+changed=0
+trap - ERR
 printf 'rollback=complete\n'
 printf 'rescue_dir=%s\n' "$rescue_dir"

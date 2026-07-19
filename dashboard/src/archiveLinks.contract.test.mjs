@@ -33,13 +33,20 @@ test("service worker leaves archive navigations to the Worker instead of the SPA
   );
 });
 
-test("service worker leaves the homepage to SSR so the persisted view cookie stays authoritative", () => {
+test("service worker leaves every home-experience navigation to SSR so the persisted view cookie stays authoritative", () => {
   assert.match(
     serviceWorker,
-    /if\s*\(url\.pathname === "\/"\)\s*return;/,
+    /function isHomeExperiencePath\(pathname\)/,
   );
+  for (const prefix of ["t", "g", "ph", "c", "e", "h", "o", "y"]) {
+    assert.ok(
+      serviceWorker.includes(`^\\/${prefix}\\/`),
+      `missing home-experience route /${prefix}/`,
+    );
+  }
+  assert.match(serviceWorker, /if\s*\(isHomeExperiencePath\(url\.pathname\)\)\s*return;/);
   assert.ok(
-    serviceWorker.indexOf('url.pathname === "/"') <
+    serviceWorker.indexOf("isHomeExperiencePath(url.pathname)") <
       serviceWorker.indexOf('if (req.mode === "navigate")'),
   );
 });

@@ -258,6 +258,10 @@ test("a controlled service worker cannot reset a persisted waterfall preference"
     const response = await coldPage.goto("/", { waitUntil: "load" });
     expect(response?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
     await expect(coldPage.locator("html")).toHaveAttribute("data-home-view", "waterfall");
+
+    const deepLinkResponse = await coldPage.goto("/t/fixture-01", { waitUntil: "load" });
+    expect(deepLinkResponse?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
+    await expect(coldPage.locator("html")).toHaveAttribute("data-home-view", "waterfall");
   } finally {
     await coldPage.close();
   }

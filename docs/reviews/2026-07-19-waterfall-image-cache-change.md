@@ -42,10 +42,10 @@ Vary: Accept
 
 ```text
 deploy/nginx/aifeeds-image-format-cache-apply.sh
-SHA-256 c9f60a513d89efa2bdbacef52535cbab71c5cdcc81986f2e4190cf013da9d9d1
+SHA-256 3ecba8fb157997346ac38200ed31d65f8c0d65559c2a96b02e6b6c17248f3fca
 
 deploy/nginx/aifeeds-image-format-cache-rollback.sh
-SHA-256 351994819c0d941c5acf968a15979c7e9b2ec463244d39f7b78874a51b9946e2
+SHA-256 54ea3e643c155d3bb67b8c1557de706e3d2fe112aa49b9651cb089c464ec3245
 ```
 
 执行脚本具备以下门禁：
@@ -57,8 +57,11 @@ SHA-256 351994819c0d941c5acf968a15979c7e9b2ec463244d39f7b78874a51b9946e2
 - Worker 会尊重显式 `q=` 权重，因此这类少见请求直接绕过 Nginx cache，避免跨桶污染；
 - `video.twimg.com` 继续由 `$img_skip_cache` 绕过缓存，Range 行为不变；
 - 修改后先 `nginx -t`，失败会自动恢复备份且不会 reload 候选配置；
+- apply 把激活后两份配置的精确 SHA 写入 root-only `activated.sha256`；
 - 只删除缓存文件内容中 key 含 `/img?` 的对象，不清字体、HTML、JS、CSS 或 `/r`；
 - reload 失败会自动恢复原配置并再次校验、reload。
+- rollback 先用 `activated.sha256` 拒绝覆盖 apply 后的任何并发配置变更；恢复或 reload 任一步
+  失败都会恢复回滚前配置并明确输出 `rollback_failed`。
 
 本地契约：
 
@@ -134,9 +137,10 @@ bash /tmp/aifeeds-image-format-cache-rollback.sh \
   /root/aifeeds-image-format-cache-<UTC timestamp>
 ```
 
-回滚脚本验证 root 所有权与备份 manifest，先保存回滚前配置，恢复旧配置后执行 `nginx -t`；
-若旧配置验证失败会恢复回滚前配置。成功后同样只清 `/img?` 对象并 reload。备份与 rescue 目录保留
-用于复盘，不在本变更中删除。
+回滚脚本验证 root 所有权、备份 manifest 与当前两份配置的精确激活 SHA，先保存回滚前配置，
+恢复旧配置后执行 `nginx -t`。验证、定向清理或 reload 任一步失败都会恢复回滚前配置并再次
+校验、reload，同时输出 `rollback_failed` 供独立回滚负责人接管。成功后同样只清 `/img?`
+对象并 reload。备份与 rescue 目录保留用于复盘，不在本变更中删除。
 
 ## 执行记录
 

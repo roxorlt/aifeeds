@@ -24,6 +24,8 @@ test("production mutation is checksum-gated, backed up, syntax-tested, and narro
   assert.match(script, /0446c7076e8ca1dfdf1e591e74dd6a559a9599791fd2659589edba80f36c2214/);
   assert.match(script, /cd78847ba901509575e9c0df8c5674fe1b86723906da7216f2a486a1b0a74795/);
   assert.match(script, /install -d -m 700/);
+  assert.match(script, /activated\.sha256/);
+  assert.match(script, /sha_file "\$SITE_CONFIG"[\s\S]*sha_file "\$PERF_CONFIG"/);
   assert.match(script, /nginx -t[\s\S]*systemctl reload nginx/);
   assert.match(script, /grep -R -l -Z -a '\/img\?'/);
   assert.doesNotMatch(script, /rm -rf|find [^\n]*-delete/);
@@ -32,6 +34,12 @@ test("production mutation is checksum-gated, backed up, syntax-tested, and narro
 test("rollback restores only an apply-created backup and repeats validation and targeted purge", () => {
   const script = readDeploy("aifeeds-image-format-cache-rollback.sh");
   assert.match(script, /\/root\/aifeeds-image-format-cache-/);
+  assert.match(script, /activated\.sha256/);
+  assert.match(script, /sha256sum -c "\$backup_dir\/activated\.sha256"/);
+  assert.match(script, /trap restore_on_error ERR/);
+  assert.match(script, /rollback_failed/);
+  assert.match(script, /install -m 600 "\$rescue_dir\/aifeeds\.conf" "\$SITE_CONFIG"/);
+  assert.match(script, /install -m 600 "\$rescue_dir\/aifeeds-perf\.conf" "\$PERF_CONFIG"/);
   assert.match(script, /nginx -t[\s\S]*systemctl reload nginx/);
   assert.match(script, /grep -R -l -Z -a '\/img\?'/);
   assert.doesNotMatch(script, /rm -rf|find [^\n]*-delete/);

@@ -79,7 +79,7 @@ exit 0
 
 npm run build:ssr
 exit 0
-home_build_identity=35d3da7ec3a4...
+home_build_identity=6b02081b314f...
 waterfall CSS=6.86 kB / gzip 2.03 kB
 waterfall JS=20.82 kB / gzip 7.77 kB
 ```
@@ -93,6 +93,11 @@ WATERFALL_E2E=1 npx playwright test e2e/waterfall-home.spec.ts
 
 最终发布前于 2026-07-19 重跑同一组门禁；365/365 单测、lint、SSR build 与 45/45
 五设备浏览器矩阵全部通过。新增的 3 项单测覆盖 Nginx 图片格式缓存执行与回滚契约。
+
+独立合入前审阅发现 Service Worker 只放行 `/`、回滚未校验激活后精确 SHA 两个 Important。
+补充失败测试后，SW v6 放行全部有限 home-experience 深链；apply 记录 `activated.sha256`，
+rollback 对当前配置做精确校验并在失败时恢复 rescue 配置、输出 `rollback_failed`。修复后的
+最终复验仍为 365/365 单测、lint 0、SSR build `6b02081b314f...` 与五设备 Playwright 45/45。
 
 设备：
 
@@ -114,6 +119,7 @@ WATERFALL_E2E=1 npx playwright test e2e/waterfall-home.spec.ts
 - 400/800 `srcset` 与 API `preconnect` 存在；
 - 移动顶栏上推隐藏、下拉恢复，PC 不隐藏；
 - Service Worker 控制后的新页面仍由 Cookie 返回 waterfall SSR；
+- Service Worker 控制后的 `/t/*` 详情深链刷新仍由 Cookie 返回 waterfall SSR；
 - 图片失败后卡片消失且网格重新收紧；
 - 减弱动效、键盘切换、加载更多、详情 Drawer 和 API fail-open 保持正常。
 

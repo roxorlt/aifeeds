@@ -136,6 +136,11 @@ sed -i 's#        proxy_cache_bypass   $img_skip_cache;#        proxy_cache_bypa
 [[ "$(grep -Fxc "$NEW_NO_CACHE" "$SITE_CONFIG")" -eq 1 ]]
 [[ "$(grep -Fxc "$NEW_CACHE_BYPASS" "$SITE_CONFIG")" -eq 1 ]]
 nginx -t
+{
+  printf '%s  %s\n' "$(sha_file "$SITE_CONFIG")" "$SITE_CONFIG"
+  printf '%s  %s\n' "$(sha_file "$PERF_CONFIG")" "$PERF_CONFIG"
+} > "$backup_dir/activated.sha256"
+chmod 600 "$backup_dir/activated.sha256"
 purge_image_cache
 systemctl reload nginx
 changed=0
