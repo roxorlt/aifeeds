@@ -3,12 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-19（瀑布流临近底部自动分页已由 PR #206 发布生产并完成双端烟测）
-
-历史：2026-07-19（瀑布流分页按钮保留为失败/兼容兜底，新增距底部 600px 自动续页；移动端观察
-`#root`、PC 观察 viewport，跨 767px 断点会重建 observer。PR #206 / merge `cf0223e` 经本地
-368 单测、55 项五设备矩阵、staging 25 项远程矩阵及生产 workflow `29685573287` 发布；生产桌面
-Chromium、移动 WebKit 均验证 24→48 张卡且只发 1 次分页 GET，断点重绑定通过）
+最后更新：2026-07-18（首页瀑布流 SSR opt-in 生产发布、经典默认、手动 SWR、五设备验收与回滚点已写入 §5a）
 
 历史：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
 
