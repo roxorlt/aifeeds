@@ -61,6 +61,15 @@ test("hydration keeps SSR visible and safely reconciles compact measured spans",
   assert.match(card, /setImageFailed\(true\)/);
 });
 
+test("waterfall warms the correct API origin and prioritizes actual covers instead of DOM positions", () => {
+  assert.match(template, /__AIFEEDS_API_SAME_ORIGIN__/);
+  assert.match(template, /__AIFEEDS_API_BASE__/);
+  assert.match(template, /\["preconnect", "dns-prefetch"\]/);
+  assert.match(home, /rankWaterfallMedia/);
+  assert.match(card, /waterfallMediaPolicy\(mediaRank\)/);
+  assert.doesNotMatch(card, /position < [24]/);
+});
+
 test("cards retain no-JS deep links and only enhance unmodified primary clicks", () => {
   assert.match(card, /href=\{path\}/);
   assert.match(card, /event\.button !== 0/);

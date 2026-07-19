@@ -1,7 +1,9 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { HomeFeedResponse, Item } from "../types";
 import { fetchHomeFeedPage } from "./homeData";
 import { WaterfallCard } from "./WaterfallCard";
+import { getWaterfallCardModel } from "./waterfallCardModel";
+import { rankWaterfallMedia } from "./waterfallMedia";
 
 type Props = Readonly<{
   initialData: HomeFeedResponse;
@@ -25,6 +27,12 @@ export function WaterfallHome({ initialData }: Props) {
   const [hasMore, setHasMore] = useState(initialData.has_more);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const mediaRanks = useMemo(
+    () => rankWaterfallMedia(
+      items.map((item) => Boolean(getWaterfallCardModel(item).image)),
+    ),
+    [items],
+  );
 
   useLayoutEffect(() => {
     const grid = gridRef.current;
@@ -75,7 +83,7 @@ export function WaterfallHome({ initialData }: Props) {
             key={item.id}
             item={item}
             siblings={items}
-            position={position}
+            mediaRank={mediaRanks[position]}
           />
         ))}
       </ol>

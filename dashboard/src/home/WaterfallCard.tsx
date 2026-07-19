@@ -21,18 +21,20 @@ import {
   masonryRowSpan,
 } from "./masonry";
 import { getWaterfallCardModel } from "./waterfallCardModel";
+import { waterfallMediaPolicy } from "./waterfallMedia";
 
 type Props = Readonly<{
   item: Item;
   siblings: Item[];
-  position: number;
+  mediaRank: number | null;
 }>;
 
-export function WaterfallCard({ item, siblings, position }: Props) {
+export function WaterfallCard({ item, siblings, mediaRank }: Props) {
   const { openItem } = useDrawer();
   const imageRef = useRef<HTMLImageElement>(null);
   const [imageFailed, setImageFailed] = useState(false);
   const model = getWaterfallCardModel(item);
+  const mediaPolicy = waterfallMediaPolicy(mediaRank);
   const path = homePathForItem(item) ?? "/";
   const aspectRatio = model.image ? model.image.width / model.image.height : null;
   const estimatedHeight = estimateMasonryHeight(
@@ -110,8 +112,8 @@ export function WaterfallCard({ item, siblings, position }: Props) {
       width={model.image.width}
       height={model.image.height}
       alt={model.image.alt}
-      loading={position < 4 ? "eager" : "lazy"}
-      fetchPriority={position < 2 ? "high" : "auto"}
+      loading={mediaPolicy.loading}
+      fetchPriority={mediaPolicy.fetchPriority}
       decoding="async"
       style={model.image.crop ? { aspectRatio: "16 / 9" } : undefined}
       onError={(event) => {
