@@ -139,8 +139,34 @@ export async function reviewCcItem(
       && stored.review_text_hash === reviewTextHash
       && stored.source_policy === sourceDecision.policy
     ) {
+      if (reviewText.renderError) {
+        return result(
+          "pending",
+          CONSERVATIVE_FLAGS,
+          `render-failed:${reviewText.renderError}`,
+          true,
+        );
+      }
       return reuseStoredReview(stored, sourceDecision);
     }
+  }
+
+  if (reviewText.renderError) {
+    const pending = result(
+      "pending",
+      CONSERVATIVE_FLAGS,
+      `render-failed:${reviewText.renderError}`,
+    );
+    await persistReview(
+      env,
+      itemId,
+      sourceDecision,
+      reviewTextHash,
+      pending,
+      null,
+      opts.dry === true,
+    );
+    return pending;
   }
 
   if (!reviewText.text) {

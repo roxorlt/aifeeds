@@ -393,7 +393,7 @@ describe("reviewCcItem fail-closed model handling", () => {
     db.close();
   });
 
-  it("returns pending without a model call when the visible review text is empty", async () => {
+  it("reviews the renderer's visible no-title fallback instead of treating the row as empty", async () => {
     const db = new StatefulD1();
     const itemId = db.insertItem({
       title: null,
@@ -406,8 +406,52 @@ describe("reviewCcItem fail-closed model handling", () => {
 
     const result = await reviewCcItem(makeEnv(db), itemId);
 
+    expect(result.status).toBe("pass");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    db.close();
+  });
+
+  it("returns pending without a model call when the renderer fails", async () => {
+    const db = new StatefulD1();
+    const hidden = "HIDDEN_X_FULLTEXT_MUST_NOT_REACH_LLM";
+    const itemId = db.insertItem({
+      id: "x_list:renderer-error",
+      source_type: "x_list",
+      title: "安全标题",
+      content_translated: hidden,
+      extra: "null",
+    });
+    const fetchMock = mockFlags();
+
+    const result = await reviewCcItem(makeEnv(db), itemId);
+
     expect(result.status).toBe("pending");
-    expect(result.reason).toContain("empty-review-text");
+    expect(result.reason).toContain("render-failed");
+    expect(fetchMock).not.toHaveBeenCalled();
+    const stored = db.sqlite
+      .prepare(
+        `SELECT review_status, flags_json
+         FROM cc_item_reviews
+         WHERE item_id = ?`,
+      )
+      .get(itemId) as { review_status: string; flags_json: string };
+    expect(stored.review_status).toBe("pending");
+    expect(stored.flags_json).not.toContain(hidden);
+    db.sqlite
+      .prepare(
+        `UPDATE cc_item_reviews
+         SET review_status = 'pass', flags_json = ?, reason = 'model-pass'
+         WHERE item_id = ?`,
+      )
+      .run(JSON.stringify(SAFE_FLAGS), itemId);
+
+    const reused = await reviewCcItem(makeEnv(db), itemId);
+
+    expect(reused).toMatchObject({
+      status: "pending",
+      reused: true,
+      reason: "render-failed:render-item-failed",
+    });
     expect(fetchMock).not.toHaveBeenCalled();
     db.close();
   });

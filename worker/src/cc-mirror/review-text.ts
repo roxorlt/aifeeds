@@ -1,9 +1,16 @@
 import type { Env } from "../index";
 import type { DigestSource } from "../digest/config";
-import type { RenderRow } from "../digest/render";
+import { getBases } from "../digest/lib";
+import { renderItem, type RenderRow } from "../digest/render";
 import { renderItemBody } from "../seo/item-body";
 
 type ReviewRow = RenderRow & { source_type?: string | null };
+
+export interface CcReviewText {
+  text: string;
+  hashInput: string;
+  renderError?: "render-item-failed" | "render-body-failed";
+}
 
 const REVIEW_TEXT_VERSION = 1;
 const REVIEW_TEXT_MAX_CODE_POINTS = 11_000;
@@ -46,33 +53,68 @@ const NAMED_ENTITIES: Record<string, string> = {
 export function buildCcReviewText(
   row: RenderRow,
   env: Env,
-): { text: string; hashInput: string } {
+): CcReviewText {
   const reviewRow = row as ReviewRow;
   const sourceType =
     typeof reviewRow.source_type === "string" ? reviewRow.source_type : "";
   const source = SOURCE_MAP[sourceType] ?? (sourceType as DigestSource);
-  const title = htmlToPlainText(reviewRow.title ?? "");
+  const safeFallbackTitle = htmlToPlainText(reviewRow.title ?? "");
+  let title: string;
+  try {
+    const { apiBase } = getBases(env);
+    title = normalizeWhitespace(
+      renderItem(source, row, 1, apiBase, {
+        newsCoverQualityGate: true,
+        extendedIntro: true,
+      }).title,
+    );
+  } catch {
+    return finalizeReviewText(
+      reviewRow,
+      sourceType,
+      safeFallbackTitle,
+      "render-item-failed",
+    );
+  }
 
-  let body = "";
+  let body: string;
   try {
     body = htmlToPlainText(renderItemBody(source, row, env));
   } catch {
-    body = htmlToPlainText(
-      reviewRow.content_translated ?? reviewRow.content ?? "",
+    return finalizeReviewText(
+      reviewRow,
+      sourceType,
+      title,
+      "render-body-failed",
     );
   }
 
   const combined = normalizeWhitespace([title, body].filter(Boolean).join(" "));
-  const text = stableSample(combined);
+  return finalizeReviewText(reviewRow, sourceType, combined);
+}
+
+function finalizeReviewText(
+  row: ReviewRow,
+  sourceType: string,
+  combined: string,
+  renderError?: CcReviewText["renderError"],
+): CcReviewText {
+  const normalized = normalizeWhitespace(combined);
+  const text = sourceType === "github" ? stableSample(normalized) : normalized;
   const hashInput = [
     `cc-review-text:v${REVIEW_TEXT_VERSION}`,
-    `item_id=${reviewRow.id}`,
+    `item_id=${row.id}`,
     `source_type=${sourceType}`,
+    `render_status=${renderError ? "error" : "ok"}`,
     `text_code_points=${Array.from(text).length}`,
     text,
   ].join("\n");
 
-  return { text, hashInput };
+  return {
+    text,
+    hashInput,
+    ...(renderError ? { renderError } : {}),
+  };
 }
 
 function htmlToPlainText(value: string): string {

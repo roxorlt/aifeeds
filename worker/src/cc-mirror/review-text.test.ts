@@ -29,6 +29,51 @@ function row(
 }
 
 describe("buildCcReviewText", () => {
+  it.each([
+    [
+      "blog",
+      "原始英文新闻标题",
+      {
+        feed_key: "openai",
+        title_zh: "[AI News] 实际中文新闻标题",
+        ai_summary_zh: "新闻摘要",
+      },
+      "实际中文新闻标题",
+    ],
+    [
+      "hf_paper",
+      "Raw paper title",
+      {
+        title_zh: "实际中文论文标题",
+        summary_zh: "论文摘要",
+      },
+      "实际中文论文标题",
+    ],
+    [
+      "x_list",
+      "原始数据库标题",
+      {
+        ai_summary: "实际 X 展示标题",
+      },
+      "实际 X 展示标题",
+    ],
+  ])(
+    "uses renderItem's actual visible title for %s",
+    (sourceType, rawTitle, extra, visibleTitle) => {
+      const result = buildCcReviewText(
+        row(sourceType, {
+          title: rawTitle,
+          content_translated: "可见正文",
+          extra: JSON.stringify(extra),
+        }),
+        env,
+      );
+
+      expect(result.text).toContain(visibleTitle);
+      expect(result.text).not.toContain(rawTitle);
+    },
+  );
+
   it("includes the title and only the blog text that the renderer exposes", () => {
     const hiddenTail = "BLOG_HIDDEN_FULLTEXT_TAIL";
     const body = `${"这是正文摘录。".repeat(150)}${hiddenTail}`;
@@ -100,11 +145,38 @@ describe("buildCcReviewText", () => {
       env,
     );
 
-    expect(result.text).toContain("X 串标题");
+    expect(result.text).toContain("(无标题)");
+    expect(result.text).not.toContain("X 串标题");
     expect(result.text).toContain("串内容一");
     expect(result.text).toContain("thread content two");
     expect(result.text).toContain("串内容三");
     expect(result.text).toContain("引用内容");
+  });
+
+  it("does not sample or truncate a long rendered X thread and quote", () => {
+    const longMiddle = "长串正文".repeat(3_000);
+    const result = buildCcReviewText(
+      row("x_list", {
+        title: "X 长串",
+        extra: JSON.stringify({
+          ai_summary: "X 长串展示标题",
+          thread: [
+            { content_translated: "X_THREAD_HEAD" },
+            { content_translated: longMiddle },
+            { content_translated: "X_THREAD_TAIL" },
+          ],
+          quote_of: {
+            content_translated: "X_QUOTE_FINAL",
+          },
+        }),
+      }),
+      env,
+    );
+
+    expect(Array.from(result.text).length).toBeGreaterThan(11_000);
+    expect(result.text).toContain("X_THREAD_HEAD");
+    expect(result.text).toContain("X_THREAD_TAIL");
+    expect(result.text).toContain("X_QUOTE_FINAL");
   });
 
   it("stably samples long GitHub text from head, middle and tail within 11000 code points", () => {
@@ -125,7 +197,8 @@ describe("buildCcReviewText", () => {
     const first = buildCcReviewText(input, env);
     const second = buildCcReviewText(input, env);
 
-    expect(first.text).toContain("GitHub 页面标题");
+    expect(first.text).toContain("repo");
+    expect(first.text).not.toContain("GitHub 页面标题");
     expect(first.text).toContain("GH_HEAD_MARKER");
     expect(first.text).toContain("GH_MIDDLE_MARKER");
     expect(first.text).toContain("GH_TAIL_MARKER");
@@ -133,18 +206,23 @@ describe("buildCcReviewText", () => {
     expect(second).toEqual(first);
   });
 
-  it("removes executable HTML blocks and tags, decodes entities and normalizes whitespace", () => {
+  it("strips safe renderer HTML, removes script blocks and decodes entities", () => {
     const result = buildCcReviewText(
-      row("unknown", {
-        title:
-          "安全&nbsp;标题 <style>.secret{}</style> <script>alert(1)</script> &amp; &#20013; &#x6587;",
-        content_translated: "fallback   text\n\nwith\tspaces",
+      row("github", {
+        id: "github:owner/entity-test",
+        title: "不会展示的原始标题",
+        extra: JSON.stringify({
+          readme_translated:
+            "正文前\n\n<script>SECRET_SCRIPT</script>\n\n正文后 A &amp; B &#20013; &#x6587;",
+        }),
       }),
       env,
     );
 
-    expect(result.text).toBe("安全 标题 & 中 文 fallback text with spaces");
-    expect(result.text).not.toMatch(/<[^>]+>|alert|secret/);
+    expect(result.text).toContain("entity-test");
+    expect(result.text).toContain("正文前");
+    expect(result.text).toContain("正文后 A & B 中 文");
+    expect(result.text).not.toMatch(/SECRET_SCRIPT|<script|<p/);
   });
 
   it("returns a stable versioned hash input that separates item and source identities", () => {
@@ -172,5 +250,22 @@ describe("buildCcReviewText", () => {
     expect(first.hashInput).toContain(first.text);
     expect(otherItem.hashInput).not.toBe(first.hashInput);
     expect(otherSource.hashInput).not.toBe(first.hashInput);
+  });
+
+  it("reports renderer failure without falling back to hidden translated content", () => {
+    const hidden = "HIDDEN_TRANSLATED_FULLTEXT_MUST_NOT_LEAK";
+    const result = buildCcReviewText(
+      row("blog", {
+        title: "最小安全标题",
+        content_translated: hidden,
+        extra: "null",
+      }),
+      env,
+    );
+
+    expect(result.renderError).toBeTruthy();
+    expect(result.text).toContain("最小安全标题");
+    expect(result.text).not.toContain(hidden);
+    expect(result.hashInput).toContain("render_status=error");
   });
 });
