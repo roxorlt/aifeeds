@@ -21,7 +21,16 @@
 | G | 上线后观察任务 | 按源索引质量、RUM 和 2–4 周抓取趋势达到样本后再决定 noindex/retention；本轮未做批量 noindex/410。 |
 
 F 的发布证据见
-[`docs/reviews/2026-07-18-waterfall-ssr-production-release.md`](../reviews/2026-07-18-waterfall-ssr-production-release.md)。
+[`docs/reviews/2026-07-18-waterfall-ssr-production-release.md`](../reviews/2026-07-18-waterfall-ssr-production-release.md)；
+后续精修、生产图片链路和外部四组只读对照分别见：
+
+- [`docs/reviews/2026-07-19-waterfall-polish-verification.md`](../reviews/2026-07-19-waterfall-polish-verification.md)；
+- [`docs/reviews/2026-07-19-production-image-transform-root-cause.md`](../reviews/2026-07-19-production-image-transform-root-cause.md)；
+- [`docs/reviews/2026-07-19-sitespeed-view-matrix.md`](../reviews/2026-07-19-sitespeed-view-matrix.md)。
+
+外部 sitespeed 对照确认已知 4.276MB Product Hunt GIF 不再请求，waterfall 两端性能门通过。
+classic desktop 另有新发现的 Product Hunt 原始大图与两个较小动画 logo；它们是独立后续 P1，
+不改写批次 D 对“已知 4.276MB GIF”的完成结论。
 
 ## 1. 目标
 
