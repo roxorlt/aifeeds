@@ -72,7 +72,7 @@ node --test src/home/home-ui.contract.test.mjs \
 
 ```text
 npm run test:unit
-362 passed, 0 failed
+365 passed, 0 failed
 
 npm run lint
 exit 0
@@ -90,6 +90,9 @@ waterfall JS=20.82 kB / gzip 7.77 kB
 WATERFALL_E2E=1 npx playwright test e2e/waterfall-home.spec.ts
 45 passed
 ```
+
+最终发布前于 2026-07-19 重跑同一组门禁；365/365 单测、lint、SSR build 与 45/45
+五设备浏览器矩阵全部通过。新增的 3 项单测覆盖 Nginx 图片格式缓存执行与回滚契约。
 
 设备：
 
