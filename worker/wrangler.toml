@@ -31,6 +31,17 @@ preview_id = "78f0a9567d434d8b87c71cc29eea88f9"
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
+# Production custom domains are declared together because Wrangler treats this
+# list as authoritative on deploy. Keep the existing admin domain while adding
+# a relay-only image origin whose cf.image transforms run on the ai-feeds zone.
+[[routes]]
+pattern = "admin.ai-feeds.com"
+custom_domain = true
+
+[[routes]]
+pattern = "image-api.ai-feeds.com"
+custom_domain = true
+
 # CF Browser Rendering 试过(2026-05-18)再 verified arxiv 对 headless 也 detect,
 # 改走 PDF parse(figure-pdf.ts,unzlibSync 修复后 92.9% per-paper 命中率)。binding 移除。
 
