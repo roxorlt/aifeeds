@@ -254,6 +254,7 @@ describe("reviewCcItem decisions", () => {
       status: "pass",
       reused: false,
       flags: SAFE_FLAGS,
+      passProvenance: "model",
     });
     expect(result.reviewTextHash).toMatch(/^[0-9a-f]{64}$/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -693,6 +694,7 @@ describe("reviewCcItem cache, overrides and writes", () => {
 
     expect(result.status).toBe("pass");
     expect(result.reason).toContain("override-allow");
+    expect(result.passProvenance).toBe("override");
     expect(fetchMock).not.toHaveBeenCalled();
     db.close();
   });

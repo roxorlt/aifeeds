@@ -26,6 +26,12 @@ interface StoredPage {
   status: string;
 }
 
+interface R2Backup {
+  bytes: ArrayBuffer;
+  httpMetadata?: R2HTTPMetadata;
+  customMetadata?: Record<string, string>;
+}
+
 type CcPageRow = RenderRow & {
   source_type?: string | null;
   published_at?: string | null;
@@ -68,6 +74,7 @@ export async function syncCcItemPage(
     env,
     itemId,
     review.reviewTextHash,
+    review.passProvenance,
   );
   if (!bound.ok) {
     return transitionToGone(
@@ -123,6 +130,20 @@ export async function syncCcItemPage(
   if (!env.READMES) {
     throw new Error("R2 not configured");
   }
+  let priorObject: R2Backup | null = null;
+  if (prior?.status === "live") {
+    const object = await env.READMES.get(r2Key);
+    if (!object) {
+      throw new Error(
+        `[cc-mirror] ${itemId}: live R2 object missing before update`,
+      );
+    }
+    priorObject = {
+      bytes: await object.arrayBuffer(),
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+    };
+  }
 
   // Publish bytes before the authoritative live row. If R2 fails, D1 remains
   // unchanged and can never claim a missing object. The D1 page row and event
@@ -136,47 +157,71 @@ export async function syncCcItemPage(
   const publishedAt = String(
     row.published_at || row.scraped_at || "",
   ).trim() || null;
-  const batchResults = await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO cc_page_events (
-         item_id, op, content_hash, created_at
-       )
-       SELECT ?, 'upsert', ?, ?
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM cc_item_pages
-         WHERE item_id = ?
-           AND status = 'live'
-           AND content_hash = ?
-       )`,
-    ).bind(itemId, contentHash, now, itemId, contentHash),
-    env.DB.prepare(
-      `INSERT INTO cc_item_pages (
-         item_id, source, url_path, r2_key, content_hash, title,
-         published_at, generated_at, status, reason
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', ?)
-       ON CONFLICT(item_id) DO UPDATE SET
-         source = excluded.source,
-         url_path = excluded.url_path,
-         r2_key = excluded.r2_key,
-         content_hash = excluded.content_hash,
-         title = excluded.title,
-         published_at = excluded.published_at,
-         generated_at = excluded.generated_at,
-         status = 'live',
-         reason = excluded.reason`,
-    ).bind(
-      itemId,
-      source.stored,
-      urlPath,
-      r2Key,
-      contentHash,
-      title,
-      publishedAt,
-      now,
-      review.reason,
-    ),
-  ]);
+  let batchResults: D1Result[];
+  try {
+    batchResults = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO cc_page_events (
+           item_id, op, content_hash, created_at
+         )
+         SELECT ?, 'upsert', ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM cc_item_pages
+           WHERE item_id = ?
+             AND status = 'live'
+             AND content_hash = ?
+         )`,
+      ).bind(itemId, contentHash, now, itemId, contentHash),
+      env.DB.prepare(
+        `INSERT INTO cc_item_pages (
+           item_id, source, url_path, r2_key, content_hash, title,
+           published_at, generated_at, status, reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', ?)
+         ON CONFLICT(item_id) DO UPDATE SET
+           source = excluded.source,
+           url_path = excluded.url_path,
+           r2_key = excluded.r2_key,
+           content_hash = excluded.content_hash,
+           title = excluded.title,
+           published_at = excluded.published_at,
+           generated_at = excluded.generated_at,
+           status = 'live',
+           reason = excluded.reason`,
+      ).bind(
+        itemId,
+        source.stored,
+        urlPath,
+        r2Key,
+        contentHash,
+        title,
+        publishedAt,
+        now,
+        review.reason,
+      ),
+    ]);
+  } catch (databaseError) {
+    try {
+      if (priorObject) {
+        await env.READMES.put(r2Key, priorObject.bytes, {
+          httpMetadata: priorObject.httpMetadata,
+          customMetadata: priorObject.customMetadata,
+        });
+      } else {
+        await env.READMES.delete(r2Key);
+      }
+    } catch (compensationError) {
+      console.error(
+        `[cc-mirror] ${itemId}: R2 compensation failed after D1 batch failure`,
+        compensationError,
+      );
+      throw new AggregateError(
+        [databaseError, compensationError],
+        `[cc-mirror] ${itemId}: D1 publish and R2 compensation both failed`,
+      );
+    }
+    throw databaseError;
+  }
 
   return {
     itemId,

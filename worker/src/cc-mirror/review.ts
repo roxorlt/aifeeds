@@ -27,6 +27,7 @@ export interface CcReviewResult {
   reason: string;
   reused: boolean;
   reviewTextHash: string | null;
+  passProvenance: "model" | "override" | null;
 }
 
 export type CcPassSnapshot =
@@ -174,7 +175,7 @@ export async function reviewCcItem(
       return pending;
     }
     return withReviewTextHash(
-      result("pass", ZERO_FLAGS, "override-allow"),
+      result("pass", ZERO_FLAGS, "override-allow", false, "override"),
       reviewTextHash,
     );
   }
@@ -356,6 +357,7 @@ export async function bindCcPassToCurrentRow(
   env: Env,
   itemId: string,
   expectedReviewTextHash: string | null,
+  passProvenance: CcReviewResult["passProvenance"],
 ): Promise<CcPassSnapshot> {
   if (!expectedReviewTextHash) {
     return {
@@ -396,6 +398,30 @@ export async function bindCcPassToCurrentRow(
     return {
       ok: false,
       reason: "override-deny",
+      reviewTextHash: null,
+    };
+  }
+  if (passProvenance === "override" && override?.action !== "allow") {
+    return {
+      ok: false,
+      reason: "override-allow-no-longer-active",
+      reviewTextHash: null,
+    };
+  }
+  if (
+    sourceDecision.policy === "manual"
+    && override?.action !== "allow"
+  ) {
+    return {
+      ok: false,
+      reason: "manual-source-requires-allow-override",
+      reviewTextHash: null,
+    };
+  }
+  if (passProvenance === null) {
+    return {
+      ok: false,
+      reason: "missing-pass-provenance",
       reviewTextHash: null,
     };
   }
@@ -507,7 +533,7 @@ async function revalidateAfterModel(
   if (override?.action === "allow") {
     return {
       terminal: withReviewTextHash(
-        result("pass", ZERO_FLAGS, "override-allow"),
+        result("pass", ZERO_FLAGS, "override-allow", false, "override"),
         reviewTextHash,
       ),
     };
@@ -662,7 +688,7 @@ function decideFromFlags(
   if (sourceDecision.policy === "manual") {
     return result("review", flags, "source-manual");
   }
-  return result("pass", flags, "model-pass");
+  return result("pass", flags, "model-pass", false, "model");
 }
 
 function result(
@@ -670,6 +696,7 @@ function result(
   flags: CcRiskFlags,
   reason: string,
   reused = false,
+  passProvenance: CcReviewResult["passProvenance"] = null,
 ): CcReviewResult {
   return {
     status,
@@ -680,6 +707,7 @@ function result(
     reason,
     reused,
     reviewTextHash: null,
+    passProvenance,
   };
 }
 

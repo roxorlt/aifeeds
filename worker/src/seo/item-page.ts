@@ -97,8 +97,9 @@ export function renderItemPageHtml(
   const path = itemPagePath(row.id);
   const canonical = `${siteBase}${path ?? '/'}`;
   const deepUrl = ccVariant
-    ? `${interactiveBase}${deepLinkPath(row.id)}?utm_source=ai-feeds.cc&utm_medium=referral&utm_campaign=cc_content_mirror`
+    ? `${interactiveBase}${deepLinkPath(row.id)}?utm_source=cc&utm_medium=mirror&utm_campaign=cn_seo`
     : `${interactiveBase}${deepLinkPath(row.id)}`;
+  const ctaLabel = ccVariant ? '打开 AI Feeds 完整版' : '打开互动版';
   const label = SOURCE_LABELS[source] || source;
   const pageTitle = `${item.title} | ${titleSuffix}`;
   const cover = item.cover || `${siteBase}/og-default.png`;
@@ -203,7 +204,7 @@ ${archiveLinks}
 ${coverHtml}
 ${bodyContent}
 <div class="meta">${metaBits.join('')}</div>
-<p><a class="subscribe-btn" style="display:inline-block" href="${escapeHtml(deepUrl)}">打开互动版</a></p>
+<p><a class="subscribe-btn" style="display:inline-block" href="${escapeHtml(deepUrl)}">${ctaLabel}</a></p>
 </article>
 ${relatedHtml}
 </main>

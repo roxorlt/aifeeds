@@ -2,10 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../index";
 import type { RenderRow } from "../digest/render";
-import { CC_REVIEW_POLICY_VERSION } from "./review";
+import {
+  bindCcPassToCurrentRow,
+  CC_REVIEW_POLICY_VERSION,
+} from "./review";
 import { buildCcReviewText } from "./review-text";
 import {
   ccItemPageR2Key,
@@ -26,6 +29,7 @@ class StatefulD1 {
   writeCount = 0;
   itemReads = 0;
   overrideReads = 0;
+  failNextBatch = false;
   afterFirstItemRead?: MutationHook;
   afterFirstOverrideRead?: MutationHook;
 
@@ -132,6 +136,10 @@ class StatefulD1 {
   }
 
   async batch(statements: Array<{ run(): Promise<unknown> }>): Promise<unknown[]> {
+    if (this.failNextBatch) {
+      this.failNextBatch = false;
+      throw new Error("D1 batch unavailable");
+    }
     this.sqlite.exec("BEGIN");
     try {
       const results: unknown[] = [];
@@ -150,17 +158,60 @@ class StatefulD1 {
 }
 
 class ObservableR2 {
-  readonly objects = new Map<string, string>();
+  readonly objects = new Map<string, {
+    bytes: Uint8Array;
+    httpMetadata?: R2PutOptions["httpMetadata"];
+    customMetadata?: Record<string, string>;
+  }>();
   readonly puts: Array<{ key: string; value: string }> = [];
   failNextPut = false;
+  failNextDelete = false;
 
-  async put(key: string, value: string): Promise<void> {
+  async put(
+    key: string,
+    value: string | ArrayBuffer,
+    options: R2PutOptions = {},
+  ): Promise<void> {
     if (this.failNextPut) {
       this.failNextPut = false;
       throw new Error("R2 unavailable");
     }
-    this.puts.push({ key, value });
-    this.objects.set(key, value);
+    const bytes = typeof value === "string"
+      ? new TextEncoder().encode(value)
+      : new Uint8Array(value);
+    this.puts.push({ key, value: new TextDecoder().decode(bytes) });
+    this.objects.set(key, {
+      bytes: new Uint8Array(bytes),
+      httpMetadata: options.httpMetadata,
+      customMetadata: options.customMetadata,
+    });
+  }
+
+  async get(key: string) {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return {
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+      arrayBuffer: async () =>
+        object.bytes.buffer.slice(
+          object.bytes.byteOffset,
+          object.bytes.byteOffset + object.bytes.byteLength,
+        ),
+    };
+  }
+
+  async delete(key: string): Promise<void> {
+    if (this.failNextDelete) {
+      this.failNextDelete = false;
+      throw new Error("R2 delete unavailable");
+    }
+    this.objects.delete(key);
+  }
+
+  text(key: string): string | undefined {
+    const object = this.objects.get(key);
+    return object ? new TextDecoder().decode(object.bytes) : undefined;
   }
 }
 
@@ -214,7 +265,7 @@ describe("syncCcItemPage", () => {
 
     const result = await syncCcItemPage(env, id);
     const page = db.page(id)!;
-    const html = r2.objects.get(String(page.r2_key))!;
+    const html = r2.text(String(page.r2_key))!;
 
     expect(result).toEqual({
       itemId: id,
@@ -349,6 +400,71 @@ describe("syncCcItemPage", () => {
     expect(db.events(id)).toHaveLength(0);
   });
 
+  it("compensates an initial R2 put when the following D1 batch fails", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    const key = ccItemPageR2Key(id)!;
+    db.failNextBatch = true;
+
+    await expect(syncCcItemPage(env, id)).rejects.toThrow(
+      "D1 batch unavailable",
+    );
+
+    expect(r2.objects.has(key)).toBe(false);
+    expect(db.page(id)).toBeUndefined();
+    expect(db.events(id)).toHaveLength(0);
+  });
+
+  it("restores old R2 bytes and metadata when a live update D1 batch fails", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    await syncCcItemPage(env, id);
+    const pageBefore = db.page(id)!;
+    const key = String(pageBefore.r2_key);
+    const oldBytes = r2.text(key)!;
+    const oldHash = String(pageBefore.content_hash);
+    const oldHttpMetadata = r2.objects.get(key)!.httpMetadata;
+    const eventCount = db.events(id).length;
+
+    db.sqlite.prepare(
+      `UPDATE items
+       SET extra = json_set(extra, '$.ai_summary_zh', '审核通过后的更新正文。')
+       WHERE id = ?`,
+    ).run(id);
+    db.failNextBatch = true;
+
+    await expect(syncCcItemPage(env, id)).rejects.toThrow(
+      "D1 batch unavailable",
+    );
+
+    expect(r2.text(key)).toBe(oldBytes);
+    expect(r2.objects.get(key)!.httpMetadata).toEqual(oldHttpMetadata);
+    expect(await sha256(r2.text(key)!)).toBe(oldHash);
+    expect(db.page(id)!.content_hash).toBe(oldHash);
+    expect(db.events(id)).toHaveLength(eventCount);
+  });
+
+  it("surfaces and logs a compensation failure instead of hiding split-brain risk", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    db.failNextBatch = true;
+    r2.failNextDelete = true;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(syncCcItemPage(env, id)).rejects.toThrow(
+      "D1 publish and R2 compensation both failed",
+    );
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      `[cc-mirror] ${id}: R2 compensation failed after D1 batch failure`,
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
+  });
+
   it.each([
     ["visible content changed", (db: StatefulD1, id: string) => {
       db.sqlite.prepare(
@@ -397,6 +513,63 @@ describe("syncCcItemPage", () => {
     expect(result.reason).toBe("override-deny");
     expect(r2.puts).toHaveLength(0);
     expect(db.page(id)).toBeUndefined();
+  });
+
+  it("fails closed when an override-allow pass loses that allow before binding", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    db.afterFirstOverrideRead = (state) => {
+      state.sqlite.prepare(
+        `DELETE FROM cc_item_overrides WHERE item_id = ?`,
+      ).run(id);
+    };
+
+    const result = await syncCcItemPage(env, id);
+
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("override-allow-no-longer-active");
+    expect(r2.puts).toHaveLength(0);
+    expect(db.page(id)).toBeUndefined();
+    expect(db.events(id)).toHaveLength(0);
+  });
+
+  it("requires a current allow override when a model pass is bound to a manual source", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.sqlite.prepare(
+      `UPDATE items
+       SET source_type = 'podcast',
+           extra = ?
+       WHERE id = ?`,
+    ).run(
+      JSON.stringify({
+        show_key: "last-week-in-ai",
+        title_zh: "AI 周报播客",
+        ai_summary_zh: "中性 AI 周报摘要。",
+        shownotes_zh: "节目简介。",
+      }),
+      id,
+    );
+    const current = db.sqlite.prepare(
+      `SELECT * FROM items WHERE id = ?`,
+    ).get(id) as unknown as RenderRow;
+    const currentHash = await sha256(buildCcReviewText(current, env).hashInput);
+
+    const bound = await bindCcPassToCurrentRow(
+      env,
+      id,
+      currentHash,
+      "model",
+    );
+
+    expect(bound).toMatchObject({
+      ok: false,
+      reason: "manual-source-requires-allow-override",
+    });
+    expect(r2.puts).toHaveLength(0);
+    expect(db.page(id)).toBeUndefined();
+    expect(db.events(id)).toHaveLength(0);
   });
 });
 

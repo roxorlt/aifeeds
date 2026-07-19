@@ -278,8 +278,9 @@ describe('renderItemPageHtml', () => {
     expect(strings).toContain('https://www.ai-feeds.cc/i/x/1890');
     expect(strings).toContain('https://www.ai-feeds.cc/archive/x/');
     expect(html).toContain('https://www.ai-feeds.cc/i/gh/acme/tool');
+    expect(html).toContain('>打开 AI Feeds 完整版</a>');
     expect(html).toMatch(
-      /href="https:\/\/ai-feeds\.com\/t\/1890\?utm_source=ai-feeds\.cc&amp;utm_medium=referral&amp;utm_campaign=cc_content_mirror"/,
+      /href="https:\/\/ai-feeds\.com\/t\/1890\?utm_source=cc&amp;utm_medium=mirror&amp;utm_campaign=cn_seo"/,
     );
     expect(stripJsonLd(html)).not.toMatch(
       /<meta[^>]+http-equiv=["']?refresh|window\.location|location\.(?:href|replace|assign)/i,
@@ -350,6 +351,11 @@ describe('renderItemPageHtml', () => {
     expect(String(article.articleBody)).not.toContain(transcriptMarker);
     expect(comHtml).toContain('<title>推文要点标题 | AI Feeds</title>');
     expect(comHtml).toContain('<div class="brand"><a href="https://ai-feeds.com/">AI Feeds</a></div>');
-    expect(comHtml).not.toContain('cc_content_mirror');
+    expect(comHtml).toContain('>打开互动版</a>');
+    expect(comHtml).not.toContain('utm_campaign=cn_seo');
+  });
+
+  test('默认 .com profile 的完整代表性 HTML 保持逐字节 snapshot', () => {
+    expect(renderItemPageHtml(mkRow(), envFixture())).toMatchSnapshot();
   });
 });
