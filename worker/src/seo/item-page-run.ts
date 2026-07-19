@@ -18,6 +18,14 @@ import { getBases } from '../digest/lib';
 import { fetchItemRow } from '../digest/item-fetch';
 import { itemPageR2Key, itemPagePath, renderItem } from '../digest/render';
 import { renderItemPageHtml } from './item-page';
+import {
+  ITEM_CN_NOT_SENSITIVE_SQL,
+  ITEM_CN_SENSITIVE_SQL,
+  ITEM_DEDUPED_SQL,
+  ITEM_NOT_DEDUPED_SQL,
+  isCnSensitive,
+  isDedupSuppressed,
+} from './item-page-policy';
 
 export interface ItemPageRunResult {
   itemId: string;
@@ -44,18 +52,6 @@ const SOURCE_TYPES: Record<DigestSource, string[]> = {
   clawhub: ['clawhub'], // 占位：不出页，但让映射类型完整
 };
 
-const CN_SENSITIVE_ELIGIBILITY =
-  "COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1";
-
-export function isCnSensitive(extra: string | null | undefined): boolean {
-  if (!extra) return false;
-  try {
-    return (JSON.parse(extra) as { cn_sensitive?: unknown }).cn_sensitive === 1;
-  } catch {
-    return false;
-  }
-}
-
 // composite id 的 source_type 前缀 → DigestSource（与 item-page.ts digestSourceForId 同口径）。
 // 出页 5 类返回对应 DigestSource；clawhub 返回 'clawhub'（后续被 itemPageR2Key null gate 挡）；
 // huodongxing / 未知前缀 → null。
@@ -81,18 +77,6 @@ function digestSourceForId(itemId: string): DigestSource | null {
   }
 }
 
-// extra.dedup_of 非空 → 该 item 是 dedup 次源（被主源隐藏，见 feeds/dedup.ts），不出独立页。
-// 口径同 feeds/dedup.ts 的 json_extract(extra,'$.dedup_of')：非空（非 null 非空串）即次源。
-function isDedupSuppressed(extra: string | null | undefined): boolean {
-  if (!extra) return false;
-  try {
-    const d = (JSON.parse(extra) as { dedup_of?: unknown }).dedup_of;
-    return d != null && d !== '';
-  } catch {
-    return false;
-  }
-}
-
 // 同源稳定时间邻居：按 (published_at 回退 scraped_at DESC, id DESC) 的主时间线，取当前项前后各 3 条。
 // 只织入已经 live 且仍 relevant/未软删/非 dedup/非涉华敏感的页面，避免历史页长期指向
 // “全站最新 5 条”而形成不稳定链接图，也避免链接到 gone/404。
@@ -109,8 +93,8 @@ async function fetchRelated(
   const gates = `p.status = 'live'
         AND i.is_relevant = 1
         AND i.deleted_at IS NULL
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND ${CN_SENSITIVE_ELIGIBILITY}`;
+        AND ${ITEM_NOT_DEDUPED_SQL}
+        AND ${ITEM_CN_NOT_SENSITIVE_SQL}`;
   const newer = await env.DB.prepare(
     `SELECT i.* FROM items i
       JOIN item_pages p ON p.item_id = i.id
@@ -235,12 +219,12 @@ export async function backfillItemPages(
   const selectExtra: unknown[] = force ? [cutoff] : [];
 
   // 选取本批：该源、relevant、非 dedup 次源、按 doneClause 未处理。发布时间倒序（新内容优先收录）。
-  // dedup 谓词（C1）：json_extract(i.extra,'$.dedup_of') IS NULL，让 dedup 次源不算「待办」（force 下亦然，不收敛问题）。
+  // dedup 谓词（C1）：共享 policy 让 dedup 次源不算「待办」（force 下亦然，不收敛问题）。
   const rows = await env.DB.prepare(
     `SELECT i.id FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND ${CN_SENSITIVE_ELIGIBILITY}
+        AND ${ITEM_NOT_DEDUPED_SQL}
+        AND ${ITEM_CN_NOT_SENSITIVE_SQL}
         AND ${doneClause}
       ORDER BY i.published_at DESC
       LIMIT ?`,
@@ -259,8 +243,8 @@ export async function backfillItemPages(
   const cnt = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM items i
       WHERE i.source_type IN (${ph}) AND i.is_relevant = 1
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND ${CN_SENSITIVE_ELIGIBILITY}
+        AND ${ITEM_NOT_DEDUPED_SQL}
+        AND ${ITEM_CN_NOT_SENSITIVE_SQL}
         AND ${doneClause}`,
   )
     .bind(...sts, ...selectExtra)
@@ -277,10 +261,10 @@ export async function backfillItemPages(
 
 const LIVE_PAGE_COMPLIANCE_VIOLATION = `p.status = 'live'
         AND (
-          COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) = 1
+          ${ITEM_CN_SENSITIVE_SQL}
           OR COALESCE(i.is_relevant, 0) != 1
           OR i.deleted_at IS NOT NULL
-          OR json_extract(i.extra, '$.dedup_of') IS NOT NULL
+          OR ${ITEM_DEDUPED_SQL}
         )`;
 
 // 存量合规 reconciliation：把已经 live、但当前已涉华敏感/不相关/软删/dedup 的页面置 gone。

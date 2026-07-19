@@ -4,11 +4,11 @@ import {
   generateItemPage,
   markItemPageGone,
   backfillItemPages,
-  isCnSensitive,
 } from './item-page-run';
 import { syncItemPageOnEnrichDone } from './item-page-hook';
 import { itemPageR2Key, itemPagePath } from '../digest/render';
 import type { Env } from '../index';
+import { isCnSensitive } from './item-page-policy';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
@@ -71,7 +71,7 @@ function makeDb(seed: ItemSeed[] = []) {
   const pages = new Map<string, PageRow>();
   const runs: Array<{ sql: string; binds: unknown[] }> = [];
 
-  // extra.dedup_of 非空 → dedup 次源，模拟 SQL `json_extract(extra,'$.dedup_of') IS NULL` 的排除。
+  // extra.dedup_of 非空 → dedup 次源，模拟共享 policy SQL 的排除口径。
   const isDeduped = (r: Record<string, unknown>): boolean => {
     try {
       const d = r.extra ? (JSON.parse(String(r.extra)) as { dedup_of?: unknown }).dedup_of : null;

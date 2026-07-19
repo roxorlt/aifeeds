@@ -1,3 +1,8 @@
+import {
+  ITEM_CN_NOT_SENSITIVE_SQL,
+  ITEM_NOT_DEDUPED_SQL,
+} from './item-page-policy';
+
 export const ARCHIVE_SOURCES = ['x', 'gh', 'ph', 'paper', 'news'] as const;
 export type ArchiveSource = (typeof ARCHIVE_SOURCES)[number];
 
@@ -29,8 +34,8 @@ const PAGE_SOURCE: Record<ArchiveSource, string> = {
 const ARCHIVE_EFFECTIVE_TIME = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
 export const ITEM_ELIGIBILITY = `i.is_relevant = 1
         AND i.deleted_at IS NULL
-        AND json_extract(i.extra, '$.dedup_of') IS NULL
-        AND COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1`;
+        AND ${ITEM_NOT_DEDUPED_SQL}
+        AND ${ITEM_CN_NOT_SENSITIVE_SQL}`;
 export const ITEM_PAGE_ELIGIBILITY = `p.status = 'live'
         AND ${ITEM_ELIGIBILITY}`;
 

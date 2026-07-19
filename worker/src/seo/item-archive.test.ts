@@ -11,6 +11,10 @@ import {
   archiveSitemapGroupsQuery,
   parseItemArchivePath,
 } from './item-archive';
+import {
+  ITEM_CN_NOT_SENSITIVE_SQL,
+  ITEM_NOT_DEDUPED_SQL,
+} from './item-page-policy';
 
 describe('parseItemArchivePath', () => {
   test('只接受 index、已知 source、真实月份与有上限的正整数 page', () => {
@@ -94,8 +98,8 @@ describe('archiveItemsQuery', () => {
     expect(sql).toMatch(/p\.status\s*=\s*'live'/i);
     expect(sql).toMatch(/i\.is_relevant\s*=\s*1/i);
     expect(sql).toMatch(/i\.deleted_at\s+IS\s+NULL/i);
-    expect(sql).toContain("json_extract(i.extra, '$.dedup_of') IS NULL");
-    expect(sql).toContain("COALESCE(json_extract(i.extra, '$.cn_sensitive'), 0) != 1");
+    expect(sql).toContain(ITEM_NOT_DEDUPED_SQL);
+    expect(sql).toContain(ITEM_CN_NOT_SENSITIVE_SQL);
     expect(sql).toContain("COALESCE(NULLIF(i.published_at, ''), i.scraped_at) AS published_at");
     expect(sql).toMatch(/WHERE\s+p\.source\s*=\s*\?\s+AND/i);
     expect(sql).toMatch(

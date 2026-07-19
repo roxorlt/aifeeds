@@ -26,10 +26,10 @@ import { fetchItemRow } from '../digest/item-fetch';
 import { itemPageR2Key } from '../digest/render';
 import {
   generateItemPage as defaultGenerate,
-  isCnSensitive,
   type ItemPageRunResult,
 } from './item-page-run';
 import { ITEM_ELIGIBILITY } from './item-archive';
+import { isCnSensitive } from './item-page-policy';
 
 // R2-miss 兜底生成器。默认走 Task 4 的 generateItemPage；测试用依赖注入替身（避免 vi.mock hoist）。
 export type ItemPageGenerator = (env: Env, id: string) => Promise<ItemPageRunResult>;
