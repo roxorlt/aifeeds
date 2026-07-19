@@ -52,6 +52,18 @@ test("waterfall preserves one ordered DOM list and never uses dense placement", 
   assert.doesNotMatch(css, /grid-auto-flow:\s*dense/);
 });
 
+test("waterfall auto-loads near the footer while preserving a manual failure fallback", () => {
+  assert.match(home, /getIntersectionRoot/);
+  assert.match(home, /new IntersectionObserver/);
+  assert.match(home, /rootMargin:\s*"600px 0px"/);
+  assert.match(home, /loadingRef/);
+  assert.match(home, /document\.visibilityState !== "visible"/);
+  assert.match(home, /navigator\.onLine === false/);
+  assert.match(home, /if \(error\) return/);
+  assert.match(home, /ref=\{paginationRef\}/);
+  assert.match(home, /error \? "重试加载" : "加载更多"/);
+});
+
 test("hydration keeps SSR visible and safely reconciles compact measured spans", () => {
   assert.match(home, /__aifeedsLayoutWaterfall/);
   assert.match(template, /getBoundingClientRect\(\)\.height[\s\S]*waterfall-main\.tsx/);

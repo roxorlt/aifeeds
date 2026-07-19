@@ -147,19 +147,23 @@ test("staging hydration is clean and responsive within the CLS budget", async ({
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
 });
 
-test("staging load more appends a bounded page without document navigation", async ({ page }) => {
+test("staging loads a bounded page near the footer without document navigation", async ({ page }) => {
   let documentRequests = 0;
+  let paginationRequests = 0;
   page.on("request", (request) => {
     if (request.resourceType() === "document") documentRequests += 1;
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/_home/feed") paginationRequests += 1;
   });
   await page.goto("/?view=waterfall", { waitUntil: "load" });
   const cookies = await page.context().cookies(STAGING_ORIGIN);
   expect(cookies.find((cookie) => cookie.name === "aifeeds_view")?.value).toBe("waterfall");
   const before = await page.locator(".waterfall-card").count();
   expect(before).toBeGreaterThanOrEqual(12);
-  await page.getByRole("button", { name: "加载更多" }).click();
+  await page.locator(".waterfall-pagination").scrollIntoViewIfNeeded();
   await expect.poll(() => page.locator(".waterfall-card").count()).toBeGreaterThan(before);
   expect(await page.locator(".waterfall-card").count()).toBeLessThanOrEqual(before + 24);
+  expect(paginationRequests).toBe(1);
   expect(documentRequests).toBe(1);
 });
 

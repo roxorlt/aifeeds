@@ -17,7 +17,8 @@
 
 - `WaterfallHome` 在分页区域挂一个稳定哨兵，使用 `getIntersectionRoot()`：移动端观察 `#root`，
   PC 观察 viewport。
-- 用户第一次实际滚动后才启用观察，避免首屏 hydration 时因为短测试数据或超高视口立即连续翻页。
+- 观察器在 hydration 后立即启用；如果首屏内容不足、哨兵本来就在临近区域，也应直接补足下一页，
+  不能依赖一次实际上不会发生的 scroll 事件。
 - 哨兵进入距视口约 `600px` 的区域时调用现有 `fetchHomeFeedPage()`，每页仍为 24 条。
 - 同步 ref 在 React 状态提交前就锁住在途请求，防止同一批 observer 回调发出重复请求。
 - 成功后按现有 ID 去重并推进 cursor；如果追加后哨兵仍在预加载区，允许继续填充到离开临近区域。
