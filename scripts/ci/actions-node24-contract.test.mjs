@@ -43,9 +43,9 @@ test("workflow migration keeps the application runtime on Node 22", () => {
   }
 });
 
-test("the performance-ops gate runs this workflow contract", () => {
+test("the lightweight workflow gate runs this action runtime contract", () => {
   assert.match(
     workflows["pr-validation.yml"],
-    /scripts\/ci\/actions-node24-contract\.test\.mjs/,
+    /validate-workflow-contracts:[\s\S]*?scripts\/ci\/actions-node24-contract\.test\.mjs/,
   );
 });

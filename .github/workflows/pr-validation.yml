@@ -33,6 +33,7 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       admin_dashboard: ${{ steps.filter.outputs.admin_dashboard }}
       performance_ops: ${{ steps.filter.outputs.performance_ops }}
+      workflow_contracts: ${{ steps.filter.outputs.workflow_contracts }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -51,11 +52,13 @@ jobs:
               - 'scripts/benchmark-aifeeds-upstream*'
               - 'scripts/run-aifeeds-staging-backfill*'
               - 'scripts/ci/performance-validation-contract.test.mjs'
-              - 'scripts/ci/sitespeed-external-workflow.contract.test.mjs'
               - 'docs/operations.md'
               - 'docs/plans/2026-07-10-c-end-performance-optimization-plan.md'
               - 'docs/reviews/c-end-perf-staging-change-packet.md'
               - 'docs/reviews/c-end-performance-rollout-template.md'
+            workflow_contracts:
+              - 'scripts/ci/actions-node24-contract.test.mjs'
+              - 'scripts/ci/sitespeed-external-workflow.contract.test.mjs'
               - '.github/workflows/**'
 
   validate-worker:
@@ -150,6 +153,21 @@ jobs:
       - name: Run admin-dashboard smoke
         run: bash scripts/ci/admin-dashboard-smoke.sh
 
+  validate-workflow-contracts:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.workflow_contracts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Validate workflow contracts
+        run: >-
+          node --test
+          scripts/ci/actions-node24-contract.test.mjs
+          scripts/ci/sitespeed-external-workflow.contract.test.mjs
+
   validate-performance-ops:
     needs: detect-changes
     if: needs.detect-changes.outputs.performance_ops == 'true'
@@ -166,8 +184,6 @@ jobs:
           scripts/run-aifeeds-staging-backfill.test.mjs
           deploy/nginx/*.test.mjs
           scripts/ci/performance-validation-contract.test.mjs
-          scripts/ci/actions-node24-contract.test.mjs
-          scripts/ci/sitespeed-external-workflow.contract.test.mjs
       - name: Validate nginx performance deployment helpers
         run: |
           python3 deploy/nginx/check-nginx-request-id.test.py
