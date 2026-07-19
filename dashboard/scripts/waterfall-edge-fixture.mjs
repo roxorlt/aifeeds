@@ -83,12 +83,20 @@ function fixtureItem(number) {
       title_zh: `本地边缘验收条目 ${fixtureNumber(number)}`,
       ai_summary_zh: longTail,
       ...(number === 2 ? {
-        cover_variants: [{
-          url: "/r/waterfall-fixture-square.webp",
-          width: 640,
-          height: 640,
-          format: "webp",
-        }],
+        cover_variants: [
+          {
+            url: "/r/waterfall-fixture-square-400.webp",
+            width: 400,
+            height: 400,
+            format: "webp",
+          },
+          {
+            url: "/r/waterfall-fixture-square.webp",
+            width: 800,
+            height: 800,
+            format: "webp",
+          },
+        ],
       } : {}),
     },
   };

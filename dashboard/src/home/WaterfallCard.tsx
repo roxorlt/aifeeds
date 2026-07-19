@@ -21,18 +21,27 @@ import {
   masonryRowSpan,
 } from "./masonry";
 import { getWaterfallCardModel } from "./waterfallCardModel";
+import { waterfallMediaPolicy } from "./waterfallMedia";
 
 type Props = Readonly<{
   item: Item;
   siblings: Item[];
-  position: number;
+  mediaRank: number | null;
 }>;
 
-export function WaterfallCard({ item, siblings, position }: Props) {
+const WATERFALL_IMAGE_SIZES = [
+  "(max-width: 767px) calc((100vw - 32px) / 2)",
+  "(max-width: 1023px) calc((100vw - 40px) / 3)",
+  "(max-width: 1279px) calc((100vw - 48px) / 4)",
+  "242px",
+].join(", ");
+
+export function WaterfallCard({ item, siblings, mediaRank }: Props) {
   const { openItem } = useDrawer();
   const imageRef = useRef<HTMLImageElement>(null);
   const [imageFailed, setImageFailed] = useState(false);
   const model = getWaterfallCardModel(item);
+  const mediaPolicy = waterfallMediaPolicy(mediaRank);
   const path = homePathForItem(item) ?? "/";
   const aspectRatio = model.image ? model.image.width / model.image.height : null;
   const estimatedHeight = estimateMasonryHeight(
@@ -107,11 +116,13 @@ export function WaterfallCard({ item, siblings, position }: Props) {
       ref={imageRef}
       className="waterfall-card__image"
       src={model.image.src}
+      srcSet={model.image.srcSet}
+      sizes={WATERFALL_IMAGE_SIZES}
       width={model.image.width}
       height={model.image.height}
       alt={model.image.alt}
-      loading={position < 4 ? "eager" : "lazy"}
-      fetchPriority={position < 2 ? "high" : "auto"}
+      loading={mediaPolicy.loading}
+      fetchPriority={mediaPolicy.fetchPriority}
       decoding="async"
       style={model.image.crop ? { aspectRatio: "16 / 9" } : undefined}
       onError={(event) => {
@@ -120,12 +131,23 @@ export function WaterfallCard({ item, siblings, position }: Props) {
       }}
     />
   ) : null;
+  const hasVisibleMedia = Boolean(image);
+  const cardClassName = [
+    "waterfall-card",
+    hasVisibleMedia ? "waterfall-card--with-media" : "waterfall-card--text-only",
+    hasVisibleMedia && model.mediaPosition === "before_text"
+      ? "waterfall-card--media-before"
+      : "",
+    hasVisibleMedia && model.mediaPosition === "after_text"
+      ? "waterfall-card--media-after"
+      : "",
+  ].filter(Boolean).join(" ");
   const accessibleTitle = model.title || model.summary || model.identity;
 
   return (
     <li
       ref={setCardRef}
-      className="waterfall-card"
+      className={cardClassName}
       data-item-id={item.id}
       data-source={item.source_type}
       style={{

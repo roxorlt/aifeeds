@@ -6,6 +6,7 @@ const read = (name) => fs.readFileSync(new URL(name, import.meta.url), "utf8");
 const viewSwitch = read("./HomeViewSwitch.tsx");
 const home = read("./WaterfallHome.tsx");
 const card = read("./WaterfallCard.tsx");
+const shell = read("./WaterfallShell.tsx");
 const css = `${read("./waterfall.css")}\n${read("./home-view-switch.css")}`;
 const template = read("../../waterfall.html");
 
@@ -29,6 +30,18 @@ test("switching persists one bounded cookie, emits a finite event, and navigates
   assert.doesNotMatch(viewSwitch, /location\.reload/);
 });
 
+test("waterfall restores the mobile follow-scroll app bar without moving it on desktop", () => {
+  assert.match(shell, /useReducedMotion/);
+  assert.match(shell, /useIsNarrow/);
+  assert.match(shell, /addScrollRootListener/);
+  assert.match(shell, /getScrollY/);
+  assert.match(shell, /requestAnimationFrame/);
+  assert.match(shell, /nextWaterfallHeaderRatio/);
+  assert.match(shell, /ref=\{headerRef\}/);
+  assert.match(css, /@media\s*\(max-width:\s*767px\)[\s\S]*\.waterfall-appbar\s*\{[\s\S]*position:\s*fixed/);
+  assert.match(css, /\.waterfall-appbar-spacer/);
+});
+
 test("waterfall preserves one ordered DOM list and never uses dense placement", () => {
   assert.match(home, /<ol[^>]+className="waterfall-grid"/);
   assert.match(home, /items\.map\(\(item/);
@@ -46,6 +59,23 @@ test("hydration keeps SSR visible and safely reconciles compact measured spans",
   assert.doesNotMatch(css, /waterfall-hydrating[\s\S]*opacity:\s*0/);
   assert.match(card, /naturalWidth === 0/);
   assert.match(card, /setImageFailed\(true\)/);
+});
+
+test("waterfall warms the correct API origin and prioritizes actual covers instead of DOM positions", () => {
+  assert.match(template, /__AIFEEDS_API_SAME_ORIGIN__/);
+  assert.match(template, /__AIFEEDS_API_BASE__/);
+  assert.match(template, /\["preconnect", "dns-prefetch"\]/);
+  assert.match(home, /rankWaterfallMedia/);
+  assert.match(card, /waterfallMediaPolicy\(mediaRank\)/);
+  assert.doesNotMatch(card, /position < [24]/);
+});
+
+test("waterfall images expose responsive candidates sized to every column breakpoint", () => {
+  assert.match(card, /srcSet=\{model\.image\.srcSet\}/);
+  assert.match(card, /sizes=\{WATERFALL_IMAGE_SIZES\}/);
+  assert.match(card, /max-width: 767px/);
+  assert.match(card, /max-width: 1023px/);
+  assert.match(card, /max-width: 1279px/);
 });
 
 test("cards retain no-JS deep links and only enhance unmodified primary clicks", () => {
@@ -86,11 +116,28 @@ test("waterfall is 2/3/4/5/6 columns with independent cards and no category chro
     /@media\s*\(min-width:\s*1600px\)[\s\S]*\.waterfall-grid\s*\{[\s\S]*repeat\(6,/,
   );
   assert.match(css, /\.waterfall-card\s*\{[\s\S]*border:\s*1px solid/);
-  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border-radius:\s*10px/);
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*border-radius:\s*12px/);
+  assert.match(css, /\.waterfall-card\s*\{[\s\S]*box-shadow:/);
+  assert.match(card, /waterfall-card--with-media/);
+  assert.match(card, /waterfall-card--text-only/);
+  assert.match(card, /waterfall-card--media-before/);
+  assert.match(card, /waterfall-card--media-after/);
   assert.match(css, /\.waterfall-card__identity\s*\{[\s\S]*font-size:\s*11px/);
   assert.match(css, /\.waterfall-card__identity-copy small\s*\{[\s\S]*font-size:\s*11px/);
   assert.match(css, /\.waterfall-card__link p\s*\{[\s\S]*font-size:\s*13px/);
   assert.doesNotMatch(css, /\.waterfall-card\[data-source=.*\.waterfall-card__source-icon/);
   assert.doesNotMatch(css, /\.waterfall-grid\s*\{[\s\S]{0,160}?display:\s*block/);
   assert.doesNotMatch(home, /waterfall-intro|分类|category|sidebar/i);
+});
+
+test("approved card polish preserves readable hierarchy and restrained motion", () => {
+  assert.match(css, /\.waterfall-card--media-before\s+\.waterfall-card__link p/);
+  assert.match(css, /\.waterfall-card--text-only\s+\.waterfall-card__link p/);
+  assert.match(css, /\.waterfall-card__metrics\s*\{[\s\S]*border-radius:/);
+  assert.match(css, /\.waterfall-card__link:focus-visible\s*\{[\s\S]*outline:/);
+  assert.match(
+    css,
+    /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)[\s\S]*\.waterfall-card:hover\s*\{[\s\S]*transform:\s*translateY\(-2px\)/,
+  );
+  assert.doesNotMatch(css, /animation:\s*[^;]*(?:infinite|linear)/);
 });

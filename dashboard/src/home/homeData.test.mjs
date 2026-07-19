@@ -88,6 +88,26 @@ test("card presentation is source-aware and only selects bounded internal image 
   assert.equal(JSON.stringify(model).includes("javascript:"), false);
 });
 
+test("stored 400 and 800 WebP covers expose responsive candidates", () => {
+  const model = getHomeCardModel({
+    ...fixture,
+    id: "blog:responsive",
+    extra: {
+      ...fixture.extra,
+      cover_image_variants: [
+        { url: "/r/blog/card/responsive-800.webp", width: 800, height: 450, format: "webp" },
+        { url: "/r/blog/card/responsive-400.webp", width: 400, height: 225, format: "webp" },
+      ],
+    },
+  });
+  assert.equal(model.image?.src, "https://api.ai-feeds.com/r/blog/card/responsive-800.webp");
+  assert.equal(
+    model.image?.srcSet,
+    "https://api.ai-feeds.com/r/blog/card/responsive-400.webp 400w, "
+      + "https://api.ai-feeds.com/r/blog/card/responsive-800.webp 800w",
+  );
+});
+
 test("cards fall back to safe source media when ingestion-time variants are not ready", () => {
   const xImage = getHomeCardModel({
     ...fixture,
@@ -119,6 +139,9 @@ test("cards fall back to safe source media when ingestion-time variants are not 
   });
   assert.deepEqual(eventImage.image, {
     src: "https://api.ai-feeds.com/img?url=https%3A%2F%2Fwimg.huodongxing.com%2Fevent.jpg&w=640",
+    srcSet:
+      "https://api.ai-feeds.com/img?url=https%3A%2F%2Fwimg.huodongxing.com%2Fevent.jpg&w=400 400w, "
+      + "https://api.ai-feeds.com/img?url=https%3A%2F%2Fwimg.huodongxing.com%2Fevent.jpg&w=800 800w",
     width: 800,
     height: 450,
     alt: "Original title",
@@ -141,6 +164,7 @@ test("cards fall back to safe source media when ingestion-time variants are not 
   assert.equal(videoPoster.image?.src, "https://api.ai-feeds.com/r/x/poster.jpg");
   assert.equal(videoPoster.image?.width, 1280);
   assert.equal(videoPoster.image?.height, 720);
+  assert.equal(videoPoster.image?.srcSet, undefined);
 });
 
 test("raw animated and unsafe media never bypass the verified static preview contract", () => {

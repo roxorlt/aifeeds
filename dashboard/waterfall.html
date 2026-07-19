@@ -8,6 +8,37 @@
     <meta name="aifeeds-build-id" content="__AIFEEDS_HOME_BUILD_IDENTITY__" />
     <link rel="canonical" href="https://ai-feeds.com/" />
     <meta name="theme-color" content="#fafafa" />
+    <script>
+      (() => {
+        try {
+          const sameOrigin = __AIFEEDS_API_SAME_ORIGIN__;
+          const configuredBase = __AIFEEDS_API_BASE__;
+          const host = location.hostname;
+          let base = null;
+
+          if (sameOrigin) base = "";
+          else if (configuredBase) base = configuredBase;
+          else if (host === "localhost" || host === "127.0.0.1" ||
+                   host === "www.ai-feeds.com" || host === "perf-staging.ai-feeds.com") base = "";
+          else if (host === "staging.ai-feeds.com" ||
+                   host === "xlist-dashboard-staging.pages.dev" ||
+                   host.endsWith(".xlist-dashboard-staging.pages.dev")) {
+            base = "https://staging-api.ai-feeds.com";
+          } else {
+            base = "https://api.ai-feeds.com";
+          }
+
+          if (!base) return;
+          ["preconnect", "dns-prefetch"].forEach((rel) => {
+            const link = document.createElement("link");
+            link.rel = rel;
+            link.href = base;
+            if (rel === "preconnect") link.crossOrigin = "anonymous";
+            document.head.appendChild(link);
+          });
+        } catch (error) {}
+      })();
+    </script>
     <title>AI Feeds — 瀑布版</title>
   </head>
   <body>
