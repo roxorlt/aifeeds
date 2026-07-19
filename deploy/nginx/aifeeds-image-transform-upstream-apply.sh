@@ -89,22 +89,27 @@ location = text[start:end]
 match = re.search(r"proxy_set_header\s+X-Origin-Secret\s+([^;]+);", location)
 if not match:
     raise SystemExit("missing X-Origin-Secret in /img location")
-print(match.group(1).strip())
+value = match.group(1).strip()
+if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+    value = value[1:-1]
+print(value)
 PY
 )"
   cleanup_probe() {
     rm -f "$header_file" "$body_file"
   }
-  [[ "${#origin_secret}" -ge 20 ]] || {
+  [[ "$origin_secret" =~ ^[A-Za-z0-9._~-]{20,256}$ ]] || {
     cleanup_probe
     echo "invalid relay origin secret" >&2
     exit 65
   }
-  if ! curl -fsS --max-time 20 --get "https://$NEW_UPSTREAM/img" \
+  # Read the sensitive header from curl config on stdin so the secret never
+  # appears in the process command line or a world-readable temporary file.
+  if ! printf 'header = "X-Origin-Secret: %s"\n' "$origin_secret" | \
+    curl --config - -fsS --max-time 20 --get "https://$NEW_UPSTREAM/img" \
     --data-urlencode "url=$PROBE_SOURCE" \
     --data "w=400" \
     --data "q=82" \
-    -H "X-Origin-Secret: $origin_secret" \
     -H "Accept: image/avif,image/webp,*/*;q=0.8" \
     -H "User-Agent: Mozilla/5.0 (compatible; aifeeds-image-transform-preflight/1.0)" \
     -D "$header_file" \

@@ -16,6 +16,9 @@ test("image upstream apply is checksum-gated and mutates only the /img block", (
   assert.match(script, /image-api\.ai-feeds\.com/);
   assert.match(script, /Content-Type:[^\n]*image\/avif|content-type:[^\n]*image\/avif/i);
   assert.match(script, /X-Origin-Secret/);
+  assert.match(script, /curl[\s\S]*--config -/);
+  assert.match(script, /value\[0\] == value\[-1\]/);
+  assert.doesNotMatch(script, /-H "X-Origin-Secret: \$origin_secret"/);
   assert.match(script, /nginx -t[\s\S]*systemctl reload nginx/);
   assert.match(script, /activated\.sha256/);
   assert.match(script, /grep -R -l -Z -a '\/img\?'/);

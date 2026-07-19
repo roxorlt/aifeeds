@@ -53,7 +53,7 @@ Worker 自定义域即可恢复转换。Cloudflare 官方也说明 `cf.image` �
 
 ```text
 deploy/nginx/aifeeds-image-transform-upstream-apply.sh
-SHA-256 6a387024cf9e1874c698d886700b2b37170ca31368e66a6e3ab8ba7bc6fb2d9f
+SHA-256 d78507275ecab6bfcb8fd4954b460886adec02a88afeed0bd9f43cd50341a6e6
 
 deploy/nginx/aifeeds-image-transform-upstream-rollback.sh
 SHA-256 501b48c80c2f297c6c63cfae794c488763bc24617f691946b99ea0b593f9bbe9
@@ -69,10 +69,11 @@ apply 脚本只接受当前生产已激活的两份精确基线：
 55630f8c73aa8ee9cce056daa064788d57cbc54be48a354b3f163f6441ba6837
 ```
 
-它会先从现有 `/img` location 内读取 origin secret，但不会输出；用该 secret 直连新域，要求返回
-小于 30KB 的 AVIF 后才允许继续。修改只发生在 `/img` block 的 `proxy_pass`、`Host` 和
-`proxy_ssl_name` 三行。候选配置通过 `nginx -t` 后才写入、定向清理 `/img?` 缓存并 reload；
-任一步失败自动恢复。
+它会先从现有 `/img` location 内读取 origin secret，去掉 Nginx 可选引号后只接受有限安全字符，
+不输出 secret，也不把它放进 curl argv 或普通临时文件；敏感 header 经 `curl --config -` 的
+stdin 传入。直连新域必须返回小于 30KB 的 AVIF 才允许继续。修改只发生在 `/img` block 的
+`proxy_pass`、`Host` 和 `proxy_ssl_name` 三行。候选配置通过 `nginx -t` 后才写入、定向清理
+`/img?` 缓存并 reload；任一步失败自动恢复。
 
 rollback 只接受 apply 创建的 root-only 备份，先验证 manifest 和当前激活配置的精确 SHA。
 回滚过程另存 rescue 配置；恢复、清理或 reload 失败会恢复回滚前状态并输出
