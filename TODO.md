@@ -10,6 +10,11 @@
 
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 
+- [ ] **GSC 旧内容深链 canonical**（2026-07-20，branch
+  `codex/fix-gsc-deeplink-canonicals`）：生产 `/t/`、`/g/`、`/ph/`、`/h/`、`/o/`
+  SSR 壳错误继承首页 canonical，按已有 `/i/...` 实体页做响应级映射；保留 SPA 抽屉交互，
+  不对预期 redirect/404/noindex 状态做伪修复。设计与证据见
+  [`docs/plans/2026-07-20-gsc-deeplink-canonical-fix.md`](docs/plans/2026-07-20-gsc-deeplink-canonical-fix.md)。
 - [x] 完成 GSC Unicode、sitemap/孤岛页/无出站链接、Product Hunt GIF、移动请求策略和
   waterfall SSR 缓存的代码/线上证据归因；完整实施计划见
   [`docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md`](docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md)。
