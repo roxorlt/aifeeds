@@ -8,13 +8,6 @@
 
 ## 进行中
 
-### A7. 瀑布流临近底部自动分页（2026-07-19，branch `codex/auto-waterfall-pagination`）
-
-- [x] 使用移动端 `#root` / PC viewport 的 `IntersectionObserver` 临近触发下一页。
-- [x] 保留手动加载与失败重试兜底，阻止重复请求和失败自动重试循环。
-- [ ] 完成 production 验证；本地 368 项单测、lint、SSR build、55 项五设备矩阵及 staging
-  25 项远程矩阵已全绿。
-
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 
 - [x] 完成 GSC Unicode、sitemap/孤岛页/无出站链接、Product Hunt GIF、移动请求策略和
@@ -449,6 +442,15 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 ---
 
 ## 已完成
+
+### A7. 瀑布流临近底部自动分页（2026-07-19，PR #206）
+
+- [x] 使用移动端 `#root` / PC viewport 的 `IntersectionObserver` 在距底部 600px 时触发下一页。
+- [x] 保留手动加载与失败重试兜底，阻止重复请求和失败自动重试循环。
+- [x] 完成本地 368 项单测、lint、SSR build、55 项五设备矩阵及 staging 25 项远程矩阵。
+- [x] production workflow `29685573287` 成功部署 `cf0223e`；生产匿名烟测中桌面 Chromium 与
+  移动 WebKit 均由 24 张自动追加到 48 张且各只发 1 次分页请求，移动 `#root` → PC viewport
+  observer 重绑定通过。
 
 ### 2026-05-10 — 项目重命名 + CICD + 微信浏览器提示
 - [x] **项目重命名 xlist-scraper → aifeeds**：commit `b7e9afe` + `a33f317`，加身份卡 + 删 chrome skill 残留 + CLAUDE.md 同步
