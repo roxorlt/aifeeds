@@ -318,6 +318,7 @@ export interface Env {
   DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
   NEWS_CODEX_PUSH?: string;               // 行业新闻板块是否推进 Codex:'1'=开;不设/其他=关(等下游 Codex 适配好 news 板块再开,翻 flag 即生效)
   DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
+  CC_MIRROR_ENABLED?: string;             // '1'=启用 .cc 内容镜像生成/同步链；缺省关闭
   INDEXNOW_KEY?: string;                  // IndexNow 提交 key(SEO 快速收录)。未配置时 pingIndexNow 静默跳过。secret 进 .secrets/aifeeds-{prod,staging}.env
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
