@@ -114,4 +114,44 @@ bash -n apply/rollback: pass
 
 ## 生产执行记录
 
-待 feature staging、main Worker deploy 和 VPS 激活完成后追加。
+PR #201 已合入 `main`：
+
+```text
+main merge: 41244c76a80d01dc342e332c74c0a69c5a775550
+production Worker run: 29680194836
+image custom domain: image-api.ai-feeds.com -> xlist-api production
+Nginx backup: /root/aifeeds-image-transform-upstream-20260719T084215Z
+activated site SHA:
+72e41a211d2b74f179916c253eb6fbc91e74688bdc122cacfeaf7b0acb43c199
+```
+
+由 VPS 直达本机 Nginx 的正式 `/img` 验证结果：
+
+```text
+AVIF: image/avif, MISS -> HIT, 10,045 B
+WebP: image/webp, MISS -> HIT, 10,912 B
+JPEG: image/jpeg, MISS -> HIT, 11,794 B
+```
+
+三者内容 SHA 与 staging 自定义域验证结果完全一致，说明浏览器到香港 VPS 的入口未改变，
+而 Cloudflare 图片转换和 Nginx 分格式缓存均已实际生效。
+
+### 发布回归与恢复
+
+首次生产部署还暴露了一项独立的路由配置陷阱：当 Wrangler 配置出现 custom-domain
+`routes` 且没有显式声明 `workers_dev` 时，Cloudflare 会在下一次部署将它推断为
+`false`。生产 Nginx 的一般 API 仍以 `xlist-api.ltsms86.workers.dev` 为上游，因此部署后
+该链路短暂返回 Cloudflare 1042；图片链路因已改走自定义域而不受影响。
+
+2026-07-19 16:49 CST 通过 Cloudflare 官方 API 将 `xlist-api` 的 workers.dev 中继从
+`enabled: false` 恢复为 `enabled: true`。恢复后从公网及 VPS 内侧验证：
+
+```text
+/api/sources                                      200
+/api/items?source_type=x_list&limit=1             200
+/api/items?source_type=github&limit=1             200
+/api/items?limit=1                                200
+```
+
+后续修复在 production 与 staging 配置中都显式声明 `workers_dev = true`，并新增契约测试。
+该配置必须与自定义域 route 一起保留；以后 route 变更不能依赖 Wrangler 的推断默认值。

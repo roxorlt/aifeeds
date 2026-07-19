@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 # nodejs_compat: required by @cloudflare/puppeteer (uses node:buffer internally)
 compatibility_flags = ["nodejs_compat"]
+# Production Nginx still uses xlist-api.ltsms86.workers.dev for the general API
+# relay. Wrangler otherwise infers false once custom-domain routes are present.
+workers_dev = true
 
 # PR5 share poster：把 woff2 字体子集 + resvg wasm 当二进制 asset 打进 worker bundle。
 # *.wasm 走 wrangler 默认的 CompiledWasm rule（返回 WebAssembly.Module，给 resvg initWasm 用）。
@@ -172,6 +175,8 @@ class_name = "DigestDeliverWorkflow"
 [env.staging]
 name = "xlist-api-staging"
 compatibility_flags = ["nodejs_compat"]
+# Keep the staging workers.dev route explicit for parity and emergency fallback.
+workers_dev = true
 
 [[env.staging.d1_databases]]
 binding = "DB"

@@ -82,6 +82,9 @@ describe('public media transport contract', () => {
 
   test('production preserves admin and adds a dedicated image-transform custom domain', () => {
     const productionConfig = wranglerConfig.split('[env.staging]')[0];
+    const stagingConfig = wranglerConfig.split('[env.staging]')[1];
+    expect(productionConfig).toMatch(/^workers_dev = true$/m);
+    expect(stagingConfig).toMatch(/^workers_dev = true$/m);
     expect(productionConfig).toMatch(
       /\[\[routes\]\]\s+pattern = "admin\.ai-feeds\.com"\s+custom_domain = true/,
     );
