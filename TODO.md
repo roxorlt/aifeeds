@@ -12,8 +12,8 @@
 
 - [x] 使用移动端 `#root` / PC viewport 的 `IntersectionObserver` 临近触发下一页。
 - [x] 保留手动加载与失败重试兜底，阻止重复请求和失败自动重试循环。
-- [ ] 完成 staging 与 production 验证；本地 368 项单测、lint、SSR build 和 50 项五设备
-  浏览器矩阵已全绿。
+- [ ] 完成 production 验证；本地 368 项单测、lint、SSR build、55 项五设备矩阵及 staging
+  25 项远程矩阵已全绿。
 
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 

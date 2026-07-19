@@ -283,6 +283,7 @@ test("waterfall staging has an exact-host five-device remote browser gate", () =
   assert.match(remoteSpec, /staging loads a bounded page near the footer/);
   assert.match(remoteSpec, /scrollIntoViewIfNeeded/);
   assert.match(remoteSpec, /paginationRequests/);
+  assert.match(remoteSpec, /staging pagination observer follows the responsive scroll root/);
   assert.match(remoteSpec, /staging view switch persists classic/);
 });
 
