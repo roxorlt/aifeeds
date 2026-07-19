@@ -1,6 +1,6 @@
 import {
-  ITEM_CN_NOT_SENSITIVE_SQL,
-  ITEM_NOT_DEDUPED_SQL,
+  itemCnNotSensitiveSql,
+  itemNotDedupedSql,
 } from './item-page-policy';
 
 export const ARCHIVE_SOURCES = ['x', 'gh', 'ph', 'paper', 'news'] as const;
@@ -32,6 +32,8 @@ const PAGE_SOURCE: Record<ArchiveSource, string> = {
   news: 'news',
 };
 const ARCHIVE_EFFECTIVE_TIME = "COALESCE(NULLIF(i.published_at, ''), i.scraped_at)";
+const ITEM_CN_NOT_SENSITIVE_SQL = itemCnNotSensitiveSql('i.extra');
+const ITEM_NOT_DEDUPED_SQL = itemNotDedupedSql('i.extra');
 export const ITEM_ELIGIBILITY = `i.is_relevant = 1
         AND i.deleted_at IS NULL
         AND ${ITEM_NOT_DEDUPED_SQL}

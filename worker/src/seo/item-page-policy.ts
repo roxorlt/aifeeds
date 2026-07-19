@@ -25,28 +25,43 @@ export function isDedupSuppressed(extra: string | null | undefined): boolean {
   }
 }
 
-const CN_SENSITIVE_VALUE_SQL = `(CASE
-          WHEN json_valid(i.extra) THEN
+// extraExpression 只能由代码内调用点提供（当前为 `i.extra` / 测试别名），不得接收请求输入。
+function cnSensitiveValueSql(extraExpression: string): string {
+  return `(CASE
+          WHEN json_valid(${extraExpression}) THEN
             CASE
-              WHEN json_type(i.extra, '$.cn_sensitive') IN ('integer', 'real') THEN
-                CASE WHEN json_extract(i.extra, '$.cn_sensitive') = 1 THEN 1 ELSE 0 END
+              WHEN json_type(${extraExpression}, '$.cn_sensitive') IN ('integer', 'real') THEN
+                CASE WHEN json_extract(${extraExpression}, '$.cn_sensitive') = 1 THEN 1 ELSE 0 END
               ELSE 0
             END
           ELSE 0
         END)`;
+}
 
-export const ITEM_CN_SENSITIVE_SQL = `${CN_SENSITIVE_VALUE_SQL} = 1`;
-export const ITEM_CN_NOT_SENSITIVE_SQL = `${CN_SENSITIVE_VALUE_SQL} != 1`;
+export function itemCnSensitiveSql(extraExpression: string): string {
+  return `${cnSensitiveValueSql(extraExpression)} = 1`;
+}
 
-const DEDUP_SUPPRESSED_VALUE_SQL = `(CASE
-          WHEN json_valid(i.extra) THEN
+export function itemCnNotSensitiveSql(extraExpression: string): string {
+  return `${cnSensitiveValueSql(extraExpression)} != 1`;
+}
+
+function dedupSuppressedValueSql(extraExpression: string): string {
+  return `(CASE
+          WHEN json_valid(${extraExpression}) THEN
             CASE
-              WHEN json_extract(i.extra, '$.dedup_of') IS NULL THEN 0
-              WHEN json_extract(i.extra, '$.dedup_of') = '' THEN 0
+              WHEN json_extract(${extraExpression}, '$.dedup_of') IS NULL THEN 0
+              WHEN json_extract(${extraExpression}, '$.dedup_of') = '' THEN 0
               ELSE 1
             END
           ELSE 0
         END)`;
+}
 
-export const ITEM_NOT_DEDUPED_SQL = `${DEDUP_SUPPRESSED_VALUE_SQL} != 1`;
-export const ITEM_DEDUPED_SQL = `${DEDUP_SUPPRESSED_VALUE_SQL} = 1`;
+export function itemNotDedupedSql(extraExpression: string): string {
+  return `${dedupSuppressedValueSql(extraExpression)} != 1`;
+}
+
+export function itemDedupedSql(extraExpression: string): string {
+  return `${dedupSuppressedValueSql(extraExpression)} = 1`;
+}

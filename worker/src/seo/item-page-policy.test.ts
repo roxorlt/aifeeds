@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 
-import { isCnSensitive, isDedupSuppressed } from './item-page-policy';
+import {
+  isCnSensitive,
+  isDedupSuppressed,
+  itemCnNotSensitiveSql,
+} from './item-page-policy';
 import { ITEM_ELIGIBILITY } from './item-archive';
 
 function eligibilityIds(rows: Array<{ id: string; extra: string | null }>): string[] {
@@ -29,6 +33,29 @@ function eligibilityIds(rows: Array<{ id: string; extra: string | null }>): stri
 }
 
 describe('item page JSON compliance policy contract', () => {
+  test('SQL builder 接受调用点提供的受控 extra expression，不隐式依赖 i alias', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`CREATE TABLE items (id TEXT PRIMARY KEY, extra TEXT);`);
+    db.prepare(`INSERT INTO items (id, extra) VALUES (?, ?)`).run(
+      'malformed',
+      '{malformed',
+    );
+    db.prepare(`INSERT INTO items (id, extra) VALUES (?, ?)`).run(
+      'sensitive',
+      '{"cn_sensitive":1}',
+    );
+
+    const ids = (
+      db
+        .prepare(
+          `SELECT x.id FROM items x WHERE ${itemCnNotSensitiveSql('x.extra')} ORDER BY x.id`,
+        )
+        .all() as Array<{ id: string }>
+    ).map((row) => row.id);
+    expect(ids).toEqual(['malformed']);
+    db.close();
+  });
+
   test('TypeScript 仅把 JSON number 1 判为敏感', () => {
     expect(isCnSensitive('{"cn_sensitive":1}')).toBe(true);
     expect(isCnSensitive('{"cn_sensitive":1.0}')).toBe(true);

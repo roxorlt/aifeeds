@@ -114,6 +114,20 @@ function makeDb(seed: ItemSeed[] = []) {
   const effectiveTime = (r: Record<string, unknown>): string =>
     String(r.published_at || r.scraped_at || '');
 
+  const complianceViolations = (): Array<Record<string, unknown>> =>
+    items
+      .filter((r) => {
+        const page = pages.get(String(r.id));
+        return (
+          page?.status === 'live' &&
+          (isSensitive(r) ||
+            Number(r.is_relevant) !== 1 ||
+            r.deleted_at != null ||
+            isDeduped(r))
+        );
+      })
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
   const db = {
     _items: items,
     _pages: pages,
@@ -138,17 +152,11 @@ function makeDb(seed: ItemSeed[] = []) {
           }
           if (/COUNT\(\*\)/i.test(sql)) {
             if (/JOIN items i ON i\.id = p\.item_id/i.test(sql)) {
-              const violations = items.filter((r) => {
-                const page = pages.get(String(r.id));
-                return (
-                  page?.status === 'live' &&
-                  (isSensitive(r) ||
-                    Number(r.is_relevant) !== 1 ||
-                    r.deleted_at != null ||
-                    isDeduped(r))
-                );
-              });
-              return { n: violations.length } as T;
+              const violations = complianceViolations();
+              const n = /LIMIT \?/i.test(sql)
+                ? violations.slice(0, Number(binds[0])).length
+                : violations.length;
+              return { n } as T;
             }
             if (/generated_at >= \?/i.test(sql)) {
               // force 计数：binds = [...sts, cutoff]
@@ -191,23 +199,6 @@ function makeDb(seed: ItemSeed[] = []) {
               .slice(0, 3);
             return { results: res as unknown as T[] };
           }
-          if (/SELECT p\.item_id/i.test(sql) && /JOIN items i ON i\.id = p\.item_id/i.test(sql)) {
-            const limit = Number(binds[binds.length - 1]);
-            const res = items
-              .filter((r) => {
-                const page = pages.get(String(r.id));
-                return (
-                  page?.status === 'live' &&
-                  (isSensitive(r) ||
-                    Number(r.is_relevant) !== 1 ||
-                    r.deleted_at != null ||
-                    isDeduped(r))
-                );
-              })
-              .slice(0, limit)
-              .map((r) => ({ item_id: r.id }));
-            return { results: res as unknown as T[] };
-          }
           if (/generated_at >= \?/i.test(sql)) {
             // force 选取：binds = [...sourceTypes, cutoff, limit]
             const limit = Number(binds[binds.length - 1]);
@@ -231,16 +222,30 @@ function makeDb(seed: ItemSeed[] = []) {
         },
         async run() {
           runs.push({ sql, binds });
+          let changes = 0;
           if (/INSERT INTO item_pages/i.test(sql)) {
             const [item_id, source, url_path, generated_at] = binds as [string, string, string, string];
             pages.set(item_id, { item_id, source, url_path, generated_at, status: 'live' });
-          } else if (/UPDATE item_pages SET status/i.test(sql)) {
-            for (const id of binds) {
-              const p = pages.get(String(id));
-              if (p) p.status = 'gone';
+            changes = 1;
+          } else if (/UPDATE\s+item_pages\s+SET\s+status\s*=\s*'gone'/i.test(sql)) {
+            if (/SELECT p\.item_id/i.test(sql)) {
+              const limit = Number(binds[0]);
+              for (const row of complianceViolations().slice(0, limit)) {
+                const page = pages.get(String(row.id));
+                if (page?.status === 'live') {
+                  page.status = 'gone';
+                  changes++;
+                }
+              }
+            } else {
+              const page = pages.get(String(binds[0]));
+              if (page) {
+                page.status = 'gone';
+                changes = 1;
+              }
             }
           }
-          return { success: true };
+          return { success: true, meta: { changes } };
         },
       };
       return stmt;

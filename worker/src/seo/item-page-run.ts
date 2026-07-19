@@ -19,10 +19,10 @@ import { fetchItemRow } from '../digest/item-fetch';
 import { itemPageR2Key, itemPagePath, renderItem } from '../digest/render';
 import { renderItemPageHtml } from './item-page';
 import {
-  ITEM_CN_NOT_SENSITIVE_SQL,
-  ITEM_CN_SENSITIVE_SQL,
-  ITEM_DEDUPED_SQL,
-  ITEM_NOT_DEDUPED_SQL,
+  itemCnNotSensitiveSql,
+  itemCnSensitiveSql,
+  itemDedupedSql,
+  itemNotDedupedSql,
   isCnSensitive,
   isDedupSuppressed,
 } from './item-page-policy';
@@ -51,6 +51,11 @@ const SOURCE_TYPES: Record<DigestSource, string[]> = {
   news: ['blog', 'podcast'],
   clawhub: ['clawhub'], // 占位：不出页，但让映射类型完整
 };
+
+const ITEM_CN_NOT_SENSITIVE_SQL = itemCnNotSensitiveSql('i.extra');
+const ITEM_CN_SENSITIVE_SQL = itemCnSensitiveSql('i.extra');
+const ITEM_NOT_DEDUPED_SQL = itemNotDedupedSql('i.extra');
+const ITEM_DEDUPED_SQL = itemDedupedSql('i.extra');
 
 // composite id 的 source_type 前缀 → DigestSource（与 item-page.ts digestSourceForId 同口径）。
 // 出页 5 类返回对应 DigestSource；clawhub 返回 'clawhub'（后续被 itemPageR2Key null gate 挡）；
@@ -273,28 +278,37 @@ export async function reconcileItemPageCompliance(
   env: Env,
   opts: { limit?: number; dry?: boolean } = {},
 ): Promise<{ scanned: number; markedGone: number; remaining: number }> {
-  const limit = Math.min(Math.max(opts.limit ?? 300, 1), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT p.item_id
+  const rawLimit = opts.limit;
+  const normalizedLimit =
+    rawLimit == null || !Number.isFinite(rawLimit) ? 300 : Math.trunc(rawLimit);
+  const limit = Math.min(Math.max(normalizedLimit, 1), 1000);
+  const candidateSql = `SELECT p.item_id
      FROM item_pages p
      JOIN items i ON i.id = p.item_id
      WHERE ${LIVE_PAGE_COMPLIANCE_VIOLATION}
      ORDER BY p.item_id ASC
-     LIMIT ?`,
-  )
-    .bind(limit)
-    .all<{ item_id: string }>();
-  const ids = (rows.results || []).map((row) => row.item_id);
+     LIMIT ?`;
 
+  let scanned = 0;
   let markedGone = 0;
-  if (!opts.dry && ids.length > 0) {
-    const placeholders = ids.map(() => '?').join(',');
-    await env.DB.prepare(
-      `UPDATE item_pages SET status = 'gone' WHERE item_id IN (${placeholders})`,
+  if (opts.dry) {
+    const selected = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM (${candidateSql}) candidates`,
     )
-      .bind(...ids)
+      .bind(limit)
+      .first<{ n: number }>();
+    scanned = Number(selected?.n ?? 0);
+  } else {
+    const updated = await env.DB.prepare(
+      `UPDATE item_pages
+       SET status = 'gone'
+       WHERE status = 'live'
+         AND item_id IN (${candidateSql})`,
+    )
+      .bind(limit)
       .run();
-    markedGone = ids.length;
+    markedGone = Number(updated.meta?.changes ?? 0);
+    scanned = markedGone;
   }
 
   const count = await env.DB.prepare(
@@ -305,7 +319,7 @@ export async function reconcileItemPageCompliance(
   ).first<{ n: number }>();
 
   return {
-    scanned: ids.length,
+    scanned,
     markedGone,
     remaining: Number(count?.n ?? 0),
   };
