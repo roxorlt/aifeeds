@@ -25,6 +25,22 @@ const wranglerConfig = fs.readFileSync(
   'utf8',
 );
 
+function readBooleanFromTomlTable(config: string, table: string, key: string): boolean | undefined {
+  let currentTable = '';
+  for (const rawLine of config.split('\n')) {
+    const line = rawLine.trim();
+    const tableMatch = line.match(/^\[\[?([^\]]+)\]\]?$/);
+    if (tableMatch) {
+      currentTable = tableMatch[1];
+      continue;
+    }
+    if (currentTable !== table) continue;
+    const valueMatch = line.match(new RegExp(`^${key}\\s*=\\s*(true|false)(?:\\s*#.*)?$`));
+    if (valueMatch) return valueMatch[1] === 'true';
+  }
+  return undefined;
+}
+
 describe('public media transport contract', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -82,9 +98,8 @@ describe('public media transport contract', () => {
 
   test('production preserves admin and adds a dedicated image-transform custom domain', () => {
     const productionConfig = wranglerConfig.split('[env.staging]')[0];
-    const stagingConfig = wranglerConfig.split('[env.staging]')[1];
-    expect(productionConfig).toMatch(/^workers_dev = true$/m);
-    expect(stagingConfig).toMatch(/^workers_dev = true$/m);
+    expect(readBooleanFromTomlTable(wranglerConfig, '', 'workers_dev')).toBe(true);
+    expect(readBooleanFromTomlTable(wranglerConfig, 'env.staging', 'workers_dev')).toBe(true);
     expect(productionConfig).toMatch(
       /\[\[routes\]\]\s+pattern = "admin\.ai-feeds\.com"\s+custom_domain = true/,
     );
