@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the AI Feeds mainland static content mirror every ten minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30
+Persistent=true
+Unit=aifeeds-cc-sync.service
+
+[Install]
+WantedBy=timers.target
