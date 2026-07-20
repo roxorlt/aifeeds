@@ -28,10 +28,12 @@ import type { CcPageRunResult } from "./page-run";
 import { buildCcReviewText } from "./review-text";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const migration = fs.readFileSync(
-  path.resolve(here, "../../migrations/029-cc-content-mirror.sql"),
-  "utf8",
-);
+const migration = [
+  "029-cc-content-mirror.sql",
+  "030-cc-content-mirror-decision-token.sql",
+].map((file) =>
+  fs.readFileSync(path.resolve(here, "../../migrations", file), "utf8")
+).join("\n");
 
 class TestD1 {
   readonly sqlite = new DatabaseSync(":memory:");
@@ -40,6 +42,7 @@ class TestD1 {
   activeItemReads = 0;
   maxActiveItemReads = 0;
   itemReadDelayMs = 0;
+  beforeNextBatch?: (db: TestD1) => void;
   afterNextBatch?: (db: TestD1) => void;
   failDecisionStateRead = false;
 
@@ -164,6 +167,9 @@ class TestD1 {
   }
 
   async batch(statements: Array<{ run(): Promise<unknown> }>): Promise<unknown[]> {
+    const beforeBatch = this.beforeNextBatch;
+    this.beforeNextBatch = undefined;
+    beforeBatch?.(this);
     this.sqlite.exec("BEGIN");
     try {
       const results: unknown[] = [];
@@ -873,16 +879,27 @@ describe("cc mirror manual decisions", () => {
     });
   });
 
-  it("rejects deny A after allow B supersedes it, even though A already made the page gone", async () => {
+  it("rejects deny A after allow B publishes H1 before A can delete H0", async () => {
     const { db, env } = setup();
     db.insertItem({ id: "x_list:1" });
     db.insertLivePage("x_list:1");
-    db.afterNextBatch = (state) => {
+    const successorHash = "b".repeat(64);
+    db.beforeNextBatch = (state) => {
       state.sqlite.prepare(
         `UPDATE cc_item_overrides
          SET action = 'allow', reason = 'B', decision_token = 'token-b'
          WHERE item_id = ?`,
       ).run("x_list:1");
+      state.sqlite.prepare(
+        `UPDATE cc_item_pages
+         SET status = 'live', content_hash = ?, reason = 'B live'
+         WHERE item_id = ?`,
+      ).run(successorHash, "x_list:1");
+      state.sqlite.prepare(
+        `INSERT INTO cc_page_events (
+           item_id, op, content_hash, created_at
+         ) VALUES (?, 'upsert', ?, '2026-07-21T00:00:00.000Z')`,
+      ).run("x_list:1", successorHash);
     };
 
     const response = await handleCcMirrorAdmin(
@@ -901,14 +918,26 @@ describe("cc mirror manual decisions", () => {
       action: "deny",
       override_persisted: true,
       current_decision_action: "allow",
-      current_page_status: "gone",
+      current_page_status: "live",
     });
+    expect(
+      db.sqlite.prepare(
+        `SELECT status, content_hash
+         FROM cc_item_pages
+         WHERE item_id = ?`,
+      ).get("x_list:1"),
+    ).toEqual({ status: "live", content_hash: successorHash });
+    expect(
+      db.sqlite.prepare(
+        "SELECT op FROM cc_page_events WHERE item_id = ? ORDER BY seq",
+      ).all("x_list:1"),
+    ).toEqual([{ op: "upsert" }]);
   });
 
-  it("rejects allow A after deny B supersedes it, even though A already made the page live", async () => {
+  it("rejects allow A after deny B supersedes it before A can publish", async () => {
     const { db, env } = setup();
     db.insertItem({ id: "x_list:1" });
-    db.afterNextBatch = (state) => {
+    db.beforeNextBatch = (state) => {
       state.sqlite.prepare(
         `UPDATE cc_item_overrides
          SET action = 'deny', reason = 'B', decision_token = 'token-b'
@@ -932,15 +961,20 @@ describe("cc mirror manual decisions", () => {
       action: "allow",
       override_persisted: true,
       current_decision_action: "deny",
-      current_page_status: "live",
+      current_page_status: "missing",
     });
+    expect(
+      db.sqlite.prepare(
+        "SELECT COUNT(*) AS n FROM cc_page_events WHERE item_id = ?",
+      ).get("x_list:1"),
+    ).toEqual({ n: 0 });
   });
 
   it("uses the token to reject a same-action successor", async () => {
     const { db, env } = setup();
     db.insertItem({ id: "x_list:1" });
     db.insertLivePage("x_list:1");
-    db.afterNextBatch = (state) => {
+    db.beforeNextBatch = (state) => {
       state.sqlite.prepare(
         `UPDATE cc_item_overrides
          SET action = 'deny', reason = 'newer deny',
@@ -963,8 +997,18 @@ describe("cc mirror manual decisions", () => {
       error: "decision_superseded",
       action: "deny",
       current_decision_action: "deny",
-      current_page_status: "gone",
+      current_page_status: "live",
     });
+    expect(
+      db.sqlite.prepare(
+        "SELECT status FROM cc_item_pages WHERE item_id = ?",
+      ).get("x_list:1"),
+    ).toEqual({ status: "live" });
+    expect(
+      db.sqlite.prepare(
+        "SELECT COUNT(*) AS n FROM cc_page_events WHERE item_id = ?",
+      ).get("x_list:1"),
+    ).toEqual({ n: 0 });
   });
 
   it("does not report success when the immediate sync fails", async () => {

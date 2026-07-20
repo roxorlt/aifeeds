@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const migrationPath = path.resolve(here, '../../migrations/029-cc-content-mirror.sql');
+const migration029Path = path.resolve(here, '../../migrations/029-cc-content-mirror.sql');
+const migration030Path = path.resolve(
+  here,
+  '../../migrations/030-cc-content-mirror-decision-token.sql',
+);
 const schemaPath = path.resolve(here, '../../schema.sql');
 
 type TableInfoRow = {
@@ -41,8 +45,8 @@ const expectedColumns: Record<string, Array<[string, string, number, number]>> =
     ['item_id', 'TEXT', 0, 1],
     ['action', 'TEXT', 1, 0],
     ['reason', 'TEXT', 1, 0],
-    ['decision_token', 'TEXT', 1, 0],
     ['updated_at', 'TEXT', 1, 0],
+    ['decision_token', 'TEXT', 1, 0],
   ],
   cc_item_pages: [
     ['item_id', 'TEXT', 0, 1],
@@ -71,9 +75,14 @@ const expectedIndexes: Record<string, string[]> = {
   idx_cc_page_events_item: ['item_id', 'seq'],
 };
 
-function readMigration(): string {
-  expect(fs.existsSync(migrationPath), '029 migration must exist').toBe(true);
-  return fs.readFileSync(migrationPath, 'utf8');
+function readMigration029(): string {
+  expect(fs.existsSync(migration029Path), '029 migration must exist').toBe(true);
+  return fs.readFileSync(migration029Path, 'utf8');
+}
+
+function readMigration030(): string {
+  expect(fs.existsSync(migration030Path), '030 migration must exist').toBe(true);
+  return fs.readFileSync(migration030Path, 'utf8');
 }
 
 function tableInfo(db: DatabaseSync, tableName: string): TableInfoRow[] {
@@ -133,21 +142,51 @@ function extractStatement(sql: string, kind: 'TABLE' | 'INDEX', name: string): s
   return match![0];
 }
 
-describe('029 cc content mirror DB contract', () => {
-  test('migration is idempotent and creates the exact tables and indexes', () => {
+describe('029 + 030 cc content mirror DB contract', () => {
+  test('ordered migrations create the exact tables and indexes', () => {
     const db = new DatabaseSync(':memory:');
-    const migration = readMigration();
+    const migration029 = readMigration029();
 
-    db.exec(migration);
-    db.exec(migration);
+    db.exec(migration029);
+    db.exec(migration029);
+    db.exec(readMigration030());
 
     assertContract(db);
     db.close();
   });
 
+  test('030 upgrades an existing 029 database and safely backfills old overrides', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(readMigration029());
+    db.prepare(
+      `INSERT INTO cc_item_overrides (item_id, action, reason, updated_at)
+       VALUES ('blog:legacy', 'allow', 'legacy row',
+         '2026-07-20T00:00:00.000Z')`,
+    ).run();
+
+    db.exec(readMigration030());
+
+    expect(
+      tableInfo(db, 'cc_item_overrides').map((column) => column.name),
+    ).toContain('decision_token');
+    expect(
+      db.prepare(
+        `SELECT action, reason, decision_token
+         FROM cc_item_overrides
+         WHERE item_id = 'blog:legacy'`,
+      ).get(),
+    ).toEqual({
+      action: 'allow',
+      reason: 'legacy row',
+      decision_token: '',
+    });
+    db.close();
+  });
+
   test('page event sequence is globally increasing and AUTOINCREMENT never reuses a deleted seq', () => {
     const db = new DatabaseSync(':memory:');
-    db.exec(readMigration());
+    db.exec(readMigration029());
+    db.exec(readMigration030());
     const insert = db.prepare(
       `INSERT INTO cc_page_events (item_id, op, content_hash, created_at)
        VALUES (?, ?, ?, ?)`,

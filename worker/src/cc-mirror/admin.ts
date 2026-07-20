@@ -266,7 +266,12 @@ async function applyCcMirrorDecision(
 
   let sync: CcPageRunResult;
   try {
-    sync = await syncCcItemPage(env, itemId);
+    sync = await syncCcItemPage(env, itemId, {
+      expectedDecision: {
+        action,
+        token: decisionToken,
+      },
+    });
   } catch {
     // The override is durable audit state, but the requested publish/unpublish
     // side effect did not complete. Never turn that partial outcome into 200.

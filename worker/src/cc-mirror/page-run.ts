@@ -22,6 +22,17 @@ export interface CcPageRunResult {
   eventCreated: boolean;
 }
 
+export interface CcExpectedDecision {
+  action: "allow" | "deny";
+  token: string;
+}
+
+export interface CcPageRunOptions {
+  forceReview?: boolean;
+  dry?: boolean;
+  expectedDecision?: CcExpectedDecision;
+}
+
 interface StoredPage {
   item_id: string;
   content_hash: string | null;
@@ -55,7 +66,7 @@ export function ccItemPageR2Key(
 export async function syncCcItemPage(
   env: Env,
   itemId: string,
-  opts: { forceReview?: boolean; dry?: boolean } = {},
+  opts: CcPageRunOptions = {},
 ): Promise<CcPageRunResult> {
   const urlPath = itemPagePath(itemId);
   if (!urlPath) {
@@ -72,6 +83,7 @@ export async function syncCcItemPage(
       itemId,
       review.reason,
       opts.dry === true,
+      opts.expectedDecision,
     );
   }
 
@@ -87,6 +99,7 @@ export async function syncCcItemPage(
       itemId,
       bound.reason,
       opts.dry === true,
+      opts.expectedDecision,
     );
   }
 
@@ -98,6 +111,7 @@ export async function syncCcItemPage(
       itemId,
       "unsupported-source",
       opts.dry === true,
+      opts.expectedDecision,
     );
   }
 
@@ -116,6 +130,7 @@ export async function syncCcItemPage(
       itemId,
       "render-failed",
       opts.dry === true,
+      opts.expectedDecision,
     );
   }
   const contentHash = await sha256Hex(html);
@@ -139,13 +154,14 @@ export async function syncCcItemPage(
   const publishedAt = String(
     row.published_at || row.scraped_at || "",
   ).trim() || null;
-  const authSql = finalAuthorizationSql();
+  const authSql = finalAuthorizationSql(opts.expectedDecision);
   const authBindings = finalAuthorizationBindings(
     itemId,
     row,
     bound.sourcePolicy,
     bound.passProvenance,
     bound.reviewTextHash,
+    opts.expectedDecision,
   );
   const batchResults = await env.DB.batch([
     env.DB.prepare(
@@ -215,6 +231,7 @@ export async function syncCcItemPage(
       env,
       itemId,
       prior,
+      opts.expectedDecision,
     );
   }
 
@@ -246,6 +263,7 @@ async function markCcItemPageGoneIfCurrent(
   itemId: string,
   reason: string,
   expectedContentHash: string,
+  expectedDecision?: CcExpectedDecision,
 ): Promise<boolean> {
   const prior = await getStoredPage(env, itemId);
   if (
@@ -255,6 +273,11 @@ async function markCcItemPageGoneIfCurrent(
   ) return false;
 
   const now = new Date().toISOString();
+  const decisionSql = expectedDecisionAuthorizationSql(expectedDecision);
+  const decisionBindings = expectedDecisionAuthorizationBindings(
+    itemId,
+    expectedDecision,
+  );
   const results = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO cc_page_events (
@@ -267,14 +290,28 @@ async function markCcItemPageGoneIfCurrent(
          WHERE item_id = ?
            AND status = 'live'
            AND content_hash = ?
-       )`,
-    ).bind(itemId, now, itemId, expectedContentHash),
+       )
+       ${decisionSql}`,
+    ).bind(
+      itemId,
+      now,
+      itemId,
+      expectedContentHash,
+      ...decisionBindings,
+    ),
     env.DB.prepare(
       `UPDATE cc_item_pages
        SET status = 'gone', reason = ?, generated_at = ?
        WHERE item_id = ? AND status = 'live'
-         AND content_hash = ?`,
-    ).bind(reason, now, itemId, expectedContentHash),
+         AND content_hash = ?
+         ${decisionSql}`,
+    ).bind(
+      reason,
+      now,
+      itemId,
+      expectedContentHash,
+      ...decisionBindings,
+    ),
   ]);
   return Number(results[0]?.meta?.changes ?? 0) > 0
     && Number(results[1]?.meta?.changes ?? 0) > 0;
@@ -285,7 +322,11 @@ async function transitionToGone(
   itemId: string,
   reason: string,
   dry: boolean,
+  expectedDecision?: CcExpectedDecision,
 ): Promise<CcPageRunResult> {
+  if (expectedDecision?.action === "allow") {
+    return skipped(itemId, dry ? `dry:${reason}` : reason);
+  }
   const prior = await getStoredPage(env, itemId);
   if (!prior) return skipped(itemId, dry ? `dry:${reason}` : reason);
   if (prior.status !== "live") {
@@ -304,6 +345,7 @@ async function transitionToGone(
     itemId,
     reason,
     prior.content_hash,
+    expectedDecision,
   );
   if (!eventCreated) {
     const current = await getStoredPage(env, itemId);
@@ -321,8 +363,12 @@ async function transitionAfterFinalAuthorizationFailure(
   env: Env,
   itemId: string,
   prior: StoredPage | null,
+  expectedDecision?: CcExpectedDecision,
 ): Promise<CcPageRunResult> {
   const reason = "final-authorization-changed";
+  if (expectedDecision?.action === "allow") {
+    return skipped(itemId, reason);
+  }
   if (!prior) return skipped(itemId, reason);
   if (prior.status !== "live" || !prior.content_hash) {
     return {
@@ -338,6 +384,7 @@ async function transitionAfterFinalAuthorizationFailure(
     itemId,
     reason,
     prior.content_hash,
+    expectedDecision,
   );
   if (!eventCreated) return skipped(itemId, reason);
   return {
@@ -376,7 +423,10 @@ async function ensureImmutableVersion(
   });
 }
 
-function finalAuthorizationSql(): string {
+function finalAuthorizationSql(
+  expectedDecision?: CcExpectedDecision,
+): string {
+  const decisionSql = expectedDecisionAuthorizationSql(expectedDecision);
   return `EXISTS (
     SELECT 1
     FROM items i
@@ -403,6 +453,7 @@ function finalAuthorizationSql(): string {
         WHERE invalid_override.item_id = i.id
           AND invalid_override.action <> 'allow'
       )
+      ${decisionSql}
       AND (
         EXISTS (
           SELECT 1
@@ -433,6 +484,7 @@ function finalAuthorizationBindings(
   sourcePolicy: "allow" | "manual",
   passProvenance: "model" | "override",
   expectedReviewTextHash: string,
+  expectedDecision?: CcExpectedDecision,
 ): unknown[] {
   const nullable = (value: unknown): unknown => value ?? null;
   const requiresAllow =
@@ -452,12 +504,35 @@ function finalAuthorizationBindings(
     row.scraped_at ?? null,
     sourcePolicy,
     passProvenance,
+    ...expectedDecisionAuthorizationBindings(itemId, expectedDecision),
     requiresAllow ? 1 : 0,
     passProvenance,
     CC_REVIEW_POLICY_VERSION,
     sourcePolicy,
     expectedReviewTextHash,
   ];
+}
+
+function expectedDecisionAuthorizationSql(
+  expectedDecision?: CcExpectedDecision,
+): string {
+  if (!expectedDecision) return "";
+  return `AND EXISTS (
+        SELECT 1
+        FROM cc_item_overrides decision_override
+        WHERE decision_override.item_id = ?
+          AND decision_override.action = ?
+          AND decision_override.decision_token = ?
+      )`;
+}
+
+function expectedDecisionAuthorizationBindings(
+  itemId: string,
+  expectedDecision?: CcExpectedDecision,
+): unknown[] {
+  return expectedDecision
+    ? [itemId, expectedDecision.action, expectedDecision.token]
+    : [];
 }
 
 function digestSource(

@@ -18,10 +18,12 @@ import {
 } from "./review";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const migration = fs.readFileSync(
-  path.resolve(here, "../../migrations/029-cc-content-mirror.sql"),
-  "utf8",
-);
+const migration = [
+  "029-cc-content-mirror.sql",
+  "030-cc-content-mirror-decision-token.sql",
+].map((file) =>
+  fs.readFileSync(path.resolve(here, "../../migrations", file), "utf8")
+).join("\n");
 
 const SAFE_FLAGS: CcRiskFlags = {
   china_negative: 0,

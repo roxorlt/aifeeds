@@ -18,10 +18,12 @@ import {
 } from "./page-run";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const migration = fs.readFileSync(
-  path.resolve(here, "../../migrations/029-cc-content-mirror.sql"),
-  "utf8",
-);
+const migration = [
+  "029-cc-content-mirror.sql",
+  "030-cc-content-mirror-decision-token.sql",
+].map((file) =>
+  fs.readFileSync(path.resolve(here, "../../migrations", file), "utf8")
+).join("\n");
 
 type MutationHook = (db: StatefulD1) => void;
 
@@ -78,16 +80,20 @@ class StatefulD1 {
     return id;
   }
 
-  setOverride(itemId: string, action: "allow" | "deny"): void {
+  setOverride(
+    itemId: string,
+    action: "allow" | "deny",
+    decisionToken = "fixture-token",
+  ): void {
     this.sqlite.prepare(
       `INSERT INTO cc_item_overrides (
          item_id, action, reason, decision_token, updated_at
-       ) VALUES (?, ?, 'test', 'fixture-token',
+       ) VALUES (?, ?, 'test', ?,
          '2026-07-20T00:00:00.000Z')
        ON CONFLICT(item_id) DO UPDATE SET
          action = excluded.action,
          decision_token = excluded.decision_token`,
-    ).run(itemId, action);
+    ).run(itemId, action, decisionToken);
   }
 
   page(itemId: string): Record<string, unknown> | undefined {
@@ -903,6 +909,56 @@ describe("syncCcItemPage", () => {
     expect(db.page(id)!.status).toBe("live");
     expect(db.page(id)!.content_hash).toBe(live.content_hash);
     expect(reviewHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
+  });
+
+  it("does not publish allow A after a same-action allow B replaces its token", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow", "allow-token-a");
+    db.beforeNextBatch = (state) => {
+      state.setOverride(id, "allow", "allow-token-b");
+    };
+
+    const result = await syncCcItemPage(env, id, {
+      expectedDecision: {
+        action: "allow",
+        token: "allow-token-a",
+      },
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("final-authorization-changed");
+    expect(result.eventCreated).toBe(false);
+    expect(db.page(id)).toBeUndefined();
+    expect(db.events(id)).toHaveLength(0);
+    expect(r2.objects.size).toBe(1);
+  });
+
+  it("does not let deny A remove a live page after same-action deny B replaces its token", async () => {
+    const { db, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow", "initial-allow");
+    await syncCcItemPage(env, id);
+    const liveHash = db.page(id)!.content_hash;
+    db.setOverride(id, "deny", "deny-token-a");
+    db.beforeNextBatch = (state) => {
+      state.setOverride(id, "deny", "deny-token-b");
+    };
+
+    const result = await syncCcItemPage(env, id, {
+      expectedDecision: {
+        action: "deny",
+        token: "deny-token-a",
+      },
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(result.eventCreated).toBe(false);
+    expect(db.page(id)).toMatchObject({
+      status: "live",
+      content_hash: liveHash,
+    });
     expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
   });
 });
