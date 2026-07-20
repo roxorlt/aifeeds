@@ -9,6 +9,7 @@ import {
   rename,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -146,7 +147,6 @@ test('references the static sitemap only when it is a regular non-symlink file',
   for (const [fixture, expected] of [
     ['present', true],
     ['absent', false],
-    ['symlink', false],
   ]) {
     const dirs = await workspace({ staticSitemap: fixture });
     await publishIndexes({
@@ -164,6 +164,15 @@ test('references the static sitemap only when it is a regular non-symlink file',
     );
     assert.match(index, /https:\/\/ai-feeds\.cc\/sitemaps\/archive\.xml/);
   }
+
+  const symlinkDirs = await workspace({ staticSitemap: 'symlink' });
+  await assert.rejects(
+    publishIndexes({
+      ...symlinkDirs,
+      state: state([]),
+    }),
+    /static sitemap|symlink|regular/i,
+  );
 });
 
 test('sorts equal and undated items deterministically after dated items', async () => {
@@ -516,7 +525,7 @@ test('fails closed when a pinned site-root ancestor is swapped before commit', a
         },
       },
     }),
-    /symlink|changed|unsafe.*directory|rollback/i,
+    /symlink|changed|unsafe.*directory|rollback|cleanup/i,
   );
   const remaining = await readdir(path.join(movedParent, 'site'));
   assert.ok(remaining.includes('sitemap-static.xml'));
@@ -558,7 +567,7 @@ test('a state-root ancestor swap fails closed and rolls back the archive commit'
         },
       },
     }),
-    /symlink|changed|unsafe.*directory|rollback/i,
+    /symlink|changed|unsafe.*directory|rollback|cleanup/i,
   );
   assert.equal(
     await readFile(path.join(siteRoot, 'ai-news', 'index.html'), 'utf8'),
@@ -571,6 +580,130 @@ test('a state-root ancestor swap fails closed and rolls back the archive commit'
   );
   await rm(parent);
   await rename(movedParent, parent);
+});
+
+test('rejects a site-root ancestor swap from the archive afterPublish hook', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-site-after-hook-',
+  ));
+  const parent = path.join(base, 'owned-site-parent');
+  const movedParent = path.join(base, 'moved-site-parent');
+  const siteRoot = path.join(parent, 'site');
+  const stateDir = path.join(base, 'state');
+  await mkdir(siteRoot, { recursive: true });
+  await mkdir(stateDir);
+  await writeFile(
+    path.join(siteRoot, 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir,
+      state: state([]),
+      hooks: {
+        async afterPublish(name) {
+          if (name !== 'archive') return;
+          await rename(parent, movedParent);
+          await symlink(movedParent, parent);
+        },
+      },
+    }),
+    /symlink|changed|unsafe.*directory|cleanup|rollback/i,
+  );
+  await rm(parent);
+  await rename(movedParent, parent);
+});
+
+test('rejects a state-root ancestor swap from the sitemap-index afterPublish hook', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-state-after-hook-',
+  ));
+  const siteRoot = path.join(base, 'site');
+  const parent = path.join(base, 'owned-state-parent');
+  const movedParent = path.join(base, 'moved-state-parent');
+  const stateDir = path.join(parent, 'state');
+  await mkdir(siteRoot);
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    path.join(siteRoot, 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir,
+      state: state([]),
+      hooks: {
+        async afterPublish(name) {
+          if (name !== 'sitemap-index') return;
+          await rename(parent, movedParent);
+          await symlink(movedParent, parent);
+        },
+      },
+    }),
+    /symlink|changed|unsafe.*directory|cleanup|rollback/i,
+  );
+  assert.equal(
+    (await readdir(siteRoot)).includes('ai-news'),
+    false,
+  );
+  await rm(parent);
+  await rename(movedParent, parent);
+});
+
+test('rejects a regular-to-symlink static sitemap swap before archive or index commit', async (t) => {
+  for (const hookName of ['archive', 'sitemap-index']) {
+    await t.test(hookName, async () => {
+      const dirs = await workspace();
+      const oldState = state([
+        ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+      ]);
+      await publishIndexes({ ...dirs, state: oldState });
+      const archiveFile = path.join(dirs.siteRoot, 'ai-news', 'index.html');
+      const indexFile = path.join(dirs.stateDir, 'public', 'sitemap.xml');
+      const shardFile = path.join(
+        dirs.stateDir,
+        'public',
+        'sitemaps',
+        'news-1.xml',
+      );
+      const before = await Promise.all([
+        readFile(archiveFile, 'utf8'),
+        readFile(indexFile, 'utf8'),
+        readFile(shardFile, 'utf8'),
+      ]);
+      const staticFile = path.join(dirs.siteRoot, 'sitemap-static.xml');
+      const outside = path.join(dirs.root, `outside-${hookName}.xml`);
+      await writeFile(outside, '<urlset></urlset>\n');
+
+      await assert.rejects(
+        publishIndexes({
+          ...dirs,
+          state: state([
+            ['/i/news/new', metadata('news', 'New', '2026-07-20T00:00:00Z')],
+          ]),
+          hooks: {
+            async beforePublish(name) {
+              if (name !== hookName) return;
+              await unlink(staticFile);
+              await symlink(outside, staticFile);
+            },
+          },
+        }),
+        /static sitemap|symlink|regular/i,
+      );
+      assert.deepEqual(await Promise.all([
+        readFile(archiveFile, 'utf8'),
+        readFile(indexFile, 'utf8'),
+        readFile(shardFile, 'utf8'),
+      ]), before);
+    });
+  }
 });
 
 test('publishes a 30,001 item fixture within a bounded heap increase', async () => {

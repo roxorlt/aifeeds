@@ -422,9 +422,7 @@ async function replaceGeneratedEntry({
   backup,
   parentIdentity,
   records,
-  hooks,
 }) {
-  await hooks.beforePublish?.(name);
   await assertIdentity(parentIdentity);
   const oldEntry = await lstatOptional(target);
   assertReplaceable(oldEntry, kind, target);
@@ -449,7 +447,6 @@ async function replaceGeneratedEntry({
   await rename(stage, target);
   record.installed = true;
   await syncDirectory(parentIdentity);
-  await hooks.afterPublish?.(name);
 }
 
 async function rollback(records) {
@@ -479,19 +476,13 @@ async function rollback(records) {
 }
 
 async function cleanupEntry(target, kind, parentIdentity) {
-  try {
-    await removeKnownEntry(target, kind, parentIdentity);
-  } catch {
-    // Published data is already durable; stale random-name staging/backup
-    // entries are safer than turning successful publication into a rollback.
-  }
+  await removeKnownEntry(target, kind, parentIdentity);
 }
 
 async function buildStaging({
   items,
   archiveStage,
   publicStage,
-  includeStaticSitemap,
 }) {
   const pageCount = Math.max(1, Math.ceil(items.length / ARCHIVE_PAGE_SIZE));
   const archiveEntries = [];
@@ -548,31 +539,58 @@ async function buildStaging({
     }
   }
 
-  await writeDurableFile(
-    publicStage,
-    'sitemap.xml',
-    renderSitemapIndex([
-      ...(includeStaticSitemap
-        ? [`${SITE_BASE}/sitemap-static.xml`]
-        : []),
-      `${SITE_BASE}/sitemaps/archive.xml`,
-      ...shardLocations,
-    ]),
-  );
-  return { sitemapsStage };
+  return { sitemapsStage, shardLocations };
 }
 
-async function hasRegularStaticSitemap(siteIdentity) {
+async function staticSitemapPresence(siteIdentity) {
   await assertIdentity(siteIdentity);
   const entry = await lstatOptional(
     path.join(siteIdentity.path, 'sitemap-static.xml'),
   );
   await assertIdentity(siteIdentity);
-  return Boolean(
-    entry
-    && !entry.isSymbolicLink()
-    && entry.isFile()
-  );
+  if (entry === null) return false;
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error('static sitemap must be a regular non-symlink file');
+  }
+  return true;
+}
+
+async function assertPinnedRoots(
+  siteIdentity,
+  stateIdentity,
+  publicIdentity,
+) {
+  await assertIdentity(siteIdentity);
+  await assertIdentity(stateIdentity);
+  await assertIdentity(publicIdentity);
+}
+
+async function validateFinalPublication({
+  siteIdentity,
+  stateIdentity,
+  publicIdentity,
+  includeStaticSitemap,
+}) {
+  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+  const actualStaticSitemap = await staticSitemapPresence(siteIdentity);
+  if (actualStaticSitemap !== includeStaticSitemap) {
+    throw new Error('static sitemap presence changed before publication');
+  }
+  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+}
+
+async function publishGeneratedEntry({
+  entry,
+  hooks,
+  siteIdentity,
+  stateIdentity,
+  publicIdentity,
+}) {
+  await hooks.beforePublish?.(entry.name);
+  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+  await replaceGeneratedEntry(entry);
+  await hooks.afterPublish?.(entry.name);
+  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
 }
 
 export async function publishIndexes({
@@ -587,7 +605,7 @@ export async function publishIndexes({
   const items = normalizeItems(state);
   const siteIdentity = await rootIdentity(safeSiteRoot, 'siteRoot');
   const stateIdentity = await rootIdentity(safeStateDir, 'stateDir');
-  const includeStaticSitemap = await hasRegularStaticSitemap(siteIdentity);
+  await staticSitemapPresence(siteIdentity);
   const token = randomUUID();
   const archiveStage = await createDirectory(
     siteIdentity,
@@ -600,43 +618,66 @@ export async function publishIndexes({
     0o755,
   );
   let sitemapsStage;
+  let shardLocations = [];
+  let publicIdentity;
+  let includeStaticSitemap;
+  let primaryError = null;
+  let committed = false;
   const records = [];
   try {
-    ({ sitemapsStage } = await buildStaging({
+    ({ sitemapsStage, shardLocations } = await buildStaging({
       items,
       archiveStage,
       publicStage,
-      includeStaticSitemap,
     }));
     await hooks.afterStageBuilt?.();
-    if (
-      await hasRegularStaticSitemap(siteIdentity)
-      !== includeStaticSitemap
-    ) {
-      throw new Error('static sitemap changed during index generation');
-    }
 
-    const publicIdentity = await ensureDirectory(stateIdentity, 'public');
-    await replaceGeneratedEntry({
-      name: 'archive',
-      kind: 'directory',
-      stage: archiveStage.path,
-      target: path.join(safeSiteRoot, 'ai-news'),
-      backup: path.join(safeSiteRoot, `.ai-news.backup.${token}`),
-      parentIdentity: siteIdentity,
-      records,
+    publicIdentity = await ensureDirectory(stateIdentity, 'public');
+    await publishGeneratedEntry({
+      entry: {
+        name: 'archive',
+        kind: 'directory',
+        stage: archiveStage.path,
+        target: path.join(safeSiteRoot, 'ai-news'),
+        backup: path.join(safeSiteRoot, `.ai-news.backup.${token}`),
+        parentIdentity: siteIdentity,
+        records,
+      },
       hooks,
+      siteIdentity,
+      stateIdentity,
+      publicIdentity,
     });
-    await replaceGeneratedEntry({
-      name: 'sitemaps',
-      kind: 'directory',
-      stage: sitemapsStage.path,
-      target: path.join(publicIdentity.path, 'sitemaps'),
-      backup: path.join(publicIdentity.path, `.sitemaps.backup.${token}`),
-      parentIdentity: publicIdentity,
-      records,
+    await publishGeneratedEntry({
+      entry: {
+        name: 'sitemaps',
+        kind: 'directory',
+        stage: sitemapsStage.path,
+        target: path.join(publicIdentity.path, 'sitemaps'),
+        backup: path.join(publicIdentity.path, `.sitemaps.backup.${token}`),
+        parentIdentity: publicIdentity,
+        records,
+      },
       hooks,
+      siteIdentity,
+      stateIdentity,
+      publicIdentity,
     });
+
+    await hooks.beforePublish?.('sitemap-index');
+    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+    includeStaticSitemap = await staticSitemapPresence(siteIdentity);
+    await writeDurableFile(
+      publicStage,
+      'sitemap.xml',
+      renderSitemapIndex([
+        ...(includeStaticSitemap
+          ? [`${SITE_BASE}/sitemap-static.xml`]
+          : []),
+        `${SITE_BASE}/sitemaps/archive.xml`,
+        ...shardLocations,
+      ]),
+    );
     await replaceGeneratedEntry({
       name: 'sitemap-index',
       kind: 'file',
@@ -645,31 +686,76 @@ export async function publishIndexes({
       backup: path.join(publicIdentity.path, `.sitemap.xml.backup.${token}`),
       parentIdentity: publicIdentity,
       records,
-      hooks,
     });
-
-    for (const record of records) {
-      if (record.oldMoved) {
-        await cleanupEntry(
-          record.backup,
-          record.kind,
-          record.parentIdentity,
-        );
-      }
-    }
+    await hooks.afterPublish?.('sitemap-index');
+    await validateFinalPublication({
+      siteIdentity,
+      stateIdentity,
+      publicIdentity,
+      includeStaticSitemap,
+    });
+    committed = true;
   } catch (error) {
+    primaryError = error;
     try {
       await rollback(records);
     } catch (rollbackError) {
-      throw new AggregateError(
+      primaryError = new AggregateError(
         [error, rollbackError],
         'index publication failed and rollback was incomplete',
       );
     }
-    throw error;
-  } finally {
-    await cleanupEntry(archiveStage.path, 'directory', siteIdentity);
-    await cleanupEntry(publicStage.path, 'directory', stateIdentity);
+  }
+
+  const cleanupErrors = [];
+  const cleanupTasks = [
+    ...(committed
+      ? records
+        .filter((record) => record.oldMoved)
+        .map((record) => () => cleanupEntry(
+          record.backup,
+          record.kind,
+          record.parentIdentity,
+        ))
+      : []),
+    () => cleanupEntry(archiveStage.path, 'directory', siteIdentity),
+    () => cleanupEntry(publicStage.path, 'directory', stateIdentity),
+  ];
+  for (const cleanup of cleanupTasks) {
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (committed) {
+    try {
+      await validateFinalPublication({
+        siteIdentity,
+        stateIdentity,
+        publicIdentity,
+        includeStaticSitemap,
+      });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (cleanupErrors.length > 0) {
+    if (primaryError !== null) {
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        'index publication failed and cleanup was incomplete',
+      );
+    }
+    throw new AggregateError(
+      cleanupErrors,
+      'index publication cleanup failed',
+    );
+  }
+  if (primaryError !== null) {
+    throw primaryError;
   }
 }
 
