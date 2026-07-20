@@ -6,8 +6,10 @@ import {
   mkdir,
   open,
   readFile,
+  readdir,
   rename,
   rm,
+  rmdir,
   unlink,
 } from 'node:fs/promises';
 import { hostname as getHostname } from 'node:os';
@@ -35,6 +37,9 @@ const PROCESS_START_FALLBACK = (
   `runtime:${Math.max(0, Math.round(Date.now() - process.uptime() * 1000))}`
 );
 const MAX_GUARD_ACQUIRE_ATTEMPTS = 8;
+const GUARD_OWNER_PREFIX = 'owner-';
+const GUARD_OWNER_SUFFIX = '.json';
+const GUARD_TOKEN_RE = /^[A-Za-z0-9_-]{1,256}$/;
 
 export function createEmptyState() {
   return {
@@ -88,6 +93,20 @@ async function syncStateDirectory(stateDir, expected) {
     await handle.sync();
   } finally {
     await handle.close();
+  }
+}
+
+function assertSecureLockDirectory(entry, directory) {
+  if (
+    entry.isSymbolicLink()
+    || !entry.isDirectory()
+    || (entry.mode & 0o022)
+    || (
+      typeof process.getuid === 'function'
+      && entry.uid !== process.getuid()
+    )
+  ) {
+    throw new Error(`unsafe sync lock directory: ${directory}`);
   }
 }
 
@@ -253,7 +272,7 @@ async function createOwnedLock(
         stateDirectory,
         Date.now(),
         DEFAULT_STALE_LOCK_MS,
-        {},
+        hooks,
       );
       try {
         const current = await readLockOwner(file);
@@ -263,6 +282,7 @@ async function createOwnedLock(
           );
         }
         await unlink(file);
+        await hooks.afterMainLockRemoved?.(owner);
         await syncStateDirectory(stateDir, stateDirectory);
         released = true;
       } finally {
@@ -311,25 +331,6 @@ async function reclaimLockFile(
   return true;
 }
 
-async function createOwnedGuard(
-  file,
-  stateDir,
-  stateDirectory,
-  token,
-  now,
-  hooks = {},
-) {
-  const owner = await newLockOwner(token, now);
-  const published = await publishOwnedLockFile(
-    file,
-    stateDir,
-    stateDirectory,
-    owner,
-    hooks.afterGuardCandidateSync,
-  );
-  return published ? owner : null;
-}
-
 async function publishOwnedLockFile(
   file,
   stateDir,
@@ -364,6 +365,223 @@ async function publishOwnedLockFile(
   }
 }
 
+function guardOwnerFileName(token) {
+  if (!GUARD_TOKEN_RE.test(token)) {
+    throw new Error('invalid sync lock guard ownership token');
+  }
+  return `${GUARD_OWNER_PREFIX}${token}${GUARD_OWNER_SUFFIX}`;
+}
+
+function guardIdentity(entry) {
+  return { dev: entry.dev, ino: entry.ino };
+}
+
+async function syncGuardDirectory(directory, expected) {
+  const handle = await open(directory, DIRECTORY_OPEN_FLAGS);
+  try {
+    const entry = await handle.stat();
+    if (
+      !entry.isDirectory()
+      || entry.dev !== expected.dev
+      || entry.ino !== expected.ino
+    ) {
+      throw new Error('sync lock guard directory changed during write');
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function cleanupGuardCandidate(
+  candidate,
+  ownerFile,
+  expectedDirectory,
+) {
+  try {
+    const entry = await lstat(candidate);
+    if (
+      !entry.isDirectory()
+      || entry.dev !== expectedDirectory.dev
+      || entry.ino !== expectedDirectory.ino
+    ) {
+      return;
+    }
+    await unlink(ownerFile).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+    await rmdir(candidate);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function publishGuardDirectory(
+  guardDirectory,
+  stateDir,
+  stateDirectory,
+  token,
+  now,
+  hooks,
+) {
+  const owner = await newLockOwner(token, now);
+  const candidate = path.join(
+    stateDir,
+    `.${path.basename(guardDirectory)}.${process.pid}.${randomUUID()}.candidate`,
+  );
+  await mkdir(candidate, { mode: 0o700 });
+  const candidateEntry = await lstat(candidate);
+  assertSecureLockDirectory(candidateEntry, candidate);
+  const candidateIdentity = guardIdentity(candidateEntry);
+  const ownerFile = path.join(candidate, guardOwnerFileName(token));
+  let handle;
+  let published = false;
+  try {
+    handle = await open(ownerFile, TEMP_OPEN_FLAGS, 0o600);
+    await handle.writeFile(`${JSON.stringify(owner)}\n`);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await syncGuardDirectory(candidate, candidateIdentity);
+    await hooks.afterGuardCandidateSync?.(candidate);
+    try {
+      await rename(candidate, guardDirectory);
+    } catch (error) {
+      if (error?.code === 'EEXIST' || error?.code === 'ENOTEMPTY') {
+        return null;
+      }
+      throw error;
+    }
+    published = true;
+    await syncStateDirectory(stateDir, stateDirectory);
+    await hooks.afterGuardPublished?.(owner);
+    return owner;
+  } finally {
+    await handle?.close().catch(() => {});
+    if (!published) {
+      await cleanupGuardCandidate(
+        candidate,
+        ownerFile,
+        candidateIdentity,
+      );
+    }
+  }
+}
+
+async function readGuardDirectory(guardDirectory) {
+  let directoryEntry;
+  try {
+    directoryEntry = await lstat(guardDirectory);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'changed' };
+    throw error;
+  }
+  assertSecureLockDirectory(directoryEntry, guardDirectory);
+  const directoryIdentity = guardIdentity(directoryEntry);
+
+  let names;
+  try {
+    names = await readdir(guardDirectory);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'changed' };
+    throw error;
+  }
+  if (names.length === 0) {
+    return {
+      status: 'empty',
+      directoryIdentity,
+    };
+  }
+  if (names.length !== 1) {
+    throw new Error('invalid sync lock operation guard directory');
+  }
+
+  const ownerName = names[0];
+  if (
+    !ownerName.startsWith(GUARD_OWNER_PREFIX)
+    || !ownerName.endsWith(GUARD_OWNER_SUFFIX)
+  ) {
+    throw new Error('invalid sync lock operation guard owner filename');
+  }
+  const ownerFile = path.join(guardDirectory, ownerName);
+  let observed;
+  try {
+    observed = await readLockOwner(ownerFile);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'changed' };
+    throw error;
+  }
+  if (guardOwnerFileName(observed.owner.token) !== ownerName) {
+    throw new Error('sync lock guard owner token does not match filename');
+  }
+
+  let afterRead;
+  try {
+    afterRead = await lstat(guardDirectory);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'changed' };
+    throw error;
+  }
+  if (!sameIdentity(directoryIdentity, afterRead)) {
+    return { status: 'changed' };
+  }
+  return {
+    status: 'owned',
+    owner: observed.owner,
+    ownerFile,
+    directoryIdentity,
+  };
+}
+
+async function removeEmptyGuardDirectory(
+  guardDirectory,
+  stateDir,
+  stateDirectory,
+) {
+  try {
+    await rmdir(guardDirectory);
+  } catch (error) {
+    if (
+      error?.code === 'ENOENT'
+      || error?.code === 'EEXIST'
+      || error?.code === 'ENOTEMPTY'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+  await syncStateDirectory(stateDir, stateDirectory);
+  return true;
+}
+
+async function removeObservedGuardDirectory(
+  guardDirectory,
+  observed,
+  stateDir,
+  stateDirectory,
+) {
+  try {
+    await unlink(observed.ownerFile);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    await rmdir(guardDirectory);
+  } catch (error) {
+    if (
+      error?.code === 'ENOENT'
+      || error?.code === 'EEXIST'
+      || error?.code === 'ENOTEMPTY'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+  await syncStateDirectory(stateDir, stateDirectory);
+  return true;
+}
+
 async function acquireLockGuard(
   stateDir,
   stateDirectory,
@@ -371,7 +589,7 @@ async function acquireLockGuard(
   staleAfterMs,
   hooks = {},
 ) {
-  const file = lockGuardFilePath(stateDir);
+  const guardDirectory = lockGuardFilePath(stateDir);
   const token = randomUUID();
   let owner;
   for (
@@ -379,8 +597,8 @@ async function acquireLockGuard(
     attempt < MAX_GUARD_ACQUIRE_ATTEMPTS;
     attempt += 1
   ) {
-    owner = await createOwnedGuard(
-      file,
+    owner = await publishGuardDirectory(
+      guardDirectory,
       stateDir,
       stateDirectory,
       token,
@@ -391,12 +609,21 @@ async function acquireLockGuard(
 
     let observed;
     try {
-      observed = await readLockOwner(file);
+      observed = await readGuardDirectory(guardDirectory);
     } catch (error) {
       throw new Error(
         'cc sync lock operation guard has invalid metadata',
         { cause: error },
       );
+    }
+    if (observed.status === 'changed') continue;
+    if (observed.status === 'empty') {
+      await removeEmptyGuardDirectory(
+        guardDirectory,
+        stateDir,
+        stateDirectory,
+      );
+      continue;
     }
     if (!await lockOwnerIsReclaimable(
       observed.owner,
@@ -407,12 +634,12 @@ async function acquireLockGuard(
         'cc sync lock operation guard exists; another lock operation is live',
       );
     }
-    await reclaimLockFile(
-      file,
+    await hooks.afterGuardStaleObserved?.(observed.owner);
+    await removeObservedGuardDirectory(
+      guardDirectory,
       observed,
       stateDir,
       stateDirectory,
-      'sync lock operation guard',
     );
   }
   if (!owner) {
@@ -426,14 +653,23 @@ async function acquireLockGuard(
     owner,
     async release() {
       if (released) return;
-      const current = await readLockOwner(file);
-      if (current.owner.token !== token) {
+      const removed = await removeObservedGuardDirectory(
+        guardDirectory,
+        {
+          owner,
+          ownerFile: path.join(
+            guardDirectory,
+            guardOwnerFileName(token),
+          ),
+        },
+        stateDir,
+        stateDirectory,
+      );
+      if (!removed) {
         throw new Error(
           'sync lock operation guard ownership changed; refusing deletion',
         );
       }
-      await unlink(file);
-      await syncStateDirectory(stateDir, stateDirectory);
       released = true;
     },
   };
@@ -485,6 +721,7 @@ export async function acquireSyncLock(
         `cc sync already running (pid ${observed.owner.pid})`,
       );
     }
+    await hooks.afterMainStaleObserved?.(observed.owner);
     await reclaimLockFile(
       file,
       observed,

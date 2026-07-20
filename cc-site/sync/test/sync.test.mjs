@@ -39,6 +39,32 @@ function lockGuardFilePath(stateDir) {
   return path.join(stateDir, 'sync.lock.guard');
 }
 
+function lockGuardOwnerFilePath(stateDir, token) {
+  return path.join(
+    lockGuardFilePath(stateDir),
+    `owner-${token}.json`,
+  );
+}
+
+async function writeGuardOwnerFixture(stateDir, owner) {
+  await mkdir(lockGuardFilePath(stateDir), { mode: 0o700 });
+  await writeFile(
+    lockGuardOwnerFilePath(stateDir, owner.token),
+    `${JSON.stringify(owner)}\n`,
+  );
+}
+
+async function readGuardOwnerFixture(stateDir) {
+  const names = await readdir(lockGuardFilePath(stateDir));
+  assert.equal(names.length, 1);
+  return JSON.parse(
+    await readFile(
+      path.join(lockGuardFilePath(stateDir), names[0]),
+      'utf8',
+    ),
+  );
+}
+
 function metadata(itemId, urlPath, hash, overrides = {}) {
   return {
     item_id: itemId,
@@ -1097,17 +1123,41 @@ test('lock metadata is complete before guard and main paths become visible', asy
   await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
 });
 
+test('an empty guard and an abandoned candidate do not wedge acquisition', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  await mkdir(lockGuardFilePath(dirs.stateDir), { mode: 0o700 });
+  const abandonedCandidate = path.join(
+    dirs.stateDir,
+    '.sync.lock.guard.abandoned.candidate',
+  );
+  await mkdir(abandonedCandidate, { mode: 0o700 });
+  await writeFile(
+    path.join(abandonedCandidate, 'owner-abandoned.json'),
+    'crash-left candidate metadata',
+  );
+
+  const lock = await acquireSyncLock(dirs.stateDir);
+  assert.equal(
+    JSON.parse(await readFile(lockFilePath(dirs.stateDir), 'utf8')).token,
+    lock.owner.token,
+  );
+  await lock.release();
+  await assert.rejects(lstat(lockGuardFilePath(dirs.stateDir)), /ENOENT/);
+  assert.equal((await lstat(abandonedCandidate)).isDirectory(), true);
+});
+
 test('a dead guard left immediately after creation is crash-recoverable', async () => {
   const dirs = await workspace();
   await saveState(dirs.stateDir, createEmptyState());
-  await writeFile(lockGuardFilePath(dirs.stateDir), JSON.stringify({
+  await writeGuardOwnerFixture(dirs.stateDir, {
     schema: 2,
     pid: 999_999_999,
     hostname: os.hostname(),
     process_start: 'dead-guard-start',
     created_at: Date.now(),
     token: 'dead-guard',
-  }));
+  });
 
   const lock = await acquireSyncLock(dirs.stateDir);
   assert.notEqual(lock.owner.token, 'dead-guard');
@@ -1147,10 +1197,10 @@ test('a crash during release recovers both dead guard and main lock', async () =
     ...deadOwner,
     token: 'dead-release-main',
   }));
-  await writeFile(lockGuardFilePath(dirs.stateDir), JSON.stringify({
+  await writeGuardOwnerFixture(dirs.stateDir, {
     ...deadOwner,
     token: 'dead-release-guard',
-  }));
+  });
 
   const lock = await acquireSyncLock(dirs.stateDir);
   assert.notEqual(lock.owner.token, 'dead-release-main');
@@ -1177,6 +1227,187 @@ test('same-host PID reuse is detected from process-start identity', async () => 
   const recovered = await acquireSyncLock(dirs.stateDir);
   assert.notEqual(recovered.owner.token, 'pid-reused');
   await recovered.release();
+});
+
+test('a delayed stale-guard reaper cannot remove a new live guard', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  const staleGuard = {
+    schema: 2,
+    pid: 999_999_999,
+    hostname: os.hostname(),
+    process_start: 'stale-guard-start',
+    created_at: Date.now(),
+    token: 'stale-guard-race',
+  };
+  await writeGuardOwnerFixture(dirs.stateDir, staleGuard);
+
+  let markStaleObserved;
+  const staleObserved = new Promise((resolve) => {
+    markStaleObserved = resolve;
+  });
+  let resumeDelayed;
+  const delayedGate = new Promise((resolve) => {
+    resumeDelayed = resolve;
+  });
+  const delayed = acquireSyncLock(dirs.stateDir, {
+    hooks: {
+      async afterGuardStaleObserved(owner) {
+        if (owner.token !== staleGuard.token) return;
+        markStaleObserved();
+        await delayedGate;
+      },
+    },
+  });
+  await Promise.race([
+    staleObserved,
+    delayed.then(
+      () => {
+        throw new Error('delayed guard contender completed before observation');
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
+
+  let markNewGuardPublished;
+  const newGuardPublished = new Promise((resolve) => {
+    markNewGuardPublished = resolve;
+  });
+  let resumeWinner;
+  const winnerGate = new Promise((resolve) => {
+    resumeWinner = resolve;
+  });
+  const winner = acquireSyncLock(dirs.stateDir, {
+    hooks: {
+      async afterGuardPublished() {
+        markNewGuardPublished();
+        await winnerGate;
+      },
+    },
+  });
+  await Promise.race([
+    newGuardPublished,
+    winner.then(
+      () => {
+        throw new Error('winner completed before publishing its guard');
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
+
+  resumeDelayed();
+  const delayedOutcome = await delayed.then(
+    () => null,
+    (error) => error,
+  );
+  assert.match(String(delayedOutcome), /guard|lock.*live|already running/i);
+  const liveGuard = await readGuardOwnerFixture(dirs.stateDir);
+  assert.notEqual(liveGuard.token, staleGuard.token);
+
+  resumeWinner();
+  const winnerLock = await winner;
+  assert.equal(
+    JSON.parse(await readFile(lockFilePath(dirs.stateDir), 'utf8')).token,
+    winnerLock.owner.token,
+  );
+  await winnerLock.release();
+});
+
+test('stale-main recovery stays serialized beneath the live guard', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  await writeFile(lockFilePath(dirs.stateDir), JSON.stringify({
+    schema: 2,
+    pid: 999_999_999,
+    hostname: os.hostname(),
+    process_start: 'stale-main-race-start',
+    created_at: Date.now(),
+    token: 'stale-main-race',
+  }));
+
+  let markMainObserved;
+  const mainObserved = new Promise((resolve) => {
+    markMainObserved = resolve;
+  });
+  let resumeRecovery;
+  const recoveryGate = new Promise((resolve) => {
+    resumeRecovery = resolve;
+  });
+  const recovery = acquireSyncLock(dirs.stateDir, {
+    hooks: {
+      async afterMainStaleObserved() {
+        markMainObserved();
+        await recoveryGate;
+      },
+    },
+  });
+  await Promise.race([
+    mainObserved,
+    recovery.then(
+      () => {
+        throw new Error('main recovery completed before stale observation');
+      },
+      (error) => {
+        throw error;
+      },
+    ),
+  ]);
+
+  await assert.rejects(
+    acquireSyncLock(dirs.stateDir),
+    /guard|lock.*live|already running/i,
+  );
+  assert.equal(
+    JSON.parse(await readFile(lockFilePath(dirs.stateDir), 'utf8')).token,
+    'stale-main-race',
+  );
+
+  resumeRecovery();
+  const recovered = await recovery;
+  assert.notEqual(recovered.owner.token, 'stale-main-race');
+  await recovered.release();
+});
+
+test('main-lock release remains serialized until its guard is released', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  let markMainRemoved;
+  const mainRemoved = new Promise((resolve) => {
+    markMainRemoved = resolve;
+  });
+  let resumeRelease;
+  const releaseGate = new Promise((resolve) => {
+    resumeRelease = resolve;
+  });
+  const owner = await acquireSyncLock(dirs.stateDir, {
+    hooks: {
+      async afterMainLockRemoved() {
+        markMainRemoved();
+        await releaseGate;
+      },
+    },
+  });
+  const release = owner.release();
+  await Promise.race([
+    mainRemoved,
+    release.then(() => {
+      throw new Error('release completed before guarded removal pause');
+    }),
+  ]);
+
+  await assert.rejects(
+    acquireSyncLock(dirs.stateDir),
+    /guard|lock.*live|already running/i,
+  );
+  resumeRelease();
+  await release;
+
+  const successor = await acquireSyncLock(dirs.stateDir);
+  await successor.release();
 });
 
 test('stale dead-owner locks are reclaimed but a live lock is never deleted', async () => {
@@ -1240,10 +1471,7 @@ test('stale recovery fails closed while another lock operation guard is live', a
     token: 'live-guard',
   };
   await writeFile(lockFilePath(dirs.stateDir), JSON.stringify(stale));
-  await writeFile(
-    lockGuardFilePath(dirs.stateDir),
-    JSON.stringify(liveGuard),
-  );
+  await writeGuardOwnerFixture(dirs.stateDir, liveGuard);
   const cfg = {
     baseUrl: 'http://127.0.0.1:1',
     secret: SECRET,
@@ -1271,7 +1499,7 @@ test('stale recovery fails closed while another lock operation guard is live', a
     stale.token,
   );
   assert.equal(
-    JSON.parse(await readFile(lockGuardFilePath(dirs.stateDir), 'utf8')).token,
+    (await readGuardOwnerFixture(dirs.stateDir)).token,
     liveGuard.token,
   );
 });
