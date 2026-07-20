@@ -11,6 +11,7 @@ import { ccItemPageProfile } from "./profile";
 import { itemNotDedupedSql } from "../seo/item-page-policy";
 import {
   bindCcPassToCurrentRow,
+  CC_REVIEW_POLICY_VERSION,
   reviewCcItem,
 } from "./review";
 
@@ -144,6 +145,7 @@ export async function syncCcItemPage(
     row,
     bound.sourcePolicy,
     bound.passProvenance,
+    bound.reviewTextHash,
   );
   const batchResults = await env.DB.batch([
     env.DB.prepare(
@@ -229,32 +231,30 @@ export async function markCcItemPageGone(
   itemId: string,
   reason: string,
 ): Promise<boolean> {
-  return markCcItemPageGoneIfCurrent(env, itemId, reason, null);
+  const prior = await getStoredPage(env, itemId);
+  if (!prior || prior.status !== "live" || !prior.content_hash) return false;
+  return markCcItemPageGoneIfCurrent(
+    env,
+    itemId,
+    reason,
+    prior.content_hash,
+  );
 }
 
 async function markCcItemPageGoneIfCurrent(
   env: Env,
   itemId: string,
   reason: string,
-  expectedContentHash: string | null,
+  expectedContentHash: string,
 ): Promise<boolean> {
   const prior = await getStoredPage(env, itemId);
   if (
     !prior
     || prior.status !== "live"
-    || (
-      expectedContentHash !== null
-      && prior.content_hash !== expectedContentHash
-    )
+    || prior.content_hash !== expectedContentHash
   ) return false;
 
   const now = new Date().toISOString();
-  const hashSql = expectedContentHash === null
-    ? ""
-    : " AND content_hash = ?";
-  const hashBindings = expectedContentHash === null
-    ? []
-    : [expectedContentHash];
   const results = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO cc_page_events (
@@ -266,15 +266,15 @@ async function markCcItemPageGoneIfCurrent(
          FROM cc_item_pages
          WHERE item_id = ?
            AND status = 'live'
-           ${hashSql}
+           AND content_hash = ?
        )`,
-    ).bind(itemId, now, itemId, ...hashBindings),
+    ).bind(itemId, now, itemId, expectedContentHash),
     env.DB.prepare(
       `UPDATE cc_item_pages
        SET status = 'gone', reason = ?, generated_at = ?
        WHERE item_id = ? AND status = 'live'
-         ${hashSql}`,
-    ).bind(reason, now, itemId, ...hashBindings),
+         AND content_hash = ?`,
+    ).bind(reason, now, itemId, expectedContentHash),
   ]);
   return Number(results[0]?.meta?.changes ?? 0) > 0
     && Number(results[1]?.meta?.changes ?? 0) > 0;
@@ -298,7 +298,17 @@ async function transitionToGone(
   }
   if (dry) return skipped(itemId, `dry:${reason}`);
 
-  const eventCreated = await markCcItemPageGone(env, itemId, reason);
+  if (!prior.content_hash) return skipped(itemId, reason);
+  const eventCreated = await markCcItemPageGoneIfCurrent(
+    env,
+    itemId,
+    reason,
+    prior.content_hash,
+  );
+  if (!eventCreated) {
+    const current = await getStoredPage(env, itemId);
+    if (current?.status === "live") return skipped(itemId, reason);
+  }
   return {
     itemId,
     status: "gone",
@@ -394,12 +404,24 @@ function finalAuthorizationSql(): string {
           AND invalid_override.action <> 'allow'
       )
       AND (
-        ? = 0
-        OR EXISTS (
+        EXISTS (
           SELECT 1
           FROM cc_item_overrides allow_override
           WHERE allow_override.item_id = i.id
             AND allow_override.action = 'allow'
+        )
+        OR (
+          ? = 0
+          AND ? = 'model'
+          AND EXISTS (
+            SELECT 1
+            FROM cc_item_reviews current_review
+            WHERE current_review.item_id = i.id
+              AND current_review.policy_version = ?
+              AND current_review.source_policy = ?
+              AND current_review.review_text_hash = ?
+              AND current_review.review_status = 'pass'
+          )
         )
       )
   )`;
@@ -410,6 +432,7 @@ function finalAuthorizationBindings(
   row: CcPageRow,
   sourcePolicy: "allow" | "manual",
   passProvenance: "model" | "override",
+  expectedReviewTextHash: string,
 ): unknown[] {
   const nullable = (value: unknown): unknown => value ?? null;
   const requiresAllow =
@@ -430,6 +453,10 @@ function finalAuthorizationBindings(
     sourcePolicy,
     passProvenance,
     requiresAllow ? 1 : 0,
+    passProvenance,
+    CC_REVIEW_POLICY_VERSION,
+    sourcePolicy,
+    expectedReviewTextHash,
   ];
 }
 

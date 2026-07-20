@@ -2,12 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../index";
 import type { RenderRow } from "../digest/render";
 import {
   bindCcPassToCurrentRow,
   CC_REVIEW_POLICY_VERSION,
+  reviewCcItem,
 } from "./review";
 import { buildCcReviewText } from "./review-text";
 import {
@@ -245,6 +246,8 @@ class ObservableR2 {
 const resources: StatefulD1[] = [];
 afterEach(() => {
   while (resources.length) resources.pop()!.close();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function setup(opts: { apiKey?: string } = {}) {
@@ -268,6 +271,70 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(hash), (byte) =>
     byte.toString(16).padStart(2, "0")
   ).join("");
+}
+
+const SAFE_FLAGS = {
+  china_negative: 0,
+  politics_governance: 0,
+  military_conflict: 0,
+  sanctions_export_control: 0,
+  other_cn_distribution_risk: 0,
+  uncertain: 0,
+  reasons: [],
+};
+
+async function seedModelReview(
+  db: StatefulD1,
+  env: Env,
+  itemId: string,
+  status = "pass",
+): Promise<string> {
+  const row = db.sqlite.prepare(
+    `SELECT * FROM items WHERE id = ?`,
+  ).get(itemId) as unknown as RenderRow;
+  const hash = await sha256(buildCcReviewText(row, env).hashInput);
+  db.sqlite.prepare(
+    `INSERT INTO cc_item_reviews (
+       item_id, policy_version, source_policy, review_status, flags_json,
+       reason, review_text_hash, model, reviewed_at
+     ) VALUES (?, ?, 'allow', ?, ?, 'seeded model result', ?, 'test-model', ?)
+     ON CONFLICT(item_id) DO UPDATE SET
+       policy_version = excluded.policy_version,
+       source_policy = excluded.source_policy,
+       review_status = excluded.review_status,
+       flags_json = excluded.flags_json,
+       reason = excluded.reason,
+       review_text_hash = excluded.review_text_hash,
+       model = excluded.model,
+       reviewed_at = excluded.reviewed_at`,
+  ).run(
+    itemId,
+    CC_REVIEW_POLICY_VERSION,
+    status,
+    JSON.stringify(SAFE_FLAGS),
+    hash,
+    "2026-07-20T00:00:00.000Z",
+  );
+  return hash;
+}
+
+function mockReviewFlags(flags: Partial<typeof SAFE_FLAGS>): void {
+  vi.stubGlobal("fetch", vi.fn(async () =>
+    new Response(
+      JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({ ...SAFE_FLAGS, ...flags }),
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    )
+  ));
 }
 
 describe("ccItemPageR2Key", () => {
@@ -768,6 +835,72 @@ describe("syncCcItemPage", () => {
     expect(result.eventCreated).toBe(false);
     expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
   });
+
+  it.each([
+    ["deny", { china_negative: 1 }, "deny"],
+    ["review", { uncertain: 1 }, "review"],
+    ["pending", null, "pending"],
+  ] as const)(
+    "a force model %s with the same text hash wins before publish CAS and the stale pass cannot keep live",
+    async (_label, flags, expectedStatus) => {
+      const { db, r2, env } = setup({ apiKey: "unit-test-key" });
+      const id = db.insertSafeBlog();
+      await seedModelReview(db, env, id);
+      await syncCcItemPage(env, id);
+      const live = db.page(id)!;
+      r2.objects.delete(String(live.r2_key));
+      const pause = r2.pauseNextPut();
+      const stalePublish = syncCcItemPage(env, id);
+      await pause.started;
+
+      if (flags === null) {
+        env.DEEPSEEK_API_KEY = undefined;
+      } else {
+        mockReviewFlags(flags);
+      }
+      const newerReview = await reviewCcItem(env, id, { force: true });
+      expect(newerReview.status).toBe(expectedStatus);
+      expect(newerReview.reviewTextHash).toMatch(/^[0-9a-f]{64}$/);
+
+      pause.release();
+      const staleResult = await stalePublish;
+
+      expect(staleResult.status).toBe("gone");
+      expect(db.page(id)!.status).toBe("gone");
+      expect(db.events(id).map((event) => event.op)).toEqual([
+        "upsert",
+        "delete",
+      ]);
+    },
+  );
+
+  it("a current allow override can explicitly bypass a newer model deny at final CAS", async () => {
+    const { db, r2, env } = setup({ apiKey: "unit-test-key" });
+    const id = db.insertSafeBlog();
+    const reviewHash = await seedModelReview(db, env, id);
+    await syncCcItemPage(env, id);
+    const live = db.page(id)!;
+    r2.objects.delete(String(live.r2_key));
+    const pause = r2.pauseNextPut();
+    const staleModelPublish = syncCcItemPage(env, id);
+    await pause.started;
+
+    db.sqlite.prepare(
+      `UPDATE cc_item_reviews
+       SET review_status = 'deny', reason = 'newer model deny'
+       WHERE item_id = ?`,
+    ).run(id);
+    db.setOverride(id, "allow");
+    pause.release();
+
+    const result = await staleModelPublish;
+    expect(result.status).toBe("live");
+    expect(result.eventCreated).toBe(false);
+    expect(db.page(id)!.status).toBe("live");
+    expect(db.page(id)!.content_hash).toBe(live.content_hash);
+    expect(reviewHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
+  });
 });
 
 describe("markCcItemPageGone", () => {
@@ -785,5 +918,74 @@ describe("markCcItemPageGone", () => {
     expect(db.page(id)!.status).toBe("gone");
     expect(db.page(id)!.reason).toBe("enrich-not-relevant");
     expect(db.events(id).map((event) => event.op)).toEqual(["upsert", "delete"]);
+  });
+
+  it("does not let a stale gone operation delete a newer live content hash", async () => {
+    const { db, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    await syncCcItemPage(env, id);
+    const successorHash = "f".repeat(64);
+    const successorKey = ccItemPageR2Key(id, successorHash)!;
+    db.beforeNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_pages
+         SET content_hash = ?, r2_key = ?, status = 'live', reason = 'new allow'
+         WHERE item_id = ?`,
+      ).run(successorHash, successorKey, id);
+      state.sqlite.prepare(
+        `INSERT INTO cc_page_events (item_id, op, content_hash, created_at)
+         VALUES (?, 'upsert', ?, '2026-07-21T00:00:00.000Z')`,
+      ).run(id, successorHash);
+    };
+
+    const deleted = await markCcItemPageGone(env, id, "stale deny");
+
+    expect(deleted).toBe(false);
+    expect(db.page(id)).toMatchObject({
+      status: "live",
+      content_hash: successorHash,
+      r2_key: successorKey,
+    });
+    expect(db.events(id).map((event) => event.op)).toEqual([
+      "upsert",
+      "upsert",
+    ]);
+  });
+
+  it("transitionToGone also leaves a newer allow/live successor untouched", async () => {
+    const { db, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    await syncCcItemPage(env, id);
+    db.setOverride(id, "deny");
+    const successorHash = "e".repeat(64);
+    const successorKey = ccItemPageR2Key(id, successorHash)!;
+    db.beforeNextBatch = (state) => {
+      state.setOverride(id, "allow");
+      state.sqlite.prepare(
+        `UPDATE cc_item_pages
+         SET content_hash = ?, r2_key = ?, status = 'live', reason = 'new allow'
+         WHERE item_id = ?`,
+      ).run(successorHash, successorKey, id);
+      state.sqlite.prepare(
+        `INSERT INTO cc_page_events (item_id, op, content_hash, created_at)
+         VALUES (?, 'upsert', ?, '2026-07-21T00:00:00.000Z')`,
+      ).run(id, successorHash);
+    };
+
+    const staleDeny = await syncCcItemPage(env, id);
+
+    expect(staleDeny.status).toBe("skipped");
+    expect(staleDeny.eventCreated).toBe(false);
+    expect(db.page(id)).toMatchObject({
+      status: "live",
+      content_hash: successorHash,
+      r2_key: successorKey,
+    });
+    expect(db.events(id).map((event) => event.op)).toEqual([
+      "upsert",
+      "upsert",
+    ]);
   });
 });
