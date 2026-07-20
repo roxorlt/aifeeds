@@ -168,6 +168,7 @@ import {
   adminClearPosterCache,
   checkAdminAuth,
 } from './admin';
+import { handleCcMirrorAdmin } from './cc-mirror/admin';
 import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
 import { serveAdminOpsHtml, handleAdminOps, handleXCardManual, handleXCardRepush } from './admin-ops';
 import { runOpsBaseline } from './ops/baseline';
@@ -847,6 +848,8 @@ export default {
       if (path === '/admin/feedback' && request.method === 'GET') {
         return serveAdminFeedbackHtml(request, env);
       }
+      const ccMirrorAdminResponse = await handleCcMirrorAdmin(request, env);
+      if (ccMirrorAdminResponse) return ccMirrorAdminResponse;
       if (path === '/api/admin/analytics' && request.method === 'GET') {
         return handleAdminAnalytics(request, env);
       }
