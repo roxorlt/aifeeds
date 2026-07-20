@@ -25,6 +25,7 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "rm -rf $STAGING && mk
 scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
   index.html privacy.html terms.html contact.html style.css \
   372c4ae2a3701bbe3b091dff54fb6d14.txt sogousiteverification.txt \
+  shenma-site-verification.txt \
   "$HOST:$STAGING/"
 scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
   assets/gongan-icon.png \
@@ -34,17 +35,20 @@ echo "▶ sudo cp → $REMOTE_ROOT/"
 ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
   sudo mkdir -p $REMOTE_ROOT/assets
   sudo cp $STAGING/index.html $STAGING/privacy.html $STAGING/terms.html $STAGING/contact.html $STAGING/style.css \
-    $STAGING/372c4ae2a3701bbe3b091dff54fb6d14.txt $STAGING/sogousiteverification.txt $REMOTE_ROOT/
+    $STAGING/372c4ae2a3701bbe3b091dff54fb6d14.txt $STAGING/sogousiteverification.txt \
+    $STAGING/shenma-site-verification.txt $REMOTE_ROOT/
   sudo cp $STAGING/assets/gongan-icon.png $REMOTE_ROOT/assets/
   sudo chown www:www \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/372c4ae2a3701bbe3b091dff54fb6d14.txt \
     $REMOTE_ROOT/sogousiteverification.txt \
+    $REMOTE_ROOT/shenma-site-verification.txt \
     $REMOTE_ROOT/assets/gongan-icon.png
   sudo chmod 644 \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/372c4ae2a3701bbe3b091dff54fb6d14.txt \
     $REMOTE_ROOT/sogousiteverification.txt \
+    $REMOTE_ROOT/shenma-site-verification.txt \
     $REMOTE_ROOT/assets/gongan-icon.png
   rm -rf $STAGING
 "
@@ -53,7 +57,8 @@ echo "▶ smoke test"
 SCHEME=https
 curl -skI --max-time 5 https://ai-feeds.cc/ >/dev/null 2>&1 || SCHEME=http
 for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /style.css \
-  /372c4ae2a3701bbe3b091dff54fb6d14.txt /sogousiteverification.txt; do
+  /372c4ae2a3701bbe3b091dff54fb6d14.txt /sogousiteverification.txt \
+  /shenma-site-verification.txt; do
   code=$(curl -sk -o /dev/null -w '%{http_code}' "$SCHEME://ai-feeds.cc$path")
   echo "  $SCHEME://ai-feeds.cc$path → $code"
 done
