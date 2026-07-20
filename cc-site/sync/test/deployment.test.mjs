@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   chmod,
+  cp,
   copyFile,
   link,
   mkdir,
@@ -8,6 +9,7 @@ import {
   readFile,
   readlink,
   readdir,
+  rename,
   stat,
   symlink,
   unlink,
@@ -34,6 +36,24 @@ const SYNC_DIR = path.resolve(
 
 async function read(relativePath) {
   return readFile(path.join(SYNC_DIR, relativePath), 'utf8');
+}
+
+async function normalizeReleaseFixture(root, relative = '') {
+  await chmod(root, 0o755);
+  for (const name of await readdir(root)) {
+    const child = path.join(root, name);
+    const childRelative = relative ? `${relative}/${name}` : name;
+    const identity = await stat(child);
+    if (identity.isDirectory()) {
+      await normalizeReleaseFixture(child, childRelative);
+    } else {
+      await chmod(child, new Set([
+        'cc-site/deploy.sh',
+        'cc-site/sync/deploy-to-cc.sh',
+        'cc-site/sync/install-remote.sh',
+      ]).has(childRelative) ? 0o755 : 0o644);
+    }
+  }
 }
 
 function section(content, name) {
@@ -667,6 +687,263 @@ test('deployment file transaction atomically restores bytes and metadata', async
   await assert.rejects(stat(initiallyAbsent), /ENOENT/);
 });
 
+test('deployment path transactions never overwrite a concurrent live object', async (t) => {
+  const {
+    captureFile,
+    installFileTransaction,
+    installSymlinkTransaction,
+    recoverFileTransaction,
+  } = await import('../deployment-file-transaction.mjs');
+  const transaction = 'a'.repeat(64);
+  const ids = {
+    gid: process.getgid(),
+    uid: process.getuid(),
+  };
+
+  await t.test('env receipt failure makes no live change', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-env-'));
+    const backups = path.join(root, 'backups');
+    const destination = path.join(root, 'cc-sync.env');
+    const source = path.join(root, 'candidate.env');
+    await mkdir(backups, { mode: 0o700 });
+    await writeFile(destination, 'old env\n', { mode: 0o600 });
+    await writeFile(source, 'new env\n', { mode: 0o600 });
+    await captureFile({ backups, destination, name: 'env' });
+    const before = await stat(destination);
+    await assert.rejects(
+      installFileTransaction({
+        ...ids,
+        backups,
+        destination,
+        hooks: {
+          beforeReceiptWrite() {
+            throw new Error('injected receipt failure');
+          },
+        },
+        mode: 0o600,
+        name: 'env',
+        source,
+        transaction,
+      }),
+      /injected receipt failure/,
+    );
+    const after = await stat(destination);
+    assert.equal(after.ino, before.ino);
+    assert.equal(await readFile(destination, 'utf8'), 'old env\n');
+  });
+
+  await t.test('service commit interruption is forward-recovered by the same transaction', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-service-'));
+    const backups = path.join(root, 'backups');
+    const destination = path.join(root, 'aifeeds-cc-sync.service');
+    const source = path.join(root, 'candidate.service');
+    await mkdir(backups, { mode: 0o700 });
+    await writeFile(destination, 'old service\n', { mode: 0o644 });
+    await writeFile(source, 'new service\n', { mode: 0o644 });
+    await captureFile({ backups, destination, name: 'service' });
+    await assert.rejects(
+      installFileTransaction({
+        ...ids,
+        backups,
+        destination,
+        hooks: {
+          afterOldMove() {
+            throw new Error('injected commit interruption');
+          },
+        },
+        mode: 0o644,
+        name: 'service',
+        source,
+        transaction,
+      }),
+      /injected commit interruption/,
+    );
+    await assert.rejects(stat(destination), /ENOENT/);
+    await recoverFileTransaction({ destination, name: 'service', transaction });
+    assert.equal(await readFile(destination, 'utf8'), 'new service\n');
+  });
+
+  await t.test('timer replacement after open is restored without overwrite', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-timer-'));
+    const backups = path.join(root, 'backups');
+    const destination = path.join(root, 'aifeeds-cc-sync.timer');
+    const heldOld = path.join(root, 'held-old.timer');
+    const source = path.join(root, 'candidate.timer');
+    await mkdir(backups, { mode: 0o700 });
+    await writeFile(destination, 'old timer\n', { mode: 0o644 });
+    await writeFile(source, 'new timer\n', { mode: 0o644 });
+    await captureFile({ backups, destination, name: 'timer' });
+    await assert.rejects(
+      installFileTransaction({
+        ...ids,
+        backups,
+        destination,
+        hooks: {
+          async afterLiveOpen() {
+            await rename(destination, heldOld);
+            await writeFile(destination, 'operator timer\n', { mode: 0o644 });
+          },
+        },
+        mode: 0o644,
+        name: 'timer',
+        source,
+        transaction,
+      }),
+      /transaction conflict/i,
+    );
+    assert.equal(await readFile(destination, 'utf8'), 'operator timer\n');
+  });
+
+  await t.test('OPT replacement after snapshot is restored without overwrite', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-opt-'));
+    const destination = path.join(root, 'aifeeds-cc-sync');
+    const heldOld = path.join(root, 'held-old-link');
+    await symlink('aifeeds-cc-sync-releases/old/cc-site/sync', destination);
+    await assert.rejects(
+      installSymlinkTransaction({
+        destination,
+        hooks: {
+          async afterLiveOpen() {
+            await rename(destination, heldOld);
+            await symlink('operator-managed/cc-site/sync', destination);
+          },
+        },
+        name: 'opt',
+        target: 'aifeeds-cc-sync-releases/new/cc-site/sync',
+        transaction,
+      }),
+      /transaction conflict/i,
+    );
+    assert.equal(
+      await readlink(destination),
+      'operator-managed/cc-site/sync',
+    );
+  });
+});
+
+test('managed state validation accepts private lock artifacts but rejects unsafe trees', async (t) => {
+  const { validateManagedRoot } = await import('../deployment-security.mjs');
+  const { acquireSyncLock } = await import('../state.mjs');
+  const uid = process.getuid();
+  const gid = process.getgid();
+  const generation = '123e4567-e89b-42d3-a456-426614174000';
+
+  async function stateFixture() {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-managed-state-'));
+    await chmod(root, 0o750);
+    const publicRoot = path.join(root, 'public');
+    const generationRoot = path.join(publicRoot, 'generations', generation);
+    await mkdir(path.join(generationRoot, 'sitemaps'), {
+      mode: 0o750,
+      recursive: true,
+    });
+    for (const directory of [
+      publicRoot,
+      path.join(publicRoot, 'generations'),
+      generationRoot,
+      path.join(generationRoot, 'sitemaps'),
+    ]) {
+      await chmod(directory, 0o750);
+    }
+    await writeFile(path.join(generationRoot, 'sitemap.xml'), '<sitemapindex/>\n', {
+      mode: 0o640,
+    });
+    await writeFile(
+      path.join(generationRoot, 'sitemaps', 'archive.xml'),
+      '<urlset/>\n',
+      { mode: 0o640 },
+    );
+    await symlink(`generations/${generation}`, path.join(publicRoot, 'current'));
+    const deadOwner = {
+      schema: 2,
+      pid: 999_999_999,
+      hostname: os.hostname(),
+      process_start: 'dead-deployment-owner',
+      created_at: Date.now(),
+    };
+    await writeFile(
+      path.join(root, 'state.json'),
+      `${JSON.stringify({ schema: 1, last_seq: 0, bootstrap: null, pages: {} })}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      path.join(root, 'sync.lock'),
+      `${JSON.stringify({ ...deadOwner, token: 'dead-main' })}\n`,
+      { mode: 0o600 },
+    );
+    for (const privateFile of [
+      `.sync.lock.999999999.${generation}.candidate`,
+      `.sync.lock.stale.${generation}`,
+      `.state.json.999999999.${generation}.tmp`,
+    ]) {
+      await writeFile(path.join(root, privateFile), 'private crash artifact\n', {
+        mode: 0o600,
+      });
+    }
+    const guard = path.join(root, 'sync.lock.guard');
+    await mkdir(guard, { mode: 0o700 });
+    await writeFile(
+      path.join(guard, 'owner-dead-guard.json'),
+      `${JSON.stringify({ ...deadOwner, token: 'dead-guard' })}\n`,
+      { mode: 0o600 },
+    );
+    const abandoned = path.join(
+      root,
+      `.sync.lock.guard.999999999.${generation}.candidate`,
+    );
+    await mkdir(abandoned, { mode: 0o700 });
+    await writeFile(
+      path.join(abandoned, 'owner-abandoned.json'),
+      'crash-left owner metadata\n',
+      { mode: 0o600 },
+    );
+    return { root, guard };
+  }
+
+  await t.test('a stopped active oneshot can recover its legitimate private state', async () => {
+    const fixture = await stateFixture();
+    await validateManagedRoot({
+      gid,
+      kind: 'state',
+      root: fixture.root,
+      uid,
+    });
+    const lock = await acquireSyncLock(fixture.root);
+    assert.notEqual(lock.owner.token, 'dead-main');
+    await lock.release();
+    await assert.rejects(stat(path.join(fixture.root, 'sync.lock')), /ENOENT/);
+    await assert.rejects(stat(fixture.guard), /ENOENT/);
+  });
+
+  await t.test('0700 is forbidden below the Nginx public tree', async () => {
+    const fixture = await stateFixture();
+    const privatePublic = path.join(fixture.root, 'public', 'private');
+    await mkdir(privatePublic, { mode: 0o700 });
+    await assert.rejects(
+      validateManagedRoot({ gid, kind: 'state', root: fixture.root, uid }),
+      /unsafe identity or mode/,
+    );
+  });
+
+  await t.test('unknown state symlinks remain forbidden', async () => {
+    const fixture = await stateFixture();
+    await symlink('state.json', path.join(fixture.root, 'unknown-link'));
+    await assert.rejects(
+      validateManagedRoot({ gid, kind: 'state', root: fixture.root, uid }),
+      /unsafe entry/,
+    );
+  });
+
+  await t.test('group-writable private state remains forbidden', async () => {
+    const fixture = await stateFixture();
+    await chmod(fixture.guard, 0o770);
+    await assert.rejects(
+      validateManagedRoot({ gid, kind: 'state', root: fixture.root, uid }),
+      /unsafe identity or mode/,
+    );
+  });
+});
+
 test('Nginx transaction uses compare-before-commit and compare-before-rollback', async (t) => {
   const {
     commitNginxTransaction,
@@ -802,16 +1079,17 @@ async function remoteDeployHarness({
   let oldReleaseId = null;
   if (priorDeployment) {
     oldReleaseId = '1'.repeat(64);
-    const oldSync = path.join(
+    const oldRelease = path.join(
       root,
       'opt',
       'aifeeds-cc-sync-releases',
       oldReleaseId,
-      'cc-site',
-      'sync',
     );
-    await mkdir(oldSync, { recursive: true });
-    await writeFile(path.join(oldSync, 'old-release.txt'), 'old-release\n');
+    await mkdir(oldRelease, { recursive: true });
+    await cp(path.join(stage, 'cc-site'), path.join(oldRelease, 'cc-site'), {
+      recursive: true,
+    });
+    await normalizeReleaseFixture(oldRelease);
     await symlink(
       `aifeeds-cc-sync-releases/${oldReleaseId}/cc-site/sync`,
       path.join(root, 'opt', 'aifeeds-cc-sync'),
@@ -988,6 +1266,10 @@ case "$*" in
       *) exit 4 ;;
     esac ;;
   'disable aifeeds-cc-sync.timer')
+    if [[ "\${AIFEEDS_TIMER_DISABLE_MUTATE_THEN_EXIT:-0}" != 0 ]]; then
+      rm -f "$state/timer-enabled"
+      exit "$AIFEEDS_TIMER_DISABLE_MUTATE_THEN_EXIT"
+    fi
     [[ "\${AIFEEDS_TIMER_DISABLE_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_DISABLE_EXIT"
     rm -f "$state/timer-enabled"; exit 0 ;;
   'enable aifeeds-cc-sync.timer')
@@ -998,11 +1280,19 @@ case "$*" in
     printf 'active\n' > "$state/timer-active"
     exit 0 ;;
   'stop aifeeds-cc-sync.timer')
+    if [[ "\${AIFEEDS_TIMER_STOP_MUTATE_THEN_EXIT:-0}" != 0 ]]; then
+      rm -f "$state/timer-active"
+      exit "$AIFEEDS_TIMER_STOP_MUTATE_THEN_EXIT"
+    fi
     [[ "\${AIFEEDS_TIMER_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_STOP_EXIT"
     rm -f "$state/timer-active"; exit 0 ;;
   'start aifeeds-cc-sync.timer')
     printf 'active\n' > "$state/timer-active"; exit 0 ;;
   'stop aifeeds-cc-sync.service')
+    if [[ "\${AIFEEDS_SERVICE_STOP_MUTATE_THEN_EXIT:-0}" != 0 ]]; then
+      rm -f "$state/service-active"
+      exit "$AIFEEDS_SERVICE_STOP_MUTATE_THEN_EXIT"
+    fi
     [[ "\${AIFEEDS_SERVICE_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_SERVICE_STOP_EXIT"
     rm -f "$state/service-active"; exit 0 ;;
 esac
@@ -1526,6 +1816,206 @@ remoteHarnessTest('a running old service that cannot stop leaves all live deploy
     await readFile(harness.log, 'utf8'),
     /switch-symlink|deployment-file-transaction\.mjs> <install>/,
   );
+});
+
+remoteHarnessTest('systemctl partial failures restore the exact original unit state', async (t) => {
+  await t.test('service stop mutates state before returning nonzero', async () => {
+    const harness = await remoteDeployHarness({
+      priorDeployment: true,
+      serviceState: 'active',
+      timerEnabledState: 'enabled',
+      timerState: 'active',
+    });
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_SERVICE_STOP_MUTATE_THEN_EXIT: '31',
+      },
+    );
+
+    assert.equal(result.status, 31, result.stderr);
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+      'active\n',
+    );
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+      'active\n',
+    );
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+      'enabled\n',
+    );
+  });
+
+  await t.test('timer stop mutates state before returning nonzero', async () => {
+    const harness = await remoteDeployHarness({
+      priorDeployment: true,
+      serviceState: 'inactive',
+      timerEnabledState: 'enabled',
+      timerState: 'active',
+    });
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_TIMER_STOP_MUTATE_THEN_EXIT: '32',
+      },
+    );
+
+    assert.equal(result.status, 32, result.stderr);
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+      'active\n',
+    );
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+      'enabled\n',
+    );
+    await assert.rejects(
+      stat(path.join(harness.systemctlState, 'service-active')),
+      /ENOENT/,
+    );
+  });
+
+  await t.test('timer disable mutates state before returning nonzero', async () => {
+    const harness = await remoteDeployHarness({
+      priorDeployment: true,
+      serviceState: 'inactive',
+      timerEnabledState: 'enabled',
+      timerState: 'inactive',
+    });
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_TIMER_DISABLE_MUTATE_THEN_EXIT: '33',
+      },
+    );
+
+    assert.equal(result.status, 33, result.stderr);
+    assert.equal(
+      await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+      'enabled\n',
+    );
+    await assert.rejects(
+      stat(path.join(harness.systemctlState, 'timer-active')),
+      /ENOENT/,
+    );
+    await assert.rejects(
+      stat(path.join(harness.systemctlState, 'service-active')),
+      /ENOENT/,
+    );
+  });
+});
+
+remoteHarnessTest('existing OPT must name one safe and complete managed release', async (t) => {
+  const scenarios = [
+    {
+      name: 'absolute target',
+      async mutate(harness, live) {
+        await unlink(live);
+        await symlink(
+          path.join(
+            harness.root,
+            'opt',
+            'aifeeds-cc-sync-releases',
+            harness.oldReleaseId,
+            'cc-site',
+            'sync',
+          ),
+          live,
+        );
+      },
+    },
+    {
+      name: 'dot-dot target',
+      async mutate(harness, live) {
+        await unlink(live);
+        await symlink(
+          `aifeeds-cc-sync-releases/${harness.oldReleaseId}/cc-site/../cc-site/sync`,
+          live,
+        );
+      },
+    },
+    {
+      name: 'unmanaged relative target',
+      async mutate(_harness, live) {
+        await unlink(live);
+        await symlink('operator-managed/cc-site/sync', live);
+      },
+    },
+    {
+      name: 'damaged managed release',
+      async mutate(harness) {
+        await unlink(path.join(
+          harness.root,
+          'opt',
+          'aifeeds-cc-sync-releases',
+          harness.oldReleaseId,
+          'cc-site',
+          'sync',
+          'sync.mjs',
+        ));
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const harness = await remoteDeployHarness({
+        priorDeployment: true,
+        serviceState: 'active',
+        timerEnabledState: 'enabled',
+        timerState: 'active',
+      });
+      const live = path.join(harness.root, 'opt', 'aifeeds-cc-sync');
+      const beforeTarget = await readlink(live);
+      const oldEnv = await readFile(
+        path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'),
+        'utf8',
+      );
+      await scenario.mutate(harness, live);
+      const invalidTarget = await readlink(live);
+
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+      );
+
+      assert.notEqual(result.status, 0, scenario.name);
+      assert.match(result.stderr, /live release|live code.*managed|unsafe/i);
+      assert.equal(await readlink(live), invalidTarget);
+      assert.equal(
+        await readFile(path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'), 'utf8'),
+        oldEnv,
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+        'active\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+        'active\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+        'enabled\n',
+      );
+      await assert.rejects(stat(harness.payloadTestProof), /ENOENT/);
+      const commandLog = await readFile(harness.log, 'utf8');
+      assert.doesNotMatch(commandLog, /systemctl <stop>|systemctl <disable>|useradd/);
+      assert.notEqual(beforeTarget, '', scenario.name);
+    });
+  }
 });
 
 remoteHarnessTest('unsupported systemd states fail closed before tests or live writes', async () => {

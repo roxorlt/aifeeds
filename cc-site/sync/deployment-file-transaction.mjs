@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
+  chmod,
+  chown,
+  link,
   lstat,
   mkdir,
   open,
   readFile,
+  readlink,
   rename,
+  rmdir,
+  symlink,
   unlink,
   writeFile,
 } from 'node:fs/promises';
@@ -104,24 +111,525 @@ function fileIdentity(identity, bytes) {
   };
 }
 
-export async function atomicInstallRecorded({
+function pathTransactionNames(destination, name, transaction) {
+  if (
+    !path.isAbsolute(destination)
+    || !/^[a-z]+$/.test(name)
+    || !/^[0-9a-f]{64}$/.test(transaction)
+  ) {
+    throw new Error('invalid deployment path transaction arguments');
+  }
+  const directory = path.dirname(destination);
+  const transactionDirectory = path.join(
+    directory,
+    `.aifeeds-deploy.${transaction}.${name}`,
+  );
+  return {
+    candidate: path.join(transactionDirectory, 'candidate'),
+    current: path.join(transactionDirectory, 'current'),
+    destination,
+    directory,
+    old: path.join(transactionDirectory, 'old'),
+    receipt: path.join(transactionDirectory, 'receipt.jsonl'),
+    transactionDirectory,
+  };
+}
+
+function symlinkIdentity(identity, target) {
+  return {
+    dev: identity.dev,
+    digest: createHash('sha256').update(target).digest('hex'),
+    gid: identity.gid,
+    ino: identity.ino,
+    target,
+    type: 'symlink',
+    uid: identity.uid,
+  };
+}
+
+function regularIdentity(identity, bytes) {
+  return {
+    ...fileIdentity(identity, bytes),
+    type: 'file',
+  };
+}
+
+function identityMatches(actual, expected) {
+  if (actual?.type !== expected?.type) return false;
+  const fields = actual.type === 'file'
+    ? ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'digest']
+    : ['dev', 'ino', 'uid', 'gid', 'target', 'digest'];
+  return fields.every((field) => actual[field] === expected[field]);
+}
+
+async function inspectRegular(file, label) {
+  const handle = await open(
+    file,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.isSymbolicLink()) {
+      throw new Error(`${label} must be a regular file`);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+    ) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return { handle, identity: regularIdentity(before, bytes) };
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw error;
+  }
+}
+
+async function inspectSymlink(file, label) {
+  const identity = await lstat(file);
+  if (!identity.isSymbolicLink()) throw new Error(`${label} must be a symlink`);
+  const target = await readlink(file);
+  return symlinkIdentity(identity, target);
+}
+
+async function inspectOptional(file, type, label) {
+  const identity = await lstatOptional(file);
+  if (identity === null) return null;
+  if (type === 'file') {
+    const pinned = await inspectRegular(file, label);
+    await pinned.handle.close();
+    return pinned.identity;
+  }
+  return inspectSymlink(file, label);
+}
+
+async function appendReceipt(receipt, event) {
+  const handle = await open(receipt, 'a');
+  try {
+    await handle.writeFile(`${JSON.stringify(event)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readReceipt(names) {
+  const lines = (await readFile(names.receipt, 'utf8')).split('\n').filter(Boolean);
+  if (lines.length === 0) throw new Error('invalid empty deployment receipt');
+  const header = JSON.parse(lines[0]);
+  if (
+    header.schema !== 1
+    || header.destination !== names.destination
+    || header.transactionDirectory !== names.transactionDirectory
+    || (header.type !== 'file' && header.type !== 'symlink')
+  ) {
+    throw new Error('invalid deployment transaction receipt');
+  }
+  const events = lines.slice(1).map((line) => JSON.parse(line));
+  for (const event of events) {
+    if (event.candidate) header.candidate = event.candidate;
+  }
+  return { events, header };
+}
+
+async function createTransactionDirectory(names) {
+  await mkdir(names.transactionDirectory, { mode: 0o700 });
+  await chmod(names.transactionDirectory, 0o700);
+  await syncDirectory(names.directory);
+}
+
+async function cleanupTransaction(names) {
+  for (const artifact of [
+    names.candidate,
+    names.current,
+    names.old,
+    names.receipt,
+  ]) {
+    await unlink(artifact).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+  }
+  await syncDirectory(names.transactionDirectory);
+  await rmdir(names.transactionDirectory);
+  await syncDirectory(names.directory);
+}
+
+async function publishNoReplace(source, destination, directory, type) {
+  try {
+    if (type === 'symlink') {
+      await symlink(await readlink(source), destination);
+    } else {
+      await link(source, destination);
+    }
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw new Error('deployment transaction conflict: live destination already exists');
+    }
+    throw error;
+  }
+  await syncDirectory(directory);
+}
+
+async function restoreMovedNoReplace(moved, names) {
+  try {
+    const identity = await lstat(moved);
+    if (identity.isSymbolicLink()) {
+      await symlink(await readlink(moved), names.destination);
+    } else {
+      await link(moved, names.destination);
+    }
+    await syncDirectory(names.directory);
+    await unlink(moved);
+    await syncDirectory(names.transactionDirectory);
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw new Error(
+        `deployment transaction conflict: live destination and preserved object coexist; `
+        + `preserved=${moved}`,
+      );
+    }
+    throw error;
+  }
+}
+
+async function moveAndVerifyExpected({ expected, hooks, names, type }) {
+  let opened = null;
+  let observed;
+  try {
+    if (type === 'file') {
+      opened = await inspectRegular(names.destination, 'live deployment file');
+      observed = opened.identity;
+    } else {
+      observed = await inspectSymlink(names.destination, 'live deployment link');
+    }
+    await hooks?.afterLiveOpen?.(names.destination);
+    await rename(names.destination, names.old);
+    await syncDirectory(names.directory);
+    await syncDirectory(names.transactionDirectory);
+    await appendReceipt(names.receipt, { phase: 'old-moved' });
+    await hooks?.afterOldMove?.(names.old);
+    const moved = await inspectOptional(names.old, type, 'moved deployment object');
+    if (
+      !identityMatches(observed, expected)
+      || !identityMatches(moved, observed)
+    ) {
+      await restoreMovedNoReplace(names.old, names);
+      throw new Error(
+        'deployment transaction conflict: live object changed before quarantine',
+      );
+    }
+  } finally {
+    await opened?.handle.close().catch(() => {});
+  }
+}
+
+async function resumeInstall(names) {
+  const { header } = await readReceipt(names);
+  const live = await inspectOptional(
+    names.destination,
+    header.type,
+    'live deployment object',
+  );
+  if (live !== null) {
+    if (identityMatches(live, header.candidate)) return header.candidate;
+    if (!identityMatches(live, header.expected)) {
+      throw new Error('deployment transaction conflict: live object is operator-managed');
+    }
+  }
+  if (live !== null && header.expected !== null) {
+    await moveAndVerifyExpected({
+      expected: header.expected,
+      hooks: {},
+      names,
+      type: header.type,
+    });
+  } else if (live === null && header.expected !== null) {
+    const quarantined = await inspectOptional(
+      names.old,
+      header.type,
+      'quarantined deployment object',
+    );
+    if (!identityMatches(quarantined, header.expected)) {
+      throw new Error('deployment transaction conflict: expected quarantine is missing');
+    }
+  } else if (live !== null) {
+    throw new Error('deployment transaction conflict: expected an absent destination');
+  }
+  await publishNoReplace(
+    names.candidate,
+    names.destination,
+    names.directory,
+    header.type,
+  );
+  const published = await inspectOptional(
+    names.destination,
+    header.type,
+    'published deployment candidate',
+  );
+  await appendReceipt(names.receipt, {
+    candidate: published,
+    phase: 'candidate-published',
+  });
+  return published;
+}
+
+async function prepareReceipt({
+  candidate,
+  expected,
+  hooks,
+  names,
+  type,
+}) {
+  await hooks?.beforeReceiptWrite?.();
+  const header = {
+    candidate,
+    destination: names.destination,
+    expected,
+    schema: 1,
+    transactionDirectory: names.transactionDirectory,
+    type,
+  };
+  const handle = await open(names.receipt, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(header)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(names.transactionDirectory);
+}
+
+export async function installFileTransaction({
   backups,
   destination,
   gid,
+  hooks = {},
   mode,
   name,
   source,
+  transaction,
   uid,
 }) {
-  const installed = await atomicInstall({ destination, gid, mode, source, uid });
-  const metadata = fileIdentity(installed.identity, installed.bytes);
-  await writeFile(
-    path.join(backups, `${name}.candidate.json`),
-    `${JSON.stringify(metadata)}\n`,
-    { flag: 'wx', mode: 0o600 },
+  const names = pathTransactionNames(destination, name, transaction);
+  await createTransactionDirectory(names);
+  let receiptWritten = false;
+  try {
+    const { bytes } = await readPinned(source, 'deployment transaction source');
+    const candidateHandle = await open(names.candidate, 'wx', mode);
+    let candidate;
+    try {
+      await candidateHandle.writeFile(bytes);
+      await candidateHandle.chmod(mode);
+      await candidateHandle.chown(uid, gid);
+      await candidateHandle.sync();
+      candidate = regularIdentity(await candidateHandle.stat(), bytes);
+    } finally {
+      await candidateHandle.close();
+    }
+    await syncDirectory(names.transactionDirectory);
+    const expectedMetadata = JSON.parse(
+      await readFile(path.join(backups, `${name}.json`), 'utf8'),
+    );
+    const expected = expectedMetadata.existed === true
+      ? { ...expectedMetadata, type: 'file' }
+      : null;
+    await prepareReceipt({
+      candidate,
+      expected,
+      hooks,
+      names,
+      type: 'file',
+    });
+    receiptWritten = true;
+    if (expected !== null) {
+      await moveAndVerifyExpected({
+        expected,
+        hooks,
+        names,
+        type: 'file',
+      });
+    }
+    await publishNoReplace(names.candidate, destination, names.directory, 'file');
+    const published = await inspectOptional(
+      destination,
+      'file',
+      'published deployment candidate',
+    );
+    await appendReceipt(names.receipt, {
+      candidate: published,
+      phase: 'candidate-published',
+    });
+    return published;
+  } catch (error) {
+    if (!receiptWritten) {
+      await cleanupTransaction(names).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+export async function recoverFileTransaction({ destination, name, transaction }) {
+  const names = pathTransactionNames(destination, name, transaction);
+  const receipt = await lstatOptional(names.receipt);
+  if (receipt === null) return null;
+  return resumeInstall(names);
+}
+
+export async function installSymlinkTransaction({
+  destination,
+  hooks = {},
+  name,
+  target,
+  transaction,
+}) {
+  if (target.length === 0 || path.isAbsolute(target)) {
+    throw new Error('invalid deployment symlink target');
+  }
+  const names = pathTransactionNames(destination, name, transaction);
+  const oldIdentity = await lstatOptional(destination);
+  let expected = null;
+  if (oldIdentity !== null) {
+    expected = await inspectSymlink(destination, 'existing deployment link');
+  }
+  await createTransactionDirectory(names);
+  let receiptWritten = false;
+  try {
+    await symlink(target, names.candidate);
+    const candidate = await inspectSymlink(
+      names.candidate,
+      'deployment link candidate',
+    );
+    await syncDirectory(names.transactionDirectory);
+    await prepareReceipt({
+      candidate,
+      expected,
+      hooks,
+      names,
+      type: 'symlink',
+    });
+    receiptWritten = true;
+    if (expected !== null) {
+      await moveAndVerifyExpected({
+        expected,
+        hooks,
+        names,
+        type: 'symlink',
+      });
+    }
+    await publishNoReplace(names.candidate, destination, names.directory, 'symlink');
+    const published = await inspectOptional(
+      destination,
+      'symlink',
+      'published deployment candidate',
+    );
+    await appendReceipt(names.receipt, {
+      candidate: published,
+      phase: 'candidate-published',
+    });
+    return published;
+  } catch (error) {
+    if (!receiptWritten) {
+      await cleanupTransaction(names).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+export async function recoverSymlinkTransaction({
+  destination,
+  name,
+  transaction,
+}) {
+  const names = pathTransactionNames(destination, name, transaction);
+  const receipt = await lstatOptional(names.receipt);
+  if (receipt === null) return null;
+  return resumeInstall(names);
+}
+
+export async function rollbackPathTransaction({
+  destination,
+  hooks = {},
+  name,
+  transaction,
+}) {
+  const names = pathTransactionNames(destination, name, transaction);
+  const receiptIdentity = await lstatOptional(names.receipt);
+  if (receiptIdentity === null) return;
+  const { header } = await readReceipt(names);
+  const liveIdentity = await lstatOptional(destination);
+  if (liveIdentity !== null) {
+    let opened = null;
+    let observed;
+    try {
+      if (header.type === 'file') {
+        opened = await inspectRegular(destination, 'rollback live object');
+        observed = opened.identity;
+      } else {
+        observed = await inspectSymlink(destination, 'rollback live object');
+      }
+      if (!identityMatches(observed, header.candidate)) {
+        throw new Error('rollback conflict: live object changed after deployment');
+      }
+      await hooks.afterLiveOpen?.(destination);
+      await rename(destination, names.current);
+      await syncDirectory(names.directory);
+      await syncDirectory(names.transactionDirectory);
+      const moved = await inspectOptional(
+        names.current,
+        header.type,
+        'rollback moved candidate',
+      );
+      if (
+        !identityMatches(moved, observed)
+        || !identityMatches(moved, header.candidate)
+      ) {
+        await restoreMovedNoReplace(names.current, names);
+        throw new Error('rollback conflict: live object changed during rollback');
+      }
+    } finally {
+      await opened?.handle.close().catch(() => {});
+    }
+  }
+  if (header.expected !== null) {
+    const old = await inspectOptional(
+      names.old,
+      header.type,
+      'rollback old object',
+    );
+    if (!identityMatches(old, header.expected)) {
+      throw new Error('rollback conflict: old deployment object changed');
+    }
+    await publishNoReplace(
+      names.old,
+      destination,
+      names.directory,
+      header.type,
+    );
+  }
+  await cleanupTransaction(names);
+}
+
+export async function finalizePathTransaction({
+  destination,
+  name,
+  transaction,
+}) {
+  const names = pathTransactionNames(destination, name, transaction);
+  const receiptIdentity = await lstatOptional(names.receipt);
+  if (receiptIdentity === null) return;
+  const { header } = await readReceipt(names);
+  const live = await inspectOptional(
+    destination,
+    header.type,
+    'final live deployment object',
   );
-  await syncDirectory(backups);
-  return metadata;
+  if (!identityMatches(live, header.candidate)) {
+    throw new Error('deployment transaction conflict: final live object changed');
+  }
+  await cleanupTransaction(names);
 }
 
 export async function captureFile({ backups, destination, name }) {
@@ -145,6 +653,7 @@ export async function captureFile({ backups, destination, name }) {
     gid: pinned.identity.gid,
     ino: pinned.identity.ino,
     mode: pinned.identity.mode & 0o7777,
+    size: pinned.identity.size,
     uid: pinned.identity.uid,
   };
   await writeFile(metadataFile, `${JSON.stringify(metadata)}\n`, {
@@ -174,26 +683,6 @@ export async function restoreFile({ backups, destination, name }) {
   }
 }
 
-async function assertCandidateUnchanged({ backups, destination, name }) {
-  const expected = JSON.parse(
-    await readFile(path.join(backups, `${name}.candidate.json`), 'utf8'),
-  );
-  const current = await lstatOptional(destination);
-  if (current === null) throw new Error(`rollback conflict: ${name} is missing`);
-  const pinned = await readPinned(destination, `rollback candidate ${name}`);
-  const actual = fileIdentity(pinned.identity, pinned.bytes);
-  for (const field of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'digest']) {
-    if (actual[field] !== expected[field]) {
-      throw new Error(`rollback conflict: ${name} changed after deployment`);
-    }
-  }
-}
-
-export async function restoreFileCompareAndSwap({ backups, destination, name }) {
-  await assertCandidateUnchanged({ backups, destination, name });
-  await restoreFile({ backups, destination, name });
-}
-
 const isMain = process.argv[1]
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
@@ -210,8 +699,8 @@ if (isMain) {
         uid: Number(args[3]),
         gid: Number(args[4]),
       });
-    } else if (command === 'install-recorded' && args.length === 7) {
-      await atomicInstallRecorded({
+    } else if (command === 'install-transaction' && args.length === 8) {
+      await installFileTransaction({
         source: args[0],
         destination: args[1],
         mode: Number.parseInt(args[2], 8),
@@ -219,15 +708,41 @@ if (isMain) {
         gid: Number(args[4]),
         backups: args[5],
         name: args[6],
+        transaction: args[7],
+      });
+    } else if (command === 'recover-file' && args.length === 3) {
+      await recoverFileTransaction({
+        destination: args[0],
+        name: args[1],
+        transaction: args[2],
+      });
+    } else if (command === 'install-symlink-transaction' && args.length === 4) {
+      await installSymlinkTransaction({
+        destination: args[0],
+        target: args[1],
+        name: args[2],
+        transaction: args[3],
+      });
+    } else if (command === 'recover-symlink' && args.length === 3) {
+      await recoverSymlinkTransaction({
+        destination: args[0],
+        name: args[1],
+        transaction: args[2],
+      });
+    } else if (command === 'rollback-path' && args.length === 3) {
+      await rollbackPathTransaction({
+        destination: args[0],
+        name: args[1],
+        transaction: args[2],
+      });
+    } else if (command === 'finalize-path' && args.length === 3) {
+      await finalizePathTransaction({
+        destination: args[0],
+        name: args[1],
+        transaction: args[2],
       });
     } else if (command === 'restore' && args.length === 3) {
       await restoreFile({ destination: args[0], backups: args[1], name: args[2] });
-    } else if (command === 'restore-cas' && args.length === 3) {
-      await restoreFileCompareAndSwap({
-        destination: args[0],
-        backups: args[1],
-        name: args[2],
-      });
     } else {
       throw new Error('invalid deployment file transaction command');
     }

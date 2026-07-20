@@ -13,9 +13,6 @@ import {
   readlink,
   rename,
   rm,
-  symlink,
-  unlink,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -151,75 +148,6 @@ export async function verifyPayload({ expectedManifestDigest, payload }) {
   return records;
 }
 
-export async function switchSymlink({ link, record = null, target }) {
-  if (!path.isAbsolute(link) || target.length === 0 || path.isAbsolute(target)) {
-    throw new Error('invalid live symlink arguments');
-  }
-  if (record !== null && !path.isAbsolute(record)) {
-    throw new Error('invalid live symlink record');
-  }
-  const temporary = `${link}.new.${process.pid}`;
-  let published = false;
-  try {
-    await symlink(target, temporary);
-    const candidate = await lstat(temporary);
-    if (!candidate.isSymbolicLink()) throw new Error('live link candidate is unsafe');
-    if (record !== null) {
-      await writeFile(record, `${JSON.stringify({
-        dev: candidate.dev,
-        digest: sha256(Buffer.from(target)),
-        ino: candidate.ino,
-        target,
-      })}\n`, { flag: 'wx', mode: 0o600 });
-      await syncDirectory(path.dirname(record));
-    }
-    await rename(temporary, link);
-    published = true;
-    await syncDirectory(path.dirname(link));
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    if (record !== null && !published) await unlink(record).catch(() => {});
-    throw error;
-  }
-  if (await readlink(link) !== target) throw new Error('live symlink verification failed');
-}
-
-export async function restoreSymlinkCompareAndSwap({
-  link,
-  oldKind,
-  oldTarget,
-  record,
-}) {
-  if (
-    !path.isAbsolute(link)
-    || !path.isAbsolute(record)
-    || (oldKind !== 'absent' && oldKind !== 'symlink')
-    || (oldKind === 'symlink' && (oldTarget.length === 0 || path.isAbsolute(oldTarget)))
-  ) {
-    throw new Error('invalid live symlink rollback arguments');
-  }
-  const expected = JSON.parse(await readFile(record, 'utf8'));
-  const identity = await lstatOptional(link);
-  if (identity === null || !identity.isSymbolicLink()) {
-    throw new Error('rollback conflict: live code link changed after deployment');
-  }
-  const target = await readlink(link);
-  if (
-    identity.dev !== expected.dev
-    || identity.ino !== expected.ino
-    || target !== expected.target
-    || sha256(Buffer.from(target)) !== expected.digest
-  ) {
-    throw new Error('rollback conflict: live code link changed after deployment');
-  }
-  if (oldKind === 'symlink') {
-    await switchSymlink({ link, target: oldTarget });
-  } else {
-    await unlink(link);
-    await syncDirectory(path.dirname(link));
-  }
-}
-
 export async function validateDirectoryChain({
   allowMissing,
   allowedUids,
@@ -288,6 +216,11 @@ export async function validateItemTree(root) {
 
 const CURRENT_GENERATION_TARGET =
   /^generations\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PRIVATE_GUARD_DIRECTORY =
+  /^\.sync\.lock\.guard\.[0-9]+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.candidate$/;
+const PRIVATE_OWNER_FILE = /^owner-[A-Za-z0-9_-]{1,256}\.json$/;
+const PRIVATE_ROOT_FILE =
+  /^(?:state\.json|sync\.lock|\.sync\.lock\.[0-9]+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.candidate|\.sync\.lock\.stale\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|\.state\.json\.[0-9]+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp)$/;
 
 export async function validateManagedRoot({ gid, kind, root, uid }) {
   if (
@@ -300,14 +233,40 @@ export async function validateManagedRoot({ gid, kind, root, uid }) {
   ) {
     throw new Error('invalid managed root validation arguments');
   }
+  const stateDirectoryMode = (relative) => {
+    if (relative === '' || relative === 'public' || relative.startsWith('public/')) {
+      return 0o750;
+    }
+    if (relative === 'sync.lock.guard' || PRIVATE_GUARD_DIRECTORY.test(relative)) {
+      return 0o700;
+    }
+    return null;
+  };
+  const stateFileMode = (relative) => {
+    if (relative.startsWith('public/')) return 0o640;
+    if (!relative.includes('/') && PRIVATE_ROOT_FILE.test(relative)) return 0o600;
+    const parent = path.posix.dirname(relative);
+    const basename = path.posix.basename(relative);
+    if (
+      (parent === 'sync.lock.guard' || PRIVATE_GUARD_DIRECTORY.test(parent))
+      && PRIVATE_OWNER_FILE.test(basename)
+    ) {
+      return 0o600;
+    }
+    return null;
+  };
   const walkManaged = async (directory, relative = '') => {
     const directoryIdentity = await lstat(directory);
+    const requiredDirectoryMode = kind === 'items'
+      ? 0o750
+      : stateDirectoryMode(relative);
     if (
-      !directoryIdentity.isDirectory()
+      requiredDirectoryMode === null
+      || !directoryIdentity.isDirectory()
       || directoryIdentity.isSymbolicLink()
       || directoryIdentity.uid !== uid
       || directoryIdentity.gid !== gid
-      || (directoryIdentity.mode & 0o7777) !== 0o750
+      || (directoryIdentity.mode & 0o7777) !== requiredDirectoryMode
     ) {
       throw new Error(`managed ${kind} directory has unsafe identity or mode`);
     }
@@ -318,13 +277,17 @@ export async function validateManagedRoot({ gid, kind, root, uid }) {
       if (identity.isDirectory() && !identity.isSymbolicLink()) {
         await walkManaged(child, childRelative);
       } else if (identity.isFile() && !identity.isSymbolicLink()) {
+        const requiredFileMode = kind === 'items'
+          ? 0o640
+          : stateFileMode(childRelative);
         if (identity.nlink !== 1) {
           throw new Error(`managed ${kind} file must be a single-link regular file`);
         }
         if (
-          identity.uid !== uid
+          requiredFileMode === null
+          || identity.uid !== uid
           || identity.gid !== gid
-          || (identity.mode & 0o7777) !== 0o640
+          || (identity.mode & 0o7777) !== requiredFileMode
         ) {
           throw new Error(`managed ${kind} file has unsafe identity or mode`);
         }
@@ -530,6 +493,117 @@ function releaseExecutable(relative) {
     'cc-site/sync/deploy-to-cc.sh',
     'cc-site/sync/install-remote.sh',
   ]).has(relative);
+}
+
+const LIVE_RELEASE_TARGET =
+  /^aifeeds-cc-sync-releases\/([0-9a-f]{64})\/cc-site\/sync$/;
+
+export async function validateManagedLiveRelease({
+  allowedGid,
+  allowedUid,
+  liveLink,
+  releases,
+}) {
+  if (
+    !path.isAbsolute(liveLink)
+    || !path.isAbsolute(releases)
+    || path.dirname(liveLink) !== path.dirname(releases)
+    || path.basename(releases) !== 'aifeeds-cc-sync-releases'
+    || !Number.isInteger(allowedUid)
+    || allowedUid < 0
+    || !Number.isInteger(allowedGid)
+    || allowedGid < 0
+  ) {
+    throw new Error('invalid live release validation arguments');
+  }
+  const releasesIdentity = await lstat(releases);
+  if (
+    !releasesIdentity.isDirectory()
+    || releasesIdentity.isSymbolicLink()
+    || releasesIdentity.uid !== allowedUid
+    || releasesIdentity.gid !== allowedGid
+    || (releasesIdentity.mode & 0o7777) !== 0o755
+  ) {
+    throw new Error('live release root is unsafe');
+  }
+  const linkBefore = await lstat(liveLink);
+  if (
+    !linkBefore.isSymbolicLink()
+    || linkBefore.uid !== allowedUid
+    || linkBefore.gid !== allowedGid
+  ) {
+    throw new Error('live code path is not a managed symlink');
+  }
+  const target = await readlink(liveLink);
+  const targetMatch = LIVE_RELEASE_TARGET.exec(target);
+  if (!targetMatch) {
+    throw new Error('live release target is unsafe');
+  }
+  const linkAfter = await lstat(liveLink);
+  if (linkAfter.dev !== linkBefore.dev || linkAfter.ino !== linkBefore.ino) {
+    throw new Error('live release target changed during validation');
+  }
+
+  const release = path.join(releases, targetMatch[1]);
+  try {
+    const releaseBefore = await lstat(release);
+    await validateReleaseTree(release, allowedUid, allowedGid);
+    const allowlist = parseAllowlist(await readFile(
+      path.join(release, 'cc-site', 'sync', 'payload-files.txt'),
+      'utf8',
+    ));
+    const expectedNames = allowlist
+      .filter((relative) => relative.startsWith('cc-site/'))
+      .sort();
+    const actualNames = [];
+    const walkExact = async (directory, relative = '') => {
+      const identity = await lstat(directory);
+      if (
+        !identity.isDirectory()
+        || identity.isSymbolicLink()
+        || identity.uid !== allowedUid
+        || identity.gid !== allowedGid
+        || (identity.mode & 0o7777) !== 0o755
+      ) {
+        throw new Error('live release directory identity or mode mismatch');
+      }
+      for (const name of (await readdir(directory)).sort()) {
+        const child = path.join(directory, name);
+        const childRelative = relative ? `${relative}/${name}` : name;
+        const childIdentity = await lstat(child);
+        if (childIdentity.isDirectory() && !childIdentity.isSymbolicLink()) {
+          await walkExact(child, childRelative);
+          continue;
+        }
+        const expectedMode = releaseExecutable(childRelative) ? 0o755 : 0o644;
+        if (
+          !childIdentity.isFile()
+          || childIdentity.isSymbolicLink()
+          || childIdentity.nlink !== 1
+          || childIdentity.uid !== allowedUid
+          || childIdentity.gid !== allowedGid
+          || (childIdentity.mode & 0o7777) !== expectedMode
+        ) {
+          throw new Error(`live release file is unsafe: ${childRelative}`);
+        }
+        actualNames.push(childRelative);
+      }
+    };
+    await walkExact(release);
+    if (actualNames.sort().join('\n') !== expectedNames.join('\n')) {
+      throw new Error('live release path set is incomplete or unexpected');
+    }
+    const releaseAfter = await lstat(release);
+    if (
+      releaseAfter.dev !== releaseBefore.dev
+      || releaseAfter.ino !== releaseBefore.ino
+    ) {
+      throw new Error('live release changed during validation');
+    }
+  } catch (error) {
+    throw new Error('live release is damaged or incomplete', { cause: error });
+  }
+  return target;
 }
 
 export async function verifyRelease({
@@ -865,22 +939,6 @@ if (isMain) {
         process.stdout.write(`${sha256(await readFile(args[0]))}\n`);
       } else if (command === 'verify-payload' && args.length === 2) {
         await verifyPayload({ payload: args[0], expectedManifestDigest: args[1] });
-      } else if (
-        command === 'switch-symlink'
-        && (args.length === 2 || args.length === 3)
-      ) {
-        await switchSymlink({
-          link: args[0],
-          target: args[1],
-          record: args[2] ?? null,
-        });
-      } else if (command === 'restore-symlink-cas' && args.length === 4) {
-        await restoreSymlinkCompareAndSwap({
-          link: args[0],
-          record: args[1],
-          oldKind: args[2],
-          oldTarget: args[3],
-        });
       } else if (command === 'validate-chain' && args.length === 4) {
         await validateDirectoryChain({
           boundary: args[0],
@@ -935,6 +993,13 @@ if (isMain) {
           expectedManifestDigest: args[2],
           allowedUid: Number(args[3]),
           allowedGid: Number(args[4]),
+        })}\n`);
+      } else if (command === 'validate-live-release' && args.length === 4) {
+        process.stdout.write(`${await validateManagedLiveRelease({
+          liveLink: args[0],
+          releases: args[1],
+          allowedUid: Number(args[2]),
+          allowedGid: Number(args[3]),
         })}\n`);
       } else if (command === 'publish-release' && args.length === 7) {
         process.stdout.write(`${await publishRelease({

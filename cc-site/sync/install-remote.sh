@@ -113,8 +113,6 @@ transaction_prepared=0
 deployment_committed=0
 release_created=0
 release_stage=""
-old_opt_kind=absent
-old_opt_target=""
 service_load_before=""
 timer_load_before=""
 timer_enabled_before=""
@@ -123,6 +121,9 @@ service_active_before=inactive
 service_quiesced=0
 timer_quiesced=0
 timer_disabled=0
+service_stop_attempted=0
+timer_stop_attempted=0
+timer_disable_attempted=0
 new_service_start_attempted=0
 new_timer_activation_attempted=0
 opt_switched=0
@@ -193,12 +194,6 @@ rollback_nginx() {
   return "$failed"
 }
 
-restore_backed_file() {
-  local destination=$1
-  local backup_name=$2
-  "$NODE" "$FILE_TOOL" restore-cas "$destination" "$ROLLBACK" "$backup_name"
-}
-
 stop_candidate_units() {
   local failed=0
   if ((new_timer_activation_attempted == 1)); then
@@ -211,42 +206,103 @@ stop_candidate_units() {
   return "$failed"
 }
 
+restore_original_service_state() {
+  capture_systemctl is-active "$SERVICE"
+  case "$service_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    active:0:active|active:0:activating|activating:0:active|activating:0:activating)
+      return 0 ;;
+    active:3:inactive|activating:3:inactive)
+      "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1 || return 1
+      capture_systemctl is-active "$SERVICE"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active \
+        || "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:activating ]] ;;
+    inactive:3:inactive)
+      return 0 ;;
+    inactive:0:active|inactive:0:activating)
+      "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || return 1
+      capture_systemctl is-active "$SERVICE"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+restore_original_timer_enablement() {
+  capture_systemctl is-enabled "$TIMER"
+  case "$timer_enabled_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    enabled:0:enabled)
+      return 0 ;;
+    enabled:1:disabled)
+      "$SYSTEMCTL" enable "$TIMER" >/dev/null 2>&1 || return 1
+      capture_systemctl is-enabled "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:enabled ]] ;;
+    disabled:1:disabled|not-found:4:not-found)
+      return 0 ;;
+    disabled:0:enabled)
+      "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1 || return 1
+      capture_systemctl is-enabled "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 1:disabled ]] ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+restore_original_timer_activity() {
+  capture_systemctl is-active "$TIMER"
+  case "$timer_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    active:0:active)
+      return 0 ;;
+    active:3:inactive)
+      "$SYSTEMCTL" start "$TIMER" >/dev/null 2>&1 || return 1
+      capture_systemctl is-active "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active ]] ;;
+    inactive:3:inactive)
+      return 0 ;;
+    inactive:0:active)
+      "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || return 1
+      capture_systemctl is-active "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] ;;
+    *)
+      return 1 ;;
+  esac
+}
+
 rollback_install() {
   local failed=0
   rollback_nginx || failed=1
   stop_candidate_units || failed=1
   cleanup_created_roots || failed=1
   if ((opt_switched == 1)); then
-    "$NODE" "$SECURITY_TOOL" restore-symlink-cas \
-      "$OPT" "$ROLLBACK/opt-candidate.json" \
-      "$old_opt_kind" "$old_opt_target" || failed=1
+    "$NODE" "$FILE_TOOL" rollback-path \
+      "$OPT" opt "$EXPECTED_MANIFEST_DIGEST" || failed=1
   fi
   if ((env_installed == 1)); then
-    restore_backed_file "$ENV_FILE" env || failed=1
+    "$NODE" "$FILE_TOOL" rollback-path \
+      "$ENV_FILE" env "$EXPECTED_MANIFEST_DIGEST" || failed=1
   fi
   if ((service_installed == 1)); then
-    restore_backed_file "$UNIT_DIR/$SERVICE" service || failed=1
+    "$NODE" "$FILE_TOOL" rollback-path \
+      "$UNIT_DIR/$SERVICE" service "$EXPECTED_MANIFEST_DIGEST" || failed=1
   fi
   if ((timer_installed == 1)); then
-    restore_backed_file "$UNIT_DIR/$TIMER" timer || failed=1
+    "$NODE" "$FILE_TOOL" rollback-path \
+      "$UNIT_DIR/$TIMER" timer "$EXPECTED_MANIFEST_DIGEST" || failed=1
   fi
   if ((service_installed == 1 || timer_installed == 1)); then
     "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || failed=1
   fi
-  if ((service_quiesced == 1)) \
-    && [[ "$service_active_before" == active \
-      || "$service_active_before" == activating ]]; then
-    "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1 || failed=1
-    service_quiesced=0
+  if ((service_stop_attempted == 1 || new_service_start_attempted == 1)); then
+    restore_original_service_state || failed=1
   fi
-  if ((timer_disabled == 1)) && [[ "$timer_enabled_before" == enabled ]]; then
-    "$SYSTEMCTL" enable "$TIMER" >/dev/null 2>&1 || failed=1
-    timer_disabled=0
+  if ((timer_disable_attempted == 1 || new_timer_activation_attempted == 1)); then
+    restore_original_timer_enablement || failed=1
   fi
-  if ((timer_quiesced == 1)) && [[ "$timer_active_before" == active ]]; then
-    "$SYSTEMCTL" start "$TIMER" >/dev/null 2>&1 || failed=1
-    timer_quiesced=0
+  if ((timer_stop_attempted == 1 || new_timer_activation_attempted == 1)); then
+    restore_original_timer_activity || failed=1
   fi
+  service_quiesced=0
+  timer_disabled=0
+  timer_quiesced=0
   if ((release_created == 1)); then
     rm -rf -- "$RELEASE" || failed=1
   fi
@@ -370,6 +426,14 @@ ITEM_ROOT="$SITE_ROOT/i"
 VHOST_DIR=$(rooted /www/server/panel/vhost/nginx)
 VHOST="$VHOST_DIR/html_ai-feeds.cc.conf"
 SNIPPET="$VHOST_DIR/aifeeds-cc-content-mirror.conf"
+
+if [[ -L "$OPT" ]]; then
+  "$NODE" "$SECURITY_TOOL" validate-live-release \
+    "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
+elif [[ -e "$OPT" ]]; then
+  echo "ERROR: existing live code path is not a managed symlink" >&2
+  exit 1
+fi
 
 SYSTEMCTL_OUTPUT=""
 SYSTEMCTL_STATUS=0
@@ -539,9 +603,101 @@ if [[ ! -f "$VHOST" || -L "$VHOST" ]]; then
   exit 1
 fi
 "$INSTALL" -d -o root -g root -m 0700 "$ROLLBACK"
+transaction_prepared=1
+
+if [[ "$service_active_before" == active \
+  || "$service_active_before" == activating ]]; then
+  service_stop_attempted=1
+  set +e
+  "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1
+  service_stop_status=$?
+  set -e
+  capture_systemctl is-active "$SERVICE"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    3:inactive) service_quiesced=1 ;;
+    0:active|0:activating) service_quiesced=0 ;;
+    *)
+      echo "ERROR: unsupported post-stop systemd state for $SERVICE: $SYSTEMCTL_OUTPUT" >&2
+      exit 1 ;;
+  esac
+  if ((service_stop_status != 0)); then
+    echo "ERROR: systemctl stop failed for $SERVICE" >&2
+    exit "$service_stop_status"
+  fi
+  if ((service_quiesced != 1)); then
+    echo "ERROR: unable to stop $SERVICE cleanly" >&2
+    exit 1
+  fi
+fi
+if [[ "$timer_active_before" == active ]]; then
+  timer_stop_attempted=1
+  set +e
+  "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1
+  timer_stop_status=$?
+  set -e
+  capture_systemctl is-active "$TIMER"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    3:inactive) timer_quiesced=1 ;;
+    0:active) timer_quiesced=0 ;;
+    *)
+      echo "ERROR: unsupported post-stop systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
+      exit 1 ;;
+  esac
+  if ((timer_stop_status != 0)); then
+    echo "ERROR: systemctl stop failed for $TIMER" >&2
+    exit "$timer_stop_status"
+  fi
+  if ((timer_quiesced != 1)); then
+    echo "ERROR: unable to stop $TIMER cleanly" >&2
+    exit 1
+  fi
+fi
+if [[ "$timer_enabled_before" == enabled ]]; then
+  timer_disable_attempted=1
+  set +e
+  "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1
+  timer_disable_status=$?
+  set -e
+  capture_systemctl is-enabled "$TIMER"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    1:disabled) timer_disabled=1 ;;
+    0:enabled) timer_disabled=0 ;;
+    *)
+      echo "ERROR: unsupported post-disable systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
+      exit 1 ;;
+  esac
+  if ((timer_disable_status != 0)); then
+    echo "ERROR: systemctl disable failed for $TIMER" >&2
+    exit "$timer_disable_status"
+  fi
+  if ((timer_disabled != 1)); then
+    echo "ERROR: unable to disable $TIMER cleanly" >&2
+    exit 1
+  fi
+fi
+
+"$NODE" "$FILE_TOOL" recover-symlink \
+  "$OPT" opt "$EXPECTED_MANIFEST_DIGEST"
+"$NODE" "$FILE_TOOL" recover-file \
+  "$UNIT_DIR/$SERVICE" service "$EXPECTED_MANIFEST_DIGEST"
+"$NODE" "$FILE_TOOL" recover-file \
+  "$UNIT_DIR/$TIMER" timer "$EXPECTED_MANIFEST_DIGEST"
+"$NODE" "$FILE_TOOL" recover-file \
+  "$ENV_FILE" env "$EXPECTED_MANIFEST_DIGEST"
+for recovered in \
+  "$OPT:opt" \
+  "$UNIT_DIR/$SERVICE:service" \
+  "$UNIT_DIR/$TIMER:timer" \
+  "$ENV_FILE:env"; do
+  recovered_destination=${recovered%%:*}
+  recovered_name=${recovered#*:}
+  "$NODE" "$FILE_TOOL" finalize-path \
+    "$recovered_destination" "$recovered_name" "$EXPECTED_MANIFEST_DIGEST"
+done
+
 if [[ -L "$OPT" ]]; then
-  old_opt_kind=symlink
-  old_opt_target=$(readlink "$OPT")
+  "$NODE" "$SECURITY_TOOL" validate-live-release \
+    "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
 elif [[ -e "$OPT" ]]; then
   echo "ERROR: existing live code path is not a managed symlink" >&2
   exit 1
@@ -554,36 +710,6 @@ for backup in \
   backup_name=${backup#*:}
   "$NODE" "$FILE_TOOL" capture "$destination" "$ROLLBACK" "$backup_name"
 done
-transaction_prepared=1
-
-if [[ "$service_active_before" == active \
-  || "$service_active_before" == activating ]]; then
-  "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1
-  service_quiesced=1
-  capture_systemctl is-active "$SERVICE"
-  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 3:inactive ]]; then
-    echo "ERROR: unable to stop $SERVICE cleanly" >&2
-    exit 1
-  fi
-fi
-if [[ "$timer_active_before" == active ]]; then
-  "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1
-  timer_quiesced=1
-  capture_systemctl is-active "$TIMER"
-  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 3:inactive ]]; then
-    echo "ERROR: unable to stop $TIMER cleanly" >&2
-    exit 1
-  fi
-fi
-if [[ "$timer_enabled_before" == enabled ]]; then
-  "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1
-  timer_disabled=1
-  capture_systemctl is-enabled "$TIMER"
-  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 1:disabled ]]; then
-    echo "ERROR: unable to disable $TIMER cleanly" >&2
-    exit 1
-  fi
-fi
 
 "$INSTALL" -d -o root -g root -m 0755 "$RELEASES"
 "$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
@@ -623,19 +749,22 @@ IFS=$'\t' read -r item_root_created item_root_dev item_root_ino < <(
 
 LIVE_TARGET="aifeeds-cc-sync-releases/$EXPECTED_MANIFEST_DIGEST/cc-site/sync"
 opt_switched=1
-"$NODE" "$SECURITY_TOOL" switch-symlink \
-  "$OPT" "$LIVE_TARGET" "$ROLLBACK/opt-candidate.json"
+"$NODE" "$FILE_TOOL" install-symlink-transaction \
+  "$OPT" "$LIVE_TARGET" opt "$EXPECTED_MANIFEST_DIGEST"
 service_installed=1
-"$NODE" "$FILE_TOOL" install-recorded \
+"$NODE" "$FILE_TOOL" install-transaction \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.service" "$UNIT_DIR/$SERVICE" \
-  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" service
+  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" service \
+  "$EXPECTED_MANIFEST_DIGEST"
 timer_installed=1
-"$NODE" "$FILE_TOOL" install-recorded \
+"$NODE" "$FILE_TOOL" install-transaction \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.timer" "$UNIT_DIR/$TIMER" \
-  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" timer
+  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" timer \
+  "$EXPECTED_MANIFEST_DIGEST"
 env_installed=1
-"$NODE" "$FILE_TOOL" install-recorded "$ENV_SOURCE" "$ENV_FILE" \
-  0600 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" env
+"$NODE" "$FILE_TOOL" install-transaction "$ENV_SOURCE" "$ENV_FILE" \
+  0600 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" env \
+  "$EXPECTED_MANIFEST_DIGEST"
 
 "$SYSTEMCTL" daemon-reload
 new_service_start_attempted=1
@@ -729,6 +858,16 @@ smoke_exact ai-news \
 
 new_timer_activation_attempted=1
 "$SYSTEMCTL" enable --now "$TIMER"
+for installed in \
+  "$OPT:opt" \
+  "$UNIT_DIR/$SERVICE:service" \
+  "$UNIT_DIR/$TIMER:timer" \
+  "$ENV_FILE:env"; do
+  installed_destination=${installed%%:*}
+  installed_name=${installed#*:}
+  "$NODE" "$FILE_TOOL" finalize-path \
+    "$installed_destination" "$installed_name" "$EXPECTED_MANIFEST_DIGEST"
+done
 nginx_mutated=0
 deployment_committed=1
 if ! "$NODE" "$SECURITY_TOOL" gc-releases \
