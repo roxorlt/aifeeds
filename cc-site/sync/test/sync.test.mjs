@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   stat,
   writeFile,
@@ -242,7 +243,10 @@ class SyncApiFixture {
 }
 
 async function workspace() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'cc-sync-test-'));
+  const root = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-sync-test-',
+  ));
   const siteRoot = path.join(root, 'site');
   const stateDir = path.join(root, 'state');
   await mkdir(path.join(siteRoot, 'i'), { recursive: true });

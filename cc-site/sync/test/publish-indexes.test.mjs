@@ -3,7 +3,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
+  rm,
+  rename,
   stat,
   symlink,
   writeFile,
@@ -25,12 +28,23 @@ const CC_SITE = path.resolve(
   '..',
 );
 
-async function workspace() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'cc-index-test-'));
+async function workspace({ staticSitemap = 'present' } = {}) {
+  const temporaryRoot = await realpath(os.tmpdir());
+  const root = await mkdtemp(path.join(temporaryRoot, 'cc-index-test-'));
   const siteRoot = path.join(root, 'site');
   const stateDir = path.join(root, 'state');
   await mkdir(siteRoot, { mode: 0o700 });
   await mkdir(stateDir, { mode: 0o700 });
+  if (staticSitemap === 'present') {
+    await writeFile(
+      path.join(siteRoot, 'sitemap-static.xml'),
+      '<urlset></urlset>\n',
+    );
+  } else if (staticSitemap === 'symlink') {
+    const outsideStatic = path.join(root, 'outside-static.xml');
+    await writeFile(outsideStatic, '<urlset></urlset>\n');
+    await symlink(outsideStatic, path.join(siteRoot, 'sitemap-static.xml'));
+  }
   return { root, siteRoot, stateDir };
 }
 
@@ -126,6 +140,30 @@ test('publishes sorted .cc archive pages and sitemap outputs', async () => {
   assert.match(newsMap, /<lastmod>2026-07-/);
   assert.doesNotMatch(newsMap, /<lastmod>null<\/lastmod>/);
   assert.equal((await stat(path.join(dirs.siteRoot, 'ai-news'))).isDirectory(), true);
+});
+
+test('references the static sitemap only when it is a regular non-symlink file', async () => {
+  for (const [fixture, expected] of [
+    ['present', true],
+    ['absent', false],
+    ['symlink', false],
+  ]) {
+    const dirs = await workspace({ staticSitemap: fixture });
+    await publishIndexes({
+      ...dirs,
+      state: state([]),
+    });
+    const index = await readFile(
+      path.join(dirs.stateDir, 'public', 'sitemap.xml'),
+      'utf8',
+    );
+    assert.equal(
+      index.includes('https://ai-feeds.cc/sitemap-static.xml'),
+      expected,
+      fixture,
+    );
+    assert.match(index, /https:\/\/ai-feeds\.cc\/sitemaps\/archive\.xml/);
+  }
 });
 
 test('sorts equal and undated items deterministically after dated items', async () => {
@@ -377,6 +415,164 @@ test('rejects generated-root symlinks without writing through them', async () =>
   assert.deepEqual(await readdir(outside), ['sentinel']);
 });
 
+test('rejects an intermediate symlink in the configured site root', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-site-link-',
+  ));
+  const actualParent = path.join(base, 'actual-site-parent');
+  const linkedParent = path.join(base, 'linked-site-parent');
+  const stateDir = path.join(base, 'state');
+  await mkdir(path.join(actualParent, 'site'), { recursive: true });
+  await mkdir(stateDir);
+  await writeFile(
+    path.join(actualParent, 'site', 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+  await symlink(actualParent, linkedParent);
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot: path.join(linkedParent, 'site'),
+      stateDir,
+      state: state([]),
+    }),
+    /symlink|unsafe.*directory/i,
+  );
+  assert.deepEqual(await readdir(path.join(actualParent, 'site')), [
+    'sitemap-static.xml',
+  ]);
+});
+
+test('rejects intermediate symlinks in the state/public root chain', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-state-link-',
+  ));
+  const siteRoot = path.join(base, 'site');
+  const actualParent = path.join(base, 'actual-state-parent');
+  const linkedParent = path.join(base, 'linked-state-parent');
+  await mkdir(siteRoot);
+  await writeFile(
+    path.join(siteRoot, 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+  await mkdir(path.join(actualParent, 'state'), { recursive: true });
+  await symlink(actualParent, linkedParent);
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir: path.join(linkedParent, 'state'),
+      state: state([]),
+    }),
+    /symlink|unsafe.*directory/i,
+  );
+  assert.deepEqual(await readdir(path.join(actualParent, 'state')), []);
+
+  const realState = path.join(base, 'real-state');
+  const outsidePublic = path.join(base, 'outside-public');
+  await mkdir(realState);
+  await mkdir(outsidePublic);
+  await writeFile(path.join(outsidePublic, 'sentinel'), 'unchanged');
+  await symlink(outsidePublic, path.join(realState, 'public'));
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir: realState,
+      state: state([]),
+    }),
+    /symlink|unsafe.*directory/i,
+  );
+  assert.deepEqual(await readdir(outsidePublic), ['sentinel']);
+});
+
+test('fails closed when a pinned site-root ancestor is swapped before commit', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-swap-',
+  ));
+  const parent = path.join(base, 'owned-parent');
+  const movedParent = path.join(base, 'moved-parent');
+  const siteRoot = path.join(parent, 'site');
+  const stateDir = path.join(base, 'state');
+  await mkdir(siteRoot, { recursive: true });
+  await mkdir(stateDir);
+  await writeFile(
+    path.join(siteRoot, 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir,
+      state: state([]),
+      hooks: {
+        async beforePublish(name) {
+          if (name !== 'archive') return;
+          await rename(parent, movedParent);
+          await symlink(movedParent, parent);
+        },
+      },
+    }),
+    /symlink|changed|unsafe.*directory|rollback/i,
+  );
+  const remaining = await readdir(path.join(movedParent, 'site'));
+  assert.ok(remaining.includes('sitemap-static.xml'));
+  assert.equal(remaining.includes('ai-news'), false);
+  await rm(parent);
+  await rename(movedParent, parent);
+});
+
+test('a state-root ancestor swap fails closed and rolls back the archive commit', async () => {
+  const base = await mkdtemp(path.join(
+    await realpath(os.tmpdir()),
+    'cc-index-state-swap-',
+  ));
+  const siteRoot = path.join(base, 'site');
+  const parent = path.join(base, 'owned-state-parent');
+  const movedParent = path.join(base, 'moved-state-parent');
+  const stateDir = path.join(parent, 'state');
+  await mkdir(path.join(siteRoot, 'ai-news'), { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    path.join(siteRoot, 'sitemap-static.xml'),
+    '<urlset></urlset>\n',
+  );
+  await writeFile(
+    path.join(siteRoot, 'ai-news', 'index.html'),
+    'previous archive',
+  );
+
+  await assert.rejects(
+    publishIndexes({
+      siteRoot,
+      stateDir,
+      state: state([]),
+      hooks: {
+        async beforePublish(name) {
+          if (name !== 'sitemaps') return;
+          await rename(parent, movedParent);
+          await symlink(movedParent, parent);
+        },
+      },
+    }),
+    /symlink|changed|unsafe.*directory|rollback/i,
+  );
+  assert.equal(
+    await readFile(path.join(siteRoot, 'ai-news', 'index.html'), 'utf8'),
+    'previous archive',
+  );
+  assert.equal(
+    (await readdir(path.join(movedParent, 'state', 'public')))
+      .includes('sitemaps'),
+    false,
+  );
+  await rm(parent);
+  await rename(movedParent, parent);
+});
+
 test('publishes a 30,001 item fixture within a bounded heap increase', async () => {
   const dirs = await workspace();
   const entries = [];
@@ -409,7 +605,16 @@ test('manual static URL config, sitemap, robots, homepage, and deploy ownership 
   );
   assert.deepEqual(configured, {
     base_url: 'https://ai-feeds.cc',
-    paths: ['/', '/privacy.html', '/terms.html', '/contact.html'],
+    paths: [
+      '/',
+      '/privacy.html',
+      '/terms.html',
+      '/contact.html',
+      '/cc-prompts/',
+      '/cc-prompts/best-practices.html',
+      '/cc-prompts/common-workflows.html',
+      '/cc-prompts/how-anthropic-teams-use-claude-code.html',
+    ],
   });
 
   const staticMap = await readFile(
@@ -436,6 +641,20 @@ test('manual static URL config, sitemap, robots, homepage, and deploy ownership 
   const deploy = await readFile(path.join(CC_SITE, 'deploy.sh'), 'utf8');
   assert.match(deploy, /robots\.txt/);
   assert.match(deploy, /sitemap-static\.xml/);
+  for (const promptPath of [
+    'cc-prompts/index.html',
+    'cc-prompts/best-practices.html',
+    'cc-prompts/common-workflows.html',
+    'cc-prompts/how-anthropic-teams-use-claude-code.html',
+  ]) {
+    assert.equal(
+      (deploy.match(new RegExp(promptPath.replaceAll('.', '\\.'), 'g')) ?? [])
+        .length >= 4,
+      true,
+      `${promptPath} must be explicitly staged, copied, permissioned, and smoked`,
+    );
+    await stat(path.join(CC_SITE, promptPath));
+  }
   const operativeDeploy = deploy
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('#'))

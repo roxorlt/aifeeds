@@ -14,6 +14,7 @@
 | `robots.txt` | 爬虫规则；根 sitemap 指向同步器生成的 `/sitemap.xml` |
 | `sitemap-static.xml` | 人工维护静态页的独立 sitemap |
 | `assets/gongan-icon.png` | 公安备案徽章（36×40） |
+| `cc-prompts/*.html` | 人工维护的四个 Claude Code 提示词公开页 |
 | `372c4ae2a3701bbe3b091dff54fb6d14.txt` | 360 搜索站点所有权验证文件 |
 | `sogousiteverification.txt` | 搜狗搜索站点所有权验证文件 |
 | `shenma-site-verification.txt` | 神马搜索站点所有权验证文件 |
@@ -38,9 +39,9 @@
 
 ## 发布所有权边界
 
-`deploy.sh` 只维护首页、隐私、条款、联系页、样式与 assets、`robots.txt`、
-`sitemap-static.xml` 及四个搜索站点验证文件。若后续增加人工维护的
-`cc-prompts/`，也应由该脚本显式列出，不使用会吞入生成目录的根目录通配符。
+`deploy.sh` 只维护首页、隐私、条款、联系页、样式与 assets、四个
+`cc-prompts/` 页面、`robots.txt`、`sitemap-static.xml` 及四个搜索站点验证
+文件。脚本逐个列出公开文件，不使用会吞入生成目录的根目录通配符。
 
 内容同步器独占以下生成输出：
 

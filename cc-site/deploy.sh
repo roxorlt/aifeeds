@@ -22,7 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "▶ scp cc-site/ → $HOST:$STAGING/"
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "rm -rf $STAGING && mkdir -p $STAGING/assets"
+ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" \
+  "rm -rf $STAGING && mkdir -p $STAGING/assets $STAGING/cc-prompts"
 scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
   index.html privacy.html terms.html contact.html style.css \
   robots.txt sitemap-static.xml \
@@ -32,16 +33,28 @@ scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
 scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
   assets/gongan-icon.png \
   "$HOST:$STAGING/assets/"
+scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+  cc-prompts/index.html \
+  cc-prompts/best-practices.html \
+  cc-prompts/common-workflows.html \
+  cc-prompts/how-anthropic-teams-use-claude-code.html \
+  "$HOST:$STAGING/cc-prompts/"
 
 echo "▶ sudo cp → $REMOTE_ROOT/"
 ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
-  sudo mkdir -p $REMOTE_ROOT/assets
+  sudo mkdir -p $REMOTE_ROOT/assets $REMOTE_ROOT/cc-prompts
   sudo cp $STAGING/index.html $STAGING/privacy.html $STAGING/terms.html $STAGING/contact.html $STAGING/style.css \
     $STAGING/robots.txt $STAGING/sitemap-static.xml \
     $STAGING/372c4ae2a3701bbe3b091dff54fb6d14.txt $STAGING/sogousiteverification.txt \
     $STAGING/shenma-site-verification.txt $STAGING/baidu_verify_codeva-OHhjgzJndf.html \
     $REMOTE_ROOT/
   sudo cp $STAGING/assets/gongan-icon.png $REMOTE_ROOT/assets/
+  sudo cp \
+    $STAGING/cc-prompts/index.html \
+    $STAGING/cc-prompts/best-practices.html \
+    $STAGING/cc-prompts/common-workflows.html \
+    $STAGING/cc-prompts/how-anthropic-teams-use-claude-code.html \
+    $REMOTE_ROOT/cc-prompts/
   sudo chown www:www \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/robots.txt $REMOTE_ROOT/sitemap-static.xml \
@@ -49,7 +62,11 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
     $REMOTE_ROOT/sogousiteverification.txt \
     $REMOTE_ROOT/shenma-site-verification.txt \
     $REMOTE_ROOT/baidu_verify_codeva-OHhjgzJndf.html \
-    $REMOTE_ROOT/assets/gongan-icon.png
+    $REMOTE_ROOT/assets/gongan-icon.png \
+    $REMOTE_ROOT/cc-prompts/index.html \
+    $REMOTE_ROOT/cc-prompts/best-practices.html \
+    $REMOTE_ROOT/cc-prompts/common-workflows.html \
+    $REMOTE_ROOT/cc-prompts/how-anthropic-teams-use-claude-code.html
   sudo chmod 644 \
     $REMOTE_ROOT/index.html $REMOTE_ROOT/privacy.html $REMOTE_ROOT/terms.html $REMOTE_ROOT/contact.html \
     $REMOTE_ROOT/style.css $REMOTE_ROOT/robots.txt $REMOTE_ROOT/sitemap-static.xml \
@@ -57,7 +74,11 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" "
     $REMOTE_ROOT/sogousiteverification.txt \
     $REMOTE_ROOT/shenma-site-verification.txt \
     $REMOTE_ROOT/baidu_verify_codeva-OHhjgzJndf.html \
-    $REMOTE_ROOT/assets/gongan-icon.png
+    $REMOTE_ROOT/assets/gongan-icon.png \
+    $REMOTE_ROOT/cc-prompts/index.html \
+    $REMOTE_ROOT/cc-prompts/best-practices.html \
+    $REMOTE_ROOT/cc-prompts/common-workflows.html \
+    $REMOTE_ROOT/cc-prompts/how-anthropic-teams-use-claude-code.html
   rm -rf $STAGING
 "
 
@@ -66,6 +87,8 @@ SCHEME=https
 curl -skI --max-time 5 https://ai-feeds.cc/ >/dev/null 2>&1 || SCHEME=http
 for path in / /privacy.html /terms.html /contact.html /assets/gongan-icon.png /style.css \
   /robots.txt /sitemap-static.xml \
+  /cc-prompts/ /cc-prompts/best-practices.html \
+  /cc-prompts/common-workflows.html /cc-prompts/how-anthropic-teams-use-claude-code.html \
   /372c4ae2a3701bbe3b091dff54fb6d14.txt /sogousiteverification.txt \
   /shenma-site-verification.txt /baidu_verify_codeva-OHhjgzJndf.html; do
   code=$(curl -sk -o /dev/null -w '%{http_code}' "$SCHEME://ai-feeds.cc$path")

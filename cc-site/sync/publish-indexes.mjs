@@ -245,18 +245,58 @@ function assertDirectory(entry, name) {
   }
 }
 
+function absoluteDirectoryPaths(target) {
+  const root = path.parse(target).root;
+  const relative = path.relative(root, target);
+  const parts = relative === '' ? [] : relative.split(path.sep);
+  const paths = [root];
+  for (const part of parts) {
+    paths.push(path.join(paths.at(-1), part));
+  }
+  return paths;
+}
+
+async function inspectDirectoryChain(target, name) {
+  const chain = [];
+  for (const directory of absoluteDirectoryPaths(target)) {
+    const entry = await lstat(directory);
+    assertDirectory(entry, name);
+    chain.push({
+      path: directory,
+      dev: entry.dev,
+      ino: entry.ino,
+    });
+  }
+  return chain;
+}
+
+function assertSameDirectoryChain(expected, actual) {
+  if (
+    expected.length !== actual.length
+    || expected.some((entry, index) => (
+      entry.path !== actual[index].path
+      || entry.dev !== actual[index].dev
+      || entry.ino !== actual[index].ino
+    ))
+  ) {
+    throw new Error('generated directory chain changed during publication');
+  }
+}
+
 async function rootIdentity(root, name) {
-  const entry = await lstat(root);
-  assertDirectory(entry, name);
-  return { path: root, dev: entry.dev, ino: entry.ino };
+  const chain = await inspectDirectoryChain(root, name);
+  const entry = chain.at(-1);
+  return {
+    path: root,
+    dev: entry.dev,
+    ino: entry.ino,
+    chain,
+  };
 }
 
 async function assertIdentity(identity) {
-  const entry = await lstat(identity.path);
-  assertDirectory(entry, identity.path);
-  if (entry.dev !== identity.dev || entry.ino !== identity.ino) {
-    throw new Error(`generated root changed during publication: ${identity.path}`);
-  }
+  const actual = await inspectDirectoryChain(identity.path, identity.path);
+  assertSameDirectoryChain(identity.chain, actual);
 }
 
 async function syncDirectory(identity) {
@@ -267,6 +307,7 @@ async function syncDirectory(identity) {
     if (entry.dev !== identity.dev || entry.ino !== identity.ino) {
       throw new Error(`generated directory changed before sync: ${identity.path}`);
     }
+    await assertIdentity(identity);
     await handle.sync();
   } finally {
     await handle.close();
@@ -364,10 +405,12 @@ function assertReplaceable(entry, kind, target) {
   }
 }
 
-async function removeKnownEntry(target, kind) {
+async function removeKnownEntry(target, kind, parentIdentity) {
+  await assertIdentity(parentIdentity);
   const entry = await lstatOptional(target);
   if (entry === null) return;
   assertReplaceable(entry, kind, target);
+  await assertIdentity(parentIdentity);
   await rm(target, { recursive: kind === 'directory', force: true });
 }
 
@@ -414,10 +457,15 @@ async function rollback(records) {
   for (const record of [...records].reverse()) {
     try {
       if (record.installed) {
-        await removeKnownEntry(record.target, record.kind);
+        await removeKnownEntry(
+          record.target,
+          record.kind,
+          record.parentIdentity,
+        );
         await syncDirectory(record.parentIdentity);
       }
       if (record.oldMoved) {
+        await assertIdentity(record.parentIdentity);
         await rename(record.backup, record.target);
         await syncDirectory(record.parentIdentity);
       }
@@ -430,16 +478,21 @@ async function rollback(records) {
   }
 }
 
-async function cleanupEntry(target, kind) {
+async function cleanupEntry(target, kind, parentIdentity) {
   try {
-    await removeKnownEntry(target, kind);
+    await removeKnownEntry(target, kind, parentIdentity);
   } catch {
     // Published data is already durable; stale random-name staging/backup
     // entries are safer than turning successful publication into a rollback.
   }
 }
 
-async function buildStaging({ items, archiveStage, publicStage }) {
+async function buildStaging({
+  items,
+  archiveStage,
+  publicStage,
+  includeStaticSitemap,
+}) {
   const pageCount = Math.max(1, Math.ceil(items.length / ARCHIVE_PAGE_SIZE));
   const archiveEntries = [];
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
@@ -499,12 +552,27 @@ async function buildStaging({ items, archiveStage, publicStage }) {
     publicStage,
     'sitemap.xml',
     renderSitemapIndex([
-      `${SITE_BASE}/sitemap-static.xml`,
+      ...(includeStaticSitemap
+        ? [`${SITE_BASE}/sitemap-static.xml`]
+        : []),
       `${SITE_BASE}/sitemaps/archive.xml`,
       ...shardLocations,
     ]),
   );
   return { sitemapsStage };
+}
+
+async function hasRegularStaticSitemap(siteIdentity) {
+  await assertIdentity(siteIdentity);
+  const entry = await lstatOptional(
+    path.join(siteIdentity.path, 'sitemap-static.xml'),
+  );
+  await assertIdentity(siteIdentity);
+  return Boolean(
+    entry
+    && !entry.isSymbolicLink()
+    && entry.isFile()
+  );
 }
 
 export async function publishIndexes({
@@ -519,6 +587,7 @@ export async function publishIndexes({
   const items = normalizeItems(state);
   const siteIdentity = await rootIdentity(safeSiteRoot, 'siteRoot');
   const stateIdentity = await rootIdentity(safeStateDir, 'stateDir');
+  const includeStaticSitemap = await hasRegularStaticSitemap(siteIdentity);
   const token = randomUUID();
   const archiveStage = await createDirectory(
     siteIdentity,
@@ -537,8 +606,15 @@ export async function publishIndexes({
       items,
       archiveStage,
       publicStage,
+      includeStaticSitemap,
     }));
     await hooks.afterStageBuilt?.();
+    if (
+      await hasRegularStaticSitemap(siteIdentity)
+      !== includeStaticSitemap
+    ) {
+      throw new Error('static sitemap changed during index generation');
+    }
 
     const publicIdentity = await ensureDirectory(stateIdentity, 'public');
     await replaceGeneratedEntry({
@@ -574,7 +650,11 @@ export async function publishIndexes({
 
     for (const record of records) {
       if (record.oldMoved) {
-        await cleanupEntry(record.backup, record.kind);
+        await cleanupEntry(
+          record.backup,
+          record.kind,
+          record.parentIdentity,
+        );
       }
     }
   } catch (error) {
@@ -588,8 +668,8 @@ export async function publishIndexes({
     }
     throw error;
   } finally {
-    await cleanupEntry(archiveStage.path, 'directory');
-    await cleanupEntry(publicStage.path, 'directory');
+    await cleanupEntry(archiveStage.path, 'directory', siteIdentity);
+    await cleanupEntry(publicStage.path, 'directory', stateIdentity);
   }
 }
 
