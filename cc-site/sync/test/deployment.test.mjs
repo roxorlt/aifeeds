@@ -318,10 +318,12 @@ async function localDeployHarness(
     ? path.join(repo, '.secrets')
     : path.join(root, '.secrets');
   const fakeBin = path.join(root, 'bin');
+  const fakeRemoteBin = path.join(root, 'remote-bin');
   const log = path.join(root, 'commands.log');
   await mkdir(path.join(home, '.ssh'), { recursive: true });
   await mkdir(secrets, { recursive: true });
   await mkdir(fakeBin);
+  await mkdir(fakeRemoteBin);
   if (autoDiscover) {
     await mkdir(path.join(deploySyncDir, 'test'), { recursive: true });
     for (const name of await readdir(SYNC_DIR)) {
@@ -354,14 +356,48 @@ set -euo pipefail
 printf 'ssh' >> "$AIFEEDS_HARNESS_LOG"
 printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
 printf '\n' >> "$AIFEEDS_HARNESS_LOG"
-case "$*" in
+while (($#)); do
+  case "$1" in
+    -i|-o) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) shift; break ;;
+  esac
+done
+remote_command="$*"
+case "$remote_command" in
   *'mktemp -d /tmp/aifeeds-cc-sync.XXXXXX'*)
     printf '/tmp/aifeeds-cc-sync.ABC123\n'
     ;;
-  *'install-remote.sh'*)
-    exit "\${AIFEEDS_REMOTE_INSTALL_EXIT:-0}"
+  *'chmod 0600 '*)
+    exit 0
+    ;;
+  *)
+    PATH="$AIFEEDS_FAKE_REMOTE_BIN:$PATH" /bin/sh -c "$remote_command"
     ;;
 esac
+`);
+  await executable(path.join(fakeRemoteBin, 'sudo'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'remote-sudo' >> "$AIFEEDS_HARNESS_LOG"
+printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
+printf '\n' >> "$AIFEEDS_HARNESS_LOG"
+[[ "$#" == 14 ]]
+[[ "$1" == env && "$2" == -i ]]
+[[ "$3" == PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ]]
+[[ "$4" == bash && "$5" == -s && "$6" == -- ]]
+[[ "$7" =~ ^/tmp/aifeeds-cc-sync\\.[A-Za-z0-9]+$ ]]
+[[ "$8" == https://api.ai-feeds.com ]]
+for digest in "\${@:9}"; do
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+done
+bootstrap_script=$(cat)
+printf 'remote-bootstrap-stdin\n%s\n' "$bootstrap_script" >> "$AIFEEDS_HARNESS_LOG"
+printf '%s\n' "$bootstrap_script" | /bin/bash -n
+[[ "$bootstrap_script" == *$'set -euo pipefail\numask 077\n'* ]]
+[[ "$bootstrap_script" == *'install-remote.fixed'* ]]
+[[ "$bootstrap_script" == *'"$staging" "$base_url" "$manifest_digest" </dev/null'* ]]
+exit "\${AIFEEDS_REMOTE_INSTALL_EXIT:-0}"
 `);
   await executable(path.join(fakeBin, 'scp'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -374,6 +410,7 @@ exit "\${AIFEEDS_SCP_EXIT:-0}"
     env: {
       HOME: home,
       PATH: `${fakeBin}:${process.env.PATH}`,
+      AIFEEDS_FAKE_REMOTE_BIN: fakeRemoteBin,
       ...(autoDiscover ? {} : { AIFEEDS_SECRETS_DIR: secrets }),
       AIFEEDS_HARNESS_LOG: log,
     },
@@ -432,6 +469,14 @@ test('local deploy stages through unique /tmp and never exposes the secret', asy
   assert.match(commandLog, /mktemp -d \/tmp\/aifeeds-cc-sync\.XXXXXX/);
   assert.match(commandLog, /\/tmp\/aifeeds-cc-sync\.ABC123/);
   assert.match(commandLog, /<sudo> <env> <-i>/);
+  const bootstrapCommand = commandLog
+    .split('\n')
+    .find((line) => line.startsWith('ssh') && line.includes('<sudo>'));
+  assert.ok(bootstrapCommand, commandLog);
+  assert.match(bootstrapCommand, /<bash> <-s> <--> <\/tmp\/aifeeds-cc-sync\.ABC123>/);
+  assert.doesNotMatch(bootstrapCommand, /<-c>/);
+  assert.doesNotMatch(bootstrapCommand, /set -euo pipefail|install-remote\.fixed/);
+  assert.match(commandLog, /remote-bootstrap-stdin\nset -euo pipefail\numask 077/);
   assert.match(commandLog, /mktemp -d \/var\/tmp\/aifeeds-cc-bootstrap\.XXXXXX/);
   assert.match(commandLog, /install-remote\.fixed/);
   assert.match(commandLog, /deployment-security\.fixed\.mjs/);

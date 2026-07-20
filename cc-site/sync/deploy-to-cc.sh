@@ -135,6 +135,16 @@ NGINX_TRANSACTION_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mj
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/nginx-config-transaction.mjs")
 NGINX_EDITOR_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/nginx-vhost-editor.mjs")
+for digest in \
+  "$MANIFEST_DIGEST" "$INSTALLER_DIGEST" "$SECURITY_DIGEST" \
+  "$FILE_TRANSACTION_DIGEST" "$NGINX_TRANSACTION_DIGEST" \
+  "$NGINX_EDITOR_DIGEST"; do
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: payload helper returned an invalid SHA-256 digest" >&2
+    exit 1
+  fi
+done
+unset digest
 
 REMOTE_STAGING=$(ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
   'set -euo pipefail; umask 077; mktemp -d /tmp/aifeeds-cc-sync.XXXXXX')
@@ -152,6 +162,10 @@ ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
 
 REMOTE_BOOTSTRAP='set -euo pipefail
 umask 077
+if (($# != 8)); then
+  echo "ERROR: invalid bootstrap argument count" >&2
+  exit 2
+fi
 staging=$1
 base_url=$2
 manifest_digest=$3
@@ -160,6 +174,24 @@ security_digest=$5
 file_transaction_digest=$6
 nginx_transaction_digest=$7
 nginx_editor_digest=$8
+if [[ ! "$staging" =~ ^/tmp/aifeeds-cc-sync\.[A-Za-z0-9]+$ ]]; then
+  echo "ERROR: invalid bootstrap staging path" >&2
+  exit 2
+fi
+if [[ "$base_url" != https://api.ai-feeds.com ]]; then
+  echo "ERROR: invalid bootstrap API origin" >&2
+  exit 2
+fi
+for digest in \
+  "$manifest_digest" "$installer_digest" "$security_digest" \
+  "$file_transaction_digest" "$nginx_transaction_digest" \
+  "$nginx_editor_digest"; do
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: invalid bootstrap digest" >&2
+    exit 2
+  fi
+done
+unset digest
 bootstrap=$(mktemp -d /var/tmp/aifeeds-cc-bootstrap.XXXXXX)
 cleanup_bootstrap() { rm -rf -- "$bootstrap"; }
 trap cleanup_bootstrap EXIT
@@ -197,12 +229,12 @@ AIFEEDS_FIXED_SECURITY_TOOL="$bootstrap/deployment-security.fixed.mjs" \
   AIFEEDS_FIXED_FILE_TOOL="$bootstrap/deployment-file-transaction.fixed.mjs" \
   AIFEEDS_FIXED_NGINX_TOOL="$bootstrap/nginx-config-transaction.fixed.mjs" \
   "$bootstrap/install-remote.fixed" \
-  "$staging" "$base_url" "$manifest_digest"'
+  "$staging" "$base_url" "$manifest_digest" </dev/null'
 
-ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
+printf '%s\n' "$REMOTE_BOOTSTRAP" | ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
   sudo env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  bash -c "$REMOTE_BOOTSTRAP" bootstrap \
+  bash -s -- \
   "$REMOTE_STAGING" "$BASE_URL" "$MANIFEST_DIGEST" \
   "$INSTALLER_DIGEST" "$SECURITY_DIGEST" "$FILE_TRANSACTION_DIGEST" \
   "$NGINX_TRANSACTION_DIGEST" "$NGINX_EDITOR_DIGEST"
