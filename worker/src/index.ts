@@ -169,6 +169,7 @@ import {
   checkAdminAuth,
 } from './admin';
 import { handleCcMirrorAdmin } from './cc-mirror/admin';
+import { handleCcSyncRoute } from './cc-mirror/sync-routes';
 import { serveAdminDashboardHtml, handleAdminAnalytics } from './admin-dashboard';
 import { serveAdminOpsHtml, handleAdminOps, handleXCardManual, handleXCardRepush } from './admin-ops';
 import { runOpsBaseline } from './ops/baseline';
@@ -321,6 +322,7 @@ export interface Env {
   DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
   CC_MIRROR_ENABLED?: string;             // '1'=启用 .cc 内容镜像生成/同步链；缺省关闭
   CC_SITE_BASE?: string;                  // .cc 静态内容 canonical 域；默认 https://ai-feeds.cc
+  CC_SYNC_SECRET?: string;                 // .cc VPS 增量同步专用 HMAC secret；不得复用 BRIDGE_SECRET
   INDEXNOW_KEY?: string;                  // IndexNow 提交 key(SEO 快速收录)。未配置时 pingIndexNow 静默跳过。secret 进 .secrets/aifeeds-{prod,staging}.env
   // CF Workflow binding for GH 抓取链 (worker/src/workflows/github-pipeline.ts)。
   // runGithubFetchTrending 解析 trending 后对每个新 repo create 一个 instance。
@@ -620,6 +622,16 @@ export default {
       });
     }
 
+    // The cc sync namespace never uses the global credentialed CORS preflight.
+    // Even OPTIONS/wrong-method requests must authenticate before receiving
+    // their 405, so signed server-to-server semantics stay uniform.
+    if (
+      request.method === 'OPTIONS'
+      && path.startsWith('/api/cc-sync/')
+    ) {
+      return (await handleCcSyncRoute(request, env))!;
+    }
+
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
@@ -686,6 +698,11 @@ export default {
     }
 
     try {
+      // Mainland static mirror sync. This is the first route handler because
+      // its HMAC must run before query parsing and any D1/R2 access.
+      const ccSyncResponse = await handleCcSyncRoute(request, env);
+      if (ccSyncResponse) return ccSyncResponse;
+
       // ─── 公开 SEO 路由(bot gate 之后、鉴权路由之前)──────────────
       // /daily/* 日报页 + 归档、robots.txt、sitemap.xml、llms.txt、<indexnow-key>.txt。
       // 返回 null = 非本模块路径,继续后续匹配。绝对 URL 一律走 SITE_BASE(seo-routes.ts)。
@@ -5827,6 +5844,10 @@ function isBlockedBot(ua: string): boolean {
 //      here breaks BE/OPS smoke tests without any security benefit.
 function isBotGateExempt(path: string, method: string): boolean {
   if (path === '/api/ingest' || path === '/api/track') return true;
+  // Dedicated server-to-server HMAC is the only gate for this namespace.
+  // The exemption is prefix-scoped; handleCcSyncRoute still authenticates
+  // health, unknown subpaths, and wrong methods before any other work.
+  if (path.startsWith('/api/cc-sync/')) return true;
   // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
   if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {

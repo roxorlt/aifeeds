@@ -464,6 +464,7 @@ function robotsResponse(env: Env): Response {
   const body = `User-agent: *
 Allow: /
 Disallow: /api/
+Disallow: /api/cc-sync/
 Disallow: /admin
 Disallow: /settings
 Disallow: /me/

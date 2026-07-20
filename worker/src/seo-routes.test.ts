@@ -345,17 +345,17 @@ describe('handleSeoRoute 归档索引 /daily(/)', () => {
 });
 
 describe('handleSeoRoute /robots.txt', () => {
-  test('含 Sitemap 行 + 5 条 Disallow + Cache 86400', async () => {
+  test('含 Sitemap 行 + cc sync 明确禁抓 + Cache 86400', async () => {
     const resp = await handleSeoRoute(req('/robots.txt'), makeEnv());
     expect(resp!.status).toBe(200);
     expect(resp!.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
     expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=86400');
     const body = await resp!.text();
     expect(body).toContain(`Sitemap: ${SITE}/sitemap.xml`);
-    for (const d of ['/api/', '/admin', '/settings', '/me/', '/unsubscribe']) {
+    for (const d of ['/api/', '/api/cc-sync/', '/admin', '/settings', '/me/', '/unsubscribe']) {
       expect(body).toContain(`Disallow: ${d}`);
     }
-    expect((body.match(/^Disallow: /gm) || []).length).toBe(5);
+    expect((body.match(/^Disallow: /gm) || []).length).toBe(6);
   });
 });
 
