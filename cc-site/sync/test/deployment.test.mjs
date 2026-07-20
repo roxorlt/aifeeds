@@ -4,6 +4,7 @@ import {
   cp,
   copyFile,
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -54,6 +55,16 @@ async function normalizeReleaseFixture(root, relative = '') {
       ]).has(childRelative) ? 0o755 : 0o644);
     }
   }
+}
+
+function manifestWithEnvironmentDigest(manifestBytes, environmentDigest) {
+  const manifest = manifestBytes.toString('utf8');
+  const replaced = manifest.replace(
+    /^[0-9a-f]{64}  deploy\/cc-sync\.env$/m,
+    `${environmentDigest}  deploy/cc-sync.env`,
+  );
+  assert.notEqual(replaced, manifest, 'fixture manifest must contain the environment record');
+  return Buffer.from(replaced);
 }
 
 function section(content, name) {
@@ -613,13 +624,31 @@ test('release garbage collection retains the live release and deletes only verif
   const releases = path.join(root, 'aifeeds-cc-sync-releases');
   const live = path.join(root, 'aifeeds-cc-sync');
   await mkdir(releases);
-  const ids = ['1', '2', '3', '4'].map((digit) => digit.repeat(64));
+  const payload = path.join(root, 'payload');
+  const envFile = path.join(root, 'cc-sync.env');
+  await writeFile(envFile, `CC_SYNC_SECRET=${'e'.repeat(64)}\n`, { mode: 0o600 });
+  await buildPayload({
+    envFile,
+    payload,
+    repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+  });
+  const baseManifest = await readFile(path.join(payload, 'MANIFEST.sha256'));
+  const manifests = ['1', '2', '3', '4'].map((digit) => (
+    manifestWithEnvironmentDigest(baseManifest, digit.repeat(64))
+  ));
+  const ids = manifests.map((manifest) => (
+    createHash('sha256').update(manifest).digest('hex')
+  ));
   for (const [index, id] of ids.entries()) {
-    const sync = path.join(releases, id, 'cc-site', 'sync');
-    await mkdir(sync, { recursive: true });
-    await writeFile(path.join(sync, 'sync.mjs'), `release ${id}\n`);
+    const release = path.join(releases, id);
+    await mkdir(release);
+    await cp(path.join(payload, 'cc-site'), path.join(release, 'cc-site'), {
+      recursive: true,
+    });
+    await writeFile(path.join(release, 'MANIFEST.sha256'), manifests[index]);
+    await normalizeReleaseFixture(release);
     const timestamp = new Date(1_700_000_000_000 + index * 1_000);
-    await utimes(path.join(releases, id), timestamp, timestamp);
+    await utimes(release, timestamp, timestamp);
   }
   await symlink(
     `aifeeds-cc-sync-releases/${ids[0]}/cc-site/sync`,
@@ -633,6 +662,7 @@ test('release garbage collection retains the live release and deletes only verif
   await symlink(outside, path.join(releases, unsafeId));
 
   const result = await garbageCollectReleases({
+    allowedGid: process.getgid(),
     allowedUid: process.getuid(),
     keep: 3,
     liveLink: live,
@@ -693,6 +723,8 @@ test('deployment path transactions never overwrite a concurrent live object', as
     installFileTransaction,
     installSymlinkTransaction,
     recoverFileTransaction,
+    recoverSymlinkTransaction,
+    rollbackPathTransaction,
   } = await import('../deployment-file-transaction.mjs');
   const transaction = 'a'.repeat(64);
   const ids = {
@@ -818,6 +850,83 @@ test('deployment path transactions never overwrite a concurrent live object', as
       await readlink(destination),
       'operator-managed/cc-site/sync',
     );
+  });
+
+  await t.test('OPT publish interruption keeps the receipt candidate inode recoverable', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-opt-publish-'));
+    const destination = path.join(root, 'aifeeds-cc-sync');
+    const target = 'aifeeds-cc-sync-releases/new/cc-site/sync';
+    await symlink('aifeeds-cc-sync-releases/old/cc-site/sync', destination);
+    await assert.rejects(
+      installSymlinkTransaction({
+        destination,
+        hooks: {
+          afterLivePublishBeforeReceipt() {
+            throw new Error('injected post-publish interruption');
+          },
+        },
+        name: 'opt',
+        target,
+        transaction,
+      }),
+      /injected post-publish interruption/,
+    );
+    const receipt = path.join(
+      root,
+      `.aifeeds-deploy.${transaction}.opt`,
+      'receipt.jsonl',
+    );
+    const [headerLine] = (await readFile(receipt, 'utf8')).split('\n');
+    const header = JSON.parse(headerLine);
+    const liveIdentity = await lstat(destination);
+    assert.equal(liveIdentity.dev, header.candidate.dev);
+    assert.equal(liveIdentity.ino, header.candidate.ino);
+
+    await recoverSymlinkTransaction({ destination, name: 'opt', transaction });
+    await rollbackPathTransaction({ destination, name: 'opt', transaction });
+    assert.equal(
+      await readlink(destination),
+      'aifeeds-cc-sync-releases/old/cc-site/sync',
+    );
+  });
+
+  await t.test('same-target operator symlink is not mistaken for an interrupted candidate', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-path-txn-opt-operator-'));
+    const destination = path.join(root, 'aifeeds-cc-sync');
+    const target = 'aifeeds-cc-sync-releases/new/cc-site/sync';
+    await symlink('aifeeds-cc-sync-releases/old/cc-site/sync', destination);
+    await assert.rejects(
+      installSymlinkTransaction({
+        destination,
+        hooks: {
+          afterLivePublishBeforeReceipt() {
+            throw new Error('injected post-publish interruption');
+          },
+        },
+        name: 'opt',
+        target,
+        transaction,
+      }),
+      /injected post-publish interruption/,
+    );
+    const interruptedIdentity = await lstat(destination);
+    await unlink(destination);
+    await symlink(target, destination);
+    const operatorIdentity = await lstat(destination);
+    assert.notEqual(operatorIdentity.ino, interruptedIdentity.ino);
+
+    await assert.rejects(
+      recoverSymlinkTransaction({ destination, name: 'opt', transaction }),
+      /operator-managed|transaction conflict/i,
+    );
+    await assert.rejects(
+      rollbackPathTransaction({ destination, name: 'opt', transaction }),
+      /rollback conflict/i,
+    );
+    const preserved = await lstat(destination);
+    assert.equal(preserved.dev, operatorIdentity.dev);
+    assert.equal(preserved.ino, operatorIdentity.ino);
+    assert.equal(await readlink(destination), target);
   });
 });
 
@@ -1078,7 +1187,11 @@ async function remoteDeployHarness({
 
   let oldReleaseId = null;
   if (priorDeployment) {
-    oldReleaseId = '1'.repeat(64);
+    const oldManifest = manifestWithEnvironmentDigest(
+      await readFile(path.join(stage, 'MANIFEST.sha256')),
+      '1'.repeat(64),
+    );
+    oldReleaseId = createHash('sha256').update(oldManifest).digest('hex');
     const oldRelease = path.join(
       root,
       'opt',
@@ -1089,6 +1202,7 @@ async function remoteDeployHarness({
     await cp(path.join(stage, 'cc-site'), path.join(oldRelease, 'cc-site'), {
       recursive: true,
     });
+    await writeFile(path.join(oldRelease, 'MANIFEST.sha256'), oldManifest);
     await normalizeReleaseFixture(oldRelease);
     await symlink(
       `aifeeds-cc-sync-releases/${oldReleaseId}/cc-site/sync`,
@@ -1185,6 +1299,21 @@ set -euo pipefail
 printf 'node' >> "$AIFEEDS_HARNESS_LOG"
 printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
 printf '\n' >> "$AIFEEDS_HARNESS_LOG"
+if [[ "\${2:-}" == 'commit-global' \
+  && "\${AIFEEDS_GLOBAL_COMMIT_EXIT:-0}" != 0 ]]; then
+  exit "$AIFEEDS_GLOBAL_COMMIT_EXIT"
+fi
+if [[ "\${2:-}" == 'finalize-path' \
+  && -f "$AIFEEDS_DEPLOY_ROOT/opt/aifeeds-cc-sync-releases/.deployment-committed.json" ]]; then
+  finalize_count_file="$AIFEEDS_DEPLOY_ROOT/global-finalize-count"
+  finalize_count=0
+  [[ ! -f "$finalize_count_file" ]] || read -r finalize_count < "$finalize_count_file"
+  finalize_count=$((finalize_count + 1))
+  printf '%s\n' "$finalize_count" > "$finalize_count_file"
+  if [[ "$finalize_count" == "\${AIFEEDS_FINALIZE_FAIL_AT:-0}" ]]; then
+    exit 67
+  fi
+fi
 if [[ "\${1:-}" == '-p' ]]; then printf '%s\n' "\${AIFEEDS_NODE_MAJOR:-18}"; exit 0; fi
 if [[ "\${1:-}" == '--test' ]]; then
   [[ "\${AIFEEDS_NODE_TEST_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_NODE_TEST_EXIT"
@@ -1439,6 +1568,86 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
   };
 }
 
+test('immutable releases are cryptographically bound to their manifest', async (t) => {
+  const { verifyBoundRelease } = await import('../deployment-security.mjs');
+
+  async function fixture(releaseId = null) {
+    const harness = await remoteDeployHarness();
+    const id = releaseId ?? harness.manifestDigest;
+    const release = path.join(
+      harness.root,
+      'opt',
+      'aifeeds-cc-sync-releases',
+      id,
+    );
+    await mkdir(release, { recursive: true });
+    await cp(path.join(harness.stage, 'cc-site'), path.join(release, 'cc-site'), {
+      recursive: true,
+    });
+    await copyFile(
+      path.join(harness.stage, 'MANIFEST.sha256'),
+      path.join(release, 'MANIFEST.sha256'),
+    );
+    await normalizeReleaseFixture(release);
+    return { harness, release };
+  }
+
+  const verify = ({ harness, release }) => verifyBoundRelease({
+    allowedGid: process.getgid(),
+    allowedUid: process.getuid(),
+    expectedManifestDigest: harness.manifestDigest,
+    release,
+    requireReleaseId: true,
+  });
+
+  await t.test('normal prior release passes', async () => {
+    const bound = await fixture();
+    await verify(bound);
+    const manifest = await readFile(
+      path.join(bound.release, 'MANIFEST.sha256'),
+      'utf8',
+    );
+    assert.match(manifest, /^[0-9a-f]{64}  deploy\/cc-sync\.env$/m);
+    await assert.rejects(stat(path.join(bound.release, 'deploy')), /ENOENT/);
+  });
+
+  await t.test('release content tampering is rejected', async () => {
+    const bound = await fixture();
+    await writeFile(
+      path.join(bound.release, 'cc-site', 'sync', 'sync.mjs'),
+      'tampered release code\n',
+    );
+    await assert.rejects(verify(bound), /release digest mismatch|damaged/i);
+  });
+
+  await t.test('manifest byte tampering is rejected', async () => {
+    const bound = await fixture();
+    const manifest = path.join(bound.release, 'MANIFEST.sha256');
+    await writeFile(manifest, `${await readFile(manifest, 'utf8')}\n`);
+    await assert.rejects(verify(bound), /manifest digest mismatch|release id/i);
+  });
+
+  await t.test('release directory id must equal the manifest digest', async () => {
+    const bound = await fixture('2'.repeat(64));
+    await assert.rejects(verify(bound), /release id|manifest digest/i);
+  });
+
+  await t.test('the bound payload path list cannot be edited independently', async () => {
+    const bound = await fixture();
+    const allowlist = path.join(
+      bound.release,
+      'cc-site',
+      'sync',
+      'payload-files.txt',
+    );
+    await writeFile(
+      allowlist,
+      `${await readFile(allowlist, 'utf8')}cc-site/unlisted.html\n`,
+    );
+    await assert.rejects(verify(bound), /release digest mismatch|allowlist/i);
+  });
+});
+
 remoteHarnessTest('remote installer gates activation on tests, service output readability and Nginx', async () => {
   const harness = await remoteDeployHarness();
   const installer = path.join(SYNC_DIR, 'install-remote.sh');
@@ -1665,6 +1874,202 @@ remoteHarnessTest('redeploying the same verified manifest safely reuses its immu
     await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
     `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
   );
+});
+
+remoteHarnessTest('global commit makes local transaction finalization retryable housekeeping', async (t) => {
+  for (const failAt of [2, 3, 4]) {
+    await t.test(`finalize ${failAt} failure is recovered by the next deployment`, async () => {
+      const harness = await remoteDeployHarness();
+      const installer = path.join(SYNC_DIR, 'install-remote.sh');
+      const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+      const journal = path.join(
+        harness.root,
+        'opt',
+        'aifeeds-cc-sync-releases',
+        '.deployment-committed.json',
+      );
+      const transactions = [
+        path.join(
+          harness.root,
+          'opt',
+          `.aifeeds-deploy.${harness.manifestDigest}.opt`,
+        ),
+        path.join(
+          harness.root,
+          'etc',
+          'systemd',
+          'system',
+          `.aifeeds-deploy.${harness.manifestDigest}.service`,
+        ),
+        path.join(
+          harness.root,
+          'etc',
+          'systemd',
+          'system',
+          `.aifeeds-deploy.${harness.manifestDigest}.timer`,
+        ),
+        path.join(
+          harness.root,
+          'etc',
+          'aifeeds',
+          `.aifeeds-deploy.${harness.manifestDigest}.env`,
+        ),
+      ];
+
+      const first = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_FINALIZE_FAIL_AT: String(failAt),
+      });
+      assert.equal(first.status, 0, first.stderr);
+      assert.match(first.stderr, /WARNING:.*finaliz/i);
+      assert.equal((await stat(journal)).mode & 0o777, 0o600);
+      assert.equal(
+        await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+        `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+        'active\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+        'enabled\n',
+      );
+      assert.equal((await stat(transactions[failAt - 1])).isDirectory(), true);
+
+      await buildPayload({
+        envFile: harness.stagedEnv,
+        payload: harness.stage,
+        repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+      });
+      const second = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+      assert.equal(second.status, 0, second.stderr);
+      await assert.rejects(stat(journal), /ENOENT/);
+      for (const transactionDirectory of transactions) {
+        await assert.rejects(stat(transactionDirectory), /ENOENT/);
+      }
+    });
+  }
+});
+
+remoteHarnessTest('global journal failure remains before the rollback boundary', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+    timerEnabledState: 'enabled',
+    timerState: 'active',
+  });
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      AIFEEDS_GLOBAL_COMMIT_EXIT: '61',
+    },
+  );
+
+  assert.equal(result.status, 61, result.stderr);
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    `aifeeds-cc-sync-releases/${harness.oldReleaseId}/cc-site/sync`,
+  );
+  assert.equal(
+    await readFile(path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'), 'utf8'),
+    'OLD_ENV=1\n',
+  );
+  assert.equal(
+    await readFile(
+      path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.service'),
+      'utf8',
+    ),
+    'OLD_SERVICE\n',
+  );
+  assert.equal(
+    await readFile(
+      path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.timer'),
+      'utf8',
+    ),
+    'OLD_TIMER\n',
+  );
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+    'active\n',
+  );
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+    'active\n',
+  );
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+    'enabled\n',
+  );
+  await assert.rejects(stat(path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+    '.deployment-committed.json',
+  )), /ENOENT/);
+});
+
+remoteHarnessTest('global journal and local receipts must remain mutually consistent', async (t) => {
+  for (const mutation of ['receipt', 'marker']) {
+    await t.test(`${mutation} mutation fails closed`, async () => {
+      const harness = await remoteDeployHarness();
+      const installer = path.join(SYNC_DIR, 'install-remote.sh');
+      const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+      const journal = path.join(
+        harness.root,
+        'opt',
+        'aifeeds-cc-sync-releases',
+        '.deployment-committed.json',
+      );
+      const serviceTransaction = path.join(
+        harness.root,
+        'etc',
+        'systemd',
+        'system',
+        `.aifeeds-deploy.${harness.manifestDigest}.service`,
+      );
+      const receipt = path.join(serviceTransaction, 'receipt.jsonl');
+      const first = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_FINALIZE_FAIL_AT: '2',
+      });
+      assert.equal(first.status, 0, first.stderr);
+
+      if (mutation === 'receipt') {
+        await writeFile(receipt, `${await readFile(receipt, 'utf8')}\n`);
+      } else {
+        const marker = JSON.parse(await readFile(journal, 'utf8'));
+        marker.transactions[1].receipt_digest = '0'.repeat(64);
+        await writeFile(journal, `${JSON.stringify(marker)}\n`);
+      }
+      await buildPayload({
+        envFile: harness.stagedEnv,
+        payload: harness.stage,
+        repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+      });
+      const second = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+
+      assert.notEqual(second.status, 0);
+      assert.match(second.stderr, /global deployment marker and receipt mismatch/i);
+      assert.equal((await stat(journal)).isFile(), true);
+      assert.equal((await stat(serviceTransaction)).isDirectory(), true);
+      assert.equal(
+        await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+        `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+      );
+    });
+  }
 });
 
 remoteHarnessTest('a damaged live release fails closed without replacement', async () => {

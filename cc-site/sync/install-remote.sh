@@ -323,7 +323,7 @@ on_exit() {
       status=70
     fi
   fi
-  if ((status != 0)); then
+  if ((status != 0 && deployment_committed == 0)); then
     if ! cleanup_created_roots || ! cleanup_created_account; then
       echo "ERROR: deployment side-effect cleanup was incomplete" >&2
       status=70
@@ -417,6 +417,7 @@ unset env_concurrency env_page_limit env_timeout value line
 RELEASES=$(rooted /opt/aifeeds-cc-sync-releases)
 OPT=$(rooted /opt/aifeeds-cc-sync)
 RELEASE="$RELEASES/$EXPECTED_MANIFEST_DIGEST"
+GLOBAL_JOURNAL="$RELEASES/.deployment-committed.json"
 ETC_DIR=$(rooted /etc/aifeeds)
 ENV_FILE="$ETC_DIR/cc-sync.env"
 UNIT_DIR=$(rooted /etc/systemd/system)
@@ -433,6 +434,11 @@ if [[ -L "$OPT" ]]; then
 elif [[ -e "$OPT" ]]; then
   echo "ERROR: existing live code path is not a managed symlink" >&2
   exit 1
+fi
+if [[ -e "$GLOBAL_JOURNAL" || -L "$GLOBAL_JOURNAL" ]]; then
+  "$NODE" "$FILE_TOOL" recover-global \
+    "$GLOBAL_JOURNAL" "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"
 fi
 
 SYSTEMCTL_OUTPUT=""
@@ -717,6 +723,7 @@ done
 release_stage=$("$NODE" "$SECURITY_TOOL" create-release-stage \
   "$RELEASES" "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
 cp -a "$SNAPSHOT/cc-site" "$release_stage/cc-site"
+cp -a "$SNAPSHOT/MANIFEST.sha256" "$release_stage/MANIFEST.sha256"
 "$CHOWN" -R root:root "$release_stage"
 find -P "$release_stage" -type d -exec chmod 0755 {} +
 find -P "$release_stage" -type f -exec chmod 0644 {} +
@@ -858,6 +865,12 @@ smoke_exact ai-news \
 
 new_timer_activation_attempted=1
 "$SYSTEMCTL" enable --now "$TIMER"
+"$NODE" "$FILE_TOOL" commit-global \
+  "$GLOBAL_JOURNAL" "$RELEASE" "$EXPECTED_MANIFEST_DIGEST" \
+  "$ROOT_UID" "$ROOT_GID" \
+  "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"
+deployment_committed=1
+nginx_mutated=0
 for installed in \
   "$OPT:opt" \
   "$UNIT_DIR/$SERVICE:service" \
@@ -865,11 +878,21 @@ for installed in \
   "$ENV_FILE:env"; do
   installed_destination=${installed%%:*}
   installed_name=${installed#*:}
-  "$NODE" "$FILE_TOOL" finalize-path \
-    "$installed_destination" "$installed_name" "$EXPECTED_MANIFEST_DIGEST"
+  if ! "$NODE" "$FILE_TOOL" finalize-path \
+    "$installed_destination" "$installed_name" "$EXPECTED_MANIFEST_DIGEST"; then
+    echo "WARNING: committed deployment finalization failed for $installed_name; retrying next deployment" >&2
+  fi
 done
-nginx_mutated=0
-deployment_committed=1
+global_clear_result=""
+if ! global_clear_result=$("$NODE" "$FILE_TOOL" clear-global \
+  "$GLOBAL_JOURNAL" "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+  "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"); then
+  echo "WARNING: committed deployment journal cleanup failed; retrying next deployment" >&2
+elif [[ "$global_clear_result" == pending ]]; then
+  echo "WARNING: committed deployment receipts remain; retrying next deployment" >&2
+elif [[ "$global_clear_result" != cleared ]]; then
+  echo "WARNING: committed deployment journal returned an unexpected cleanup state" >&2
+fi
 if ! "$NODE" "$SECURITY_TOOL" gc-releases \
   "$RELEASES" "$OPT" 3 "$ROOT_UID" "$ROOT_GID"; then
   echo "WARNING: release garbage collection was skipped after deployment" >&2

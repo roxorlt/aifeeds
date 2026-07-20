@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile as execFileCallback } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import {
   chmod,
@@ -11,6 +12,7 @@ import {
   open,
   readFile,
   readlink,
+  readdir,
   rename,
   rmdir,
   symlink,
@@ -18,7 +20,10 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+
+const execFile = promisify(execFileCallback);
 
 async function lstatOptional(file) {
   try {
@@ -216,8 +221,8 @@ async function appendReceipt(receipt, event) {
   }
 }
 
-async function readReceipt(names) {
-  const lines = (await readFile(names.receipt, 'utf8')).split('\n').filter(Boolean);
+function parseReceipt(names, serialized) {
+  const lines = serialized.split('\n').filter(Boolean);
   if (lines.length === 0) throw new Error('invalid empty deployment receipt');
   const header = JSON.parse(lines[0]);
   if (
@@ -233,6 +238,10 @@ async function readReceipt(names) {
     if (event.candidate) header.candidate = event.candidate;
   }
   return { events, header };
+}
+
+async function readReceipt(names) {
+  return parseReceipt(names, await readFile(names.receipt, 'utf8'));
 }
 
 async function createTransactionDirectory(names) {
@@ -260,17 +269,38 @@ async function cleanupTransaction(names) {
 async function publishNoReplace(source, destination, directory, type) {
   try {
     if (type === 'symlink') {
-      await symlink(await readlink(source), destination);
+      try {
+        await link(source, destination);
+      } catch (error) {
+        if (
+          process.platform !== 'darwin'
+          || (error?.code !== 'ENOENT' && error?.code !== 'EPERM')
+        ) {
+          throw error;
+        }
+        await execFile('/bin/ln', ['-P', '--', source, destination]);
+      }
     } else {
       await link(source, destination);
     }
   } catch (error) {
-    if (error?.code === 'EEXIST') {
+    if (
+      error?.code === 'EEXIST'
+      || await lstatOptional(destination) !== null
+    ) {
       throw new Error('deployment transaction conflict: live destination already exists');
     }
     throw error;
   }
   await syncDirectory(directory);
+}
+
+async function settlePublishedCandidate(names, type) {
+  if (type !== 'symlink') return;
+  await unlink(names.candidate).catch((error) => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  await syncDirectory(names.transactionDirectory);
 }
 
 async function restoreMovedNoReplace(moved, names) {
@@ -327,14 +357,23 @@ async function moveAndVerifyExpected({ expected, hooks, names, type }) {
 }
 
 async function resumeInstall(names) {
-  const { header } = await readReceipt(names);
+  const { events, header } = await readReceipt(names);
   const live = await inspectOptional(
     names.destination,
     header.type,
     'live deployment object',
   );
   if (live !== null) {
-    if (identityMatches(live, header.candidate)) return header.candidate;
+    if (identityMatches(live, header.candidate)) {
+      if (!events.some(({ phase }) => phase === 'candidate-published')) {
+        await appendReceipt(names.receipt, {
+          candidate: live,
+          phase: 'candidate-published',
+        });
+      }
+      await settlePublishedCandidate(names, header.type);
+      return header.candidate;
+    }
     if (!identityMatches(live, header.expected)) {
       throw new Error('deployment transaction conflict: live object is operator-managed');
     }
@@ -373,6 +412,7 @@ async function resumeInstall(names) {
     candidate: published,
     phase: 'candidate-published',
   });
+  await settlePublishedCandidate(names, header.type);
   return published;
 }
 
@@ -520,6 +560,7 @@ export async function installSymlinkTransaction({
       });
     }
     await publishNoReplace(names.candidate, destination, names.directory, 'symlink');
+    await hooks?.afterLivePublishBeforeReceipt?.(destination);
     const published = await inspectOptional(
       destination,
       'symlink',
@@ -529,6 +570,7 @@ export async function installSymlinkTransaction({
       candidate: published,
       phase: 'candidate-published',
     });
+    await settlePublishedCandidate(names, 'symlink');
     return published;
   } catch (error) {
     if (!receiptWritten) {
@@ -630,6 +672,361 @@ export async function finalizePathTransaction({
     throw new Error('deployment transaction conflict: final live object changed');
   }
   await cleanupTransaction(names);
+}
+
+const GLOBAL_TRANSACTION_NAMES = ['opt', 'service', 'timer', 'env'];
+
+function globalTransactionSpecs(destinations, transaction) {
+  if (
+    !Array.isArray(destinations)
+    || destinations.length !== GLOBAL_TRANSACTION_NAMES.length
+    || destinations.some((destination) => !path.isAbsolute(destination))
+    || new Set(destinations).size !== destinations.length
+  ) {
+    throw new Error('invalid global deployment destinations');
+  }
+  return GLOBAL_TRANSACTION_NAMES.map((name, index) => ({
+    name,
+    names: pathTransactionNames(destinations[index], name, transaction),
+  }));
+}
+
+function numericIdentity(identity) {
+  return {
+    dev: identity.dev,
+    ino: identity.ino,
+  };
+}
+
+function recordedIdentityMatches(actual, expected) {
+  return (
+    Number.isSafeInteger(expected?.dev)
+    && Number.isSafeInteger(expected?.ino)
+    && actual.dev === expected.dev
+    && actual.ino === expected.ino
+  );
+}
+
+async function readSecureRegular(file, uid, gid, mode, label) {
+  const handle = await open(
+    file,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const before = await handle.stat();
+    if (
+      !before.isFile()
+      || before.nlink !== 1
+      || before.uid !== uid
+      || before.gid !== gid
+      || (before.mode & 0o7777) !== mode
+    ) {
+      throw new Error(`${label} has unsafe identity or mode`);
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.size !== before.size
+    ) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return { bytes, identity: before };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectCommittedTransaction({
+  entry = null,
+  gid,
+  spec,
+  transaction,
+  uid,
+}) {
+  const transactionIdentity = await lstatOptional(spec.names.transactionDirectory);
+  const receiptIdentity = await lstatOptional(spec.names.receipt);
+  if (transactionIdentity === null) {
+    if (receiptIdentity !== null) {
+      throw new Error('global deployment receipt escaped its transaction directory');
+    }
+    return { finalized: true, spec };
+  }
+  if (
+    !transactionIdentity.isDirectory()
+    || transactionIdentity.isSymbolicLink()
+    || transactionIdentity.uid !== uid
+    || transactionIdentity.gid !== gid
+    || (transactionIdentity.mode & 0o7777) !== 0o700
+  ) {
+    throw new Error('global deployment transaction directory is unsafe');
+  }
+  const allowed = new Set(['candidate', 'current', 'old', 'receipt.jsonl']);
+  if ((await readdir(spec.names.transactionDirectory)).some((name) => !allowed.has(name))) {
+    throw new Error('global deployment transaction has an unexpected artifact');
+  }
+  if (
+    entry !== null
+    && !recordedIdentityMatches(transactionIdentity, entry.transaction_identity)
+  ) {
+    throw new Error('global deployment transaction identity mismatch');
+  }
+  if (receiptIdentity === null) {
+    return {
+      finalized: false,
+      receiptMissing: true,
+      spec,
+      transactionIdentity,
+    };
+  }
+  const receipt = await readSecureRegular(
+    spec.names.receipt,
+    uid,
+    gid,
+    0o600,
+    'global deployment receipt',
+  );
+  const parsed = parseReceipt(spec.names, receipt.bytes.toString('utf8'));
+  if (
+    !parsed.events.some(({ phase }) => phase === 'candidate-published')
+    || parsed.header.type !== (spec.name === 'opt' ? 'symlink' : 'file')
+  ) {
+    throw new Error('global deployment receipt is not candidate-published');
+  }
+  const live = await inspectOptional(
+    spec.names.destination,
+    parsed.header.type,
+    'globally committed live object',
+  );
+  if (!identityMatches(live, parsed.header.candidate)) {
+    throw new Error('global deployment live identity mismatch');
+  }
+  const receiptDigest = createHash('sha256').update(receipt.bytes).digest('hex');
+  if (
+    entry !== null
+    && (
+      entry.name !== spec.name
+      || entry.destination !== spec.names.destination
+      || entry.receipt !== spec.names.receipt
+      || entry.receipt_digest !== receiptDigest
+      || !recordedIdentityMatches(receipt.identity, entry.receipt_identity)
+      || !identityMatches(parsed.header.candidate, entry.candidate)
+      || entry.transaction !== transaction
+    )
+  ) {
+    throw new Error('global deployment marker and receipt mismatch');
+  }
+  return {
+    candidate: parsed.header.candidate,
+    finalized: false,
+    receiptDigest,
+    receiptIdentity: receipt.identity,
+    spec,
+    transactionIdentity,
+  };
+}
+
+function assertGlobalPaths({ journal, manifest, release }) {
+  if (
+    !path.isAbsolute(journal)
+    || path.basename(journal) !== '.deployment-committed.json'
+    || !path.isAbsolute(release)
+    || path.dirname(journal) !== path.dirname(release)
+    || !/^[0-9a-f]{64}$/.test(manifest)
+    || path.basename(release) !== manifest
+  ) {
+    throw new Error('invalid global deployment journal paths');
+  }
+}
+
+export async function commitGlobalDeployment({
+  destinations,
+  gid,
+  journal,
+  manifest,
+  release,
+  uid,
+}) {
+  assertGlobalPaths({ journal, manifest, release });
+  if (
+    !Number.isInteger(uid)
+    || uid < 0
+    || !Number.isInteger(gid)
+    || gid < 0
+    || await lstatOptional(journal) !== null
+  ) {
+    throw new Error('invalid global deployment commit arguments');
+  }
+  const releaseIdentity = await lstat(release);
+  if (
+    !releaseIdentity.isDirectory()
+    || releaseIdentity.isSymbolicLink()
+    || releaseIdentity.uid !== uid
+    || releaseIdentity.gid !== gid
+    || (releaseIdentity.mode & 0o7777) !== 0o755
+  ) {
+    throw new Error('global deployment release is unsafe');
+  }
+  const specs = globalTransactionSpecs(destinations, manifest);
+  const snapshots = [];
+  for (const spec of specs) {
+    const snapshot = await inspectCommittedTransaction({
+      gid,
+      spec,
+      transaction: manifest,
+      uid,
+    });
+    if (snapshot.finalized || snapshot.receiptMissing) {
+      throw new Error('global deployment commit requires all four receipts');
+    }
+    snapshots.push(snapshot);
+  }
+  const marker = {
+    manifest,
+    release,
+    schema: 1,
+    transactions: snapshots.map((snapshot) => ({
+      candidate: snapshot.candidate,
+      destination: snapshot.spec.names.destination,
+      name: snapshot.spec.name,
+      receipt: snapshot.spec.names.receipt,
+      receipt_digest: snapshot.receiptDigest,
+      receipt_identity: numericIdentity(snapshot.receiptIdentity),
+      transaction: manifest,
+      transaction_identity: numericIdentity(snapshot.transactionIdentity),
+    })),
+  };
+  const candidate = path.join(
+    path.dirname(journal),
+    `.deployment-committed.${randomUUID()}.candidate`,
+  );
+  const handle = await open(candidate, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(marker)}\n`);
+    await handle.chown(uid, gid);
+    await handle.chmod(0o600);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await publishNoReplace(candidate, journal, path.dirname(journal), 'file');
+    await unlink(candidate);
+    await syncDirectory(path.dirname(journal));
+  } catch (error) {
+    await unlink(candidate).catch(() => {});
+    throw error;
+  }
+  return marker;
+}
+
+async function readGlobalDeployment({
+  destinations,
+  gid,
+  journal,
+  releases,
+  uid,
+}) {
+  if (
+    !path.isAbsolute(releases)
+    || path.dirname(journal) !== releases
+    || !Number.isInteger(uid)
+    || uid < 0
+    || !Number.isInteger(gid)
+    || gid < 0
+  ) {
+    throw new Error('invalid committed deployment recovery arguments');
+  }
+  const markerFile = await readSecureRegular(
+    journal,
+    uid,
+    gid,
+    0o600,
+    'global deployment marker',
+  );
+  const marker = JSON.parse(markerFile.bytes.toString('utf8'));
+  if (
+    marker.schema !== 1
+    || !/^[0-9a-f]{64}$/.test(marker.manifest)
+    || marker.release !== path.join(releases, marker.manifest)
+    || !Array.isArray(marker.transactions)
+    || marker.transactions.length !== GLOBAL_TRANSACTION_NAMES.length
+  ) {
+    throw new Error('invalid global deployment marker');
+  }
+  assertGlobalPaths({
+    journal,
+    manifest: marker.manifest,
+    release: marker.release,
+  });
+  const specs = globalTransactionSpecs(destinations, marker.manifest);
+  const snapshots = [];
+  for (let index = 0; index < specs.length; index += 1) {
+    const entry = marker.transactions[index];
+    if (
+      entry?.name !== GLOBAL_TRANSACTION_NAMES[index]
+      || entry.destination !== specs[index].names.destination
+      || entry.receipt !== specs[index].names.receipt
+      || entry.transaction !== marker.manifest
+      || !/^[0-9a-f]{64}$/.test(entry.receipt_digest ?? '')
+    ) {
+      throw new Error('invalid global deployment marker transaction');
+    }
+    const snapshot = await inspectCommittedTransaction({
+      entry,
+      gid,
+      spec: specs[index],
+      transaction: marker.manifest,
+      uid,
+    });
+    if (snapshot.finalized || snapshot.receiptMissing) {
+      const live = await inspectOptional(
+        specs[index].names.destination,
+        entry.candidate?.type,
+        'globally committed finalized object',
+      );
+      if (!identityMatches(live, entry.candidate)) {
+        throw new Error('global deployment finalized live identity mismatch');
+      }
+    }
+    snapshots.push(snapshot);
+  }
+  return { marker, snapshots };
+}
+
+async function removeGlobalJournal(journal) {
+  await unlink(journal);
+  await syncDirectory(path.dirname(journal));
+}
+
+export async function recoverCommittedDeployment(options) {
+  const { journal } = options;
+  const committed = await readGlobalDeployment(options);
+  for (const snapshot of committed.snapshots) {
+    if (snapshot.finalized) continue;
+    if (snapshot.receiptMissing) {
+      await cleanupTransaction(snapshot.spec.names);
+    } else {
+      await finalizePathTransaction({
+        destination: snapshot.spec.names.destination,
+        name: snapshot.spec.name,
+        transaction: committed.marker.manifest,
+      });
+    }
+  }
+  const verified = await readGlobalDeployment(options);
+  if (verified.snapshots.some(({ finalized }) => !finalized)) {
+    throw new Error('committed deployment finalization remains incomplete');
+  }
+  await removeGlobalJournal(journal);
+}
+
+export async function clearCommittedDeployment(options) {
+  const committed = await readGlobalDeployment(options);
+  if (committed.snapshots.some(({ finalized }) => !finalized)) return 'pending';
+  await removeGlobalJournal(options.journal);
+  return 'cleared';
 }
 
 export async function captureFile({ backups, destination, name }) {
@@ -741,6 +1138,31 @@ if (isMain) {
         name: args[1],
         transaction: args[2],
       });
+    } else if (command === 'commit-global' && args.length === 9) {
+      await commitGlobalDeployment({
+        journal: args[0],
+        release: args[1],
+        manifest: args[2],
+        uid: Number(args[3]),
+        gid: Number(args[4]),
+        destinations: args.slice(5),
+      });
+    } else if (
+      (command === 'recover-global' || command === 'clear-global')
+      && args.length === 8
+    ) {
+      const options = {
+        journal: args[0],
+        releases: args[1],
+        uid: Number(args[2]),
+        gid: Number(args[3]),
+        destinations: args.slice(4),
+      };
+      if (command === 'recover-global') {
+        await recoverCommittedDeployment(options);
+      } else {
+        process.stdout.write(`${await clearCommittedDeployment(options)}\n`);
+      }
     } else if (command === 'restore' && args.length === 3) {
       await restoreFile({ destination: args[0], backups: args[1], name: args[2] });
     } else {

@@ -547,52 +547,13 @@ export async function validateManagedLiveRelease({
   const release = path.join(releases, targetMatch[1]);
   try {
     const releaseBefore = await lstat(release);
-    await validateReleaseTree(release, allowedUid, allowedGid);
-    const allowlist = parseAllowlist(await readFile(
-      path.join(release, 'cc-site', 'sync', 'payload-files.txt'),
-      'utf8',
-    ));
-    const expectedNames = allowlist
-      .filter((relative) => relative.startsWith('cc-site/'))
-      .sort();
-    const actualNames = [];
-    const walkExact = async (directory, relative = '') => {
-      const identity = await lstat(directory);
-      if (
-        !identity.isDirectory()
-        || identity.isSymbolicLink()
-        || identity.uid !== allowedUid
-        || identity.gid !== allowedGid
-        || (identity.mode & 0o7777) !== 0o755
-      ) {
-        throw new Error('live release directory identity or mode mismatch');
-      }
-      for (const name of (await readdir(directory)).sort()) {
-        const child = path.join(directory, name);
-        const childRelative = relative ? `${relative}/${name}` : name;
-        const childIdentity = await lstat(child);
-        if (childIdentity.isDirectory() && !childIdentity.isSymbolicLink()) {
-          await walkExact(child, childRelative);
-          continue;
-        }
-        const expectedMode = releaseExecutable(childRelative) ? 0o755 : 0o644;
-        if (
-          !childIdentity.isFile()
-          || childIdentity.isSymbolicLink()
-          || childIdentity.nlink !== 1
-          || childIdentity.uid !== allowedUid
-          || childIdentity.gid !== allowedGid
-          || (childIdentity.mode & 0o7777) !== expectedMode
-        ) {
-          throw new Error(`live release file is unsafe: ${childRelative}`);
-        }
-        actualNames.push(childRelative);
-      }
-    };
-    await walkExact(release);
-    if (actualNames.sort().join('\n') !== expectedNames.join('\n')) {
-      throw new Error('live release path set is incomplete or unexpected');
-    }
+    await verifyBoundRelease({
+      allowedGid,
+      allowedUid,
+      expectedManifestDigest: targetMatch[1],
+      release,
+      requireReleaseId: true,
+    });
     const releaseAfter = await lstat(release);
     if (
       releaseAfter.dev !== releaseBefore.dev
@@ -604,6 +565,204 @@ export async function validateManagedLiveRelease({
     throw new Error('live release is damaged or incomplete', { cause: error });
   }
   return target;
+}
+
+function expectedReleaseDirectories(files) {
+  const directories = new Set();
+  for (const file of files) {
+    let directory = path.posix.dirname(file);
+    while (directory !== '.') {
+      directories.add(directory);
+      directory = path.posix.dirname(directory);
+    }
+  }
+  return [...directories].sort();
+}
+
+async function readSingleLinkRegularFile(file, {
+  allowedGid,
+  allowedUid,
+  expectedMode,
+  label,
+}) {
+  const handle = await open(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const identityBefore = await handle.stat();
+    if (
+      !identityBefore.isFile()
+      || identityBefore.nlink !== 1
+      || identityBefore.uid !== allowedUid
+      || identityBefore.gid !== allowedGid
+      || (identityBefore.mode & 0o7777) !== expectedMode
+    ) {
+      throw new Error(`${label} identity or mode mismatch`);
+    }
+    const bytes = await handle.readFile();
+    const identityAfter = await handle.stat();
+    if (
+      identityAfter.dev !== identityBefore.dev
+      || identityAfter.ino !== identityBefore.ino
+      || identityAfter.size !== identityBefore.size
+      || identityAfter.mtimeMs !== identityBefore.mtimeMs
+      || identityAfter.ctimeMs !== identityBefore.ctimeMs
+    ) {
+      throw new Error(`${label} changed during validation`);
+    }
+    return { bytes, identity: identityAfter };
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function verifyBoundRelease({
+  allowedGid,
+  allowedUid,
+  expectedManifestDigest,
+  release,
+  requireReleaseId = true,
+}) {
+  if (
+    !path.isAbsolute(release)
+    || !Number.isInteger(allowedUid)
+    || allowedUid < 0
+    || !Number.isInteger(allowedGid)
+    || allowedGid < 0
+    || !/^[0-9a-f]{64}$/.test(expectedManifestDigest)
+    || typeof requireReleaseId !== 'boolean'
+  ) {
+    throw new Error('invalid bound release verification arguments');
+  }
+  if (
+    requireReleaseId
+    && path.basename(release) !== expectedManifestDigest
+  ) {
+    throw new Error('release id does not match the manifest digest');
+  }
+
+  const rootBefore = await lstat(release);
+  if (
+    !rootBefore.isDirectory()
+    || rootBefore.isSymbolicLink()
+    || rootBefore.uid !== allowedUid
+    || rootBefore.gid !== allowedGid
+    || (rootBefore.mode & 0o7777) !== 0o755
+  ) {
+    throw new Error('release root identity or mode mismatch');
+  }
+
+  const manifestFile = path.join(release, 'MANIFEST.sha256');
+  const { bytes: manifestBytes } = await readSingleLinkRegularFile(manifestFile, {
+    allowedGid,
+    allowedUid,
+    expectedMode: 0o644,
+    label: 'release manifest',
+  });
+  if (sha256(manifestBytes) !== expectedManifestDigest) {
+    throw new Error('release manifest digest mismatch');
+  }
+  const records = parseManifest(manifestBytes.toString('utf8'));
+  const recordByName = new Map(records.map((record) => [record.relative, record]));
+  const allowlistRecord = recordByName.get('cc-site/sync/payload-files.txt');
+  if (!allowlistRecord) {
+    throw new Error('release manifest is missing its allowlist');
+  }
+  const allowlistFile = path.join(
+    release,
+    'cc-site',
+    'sync',
+    'payload-files.txt',
+  );
+  const { bytes: allowlistBytes } = await readSingleLinkRegularFile(allowlistFile, {
+    allowedGid,
+    allowedUid,
+    expectedMode: 0o644,
+    label: 'release allowlist',
+  });
+  if (sha256(allowlistBytes) !== allowlistRecord.digest) {
+    throw new Error('release digest mismatch: cc-site/sync/payload-files.txt');
+  }
+  const allowlist = parseAllowlist(allowlistBytes.toString('utf8'));
+  const manifestNames = records.map(({ relative }) => relative);
+  const expectedManifestNames = [...allowlist, 'deploy/cc-sync.env'].sort();
+  if (manifestNames.join('\n') !== expectedManifestNames.join('\n')) {
+    throw new Error('release manifest does not match the exact allowlist');
+  }
+
+  const releaseRecords = records.filter(
+    ({ relative }) => relative.startsWith('cc-site/'),
+  );
+  if (
+    releaseRecords.length !== records.length - 1
+    || !recordByName.has('deploy/cc-sync.env')
+  ) {
+    throw new Error('release manifest has an invalid environment record');
+  }
+  const expectedFiles = [
+    'MANIFEST.sha256',
+    ...releaseRecords.map(({ relative }) => relative),
+  ].sort();
+  const expectedDirectories = expectedReleaseDirectories(expectedFiles);
+  const actualFiles = [];
+  const actualDirectories = [];
+  const actualDigests = new Map();
+
+  const walkExact = async (directory, relative = '') => {
+    const identity = await lstat(directory);
+    if (
+      !identity.isDirectory()
+      || identity.isSymbolicLink()
+      || identity.uid !== allowedUid
+      || identity.gid !== allowedGid
+      || (identity.mode & 0o7777) !== 0o755
+    ) {
+      throw new Error(`release directory identity or mode mismatch: ${relative || '.'}`);
+    }
+    for (const name of (await readdir(directory)).sort()) {
+      const child = path.join(directory, name);
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const childIdentity = await lstat(child);
+      if (childIdentity.isDirectory() && !childIdentity.isSymbolicLink()) {
+        actualDirectories.push(childRelative);
+        await walkExact(child, childRelative);
+        continue;
+      }
+      const expectedMode = releaseExecutable(childRelative) ? 0o755 : 0o644;
+      const { bytes } = await readSingleLinkRegularFile(child, {
+        allowedGid,
+        allowedUid,
+        expectedMode,
+        label: `release file ${childRelative}`,
+      });
+      actualFiles.push(childRelative);
+      actualDigests.set(childRelative, sha256(bytes));
+    }
+  };
+  await walkExact(release);
+  if (
+    actualFiles.sort().join('\n') !== expectedFiles.join('\n')
+    || actualDirectories.sort().join('\n') !== expectedDirectories.join('\n')
+  ) {
+    throw new Error('release path set does not match the exact allowlist');
+  }
+  for (const { digest, relative } of releaseRecords) {
+    if (actualDigests.get(relative) !== digest) {
+      throw new Error(`release digest mismatch: ${relative}`);
+    }
+  }
+  if (actualDigests.get('MANIFEST.sha256') !== expectedManifestDigest) {
+    throw new Error('release manifest digest mismatch');
+  }
+  const rootAfter = await lstat(release);
+  if (
+    rootAfter.dev !== rootBefore.dev
+    || rootAfter.ino !== rootBefore.ino
+  ) {
+    throw new Error('release root changed during validation');
+  }
+  return expectedManifestDigest;
 }
 
 export async function verifyRelease({
@@ -628,61 +787,13 @@ export async function verifyRelease({
   if (sha256(manifestBytes) !== expectedManifestDigest) {
     throw new Error('release payload manifest digest mismatch');
   }
-  const expectedRecords = parseManifest(manifestBytes.toString('utf8'))
-    .filter(({ relative }) => relative.startsWith('cc-site/'));
-  const expectedNames = expectedRecords.map(({ relative }) => relative);
-  const actualRecords = [];
-  const walkExact = async (directory, relative = '') => {
-    const identity = await lstat(directory);
-    if (
-      !identity.isDirectory()
-      || identity.isSymbolicLink()
-      || identity.uid !== allowedUid
-      || identity.gid !== allowedGid
-      || (identity.mode & 0o7777) !== 0o755
-    ) {
-      throw new Error('release directory identity or mode mismatch');
-    }
-    for (const name of (await readdir(directory)).sort()) {
-      const child = path.join(directory, name);
-      const childRelative = relative ? `${relative}/${name}` : name;
-      const childIdentity = await lstat(child);
-      if (childIdentity.isDirectory() && !childIdentity.isSymbolicLink()) {
-        await walkExact(child, childRelative);
-        continue;
-      }
-      const expectedMode = releaseExecutable(childRelative) ? 0o755 : 0o644;
-      if (
-        !childIdentity.isFile()
-        || childIdentity.isSymbolicLink()
-        || childIdentity.nlink !== 1
-        || childIdentity.uid !== allowedUid
-        || childIdentity.gid !== allowedGid
-        || (childIdentity.mode & 0o7777) !== expectedMode
-      ) {
-        throw new Error(`release file identity or mode mismatch: ${childRelative}`);
-      }
-      actualRecords.push({
-        digest: sha256(await readFile(child)),
-        relative: childRelative,
-      });
-    }
-  };
-  await walkExact(release);
-  const actualNames = actualRecords.map(({ relative }) => relative);
-  if (actualNames.join('\n') !== expectedNames.join('\n')) {
-    throw new Error('release path set does not match the payload manifest');
-  }
-  for (let index = 0; index < expectedRecords.length; index += 1) {
-    const expected = expectedRecords[index];
-    const actual = actualRecords[index];
-    if (expected.digest !== actual.digest) {
-      throw new Error(`release digest mismatch: ${expected.relative}`);
-    }
-  }
-  return sha256(Buffer.from(actualRecords.map(
-    ({ digest, relative }) => `${digest}  ${relative}\n`,
-  ).join('')));
+  return verifyBoundRelease({
+    allowedGid,
+    allowedUid,
+    expectedManifestDigest,
+    release,
+    requireReleaseId: false,
+  });
 }
 
 function releaseArtifactName(name) {
@@ -776,6 +887,13 @@ export async function publishRelease({
   if (finalIdentity === null) {
     await rename(stage, finalRelease);
     await syncDirectory(path.dirname(finalRelease));
+    await verifyBoundRelease({
+      allowedGid,
+      allowedUid,
+      expectedManifestDigest,
+      release: finalRelease,
+      requireReleaseId: true,
+    });
     return 'created';
   }
 
@@ -822,7 +940,7 @@ export async function publishRelease({
 }
 
 export async function garbageCollectReleases({
-  allowedGid = null,
+  allowedGid,
   allowedUid,
   keep,
   liveLink,
@@ -834,21 +952,21 @@ export async function garbageCollectReleases({
     || path.dirname(releases) !== path.dirname(liveLink)
     || !Number.isInteger(allowedUid)
     || allowedUid < 0
-    || (allowedGid !== null && (!Number.isInteger(allowedGid) || allowedGid < 0))
+    || !Number.isInteger(allowedGid)
+    || allowedGid < 0
     || !Number.isInteger(keep)
     || keep < 1
     || keep > 10
   ) {
     throw new Error('invalid release garbage collection arguments');
   }
-  if (allowedGid !== null) {
-    await cleanupReleaseArtifacts({ releases, allowedUid, allowedGid });
-  }
+  await cleanupReleaseArtifacts({ releases, allowedUid, allowedGid });
   const releasesIdentity = await lstat(releases);
   if (
     !releasesIdentity.isDirectory()
     || releasesIdentity.isSymbolicLink()
     || releasesIdentity.uid !== allowedUid
+    || releasesIdentity.gid !== allowedGid
     || (releasesIdentity.mode & 0o022) !== 0
   ) {
     throw new Error('release root is unsafe');
@@ -877,7 +995,14 @@ export async function garbageCollectReleases({
     }
     const candidate = path.join(releases, name);
     try {
-      const identity = await validateReleaseTree(candidate, allowedUid);
+      await verifyBoundRelease({
+        allowedGid,
+        allowedUid,
+        expectedManifestDigest: name,
+        release: candidate,
+        requireReleaseId: true,
+      });
+      const identity = await lstat(candidate);
       safe.push({
         dev: identity.dev,
         ino: identity.ino,
@@ -918,7 +1043,13 @@ export async function garbageCollectReleases({
       skipped.push(candidate.name);
       continue;
     }
-    await validateReleaseTree(candidatePath, allowedUid);
+    await verifyBoundRelease({
+      allowedGid,
+      allowedUid,
+      expectedManifestDigest: candidate.name,
+      release: candidatePath,
+      requireReleaseId: true,
+    });
     await rm(candidatePath, { recursive: true });
     removed.push(candidate.name);
   }
