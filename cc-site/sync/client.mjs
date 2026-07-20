@@ -1,5 +1,65 @@
 import { signedHeaders } from './auth.mjs';
 
+export const RESPONSE_LIMITS = Object.freeze({
+  json: 1024 * 1024,
+  page: 8 * 1024 * 1024,
+  error: 8 * 1024,
+});
+
+class ResponseTooLargeError extends Error {
+  constructor(label, limit) {
+    super(`${label} response body is too large (limit ${limit} bytes)`);
+    this.name = 'ResponseTooLargeError';
+  }
+}
+
+function declaredBodyTooLarge(response, limit) {
+  const value = response.headers.get('Content-Length');
+  if (value === null) return false;
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error('invalid response Content-Length');
+  }
+  const maximum = String(limit);
+  return value.length > maximum.length
+    || (value.length === maximum.length && value > maximum);
+}
+
+export async function readBoundedResponse(response, limit, label) {
+  if (declaredBodyTooLarge(response, limit)) {
+    await response.body?.cancel('declared response body too large').catch(
+      () => {},
+    );
+    throw new ResponseTooLargeError(label, limit);
+  }
+  if (!response.body) return Buffer.alloc(0);
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array
+        ? value
+        : new Uint8Array(value);
+      if (total + chunk.byteLength > limit) {
+        await reader.cancel('response body too large').catch(() => {});
+        throw new ResponseTooLargeError(label, limit);
+      }
+      chunks.push(Buffer.from(chunk));
+      total += chunk.byteLength;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cancellation may already detach a runtime-specific reader.
+    }
+  }
+  return Buffer.concat(chunks, total);
+}
+
 export class SyncClient {
   constructor(config, { fetchImpl = globalThis.fetch } = {}) {
     this.baseUrl = config.baseUrl;
@@ -27,14 +87,22 @@ export class SyncClient {
     return this.#get('/api/cc-sync/page', [
       ['item_id', itemId],
       ['content_hash', contentHash],
-    ], async (response) => Buffer.from(await response.arrayBuffer()));
+    ], (response) => (
+      readBoundedResponse(response, RESPONSE_LIMITS.page, 'page')
+    ));
   }
 
   async #getJson(pathname, query) {
     return this.#get(pathname, query, async (response) => {
       try {
-        return await response.json();
+        const bytes = await readBoundedResponse(
+          response,
+          RESPONSE_LIMITS.json,
+          'JSON',
+        );
+        return JSON.parse(bytes.toString('utf8'));
       } catch (error) {
+        if (error instanceof ResponseTooLargeError) throw error;
         throw new Error(`invalid JSON from ${pathname}`, { cause: error });
       }
     });
@@ -60,7 +128,24 @@ export class SyncClient {
         signal: controller.signal,
       });
       if (!response.ok) {
-        const detail = (await response.text()).slice(0, 256).trim();
+        let detail;
+        try {
+          detail = (
+            await readBoundedResponse(
+              response,
+              RESPONSE_LIMITS.error,
+              'error',
+            )
+          ).toString('utf8').slice(0, 256).trim();
+        } catch (error) {
+          if (error instanceof ResponseTooLargeError) {
+            throw new Error(
+              `cc sync error response too large: ${response.status}`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
         throw new Error(
           `cc sync request failed: ${response.status} ${detail || response.statusText}`,
         );

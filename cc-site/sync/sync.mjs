@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { lstat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 import { SyncClient } from './client.mjs';
-import { loadConfig } from './config.mjs';
+import { assertSecureConfig, loadConfig } from './config.mjs';
 import {
+  assertCanonicalPageUrl,
+  hashPageFile,
   removePageFile,
   resolvePageFile,
   writePageFileAtomic,
 } from './fs-safe.mjs';
 import {
+  acquireSyncLock,
   createEmptyState,
   loadState,
   saveState,
 } from './state.mjs';
 
 const HASH_RE = /^[0-9a-f]{64}$/;
+const dryRunLocks = new Set();
 
 function clone(value) {
   return structuredClone(value);
@@ -46,6 +49,11 @@ function assertPageItem(item, context) {
   ) {
     throw new Error(`invalid ${context} page item`);
   }
+  try {
+    assertCanonicalPageUrl(item.url_path);
+  } catch (error) {
+    throw new Error(`invalid ${context} page item URL`, { cause: error });
+  }
 }
 
 function assertChangeItem(item, afterSeq) {
@@ -68,6 +76,11 @@ function assertChangeItem(item, afterSeq) {
     )
   ) {
     throw new Error('invalid changes item');
+  }
+  try {
+    assertCanonicalPageUrl(item.url_path);
+  } catch (error) {
+    throw new Error('invalid changes item URL', { cause: error });
   }
 }
 
@@ -112,16 +125,6 @@ async function prepareBatch(items, client, config) {
   });
 }
 
-async function regularPageExists(urlPath, siteRoot) {
-  const file = await resolvePageFile(urlPath, siteRoot);
-  try {
-    return (await lstat(file)).isFile();
-  } catch (error) {
-    if (error?.code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
 async function applyPreparedBatch({
   prepared,
   state,
@@ -139,9 +142,9 @@ async function applyPreparedBatch({
       continue;
     }
 
-    const previous = nextState.pages[item.url_path];
-    const maySkipWrite = previous?.hash === item.content_hash
-      && await regularPageExists(item.url_path, config.siteRoot);
+    const maySkipWrite = (
+      await hashPageFile(item.url_path, config.siteRoot)
+    ) === item.content_hash;
     if (!dryRun && !maySkipWrite) {
       await writePageFileAtomic(
         item.url_path,
@@ -156,13 +159,19 @@ async function applyPreparedBatch({
   return nextState;
 }
 
-function assertBootstrapResponse(body, expectedWatermark, afterItemId) {
+function assertBootstrapResponse(
+  body,
+  expectedWatermark,
+  afterItemId,
+  requestedLimit,
+) {
   if (
     !body
     || typeof body !== 'object'
     || !Number.isSafeInteger(body.watermark)
     || body.watermark < 0
     || !Array.isArray(body.items)
+    || body.items.length > requestedLimit
     || !(
       body.next_after_item_id === null
       || typeof body.next_after_item_id === 'string'
@@ -174,12 +183,28 @@ function assertBootstrapResponse(body, expectedWatermark, afterItemId) {
   ) {
     throw new Error('invalid bootstrap response');
   }
-  for (const item of body.items) assertPageItem(item, 'bootstrap');
-  if (
-    body.next_after_item_id !== null
-    && body.next_after_item_id <= afterItemId
-  ) {
-    throw new Error('bootstrap cursor did not advance');
+
+  let previousItemId = afterItemId;
+  for (const item of body.items) {
+    try {
+      assertPageItem(item, 'bootstrap');
+    } catch (error) {
+      throw new Error('invalid bootstrap response item', { cause: error });
+    }
+    if (item.item_id <= previousItemId) {
+      throw new Error('invalid bootstrap response item ordering');
+    }
+    previousItemId = item.item_id;
+  }
+
+  if (body.next_after_item_id !== null) {
+    if (
+      body.items.length === 0
+      || body.items.length < requestedLimit
+      || body.next_after_item_id !== body.items.at(-1).item_id
+    ) {
+      throw new Error('invalid bootstrap response cursor');
+    }
   }
 }
 
@@ -217,7 +242,12 @@ async function runBootstrap({
         limit: config.pageLimit,
         watermark: expectedWatermark,
       });
-      assertBootstrapResponse(body, expectedWatermark, afterItemId);
+      assertBootstrapResponse(
+        body,
+        expectedWatermark,
+        afterItemId,
+        config.pageLimit,
+      );
 
       const withPending = clone(current);
       withPending.bootstrap.watermark = body.watermark;
@@ -230,6 +260,16 @@ async function runBootstrap({
     }
 
     const pending = current.bootstrap.pending;
+    assertBootstrapResponse(
+      {
+        watermark: current.bootstrap.watermark,
+        items: pending.items,
+        next_after_item_id: pending.next_after_item_id,
+      },
+      current.bootstrap.watermark,
+      current.bootstrap.after_item_id,
+      config.pageLimit,
+    );
     const items = pending.items.map((item) => ({ ...item, op: 'upsert' }));
     const prepared = await prepareBatch(items, client, config);
     const bootstrapPages = clone(current.bootstrap.pages);
@@ -314,6 +354,7 @@ async function runChanges({ state, client, config, dryRun }) {
 }
 
 function validateRuntimeConfig(config) {
+  assertSecureConfig(config);
   if (
     !config
     || typeof config.baseUrl !== 'string'
@@ -333,13 +374,12 @@ function validateRuntimeConfig(config) {
   }
 }
 
-export async function runSync({
+async function runSyncUnlocked({
   config,
-  dryRun = false,
-  full = false,
-  client = new SyncClient(config),
+  dryRun,
+  full,
+  client,
 }) {
-  validateRuntimeConfig(config);
   const loaded = await loadState(config.stateDir);
   const state = loaded ?? createEmptyState();
   const needsBootstrap = full || loaded === null || state.bootstrap !== null;
@@ -358,6 +398,40 @@ export async function runSync({
     config,
     dryRun,
   });
+}
+
+export async function runSync({
+  config,
+  dryRun = false,
+  full = false,
+  client = new SyncClient(config),
+}) {
+  validateRuntimeConfig(config);
+  const operation = () => runSyncUnlocked({
+    config,
+    dryRun,
+    full,
+    client,
+  });
+
+  if (dryRun) {
+    if (dryRunLocks.has(config.stateDir)) {
+      throw new Error('cc sync dry-run already running for this state');
+    }
+    dryRunLocks.add(config.stateDir);
+    try {
+      return await operation();
+    } finally {
+      dryRunLocks.delete(config.stateDir);
+    }
+  }
+
+  const lock = await acquireSyncLock(config.stateDir);
+  try {
+    return await operation();
+  } finally {
+    await lock.release();
+  }
 }
 
 export function parseCliArgs(args) {
