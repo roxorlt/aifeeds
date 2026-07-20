@@ -276,8 +276,10 @@ describe('renderItemPageHtml', () => {
     expect(html).toContain('<link rel="canonical" href="https://www.ai-feeds.cc/i/x/1890">');
     expect(html).toContain('<meta property="og:url" content="https://www.ai-feeds.cc/i/x/1890">');
     expect(strings).toContain('https://www.ai-feeds.cc/i/x/1890');
-    expect(strings).toContain('https://www.ai-feeds.cc/archive/x/');
+    expect(strings).toContain('https://www.ai-feeds.cc/ai-news/');
     expect(html).toContain('https://www.ai-feeds.cc/i/gh/acme/tool');
+    expect(html).toContain('href="https://www.ai-feeds.cc/ai-news/"');
+    expect(html).not.toContain('https://www.ai-feeds.cc/archive/');
     expect(html).toContain('>打开 AI Feeds 完整版</a>');
     expect(html).toMatch(
       /href="https:\/\/ai-feeds\.com\/t\/1890\?utm_source=cc&amp;utm_medium=mirror&amp;utm_campaign=cn_seo"/,
@@ -286,6 +288,31 @@ describe('renderItemPageHtml', () => {
       /<meta[^>]+http-equiv=["']?refresh|window\.location|location\.(?:href|replace|assign)/i,
     );
     expect((html.match(/<script/g) || []).length).toBe(1);
+  });
+
+  test('.cc 无封面时复用确实存在的 .com 默认 OG，且不生成不存在的 source/month archive', () => {
+    const ccEnv = {
+      SITE_BASE: SITE,
+      CC_SITE_BASE: 'https://ai-feeds.cc',
+      API_BASE: API,
+    } as Env;
+    const html = renderItemPageHtml(
+      mkRow({ media: null }),
+      ccEnv,
+      [],
+      ccItemPageProfile(ccEnv),
+    );
+    const breadcrumb = extractJsonLd(html)['@graph'].find(
+      (entry) => entry['@type'] === 'BreadcrumbList',
+    )!;
+    const items = breadcrumb.itemListElement as Array<Record<string, unknown>>;
+
+    expect(html).toContain(
+      '<meta property="og:image" content="https://ai-feeds.com/og-default.png">',
+    );
+    expect(items[1].item).toBe('https://ai-feeds.cc/ai-news/');
+    expect(html).not.toContain('https://ai-feeds.cc/archive/');
+    expect(html).not.toContain('https://ai-feeds.cc/ai-news/2026-07/');
   });
 
   test('.cc profile 固定展示备案、法律与联系信息，原文 URL 保持来源站', () => {

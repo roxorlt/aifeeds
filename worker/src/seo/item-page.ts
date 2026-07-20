@@ -86,6 +86,9 @@ export function renderItemPageHtml(
     brandName,
     titleSuffix,
     ccVariant,
+    archiveBase,
+    archiveHasSourcePages,
+    defaultOgImage,
   } = profile;
   const r = row as ItemPageRow;
   // 出页 5 类之外理论上被路由层拦掉;兜底给 news 分支避免崩(不影响正常 5 源)。
@@ -102,15 +105,19 @@ export function renderItemPageHtml(
   const ctaLabel = ccVariant ? '打开 AI Feeds 完整版' : '打开互动版';
   const label = SOURCE_LABELS[source] || source;
   const pageTitle = `${item.title} | ${titleSuffix}`;
-  const cover = item.cover || `${siteBase}/og-default.png`;
+  const cover = item.cover || defaultOgImage;
 
   const summaryFull = item.summary_full || item.summary || '';
   const description = clampSentences(summaryFull, ITEM_DESC_MAX);
   const datePublished = (r.published_at || r.scraped_at || '').trim();
   const archiveSource = source === 'hf-paper' ? 'paper' : source;
-  const sourceArchiveUrl = `${siteBase}/archive/${archiveSource}/`;
+  const sourceArchiveUrl = archiveHasSourcePages
+    ? `${archiveBase}/${archiveSource}/`
+    : `${archiveBase}/`;
   const archiveMonth = datePublished.match(/^(\d{4}-(?:0[1-9]|1[0-2]))/)?.[1] || null;
-  const monthArchiveUrl = archiveMonth ? `${sourceArchiveUrl}${archiveMonth}/` : null;
+  const monthArchiveUrl = archiveHasSourcePages && archiveMonth
+    ? `${sourceArchiveUrl}${archiveMonth}/`
+    : null;
 
   // 分源混合正文:gh/hf/ph/x 全文,blog/podcast 摘要+分析+短摘录(见 item-body.ts)。净化后零可执行 script。
   const bodyContent = renderItemBody(source, row, env);

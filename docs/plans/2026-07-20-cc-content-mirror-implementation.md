@@ -584,7 +584,10 @@ export function renderItemPageHtml(
 接口：
 
 ```ts
-export function ccItemPageR2Key(itemId: string): string | null;
+export function ccItemPageR2Key(
+  itemId: string,
+  contentHash: string,
+): string | null;
 
 export async function syncCcItemPage(
   env: Env,
@@ -606,7 +609,8 @@ export async function markCcItemPageGone(
 
 测试：
 
-- review pass → R2 写 `cc-item-pages/...html`、`cc_item_pages=live`、event=`upsert`。
+- review pass → R2 写含 64hex `content_hash` 的不可变
+  `cc-item-pages/.../<hash>.html`、`cc_item_pages=live`、event=`upsert`。
 - review pending/review/deny → 不写 HTML；已有 live 行变 gone 并产生 delete event。
 - HTML SHA-256 等于 `content_hash`。
 - 相同 hash 且已 live → 不新增 event。
@@ -781,7 +785,7 @@ timestamp + "\n"
 ```text
 GET /api/cc-sync/bootstrap?after_item_id=&limit=200&watermark=
 GET /api/cc-sync/changes?after_seq=123&limit=200
-GET /api/cc-sync/page?item_id=...
+GET /api/cc-sync/page?item_id=...&content_hash=<64hex>
 GET /api/cc-sync/health
 ```
 
@@ -819,7 +823,13 @@ interface ChangesResponse {
 - bootstrap 首次固定 `watermark=MAX(cc_page_events.seq)`；后续页必须回传同 watermark。
 - bootstrap 只列当前 live 页，按 `item_id` 游标分页。
 - changes 按 seq 升序，重复 item event 不丢；客户端负责幂等。
-- page 仅在当前 live 且 R2 命中时 200；ETag=`content_hash`；gone=404。
+- page 必须同时接收 `item_id` 与预期 `content_hash`，先确认存在对应
+  `op='upsert'` 的 `cc_page_events`，再按
+  `ccItemPageR2Key(item_id, content_hash)` 读取不可变私有版本；不得只按当前
+  `cc_item_pages` 指针取“最新版”。
+- page 命中事件且不可变 R2 版本存在时 200，ETag=`content_hash`；hash 非法、
+  无对应 upsert event 或对象缺失时 404。这样客户端重放 H1→H2 时，即使当前页已是
+  H2 或 gone，也仍可安全拉到 H1 对应 bytes。
 - 所有响应 `Cache-Control:no-store`。
 - limit 默认 200，最大 500。
 
@@ -910,6 +920,9 @@ Node 端签名必须与 Worker fixture 完全一致。固定 timestamp/method/pa
 - 首次无 state → bootstrap 全量 → 拉页面 → hash 校验 → 原子写 → 保存 watermark。
 - 第二次 → changes 增量。
 - upsert 相同 hash 不重写。
+- 每条 upsert 必须把事件里的 hash 作为
+  `/api/cc-sync/page?item_id=...&content_hash=...` 的 `content_hash` 参数拉取，
+  不得省略 hash 后读取当前最新版；否则 H1→H2 事件重放会拿错 bytes 并让游标永久卡住。
 - delete 删除 `index.html` 并从 state 移除。
 - page hash 不符、HMAC 401、网络超时 → 退出码非 0，不推进 cursor。
 - 批次中一个失败 → 整批 cursor 不推进，下一次安全重试。

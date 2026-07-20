@@ -77,11 +77,12 @@ async function requestAsset(
   method: 'GET' | 'HEAD',
   bucket: R2Bucket,
   range?: string,
+  key = KEY,
 ): Promise<Response> {
   const headers = new Headers();
   if (range !== undefined) headers.set('Range', range);
   return worker.fetch(
-    new Request(`https://api.ai-feeds.com/r/${KEY}`, { method, headers }),
+    new Request(`https://api.ai-feeds.com/r/${key}`, { method, headers }),
     { READMES: bucket } as unknown as Env,
     {} as ExecutionContext,
   );
@@ -97,6 +98,24 @@ function expectPublicAssetHeaders(response: Response): void {
 }
 
 describe('Worker /r/* HEAD and single byte-range contract', () => {
+  test.each(['GET', 'HEAD'] as const)(
+    '%s permanently hides private cc immutable page versions before any R2 read',
+    async (method) => {
+      const { bucket, head, get } = createBucket();
+      const response = await requestAsset(
+        method,
+        bucket,
+        undefined,
+        'cc-item-pages/news/blog%3Aitem/abc.html',
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(head).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
   test('HEAD reads metadata only, returns no body, and preserves public asset headers', async () => {
     const { bucket, head, get } = createBucket();
 

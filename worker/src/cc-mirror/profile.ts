@@ -8,6 +8,9 @@ export interface ItemPageProfile {
   brandName: string;
   titleSuffix: string;
   ccVariant: boolean;
+  archiveBase: string;
+  archiveHasSourcePages: boolean;
+  defaultOgImage: string;
 }
 
 function withoutTrailingSlash(value: string): string {
@@ -23,21 +26,29 @@ export function defaultItemPageProfile(env: Env): ItemPageProfile {
     brandName: "AI Feeds",
     titleSuffix: "AI Feeds",
     ccVariant: false,
+    archiveBase: `${siteBase}/archive`,
+    archiveHasSourcePages: true,
+    defaultOgImage: `${siteBase}/og-default.png`,
   };
 }
 
 export function ccItemPageProfile(env: Env): ItemPageProfile {
   const defaults = defaultItemPageProfile(env);
+  const siteBase = withoutTrailingSlash(
+    env.CC_SITE_BASE || "https://ai-feeds.cc",
+  );
+  const interactiveBase = withoutTrailingSlash(
+    defaults.siteBase || "https://ai-feeds.com",
+  );
   return {
-    siteBase: withoutTrailingSlash(
-      env.CC_SITE_BASE || "https://ai-feeds.cc",
-    ),
-    interactiveBase: withoutTrailingSlash(
-      defaults.siteBase || "https://ai-feeds.com",
-    ),
+    siteBase,
+    interactiveBase,
     apiBase: defaults.apiBase,
     brandName: "AI源信",
     titleSuffix: "AI源信",
     ccVariant: true,
+    archiveBase: `${siteBase}/ai-news`,
+    archiveHasSourcePages: false,
+    defaultOgImage: `${interactiveBase}/og-default.png`,
   };
 }

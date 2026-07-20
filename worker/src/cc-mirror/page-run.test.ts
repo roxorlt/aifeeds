@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { Env } from "../index";
 import type { RenderRow } from "../digest/render";
 import {
@@ -30,6 +30,7 @@ class StatefulD1 {
   itemReads = 0;
   overrideReads = 0;
   failNextBatch = false;
+  beforeNextBatch?: MutationHook;
   afterFirstItemRead?: MutationHook;
   afterFirstOverrideRead?: MutationHook;
 
@@ -140,6 +141,9 @@ class StatefulD1 {
       this.failNextBatch = false;
       throw new Error("D1 batch unavailable");
     }
+    const beforeBatch = this.beforeNextBatch;
+    this.beforeNextBatch = undefined;
+    beforeBatch?.(this);
     this.sqlite.exec("BEGIN");
     try {
       const results: unknown[] = [];
@@ -165,7 +169,10 @@ class ObservableR2 {
   }>();
   readonly puts: Array<{ key: string; value: string }> = [];
   failNextPut = false;
-  failNextDelete = false;
+  private pausedPut: {
+    started: () => void;
+    wait: Promise<void>;
+  } | null = null;
 
   async put(
     key: string,
@@ -175,6 +182,12 @@ class ObservableR2 {
     if (this.failNextPut) {
       this.failNextPut = false;
       throw new Error("R2 unavailable");
+    }
+    const paused = this.pausedPut;
+    if (paused) {
+      this.pausedPut = null;
+      paused.started();
+      await paused.wait;
     }
     const bytes = typeof value === "string"
       ? new TextEncoder().encode(value)
@@ -201,17 +214,31 @@ class ObservableR2 {
     };
   }
 
-  async delete(key: string): Promise<void> {
-    if (this.failNextDelete) {
-      this.failNextDelete = false;
-      throw new Error("R2 delete unavailable");
-    }
-    this.objects.delete(key);
+  async head(key: string) {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return {
+      customMetadata: object.customMetadata,
+      httpMetadata: object.httpMetadata,
+    };
   }
 
   text(key: string): string | undefined {
     const object = this.objects.get(key);
     return object ? new TextDecoder().decode(object.bytes) : undefined;
+  }
+
+  pauseNextPut(): { started: Promise<void>; release: () => void } {
+    let signalStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pausedPut = { started: signalStarted, wait };
+    return { started, release };
   }
 }
 
@@ -244,16 +271,19 @@ async function sha256(value: string): Promise<string> {
 }
 
 describe("ccItemPageR2Key", () => {
-  it("uses an isolated cc-item-pages namespace and rejects malformed/unsupported ids", () => {
-    expect(ccItemPageR2Key("github:owner/repo")).toBe(
-      "cc-item-pages/gh/github%3Aowner%2Frepo.html",
+  it("uses an immutable content-addressed private namespace and rejects malformed ids or hashes", () => {
+    const hash = "a".repeat(64);
+    expect(ccItemPageR2Key("github:owner/repo", hash)).toBe(
+      `cc-item-pages/gh/github%3Aowner%2Frepo/${hash}.html`,
     );
-    expect(ccItemPageR2Key("blog:openai:item-1")).toBe(
-      "cc-item-pages/news/blog%3Aopenai%3Aitem-1.html",
+    expect(ccItemPageR2Key("blog:openai:item-1", hash)).toBe(
+      `cc-item-pages/news/blog%3Aopenai%3Aitem-1/${hash}.html`,
     );
-    expect(ccItemPageR2Key("github:missing-repo")).toBeNull();
-    expect(ccItemPageR2Key("clawhub:item")).toBeNull();
-    expect(ccItemPageR2Key("../escape")).toBeNull();
+    expect(ccItemPageR2Key("github:missing-repo", hash)).toBeNull();
+    expect(ccItemPageR2Key("clawhub:item", hash)).toBeNull();
+    expect(ccItemPageR2Key("../escape", hash)).toBeNull();
+    expect(ccItemPageR2Key("github:owner/repo", "abc")).toBeNull();
+    expect(ccItemPageR2Key("github:owner/repo", "A".repeat(64))).toBeNull();
   });
 });
 
@@ -276,6 +306,12 @@ describe("syncCcItemPage", () => {
     expect(String(page.status)).toBe("live");
     expect(String(page.url_path)).toBe("/i/news/blog%3Aopenai%3Aitem-1");
     expect(String(page.content_hash)).toBe(await sha256(html));
+    expect(String(page.r2_key)).toBe(
+      ccItemPageR2Key(id, String(page.content_hash)),
+    );
+    expect(r2.objects.get(String(page.r2_key))!.customMetadata).toEqual({
+      contentHash: page.content_hash,
+    });
     expect(html).toContain("https://ai-feeds.cc/i/news/");
     expect(db.events(id)).toMatchObject([
       { op: "upsert", content_hash: page.content_hash },
@@ -289,7 +325,8 @@ describe("syncCcItemPage", () => {
 
     await syncCcItemPage(env, id);
     const firstHash = String(db.page(id)!.content_hash);
-    await syncCcItemPage(env, id);
+    const unchanged = await syncCcItemPage(env, id);
+    expect(unchanged.eventCreated).toBe(false);
     expect(db.events(id)).toHaveLength(1);
 
     db.sqlite.prepare(
@@ -400,32 +437,34 @@ describe("syncCcItemPage", () => {
     expect(db.events(id)).toHaveLength(0);
   });
 
-  it("compensates an initial R2 put when the following D1 batch fails", async () => {
+  it("retains an unreferenced immutable version when the following D1 batch fails", async () => {
     const { db, r2, env } = setup();
     const id = db.insertSafeBlog();
     db.setOverride(id, "allow");
-    const key = ccItemPageR2Key(id)!;
     db.failNextBatch = true;
 
     await expect(syncCcItemPage(env, id)).rejects.toThrow(
       "D1 batch unavailable",
     );
 
-    expect(r2.objects.has(key)).toBe(false);
+    expect(r2.objects.size).toBe(1);
+    const [key] = r2.objects.keys();
+    expect(key).toMatch(
+      /^cc-item-pages\/news\/blog%3Aopenai%3Aitem-1\/[0-9a-f]{64}\.html$/,
+    );
     expect(db.page(id)).toBeUndefined();
     expect(db.events(id)).toHaveLength(0);
   });
 
-  it("restores old R2 bytes and metadata when a live update D1 batch fails", async () => {
+  it("keeps the old live pointer and both immutable versions when an update D1 batch fails", async () => {
     const { db, r2, env } = setup();
     const id = db.insertSafeBlog();
     db.setOverride(id, "allow");
     await syncCcItemPage(env, id);
     const pageBefore = db.page(id)!;
-    const key = String(pageBefore.r2_key);
-    const oldBytes = r2.text(key)!;
+    const oldKey = String(pageBefore.r2_key);
+    const oldBytes = r2.text(oldKey)!;
     const oldHash = String(pageBefore.content_hash);
-    const oldHttpMetadata = r2.objects.get(key)!.httpMetadata;
     const eventCount = db.events(id).length;
 
     db.sqlite.prepare(
@@ -439,31 +478,70 @@ describe("syncCcItemPage", () => {
       "D1 batch unavailable",
     );
 
-    expect(r2.text(key)).toBe(oldBytes);
-    expect(r2.objects.get(key)!.httpMetadata).toEqual(oldHttpMetadata);
-    expect(await sha256(r2.text(key)!)).toBe(oldHash);
+    expect(r2.text(oldKey)).toBe(oldBytes);
+    expect(await sha256(r2.text(oldKey)!)).toBe(oldHash);
     expect(db.page(id)!.content_hash).toBe(oldHash);
+    expect(db.page(id)!.r2_key).toBe(oldKey);
     expect(db.events(id)).toHaveLength(eventCount);
+    expect(r2.objects.size).toBe(2);
   });
 
-  it("surfaces and logs a compensation failure instead of hiding split-brain risk", async () => {
+  it("retains every event-addressable immutable version across two successful updates", async () => {
     const { db, r2, env } = setup();
     const id = db.insertSafeBlog();
     db.setOverride(id, "allow");
-    db.failNextBatch = true;
-    r2.failNextDelete = true;
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await syncCcItemPage(env, id);
+    db.sqlite.prepare(
+      `UPDATE items
+       SET extra = json_set(extra, '$.ai_summary_zh', '第二版已审核正文。')
+       WHERE id = ?`,
+    ).run(id);
+    await syncCcItemPage(env, id);
 
-    await expect(syncCcItemPage(env, id)).rejects.toThrow(
-      "D1 publish and R2 compensation both failed",
-    );
-
-    expect(errorSpy).toHaveBeenCalledWith(
-      `[cc-mirror] ${id}: R2 compensation failed after D1 batch failure`,
-      expect.any(Error),
-    );
-    errorSpy.mockRestore();
+    const upserts = db.events(id).filter((event) => event.op === "upsert");
+    expect(upserts).toHaveLength(2);
+    for (const event of upserts) {
+      const hash = String(event.content_hash);
+      const key = ccItemPageR2Key(id, hash)!;
+      const html = r2.text(key);
+      expect(html).toBeDefined();
+      expect(await sha256(html!)).toBe(hash);
+    }
+    expect(r2.objects.size).toBe(2);
   });
+
+  it.each(["missing", "metadata-mismatch"] as const)(
+    "self-heals a live same-hash immutable object when it is %s without creating an event",
+    async (mode) => {
+      const { db, r2, env } = setup();
+      const id = db.insertSafeBlog();
+      db.setOverride(id, "allow");
+      await syncCcItemPage(env, id);
+      const page = db.page(id)!;
+      const key = String(page.r2_key);
+      const eventsBefore = db.events(id).length;
+      const putsBefore = r2.puts.length;
+
+      if (mode === "missing") {
+        r2.objects.delete(key);
+      } else {
+        r2.objects.get(key)!.customMetadata = {
+          contentHash: "0".repeat(64),
+        };
+      }
+
+      const result = await syncCcItemPage(env, id);
+
+      expect(result.status).toBe("live");
+      expect(result.eventCreated).toBe(false);
+      expect(r2.puts).toHaveLength(putsBefore + 1);
+      expect(r2.objects.get(key)!.customMetadata).toEqual({
+        contentHash: page.content_hash,
+      });
+      expect(await sha256(r2.text(key)!)).toBe(page.content_hash);
+      expect(db.events(id)).toHaveLength(eventsBefore);
+    },
+  );
 
   it.each([
     ["visible content changed", (db: StatefulD1, id: string) => {
@@ -571,6 +649,125 @@ describe("syncCcItemPage", () => {
     expect(db.page(id)).toBeUndefined();
     expect(db.events(id)).toHaveLength(0);
   });
+
+  it.each([
+    ["deny override", (db: StatefulD1, id: string) => db.setOverride(id, "deny")],
+    ["allow override removed", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(`DELETE FROM cc_item_overrides WHERE item_id = ?`).run(id);
+    }],
+    ["irrelevant", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(`UPDATE items SET is_relevant = 0 WHERE id = ?`).run(id);
+    }],
+    ["deleted", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(`UPDATE items SET deleted_at = '2026-07-21' WHERE id = ?`).run(id);
+    }],
+    ["deduplicated", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items SET extra = json_set(extra, '$.dedup_of', 'blog:canonical') WHERE id = ?`,
+      ).run(id);
+    }],
+    ["visible extra", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items SET extra = json_set(extra, '$.ai_summary_zh', 'CAS 后变化') WHERE id = ?`,
+      ).run(id);
+    }],
+    ["title snapshot", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(`UPDATE items SET title = 'CAS 后标题变化' WHERE id = ?`).run(id);
+    }],
+    ["media snapshot", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items SET media = '[{"type":"image","url":"https://example.test/new.png"}]' WHERE id = ?`,
+      ).run(id);
+    }],
+    ["feed policy", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items SET extra = json_set(extra, '$.feed_key', '36kr') WHERE id = ?`,
+      ).run(id);
+    }],
+  ] as const)(
+    "final D1 authorization CAS blocks initial publish when %s commits after bind",
+    async (_label, mutate) => {
+      const { db, r2, env } = setup();
+      const id = db.insertSafeBlog();
+      db.setOverride(id, "allow");
+      db.beforeNextBatch = (state) => mutate(state, id);
+
+      const result = await syncCcItemPage(env, id);
+
+      expect(result.status).toBe("skipped");
+      expect(result.eventCreated).toBe(false);
+      expect(db.page(id)).toBeUndefined();
+      expect(db.events(id)).toHaveLength(0);
+      expect(r2.objects.size).toBe(1);
+    },
+  );
+
+  it("final CAS cannot upsert a changed live page after a deny wins; it transitions the old page gone", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    await syncCcItemPage(env, id);
+    const oldHash = db.page(id)!.content_hash;
+    db.sqlite.prepare(
+      `UPDATE items SET extra = json_set(extra, '$.ai_summary_zh', '待发布第二版') WHERE id = ?`,
+    ).run(id);
+    db.beforeNextBatch = (state) => state.setOverride(id, "deny");
+
+    const result = await syncCcItemPage(env, id);
+
+    expect(result.status).toBe("gone");
+    expect(result.reason).toBe("final-authorization-changed");
+    expect(db.page(id)!.status).toBe("gone");
+    expect(db.page(id)!.content_hash).toBe(oldHash);
+    expect(db.events(id).map((event) => event.op)).toEqual(["upsert", "delete"]);
+    expect(r2.objects.size).toBe(2);
+  });
+
+  it("two different contents interleave safely: D1 commit order selects a matching immutable pointer", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    const pause = r2.pauseNextPut();
+    const first = syncCcItemPage(env, id);
+    await pause.started;
+
+    db.sqlite.prepare(
+      `UPDATE items SET extra = json_set(extra, '$.ai_summary_zh', '并发第二版') WHERE id = ?`,
+    ).run(id);
+    const second = await syncCcItemPage(env, id);
+    pause.release();
+    const firstResult = await first;
+
+    expect(second.status).toBe("live");
+    expect(firstResult.status).toBe("skipped");
+    const page = db.page(id)!;
+    const html = r2.text(String(page.r2_key))!;
+    expect(await sha256(html)).toBe(page.content_hash);
+    expect(String(page.r2_key)).toBe(
+      ccItemPageR2Key(id, String(page.content_hash)),
+    );
+    expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
+    expect(r2.objects.size).toBe(2);
+  });
+
+  it("reports no delete event when a concurrent actor already marked the page gone", async () => {
+    const { db, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow");
+    await syncCcItemPage(env, id);
+    db.setOverride(id, "deny");
+    db.beforeNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_pages SET status = 'gone' WHERE item_id = ?`,
+      ).run(id);
+    };
+
+    const result = await syncCcItemPage(env, id);
+
+    expect(result.status).toBe("gone");
+    expect(result.eventCreated).toBe(false);
+    expect(db.events(id).map((event) => event.op)).toEqual(["upsert"]);
+  });
 });
 
 describe("markCcItemPageGone", () => {
@@ -580,9 +777,11 @@ describe("markCcItemPageGone", () => {
     db.setOverride(id, "allow");
     await syncCcItemPage(env, id);
 
-    await markCcItemPageGone(env, id, "enrich-not-relevant");
-    await markCcItemPageGone(env, id, "enrich-not-relevant");
+    const first = await markCcItemPageGone(env, id, "enrich-not-relevant");
+    const second = await markCcItemPageGone(env, id, "enrich-not-relevant");
 
+    expect(first).toBe(true);
+    expect(second).toBe(false);
     expect(db.page(id)!.status).toBe("gone");
     expect(db.page(id)!.reason).toBe("enrich-not-relevant");
     expect(db.events(id).map((event) => event.op)).toEqual(["upsert", "delete"]);

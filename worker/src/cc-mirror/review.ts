@@ -35,6 +35,8 @@ export type CcPassSnapshot =
       ok: true;
       row: RenderRow;
       reviewTextHash: string;
+      sourcePolicy: Exclude<CcSourceDecision["policy"], "deny">;
+      passProvenance: Exclude<CcReviewResult["passProvenance"], null>;
     }
   | {
       ok: false;
@@ -454,6 +456,8 @@ export async function bindCcPassToCurrentRow(
     ok: true,
     row: candidate,
     reviewTextHash: currentHash,
+    sourcePolicy: sourceDecision.policy,
+    passProvenance,
   };
 }
 

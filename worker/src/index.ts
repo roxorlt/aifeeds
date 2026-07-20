@@ -957,7 +957,9 @@ export default {
         return handleImageProxy(request, 'video', env.CF_VERSION_METADATA?.id);
       }
       if (path.startsWith('/r/') && (request.method === 'GET' || request.method === 'HEAD')) {
-        return handleR2Asset(request, env, path.slice(3));
+        const r2Key = path.slice(3);
+        if (isPrivateCcPageKey(r2Key)) return privateR2NotFound();
+        return handleR2Asset(request, env, r2Key);
       }
       // ─── PH admin debug endpoints ──────────────────────────────
       // POST /api/admin/ph-fetch-now?force=1&pt_date=YYYY-MM-DD
@@ -5891,6 +5893,11 @@ function r2AssetHeaders(obj: R2Object): Headers {
 }
 
 async function handleR2Asset(request: Request, env: Env, key: string): Promise<Response> {
+  // `.cc` page versions are deliberately retained as private immutable objects
+  // so future HMAC sync/event replay can fetch historical hashes through the R2
+  // binding. They must never be exposed by the anonymous `/r/*` asset gateway,
+  // including requests with an empty/allowed Referer.
+  if (isPrivateCcPageKey(key)) return privateR2NotFound();
   if (!env.READMES) return new Response('R2 not configured', { status: 503 });
   if (!key) return new Response('missing key', { status: 400 });
 
@@ -5941,4 +5948,18 @@ async function handleR2Asset(request: Request, env: Env, key: string): Promise<R
   if (!obj) return new Response('not found', { status: 404 });
 
   return new Response(obj.body, { status: 200, headers: r2AssetHeaders(obj) });
+}
+
+function isPrivateCcPageKey(key: string): boolean {
+  return key.startsWith('cc-item-pages/');
+}
+
+function privateR2NotFound(): Response {
+  return new Response('not found', {
+    status: 404,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  });
 }
