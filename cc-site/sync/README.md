@@ -8,7 +8,8 @@
 
 | 路径 | 所有者与用途 |
 |---|---|
-| `/opt/aifeeds-cc-sync` | `root:root`，同步器代码与远端测试，只读 |
+| `/opt/aifeeds-cc-sync` | 指向 `/opt/aifeeds-cc-sync-releases/<manifest-sha256>/cc-site/sync` 的原子切换 symlink |
+| `/opt/aifeeds-cc-sync-releases` | `root:root` 的不可变 release；成功后保留当前与最近两个安全旧版本 |
 | `/etc/aifeeds/cc-sync.env` | `root:root 0600`，systemd 环境文件 |
 | `/var/lib/aifeeds-cc-sync` | `aifeeds-sync:www 0750`，state、锁与生成的归档/sitemap |
 | `/www/wwwroot/ai-feeds.cc/i` | `aifeeds-sync:www 0750`，唯一写入站点根的生成目录 |
@@ -48,8 +49,7 @@ node cc-site/sync/sync.mjs --full
 ```bash
 bash -n cc-site/sync/deploy-to-cc.sh
 bash -n cc-site/sync/install-remote.sh
-node --check cc-site/sync/sync.mjs
-node --check cc-site/sync/nginx-vhost-editor.mjs
+for file in cc-site/sync/*.mjs; do node --check "$file"; done
 node --test cc-site/sync/test/*.test.mjs
 ```
 
@@ -57,10 +57,11 @@ node --test cc-site/sync/test/*.test.mjs
 `aifeeds-sync` 用户重新运行全部测试。本地若不是 Node 18，只能说明当前本机 Node 版本的
 结果；Node 18 是远端部署的硬门。
 
-## 部署
+## 生产部署
 
-secret 的唯一来源仍是仓库根的 `.secrets/aifeeds-prod.env` 或
-`.secrets/aifeeds-staging.env`，其中单独设置：
+远端脚本只接受 `prod`；staging 验证只允许在本机临时目录构建 payload 和执行测试，
+不会连接或修改生产服务器。secret 的唯一来源是仓库根的
+`.secrets/aifeeds-prod.env`，其中单独设置：
 
 ```dotenv
 CC_SYNC_SECRET=<openssl rand -hex 32 的结果>
@@ -72,26 +73,44 @@ CC_SYNC_SECRET=<openssl rand -hex 32 的结果>
 systemd unit；本地和远端都有退出清理 trap。
 
 ```bash
-./cc-site/sync/deploy-to-cc.sh staging
 ./cc-site/sync/deploy-to-cc.sh prod
 ```
 
+本地构建器只复制 `payload-files.txt` 的精确 allowlist，并保持仓库内的
+`cc-site/...` 相对路径。payload 不含 `cc-site/server`、`.env*`、`.secrets`
+或其他未声明文件；环境文件单独位于 `deploy/cc-sync.env`。路径排序的
+`MANIFEST.sha256` 同时约束文件集合和内容，额外文件、symlink、hardlink 或摘要不符
+都会拒绝部署。
+
 远端顺序固定为：
 
-1. 停止并禁用旧 timer，创建专用 system user 和权限目录；
-2. 安装 root-owned 代码、unit 与 `0600` 环境文件；
-3. 检查 Node 18+，以同步用户运行 Node 测试；
-4. 手动启动一次 oneshot service；
-5. 从 `nginx -T` 检测真实 worker user（当前必须精确为 `www`），验证它可读 current、
-   current archive sitemap 和根 sitemap 实际引用的 generation 文件；
-6. 对现有宝塔 vhost 做 marker-managed include，不覆盖整个 vhost；
-7. `nginx -t` 成功后 reload，再对公开归档和 sitemap 做 HTTPS smoke；
-8. 最后才 `enable --now` timer。
+1. 将 installer 和所有事务 helper 固定到唯一、root-owned 的
+   `/var/tmp/aifeeds-cc-bootstrap.*`，逐个核对 SHA-256 后才执行；
+2. 获取非阻塞部署锁，把 staging 复制成 root-owned snapshot，并在改动 live state 前
+   两次验证 manifest、文件类型和 link count；
+3. 验证系统账号、所有 managed path 的 owner/mode/目录链和现有 `/i` inode tree，
+   检查 Node 18+，再以 `aifeeds-sync` 用户运行 payload 内的真实完整测试；
+4. 记录旧 symlink、env、unit 及 timer/service 的 enabled/active 状态，停止旧任务；
+5. 创建以 manifest digest 命名的不可变 release，原子切换
+   `/opt/aifeeds-cc-sync`，并用同目录临时文件、fsync、rename 安装 env 与 unit；
+6. 手动启动一次 oneshot service，从 `nginx -T` 检测真实 worker user（必须精确为
+   `www`），验证它可读 current、AI 新闻首页及根 sitemap 引用的 generation shard；
+7. 通过 compare-and-swap 事务安装 marker-managed include 和 snippet；若宝塔在准备、
+   提交或回滚期间改写 vhost，部署 fail closed，绝不覆盖并发面板内容；
+8. `nginx -t` 成功后 reload，并通过
+   `--resolve ai-feeds.cc:443:127.0.0.1` 直接命中本机 HTTPS：根 sitemap、
+   generation shard、`/ai-news/` 都必须精确返回 HTTP 200，且响应字节必须与刚发布
+   的文件完全一致；
+9. 最后才 `enable --now` timer；部署提交后仅清理经过 owner/mode/type/link
+   验证的旧 release，保留当前与最近两个安全版本，异常目录只跳过、不跟随。
 
 vhost editor 只修改唯一的 `listen 443` + `server_name ai-feeds.cc` server block，并保留
-HTTP 神马验证例外、`/auth/wechat/` 和其他业务 location。若 HTTPS server 不唯一、marker
-不完整或已有 unmanaged include，部署会 fail closed。Nginx 配置测试、reload、公开 smoke
-或 timer 激活失败时，脚本恢复部署前的 vhost/snippet，并再次加载旧配置。
+HTTP 神马验证例外、`/auth/wechat/` 和其他业务 location。HTTPS block 必须有且只有一个
+顶层 `#REWRITE-END`，managed include 必须位于所有顶层 regex location 之前。若 server
+不唯一、marker 不完整/错序或已有 unmanaged include，部署会 fail closed。测试、service、
+Nginx 配置、reload、精确内容探针或 timer 激活失败时，脚本事务恢复旧 release symlink、
+env、unit、service/timer 状态和未发生并发冲突的 vhost/snippet；任何回滚步骤失败时明确
+返回 70。
 
 ## 运维与回滚
 
@@ -100,6 +119,19 @@ sudo systemctl status aifeeds-cc-sync.timer
 sudo systemctl start aifeeds-cc-sync.service
 sudo journalctl -u aifeeds-cc-sync.service -n 100
 ```
+
+首次 bootstrap 可能需要处理三万多个页面。service 的 `TimeoutStartSec=2h`；同步器在
+state 目录持久化冻结 watermark、item cursor、固定 request limit 和已校验 pending page，
+每批提交后都可续跑。若网络、进程退出或两小时超时中断，不要删除
+`/var/lib/aifeeds-cc-sync`，直接再次执行：
+
+```bash
+sudo systemctl start aifeeds-cc-sync.service
+sudo journalctl -fu aifeeds-cc-sync.service
+```
+
+后续 timer 也会从持久化 cursor 继续。只有明确要从零重建且已经制定数据恢复方案时，才
+考虑清理 state；普通失败不需要重新传三万页，也不应手工改写 `public/current`。
 
 紧急停更：
 

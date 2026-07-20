@@ -126,31 +126,73 @@ function canonicalManagedBlock(indent) {
   ].join('\n');
 }
 
-function newManagedBlockInsertion(source, target) {
+function depthAt(view, offset) {
+  let depth = 0;
+  for (let index = 0; index < offset; index += 1) {
+    if (view[index] === '{') depth += 1;
+    if (view[index] === '}') depth -= 1;
+  }
+  return depth;
+}
+
+function topLevelRegexLocations(block) {
+  const view = structuralView(block);
+  const offsets = [];
+  let depth = 0;
+  for (let index = 0; index < view.length;) {
+    if (view[index] === '{') {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (view[index] === '}') {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && view.startsWith('location', index)) {
+      const before = index === 0 ? ' ' : view[index - 1];
+      const after = view[index + 'location'.length] ?? ' ';
+      if (!/[A-Za-z0-9_-]/.test(before) && /\s/.test(after)) {
+        let modifier = index + 'location'.length;
+        while (/\s/.test(view[modifier] ?? '')) modifier += 1;
+        if (view[modifier] === '~') offsets.push(index);
+      }
+    }
+    index += 1;
+  }
+  return offsets;
+}
+
+function rewriteContract(source, target) {
   const targetBody = source.slice(target.open + 1, target.close);
   const rewriteMarkers = [...targetBody.matchAll(/^[ \t]*#REWRITE-END[ \t]*$/gm)];
-  if (rewriteMarkers.length > 1) {
-    throw new Error('ambiguous Nginx rewrite marker');
+  const view = structuralView(targetBody);
+  if (
+    rewriteMarkers.length !== 1
+    || depthAt(view, rewriteMarkers[0].index) !== 0
+  ) {
+    throw new Error('expected exactly one top-level Nginx rewrite marker');
   }
-  if (rewriteMarkers.length === 1) {
-    const marker = rewriteMarkers[0];
-    const markerStart = target.open + 1 + marker.index;
-    const markerLineEnd = source.indexOf('\n', markerStart);
-    if (markerLineEnd === -1 || markerLineEnd >= target.close) {
-      throw new Error('invalid Nginx rewrite marker placement');
-    }
-    const indent = marker[0].match(/^[ \t]*/)[0];
-    return {
-      index: markerLineEnd + 1,
-      contents: `${canonicalManagedBlock(indent)}\n`,
-    };
+  const marker = rewriteMarkers[0];
+  const markerStart = target.open + 1 + marker.index;
+  const regexLocations = topLevelRegexLocations(targetBody)
+    .map((offset) => target.open + 1 + offset);
+  if (regexLocations.some((offset) => offset < markerStart)) {
+    throw new Error('rewrite marker must precede every top-level regex location');
   }
+  return { marker, markerStart, regexLocations };
+}
 
-  const lineStart = source.lastIndexOf('\n', target.close - 1) + 1;
-  const closeIndent = source.slice(lineStart, target.close).match(/^\s*/)[0];
+function newManagedBlockInsertion(source, target, contract) {
+  const markerLineEnd = source.indexOf('\n', contract.markerStart);
+  if (markerLineEnd === -1 || markerLineEnd >= target.close) {
+    throw new Error('invalid Nginx rewrite marker placement');
+  }
+  const indent = contract.marker[0].match(/^[ \t]*/)[0];
   return {
-    index: lineStart,
-    contents: `${canonicalManagedBlock(`${closeIndent}    `)}\n`,
+    index: markerLineEnd + 1,
+    contents: `${canonicalManagedBlock(indent)}\n`,
   };
 }
 
@@ -166,6 +208,7 @@ export function injectManagedInclude(source) {
     throw new Error('expected exactly one HTTPS ai-feeds.cc server block');
   }
   const target = targets[0];
+  const contract = rewriteContract(source, target);
   const beginCount = countOccurrences(source, BEGIN);
   const endCount = countOccurrences(source, END);
   if (beginCount !== endCount || beginCount > 1) {
@@ -176,7 +219,7 @@ export function injectManagedInclude(source) {
     if (source.includes(INCLUDE)) {
       throw new Error('unmanaged content mirror include');
     }
-    const insertion = newManagedBlockInsertion(source, target);
+    const insertion = newManagedBlockInsertion(source, target, contract);
     return (
       source.slice(0, insertion.index)
       + insertion.contents
@@ -196,6 +239,12 @@ export function injectManagedInclude(source) {
     || endIndex < beginIndex
   ) {
     throw new Error('managed include is outside the HTTPS site block');
+  }
+  if (
+    beginIndex < contract.markerStart
+    || contract.regexLocations.some((offset) => offset < beginIndex)
+  ) {
+    throw new Error('managed include must precede every top-level regex location');
   }
   const blockLineStart = source.lastIndexOf('\n', beginIndex - 1) + 1;
   const afterEnd = source.indexOf('\n', endIndex);

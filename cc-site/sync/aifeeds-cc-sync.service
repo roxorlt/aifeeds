@@ -11,6 +11,7 @@ UMask=0027
 WorkingDirectory=/opt/aifeeds-cc-sync
 EnvironmentFile=/etc/aifeeds/cc-sync.env
 ExecStart=/usr/bin/node /opt/aifeeds-cc-sync/sync.mjs
+TimeoutStartSec=2h
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
