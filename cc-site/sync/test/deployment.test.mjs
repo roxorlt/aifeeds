@@ -749,8 +749,11 @@ async function remoteDeployHarness({
   existingSnippet = null,
   priorDeployment = false,
   serviceActive = false,
+  serviceState = serviceActive ? 'active' : 'inactive',
   timerActive = false,
+  timerState = timerActive ? 'active' : 'inactive',
   timerEnabled = false,
+  timerEnabledState = timerEnabled ? 'enabled' : 'disabled',
 } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cc-deploy-remote-'));
   const fakeBin = path.join(root, 'fake-bin');
@@ -764,8 +767,10 @@ async function remoteDeployHarness({
   const payloadTestProof = path.join(root, 'payload-tests-ran');
   await mkdir(fakeBin, { recursive: true });
   await mkdir(systemctlState);
+  await mkdir(path.join(root, 'run'), { mode: 0o755 });
   await writeFile(log, '');
   await mkdir(path.dirname(stage), { recursive: true });
+  await mkdir(path.join(root, 'var', 'lib'), { recursive: true });
   await mkdir(siteRoot, { recursive: true });
   await mkdir(vhostDir, { recursive: true });
   await writeFile(path.join(siteRoot, 'sitemap-static.xml'), '<urlset/>\n');
@@ -819,9 +824,15 @@ async function remoteDeployHarness({
     await writeFile(path.join(unitDir, 'aifeeds-cc-sync.service'), 'OLD_SERVICE\n');
     await writeFile(path.join(unitDir, 'aifeeds-cc-sync.timer'), 'OLD_TIMER\n');
   }
-  if (timerEnabled) await writeFile(path.join(systemctlState, 'timer-enabled'), '1');
-  if (timerActive) await writeFile(path.join(systemctlState, 'timer-active'), '1');
-  if (serviceActive) await writeFile(path.join(systemctlState, 'service-active'), '1');
+  if (timerEnabledState !== 'disabled') {
+    await writeFile(path.join(systemctlState, 'timer-enabled'), `${timerEnabledState}\n`);
+  }
+  if (timerState !== 'inactive') {
+    await writeFile(path.join(systemctlState, 'timer-active'), `${timerState}\n`);
+  }
+  if (serviceState !== 'inactive') {
+    await writeFile(path.join(systemctlState, 'service-active'), `${serviceState}\n`);
+  }
 
   await executable(path.join(fakeBin, 'install'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -850,11 +861,12 @@ printf '\n' >> "$AIFEEDS_HARNESS_LOG"
 `);
   await executable(path.join(fakeBin, 'getent'), `#!/usr/bin/env bash
 if [[ "$*" == 'passwd www' ]]; then
-  printf 'www:x:1000:1000::/nonexistent:/sbin/nologin\n'
+  printf 'www:x:%s:%s::/nonexistent:/sbin/nologin\n' \
+    "$AIFEEDS_ROOT_UID" "$AIFEEDS_ROOT_GID"
   exit 0
 fi
 if [[ "$*" == 'group www' ]]; then
-  printf 'www:x:1000:\n'
+  printf 'www:x:%s:\n' "$AIFEEDS_ROOT_GID"
   exit 0
 fi
 if [[ "$*" == 'passwd aifeeds-sync' && -n "\${AIFEEDS_SYNC_PASSWD:-}" ]]; then
@@ -862,11 +874,20 @@ if [[ "$*" == 'passwd aifeeds-sync' && -n "\${AIFEEDS_SYNC_PASSWD:-}" ]]; then
   exit 0
 fi
 if [[ "$*" == 'passwd aifeeds-sync' && -f "$AIFEEDS_DEPLOY_ROOT/user-created" ]]; then
-  printf 'aifeeds-sync:x:998:1000::/nonexistent:/sbin/nologin\n'
+  printf 'aifeeds-sync:x:%s:%s::/nonexistent:/sbin/nologin\n' \
+    "$AIFEEDS_ROOT_UID" "$AIFEEDS_ROOT_GID"
   exit 0
 fi
 if [[ "$*" == 'passwd aifeeds-sync' ]]; then exit 2; fi
 exit 2
+`);
+  await executable(path.join(fakeBin, 'userdel'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'userdel' >> "$AIFEEDS_HARNESS_LOG"
+printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
+printf '\n' >> "$AIFEEDS_HARNESS_LOG"
+[[ "\${AIFEEDS_USERDEL_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_USERDEL_EXIT"
+rm -f "$AIFEEDS_DEPLOY_ROOT/user-created"
 `);
   await executable(path.join(fakeBin, 'runuser'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -906,40 +927,102 @@ printf 'systemctl' >> "$AIFEEDS_HARNESS_LOG"
 printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
 printf '\n' >> "$AIFEEDS_HARNESS_LOG"
 state="$AIFEEDS_DEPLOY_ROOT/systemctl-state"
+unit_dir="$AIFEEDS_DEPLOY_ROOT/etc/systemd/system"
+read_state() {
+  local file=$1
+  local fallback=$2
+  if [[ -f "$file" ]]; then
+    tr -d '\n' < "$file"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+load_state() {
+  local unit=$1
+  local override=$2
+  if [[ -n "$override" ]]; then
+    printf '%s\n' "$override"
+  elif [[ -f "$unit_dir/$unit" ]]; then
+    printf 'loaded\n'
+  else
+    printf 'not-found\n'
+  fi
+}
 case "$*" in
+  'show --property=LoadState --value aifeeds-cc-sync.service')
+    [[ "\${AIFEEDS_SYSTEMCTL_SHOW_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_SYSTEMCTL_SHOW_EXIT"
+    load_state aifeeds-cc-sync.service "\${AIFEEDS_SERVICE_LOAD_STATE:-}" ;;
+  'show --property=LoadState --value aifeeds-cc-sync.timer')
+    [[ "\${AIFEEDS_SYSTEMCTL_SHOW_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_SYSTEMCTL_SHOW_EXIT"
+    load_state aifeeds-cc-sync.timer "\${AIFEEDS_TIMER_LOAD_STATE:-}" ;;
   'is-enabled aifeeds-cc-sync.timer')
-    [[ -e "$state/timer-enabled" ]] && { printf 'enabled\n'; exit 0; }
-    printf 'disabled\n'; exit 1 ;;
+    if [[ -f "$state/timer-enabled" ]]; then
+      enabled=$(read_state "$state/timer-enabled" disabled)
+    elif [[ -f "$unit_dir/aifeeds-cc-sync.timer" ]]; then
+      enabled=disabled
+    else
+      enabled=not-found
+    fi
+    printf '%s\n' "$enabled"
+    case "$enabled" in
+      enabled) exit 0 ;;
+      disabled|masked) exit 1 ;;
+      not-found) exit 4 ;;
+      static|enabled-runtime) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   'is-active aifeeds-cc-sync.timer')
-    [[ -e "$state/timer-active" ]] && { printf 'active\n'; exit 0; }
-    printf 'inactive\n'; exit 3 ;;
+    active=$(read_state "$state/timer-active" inactive)
+    printf '%s\n' "$active"
+    case "$active" in
+      active|activating|deactivating) exit 0 ;;
+      inactive|failed) exit 3 ;;
+      *) exit 4 ;;
+    esac ;;
   'is-active aifeeds-cc-sync.service')
-    [[ -e "$state/service-active" ]] && { printf 'active\n'; exit 0; }
-    printf 'inactive\n'; exit 3 ;;
-  'disable --now aifeeds-cc-sync.timer')
-    rm -f "$state/timer-enabled" "$state/timer-active"; exit 0 ;;
+    active=$(read_state "$state/service-active" inactive)
+    printf '%s\n' "$active"
+    case "$active" in
+      active|activating|deactivating) exit 0 ;;
+      inactive|failed) exit 3 ;;
+      *) exit 4 ;;
+    esac ;;
   'disable aifeeds-cc-sync.timer')
+    [[ "\${AIFEEDS_TIMER_DISABLE_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_DISABLE_EXIT"
     rm -f "$state/timer-enabled"; exit 0 ;;
   'enable aifeeds-cc-sync.timer')
-    : > "$state/timer-enabled"; exit 0 ;;
+    printf 'enabled\n' > "$state/timer-enabled"; exit 0 ;;
   'enable --now aifeeds-cc-sync.timer')
     [[ "\${AIFEEDS_TIMER_ENABLE_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_ENABLE_EXIT"
-    : > "$state/timer-enabled"; : > "$state/timer-active"; exit 0 ;;
+    printf 'enabled\n' > "$state/timer-enabled"
+    printf 'active\n' > "$state/timer-active"
+    exit 0 ;;
   'stop aifeeds-cc-sync.timer')
+    [[ "\${AIFEEDS_TIMER_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_STOP_EXIT"
     rm -f "$state/timer-active"; exit 0 ;;
   'start aifeeds-cc-sync.timer')
-    : > "$state/timer-active"; exit 0 ;;
+    printf 'active\n' > "$state/timer-active"; exit 0 ;;
   'stop aifeeds-cc-sync.service')
+    [[ "\${AIFEEDS_SERVICE_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_SERVICE_STOP_EXIT"
     rm -f "$state/service-active"; exit 0 ;;
 esac
 if [[ "$*" == 'start aifeeds-cc-sync.service' ]]; then
   count_file="$state/service-start-count"
   count=0; [[ ! -f "$count_file" ]] || read -r count < "$count_file"
   count=$((count + 1)); printf '%s\n' "$count" > "$count_file"
+  if [[ "$count" == 1 && -n "\${AIFEEDS_OPERATOR_MUTATE_RELATIVE_PATH:-}" ]]; then
+    printf 'operator mutation\n' \
+      > "$AIFEEDS_DEPLOY_ROOT/$AIFEEDS_OPERATOR_MUTATE_RELATIVE_PATH"
+  fi
+  if [[ "$count" == 1 && -n "\${AIFEEDS_OPERATOR_MUTATE_OPT_TARGET:-}" ]]; then
+    rm -f "$AIFEEDS_DEPLOY_ROOT/opt/aifeeds-cc-sync"
+    ln -s "$AIFEEDS_OPERATOR_MUTATE_OPT_TARGET" \
+      "$AIFEEDS_DEPLOY_ROOT/opt/aifeeds-cc-sync"
+  fi
   if [[ "$count" == 1 && "\${AIFEEDS_SERVICE_START_EXIT:-0}" != 0 ]]; then
     exit "$AIFEEDS_SERVICE_START_EXIT"
   fi
-  : > "$state/service-active"
+  printf 'active\n' > "$state/service-active"
   generation='123e4567-e89b-42d3-a456-426614174000'
   state="$AIFEEDS_DEPLOY_ROOT/var/lib/aifeeds-cc-sync/public"
   mkdir -p "$state/generations/$generation/sitemaps" "$state/generations/$generation/ai-news"
@@ -1041,6 +1124,7 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
       AIFEEDS_INSTALL: path.join(fakeBin, 'install'),
       AIFEEDS_CHOWN: path.join(fakeBin, 'chown'),
       AIFEEDS_USERADD: path.join(fakeBin, 'useradd'),
+      AIFEEDS_USERDEL: path.join(fakeBin, 'userdel'),
       AIFEEDS_GETENT: path.join(fakeBin, 'getent'),
       AIFEEDS_RUNUSER: path.join(fakeBin, 'runuser'),
       AIFEEDS_NODE_BIN: path.join(fakeBin, 'node'),
@@ -1059,6 +1143,7 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
     siteRoot,
     snippet,
     stage,
+    stagedEnv,
     systemctlState,
     vhost,
   };
@@ -1139,6 +1224,49 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
   assert.equal(output.includes('c'.repeat(64)), false);
 });
 
+remoteHarnessTest('deployment lock refuses prepositioned links and non-regular files without touching shared paths', async (t) => {
+  for (const kind of ['symlink', 'directory']) {
+    await t.test(kind, async () => {
+      const harness = await remoteDeployHarness();
+      const run = path.join(harness.root, 'run');
+      const sharedLock = path.join(run, 'lock');
+      const privateLock = path.join(run, 'aifeeds-cc-sync-deploy');
+      const lockFile = path.join(privateLock, 'deployment.lock');
+      await mkdir(sharedLock, { recursive: true, mode: 0o755 });
+      await chmod(sharedLock, 0o755);
+      await mkdir(privateLock, { mode: 0o700 });
+      const outside = path.join(harness.root, 'outside-lock-target');
+      await writeFile(outside, 'do-not-truncate\n', { mode: 0o600 });
+      if (kind === 'symlink') {
+        await symlink(outside, lockFile);
+      } else {
+        await mkdir(lockFile);
+      }
+      const sharedMode = (await stat(sharedLock)).mode & 0o777;
+
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        {
+          ...harness.env,
+          AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+          AIFEEDS_NODE_TEST_EXIT: '44',
+        },
+      );
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /deployment lock.*regular|lock.*unsafe/i);
+      assert.equal(await readFile(outside, 'utf8'), 'do-not-truncate\n');
+      assert.equal((await stat(sharedLock)).mode & 0o777, sharedMode);
+      assert.doesNotMatch(await readFile(harness.log, 'utf8'), /node <--test>/);
+      await assert.rejects(
+        stat(path.join(harness.root, 'var', 'lock', 'aifeeds-cc-sync-deploy.lock')),
+        /ENOENT/,
+      );
+    });
+  }
+});
+
 remoteHarnessTest('remote installer holds a nonblocking deployment lock without changing live state', async () => {
   const harness = await remoteDeployHarness();
   const installer = path.join(SYNC_DIR, 'install-remote.sh');
@@ -1180,6 +1308,104 @@ remoteHarnessTest('remote installer holds a nonblocking deployment lock without 
     new Promise((resolve) => first.stderr.resume().once('end', resolve)),
   ]);
   assert.equal(firstExit, 44);
+});
+
+remoteHarnessTest('remote installer replaces an incomplete non-live release left by a killed legacy install', async () => {
+  const harness = await remoteDeployHarness();
+  const releases = path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases');
+  const incomplete = path.join(releases, harness.manifestDigest);
+  const staleStage = path.join(
+    releases,
+    `.stage.${harness.manifestDigest}.123e4567-e89b-42d3-a456-426614174000`,
+  );
+  await mkdir(path.join(incomplete, 'cc-site', 'sync'), { recursive: true });
+  await writeFile(path.join(incomplete, 'cc-site', 'sync', 'partial.mjs'), 'partial\n');
+  await mkdir(staleStage);
+  await writeFile(path.join(staleStage, 'partial'), 'stale\n');
+
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+  );
+  assert.equal(
+    (await stat(path.join(incomplete, 'cc-site', 'sync', 'sync.mjs'))).isFile(),
+    true,
+  );
+  await assert.rejects(stat(path.join(incomplete, 'cc-site', 'sync', 'partial.mjs')), /ENOENT/);
+  await assert.rejects(stat(staleStage), /ENOENT/);
+});
+
+remoteHarnessTest('redeploying the same verified manifest safely reuses its immutable release', async () => {
+  const harness = await remoteDeployHarness();
+  const installer = path.join(SYNC_DIR, 'install-remote.sh');
+  const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+  const first = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+  });
+  assert.equal(first.status, 0, first.stderr);
+  const release = path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+    harness.manifestDigest,
+  );
+  const releaseIdentity = await stat(release);
+
+  await buildPayload({
+    envFile: harness.stagedEnv,
+    payload: harness.stage,
+    repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+  });
+  const second = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+  });
+
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal((await stat(release)).ino, releaseIdentity.ino);
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+  );
+});
+
+remoteHarnessTest('a damaged live release fails closed without replacement', async () => {
+  const harness = await remoteDeployHarness();
+  const release = path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+    harness.manifestDigest,
+  );
+  await mkdir(path.join(release, 'cc-site', 'sync'), { recursive: true });
+  const proof = path.join(release, 'cc-site', 'sync', 'damaged-live.txt');
+  await writeFile(proof, 'operator proof\n');
+  await symlink(
+    `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+    path.join(harness.root, 'opt', 'aifeeds-cc-sync'),
+  );
+
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /live release.*damaged|damaged live release/i);
+  assert.equal(await readFile(proof, 'utf8'), 'operator proof\n');
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+  );
 });
 
 remoteHarnessTest('remote installer propagates service failure before changing Nginx', async () => {
@@ -1231,6 +1457,143 @@ remoteHarnessTest('remote installer propagates service failure before changing N
   );
 });
 
+remoteHarnessTest('a running old service that cannot stop leaves all live deployment state untouched', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+    timerEnabledState: 'enabled',
+    timerState: 'active',
+  });
+  const oldEnv = await readFile(
+    path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'),
+    'utf8',
+  );
+  const oldService = await readFile(
+    path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.service'),
+    'utf8',
+  );
+  const oldTimer = await readFile(
+    path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.timer'),
+    'utf8',
+  );
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      AIFEEDS_SERVICE_STOP_EXIT: '31',
+    },
+  );
+
+  assert.equal(result.status, 31, result.stderr);
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    `aifeeds-cc-sync-releases/${harness.oldReleaseId}/cc-site/sync`,
+  );
+  assert.equal(
+    await readFile(path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'), 'utf8'),
+    oldEnv,
+  );
+  assert.equal(
+    await readFile(
+      path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.service'),
+      'utf8',
+    ),
+    oldService,
+  );
+  assert.equal(
+    await readFile(
+      path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.timer'),
+      'utf8',
+    ),
+    oldTimer,
+  );
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+    'active\n',
+  );
+  await assert.rejects(
+    stat(path.join(
+      harness.root,
+      'opt',
+      'aifeeds-cc-sync-releases',
+      harness.manifestDigest,
+    )),
+    /ENOENT/,
+  );
+  assert.doesNotMatch(
+    await readFile(harness.log, 'utf8'),
+    /switch-symlink|deployment-file-transaction\.mjs> <install>/,
+  );
+});
+
+remoteHarnessTest('unsupported systemd states fail closed before tests or live writes', async () => {
+  const scenarios = [
+    {
+      name: 'masked service load',
+      harness: { priorDeployment: true },
+      env: { AIFEEDS_SERVICE_LOAD_STATE: 'masked' },
+    },
+    {
+      name: 'masked timer load',
+      harness: { priorDeployment: true },
+      env: { AIFEEDS_TIMER_LOAD_STATE: 'masked' },
+    },
+    {
+      name: 'runtime-enabled timer',
+      harness: { priorDeployment: true, timerEnabledState: 'enabled-runtime' },
+      env: {},
+    },
+    {
+      name: 'static timer',
+      harness: { priorDeployment: true, timerEnabledState: 'static' },
+      env: {},
+    },
+    {
+      name: 'failed service',
+      harness: { priorDeployment: true, serviceState: 'failed' },
+      env: {},
+    },
+    {
+      name: 'deactivating service',
+      harness: { priorDeployment: true, serviceState: 'deactivating' },
+      env: {},
+    },
+    {
+      name: 'failed timer',
+      harness: { priorDeployment: true, timerState: 'failed' },
+      env: {},
+    },
+  ];
+  for (const scenario of scenarios) {
+    const harness = await remoteDeployHarness(scenario.harness);
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        ...scenario.env,
+        AIFEEDS_NODE_TEST_EXIT: '45',
+      },
+    );
+    assert.notEqual(result.status, 0, scenario.name);
+    assert.match(result.stderr, /unsupported systemd state|unable to query systemd/i);
+    const commandLog = await readFile(harness.log, 'utf8');
+    assert.doesNotMatch(commandLog, /node <--test>/, scenario.name);
+    assert.doesNotMatch(
+      commandLog,
+      /switch-symlink|deployment-file-transaction\.mjs> <install>/,
+      scenario.name,
+    );
+    assert.equal(
+      await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+      `aifeeds-cc-sync-releases/${harness.oldReleaseId}/cc-site/sync`,
+      scenario.name,
+    );
+  }
+});
+
 remoteHarnessTest('a failed first install leaves no live code, unit, env, or timer state', async () => {
   const harness = await remoteDeployHarness();
   const result = runBash(
@@ -1242,7 +1605,7 @@ remoteHarnessTest('a failed first install leaves no live code, unit, env, or tim
       AIFEEDS_SERVICE_START_EXIT: '19',
     },
   );
-  assert.equal(result.status, 19);
+  assert.equal(result.status, 19, result.stderr);
   for (const absent of [
     path.join(harness.root, 'opt', 'aifeeds-cc-sync'),
     path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases', harness.manifestDigest),
@@ -1251,9 +1614,71 @@ remoteHarnessTest('a failed first install leaves no live code, unit, env, or tim
     path.join(harness.root, 'etc', 'systemd', 'system', 'aifeeds-cc-sync.timer'),
     path.join(harness.systemctlState, 'timer-enabled'),
     path.join(harness.systemctlState, 'timer-active'),
+    path.join(harness.root, 'user-created'),
+    path.join(harness.root, 'var', 'lib', 'aifeeds-cc-sync'),
+    path.join(harness.siteRoot, 'i'),
   ]) {
     await assert.rejects(stat(absent), /ENOENT/, absent);
   }
+});
+
+remoteHarnessTest('a newly-created sync account is removed after managed path validation fails', async () => {
+  const harness = await remoteDeployHarness();
+  const outside = path.join(harness.root, 'outside-release-parent');
+  await mkdir(outside);
+  await mkdir(path.join(harness.root, 'opt'), { recursive: true });
+  await symlink(outside, path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases'));
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+  );
+  assert.notEqual(result.status, 0);
+  await assert.rejects(stat(path.join(harness.root, 'user-created')), /ENOENT/);
+  await assert.rejects(stat(path.join(harness.root, 'var', 'lib', 'aifeeds-cc-sync')), /ENOENT/);
+  await assert.rejects(stat(path.join(harness.siteRoot, 'i')), /ENOENT/);
+  assert.match(await readFile(harness.log, 'utf8'), /userdel <aifeeds-sync>/);
+});
+
+remoteHarnessTest('existing managed roots with wrong mode or owner are rejected unchanged', async (t) => {
+  await t.test('wrong item-root mode', async () => {
+    const harness = await remoteDeployHarness();
+    const itemRoot = path.join(harness.siteRoot, 'i');
+    await mkdir(itemRoot, { mode: 0o750 });
+    await chmod(itemRoot, 0o770);
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+    );
+    assert.notEqual(result.status, 0);
+    assert.equal((await stat(itemRoot)).mode & 0o777, 0o770);
+    const log = await readFile(harness.log, 'utf8');
+    assert.doesNotMatch(log, /chown <-R>.*\/i>|chmod.*\/i/);
+  });
+
+  await t.test('wrong state-root owner', async () => {
+    const harness = await remoteDeployHarness();
+    const stateRoot = path.join(harness.root, 'var', 'lib', 'aifeeds-cc-sync');
+    await mkdir(stateRoot, { recursive: true, mode: 0o750 });
+    const before = await stat(stateRoot);
+    const wrongUid = process.getuid() === 997 ? 996 : 997;
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_SYNC_PASSWD:
+          `aifeeds-sync:x:${wrongUid}:${process.getgid()}::/nonexistent:/sbin/nologin`,
+      },
+    );
+    assert.notEqual(result.status, 0);
+    const after = await stat(stateRoot);
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+    assert.equal(after.mode & 0o777, before.mode & 0o777);
+  });
 });
 
 remoteHarnessTest('rollback restores independent timer and service states exactly', async () => {
@@ -1282,6 +1707,99 @@ remoteHarnessTest('rollback restores independent timer and service states exactl
   assert.equal((await stat(path.join(harness.systemctlState, 'service-active'))).isFile(), true);
 });
 
+remoteHarnessTest('rollback restarts an old oneshot that was still activating', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'activating',
+    timerEnabledState: 'enabled',
+  });
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      AIFEEDS_TIMER_ENABLE_EXIT: '23',
+    },
+  );
+  assert.equal(result.status, 23, result.stderr);
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+    'active\n',
+  );
+  assert.equal(
+    (await readFile(harness.log, 'utf8').then(
+      (value) => value.match(/systemctl <start> <aifeeds-cc-sync\.service>/g) ?? [],
+    )).length,
+    2,
+  );
+});
+
+remoteHarnessTest('rollback preserves concurrent operator changes to candidate live files', async (t) => {
+  const scenarios = [
+    {
+      name: 'environment',
+      relative: 'etc/aifeeds/cc-sync.env',
+    },
+    {
+      name: 'service unit',
+      relative: 'etc/systemd/system/aifeeds-cc-sync.service',
+    },
+    {
+      name: 'timer unit',
+      relative: 'etc/systemd/system/aifeeds-cc-sync.timer',
+    },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const harness = await remoteDeployHarness({
+        priorDeployment: true,
+        serviceState: 'active',
+      });
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        {
+          ...harness.env,
+          AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+          AIFEEDS_OPERATOR_MUTATE_RELATIVE_PATH: scenario.relative,
+          AIFEEDS_SERVICE_START_EXIT: '17',
+        },
+      );
+      assert.equal(result.status, 70, result.stderr);
+      assert.equal(
+        await readFile(path.join(harness.root, scenario.relative), 'utf8'),
+        'operator mutation\n',
+      );
+      assert.match(result.stderr, /rollback conflict/i);
+    });
+  }
+});
+
+remoteHarnessTest('rollback preserves a concurrent operator change to the live code link', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+  });
+  const operatorTarget = 'operator-managed-release/cc-site/sync';
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      AIFEEDS_OPERATOR_MUTATE_OPT_TARGET: operatorTarget,
+      AIFEEDS_SERVICE_START_EXIT: '17',
+    },
+  );
+  assert.equal(result.status, 70, result.stderr);
+  assert.equal(
+    await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+    operatorTarget,
+  );
+  assert.match(result.stderr, /rollback conflict/i);
+});
+
 remoteHarnessTest('managed path symlinks and item hardlinks cannot modify outside inodes', async (t) => {
   await t.test('release parent symlink', async () => {
     const harness = await remoteDeployHarness();
@@ -1303,7 +1821,7 @@ remoteHarnessTest('managed path symlinks and item hardlinks cannot modify outsid
     const harness = await remoteDeployHarness();
     const itemRoot = path.join(harness.siteRoot, 'i');
     const outside = path.join(harness.root, 'outside-item.html');
-    await mkdir(itemRoot);
+    await mkdir(itemRoot, { mode: 0o750 });
     await writeFile(outside, 'outside\n', { mode: 0o600 });
     await link(outside, path.join(itemRoot, 'hardlink.html'));
     const beforeMode = (await stat(outside)).mode & 0o777;
@@ -1364,7 +1882,8 @@ remoteHarnessTest('remote installer rolls back the managed include and snippet w
   assert.equal(await readFile(harness.snippet, 'utf8'), oldSnippet);
   const commandLog = await readFile(harness.log, 'utf8');
   assert.ok((commandLog.match(/nginx <-t>/g) ?? []).length >= 2, commandLog);
-  assert.match(commandLog, /systemctl <disable> <--now> <aifeeds-cc-sync.timer>/);
+  assert.match(commandLog, /systemctl <stop> <aifeeds-cc-sync.service>/);
+  assert.doesNotMatch(commandLog, /systemctl <disable> <aifeeds-cc-sync.timer>/);
 });
 
 remoteHarnessTest('Nginx reload failure restores the prior config', async () => {

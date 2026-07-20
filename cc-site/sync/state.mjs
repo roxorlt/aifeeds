@@ -925,7 +925,7 @@ export async function saveState(
 
   let handle;
   try {
-    handle = await open(tempPath, TEMP_OPEN_FLAGS, 0o600);
+    handle = await open(tempPath, TEMP_OPEN_FLAGS, 0o640);
     await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`);
     await hooks.afterTempWrite?.(tempPath);
     await handle.sync();

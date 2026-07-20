@@ -69,11 +69,13 @@ export async function atomicInstall({ destination, gid, mode, source, uid }) {
   const directory = path.dirname(destination);
   const temporary = path.join(directory, `.aifeeds-install.${randomUUID()}`);
   const handle = await open(temporary, 'wx', mode);
+  let candidateIdentity;
   try {
     await handle.writeFile(bytes);
     await handle.chmod(mode);
     await handle.chown(uid, gid);
     await handle.sync();
+    candidateIdentity = await handle.stat();
   } catch (error) {
     await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});
@@ -87,6 +89,39 @@ export async function atomicInstall({ destination, gid, mode, source, uid }) {
     await unlink(temporary).catch(() => {});
     throw error;
   }
+  return { bytes, identity: candidateIdentity };
+}
+
+function fileIdentity(identity, bytes) {
+  return {
+    dev: identity.dev,
+    digest: createHash('sha256').update(bytes).digest('hex'),
+    gid: identity.gid,
+    ino: identity.ino,
+    mode: identity.mode & 0o7777,
+    size: identity.size,
+    uid: identity.uid,
+  };
+}
+
+export async function atomicInstallRecorded({
+  backups,
+  destination,
+  gid,
+  mode,
+  name,
+  source,
+  uid,
+}) {
+  const installed = await atomicInstall({ destination, gid, mode, source, uid });
+  const metadata = fileIdentity(installed.identity, installed.bytes);
+  await writeFile(
+    path.join(backups, `${name}.candidate.json`),
+    `${JSON.stringify(metadata)}\n`,
+    { flag: 'wx', mode: 0o600 },
+  );
+  await syncDirectory(backups);
+  return metadata;
 }
 
 export async function captureFile({ backups, destination, name }) {
@@ -139,6 +174,26 @@ export async function restoreFile({ backups, destination, name }) {
   }
 }
 
+async function assertCandidateUnchanged({ backups, destination, name }) {
+  const expected = JSON.parse(
+    await readFile(path.join(backups, `${name}.candidate.json`), 'utf8'),
+  );
+  const current = await lstatOptional(destination);
+  if (current === null) throw new Error(`rollback conflict: ${name} is missing`);
+  const pinned = await readPinned(destination, `rollback candidate ${name}`);
+  const actual = fileIdentity(pinned.identity, pinned.bytes);
+  for (const field of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'digest']) {
+    if (actual[field] !== expected[field]) {
+      throw new Error(`rollback conflict: ${name} changed after deployment`);
+    }
+  }
+}
+
+export async function restoreFileCompareAndSwap({ backups, destination, name }) {
+  await assertCandidateUnchanged({ backups, destination, name });
+  await restoreFile({ backups, destination, name });
+}
+
 const isMain = process.argv[1]
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
@@ -155,8 +210,24 @@ if (isMain) {
         uid: Number(args[3]),
         gid: Number(args[4]),
       });
+    } else if (command === 'install-recorded' && args.length === 7) {
+      await atomicInstallRecorded({
+        source: args[0],
+        destination: args[1],
+        mode: Number.parseInt(args[2], 8),
+        uid: Number(args[3]),
+        gid: Number(args[4]),
+        backups: args[5],
+        name: args[6],
+      });
     } else if (command === 'restore' && args.length === 3) {
       await restoreFile({ destination: args[0], backups: args[1], name: args[2] });
+    } else if (command === 'restore-cas' && args.length === 3) {
+      await restoreFileCompareAndSwap({
+        destination: args[0],
+        backups: args[1],
+        name: args[2],
+      });
     } else {
       throw new Error('invalid deployment file transaction command');
     }

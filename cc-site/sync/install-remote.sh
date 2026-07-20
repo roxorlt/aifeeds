@@ -16,6 +16,7 @@ if [[ "$TEST_MODE" == "1" ]]; then
   INSTALL=${AIFEEDS_INSTALL:?}
   CHOWN=${AIFEEDS_CHOWN:?}
   USERADD=${AIFEEDS_USERADD:?}
+  USERDEL=${AIFEEDS_USERDEL:?}
   GETENT=${AIFEEDS_GETENT:?}
   RUNUSER=${AIFEEDS_RUNUSER:?}
   NODE=${AIFEEDS_NODE_BIN:?}
@@ -34,6 +35,7 @@ else
   INSTALL=/usr/bin/install
   CHOWN=/usr/bin/chown
   USERADD=/usr/sbin/useradd
+  USERDEL=/usr/sbin/userdel
   GETENT=/usr/bin/getent
   RUNUSER=/usr/sbin/runuser
   NODE=/usr/bin/node
@@ -91,10 +93,10 @@ if [[ ! -f "$NGINX_TRANSACTION_TOOL" || -L "$NGINX_TRANSACTION_TOOL" ]]; then
   exit 1
 fi
 
-LOCK_DIR=$(rooted /var/lock)
-LOCK_FILE="$LOCK_DIR/aifeeds-cc-sync-deploy.lock"
-"$INSTALL" -d -o root -g root -m 0755 "$LOCK_DIR"
-exec 9>"$LOCK_FILE"
+PATH_BOUNDARY=${DEPLOY_ROOT:-/}
+LOCK_FILE=$("$NODE" "$SECURITY_TOOL" prepare-lock \
+  "$PATH_BOUNDARY" "$ROOT_UID" "$ROOT_GID")
+exec 9<>"$LOCK_FILE"
 if ! "$FLOCK" -n 9; then
   echo "ERROR: another aifeeds .cc deployment is in progress" >&2
   exit 75
@@ -110,11 +112,77 @@ nginx_mutated=0
 transaction_prepared=0
 deployment_committed=0
 release_created=0
+release_stage=""
 old_opt_kind=absent
 old_opt_target=""
-timer_enabled_before=disabled
+service_load_before=""
+timer_load_before=""
+timer_enabled_before=""
 timer_active_before=inactive
 service_active_before=inactive
+service_quiesced=0
+timer_quiesced=0
+timer_disabled=0
+new_service_start_attempted=0
+new_timer_activation_attempted=0
+opt_switched=0
+env_installed=0
+service_installed=0
+timer_installed=0
+sync_account_created=0
+sync_passwd_recorded=""
+state_root_created=0
+state_root_dev=""
+state_root_ino=""
+item_root_created=0
+item_root_dev=""
+item_root_ino=""
+
+cleanup_created_roots() {
+  local failed=0
+  if ((item_root_created == 1)); then
+    if "$NODE" "$SECURITY_TOOL" remove-created-root \
+      "$ITEM_ROOT" "$item_root_dev" "$item_root_ino" \
+      "$SYNC_UID" "$WWW_GID" items; then
+      item_root_created=0
+    else
+      failed=1
+    fi
+  fi
+  if ((state_root_created == 1)); then
+    if "$NODE" "$SECURITY_TOOL" remove-created-root \
+      "$STATE_DIR" "$state_root_dev" "$state_root_ino" \
+      "$SYNC_UID" "$WWW_GID" state; then
+      state_root_created=0
+    else
+      failed=1
+    fi
+  fi
+  return "$failed"
+}
+
+cleanup_created_account() {
+  if ((sync_account_created == 0)); then return 0; fi
+  if ((state_root_created == 1 || item_root_created == 1)); then
+    echo "ERROR: rollback conflict: created sync account still owns managed roots" >&2
+    return 1
+  fi
+  local current_passwd
+  if ! current_passwd=$("$GETENT" passwd aifeeds-sync); then
+    echo "ERROR: rollback conflict: unable to verify created sync account" >&2
+    return 1
+  fi
+  if [[ "$current_passwd" != "$sync_passwd_recorded" ]]; then
+    echo "ERROR: rollback conflict: created sync account changed" >&2
+    return 1
+  fi
+  "$USERDEL" aifeeds-sync
+  if "$GETENT" passwd aifeeds-sync >/dev/null 2>&1; then
+    echo "ERROR: unable to remove created sync account" >&2
+    return 1
+  fi
+  sync_account_created=0
+}
 
 rollback_nginx() {
   local failed=0
@@ -128,25 +196,17 @@ rollback_nginx() {
 restore_backed_file() {
   local destination=$1
   local backup_name=$2
-  "$NODE" "$FILE_TOOL" restore "$destination" "$ROLLBACK" "$backup_name"
+  "$NODE" "$FILE_TOOL" restore-cas "$destination" "$ROLLBACK" "$backup_name"
 }
 
-restore_unit_states() {
+stop_candidate_units() {
   local failed=0
-  "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || failed=1
-  "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || failed=1
-  if [[ "$service_active_before" == active ]]; then
-    "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1 || failed=1
-  fi
-  if [[ "$timer_enabled_before" == enabled ]]; then
-    "$SYSTEMCTL" enable "$TIMER" >/dev/null 2>&1 || failed=1
-  else
+  if ((new_timer_activation_attempted == 1)); then
+    "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || failed=1
     "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1 || failed=1
   fi
-  if [[ "$timer_active_before" == active ]]; then
-    "$SYSTEMCTL" start "$TIMER" >/dev/null 2>&1 || failed=1
-  else
-    "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || failed=1
+  if ((new_service_start_attempted == 1)); then
+    "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || failed=1
   fi
   return "$failed"
 }
@@ -154,21 +214,45 @@ restore_unit_states() {
 rollback_install() {
   local failed=0
   rollback_nginx || failed=1
-  "$SYSTEMCTL" disable --now "$TIMER" >/dev/null 2>&1 || failed=1
-  "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || failed=1
-  if [[ "$old_opt_kind" == symlink ]]; then
-    "$NODE" "$SECURITY_TOOL" switch-symlink "$OPT" "$old_opt_target" \
-      >/dev/null 2>&1 || failed=1
-  else
-    rm -f -- "$OPT" || failed=1
+  stop_candidate_units || failed=1
+  cleanup_created_roots || failed=1
+  if ((opt_switched == 1)); then
+    "$NODE" "$SECURITY_TOOL" restore-symlink-cas \
+      "$OPT" "$ROLLBACK/opt-candidate.json" \
+      "$old_opt_kind" "$old_opt_target" || failed=1
   fi
-  restore_backed_file "$ENV_FILE" env || failed=1
-  restore_backed_file "$UNIT_DIR/$SERVICE" service || failed=1
-  restore_backed_file "$UNIT_DIR/$TIMER" timer || failed=1
-  "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || failed=1
-  restore_unit_states || failed=1
+  if ((env_installed == 1)); then
+    restore_backed_file "$ENV_FILE" env || failed=1
+  fi
+  if ((service_installed == 1)); then
+    restore_backed_file "$UNIT_DIR/$SERVICE" service || failed=1
+  fi
+  if ((timer_installed == 1)); then
+    restore_backed_file "$UNIT_DIR/$TIMER" timer || failed=1
+  fi
+  if ((service_installed == 1 || timer_installed == 1)); then
+    "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || failed=1
+  fi
+  if ((service_quiesced == 1)) \
+    && [[ "$service_active_before" == active \
+      || "$service_active_before" == activating ]]; then
+    "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1 || failed=1
+    service_quiesced=0
+  fi
+  if ((timer_disabled == 1)) && [[ "$timer_enabled_before" == enabled ]]; then
+    "$SYSTEMCTL" enable "$TIMER" >/dev/null 2>&1 || failed=1
+    timer_disabled=0
+  fi
+  if ((timer_quiesced == 1)) && [[ "$timer_active_before" == active ]]; then
+    "$SYSTEMCTL" start "$TIMER" >/dev/null 2>&1 || failed=1
+    timer_quiesced=0
+  fi
   if ((release_created == 1)); then
     rm -rf -- "$RELEASE" || failed=1
+  fi
+  if [[ -n "$release_stage" && -d "$RELEASES" ]]; then
+    "$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
+      "$RELEASES" "$ROOT_UID" "$ROOT_GID" || failed=1
   fi
   return "$failed"
 }
@@ -180,6 +264,12 @@ on_exit() {
   if ((status != 0 && transaction_prepared == 1 && deployment_committed == 0)); then
     if ! rollback_install; then
       echo "ERROR: deployment rollback was incomplete" >&2
+      status=70
+    fi
+  fi
+  if ((status != 0)); then
+    if ! cleanup_created_roots || ! cleanup_created_account; then
+      echo "ERROR: deployment side-effect cleanup was incomplete" >&2
       status=70
     fi
   fi
@@ -280,7 +370,84 @@ ITEM_ROOT="$SITE_ROOT/i"
 VHOST_DIR=$(rooted /www/server/panel/vhost/nginx)
 VHOST="$VHOST_DIR/html_ai-feeds.cc.conf"
 SNIPPET="$VHOST_DIR/aifeeds-cc-content-mirror.conf"
-PATH_BOUNDARY=${DEPLOY_ROOT:-/}
+
+SYSTEMCTL_OUTPUT=""
+SYSTEMCTL_STATUS=0
+capture_systemctl() {
+  local restore_errexit=0
+  if [[ $- == *e* ]]; then restore_errexit=1; fi
+  set +e
+  SYSTEMCTL_OUTPUT=$("$SYSTEMCTL" "$@" 2>/dev/null)
+  SYSTEMCTL_STATUS=$?
+  if ((restore_errexit == 1)); then set -e; fi
+  return 0
+}
+
+capture_systemctl show --property=LoadState --value "$SERVICE"
+if ((SYSTEMCTL_STATUS != 0)); then
+  echo "ERROR: unable to query systemd service load state" >&2
+  exit 1
+fi
+service_load_before=$SYSTEMCTL_OUTPUT
+case "$service_load_before" in
+  loaded|not-found) ;;
+  *) echo "ERROR: unsupported systemd state for $SERVICE: $service_load_before" >&2; exit 1 ;;
+esac
+
+capture_systemctl show --property=LoadState --value "$TIMER"
+if ((SYSTEMCTL_STATUS != 0)); then
+  echo "ERROR: unable to query systemd timer load state" >&2
+  exit 1
+fi
+timer_load_before=$SYSTEMCTL_OUTPUT
+case "$timer_load_before" in
+  loaded|not-found) ;;
+  *) echo "ERROR: unsupported systemd state for $TIMER: $timer_load_before" >&2; exit 1 ;;
+esac
+
+capture_systemctl is-active "$SERVICE"
+case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+  0:active) service_active_before=active ;;
+  0:activating) service_active_before=activating ;;
+  3:inactive) service_active_before=inactive ;;
+  *)
+    echo "ERROR: unsupported systemd state for $SERVICE: $SYSTEMCTL_OUTPUT" >&2
+    exit 1 ;;
+esac
+if [[ "$service_load_before" == not-found \
+  && "$service_active_before" != inactive ]]; then
+  echo "ERROR: unsupported systemd state for absent $SERVICE" >&2
+  exit 1
+fi
+
+capture_systemctl is-active "$TIMER"
+case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+  0:active) timer_active_before=active ;;
+  3:inactive) timer_active_before=inactive ;;
+  *)
+    echo "ERROR: unsupported systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
+    exit 1 ;;
+esac
+if [[ "$timer_load_before" == not-found && "$timer_active_before" != inactive ]]; then
+  echo "ERROR: unsupported systemd state for absent $TIMER" >&2
+  exit 1
+fi
+
+capture_systemctl is-enabled "$TIMER"
+case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+  0:enabled) timer_enabled_before=enabled ;;
+  1:disabled) timer_enabled_before=disabled ;;
+  4:not-found) timer_enabled_before=not-found ;;
+  *)
+    echo "ERROR: unsupported systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
+    exit 1 ;;
+esac
+if [[ "$timer_load_before:$timer_enabled_before" != loaded:enabled \
+  && "$timer_load_before:$timer_enabled_before" != loaded:disabled \
+  && "$timer_load_before:$timer_enabled_before" != not-found:not-found ]]; then
+  echo "ERROR: unsupported systemd state combination for $TIMER" >&2
+  exit 1
+fi
 
 www_passwd=$("$GETENT" passwd www) || {
   echo "ERROR: required www account does not exist" >&2
@@ -300,6 +467,7 @@ if [[ "$www_name" != www || "$www_group_name" != www \
 fi
 if ! sync_passwd=$("$GETENT" passwd aifeeds-sync); then
   "$USERADD" -r -g www -d /nonexistent -s /sbin/nologin aifeeds-sync
+  sync_account_created=1
   sync_passwd=$("$GETENT" passwd aifeeds-sync) || {
     echo "ERROR: unable to create aifeeds-sync account" >&2
     exit 1
@@ -315,6 +483,7 @@ if [[ "$sync_name" != aifeeds-sync \
   echo "ERROR: aifeeds-sync account does not match the locked system identity" >&2
   exit 1
 fi
+sync_passwd_recorded=$sync_passwd
 
 ROOT_OWNERS="$ROOT_UID"
 WEB_OWNERS="$ROOT_UID,$WWW_UID"
@@ -377,21 +546,6 @@ elif [[ -e "$OPT" ]]; then
   echo "ERROR: existing live code path is not a managed symlink" >&2
   exit 1
 fi
-for state_query in \
-  "timer_enabled_before:is-enabled:$TIMER" \
-  "timer_active_before:is-active:$TIMER" \
-  "service_active_before:is-active:$SERVICE"; do
-  variable=${state_query%%:*}
-  remainder=${state_query#*:}
-  verb=${remainder%%:*}
-  unit=${remainder#*:}
-  state_value=$("$SYSTEMCTL" "$verb" "$unit" 2>/dev/null || true)
-  case "$variable:$state_value" in
-    timer_enabled_before:enabled) timer_enabled_before=enabled ;;
-    timer_active_before:active) timer_active_before=active ;;
-    service_active_before:active) service_active_before=active ;;
-  esac
-done
 for backup in \
   "$ENV_FILE:env" \
   "$UNIT_DIR/$SERVICE:service" \
@@ -402,44 +556,89 @@ for backup in \
 done
 transaction_prepared=1
 
-"$SYSTEMCTL" disable --now "$TIMER" >/dev/null 2>&1 || true
-"$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || true
+if [[ "$service_active_before" == active \
+  || "$service_active_before" == activating ]]; then
+  "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1
+  service_quiesced=1
+  capture_systemctl is-active "$SERVICE"
+  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 3:inactive ]]; then
+    echo "ERROR: unable to stop $SERVICE cleanly" >&2
+    exit 1
+  fi
+fi
+if [[ "$timer_active_before" == active ]]; then
+  "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1
+  timer_quiesced=1
+  capture_systemctl is-active "$TIMER"
+  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 3:inactive ]]; then
+    echo "ERROR: unable to stop $TIMER cleanly" >&2
+    exit 1
+  fi
+fi
+if [[ "$timer_enabled_before" == enabled ]]; then
+  "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1
+  timer_disabled=1
+  capture_systemctl is-enabled "$TIMER"
+  if [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" != 1:disabled ]]; then
+    echo "ERROR: unable to disable $TIMER cleanly" >&2
+    exit 1
+  fi
+fi
 
 "$INSTALL" -d -o root -g root -m 0755 "$RELEASES"
-if [[ -e "$RELEASE" ]]; then
-  echo "ERROR: immutable release already exists" >&2
-  exit 1
-fi
-"$INSTALL" -d -o root -g root -m 0755 "$RELEASE"
-release_created=1
-cp -a "$SNAPSHOT/cc-site" "$RELEASE/cc-site"
-"$CHOWN" -R root:root "$RELEASE"
-find -P "$RELEASE" -type d -exec chmod 0755 {} +
-find -P "$RELEASE" -type f -exec chmod 0644 {} +
+"$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
+  "$RELEASES" "$ROOT_UID" "$ROOT_GID"
+release_stage=$("$NODE" "$SECURITY_TOOL" create-release-stage \
+  "$RELEASES" "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
+cp -a "$SNAPSHOT/cc-site" "$release_stage/cc-site"
+"$CHOWN" -R root:root "$release_stage"
+find -P "$release_stage" -type d -exec chmod 0755 {} +
+find -P "$release_stage" -type f -exec chmod 0644 {} +
 chmod 0755 \
-  "$RELEASE/cc-site/deploy.sh" \
-  "$RELEASE/cc-site/sync/deploy-to-cc.sh" \
-  "$RELEASE/cc-site/sync/install-remote.sh"
+  "$release_stage/cc-site/deploy.sh" \
+  "$release_stage/cc-site/sync/deploy-to-cc.sh" \
+  "$release_stage/cc-site/sync/install-remote.sh"
+"$NODE" "$SECURITY_TOOL" verify-release \
+  "$release_stage" "$SNAPSHOT" "$EXPECTED_MANIFEST_DIGEST" \
+  "$ROOT_UID" "$ROOT_GID" >/dev/null
+release_action=$("$NODE" "$SECURITY_TOOL" publish-release \
+  "$release_stage" "$RELEASE" "$OPT" "$SNAPSHOT" \
+  "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
+release_stage=""
+case "$release_action" in
+  created|replaced) release_created=1 ;;
+  reused) ;;
+  *) echo "ERROR: invalid release publication result" >&2; exit 1 ;;
+esac
 
 "$INSTALL" -d -o root -g root -m 0755 "$ETC_DIR" "$UNIT_DIR"
-"$INSTALL" -d -o aifeeds-sync -g www -m 0750 "$STATE_DIR" "$ITEM_ROOT"
-"$NODE" "$SECURITY_TOOL" validate-item-tree "$ITEM_ROOT"
-"$CHOWN" -R aifeeds-sync:www "$ITEM_ROOT"
-find -P "$ITEM_ROOT" -type d -exec chmod 0750 {} +
-find -P "$ITEM_ROOT" -type f -exec chmod 0640 {} +
+IFS=$'\t' read -r state_root_created state_root_dev state_root_ino < <(
+  "$NODE" "$SECURITY_TOOL" ensure-managed-root \
+    "$STATE_DIR" "$SYNC_UID" "$WWW_GID" state
+)
+IFS=$'\t' read -r item_root_created item_root_dev item_root_ino < <(
+  "$NODE" "$SECURITY_TOOL" ensure-managed-root \
+    "$ITEM_ROOT" "$SYNC_UID" "$WWW_GID" items
+)
 
 LIVE_TARGET="aifeeds-cc-sync-releases/$EXPECTED_MANIFEST_DIGEST/cc-site/sync"
-"$NODE" "$SECURITY_TOOL" switch-symlink "$OPT" "$LIVE_TARGET"
-"$NODE" "$FILE_TOOL" install \
+opt_switched=1
+"$NODE" "$SECURITY_TOOL" switch-symlink \
+  "$OPT" "$LIVE_TARGET" "$ROLLBACK/opt-candidate.json"
+service_installed=1
+"$NODE" "$FILE_TOOL" install-recorded \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.service" "$UNIT_DIR/$SERVICE" \
-  0644 "$ROOT_UID" "$ROOT_GID"
-"$NODE" "$FILE_TOOL" install \
+  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" service
+timer_installed=1
+"$NODE" "$FILE_TOOL" install-recorded \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.timer" "$UNIT_DIR/$TIMER" \
-  0644 "$ROOT_UID" "$ROOT_GID"
-"$NODE" "$FILE_TOOL" install "$ENV_SOURCE" "$ENV_FILE" \
-  0600 "$ROOT_UID" "$ROOT_GID"
+  0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" timer
+env_installed=1
+"$NODE" "$FILE_TOOL" install-recorded "$ENV_SOURCE" "$ENV_FILE" \
+  0600 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" env
 
 "$SYSTEMCTL" daemon-reload
+new_service_start_attempted=1
 "$SYSTEMCTL" start "$SERVICE"
 
 nginx_dump=$("$NGINX" -T 2>&1) || {
@@ -528,10 +727,12 @@ smoke_exact ai-news \
   https://ai-feeds.cc/ai-news/ \
   "$CURRENT/ai-news/index.html" "$SMOKE_DIR/ai-news.html"
 
+new_timer_activation_attempted=1
 "$SYSTEMCTL" enable --now "$TIMER"
 nginx_mutated=0
 deployment_committed=1
-if ! "$NODE" "$SECURITY_TOOL" gc-releases "$RELEASES" "$OPT" 3 "$ROOT_UID"; then
+if ! "$NODE" "$SECURITY_TOOL" gc-releases \
+  "$RELEASES" "$OPT" 3 "$ROOT_UID" "$ROOT_GID"; then
   echo "WARNING: release garbage collection was skipped after deployment" >&2
 fi
 echo "✓ remote .cc sync deployment completed."

@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
+  chmod,
+  chown,
   lstat,
+  mkdir,
+  open,
   readFile,
   readdir,
   readlink,
@@ -10,12 +15,22 @@ import {
   rm,
   symlink,
   unlink,
+  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function lstatOptional(entry) {
+  try {
+    return await lstat(entry);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 function safeRelative(relative) {
@@ -136,19 +151,73 @@ export async function verifyPayload({ expectedManifestDigest, payload }) {
   return records;
 }
 
-export async function switchSymlink({ link, target }) {
+export async function switchSymlink({ link, record = null, target }) {
   if (!path.isAbsolute(link) || target.length === 0 || path.isAbsolute(target)) {
     throw new Error('invalid live symlink arguments');
   }
+  if (record !== null && !path.isAbsolute(record)) {
+    throw new Error('invalid live symlink record');
+  }
   const temporary = `${link}.new.${process.pid}`;
+  let published = false;
   try {
     await symlink(target, temporary);
+    const candidate = await lstat(temporary);
+    if (!candidate.isSymbolicLink()) throw new Error('live link candidate is unsafe');
+    if (record !== null) {
+      await writeFile(record, `${JSON.stringify({
+        dev: candidate.dev,
+        digest: sha256(Buffer.from(target)),
+        ino: candidate.ino,
+        target,
+      })}\n`, { flag: 'wx', mode: 0o600 });
+      await syncDirectory(path.dirname(record));
+    }
     await rename(temporary, link);
+    published = true;
+    await syncDirectory(path.dirname(link));
   } catch (error) {
     await unlink(temporary).catch(() => {});
+    if (record !== null && !published) await unlink(record).catch(() => {});
     throw error;
   }
   if (await readlink(link) !== target) throw new Error('live symlink verification failed');
+}
+
+export async function restoreSymlinkCompareAndSwap({
+  link,
+  oldKind,
+  oldTarget,
+  record,
+}) {
+  if (
+    !path.isAbsolute(link)
+    || !path.isAbsolute(record)
+    || (oldKind !== 'absent' && oldKind !== 'symlink')
+    || (oldKind === 'symlink' && (oldTarget.length === 0 || path.isAbsolute(oldTarget)))
+  ) {
+    throw new Error('invalid live symlink rollback arguments');
+  }
+  const expected = JSON.parse(await readFile(record, 'utf8'));
+  const identity = await lstatOptional(link);
+  if (identity === null || !identity.isSymbolicLink()) {
+    throw new Error('rollback conflict: live code link changed after deployment');
+  }
+  const target = await readlink(link);
+  if (
+    identity.dev !== expected.dev
+    || identity.ino !== expected.ino
+    || target !== expected.target
+    || sha256(Buffer.from(target)) !== expected.digest
+  ) {
+    throw new Error('rollback conflict: live code link changed after deployment');
+  }
+  if (oldKind === 'symlink') {
+    await switchSymlink({ link, target: oldTarget });
+  } else {
+    await unlink(link);
+    await syncDirectory(path.dirname(link));
+  }
 }
 
 export async function validateDirectoryChain({
@@ -217,10 +286,215 @@ export async function validateItemTree(root) {
   await walkTree(root);
 }
 
-async function validateReleaseTree(root, allowedUid) {
+const CURRENT_GENERATION_TARGET =
+  /^generations\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export async function validateManagedRoot({ gid, kind, root, uid }) {
+  if (
+    !path.isAbsolute(root)
+    || !Number.isInteger(uid)
+    || uid < 0
+    || !Number.isInteger(gid)
+    || gid < 0
+    || (kind !== 'state' && kind !== 'items')
+  ) {
+    throw new Error('invalid managed root validation arguments');
+  }
+  const walkManaged = async (directory, relative = '') => {
+    const directoryIdentity = await lstat(directory);
+    if (
+      !directoryIdentity.isDirectory()
+      || directoryIdentity.isSymbolicLink()
+      || directoryIdentity.uid !== uid
+      || directoryIdentity.gid !== gid
+      || (directoryIdentity.mode & 0o7777) !== 0o750
+    ) {
+      throw new Error(`managed ${kind} directory has unsafe identity or mode`);
+    }
+    for (const name of await readdir(directory)) {
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const child = path.join(directory, name);
+      const identity = await lstat(child);
+      if (identity.isDirectory() && !identity.isSymbolicLink()) {
+        await walkManaged(child, childRelative);
+      } else if (identity.isFile() && !identity.isSymbolicLink()) {
+        if (identity.nlink !== 1) {
+          throw new Error(`managed ${kind} file must be a single-link regular file`);
+        }
+        if (
+          identity.uid !== uid
+          || identity.gid !== gid
+          || (identity.mode & 0o7777) !== 0o640
+        ) {
+          throw new Error(`managed ${kind} file has unsafe identity or mode`);
+        }
+      } else if (
+        kind === 'state'
+        && childRelative === 'public/current'
+        && identity.isSymbolicLink()
+        && identity.uid === uid
+        && identity.gid === gid
+        && CURRENT_GENERATION_TARGET.test(await readlink(child))
+      ) {
+        // The publisher's sole managed link is relative and generation-scoped.
+      } else {
+        throw new Error(`managed ${kind} tree contains an unsafe entry`);
+      }
+    }
+    return directoryIdentity;
+  };
+  return walkManaged(root);
+}
+
+export async function ensureManagedRoot({ gid, kind, root, uid }) {
+  let identity = await lstatOptional(root);
+  let created = false;
+  try {
+    if (identity === null) {
+      await mkdir(root, { mode: 0o750 });
+      created = true;
+      await chown(root, uid, gid);
+      await chmod(root, 0o750);
+      await syncDirectory(path.dirname(root));
+      identity = await lstat(root);
+    }
+    await validateManagedRoot({ gid, kind, root, uid });
+  } catch (error) {
+    if (created) {
+      await rm(root, { recursive: true }).catch(() => {});
+      await syncDirectory(path.dirname(root)).catch(() => {});
+    }
+    throw error;
+  }
+  return {
+    created,
+    dev: identity.dev,
+    ino: identity.ino,
+  };
+}
+
+export async function removeCreatedManagedRoot({
+  dev,
+  gid,
+  ino,
+  kind,
+  root,
+  uid,
+}) {
+  const identity = await lstatOptional(root);
+  if (
+    identity === null
+    || !identity.isDirectory()
+    || identity.isSymbolicLink()
+    || identity.dev !== dev
+    || identity.ino !== ino
+  ) {
+    throw new Error(`rollback conflict: created ${kind} root changed`);
+  }
+  await validateManagedRoot({ gid, kind, root, uid });
+  const confirmed = await lstat(root);
+  if (confirmed.dev !== dev || confirmed.ino !== ino) {
+    throw new Error(`rollback conflict: created ${kind} root changed`);
+  }
+  await rm(root, { recursive: true });
+  await syncDirectory(path.dirname(root));
+}
+
+export async function prepareDeploymentLock({
+  boundary,
+  gid,
+  uid,
+}) {
+  if (
+    !path.isAbsolute(boundary)
+    || !Number.isInteger(uid)
+    || uid < 0
+    || !Number.isInteger(gid)
+    || gid < 0
+  ) {
+    throw new Error('invalid deployment lock arguments');
+  }
+  await validateDirectoryChain({
+    allowMissing: false,
+    allowedUids: [uid],
+    boundary,
+    logicalPath: '/run',
+  });
+  const run = path.join(boundary, 'run');
+  const privateDirectory = path.join(run, 'aifeeds-cc-sync-deploy');
+  let privateIdentity = await lstatOptional(privateDirectory);
+  if (privateIdentity === null) {
+    await mkdir(privateDirectory, { mode: 0o700 });
+    await chown(privateDirectory, uid, gid);
+    await chmod(privateDirectory, 0o700);
+    privateIdentity = await lstat(privateDirectory);
+  }
+  if (
+    !privateIdentity.isDirectory()
+    || privateIdentity.isSymbolicLink()
+    || privateIdentity.uid !== uid
+    || privateIdentity.gid !== gid
+    || (privateIdentity.mode & 0o7777) !== 0o700
+  ) {
+    throw new Error('deployment lock directory is unsafe');
+  }
+
+  const lockFile = path.join(privateDirectory, 'deployment.lock');
+  let handle;
+  let created = false;
+  try {
+    handle = await open(
+      lockFile,
+      fsConstants.O_RDWR
+        | fsConstants.O_CREAT
+        | fsConstants.O_EXCL
+        | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    created = true;
+  } catch (error) {
+    if (error?.code !== 'EEXIST') {
+      throw new Error('deployment lock file is unsafe', { cause: error });
+    }
+    try {
+      handle = await open(
+        lockFile,
+        fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      );
+    } catch (openError) {
+      throw new Error('deployment lock file is unsafe', { cause: openError });
+    }
+  }
+  try {
+    if (created) {
+      await handle.chown(uid, gid);
+      await handle.chmod(0o600);
+      await handle.sync();
+    }
+    const identity = await handle.stat();
+    if (
+      !identity.isFile()
+      || identity.nlink !== 1
+      || identity.uid !== uid
+      || identity.gid !== gid
+      || (identity.mode & 0o7777) !== 0o600
+    ) {
+      throw new Error('deployment lock file must be a root-owned regular 0600 file');
+    }
+  } finally {
+    await handle.close();
+  }
+  return lockFile;
+}
+
+async function validateReleaseTree(root, allowedUid, allowedGid = null) {
   const walkTree = async (entry) => {
     const identity = await lstat(entry);
-    if (identity.uid !== allowedUid || (identity.mode & 0o022) !== 0) {
+    if (
+      identity.uid !== allowedUid
+      || (allowedGid !== null && identity.gid !== allowedGid)
+      || (identity.mode & 0o022) !== 0
+    ) {
       throw new Error('release tree has unsafe ownership or permissions');
     }
     if (identity.isDirectory() && !identity.isSymbolicLink()) {
@@ -241,7 +515,240 @@ async function validateReleaseTree(root, allowedUid) {
   return walkTree(root);
 }
 
+async function syncDirectory(directory) {
+  const handle = await open(directory, 'r');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function releaseExecutable(relative) {
+  return new Set([
+    'cc-site/deploy.sh',
+    'cc-site/sync/deploy-to-cc.sh',
+    'cc-site/sync/install-remote.sh',
+  ]).has(relative);
+}
+
+export async function verifyRelease({
+  allowedGid,
+  allowedUid,
+  expectedManifestDigest,
+  payload,
+  release,
+}) {
+  if (
+    !path.isAbsolute(payload)
+    || !path.isAbsolute(release)
+    || !Number.isInteger(allowedUid)
+    || allowedUid < 0
+    || !Number.isInteger(allowedGid)
+    || allowedGid < 0
+    || !/^[0-9a-f]{64}$/.test(expectedManifestDigest)
+  ) {
+    throw new Error('invalid release verification arguments');
+  }
+  const manifestBytes = await readFile(path.join(payload, 'MANIFEST.sha256'));
+  if (sha256(manifestBytes) !== expectedManifestDigest) {
+    throw new Error('release payload manifest digest mismatch');
+  }
+  const expectedRecords = parseManifest(manifestBytes.toString('utf8'))
+    .filter(({ relative }) => relative.startsWith('cc-site/'));
+  const expectedNames = expectedRecords.map(({ relative }) => relative);
+  const actualRecords = [];
+  const walkExact = async (directory, relative = '') => {
+    const identity = await lstat(directory);
+    if (
+      !identity.isDirectory()
+      || identity.isSymbolicLink()
+      || identity.uid !== allowedUid
+      || identity.gid !== allowedGid
+      || (identity.mode & 0o7777) !== 0o755
+    ) {
+      throw new Error('release directory identity or mode mismatch');
+    }
+    for (const name of (await readdir(directory)).sort()) {
+      const child = path.join(directory, name);
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const childIdentity = await lstat(child);
+      if (childIdentity.isDirectory() && !childIdentity.isSymbolicLink()) {
+        await walkExact(child, childRelative);
+        continue;
+      }
+      const expectedMode = releaseExecutable(childRelative) ? 0o755 : 0o644;
+      if (
+        !childIdentity.isFile()
+        || childIdentity.isSymbolicLink()
+        || childIdentity.nlink !== 1
+        || childIdentity.uid !== allowedUid
+        || childIdentity.gid !== allowedGid
+        || (childIdentity.mode & 0o7777) !== expectedMode
+      ) {
+        throw new Error(`release file identity or mode mismatch: ${childRelative}`);
+      }
+      actualRecords.push({
+        digest: sha256(await readFile(child)),
+        relative: childRelative,
+      });
+    }
+  };
+  await walkExact(release);
+  const actualNames = actualRecords.map(({ relative }) => relative);
+  if (actualNames.join('\n') !== expectedNames.join('\n')) {
+    throw new Error('release path set does not match the payload manifest');
+  }
+  for (let index = 0; index < expectedRecords.length; index += 1) {
+    const expected = expectedRecords[index];
+    const actual = actualRecords[index];
+    if (expected.digest !== actual.digest) {
+      throw new Error(`release digest mismatch: ${expected.relative}`);
+    }
+  }
+  return sha256(Buffer.from(actualRecords.map(
+    ({ digest, relative }) => `${digest}  ${relative}\n`,
+  ).join('')));
+}
+
+function releaseArtifactName(name) {
+  return /^\.(?:stage|quarantine)\.[0-9a-f]{64}\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(name);
+}
+
+export async function cleanupReleaseArtifacts({
+  allowedGid,
+  allowedUid,
+  releases,
+}) {
+  const removed = [];
+  const skipped = [];
+  for (const name of await readdir(releases)) {
+    if (!releaseArtifactName(name)) continue;
+    const candidate = path.join(releases, name);
+    try {
+      await validateReleaseTree(candidate, allowedUid, allowedGid);
+      await rm(candidate, { recursive: true });
+      removed.push(name);
+    } catch {
+      skipped.push(name);
+    }
+  }
+  if (removed.length > 0) await syncDirectory(releases);
+  return { removed: removed.sort(), skipped: skipped.sort() };
+}
+
+export async function createReleaseStage({
+  allowedGid,
+  allowedUid,
+  manifestDigest,
+  releases,
+}) {
+  if (
+    !path.isAbsolute(releases)
+    || !/^[0-9a-f]{64}$/.test(manifestDigest)
+    || !Number.isInteger(allowedUid)
+    || allowedUid < 0
+    || !Number.isInteger(allowedGid)
+    || allowedGid < 0
+  ) {
+    throw new Error('invalid release stage arguments');
+  }
+  await validateReleaseTree(releases, allowedUid, allowedGid);
+  const stage = path.join(
+    releases,
+    `.stage.${manifestDigest}.${randomUUID()}`,
+  );
+  await mkdir(stage, { mode: 0o755 });
+  await chown(stage, allowedUid, allowedGid);
+  await chmod(stage, 0o755);
+  await syncDirectory(releases);
+  return stage;
+}
+
+function targetNamesRelease({ finalRelease, liveLink, liveTarget }) {
+  const expected = `${path.basename(path.dirname(finalRelease))}`
+    + `/${path.basename(finalRelease)}/cc-site/sync`;
+  return path.dirname(finalRelease) === path.join(path.dirname(liveLink), path.basename(path.dirname(finalRelease)))
+    && liveTarget === expected;
+}
+
+export async function publishRelease({
+  allowedGid,
+  allowedUid,
+  expectedManifestDigest,
+  finalRelease,
+  liveLink,
+  payload,
+  stage,
+}) {
+  if (
+    !path.isAbsolute(finalRelease)
+    || !path.isAbsolute(liveLink)
+    || !path.isAbsolute(stage)
+    || path.dirname(stage) !== path.dirname(finalRelease)
+    || path.basename(finalRelease) !== expectedManifestDigest
+    || !path.basename(stage).startsWith(`.stage.${expectedManifestDigest}.`)
+  ) {
+    throw new Error('invalid release publication arguments');
+  }
+  await verifyRelease({
+    allowedGid,
+    allowedUid,
+    expectedManifestDigest,
+    payload,
+    release: stage,
+  });
+  const finalIdentity = await lstatOptional(finalRelease);
+  if (finalIdentity === null) {
+    await rename(stage, finalRelease);
+    await syncDirectory(path.dirname(finalRelease));
+    return 'created';
+  }
+
+  try {
+    await verifyRelease({
+      allowedGid,
+      allowedUid,
+      expectedManifestDigest,
+      payload,
+      release: finalRelease,
+    });
+    await rm(stage, { recursive: true });
+    await syncDirectory(path.dirname(finalRelease));
+    return 'reused';
+  } catch (verificationError) {
+    const liveIdentity = await lstatOptional(liveLink);
+    if (liveIdentity?.isSymbolicLink()) {
+      const liveTarget = await readlink(liveLink);
+      if (targetNamesRelease({ finalRelease, liveLink, liveTarget })) {
+        throw new Error('damaged live release cannot be replaced', {
+          cause: verificationError,
+        });
+      }
+    }
+    await validateReleaseTree(finalRelease, allowedUid, allowedGid);
+  }
+
+  const quarantine = path.join(
+    path.dirname(finalRelease),
+    `.quarantine.${expectedManifestDigest}.${randomUUID()}`,
+  );
+  await rename(finalRelease, quarantine);
+  try {
+    await rename(stage, finalRelease);
+  } catch (error) {
+    await rename(quarantine, finalRelease).catch(() => {});
+    throw error;
+  }
+  await syncDirectory(path.dirname(finalRelease));
+  await validateReleaseTree(quarantine, allowedUid, allowedGid);
+  await rm(quarantine, { recursive: true });
+  await syncDirectory(path.dirname(finalRelease));
+  return 'replaced';
+}
+
 export async function garbageCollectReleases({
+  allowedGid = null,
   allowedUid,
   keep,
   liveLink,
@@ -253,11 +760,15 @@ export async function garbageCollectReleases({
     || path.dirname(releases) !== path.dirname(liveLink)
     || !Number.isInteger(allowedUid)
     || allowedUid < 0
+    || (allowedGid !== null && (!Number.isInteger(allowedGid) || allowedGid < 0))
     || !Number.isInteger(keep)
     || keep < 1
     || keep > 10
   ) {
     throw new Error('invalid release garbage collection arguments');
+  }
+  if (allowedGid !== null) {
+    await cleanupReleaseArtifacts({ releases, allowedUid, allowedGid });
   }
   const releasesIdentity = await lstat(releases);
   if (
@@ -354,8 +865,22 @@ if (isMain) {
         process.stdout.write(`${sha256(await readFile(args[0]))}\n`);
       } else if (command === 'verify-payload' && args.length === 2) {
         await verifyPayload({ payload: args[0], expectedManifestDigest: args[1] });
-      } else if (command === 'switch-symlink' && args.length === 2) {
-        await switchSymlink({ link: args[0], target: args[1] });
+      } else if (
+        command === 'switch-symlink'
+        && (args.length === 2 || args.length === 3)
+      ) {
+        await switchSymlink({
+          link: args[0],
+          target: args[1],
+          record: args[2] ?? null,
+        });
+      } else if (command === 'restore-symlink-cas' && args.length === 4) {
+        await restoreSymlinkCompareAndSwap({
+          link: args[0],
+          record: args[1],
+          oldKind: args[2],
+          oldTarget: args[3],
+        });
       } else if (command === 'validate-chain' && args.length === 4) {
         await validateDirectoryChain({
           boundary: args[0],
@@ -365,12 +890,69 @@ if (isMain) {
         });
       } else if (command === 'validate-item-tree' && args.length === 1) {
         await validateItemTree(args[0]);
-      } else if (command === 'gc-releases' && args.length === 4) {
+      } else if (command === 'ensure-managed-root' && args.length === 4) {
+        const managedRoot = await ensureManagedRoot({
+          root: args[0],
+          uid: Number(args[1]),
+          gid: Number(args[2]),
+          kind: args[3],
+        });
+        process.stdout.write(
+          `${managedRoot.created ? 1 : 0}\t${managedRoot.dev}\t${managedRoot.ino}\n`,
+        );
+      } else if (command === 'remove-created-root' && args.length === 6) {
+        await removeCreatedManagedRoot({
+          root: args[0],
+          dev: Number(args[1]),
+          ino: Number(args[2]),
+          uid: Number(args[3]),
+          gid: Number(args[4]),
+          kind: args[5],
+        });
+      } else if (command === 'prepare-lock' && args.length === 3) {
+        process.stdout.write(`${await prepareDeploymentLock({
+          boundary: args[0],
+          uid: Number(args[1]),
+          gid: Number(args[2]),
+        })}\n`);
+      } else if (command === 'cleanup-release-artifacts' && args.length === 3) {
+        await cleanupReleaseArtifacts({
+          releases: args[0],
+          allowedUid: Number(args[1]),
+          allowedGid: Number(args[2]),
+        });
+      } else if (command === 'create-release-stage' && args.length === 4) {
+        process.stdout.write(`${await createReleaseStage({
+          releases: args[0],
+          manifestDigest: args[1],
+          allowedUid: Number(args[2]),
+          allowedGid: Number(args[3]),
+        })}\n`);
+      } else if (command === 'verify-release' && args.length === 5) {
+        process.stdout.write(`${await verifyRelease({
+          release: args[0],
+          payload: args[1],
+          expectedManifestDigest: args[2],
+          allowedUid: Number(args[3]),
+          allowedGid: Number(args[4]),
+        })}\n`);
+      } else if (command === 'publish-release' && args.length === 7) {
+        process.stdout.write(`${await publishRelease({
+          stage: args[0],
+          finalRelease: args[1],
+          liveLink: args[2],
+          payload: args[3],
+          expectedManifestDigest: args[4],
+          allowedUid: Number(args[5]),
+          allowedGid: Number(args[6]),
+        })}\n`);
+      } else if (command === 'gc-releases' && args.length === 5) {
         await garbageCollectReleases({
           releases: args[0],
           liveLink: args[1],
           keep: Number(args[2]),
           allowedUid: Number(args[3]),
+          allowedGid: Number(args[4]),
         });
       } else {
         throw new Error('unsupported deployment security command');
