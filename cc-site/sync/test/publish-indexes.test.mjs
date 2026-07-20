@@ -493,6 +493,106 @@ test('recovers real SIGKILL crashes and retains current plus previous generation
   }
 });
 
+test('recovery GC fails closed before reading or deleting a replacement parent tree', async () => {
+  const dirs = await workspace();
+  await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+    ]),
+  });
+  const movedState = path.join(dirs.root, 'moved-state');
+  const replacementStage = path.join(
+    dirs.stateDir,
+    'public',
+    'generations',
+    '.stage.44444444-4444-4444-8444-444444444444',
+  );
+  let swapped = false;
+
+  await assert.rejects(
+    publishIndexes({
+      ...dirs,
+      state: state([
+        ['/i/news/new', metadata('news', 'New', '2026-07-20T00:00:00Z')],
+      ]),
+      hooks: {
+        async beforeGarbageCollection() {
+          if (swapped) return;
+          swapped = true;
+          await rename(dirs.stateDir, movedState);
+          await mkdir(replacementStage, { recursive: true });
+          await writeFile(
+            path.join(replacementStage, 'sentinel'),
+            'replacement untouched',
+          );
+        },
+      },
+    }),
+    /changed|unsafe.*directory|generation.*chain|recovery/i,
+  );
+  assert.equal(
+    await readFile(path.join(replacementStage, 'sentinel'), 'utf8'),
+    'replacement untouched',
+  );
+  assert.deepEqual(await readdir(replacementStage), ['sentinel']);
+
+  await rm(dirs.stateDir, { recursive: true });
+  await rename(movedState, dirs.stateDir);
+});
+
+test('afterPrepared static sitemap deletion or replacement never activates the new generation', async (t) => {
+  for (const mutation of ['delete', 'regular', 'symlink']) {
+    await t.test(mutation, async () => {
+      const dirs = await workspace();
+      await publishIndexes({
+        ...dirs,
+        state: state([
+          ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+        ]),
+      });
+      const currentPath = path.join(dirs.stateDir, 'public', 'current');
+      const currentBefore = await readlink(currentPath);
+      const livePaths = [
+        publishedPath(dirs, 'ai-news', 'index.html'),
+        publishedPath(dirs, 'sitemap.xml'),
+        publishedPath(dirs, 'sitemaps', 'news-1.xml'),
+      ];
+      const liveBefore = await Promise.all(
+        livePaths.map((file) => readFile(file, 'utf8')),
+      );
+      const staticFile = path.join(dirs.siteRoot, 'sitemap-static.xml');
+      const outside = path.join(dirs.root, 'outside-static.xml');
+      await writeFile(outside, '<urlset></urlset>\n');
+
+      await assert.rejects(
+        publishIndexes({
+          ...dirs,
+          state: state([
+            ['/i/news/new', metadata('news', 'New', '2026-07-20T00:00:00Z')],
+          ]),
+          hooks: {
+            async afterPrepared() {
+              await unlink(staticFile);
+              if (mutation === 'regular') {
+                await writeFile(staticFile, '<urlset>replacement</urlset>\n');
+              } else if (mutation === 'symlink') {
+                await symlink(outside, staticFile);
+              }
+            },
+          },
+        }),
+        /static sitemap|symlink|regular|changed/i,
+      );
+      assert.equal(await readlink(currentPath), currentBefore);
+      assert.deepEqual(
+        await Promise.all(livePaths.map((file) => readFile(file, 'utf8'))),
+        liveBefore,
+      );
+    });
+  }
+});
+
 test('a staging-generation failure leaves the entire previous generation untouched', async () => {
   const dirs = await workspace();
   await publishIndexes({

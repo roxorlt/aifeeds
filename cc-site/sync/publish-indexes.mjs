@@ -426,6 +426,7 @@ async function replaceDurableFile(parentIdentity, name, contents) {
   const temporary = `.${name}.tmp.${token}`;
   await writeDurableFile(parentIdentity, temporary, contents);
   const target = path.join(parentIdentity.path, name);
+  await assertIdentity(parentIdentity);
   const existing = await lstatOptional(target);
   if (existing !== null && (existing.isSymbolicLink() || !existing.isFile())) {
     throw new Error(`unsafe durable file target: ${target}`);
@@ -435,15 +436,33 @@ async function replaceDurableFile(parentIdentity, name, contents) {
   await syncDirectory(parentIdentity);
 }
 
-async function staticSitemapPresence(siteIdentity) {
+async function staticSitemapIdentity(siteIdentity) {
   await assertIdentity(siteIdentity);
   const entry = await lstatOptional(path.join(siteIdentity.path, 'sitemap-static.xml'));
   await assertIdentity(siteIdentity);
-  if (entry === null) return false;
+  if (entry === null) {
+    return { present: false, dev: null, ino: null };
+  }
   if (entry.isSymbolicLink() || !entry.isFile()) {
     throw new Error('static sitemap must be a regular non-symlink file');
   }
-  return true;
+  return {
+    present: true,
+    dev: entry.dev,
+    ino: entry.ino,
+  };
+}
+
+async function assertStaticSitemapIdentity(siteIdentity, expected) {
+  const actual = await staticSitemapIdentity(siteIdentity);
+  if (
+    actual.present !== expected.present
+    || actual.dev !== expected.dev
+    || actual.ino !== expected.ino
+  ) {
+    throw new Error('static sitemap identity changed before publication');
+  }
+  await assertIdentity(siteIdentity);
 }
 
 function generationLink(id) {
@@ -523,7 +542,9 @@ function validateJournal(value) {
 }
 
 async function loadJournal(publicIdentity) {
+  await assertIdentity(publicIdentity);
   const entry = await lstatOptional(path.join(publicIdentity.path, JOURNAL_FILE));
+  await assertIdentity(publicIdentity);
   if (entry === null) return null;
   if (entry.isSymbolicLink() || !entry.isFile()) {
     throw new Error('unsafe publication journal');
@@ -566,32 +587,41 @@ async function removePinnedDirectory(parentIdentity, target) {
 }
 
 async function cleanupPointerTemps(publicIdentity) {
+  await assertIdentity(publicIdentity);
   const entries = await readdir(publicIdentity.path, { withFileTypes: true });
+  await assertIdentity(publicIdentity);
   for (const entry of entries) {
     const match = /^\.current\.([0-9a-f-]{36})$/.exec(entry.name);
     if (match === null || !UUID_RE.test(match[1])) continue;
     const targetPath = path.join(publicIdentity.path, entry.name);
+    await assertIdentity(publicIdentity);
     const actual = await lstat(targetPath);
     if (!actual.isSymbolicLink()) {
       throw new Error(`unsafe current pointer temporary: ${entry.name}`);
     }
+    await assertIdentity(publicIdentity);
     parseGenerationLink(await readlink(targetPath));
+    await assertIdentity(publicIdentity);
     await rm(targetPath);
     await syncDirectory(publicIdentity);
   }
 }
 
 async function cleanupJournalTemps(publicIdentity) {
+  await assertIdentity(publicIdentity);
   const entries = await readdir(publicIdentity.path, { withFileTypes: true });
+  await assertIdentity(publicIdentity);
   for (const entry of entries) {
     const match = /^\.publication-journal\.json\.tmp\.([0-9a-f-]{36})$/
       .exec(entry.name);
     if (match === null || !UUID_RE.test(match[1])) continue;
     const targetPath = path.join(publicIdentity.path, entry.name);
+    await assertIdentity(publicIdentity);
     const actual = await lstat(targetPath);
     if (actual.isSymbolicLink() || !actual.isFile()) {
       throw new Error(`unsafe publication journal temporary: ${entry.name}`);
     }
+    await assertIdentity(publicIdentity);
     await rm(targetPath);
     await syncDirectory(publicIdentity);
   }
@@ -600,11 +630,16 @@ async function cleanupJournalTemps(publicIdentity) {
 async function garbageCollectGenerations(
   generationsIdentity,
   keepIds,
+  hooks = {},
 ) {
+  await hooks.beforeGarbageCollection?.();
+  await assertIdentity(generationsIdentity);
   const entries = await readdir(generationsIdentity.path, {
     withFileTypes: true,
   });
+  await assertIdentity(generationsIdentity);
   for (const entry of entries) {
+    await assertIdentity(generationsIdentity);
     const stageMatch = /^\.stage\.([0-9a-f-]{36})$/.exec(entry.name);
     const safeStage = stageMatch !== null && UUID_RE.test(stageMatch[1]);
     const safeGeneration = UUID_RE.test(entry.name);
@@ -620,9 +655,17 @@ async function garbageCollectGenerations(
   }
 }
 
-async function recoverPublication(publicIdentity, generationsIdentity) {
+async function recoverPublication(
+  publicIdentity,
+  generationsIdentity,
+  hooks = {},
+) {
+  await assertIdentity(publicIdentity);
+  await assertIdentity(generationsIdentity);
   await cleanupPointerTemps(publicIdentity);
+  await assertIdentity(generationsIdentity);
   await cleanupJournalTemps(publicIdentity);
+  await assertIdentity(generationsIdentity);
   const current = await inspectCurrent(publicIdentity, generationsIdentity);
   const journal = await loadJournal(publicIdentity);
   let stable;
@@ -667,7 +710,10 @@ async function recoverPublication(publicIdentity, generationsIdentity) {
   await garbageCollectGenerations(
     generationsIdentity,
     new Set([stable.current, stable.previous].filter(Boolean)),
+    hooks,
   );
+  await assertIdentity(publicIdentity);
+  await assertIdentity(generationsIdentity);
   return stable;
 }
 
@@ -808,6 +854,8 @@ async function buildGeneration({
 }
 
 async function activateGeneration({
+  siteIdentity,
+  expectedStaticSitemap,
   publicIdentity,
   generationsIdentity,
   generationId,
@@ -836,6 +884,12 @@ async function activateGeneration({
     throw new Error('temporary current generation link changed');
   }
   await syncDirectory(publicIdentity);
+  await assertStaticSitemapIdentity(
+    siteIdentity,
+    expectedStaticSitemap,
+  );
+  await assertIdentity(publicIdentity);
+  await assertIdentity(generationsIdentity);
   await rename(temporaryPath, path.join(publicIdentity.path, 'current'));
   await syncDirectory(publicIdentity);
   await hooks.afterCurrentSwap?.(generationId);
@@ -855,6 +909,7 @@ async function activateGeneration({
   await garbageCollectGenerations(
     generationsIdentity,
     new Set([nextStable.current, nextStable.previous].filter(Boolean)),
+    hooks,
   );
   return nextStable;
 }
@@ -871,13 +926,18 @@ export async function publishIndexes({
   const items = normalizeItems(state);
   const siteIdentity = await rootIdentity(safeSiteRoot, 'siteRoot');
   const stateIdentity = await rootIdentity(safeStateDir, 'stateDir');
-  const includeStaticSitemap = await staticSitemapPresence(siteIdentity);
+  const expectedStaticSitemap = await staticSitemapIdentity(siteIdentity);
+  const includeStaticSitemap = expectedStaticSitemap.present;
   const publicIdentity = await ensureDirectory(stateIdentity, 'public');
   const generationsIdentity = await ensureDirectory(
     publicIdentity,
     'generations',
   );
-  const stable = await recoverPublication(publicIdentity, generationsIdentity);
+  const stable = await recoverPublication(
+    publicIdentity,
+    generationsIdentity,
+    hooks,
+  );
   const current = await inspectCurrent(publicIdentity, generationsIdentity);
   const fingerprint = publicationFingerprint(items, includeStaticSitemap);
   if (current !== null) {
@@ -909,9 +969,7 @@ export async function publishIndexes({
       hooks,
     });
     await hooks.afterStageBuilt?.(stageIdentity.path);
-    if (await staticSitemapPresence(siteIdentity) !== includeStaticSitemap) {
-      throw new Error('static sitemap presence changed before publication');
-    }
+    await assertStaticSitemapIdentity(siteIdentity, expectedStaticSitemap);
     await assertIdentity(siteIdentity);
     await assertIdentity(stateIdentity);
     await assertIdentity(publicIdentity);
@@ -922,6 +980,8 @@ export async function publishIndexes({
     immutableIdentity = await inspectGeneration(generationsIdentity, generationId);
     await validateGenerationComplete(immutableIdentity, generationId);
     await activateGeneration({
+      siteIdentity,
+      expectedStaticSitemap,
       publicIdentity,
       generationsIdentity,
       generationId,
@@ -931,7 +991,7 @@ export async function publishIndexes({
     return { changed: true, generation: generationId };
   } catch (error) {
     try {
-      await recoverPublication(publicIdentity, generationsIdentity);
+      await recoverPublication(publicIdentity, generationsIdentity, hooks);
     } catch (recoveryError) {
       throw new AggregateError(
         [error, recoveryError],
