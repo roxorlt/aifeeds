@@ -117,6 +117,19 @@ code { font-family: var(--mono); }
 .codeblock .copy-btn:hover { background: var(--accent); color: #fff; }
 .codeblock .copy-btn.ok { background: #4a8c5c; color: #fff; opacity: 1; }
 
+/* 双语围栏（提示词/CLAUDE.md 示例）：默认中文，可切英文 */
+.codeblock.bilingual .v-en { display: none; }
+.codeblock.bilingual[data-clang="en"] .v-en { display: block; }
+.codeblock.bilingual[data-clang="en"] .v-zh { display: none; }
+.cb-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; }
+.cb-tools .copy-btn { position: static; }
+.cb-seg { display: inline-flex; border-radius: 999px; overflow: hidden; }
+.cb-seg .cb-lang {
+  border: none; background: rgba(240,238,230,0.12); color: #d9d7cf;
+  font-size: 11px; padding: 4px 10px; letter-spacing: 0.02em;
+}
+.cb-seg .cb-lang.on { background: var(--accent); color: #fff; }
+
 /* 呼出块 */
 .callout { display: flex; gap: 10px; padding: 13px 16px; border-radius: 8px; margin: 0 0 16px; font-size: 14.5px; background: var(--accent-bg); border: 1px solid rgba(217,119,87,0.18); }
 .callout .co-icon { flex-shrink: 0; }
@@ -233,6 +246,7 @@ ol.steps > li:last-child::after { display: none; }
     </nav>
     <div class="side-foot">
       <button class="theme-btn" id="themeBtn">🌗 主题：自动</button>
+      <button class="theme-btn" id="clangBtn">🌐 示例默认：中文</button>
       <div><a href="https://code.claude.com/docs/en/best-practices" target="_blank" rel="noopener">查看英文原文 ↗</a></div>
     </div>
   </aside>
@@ -294,20 +308,23 @@ ol.steps > li:last-child::after { display: none; }
 <p>让 Claude 直接跳到编码可能会产生解决错误问题的代码。使用 <a href="https://code.claude.com/docs/en/permission-modes#analyze-before-you-edit-with-plan-mode" target="_blank" rel="noopener">计划模式</a> 将探索与执行分离。</p>
 <p>推荐的工作流程有四个阶段：</p>
 <ol class="steps"><li><div class="step-title">探索</div><p>进入计划模式。Claude 读取文件并回答问题，而不进行更改。</p>
-<div class="codeblock"><pre><code class="language-txt claude (plan mode)">read /src/auth and understand how we handle sessions and login.
-also look at how we manage environment variables for secrets.</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-txt">阅读 /src/auth 并理解我们如何处理会话和登录。
+同时查看我们如何管理用于机密的环境变量。</code></pre><pre class="v-en"><code class="language-txt">read /src/auth and understand how we handle sessions and login.
+also look at how we manage environment variables for secrets.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
 <li><div class="step-title">规划</div><p>让 Claude 创建一个详细的实现计划。</p>
-<div class="codeblock"><pre><code class="language-txt claude (plan mode)">I want to add Google OAuth. What files need to change?
-What's the session flow? Create a plan.</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-txt">我想添加 Google OAuth。需要更改哪些文件？
+会话流程是怎样的？制定一个计划。</code></pre><pre class="v-en"><code class="language-txt">I want to add Google OAuth. What files need to change?
+What's the session flow? Create a plan.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>按 <code>Ctrl+G</code> 在文本编辑器中打开计划，以便在 Claude 继续之前直接编辑。</p>
 </li>
 <li><div class="step-title">实现</div><p>退出计划模式，让 Claude 编写代码，根据其计划进行验证。</p>
-<div class="codeblock"><pre><code class="language-txt claude (default mode)">implement the OAuth flow from your plan. write tests for the
-callback handler, run the test suite and fix any failures.</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-txt">根据你的计划实现 OAuth 流程。为回调处理器编写测试，
+运行测试套件并修复任何失败。</code></pre><pre class="v-en"><code class="language-txt">implement the OAuth flow from your plan. write tests for the
+callback handler, run the test suite and fix any failures.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
 <li><div class="step-title">提交</div><p>让 Claude 提交，附带描述性信息并创建 PR。</p>
-<div class="codeblock"><pre><code class="language-txt claude (default mode)">commit with a descriptive message and open a PR</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-txt">使用描述性提交信息提交并创建 PR</code></pre><pre class="v-en"><code class="language-txt">commit with a descriptive message and open a PR</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout note"><span class="co-icon">📌</span><div><p>计划模式很有用，但也会增加开销。</p>
 <p>对于范围明确且修复很小（如修正拼写错误、添加日志行或重命名变量）的任务，请让 Claude 直接完成。</p>
@@ -368,13 +385,19 @@ callback handler, run the test suite and fix any failures.</code></pre><button t
 <p>CLAUDE.md 是 Claude 在每次对话开始时都会读取的特殊文件。你可以在其中包含 Bash 命令、代码风格以及工作流规则，这能为 Claude 提供那些仅凭代码无法推断出来的持久化上下文。</p>
 <p><code>/init</code> 命令会分析你的代码库，检测构建系统、测试框架和代码模式，为你提供一个坚实的基础以便进一步完善。</p>
 <p>CLAUDE.md 文件没有强制的格式要求，但应保持简短且便于人类阅读。例如：</p>
-<div class="codeblock"><pre><code class="language-markdown CLAUDE.md"># Code style
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-markdown"># 代码风格
+- 使用 ES modules (import/export) 语法，而非 CommonJS (require)
+- 尽可能解构导入（例如 import { foo } from 'bar'）
+
+# 工作流
+- 完成一系列代码更改后，务必进行类型检查
+- 出于性能考虑，最好运行单个测试，而不是整个测试套件</code></pre><pre class="v-en"><code class="language-markdown"># Code style
 - Use ES modules (import/export) syntax, not CommonJS (require)
 - Destructure imports when possible (eg. import { foo } from 'bar')
 
 # Workflow
 - Be sure to typecheck when you're done making a series of code changes
-- Prefer running single tests, and not the whole test suite, for performance</code></pre><button type="button" class="copy-btn">复制</button></div>
+- Prefer running single tests, and not the whole test suite, for performance</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>CLAUDE.md 在每次会话中都会被加载，因此只应包含广泛适用的内容。对于仅在特定情况下相关的领域知识或工作流，请改用 <a href="https://code.claude.com/docs/en/skills" target="_blank" rel="noopener">技能</a>。Claude 会按需加载它们，而不会让每次对话都变得臃肿。</p>
 <p>保持简洁。对每一行内容，都问一问自己：<em>“如果删掉这一条，会不会导致 Claude 出错？”</em> 如果不会，就删掉它。臃肿的 CLAUDE.md 文件会让 Claude 忽略你真正的指令！</p>
 <table>
@@ -416,11 +439,15 @@ callback handler, run the test suite and fix any failures.</code></pre><button t
 <p>如果 Claude 在已有规则禁止的情况下仍然反复做你不想让它做的事，那很可能是因为文件太长，导致那条规则被淹没了。如果 Claude 问你的问题在 CLAUDE.md 中已有答案，那可能是措辞有歧义。请把 CLAUDE.md 当作代码来对待：在出问题时审阅它，定期精简，并通过观察 Claude 的行为是否真的发生改变来测试你的修改。</p>
 <p>你可以通过添加强调（例如，“重要”或“你必须”）来调整指令，以提高遵从性。将 CLAUDE.md 签入 git，方便你的团队共同完善。这个文件的价值会随着时间不断累积。</p>
 <p>CLAUDE.md 文件可以使用 <code>@path/to/import</code> 语法来导入其他文件：</p>
-<div class="codeblock"><pre><code class="language-markdown CLAUDE.md">See @README.md for project overview and @package.json for available npm commands.
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-markdown">请参阅 @README.md 了解项目概述，参阅 @package.json 了解可用的 npm 命令。
+
+# 额外说明
+- Git 工作流：@docs/git-instructions.md
+- 个人覆盖：@~/.claude/my-project-instructions.md</code></pre><pre class="v-en"><code class="language-markdown">See @README.md for project overview and @package.json for available npm commands.
 
 # Additional Instructions
 - Git workflow: @docs/git-instructions.md
-- Personal overrides: @~/.claude/my-project-instructions.md</code></pre><button type="button" class="copy-btn">复制</button></div>
+- Personal overrides: @~/.claude/my-project-instructions.md</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>你可以将 CLAUDE.md 文件放置在以下几个位置：</p>
 <ul>
 <li><strong>主文件夹 (<code>~/.claude/CLAUDE.md</code>)</strong>：适用于所有 Claude 会话</li>
@@ -458,7 +485,15 @@ callback handler, run the test suite and fix any failures.</code></pre><button t
 </div></div>
 <p><a href="https://code.claude.com/docs/en/skills" target="_blank" rel="noopener">技能</a>用你的项目、团队或领域的特定信息扩展 Claude 的知识。Claude 会在相关时自动应用它们，或者你可以用 <code>/skill-name</code> 直接调用。</p>
 <p>通过在 <code>.claude/skills/</code> 中添加包含 <code>SKILL.md</code> 的目录来创建技能：</p>
-<div class="codeblock"><pre><code class="language-markdown .claude/skills/api-conventions/SKILL.md">---
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-markdown">---
+name: api-conventions
+description: 我们服务的 REST API 设计规范
+---
+# API 规范
+- URL 路径使用 kebab-case
+- JSON 属性使用 camelCase
+- 列表端点务必包含分页
+- 在 URL 路径中进行 API 版本管理（/v1/、/v2/）</code></pre><pre class="v-en"><code class="language-markdown">---
 name: api-conventions
 description: REST API design conventions for our services
 ---
@@ -466,9 +501,23 @@ description: REST API design conventions for our services
 - Use kebab-case for URL paths
 - Use camelCase for JSON properties
 - Always include pagination for list endpoints
-- Version APIs in the URL path (/v1/, /v2/)</code></pre><button type="button" class="copy-btn">复制</button></div>
+- Version APIs in the URL path (/v1/, /v2/)</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>技能还可以定义你直接调用的可重复工作流：</p>
-<div class="codeblock"><pre><code class="language-markdown .claude/skills/fix-issue/SKILL.md">---
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-markdown">---
+name: fix-issue
+description: 修复 GitHub issue
+disable-model-invocation: true
+---
+分析并修复 GitHub issue：$ARGUMENTS。
+
+1. 使用 `gh issue view` 获取 issue 详情
+2. 理解 issue 中描述的问题
+3. 在代码库中搜索相关文件
+4. 实施必要更改以修复问题
+5. 编写并运行测试以验证修复
+6. 确保代码通过 linting 和类型检查
+7. 创建描述性提交信息
+8. 推送并创建 PR</code></pre><pre class="v-en"><code class="language-markdown">---
 name: fix-issue
 description: Fix a GitHub issue
 disable-model-invocation: true
@@ -482,13 +531,25 @@ Analyze and fix the GitHub issue: $ARGUMENTS.
 5. Write and run tests to verify the fix
 6. Ensure code passes linting and type checking
 7. Create a descriptive commit message
-8. Push and create a PR</code></pre><button type="button" class="copy-btn">复制</button></div>
+8. Push and create a PR</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>运行 <code>/fix-issue 1234</code> 来调用它。对带有副作用、你希望手动触发的工作流，使用 <code>disable-model-invocation: true</code>。</p>
 <h3 id="创建自定义子代理">创建自定义子代理</h3>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>在 <code>.claude/agents/</code> 中定义专门助手，Claude 可将其委派给这些助手来执行隔离任务。</p>
 </div></div>
 <p><a href="https://code.claude.com/docs/en/sub-agents" target="_blank" rel="noopener">子代理</a> 在自己的上下文中运行，拥有一组允许的工具。它们适用于需要读取大量文件或需要专注而不会弄乱主对话的任务。</p>
-<div class="codeblock"><pre><code class="language-markdown .claude/agents/security-reviewer.md">---
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-markdown">---
+name: security-reviewer
+description: 审查代码中的安全漏洞
+tools: Read, Grep, Glob, Bash
+model: opus
+---
+你是一名资深安全工程师。审查代码是否存在以下问题：
+- 注入漏洞（SQL、XSS、命令注入）
+- 身份认证和授权缺陷
+- 代码中的机密或凭据
+- 不安全的数据处理
+
+提供具体的行引用和修复建议。</code></pre><pre class="v-en"><code class="language-markdown">---
 name: security-reviewer
 description: Reviews code for security vulnerabilities
 tools: Read, Grep, Glob, Bash
@@ -500,7 +561,7 @@ You are a senior security engineer. Review code for:
 - Secrets or credentials in code
 - Insecure data handling
 
-Provide specific line references and suggested fixes.</code></pre><button type="button" class="copy-btn">复制</button></div>
+Provide specific line references and suggested fixes.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>明确告诉 Claude 使用子代理：<em>“使用子代理来审查此代码的安全性问题。”</em></p>
 <h3 id="安装插件">安装插件</h3>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>运行 <code>/plugin</code> 浏览市场。插件无需配置即可添加技能、工具和集成。</p>
@@ -526,11 +587,15 @@ Provide specific line references and suggested fixes.</code></pre><button type="
 <div class="callout tip"><span class="co-icon">💡</span><div><p>对于较大的功能，先让 Claude 来面试你。从一个极简的提示开始，让 Claude 使用 <code>AskUserQuestion</code> 工具来面试你。</p>
 </div></div>
 <p>Claude 会询问你可能还未考虑到的事情，包括技术实现、UI/UX、边缘情况和权衡。</p>
-<div class="codeblock"><pre><code class="language-text">I want to build [brief description]. Interview me in detail using the AskUserQuestion tool.
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">我想构建 [简要描述]。使用 AskUserQuestion 工具对我进行详细访谈。
+
+询问技术实现、UI/UX、边缘情况、担忧和权衡。不要问显而易见的问题，深入探讨我可能未曾考虑到的难点。
+
+持续访谈，直至覆盖所有方面，然后将完整规范写入 SPEC.md。</code></pre><pre class="v-en"><code class="language-text">I want to build [brief description]. Interview me in detail using the AskUserQuestion tool.
 
 Ask about technical implementation, UI/UX, edge cases, concerns, and tradeoffs. Don't ask obvious questions, dig into the hard parts I might not have considered.
 
-Keep interviewing until we've covered everything, then write a complete spec to SPEC.md.</code></pre><button type="button" class="copy-btn">复制</button></div>
+Keep interviewing until we've covered everything, then write a complete spec to SPEC.md.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>一旦规范完成，启动一个全新的会话来执行它。新会话有干净的上下文，完全专注于实现，你还有书面规范可供参考。</p>
 <p>最有用的规范是自包含的：列出涉及的文件和接口，说明什么不在范围内，并以一个端到端的验证步骤来证明功能有效。花时间让规范精确，比花时间盯着实现更划算。</p>
 <hr>
@@ -564,11 +629,12 @@ Keep interviewing until we've covered everything, then write a complete spec to 
 <div class="callout tip"><span class="co-icon">💡</span><div><p>用 <code>&quot;使用子代理调查 X&quot;</code> 委托研究任务。它们会在独立上下文中探索，保持你的主对话干净，专注于实施。</p>
 </div></div>
 <p>既然上下文是你的根本约束，子代理就成了最强大的工具之一。当 Claude 研究一个代码库时，它会读取大量文件，这些都会消耗你的上下文。子代理在独立的上下文窗口中运行，并返回摘要报告：</p>
-<div class="codeblock"><pre><code class="language-text">Use subagents to investigate how our authentication system handles token
-refresh, and whether we have any existing OAuth utilities I should reuse.</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">使用子代理调查我们的身份验证系统如何处理令牌
+刷新，以及我们是否有任何现有的 OAuth 工具可以复用。</code></pre><pre class="v-en"><code class="language-text">Use subagents to investigate how our authentication system handles token
+refresh, and whether we have any existing OAuth utilities I should reuse.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>子代理探索代码库，读取相关文件，然后带回发现结果，所有这些都不会污染你的主对话。</p>
 <p>你也可以在 Claude 实现某些功能后，使用子代理进行验证：</p>
-<div class="codeblock"><pre><code class="language-text">use a subagent to review this code for edge cases</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">使用子代理审查此代码的边缘情况</code></pre><pre class="v-en"><code class="language-text">use a subagent to review this code for edge cases</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <h3 id="使用检查点回退">使用检查点回退</h3>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>你发送的每一条提示都会创建一个检查点。你可以将会话、代码或两者恢复到任意之前的检查点。</p>
 </div></div>
@@ -654,9 +720,11 @@ done</code></pre><button type="button" class="copy-btn">复制</button></div>
 </div></div>
 <p>Claude 无人值守工作的时间越长，在将工作视为完成之前进行独立检查就越重要。审查者在全新的 <a href="https://code.claude.com/docs/en/sub-agents" target="_blank" rel="noopener">subagent</a> 上下文中运行，只会看到 diff 和你给出的标准，而不会看到产生该变更的推理过程，因此它会根据自身条件评估结果。</p>
 <p>如需进行正确性检查，可以运行内置的 <a href="https://code.claude.com/docs/en/commands" target="_blank" rel="noopener"><code>/code-review</code> 技能</a>，它会在一个全新的 subagent 中审查当前 diff 中的 bug，并将发现汇报给当前会话。如果要对照你的计划来检查 diff，请自行编写审查提示。指出要检查的工作、对照的计划，以及什么算作发现：</p>
-<div class="codeblock"><pre><code class="language-text">Use a subagent to review the rate limiter diff against PLAN.md. Check that
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">使用子代理对照 PLAN.md 审查限流器的差异。检查
+
+every requirement is implemented, the listed edge cases have tests, and nothing outside the task's scope changed. Report gaps, not style preferences.</code></pre><pre class="v-en"><code class="language-text">Use a subagent to review the rate limiter diff against PLAN.md. Check that
 every requirement is implemented, the listed edge cases have tests, and
-nothing outside the task's scope changed. Report gaps, not style preferences.</code></pre><button type="button" class="copy-btn">复制</button></div>
+nothing outside the task's scope changed. Report gaps, not style preferences.</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>由于审查者以 subagent 方式运行，执行会话会直接收到差距报告，并可以修复它们并重新审查，无需你在不同窗口之间复制发现结果。对于更长时间的自主运行，一个 <a href="https://code.claude.com/docs/en/agent-teams" target="_blank" rel="noopener">agent 团队</a> 可以在多个任务之间维持这个循环，而你只需抽查记录下来的发现。</p>
 <div class="callout note"><span class="co-icon">📌</span><div><p>要求审查者找差距的提示通常会导致它报告一些发现——即使工作本身是没问题的，因为它被要求这样做。追逐每一个发现会导致过度工程化：额外的抽象层、防御性代码，以及针对不可能发生情况的测试。告诉审查者只标记那些会影响正确性或已明确要求的差距，其余的视为可选项。</p>
 </div></div>
@@ -718,11 +786,33 @@ nothing outside the task's scope changed. Report gaps, not style preferences.</c
   }
   $('#themeBtn').addEventListener('click', function () { idx = (idx + 1) % THEMES.length; applyTheme(); });
   applyTheme();
-  // 代码块复制
+  // 双语围栏：单块切换
+  function setBlockLang(cb, lang) {
+    cb.setAttribute('data-clang', lang);
+    cb.querySelectorAll('.cb-lang').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-lang') === lang); });
+  }
+  document.addEventListener('click', function (e) {
+    var lb = e.target.closest('.cb-lang');
+    if (lb) setBlockLang(lb.closest('.codeblock'), lb.getAttribute('data-lang'));
+  });
+  // 双语围栏：全局默认（与提示词库一致的持久化模式）
+  var clang = localStorage.getItem('ccpl-doc-clang') === 'en' ? 'en' : 'zh';
+  function applyClang() {
+    $('#clangBtn').textContent = clang === 'zh' ? '🌐 示例默认：中文' : '🌐 示例默认：英文';
+    localStorage.setItem('ccpl-doc-clang', clang);
+    document.querySelectorAll('.codeblock.bilingual').forEach(function (cb) { setBlockLang(cb, clang); });
+  }
+  $('#clangBtn').addEventListener('click', function () { clang = clang === 'zh' ? 'en' : 'zh'; applyClang(); });
+  applyClang();
+  // 代码块复制（双语块复制当前显示的版本）
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.copy-btn');
     if (!btn) return;
-    var text = btn.parentElement.querySelector('code').textContent;
+    var block = btn.closest('.codeblock');
+    var code = block.classList.contains('bilingual')
+      ? block.querySelector(block.getAttribute('data-clang') === 'en' ? '.v-en code' : '.v-zh code')
+      : block.querySelector('code');
+    var text = code.textContent;
     var done = function () {
       btn.textContent = '已复制 ✓'; btn.classList.add('ok');
       setTimeout(function () { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);

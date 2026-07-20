@@ -117,6 +117,19 @@ code { font-family: var(--mono); }
 .codeblock .copy-btn:hover { background: var(--accent); color: #fff; }
 .codeblock .copy-btn.ok { background: #4a8c5c; color: #fff; opacity: 1; }
 
+/* 双语围栏（提示词/CLAUDE.md 示例）：默认中文，可切英文 */
+.codeblock.bilingual .v-en { display: none; }
+.codeblock.bilingual[data-clang="en"] .v-en { display: block; }
+.codeblock.bilingual[data-clang="en"] .v-zh { display: none; }
+.cb-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; }
+.cb-tools .copy-btn { position: static; }
+.cb-seg { display: inline-flex; border-radius: 999px; overflow: hidden; }
+.cb-seg .cb-lang {
+  border: none; background: rgba(240,238,230,0.12); color: #d9d7cf;
+  font-size: 11px; padding: 4px 10px; letter-spacing: 0.02em;
+}
+.cb-seg .cb-lang.on { background: var(--accent); color: #fff; }
+
 /* 呼出块 */
 .callout { display: flex; gap: 10px; padding: 13px 16px; border-radius: 8px; margin: 0 0 16px; font-size: 14.5px; background: var(--accent-bg); border: 1px solid rgba(217,119,87,0.18); }
 .callout .co-icon { flex-shrink: 0; }
@@ -209,6 +222,7 @@ ol.steps > li:last-child::after { display: none; }
     </nav>
     <div class="side-foot">
       <button class="theme-btn" id="themeBtn">🌗 主题：自动</button>
+      <button class="theme-btn" id="clangBtn">🌐 示例默认：中文</button>
       <div><a href="https://claude.com/blog/how-anthropic-teams-use-claude-code" target="_blank" rel="noopener">查看英文原文 ↗</a></div>
     </div>
   </aside>
@@ -272,11 +286,33 @@ ol.steps > li:last-child::after { display: none; }
   }
   $('#themeBtn').addEventListener('click', function () { idx = (idx + 1) % THEMES.length; applyTheme(); });
   applyTheme();
-  // 代码块复制
+  // 双语围栏：单块切换
+  function setBlockLang(cb, lang) {
+    cb.setAttribute('data-clang', lang);
+    cb.querySelectorAll('.cb-lang').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-lang') === lang); });
+  }
+  document.addEventListener('click', function (e) {
+    var lb = e.target.closest('.cb-lang');
+    if (lb) setBlockLang(lb.closest('.codeblock'), lb.getAttribute('data-lang'));
+  });
+  // 双语围栏：全局默认（与提示词库一致的持久化模式）
+  var clang = localStorage.getItem('ccpl-doc-clang') === 'en' ? 'en' : 'zh';
+  function applyClang() {
+    $('#clangBtn').textContent = clang === 'zh' ? '🌐 示例默认：中文' : '🌐 示例默认：英文';
+    localStorage.setItem('ccpl-doc-clang', clang);
+    document.querySelectorAll('.codeblock.bilingual').forEach(function (cb) { setBlockLang(cb, clang); });
+  }
+  $('#clangBtn').addEventListener('click', function () { clang = clang === 'zh' ? 'en' : 'zh'; applyClang(); });
+  applyClang();
+  // 代码块复制（双语块复制当前显示的版本）
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.copy-btn');
     if (!btn) return;
-    var text = btn.parentElement.querySelector('code').textContent;
+    var block = btn.closest('.codeblock');
+    var code = block.classList.contains('bilingual')
+      ? block.querySelector(block.getAttribute('data-clang') === 'en' ? '.v-en code' : '.v-zh code')
+      : block.querySelector('code');
+    var text = code.textContent;
     var done = function () {
       btn.textContent = '已复制 ✓'; btn.classList.add('ok');
       setTimeout(function () { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);

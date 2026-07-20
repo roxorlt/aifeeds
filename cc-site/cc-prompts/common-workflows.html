@@ -117,6 +117,19 @@ code { font-family: var(--mono); }
 .codeblock .copy-btn:hover { background: var(--accent); color: #fff; }
 .codeblock .copy-btn.ok { background: #4a8c5c; color: #fff; opacity: 1; }
 
+/* 双语围栏（提示词/CLAUDE.md 示例）：默认中文，可切英文 */
+.codeblock.bilingual .v-en { display: none; }
+.codeblock.bilingual[data-clang="en"] .v-en { display: block; }
+.codeblock.bilingual[data-clang="en"] .v-zh { display: none; }
+.cb-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; }
+.cb-tools .copy-btn { position: static; }
+.cb-seg { display: inline-flex; border-radius: 999px; overflow: hidden; }
+.cb-seg .cb-lang {
+  border: none; background: rgba(240,238,230,0.12); color: #d9d7cf;
+  font-size: 11px; padding: 4px 10px; letter-spacing: 0.02em;
+}
+.cb-seg .cb-lang.on { background: var(--accent); color: #fff; }
+
 /* 呼出块 */
 .callout { display: flex; gap: 10px; padding: 13px 16px; border-radius: 8px; margin: 0 0 16px; font-size: 14.5px; background: var(--accent-bg); border: 1px solid rgba(217,119,87,0.18); }
 .callout .co-icon { flex-shrink: 0; }
@@ -220,6 +233,7 @@ ol.steps > li:last-child::after { display: none; }
     </nav>
     <div class="side-foot">
       <button class="theme-btn" id="themeBtn">🌗 主题：自动</button>
+      <button class="theme-btn" id="clangBtn">🌐 示例默认：中文</button>
       <div><a href="https://code.claude.com/docs/en/common-workflows" target="_blank" rel="noopener">查看英文原文 ↗</a></div>
     </div>
   </aside>
@@ -248,11 +262,11 @@ ol.steps > li:last-child::after { display: none; }
 </li>
 <li><div class="step-title">启动 Claude Code</div><div class="codeblock"><pre><code class="language-bash">claude </code></pre><button type="button" class="copy-btn">复制</button></div>
 </li>
-<li><div class="step-title">请求高层次概览</div><div class="codeblock"><pre><code class="language-text">give me an overview of this codebase</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">请求高层次概览</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">给我一个这个代码库的概述</code></pre><pre class="v-en"><code class="language-text">give me an overview of this codebase</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">深入探索特定组件</div><div class="codeblock"><pre><code class="language-text">explain the main architecture patterns used here</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">what are the key data models?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">how is authentication handled?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">深入探索特定组件</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">解释这里使用的主要架构模式</code></pre><pre class="v-en"><code class="language-text">explain the main architecture patterns used here</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">关键的数据模型是什么？</code></pre><pre class="v-en"><code class="language-text">what are the key data models?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">认证是如何处理的？</code></pre><pre class="v-en"><code class="language-text">how is authentication handled?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
 <ul>
@@ -263,11 +277,11 @@ ol.steps > li:last-child::after { display: none; }
 </div></div>
 <h4 id="查找相关代码">查找相关代码</h4>
 <p>假设你需要定位与特定功能或特性相关的代码。</p>
-<ol class="steps"><li><div class="step-title">让 Claude 查找相关文件</div><div class="codeblock"><pre><code class="language-text">find the files that handle user authentication</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">让 Claude 查找相关文件</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">找出处理用户认证的文件</code></pre><pre class="v-en"><code class="language-text">find the files that handle user authentication</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">了解组件如何交互的上下文</div><div class="codeblock"><pre><code class="language-text">how do these authentication files work together?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">了解组件如何交互的上下文</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">这些认证文件是如何协同工作的？</code></pre><pre class="v-en"><code class="language-text">how do these authentication files work together?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">理解执行流程</div><div class="codeblock"><pre><code class="language-text">trace the login process from front-end to database</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">理解执行流程</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">从前端到数据库追踪登录流程</code></pre><pre class="v-en"><code class="language-text">trace the login process from front-end to database</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
 <ul>
@@ -279,11 +293,11 @@ ol.steps > li:last-child::after { display: none; }
 <hr>
 <h3 id="高效修复-bug">高效修复 Bug</h3>
 <p>假设你遇到了一个错误信息，需要找到其根源并修复。</p>
-<ol class="steps"><li><div class="step-title">向 Claude 分享错误信息</div><div class="codeblock"><pre><code class="language-text">I'm seeing an error when I run npm test</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">向 Claude 分享错误信息</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">运行 npm test 时我看到一个错误</code></pre><pre class="v-en"><code class="language-text">I'm seeing an error when I run npm test</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">请求修复建议</div><div class="codeblock"><pre><code class="language-text">suggest a few ways to fix the @ts-ignore in user.ts</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">请求修复建议</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">建议几种修复 user.ts 中 @ts-ignore 的方法</code></pre><pre class="v-en"><code class="language-text">suggest a few ways to fix the @ts-ignore in user.ts</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">应用修复</div><div class="codeblock"><pre><code class="language-text">update user.ts to add the null check you suggested</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">应用修复</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">更新 user.ts 以添加你建议的 null 检查</code></pre><pre class="v-en"><code class="language-text">update user.ts to add the null check you suggested</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
 <ul>
@@ -295,13 +309,13 @@ ol.steps > li:last-child::after { display: none; }
 <hr>
 <h3 id="重构代码">重构代码</h3>
 <p>假设你需要更新旧代码，使其采用现代模式和实践。</p>
-<ol class="steps"><li><div class="step-title">识别需要重构的遗留代码</div><div class="codeblock"><pre><code class="language-text">find deprecated API usage in our codebase</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">识别需要重构的遗留代码</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">在我们的代码库中找出已弃用的 API 用法</code></pre><pre class="v-en"><code class="language-text">find deprecated API usage in our codebase</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">获取重构建议</div><div class="codeblock"><pre><code class="language-text">suggest how to refactor utils.js to use modern JavaScript features</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">获取重构建议</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">建议如何重构 utils.js 以使用现代 JavaScript 特性</code></pre><pre class="v-en"><code class="language-text">suggest how to refactor utils.js to use modern JavaScript features</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">安全地应用更改</div><div class="codeblock"><pre><code class="language-text">refactor utils.js to use ES2024 features while maintaining the same behavior</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">安全地应用更改</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">重构 utils.js 以使用 ES2024 特性，同时保持相同的行为</code></pre><pre class="v-en"><code class="language-text">refactor utils.js to use ES2024 features while maintaining the same behavior</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">验证重构结果</div><div class="codeblock"><pre><code class="language-text">run tests for the refactored code</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">验证重构结果</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">为重构后的代码运行测试</code></pre><pre class="v-en"><code class="language-text">run tests for the refactored code</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>小贴士：</p>
 <ul>
@@ -313,37 +327,37 @@ ol.steps > li:last-child::after { display: none; }
 <hr>
 <h3 id="编写测试">编写测试</h3>
 <p>假设你需要为未覆盖的代码添加测试。</p>
-<ol class="steps"><li><div class="step-title">识别未测试的代码</div><div class="codeblock"><pre><code class="language-text">find functions in NotificationsService.swift that are not covered by tests</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">识别未测试的代码</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">在 NotificationsService.swift 中找出未被测试覆盖的函数</code></pre><pre class="v-en"><code class="language-text">find functions in NotificationsService.swift that are not covered by tests</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">生成测试脚手架</div><div class="codeblock"><pre><code class="language-text">add tests for the notification service</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">生成测试脚手架</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">为通知服务添加测试</code></pre><pre class="v-en"><code class="language-text">add tests for the notification service</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">添加有意义的测试用例</div><div class="codeblock"><pre><code class="language-text">add test cases for edge conditions in the notification service</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">添加有意义的测试用例</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">为通知服务中边界条件添加测试用例</code></pre><pre class="v-en"><code class="language-text">add test cases for edge conditions in the notification service</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">运行并验证测试</div><div class="codeblock"><pre><code class="language-text">run the new tests and fix any failures</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">运行并验证测试</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">运行新的测试并修复所有失败</code></pre><pre class="v-en"><code class="language-text">run the new tests and fix any failures</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <p>Claude 可以生成遵循项目现有模式和约定的测试。在请求测试时，请明确说明你希望验证哪些行为。Claude 会检查你现有的测试文件，以匹配已经使用的风格、框架和断言模式。</p>
 <p>为了获得全面的覆盖率，可以让 Claude 找出你可能遗漏的边界情况。Claude 能够分析代码路径，并建议针对错误条件、边界值以及容易被忽略的异常输入编写测试。</p>
 <hr>
 <h3 id="创建-pull-request">创建 Pull Request</h3>
 <p>你可以直接让 Claude 为你创建 pull request（例如，&quot;为我的更改创建一个 pr&quot;），也可以按步骤引导 Claude 完成：</p>
-<ol class="steps"><li><div class="step-title">总结你的更改</div><div class="codeblock"><pre><code class="language-text">summarize the changes I've made to the authentication module</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">总结你的更改</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">总结我对认证模块所做的更改</code></pre><pre class="v-en"><code class="language-text">summarize the changes I've made to the authentication module</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">生成 Pull Request</div><div class="codeblock"><pre><code class="language-text">create a pr</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">生成 Pull Request</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">创建一个 pr</code></pre><pre class="v-en"><code class="language-text">create a pr</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">审核并完善</div><div class="codeblock"><pre><code class="language-text">enhance the PR description with more context about the security improvements</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">审核并完善</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">增强 PR 描述，提供更多关于安全改进的上下文</code></pre><pre class="v-en"><code class="language-text">enhance the PR description with more context about the security improvements</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <p>当你使用 <code>gh pr create</code> 创建 PR 时，会话会自动关联到该 PR。要稍后查找，可使用你的 PR 编号运行 <code>claude --from-pr 1234</code>，这样会打开会话选择器，并筛选出与该 PR 关联的会话；或者将 PR URL 粘贴到 <a href="https://code.claude.com/docs/en/sessions#use-the-session-picker" target="_blank" rel="noopener"><code>/resume</code> 选择器</a> 的搜索框中。</p>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提交前先审查 Claude 生成的 PR，并让 Claude 高亮潜在的风险或需要考虑的事项。</p>
 </div></div>
 <h3 id="处理文档">处理文档</h3>
 <p>假设你需要为代码添加或更新文档。</p>
-<ol class="steps"><li><div class="step-title">识别缺少文档的代码</div><div class="codeblock"><pre><code class="language-text">find functions without proper JSDoc comments in the auth module</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">识别缺少文档的代码</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">在 auth 模块中查找没有适当 JSDoc 注释的函数</code></pre><pre class="v-en"><code class="language-text">find functions without proper JSDoc comments in the auth module</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">生成文档</div><div class="codeblock"><pre><code class="language-text">add JSDoc comments to the undocumented functions in auth.js</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">生成文档</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">为 auth.js 中未文档化的函数添加 JSDoc 注释</code></pre><pre class="v-en"><code class="language-text">add JSDoc comments to the undocumented functions in auth.js</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">审核并增强</div><div class="codeblock"><pre><code class="language-text">improve the generated documentation with more context and examples</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">审核并增强</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">改进生成的文档，提供更多上下文和示例</code></pre><pre class="v-en"><code class="language-text">improve the generated documentation with more context and examples</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">验证文档</div><div class="codeblock"><pre><code class="language-text">check if the documentation follows our project standards</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">验证文档</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">检查文档是否符合项目标准</code></pre><pre class="v-en"><code class="language-text">check if the documentation follows our project standards</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>小贴士：</p>
 <ul>
@@ -365,15 +379,15 @@ ol.steps > li:last-child::after { display: none; }
 <li>向 Claude 提供图片路径。例如：&quot;Analyze this image: /path/to/your/image.png&quot;</li>
 </ol>
 </li>
-<li><div class="step-title">让 Claude 分析图片</div><div class="codeblock"><pre><code class="language-text">What does this image show?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">Describe the UI elements in this screenshot</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">Are there any problematic elements in this diagram?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">让 Claude 分析图片</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">这张图片展示了什么？</code></pre><pre class="v-en"><code class="language-text">What does this image show?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">描述这张截图中的 UI 元素</code></pre><pre class="v-en"><code class="language-text">Describe the UI elements in this screenshot</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">这个图表中有什么问题元素吗？</code></pre><pre class="v-en"><code class="language-text">Are there any problematic elements in this diagram?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">使用图片提供上下文</div><div class="codeblock"><pre><code class="language-text">Here's a screenshot of the error. What's causing it?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">This is our current database schema. How should we modify it for the new feature?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">使用图片提供上下文</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">这是一张错误的截图。是什么导致了它？</code></pre><pre class="v-en"><code class="language-text">Here's a screenshot of the error. What's causing it?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">这是我们当前的数据库模式。我们应该如何为新的功能进行修改？</code></pre><pre class="v-en"><code class="language-text">This is our current database schema. How should we modify it for the new feature?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li>
-<li><div class="step-title">从视觉内容中获取代码建议</div><div class="codeblock"><pre><code class="language-text">Generate CSS to match this design mockup</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">What HTML structure would recreate this component?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">从视觉内容中获取代码建议</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">生成匹配这个设计模型的 CSS</code></pre><pre class="v-en"><code class="language-text">Generate CSS to match this design mockup</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">什么样的 HTML 结构会重新创建这个组件？</code></pre><pre class="v-en"><code class="language-text">What HTML structure would recreate this component?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
 <ul>
@@ -387,13 +401,13 @@ ol.steps > li:last-child::after { display: none; }
 <hr>
 <h3 id="引用文件和目录">引用文件和目录</h3>
 <p>使用 @ 可以快速包含文件或目录，无需等待 Claude 读取它们。</p>
-<ol class="steps"><li><div class="step-title">引用单个文件</div><div class="codeblock"><pre><code class="language-text">Explain the logic in @src/utils/auth.js</code></pre><button type="button" class="copy-btn">复制</button></div>
+<ol class="steps"><li><div class="step-title">引用单个文件</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">解释 @src/utils/auth.js 中的逻辑</code></pre><pre class="v-en"><code class="language-text">Explain the logic in @src/utils/auth.js</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>这会将文件的完整内容纳入对话中。</p>
 </li>
-<li><div class="step-title">引用目录</div><div class="codeblock"><pre><code class="language-text">What's the structure of @src/components?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">引用目录</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">@src/components 的结构是什么？</code></pre><pre class="v-en"><code class="language-text">What's the structure of @src/components?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>这会提供一个包含文件信息的目录列表。</p>
 </li>
-<li><div class="step-title">引用 MCP 资源</div><div class="codeblock"><pre><code class="language-text">Show me the data from @github:repos/owner/repo/issues</code></pre><button type="button" class="copy-btn">复制</button></div>
+<li><div class="step-title">引用 MCP 资源</div><div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">展示来自 @github:repos/owner/repo/issues 的数据</code></pre><pre class="v-en"><code class="language-text">Show me the data from @github:repos/owner/repo/issues</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>这会使用 @server:resource 格式从已连接的 MCP 服务器获取数据。详情请参阅 <a href="https://code.claude.com/docs/en/mcp#use-mcp-resources" target="_blank" rel="noopener">MCP 资源</a>。</p>
 </li></ol>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
@@ -443,12 +457,12 @@ ol.steps > li:last-child::after { display: none; }
 <h3 id="询问-claude-关于其能力的问题">询问 Claude 关于其能力的问题</h3>
 <p>Claude 内置了对其文档的访问能力，可以回答有关自身功能和限制的问题。</p>
 <h4 id="示例问题">示例问题</h4>
-<div class="codeblock"><pre><code class="language-text">can Claude Code create pull requests?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">how does Claude Code handle permissions?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">what skills are available?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">how do I use MCP with Claude Code?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">how do I configure Claude Code for Amazon Bedrock?</code></pre><button type="button" class="copy-btn">复制</button></div>
-<div class="codeblock"><pre><code class="language-text">what are the limitations of Claude Code?</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">Claude Code 可以创建拉取请求吗？</code></pre><pre class="v-en"><code class="language-text">can Claude Code create pull requests?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">Claude Code 如何处理权限？</code></pre><pre class="v-en"><code class="language-text">how does Claude Code handle permissions?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">有哪些技能可用？</code></pre><pre class="v-en"><code class="language-text">what skills are available?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">如何在 Claude Code 中使用 MCP？</code></pre><pre class="v-en"><code class="language-text">how do I use MCP with Claude Code?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">如何为 Amazon Bedrock 配置 Claude Code？</code></pre><pre class="v-en"><code class="language-text">how do I configure Claude Code for Amazon Bedrock?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">Claude Code 的限制是什么？</code></pre><pre class="v-en"><code class="language-text">what are the limitations of Claude Code?</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <div class="callout note"><span class="co-icon">📝</span><div><p>Claude 对这些问题提供基于文档的回答。如需动手演示，请运行 <code>/powerup</code> 获取带有动画演示的交互式教程，或参考上面相应的特定工作流部分。</p>
 </div></div>
 <div class="callout tip"><span class="co-icon">💡</span><div><p>提示：</p>
@@ -473,7 +487,7 @@ ol.steps > li:last-child::after { display: none; }
 <p>你也可以在会话期间按下 <code>Shift+Tab</code> 来循环切换到规划模式。循环顺序为 <code>default</code>（默认）→ <code>acceptEdits</code>（接受编辑）→ <code>plan</code>（规划）。关于批准流程以及在文本编辑器中编辑计划的内容，请参阅<a href="https://code.claude.com/docs/en/permission-modes#analyze-before-you-edit-with-plan-mode" target="_blank" rel="noopener">规划模式</a>。</p>
 <h2 id="将探索任务委托给子智能体">将探索任务委托给子智能体</h2>
 <p>浏览大型代码库会占用大量上下文空间。将探索工作委托出去，你只需要接收最终的发现结果。</p>
-<div class="codeblock"><pre><code class="language-text">use a subagent to investigate how our auth system handles token refresh</code></pre><button type="button" class="copy-btn">复制</button></div>
+<div class="codeblock bilingual" data-clang="zh"><pre class="v-zh"><code class="language-text">使用子代理调查我们的认证系统如何处理令牌刷新</code></pre><pre class="v-en"><code class="language-text">use a subagent to investigate how our auth system handles token refresh</code></pre><div class="cb-tools"><span class="cb-seg"><button type="button" class="cb-lang on" data-lang="zh">中文</button><button type="button" class="cb-lang" data-lang="en">EN</button></span><button type="button" class="copy-btn">复制</button></div></div>
 <p>子智能体会在自己的上下文窗口中读取文件，并汇报一份摘要。关于定义拥有自定义工具和提示词的智能体，请参阅<a href="https://code.claude.com/docs/en/sub-agents" target="_blank" rel="noopener">子智能体</a>。</p>
 <h2 id="将-claude-管道化用于脚本">将 Claude 管道化用于脚本</h2>
 <p>在 CI、预提交钩子或批处理等场景中，以非交互方式运行 Claude。其标准输入和标准输出的使用方式与任何 Unix 工具一样。</p>
@@ -504,11 +518,33 @@ ol.steps > li:last-child::after { display: none; }
   }
   $('#themeBtn').addEventListener('click', function () { idx = (idx + 1) % THEMES.length; applyTheme(); });
   applyTheme();
-  // 代码块复制
+  // 双语围栏：单块切换
+  function setBlockLang(cb, lang) {
+    cb.setAttribute('data-clang', lang);
+    cb.querySelectorAll('.cb-lang').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-lang') === lang); });
+  }
+  document.addEventListener('click', function (e) {
+    var lb = e.target.closest('.cb-lang');
+    if (lb) setBlockLang(lb.closest('.codeblock'), lb.getAttribute('data-lang'));
+  });
+  // 双语围栏：全局默认（与提示词库一致的持久化模式）
+  var clang = localStorage.getItem('ccpl-doc-clang') === 'en' ? 'en' : 'zh';
+  function applyClang() {
+    $('#clangBtn').textContent = clang === 'zh' ? '🌐 示例默认：中文' : '🌐 示例默认：英文';
+    localStorage.setItem('ccpl-doc-clang', clang);
+    document.querySelectorAll('.codeblock.bilingual').forEach(function (cb) { setBlockLang(cb, clang); });
+  }
+  $('#clangBtn').addEventListener('click', function () { clang = clang === 'zh' ? 'en' : 'zh'; applyClang(); });
+  applyClang();
+  // 代码块复制（双语块复制当前显示的版本）
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.copy-btn');
     if (!btn) return;
-    var text = btn.parentElement.querySelector('code').textContent;
+    var block = btn.closest('.codeblock');
+    var code = block.classList.contains('bilingual')
+      ? block.querySelector(block.getAttribute('data-clang') === 'en' ? '.v-en code' : '.v-zh code')
+      : block.querySelector('code');
+    var text = code.textContent;
     var done = function () {
       btn.textContent = '已复制 ✓'; btn.classList.add('ok');
       setTimeout(function () { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);
