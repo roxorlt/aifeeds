@@ -13,6 +13,7 @@
 | `style.css` | 共用样式 |
 | `assets/gongan-icon.png` | 公安备案徽章（36×40） |
 | `372c4ae2a3701bbe3b091dff54fb6d14.txt` | 360 搜索站点所有权验证文件 |
+| `sogousiteverification.txt` | 搜狗搜索站点所有权验证文件 |
 | `deploy.sh` | scp + chown + chmod 一键覆盖部署 |
 
 服务器对应路径：`/www/wwwroot/ai-feeds.cc/`（OpenCloudOS 9.2，宝塔面板）。
