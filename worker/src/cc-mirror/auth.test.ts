@@ -61,6 +61,57 @@ describe("cc sync canonical request", () => {
       "6453e5535a85f8d9e403e2ab5cfec0df97a597afdcd0d105fb8f43e0dae83909",
     );
   });
+
+  it("hashes even a non-standard GET body through clone without consuming it", async () => {
+    function fakeGet(body: string, headers = new Headers()) {
+      let originalReads = 0;
+      let cloneReads = 0;
+      const bytes = new TextEncoder().encode(body);
+      const value = {
+        url: "https://api.ai-feeds.com/api/cc-sync/health",
+        method: "GET",
+        headers,
+        async arrayBuffer() {
+          originalReads += 1;
+          return bytes.slice().buffer;
+        },
+        clone() {
+          return {
+            async arrayBuffer() {
+              cloneReads += 1;
+              return bytes.slice().buffer;
+            },
+          };
+        },
+      } as unknown as Request;
+      return {
+        request: value,
+        reads: () => ({ originalReads, cloneReads }),
+      };
+    }
+
+    const timestamp = String(NOW_SECONDS);
+    const bodyA = fakeGet("body A");
+    const signatureA = await signCcSyncRequest(
+      bodyA.request,
+      SECRET,
+      timestamp,
+    );
+    expect(bodyA.reads()).toEqual({ originalReads: 0, cloneReads: 1 });
+
+    const headers = new Headers({
+      "X-CC-Timestamp": timestamp,
+      "X-CC-Signature": signatureA,
+    });
+    const bodyB = fakeGet("body B", headers);
+    const result = await verifyCcSyncRequest(
+      bodyB.request,
+      SECRET,
+      NOW_SECONDS,
+    );
+    expect(result.ok).toBe(false);
+    expect(bodyB.reads()).toEqual({ originalReads: 0, cloneReads: 1 });
+  });
 });
 
 describe("verifyCcSyncRequest", () => {

@@ -3,8 +3,6 @@ const SIGNATURE_HEADER = "X-CC-Signature";
 const SIGNATURE_RE = /^[0-9a-f]{64}$/;
 const CANONICAL_TIMESTAMP_RE = /^(0|[1-9][0-9]*)$/;
 const MAX_CLOCK_SKEW_SECONDS = 60;
-const EMPTY_SHA256 =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 export type CcSyncAuthResult =
   | { ok: true }
@@ -33,9 +31,7 @@ export async function buildCcSyncCanonicalRequest(
 ): Promise<string> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
-  const bodyHash = method === "GET" || method === "HEAD"
-    ? EMPTY_SHA256
-    : await sha256Hex(await request.clone().arrayBuffer());
+  const bodyHash = await sha256Hex(await request.clone().arrayBuffer());
   return [
     timestamp,
     method,
