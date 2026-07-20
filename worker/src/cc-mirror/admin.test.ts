@@ -41,6 +41,7 @@ class TestD1 {
   maxActiveItemReads = 0;
   itemReadDelayMs = 0;
   afterNextBatch?: (db: TestD1) => void;
+  failDecisionStateRead = false;
 
   constructor() {
     this.sqlite.exec(`
@@ -86,8 +87,10 @@ class TestD1 {
 
   insertOverride(itemId: string, action: "allow" | "deny"): void {
     this.sqlite.prepare(
-      `INSERT INTO cc_item_overrides (item_id, action, reason, updated_at)
-       VALUES (?, ?, 'fixture', '2026-07-20T00:00:00.000Z')`,
+      `INSERT INTO cc_item_overrides (
+         item_id, action, reason, decision_token, updated_at
+       ) VALUES (?, ?, 'fixture', 'fixture-token',
+         '2026-07-20T00:00:00.000Z')`,
     ).run(itemId, action);
   }
 
@@ -116,6 +119,12 @@ class TestD1 {
         return prepared;
       },
       first: async <T>() => {
+        if (
+          this.failDecisionStateRead
+          && /cc_item_overrides\s+o[\s\S]+cc_item_pages\s+p/i.test(sql)
+        ) {
+          throw new Error("decision state unavailable");
+        }
         const isItemRead = /SELECT\s+\*\s+FROM\s+items\s+WHERE\s+id/i.test(sql);
         if (isItemRead) {
           this.activeItemReads += 1;
@@ -329,6 +338,138 @@ describe("cc mirror admin authorization and routing", () => {
     expect(await json(response)).toHaveProperty("source_policy");
   });
 
+  it("blocks cc mirror preflight before the global credentialed CORS handler", async () => {
+    const { env } = setup();
+    const response = await worker.fetch(
+      new Request("https://admin.ai-feeds.com/api/admin/cc-mirror/decision", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://evil.pages.dev",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      }),
+      env,
+      {
+        waitUntil() {},
+        passThroughOnException() {},
+      } as unknown as ExecutionContext,
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.has("Access-Control-Allow-Origin")).toBe(false);
+    expect(response.headers.has("Access-Control-Allow-Credentials")).toBe(false);
+  });
+
+  it.each([
+    "null",
+    "not-an-origin",
+    "https://evil.pages.dev",
+    "https://staging.ai-feeds.com",
+    "https://api.ai-feeds.com",
+  ])("rejects authenticated cross-origin requests before storage: %s", async (
+    origin,
+  ) => {
+    const poison = new Proxy({}, {
+      get() {
+        throw new Error("storage must not be touched");
+      },
+    });
+    const env = {
+      DB: poison,
+      ADMIN_USER: "admin",
+      ADMIN_PASS: "pass",
+    } as unknown as Env;
+    const response = await handleCcMirrorAdmin(
+      authed("/api/admin/cc-mirror/stats", {
+        headers: { Origin: origin },
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(403);
+    expect(response?.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("rejects authenticated non-JSON POST before body or storage access", async () => {
+    const poison = new Proxy({}, {
+      get() {
+        throw new Error("storage must not be touched");
+      },
+    });
+    const env = {
+      DB: poison,
+      ADMIN_USER: "admin",
+      ADMIN_PASS: "pass",
+    } as unknown as Env;
+    const response = await handleCcMirrorAdmin(
+      authed("/api/admin/cc-mirror/decision", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({
+          item_id: "x_list:1",
+          action: "deny",
+          reason: "evil",
+        }),
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(415);
+  });
+
+  it("does not let an evil simple text/plain request mutate an override", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    const response = await worker.fetch(
+      authed("/api/admin/cc-mirror/decision", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          Origin: "https://evil.pages.dev",
+        },
+        body: JSON.stringify({
+          item_id: "x_list:1",
+          action: "deny",
+          reason: "evil",
+        }),
+      }),
+      env,
+      {
+        waitUntil() {},
+        passThroughOnException() {},
+      } as unknown as ExecutionContext,
+    );
+
+    expect(response.status).toBe(403);
+    expect(
+      db.sqlite.prepare("SELECT COUNT(*) AS n FROM cc_item_overrides").get(),
+    ).toEqual({ n: 0 });
+  });
+
+  it.each([
+    ["same-origin browser", "https://admin.ai-feeds.com"],
+    ["no-Origin CLI", null],
+  ])("accepts JSON POST from %s", async (_label, origin) => {
+    const { env } = setup();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json; charset=UTF-8",
+    };
+    if (origin) headers.Origin = origin;
+    const response = await handleCcMirrorAdmin(
+      authed("/api/admin/cc-mirror/backfill", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ source: "x", limit: 1, dry: 1 }),
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(200);
+    expect(await json(response!)).toMatchObject({ scanned: 0 });
+  });
+
   it("adds a minimal safe operations form to the existing tools page", async () => {
     const { env } = setup();
     const response = await serveAdminToolsHtml(
@@ -521,6 +662,31 @@ describe("cc mirror manual decisions", () => {
     expect(oversized?.status).toBe(413);
   });
 
+  it.each([
+    { dry: 1 },
+    { force_review: 1 },
+    { unknown_field: "typo" },
+  ])("rejects unknown decision fields with zero override writes: %j", async (
+    extra,
+  ) => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "deny",
+        reason: "人工拒绝",
+        ...extra,
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(400);
+    expect(
+      db.sqlite.prepare("SELECT COUNT(*) AS n FROM cc_item_overrides").get(),
+    ).toEqual({ n: 0 });
+  });
+
   it("trims and stores allow reason, then immediately publishes", async () => {
     const { db, r2, env } = setup();
     db.insertItem({ id: "x_list:1" });
@@ -707,6 +873,100 @@ describe("cc mirror manual decisions", () => {
     });
   });
 
+  it("rejects deny A after allow B supersedes it, even though A already made the page gone", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    db.insertLivePage("x_list:1");
+    db.afterNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_overrides
+         SET action = 'allow', reason = 'B', decision_token = 'token-b'
+         WHERE item_id = ?`,
+      ).run("x_list:1");
+    };
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "deny",
+        reason: "decision A",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "decision_superseded",
+      item_id: "x_list:1",
+      action: "deny",
+      override_persisted: true,
+      current_decision_action: "allow",
+      current_page_status: "gone",
+    });
+  });
+
+  it("rejects allow A after deny B supersedes it, even though A already made the page live", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    db.afterNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_overrides
+         SET action = 'deny', reason = 'B', decision_token = 'token-b'
+         WHERE item_id = ?`,
+      ).run("x_list:1");
+    };
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "allow",
+        reason: "decision A",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "decision_superseded",
+      item_id: "x_list:1",
+      action: "allow",
+      override_persisted: true,
+      current_decision_action: "deny",
+      current_page_status: "live",
+    });
+  });
+
+  it("uses the token to reject a same-action successor", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    db.insertLivePage("x_list:1");
+    db.afterNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_overrides
+         SET action = 'deny', reason = 'newer deny',
+             decision_token = 'token-b'
+         WHERE item_id = ?`,
+      ).run("x_list:1");
+    };
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "deny",
+        reason: "older deny",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "decision_superseded",
+      action: "deny",
+      current_decision_action: "deny",
+      current_page_status: "gone",
+    });
+  });
+
   it("does not report success when the immediate sync fails", async () => {
     const { db, env } = setup();
     db.insertItem({ id: "x_list:1" });
@@ -730,8 +990,72 @@ describe("cc mirror manual decisions", () => {
     expect(await json(response!)).toEqual({
       error: "cc_mirror_sync_failed",
       item_id: "x_list:1",
+      action: "allow",
+      override_persisted: true,
+      current_decision_action: "allow",
+      current_page_status: "missing",
     });
     expect(log.mock.calls.flat().join(" ")).not.toContain("secret-looking");
+  });
+
+  it("returns decision_superseded when sync throws after a newer override wins", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    env.READMES = {
+      head: async () => null,
+      put: async () => {
+        db.sqlite.prepare(
+          `UPDATE cc_item_overrides
+           SET action = 'deny', reason = 'B', decision_token = 'token-b'
+           WHERE item_id = ?`,
+        ).run("x_list:1");
+        throw new Error("downstream unavailable");
+      },
+    } as unknown as R2Bucket;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "allow",
+        reason: "decision A",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "decision_superseded",
+      item_id: "x_list:1",
+      action: "allow",
+      override_persisted: true,
+      current_decision_action: "deny",
+    });
+  });
+
+  it("discloses the persisted override when final decision state cannot be read", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    db.failDecisionStateRead = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "allow",
+        reason: "人工允许",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(502);
+    expect(await json(response!)).toEqual({
+      error: "cc_mirror_state_check_failed",
+      item_id: "x_list:1",
+      action: "allow",
+      override_persisted: true,
+      decision_state: "unknown",
+    });
   });
 });
 

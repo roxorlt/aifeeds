@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS cc_item_overrides (
   item_id TEXT PRIMARY KEY,
   action TEXT NOT NULL,
   reason TEXT NOT NULL,
+  decision_token TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 

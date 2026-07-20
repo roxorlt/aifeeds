@@ -119,8 +119,10 @@ class StatefulD1 {
   setOverride(itemId: string, action: string): void {
     this.sqlite
       .prepare(
-        `INSERT INTO cc_item_overrides (item_id, action, reason, updated_at)
-         VALUES (?, ?, 'test override', '2026-07-20T00:00:00.000Z')`,
+        `INSERT INTO cc_item_overrides (
+           item_id, action, reason, decision_token, updated_at
+         ) VALUES (?, ?, 'test override', 'fixture-token',
+           '2026-07-20T00:00:00.000Z')`,
       )
       .run(itemId, action);
   }

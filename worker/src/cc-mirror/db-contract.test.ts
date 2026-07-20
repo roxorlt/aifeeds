@@ -41,6 +41,7 @@ const expectedColumns: Record<string, Array<[string, string, number, number]>> =
     ['item_id', 'TEXT', 0, 1],
     ['action', 'TEXT', 1, 0],
     ['reason', 'TEXT', 1, 0],
+    ['decision_token', 'TEXT', 1, 0],
     ['updated_at', 'TEXT', 1, 0],
   ],
   cc_item_pages: [

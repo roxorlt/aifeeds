@@ -58,8 +58,10 @@ interface EventStatsRow {
   max_seq: number | null;
 }
 
-interface CurrentPageStatusRow {
-  status: string;
+interface DecisionStateRow {
+  override_action: string | null;
+  decision_token: string | null;
+  page_status: string | null;
 }
 
 type BatchBucket = "live" | "review" | "denied" | "pending";
@@ -110,6 +112,11 @@ export async function handleCcMirrorAdmin(
     );
   }
 
+  const origin = request.headers.get("Origin");
+  if (origin !== null && origin !== url.origin) {
+    return adminJson({ error: "cross_origin_forbidden" }, 403);
+  }
+
   const endpoint = url.pathname.slice(ADMIN_PREFIX.length);
   const expectedMethod = endpoint === "stats" || endpoint === "reviews"
     ? "GET"
@@ -125,6 +132,9 @@ export async function handleCcMirrorAdmin(
       405,
       { Allow: expectedMethod },
     );
+  }
+  if (expectedMethod === "POST" && !hasJsonContentType(request)) {
+    return adminJson({ error: "application_json_required" }, 415);
   }
 
   try {
@@ -213,6 +223,11 @@ async function applyCcMirrorDecision(
   env: Env,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  assertOnlyFields(
+    body,
+    ["item_id", "action", "reason"],
+    "invalid_decision_parameter",
+  );
   const itemId = requiredTrimmedString(body.item_id, "item_id", 512);
   const action = body.action;
   if (action !== "allow" && action !== "deny") {
@@ -228,15 +243,25 @@ async function applyCcMirrorDecision(
     .first<{ id: string }>();
   if (!item) throw new AdminInputError("item_not_found");
 
+  const decisionToken = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO cc_item_overrides (item_id, action, reason, updated_at)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO cc_item_overrides (
+       item_id, action, reason, decision_token, updated_at
+     )
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(item_id) DO UPDATE SET
        action = excluded.action,
        reason = excluded.reason,
+       decision_token = excluded.decision_token,
        updated_at = excluded.updated_at`,
   )
-    .bind(itemId, action, reason, new Date().toISOString())
+    .bind(
+      itemId,
+      action,
+      reason,
+      decisionToken,
+      new Date().toISOString(),
+    )
     .run();
 
   let sync: CcPageRunResult;
@@ -246,35 +271,35 @@ async function applyCcMirrorDecision(
     // The override is durable audit state, but the requested publish/unpublish
     // side effect did not complete. Never turn that partial outcome into 200.
     console.error(`[cc-mirror-admin] decision sync failed for ${itemId}`);
+    const state = await readDecisionStateOrThrow(env, itemId, action);
+    assertDecisionStillCurrent(
+      itemId,
+      action,
+      decisionToken,
+      state,
+    );
     throw new AdminInputError(
       "cc_mirror_sync_failed",
-      502,
-      { item_id: itemId },
-    );
-  }
-
-  let currentPage: CurrentPageStatusRow | null;
-  try {
-    currentPage = await env.DB.prepare(
-      `SELECT status
-       FROM cc_item_pages
-       WHERE item_id = ?`,
-    )
-      .bind(itemId)
-      .first<CurrentPageStatusRow>();
-  } catch {
-    console.error(`[cc-mirror-admin] decision state check failed for ${itemId}`);
-    throw new AdminInputError(
-      "cc_mirror_state_check_failed",
       502,
       {
         item_id: itemId,
         action,
         override_persisted: true,
+        current_decision_action: state.overrideAction,
+        current_page_status: state.pageStatus,
       },
     );
   }
-  const currentPageStatus = currentPage?.status ?? "missing";
+
+  const state = await readDecisionStateOrThrow(env, itemId, action);
+  assertDecisionStillCurrent(
+    itemId,
+    action,
+    decisionToken,
+    state,
+    sync,
+  );
+  const currentPageStatus = state.pageStatus;
   const actionReachedRequestedState = action === "allow"
     ? sync.status === "live" && currentPageStatus === "live"
     : currentPageStatus === "missing" || currentPageStatus === "gone";
@@ -298,9 +323,83 @@ async function applyCcMirrorDecision(
     ok: true,
     item_id: itemId,
     action,
+    current_decision_action: state.overrideAction,
     current_page_status: currentPageStatus,
     sync,
   };
+}
+
+async function readDecisionStateOrThrow(
+  env: Env,
+  itemId: string,
+  action: "allow" | "deny",
+): Promise<{
+  overrideAction: string;
+  decisionToken: string | null;
+  pageStatus: string;
+}> {
+  let row: DecisionStateRow | null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT
+         o.action AS override_action,
+         o.decision_token,
+         p.status AS page_status
+       FROM (SELECT 1) anchor
+       LEFT JOIN cc_item_overrides o ON o.item_id = ?
+       LEFT JOIN cc_item_pages p ON p.item_id = ?`,
+    )
+      .bind(itemId, itemId)
+      .first<DecisionStateRow>();
+  } catch {
+    console.error(`[cc-mirror-admin] decision state check failed for ${itemId}`);
+    throw new AdminInputError(
+      "cc_mirror_state_check_failed",
+      502,
+      {
+        item_id: itemId,
+        action,
+        override_persisted: true,
+        decision_state: "unknown",
+      },
+    );
+  }
+  return {
+    overrideAction: row?.override_action ?? "missing",
+    decisionToken: row?.decision_token ?? null,
+    pageStatus: row?.page_status ?? "missing",
+  };
+}
+
+function assertDecisionStillCurrent(
+  itemId: string,
+  action: "allow" | "deny",
+  expectedToken: string,
+  state: {
+    overrideAction: string;
+    decisionToken: string | null;
+    pageStatus: string;
+  },
+  sync?: CcPageRunResult,
+): void {
+  if (
+    state.decisionToken === expectedToken
+    && state.overrideAction === action
+  ) {
+    return;
+  }
+  throw new AdminInputError(
+    "decision_superseded",
+    409,
+    {
+      item_id: itemId,
+      action,
+      override_persisted: true,
+      current_decision_action: state.overrideAction,
+      current_page_status: state.pageStatus,
+      ...(sync ? { sync } : {}),
+    },
+  );
 }
 
 async function listCcMirrorReviews(
@@ -661,17 +760,11 @@ function normalizeBatchOptions(
 function parseBackfillBody(
   body: Record<string, unknown>,
 ): CcMirrorBatchOptions {
-  const allowed = new Set([
-    "source",
-    "feed_key",
-    "limit",
-    "cursor",
-    "dry",
-    "force_review",
-  ]);
-  if (Object.keys(body).some((key) => !allowed.has(key))) {
-    throw new AdminInputError("invalid_backfill_parameter");
-  }
+  assertOnlyFields(
+    body,
+    ["source", "feed_key", "limit", "cursor", "dry", "force_review"],
+    "invalid_backfill_parameter",
+  );
   return {
     source: body.source as CcMirrorSource | undefined,
     feedKey: body.feed_key as string | undefined,
@@ -685,10 +778,11 @@ function parseBackfillBody(
 function parseReconcileBody(
   body: Record<string, unknown>,
 ): Omit<CcMirrorBatchOptions, "source" | "feedKey" | "forceReview"> {
-  const allowed = new Set(["limit", "cursor", "dry"]);
-  if (Object.keys(body).some((key) => !allowed.has(key))) {
-    throw new AdminInputError("invalid_reconcile_parameter");
-  }
+  assertOnlyFields(
+    body,
+    ["limit", "cursor", "dry"],
+    "invalid_reconcile_parameter",
+  );
   return {
     limit: body.limit as number | undefined,
     cursor: body.cursor as string | undefined,
@@ -763,6 +857,27 @@ function requiredTrimmedString(
   const normalized = normalizeOptionalString(value, field, maxLength);
   if (!normalized) throw new AdminInputError(`${field}_required`);
   return normalized;
+}
+
+function assertOnlyFields(
+  body: Record<string, unknown>,
+  fields: string[],
+  error: string,
+): void {
+  const allowed = new Set(fields);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    throw new AdminInputError(error);
+  }
+}
+
+function hasJsonContentType(request: Request): boolean {
+  const raw = request.headers.get("Content-Type");
+  if (!raw) return false;
+  const parts = raw.split(";").map((part) => part.trim());
+  if (parts[0].toLowerCase() !== "application/json") return false;
+  if (parts.length === 1) return true;
+  if (parts.length !== 2) return false;
+  return /^charset\s*=\s*(?:"utf-8"|utf-8)$/i.test(parts[1]);
 }
 
 async function readJsonObject(

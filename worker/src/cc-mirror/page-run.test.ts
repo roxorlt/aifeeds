@@ -80,9 +80,13 @@ class StatefulD1 {
 
   setOverride(itemId: string, action: "allow" | "deny"): void {
     this.sqlite.prepare(
-      `INSERT INTO cc_item_overrides (item_id, action, reason, updated_at)
-       VALUES (?, ?, 'test', '2026-07-20T00:00:00.000Z')
-       ON CONFLICT(item_id) DO UPDATE SET action = excluded.action`,
+      `INSERT INTO cc_item_overrides (
+         item_id, action, reason, decision_token, updated_at
+       ) VALUES (?, ?, 'test', 'fixture-token',
+         '2026-07-20T00:00:00.000Z')
+       ON CONFLICT(item_id) DO UPDATE SET
+         action = excluded.action,
+         decision_token = excluded.decision_token`,
     ).run(itemId, action);
   }
 

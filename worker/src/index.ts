@@ -607,6 +607,19 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // Admin mirror mutations are same-origin JSON operations, not CORS APIs.
+    // Block their preflights before the global credentialed CORS responder so
+    // an allowlisted *.pages.dev origin can never receive mutation permission.
+    if (
+      request.method === 'OPTIONS'
+      && path.startsWith('/api/admin/cc-mirror/')
+    ) {
+      return new Response(null, {
+        status: 403,
+        headers: { 'Cache-Control': 'private, no-store' },
+      });
+    }
+
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
