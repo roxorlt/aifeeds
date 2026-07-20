@@ -49,6 +49,13 @@
 
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 
+- [x] **GSC 视频观看页修复：本地代码与验证**（2026-07-20，branch
+  `codex/fix-video-watch-pages`）：实现 `/video/daily/:date` 独立观看页、日报普通内链、
+  VideoObject watch `@id`、video/daily sitemap、IndexNow 与 Worker/SW/nginx 三层路径；
+  Worker 841 项、Dashboard 373 项测试及 PC/390px 移动端浏览器验收通过。设计见
+  [`docs/plans/2026-07-20-video-watch-pages-design.md`](docs/plans/2026-07-20-video-watch-pages-design.md)。
+- [ ] **GSC 视频观看页修复：发布与验证**：进入 staging 后验证 nginx 路由、sitemap 与真实媒体，
+  再合入 production，并在 GSC 对“视频不在观看页面上”发起“验证修正情况”。
 - [ ] **GSC 旧内容深链 canonical**（2026-07-20，branch
   `codex/fix-gsc-deeplink-canonicals`）：生产 `/t/`、`/g/`、`/ph/`、`/h/`、`/o/`
   SSR 壳错误继承首页 canonical，按已有 `/i/...` 实体页做响应级映射；保留 SPA 抽屉交互，

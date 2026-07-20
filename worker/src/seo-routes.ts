@@ -13,7 +13,14 @@ import type { Env } from './index';
 import { getBases } from './digest/lib';
 import { escapeHtml } from './digest/templates';
 import type { DailyVideoRow } from './digest/daily-video';
-import { dailyVideoPublicationDate } from './digest/daily-page';
+import { loadDailyVideo } from './digest/daily-video';
+import {
+  dailyVideoObject,
+  dailyVideoPublicationDate,
+  ensureDailyVideoWatchLinkHtml,
+  renderDailyVideoPlayer,
+  renderSeoPageShell,
+} from './digest/daily-page';
 import {
   ARCHIVE_PAGE_SIZE,
   ARCHIVE_SOURCES,
@@ -36,6 +43,7 @@ const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
 const SITEMAP_SHARD_RE = /^\/sitemap-[a-z0-9-]+\.xml$/;
 // 日报深链:严格 YYYY-MM-DD 形状(真实性再由 isValidCalendarDate 校验,拦 2026-13-99)。
 const DAILY_DATE_RE = /^\/daily\/(\d{4}-\d{2}-\d{2})$/;
+const DAILY_VIDEO_WATCH_RE = /^\/video\/daily\/(\d{4}-\d{2}-\d{2})$/;
 
 // sitemap 分源分片(Task 6)。source 口径 = item_pages.source(DigestSource:x|gh|ph|hf-paper|news)。
 // 单片上限 5 万(sitemaps.org 硬限);超则 /sitemap-<source>-2.xml、-3.xml 续片(page1 无后缀)。
@@ -64,6 +72,7 @@ function parseSitemapShard(pathname: string): { source: string; page: number } |
 // 无 env 参数(签名固定),故 indexnow key 文件按"根目录 .txt"整体豁免,真实 key 校验在 handleSeoRoute。
 export function isSeoPath(pathname: string): boolean {
   if (pathname === '/daily' || pathname.startsWith('/daily/')) return true;
+  if (pathname.startsWith('/video/daily/')) return true;
   if (pathname === '/archive' || pathname.startsWith('/archive/')) return true;
   // item SSR 静态页 /i/…（伺服由 seo/item-routes.ts handleItemRoute 出）。裸 /i 不放行。
   if (pathname.startsWith('/i/')) return true;
@@ -170,13 +179,110 @@ async function serveDailyPage(env: Env, date: string): Promise<Response> {
 </html>`;
     return html(body, 404, null);
   }
-  return new Response(obj.body, {
+  const body = await new Response(obj.body).text();
+  const withWatchLink = ensureDailyVideoWatchLinkHtml(body, date, env);
+  return new Response(withWatchLink, {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'public, max-age=3600',
     },
   });
+}
+
+function dailyVideoWatchNotFound(env: Env): Response {
+  const { siteBase } = getBases(env);
+  const body = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>视频不存在 | AI Feeds</title>
+<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;background:#fafafa;color:#171717;line-height:1.65}.wrap{max-width:560px;margin:0 auto;padding:64px 20px;text-align:center}h1{font-size:20px}a{color:#0284c7;text-decoration:none}</style>
+</head>
+<body>
+<div class="wrap">
+<h1>这期视频不存在</h1>
+<p>该日期的视频暂未发布或已经下线。</p>
+<p><a href="${siteBase}/daily/">← 返回日报归档</a></p>
+</div>
+</body>
+</html>`;
+  return html(body, 404, null);
+}
+
+async function serveDailyVideoWatchPage(env: Env, date: string): Promise<Response> {
+  const video = await loadDailyVideo(env, date);
+  if (!video) return dailyVideoWatchNotFound(env);
+
+  const { apiBase, siteBase } = getBases(env);
+  const canonical = `${siteBase}/video/daily/${date}`;
+  const title = `${video.title} | AI Feeds 视频`;
+  const description = truncateUnicode(video.description, 180);
+  const videoId = `${canonical}#video`;
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'WebPage',
+        '@id': canonical,
+        url: canonical,
+        name: video.title,
+        description,
+        inLanguage: 'zh-CN',
+        mainEntity: { '@id': videoId },
+      },
+      dailyVideoObject(video, env, canonical),
+      {
+        '@type': 'BreadcrumbList',
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: 'AI Feeds', item: `${siteBase}/` },
+          { '@type': 'ListItem', position: 2, name: 'AI 日报', item: `${siteBase}/daily/` },
+          { '@type': 'ListItem', position: 3, name: video.title, item: canonical },
+        ],
+      },
+      {
+        '@type': 'Organization',
+        name: 'AI Feeds',
+        url: `${siteBase}/`,
+        logo: `${siteBase}/og-default.png`,
+      },
+    ],
+  };
+  const bodyHtml = `<div class="wrap">
+<header>
+<div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
+<h1>${escapeHtml(video.title)}</h1>
+<p class="date">${escapeHtml(date)} · 本期视频</p>
+</header>
+<main>
+${renderDailyVideoPlayer(video, env, { showWatchLink: false })}
+<section aria-labelledby="video-summary">
+<h2 id="video-summary">本期内容</h2>
+<p class="summary">${escapeHtml(video.description)}</p>
+</section>
+<nav class="nav" aria-label="相关内容">
+<a href="${siteBase}/daily/${date}">阅读完整日报</a>
+<a href="${siteBase}/daily/">浏览历史日报</a>
+</nav>
+</main>
+<footer>
+<a href="${siteBase}/subscribe">订阅每日邮件</a>
+<a href="${siteBase}/">进站看全部</a>
+</footer>
+</div>`;
+  const page = renderSeoPageShell({
+    lang: 'zh-CN',
+    title,
+    description,
+    canonical,
+    ogImage: `${apiBase}/r/${video.poster_key}`,
+    ogType: 'article',
+    jsonLd,
+    bodyHtml,
+  });
+  return html(page, 200, 3600);
 }
 
 // ── /daily(/) 归档索引 ─────────────────────────────────────────
@@ -588,6 +694,7 @@ function isValidArchiveGroup(row: ArchiveSitemapGroup): boolean {
 async function dailySitemapResponse(env: Env): Promise<Response> {
   const { siteBase } = getBases(env);
   const rows = await loadDailyPages(env); // date DESC
+  const videos = await loadDailyVideos(env);
   const latestDailyMod = latestDailyPageModified(rows);
   const latestMod = latestDailyMod ? dateOnly(latestDailyMod) : dateOnly(new Date().toISOString());
 
@@ -597,18 +704,27 @@ async function dailySitemapResponse(env: Env): Promise<Response> {
   for (const row of rows) {
     urls.push(urlEntry(`${siteBase}/daily/${row.date}`, dateOnly(row.lastmod || row.generated_at), 'monthly'));
   }
+  for (const row of videos) {
+    urls.push(
+      urlEntry(
+        `${siteBase}/video/daily/${row.date}`,
+        dateOnly(row.updated_at || row.uploaded_at),
+        'monthly',
+      ),
+    );
+  }
   return urlsetResponse(urls);
 }
 
 // ── /video-sitemap.xml ─────────────────────────────────────────
-// Google video sitemap:landing page 是日报页，媒体/封面走 API /r/（已支持 Range）。
+// Google video sitemap：landing page 是独立观看页，媒体/封面走 API /r/（已支持 Range）。
 async function videoSitemapResponse(env: Env): Promise<Response> {
   const { apiBase, siteBase } = getBases(env);
   const rows = await loadDailyVideos(env);
   const urls = rows.map((row) => {
     const duration = Math.max(1, Math.min(28800, Math.round(Number(row.duration_seconds))));
     return `  <url>
-    <loc>${xmlEscape(`${siteBase}/daily/${row.date}`)}</loc>
+    <loc>${xmlEscape(`${siteBase}/video/daily/${row.date}`)}</loc>
     <video:video>
       <video:thumbnail_loc>${xmlEscape(`${apiBase}/r/${row.poster_key}`)}</video:thumbnail_loc>
       <video:title>${xmlEscape(row.title)}</video:title>
@@ -760,6 +876,14 @@ export async function handleSeoRoute(request: Request, env: Env): Promise<Respon
 
   // /daily/<其它非法>(如 /daily/abc、/daily/2026-07)→ 302 归档
   if (pathname.startsWith('/daily/')) return redirectArchive(env);
+
+  const videoMatch = pathname.match(DAILY_VIDEO_WATCH_RE);
+  if (videoMatch) {
+    const date = videoMatch[1];
+    if (isValidCalendarDate(date)) return serveDailyVideoWatchPage(env, date);
+    return dailyVideoWatchNotFound(env);
+  }
+  if (pathname.startsWith('/video/daily/')) return dailyVideoWatchNotFound(env);
 
   if (pathname === '/archive' || pathname.startsWith('/archive/')) {
     const route = parseItemArchivePath(pathname);

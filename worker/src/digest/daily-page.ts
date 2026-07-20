@@ -211,18 +211,23 @@ export function dailyVideoPublicationDate(date: string): string {
 function dailyVideoUrls(video: DailyVideoRow, env: Env) {
   const { apiBase, siteBase } = getBases(env);
   return {
-    page: `${siteBase}/daily/${video.date}`,
+    page: `${siteBase}/video/daily/${video.date}`,
     mp4: `${apiBase}/r/${video.mp4_key}`,
     poster: `${apiBase}/r/${video.poster_key}`,
     vtt: `${apiBase}/r/${video.vtt_key}`,
   };
 }
 
-export function dailyVideoObject(video: DailyVideoRow, env: Env): Record<string, unknown> {
+export function dailyVideoObject(
+  video: DailyVideoRow,
+  env: Env,
+  pageUrl?: string,
+): Record<string, unknown> {
   const urls = dailyVideoUrls(video, env);
+  const videoPage = pageUrl || urls.page;
   return {
     '@type': 'VideoObject',
-    '@id': `${urls.page}#video`,
+    '@id': `${videoPage}#video`,
     name: video.title,
     description: video.description,
     thumbnailUrl: urls.poster,
@@ -232,15 +237,35 @@ export function dailyVideoObject(video: DailyVideoRow, env: Env): Record<string,
   };
 }
 
-function dailyVideoPlayer(video: DailyVideoRow, env: Env): string {
+function dailyVideoWatchLink(date: string, env: Env): string {
+  const { siteBase } = getBases(env);
+  return `<p class="daily-video-watch-link" style="margin:10px 0 0;font-size:14px"><a href="${siteBase}/video/daily/${date}">在独立观看页观看</a></p>`;
+}
+
+export function renderDailyVideoPlayer(
+  video: DailyVideoRow,
+  env: Env,
+  options: { showWatchLink?: boolean } = {},
+): string {
   const urls = dailyVideoUrls(video, env);
+  const link = options.showWatchLink === false ? '' : `\n${dailyVideoWatchLink(video.date, env)}`;
   return `<section class="daily-video" aria-label="本期视频" style="margin:20px 0 28px">
 <video controls playsinline preload="metadata" poster="${escapeHtml(urls.poster)}" style="display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;border-radius:8px">
 <source src="${escapeHtml(urls.mp4)}" type="video/mp4">
 <track kind="captions" src="${escapeHtml(urls.vtt)}" srclang="zh-CN" label="中文" default>
 您的浏览器不支持 HTML5 视频。
 </video>
-</section>`;
+</section>${link}`;
+}
+
+export function ensureDailyVideoWatchLinkHtml(html: string, date: string, env: Env): string {
+  const from = html.indexOf(DAILY_VIDEO_PLAYER_START);
+  if (from < 0) return html;
+  const to = html.indexOf(DAILY_VIDEO_PLAYER_END, from + DAILY_VIDEO_PLAYER_START.length);
+  if (to < 0) return html;
+  const playerBlock = html.slice(from, to);
+  if (playerBlock.includes('class="daily-video-watch-link"')) return html;
+  return html.slice(0, to) + dailyVideoWatchLink(date, env) + html.slice(to);
 }
 
 function marked(start: string, content: string, end: string): string {
@@ -277,7 +302,7 @@ function mergeVideoIntoJsonLd(value: unknown, videoNode: Record<string, unknown>
 export function patchDailyPageVideoHtml(html: string, video: DailyVideoRow, env: Env): string {
   const playerBlock = marked(
     DAILY_VIDEO_PLAYER_START,
-    dailyVideoPlayer(video, env),
+    renderDailyVideoPlayer(video, env),
     DAILY_VIDEO_PLAYER_END,
   );
   let next = replaceMarked(html, DAILY_VIDEO_PLAYER_START, DAILY_VIDEO_PLAYER_END, playerBlock);
@@ -493,7 +518,7 @@ export function renderDailyPageHtml(data: DailyPageData, env: Env, video: DailyV
 
   // SSR 骨架抽取:head/OG/canonical/CSS/html 外壳统一走 renderSeoPageShell,本函数只拼 body。
   const playerHtml = video
-    ? marked(DAILY_VIDEO_PLAYER_START, dailyVideoPlayer(video, env), DAILY_VIDEO_PLAYER_END)
+    ? marked(DAILY_VIDEO_PLAYER_START, renderDailyVideoPlayer(video, env), DAILY_VIDEO_PLAYER_END)
     : '';
   const bodyHtml = `<div class="wrap">
 <header>

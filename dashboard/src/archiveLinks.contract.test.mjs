@@ -5,6 +5,14 @@ import test from "node:test";
 const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const serviceWorker = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
+const productionNginx = readFileSync(
+  new URL("../../deploy/nginx/aifeeds-seo-location.conf", import.meta.url),
+  "utf8",
+);
+const perfStagingNginx = readFileSync(
+  new URL("../../deploy/nginx/aifeeds-perf-staging-server.conf", import.meta.url),
+  "utf8",
+);
 
 test("React footer exposes a visible ordinary link to the content archive", () => {
   assert.match(
@@ -31,6 +39,24 @@ test("service worker leaves archive navigations to the Worker instead of the SPA
     serviceWorker.indexOf('pathname === "/archive"') <
       serviceWorker.indexOf('if (req.mode === "navigate")'),
   );
+});
+
+test("video watch pages and video sitemap bypass the SPA shell in every routing mirror", () => {
+  assert.match(
+    serviceWorker,
+    /pathname\.startsWith\("\/video\/daily\/"\)/,
+  );
+  assert.match(
+    serviceWorker,
+    /pathname === "\/video-sitemap\.xml"/,
+  );
+  for (const [name, source] of [
+    ["production nginx", productionNginx],
+    ["perf staging nginx", perfStagingNginx],
+  ]) {
+    assert.match(source, /video\/daily\/\.\*/, `${name} misses /video/daily/*`);
+    assert.match(source, /video-sitemap\\\.xml/, `${name} misses /video-sitemap.xml`);
+  }
 });
 
 test("service worker leaves every home-experience navigation to SSR so the persisted view cookie stays authoritative", () => {

@@ -428,21 +428,30 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/admin/search/rebuild-terms` | POST | **suggestion 词表手动重建**（2026-07-06，`worker/src/search/terms.ts rebuildSearchTerms`）：全量重算 entity 词（GH 仓库/PH 产品/skill 名/hf keyword/媒体名/高频作者/分类）+ hot_query（近 7 天 `search_submit` 聚合），物化到 `search_terms`。**staging cron 全关，词表靠手动触发** | 同上 |
 | `/img` | GET | 图片反代（绕 GFW + 边缘 resize/compress + format=auto）；视频走原反代 + Range | 无（host 白名单） |
 | `/r/<key>` | GET | R2 资源反代（GitHub README 图 + PH logo/screenshot/video/avatar），`key` 是 SHA-256；24h 边缘缓存。**referer 白名单**（2026-05-17）：空 referer + `*.ai-feeds.com` + `twitter.com/x.com/t.co` + `producthunt.com` + `github.com` + `*.pages.dev` + `localhost` 放行，其他 referer → 403 防热链 | 无 + referer 白名单 |
-| `/daily/:date` | GET | **每日静态日报页**（SEO P0，2026-07-06，`worker/src/seo-routes.ts`）：`:date`=`YYYY-MM-DD`，命中 R2 `daily/<date>.html` 返回 200 静态 HTML（`max-age=3600`）；miss → `noindex` 简洁 404 页；日期形状对但日历越界（`2026-13-99`）→ 302 归档 | 无（公开，bot gate 豁免） |
+| `/daily/:date` | GET | **每日静态日报页**（SEO P0，2026-07-06，`worker/src/seo-routes.ts`）：`:date`=`YYYY-MM-DD`，命中 R2 `daily/<date>.html` 返回 200 静态 HTML（`max-age=3600`）；有视频的历史快照在响应时幂等补入 `/video/daily/:date` 普通链接；miss → `noindex` 简洁 404 页；日期形状对但日历越界（`2026-13-99`）→ 302 归档 | 无（公开，bot gate 豁免） |
 | `/daily/` `/daily` | GET | 日报归档索引（从 D1 `daily_pages` 表实时渲染，按月分组倒序，`max-age=3600`）；`/daily/<其它非法段>`（如 `/daily/abc`）→ 302 本页 | 无（公开，bot gate 豁免） |
+| `/video/daily/:date` | GET | **独立视频观看页**（2026-07-20，`worker/src/seo-routes.ts`）：从 `daily_videos` 读取单期元数据，首屏只呈现一个原生播放器、视频简介及返回完整日报链接；self canonical + `WebPage`/`VideoObject`/breadcrumb JSON-LD；无视频或非法日期 → `noindex` 404 | 无（公开，bot gate 豁免） |
 | `/robots.txt` | GET | 决策 5 全放（含 AI 训练爬虫），仅 `Disallow` `/api/` `/admin` `/settings` `/me/` `/unsubscribe`；末行 `Sitemap:` 指 `SITE_BASE/sitemap.xml`（`max-age=86400`） | 无（公开，bot gate 豁免） |
-| `/sitemap.xml` | GET | 站点地图（`/` + `/daily/` + 全部 `daily_pages` 行，`lastmod` 取各行 `generated_at` 日期部分，`max-age=3600`） | 无（公开，bot gate 豁免） |
+| `/sitemap.xml` | GET | sitemap index，引用日报、视频、归档与各内容源分片（`max-age=3600`） | 无（公开，bot gate 豁免） |
+| `/video-sitemap.xml` | GET | Google 视频 sitemap；每个 `<loc>` 使用 `/video/daily/:date` 独立观看页，媒体/封面继续指向支持 Range 的 API `/r/` 资源 | 无（公开，bot gate 豁免） |
 | `/llms.txt` | GET | AI 检索友好站点说明（Markdown：中英各一行定位 + 归档/订阅入口 + 最近 7 天日报链接，`max-age=86400`） | 无（公开，bot gate 豁免） |
 | `/<INDEXNOW_KEY>.txt` | GET | IndexNow 域名归属校验文件：路径 = `/<INDEXNOW_KEY 值>.txt` 时返回 key 纯文本（`max-age=86400`）；未配置 secret / key 不匹配的其它根目录 `.txt` → 404 `no-store` | 无（公开，bot gate 豁免） |
 
 **每日静态日报页 + SEO 伺服**（2026-07-06 上线，PR #161，`worker/src/seo-routes.ts`）：
-- 上述 6 条公开路由在 `index.ts` 里 **bot gate 之后、鉴权路由之前**由 `handleSeoRoute` 统一伺服；`isSeoPath` 与 `isBotGateExempt` 并联豁免 bot UA 闸（决策 5 全放，让搜索引擎 / AI 检索 / 训练爬虫全部可达，放行策略统一收口 robots.txt）
+- 上述公开 SEO 路由在 `index.ts` 里 **bot gate 之后、鉴权路由之前**由 `handleSeoRoute` 统一伺服；`isSeoPath` 与 `isBotGateExempt` 并联豁免 bot UA 闸（决策 5 全放，让搜索引擎 / AI 检索 / 训练爬虫全部可达，放行策略统一收口 robots.txt）
 - **绝对 URL 一律走 `env.SITE_BASE`（`getBases`），禁止取 request host** —— 香港中转会把 `Host` 改写成 `workers.dev`（2026-06-08 事故教训），canonical / 深链 / sitemap `loc` / IndexNow host 全部用 env 域
 - 归档索引 / sitemap / llms 均从 D1 `daily_pages` 表**实时读取，不做 R2 list**（R2 `READMES` bucket 只存 `daily/YYYY-MM-DD.html` 快照）
 - 日报页 HTML **零可执行 `<script>`**：唯一的 `<script>` 是 `application/ld+json` JSON-LD 数据岛（`ItemList` 结构化数据，`<` 转义防 `</script>` 越权）；外部 title 字段一律 `escapeHtml`
 - 静态页生成挂在 digest 早 8 点 workflow 的 **Phase 4**（详见下方「订阅推送子系统」§「每日静态日报页 Phase 4」）；手动 `POST /api/enrich/run?mode=daily-page` 重建 / 回填
 - **主域 `ai-feeds.com` 经香港 nginx 转发**：front server 块加 regex location 把这 6 类路径转发到与 api 块同一 worker upstream（详见下方 §6b 六续 note；2026-07-08 起该 location 再扩 `/i/*` 与 sitemap 分片，见 §6b 七续 + 下方「item SSR 静态页」段）；api 域 `api.ai-feeds.com` 直接可达不受影响
 - 设计文档：[`plans/2026-07-06-daily-static-page-seo-design.md`](plans/2026-07-06-daily-static-page-seo-design.md)
+
+**独立视频观看页 + 视频 sitemap**（2026-07-20，`worker/src/seo-routes.ts`）：
+- `/video/daily/:date` 不复制日报卡片流，只使用现有 `daily_videos` 行动态生成观看页；因此不新增 migration、不复制 MP4/封面/VTT，也不改变上传 API。
+- 日报页仍可内嵌播放同一视频，但 `VideoObject.@id` 与可见普通链接统一指向独立观看页；旧 R2 日报快照无需批量重写，伺服时只在稳定 video marker 内幂等补链。
+- `/video-sitemap.xml` 不再把 `/daily/:date` 当视频 landing page；`/sitemap-daily.xml` 也列观看页，视频 `updated_at` 作为 `lastmod`。sitemap index 继续引用 video sitemap，无需新建第三个视频分片。
+- 视频上传完成后的 IndexNow 集合为日报页、观看页、video sitemap、daily sitemap 与 sitemap index。Google 不支持 IndexNow，仍靠 sitemap/GSC 复抓。
+- 三层路径同步：Worker `isSeoPath`、Dashboard Service Worker、生产/perf-staging nginx 都显式放行 `/video/daily/*` 和 `/video-sitemap.xml`。设计与实施见 [`plans/2026-07-20-video-watch-pages-design.md`](plans/2026-07-20-video-watch-pages-design.md) 与 [`plans/2026-07-20-video-watch-pages-implementation.md`](plans/2026-07-20-video-watch-pages-implementation.md)。
 
 **item SSR 静态页 `/i/*` + sitemap 分片**（2026-07-08 上线，`worker/src/seo/item-routes.ts` + `worker/src/seo-routes.ts`）：
 - `GET /i/<source>/<id...>`：五源单页（`x`/`gh`/`ph`/`hf-paper`/`news`），伺服逻辑、404/410 与 `isSeoPath` 判定见设计 `docs/plans/2026-07-08-item-ssr-pages-design.md` §4.4/§4.6；bot gate 豁免（`isSeoPath` 的 `pathname.startsWith('/i/')`，裸 `/i` 不豁免）
@@ -3721,9 +3730,9 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ---
 
-## SEO 静态页运维（每日日报页 + `/i/` 全量内容页）
+## SEO 静态页运维（每日日报页 + 独立视频观看页 + `/i/` 全量内容页）
 
-> 这条线把 aifeeds 可索引面从「~39 个 URL（首页 / 归档 / 日报聚合页）」扩到「3.2 万+ 独立内容页」。三块：① **每日静态日报页** `/daily/*`（早 8 点 Phase 4 生成，生成/告警/选品细节见上「订阅推送子系统」§「每日静态日报页 Phase 4」，此处不重复）；② **`/i/:source/:id` 全量内容 SSR 页**（五源 relevant 每条一页，约 3.2 万，2026-07-08 上线）；③ **robots / sitemap-index / 分片 / llms / IndexNow** 配套。内容为分源混合全文（gh/hf/ph/x 全文正文，blog/podcast 因版权只放摘录）+ `marked` markdown→HTML + 净化（零可执行 script）。设计：日报页 `docs/plans/2026-07-06-daily-static-page-seo-design.md`；item 页 `docs/plans/2026-07-08-item-ssr-pages-design.md` + 全文渲染器 `docs/plans/2026-07-08-item-page-fulltext-plan.md`。
+> 这条线把 aifeeds 可索引面从「~39 个 URL（首页 / 归档 / 日报聚合页）」扩到「3.2 万+ 独立内容页」。四块：① **每日静态日报页** `/daily/*`；② **独立视频观看页** `/video/daily/*`；③ **`/i/:source/:id` 全量内容 SSR 页**；④ **robots / sitemap-index / 分片 / llms / IndexNow** 配套。设计：日报页 `docs/plans/2026-07-06-daily-static-page-seo-design.md`；视频页 `docs/plans/2026-07-20-video-watch-pages-design.md`；item 页 `docs/plans/2026-07-08-item-ssr-pages-design.md` + 全文渲染器 `docs/plans/2026-07-08-item-page-fulltext-plan.md`。
 
 ### 1. 路由清单（伺服 + 缓存头）
 
@@ -3733,9 +3742,11 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 |------|------|--------|
 | `/daily/:date` | R2 `daily/<date>.html` 快照命中 → 200；miss → noindex 404 页；日历越界 → 302 归档 | `public, max-age=3600` |
 | `/daily/` `/daily` | 从 `daily_pages` 表实时渲染归档索引（按月倒序） | `public, max-age=3600` |
+| `/video/daily/:date` | 从 `daily_videos` 动态渲染单视频观看页；无视频/非法日期 → noindex 404 | `public, max-age=3600` |
 | `/archive/` `/archive/:source/` `/archive/:source/:yyyy-mm/[page]` | 从 `items` + `item_pages` 实时渲染五源分层归档；源仅 `x`/`gh`/`ph`/`paper`/`news`，每页 100，空月/越界页 noindex 404；资格 gate 与内容出口一致（live/relevant/未软删/非 dedup/非 `cn_sensitive`） | `public, max-age=3600` |
 | `/robots.txt` | 模板（决策 5 全放，仅 Disallow `/api/` `/admin` `/settings` `/me/` `/unsubscribe`；末行 `Sitemap:`） | `public, max-age=86400` |
 | `/sitemap.xml` | **sitemap-index**（2026-07-08 改），列全部分片 | `public, max-age=3600` |
+| `/video-sitemap.xml` | 每期视频一个 entry，landing page=`/video/daily/:date`，媒体/封面=`API_BASE/r/*` | `public, max-age=3600` |
 | `/sitemap-archive.xml` | 归档 index、五个 source、全部有效 month/page URL；不混入 item sitemap | `public, max-age=3600` |
 | `/sitemap-<source>.xml` | 各源 `item_pages`(status=live) 实际 URL 列表，每片 ≤5 万（超则续 `-2 -3…`）；分片有 `daily` / `x` / `gh` / `ph` / `hf-paper` / `news` 共 6 类；正则 `SITEMAP_SHARD_RE`（`worker/src/seo-routes.ts`） | `public, max-age=3600` |
 | `/llms.txt` | 模板（中英各一行定位 + 归档/订阅入口 + 最近 7 天日报） | `public, max-age=86400` |
@@ -3791,7 +3802,7 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 
 ### 5. 香港 nginx 转发
 
-`ai-feeds.com` 灰云直连香港 VPS（`154.12.188.231`）。front server 块一个 **regex location** 把 `/daily(/.*)?`、`/archive(/.*)?`、`/i/.*`、`robots.txt`、`sitemap.xml`、`sitemap-<source>.xml` 分片、`llms.txt`、`<INDEXNOW_KEY>.txt` 转发到与 api 块同一 worker upstream（`xlist-api.ltsms86.workers.dev`），照 api 块注入全套头（`Host: workers.dev` + `X-Forwarded-Host: api.ai-feeds.com` + `X-Origin-Secret` + `proxy_ssl_name/server_name`）。**故意不启用 proxy_cache**。完整正则 + 演进见上 §6b「六续」（daily + SEO 文件）/「七续」（扩 `/i/*` + sitemap 分片）。
+`ai-feeds.com` 灰云直连香港 VPS（`154.12.188.231`）。front server 块一个 **regex location** 把 `/daily(/.*)?`、`/video/daily/.*`、`/archive(/.*)?`、`/i/.*`、`robots.txt`、`sitemap.xml`、`video-sitemap.xml`、`sitemap-<source>.xml` 分片、`llms.txt`、`<INDEXNOW_KEY>.txt` 转发到与 api 块同一 worker upstream（`xlist-api.ltsms86.workers.dev`），照 api 块注入全套头。**故意不启用 proxy_cache**。
 
 - **权威副本已版本化**：`deploy/nginx/aifeeds-seo-location.conf`（repo 内，含完整回滚 / 部署步骤注释）。**VPS 仍是实际生效配置**，改这个副本后须 SSH 同步 VPS → `nginx -t` → `systemctl reload nginx` → 清缓存（`rm -rf /var/cache/nginx/aifeeds/*`）。upstream / SNI / 注入头一律照现有 `/daily` location 的 proxy 体，别自己拼。
 - **回滚**：删该 location 块 + reload（worker 路由无状态；api 域 `/daily` `/i/` 等仍可直达不受影响）。
@@ -3804,7 +3815,7 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 2. **worker `isSeoPath()`**（`worker/src/seo-routes.ts`）—— 决定该路径豁不豁免 bot UA 闸
 3. **`dashboard/public/sw.js` 的 `isSeoPath()`** —— 决定 PWA SW 拦导航时透传还是喂缓存壳
 
-当前三层均包含 `/daily`、`/archive`、`/i/*`、sitemap 与根级 SEO 文本路径；契约测试覆盖 production 权威副本、perf-staging 模板和 Service Worker，避免新增 SSR 路由被 SPA 壳截获。
+当前三层均包含 `/daily`、`/video/daily/*`、`/archive`、`/i/*`、`/video-sitemap.xml`、其它 sitemap 与根级 SEO 文本路径；契约测试覆盖 production 权威副本、perf-staging 模板和 Service Worker，避免新增 SSR 路由被 SPA 壳截获。
 
 ### 6.1 内容归档与链接图验收
 
@@ -3826,6 +3837,7 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 ### 8. IndexNow 现状
 
 - **每日静态日报页生成后 ping**（`daily/<date>` + `/daily/` + `/sitemap.xml`，提交给 Bing/Yandex）。fire-and-forget，非 2xx 只记日志不重试。
+- **视频发布后 ping**（`daily/<date>` + `video/daily/<date>` + `/video-sitemap.xml` + `/sitemap-daily.xml` + `/sitemap.xml`）。Google 不消费 IndexNow，观看页仍需 sitemap/GSC 复抓。
 - **`/i/` 页目前未接 IndexNow**（3.2 万页只靠 sitemap + 自然抓取被发现）—— 遗留增强项（TODO §12 SEO 遗留低优 #1，值得做，Bing/Yandex 侧可加速收录）。
 - **Google 不支持 IndexNow**，只能靠 sitemap 提交 + 自然抓取（GSC 提交见 `docs/seo-webmaster-guide.md`）。
 - key = secret `INDEXNOW_KEY`（prod / staging 各自值，存 `.secrets/aifeeds-{prod,staging}.env`）；未配置时 ping 静默跳过。

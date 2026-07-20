@@ -333,6 +333,7 @@ export function dailyVideoIndexNowUrls(env: DailyVideoEnv, date: string): string
   const siteBase = env.SITE_BASE || 'https://ai-feeds.com';
   return [
     `${siteBase}/daily/${date}`,
+    `${siteBase}/video/daily/${date}`,
     `${siteBase}/video-sitemap.xml`,
     `${siteBase}/sitemap-daily.xml`,
     `${siteBase}/sitemap.xml`,

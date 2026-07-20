@@ -72,6 +72,7 @@ describe('isSeoPath', () => {
     expect(isSeoPath('/daily')).toBe(true);
     expect(isSeoPath('/daily/')).toBe(true);
     expect(isSeoPath('/daily/abc')).toBe(true);
+    expect(isSeoPath('/video/daily/2026-07-14')).toBe(true);
     expect(isSeoPath('/robots.txt')).toBe(true);
     expect(isSeoPath('/sitemap.xml')).toBe(true);
     expect(isSeoPath('/video-sitemap.xml')).toBe(true);
@@ -281,6 +282,15 @@ describe('handleSeoRoute /daily/:date', () => {
     expect(await resp!.text()).toContain('<!doctype html>');
   });
 
+  test('历史视频快照响应时幂等补入独立观看页普通链接', async () => {
+    const legacy = '<!doctype html><main><!-- daily-video:player:start --><section class="daily-video"><video controls></video></section><!-- daily-video:player:end --><p>日报正文</p></main>';
+    const r2 = makeR2(new Map([['daily/2026-07-06.html', legacy]]));
+    const resp = await handleSeoRoute(req('/daily/2026-07-06'), makeEnv({}, makeDb([]), r2));
+    const body = await resp!.text();
+    expect(body).toContain(`href="${SITE}/video/daily/2026-07-06"`);
+    expect(body.match(/class="daily-video-watch-link"/g)).toHaveLength(1);
+  });
+
   test('合法日期 R2 miss → 404 HTML 含返回 /daily/ 链接', async () => {
     const resp = await handleSeoRoute(req('/daily/2026-07-06'), makeEnv({}, makeDb([]), makeR2()));
     expect(resp!.status).toBe(404);
@@ -379,6 +389,7 @@ interface VideoRow {
   duration_seconds: number;
   mp4_key: string;
   poster_key: string;
+  vtt_key: string;
   uploaded_at: string;
   updated_at: string;
 }
@@ -482,6 +493,10 @@ function makeSitemapDb({
           return { results: [] as T[] };
         },
         async first<T>() {
+          if (/FROM daily_videos/i.test(sql)) {
+            const date = String(binds[0] || '');
+            return (videos.find((video) => video.date === date) || null) as T | null;
+          }
           return null as T | null;
         },
         async run() {
@@ -501,6 +516,73 @@ function mkItem(
 ): ItemPageRow {
   return { source, url_path, generated_at, status };
 }
+
+describe('handleSeoRoute /video/daily/:date', () => {
+  const video: VideoRow = {
+    date: '2026-07-14',
+    title: 'AI 早报 07-14',
+    description: '本期聚焦模型、Agent 与视频生成。',
+    duration_seconds: 391,
+    mp4_key: 'daily-video/2026-07-14/video.mp4',
+    poster_key: 'daily-video/2026-07-14/poster.jpg',
+    vtt_key: 'daily-video/2026-07-14/captions.vtt',
+    uploaded_at: '2026-07-14T08:09:10.000Z',
+    updated_at: '2026-07-14T09:10:11.000Z',
+  };
+
+  test('命中视频 → 200 self-canonical 单视频观看页 + 完整 VideoObject', async () => {
+    const path = '/video/daily/2026-07-14';
+    const resp = await handleSeoRoute(
+      req(path),
+      makeEnv({}, makeSitemapDb({ videos: [video] })),
+    );
+    expect(resp).not.toBeNull();
+    expect(resp!.status).toBe(200);
+    expect(resp!.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(resp!.headers.get('Cache-Control')).toBe('public, max-age=3600');
+
+    const body = await resp!.text();
+    const canonical = `${SITE}${path}`;
+    expect(body).toContain(`<link rel="canonical" href="${canonical}">`);
+    expect((body.match(/<h1[\s>]/g) || [])).toHaveLength(1);
+    expect(body).toContain('<video controls playsinline preload="metadata"');
+    expect(body).toContain(`<source src="${API}/r/${video.mp4_key}" type="video/mp4">`);
+    expect(body).toContain(`<track kind="captions" src="${API}/r/${video.vtt_key}"`);
+    expect(body).toContain(`href="${SITE}/daily/2026-07-14"`);
+
+    const script = body.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+    expect(script).not.toBeNull();
+    const ld = JSON.parse(script![1]) as { '@graph': Array<Record<string, unknown>> };
+    const videoObject = ld['@graph'].find((node) => node['@type'] === 'VideoObject');
+    expect(videoObject).toMatchObject({
+      '@id': `${canonical}#video`,
+      name: video.title,
+      thumbnailUrl: `${API}/r/${video.poster_key}`,
+      contentUrl: `${API}/r/${video.mp4_key}`,
+      uploadDate: '2026-07-14T08:00:00+08:00',
+      duration: 'PT6M31S',
+    });
+  });
+
+  test('合法日期但无视频 → noindex 404', async () => {
+    const resp = await handleSeoRoute(
+      req('/video/daily/2026-07-13'),
+      makeEnv({}, makeSitemapDb({ videos: [] })),
+    );
+    expect(resp).not.toBeNull();
+    expect(resp!.status).toBe(404);
+    expect(await resp!.text()).toContain('name="robots" content="noindex"');
+  });
+
+  test('非法日期与非日期段 → noindex 404，不落入 SPA', async () => {
+    for (const path of ['/video/daily/2026-13-99', '/video/daily/not-a-date']) {
+      const resp = await handleSeoRoute(req(path), makeEnv({}, makeSitemapDb({ videos: [] })));
+      expect(resp, path).not.toBeNull();
+      expect(resp!.status, path).toBe(404);
+      expect(await resp!.text(), path).toContain('name="robots" content="noindex"');
+    }
+  });
+});
 
 describe('handleSeoRoute /sitemap.xml (sitemap-index)', () => {
   test('合法 <sitemapindex>：列日报片 + 五源分片，无 <url> 条目', async () => {
@@ -560,6 +642,7 @@ describe('handleSeoRoute /video-sitemap.xml', () => {
       duration_seconds: 125.25,
       mp4_key: 'daily-video/2026-07-14/a&b.mp4',
       poster_key: 'daily-video/2026-07-14/poster.jpg',
+      vtt_key: 'daily-video/2026-07-14/captions.vtt',
       uploaded_at: '2026-07-14T08:09:10.000Z',
       updated_at: '2026-07-14T09:10:11.000Z',
     };
@@ -571,7 +654,8 @@ describe('handleSeoRoute /video-sitemap.xml', () => {
     expect(resp!.headers.get('Content-Type')).toContain('application/xml');
     const xml = await resp!.text();
     expect(xml).toContain('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
-    expect(xml).toContain(`<loc>${SITE}/daily/2026-07-14</loc>`);
+    expect(xml).toContain(`<loc>${SITE}/video/daily/2026-07-14</loc>`);
+    expect(xml).not.toContain(`<loc>${SITE}/daily/2026-07-14</loc>`);
     expect(xml).toContain(`<video:thumbnail_loc>${API}/r/${video.poster_key}</video:thumbnail_loc>`);
     expect(xml).toContain('<video:title>AI &amp; &lt;模型&gt; &quot;日报&quot;</video:title>');
     expect(xml).toContain('<video:description>A &amp; B &lt; C &gt; D</video:description>');
@@ -586,6 +670,7 @@ describe('handleSeoRoute /video-sitemap.xml', () => {
       date: '2026-07-14', title: '长描述', description, duration_seconds: 60,
       mp4_key: 'daily-video/2026-07-14/a.mp4',
       poster_key: 'daily-video/2026-07-14/b.jpg',
+      vtt_key: 'daily-video/2026-07-14/c.vtt',
       uploaded_at: '2026-07-20T00:00:00.000Z',
       updated_at: '2026-07-20T00:00:00.000Z',
     };
@@ -635,6 +720,28 @@ describe('handleSeoRoute /sitemap-daily.xml (日报片回归)', () => {
     );
     const xml = await resp!.text();
     expect(xml).toContain(`<loc>${SITE}/daily/2026-07-06</loc><lastmod>2026-07-14</lastmod>`);
+  });
+
+  test('普通日报 sitemap 同时枚举独立观看页并使用视频 updated_at', async () => {
+    const video: VideoRow = {
+      date: '2026-07-06',
+      title: 'AI 早报 07-06',
+      description: '视频简介',
+      duration_seconds: 120,
+      mp4_key: 'daily-video/2026-07-06/a.mp4',
+      poster_key: 'daily-video/2026-07-06/b.jpg',
+      vtt_key: 'daily-video/2026-07-06/c.vtt',
+      uploaded_at: '2026-07-06T08:00:00.000Z',
+      updated_at: '2026-07-20T09:10:11.000Z',
+    };
+    const resp = await handleSeoRoute(
+      req('/sitemap-daily.xml'),
+      makeEnv({}, makeSitemapDb({ daily: [mkRow('2026-07-06')], videos: [video] })),
+    );
+    const xml = await resp!.text();
+    expect(xml).toContain(
+      `<loc>${SITE}/video/daily/2026-07-06</loc><lastmod>2026-07-20</lastmod>`,
+    );
   });
 
   test('首页和归档 lastmod 使用所有日报中的最大值而不是日期最新一行', async () => {

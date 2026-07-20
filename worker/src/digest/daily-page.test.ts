@@ -14,6 +14,7 @@ import {
   DAILY_VIDEO_JSON_LD_START,
   DAILY_VIDEO_PLAYER_END,
   DAILY_VIDEO_PLAYER_START,
+  ensureDailyVideoWatchLinkHtml,
   patchDailyPageVideoHtml,
   renderDailyPageHtml,
   type DailyPageData,
@@ -507,13 +508,14 @@ describe('daily video native rendering and historical marker patch', () => {
     expect(html).toContain(`poster="${API}/r/${video.poster_key}"`);
     expect(html).toContain(`<source src="${API}/r/${video.mp4_key}" type="video/mp4">`);
     expect(html).toContain(`<track kind="captions" src="${API}/r/${video.vtt_key}" srclang="zh-CN" label="中文" default>`);
+    expect(html).toContain(`href="${SITE}/video/daily/2026-07-06"`);
 
     const ld = extractJsonLd(html);
     const graph = ld['@graph'] as any[];
     expect(graph.find((node) => node['@type'] === 'CollectionPage')).toBeTruthy();
     expect(graph.find((node) => node['@type'] === 'VideoObject')).toEqual({
       '@type': 'VideoObject',
-      '@id': `${SITE}/daily/2026-07-06#video`,
+      '@id': `${SITE}/video/daily/2026-07-06#video`,
       name: video.title,
       description: video.description,
       thumbnailUrl: `${API}/r/${video.poster_key}`,
@@ -521,6 +523,16 @@ describe('daily video native rendering and historical marker patch', () => {
       duration: 'PT2M5.25S',
       contentUrl: `${API}/r/${video.mp4_key}`,
     });
+  });
+
+  test('legacy player marker gains one crawlable watch-page link idempotently', () => {
+    const legacy = `<!doctype html><main>${DAILY_VIDEO_PLAYER_START}<section class="daily-video"><video controls></video></section>${DAILY_VIDEO_PLAYER_END}<p>日报正文</p></main>`;
+    const once = ensureDailyVideoWatchLinkHtml(legacy, '2026-07-06', envFixture());
+    const twice = ensureDailyVideoWatchLinkHtml(once, '2026-07-06', envFixture());
+    expect(twice).toBe(once);
+    expect(once).toContain(`href="${SITE}/video/daily/2026-07-06"`);
+    expect(once.match(/class="daily-video-watch-link"/g)).toHaveLength(1);
+    expect(once).toContain('<p>日报正文</p>');
   });
 
   test('historical patch is byte-stable outside markers and idempotent', () => {
