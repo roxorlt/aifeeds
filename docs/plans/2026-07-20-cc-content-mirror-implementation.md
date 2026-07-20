@@ -1034,12 +1034,12 @@ git commit -m "feat(cc): 增加腾讯云静态内容增量同步器"
 /var/lib/aifeeds-cc-sync/public/current/ai-news/page/2/index.html ...
 /var/lib/aifeeds-cc-sync/public/current/sitemap.xml
 /sitemap-static.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/news-1.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/x-1.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/gh-1.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/ph-1.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/hf-paper-1.xml
-/var/lib/aifeeds-cc-sync/public/current/sitemaps/archive.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/news-1.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/x-1.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/gh-1.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/ph-1.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/hf-paper-1.xml
+/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/archive.xml
 ```
 
 规则：
@@ -1049,9 +1049,16 @@ git commit -m "feat(cc): 增加腾讯云静态内容增量同步器"
 - archive canonical 为 `.cc`。
 - 每个 sitemap shard 最多 45,000 URL。
 - sitemap index 只引用实际存在 shard。
+- sitemap index 的生成分片只引用
+  `/sitemaps/<generation-v4-uuid>/<allowlisted-file>.xml`；不引用跨代稳定
+  `/sitemaps/<file>.xml`。
 - XML 全部转义。
 - archive、shards 与 sitemap index 同代写入 staging 并全部 fsync，最后只原子
-  替换一次 `public/current` 相对 symlink；至少保留 current 与 previous。
+  替换一次 `public/current` 相对 symlink。
+- GC 保留按有效 manifest 时间排序的最新 24 个完整 generation，并额外无条件保留
+  journal current/previous；正常最多 24 个，异常时最多 26 个完整 generation。
+  10 分钟 timer + 30 秒 jitter 下提供约 4 小时分片寿命，覆盖 600 秒 HTTP 缓存并
+  留出 3 小时以上 crawler grace。
 - delete 后对应 URL 不再出现在 archive/sitemap。
 - 30,001 fixture 在合理内存内完成。
 
@@ -1118,6 +1125,7 @@ oneshot service：
 Type=oneshot
 User=aifeeds-sync
 Group=www
+UMask=0027
 EnvironmentFile=/etc/aifeeds/cc-sync.env
 ExecStart=/usr/bin/node /opt/aifeeds-cc-sync/sync.mjs
 NoNewPrivileges=true
@@ -1140,7 +1148,12 @@ Persistent=true
 
 部署时 `aifeeds-sync` 只能写 `/i` 和 `/var/lib/aifeeds-cc-sync`；站点根及
 `/ai-news` 对同步用户只读，不能写 `index.html`、隐私条款、relay 源码或
-`/etc/aifeeds`。
+`/etc/aifeeds`。`CC_SYNC_STATE_DIR` 必须预建为
+`aifeeds-sync:www 0750`，不能依赖 service 首次运行临时创建：
+
+```bash
+sudo install -d -o aifeeds-sync -g www -m 0750 /var/lib/aifeeds-cc-sync
+```
 
 **Step 2: Nginx**
 
@@ -1164,14 +1177,21 @@ location = /sitemap.xml {
     add_header Cache-Control "public, max-age=600" always;
 }
 
-location ^~ /sitemaps/ {
-    alias /var/lib/aifeeds-cc-sync/public/current/sitemaps/;
+location ~ "\A/sitemaps/(?<generation>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(?<sitemap>(?:archive|(?:news|x|gh|ph|hf-paper)-[1-9][0-9]*)\.xml)\z" {
+    alias /var/lib/aifeeds-cc-sync/public/generations/$generation/sitemaps/$sitemap;
     default_type application/xml;
     add_header Cache-Control "public, max-age=600" always;
 }
+
+# 不得写成 ^~，否则上面的严格 regex 不会参与匹配。
+location /sitemaps/ {
+    return 404;
+}
 ```
 
-不得影响现有 `/auth/wechat/` 反代。
+严格 regex 的两个 capture 都不接受 `/`、`..`、百分号或任意文件名；旧 root index
+缓存命中时会继续读取其 generation 下未改变的 XML。不得退回
+`public/current/sitemaps/` alias，也不得影响现有 `/auth/wechat/` 反代。
 
 **Step 3: 部署脚本**
 
@@ -1180,10 +1200,20 @@ location ^~ /sitemaps/ {
 1. 从 `.secrets/aifeeds-{target}.env` 读取 `CC_SYNC_SECRET`。
 2. scp 到 `/tmp`，再 sudo 安装 `/opt/aifeeds-cc-sync`。
 3. 写 `/etc/aifeeds/cc-sync.env`，不输出 secret。
-4. 创建专用用户和可写目录。
+4. 创建专用用户，并用 `aifeeds-sync:www 0750` 预建
+   `/var/lib/aifeeds-cc-sync`。
 5. 安装/enable timer。
 6. 先跑 `node --test`，再 `systemctl start aifeeds-cc-sync.service`。
-7. `nginx -t` 成功后才 reload。
+7. service 首次成功后，以 Nginx worker 用户验证可遍历并读取 current：
+
+   ```bash
+   sudo -u www test -x /var/lib/aifeeds-cc-sync
+   sudo -u www test -x /var/lib/aifeeds-cc-sync/public/current
+   sudo -u www test -r /var/lib/aifeeds-cc-sync/public/current/sitemap.xml
+   sudo -u www test -r /var/lib/aifeeds-cc-sync/public/current/sitemaps/archive.xml
+   ```
+
+8. 上述检查与 `nginx -t` 都成功后才 reload。
 
 **Step 4: 静态检查**
 

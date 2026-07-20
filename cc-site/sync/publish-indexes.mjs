@@ -17,7 +17,9 @@ import { assertCanonicalPageUrl } from './fs-safe.mjs';
 const SITE_BASE = 'https://ai-feeds.cc';
 const ARCHIVE_PAGE_SIZE = 50;
 const SITEMAP_SHARD_SIZE = 45_000;
+const GENERATION_RETENTION_COUNT = 24;
 const PUBLICATION_SCHEMA = 2;
+const SITEMAP_URL_SCHEMA = 2;
 const JOURNAL_SCHEMA = 1;
 const JOURNAL_FILE = 'publication-journal.json';
 const SOURCE_BUCKETS = new Map([
@@ -29,6 +31,7 @@ const SOURCE_BUCKETS = new Map([
 ]);
 const SOURCE_ORDER = ['news', 'x', 'gh', 'ph', 'hf-paper'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PUBLIC_SITEMAP_FILE_RE = /^(?:archive|(?:news|x|gh|ph|hf-paper)-[1-9][0-9]*)\.xml$/;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
 const FILE_FLAGS = (
@@ -129,6 +132,7 @@ function normalizeItems(state) {
 function publicationFingerprint(items, includeStaticSitemap) {
   return createHash('sha256').update(JSON.stringify({
     schema: PUBLICATION_SCHEMA,
+    sitemapUrlSchema: SITEMAP_URL_SCHEMA,
     includeStaticSitemap,
     items: items.map((item) => ({
       urlPath: item.urlPath,
@@ -148,6 +152,14 @@ function archiveUrl(pageNumber) {
 
 function itemUrl(urlPath) {
   return `${SITE_BASE}${urlPath}`;
+}
+
+function generationSitemapUrl(generationId, fileName) {
+  if (!UUID_RE.test(generationId)) throw new Error('unsafe generation id');
+  if (!PUBLIC_SITEMAP_FILE_RE.test(fileName)) {
+    throw new Error('unsafe public sitemap file name');
+  }
+  return `${SITE_BASE}/sitemaps/${generationId}/${fileName}`;
 }
 
 function complianceFooter() {
@@ -638,13 +650,43 @@ async function garbageCollectGenerations(
     withFileTypes: true,
   });
   await assertIdentity(generationsIdentity);
+  const completeGenerations = [];
+  for (const entry of entries) {
+    if (!UUID_RE.test(entry.name)) continue;
+    await assertIdentity(generationsIdentity);
+    const identity = await inspectGeneration(
+      generationsIdentity,
+      entry.name,
+    );
+    const manifest = await validateGenerationComplete(identity, entry.name);
+    completeGenerations.push({
+      id: entry.name,
+      generatedAt: Date.parse(manifest.generated_at),
+    });
+  }
+  completeGenerations.sort((left, right) => (
+    right.generatedAt - left.generatedAt
+    || lexicalCompare(right.id, left.id)
+  ));
+  const retainedIds = new Set(keepIds);
+  for (
+    let index = 0;
+    index < Math.min(
+      completeGenerations.length,
+      GENERATION_RETENTION_COUNT,
+    );
+    index += 1
+  ) {
+    retainedIds.add(completeGenerations[index].id);
+  }
+
   for (const entry of entries) {
     await assertIdentity(generationsIdentity);
     const stageMatch = /^\.stage\.([0-9a-f-]{36})$/.exec(entry.name);
     const safeStage = stageMatch !== null && UUID_RE.test(stageMatch[1]);
     const safeGeneration = UUID_RE.test(entry.name);
     if (!safeStage && !safeGeneration) continue;
-    if (safeGeneration && keepIds.has(entry.name)) {
+    if (safeGeneration && retainedIds.has(entry.name)) {
       await inspectGeneration(generationsIdentity, entry.name);
       continue;
     }
@@ -821,7 +863,7 @@ async function buildGeneration({
           .slice(offset, offset + SITEMAP_SHARD_SIZE)
           .map((item) => ({ loc: itemUrl(item.urlPath), lastmod: null }))),
       );
-      shardLocations.push(`${SITE_BASE}/sitemaps/${shardFile}`);
+      shardLocations.push(generationSitemapUrl(generationId, shardFile));
     }
   }
 
@@ -833,7 +875,7 @@ async function buildGeneration({
       ...(includeStaticSitemap
         ? [`${SITE_BASE}/sitemap-static.xml`]
         : []),
-      `${SITE_BASE}/sitemaps/archive.xml`,
+      generationSitemapUrl(generationId, 'archive.xml'),
       ...shardLocations,
     ]),
   );

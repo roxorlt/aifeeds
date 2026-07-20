@@ -51,21 +51,29 @@
 - `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemaps/`：内容与归档 sitemap 分片；
 - `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemap.xml`：根 sitemap 索引；
 - `${CC_SYNC_STATE_DIR}/public/current`：只允许指向 `generations/<uuid>` 的受控相对
-  symlink，是 Nginx 暴露整代内容的唯一原子入口；
+  symlink，是 Nginx 暴露归档与根 sitemap 的原子入口；
 - `${CC_SYNC_STATE_DIR}/public/publication-journal.json`：崩溃恢复与 current/previous
   保留信息。
 
 同步用户只需写 `${CC_SITE_ROOT}/i/` 和 `${CC_SYNC_STATE_DIR}`；站点根对同步器只读，
 归档不再落到 `${CC_SITE_ROOT}/ai-news/`。人工部署脚本不得复制或删除 `/i/`、
 `/ai-news/`、`/sitemaps/`，也不得在站点根目录写旧版 `sitemap.xml`。生产 Nginx
-将 `/ai-news/`、根 sitemap 和 `/sitemaps/` alias 到 `public/current/` 下对应路径。
+将 `/ai-news/` 和根 sitemap alias 到 `public/current/` 下对应路径。根 sitemap
+中的分片 URL 固定为 `/sitemaps/<generation-v4-uuid>/<allowlisted-file>.xml`；
+Nginx 只把严格匹配的 UUID 与 `archive.xml` 或
+`(news|x|gh|ph|hf-paper)-<正整数>.xml` 映射到对应不可变 generation，其他
+`/sitemaps/` 请求一律 404，不能通过 URL 选择任意文件或使用 `..`。
 
 发布器先 fsync 完整 generation，再以一次 `rename` 原子替换 `current` symlink；
-旧 generation 仅在新入口生效后回收，并至少保留 current 与 previous 两代。启动时
-按持久 journal 恢复 SIGKILL 中断并清理已确认安全的孤立 stage。相同 state 指纹会
-跳过重建。item state 当前没有镜像生成/修改时间字段，因此 item sitemap 明确省略
-`lastmod`，不会把来源文章的 `published_at` 冒充本站修改时间；归档 sitemap 使用
-真实 generation 生成时间。
+GC 保留按 manifest 时间排序的最近 24 个完整 generation，并无条件保留 journal 的
+current 与 previous。正常运行的磁盘边界是 24 个完整 generation；时钟异常导致
+current/previous 不在最新集合时，硬上界为 26 个。10 分钟 timer 加 30 秒 jitter 下，
+旧分片约保留 4 小时，覆盖 Nginx `max-age=600` 后仍有 3 小时以上 crawler grace；
+因此旧根 sitemap 在 current 切换后仍能抓到其列出的不可变 XML。启动时按持久 journal
+恢复 SIGKILL 中断并清理已确认安全的孤立 stage。相同 state 指纹会跳过重建。item
+state 当前没有镜像生成/修改时间字段，因此 item sitemap 明确省略 `lastmod`，不会把
+来源文章的 `published_at` 冒充本站修改时间；归档 sitemap 使用真实 generation
+生成时间。
 
 `publish-indexes.mjs` 不提供独立 CLI；唯一生产调用链是已持有同一
 `acquireSyncLock` 的 `sync.mjs`。

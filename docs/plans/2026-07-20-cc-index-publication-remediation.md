@@ -4,7 +4,7 @@
 
 **Goal:** 让 `.cc` 归档与 sitemap 在只读站点根、进程崩溃和并发请求下仍以完整一致的一代原子发布。
 
-**Architecture:** 所有生成内容写入 `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/`，目录内包含 `ai-news/`、`sitemaps/`、`sitemap.xml` 和 `manifest.json`。全部文件及目录 fsync 后，发布器以受控相对符号链接 `generations/<uuid>` 单次原子替换 `public/current`；Nginx Task 10 只通过 `public/current/...` 暴露动态公开文件。持久 journal 记录 prepared/current/previous，恢复和 GC 仅处理经过安全名称、真实目录及固定父链校验的 generation，并至少保留 current 与 previous。
+**Architecture:** 所有生成内容写入 `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/`，目录内包含 `ai-news/`、`sitemaps/`、`sitemap.xml` 和 `manifest.json`。全部文件及目录 fsync 后，发布器以受控相对符号链接 `generations/<uuid>` 单次原子替换 `public/current`；Nginx Task 10 通过 `public/current` 暴露归档与根 sitemap，通过严格 generation UUID URL 暴露不可变分片。持久 journal 记录 prepared/current/previous；恢复和 GC 仅处理经过安全名称、真实目录及固定父链校验的 generation，保留最新 24 个完整代并额外无条件保留 journal current/previous。
 
 **Tech Stack:** Node.js 18 ESM、`node:fs/promises`、Node test runner、Bash、Nginx alias。
 
@@ -24,7 +24,7 @@
 4. 把归档、分片和根 sitemap 全部迁入 stateDir generation；siteRoot 只用于固定链与 `sitemap-static.xml` 检查。
 5. 运行定向测试，确认通过。
 
-### Task 2: 实现 journal、原子切换、恢复和双代保留
+### Task 2: 实现 journal、原子切换、恢复和有界多代保留
 
 **Files:**
 - Modify: `cc-site/sync/test/publish-indexes.test.mjs`
@@ -34,7 +34,7 @@
 **Steps:**
 
 1. 写真实子进程测试：初始代发布后，子进程构建下一代并分别在 prepared、current swap 后暂停；父进程发送 `SIGKILL`。
-2. 重启发布器，断言 `current` 始终解析到完整代，journal 被恢复，孤立 stage 被清理，current 与 previous 均保留，其他安全孤儿才被 GC。
+2. 重启发布器，断言 `current` 始终解析到完整代，journal 被恢复，孤立 stage 被清理；最新 24 个完整 generation 与 journal current/previous 均保留，更旧的安全 UUID generation 才被 GC。
 3. 运行测试确认旧实现失败。
 4. 实现 durable journal、generation stage→immutable rename、相对 symlink 临时项→`current` 原子 rename、目录 fsync、启动恢复和保守 GC。
 5. 在切换前后校验 generation 真实目录身份；绝不跟随或删除未固定的 replacement symlink。
@@ -53,7 +53,7 @@
 
 1. 移除 `publish-indexes.mjs` 独立 CLI，使发布只经已持有 `acquireSyncLock` 的 `runSync` 调用。
 2. 增加并发测试，证明第二个同步进程不能进入发布阶段。
-3. 文档更新为 Task 10 Nginx alias `public/current/ai-news/`、`public/current/sitemaps/`、`public/current/sitemap.xml`，systemd 不再开放 `siteRoot/ai-news`。
+3. 文档更新为 Task 10 Nginx alias `public/current/ai-news/` 与 `public/current/sitemap.xml`；分片只允许 `/sitemaps/<v4-uuid>/<allowlisted-file>.xml` 映射到 `public/generations/<uuid>/sitemaps/<file>`，其他 `/sitemaps/` 请求 404。systemd 不再开放 `siteRoot/ai-news`。
 4. item sitemap 不再把 `published_at` 冒充修改时间；state 无镜像修改时间字段时省略 `lastmod`，归档 lastmod 仅使用真实 generation 时间。
 
 ### Task 4: 加固静态部署脚本并冻结验证文件

@@ -30,6 +30,9 @@ import {
 } from '../publish-indexes.mjs';
 
 const HASH = 'a'.repeat(64);
+const RETAINED_GENERATIONS = 24;
+const SITE_BASE_FOR_TESTS = 'https://ai-feeds.cc';
+const PUBLIC_SITEMAP_URL_RE = /^https:\/\/ai-feeds\.cc\/sitemaps\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/(archive|(?:news|x|gh|ph|hf-paper)-[1-9][0-9]*)\.xml$/;
 const CC_SITE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -128,7 +131,7 @@ test('publishes sorted .cc archive pages and sitemap outputs', async () => {
     ]);
   }
 
-  await publishIndexes({
+  const published = await publishIndexes({
     siteRoot: dirs.siteRoot,
     stateDir: dirs.stateDir,
     state: state(pages),
@@ -169,8 +172,18 @@ test('publishes sorted .cc archive pages and sitemap outputs', async () => {
     'utf8',
   );
   assert.match(sitemapIndex, /https:\/\/ai-feeds\.cc\/sitemap-static\.xml/);
-  assert.match(sitemapIndex, /https:\/\/ai-feeds\.cc\/sitemaps\/archive\.xml/);
-  assert.match(sitemapIndex, /https:\/\/ai-feeds\.cc\/sitemaps\/news-1\.xml/);
+  assert.match(
+    sitemapIndex,
+    new RegExp(`https://ai-feeds\\.cc/sitemaps/${published.generation}/archive\\.xml`),
+  );
+  assert.match(
+    sitemapIndex,
+    new RegExp(`https://ai-feeds\\.cc/sitemaps/${published.generation}/news-1\\.xml`),
+  );
+  assert.doesNotMatch(
+    sitemapIndex,
+    /https:\/\/ai-feeds\.cc\/sitemaps\/(?:archive|news-1)\.xml/,
+  );
 
   const archiveMap = await readFile(
     publishedPath(dirs, 'sitemaps', 'archive.xml'),
@@ -211,7 +224,10 @@ test('references the static sitemap only when it is a regular non-symlink file',
       expected,
       fixture,
     );
-    assert.match(index, /https:\/\/ai-feeds\.cc\/sitemaps\/archive\.xml/);
+    assert.match(
+      index,
+      /https:\/\/ai-feeds\.cc\/sitemaps\/[0-9a-f-]{36}\/archive\.xml/,
+    );
   }
 
   const symlinkDirs = await workspace({ staticSitemap: 'symlink' });
@@ -343,6 +359,131 @@ test('maps sources to fixed safe shard names and splits at 45,000 URLs', async (
   assert.match(index, /hf-paper-1\.xml/);
   assert.match(index, /hf-paper-2\.xml/);
   assert.doesNotMatch(index, /news-1\.xml|x-1\.xml|gh-1\.xml|ph-1\.xml/);
+});
+
+test('only strict generation UUID and allowlisted sitemap filenames are generated', async () => {
+  const dirs = await workspace();
+  const published = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/item', metadata('news', 'News', null)],
+      ['/i/x/item', metadata('x', 'X', null)],
+      ['/i/gh/item', metadata('gh', 'GitHub', null)],
+      ['/i/ph/item', metadata('ph', 'Product Hunt', null)],
+      ['/i/paper/item', metadata('paper', 'Paper', null)],
+    ]),
+  });
+  const index = await readFile(publishedPath(dirs, 'sitemap.xml'), 'utf8');
+  const dynamicLocations = [...index.matchAll(/<loc>([^<]+)<\/loc>/g)]
+    .map((match) => match[1])
+    .filter((location) => location.includes('/sitemaps/'));
+
+  assert.equal(dynamicLocations.length, 6);
+  for (const location of dynamicLocations) {
+    const match = PUBLIC_SITEMAP_URL_RE.exec(location);
+    assert.notEqual(match, null, location);
+    assert.equal(match[1], published.generation);
+    assert.doesNotMatch(location, /(?:\.\.|%|\\)/);
+  }
+  assert.deepEqual(
+    dynamicLocations.map((location) => location.split('/').at(-1)),
+    [
+      'archive.xml',
+      'news-1.xml',
+      'x-1.xml',
+      'gh-1.xml',
+      'ph-1.xml',
+      'hf-paper-1.xml',
+    ],
+  );
+});
+
+test('cached generation sitemap URLs remain immutable across later publications', async () => {
+  const dirs = await workspace();
+  const first = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/a', metadata('news', 'A', '2026-07-20T00:00:00Z')],
+    ]),
+  });
+  const firstGeneration = path.join(
+    dirs.stateDir,
+    'public',
+    'generations',
+    first.generation,
+  );
+  const firstIndex = await readFile(
+    path.join(firstGeneration, 'sitemap.xml'),
+    'utf8',
+  );
+  const firstShardUrl = `${SITE_BASE_FOR_TESTS}/sitemaps/${first.generation}/news-1.xml`;
+  const firstShard = path.join(firstGeneration, 'sitemaps', 'news-1.xml');
+  const firstShardBytes = await readFile(firstShard);
+  assert.ok(firstIndex.includes(firstShardUrl));
+
+  for (const [urlPath, title] of [
+    ['/i/news/b', 'B'],
+    ['/i/news/c', 'C'],
+  ]) {
+    await publishIndexes({
+      ...dirs,
+      state: state([
+        [urlPath, metadata('news', title, '2026-07-20T00:00:00Z')],
+      ]),
+    });
+  }
+
+  assert.equal(
+    await readFile(path.join(firstGeneration, 'sitemap.xml'), 'utf8'),
+    firstIndex,
+  );
+  assert.deepEqual(await readFile(firstShard), firstShardBytes);
+});
+
+test('generation retention is bounded and collects only after 24 complete generations', async () => {
+  const dirs = await workspace();
+  const first = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/item-0', metadata('news', 'Generation 0', null)],
+    ]),
+  });
+  const generationsPath = path.join(dirs.stateDir, 'public', 'generations');
+  const firstPath = path.join(generationsPath, first.generation);
+
+  for (let index = 1; index < RETAINED_GENERATIONS; index += 1) {
+    await publishIndexes({
+      ...dirs,
+      state: state([
+        [
+          `/i/news/item-${index}`,
+          metadata('news', `Generation ${index}`, null),
+        ],
+      ]),
+    });
+  }
+  assert.equal((await lstat(firstPath)).isDirectory(), true);
+  assert.equal((await readdir(generationsPath)).length, RETAINED_GENERATIONS);
+
+  await publishIndexes({
+    ...dirs,
+    state: state([
+      [
+        `/i/news/item-${RETAINED_GENERATIONS}`,
+        metadata('news', `Generation ${RETAINED_GENERATIONS}`, null),
+      ],
+    ]),
+  });
+  await assert.rejects(lstat(firstPath), { code: 'ENOENT' });
+  const retained = await readdir(generationsPath);
+  const journal = JSON.parse(await readFile(
+    path.join(dirs.stateDir, 'public', 'publication-journal.json'),
+    'utf8',
+  ));
+  assert.equal(retained.length, RETAINED_GENERATIONS);
+  assert.ok(retained.includes(journal.current));
+  assert.ok(retained.includes(journal.previous));
+  assert.ok(retained.every((name) => /^[0-9a-f-]{36}$/.test(name)));
 });
 
 test('fails closed for an unknown source without replacing a prior generation', async () => {
@@ -481,10 +622,10 @@ test('recovers real SIGKILL crashes and retains current plus previous generation
         `generations/${journal.current}`,
       );
       const names = await readdir(path.join(publicDir, 'generations'));
-      assert.deepEqual(
-        names.sort(),
-        [journal.current, journal.previous].sort(),
-      );
+      assert.ok(names.includes(journal.current));
+      assert.ok(names.includes(journal.previous));
+      assert.ok(names.length <= RETAINED_GENERATIONS);
+      assert.ok(names.every((name) => /^[0-9a-f-]{36}$/.test(name)));
       assert.match(
         await readFile(publishedPath(dirs, 'ai-news', 'index.html'), 'utf8'),
         /New/,
