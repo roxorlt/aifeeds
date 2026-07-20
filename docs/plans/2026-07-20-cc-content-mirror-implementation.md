@@ -100,7 +100,7 @@ source policy=manual                                                 → review
   → 校验 content_hash
   → 写临时文件并 rename
   → 删除 gone 文件
-  → 原子重建 /ai-news/、sitemap index/shards
+  → stateDir 构建完整 generation，单次原子切换 public/current
   → 成功后推进 last_seq
 ```
 
@@ -1030,16 +1030,16 @@ git commit -m "feat(cc): 增加腾讯云静态内容增量同步器"
 同步完成后从 state 生成：
 
 ```text
-/ai-news/index.html
-/ai-news/page/2/index.html ...
-/var/lib/aifeeds-cc-sync/public/sitemap.xml
+/var/lib/aifeeds-cc-sync/public/current/ai-news/index.html
+/var/lib/aifeeds-cc-sync/public/current/ai-news/page/2/index.html ...
+/var/lib/aifeeds-cc-sync/public/current/sitemap.xml
 /sitemap-static.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/news-1.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/x-1.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/gh-1.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/ph-1.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/hf-paper-1.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/archive.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/news-1.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/x-1.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/gh-1.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/ph-1.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/hf-paper-1.xml
+/var/lib/aifeeds-cc-sync/public/current/sitemaps/archive.xml
 ```
 
 规则：
@@ -1050,7 +1050,8 @@ git commit -m "feat(cc): 增加腾讯云静态内容增量同步器"
 - 每个 sitemap shard 最多 45,000 URL。
 - sitemap index 只引用实际存在 shard。
 - XML 全部转义。
-- 输出目录先写 staging，所有 shard 成功后最后原子替换 sitemap index。
+- archive、shards 与 sitemap index 同代写入 staging 并全部 fsync，最后只原子
+  替换一次 `public/current` 相对 symlink；至少保留 current 与 previous。
 - delete 后对应 URL 不再出现在 archive/sitemap。
 - 30,001 fixture 在合理内存内完成。
 
@@ -1058,13 +1059,13 @@ git commit -m "feat(cc): 增加腾讯云静态内容增量同步器"
 
 `cc-site/deploy.sh` 不再部署旧的根目录 `sitemap.xml`。线上
 `https://ai-feeds.cc/sitemap.xml` 由 Nginx alias 指向同步器的
-`/var/lib/aifeeds-cc-sync/public/sitemap.xml`。同步器拥有：
+`/var/lib/aifeeds-cc-sync/public/current/sitemap.xml`。同步器拥有：
 
 ```text
-/var/lib/aifeeds-cc-sync/public/sitemap.xml
-/var/lib/aifeeds-cc-sync/public/sitemaps/
+/var/lib/aifeeds-cc-sync/public/generations/
+/var/lib/aifeeds-cc-sync/public/current
+/var/lib/aifeeds-cc-sync/public/publication-journal.json
 /i/
-/ai-news/
 ```
 
 手工部署只维护：
@@ -1125,7 +1126,6 @@ ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/aifeeds-cc-sync
 ReadWritePaths=/www/wwwroot/ai-feeds.cc/i
-ReadWritePaths=/www/wwwroot/ai-feeds.cc/ai-news
 ```
 
 timer：
@@ -1138,8 +1138,8 @@ RandomizedDelaySec=30
 Persistent=true
 ```
 
-部署时 `aifeeds-sync` 只能写 `/i`、`/ai-news` 和
-`/var/lib/aifeeds-cc-sync`；不能写 `index.html`、隐私条款、relay 源码或
+部署时 `aifeeds-sync` 只能写 `/i` 和 `/var/lib/aifeeds-cc-sync`；站点根及
+`/ai-news` 对同步用户只读，不能写 `index.html`、隐私条款、relay 源码或
 `/etc/aifeeds`。
 
 **Step 2: Nginx**
@@ -1153,18 +1153,19 @@ location ^~ /i/ {
 }
 
 location ^~ /ai-news/ {
+    alias /var/lib/aifeeds-cc-sync/public/current/ai-news/;
     try_files $uri $uri/ $uri/index.html =404;
     add_header Cache-Control "public, max-age=600" always;
 }
 
 location = /sitemap.xml {
-    alias /var/lib/aifeeds-cc-sync/public/sitemap.xml;
+    alias /var/lib/aifeeds-cc-sync/public/current/sitemap.xml;
     default_type application/xml;
     add_header Cache-Control "public, max-age=600" always;
 }
 
 location ^~ /sitemaps/ {
-    alias /var/lib/aifeeds-cc-sync/public/sitemaps/;
+    alias /var/lib/aifeeds-cc-sync/public/current/sitemaps/;
     default_type application/xml;
     add_header Cache-Control "public, max-age=600" always;
 }
@@ -1472,7 +1473,8 @@ sudo systemctl disable --now aifeeds-cc-sync.timer
 ```bash
 sudo systemctl disable --now aifeeds-cc-sync.timer
 sudo mv /www/wwwroot/ai-feeds.cc/i /www/wwwroot/ai-feeds.cc/i.disabled
-sudo mv /www/wwwroot/ai-feeds.cc/ai-news /www/wwwroot/ai-feeds.cc/ai-news.disabled
+sudo mv /var/lib/aifeeds-cc-sync/public/current \
+  /var/lib/aifeeds-cc-sync/public/current.disabled
 ```
 
 然后部署只含静态页的 emergency sitemap；不得删除 `/auth/wechat/` relay 或备案页。

@@ -1,24 +1,25 @@
-#!/usr/bin/env node
-
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   lstat,
   mkdir,
   open,
+  readdir,
+  readlink,
   rename,
   rm,
+  symlink,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
-import { loadConfig } from './config.mjs';
 import { assertCanonicalPageUrl } from './fs-safe.mjs';
-import { loadState } from './state.mjs';
 
 const SITE_BASE = 'https://ai-feeds.cc';
 const ARCHIVE_PAGE_SIZE = 50;
 const SITEMAP_SHARD_SIZE = 45_000;
+const PUBLICATION_SCHEMA = 2;
+const JOURNAL_SCHEMA = 1;
+const JOURNAL_FILE = 'publication-journal.json';
 const SOURCE_BUCKETS = new Map([
   ['news', 'news'],
   ['x', 'x'],
@@ -27,6 +28,7 @@ const SOURCE_BUCKETS = new Map([
   ['paper', 'hf-paper'],
 ]);
 const SOURCE_ORDER = ['news', 'x', 'gh', 'ph', 'hf-paper'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
 const FILE_FLAGS = (
@@ -35,6 +37,7 @@ const FILE_FLAGS = (
   | constants.O_EXCL
   | NOFOLLOW
 );
+const READ_FLAGS = constants.O_RDONLY | NOFOLLOW;
 const DIRECTORY_FLAGS = constants.O_RDONLY | DIRECTORY | NOFOLLOW;
 
 function htmlEscape(value) {
@@ -78,6 +81,8 @@ function normalizeItems(state) {
     if (
       !metadata
       || typeof metadata !== 'object'
+      || typeof metadata.hash !== 'string'
+      || !/^[0-9a-f]{64}$/.test(metadata.hash)
       || typeof metadata.source !== 'string'
       || typeof metadata.title !== 'string'
       || !(
@@ -94,11 +99,13 @@ function normalizeItems(state) {
     const timestamp = parsedTimestamp(metadata.published_at);
     items.push({
       urlPath,
+      hash: metadata.hash,
       source: metadata.source,
       shard,
       title: metadata.title,
+      publishedAt: metadata.published_at,
       timestamp,
-      lastmod: timestamp === null
+      displayDate: timestamp === null
         ? null
         : new Date(timestamp).toISOString(),
     });
@@ -119,6 +126,20 @@ function normalizeItems(state) {
   return items;
 }
 
+function publicationFingerprint(items, includeStaticSitemap) {
+  return createHash('sha256').update(JSON.stringify({
+    schema: PUBLICATION_SCHEMA,
+    includeStaticSitemap,
+    items: items.map((item) => ({
+      urlPath: item.urlPath,
+      hash: item.hash,
+      source: item.source,
+      title: item.title,
+      publishedAt: item.publishedAt,
+    })),
+  })).digest('hex');
+}
+
 function archiveUrl(pageNumber) {
   return pageNumber === 1
     ? `${SITE_BASE}/ai-news/`
@@ -129,6 +150,10 @@ function itemUrl(urlPath) {
   return `${SITE_BASE}${urlPath}`;
 }
 
+function complianceFooter() {
+  return `<footer><div class="container"><p class="links"><a href="/">首页</a> · <a href="/ai-news/">AI 资讯</a> · <a href="/privacy.html">隐私政策</a> · <a href="/terms.html">服务条款</a> · <a href="/contact.html">联系我们</a> · <a href="mailto:support@ai-feeds.cc">support@ai-feeds.cc</a></p><p class="beian"><a href="https://beian.mps.gov.cn/#/query/webSearch?code=11010802048455" rel="noopener noreferrer" target="_blank"><img src="/assets/gongan-icon.png" alt="公安备案图标" width="14" height="16">京公网安备11010802048455号</a><a href="https://beian.miit.gov.cn/#/Integrated/index" rel="noopener noreferrer" target="_blank">京ICP备2025123594号-2</a></p><p>© 2026 AI源信. 版权所有</p></div></footer>`;
+}
+
 function renderArchivePage(items, pageNumber, pageCount) {
   const canonical = archiveUrl(pageNumber);
   const previous = pageNumber > 1 ? archiveUrl(pageNumber - 1) : null;
@@ -136,12 +161,12 @@ function renderArchivePage(items, pageNumber, pageCount) {
   const cards = items.length === 0
     ? '<p class="archive-empty">暂无可公开的 AI 资讯。</p>'
     : `<ol class="archive-list">\n${items.map((item) => {
-      const date = item.lastmod === null
+      const date = item.displayDate === null
         ? '日期未知'
-        : item.lastmod.slice(0, 10);
-      const datetime = item.lastmod === null
+        : item.displayDate.slice(0, 10);
+      const datetime = item.displayDate === null
         ? ''
-        : ` datetime="${htmlEscape(item.lastmod)}"`;
+        : ` datetime="${htmlEscape(item.displayDate)}"`;
       return `    <li class="archive-item"><a href="${htmlEscape(itemUrl(item.urlPath))}">${htmlEscape(item.title)}</a><div><span>${htmlEscape(item.source)}</span> · <time${datetime}>${htmlEscape(date)}</time></div></li>`;
     }).join('\n')}\n  </ol>`;
   const headLinks = [
@@ -183,7 +208,7 @@ ${headLinks}
       ${navigation}
   </nav>
 </div></section></main>
-<footer><div class="container"><p class="links"><a href="/">首页</a> · <a href="/ai-news/">AI 资讯</a> · <a href="/privacy.html">隐私政策</a> · <a href="/terms.html">服务条款</a> · <a href="/contact.html">联系我们</a></p><p>© 2026 AI源信. 版权所有</p></div></footer>
+${complianceFooter()}
 </body>
 </html>
 `;
@@ -250,9 +275,7 @@ function absoluteDirectoryPaths(target) {
   const relative = path.relative(root, target);
   const parts = relative === '' ? [] : relative.split(path.sep);
   const paths = [root];
-  for (const part of parts) {
-    paths.push(path.join(paths.at(-1), part));
-  }
+  for (const part of parts) paths.push(path.join(paths.at(-1), part));
   return paths;
 }
 
@@ -261,11 +284,7 @@ async function inspectDirectoryChain(target, name) {
   for (const directory of absoluteDirectoryPaths(target)) {
     const entry = await lstat(directory);
     assertDirectory(entry, name);
-    chain.push({
-      path: directory,
-      dev: entry.dev,
-      ino: entry.ino,
-    });
+    chain.push({ path: directory, dev: entry.dev, ino: entry.ino });
   }
   return chain;
 }
@@ -286,12 +305,7 @@ function assertSameDirectoryChain(expected, actual) {
 async function rootIdentity(root, name) {
   const chain = await inspectDirectoryChain(root, name);
   const entry = chain.at(-1);
-  return {
-    path: root,
-    dev: entry.dev,
-    ino: entry.ino,
-    chain,
-  };
+  return { path: root, dev: entry.dev, ino: entry.ino, chain };
 }
 
 async function assertIdentity(identity) {
@@ -307,14 +321,13 @@ async function syncDirectory(identity) {
     if (entry.dev !== identity.dev || entry.ino !== identity.ino) {
       throw new Error(`generated directory changed before sync: ${identity.path}`);
     }
-    await assertIdentity(identity);
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
 
-async function createDirectory(parentIdentity, name, mode) {
+async function createDirectory(parentIdentity, name, mode = 0o755) {
   if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
     throw new Error('unsafe generated directory name');
   }
@@ -367,9 +380,7 @@ async function writeDurableFile(rootIdentityValue, relativePath, contents) {
   const parts = safeRelativeParts(relativePath);
   const fileName = parts.pop();
   let parent = rootIdentityValue;
-  for (const directory of parts) {
-    parent = await ensureDirectory(parent, directory);
-  }
+  for (const directory of parts) parent = await ensureDirectory(parent, directory);
   await assertIdentity(parent);
   const file = path.join(parent.path, fileName);
   const handle = await open(file, FILE_FLAGS, 0o644);
@@ -392,160 +403,335 @@ async function lstatOptional(target) {
   }
 }
 
-function assertReplaceable(entry, kind, target) {
-  if (entry === null) return;
-  if (entry.isSymbolicLink()) {
-    throw new Error(`refusing generated symlink target: ${target}`);
-  }
-  if (
-    (kind === 'directory' && !entry.isDirectory())
-    || (kind === 'file' && !entry.isFile())
-  ) {
-    throw new Error(`invalid generated ${kind} target: ${target}`);
-  }
-}
-
-async function removeKnownEntry(target, kind, parentIdentity) {
+async function readRegularFile(parentIdentity, name, maximumBytes = 1024 * 1024) {
+  if (name.includes('/') || name.includes('\\')) throw new Error('unsafe file name');
   await assertIdentity(parentIdentity);
-  const entry = await lstatOptional(target);
-  if (entry === null) return;
-  assertReplaceable(entry, kind, target);
-  await assertIdentity(parentIdentity);
-  await rm(target, { recursive: kind === 'directory', force: true });
-}
-
-async function installedTargetIdentity(target, kind, parentIdentity) {
-  await assertIdentity(parentIdentity);
-  const entry = await lstatOptional(target);
-  if (entry === null) {
-    throw new Error(`installed generated target is missing: ${target}`);
-  }
-  assertReplaceable(entry, kind, target);
-  await assertIdentity(parentIdentity);
-  return {
-    path: target,
-    kind,
-    dev: entry.dev,
-    ino: entry.ino,
-    parentIdentity,
-  };
-}
-
-async function assertInstalledTarget(identity) {
-  await assertIdentity(identity.parentIdentity);
-  const entry = await lstatOptional(identity.path);
-  if (entry === null) {
-    throw new Error(`installed generated target is missing: ${identity.path}`);
-  }
-  assertReplaceable(entry, identity.kind, identity.path);
-  if (entry.dev !== identity.dev || entry.ino !== identity.ino) {
-    throw new Error(
-      `installed generated target changed during publication: ${identity.path}`,
-    );
-  }
-  await assertIdentity(identity.parentIdentity);
-}
-
-async function assertInstalledTargets(records) {
-  for (const record of records) {
-    if (!record.installed) continue;
-    if (record.installedIdentity === null) {
-      throw new Error(
-        `installed generated target identity is unavailable: ${record.target}`,
-      );
+  const file = path.join(parentIdentity.path, name);
+  const handle = await open(file, READ_FLAGS);
+  try {
+    const entry = await handle.stat();
+    if (!entry.isFile() || entry.size > maximumBytes) {
+      throw new Error(`unsafe generated file: ${file}`);
     }
-    await assertInstalledTarget(record.installedIdentity);
+    const content = await handle.readFile('utf8');
+    await assertIdentity(parentIdentity);
+    return content;
+  } finally {
+    await handle.close();
   }
 }
 
-async function removeInstalledTarget(record) {
-  if (record.installedIdentity === null) {
-    throw new Error(
-      `refusing to remove unpinned installed target: ${record.target}`,
-    );
+async function replaceDurableFile(parentIdentity, name, contents) {
+  const token = randomUUID();
+  const temporary = `.${name}.tmp.${token}`;
+  await writeDurableFile(parentIdentity, temporary, contents);
+  const target = path.join(parentIdentity.path, name);
+  const existing = await lstatOptional(target);
+  if (existing !== null && (existing.isSymbolicLink() || !existing.isFile())) {
+    throw new Error(`unsafe durable file target: ${target}`);
   }
-  await assertInstalledTarget(record.installedIdentity);
-  await assertIdentity(record.parentIdentity);
-  await rm(record.target, {
-    recursive: record.kind === 'directory',
-    force: true,
-  });
-}
-
-async function replaceGeneratedEntry({
-  name,
-  kind,
-  stage,
-  target,
-  backup,
-  parentIdentity,
-  records,
-}) {
   await assertIdentity(parentIdentity);
-  const oldEntry = await lstatOptional(target);
-  assertReplaceable(oldEntry, kind, target);
-  if (await lstatOptional(backup) !== null) {
-    throw new Error(`generated backup already exists: ${backup}`);
-  }
-  const record = {
-    name,
-    kind,
-    target,
-    backup,
-    parentIdentity,
-    oldMoved: false,
-    installed: false,
-    installedIdentity: null,
-  };
-  records.push(record);
-  if (oldEntry !== null) {
-    await rename(target, backup);
-    record.oldMoved = true;
-    await syncDirectory(parentIdentity);
-  }
-  await rename(stage, target);
-  record.installed = true;
-  record.installedIdentity = await installedTargetIdentity(
-    target,
-    kind,
-    parentIdentity,
-  );
+  await rename(path.join(parentIdentity.path, temporary), target);
   await syncDirectory(parentIdentity);
 }
 
-async function rollback(records) {
-  const failures = [];
-  for (const record of [...records].reverse()) {
-    try {
-      if (record.installed) {
-        await removeInstalledTarget(record);
-        await syncDirectory(record.parentIdentity);
-      }
-      if (record.oldMoved) {
-        await assertIdentity(record.parentIdentity);
-        await rename(record.backup, record.target);
-        await syncDirectory(record.parentIdentity);
-      }
-    } catch (error) {
-      failures.push(error);
+async function staticSitemapPresence(siteIdentity) {
+  await assertIdentity(siteIdentity);
+  const entry = await lstatOptional(path.join(siteIdentity.path, 'sitemap-static.xml'));
+  await assertIdentity(siteIdentity);
+  if (entry === null) return false;
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error('static sitemap must be a regular non-symlink file');
+  }
+  return true;
+}
+
+function generationLink(id) {
+  if (!UUID_RE.test(id)) throw new Error('unsafe generation id');
+  return `generations/${id}`;
+}
+
+function parseGenerationLink(target) {
+  if (typeof target !== 'string') throw new Error('unsafe current generation link');
+  const match = /^generations\/([0-9a-f-]{36})$/.exec(target);
+  if (match === null || !UUID_RE.test(match[1])) {
+    throw new Error('unsafe current generation link');
+  }
+  return match[1];
+}
+
+async function inspectGeneration(generationsIdentity, id) {
+  generationLink(id);
+  await assertIdentity(generationsIdentity);
+  const directory = path.join(generationsIdentity.path, id);
+  const entry = await lstatOptional(directory);
+  if (entry === null || entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error(`unsafe generation directory: ${id}`);
+  }
+  const identity = await rootIdentity(directory, directory);
+  await assertIdentity(generationsIdentity);
+  return identity;
+}
+
+async function inspectCurrent(publicIdentity, generationsIdentity) {
+  await assertIdentity(publicIdentity);
+  const currentPath = path.join(publicIdentity.path, 'current');
+  const entry = await lstatOptional(currentPath);
+  if (entry === null) return null;
+  if (!entry.isSymbolicLink()) throw new Error('current generation must be a symlink');
+  const target = await readlink(currentPath);
+  const id = parseGenerationLink(target);
+  const generationIdentity = await inspectGeneration(generationsIdentity, id);
+  await assertIdentity(publicIdentity);
+  return { id, target, generationIdentity };
+}
+
+function validateJournalId(value, name, nullable = false) {
+  if (nullable && value === null) return null;
+  if (typeof value !== 'string' || !UUID_RE.test(value)) {
+    throw new Error(`invalid publication journal ${name}`);
+  }
+  return value;
+}
+
+function validateJournal(value) {
+  if (!value || typeof value !== 'object' || value.schema !== JOURNAL_SCHEMA) {
+    throw new Error('invalid publication journal');
+  }
+  if (value.phase === 'stable') {
+    return {
+      schema: JOURNAL_SCHEMA,
+      phase: 'stable',
+      current: validateJournalId(value.current, 'current', true),
+      previous: validateJournalId(value.previous, 'previous', true),
+    };
+  }
+  if (value.phase === 'prepared') {
+    return {
+      schema: JOURNAL_SCHEMA,
+      phase: 'prepared',
+      prepared: validateJournalId(value.prepared, 'prepared'),
+      previous: validateJournalId(value.previous, 'previous', true),
+      priorPrevious: validateJournalId(
+        value.priorPrevious,
+        'priorPrevious',
+        true,
+      ),
+    };
+  }
+  throw new Error('invalid publication journal phase');
+}
+
+async function loadJournal(publicIdentity) {
+  const entry = await lstatOptional(path.join(publicIdentity.path, JOURNAL_FILE));
+  if (entry === null) return null;
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error('unsafe publication journal');
+  }
+  return validateJournal(JSON.parse(await readRegularFile(
+    publicIdentity,
+    JOURNAL_FILE,
+    16 * 1024,
+  )));
+}
+
+async function storeJournal(publicIdentity, journal) {
+  await replaceDurableFile(
+    publicIdentity,
+    JOURNAL_FILE,
+    `${JSON.stringify(validateJournal(journal))}\n`,
+  );
+}
+
+async function removePinnedDirectory(parentIdentity, target) {
+  await assertIdentity(parentIdentity);
+  const entry = await lstatOptional(target);
+  if (entry === null) return;
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error(`refusing to remove unsafe generation: ${target}`);
+  }
+  const expected = { dev: entry.dev, ino: entry.ino };
+  await assertIdentity(parentIdentity);
+  const actual = await lstat(target);
+  if (
+    actual.isSymbolicLink()
+    || !actual.isDirectory()
+    || actual.dev !== expected.dev
+    || actual.ino !== expected.ino
+  ) {
+    throw new Error(`generation changed before removal: ${target}`);
+  }
+  await rm(target, { recursive: true });
+  await syncDirectory(parentIdentity);
+}
+
+async function cleanupPointerTemps(publicIdentity) {
+  const entries = await readdir(publicIdentity.path, { withFileTypes: true });
+  for (const entry of entries) {
+    const match = /^\.current\.([0-9a-f-]{36})$/.exec(entry.name);
+    if (match === null || !UUID_RE.test(match[1])) continue;
+    const targetPath = path.join(publicIdentity.path, entry.name);
+    const actual = await lstat(targetPath);
+    if (!actual.isSymbolicLink()) {
+      throw new Error(`unsafe current pointer temporary: ${entry.name}`);
+    }
+    parseGenerationLink(await readlink(targetPath));
+    await rm(targetPath);
+    await syncDirectory(publicIdentity);
+  }
+}
+
+async function cleanupJournalTemps(publicIdentity) {
+  const entries = await readdir(publicIdentity.path, { withFileTypes: true });
+  for (const entry of entries) {
+    const match = /^\.publication-journal\.json\.tmp\.([0-9a-f-]{36})$/
+      .exec(entry.name);
+    if (match === null || !UUID_RE.test(match[1])) continue;
+    const targetPath = path.join(publicIdentity.path, entry.name);
+    const actual = await lstat(targetPath);
+    if (actual.isSymbolicLink() || !actual.isFile()) {
+      throw new Error(`unsafe publication journal temporary: ${entry.name}`);
+    }
+    await rm(targetPath);
+    await syncDirectory(publicIdentity);
+  }
+}
+
+async function garbageCollectGenerations(
+  generationsIdentity,
+  keepIds,
+) {
+  const entries = await readdir(generationsIdentity.path, {
+    withFileTypes: true,
+  });
+  for (const entry of entries) {
+    const stageMatch = /^\.stage\.([0-9a-f-]{36})$/.exec(entry.name);
+    const safeStage = stageMatch !== null && UUID_RE.test(stageMatch[1]);
+    const safeGeneration = UUID_RE.test(entry.name);
+    if (!safeStage && !safeGeneration) continue;
+    if (safeGeneration && keepIds.has(entry.name)) {
+      await inspectGeneration(generationsIdentity, entry.name);
+      continue;
+    }
+    await removePinnedDirectory(
+      generationsIdentity,
+      path.join(generationsIdentity.path, entry.name),
+    );
+  }
+}
+
+async function recoverPublication(publicIdentity, generationsIdentity) {
+  await cleanupPointerTemps(publicIdentity);
+  await cleanupJournalTemps(publicIdentity);
+  const current = await inspectCurrent(publicIdentity, generationsIdentity);
+  const journal = await loadJournal(publicIdentity);
+  let stable;
+
+  if (journal === null) {
+    stable = {
+      schema: JOURNAL_SCHEMA,
+      phase: 'stable',
+      current: current?.id ?? null,
+      previous: null,
+    };
+  } else if (journal.phase === 'stable') {
+    if ((current?.id ?? null) !== journal.current) {
+      throw new Error('current generation disagrees with publication journal');
+    }
+    stable = journal;
+  } else if (current?.id === journal.prepared) {
+    stable = {
+      schema: JOURNAL_SCHEMA,
+      phase: 'stable',
+      current: journal.prepared,
+      previous: journal.previous,
+    };
+  } else if ((current?.id ?? null) === journal.previous) {
+    stable = {
+      schema: JOURNAL_SCHEMA,
+      phase: 'stable',
+      current: journal.previous,
+      previous: journal.priorPrevious,
+    };
+  } else {
+    throw new Error('cannot safely recover publication journal');
+  }
+
+  if (stable.current !== null) {
+    await inspectGeneration(generationsIdentity, stable.current);
+  }
+  if (stable.previous !== null && stable.previous !== stable.current) {
+    await inspectGeneration(generationsIdentity, stable.previous);
+  }
+  await storeJournal(publicIdentity, stable);
+  await garbageCollectGenerations(
+    generationsIdentity,
+    new Set([stable.current, stable.previous].filter(Boolean)),
+  );
+  return stable;
+}
+
+async function readManifest(generationIdentity) {
+  const value = JSON.parse(await readRegularFile(
+    generationIdentity,
+    'manifest.json',
+    64 * 1024,
+  ));
+  if (
+    !value
+    || typeof value !== 'object'
+    || value.schema !== PUBLICATION_SCHEMA
+    || typeof value.generation !== 'string'
+    || !UUID_RE.test(value.generation)
+    || typeof value.fingerprint !== 'string'
+    || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+    || typeof value.generated_at !== 'string'
+    || !Number.isFinite(Date.parse(value.generated_at))
+    || typeof value.include_static_sitemap !== 'boolean'
+  ) {
+    throw new Error('invalid generation manifest');
+  }
+  return value;
+}
+
+async function validateGenerationComplete(generationIdentity, expectedId) {
+  const manifest = await readManifest(generationIdentity);
+  if (manifest.generation !== expectedId) {
+    throw new Error('generation manifest id mismatch');
+  }
+  for (const name of ['ai-news', 'sitemaps']) {
+    const entry = await lstat(path.join(generationIdentity.path, name));
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(`incomplete generation directory: ${name}`);
     }
   }
-  if (failures.length > 0) {
-    throw new AggregateError(failures, 'failed to roll back generated indexes');
+  for (const name of ['sitemap.xml', 'manifest.json']) {
+    const entry = await lstat(path.join(generationIdentity.path, name));
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`incomplete generation file: ${name}`);
+    }
   }
+  await assertIdentity(generationIdentity);
+  return manifest;
 }
 
-async function cleanupEntry(target, kind, parentIdentity) {
-  await removeKnownEntry(target, kind, parentIdentity);
-}
-
-async function buildStaging({
+async function buildGeneration({
   items,
-  archiveStage,
-  publicStage,
+  generationIdentity,
+  generationId,
+  generatedAt,
   includeStaticSitemap,
+  fingerprint,
   hooks,
 }) {
+  const archiveIdentity = await createDirectory(
+    generationIdentity,
+    'ai-news',
+  );
+  const sitemapsIdentity = await createDirectory(
+    generationIdentity,
+    'sitemaps',
+  );
   const pageCount = Math.max(1, Math.ceil(items.length / ARCHIVE_PAGE_SIZE));
   const archiveEntries = [];
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
@@ -553,27 +739,24 @@ async function buildStaging({
       (pageNumber - 1) * ARCHIVE_PAGE_SIZE,
       pageNumber * ARCHIVE_PAGE_SIZE,
     );
-    const relativePath = pageNumber === 1
-      ? 'index.html'
-      : `page/${pageNumber}/index.html`;
     await writeDurableFile(
-      archiveStage,
-      relativePath,
+      archiveIdentity,
+      pageNumber === 1
+        ? 'index.html'
+        : `page/${pageNumber}/index.html`,
       renderArchivePage(pageItems, pageNumber, pageCount),
     );
     archiveEntries.push({
       loc: archiveUrl(pageNumber),
-      lastmod: pageItems.find((item) => item.lastmod !== null)?.lastmod ?? null,
+      lastmod: generatedAt,
     });
   }
 
-  const sitemapsStage = await createDirectory(publicStage, 'sitemaps', 0o755);
   await writeDurableFile(
-    sitemapsStage,
+    sitemapsIdentity,
     'archive.xml',
     renderUrlSet(archiveEntries),
   );
-
   const shardLocations = [];
   for (const shardName of SOURCE_ORDER) {
     const shardItems = items
@@ -586,24 +769,19 @@ async function buildStaging({
     ) {
       const shardFile = `${shardName}-${shardNumber}.xml`;
       await writeDurableFile(
-        sitemapsStage,
+        sitemapsIdentity,
         shardFile,
-        renderUrlSet(
-          shardItems
-            .slice(offset, offset + SITEMAP_SHARD_SIZE)
-            .map((item) => ({
-              loc: itemUrl(item.urlPath),
-              lastmod: item.lastmod,
-            })),
-        ),
+        renderUrlSet(shardItems
+          .slice(offset, offset + SITEMAP_SHARD_SIZE)
+          .map((item) => ({ loc: itemUrl(item.urlPath), lastmod: null }))),
       );
       shardLocations.push(`${SITE_BASE}/sitemaps/${shardFile}`);
     }
   }
 
-  await hooks.beforeStageSitemapIndex?.(publicStage.path);
+  await hooks.beforeStageSitemapIndex?.(generationIdentity.path);
   await writeDurableFile(
-    publicStage,
+    generationIdentity,
     'sitemap.xml',
     renderSitemapIndex([
       ...(includeStaticSitemap
@@ -613,63 +791,72 @@ async function buildStaging({
       ...shardLocations,
     ]),
   );
-
-  return { sitemapsStage };
-}
-
-async function staticSitemapPresence(siteIdentity) {
-  await assertIdentity(siteIdentity);
-  const entry = await lstatOptional(
-    path.join(siteIdentity.path, 'sitemap-static.xml'),
+  await writeDurableFile(
+    generationIdentity,
+    'manifest.json',
+    `${JSON.stringify({
+      schema: PUBLICATION_SCHEMA,
+      generation: generationId,
+      fingerprint,
+      generated_at: generatedAt,
+      include_static_sitemap: includeStaticSitemap,
+    })}\n`,
   );
-  await assertIdentity(siteIdentity);
-  if (entry === null) return false;
-  if (entry.isSymbolicLink() || !entry.isFile()) {
-    throw new Error('static sitemap must be a regular non-symlink file');
-  }
-  return true;
+  await syncDirectory(archiveIdentity);
+  await syncDirectory(sitemapsIdentity);
+  await syncDirectory(generationIdentity);
 }
 
-async function assertPinnedRoots(
-  siteIdentity,
-  stateIdentity,
+async function activateGeneration({
   publicIdentity,
-) {
-  await assertIdentity(siteIdentity);
-  await assertIdentity(stateIdentity);
-  await assertIdentity(publicIdentity);
-}
-
-async function validateFinalPublication({
-  siteIdentity,
-  stateIdentity,
-  publicIdentity,
-  includeStaticSitemap,
-  records,
-}) {
-  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-  const actualStaticSitemap = await staticSitemapPresence(siteIdentity);
-  if (actualStaticSitemap !== includeStaticSitemap) {
-    throw new Error('static sitemap presence changed before publication');
-  }
-  await assertInstalledTargets(records);
-  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-}
-
-async function publishGeneratedEntry({
-  entry,
+  generationsIdentity,
+  generationId,
+  stable,
   hooks,
-  siteIdentity,
-  stateIdentity,
-  publicIdentity,
 }) {
-  await hooks.beforePublish?.(entry.name);
-  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-  await assertInstalledTargets(entry.records);
-  await replaceGeneratedEntry(entry);
-  await hooks.afterPublish?.(entry.name);
-  await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-  await assertInstalledTargets(entry.records);
+  const prepared = {
+    schema: JOURNAL_SCHEMA,
+    phase: 'prepared',
+    prepared: generationId,
+    previous: stable.current,
+    priorPrevious: stable.previous,
+  };
+  await storeJournal(publicIdentity, prepared);
+  await hooks.afterPrepared?.(generationId);
+
+  const current = await inspectCurrent(publicIdentity, generationsIdentity);
+  if ((current?.id ?? null) !== stable.current) {
+    throw new Error('current generation changed before activation');
+  }
+  const temporaryName = `.current.${generationId}`;
+  const temporaryPath = path.join(publicIdentity.path, temporaryName);
+  await assertIdentity(publicIdentity);
+  await symlink(generationLink(generationId), temporaryPath);
+  if (parseGenerationLink(await readlink(temporaryPath)) !== generationId) {
+    throw new Error('temporary current generation link changed');
+  }
+  await syncDirectory(publicIdentity);
+  await rename(temporaryPath, path.join(publicIdentity.path, 'current'));
+  await syncDirectory(publicIdentity);
+  await hooks.afterCurrentSwap?.(generationId);
+
+  const activated = await inspectCurrent(publicIdentity, generationsIdentity);
+  if (activated?.id !== generationId) {
+    throw new Error('current generation activation failed');
+  }
+  await validateGenerationComplete(activated.generationIdentity, generationId);
+  const nextStable = {
+    schema: JOURNAL_SCHEMA,
+    phase: 'stable',
+    current: generationId,
+    previous: stable.current,
+  };
+  await storeJournal(publicIdentity, nextStable);
+  await garbageCollectGenerations(
+    generationsIdentity,
+    new Set([nextStable.current, nextStable.previous].filter(Boolean)),
+  );
+  return nextStable;
 }
 
 export async function publishIndexes({
@@ -685,175 +872,74 @@ export async function publishIndexes({
   const siteIdentity = await rootIdentity(safeSiteRoot, 'siteRoot');
   const stateIdentity = await rootIdentity(safeStateDir, 'stateDir');
   const includeStaticSitemap = await staticSitemapPresence(siteIdentity);
-  const token = randomUUID();
-  const archiveStage = await createDirectory(
-    siteIdentity,
-    `.ai-news.stage.${token}`,
-    0o755,
+  const publicIdentity = await ensureDirectory(stateIdentity, 'public');
+  const generationsIdentity = await ensureDirectory(
+    publicIdentity,
+    'generations',
   );
-  const publicStage = await createDirectory(
-    stateIdentity,
-    `.public.stage.${token}`,
-    0o755,
+  const stable = await recoverPublication(publicIdentity, generationsIdentity);
+  const current = await inspectCurrent(publicIdentity, generationsIdentity);
+  const fingerprint = publicationFingerprint(items, includeStaticSitemap);
+  if (current !== null) {
+    const manifest = await validateGenerationComplete(
+      current.generationIdentity,
+      current.id,
+    );
+    if (manifest.fingerprint === fingerprint) {
+      return { changed: false, generation: current.id };
+    }
+  }
+
+  const generationId = randomUUID();
+  const stageName = `.stage.${generationId}`;
+  const stageIdentity = await createDirectory(
+    generationsIdentity,
+    stageName,
   );
-  let sitemapsStage;
-  let publicIdentity;
-  let primaryError = null;
-  let committed = false;
-  const records = [];
+  const generatedAt = new Date().toISOString();
+  let immutableIdentity = null;
   try {
-    ({ sitemapsStage } = await buildStaging({
+    await buildGeneration({
       items,
-      archiveStage,
-      publicStage,
+      generationIdentity: stageIdentity,
+      generationId,
+      generatedAt,
       includeStaticSitemap,
+      fingerprint,
       hooks,
-    }));
-    await hooks.afterStageBuilt?.();
-
-    publicIdentity = await ensureDirectory(stateIdentity, 'public');
-    await publishGeneratedEntry({
-      entry: {
-        name: 'archive',
-        kind: 'directory',
-        stage: archiveStage.path,
-        target: path.join(safeSiteRoot, 'ai-news'),
-        backup: path.join(safeSiteRoot, `.ai-news.backup.${token}`),
-        parentIdentity: siteIdentity,
-        records,
-      },
-      hooks,
-      siteIdentity,
-      stateIdentity,
-      publicIdentity,
     });
-    await publishGeneratedEntry({
-      entry: {
-        name: 'sitemaps',
-        kind: 'directory',
-        stage: sitemapsStage.path,
-        target: path.join(publicIdentity.path, 'sitemaps'),
-        backup: path.join(publicIdentity.path, `.sitemaps.backup.${token}`),
-        parentIdentity: publicIdentity,
-        records,
-      },
-      hooks,
-      siteIdentity,
-      stateIdentity,
-      publicIdentity,
-    });
-
-    await hooks.beforePublish?.('sitemap-index');
-    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-    await assertInstalledTargets(records);
-    const actualStaticSitemap = await staticSitemapPresence(siteIdentity);
-    if (actualStaticSitemap !== includeStaticSitemap) {
+    await hooks.afterStageBuilt?.(stageIdentity.path);
+    if (await staticSitemapPresence(siteIdentity) !== includeStaticSitemap) {
       throw new Error('static sitemap presence changed before publication');
     }
-    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-    await replaceGeneratedEntry({
-      name: 'sitemap-index',
-      kind: 'file',
-      stage: path.join(publicStage.path, 'sitemap.xml'),
-      target: path.join(publicIdentity.path, 'sitemap.xml'),
-      backup: path.join(publicIdentity.path, `.sitemap.xml.backup.${token}`),
-      parentIdentity: publicIdentity,
-      records,
-    });
-    await hooks.afterPublish?.('sitemap-index');
-    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-    await assertInstalledTargets(records);
-    await validateFinalPublication({
-      siteIdentity,
-      stateIdentity,
+    await assertIdentity(siteIdentity);
+    await assertIdentity(stateIdentity);
+    await assertIdentity(publicIdentity);
+    await assertIdentity(generationsIdentity);
+    const immutablePath = path.join(generationsIdentity.path, generationId);
+    await rename(stageIdentity.path, immutablePath);
+    await syncDirectory(generationsIdentity);
+    immutableIdentity = await inspectGeneration(generationsIdentity, generationId);
+    await validateGenerationComplete(immutableIdentity, generationId);
+    await activateGeneration({
       publicIdentity,
-      includeStaticSitemap,
-      records,
+      generationsIdentity,
+      generationId,
+      stable,
+      hooks,
     });
-    committed = true;
+    return { changed: true, generation: generationId };
   } catch (error) {
-    primaryError = error;
     try {
-      await rollback(records);
-    } catch (rollbackError) {
-      primaryError = new AggregateError(
-        [error, rollbackError],
-        'index publication failed and rollback was incomplete',
-      );
-    }
-  }
-
-  const cleanupErrors = [];
-  const cleanupTasks = [
-    ...(committed
-      ? records
-        .filter((record) => record.oldMoved)
-        .map((record) => () => cleanupEntry(
-          record.backup,
-          record.kind,
-          record.parentIdentity,
-        ))
-      : []),
-    () => cleanupEntry(archiveStage.path, 'directory', siteIdentity),
-    () => cleanupEntry(publicStage.path, 'directory', stateIdentity),
-  ];
-  for (const cleanup of cleanupTasks) {
-    try {
-      await cleanup();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-
-  if (committed) {
-    try {
-      await validateFinalPublication({
-        siteIdentity,
-        stateIdentity,
-        publicIdentity,
-        includeStaticSitemap,
-        records,
-      });
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-
-  if (cleanupErrors.length > 0) {
-    if (primaryError !== null) {
+      await recoverPublication(publicIdentity, generationsIdentity);
+    } catch (recoveryError) {
       throw new AggregateError(
-        [primaryError, ...cleanupErrors],
-        'index publication failed and cleanup was incomplete',
+        [error, recoveryError],
+        'index publication failed and recovery was incomplete',
       );
     }
-    throw new AggregateError(
-      cleanupErrors,
-      'index publication cleanup failed',
-    );
+    throw error;
   }
-  if (primaryError !== null) {
-    throw primaryError;
-  }
-}
-
-async function main() {
-  const config = loadConfig();
-  const state = await loadState(config.stateDir);
-  if (state === null) throw new Error('cc sync state does not exist');
-  await publishIndexes({
-    siteRoot: config.siteRoot,
-    stateDir: config.stateDir,
-    state,
-  });
-}
-
-const isMain = process.argv[1]
-  && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
 }
 
 export {

@@ -1061,12 +1061,17 @@ test('an overlapping run cannot apply an older state snapshot', async () => {
       return { items: [], next_after_seq: afterSeq };
     },
   };
+  let publicationCalls = 0;
+  const publisher = async () => {
+    publicationCalls += 1;
+  };
 
-  const firstRun = runSync({ config: cfg, client: firstClient });
+  const firstRun = runSync({ config: cfg, client: firstClient, publisher });
   await firstEntered;
   const secondOutcome = await runSync({
     config: cfg,
     client: secondClient,
+    publisher,
   }).then(
     () => null,
     (error) => error,
@@ -1075,6 +1080,7 @@ test('an overlapping run cannot apply an older state snapshot', async () => {
   await firstRun;
 
   assert.match(String(secondOutcome), /already running|lock/i);
+  assert.equal(publicationCalls, 1);
   assert.equal((await loadState(dirs.stateDir)).last_seq, 1);
   assert.equal(await body(item.url_path, dirs.siteRoot), '<h1>one</h1>');
   await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);

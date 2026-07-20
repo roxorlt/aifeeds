@@ -31,9 +31,10 @@
 ```
 
 需要 `~/.ssh/aifeeds_temp` 私钥。脚本会：
-1. scp 脚本列出的人工静态文件（含 assets）到 `/tmp/cc-site-staging/`
-2. ssh 到目标主机，sudo 把这些文件覆盖到 `/www/wwwroot/ai-feeds.cc/`
-3. chown www:www + chmod 644 修正权限（不要 -R 整目录，会撞到 `.user.ini` immutable）
+1. 校验四个搜索验证文件的固定字节数和 SHA-256；
+2. 在远端用 `mktemp` 创建唯一 staging，并由本地与远端双重 trap 清理；
+3. 逐文件 `sudo install -o www -g www -m 0644` 到站点目录；
+4. HTTPS smoke 必须严格返回 200，神马验证文件另做 HTTP 200 与内容哈希校验。
 
 部署完之后浏览器打开 https://ai-feeds.cc 验证 footer 显示。
 
@@ -46,13 +47,28 @@
 内容同步器独占以下生成输出：
 
 - `${CC_SITE_ROOT}/i/`：逐条内容页；
-- `${CC_SITE_ROOT}/ai-news/`：50 条一页的内容归档；
-- `${CC_SYNC_STATE_DIR}/public/sitemaps/`：内容与归档 sitemap 分片；
-- `${CC_SYNC_STATE_DIR}/public/sitemap.xml`：根 sitemap 索引。
+- `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/ai-news/`：50 条一页的内容归档；
+- `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemaps/`：内容与归档 sitemap 分片；
+- `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemap.xml`：根 sitemap 索引；
+- `${CC_SYNC_STATE_DIR}/public/current`：只允许指向 `generations/<uuid>` 的受控相对
+  symlink，是 Nginx 暴露整代内容的唯一原子入口；
+- `${CC_SYNC_STATE_DIR}/public/publication-journal.json`：崩溃恢复与 current/previous
+  保留信息。
 
-人工部署脚本不得复制或删除 `/i/`、`/ai-news/`、`/sitemaps/`，也不得在站点根
-目录写旧版 `sitemap.xml`。生产 Nginx 会把根 sitemap 和 `/sitemaps/` alias 到同步
-状态目录；该 alias 属于 Nginx 部署任务，不属于本脚本。
+同步用户只需写 `${CC_SITE_ROOT}/i/` 和 `${CC_SYNC_STATE_DIR}`；站点根对同步器只读，
+归档不再落到 `${CC_SITE_ROOT}/ai-news/`。人工部署脚本不得复制或删除 `/i/`、
+`/ai-news/`、`/sitemaps/`，也不得在站点根目录写旧版 `sitemap.xml`。生产 Nginx
+将 `/ai-news/`、根 sitemap 和 `/sitemaps/` alias 到 `public/current/` 下对应路径。
+
+发布器先 fsync 完整 generation，再以一次 `rename` 原子替换 `current` symlink；
+旧 generation 仅在新入口生效后回收，并至少保留 current 与 previous 两代。启动时
+按持久 journal 恢复 SIGKILL 中断并清理已确认安全的孤立 stage。相同 state 指纹会
+跳过重建。item state 当前没有镜像生成/修改时间字段，因此 item sitemap 明确省略
+`lastmod`，不会把来源文章的 `published_at` 冒充本站修改时间；归档 sitemap 使用
+真实 generation 生成时间。
+
+`publish-indexes.mjs` 不提供独立 CLI；唯一生产调用链是已持有同一
+`acquireSyncLock` 的 `sync.mjs`。
 
 ### 神马验证的 HTTP 例外
 
