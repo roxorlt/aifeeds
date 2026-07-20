@@ -58,6 +58,10 @@ interface EventStatsRow {
   max_seq: number | null;
 }
 
+interface CurrentPageStatusRow {
+  status: string;
+}
+
 type BatchBucket = "live" | "review" | "denied" | "pending";
 
 const ADMIN_PREFIX = "/api/admin/cc-mirror/";
@@ -249,10 +253,52 @@ async function applyCcMirrorDecision(
     );
   }
 
+  let currentPage: CurrentPageStatusRow | null;
+  try {
+    currentPage = await env.DB.prepare(
+      `SELECT status
+       FROM cc_item_pages
+       WHERE item_id = ?`,
+    )
+      .bind(itemId)
+      .first<CurrentPageStatusRow>();
+  } catch {
+    console.error(`[cc-mirror-admin] decision state check failed for ${itemId}`);
+    throw new AdminInputError(
+      "cc_mirror_state_check_failed",
+      502,
+      {
+        item_id: itemId,
+        action,
+        override_persisted: true,
+      },
+    );
+  }
+  const currentPageStatus = currentPage?.status ?? "missing";
+  const actionReachedRequestedState = action === "allow"
+    ? sync.status === "live" && currentPageStatus === "live"
+    : currentPageStatus === "missing" || currentPageStatus === "gone";
+  if (!actionReachedRequestedState) {
+    throw new AdminInputError(
+      action === "allow"
+        ? "cc_mirror_publish_not_live"
+        : "cc_mirror_unpublish_incomplete",
+      409,
+      {
+        item_id: itemId,
+        action,
+        override_persisted: true,
+        current_page_status: currentPageStatus,
+        sync,
+      },
+    );
+  }
+
   return {
     ok: true,
     item_id: itemId,
     action,
+    current_page_status: currentPageStatus,
     sync,
   };
 }
@@ -488,7 +534,7 @@ async function processCandidateBatch(
           dry: opts.dry === true,
           forceReview: opts.forceReview === true,
         });
-        return classifyBatchResult(result);
+        return classifyCcBatchResult(result);
       } catch {
         console.error(`[cc-mirror-admin] batch sync failed for ${row.id}`);
         return "pending" as const;
@@ -535,29 +581,40 @@ async function mapWithConcurrency<T, R>(
   return output;
 }
 
-function classifyBatchResult(result: CcPageRunResult): BatchBucket {
+export function classifyCcBatchResult(
+  result: CcPageRunResult,
+): BatchBucket {
   const reason = result.reason.startsWith("dry:")
     ? result.reason.slice(4)
     : result.reason;
   if (result.status === "live" || reason === "dry") return "live";
-  if (
-    reason === "missing-api-key"
-    || reason === "empty-review-text"
-    || reason === "item-changed-during-review"
-    || reason.startsWith("render-failed:")
-    || reason.startsWith("model-call-failed:")
-  ) {
-    return "pending";
-  }
+
   if (
     reason === "source-manual"
     || reason === "model-invalid-shape"
+    || reason === "cache-invalid-shape"
+    || reason === "cache-invalid-status"
     || reason.startsWith("risk-review:")
-    || reason.startsWith("cache-invalid-")
   ) {
     return "review";
   }
-  return "denied";
+
+  if (
+    reason === "item-not-found"
+    || reason === "item-not-relevant"
+    || reason === "item-deleted"
+    || reason === "item-deduplicated"
+    || reason === "override-deny"
+    || reason.startsWith("source-deny:")
+    || reason.startsWith("risk-deny:")
+  ) {
+    return "denied";
+  }
+
+  // Unknown/future reasons, renderer faults, snapshot/CAS races, missing pass
+  // evidence, and operational failures all require retry or investigation.
+  // They must never silently inflate the content-denied bucket.
+  return "pending";
 }
 
 function normalizeBatchOptions(

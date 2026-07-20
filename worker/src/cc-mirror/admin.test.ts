@@ -20,9 +20,11 @@ import worker, { type Env } from "../index";
 import { serveAdminToolsHtml } from "../admin";
 import {
   backfillCcMirror,
+  classifyCcBatchResult,
   handleCcMirrorAdmin,
   reconcileCcMirror,
 } from "./admin";
+import type { CcPageRunResult } from "./page-run";
 import { buildCcReviewText } from "./review-text";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ class TestD1 {
   activeItemReads = 0;
   maxActiveItemReads = 0;
   itemReadDelayMs = 0;
+  afterNextBatch?: (db: TestD1) => void;
 
   constructor() {
     this.sqlite.exec(`
@@ -157,6 +160,9 @@ class TestD1 {
       const results: unknown[] = [];
       for (const statement of statements) results.push(await statement.run());
       this.sqlite.exec("COMMIT");
+      const afterBatch = this.afterNextBatch;
+      this.afterNextBatch = undefined;
+      afterBatch?.(this);
       return results;
     } catch (error) {
       this.sqlite.exec("ROLLBACK");
@@ -550,6 +556,68 @@ describe("cc mirror manual decisions", () => {
     expect(r2.puts).toBe(1);
   });
 
+  it("returns conflict when allow is persisted but source policy denies publication", async () => {
+    const { db, env } = setup();
+    db.insertItem({
+      id: "blog:qbitai:blocked",
+      sourceType: "blog",
+      extra: { feed_key: "qbitai" },
+    });
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "blog:qbitai:blocked",
+        action: "allow",
+        reason: "人工尝试允许",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "cc_mirror_publish_not_live",
+      item_id: "blog:qbitai:blocked",
+      action: "allow",
+      override_persisted: true,
+      current_page_status: "missing",
+      sync: { status: "skipped" },
+    });
+    expect(
+      db.sqlite.prepare(
+        "SELECT action FROM cc_item_overrides WHERE item_id = ?",
+      ).get("blog:qbitai:blocked"),
+    ).toEqual({ action: "allow" });
+  });
+
+  it("returns conflict when allow is persisted but rendering cannot be reviewed", async () => {
+    const { db, env } = setup();
+    db.insertItem({
+      id: "x_list:renderer-error",
+      sourceType: "x_list",
+      extra: "null",
+    });
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:renderer-error",
+        action: "allow",
+        reason: "人工尝试允许",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "cc_mirror_publish_not_live",
+      override_persisted: true,
+      current_page_status: "missing",
+      sync: {
+        status: "skipped",
+        reason: "render-failed:render-item-failed",
+      },
+    });
+  });
+
   it("stores deny and immediately creates one safe delete event", async () => {
     const { db, env } = setup();
     db.insertItem({ id: "x_list:1" });
@@ -578,6 +646,65 @@ describe("cc mirror manual decisions", () => {
         "SELECT op FROM cc_page_events WHERE item_id = ?",
       ).all("x_list:1"),
     ).toEqual([{ op: "delete" }]);
+  });
+
+  it.each(["missing", "gone"])(
+    "accepts deny when the current page is already %s",
+    async (pageState) => {
+      const { db, env } = setup();
+      db.insertItem({ id: "x_list:1" });
+      if (pageState === "gone") {
+        db.insertLivePage("x_list:1");
+        db.sqlite.prepare(
+          "UPDATE cc_item_pages SET status = 'gone' WHERE item_id = ?",
+        ).run("x_list:1");
+      }
+
+      const response = await handleCcMirrorAdmin(
+        post("/api/admin/cc-mirror/decision", {
+          item_id: "x_list:1",
+          action: "deny",
+          reason: "维持下架",
+        }),
+        env,
+      );
+      expect(response?.status).toBe(200);
+      expect(await json(response!)).toMatchObject({
+        ok: true,
+        action: "deny",
+        current_page_status: pageState,
+      });
+    },
+  );
+
+  it("does not report deny success when a stale successor remains live", async () => {
+    const { db, env } = setup();
+    db.insertItem({ id: "x_list:1" });
+    db.insertLivePage("x_list:1", "a".repeat(64));
+    db.afterNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE cc_item_pages
+         SET status = 'live', content_hash = ?, reason = 'successor'
+         WHERE item_id = ?`,
+      ).run("b".repeat(64), "x_list:1");
+    };
+
+    const response = await handleCcMirrorAdmin(
+      post("/api/admin/cc-mirror/decision", {
+        item_id: "x_list:1",
+        action: "deny",
+        reason: "人工拒绝",
+      }),
+      env,
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await json(response!)).toMatchObject({
+      error: "cc_mirror_unpublish_incomplete",
+      action: "deny",
+      override_persisted: true,
+      current_page_status: "live",
+    });
   });
 
   it("does not report success when the immediate sync fails", async () => {
@@ -609,6 +736,35 @@ describe("cc mirror manual decisions", () => {
 });
 
 describe("cc mirror backfill and reconcile", () => {
+  it.each([
+    ["live result", { status: "live", reason: "model-pass" }, "live"],
+    ["dry pass", { status: "skipped", reason: "dry" }, "live"],
+    ["hard missing", { status: "skipped", reason: "item-not-found" }, "denied"],
+    ["hard irrelevant", { status: "gone", reason: "item-not-relevant" }, "denied"],
+    ["hard deleted", { status: "gone", reason: "item-deleted" }, "denied"],
+    ["hard duplicate", { status: "gone", reason: "item-deduplicated" }, "denied"],
+    ["source deny", { status: "gone", reason: "source-deny:registry-policy:deny" }, "denied"],
+    ["override deny", { status: "gone", reason: "override-deny" }, "denied"],
+    ["risk deny", { status: "gone", reason: "risk-deny:china_negative" }, "denied"],
+    ["manual review", { status: "gone", reason: "source-manual" }, "review"],
+    ["risk review", { status: "gone", reason: "risk-review:uncertain" }, "review"],
+    ["model shape", { status: "skipped", reason: "model-invalid-shape" }, "review"],
+    ["cache shape", { status: "skipped", reason: "cache-invalid-shape" }, "review"],
+    ["render exact", { status: "skipped", reason: "render-failed" }, "pending"],
+    ["render detail", { status: "skipped", reason: "render-failed:render-item-failed" }, "pending"],
+    ["hash race", { status: "skipped", reason: "review-text-hash-mismatch" }, "pending"],
+    ["final auth race", { status: "skipped", reason: "final-authorization-changed" }, "pending"],
+    ["missing hash", { status: "skipped", reason: "missing-review-text-hash" }, "pending"],
+    ["missing provenance", { status: "skipped", reason: "missing-pass-provenance" }, "pending"],
+    ["unknown future reason", { status: "gone", reason: "new-unrecognized-reason" }, "pending"],
+  ])("classifies %s conservatively", (_label, partial, expected) => {
+    expect(classifyCcBatchResult({
+      itemId: "x_list:1",
+      eventCreated: false,
+      ...partial,
+    } as CcPageRunResult)).toBe(expected);
+  });
+
   it("uses strict source/feed mapping, stable cursors, and accurate result buckets", async () => {
     const { db, env } = setup();
     db.insertItem({
