@@ -105,8 +105,14 @@ async function mapLimit(values, limit, operation) {
 }
 
 async function prepareBatch(items, client, config) {
+  const batchFiles = new Map();
   for (const item of items) {
-    await resolvePageFile(item.url_path, config.siteRoot);
+    const file = await resolvePageFile(item.url_path, config.siteRoot);
+    const existingUrl = batchFiles.get(file);
+    if (existingUrl !== undefined && existingUrl !== item.url_path) {
+      throw new Error(`page path collision in sync batch: ${item.url_path}`);
+    }
+    batchFiles.set(file, item.url_path);
   }
 
   return mapLimit(items, config.concurrency, async (item) => {
@@ -211,6 +217,7 @@ function assertBootstrapResponse(
 async function beginBootstrap(state, config, dryRun) {
   const nextState = clone(state);
   nextState.bootstrap = {
+    request_limit: config.pageLimit,
     watermark: null,
     after_item_id: '',
     pages: {},
@@ -232,6 +239,7 @@ async function runBootstrap({
     : state;
 
   while (current.bootstrap.after_item_id !== null) {
+    const requestLimit = current.bootstrap.request_limit;
     if (current.bootstrap.pending === null) {
       const afterItemId = current.bootstrap.after_item_id;
       const expectedWatermark = afterItemId === ''
@@ -239,14 +247,14 @@ async function runBootstrap({
         : current.bootstrap.watermark;
       const body = await client.bootstrap({
         afterItemId,
-        limit: config.pageLimit,
+        limit: requestLimit,
         watermark: expectedWatermark,
       });
       assertBootstrapResponse(
         body,
         expectedWatermark,
         afterItemId,
-        config.pageLimit,
+        requestLimit,
       );
 
       const withPending = clone(current);
@@ -268,7 +276,7 @@ async function runBootstrap({
       },
       current.bootstrap.watermark,
       current.bootstrap.after_item_id,
-      config.pageLimit,
+      requestLimit,
     );
     const items = pending.items.map((item) => ({ ...item, op: 'upsert' }));
     const prepared = await prepareBatch(items, client, config);

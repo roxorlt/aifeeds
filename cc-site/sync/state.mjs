@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -12,7 +13,10 @@ import {
 import { hostname as getHostname } from 'node:os';
 import path from 'node:path';
 
-import { assertCanonicalPageUrl } from './fs-safe.mjs';
+import {
+  assertCanonicalPageUrl,
+  pageFileKey,
+} from './fs-safe.mjs';
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -27,6 +31,10 @@ const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | DIRECTORY | NOFOLLOW;
 const READ_OPEN_FLAGS = constants.O_RDONLY | NOFOLLOW;
 const LOCK_MAX_BYTES = 8 * 1024;
 const DEFAULT_STALE_LOCK_MS = 6 * 60 * 60 * 1000;
+const PROCESS_START_FALLBACK = (
+  `runtime:${Math.max(0, Math.round(Date.now() - process.uptime() * 1000))}`
+);
+const MAX_GUARD_ACQUIRE_ATTEMPTS = 8;
 
 export function createEmptyState() {
   return {
@@ -87,7 +95,15 @@ function validLockOwner(value) {
   return Boolean(
     value
     && typeof value === 'object'
-    && value.schema === 1
+    && (
+      value.schema === 1
+      || (
+        value.schema === 2
+        && typeof value.process_start === 'string'
+        && value.process_start !== ''
+        && value.process_start.length <= 256
+      )
+    )
     && Number.isSafeInteger(value.pid)
     && value.pid > 0
     && typeof value.hostname === 'string'
@@ -125,48 +141,107 @@ async function readLockOwner(file) {
   }
 }
 
-function ownerProcessIsLive(owner) {
-  if (owner.hostname !== getHostname()) return true;
+async function linuxProcessStartIdentity(pid) {
+  if (process.platform !== 'linux') return null;
+  let serialized;
+  try {
+    serialized = await readFile(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return null;
+  }
+  const commandEnd = serialized.lastIndexOf(') ');
+  if (commandEnd < 0) return null;
+  const fieldsAfterCommand = serialized
+    .slice(commandEnd + 2)
+    .trim()
+    .split(/\s+/);
+  const startTime = fieldsAfterCommand[19];
+  return /^[0-9]+$/.test(startTime ?? '')
+    ? `linux-proc:${startTime}`
+    : null;
+}
+
+async function processStartIdentity(pid) {
+  const linuxIdentity = await linuxProcessStartIdentity(pid);
+  if (linuxIdentity !== null) return linuxIdentity;
+  return pid === process.pid ? PROCESS_START_FALLBACK : null;
+}
+
+async function newLockOwner(token, now) {
+  return {
+    schema: 2,
+    pid: process.pid,
+    hostname: getHostname(),
+    process_start: await processStartIdentity(process.pid),
+    created_at: now,
+    token,
+  };
+}
+
+async function lockOwnerStatus(owner) {
+  if (owner.hostname !== getHostname()) return 'remote';
   try {
     process.kill(owner.pid, 0);
-    return true;
   } catch (error) {
-    if (error?.code === 'ESRCH') return false;
-    return true;
+    if (error?.code === 'ESRCH') return 'dead';
+    return 'live';
   }
+  if (owner.schema === 2) {
+    const actualStart = await processStartIdentity(owner.pid);
+    const comparableStartIdentity = (
+      (
+        owner.process_start.startsWith('linux-proc:')
+        && actualStart?.startsWith('linux-proc:')
+      )
+      || (
+        owner.pid === process.pid
+        && owner.process_start.startsWith('runtime:')
+        && actualStart?.startsWith('runtime:')
+      )
+    );
+    if (
+      comparableStartIdentity
+      && actualStart !== owner.process_start
+    ) {
+      return 'pid-reused';
+    }
+  }
+  return 'live';
+}
+
+async function lockOwnerIsReclaimable(owner, now, staleAfterMs) {
+  const status = await lockOwnerStatus(owner);
+  if (status === 'dead' || status === 'pid-reused') return true;
+  if (status === 'live') return false;
+  const age = now - owner.created_at;
+  return (
+    Number.isSafeInteger(staleAfterMs)
+    && staleAfterMs >= 0
+    && age >= staleAfterMs
+  );
 }
 
 function sameIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function createOwnedLock(stateDir, stateDirectory, token, now) {
+async function createOwnedLock(
+  stateDir,
+  stateDirectory,
+  token,
+  now,
+  hooks = {},
+) {
   const file = lockFilePath(stateDir);
-  let handle;
-  try {
-    handle = await open(file, TEMP_OPEN_FLAGS, 0o600);
-  } catch (error) {
-    if (error?.code === 'EEXIST') return null;
-    throw error;
-  }
-
-  const owner = {
-    schema: 1,
-    pid: process.pid,
-    hostname: getHostname(),
-    created_at: now,
-    token,
-  };
-  try {
-    await handle.writeFile(`${JSON.stringify(owner)}\n`);
-    await handle.sync();
-  } catch (error) {
-    await handle.close().catch(() => {});
-    await unlink(file).catch(() => {});
-    throw error;
-  }
-  await handle.close();
-  await syncStateDirectory(stateDir, stateDirectory);
+  const owner = await newLockOwner(token, now);
+  const published = await publishOwnedLockFile(
+    file,
+    stateDir,
+    stateDirectory,
+    owner,
+    hooks.afterMainCandidateSync,
+  );
+  if (!published) return null;
 
   let released = false;
   return {
@@ -177,6 +252,8 @@ async function createOwnedLock(stateDir, stateDirectory, token, now) {
         stateDir,
         stateDirectory,
         Date.now(),
+        DEFAULT_STALE_LOCK_MS,
+        {},
       );
       try {
         const current = await readLockOwner(file);
@@ -195,40 +272,158 @@ async function createOwnedLock(stateDir, stateDirectory, token, now) {
   };
 }
 
-async function acquireLockGuard(stateDir, stateDirectory, now) {
-  const file = lockGuardFilePath(stateDir);
-  const token = randomUUID();
+async function reclaimLockFile(
+  file,
+  observed,
+  stateDir,
+  stateDirectory,
+  label,
+) {
+  let beforeReclaim;
+  try {
+    beforeReclaim = await lstat(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!sameIdentity(observed.identity, beforeReclaim)) {
+    return false;
+  }
+  const stalePath = path.join(
+    stateDir,
+    `.${path.basename(file)}.stale.${randomUUID()}`,
+  );
+  try {
+    await rename(file, stalePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+  const moved = await readLockOwner(stalePath);
+  if (
+    moved.owner.token !== observed.owner.token
+    || !sameIdentity(observed.identity, moved.identity)
+  ) {
+    throw new Error(`${label} changed during crash recovery`);
+  }
+  await unlink(stalePath);
+  await syncStateDirectory(stateDir, stateDirectory);
+  return true;
+}
+
+async function createOwnedGuard(
+  file,
+  stateDir,
+  stateDirectory,
+  token,
+  now,
+  hooks = {},
+) {
+  const owner = await newLockOwner(token, now);
+  const published = await publishOwnedLockFile(
+    file,
+    stateDir,
+    stateDirectory,
+    owner,
+    hooks.afterGuardCandidateSync,
+  );
+  return published ? owner : null;
+}
+
+async function publishOwnedLockFile(
+  file,
+  stateDir,
+  stateDirectory,
+  owner,
+  afterCandidateSync,
+) {
+  const candidate = path.join(
+    stateDir,
+    `.${path.basename(file)}.${process.pid}.${randomUUID()}.candidate`,
+  );
   let handle;
   try {
-    handle = await open(file, TEMP_OPEN_FLAGS, 0o600);
-  } catch (error) {
-    if (error?.code === 'EEXIST') {
-      throw new Error(
-        'cc sync lock operation guard exists; refusing concurrent recovery',
-      );
-    }
-    throw error;
-  }
-  const owner = {
-    schema: 1,
-    pid: process.pid,
-    hostname: getHostname(),
-    created_at: now,
-    token,
-  };
-  try {
+    handle = await open(candidate, TEMP_OPEN_FLAGS, 0o600);
     await handle.writeFile(`${JSON.stringify(owner)}\n`);
     await handle.sync();
-  } catch (error) {
-    await handle.close().catch(() => {});
-    await unlink(file).catch(() => {});
-    throw error;
+    await afterCandidateSync?.(candidate);
+    await handle.close();
+    handle = null;
+    try {
+      await link(candidate, file);
+    } catch (error) {
+      if (error?.code === 'EEXIST') return false;
+      throw error;
+    }
+    await unlink(candidate);
+    await syncStateDirectory(stateDir, stateDirectory);
+    return true;
+  } finally {
+    await handle?.close().catch(() => {});
+    await unlink(candidate).catch(() => {});
   }
-  await handle.close();
-  await syncStateDirectory(stateDir, stateDirectory);
+}
+
+async function acquireLockGuard(
+  stateDir,
+  stateDirectory,
+  now,
+  staleAfterMs,
+  hooks = {},
+) {
+  const file = lockGuardFilePath(stateDir);
+  const token = randomUUID();
+  let owner;
+  for (
+    let attempt = 0;
+    attempt < MAX_GUARD_ACQUIRE_ATTEMPTS;
+    attempt += 1
+  ) {
+    owner = await createOwnedGuard(
+      file,
+      stateDir,
+      stateDirectory,
+      token,
+      now,
+      hooks,
+    );
+    if (owner) break;
+
+    let observed;
+    try {
+      observed = await readLockOwner(file);
+    } catch (error) {
+      throw new Error(
+        'cc sync lock operation guard has invalid metadata',
+        { cause: error },
+      );
+    }
+    if (!await lockOwnerIsReclaimable(
+      observed.owner,
+      now,
+      staleAfterMs,
+    )) {
+      throw new Error(
+        'cc sync lock operation guard exists; another lock operation is live',
+      );
+    }
+    await reclaimLockFile(
+      file,
+      observed,
+      stateDir,
+      stateDirectory,
+      'sync lock operation guard',
+    );
+  }
+  if (!owner) {
+    throw new Error(
+      'cc sync lock operation guard changed repeatedly during acquisition',
+    );
+  }
 
   let released = false;
   return {
+    owner,
     async release() {
       if (released) return;
       const current = await readLockOwner(file);
@@ -249,10 +444,17 @@ export async function acquireSyncLock(
   {
     now = Date.now(),
     staleAfterMs = DEFAULT_STALE_LOCK_MS,
+    hooks = {},
   } = {},
 ) {
   const stateDirectory = await ensureSecureStateDirectory(stateDir);
-  const guard = await acquireLockGuard(stateDir, stateDirectory, now);
+  const guard = await acquireLockGuard(
+    stateDir,
+    stateDirectory,
+    now,
+    staleAfterMs,
+    hooks,
+  );
   try {
     const token = randomUUID();
     let owned = await createOwnedLock(
@@ -260,6 +462,7 @@ export async function acquireSyncLock(
       stateDirectory,
       token,
       now,
+      hooks,
     );
     if (owned) return owned;
 
@@ -273,38 +476,30 @@ export async function acquireSyncLock(
         { cause: error },
       );
     }
-    const age = now - observed.owner.created_at;
-    if (
-      ownerProcessIsLive(observed.owner)
-      || !Number.isSafeInteger(staleAfterMs)
-      || staleAfterMs < 0
-      || age < staleAfterMs
-    ) {
+    if (!await lockOwnerIsReclaimable(
+      observed.owner,
+      now,
+      staleAfterMs,
+    )) {
       throw new Error(
         `cc sync already running (pid ${observed.owner.pid})`,
       );
     }
-
-    const beforeReclaim = await lstat(file);
-    if (!sameIdentity(observed.identity, beforeReclaim)) {
-      throw new Error('cc sync lock changed while checking staleness');
-    }
-    const stalePath = path.join(
+    await reclaimLockFile(
+      file,
+      observed,
       stateDir,
-      `.sync.lock.stale.${randomUUID()}`,
+      stateDirectory,
+      'sync lock',
     );
-    await rename(file, stalePath);
-    const moved = await readLockOwner(stalePath);
-    if (
-      moved.owner.token !== observed.owner.token
-      || !sameIdentity(observed.identity, moved.identity)
-    ) {
-      throw new Error('cc sync lock changed during stale reclamation');
-    }
-    await unlink(stalePath);
-    await syncStateDirectory(stateDir, stateDirectory);
 
-    owned = await createOwnedLock(stateDir, stateDirectory, token, now);
+    owned = await createOwnedLock(
+      stateDir,
+      stateDirectory,
+      token,
+      now,
+      hooks,
+    );
     if (!owned) {
       throw new Error(
         'cc sync already running after stale lock reclamation',
@@ -337,14 +532,19 @@ function isCanonicalPageUrl(value) {
 }
 
 function validPages(value) {
-  return Boolean(
-    value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.entries(value).every(([urlPath, metadata]) => (
-      isCanonicalPageUrl(urlPath) && validMetadata(metadata)
-    )),
-  );
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const seenFiles = new Set();
+  for (const [urlPath, metadata] of Object.entries(value)) {
+    if (!isCanonicalPageUrl(urlPath) || !validMetadata(metadata)) {
+      return false;
+    }
+    const fileKey = pageFileKey(urlPath);
+    if (seenFiles.has(fileKey)) return false;
+    seenFiles.add(fileKey);
+  }
+  return true;
 }
 
 function validPendingBootstrapPage(value) {
@@ -361,16 +561,42 @@ function validPendingBootstrapPage(value) {
   );
 }
 
-function validPending(value) {
-  return value === null || Boolean(
-    value
-    && typeof value === 'object'
-    && Array.isArray(value.items)
-    && value.items.every(validPendingBootstrapPage)
-    && (
+function validPending(value, afterItemId, requestLimit) {
+  if (value === null) return true;
+  if (
+    !value
+    || typeof value !== 'object'
+    || !Array.isArray(value.items)
+    || value.items.length > requestLimit
+    || !(
       value.next_after_item_id === null
       || typeof value.next_after_item_id === 'string'
-    ),
+    )
+  ) {
+    return false;
+  }
+
+  const seenFiles = new Set();
+  let previousItemId = afterItemId;
+  for (const item of value.items) {
+    if (
+      !validPendingBootstrapPage(item)
+      || item.item_id <= previousItemId
+    ) {
+      return false;
+    }
+    const fileKey = pageFileKey(item.url_path);
+    if (seenFiles.has(fileKey)) return false;
+    seenFiles.add(fileKey);
+    previousItemId = item.item_id;
+  }
+  return (
+    value.next_after_item_id === null
+    || (
+      value.items.length === requestLimit
+      && value.items.length > 0
+      && value.next_after_item_id === value.items.at(-1).item_id
+    )
   );
 }
 
@@ -390,6 +616,9 @@ function assertState(value) {
     if (
       !bootstrap
       || typeof bootstrap !== 'object'
+      || !Number.isSafeInteger(bootstrap.request_limit)
+      || bootstrap.request_limit < 1
+      || bootstrap.request_limit > 500
       || !(
         bootstrap.watermark === null
         || (
@@ -402,7 +631,11 @@ function assertState(value) {
         || typeof bootstrap.after_item_id === 'string'
       )
       || !validPages(bootstrap.pages)
-      || !validPending(bootstrap.pending)
+      || !validPending(
+        bootstrap.pending,
+        bootstrap.after_item_id,
+        bootstrap.request_limit,
+      )
       || (
         bootstrap.watermark === null
         && (

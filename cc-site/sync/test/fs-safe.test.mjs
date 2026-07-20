@@ -26,15 +26,41 @@ async function siteRoot() {
   return { root, site };
 }
 
-test('maps a safe item URL to its index.html below CC_SITE_ROOT/i', async () => {
+test('maps canonical Worker item URLs to decoded filesystem paths', async () => {
   const { site } = await siteRoot();
   assert.equal(
     await resolvePageFile('/i/x/123', site),
     path.join(site, 'i', 'x', '123', 'index.html'),
   );
+  assert.equal(
+    await resolvePageFile(
+      '/i/news/blog%3Aopenai%3Aitem-1',
+      site,
+    ),
+    path.join(
+      site,
+      'i',
+      'news',
+      'blog:openai:item-1',
+      'index.html',
+    ),
+  );
+  assert.equal(
+    await resolvePageFile(
+      '/i/news/podcast%3Axiaoyuzhou%3Aabc-123',
+      site,
+    ),
+    path.join(
+      site,
+      'i',
+      'news',
+      'podcast:xiaoyuzhou:abc-123',
+      'index.html',
+    ),
+  );
 });
 
-test('rejects malformed, traversing, empty, NUL, backslash, and double-encoded paths', async () => {
+test('rejects non-canonical aliases, traversal, separators, and repeated encoding', async () => {
   const { site } = await siteRoot();
   const rejected = [
     '/other/x/123',
@@ -46,7 +72,9 @@ test('rejects malformed, traversing, empty, NUL, backslash, and double-encoded p
     '/i/x/%5Csecret',
     '/i/x/%252e%252e/secret',
     '/i/news/a%2Fb',
+    '/i/news/blog:openai:item-1',
     '/i/news/%61',
+    '/i/news/blog%3aopenai',
     '/i/../../outside',
     '/i/x/%',
   ];
@@ -118,6 +146,37 @@ test('atomic page writes sync temp bytes and the parent directory in order', asy
     'before-rename',
     'rename',
     'dir-sync',
+  ]);
+});
+
+test('new multi-level page directories and their parents are synced in order', async () => {
+  const { site } = await siteRoot();
+  const calls = [];
+  await writePageFileAtomic(
+    '/i/source/item',
+    site,
+    Buffer.from('durable tree'),
+    {
+      hooks: {
+        afterCreatedDirectorySync(directory) {
+          calls.push(`created-sync:${path.relative(site, directory)}`);
+        },
+        afterTempWrite() {
+          calls.push('temp-write');
+        },
+        afterDirectorySync(directory) {
+          calls.push(`page-sync:${path.relative(site, directory)}`);
+        },
+      },
+    },
+  );
+  assert.deepEqual(calls, [
+    'created-sync:i/source',
+    'created-sync:i',
+    'created-sync:i/source/item',
+    'created-sync:i/source',
+    'temp-write',
+    'page-sync:i/source/item',
   ]);
 });
 
@@ -227,6 +286,15 @@ test('config requires canonical absolute roots and an origin-only secure API URL
     { CC_SITE_ROOT: '/srv/../site' },
     { CC_SYNC_STATE_DIR: 'relative/state' },
     { CC_SYNC_STATE_DIR: '/' },
+    {
+      CC_SYNC_STATE_DIR: '/srv/ai-feeds.cc',
+    },
+    {
+      CC_SYNC_STATE_DIR: '/srv/ai-feeds.cc/.sync-state',
+    },
+    {
+      CC_SITE_ROOT: '/var/lib/aifeeds-cc-sync/site',
+    },
     { CC_SYNC_BASE_URL: 'https://api.ai-feeds.com/prefix' },
     { CC_SYNC_BASE_URL: 'http://api.ai-feeds.com' },
     {

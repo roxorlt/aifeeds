@@ -17,6 +17,7 @@ import test from 'node:test';
 import { SyncClient } from '../client.mjs';
 import { resolvePageFile } from '../fs-safe.mjs';
 import {
+  acquireSyncLock,
   createEmptyState,
   loadState,
   saveState,
@@ -339,6 +340,7 @@ test('bootstrap resumes a persisted first page even when its frozen watermark is
 
   const state = createEmptyState();
   state.bootstrap = {
+    request_limit: 1,
     watermark: 0,
     after_item_id: '',
     pages: {},
@@ -476,6 +478,7 @@ test('bootstrap rejects an item id that does not advance its persisted cursor', 
 
   const state = createEmptyState();
   state.bootstrap = {
+    request_limit: 2,
     watermark: 3,
     after_item_id: b.item_id,
     pages: {
@@ -511,6 +514,7 @@ test('bootstrap revalidates malformed pending metadata before crash-resume', asy
 
   const state = createEmptyState();
   state.bootstrap = {
+    request_limit: 2,
     watermark: 0,
     after_item_id: '',
     pages: {},
@@ -519,17 +523,89 @@ test('bootstrap revalidates malformed pending metadata before crash-resume', asy
       next_after_item_id: null,
     },
   };
-  await saveState(dirs.stateDir, state);
+  await mkdir(dirs.stateDir, { recursive: true });
+  await writeFile(
+    stateFilePath(dirs.stateDir),
+    `${JSON.stringify(state)}\n`,
+  );
 
   await assert.rejects(
     runSync({ config: config(api, dirs, { pageLimit: 2 }) }),
-    /invalid bootstrap/i,
+    /invalid.*bootstrap/i,
   );
   assert.equal(
     api.requests.some((request) => request.pathname === '/api/cc-sync/page'),
     false,
   );
-  assert.equal((await loadState(dirs.stateDir)).bootstrap.after_item_id, '');
+  assert.equal(
+    JSON.parse(
+      await readFile(stateFilePath(dirs.stateDir), 'utf8'),
+    ).bootstrap.after_item_id,
+    '',
+  );
+});
+
+test('bootstrap restart reuses its persisted request limit', async (t) => {
+  const dirs = await workspace();
+  const c = metadata('blog:c', '/i/news/c', H1);
+  const d = metadata('blog:d', '/i/news/d', H2);
+  const api = await new SyncApiFixture({
+    watermark: 4,
+    bootstrap: [c, d],
+    pages: new Map([
+      [`${c.item_id}\0${H1}`, '<h1>one</h1>'],
+      [`${d.item_id}\0${H2}`, '<h1>two</h1>'],
+    ]),
+  }).start();
+  t.after(() => api.close());
+
+  const state = createEmptyState();
+  state.bootstrap = {
+    request_limit: 2,
+    watermark: 4,
+    after_item_id: 'blog:b',
+    pages: {},
+    pending: null,
+  };
+  await saveState(dirs.stateDir, state);
+
+  await runSync({
+    config: config(api, dirs, { pageLimit: 1 }),
+  });
+
+  const request = api.requests.find(
+    (entry) => entry.pathname === '/api/cc-sync/bootstrap',
+  );
+  assert.equal(request.query.limit, '2');
+  assert.equal(await body(c.url_path, dirs.siteRoot), '<h1>one</h1>');
+  assert.equal(await body(d.url_path, dirs.siteRoot), '<h1>two</h1>');
+});
+
+test('persisted bootstrap pending data is bounded by its own request limit', async () => {
+  const dirs = await workspace();
+  const a = metadata('blog:a', '/i/news/a', H1);
+  const b = metadata('blog:b', '/i/news/b', H2);
+  const state = createEmptyState();
+  state.bootstrap = {
+    request_limit: 1,
+    watermark: 4,
+    after_item_id: '',
+    pages: {},
+    pending: {
+      items: [a, b],
+      next_after_item_id: null,
+    },
+  };
+  await mkdir(dirs.stateDir, { recursive: true });
+  await writeFile(
+    stateFilePath(dirs.stateDir),
+    `${JSON.stringify(state)}\n`,
+  );
+
+  await assert.rejects(
+    loadState(dirs.stateDir),
+    /invalid.*bootstrap|request limit/i,
+  );
 });
 
 test('second run is incremental, replays H1 to H2 by event hash, deletes, and skips same-hash rewrite', async (t) => {
@@ -972,6 +1048,135 @@ test('an overlapping run cannot apply an older state snapshot', async () => {
   assert.equal((await loadState(dirs.stateDir)).last_seq, 1);
   assert.equal(await body(item.url_path, dirs.siteRoot), '<h1>one</h1>');
   await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
+});
+
+test('new sync locks persist process-start identity', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+
+  const lock = await acquireSyncLock(dirs.stateDir);
+  const owner = JSON.parse(
+    await readFile(lockFilePath(dirs.stateDir), 'utf8'),
+  );
+  assert.equal(owner.schema, 2);
+  assert.equal(owner.pid, process.pid);
+  assert.equal(owner.hostname, os.hostname());
+  assert.equal(typeof owner.process_start, 'string');
+  assert.notEqual(owner.process_start, '');
+  await lock.release();
+});
+
+test('lock metadata is complete before guard and main paths become visible', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+
+  await assert.rejects(
+    acquireSyncLock(dirs.stateDir, {
+      hooks: {
+        afterGuardCandidateSync() {
+          throw new Error('guard publication crash');
+        },
+      },
+    }),
+    /guard publication crash/,
+  );
+  await assert.rejects(lstat(lockGuardFilePath(dirs.stateDir)), /ENOENT/);
+  await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
+
+  await assert.rejects(
+    acquireSyncLock(dirs.stateDir, {
+      hooks: {
+        afterMainCandidateSync() {
+          throw new Error('main publication crash');
+        },
+      },
+    }),
+    /main publication crash/,
+  );
+  await assert.rejects(lstat(lockGuardFilePath(dirs.stateDir)), /ENOENT/);
+  await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
+});
+
+test('a dead guard left immediately after creation is crash-recoverable', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  await writeFile(lockGuardFilePath(dirs.stateDir), JSON.stringify({
+    schema: 2,
+    pid: 999_999_999,
+    hostname: os.hostname(),
+    process_start: 'dead-guard-start',
+    created_at: Date.now(),
+    token: 'dead-guard',
+  }));
+
+  const lock = await acquireSyncLock(dirs.stateDir);
+  assert.notEqual(lock.owner.token, 'dead-guard');
+  await lock.release();
+  await assert.rejects(lstat(lockGuardFilePath(dirs.stateDir)), /ENOENT/);
+});
+
+test('a dead main lock left immediately after creation is crash-recoverable', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  await writeFile(lockFilePath(dirs.stateDir), JSON.stringify({
+    schema: 2,
+    pid: 999_999_999,
+    hostname: os.hostname(),
+    process_start: 'dead-main-start',
+    created_at: Date.now(),
+    token: 'dead-main',
+  }));
+
+  const lock = await acquireSyncLock(dirs.stateDir);
+  assert.notEqual(lock.owner.token, 'dead-main');
+  await lock.release();
+  await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
+});
+
+test('a crash during release recovers both dead guard and main lock', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  const deadOwner = {
+    schema: 2,
+    pid: 999_999_999,
+    hostname: os.hostname(),
+    process_start: 'dead-release-start',
+    created_at: Date.now(),
+  };
+  await writeFile(lockFilePath(dirs.stateDir), JSON.stringify({
+    ...deadOwner,
+    token: 'dead-release-main',
+  }));
+  await writeFile(lockGuardFilePath(dirs.stateDir), JSON.stringify({
+    ...deadOwner,
+    token: 'dead-release-guard',
+  }));
+
+  const lock = await acquireSyncLock(dirs.stateDir);
+  assert.notEqual(lock.owner.token, 'dead-release-main');
+  await lock.release();
+  await assert.rejects(lstat(lockFilePath(dirs.stateDir)), /ENOENT/);
+  await assert.rejects(lstat(lockGuardFilePath(dirs.stateDir)), /ENOENT/);
+});
+
+test('same-host PID reuse is detected from process-start identity', async () => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  const first = await acquireSyncLock(dirs.stateDir);
+  const currentOwner = JSON.parse(
+    await readFile(lockFilePath(dirs.stateDir), 'utf8'),
+  );
+  await first.release();
+  await writeFile(lockFilePath(dirs.stateDir), JSON.stringify({
+    ...currentOwner,
+    process_start: `${currentOwner.process_start}-reused`,
+    created_at: Date.now(),
+    token: 'pid-reused',
+  }));
+
+  const recovered = await acquireSyncLock(dirs.stateDir);
+  assert.notEqual(recovered.owner.token, 'pid-reused');
+  await recovered.release();
 });
 
 test('stale dead-owner locks are reclaimed but a live lock is never deleted', async () => {

@@ -21,6 +21,29 @@ function canonicalAbsolutePath(value, name) {
   return value;
 }
 
+function pathContains(parent, child) {
+  const relative = path.relative(parent, child);
+  return (
+    relative === ''
+    || (
+      relative !== '..'
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative)
+    )
+  );
+}
+
+function assertDisjointRoots(siteRoot, stateDir) {
+  if (
+    pathContains(siteRoot, stateDir)
+    || pathContains(stateDir, siteRoot)
+  ) {
+    throw new Error(
+      'CC_SITE_ROOT and CC_SYNC_STATE_DIR must be disjoint paths',
+    );
+  }
+}
+
 function isLoopback(hostname) {
   const normalized = hostname.toLowerCase();
   if (
@@ -73,8 +96,12 @@ export function assertSecureConfig(config) {
   if (baseUrl !== config.baseUrl) {
     throw new Error('CC_SYNC_BASE_URL must use its canonical origin form');
   }
-  canonicalAbsolutePath(config.siteRoot, 'CC_SITE_ROOT');
-  canonicalAbsolutePath(config.stateDir, 'CC_SYNC_STATE_DIR');
+  const siteRoot = canonicalAbsolutePath(config.siteRoot, 'CC_SITE_ROOT');
+  const stateDir = canonicalAbsolutePath(
+    config.stateDir,
+    'CC_SYNC_STATE_DIR',
+  );
+  assertDisjointRoots(siteRoot, stateDir);
 }
 
 function positiveInteger(value, fallback, name, maximum = Number.MAX_SAFE_INTEGER) {
@@ -100,18 +127,21 @@ export function loadConfig(env = process.env) {
     env.CC_SYNC_ALLOW_INSECURE_LOCALHOST === '1'
   );
   const baseUrl = canonicalBaseUrl(rawBaseUrl, allowInsecureLocalhost);
+  const siteRoot = canonicalAbsolutePath(
+    env.CC_SITE_ROOT ?? DEFAULTS.siteRoot,
+    'CC_SITE_ROOT',
+  );
+  const stateDir = canonicalAbsolutePath(
+    env.CC_SYNC_STATE_DIR ?? DEFAULTS.stateDir,
+    'CC_SYNC_STATE_DIR',
+  );
+  assertDisjointRoots(siteRoot, stateDir);
 
   return {
     baseUrl,
     secret,
-    siteRoot: canonicalAbsolutePath(
-      env.CC_SITE_ROOT ?? DEFAULTS.siteRoot,
-      'CC_SITE_ROOT',
-    ),
-    stateDir: canonicalAbsolutePath(
-      env.CC_SYNC_STATE_DIR ?? DEFAULTS.stateDir,
-      'CC_SYNC_STATE_DIR',
-    ),
+    siteRoot,
+    stateDir,
     allowInsecureLocalhost,
     concurrency: positiveInteger(
       env.CC_SYNC_CONCURRENCY,

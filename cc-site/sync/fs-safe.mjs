@@ -9,7 +9,6 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 
-const ITEM_PATH_RE = /^\/i\/[A-Za-z0-9._~!$&'()*+,;=:@/-]+$/;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
 const TEMP_OPEN_FLAGS = (
@@ -21,8 +20,41 @@ const TEMP_OPEN_FLAGS = (
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | DIRECTORY | NOFOLLOW;
 const READ_OPEN_FLAGS = constants.O_RDONLY | NOFOLLOW;
 
-export function assertCanonicalPageUrl(urlPath) {
-  if (typeof urlPath !== 'string' || !ITEM_PATH_RE.test(urlPath)) {
+function unsafeDecodedSegment(segment) {
+  return (
+    segment === ''
+    || segment === '.'
+    || segment === '..'
+    || segment.includes('/')
+    || segment.includes('\\')
+    || segment.includes('\0')
+  );
+}
+
+function assertNoRepeatedDecodeTraversal(segment) {
+  let candidate = segment;
+  while (candidate.includes('%')) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      return;
+    }
+    if (decoded === candidate) return;
+    if (unsafeDecodedSegment(decoded)) {
+      throw new Error('unsafe repeatedly encoded item URL segment');
+    }
+    candidate = decoded;
+  }
+}
+
+function canonicalDecodedSegments(urlPath) {
+  if (
+    typeof urlPath !== 'string'
+    || !urlPath.startsWith('/i/')
+    || urlPath.includes('?')
+    || urlPath.includes('#')
+  ) {
     throw new Error('unsafe or non-canonical item URL path');
   }
 
@@ -31,24 +63,44 @@ export function assertCanonicalPageUrl(urlPath) {
     segments[0] !== ''
     || segments[1] !== 'i'
     || segments.length < 3
-    || segments.slice(2).some((segment) => (
-      segment === ''
-      || segment === '.'
-      || segment === '..'
-      || segment.includes('\0')
-      || segment.includes('\\')
-    ))
   ) {
     throw new Error('unsafe item URL path segments');
   }
+
+  const decodedSegments = [];
+  for (const segment of segments.slice(2)) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      throw new Error('invalid item URL encoding');
+    }
+    if (
+      unsafeDecodedSegment(decoded)
+      || encodeURIComponent(decoded) !== segment
+    ) {
+      throw new Error('unsafe or non-canonical item URL segment');
+    }
+    assertNoRepeatedDecodeTraversal(decoded);
+    decodedSegments.push(decoded);
+  }
+  return decodedSegments;
+}
+
+export function assertCanonicalPageUrl(urlPath) {
+  canonicalDecodedSegments(urlPath);
   return urlPath;
 }
 
+export function pageFileKey(urlPath) {
+  return canonicalDecodedSegments(urlPath).join('\0');
+}
+
 function pagePathInfo(urlPath, siteRoot) {
-  const canonical = assertCanonicalPageUrl(urlPath);
+  const decodedSegments = canonicalDecodedSegments(urlPath);
   const root = path.resolve(siteRoot);
   const itemRoot = path.join(root, 'i');
-  const pageParent = path.resolve(root, ...canonical.split('/').slice(1));
+  const pageParent = path.resolve(itemRoot, ...decodedSegments);
   if (
     pageParent === itemRoot
     || !pageParent.startsWith(`${itemRoot}${path.sep}`)
@@ -136,6 +188,49 @@ async function syncDirectory(directory, expected) {
   }
 }
 
+async function ensurePageParentDirectories(info, initialChain, hooks) {
+  const relativeParent = path.relative(info.itemRoot, info.pageParent);
+  const parts = relativeParent === '' ? [] : relativeParent.split(path.sep);
+  const desiredPaths = [info.itemRoot];
+  for (const part of parts) {
+    desiredPaths.push(path.join(desiredPaths.at(-1), part));
+  }
+
+  const expectedChain = [...initialChain];
+  while (expectedChain.length < desiredPaths.length) {
+    const beforeCreate = await inspectParentChain(info, {
+      requireComplete: false,
+    });
+    assertSameParentChain(expectedChain, beforeCreate);
+    const parent = expectedChain.at(-1);
+    const directory = desiredPaths[expectedChain.length];
+    try {
+      await mkdir(directory, { mode: 0o755 });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+
+    const entry = await lstat(directory);
+    assertSecureDirectory(entry, directory);
+    const child = {
+      path: directory,
+      dev: entry.dev,
+      ino: entry.ino,
+    };
+    expectedChain.push(child);
+    const afterCreate = await inspectParentChain(info, {
+      requireComplete: false,
+    });
+    assertSameParentChain(expectedChain, afterCreate);
+
+    await syncDirectory(directory, child);
+    await hooks.afterCreatedDirectorySync?.(directory);
+    await syncDirectory(parent.path, parent);
+    await hooks.afterCreatedDirectorySync?.(parent.path);
+  }
+  return expectedChain;
+}
+
 async function cleanupTempIfStillSafe(tempPath, info, expectedChain) {
   try {
     const actualChain = await inspectParentChain(info, {
@@ -216,10 +311,11 @@ export async function writePageFileAtomic(
   if (initialChain.length === 0) {
     throw new Error('item root must be securely pre-provisioned');
   }
-  await mkdir(info.pageParent, { recursive: true, mode: 0o755 });
-  const expectedChain = await inspectParentChain(info, {
-    requireComplete: true,
-  });
+  const expectedChain = await ensurePageParentDirectories(
+    info,
+    initialChain,
+    hooks,
+  );
 
   const tempPath = path.join(
     info.pageParent,
