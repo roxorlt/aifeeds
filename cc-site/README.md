@@ -32,6 +32,21 @@
 
 部署完之后浏览器打开 https://ai-feeds.cc 验证 footer 显示。
 
+### 神马验证的 HTTP 例外
+
+神马站长平台的文件验证器需要直接读取
+`http://ai-feeds.cc/shenma-site-verification.txt`，不能依赖跳转到 HTTPS。生产
+Nginx 的 HTTP → HTTPS 规则必须排除这一条路径：
+
+```nginx
+if ($server_port !~ 443) {
+    rewrite ^(?!/shenma-site-verification\.txt$)(/.*)$ https://$host$1 permanent;
+}
+```
+
+除该验证文件外，其余 HTTP 路径仍然跳转到 HTTPS。腾讯云轻量服务器防火墙还需
+放行入站 TCP 80，否则验证请求不会到达 Nginx。
+
 ## 改 footer / 文案的标准流程
 
 1. 在本目录改文件
