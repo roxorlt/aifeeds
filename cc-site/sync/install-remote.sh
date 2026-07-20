@@ -315,12 +315,21 @@ rollback_install() {
 
 on_exit() {
   local status=$?
+  local preserve_snapshot=0
   trap - EXIT
   set +e
   if ((status != 0 && transaction_prepared == 1 && deployment_committed == 0)); then
     if ! rollback_install; then
       echo "ERROR: deployment rollback was incomplete" >&2
       status=70
+      preserve_snapshot=1
+    elif ! "$NODE" "$FILE_TOOL" complete-preparing \
+      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" >/dev/null; then
+      echo "ERROR: preparing deployment rollback could not be completed" >&2
+      status=70
+      preserve_snapshot=1
     fi
   fi
   if ((status != 0 && deployment_committed == 0)); then
@@ -329,7 +338,12 @@ on_exit() {
       status=70
     fi
   fi
-  rm -rf -- "$SNAPSHOT" "$STAGING"
+  if ((preserve_snapshot == 1)); then
+    echo "WARNING: preserving rollback snapshot for preparing recovery: $SNAPSHOT" >&2
+    rm -rf -- "$STAGING"
+  else
+    rm -rf -- "$SNAPSHOT" "$STAGING"
+  fi
   exit "$status"
 }
 trap on_exit EXIT
@@ -417,7 +431,9 @@ unset env_concurrency env_page_limit env_timeout value line
 RELEASES=$(rooted /opt/aifeeds-cc-sync-releases)
 OPT=$(rooted /opt/aifeeds-cc-sync)
 RELEASE="$RELEASES/$EXPECTED_MANIFEST_DIGEST"
-GLOBAL_JOURNAL="$RELEASES/.deployment-committed.json"
+GLOBAL_PREPARING="$RELEASES/.deployment-preparing.json"
+GLOBAL_COMMITTED="$RELEASES/.deployment-committed.json"
+GLOBAL_JOURNAL_DIR="$RELEASES/.deployment-journal"
 ETC_DIR=$(rooted /etc/aifeeds)
 ENV_FILE="$ETC_DIR/cc-sync.env"
 UNIT_DIR=$(rooted /etc/systemd/system)
@@ -427,19 +443,6 @@ ITEM_ROOT="$SITE_ROOT/i"
 VHOST_DIR=$(rooted /www/server/panel/vhost/nginx)
 VHOST="$VHOST_DIR/html_ai-feeds.cc.conf"
 SNIPPET="$VHOST_DIR/aifeeds-cc-content-mirror.conf"
-
-if [[ -L "$OPT" ]]; then
-  "$NODE" "$SECURITY_TOOL" validate-live-release \
-    "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
-elif [[ -e "$OPT" ]]; then
-  echo "ERROR: existing live code path is not a managed symlink" >&2
-  exit 1
-fi
-if [[ -e "$GLOBAL_JOURNAL" || -L "$GLOBAL_JOURNAL" ]]; then
-  "$NODE" "$FILE_TOOL" recover-global \
-    "$GLOBAL_JOURNAL" "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
-    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"
-fi
 
 SYSTEMCTL_OUTPUT=""
 SYSTEMCTL_STATUS=0
@@ -452,6 +455,14 @@ capture_systemctl() {
   if ((restore_errexit == 1)); then set -e; fi
   return 0
 }
+
+if [[ -L "$OPT" ]]; then
+  "$NODE" "$SECURITY_TOOL" validate-live-release \
+    "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
+elif [[ -e "$OPT" ]]; then
+  echo "ERROR: existing live code path is not a managed symlink" >&2
+  exit 1
+fi
 
 capture_systemctl show --property=LoadState --value "$SERVICE"
 if ((SYSTEMCTL_STATUS != 0)); then
@@ -587,6 +598,67 @@ for chain in \
     "$PATH_BOUNDARY" "$logical" "$owners" "$allow_missing"
 done
 
+global_recovery=$("$NODE" "$FILE_TOOL" recover-global \
+  "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+  "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+  "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE")
+recovery_phase=""
+recovery_manifest=""
+recovery_nginx=""
+recovery_service_active=""
+recovery_timer_active=""
+recovery_timer_enabled=""
+IFS=$'\t' read -r \
+  recovery_phase recovery_manifest recovery_nginx recovery_service_active \
+  recovery_timer_active recovery_timer_enabled <<< "$global_recovery"
+case "$recovery_phase" in
+  none|committed) ;;
+  preparing)
+    [[ "$recovery_manifest" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "ERROR: invalid recovered preparing manifest" >&2
+      exit 1
+    }
+    service_active_before=$recovery_service_active
+    timer_active_before=$recovery_timer_active
+    timer_enabled_before=$recovery_timer_enabled
+    if [[ -e "$recovery_nginx" || -L "$recovery_nginx" ]]; then
+      if [[ ! -d "$recovery_nginx" || -L "$recovery_nginx" ]]; then
+        echo "ERROR: recovered Nginx transaction is unsafe" >&2
+        exit 1
+      fi
+      "$NODE" "$NGINX_TRANSACTION_TOOL" rollback "$recovery_nginx"
+      "$NGINX" -t
+      "$NGINX" -s reload
+    fi
+    new_service_start_attempted=1
+    new_timer_activation_attempted=1
+    stop_candidate_units
+    "$SYSTEMCTL" daemon-reload
+    restore_original_service_state
+    restore_original_timer_enablement
+    restore_original_timer_activity
+    "$NODE" "$FILE_TOOL" complete-preparing \
+      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" >/dev/null
+    new_service_start_attempted=0
+    new_timer_activation_attempted=0
+    ;;
+  *)
+    echo "ERROR: invalid global deployment recovery phase" >&2
+    exit 1 ;;
+esac
+unset global_recovery recovery_phase recovery_manifest recovery_nginx
+unset recovery_service_active recovery_timer_active recovery_timer_enabled
+
+if [[ -L "$OPT" ]]; then
+  "$NODE" "$SECURITY_TOOL" validate-live-release \
+    "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
+elif [[ -e "$OPT" ]]; then
+  echo "ERROR: existing live code path is not a managed symlink" >&2
+  exit 1
+fi
+
 node_major=$("$NODE" -p 'Number(process.versions.node.split(".")[0])')
 if [[ ! "$node_major" =~ ^[0-9]+$ ]] || ((node_major < 18)); then
   echo "ERROR: Node 18 or newer is required" >&2
@@ -609,6 +681,23 @@ if [[ ! -f "$VHOST" || -L "$VHOST" ]]; then
   exit 1
 fi
 "$INSTALL" -d -o root -g root -m 0700 "$ROLLBACK"
+"$INSTALL" -d -o root -g root -m 0755 "$RELEASES" "$ETC_DIR" "$UNIT_DIR"
+"$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
+  "$RELEASES" "$ROOT_UID" "$ROOT_GID"
+for backup in \
+  "$ENV_FILE:env" \
+  "$UNIT_DIR/$SERVICE:service" \
+  "$UNIT_DIR/$TIMER:timer"; do
+  destination=${backup%%:*}
+  backup_name=${backup#*:}
+  "$NODE" "$FILE_TOOL" capture "$destination" "$ROLLBACK" "$backup_name"
+done
+"$NODE" "$FILE_TOOL" prepare-global \
+  "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+  "$RELEASES" "$RELEASE" "$EXPECTED_MANIFEST_DIGEST" "$ROLLBACK/nginx" \
+  "$ROOT_UID" "$ROOT_GID" \
+  "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" \
+  "$service_active_before" "$timer_active_before" "$timer_enabled_before"
 transaction_prepared=1
 
 if [[ "$service_active_before" == active \
@@ -682,25 +771,6 @@ if [[ "$timer_enabled_before" == enabled ]]; then
   fi
 fi
 
-"$NODE" "$FILE_TOOL" recover-symlink \
-  "$OPT" opt "$EXPECTED_MANIFEST_DIGEST"
-"$NODE" "$FILE_TOOL" recover-file \
-  "$UNIT_DIR/$SERVICE" service "$EXPECTED_MANIFEST_DIGEST"
-"$NODE" "$FILE_TOOL" recover-file \
-  "$UNIT_DIR/$TIMER" timer "$EXPECTED_MANIFEST_DIGEST"
-"$NODE" "$FILE_TOOL" recover-file \
-  "$ENV_FILE" env "$EXPECTED_MANIFEST_DIGEST"
-for recovered in \
-  "$OPT:opt" \
-  "$UNIT_DIR/$SERVICE:service" \
-  "$UNIT_DIR/$TIMER:timer" \
-  "$ENV_FILE:env"; do
-  recovered_destination=${recovered%%:*}
-  recovered_name=${recovered#*:}
-  "$NODE" "$FILE_TOOL" finalize-path \
-    "$recovered_destination" "$recovered_name" "$EXPECTED_MANIFEST_DIGEST"
-done
-
 if [[ -L "$OPT" ]]; then
   "$NODE" "$SECURITY_TOOL" validate-live-release \
     "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
@@ -708,18 +778,6 @@ elif [[ -e "$OPT" ]]; then
   echo "ERROR: existing live code path is not a managed symlink" >&2
   exit 1
 fi
-for backup in \
-  "$ENV_FILE:env" \
-  "$UNIT_DIR/$SERVICE:service" \
-  "$UNIT_DIR/$TIMER:timer"; do
-  destination=${backup%%:*}
-  backup_name=${backup#*:}
-  "$NODE" "$FILE_TOOL" capture "$destination" "$ROLLBACK" "$backup_name"
-done
-
-"$INSTALL" -d -o root -g root -m 0755 "$RELEASES"
-"$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
-  "$RELEASES" "$ROOT_UID" "$ROOT_GID"
 release_stage=$("$NODE" "$SECURITY_TOOL" create-release-stage \
   "$RELEASES" "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
 cp -a "$SNAPSHOT/cc-site" "$release_stage/cc-site"
@@ -744,7 +802,6 @@ case "$release_action" in
   *) echo "ERROR: invalid release publication result" >&2; exit 1 ;;
 esac
 
-"$INSTALL" -d -o root -g root -m 0755 "$ETC_DIR" "$UNIT_DIR"
 IFS=$'\t' read -r state_root_created state_root_dev state_root_ino < <(
   "$NODE" "$SECURITY_TOOL" ensure-managed-root \
     "$STATE_DIR" "$SYNC_UID" "$WWW_GID" state
@@ -757,21 +814,22 @@ IFS=$'\t' read -r item_root_created item_root_dev item_root_ino < <(
 LIVE_TARGET="aifeeds-cc-sync-releases/$EXPECTED_MANIFEST_DIGEST/cc-site/sync"
 opt_switched=1
 "$NODE" "$FILE_TOOL" install-symlink-transaction \
-  "$OPT" "$LIVE_TARGET" opt "$EXPECTED_MANIFEST_DIGEST"
+  "$OPT" "$LIVE_TARGET" opt "$EXPECTED_MANIFEST_DIGEST" \
+  "$GLOBAL_PREPARING" "$GLOBAL_JOURNAL_DIR" "$ROOT_UID" "$ROOT_GID"
 service_installed=1
 "$NODE" "$FILE_TOOL" install-transaction \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.service" "$UNIT_DIR/$SERVICE" \
   0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" service \
-  "$EXPECTED_MANIFEST_DIGEST"
+  "$EXPECTED_MANIFEST_DIGEST" "$GLOBAL_PREPARING" "$GLOBAL_JOURNAL_DIR"
 timer_installed=1
 "$NODE" "$FILE_TOOL" install-transaction \
   "$RELEASE/cc-site/sync/aifeeds-cc-sync.timer" "$UNIT_DIR/$TIMER" \
   0644 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" timer \
-  "$EXPECTED_MANIFEST_DIGEST"
+  "$EXPECTED_MANIFEST_DIGEST" "$GLOBAL_PREPARING" "$GLOBAL_JOURNAL_DIR"
 env_installed=1
 "$NODE" "$FILE_TOOL" install-transaction "$ENV_SOURCE" "$ENV_FILE" \
   0600 "$ROOT_UID" "$ROOT_GID" "$ROLLBACK" env \
-  "$EXPECTED_MANIFEST_DIGEST"
+  "$EXPECTED_MANIFEST_DIGEST" "$GLOBAL_PREPARING" "$GLOBAL_JOURNAL_DIR"
 
 "$SYSTEMCTL" daemon-reload
 new_service_start_attempted=1
@@ -865,11 +923,31 @@ smoke_exact ai-news \
 
 new_timer_activation_attempted=1
 "$SYSTEMCTL" enable --now "$TIMER"
+set +e
 "$NODE" "$FILE_TOOL" commit-global \
-  "$GLOBAL_JOURNAL" "$RELEASE" "$EXPECTED_MANIFEST_DIGEST" \
+  "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+  "$RELEASES" "$RELEASE" "$EXPECTED_MANIFEST_DIGEST" \
   "$ROOT_UID" "$ROOT_GID" \
   "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"
-deployment_committed=1
+global_commit_status=$?
+set -e
+if ((global_commit_status != 0)); then
+  if [[ -e "$GLOBAL_COMMITTED" || -L "$GLOBAL_COMMITTED" ]]; then
+    deployment_committed=1
+    committed_recovery=$("$NODE" "$FILE_TOOL" recover-global \
+      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE")
+    if [[ "$committed_recovery" != committed ]]; then
+      echo "ERROR: failed global commit did not recover as committed" >&2
+      exit 70
+    fi
+  else
+    exit "$global_commit_status"
+  fi
+else
+  deployment_committed=1
+fi
 nginx_mutated=0
 for installed in \
   "$OPT:opt" \
@@ -885,7 +963,8 @@ for installed in \
 done
 global_clear_result=""
 if ! global_clear_result=$("$NODE" "$FILE_TOOL" clear-global \
-  "$GLOBAL_JOURNAL" "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+  "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" "$RELEASES" \
+  "$ROOT_UID" "$ROOT_GID" \
   "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE"); then
   echo "WARNING: committed deployment journal cleanup failed; retrying next deployment" >&2
 elif [[ "$global_clear_result" == pending ]]; then

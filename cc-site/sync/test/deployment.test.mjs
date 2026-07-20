@@ -11,6 +11,7 @@ import {
   readlink,
   readdir,
   rename,
+  rm,
   stat,
   symlink,
   unlink,
@@ -930,6 +931,332 @@ test('deployment path transactions never overwrite a concurrent live object', as
   });
 });
 
+test('global journal publication recovers only its exact interrupted hard-link candidate', async (t) => {
+  const { recoverGlobalJournalCandidate } = await import(
+    '../deployment-file-transaction.mjs'
+  );
+  const fixtureScript = path.join(
+    SYNC_DIR,
+    'test',
+    'fixtures',
+    'publish-and-pause.mjs',
+  );
+  const uid = process.getuid();
+  const gid = process.getgid();
+
+  async function killedPublication(phase) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `cc-global-${phase}-`));
+    const journalDirectory = path.join(root, '.deployment-journal');
+    const canonical = path.join(root, `.deployment-${phase}.json`);
+    const ready = path.join(root, 'ready');
+    await mkdir(journalDirectory, { mode: 0o700 });
+    const child = spawn(process.execPath, [
+      fixtureScript,
+      'global-journal',
+      phase,
+      canonical,
+      journalDirectory,
+      String(uid),
+      String(gid),
+      ready,
+    ], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let childError = '';
+    child.stderr.on('data', (chunk) => {
+      childError += chunk;
+    });
+    await Promise.race([
+      waitForPath(ready),
+      new Promise((_, reject) => {
+        child.once('exit', (code, signal) => {
+          reject(new Error(
+            `journal fixture exited before pause: ${code ?? signal}: ${childError}`,
+          ));
+        });
+      }),
+    ]);
+    child.kill('SIGKILL');
+    await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', resolve);
+    });
+    return { canonical, journalDirectory, phase };
+  }
+
+  for (const phase of ['preparing', 'committed']) {
+    await t.test(`${phase} marker crash leaves one recoverable inode`, async () => {
+      const fixture = await killedPublication(phase);
+      const canonicalBefore = await lstat(fixture.canonical);
+      assert.equal(canonicalBefore.isFile(), true);
+      assert.equal(canonicalBefore.nlink, 2);
+      const candidates = (await readdir(fixture.journalDirectory))
+        .filter((name) => name.startsWith(`.${phase}.`));
+      assert.equal(candidates.length, 1);
+      const candidate = path.join(fixture.journalDirectory, candidates[0]);
+      const candidateIdentity = await lstat(candidate);
+      assert.equal(candidateIdentity.dev, canonicalBefore.dev);
+      assert.equal(candidateIdentity.ino, canonicalBefore.ino);
+
+      await recoverGlobalJournalCandidate({
+        canonical: fixture.canonical,
+        gid,
+        journalDirectory: fixture.journalDirectory,
+        phase,
+        uid,
+      });
+
+      assert.equal((await lstat(fixture.canonical)).nlink, 1);
+      await assert.rejects(lstat(candidate), /ENOENT/);
+    });
+  }
+
+  async function adversarialFixture() {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-global-adversarial-'));
+    const journalDirectory = path.join(root, '.deployment-journal');
+    const canonical = path.join(root, '.deployment-preparing.json');
+    await mkdir(journalDirectory, { mode: 0o700 });
+    await writeFile(canonical, '{"phase":"preparing"}\n', { mode: 0o600 });
+    return { canonical, journalDirectory };
+  }
+
+  await t.test('multiple controlled candidates fail closed', async () => {
+    const fixture = await adversarialFixture();
+    for (const uuid of [
+      '123e4567-e89b-42d3-a456-426614174000',
+      '123e4567-e89b-42d3-a456-426614174001',
+    ]) {
+      await link(
+        fixture.canonical,
+        path.join(fixture.journalDirectory, `.preparing.${uuid}.candidate`),
+      );
+    }
+    await assert.rejects(recoverGlobalJournalCandidate({
+      ...fixture,
+      gid,
+      phase: 'preparing',
+      uid,
+    }), /candidate|link/i);
+    assert.equal((await lstat(fixture.canonical)).nlink, 3);
+  });
+
+  await t.test('different-inode controlled candidate fails closed', async () => {
+    const fixture = await adversarialFixture();
+    const candidate = path.join(
+      fixture.journalDirectory,
+      '.preparing.123e4567-e89b-42d3-a456-426614174000.candidate',
+    );
+    await writeFile(candidate, '{"phase":"preparing"}\n', { mode: 0o600 });
+    await assert.rejects(recoverGlobalJournalCandidate({
+      ...fixture,
+      gid,
+      phase: 'preparing',
+      uid,
+    }), /candidate|inode|link/i);
+    assert.equal((await lstat(candidate)).isFile(), true);
+  });
+
+  await t.test('arbitrary hard link fails closed', async () => {
+    const fixture = await adversarialFixture();
+    await link(fixture.canonical, path.join(fixture.journalDirectory, 'operator-link'));
+    await assert.rejects(recoverGlobalJournalCandidate({
+      ...fixture,
+      gid,
+      phase: 'preparing',
+      uid,
+    }), /candidate|unexpected|link/i);
+    assert.equal((await lstat(fixture.canonical)).nlink, 2);
+  });
+
+  await t.test('symbolic candidate fails closed', async () => {
+    const fixture = await adversarialFixture();
+    const candidate = path.join(
+      fixture.journalDirectory,
+      '.preparing.123e4567-e89b-42d3-a456-426614174000.candidate',
+    );
+    await symlink(fixture.canonical, candidate);
+    await assert.rejects(recoverGlobalJournalCandidate({
+      ...fixture,
+      gid,
+      phase: 'preparing',
+      uid,
+    }), /candidate|regular|symbolic/i);
+    assert.equal((await lstat(candidate)).isSymbolicLink(), true);
+  });
+});
+
+test('preparing journal owns every path transaction before live mutation', async (t) => {
+  const {
+    armPreparingTransaction,
+    captureFile,
+    installFileTransaction,
+    prepareGlobalDeployment,
+    recoverGlobalDeployment,
+  } = await import('../deployment-file-transaction.mjs');
+  const uid = process.getuid();
+  const gid = process.getgid();
+
+  async function fixture() {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-global-preparing-'));
+    const releases = path.join(root, 'aifeeds-cc-sync-releases');
+    const journalDirectory = path.join(releases, '.deployment-journal');
+    const preparingJournal = path.join(releases, '.deployment-preparing.json');
+    const committedJournal = path.join(releases, '.deployment-committed.json');
+    const manifest = 'a'.repeat(64);
+    const release = path.join(releases, manifest);
+    const destinations = [
+      path.join(root, 'aifeeds-cc-sync'),
+      path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
+      path.join(root, 'systemd', 'aifeeds-cc-sync.timer'),
+      path.join(root, 'aifeeds', 'cc-sync.env'),
+    ];
+    await mkdir(release, { recursive: true, mode: 0o755 });
+    await chmod(releases, 0o755);
+    await chmod(release, 0o755);
+    await mkdir(path.dirname(destinations[1]), { recursive: true });
+    await mkdir(path.dirname(destinations[3]), { recursive: true });
+    await writeFile(destinations[1], 'OLD_SERVICE\n', { mode: 0o644 });
+    return {
+      committedJournal,
+      destinations,
+      gid,
+      journalDirectory,
+      manifest,
+      preparingJournal,
+      release,
+      releases,
+      root,
+      uid,
+    };
+  }
+
+  await t.test('marker is durable before transaction directories exist', async () => {
+    const current = await fixture();
+    const marker = await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.root, 'snapshot', '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'active',
+        timer_active: 'active',
+        timer_enabled: 'enabled',
+      },
+    });
+    assert.equal(marker.phase, 'preparing');
+    assert.equal((await lstat(current.preparingJournal)).nlink, 1);
+    assert.equal((await lstat(current.preparingJournal)).mode & 0o777, 0o600);
+    assert.equal((await lstat(current.journalDirectory)).mode & 0o777, 0o700);
+    assert.deepEqual(
+      marker.transactions.map(({ name, state }) => [name, state]),
+      [
+        ['opt', 'planned'],
+        ['service', 'planned'],
+        ['timer', 'planned'],
+        ['env', 'planned'],
+      ],
+    );
+    assert.equal(marker.transactions[1].expected.type, 'file');
+    for (const transaction of marker.transactions) {
+      await assert.rejects(lstat(transaction.transaction), /ENOENT/);
+    }
+  });
+
+  await t.test('receipt is armed and fsynced while the old live file still exists', async () => {
+    const current = await fixture();
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.root, 'snapshot', '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    const backups = path.join(current.root, 'backups');
+    const source = path.join(current.root, 'new.service');
+    await writeFile(source, 'NEW_SERVICE\n', { mode: 0o644 });
+    await captureFile({
+      backups,
+      destination: current.destinations[1],
+      name: 'service',
+    });
+    let armedBeforeMutation = false;
+    await installFileTransaction({
+      backups,
+      destination: current.destinations[1],
+      gid,
+      hooks: {
+        async afterReceiptPrepared() {
+          assert.equal(
+            await readFile(current.destinations[1], 'utf8'),
+            'OLD_SERVICE\n',
+          );
+          await armPreparingTransaction({
+            gid,
+            journalDirectory: current.journalDirectory,
+            name: 'service',
+            preparingJournal: current.preparingJournal,
+            uid,
+          });
+          armedBeforeMutation = true;
+        },
+      },
+      mode: 0o644,
+      name: 'service',
+      source,
+      transaction: current.manifest,
+      uid,
+    });
+    assert.equal(armedBeforeMutation, true);
+    const marker = JSON.parse(await readFile(current.preparingJournal, 'utf8'));
+    assert.equal(marker.transactions[1].state, 'armed');
+    assert.match(marker.transactions[1].receipt_header_digest, /^[0-9a-f]{64}$/);
+    assert.equal(Number.isSafeInteger(
+      marker.transactions[1].receipt_identity.ino,
+    ), true);
+    assert.equal(
+      await readFile(current.destinations[1], 'utf8'),
+      'NEW_SERVICE\n',
+    );
+  });
+
+  await t.test('a receipt without a matching journal is never forward-finalized', async () => {
+    const current = await fixture();
+    const backups = path.join(current.root, 'backups');
+    const source = path.join(current.root, 'new.service');
+    await writeFile(source, 'NEW_SERVICE\n', { mode: 0o644 });
+    await captureFile({
+      backups,
+      destination: current.destinations[1],
+      name: 'service',
+    });
+    await installFileTransaction({
+      backups,
+      destination: current.destinations[1],
+      gid,
+      mode: 0o644,
+      name: 'service',
+      source,
+      transaction: current.manifest,
+      uid,
+    });
+    const transaction = path.join(
+      path.dirname(current.destinations[1]),
+      `.aifeeds-deploy.${current.manifest}.service`,
+    );
+    await assert.rejects(recoverGlobalDeployment({
+      committedJournal: current.committedJournal,
+      destinations: current.destinations,
+      gid,
+      journalDirectory: current.journalDirectory,
+      preparingJournal: current.preparingJournal,
+      releases: current.releases,
+      uid,
+    }), /orphan|journal/i);
+    assert.equal(await readFile(current.destinations[1], 'utf8'), 'NEW_SERVICE\n');
+    assert.equal((await lstat(path.join(transaction, 'receipt.jsonl'))).isFile(), true);
+  });
+});
+
 test('managed state validation accepts private lock artifacts but rejects unsafe trees', async (t) => {
   const { validateManagedRoot } = await import('../deployment-security.mjs');
   const { acquireSyncLock } = await import('../state.mjs');
@@ -1303,6 +1630,11 @@ if [[ "\${2:-}" == 'commit-global' \
   && "\${AIFEEDS_GLOBAL_COMMIT_EXIT:-0}" != 0 ]]; then
   exit "$AIFEEDS_GLOBAL_COMMIT_EXIT"
 fi
+if [[ "\${2:-}" == 'commit-global' \
+  && "\${AIFEEDS_KILL_BEFORE_GLOBAL_COMMIT:-0}" == 1 ]]; then
+  kill -KILL "$PPID"
+  exit 137
+fi
 if [[ "\${2:-}" == 'finalize-path' \
   && -f "$AIFEEDS_DEPLOY_ROOT/opt/aifeeds-cc-sync-releases/.deployment-committed.json" ]]; then
   finalize_count_file="$AIFEEDS_DEPLOY_ROOT/global-finalize-count"
@@ -1326,7 +1658,26 @@ if [[ "\${1:-}" == '--test' ]]; then
   : > "$AIFEEDS_PAYLOAD_TEST_PROOF"
   exit 0
 fi
-exec "$AIFEEDS_REAL_NODE" "$@"
+node_status=0
+"$AIFEEDS_REAL_NODE" "$@" || node_status=$?
+if ((node_status == 0)) && [[ "\${AIFEEDS_KILL_AFTER_PATH_PUBLISH:-0}" != 0 ]] \
+  && [[ "\${2:-}" == 'install-symlink-transaction' \
+    || "\${2:-}" == 'install-transaction' ]]; then
+  publish_count_file="$AIFEEDS_DEPLOY_ROOT/path-publish-count"
+  publish_count=0
+  [[ ! -f "$publish_count_file" ]] || read -r publish_count < "$publish_count_file"
+  publish_count=$((publish_count + 1))
+  printf '%s\n' "$publish_count" > "$publish_count_file"
+  if [[ "$publish_count" == "$AIFEEDS_KILL_AFTER_PATH_PUBLISH" ]]; then
+    kill -KILL "$PPID"
+    exit 137
+  fi
+fi
+if ((node_status == 0)) && [[ "\${2:-}" == 'complete-preparing' \
+  && "\${AIFEEDS_EXIT_AFTER_PREPARING_RECOVERY:-0}" != 0 ]]; then
+  exit "$AIFEEDS_EXIT_AFTER_PREPARING_RECOVERY"
+fi
+exit "$node_status"
 `);
 await executable(path.join(fakeBin, 'systemctl'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -2070,6 +2421,175 @@ remoteHarnessTest('global journal and local receipts must remain mutually consis
       );
     });
   }
+});
+
+remoteHarnessTest('preparing journal rolls every pre-commit crash back before redeploy', async (t) => {
+  const scenarios = [
+    { env: { AIFEEDS_KILL_AFTER_PATH_PUBLISH: '1' }, name: 'path 1' },
+    { env: { AIFEEDS_KILL_AFTER_PATH_PUBLISH: '2' }, name: 'path 2' },
+    { env: { AIFEEDS_KILL_AFTER_PATH_PUBLISH: '3' }, name: 'path 3' },
+    { env: { AIFEEDS_KILL_AFTER_PATH_PUBLISH: '4' }, name: 'path 4' },
+    { env: { AIFEEDS_KILL_BEFORE_GLOBAL_COMMIT: '1' }, name: 'post-health' },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(`${scenario.name} crash restores the prior deployment`, async () => {
+      const harness = await remoteDeployHarness({
+        priorDeployment: true,
+        serviceState: 'active',
+        timerEnabledState: 'enabled',
+        timerState: 'active',
+      });
+      const installer = path.join(SYNC_DIR, 'install-remote.sh');
+      const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+      const preparingJournal = path.join(
+        harness.root,
+        'opt',
+        'aifeeds-cc-sync-releases',
+        '.deployment-preparing.json',
+      );
+
+      const killed = runBash(installer, args, {
+        ...harness.env,
+        ...scenario.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+      assert.equal(
+        killed.signal === 'SIGKILL' || killed.status === 137,
+        true,
+        killed.stderr,
+      );
+      assert.equal(
+        JSON.parse(await readFile(preparingJournal, 'utf8')).phase,
+        'preparing',
+      );
+
+      await rm(harness.stage, { force: true, recursive: true });
+      await buildPayload({
+        envFile: harness.stagedEnv,
+        payload: harness.stage,
+        repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+      });
+      const recovered = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_EXIT_AFTER_PREPARING_RECOVERY: '66',
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+      assert.equal(recovered.status, 66, recovered.stderr);
+      assert.equal(
+        await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+        `aifeeds-cc-sync-releases/${harness.oldReleaseId}/cc-site/sync`,
+      );
+      assert.equal(
+        await readFile(path.join(harness.root, 'etc', 'aifeeds', 'cc-sync.env'), 'utf8'),
+        'OLD_ENV=1\n',
+      );
+      assert.equal(
+        await readFile(
+          path.join(
+            harness.root,
+            'etc',
+            'systemd',
+            'system',
+            'aifeeds-cc-sync.service',
+          ),
+          'utf8',
+        ),
+        'OLD_SERVICE\n',
+      );
+      assert.equal(
+        await readFile(
+          path.join(
+            harness.root,
+            'etc',
+            'systemd',
+            'system',
+            'aifeeds-cc-sync.timer',
+          ),
+          'utf8',
+        ),
+        'OLD_TIMER\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'service-active'), 'utf8'),
+        'active\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-active'), 'utf8'),
+        'active\n',
+      );
+      assert.equal(
+        await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+        'enabled\n',
+      );
+      assert.equal(await readFile(harness.vhost, 'utf8'), VHOST_FIXTURE);
+      await assert.rejects(lstat(harness.snippet), /ENOENT/);
+      await assert.rejects(lstat(preparingJournal), /ENOENT/);
+
+      await buildPayload({
+        envFile: harness.stagedEnv,
+        payload: harness.stage,
+        repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+      });
+      const redeployed = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+      assert.equal(redeployed.status, 0, redeployed.stderr);
+      assert.equal(
+        await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
+        `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
+      );
+    });
+  }
+});
+
+remoteHarnessTest('orphan receipts without a global journal are not finalized', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+    timerEnabledState: 'enabled',
+    timerState: 'active',
+  });
+  const installer = path.join(SYNC_DIR, 'install-remote.sh');
+  const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+  const preparingJournal = path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+    '.deployment-preparing.json',
+  );
+  const first = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+    AIFEEDS_KILL_AFTER_PATH_PUBLISH: '1',
+  });
+  assert.equal(first.signal === 'SIGKILL' || first.status === 137, true);
+  await unlink(preparingJournal).catch((error) => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  await rm(harness.stage, { force: true, recursive: true });
+  await buildPayload({
+    envFile: harness.stagedEnv,
+    payload: harness.stage,
+    repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+  });
+
+  const second = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+  });
+  assert.notEqual(second.status, 0);
+  assert.match(second.stderr, /orphan.*journal/i);
+  assert.equal(
+    (await lstat(path.join(
+      harness.root,
+      'opt',
+      `.aifeeds-deploy.${harness.manifestDigest}.opt`,
+      'receipt.jsonl',
+    ))).isFile(),
+    true,
+  );
 });
 
 remoteHarnessTest('a damaged live release fails closed without replacement', async () => {
