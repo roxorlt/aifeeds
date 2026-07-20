@@ -1571,3 +1571,77 @@ test('--full removes stale pages only after a fully successful bootstrap', async
     fresh.url_path,
   ]);
 });
+
+test('successful sync publishes indexes from the committed live state', async () => {
+  const dirs = await workspace();
+  const item = metadata('news:indexed', '/i/news/indexed', H1);
+  const api = { baseUrl: 'http://127.0.0.1:1' };
+  const client = {
+    async changes({ afterSeq }) {
+      return afterSeq === 0
+        ? { items: [change(1, 'upsert', item)], next_after_seq: 1 }
+        : { items: [], next_after_seq: afterSeq };
+    },
+    async page() {
+      return Buffer.from('<h1>one</h1>');
+    },
+  };
+  await saveState(dirs.stateDir, createEmptyState());
+  const calls = [];
+
+  await runSync({
+    config: config(api, dirs),
+    client,
+    publisher: async (input) => {
+      calls.push(input);
+      assert.deepEqual(input.state, await loadState(dirs.stateDir));
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].siteRoot, dirs.siteRoot);
+  assert.equal(calls[0].stateDir, dirs.stateDir);
+  assert.equal(calls[0].state.last_seq, 1);
+  assert.ok(calls[0].state.pages[item.url_path]);
+});
+
+test('index publication failure fails sync after state commit and dry-run never publishes', async () => {
+  const dirs = await workspace();
+  const item = metadata('news:index-failure', '/i/news/index-failure', H1);
+  const api = { baseUrl: 'http://127.0.0.1:1' };
+  const client = {
+    async changes({ afterSeq }) {
+      return afterSeq === 0
+        ? { items: [change(1, 'upsert', item)], next_after_seq: 1 }
+        : { items: [], next_after_seq: afterSeq };
+    },
+    async page() {
+      return Buffer.from('<h1>one</h1>');
+    },
+  };
+  await saveState(dirs.stateDir, createEmptyState());
+
+  await assert.rejects(
+    runSync({
+      config: config(api, dirs),
+      client,
+      publisher: async () => {
+        throw new Error('injected index failure');
+      },
+    }),
+    /injected index failure/,
+  );
+  assert.equal((await loadState(dirs.stateDir)).last_seq, 1);
+  assert.equal(await body(item.url_path, dirs.siteRoot), '<h1>one</h1>');
+
+  let dryRunPublished = false;
+  await runSync({
+    config: config(api, dirs),
+    client,
+    dryRun: true,
+    publisher: async () => {
+      dryRunPublished = true;
+    },
+  });
+  assert.equal(dryRunPublished, false);
+});

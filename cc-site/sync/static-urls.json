@@ -1,0 +1,9 @@
+{
+  "base_url": "https://ai-feeds.cc",
+  "paths": [
+    "/",
+    "/privacy.html",
+    "/terms.html",
+    "/contact.html"
+  ]
+}

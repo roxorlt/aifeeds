@@ -18,6 +18,7 @@ import {
   loadState,
   saveState,
 } from './state.mjs';
+import { publishIndexes } from './publish-indexes.mjs';
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 const dryRunLocks = new Set();
@@ -387,6 +388,7 @@ async function runSyncUnlocked({
   dryRun,
   full,
   client,
+  publisher,
 }) {
   const loaded = await loadState(config.stateDir);
   const state = loaded ?? createEmptyState();
@@ -400,12 +402,20 @@ async function runSyncUnlocked({
       restart: full || loaded === null,
     })
     : state;
-  return runChanges({
+  const finalState = await runChanges({
     state: afterBootstrap,
     client,
     config,
     dryRun,
   });
+  if (!dryRun) {
+    await publisher({
+      siteRoot: config.siteRoot,
+      stateDir: config.stateDir,
+      state: finalState,
+    });
+  }
+  return finalState;
 }
 
 export async function runSync({
@@ -413,6 +423,7 @@ export async function runSync({
   dryRun = false,
   full = false,
   client = new SyncClient(config),
+  publisher = publishIndexes,
 }) {
   validateRuntimeConfig(config);
   const operation = () => runSyncUnlocked({
@@ -420,6 +431,7 @@ export async function runSync({
     dryRun,
     full,
     client,
+    publisher,
   });
 
   if (dryRun) {
