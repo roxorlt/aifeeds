@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -377,6 +378,41 @@ test('a staging-generation failure leaves the entire previous generation untouch
   );
 });
 
+test('a root sitemap staging failure leaves every live output untouched', async () => {
+  const dirs = await workspace();
+  await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+    ]),
+  });
+  const paths = [
+    path.join(dirs.siteRoot, 'ai-news', 'index.html'),
+    path.join(dirs.stateDir, 'public', 'sitemaps', 'news-1.xml'),
+    path.join(dirs.stateDir, 'public', 'sitemap.xml'),
+  ];
+  const before = await Promise.all(paths.map((file) => readFile(file, 'utf8')));
+
+  await assert.rejects(
+    publishIndexes({
+      ...dirs,
+      state: state([
+        ['/i/news/new', metadata('news', 'New', '2026-07-20T00:00:00Z')],
+      ]),
+      hooks: {
+        async beforeStageSitemapIndex(stageRoot) {
+          await mkdir(path.join(stageRoot, 'sitemap.xml'));
+        },
+      },
+    }),
+    /EEXIST|already exists/i,
+  );
+  assert.deepEqual(
+    await Promise.all(paths.map((file) => readFile(file, 'utf8'))),
+    before,
+  );
+});
+
 test('a deleted state entry disappears from archive and sitemap', async () => {
   const dirs = await workspace();
   await publishIndexes({
@@ -654,6 +690,66 @@ test('rejects a state-root ancestor swap from the sitemap-index afterPublish hoo
   );
   await rm(parent);
   await rename(movedParent, parent);
+});
+
+test('rejects replacement of every installed generated target without traversing it', async (t) => {
+  for (const targetName of ['archive', 'sitemaps', 'sitemap-index']) {
+    await t.test(targetName, async () => {
+      const dirs = await workspace();
+      const publicDir = path.join(dirs.stateDir, 'public');
+      const targets = {
+        archive: path.join(dirs.siteRoot, 'ai-news'),
+        sitemaps: path.join(publicDir, 'sitemaps'),
+        'sitemap-index': path.join(publicDir, 'sitemap.xml'),
+      };
+      const target = targets[targetName];
+      const displaced = path.join(
+        dirs.root,
+        `displaced-${targetName}`,
+      );
+      const outside = path.join(dirs.root, `outside-${targetName}`);
+      const isDirectory = targetName !== 'sitemap-index';
+      if (isDirectory) {
+        await mkdir(outside);
+        await writeFile(path.join(outside, 'sentinel'), 'unchanged');
+      } else {
+        await writeFile(outside, 'unchanged');
+      }
+
+      await assert.rejects(
+        publishIndexes({
+          ...dirs,
+          state: state([
+            ['/i/news/item', metadata(
+              'news',
+              'Item',
+              '2026-07-20T00:00:00Z',
+            )],
+          ]),
+          hooks: {
+            async afterPublish(name) {
+              if (name !== targetName) return;
+              await rename(target, displaced);
+              await symlink(outside, target);
+            },
+          },
+        }),
+        /installed|target|symlink|rollback|cleanup/i,
+      );
+
+      assert.equal((await lstat(target)).isSymbolicLink(), true);
+      if (isDirectory) {
+        assert.deepEqual(await readdir(outside), ['sentinel']);
+        assert.equal(
+          await readFile(path.join(outside, 'sentinel'), 'utf8'),
+          'unchanged',
+        );
+      } else {
+        assert.equal(await readFile(outside, 'utf8'), 'unchanged');
+      }
+      assert.equal((await lstat(displaced)).isSymbolicLink(), false);
+    });
+  }
 });
 
 test('rejects a regular-to-symlink static sitemap swap before archive or index commit', async (t) => {

@@ -414,6 +414,64 @@ async function removeKnownEntry(target, kind, parentIdentity) {
   await rm(target, { recursive: kind === 'directory', force: true });
 }
 
+async function installedTargetIdentity(target, kind, parentIdentity) {
+  await assertIdentity(parentIdentity);
+  const entry = await lstatOptional(target);
+  if (entry === null) {
+    throw new Error(`installed generated target is missing: ${target}`);
+  }
+  assertReplaceable(entry, kind, target);
+  await assertIdentity(parentIdentity);
+  return {
+    path: target,
+    kind,
+    dev: entry.dev,
+    ino: entry.ino,
+    parentIdentity,
+  };
+}
+
+async function assertInstalledTarget(identity) {
+  await assertIdentity(identity.parentIdentity);
+  const entry = await lstatOptional(identity.path);
+  if (entry === null) {
+    throw new Error(`installed generated target is missing: ${identity.path}`);
+  }
+  assertReplaceable(entry, identity.kind, identity.path);
+  if (entry.dev !== identity.dev || entry.ino !== identity.ino) {
+    throw new Error(
+      `installed generated target changed during publication: ${identity.path}`,
+    );
+  }
+  await assertIdentity(identity.parentIdentity);
+}
+
+async function assertInstalledTargets(records) {
+  for (const record of records) {
+    if (!record.installed) continue;
+    if (record.installedIdentity === null) {
+      throw new Error(
+        `installed generated target identity is unavailable: ${record.target}`,
+      );
+    }
+    await assertInstalledTarget(record.installedIdentity);
+  }
+}
+
+async function removeInstalledTarget(record) {
+  if (record.installedIdentity === null) {
+    throw new Error(
+      `refusing to remove unpinned installed target: ${record.target}`,
+    );
+  }
+  await assertInstalledTarget(record.installedIdentity);
+  await assertIdentity(record.parentIdentity);
+  await rm(record.target, {
+    recursive: record.kind === 'directory',
+    force: true,
+  });
+}
+
 async function replaceGeneratedEntry({
   name,
   kind,
@@ -437,6 +495,7 @@ async function replaceGeneratedEntry({
     parentIdentity,
     oldMoved: false,
     installed: false,
+    installedIdentity: null,
   };
   records.push(record);
   if (oldEntry !== null) {
@@ -446,6 +505,11 @@ async function replaceGeneratedEntry({
   }
   await rename(stage, target);
   record.installed = true;
+  record.installedIdentity = await installedTargetIdentity(
+    target,
+    kind,
+    parentIdentity,
+  );
   await syncDirectory(parentIdentity);
 }
 
@@ -454,11 +518,7 @@ async function rollback(records) {
   for (const record of [...records].reverse()) {
     try {
       if (record.installed) {
-        await removeKnownEntry(
-          record.target,
-          record.kind,
-          record.parentIdentity,
-        );
+        await removeInstalledTarget(record);
         await syncDirectory(record.parentIdentity);
       }
       if (record.oldMoved) {
@@ -483,6 +543,8 @@ async function buildStaging({
   items,
   archiveStage,
   publicStage,
+  includeStaticSitemap,
+  hooks,
 }) {
   const pageCount = Math.max(1, Math.ceil(items.length / ARCHIVE_PAGE_SIZE));
   const archiveEntries = [];
@@ -539,7 +601,20 @@ async function buildStaging({
     }
   }
 
-  return { sitemapsStage, shardLocations };
+  await hooks.beforeStageSitemapIndex?.(publicStage.path);
+  await writeDurableFile(
+    publicStage,
+    'sitemap.xml',
+    renderSitemapIndex([
+      ...(includeStaticSitemap
+        ? [`${SITE_BASE}/sitemap-static.xml`]
+        : []),
+      `${SITE_BASE}/sitemaps/archive.xml`,
+      ...shardLocations,
+    ]),
+  );
+
+  return { sitemapsStage };
 }
 
 async function staticSitemapPresence(siteIdentity) {
@@ -570,12 +645,14 @@ async function validateFinalPublication({
   stateIdentity,
   publicIdentity,
   includeStaticSitemap,
+  records,
 }) {
   await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
   const actualStaticSitemap = await staticSitemapPresence(siteIdentity);
   if (actualStaticSitemap !== includeStaticSitemap) {
     throw new Error('static sitemap presence changed before publication');
   }
+  await assertInstalledTargets(records);
   await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
 }
 
@@ -588,9 +665,11 @@ async function publishGeneratedEntry({
 }) {
   await hooks.beforePublish?.(entry.name);
   await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+  await assertInstalledTargets(entry.records);
   await replaceGeneratedEntry(entry);
   await hooks.afterPublish?.(entry.name);
   await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+  await assertInstalledTargets(entry.records);
 }
 
 export async function publishIndexes({
@@ -605,7 +684,7 @@ export async function publishIndexes({
   const items = normalizeItems(state);
   const siteIdentity = await rootIdentity(safeSiteRoot, 'siteRoot');
   const stateIdentity = await rootIdentity(safeStateDir, 'stateDir');
-  await staticSitemapPresence(siteIdentity);
+  const includeStaticSitemap = await staticSitemapPresence(siteIdentity);
   const token = randomUUID();
   const archiveStage = await createDirectory(
     siteIdentity,
@@ -618,17 +697,17 @@ export async function publishIndexes({
     0o755,
   );
   let sitemapsStage;
-  let shardLocations = [];
   let publicIdentity;
-  let includeStaticSitemap;
   let primaryError = null;
   let committed = false;
   const records = [];
   try {
-    ({ sitemapsStage, shardLocations } = await buildStaging({
+    ({ sitemapsStage } = await buildStaging({
       items,
       archiveStage,
       publicStage,
+      includeStaticSitemap,
+      hooks,
     }));
     await hooks.afterStageBuilt?.();
 
@@ -666,18 +745,12 @@ export async function publishIndexes({
 
     await hooks.beforePublish?.('sitemap-index');
     await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
-    includeStaticSitemap = await staticSitemapPresence(siteIdentity);
-    await writeDurableFile(
-      publicStage,
-      'sitemap.xml',
-      renderSitemapIndex([
-        ...(includeStaticSitemap
-          ? [`${SITE_BASE}/sitemap-static.xml`]
-          : []),
-        `${SITE_BASE}/sitemaps/archive.xml`,
-        ...shardLocations,
-      ]),
-    );
+    await assertInstalledTargets(records);
+    const actualStaticSitemap = await staticSitemapPresence(siteIdentity);
+    if (actualStaticSitemap !== includeStaticSitemap) {
+      throw new Error('static sitemap presence changed before publication');
+    }
+    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
     await replaceGeneratedEntry({
       name: 'sitemap-index',
       kind: 'file',
@@ -688,11 +761,14 @@ export async function publishIndexes({
       records,
     });
     await hooks.afterPublish?.('sitemap-index');
+    await assertPinnedRoots(siteIdentity, stateIdentity, publicIdentity);
+    await assertInstalledTargets(records);
     await validateFinalPublication({
       siteIdentity,
       stateIdentity,
       publicIdentity,
       includeStaticSitemap,
+      records,
     });
     committed = true;
   } catch (error) {
@@ -736,6 +812,7 @@ export async function publishIndexes({
         stateIdentity,
         publicIdentity,
         includeStaticSitemap,
+        records,
       });
     } catch (error) {
       cleanupErrors.push(error);
