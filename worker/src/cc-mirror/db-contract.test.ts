@@ -10,6 +10,10 @@ const migration030Path = path.resolve(
   here,
   '../../migrations/030-cc-content-mirror-decision-token.sql',
 );
+const migration031Path = path.resolve(
+  here,
+  '../../migrations/031-cc-content-mirror-bootstrap-index.sql',
+);
 const schemaPath = path.resolve(here, '../../schema.sql');
 
 type TableInfoRow = {
@@ -72,6 +76,7 @@ const expectedColumns: Record<string, Array<[string, string, number, number]>> =
 const expectedIndexes: Record<string, string[]> = {
   idx_cc_reviews_status: ['review_status', 'reviewed_at'],
   idx_cc_pages_status_source: ['status', 'source', 'generated_at'],
+  idx_cc_pages_status_item: ['status', 'item_id'],
   idx_cc_page_events_item: ['item_id', 'seq'],
 };
 
@@ -83,6 +88,11 @@ function readMigration029(): string {
 function readMigration030(): string {
   expect(fs.existsSync(migration030Path), '030 migration must exist').toBe(true);
   return fs.readFileSync(migration030Path, 'utf8');
+}
+
+function readMigration031(): string {
+  expect(fs.existsSync(migration031Path), '031 migration must exist').toBe(true);
+  return fs.readFileSync(migration031Path, 'utf8');
 }
 
 function tableInfo(db: DatabaseSync, tableName: string): TableInfoRow[] {
@@ -142,7 +152,7 @@ function extractStatement(sql: string, kind: 'TABLE' | 'INDEX', name: string): s
   return match![0];
 }
 
-describe('029 + 030 cc content mirror DB contract', () => {
+describe('029 + 030 + 031 cc content mirror DB contract', () => {
   test('ordered migrations create the exact tables and indexes', () => {
     const db = new DatabaseSync(':memory:');
     const migration029 = readMigration029();
@@ -150,8 +160,57 @@ describe('029 + 030 cc content mirror DB contract', () => {
     db.exec(migration029);
     db.exec(migration029);
     db.exec(readMigration030());
+    db.exec(readMigration031());
+    db.exec(readMigration031());
 
     assertContract(db);
+    db.close();
+  });
+
+  test('031 upgrades an existing database and makes bootstrap an indexed ordered scan', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(readMigration029());
+    db.exec(readMigration030());
+    const insert = db.prepare(
+      `INSERT INTO cc_item_pages (
+         item_id, source, url_path, r2_key, content_hash, title,
+         published_at, generated_at, status, reason
+       ) VALUES (?, 'news', ?, ?, ?, ?, NULL,
+         '2026-07-20T00:00:00Z', ?, 'test')`,
+    );
+    for (let index = 0; index < 4000; index++) {
+      const id = `blog:fixture:${String(index).padStart(5, '0')}`;
+      insert.run(
+        id,
+        `/i/news/fixture/${index}`,
+        `cc-item-pages/${index}`,
+        'a'.repeat(64),
+        id,
+        index % 5 === 0 ? 'live' : 'gone',
+      );
+    }
+
+    db.exec(readMigration031());
+    db.exec('ANALYZE');
+
+    expect(indexColumns(db, 'idx_cc_pages_status_item')).toEqual([
+      'status',
+      'item_id',
+    ]);
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT item_id, source, url_path, content_hash, title, published_at
+       FROM cc_item_pages
+       WHERE status = 'live'
+         AND content_hash IS NOT NULL
+         AND item_id > ?
+       ORDER BY item_id ASC
+       LIMIT ?`,
+    ).all('blog:fixture:01000', 201).map((row) =>
+      String((row as { detail?: unknown }).detail ?? '')
+    );
+    expect(plan.join('\n')).toContain('idx_cc_pages_status_item');
+    expect(plan.join('\n')).not.toMatch(/USE TEMP B-TREE FOR ORDER BY/i);
     db.close();
   });
 

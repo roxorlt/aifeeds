@@ -31,6 +31,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const migration = [
   "029-cc-content-mirror.sql",
   "030-cc-content-mirror-decision-token.sql",
+  "031-cc-content-mirror-bootstrap-index.sql",
 ].map((file) =>
   fs.readFileSync(path.resolve(here, "../../migrations", file), "utf8")
 ).join("\n");

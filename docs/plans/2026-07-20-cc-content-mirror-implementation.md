@@ -324,6 +324,7 @@ git commit -m "feat(cc): 为全部内容源声明大陆镜像政策"
 **Files:**
 - Create: `worker/migrations/029-cc-content-mirror.sql`
 - Create: `worker/migrations/030-cc-content-mirror-decision-token.sql`
+- Create: `worker/migrations/031-cc-content-mirror-bootstrap-index.sql`
 - Modify: `worker/schema.sql`
 - Create: `worker/src/cc-mirror/db-contract.test.ts`
 
@@ -389,6 +390,14 @@ ALTER TABLE cc_item_overrides
   ADD COLUMN decision_token TEXT NOT NULL DEFAULT '';
 ```
 
+`031` 也是独立前向 migration，为 bootstrap 的 live + item cursor 查询补索引；
+不得修改已经执行过的 `029`/`030`：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_cc_pages_status_item
+  ON cc_item_pages(status, item_id);
+```
+
 合法枚举由应用层验证：
 
 - review: `pending | pass | review | deny`
@@ -398,9 +407,12 @@ ALTER TABLE cc_item_overrides
 
 **Step 2: 写 DB contract 测试**
 
-测试 `029` 重复执行幂等，再按顺序执行一次 `030`；检查 4 张表、关键索引和
+测试 `029` 重复执行幂等，再按顺序执行 `030`、`031`；检查 4 张表、关键索引和
 `decision_token TEXT NOT NULL DEFAULT ''`。另在只执行 `029` 后插入旧 override，
 再执行 `030`，断言旧行 token 被安全补为 `''`；插入 event 后 `seq` 严格递增。
+对已有 `029 + 030` 数据库执行 `031`，用真实 SQLite
+`EXPLAIN QUERY PLAN` 断言 bootstrap 查询使用
+`idx_cc_pages_status_item`，且不创建 `ORDER BY` 临时 B-tree。
 
 **Step 3: 本地执行**
 
@@ -410,22 +422,28 @@ npx wrangler d1 execute xlist --local --file=migrations/029-cc-content-mirror.sq
 npx wrangler d1 execute xlist --local \
   --file=migrations/030-cc-content-mirror-decision-token.sql
 npx wrangler d1 execute xlist --local \
+  --file=migrations/031-cc-content-mirror-bootstrap-index.sql
+npx wrangler d1 execute xlist --local \
   --command="PRAGMA table_info('cc_item_overrides');"
+npx wrangler d1 execute xlist --local \
+  --command="PRAGMA index_list('cc_item_pages');"
 npm test -- src/cc-mirror/db-contract.test.ts
 ```
 
-Expected: 两个 migration 按顺序成功；`PRAGMA` 中 `decision_token` 为 `TEXT`、
-`notnull=1`、默认值 `''`；测试 PASS。
+Expected: 三个 migration 按 `029 → 030 → 031` 成功；`PRAGMA` 中
+`decision_token` 为 `TEXT`、`notnull=1`、默认值 `''`，且存在
+`idx_cc_pages_status_item`；测试 PASS。
 
 **Step 4: 同步 schema.sql**
 
-把 `029 + 030` 的最终结构补进 `worker/schema.sql`，保证新环境从零初始化不缺表。
+把 `029 + 030 + 031` 的最终结构补进 `worker/schema.sql`，保证新环境从零初始化不缺表和索引。
 
 **Step 5: Commit**
 
 ```bash
 git add worker/migrations/029-cc-content-mirror.sql \
   worker/migrations/030-cc-content-mirror-decision-token.sql \
+  worker/migrations/031-cc-content-mirror-bootstrap-index.sql \
   worker/schema.sql worker/src/cc-mirror/db-contract.test.ts
 git commit -m "feat(cc): 增加镜像审核页面与变更事件表"
 ```
@@ -796,6 +814,9 @@ timestamp + "\n"
 - query 先按 key/value 排序并 RFC3986 编码。
 - 常数时间比较。
 - method/path/query/body 任一被改动都验签失败。
+- 所有 method 的实际 body 都参与 SHA-256；body 上限 64 KiB。先拒绝明确超限的
+  `Content-Length`，无长度或伪小长度也必须逐块计数，越限立即 cancel 并返回
+  `413`，不得先无界 `arrayBuffer()`。
 - missing secret = 503；缺头/过期/错误签名 = 401。
 - 不复用微信 `BRIDGE_SECRET`。
 
@@ -937,6 +958,13 @@ Node 端签名必须与 Worker fixture 完全一致。固定 timestamp/method/pa
 用本地 mock HTTP server：
 
 - 首次无 state → bootstrap 全量 → 拉页面 → hash 校验 → 原子写 → 保存 watermark。
+- 首个 bootstrap 响应取得 watermark `W` 后，必须立即把 `W` 冻结在本次
+  bootstrap state；所有续页精确回传同一个 `W`，不得用后续响应时的新
+  `MAX(seq)` 覆盖。完整 bootstrap 成功后，第一次 changes 必须从精确的 `W`
+  开始。
+- 并发夹具：取得 `W` 并消费一页后写入 `W+1` 新页面，且该页面
+  `item_id` 排在已消费 cursor 之前；续页不会看到它，但从 `W` 开始的 changes
+  必须收敛该 upsert。
 - 第二次 → changes 增量。
 - upsert 相同 hash 不重写。
 - 每条 upsert 必须把事件里的 hash 作为
@@ -1202,11 +1230,16 @@ npx wrangler d1 execute xlist-staging --env staging --remote \
 npx wrangler d1 execute xlist-staging --env staging --remote \
   --file=migrations/030-cc-content-mirror-decision-token.sql
 npx wrangler d1 execute xlist-staging --env staging --remote \
+  --file=migrations/031-cc-content-mirror-bootstrap-index.sql
+npx wrangler d1 execute xlist-staging --env staging --remote \
   --command="PRAGMA table_info('cc_item_overrides');"
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --command="PRAGMA index_list('cc_item_pages');"
 ```
 
-Expected: `029`、`030` 严格按顺序成功，4 张表和索引存在；部署前确认
-`decision_token` 为 `TEXT`、`notnull=1`、默认值 `''`。
+Expected: `029 → 030 → 031` 严格按顺序成功，4 张表和索引存在；部署前确认
+`decision_token` 为 `TEXT`、`notnull=1`、默认值 `''`，并确认
+`idx_cc_pages_status_item` 存在。
 
 **Step 3: staging secrets/vars**
 
@@ -1294,7 +1327,7 @@ PR 必须包含：
 - source policy 表。
 - 审核 fail-closed 说明。
 - staging 三媒体样本与删除闭环证据。
-- migration 029 和前向 migration 030。
+- migration 029 和前向 migration 030、031。
 - prod rollout 和 rollback 命令。
 
 暂停等待 review/merge。
@@ -1310,13 +1343,18 @@ npx wrangler d1 execute xlist --remote \
 npx wrangler d1 execute xlist --remote \
   --file=migrations/030-cc-content-mirror-decision-token.sql
 npx wrangler d1 execute xlist --remote \
+  --file=migrations/031-cc-content-mirror-bootstrap-index.sql
+npx wrangler d1 execute xlist --remote \
   --command="PRAGMA table_info('cc_item_overrides');"
+npx wrangler d1 execute xlist --remote \
+  --command="PRAGMA index_list('cc_item_pages');"
 npx wrangler secret put CC_SYNC_SECRET
 npx wrangler deploy
 ```
 
-只有 `029`、`030` 依次成功，且 `PRAGMA` 确认 `decision_token` 为 `TEXT`、
-`notnull=1`、默认值 `''` 后才允许部署；先保持 `CC_MIRROR_ENABLED` 关闭。
+只有 `029 → 030 → 031` 依次成功，且 `PRAGMA` 确认 `decision_token` 为
+`TEXT`、`notnull=1`、默认值 `''` 以及 `idx_cc_pages_status_item` 存在后
+才允许部署；先保持 `CC_MIRROR_ENABLED` 关闭。
 
 **Step 4: 部署 VPS 同步器**
 

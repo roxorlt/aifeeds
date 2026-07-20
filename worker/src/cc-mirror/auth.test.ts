@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCcSyncCanonicalRequest,
+  CC_SYNC_MAX_BODY_BYTES,
   canonicalizeCcSyncQuery,
   signCcSyncRequest,
   verifyCcSyncRequest,
@@ -8,6 +9,54 @@ import {
 
 const SECRET = "task-7-fixture-secret";
 const NOW_SECONDS = 1_753_000_000;
+
+function fakeStreamingRequest(
+  chunks: Uint8Array[],
+  headers = new Headers(),
+  method = "GET",
+) {
+  const reads = { original: 0, clone: 0 };
+  const cancels = { original: 0, clone: 0 };
+  const url = "https://api.ai-feeds.com/api/cc-sync/health";
+
+  function body(kind: "original" | "clone") {
+    let index = 0;
+    return {
+      getReader() {
+        return {
+          async read() {
+            reads[kind] += 1;
+            if (index >= chunks.length) {
+              return { done: true, value: undefined };
+            }
+            return { done: false, value: chunks[index++] };
+          },
+          async cancel() {
+            cancels[kind] += 1;
+          },
+          releaseLock() {},
+        };
+      },
+    };
+  }
+
+  const request = {
+    url,
+    method,
+    headers,
+    body: body("original"),
+    clone() {
+      return {
+        url,
+        method,
+        headers,
+        body: body("clone"),
+      };
+    },
+  } as unknown as Request;
+
+  return { request, reads, cancels };
+}
 
 function request(
   path: string,
@@ -63,54 +112,33 @@ describe("cc sync canonical request", () => {
   });
 
   it("hashes even a non-standard GET body through clone without consuming it", async () => {
-    function fakeGet(body: string, headers = new Headers()) {
-      let originalReads = 0;
-      let cloneReads = 0;
-      const bytes = new TextEncoder().encode(body);
-      const value = {
-        url: "https://api.ai-feeds.com/api/cc-sync/health",
-        method: "GET",
-        headers,
-        async arrayBuffer() {
-          originalReads += 1;
-          return bytes.slice().buffer;
-        },
-        clone() {
-          return {
-            async arrayBuffer() {
-              cloneReads += 1;
-              return bytes.slice().buffer;
-            },
-          };
-        },
-      } as unknown as Request;
-      return {
-        request: value,
-        reads: () => ({ originalReads, cloneReads }),
-      };
-    }
-
     const timestamp = String(NOW_SECONDS);
-    const bodyA = fakeGet("body A");
+    const bodyA = fakeStreamingRequest([
+      new TextEncoder().encode("body A"),
+    ]);
     const signatureA = await signCcSyncRequest(
       bodyA.request,
       SECRET,
       timestamp,
     );
-    expect(bodyA.reads()).toEqual({ originalReads: 0, cloneReads: 1 });
+    expect(bodyA.reads.original).toBe(0);
+    expect(bodyA.reads.clone).toBeGreaterThan(0);
 
     const headers = new Headers({
       "X-CC-Timestamp": timestamp,
       "X-CC-Signature": signatureA,
     });
-    const bodyB = fakeGet("body B", headers);
+    const bodyB = fakeStreamingRequest([
+      new TextEncoder().encode("body B"),
+    ], headers);
     const result = await verifyCcSyncRequest(
       bodyB.request,
       SECRET,
       NOW_SECONDS,
     );
     expect(result.ok).toBe(false);
-    expect(bodyB.reads()).toEqual({ originalReads: 0, cloneReads: 1 });
+    expect(bodyB.reads.original).toBeGreaterThan(0);
+    expect(bodyB.reads.clone).toBe(0);
   });
 });
 
@@ -225,5 +253,96 @@ describe("verifyCcSyncRequest", () => {
       );
       expect(result.ok).toBe(false);
     }
+  });
+
+  it("rejects an oversized Content-Length before reading the stream", async () => {
+    const signature = "a".repeat(64);
+    for (const contentLength of [
+      String(CC_SYNC_MAX_BODY_BYTES + 1),
+      "9".repeat(100),
+    ]) {
+      const headers = new Headers({
+        "Content-Length": contentLength,
+        "X-CC-Timestamp": String(NOW_SECONDS),
+        "X-CC-Signature": signature,
+      });
+      const oversized = fakeStreamingRequest([
+        new Uint8Array([1]),
+      ], headers);
+
+      const result = await verifyCcSyncRequest(
+        oversized.request,
+        SECRET,
+        NOW_SECONDS,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.response.status).toBe(413);
+        expect(result.response.headers.get("Cache-Control")).toBe("no-store");
+        const body = await result.response.text();
+        expect(body).not.toContain(SECRET);
+        expect(body).not.toContain(signature);
+      }
+      expect(oversized.reads.original).toBe(0);
+      expect(oversized.cancels.original).toBe(0);
+    }
+  });
+
+  it("cancels a chunked/falsely-small body as soon as it crosses the limit", async () => {
+    for (const contentLength of [null, "1"]) {
+      const headers = new Headers({
+        "X-CC-Timestamp": String(NOW_SECONDS),
+        "X-CC-Signature": "b".repeat(64),
+      });
+      if (contentLength !== null) {
+        headers.set("Content-Length", contentLength);
+      }
+      const oversized = fakeStreamingRequest([
+        new Uint8Array(40 * 1024),
+        new Uint8Array(24 * 1024),
+        new Uint8Array(1),
+        new Uint8Array(8 * 1024),
+      ], headers);
+
+      const result = await verifyCcSyncRequest(
+        oversized.request,
+        SECRET,
+        NOW_SECONDS,
+      );
+      expect(result.ok, String(contentLength)).toBe(false);
+      if (!result.ok) {
+        expect(result.response.status).toBe(413);
+        expect(result.response.headers.get("Cache-Control")).toBe("no-store");
+      }
+      expect(oversized.reads.original).toBe(3);
+      expect(oversized.cancels.original).toBe(1);
+      expect(oversized.reads.clone).toBe(0);
+    }
+  });
+
+  it("signs and verifies a body exactly at the byte limit", async () => {
+    const bytes = new Uint8Array(CC_SYNC_MAX_BODY_BYTES);
+    bytes.fill(97);
+    const timestamp = String(NOW_SECONDS);
+    const signingRequest = fakeStreamingRequest([bytes]);
+    const signature = await signCcSyncRequest(
+      signingRequest.request,
+      SECRET,
+      timestamp,
+    );
+    expect(signingRequest.reads.original).toBe(0);
+    expect(signingRequest.reads.clone).toBeGreaterThan(0);
+
+    const headers = new Headers({
+      "Content-Length": String(CC_SYNC_MAX_BODY_BYTES),
+      "X-CC-Timestamp": timestamp,
+      "X-CC-Signature": signature,
+    });
+    const verifyingRequest = fakeStreamingRequest([bytes], headers);
+    await expect(
+      verifyCcSyncRequest(verifyingRequest.request, SECRET, NOW_SECONDS),
+    ).resolves.toEqual({ ok: true });
+    expect(verifyingRequest.reads.original).toBeGreaterThan(0);
+    expect(verifyingRequest.reads.clone).toBe(0);
   });
 });

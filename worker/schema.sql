@@ -283,6 +283,9 @@ CREATE TABLE IF NOT EXISTS cc_item_pages (
 CREATE INDEX IF NOT EXISTS idx_cc_pages_status_source
   ON cc_item_pages(status, source, generated_at);
 
+CREATE INDEX IF NOT EXISTS idx_cc_pages_status_item
+  ON cc_item_pages(status, item_id);
+
 CREATE TABLE IF NOT EXISTS cc_page_events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
