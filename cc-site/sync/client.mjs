@@ -24,23 +24,23 @@ export class SyncClient {
   }
 
   async page({ itemId, contentHash }) {
-    const response = await this.#get('/api/cc-sync/page', [
+    return this.#get('/api/cc-sync/page', [
       ['item_id', itemId],
       ['content_hash', contentHash],
-    ]);
-    return Buffer.from(await response.arrayBuffer());
+    ], async (response) => Buffer.from(await response.arrayBuffer()));
   }
 
   async #getJson(pathname, query) {
-    const response = await this.#get(pathname, query);
-    try {
-      return await response.json();
-    } catch (error) {
-      throw new Error(`invalid JSON from ${pathname}`, { cause: error });
-    }
+    return this.#get(pathname, query, async (response) => {
+      try {
+        return await response.json();
+      } catch (error) {
+        throw new Error(`invalid JSON from ${pathname}`, { cause: error });
+      }
+    });
   }
 
-  async #get(pathname, query) {
+  async #get(pathname, query, consume) {
     const url = new URL(pathname, `${this.baseUrl}/`);
     for (const [key, value] of query) url.searchParams.append(key, value);
     const controller = new AbortController();
@@ -49,9 +49,8 @@ export class SyncClient {
       this.requestTimeoutMs,
     );
 
-    let response;
     try {
-      response = await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         method: 'GET',
         headers: signedHeaders({
           secret: this.secret,
@@ -60,6 +59,13 @@ export class SyncClient {
         }),
         signal: controller.signal,
       });
+      if (!response.ok) {
+        const detail = (await response.text()).slice(0, 256).trim();
+        throw new Error(
+          `cc sync request failed: ${response.status} ${detail || response.statusText}`,
+        );
+      }
+      return await consume(response);
     } catch (error) {
       if (controller.signal.aborted) {
         throw new Error(
@@ -71,13 +77,5 @@ export class SyncClient {
     } finally {
       clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 256).trim();
-      throw new Error(
-        `cc sync request failed: ${response.status} ${detail || response.statusText}`,
-      );
-    }
-    return response;
   }
 }

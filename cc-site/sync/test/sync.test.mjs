@@ -98,6 +98,7 @@ class SyncApiFixture {
     this.failPath = null;
     this.corruptHashes = new Set();
     this.hangPath = null;
+    this.hangBodyPath = null;
     this.firstBootstrapSeen = false;
   }
 
@@ -133,6 +134,11 @@ class SyncApiFixture {
     if (!validSignature(request, url)) {
       response.writeHead(401, { 'content-type': 'text/plain' });
       response.end('unauthorized');
+      return;
+    }
+    if (this.hangBodyPath === url.pathname) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.flushHeaders();
       return;
     }
 
@@ -408,6 +414,35 @@ test('HMAC 401 and network timeout fail without advancing the cursor', async (t)
     runSync({ config: config(api, dirs, { requestTimeoutMs: 30 }) }),
     /timeout|abort/i,
   );
+  assert.equal((await loadState(dirs.stateDir)).last_seq, 0);
+});
+
+test('timeout covers a successful response whose body stalls after headers', async (t) => {
+  const dirs = await workspace();
+  await saveState(dirs.stateDir, createEmptyState());
+  const api = await new SyncApiFixture().start();
+  t.after(() => api.close());
+  api.hangBodyPath = '/api/cc-sync/changes';
+
+  const startedAt = Date.now();
+  let guardTimer;
+  try {
+    await assert.rejects(
+      Promise.race([
+        runSync({ config: config(api, dirs, { requestTimeoutMs: 30 }) }),
+        new Promise((_, reject) => {
+          guardTimer = setTimeout(
+            () => reject(new Error('regression deadline expired')),
+            250,
+          );
+        }),
+      ]),
+      /timeout|abort/i,
+    );
+  } finally {
+    clearTimeout(guardTimer);
+  }
+  assert.ok(Date.now() - startedAt < 200);
   assert.equal((await loadState(dirs.stateDir)).last_seq, 0);
 });
 
