@@ -946,6 +946,7 @@ export async function publishIndexes({
       current.id,
     );
     if (manifest.fingerprint === fingerprint) {
+      await assertStaticSitemapIdentity(siteIdentity, expectedStaticSitemap);
       return { changed: false, generation: current.id };
     }
   }
@@ -988,6 +989,7 @@ export async function publishIndexes({
       stable,
       hooks,
     });
+    await assertStaticSitemapIdentity(siteIdentity, expectedStaticSitemap);
     return { changed: true, generation: generationId };
   } catch (error) {
     try {

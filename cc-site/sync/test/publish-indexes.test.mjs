@@ -541,6 +541,92 @@ test('recovery GC fails closed before reading or deleting a replacement parent t
   await rename(movedState, dirs.stateDir);
 });
 
+test('no-op publication rejects static sitemap changes during recovery GC', async (t) => {
+  for (const mutation of ['delete', 'regular', 'symlink']) {
+    await t.test(mutation, async () => {
+      const dirs = await workspace();
+      const unchangedState = state([
+        ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+      ]);
+      await publishIndexes({ ...dirs, state: unchangedState });
+      const publicDir = path.join(dirs.stateDir, 'public');
+      const currentPath = path.join(publicDir, 'current');
+      const generationsPath = path.join(publicDir, 'generations');
+      const currentBefore = await readlink(currentPath);
+      const generationsBefore = await readdir(generationsPath);
+      const livePaths = [
+        publishedPath(dirs, 'ai-news', 'index.html'),
+        publishedPath(dirs, 'sitemap.xml'),
+        publishedPath(dirs, 'sitemaps', 'news-1.xml'),
+      ];
+      const liveBefore = await Promise.all(
+        livePaths.map((file) => readFile(file, 'utf8')),
+      );
+      const staticFile = path.join(dirs.siteRoot, 'sitemap-static.xml');
+      const outside = path.join(dirs.root, 'outside-static.xml');
+      await writeFile(outside, '<urlset></urlset>\n');
+      let mutated = false;
+
+      await assert.rejects(
+        publishIndexes({
+          ...dirs,
+          state: unchangedState,
+          hooks: {
+            async beforeGarbageCollection() {
+              if (mutated) return;
+              mutated = true;
+              await unlink(staticFile);
+              if (mutation === 'regular') {
+                await writeFile(staticFile, '<urlset>replacement</urlset>\n');
+              } else if (mutation === 'symlink') {
+                await symlink(outside, staticFile);
+              }
+            },
+          },
+        }),
+        /static sitemap|symlink|regular|changed/i,
+      );
+      assert.equal(await readlink(currentPath), currentBefore);
+      assert.deepEqual(await readdir(generationsPath), generationsBefore);
+      assert.deepEqual(
+        await Promise.all(livePaths.map((file) => readFile(file, 'utf8'))),
+        liveBefore,
+      );
+    });
+  }
+});
+
+test('changed publication rechecks the static sitemap after activation GC', async () => {
+  const dirs = await workspace();
+  await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+    ]),
+  });
+  const staticFile = path.join(dirs.siteRoot, 'sitemap-static.xml');
+  let garbageCollections = 0;
+
+  await assert.rejects(
+    publishIndexes({
+      ...dirs,
+      state: state([
+        ['/i/news/new', metadata('news', 'New', '2026-07-20T00:00:00Z')],
+      ]),
+      hooks: {
+        async beforeGarbageCollection() {
+          garbageCollections += 1;
+          if (garbageCollections === 2) {
+            await unlink(staticFile);
+          }
+        },
+      },
+    }),
+    /static sitemap|changed/i,
+  );
+  assert.equal(garbageCollections >= 2, true);
+});
+
 test('afterPrepared static sitemap deletion or replacement never activates the new generation', async (t) => {
   for (const mutation of ['delete', 'regular', 'symlink']) {
     await t.test(mutation, async () => {
