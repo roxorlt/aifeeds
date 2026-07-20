@@ -240,21 +240,51 @@ function runBash(script, args, env = {}) {
   });
 }
 
-async function localDeployHarness(secretFileContents) {
+async function localDeployHarness(
+  secretFileContents,
+  { autoDiscover = false, secretTarget = 'prod' } = {},
+) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cc-deploy-local-'));
   const home = path.join(root, 'home');
-  const secrets = path.join(root, '.secrets');
+  const repo = path.join(root, 'repo');
+  const deploySyncDir = autoDiscover
+    ? path.join(repo, 'cc-site', 'sync')
+    : SYNC_DIR;
+  const secrets = autoDiscover
+    ? path.join(repo, '.secrets')
+    : path.join(root, '.secrets');
   const fakeBin = path.join(root, 'bin');
   const log = path.join(root, 'commands.log');
   await mkdir(path.join(home, '.ssh'), { recursive: true });
-  await mkdir(secrets);
+  await mkdir(secrets, { recursive: true });
   await mkdir(fakeBin);
+  if (autoDiscover) {
+    await mkdir(path.join(deploySyncDir, 'test'), { recursive: true });
+    for (const name of await readdir(SYNC_DIR)) {
+      if ((await stat(path.join(SYNC_DIR, name))).isFile()) {
+        await copyFile(
+          path.join(SYNC_DIR, name),
+          path.join(deploySyncDir, name),
+        );
+      }
+    }
+    for (const name of await readdir(path.join(SYNC_DIR, 'test'))) {
+      if (name.endsWith('.test.mjs')) {
+        await copyFile(
+          path.join(SYNC_DIR, 'test', name),
+          path.join(deploySyncDir, 'test', name),
+        );
+      }
+    }
+  }
   await writeFile(path.join(home, '.ssh', 'aifeeds_temp'), 'test-key', {
     mode: 0o600,
   });
-  await writeFile(path.join(secrets, 'aifeeds-prod.env'), secretFileContents, {
-    mode: 0o600,
-  });
+  await writeFile(
+    path.join(secrets, `aifeeds-${secretTarget}.env`),
+    secretFileContents,
+    { mode: 0o600 },
+  );
   await executable(path.join(fakeBin, 'ssh'), `#!/usr/bin/env bash
 set -euo pipefail
 printf 'ssh' >> "$AIFEEDS_HARNESS_LOG"
@@ -280,9 +310,10 @@ exit "\${AIFEEDS_SCP_EXIT:-0}"
     env: {
       HOME: home,
       PATH: `${fakeBin}:${process.env.PATH}`,
-      AIFEEDS_SECRETS_DIR: secrets,
+      ...(autoDiscover ? {} : { AIFEEDS_SECRETS_DIR: secrets }),
       AIFEEDS_HARNESS_LOG: log,
     },
+    deploy: path.join(deploySyncDir, 'deploy-to-cc.sh'),
     log,
     root,
   };
@@ -341,6 +372,44 @@ test('local deploy stages through unique /tmp and never exposes the secret', asy
     AIFEEDS_REMOTE_INSTALL_EXIT: '23',
   });
   assert.equal(failure.status, 23);
+});
+
+test('local deploy discovers only the secret file for the selected target', async () => {
+  const stagingSecret = 'd'.repeat(64);
+  const stagingOnly = await localDeployHarness(
+    `CC_SYNC_SECRET=${stagingSecret}\n`,
+    { autoDiscover: true, secretTarget: 'staging' },
+  );
+  const stagingResult = runBash(
+    stagingOnly.deploy,
+    ['staging'],
+    stagingOnly.env,
+  );
+  assert.equal(
+    stagingResult.status,
+    0,
+    `${stagingResult.stdout}\n${stagingResult.stderr}`,
+  );
+  assert.equal(
+    `${stagingResult.stdout}\n${stagingResult.stderr}`.includes(stagingSecret),
+    false,
+  );
+
+  const prodOnly = await localDeployHarness(
+    `CC_SYNC_SECRET=${'e'.repeat(64)}\n`,
+    { autoDiscover: true },
+  );
+  const missingStaging = runBash(
+    prodOnly.deploy,
+    ['staging'],
+    prodOnly.env,
+  );
+  assert.notEqual(missingStaging.status, 0);
+  assert.match(
+    missingStaging.stderr,
+    /unable to find \.secrets\/aifeeds-staging\.env/,
+  );
+  await assert.rejects(readFile(prodOnly.log, 'utf8'), /ENOENT/);
 });
 
 const VHOST_FIXTURE = `server {

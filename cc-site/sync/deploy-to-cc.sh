@@ -39,8 +39,9 @@ fi
 
 find_secrets_dir() {
   local directory=$SCRIPT_DIR
+  local target_file="aifeeds-$TARGET.env"
   while [[ "$directory" != "/" ]]; do
-    if [[ -f "$directory/.secrets/aifeeds-prod.env" ]]; then
+    if [[ -f "$directory/.secrets/$target_file" ]]; then
       printf '%s\n' "$directory/.secrets"
       return 0
     fi
@@ -53,7 +54,7 @@ if [[ -n "${AIFEEDS_SECRETS_DIR:-}" ]]; then
   SECRETS_DIR=$AIFEEDS_SECRETS_DIR
 else
   SECRETS_DIR=$(find_secrets_dir) || {
-    echo "ERROR: unable to find .secrets/aifeeds-prod.env" >&2
+    echo "ERROR: unable to find .secrets/aifeeds-$TARGET.env" >&2
     exit 1
   }
 fi
