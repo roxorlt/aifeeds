@@ -323,10 +323,13 @@ git commit -m "feat(cc): 为全部内容源声明大陆镜像政策"
 
 **Files:**
 - Create: `worker/migrations/029-cc-content-mirror.sql`
+- Create: `worker/migrations/030-cc-content-mirror-decision-token.sql`
 - Modify: `worker/schema.sql`
 - Create: `worker/src/cc-mirror/db-contract.test.ts`
 
-**Step 1: 写 migration**
+**Step 1: 写顺序 migration**
+
+`029` 只创建初始 4 张表和索引：
 
 ```sql
 CREATE TABLE IF NOT EXISTS cc_item_reviews (
@@ -379,6 +382,13 @@ CREATE INDEX IF NOT EXISTS idx_cc_page_events_item
   ON cc_page_events(item_id, seq);
 ```
 
+`030` 是独立的前向 migration，不得把字段反向补写进已经发布的 `029`：
+
+```sql
+ALTER TABLE cc_item_overrides
+  ADD COLUMN decision_token TEXT NOT NULL DEFAULT '';
+```
+
 合法枚举由应用层验证：
 
 - review: `pending | pass | review | deny`
@@ -388,26 +398,35 @@ CREATE INDEX IF NOT EXISTS idx_cc_page_events_item
 
 **Step 2: 写 DB contract 测试**
 
-测试 migration 重复执行幂等；检查 4 张表和关键索引存在；插入 event 后 `seq` 严格递增。
+测试 `029` 重复执行幂等，再按顺序执行一次 `030`；检查 4 张表、关键索引和
+`decision_token TEXT NOT NULL DEFAULT ''`。另在只执行 `029` 后插入旧 override，
+再执行 `030`，断言旧行 token 被安全补为 `''`；插入 event 后 `seq` 严格递增。
 
 **Step 3: 本地执行**
 
 ```bash
 cd worker
 npx wrangler d1 execute xlist --local --file=migrations/029-cc-content-mirror.sql
+npx wrangler d1 execute xlist --local \
+  --file=migrations/030-cc-content-mirror-decision-token.sql
+npx wrangler d1 execute xlist --local \
+  --command="PRAGMA table_info('cc_item_overrides');"
 npm test -- src/cc-mirror/db-contract.test.ts
 ```
 
-Expected: migration 成功、测试 PASS。
+Expected: 两个 migration 按顺序成功；`PRAGMA` 中 `decision_token` 为 `TEXT`、
+`notnull=1`、默认值 `''`；测试 PASS。
 
 **Step 4: 同步 schema.sql**
 
-把 migration 最终结构补进 `worker/schema.sql`，保证新环境从零初始化不缺表。
+把 `029 + 030` 的最终结构补进 `worker/schema.sql`，保证新环境从零初始化不缺表。
 
 **Step 5: Commit**
 
 ```bash
-git add worker/migrations/029-cc-content-mirror.sql worker/schema.sql worker/src/cc-mirror/db-contract.test.ts
+git add worker/migrations/029-cc-content-mirror.sql \
+  worker/migrations/030-cc-content-mirror-decision-token.sql \
+  worker/schema.sql worker/src/cc-mirror/db-contract.test.ts
 git commit -m "feat(cc): 增加镜像审核页面与变更事件表"
 ```
 
@@ -1180,9 +1199,14 @@ Expected: 全绿；微信 relay 零回归。
 cd worker
 npx wrangler d1 execute xlist-staging --env staging --remote \
   --file=migrations/029-cc-content-mirror.sql
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --file=migrations/030-cc-content-mirror-decision-token.sql
+npx wrangler d1 execute xlist-staging --env staging --remote \
+  --command="PRAGMA table_info('cc_item_overrides');"
 ```
 
-Expected: 4 张表和索引创建成功。
+Expected: `029`、`030` 严格按顺序成功，4 张表和索引存在；部署前确认
+`decision_token` 为 `TEXT`、`notnull=1`、默认值 `''`。
 
 **Step 3: staging secrets/vars**
 
@@ -1270,7 +1294,7 @@ PR 必须包含：
 - source policy 表。
 - 审核 fail-closed 说明。
 - staging 三媒体样本与删除闭环证据。
-- migration 029。
+- migration 029 和前向 migration 030。
 - prod rollout 和 rollback 命令。
 
 暂停等待 review/merge。
@@ -1283,11 +1307,16 @@ PR 必须包含：
 cd worker
 npx wrangler d1 execute xlist --remote \
   --file=migrations/029-cc-content-mirror.sql
+npx wrangler d1 execute xlist --remote \
+  --file=migrations/030-cc-content-mirror-decision-token.sql
+npx wrangler d1 execute xlist --remote \
+  --command="PRAGMA table_info('cc_item_overrides');"
 npx wrangler secret put CC_SYNC_SECRET
 npx wrangler deploy
 ```
 
-先保持 `CC_MIRROR_ENABLED` 关闭。
+只有 `029`、`030` 依次成功，且 `PRAGMA` 确认 `decision_token` 为 `TEXT`、
+`notnull=1`、默认值 `''` 后才允许部署；先保持 `CC_MIRROR_ENABLED` 关闭。
 
 **Step 4: 部署 VPS 同步器**
 

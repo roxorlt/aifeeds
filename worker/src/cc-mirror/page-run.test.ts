@@ -935,6 +935,172 @@ describe("syncCcItemPage", () => {
     expect(r2.objects.size).toBe(1);
   });
 
+  it.each([
+    ["source deny", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items
+         SET extra = json_set(extra, '$.feed_key', 'qbitai')
+         WHERE id = ?`,
+      ).run(id);
+    }, "source-deny:registry-policy:deny"],
+    ["deleted item", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items
+         SET deleted_at = '2026-07-21T00:00:00.000Z'
+         WHERE id = ?`,
+      ).run(id);
+    }, "item-deleted"],
+    ["irrelevant item", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items
+         SET is_relevant = 0
+         WHERE id = ?`,
+      ).run(id);
+    }, "item-not-relevant"],
+    ["deduplicated item", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items
+         SET extra = json_set(extra, '$.dedup_of', 'blog:canonical')
+         WHERE id = ?`,
+      ).run(id);
+    }, "item-deduplicated"],
+    ["review renderer failure", (db: StatefulD1, id: string) => {
+      db.sqlite.prepare(
+        `UPDATE items
+         SET source_type = 'x_list', extra = 'null'
+         WHERE id = ?`,
+      ).run(id);
+    }, "render-failed:render-item-failed"],
+  ] as const)(
+    "fails closed and removes H0 when the current allow token encounters %s",
+    async (_label, mutate, expectedReason) => {
+      const { db, r2, env } = setup();
+      const id = db.insertSafeBlog();
+      db.setOverride(id, "allow", "allow-token-current");
+      await syncCcItemPage(env, id);
+      const putsBefore = r2.puts.length;
+      mutate(db, id);
+
+      const result = await syncCcItemPage(env, id, {
+        expectedDecision: {
+          action: "allow",
+          token: "allow-token-current",
+        },
+      });
+
+      expect(result).toMatchObject({
+        status: "gone",
+        reason: expectedReason,
+        eventCreated: true,
+      });
+      expect(db.page(id)).toMatchObject({
+        status: "gone",
+        reason: expectedReason,
+      });
+      expect(db.events(id).map((event) => event.op)).toEqual([
+        "upsert",
+        "delete",
+      ]);
+      expect(r2.puts).toHaveLength(putsBefore);
+    },
+  );
+
+  it("fails closed and removes H0 when final authorization changes under the current allow token", async () => {
+    const { db, r2, env } = setup();
+    const id = db.insertSafeBlog();
+    db.setOverride(id, "allow", "allow-token-current");
+    await syncCcItemPage(env, id);
+    const oldHash = db.page(id)!.content_hash;
+    db.sqlite.prepare(
+      `UPDATE items
+       SET extra = json_set(extra, '$.ai_summary_zh', '待发布第二版')
+       WHERE id = ?`,
+    ).run(id);
+    db.beforeNextBatch = (state) => {
+      state.sqlite.prepare(
+        `UPDATE items
+         SET deleted_at = '2026-07-21T00:00:00.000Z'
+         WHERE id = ?`,
+      ).run(id);
+    };
+
+    const result = await syncCcItemPage(env, id, {
+      expectedDecision: {
+        action: "allow",
+        token: "allow-token-current",
+      },
+    });
+
+    expect(result).toEqual({
+      itemId: id,
+      status: "gone",
+      reason: "final-authorization-changed",
+      eventCreated: true,
+    });
+    expect(db.page(id)).toMatchObject({
+      status: "gone",
+      content_hash: oldHash,
+      reason: "final-authorization-changed",
+    });
+    expect(db.events(id).map((event) => event.op)).toEqual([
+      "upsert",
+      "delete",
+    ]);
+    expect(r2.objects.size).toBe(2);
+  });
+
+  it.each(["allow", "deny"] as const)(
+    "does not let allow A remove B/H1 after a newer %s token replaces it",
+    async (successorAction) => {
+      const { db, env } = setup();
+      const id = db.insertSafeBlog();
+      db.setOverride(id, "allow", "initial-allow");
+      await syncCcItemPage(env, id);
+      db.setOverride(id, "allow", "allow-token-a");
+      db.sqlite.prepare(
+        `UPDATE items
+         SET deleted_at = '2026-07-21T00:00:00.000Z'
+         WHERE id = ?`,
+      ).run(id);
+      const successorHash = successorAction === "allow"
+        ? "d".repeat(64)
+        : "e".repeat(64);
+      const successorKey = ccItemPageR2Key(id, successorHash)!;
+      db.beforeNextBatch = (state) => {
+        state.setOverride(id, successorAction, `${successorAction}-token-b`);
+        state.sqlite.prepare(
+          `UPDATE cc_item_pages
+           SET content_hash = ?, r2_key = ?, status = 'live', reason = 'B live'
+           WHERE item_id = ?`,
+        ).run(successorHash, successorKey, id);
+        state.sqlite.prepare(
+          `INSERT INTO cc_page_events (
+             item_id, op, content_hash, created_at
+           ) VALUES (?, 'upsert', ?, '2026-07-21T00:00:00.000Z')`,
+        ).run(id, successorHash);
+      };
+
+      const result = await syncCcItemPage(env, id, {
+        expectedDecision: {
+          action: "allow",
+          token: "allow-token-a",
+        },
+      });
+
+      expect(result.status).toBe("skipped");
+      expect(result.eventCreated).toBe(false);
+      expect(db.page(id)).toMatchObject({
+        status: "live",
+        content_hash: successorHash,
+        r2_key: successorKey,
+      });
+      expect(db.events(id).map((event) => event.op)).toEqual([
+        "upsert",
+        "upsert",
+      ]);
+    },
+  );
+
   it("does not let deny A remove a live page after same-action deny B replaces its token", async () => {
     const { db, env } = setup();
     const id = db.insertSafeBlog();

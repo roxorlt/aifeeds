@@ -324,9 +324,6 @@ async function transitionToGone(
   dry: boolean,
   expectedDecision?: CcExpectedDecision,
 ): Promise<CcPageRunResult> {
-  if (expectedDecision?.action === "allow") {
-    return skipped(itemId, dry ? `dry:${reason}` : reason);
-  }
   const prior = await getStoredPage(env, itemId);
   if (!prior) return skipped(itemId, dry ? `dry:${reason}` : reason);
   if (prior.status !== "live") {
@@ -366,9 +363,6 @@ async function transitionAfterFinalAuthorizationFailure(
   expectedDecision?: CcExpectedDecision,
 ): Promise<CcPageRunResult> {
   const reason = "final-authorization-changed";
-  if (expectedDecision?.action === "allow") {
-    return skipped(itemId, reason);
-  }
   if (!prior) return skipped(itemId, reason);
   if (prior.status !== "live" || !prior.content_hash) {
     return {
