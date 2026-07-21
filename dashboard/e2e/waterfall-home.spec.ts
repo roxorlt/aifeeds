@@ -55,6 +55,24 @@ test("SSR HTML has at least 12 cards before JavaScript", async ({ browser }, tes
   }
 });
 
+test("classic and waterfall deep links keep drawers while exposing item canonicals", async ({ page }) => {
+  const classicResponse = await page.goto("/h/2607.00006?view=classic", { waitUntil: "load" });
+  expect(classicResponse?.headers()["x-aifeeds-home-ssr"]).toBe("classic");
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    "href",
+    "https://ai-feeds.com/i/paper/2607.00006",
+  );
+  await expect(page.getByRole("dialog")).toBeVisible();
+
+  const waterfallResponse = await page.goto("/t/fixture-01?view=waterfall", { waitUntil: "load" });
+  expect(waterfallResponse?.headers()["x-aifeeds-home-ssr"]).toBe("waterfall");
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    "href",
+    "https://ai-feeds.com/i/x/fixture-01",
+  );
+  await expect(page.getByRole("dialog")).toBeVisible();
+});
+
 test("hydration has no console errors and meets responsive CLS budgets", async ({ page }, testInfo) => {
   await setWaterfallCookie(page);
   const errors: string[] = [];
