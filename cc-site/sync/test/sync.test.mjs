@@ -16,6 +16,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { SyncClient } from '../client.mjs';
@@ -39,7 +40,7 @@ const H3 = createHash('sha256').update('<h1>three</h1>').digest('hex');
 test('CLI executes when its release directory is reached through a symlink', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cc-sync-cli-link-'));
   const live = path.join(root, 'live');
-  await symlink(path.resolve(import.meta.dirname, '..'), live);
+  await symlink(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), live);
 
   await assert.rejects(
     execFileAsync(process.execPath, [path.join(live, 'sync.mjs'), '--invalid']),
