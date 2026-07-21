@@ -1433,9 +1433,15 @@ npx wrangler deploy
 
 **Step 7: 搜索引擎提交**
 
-- 提交 `https://ai-feeds.cc/sitemap.xml` 到百度、搜狗、360、神马和 Bing。
+- 360 可提交 `https://ai-feeds.cc/sitemap.xml`；搜狗仅在账号获邀后提交同一根索引。
+- 百度普通收录不处理索引型 sitemap，不能提交现有根索引；先提交
+  `sitemap-static.xml` 与少量种子 URL，待稳定直连 URL-set 分片完成后逐片登记。
+- 神马标准 XML 每片上限 10,000 URL，且顶层索引需 `lastmod`；完成国内平台专用
+  sitemap 兼容层后再提交。
 - 首周只观察抓取与收录，不做批量主动推送。
 - Google/Bing 若已收录 `.com` 同主题页，保留两域 self-canonical，不相互 canonical。
+- 四家逐步操作、提交前门禁与异常处理见
+  [`docs/cc-search-engine-submission-runbook.md`](../cc-search-engine-submission-runbook.md)。
 
 ---
 

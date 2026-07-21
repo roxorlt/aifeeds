@@ -4087,6 +4087,10 @@ curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer 
 实现与逐项命令以 [`cc-site/sync/README.md`](../cc-site/sync/README.md) 为准。同步器从生产 API
 读取已经翻译的海外 AI 内容，排除国内来源，并通过 `is_ai` 与对华负面双 gate 后生成
 immutable generation、根 sitemap 与 shard；详情按钮是用户主动跳往 `.com`，没有自动跳转。
+百度、360、搜狗、神马的 sitemap 兼容差异、提交前门禁和逐步操作见
+[`docs/cc-search-engine-submission-runbook.md`](cc-search-engine-submission-runbook.md)。其中百度不处理
+现有索引型根 sitemap；神马要求每个标准 XML 不超过 10,000 URL 且索引子项带 `lastmod`，
+国内平台专用稳定 sitemap 完成前不得直接提交这两个平台。
 
 批准上线后从仓库根执行：
 
