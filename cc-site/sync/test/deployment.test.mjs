@@ -150,6 +150,19 @@ function strictSitemapPattern(nginx) {
   );
 }
 
+function strictDomesticSitemapPattern(nginx) {
+  const match = /location ~ "([^"]+)" \{\n\s+alias \/var\/lib\/aifeeds-cc-sync\/public\/current\/sitemap-cn-\$part\.xml;/.exec(
+    nginx,
+  );
+  assert.ok(match, 'strict domestic sitemap regex missing');
+  return new RegExp(
+    match[1]
+      .replaceAll('\\A', '^')
+      .replaceAll('\\z', '$')
+      .replaceAll(/\(\?<[^>]+>/g, '('),
+  );
+}
+
 test('nginx exposes only generated content roots without shadowing auth', async () => {
   const nginx = await read('nginx-content-mirror.conf');
 
@@ -169,6 +182,10 @@ test('nginx exposes only generated content roots without shadowing auth', async 
   assert.match(
     nginx,
     /location = \/sitemap\.xml \{[\s\S]*?alias \/var\/lib\/aifeeds-cc-sync\/public\/current\/sitemap\.xml;/,
+  );
+  assert.match(
+    nginx,
+    /location = \/sitemap-cn\.xml \{[\s\S]*?alias \/var\/lib\/aifeeds-cc-sync\/public\/current\/sitemap-cn\.xml;/,
   );
   assert.doesNotMatch(nginx, /location[^\n]*\/auth\/wechat/);
   assert.doesNotMatch(nginx, /location \^~ \/sitemaps\//);
@@ -218,6 +235,53 @@ test('nginx sitemap regex accepts only v4 generation UUIDs and allowlisted XML',
   ]) {
     assert.equal(pattern.test(requestPath), false, requestPath);
   }
+});
+
+test('nginx domestic sitemap regex accepts only four-digit positive stable leaves', async () => {
+  const nginx = await read('nginx-content-mirror.conf');
+  const pattern = strictDomesticSitemapPattern(nginx);
+
+  for (const requestPath of [
+    '/sitemap-cn-0001.xml',
+    '/sitemap-cn-0010.xml',
+    '/sitemap-cn-9999.xml',
+  ]) {
+    assert.equal(pattern.test(requestPath), true, requestPath);
+  }
+  for (const requestPath of [
+    '/sitemap-cn-0000.xml',
+    '/sitemap-cn-1.xml',
+    '/sitemap-cn-00001.xml',
+    '/sitemap-cn-abcd.xml',
+    '/sitemap-cn-0001.xml/extra',
+    '/SITEMAP-CN-0001.XML',
+  ]) {
+    assert.equal(pattern.test(requestPath), false, requestPath);
+  }
+  assert.match(
+    nginx,
+    /location ~ "\\A\/sitemap-cn\(\?:-\[\^\/\]\*\)\?\\\.xml\\z" \{\n\s+return 404;/,
+  );
+});
+
+test('remote installer validates and byte-smokes the domestic index and first leaf', async () => {
+  const installer = await read('install-remote.sh');
+  assert.match(
+    installer,
+    /test -r "\$CURRENT\/sitemap-cn\.xml"/,
+  );
+  assert.match(
+    installer,
+    /test -r "\$CURRENT\/sitemap-cn-0001\.xml"/,
+  );
+  assert.match(
+    installer,
+    /smoke_exact domestic-sitemap-index[\s\S]*https:\/\/ai-feeds\.cc\/sitemap-cn\.xml[\s\S]*"\$CURRENT\/sitemap-cn\.xml"/,
+  );
+  assert.match(
+    installer,
+    /smoke_exact domestic-sitemap-leaf[\s\S]*https:\/\/ai-feeds\.cc\/sitemap-cn-0001\.xml[\s\S]*"\$CURRENT\/sitemap-cn-0001\.xml"/,
+  );
 });
 
 test('vhost editor inserts one managed include into only the HTTPS site block', async () => {
@@ -3572,6 +3636,8 @@ if [[ "$*" == 'start aifeeds-cc-sync.service' ]]; then
   state="$AIFEEDS_DEPLOY_ROOT/var/lib/aifeeds-cc-sync/public"
   mkdir -p "$state/generations/$generation/sitemaps" "$state/generations/$generation/ai-news"
   printf '<urlset/>\n' > "$state/generations/$generation/sitemaps/archive.xml"
+  printf '<urlset><url><loc>https://ai-feeds.cc/ai-news/</loc></url></urlset>\n' > "$state/generations/$generation/sitemap-cn-0001.xml"
+  printf '<sitemapindex><sitemap><loc>https://ai-feeds.cc/sitemap-cn-0001.xml</loc><lastmod>2026-07-21T00:00:00.000Z</lastmod></sitemap></sitemapindex>\n' > "$state/generations/$generation/sitemap-cn.xml"
   printf '<html></html>\n' > "$state/generations/$generation/ai-news/index.html"
   printf '<sitemapindex><sitemap><loc>https://ai-feeds.cc/sitemaps/%s/archive.xml</loc></sitemap></sitemapindex>\n' "$generation" > "$state/generations/$generation/sitemap.xml"
   rm -f "$state/current"
@@ -3627,6 +3693,11 @@ state="$AIFEEDS_DEPLOY_ROOT/var/lib/aifeeds-cc-sync/public"
 case "$url" in
   https://ai-feeds.cc/sitemap.xml)
     source="$state/current/sitemap.xml" ;;
+  https://ai-feeds.cc/sitemap-cn.xml)
+    source="$state/current/sitemap-cn.xml" ;;
+  https://ai-feeds.cc/sitemap-cn-[0-9][0-9][0-9][0-9].xml)
+    relative=\${url#https://ai-feeds.cc/}
+    source="$state/current/$relative" ;;
   https://ai-feeds.cc/sitemaps/*)
     relative=\${url#https://ai-feeds.cc/sitemaps/}
     generation=\${relative%%/*}
@@ -3966,13 +4037,21 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
   assert.ok(position('nginx <-s> <reload>') < position('curl'));
   assert.ok(position('curl') < position('systemctl <enable> <--now> <aifeeds-cc-sync.timer>'));
   const curlLines = commandLog.split('\n').filter((line) => line.startsWith('curl'));
-  assert.equal(curlLines.length, 3, commandLog);
+  assert.equal(curlLines.length, 5, commandLog);
   for (const line of curlLines) {
     assert.match(line, /<--resolve> <ai-feeds\.cc:443:127\.0\.0\.1>/);
     assert.match(line, /<--write-out> <%\{http_code\}>/);
   }
   assert.equal(
     curlLines.some((line) => line.includes('<https://ai-feeds.cc/sitemap.xml>')),
+    true,
+  );
+  assert.equal(
+    curlLines.some((line) => line.includes('<https://ai-feeds.cc/sitemap-cn.xml>')),
+    true,
+  );
+  assert.equal(
+    curlLines.some((line) => line.includes('<https://ai-feeds.cc/sitemap-cn-0001.xml>')),
     true,
   );
   assert.equal(
@@ -3990,6 +4069,8 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
     /deployment-security\.mjs> <gc-releases> <[^>]+\/aifeeds-cc-sync-releases> <[^>]+\/aifeeds-cc-sync> <3> <[0-9]+>/,
   );
   assert.match(commandLog, /current\/sitemaps\/archive\.xml/);
+  assert.match(commandLog, /current\/sitemap-cn\.xml/);
+  assert.match(commandLog, /current\/sitemap-cn-0001\.xml/);
   assert.match(
     commandLog,
     /generations\/123e4567-e89b-42d3-a456-426614174000\/sitemaps\/archive\.xml/,
@@ -5473,6 +5554,14 @@ remoteHarnessTest('local HTTPS smoke probes require exact 200 responses and depl
         AIFEEDS_CURL_CORRUPT_URL:
           'https://ai-feeds.cc/sitemaps/123e4567-e89b-42d3-a456-426614174000/archive.xml',
       },
+    },
+    {
+      name: 'wrong domestic sitemap index bytes',
+      env: { AIFEEDS_CURL_CORRUPT_URL: 'https://ai-feeds.cc/sitemap-cn.xml' },
+    },
+    {
+      name: 'wrong domestic sitemap leaf bytes',
+      env: { AIFEEDS_CURL_CORRUPT_URL: 'https://ai-feeds.cc/sitemap-cn-0001.xml' },
     },
     {
       name: 'wrong ai-news bytes',

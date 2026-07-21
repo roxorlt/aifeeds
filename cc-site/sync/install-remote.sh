@@ -1068,6 +1068,8 @@ CURRENT="$STATE_DIR/public/current"
 "$RUNUSER" -u "$NGINX_USER" -- test -x "$STATE_DIR"
 "$RUNUSER" -u "$NGINX_USER" -- test -x "$CURRENT"
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap.xml"
+"$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap-cn.xml"
+"$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap-cn-0001.xml"
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemaps/archive.xml"
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/ai-news/index.html"
 
@@ -1125,6 +1127,12 @@ smoke_exact() {
 smoke_exact root-sitemap \
   https://ai-feeds.cc/sitemap.xml \
   "$CURRENT/sitemap.xml" "$SMOKE_DIR/root-sitemap.xml"
+smoke_exact domestic-sitemap-index \
+  https://ai-feeds.cc/sitemap-cn.xml \
+  "$CURRENT/sitemap-cn.xml" "$SMOKE_DIR/domestic-sitemap-index.xml"
+smoke_exact domestic-sitemap-leaf \
+  https://ai-feeds.cc/sitemap-cn-0001.xml \
+  "$CURRENT/sitemap-cn-0001.xml" "$SMOKE_DIR/domestic-sitemap-leaf.xml"
 smoke_exact generation-sitemap \
   "https://ai-feeds.cc/sitemaps/$generation/$sitemap" \
   "$STATE_DIR/public/generations/$generation/sitemaps/$sitemap" \
