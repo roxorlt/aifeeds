@@ -3629,12 +3629,14 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
   - **2026-06-24 推送跨天去重 `c0e653b`**（`selection.ts` 两个新函数）：① **订阅邮件 + Codex**（均读 `node-run` 建的 pool）选品后过 `excludeAlreadyPushed` —— 剔除「今日 BJT 0 点之前 5 天内」已进 `digest_pool`（= 已推送）的 item，确保同一订阅者每天不重复前几天推过的同一条（修高分新闻在 3 天选品窗内被天天选中重推，如「MiniMax 语音 2.8」6/22–6/24 连推三天）。账本只 node-run 写，严格 `< 今日 0 点`（同日 8/12/17 三档**不**互相去重，各档用户不重叠）。② 对外 **`daily-api`** 单独用 `excludeStalePushes`（**宽松**）：允许与最近 3 个推送档次重复（拉取方可能要近期热点），只滤第 4 档及更早的陈旧内容；**档次按 `slot_key` 计数，不能用 `generated_at`**——一次 run 给同源写 normal+curated 两行、`generated_at` 差几秒会把一次推送数成两档，`slot_key`（YYYY-MM-DD-HH，一次 run 所有行共享）才是真实档次；daily-api 无状态、自身不写账本
   - 2026-06-21 ClawHub（龙虾技能）退出订阅日报：`node-run.ts` pool 构建 + `deliver.ts` 投递都 `if (source==='clawhub') continue`；前端订阅页（`Subscription.tsx`）也去掉龙虾技能勾选项。**仅订阅日报下架** —— 首页「龙虾技能」频道 + 对外 `/api/digest/daily`（仍含 clawhub）都不受影响（DigestSource 类型保留 clawhub）
 - `digest-deliver-workflow`：per-subscription 选品（无 LLM）→ 渲染 → Resend 投递 → 记账 + 重算 next_send_at
-- 节点触发：scheduled handler 按 `utc.getUTCHours()` 在 UTC 0/4/9（BJT 8/12/17）触发 node-run；prod 复用现有 `*/5` cron tick 内判断节点时刻；**staging cron 全关（手动触发，同现有约定）**
+- 节点触发：prod 复用现有 `*/5` cron。v1 在 UTC 0/4/9（BJT 8/12/17）触发；打开 `DAILY_STAGED_PUSH_ENABLED=1` 后，额外在 UTC 22:30（次日 BJT 06:30）和 23:50（次日 BJT 07:50）触发分批任务，UTC 00:00 的 08:00 节点改为 papers+finalize；**staging cron 全关（手动触发，同现有约定）**
 
 ### Secrets（加到 `.secrets/aifeeds-{prod,staging}.env`）
 
 - `DIGEST_EMAIL_HMAC`（32B hex）：回流 token + 编辑令牌（`edit:` 前缀）HMAC 签名
 - `NEWS_CODEX_PUSH`（flag，prod 已设 `=1`）：是否把「行业新闻」板块推进 Codex（`codex-push.ts pushSources`）。**2026-06-22 Codex 下游适配完成后已开启**（`wrangler secret put`，秒生效无需重部署，已记于 `.secrets/aifeeds-prod.env`）—— 自此 prod `daily-codex-push` payload `source_order = ['news','ph','gh','hf-paper']`，8 点节点把行业新闻头条一并推 Codex。回滚：删该 secret 或设非 `1`
+- `DAILY_STAGED_PUSH_ENABLED`（v2 灰度 flag，默认关）：`1` 时启用 06:30/07:50/08:00 分批快照与 v2 payload；关闭时自动保留旧 08:00 v1 全量路径。必须先部署兼容 v2 的 HK ingest，再开 prod flag
+- `DAILY_PUSH_STAGING_ENDPOINT`（staging 专用测试地址）：staging/dev 的 v2 推送只读取此变量，绝不读取 `DAILY_PUSH_ENDPOINT`、也不回落 prod 默认地址；不得设置成 `https://ai-feeds.cc/aifeeds/api/daily/ingest`
 - `RESEND_WEBHOOK_SECRET`（Svix）：Resend webhook 签名校验
 - `INDEXNOW_KEY`（SEO IndexNow 快速收录 key，**prod / staging 各自值**，均存 `.secrets/aifeeds-{prod,staging}.env`）：未配置时 `pingIndexNow` 静默跳过；同时用于 `/<INDEXNOW_KEY>.txt` 域名归属校验文件。每日静态日报页 Phase 4 用，详见下方「每日静态日报页 Phase 4」
 - `DAILY_PAGE_ENABLED`（flag，prod 已设 `=1`；**staging 未设 = 关**）：早 8 点自动生成 SEO 静态日报页的总开关（node-run Phase 4）。手动 `mode=daily-page` 不受此限。同上「每日静态日报页 Phase 4」
@@ -3655,15 +3657,24 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
 - [ ] 节点 cron prod 确认（BE）：UTC 0/4/9 是否如期触发 node-run
 - [ ] 真人端到端验收：订阅 → welcome → 点链接回流登录 + 落地抽屉 → 退订
 
-### 日报推送 Codex 渲染机（daily/ingest，**2026-06-07 上线**）
+### 日报推送 Codex 渲染机（daily/ingest；v1 已上线，v2 分批预生产待跨端灰度）
 
 > 早 8 点 `digest-node-run-workflow` 算完当天榜单后，并行把日报内容推给 Codex 渲染机做下游加工（日报图 / ZIP / 微信+小红书文案）。Codex 工作台：`https://ai-feeds.cc/aifeeds/`。设计：`docs/plans/2026-06-05-daily-codex-push-design.md`。
 
-- **触发**：`DigestNodeRunWorkflow` Phase 3，仅 `slotHourBjt===8` **且** 总开关 `DAILY_PUSH_ENABLED==='1'`。放在 deliver spawn 之后，非阻塞（`pushDailyToCodex` 永不抛错，失败 PushDeer），不影响邮件投递。
-- **内容**：当天 8 点 `digest_pool` 快照（normal 档，ph/gh/hf-paper 三源），复用 `digest/render.ts` `renderItem` 出完整条目：title=`title_zh`（论文原始标题译文，对齐前端）/ summary / cover+media（R2 链接）/ url / deep_link。`render_key` 内容指纹幂等。
+- **v1 回滚路径**：`DAILY_STAGED_PUSH_ENABLED` 未开时，`slotHourBjt===8` 且 `DAILY_PUSH_ENABLED==='1'` 继续全量构造旧 payload；手动 `mode=daily-codex-push` 永远保留 v1 语义。内容与原实现一致：8 点 normal 池、`renderItem` 完整条目、内容指纹 `render_key`。
+- **v2 时点与批次**（仍复用 `*/5`，`wrangler.toml` 无需新增 cron）：
+  - BJT 06:30 / UTC 前一日 22:30：`foundation`，只重建并推 `ph/gh`
+  - BJT 07:50 / UTC 前一日 23:50：`editorial`，只重建并推 `news/x`
+  - BJT 08:00 / UTC 00:00：只重建 `hf-paper` + `_subject`，依次推 `papers`、`finalize`；正常路径不重算前两批
+- **缺批恢复**：08:00 读取 `digest_pool` 的 `_codex_stage_<stage>/meta` 状态。状态不存在才补建对应早批；有 revision/hash 但无 `pushed_at` 时只补推、不重算。stage HTTP/状态落库失败会先走 Workflow step retry + PushDeer；08:00 邮件和 SEO step 完成后再令 Workflow 保持失败，避免下游故障遮蔽原日报业务。
+- **v2 契约**：`protocol_version=2`，含 `batch_id/stage/revision/content_hash/expected_stages/final_manifest`。每批 `digest.meta.source_order` 表示本批源，另固定带 `final_source_order=['news','x','ph','gh','hf-paper']`；每个 item 在早批即带由 `source+item_id` 派生的稳定 `segment_id` 和批内临时 `card_index`。finalize 按 `item_id` 重绑最终 `card_index`，`final_manifest.section_order` 是 `final_source_order` 过滤空栏目后的有序子集。
+- **hash / revision**：稳定 JSON（不含 `generated_at`）算完整 `sha256:`；同内容重放复用 revision/hash/render_key，内容变化 revision +1 并清除旧 `pushed_at`。finalize 会重新计算三批当前内容 hash，与已锁定 state 不一致则拒绝，防止 final manifest 引用旧批却夹带新条目。
+- **final manifest**：精确带三批 `revision/content_hash`，以及每条 `segment_id/item_id/source/card_index/stage/revision` 和自身 `manifest_hash`。相同 stage/revision/hash 的接收幂等、冲突 409 由 HK v2 ingest 状态机执行。
 - **端点**：`POST https://ai-feeds.cc/aifeeds/api/daily/ingest`，`Bearer X_CARD_SHARED_TOKEN`（复用 X-card 那个，可被 `DAILY_PUSH_ENDPOINT` env 覆盖）。
-- **总开关** `DAILY_PUSH_ENABLED`：prod = `1`（已开）；staging/dev 不设。**另有硬闸**：`pushDailyToCodex` 只在 `API_BASE` 含 `//api.ai-feeds.com`（prod）才真推，staging/dev 一律返 `non_prod_blocked`（2026-06-07 staging 假数据污染 Codex 事故后加，staging 验证只能 dry）。
-- **手动触发 / 重推**：`POST /api/enrich/run?mode=daily-codex-push[&date=YYYY-MM-DD][&dry=1]`（`Bearer INGEST_TOKEN`）。`dry=1` 只返 payload + `daily_push_enabled` 诊断、不真推；`date` 重推指定日的池（默认今天）。
+- **总开关**：`DAILY_PUSH_ENABLED=1` 控制真实 push；`DAILY_STAGED_PUSH_ENABLED=1` 仅控制调度/协议选择。v1 仍有 prod-only 硬闸。v2 在 prod 使用 `DAILY_PUSH_ENDPOINT`/默认地址；staging 只有显式设置 `DAILY_PUSH_STAGING_ENDPOINT` 才能真推测试 ingest，否则返回 `non_prod_or_staging_endpoint_missing`。
+- **手动 v1 兼容**：`POST /api/enrich/run?mode=daily-codex-push[&date=YYYY-MM-DD][&dry=1]`（`Bearer INGEST_TOKEN`）。
+- **手动 v2 stage 重放**：`POST /api/enrich/run?mode=daily-codex-stage&stage=foundation|editorial|papers|finalize[&date=YYYY-MM-DD][&dry=1][&rebuild=1]`。默认复用已锁定池；`rebuild=1` 只允许当天前三批，禁止 finalize/历史日重算；`dry=1` 不写 revision、不 POST。建议 staging 依次重放 foundation → editorial → papers → finalize。
+- **灰度顺序**：先部署 HK v2 parser/state machine 并配置 staging test endpoint → staging 四阶段重放 → 部署本 CF 代码（flag 仍关）→ prod 手动 dry/四阶段 → 开 `DAILY_STAGED_PUSH_ENABLED=1`。回滚只需关 staged flag，下一次 08:00 恢复 v1；勿在 HK 尚未兼容时开 flag。
 - ⚠️ **同一天勿连推多条不同 render_key**：Codex 按日期覆盖图、文案按 render_key，多条会图文错位（2026-06-07 事故）。Codex 侧已加串行 + 最新 render_key 胜出保护，但本侧也应只推一条干净 payload。
 
 ### 每日静态日报页 Phase 4（daily static page，**2026-07-06 上线，PR #161**）

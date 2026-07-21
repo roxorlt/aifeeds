@@ -9,7 +9,11 @@ vi.mock('./llm-curate', () => ({
   curateSource: vi.fn(),
 }));
 
-import { rebuildDigestPoolSnapshot, rebuildDigestPoolSource } from './pool-rebuild';
+import {
+  rebuildDigestPoolSnapshot,
+  rebuildDigestPoolSource,
+  rebuildDigestPoolStage,
+} from './pool-rebuild';
 import { selectTopForSource, selectNewsByScoreWithAudit, excludeAlreadyPushed } from './selection';
 import { curateSource } from './llm-curate';
 
@@ -126,5 +130,53 @@ describe('digest pool safe rescore', () => {
 
     expect(result.candidates).toBe(2);
     expect(pools.get('2026-07-14-08|gh|normal')?.ids).toEqual(['gh-1', 'gh-2']);
+  });
+
+  test('06:30 foundation rebuild touches PH/GH only and does not generate a subject', async () => {
+    const { env, pools } = makeEnv();
+    const result = await rebuildDigestPoolStage(env, {
+      date: '2026-07-21',
+      stage: 'foundation',
+    });
+
+    expect(result.sources.map((row) => row.source)).toEqual(['ph', 'gh']);
+    expect(selectTopForSource).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(selectTopForSource).mock.calls.map((call) => call[1])).toEqual(['ph', 'gh']);
+    expect(selectNewsByScoreWithAudit).not.toHaveBeenCalled();
+    expect(pools.has('2026-07-21-08|_subject|meta')).toBe(false);
+  });
+
+  test('07:50 editorial rebuild touches news/X only', async () => {
+    const { env } = makeEnv();
+    const result = await rebuildDigestPoolStage(env, {
+      date: '2026-07-21',
+      stage: 'editorial',
+    });
+
+    expect(result.sources.map((row) => row.source)).toEqual(['news', 'x']);
+    expect(selectNewsByScoreWithAudit).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(selectTopForSource).mock.calls.map((call) => call[1])).toEqual(['x']);
+  });
+
+  test('08:00 papers rebuild touches hf-paper plus subject and does not rerun earlier selectors', async () => {
+    const { env, pools } = makeEnv();
+    const result = await rebuildDigestPoolStage(env, {
+      date: '2026-07-21',
+      stage: 'papers',
+    });
+
+    expect(result.sources.map((row) => row.source)).toEqual(['hf-paper']);
+    expect(vi.mocked(selectTopForSource).mock.calls.map((call) => call[1])).toEqual(['hf-paper']);
+    expect(selectNewsByScoreWithAudit).not.toHaveBeenCalled();
+    expect(pools.get('2026-07-21-08|_subject|meta')?.meta?.subject).toBeTruthy();
+  });
+
+  test('stage snapshots remain isolated by BJT date', async () => {
+    const { env, pools } = makeEnv();
+    await rebuildDigestPoolStage(env, { date: '2026-07-21', stage: 'foundation' });
+    await rebuildDigestPoolStage(env, { date: '2026-07-22', stage: 'foundation' });
+
+    expect(pools.has('2026-07-21-08|ph|normal')).toBe(true);
+    expect(pools.has('2026-07-22-08|ph|normal')).toBe(true);
   });
 });

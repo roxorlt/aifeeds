@@ -19,6 +19,14 @@ import { slotKey, bjtDateStr } from './lib';
 import { callDeepSeekJson, DEEPSEEK_FLASH } from '../hf-paper/llm';
 import { buildDigestSubjectFallback, digestSubjectTitleFromRow } from './subject';
 
+export type DigestPoolStage = 'foundation' | 'editorial' | 'papers';
+
+export const DIGEST_POOL_STAGE_SOURCES: Record<DigestPoolStage, readonly DigestSource[]> = {
+  foundation: ['ph', 'gh'],
+  editorial: ['news', 'x'],
+  papers: ['hf-paper'],
+};
+
 async function upsertPool(
   env: Env,
   sk: string,
@@ -203,6 +211,41 @@ export interface DigestPoolRebuildResult {
   subject: string;
 }
 
+export interface DigestPoolStageRebuildResult {
+  slotKey: string;
+  date: string;
+  slotHourBjt: 8;
+  stage: DigestPoolStage;
+  sources: DigestPoolSourceResult[];
+  subject: string | null;
+}
+
+export async function rebuildDigestPoolSources(
+  env: Env,
+  sk: string,
+  sources: readonly DigestSource[],
+): Promise<DigestPoolSourceResult[]> {
+  const results: DigestPoolSourceResult[] = [];
+  for (const source of sources) {
+    if (source === 'clawhub') continue;
+    results.push(await rebuildDigestPoolSource(env, sk, source));
+  }
+  return results;
+}
+
+// 分批日报固定写入当天 08:00 的同一个 digest_pool 槽。papers 是正式 08:00
+// 节点，重建论文后才生成 subject；foundation/editorial 绝不碰其它批次。
+export async function rebuildDigestPoolStage(
+  env: Env,
+  opts: { date?: string; stage: DigestPoolStage },
+): Promise<DigestPoolStageRebuildResult> {
+  const date = opts.date || bjtDateStr();
+  const sk = `${date}-08`;
+  const sources = await rebuildDigestPoolSources(env, sk, DIGEST_POOL_STAGE_SOURCES[opts.stage]);
+  const subject = opts.stage === 'papers' ? await rebuildDigestPoolSubject(env, sk) : null;
+  return { slotKey: sk, date, slotHourBjt: 8, stage: opts.stage, sources, subject };
+}
+
 // 只重建 digest_pool；明确不创建 deliver workflow、不发送邮件、不推送 HK。
 export async function rebuildDigestPoolSnapshot(
   env: Env,
@@ -213,11 +256,7 @@ export async function rebuildDigestPoolSnapshot(
   const sk = opts.date
     ? `${date}-${String(slotHourBjt).padStart(2, '0')}`
     : slotKey(slotHourBjt);
-  const sources: DigestPoolSourceResult[] = [];
-  for (const source of DIGEST_SOURCE_ORDER) {
-    if (source === 'clawhub') continue;
-    sources.push(await rebuildDigestPoolSource(env, sk, source));
-  }
+  const sources = await rebuildDigestPoolSources(env, sk, DIGEST_SOURCE_ORDER);
   const subject = await rebuildDigestPoolSubject(env, sk);
   return { slotKey: sk, date, slotHourBjt, sources, subject };
 }

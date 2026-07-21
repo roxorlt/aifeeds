@@ -112,9 +112,16 @@ import { idHashOf } from './feeds/extract';
 import { runPhR2Migrate, countPhR2Pending } from './ph-r2';
 import { runXMediaR2Migrate, countXMediaR2Pending } from './x-media-r2';
 import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXCardRender, addManualXCardRender } from './x-card-render';
-import { buildDailyCodexPayload, pushDailyToCodex } from './digest/codex-push';
+import {
+  buildDailyCodexPayload,
+  buildStagedDailyCodexPayload,
+  pushDailyStageToCodex,
+  pushDailyToCodex,
+  type DailyCodexStage,
+} from './digest/codex-push';
 import { drainDailyVideoGc, handleDailyVideoUpload } from './digest/daily-video';
-import { rebuildDigestPoolSnapshot } from './digest/pool-rebuild';
+import { rebuildDigestPoolSnapshot, rebuildDigestPoolStage } from './digest/pool-rebuild';
+import { routeDigestCronWorkflows } from './digest/node-run';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
@@ -318,6 +325,8 @@ export interface Env {
   X_CARD_RENDER_ENDPOINT?: string;        // Codex 渲染端点(默认 http://82.156.0.68/aifeeds/api/render/x-card)
   DAILY_PUSH_ENDPOINT?: string;           // Codex 日报 ingest 端点(默认 https://ai-feeds.cc/aifeeds/api/daily/ingest)
   DAILY_PUSH_ENABLED?: string;            // 早8点自动推 Codex 总开关:'1'=开;不设/其他=关(手动 mode 不受此限)
+  DAILY_STAGED_PUSH_ENABLED?: string;     // v2 分批预生产开关:'1'=06:30/07:50/08:00 stages;关闭时保留 v1 早8点全量
+  DAILY_PUSH_STAGING_ENDPOINT?: string;   // staging 专用测试 ingest；非 prod v2 只能推该端点，禁止回落生产地址
   NEWS_CODEX_PUSH?: string;               // 行业新闻板块是否推进 Codex:'1'=开;不设/其他=关(等下游 Codex 适配好 news 板块再开,翻 flag 即生效)
   DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
   CC_MIRROR_ENABLED?: string;             // '1'=启用 .cc 内容镜像生成/同步链；缺省关闭
@@ -1881,15 +1890,18 @@ export default {
       );
     }
 
-    // digest 推送节点:UTC 0/4/9 (= BJT 8/12/17),minute=0。独立触发 node-run workflow
-    // (不占 X mode rotation);instance id 唯一 = 同节点同天幂等防重复 create。
-    const digestSlotBjt =
-      minute === 0 ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour] : undefined;
-    if (digestSlotBjt !== undefined) {
+    // digest 节点复用 */5 cron。v2 开启后新增 BJT 06:30 foundation、07:50
+    // editorial，08:00 原节点转为 papers+finalize；12/17 邮件节点保持不变。
+    // route 返回 date+stage 唯一 id，避免 UTC 跨日把早批写进前一天。
+    const digestActions = routeDigestCronWorkflows(
+      event.scheduledTime,
+      env.DAILY_STAGED_PUSH_ENABLED === '1',
+    );
+    for (const action of digestActions) {
       ctx.waitUntil(
         env.DIGEST_NODE_RUN_WORKFLOW.create({
-          id: `digest-node-${slotKey(digestSlotBjt)}`,
-          params: { slotHourBjt: digestSlotBjt },
+          id: action.id,
+          params: action.params,
         })
           .then(() => undefined)
           .catch((e) => console.error('[digest] node-run create fail', e)),
@@ -4879,6 +4891,49 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
     }
     const result = await pushDailyToCodex(env, 8, dateParam);
     return jsonResponse(result, result.ok ? 200 : 502, request, env);
+  }
+  if (mode === 'daily-codex-stage') {
+    // v2 分批手动重放：默认消费已锁定的 08:00 pool；rebuild=1 只允许当天且只
+    // 允许 foundation/editorial/papers。未传 stage 的旧 daily-codex-push 仍是 v1。
+    const rawStage = url.searchParams.get('stage') || '';
+    const validStages: DailyCodexStage[] = ['foundation', 'editorial', 'papers', 'finalize'];
+    if (!validStages.includes(rawStage as DailyCodexStage)) {
+      return jsonResponse({ error: 'bad stage, expect foundation|editorial|papers|finalize' }, 400, request, env);
+    }
+    const stage = rawStage as DailyCodexStage;
+    const date = url.searchParams.get('date') || bjtDateStr();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return jsonResponse({ error: 'bad date, expect YYYY-MM-DD' }, 400, request, env);
+    }
+    const rebuild = url.searchParams.get('rebuild') === '1';
+    if (rebuild && stage === 'finalize') {
+      return jsonResponse({ error: 'finalize cannot rebuild source pools' }, 400, request, env);
+    }
+    if (rebuild && date !== bjtDateStr()) {
+      return jsonResponse({ error: 'stage rebuild only supports current BJT date' }, 400, request, env);
+    }
+    const rebuilt = rebuild
+      ? await rebuildDigestPoolStage(env, { date, stage: stage as Exclude<DailyCodexStage, 'finalize'> })
+      : null;
+    if (url.searchParams.get('dry') === '1') {
+      try {
+        const payload = await buildStagedDailyCodexPayload(env, stage, { date });
+        const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
+        return jsonResponse({
+          ok: true,
+          dry: true,
+          daily_push_enabled: env.DAILY_PUSH_ENABLED === '1',
+          daily_staged_push_enabled: env.DAILY_STAGED_PUSH_ENABLED === '1',
+          total_items: total,
+          rebuilt,
+          payload,
+        }, 200, request, env);
+      } catch (error) {
+        return jsonResponse({ ok: false, dry: true, error: String(error).slice(0, 200), rebuilt }, 409, request, env);
+      }
+    }
+    const result = await pushDailyStageToCodex(env, stage, date);
+    return jsonResponse({ ...result, rebuilt }, result.ok ? 200 : 502, request, env);
   }
   if (mode === 'daily-page') {
     // SEO 静态日报页生成(正常由早 8 点 workflow Phase 4 自动跑;此 mode 供测试/重建/回填手动触发)。

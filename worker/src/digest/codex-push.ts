@@ -11,6 +11,9 @@ import { slotKey, bjtDateStr, getBases } from './lib';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS } from './templates';
 import { pushDeerAlert } from '../notifier';
+import {
+  DIGEST_POOL_STAGE_SOURCES,
+} from './pool-rebuild';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
@@ -27,6 +30,30 @@ async function sha256Hex(s: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .filter((key) => object[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`)
+    .join(',')}}`;
+}
+
+function generatedAtBjt(): string {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' (BJT)';
+}
+
+function stagedGeneratedAtBjt(date: string, stage: DailyCodexStage): string {
+  const time = stage === 'foundation'
+    ? '06:30:00'
+    : stage === 'editorial'
+      ? '07:50:00'
+      : '08:00:00';
+  return `${date} ${time} (BJT)`;
+}
+
 // Codex item:cover 顶层 + media/logo 进 raw(满足 Codex「多图从 raw.media[] 收集」规则)
 interface CodexItem {
   rank: number;
@@ -39,6 +66,8 @@ interface CodexItem {
   author: string;
   cover: string | null;
   item_id: string;
+  segment_id?: string;
+  card_index?: number;
   duration_sec?: number; // 播客单集时长(秒),仅 podcast 行业新闻条目有
   guests?: string[]; // 播客本集嘉宾名,仅 podcast 且抽到时有
   intro?: string; // 内容简介:图文→excerpt_zh / 播客→shownotes_zh
@@ -98,6 +127,7 @@ export interface DailyCodexPayload {
       generated_at: string;
       density: 'normal';
       source_order: DigestSource[];
+      final_source_order?: DigestSource[];
       source_labels: Record<string, string>;
     };
     sections: {
@@ -145,8 +175,7 @@ export async function buildDailyCodexPayload(
 
   // 内容指纹幂等:item_ids + title 变了才换 render_key(Codex 命中同 key 不重复生成)
   const hash8 = (await sha256Hex(hashParts.join('\n'))).slice(0, 8);
-  const generatedAt =
-    new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' (BJT)';
+  const generatedAt = generatedAtBjt();
 
   return {
     render_key: `daily-${date}-normal-${hash8}`,
@@ -166,6 +195,275 @@ export async function buildDailyCodexPayload(
   };
 }
 
+export const DAILY_CODEX_EXPECTED_STAGES = ['foundation', 'editorial', 'papers'] as const;
+export type DailyCodexInputStage = (typeof DAILY_CODEX_EXPECTED_STAGES)[number];
+export type DailyCodexStage = DailyCodexInputStage | 'finalize';
+
+const FINAL_SECTION_ORDER: readonly DigestSource[] = ['news', 'x', 'ph', 'gh', 'hf-paper'];
+
+function sourcesForStage(stage: DailyCodexStage): readonly DigestSource[] {
+  return stage === 'finalize' ? FINAL_SECTION_ORDER : DIGEST_POOL_STAGE_SOURCES[stage];
+}
+
+function inputStageForSource(source: DigestSource): DailyCodexInputStage {
+  if (source === 'ph' || source === 'gh') return 'foundation';
+  if (source === 'news' || source === 'x') return 'editorial';
+  if (source === 'hf-paper') return 'papers';
+  throw new Error(`unsupported_staged_source:${source}`);
+}
+
+export interface DailyStageState {
+  stage: DailyCodexStage;
+  revision: number;
+  content_hash: string;
+  pushed_at?: number;
+}
+
+export interface DailyStageRevisionRef {
+  revision: number;
+  content_hash: string;
+}
+
+export interface DailyFinalManifestItem {
+  segment_id: string;
+  item_id: string;
+  source: DigestSource;
+  card_index: number;
+  stage: DailyCodexInputStage;
+  revision: number;
+}
+
+export interface DailyFinalManifest {
+  stage_revisions: Record<DailyCodexInputStage, DailyStageRevisionRef>;
+  section_order: DigestSource[];
+  items: DailyFinalManifestItem[];
+  manifest_hash: string;
+}
+
+export interface StagedDailyCodexPayload {
+  protocol_version: 2;
+  date: string;
+  density: 'normal';
+  batch_id: string;
+  stage: DailyCodexStage;
+  revision: number;
+  content_hash: string;
+  render_key: string;
+  expected_stages: DailyCodexInputStage[];
+  title: string;
+  source: 'cloudflare-daily-staged';
+  digest: DailyCodexPayload['digest'];
+  final_manifest: DailyFinalManifest | null;
+}
+
+function stageStateSource(stage: DailyCodexStage): string {
+  return `_codex_stage_${stage}`;
+}
+
+function parseStageState(raw: string | null | undefined, stage: DailyCodexStage): DailyStageState | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<DailyStageState>;
+    if (
+      value.stage !== stage ||
+      !Number.isInteger(value.revision) ||
+      Number(value.revision) < 1 ||
+      typeof value.content_hash !== 'string' ||
+      !/^sha256:[0-9a-f]{64}$/.test(value.content_hash)
+    ) return null;
+    return {
+      stage,
+      revision: Number(value.revision),
+      content_hash: value.content_hash,
+      ...(typeof value.pushed_at === 'number' ? { pushed_at: value.pushed_at } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getDailyStageState(
+  env: Env,
+  date: string,
+  stage: DailyCodexStage,
+): Promise<DailyStageState | null> {
+  const row = await env.DB.prepare(
+    `SELECT items_meta FROM digest_pool WHERE slot_key = ? AND source = ? AND density = ?`,
+  )
+    .bind(`${date}-08`, stageStateSource(stage), 'meta')
+    .first<{ items_meta: string | null }>();
+  return parseStageState(row?.items_meta, stage);
+}
+
+async function persistDailyStageState(env: Env, date: string, state: DailyStageState): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO digest_pool (slot_key, source, density, item_ids, items_meta, generated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(slot_key, source, density) DO UPDATE SET
+       item_ids = excluded.item_ids, items_meta = excluded.items_meta, generated_at = excluded.generated_at`,
+  )
+    .bind(
+      `${date}-08`,
+      stageStateSource(state.stage),
+      'meta',
+      '[]',
+      JSON.stringify(state),
+      Date.now(),
+    )
+    .run();
+}
+
+async function markDailyStagePushed(
+  env: Env,
+  date: string,
+  stage: DailyCodexStage,
+  revision: number,
+  contentHash: string,
+): Promise<void> {
+  const current = await getDailyStageState(env, date, stage);
+  if (!current || current.revision !== revision || current.content_hash !== contentHash) {
+    throw new Error(`stage_state_changed_during_push:${stage}`);
+  }
+  await persistDailyStageState(env, date, { ...current, pushed_at: Date.now() });
+}
+
+async function buildCodexSections(
+  env: Env,
+  sk: string,
+  sources: readonly DigestSource[],
+): Promise<DailyCodexPayload['digest']['sections']['normal']> {
+  const { apiBase } = getBases(env);
+  const sections: DailyCodexPayload['digest']['sections']['normal'] = [];
+  let stageCardIndex = 0;
+  for (const source of sources) {
+    const pool = await env.DB.prepare(
+      `SELECT item_ids FROM digest_pool WHERE slot_key = ? AND source = ? AND density = 'normal'`,
+    )
+      .bind(sk, source)
+      .first<{ item_ids: string }>();
+    const ids = safeIds(pool?.item_ids ?? null);
+    if (!ids.length) continue;
+    const rows = await fetchRows(env, ids);
+    const items: CodexItem[] = [];
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index];
+      const row = rows.get(id);
+      if (!row) continue;
+      const item = toCodexItem(renderItem(source, row, index + 1, apiBase));
+      const segmentHash = (await sha256Hex(`${source}\0${item.item_id}`)).slice(0, 16);
+      items.push({
+        ...item,
+        segment_id: `segment-${source}-${segmentHash}`,
+        card_index: ++stageCardIndex,
+      });
+    }
+    if (items.length) {
+      sections.push({ source, source_label: SOURCE_LABELS[source] || source, count: items.length, items });
+    }
+  }
+  return sections;
+}
+
+async function buildFinalManifest(
+  env: Env,
+  date: string,
+  sections: DailyCodexPayload['digest']['sections']['normal'],
+): Promise<DailyFinalManifest> {
+  const stageStates = {} as Record<DailyCodexInputStage, DailyStageState>;
+  for (const stage of DAILY_CODEX_EXPECTED_STAGES) {
+    const state = await getDailyStageState(env, date, stage);
+    if (!state) throw new Error(`missing_stage_state:${stage}`);
+    const current = await buildStagedDailyCodexPayload(env, stage, { date });
+    if (current.content_hash !== state.content_hash) {
+      throw new Error(`stage_content_changed:${stage}`);
+    }
+    stageStates[stage] = state;
+  }
+  const stageRevisions = Object.fromEntries(DAILY_CODEX_EXPECTED_STAGES.map((stage) => [stage, {
+    revision: stageStates[stage].revision,
+    content_hash: stageStates[stage].content_hash,
+  }])) as Record<DailyCodexInputStage, DailyStageRevisionRef>;
+
+  const items: DailyFinalManifestItem[] = [];
+  for (const section of sections) {
+    const itemStage = inputStageForSource(section.source);
+    for (const item of section.items) {
+      items.push({
+        segment_id: item.segment_id!,
+        item_id: item.item_id,
+        source: section.source,
+        card_index: item.card_index!,
+        stage: itemStage,
+        revision: stageStates[itemStage].revision,
+      });
+    }
+  }
+  const core = {
+    stage_revisions: stageRevisions,
+    section_order: sections.map((section) => section.source),
+    items,
+  };
+  return {
+    ...core,
+    manifest_hash: `sha256:${await sha256Hex(stableJson(core))}`,
+  };
+}
+
+export async function buildStagedDailyCodexPayload(
+  env: Env,
+  stage: DailyCodexStage,
+  opts: { date?: string; persistRevision?: boolean } = {},
+): Promise<StagedDailyCodexPayload> {
+  const date = opts.date || bjtDateStr();
+  const sources = sourcesForStage(stage);
+  const sections = await buildCodexSections(env, `${date}-08`, sources);
+  const total = sections.reduce((count, section) => count + section.count, 0);
+  if (!total) throw new Error(`empty_stage:${stage}`);
+
+  const digest: DailyCodexPayload['digest'] = {
+    meta: {
+      // This field participates in content_hash. Keep it deterministic for a
+      // date/stage so retries and the 08:00 finalize integrity check see the
+      // same snapshot hash when the selected content has not changed.
+      generated_at: stagedGeneratedAtBjt(date, stage),
+      density: 'normal',
+      source_order: [...sources],
+      final_source_order: [...FINAL_SECTION_ORDER],
+      source_labels: Object.fromEntries(sources.map((source) => [source, SOURCE_LABELS[source] || source])),
+    },
+    sections: { normal: sections },
+  };
+  const finalManifest = stage === 'finalize' ? await buildFinalManifest(env, date, sections) : null;
+  // 跨端契约：content_hash 只覆盖实际 digest，HK 可在 ingest 时独立重算并拒绝
+  // 传输损坏；final_manifest 另有自己的 manifest_hash，职责不混用。
+  const contentHash = `sha256:${await sha256Hex(stableJson(digest))}`;
+  const previous = await getDailyStageState(env, date, stage);
+  const revision = previous?.content_hash === contentHash ? previous.revision : (previous?.revision || 0) + 1;
+  if (opts.persistRevision) {
+    await persistDailyStageState(env, date, {
+      stage,
+      revision,
+      content_hash: contentHash,
+      ...(previous?.content_hash === contentHash && previous.pushed_at ? { pushed_at: previous.pushed_at } : {}),
+    });
+  }
+  return {
+    protocol_version: 2,
+    date,
+    density: 'normal',
+    batch_id: `daily-${date}-normal`,
+    stage,
+    revision,
+    content_hash: contentHash,
+    render_key: `daily-${date}-normal-${stage}-r${revision}-${contentHash.slice(7, 15)}`,
+    expected_stages: [...DAILY_CODEX_EXPECTED_STAGES],
+    title: `AI Feeds ${date} 日报`,
+    source: 'cloudflare-daily-staged',
+    digest,
+    final_manifest: finalManifest,
+  };
+}
+
 export interface DailyPushResult {
   ok: boolean;
   skipped?: string;
@@ -173,7 +471,129 @@ export interface DailyPushResult {
   total_items?: number;
   codex_id?: string;
   codex_status?: string;
+  stage?: DailyCodexStage;
+  revision?: number;
+  content_hash?: string;
   error?: string;
+}
+
+function stagedDailyEndpoint(env: Env): string | null {
+  if (getBases(env).apiBase.includes('//api.ai-feeds.com')) {
+    return env.DAILY_PUSH_ENDPOINT || DEFAULT_DAILY_ENDPOINT;
+  }
+  const staging = env.DAILY_PUSH_STAGING_ENDPOINT;
+  if (!staging) return null;
+  try {
+    const candidate = new URL(staging);
+    const production = new URL(DEFAULT_DAILY_ENDPOINT);
+    if (
+      candidate.origin === production.origin &&
+      candidate.pathname.replace(/\/+$/, '') === production.pathname.replace(/\/+$/, '')
+    ) return null;
+  } catch {
+    return null;
+  }
+  return staging;
+}
+
+async function postDailyPayload(endpoint: string, token: string, body: string): Promise<Response> {
+  const attempt = async (): Promise<Response> => {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), PUSH_TIMEOUT_MS);
+    try {
+      return await fetch(endpoint, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(tid);
+    }
+  };
+  try {
+    const first = await attempt();
+    return first.status >= 500 ? await attempt() : first;
+  } catch {
+    return await attempt();
+  }
+}
+
+// v2 stage push:revision/hash 在网络调用前固化，成功响应后才写 pushed_at。Workflow
+// step 失败重试会复用同 revision/hash；08:00 可据 pushed_at 精确识别缺批并补推。
+export async function pushDailyStageToCodex(
+  env: Env,
+  stage: DailyCodexStage,
+  dateOverride?: string,
+): Promise<DailyPushResult> {
+  if (!env.X_CARD_SHARED_TOKEN) return { ok: false, skipped: 'no_token', stage };
+  const endpoint = stagedDailyEndpoint(env);
+  if (!endpoint) return { ok: false, skipped: 'non_prod_or_staging_endpoint_missing', stage };
+  if (stage === 'finalize') {
+    for (const inputStage of DAILY_CODEX_EXPECTED_STAGES) {
+      const state = await getDailyStageState(env, dateOverride || bjtDateStr(), inputStage);
+      if (!state?.pushed_at) {
+        return { ok: false, stage, error: `stage_not_pushed:${inputStage}` };
+      }
+    }
+  }
+
+  let payload: StagedDailyCodexPayload;
+  try {
+    payload = await buildStagedDailyCodexPayload(env, stage, {
+      date: dateOverride,
+      persistRevision: true,
+    });
+  } catch (error) {
+    const message = String(error).slice(0, 200);
+    await pushDeerAlert(env, '分批日报推 Codex 失败', `${stage} 构造 payload 异常: ${message}`).catch(() => {});
+    return { ok: false, stage, error: message };
+  }
+
+  const total = payload.digest.sections.normal.reduce((count, section) => count + section.count, 0);
+  let response: Response;
+  try {
+    response = await postDailyPayload(endpoint, env.X_CARD_SHARED_TOKEN, JSON.stringify(payload));
+  } catch (error) {
+    const message = `network: ${String(error).slice(0, 160)}`;
+    await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${message}`).catch(() => {});
+    return {
+      ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
+      render_key: payload.render_key, total_items: total, error: message,
+    };
+  }
+  if (!response.ok) {
+    const text = (await response.text().catch(() => '')).slice(0, 200);
+    const error = `http_${response.status}: ${text}`;
+    await pushDeerAlert(env, '分批日报推 Codex 失败', `${payload.render_key}: ${error}`).catch(() => {});
+    return {
+      ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
+      render_key: payload.render_key, total_items: total, error,
+    };
+  }
+
+  try {
+    await markDailyStagePushed(env, payload.date, stage, payload.revision, payload.content_hash);
+  } catch (error) {
+    const message = String(error).slice(0, 200);
+    await pushDeerAlert(env, '分批日报状态落库失败', `${payload.render_key}: ${message}`).catch(() => {});
+    return {
+      ok: false, stage, revision: payload.revision, content_hash: payload.content_hash,
+      render_key: payload.render_key, total_items: total, error: message,
+    };
+  }
+  const data = (await response.json().catch(() => ({}))) as { id?: string; status?: string };
+  console.log(`[daily-codex-stage] ${payload.render_key} items=${total} → id=${data.id} status=${data.status}`);
+  return {
+    ok: true,
+    stage,
+    revision: payload.revision,
+    content_hash: payload.content_hash,
+    render_key: payload.render_key,
+    total_items: total,
+    codex_id: data.id,
+    codex_status: data.status,
+  };
 }
 
 // 构造 payload + POST Codex。内部对 5xx/网络错重试一次。永不抛错(非阻塞)。

@@ -1,17 +1,33 @@
-// digest-node-run workflow:某推送节点到点,算 5 源榜单 + 节点标题摘要 + 给订阅起 deliver。
-// 由 scheduled handler 在节点时间(UTC 0/4/9 = BJT 8/12/17,minute=0)create。
-// 设计文档:roxor-main-design-20260528-090625.md
+// digest-node-run workflow:订阅节点继续负责邮件/SEO；日报视频在启用 v2 后额外按
+// BJT 06:30 foundation、07:50 editorial、08:00 papers+finalize 分批固化和推送。
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import type { Env } from '../index';
 import { DIGEST_SOURCE_ORDER } from './config';
-import { slotKey, bjtDateStr } from './lib';
-import { pushDailyToCodex } from './codex-push';
+import { bjtDateStr } from './lib';
+import {
+  getDailyStageState,
+  pushDailyStageToCodex,
+  pushDailyToCodex,
+  type DailyCodexInputStage,
+} from './codex-push';
 import { runDailyPagePhase } from './daily-page-monitor';
-import { rebuildDigestPoolSource, rebuildDigestPoolSubject } from './pool-rebuild';
+import {
+  rebuildDigestPoolSource,
+  rebuildDigestPoolStage,
+  rebuildDigestPoolSubject,
+} from './pool-rebuild';
+import { pushDeerAlert } from '../notifier';
 
-interface NodeRunParams {
+export interface NodeRunParams {
   slotHourBjt: number;
+  date?: string;
+  dailyStage?: DailyCodexInputStage;
+}
+
+export interface DigestCronWorkflowAction {
+  id: string;
+  params: NodeRunParams;
 }
 
 const RETRY = {
@@ -19,65 +35,211 @@ const RETRY = {
   timeout: '5 minutes',
 } as const;
 
-export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams> {
-  async run(event: WorkflowEvent<NodeRunParams>, step: WorkflowStep) {
-    const { slotHourBjt } = event.payload;
-    const sk = slotKey(slotHourBjt);
+function slotKeyFor(date: string, slotHourBjt: number): string {
+  return `${date}-${String(slotHourBjt).padStart(2, '0')}`;
+}
 
-    // Phase 1:各源算 normal(纯分 top N)+ curated(LLM 挑 M)榜单
+// 复用现有 */5 cron，不增加 wrangler trigger。scheduledTime 是 UTC；日期必须按
+// BJT 计算，否则 06:30/07:50 会被错误写到前一日。
+export function routeDigestCronWorkflows(
+  scheduledTime: number,
+  stagedEnabled: boolean,
+): DigestCronWorkflowAction[] {
+  const utc = new Date(scheduledTime);
+  const hour = utc.getUTCHours();
+  const minute = utc.getUTCMinutes();
+  const date = bjtDateStr(scheduledTime);
+
+  if (stagedEnabled && hour === 22 && minute === 30) {
+    return [{
+      id: `digest-node-${date}-08-foundation`,
+      params: { slotHourBjt: 8, date, dailyStage: 'foundation' },
+    }];
+  }
+  if (stagedEnabled && hour === 23 && minute === 50) {
+    return [{
+      id: `digest-node-${date}-08-editorial`,
+      params: { slotHourBjt: 8, date, dailyStage: 'editorial' },
+    }];
+  }
+
+  const slotHourBjt = minute === 0
+    ? ({ 0: 8, 4: 12, 9: 17 } as Record<number, number>)[hour]
+    : undefined;
+  if (slotHourBjt === undefined) return [];
+  const dailyStage = stagedEnabled && slotHourBjt === 8 ? 'papers' as const : undefined;
+  return [{
+    id: `digest-node-${date}-${String(slotHourBjt).padStart(2, '0')}${dailyStage ? `-${dailyStage}` : ''}`,
+    params: { slotHourBjt, date, ...(dailyStage ? { dailyStage } : {}) },
+  }];
+}
+
+function assertStagePushOk(stage: string, result: { ok: boolean; skipped?: string; error?: string }): void {
+  if (result.ok) return;
+  throw new Error(`daily_stage_push_failed:${stage}:${result.error || result.skipped || 'unknown'}`);
+}
+
+async function rebuildStageStep(
+  env: Env,
+  step: WorkflowStep,
+  date: string,
+  stage: DailyCodexInputStage,
+): Promise<void> {
+  await step.do(`pool-stage-${stage}`, RETRY, async () => {
+    return rebuildDigestPoolStage(env, { date, stage });
+  });
+}
+
+async function pushStageStep(
+  env: Env,
+  step: WorkflowStep,
+  date: string,
+  stage: DailyCodexInputStage | 'finalize',
+): Promise<void> {
+  await step.do(`push-codex-${stage}`, RETRY, async () => {
+    const result = await pushDailyStageToCodex(env, stage, date);
+    assertStagePushOk(stage, result);
+    return result;
+  });
+}
+
+async function ensurePriorStageSnapshots(env: Env, step: WorkflowStep, date: string): Promise<void> {
+  for (const stage of ['foundation', 'editorial'] as const) {
+    const state = await step.do(`check-codex-${stage}`, RETRY, async () => {
+      return getDailyStageState(env, date, stage);
+    });
+    if (!state) await rebuildStageStep(env, step, date, stage);
+  }
+}
+
+async function recoverPriorStagePushes(env: Env, step: WorkflowStep, date: string): Promise<void> {
+  for (const stage of ['foundation', 'editorial'] as const) {
+    const state = await step.do(`check-codex-push-${stage}`, RETRY, async () => {
+      return getDailyStageState(env, date, stage);
+    });
+    if (!state?.pushed_at) await pushStageStep(env, step, date, stage);
+  }
+}
+
+async function runDigestNodeWorkflowCore(
+  env: Env,
+  params: NodeRunParams,
+  step: WorkflowStep,
+): Promise<{ slotKey: string; subs: number; dailyStage?: string; skipped?: string }> {
+  const { slotHourBjt } = params;
+  const date = params.date || bjtDateStr();
+  const sk = slotKeyFor(date, slotHourBjt);
+  const stagedEnabled = env.DAILY_STAGED_PUSH_ENABLED === '1';
+  const earlyStage = params.dailyStage === 'foundation' || params.dailyStage === 'editorial'
+    ? params.dailyStage
+    : null;
+
+  // 06:30/07:50 是纯预生产批次：不列订阅、不发邮件、不生成 SEO。
+  // 若 workflow 已入队后开关被关闭，必须 no-op，不能误降级成 08:00 v1 全量任务。
+  if (earlyStage && !stagedEnabled) {
+    return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage, skipped: 'staged_disabled' };
+  }
+  if (stagedEnabled && earlyStage) {
+    await rebuildStageStep(env, step, date, earlyStage);
+    if (env.DAILY_PUSH_ENABLED === '1') {
+      await pushStageStep(env, step, date, earlyStage);
+    }
+    return { slotKey: `${date}-08`, subs: 0, dailyStage: earlyStage };
+  }
+
+  const stagedEight = stagedEnabled && slotHourBjt === 8;
+  if (stagedEight) {
+    // 邮件也消费同一个 -08 池，因此缺失早批要先补快照；这里不做外部 push，
+    // 保证 HK 故障不会让邮件缺栏目或阻断投递。
+    await ensurePriorStageSnapshots(env, step, date);
+    await rebuildStageStep(env, step, date, 'papers');
+  } else {
+    // v1 回滚路径及 12/17 邮件节点保持原有全源重建行为。
     for (const source of DIGEST_SOURCE_ORDER) {
-      // 2026-06-21 ClawHub(龙虾技能)退出订阅日报:仍保留 homepage 频道 + 对外 daily-api 源,
-      // 但不入 digest_pool(省 curated LLM 调用)、不进订阅邮件。仅此一处下架,daily-api 不受影响。
       if (source === 'clawhub') continue;
       await step.do(`pool-${source}`, RETRY, async (): Promise<number> => {
-        return (await rebuildDigestPoolSource(this.env, sk, source)).candidates;
+        return (await rebuildDigestPoolSource(env, sk, source)).candidates;
       });
     }
-
-    // Phase 1.5:节点级标题摘要
     await step.do('subject-digest', RETRY, async (): Promise<string> => {
-      return rebuildDigestPoolSubject(this.env, sk);
+      return rebuildDigestPoolSubject(env, sk);
     });
+  }
 
-    // Phase 2:给选了这个节点的 active 订阅起 deliver(workflow id 唯一 = 幂等防重复 create)
-    const subIds = await step.do('list-subs', RETRY, async (): Promise<number[]> => {
-      const r = await this.env.DB.prepare(
-        `SELECT id FROM subscriptions WHERE status = 'active' AND send_slot = ?`,
-      )
-        .bind(slotHourBjt)
-        .all<{ id: number }>();
-      return (r.results || []).map((s) => s.id);
-    });
+  const subIds = await step.do('list-subs', RETRY, async (): Promise<number[]> => {
+    const result = await env.DB.prepare(
+      `SELECT id FROM subscriptions WHERE status = 'active' AND send_slot = ?`,
+    )
+      .bind(slotHourBjt)
+      .all<{ id: number }>();
+    return (result.results || []).map((subscription) => subscription.id);
+  });
 
-    for (const subId of subIds) {
-      await step.do(`spawn-deliver-${subId}`, RETRY, async (): Promise<number> => {
-        await this.env.DIGEST_DELIVER_WORKFLOW.create({
-          id: `digest-${sk}-${subId}`,
-          params: { subId, slotKey: sk },
-        });
-        return subId;
+  for (const subId of subIds) {
+    await step.do(`spawn-deliver-${subId}`, RETRY, async (): Promise<number> => {
+      await env.DIGEST_DELIVER_WORKFLOW.create({
+        id: `digest-${sk}-${subId}`,
+        params: { subId, slotKey: sk },
       });
-    }
+      return subId;
+    });
+  }
 
-    // Phase 3:仅早 8 点 + 总开关 DAILY_PUSH_ENABLED==='1' → 把当天日报内容(快照,normal,
-    // ph/gh/hf-paper)并行推给 Codex 渲染机。放在 deliver spawn 之后(邮件已在投递路上,不拖慢);
-    // pushDailyToCodex 非阻塞、永不抛错。开关默认关,手动 mode(daily-codex-push)不受此限。
-    if (slotHourBjt === 8 && this.env.DAILY_PUSH_ENABLED === '1') {
+  let stagedPushError: unknown = null;
+  if (slotHourBjt === 8 && env.DAILY_PUSH_ENABLED === '1') {
+    if (stagedEight) {
+      try {
+        // 正常路径只读前两批状态。只有状态不存在或没有成功 push 标记时才补建/补推，
+        // 不在 08:00 无条件重跑 PH/GH/news/X 选择器。
+        await recoverPriorStagePushes(env, step, date);
+        await pushStageStep(env, step, date, 'papers');
+        await pushStageStep(env, step, date, 'finalize');
+      } catch (error) {
+        // 先让独立的邮件与 SEO 阶段完成，再抛出使 Workflow 保持失败并可重试。
+        stagedPushError = error;
+      }
+    } else {
       await step.do('push-codex-daily', RETRY, async () => {
-        return await pushDailyToCodex(this.env, slotHourBjt);
+        return pushDailyToCodex(env, slotHourBjt, date);
       });
     }
+  }
 
-    // Phase 4:仅早 8 点 + 开关 DAILY_PAGE_ENABLED==='1' → 生成当日 SEO 静态日报页。
-    // 学 Phase 3 容错:独立 workflow step,任何异常绝不影响邮件/Codex。runDailyPagePhase 内部
-    // try/catch 兜底(永不抛错)+ 告警:异常 → PushDeer「[SEO] 日报页生成失败」;skipped(选品空)
-    // → 告警「[SEO] 日报页跳过(选品空)」;正常静默。手动 mode(daily-page)不受此开关限制。
-    if (slotHourBjt === 8 && this.env.DAILY_PAGE_ENABLED === '1') {
-      await step.do('generate-daily-page', RETRY, async () => {
-        return await runDailyPagePhase(this.env, bjtDateStr());
-      });
+  if (slotHourBjt === 8 && env.DAILY_PAGE_ENABLED === '1') {
+    await step.do('generate-daily-page', RETRY, async () => runDailyPagePhase(env, date));
+  }
+
+  if (stagedPushError) throw stagedPushError;
+
+  return { slotKey: sk, subs: subIds.length, ...(stagedEight ? { dailyStage: 'papers' } : {}) };
+}
+
+export async function runDigestNodeWorkflow(
+  env: Env,
+  params: NodeRunParams,
+  step: WorkflowStep,
+): Promise<{ slotKey: string; subs: number; dailyStage?: string; skipped?: string }> {
+  try {
+    return await runDigestNodeWorkflowCore(env, params, step);
+  } catch (error) {
+    const isStagedRun = !!params.dailyStage || (
+      env.DAILY_STAGED_PUSH_ENABLED === '1' && params.slotHourBjt === 8
+    );
+    if (isStagedRun) {
+      const date = params.date || bjtDateStr();
+      const stage = params.dailyStage || 'papers';
+      await pushDeerAlert(
+        env,
+        '分批日报 Workflow 失败',
+        `${date} ${stage}: ${String(error).slice(0, 300)}`,
+      ).catch(() => {});
     }
+    throw error;
+  }
+}
 
-    return { slotKey: sk, subs: subIds.length };
+export class DigestNodeRunWorkflow extends WorkflowEntrypoint<Env, NodeRunParams> {
+  async run(event: WorkflowEvent<NodeRunParams>, step: WorkflowStep) {
+    return runDigestNodeWorkflow(this.env, event.payload, step);
   }
 }
