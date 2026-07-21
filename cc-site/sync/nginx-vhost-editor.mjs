@@ -8,7 +8,7 @@ const BEGIN = '# AIFEEDS-CC-CONTENT-MIRROR-BEGIN';
 const END = '# AIFEEDS-CC-CONTENT-MIRROR-END';
 const INCLUDE = (
   'include /www/server/panel/vhost/nginx/'
-  + 'aifeeds-cc-content-mirror.conf;'
+  + 'aifeeds-cc-content-mirror.inc;'
 );
 
 function structuralView(source) {

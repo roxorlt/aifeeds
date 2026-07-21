@@ -667,7 +667,7 @@ SITE_ROOT=$(rooted /www/wwwroot/ai-feeds.cc)
 ITEM_ROOT="$SITE_ROOT/i"
 VHOST_DIR=$(rooted /www/server/panel/vhost/nginx)
 VHOST="$VHOST_DIR/html_ai-feeds.cc.conf"
-SNIPPET="$VHOST_DIR/aifeeds-cc-content-mirror.conf"
+SNIPPET="$VHOST_DIR/aifeeds-cc-content-mirror.inc"
 
 SYSTEMCTL_OUTPUT=""
 SYSTEMCTL_STATUS=0

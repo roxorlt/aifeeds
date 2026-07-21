@@ -294,7 +294,7 @@ test('vhost editor inserts one managed include into only the HTTPS site block', 
     1,
   );
   assert.equal(
-    edited.match(/include \/www\/server\/panel\/vhost\/nginx\/aifeeds-cc-content-mirror\.conf;/g)?.length,
+    edited.match(/include \/www\/server\/panel\/vhost\/nginx\/aifeeds-cc-content-mirror\.inc;/g)?.length,
     1,
   );
   assert.match(edited, /shenma-site-verification/);
@@ -321,7 +321,7 @@ test('vhost editor fails closed for ambiguous or unmanaged include state', async
     () => injectManagedInclude(
       https.replace(
         '\n}',
-        '\n include /www/server/panel/vhost/nginx/aifeeds-cc-content-mirror.conf;\n}',
+        '\n include /www/server/panel/vhost/nginx/aifeeds-cc-content-mirror.inc;\n}',
       ),
     ),
     /unmanaged content mirror include/,
@@ -365,7 +365,7 @@ test('vhost editor fails closed for ambiguous or unmanaged include state', async
 
 const INCLUDE_OUTSIDE_FIXTURE = (
   'include /www/server/panel/vhost/nginx/'
-  + 'aifeeds-cc-content-mirror.conf;'
+  + 'aifeeds-cc-content-mirror.inc;'
 );
 
 async function executable(file, contents) {
@@ -3259,7 +3259,7 @@ async function remoteDeployHarness({
   const siteRoot = path.join(root, 'www', 'wwwroot', 'ai-feeds.cc');
   const vhostDir = path.join(root, 'www', 'server', 'panel', 'vhost', 'nginx');
   const vhost = path.join(vhostDir, 'html_ai-feeds.cc.conf');
-  const snippet = path.join(vhostDir, 'aifeeds-cc-content-mirror.conf');
+  const snippet = path.join(vhostDir, 'aifeeds-cc-content-mirror.inc');
   const log = path.join(root, 'commands.log');
   const systemctlState = path.join(root, 'systemctl-state');
   const payloadTestProof = path.join(root, 'payload-tests-ran');
