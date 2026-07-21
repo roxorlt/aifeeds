@@ -240,8 +240,8 @@ afterEach(() => {
 });
 
 describe("reviewCcItem decisions", () => {
-  it("uses policy v2 and deterministically blocks explicit political-governance language", async () => {
-    expect(CC_REVIEW_POLICY_VERSION).toBe(2);
+  it("uses policy v3 and deterministically blocks explicit political-governance language", async () => {
+    expect(CC_REVIEW_POLICY_VERSION).toBe(3);
     const db = new StatefulD1();
     const itemId = db.insertItem({
       title: "中国免费AI模型Kimi引发特朗普AI团队内部分歧",
@@ -271,6 +271,22 @@ describe("reviewCcItem decisions", () => {
     )).toMatchObject({ sanctions_export_control: 1 });
     expect(detectDeterministicRiskFlags(
       "中国 AI 公司发布中性开源模型，性能有所提升。",
+    )).toEqual(SAFE_FLAGS);
+  });
+
+  it("blocks regulatory, elected-official, and law-enforcement language without overblocking data governance", () => {
+    for (const text of [
+      "Google DeepMind CEO calls for a US-led global AI regulator.",
+      "Inside the business of selling artificial intelligence to the police.",
+      "Google SynthID identified a deepfake image of a US senator.",
+      "Apple Intelligence 获中国监管机构批准上线。",
+    ]) {
+      expect(detectDeterministicRiskFlags(text)).toMatchObject({
+        politics_governance: 1,
+      });
+    }
+    expect(detectDeterministicRiskFlags(
+      "企业 AI 架构需要数据治理、上下文工程与模型管理。",
     )).toEqual(SAFE_FLAGS);
   });
 
