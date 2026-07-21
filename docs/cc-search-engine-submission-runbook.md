@@ -2,24 +2,24 @@
 
 > 适用站点：`https://ai-feeds.cc`
 > 平台：百度搜索资源平台、360 站长平台、搜狗搜索资源平台、神马站长平台
-> 状态基线：2026-07-21；四家站点所有权验证均已通过；国内兼容 sitemap 代码已完成，等待生产部署验收与叶子枚举
+> 状态基线：2026-07-21；四家站点所有权验证均已通过；国内兼容 sitemap 已部署并完成首期生产验收
 > 原则：先确认生产页面与 sitemap 真实可抓取，再在平台中提交；提交不等于保证抓取、收录或排名。
 
 ## 1. 当前结论
 
-| 平台 | 当前能否提交 3 万内容页 | 建议提交对象 | 结论 |
+| 平台 | 当前能否提交 | 本次正式提交对象 | 结论 |
 |---|---:|---|---|
-| 360 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 稳定一级索引；生产验收通过后提交 |
+| 360 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 稳定一级索引；已通过生产验收，可以提交 |
 | 搜狗 | 取决于账号权限 | `https://ai-feeds.cc/sitemap-cn.xml` | 稳定一级索引；sitemap 工具采用邀请制，先检查账号是否获邀 |
-| 百度 | 可以逐片提交 | `sitemap-static.xml` + 生产实际存在的全部 `sitemap-cn-NNNN.xml` | 百度普通收录不处理索引型 sitemap，不提交 `sitemap-cn.xml` 或 `/sitemap.xml` |
-| 神马 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 每片最多 10,000 URL，索引每个子项均带真实 `lastmod` |
+| 百度 | 可以逐片提交 | `https://ai-feeds.cc/sitemap-static.xml`、`https://ai-feeds.cc/sitemap-cn-0001.xml` | 当前只有 `0001`；百度普通收录不处理索引型 sitemap，不提交 `sitemap-cn.xml` 或 `/sitemap.xml` |
+| 神马 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 已通过生产验收；每片最多 10,000 URL，索引每个子项均带真实 `lastmod` |
 
 因此不要把同一个 `/sitemap.xml` 不加检查地提交给四家。生产首发顺序建议为：
 
-1. 上线并完成本手册第 3 节验收，冻结当次生产叶子清单；
-2. 360 与神马提交 `sitemap-cn.xml`；
-3. 检查搜狗邀请与资质状态，满足条件后提交同一个稳定索引；
-4. 百度先提交 `sitemap-static.xml` 与 `sitemap-cn-0001.xml`，观察 24～48 小时正常后补齐其余生产叶子。
+1. 360 与神马提交 `sitemap-cn.xml`；
+2. 检查搜狗邀请与资质状态，满足条件后提交同一个稳定索引；
+3. 百度提交 `sitemap-static.xml` 与 `sitemap-cn-0001.xml`；
+4. 观察 24～48 小时平台状态。以后只有当 `sitemap-cn.xml` 真实列出新叶子时，百度才增加对应编号，绝不预先提交不存在的 `0002`。
 
 ## 2. 已实现的 sitemap 兼容层
 
@@ -46,6 +46,9 @@ https://ai-feeds.cc/sitemap-cn-0002.xml
 https://ai-feeds.cc/sitemap-cn-0003.xml
 ...
 ```
+
+上面 `0002`、`0003` 仅表示容量增长后的命名规则。2026-07-21 的生产索引实际只列出
+`sitemap-static.xml` 与 `sitemap-cn-0001.xml`，因此本次不得提交任何更高编号。
 
 实现保证：
 
@@ -122,6 +125,34 @@ curl -fsS https://ai-feeds.cc/robots.txt | grep -F 'Sitemap: https://ai-feeds.cc
 ```
 
 生产提交时把检查日期、根 sitemap 的 SHA-256、根索引叶子数、内容 URL 总数和 20 个抽样 URL 记入操作记录。
+
+### 3.4 2026-07-21 首期生产验收记录
+
+当前冻结清单可直接用于本轮平台提交：
+
+| 文件 | 结构与数量 | 字节数 | SHA-256 |
+|---|---:|---:|---|
+| `https://ai-feeds.cc/sitemap.xml` | sitemap index，3 个子项 | 412 | `f329cd4108360f7f8c7b049fc6be08d41b7649a8a02113d8f4f05c5ae932ddc1` |
+| `https://ai-feeds.cc/sitemap-cn.xml` | sitemap index，2 个子项 | 351 | `27952b6f718721dd9145dcddeed060231cea3c2525e267365e109fa4513a8f41` |
+| `https://ai-feeds.cc/sitemap-cn-0001.xml` | urlset，140 个 URL | 12,504 | `cc891d22fa841dcb18238b5fb403d8a60a62568f550e496d7b1e02e6767389da` |
+| `https://ai-feeds.cc/sitemap-static.xml` | urlset，8 个 URL | 628 | `20b3c7498fef4095a9af01cb2f12f8d0aaa15503af1dddeac83ebc649c9c9e5c` |
+
+计数口径：`sitemap-cn-0001.xml` 包含 137 个内容页与 3 个归档页；再加 8 个固定页，
+四家可发现的唯一 URL 合计 148。VPS state 为 `last_seq=163`、`bootstrap=null`、137 个
+live 页面，与 sitemap 完全一致。
+
+验收结果：
+
+- 四份 XML 均可解析并返回 200；148 个 sitemap URL 均直接返回 200，无跳转；
+- 137 个内容页全部为精确自 canonical，无 `noindex`、meta refresh 或脚本自动跳转，`.com`
+  CTA 都带 `utm_source=cc&utm_medium=mirror&utm_campaign=cn_seo`；
+- 逐页执行内容策略 v5 的政治治理、军事冲突、制裁/出口管制、严重伤害与对华负面确定性
+  backstop，137/137 无命中；固定抽样 50 个标题与摘要再次人工复核，无新增阻断项；
+- 首期三家海外第三方媒体共审核 219 条：137 条 live、82 条 deny；13 个曾短暂公开后撤回的
+  URL 均直接返回 404，且不在归档或 sitemap；
+- 360、搜狗、神马、百度四个验证文件均直接返回 200；神马的 HTTP 验证文件没有被重定向；
+- `aifeeds-cc-sync.timer` 为 `active` 且 `enabled`。生产 `CC_MIRROR_ENABLED` 仍保持关闭，
+  当前只发布经过人工分批回填和验收的首期内容，不自动扩张到其他来源。
 
 ## 4. 360 站长平台
 

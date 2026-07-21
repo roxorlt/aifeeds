@@ -3,7 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-21（ai-feeds.cc 内容镜像新增国内搜索稳定 sitemap：一层索引、1 万 URL 分片、真实 lastmod 与叶子高水位；代码完成，等待生产部署验收）
+最后更新：2026-07-21（ai-feeds.cc 内容镜像与国内搜索稳定 sitemap 已上线：首期 137 个内容页、148 个可发现 URL，全量公网门禁通过）
 
 历史：2026-07-20（ai-feeds.cc 静态内容镜像同步器完成本地实现：海外 AI 内容双 gate、immutable generation/sitemap、systemd timer、Nginx 路由及全局 preparing/committed 部署事务；本轮未推送、未部署）
 
@@ -4082,7 +4082,7 @@ curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer 
 
 ---
 
-## ai-feeds.cc 静态内容镜像（代码完成，待生产验收）
+## ai-feeds.cc 静态内容镜像（首期生产已上线）
 
 实现与逐项命令以 [`cc-site/sync/README.md`](../cc-site/sync/README.md) 为准。同步器从生产 API
 读取已经翻译的海外 AI 内容，排除国内来源，并通过 `is_ai` 与对华负面双 gate 后生成
@@ -4139,8 +4139,18 @@ curl -fsS https://ai-feeds.cc/ai-news/ >/dev/null
 ```
 
 首次三万页同步可续跑；失败后保留 `/var/lib/aifeeds-cc-sync`，修复原因后重新启动 service，
-不要删除 state 或手工改写 `public/current`。本节记录代码与 runbook；2026-07-21 的国内
-sitemap 兼容版等待本轮生产部署与线上验收结果回填。
+不要删除 state 或手工改写 `public/current`。
+
+2026-07-21 首期生产记录：Worker 内容策略 v5 对 TechCrunch AI、The Verge AI、MIT
+Technology Review AI 分批审核 219 条，最终 137 条 live、82 条 deny；13 个曾短暂公开后
+撤回的 URL 均返回 404。VPS state 为 `last_seq=163`、`bootstrap=null`、137 个 live 页面，
+`aifeeds-cc-sync.timer` 为 `active/enabled`。`sitemap-cn-0001.xml` 含 137 个内容页与 3 个归档页，
+`sitemap-static.xml` 含 8 个固定页，去重后共 148 个可发现 URL；全部直接 200。137 个内容页
+逐页通过 200、精确自 canonical、无 noindex/自动跳转、`.com` CTA UTM 和 v5 风险词门禁，
+另做固定 50 条标题/摘要人工复核。当前国内稳定索引只有 `0001` 一片；四家最终提交清单、
+文件 SHA-256 与逐平台步骤见
+[`docs/cc-search-engine-submission-runbook.md`](cc-search-engine-submission-runbook.md)。生产
+`CC_MIRROR_ENABLED` 仍保持关闭，在扩大来源或继续历史回填前必须重复分批审核与抽样门禁。
 
 ---
 
