@@ -260,16 +260,25 @@ describe('daily Codex payload v2', () => {
       .rejects.toThrow('missing_stage_state:papers');
   });
 
-  test('refuses finalize when a locked stage pool changed without a new stage revision', async () => {
+  test('finalize uses the immutable pushed stage snapshot when the live pool changes later', async () => {
     const { env, setPool } = makeEnv();
     seedAll(setPool);
     await buildStagedDailyCodexPayload(env, 'foundation', { date: '2026-07-21', persistRevision: true });
-    await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21', persistRevision: true });
+    const editorial = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date: '2026-07-21', persistRevision: true,
+    });
     await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
     setPool('2026-07-21', 'news', ['news:3', 'news:1']);
 
-    await expect(buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' }))
-      .rejects.toThrow('stage_content_changed:editorial');
+    const final = await buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' });
+
+    expect(final.final_manifest?.stage_revisions.editorial).toEqual({
+      revision: editorial.revision,
+      content_hash: editorial.content_hash,
+    });
+    expect(final.digest.sections.normal.find((section) => section.source === 'news')?.items
+      .map((item) => item.item_id)).toEqual(['news:2', 'news:1']);
+    expect(final.final_manifest?.items.some((item) => item.item_id === 'news:3')).toBe(false);
   });
 
   test('keeps the fixed final source order on every batch but removes empty sections from final manifest order', async () => {

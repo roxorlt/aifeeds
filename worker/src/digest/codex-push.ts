@@ -217,6 +217,10 @@ export interface DailyStageState {
   revision: number;
   content_hash: string;
   pushed_at?: number;
+  // Immutable payload snapshot selected for this revision. The shared
+  // digest_pool rows remain live and can be rebuilt by later jobs, so the
+  // 08:00 final manifest must never reconstruct a locked stage from them.
+  snapshot?: DailyCodexPayload['digest'];
 }
 
 export interface DailyStageRevisionRef {
@@ -276,6 +280,9 @@ function parseStageState(raw: string | null | undefined, stage: DailyCodexStage)
       revision: Number(value.revision),
       content_hash: value.content_hash,
       ...(typeof value.pushed_at === 'number' ? { pushed_at: value.pushed_at } : {}),
+      ...(value.snapshot && typeof value.snapshot === 'object'
+        ? { snapshot: value.snapshot as DailyCodexPayload['digest'] }
+        : {}),
     };
   } catch {
     return null;
@@ -364,24 +371,58 @@ async function buildCodexSections(
   return sections;
 }
 
-async function buildFinalManifest(
+interface LockedStageSnapshot {
+  state: DailyStageState;
+  digest: DailyCodexPayload['digest'];
+}
+
+async function loadLockedStageSnapshots(
   env: Env,
   date: string,
-  sections: DailyCodexPayload['digest']['sections']['normal'],
-): Promise<DailyFinalManifest> {
-  const stageStates = {} as Record<DailyCodexInputStage, DailyStageState>;
+): Promise<Record<DailyCodexInputStage, LockedStageSnapshot>> {
+  const snapshots = {} as Record<DailyCodexInputStage, LockedStageSnapshot>;
   for (const stage of DAILY_CODEX_EXPECTED_STAGES) {
     const state = await getDailyStageState(env, date, stage);
     if (!state) throw new Error(`missing_stage_state:${stage}`);
-    const current = await buildStagedDailyCodexPayload(env, stage, { date });
-    if (current.content_hash !== state.content_hash) {
-      throw new Error(`stage_content_changed:${stage}`);
+    if (!state.snapshot) throw new Error(`missing_stage_snapshot:${stage}`);
+    const snapshotHash = `sha256:${await sha256Hex(stableJson(state.snapshot))}`;
+    if (snapshotHash !== state.content_hash) throw new Error(`stage_snapshot_hash_mismatch:${stage}`);
+
+    const expectedSources = new Set(DIGEST_POOL_STAGE_SOURCES[stage]);
+    const seenSources = new Set<DigestSource>();
+    for (const section of state.snapshot.sections.normal) {
+      if (!expectedSources.has(section.source) || seenSources.has(section.source)) {
+        throw new Error(`stage_snapshot_sources_invalid:${stage}`);
+      }
+      seenSources.add(section.source);
     }
-    stageStates[stage] = state;
+    snapshots[stage] = { state, digest: state.snapshot };
   }
+  return snapshots;
+}
+
+function combineLockedStageSections(
+  snapshots: Record<DailyCodexInputStage, LockedStageSnapshot>,
+): DailyCodexPayload['digest']['sections']['normal'] {
+  const sections: DailyCodexPayload['digest']['sections']['normal'] = [];
+  let cardIndex = 0;
+  for (const source of FINAL_SECTION_ORDER) {
+    const stage = inputStageForSource(source);
+    const locked = snapshots[stage].digest.sections.normal.find((section) => section.source === source);
+    if (!locked) continue;
+    const items = locked.items.map((item) => ({ ...item, card_index: ++cardIndex }));
+    sections.push({ ...locked, count: items.length, items });
+  }
+  return sections;
+}
+
+async function buildFinalManifest(
+  snapshots: Record<DailyCodexInputStage, LockedStageSnapshot>,
+  sections: DailyCodexPayload['digest']['sections']['normal'],
+): Promise<DailyFinalManifest> {
   const stageRevisions = Object.fromEntries(DAILY_CODEX_EXPECTED_STAGES.map((stage) => [stage, {
-    revision: stageStates[stage].revision,
-    content_hash: stageStates[stage].content_hash,
+    revision: snapshots[stage].state.revision,
+    content_hash: snapshots[stage].state.content_hash,
   }])) as Record<DailyCodexInputStage, DailyStageRevisionRef>;
 
   const items: DailyFinalManifestItem[] = [];
@@ -394,7 +435,7 @@ async function buildFinalManifest(
         source: section.source,
         card_index: item.card_index!,
         stage: itemStage,
-        revision: stageStates[itemStage].revision,
+        revision: snapshots[itemStage].state.revision,
       });
     }
   }
@@ -416,7 +457,10 @@ export async function buildStagedDailyCodexPayload(
 ): Promise<StagedDailyCodexPayload> {
   const date = opts.date || bjtDateStr();
   const sources = sourcesForStage(stage);
-  const sections = await buildCodexSections(env, `${date}-08`, sources);
+  const lockedSnapshots = stage === 'finalize' ? await loadLockedStageSnapshots(env, date) : null;
+  const sections = lockedSnapshots
+    ? combineLockedStageSections(lockedSnapshots)
+    : await buildCodexSections(env, `${date}-08`, sources);
   const total = sections.reduce((count, section) => count + section.count, 0);
   if (!total) throw new Error(`empty_stage:${stage}`);
 
@@ -433,7 +477,7 @@ export async function buildStagedDailyCodexPayload(
     },
     sections: { normal: sections },
   };
-  const finalManifest = stage === 'finalize' ? await buildFinalManifest(env, date, sections) : null;
+  const finalManifest = lockedSnapshots ? await buildFinalManifest(lockedSnapshots, sections) : null;
   // 跨端契约：content_hash 只覆盖实际 digest，HK 可在 ingest 时独立重算并拒绝
   // 传输损坏；final_manifest 另有自己的 manifest_hash，职责不混用。
   const contentHash = `sha256:${await sha256Hex(stableJson(digest))}`;
@@ -445,6 +489,7 @@ export async function buildStagedDailyCodexPayload(
       revision,
       content_hash: contentHash,
       ...(previous?.content_hash === contentHash && previous.pushed_at ? { pushed_at: previous.pushed_at } : {}),
+      snapshot: digest,
     });
   }
   return {
