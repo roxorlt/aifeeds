@@ -1120,7 +1120,13 @@ NGINX_USER=$nginx_users
 
 CURRENT="$STATE_DIR/public/current"
 "$RUNUSER" -u "$NGINX_USER" -- test -x "$STATE_DIR"
-"$RUNUSER" -u "$NGINX_USER" -- test -x "$CURRENT"
+if ! "$RUNUSER" -u "$NGINX_USER" -- test -x "$CURRENT"; then
+  echo "ERROR: Nginx worker cannot traverse the current generation" >&2
+  if [[ "$TEST_MODE" != 1 ]]; then
+    /usr/bin/namei -om "$CURRENT" >&2 || true
+  fi
+  exit 1
+fi
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap.xml"
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap-cn.xml"
 "$RUNUSER" -u "$NGINX_USER" -- test -r "$CURRENT/sitemap-cn-0001.xml"
