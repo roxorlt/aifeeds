@@ -17,9 +17,12 @@ import { assertCanonicalPageUrl } from './fs-safe.mjs';
 const SITE_BASE = 'https://ai-feeds.cc';
 const ARCHIVE_PAGE_SIZE = 50;
 const SITEMAP_SHARD_SIZE = 45_000;
+const CN_SITEMAP_SHARD_SIZE = 10_000;
+const CN_SITEMAP_MAX_BYTES = 10 * 1024 * 1024;
+const CN_SITEMAP_MAX_SHARDS = 9_999;
 const GENERATION_RETENTION_COUNT = 24;
 const PUBLICATION_SCHEMA = 2;
-const SITEMAP_URL_SCHEMA = 2;
+const SITEMAP_URL_SCHEMA = 3;
 const JOURNAL_SCHEMA = 1;
 const JOURNAL_FILE = 'publication-journal.json';
 const SOURCE_BUCKETS = new Map([
@@ -129,11 +132,15 @@ function normalizeItems(state) {
   return items;
 }
 
-function publicationFingerprint(items, includeStaticSitemap) {
+function publicationFingerprint(items, staticSitemap) {
   return createHash('sha256').update(JSON.stringify({
     schema: PUBLICATION_SCHEMA,
     sitemapUrlSchema: SITEMAP_URL_SCHEMA,
-    includeStaticSitemap,
+    staticSitemap: {
+      present: staticSitemap.present,
+      size: staticSitemap.size,
+      lastmod: staticSitemap.lastmod,
+    },
     items: items.map((item) => ({
       urlPath: item.urlPath,
       hash: item.hash,
@@ -239,9 +246,17 @@ ${body}${body === '' ? '' : '\n'}</urlset>
 `;
 }
 
-function renderSitemapIndex(locations) {
-  const body = locations
-    .map((loc) => `  <sitemap><loc>${xmlEscape(loc)}</loc></sitemap>`)
+function renderSitemapIndex(entries) {
+  const body = entries
+    .map((entry) => {
+      const { loc, lastmod } = typeof entry === 'string'
+        ? { loc: entry, lastmod: null }
+        : entry;
+      const modified = lastmod === null || lastmod === undefined
+        ? ''
+        : `<lastmod>${xmlEscape(lastmod)}</lastmod>`;
+      return `  <sitemap><loc>${xmlEscape(loc)}</loc>${modified}</sitemap>`;
+    })
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -453,7 +468,14 @@ async function staticSitemapIdentity(siteIdentity) {
   const entry = await lstatOptional(path.join(siteIdentity.path, 'sitemap-static.xml'));
   await assertIdentity(siteIdentity);
   if (entry === null) {
-    return { present: false, dev: null, ino: null };
+    return {
+      present: false,
+      dev: null,
+      ino: null,
+      size: null,
+      mtimeMs: null,
+      lastmod: null,
+    };
   }
   if (entry.isSymbolicLink() || !entry.isFile()) {
     throw new Error('static sitemap must be a regular non-symlink file');
@@ -462,6 +484,9 @@ async function staticSitemapIdentity(siteIdentity) {
     present: true,
     dev: entry.dev,
     ino: entry.ino,
+    size: entry.size,
+    mtimeMs: entry.mtimeMs,
+    lastmod: entry.mtime.toISOString(),
   };
 }
 
@@ -471,6 +496,8 @@ async function assertStaticSitemapIdentity(siteIdentity, expected) {
     actual.present !== expected.present
     || actual.dev !== expected.dev
     || actual.ino !== expected.ino
+    || actual.size !== expected.size
+    || actual.mtimeMs !== expected.mtimeMs
   ) {
     throw new Error('static sitemap identity changed before publication');
   }
@@ -779,7 +806,20 @@ async function readManifest(generationIdentity) {
   ) {
     throw new Error('invalid generation manifest');
   }
-  return value;
+  const domesticLeafCount = value.cn_sitemap_leaf_count === undefined
+    ? null
+    : value.cn_sitemap_leaf_count;
+  if (
+    domesticLeafCount !== null
+    && (
+      !Number.isSafeInteger(domesticLeafCount)
+      || domesticLeafCount < 1
+      || domesticLeafCount > CN_SITEMAP_MAX_SHARDS
+    )
+  ) {
+    throw new Error('invalid generation domestic sitemap leaf count');
+  }
+  return { ...value, cn_sitemap_leaf_count: domesticLeafCount };
 }
 
 async function validateGenerationComplete(generationIdentity, expectedId) {
@@ -793,7 +833,20 @@ async function validateGenerationComplete(generationIdentity, expectedId) {
       throw new Error(`incomplete generation directory: ${name}`);
     }
   }
-  for (const name of ['sitemap.xml', 'manifest.json']) {
+  const requiredFiles = ['sitemap.xml', 'manifest.json'];
+  if (manifest.cn_sitemap_leaf_count !== null) {
+    requiredFiles.push('sitemap-cn.xml');
+    for (
+      let leafNumber = 1;
+      leafNumber <= manifest.cn_sitemap_leaf_count;
+      leafNumber += 1
+    ) {
+      requiredFiles.push(
+        `sitemap-cn-${String(leafNumber).padStart(4, '0')}.xml`,
+      );
+    }
+  }
+  for (const name of requiredFiles) {
     const entry = await lstat(path.join(generationIdentity.path, name));
     if (entry.isSymbolicLink() || !entry.isFile()) {
       throw new Error(`incomplete generation file: ${name}`);
@@ -809,6 +862,8 @@ async function buildGeneration({
   generationId,
   generatedAt,
   includeStaticSitemap,
+  staticSitemap,
+  cnSitemapLeafCount,
   fingerprint,
   hooks,
 }) {
@@ -867,6 +922,38 @@ async function buildGeneration({
     }
   }
 
+  const domesticEntries = [
+    ...archiveEntries,
+    ...items.map((item) => ({ loc: itemUrl(item.urlPath), lastmod: null })),
+  ];
+  const domesticIndexEntries = includeStaticSitemap
+    ? [{ loc: `${SITE_BASE}/sitemap-static.xml`, lastmod: staticSitemap.lastmod }]
+    : [];
+  for (
+    let leafNumber = 1;
+    leafNumber <= cnSitemapLeafCount;
+    leafNumber += 1
+  ) {
+    const leafFile = `sitemap-cn-${String(leafNumber).padStart(4, '0')}.xml`;
+    const leaf = renderUrlSet(domesticEntries.slice(
+      (leafNumber - 1) * CN_SITEMAP_SHARD_SIZE,
+      leafNumber * CN_SITEMAP_SHARD_SIZE,
+    ));
+    if (Buffer.byteLength(leaf) >= CN_SITEMAP_MAX_BYTES) {
+      throw new Error(`domestic sitemap leaf exceeds byte limit: ${leafFile}`);
+    }
+    await writeDurableFile(generationIdentity, leafFile, leaf);
+    domesticIndexEntries.push({
+      loc: `${SITE_BASE}/${leafFile}`,
+      lastmod: generatedAt,
+    });
+  }
+  await writeDurableFile(
+    generationIdentity,
+    'sitemap-cn.xml',
+    renderSitemapIndex(domesticIndexEntries),
+  );
+
   await hooks.beforeStageSitemapIndex?.(generationIdentity.path);
   await writeDurableFile(
     generationIdentity,
@@ -888,6 +975,7 @@ async function buildGeneration({
       fingerprint,
       generated_at: generatedAt,
       include_static_sitemap: includeStaticSitemap,
+      cn_sitemap_leaf_count: cnSitemapLeafCount,
     })}\n`,
   );
   await syncDirectory(archiveIdentity);
@@ -981,16 +1069,37 @@ export async function publishIndexes({
     hooks,
   );
   const current = await inspectCurrent(publicIdentity, generationsIdentity);
-  const fingerprint = publicationFingerprint(items, includeStaticSitemap);
+  let currentManifest = null;
   if (current !== null) {
-    const manifest = await validateGenerationComplete(
+    currentManifest = await validateGenerationComplete(
       current.generationIdentity,
       current.id,
     );
-    if (manifest.fingerprint === fingerprint) {
+  }
+  const fingerprint = publicationFingerprint(items, expectedStaticSitemap);
+  if (currentManifest !== null) {
+    if (currentManifest.fingerprint === fingerprint) {
       await assertStaticSitemapIdentity(siteIdentity, expectedStaticSitemap);
       return { changed: false, generation: current.id };
     }
+  }
+
+  const archivePageCount = Math.max(
+    1,
+    Math.ceil(items.length / ARCHIVE_PAGE_SIZE),
+  );
+  const requiredDomesticLeafCount = Math.max(
+    1,
+    Math.ceil(
+      (archivePageCount + items.length) / CN_SITEMAP_SHARD_SIZE,
+    ),
+  );
+  const cnSitemapLeafCount = Math.max(
+    requiredDomesticLeafCount,
+    currentManifest?.cn_sitemap_leaf_count ?? 0,
+  );
+  if (cnSitemapLeafCount > CN_SITEMAP_MAX_SHARDS) {
+    throw new Error('domestic sitemap requires too many stable leaves');
   }
 
   const generationId = randomUUID();
@@ -1008,6 +1117,8 @@ export async function publishIndexes({
       generationId,
       generatedAt,
       includeStaticSitemap,
+      staticSitemap: expectedStaticSitemap,
+      cnSitemapLeafCount,
       fingerprint,
       hooks,
     });
@@ -1048,6 +1159,7 @@ export async function publishIndexes({
 
 export {
   ARCHIVE_PAGE_SIZE,
+  CN_SITEMAP_SHARD_SIZE,
   SITEMAP_SHARD_SIZE,
   xmlEscape as escapeXml,
 };

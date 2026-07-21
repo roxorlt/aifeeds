@@ -16,6 +16,7 @@ import {
   stat,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -203,6 +204,137 @@ test('publishes sorted .cc archive pages and sitemap outputs', async () => {
     (await stat(publishedPath(dirs, 'ai-news'))).isDirectory(),
     true,
   );
+});
+
+test('publishes a stable domestic sitemap index with child lastmod values', async () => {
+  const dirs = await workspace();
+  const staticModified = new Date('2026-07-20T01:02:03.000Z');
+  await utimes(
+    path.join(dirs.siteRoot, 'sitemap-static.xml'),
+    staticModified,
+    staticModified,
+  );
+  const published = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/one', metadata('news', 'One', '2026-07-20T00:00:00Z')],
+      ['/i/x/two', metadata('x', 'Two', '2026-07-19T00:00:00Z')],
+    ]),
+  });
+
+  const domesticIndex = await readFile(
+    publishedPath(dirs, 'sitemap-cn.xml'),
+    'utf8',
+  );
+  const manifest = JSON.parse(await readFile(
+    publishedPath(dirs, 'manifest.json'),
+    'utf8',
+  ));
+  assert.match(
+    domesticIndex,
+    /<sitemap><loc>https:\/\/ai-feeds\.cc\/sitemap-static\.xml<\/loc><lastmod>2026-07-20T01:02:03\.000Z<\/lastmod><\/sitemap>/,
+  );
+  assert.match(
+    domesticIndex,
+    new RegExp(`<sitemap><loc>https://ai-feeds\\.cc/sitemap-cn-0001\\.xml</loc><lastmod>${manifest.generated_at.replaceAll('.', '\\.')}`),
+  );
+  assert.doesNotMatch(domesticIndex, new RegExp(published.generation));
+  assert.equal(manifest.cn_sitemap_leaf_count, 1);
+
+  const leaf = await readFile(
+    publishedPath(dirs, 'sitemap-cn-0001.xml'),
+    'utf8',
+  );
+  assert.equal((leaf.match(/<url>/g) ?? []).length, 3);
+  assert.match(leaf, /https:\/\/ai-feeds\.cc\/ai-news\//);
+  assert.match(leaf, /https:\/\/ai-feeds\.cc\/i\/news\/one/);
+  assert.match(leaf, /https:\/\/ai-feeds\.cc\/i\/x\/two/);
+});
+
+test('domestic sitemap leaves stay at 10,000 URLs and preserve their high-water paths', async () => {
+  const dirs = await workspace();
+  const entries = [];
+  for (let index = 0; index < 10_001; index += 1) {
+    entries.push([
+      `/i/news/${String(index).padStart(5, '0')}`,
+      metadata('news', `Item ${index}`, '2026-07-20T00:00:00Z'),
+    ]);
+  }
+  await publishIndexes({ ...dirs, state: state(entries) });
+
+  const firstIndex = await readFile(
+    publishedPath(dirs, 'sitemap-cn.xml'),
+    'utf8',
+  );
+  assert.match(firstIndex, /sitemap-cn-0001\.xml/);
+  assert.match(firstIndex, /sitemap-cn-0002\.xml/);
+  const firstLeaf = await readFile(
+    publishedPath(dirs, 'sitemap-cn-0001.xml'),
+    'utf8',
+  );
+  const secondLeaf = await readFile(
+    publishedPath(dirs, 'sitemap-cn-0002.xml'),
+    'utf8',
+  );
+  assert.equal((firstLeaf.match(/<url>/g) ?? []).length, 10_000);
+  assert.equal((secondLeaf.match(/<url>/g) ?? []).length, 202);
+  assert.ok(Buffer.byteLength(firstLeaf) < 10 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(secondLeaf) < 10 * 1024 * 1024);
+
+  await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/only', metadata('news', 'Only', '2026-07-21T00:00:00Z')],
+    ]),
+  });
+  const shrunkIndex = await readFile(
+    publishedPath(dirs, 'sitemap-cn.xml'),
+    'utf8',
+  );
+  assert.match(shrunkIndex, /sitemap-cn-0001\.xml/);
+  assert.match(shrunkIndex, /sitemap-cn-0002\.xml/);
+  const emptyHighWaterLeaf = await readFile(
+    publishedPath(dirs, 'sitemap-cn-0002.xml'),
+    'utf8',
+  );
+  assert.equal((emptyHighWaterLeaf.match(/<url>/g) ?? []).length, 0);
+  assert.match(emptyHighWaterLeaf, /<urlset /);
+});
+
+test('legacy manifests without domestic sitemap fields remain upgradeable', async () => {
+  const dirs = await workspace();
+  const first = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/old', metadata('news', 'Old', '2026-07-19T00:00:00Z')],
+    ]),
+  });
+  const legacyRoot = path.join(
+    dirs.stateDir,
+    'public',
+    'generations',
+    first.generation,
+  );
+  const legacyManifestPath = path.join(legacyRoot, 'manifest.json');
+  const legacyManifest = JSON.parse(await readFile(legacyManifestPath, 'utf8'));
+  delete legacyManifest.cn_sitemap_leaf_count;
+  legacyManifest.fingerprint = 'b'.repeat(64);
+  await writeFile(legacyManifestPath, `${JSON.stringify(legacyManifest)}\n`);
+  for (const name of await readdir(legacyRoot)) {
+    if (/^sitemap-cn(?:-[0-9]{4})?\.xml$/.test(name)) {
+      await unlink(path.join(legacyRoot, name));
+    }
+  }
+
+  const upgraded = await publishIndexes({
+    ...dirs,
+    state: state([
+      ['/i/news/new', metadata('news', 'New', '2026-07-21T00:00:00Z')],
+    ]),
+  });
+  assert.notEqual(upgraded.generation, first.generation);
+  await stat(publishedPath(dirs, 'sitemap-cn.xml'));
+  await stat(publishedPath(dirs, 'sitemap-cn-0001.xml'));
 });
 
 test('references the static sitemap only when it is a regular non-symlink file', async () => {
