@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import {
@@ -9,11 +10,13 @@ import {
   realpath,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { SyncClient } from '../client.mjs';
 import { resolvePageFile } from '../fs-safe.mjs';
@@ -27,10 +30,26 @@ import {
 import { runSync } from '../sync.mjs';
 
 const SECRET = 'local-sync-test-secret';
+const execFileAsync = promisify(execFile);
 const H0 = createHash('sha256').update('<h1>zero</h1>').digest('hex');
 const H1 = createHash('sha256').update('<h1>one</h1>').digest('hex');
 const H2 = createHash('sha256').update('<h1>two</h1>').digest('hex');
 const H3 = createHash('sha256').update('<h1>three</h1>').digest('hex');
+
+test('CLI executes when its release directory is reached through a symlink', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cc-sync-cli-link-'));
+  const live = path.join(root, 'live');
+  await symlink(path.resolve(import.meta.dirname, '..'), live);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [path.join(live, 'sync.mjs'), '--invalid']),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /unknown argument: --invalid/);
+      return true;
+    },
+  );
+});
 
 function lockFilePath(stateDir) {
   return path.join(stateDir, 'sync.lock');

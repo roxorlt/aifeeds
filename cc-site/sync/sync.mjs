@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { SyncClient } from './client.mjs';
 import { assertSecureConfig, loadConfig } from './config.mjs';
@@ -473,7 +474,7 @@ async function main() {
 }
 
 const isMain = process.argv[1]
-  && import.meta.url === pathToFileURL(process.argv[1]).href;
+  && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (isMain) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
