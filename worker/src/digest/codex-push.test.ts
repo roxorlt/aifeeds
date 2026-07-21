@@ -147,7 +147,7 @@ describe('daily Codex payload v2', () => {
     expect(first.batch_id).toBe('daily-2026-07-21-normal');
     expect(first.expected_stages).toEqual(['foundation', 'editorial', 'papers']);
     expect(first.digest.meta.source_order).toEqual(['ph', 'gh']);
-    expect(first.digest.meta.final_source_order).toEqual(['news', 'x', 'ph', 'gh', 'hf-paper']);
+    expect(first.digest.meta.final_source_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
     expect(first.digest.sections.normal.map((section) => section.source)).toEqual(['ph', 'gh']);
     expect(first.digest.sections.normal[0].items.map((item) => item.item_id)).toEqual([
       'product_hunt:2',
@@ -174,6 +174,26 @@ describe('daily Codex payload v2', () => {
     expect(rebuilt.digest.meta.generated_at).toBe(first.digest.meta.generated_at);
     expect(rebuilt.content_hash).toBe(first.content_hash);
     expect(rebuilt.render_key).toBe(first.render_key);
+  });
+
+  test('excludes X from staged daily video while the shared editorial pool still contains X', async () => {
+    const { env, setPool } = makeEnv();
+    seedAll(setPool);
+
+    const editorial = await buildStagedDailyCodexPayload(env, 'editorial', {
+      date: '2026-07-21', persistRevision: true,
+    });
+    await buildStagedDailyCodexPayload(env, 'foundation', { date: '2026-07-21', persistRevision: true });
+    await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
+    const final = await buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' });
+
+    expect(editorial.digest.meta.source_order).toEqual(['news']);
+    expect(editorial.digest.sections.normal.map((section) => section.source)).toEqual(['news']);
+    expect(editorial.digest.sections.normal.flatMap((section) => section.items)
+      .some((item) => item.source === 'x')).toBe(false);
+    expect(final.digest.meta.final_source_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
+    expect(final.digest.sections.normal.map((section) => section.source)).toEqual(['news', 'ph', 'gh', 'hf-paper']);
+    expect(final.final_manifest?.items.some((item) => item.source === 'x')).toBe(false);
   });
 
   test('rejects an empty non-final stage instead of sending an ambiguous snapshot', async () => {
@@ -236,9 +256,9 @@ describe('daily Codex payload v2', () => {
       editorial: { revision: editorial.revision, content_hash: editorial.content_hash },
       papers: { revision: papers.revision, content_hash: papers.content_hash },
     });
-    expect(final.final_manifest?.section_order).toEqual(['news', 'x', 'ph', 'gh', 'hf-paper']);
-    expect(final.final_manifest?.items.map((item) => item.card_index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    expect(new Set(final.final_manifest?.items.map((item) => item.segment_id)).size).toBe(10);
+    expect(final.final_manifest?.section_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
+    expect(final.final_manifest?.items.map((item) => item.card_index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(new Set(final.final_manifest?.items.map((item) => item.segment_id)).size).toBe(8);
     expect(final.final_manifest?.items.find((item) => item.source === 'ph')?.revision).toBe(foundation2.revision);
     const finalPh1 = final.final_manifest?.items.find((item) => item.item_id === 'product_hunt:1');
     const stagePh1 = foundation2.digest.sections.normal.flatMap((section) => section.items)
@@ -281,10 +301,9 @@ describe('daily Codex payload v2', () => {
     expect(final.final_manifest?.items.some((item) => item.item_id === 'news:3')).toBe(false);
   });
 
-  test('keeps the fixed final source order on every batch but removes empty sections from final manifest order', async () => {
+  test('keeps the video-only final source order even when the shared X pool is populated', async () => {
     const { env, setPool } = makeEnv();
     seedAll(setPool);
-    setPool('2026-07-21', 'x', []);
     const foundation = await buildStagedDailyCodexPayload(env, 'foundation', {
       date: '2026-07-21', persistRevision: true,
     });
@@ -292,9 +311,10 @@ describe('daily Codex payload v2', () => {
     await buildStagedDailyCodexPayload(env, 'papers', { date: '2026-07-21', persistRevision: true });
     const final = await buildStagedDailyCodexPayload(env, 'finalize', { date: '2026-07-21' });
 
-    expect(foundation.digest.meta.final_source_order).toEqual(['news', 'x', 'ph', 'gh', 'hf-paper']);
-    expect(final.digest.meta.final_source_order).toEqual(['news', 'x', 'ph', 'gh', 'hf-paper']);
+    expect(foundation.digest.meta.final_source_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
+    expect(final.digest.meta.final_source_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
     expect(final.final_manifest?.section_order).toEqual(['news', 'ph', 'gh', 'hf-paper']);
+    expect(final.final_manifest?.items.some((item) => item.source === 'x')).toBe(false);
   });
 
   test('allows staged pushes from staging only through the explicit test endpoint', async () => {

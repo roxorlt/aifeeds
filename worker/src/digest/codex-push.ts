@@ -1,4 +1,4 @@
-// 日报内容推送 Codex 渲染机:早 8 点 digest_pool 快照(normal 档,ph/gh/hf-paper 三源)
+// 日报内容推送 Codex 渲染机：按阶段锁定 news/ph/gh/hf-paper 的 digest_pool 快照
 // → 复用 renderItem 产出完整条目(cover + media + 全字段)→ POST Codex daily/ingest。
 // 设计:docs/plans/2026-06-05-daily-codex-push-design.md
 //
@@ -11,9 +11,6 @@ import { slotKey, bjtDateStr, getBases } from './lib';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS } from './templates';
 import { pushDeerAlert } from '../notifier';
-import {
-  DIGEST_POOL_STAGE_SOURCES,
-} from './pool-rebuild';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
@@ -199,15 +196,22 @@ export const DAILY_CODEX_EXPECTED_STAGES = ['foundation', 'editorial', 'papers']
 export type DailyCodexInputStage = (typeof DAILY_CODEX_EXPECTED_STAGES)[number];
 export type DailyCodexStage = DailyCodexInputStage | 'finalize';
 
-const FINAL_SECTION_ORDER: readonly DigestSource[] = ['news', 'x', 'ph', 'gh', 'hf-paper'];
+// 这是日报视频专用的来源契约。共享 digest_pool 的 editorial 阶段仍会刷新
+// news/X，供邮件、静态日报等业务使用；视频 payload 只选择 news。
+const DAILY_CODEX_STAGE_SOURCES: Record<DailyCodexInputStage, readonly DigestSource[]> = {
+  foundation: ['ph', 'gh'],
+  editorial: ['news'],
+  papers: ['hf-paper'],
+};
+const FINAL_SECTION_ORDER: readonly DigestSource[] = ['news', 'ph', 'gh', 'hf-paper'];
 
 function sourcesForStage(stage: DailyCodexStage): readonly DigestSource[] {
-  return stage === 'finalize' ? FINAL_SECTION_ORDER : DIGEST_POOL_STAGE_SOURCES[stage];
+  return stage === 'finalize' ? FINAL_SECTION_ORDER : DAILY_CODEX_STAGE_SOURCES[stage];
 }
 
 function inputStageForSource(source: DigestSource): DailyCodexInputStage {
   if (source === 'ph' || source === 'gh') return 'foundation';
-  if (source === 'news' || source === 'x') return 'editorial';
+  if (source === 'news') return 'editorial';
   if (source === 'hf-paper') return 'papers';
   throw new Error(`unsupported_staged_source:${source}`);
 }
@@ -388,7 +392,7 @@ async function loadLockedStageSnapshots(
     const snapshotHash = `sha256:${await sha256Hex(stableJson(state.snapshot))}`;
     if (snapshotHash !== state.content_hash) throw new Error(`stage_snapshot_hash_mismatch:${stage}`);
 
-    const expectedSources = new Set(DIGEST_POOL_STAGE_SOURCES[stage]);
+    const expectedSources = new Set(DAILY_CODEX_STAGE_SOURCES[stage]);
     const seenSources = new Set<DigestSource>();
     for (const section of state.snapshot.sections.normal) {
       if (!expectedSources.has(section.source) || seenSources.has(section.source)) {

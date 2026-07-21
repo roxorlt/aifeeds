@@ -190,7 +190,8 @@ async function runDigestNodeWorkflowCore(
     if (stagedEight) {
       try {
         // 正常路径只读前两批状态。只有状态不存在或没有成功 push 标记时才补建/补推，
-        // 不在 08:00 无条件重跑 PH/GH/news/X 选择器。
+        // 不在 08:00 无条件重跑 PH/GH/news/X 共享池选择器；视频推送会在其
+        // 专用 payload 层从 editorial 共享池中只选择 news。
         await recoverPriorStagePushes(env, step, date);
         await pushStageStep(env, step, date, 'papers');
         await pushStageStep(env, step, date, 'finalize');
