@@ -24,6 +24,7 @@ if [[ "$TEST_MODE" == "1" ]]; then
   NGINX=${AIFEEDS_NGINX:?}
   CURL=${AIFEEDS_CURL:?}
   FLOCK=${AIFEEDS_FLOCK:?}
+  PYTHON=${AIFEEDS_PYTHON_BIN:?}
   ROOT_UID=${AIFEEDS_ROOT_UID:?}
   ROOT_GID=${AIFEEDS_ROOT_GID:?}
 else
@@ -43,6 +44,7 @@ else
   NGINX=/www/server/nginx/sbin/nginx
   CURL=/usr/bin/curl
   FLOCK=/usr/bin/flock
+  PYTHON=/usr/bin/python3
   ROOT_UID=0
   ROOT_GID=0
 fi
@@ -80,6 +82,7 @@ INSTALLER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SECURITY_TOOL=${AIFEEDS_FIXED_SECURITY_TOOL:-$INSTALLER_DIR/deployment-security.mjs}
 FILE_TOOL=${AIFEEDS_FIXED_FILE_TOOL:-$INSTALLER_DIR/deployment-file-transaction.mjs}
 NGINX_TRANSACTION_TOOL=${AIFEEDS_FIXED_NGINX_TOOL:-$INSTALLER_DIR/nginx-config-transaction.mjs}
+LINUX_FS_HELPER=${AIFEEDS_FIXED_LINUX_FS_HELPER:-$INSTALLER_DIR/deployment-linux-fs.py}
 if [[ ! -f "$SECURITY_TOOL" || -L "$SECURITY_TOOL" ]]; then
   echo "ERROR: fixed deployment verifier is missing or unsafe" >&2
   exit 1
@@ -92,8 +95,28 @@ if [[ ! -f "$NGINX_TRANSACTION_TOOL" || -L "$NGINX_TRANSACTION_TOOL" ]]; then
   echo "ERROR: fixed Nginx transaction helper is missing or unsafe" >&2
   exit 1
 fi
-
+if [[ ! -f "$LINUX_FS_HELPER" || -L "$LINUX_FS_HELPER" ]]; then
+  echo "ERROR: fixed Linux filesystem helper is missing or unsafe" >&2
+  exit 1
+fi
 PATH_BOUNDARY=${DEPLOY_ROOT:-/}
+if ! PYTHON=$("$NODE" "$SECURITY_TOOL" resolve-executable \
+  "$PATH_BOUNDARY" "$PYTHON" /usr/bin "$ROOT_UID"); then
+  echo "ERROR: fixed Python interpreter chain is missing or unsafe" >&2
+  exit 1
+fi
+if [[ "$TEST_MODE" != 1 && "$(uname -s)" != Linux ]]; then
+  echo "ERROR: snapshot directory transactions require Linux" >&2
+  exit 1
+fi
+
+"$NODE" "$SECURITY_TOOL" validate-chain \
+  "$PATH_BOUNDARY" /run "$ROOT_UID" false
+if ! "$PYTHON" "$LINUX_FS_HELPER" probe \
+  "$(rooted /run)" "$ROOT_UID" "$ROOT_GID"; then
+  echo "ERROR: required Linux filesystem transaction capability is unavailable" >&2
+  exit 1
+fi
 LOCK_FILE=$("$NODE" "$SECURITY_TOOL" prepare-lock \
   "$PATH_BOUNDARY" "$ROOT_UID" "$ROOT_GID")
 exec 9<>"$LOCK_FILE"
@@ -102,9 +125,17 @@ if ! "$FLOCK" -n 9; then
   exit 75
 fi
 
-SNAPSHOT_PARENT=$(rooted /var/tmp)
-"$INSTALL" -d -o root -g root -m 0755 "$SNAPSHOT_PARENT"
+SNAPSHOT_PARENT=$(rooted /var/lib/aifeeds-cc-deploy-snapshots)
+"$NODE" "$SECURITY_TOOL" validate-chain \
+  "$PATH_BOUNDARY" /var "$ROOT_UID" false
+"$NODE" "$SECURITY_TOOL" validate-chain \
+  "$PATH_BOUNDARY" /var/lib "$ROOT_UID" false
+"$NODE" "$SECURITY_TOOL" ensure-snapshot-parent \
+  "$SNAPSHOT_PARENT" "$ROOT_UID" "$ROOT_GID" >/dev/null
 SNAPSHOT=$(mktemp -d "$SNAPSHOT_PARENT/aifeeds-cc-root-snapshot.XXXXXX")
+IFS=$'\t' read -r snapshot_dev snapshot_ino snapshot_uid snapshot_gid snapshot_mode < <(
+  "$PYTHON" "$LINUX_FS_HELPER" inspect-directory "$SNAPSHOT"
+)
 ROLLBACK="$SNAPSHOT/.rollback"
 TIMER=aifeeds-cc-sync.timer
 SERVICE=aifeeds-cc-sync.service
@@ -121,11 +152,10 @@ service_active_before=inactive
 service_quiesced=0
 timer_quiesced=0
 timer_disabled=0
-service_stop_attempted=0
-timer_stop_attempted=0
-timer_disable_attempted=0
 new_service_start_attempted=0
 new_timer_activation_attempted=0
+recovery_in_progress=0
+PREPARING_NGINX_TRANSACTION="$ROLLBACK/nginx"
 opt_switched=0
 env_installed=0
 service_installed=0
@@ -138,6 +168,13 @@ state_root_ino=""
 item_root_created=0
 item_root_dev=""
 item_root_ino=""
+
+cleanup_snapshot() {
+  if [[ ! -e "$SNAPSHOT" && ! -L "$SNAPSHOT" ]]; then return 0; fi
+  "$PYTHON" "$LINUX_FS_HELPER" remove-directory-bound \
+    "$SNAPSHOT" "$snapshot_dev" "$snapshot_ino" \
+    "$snapshot_uid" "$snapshot_gid" "$snapshot_mode"
+}
 
 cleanup_created_roots() {
   local failed=0
@@ -185,121 +222,280 @@ cleanup_created_account() {
   sync_account_created=0
 }
 
-rollback_nginx() {
-  local failed=0
-  if ((nginx_mutated == 0)); then return 0; fi
-  "$NODE" "$NGINX_TRANSACTION_TOOL" rollback "$ROLLBACK/nginx" || failed=1
-  "$NGINX" -t || failed=1
-  "$NGINX" -s reload || failed=1
-  return "$failed"
+record_recovery_step() {
+  "$NODE" "$FILE_TOOL" recovery-step \
+    "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" \
+    "$1" "$2"
+}
+
+begin_recovery_step() {
+  local result
+  result=$(record_recovery_step "$1" attempted) || return $?
+  case "$result" in
+    attempted) return 0 ;;
+    completed) return 2 ;;
+    *) echo "ERROR: invalid recovery step result for $1" >&2; return 1 ;;
+  esac
+}
+
+complete_recovery_step() {
+  local result
+  result=$(record_recovery_step "$1" completed) || return $?
+  [[ "$result" == completed ]]
+}
+
+begin_or_skip_recovery_step() {
+  begin_recovery_step "$1"
+  local status=$?
+  if ((status == 2)); then return 3; fi
+  if ((status != 0)); then return "$status"; fi
+  return 0
+}
+
+stop_candidate_timer() {
+  local step=candidate_timer_stop
+  local command_status=0
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
+  capture_systemctl is-active "$TIMER"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    3:inactive) ;;
+    0:active)
+      "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || command_status=$?
+      capture_systemctl is-active "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  complete_recovery_step "$step" || return $?
+  return "$command_status"
+}
+
+disable_candidate_timer() {
+  local step=candidate_timer_disable
+  local command_status=0
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
+  capture_systemctl is-enabled "$TIMER"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    1:disabled|4:not-found) ;;
+    0:enabled)
+      "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1 || command_status=$?
+      capture_systemctl is-enabled "$TIMER"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 1:disabled \
+        || "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 4:not-found ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  complete_recovery_step "$step" || return $?
+  return "$command_status"
+}
+
+stop_candidate_service() {
+  local step=candidate_service_stop
+  local command_status=0
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
+  capture_systemctl is-active "$SERVICE"
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    3:inactive) ;;
+    0:active|0:activating)
+      "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || command_status=$?
+      capture_systemctl is-active "$SERVICE"
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  complete_recovery_step "$step" || return $?
+  return "$command_status"
 }
 
 stop_candidate_units() {
-  local failed=0
-  if ((new_timer_activation_attempted == 1)); then
-    "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || failed=1
-    "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1 || failed=1
+  stop_candidate_timer || return $?
+  disable_candidate_timer || return $?
+  stop_candidate_service || return $?
+}
+
+rollback_nginx() {
+  local step=nginx_rollback
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
   fi
-  if ((new_service_start_attempted == 1)); then
-    "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || failed=1
+  if [[ -e "$PREPARING_NGINX_TRANSACTION" \
+    || -L "$PREPARING_NGINX_TRANSACTION" ]]; then
+    if [[ ! -d "$PREPARING_NGINX_TRANSACTION" \
+      || -L "$PREPARING_NGINX_TRANSACTION" ]]; then
+      echo "ERROR: recovered Nginx transaction is unsafe" >&2
+      return 1
+    fi
+    "$NODE" "$NGINX_TRANSACTION_TOOL" rollback \
+      "$PREPARING_NGINX_TRANSACTION" || return $?
+    "$NGINX" -t || return $?
+    "$NGINX" -s reload || return $?
   fi
-  return "$failed"
+  complete_recovery_step "$step"
+}
+
+rollback_preparing_paths() {
+  local step=paths_rollback
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
+  "$NODE" "$FILE_TOOL" rollback-preparing \
+    "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" \
+    >/dev/null || return $?
+  complete_recovery_step "$step"
+}
+
+reload_recovered_units() {
+  local step=daemon_reload
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
+  "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || return $?
+  complete_recovery_step "$step"
 }
 
 restore_original_service_state() {
+  local step=restore_service
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
   capture_systemctl is-active "$SERVICE"
   case "$service_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
     active:0:active|active:0:activating|activating:0:active|activating:0:activating)
-      return 0 ;;
+      ;;
     active:3:inactive|activating:3:inactive)
       "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$SERVICE"
       [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active \
-        || "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:activating ]] ;;
+        || "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:activating ]] || return 1 ;;
     inactive:3:inactive)
-      return 0 ;;
+      ;;
     inactive:0:active|inactive:0:activating)
       "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$SERVICE"
-      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] ;;
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] || return 1 ;;
     *)
       return 1 ;;
   esac
+  complete_recovery_step "$step"
 }
 
 restore_original_timer_enablement() {
+  local step=restore_timer_enablement
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
   capture_systemctl is-enabled "$TIMER"
   case "$timer_enabled_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
     enabled:0:enabled)
-      return 0 ;;
+      ;;
     enabled:1:disabled)
       "$SYSTEMCTL" enable "$TIMER" >/dev/null 2>&1 || return 1
       capture_systemctl is-enabled "$TIMER"
-      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:enabled ]] ;;
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:enabled ]] || return 1 ;;
     disabled:1:disabled|not-found:4:not-found)
-      return 0 ;;
+      ;;
     disabled:0:enabled)
       "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1 || return 1
       capture_systemctl is-enabled "$TIMER"
-      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 1:disabled ]] ;;
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 1:disabled ]] || return 1 ;;
     *)
       return 1 ;;
   esac
+  complete_recovery_step "$step"
 }
 
 restore_original_timer_activity() {
+  local step=restore_timer_activity
+  if begin_or_skip_recovery_step "$step"; then
+    :
+  else
+    local status=$?
+    if ((status == 3)); then return 0; fi
+    return "$status"
+  fi
   capture_systemctl is-active "$TIMER"
   case "$timer_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
     active:0:active)
-      return 0 ;;
+      ;;
     active:3:inactive)
       "$SYSTEMCTL" start "$TIMER" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$TIMER"
-      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active ]] ;;
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active ]] || return 1 ;;
     inactive:3:inactive)
-      return 0 ;;
+      ;;
     inactive:0:active)
       "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$TIMER"
-      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] ;;
+      [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 3:inactive ]] || return 1 ;;
     *)
       return 1 ;;
   esac
+  complete_recovery_step "$step"
+}
+
+recover_preparing_install() {
+  recovery_in_progress=1
+  stop_candidate_units || return $?
+  rollback_nginx || return $?
+  rollback_preparing_paths || return $?
+  reload_recovered_units || return $?
+  restore_original_service_state || return $?
+  restore_original_timer_enablement || return $?
+  restore_original_timer_activity || return $?
+  "$NODE" "$FILE_TOOL" complete-preparing \
+    "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" >/dev/null \
+    || return $?
+  recovery_in_progress=0
 }
 
 rollback_install() {
   local failed=0
-  rollback_nginx || failed=1
-  stop_candidate_units || failed=1
+  recover_preparing_install || failed=1
   cleanup_created_roots || failed=1
-  if ((opt_switched == 1)); then
-    "$NODE" "$FILE_TOOL" rollback-path \
-      "$OPT" opt "$EXPECTED_MANIFEST_DIGEST" || failed=1
-  fi
-  if ((env_installed == 1)); then
-    "$NODE" "$FILE_TOOL" rollback-path \
-      "$ENV_FILE" env "$EXPECTED_MANIFEST_DIGEST" || failed=1
-  fi
-  if ((service_installed == 1)); then
-    "$NODE" "$FILE_TOOL" rollback-path \
-      "$UNIT_DIR/$SERVICE" service "$EXPECTED_MANIFEST_DIGEST" || failed=1
-  fi
-  if ((timer_installed == 1)); then
-    "$NODE" "$FILE_TOOL" rollback-path \
-      "$UNIT_DIR/$TIMER" timer "$EXPECTED_MANIFEST_DIGEST" || failed=1
-  fi
-  if ((service_installed == 1 || timer_installed == 1)); then
-    "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || failed=1
-  fi
-  if ((service_stop_attempted == 1 || new_service_start_attempted == 1)); then
-    restore_original_service_state || failed=1
-  fi
-  if ((timer_disable_attempted == 1 || new_timer_activation_attempted == 1)); then
-    restore_original_timer_enablement || failed=1
-  fi
-  if ((timer_stop_attempted == 1 || new_timer_activation_attempted == 1)); then
-    restore_original_timer_activity || failed=1
-  fi
   service_quiesced=0
   timer_disabled=0
   timer_quiesced=0
@@ -318,19 +514,16 @@ on_exit() {
   local preserve_snapshot=0
   trap - EXIT
   set +e
-  if ((status != 0 && transaction_prepared == 1 && deployment_committed == 0)); then
+  if ((status != 0 && transaction_prepared == 1 \
+    && deployment_committed == 0 && recovery_in_progress == 0)); then
     if ! rollback_install; then
       echo "ERROR: deployment rollback was incomplete" >&2
       status=70
       preserve_snapshot=1
-    elif ! "$NODE" "$FILE_TOOL" complete-preparing \
-      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
-      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
-      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" >/dev/null; then
-      echo "ERROR: preparing deployment rollback could not be completed" >&2
-      status=70
-      preserve_snapshot=1
     fi
+  elif ((status != 0 && transaction_prepared == 1 \
+    && deployment_committed == 0 && recovery_in_progress == 1)); then
+    preserve_snapshot=1
   fi
   if ((status != 0 && deployment_committed == 0)); then
     if ! cleanup_created_roots || ! cleanup_created_account; then
@@ -342,7 +535,11 @@ on_exit() {
     echo "WARNING: preserving rollback snapshot for preparing recovery: $SNAPSHOT" >&2
     rm -rf -- "$STAGING"
   else
-    rm -rf -- "$SNAPSHOT" "$STAGING"
+    if ! cleanup_snapshot; then
+      echo "ERROR: root snapshot cleanup was incomplete" >&2
+      status=70
+    fi
+    rm -rf -- "$STAGING"
   fi
   exit "$status"
 }
@@ -357,6 +554,9 @@ find -P "$SNAPSHOT" -type f -exec chmod 0644 {} +
 chmod 0600 "$SNAPSHOT/deploy/cc-sync.env" "$SNAPSHOT/MANIFEST.sha256"
 "$NODE" "$SECURITY_TOOL" verify-payload \
   "$SNAPSHOT" "$EXPECTED_MANIFEST_DIGEST"
+IFS=$'\t' read -r snapshot_dev snapshot_ino snapshot_uid snapshot_gid snapshot_mode < <(
+  "$PYTHON" "$LINUX_FS_HELPER" inspect-directory "$SNAPSHOT"
+)
 
 ENV_SOURCE="$SNAPSHOT/deploy/cc-sync.env"
 env_secret=""
@@ -456,6 +656,37 @@ capture_systemctl() {
   return 0
 }
 
+abort_unmodified_preparation() {
+  if ((transaction_prepared != 1 || nginx_mutated != 0 \
+    || release_created != 0 || opt_switched != 0 || env_installed != 0 \
+    || service_installed != 0 || timer_installed != 0 \
+    || service_quiesced != 0 || timer_quiesced != 0 || timer_disabled != 0 \
+    || new_service_start_attempted != 0 || new_timer_activation_attempted != 0)); then
+    return 1
+  fi
+  capture_systemctl is-active "$SERVICE"
+  case "$service_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    active:0:active|activating:0:activating|inactive:3:inactive) ;;
+    *) return 1 ;;
+  esac
+  capture_systemctl is-active "$TIMER"
+  case "$timer_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    active:0:active|inactive:3:inactive) ;;
+    *) return 1 ;;
+  esac
+  capture_systemctl is-enabled "$TIMER"
+  case "$timer_enabled_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    enabled:0:enabled|disabled:1:disabled|not-found:4:not-found) ;;
+    *) return 1 ;;
+  esac
+  "$NODE" "$FILE_TOOL" abort-unmodified-preparing \
+    "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" \
+    >/dev/null || return $?
+  transaction_prepared=0
+}
+
 if [[ -L "$OPT" ]]; then
   "$NODE" "$SECURITY_TOOL" validate-live-release \
     "$OPT" "$RELEASES" "$ROOT_UID" "$ROOT_GID" >/dev/null
@@ -530,6 +761,22 @@ if [[ "$timer_load_before:$timer_enabled_before" != loaded:enabled \
   exit 1
 fi
 
+ROOT_OWNERS="$ROOT_UID"
+for chain in \
+  "/opt:$ROOT_OWNERS:true" \
+  "/opt/aifeeds-cc-sync-releases:$ROOT_OWNERS:true" \
+  "/etc:$ROOT_OWNERS:true" \
+  "/etc/aifeeds:$ROOT_OWNERS:true" \
+  "/etc/systemd/system:$ROOT_OWNERS:true" \
+  "/var/lib:$ROOT_OWNERS:true"; do
+  logical=${chain%%:*}
+  remainder=${chain#*:}
+  owners=${remainder%%:*}
+  allow_missing=${remainder#*:}
+  "$NODE" "$SECURITY_TOOL" validate-chain \
+    "$PATH_BOUNDARY" "$logical" "$owners" "$allow_missing"
+done
+
 www_passwd=$("$GETENT" passwd www) || {
   echo "ERROR: required www account does not exist" >&2
   exit 1
@@ -546,6 +793,8 @@ if [[ "$www_name" != www || "$www_group_name" != www \
   echo "ERROR: invalid www account identity" >&2
   exit 1
 fi
+# Account creation is a deliberately narrow, non-transactional bootstrap side
+# effect. All root-owned path chains are validated before reaching this point.
 if ! sync_passwd=$("$GETENT" passwd aifeeds-sync); then
   "$USERADD" -r -g www -d /nonexistent -s /sbin/nologin aifeeds-sync
   sync_account_created=1
@@ -566,23 +815,8 @@ if [[ "$sync_name" != aifeeds-sync \
 fi
 sync_passwd_recorded=$sync_passwd
 
-ROOT_OWNERS="$ROOT_UID"
 WEB_OWNERS="$ROOT_UID,$WWW_UID"
 WRITABLE_OWNERS="$ROOT_UID,$WWW_UID,$SYNC_UID"
-for chain in \
-  "/opt:$ROOT_OWNERS:true" \
-  "/opt/aifeeds-cc-sync-releases:$ROOT_OWNERS:true" \
-  "/etc:$ROOT_OWNERS:true" \
-  "/etc/aifeeds:$ROOT_OWNERS:true" \
-  "/etc/systemd/system:$ROOT_OWNERS:true" \
-  "/var/lib:$ROOT_OWNERS:true"; do
-  logical=${chain%%:*}
-  remainder=${chain#*:}
-  owners=${remainder%%:*}
-  allow_missing=${remainder#*:}
-  "$NODE" "$SECURITY_TOOL" validate-chain \
-    "$PATH_BOUNDARY" "$logical" "$owners" "$allow_missing"
-done
 for chain in \
   "/var/lib/aifeeds-cc-sync:$WRITABLE_OWNERS:true" \
   "/www:$WEB_OWNERS:false" \
@@ -621,28 +855,8 @@ case "$recovery_phase" in
     service_active_before=$recovery_service_active
     timer_active_before=$recovery_timer_active
     timer_enabled_before=$recovery_timer_enabled
-    if [[ -e "$recovery_nginx" || -L "$recovery_nginx" ]]; then
-      if [[ ! -d "$recovery_nginx" || -L "$recovery_nginx" ]]; then
-        echo "ERROR: recovered Nginx transaction is unsafe" >&2
-        exit 1
-      fi
-      "$NODE" "$NGINX_TRANSACTION_TOOL" rollback "$recovery_nginx"
-      "$NGINX" -t
-      "$NGINX" -s reload
-    fi
-    new_service_start_attempted=1
-    new_timer_activation_attempted=1
-    stop_candidate_units
-    "$SYSTEMCTL" daemon-reload
-    restore_original_service_state
-    restore_original_timer_enablement
-    restore_original_timer_activity
-    "$NODE" "$FILE_TOOL" complete-preparing \
-      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
-      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
-      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE" >/dev/null
-    new_service_start_attempted=0
-    new_timer_activation_attempted=0
+    PREPARING_NGINX_TRANSACTION=$recovery_nginx
+    recover_preparing_install
     ;;
   *)
     echo "ERROR: invalid global deployment recovery phase" >&2
@@ -702,7 +916,6 @@ transaction_prepared=1
 
 if [[ "$service_active_before" == active \
   || "$service_active_before" == activating ]]; then
-  service_stop_attempted=1
   set +e
   "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1
   service_stop_status=$?
@@ -717,6 +930,7 @@ if [[ "$service_active_before" == active \
   esac
   if ((service_stop_status != 0)); then
     echo "ERROR: systemctl stop failed for $SERVICE" >&2
+    abort_unmodified_preparation || true
     exit "$service_stop_status"
   fi
   if ((service_quiesced != 1)); then
@@ -725,7 +939,6 @@ if [[ "$service_active_before" == active \
   fi
 fi
 if [[ "$timer_active_before" == active ]]; then
-  timer_stop_attempted=1
   set +e
   "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1
   timer_stop_status=$?
@@ -748,7 +961,6 @@ if [[ "$timer_active_before" == active ]]; then
   fi
 fi
 if [[ "$timer_enabled_before" == enabled ]]; then
-  timer_disable_attempted=1
   set +e
   "$SYSTEMCTL" disable "$TIMER" >/dev/null 2>&1
   timer_disable_status=$?
@@ -932,17 +1144,18 @@ set +e
 global_commit_status=$?
 set -e
 if ((global_commit_status != 0)); then
-  if [[ -e "$GLOBAL_COMMITTED" || -L "$GLOBAL_COMMITTED" ]]; then
+  set +e
+  committed_recovery=$("$NODE" "$FILE_TOOL" recover-global \
+    "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
+    "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE")
+  committed_recovery_status=$?
+  set -e
+  if ((committed_recovery_status == 0)) \
+    && [[ "$committed_recovery" == committed ]]; then
     deployment_committed=1
-    committed_recovery=$("$NODE" "$FILE_TOOL" recover-global \
-      "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
-      "$RELEASES" "$ROOT_UID" "$ROOT_GID" \
-      "$OPT" "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$TIMER" "$ENV_FILE")
-    if [[ "$committed_recovery" != committed ]]; then
-      echo "ERROR: failed global commit did not recover as committed" >&2
-      exit 70
-    fi
   else
+    echo "ERROR: failed global commit did not validate as committed" >&2
     exit "$global_commit_status"
   fi
 else

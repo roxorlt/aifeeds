@@ -85,9 +85,14 @@ systemd unit；本地和远端都有退出清理 trap。
 远端顺序固定为：
 
 1. 将 installer 和所有事务 helper 固定到唯一、root-owned 的
-   `/var/tmp/aifeeds-cc-bootstrap.*`，逐个核对 SHA-256 后才执行；
-2. 获取非阻塞部署锁，把 staging 复制成 root-owned snapshot，并在改动 live state 前
-   两次验证 manifest、文件类型和 link count；
+   `/var/tmp/aifeeds-cc-bootstrap.*`，逐个核对 SHA-256 后才执行；其中目录事务 helper
+   固定为 root-only `deployment-linux-fs.fixed.py`，生产要求 Linux、glibc 与
+   `/usr/bin/python3`。Python 可使用 Debian 常见的 root-owned 相对 symlink，但每层目录、
+   link owner 和最终 executable 都必须留在不可写的 `/usr/bin` 信任链；安装器随后在
+   `/run` 下执行并清零一次 `RENAME_NOREPLACE`/dirfd capability probe；
+2. 获取非阻塞部署锁，把 staging 复制到 root:root `0700` 的
+   `/var/lib/aifeeds-cc-deploy-snapshots` 下形成 root-owned snapshot，并在改动 live state 前
+   两次验证 manifest、文件类型和 link count；安装器不会 chmod/chown `/var/tmp`；
 3. 验证系统账号、所有 managed path 的 owner/mode/目录链和现有 `/i` inode tree，
    检查 Node 18+，再以 `aifeeds-sync` 用户运行 payload 内的真实完整测试；
 4. 记录旧 symlink、env、unit 及 timer/service 的 enabled/active 状态，停止旧任务；
@@ -111,6 +116,30 @@ HTTP 神马验证例外、`/auth/wechat/` 和其他业务 location。HTTPS block
 Nginx 配置、reload、精确内容探针或 timer 激活失败时，脚本事务恢复旧 release symlink、
 env、unit、service/timer 状态和未发生并发冲突的 vhost/snippet；任何回滚步骤失败时明确
 返回 70。
+
+pre-commit 恢复由 root-owned preparing marker 持久化驱动。恢复顺序固定为先停止/禁用
+candidate timer 和 service，再回滚 Nginx 与四个 live path，`daemon-reload` 后才恢复原
+service/timer 状态；每个 systemd 动作先记 `attempted`、验证成功后记 `completed`。若进程在
+动作窗口被 SIGKILL，下一次部署只做校验并因 `attempted` 状态 fail closed，不会猜测动作
+结果。若 `systemctl stop` 明确返回非零且复查确认所有 unit 状态精确未变、四个 path 仍为
+planned、Nginx 尚未 prepare，则只撤销这个未改动的 preparing 事务并保留原错误码。
+
+marker 的创建、替换和删除都先 fsync root-private `.marker-mutation.<uuid>.json` operation
+record；候选 inode 另由 self-contained identity receipt 绑定。恢复会在读取 preparing、
+committed 或 cleanup receipt canonical 之前，按 operation record 与精确文件系统 tuple 逐步
+继续，直到 canonical 内容/phase、link count 和临时证据都收敛；并发运维替换、同 inode
+改写、ABA、外来 candidate/quarantine 或 record 漂移都会保留对方文件并 fail closed。
+
+preparing marker 同时绑定唯一
+`/var/lib/aifeeds-cc-deploy-snapshots/aifeeds-cc-root-snapshot.*` 的
+dev/ino/owner/mode。历史 marker 仍可引用 `/var/tmp/aifeeds-cc-root-snapshot.*`，但只在
+`/var/tmp` 为 root-owned、非 symlink、`01777` 时只读兼容，绝不修复其 mode/owner。成功恢复
+会先写 cleanup receipt，再用 Linux `renameat2(RENAME_NOREPLACE)` 将精确 snapshot inode
+隔离；递归清理由 directory fd、`openat`/`fstatat`/`unlinkat` 约束，不通过可被替换的 pathname
+向下遍历。若进程在 marker 或 snapshot cleanup 的任一 durable 边界被杀，下一次部署只会
+继续 operation/receipt 精确绑定的对象，避免覆盖运维替换或遗留含环境密钥的 snapshot。
+这些保护假设 snapshot parent、journal 与固定 helper 的 root-only 目录链没有被同权限 root
+主动篡改；发现链路、owner、mode、symlink 或 helper digest 异常时直接停止。
 
 ## 运维与回滚
 

@@ -23,6 +23,7 @@ cc-site/sync/client.mjs
 cc-site/sync/config.mjs
 cc-site/sync/deploy-to-cc.sh
 cc-site/sync/deployment-file-transaction.mjs
+cc-site/sync/deployment-linux-fs.py
 cc-site/sync/deployment-security.mjs
 cc-site/sync/fs-safe.mjs
 cc-site/sync/install-remote.sh

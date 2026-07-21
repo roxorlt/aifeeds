@@ -13,6 +13,7 @@ import {
   readlink,
   rename,
   rm,
+  rmdir,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -187,6 +188,100 @@ export async function validateDirectoryChain({
   }
 }
 
+function pathIsWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (
+    relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function logicalPathForBoundary(boundary, physical) {
+  const relative = path.relative(boundary, physical);
+  if (!pathIsWithin(boundary, physical)) {
+    throw new Error('trusted executable escaped its deployment boundary');
+  }
+  return `/${relative.split(path.sep).filter(Boolean).join('/')}`;
+}
+
+export async function resolveTrustedExecutable({
+  boundary,
+  executable,
+  logicalRoot,
+  uid,
+}) {
+  if (
+    !path.isAbsolute(boundary)
+    || path.normalize(boundary) !== boundary
+    || !path.isAbsolute(executable)
+    || path.normalize(executable) !== executable
+    || !path.posix.isAbsolute(logicalRoot)
+    || path.posix.normalize(logicalRoot) !== logicalRoot
+    || logicalRoot === '/'
+    || !Number.isInteger(uid)
+    || uid < 0
+  ) {
+    throw new Error('invalid trusted executable arguments');
+  }
+  const trustedRoot = path.join(
+    boundary,
+    ...logicalRoot.split('/').filter(Boolean),
+  );
+  if (!pathIsWithin(trustedRoot, executable)) {
+    throw new Error('trusted executable is outside its trusted system path');
+  }
+  await validateDirectoryChain({
+    allowMissing: false,
+    allowedUids: [uid],
+    boundary,
+    logicalPath: logicalPathForBoundary(boundary, trustedRoot),
+  });
+
+  const seen = new Set();
+  let current = executable;
+  for (let depth = 0; depth < 16; depth += 1) {
+    if (!pathIsWithin(trustedRoot, current)) {
+      throw new Error('trusted executable symlink escaped its trusted system path');
+    }
+    await validateDirectoryChain({
+      allowMissing: false,
+      allowedUids: [uid],
+      boundary,
+      logicalPath: logicalPathForBoundary(boundary, path.dirname(current)),
+    });
+    const before = await lstat(current);
+    if (before.uid !== uid) {
+      throw new Error('trusted executable chain has an unexpected owner');
+    }
+    if (before.isSymbolicLink()) {
+      const key = `${before.dev}:${before.ino}`;
+      if (seen.has(key)) {
+        throw new Error('trusted executable symlink loop detected');
+      }
+      seen.add(key);
+      const target = await readlink(current);
+      const after = await lstat(current);
+      if (after.dev !== before.dev || after.ino !== before.ino) {
+        throw new Error('trusted executable symlink changed during validation');
+      }
+      current = path.isAbsolute(target)
+        ? path.join(boundary, ...target.split('/').filter(Boolean))
+        : path.resolve(path.dirname(current), target);
+      continue;
+    }
+    if (
+      !before.isFile()
+      || (before.mode & 0o022) !== 0
+      || (before.mode & 0o111) === 0
+    ) {
+      throw new Error('trusted executable target is not a safe regular executable');
+    }
+    return current;
+  }
+  throw new Error('trusted executable symlink depth limit exceeded');
+}
+
 export async function validateItemTree(root) {
   if (!path.isAbsolute(root)) throw new Error('item root must be absolute');
   const walkTree = async (directory) => {
@@ -334,6 +429,77 @@ export async function ensureManagedRoot({ gid, kind, root, uid }) {
     dev: identity.dev,
     ino: identity.ino,
   };
+}
+
+export async function ensurePrivateSnapshotParent({ gid, root, uid }) {
+  if (
+    !path.isAbsolute(root)
+    || path.basename(root) !== 'aifeeds-cc-deploy-snapshots'
+    || path.basename(path.dirname(root)) !== 'lib'
+    || path.basename(path.dirname(path.dirname(root))) !== 'var'
+    || !Number.isInteger(uid)
+    || uid < 0
+    || !Number.isInteger(gid)
+    || gid < 0
+  ) {
+    throw new Error('invalid private snapshot parent arguments');
+  }
+  let identity = await lstatOptional(root);
+  let created = false;
+  let createdIdentity = null;
+  let handle = null;
+  try {
+    if (identity === null) {
+      await mkdir(root, { mode: 0o700 });
+      created = true;
+      handle = await open(
+        root,
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+      );
+      const before = await handle.stat();
+      if (!before.isDirectory()) {
+        throw new Error('created private snapshot parent is not a directory');
+      }
+      createdIdentity = { dev: before.dev, ino: before.ino };
+      await handle.chown(uid, gid);
+      await handle.chmod(0o700);
+      await handle.sync();
+      identity = await handle.stat();
+      await handle.close();
+      handle = null;
+      await syncDirectory(path.dirname(root));
+      const pathname = await lstat(root);
+      if (pathname.dev !== identity.dev || pathname.ino !== identity.ino) {
+        throw new Error('private snapshot parent pathname changed during creation');
+      }
+    }
+    if (
+      !identity.isDirectory()
+      || identity.isSymbolicLink()
+      || identity.uid !== uid
+      || identity.gid !== gid
+      || (identity.mode & 0o7777) !== 0o700
+    ) {
+      throw new Error('private snapshot parent has unsafe identity or mode');
+    }
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (createdIdentity !== null) {
+      const current = await lstatOptional(root).catch(() => null);
+      if (
+        current !== null
+        && current.isDirectory()
+        && !current.isSymbolicLink()
+        && current.dev === createdIdentity.dev
+        && current.ino === createdIdentity.ino
+      ) {
+        await rmdir(root).catch(() => {});
+      }
+      await syncDirectory(path.dirname(root)).catch(() => {});
+    }
+    throw error;
+  }
+  return { created, dev: identity.dev, ino: identity.ino };
 }
 
 export async function removeCreatedManagedRoot({
@@ -1077,6 +1243,13 @@ if (isMain) {
           allowedUids: args[2].split(',').map(Number),
           allowMissing: args[3] === 'true',
         });
+      } else if (command === 'resolve-executable' && args.length === 4) {
+        process.stdout.write(`${await resolveTrustedExecutable({
+          boundary: args[0],
+          executable: args[1],
+          logicalRoot: args[2],
+          uid: Number(args[3]),
+        })}\n`);
       } else if (command === 'validate-item-tree' && args.length === 1) {
         await validateItemTree(args[0]);
       } else if (command === 'ensure-managed-root' && args.length === 4) {
@@ -1088,6 +1261,15 @@ if (isMain) {
         });
         process.stdout.write(
           `${managedRoot.created ? 1 : 0}\t${managedRoot.dev}\t${managedRoot.ino}\n`,
+        );
+      } else if (command === 'ensure-snapshot-parent' && args.length === 3) {
+        const snapshotParent = await ensurePrivateSnapshotParent({
+          root: args[0],
+          uid: Number(args[1]),
+          gid: Number(args[2]),
+        });
+        process.stdout.write(
+          `${snapshotParent.created ? 1 : 0}\t${snapshotParent.dev}\t${snapshotParent.ino}\n`,
         );
       } else if (command === 'remove-created-root' && args.length === 6) {
         await removeCreatedManagedRoot({

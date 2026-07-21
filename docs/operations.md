@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-18（首页瀑布流 SSR opt-in 生产发布、经典默认、手动 SWR、五设备验收与回滚点已写入 §5a）
+最后更新：2026-07-20（新增 ai-feeds.cc 静态内容镜像同步器的事务部署与 fail-closed 恢复手册；代码完成，尚未部署）
+
+历史：2026-07-20（ai-feeds.cc 静态内容镜像同步器完成本地实现：海外 AI 内容双 gate、immutable generation/sitemap、systemd timer、Nginx 路由及全局 preparing/committed 部署事务；本轮未推送、未部署）
 
 历史：2026-05-09（ClawHub v2：抽屉内容跟 ClawHub 网页对齐。抓取从「自己解 ZIP 挑文件」改成「调 ClawHub 自家的 `skills:getReadme` 接口」，拿到啥就翻啥，不再纠结 README.md 还是 SKILL.md。新增「可疑 skill」处理：ClawHub 自家 LLM 标记的可疑项也拉回来，存 `extra.is_suspicious`，前端默认隐藏，开关切换时加 `?include_suspicious=true`。删除 `extra.skill_md`（ZIP 流程废弃）。详见下方「ClawHub」段）
 
@@ -4077,6 +4079,60 @@ curl -sS https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer 
 - ❌ 不要写到 `wrangler.toml` / 任何 git-tracked 文件
 - ❌ 子 token 一律带 `expires_on`，不要做永久 token
 - ✅ 操作完成后子 token 自动过期，不需要手动撤
+
+---
+
+## ai-feeds.cc 静态内容镜像（代码完成，未部署）
+
+实现与逐项命令以 [`cc-site/sync/README.md`](../cc-site/sync/README.md) 为准。同步器从生产 API
+读取已经翻译的海外 AI 内容，排除国内来源，并通过 `is_ai` 与对华负面双 gate 后生成
+immutable generation、根 sitemap 与 shard；详情按钮是用户主动跳往 `.com`，没有自动跳转。
+
+批准上线后从仓库根执行：
+
+```bash
+./cc-site/sync/deploy-to-cc.sh prod
+```
+
+部署前必须确认工作树对应已审阅 commit，不能从 dirty 或落后于目标分支的副本上传。部署器
+会先验证 root-only 目录链，再做最小账号 bootstrap；payload 用精确 allowlist 与 manifest
+绑定。远端全局事务覆盖 release symlink、env、service/timer unit 和 Nginx managed block。
+
+异常处理规则：
+
+- 明确 `systemctl` 失败且复查证明 unit 与四个 live path 均未变化时，安全撤销空 preparing
+  事务并透传原错误码。
+- systemd 动作被 SIGKILL、marker/receipt 身份不符、并发运维改写或任一回滚步骤无法确认时，
+  返回 70 并保留 preparing marker 与绑定 snapshot；不要手工删除 marker 或 snapshot。
+- 新 snapshot 位于 root:root `0700` 的 `/var/lib/aifeeds-cc-deploy-snapshots`；安装器不修改
+  `/var/tmp`。历史 `/var/tmp/aifeeds-cc-root-snapshot.*` marker 仅在 `/var/tmp` 是 root-owned、
+  非 symlink、`01777` 时只读兼容，错误 owner/mode 或 symlink 原样阻断。
+- 下一次部署会先恢复 root-private marker mutation operation record，再检查全局 marker。
+  create/replace/delete 都绑定 exact bytes、digest、inode 与 identity receipt；外来 canonical、
+  同 inode 改写、ABA、孤立 artifact 或 record 漂移均 fail closed。只有没有 `attempted` 模糊步骤时才按固定顺序停止
+  candidate units、回滚 Nginx/path、reload unit 并恢复原 service/timer 状态。
+- 成功恢复会通过 cleanup receipt 删除精确绑定的 root snapshot；receipt 存在时只能让下一次
+  部署继续恢复，不能用通配符清 snapshot。隔离使用 payload digest 固定的 Python 3 helper
+  调 Linux/glibc `renameat2(RENAME_NOREPLACE)`；清理通过 directory fd 与
+  `openat`/`fstatat`/`unlinkat` 完成。生产依赖 `/usr/bin/python3`，helper、journal 与 snapshot
+  parent 的 root-only 目录链属于信任边界。`python3` 可为 Debian 式相对 symlink，但所有 link
+  与 parent 必须由 root 控制、parent 不可 group/other writable，解析结果仍须位于 `/usr/bin`
+  且为不可写的 regular executable。安装器在创建部署锁、账号或 snapshot 前先于 `/run`
+  执行一次无覆盖 rename + dirfd cleanup probe；缺少 symbol、返回 `ENOSYS`、覆盖语义错误或
+  probe 残留都会阻断部署。
+
+上线后的常用检查：
+
+```bash
+sudo systemctl status aifeeds-cc-sync.timer
+sudo journalctl -u aifeeds-cc-sync.service -n 100
+curl -fsS https://ai-feeds.cc/sitemap.xml >/dev/null
+curl -fsS https://ai-feeds.cc/ai-news/ >/dev/null
+```
+
+首次三万页同步可续跑；失败后保留 `/var/lib/aifeeds-cc-sync`，修复原因后重新启动 service，
+不要删除 state 或手工改写 `public/current`。本节仅记录代码与 runbook，2026-07-20 尚未执行
+生产部署。
 
 ---
 

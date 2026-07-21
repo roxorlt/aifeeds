@@ -35,6 +35,7 @@ const SYNC_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
+const LINUX_FS_HELPER = path.join(SYNC_DIR, 'deployment-linux-fs.py');
 
 async function read(relativePath) {
   return readFile(path.join(SYNC_DIR, relativePath), 'utf8');
@@ -932,7 +933,7 @@ test('deployment path transactions never overwrite a concurrent live object', as
 });
 
 test('global journal publication recovers only its exact interrupted hard-link candidate', async (t) => {
-  const { recoverGlobalJournalCandidate } = await import(
+  const { publishGlobalJournalMarker, recoverGlobalJournalCandidate } = await import(
     '../deployment-file-transaction.mjs'
   );
   const fixtureScript = path.join(
@@ -944,7 +945,10 @@ test('global journal publication recovers only its exact interrupted hard-link c
   const uid = process.getuid();
   const gid = process.getgid();
 
-  async function killedPublication(phase) {
+  async function killedPublication(
+    phase,
+    hookName = 'afterMarkerPublishBeforeCandidateUnlink',
+  ) {
     const root = await mkdtemp(path.join(os.tmpdir(), `cc-global-${phase}-`));
     const journalDirectory = path.join(root, '.deployment-journal');
     const canonical = path.join(root, `.deployment-${phase}.json`);
@@ -959,6 +963,7 @@ test('global journal publication recovers only its exact interrupted hard-link c
       String(uid),
       String(gid),
       ready,
+      hookName,
     ], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
@@ -991,7 +996,9 @@ test('global journal publication recovers only its exact interrupted hard-link c
       assert.equal(canonicalBefore.isFile(), true);
       assert.equal(canonicalBefore.nlink, 2);
       const candidates = (await readdir(fixture.journalDirectory))
-        .filter((name) => name.startsWith(`.${phase}.`));
+        .filter((name) => (
+          name.startsWith('.marker-mutation.') && name.endsWith('.candidate')
+        ));
       assert.equal(candidates.length, 1);
       const candidate = path.join(fixture.journalDirectory, candidates[0]);
       const candidateIdentity = await lstat(candidate);
@@ -1008,8 +1015,93 @@ test('global journal publication recovers only its exact interrupted hard-link c
 
       assert.equal((await lstat(fixture.canonical)).nlink, 1);
       await assert.rejects(lstat(candidate), /ENOENT/);
+      assert.deepEqual(await readdir(fixture.journalDirectory), []);
     });
   }
+
+  await t.test('create interruption boundaries converge exactly', async (createT) => {
+    for (const phase of ['preparing', 'committed']) {
+      for (const hookName of [
+        'afterMutationRecordSync',
+        'afterMarkerCandidateSync',
+        'afterMarkerCanonicalPublishSync',
+        'afterMarkerCandidateRemovalSync',
+      ]) {
+        await createT.test(`${phase} ${hookName}`, async () => {
+          const fixture = await killedPublication(phase, hookName);
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const identity = await recoverGlobalJournalCandidate({
+              canonical: fixture.canonical,
+              gid,
+              journalDirectory: fixture.journalDirectory,
+              phase,
+              uid,
+            });
+            assert.equal(identity.isFile(), true);
+            assert.equal(identity.nlink, 1);
+          }
+          const marker = JSON.parse(await readFile(fixture.canonical, 'utf8'));
+          assert.equal(marker.phase, phase);
+          assert.deepEqual(await readdir(fixture.journalDirectory), []);
+        });
+      }
+    }
+  });
+
+  await t.test('foreign canonical during create is preserved and remains fail-closed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-global-create-conflict-'));
+    const journalDirectory = path.join(root, '.deployment-journal');
+    const canonical = path.join(root, '.deployment-preparing.json');
+    await mkdir(journalDirectory, { mode: 0o700 });
+    await assert.rejects(publishGlobalJournalMarker({
+      canonical,
+      gid,
+      hooks: {
+        async beforeMarkerLink() {
+          await writeFile(canonical, 'operator create marker\n', { mode: 0o600 });
+        },
+      },
+      journalDirectory,
+      marker: {
+        manifest: 'a'.repeat(64),
+        phase: 'preparing',
+        release: `/opt/aifeeds-cc-sync-releases/${'a'.repeat(64)}`,
+        schema: 2,
+        transactions: [],
+      },
+      phase: 'preparing',
+      uid,
+    }), /conflict|canonical|marker/i);
+    assert.equal(await readFile(canonical, 'utf8'), 'operator create marker\n');
+    await assert.rejects(recoverGlobalJournalCandidate({
+      canonical,
+      gid,
+      journalDirectory,
+      phase: 'preparing',
+      uid,
+    }), /conflict|canonical|marker/i);
+    assert.equal(await readFile(canonical, 'utf8'), 'operator create marker\n');
+  });
+
+  await t.test('same-inode operation record mutation fails closed', async () => {
+    const fixture = await killedPublication('preparing', 'afterMutationRecordSync');
+    const [recordName] = (await readdir(fixture.journalDirectory))
+      .filter((name) => name.endsWith('.json'));
+    assert.ok(recordName);
+    const record = path.join(fixture.journalDirectory, recordName);
+    const before = await lstat(record);
+    await writeFile(record, '{}\n');
+    const after = await lstat(record);
+    assert.equal(after.ino, before.ino);
+    await assert.rejects(recoverGlobalJournalCandidate({
+      canonical: fixture.canonical,
+      gid,
+      journalDirectory: fixture.journalDirectory,
+      phase: 'preparing',
+      uid,
+    }), /operation record|invalid|marker mutation/i);
+    assert.equal((await lstat(record)).ino, before.ino);
+  });
 
   async function adversarialFixture() {
     const root = await mkdtemp(path.join(os.tmpdir(), 'cc-global-adversarial-'));
@@ -1038,6 +1130,22 @@ test('global journal publication recovers only its exact interrupted hard-link c
       uid,
     }), /candidate|link/i);
     assert.equal((await lstat(fixture.canonical)).nlink, 3);
+  });
+
+  await t.test('orphan durable mutation artifact fails closed', async () => {
+    const fixture = await adversarialFixture();
+    const candidate = path.join(
+      fixture.journalDirectory,
+      '.marker-mutation.123e4567-e89b-42d3-a456-426614174000.candidate',
+    );
+    await writeFile(candidate, '{"phase":"preparing"}\n', { mode: 0o600 });
+    await assert.rejects(recoverGlobalJournalCandidate({
+      ...fixture,
+      gid,
+      phase: 'preparing',
+      uid,
+    }), /orphan|operation record|mutation artifact/i);
+    assert.equal((await lstat(candidate)).isFile(), true);
   });
 
   await t.test('different-inode controlled candidate fails closed', async () => {
@@ -1085,12 +1193,354 @@ test('global journal publication recovers only its exact interrupted hard-link c
   });
 });
 
+test('preparing marker update SIGKILL windows always recover exactly', async (t) => {
+  const { recoverGlobalDeployment, recoverGlobalJournalCandidate } = await import(
+    '../deployment-file-transaction.mjs'
+  );
+  const fixtureScript = path.join(
+    SYNC_DIR,
+    'test',
+    'fixtures',
+    'publish-and-pause.mjs',
+  );
+
+  for (const hookName of [
+    'afterMutationRecordSync',
+    'afterMarkerCandidateSync',
+    'afterMarkerQuarantineSync',
+    'afterMarkerCanonicalPublishSync',
+    'afterMarkerQuarantineRemovalSync',
+    'afterMarkerCandidateRemovalSync',
+  ]) {
+    await t.test(hookName, async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cc-marker-kill-'));
+      const ready = path.join(root, 'ready');
+      const child = spawn(process.execPath, [
+        fixtureScript,
+        'preparing-marker-update',
+        root,
+        hookName,
+        ready,
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let childError = '';
+      child.stderr.on('data', (chunk) => {
+        childError += chunk;
+      });
+      await Promise.race([
+        waitForPath(ready),
+        new Promise((_, reject) => {
+          child.once('exit', (code, signal) => {
+            reject(new Error(
+              `marker fixture exited before ${hookName}: ${code ?? signal}: ${childError}`,
+            ));
+          });
+        }),
+      ]);
+      child.kill('SIGKILL');
+      await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+
+      const releases = path.join(root, 'aifeeds-cc-sync-releases');
+      const preparingJournal = path.join(releases, '.deployment-preparing.json');
+      const committedJournal = path.join(releases, '.deployment-committed.json');
+      const journalDirectory = path.join(releases, '.deployment-journal');
+      const destinations = [
+        path.join(root, 'aifeeds-cc-sync'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.timer'),
+        path.join(root, 'aifeeds', 'cc-sync.env'),
+      ];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const recovered = await recoverGlobalJournalCandidate({
+          canonical: preparingJournal,
+          gid: process.getgid(),
+          journalDirectory,
+          phase: 'preparing',
+          uid: process.getuid(),
+        });
+        assert.equal(recovered.isFile(), true);
+        assert.equal(recovered.nlink, 1);
+        assert.equal((await stat(preparingJournal)).isFile(), true);
+      }
+      const marker = JSON.parse(await readFile(preparingJournal, 'utf8'));
+      assert.equal(marker.recovery.candidate_timer_stop, 'attempted');
+      assert.deepEqual(
+        (await readdir(journalDirectory)).filter((name) => (
+          name.startsWith('.marker-') || name.startsWith('.mutation-')
+        )),
+        [],
+      );
+      await assert.rejects(recoverGlobalDeployment({
+        committedJournal,
+        destinations,
+        gid: process.getgid(),
+        journalDirectory,
+        preparingJournal,
+        releases,
+        uid: process.getuid(),
+      }), /ambiguous preparing recovery step: candidate_timer_stop/);
+    });
+  }
+});
+
+test('cleanup receipt initial create SIGKILL windows recover exact durable evidence', async (t) => {
+  const {
+    completePreparingDeployment,
+    recoverGlobalDeployment,
+    recoverGlobalJournalCandidate,
+  } = await import('../deployment-file-transaction.mjs');
+  const fixtureScript = path.join(
+    SYNC_DIR,
+    'test',
+    'fixtures',
+    'publish-and-pause.mjs',
+  );
+
+  for (const hookName of [
+    'afterMutationRecordSync',
+    'afterMarkerCandidateSync',
+    'afterMarkerCanonicalPublishSync',
+    'afterMarkerCandidateRemovalSync',
+  ]) {
+    await t.test(hookName, async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cc-cleanup-create-kill-'));
+      const ready = path.join(root, 'ready');
+      const child = spawn(process.execPath, [
+        fixtureScript,
+        'cleanup-receipt-create',
+        root,
+        hookName,
+        ready,
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let childError = '';
+      child.stderr.on('data', (chunk) => {
+        childError += chunk;
+      });
+      await Promise.race([
+        waitForPath(ready),
+        new Promise((_, reject) => {
+          child.once('exit', (code, signal) => {
+            reject(new Error(
+              `cleanup create fixture exited before ${hookName}: `
+              + `${code ?? signal}: ${childError}`,
+            ));
+          });
+        }),
+      ]);
+      child.kill('SIGKILL');
+      await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+
+      const releases = path.join(root, 'aifeeds-cc-sync-releases');
+      const preparingJournal = path.join(releases, '.deployment-preparing.json');
+      const committedJournal = path.join(releases, '.deployment-committed.json');
+      const journalDirectory = path.join(releases, '.deployment-journal');
+      const destinations = [
+        path.join(root, 'aifeeds-cc-sync'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.timer'),
+        path.join(root, 'aifeeds', 'cc-sync.env'),
+      ];
+      const options = {
+        committedJournal,
+        destinations,
+        gid: process.getgid(),
+        journalDirectory,
+        preparingJournal,
+        releases,
+        uid: process.getuid(),
+      };
+      const marker = JSON.parse(await readFile(preparingJournal, 'utf8'));
+      const receipt = marker.snapshot.cleanup.receipt;
+      const expectedReceipt = {
+        canonical: marker.snapshot.path,
+        deployment_id: marker.snapshot.cleanup.deployment_id,
+        identity: {
+          dev: marker.snapshot.dev,
+          gid: marker.snapshot.gid,
+          ino: marker.snapshot.ino,
+          mode: marker.snapshot.mode,
+          uid: marker.snapshot.uid,
+        },
+        quarantine: marker.snapshot.cleanup.quarantine,
+        phase: 'planned',
+        schema: 2,
+      };
+      let canonicalBytes = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const recovered = await recoverGlobalJournalCandidate({
+          canonical: preparingJournal,
+          gid: options.gid,
+          journalDirectory,
+          phase: 'preparing',
+          uid: options.uid,
+        });
+        assert.equal(recovered.isFile(), true);
+        const identity = await lstat(receipt);
+        assert.equal(identity.isFile(), true);
+        assert.equal(identity.nlink, 1);
+        assert.equal(identity.mode & 0o7777, 0o600);
+        const bytes = await readFile(receipt);
+        assert.deepEqual(JSON.parse(bytes), expectedReceipt);
+        if (canonicalBytes === null) {
+          canonicalBytes = bytes;
+        } else {
+          assert.deepEqual(bytes, canonicalBytes);
+        }
+        assert.deepEqual(
+          (await readdir(journalDirectory)).filter((name) => (
+            name.startsWith('.marker-') || name.startsWith('.mutation-')
+          )),
+          [],
+        );
+      }
+      assert.equal(await completePreparingDeployment(options), 'cleared');
+      assert.deepEqual(await recoverGlobalDeployment(options), { phase: 'none' });
+      await assert.rejects(lstat(marker.snapshot.path), /ENOENT/);
+      assert.deepEqual(await readdir(journalDirectory), []);
+    });
+  }
+});
+
+test('preparing delete and cleanup receipt mutations survive real SIGKILL', async (t) => {
+  const {
+    recoverGlobalDeployment,
+    recoverGlobalMarkerMutations,
+  } = await import('../deployment-file-transaction.mjs');
+  const fixtureScript = path.join(
+    SYNC_DIR,
+    'test',
+    'fixtures',
+    'publish-and-pause.mjs',
+  );
+  const cases = [
+    {
+      hooks: [
+        'afterMutationRecordSync',
+        'afterMarkerQuarantineSync',
+        'afterMarkerQuarantineRemovalSync',
+      ],
+      mutation: 'preparing-delete',
+    },
+    {
+      hooks: [
+        'afterMutationRecordSync',
+        'afterMarkerCandidateSync',
+        'afterMarkerQuarantineSync',
+        'afterMarkerCanonicalPublishSync',
+        'afterMarkerQuarantineRemovalSync',
+        'afterMarkerCandidateRemovalSync',
+      ],
+      mutation: 'cleanup-replace',
+    },
+    {
+      hooks: [
+        'afterMutationRecordSync',
+        'afterMarkerQuarantineSync',
+        'afterMarkerQuarantineRemovalSync',
+      ],
+      mutation: 'cleanup-delete',
+    },
+  ];
+
+  for (const currentCase of cases) {
+    await t.test(currentCase.mutation, async (mutationT) => {
+      for (const hookName of currentCase.hooks) {
+        await mutationT.test(hookName, async () => {
+          const root = await mkdtemp(path.join(os.tmpdir(), 'cc-cleanup-kill-'));
+          const ready = path.join(root, 'ready');
+          const child = spawn(process.execPath, [
+            fixtureScript,
+            'cleanup-mutation',
+            root,
+            currentCase.mutation,
+            hookName,
+            ready,
+          ], { stdio: ['ignore', 'ignore', 'pipe'] });
+          let childError = '';
+          child.stderr.on('data', (chunk) => {
+            childError += chunk;
+          });
+          await Promise.race([
+            waitForPath(ready),
+            new Promise((_, reject) => {
+              child.once('exit', (code, signal) => {
+                reject(new Error(
+                  `cleanup mutation fixture exited before ${hookName}: `
+                  + `${code ?? signal}: ${childError}`,
+                ));
+              });
+            }),
+          ]);
+          child.kill('SIGKILL');
+          await new Promise((resolve, reject) => {
+            child.once('error', reject);
+            child.once('exit', resolve);
+          });
+
+          const releases = path.join(root, 'aifeeds-cc-sync-releases');
+          const journalDirectory = path.join(releases, '.deployment-journal');
+          const options = {
+            committedJournal: path.join(releases, '.deployment-committed.json'),
+            destinations: [
+              path.join(root, 'aifeeds-cc-sync'),
+              path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
+              path.join(root, 'systemd', 'aifeeds-cc-sync.timer'),
+              path.join(root, 'aifeeds', 'cc-sync.env'),
+            ],
+            gid: process.getgid(),
+            journalDirectory,
+            preparingJournal: path.join(releases, '.deployment-preparing.json'),
+            releases,
+            uid: process.getuid(),
+          };
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            await recoverGlobalMarkerMutations({
+              gid: options.gid,
+              journalDirectory,
+              uid: options.uid,
+            });
+            assert.deepEqual(
+              (await readdir(journalDirectory)).filter((name) => (
+                name.startsWith('.marker-') || name.startsWith('.mutation-')
+              )),
+              [],
+            );
+          }
+          assert.deepEqual(await recoverGlobalDeployment(options), { phase: 'none' });
+          assert.deepEqual(await recoverGlobalDeployment(options), { phase: 'none' });
+          assert.deepEqual(await readdir(journalDirectory), []);
+          assert.deepEqual(
+            (await readdir(path.join(
+              root,
+              'var',
+              'lib',
+              'aifeeds-cc-deploy-snapshots',
+            ))).filter((name) => name.includes('.cleanup.')),
+            [],
+          );
+        });
+      }
+    });
+  }
+});
+
 test('preparing journal owns every path transaction before live mutation', async (t) => {
   const {
     armPreparingTransaction,
     captureFile,
+    clearCommittedDeployment,
+    commitGlobalDeployment,
+    completePreparingDeployment,
+    finalizePathTransaction,
     installFileTransaction,
+    installSymlinkTransaction,
     prepareGlobalDeployment,
+    recordPreparingRecoveryStep,
     recoverGlobalDeployment,
   } = await import('../deployment-file-transaction.mjs');
   const uid = process.getuid();
@@ -1104,6 +1554,13 @@ test('preparing journal owns every path transaction before live mutation', async
     const committedJournal = path.join(releases, '.deployment-committed.json');
     const manifest = 'a'.repeat(64);
     const release = path.join(releases, manifest);
+    const snapshot = path.join(
+      root,
+      'var',
+      'lib',
+      'aifeeds-cc-deploy-snapshots',
+      'aifeeds-cc-root-snapshot.ABC123',
+    );
     const destinations = [
       path.join(root, 'aifeeds-cc-sync'),
       path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
@@ -1115,6 +1572,9 @@ test('preparing journal owns every path transaction before live mutation', async
     await chmod(release, 0o755);
     await mkdir(path.dirname(destinations[1]), { recursive: true });
     await mkdir(path.dirname(destinations[3]), { recursive: true });
+    await mkdir(snapshot, { recursive: true, mode: 0o755 });
+    await chmod(path.dirname(snapshot), 0o700);
+    await chmod(snapshot, 0o755);
     await writeFile(destinations[1], 'OLD_SERVICE\n', { mode: 0o644 });
     return {
       committedJournal,
@@ -1126,15 +1586,148 @@ test('preparing journal owns every path transaction before live mutation', async
       release,
       releases,
       root,
+      snapshot,
       uid,
     };
+  }
+
+  async function armedCommitFixture() {
+    const current = await fixture();
+    const secretFile = path.join(current.snapshot, 'deploy', 'cc-sync.env');
+    await mkdir(path.dirname(secretFile), { recursive: true });
+    await writeFile(
+      secretFile,
+      `CC_SYNC_SECRET=${'d'.repeat(64)}\n`,
+      { mode: 0o600 },
+    );
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    const arm = (name) => armPreparingTransaction({
+      gid,
+      journalDirectory: current.journalDirectory,
+      name,
+      preparingJournal: current.preparingJournal,
+      uid,
+    });
+    await installSymlinkTransaction({
+      destination: current.destinations[0],
+      hooks: { afterReceiptPrepared: () => arm('opt') },
+      name: 'opt',
+      target: `${current.manifest}/cc-site/sync`,
+      transaction: current.manifest,
+    });
+    const backups = path.join(current.snapshot, '.rollback');
+    for (const [index, name] of ['service', 'timer', 'env'].entries()) {
+      const destination = current.destinations[index + 1];
+      const source = path.join(current.root, `new-${name}`);
+      await writeFile(source, `NEW_${name.toUpperCase()}\n`, { mode: 0o600 });
+      await captureFile({ backups, destination, name });
+      await installFileTransaction({
+        backups,
+        destination,
+        gid,
+        hooks: { afterReceiptPrepared: () => arm(name) },
+        mode: name === 'env' ? 0o600 : 0o644,
+        name,
+        source,
+        transaction: current.manifest,
+        uid,
+      });
+    }
+    return current;
+  }
+
+  async function committedAndPreparingFixture() {
+    const current = await armedCommitFixture();
+    await assert.rejects(commitGlobalDeployment({
+      ...current,
+      hooks: {
+        async afterCommittedPublishBeforePreparingCleanup() {
+          throw new Error('simulated cross-process commit interruption');
+        },
+      },
+    }), /simulated cross-process commit interruption/);
+    assert.equal((await lstat(current.committedJournal)).isFile(), true);
+    assert.equal((await lstat(current.preparingJournal)).isFile(), true);
+    return current;
+  }
+
+  async function committedFixture() {
+    const current = await armedCommitFixture();
+    await commitGlobalDeployment(current);
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    assert.equal((await lstat(current.committedJournal)).isFile(), true);
+    return current;
+  }
+
+  async function orphanCleanupFixture() {
+    const current = await fixture();
+    const secretFile = path.join(current.snapshot, 'deploy', 'cc-sync.env');
+    await mkdir(path.dirname(secretFile), { recursive: true });
+    await writeFile(secretFile, `CC_SYNC_SECRET=${'e'.repeat(64)}\n`, {
+      mode: 0o600,
+    });
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    await assert.rejects(completePreparingDeployment({
+      ...current,
+      hooks: {
+        async afterMarkerRemovalBeforeSnapshotDelete() {
+          throw new Error('simulated orphan cleanup interruption');
+        },
+      },
+    }), /simulated orphan cleanup interruption/);
+    const [receiptName] = (await readdir(current.journalDirectory))
+      .filter((name) => name.startsWith('.snapshot-cleanup.'));
+    assert.ok(receiptName);
+    const receipt = path.join(current.journalDirectory, receiptName);
+    const record = JSON.parse(await readFile(receipt, 'utf8'));
+    return {
+      ...current,
+      quarantine: record.quarantine,
+      receipt,
+    };
+  }
+
+  async function cleanupReceiptFixture() {
+    const current = await fixture();
+    const secretFile = path.join(current.snapshot, 'deploy', 'cc-sync.env');
+    await mkdir(path.dirname(secretFile), { recursive: true });
+    await writeFile(secretFile, `CC_SYNC_SECRET=${'f'.repeat(64)}\n`, {
+      mode: 0o600,
+    });
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    return current;
   }
 
   await t.test('marker is durable before transaction directories exist', async () => {
     const current = await fixture();
     const marker = await prepareGlobalDeployment({
       ...current,
-      nginxTransaction: path.join(current.root, 'snapshot', '.rollback', 'nginx'),
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
       runtime: {
         service_active: 'active',
         timer_active: 'active',
@@ -1142,6 +1735,11 @@ test('preparing journal owns every path transaction before live mutation', async
       },
     });
     assert.equal(marker.phase, 'preparing');
+    assert.equal(marker.snapshot.path, current.snapshot);
+    assert.equal(marker.snapshot.parent, path.dirname(current.snapshot));
+    assert.equal(marker.snapshot.mode, 0o755);
+    assert.equal(Number.isSafeInteger(marker.snapshot.dev), true);
+    assert.equal(Number.isSafeInteger(marker.snapshot.ino), true);
     assert.equal((await lstat(current.preparingJournal)).nlink, 1);
     assert.equal((await lstat(current.preparingJournal)).mode & 0o777, 0o600);
     assert.equal((await lstat(current.journalDirectory)).mode & 0o777, 0o700);
@@ -1164,7 +1762,7 @@ test('preparing journal owns every path transaction before live mutation', async
     const current = await fixture();
     await prepareGlobalDeployment({
       ...current,
-      nginxTransaction: path.join(current.root, 'snapshot', '.rollback', 'nginx'),
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
       runtime: {
         service_active: 'inactive',
         timer_active: 'inactive',
@@ -1254,6 +1852,729 @@ test('preparing journal owns every path transaction before live mutation', async
     }), /orphan|journal/i);
     assert.equal(await readFile(current.destinations[1], 'utf8'), 'NEW_SERVICE\n');
     assert.equal((await lstat(path.join(transaction, 'receipt.jsonl'))).isFile(), true);
+  });
+
+  await t.test('marker replacement is full-content CAS across rename, link, and unlink', async (replaceT) => {
+    const cases = [
+      {
+        name: 'foreign canonical before rename',
+        async hook(current) {
+          await unlink(current.preparingJournal);
+          await writeFile(current.preparingJournal, 'operator marker\n', { mode: 0o600 });
+        },
+        hookName: 'beforeMarkerRename',
+        expected: 'operator marker\n',
+      },
+      {
+        name: 'same inode content mutation before rename',
+        async hook(current) {
+          await writeFile(current.preparingJournal, 'same inode operator mutation\n');
+        },
+        hookName: 'beforeMarkerRename',
+        expected: 'same inode operator mutation\n',
+      },
+      {
+        name: 'ABA relink before rename',
+        async hook(current) {
+          const parked = `${current.preparingJournal}.parked`;
+          const bytes = await readFile(current.preparingJournal);
+          await link(current.preparingJournal, parked);
+          await unlink(current.preparingJournal);
+          await writeFile(current.preparingJournal, bytes, { mode: 0o600 });
+          await unlink(current.preparingJournal);
+          await link(parked, current.preparingJournal);
+          await unlink(parked);
+        },
+        hookName: 'beforeMarkerRename',
+        expected: null,
+      },
+      {
+        name: 'foreign canonical before candidate link',
+        async hook(current) {
+          await writeFile(current.preparingJournal, 'operator before link\n', { mode: 0o600 });
+        },
+        hookName: 'beforeMarkerLink',
+        expected: 'operator before link\n',
+      },
+      {
+        name: 'foreign canonical before quarantine unlink',
+        async hook(current) {
+          await unlink(current.preparingJournal);
+          await writeFile(current.preparingJournal, 'operator before unlink\n', { mode: 0o600 });
+        },
+        hookName: 'beforeMarkerUnlink',
+        expected: 'operator before unlink\n',
+      },
+    ];
+
+    for (const scenario of cases) {
+      await replaceT.test(scenario.name, async () => {
+        const current = await fixture();
+        await prepareGlobalDeployment({
+          ...current,
+          nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+          runtime: {
+            service_active: 'inactive',
+            timer_active: 'inactive',
+            timer_enabled: 'disabled',
+          },
+        });
+        const before = await lstat(current.preparingJournal);
+        let hookCalled = false;
+        await assert.rejects(recordPreparingRecoveryStep({
+          ...current,
+          hooks: {
+            async [scenario.hookName]() {
+              hookCalled = true;
+              await scenario.hook(current);
+            },
+          },
+          state: 'attempted',
+          step: 'candidate_timer_stop',
+        }), /changed|conflict|operator|marker|canonical|CAS/i);
+        assert.equal(hookCalled, true);
+        if (scenario.expected !== null) {
+          assert.equal(await readFile(current.preparingJournal, 'utf8'), scenario.expected);
+        } else {
+          const after = await lstat(current.preparingJournal);
+          assert.equal(after.dev, before.dev);
+          assert.equal(after.ino, before.ino);
+        }
+        await assert.rejects(
+          recoverGlobalDeployment(current),
+          /changed|conflict|identity|marker|canonical|CAS/i,
+        );
+        if (scenario.expected !== null) {
+          assert.equal(await readFile(current.preparingJournal, 'utf8'), scenario.expected);
+        }
+      });
+    }
+  });
+
+  await t.test('marker deletion is CAS and preserves concurrent canonical files', async (deleteT) => {
+    for (const scenario of [
+      {
+        name: 'replacement before quarantine rename',
+        hookName: 'beforeMarkerRename',
+        expected: 'operator delete replacement\n',
+        async hook(current) {
+          await unlink(current.preparingJournal);
+          await writeFile(
+            current.preparingJournal,
+            'operator delete replacement\n',
+            { mode: 0o600 },
+          );
+        },
+      },
+      {
+        name: 'replacement before quarantine unlink',
+        hookName: 'beforeMarkerUnlink',
+        expected: 'operator delete unlink replacement\n',
+        async hook(current) {
+          await writeFile(
+            current.preparingJournal,
+            'operator delete unlink replacement\n',
+            { mode: 0o600 },
+          );
+        },
+      },
+    ]) {
+      await deleteT.test(scenario.name, async () => {
+        const current = await fixture();
+        await prepareGlobalDeployment({
+          ...current,
+          nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+          runtime: {
+            service_active: 'inactive',
+            timer_active: 'inactive',
+            timer_enabled: 'disabled',
+          },
+        });
+        let hookCalled = false;
+        await assert.rejects(completePreparingDeployment({
+          ...current,
+          hooks: {
+            async [scenario.hookName]() {
+              hookCalled = true;
+              await scenario.hook(current);
+            },
+          },
+        }), /changed|conflict|operator|marker|canonical|CAS/i);
+        assert.equal(hookCalled, true);
+        assert.equal(await readFile(current.preparingJournal, 'utf8'), scenario.expected);
+        await assert.rejects(
+          recoverGlobalDeployment(current),
+          /changed|conflict|identity|marker|canonical|CAS/i,
+        );
+        assert.equal(await readFile(current.preparingJournal, 'utf8'), scenario.expected);
+        const retained = (await readdir(path.dirname(current.snapshot)))
+          .filter((name) => name.startsWith(
+            `${path.basename(current.snapshot)}.cleanup.`,
+          ));
+        assert.equal(retained.length, 1);
+        assert.equal(
+          (await lstat(path.join(path.dirname(current.snapshot), retained[0]))).isDirectory(),
+          true,
+        );
+      });
+    }
+  });
+
+  await t.test('committed marker deletion interruption boundaries converge exactly', async (deleteT) => {
+    for (const hookName of [
+      'afterMutationRecordSync',
+      'afterMarkerQuarantineSync',
+      'afterMarkerQuarantineRemovalSync',
+    ]) {
+      await deleteT.test(hookName, async () => {
+        const current = await committedFixture();
+        for (const [index, name] of ['opt', 'service', 'timer', 'env'].entries()) {
+          await finalizePathTransaction({
+            destination: current.destinations[index],
+            name,
+            transaction: current.manifest,
+          });
+        }
+        await assert.rejects(clearCommittedDeployment({
+          ...current,
+          hooks: {
+            async [hookName]() {
+              throw new Error(`injected committed delete ${hookName}`);
+            },
+          },
+        }), new RegExp(`injected committed delete ${hookName}`));
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        assert.deepEqual(
+          (await readdir(current.journalDirectory)).filter((name) => (
+            name.startsWith('.marker-') || name.startsWith('.mutation-')
+          )),
+          [],
+        );
+      });
+    }
+  });
+
+  await t.test('cleanup receipt replacement interruption boundaries converge exactly', async (receiptT) => {
+    for (const hookName of [
+      'afterMutationRecordSync',
+      'afterMarkerCandidateSync',
+      'afterMarkerQuarantineSync',
+      'afterMarkerCanonicalPublishSync',
+      'afterMarkerQuarantineRemovalSync',
+      'afterMarkerCandidateRemovalSync',
+    ]) {
+      await receiptT.test(hookName, async () => {
+        const current = await cleanupReceiptFixture();
+        let interrupted = false;
+        await assert.rejects(completePreparingDeployment({
+          ...current,
+          hooks: {
+            async [hookName]({ action, location }) {
+              if (action !== 'replace' || location !== 'snapshot-cleanup') return;
+              interrupted = true;
+              throw new Error(`injected cleanup receipt replace ${hookName}`);
+            },
+          },
+        }), new RegExp(`injected cleanup receipt replace ${hookName}`));
+        assert.equal(interrupted, true);
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        await assert.rejects(lstat(current.snapshot), /ENOENT/);
+        assert.deepEqual(await readdir(current.journalDirectory), []);
+      });
+    }
+  });
+
+  await t.test('cleanup receipt deletion interruption boundaries converge exactly', async (receiptT) => {
+    for (const hookName of [
+      'afterMutationRecordSync',
+      'afterMarkerQuarantineSync',
+      'afterMarkerQuarantineRemovalSync',
+    ]) {
+      await receiptT.test(hookName, async () => {
+        const current = await cleanupReceiptFixture();
+        let interrupted = false;
+        await assert.rejects(completePreparingDeployment({
+          ...current,
+          hooks: {
+            async [hookName]({ action, location }) {
+              if (action !== 'delete' || location !== 'snapshot-cleanup') return;
+              interrupted = true;
+              throw new Error(`injected cleanup receipt delete ${hookName}`);
+            },
+          },
+        }), new RegExp(`injected cleanup receipt delete ${hookName}`));
+        assert.equal(interrupted, true);
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+        await assert.rejects(lstat(current.snapshot), /ENOENT/);
+        assert.deepEqual(await readdir(current.journalDirectory), []);
+      });
+    }
+  });
+
+  await t.test('cleanup receipt create conflicts fail closed and preserve evidence', async (conflictT) => {
+    for (const scenario of [
+      {
+        bytes: 'operator-owned cleanup receipt\n',
+        name: 'foreign canonical preoccupation',
+      },
+      {
+        bytes: '{"schema":2,"phase":"plan',
+        name: 'partial canonical preoccupation',
+      },
+    ]) {
+      await conflictT.test(scenario.name, async () => {
+        const current = await cleanupReceiptFixture();
+        let receipt = null;
+        await assert.rejects(completePreparingDeployment({
+          ...current,
+          hooks: {
+            async afterMarkerCandidateSync({
+              action,
+              canonical,
+              location,
+            }) {
+              if (action !== 'create' || location !== 'snapshot-cleanup') return;
+              receipt = canonical;
+              await writeFile(receipt, scenario.bytes, { mode: 0o600 });
+            },
+          },
+        }), /canonical|conflict|creation/i);
+        assert.ok(receipt);
+        assert.equal(await readFile(receipt, 'utf8'), scenario.bytes);
+        await assert.rejects(
+          recoverGlobalDeployment(current),
+          /canonical|conflict|creation/i,
+        );
+        assert.equal(await readFile(receipt, 'utf8'), scenario.bytes);
+      });
+    }
+
+    await conflictT.test('same-inode operation record mutation', async () => {
+      const current = await cleanupReceiptFixture();
+      let operation = null;
+      let operationIdentity = null;
+      await assert.rejects(completePreparingDeployment({
+        ...current,
+        hooks: {
+          async afterMutationRecordSync({
+            action,
+            location,
+            record,
+          }) {
+            if (action !== 'create' || location !== 'snapshot-cleanup') return;
+            operation = record;
+            operationIdentity = await lstat(record);
+            await writeFile(record, '{}\n');
+            throw new Error('injected operation record mutation');
+          },
+        },
+      }), /injected operation record mutation/);
+      assert.ok(operation);
+      const mutatedIdentity = await lstat(operation);
+      assert.equal(mutatedIdentity.dev, operationIdentity.dev);
+      assert.equal(mutatedIdentity.ino, operationIdentity.ino);
+      assert.equal(await readFile(operation, 'utf8'), '{}\n');
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /invalid marker mutation operation record/i,
+      );
+      const preservedIdentity = await lstat(operation);
+      assert.equal(preservedIdentity.dev, operationIdentity.dev);
+      assert.equal(preservedIdentity.ino, operationIdentity.ino);
+      assert.equal(await readFile(operation, 'utf8'), '{}\n');
+    });
+
+    await conflictT.test('orphan mutation candidate', async () => {
+      const current = await cleanupReceiptFixture();
+      const orphan = path.join(
+        current.journalDirectory,
+        '.marker-mutation.123e4567-e89b-42d3-a456-426614174000.candidate',
+      );
+      const evidence = 'orphan cleanup candidate\n';
+      await writeFile(orphan, evidence, { mode: 0o600 });
+      await assert.rejects(
+        completePreparingDeployment(current),
+        /orphan marker mutation artifact/i,
+      );
+      assert.equal(await readFile(orphan, 'utf8'), evidence);
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /orphan marker mutation artifact/i,
+      );
+      assert.equal(await readFile(orphan, 'utf8'), evidence);
+    });
+  });
+
+  await t.test('successful preparing recovery removes the exact bound snapshot', async () => {
+    const current = await fixture();
+    const secretFile = path.join(current.snapshot, 'deploy', 'cc-sync.env');
+    await mkdir(path.dirname(secretFile), { recursive: true });
+    await writeFile(secretFile, `CC_SYNC_SECRET=${'c'.repeat(64)}\n`, { mode: 0o600 });
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    assert.equal(await completePreparingDeployment(current), 'cleared');
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+  });
+
+  await t.test('committed recovery cleans its preparing marker and secret snapshot', async () => {
+    const current = await committedAndPreparingFixture();
+
+    assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'committed' });
+
+    await assert.rejects(lstat(current.committedJournal), /ENOENT/);
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    assert.deepEqual(await readdir(current.journalDirectory), []);
+    assert.equal(
+      (await readdir(path.dirname(current.snapshot))).some((name) => (
+        name.startsWith(`${path.basename(current.snapshot)}.cleanup.`)
+      )),
+      false,
+    );
+  });
+
+  await t.test('committed cleanup SIGKILL is finished from its orphan receipt', async () => {
+    const current = await committedAndPreparingFixture();
+    const fixtureScript = path.join(
+      SYNC_DIR,
+      'test',
+      'fixtures',
+      'publish-and-pause.mjs',
+    );
+    const optionsFile = path.join(current.root, 'recovery-options.json');
+    const ready = path.join(current.root, 'snapshot-delete-paused');
+    await writeFile(optionsFile, JSON.stringify({
+      committedJournal: current.committedJournal,
+      destinations: current.destinations,
+      gid,
+      journalDirectory: current.journalDirectory,
+      preparingJournal: current.preparingJournal,
+      releases: current.releases,
+      uid,
+    }));
+    const child = spawn(process.execPath, [
+      fixtureScript,
+      'recover-committed-and-pause',
+      optionsFile,
+      ready,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let childError = '';
+    child.stderr.on('data', (chunk) => {
+      childError += chunk;
+    });
+    await Promise.race([
+      waitForPath(ready),
+      new Promise((_, reject) => {
+        child.once('exit', (code, signal) => {
+          reject(new Error(
+            `committed cleanup exited before pause: ${code ?? signal}: ${childError}`,
+          ));
+        });
+      }),
+    ]);
+    child.kill('SIGKILL');
+    await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', resolve);
+    });
+
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    assert.equal((await lstat(current.committedJournal)).isFile(), true);
+    assert.equal(
+      (await readdir(current.journalDirectory)).filter((name) => (
+        name.startsWith('.snapshot-cleanup.')
+      )).length,
+      1,
+    );
+    assert.equal(
+      (await readdir(path.dirname(current.snapshot))).filter((name) => (
+        name.startsWith(`${path.basename(current.snapshot)}.cleanup.`)
+      )).length,
+      1,
+    );
+
+    assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'committed' });
+    await assert.rejects(lstat(current.committedJournal), /ENOENT/);
+    assert.deepEqual(await readdir(current.journalDirectory), []);
+    assert.equal(
+      (await readdir(path.dirname(current.snapshot))).some((name) => (
+        name.startsWith(`${path.basename(current.snapshot)}.cleanup.`)
+      )),
+      false,
+    );
+  });
+
+  await t.test('committed cleanup resumes after quarantine removal before receipt unlink', async () => {
+    const current = await committedAndPreparingFixture();
+    const fixtureScript = path.join(
+      SYNC_DIR,
+      'test',
+      'fixtures',
+      'publish-and-pause.mjs',
+    );
+    const optionsFile = path.join(current.root, 'receipt-recovery-options.json');
+    const ready = path.join(current.root, 'receipt-unlink-paused');
+    await writeFile(optionsFile, JSON.stringify({
+      committedJournal: current.committedJournal,
+      destinations: current.destinations,
+      gid,
+      journalDirectory: current.journalDirectory,
+      preparingJournal: current.preparingJournal,
+      releases: current.releases,
+      uid,
+    }));
+    const child = spawn(process.execPath, [
+      fixtureScript,
+      'recover-committed-after-quarantine-delete-pause',
+      optionsFile,
+      ready,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let childError = '';
+    child.stderr.on('data', (chunk) => {
+      childError += chunk;
+    });
+    await Promise.race([
+      waitForPath(ready),
+      new Promise((_, reject) => {
+        child.once('exit', (code, signal) => {
+          reject(new Error(
+            `receipt cleanup exited before pause: ${code ?? signal}: ${childError}`,
+          ));
+        });
+      }),
+    ]);
+    child.kill('SIGKILL');
+    await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', resolve);
+    });
+
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    assert.equal((await lstat(current.committedJournal)).isFile(), true);
+    const [receiptName] = (await readdir(current.journalDirectory))
+      .filter((name) => name.startsWith('.snapshot-cleanup.'));
+    assert.ok(receiptName);
+    const receipt = JSON.parse(await readFile(
+      path.join(current.journalDirectory, receiptName),
+      'utf8',
+    ));
+    assert.equal(receipt.phase, 'deleted');
+    await assert.rejects(lstat(receipt.quarantine), /ENOENT/);
+
+    assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'committed' });
+    await assert.rejects(lstat(current.committedJournal), /ENOENT/);
+    assert.deepEqual(await readdir(current.journalDirectory), []);
+  });
+
+  await t.test('committed cleanup conflicts retain recovery evidence and fail closed', async (conflictT) => {
+    await conflictT.test('snapshot identity replacement', async () => {
+      const current = await committedAndPreparingFixture();
+      const preserved = `${current.snapshot}.operator-preserved`;
+      await rename(current.snapshot, preserved);
+      await mkdir(current.snapshot, { mode: 0o755 });
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /snapshot|identity|replacement/i,
+      );
+      assert.equal((await lstat(current.committedJournal)).isFile(), true);
+      assert.equal((await lstat(current.preparingJournal)).isFile(), true);
+      assert.equal((await lstat(preserved)).isDirectory(), true);
+      assert.equal((await lstat(current.snapshot)).isDirectory(), true);
+    });
+
+    await conflictT.test('preparing marker CAS during cleanup removal', async () => {
+      const current = await committedAndPreparingFixture();
+      let preparingRenames = 0;
+      await assert.rejects(recoverGlobalDeployment({
+        ...current,
+        hooks: {
+          async beforeMarkerRename({ canonical }) {
+            if (canonical !== current.preparingJournal) return;
+            preparingRenames += 1;
+            if (preparingRenames !== 1) return;
+            await unlink(current.preparingJournal);
+            await writeFile(
+              current.preparingJournal,
+              'operator committed-cleanup marker\n',
+              { mode: 0o600 },
+            );
+          },
+        },
+      }), /changed|conflict|marker|canonical|CAS/i);
+      assert.equal(preparingRenames, 1);
+      assert.equal((await lstat(current.committedJournal)).isFile(), true);
+      assert.equal(
+        await readFile(current.preparingJournal, 'utf8'),
+        'operator committed-cleanup marker\n',
+      );
+      assert.equal(
+        (await readdir(current.journalDirectory)).filter((name) => (
+          name.startsWith('.snapshot-cleanup.')
+        )).length,
+        1,
+      );
+      assert.equal(
+        (await readdir(path.dirname(current.snapshot))).filter((name) => (
+          name.startsWith(`${path.basename(current.snapshot)}.cleanup.`)
+        )).length,
+        1,
+      );
+    });
+  });
+
+  await t.test('orphan cleanup receipt finishes snapshot deletion after marker removal', async () => {
+    const current = await fixture();
+    await writeFile(path.join(current.snapshot, 'secret.txt'), 'secret snapshot bytes\n');
+    await prepareGlobalDeployment({
+      ...current,
+      nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+    });
+    await assert.rejects(completePreparingDeployment({
+      ...current,
+      hooks: {
+        async afterMarkerRemovalBeforeSnapshotDelete() {
+          throw new Error('simulated cleanup interruption');
+        },
+      },
+    }), /simulated cleanup interruption/);
+    await assert.rejects(lstat(current.preparingJournal), /ENOENT/);
+    await assert.rejects(lstat(current.snapshot), /ENOENT/);
+    assert.ok((await readdir(current.journalDirectory)).some((name) => (
+      name.startsWith('.snapshot-cleanup.')
+    )));
+
+    assert.deepEqual(await recoverGlobalDeployment(current), { phase: 'none' });
+    assert.deepEqual(await readdir(current.journalDirectory), []);
+    assert.equal(
+      (await readdir(path.dirname(current.snapshot))).some((name) => (
+        name.startsWith(`${path.basename(current.snapshot)}.cleanup.`)
+      )),
+      false,
+    );
+  });
+
+  await t.test('orphan cleanup rejects unproven deletion and receipt tampering', async (attackT) => {
+    await attackT.test('quarantine deleted before cleanup phase', async () => {
+      const current = await orphanCleanupFixture();
+      await rm(current.quarantine, { recursive: true });
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /receipt|quarantine|snapshot|unsafe|identity/i,
+      );
+      assert.equal((await lstat(current.receipt)).isFile(), true);
+    });
+
+    await attackT.test('quarantine identity replacement', async () => {
+      const current = await orphanCleanupFixture();
+      const preserved = `${current.quarantine}.operator-preserved`;
+      await rename(current.quarantine, preserved);
+      await mkdir(current.quarantine, { mode: 0o755 });
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /receipt|quarantine|snapshot|unsafe|identity/i,
+      );
+      assert.equal((await lstat(current.receipt)).isFile(), true);
+      assert.equal((await lstat(preserved)).isDirectory(), true);
+      assert.equal((await lstat(current.quarantine)).isDirectory(), true);
+    });
+
+    await attackT.test('receipt identity mutation', async () => {
+      const current = await orphanCleanupFixture();
+      const record = JSON.parse(await readFile(current.receipt, 'utf8'));
+      record.identity.ino += 1;
+      await writeFile(current.receipt, `${JSON.stringify(record)}\n`);
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /receipt|snapshot|unsafe|identity|mismatch/i,
+      );
+      assert.equal((await lstat(current.receipt)).isFile(), true);
+      assert.equal((await lstat(current.quarantine)).isDirectory(), true);
+    });
+
+    await attackT.test('forged deleted phase without a digest chain', async () => {
+      const current = await orphanCleanupFixture();
+      const record = JSON.parse(await readFile(current.receipt, 'utf8'));
+      record.schema = 2;
+      record.phase = 'deleted';
+      await writeFile(current.receipt, `${JSON.stringify(record)}\n`);
+      await rm(current.quarantine, { recursive: true });
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /receipt|snapshot|unsafe|phase|digest/i,
+      );
+      assert.equal((await lstat(current.receipt)).isFile(), true);
+    });
+
+    await attackT.test('receipt parent mismatch', async () => {
+      const current = await orphanCleanupFixture();
+      const record = JSON.parse(await readFile(current.receipt, 'utf8'));
+      record.canonical = path.join(
+        current.root,
+        'other',
+        'var',
+        'tmp',
+        path.basename(current.snapshot),
+      );
+      await writeFile(current.receipt, `${JSON.stringify(record)}\n`);
+
+      await assert.rejects(
+        recoverGlobalDeployment(current),
+        /receipt|snapshot|unsafe|parent|quarantine/i,
+      );
+      assert.equal((await lstat(current.receipt)).isFile(), true);
+      assert.equal((await lstat(current.quarantine)).isDirectory(), true);
+    });
+  });
+
+  await t.test('snapshot root replacement or symlink substitution fails closed', async (snapshotT) => {
+    for (const kind of ['directory', 'symlink']) {
+      await snapshotT.test(kind, async () => {
+        const current = await fixture();
+        await prepareGlobalDeployment({
+          ...current,
+          nginxTransaction: path.join(current.snapshot, '.rollback', 'nginx'),
+          runtime: {
+            service_active: 'inactive',
+            timer_active: 'inactive',
+            timer_enabled: 'disabled',
+          },
+        });
+        const preserved = `${current.snapshot}.operator-preserved`;
+        await rename(current.snapshot, preserved);
+        if (kind === 'directory') {
+          await mkdir(current.snapshot, { mode: 0o755 });
+        } else {
+          await symlink(preserved, current.snapshot);
+        }
+        await assert.rejects(recoverGlobalDeployment(current), /snapshot|identity|symlink/i);
+        assert.equal((await lstat(current.preparingJournal)).isFile(), true);
+        assert.equal((await lstat(preserved)).isDirectory(), true);
+        assert.equal((await lstat(current.snapshot)).isSymbolicLink(), kind === 'symlink');
+      });
+    }
   });
 });
 
@@ -1439,6 +2760,406 @@ test('Nginx transaction uses compare-before-commit and compare-before-rollback',
   });
 });
 
+test('snapshot directory operations are no-replace and descriptor-bound', async (t) => {
+  async function pausedHelper(args, root) {
+    const ready = path.join(root, `ready-${Math.random()}`);
+    const gate = path.join(root, `gate-${Math.random()}`);
+    await writeFile(gate, 'hold\n');
+    const child = spawn('/usr/bin/python3', [
+      LINUX_FS_HELPER,
+      ...args,
+      '--test-ready',
+      ready,
+      '--test-gate',
+      gate,
+    ], {
+      env: {
+        ...process.env,
+        AIFEEDS_LINUX_FS_TEST_MODE: '1',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await Promise.race([
+      waitForPath(ready),
+      new Promise((_, reject) => {
+        child.once('exit', (code, signal) => {
+          reject(new Error(
+            `filesystem helper exited before pause: ${code ?? signal}: ${stderr}`,
+          ));
+        });
+      }),
+    ]);
+    return {
+      child,
+      gate,
+      async release() {
+        await rm(gate, { force: true });
+        return new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('exit', (code, signal) => resolve({ code, signal, stderr }));
+        });
+      },
+    };
+  }
+
+  await t.test('occupied quarantine is never overwritten', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-snapshot-move-dest-'));
+    const source = path.join(root, 'snapshot');
+    const quarantine = path.join(root, 'snapshot.cleanup');
+    await mkdir(source, { mode: 0o755 });
+    const identity = await lstat(source);
+    const paused = await pausedHelper([
+      'move-directory-no-replace',
+      source,
+      quarantine,
+      String(identity.dev),
+      String(identity.ino),
+      String(identity.uid),
+      String(identity.gid),
+      String(identity.mode & 0o7777),
+    ], root);
+    await mkdir(quarantine, { mode: 0o700 });
+    await writeFile(path.join(quarantine, 'operator.txt'), 'operator directory\n');
+    const replacement = await lstat(quarantine);
+
+    const result = await paused.release();
+
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.equal((await lstat(source)).ino, identity.ino);
+    assert.equal((await lstat(quarantine)).ino, replacement.ino);
+    assert.equal(
+      await readFile(path.join(quarantine, 'operator.txt'), 'utf8'),
+      'operator directory\n',
+    );
+  });
+
+  await t.test('directory identity is reported for later bound cleanup', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-snapshot-identity-'));
+    const snapshot = path.join(root, 'snapshot');
+    await mkdir(snapshot, { mode: 0o700 });
+    const expected = await lstat(snapshot);
+
+    const result = spawnSync('/usr/bin/python3', [
+      LINUX_FS_HELPER,
+      'inspect-directory',
+      snapshot,
+    ], { encoding: 'utf8' });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      result.stdout,
+      `${expected.dev}\t${expected.ino}\t${expected.uid}\t${expected.gid}\t${expected.mode & 0o7777}\n`,
+    );
+  });
+
+  await t.test('source replacement is restored instead of quarantined', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-snapshot-move-source-'));
+    const source = path.join(root, 'snapshot');
+    const quarantine = path.join(root, 'snapshot.cleanup');
+    const preserved = path.join(root, 'snapshot.preserved');
+    await mkdir(source, { mode: 0o755 });
+    await writeFile(path.join(source, 'owned.txt'), 'owned snapshot\n');
+    const identity = await lstat(source);
+    const paused = await pausedHelper([
+      'move-directory-no-replace',
+      source,
+      quarantine,
+      String(identity.dev),
+      String(identity.ino),
+      String(identity.uid),
+      String(identity.gid),
+      String(identity.mode & 0o7777),
+    ], root);
+    await rename(source, preserved);
+    await mkdir(source, { mode: 0o700 });
+    await writeFile(path.join(source, 'operator.txt'), 'operator replacement\n');
+    const replacement = await lstat(source);
+
+    const result = await paused.release();
+
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.equal((await lstat(source)).ino, replacement.ino);
+    await assert.rejects(lstat(quarantine), /ENOENT/);
+    assert.equal(await readFile(path.join(source, 'operator.txt'), 'utf8'), 'operator replacement\n');
+    assert.equal(await readFile(path.join(preserved, 'owned.txt'), 'utf8'), 'owned snapshot\n');
+  });
+
+  await t.test('cleanup rejects a pathname replacement before descriptor traversal', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-snapshot-cleanup-fd-'));
+    const quarantine = path.join(root, 'snapshot.cleanup');
+    const preserved = path.join(root, 'snapshot.preserved');
+    await mkdir(path.join(quarantine, 'nested'), { recursive: true, mode: 0o755 });
+    await writeFile(path.join(quarantine, 'nested', 'secret.txt'), 'owned secret\n');
+    const identity = await lstat(quarantine);
+    const paused = await pausedHelper([
+      'remove-directory-bound',
+      quarantine,
+      String(identity.dev),
+      String(identity.ino),
+      String(identity.uid),
+      String(identity.gid),
+      String(identity.mode & 0o7777),
+    ], root);
+    await rename(quarantine, preserved);
+    await mkdir(quarantine, { mode: 0o700 });
+    await writeFile(path.join(quarantine, 'operator.txt'), 'operator replacement\n');
+    const replacement = await lstat(quarantine);
+
+    const result = await paused.release();
+
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.equal((await lstat(quarantine)).ino, replacement.ino);
+    assert.equal(await readFile(path.join(quarantine, 'operator.txt'), 'utf8'), 'operator replacement\n');
+    assert.equal(
+      await readFile(path.join(preserved, 'nested', 'secret.txt'), 'utf8'),
+      'owned secret\n',
+    );
+  });
+});
+
+test('installer allocates snapshots under a managed root without modifying var tmp', async () => {
+  const installer = await read('install-remote.sh');
+  const deployer = await read('deploy-to-cc.sh');
+  const payloadFiles = await read('payload-files.txt');
+  assert.match(installer, /\/var\/lib\/aifeeds-cc-deploy-snapshots/);
+  assert.doesNotMatch(installer, /(?:install\s+-d|chmod|chown)[^\n]*\/var\/tmp/);
+  assert.doesNotMatch(installer, /SNAPSHOT_PARENT=.*\/var\/tmp/);
+  assert.match(payloadFiles, /^cc-site\/sync\/deployment-linux-fs\.py$/m);
+  assert.match(deployer, /LINUX_FS_DIGEST/);
+  assert.match(deployer, /deployment-linux-fs\.fixed\.py/);
+  assert.match(deployer, /AIFEEDS_FIXED_LINUX_FS_HELPER/);
+});
+
+test('snapshot parent validation rejects an unexpected owner without repair', async () => {
+  const { ensurePrivateSnapshotParent } = await import('../deployment-security.mjs');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cc-snapshot-parent-owner-'));
+  const snapshotParent = path.join(root, 'var', 'lib', 'aifeeds-cc-deploy-snapshots');
+  await mkdir(snapshotParent, { recursive: true, mode: 0o700 });
+  await chmod(snapshotParent, 0o700);
+  const before = await lstat(snapshotParent);
+
+  await assert.rejects(ensurePrivateSnapshotParent({
+    gid: before.gid,
+    root: snapshotParent,
+    uid: before.uid + 1,
+  }), /owner|identity|unsafe/i);
+
+  const after = await lstat(snapshotParent);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.uid, before.uid);
+  assert.equal(after.mode & 0o7777, 0o700);
+});
+
+test('trusted Python resolver accepts system symlinks and rejects unsafe chains', async (t) => {
+  const { resolveTrustedExecutable } = await import('../deployment-security.mjs');
+  const uid = process.getuid();
+
+  async function fixture() {
+    const boundary = await mkdtemp(path.join(os.tmpdir(), 'cc-python-chain-'));
+    const bin = path.join(boundary, 'usr', 'bin');
+    const python = path.join(bin, 'python3');
+    const target = path.join(bin, 'python3.11');
+    await mkdir(bin, { recursive: true, mode: 0o755 });
+    await chmod(boundary, 0o700);
+    await chmod(path.join(boundary, 'usr'), 0o755);
+    await chmod(bin, 0o755);
+    await executable(target, '#!/usr/bin/env bash\nexit 0\n');
+    await symlink('python3.11', python);
+    return { bin, boundary, python, target };
+  }
+
+  await t.test('Debian relative python3 symlink', async () => {
+    const current = await fixture();
+    assert.equal(await resolveTrustedExecutable({
+      boundary: current.boundary,
+      executable: current.python,
+      logicalRoot: '/usr/bin',
+      uid,
+    }), current.target);
+  });
+
+  await t.test('absolute target remains mapped inside trusted system bin', async () => {
+    const current = await fixture();
+    await unlink(current.python);
+    await symlink('/usr/bin/python3.11', current.python);
+    assert.equal(await resolveTrustedExecutable({
+      boundary: current.boundary,
+      executable: current.python,
+      logicalRoot: '/usr/bin',
+      uid,
+    }), current.target);
+  });
+
+  for (const scenario of [
+    {
+      name: 'world-writable parent',
+      async mutate(current) {
+        await chmod(current.bin, 0o777);
+      },
+      uid,
+    },
+    {
+      name: 'unexpected owner',
+      async mutate() {},
+      uid: uid + 1,
+    },
+    {
+      name: 'symlink loop',
+      async mutate(current) {
+        await unlink(current.target);
+        await symlink('python3', current.target);
+      },
+      uid,
+    },
+    {
+      name: 'trusted-root escape',
+      async mutate(current) {
+        const escaped = path.join(current.boundary, 'tmp', 'python3.11');
+        await mkdir(path.dirname(escaped), { recursive: true });
+        await executable(escaped, '#!/usr/bin/env bash\nexit 0\n');
+        await unlink(current.python);
+        await symlink('../../tmp/python3.11', current.python);
+      },
+      uid,
+    },
+    {
+      name: 'final target is not regular',
+      async mutate(current) {
+        await unlink(current.target);
+        await mkdir(current.target);
+      },
+      uid,
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const current = await fixture();
+      await scenario.mutate(current);
+      await assert.rejects(resolveTrustedExecutable({
+        boundary: current.boundary,
+        executable: current.python,
+        logicalRoot: '/usr/bin',
+        uid: scenario.uid,
+      }), /owner|writable|loop|escape|trusted|regular|executable/i);
+    });
+  }
+});
+
+test('Linux filesystem helper probe proves no-replace and leaves no artifacts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cc-linux-fs-probe-'));
+  const parent = path.join(root, 'run');
+  await mkdir(parent, { mode: 0o700 });
+  const args = [
+    LINUX_FS_HELPER,
+    'probe',
+    parent,
+    String(process.getuid()),
+    String(process.getgid()),
+  ];
+  const supported = spawnSync('/usr/bin/python3', args, { encoding: 'utf8' });
+  assert.equal(supported.status, 0, supported.stderr);
+  assert.deepEqual(await readdir(parent), []);
+
+  const unsupported = spawnSync('/usr/bin/python3', args, {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AIFEEDS_LINUX_FS_FORCE_UNSUPPORTED: '1',
+      AIFEEDS_LINUX_FS_TEST_MODE: '1',
+    },
+  });
+  assert.notEqual(unsupported.status, 0);
+  assert.match(unsupported.stderr, /unsupported|not implemented|rename/i);
+  assert.deepEqual(await readdir(parent), []);
+});
+
+test('legacy var tmp snapshots are accepted only under an unchanged root sticky parent', async (t) => {
+  const { prepareGlobalDeployment } = await import(
+    '../deployment-file-transaction.mjs'
+  );
+  const uid = process.getuid();
+  const gid = process.getgid();
+
+  async function legacyFixture(kind) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cc-legacy-snapshot-'));
+    const releases = path.join(root, 'aifeeds-cc-sync-releases');
+    const manifest = 'b'.repeat(64);
+    const release = path.join(releases, manifest);
+    const varRoot = path.join(root, 'var');
+    const varTmp = path.join(varRoot, 'tmp');
+    await mkdir(release, { recursive: true, mode: 0o755 });
+    await chmod(releases, 0o755);
+    await chmod(release, 0o755);
+    if (kind === 'symlink') {
+      await mkdir(varRoot, { recursive: true, mode: 0o755 });
+      const outside = path.join(root, 'operator-tmp');
+      await mkdir(outside, { mode: 0o1777 });
+      await chmod(outside, 0o1777);
+      await symlink(outside, varTmp);
+    } else {
+      await mkdir(varTmp, { recursive: true, mode: kind === 'valid' ? 0o1777 : 0o755 });
+      await chmod(varTmp, kind === 'valid' ? 0o1777 : 0o755);
+    }
+    const snapshot = path.join(varTmp, 'aifeeds-cc-root-snapshot.ABC123');
+    await mkdir(snapshot, { mode: 0o755 });
+    await chmod(snapshot, 0o755);
+    return {
+      committedJournal: path.join(releases, '.deployment-committed.json'),
+      destinations: [
+        path.join(root, 'opt', 'aifeeds-cc-sync'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.service'),
+        path.join(root, 'systemd', 'aifeeds-cc-sync.timer'),
+        path.join(root, 'aifeeds', 'cc-sync.env'),
+      ],
+      gid,
+      journalDirectory: path.join(releases, '.deployment-journal'),
+      manifest,
+      nginxTransaction: path.join(snapshot, '.rollback', 'nginx'),
+      preparingJournal: path.join(releases, '.deployment-preparing.json'),
+      release,
+      releases,
+      runtime: {
+        service_active: 'inactive',
+        timer_active: 'inactive',
+        timer_enabled: 'disabled',
+      },
+      snapshot,
+      uid,
+      varTmp,
+    };
+  }
+
+  await t.test('01777 directory is accepted and not modified', async () => {
+    const current = await legacyFixture('valid');
+    const before = await lstat(current.varTmp);
+    const marker = await prepareGlobalDeployment(current);
+    const after = await lstat(current.varTmp);
+    assert.equal(marker.snapshot.parent, current.varTmp);
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+    assert.equal(after.mode & 0o7777, 0o1777);
+  });
+
+  for (const kind of ['wrong-mode', 'symlink']) {
+    await t.test(`${kind} parent is rejected without repair`, async () => {
+      const current = await legacyFixture(kind);
+      const before = await lstat(current.varTmp);
+      await assert.rejects(
+        prepareGlobalDeployment(current),
+        /snapshot parent|unsafe/i,
+      );
+      const after = await lstat(current.varTmp);
+      assert.equal(after.ino, before.ino);
+      assert.equal(after.isSymbolicLink(), before.isSymbolicLink());
+      assert.equal(after.mode & 0o7777, before.mode & 0o7777);
+    });
+  }
+});
+
 const VHOST_FIXTURE = `server {
     listen 80;
     server_name ai-feeds.cc;
@@ -1481,6 +3202,17 @@ async function remoteDeployHarness({
   await mkdir(fakeBin, { recursive: true });
   await mkdir(systemctlState);
   await mkdir(path.join(root, 'run'), { mode: 0o755 });
+  const pythonBin = path.join(root, 'usr', 'bin');
+  const python = path.join(pythonBin, 'python3');
+  const pythonTarget = path.join(pythonBin, 'python3.11');
+  await mkdir(pythonBin, { recursive: true, mode: 0o755 });
+  await chmod(path.join(root, 'usr'), 0o755);
+  await chmod(pythonBin, 0o755);
+  await executable(
+    pythonTarget,
+    '#!/usr/bin/env bash\nexec /usr/bin/python3 "$@"\n',
+  );
+  await symlink('python3.11', python);
   await writeFile(log, '');
   await mkdir(path.dirname(stage), { recursive: true });
   await mkdir(path.join(root, 'var', 'lib'), { recursive: true });
@@ -1631,6 +3363,12 @@ if [[ "\${2:-}" == 'commit-global' \
   exit "$AIFEEDS_GLOBAL_COMMIT_EXIT"
 fi
 if [[ "\${2:-}" == 'commit-global' \
+  && "\${AIFEEDS_CREATE_FOREIGN_COMMITTED_BEFORE_COMMIT:-0}" == 1 ]]; then
+  committed="$AIFEEDS_DEPLOY_ROOT/opt/aifeeds-cc-sync-releases/.deployment-committed.json"
+  printf '%s\n' '{"schema":2,"phase":"committed","manifest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","release":"/operator/release","transactions":[]}' > "$committed"
+  chmod 0600 "$committed"
+fi
+if [[ "\${2:-}" == 'commit-global' \
   && "\${AIFEEDS_KILL_BEFORE_GLOBAL_COMMIT:-0}" == 1 ]]; then
   kill -KILL "$PPID"
   exit 137
@@ -1645,6 +3383,14 @@ if [[ "\${2:-}" == 'finalize-path' \
   if [[ "$finalize_count" == "\${AIFEEDS_FINALIZE_FAIL_AT:-0}" ]]; then
     exit 67
   fi
+fi
+if [[ "\${AIFEEDS_ASSERT_CANDIDATE_STOPPED_BEFORE_ROLLBACK:-0}" == 1 \
+  && -f "$AIFEEDS_DEPLOY_ROOT/systemctl-state/service-active" \
+  && ("\${2:-}" == 'rollback-path' \
+    || ("\${1:-}" == *nginx-config-transaction.mjs \
+      && "\${2:-}" == 'rollback')) ]]; then
+  : > "$AIFEEDS_DEPLOY_ROOT/rollback-while-candidate-active"
+  exit 91
 fi
 if [[ "\${1:-}" == '-p' ]]; then printf '%s\n' "\${AIFEEDS_NODE_MAJOR:-18}"; exit 0; fi
 if [[ "\${1:-}" == '--test' ]]; then
@@ -1751,9 +3497,19 @@ case "$*" in
       exit "$AIFEEDS_TIMER_DISABLE_MUTATE_THEN_EXIT"
     fi
     [[ "\${AIFEEDS_TIMER_DISABLE_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_DISABLE_EXIT"
-    rm -f "$state/timer-enabled"; exit 0 ;;
+    rm -f "$state/timer-enabled"
+    if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
+    exit 0 ;;
   'enable aifeeds-cc-sync.timer')
-    printf 'enabled\n' > "$state/timer-enabled"; exit 0 ;;
+    printf 'enabled\n' > "$state/timer-enabled"
+    if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
+    exit 0 ;;
   'enable --now aifeeds-cc-sync.timer')
     [[ "\${AIFEEDS_TIMER_ENABLE_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_ENABLE_EXIT"
     printf 'enabled\n' > "$state/timer-enabled"
@@ -1765,16 +3521,31 @@ case "$*" in
       exit "$AIFEEDS_TIMER_STOP_MUTATE_THEN_EXIT"
     fi
     [[ "\${AIFEEDS_TIMER_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_TIMER_STOP_EXIT"
-    rm -f "$state/timer-active"; exit 0 ;;
+    rm -f "$state/timer-active"
+    if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
+    exit 0 ;;
   'start aifeeds-cc-sync.timer')
-    printf 'active\n' > "$state/timer-active"; exit 0 ;;
+    printf 'active\n' > "$state/timer-active"
+    if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
+    exit 0 ;;
   'stop aifeeds-cc-sync.service')
     if [[ "\${AIFEEDS_SERVICE_STOP_MUTATE_THEN_EXIT:-0}" != 0 ]]; then
       rm -f "$state/service-active"
       exit "$AIFEEDS_SERVICE_STOP_MUTATE_THEN_EXIT"
     fi
     [[ "\${AIFEEDS_SERVICE_STOP_EXIT:-0}" == 0 ]] || exit "$AIFEEDS_SERVICE_STOP_EXIT"
-    rm -f "$state/service-active"; exit 0 ;;
+    rm -f "$state/service-active"
+    if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
+    exit 0 ;;
 esac
 if [[ "$*" == 'start aifeeds-cc-sync.service' ]]; then
   count_file="$state/service-start-count"
@@ -1793,6 +3564,10 @@ if [[ "$*" == 'start aifeeds-cc-sync.service' ]]; then
     exit "$AIFEEDS_SERVICE_START_EXIT"
   fi
   printf 'active\n' > "$state/service-active"
+  if [[ "\${AIFEEDS_KILL_AFTER_SYSTEMCTL:-}" == "$*" ]]; then
+    kill -KILL "$PPID"
+    exit 137
+  fi
   generation='123e4567-e89b-42d3-a456-426614174000'
   state="$AIFEEDS_DEPLOY_ROOT/var/lib/aifeeds-cc-sync/public"
   mkdir -p "$state/generations/$generation/sitemaps" "$state/generations/$generation/ai-news"
@@ -1902,6 +3677,7 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
       AIFEEDS_NGINX: path.join(fakeBin, 'nginx'),
       AIFEEDS_CURL: path.join(fakeBin, 'curl'),
       AIFEEDS_FLOCK: path.join(fakeBin, 'flock'),
+      AIFEEDS_PYTHON_BIN: python,
       AIFEEDS_ROOT_GID: String(process.getgid()),
       AIFEEDS_ROOT_UID: String(process.getuid()),
     },
@@ -1909,6 +3685,9 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
     manifestDigest,
     oldReleaseId,
     payloadTestProof,
+    python,
+    pythonBin,
+    pythonTarget,
     root,
     siteRoot,
     snippet,
@@ -1918,6 +3697,162 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
     vhost,
   };
 }
+
+remoteHarnessTest('Python chain and filesystem capability preflight precede user creation', async (t) => {
+  await t.test('Debian-style relative python symlink and supported probe continue', async () => {
+    const harness = await remoteDeployHarness();
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+    );
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  for (const scenario of [
+    {
+      name: 'world-writable chain',
+      async mutate(harness) {
+        await chmod(harness.pythonBin, 0o777);
+      },
+    },
+    {
+      name: 'unexpected chain owner',
+      async mutate(harness) {
+        harness.env.AIFEEDS_ROOT_UID = String(process.getuid() + 1);
+      },
+    },
+    {
+      name: 'symlink loop',
+      async mutate(harness) {
+        await unlink(harness.pythonTarget);
+        await symlink('python3', harness.pythonTarget);
+      },
+    },
+    {
+      name: 'trusted-root escape',
+      async mutate(harness) {
+        const escaped = path.join(harness.root, 'tmp', 'python3.11');
+        await executable(escaped, '#!/usr/bin/env bash\nexit 0\n');
+        await unlink(harness.python);
+        await symlink('../../tmp/python3.11', harness.python);
+      },
+    },
+    {
+      name: 'final target is not regular',
+      async mutate(harness) {
+        await unlink(harness.pythonTarget);
+        await mkdir(harness.pythonTarget);
+      },
+    },
+    {
+      name: 'rename no-replace unsupported',
+      async mutate(harness) {
+        harness.env.AIFEEDS_LINUX_FS_TEST_MODE = '1';
+        harness.env.AIFEEDS_LINUX_FS_FORCE_UNSUPPORTED = '1';
+      },
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const harness = await remoteDeployHarness();
+      await scenario.mutate(harness);
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+      );
+      assert.notEqual(result.status, 0);
+      const log = await readFile(harness.log, 'utf8');
+      assert.doesNotMatch(log, /useradd/);
+      await assert.rejects(lstat(path.join(harness.root, 'user-created')), /ENOENT/);
+      await assert.rejects(lstat(path.join(
+        harness.root,
+        'var',
+        'lib',
+        'aifeeds-cc-deploy-snapshots',
+      )), /ENOENT/);
+      assert.deepEqual(
+        (await readdir(path.join(harness.root, 'run')))
+          .filter((name) => name.startsWith('.aifeeds-cc-fs-probe.')),
+        [],
+      );
+      await assert.rejects(lstat(path.join(
+        harness.root,
+        'run',
+        'aifeeds-cc-sync-deploy',
+      )), /ENOENT/);
+    });
+  }
+});
+
+remoteHarnessTest('snapshot parent is private and existing var tmp mode is preserved', async (t) => {
+  await t.test('successful deployment leaves var tmp at 01777', async () => {
+    const harness = await remoteDeployHarness();
+    const varTmp = path.join(harness.root, 'var', 'tmp');
+    await mkdir(varTmp, { recursive: true, mode: 0o1777 });
+    await chmod(varTmp, 0o1777);
+
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal((await lstat(varTmp)).mode & 0o7777, 0o1777);
+    const snapshotParent = path.join(
+      harness.root,
+      'var',
+      'lib',
+      'aifeeds-cc-deploy-snapshots',
+    );
+    const identity = await lstat(snapshotParent);
+    assert.equal(identity.isDirectory(), true);
+    assert.equal(identity.isSymbolicLink(), false);
+    assert.equal(identity.mode & 0o7777, 0o700);
+    assert.deepEqual(await readdir(snapshotParent), []);
+  });
+
+  for (const fixture of ['symlink', 'wrong-mode']) {
+    await t.test(`rejects an existing snapshot parent ${fixture}`, async () => {
+      const harness = await remoteDeployHarness();
+      const snapshotParent = path.join(
+        harness.root,
+        'var',
+        'lib',
+        'aifeeds-cc-deploy-snapshots',
+      );
+      if (fixture === 'symlink') {
+        const outside = path.join(harness.root, 'operator-snapshot-parent');
+        await mkdir(outside, { mode: 0o700 });
+        await symlink(outside, snapshotParent);
+      } else {
+        await mkdir(snapshotParent, { mode: 0o755 });
+        await chmod(snapshotParent, 0o755);
+      }
+
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        {
+          ...harness.env,
+          AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        },
+      );
+
+      assert.notEqual(result.status, 0);
+      await assert.rejects(lstat(path.join(harness.root, 'user-created')), /ENOENT/);
+      if (fixture === 'symlink') {
+        assert.equal((await lstat(snapshotParent)).isSymbolicLink(), true);
+      } else {
+        assert.equal((await lstat(snapshotParent)).mode & 0o7777, 0o755);
+      }
+    });
+  }
+});
 
 test('immutable releases are cryptographically bound to their manifest', async (t) => {
   const { verifyBoundRelease } = await import('../deployment-security.mjs');
@@ -2367,6 +4302,38 @@ remoteHarnessTest('global journal failure remains before the rollback boundary',
   )), /ENOENT/);
 });
 
+remoteHarnessTest('foreign committed marker cannot create a false commit boundary', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+    timerEnabledState: 'enabled',
+    timerState: 'active',
+  });
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_CREATE_FOREIGN_COMMITTED_BEFORE_COMMIT: '1',
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+    },
+  );
+  assert.notEqual(result.status, 0);
+  const releases = path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+  );
+  const committedJournal = path.join(releases, '.deployment-committed.json');
+  const preparingJournal = path.join(releases, '.deployment-preparing.json');
+  assert.match(await readFile(committedJournal, 'utf8'), /"manifest":"f{64}"/);
+  const preparing = JSON.parse(await readFile(preparingJournal, 'utf8'));
+  assert.equal(preparing.manifest, harness.manifestDigest);
+  const snapshot = path.dirname(path.dirname(preparing.nginx_transaction));
+  assert.equal((await stat(snapshot)).isDirectory(), true);
+  assert.match(result.stderr, /committed|marker|mismatch|already exists|rollback/i);
+});
+
 remoteHarnessTest('global journal and local receipts must remain mutually consistent', async (t) => {
   for (const mutation of ['receipt', 'marker']) {
     await t.test(`${mutation} mutation fails closed`, async () => {
@@ -2459,9 +4426,12 @@ remoteHarnessTest('preparing journal rolls every pre-commit crash back before re
         true,
         killed.stderr,
       );
-      assert.equal(
-        JSON.parse(await readFile(preparingJournal, 'utf8')).phase,
-        'preparing',
+      const interruptedMarker = JSON.parse(
+        await readFile(preparingJournal, 'utf8'),
+      );
+      assert.equal(interruptedMarker.phase, 'preparing');
+      const interruptedSnapshot = path.dirname(
+        path.dirname(interruptedMarker.nginx_transaction),
       );
 
       await rm(harness.stage, { force: true, recursive: true });
@@ -2525,6 +4495,7 @@ remoteHarnessTest('preparing journal rolls every pre-commit crash back before re
       assert.equal(await readFile(harness.vhost, 'utf8'), VHOST_FIXTURE);
       await assert.rejects(lstat(harness.snippet), /ENOENT/);
       await assert.rejects(lstat(preparingJournal), /ENOENT/);
+      await assert.rejects(lstat(interruptedSnapshot), /ENOENT/);
 
       await buildPayload({
         envFile: harness.stagedEnv,
@@ -2540,6 +4511,129 @@ remoteHarnessTest('preparing journal rolls every pre-commit crash back before re
         await readlink(path.join(harness.root, 'opt', 'aifeeds-cc-sync')),
         `aifeeds-cc-sync-releases/${harness.manifestDigest}/cc-site/sync`,
       );
+    });
+  }
+});
+
+remoteHarnessTest('preparing recovery quiesces candidate units before any live rollback', async () => {
+  const harness = await remoteDeployHarness({
+    priorDeployment: true,
+    serviceState: 'active',
+    timerEnabledState: 'enabled',
+    timerState: 'active',
+  });
+  const installer = path.join(SYNC_DIR, 'install-remote.sh');
+  const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+  const killed = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+    AIFEEDS_KILL_BEFORE_GLOBAL_COMMIT: '1',
+  });
+  assert.equal(killed.signal === 'SIGKILL' || killed.status === 137, true, killed.stderr);
+
+  await rm(harness.stage, { force: true, recursive: true });
+  await buildPayload({
+    envFile: harness.stagedEnv,
+    payload: harness.stage,
+    repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+  });
+  const recovered = runBash(installer, args, {
+    ...harness.env,
+    AIFEEDS_ASSERT_CANDIDATE_STOPPED_BEFORE_ROLLBACK: '1',
+    AIFEEDS_EXIT_AFTER_PREPARING_RECOVERY: '66',
+    AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+  });
+  assert.equal(recovered.status, 66, recovered.stderr);
+  await assert.rejects(
+    stat(path.join(harness.root, 'rollback-while-candidate-active')),
+    /ENOENT/,
+  );
+
+  const commandLog = await readFile(harness.log, 'utf8');
+  const position = (needle) => {
+    const index = commandLog.lastIndexOf(needle);
+    assert.notEqual(index, -1, `missing command ${needle}\n${commandLog}`);
+    return index;
+  };
+  const quiescedAt = Math.max(
+    position('systemctl <stop> <aifeeds-cc-sync.timer>'),
+    position('systemctl <disable> <aifeeds-cc-sync.timer>'),
+    position('systemctl <stop> <aifeeds-cc-sync.service>'),
+  );
+  const firstRollbackAt = Math.min(
+    position('nginx-config-transaction.mjs> <rollback>'),
+    position('deployment-file-transaction.mjs> <rollback-preparing>'),
+  );
+  assert.ok(quiescedAt < firstRollbackAt, commandLog);
+});
+
+remoteHarnessTest('ambiguous recovery systemd effects are durably fail-closed', async (t) => {
+  const scenarios = [
+    {
+      command: 'stop aifeeds-cc-sync.timer',
+      step: 'candidate_timer_stop',
+    },
+    {
+      command: 'disable aifeeds-cc-sync.timer',
+      step: 'candidate_timer_disable',
+    },
+    {
+      command: 'start aifeeds-cc-sync.service',
+      step: 'restore_service',
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.step, async () => {
+      const harness = await remoteDeployHarness({
+        priorDeployment: true,
+        serviceState: 'active',
+        timerEnabledState: 'enabled',
+        timerState: 'active',
+      });
+      const installer = path.join(SYNC_DIR, 'install-remote.sh');
+      const args = [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest];
+      const preparingJournal = path.join(
+        harness.root,
+        'opt',
+        'aifeeds-cc-sync-releases',
+        '.deployment-preparing.json',
+      );
+      const first = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_KILL_BEFORE_GLOBAL_COMMIT: '1',
+      });
+      assert.equal(first.signal === 'SIGKILL' || first.status === 137, true, first.stderr);
+
+      await rm(harness.stage, { force: true, recursive: true });
+      await buildPayload({
+        envFile: harness.stagedEnv,
+        payload: harness.stage,
+        repoRoot: path.resolve(SYNC_DIR, '..', '..'),
+      });
+      const second = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+        AIFEEDS_KILL_AFTER_SYSTEMCTL: scenario.command,
+      });
+      assert.equal(second.signal === 'SIGKILL' || second.status === 137, true, second.stderr);
+      const marker = JSON.parse(await readFile(preparingJournal, 'utf8'));
+      assert.equal(marker.recovery?.[scenario.step], 'attempted');
+
+      const logBeforeRetry = await readFile(harness.log, 'utf8');
+      const third = runBash(installer, args, {
+        ...harness.env,
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      });
+      assert.notEqual(third.status, 0);
+      assert.match(third.stderr, new RegExp(`ambiguous.*${scenario.step}`, 'i'));
+      const retryLog = (await readFile(harness.log, 'utf8')).slice(logBeforeRetry.length);
+      assert.doesNotMatch(
+        retryLog,
+        /systemctl <(stop|start|disable|enable)(?:> <--now)?>(?: <[^>]+>)?/,
+      );
+      assert.equal((await stat(preparingJournal)).isFile(), true);
     });
   }
 });
@@ -2672,7 +4766,7 @@ remoteHarnessTest('remote installer propagates service failure before changing N
   );
 });
 
-remoteHarnessTest('a running old service that cannot stop leaves all live deployment state untouched', async () => {
+remoteHarnessTest('a running old service that clearly remains active preserves the original stop error', async () => {
   const harness = await remoteDeployHarness({
     priorDeployment: true,
     serviceState: 'active',
@@ -2740,6 +4834,23 @@ remoteHarnessTest('a running old service that cannot stop leaves all live deploy
   assert.doesNotMatch(
     await readFile(harness.log, 'utf8'),
     /switch-symlink|deployment-file-transaction\.mjs> <install>/,
+  );
+  await assert.rejects(stat(path.join(
+    harness.root,
+    'opt',
+    'aifeeds-cc-sync-releases',
+    '.deployment-preparing.json',
+  )), /ENOENT/);
+  assert.equal(
+    (await readdir(path.join(
+      harness.root,
+      'var',
+      'lib',
+      'aifeeds-cc-deploy-snapshots',
+    ))).some((name) => (
+      name.startsWith('aifeeds-cc-root-snapshot.')
+    )),
+    false,
   );
 });
 
@@ -3037,22 +5148,49 @@ remoteHarnessTest('a failed first install leaves no live code, unit, env, or tim
   }
 });
 
-remoteHarnessTest('a newly-created sync account is removed after managed path validation fails', async () => {
-  const harness = await remoteDeployHarness();
-  const outside = path.join(harness.root, 'outside-release-parent');
-  await mkdir(outside);
-  await mkdir(path.join(harness.root, 'opt'), { recursive: true });
-  await symlink(outside, path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases'));
-  const result = runBash(
-    path.join(SYNC_DIR, 'install-remote.sh'),
-    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
-    { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
-  );
-  assert.notEqual(result.status, 0);
-  await assert.rejects(stat(path.join(harness.root, 'user-created')), /ENOENT/);
-  await assert.rejects(stat(path.join(harness.root, 'var', 'lib', 'aifeeds-cc-sync')), /ENOENT/);
-  await assert.rejects(stat(path.join(harness.siteRoot, 'i')), /ENOENT/);
-  assert.match(await readFile(harness.log, 'utf8'), /userdel <aifeeds-sync>/);
+remoteHarnessTest('root-only path chains are rejected before account bootstrap', async (t) => {
+  for (const scenario of [
+    {
+      name: 'release root symlink',
+      async mutate(harness) {
+        const outside = path.join(harness.root, 'outside-release-parent');
+        await mkdir(outside);
+        await mkdir(path.join(harness.root, 'opt'), { recursive: true });
+        await symlink(
+          outside,
+          path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases'),
+        );
+      },
+    },
+    {
+      name: 'intermediate systemd symlink',
+      async mutate(harness) {
+        const outside = path.join(harness.root, 'outside-systemd-parent');
+        await mkdir(outside);
+        await mkdir(path.join(harness.root, 'etc'), { recursive: true });
+        await symlink(outside, path.join(harness.root, 'etc', 'systemd'));
+      },
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const harness = await remoteDeployHarness();
+      await scenario.mutate(harness);
+      const result = runBash(
+        path.join(SYNC_DIR, 'install-remote.sh'),
+        [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+        { ...harness.env, AIFEEDS_FAST_PAYLOAD_TESTS: '1' },
+      );
+      assert.notEqual(result.status, 0);
+      await assert.rejects(stat(path.join(harness.root, 'user-created')), /ENOENT/);
+      await assert.rejects(
+        stat(path.join(harness.root, 'var', 'lib', 'aifeeds-cc-sync')),
+        /ENOENT/,
+      );
+      await assert.rejects(stat(path.join(harness.siteRoot, 'i')), /ENOENT/);
+      const log = await readFile(harness.log, 'utf8');
+      assert.doesNotMatch(log, /useradd|userdel/);
+    });
+  }
 });
 
 remoteHarnessTest('existing managed roots with wrong mode or owner are rejected unchanged', async (t) => {

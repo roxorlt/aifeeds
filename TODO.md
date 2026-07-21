@@ -400,9 +400,19 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 > - [`docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html`](docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html) — 30+ 引擎规则 + AI bot 三类法 + ICP 备案专题
 > - [`docs/plans/2026-05-08-cn-mirror-cc-domain-design.md`](docs/plans/2026-05-08-cn-mirror-cc-domain-design.md) — `.cc` 静态镜像方案、成本估算、合规加固、实施分阶段
 
-阻塞依赖：#11 备案号下来 + `.cc` 站点改造完成。已选 A 方案（`.cc` 启用国内主站，由 `.com` 抓取 + 翻译后生成静态页），不动手实施前先把 5 个待决策点拍板。
+备案依赖已解除。已选 A 方案（`.cc` 启用国内静态内容站，由 `.com` API 拉取、过滤并生成
+静态页；详情按钮由用户主动点击前往 `.com`，不做自动跳转）。
 
-**5 个待拍板的决策点**（开工前要定）：
+- [x] **镜像同步器与事务化部署代码完成**（2026-07-20，当前分支，未部署）：国内来源不
+  同步；海外第三方媒体先过 `is_ai` 与对华负面双层 gate；生成 immutable generation、
+  sitemap shard、`/ai-news/` 与原子 current；部署具备全局 preparing/committed marker、
+  systemd/Nginx/path 精确回滚、durable marker create/replace/delete 恢复、root-only managed
+  snapshot parent、Linux no-replace + directory-fd 清理和 SIGKILL fail-closed；legacy
+  `/var/tmp` snapshot 仅只读验证，安装器不修改 `/var/tmp`。
+- [ ] **生产部署与真实收录观察**：需用户单独批准后执行 `cc-site/sync/deploy-to-cc.sh prod`，
+  再验收 360/搜狗/神马/百度抓取、sitemap 提交、日志与首轮三万页续跑；本轮不推送、不部署。
+
+**5 个运营决策点**（生产上线前仍需逐项确认）：
 1. 境内 OSS / CDN 厂商（七牛云 / 阿里云 / 腾讯云）
 2. AI 训练 bot（GPTBot / ClaudeBot 等）在 `.cc` 上放还是禁
 3. takedown 邮箱地址定名

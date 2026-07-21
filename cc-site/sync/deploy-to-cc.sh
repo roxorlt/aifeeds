@@ -131,13 +131,15 @@ SECURITY_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/deployment-security.mjs")
 FILE_TRANSACTION_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/deployment-file-transaction.mjs")
+LINUX_FS_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
+  sha256 "$LOCAL_PAYLOAD/cc-site/sync/deployment-linux-fs.py")
 NGINX_TRANSACTION_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/nginx-config-transaction.mjs")
 NGINX_EDITOR_DIGEST=$(/usr/bin/env node "$SCRIPT_DIR/deployment-security.mjs" \
   sha256 "$LOCAL_PAYLOAD/cc-site/sync/nginx-vhost-editor.mjs")
 for digest in \
   "$MANIFEST_DIGEST" "$INSTALLER_DIGEST" "$SECURITY_DIGEST" \
-  "$FILE_TRANSACTION_DIGEST" "$NGINX_TRANSACTION_DIGEST" \
+  "$FILE_TRANSACTION_DIGEST" "$LINUX_FS_DIGEST" "$NGINX_TRANSACTION_DIGEST" \
   "$NGINX_EDITOR_DIGEST"; do
   if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: payload helper returned an invalid SHA-256 digest" >&2
@@ -162,7 +164,7 @@ ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
 
 REMOTE_BOOTSTRAP='set -euo pipefail
 umask 077
-if (($# != 8)); then
+if (($# != 9)); then
   echo "ERROR: invalid bootstrap argument count" >&2
   exit 2
 fi
@@ -172,8 +174,9 @@ manifest_digest=$3
 installer_digest=$4
 security_digest=$5
 file_transaction_digest=$6
-nginx_transaction_digest=$7
-nginx_editor_digest=$8
+linux_fs_digest=$7
+nginx_transaction_digest=$8
+nginx_editor_digest=$9
 if [[ ! "$staging" =~ ^/tmp/aifeeds-cc-sync\.[A-Za-z0-9]+$ ]]; then
   echo "ERROR: invalid bootstrap staging path" >&2
   exit 2
@@ -184,7 +187,7 @@ if [[ "$base_url" != https://api.ai-feeds.com ]]; then
 fi
 for digest in \
   "$manifest_digest" "$installer_digest" "$security_digest" \
-  "$file_transaction_digest" "$nginx_transaction_digest" \
+  "$file_transaction_digest" "$linux_fs_digest" "$nginx_transaction_digest" \
   "$nginx_editor_digest"; do
   if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: invalid bootstrap digest" >&2
@@ -207,6 +210,9 @@ install -o root -g root -m 0600 \
 install -o root -g root -m 0600 \
   "$staging/cc-site/sync/deployment-file-transaction.mjs" \
   "$bootstrap/deployment-file-transaction.mjs"
+install -o root -g root -m 0500 \
+  "$staging/cc-site/sync/deployment-linux-fs.py" \
+  "$bootstrap/deployment-linux-fs.fixed.py"
 install -o root -g root -m 0600 \
   "$staging/cc-site/sync/nginx-vhost-editor.mjs" \
   "$bootstrap/nginx-vhost-editor.mjs"
@@ -221,12 +227,15 @@ printf "%s  %s\n" "$file_transaction_digest" \
   "$bootstrap/deployment-file-transaction.fixed.mjs" | sha256sum --check --status
 printf "%s  %s\n" "$file_transaction_digest" \
   "$bootstrap/deployment-file-transaction.mjs" | sha256sum --check --status
+printf "%s  %s\n" "$linux_fs_digest" \
+  "$bootstrap/deployment-linux-fs.fixed.py" | sha256sum --check --status
 printf "%s  %s\n" "$nginx_editor_digest" \
   "$bootstrap/nginx-vhost-editor.mjs" | sha256sum --check --status
 printf "%s  %s\n" "$nginx_transaction_digest" \
   "$bootstrap/nginx-config-transaction.fixed.mjs" | sha256sum --check --status
 AIFEEDS_FIXED_SECURITY_TOOL="$bootstrap/deployment-security.fixed.mjs" \
   AIFEEDS_FIXED_FILE_TOOL="$bootstrap/deployment-file-transaction.fixed.mjs" \
+  AIFEEDS_FIXED_LINUX_FS_HELPER="$bootstrap/deployment-linux-fs.fixed.py" \
   AIFEEDS_FIXED_NGINX_TOOL="$bootstrap/nginx-config-transaction.fixed.mjs" \
   "$bootstrap/install-remote.fixed" \
   "$staging" "$base_url" "$manifest_digest" </dev/null'
@@ -237,6 +246,6 @@ printf '%s\n' "$REMOTE_BOOTSTRAP" | ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" \
   bash -s -- \
   "$REMOTE_STAGING" "$BASE_URL" "$MANIFEST_DIGEST" \
   "$INSTALLER_DIGEST" "$SECURITY_DIGEST" "$FILE_TRANSACTION_DIGEST" \
-  "$NGINX_TRANSACTION_DIGEST" "$NGINX_EDITOR_DIGEST"
+  "$LINUX_FS_DIGEST" "$NGINX_TRANSACTION_DIGEST" "$NGINX_EDITOR_DIGEST"
 
 echo "✓ aifeeds .cc sync service and timer installed for $TARGET."
