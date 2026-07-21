@@ -940,7 +940,11 @@ if [[ ! -f "${payload_tests[0]}" ]]; then
   echo "ERROR: verified payload test suite is empty" >&2
   exit 1
 fi
-"$RUNUSER" -u aifeeds-sync -- env AIFEEDS_REMOTE_PAYLOAD_TEST=1 \
+"$RUNUSER" -u aifeeds-sync -- env -i \
+  AIFEEDS_REMOTE_PAYLOAD_TEST=1 \
+  HOME=/nonexistent \
+  TMPDIR=/tmp \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   "$NODE" --test "${payload_tests[@]}"
 
 if [[ ! -d "$SITE_ROOT" || -L "$SITE_ROOT" ]]; then

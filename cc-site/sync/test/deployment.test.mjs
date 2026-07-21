@@ -3418,8 +3418,32 @@ if [[ "\${AIFEEDS_ENFORCE_RUNUSER_TRAVERSAL:-0}" == 1 \
   printf 'runuser cannot traverse the root-private snapshot parent\n' >&2
   exit 7
 fi
+if [[ "\${AIFEEDS_ENFORCE_RUNUSER_CLEAN_ENV:-0}" == 1 \
+  && "$*" == *'AIFEEDS_REMOTE_PAYLOAD_TEST=1'* \
+  && "$*" != *'-- env -i '* ]]; then
+  printf 'runuser payload tests did not request a clean environment\n' >&2
+  exit 8
+fi
 while (($#)) && [[ "$1" != '--' ]]; do shift; done
 shift
+if [[ "\${1:-}" == env && "\${2:-}" == -i ]]; then
+  shift 2
+  clean_assignments=()
+  while (($#)) && [[ "$1" == *=* ]]; do
+    clean_assignments+=("$1")
+    shift
+  done
+  env -i "\${clean_assignments[@]}" \
+    PATH="$AIFEEDS_HARNESS_CHILD_PATH" \
+    TMPDIR="$AIFEEDS_HARNESS_CHILD_TMPDIR" \
+    AIFEEDS_HARNESS_LOG="$AIFEEDS_HARNESS_LOG" \
+    AIFEEDS_REAL_NODE="$AIFEEDS_REAL_NODE" \
+    AIFEEDS_PAYLOAD_TEST_PROOF="$AIFEEDS_PAYLOAD_TEST_PROOF" \
+    AIFEEDS_NODE_TEST_EXIT="\${AIFEEDS_NODE_TEST_EXIT:-0}" \
+    AIFEEDS_FAST_PAYLOAD_TESTS="\${AIFEEDS_FAST_PAYLOAD_TESTS:-0}" \
+    "$@"
+  exit
+fi
 "$@"
 `);
   await executable(path.join(fakeBin, 'node'), `#!/usr/bin/env bash
@@ -3752,6 +3776,8 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
       AIFEEDS_DEPLOY_TEST_MODE: '1',
       AIFEEDS_DEPLOY_ROOT: root,
       AIFEEDS_HARNESS_LOG: log,
+      AIFEEDS_HARNESS_CHILD_PATH: process.env.PATH,
+      AIFEEDS_HARNESS_CHILD_TMPDIR: os.tmpdir(),
       AIFEEDS_REAL_NODE: process.execPath,
       AIFEEDS_PAYLOAD_TEST_PROOF: payloadTestProof,
       AIFEEDS_INSTALL: path.join(fakeBin, 'install'),
@@ -4140,6 +4166,7 @@ remoteHarnessTest('payload tests run outside the root-private rollback snapshot'
     {
       ...harness.env,
       AIFEEDS_ENFORCE_RUNUSER_TRAVERSAL: '1',
+      AIFEEDS_ENFORCE_RUNUSER_CLEAN_ENV: '1',
       AIFEEDS_FAST_PAYLOAD_TESTS: '1',
     },
   );
@@ -4148,6 +4175,7 @@ remoteHarnessTest('payload tests run outside the root-private rollback snapshot'
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}\n${commandLog}`);
   const runuserLine = commandLog.split('\n').find((line) => line.startsWith('runuser'));
   assert.ok(runuserLine, commandLog);
+  assert.match(runuserLine, /<env> <-i>/);
   assert.doesNotMatch(runuserLine, /aifeeds-cc-deploy-snapshots/);
   assert.match(runuserLine, /aifeeds-cc-sync-releases/);
 });
