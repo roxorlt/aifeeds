@@ -240,8 +240,8 @@ afterEach(() => {
 });
 
 describe("reviewCcItem decisions", () => {
-  it("uses policy v3 and deterministically blocks explicit political-governance language", async () => {
-    expect(CC_REVIEW_POLICY_VERSION).toBe(3);
+  it("uses policy v4 and deterministically blocks explicit political-governance language", async () => {
+    expect(CC_REVIEW_POLICY_VERSION).toBe(4);
     const db = new StatefulD1();
     const itemId = db.insertItem({
       title: "中国免费AI模型Kimi引发特朗普AI团队内部分歧",
@@ -287,6 +287,18 @@ describe("reviewCcItem decisions", () => {
     }
     expect(detectDeterministicRiskFlags(
       "企业 AI 架构需要数据治理、上下文工程与模型管理。",
+    )).toEqual(SAFE_FLAGS);
+  });
+
+  it("blocks restrictions targeting Chinese companies without treating a Chinese company as the target", () => {
+    expect(detectDeterministicRiskFlags(
+      "这篇报道涉及 Anthropic 对中国企业使用 Claude Code 的限制。",
+    )).toMatchObject({ china_negative: 1 });
+    expect(detectDeterministicRiskFlags(
+      "Anthropic restricts Chinese companies from using Claude Code.",
+    )).toMatchObject({ china_negative: 1 });
+    expect(detectDeterministicRiskFlags(
+      "中国 AI 公司限制免费用户的模型调用频率。",
     )).toEqual(SAFE_FLAGS);
   });
 

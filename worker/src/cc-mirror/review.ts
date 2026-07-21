@@ -9,7 +9,7 @@ import {
   type CcSourceDecision,
 } from "./source-policy";
 
-export const CC_REVIEW_POLICY_VERSION = 3;
+export const CC_REVIEW_POLICY_VERSION = 4;
 
 export interface CcRiskFlags {
   china_negative: 0 | 1;
@@ -114,6 +114,7 @@ const MILITARY_CONFLICT_RE = /(?:军事|军方|国防部|五角大楼|武器|战
 const SANCTIONS_EXPORT_RE = /(?:制裁|出口管制|禁运|芯片禁令|\b(?:sanctions?|export controls?|embargo|trade ban)\b)/iu;
 const CHINA_REFERENCE_RE = /(?:中国|中方|中国人|中国企业|中国公司|\bchina(?:'s)?\b|\bchinese\b)/iu;
 const CHINA_NEGATIVE_RE = /(?:威胁|窃取|偷窃|间谍|渗透|操纵|审查|威权|颠覆|\b(?:threat(?:en(?:s|ed|ing)?)?|steal(?:s|ing)?|stole|stolen|spy|spies|espionage|infiltrat(?:e|es|ed|ing|ion)|manipulat(?:e|es|ed|ing|ion)|censor(?:s|ed|ing|ship)?|authoritarian)\b)/iu;
+const CHINA_TARGETED_RE = /(?:对(?:中国|中方|中国企业|中国公司|中国用户|中国开发者)[^。！？\n]{0,40}(?:限制|禁止|禁用|封禁|阻止|切断)|(?:中国企业|中国公司|中国用户|中国开发者)[^。！？\n]{0,20}(?:被|遭|受到)[^。！？\n]{0,20}(?:限制|禁止|禁用|封禁|阻止|切断)|\b(?:ban(?:s|ned|ning)?|restrict(?:s|ed|ing|ions?)?|block(?:s|ed|ing)?|bar(?:s|red|ring)?)\b.{0,60}\b(?:china|chinese(?:\s+(?:companies|firms|users|developers))?)\b|\bchinese\s+(?:companies|firms|users|developers)\s+(?:are|were|remain|have been)\s+(?:banned|restricted|blocked|barred)\b)/iu;
 
 export function detectDeterministicRiskFlags(text: string): CcRiskFlags {
   const flags: CcRiskFlags = {
@@ -137,7 +138,10 @@ export function detectDeterministicRiskFlags(text: string): CcRiskFlags {
   if (SANCTIONS_EXPORT_RE.test(text)) {
     mark("sanctions_export_control", "明确涉及制裁、禁运或出口管制");
   }
-  if (CHINA_REFERENCE_RE.test(text) && CHINA_NEGATIVE_RE.test(text)) {
+  if (
+    (CHINA_REFERENCE_RE.test(text) && CHINA_NEGATIVE_RE.test(text))
+    || CHINA_TARGETED_RE.test(text)
+  ) {
     mark("china_negative", "中国相关主体与明显负面定性同时出现");
   }
   return flags;
@@ -787,7 +791,7 @@ function buildReviewSystemPrompt(): string {
 
 判定规则：
 1. 中性产品、技术或研究内容的全部风险 flag 为 0。
-2. 对华负面内容标 china_negative=1。
+2. 对华负面内容标 china_negative=1；对中国、中国企业或中国用户实施限制、禁用、封禁或阻断也属于该项。中国公司作为产品限制的实施者不因此自动命中。
 3. 政治治理内容独立标 politics_governance=1。政府官员、总统或州长、议员、国会、白宫、五角大楼、政党、监管机构、立法、警方或执法机关、国家间技术竞争、政府政策阵营及其政治经济影响都属于政治治理；不要因为主要批评对象是美国而标 0。企业内部的数据治理、模型治理或产品管理本身不属于政治治理。
 4. 军事冲突内容独立标 military_conflict=1。
 5. 中性陈述制裁或出口管制事实也标 sanctions_export_control=1，交人工复核。
