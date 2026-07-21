@@ -3544,7 +3544,13 @@ case "$*" in
     printf '%s\n' "$active"
     case "$active" in
       active|activating|deactivating) exit 0 ;;
-      inactive|failed) exit 3 ;;
+      inactive)
+        if [[ "\${AIFEEDS_ABSENT_IS_ACTIVE_EXIT:-3}" == 4 \
+          && ! -f "$unit_dir/aifeeds-cc-sync.timer" ]]; then
+          exit 4
+        fi
+        exit 3 ;;
+      failed) exit 3 ;;
       *) exit 4 ;;
     esac ;;
   'is-active aifeeds-cc-sync.service')
@@ -3552,7 +3558,13 @@ case "$*" in
     printf '%s\n' "$active"
     case "$active" in
       active|activating|deactivating) exit 0 ;;
-      inactive|failed) exit 3 ;;
+      inactive)
+        if [[ "\${AIFEEDS_ABSENT_IS_ACTIVE_EXIT:-3}" == 4 \
+          && ! -f "$unit_dir/aifeeds-cc-sync.service" ]]; then
+          exit 4
+        fi
+        exit 3 ;;
+      failed) exit 3 ;;
       *) exit 4 ;;
     esac ;;
   'disable aifeeds-cc-sync.timer')
@@ -4088,6 +4100,31 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
   assert.equal((await stat(path.join(harness.siteRoot, 'i'))).mode & 0o777, 0o750);
   assert.equal((await stat(path.join(harness.root, 'etc/aifeeds/cc-sync.env'))).mode & 0o777, 0o600);
   assert.equal(output.includes('c'.repeat(64)), false);
+});
+
+remoteHarnessTest('first install accepts systemd 255 exit 4 for absent inactive units', async () => {
+  const harness = await remoteDeployHarness();
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_ABSENT_IS_ACTIVE_EXIT: '4',
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+    },
+  );
+  const commandLog = await readFile(harness.log, 'utf8');
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}\n${commandLog}`);
+  assert.match(
+    commandLog,
+    /systemctl <show> <--property=LoadState> <--value> <aifeeds-cc-sync\.service>/,
+  );
+  assert.match(commandLog, /systemctl <is-active> <aifeeds-cc-sync\.service>/);
+  assert.equal(
+    await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
+    'enabled\n',
+  );
 });
 
 remoteHarnessTest('deployment lock refuses prepositioned links and non-regular files without touching shared paths', async (t) => {
@@ -5209,6 +5246,7 @@ remoteHarnessTest('a failed first install leaves no live code, unit, env, or tim
     {
       ...harness.env,
       AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      AIFEEDS_ABSENT_IS_ACTIVE_EXIT: '4',
       AIFEEDS_SERVICE_START_EXIT: '19',
     },
   );

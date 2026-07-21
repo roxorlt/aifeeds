@@ -407,6 +407,9 @@ restore_original_service_state() {
         || "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:activating ]] || return 1 ;;
     inactive:3:inactive)
       ;;
+    inactive:4:inactive)
+      [[ ! -e "$UNIT_DIR/$SERVICE" && ! -L "$UNIT_DIR/$SERVICE" ]] \
+        || return 1 ;;
     inactive:0:active|inactive:0:activating)
       "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$SERVICE"
@@ -465,6 +468,9 @@ restore_original_timer_activity() {
       [[ "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" == 0:active ]] || return 1 ;;
     inactive:3:inactive)
       ;;
+    inactive:4:inactive)
+      [[ ! -e "$UNIT_DIR/$TIMER" && ! -L "$UNIT_DIR/$TIMER" ]] \
+        || return 1 ;;
     inactive:0:active)
       "$SYSTEMCTL" stop "$TIMER" >/dev/null 2>&1 || return 1
       capture_systemctl is-active "$TIMER"
@@ -656,6 +662,17 @@ capture_systemctl() {
   return 0
 }
 
+systemctl_reports_inactive() {
+  local unit_path=$1
+  case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+    3:inactive) return 0 ;;
+    4:inactive)
+      [[ ! -e "$unit_path" && ! -L "$unit_path" ]]
+      return ;;
+    *) return 1 ;;
+  esac
+}
+
 abort_unmodified_preparation() {
   if ((transaction_prepared != 1 || nginx_mutated != 0 \
     || release_created != 0 || opt_switched != 0 || env_installed != 0 \
@@ -665,15 +682,21 @@ abort_unmodified_preparation() {
     return 1
   fi
   capture_systemctl is-active "$SERVICE"
-  case "$service_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
-    active:0:active|activating:0:activating|inactive:3:inactive) ;;
-    *) return 1 ;;
-  esac
+  if [[ "$service_active_before" == inactive ]]; then
+    systemctl_reports_inactive "$UNIT_DIR/$SERVICE" || return 1
+  else
+    case "$service_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
+      active:0:active|activating:0:activating) ;;
+      *) return 1 ;;
+    esac
+  fi
   capture_systemctl is-active "$TIMER"
-  case "$timer_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
-    active:0:active|inactive:3:inactive) ;;
-    *) return 1 ;;
-  esac
+  if [[ "$timer_active_before" == inactive ]]; then
+    systemctl_reports_inactive "$UNIT_DIR/$TIMER" || return 1
+  else
+    [[ "$timer_active_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" \
+      == active:0:active ]] || return 1
+  fi
   capture_systemctl is-enabled "$TIMER"
   case "$timer_enabled_before:$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
     enabled:0:enabled|disabled:1:disabled|not-found:4:not-found) ;;
@@ -721,10 +744,13 @@ capture_systemctl is-active "$SERVICE"
 case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
   0:active) service_active_before=active ;;
   0:activating) service_active_before=activating ;;
-  3:inactive) service_active_before=inactive ;;
   *)
-    echo "ERROR: unsupported systemd state for $SERVICE: $SYSTEMCTL_OUTPUT" >&2
-    exit 1 ;;
+    if systemctl_reports_inactive "$UNIT_DIR/$SERVICE"; then
+      service_active_before=inactive
+    else
+      echo "ERROR: unsupported systemd state for $SERVICE: $SYSTEMCTL_OUTPUT" >&2
+      exit 1
+    fi ;;
 esac
 if [[ "$service_load_before" == not-found \
   && "$service_active_before" != inactive ]]; then
@@ -735,10 +761,13 @@ fi
 capture_systemctl is-active "$TIMER"
 case "$SYSTEMCTL_STATUS:$SYSTEMCTL_OUTPUT" in
   0:active) timer_active_before=active ;;
-  3:inactive) timer_active_before=inactive ;;
   *)
-    echo "ERROR: unsupported systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
-    exit 1 ;;
+    if systemctl_reports_inactive "$UNIT_DIR/$TIMER"; then
+      timer_active_before=inactive
+    else
+      echo "ERROR: unsupported systemd state for $TIMER: $SYSTEMCTL_OUTPUT" >&2
+      exit 1
+    fi ;;
 esac
 if [[ "$timer_load_before" == not-found && "$timer_active_before" != inactive ]]; then
   echo "ERROR: unsupported systemd state for absent $TIMER" >&2
