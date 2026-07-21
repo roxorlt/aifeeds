@@ -479,21 +479,21 @@ set -euo pipefail
 printf 'remote-sudo' >> "$AIFEEDS_HARNESS_LOG"
 printf ' <%s>' "$@" >> "$AIFEEDS_HARNESS_LOG"
 printf '\n' >> "$AIFEEDS_HARNESS_LOG"
-[[ "$#" == 14 ]]
-[[ "$1" == env && "$2" == -i ]]
-[[ "$3" == PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ]]
-[[ "$4" == bash && "$5" == -s && "$6" == -- ]]
-[[ "$7" =~ ^/tmp/aifeeds-cc-sync\\.[A-Za-z0-9]+$ ]]
-[[ "$8" == https://api.ai-feeds.com ]]
+[[ "$#" == 15 ]] || exit 64
+[[ "$1" == env && "$2" == -i ]] || exit 64
+[[ "$3" == PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ]] || exit 64
+[[ "$4" == bash && "$5" == -s && "$6" == -- ]] || exit 64
+[[ "$7" =~ ^/tmp/aifeeds-cc-sync\\.[A-Za-z0-9]+$ ]] || exit 64
+[[ "$8" == https://api.ai-feeds.com ]] || exit 64
 for digest in "\${@:9}"; do
-  [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 64
 done
 bootstrap_script=$(cat)
 printf 'remote-bootstrap-stdin\n%s\n' "$bootstrap_script" >> "$AIFEEDS_HARNESS_LOG"
 printf '%s\n' "$bootstrap_script" | /bin/bash -n
-[[ "$bootstrap_script" == *$'set -euo pipefail\numask 077\n'* ]]
-[[ "$bootstrap_script" == *'install-remote.fixed'* ]]
-[[ "$bootstrap_script" == *'"$staging" "$base_url" "$manifest_digest" </dev/null'* ]]
+[[ "$bootstrap_script" == *$'set -euo pipefail\numask 077\n'* ]] || exit 64
+[[ "$bootstrap_script" == *'install-remote.fixed'* ]] || exit 64
+[[ "$bootstrap_script" == *'"$staging" "$base_url" "$manifest_digest" </dev/null'* ]] || exit 64
 exit "\${AIFEEDS_REMOTE_INSTALL_EXIT:-0}"
 `);
   await executable(path.join(fakeBin, 'scp'), `#!/usr/bin/env bash
