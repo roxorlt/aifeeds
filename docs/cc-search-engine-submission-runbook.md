@@ -2,27 +2,26 @@
 
 > 适用站点：`https://ai-feeds.cc`
 > 平台：百度搜索资源平台、360 站长平台、搜狗搜索资源平台、神马站长平台
-> 状态基线：2026-07-21；四家站点所有权验证均已通过；内容镜像代码已完成但尚未部署
+> 状态基线：2026-07-21；四家站点所有权验证均已通过；国内兼容 sitemap 代码已完成，等待生产部署验收与叶子枚举
 > 原则：先确认生产页面与 sitemap 真实可抓取，再在平台中提交；提交不等于保证抓取、收录或排名。
 
 ## 1. 当前结论
 
 | 平台 | 当前能否提交 3 万内容页 | 建议提交对象 | 结论 |
 |---|---:|---|---|
-| 360 | 可以 | `https://ai-feeds.cc/sitemap.xml` | 根文件是 sitemap index，360 当前界面支持索引型 sitemap；生产验收通过后提交 |
-| 搜狗 | 取决于账号权限 | `https://ai-feeds.cc/sitemap.xml` | 搜狗支持一级 sitemap index，但 sitemap 工具采用邀请制；先检查账号是否获邀 |
-| 百度 | 暂不能用现有根文件批量提交 | 现阶段先提交 `sitemap-static.xml`，再少量手动提交代表 URL | 百度普通收录当前不处理索引型 sitemap；现有叶子 URL 又带短期 generation UUID，不适合登记为长期文件 |
-| 神马 | 暂缓 | 完成兼容改造后提交稳定的国内平台专用 sitemap index | 神马每个标准 XML 最多 10,000 URL，且顶层索引示例要求 `lastmod`；现实现分片上限为 45,000，根索引没有 `lastmod` |
+| 360 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 稳定一级索引；生产验收通过后提交 |
+| 搜狗 | 取决于账号权限 | `https://ai-feeds.cc/sitemap-cn.xml` | 稳定一级索引；sitemap 工具采用邀请制，先检查账号是否获邀 |
+| 百度 | 可以逐片提交 | `sitemap-static.xml` + 生产实际存在的全部 `sitemap-cn-NNNN.xml` | 百度普通收录不处理索引型 sitemap，不提交 `sitemap-cn.xml` 或 `/sitemap.xml` |
+| 神马 | 可以 | `https://ai-feeds.cc/sitemap-cn.xml` | 每片最多 10,000 URL，索引每个子项均带真实 `lastmod` |
 
 因此不要把同一个 `/sitemap.xml` 不加检查地提交给四家。生产首发顺序建议为：
 
-1. 上线并完成本手册第 3 节验收；
-2. 提交 360；
-3. 检查搜狗邀请与资质状态，满足条件后提交；
-4. 百度先走静态 sitemap、少量手动 URL 和自然抓取；
-5. 完成第 2 节的国内平台专用 sitemap 兼容层后，再补齐百度批量 sitemap 与神马提交。
+1. 上线并完成本手册第 3 节验收，冻结当次生产叶子清单；
+2. 360 与神马提交 `sitemap-cn.xml`；
+3. 检查搜狗邀请与资质状态，满足条件后提交同一个稳定索引；
+4. 百度先提交 `sitemap-static.xml` 与 `sitemap-cn-0001.xml`，观察 24～48 小时正常后补齐其余生产叶子。
 
-## 2. 提交前需要补的 sitemap 兼容层
+## 2. 已实现的 sitemap 兼容层
 
 ### 2.1 已有实现
 
@@ -36,7 +35,7 @@
 
 这一设计适合通用 crawler 从稳定根索引发现短期不可变叶子，但不满足“平台长期登记一个标准 URL 列表文件”的全部要求。
 
-### 2.2 推荐的后续实现
+### 2.2 国内平台稳定文件
 
 新增一套稳定的国内平台提交文件，同时保留现有 generation sitemap：
 
@@ -48,17 +47,17 @@ https://ai-feeds.cc/sitemap-cn-0003.xml
 ...
 ```
 
-要求：
+实现保证：
 
 - `sitemap-cn.xml` 是稳定的一层索引，子项都带真实 `lastmod`；
 - 每个 `sitemap-cn-NNNN.xml` 是标准 `<urlset>`，最多 10,000 URL、UTF-8、未压缩时小于 10 MB；
 - 叶子 URL 稳定，不含 generation UUID，Nginx 通过原子 `current` 入口读取当代文件；
 - 叶子仅包含 `https://ai-feeds.cc/` 下允许公开的 200 页面；
 - 页数减少时，已被百度登记过的旧叶子编号不能突然变成任意文件或错误内容；应保留安全的空 `<urlset>`，或在百度平台先删除登记再下线；
-- 发布时校验根索引、所有叶子的 XML、URL 数、文件大小、同域性、重复 URL 和 HTTP 200；
+- 发布器校验每片 URL 数与文件大小；部署事务再验证 Nginx 用户可读，并对稳定索引与第一片做本机 HTTPS 200 精确字节比对；生产提交前仍按第 3 节检查全部叶子与页面；
 - `sitemap-static.xml` 继续独立存在。百度直接登记 `sitemap-static.xml` 与各个 `sitemap-cn-NNNN.xml`；360、搜狗、神马可登记 `sitemap-cn.xml`。
 
-这套兼容层不是当前已完成 plan 的一部分。完成前，百度不得提交现有 `/sitemap.xml`，神马不得提交可能包含超过 10,000 URL 叶子且缺少索引 `lastmod` 的现有根文件。
+旧 generation 的 manifest 没有新字段时仍可恢复和回收；首次运行新版发布器会因 sitemap URL schema 升级重建完整 generation。manifest 记录叶子高水位，数据缩小时曾发布的旧编号继续返回空的合法 `<urlset>`，不会让百度已登记地址突变为 404。
 
 ## 3. 生产提交前共同门禁
 
@@ -95,6 +94,8 @@ https://ai-feeds.cc/sitemap-cn-0003.xml
 curl -fsS https://ai-feeds.cc/robots.txt
 curl -fsS https://ai-feeds.cc/sitemap.xml
 curl -fsS https://ai-feeds.cc/sitemap-static.xml
+curl -fsS https://ai-feeds.cc/sitemap-cn.xml
+curl -fsS https://ai-feeds.cc/sitemap-cn-0001.xml
 ```
 
 确认：
@@ -103,6 +104,8 @@ curl -fsS https://ai-feeds.cc/sitemap-static.xml
 - 未禁止 `Baiduspider`、`360Spider`、搜狗 spider 或 `yisouspider` 抓取公开页面；
 - sitemap 中只有 `.cc` URL，不得混入 `.com` CTA、后台、工作台、API、验证文件或被过滤内容；
 - 根索引列出的每一个叶子都返回 200 和 `application/xml`；
+- `sitemap-cn.xml` 是一层索引，每个子项都有 `lastmod`，且稳定叶子名严格为 `sitemap-cn-NNNN.xml`；
+- 每个 CN 叶子不超过 10,000 个 `<url>`、小于 10 MB，所有 `<loc>` 不超过 256 字节；
 - 每个 URL 只出现一次，且其页面返回 200、自 canonical；
 - sitemap URL 总数等于 VPS 同步 state 中 live page 数，加上明确列出的静态页和归档页；
 - 内容删除后从 sitemap 移除，页面返回 404 或 410，不做软 404。
@@ -112,6 +115,9 @@ curl -fsS https://ai-feeds.cc/sitemap-static.xml
 ```bash
 curl -fsSI https://ai-feeds.cc/sitemap.xml
 curl -fsS https://ai-feeds.cc/sitemap.xml | xmllint --noout -
+curl -fsSI https://ai-feeds.cc/sitemap-cn.xml
+curl -fsS https://ai-feeds.cc/sitemap-cn.xml | xmllint --noout -
+curl -fsS https://ai-feeds.cc/sitemap-cn-0001.xml | xmllint --noout -
 curl -fsS https://ai-feeds.cc/robots.txt | grep -F 'Sitemap: https://ai-feeds.cc/sitemap.xml'
 ```
 
@@ -127,7 +133,7 @@ curl -fsS https://ai-feeds.cc/robots.txt | grep -F 'Sitemap: https://ai-feeds.cc
 2. 进入“数据提交 → Sitemap 提交”。
 3. 确认列表中没有错误的旧域名或测试文件。
 4. 点击“添加新数据”。
-5. 在“数据文件地址”填写 `https://ai-feeds.cc/sitemap.xml`。
+5. 在“数据文件地址”填写 `https://ai-feeds.cc/sitemap-cn.xml`。
 6. 人工填写页面验证码。
 7. 再核对一次域名与协议后，点击“添加”。
 8. 截图或记录提交时间、文件 URL 与页面返回状态。
@@ -168,7 +174,7 @@ ICP备案：京ICP备2025123594号-2
           国内新闻来源与非 AI、对华负面等风险内容不进入公开镜像。
 页面规模：约 <实际 live 数> 个内容页
 归档入口：https://ai-feeds.cc/ai-news/
-Sitemap：https://ai-feeds.cc/sitemap.xml
+Sitemap：https://ai-feeds.cc/sitemap-cn.xml
 抓取问题或申请理由：<如实填写；若 spider 可正常抓取，不要声称无法抓取>
 抽样页面：
 1. <URL>
@@ -179,7 +185,7 @@ Sitemap：https://ai-feeds.cc/sitemap.xml
 ### 5.2 获邀后的提交
 
 1. 进入“Sitemap 提交”，选择 `ai-feeds.cc`；
-2. 填写 `https://ai-feeds.cc/sitemap.xml`；
+2. 填写 `https://ai-feeds.cc/sitemap-cn.xml`；
 3. 提交后记录状态；
 4. 状态含义按平台帮助理解：“已提交”是收到地址，“等待”是排队，“正常”才表示文件被正常处理，“等待更新”表示等待再次抓取；
 5. 若失败，依次检查：公网可访问、文件属于已验证域名及目录、是否重复、XML 是否有效、是否为一级索引、每个文件是否小于 50,000 URL 和 10 MB。
@@ -197,27 +203,28 @@ Sitemap：https://ai-feeds.cc/sitemap.xml
 
 入口：[百度普通收录](https://ziyuan.baidu.com/linksubmit/index)
 
-### 6.1 当前不要提交 `/sitemap.xml`
+### 6.1 不要提交任何 sitemap index
 
 百度普通收录的官方手册与常见问题明确说明：sitemap 文件要直接包含站点 URL，索引型 sitemap 不予处理。当前 `/sitemap.xml` 是索引，因此不要尝试提交后等待碰运气。
 
 现有 generation 叶子地址也不要登记：它们形如 `/sitemaps/<uuid>/news-1.xml`，是给根索引临时引用的不可变文件，旧代会回收，不是长期提交地址。
 
-### 6.2 国内平台专用 sitemap 完成前
+### 6.2 首次提交顺序
 
 1. 进入“资源提交 → 普通收录”。
-2. 如果有“Sitemap”标签，先提交稳定的标准 URL 集：`https://ai-feeds.cc/sitemap-static.xml`。
-3. 在“手动提交”中提交少量种子 URL：
+2. 如果有“Sitemap”标签，先提交 `https://ai-feeds.cc/sitemap-static.xml` 与 `https://ai-feeds.cc/sitemap-cn-0001.xml`。
+3. 等待 24～48 小时；首片状态正常后，把生产 `sitemap-cn.xml` 当前列出的其余 `sitemap-cn-NNNN.xml` 逐个登记。不要凭预计页数填写不存在的编号。
+4. 在“手动提交”中可另提交少量种子 URL：
    - `https://ai-feeds.cc/`
    - `https://ai-feeds.cc/ai-news/`
    - 最新归档页；
    - 10～20 个通过人工抽查的高质量内容页，覆盖 news、X、GitHub、Product Hunt、HF Paper。
-4. 不提交 `.com` CTA 目标，不提交同内容的多个参数 URL，不提交 pending/deny 页。
-5. 首周观察自然抓取和质量反馈，不把 3 万历史 URL 一次性塞进手动或 API 通道。
+5. 不提交 `.com` CTA 目标，不提交同内容的多个参数 URL，不提交 pending/deny 页。
+6. 首周观察自然抓取和质量反馈，不把 3 万历史 URL 一次性塞进手动或 API 通道。
 
 “普通收录”只缩短发现链接的时间，不能解决内容是否收录。若账号显示“快速抓取”，它是平台按权益开放的稀缺通道，只用于最新、高时效且经过审核的少量内容，不用于历史回填。
 
-### 6.3 兼容层完成后
+### 6.3 百度最终可登记文件
 
 百度不能提交 `sitemap-cn.xml` 索引，应逐个登记：
 
@@ -253,16 +260,16 @@ https://ai-feeds.cc/sitemap-cn-0002.xml
 
 入口：[神马 Sitemap 官方格式说明](https://zhanzhang.sm.cn/open/helpsitemap)
 
-### 7.1 当前先不要提交现有根文件
+### 7.1 不提交通用根文件
 
 神马支持标准 XML 与最多三层 sitemap index，但有两项更严格要求：
 
 - 每个标准 XML 最多 10,000 URL；
 - 官方顶层索引格式把每个子 sitemap 的 `lastmod` 标为必填。
 
-当前内容分片上限是 45,000，根索引也没有 sitemap 子项 `lastmod`。即使当前某次生产数据恰好没有任何来源超过 10,000 条，也不应把偶然满足当成长期协议保证。
+通用 `/sitemap.xml` 仍按 45,000 上限组织 generation 分片，索引子项也不承诺 `lastmod`，因此不要提交它。专用 `/sitemap-cn.xml` 已按神马约束生成，才是正式提交入口。
 
-### 7.2 兼容层完成后的提交
+### 7.2 提交步骤
 
 1. 先验证 `sitemap-cn.xml` 是一层索引、每个子项都有 `lastmod`；
 2. 逐个检查所有叶子 URL 数 `<= 10000`，URL 长度不超过 256 字节，UTF-8，页面为移动端可读的 HTTPS 200；
@@ -281,10 +288,10 @@ https://ai-feeds.cc/sitemap-cn-0002.xml
 | 时间 | 操作 |
 |---|---|
 | D0 | 部署；跑第 3 节全部门禁；保存 sitemap 哈希、URL 数和抽样结果；不提交有错误的平台 |
-| D1 | 提交 360；检查搜狗资质与邀请；百度提交静态 sitemap 和少量种子 URL；神马保持暂缓 |
+| D1 | 360、神马提交 `sitemap-cn.xml`；检查搜狗资质与邀请；百度提交静态 sitemap 与 `0001` |
 | D2～D3 | 查看平台 sitemap 状态与抓取诊断；修复 4xx/5xx、robots、XML 或响应速度问题 |
 | D7 | 记录四家索引量、抓取量、关键词/流量、异常；人工抽查搜索结果标题、摘要与落地页 |
-| D8～D14 | 只修真实问题，不反复提交；完成国内平台专用 sitemap 后补交百度叶子和神马索引 |
+| D8～D14 | 只修真实问题，不反复提交；百度首片正常后补齐当次生产叶子 |
 | D14 | 对比 D7 数据，决定是否开启百度“当天新增 URL”API 推送；形成第一版收录基线 |
 
 建议操作台账至少包含：平台、站点、提交账号、提交文件、提交时间、平台状态、最近抓取时间、发现 URL 数、索引量、错误、处理人和复查日期。

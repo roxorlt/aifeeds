@@ -23,6 +23,8 @@ systemd service 使用 `UMask=0027`，生成目录/文件保持 Nginx 用户 `ww
 
 - `/var/lib/aifeeds-cc-sync/public/current/ai-news/`
 - `/var/lib/aifeeds-cc-sync/public/current/sitemap.xml`
+- `/var/lib/aifeeds-cc-sync/public/current/sitemap-cn.xml`
+- `/var/lib/aifeeds-cc-sync/public/current/sitemap-cn-NNNN.xml`
 - `/var/lib/aifeeds-cc-sync/public/generations/<uuid>/sitemaps/`
 
 Nginx 的 generation 路由只接受小写 v4 UUID 与 `archive.xml` 或
@@ -99,13 +101,14 @@ systemd unit；本地和远端都有退出清理 trap。
 5. 创建以 manifest digest 命名的不可变 release，原子切换
    `/opt/aifeeds-cc-sync`，并用同目录临时文件、fsync、rename 安装 env 与 unit；
 6. 手动启动一次 oneshot service，从 `nginx -T` 检测真实 worker user（必须精确为
-   `www`），验证它可读 current、AI 新闻首页及根 sitemap 引用的 generation shard；
+   `www`），验证它可读 current、AI 新闻首页、国内稳定 sitemap 与根 sitemap 引用的
+   generation shard；
 7. 通过 compare-and-swap 事务安装 marker-managed include 和 snippet；若宝塔在准备、
    提交或回滚期间改写 vhost，部署 fail closed，绝不覆盖并发面板内容；
 8. `nginx -t` 成功后 reload，并通过
-   `--resolve ai-feeds.cc:443:127.0.0.1` 直接命中本机 HTTPS：根 sitemap、
-   generation shard、`/ai-news/` 都必须精确返回 HTTP 200，且响应字节必须与刚发布
-   的文件完全一致；
+   `--resolve ai-feeds.cc:443:127.0.0.1` 直接命中本机 HTTPS：根 sitemap、国内稳定
+   sitemap index、第一片稳定叶子、generation shard 与 `/ai-news/` 都必须精确返回
+   HTTP 200，且响应字节必须与刚发布的文件完全一致；
 9. 最后才 `enable --now` timer；部署提交后仅清理经过 owner/mode/type/link
    验证的旧 release，保留当前与最近两个安全版本，异常目录只跳过、不跟随。
 

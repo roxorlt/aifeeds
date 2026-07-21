@@ -51,6 +51,9 @@
 - `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/ai-news/`：50 条一页的内容归档；
 - `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemaps/`：内容与归档 sitemap 分片；
 - `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemap.xml`：根 sitemap 索引；
+- `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemap-cn.xml`：国内搜索平台稳定入口对应的一层索引；
+- `${CC_SYNC_STATE_DIR}/public/generations/<uuid>/sitemap-cn-NNNN.xml`：每片最多
+  10,000 URL 的稳定编号叶子；
 - `${CC_SYNC_STATE_DIR}/public/current`：只允许指向 `generations/<uuid>` 的受控相对
   symlink，是 Nginx 暴露归档与根 sitemap 的原子入口；
 - `${CC_SYNC_STATE_DIR}/public/publication-journal.json`：崩溃恢复与 current/previous
@@ -59,7 +62,9 @@
 同步用户只需写 `${CC_SITE_ROOT}/i/` 和 `${CC_SYNC_STATE_DIR}`；站点根对同步器只读，
 归档不再落到 `${CC_SITE_ROOT}/ai-news/`。人工部署脚本不得复制或删除 `/i/`、
 `/ai-news/`、`/sitemaps/`，也不得在站点根目录写旧版 `sitemap.xml`。生产 Nginx
-将 `/ai-news/` 和根 sitemap alias 到 `public/current/` 下对应路径。根 sitemap
+将 `/ai-news/`、根 sitemap 与 `sitemap-cn*.xml` alias 到 `public/current/` 下对应路径。
+国内叶子编号从 `0001` 开始；manifest 保存历史高水位，内容缩容后旧编号继续返回空的合法
+`urlset`，避免站长平台已登记地址变成 404。通用根 sitemap
 中的分片 URL 固定为 `/sitemaps/<generation-v4-uuid>/<allowlisted-file>.xml`；
 Nginx 只把严格匹配的 UUID 与 `archive.xml` 或
 `(news|x|gh|ph|hf-paper)-<正整数>.xml` 映射到对应不可变 generation，其他
