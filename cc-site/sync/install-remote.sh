@@ -6,6 +6,15 @@ set -euo pipefail
 set +x
 umask 027
 
+report_failure() {
+  local status=$?
+  local line=${BASH_LINENO[0]:-$LINENO}
+  printf 'ERROR: installer command failed at line %s (status %s)\n' \
+    "$line" "$status" >&2
+  return "$status"
+}
+trap report_failure ERR
+
 TEST_MODE=${AIFEEDS_DEPLOY_TEST_MODE:-0}
 if [[ "$TEST_MODE" == "1" ]]; then
   DEPLOY_ROOT=${AIFEEDS_DEPLOY_ROOT:?test root is required}

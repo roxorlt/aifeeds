@@ -5304,6 +5304,10 @@ remoteHarnessTest('a failed first install leaves no live code, unit, env, or tim
     },
   );
   assert.equal(result.status, 19, result.stderr);
+  assert.match(
+    result.stderr,
+    /installer command failed at line [0-9]+ \(status 19\)/,
+  );
   for (const absent of [
     path.join(harness.root, 'opt', 'aifeeds-cc-sync'),
     path.join(harness.root, 'opt', 'aifeeds-cc-sync-releases', harness.manifestDigest),
