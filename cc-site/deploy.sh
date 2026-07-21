@@ -40,11 +40,16 @@ cleanup() {
   set +e
   rm -rf -- "$SMOKE_DIR"
   if [[ -n "$REMOTE_STAGING" ]]; then
-    ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" \
+    ssh "${SSH_OPTS[@]}" "$HOST" \
       "set -euo pipefail; rm -rf -- '$REMOTE_STAGING'" >/dev/null 2>&1
   fi
 }
 trap cleanup EXIT
+
+# SSH 连接复用：全程共享一条 TCP 连接，避免服务器对短时间内
+# 连续新建连接限流导致 scp "Connection closed"（2026-07-16 实际踩到）
+SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=accept-new
+  -o ControlMaster=auto -o ControlPath=/tmp/cc-site-ssh-mux-%r@%h:%p -o ControlPersist=120)
 
 if [[ ! -f "$KEY" ]]; then
   echo "ERROR: SSH key not found at $KEY" >&2
@@ -71,19 +76,19 @@ for record in "${VERIFICATION_RECORDS[@]}"; do
   check_verification_file "$file" "$bytes" "$digest"
 done
 
-REMOTE_STAGING=$(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" \
+REMOTE_STAGING=$(ssh "${SSH_OPTS[@]}" "$HOST" \
   'set -euo pipefail; mktemp -d /tmp/cc-site-staging.XXXXXX')
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" \
+ssh "${SSH_OPTS[@]}" "$HOST" \
   "set -euo pipefail; mkdir -p '$REMOTE_STAGING/assets' '$REMOTE_STAGING/cc-prompts'"
 
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+scp "${SSH_OPTS[@]}" \
   "${ROOT_FILES[@]}" "$HOST:$REMOTE_STAGING/"
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+scp "${SSH_OPTS[@]}" \
   assets/gongan-icon.png "$HOST:$REMOTE_STAGING/assets/"
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new \
+scp "${SSH_OPTS[@]}" \
   "${PROMPT_FILES[@]}" "$HOST:$REMOTE_STAGING/cc-prompts/"
 
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" \
+ssh "${SSH_OPTS[@]}" "$HOST" \
   "bash -s -- '$REMOTE_STAGING' '$REMOTE_ROOT'" <<'REMOTE'
 set -euo pipefail
 staging=$1

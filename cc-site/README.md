@@ -14,7 +14,8 @@
 | `robots.txt` | 爬虫规则；根 sitemap 指向同步器生成的 `/sitemap.xml` |
 | `sitemap-static.xml` | 人工维护静态页的独立 sitemap |
 | `assets/gongan-icon.png` | 公安备案徽章（36×40） |
-| `cc-prompts/*.html` | 人工维护的四个 Claude Code 提示词公开页 |
+| `cc-prompts/index.html` | Claude Code 官方提示词库中文版（自包含单文件，源头在 `~/brain/30-projects/cc-prompt-library/`，更新时重新 build 后复制过来） |
+| `cc-prompts/{common-workflows,best-practices,how-anthropic-teams-use-claude-code}.html` | 三份官方参考文档中文版（常见工作流 / 最佳实践 / Anthropic 团队实践），同一源头项目 build 产出 |
 | `372c4ae2a3701bbe3b091dff54fb6d14.txt` | 360 搜索站点所有权验证文件 |
 | `sogousiteverification.txt` | 搜狗搜索站点所有权验证文件 |
 | `shenma-site-verification.txt` | 神马搜索站点所有权验证文件 |
