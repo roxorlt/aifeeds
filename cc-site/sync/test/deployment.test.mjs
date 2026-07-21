@@ -3413,6 +3413,11 @@ if [[ "\${AIFEEDS_PAUSE_PAYLOAD_TESTS:-0}" == 1 && "$*" == *AIFEEDS_REMOTE_PAYLO
   : > "$AIFEEDS_PAUSE_READY"
   while [[ -e "$AIFEEDS_PAUSE_GATE" ]]; do sleep 0.05; done
 fi
+if [[ "\${AIFEEDS_ENFORCE_RUNUSER_TRAVERSAL:-0}" == 1 \
+  && "$*" == *'/var/lib/aifeeds-cc-deploy-snapshots/'* ]]; then
+  printf 'runuser cannot traverse the root-private snapshot parent\n' >&2
+  exit 7
+fi
 while (($#)) && [[ "$1" != '--' ]]; do shift; done
 shift
 "$@"
@@ -4125,6 +4130,26 @@ remoteHarnessTest('first install accepts systemd 255 exit 4 for absent inactive 
     await readFile(path.join(harness.systemctlState, 'timer-enabled'), 'utf8'),
     'enabled\n',
   );
+});
+
+remoteHarnessTest('payload tests run outside the root-private rollback snapshot', async () => {
+  const harness = await remoteDeployHarness();
+  const result = runBash(
+    path.join(SYNC_DIR, 'install-remote.sh'),
+    [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+    {
+      ...harness.env,
+      AIFEEDS_ENFORCE_RUNUSER_TRAVERSAL: '1',
+      AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+    },
+  );
+  const commandLog = await readFile(harness.log, 'utf8');
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}\n${commandLog}`);
+  const runuserLine = commandLog.split('\n').find((line) => line.startsWith('runuser'));
+  assert.ok(runuserLine, commandLog);
+  assert.doesNotMatch(runuserLine, /aifeeds-cc-deploy-snapshots/);
+  assert.match(runuserLine, /aifeeds-cc-sync-releases/);
 });
 
 remoteHarnessTest('deployment lock refuses prepositioned links and non-regular files without touching shared paths', async (t) => {

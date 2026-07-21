@@ -222,6 +222,15 @@ cleanup_created_account() {
   sync_account_created=0
 }
 
+cleanup_release_stage() {
+  if [[ -z "$release_stage" ]]; then return 0; fi
+  if [[ ! -d "$RELEASES" || -L "$RELEASES" ]]; then return 1; fi
+  "$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
+    "$RELEASES" "$ROOT_UID" "$ROOT_GID" || return $?
+  if [[ -e "$release_stage" || -L "$release_stage" ]]; then return 1; fi
+  release_stage=""
+}
+
 record_recovery_step() {
   "$NODE" "$FILE_TOOL" recovery-step \
     "$GLOBAL_PREPARING" "$GLOBAL_COMMITTED" "$GLOBAL_JOURNAL_DIR" \
@@ -508,10 +517,7 @@ rollback_install() {
   if ((release_created == 1)); then
     rm -rf -- "$RELEASE" || failed=1
   fi
-  if [[ -n "$release_stage" && -d "$RELEASES" ]]; then
-    "$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
-      "$RELEASES" "$ROOT_UID" "$ROOT_GID" || failed=1
-  fi
+  cleanup_release_stage || failed=1
   return "$failed"
 }
 
@@ -536,6 +542,10 @@ on_exit() {
       echo "ERROR: deployment side-effect cleanup was incomplete" >&2
       status=70
     fi
+  fi
+  if ! cleanup_release_stage; then
+    echo "ERROR: release test stage cleanup was incomplete" >&2
+    status=70
   fi
   if ((preserve_snapshot == 1)); then
     echo "WARNING: preserving rollback snapshot for preparing recovery: $SNAPSHOT" >&2
@@ -902,12 +912,30 @@ elif [[ -e "$OPT" ]]; then
   exit 1
 fi
 
+"$INSTALL" -d -o root -g root -m 0755 "$RELEASES"
+"$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
+  "$RELEASES" "$ROOT_UID" "$ROOT_GID"
+release_stage=$("$NODE" "$SECURITY_TOOL" create-release-stage \
+  "$RELEASES" "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
+cp -a "$SNAPSHOT/cc-site" "$release_stage/cc-site"
+cp -a "$SNAPSHOT/MANIFEST.sha256" "$release_stage/MANIFEST.sha256"
+"$CHOWN" -R root:root "$release_stage"
+find -P "$release_stage" -type d -exec chmod 0755 {} +
+find -P "$release_stage" -type f -exec chmod 0644 {} +
+chmod 0755 \
+  "$release_stage/cc-site/deploy.sh" \
+  "$release_stage/cc-site/sync/deploy-to-cc.sh" \
+  "$release_stage/cc-site/sync/install-remote.sh"
+"$NODE" "$SECURITY_TOOL" verify-release \
+  "$release_stage" "$SNAPSHOT" "$EXPECTED_MANIFEST_DIGEST" \
+  "$ROOT_UID" "$ROOT_GID" >/dev/null
+
 node_major=$("$NODE" -p 'Number(process.versions.node.split(".")[0])')
 if [[ ! "$node_major" =~ ^[0-9]+$ ]] || ((node_major < 18)); then
   echo "ERROR: Node 18 or newer is required" >&2
   exit 1
 fi
-payload_tests=("$SNAPSHOT"/cc-site/sync/test/*.test.mjs)
+payload_tests=("$release_stage"/cc-site/sync/test/*.test.mjs)
 if [[ ! -f "${payload_tests[0]}" ]]; then
   echo "ERROR: verified payload test suite is empty" >&2
   exit 1
@@ -925,8 +953,6 @@ if [[ ! -f "$VHOST" || -L "$VHOST" ]]; then
 fi
 "$INSTALL" -d -o root -g root -m 0700 "$ROLLBACK"
 "$INSTALL" -d -o root -g root -m 0755 "$RELEASES" "$ETC_DIR" "$UNIT_DIR"
-"$NODE" "$SECURITY_TOOL" cleanup-release-artifacts \
-  "$RELEASES" "$ROOT_UID" "$ROOT_GID"
 for backup in \
   "$ENV_FILE:env" \
   "$UNIT_DIR/$SERVICE:service" \
@@ -1019,20 +1045,6 @@ elif [[ -e "$OPT" ]]; then
   echo "ERROR: existing live code path is not a managed symlink" >&2
   exit 1
 fi
-release_stage=$("$NODE" "$SECURITY_TOOL" create-release-stage \
-  "$RELEASES" "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
-cp -a "$SNAPSHOT/cc-site" "$release_stage/cc-site"
-cp -a "$SNAPSHOT/MANIFEST.sha256" "$release_stage/MANIFEST.sha256"
-"$CHOWN" -R root:root "$release_stage"
-find -P "$release_stage" -type d -exec chmod 0755 {} +
-find -P "$release_stage" -type f -exec chmod 0644 {} +
-chmod 0755 \
-  "$release_stage/cc-site/deploy.sh" \
-  "$release_stage/cc-site/sync/deploy-to-cc.sh" \
-  "$release_stage/cc-site/sync/install-remote.sh"
-"$NODE" "$SECURITY_TOOL" verify-release \
-  "$release_stage" "$SNAPSHOT" "$EXPECTED_MANIFEST_DIGEST" \
-  "$ROOT_UID" "$ROOT_GID" >/dev/null
 release_action=$("$NODE" "$SECURITY_TOOL" publish-release \
   "$release_stage" "$RELEASE" "$OPT" "$SNAPSHOT" \
   "$EXPECTED_MANIFEST_DIGEST" "$ROOT_UID" "$ROOT_GID")
