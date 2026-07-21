@@ -1165,23 +1165,34 @@ smoke_exact() {
   local url=$2
   local expected=$3
   local output=$4
-  local status
-  if ! status=$(
-    "$CURL" --silent --show-error --max-time 10 \
-      --resolve ai-feeds.cc:443:127.0.0.1 \
-      --output "$output" --write-out '%{http_code}' "$url"
-  ); then
+  local status=""
+  local curl_ok=0
+  local attempt
+  for attempt in {1..10}; do
+    if status=$(
+      "$CURL" --silent --show-error --max-time 2 --noproxy '*' \
+        --resolve ai-feeds.cc:443:127.0.0.1 \
+        --output "$output" --write-out '%{http_code}' "$url"
+    ); then
+      curl_ok=1
+      if [[ "$status" == 200 ]] && cmp -s -- "$output" "$expected"; then
+        return 0
+      fi
+    else
+      curl_ok=0
+    fi
+    if ((attempt < 10)) && [[ "$TEST_MODE" != 1 ]]; then
+      sleep 1
+    fi
+  done
+  if ((curl_ok == 0)); then
     echo "ERROR: local HTTPS smoke probe failed for $label" >&2
-    return 1
-  fi
-  if [[ "$status" != 200 ]]; then
+  elif [[ "$status" != 200 ]]; then
     echo "ERROR: local HTTPS smoke probe returned HTTP $status for $label" >&2
-    return 1
-  fi
-  if ! cmp -s -- "$output" "$expected"; then
+  else
     echo "ERROR: local HTTPS smoke probe returned unexpected bytes for $label" >&2
-    return 1
   fi
+  return 1
 }
 
 smoke_exact root-sitemap \

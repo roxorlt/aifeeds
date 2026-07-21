@@ -3723,7 +3723,7 @@ while (($#)); do
   case "$1" in
     --output) output=$2; shift 2 ;;
     --write-out) write_out=$2; shift 2 ;;
-    --resolve|--max-time) shift 2 ;;
+    --resolve|--max-time|--noproxy) shift 2 ;;
     --silent|--show-error) shift ;;
     https://*) url=$1; shift ;;
     *) shift ;;
@@ -3751,7 +3751,11 @@ case "$url" in
     exit 64 ;;
 esac
 if [[ -n "$output" && "$output" != /dev/null ]]; then
-  if [[ "\${AIFEEDS_CURL_CORRUPT_URL:-}" == "$url" ]]; then
+  stale_file="$AIFEEDS_DEPLOY_ROOT/curl-stale-response-served"
+  if [[ "\${AIFEEDS_CURL_STALE_ONCE_URL:-}" == "$url" && ! -f "$stale_file" ]]; then
+    printf 'served\n' > "$stale_file"
+    printf 'stale response\n' > "$output"
+  elif [[ "\${AIFEEDS_CURL_CORRUPT_URL:-}" == "$url" ]]; then
     printf 'corrupt response\n' > "$output"
   else
     cp "$source" "$output"
@@ -5634,6 +5638,28 @@ remoteHarnessTest('Nginx reload failure restores the prior config', async () => 
 });
 
 remoteHarnessTest('local HTTPS smoke probes require exact 200 responses and deployed bytes', async (t) => {
+  await t.test('reload overlap retries one stale response', async () => {
+    const harness = await remoteDeployHarness();
+    const result = runBash(
+      path.join(SYNC_DIR, 'install-remote.sh'),
+      [harness.stage, 'https://api.ai-feeds.com', harness.manifestDigest],
+      {
+        ...harness.env,
+        AIFEEDS_CURL_STALE_ONCE_URL: 'https://ai-feeds.cc/sitemap.xml',
+        AIFEEDS_FAST_PAYLOAD_TESTS: '1',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const commandLog = await readFile(harness.log, 'utf8');
+    assert.equal(
+      commandLog.split('\n').filter((line) => (
+        line.startsWith('curl')
+        && line.includes('<https://ai-feeds.cc/sitemap.xml>')
+      )).length,
+      2,
+    );
+  });
+
   const failures = [
     {
       name: 'non-200 root sitemap',
