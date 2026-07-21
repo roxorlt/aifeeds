@@ -15,6 +15,8 @@ const weiboFeed: FeedDef = {
   source_company: "微博",
   name: "微博科技热搜",
   region: "domestic",
+  cc_policy: "deny",
+  editorial_type: "radar",
   via: "rsshub",
   feed_url: "/weibo/hot/tech",
   cadence_hours: 2,

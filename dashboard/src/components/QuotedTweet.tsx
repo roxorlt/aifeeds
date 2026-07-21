@@ -1,9 +1,9 @@
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { QuoteOf } from "../types";
-import { cn, formatBjtMdHm, proxyImg, timeAgo } from "../lib/utils";
+import { buildResponsiveCardImage, cn, formatBjtMdHm, proxyImg, timeAgo } from "../lib/utils";
 import { useQuoteSnapshotStore } from "../lib/quoteSnapshotStore";
 import { VerifiedBadge } from "./icons";
-import { isTcoOnly } from "./TcoResolvedLinkCard";
+import { isTcoOnly } from "../lib/tcoResolvedLink";
 import { XArticleCard } from "./XArticleCard";
 
 interface Props {
@@ -22,11 +22,15 @@ const MAX_QUOTE_DEPTH = 2;
 export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
+  const [imageVariantFailed, setImageVariantFailed] = useState(false);
   const openSnapshot = useQuoteSnapshotStore((s) => s.open);
   const handle = quote.handle || "";
   const author = quote.author || handle || "Unknown";
   const images = (quote.media || []).filter((m) => m.type === "image");
   const firstImage = images[0];
+  const firstImageSource = firstImage
+    ? buildResponsiveCardImage(firstImage.url, firstImage.card_variants, { fallbackWidth: 400 })
+    : null;
   const isNested = depth >= 1;
   // 内嵌第二层 quote — 直接拿对象(API inline)优先;只有 id 时画 placeholder
   const innerQuote = quote.quote_of;
@@ -34,7 +38,7 @@ export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
   const canRecurseInner = depth + 1 < MAX_QUOTE_DEPTH;
 
   // PM 2026-05-20 PR3: 所有 quote 小卡点击 → 打开站内 QuoteSnapshotModal
-  // 显示完整 quote 内容(数据从已有 snapshot 取,不调 API)。
+  // 显示 list DTO 中可用的 quote 快照(数据从已有 snapshot 取,不调 API)。
   // - stopPropagation 防冒泡到外层 article 触发 openTweet(主推 drawer);
   //   流内主卡里点 quote 小卡的意图是看 quote 本身,不是开主推
   // - 嵌套第二层(depth=1)点击 → 同样开 modal 显示该层 quote
@@ -136,14 +140,30 @@ export function QuotedTweet({ quote, depth = 0, posterMode }: Props) {
       </div>
 
       {/* Inline image — 嵌套层不显,避免视觉过重 */}
-      {!isNested && firstImage && !imageFailed && (
-        <img
-          src={proxyImg(firstImage.url, 400)}
-          alt={firstImage.alt || ""}
-          loading="lazy"
-          className="max-h-60 w-full border-t border-neutral-200 object-cover"
-          onError={() => setImageFailed(true)}
-        />
+      {!isNested && firstImage && firstImageSource && !imageFailed && (
+        <picture className="block">
+          {firstImageSource.webpSrcSet && !imageVariantFailed && (
+            <source type="image/webp" srcSet={firstImageSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 48px), 380px" />
+          )}
+          <img
+            src={firstImageSource.fallbackSrc}
+            srcSet={firstImageSource.srcSet}
+            sizes="(max-width: 640px) calc(100vw - 48px), 380px"
+            width={firstImage.width || 760}
+            height={firstImage.height || 450}
+            alt={firstImage.alt || ""}
+            loading="lazy"
+            decoding="async"
+            className="max-h-60 w-full border-t border-neutral-200 object-cover"
+            onError={() => {
+              if (firstImageSource.webpSrcSet && !imageVariantFailed) {
+                setImageVariantFailed(true);
+              } else {
+                setImageFailed(true);
+              }
+            }}
+          />
+        </picture>
       )}
     </div>
   );

@@ -1,0 +1,58 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  MASONRY_GAP_PX,
+  MASONRY_ROW_PX,
+  MASONRY_SSR_SAFETY_PX,
+  estimateMasonryHeight,
+  masonryRowSpan,
+} from "./masonry.ts";
+
+const item = {
+  id: "blog:openai:fixture",
+  source_type: "blog",
+  source_id: "fixture",
+  title: "A useful title",
+  content: "A compact summary that gives the card enough editorial context.",
+  scraped_at: "2026-07-17T00:00:00.000Z",
+};
+
+test("measured row spans are positive and use one explicit row-gap contract", () => {
+  assert.equal(MASONRY_ROW_PX, 1);
+  assert.equal(MASONRY_GAP_PX, 8);
+  assert.equal(MASONRY_SSR_SAFETY_PX, 20);
+  assert.equal(masonryRowSpan(0), 1);
+  assert.equal(masonryRowSpan(1), 1);
+  assert.equal(masonryRowSpan(2), 2);
+  assert.equal(masonryRowSpan(188), 22);
+  assert.equal(masonryRowSpan(188), masonryRowSpan(188));
+  const allocatedHeight = (
+    masonryRowSpan(188) * (MASONRY_ROW_PX + MASONRY_GAP_PX)
+  ) - MASONRY_GAP_PX;
+  assert.ok(allocatedHeight >= 188);
+  assert.ok(allocatedHeight - 188 < MASONRY_ROW_PX + MASONRY_GAP_PX);
+});
+
+test("SSR estimates are deterministic and media creates a taller card", () => {
+  const textHeight = estimateMasonryHeight(item);
+  const mediaHeight = estimateMasonryHeight(item, { aspectRatio: 16 / 9 });
+  const squareMediaHeight = estimateMasonryHeight(item, { aspectRatio: 1 });
+  assert.equal(textHeight, estimateMasonryHeight(item));
+  assert.ok(textHeight > 100);
+  assert.ok(mediaHeight > textHeight);
+  assert.equal(squareMediaHeight - textHeight, 200);
+  assert.ok(masonryRowSpan(mediaHeight) >= masonryRowSpan(textHeight));
+});
+
+test("SSR reserves a complete extra row for dense CJK editorial cards", () => {
+  const denseEditorialCard = {
+    ...item,
+    title: "征程赶超世界模型与智能体后Scaling时代范式重构迈入生产力时代",
+    content: "这是一段用于覆盖真实中文资讯卡片换行密度的摘要内容。它包含足够多的连续中文字符，使五列桌面布局中的标题和摘要产生额外换行，同时仍保持在客户端视觉截断范围以内。",
+  };
+  const span = masonryRowSpan(estimateMasonryHeight(denseEditorialCard));
+  const allocatedHeight = (span * (MASONRY_ROW_PX + MASONRY_GAP_PX)) - MASONRY_GAP_PX;
+
+  assert.ok(allocatedHeight >= 268);
+});

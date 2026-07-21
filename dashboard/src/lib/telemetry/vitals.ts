@@ -11,6 +11,15 @@
 import { onLCP, onINP, onCLS, onTTFB, onFCP, type Metric } from 'web-vitals';
 import { track } from './index';
 import { EVENTS } from './event-types';
+import {
+  classifyResourceUrl,
+  installApiResourceObserver,
+  safeLcpDescriptorFromMetric,
+} from './performance-detail';
+import {
+  resolveTelemetryHomeSsrState,
+  resolveTelemetryHomeView,
+} from './home-view-mode';
 
 const SAMPLE_RATE = 1.0;  // 初期 100%,数据足后调回 0.1
 
@@ -28,11 +37,13 @@ interface NavigatorPerf {
   hardwareConcurrency?: number;
 }
 
-function deviceMeta(): Record<string, unknown> {
+export function getPerformanceDeviceMeta(): Record<string, unknown> {
   const nav = navigator as Navigator & NavigatorPerf;
   const c = nav.connection;
   const ua = navigator.userAgent;
   return {
+    view_mode: resolveTelemetryHomeView(document.documentElement),
+    ssr_state: resolveTelemetryHomeSsrState(document.documentElement),
     // 网络（⚠️ iOS 微信 WKWebView 无 navigator.connection → 这几项 undefined,
     // admin 切片时 nettype=NULL 要单独归一桶,不能丢）
     nettype: c?.effectiveType,
@@ -62,8 +73,20 @@ function deviceMeta(): Record<string, unknown> {
 }
 
 export function installVitals(): void {
-  if (Math.random() >= SAMPLE_RATE) return;
-  onLCP(report(EVENTS.PERF_LCP));
+  const sampled = Math.random() < SAMPLE_RATE;
+  onLCP((metric) => {
+    if (sampled) {
+      track(EVENTS.PERF_LCP, {
+        value: Math.round(metric.value * 100) / 100,
+        rating: metric.rating,
+        navigation_type: metric.navigationType,
+        ...safeLcpDescriptorFromMetric(metric, window.location.origin),
+        ...getPerformanceDeviceMeta(),
+      });
+    }
+    window.dispatchEvent(new Event('aifeeds:lcp-settled'));
+  });
+  if (!sampled) return;
   onINP(report(EVENTS.PERF_INP));
   onCLS(report(EVENTS.PERF_CLS));
   onTTFB(report(EVENTS.PERF_TTFB));
@@ -98,15 +121,16 @@ export function installNavTiming(): void {
       // SW 壳缓存命中(2026-06-11):1 = 本次导航由 Service Worker 直接回壳(回访秒开),
       // 0 = 走网络(新用户首开/SW 未装)。用来在面板上区分"秒开人群"和"冷连接人群"。
       sw: navigator.serviceWorker?.controller ? 1 : 0,
-      ...deviceMeta(),
+      ...getPerformanceDeviceMeta(),
     });
   };
   if (document.readyState === 'complete') setTimeout(emit, 0);
   else window.addEventListener('load', () => setTimeout(emit, 0), { once: true });
 }
 
-// perf_img: 封面图(经 /img 代理)的加载耗时。图多,按 IMG_SAMPLE 采样控制事件量。
-// Resource Timing 观察 /img? 资源,取 responseEnd-startTime;transferSize===0 表示
+// perf_img: 卡片图的加载耗时。图多,按 IMG_SAMPLE 采样控制事件量。
+// Resource Timing 覆盖 /r/、/img 与分类后的第三方图（同源静态资源排除），
+// 取 responseEnd-startTime;transferSize===0 表示
 // 浏览器缓存命中(看重复浏览的缓存效果)。VPS 边缘缓存的 HIT/MISS 客户端看不到
 // (CORS 不暴露响应头),但 dur 直接反映真实加载快慢 —— 用来量化"切 tab 封面图慢"。
 const IMG_SAMPLE = 0.25;
@@ -116,7 +140,9 @@ export function installImgTiming(): void {
   try {
     const obs = new PerformanceObserver((list) => {
       for (const e of list.getEntries() as PerformanceResourceTiming[]) {
-        if (!e.name.includes('/img?')) continue;
+        if (e.initiatorType !== 'img') continue;
+        const resource = classifyResourceUrl(e.name, window.location.origin);
+        if (resource.kind === 'none' || resource.kind === 'static_asset') continue;
         if (Math.random() >= IMG_SAMPLE) continue;
         const dur = Math.round(e.responseEnd - e.startTime);
         if (dur <= 0) continue;
@@ -126,7 +152,9 @@ export function installImgTiming(): void {
           kb: Math.round((e.transferSize || 0) / 1024),
           cached: e.transferSize === 0 && e.decodedBodySize > 0,
           w: wMatch ? Number(wMatch[1]) : undefined,
-          ...deviceMeta(),
+          resource_kind: resource.kind,
+          origin_class: resource.origin_class,
+          ...getPerformanceDeviceMeta(),
         });
       }
     });
@@ -136,11 +164,19 @@ export function installImgTiming(): void {
   }
 }
 
+export function installApiTiming(): () => void {
+  return installApiResourceObserver({
+    pageOrigin: window.location.origin,
+    deviceMeta: getPerformanceDeviceMeta,
+    report: (detail) => track(EVENTS.PERF_API, detail),
+  });
+}
+
 function report(eventType: string): (metric: Metric) => void {
   // device meta 只在 install 时算一次(connection.effectiveType 用户网络切换
   // 时会变,但成本极低这里偷懒不监听 change);如需精准捕获 install 后切换可
   // 改成每次 callback 内重算 deviceMeta()
-  const meta = deviceMeta();
+  const meta = getPerformanceDeviceMeta();
   return (metric) => {
     track(eventType, {
       value: Math.round(metric.value * 100) / 100,

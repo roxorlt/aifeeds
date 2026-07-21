@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
@@ -9,18 +7,22 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Item } from "../types";
-import { fetchItem, ItemNotFoundError } from "../api";
+import { fetchItem, ItemNotFoundError, type ItemDetailResponse } from "../api";
 import { dispatchItemUpdate, subscribeItemUpdate } from "./itemUpdateBus";
+import { createDetailLoader, type DetailLoader } from "./detailLoader";
+import { DrawerContext } from "./drawerContext";
+import { homePathForItem } from "../home/itemPath";
 
-interface DrawerState {
+export interface DrawerState {
   item: Item | null;
   siblings: Item[];
   siblings_has_more?: boolean;
+  metrics_history?: ItemDetailResponse["metrics_history"];
   loading: boolean;
   error: "not_found" | "network" | null;
 }
 
-interface DrawerContextValue {
+export interface DrawerContextValue {
   state: DrawerState;
   openTweet: (item: Item, siblings?: Item[]) => void;
   // Generic: open any source's item in the drawer. For X items this delegates
@@ -43,8 +45,6 @@ interface DrawerContextValue {
   /** 释放当前 spotlight（feed 列头筛选条件变了的话需要清掉，否则 pin 的 item 不符合新筛选）*/
   clearSpotlight: () => void;
 }
-
-const DrawerContext = createContext<DrawerContextValue | null>(null);
 
 function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null {
   // /t/:source_id  → x_list:<source_id>
@@ -84,6 +84,12 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     const arxivId = decodeURIComponent(hfMatch[1]);
     return { compositeId: `hf_paper:${arxivId}` };
   }
+  // /y/:video_id → youtube:<video_id>
+  const youtubeMatch = pathname.match(/^\/y\/([^/]+)$/);
+  if (youtubeMatch) {
+    const videoId = decodeURIComponent(youtubeMatch[1]);
+    return { compositeId: `youtube:${videoId}` };
+  }
   // /o/:id → 官方新闻(blog/podcast)。:id 是完整 composite id(blog:<feed>:<hash>),
   // 前缀校验防把裸 /o/ 频道或非法值当 item 深链。
   const oMatch = pathname.match(/^\/o\/([^/]+)$/);
@@ -94,38 +100,6 @@ function parseDeepLinkFromPath(pathname: string): { compositeId: string } | null
     }
   }
   return null;
-}
-
-// item → 抽屉 deep-link 路径（跟 parseDeepLinkFromPath 互逆）。openItem / pushItem 共用。
-function urlForItem(item: Item): string | null {
-  switch (item.source_type) {
-    case "x_list":
-      return `/t/${encodeURIComponent(item.source_id)}`;
-    case "github": {
-      // /g/:owner/:repo（两段，跟 github.com URL 同形）
-      const [owner, repo] = item.source_id.split("/");
-      return owner && repo ? `/g/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` : null;
-    }
-    case "product_hunt": {
-      // /ph/:slug/:date — source_id 是 <slug>:<launch_date> 复合键
-      const [slug, date] = item.source_id.split(":");
-      return slug && date ? `/ph/${encodeURIComponent(slug)}/${encodeURIComponent(date)}` : null;
-    }
-    case "clawhub":
-      return `/c/${encodeURIComponent(item.source_id)}`;
-    case "huodongxing":
-      return `/e/${encodeURIComponent(item.source_id)}`;
-    case "hf_paper":
-      return `/h/${encodeURIComponent(item.source_id)}`;
-    case "blog":
-    case "podcast":
-      // /o/:id 用完整 composite id(blog:<feed>:<hash>),parse 侧 decode 即还原。
-      // 没这分支时 openItem 不 push 历史,close() navigate(-1) 会把进站前历史
-      // 退出去(用户实测「返回变 chrome 启动页」,2026-06-11)。
-      return `/o/${encodeURIComponent(item.id)}`;
-    default:
-      return null;
-  }
 }
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
@@ -147,50 +121,92 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   // 驱动顶栏 ←/✕ 切换 + 覆盖层不插 spotlight。
   const depth = (location.state as { drawerDepth?: number } | null)?.drawerDepth ?? 0;
 
-  // Track which composite id is currently shown / being fetched, to dedupe
-  // URL-effect work when the cache was just primed by openTweet().
+  // Refresh/enrich work uses this ref as its stale guard. Read-only detail
+  // loading has its own entry-scoped controller below.
   const activeIdRef = useRef<string | null>(null);
+  const detailLoaderRef = useRef<DetailLoader<ItemDetailResponse> | null>(null);
+  if (!detailLoaderRef.current) {
+    detailLoaderRef.current = createDetailLoader(fetchItem);
+  }
+
+  const startDetailLoad = useCallback((id: string, addToSpotlight: boolean) => {
+    activeIdRef.current = id;
+    return detailLoaderRef.current!.enter(id, {
+      onSuccess: (_loadedId, { item, siblings, siblings_has_more, metrics_history }) => {
+        setState({ item, siblings, siblings_has_more, metrics_history, loading: false, error: null });
+        if (addToSpotlight) setSpotlightItem(item);
+      },
+      onError: (loadedId, err: unknown) => {
+        setState((current) => {
+          // DetailLoader already rejects stale tokens. Keep the id guard here
+          // as a second boundary so an old failure can never erase a newer
+          // optimistic entry if callback ownership changes in the future.
+          if (activeIdRef.current !== loadedId) return current;
+          if (err instanceof ItemNotFoundError) {
+            return { item: null, siblings: [], loading: false, error: "not_found" };
+          }
+          // A transport failure is not evidence that the optimistic list DTO
+          // disappeared. Keep the usable item and its navigation siblings.
+          if (current.item?.id === loadedId) {
+            return { ...current, loading: false, error: "network" };
+          }
+          return { item: null, siblings: [], loading: false, error: "network" };
+        });
+      },
+    });
+  }, []);
+
+  // Closing, switching providers, or unmounting must invalidate any response
+  // that is still in flight. StrictMode's duplicate effect within one mount is
+  // coalesced because the loader entry remains active.
+  useEffect(() => () => {
+    detailLoaderRef.current?.leave();
+    activeIdRef.current = null;
+  }, []);
 
   const openTweet = useCallback(
     (item: Item, siblings: Item[] = []) => {
-      // Optimistic open: set state first so the URL effect sees the cache hit.
+      // Optimistic open keeps the drawer instant, while the independent
+      // read-only request upgrades the list DTO to a full detail item.
       setState({ item, siblings, loading: false, error: null });
       // B2: 流内点击不强插 spotlight（卡片本来就在原位置，关抽屉用户回到原
       // 位置即可）。强插 spotlight 只发生在 URL 直接访问场景（见 URL useEffect）。
-      activeIdRef.current = item.id;
+      void startDetailLoad(item.id, false).catch(() => {});
       navigate(`/t/${encodeURIComponent(item.source_id)}`);
     },
-    [navigate],
+    [navigate, startDetailLoad],
   );
 
   const openItem = useCallback(
     (item: Item, siblings: Item[] = []) => {
-      // Optimistic open: set state first so URL effect sees cache hit.
+      // Optimistic open, then always start the full read. refreshItem below is
+      // parallel enrichment and never gates this request.
       setState({ item, siblings, loading: false, error: null });
       // B2: 同 openTweet 不强插 spotlight
-      activeIdRef.current = item.id;
-      const url = urlForItem(item);
+      void startDetailLoad(item.id, false).catch(() => {});
+      const url = homePathForItem(item);
       if (url) navigate(url);
-      // Future sources: youtube / podcast / arxiv — 在 urlForItem 里补 URL 形式。
+      // Future source: legacy arxiv — 在 homePathForItem 里补 URL 形式。
     },
-    [navigate],
+    [navigate, startDetailLoad],
   );
 
   // 覆盖式下钻：压栈打开 item（history state drawerDepth +1），顶栏显示「←」。
-  // 跟 openItem 一样 optimistic + 预设 activeIdRef → URL effect early-return，
-  // 所以不会触发 fetch / spotlight（覆盖层不向流内插该条，满足「不插流」要求）。
+  // 跟 openItem 一样 optimistic，并立即拉完整详情；覆盖层不向流内插 spotlight。
   const pushItem = useCallback(
     (item: Item) => {
-      const url = urlForItem(item);
+      const url = homePathForItem(item);
       if (!url) return;
       setState({ item, siblings: [], loading: false, error: null });
-      activeIdRef.current = item.id;
+      void startDetailLoad(item.id, false).catch(() => {});
       navigate(url, { state: { drawerDepth: depth + 1 } });
     },
-    [navigate, depth],
+    [navigate, depth, startDetailLoad],
   );
 
   const close = useCallback(() => {
+    detailLoaderRef.current?.leave();
+    activeIdRef.current = null;
     // Going back triggers popstate → URL becomes / → URL effect clears state.
     // main.tsx seeds '/' under any cold /t/:id, so history.length > 1 always
     // holds in practice; keep the fallback for paranoia.
@@ -206,36 +222,24 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     const parsed = parseDeepLinkFromPath(location.pathname);
 
     if (!parsed) {
-      if (activeIdRef.current !== null) {
-        activeIdRef.current = null;
-        setState({ item: null, siblings: [], loading: false, error: null });
-      }
+      detailLoaderRef.current?.leave();
+      activeIdRef.current = null;
+      setState((current) => (
+        current.item || current.loading || current.error
+          ? { item: null, siblings: [], loading: false, error: null }
+          : current
+      ));
       return;
     }
 
     const { compositeId } = parsed;
-    if (activeIdRef.current === compositeId) return;
-
-    activeIdRef.current = compositeId;
-    setState((s) => ({ ...s, loading: true, error: null }));
-
-    // Stale-fetch guard uses activeIdRef only — `cancelled` flag would bail
-    // valid fetches under StrictMode's double-effect remount. Ref-equality
-    // already covers both unmount and URL-changed-mid-fetch cases.
-    fetchItem(compositeId)
-      .then(({ item, siblings, siblings_has_more }) => {
-        if (activeIdRef.current !== compositeId) return;
-        setState({ item, siblings, siblings_has_more, loading: false, error: null });
-        // 只有根层（depth 0：冷链 / 直接访问）才向流内插该条；覆盖下钻层（depth>0）不插。
-        if (depth === 0) setSpotlightItem(item);
-      })
-      .catch((err: unknown) => {
-        if (activeIdRef.current !== compositeId) return;
-        const code = err instanceof ItemNotFoundError ? "not_found" : "network";
-        setState({ item: null, siblings: [], loading: false, error: code });
-      });
+    const alreadyEntered = detailLoaderRef.current?.activeId() === compositeId;
+    if (!alreadyEntered) setState((s) => ({ ...s, loading: true, error: null }));
+    // Direct routes start here. Optimistic opens already started the same entry,
+    // so enter() returns that exact promise without a second network request.
+    void startDetailLoad(compositeId, depth === 0).catch(() => {});
   // depth 进依赖：back 到不同 depth 的条目时正确重算 spotlight 门控
-  }, [location.pathname, depth]);
+  }, [location.pathname, depth, startDetailLoad]);
 
   // itemUpdateBus 订阅：外部（如 TweetCard 译文按钮触发 translate-now）更新某 item
   // 后 dispatch，drawer 内若当前正显示该 item 则同步更新 state.item，保证抽屉视图实时刷新。
@@ -251,8 +255,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   // PR6.6 lazy enrich：drawer 上的 item 变化时立即触发 on-demand refresh（X syndication）
   // 用单独的 useEffect 监听 state.item?.id，覆盖三种打开方式：
   // (1) URL 直接访问 → URL useEffect 跑 fetchItem → state 设置
-  // (2) openTweet/openItem (点卡片，optimistic) → state 立即设置，URL useEffect 因
-  //     activeIdRef 已被预设而 early return，不会跑 fetchItem
+  // (2) openTweet/openItem (点卡片，optimistic) → state 立即设置，同时独立详情读取
   // 两种情况下，state.item 都更新到新 id，这个 useEffect 都会触发
   // worker 端 KV 5min throttle，重复打开不会重复 syndication 调用
   useEffect(() => {
@@ -268,12 +271,17 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     // BE 2026-05-19: hf_paper discussion refresh 完成后也走同样 merge 路径,
     // 抽成 applyFresh 闭包共用
     const applyFresh = (fresh: Awaited<ReturnType<typeof fetchItem>>) => {
+      // refresh-origin fetchItem is newer than the optimistic entry's initial
+      // detail request. Invalidate that older request's success/error callbacks
+      // before applying fresh so it cannot roll state back later.
+      detailLoaderRef.current?.supersede(fresh.item.id);
       setState((prev) => {
         if (!prev.item) {
           return {
             item: fresh.item,
             siblings: fresh.siblings,
             siblings_has_more: fresh.siblings_has_more,
+            metrics_history: fresh.metrics_history,
             loading: false,
             error: null,
           };
@@ -291,6 +299,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
           item: { ...fresh.item, extra: mergedExtra },
           siblings: fresh.siblings,
           siblings_has_more: fresh.siblings_has_more,
+          metrics_history: fresh.metrics_history,
           loading: false,
           error: null,
         };
@@ -341,10 +350,4 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       {children}
     </DrawerContext.Provider>
   );
-}
-
-export function useDrawer(): DrawerContextValue {
-  const ctx = useContext(DrawerContext);
-  if (!ctx) throw new Error("useDrawer must be used within DrawerProvider");
-  return ctx;
 }

@@ -19,14 +19,22 @@
 //   8. Top 评论 (10，maker reply 嵌套)
 //   9. 更多 (论坛 / 类似产品出链 + Pricing chips)
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import type { Item, ItemExtra, MediaItem, PhComment, PhMetrics, PhReview } from "../types";
-import { cn, formatCompact, ordinal, parseJsonField } from "../lib/utils";
+import {
+  buildResponsiveCardImage,
+  cn,
+  formatCompact,
+  isAnimatedImageMedia,
+  optimizedAvatarUrl,
+  ordinal,
+  parseJsonField,
+} from "../lib/utils";
 import { Lightbox } from "./Lightbox";
 import { resolveAssetUrl } from "../lib/asset";
 import { useCoordinatedVideo } from "../lib/useCoordinatedVideo";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { fetchItems } from "../api";
 
 // 抽屉 gallery 内单个直链 mp4 视频 — hook 接 VideoCoordinator
@@ -56,6 +64,72 @@ function PhGalleryVideo({
       playsInline
       loop
     />
+  );
+}
+
+function PhAnimatedGalleryImage({
+  media,
+  onOpen,
+}: {
+  media: MediaItem;
+  onOpen: () => void;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const preview = buildResponsiveCardImage(media.url, media.card_variants, {
+    staticOnly: true,
+  });
+
+  if (!preview.fallbackSrc) {
+    return (
+      <div className="flex h-44 w-72 shrink-0 snap-start items-center justify-center rounded-md bg-neutral-100 px-4 text-center text-[13px] text-neutral-500">
+        动图预览暂不可用
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-44 w-72 shrink-0 snap-start overflow-hidden rounded-md bg-neutral-200">
+      {playing ? (
+        <img
+          src={resolveAssetUrl(media.url)}
+          className="h-full w-full cursor-zoom-in object-cover"
+          alt=""
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+          onError={() => setPlaying(false)}
+        />
+      ) : (
+        <picture className="block h-full w-full">
+          {preview.webpSrcSet && (
+            <source type="image/webp" srcSet={preview.webpSrcSet} sizes="288px" />
+          )}
+          <img
+            src={preview.fallbackSrc}
+            className="h-full w-full cursor-zoom-in object-cover"
+            loading="lazy"
+            alt=""
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen();
+            }}
+          />
+        </picture>
+      )}
+      {!playing && (
+        <button
+          type="button"
+          className="absolute bottom-2 right-2 rounded-full bg-black/65 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-black/75"
+          onClick={(event) => {
+            event.stopPropagation();
+            setPlaying(true);
+          }}
+        >
+          播放动图
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -189,7 +263,7 @@ export function PhDrawerBody({ item }: Props) {
 
   const makers = (extra.makers as Array<{ name?: string; handle?: string; avatar_url?: string; profile_url?: string }>) || [];
   const hunter = (extra.hunter as { name?: string; handle?: string; avatar_url?: string }) || null;
-  const makerHandles = useMemo(() => new Set(makers.map((m) => m.handle).filter(Boolean) as string[]), [makers]);
+  const makerHandles = new Set(makers.map((m) => m.handle).filter(Boolean) as string[]);
 
   const makerPost = (extra.maker_post as PhComment) || null;
   const makerPostText = (extra.maker_post_text as string) || makerPost?.text || "";
@@ -240,6 +314,7 @@ export function PhDrawerBody({ item }: Props) {
   // Lightbox
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const lightboxMedia = galleryItems.map((m) => ({
+    ...m,
     type: m.type === "video" ? "video" : "image",
     url: resolveAssetUrl(m.url),
   } as MediaItem));
@@ -379,6 +454,19 @@ export function PhDrawerBody({ item }: Props) {
                 }
                 return m.type === "video" ? (
                   <PhGalleryVideo key={i} src={url} itemId={item.id} slot={i} />
+                ) : isAnimatedImageMedia(m) && m.card_variants?.length ? (
+                  <PhAnimatedGalleryImage
+                    key={`${item.id}:${m.url}`}
+                    media={m}
+                    onOpen={() => setLightboxIndex(i)}
+                  />
+                ) : isAnimatedImageMedia(m) ? (
+                  <div
+                    key={i}
+                    className="flex h-44 w-72 shrink-0 snap-start items-center justify-center rounded-md bg-neutral-100 px-4 text-center text-[13px] text-neutral-500"
+                  >
+                    动图预览暂不可用
+                  </div>
                 ) : (
                   <img
                     key={i}
@@ -412,7 +500,7 @@ export function PhDrawerBody({ item }: Props) {
           <div className="mb-2.5 flex items-center gap-2">
             {makerPost?.avatar_url ? (
               <img
-                src={resolveAssetUrl(makerPost.avatar_url)}
+                src={optimizedAvatarUrl(makerPost.avatar_url, 80)}
                 alt={makerPost.author_name || ""}
                 className="h-8 w-8 rounded-full bg-neutral-200 object-cover"
                 onError={(e) => (e.currentTarget.style.visibility = "hidden")}
@@ -616,7 +704,7 @@ function PersonBadge({ person, role }: {
   person: { name?: string; handle?: string; avatar_url?: string; profile_url?: string };
   role: string;
 }) {
-  const avatar = person.avatar_url ? resolveAssetUrl(person.avatar_url) : "";
+  const avatar = optimizedAvatarUrl(person.avatar_url, 80);
   return (
     <div className="flex items-center gap-2">
       {avatar ? (
@@ -644,7 +732,7 @@ function PersonBadge({ person, role }: {
 function ReviewItem({ review, tab }: { review: PhReview; tab: TabState }) {
   const body = tab === "translated" && review.body_translated ? review.body_translated : review.body || "";
   const stars = review.rating ? "⭐".repeat(Math.round(review.rating)) : "";
-  const avatar = review.avatar_url ? resolveAssetUrl(review.avatar_url) : "";
+  const avatar = optimizedAvatarUrl(review.avatar_url, 64);
   return (
     <div className="rounded-md border border-neutral-200 p-3">
       <div className="mb-1.5 flex items-center gap-2">
@@ -681,7 +769,7 @@ function CommentItem({
     : "";
   const plainBody = showTranslated ? (comment.translated as string) : (comment.text || "");
   const isMaker = !!comment.author_handle && makerHandles.has(comment.author_handle);
-  const avatar = comment.avatar_url ? resolveAssetUrl(comment.avatar_url) : "";
+  const avatar = optimizedAvatarUrl(comment.avatar_url, 64);
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">

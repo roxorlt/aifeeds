@@ -27,6 +27,7 @@ export type EventTypeName =
   | 'thread_expand' | 'image_lightbox_open' | 'external_link_click'
   // 筛选
   | 'source_filter_change' | 'sort_change' | 'new_content_banner_click'
+  | 'home_view_switch'
   // 分享
   | 'share_click' | 'share_landing'
   // 登录（PR2/3）
@@ -44,6 +45,7 @@ export type EventTypeName =
   | 'video_effective_play'
   // 性能(web-vitals + navigation timing)
   | 'perf_lcp' | 'perf_inp' | 'perf_cls' | 'perf_ttfb' | 'perf_fcp' | 'perf_nav' | 'perf_img'
+  | 'perf_api' | 'feed_ready'
   // 错误
   | 'js_error' | 'unhandled_promise' | 'api_error' | 'image_load_error'
   | 'feed_load_error';

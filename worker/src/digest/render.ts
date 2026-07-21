@@ -51,17 +51,46 @@ export function cleanText(s: string): string {
   return (s || '').replace(/[#*`>_~]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+export function wellFormedText(value: string): string {
+  let result = '';
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        result += value[i] + value[i + 1];
+        i++;
+      } else {
+        result += '\ufffd';
+      }
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      result += '\ufffd';
+    } else {
+      result += value[i];
+    }
+  }
+  return result;
+}
+
+export function truncateCodePoints(value: string, maxLen: number): string {
+  const normalized = wellFormedText(value);
+  if (!Number.isFinite(maxLen)) return normalized;
+  const limit = Math.max(0, Math.floor(maxLen));
+  return Array.from(normalized).slice(0, limit).join('');
+}
+
 export function clampSentences(s: string, maxLen = 180): string {
-  const clean = cleanText(s);
-  if (clean.length <= maxLen) return clean;
-  const slice = clean.slice(0, maxLen);
-  const lastPunct = Math.max(
-    slice.lastIndexOf('。'),
-    slice.lastIndexOf('！'),
-    slice.lastIndexOf('？'),
-    slice.lastIndexOf('；'),
-  );
-  return lastPunct > maxLen * 0.5 ? slice.slice(0, lastPunct + 1) : slice + '…';
+  const clean = wellFormedText(cleanText(s));
+  const points = Array.from(clean);
+  if (points.length <= maxLen) return clean;
+  const prefix = points.slice(0, Math.max(0, Math.floor(maxLen)));
+  let lastPunct = -1;
+  for (let i = 0; i < prefix.length; i++) {
+    if (prefix[i] === '。' || prefix[i] === '！' || prefix[i] === '？' || prefix[i] === '；') {
+      lastPunct = i;
+    }
+  }
+  return lastPunct > maxLen * 0.5 ? prefix.slice(0, lastPunct + 1).join('') : prefix.join('') + '…';
 }
 
 export function deepLinkPath(itemId: string): string {
@@ -618,7 +647,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
       summary = (ex.summary_zh as string) || (ex.ai_summary_zh as string) || '';
       break;
     case 'x':
-      title = (ex.ai_summary as string) || body.slice(0, 60);
+      title = (ex.ai_summary as string) || truncateCodePoints(body, 60);
       summary = ct || row.content || '';
       break;
     case 'clawhub':
@@ -631,7 +660,7 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
       summary = (ex.ai_summary_zh as string) || ct;
       break;
     default:
-      title = row.title || body.slice(0, 60);
+      title = row.title || truncateCodePoints(body, 60);
       summary = body;
   }
   // 播客专属:单集时长 + 本集嘉宾(blog / 其他源没有 → 省略,不进 JSON)
@@ -662,12 +691,12 @@ export function renderItem(source: DigestSource, row: RenderRow, rank: number, a
     rank,
     item_id: row.id,
     source,
-    title: cleanText(title || '(无标题)').slice(0, 120),
+    title: truncateCodePoints(cleanText(title || '(无标题)'), 120),
     summary: clampSentences(summary),
-    summary_full: cleanText(summary),
+    summary_full: wellFormedText(cleanText(summary)),
     url: row.url || '',
     deep_link: deepLinkPath(row.id),
-    author: row.author || row.handle || '',
+    author: wellFormedText(row.author || row.handle || ''),
     cover: pickCover(source, row, ex, apiBase, opts),
     logo: pickLogo(source, row, apiBase),
     media: buildMedia(source, row, ex, apiBase),

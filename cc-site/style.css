@@ -33,4 +33,4 @@ footer p{margin:8px 0;color:#999}
 .beian a{color:#ccc;display:inline-flex;align-items:center;gap:4px}
 .beian a:hover{color:#fff;text-decoration:none}
 .beian img{vertical-align:middle}
-@media(max-width:600px){.hero h1{font-size:28px}nav a{margin-left:12px;font-size:13px}h1{font-size:26px}.beian{gap:8px;font-size:11px}}
+@media(max-width:720px){.header-inner{align-items:flex-start;gap:12px;flex-wrap:wrap}.header-inner nav{display:flex;width:100%;overflow-x:auto;padding-bottom:2px}.header-inner nav a{margin-left:0;margin-right:16px;white-space:nowrap}.hero h1{font-size:28px}h1{font-size:26px}.beian{gap:8px;font-size:11px}}

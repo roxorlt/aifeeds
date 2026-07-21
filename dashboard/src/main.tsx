@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
+import { TRACK_ENDPOINT } from './api'
+import { initTelemetry, track, EVENTS } from './lib/telemetry'
+import { installApiTiming, installImgTiming, installNavTiming, installVitals } from './lib/telemetry/vitals'
+import { installErrorHandlers } from './lib/telemetry/errors'
+import { createTelemetryBootstrap } from './lib/telemetry/bootstrap'
 
 // Seed history so cold deep-links into item detail paths don't trap the back
 // button. Stack becomes ['/', '/<deep>'] → back returns to feed.
@@ -24,6 +29,28 @@ import App from './App.tsx'
     window.history.replaceState({}, '', '/')
     window.history.pushState({}, '', target)
   }
+}
+
+// Global, route-independent telemetry bootstrap. This runs before React so a buffered
+// Resource Timing replay can never beat queue/session initialization, including on
+// /search, /settings, /subscribe and other routes that do not mount DashboardHome.
+try {
+  const bootstrapTelemetry = createTelemetryBootstrap({
+    endpoint: TRACK_ENDPOINT,
+    events: EVENTS,
+    initTelemetry,
+    installVitals,
+    installNavTiming,
+    installImgTiming,
+    installApiTiming,
+    installErrorHandlers,
+    track,
+    location: window.location,
+    referrer: document.referrer,
+  })
+  bootstrapTelemetry()
+} catch {
+  // Defense in depth: telemetry must never prevent the product UI from mounting.
 }
 
 createRoot(document.getElementById('root')!).render(

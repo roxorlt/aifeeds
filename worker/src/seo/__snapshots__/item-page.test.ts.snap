@@ -1,0 +1,111 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderItemPageHtml > 默认 .com profile 的完整代表性 HTML 保持逐字节 snapshot 1`] = `
+"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>推文要点标题 | AI Feeds</title>
+<meta name="description" content="这是一条推文的完整中文翻译，包含足够的正文内容供检索抓取。">
+<link rel="canonical" href="https://ai-feeds.com/i/x/1890">
+<meta property="og:title" content="推文要点标题 | AI Feeds">
+<meta property="og:description" content="这是一条推文的完整中文翻译，包含足够的正文内容供检索抓取。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://ai-feeds.com/i/x/1890">
+<meta property="og:image" content="https://ai-feeds.com/og-default.png">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"推文要点标题","description":"这是一条推文的完整中文翻译，包含足够的正文内容供检索抓取。","inLanguage":"zh-CN","mainEntityOfPage":"https://ai-feeds.com/i/x/1890","image":"https://ai-feeds.com/og-default.png","articleBody":"这是一条推文的完整中文翻译，包含足够的正文内容供检索抓取。","datePublished":"2026-07-01T08:00:00Z","author":{"@type":"Person","name":"@someone"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AI Feeds","item":"https://ai-feeds.com/"},{"@type":"ListItem","position":2,"name":"动态","item":"https://ai-feeds.com/archive/x/"},{"@type":"ListItem","position":3,"name":"推文要点标题","item":"https://ai-feeds.com/i/x/1890"}]},{"@type":"Organization","name":"AI Feeds","url":"https://ai-feeds.com/"}]}</script>
+<style>:root{--text:#171717;--body:#525252;--sub:#737373;--link:#0284c7;--border:#e5e5e5;--bg:#fafafa;--card:#fff}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);line-height:1.65;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+  font-size:16px}
+a{color:var(--link);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:720px;margin:0 auto;padding:20px 16px 48px}
+header{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:8px}
+.brand{font-size:18px;font-weight:700;color:var(--text)}
+.brand a{color:var(--text)}
+h1{font-size:21px;font-weight:700;color:var(--text);line-height:1.4;margin:10px 0 4px}
+.date{color:var(--sub);font-size:14px;margin-top:4px}
+.nav{margin-top:12px;font-size:14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.subscribe-btn{margin-left:auto;flex:none;white-space:nowrap;background:var(--link);color:#fff;
+  padding:6px 14px;border-radius:6px;font-weight:600}
+.subscribe-btn:hover{background:#0369a1;text-decoration:none;color:#fff}
+section{margin-top:28px}
+h2{font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;
+  border-left:3px solid var(--link);padding-left:10px}
+article{padding:16px 0;border-bottom:1px solid var(--border)}
+h3{font-size:17px;font-weight:600;line-height:1.5;margin:0 0 8px}
+.summary{color:var(--body);font-size:15px;margin:8px 0}
+.summary-full{color:var(--body);font-size:14px;line-height:1.75;margin:6px 0 0}
+.cover{display:block;width:100%;max-width:100%;height:auto;border-radius:8px;margin:10px 0;border:1px solid var(--border)}
+.meta{color:var(--sub);font-size:13px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);
+  color:var(--sub);font-size:14px;display:flex;gap:16px;flex-wrap:wrap}</style>
+</head>
+<body>
+<style>.summary-full{color:var(--body);font-size:15px;line-height:1.8;margin:10px 0}
+.item-body{color:var(--body);font-size:15px;line-height:1.85;margin:8px 0}
+.item-body h2,.item-body h3,.item-body h4,.item-body h5,.item-body h6{border-left:none;padding-left:0;color:var(--text);margin:18px 0 8px;line-height:1.4}
+.item-body h3{font-size:16px}.item-body h4,.item-body h5,.item-body h6{font-size:15px}
+.item-body p{margin:9px 0}
+.item-body ul,.item-body ol{margin:8px 0;padding-left:22px}
+.item-body li{margin:4px 0}
+.item-body img{max-width:100%;height:auto;border-radius:6px;margin:10px 0;border:1px solid var(--border)}
+.item-body pre{background:#f5f5f5;padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.6}
+.item-body code{background:#f5f5f5;padding:1px 5px;border-radius:4px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.item-body pre code{background:none;padding:0}
+.item-body blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--border);color:var(--sub)}
+.item-body table{border-collapse:collapse;font-size:13px;margin:10px 0;display:block;overflow-x:auto;max-width:100%}
+.item-body th,.item-body td{border:1px solid var(--border);padding:6px 10px;text-align:left}
+.tweet-thread{margin:10px 0}
+.tweet-card{border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:8px 0;background:var(--card)}
+.tweet-author{font-weight:600;color:var(--text);font-size:14px;margin-bottom:4px}
+.tweet-text{color:var(--body);font-size:15px;line-height:1.7}
+.quote-tweet{border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin:8px 0;color:var(--sub);font-size:14px}
+.quote-author{font-weight:600;color:var(--body);margin-bottom:2px}
+.comments{margin:6px 0}
+.comment{border-top:1px solid var(--border);padding:10px 0}
+.comment-author{font-weight:600;font-size:14px;color:var(--text);margin-bottom:3px}
+.comment-text{color:var(--body);font-size:14px;line-height:1.7}
+.chapters{list-style:none;padding-left:0}
+.chapters li{margin:5px 0;color:var(--body);font-size:14px}
+.chapters .ts{display:inline-block;min-width:56px;color:var(--link);font-variant-numeric:tabular-nums;font-weight:600}
+.timeline li{margin:0 0 12px}
+.timeline .tl-topic{font-weight:600;color:var(--text)}
+.timeline .tl-point{margin:4px 0 0;color:var(--sub);font-size:14px;line-height:1.7}
+.timeline .tl-speaker{margin-top:2px;color:var(--sub);font-size:13px}
+.podcast-people{margin:8px 0;font-size:14px;color:var(--body)}
+.podcast-people p{margin:3px 0}
+.podcast-people .people-label{color:var(--sub);font-weight:600;margin-right:8px}
+.excerpt{margin:10px 0;padding:10px 14px;border-left:3px solid var(--border);color:var(--body);font-size:14px;line-height:1.85;white-space:pre-wrap}
+.read-original{margin:18px 0 4px;font-size:15px;font-weight:600}
+.read-original a{color:var(--link)}</style>
+<div class="wrap">
+<header>
+<div class="brand"><a href="https://ai-feeds.com/">AI Feeds</a></div>
+<div class="date">动态</div>
+<nav class="nav" aria-label="内容归档"><a href="https://ai-feeds.com/archive/x/">动态归档</a><a href="https://ai-feeds.com/archive/x/2026-07/">2026-07归档</a></nav>
+</header>
+<main>
+<article>
+<h1 style="font-size:22px;font-weight:700;line-height:1.4;margin:12px 0 10px">推文要点标题</h1>
+
+<div class="tweet-thread"><div class="tweet-card"><div class="tweet-author">@someone</div><div class="tweet-text">这是一条推文的完整中文翻译，包含足够的正文内容供检索抓取。</div></div></div>
+<div class="meta"><span>动态</span><span>@someone</span><span>2026-07-01</span><a href="https://x.com/u/status/1890" target="_blank" rel="noopener nofollow">原文</a></div>
+<p><a class="subscribe-btn" style="display:inline-block" href="https://ai-feeds.com/t/1890">打开互动版</a></p>
+</article>
+
+</main>
+<footer>
+<a href="https://ai-feeds.com/subscribe">订阅每日邮件</a>
+<a href="https://ai-feeds.com/">进站看全部</a>
+<a href="https://ai-feeds.com/daily/">历史日报</a>
+<a href="https://ai-feeds.com/archive/">内容归档</a>
+</footer>
+</div>
+</body>
+</html>"
+`;

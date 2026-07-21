@@ -361,6 +361,20 @@ describe('renderItemBody — 净化接线（任一源）', () => {
 });
 
 describe('itemIndexableText — articleBody 可安全索引文本', () => {
+  test('4,000 code point 边界保留完整 emoji，不产生孤立 surrogate', () => {
+    const t = itemIndexableText(
+      'x',
+      mkRow({
+        content_translated: 'a'.repeat(3999) + '🔥' + 'tail',
+      }),
+      env(),
+    );
+
+    expect(Array.from(t)).toHaveLength(4000);
+    expect(t.endsWith('🔥')).toBe(true);
+    expect(hasLoneSurrogate(t)).toBe(false);
+  });
+
   test('blog：只含我们的摘要+要点，不含照译全文', () => {
     const SENTINEL = '尾部照译全文标记';
     const t = itemIndexableText(
@@ -407,3 +421,17 @@ describe('itemIndexableText — articleBody 可安全索引文本', () => {
     expect(t).not.toContain(SENTINEL);
   });
 });
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      i++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}

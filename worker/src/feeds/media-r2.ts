@@ -40,6 +40,10 @@ import {
   isNoCoverSource,
   noCoverSourcesSqlExclusion,
 } from "./cover-heuristics";
+import {
+  generateCardImageVariants,
+  type CardImageVariant,
+} from "../card-image-variant";
 import { isTheVergeAuthorProfileImage } from "./editorial-image";
 import { cleanBlogEditorialImages } from "./blog-editorial-image-cleanup";
 
@@ -390,6 +394,27 @@ interface ItemRow {
   extra_raw: string | null;
 }
 
+type CoverVariantGenerator = (
+  env: Env,
+  sourceUrl: string,
+  prefix: "blog" | "podcast",
+  dimensions?: { width?: number; height?: number },
+) => Promise<CardImageVariant[]>;
+
+const defaultCoverVariantGenerator: CoverVariantGenerator = (
+  env,
+  sourceUrl,
+  prefix,
+  dimensions = {},
+) => generateCardImageVariants(env.READMES, {
+  sourceUrl,
+  sourcePrefix: prefix,
+  mediaKind: "image",
+  sourceWidth: dimensions.width,
+  sourceHeight: dimensions.height,
+  sourceRequestHeaders: { "User-Agent": FEED_R2_USER_AGENT },
+});
+
 // ═════════════════════════════════════════════════════════════════════════════
 // blog：封面 + 正文 inline 图/视频 + publisher logo 迁 R2（音频无）。
 // ═════════════════════════════════════════════════════════════════════════════
@@ -405,11 +430,15 @@ export async function migrateMediaForBlog(
       env: Env,
       coverUrl: string,
     ) => Promise<{ width: number; height: number } | undefined>;
+    /** 入库时卡片变体 seam；失败只回退原图，不阻断正文迁移。 */
+    generateCoverVariants?: CoverVariantGenerator;
   },
 ): Promise<{ migrated: number; marker: "blog_media_r2_at" }> {
   const marker = "blog_media_r2_at" as const;
   const migrateCover = deps?.migrateCover ?? migrateFeedCover;
   const probeCoverSize = deps?.probeCoverSize ?? probeRemoteCoverSize;
+  const generateCoverVariantsForSource =
+    deps?.generateCoverVariants ?? defaultCoverVariantGenerator;
   if (!env.READMES) {
     console.warn("[feeds-r2:blog] R2 binding READMES 未配置 — 跳过");
     return { migrated: 0, marker };
@@ -566,6 +595,30 @@ export async function migrateMediaForBlog(
   const cleanMd = editorialCleanup.patch.body_markdown ?? oldMd;
   const newMd = mapping.size ? rewriteMarkdownUrls(cleanMd, mapping) : cleanMd;
 
+  // ── 4b. 最终采用的卡片封面生成两档静态 WebP ──
+  // 只对仍保留的外部原始 URL 做转换；R2 `/r/` 永远不从 Worker 自取。
+  const adoptedCover = noCoverSrc
+    ? undefined
+    : newCover && !brandLogoGuarded
+      ? newCover
+      : (brandLogoGuarded || coverKeywordBlocked) && bodyHeroCover
+        ? bodyHeroCover
+        : isAlreadyMigrated(cover)
+          ? cover
+          : undefined;
+  const adoptedAsset = adoptedCover
+    ? newAssets.find((asset) => asset.r2_url === adoptedCover)
+    : undefined;
+  const adoptedSourceUrl = adoptedCover === newCover
+    ? cover
+    : adoptedAsset?.url;
+  const coverVariants = adoptedCover && adoptedSourceUrl && !isAlreadyMigrated(adoptedSourceUrl)
+    ? await generateCoverVariantsForSource(env, adoptedSourceUrl, "blog", {
+        width: adoptedAsset?.width,
+        height: adoptedAsset?.height,
+      })
+    : [];
+
   // ── 5. 落库（json_set 只改自己字段，防擦并行 enrich）──
   const patches: ExtraPatch[] = [{ path: "$.blog_media_r2_at", value: nowIso }];
   if (noCoverSrc) {
@@ -638,6 +691,16 @@ export async function migrateMediaForBlog(
       json: true,
     });
   }
+  if (adoptedCover && coverVariants.length > 0) {
+    patches.push({
+      path: "$.cover_image_variants",
+      value: JSON.stringify(coverVariants),
+      json: true,
+    });
+    patches.push({ path: "$.cover_variant_source", value: adoptedCover });
+    patches.push({ path: "$.card_variant_version", value: "1", json: true });
+    patches.push({ path: "$.card_variant_status", value: "ok" });
+  }
   await applyExtraPatch(env, itemId, patches);
 
   console.log(`[feeds-r2:blog] ${itemId}: ${migrated} assets migrated`);
@@ -651,8 +714,11 @@ export async function migrateMediaForBlog(
 export async function migrateCoverForPodcast(
   env: Env,
   itemId: string,
+  deps?: { generateCoverVariants?: CoverVariantGenerator },
 ): Promise<{ migrated: number; marker: "podcast_media_r2_at" }> {
   const marker = "podcast_media_r2_at" as const;
+  const generateCoverVariantsForSource =
+    deps?.generateCoverVariants ?? defaultCoverVariantGenerator;
   if (!env.READMES) {
     console.warn("[feeds-r2:podcast] R2 binding READMES 未配置 — 跳过");
     return { migrated: 0, marker };
@@ -672,6 +738,7 @@ export async function migrateCoverForPodcast(
 
   // ── 单集封面（过质量门控；不合格/防盗链失败 → cover 落 null；audio_url 完全不碰）──
   let newCover: string | undefined;
+  let coverVariants: CardImageVariant[] = [];
   let coverRejected = false;
   const cover = (extra.cover_image || "").trim();
   if (cover && !isAlreadyMigrated(cover)) {
@@ -684,6 +751,11 @@ export async function migrateCoverForPodcast(
     if (r2) {
       newCover = r2;
       migrated++;
+      coverVariants = await generateCoverVariantsForSource(
+        env,
+        cover,
+        "podcast",
+      );
     } else {
       coverRejected = true;
     }
@@ -706,6 +778,16 @@ export async function migrateCoverForPodcast(
   if (newCover) {
     patches.push({ path: "$.cover_image", value: newCover });
     patches.push({ path: "$.cover_backfilled_at", value: nowIso });
+    if (coverVariants.length > 0) {
+      patches.push({
+        path: "$.cover_image_variants",
+        value: JSON.stringify(coverVariants),
+        json: true,
+      });
+      patches.push({ path: "$.cover_variant_source", value: newCover });
+      patches.push({ path: "$.card_variant_version", value: "1", json: true });
+      patches.push({ path: "$.card_variant_status", value: "ok" });
+    }
   } else if (coverRejected) {
     patches.push({ path: "$.cover_image", value: "" });
     patches.push({ path: "$.cover_rejected_at", value: nowIso });

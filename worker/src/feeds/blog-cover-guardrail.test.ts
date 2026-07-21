@@ -263,6 +263,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     const { env } = makeEnv([...siblings, target]);
     await migrateMediaForBlog(env, 'blog:small:new', {
       migrateCover: async () => '/r/blog/pic.jpg',
+      generateCoverVariants: async () => [],
     });
     expect(target.extra.cover_image).toBe('/r/blog/pic.jpg');
     expect(target.extra.cover_generic_cleared_hash).toBeUndefined();
@@ -278,6 +279,7 @@ describe('migrateMediaForBlog 采用护栏集成', () => {
     const { env } = makeEnv([target]);
     await migrateMediaForBlog(env, 'blog:the-verge:new', {
       migrateCover: async () => '/r/blog/uniquehero.jpg',
+      generateCoverVariants: async () => [],
     });
     expect(target.extra.cover_image).toBe('/r/blog/uniquehero.jpg');
     expect(target.extra.cover_brandlogo_guarded_at).toBeUndefined();
@@ -717,6 +719,7 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
     const res = await migrateMediaForBlog(env, 'blog:nvidia:kw', {
       migrateCover: async () => { migrateCoverCalls++; return '/r/blog/nvidia-hero.jpg'; },
       probeCoverSize: async () => ({ width: 2048, height: 1024 }), // 实测真头图尺寸
+      generateCoverVariants: async () => [],
     });
     expect(migrateCoverCalls).toBe(1);                             // 尺寸 override → 当作干净 og 正常迁移
     expect(res.migrated).toBe(1);
@@ -760,6 +763,7 @@ describe('migrateMediaForBlog 层 0 关键词黑名单（Fix A）', () => {
     const { env } = makeEnv([target]);
     const res = await migrateMediaForBlog(env, 'blog:the-verge:kw', {
       migrateCover: async () => { migrateCoverCalls++; return '/r/blog/uniquehero.jpg'; },
+      generateCoverVariants: async () => [],
     });
     expect(migrateCoverCalls).toBe(1);                            // 干净 og → 正常迁移
     expect(res.migrated).toBe(1);

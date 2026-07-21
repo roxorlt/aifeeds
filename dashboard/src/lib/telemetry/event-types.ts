@@ -21,6 +21,7 @@ export const EVENTS = {
   SOURCE_FILTER_CHANGE: 'source_filter_change',
   SORT_CHANGE: 'sort_change',
   NEW_CONTENT_BANNER_CLICK: 'new_content_banner_click',
+  HOME_VIEW_SWITCH: 'home_view_switch',
   // 分享
   SHARE_CLICK: 'share_click',
   SHARE_LANDING: 'share_landing',
@@ -57,6 +58,8 @@ export const EVENTS = {
   PERF_FCP: 'perf_fcp',         // First Contentful Paint — 比 LCP 早,首屏首字符耗时
   PERF_NAV: 'perf_nav',         // PerformanceNavigationTiming 全相位(dns/tcp/tls/ttfb/response/dcl/load)
   PERF_IMG: 'perf_img',         // 封面图(/img 代理)加载耗时,Resource Timing 采样上报
+  PERF_API: 'perf_api',         // 固定 API endpoint 类别的 Resource Timing（不含 URL/query）
+  FEED_READY: 'feed_ready',     // 页面首个非空 Feed 完成 commit + 一帧绘制
   // 错误
   JS_ERROR: 'js_error',
   UNHANDLED_PROMISE: 'unhandled_promise',

@@ -1,12 +1,17 @@
 import { useState } from "react";
 import type { Item } from "../types";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { TweetCard } from "./TweetCard";
 
 interface Props {
   items: Item[]; // sorted by published_at ascending (root first)
+  mediaPolicy: MediaLoadPolicy;
 }
 
-export function ThreadCard({ items }: Props) {
+export function ThreadCard({ items, mediaPolicy }: Props) {
   const [open, setOpen] = useState(false);
   const [root, ...rest] = items;
   const replyCount = rest.length;
@@ -20,6 +25,7 @@ export function ThreadCard({ items }: Props) {
         inThread
         siblings={items}
         hasThreadBelow={hasReplies}
+        mediaPolicy={mediaPolicy}
       />
       {hasReplies && open &&
         rest.map((it, idx) => (
@@ -31,13 +37,14 @@ export function ThreadCard({ items }: Props) {
             siblings={items}
             hasThreadAbove
             hasThreadBelow={idx < rest.length - 1}
+            mediaPolicy={LAZY_MEDIA_LOAD_POLICY}
           />
         ))}
       {hasReplies && (
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="relative block w-full px-4 py-2 pl-[68px] text-left text-[14px] text-sky-600 hover:bg-neutral-50/60 hover:underline"
+          className="relative block w-full px-4 py-2 pl-[68px] text-left text-[14px] text-sky-700 hover:bg-neutral-50/60 hover:underline"
         >
           {!open && (
             <span className="pointer-events-none absolute left-[35px] top-0 bottom-1/2 w-[2px] bg-gradient-to-b from-neutral-200 to-transparent" />

@@ -10,9 +10,13 @@ export function useIsNarrow(): boolean {
   );
   useEffect(() => {
     const mq = window.matchMedia(NARROW_QUERY);
-    const handler = (e: MediaQueryListEvent) => setNarrow(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
+    const update = () => setNarrow(mq.matches);
+    mq.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    return () => {
+      mq.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
   }, []);
   return narrow;
 }

@@ -1,0 +1,13 @@
+{
+  "base_url": "https://ai-feeds.cc",
+  "paths": [
+    "/",
+    "/privacy.html",
+    "/terms.html",
+    "/contact.html",
+    "/cc-prompts/",
+    "/cc-prompts/best-practices.html",
+    "/cc-prompts/common-workflows.html",
+    "/cc-prompts/how-anthropic-teams-use-claude-code.html"
+  ]
+}

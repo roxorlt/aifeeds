@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "include": [
+    "/",
+    "/t/*",
+    "/g/*",
+    "/ph/*",
+    "/c/*",
+    "/e/*",
+    "/h/*",
+    "/o/*",
+    "/_home/feed"
+  ],
+  "exclude": [
+    "/assets/*",
+    "/daily/*",
+    "/api/*",
+    "/r/*",
+    "/img",
+    "/media"
+  ]
+}

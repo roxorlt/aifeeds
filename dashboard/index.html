@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="AI Feeds — 一站式 AI 信息聚合看板，聚合 X、GitHub、Product Hunt 等多源 AI 资讯" />
     <!-- SPA 首页自引用 canonical：站点根为规范 URL，避免带 query/hash 的变体被视作重复页 -->
     <link rel="canonical" href="https://ai-feeds.com/" />
@@ -16,47 +16,73 @@
     <meta name="twitter:title" content="AI Feeds — 一站式 AI 信息聚合看板" />
     <meta name="twitter:description" content="聚合 X、GitHub、Product Hunt 等多源 AI 资讯，每日追踪 AI 领域动态。" />
     <meta name="twitter:image" content="https://ai-feeds.com/og-default.png" />
-    <link rel="preconnect" href="https://api.ai-feeds.com" crossorigin />
-    <link rel="dns-prefetch" href="https://api.ai-feeds.com" />
-    <!-- 首屏冷启动数据预取:在 JS 还在下载/解析时就并行发起默认 feed(x_list)请求,让接口
-         数据跟 JS 加载并行、而非「等 JS 跑完才发请求」的串行等待。命中由 fetchItems 用 path
-         严格匹配消费(默认频道 = x_list / time 排序 / limit 30);其他频道或排序不匹配自动
-         回退正常请求,失败(null)也回退,无副作用。 -->
+    <!-- 首页冷启动数据预取:仅 pathname="/" 会消费默认 feed(x_list),所以只在该路径于 JS
+         下载/解析时并行发请求；搜索、设置、分享和各源详情深链只允许 preconnect 正确 API
+         环境，不拉无用列表。命中由 fetchItems 用 path 严格匹配消费(默认频道 = x_list /
+         time 排序 / limit 12);失败(null)回退正常请求。same-origin 构建必须用相对 /api；
+         普通 staging/Pages 构建仍使用显式外域 API。 -->
     <script>
-      (function () {
+      (() => {
         try {
-          var h = location.host, base = null;
-          if (h === "ai-feeds.com" || h === "www.ai-feeds.com") base = "https://api.ai-feeds.com";
-          else if (h.indexOf("staging") >= 0) base = "https://staging-api.ai-feeds.com";
-          if (!base) return;
-          var path = "/api/items?source_type=x_list&limit=30";
+          const sameOrigin = __AIFEEDS_API_SAME_ORIGIN__;
+          const configuredBase = __AIFEEDS_API_BASE__;
+          const host = location.hostname;
+          let base = null;
+
+          if (sameOrigin) base = "";
+          else if (configuredBase) base = configuredBase;
+          else if (host === "localhost" || host === "127.0.0.1" ||
+                   host === "www.ai-feeds.com" || host === "perf-staging.ai-feeds.com") base = "";
+          else if (host === "staging.ai-feeds.com" ||
+                   host === "xlist-dashboard-staging.pages.dev" ||
+                   host.endsWith(".xlist-dashboard-staging.pages.dev")) {
+            base = "https://staging-api.ai-feeds.com";
+          } else {
+            base = "https://api.ai-feeds.com";
+          }
+
+          if (base === null) return;
+          if (base) {
+            ["preconnect", "dns-prefetch"].forEach((rel) => {
+              const link = document.createElement("link");
+              link.rel = rel;
+              link.href = base;
+              if (rel === "preconnect") link.crossOrigin = "anonymous";
+              document.head.appendChild(link);
+            });
+          }
+
+          // Only the root route mounts the default x_list feed without a
+          // source/deep-link override. Other SPA routes may reuse the warmed
+          // API connection, but must not download a list they never consume.
+          if (location.pathname !== "/") return;
+
+          const path = "/api/items?source_type=x_list&limit=12";
+          const controller = new AbortController();
+          const promise = fetch(base + path, {
+            credentials: "include",
+            signal: controller.signal,
+          })
+            .then((r) => r.ok ? r.json() : null)
+            .catch(() => null);
+          const settled = promise.then(() => undefined, () => undefined);
           window.__feedPrefetch = {
-            path: path,
-            promise: fetch(base + path, { credentials: "include" })
-              .then(function (r) { return r.ok ? r.json() : null; })
-              .catch(function () { return null; }),
+            path,
+            promise,
+            cancel: () => {
+              controller.abort();
+              return settled;
+            },
           };
         } catch (e) {}
       })();
     </script>
-    <link rel="preconnect" href="https://fonts.ai-feeds.com" crossorigin />
-    <!-- 字体在 window.load 之后才注入：HarmonyOS Sans SC 已改 font-display: optional（品牌字体
-         非必须），但若在加载窗口内引用，~38 个 woff2（~200KB）仍会后台下载、把 load 指标拖到 12s+、
-         也跟首屏抢带宽。改成 load 之后空闲时才注入字体 CSS —— 字体不再算进 load、不抢首屏；首屏先用
-         系统苹方（见 index.css fallback 栈）秒出，字体下完缓存供回访用。<noscript> 兜底 JS 关闭场景。 -->
-    <script>
-      window.addEventListener("load", function () {
-        var inject = function () {
-          ["regular", "medium", "bold"].forEach(function (w) {
-            var l = document.createElement("link");
-            l.rel = "stylesheet";
-            l.href = "https://fonts.ai-feeds.com/hmos-" + w + "/result.css";
-            document.head.appendChild(l);
-          });
-        };
-        if (window.requestIdleCallback) window.requestIdleCallback(inject, { timeout: 3000 });
-        else setTimeout(inject, 300);
-      });
+    <!-- HarmonyOS Sans SC 是 optional 品牌字体。首次 pointer/keyboard 或 load+10s 后再
+         进入 idle 注入；saveData/≤3g 不主动加载，避免约 200KB 字体与 LCP 抢带宽。
+         系统苹方 fallback 先出，<noscript> 保留 JS 关闭场景。 -->
+    <script type="module">
+      import { installDeferredFonts } from "/src/lib/deferredFonts.ts";
+      installDeferredFonts();
     </script>
     <noscript>
       <link rel="stylesheet" href="https://fonts.ai-feeds.com/hmos-regular/result.css" />
@@ -66,6 +92,12 @@
     <title>AI Feeds — 一站式 AI 信息聚合看板</title>
   </head>
   <body>
+    <noscript>
+      <nav aria-label="站点导航">
+        <a href="/archive/">内容归档</a>
+        <a href="/daily/">AI 日报</a>
+      </nav>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

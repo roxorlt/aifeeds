@@ -12,16 +12,19 @@
 
 import { useState } from "react";
 import type { HfPaperMetrics, Item, ItemExtra } from "../types";
-import { formatCompact, parseJsonField, timeAgo } from "../lib/utils";
-import { resolveAssetUrl } from "../lib/asset";
-import { useDrawer } from "../lib/drawer";
+import { buildResponsiveCardImage, formatCompact, parseJsonField, proxyImg, timeAgo } from "../lib/utils";
+import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
+import {
+  LAZY_MEDIA_LOAD_POLICY,
+  getMediaPriorityTelemetryLabel,
+  type MediaLoadPolicy,
+} from "../lib/mediaPriority";
 import { HL } from "./search/highlight";
 
 interface Props {
   item: Item;
-  // 首屏前几张卡(Feed 传入):封面图 eager + fetchPriority=high,LCP 优化
-  eager?: boolean;
+  mediaPolicy?: MediaLoadPolicy;
 }
 
 // ─── Inline icons (HF feed specific) ──────────────────────────────────────
@@ -98,9 +101,13 @@ export function NoveltyStars({
   );
 }
 
-export function HfPaperCard({ item, eager }: Props) {
+export function HfPaperCard({
+  item,
+  mediaPolicy = LAZY_MEDIA_LOAD_POLICY,
+}: Props) {
   const drawer = useDrawer();
   const [coverFailed, setCoverFailed] = useState(false);
+  const [coverVariantFailed, setCoverVariantFailed] = useState(false);
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<HfPaperMetrics>(item.metrics) ?? ({} as HfPaperMetrics);
 
@@ -117,6 +124,9 @@ export function HfPaperCard({ item, eager }: Props) {
   // 走 cf.image webp/avif 反代。mockup 阶段直拉 CDN（可能 CN 略慢但可加载）。
   const media = Array.isArray(item.media) ? item.media : [];
   const cover = media.find((m) => m.type === "image");
+  const coverSource = cover
+    ? buildResponsiveCardImage(cover.url, cover.card_variants, { fallbackWidth: 400 })
+    : null;
 
   // submitter：HF 用户名（@xxx）+ 头像 + 提交日期相对时间
   // PM v3: 多作者时显示 "by @xxx 等 N 位"（N = 论文 paper_authors 总数）。
@@ -145,16 +155,36 @@ export function HfPaperCard({ item, eager }: Props) {
     >
       {/* Cover thumbnail — 1200×630 HF social card；占满卡宽，rounded-2xl 跟
           PhCard / LinkCard 一致。挂了就隐藏（不留空白），avatar/手写降级方案 */}
-      {cover && !coverFailed && (
-        <div className="mb-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100">
-          <img
-            src={resolveAssetUrl(cover.url)}
-            alt=""
-            loading={eager ? "eager" : "lazy"}
-            fetchPriority={eager ? "high" : undefined}
-            className="aspect-[1200/630] w-full object-cover"
-            onError={() => setCoverFailed(true)}
-          />
+      {cover && coverSource && !coverFailed && (
+        <div
+          className="mb-2.5 overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-100"
+          data-feed-source={item.source_type}
+          data-media-priority={getMediaPriorityTelemetryLabel(mediaPolicy)}
+        >
+          <picture className="block">
+            {coverSource.webpSrcSet && !coverVariantFailed && (
+              <source type="image/webp" srcSet={coverSource.webpSrcSet} sizes="(max-width: 640px) calc(100vw - 32px), 400px" />
+            )}
+            <img
+              src={coverSource.fallbackSrc}
+              srcSet={coverSource.srcSet}
+              sizes="(max-width: 640px) calc(100vw - 32px), 400px"
+              width={cover.width || 1200}
+              height={cover.height || 630}
+              alt=""
+              loading={mediaPolicy.loading}
+              fetchPriority={mediaPolicy.fetchPriority}
+              decoding="async"
+              className="aspect-[1200/630] w-full object-cover"
+              onError={() => {
+                if (coverSource.webpSrcSet && !coverVariantFailed) {
+                  setCoverVariantFailed(true);
+                } else {
+                  setCoverFailed(true);
+                }
+              }}
+            />
+          </picture>
         </div>
       )}
 
@@ -213,7 +243,7 @@ export function HfPaperCard({ item, eager }: Props) {
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
           {submitter?.avatar_url ? (
             <img
-              src={resolveAssetUrl(submitter.avatar_url)}
+              src={proxyImg(submitter.avatar_url, 80)}
               alt={submitter.user}
               loading="lazy"
               decoding="async"

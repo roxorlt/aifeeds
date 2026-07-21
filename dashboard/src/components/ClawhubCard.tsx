@@ -1,8 +1,9 @@
 import type { Item } from "../types";
 import { cn, formatCompact, parseJsonField, proxyImg } from "../lib/utils";
 import { cleanTruncatedSummary, smartTruncate } from "../lib/truncate";
-import { useDrawer } from "../lib/drawer";
+import { useDrawer } from "../lib/drawerContext";
 import { useImpressionRefresh } from "../lib/impressionRefresh";
+import type { MediaLoadPolicy } from "../lib/mediaPriority";
 import {
   IconStarFill,
   IconDownload,
@@ -54,6 +55,8 @@ interface ClawhubExtra {
 
 interface Props {
   item: Item;
+  // Kept explicit for a uniform ItemCard contract; this card has no hero media.
+  mediaPolicy?: MediaLoadPolicy;
 }
 
 export function ClawhubCard({ item }: Props) {

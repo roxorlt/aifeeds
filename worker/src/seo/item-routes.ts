@@ -24,7 +24,12 @@ import type { Env } from '../index';
 import { getBases } from '../digest/lib';
 import { fetchItemRow } from '../digest/item-fetch';
 import { itemPageR2Key } from '../digest/render';
-import { generateItemPage as defaultGenerate, type ItemPageRunResult } from './item-page-run';
+import {
+  generateItemPage as defaultGenerate,
+  type ItemPageRunResult,
+} from './item-page-run';
+import { ITEM_ELIGIBILITY } from './item-archive';
+import { isCnSensitive } from './item-page-policy';
 
 // R2-miss 兜底生成器。默认走 Task 4 的 generateItemPage；测试用依赖注入替身（避免 vi.mock hoist）。
 export type ItemPageGenerator = (env: Env, id: string) => Promise<ItemPageRunResult>;
@@ -63,7 +68,14 @@ async function resolvePhLatest(env: Env, slug: string): Promise<string | null> {
   // slug 含 LIKE 通配符（% / _）或其它越界字符 → 直接判无匹配（调用点转 404），不进 D1 LIKE。
   if (!PH_SLUG_RE.test(slug)) return null;
   const row = await env.DB.prepare(
-    `SELECT id FROM items WHERE source_type = 'product_hunt' AND id LIKE ? ORDER BY published_at DESC LIMIT 1`,
+    `SELECT i.id FROM items i
+     LEFT JOIN item_pages p ON p.item_id = i.id
+     WHERE i.source_type = 'product_hunt' AND i.id LIKE ?
+       AND ${ITEM_ELIGIBILITY}
+       AND (p.status = 'live' OR p.status IS NULL)
+     ORDER BY CASE WHEN p.status = 'live' THEN 0 ELSE 1 END ASC,
+       COALESCE(NULLIF(i.published_at, ''), i.scraped_at) DESC, i.id DESC
+     LIMIT 1`,
   )
     .bind(`product_hunt:${slug}:%`)
     .first<{ id: string }>();
@@ -107,7 +119,11 @@ function statusPage(env: Env, status: 410 | 404): Response {
 </html>`;
   return new Response(body, {
     status,
-    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Robots-Tag': 'noindex',
+    },
   });
 }
 
@@ -148,9 +164,12 @@ export async function handleItemRoute(
     .first<{ status: string }>();
   const status = statusRow?.status;
   const relevant = Number(row.is_relevant) === 1;
+  const sensitive = isCnSensitive(
+    typeof row.extra === 'string' ? row.extra : null,
+  );
 
-  // 下架 / 非 relevant → 410 noindex no-store。
-  if (status === 'gone' || !relevant) return statusPage(env, 410);
+  // 下架 / 非 relevant / 涉华敏感 → 410 noindex no-store。先于 R2 读取，旧快照也不可透出。
+  if (status === 'gone' || !relevant || sensitive) return statusPage(env, 410);
 
   // live（或尚无 item_pages 行）且 relevant：读 R2 快照。
   const key = itemPageR2Key(compositeId);

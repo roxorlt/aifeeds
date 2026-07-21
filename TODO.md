@@ -8,6 +8,105 @@
 
 ## 进行中
 
+### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
+
+- [x] 完成 GSC Unicode、sitemap/孤岛页/无出站链接、Product Hunt GIF、移动请求策略和
+  waterfall SSR 缓存的代码/线上证据归因；完整实施计划见
+  [`docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md`](docs/plans/2026-07-17-seo-integrity-and-c-end-performance-follow-up.md)。
+- [x] **P0-A**：Unicode code-point 安全截断 + JSON-LD well-formed 边界兜底；精确重生 GSC
+  页面后用固定 cutoff 分源重灌存量快照。
+  - [x] 代码与 TDD：共享 code-point helper、JSON-LD 序列化兜底、4,000 字 articleBody
+    边界、严格鉴权单页重生 mode；Worker 47 files / 775 tests 与 `tsc --noEmit` 全绿。
+  - [x] staging / production：精确页重生、固定 cutoff 五源重灌与 Unicode 抽样完成；GSC
+    “验证修复”由 Google 异步复抓，不阻塞发布终态。
+- [ ] **P0-B**：取得 Ahrefs 两条 5xx 的精确 URL/时间/响应，逐条复现并关闭
+  sitemap ↔ `item_pages` ↔ R2 完整性缺口。
+- [x] **P1-C/D/E**：SSR 分层归档与稳定内链、Product Hunt GIF 静态首帧、移动端按意图预取
+  + load-more/polling 收紧。
+  - [x] P1-C 本地代码与 TDD：五源 source/month/page SSR 归档、独立 archive sitemap、
+    item 稳定时间邻居、首页/日报入口、nginx/SW 三层路由、只读链接图验收器；Worker
+    48 files / 789 tests、TypeScript、Dashboard build 与相关 Node contracts 全绿。
+  - [x] P1-C/D/E staging / production：nginx、Worker、Dashboard、静态 GIF 预览、移动请求预算与
+    公开链接图验收已发布；2–4 周后的 Ahrefs orphan 趋势保留为观察项。
+- [x] **P1-F**：把 waterfall 分支同步到包含上述修复的新 main，手动实现 SWR，并在
+  perf-staging 做 classic/waterfall 同条件对照；RUM 继续作为上线后观察，不阻塞 staging。
+  - [x] 既有隔离分支已完成同 URL 双版本路由、经典默认、cookie 权威偏好、SSR 首屏、
+    8 源 home feed、可访问视图切换、cohort telemetry、五设备本地 gate、DebugBear 基线与
+    只读 sitespeed.io workflow；设计与原始 staging 包见
+    [`docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md`](docs/plans/2026-07-17-waterfall-ssr-dual-mode-design.md)、
+    [`docs/plans/2026-07-17-waterfall-production-integration.md`](docs/plans/2026-07-17-waterfall-production-integration.md)、
+    [`docs/reviews/waterfall-ssr-staging-change-packet.md`](docs/reviews/waterfall-ssr-staging-change-packet.md)。
+  - [x] 2026-07-17 已把旧 waterfall 分支合入包含 A–E 本地封板代码的
+    `codex/waterfall-ssr-main-sync` 隔离分支。
+  - [x] 已把 30 秒被动 cache 升级为 fresh 60 秒、max-stale 10 分钟、retention 24 小时的
+    手动 SWR：并发 stale single-flight、失败保留好快照、超窗同步刷新后 classic fail-open、
+    final-artifact+hostname 隔离 cache namespace、`freshness/age` 诊断 header 与
+    `generated|fresh|stale|fallback` 有限遥测均有 TDD。
+  - [x] F 已用 final-artifact identity + hostname 隔离 cache namespace 修复跨部署旧 HTML 风险，并重跑
+    最终本地 G0：Dashboard 329/329、Functions 23/23、Worker 812/812、root contracts 187 pass/2 skips、
+    waterfall 五设备 30/30、classic 32 pass / 83 role-skips 全绿；同一独立 reviewer 三轮复审最终
+    `GO`（Critical/Important 均为 0），唯一 `build:ssr` finalize minor 也已修复并复验。
+  - [x] perf-staging classic/waterfall × mobile/desktop × cold/warm 每格 10 次完成：waterfall
+    mobile cold LCP p75 `1540ms vs 1848ms`，desktop cold `1580ms vs 1728ms`，CLS p75 `0`；
+    staging 五设备 `20/20`、生产五设备 `20/20`，生产默认仍为 classic，waterfall 仅 opt-in。
+  - [x] 发布后 DebugBear：台湾/香港 Mobile classic/waterfall 各 5 次；waterfall LCP p75 分别改善
+    `28.6%` / `16.7%`，CLS p75 `0`，代表瀑布 `0` 个 4xx/5xx/GIF 请求。
+  - [x] 瀑布流视觉与混排修订：用户已确认移动 390px 双列、PC 自适应 3–6 列且无左侧栏，
+    两端均无分类 Tab、所有来源完全混排；卡片使用来源感知紧凑经典结构。公共排序同时加入
+    隐藏内容家族去连排、来源内热度归一和稳定分页，设备曝光第一阶段只记录
+    `would_filter`、不实际隐藏。设计、实施清单与双端样例见
+    [`docs/plans/2026-07-18-waterfall-compact-cards-design.md`](docs/plans/2026-07-18-waterfall-compact-cards-design.md)、
+    [`docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md`](docs/plans/2026-07-18-waterfall-mixing-shadow-implementation.md)、
+    [`docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html`](docs/plans/_mockups/2026-07-18-waterfall-compact-cards.html)。
+    - [x] 本地 TDD 与视觉封板：九源紧凑卡、YouTube 深链、移动双列、PC 3–6 列、无侧栏/
+      无分类 Tab、v2 公共排序、v1 游标兼容、全源曝光 observer 与只记录 shadow 已完成。
+    - [x] 本地最终门：Dashboard `348/348`、Worker `834/834`、root contracts
+      `175 pass / 2 environment-skips`、waterfall 五设备 `30/30`、classic
+      `32 pass / 83 role-skips`；lint、Dashboard/Functions/Worker TypeScript、production build
+      与 PC/移动视觉截图均通过。
+    - [x] 滚动兼容保护：新 Pages 用 `X-Home-Ranking-Version: 2` 显式协商；新 Worker 对旧
+      Pages（无协商头）保持 v1/八源，cursor version 优先，避免先发 Worker 时旧 renderer 因
+      YouTube source 退回经典版；新 Pages 将旧 Worker 缺失的 ranking version 精确归一为 v1；
+      staging 固定先 Pages、后 Worker。
+    - [x] staging 真实中文资讯卡补充证据：两张 no-JS 卡片比旧 row-span 预留高约 16px；
+      已添加密集 CJK 回归 fixture，并为 SSR 估算增加一个完整 grid row 的换行缓冲。
+    - [x] feature branch 已推送；同步 staging Worker/Pages、滚动兼容矩阵、九源/分页/shadow、
+      五设备 `20/20` 与每格 10 次性能门均通过；九源临时夹具已删除并复核为 0。
+    - [x] PR #195 合入并完成 Worker/Pages 生产发布；即时门发现 query 直链续页 404 后，以
+      red→green hotfix #196 持久化有效 query 偏好。hotfix staging/production 五设备均
+      `20/20`，最终生产 Pages `57243fcc-5dee-4998-b2b4-a35012a597e7`、Worker
+      `503a8fb9-b089-4e90-a01c-31e4853d653c`；默认仍为 classic。发布清单见
+      [`docs/reviews/2026-07-18-waterfall-mixing-v2-release.md`](docs/reviews/2026-07-18-waterfall-mixing-v2-release.md)。
+  - [ ] 非阻塞观察：生产 RUM 每 cohort 至少 48 小时/100 个 LCP 样本后确认长期收益；GSC/Ahrefs
+    异步复抓；取得 Ahrefs 两条精确 5xx URL 后再完成 P0-B 根因闭环。
+
+### A5. C 端性能发布与 GL-a 异常恢复（2026-07-14，branch `codex/fix-motion-system`）
+
+- [x] **P0 `/api/items` 分页游标生产回归**（2026-07-17，branch
+  `codex/fix-item-cursor-compat`）：生产 D1 的 `scraped_at` 可为 SQLite datetime
+  `YYYY-MM-DD HH:mm:ss`，Worker 直接把该 TEXT 排序键写入 `v2` cursor，却只接受 RFC3339，
+  导致服务端生成的 X 下一页 cursor 被同版本以 `400 invalid_cursor` 拒绝。严格格式兼容、
+  Worker 全量 gate、staging 双页回放和 production 验收均通过。staging version
+  `57b55b48-c5ea-4609-8964-eef12e48363e`：合法 SQLite cursor `200`、非法日期 `400`、
+  服务端生成 cursor 原样回放 `200` 且两页 ID 无重叠。PR `#182` 合入 main
+  `c2aad3699d135dc4c827b7f8c6d47f7be5522a75`，Deploy Worker run `29567092210` 成功；
+  production X 标准请求两页 `200 → 200`、12/15 条、ID 重叠 0、无 `invalid_cursor`。
+- [x] PC/移动端动效与性能代码实施、本地契约和恢复设计完成；RUM 改为上线后观察任务，不阻塞本地交付。
+- [x] 定位 GL-a 首次失败根因：生产缺少 `/usr/sbin/logrotate`，旧 helper 无法恢复已初始化但未发布的
+  rotation-state candidate，旧 operation `20260714011642-a33e7d4d` 留在
+  `mutation_started` + `rollback_failed(prepared)`，live site 仍为 base。
+- [x] 本地实现依赖前置门、initialized-candidate 正常恢复、operation-bound exceptional authority、
+  transaction/executor 双 SHA、committed receipt、installer closure 与 8 个 publication crash 重入点。
+- [x] 2026-07-14 聚焦与完整回归：Python 74/74；Node 108 pass + 2 个既有环境 skip；独立恢复 10/10；
+  冻结 GL-a matrix 135/135、0 skip。
+- [ ] 在 clean commit 上运行完整 G0（dashboard/worker/root/GL-a），保存新的私有 evidence 目录。
+- [ ] 对 production 旧 operation 做一次只读复核，生成绑定实际 SHA/inode 的 recovery package 与精确命令；
+  **另行获得该精确命令批准前不得产生生产写**。
+- [ ] exceptional receipt 与旧 terminal pair 对账完成后，用新 operation id 重跑 GL-a；staging 全绿后再合并
+  main 触发生产发布，并做即时功能/性能验收。
+- [ ] 上线后 RUM 观察：每阶段/主 cohort 累计 ≥48h 且 ≥100 个 LCP 样本后才确认收益或推进下一阶段；
+  该项不回头阻塞本地代码交付。
+
 ### A4. C 端站内搜索（2026-07-06，branch `feat/c-search`，**staging 验收通过，待用户确认 → prod**）
 
 > 匿名可用站内搜索：入口放大镜 → 起始页（历史/热搜/源入口）→ suggestion → 分组结果页（每源 top3 + 「更多」）→ 单源无限滚动流 → 抽屉深链，返回键逐级回退。服务端 D1 FTS5 影子表 + 中文 bigram 预分词，索引/词表全靠 cron 增量维护、与主管线解耦。限流 search 12/min + suggest 40/min per device（KV fail-open）；admin 看板搜索区块（`?metric=search`）。
@@ -301,9 +400,19 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 > - [`docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html`](docs/plans/_research/2026-05-07-search-engines-ai-bots-research.html) — 30+ 引擎规则 + AI bot 三类法 + ICP 备案专题
 > - [`docs/plans/2026-05-08-cn-mirror-cc-domain-design.md`](docs/plans/2026-05-08-cn-mirror-cc-domain-design.md) — `.cc` 静态镜像方案、成本估算、合规加固、实施分阶段
 
-阻塞依赖：#11 备案号下来 + `.cc` 站点改造完成。已选 A 方案（`.cc` 启用国内主站，由 `.com` 抓取 + 翻译后生成静态页），不动手实施前先把 5 个待决策点拍板。
+备案依赖已解除。已选 A 方案（`.cc` 启用国内静态内容站，由 `.com` API 拉取、过滤并生成
+静态页；详情按钮由用户主动点击前往 `.com`，不做自动跳转）。
 
-**5 个待拍板的决策点**（开工前要定）：
+- [x] **镜像同步器与事务化部署代码完成**（2026-07-20，当前分支，未部署）：国内来源不
+  同步；海外第三方媒体先过 `is_ai` 与对华负面双层 gate；生成 immutable generation、
+  sitemap shard、`/ai-news/` 与原子 current；部署具备全局 preparing/committed marker、
+  systemd/Nginx/path 精确回滚、durable marker create/replace/delete 恢复、root-only managed
+  snapshot parent、Linux no-replace + directory-fd 清理和 SIGKILL fail-closed；legacy
+  `/var/tmp` snapshot 仅只读验证，安装器不修改 `/var/tmp`。
+- [ ] **生产部署与真实收录观察**：需用户单独批准后执行 `cc-site/sync/deploy-to-cc.sh prod`，
+  再验收 360/搜狗/神马/百度抓取、sitemap 提交、日志与首轮三万页续跑；本轮不推送、不部署。
+
+**5 个运营决策点**（生产上线前仍需逐项确认）：
 1. 境内 OSS / CDN 厂商（七牛云 / 阿里云 / 腾讯云）
 2. AI 训练 bot（GPTBot / ClaudeBot 等）在 `.cc` 上放还是禁
 3. takedown 邮箱地址定名
@@ -343,6 +452,15 @@ ai-feeds.cc + 腾讯云轻量服务器（82.156.0.68）+ 5 个静态合规页已
 ---
 
 ## 已完成
+
+### A7. 瀑布流临近底部自动分页（2026-07-19，PR #206）
+
+- [x] 使用移动端 `#root` / PC viewport 的 `IntersectionObserver` 在距底部 600px 时触发下一页。
+- [x] 保留手动加载与失败重试兜底，阻止重复请求和失败自动重试循环。
+- [x] 完成本地 368 项单测、lint、SSR build、55 项五设备矩阵及 staging 25 项远程矩阵。
+- [x] production workflow `29685573287` 成功部署 `cf0223e`；生产匿名烟测中桌面 Chromium 与
+  移动 WebKit 均由 24 张自动追加到 48 张且各只发 1 次分页请求，移动 `#root` → PC viewport
+  observer 重绑定通过。
 
 ### 2026-05-10 — 项目重命名 + CICD + 微信浏览器提示
 - [x] **项目重命名 xlist-scraper → aifeeds**：commit `b7e9afe` + `a33f317`，加身份卡 + 删 chrome skill 残留 + CLAUDE.md 同步

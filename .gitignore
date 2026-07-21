@@ -3,6 +3,8 @@ node_modules/
 
 # Build outputs
 dashboard/dist/
+dashboard/output/playwright/
+dashboard/output/home-view-benchmarks/
 worker/dist/
 
 # Runtime data

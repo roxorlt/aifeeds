@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { useDrawer } from "../lib/drawer";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useDrawer } from "../lib/drawerContext";
 import { track, EVENTS } from "../lib/telemetry";
 import { TweetCard } from "./TweetCard";
 import { GithubDrawerBody } from "./GithubDrawerBody";
@@ -18,15 +18,23 @@ import { useAuthStore } from "../lib/authStore";
 import { VideoColumnProvider } from "../lib/videoColumnContext";
 import type { CreateShareResponse } from "../lib/share";
 import type { Item, ItemExtra } from "../types";
+import {
+  DRAWER_EASE,
+  drawerActivationMode,
+  shouldCommitDismiss,
+  shouldReduceMotion,
+} from "../lib/motion";
+import { activateModalFocus } from "../lib/modalFocus";
 
 const SWIPE_EDGE_BUFFER = 24; // px from left edge — leave room for system back gesture
-const SWIPE_COMMIT_PX = 80; // dx threshold to commit close
-const SWIPE_ANIM_MS = 200;
+const DRAWER_ENTER_MS = 260;
+const DRAWER_EXIT_MS = 200;
 
 export function TweetDrawer() {
   const { state, close, depth } = useDrawer();
-  const { item, siblings, siblings_has_more, loading, error } = state;
+  const { item, siblings, siblings_has_more, metrics_history, loading, error } = state;
   const open = Boolean(item) || loading || Boolean(error);
+  const activeItemId = item?.id ?? null;
   const isNarrow = useIsNarrow();
   // 顶栏左上：抽屉内下钻（depth>0，如点进 PH「同类产品」）→ 显示「←」返回上一条；
   // 否则保持原行为（窄屏「‹」返回流内、宽屏「✕」关闭）。
@@ -36,42 +44,104 @@ export function TweetDrawer() {
   // Scroll the URL-targeted tweet into view when opening into a thread where
   // the target isn't the root. X-style behavior for shared replies.
   useEffect(() => {
-    if (!item) return;
+    if (!activeItemId) return;
     const node = targetRef.current;
     if (!node) return;
     requestAnimationFrame(() => {
       node.scrollIntoView({ behavior: "auto", block: "start" });
     });
-  }, [item?.id]);
+  }, [activeItemId]);
 
   const asideRef = useRef<HTMLElement | null>(null);
+  const backdropRef = useRef<HTMLDivElement | null>(null);
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
-  const [dragX, setDragX] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
-  // PM 2026-05-25:抽屉打开时右→左 "盖被子" slide-in 动画.
-  // mount 后下一帧 setEntered(true), transform translateX(100%) → 0 配
-  // transition transform 280ms 触发 slide. 关闭走原有路径(close() → unmount)
-  const [entered, setEntered] = useState(false);
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => setEntered(true));
-    return () => cancelAnimationFrame(raf);
+  const closingRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const drawerWasOpenRef = useRef(false);
+  const escapeCloseRef = useRef(close);
+
+  const applyDrawerPosition = useCallback((x: number, duration: number) => {
+    const aside = asideRef.current;
+    if (!aside) return;
+    const width = Math.max(window.innerWidth, 1);
+    const ratio = Math.min(Math.max(x / width, 0), 1);
+    const transition = duration > 0
+      ? `transform ${duration}ms ${DRAWER_EASE}`
+      : "none";
+    aside.style.transition = transition;
+    aside.style.transform = `translateX(${Math.max(x, 0)}px)`;
+    if (backdropRef.current) {
+      backdropRef.current.style.transition = duration > 0
+        ? `opacity ${duration}ms ${DRAWER_EASE}`
+        : "none";
+      backdropRef.current.style.opacity = String(0.4 * (1 - ratio));
+    }
   }, []);
+
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    if (shouldReduceMotion()) {
+      close();
+      return;
+    }
+    closingRef.current = true;
+    applyDrawerPosition(window.innerWidth, DRAWER_EXIT_MS);
+    closeTimerRef.current = window.setTimeout(close, DRAWER_EXIT_MS);
+  }, [applyDrawerPosition, close]);
+
+  useEffect(() => {
+    const clearCloseTimer = () => {
+      if (closeTimerRef.current === null) return;
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    };
+    const activation = drawerActivationMode(drawerWasOpenRef.current, open);
+    drawerWasOpenRef.current = open;
+    closingRef.current = false;
+    clearCloseTimer();
+
+    if (activation === "closed") return clearCloseTimer;
+    if (activation === "restore" || shouldReduceMotion()) {
+      applyDrawerPosition(0, 0);
+      return clearCloseTimer;
+    }
+
+    applyDrawerPosition(window.innerWidth, 0);
+    const raf = requestAnimationFrame(() => {
+      applyDrawerPosition(0, DRAWER_ENTER_MS);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      clearCloseTimer();
+    };
+  }, [open, item?.id, depth, applyDrawerPosition]);
   // Tracks whether the in-body title (owner/repo for GH, etc.) has scrolled
   // above the visible area — when true, the header surfaces it as a
   // "sticky" replacement title.
-  const [titleHidden, setTitleHidden] = useState(false);
+  const [titleVisibility, setTitleVisibility] = useState<{
+    itemId: string;
+    hidden: boolean;
+  } | null>(null);
+  const titleHidden = titleVisibility?.itemId === activeItemId
+    ? titleVisibility.hidden
+    : false;
   const [shareOpen, setShareOpen] = useState(false);
-  // 同 itemId 不重复 createShare：缓存最近一次为该 item 创建的 token
-  const [shareCache, setShareCache] = useState<Record<string, CreateShareResponse>>({});
   const user = useAuthStore((s) => s.user);
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
+  const activeUserId = user?.id ?? null;
+  // 同一账号 + itemId 不重复 createShare。账号键属于状态本身，因此换号时
+  // 新 render 直接看见空 cache，不需要 effect 再触发一次清空 render。
+  const [shareCacheState, setShareCacheState] = useState<{
+    userId: string | null;
+    entries: Record<string, CreateShareResponse>;
+  }>({ userId: null, entries: {} });
+  const shareCache = shareCacheState.userId === activeUserId
+    ? shareCacheState.entries
+    : {};
 
   // PM 2026-05-22 反馈:换账号点同一 feed 分享时不应复用上一账号的 token
   // (token 跟 from_uid 绑定, 海报 footer 含分享人 name + avatar + token QR,
-  // user2 拿 user1 token 等于把 user1 信息分发出去)。监听 user.id 变化清 cache
-  useEffect(() => {
-    setShareCache({});
-  }, [user?.id]);
+  // user2 拿 user1 token 等于把 user1 信息分发出去)。
 
   const onClickShare = () => {
     if (!user) {
@@ -81,22 +151,20 @@ export function TweetDrawer() {
     }
     setShareOpen(true);
   };
-  const dragXRef = useRef(0);
-  const dragStart = useRef<{ x: number; y: number } | null>(null);
+  const dragStart = useRef<{ x: number; y: number; at: number; identifier: number } | null>(null);
 
-  const setDrag = (x: number) => {
-    dragXRef.current = x;
-    setDragX(x);
-  };
+  useEffect(() => {
+    escapeCloseRef.current = close;
+  }, [close]);
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, close]);
+    const aside = asideRef.current;
+    if (!aside) return;
+    return activateModalFocus(aside, {
+      onEscape: () => escapeCloseRef.current(),
+    });
+  }, [open]);
 
   // R21: 架构改造 mobile body 永久 fixed, scroll context 转到 #root.
   // drawer 打开 lock #root scroll (不是 body), 关闭 restore.
@@ -148,15 +216,6 @@ export function TweetDrawer() {
     };
   }, [open]);
 
-  // Reset drag state when drawer (re)opens
-  useEffect(() => {
-    if (open) {
-      dragXRef.current = 0;
-      setDragX(0);
-      setIsDragging(false);
-    }
-  }, [open]);
-
   // Telemetry: open/close/dwell
   const openTimeRef = useRef<number>(0);
   useEffect(() => {
@@ -178,10 +237,10 @@ export function TweetDrawer() {
 
   // Mobile swipe-to-close: rightward swipe → close.
   //
-  // PM 2026-05-25 R9 改"跟手":touchmove 阶段同步 dragX 让 aside 跟手指走。
+  // touchmove 阶段直接写 transform/backdrop opacity 让抽屉跟手。
   // 早期方向锁定避开 native vertical scroll：touchmove 必须非 passive，
   // 只在横向锁定后 preventDefault；纵向锁定则 allow native vertical scroll。
-  // direction='horizontal' 且 dx > 0 → setDrag(dx),其他情况一律 abort.
+  // direction='horizontal' 且 dx > 0 才接管；多指和系统返回边缘均不接管。
   useEffect(() => {
     if (!open || !isNarrow) return;
     const aside = asideRef.current;
@@ -189,85 +248,104 @@ export function TweetDrawer() {
 
     let direction: 'unknown' | 'horizontal' | 'vertical' = 'unknown';
 
+    const findTouch = (touches: TouchList) => {
+      const identifier = dragStart.current?.identifier;
+      return Array.from(touches).find((touch) => touch.identifier === identifier);
+    };
+
+    const resetGesture = (snapBack = true) => {
+      dragStart.current = null;
+      direction = 'unknown';
+      if (snapBack && !closingRef.current) applyDrawerPosition(0, DRAWER_EXIT_MS);
+    };
+
     const onStart = (e: TouchEvent) => {
-      const t = e.touches[0];
-      if (t.clientX < SWIPE_EDGE_BUFFER) {
-        dragStart.current = null;
+      if (e.touches.length !== 1) {
+        resetGesture();
         return;
       }
-      dragStart.current = { x: t.clientX, y: t.clientY };
+      const t = e.touches[0];
+      if (t.clientX < SWIPE_EDGE_BUFFER) {
+        resetGesture(false);
+        return;
+      }
+      dragStart.current = {
+        x: t.clientX,
+        y: t.clientY,
+        at: performance.now(),
+        identifier: t.identifier,
+      };
       direction = 'unknown';
-      setIsDragging(false);
     };
+
     const onMove = (e: TouchEvent) => {
       if (!dragStart.current) return;
-      const t = e.touches[0];
+      if (e.touches.length !== 1) {
+        resetGesture();
+        return;
+      }
+      const t = findTouch(e.touches);
+      if (!t) return;
       const dx = t.clientX - dragStart.current.x;
       const dy = t.clientY - dragStart.current.y;
       const absDx = Math.abs(dx), absDy = Math.abs(dy);
-      // 方向未锁:抖动阈值 10px 内等
       if (direction === 'unknown') {
         if (absDx < 10 && absDy < 10) return;
         if (absDx > absDy * 2) {
           direction = 'horizontal';
-          setIsDragging(true);
         } else if (absDy > absDx * 2) {
-          // 纵向锁定 = abort, allow native vertical scroll
+          // Vertical lock: abort and allow native vertical scroll.
           direction = 'vertical';
           dragStart.current = null;
           return;
         } else {
-          return; // 模糊带等下次
+          return;
         }
       }
       if (direction === 'horizontal') {
         if (e.cancelable) e.preventDefault();
-        // 只跟手向右 (close direction), 向左阻尼 0
-        setDrag(dx > 0 ? dx : 0);
+        applyDrawerPosition(dx > 0 ? dx : 0, 0);
       }
     };
+
     const onEnd = (e: TouchEvent) => {
-      if (!dragStart.current) {
-        setIsDragging(false);
-        return;
-      }
-      const t = e.changedTouches[0];
+      const start = dragStart.current;
+      if (!start) return;
+      const t = findTouch(e.changedTouches);
       if (!t) {
-        dragStart.current = null;
-        setIsDragging(false);
-        setDrag(0);
+        resetGesture();
         return;
       }
-      const dx = t.clientX - dragStart.current.x;
-      const dy = t.clientY - dragStart.current.y;
-      setIsDragging(false);
-      // close 条件:dx 过半屏 或 dx > 阈值 且 horizontal dominant
-      const halfScreen = window.innerWidth / 2;
-      const shouldClose =
-        direction === 'horizontal' &&
-        (dx > halfScreen || (dx > SWIPE_COMMIT_PX && Math.abs(dx) > Math.abs(dy) * 1.5));
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+      const elapsedMs = Math.max(performance.now() - start.at, 1);
+      const shouldClose = direction === 'horizontal' && shouldCommitDismiss({
+        distance: dx,
+        crossAxis: dy,
+        elapsedMs,
+        viewport: window.innerWidth,
+      });
       if (shouldClose) {
-        setDrag(window.innerWidth);
-        setTimeout(close, SWIPE_ANIM_MS);
+        requestClose();
       } else {
-        // 弹回 0 (transition 已自动接管, isDragging=false)
-        setDrag(0);
+        applyDrawerPosition(0, DRAWER_EXIT_MS);
       }
-      dragStart.current = null;
-      direction = 'unknown';
+      resetGesture(false);
     };
+
+    const onCancel = () => resetGesture();
 
     aside.addEventListener("touchstart", onStart, { passive: true });
     aside.addEventListener("touchmove", onMove, { passive: false });
     aside.addEventListener("touchend", onEnd, { passive: true });
-    aside.addEventListener("touchcancel", onEnd, { passive: true });
+    aside.addEventListener("touchcancel", onCancel, { passive: true });
     return () => {
       aside.removeEventListener("touchstart", onStart);
       aside.removeEventListener("touchmove", onMove);
       aside.removeEventListener("touchend", onEnd);
-      aside.removeEventListener("touchcancel", onEnd);
+      aside.removeEventListener("touchcancel", onCancel);
     };
-  }, [open, isNarrow, close]);
+  }, [open, isNarrow, applyDrawerPosition, requestClose]);
 
   // iOS Safari boundary scroll-trap workaround.
   //
@@ -303,10 +381,10 @@ export function TweetDrawer() {
 
   // Watch when the in-body anchor title scrolls past the top of the
   // drawer body — flip `titleHidden` so the header surfaces a fallback
-  // title (owner/repo for GH). Resets to false on each item change.
+  // title (owner/repo for GH). State carries its item id, so a new item is
+  // false immediately without a synchronous reset effect.
   useEffect(() => {
-    setTitleHidden(false);
-    if (!open || !item) return;
+    if (!open || !activeItemId) return;
     const el = bodyScrollRef.current;
     if (!el) return;
     const anchor = el.querySelector<HTMLElement>("[data-drawer-title-anchor]");
@@ -316,12 +394,15 @@ export function TweetDrawer() {
       // Title is "above the screen" once the bottom of the anchor element
       // is above the scroller's visible top.
       const threshold = anchor.offsetTop + anchor.offsetHeight;
-      setTitleHidden(el.scrollTop > threshold);
+      setTitleVisibility({
+        itemId: activeItemId,
+        hidden: el.scrollTop > threshold,
+      });
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
-  }, [open, item?.id]);
+  }, [open, activeItemId]);
 
   if (!open) return null;
 
@@ -332,6 +413,7 @@ export function TweetDrawer() {
   const isHfPaper = item?.source_type === "hf_paper";
   const isBlog = item?.source_type === "blog";
   const isPodcast = item?.source_type === "podcast";
+  const isYoutube = item?.source_type === "youtube";
   const threadMembers =
     item && !isGithub && !isPh && !isClawhub && !isHdx && !isHfPaper && !isBlog && !isPodcast
       ? resolveThreadMembers(item, siblings)
@@ -348,6 +430,7 @@ export function TweetDrawer() {
   // blog/podcast：item.title 已是中译标题,drawer header 滚动后 reveal。
   const blogName = isBlog ? (item?.title || "") : "";
   const podcastName = isPodcast ? (item?.title || "") : "";
+  const youtubeName = isYoutube ? (item?.title || "") : "";
   // Default title is generic ("项目详情" / "推文详情" / etc.). Once the body's
   // own title element scrolls past the top, the header takes over and
   // displays the actual identifier (owner/repo for GH, name for PH).
@@ -358,6 +441,7 @@ export function TweetDrawer() {
   const defaultHfTitle = "论文详情";
   const defaultBlogTitle = "博客详情";
   const defaultPodcastTitle = "播客详情";
+  const defaultYoutubeTitle = "视频详情";
   const headerTitle = item
     ? isGithub
       ? titleHidden
@@ -387,6 +471,10 @@ export function TweetDrawer() {
                   ? titleHidden
                     ? podcastName || defaultPodcastTitle
                     : defaultPodcastTitle
+                  : isYoutube
+                    ? titleHidden
+                      ? youtubeName || defaultYoutubeTitle
+                      : defaultYoutubeTitle
                   : threadMembers.length > 1
                     ? `Thread · ${threadMembers.length} 条`
                     : "推文详情"
@@ -409,6 +497,8 @@ export function TweetDrawer() {
               ? "阅读原文 ↗"
               : isPodcast
                 ? "在原平台收听 ↗"
+                : isYoutube
+                  ? "在 YouTube 打开 ↗"
                 : "打开X原文 ↗";
   const externalLinkTitle = isGithub
     ? "在 GitHub 打开"
@@ -424,6 +514,8 @@ export function TweetDrawer() {
               ? "在原博客打开"
               : isPodcast
                 ? "在播客平台打开"
+                : isYoutube
+                  ? "在 YouTube 打开"
                 : "在 x.com 打开";
 
   // Double-tap on the title bar (excluding the back / external-link buttons)
@@ -435,26 +527,27 @@ export function TweetDrawer() {
     smoothScrollToTop(bodyScrollRef.current);
   };
 
-  // Backdrop opacity 跟 dragX 联动:dragX 0 → 全黑 40%, 滑到 100% width → 0
-  // entered=false 时 backdrop 也从 0 渐入 → 跟 aside slide-in 同步
-  const screenW = typeof window !== "undefined" ? window.innerWidth : 1;
-  const dragRatio = Math.min(Math.max(dragX / screenW, 0), 1);
-  const backdropOpacity = entered ? 0.4 * (1 - dragRatio) : 0;
-
   return (
-    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tweet-drawer-title"
+    >
       {/* Backdrop — opacity 跟 drag 联动让底层频道流自然透出, 配 aside slide */}
       <div
+        ref={backdropRef}
         className="absolute inset-0 bg-black"
-        onClick={close}
+        onClick={requestClose}
         style={{
-          opacity: backdropOpacity,
-          transition: isDragging ? "none" : "opacity 280ms cubic-bezier(0.32, 0.72, 0, 1)",
+          opacity: 0,
+          transition: `opacity ${DRAWER_ENTER_MS}ms ${DRAWER_EASE}`,
         }}
       />
       {/* Panel */}
       <aside
         ref={asideRef}
+        tabIndex={-1}
         // overflow-x-hidden + min-w-0 防御：
         //   - PC trackpad 双指横滑 / drawer 内某宽元素（长 URL、未处理的富文本图）
         //     会撑出 panel 宽 + 触发 horizontal scroll，视觉上 drawer 被拖偏。
@@ -463,15 +556,8 @@ export function TweetDrawer() {
         //     不是 flex item，但保留无害且一致性更好）。
         className="absolute inset-y-0 right-0 flex w-full max-w-[600px] min-w-0 flex-col overflow-x-hidden bg-white shadow-xl sm:w-[560px]"
         style={{
-          // 优先级:用户 drag (dragX>0) > entered slide-in > fallback 隐藏
-          // entered=false 时 panel 在屏外 (translateX 100%), entered=true 滑入 0,
-          // 用户 drag-to-close 时跟手 dragX, transition 在 dragging 时关掉
-          transform: dragX > 0
-            ? `translateX(${dragX}px)`
-            : entered
-              ? "translateX(0)"
-              : "translateX(100%)",
-          transition: isDragging ? "none" : "transform 280ms cubic-bezier(0.32, 0.72, 0, 1)",
+          transform: "translateX(100%)",
+          transition: `transform ${DRAWER_ENTER_MS}ms ${DRAWER_EASE}`,
         }}
       >
         {/* PM 2026-05-19: mobile 长 title 跟「分享」按钮 overlap。
@@ -486,7 +572,8 @@ export function TweetDrawer() {
           <div className="justify-self-start">
             <button
               type="button"
-              onClick={close}
+              onClick={depth > 0 ? close : requestClose}
+              data-modal-initial-focus
               className="-ml-1 flex h-10 w-10 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 active:bg-neutral-200"
               aria-label={showBack ? "返回" : "关闭"}
             >
@@ -501,7 +588,10 @@ export function TweetDrawer() {
               button 等高 + flex items-center 让文字精确 cross-axis 居中,
               避免依赖 grid items-center 时 text line-box 默认 leading 偏移 */}
           <div className="flex h-10 min-w-0 items-center justify-center px-2">
-            <span className="truncate text-sm font-semibold text-neutral-900">
+            <span
+              id="tweet-drawer-title"
+              className="truncate text-sm font-semibold text-neutral-900"
+            >
               {headerTitle}
             </span>
           </div>
@@ -533,11 +623,11 @@ export function TweetDrawer() {
           {item ? (
             <>
               {isGithub ? (
-                <GithubDrawerBody item={item} />
+                <GithubDrawerBody item={item} metricsHistory={metrics_history} />
               ) : isPh ? (
                 <PhDrawerBody item={item} />
               ) : isClawhub ? (
-                <ClawhubDrawerBody item={item} />
+                <ClawhubDrawerBody item={item} metricsHistory={metrics_history} />
               ) : isHdx ? (
                 <HuodongxingDrawerBody item={item} />
               ) : isHfPaper ? (
@@ -595,7 +685,9 @@ export function TweetDrawer() {
                     rel="noopener noreferrer"
                     onClick={() => {
                       let host = "x.com";
-                      try { host = new URL(item.url!).host; } catch {}
+                      try { host = new URL(item.url!).host; } catch {
+                        // 非法 URL 仍按默认 x.com host 上报，外链本身保持可点击。
+                      }
                       track(EVENTS.EXTERNAL_LINK_CLICK, {
                         item_id: item.id,
                         target_url_host: host,
@@ -612,7 +704,7 @@ export function TweetDrawer() {
           ) : loading ? (
             <DrawerSkeleton />
           ) : (
-            <DrawerError code={error} onClose={close} />
+            <DrawerError code={error} onClose={requestClose} />
           )}
           </VideoColumnProvider>
         </div>
@@ -622,7 +714,13 @@ export function TweetDrawer() {
           open={shareOpen}
           item={item}
           cachedShare={shareCache[item.id] ?? null}
-          onShareCreated={(id, share) => setShareCache((prev) => ({ ...prev, [id]: share }))}
+          onShareCreated={(id, share) => setShareCacheState((prev) => ({
+            userId: activeUserId,
+            entries: {
+              ...(prev.userId === activeUserId ? prev.entries : {}),
+              [id]: share,
+            },
+          }))}
           onClose={() => setShareOpen(false)}
         />
       )}

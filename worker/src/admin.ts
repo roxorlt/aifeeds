@@ -431,6 +431,24 @@ ${adminNavHtml('tools')}
     <pre id="xCookieOut">—</pre>
   </div>
 
+  <div class="card" data-testid="card-cc-mirror">
+    <h2>🌏 .cc 内容镜像</h2>
+    <p class="hint">查看审核/页面/事件统计，人工 allow/deny，或执行小批量 dry-run。返回内容仅写入下方文本框，不作为 HTML 渲染。</p>
+    <div class="row" style="flex-wrap: wrap;">
+      <button onclick="run('GET', '/api/admin/cc-mirror/stats', null, 'ccMirrorOut')">统计</button>
+      <button onclick="run('GET', '/api/admin/cc-mirror/reviews?status=review&amp;limit=20', null, 'ccMirrorOut')">待复核</button>
+      <button onclick="run('POST', '/api/admin/cc-mirror/backfill', {limit: 20, dry: 1}, 'ccMirrorOut')">回填预演 20 条</button>
+      <button onclick="run('POST', '/api/admin/cc-mirror/reconcile', {limit: 20, dry: 1}, 'ccMirrorOut')">对账预演 20 条</button>
+    </div>
+    <input type="text" id="ccMirrorItemId" placeholder="item_id，例如 blog:the-verge:..." style="margin-top: 12px;" />
+    <textarea id="ccMirrorReason" placeholder="人工决定原因（必填，最多 500 字）"></textarea>
+    <div class="row">
+      <button onclick="confirmRun('确认允许该条进入 .cc？', 'POST', '/api/admin/cc-mirror/decision', {item_id: val('ccMirrorItemId'), action: 'allow', reason: val('ccMirrorReason')}, 'ccMirrorOut')">Allow</button>
+      <button class="danger" onclick="confirmRun('确认拒绝并立即下架该条？', 'POST', '/api/admin/cc-mirror/decision', {item_id: val('ccMirrorItemId'), action: 'deny', reason: val('ccMirrorReason')}, 'ccMirrorOut')">Deny / 下架</button>
+    </div>
+    <pre id="ccMirrorOut">—</pre>
+  </div>
+
 </div>
 </main>
 

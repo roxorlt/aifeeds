@@ -15,7 +15,6 @@
 
 import type { Env } from '../index';
 import type { DigestSource } from '../digest/config';
-import { getBases } from '../digest/lib';
 import { renderSeoPageShell } from '../digest/daily-page';
 import {
   renderItem,
@@ -27,6 +26,11 @@ import {
 } from '../digest/render';
 import { SOURCE_LABELS, escapeHtml } from '../digest/templates';
 import { renderItemBody, itemIndexableText, ITEM_BODY_STYLE } from './item-body';
+import {
+  defaultItemPageProfile,
+  type ItemPageProfile,
+} from '../cc-mirror/profile';
+import { buildCcReviewText } from '../cc-mirror/review-text';
 
 // meta description 截断上限(纯文本前 ~150 字,按句)。
 const ITEM_DESC_MAX = 150;
@@ -68,8 +72,24 @@ function displayDate(raw: string): string {
   return m ? m[1] : raw;
 }
 
-export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedItem[] = []): string {
-  const { siteBase, apiBase } = getBases(env);
+export function renderItemPageHtml(
+  row: RenderRow,
+  env: Env,
+  related: RenderedItem[] = [],
+  suppliedProfile?: ItemPageProfile,
+): string {
+  const profile = suppliedProfile ?? defaultItemPageProfile(env);
+  const {
+    siteBase,
+    interactiveBase,
+    apiBase,
+    brandName,
+    titleSuffix,
+    ccVariant,
+    archiveBase,
+    archiveHasSourcePages,
+    defaultOgImage,
+  } = profile;
   const r = row as ItemPageRow;
   // 出页 5 类之外理论上被路由层拦掉;兜底给 news 分支避免崩(不影响正常 5 源)。
   const source = digestSourceForId(row.id) ?? 'news';
@@ -79,23 +99,38 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
 
   const path = itemPagePath(row.id);
   const canonical = `${siteBase}${path ?? '/'}`;
-  const deepUrl = `${siteBase}${deepLinkPath(row.id)}`;
+  const deepUrl = ccVariant
+    ? `${interactiveBase}${deepLinkPath(row.id)}?utm_source=cc&utm_medium=mirror&utm_campaign=cn_seo`
+    : `${interactiveBase}${deepLinkPath(row.id)}`;
+  const ctaLabel = ccVariant ? '打开 AI Feeds 完整版' : '打开互动版';
   const label = SOURCE_LABELS[source] || source;
-  const pageTitle = `${item.title} | AI Feeds`;
-  const cover = item.cover || `${siteBase}/og-default.png`;
+  const pageTitle = `${item.title} | ${titleSuffix}`;
+  const cover = item.cover || defaultOgImage;
 
   const summaryFull = item.summary_full || item.summary || '';
   const description = clampSentences(summaryFull, ITEM_DESC_MAX);
   const datePublished = (r.published_at || r.scraped_at || '').trim();
+  const archiveSource = source === 'hf-paper' ? 'paper' : source;
+  const sourceArchiveUrl = archiveHasSourcePages
+    ? `${archiveBase}/${archiveSource}/`
+    : `${archiveBase}/`;
+  const archiveMonth = datePublished.match(/^(\d{4}-(?:0[1-9]|1[0-2]))/)?.[1] || null;
+  const monthArchiveUrl = archiveHasSourcePages && archiveMonth
+    ? `${sourceArchiveUrl}${archiveMonth}/`
+    : null;
 
   // 分源混合正文:gh/hf/ph/x 全文,blog/podcast 摘要+分析+短摘录(见 item-body.ts)。净化后零可执行 script。
   const bodyContent = renderItemBody(source, row, env);
 
   // JSON-LD articleBody:可安全索引纯文本。全文源用正文派生,blog/podcast 只用我们的摘要+分析(不照译全文)。
-  const articleBody = itemIndexableText(source, row, env);
+  const articleBody = ccVariant
+    ? (() => {
+        const reviewed = buildCcReviewText(row, env);
+        return reviewed.renderError ? '' : reviewed.text;
+      })()
+    : itemIndexableText(source, row, env);
 
   // ── JSON-LD @graph:Article + BreadcrumbList(首页→源频道→本条) + Organization ──
-  const channelUrl = `${siteBase}/?source=${encodeURIComponent(source)}`;
   const article: Record<string, unknown> = {
     '@type': 'Article',
     headline: item.title,
@@ -110,14 +145,14 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const breadcrumb = {
     '@type': 'BreadcrumbList',
     itemListElement: [
-      { '@type': 'ListItem', position: 1, name: 'AI Feeds', item: `${siteBase}/` },
-      { '@type': 'ListItem', position: 2, name: label, item: channelUrl },
+      { '@type': 'ListItem', position: 1, name: brandName, item: `${siteBase}/` },
+      { '@type': 'ListItem', position: 2, name: label, item: sourceArchiveUrl },
       { '@type': 'ListItem', position: 3, name: item.title, item: canonical },
     ],
   };
   const organization = {
     '@type': 'Organization',
-    name: 'AI Feeds',
+    name: brandName,
     url: `${siteBase}/`,
   };
   const jsonLd = {
@@ -144,12 +179,31 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
   const coverHtml = item.cover
     ? `<img class="cover" src="${escapeHtml(item.cover)}" alt="${escapeHtml(item.title)}" loading="lazy">`
     : '';
+  const archiveLinks = `<nav class="nav" aria-label="内容归档"><a href="${escapeHtml(sourceArchiveUrl)}">${escapeHtml(label)}归档</a>${monthArchiveUrl ? `<a href="${escapeHtml(monthArchiveUrl)}">${escapeHtml(archiveMonth!)}归档</a>` : ''}</nav>`;
+
+  const footerHtml = ccVariant
+    ? `<footer>
+<a href="${siteBase}/">首页</a>
+<a href="${siteBase}/privacy.html">隐私政策</a>
+<a href="${siteBase}/terms.html">服务条款</a>
+<a href="${siteBase}/contact.html">联系我们</a>
+<a href="mailto:support@ai-feeds.cc">support@ai-feeds.cc</a>
+<a href="https://beian.mps.gov.cn/#/query/webSearch?code=11010802048455" target="_blank" rel="noopener noreferrer">京公网安备11010802048455号</a>
+<a href="https://beian.miit.gov.cn/#/Integrated/index" target="_blank" rel="noopener noreferrer">京ICP备2025123594号-2</a>
+</footer>`
+    : `<footer>
+<a href="${siteBase}/subscribe">订阅每日邮件</a>
+<a href="${siteBase}/">进站看全部</a>
+<a href="${siteBase}/daily/">历史日报</a>
+<a href="${siteBase}/archive/">内容归档</a>
+</footer>`;
 
   const bodyHtml = `<style>${ITEM_BODY_STYLE}</style>
 <div class="wrap">
 <header>
-<div class="brand"><a href="${siteBase}/">AI Feeds</a></div>
+<div class="brand"><a href="${siteBase}/">${escapeHtml(brandName)}</a></div>
 <div class="date">${escapeHtml(label)}</div>
+${archiveLinks}
 </header>
 <main>
 <article>
@@ -157,15 +211,11 @@ export function renderItemPageHtml(row: RenderRow, env: Env, related: RenderedIt
 ${coverHtml}
 ${bodyContent}
 <div class="meta">${metaBits.join('')}</div>
-<p><a class="subscribe-btn" style="display:inline-block" href="${escapeHtml(deepUrl)}">打开互动版</a></p>
+<p><a class="subscribe-btn" style="display:inline-block" href="${escapeHtml(deepUrl)}">${ctaLabel}</a></p>
 </article>
 ${relatedHtml}
 </main>
-<footer>
-<a href="${siteBase}/subscribe">订阅每日邮件</a>
-<a href="${siteBase}/">进站看全部</a>
-<a href="${siteBase}/daily/">历史日报</a>
-</footer>
+${footerHtml}
 </div>`;
 
   return renderSeoPageShell({

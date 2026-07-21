@@ -1,12 +1,21 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
 
-import { generateItemPage, markItemPageGone, backfillItemPages } from './item-page-run';
+import {
+  generateItemPage,
+  markItemPageGone,
+  backfillItemPages,
+} from './item-page-run';
 import { syncItemPageOnEnrichDone } from './item-page-hook';
 import { itemPageR2Key, itemPagePath } from '../digest/render';
 import type { Env } from '../index';
+import { isCnSensitive } from './item-page-policy';
 
 const SITE = 'https://ai-feeds.com';
 const API = 'https://api.ai-feeds.com';
+const sensitiveExtra = JSON.stringify({
+  cn_sensitive: 1,
+  workflow_completed_at: '2026-07-20T00:00:00Z',
+});
 
 // ── 有状态 D1 mock：items（数组）+ item_pages（Map，存在性即回填游标）──
 // 覆盖 5 类 SQL：fetchItemRow(SELECT * WHERE id=?)、related(id != ?)、backfill 选取(NOT EXISTS .all)、
@@ -15,7 +24,9 @@ interface ItemSeed {
   id: string;
   source_type: string;
   is_relevant?: number;
-  published_at?: string;
+  deleted_at?: string | null;
+  published_at?: string | null;
+  scraped_at?: string | null;
   title?: string | null;
   content?: string | null;
   content_translated?: string | null;
@@ -38,7 +49,12 @@ function fullRow(s: ItemSeed): Record<string, unknown> {
     id: s.id,
     source_type: s.source_type,
     is_relevant: s.is_relevant ?? 1,
-    published_at: s.published_at ?? '2026-07-01T00:00:00Z',
+    deleted_at: s.deleted_at ?? null,
+    published_at:
+      Object.prototype.hasOwnProperty.call(s, 'published_at')
+        ? s.published_at
+        : '2026-07-01T00:00:00Z',
+    scraped_at: s.scraped_at ?? '2026-07-01T00:00:00Z',
     title: s.title ?? `标题 ${s.id}`,
     content: s.content ?? `body ${s.id}`,
     content_translated: s.content_translated ?? `正文 ${s.id}`,
@@ -55,7 +71,7 @@ function makeDb(seed: ItemSeed[] = []) {
   const pages = new Map<string, PageRow>();
   const runs: Array<{ sql: string; binds: unknown[] }> = [];
 
-  // extra.dedup_of 非空 → dedup 次源，模拟 SQL `json_extract(extra,'$.dedup_of') IS NULL` 的排除。
+  // extra.dedup_of 非空 → dedup 次源，模拟共享 policy SQL 的排除口径。
   const isDeduped = (r: Record<string, unknown>): boolean => {
     try {
       const d = r.extra ? (JSON.parse(String(r.extra)) as { dedup_of?: unknown }).dedup_of : null;
@@ -65,20 +81,52 @@ function makeDb(seed: ItemSeed[] = []) {
     }
   };
 
+  const isSensitive = (r: Record<string, unknown>): boolean => {
+    try {
+      return r.extra
+        ? (JSON.parse(String(r.extra)) as { cn_sensitive?: unknown }).cn_sensitive === 1
+        : false;
+    } catch {
+      return false;
+    }
+  };
+
   // 非 force：候选 = relevant 非 dedup 且尚未生成（存在性游标）。
   // force（传 cutoff）：候选 = relevant 非 dedup 且「无本轮已重灌页」——即无页 OR 页 generated_at < cutoff。
   //   重灌把 generated_at 推到 >= cutoff → 该行退出候选（cutoff 全程固定 → 单调收敛）。
-  const pendingFor = (sts: string[], cutoff?: string): Array<Record<string, unknown>> =>
+  const pendingFor = (
+    sts: string[],
+    cutoff?: string,
+    excludeSensitive = false,
+  ): Array<Record<string, unknown>> =>
     items
       .filter((r) => {
         if (!sts.includes(String(r.source_type))) return false;
         if (Number(r.is_relevant) !== 1) return false;
         if (isDeduped(r)) return false;
+        if (excludeSensitive && isSensitive(r)) return false;
         const p = pages.get(String(r.id));
         if (cutoff == null) return !p; // 非 force：未生成才是候选
         return !p || String(p.generated_at) < cutoff; // force：无页 OR 页早于本轮 cutoff
       })
-      .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
+      .sort((a, b) => effectiveTime(b).localeCompare(effectiveTime(a)));
+
+  const effectiveTime = (r: Record<string, unknown>): string =>
+    String(r.published_at || r.scraped_at || '');
+
+  const complianceViolations = (): Array<Record<string, unknown>> =>
+    items
+      .filter((r) => {
+        const page = pages.get(String(r.id));
+        return (
+          page?.status === 'live' &&
+          (isSensitive(r) ||
+            Number(r.is_relevant) !== 1 ||
+            r.deleted_at != null ||
+            isDeduped(r))
+        );
+      })
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
   const db = {
     _items: items,
@@ -103,32 +151,52 @@ function makeDb(seed: ItemSeed[] = []) {
             return (p ? { status: p.status } : null) as T | null;
           }
           if (/COUNT\(\*\)/i.test(sql)) {
+            if (/JOIN items i ON i\.id = p\.item_id/i.test(sql)) {
+              const violations = complianceViolations();
+              const n = /LIMIT \?/i.test(sql)
+                ? violations.slice(0, Number(binds[0])).length
+                : violations.length;
+              return { n } as T;
+            }
             if (/generated_at >= \?/i.test(sql)) {
               // force 计数：binds = [...sts, cutoff]
               const cutoff = String(binds[binds.length - 1]);
               const sts = binds.slice(0, binds.length - 1).map(String);
-              return { n: pendingFor(sts, cutoff).length } as T;
+              return { n: pendingFor(sts, cutoff, /cn_sensitive/i.test(sql)).length } as T;
             }
             const sts = binds.map(String);
-            return { n: pendingFor(sts).length } as T;
+            return { n: pendingFor(sts, undefined, /cn_sensitive/i.test(sql)).length } as T;
           }
           return null as T | null;
         },
         async all<T>() {
-          if (/id != \?/i.test(sql)) {
-            // related：binds = [...sourceTypes, mainId]；SQL 含 dedup_of IS NULL → 排 dedup 次源。
+          if (/JOIN item_pages p ON p\.item_id = i\.id/i.test(sql) && /LIMIT 3/i.test(sql)) {
+            // 稳定时间邻居：binds = [...sourceTypes, publishedAt, publishedAt, mainId]。
             const mainId = String(binds[binds.length - 1]);
-            const sts = binds.slice(0, binds.length - 1).map(String);
+            const publishedAt = String(binds[binds.length - 2]);
+            const sts = binds.slice(0, binds.length - 3).map(String);
+            const isNewer = />\s*\?/i.test(sql);
             const res = items
               .filter(
                 (r) =>
                   sts.includes(String(r.source_type)) &&
                   String(r.id) !== mainId &&
                   Number(r.is_relevant) === 1 &&
-                  !isDeduped(r),
+                  !isDeduped(r) &&
+                  (!/cn_sensitive/i.test(sql) || !isSensitive(r)) &&
+                  pages.get(String(r.id))?.status === 'live' &&
+                  (isNewer
+                    ? effectiveTime(r) > publishedAt ||
+                      (effectiveTime(r) === publishedAt && String(r.id) > mainId)
+                    : effectiveTime(r) < publishedAt ||
+                      (effectiveTime(r) === publishedAt && String(r.id) < mainId)),
               )
-              .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)))
-              .slice(0, 6);
+              .sort((a, b) => {
+                const byTime = effectiveTime(a).localeCompare(effectiveTime(b));
+                const byId = String(a.id).localeCompare(String(b.id));
+                return isNewer ? byTime || byId : -(byTime || byId);
+              })
+              .slice(0, 3);
             return { results: res as unknown as T[] };
           }
           if (/generated_at >= \?/i.test(sql)) {
@@ -136,28 +204,48 @@ function makeDb(seed: ItemSeed[] = []) {
             const limit = Number(binds[binds.length - 1]);
             const cutoff = String(binds[binds.length - 2]);
             const sts = binds.slice(0, binds.length - 2).map(String);
-            const res = pendingFor(sts, cutoff).slice(0, limit).map((r) => ({ id: r.id }));
+            const res = pendingFor(sts, cutoff, /cn_sensitive/i.test(sql))
+              .slice(0, limit)
+              .map((r) => ({ id: r.id }));
             return { results: res as unknown as T[] };
           }
           if (/NOT EXISTS/i.test(sql)) {
             // backfill 选取（非 force）：binds = [...sourceTypes, limit]
             const limit = Number(binds[binds.length - 1]);
             const sts = binds.slice(0, binds.length - 1).map(String);
-            const res = pendingFor(sts).slice(0, limit).map((r) => ({ id: r.id }));
+            const res = pendingFor(sts, undefined, /cn_sensitive/i.test(sql))
+              .slice(0, limit)
+              .map((r) => ({ id: r.id }));
             return { results: res as unknown as T[] };
           }
           return { results: [] as T[] };
         },
         async run() {
           runs.push({ sql, binds });
+          let changes = 0;
           if (/INSERT INTO item_pages/i.test(sql)) {
             const [item_id, source, url_path, generated_at] = binds as [string, string, string, string];
             pages.set(item_id, { item_id, source, url_path, generated_at, status: 'live' });
-          } else if (/UPDATE item_pages SET status/i.test(sql)) {
-            const p = pages.get(String(binds[0]));
-            if (p) p.status = 'gone';
+            changes = 1;
+          } else if (/UPDATE\s+item_pages\s+SET\s+status\s*=\s*'gone'/i.test(sql)) {
+            if (/SELECT p\.item_id/i.test(sql)) {
+              const limit = Number(binds[0]);
+              for (const row of complianceViolations().slice(0, limit)) {
+                const page = pages.get(String(row.id));
+                if (page?.status === 'live') {
+                  page.status = 'gone';
+                  changes++;
+                }
+              }
+            } else {
+              const page = pages.get(String(binds[0]));
+              if (page) {
+                page.status = 'gone';
+                changes = 1;
+              }
+            }
           }
-          return { success: true };
+          return { success: true, meta: { changes } };
         },
       };
       return stmt;
@@ -202,7 +290,31 @@ const seedPage = (
   db._pages.set(id, { item_id: id, source, url_path: itemPagePath(id) ?? `/i/${id}`, generated_at, status });
 };
 
+describe('isCnSensitive', () => {
+  test('只把数值 1 判为敏感；null、缺字段、malformed JSON 均 fail-safe 为 false', () => {
+    expect(isCnSensitive(sensitiveExtra)).toBe(true);
+    expect(isCnSensitive(JSON.stringify({ cn_sensitive: 0 }))).toBe(false);
+    expect(isCnSensitive(JSON.stringify({ cn_sensitive: '1' }))).toBe(false);
+    expect(isCnSensitive('{}')).toBe(false);
+    expect(isCnSensitive('{malformed')).toBe(false);
+    expect(isCnSensitive(null)).toBe(false);
+    expect(isCnSensitive(undefined)).toBe(false);
+  });
+});
+
 describe('generateItemPage', () => {
+  test('is_relevant=1 + cn_sensitive=1 → skipped(cn-sensitive) 且 R2/D1 零写', async () => {
+    const id = 'blog:sensitive';
+    const db = makeDb([{ id, source_type: 'blog', is_relevant: 1, extra: sensitiveExtra }]);
+    const r2 = makeR2();
+
+    const res = await generateItemPage(makeEnv(db, r2), id);
+
+    expect(res).toEqual({ itemId: id, skipped: true, reason: 'cn-sensitive' });
+    expect(r2.puts).toEqual([]);
+    expect(insertRuns(db)).toBe(0);
+  });
+
   test('is_relevant=1 → R2 put(key=itemPageR2Key) + item_pages upsert(live, url_path)', async () => {
     const id = 'x_list:123';
     const db = makeDb([{ id, source_type: 'x_list', is_relevant: 1 }]);
@@ -334,10 +446,40 @@ describe('generateItemPage', () => {
       { id: 'github:a/b', source_type: 'github', is_relevant: 1 }, // 异源，不应进 related
     ]);
     const r2 = makeR2();
+    seedPage(db, rel, 'x', '2026-07-03T00:00:00Z');
     await generateItemPage(makeEnv(db, r2), main);
     const html = r2.store.get(itemPageR2Key(main)!)!;
     expect(html).toContain(itemPagePath(rel)!); // 同源相关内链指 /i/
     expect(html).not.toContain('/i/gh/a/b'); // 异源不混入
+  });
+
+  test('published_at 缺失时用 scraped_at 织入稳定邻居并生成月份归档链接', async () => {
+    const main = 'github:acme/main';
+    const rel = 'github:acme/older';
+    const db = makeDb([
+      {
+        id: main,
+        source_type: 'github',
+        is_relevant: 1,
+        published_at: null,
+        scraped_at: '2026-05-20T00:00:00Z',
+      },
+      {
+        id: rel,
+        source_type: 'github',
+        is_relevant: 1,
+        published_at: null,
+        scraped_at: '2026-05-19T00:00:00Z',
+      },
+    ]);
+    const r2 = makeR2();
+    seedPage(db, rel, 'gh', '2026-07-03T00:00:00Z');
+
+    await generateItemPage(makeEnv(db, r2), main);
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+
+    expect(html).toContain(itemPagePath(rel)!);
+    expect(html).toContain('https://ai-feeds.com/archive/gh/2026-05/');
   });
 
   test('相关内链排除 dedup 次源（I2）：同源 dedup 行不进 related', async () => {
@@ -357,10 +499,73 @@ describe('generateItemPage', () => {
       },
     ]);
     const r2 = makeR2();
+    seedPage(db, rel, 'x', '2026-07-04T00:00:00Z');
+    seedPage(db, dup, 'x', '2026-07-04T00:00:00Z');
     await generateItemPage(makeEnv(db, r2), main);
     const html = r2.store.get(itemPageR2Key(main)!)!;
     expect(html).toContain(itemPagePath(rel)!); // 正常同源进 related
     expect(html).not.toContain(itemPagePath(dup)!); // dedup 次源被排除
+  });
+
+  test('相关内链排除 cn_sensitive=1 的 news item', async () => {
+    const main = 'blog:main';
+    const eligible = 'blog:eligible';
+    const sensitive = 'blog:sensitive';
+    const db = makeDb([
+      { id: main, source_type: 'blog', published_at: '2026-07-03T00:00:00Z' },
+      { id: eligible, source_type: 'blog', published_at: '2026-07-02T00:00:00Z' },
+      {
+        id: sensitive,
+        source_type: 'blog',
+        published_at: '2026-07-01T00:00:00Z',
+        extra: sensitiveExtra,
+      },
+    ]);
+    seedPage(db, eligible, 'news', '2026-07-04T00:00:00Z');
+    seedPage(db, sensitive, 'news', '2026-07-04T00:00:00Z');
+    const r2 = makeR2();
+
+    await generateItemPage(makeEnv(db, r2), main);
+
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+    expect(html).toContain(itemPagePath(eligible)!);
+    expect(html).not.toContain(itemPagePath(sensitive)!);
+  });
+
+  test('相关内链使用当前项前后各 3 个稳定时间邻居，而不是全站最新 5 条', async () => {
+    const main = 'x_list:main';
+    const candidates = [
+      ['x_list:newest-far', '2026-07-14T00:00:00Z'],
+      ['x_list:new-3', '2026-07-13T00:00:00Z'],
+      ['x_list:new-2', '2026-07-12T00:00:00Z'],
+      ['x_list:new-1', '2026-07-11T00:00:00Z'],
+      ['x_list:old-1', '2026-07-09T00:00:00Z'],
+      ['x_list:old-2', '2026-07-08T00:00:00Z'],
+      ['x_list:old-3', '2026-07-07T00:00:00Z'],
+      ['x_list:oldest-far', '2026-07-06T00:00:00Z'],
+    ] as const;
+    const db = makeDb([
+      { id: main, source_type: 'x_list', is_relevant: 1, published_at: '2026-07-10T00:00:00Z' },
+      ...candidates.map(([id, published_at]) => ({
+        id,
+        source_type: 'x_list',
+        is_relevant: 1,
+        published_at,
+      })),
+    ]);
+    for (const [id] of candidates) {
+      seedPage(db, id, 'x', '2026-07-15T00:00:00Z');
+    }
+
+    const r2 = makeR2();
+    await generateItemPage(makeEnv(db, r2), main);
+    const html = r2.store.get(itemPageR2Key(main)!)!;
+
+    for (const id of ['x_list:new-3', 'x_list:new-2', 'x_list:new-1', 'x_list:old-1', 'x_list:old-2', 'x_list:old-3']) {
+      expect(html, id).toContain(itemPagePath(id)!);
+    }
+    expect(html).not.toContain(itemPagePath('x_list:newest-far')!);
+    expect(html).not.toContain(itemPagePath('x_list:oldest-far')!);
   });
 });
 
@@ -423,6 +628,20 @@ describe('markItemPageGone', () => {
 });
 
 describe('backfillItemPages', () => {
+  test('backfill 不选择 cn_sensitive=1，也不把它计入 remaining', async () => {
+    const db = makeDb([
+      { id: 'blog:eligible', source_type: 'blog', extra: JSON.stringify({ cn_sensitive: 0 }) },
+      { id: 'blog:sensitive', source_type: 'blog', extra: sensitiveExtra },
+    ]);
+    const r2 = makeR2();
+
+    const res = await backfillItemPages(makeEnv(db, r2), 'news');
+
+    expect(res).toEqual({ scanned: 1, generated: 1, remaining: 0 });
+    expect(db._pages.has('blog:eligible')).toBe(true);
+    expect(db._pages.has('blog:sensitive')).toBe(false);
+  });
+
   test('分源谓词：source=x 只选 x_list 且 relevant 且未生成', async () => {
     const db = makeDb([
       { id: 'x_list:1', source_type: 'x_list', is_relevant: 1 },
@@ -508,6 +727,53 @@ describe('backfillItemPages', () => {
     expect(r2.puts.length).toBe(0);
     expect(insertRuns(db)).toBe(0);
     expect(db._pages.size).toBe(0);
+  });
+});
+
+describe('reconcileItemPageCompliance', () => {
+  test('dry 零写；实跑按 limit 将违规 live 页置 gone 并返回 remaining', async () => {
+    const ids = {
+      sensitive: 'blog:sensitive',
+      irrelevant: 'blog:irrelevant',
+      deleted: 'blog:deleted',
+      dedup: 'blog:dedup',
+      eligible: 'blog:eligible',
+    };
+    const db = makeDb([
+      { id: ids.sensitive, source_type: 'blog', extra: sensitiveExtra },
+      { id: ids.irrelevant, source_type: 'blog', is_relevant: 0 },
+      { id: ids.deleted, source_type: 'blog', deleted_at: '2026-07-20T00:00:00Z' },
+      {
+        id: ids.dedup,
+        source_type: 'blog',
+        extra: JSON.stringify({ dedup_of: ids.eligible }),
+      },
+      { id: ids.eligible, source_type: 'blog' },
+    ]);
+    for (const id of Object.values(ids)) {
+      seedPage(db, id, 'news', '2026-07-19T00:00:00Z');
+    }
+    const mod = await import('./item-page-run');
+    const reconcile = (
+      mod as typeof mod & {
+        reconcileItemPageCompliance?: (
+          env: Env,
+          opts?: { limit?: number; dry?: boolean },
+        ) => Promise<{ scanned: number; markedGone: number; remaining: number }>;
+      }
+    ).reconcileItemPageCompliance;
+    expect(typeof reconcile).toBe('function');
+    if (!reconcile) return;
+
+    const dry = await reconcile(makeEnv(db, makeR2()), { limit: 2, dry: true });
+    expect(dry).toEqual({ scanned: 2, markedGone: 0, remaining: 4 });
+    expect([...db._pages.values()].filter((page) => page.status === 'gone')).toHaveLength(0);
+
+    const first = await reconcile(makeEnv(db, makeR2()), { limit: 2 });
+    expect(first).toEqual({ scanned: 2, markedGone: 2, remaining: 2 });
+    const second = await reconcile(makeEnv(db, makeR2()), { limit: 100 });
+    expect(second).toEqual({ scanned: 2, markedGone: 2, remaining: 0 });
+    expect(db._pages.get(ids.eligible)?.status).toBe('live');
   });
 });
 

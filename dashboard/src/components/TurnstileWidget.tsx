@@ -1,5 +1,6 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { TURNSTILE_SITE_KEY, loadTurnstileScript, turnstileErrorMessage } from '../lib/turnstile';
+import { createTurnstileCallbackBridge } from '../lib/turnstileCallbackBridge';
 
 export interface TurnstileWidgetHandle {
   reset: () => void;
@@ -20,9 +21,14 @@ export const TurnstileWidget = forwardRef<TurnstileWidgetHandle, TurnstileWidget
     const containerRef = useRef<HTMLDivElement | null>(null);
     const widgetIdRef = useRef<string | null>(null);
 
-    // 回调存 ref，render effect 只跑一次（不随回调身份变化重建 widget）
-    const cbRef = useRef({ onToken, onError, onExpire });
-    cbRef.current = { onToken, onError, onExpire };
+    // SDK 保留首轮 render 时的函数引用；稳定 bridge 在 layout 阶段切到最新 props，
+    // 不因父组件回调身份变化而销毁/重建挑战。
+    const [callbackBridge] = useState(() =>
+      createTurnstileCallbackBridge({ onToken, onError, onExpire }),
+    );
+    useLayoutEffect(() => {
+      callbackBridge.update({ onToken, onError, onExpire });
+    }, [callbackBridge, onToken, onError, onExpire]);
 
     useImperativeHandle(
       ref,
@@ -54,14 +60,14 @@ export const TurnstileWidget = forwardRef<TurnstileWidgetHandle, TurnstileWidget
             retry: 'auto',
             'retry-interval': 8000,
             'refresh-expired': 'auto',
-            callback: (token: string) => cbRef.current.onToken(token),
-            'error-callback': (code?: string) => cbRef.current.onError?.(turnstileErrorMessage(code)),
-            'expired-callback': () => cbRef.current.onExpire?.(),
+            callback: callbackBridge.onToken,
+            'error-callback': (code?: string) => callbackBridge.onError(turnstileErrorMessage(code)),
+            'expired-callback': callbackBridge.onExpire,
           });
           createdId = id;
           widgetIdRef.current = id;
         } catch (e) {
-          cbRef.current.onError?.(`人机校验加载失败：${e instanceof Error ? e.message : String(e)}`);
+          callbackBridge.onError(`人机校验加载失败：${e instanceof Error ? e.message : String(e)}`);
         }
       })();
       return () => {
@@ -75,7 +81,7 @@ export const TurnstileWidget = forwardRef<TurnstileWidgetHandle, TurnstileWidget
         }
         widgetIdRef.current = null;
       };
-    }, []);
+    }, [callbackBridge]);
 
     return <div ref={containerRef} className={className} />;
   },

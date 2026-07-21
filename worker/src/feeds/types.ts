@@ -22,6 +22,16 @@ export type FeedKind = "blog" | "podcast";
 /** 国内外（registry 存但 v1 不参与调度，留作 v2 作息分段开关位，见 §7.3）。 */
 export type FeedRegion = "foreign" | "domestic";
 
+/** `.cc` 内容镜像对单一来源采取的发行策略。 */
+export type CcSourcePolicy = "allow" | "manual" | "deny";
+
+/** 来源的真实编辑主体类型；传输 RSS 的中间服务不改变此分类。 */
+export type EditorialType =
+  | "official"
+  | "third-party-media"
+  | "independent"
+  | "radar";
+
 /** feed XML 怎么 GET 回来：native=CF Worker 直连；rsshub=经 token-gated nginx 转发（Phase 2）。 */
 export type FeedVia = "native" | "rsshub";
 
@@ -94,6 +104,10 @@ export interface FeedDef {
   /** sources.name 用的人类可读名，如 'OpenAI Blog' / 'Lex Fridman Podcast'。 */
   name: string;
   region: FeedRegion;
+  /** `.cc` 镜像的显式来源准入策略；不得按 region 或域名推导。 */
+  cc_policy: CcSourcePolicy;
+  /** 内容的真实编辑主体分类，不受 RSS bridge / RSSHub 等传输方式影响。 */
+  editorial_type: EditorialType;
   via: FeedVia;
   /**
    * via='native' → 完整 feed 直链（CF Worker fetch 用）；
@@ -208,6 +222,14 @@ export interface FeedBodyAsset {
   height?: number;
 }
 
+export interface FeedCardImageVariant {
+  url: string;
+  width: number;
+  height?: number;
+  format: "webp";
+  bytes?: number;
+}
+
 /** 正文抓取结果元数据（写 extra.body）。 */
 export interface FeedBodyMeta {
   /** 正文来源：rss_full=feed 自带全文；static_extract=②静态抽取；browser_render=③无头；rss_summary_fallback=抓全文失败降级摘要。 */
@@ -316,6 +338,9 @@ export interface BlogExtra
 
   /** 封面（迁 R2 后改写为 /r/ 路径；迁移前是原始域名 URL）。 */
   cover_image?: string;
+  /** 与当前 cover_image 绑定的入库时 400/800 卡片 WebP。 */
+  cover_image_variants?: FeedCardImageVariant[];
+  cover_variant_source?: string;
   /** 正文 markdown 原文（step3 抓到才有；抓不到降级仅摘要也能上 feed）。 */
   body_markdown?: string;
   /** 正文 markdown 中译（ELI25，lazy，仅 relevant 非 dup 才译）。 */
@@ -363,6 +388,8 @@ export interface PodcastExtra
 
   /** 单集封面（迁 R2 后为 /r/ 路径）。 */
   cover_image?: string;
+  cover_image_variants?: FeedCardImageVariant[];
+  cover_variant_source?: string;
   /** shownotes markdown 原文。 */
   shownotes?: string;
   /** shownotes 中译（ELI25，eager）。 */

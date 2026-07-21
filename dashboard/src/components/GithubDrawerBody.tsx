@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import type { Components } from "react-markdown";
-import type { GithubMetrics, Item, ItemExtra, MediaItem } from "../types";
+import type { GithubMetrics, Item, ItemExtra } from "../types";
 import type { MetricsSnapshotGh } from "../api";
-import { fetchItem } from "../api";
 import { cn, formatCompact, ordinal, parseJsonField, proxyImg, timeAgo, timeAgoOrDate } from "../lib/utils";
 import { langDotClass } from "../lib/githubLang";
+import { extractReadmeImages, resolveGithubReadmeUrl } from "../lib/githubReadme";
 import { Lightbox } from "./Lightbox";
 import {
   IconLeaderboard,
@@ -15,63 +15,6 @@ import {
   IconStarFill,
   IconWatching,
 } from "./icons";
-
-// dashboard origin（CF Pages）≠ worker origin（api.ai-feeds.com）；
-// /r/<key> R2 反代在 worker 那边，dashboard 端访问要走 worker base。
-// 之前老注释说"leave as same-origin"是 dashboard 和 worker 同源时代的逻辑
-// (dashboard 部署在 ai-feeds.com 时假设 worker /r/ 也走 same-origin 反代)，
-// CF Pages 拆开后失效 — README 里所有 /r/ 图片在抽屉里都 404。
-const API_BASE = import.meta.env.VITE_API_BASE || "https://api.ai-feeds.com";
-
-// Resolve relative URLs in README to absolute URLs.
-//   - "/r/..." (worker R2 proxy) → prefix API_BASE so request hits worker origin
-//   - relative "assets/foo.png" → raw.githubusercontent.com/<owner>/<repo>/<branch>/assets/foo.png
-//   - root-relative "/foo" (other than /r/) → raw.githubusercontent.com/<owner>/<repo>/<branch>/foo
-//   - absolute http(s):/data:/blob:/mailto:/anchor → untouched
-function resolveRelative(
-  src: string | undefined,
-  owner: string,
-  repo: string,
-  branch: string,
-  type: "raw" | "page",
-): string | undefined {
-  if (!src) return src;
-  if (/^(https?:|data:|blob:|mailto:|#)/i.test(src)) return src;
-  // R2 proxy path (worker /r/<key>) — 必须 prefix worker base，dashboard origin 没这路由
-  if (src.startsWith("/r/")) return `${API_BASE}${src}`;
-  const base =
-    type === "raw"
-      ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch || "main"}`
-      : `https://github.com/${owner}/${repo}/blob/${branch || "main"}`;
-  if (src.startsWith("/")) return `${base}${src}`;
-  return `${base}/${src.replace(/^\.\//, "")}`;
-}
-
-// Extract image URLs from the readme markdown in render order, resolved
-// to absolute (R2 / GitHub raw / external) URLs. Used to feed Lightbox.
-export function extractReadmeImages(
-  markdown: string,
-  owner: string,
-  repo: string,
-  branch: string,
-): MediaItem[] {
-  const out: MediaItem[] = [];
-  const seen = new Set<string>();
-  const push = (rawSrc: string) => {
-    const resolved = resolveRelative(rawSrc, owner, repo, branch, "raw");
-    if (!resolved || seen.has(resolved)) return;
-    seen.add(resolved);
-    out.push({ type: "image", url: resolved });
-  };
-  // Markdown ![alt](url "optional title")
-  const mdRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-  let m: RegExpExecArray | null;
-  while ((m = mdRe.exec(markdown)) !== null) push(m[1]);
-  // HTML <img src="url" .../>
-  const htmlRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
-  while ((m = htmlRe.exec(markdown)) !== null) push(m[1]);
-  return out;
-}
 
 // Tailwind-styled markdown elements + relative-URL rewriter (closure-bound
 // to owner/repo/branch so img/a in the README resolve to GitHub raw / blob).
@@ -84,39 +27,53 @@ function makeMarkdownComponents(
   onImageClick?: (resolvedSrc: string) => void,
 ): Components {
   return {
-    h1: ({ node: _node, ...props }) => (
-      <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />
-    ),
-    h2: ({ node: _node, ...props }) => (
-      <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />
-    ),
-    h3: ({ node: _node, ...props }) => (
-      <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />
-    ),
-    h4: ({ node: _node, ...props }) => (
-      <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />
-    ),
-    p: ({ node: _node, ...props }) => (
-      <p className="my-2 leading-relaxed text-neutral-700" {...props} />
-    ),
-    a: ({ node: _node, href, ...props }) => (
-      <a
-        href={resolveRelative(href, owner, repo, branch, "page")}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-sky-600 hover:underline break-all"
-        onClick={(e) => e.stopPropagation()}
-        {...props}
-      />
-    ),
-    ul: ({ node: _node, ...props }) => (
-      <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />
-    ),
-    ol: ({ node: _node, ...props }) => (
-      <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />
-    ),
-    li: ({ node: _node, ...props }) => <li {...props} />,
-    code: ({ node: _node, className, children, ...props }) => {
+    h1: ({ node, ...props }) => {
+      void node;
+      return <h1 className="mt-5 mb-2 text-[18px] font-bold text-neutral-900" {...props} />;
+    },
+    h2: ({ node, ...props }) => {
+      void node;
+      return <h2 className="mt-4 mb-2 text-[16px] font-bold text-neutral-900" {...props} />;
+    },
+    h3: ({ node, ...props }) => {
+      void node;
+      return <h3 className="mt-3 mb-1.5 text-[14px] font-bold text-neutral-900" {...props} />;
+    },
+    h4: ({ node, ...props }) => {
+      void node;
+      return <h4 className="mt-3 mb-1 text-[13px] font-semibold text-neutral-900" {...props} />;
+    },
+    p: ({ node, ...props }) => {
+      void node;
+      return <p className="my-2 leading-relaxed text-neutral-700" {...props} />;
+    },
+    a: ({ node, href, ...props }) => {
+      void node;
+      return (
+        <a
+          href={resolveGithubReadmeUrl(href, owner, repo, branch, "page")}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sky-600 hover:underline break-all"
+          onClick={(e) => e.stopPropagation()}
+          {...props}
+        />
+      );
+    },
+    ul: ({ node, ...props }) => {
+      void node;
+      return <ul className="my-2 list-disc pl-5 space-y-1 text-neutral-700" {...props} />;
+    },
+    ol: ({ node, ...props }) => {
+      void node;
+      return <ol className="my-2 list-decimal pl-5 space-y-1 text-neutral-700" {...props} />;
+    },
+    li: ({ node, ...props }) => {
+      void node;
+      return <li {...props} />;
+    },
+    code: ({ node, className, children, ...props }) => {
+      void node;
       const isInline = !className?.includes("language-");
       if (isInline) {
         return (
@@ -131,17 +88,21 @@ function makeMarkdownComponents(
         </code>
       );
     },
-    pre: ({ node: _node, ...props }) => (
-      <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />
-    ),
-    blockquote: ({ node: _node, ...props }) => (
-      <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />
-    ),
-    hr: ({ node: _node, ...props }) => (
-      <hr className="my-4 border-neutral-200" {...props} />
-    ),
-    img: ({ node: _node, src, ...props }) => {
-      const resolved = resolveRelative(src as string | undefined, owner, repo, branch, "raw");
+    pre: ({ node, ...props }) => {
+      void node;
+      return <pre className="my-3 overflow-x-auto rounded-lg bg-neutral-50 p-3 ring-1 ring-neutral-200" {...props} />;
+    },
+    blockquote: ({ node, ...props }) => {
+      void node;
+      return <blockquote className="my-3 border-l-2 border-neutral-300 pl-3 italic text-neutral-600" {...props} />;
+    },
+    hr: ({ node, ...props }) => {
+      void node;
+      return <hr className="my-4 border-neutral-200" {...props} />;
+    },
+    img: ({ node, src, ...props }) => {
+      void node;
+      const resolved = resolveGithubReadmeUrl(src as string | undefined, owner, repo, branch, "raw");
       return (
         <img
           src={resolved}
@@ -167,17 +128,22 @@ function makeMarkdownComponents(
         />
       );
     },
-    table: ({ node: _node, ...props }) => (
-      <div className="my-3 overflow-x-auto">
-        <table className="min-w-full border-collapse text-[12px]" {...props} />
-      </div>
-    ),
-    th: ({ node: _node, ...props }) => (
-      <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />
-    ),
-    td: ({ node: _node, ...props }) => (
-      <td className="border border-neutral-200 px-2 py-1" {...props} />
-    ),
+    table: ({ node, ...props }) => {
+      void node;
+      return (
+        <div className="my-3 overflow-x-auto">
+          <table className="min-w-full border-collapse text-[12px]" {...props} />
+        </div>
+      );
+    },
+    th: ({ node, ...props }) => {
+      void node;
+      return <th className="border border-neutral-200 bg-neutral-50 px-2 py-1 text-left font-semibold" {...props} />;
+    },
+    td: ({ node, ...props }) => {
+      void node;
+      return <td className="border border-neutral-200 px-2 py-1" {...props} />;
+    },
   };
 }
 
@@ -193,9 +159,10 @@ const CATEGORY_STYLE: Record<string, string> = {
 
 interface Props {
   item: Item;
+  metricsHistory?: MetricsSnapshotGh[];
 }
 
-export function GithubDrawerBody({ item }: Props) {
+export function GithubDrawerBody({ item, metricsHistory }: Props) {
   const extra = parseJsonField<ItemExtra>(item.extra) ?? ({} as ItemExtra);
   const metrics = parseJsonField<GithubMetrics>(item.metrics) ?? ({} as GithubMetrics);
 
@@ -230,7 +197,11 @@ export function GithubDrawerBody({ item }: Props) {
   const stars = metrics.stars ?? metrics.total_stars;
   const forks = metrics.forks;
   const watchers = metrics.watchers;
-  const [latestMetrics, setLatestMetrics] = useState<MetricsSnapshotGh | null>(null);
+  // DrawerProvider owns the single full-detail request. Reuse its history here
+  // instead of issuing a second /api/items/:id read from the body component.
+  const latestMetrics = metricsHistory?.length
+    ? metricsHistory[metricsHistory.length - 1]
+    : null;
   const openIssues = latestMetrics?.open_issues ?? metrics.open_issues;
   const openPrs = latestMetrics?.open_prs ?? metrics.open_prs;
 
@@ -248,19 +219,6 @@ export function GithubDrawerBody({ item }: Props) {
   // 提交记录折叠（PR6 反馈：默认收起，点击 meta 行的「提交记录」展开）
   const [showCommits, setShowCommits] = useState(false);
 
-  useEffect(() => {
-    // Pull metrics_history to surface freshest open_issues / open_prs.
-    let cancelled = false;
-    fetchItem(item.id).then((resp) => {
-      if (cancelled) return;
-      const hist = resp.metrics_history;
-      if (hist && hist.length > 0) {
-        setLatestMetrics(hist[hist.length - 1]);
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [item.id]);
-
   const readmeToShow = tab === "zh" ? readmeTranslated : readmeRaw;
 
   // Markdown components closure-bound to repo info so img/a resolve relative
@@ -268,17 +226,20 @@ export function GithubDrawerBody({ item }: Props) {
   // Lightbox at the matching index.
   const repoName = ownerRepo.split("/")[1] || "";
   const defaultBranch = (extra.default_branch as string | undefined) || "main";
-  const readmeImages = useMemo(
-    () => extractReadmeImages(readmeToShow || readmeRaw || "", owner, repoName, defaultBranch),
-    [readmeToShow, readmeRaw, owner, repoName, defaultBranch],
+  const readmeImages = extractReadmeImages(
+    readmeToShow || readmeRaw || "",
+    owner,
+    repoName,
+    defaultBranch,
   );
-  const markdownComponents = useMemo(
-    () =>
-      makeMarkdownComponents(owner, repoName, defaultBranch, (resolvedSrc) => {
-        const idx = readmeImages.findIndex((m) => m.url === resolvedSrc);
-        if (idx >= 0) setLightboxIndex(idx);
-      }),
-    [owner, repoName, defaultBranch, readmeImages],
+  const markdownComponents = makeMarkdownComponents(
+    owner,
+    repoName,
+    defaultBranch,
+    (resolvedSrc) => {
+      const index = readmeImages.findIndex((media) => media.url === resolvedSrc);
+      if (index >= 0) setLightboxIndex(index);
+    },
   );
 
   return (

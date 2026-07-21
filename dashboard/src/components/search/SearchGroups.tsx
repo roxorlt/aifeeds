@@ -55,7 +55,7 @@ export default function SearchGroups({ q, submit }: SearchGroupsProps) {
         });
         const nonEmpty = resp.groups.filter((g) => g.items.length > 0);
         if (nonEmpty.length === 0) {
-          track(EVENTS.SEARCH_EMPTY, { q, mode: "grouped" });
+          track(EVENTS.SEARCH_EMPTY, { q_len: q.length, mode: "grouped" });
           setOutcome({ key: reqKey, kind: "empty" });
         } else {
           setOutcome({ key: reqKey, kind: "ready", groups: nonEmpty });

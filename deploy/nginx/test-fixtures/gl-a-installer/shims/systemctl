@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+state_dir=/tmp/gl-a-test/systemctl
+mkdir -p "$state_dir"
+
+increment() {
+    local name=$1
+    local value=0
+    if [ -f "$state_dir/$name" ]; then
+        read -r value < "$state_dir/$name"
+    fi
+    value=$((value + 1))
+    printf '%s\n' "$value" > "$state_dir/$name"
+    printf '%s' "$value"
+}
+
+command=${1:-}
+shift || true
+case "$command" in
+    daemon-reload)
+        count=$(increment daemon-reload.count)
+        if [ "$scenario" = rollback-daemon-reload-fail ] && [ "$count" -eq 2 ]; then
+            : > "$state_dir/rollback-daemon-reload-injected"
+            printf 'injected rollback daemon-reload failure\n' >&2
+            exit 94
+        fi
+        ;;
+    reload)
+        test "${1:-}" = nginx
+        count=$(increment reload-nginx.count)
+        case "$scenario:$count" in
+            reload-fail:1|rollback-daemon-reload-fail:1|reinstall-after-auto-rollback:1|cleanup-automatic-*:1)
+                : > "$state_dir/deployment-reload-injected"
+                printf 'injected deployment nginx reload failure\n' >&2
+                exit 90
+                ;;
+        esac
+        /usr/sbin/nginx -s reload
+        ;;
+    is-active)
+        quiet=0
+        if [ "${1:-}" = --quiet ]; then
+            quiet=1
+            shift
+        fi
+        unit=${1:-}
+        if [ "$quiet" -eq 0 ] \
+            && [ "$scenario" = systemctl-is-active-error ] \
+            && [ "$unit" = aifeeds-performance-logrotate.timer ]; then
+            : > "$state_dir/is-active-control-error-hit"
+            printf 'failed\n'
+            exit 4
+        fi
+        state=inactive
+        rc=3
+        case "$unit" in
+            nginx)
+                if [ -s /run/nginx.pid ] && kill -0 "$(cat /run/nginx.pid)"; then
+                    state=active
+                    rc=0
+                fi
+                ;;
+            aifeeds-performance-logrotate.timer)
+                if [ ! -e "/etc/systemd/system/$unit" ]; then
+                    state=inactive
+                    rc=4
+                elif [ -e "$state_dir/timer.active" ]; then
+                    state=active
+                    rc=0
+                fi
+                ;;
+            aifeeds-performance-logrotate.service)
+                if [ ! -e "/etc/systemd/system/$unit" ]; then rc=4; fi
+                ;;
+            *) state=unknown; rc=4 ;;
+        esac
+        [ "$quiet" -eq 1 ] || printf '%s\n' "$state"
+        exit "$rc"
+        ;;
+    is-enabled)
+        quiet=0
+        if [ "${1:-}" = --quiet ]; then
+            quiet=1
+            shift
+        fi
+        test "${1:-}" = aifeeds-performance-logrotate.timer
+        if [ "$quiet" -eq 0 ] && [ "$scenario" = systemctl-is-enabled-error ]; then
+            : > "$state_dir/is-enabled-control-error-hit"
+            printf 'failed\n'
+            exit 4
+        fi
+        if [ ! -e /etc/systemd/system/aifeeds-performance-logrotate.timer ]; then
+            [ "$quiet" -eq 1 ] || printf 'not-found\n'
+            # Real systemd returns EXIT_UNKNOWN (4) when the unit does not
+            # exist.  Keep the fixture aligned with the production host so
+            # pre-publication recovery exercises that control-plane state.
+            exit 4
+        fi
+        if [ -e "$state_dir/timer.enabled" ]; then
+            [ "$quiet" -eq 1 ] || printf 'enabled\n'
+            exit 0
+        fi
+        [ "$quiet" -eq 1 ] || printf 'disabled\n'
+        exit 1
+        ;;
+    disable)
+        if [ "${1:-}" = --now ]; then shift; fi
+        test "${1:-}" = aifeeds-performance-logrotate.timer
+        rm -f "$state_dir/timer.active" "$state_dir/timer.enabled"
+        ;;
+    stop)
+        test "${1:-}" = aifeeds-performance-logrotate.service
+        rm -f "$state_dir/service.active"
+        ;;
+    start)
+        test "${1:-}" = aifeeds-performance-logrotate.service
+        if [ "$scenario" = service-fail-status-tmp ]; then
+            : > /var/lib/aifeeds-performance-logrotate/status.tmp
+            test -e /var/lib/aifeeds-performance-logrotate/status.tmp
+            : > "$state_dir/service-status-tmp-injected"
+            printf 'injected rotate service failure\n' >&2
+            exit 92
+        fi
+        exec_start=$(sed -n 's/^ExecStart=//p' \
+            /etc/systemd/system/aifeeds-performance-logrotate.service)
+        test -n "$exec_start"
+        read -r -a service_command <<< "$exec_start"
+        test "${#service_command[@]}" -eq 16
+        test "${service_command[0]}" = /usr/local/sbin/aifeeds-check-nginx-request-id
+        test "${service_command[1]}" = rotation-wrapper
+        [[ "${service_command[2]}" =~ ^[0-9]{14}-[a-f0-9]{8}$ ]]
+        test "${service_command[3]}" = \
+            "/var/backups/aifeeds-performance-log/rotation-anchor-${service_command[2]}.json"
+        for index in 4 5 7 8 10 11 13 14; do
+            [[ "${service_command[$index]}" =~ ^[1-9][0-9]*$ ]]
+        done
+        for index in 6 9 12 15; do
+            [[ "${service_command[$index]}" =~ ^[a-f0-9]{64}$ ]]
+        done
+        source_journal="/var/backups/aifeeds-performance-log/transaction-${service_command[2]}.json"
+        test -f "$source_journal"
+        anchor_identity=$(jq -cer '.rotation_anchor_identity' "$source_journal")
+        checker_identity=$(jq -cer '
+            [.runtime_artifacts[] |
+             select(.final == "/usr/local/sbin/aifeeds-check-nginx-request-id")] |
+            if length == 1 then .[0] else error("checker identity") end' "$source_journal")
+        config_identity=$(jq -cer '
+            [.runtime_artifacts[] |
+             select(.final == "/etc/aifeeds-performance-logrotate.conf")] |
+            if length == 1 then .[0] else error("config identity") end' "$source_journal")
+        test "${service_command[3]}" = "$(jq -er '.path' <<< "$anchor_identity")"
+        test "${service_command[4]}" = "$(jq -er '.dev' <<< "$anchor_identity")"
+        test "${service_command[5]}" = "$(jq -er '.ino' <<< "$anchor_identity")"
+        test "${service_command[6]}" = "$(jq -er '.sha256' <<< "$anchor_identity")"
+        test "${service_command[7]}" = "$(jq -er '.dev' <<< "$checker_identity")"
+        test "${service_command[8]}" = "$(jq -er '.ino' <<< "$checker_identity")"
+        test "${service_command[9]}" = "$(jq -er '.sha256' <<< "$checker_identity")"
+        test "${service_command[10]}" = "$(jq -er '.dev' <<< "$config_identity")"
+        test "${service_command[11]}" = "$(jq -er '.ino' <<< "$config_identity")"
+        test "${service_command[12]}" = "$(jq -er '.sha256' <<< "$config_identity")"
+        logrotate_identity=$(jq -cer '.logrotate' "${service_command[3]}")
+        test "$(jq -er '.schema' "${service_command[3]}")" = 2
+        test "$(jq -er '.operation_id' "${service_command[3]}")" = "${service_command[2]}"
+        test "$(jq -er '.path' <<< "$logrotate_identity")" = /usr/sbin/logrotate
+        test "${service_command[13]}" = "$(jq -er '.dev' <<< "$logrotate_identity")"
+        test "${service_command[14]}" = "$(jq -er '.ino' <<< "$logrotate_identity")"
+        test "${service_command[15]}" = "$(jq -er '.sha256' <<< "$logrotate_identity")"
+        case "$scenario" in
+            rotation-child-nonzero|rotation-child-sigkill) "${service_command[@]}" ;;
+            *) "${service_command[@]}" >/dev/null ;;
+        esac
+        : > "$state_dir/service.succeeded"
+        ;;
+    show)
+        test "${1:-}" = -p
+        test "${2:-}" = Result
+        test "${3:-}" = --value
+        test "${4:-}" = aifeeds-performance-logrotate.service
+        test -e "$state_dir/service.succeeded"
+        printf 'success\n'
+        ;;
+    enable)
+        if [ "${1:-}" = --now ]; then shift; fi
+        test "${1:-}" = aifeeds-performance-logrotate.timer
+        : > "$state_dir/timer.enabled"
+        : > "$state_dir/timer.active"
+        if [ "$scenario" = timer-partial-fail ]; then
+            test -e "$state_dir/timer.enabled"
+            test -e "$state_dir/timer.active"
+            : > "$state_dir/timer-partial-injected"
+            printf 'injected partial timer enable failure\n' >&2
+            exit 93
+        fi
+        ;;
+    *)
+        printf 'unexpected systemctl command: %s %s\n' "$command" "$*" >&2
+        exit 64
+        ;;
+esac

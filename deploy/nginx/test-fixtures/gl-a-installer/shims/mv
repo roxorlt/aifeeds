@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario=${GL_A_SCENARIO:?}
+state_dir=/tmp/gl-a-test
+source_path=${@: -2:1}
+destination=${!#}
+
+/usr/bin/mv "$@"
+
+if [ "$scenario" = manual-recovery-audit-log ] \
+    && case "$source_path" in /var/backups/aifeeds-performance-log/audit-*/aifeeds-performance.jsonl.candidate-gl-a-*) true ;; *) false ;; esac \
+    && case "$destination" in /var/backups/aifeeds-performance-log/audit-*/aifeeds-performance.jsonl) true ;; *) false ;; esac \
+    && mkdir "$state_dir/audit-log-barrier-once" 2>/dev/null; then
+    live_log="/var/log/nginx/${destination##*/}"
+    rollback_journal=$(/usr/bin/find /var/backups/aifeeds-performance-log -maxdepth 1 \
+        -type f -name 'rollback-transaction-*.json' -print -quit)
+    test -f "$destination"
+    test ! -L "$destination"
+    test "$(stat -c '%U %G %a' "$destination")" = 'root root 600'
+    test -f "$live_log"
+    test ! -L "$live_log"
+    test "$(stat -c '%U %G %a' "$live_log")" = 'www-data adm 640'
+    test "$(sha256sum "$destination" | awk '{print $1}')" = \
+        "$(sha256sum "$live_log" | awk '{print $1}')"
+    test -f "$rollback_journal"
+    jq -e '.phase == "nginx_reloaded"' "$rollback_journal" >/dev/null
+    : > "$state_dir/audit-log-ready"
+    while :; do sleep 1; done
+fi

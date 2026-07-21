@@ -10,19 +10,11 @@
 //   → "📄 X 文章 by @handle ↗" + URL (老 article SB 反索引只剩 author)
 // - Basic: 其他 (含 !x_article) → 当前 TcoResolvedLinkCard (裸 URL link 卡条)
 
-import { useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { XArticle } from "../types";
 import { proxyImg } from "../lib/utils";
+import { articleTier } from "../lib/xArticleTier";
 import { TcoResolvedLinkCard } from "./TcoResolvedLinkCard";
-
-export type ArticleTier = "rich" | "mid" | "basic";
-
-export function articleTier(a: XArticle | null | undefined): ArticleTier {
-  if (!a) return "basic";
-  if (a.fetched_at && a.title) return "rich";
-  if (a.fetch_failed_at && a.author_handle) return "mid";
-  return "basic";
-}
 
 interface Props {
   article: XArticle | null | undefined;
@@ -41,6 +33,29 @@ interface Props {
 
 const BODY_COLLAPSED_CHARS = 600;   // body 短于这个长度直接全显;否则 line-clamp
 
+function OptionalExternalCard({
+  href,
+  className,
+  children,
+}: {
+  href?: string;
+  className: string;
+  children: ReactNode;
+}) {
+  if (!href) return <div className={className}>{children}</div>;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      className={className}
+    >
+      {children}
+    </a>
+  );
+}
+
 export function XArticleCard({ article, resolvedUrl, content, compact, showBody }: Props) {
   const tier = articleTier(article);
   const url = resolvedUrl || undefined;
@@ -56,11 +71,8 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
   if (tier === "mid" && article) {
     const handle = article.author_handle || "";
     return (
-      <a
+      <OptionalExternalCard
         href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={(e) => e.stopPropagation()}
         className={
           compact
             ? "mt-1 inline-flex max-w-full items-center gap-1.5 truncate rounded-md border border-neutral-200 bg-neutral-50/60 px-2 py-1 text-[12px] text-neutral-700 hover:bg-neutral-100"
@@ -73,8 +85,8 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
           <span className="shrink-0 text-neutral-500">by @{handle}</span>
         )}
         {url && <span className="truncate text-neutral-500">{url}</span>}
-        <span className="shrink-0 text-neutral-400">↗</span>
-      </a>
+        {url && <span className="shrink-0 text-neutral-500">↗</span>}
+      </OptionalExternalCard>
     );
   }
 
@@ -113,11 +125,8 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
   };
 
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={(e) => e.stopPropagation()}
+    <OptionalExternalCard
+      href={showBody ? undefined : url}
       className={
         compact
           ? "mt-2 block overflow-hidden rounded-xl border border-neutral-200 bg-white transition-colors hover:bg-neutral-50"
@@ -177,7 +186,7 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
           >
             {/* sentinel 灰字提示 — 翻译失败 / body 超长跳过翻译时告知用户在看原文 */}
             {(bodyTooLongToTranslate || bodyTranslateFailed) && (
-              <div className="mb-2 text-[11px] text-neutral-400">
+              <div className="mb-2 text-[11px] text-neutral-600">
                 {bodyTooLongToTranslate
                   ? "原文较长未翻译,以下为英文原文"
                   : "翻译失败,以下为英文原文"}
@@ -199,7 +208,7 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
                   e.preventDefault();
                   setBodyExpanded((v) => !v);
                 }}
-                className="mt-1.5 text-[13px] font-medium text-sky-600 hover:text-sky-700"
+                className="mt-1.5 text-[13px] font-medium text-sky-700 hover:text-sky-800"
               >
                 {bodyExpanded ? "收起" : "展开全文"}
               </button>
@@ -209,11 +218,22 @@ export function XArticleCard({ article, resolvedUrl, content, compact, showBody 
         {/* body 抓取失败 (cookie 失效 / 老 article 死链) — 仅在 showBody 场景显小灰字,
             流内场景不打扰 */}
         {showBody && !bodyRaw && article.body_fetch_failed_at && (
-          <div className="mt-3 border-t border-neutral-100 pt-3 text-[12px] text-neutral-400">
+          <div className="mt-3 border-t border-neutral-100 pt-3 text-[12px] text-neutral-600">
             原文正文暂时无法加载
           </div>
         )}
+        {showBody && url && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="mt-3 inline-flex text-[13px] font-medium text-sky-700 hover:text-sky-800 hover:underline"
+          >
+            查看原文 ↗
+          </a>
+        )}
       </div>
-    </a>
+    </OptionalExternalCard>
   );
 }
