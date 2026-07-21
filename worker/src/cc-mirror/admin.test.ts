@@ -25,6 +25,7 @@ import {
   reconcileCcMirror,
 } from "./admin";
 import type { CcPageRunResult } from "./page-run";
+import { CC_REVIEW_POLICY_VERSION } from "./review";
 import { buildCcReviewText } from "./review-text";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1256,10 +1257,11 @@ describe("cc mirror backfill and reconcile", () => {
       `INSERT INTO cc_item_reviews (
          item_id, policy_version, source_policy, review_status, flags_json,
          reason, review_text_hash, model, reviewed_at
-       ) VALUES (?, 1, 'allow', 'pending', ?, 'missing-api-key', ?, NULL,
+       ) VALUES (?, ?, 'allow', 'pending', ?, 'missing-api-key', ?, NULL,
          '2026-07-20T00:00:00.000Z')`,
     ).run(
       "x_list:001",
+      CC_REVIEW_POLICY_VERSION,
       JSON.stringify({
         china_negative: 0,
         politics_governance: 0,

@@ -13,6 +13,7 @@ import {
 import type { Env } from "../index";
 import {
   CC_REVIEW_POLICY_VERSION,
+  detectDeterministicRiskFlags,
   type CcRiskFlags,
   reviewCcItem,
 } from "./review";
@@ -239,6 +240,40 @@ afterEach(() => {
 });
 
 describe("reviewCcItem decisions", () => {
+  it("uses policy v2 and deterministically blocks explicit political-governance language", async () => {
+    expect(CC_REVIEW_POLICY_VERSION).toBe(2);
+    const db = new StatefulD1();
+    const itemId = db.insertItem({
+      title: "中国免费AI模型Kimi引发特朗普AI团队内部分歧",
+      extra: JSON.stringify({
+        feed_key: "mit-tech-review",
+        ai_summary_zh:
+          "特朗普的AI顾问与五角大楼高级官员围绕中国模型产生政策阵营分裂。",
+      }),
+    });
+    const fetchMock = mockFlags();
+
+    const result = await reviewCcItem(makeEnv(db), itemId);
+
+    expect(result.status).toBe("deny");
+    expect(result.flags.politics_governance).toBe(1);
+    expect(result.reason).toContain("politics_governance");
+    expect(fetchMock).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("combines obvious anti-China and sanctions lexical backstops", () => {
+    expect(detectDeterministicRiskFlags(
+      "The report says Chinese AI companies steal technology and threaten national security.",
+    )).toMatchObject({ china_negative: 1 });
+    expect(detectDeterministicRiskFlags(
+      "美国收紧对华 AI 芯片出口管制。",
+    )).toMatchObject({ sanctions_export_control: 1 });
+    expect(detectDeterministicRiskFlags(
+      "中国 AI 公司发布中性开源模型，性能有所提升。",
+    )).toEqual(SAFE_FLAGS);
+  });
+
   it("passes an allowed source only when every risk flag is zero and sends the visible text policy prompt", async () => {
     const db = new StatefulD1();
     const hidden = "BLOG_FULLTEXT_MUST_NOT_REACH_PROMPT";
@@ -279,6 +314,9 @@ describe("reviewCcItem decisions", () => {
     expect(systemPrompt).toContain("中性产品、技术或研究");
     expect(systemPrompt).toContain("对华负面");
     expect(systemPrompt).toContain("政治治理");
+    expect(systemPrompt).toContain("政府官员");
+    expect(systemPrompt).toContain("国家间技术竞争");
+    expect(systemPrompt).toContain("政策阵营");
     expect(systemPrompt).toContain("军事冲突");
     expect(systemPrompt).toContain("出口管制");
     expect(systemPrompt).toContain("uncertain");

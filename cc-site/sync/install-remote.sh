@@ -1195,6 +1195,41 @@ smoke_exact() {
   return 1
 }
 
+smoke_page() {
+  local label=$1
+  local url=$2
+  local output=$3
+  local status=""
+  local curl_ok=0
+  local attempt
+  for attempt in {1..10}; do
+    if status=$(
+      "$CURL" --silent --show-error --max-time 2 --noproxy '*' \
+        --resolve ai-feeds.cc:443:127.0.0.1 \
+        --output "$output" --write-out '%{http_code}' "$url"
+    ); then
+      curl_ok=1
+      if [[ "$status" == 200 ]] \
+        && grep -Fq -- "<link rel=\"canonical\" href=\"$url\"" "$output"; then
+        return 0
+      fi
+    else
+      curl_ok=0
+    fi
+    if ((attempt < 10)) && [[ "$TEST_MODE" != 1 ]]; then
+      sleep 1
+    fi
+  done
+  if ((curl_ok == 0)); then
+    echo "ERROR: local HTTPS smoke probe failed for $label" >&2
+  elif [[ "$status" != 200 ]]; then
+    echo "ERROR: local HTTPS smoke probe returned HTTP $status for $label" >&2
+  else
+    echo "ERROR: local HTTPS smoke probe returned unexpected canonical bytes for $label" >&2
+  fi
+  return 1
+}
+
 smoke_exact root-sitemap \
   https://ai-feeds.cc/sitemap.xml \
   "$CURRENT/sitemap.xml" "$SMOKE_DIR/root-sitemap.xml"
@@ -1211,6 +1246,19 @@ smoke_exact generation-sitemap \
 smoke_exact ai-news \
   https://ai-feeds.cc/ai-news/ \
   "$CURRENT/ai-news/index.html" "$SMOKE_DIR/ai-news.html"
+
+content_url=""
+CONTENT_PAGE_RE='<loc>(https://ai-feeds\.cc/i/(news|x|gh|ph|hf-paper)/[A-Za-z0-9%._~:-]+)</loc>'
+while IFS= read -r sitemap_line; do
+  if [[ "$sitemap_line" =~ $CONTENT_PAGE_RE ]]; then
+    content_url=${BASH_REMATCH[1]}
+    break
+  fi
+done < "$CURRENT/sitemap-cn-0001.xml"
+if [[ -n "$content_url" ]]; then
+  smoke_page content-page \
+    "$content_url" "$SMOKE_DIR/content-page.html"
+fi
 
 new_timer_activation_attempted=1
 "$SYSTEMCTL" enable --now "$TIMER"

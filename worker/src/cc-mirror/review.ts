@@ -9,7 +9,7 @@ import {
   type CcSourceDecision,
 } from "./source-policy";
 
-export const CC_REVIEW_POLICY_VERSION = 1;
+export const CC_REVIEW_POLICY_VERSION = 2;
 
 export interface CcRiskFlags {
   china_negative: 0 | 1;
@@ -108,6 +108,40 @@ const CONSERVATIVE_FLAGS: CcRiskFlags = {
   uncertain: 1,
   reasons: ["审核结果不可用，需人工复核"],
 };
+
+const POLITICS_GOVERNANCE_RE = /(?:政府|总统|特朗普|白宫|国会|参议院|州长|政府官员|执政|政治|地缘政治|政策阵营|五角大楼|\b(?:government|president|trump|white house|congress|senate|governor|politics?|geopolitics?|pentagon)\b)/iu;
+const MILITARY_CONFLICT_RE = /(?:军事|军方|国防部|五角大楼|武器|战争|武装冲突|战场|\b(?:military|pentagon|weapons?|warfare|armed conflict|defen[sc]e department)\b)/iu;
+const SANCTIONS_EXPORT_RE = /(?:制裁|出口管制|禁运|芯片禁令|\b(?:sanctions?|export controls?|embargo|trade ban)\b)/iu;
+const CHINA_REFERENCE_RE = /(?:中国|中方|中国人|中国企业|中国公司|\bchina(?:'s)?\b|\bchinese\b)/iu;
+const CHINA_NEGATIVE_RE = /(?:威胁|窃取|偷窃|间谍|渗透|操纵|审查|威权|颠覆|\b(?:threat(?:en(?:s|ed|ing)?)?|steal(?:s|ing)?|stole|stolen|spy|spies|espionage|infiltrat(?:e|es|ed|ing|ion)|manipulat(?:e|es|ed|ing|ion)|censor(?:s|ed|ing|ship)?|authoritarian)\b)/iu;
+
+export function detectDeterministicRiskFlags(text: string): CcRiskFlags {
+  const flags: CcRiskFlags = {
+    ...ZERO_FLAGS,
+    reasons: [],
+  };
+  const mark = (
+    flag: Exclude<keyof CcRiskFlags, "reasons">,
+    reason: string,
+  ) => {
+    flags[flag] = 1;
+    flags.reasons.push(reason);
+  };
+
+  if (POLITICS_GOVERNANCE_RE.test(text)) {
+    mark("politics_governance", "明确涉及政府官员、政治治理或政策阵营");
+  }
+  if (MILITARY_CONFLICT_RE.test(text)) {
+    mark("military_conflict", "明确涉及军事、武器或武装冲突");
+  }
+  if (SANCTIONS_EXPORT_RE.test(text)) {
+    mark("sanctions_export_control", "明确涉及制裁、禁运或出口管制");
+  }
+  if (CHINA_REFERENCE_RE.test(text) && CHINA_NEGATIVE_RE.test(text)) {
+    mark("china_negative", "中国相关主体与明显负面定性同时出现");
+  }
+  return flags;
+}
 
 export async function reviewCcItem(
   env: Env,
@@ -261,6 +295,24 @@ export async function reviewCcItem(
       opts.dry === true,
     );
     return pending;
+  }
+
+  const deterministicFlags = detectDeterministicRiskFlags(reviewText.text);
+  if (FLAG_KEYS.some((key) => deterministicFlags[key] === 1)) {
+    const deterministic = withReviewTextHash(
+      decideFromFlags(deterministicFlags, sourceDecision),
+      reviewTextHash,
+    );
+    await persistReview(
+      env,
+      itemId,
+      sourceDecision,
+      reviewTextHash,
+      deterministic,
+      null,
+      opts.dry === true,
+    );
+    return deterministic;
   }
 
   if (!env.DEEPSEEK_API_KEY) {
@@ -736,7 +788,7 @@ function buildReviewSystemPrompt(): string {
 判定规则：
 1. 中性产品、技术或研究内容的全部风险 flag 为 0。
 2. 对华负面内容标 china_negative=1。
-3. 政治治理内容独立标 politics_governance=1。
+3. 政治治理内容独立标 politics_governance=1。政府官员、总统或州长、国会、白宫、五角大楼、政党、国家间技术竞争、政府政策阵营及其政治经济影响都属于政治治理；不要因为主要批评对象是美国而标 0。
 4. 军事冲突内容独立标 military_conflict=1。
 5. 中性陈述制裁或出口管制事实也标 sanctions_export_control=1，交人工复核。
 6. 其他不适合大陆公开分发的风险标 other_cn_distribution_risk=1。

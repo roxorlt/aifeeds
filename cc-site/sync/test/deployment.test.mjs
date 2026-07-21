@@ -169,6 +169,14 @@ test('nginx exposes only generated content roots without shadowing auth', async 
   assert.match(nginx, /location \^~ \/i\/ \{/);
   assert.match(
     nginx,
+    /location \^~ \/i\/ \{[^}]*try_files \$uri\/index\.html \$uri =404;/,
+  );
+  assert.doesNotMatch(
+    nginx,
+    /location \^~ \/i\/ \{[^}]*try_files \$uri \$uri\//,
+  );
+  assert.match(
+    nginx,
     /location \^~ \/ai-news\/ \{[^}]*root \/var\/lib\/aifeeds-cc-sync\/public\/current;/,
   );
   assert.doesNotMatch(
@@ -281,6 +289,10 @@ test('remote installer validates and byte-smokes the domestic index and first le
   assert.match(
     installer,
     /smoke_exact domestic-sitemap-leaf[\s\S]*https:\/\/ai-feeds\.cc\/sitemap-cn-0001\.xml[\s\S]*"\$CURRENT\/sitemap-cn-0001\.xml"/,
+  );
+  assert.match(
+    installer,
+    /smoke_page content-page[\s\S]*"\$content_url"[\s\S]*content-page\.html/,
   );
 });
 
@@ -3675,11 +3687,13 @@ if [[ "$*" == 'start aifeeds-cc-sync.service' ]]; then
   fi
   generation='123e4567-e89b-42d3-a456-426614174000'
   state="$AIFEEDS_DEPLOY_ROOT/var/lib/aifeeds-cc-sync/public"
-  mkdir -p "$state/generations/$generation/sitemaps" "$state/generations/$generation/ai-news"
+  item="$AIFEEDS_DEPLOY_ROOT/www/wwwroot/ai-feeds.cc/i/news/blog:fixture:item-1"
+  mkdir -p "$state/generations/$generation/sitemaps" "$state/generations/$generation/ai-news" "$item"
   printf '<urlset/>\n' > "$state/generations/$generation/sitemaps/archive.xml"
-  printf '<urlset><url><loc>https://ai-feeds.cc/ai-news/</loc></url></urlset>\n' > "$state/generations/$generation/sitemap-cn-0001.xml"
+  printf '<urlset><url><loc>https://ai-feeds.cc/i/news/blog%%3Afixture%%3Aitem-1</loc></url><url><loc>https://ai-feeds.cc/ai-news/</loc></url></urlset>\n' > "$state/generations/$generation/sitemap-cn-0001.xml"
   printf '<sitemapindex><sitemap><loc>https://ai-feeds.cc/sitemap-cn-0001.xml</loc><lastmod>2026-07-21T00:00:00.000Z</lastmod></sitemap></sitemapindex>\n' > "$state/generations/$generation/sitemap-cn.xml"
   printf '<html></html>\n' > "$state/generations/$generation/ai-news/index.html"
+  printf '<html><head><link rel="canonical" href="https://ai-feeds.cc/i/news/blog%%3Afixture%%3Aitem-1"></head></html>\n' > "$item/index.html"
   printf '<sitemapindex><sitemap><loc>https://ai-feeds.cc/sitemaps/%s/archive.xml</loc></sitemap></sitemapindex>\n' "$generation" > "$state/generations/$generation/sitemap.xml"
   rm -f "$state/current"
   ln -s "generations/$generation" "$state/current"
@@ -3746,6 +3760,8 @@ case "$url" in
     source="$state/generations/$generation/sitemaps/$sitemap" ;;
   https://ai-feeds.cc/ai-news/)
     source="$state/current/ai-news/index.html" ;;
+  https://ai-feeds.cc/i/news/blog%3Afixture%3Aitem-1)
+    source="$AIFEEDS_DEPLOY_ROOT/www/wwwroot/ai-feeds.cc/i/news/blog:fixture:item-1/index.html" ;;
   *)
     printf 'unexpected curl URL: %s\n' "$url" >&2
     exit 64 ;;
@@ -4084,7 +4100,7 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
   assert.ok(position('nginx <-s> <reload>') < position('curl'));
   assert.ok(position('curl') < position('systemctl <enable> <--now> <aifeeds-cc-sync.timer>'));
   const curlLines = commandLog.split('\n').filter((line) => line.startsWith('curl'));
-  assert.equal(curlLines.length, 5, commandLog);
+  assert.equal(curlLines.length, 6, commandLog);
   for (const line of curlLines) {
     assert.match(line, /<--resolve> <ai-feeds\.cc:443:127\.0\.0\.1>/);
     assert.match(line, /<--write-out> <%\{http_code\}>/);
@@ -4109,6 +4125,12 @@ remoteHarnessTest('remote installer gates activation on tests, service output re
   );
   assert.equal(
     curlLines.some((line) => line.includes('<https://ai-feeds.cc/ai-news/>')),
+    true,
+  );
+  assert.equal(
+    curlLines.some((line) => line.includes(
+      '<https://ai-feeds.cc/i/news/blog%3Afixture%3Aitem-1>',
+    )),
     true,
   );
   assert.match(
@@ -5687,6 +5709,13 @@ remoteHarnessTest('local HTTPS smoke probes require exact 200 responses and depl
     {
       name: 'wrong ai-news bytes',
       env: { AIFEEDS_CURL_CORRUPT_URL: 'https://ai-feeds.cc/ai-news/' },
+    },
+    {
+      name: 'wrong item-page canonical bytes',
+      env: {
+        AIFEEDS_CURL_CORRUPT_URL:
+          'https://ai-feeds.cc/i/news/blog%3Afixture%3Aitem-1',
+      },
     },
   ];
 
