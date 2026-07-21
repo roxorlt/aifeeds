@@ -240,8 +240,8 @@ afterEach(() => {
 });
 
 describe("reviewCcItem decisions", () => {
-  it("uses policy v4 and deterministically blocks explicit political-governance language", async () => {
-    expect(CC_REVIEW_POLICY_VERSION).toBe(4);
+  it("uses policy v5 and deterministically blocks explicit political-governance language", async () => {
+    expect(CC_REVIEW_POLICY_VERSION).toBe(5);
     const db = new StatefulD1();
     const itemId = db.insertItem({
       title: "中国免费AI模型Kimi引发特朗普AI团队内部分歧",
@@ -299,6 +299,24 @@ describe("reviewCcItem decisions", () => {
     )).toMatchObject({ china_negative: 1 });
     expect(detectDeterministicRiskFlags(
       "中国 AI 公司限制免费用户的模型调用频率。",
+    )).toEqual(SAFE_FLAGS);
+  });
+
+  it("blocks criminal-justice and severe-harm stories without overblocking a fictional hiring study", () => {
+    expect(detectDeterministicRiskFlags(
+      "检察官把 ChatGPT 日志作为纵火案证据提交给陪审团。",
+    )).toMatchObject({
+      politics_governance: 1,
+      other_cn_distribution_risk: 1,
+    });
+    expect(detectDeterministicRiskFlags(
+      "用户利用 AI 生成儿童性虐待材料（CSAM）。",
+    )).toMatchObject({ other_cn_distribution_risk: 1 });
+    expect(detectDeterministicRiskFlags(
+      "文章讨论 AI 是否应该帮助用户策划谋杀。",
+    )).toMatchObject({ other_cn_distribution_risk: 1 });
+    expect(detectDeterministicRiskFlags(
+      "研究让模型充当虚构城市市长的招聘顾问，分析 AI 招聘偏见。",
     )).toEqual(SAFE_FLAGS);
   });
 

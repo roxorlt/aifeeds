@@ -9,7 +9,7 @@ import {
   type CcSourceDecision,
 } from "./source-policy";
 
-export const CC_REVIEW_POLICY_VERSION = 4;
+export const CC_REVIEW_POLICY_VERSION = 5;
 
 export interface CcRiskFlags {
   china_negative: 0 | 1;
@@ -109,9 +109,10 @@ const CONSERVATIVE_FLAGS: CcRiskFlags = {
   reasons: ["审核结果不可用，需人工复核"],
 };
 
-const POLITICS_GOVERNANCE_RE = /(?:政府|总统|特朗普|白宫|国会|参议院|州长|政府官员|执政|政治|地缘政治|政策阵营|五角大楼|监管|立法|议员|参议员|众议员|部长|政客|政治人物|警察|警方|执法|\b(?:government|president|trump|white house|congress|senate|senators?|governor|politics?|politicians?|geopolitics?|pentagon|regulat(?:e|es|ed|ing|ion|ions|or|ors|ory)|legislat(?:e|es|ed|ing|ion|or|ors)|lawmakers?|ministers?|police|law enforcement)\b)/iu;
+const POLITICS_GOVERNANCE_RE = /(?:政府|总统|特朗普|白宫|国会|参议院|州长|政府官员|执政|政治|地缘政治|政策阵营|五角大楼|监管|立法|议员|参议员|众议员|部长|政客|政治人物|警察|警方|执法|检察官|检察院|陪审团|\b(?:government|president|trump|white house|congress|senate|senators?|governor|politics?|politicians?|geopolitics?|pentagon|regulat(?:e|es|ed|ing|ion|ions|or|ors|ory)|legislat(?:e|es|ed|ing|ion|or|ors)|lawmakers?|ministers?|police|law enforcement|prosecutors?|district attorney|grand jury|jurors?)\b)/iu;
 const MILITARY_CONFLICT_RE = /(?:军事|军方|国防部|五角大楼|武器|战争|武装冲突|战场|\b(?:military|pentagon|weapons?|warfare|armed conflict|defen[sc]e department)\b)/iu;
 const SANCTIONS_EXPORT_RE = /(?:制裁|出口管制|禁运|芯片禁令|\b(?:sanctions?|export controls?|embargo|trade ban)\b)/iu;
+const SEVERE_HARM_RE = /(?:儿童性虐待|性虐待材料|儿童色情|谋杀|纵火|重罪|\b(?:child sexual abuse|child pornography|csam|murder|arson|felony|felonies)\b)/iu;
 const CHINA_REFERENCE_RE = /(?:中国|中方|中国人|中国企业|中国公司|\bchina(?:'s)?\b|\bchinese\b)/iu;
 const CHINA_NEGATIVE_RE = /(?:威胁|窃取|偷窃|间谍|渗透|操纵|审查|威权|颠覆|\b(?:threat(?:en(?:s|ed|ing)?)?|steal(?:s|ing)?|stole|stolen|spy|spies|espionage|infiltrat(?:e|es|ed|ing|ion)|manipulat(?:e|es|ed|ing|ion)|censor(?:s|ed|ing|ship)?|authoritarian)\b)/iu;
 const CHINA_TARGETED_RE = /(?:对(?:中国|中方|中国企业|中国公司|中国用户|中国开发者)[^。！？\n]{0,40}(?:限制|禁止|禁用|封禁|阻止|切断)|(?:中国企业|中国公司|中国用户|中国开发者)[^。！？\n]{0,20}(?:被|遭|受到)[^。！？\n]{0,20}(?:限制|禁止|禁用|封禁|阻止|切断)|\b(?:ban(?:s|ned|ning)?|restrict(?:s|ed|ing|ions?)?|block(?:s|ed|ing)?|bar(?:s|red|ring)?)\b.{0,60}\b(?:china|chinese(?:\s+(?:companies|firms|users|developers))?)\b|\bchinese\s+(?:companies|firms|users|developers)\s+(?:are|were|remain|have been)\s+(?:banned|restricted|blocked|barred)\b)/iu;
@@ -137,6 +138,9 @@ export function detectDeterministicRiskFlags(text: string): CcRiskFlags {
   }
   if (SANCTIONS_EXPORT_RE.test(text)) {
     mark("sanctions_export_control", "明确涉及制裁、禁运或出口管制");
+  }
+  if (SEVERE_HARM_RE.test(text)) {
+    mark("other_cn_distribution_risk", "明确涉及儿童性虐待、谋杀、纵火或重罪");
   }
   if (
     (CHINA_REFERENCE_RE.test(text) && CHINA_NEGATIVE_RE.test(text))
@@ -795,7 +799,7 @@ function buildReviewSystemPrompt(): string {
 3. 政治治理内容独立标 politics_governance=1。政府官员、总统或州长、议员、国会、白宫、五角大楼、政党、监管机构、立法、警方或执法机关、国家间技术竞争、政府政策阵营及其政治经济影响都属于政治治理；不要因为主要批评对象是美国而标 0。企业内部的数据治理、模型治理或产品管理本身不属于政治治理。
 4. 军事冲突内容独立标 military_conflict=1。
 5. 中性陈述制裁或出口管制事实也标 sanctions_export_control=1，交人工复核。
-6. 其他不适合大陆公开分发的风险标 other_cn_distribution_risk=1。
+6. 其他不适合大陆公开分发的风险标 other_cn_distribution_risk=1；儿童性虐待材料、谋杀、纵火或重罪内容属于该项。
 7. 无法确定时标 uncertain=1。
 
 只输出固定 JSON 对象，不要 markdown、解释或额外字段：
