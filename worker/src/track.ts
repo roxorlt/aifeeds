@@ -3,6 +3,7 @@
 
 import type { Env } from './index';
 import { getClientIp } from './client-ip';
+import { isAnalyticsCrawlerUserAgent } from './analytics-traffic';
 
 // 与 dashboard/src/lib/telemetry/event-types.ts 保持一致
 // 任一端新增事件类型时两边都要改
@@ -434,6 +435,14 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
     return jsonError('payload too large', 413);
   }
 
+  // Declared crawlers can execute the SPA and keep its renderer alive long
+  // enough to resemble an engaged device. A successful no-op prevents the
+  // browser queue from retrying while keeping crawler events out of D1.
+  const ua = request.headers.get('User-Agent') || '';
+  if (isAnalyticsCrawlerUserAgent(ua)) {
+    return jsonOk({ accepted: 0, rejected: 0, filtered: 'crawler' });
+  }
+
   // 3. 解析 JSON
   let body: TrackRequest;
   try {
@@ -456,7 +465,6 @@ export async function handleTrack(request: Request, env: Env): Promise<Response>
 
   // 4. 抽出 IP / UA / Referer (从请求 headers)
   const ip = getClientIp(request, env);
-  const ua = request.headers.get('User-Agent') || '';
   const referer = sanitizeTelemetryReferrer(request.headers.get('Referer'));
   const ingestedAt = Date.now();
   const cf = (request as Request & { cf?: EdgeCfProperties }).cf;

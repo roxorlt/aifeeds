@@ -8,6 +8,27 @@
 
 ## 进行中
 
+### A8. Admin DAU / 错误趋势 crawler 污染修复（2026-07-23，branch `codex/fix-admin-bot-analytics`）
+
+- [x] 生产只读归因：`541 vs 2` 不是两种正常业务口径造成的小差异，而是
+  `meta-externalagent/1.1` 渲染 `/t/:id` 后执行 SPA；旧“有互动或停留 >5 秒”规则把
+  crawler 算进 Hero DAU，回访表又用 UA 单独剔除，导致同一页面口径分叉。
+- [x] 错误根因：近 7 天 `item_detail 403` 1,327 条全部来自上述 Meta crawler；403 是
+  Worker bot gate 的预期拒绝，不是详情 API 故障。样本地址段归属 Meta/Facebook AS32934，
+  当前证据不支持被攻击。
+- [x] 本地 TDD 修复：声明式 crawler 的 `/api/track` 改为 200 no-op、不再写 D1；共享非真人
+  UA 口径同时用于 Hero/趋势/漏斗/留存/性能/error 明细与 error trend，历史 crawler 与未标记
+  Headless 测试事件保留但查询时排除；显式 `traffic_kind=synthetic` 性能探针继续进入 synthetic cohort。
+- [x] 生产只读反事实复核：查询时旧口径已增长到当日 542，其中新规则过滤非真人 541、真实
+  DAU 只剩 1（新增 0、7 日回访 1）；过滤后当日没有真人错误。7 日内剩余 400 峰值集中在
+  2026-07-17，正是已由 PR #182 修复并上线的 `/api/items` SQLite cursor 兼容事故，不是新回归。
+- [x] 验证：聚焦 Vitest `21/21`、Worker 全量 `1137/1137`、`tsc --noEmit`、
+  `git diff --check` 均通过。
+- [ ] 发布边界：本轮未 push、未开 PR、未部署 staging/prod。上线前按
+  [`docs/plans/2026-07-23-admin-analytics-bot-filter.md`](docs/plans/2026-07-23-admin-analytics-bot-filter.md)
+  重跑 Worker gate；合入 `main` 后由 CI 发布，再只读复核 `/admin/dashboard` 当天 Hero DAU
+  与 returning DAU 一致、crawler 事件不再增长。
+
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 
 - [ ] **GSC 旧内容深链 canonical**（2026-07-20，branch
