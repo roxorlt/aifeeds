@@ -13,6 +13,7 @@ import {
 import {
   DASHBOARD_HTML,
   PERFORMANCE_ENGAGEMENT_EVENTS,
+  handleAdminAnalytics,
   metricLoadPerf,
   performanceCohortWhere,
   shapePerformanceAnalyticsOutput,
@@ -221,7 +222,11 @@ describe('performance event ingest', () => {
     };
     const request = new Request('https://api.ai-feeds.com/api/track', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Device-Id': 'device-12345678' },
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 Chrome/150.0.0.0',
+        'X-Device-Id': 'device-12345678',
+      },
       body: JSON.stringify({
         events: [{
           type: 'perf_api',
@@ -246,6 +251,48 @@ describe('performance event ingest', () => {
       edge_country: 'CN',
       edge_colo: 'HKG',
     });
+  });
+
+  it('acknowledges declared crawler telemetry without writing it to D1', async () => {
+    let prepareCalls = 0;
+    let batchCalls = 0;
+    const env = {
+      ORIGIN_SECRET: '',
+      DB: {
+        prepare: () => {
+          prepareCalls += 1;
+          return {
+            bind: (...values: unknown[]) => ({ values }),
+          };
+        },
+        batch: async () => {
+          batchCalls += 1;
+          return [];
+        },
+      },
+    };
+    const request = new Request('https://api.ai-feeds.com/api/track', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 Chrome/145.0.0.0 (compatible; meta-externalagent/1.1; crawler)',
+        'X-Device-Id': 'crawler-device-1234',
+      },
+      body: JSON.stringify({
+        events: [{ type: 'page_view', occurred_at: Date.now(), page_path: '/t/private-id' }],
+      }),
+    });
+
+    const response = await handleTrack(request, env as never);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      accepted: 0,
+      rejected: 0,
+      filtered: 'crawler',
+    });
+    expect(prepareCalls).toBe(0);
+    expect(batchCalls).toBe(0);
   });
 
   it('strips query, hash, dynamic ids and raw referrers at the public ingest boundary', async () => {
@@ -274,6 +321,7 @@ describe('performance event ingest', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 Chrome/150.0.0.0',
         'X-Device-Id': 'device-12345678',
         Referer: 'https://unknown.example/path?email=alice@example.com',
       },
@@ -329,6 +377,119 @@ describe('performance event ingest', () => {
   });
 });
 
+describe('admin human-traffic metrics', () => {
+  it('keeps overview, returning users and error panels on the same crawler-free population', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE events (
+        device_id TEXT NOT NULL,
+        user_id TEXT,
+        session_token_hash TEXT,
+        event_type TEXT NOT NULL,
+        event_payload TEXT,
+        ip TEXT,
+        ua TEXT,
+        referer TEXT,
+        page_path TEXT,
+        occurred_at INTEGER NOT NULL,
+        ingested_at INTEGER NOT NULL
+      );
+      CREATE TABLE identities (
+        user_id TEXT,
+        provider TEXT,
+        identity_value TEXT,
+        unbound_at INTEGER
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO events
+        (device_id, user_id, session_token_hash, event_type, event_payload,
+         ip, ua, referer, page_path, occurred_at, ingested_at)
+      VALUES (?, NULL, ?, ?, ?, '203.0.113.1', ?, 'direct', '/', ?, ?)
+    `);
+    const now = Date.now();
+    const yesterday = now - 24 * 60 * 60 * 1000;
+    const humanUa = 'Mozilla/5.0 Chrome/150.0.0.0';
+    const metaUa = 'Mozilla/5.0 Chrome/145.0.0.0 (compatible; meta-externalagent/1.1; crawler)';
+    const add = (
+      device: string,
+      type: string,
+      at: number,
+      ua = humanUa,
+      payload = '{}',
+    ) => insert.run(device, `session-${device}`, type, payload, ua, at, at);
+
+    add('returning-human', 'app_open', yesterday);
+    add('returning-human', 'app_open', now);
+    add('returning-human', 'item_open_drawer', now + 100);
+    add('returning-human', 'api_error', now + 200, humanUa, '{"status":500,"endpoint":"items"}');
+    add('new-human', 'app_open', now + 300);
+    add('new-human', 'item_click', now + 400);
+
+    // This device satisfies both of the old "real user" shortcuts: it records
+    // an impression and its renderer stays alive for more than five seconds.
+    add('meta-crawler', 'app_open', now + 500, metaUa);
+    add('meta-crawler', 'item_impression', now + 1_000, metaUa);
+    add('meta-crawler', 'api_error', now + 7_000, metaUa, '{"status":403,"endpoint":"item_detail"}');
+    const headlessUa = 'Mozilla/5.0 HeadlessChrome/149.0.0.0 Safari/537.36';
+    add('seo-automation', 'app_open', now + 800, headlessUa);
+    add('seo-automation', 'item_click', now + 7_100, headlessUa);
+
+    const d1 = {
+      prepare(sql: string) {
+        const statement = db.prepare(sql);
+        let bindings: SQLInputValue[] = [];
+        const prepared = {
+          bind(...values: SQLInputValue[]) {
+            bindings = values;
+            return prepared;
+          },
+          async all() {
+            return { results: statement.all(...bindings) };
+          },
+          async first() {
+            return statement.get(...bindings) ?? null;
+          },
+        };
+        return prepared;
+      },
+    };
+    const env = { ADMIN_USER: 'admin', ADMIN_PASS: 'secret', DB: d1 };
+    const loadMetric = async (metric: string) => {
+      const response = await handleAdminAnalytics(new Request(
+        `https://admin.ai-feeds.com/api/admin/analytics?metric=${metric}`,
+        { headers: { Authorization: `Basic ${btoa('admin:secret')}` } },
+      ), env as never);
+      expect(response.status).toBe(200);
+      return response.json() as Promise<Record<string, any>>;
+    };
+
+    const overview = await loadMetric('overview');
+    const returning = await loadMetric('returning');
+    const errors = await loadMetric('errors');
+    const errorTrend = await loadMetric('error-trend');
+    const today = new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const todayReturning = returning.days.find((row: Record<string, unknown>) => row.day === today);
+
+    expect(overview.dau).toBe(2);
+    expect(overview.synthetic_today).toBe(2);
+    expect(todayReturning).toMatchObject({ dau: 2, new_devices: 1, back_7d: 1 });
+    expect(errors.by_msg).toEqual([{
+      event_type: 'api_error',
+      error_msg: 'status_500',
+      errors: 1,
+      devices: 1,
+    }]);
+    expect(errorTrend.rows).toEqual([{
+      day: today,
+      event_type: 'api_error',
+      errors: 1,
+      devices: 1,
+    }]);
+    db.close();
+  });
+});
+
 describe('load-performance cohorts', () => {
   it('loads all cohorts with at most six real SQLite queries and preserves output contracts', async () => {
     const db = new DatabaseSync(':memory:');
@@ -340,14 +501,15 @@ describe('load-performance cohorts', () => {
         event_type TEXT NOT NULL,
         event_payload TEXT,
         page_path TEXT,
+        ua TEXT,
         occurred_at INTEGER NOT NULL
       );
       CREATE TABLE identities (user_id TEXT, identity_value TEXT, unbound_at INTEGER);
     `);
     const insert = db.prepare(`
       INSERT INTO events
-        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, occurred_at)
-      VALUES (?, NULL, ?, ?, ?, ?, ?)
+        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, ua, occurred_at)
+      VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
     `);
     const now = Date.now();
     const legacyAttackNettype = '<img src=x onerror="globalThis.__adminXss=1">';
@@ -368,14 +530,14 @@ describe('load-performance cohorts', () => {
         load: base + 4,
         is_wechat: 1,
         nettype: cohort === 'ordinary' ? legacyAttackNettype : '4g',
-      }), '/', now + index);
-      insert.run(device, session, 'perf_fcp', JSON.stringify({ ...synthetic, value: base + 5 }), '/', now + index);
-      insert.run(device, session, 'perf_lcp', JSON.stringify({ ...synthetic, value: base + 6 }), '/', now + index);
+      }), '/', 'Mozilla/5.0', now + index);
+      insert.run(device, session, 'perf_fcp', JSON.stringify({ ...synthetic, value: base + 5 }), '/', 'Mozilla/5.0', now + index);
+      insert.run(device, session, 'perf_lcp', JSON.stringify({ ...synthetic, value: base + 6 }), '/', 'Mozilla/5.0', now + index);
       if (cohort !== 'synthetic') {
-        insert.run(device, session, 'perf_img', JSON.stringify({ ...synthetic, dur: base + 7 }), '/', now + index);
+        insert.run(device, session, 'perf_img', JSON.stringify({ ...synthetic, dur: base + 7 }), '/', 'Mozilla/5.0', now + index);
       }
       if (cohort === 'engaged') {
-        insert.run(device, session, 'item_click', '{}', '/', now + index + 10);
+        insert.run(device, session, 'item_click', '{}', '/', 'Mozilla/5.0', now + index + 10);
       }
     };
     [100, 200, 300, 400].forEach((base, index) => addCohortDevice('engaged', index, base));
@@ -466,29 +628,36 @@ describe('load-performance cohorts', () => {
         event_type TEXT NOT NULL,
         event_payload TEXT,
         page_path TEXT,
+        ua TEXT,
         occurred_at INTEGER NOT NULL
       );
       CREATE TABLE identities (user_id TEXT, identity_value TEXT, unbound_at INTEGER);
     `);
     const insert = db.prepare(`
       INSERT INTO events
-        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, occurred_at)
-      VALUES (?, NULL, ?, ?, ?, ?, ?)
+        (device_id, user_id, session_token_hash, event_type, event_payload, page_path, ua, occurred_at)
+      VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
     `);
-    const perf = (device: string, payload: string, path: string, at: number) =>
-      insert.run(device, `session-${device}`, 'perf_lcp', payload, path, at);
-    const action = (device: string, type: string, at: number) =>
-      insert.run(device, `session-${device}`, type, '{}', '/', at);
+    const perf = (device: string, payload: string, path: string, at: number, ua = 'Mozilla/5.0') =>
+      insert.run(device, `session-${device}`, 'perf_lcp', payload, path, ua, at);
+    const action = (device: string, type: string, at: number, ua = 'Mozilla/5.0') =>
+      insert.run(device, `session-${device}`, type, '{}', '/', ua, at);
 
     perf('ordinary', '{}', '/', 1_000);
     perf('engaged', '{}', '/', 2_000);
     action('engaged', 'item_click', 2_100);
     perf('impression_only', '{}', '/', 3_000);
     action('impression_only', 'item_impression', 3_100);
-    perf('probe_payload', '{"traffic_kind":"synthetic"}', '/', 4_000);
+    const headlessUa = 'Mozilla/5.0 HeadlessChrome/149.0.0.0 Safari/537.36';
+    perf('probe_payload', '{"traffic_kind":"synthetic"}', '/', 4_000, headlessUa);
     perf('probe_path', '{}', '/?codex_perf_probe=1', 5_000);
     perf('XVsq80drDCUOo3CSXJbrm', '{}', '/', 6_000);
     action('XVsq80drDCUOo3CSXJbrm', 'item_click', 6_100);
+    const metaUa = 'Mozilla/5.0 Chrome/145.0.0.0 (compatible; meta-externalagent/1.1; crawler)';
+    perf('meta_crawler', '{}', '/', 7_000, metaUa);
+    action('meta_crawler', 'item_click', 7_100, metaUa);
+    perf('headless_unmarked', '{}', '/', 8_000, headlessUa);
+    action('headless_unmarked', 'item_click', 8_100, headlessUa);
 
     const devicesFor = (cohort: 'all_clean' | 'engaged' | 'synthetic') =>
       db.prepare(`

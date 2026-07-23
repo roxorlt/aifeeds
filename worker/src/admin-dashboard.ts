@@ -4,6 +4,7 @@
 
 import type { Env } from './index';
 import { ADMIN_SHARED_CSS, adminNavHtml, requireAuth, jsonRes } from './admin';
+import { analyticsNonHumanUaSql } from './analytics-traffic';
 
 // ─── /api/admin/analytics?metric=<name> ─────────────────────────
 export async function handleAdminAnalytics(request: Request, env: Env): Promise<Response> {
@@ -64,15 +65,7 @@ const ERROR_EVENT_TYPES = ['api_error', 'js_error', 'feed_load_error', 'image_lo
 // worker 入口已经被 isBlockedBot 拦了大部分，但有些 bot（如 Twitterbot / 老 Bingbot
 // / 部分爬虫）走 SEO 白名单仍能跑 JS 进 events 表，会污染留存数字。
 // SQL 用一段 OR 表达式拼到 NOT (...)，复用统一名单。
-const BOT_UA_LIKE = `(
-  ua LIKE '%bot%' OR ua LIKE '%Bot%' OR ua LIKE '%BOT%'
-  OR ua LIKE '%spider%' OR ua LIKE '%Spider%'
-  OR ua LIKE '%crawler%' OR ua LIKE '%Crawler%'
-  OR ua LIKE '%python-requests%' OR ua LIKE '%Python-urllib%'
-  OR ua LIKE 'curl/%' OR ua LIKE 'Wget/%'
-  OR ua LIKE 'Go-http-client%' OR ua LIKE 'okhttp%'
-  OR ua = ''
-)`;
+const BOT_UA_LIKE = analyticsNonHumanUaSql('ua');
 
 // 项目 owner 的 device：从报表里整体踢掉，避免自己开发 / 测试访问污染数据。
 // 两层识别：
@@ -136,6 +129,7 @@ export function performanceCohortWhere(cohort: PerformanceCohortName, alias: str
   const allClean = `
     ${alias}.device_id NOT IN (${OWNER_DEVICE_CTE})
     AND NOT ${syntheticMarker}
+    AND NOT ${analyticsNonHumanUaSql(`${alias}.ua`)}
   `;
   if (cohort === 'all_clean') return allClean;
 
@@ -203,8 +197,11 @@ const REAL_USER_DEVICE_CTE = `
   SELECT device_id FROM events
   WHERE occurred_at > (strftime('%s','now') - 30 * 86400) * 1000
   GROUP BY device_id
-  HAVING MAX(CASE WHEN event_type IN (${REAL_USER_INTERACT_EVENTS.map((e) => `'${e}'`).join(',')}) THEN 1 ELSE 0 END) = 1
-      OR (MAX(occurred_at) - MIN(occurred_at)) > 5000
+  HAVING MAX(CASE WHEN ${BOT_UA_LIKE} THEN 1 ELSE 0 END) = 0
+     AND (
+       MAX(CASE WHEN event_type IN (${REAL_USER_INTERACT_EVENTS.map((e) => `'${e}'`).join(',')}) THEN 1 ELSE 0 END) = 1
+       OR (MAX(occurred_at) - MIN(occurred_at)) > 5000
+     )
 `;
 const IS_REAL_USER_SQL = `device_id IN (${REAL_USER_DEVICE_CTE})`;
 
@@ -567,6 +564,7 @@ async function metricErrors(env: Env) {
     WHERE event_type IN ('api_error','js_error','feed_load_error','image_load_error','unhandled_promise')
       AND occurred_at > (strftime('%s','now')-7*86400)*1000
       AND ${NOT_OWNER_SQL}
+      AND NOT ${analyticsNonHumanUaSql('ua')}
     GROUP BY event_type, error_msg
     ORDER BY errors DESC
     LIMIT 20
@@ -577,6 +575,7 @@ async function metricErrors(env: Env) {
     WHERE event_type IN ('api_error','js_error','feed_load_error','image_load_error','unhandled_promise')
       AND occurred_at > (strftime('%s','now')-7*86400)*1000
       AND ${NOT_OWNER_SQL}
+      AND NOT ${analyticsNonHumanUaSql('ua')}
     GROUP BY device_id
     ORDER BY errors DESC
     LIMIT 10
@@ -598,6 +597,7 @@ async function metricErrorTrend(env: Env) {
     WHERE event_type IN (${placeholders})
       AND occurred_at > (strftime('%s','now')-30*86400)*1000
       AND ${NOT_OWNER_SQL}
+      AND NOT ${analyticsNonHumanUaSql('ua')}
     GROUP BY day, event_type
     ORDER BY day, event_type
   `).bind(...ERROR_EVENT_TYPES).all();

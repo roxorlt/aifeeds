@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-21（ai-feeds.cc 内容镜像与国内搜索稳定 sitemap 已上线：首期 137 个内容页、148 个可发现 URL，全量公网门禁通过）
+最后更新：2026-07-23（admin analytics 统一非真人过滤：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；本地完成、尚未部署）
+
+历史：2026-07-21（ai-feeds.cc 内容镜像与国内搜索稳定 sitemap 已上线：首期 137 个内容页、148 个可发现 URL，全量公网门禁通过）
 
 历史：2026-07-20（ai-feeds.cc 静态内容镜像同步器完成本地实现：海外 AI 内容双 gate、immutable generation/sitemap、systemd timer、Nginx 路由及全局 preparing/committed 部署事务；本轮未推送、未部署）
 
@@ -397,7 +399,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/enrich/run` | POST | 手动触发 enrich（支持多模式） | Bearer `INGEST_TOKEN` |
 | `/api/longform/pending` | GET | 长推 fetch 队列（`?limit=20`，最多 50；`attempts < 3`） | Bearer `INGEST_TOKEN` |
 | `/api/longform/submit` | POST | 提交本地浏览器抓回的完整长推正文 | Bearer `INGEST_TOKEN` |
-| `/api/track` | POST | Dashboard telemetry 上报（dashboard SDK 用，必带 `X-Device-Id`） | 无（CORS 白名单 + did 必填） |
+| `/api/track` | POST | Dashboard telemetry 上报（dashboard SDK 用，必带 `X-Device-Id`）。2026-07-23 起声明式 crawler UA 返回 `200 {accepted:0,rejected:0,filtered:"crawler"}` 且不写 D1；成功 no-op 避免浏览器队列重试。HeadlessChrome/Playwright 不按 UA 丢弃，批准的性能测试仍靠 `traffic_kind=synthetic` 进入独立 cohort | 无（CORS 白名单 + did 必填） |
 | `/api/dub-wishlist` | POST | 播客「翻译成中文音频」假门(painted door)：记录需求信号（body `item_id`，必带 `X-Device-Id`，登录则附 `user_id`）。`INSERT OR IGNORE` 去重，返回 `{ok,already}`。点击不真做配音，计数只在 admin 看板（2026-06-21 上线，`worker/src/dub-wishlist.ts`，表 `dub_wishlist` migration 023） | 无（匿名，必带 X-Device-Id） |
 | `/api/dub-wishlist` | GET | `?item_id=X` 查当前设备是否已点过 → `{wishlisted}`，前端「历史已点则隐藏整块」用 | 无（必带 X-Device-Id） |
 | `/api/feedback` | POST | 用户反馈提交（multipart：`content` 必填 ≤2000 字 / `image` 选填 ≤5MB jpeg png webp gif / `device` 前端设备信息 JSON）。**限频：每账号每 BJT 自然日 3 条**，超出 429 `rate_limited`（C 端 toast「操作太频繁了，稍后再试」）。图片入 R2 `feedback/<sha256>.<ext>`；服务端快照 device_info（request.cf country/colo/asn + ip/ua）与 account_info（display_name + identities）（2026-07-05，`worker/src/feedback.ts`，表 `feedback`/`feedback_replies` migration 024，入口 UserMenu/Settings 仅登录+非微信 UA 展示） | session（cookie） |
@@ -415,7 +417,7 @@ gh secret list --repo roxorlt/aifeeds | grep SECRET_NAME
 | `/api/share/landing` | POST | 落地详情页前端调，补 to_did（redirect 时 cookie 可能缺 device_id） | 无（必带 X-Device-Id） |
 | `/api/admin/share/:token` | GET | 看一个 token 的扫码 / 落地统计 | CF Access JWT（Basic Auth fallback，见 § 7a） |
 | `/admin` | GET | 302 redirect 到 `/admin/dashboard`（2026-05-17 加） | CF Access JWT（边缘拦截，见 § 7a） |
-| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）、**🎧 中文配音需求（假门）卡片**（2026-06-21：想听 KPI + 需求强度漏斗「打开播客详情→点想听」转化率 + 需求排行榜）。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
+| `/admin/dashboard` | GET | 仪表盘默认页：DAU/WAU/MAU 头部 KPI、30 天 DAU 折线、行为漏斗、会话时长直方图、每日新增vs回访（反向口径表格，2026-06-18）、留存矩阵（正向 cohort；未到期格显示「—」非误导性 0%）、事件类型分布（中文标签）、错误明细、重度设备表（留存/回访表默认 5 行可展开）、**🎧 中文配音需求（假门）卡片**。2026-07-23 起 Hero/趋势/漏斗/留存/性能/错误面板复用 `analytics-traffic.ts` 的非真人 UA 口径，历史 crawler/未标记 Headless 行不删除、查询时排除；显式 synthetic 性能 cohort 单列保留。echarts CDN，单文件 HTML（`worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/tools` | GET | 原 SMS 限流 / user 详情 / 清除测试账号 / 今日 SMS 用量 4 张卡（`worker/src/admin.ts` 的 `TOOLS_HTML`，2026-05-17 从 `/admin` 路径迁来） | CF Access JWT（Basic Auth fallback） |
 | `/api/admin/analytics?metric=<name>` | GET | 仪表盘 SQL JSON 数据源。`metric` ∈ `overview` / `dau-trend` / `retention` / `returning`(反向回访口径) / `event-distribution` / `funnel` / `session-duration` / `errors` / `top-devices` / `dub-wishlist`(中文配音需求假门) / `search`(C 端搜索监控：使用/性能/异常/索引滞后，2026-07-06)（实现在 `worker/src/admin-dashboard.ts`） | CF Access JWT（Basic Auth fallback） |
 | `/admin/feedback` | GET | **用户反馈看板页**（2026-07-05，`worker/src/admin-feedback.ts`）：列表 + 搜索（user_id 精确 / 昵称 / identity 模糊 → 按账号查该用户全部历史）+ 状态过滤（未回复/已回复）+ 分页 + 详情（device_info / 账号快照 / 回复线程）+ 图文回复用户 | CF Access JWT（Basic Auth fallback） |
@@ -3302,7 +3304,9 @@ RUM 看不到 DNS 失败，必须同时看显式 synthetic 与服务端可用性
 - 已验证不影响 SEO：Googlebot / Bingbot / Baiduspider / YandexBot 不在此名单
 
 **Worker 层 bot/referer 防御**（2026-05-17，PR #52 加入；跟 zone 层规则互补）：
-- **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot` + `isBotGateExempt`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: private, no-store`（2026-05-17 改，原 `max-age=86400` 把 403 缓存了 24h，开发期反复试错痛苦），不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**豁免路径**（`isBotGateExempt`）：`/api/ingest`（自家 scrapers）+ `/api/track`（device-token 已防滥用）+ 公开只读 endpoint（`/api/items` GET / `/api/sources` GET / `/api/stats` GET / `/img` / `/r/*`）—— 后一组是 dashboard 给所有 visitor 用的，拦 curl 没意义反而误伤 OPS smoke
+- **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot` + `isBotGateExempt`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: private, no-store`（2026-05-17 改，原 `max-age=86400` 把 403 缓存了 24h，开发期反复试错痛苦），不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**豁免路径**（`isBotGateExempt`）：`/api/ingest` + `/api/track` + 公开只读 endpoint（`/api/items` GET / `/api/sources` GET / `/api/stats` GET / `/img` / `/r/*`）。`/api/track` 虽跳过入口 403 gate，但 handler 自 2026-07-23 起用共享 `analytics-traffic.ts` 识别声明式 crawler 并 200 no-op，既不污染 D1，也不影响显式 synthetic RUM
+- **2026-07-23 Meta crawler analytics 事故**：生产 `/t/:id` 被 `meta-externalagent/1.1` 批量渲染；crawler 会执行 SPA、产生 `item_impression`/性能事件且存活 >5 秒，绕过旧 `REAL_USER_DEVICE_CTE`，Hero 当天显示 541；returning query 另有 UA bot CTE，只剩 2，形成同页口径分叉。额外只读核对确认当日还有 1 个未标记 `HeadlessChrome/149` 测试 device（73 events，约 2 分钟），对应 returning 的“新增 1”；它不再进入真人口径。近 7 天 1,327 条 `item_detail 403` 均来自 Meta crawler device cohort，403 是详情 API 非豁免 bot gate 的预期响应。修复为“声明式 crawler 采集前 no-op + 历史查询排除 crawler/未标记自动化”两层；不删除生产历史事件。样本网络前缀公开归属 Meta/Facebook AS32934，不按攻击处置
+- **反事实与剩余错误复核**：2026-07-23 发布前只读回算时，旧 eligible-device 口径已从页面采样时的 541 增长到 542；新口径保留真人 1、过滤非真人 541，真人拆分为新增 0 / 7 日回访 1，当日无真人错误。过滤 crawler 后仍可见的 7 日 `status_400` / `fetchItems failed: 400` 各 63 条都集中在 2026-07-17，来自已经由 PR #182 修复并生产验收的 SQLite cursor producer/consumer 契约事故；保留历史趋势，不作为当前故障处理
 - **`/r/<key>` referer 白名单**（`worker/src/index.ts` 的 `isAllowedR2Referer`，R2 fetch 前）：空 referer（直接打开 / poster renderer）放行；其他 referer 必须来自 `*.ai-feeds.com` / `twitter.com|x.com|t.co|mobile.*` / `producthunt.com` / `github.com` / `*.pages.dev` / `localhost`，否则 403 防图片视频被第三方站点热链
 - **AbortError 错误归一化**（`dashboard/src/api.ts`）：fetch 5s 超时触发的 AbortError 在 `/api/track` 上报时 `error_msg` 标记成 `timeout_5000ms`，方便 `/admin/dashboard` 错误分桶（之前都是 `signal is aborted without reason` 看不懂）
 
