@@ -3,7 +3,7 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-23（admin analytics 统一非真人过滤：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；本地完成、尚未部署）
+最后更新：2026-07-23（admin analytics 统一非真人过滤已上线：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；PR #209 / production `94946fc`）
 
 历史：2026-07-21（ai-feeds.cc 内容镜像与国内搜索稳定 sitemap 已上线：首期 137 个内容页、148 个可发现 URL，全量公网门禁通过）
 
@@ -3307,6 +3307,7 @@ RUM 看不到 DNS 失败，必须同时看显式 synthetic 与服务端可用性
 - **Bot UA 拦截**（`worker/src/index.ts` 的 `isBlockedBot` + `isBotGateExempt`，CORS 检查后、路由前）：UA 命中 AI 训练爬虫（GPTBot/ClaudeBot/Bytespider 等）/ 脚本工具（python-requests/curl/wget/scrapy）/ SEO 爬虫（AhrefsBot/SemrushBot 等，跟 zone 规则双层）/ 漏洞扫描（nikto/sqlmap/nmap 等）→ 直接 403 + `Cache-Control: private, no-store`（2026-05-17 改，原 `max-age=86400` 把 403 缓存了 24h，开发期反复试错痛苦），不查 D1。**白名单**：Googlebot/Bingbot/Baiduspider/Sogou 等搜索引擎 + Twitterbot/facebookexternalhit/Slackbot 等社交预览 bot 不进 blocklist。**豁免路径**（`isBotGateExempt`）：`/api/ingest` + `/api/track` + 公开只读 endpoint（`/api/items` GET / `/api/sources` GET / `/api/stats` GET / `/img` / `/r/*`）。`/api/track` 虽跳过入口 403 gate，但 handler 自 2026-07-23 起用共享 `analytics-traffic.ts` 识别声明式 crawler 并 200 no-op，既不污染 D1，也不影响显式 synthetic RUM
 - **2026-07-23 Meta crawler analytics 事故**：生产 `/t/:id` 被 `meta-externalagent/1.1` 批量渲染；crawler 会执行 SPA、产生 `item_impression`/性能事件且存活 >5 秒，绕过旧 `REAL_USER_DEVICE_CTE`，Hero 当天显示 541；returning query 另有 UA bot CTE，只剩 2，形成同页口径分叉。额外只读核对确认当日还有 1 个未标记 `HeadlessChrome/149` 测试 device（73 events，约 2 分钟），对应 returning 的“新增 1”；它不再进入真人口径。近 7 天 1,327 条 `item_detail 403` 均来自 Meta crawler device cohort，403 是详情 API 非豁免 bot gate 的预期响应。修复为“声明式 crawler 采集前 no-op + 历史查询排除 crawler/未标记自动化”两层；不删除生产历史事件。样本网络前缀公开归属 Meta/Facebook AS32934，不按攻击处置
 - **反事实与剩余错误复核**：2026-07-23 发布前只读回算时，旧 eligible-device 口径已从页面采样时的 541 增长到 542；新口径保留真人 1、过滤非真人 541，真人拆分为新增 0 / 7 日回访 1，当日无真人错误。过滤 crawler 后仍可见的 7 日 `status_400` / `fetchItems failed: 400` 各 63 条都集中在 2026-07-17，来自已经由 PR #182 修复并生产验收的 SQLite cursor producer/consumer 契约事故；保留历史趋势，不作为当前故障处理
+- **发布记录**：staging Worker `6e6dfa70-be43-4f7e-835f-9a5cf5bb12bb` 实测 crawler `/api/track` 返回 `200 {accepted:0,rejected:0,filtered:"crawler"}`，D1 对 smoke device 为 0 行；PR #209 合入 `main` `94946fc`，Deploy Worker run #228 的 validate/deploy 均成功。production 同样完成 crawler no-op + D1 零写入 smoke；发布后最终只读回算 DAU 2 = 新增 1 + 7 日回访 1、过滤非真人 549、当日真实用户错误 0
 - **`/r/<key>` referer 白名单**（`worker/src/index.ts` 的 `isAllowedR2Referer`，R2 fetch 前）：空 referer（直接打开 / poster renderer）放行；其他 referer 必须来自 `*.ai-feeds.com` / `twitter.com|x.com|t.co|mobile.*` / `producthunt.com` / `github.com` / `*.pages.dev` / `localhost`，否则 403 防图片视频被第三方站点热链
 - **AbortError 错误归一化**（`dashboard/src/api.ts`）：fetch 5s 超时触发的 AbortError 在 `/api/track` 上报时 `error_msg` 标记成 `timeout_5000ms`，方便 `/admin/dashboard` 错误分桶（之前都是 `signal is aborted without reason` 看不懂）
 
