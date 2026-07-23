@@ -111,4 +111,8 @@ Expected: only scoped code/tests/docs, no secrets, generated files, or unrelated
   a new acquisition. No production rows were changed.
 - The filtered 7-day error view removes the current Meta `item_detail 403` spike. Its remaining 400 spike is
   confined to 2026-07-17 and matches the already-fixed `/api/items` SQLite cursor incident (PR #182).
-- Release status: local branch only; no push, PR, staging deployment, production deployment, or data deletion.
+- Release completed through PR #209. Staging Worker version
+  `6e6dfa70-be43-4f7e-835f-9a5cf5bb12bb` passed crawler no-op and zero-row D1 verification; merge
+  commit `94946fc` passed Deploy Worker run #228 and reached production. Production repeated the no-op /
+  zero-row smoke. Final read-only recomputation returned DAU 2 (new 1, 7-day returner 1), 549 filtered
+  non-human devices, and zero human errors for the day. No historical production rows were deleted.

@@ -24,10 +24,10 @@
   2026-07-17，正是已由 PR #182 修复并上线的 `/api/items` SQLite cursor 兼容事故，不是新回归。
 - [x] 验证：聚焦 Vitest `21/21`、Worker 全量 `1137/1137`、`tsc --noEmit`、
   `git diff --check` 均通过。
-- [ ] 发布边界：本轮未 push、未开 PR、未部署 staging/prod。上线前按
-  [`docs/plans/2026-07-23-admin-analytics-bot-filter.md`](docs/plans/2026-07-23-admin-analytics-bot-filter.md)
-  重跑 Worker gate；合入 `main` 后由 CI 发布，再只读复核 `/admin/dashboard` 当天 Hero DAU
-  与 returning DAU 一致、crawler 事件不再增长。
+- [x] 发布完成：staging Worker `6e6dfa70-be43-4f7e-835f-9a5cf5bb12bb` 验证 crawler
+  `200 no-op` 且 D1 零写入；PR #209 合入 `main` `94946fc`，Deploy Worker run #228
+  硬门禁与 production 发布成功。生产 smoke 同样 `200 no-op` / D1 0 行；最终只读回算
+  DAU 2 = 新增 1 + 7 日回访 1，过滤非真人 549，当日真实用户错误 0。
 
 ### A6. SEO 完整性与 C 端性能后续（2026-07-17，plan branch `codex/seo-performance-follow-up-plan`）
 
