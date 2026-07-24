@@ -2003,24 +2003,38 @@ window.addEventListener('resize', () => {
   });
 });
 
-Promise.all([
-  loadOverview(),
-  loadDubWishlist(),
-  loadDauTrend(),
-  loadFunnel(),
-  loadSession(),
-  loadChannels(),
-  loadDrawerBySource(),
-  loadFeedDepth(),
-  loadLoadPerf(),
-  loadReturning(),
-  loadRetention(),
-  loadEvents(),
-  loadErrorTrend(),
-  loadErrors(),
-  loadDevices(),
-  loadSearch(),
-]);
+/* admin-dashboard-loader:start */
+async function runDashboardLoaders(priorityLoader, backgroundLoaders, concurrency) {
+  await priorityLoader();
+  let nextIndex = 0;
+  async function runWorker() {
+    while (nextIndex < backgroundLoaders.length) {
+      const loader = backgroundLoaders[nextIndex++];
+      await loader();
+    }
+  }
+  const workerCount = Math.min(Math.max(1, concurrency), backgroundLoaders.length);
+  await Promise.all(Array.from({ length: workerCount }, runWorker));
+}
+/* admin-dashboard-loader:end */
+
+runDashboardLoaders(loadOverview, [
+  loadDauTrend,
+  loadFunnel,
+  loadReturning,
+  loadRetention,
+  loadEvents,
+  loadSession,
+  loadChannels,
+  loadDrawerBySource,
+  loadFeedDepth,
+  loadErrorTrend,
+  loadErrors,
+  loadDevices,
+  loadSearch,
+  loadLoadPerf,
+  loadDubWishlist,
+], 3);
 </script>
 </body>
 </html>`;

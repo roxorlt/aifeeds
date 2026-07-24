@@ -8,6 +8,22 @@
 
 ## 进行中
 
+### A9. Admin 看板渐进加载（2026-07-24，branch `codex/fix-admin-dashboard-loading`）
+
+- [x] 生产浏览器抓包复现：HTML / ECharts 缓存命中且页面壳约 0.5 秒完成，但页面随后同一时刻
+  发出 16 个 `/api/admin/analytics?metric=*` 请求；所有 JSON 在约 10.6–12.6 秒后分批返回。
+- [x] 根因对照：生产同一会话串行测 `overview` / `load-perf` / `channel-dwell` 仅约
+  0.76–1.4 秒，证明不是 Access、静态资源或单条 SQL 卡死，而是 16 路 D1 聚合查询同时启动
+  后产生排队放大。
+- [x] 本地 TDD 修复：`overview` 作为 priority loader 单独完成后再启动其余卡片，后台 loader
+  使用固定 3 worker 队列渐进填充；调度契约覆盖“顶部先返回”和“后台并发不超过 3”。生产
+  只读模拟同策略时 KPI 约 1.5 秒出现。
+- [x] 验证：Worker Vitest `1139/1139`、`tsc --noEmit`、Wrangler production dry-run、
+  Admin HTML smoke、`git diff --check` 全通过；隔离本地 Worker 真浏览器确认 16/16 metric
+  均为 200、`overview` 在后台请求前完成、最大并发严格为 3、最终无 loading / 新 console error。
+- [ ] 发布：完成 Worker 全量验证与浏览器 smoke 后走 PR → staging → main CI → production；
+  未经本任务单独批准不手动发布 production。
+
 ### A8. Admin DAU / 错误趋势 crawler 污染修复（2026-07-23，branch `codex/fix-admin-bot-analytics`）
 
 - [x] 生产只读归因：`541 vs 2` 不是两种正常业务口径造成的小差异，而是

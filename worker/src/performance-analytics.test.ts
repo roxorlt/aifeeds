@@ -24,6 +24,63 @@ const adminDashboardSource = fs.readFileSync(
   'utf8',
 );
 
+function getDashboardLoaderScheduler(): (
+  priorityLoader: () => Promise<void>,
+  backgroundLoaders: Array<() => Promise<void>>,
+  concurrency: number,
+) => Promise<void> {
+  const script = DASHBOARD_HTML.match(
+    /\/\* admin-dashboard-loader:start \*\/([\s\S]*?)\/\* admin-dashboard-loader:end \*\//,
+  );
+  expect(script).not.toBeNull();
+  return new Function(`${script?.[1]}; return runDashboardLoaders;`)() as (
+    priorityLoader: () => Promise<void>,
+    backgroundLoaders: Array<() => Promise<void>>,
+    concurrency: number,
+  ) => Promise<void>;
+}
+
+describe('admin dashboard initial loading', () => {
+  it('finishes the priority loader before starting background loaders', async () => {
+    const runDashboardLoaders = getDashboardLoaderScheduler();
+    const calls: string[] = [];
+    let releasePriority!: () => void;
+    const priorityGate = new Promise<void>((resolve) => { releasePriority = resolve; });
+
+    const scheduled = runDashboardLoaders(
+      async () => {
+        calls.push('priority:start');
+        await priorityGate;
+        calls.push('priority:end');
+      },
+      [async () => { calls.push('background'); }],
+      3,
+    );
+
+    await Promise.resolve();
+    expect(calls).toEqual(['priority:start']);
+    releasePriority();
+    await scheduled;
+    expect(calls).toEqual(['priority:start', 'priority:end', 'background']);
+  });
+
+  it('limits background loaders to three concurrent requests', async () => {
+    const runDashboardLoaders = getDashboardLoaderScheduler();
+    let active = 0;
+    let maxActive = 0;
+    const loaders = Array.from({ length: 8 }, () => async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+    });
+
+    await runDashboardLoaders(async () => {}, loaders, 3);
+
+    expect(maxActive).toBe(3);
+  });
+});
+
 describe('performance event ingest', () => {
   it('keeps all performance event contracts in the geography-enrichment set', () => {
     expect(PERFORMANCE_EVENT_TYPES).toContain('perf_lcp');
