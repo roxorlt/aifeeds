@@ -299,6 +299,73 @@ test('foldNewsEventsForDigest keeps one representative per same news event and p
   assert.ok(foldedIds.includes('blog:jiqizhixin:unrelated'));
 });
 
+test('foldNewsEventsForDigest treats reordered structured product names as the same launch event', () => {
+  const scored = scoreNewsCandidatesForDigest([
+    row({
+      id: 'blog:the-verge:chatgpt-health',
+      title: 'OpenAI is rolling out ChatGPT Health to everyone in the US',
+      sourceCompany: 'The Verge',
+      sourceKey: 'the-verge',
+      aiCategory: 'product',
+      publishedAt: '2026-07-23T17:00:00.000Z',
+      aiSummaryZh: 'OpenAI 向美国用户全面开放 ChatGPT Health。',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'ChatGPT Health',
+        objectFamily: 'ChatGPT',
+        objectVariant: 'Health',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches ChatGPT Health broadly in the US',
+        confidence: 0.95,
+      },
+    }),
+    row({
+      id: 'blog:techcrunch:chatgpt-health',
+      title: 'OpenAI makes ChatGPT Health available to all US users',
+      sourceCompany: 'TechCrunch',
+      sourceKey: 'techcrunch',
+      aiCategory: 'product',
+      publishedAt: '2026-07-23T17:00:00.000Z',
+      aiSummaryZh: 'OpenAI 向所有美国用户开放 ChatGPT Health。',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'ChatGPT Health',
+        objectFamily: 'ChatGPT',
+        objectVariant: 'Health',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches ChatGPT Health for all US users',
+        confidence: 0.95,
+      },
+    }),
+    row({
+      id: 'blog:openai:health-in-chatgpt',
+      title: 'Launching Health in ChatGPT',
+      sourceCompany: 'OpenAI',
+      sourceKey: 'openai',
+      aiCategory: 'product',
+      publishedAt: '2026-07-23T00:00:00.000Z',
+      aiSummaryZh: 'OpenAI 推出 ChatGPT 健康功能，可连接医疗记录与 Apple Health。',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'Health in ChatGPT',
+        objectFamily: 'ChatGPT',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches Health in ChatGPT for US users',
+        confidence: 1,
+      },
+    }),
+  ], Date.parse('2026-07-24T00:00:00.000Z'));
+
+  const official = scored.find((item) => item.id === 'blog:openai:health-in-chatgpt');
+  const foldedIds = foldNewsEventsForDigest(scored).map((item) => item.id);
+
+  assert.equal(official?.eventSourceCount, 3);
+  assert.deepEqual(foldedIds, ['blog:openai:health-in-chatgpt']);
+});
+
 test('foldNewsEventsForDigest folds Anthropic Mythos and Fable policy coverage into one event', () => {
   const scored = scoreNewsCandidatesForDigest([
     row({

@@ -850,6 +850,7 @@ interface DerivedEventFingerprint {
 interface StructuredEventFingerprint {
   eventType: string;
   primaryObject: string;
+  primaryObjectIdentity: string;
   objectFamily: string;
   objectVariantTokens: Set<string>;
   objectVersion: string;
@@ -1012,6 +1013,7 @@ function deriveStructuredEventFingerprint(
   return {
     eventType: normalizeEventType(fp.eventType || ''),
     primaryObject: normalizeStructuredValue(fp.primaryObject || ''),
+    primaryObjectIdentity: normalizeStructuredObjectIdentity(fp.primaryObject || ''),
     objectFamily: normalizeStructuredValue(fp.objectFamily || ''),
     objectVariantTokens: structuredVariantTokens(fp.objectVariant || fp.primaryObject || ''),
     objectVersion: normalizeStructuredValue(fp.objectVersion || ''),
@@ -1027,6 +1029,17 @@ function normalizeEventType(value: string): string {
 
 function normalizeStructuredValue(value: string): string {
   return normalizeEventText(value).replace(/[^a-z0-9]+/g, '');
+}
+
+const structuredObjectConnectorWords = new Set([
+  'a', 'an', 'and', 'by', 'for', 'in', 'of', 'on', 'the', 'to', 'with',
+]);
+
+function normalizeStructuredObjectIdentity(value: string): string {
+  return (normalizeEventText(value).match(/[a-z0-9]+/g) || [])
+    .filter((token) => !structuredObjectConnectorWords.has(token))
+    .sort()
+    .join('|');
 }
 
 function structuredVariantTokens(value: string): Set<string> {
@@ -1094,6 +1107,16 @@ function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: De
   if (!sameAction && !left.policyAccess && !right.policyAccess) return undefined;
 
   if (l.primaryObject && r.primaryObject && l.primaryObject === r.primaryObject && sameAction) return true;
+
+  const compatibleFamily = !l.objectFamily || !r.objectFamily || l.objectFamily === r.objectFamily;
+  if (
+    sameAction
+    && compatibleFamily
+    && l.primaryObjectIdentity.includes('|')
+    && l.primaryObjectIdentity === r.primaryObjectIdentity
+  ) {
+    return true;
+  }
 
   if (l.objectFamily && r.objectFamily && l.objectFamily === r.objectFamily && l.objectVersion && r.objectVersion && l.objectVersion === r.objectVersion) {
     if (!left.policyAccess && !right.policyAccess) return sameAction;
