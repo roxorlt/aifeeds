@@ -94,3 +94,8 @@ git commit -m "fix(admin): prioritize dashboard KPI loading"
 - Local browser smoke: 16/16 analytics responses were 200, `overview` completed before any background
   request, maximum observed background concurrency was 3, and the rendered page had no remaining
   loading state or new console error.
+- Production release: commit `209ebc5` reached `main`; Deploy Worker run `30061301699` and Secret Scan
+  run `30061301771` succeeded. A fresh production browser reload rendered DAU in 1.746 seconds;
+  `overview` finished in 1.303 seconds before background work started, all 16 metrics returned 200,
+  maximum concurrency was 3, and all analytics finished in about 12.669 seconds without a remaining
+  loading state or site console error.

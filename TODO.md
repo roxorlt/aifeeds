@@ -8,7 +8,7 @@
 
 ## 进行中
 
-### A9. Admin 看板渐进加载（2026-07-24，branch `codex/fix-admin-dashboard-loading`）
+### A9. Admin 看板渐进加载（2026-07-24，已上线）
 
 - [x] 生产浏览器抓包复现：HTML / ECharts 缓存命中且页面壳约 0.5 秒完成，但页面随后同一时刻
   发出 16 个 `/api/admin/analytics?metric=*` 请求；所有 JSON 在约 10.6–12.6 秒后分批返回。
@@ -21,8 +21,10 @@
 - [x] 验证：Worker Vitest `1139/1139`、`tsc --noEmit`、Wrangler production dry-run、
   Admin HTML smoke、`git diff --check` 全通过；隔离本地 Worker 真浏览器确认 16/16 metric
   均为 200、`overview` 在后台请求前完成、最大并发严格为 3、最终无 loading / 新 console error。
-- [ ] 发布：完成 Worker 全量验证与浏览器 smoke 后走 PR → staging → main CI → production；
-  未经本任务单独批准不手动发布 production。
+- [x] 发布完成：`209ebc5` 快进合入并推送 `main`，Deploy Worker run `30061301699`
+  的 validate / production deploy 均成功，Secret Scan run `30061301771` 成功。生产真浏览器冷重载
+  实测顶部 DAU 1.746 秒出现，`overview` 1.303 秒完成后才启动后台请求；16/16 metric 均为 200、
+  最大并发严格为 3、全部 analytics 约 12.669 秒渐进完成，最终无残留 loading 或本站 console error。
 
 ### A8. Admin DAU / 错误趋势 crawler 污染修复（2026-07-23，branch `codex/fix-admin-bot-analytics`）
 
