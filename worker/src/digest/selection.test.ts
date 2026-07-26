@@ -5,6 +5,7 @@ import {
   buildNewsSelectionAudit,
   foldNewsEventsForDigest,
   scoreNewsCandidatesForDigest,
+  selectNewsByScoreWithAudit,
   suppressCrossDayRepeatedNewsEvents,
   selectTopForSource,
   type NewsCandidateForScoring,
@@ -461,6 +462,202 @@ test('suppressCrossDayRepeatedNewsEvents removes prior media repeats but allows 
     'blog:jiqizhixin:unrelated',
     'blog:openai:gpt56-sol-preview',
   ].sort());
+});
+
+test('suppressCrossDayRepeatedNewsEvents removes a later hands-on review of the already-pushed Codex Micro launch', () => {
+  const candidates = [
+    row({
+      id: 'blog:techcrunch:micro-keypad-review',
+      title: 'I tried out OpenAI’s new AI keypad',
+      sourceCompany: 'TechCrunch',
+      sourceKey: 'techcrunch',
+      aiCategory: 'product',
+      publishedAt: '2026-07-25T00:23:11.000Z',
+      aiSummaryZh: 'OpenAI 的硬件首秀 Micro 是一款可编程快捷键键盘。',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'Micro keypad',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches Micro keypad in collaboration with Work Louder',
+        confidence: 0.95,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:the-verge:codex-micro-launch',
+      title: 'OpenAI finally launches hardware… for Codex',
+      sourceCompany: 'The Verge',
+      sourceKey: 'the-verge',
+      aiCategory: 'product',
+      publishedAt: '2026-07-15T16:00:00.000Z',
+      aiSummaryZh: 'OpenAI 发布 Codex 专用宏键盘 Codex Micro。',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'Codex Micro',
+        objectFamily: 'Codex',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches Codex Micro, a programmable keypad for Codex, in collaboration with Work Louder',
+        confidence: 0.95,
+      },
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, []);
+});
+
+test('suppressCrossDayRepeatedNewsEvents keeps different products that only share a collaborator and audience', () => {
+  const candidates = [
+    row({
+      id: 'blog:techcrunch:beta-keyboard',
+      title: 'OpenAI launches Beta Keyboard',
+      sourceCompany: 'TechCrunch',
+      aiCategory: 'product',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'Beta Keyboard',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches Beta Keyboard with Work Louder for developers',
+        confidence: 0.95,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:the-verge:alpha-pad',
+      title: 'OpenAI launches Alpha Pad',
+      sourceCompany: 'The Verge',
+      aiCategory: 'product',
+      eventFingerprint: {
+        eventType: 'product_launch',
+        primaryActor: 'OpenAI',
+        primaryObject: 'Alpha Pad',
+        action: 'launch',
+        canonicalEvent: 'OpenAI launches Alpha Pad with Work Louder for developers',
+        confidence: 0.95,
+      },
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, ['blog:techcrunch:beta-keyboard']);
+});
+
+test('selectNewsByScoreWithAudit uses a 30-day ledger for cross-day event deduplication', async () => {
+  let ledgerBinds: unknown[] = [];
+  const db = {
+    prepare(sql: string) {
+      const statement = {
+        bind(...binds: unknown[]) {
+          if (/FROM digest_pool/.test(sql)) ledgerBinds = binds;
+          return statement;
+        },
+        async all<T>() {
+          return { results: [] as T[] };
+        },
+      };
+      return statement;
+    },
+  };
+
+  await selectNewsByScoreWithAudit(
+    { DB: db } as never,
+    5,
+    { strictCrossDayEventDedup: true },
+  );
+
+  assert.equal(Number(ledgerBinds[1]) - Number(ledgerBinds[0]), 30 * 86400_000);
+});
+
+test('selectNewsByScoreWithAudit does not truncate matching events after the first 300 ledger IDs', async () => {
+  const currentId = 'blog:techcrunch:current-review';
+  const priorId = 'blog:the-verge:prior-launch';
+  const fingerprint = {
+    event_type: 'product_launch',
+    primary_actor: 'Example AI',
+    primary_object: 'Example Pad',
+    action: 'launch',
+    canonical_event: 'Example AI launches Example Pad',
+    confidence: 0.95,
+  };
+  const currentRow = {
+    id: currentId,
+    title: 'A later review of Example Pad',
+    source_type: 'blog',
+    content: '',
+    content_translated: '',
+    published_at: '2026-07-25T00:00:00.000Z',
+    extra: JSON.stringify({
+      title_zh: 'Example Pad 后续体验',
+      ai_summary_zh: 'Example Pad 后续体验。',
+      ai_category: 'product',
+      source_company: 'TechCrunch',
+      feed_key: 'techcrunch',
+      event_fingerprint: fingerprint,
+    }),
+  };
+  const priorRow = {
+    id: priorId,
+    title: 'Example AI launches Example Pad',
+    source_type: 'blog',
+    content: '',
+    content_translated: '',
+    published_at: '2026-07-15T00:00:00.000Z',
+    extra: JSON.stringify({
+      title_zh: 'Example Pad 正式发布',
+      ai_summary_zh: 'Example Pad 正式发布。',
+      ai_category: 'product',
+      source_company: 'The Verge',
+      feed_key: 'the-verge',
+      event_fingerprint: fingerprint,
+    }),
+  };
+  const ledgerIds = [
+    ...Array.from({ length: 300 }, (_, index) => `blog:history:${index}`),
+    priorId,
+  ];
+  const fetchedBatches: string[][] = [];
+  const db = {
+    prepare(sql: string) {
+      let binds: unknown[] = [];
+      const statement = {
+        bind(...nextBinds: unknown[]) {
+          binds = nextBinds;
+          return statement;
+        },
+        async all<T>() {
+          if (/FROM items\s+WHERE source_type IN/.test(sql)) {
+            return { results: [currentRow] as T[] };
+          }
+          if (/FROM digest_pool/.test(sql)) {
+            return { results: ledgerIds.map((id) => ({ id })) as T[] };
+          }
+          if (/WHERE id IN/.test(sql)) {
+            const ids = binds.map(String);
+            fetchedBatches.push(ids);
+            return { results: (ids.includes(priorId) ? [priorRow] : []) as T[] };
+          }
+          return { results: [] as T[] };
+        },
+      };
+      return statement;
+    },
+  };
+
+  const result = await selectNewsByScoreWithAudit(
+    { DB: db } as never,
+    5,
+    { strictCrossDayEventDedup: true },
+  );
+
+  assert.ok(fetchedBatches.flat().includes(priorId));
+  assert.deepEqual(result.ids, []);
 });
 
 test('suppressCrossDayRepeatedNewsEvents does not suppress a new Claude Sonnet launch because of prior Claude infrastructure coverage', () => {

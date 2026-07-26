@@ -38,12 +38,14 @@ export const GITHUB_CANDIDATE_TIME_EXPR = `COALESCE(
 
 // 跨天去重(2026-06-24):排除「今天之前」已进过 digest_pool(= node-run 已推送过)的 item,
 // 确保每天推送不含前几天推过的同一条(如 6/23 推过的「MiniMax 语音 2.8」6/24 不再重复)。
-// 账本 = digest_pool(node-run 每档每源写入的榜单 item_ids,JSON 数组)。只需回看选品窗:
-//   各源 scraped_at 窗最长 3 天(news/hf),故回看 DEDUP_LOOKBACK_DAYS=5 足够覆盖可被重选的范围。
+// 账本 = digest_pool(node-run 每档每源写入的榜单 item_ids,JSON 数组)。精确 item id 只需覆盖
+// 候选窗,但事件级去重必须独立回看更久:媒体会在产品发布数周后再发体验/复盘稿,这些稿件
+// id 和 scraped_at 都很新,事件本身却不是新新闻。
 // 严格 < 今日 BJT 0 点 → 只去「跨天」重复,不让同日 8/12/17 三档互相去重(各档用户不重叠)。
 // 仅用于「同一受众反复收」的推送场景:订阅邮件 + Codex API(都读 node-run 建的 pool)。
 // daily-api 不用本函数,改用下方 excludeStalePushes(宽松:容忍近期重复、只滤陈旧)。
-const DEDUP_LOOKBACK_DAYS = 5;
+const EXACT_ITEM_DEDUP_LOOKBACK_DAYS = 5;
+const EVENT_DEDUP_LOOKBACK_DAYS = 30;
 export interface SelectTopOptions {
   // node-run / 邮件 / Codex 快照使用:过滤前几天已经推过的同事件媒体重复。
   // daily-api 实时模式不启用,它只做日内事件折叠 + 自己的宽松 stale 去重。
@@ -69,7 +71,7 @@ export async function excludeAlreadyPushed(
   // 今日 BJT(UTC+8)0 点对应的 epoch ms
   const startOfTodayBjtMs =
     Math.floor((now + 8 * 3600_000) / 86400_000) * 86400_000 - 8 * 3600_000;
-  const lookbackFromMs = startOfTodayBjtMs - DEDUP_LOOKBACK_DAYS * 86400_000;
+  const lookbackFromMs = startOfTodayBjtMs - EXACT_ITEM_DEDUP_LOOKBACK_DAYS * 86400_000;
   const rows = await env.DB.prepare(
     `SELECT DISTINCT je.value AS id
        FROM digest_pool dp, json_each(COALESCE(dp.item_ids,'[]')) je
@@ -431,7 +433,7 @@ async function fetchPreviousPushedNewsCandidates(env: Env): Promise<NewsCandidat
   const now = Date.now();
   const startOfTodayBjtMs =
     Math.floor((now + 8 * 3600_000) / 86400_000) * 86400_000 - 8 * 3600_000;
-  const lookbackFromMs = startOfTodayBjtMs - DEDUP_LOOKBACK_DAYS * 86400_000;
+  const lookbackFromMs = startOfTodayBjtMs - EVENT_DEDUP_LOOKBACK_DAYS * 86400_000;
   const pushedRows = await env.DB.prepare(
     `SELECT DISTINCT je.value AS id
        FROM digest_pool dp, json_each(COALESCE(dp.item_ids,'[]')) je
@@ -452,16 +454,23 @@ async function fetchPreviousPushedNewsCandidates(env: Env): Promise<NewsCandidat
 
 async function fetchNewsCandidatesByIds(env: Env, ids: string[]): Promise<NewsCandidateForScoring[]> {
   if (!ids.length) return [];
-  const uniqueIds = [...new Set(ids)].slice(0, 300);
-  const placeholders = uniqueIds.map(() => '?').join(',');
-  const rows = await env.DB.prepare(
-    `SELECT id, title, source_type, content, content_translated, extra, published_at
-       FROM items
-      WHERE id IN (${placeholders})
-        AND source_type IN ('blog','podcast')
-        AND deleted_at IS NULL`,
-  ).bind(...uniqueIds).all<NewsCandidateDbRow>();
-  return (rows.results || []).map(newsCandidateFromDbRow);
+  const uniqueIds = [...new Set(ids)];
+  const rows: NewsCandidateDbRow[] = [];
+  // D1/SQLite 的 bind 参数有上限。分批读取完整事件账本,不能再静默截断到前 300 条,
+  // 否则 30 天窗口中较早但仍有效的同事件记录会随机漏掉。
+  for (let start = 0; start < uniqueIds.length; start += 200) {
+    const batch = uniqueIds.slice(start, start + 200);
+    const placeholders = batch.map(() => '?').join(',');
+    const result = await env.DB.prepare(
+      `SELECT id, title, source_type, content, content_translated, extra, published_at
+         FROM items
+        WHERE id IN (${placeholders})
+          AND source_type IN ('blog','podcast')
+          AND deleted_at IS NULL`,
+    ).bind(...batch).all<NewsCandidateDbRow>();
+    rows.push(...(result.results || []));
+  }
+  return rows.map(newsCandidateFromDbRow);
 }
 
 export function scoreNewsCandidatesForDigest(
@@ -849,8 +858,10 @@ interface DerivedEventFingerprint {
 
 interface StructuredEventFingerprint {
   eventType: string;
+  primaryActor: string;
   primaryObject: string;
   primaryObjectIdentity: string;
+  canonicalTokens: Set<string>;
   objectFamily: string;
   objectVariantTokens: Set<string>;
   objectVersion: string;
@@ -1012,8 +1023,10 @@ function deriveStructuredEventFingerprint(
   const confidence = typeof fp.confidence === 'number' ? fp.confidence : 0;
   return {
     eventType: normalizeEventType(fp.eventType || ''),
+    primaryActor: normalizeStructuredValue(fp.primaryActor || ''),
     primaryObject: normalizeStructuredValue(fp.primaryObject || ''),
     primaryObjectIdentity: normalizeStructuredObjectIdentity(fp.primaryObject || ''),
+    canonicalTokens: structuredCanonicalTokens(fp.canonicalEvent || ''),
     objectFamily: normalizeStructuredValue(fp.objectFamily || ''),
     objectVariantTokens: structuredVariantTokens(fp.objectVariant || fp.primaryObject || ''),
     objectVersion: normalizeStructuredValue(fp.objectVersion || ''),
@@ -1040,6 +1053,27 @@ function normalizeStructuredObjectIdentity(value: string): string {
     .filter((token) => !structuredObjectConnectorWords.has(token))
     .sort()
     .join('|');
+}
+
+const structuredCanonicalGenericWords = new Set([
+  'app', 'collaboration', 'device', 'feature', 'hardware', 'partnership',
+  'platform', 'product', 'service', 'system',
+]);
+
+function structuredCanonicalTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const match of normalizeEventText(value).match(/[a-z0-9][a-z0-9-]{2,}/g) || []) {
+    const token = normalizeEventToken(match);
+    if (
+      token
+      && !eventStopWords.has(token)
+      && !genericEventTokens.has(token)
+      && !structuredCanonicalGenericWords.has(token)
+    ) {
+      tokens.add(token);
+    }
+  }
+  return tokens;
 }
 
 function structuredVariantTokens(value: string): Set<string> {
@@ -1114,6 +1148,22 @@ function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: De
     && compatibleFamily
     && l.primaryObjectIdentity.includes('|')
     && l.primaryObjectIdentity === r.primaryObjectIdentity
+  ) {
+    return true;
+  }
+
+  const sameActor = Boolean(l.primaryActor && r.primaryActor && l.primaryActor === r.primaryActor);
+  const sharedCanonical = intersection(l.canonicalTokens, r.canonicalTokens);
+  const sharedObjectTokens = intersection(l.objectVariantTokens, r.objectVariantTokens);
+  const smallerCanonicalSize = Math.min(l.canonicalTokens.size, r.canonicalTokens.size);
+  if (
+    sameAction
+    && compatibleFamily
+    && sameActor
+    && sharedObjectTokens.size > 0
+    && sharedCanonical.size >= 3
+    && smallerCanonicalSize > 0
+    && sharedCanonical.size / smallerCanonicalSize >= 0.6
   ) {
     return true;
   }
