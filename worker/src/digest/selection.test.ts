@@ -640,6 +640,9 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
           }
           if (/WHERE id IN/.test(sql)) {
             const ids = binds.map(String);
+            if (ids.length > 80) {
+              throw new Error('D1_ERROR: too many SQL variables');
+            }
             fetchedBatches.push(ids);
             return { results: (ids.includes(priorId) ? [priorRow] : []) as T[] };
           }
@@ -657,6 +660,7 @@ test('selectNewsByScoreWithAudit does not truncate matching events after the fir
   );
 
   assert.ok(fetchedBatches.flat().includes(priorId));
+  assert.ok(fetchedBatches.every((batch) => batch.length <= 80));
   assert.deepEqual(result.ids, []);
 });
 

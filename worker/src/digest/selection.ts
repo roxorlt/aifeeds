@@ -46,6 +46,7 @@ export const GITHUB_CANDIDATE_TIME_EXPR = `COALESCE(
 // daily-api 不用本函数,改用下方 excludeStalePushes(宽松:容忍近期重复、只滤陈旧)。
 const EXACT_ITEM_DEDUP_LOOKBACK_DAYS = 5;
 const EVENT_DEDUP_LOOKBACK_DAYS = 30;
+const D1_ID_BATCH_SIZE = 80;
 export interface SelectTopOptions {
   // node-run / 邮件 / Codex 快照使用:过滤前几天已经推过的同事件媒体重复。
   // daily-api 实时模式不启用,它只做日内事件折叠 + 自己的宽松 stale 去重。
@@ -458,8 +459,8 @@ async function fetchNewsCandidatesByIds(env: Env, ids: string[]): Promise<NewsCa
   const rows: NewsCandidateDbRow[] = [];
   // D1/SQLite 的 bind 参数有上限。分批读取完整事件账本,不能再静默截断到前 300 条,
   // 否则 30 天窗口中较早但仍有效的同事件记录会随机漏掉。
-  for (let start = 0; start < uniqueIds.length; start += 200) {
-    const batch = uniqueIds.slice(start, start + 200);
+  for (let start = 0; start < uniqueIds.length; start += D1_ID_BATCH_SIZE) {
+    const batch = uniqueIds.slice(start, start + D1_ID_BATCH_SIZE);
     const placeholders = batch.map(() => '?').join(',');
     const result = await env.DB.prepare(
       `SELECT id, title, source_type, content, content_translated, extra, published_at
