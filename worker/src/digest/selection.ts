@@ -1188,6 +1188,25 @@ function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: De
   if (!l || !r) return undefined;
   if (l.confidence < 0.75 || r.confidence < 0.75) return undefined;
   if (policyStagesConflict(l.policyStage, r.policyStage)) return false;
+
+  // 两边都有高置信结构化指纹时，主体/对象身份的明确冲突优先于泛关键词兜底。
+  // 否则 Kimi K3 开源与 GPT-5.6 Copilot 集成会仅因都含有 AI/model/推出
+  // 被错误判成同一事件。要求“对象不同 + 至少两个结构字段冲突”，兼顾不同媒体
+  // 对同一对象的轻微命名差异，不因单字段漂移就强行拆事件。
+  const structuredIdentityConflicts = [
+    Boolean(l.eventType && r.eventType && l.eventType !== r.eventType),
+    Boolean(l.primaryActor && r.primaryActor && l.primaryActor !== r.primaryActor),
+    Boolean(l.objectFamily && r.objectFamily && l.objectFamily !== r.objectFamily),
+    Boolean(l.objectVersion && r.objectVersion && l.objectVersion !== r.objectVersion),
+  ].filter(Boolean).length;
+  if (
+    l.primaryObject
+    && r.primaryObject
+    && l.primaryObject !== r.primaryObject
+    && structuredIdentityConflicts >= 2
+  ) {
+    return false;
+  }
   if (l.eventType && r.eventType && l.eventType !== r.eventType) {
     const types = new Set([l.eventType, r.eventType]);
     // 同一模型的正式发布、基准评测和政策倡议是三个独立新闻事件。
