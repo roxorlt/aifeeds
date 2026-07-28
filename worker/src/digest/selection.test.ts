@@ -549,6 +549,90 @@ test('suppressCrossDayRepeatedNewsEvents keeps different products that only shar
   assert.deepEqual(filteredIds, ['blog:techcrunch:beta-keyboard']);
 });
 
+test('suppressCrossDayRepeatedNewsEvents keeps an actual open-weight release after an earlier upcoming-model preview', () => {
+  const candidates = [
+    row({
+      id: 'blog:the-verge:kimi-k3-open-weights',
+      title: 'Why China is giving away its best AI models',
+      sourceCompany: 'The Verge',
+      sourceKey: 'the-verge',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-27T16:51:50.000Z',
+      aiSummaryZh: '月之暗面已经开放 Kimi K3 模型权重。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Moonshot AI',
+        primaryObject: 'Kimi K3',
+        objectFamily: 'Kimi',
+        objectVersion: 'K3',
+        action: 'open_source',
+        canonicalEvent: 'Moonshot AI releases open-weight Kimi K3 model',
+        confidence: 1,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:techcrunch:kimi-k3-upcoming',
+      title: 'Moonshot’s upcoming Kimi 3 is expected to close the gap with Anthropic’s Opus 4.8',
+      sourceCompany: 'TechCrunch',
+      sourceKey: 'techcrunch',
+      aiCategory: 'model-release',
+      publishedAt: '2026-07-16T21:24:57.000Z',
+      aiSummaryZh: '月之暗面即将发布 Kimi K3，预计参数达 2 至 3 万亿。',
+      eventFingerprint: {
+        eventType: 'model_release',
+        primaryActor: 'Moonshot AI',
+        primaryObject: 'Kimi K3',
+        objectFamily: 'Kimi',
+        objectVersion: '3',
+        action: 'launch',
+        canonicalEvent: 'Moonshot AI to release Kimi K3 open-weight model',
+        confidence: 0.9,
+      },
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, ['blog:the-verge:kimi-k3-open-weights']);
+});
+
+test('suppressCrossDayRepeatedNewsEvents still removes a stale preview published after the actual release', () => {
+  const candidates = [
+    row({
+      id: 'blog:example:kimi-k3-late-preview',
+      title: 'Moonshot is expected to release Kimi K3',
+      sourceCompany: 'Example News',
+      aiCategory: 'model-release',
+      aiSummaryZh: '月之暗面预计将发布 Kimi K3。',
+      eventFingerprint: {
+        eventType: 'model_release', primaryActor: 'Moonshot AI', primaryObject: 'Kimi K3',
+        objectFamily: 'Kimi', objectVersion: 'K3', action: 'launch',
+        canonicalEvent: 'Moonshot AI to release Kimi K3', confidence: 0.9,
+      },
+    }),
+  ];
+  const prior = [
+    row({
+      id: 'blog:moonshot:kimi-k3-release',
+      title: 'Moonshot releases open-weight Kimi K3',
+      sourceCompany: 'Moonshot AI',
+      aiCategory: 'model-release',
+      aiSummaryZh: '月之暗面正式开放 Kimi K3 权重。',
+      eventFingerprint: {
+        eventType: 'model_release', primaryActor: 'Moonshot AI', primaryObject: 'Kimi K3',
+        objectFamily: 'Kimi', objectVersion: 'K3', action: 'open_source',
+        canonicalEvent: 'Moonshot AI releases open-weight Kimi K3', confidence: 1,
+      },
+    }),
+  ];
+
+  const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
+
+  assert.deepEqual(filteredIds, []);
+});
+
 test('selectNewsByScoreWithAudit uses a 30-day ledger for cross-day event deduplication', async () => {
   let ledgerBinds: unknown[] = [];
   const db = {

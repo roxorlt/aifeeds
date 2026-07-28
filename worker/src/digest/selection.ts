@@ -668,7 +668,9 @@ export function suppressCrossDayRepeatedNewsEvents<T extends NewsCandidateForSco
     // 官方源是更权威的后续代表:昨天媒体报过、今天官方源入库时仍允许替换成官方口径。
     if (officialSourceWeight(item) > 0) return true;
     const profile = eventTokens(item);
-    return !previousProfiles.some((previous) => sameNewsEvent(profile, previous));
+    return !previousProfiles.some((previous) =>
+      sameNewsEvent(profile, previous)
+      && !(previous.releaseStage === 'preview' && profile.releaseStage === 'released'));
   });
 }
 
@@ -805,8 +807,11 @@ interface TokenProfile {
   orgs: Set<string>;
   topics: Set<string>;
   distinctive: Set<string>;
+  releaseStage: ReleaseLifecycleStage;
   fingerprint: DerivedEventFingerprint;
 }
+
+type ReleaseLifecycleStage = 'preview' | 'released' | 'unknown';
 
 function eventTokens(item: NewsCandidateForScoring): TokenProfile {
   const text = normalizeEventText([
@@ -826,7 +831,46 @@ function eventTokens(item: NewsCandidateForScoring): TokenProfile {
   const orgs = new Set([...tokens].filter((token) => orgEventTokens.has(token)));
   const topics = new Set([...tokens].filter((token) => topicEventTokens.has(token)));
   const distinctive = new Set([...tokens].filter((token) => !genericEventTokens.has(token) && !eventStopWords.has(token)));
-  return { tokens, orgs, topics, distinctive, fingerprint: deriveEventFingerprint(item, text, tokens) };
+  return {
+    tokens,
+    orgs,
+    topics,
+    distinctive,
+    releaseStage: detectReleaseLifecycleStage(item, text),
+    fingerprint: deriveEventFingerprint(item, text, tokens),
+  };
+}
+
+function detectReleaseLifecycleStage(
+  item: NewsCandidateForScoring,
+  normalizedText: string,
+): ReleaseLifecycleStage {
+  if (item.aiCategory !== 'model-release' && normalizeEventType(item.eventFingerprint?.eventType || '') !== 'model-release') {
+    return 'unknown';
+  }
+  const fp = item.eventFingerprint;
+  const text = normalizeEventText([
+    normalizedText,
+    fp?.action || '',
+    fp?.canonicalEvent || '',
+  ].join(' '));
+
+  // LLM 有时会把“即将发布”的预告也标成 action=launch。先识别未来时态，
+  // 避免它挡住数日后真正的发布、开源或开放权重进展。
+  if (
+    /\bupcoming\b|\bexpected\s+to\b|\b(?:will|plans?\s+to|set\s+to|due\s+to|scheduled\s+to|poised\s+to)\s+(?:open[-\s]?(?:source|weight)|launch|release|publish|unveil)\b|\bto\s+(?:open[-\s]?(?:source|weight)|launch|release|publish|unveil)\b|\bteas(?:e|es|ed|ing)\b|即将|预告|预计.{0,16}(?:发布|推出|开源|开放权重)|最快.{0,10}(?:发布|推出)|计划.{0,16}(?:发布|推出|开源|开放权重)|将.{0,16}(?:发布|推出|开源|开放权重)/.test(text)
+  ) {
+    return 'preview';
+  }
+
+  const action = String(fp?.action || '').toLowerCase().replace(/[_\s]+/g, '-');
+  if (
+    ['launch', 'release', 'publish', 'available', 'open-source', 'open-weight', 'opensource', 'openweight'].includes(action)
+    || /\b(?:launch(?:es|ed)?|release(?:s|d)?|publish(?:es|ed)?|available)\b|\bopen[-\s]?(?:source|weight)(?:d|ed)?\b|已经|已正式|现已|正式(?:发布|推出|开源|开放权重)|开放权重|开源/.test(text)
+  ) {
+    return 'released';
+  }
+  return 'unknown';
 }
 
 function normalizeEventText(value: string): string {
