@@ -591,8 +591,44 @@ test('suppressCrossDayRepeatedNewsEvents keeps an actual open-weight release aft
         confidence: 0.9,
       },
     }),
+    row({
+      id: 'blog:jiqizhixin:kimi-k3-open-letter',
+      title: '黄仁勋首次发推：半个硅谷力挺 Kimi K3 开源',
+      sourceCompany: '机器之心',
+      aiCategory: 'safety',
+      publishedAt: '2026-07-25T02:12:25.000Z',
+      aiSummaryZh: '黄仁勋及二十余家公司联署公开信，倡导开放权重模型。',
+      eventFingerprint: {
+        eventType: 'policy_access',
+        primaryActor: 'NVIDIA',
+        primaryObject: '开放权重开源模型倡导公开信',
+        action: 'report',
+        canonicalEvent: '黄仁勋及科技公司签署公开信倡导开放权重模型',
+        confidence: 0.95,
+      },
+    }),
+    row({
+      id: 'blog:together:kimi-k3-benchmark',
+      title: 'Kimi K3 vs Claude Fable 5 on DeepSWE: Cost and Coding',
+      sourceCompany: 'Together AI',
+      aiCategory: 'research',
+      publishedAt: '2026-07-25T00:00:00.000Z',
+      aiSummaryZh: 'Together AI 发布 Kimi K3 与 Claude Fable 5 的 DeepSWE 评测。',
+      eventFingerprint: {
+        eventType: 'benchmark_eval',
+        primaryActor: 'Together AI',
+        primaryObject: 'Kimi K3 vs Claude Fable 5 on DeepSWE',
+        action: 'benchmark',
+        canonicalEvent: 'Together AI benchmarks Kimi K3 against Claude Fable 5',
+        confidence: 0.95,
+      },
+    }),
   ];
 
+  for (const previous of prior) {
+    const filteredAgainstOne = suppressCrossDayRepeatedNewsEvents(candidates, [previous]).map((item) => item.id);
+    assert.deepEqual(filteredAgainstOne, ['blog:the-verge:kimi-k3-open-weights'], `blocked by ${previous.id}`);
+  }
   const filteredIds = suppressCrossDayRepeatedNewsEvents(candidates, prior).map((item) => item.id);
 
   assert.deepEqual(filteredIds, ['blog:the-verge:kimi-k3-open-weights']);

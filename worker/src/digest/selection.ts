@@ -826,7 +826,11 @@ function eventTokens(item: NewsCandidateForScoring): TokenProfile {
     if (token && !eventStopWords.has(token)) tokens.add(token);
   }
   for (const [pattern, token] of cjkEventTerms) {
+    // cjkEventTerms 中的表达式带 /g；RegExp.test 会推进 lastIndex。
+    // 每条候选都必须从 0 开始，否则去重结果会随候选遍历顺序漂移。
+    pattern.lastIndex = 0;
     if (pattern.test(text)) tokens.add(token);
+    pattern.lastIndex = 0;
   }
   const orgs = new Set([...tokens].filter((token) => orgEventTokens.has(token)));
   const topics = new Set([...tokens].filter((token) => topicEventTokens.has(token)));
@@ -1082,7 +1086,11 @@ function deriveStructuredEventFingerprint(
 }
 
 function normalizeEventType(value: string): string {
-  return normalizeEventToken(String(value || '').toLowerCase().replace(/_/g, '-'));
+  const normalized = String(value || '').toLowerCase().replace(/[_\s]+/g, '-');
+  // normalizeEventToken 会把普通内容 token "model-release" 压成 "model"；
+  // 事件类型必须保留 release 语义，否则无法区分模型发布与政策/评测事件。
+  if (normalized === 'model-release' || normalized === 'model-launch') return 'model-release';
+  return normalizeEventToken(normalized);
 }
 
 function normalizeStructuredValue(value: string): string {
@@ -1180,7 +1188,19 @@ function sameStructuredEventFingerprint(left: DerivedEventFingerprint, right: De
   if (!l || !r) return undefined;
   if (l.confidence < 0.75 || r.confidence < 0.75) return undefined;
   if (policyStagesConflict(l.policyStage, r.policyStage)) return false;
-  if (l.eventType && r.eventType && l.eventType !== r.eventType) return undefined;
+  if (l.eventType && r.eventType && l.eventType !== r.eventType) {
+    const types = new Set([l.eventType, r.eventType]);
+    // 同一模型的正式发布、基准评测和政策倡议是三个独立新闻事件。
+    // 结构化类型已经高置信时不要再退回关键词重叠，否则“Kimi K3”这类
+    // 强产品词会把开放权重、联名信和评测错误合并。
+    if (
+      types.has('model-release')
+      && (types.has('benchmark-eval') || types.has('policy-access'))
+    ) {
+      return false;
+    }
+    return undefined;
+  }
 
   const sameAction = !l.action || !r.action || l.action === r.action;
   if (!sameAction && !left.policyAccess && !right.policyAccess) return undefined;
