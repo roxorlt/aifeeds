@@ -83,14 +83,29 @@ describe('daily news review API', () => {
   });
 
   test('GET returns the immutable batch and effective production selection', async () => {
-    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(['news-6', 'news-2', 'news-7', 'news-1', 'news-5']);
+    const reviewedBatch = {
+      ...batch,
+      applied_selected_ids: ['news-6', 'news-2', 'news-7'],
+      edit_revision: 2,
+      publish_status: 'published',
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(reviewedBatch.applied_selected_ids);
+    vi.mocked(getDailyStageState).mockResolvedValue({
+      stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 123,
+    } as never);
     const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
     const payload = await response.json<Record<string, unknown>>();
 
     expect(response.status).toBe(200);
     expect(payload.read_only).toBe(false);
     expect(payload.candidates).toHaveLength(10);
-    expect(payload.published_selected_ids).toEqual(['news-6', 'news-2', 'news-7', 'news-1', 'news-5']);
+    expect(payload.published_selected_ids).toEqual(['news-6', 'news-2', 'news-7']);
+    expect(payload.generation_target).toEqual({
+      review_revision: 2,
+      editorial_revision: 7,
+      editorial_content_hash: `sha256:${'a'.repeat(64)}`,
+    });
   });
 
   test('changed submission pushes editorial and finalizes only when papers are ready', async () => {
@@ -104,7 +119,14 @@ describe('daily news review API', () => {
     vi.mocked(submitNewsReviewSelection).mockResolvedValue({
       ok: true, changed: true, retry_publish: true, batch: changedBatch, selected_ids: changedBatch.applied_selected_ids,
     } as never);
-    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', pushed_at: 123 } as never);
+    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 3, pushed_at: 123 } as never);
+    vi.mocked(pushDailyStageToCodex).mockImplementation(async (_env, stage) => ({
+      ok: true,
+      stage,
+      revision: stage === 'editorial' ? 7 : 4,
+      content_hash: `sha256:${stage === 'editorial' ? 'a' : 'b'}`.padEnd(71, stage === 'editorial' ? 'a' : 'b'),
+      codex_id: 'daily-20260730',
+    }) as never);
 
     const response = await handleDailyNewsReviewApi(request('POST', {
       selected_ids: changedBatch.applied_selected_ids,
@@ -116,6 +138,14 @@ describe('daily news review API', () => {
     expect(markNewsReviewPublished).toHaveBeenCalledWith(
       expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash',
     );
+    await expect(response.clone().json()).resolves.toMatchObject({
+      generation_target: {
+        review_revision: 1,
+        editorial_revision: 7,
+        finalize_revision: 4,
+        codex_id: 'daily-20260730',
+      },
+    });
   });
 
   test('same default selection is a no-op and never regenerates downstream assets', async () => {

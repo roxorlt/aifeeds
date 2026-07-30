@@ -186,14 +186,19 @@ export async function verifyNewsReviewTokenSignature(
 
 export type NewsReviewSelectionValidation =
   | { ok: true; selected_ids: string[] }
-  | { ok: false; error: 'selection_must_have_five' | 'selection_must_be_unique' | 'selection_contains_unknown_item' };
+  | { ok: false; error: 'selection_must_have_one_to_five' | 'selection_must_be_unique' | 'selection_contains_unknown_item' };
 
 export function validateNewsReviewSelection(
   selectedIds: unknown,
   candidateIds: readonly string[],
 ): NewsReviewSelectionValidation {
-  if (!Array.isArray(selectedIds) || selectedIds.length !== 5 || selectedIds.some((id) => typeof id !== 'string')) {
-    return { ok: false, error: 'selection_must_have_five' };
+  if (
+    !Array.isArray(selectedIds)
+    || selectedIds.length < 1
+    || selectedIds.length > 5
+    || selectedIds.some((id) => typeof id !== 'string')
+  ) {
+    return { ok: false, error: 'selection_must_have_one_to_five' };
   }
   const normalized = selectedIds.map((id) => id.trim());
   if (new Set(normalized).size !== normalized.length) {
@@ -238,7 +243,7 @@ export async function getAppliedNewsReviewSelection(env: Env, date: string): Pro
        ORDER BY created_at DESC, edit_revision DESC LIMIT 1`,
     ).bind(date).first<{ applied_selected_ids: string }>();
     const ids = row ? parseStringArray(row.applied_selected_ids) : [];
-    return ids.length === 5 ? ids : null;
+    return ids.length >= 1 && ids.length <= 5 ? ids : null;
   } catch (error) {
     // 部署迁移与 Worker 代码存在短暂先后窗口；缺表时回退默认 digest_pool，
     // 不能让邮件、日报页或默认视频因此中断。
@@ -283,12 +288,13 @@ export function repairInvalidNewsReviewSelection(
   const candidates = new Set(candidateIds);
   const invalidIds = publishedIds.filter((id) => !candidates.has(id));
   if (!invalidIds.length) return { required: false, invalid_ids: [], selected_ids: [...publishedIds] };
+  const targetCount = Math.min(5, Math.max(1, publishedIds.length));
   const selected = publishedIds.filter((id) => candidates.has(id));
   for (const id of candidateIds) {
-    if (selected.length >= 5) break;
+    if (selected.length >= targetCount) break;
     if (!selected.includes(id)) selected.push(id);
   }
-  return { required: true, invalid_ids: invalidIds, selected_ids: selected.slice(0, 5) };
+  return { required: true, invalid_ids: invalidIds, selected_ids: selected.slice(0, targetCount) };
 }
 
 export async function freezeNewsReviewBatch(

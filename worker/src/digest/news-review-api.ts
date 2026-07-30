@@ -72,7 +72,12 @@ export async function handleDailyNewsReviewApi(
       getActiveNewsReviewBatch(env, date),
     ]);
     if (!batch) return response({ ok: false, error: 'review_batch_not_found' }, 404);
-    const publishedSelectedIds = await getPublishedNewsReviewSelection(env, date, batch);
+    const [publishedSelectedIds, editorialState] = await Promise.all([
+      getPublishedNewsReviewSelection(env, date, batch),
+      batch.edit_revision > 0 && batch.applied_selected_ids?.length
+        ? getDailyStageState(env, date, 'editorial')
+        : Promise.resolve(null),
+    ]);
     const expired = now >= batch.expires_at;
     const superseded = !!batch.superseded_by;
     let newerBatch: { batch_id: string; review_url: string } | null = null;
@@ -91,6 +96,13 @@ export async function handleDailyNewsReviewApi(
       edit_revision: batch.edit_revision,
       publish_status: batch.publish_status,
       publish_error: batch.publish_error,
+      generation_target: batch.edit_revision > 0 && batch.applied_selected_ids?.length
+        ? {
+          review_revision: batch.edit_revision,
+          editorial_revision: editorialState?.revision || null,
+          editorial_content_hash: editorialState?.content_hash || '',
+        }
+        : null,
       auto_repaired_invalid_ids: batch.auto_repaired_invalid_ids,
       expires_at: new Date(batch.expires_at).toISOString(),
       expired,
@@ -153,5 +165,12 @@ export async function handleDailyNewsReviewApi(
     editorial,
     finalize,
     finalize_pending: !papers?.pushed_at,
+    generation_target: {
+      review_revision: submitted.batch.edit_revision,
+      editorial_revision: editorial.revision || null,
+      editorial_content_hash: editorial.content_hash || '',
+      finalize_revision: finalize?.revision || null,
+      codex_id: finalize?.codex_id || editorial.codex_id || '',
+    },
   }, papers?.pushed_at ? 200 : 202);
 }

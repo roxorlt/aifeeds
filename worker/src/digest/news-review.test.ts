@@ -5,6 +5,7 @@ import {
   buildNewsReviewBatchId,
   createNewsReviewToken,
   freezeNewsReviewBatchFromPool,
+  getAppliedNewsReviewSelection,
   getPublishedNewsReviewSelection,
   repairInvalidNewsReviewSelection,
   validateNewsReviewSelection,
@@ -50,17 +51,46 @@ describe('daily news review contract', () => {
       .resolves.toEqual({ ok: false, expired: true });
   });
 
-  test('selection accepts exactly five unique candidate item ids and preserves submitted order', () => {
+  test('selection accepts one to five unique candidate item ids and preserves submitted order', () => {
     const ids = candidates.map((candidate) => candidate.item_id);
+    expect(validateNewsReviewSelection(['news-4'], ids)).toEqual({
+      ok: true,
+      selected_ids: ['news-4'],
+    });
+    expect(validateNewsReviewSelection(ids.slice(3, 6), ids)).toEqual({
+      ok: true,
+      selected_ids: ['news-4', 'news-5', 'news-6'],
+    });
     expect(validateNewsReviewSelection(ids.slice(3, 8), ids)).toEqual({
       ok: true,
       selected_ids: ['news-4', 'news-5', 'news-6', 'news-7', 'news-8'],
     });
-    expect(validateNewsReviewSelection(ids.slice(0, 4), ids)).toMatchObject({ ok: false, error: 'selection_must_have_five' });
-    expect(validateNewsReviewSelection(['news-1', 'news-2', 'news-2', 'news-4', 'news-5'], ids))
+    expect(validateNewsReviewSelection([], ids)).toMatchObject({ ok: false, error: 'selection_must_have_one_to_five' });
+    expect(validateNewsReviewSelection(ids.slice(0, 6), ids)).toMatchObject({ ok: false, error: 'selection_must_have_one_to_five' });
+    expect(validateNewsReviewSelection([''], ids)).toMatchObject({ ok: false, error: 'selection_contains_unknown_item' });
+    expect(validateNewsReviewSelection(['news-1', 'news-2', 'news-2'], ids))
       .toMatchObject({ ok: false, error: 'selection_must_be_unique' });
-    expect(validateNewsReviewSelection(['news-1', 'news-2', 'news-3', 'news-4', 'unknown'], ids))
+    expect(validateNewsReviewSelection(['news-1', 'unknown'], ids))
       .toMatchObject({ ok: false, error: 'selection_contains_unknown_item' });
+  });
+
+  test('applied production selection may contain fewer than five reviewed items', async () => {
+    const env = {
+      DB: {
+        prepare() {
+          const stmt = {
+            bind() { return stmt; },
+            async first<T>() {
+              return { applied_selected_ids: JSON.stringify(['news-6', 'news-2', 'news-7']) } as T;
+            },
+          };
+          return stmt;
+        },
+      },
+    } as never;
+
+    await expect(getAppliedNewsReviewSelection(env, '2026-07-30'))
+      .resolves.toEqual(['news-6', 'news-2', 'news-7']);
   });
 
   test('notification lists all candidates and binds the immutable date and batch link', () => {
@@ -192,5 +222,13 @@ describe('daily news review contract', () => {
       ['news-5', 'news-4', 'news-3', 'news-2', 'news-1'],
       ['news-1', 'news-2', 'news-3', 'news-4', 'news-5'],
     )).toEqual({ required: false, invalid_ids: [], selected_ids: ['news-5', 'news-4', 'news-3', 'news-2', 'news-1'] });
+    expect(repairInvalidNewsReviewSelection(
+      ['news-9', 'deleted-news', 'news-2'],
+      ['news-1', 'news-2', 'news-3', 'news-4', 'news-5', 'news-6', 'news-7', 'news-8', 'news-9', 'news-10'],
+    )).toEqual({
+      required: true,
+      invalid_ids: ['deleted-news'],
+      selected_ids: ['news-9', 'news-2', 'news-1'],
+    });
   });
 });
