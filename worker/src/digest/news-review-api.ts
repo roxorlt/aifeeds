@@ -59,7 +59,21 @@ export async function handleDailyNewsReviewApi(
   const date = url.searchParams.get('date') || '';
   const batchId = url.searchParams.get('batch') || '';
   const token = url.searchParams.get('token') || '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^nr-\d{8}-[a-f0-9]{12}$/.test(batchId)) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return response({ ok: false, error: 'invalid_review_reference' }, 400);
+  }
+  if (request.method === 'GET' && !batchId && !token) {
+    const active = await getActiveNewsReviewBatch(env, date);
+    if (!active) return response({ ok: false, error: 'review_batch_not_found' }, 404);
+    const activeToken = await createNewsReviewToken(newsReviewSecret(env), date, active.batch_id);
+    return response({
+      ok: true,
+      date,
+      batch_id: active.batch_id,
+      review_url: reviewLink(date, active.batch_id, activeToken),
+    });
+  }
+  if (!/^nr-\d{8}-[a-f0-9]{12}$/.test(batchId)) {
     return response({ ok: false, error: 'invalid_review_reference' }, 400);
   }
   if (!await verifyNewsReviewTokenSignature(newsReviewSecret(env), date, batchId, token)) {

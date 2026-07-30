@@ -65,6 +65,13 @@ function request(method: string, body?: unknown, auth = true) {
   });
 }
 
+function currentBatchRequest(auth = true) {
+  return new Request('https://api.example.test/api/digest/daily-news-review?date=2026-07-30', {
+    method: 'GET',
+    headers: auth ? { Authorization: 'Bearer shared-secret' } : {},
+  });
+}
+
 describe('daily news review API', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -106,6 +113,22 @@ describe('daily news review API', () => {
       editorial_revision: 7,
       editorial_content_hash: `sha256:${'a'.repeat(64)}`,
     });
+  });
+
+  test('authenticated HK may resolve the active review link without a PushDeer capability', async () => {
+    const response = await handleDailyNewsReviewApi(currentBatchRequest(), env(), Date.parse('2026-07-30T08:00:00Z'));
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      ok: true,
+      date: '2026-07-30',
+      batch_id: batch.batch_id,
+    });
+    expect(payload.review_url).toBe(
+      `https://ai-feeds.cc/aifeeds/latest/?review_date=2026-07-30&review_batch=${batch.batch_id}&review_token=newer-token#news-review`,
+    );
+    expect(getActiveNewsReviewBatch).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
   });
 
   test('changed submission pushes editorial and finalizes only when papers are ready', async () => {
