@@ -4,6 +4,9 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 vi.mock('./selection', () => ({
   selectTopForSource: vi.fn(async () => [] as string[]),
 }));
+vi.mock('./news-review', () => ({
+  getAppliedNewsReviewSelection: vi.fn(async () => null),
+}));
 
 import {
   buildDailyPageData,
@@ -18,6 +21,7 @@ import {
 } from './daily-page';
 import type { DailyVideoRow } from './daily-video';
 import { selectTopForSource } from './selection';
+import { getAppliedNewsReviewSelection } from './news-review';
 import type { Env } from '../index';
 import { DAILY_PAGE_INTRO_MAX, type DigestSource } from './config';
 import { clampSentences, renderItem, type RenderedItem, type RenderRow } from './render';
@@ -650,6 +654,22 @@ describe('buildDailyPageData', () => {
   beforeEach(() => {
     vi.mocked(selectTopForSource).mockReset();
     vi.mocked(selectTopForSource).mockResolvedValue([]);
+    vi.mocked(getAppliedNewsReviewSelection).mockReset();
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+  });
+
+  test('对应日期的日报页按人工选择的五条及顺序展示新闻', async () => {
+    const defaultIds = ['blog:n1', 'blog:n2', 'blog:n3', 'blog:n4', 'blog:n5'];
+    const reviewedIds = ['blog:n6', 'blog:n2', 'blog:n7', 'blog:n1', 'blog:n5'];
+    const rowsById = new Map([...defaultIds, ...reviewedIds].map((id, index) => [id, mkRow(id, index)]));
+    setSelection({ news: defaultIds });
+    vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(reviewedIds);
+
+    const data = await buildDailyPageData(envWithDb(makeDbMock({ rowsById })), '2026-07-30');
+
+    expect(data!.sections.find((section) => section.source === 'news')!.items.map((item) => item.item_id))
+      .toEqual(reviewedIds);
+    expect(getAppliedNewsReviewSelection).toHaveBeenCalledWith(expect.anything(), '2026-07-30');
   });
 
   test('某源选品返回 25 条时,build 层截断到 20 条', async () => {

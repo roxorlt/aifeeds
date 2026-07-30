@@ -15,4 +15,10 @@ describe('staged daily worker wiring', () => {
     expect(indexSource).toContain("mode === 'daily-codex-stage'");
     expect(indexSource).toContain("mode === 'daily-codex-push'");
   });
+
+  test('HK review proxy has a dedicated authenticated API route', () => {
+    expect(indexSource).toContain("path === '/api/digest/daily-news-review'");
+    expect(indexSource).toContain('handleDailyNewsReviewApi(request, env)');
+    expect(indexSource).toContain('DAILY_NEWS_REVIEW_SECRET');
+  });
 });

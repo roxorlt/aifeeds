@@ -115,6 +115,7 @@ import { renderXCardViaCodex, buildXCardPayload, runDrainXCardRenders, enqueueXC
 import {
   buildDailyCodexPayload,
   buildStagedDailyCodexPayload,
+  getDailyStageState,
   pushDailyStageToCodex,
   pushDailyToCodex,
   type DailyCodexStage,
@@ -125,6 +126,8 @@ import { routeDigestCronWorkflows } from './digest/node-run';
 import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
+import { handleDailyNewsReviewApi } from './digest/news-review-api';
+import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
 import { runPhDailyFetch, triggerPhWorkflowForItem, runBackfillPhCommentsTranslation } from './scrapers/ph';
@@ -328,6 +331,8 @@ export interface Env {
   DAILY_STAGED_PUSH_ENABLED?: string;     // v2 分批预生产开关:'1'=06:30/07:50/08:00 stages;关闭时保留 v1 早8点全量
   DAILY_PUSH_STAGING_ENDPOINT?: string;   // staging 专用测试 ingest；非 prod v2 只能推该端点，禁止回落生产地址
   NEWS_CODEX_PUSH?: string;               // 行业新闻板块是否推进 Codex:'1'=开;不设/其他=关(等下游 Codex 适配好 news 板块再开,翻 flag 即生效)
+  DAILY_NEWS_REVIEW_SECRET?: string;       // HK 审核代理与当日审核链接共用 HMAC secret
+  DAILY_NEWS_REVIEW_ENABLED?: string;      // '1'=冻结 Top10 + PushDeer 审核通知 + 接受当日人工修订
   DAILY_PAGE_ENABLED?: string;            // 早8点自动生成 SEO 静态日报页总开关(node-run Phase 4):'1'=开;不设/其他=关(手动 mode=daily-page 不受此限)
   CC_MIRROR_ENABLED?: string;             // '1'=启用 .cc 内容镜像生成/同步链；缺省关闭
   CC_SITE_BASE?: string;                  // .cc 静态内容 canonical 域；默认 https://ai-feeds.cc
@@ -726,6 +731,9 @@ export default {
       // handler 内部使用 X_CARD_SHARED_TOKEN Bearer 鉴权并负责 R2/D1/静态页 SEO 更新。
       if (path === '/api/digest/daily-video') {
         return handleDailyVideoUpload(request, env);
+      }
+      if (path === '/api/digest/daily-news-review') {
+        return handleDailyNewsReviewApi(request, env);
       }
 
       if (path === '/api/ingest' && request.method === 'POST') {
@@ -4397,7 +4405,43 @@ async function handleEnrichRun(request: Request, env: Env, ctx: ExecutionContext
       return jsonResponse({ error: 'daily-digest-rescore only supports current BJT date' }, 400, request, env);
     }
     const result = await rebuildDigestPoolSnapshot(env, { slotHourBjt: 8, date });
-    return jsonResponse({ ok: true, mode, emails_sent: 0, codex_pushed: false, ...result }, 200, request, env);
+    const review = env.DAILY_NEWS_REVIEW_ENABLED === '1'
+      ? await (async () => {
+        const frozen = await freezeNewsReviewBatchFromPool(env, date);
+        const notified = await notifyNewsReviewBatch(env, frozen.batch);
+        let autoRepairPush: Record<string, unknown> | null = null;
+        if (frozen.auto_repaired && frozen.batch.selection_hash) {
+          const editorial = await pushDailyStageToCodex(env, 'editorial', date);
+          if (!editorial.ok) throw new Error(`auto_repair_editorial_push_failed:${editorial.error || editorial.skipped}`);
+          const papers = await getDailyStageState(env, date, 'papers');
+          const finalize = papers?.pushed_at
+            ? await pushDailyStageToCodex(env, 'finalize', date)
+            : null;
+          if (finalize && !finalize.ok) throw new Error(`auto_repair_finalize_push_failed:${finalize.error || finalize.skipped}`);
+          if (finalize?.ok) await generateDailyPage(env, date);
+          await markNewsReviewPublished(env, date, frozen.batch.batch_id, frozen.batch.selection_hash);
+          autoRepairPush = { editorial, finalize, finalize_pending: !papers?.pushed_at };
+        }
+        return {
+          batch_id: frozen.batch.batch_id,
+          created: frozen.created,
+          superseded_batch_id: frozen.superseded_batch_id,
+          auto_repaired: frozen.auto_repaired,
+          auto_repaired_invalid_ids: frozen.auto_repaired_invalid_ids,
+          auto_repair_push: autoRepairPush,
+          notified: notified.notified,
+          review_url: notified.review_url,
+        };
+      })()
+      : null;
+    return jsonResponse({
+      ok: true,
+      mode,
+      emails_sent: 0,
+      codex_pushed: !!review?.auto_repair_push,
+      review,
+      ...result,
+    }, 200, request, env);
   }
   // 兼容旧 OPS 命令名，但实现统一走新的 bounded drain。
   if (mode === 'backfill-hf-paper-workflow') {
@@ -5903,6 +5947,7 @@ function isBotGateExempt(path: string, method: string): boolean {
   // The exemption is prefix-scoped; handleCcSyncRoute still authenticates
   // health, unknown subpaths, and wrong methods before any other work.
   if (path.startsWith('/api/cc-sync/')) return true;
+  if (path === '/api/digest/daily-news-review') return true;
   // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
   if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {

@@ -25,6 +25,7 @@ import { SOURCE_LABELS, escapeHtml } from './templates';
 import { buildDigestSubjectFallback } from './subject';
 import { getBases } from './lib';
 import type { DailyVideoRow } from './daily-video';
+import { getAppliedNewsReviewSelection } from './news-review';
 
 // 日报页展示源与顺序:沿用 DIGEST_SOURCE_ORDER 剔除 clawhub(2026-06-21 退出订阅日报)。
 export const DAILY_PAGE_SOURCES: DigestSource[] = DIGEST_SOURCE_ORDER.filter((s) => s !== 'clawhub');
@@ -103,6 +104,7 @@ export async function buildDailyPageData(
 ): Promise<DailyPageData | null> {
   const { apiBase } = getBases(env);
   const sections: DailyPageSection[] = [];
+  const reviewedNewsIds = await getAppliedNewsReviewSelection(env, date);
 
   for (const source of DAILY_PAGE_SOURCES) {
     // 每源选品选项:
@@ -115,7 +117,9 @@ export async function buildDailyPageData(
     const selectOpts: SelectTopOptions = {};
     if (opts.anchorToDate) selectOpts.asOfDate = date;
     else if (source === 'news') selectOpts.strictCrossDayEventDedup = true;
-    const selected = await selectTopForSource(env, source, DAILY_PAGE_PER_SOURCE_LIMIT, selectOpts);
+    const selected = source === 'news' && reviewedNewsIds
+      ? reviewedNewsIds
+      : await selectTopForSource(env, source, DAILY_PAGE_PER_SOURCE_LIMIT, selectOpts);
     // 防御性截断:选品函数已带 limit,天然 ≤20;这里再 slice 一次,渲染层不做保护。
     const ids = selected.slice(0, DAILY_PAGE_PER_SOURCE_LIMIT);
     if (!ids.length) continue;

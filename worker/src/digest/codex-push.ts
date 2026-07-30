@@ -11,6 +11,7 @@ import { slotKey, bjtDateStr, getBases } from './lib';
 import { renderItem, type RenderRow, type RenderedItem } from './render';
 import { SOURCE_LABELS } from './templates';
 import { pushDeerAlert } from '../notifier';
+import { getAppliedNewsReviewSelection } from './news-review';
 
 const DEFAULT_DAILY_ENDPOINT = 'https://ai-feeds.cc/aifeeds/api/daily/ingest';
 const PUSH_TIMEOUT_MS = 30_000;
@@ -344,6 +345,10 @@ async function buildCodexSections(
   sources: readonly DigestSource[],
 ): Promise<DailyCodexPayload['digest']['sections']['normal']> {
   const { apiBase } = getBases(env);
+  const reviewDate = sk.slice(0, 10);
+  const reviewedNewsIds = sources.includes('news')
+    ? await getAppliedNewsReviewSelection(env, reviewDate)
+    : null;
   const sections: DailyCodexPayload['digest']['sections']['normal'] = [];
   let stageCardIndex = 0;
   for (const source of sources) {
@@ -352,7 +357,9 @@ async function buildCodexSections(
     )
       .bind(sk, source)
       .first<{ item_ids: string }>();
-    const ids = safeIds(pool?.item_ids ?? null);
+    const ids = source === 'news' && reviewedNewsIds
+      ? reviewedNewsIds
+      : safeIds(pool?.item_ids ?? null);
     if (!ids.length) continue;
     const rows = await fetchRows(env, ids);
     const items: CodexItem[] = [];

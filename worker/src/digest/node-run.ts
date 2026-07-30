@@ -18,6 +18,7 @@ import {
   rebuildDigestPoolSubject,
 } from './pool-rebuild';
 import { pushDeerAlert } from '../notifier';
+import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-review';
 
 export interface NodeRunParams {
   slotHourBjt: number;
@@ -103,6 +104,30 @@ async function pushStageStep(
   });
 }
 
+async function prepareNewsReviewStep(
+  env: Env,
+  step: WorkflowStep,
+  date: string,
+): Promise<void> {
+  if (env.DAILY_NEWS_REVIEW_ENABLED !== '1') return;
+  const frozen = await step.do('freeze-news-review-batch', RETRY, async () => {
+    return freezeNewsReviewBatchFromPool(env, date);
+  });
+  try {
+    await step.do('notify-news-review-batch', RETRY, async () => {
+      return notifyNewsReviewBatch(env, frozen.batch);
+    });
+  } catch (error) {
+    // 审核通知失败不能阻断默认 Top5 的海报/音频/视频生产。批次仍保留
+    // notified_at=NULL，08:00 恢复步骤和人工运维可继续补发。
+    await pushDeerAlert(
+      env,
+      '行业要闻审核通知失败',
+      `${date}: ${String(error).slice(0, 240)}`,
+    ).catch(() => {});
+  }
+}
+
 async function ensurePriorStageSnapshots(env: Env, step: WorkflowStep, date: string): Promise<void> {
   for (const stage of ['foundation', 'editorial'] as const) {
     const state = await step.do(`check-codex-${stage}`, RETRY, async () => {
@@ -141,6 +166,7 @@ async function runDigestNodeWorkflowCore(
   }
   if (stagedEnabled && earlyStage) {
     await rebuildStageStep(env, step, date, earlyStage);
+    if (earlyStage === 'editorial') await prepareNewsReviewStep(env, step, date);
     if (env.DAILY_PUSH_ENABLED === '1') {
       await pushStageStep(env, step, date, earlyStage);
     }
@@ -152,6 +178,8 @@ async function runDigestNodeWorkflowCore(
     // 邮件也消费同一个 -08 池，因此缺失早批要先补快照；这里不做外部 push，
     // 保证 HK 故障不会让邮件缺栏目或阻断投递。
     await ensurePriorStageSnapshots(env, step, date);
+    // 07:50 若因临时故障漏建批次或 PushDeer 未成功，08:00 以同一快照幂等补建/补发。
+    await prepareNewsReviewStep(env, step, date);
     await rebuildStageStep(env, step, date, 'papers');
   } else {
     // v1 回滚路径及 12/17 邮件节点保持原有全源重建行为。

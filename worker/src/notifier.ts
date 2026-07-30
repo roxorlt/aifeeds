@@ -29,48 +29,64 @@ export interface WarningEntry {
   at: string; // ISO timestamp
 }
 
+export interface PushDeerSendResult {
+  attempted: number;
+  succeeded: number;
+}
+
+async function sendPushDeer(
+  env: Env,
+  title: string,
+  body: string,
+): Promise<PushDeerSendResult> {
+  const keysCsv = env.PUSHDEER_ADMIN_KEYS;
+  if (!keysCsv) {
+    console.warn('[notifier] PUSHDEER_ADMIN_KEYS not set, skip message');
+    return { attempted: 0, succeeded: 0 };
+  }
+  const keys = keysCsv.split(',').map((key) => key.trim()).filter(Boolean);
+  let succeeded = 0;
+  await Promise.all(keys.map(async (key) => {
+    try {
+      const response = await fetch(PUSHDEER_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          pushkey: key,
+          text: title,
+          desp: body,
+          type: 'markdown',
+        }),
+      });
+      if (!response.ok) {
+        console.error(`[pushdeer] ${response.status}`, await response.text());
+        return;
+      }
+      const data = await response.json<{ code?: number; error?: string }>();
+      if (data.code === 0) succeeded++;
+      else console.error('[pushdeer]', data);
+    } catch (error) {
+      console.error('[pushdeer] exception', error);
+    }
+  }));
+  return { attempted: keys.length, succeeded };
+}
+
+export async function pushDeerMessage(
+  env: Env,
+  title: string,
+  body: string,
+): Promise<PushDeerSendResult> {
+  return sendPushDeer(env, title, body);
+}
+
 export async function pushDeerAlert(
   env: Env,
   title: string,
   body: string,
 ): Promise<void> {
-  const keysCsv = env.PUSHDEER_ADMIN_KEYS;
-  if (!keysCsv) {
-    console.warn('[notifier] PUSHDEER_ADMIN_KEYS not set, skip alert');
-    return;
-  }
-
-  const keys = keysCsv.split(',').map((k) => k.trim()).filter(Boolean);
-  if (keys.length === 0) return;
-
   const fullTitle = `xList告警 | ${title}`;
-
-  await Promise.allSettled(
-    keys.map(async (key) => {
-      try {
-        const r = await fetch(PUSHDEER_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            pushkey: key,
-            text: fullTitle,
-            desp: body,
-            type: 'markdown',
-          }),
-        });
-        if (!r.ok) {
-          console.error(`[pushdeer] ${r.status}`, await r.text());
-          return;
-        }
-        const data = await r.json<{ code?: number; error?: string }>();
-        if (data.code !== 0) {
-          console.error('[pushdeer]', data);
-        }
-      } catch (e) {
-        console.error('[pushdeer] exception', e);
-      }
-    }),
-  );
+  await sendPushDeer(env, fullTitle, body);
 }
 
 /**

@@ -20,6 +20,10 @@ vi.mock('./pool-rebuild', () => ({
 
 vi.mock('./daily-page-monitor', () => ({ runDailyPagePhase: vi.fn() }));
 vi.mock('../notifier', () => ({ pushDeerAlert: vi.fn(async () => undefined) }));
+vi.mock('./news-review', () => ({
+  freezeNewsReviewBatchFromPool: vi.fn(),
+  notifyNewsReviewBatch: vi.fn(),
+}));
 
 import type { Env } from '../index';
 import {
@@ -34,6 +38,7 @@ import {
 } from './pool-rebuild';
 import { runDailyPagePhase } from './daily-page-monitor';
 import { pushDeerAlert } from '../notifier';
+import { freezeNewsReviewBatchFromPool, notifyNewsReviewBatch } from './news-review';
 import {
   routeDigestCronWorkflows,
   runDigestNodeWorkflow,
@@ -100,6 +105,29 @@ describe('staged 08:00 node run', () => {
     vi.mocked(rebuildDigestPoolSubject).mockResolvedValue('标题');
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: true } as never);
     vi.mocked(pushDailyToCodex).mockResolvedValue({ ok: true } as never);
+    vi.mocked(freezeNewsReviewBatchFromPool).mockResolvedValue({
+      created: true,
+      superseded_batch_id: null,
+      batch: { batch_id: 'nr-20260721-abcdef123456' },
+    } as never);
+    vi.mocked(notifyNewsReviewBatch).mockResolvedValue({ notified: true, review_url: 'https://example.test/review' });
+  });
+
+  test('07:50 freezes and notifies the top ten before pushing the default editorial stage', async () => {
+    const env = makeEnv({ DAILY_NEWS_REVIEW_ENABLED: '1' });
+
+    await runDigestNodeWorkflow(
+      env,
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'editorial' },
+      makeStep() as never,
+    );
+
+    expect(freezeNewsReviewBatchFromPool).toHaveBeenCalledWith(env, '2026-07-21');
+    expect(notifyNewsReviewBatch).toHaveBeenCalledWith(env, expect.objectContaining({
+      batch_id: 'nr-20260721-abcdef123456',
+    }));
+    expect(vi.mocked(notifyNewsReviewBatch).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(pushDailyStageToCodex).mock.invocationCallOrder[0]);
   });
 
   test('uses locked foundation/editorial snapshots and rebuilds papers only', async () => {

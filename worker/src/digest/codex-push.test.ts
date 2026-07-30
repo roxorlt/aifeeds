@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 
+vi.mock('./news-review', () => ({
+  getAppliedNewsReviewSelection: vi.fn(async () => null),
+}));
+
 import type { Env } from '../index';
 import type { RenderRow } from './render';
 import {
@@ -9,6 +13,7 @@ import {
   getDailyStageState,
   pushDailyStageToCodex,
 } from './codex-push';
+import { getAppliedNewsReviewSelection } from './news-review';
 
 interface PoolRow {
   item_ids: string;
@@ -109,6 +114,28 @@ function makeEnv() {
     setPool,
   };
 }
+
+beforeEach(() => {
+  vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
+});
+
+test('editorial video payload uses the ordered human selection without mutating the default pool', async () => {
+  const { env, setPool, pools } = makeEnv();
+  setPool('2026-07-21', 'news', ['news-1', 'news-2', 'news-3', 'news-4', 'news-5']);
+  for (const id of ['news-6', 'news-7']) setPool('2026-07-20', 'news', [id]);
+  vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue([
+    'news-6', 'news-2', 'news-7', 'news-1', 'news-5',
+  ]);
+
+  const payload = await buildStagedDailyCodexPayload(env, 'editorial', { date: '2026-07-21' });
+
+  expect(payload.digest.sections.normal[0].items.map((item) => item.item_id)).toEqual([
+    'news-6', 'news-2', 'news-7', 'news-1', 'news-5',
+  ]);
+  expect(JSON.parse(pools.get('2026-07-21-08|news|normal')!.item_ids)).toEqual([
+    'news-1', 'news-2', 'news-3', 'news-4', 'news-5',
+  ]);
+});
 
 function seedAll(setPool: (date: string, source: string, ids: string[]) => void, date = '2026-07-21') {
   setPool(date, 'news', ['news:2', 'news:1']);
