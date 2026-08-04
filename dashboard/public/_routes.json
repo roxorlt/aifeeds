@@ -9,11 +9,15 @@
     "/e/*",
     "/h/*",
     "/o/*",
-    "/_home/feed"
+    "/_home/feed",
+    "/daily",
+    "/daily/*",
+    "/video/daily/*",
+    "/sitemap-daily.xml",
+    "/video-sitemap.xml"
   ],
   "exclude": [
     "/assets/*",
-    "/daily/*",
     "/api/*",
     "/r/*",
     "/img",

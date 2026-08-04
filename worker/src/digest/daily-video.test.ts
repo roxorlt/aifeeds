@@ -343,7 +343,7 @@ describe('daily video content-addressed persistence', () => {
     expect(pagePutAt).toBeGreaterThan(upsertAt);
   });
 
-  test('patched page timestamps are updated and IndexNow receives all four discovery URLs', async () => {
+  test('patched page timestamps are updated and IndexNow receives the watch page plus discovery URLs', async () => {
     const events: Event[] = [];
     const r2 = makeR2(events);
     r2.store.set(
@@ -366,6 +366,7 @@ describe('daily video content-addressed persistence', () => {
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(String(init.body)).urlList).toEqual([
       `${SITE}/daily/2026-07-14`,
+      `${SITE}/video/daily/2026-07-14`,
       `${SITE}/video-sitemap.xml`,
       `${SITE}/sitemap-daily.xml`,
       `${SITE}/sitemap.xml`,

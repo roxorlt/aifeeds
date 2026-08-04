@@ -134,13 +134,14 @@ test('SEO regex routes only authoritative public paths to the staging Worker', (
 
   assert.equal(
     seo.patternSource,
-    '^/(daily(/.*)?|archive(/.*)?|i/.*|robots\\.txt|sitemap\\.xml|sitemap-[a-z0-9-]+\\.xml|llms\\.txt)$',
+    '^/(daily(/.*)?|video/daily/.*|archive(/.*)?|i/.*|robots\\.txt|sitemap\\.xml|video-sitemap\\.xml|sitemap-[a-z0-9-]+\\.xml|llms\\.txt)$',
   );
 
   for (const pathname of [
     '/daily',
     '/daily/',
     '/daily/2026-07-12',
+    '/video/daily/2026-07-12',
     '/archive',
     '/archive/',
     '/archive/x/2026-07/2',
@@ -149,6 +150,7 @@ test('SEO regex routes only authoritative public paths to the staging Worker', (
     '/robots.txt',
     '/sitemap.xml',
     '/sitemap-daily.xml',
+    '/video-sitemap.xml',
     '/sitemap-hf-paper-2.xml',
     '/llms.txt',
   ]) {
@@ -159,6 +161,8 @@ test('SEO regex routes only authoritative public paths to the staging Worker', (
     '/i',
     '/api/items',
     '/dailyish',
+    '/video/daily',
+    '/video/dailyish/2026-07-12',
     '/sitemap-.xml',
     '/sitemap-NEWS.xml',
     '/indexnow-key.txt',

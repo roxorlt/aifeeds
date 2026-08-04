@@ -32,10 +32,12 @@ const ROOT_TXT_RE = /^\/[A-Za-z0-9._-]+\.txt$/;
 const SITEMAP_SHARD_RE = /^\/sitemap-[a-z0-9-]+\.xml$/;
 function isSeoPath(pathname) {
   if (pathname === "/daily" || pathname.startsWith("/daily/")) return true;
+  if (pathname.startsWith("/video/daily/")) return true;
   if (pathname === "/archive" || pathname.startsWith("/archive/")) return true;
   // item SSR 静态页 /i/…（worker seo/item-routes.ts 伺服）。裸 /i 不放行(与 worker isSeoPath 同口径)。
   if (pathname.startsWith("/i/")) return true;
   if (pathname === "/sitemap.xml") return true;
+  if (pathname === "/video-sitemap.xml") return true;
   if (SITEMAP_SHARD_RE.test(pathname)) return true;
   if (ROOT_TXT_RE.test(pathname)) return true;
   return false;
