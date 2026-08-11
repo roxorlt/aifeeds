@@ -436,6 +436,38 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '百度造大模型法院命令OpenAI停止发布GPT 6。',
+    '法院命令百度造大模型OpenAI停止发布GPT 6。',
+    '法院命令OpenAI停止发布GPT 6百度造大模型。',
+    '腾讯推模型法院命令OpenAI停止发布GPT 6。',
+    '法院命令智谱改系统OpenAI停止发布GPT 6。',
+    '法院命令OpenAI停止发布GPT 6月之暗面推模型。',
+  ])('rejects one-character predicates in every unconsumed control-chain segment: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '额外内容法院命令OpenAI停止发布GPT 6。',
+    '法院命令OpenAI停止发布GPT 6未经核实内容。',
+    'Extra context The court orders OpenAI to pause GPT 6.',
+    'The court orders unrelated context OpenAI to pause GPT 6.',
+  ])('rejects any semantic prefix or tail left outside a parsed control chain: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test('keeps a fully consumed English court control chain atomic', () => {
+    const text = 'The court orders OpenAI to pause GPT 6.';
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     '法院命令OpenAI停止发布大模型。',
     '监管机构命令百度停止发布开源模型。',
   ])('does not mistake a short ordinary control-chain object for another predicate: %s', (text) => {
@@ -497,6 +529,40 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布GPT 6支持向量模型。',
+    'Anthropic发布Claude 5命令行工具。',
+    '百度发布文心命令行工具。',
+    '月之暗面发布Kimi K3支持向量模型。',
+  ])('accepts a versioned or Chinese product prefix inside one release object noun phrase: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布Anthropic投资分析工具。',
+    'OpenAI发布Google支持向量模型。',
+    'OpenAI发布Meta开源模型。',
+    'OpenAI发布百度投资分析工具。',
+    'OpenAI发布腾讯支持向量模型。',
+    'OpenAI发布NovaAI投资分析工具。',
+  ])('does not exempt an organization subject as a post-release product prefix: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    'OpenAI发布Acme投资分析工具。',
+    'OpenAI发布Nimbus支持向量模型。',
+  ])('fails closed when a post-release entity role is ambiguous: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
   });
 
   test.each([

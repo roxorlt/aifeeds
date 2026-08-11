@@ -827,11 +827,54 @@ const ENGLISH_LOCATION_RELATION_WORDS = [
 const ENGLISH_LOCATION_RELATION_SOURCE = `(?:${ENGLISH_LOCATION_RELATION_WORDS.join('|')})`;
 const ENGLISH_LOCATION_RELATIONS: ReadonlySet<string> = new Set(ENGLISH_LOCATION_RELATION_WORDS);
 
-function isAdjacentLatinProductPrefix(raw: string): boolean {
-  const normalized = raw.normalize('NFKC');
-  if (!normalized || normalized !== normalized.trim() || /\s/u.test(normalized)) return false;
-  return /^[A-Z][A-Za-z0-9._+-]{1,39}$/u.test(normalized)
-    && (/[a-z]/u.test(normalized) || /\d|[._+-]/u.test(normalized) || /^[A-Z]{2,}$/u.test(normalized));
+type CanonicalEntityRole = 'organization' | 'product' | 'unknown';
+
+function canonicalEntityRoleKey(value: string): string {
+  return value.normalize('NFKC').toLowerCase()
+    .replace(/[._-]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+const ORGANIZATION_ENTITY_ALIASES: ReadonlySet<string> = new Set([
+  'openai', 'anthropic', 'google', 'google deepmind', 'meta', 'microsoft', 'nvidia', 'apple',
+  'amazon', 'aws', 'xai', '百度', '腾讯', '阿里巴巴', '字节跳动', '智谱', '智谱ai',
+  '月之暗面', '深度求索',
+].map(canonicalEntityRoleKey));
+const PRODUCT_ENTITY_ALIASES: ReadonlySet<string> = new Set([
+  'gpt', 'claude', 'kimi', 'gemini', 'codex', 'chatgpt', '文心', '文心一言', 'ernie',
+].map(canonicalEntityRoleKey));
+
+function canonicalEntityRole(value: string): CanonicalEntityRole {
+  const key = canonicalEntityRoleKey(value);
+  if (!key) return 'unknown';
+  if (PRODUCT_ENTITY_ALIASES.has(key)) return 'product';
+  if (ORGANIZATION_ENTITY_ALIASES.has(key)) return 'organization';
+  const productFamily = [...PRODUCT_ENTITY_ALIASES].find((alias) =>
+    key.startsWith(`${alias} `));
+  if (productFamily) {
+    const version = key.slice(productFamily.length).trim();
+    if (/^(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*(?:\s+(?:preview|pro|mini|lite|turbo))?$/iu.test(version)) {
+      return 'product';
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]{1,30}\s+(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*(?:\s+(?:preview|pro|mini|lite|turbo))?$/iu.test(key)) {
+    return 'product';
+  }
+  if (/\b(?:inc|corp|corporation|company|labs?|research|technologies|technology)\b$/iu.test(key)
+    || /^[a-z0-9+.-]{2,}ai$/iu.test(key)
+    || /(?:公司|集团|科技|实验室|研究院|研究所|团队|机构)$/u.test(key)) {
+    return 'organization';
+  }
+  return 'unknown';
+}
+
+function startsWithEntityRole(value: string, expected: CanonicalEntityRole): boolean {
+  const source = value.trimStart();
+  for (let boundary = 1; boundary <= source.length; boundary += 1) {
+    if (canonicalEntityRole(source.slice(0, boundary)) === expected) return true;
+  }
+  return false;
 }
 
 function hasAtomicBoundary(value: string): boolean {
@@ -860,7 +903,7 @@ function actionLooksLikeNominalModifier(
     const englishPremodifiers = /^(?:new|model|product|ai|enterprise|technical|customer|developer|core|smart|data)(?:\s+(?:new|model|product|ai|enterprise|technical|customer|developer|core|smart|data)){0,2}$/iu;
     if (!chinesePremodifiers.test(nominalPrefix)
       && !englishPremodifiers.test(nominalPrefix)
-      && !isAdjacentLatinProductPrefix(between)) return false;
+      && canonicalEntityRole(nominalPrefix) !== 'product') return false;
   }
 
   const nextAction = all.find((item) => item.index >= occurrence.end);
@@ -931,6 +974,9 @@ const GOVERNED_ACTION_COMPLEMENTS: Readonly<Record<FactAction, readonly FactActi
   apply_approval: [], invest: [], finance: [], sign: [], sue: [], open_source: [], train: [], partner: [],
   layoff: [], discuss: [], open_access: [], limit_scope: [],
 };
+const STRICT_CONTROL_CHAIN_ROOTS: ReadonlySet<FactAction> = new Set([
+  'order', 'mandate', 'regulatory_require', 'request', 'ban',
+]);
 
 function actionIsGovernedComplement(
   value: string,
@@ -946,10 +992,14 @@ function actionIsGovernedComplement(
   const normalized = between.normalize('NFKC').trim()
     .replace(/^(?:to|that|for|the|a|an|其|该|对|向|为)\s*/iu, '')
     .replace(/(?:立即|继续|正式|已经|已|将|再|考虑|计划|必须)+$/u, '')
+    .replace(/\b(?:to|that)\s*$/iu, '')
     .trim();
   if (!normalized) return true;
-  if (looksLikeDetachedChinesePredicate(normalized)) return false;
   if (depth > 0) return false;
+  if (STRICT_CONTROL_CHAIN_ROOTS.has(parent.action)) {
+    return controlSubjectSegmentFullyConsumed(normalized);
+  }
+  if (looksLikeDetachedChinesePredicate(normalized)) return false;
   const trailingLatinSubject = normalized.match(/([A-Z][A-Za-z0-9._+-]{1,})\s*$/u);
   if (trailingLatinSubject) {
     const beforeSubject = normalized.slice(0, trailingLatinSubject.index).trim();
@@ -970,18 +1020,48 @@ interface FactControlChainParse {
   has_unknown_predicate: boolean;
 }
 
-const CONTROL_OBJECT_NOUN_HEAD = '(?:模型|权重|服务|系统|平台|工具|计划|项目|产品|市场|业务|运营|协议|代码|数据集|能力|功能)';
+const CONTROL_OBJECT_NOUN_HEAD = '(?:模型训练|训练模型|模型|权重|服务|系统|平台|工具|计划|项目|产品|市场|业务|运营|协议|代码|数据集|能力|功能|训练|开发)';
+const CONTROL_AUTHORITY_SUBJECT = /^(?:法院|监管机构|监管部门|政府|议会|议员|委员会|管理部门|执法机构|美国议员|欧盟委员会)$/u;
+const CONTROL_GENERIC_SUBJECT = /^(?:该公司|公司|机构|团队|组织|一家(?:公司|机构)|多家(?:公司|机构)|三家(?:公司|机构)|the company|the regulator|the court|the letter|a senator|regulators?|lawmakers?)$/iu;
+
+function controlSubjectSegmentFullyConsumed(value: string): boolean {
+  const subject = normalizedAtomicClause(stripFactTemporalText(value))
+    .replace(/^(?:据称|传闻|报道称|消息称|官方|公司方面)\s*/u, '')
+    .replace(/(?:已经|已|将|正在|正式|计划|可能|据称|宣布|完成)+$/u, '')
+    .replace(/\b(?:has|have|had|will|would|may|might|reportedly|officially|formally)\s*$/iu, '')
+    .trim();
+  if (!subject) return false;
+  if (CONTROL_AUTHORITY_SUBJECT.test(subject) || CONTROL_GENERIC_SUBJECT.test(subject)) return true;
+  if (/^(?:一家|多家|三家|若干家)?(?:AI|人工智能)?(?:公司|机构|团队|组织)$/iu.test(subject)) return true;
+  if (new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'u').test(subject)) return false;
+  if (canonicalEntityRole(subject) !== 'unknown') return true;
+  if (/^[A-Za-z][A-Za-z0-9._+-]*$/u.test(subject)) return true;
+  return /^[\p{Script=Han}·]{2,16}$/u.test(subject)
+    && !/(?:内容|消息|说明|信息)(?:法院|机构|部门|政府|议会|议员|委员会)$/u.test(subject);
+}
+
+function releasedProductNominalObjectLength(rawTail: string): number {
+  for (let boundary = 1; boundary < rawTail.length; boundary += 1) {
+    const rawPrefix = rawTail.slice(0, boundary);
+    const product = rawPrefix.trim();
+    if (!product || canonicalEntityRole(product) !== 'product') continue;
+    const suffix = rawTail.slice(boundary);
+    const leadingSpace = suffix.match(/^\s*/u)?.[0].length || 0;
+    if (startsWithEntityRole(suffix.slice(leadingSpace), 'organization')) return 0;
+    const nominal = suffix.slice(leadingSpace).match(
+      new RegExp(`^[\\p{Script=Han}]{1,16}?${CONTROL_OBJECT_NOUN_HEAD}`, 'u'),
+    );
+    if (nominal?.[0]) return boundary + leadingSpace + nominal[0].length;
+  }
+  return 0;
+}
 
 function controlComplementTailRemainder(value: string, action: FactActionOccurrence): string {
   const rawTail = stripFactTemporalText(value.slice(action.end))
     .replace(/^[\s，,、:：]*(?:了|对|向|为|其|该|一个|一项|一款|新的?)*\s*/u, '');
   if (action.action === 'release') {
-    const brandedNominalObject = rawTail.match(
-      new RegExp(`^([A-Z][A-Za-z0-9._+-]{1,39})([\\p{Script=Han}]{1,16}?${CONTROL_OBJECT_NOUN_HEAD})`, 'u'),
-    );
-    if (brandedNominalObject?.[0] && isAdjacentLatinProductPrefix(brandedNominalObject[1])) {
-      return rawTail.slice(brandedNominalObject[0].length).trim();
-    }
+    const productObjectLength = releasedProductNominalObjectLength(rawTail);
+    if (productObjectLength) return rawTail.slice(productObjectLength).trim();
   }
   const latinVersion = rawTail.match(
     new RegExp(`^(?:[A-Za-z][A-Za-z0-9._+-]*)(?:\\s+(?:v(?:ersion)?\\s*)?[A-Za-z]*\\d+(?:\\.\\d+)*(?:[-_][A-Za-z0-9]+)?)?(?:${CONTROL_OBJECT_NOUN_HEAD})?`, 'iu'),
@@ -989,7 +1069,7 @@ function controlComplementTailRemainder(value: string, action: FactActionOccurre
   if (latinVersion?.[0] && /(?:\d|[A-Z]{2}|[a-z][A-Z])/u.test(latinVersion[0])) {
     return rawTail.slice(latinVersion[0].length).trim();
   }
-  const chineseObject = rawTail.match(new RegExp(`^[\\p{Script=Han}A-Za-z0-9._+-]{1,32}?${CONTROL_OBJECT_NOUN_HEAD}`, 'u'));
+  const chineseObject = rawTail.match(new RegExp(`^[\\p{Script=Han}A-Za-z0-9._+-]{0,32}${CONTROL_OBJECT_NOUN_HEAD}`, 'u'));
   if (chineseObject?.[0]) return rawTail.slice(chineseObject[0].length).trim();
   const englishObject = rawTail.match(new RegExp(`^(?:[a-z][a-z0-9-]*\\s+){0,5}${ENGLISH_OBJECT_NOUN_HEAD}\\b`, 'iu'));
   return englishObject?.[0] ? rawTail.slice(englishObject[0].length).trim() : rawTail;
@@ -1074,8 +1154,12 @@ function parseFactControlChain(value: string): FactControlChainParse {
   }
   const prefix = reliable ? stripFactTemporalText(value.slice(0, actions[0].index)) : '';
   const remainder = reliable ? controlComplementTailRemainder(value, node.occurrence) : '';
+  const parsedControlChain = reliable && actions.length > 1
+    && STRICT_CONTROL_CHAIN_ROOTS.has(actions[0].action);
   const hasUnknownPredicate = reliable
-    && (prefixContainsDetachedUnknownPredicate(prefix) || looksLikeDetachedUnknownPredicate(remainder));
+    && (parsedControlChain
+      ? !controlSubjectSegmentFullyConsumed(prefix) || !!normalizedAtomicClause(remainder)
+      : prefixContainsDetachedUnknownPredicate(prefix) || looksLikeDetachedUnknownPredicate(remainder));
   return {
     root,
     actions,
