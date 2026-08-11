@@ -734,6 +734,131 @@ describe('manual news lead domain', () => {
       ]) });
   });
 
+  test('keeps exact Alibaba support current despite noisy TechCrunch navigation and other-subject background', async () => {
+    const support = techCrunchAlibabaBan.claims_supported[0];
+    const noisyTechCrunch: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      title: "China's Alibaba will ban employees from using Anthropic's Claude Code",
+      excerpt: [
+        support,
+        'Navigation AI Security Events Newsletters Podcasts.',
+        'Anthropic prohibited Chinese companies from a separate Claude program.',
+        'Anthropic closed an unrelated security loophole in another policy.',
+        'Event advertisement: register for the latest AI conference.',
+        'Related AI: Anthropic added watermark metadata to generated media.',
+        'Related AI: Why the Alibaba Claude Code ban rumor is misleading?',
+      ].join(' '),
+      claims_supported: [support],
+    };
+    const generated = validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [noisyTechCrunch],
+    );
+    expect(generated).toMatchObject({
+      recommendation: 'needs_review',
+      evidence_completeness: [{ evidence_id: noisyTechCrunch.id, relation: 'supports' }],
+    });
+    const candidate: ManualNewsProcessedAssessment = {
+      ...applyManualLeadEvidencePolicy(generated, [noisyTechCrunch]),
+      duplicate_scope: null,
+      matched_lead_id: null,
+    };
+    const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [noisyTechCrunch],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+      evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+    };
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: prompt.facts.map((fact) => supportedFactResult(
+        fact.fact_id, noisyTechCrunch.id, support,
+      )),
+      projection_results: prompt.projections.map((projection) => ({
+        projection_id: projection.projection_id,
+        source_fact_ids: projection.source_fact_ids,
+        supported: true,
+        issue_code: 'none',
+      })),
+      disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+        evidence_id: disposition.evidence_id,
+        disposition: disposition.disposition,
+        supported: true,
+        issue_code: 'none',
+        source_quotes: [{ evidence_id: noisyTechCrunch.id, quote: support }],
+      })),
+    }, candidate, [noisyTechCrunch]);
+    const proofInput = {
+      lead_id: 'ml-20260811-noisy-techcrunch', assessment_version: 9,
+      assessment: candidate, evidence: [noisyTechCrunch], verification,
+    };
+    const secret = 'a'.repeat(64);
+    const proof = await createManualLeadVerificationProof(proofInput, secret);
+    await expect(isCurrentManualLeadVerification(proofInput, proof, secret)).resolves.toBe(true);
+  });
+
+  test('allows a reliable atomic title to provide support independently of noisy body text', () => {
+    const titleOnlySupport: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      excerpt: 'Navigation Events Newsletters Podcasts. Related AI: Anthropic added watermark metadata.',
+      claims_supported: [],
+    };
+    expect(validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [titleOnlySupport],
+    )).toMatchObject({ evidence_completeness: [{
+      evidence_id: titleOnlySupport.id,
+      relation: 'supports',
+    }] });
+  });
+
+  test.each([{
+    blockingClause: 'Alibaba called reports that it banned employees from using Claude Code false.',
+    disposition: 'contradicts_core',
+    relation: 'conflicts',
+  }, {
+    blockingClause: 'Alibaba withdrew the restriction on employees using Claude Code.',
+    disposition: 'material_update',
+    relation: 'updates',
+  }] as const)('does not let a supporting title hide a same-event denial or withdrawal: $blockingClause', ({
+    blockingClause, disposition, relation,
+  }) => {
+    const mixedEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-support-plus-${disposition}`,
+      title: techCrunchAlibabaBan.title,
+      excerpt: `${techCrunchAlibabaBan.claims_supported[0]} ${blockingClause}`,
+      claims_supported: [techCrunchAlibabaBan.claims_supported[0], blockingClause],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['同一证据包含对核心事件的否认或状态变化。'];
+    raw.evidence_dispositions.push({
+      evidence_id: mixedEvidence.id,
+      disposition,
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, mixedEvidence]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([{
+        evidence_id: mixedEvidence.id,
+        relation,
+      }]) });
+  });
+
+  test('does not treat an Anthropic denial of its own policy as an Alibaba-event blocker', () => {
+    const support = techCrunchAlibabaBan.claims_supported[0];
+    const noisyTechCrunch: ManualNewsEvidence = {
+      ...techCrunchAlibabaBan,
+      excerpt: `${support} Anthropic denied reports that it restricted its own Claude policy for Chinese companies. Related AI: Why the Alibaba Claude Code ban rumor is misleading?`,
+      claims_supported: [support],
+    };
+    expect(validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(), [noisyTechCrunch],
+    )).toMatchObject({ evidence_completeness: [{
+      evidence_id: noisyTechCrunch.id,
+      relation: 'supports',
+    }] });
+  });
+
   test('treats a question-framed misleading rumor headline as uncertain, not a declarative denial', () => {
     const rumorQuestion: ManualNewsEvidence = {
       ...officialAlibabaDenial,
@@ -1283,8 +1408,10 @@ describe('manual news lead domain', () => {
     }, candidate, [mixedEvidence])).toThrow(/invalid_disposition_verification_semantics/);
   });
 
-  test('rejects a single verifier quote containing a valid clause plus unrelated customer-service text', () => {
-    const combined = 'Alibaba reportedly bans employees from using Claude Code. Alibaba customer service remains available.';
+  test.each([
+    'Alibaba reportedly bans employees from using Claude Code. Alibaba customer service remains available.',
+    'Alibaba reportedly bans employees from using Claude Code. Related AI: Why the Alibaba Claude Code ban rumor is misleading?',
+  ])('keeps the verifier quote gate strict for a support clause mixed with noise: %s', (combined) => {
     const mixedEvidence: ManualNewsEvidence = {
       ...techCrunchAlibabaBan,
       excerpt: combined,

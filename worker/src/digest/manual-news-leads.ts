@@ -1589,6 +1589,7 @@ function validatedProjectionSentence(
 }
 
 type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+type DeterministicEvidenceClauseRelation = DeterministicEvidenceRelation | 'blocking_uncertain';
 
 interface AtomicEvidenceClause {
   text: string;
@@ -1925,6 +1926,23 @@ function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string)
   return anchors.length > 0 && anchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
 }
 
+function sameCoreEventBlockingUncertainty(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+  explicitSignal = false,
+): boolean {
+  if (!sameCoreProductAndSubject(fact, clause)) return false;
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(clause);
+  const sameAction = expectedActions.length === 1
+    && actualActions.some((action) => action.action === expectedActions[0].action);
+  if (!sameAction && !explicitSignal) return false;
+  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
+  const actualParticipants = bilingualParticipantRoles(clause);
+  return canonicalJson(expectedParticipants) === canonicalJson(actualParticipants)
+    || (explicitSignal && actualParticipants.length === 0);
+}
+
 function mentionsCoreSubjectAndProduct(fact: ManualSourceAtomicFact, clause: string): boolean {
   const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
@@ -2036,7 +2054,7 @@ function evidenceClauseRelation(
   evidence: Pick<ManualNewsEvidence, 'source_type' | 'reliable' | 'published_at'>,
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
-): DeterministicEvidenceRelation {
+): DeterministicEvidenceClauseRelation {
   if (leadingControllerIdentity(clause.text).ambiguous) return 'uncertain';
   let relatedButUnresolved = false;
   const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
@@ -2046,6 +2064,7 @@ function evidenceClauseRelation(
     const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
     const questionFramed = isQuestionFramedEvidenceClause(clause.text);
     if (questionFramed) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       if (targetMatches || productTargetMatches || mentionsCoreSubjectAndProduct(fact, clause.text)) {
         relatedButUnresolved = true;
       }
@@ -2054,25 +2073,26 @@ function evidenceClauseRelation(
     const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
     if (exactError === null) {
       if (!relationSupportFallbackSafe(fact, clause)) {
+        if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
         relatedButUnresolved = true;
         continue;
       }
-      return evidence.reliable ? 'supports' : 'uncertain';
+      return evidence.reliable ? 'supports' : 'blocking_uncertain';
     }
     if (targetMatches && exactError === 'fact_verification_polarity_mismatch') {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
     }
     const denial = directDenialEmbeddedClause(clause.text);
     if (denial && denialTargetsCoreEvent(fact, denial)) {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
     }
     const scopeChange = EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && scopeChange) {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
     }
     const statusChange = EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && statusChange) {
-      if (!trustedRelationSource) return 'uncertain';
+      if (!trustedRelationSource) return 'blocking_uncertain';
       const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
         .map((id) => evidenceById.get(id)?.published_at || '')
         .map((value) => Date.parse(value))
@@ -2085,7 +2105,9 @@ function evidenceClauseRelation(
     }
     const unresolvedDenial = /(?:未(?:能)?(?:确认|证实|验证)|无法(?:确认|证实|验证)|拒绝(?:确认|证实|验证)|\b(?:would|could|did|can)\s+not\s+(?:confirm|verify|validate|substantiate)|\b(?:cannot|can't|won't)\s+(?:confirm|verify|validate|substantiate))/iu.test(clause.text);
     if ((targetMatches || productTargetMatches) && unresolvedDenial) {
-      return 'uncertain';
+      return sameCoreEventBlockingUncertainty(fact, clause.text, true)
+        ? 'blocking_uncertain'
+        : 'uncertain';
     }
     const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
     const actualActions = factActionOccurrences(clause.text);
@@ -2097,25 +2119,43 @@ function evidenceClauseRelation(
       return 'supports';
     }
     if (!clause.reliable) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       if (targetMatches || productTargetMatches) relatedButUnresolved = true;
       continue;
     }
     if (targetMatches || productTargetMatches || (subjectMatches && highConfidenceLeadAnchors(fact.atomic_fact.object)
       .some((anchor) => exactStructuredAnchorPresent(anchor, clause.text)))) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       relatedButUnresolved = true;
     }
   }
+  if (clause.linked_addition
+    && (EVIDENCE_RELATION_DENIAL_SIGNAL.test(clause.text)
+      || EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text)
+      || EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text))
+    && !leadingControllerIdentity(clause.text).identity) return 'blocking_uncertain';
   if (clause.linked_addition) return 'uncertain';
   return relatedButUnresolved ? 'uncertain' : 'unrelated';
 }
 
 function aggregateEvidenceRelations(
-  relations: readonly DeterministicEvidenceRelation[],
+  relations: readonly DeterministicEvidenceClauseRelation[],
 ): DeterministicEvidenceRelation {
   if (relations.includes('updates')) return 'updates';
   if (relations.includes('conflicts')) return 'conflicts';
-  if (relations.includes('uncertain')) return 'uncertain';
+  if (relations.includes('blocking_uncertain') || relations.includes('uncertain')) return 'uncertain';
   if (relations.includes('supports')) return 'supports';
+  return 'unrelated';
+}
+
+function aggregateWholeEvidenceRelations(
+  relations: readonly DeterministicEvidenceClauseRelation[],
+): DeterministicEvidenceRelation {
+  if (relations.includes('updates')) return 'updates';
+  if (relations.includes('conflicts')) return 'conflicts';
+  if (relations.includes('blocking_uncertain')) return 'uncertain';
+  if (relations.includes('supports')) return 'supports';
+  if (relations.includes('uncertain')) return 'uncertain';
   return 'unrelated';
 }
 
@@ -2150,10 +2190,11 @@ function deterministicEvidenceRelation(
   const relations = clauses.map((clause) =>
     evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
   const supportingClauses = clauses.filter((_, index) => relations[index] === 'supports');
-  const effectiveRelations = relations.filter((relation, index) => relation !== 'uncertain'
+  const effectiveRelations = relations.filter((relation, index) =>
+    (relation !== 'uncertain' && relation !== 'blocking_uncertain')
     || !supportingClauses.some((supporting) =>
       isRedundantContextExpansion(supporting.text, clauses[index].text)));
-  return aggregateEvidenceRelations(effectiveRelations);
+  return aggregateWholeEvidenceRelations(effectiveRelations);
 }
 
 function deterministicDispositionQuoteRelations(
@@ -2161,7 +2202,7 @@ function deterministicDispositionQuoteRelations(
   evidence: ManualNewsEvidence,
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
-): DeterministicEvidenceRelation[] {
+): DeterministicEvidenceClauseRelation[] {
   const clauses = evidenceRelationUnitClauses(quote);
   if (!clauses.length) return ['uncertain'];
   return clauses.map((clause) => evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
@@ -5247,7 +5288,8 @@ export function validateManualLeadFactVerification(
               ? quoteRelations.every((relation) => relation === 'updates')
               : relation === 'uncertain'
                 ? definition.disposition === 'background'
-                  && quoteRelations.every((quoteRelation) => quoteRelation === 'uncertain')
+                  && quoteRelations.every((quoteRelation) =>
+                    quoteRelation === 'uncertain' || quoteRelation === 'blocking_uncertain')
                 : quoteRelations.every((quoteRelation) => quoteRelation === 'unrelated');
         const locallyConsistent = (relation === 'supports'
           ? definition.disposition === 'supports_core'
