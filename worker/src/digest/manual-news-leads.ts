@@ -812,7 +812,7 @@ interface AtomicClauseParse {
   has_unknown_compound: boolean;
 }
 
-const ATOMIC_COORDINATION_SOURCE = '(?:并且|并(?!购|未|不|非)|后又|随后|继而|然后|又|同时|以及|而且|且|兼)|\\b(?:and|but|then|subsequently|afterwards?|while|whereas|alongside|plus|as\\s+well\\s+as)\\b';
+const ATOMIC_COORDINATION_SOURCE = '(?:并且|并(?!购|未|不|非)|后又|随后|继而|然后|又|同时|以及|而且|且|兼)|\\b(?:and|but|then|subsequently|afterwards?|while|whereas|alongside|as\\s+well\\s+as)\\b|(?<![\\p{L}\\p{N}_+.-])plus(?![\\p{L}\\p{N}_+.-])';
 const ATOMIC_HARD_PUNCTUATION_SOURCE = '(?:(?:(?![.．])\\p{Sentence_Terminal})|(?<![ap]\\.m)[.．](?=\\s*[A-Z\\p{Script=Han}])|[；;|｜/／\\n\\p{Zl}\\p{Zp}]+|(?<!\\d)[:：]|[:：](?!\\d)|[—–―]+|\\s+-\\s+)';
 const ATOMIC_SOFT_BOUNDARY = new RegExp(`(?:[，,、]|${ATOMIC_COORDINATION_SOURCE})`, 'giu');
 const ATOMIC_HARD_BOUNDARY = new RegExp(ATOMIC_HARD_PUNCTUATION_SOURCE, 'gu');
@@ -881,14 +881,23 @@ const PRODUCT_DESCRIPTOR_WORDS: ReadonlySet<string> = new Set([
   'small', 'sonnet', 'thinking', 'turbo', 'ultra', 'vl',
 ]);
 
+function isStructuredProductVersionToken(value: string): boolean {
+  const parts = value.toLowerCase().split('-');
+  if (!/^[a-z]?\d+(?:\.\d+)*$/u.test(parts[0] || '')) return false;
+  return parts.slice(1).every((part) =>
+    /^\d+(?:\.\d+)?[bkm]$/u.test(part)
+    || PRODUCT_DESCRIPTOR_WORDS.has(part));
+}
+
 function isRegisteredProductDescriptor(value: string): boolean {
   if (!value || value.length > 48) return false;
   const tokens = value.split(/\s+/u);
-  return tokens.length <= 2
-    && tokens.every((token) => /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/iu.test(token))
-    && tokens.every((token) => /\d/u.test(token)
-      || token.split(/[.-]/u).every((part) => PRODUCT_DESCRIPTOR_WORDS.has(part.toLowerCase())))
-    && tokens.some((token) => /\d/u.test(token));
+  if (tokens.length === 1) return isStructuredProductVersionToken(tokens[0]);
+  if (tokens.length !== 2) return false;
+  const firstVersion = isStructuredProductVersionToken(tokens[0]);
+  const secondVersion = isStructuredProductVersionToken(tokens[1]);
+  return (firstVersion && PRODUCT_DESCRIPTOR_WORDS.has(tokens[1].toLowerCase()))
+    || (secondVersion && PRODUCT_DESCRIPTOR_WORDS.has(tokens[0].toLowerCase()));
 }
 
 function isCanonicalProduct(value: string): boolean {
@@ -1087,6 +1096,21 @@ function controlSubjectSegmentFullyConsumed(
 const CHINESE_ALLOWED_MULTI_HEAD_NOMINALS: ReadonlySet<string> = new Set([
   '模型训练工具',
 ]);
+const CHINESE_AI_NOMINAL_DESCRIPTORS = [
+  '人工智能', '大语言', '生成式', '多模态', '混合专家', '检索增强', '命令行', '合作伙伴',
+  '支持向量', '投资分析', '芯片', '设计', '推理', '图像', '生成', '语音', '视觉', '端侧',
+  '微调', '嵌入', '视频', '音频', '文本', '代码', '企业', '技术', '客户', '开发者', '核心',
+  '智能', '数据', '新型', '最新', '大型', '通用', '开源', '融资', '合作', '投资', '支持',
+  '训练', '向量', '伙伴', '分析', '语言', '基础', '新', '大',
+] as const;
+const AI_TECHNICAL_NOMINAL_DESCRIPTORS = ['LoRA', 'MoE', 'embedding', 'AI'] as const;
+const CHINESE_AI_NOMINAL_DESCRIPTOR_SOURCE = [
+  ...CHINESE_AI_NOMINAL_DESCRIPTORS,
+  ...AI_TECHNICAL_NOMINAL_DESCRIPTORS,
+]
+  .sort((left, right) => right.length - left.length)
+  .map((value) => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
+  .join('|');
 const ENGLISH_NOMINAL_MODIFIER_SOURCE = '(?:artificial\\s+intelligence|large\\s+language|foundation|generative|multimodal|enterprise|technical|customer|developer|core|smart|data|new|open[ -]source|training|investment|analysis|support|vector|command[ -]line|partner(?:ship)?)';
 
 function containsRegisteredOrganization(value: string): boolean {
@@ -1099,17 +1123,15 @@ function isAllowedChineseNominalComponent(value: string): boolean {
   const phrase = value.normalize('NFKC').replace(/\s+/gu, '');
   if (!phrase || Array.from(phrase).length > 48) return false;
   if (containsRegisteredOrganization(phrase)) return false;
-  const latinTokens = phrase.match(/[A-Za-z0-9][A-Za-z0-9.+-]*/gu) || [];
-  if (latinTokens.some((token) => !/^\d+$/u.test(token)
-    && !/^(?:[A-Z]{2,12}|[A-Z0-9]*\d[A-Z0-9.-]*)$/u.test(token))) return false;
   const heads = [...phrase.matchAll(new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'gu'))];
   const finalHead = phrase.match(new RegExp(`${CONTROL_OBJECT_NOUN_HEAD}$`, 'u'));
   if (!finalHead || finalHead.index === undefined) return false;
-  if (heads.length > 1 && !CHINESE_ALLOWED_MULTI_HEAD_NOMINALS.has(phrase)) return false;
+  if (heads.length > 1) return CHINESE_ALLOWED_MULTI_HEAD_NOMINALS.has(phrase);
   const prefix = phrase.slice(0, finalHead.index);
-  if (/^[\p{Script=Han}·]{2,16}[推造改做发建]$/u.test(prefix)
-    || /^[\p{Script=Han}·]{2,16}(?:升级|部署|重塑|商业化)$/u.test(prefix)) return false;
-  return /^[\p{Script=Han}A-Za-z0-9.+-]+$/u.test(phrase);
+  return !prefix || new RegExp(
+    `^(?:${CHINESE_AI_NOMINAL_DESCRIPTOR_SOURCE})+$`,
+    'iu',
+  ).test(prefix);
 }
 
 function isAllowedEnglishNominalComponent(value: string): boolean {

@@ -691,7 +691,7 @@ describe('manual news lead domain', () => {
     'OpenAI发布语音模型。',
     'OpenAI发布端侧视觉语言模型。',
     '法院命令OpenAI停止发布芯片设计模型。',
-  ])('accepts an open Chinese domain noun phrase ending in one explicit noun head: %s', (text) => {
+  ])('accepts an allowlisted Chinese AI descriptor sequence ending in one explicit noun head: %s', (text) => {
     const fixture = supportedTextVerification(text, text);
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
@@ -703,6 +703,9 @@ describe('manual news lead domain', () => {
     '法院命令OpenAI停止发布多模态推理系统腾讯改平台。',
     'OpenAI发布图像生成模型Acme造工具。',
     'OpenAI发布语音模型并训练GPT 6。',
+    'OpenAI发布启元推模型。',
+    'OpenAI发布启元造模型。',
+    'OpenAI发布某公司研制模型。',
   ])('keeps a second entity, predicate, or event outside an open Chinese nominal phrase: %s', (text) => {
     expect(() => validateManualLeadAssessment(assessment({
       claims: [{ text, evidence_ids: ['ev-official'] }],
@@ -728,7 +731,49 @@ describe('manual news lead domain', () => {
     '法院命令OpenAI停止发布Acme V3.2-Exp推理模型。',
     'Anthropic发布Claude Sonnet推理模型。',
     'Google发布Gemini 2.5 Flash Extra模型。',
+    'OpenAI发布GPT6Anthropic推理模型。',
+    'OpenAI发布GPT 6Acme推理模型。',
+    'OpenAI发布GPT 6-Acme推理模型。',
+    'OpenAI发布GPT 6-Extra推理模型。',
+    'Google发布Gemini2.5-Extra模型。',
   ])('does not extend registered version grammar to unknown families or malformed descriptors: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    'OpenAI发布LoRA微调工具。',
+    'OpenAI发布MoE推理模型。',
+    'OpenAI发布embedding模型。',
+  ])('accepts an explicitly allowlisted AI technical term in a nominal object: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布foo推理模型。',
+    'OpenAI发布acme微调工具。',
+  ])('does not treat an arbitrary lowercase token as an AI technical descriptor: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test('keeps Plus inside a registered hyphenated product descriptor', () => {
+    const text = '阿里发布Qwen3.5-Plus推理模型。';
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI released GPT 6 plus Anthropic released Claude 5.',
+    'OpenAI发布GPT 6 plus Anthropic发布Claude 5。',
+  ])('keeps a standalone Plus as a real compound-fact connector: %s', (text) => {
     expect(() => validateManualLeadAssessment(assessment({
       claims: [{ text, evidence_ids: ['ev-official'] }],
     }), [officialAnthropic])).toThrow(/non_atomic_claim/);
