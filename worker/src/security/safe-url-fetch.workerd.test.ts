@@ -57,7 +57,7 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
       connected_ip: '93.184.216.34',
     }],
     source_content_type: 'text/html',
-    extraction: 'html',
+    extraction: 'article_text',
     requested_limits: {
       source_bytes: 8_388_608,
       extracted_text_bytes: 2_097_152,
@@ -65,8 +65,8 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
     },
     applied_limits: {
       source_bytes: 8_388_608,
-      extracted_text_bytes: 2_097_152,
-      extracted_text_characters: 1_000_000,
+      extracted_text_bytes: 28_000,
+      extracted_text_characters: 28_000,
     },
     actual_sizes: {
       source_bytes: bytes,
@@ -74,7 +74,11 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
       extracted_text_characters: body.length,
     },
     truncation: { source: false, extracted_text: false },
-    parser: { result: 'success', version: 'workerd-test/1.0' },
+    parser: { result: 'success', version: 'chromium/128.0.6613.84' },
+    document: {
+      title: 'Example document', published_at: null,
+      selection: 'article', content_complete: true,
+    },
   }));
   let gatewayCalls = 0;
   const miniflare = new Miniflare({
@@ -82,8 +86,9 @@ test('workerd rejects unsupported redirect before outbound and accepts the produ
     script: bundle.outputFiles[0].text,
     compatibilityDate: '2024-12-01',
     compatibilityFlags: ['nodejs_compat'],
-    outboundService: async () => {
+    outboundService: async (request: Request) => {
       gatewayCalls += 1;
+      expect(await request.clone().json()).toMatchObject({ extraction_mode: 'article_text_v1' });
       return new Response(body, {
         status: 200,
         headers: {

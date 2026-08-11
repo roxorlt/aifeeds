@@ -4,6 +4,8 @@ const DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TEXT_CHARACTERS = 1_000_000;
 const DEFAULT_MAX_REDIRECTS = 3;
 const DEFAULT_SEARCH_MAX_BYTES = 256 * 1024;
+const ARTICLE_TEXT_MAX_BYTES = 28_000;
+const ARTICLE_TEXT_MAX_CHARACTERS = 28_000;
 
 const ALLOWED_SOURCE_TYPES = new Set([
   'text/html', 'application/xhtml+xml', 'text/plain', 'application/json', 'application/pdf',
@@ -22,11 +24,15 @@ export interface TrustedResearchService {
 export interface PublicDocument {
   url: string;
   content_type: string;
-  extraction: 'html' | 'text' | 'json' | 'pdf_text';
+  extraction: 'html' | 'article_text' | 'text' | 'json' | 'pdf_text';
   body: string;
   redirects: number;
   bytes: number;
   fetch_audit: DocumentFetchAudit;
+  title?: string;
+  published_at?: string | null;
+  selection?: 'article' | 'main';
+  content_complete?: true;
 }
 
 export interface PublicWebSearchResult {
@@ -57,6 +63,12 @@ export interface DocumentFetchAudit {
   actual_sizes: DocumentExtractionLimits;
   truncation: { source: boolean; extracted_text: boolean };
   parser: { result: 'success'; version: string };
+  document?: {
+    title: string;
+    published_at: string | null;
+    selection: 'article' | 'main';
+    content_complete: true;
+  };
 }
 
 function unsafe(reason: string): Error { return new Error(`unsafe_url:${reason}`); }
@@ -266,10 +278,12 @@ function parseFetchAudit(
   if (!encoded || encoded.length > 8_192) throw new Error('unsafe_gateway_audit:missing');
   let raw: unknown;
   try { raw = JSON.parse(decodeURIComponent(encoded)); } catch { throw new Error('unsafe_gateway_audit:invalid_json'); }
-  if (!strictObject(raw, [
+  const auditKeys = [
     'hops', 'source_content_type', 'extraction', 'requested_limits', 'applied_limits',
     'actual_sizes', 'truncation', 'parser',
-  ]) || !Array.isArray(raw.hops)) {
+  ];
+  if ((raw as { extraction?: unknown })?.extraction === 'article_text') auditKeys.push('document');
+  if (!strictObject(raw, auditKeys) || !Array.isArray(raw.hops)) {
     throw new Error('unsafe_gateway_audit:invalid_schema');
   }
   if (raw.hops.length < 1) throw new Error('unsafe_gateway_audit:missing_hop');
@@ -296,12 +310,12 @@ function parseFetchAudit(
   if (raw.source_content_type === 'application/pdf' && raw.extraction !== 'pdf_text') {
     throw new Error('invalid_pdf_extraction');
   }
-  if (!['html', 'text', 'json', 'pdf_text'].includes(raw.extraction)) {
+  if (!['article_text', 'text', 'json', 'pdf_text'].includes(raw.extraction)) {
     throw new Error('unsafe_gateway_audit:extraction');
   }
   const extraction = raw.extraction as PublicDocument['extraction'];
   const expectedExtraction: Record<string, PublicDocument['extraction']> = {
-    'text/html': 'html', 'application/xhtml+xml': 'html', 'text/plain': 'text',
+    'text/html': 'article_text', 'application/xhtml+xml': 'article_text', 'text/plain': 'text',
     'application/json': 'json', 'application/pdf': 'pdf_text',
   };
   if (expectedExtraction[raw.source_content_type] !== extraction) throw new Error('unsafe_gateway_audit:extraction_mismatch');
@@ -334,6 +348,30 @@ function parseFetchAudit(
     throw new Error('unsafe_gateway_audit:invalid_schema');
   }
   if (raw.parser.result !== 'success') throw new Error('unsafe_gateway_audit:parser_failed');
+  let documentMetadata: DocumentFetchAudit['document'];
+  if (extraction === 'article_text') {
+    if (!strictObject(raw.document, ['title', 'published_at', 'selection', 'content_complete'])
+      || typeof raw.document.title !== 'string' || raw.document.title !== raw.document.title.trim()
+      || !raw.document.title || Array.from(raw.document.title).length > 220
+      || new TextEncoder().encode(raw.document.title).byteLength > 1_024
+      || !['article', 'main'].includes(String(raw.document.selection))
+      || raw.document.content_complete !== true
+      || !/^chromium\/\d+(?:\.\d+){0,3}$/.test(raw.parser.version)
+      || appliedLimits.extracted_text_bytes > ARTICLE_TEXT_MAX_BYTES
+      || appliedLimits.extracted_text_characters > ARTICLE_TEXT_MAX_CHARACTERS) {
+      throw new Error('unsafe_gateway_audit:article_metadata');
+    }
+    const publishedAt = normalizedPublishedAt(raw.document.published_at);
+    if (publishedAt === undefined || publishedAt !== raw.document.published_at) {
+      throw new Error('unsafe_gateway_audit:article_metadata');
+    }
+    documentMetadata = {
+      title: raw.document.title,
+      published_at: publishedAt,
+      selection: raw.document.selection as 'article' | 'main',
+      content_complete: true,
+    };
+  }
   return {
     hops,
     source_content_type: raw.source_content_type,
@@ -343,7 +381,37 @@ function parseFetchAudit(
     actual_sizes: actualSizes,
     truncation: { source: raw.truncation.source, extracted_text: raw.truncation.extracted_text },
     parser: { result: 'success', version: raw.parser.version },
+    ...(documentMetadata ? { document: documentMetadata } : {}),
   };
+}
+
+function validateCompleteArticleText(value: string, bytes: number): void {
+  const characters = Array.from(value);
+  if (!characters.length) throw new Error('unsafe_gateway_article_text:empty');
+  if (bytes > ARTICLE_TEXT_MAX_BYTES || characters.length > ARTICLE_TEXT_MAX_CHARACTERS) {
+    throw new Error('unsafe_gateway_article_text:too_large');
+  }
+  let allowedIgnorables = 0;
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
+    if (!/\p{Default_Ignorable_Code_Point}/u.test(character)) continue;
+    const previous = characters[index - 1] || '';
+    const next = characters[index + 1] || '';
+    const contextualJoiner = character === '\u200d'
+      && ((/[\p{L}\p{M}]/u.test(previous) && /[\p{L}\p{M}]/u.test(next))
+        || (/\p{Extended_Pictographic}/u.test(previous) && /\p{Extended_Pictographic}/u.test(next)));
+    const contextualNonJoiner = character === '\u200c'
+      && /[\p{L}\p{M}]/u.test(previous) && /[\p{L}\p{M}]/u.test(next);
+    const contextualVariation = /^[\ufe00-\ufe0f]$/u.test(character)
+      && /\p{Extended_Pictographic}/u.test(previous);
+    if (!contextualJoiner && !contextualNonJoiner && !contextualVariation) {
+      throw new Error('unsafe_gateway_article_text:unsafe_unicode');
+    }
+    allowedIgnorables += 1;
+  }
+  if (allowedIgnorables > 8 && allowedIgnorables / characters.length > 0.02) {
+    throw new Error('unsafe_gateway_article_text:unsafe_unicode');
+  }
 }
 
 async function withinDeadline<T>(promise: Promise<T>, deadline: number, controller: AbortController): Promise<T> {
@@ -465,6 +533,7 @@ export async function fetchPublicDocument(
   const { response, deadline, controller } = await postTrusted(
     deps.service, '/v1/document', {
       url: target.toString(), limits: requestedLimits, max_redirects: maxRedirects,
+      extraction_mode: 'article_text_v1',
     }, timeoutMs,
   );
   try {
@@ -477,6 +546,7 @@ export async function fetchPublicDocument(
       || audit.actual_sizes.extracted_text_characters !== bodyCharacters) {
       throw new Error('unsafe_gateway_audit:body_size_mismatch');
     }
+    if (audit.extraction === 'article_text') validateCompleteArticleText(body.text, body.bytes);
     return {
       url: audit.hops.at(-1)!.url,
       content_type: audit.source_content_type,
@@ -485,6 +555,12 @@ export async function fetchPublicDocument(
       redirects: audit.hops.length - 1,
       bytes: body.bytes,
       fetch_audit: audit,
+      ...(audit.document ? {
+        title: audit.document.title,
+        published_at: audit.document.published_at,
+        selection: audit.document.selection,
+        content_complete: true as const,
+      } : {}),
     };
   } finally {
     controller.abort();
@@ -494,7 +570,12 @@ export async function fetchPublicDocument(
 function normalizedPublishedAt(value: unknown): string | null | undefined {
   if (value === null) return null;
   if (typeof value !== 'string') return undefined;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+      ? value : undefined;
+  }
   if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return undefined;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;

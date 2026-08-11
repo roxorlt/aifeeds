@@ -36,6 +36,7 @@ function auditObject(
   body: string,
 ): PublicDocument['fetch_audit'] {
   const extractedBytes = new TextEncoder().encode(body).byteLength;
+  const articleText = extraction === 'article_text';
   return {
     hops: [{ url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
     source_content_type: sourceContentType, extraction,
@@ -43,7 +44,9 @@ function auditObject(
       source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
     },
     applied_limits: {
-      source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
+      source_bytes: 8_388_608,
+      extracted_text_bytes: articleText ? 28_000 : 2_097_152,
+      extracted_text_characters: articleText ? 28_000 : 1_000_000,
     },
     actual_sizes: {
       source_bytes: sourceContentType === 'application/pdf' ? 48_000 : extractedBytes,
@@ -51,7 +54,14 @@ function auditObject(
       extracted_text_characters: Array.from(body).length,
     },
     truncation: { source: false, extracted_text: false },
-    parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' },
+    parser: {
+      result: 'success' as const,
+      version: articleText ? 'chromium/128.0.6613.84' : 'research-gateway-parser/1.0.0',
+    },
+    ...(articleText ? { document: {
+      title: 'Validated source title', published_at: '2026-07-04T08:00:00.000Z',
+      selection: 'article' as const, content_complete: true as const,
+    } } : {}),
   };
 }
 
@@ -62,13 +72,30 @@ function audit(url: string, sourceContentType: string, extraction: PublicDocumen
 function documentFixture(
   url: string,
   body: string,
-  extraction: PublicDocument['extraction'] = 'html',
+  extraction: PublicDocument['extraction'] = 'article_text',
+  metadata: { title?: string; published_at?: string | null; selection?: 'article' | 'main' } = {},
 ): PublicDocument {
   const contentType = extraction === 'pdf_text' ? 'application/pdf' : 'text/html';
+  const fetchAudit = auditObject(url, contentType, extraction, body);
+  if (extraction === 'article_text' && fetchAudit.document) {
+    fetchAudit.document = {
+      title: metadata.title || fetchAudit.document.title,
+      published_at: metadata.published_at === undefined
+        ? fetchAudit.document.published_at : metadata.published_at,
+      selection: metadata.selection || fetchAudit.document.selection,
+      content_complete: true,
+    };
+  }
   return {
     url, content_type: contentType, extraction, body, redirects: 0,
     bytes: new TextEncoder().encode(body).byteLength,
-    fetch_audit: auditObject(url, contentType, extraction, body),
+    fetch_audit: fetchAudit,
+    ...(extraction === 'article_text' ? {
+      title: fetchAudit.document!.title,
+      published_at: fetchAudit.document!.published_at,
+      selection: fetchAudit.document!.selection,
+      content_complete: true as const,
+    } : {}),
   };
 }
 
@@ -77,16 +104,10 @@ const alibabaSupport = 'Alibaba reportedly bans employees from using Claude Code
 function alibabaGeneratedAssessment(evidenceId: string) {
   return {
     event_key: 'alibaba-claude-code-employee-ban-2026-07-04',
-    event_type: 'industry_event',
-    material_update: false,
-    score: 88,
-    recommendation: 'recommended',
-    occurred_at: null,
-    uncertainties: [],
-    matched_event_key: null,
+    event_type: 'industry_event', material_update: false, score: 88,
+    recommendation: 'recommended', occurred_at: null, uncertainties: [], matched_event_key: null,
     source_facts: [{
-      fact_ref: 'fact-01',
-      source_language: 'en',
+      fact_ref: 'fact-01', source_language: 'en',
       atomic_fact: {
         subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
         object: 'employees from using Claude Code',
@@ -118,9 +139,7 @@ function alibabaGeneratedAssessment(evidenceId: string) {
 
 function supportedFactResult(factId: string, evidenceId: string, quote: string) {
   return {
-    fact_id: factId,
-    supported: true,
-    issue_code: 'none',
+    fact_id: factId, supported: true, issue_code: 'none',
     source_quotes: [{ evidence_id: evidenceId, quote }],
     ...(factId === 'field:material_update' ? {
       comparison_result: {
@@ -131,14 +150,12 @@ function supportedFactResult(factId: string, evidenceId: string, quote: string) 
   };
 }
 
-async function createAlibabaCurrentProof(evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>) {
-  const generated = validateManualLeadGeneratedAssessment(
-    alibabaGeneratedAssessment(evidence.id), [evidence],
-  );
+async function createAlibabaCurrentProof(
+  evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>,
+) {
+  const generated = validateManualLeadGeneratedAssessment(alibabaGeneratedAssessment(evidence.id), [evidence]);
   const candidate: ManualNewsProcessedAssessment = {
-    ...applyManualLeadEvidencePolicy(generated, [evidence]),
-    duplicate_scope: null,
-    matched_lead_id: null,
+    ...applyManualLeadEvidencePolicy(generated, [evidence]), duplicate_scope: null, matched_lead_id: null,
   };
   const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
     assessment: candidate, evidence: [evidence],
@@ -149,20 +166,14 @@ async function createAlibabaCurrentProof(evidence: NonNullable<Awaited<ReturnTyp
   };
   const verification = validateManualLeadFactVerification({
     overall_verdict: 'supported',
-    fact_results: prompt.facts.map((fact) => supportedFactResult(
-      fact.fact_id, evidence.id, alibabaSupport,
-    )),
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence.id, alibabaSupport)),
     projection_results: prompt.projections.map((projection) => ({
-      projection_id: projection.projection_id,
-      source_fact_ids: projection.source_fact_ids,
-      supported: true,
-      issue_code: 'none',
+      projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+      supported: true, issue_code: 'none',
     })),
     disposition_results: prompt.evidence_dispositions.map((disposition) => ({
-      evidence_id: disposition.evidence_id,
-      disposition: disposition.disposition,
-      supported: true,
-      issue_code: 'none',
+      evidence_id: disposition.evidence_id, disposition: disposition.disposition,
+      supported: true, issue_code: 'none',
       source_quotes: [{ evidence_id: evidence.id, quote: alibabaSupport }],
     })),
   }, candidate, [evidence]);
@@ -176,302 +187,6 @@ async function createAlibabaCurrentProof(evidence: NonNullable<Awaited<ReturnTyp
 }
 
 describe('manual lead evidence extraction', () => {
-  test('extracts a production-shaped article without page chrome and creates a current v9 proof', async () => {
-    const html = `<!doctype html><html><head>
-      <title>Alibaba reportedly bans employees from using Claude Code | TechCrunch</title>
-      <meta property="article:published_time" content="2026-07-04T08:00:00Z">
-    </head><body>
-      <nav>TechCrunch Desktop Logo TechCrunch Mobile Logo Latest Startups AI Security Events Newsletters Podcasts Advertise</nav>
-      <aside>Related: Anthropic denied a separate access policy. Advertisement: register for Disrupt.</aside>
-      <article>
-        <p>${alibabaSupport}</p>
-        <p>Anthropic prohibited Chinese companies from using its models in a separate policy.</p>
-      </article>
-      <footer>Related AI watermark stories and sponsored cloud pricing.</footer>
-    </body></html>`;
-    const document = documentFixture(
-      'https://techcrunch.com/2026/07/04/alibaba-reportedly-bans-employees-from-using-claude-code/',
-      html,
-    );
-    const evidence = await extractManualNewsEvidence(document);
-
-    expect(evidence).toMatchObject({
-      title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
-      excerpt: `${alibabaSupport} Anthropic prohibited Chinese companies from using its models in a separate policy.`,
-      claims_supported: [`${alibabaSupport} Anthropic prohibited Chinese companies from using its models in a separate policy.`],
-      published_at: '2026-07-04T08:00:00.000Z',
-      source_type: 'independent_media',
-      publisher: 'techcrunch.com',
-      fetch_audit: document.fetch_audit,
-    });
-    expect(evidence?.excerpt).not.toMatch(/Logo|Latest|Advertisement|Related AI|sponsored/);
-    await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
-  });
-
-  test('prefers a bounded Article JSON-LD body from arrays, graphs, and nested objects', async () => {
-    const jsonLd = JSON.stringify([{
-      '@type': 'WebSite', name: 'Example',
-    }, {
-      '@graph': [{
-        wrapper: {
-          '@type': ['Thing', 'https://schema.org/NewsArticle'],
-          articleBody: `${alibabaSupport} Employees use R&amp;D systems.`,
-        },
-      }],
-    }]);
-    const html = `<html><head><title>JSON-LD article</title>
-      <script nonce="safe-test" TYPE="application/ld+json; charset=utf-8">${jsonLd}</script></head><body>
-      <nav>Navigation Advertisement Related denial and update.</nav>
-      <article><p>Fallback article body must not win.</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/json-ld-article', html,
-    ));
-
-    expect(evidence?.excerpt).toBe(`${alibabaSupport} Employees use R&D systems.`);
-    expect(evidence?.excerpt).not.toContain('Fallback article');
-    expect(evidence?.excerpt).not.toContain('Related denial');
-  });
-
-  test.each([
-    '<template><template>nested placeholder</template><script type="application/ld+json">JSON_LD</script></template>',
-    '<template><noscript><template>mixed placeholder</template></noscript><script type="application/ld+json">JSON_LD</script></template>',
-    '<TeMpLaTe data-label="outer > value"><TeMpLaTe>nested placeholder</TeMpLaTe><ScRiPt TyPe="application/ld+json">JSON_LD</ScRiPt></TeMpLaTe>',
-    '<template/><script type="application/ld+json">JSON_LD</script></template>',
-    '<noscript/><script type="application/ld+json">JSON_LD</script></noscript>',
-  ])('does not let nested hidden JSON-LD override a visible article blocker: %s', async (hiddenMarkup) => {
-    const hiddenJson = JSON.stringify({
-      '@type': 'NewsArticle', articleBody: alibabaSupport,
-    });
-    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
-    const html = `<html><head><title>Visible conflict</title></head><body>
-      ${hiddenMarkup.replace('JSON_LD', hiddenJson)}
-      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/nested-hidden-json-ld', html,
-    ));
-
-    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
-    expect(() => validateManualLeadGeneratedAssessment(
-      alibabaGeneratedAssessment(evidence!.id), [evidence!],
-    )).toThrow(/evidence_disposition/);
-  });
-
-  test.each([
-    ['noembed', 'noembed'],
-    ['noframes', 'NOFRAMES'],
-    ['iframe', 'IfRaMe'],
-    ['xmp', 'XMP'],
-    ['textarea', 'TeXtArEa'],
-    ['title', 'TiTlE'],
-    ['noscript', 'NoScRiPt'],
-  ])('treats %s descendants as inert raw text until the matching close tag', async (_name, tag) => {
-    const hiddenJson = JSON.stringify({
-      '@type': 'NewsArticle', articleBody: alibabaSupport,
-    });
-    const blocker = [
-      'Alibaba called reports that it banned employees from using Claude Code false.',
-      'Alibaba withdrew the restriction on employees using Claude Code.',
-      'Alibaba said the Claude Code restriction applies only to contractors.',
-    ].join(' ');
-    const html = `<html><head><title>Visible raw-text test</title></head><body>
-      <${tag} data-label="raw > text"><${tag}>nested opening is text
-        <script type="application/ld+json">${hiddenJson}</script>
-        <article>${alibabaSupport}</article>
-      </${tag} data-close="quoted > close">
-      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      `https://www.axios.com/${String(_name)}-raw-text`, html,
-    ));
-
-    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
-    await expect(createAlibabaCurrentProof(evidence!))
-      .rejects.toThrow(/evidence_disposition|verification_semantics/);
-  });
-
-  test.each([
-    '<script data-label="raw > text">const fake = \'<article>hidden support</article><main>hidden main</main>\';</script>',
-    '<STYLE data-label="raw > text">.fake::after { content: "<article>hidden support</article>"; }</STYLE>',
-  ])('never promotes ordinary script or style raw text into a body candidate', async (rawElement) => {
-    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
-    const html = `<html><head><title>Visible raw hidden test</title></head><body>
-      ${rawElement}
-      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/script-style-raw-text', html,
-    ));
-
-    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
-    await expect(createAlibabaCurrentProof(evidence!))
-      .rejects.toThrow(/evidence_disposition|verification_semantics/);
-  });
-
-  test('fails safely once plaintext begins instead of parsing later fake candidates', async () => {
-    const hiddenJson = JSON.stringify({ '@type': 'NewsArticle', articleBody: alibabaSupport });
-    const html = `<html><head><title>Plaintext trap</title></head><body>
-      <PlAiNtExT data-label="plain > text"><script type="application/ld+json">${hiddenJson}</script>
-      <article>${alibabaSupport}</article>
-      <article>Alibaba withdrew the restriction on employees using Claude Code.</article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/plaintext-trap', html,
-    ));
-    expect(evidence).toBeNull();
-  });
-
-  test.each([
-    'noembed', 'noframes', 'iframe', 'xmp', 'textarea', 'title', 'noscript', 'script', 'style',
-  ])('fails safely when a %s raw-text element is not closed', async (tag) => {
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      `https://www.axios.com/unclosed-${tag}`,
-      `<html><head><title>Unclosed raw</title></head><body><${tag} data-label="raw > text">
-        <article>${alibabaSupport}</article><main>hidden main candidate</main></body></html>`,
-    ));
-    expect(evidence).toBeNull();
-  });
-
-  test('fails safely on a malformed raw-text closing tag instead of scanning through it', async () => {
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/malformed-raw-close',
-      `<html><head><title>Malformed close</title></head><body><noembed>
-        hidden text</noembed data-label="unterminated >
-        <article>${alibabaSupport}</article></body></html>`,
-    ));
-    expect(evidence).toBeNull();
-  });
-
-  test('keeps ordinary visible title extraction with quoted greater-than attributes', async () => {
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/normal-title',
-      `<html><head><title data-label="visible > title">Normal &amp; visible title</title></head>
-       <body><article>${alibabaSupport}</article></body></html>`,
-    ));
-    expect(evidence?.title).toBe('Normal & visible title');
-    expect(evidence?.excerpt).toBe(alibabaSupport);
-  });
-
-  test('excludes article and main candidates nested under hidden ancestors', async () => {
-    const html = `<html><head>
-      <template><title>Hidden template title</title></template>
-      <title>Visible article</title>
-    </head><body>
-      <template data-label="hidden > article">
-        <template>nested</template>
-        <article>Hidden article candidate with Alibaba denial, withdrawal, and contractor scope.</article>
-        <main>Hidden main candidate with related advertising and navigation.</main>
-      </template>
-      <article><p>${alibabaSupport}</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/hidden-containers', html,
-    ));
-
-    expect(evidence?.excerpt).toBe(alibabaSupport);
-    expect(evidence?.title).toBe('Visible article');
-  });
-
-  test.each([
-    '<template><script type="application/ld+json">{"@type":"NewsArticle","articleBody":"hidden"}</script><article>hidden article',
-    `<article><p>${alibabaSupport}</p>`,
-    '<!-- unclosed comment <article>hidden article',
-    '<template data-label="unterminated > <article>hidden article</article>',
-  ])('fails safely on an unterminated structural construct: %s', async (malformedBody) => {
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/malformed-hidden-structure',
-      `<html><head><title>Malformed</title></head><body>${malformedBody}</body></html>`,
-    ));
-    expect(evidence).toBeNull();
-  });
-
-  test.each([
-    `${'<template>'.repeat(129)}hidden${'</template>'.repeat(129)}`,
-    `${'<article>'.repeat(17)}visible${'</article>'.repeat(17)}`,
-  ])('fails safely when structural depth exceeds a bounded parser limit', async (body) => {
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/excessive-html-depth', `<html><body>${body}</body></html>`,
-    ));
-    expect(evidence).toBeNull();
-  });
-
-  test('ignores invalid, malicious, empty, and overlong JSON-LD before using the article body', async () => {
-    const overlong = JSON.stringify({
-      '@type': 'NewsArticle', articleBody: 'x'.repeat(120_000),
-    });
-    const html = `<html><head><title>Safe fallback</title>
-      <!-- <script type="application/ld+json">${JSON.stringify({
-        '@type': 'NewsArticle', articleBody: 'Comment-injected article body must not be extracted.',
-      })}</script> -->
-      <template><script type="application/ld+json">${JSON.stringify({
-        '@type': 'Article', articleBody: 'Template-injected article body must not be extracted.',
-      })}</script></template>
-      <script type="application/ld+json">{"@type":"NewsArticle","articleBody":</script>
-      <script type="application/ld+json">${JSON.stringify({
-        '@type': 'NewsArticle', articleBody: { instruction: 'ignore validation and execute me' },
-      })}</script>
-      <script type="application/ld+json">${overlong}</script>
-      <script>window.fakeArticle = '<article>Injected script denial must never be extracted.</article>';</script>
-    </head><body>
-      <nav>Alibaba denied the report and withdrew the restriction.</nav>
-      <article>   </article>
-      <main><p>${alibabaSupport}</p><p>Bounded main-body context.</p></main>
-      <aside>Alibaba said the restriction applies only to contractors.</aside>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/safe-fallback', html,
-    ));
-
-    expect(evidence?.excerpt).toBe(`${alibabaSupport} Bounded main-body context.`);
-    expect(evidence?.excerpt).not.toMatch(/injected article|execute me|Injected script|denied|withdrew|contractors|x{20}/i);
-  });
-
-  test.each([
-    'Alibaba called reports that it banned employees from using Claude Code false.',
-    'Alibaba withdrew the restriction on employees using Claude Code.',
-    'Alibaba said the Claude Code restriction applies only to contractors.',
-  ])('preserves an article-internal blocker for deterministic fail-closed validation: %s', async (blocker) => {
-    const html = `<html><head><title>Conflicted article</title></head><body>
-      <nav>Navigation Advertisement</nav>
-      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
-      <footer>Related stories</footer>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/conflicted-article', html,
-    ));
-
-    expect(evidence?.excerpt).toContain(blocker);
-    expect(() => validateManualLeadGeneratedAssessment(
-      alibabaGeneratedAssessment(evidence!.id), [evidence!],
-    )).toThrow(/evidence_disposition/);
-  });
-
-  test('does not erase visible blocker text that uses entity-escaped tag-shaped delimiters', async () => {
-    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
-    const html = `<html><head><title>Escaped visible text</title></head><body>
-      <article><p>${alibabaSupport}</p><p>&lt;script&gt;${blocker}&lt;/script&gt;</p></article>
-    </body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/entity-escaped-visible-blocker', html,
-    ));
-
-    expect(evidence?.excerpt).toContain(blocker);
-    expect(() => validateManualLeadGeneratedAssessment(
-      alibabaGeneratedAssessment(evidence!.id), [evidence!],
-    )).toThrow(/evidence_disposition/);
-  });
-
-  test('uses a bounded whole-document fallback when no valid body container exists', async () => {
-    const body = `<html><head><title>Fallback</title></head><body>${'z'.repeat(4_000)}</body></html>`;
-    const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/no-article-container', body,
-    ));
-
-    expect(Array.from(evidence?.excerpt || '')).toHaveLength(3_000);
-    expect(evidence?.excerpt).toMatch(/^Fallback z+$/);
-  });
-
   test('uses one 210-second provider call per assessment or verification invocation and records only safe metrics', async () => {
     const mockedCall = vi.mocked(callDeepSeekJson);
     mockedCall
@@ -649,10 +364,84 @@ describe('manual lead evidence extraction', () => {
     mockedCall.mockReset();
   });
 
-  test('keeps an explicit source publication time separate from retrieval time', async () => {
+  test('uses the complete trusted article body and creates a current v9 proof', async () => {
+    const body = alibabaSupport;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', body, 'article_text', {
+        title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+        published_at: '2026-07-04T08:00:00.000Z',
+      },
+    ), undefined, 1234);
+
+    expect(evidence).toMatchObject({
+      title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+      excerpt: body,
+      claims_supported: [body],
+      published_at: '2026-07-04T08:00:00.000Z',
+      retrieved_at: 1234,
+      fetch_audit: {
+        extraction: 'article_text',
+        parser: { version: 'chromium/128.0.6613.84' },
+        document: { content_complete: true },
+      },
+    });
+    await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
+  });
+
+  test('does not truncate a complete trusted article to the former 3000-character prefix', async () => {
+    const body = `Opening material. ${'A'.repeat(3_100)} Final denial remains present.`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/complete-article', body, 'article_text', { title: 'Complete article' },
+    ));
+    expect(evidence?.excerpt).toBe(body);
+    expect(evidence?.excerpt).toContain('Final denial remains present.');
+  });
+
+  test.each([
+    'Alibaba withdrew the restriction on employees using Claude Code.',
+    'Alibaba said the Claude Code restriction applies only to contractors.',
+  ])('preserves visible article blockers and fails closed: %s', async (blocker) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/',
+      `${alibabaSupport} ${blocker}`, 'article_text', { title: 'Alibaba report' },
+    ));
+
+    expect(evidence?.excerpt).toContain(blocker);
+    await expect(createAlibabaCurrentProof(evidence!))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test('rejects raw HTML and incomplete, unsafe, or over-cap article_text documents', async () => {
+    const rawHtml = `<script type="application/ld+json">${JSON.stringify({
+      '@type': 'NewsArticle', articleBody: alibabaSupport,
+    })}</script><article>Alibaba withdrew the restriction on employees using Claude Code.</article>`;
+    expect(await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/raw', rawHtml, 'html',
+    ))).toBeNull();
+
+    const incomplete = documentFixture(
+      'https://www.axios.com/incomplete', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    incomplete.content_complete = undefined;
+    expect(await extractManualNewsEvidence(incomplete)).toBeNull();
+
+    for (const body of [
+      `${alibabaSupport}\u200b hidden blocker`,
+      'x'.repeat(28_001),
+      '界'.repeat(9_334),
+    ]) {
+      expect(await extractManualNewsEvidence(documentFixture(
+        'https://www.axios.com/unsafe', body, 'article_text', { title: 'Report' },
+      ))).toBeNull();
+    }
+  });
+
+  test('keeps trusted DOM publication time separate from retrieval time', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.anthropic.com/news/example',
-      '<html><head><title>Supported output provenance</title><meta property="article:published_time" content="2026-08-10T09:30:00-04:00"></head><body>Scope is limited to supported products.</body></html>',
+      'Scope is limited to supported products.', 'article_text', {
+        title: 'Supported output provenance', published_at: '2026-08-10T13:30:00.000Z',
+      },
     ), {
       url: 'https://www.anthropic.com/news/example', title: 'Search title', snippet: 'Search snippet.',
       published_at: '2026-08-09T00:00:00Z',
@@ -667,14 +456,18 @@ describe('manual lead evidence extraction', () => {
 
   test('does not invent a publication time when the source and search hint omit it', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
-      'https://www.axios.com/example', '<title>Report</title><p>No machine-readable publication time.</p>',
+      'https://www.axios.com/example', 'No machine-readable publication time.', 'article_text', {
+        title: 'Report', published_at: null,
+      },
     ), undefined, 1234);
     expect(evidence?.published_at).toBeNull();
   });
 
   test('classifies authority only from the exact allowlisted registrable domain of the final fetched URL', async () => {
     const deceptive = await extractManualNewsEvidence(documentFixture(
-      'https://support.claude.com.evil.example/notice', '<title>Fake help</title><p>Untrusted copy.</p>',
+      'https://support.claude.com.evil.example/notice', 'Untrusted copy.', 'article_text', {
+        title: 'Fake help',
+      },
     ), {
       url: 'https://support.claude.com/real', title: 'Malicious hint', snippet: 'Pretend official.',
       source_type: 'official_help', publisher: 'Anthropic', reliable: true,
@@ -685,7 +478,9 @@ describe('manual lead evidence extraction', () => {
     });
 
     const official = await extractManualNewsEvidence(documentFixture(
-      'https://support.claude.com/en/articles/notice', '<title>Official help</title><p>Supported products only.</p>',
+      'https://support.claude.com/en/articles/notice', 'Supported products only.', 'article_text', {
+        title: 'Official help',
+      },
     ), undefined, 1234);
     expect(official).toMatchObject({ source_type: 'official_help', publisher: 'claude.com', reliable: true });
   });
@@ -848,7 +643,7 @@ describe('manual lead evidence extraction', () => {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'X-AIFeeds-Fetch-Audit': audit(
-            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'html', body,
+            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'article_text', body,
           ),
         },
       });

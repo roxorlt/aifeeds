@@ -127,409 +127,40 @@ function sourceIdentity(urlValue: string): { source_type: ManualEvidenceSourceTy
   return { source_type: 'other', reliable: false, publisher: displayRegistrableDomain(host) };
 }
 
-const MANUAL_NEWS_EXCERPT_MAX_CHARS = 3_000;
-const MANUAL_NEWS_JSON_LD_MAX_CHARS = 256_000;
-const MANUAL_NEWS_ARTICLE_BODY_MAX_CHARS = 100_000;
-const MANUAL_NEWS_JSON_LD_MAX_DEPTH = 12;
-const MANUAL_NEWS_JSON_LD_MAX_NODES = 1_000;
-const MANUAL_NEWS_HTML_MAX_CODE_UNITS = 2_000_000;
-const MANUAL_NEWS_HTML_MAX_TOKENS = 100_000;
-const MANUAL_NEWS_HTML_MAX_TAG_CODE_UNITS = 65_536;
-const MANUAL_NEWS_HTML_MAX_DEPTH = 128;
-const MANUAL_NEWS_HTML_MAX_CANDIDATE_DEPTH = 16;
-const MANUAL_NEWS_HTML_MAX_BODY_CANDIDATES = 256;
-const MANUAL_NEWS_HTML_MAX_JSON_LD_SCRIPTS = 32;
+const MANUAL_NEWS_ARTICLE_MAX_BYTES = 28_000;
+const MANUAL_NEWS_ARTICLE_MAX_CHARACTERS = 28_000;
 
-const HTML_HIDDEN_CONTAINERS = new Set([
-  'canvas', 'math', 'object', 'svg', 'template',
-]);
-const HTML_FOREIGN_SELF_CLOSING_CONTAINERS = new Set(['math', 'svg']);
-// These tokenizer states consume everything up to their own matching end tag.
-// Treat noscript as raw and hidden conservatively: its browser semantics depend
-// on whether scripting is enabled, while neither branch is article evidence.
-const HTML_RAW_HIDDEN_ELEMENTS = new Set([
-  'iframe', 'noembed', 'noframes', 'noscript', 'script', 'style', 'xmp',
-]);
-const HTML_RCDATA_ELEMENTS = new Set(['textarea', 'title']);
-
-function decodeHtmlEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"',
-  };
-  return value
-    .replace(/&([a-z]+);/gi, (entity, name: string) => named[name.toLowerCase()] ?? entity)
-    .replace(/&#(\d{1,7});/g, (entity, decimal: string) => {
-      const codePoint = Number(decimal);
-      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : entity;
-    })
-    .replace(/&#x([\da-f]{1,6});/gi, (entity, hex: string) => {
-      const codePoint = Number.parseInt(hex, 16);
-      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : entity;
-    });
+function normalizedHintPublishedAt(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
-function htmlAttribute(attributes: string, name: string): string | null {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = '(?:^|\\s)' + escaped + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s"\'=<>`]+))';
-  const match = new RegExp(pattern, 'i').exec(attributes);
-  return match ? decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? '') : null;
-}
-
-interface HtmlBodyCandidate {
-  tag: 'article' | 'main';
-  parts: string[];
-}
-
-interface HtmlEvidenceScan {
-  reliable: boolean;
-  title_text: string;
-  visible_text: string;
-  json_ld_sources: string[];
-  article_bodies: string[];
-  main_bodies: string[];
-}
-
-function normalizedHtmlParts(parts: readonly string[]): string {
-  return decodeHtmlEntities(parts.join('')).replace(/\s+/g, ' ').trim();
-}
-
-function findHtmlTagEnd(html: string, start: number): number | null {
-  let quote = '';
-  const limit = Math.min(html.length, start + MANUAL_NEWS_HTML_MAX_TAG_CODE_UNITS);
-  for (let index = start; index < limit; index += 1) {
-    const character = html[index];
-    if (quote) {
-      if (character === quote) quote = '';
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-    } else if (character === '>') {
-      return index;
-    }
-  }
-  return null;
-}
-
-function isHtmlTagBoundary(character: string | undefined): boolean {
-  return character === undefined || character === '>' || character === '/' || /\s/.test(character);
-}
-
-function findRawHtmlClosing(
-  html: string,
-  lowerHtml: string,
-  tag: string,
-  from: number,
-): { start: number; end: number } | null {
-  const prefix = `</${tag}`;
-  let searchFrom = from;
-  for (let attempts = 0; attempts < 1_000; attempts += 1) {
-    const start = lowerHtml.indexOf(prefix, searchFrom);
-    if (start < 0) return null;
-    if (isHtmlTagBoundary(lowerHtml[start + prefix.length])) {
-      const end = findHtmlTagEnd(html, start + prefix.length);
-      // Once an appropriate raw-text end tag starts, malformed/unbounded
-      // attributes make the tokenizer state ambiguous. Do not scan through
-      // them and accidentally activate later markup.
-      if (end === null) return null;
-      return { start, end };
-    }
-    searchFrom = start + prefix.length;
-  }
-  return null;
-}
-
-function scanHtmlEvidence(html: string, collectStructured = true): HtmlEvidenceScan {
-  const visibleParts: string[] = [];
-  const jsonLdSources: string[] = [];
-  const articleBodies: string[] = [];
-  const mainBodies: string[] = [];
-  const hiddenStack: string[] = [];
-  const candidateStack: HtmlBodyCandidate[] = [];
-  if (html.length > MANUAL_NEWS_HTML_MAX_CODE_UNITS) {
-    return {
-      reliable: false, title_text: '', visible_text: '',
-      json_ld_sources: [], article_bodies: [], main_bodies: [],
-    };
-  }
-  const lowerHtml = html.toLowerCase();
-  let index = 0;
-  let tokens = 0;
-  let reliable = true;
-  let titleText = '';
-  const hidden = () => hiddenStack.length > 0;
-  const appendVisible = (text: string) => {
-    if (!text || hidden()) return;
-    visibleParts.push(text);
-    for (const candidate of candidateStack) candidate.parts.push(text);
-  };
-  const fail = () => {
-    reliable = false;
-    index = html.length;
-  };
-
-  while (index < html.length && reliable) {
-    tokens += 1;
-    if (tokens > MANUAL_NEWS_HTML_MAX_TOKENS
-      || hiddenStack.length > MANUAL_NEWS_HTML_MAX_DEPTH
-      || candidateStack.length > MANUAL_NEWS_HTML_MAX_CANDIDATE_DEPTH) {
-      fail();
-      break;
-    }
-    if (html.startsWith('<!--', index)) {
-      const end = html.indexOf('-->', index + 4);
-      if (end < 0) {
-        fail();
-        break;
-      }
-      appendVisible(' ');
-      index = end + 3;
-      continue;
-    }
-    if (html[index] !== '<') {
-      const nextTag = html.indexOf('<', index);
-      const end = nextTag < 0 ? html.length : nextTag;
-      appendVisible(html.slice(index, end));
-      index = end;
-      continue;
-    }
-    if (html.startsWith('<!', index) || html.startsWith('<?', index)) {
-      const end = findHtmlTagEnd(html, index + 2);
-      if (end === null) {
-        fail();
-        break;
-      }
-      appendVisible(' ');
-      index = end + 1;
-      continue;
-    }
-
-    let cursor = index + 1;
-    let closing = false;
-    if (html[cursor] === '/') {
-      closing = true;
-      cursor += 1;
-      while (/\s/.test(html[cursor] || '')) cursor += 1;
-    }
-    const nameStart = cursor;
-    while (/[A-Za-z0-9:-]/.test(html[cursor] || '')) cursor += 1;
-    if (cursor === nameStart || !/[A-Za-z]/.test(html[nameStart])) {
-      appendVisible('<');
-      index += 1;
-      continue;
-    }
-    const tag = lowerHtml.slice(nameStart, cursor);
-    const tagEnd = findHtmlTagEnd(html, cursor);
-    if (tagEnd === null) {
-      fail();
-      break;
-    }
-    const attributes = html.slice(cursor, tagEnd);
-    const selfClosing = !closing && attributes.trimEnd().endsWith('/');
-
-    if (closing) {
-      if (HTML_HIDDEN_CONTAINERS.has(tag)) {
-        if (!hiddenStack.length) {
-          index = tagEnd + 1;
-          continue;
-        }
-        if (hiddenStack[hiddenStack.length - 1] !== tag) {
-          fail();
-          break;
-        }
-        hiddenStack.pop();
-        appendVisible(' ');
-      } else if ((tag === 'article' || tag === 'main') && !hidden()) {
-        const matchingIndex = candidateStack.map((candidate) => candidate.tag).lastIndexOf(tag);
-        if (matchingIndex >= 0 && matchingIndex !== candidateStack.length - 1) {
-          fail();
-          break;
-        }
-        if (matchingIndex >= 0) {
-          appendVisible(' ');
-          const candidate = candidateStack.pop()!;
-          const body = normalizedHtmlParts(candidate.parts);
-          const target = candidate.tag === 'article' ? articleBodies : mainBodies;
-          if (body) {
-            if (target.length >= MANUAL_NEWS_HTML_MAX_BODY_CANDIDATES) {
-              fail();
-              break;
-            }
-            target.push(body);
-          }
-        }
-      } else {
-        appendVisible(' ');
-      }
-      index = tagEnd + 1;
-      continue;
-    }
-
-    // HTML switches permanently to the plaintext tokenizer state here. There
-    // is no closing tag and no later structure can safely become evidence.
-    if (tag === 'plaintext') {
-      fail();
-      break;
-    }
-
-    if (HTML_RAW_HIDDEN_ELEMENTS.has(tag) || HTML_RCDATA_ELEMENTS.has(tag)) {
-      const rawClosing = findRawHtmlClosing(html, lowerHtml, tag, tagEnd + 1);
-      if (!rawClosing) {
-        fail();
-        break;
-      }
-      const rawText = html.slice(tagEnd + 1, rawClosing.start);
-      if (tag === 'script') {
-        const type = htmlAttribute(attributes, 'type')?.split(';', 1)[0].trim().toLowerCase();
-        if (collectStructured && !hidden() && type === 'application/ld+json'
-          && rawText.trim() && Array.from(rawText).length <= MANUAL_NEWS_JSON_LD_MAX_CHARS) {
-          if (jsonLdSources.length >= MANUAL_NEWS_HTML_MAX_JSON_LD_SCRIPTS) {
-            fail();
-            break;
-          }
-          jsonLdSources.push(rawText.trim());
-        }
-      } else if (tag === 'title' && !hidden()) {
-        if (!titleText) titleText = decodeHtmlEntities(rawText).replace(/\s+/g, ' ').trim();
-        appendVisible(` ${rawText} `);
-      }
-      appendVisible(' ');
-      index = rawClosing.end + 1;
-      continue;
-    }
-
-    if (HTML_HIDDEN_CONTAINERS.has(tag)) {
-      appendVisible(' ');
-      if (!selfClosing || !HTML_FOREIGN_SELF_CLOSING_CONTAINERS.has(tag)) hiddenStack.push(tag);
-      index = tagEnd + 1;
-      continue;
-    }
-    if ((tag === 'article' || tag === 'main') && !hidden() && !selfClosing) {
-      candidateStack.push({ tag, parts: [] });
-    }
-    appendVisible(' ');
-    index = tagEnd + 1;
-  }
-
-  if (hiddenStack.length || candidateStack.length) reliable = false;
-  return {
-    reliable,
-    title_text: reliable ? titleText : '',
-    visible_text: reliable ? normalizedHtmlParts(visibleParts) : '',
-    json_ld_sources: reliable ? jsonLdSources : [],
-    article_bodies: reliable ? articleBodies : [],
-    main_bodies: reliable ? mainBodies : [],
-  };
-}
-
-function decodeHtml(value: string): string {
-  const scan = scanHtmlEvidence(value, false);
-  return scan.reliable ? scan.visible_text : '';
-}
-
-function isJsonLdArticleType(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(isJsonLdArticleType);
-  if (typeof value !== 'string') return false;
-  const type = value.trim().toLowerCase().replace(/[#/]$/, '').split(/[#/]/).pop();
-  return type === 'article' || type === 'newsarticle';
-}
-
-function boundedArticleText(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const size = Array.from(value).length;
-  if (size < 20 || size > MANUAL_NEWS_ARTICLE_BODY_MAX_CHARS) return null;
-  const decoded = decodeHtml(value);
-  return Array.from(decoded).length >= 20 ? decoded : null;
-}
-
-function jsonLdArticleBody(value: unknown): string | null {
-  let visited = 0;
-  const visit = (node: unknown, depth: number): string | null => {
-    visited += 1;
-    if (visited > MANUAL_NEWS_JSON_LD_MAX_NODES || depth > MANUAL_NEWS_JSON_LD_MAX_DEPTH) return null;
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        const body = visit(item, depth + 1);
-        if (body) return body;
-      }
-      return null;
-    }
-    if (!node || typeof node !== 'object') return null;
-    const record = node as Record<string, unknown>;
-    if (isJsonLdArticleType(record['@type'])) {
-      const body = boundedArticleText(record.articleBody);
-      if (body) return body;
-    }
-    for (const [key, child] of Object.entries(record)) {
-      if (key === 'articleBody' || key === '@context') continue;
-      const body = visit(child, depth + 1);
-      if (body) return body;
-    }
-    return null;
-  };
-  return visit(value, 0);
-}
-
-function extractJsonLdArticleBody(sources: readonly string[]): string | null {
-  for (const source of sources) {
-    try {
-      const body = jsonLdArticleBody(JSON.parse(source));
-      if (body) return body;
-    } catch {
-      // Invalid structured data is untrusted and falls through to the bounded HTML containers.
-    }
-  }
-  return null;
-}
-
-function longestBoundedBody(candidates: readonly string[]): string | null {
-  return candidates
-    .map((candidate) => {
-      const size = Array.from(candidate).length;
-      return size >= 20 && size <= MANUAL_NEWS_ARTICLE_BODY_MAX_CHARS ? candidate : null;
-    })
-    .filter((candidate): candidate is string => !!candidate)
-    .sort((left, right) => Array.from(right).length - Array.from(left).length)[0] || null;
-}
-
-function preferredHtmlEvidence(html: string): { title: string; text: string } | null {
-  const scan = scanHtmlEvidence(html);
-  if (!scan.reliable) return null;
-  return {
-    title: scan.title_text,
-    text: extractJsonLdArticleBody(scan.json_ld_sources)
-      || longestBoundedBody(scan.article_bodies)
-      || longestBoundedBody(scan.main_bodies)
-      || scan.visible_text,
-  };
-}
-
-function normalizedPublishedAt(body: string, hinted: string | null | undefined): string | null {
-  const candidates: string[] = [];
-  for (const tag of body.match(/<meta\b[^>]*>/gi) || []) {
-    const attributes = new Map<string, string>();
-    for (const match of tag.matchAll(/([:\w-]+)\s*=\s*["']([^"']*)["']/g)) {
-      attributes.set(match[1].toLowerCase(), match[2]);
-    }
-    const key = (attributes.get('property') || attributes.get('name') || attributes.get('itemprop') || '').toLowerCase();
-    if (['article:published_time', 'datepublished', 'date', 'pubdate'].includes(key)) {
-      candidates.push(attributes.get('content') || '');
-    }
-  }
-  const time = /<time\b[^>]*\bdatetime\s*=\s*["']([^"']+)["']/i.exec(body);
-  if (time) candidates.push(time[1]);
-  if (hinted) candidates.push(hinted);
-  for (const value of candidates) {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-    if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) continue;
-    const timestamp = Date.parse(value);
-    if (value && Number.isFinite(timestamp)) return new Date(timestamp).toISOString();
-  }
-  return null;
+function completeTrustedArticle(document: PublicDocument): boolean {
+  if (document.extraction !== 'article_text'
+    || !['text/html', 'application/xhtml+xml'].includes(document.content_type)
+    || document.content_complete !== true
+    || typeof document.title !== 'string' || !document.title.trim()
+    || !['article', 'main'].includes(String(document.selection))
+    || !document.fetch_audit.document
+    || document.fetch_audit.document.title !== document.title
+    || document.fetch_audit.document.published_at !== document.published_at
+    || document.fetch_audit.document.selection !== document.selection
+    || document.fetch_audit.document.content_complete !== true
+    || document.fetch_audit.extraction !== 'article_text'
+    || !/^chromium\/\d+(?:\.\d+){0,3}$/.test(document.fetch_audit.parser.version)
+    || document.fetch_audit.truncation.source || document.fetch_audit.truncation.extracted_text) return false;
+  const bytes = new TextEncoder().encode(document.body).byteLength;
+  const characters = Array.from(document.body);
+  if (!characters.length || bytes !== document.bytes
+    || bytes > MANUAL_NEWS_ARTICLE_MAX_BYTES
+    || characters.length > MANUAL_NEWS_ARTICLE_MAX_CHARACTERS
+    || document.fetch_audit.actual_sizes.extracted_text_bytes !== bytes
+    || document.fetch_audit.actual_sizes.extracted_text_characters !== characters.length) return false;
+  return !characters.some((character) => /\p{Default_Ignorable_Code_Point}/u.test(character)
+    && character !== '\u200c' && character !== '\u200d' && !/^[\ufe00-\ufe0f]$/u.test(character));
 }
 
 async function evidenceId(url: string): Promise<string> {
@@ -544,19 +175,18 @@ export async function extractManualNewsEvidence(
   now = Date.now(),
 ): Promise<ManualNewsEvidence | null> {
   const identity = sourceIdentity(document.url);
-  const html = document.extraction === 'html';
-  const htmlEvidence = html ? preferredHtmlEvidence(document.body) : null;
-  if (html && htmlEvidence === null) return null;
-  const title = compact(hint?.title || htmlEvidence?.title || '', 220);
-  const extractedBody = htmlEvidence?.text ?? document.body;
-  const excerpt = compact(extractedBody, MANUAL_NEWS_EXCERPT_MAX_CHARS);
+  if (document.extraction === 'html') return null;
+  if (document.extraction === 'article_text' && !completeTrustedArticle(document)) return null;
+  const articleText = document.extraction === 'article_text';
+  const title = articleText ? document.title! : compact(hint?.title || '', 220);
+  const excerpt = articleText ? document.body : compact(document.body, 3_000);
   if (!title && !excerpt) return null;
   return {
     id: await evidenceId(document.url),
     url: document.url,
     source_type: identity.source_type,
     publisher: compact(identity.publisher, 120),
-    published_at: normalizedPublishedAt(document.body, hint?.published_at),
+    published_at: articleText ? document.published_at! : normalizedHintPublishedAt(hint?.published_at),
     retrieved_at: now,
     title,
     excerpt,

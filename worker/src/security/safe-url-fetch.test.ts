@@ -17,6 +17,11 @@ const documentLimits = {
   extracted_text_bytes: 2 * 1024 * 1024,
   extracted_text_characters: 1_000_000,
 };
+const articleAppliedLimits = {
+  ...documentLimits,
+  extracted_text_bytes: 28_000,
+  extracted_text_characters: 28_000,
+};
 
 function fetchAudit(input: {
   hops: Array<{ url: string; validated_ip: string; connected_ip: string }>;
@@ -27,16 +32,33 @@ function fetchAudit(input: {
   actual_sizes?: typeof documentLimits;
   truncation?: { source: boolean; extracted_text: boolean };
   parser?: { result: 'success' | 'failed'; version: string };
+  document?: {
+    title: string;
+    published_at: string | null;
+    selection: 'article' | 'main';
+    content_complete: boolean;
+  };
 }): string {
+  const sourceContentType = input.source_content_type || 'text/html';
+  const extraction = input.extraction || (sourceContentType === 'text/html'
+    || sourceContentType === 'application/xhtml+xml' ? 'article_text' : 'text');
+  const articleText = extraction === 'article_text';
   return encodeURIComponent(JSON.stringify({
     hops: input.hops,
-    source_content_type: input.source_content_type || 'text/html',
-    extraction: input.extraction || 'html',
+    source_content_type: sourceContentType,
+    extraction,
     requested_limits: input.requested_limits || documentLimits,
-    applied_limits: input.applied_limits || input.requested_limits || documentLimits,
+    applied_limits: input.applied_limits || input.requested_limits
+      || (articleText ? articleAppliedLimits : documentLimits),
     actual_sizes: input.actual_sizes || { source_bytes: 12, extracted_text_bytes: 12, extracted_text_characters: 12 },
     truncation: input.truncation || { source: false, extracted_text: false },
-    parser: input.parser || { result: 'success', version: 'research-gateway-parser/1.0.0' },
+    parser: input.parser || {
+      result: 'success', version: articleText ? 'chromium/128.0.6613.84' : 'research-gateway-parser/1.0.0',
+    },
+    ...(articleText ? { document: input.document || {
+      title: 'Validated source title', published_at: '2026-07-04T08:00:00.000Z',
+      selection: 'article', content_complete: true,
+    } } : {}),
   }));
 }
 
@@ -152,7 +174,79 @@ describe('trusted manual-news research boundary', () => {
       url: 'https://example.com/story',
       limits: documentLimits,
       max_redirects: 3,
+      extraction_mode: 'article_text_v1',
     });
+  });
+
+  test('requests and exposes a complete Chromium article_text_v1 document contract', async () => {
+    const body = 'Alibaba reportedly bans employees from using Claude Code. Full article context remains intact.';
+    const fetcher = vi.fn(async () => gatewayResponse(body, {
+      hops: [publicHop()],
+      document: {
+        title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+        published_at: '2026-07-04T08:00:00.000Z',
+        selection: 'article', content_complete: true,
+      },
+    }));
+
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(fetcher as typeof fetch),
+    });
+
+    expect(document).toMatchObject({
+      extraction: 'article_text',
+      title: 'Alibaba reportedly bans employees from using Claude Code | TechCrunch',
+      published_at: '2026-07-04T08:00:00.000Z',
+      content_complete: true,
+      selection: 'article',
+      body,
+      fetch_audit: {
+        extraction: 'article_text',
+        applied_limits: articleAppliedLimits,
+        parser: { result: 'success', version: 'chromium/128.0.6613.84' },
+      },
+    });
+  });
+
+  test('rejects legacy HTML and forged or incomplete article_text audits for the opt-in request', async () => {
+    const body = 'Complete article text.';
+    const cases = [
+      { extraction: 'html' },
+      { parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' } },
+      { document: { title: 'Title', published_at: null, selection: 'article' as const, content_complete: false } },
+      { document: { title: '', published_at: null, selection: 'article' as const, content_complete: true } },
+      { document: { title: 'Title', published_at: 'July 4', selection: 'article' as const, content_complete: true } },
+      { document: { title: 'Title', published_at: null, selection: 'main' as const, content_complete: true },
+        applied_limits: documentLimits },
+    ];
+    for (const mutation of cases) {
+      await expect(fetchPublicDocument('https://example.com/story', {
+        service: service(async () => gatewayResponse(body, {
+          hops: [publicHop()], ...mutation,
+        }) as never),
+      })).rejects.toThrow(/unsafe_gateway_audit/);
+    }
+  });
+
+  test('rejects unsafe invisible or over-cap article text instead of accepting a truncated prefix', async () => {
+    for (const body of [
+      'Alibaba reportedly bans employees\u200b from using Claude Code.',
+      'क\u200dष'.repeat(10),
+      'x'.repeat(28_001),
+      '界'.repeat(9_334),
+    ]) {
+      const bytes = new TextEncoder().encode(body).byteLength;
+      await expect(fetchPublicDocument('https://example.com/story', {
+        service: service(async () => gatewayResponse(body, {
+          hops: [publicHop()],
+          actual_sizes: {
+            source_bytes: bytes,
+            extracted_text_bytes: bytes,
+            extracted_text_characters: Array.from(body).length,
+          },
+        }) as never),
+      })).rejects.toThrow(/unsafe_gateway_(audit|article_text)/);
+    }
   });
 
   test('calls the Worker intrinsic fetch lexically when no gateway fetcher is injected', async () => {
@@ -235,7 +329,10 @@ describe('trusted manual-news research boundary', () => {
       service: service(async () => gatewayResponse(body, {
         hops: [publicHop()],
         requested_limits: { ...documentLimits, extracted_text_bytes: 4 },
-        applied_limits: { ...documentLimits, extracted_text_bytes: 4 },
+        applied_limits: {
+          ...articleAppliedLimits,
+          extracted_text_bytes: 4,
+        },
         actual_sizes: { source_bytes: 4, extracted_text_bytes: 4, extracted_text_characters: 4 },
       }) as never),
     })).rejects.toThrow(/response_too_large/);
