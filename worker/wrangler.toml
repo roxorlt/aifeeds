@@ -169,6 +169,12 @@ name = "digest-deliver-workflow"
 binding = "DIGEST_DELIVER_WORKFLOW"
 class_name = "DigestDeliverWorkflow"
 
+# 工作台手工补录行业新闻线索：安全取证 → 事实核验 → 聚类去重 → 评分。
+[[workflows]]
+name = "manual-news-lead-workflow"
+binding = "MANUAL_NEWS_LEAD_WORKFLOW"
+class_name = "ManualNewsLeadWorkflow"
+
 # ─────────────────── Staging 环境 ───────────────────
 # 部署：wrangler deploy --env staging
 # 设计：docs/plans/2026-05-03-staging-environment-design.md
@@ -277,6 +283,11 @@ class_name = "DigestNodeRunWorkflow"
 name = "digest-deliver-workflow-staging"
 binding = "DIGEST_DELIVER_WORKFLOW"
 class_name = "DigestDeliverWorkflow"
+
+[[env.staging.workflows]]
+name = "manual-news-lead-workflow-staging"
+binding = "MANUAL_NEWS_LEAD_WORKFLOW"
+class_name = "ManualNewsLeadWorkflow"
 
 # Staging worker 自定义域。需要 zone 已加 ai-feeds.com（已加）；
 # wrangler deploy 时自动注册 + 配 DNS（CF managed）。
