@@ -179,6 +179,34 @@ describe('manual daily news leads API', () => {
     expect(getManualNewsLead).toHaveBeenCalledWith(expect.anything(), record.id);
   });
 
+  test.each(['assessment', 'verification'] as const)(
+    'exposes only the stable %s JSON parse failure on authorized list and detail GETs',
+    async (stage) => {
+      const failed = {
+        ...record,
+        status: 'needs_review',
+        error_code: stage === 'assessment' ? 'assessment_validation_failed' : 'fact_verification_failed',
+        error_message: `manual_news_provider_error:${stage}:provider_json_parse_fail`,
+      };
+      vi.mocked(listManualNewsLeads).mockResolvedValueOnce([failed] as never);
+      vi.mocked(getManualNewsLead).mockResolvedValueOnce(failed as never);
+
+      const listResponse = await handleManualNewsLeadsApi(
+        request('/api/digest/daily-news-leads?date=2026-08-11'), env(), { waitUntil() {} } as never,
+      );
+      const detailResponse = await handleManualNewsLeadsApi(
+        request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never,
+      );
+
+      await expect(listResponse.json()).resolves.toMatchObject({
+        leads: [{ error_message: `manual_news_provider_error:${stage}:provider_json_parse_fail` }],
+      });
+      await expect(detailResponse.json()).resolves.toMatchObject({
+        lead: { error_message: `manual_news_provider_error:${stage}:provider_json_parse_fail` },
+      });
+    },
+  );
+
   test('fails closed when the durable workflow binding is unavailable', async () => {
     const unavailableEnv = env({ MANUAL_NEWS_LEAD_WORKFLOW: undefined });
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {

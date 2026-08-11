@@ -19,6 +19,7 @@ import {
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+import { ManualNewsProviderError } from './manual-news-provider';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -212,23 +213,28 @@ function verifiedPriorEvent(): ManualLeadPriorEvent {
 
 function verifiedFromPrompt(prompt: { user: string }) {
   const body = JSON.parse(prompt.user) as {
+    untrusted_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
     facts: Array<{
       fact_id: string;
       untrusted_candidate_value: string | boolean;
       untrusted_prior_events?: Array<{ event_key: string }>;
-      allowed_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
+      allowed_evidence_ids: string[];
     }>;
     projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
   };
+  const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
   return {
     overall_verdict: 'supported',
-    fact_results: body.facts.map((fact) => ({
+    fact_results: body.facts.map((fact) => {
+      const evidence = evidenceById.get(fact.allowed_evidence_ids[0])!;
+      const quote = evidence.claims_supported[0] || evidence.excerpt || evidence.title;
+      return {
       fact_id: fact.fact_id,
       supported: true,
       issue_code: 'none',
       source_quotes: [{
-        evidence_id: fact.allowed_evidence[0].id,
-        quote: fact.allowed_evidence[0].claims_supported[0],
+        evidence_id: evidence.id,
+        quote,
       }],
       ...(fact.fact_id === 'field:material_update' ? {
         comparison_result: {
@@ -238,11 +244,12 @@ function verifiedFromPrompt(prompt: { user: string }) {
           reason_code: fact.untrusted_prior_events?.length
             ? (fact.untrusted_candidate_value ? 'material_change' : 'no_material_change')
             : 'no_prior_match',
-          current_evidence_id: fact.allowed_evidence[0].id,
-          current_quote: fact.allowed_evidence[0].claims_supported[0],
+          current_evidence_id: evidence.id,
+          current_quote: quote,
         },
       } : {}),
-    })),
+    };
+    }),
     ...(body.projections?.length ? {
       projection_results: body.projections.map((projection) => ({
         projection_id: projection.projection_id,
@@ -280,12 +287,17 @@ describe('manual lead processing pipeline', () => {
   test('moves through observable stages and produces an evidence-bounded recommendation', async () => {
     const memory = memoryStore();
     let verifyCalls = 0;
+    const modelContexts: unknown[] = [];
     await processManualNewsLead('ml-20260811-abc123', memory.store, {
       search: async () => [],
       fetch: async () => documentFixture(officialEvidence.url, '<p>doc</p>'),
       extract: async () => officialEvidence,
-      assess: async () => assessed(),
-      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+      assess: async (_prompt, context) => { modelContexts.push(context); return assessed(); },
+      verify: async (prompt, context) => {
+        verifyCalls += 1;
+        modelContexts.push(context);
+        return verifiedFromPrompt(prompt);
+      },
     });
 
     expect(memory.transitions).toEqual([
@@ -299,6 +311,18 @@ describe('manual lead processing pipeline', () => {
       duplicate_scope: null, matched_lead_id: null,
     });
     expect(verifyCalls).toBe(1);
+    expect(modelContexts).toEqual([
+      {
+        request_id: 'ml-20260811-abc123:p0:assessment:1',
+        evidence_count: 1,
+        attempt: 0,
+      },
+      {
+        request_id: 'ml-20260811-abc123:p0:verification:2',
+        evidence_count: 1,
+        attempt: 0,
+      },
+    ]);
   });
 
   test('processes a URL-only TechCrunch Alibaba Claude Code restriction as one atomic fact row', async () => {
@@ -483,7 +507,8 @@ describe('manual lead processing pipeline', () => {
 
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'fact_verification_failed', error_message: 'invalid_fact_verification',
+      error_code: 'fact_verification_failed',
+      error_message: 'manual_news_provider_error:verification:provider_json_parse_fail',
     });
   });
 
@@ -499,7 +524,8 @@ describe('manual lead processing pipeline', () => {
 
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+      error_code: 'assessment_validation_failed',
+      error_message: 'manual_news_provider_error:assessment:provider_json_parse_fail',
     });
   });
 
@@ -711,9 +737,7 @@ describe('manual lead processing pipeline', () => {
     };
 
     await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
-      .rejects.toThrow(
-        /assessment_model_retryable_attempt_2_after_unknown_evidence_id/,
-      );
+      .rejects.toThrow(/trusted_gateway_http_503/);
     expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
     expect(memory.saveCalls()).toBe(0);
 
@@ -1173,10 +1197,104 @@ describe('manual lead processing pipeline', () => {
       memory.current().input_url = '';
     }
     await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
-      .rejects.toThrow(/gateway_timeout|assessment_model_retryable_attempt_1_after_not_validated/);
+      .rejects.toThrow(/gateway_timeout|trusted_gateway_http_503/);
     expect(memory.current().status).not.toBe('failed');
     expect(['researching', 'verifying']).toContain(memory.current().status);
   });
+
+  test.each([
+    ['assessment', 'provider_timeout'],
+    ['verification', 'provider_http_503'],
+  ] as const)('preserves the safe %s provider root cause for Workflow exhaustion', async (
+    stage,
+    providerErrorCode,
+  ) => {
+    const memory = memoryStore();
+    const failure = new ManualNewsProviderError({
+      stage,
+      provider_error_code: providerErrorCode,
+      metrics: {
+        stage,
+        request_id: `ml-20260811-abc123:p4:${stage}:1`,
+        system_chars: 120,
+        user_chars: 3_200,
+        evidence_count: 1,
+        attempt: 4,
+      },
+    });
+    await expect(processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => {
+        if (stage === 'assessment') throw failure;
+        return assessed();
+      },
+      verify: async (prompt) => {
+        if (stage === 'verification') throw failure;
+        return verifiedFromPrompt(prompt);
+      },
+    })).rejects.toMatchObject({
+      message: expect.stringMatching(
+        new RegExp(`^manual_news_provider_error:${stage}:${providerErrorCode}:`),
+      ),
+      provider_error_code: providerErrorCode,
+      stage,
+    });
+    expect(isTransientManualLeadError(failure)).toBe(true);
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+  });
+
+  test.each(['assessment', 'verification'] as const)(
+    'fails closed with an audited stable %s prompt-too-large terminal error',
+    async (stage) => {
+      const memory = memoryStore();
+      const failure = new ManualNewsProviderError({
+        stage,
+        provider_error_code: 'provider_prompt_too_large',
+        metrics: {
+          stage,
+          request_id: `ml-20260811-abc123:p4:${stage}:1`,
+          system_chars: 20_000,
+          user_chars: 50_000,
+          evidence_count: 6,
+          attempt: 4,
+        },
+      });
+
+      await processManualNewsLead(memory.current().id, memory.store, {
+        search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+        extract: async () => officialEvidence,
+        assess: async () => {
+          if (stage === 'assessment') throw failure;
+          return assessed();
+        },
+        verify: async (prompt) => {
+          if (stage === 'verification') throw failure;
+          return verifiedFromPrompt(prompt);
+        },
+      });
+
+      expect(isTransientManualLeadError(failure)).toBe(false);
+      expect(memory.current()).toMatchObject({
+        status: 'failed', assessment: null,
+        error_code: stage === 'assessment' ? 'assessment_failed' : 'fact_verification_failed',
+        error_message: `manual_news_provider_error:${stage}:provider_prompt_too_large`,
+      });
+      expect(memory.transitionPatches.at(-1)).toMatchObject({
+        audit_metadata: {
+          provider_failure: {
+            stage,
+            provider_error_code: 'provider_prompt_too_large',
+            request_id: `ml-20260811-abc123:p4:${stage}:1`,
+            system_chars: 20_000,
+            user_chars: 50_000,
+            evidence_count: 6,
+            attempt: 4,
+          },
+        },
+      });
+    },
+  );
 
   test.each([
     ['HTTP 503', 503],
@@ -1203,7 +1321,7 @@ describe('manual lead processing pipeline', () => {
       extract: async () => officialEvidence,
       assess: assessThroughRealDeepSeekJson,
       verify: async () => { throw new Error('unexpected_verify'); },
-    })).rejects.toThrow(/assessment_model_retryable_attempt_1_after_not_validated/);
+    })).rejects.toThrow(new RegExp(expectedError.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
     expect(isTransientManualLeadError(new Error(expectedError))).toBe(true);
     expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
@@ -1247,7 +1365,8 @@ describe('manual lead processing pipeline', () => {
     expect(isTransientManualLeadError(new Error('json_parse_fail'))).toBe(false);
     expect(memory.current()).toMatchObject({
       status: 'needs_review', assessment: null,
-      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+      error_code: 'assessment_validation_failed',
+      error_message: 'manual_news_provider_error:assessment:provider_json_parse_fail',
     });
   });
 

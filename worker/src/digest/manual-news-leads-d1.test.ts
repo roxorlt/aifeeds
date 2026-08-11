@@ -26,6 +26,7 @@ import {
   retryManualNewsLead,
   submitManualNewsLead,
 } from './manual-news-leads-store';
+import { ManualNewsProviderError } from './manual-news-provider';
 
 class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
@@ -415,22 +416,27 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
     extract: async () => null, assess: async () => generatedAssessment(),
     verify: async (prompt) => {
       const body = JSON.parse(prompt.user) as {
-        facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
+        untrusted_evidence: Array<{ id: string; excerpt: string }>;
+        facts: Array<{ fact_id: string; allowed_evidence_ids: string[] }>;
         projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
       };
+      const evidenceById = new Map(body.untrusted_evidence.map((item) => [item.id, item]));
       return {
         overall_verdict: 'supported',
-        fact_results: body.facts.map((fact) => ({
-          fact_id: fact.fact_id, supported: true, issue_code: 'none',
-          source_quotes: [{ evidence_id: fact.allowed_evidence[0].id, quote: fact.allowed_evidence[0].excerpt }],
-          ...(fact.fact_id === 'field:material_update' ? {
-            comparison_result: {
-              value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
-              current_evidence_id: fact.allowed_evidence[0].id,
-              current_quote: fact.allowed_evidence[0].excerpt,
-            },
-          } : {}),
-        })),
+        fact_results: body.facts.map((fact) => {
+          const evidence = evidenceById.get(fact.allowed_evidence_ids[0])!;
+          return {
+            fact_id: fact.fact_id, supported: true, issue_code: 'none',
+            source_quotes: [{ evidence_id: evidence.id, quote: evidence.excerpt }],
+            ...(fact.fact_id === 'field:material_update' ? {
+              comparison_result: {
+                value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+                current_evidence_id: evidence.id,
+                current_quote: evidence.excerpt,
+              },
+            } : {}),
+          };
+        }),
         ...(body.projections?.length ? {
           projection_results: body.projections.map((projection) => ({
             projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
@@ -1050,7 +1056,6 @@ describe('manual lead D1-backed dedupe', () => {
       new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER, 2),
       verifyingAdapters(),
     );
-
     expect(result).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
     expect(state.db.sqlite.prepare(`SELECT assessment_version, status, reason
       FROM manual_news_assessment_verifications WHERE lead_id = ? ORDER BY assessment_version`).all(state.leadId))
@@ -1371,7 +1376,7 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT COUNT(*) AS count FROM manual_news_leads
        WHERE status = 'validating' AND version = 5
          AND processing_owner = 'manual-news-' || id || '-v5'
-         AND processing_lease_until = 360100`,
+         AND processing_lease_until = 960100`,
     ).get()).toMatchObject({ count: statuses.length });
     expect(state.db.sqlite.prepare(
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
@@ -1397,6 +1402,88 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(state.leadId)).toMatchObject({ count: 1 });
   });
 
+  test('persists only a stable provider root cause, stage, and prompt metrics after retry exhaustion', async () => {
+    const state = fixture('verifying', 7);
+    state.db.sqlite.prepare(
+      `UPDATE manual_news_leads SET processing_owner = 'workflow-owner', processing_attempt = 6,
+       processing_lease_until = 999 WHERE id = ?`,
+    ).run(state.leadId);
+    const error = new ManualNewsProviderError({
+      stage: 'assessment', provider_error_code: 'provider_timeout',
+      metrics: {
+        stage: 'assessment', request_id: `${state.leadId}:p6:assessment:1`,
+        system_chars: 1_200, user_chars: 7_200, evidence_count: 1, attempt: 6,
+      },
+      assessment_generation_attempt: 1,
+      assessment_last_validation_code: 'not_validated',
+    });
+
+    expect(await failManualNewsLeadAfterExhaustion(
+      state.env, state.leadId, 'workflow-owner', 6, error, 100,
+    )).toBe(true);
+
+    expect(state.db.sqlite.prepare(
+      'SELECT status, error_code, error_message FROM manual_news_leads WHERE id = ?',
+    ).get(state.leadId)).toEqual({
+      status: 'failed', error_code: 'processing_retry_exhausted',
+      error_message: 'manual_news_provider_error:assessment:provider_timeout',
+    });
+    const audit = state.db.sqlite.prepare(
+      `SELECT metadata_json FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'processing_exhausted'`,
+    ).get(state.leadId) as { metadata_json: string };
+    const metadata = JSON.parse(audit.metadata_json);
+    expect(metadata).toEqual({
+      processing_owner: 'workflow-owner', processing_attempt: 6,
+      provider_failure: {
+        stage: 'assessment', provider_error_code: 'provider_timeout',
+        request_id: `${state.leadId}:p6:assessment:1`,
+        system_chars: 1_200, user_chars: 7_200, evidence_count: 1, attempt: 6,
+        assessment_generation_attempt: 1,
+        assessment_last_validation_code: 'not_validated',
+      },
+    });
+    expect(JSON.stringify(metadata)).not.toContain('https://');
+    expect(JSON.stringify(metadata)).not.toContain('Bearer');
+  });
+
+  test('recovers safe provider diagnostics after a Workflow error serialization boundary', async () => {
+    const state = fixture('verifying', 7);
+    state.db.sqlite.prepare(
+      `UPDATE manual_news_leads SET processing_owner = 'workflow-owner', processing_attempt = 6,
+       processing_lease_until = 999 WHERE id = ?`,
+    ).run(state.leadId);
+    const original = new ManualNewsProviderError({
+      stage: 'verification', provider_error_code: 'provider_http_503',
+      metrics: {
+        stage: 'verification', request_id: `${state.leadId}:p6:verification:2`,
+        system_chars: 900, user_chars: 5_100, evidence_count: 1, attempt: 6,
+      },
+    });
+    const deserialized = new Error(original.message);
+
+    expect(await failManualNewsLeadAfterExhaustion(
+      state.env, state.leadId, 'workflow-owner', 6, deserialized, 100,
+    )).toBe(true);
+
+    expect(state.db.sqlite.prepare(
+      'SELECT error_message FROM manual_news_leads WHERE id = ?',
+    ).get(state.leadId)).toEqual({
+      error_message: 'manual_news_provider_error:verification:provider_http_503',
+    });
+    const audit = state.db.sqlite.prepare(
+      `SELECT metadata_json FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'processing_exhausted'`,
+    ).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(audit.metadata_json)).toMatchObject({
+      provider_failure: {
+        stage: 'verification', provider_error_code: 'provider_http_503',
+        request_id: `${state.leadId}:p6:verification:2`,
+        system_chars: 900, user_chars: 5_100, evidence_count: 1, attempt: 6,
+      },
+    });
+  });
+
   test('retry and stale recovery reserve a fresh owner lease and recover only after expiry', async () => {
     const state = fixture('failed', 7);
     const retry = await retryManualNewsLead(state.env, state.leadId, 7, 'retry-v8', 100);
@@ -1408,25 +1495,25 @@ describe('manual lead D1-backed dedupe', () => {
         version: 8,
         status: 'validating',
         processing_owner: `manual-news-${state.leadId}-v8`,
-        processing_lease_until: 360100,
+        processing_lease_until: 960100,
       },
     });
     expect(await recoverStaleManualNewsLeads(state.env, '2026-08-11', 101)).toEqual([]);
 
-    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360101);
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 960101);
     expect(recovered).toEqual([expect.objectContaining({
       version: 9,
       processing_owner: `manual-news-${state.leadId}-v9`,
-      processing_lease_until: 720101,
+      processing_lease_until: 1920101,
     })]);
-    expect(await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360102)).toEqual([]);
+    expect(await recoverStaleManualNewsLeads(state.env, '2026-08-11', 960102)).toEqual([]);
     expect(state.db.sqlite.prepare(
       `SELECT version, processing_owner AS owner, processing_lease_until AS lease
        FROM manual_news_leads WHERE id = ?`,
     ).get(state.leadId)).toEqual({
       version: 9,
       owner: `manual-news-${state.leadId}-v9`,
-      lease: 720101,
+      lease: 1920101,
     });
   });
 
@@ -1501,10 +1588,10 @@ describe('manual lead D1-backed dedupe', () => {
     let rejectOldCreate!: (reason: Error) => void;
     const oldCreate = new Promise<never>((_resolve, reject) => { rejectOldCreate = reject; });
     const oldFailure = oldCreate.catch((error) => markManualNewsLeadEnqueueFailure(
-      state.env, state.leadId, 8, ownerV8, error, 360102,
+      state.env, state.leadId, 8, ownerV8, error, 960102,
     ));
 
-    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360101);
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 960101);
     expect(recovered).toHaveLength(1);
     const before = state.db.sqlite.prepare(
       `SELECT status, version, processing_owner AS owner, processing_lease_until AS lease,

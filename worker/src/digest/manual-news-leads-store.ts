@@ -29,6 +29,10 @@ import type {
   ManualNewsLeadRecord,
 } from './manual-news-leads-pipeline';
 import {
+  isValidManualNewsProviderFailureAudit,
+  manualNewsProviderFailureAudit,
+} from './manual-news-provider';
+import {
   buildNewsReviewBatchId,
   createNewsReviewToken,
   getActiveNewsReviewBatch,
@@ -40,7 +44,7 @@ import {
   type NewsReviewBatch,
 } from './news-review';
 
-const PROCESSING_LEASE_MS = 6 * 60 * 1000;
+const PROCESSING_LEASE_MS = 16 * 60 * 1000;
 const INTERMEDIATE_PROCESSING_STATUSES: readonly ManualNewsLeadStatus[] = [
   'submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored',
 ];
@@ -91,6 +95,7 @@ function validatedTransitionAuditMetadata(
     'assessment_editorial_projection_contract',
     'assessment_verification_policy',
     'assessment_recovery',
+    'provider_failure',
   ]);
   const generation = metadata.assessment_generation_attempts === 1
     || metadata.assessment_generation_attempts === 2;
@@ -105,6 +110,8 @@ function validatedTransitionAuditMetadata(
     || metadata.assessment_source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
     || metadata.assessment_editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
     || metadata.assessment_verification_policy !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
+    || (metadata.provider_failure !== undefined
+      && !isValidManualNewsProviderFailureAudit(metadata.provider_failure))
     || (metadata.assessment_regeneration_trigger_code !== undefined
       && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
     throw new Error('invalid_transition_audit_metadata');
@@ -437,7 +444,10 @@ export async function failManualNewsLeadAfterExhaustion(
      WHERE id = ? AND processing_owner = ? AND processing_attempt = ?`,
   ).bind(id, owner, processingAttempt).first<{ status: ManualNewsLeadStatus; version: number }>();
   if (!row || !INTERMEDIATE_PROCESSING_STATUSES.includes(row.status)) return false;
-  const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 500);
+  const providerFailure = manualNewsProviderFailureAudit(error);
+  const message = providerFailure
+    ? `manual_news_provider_error:${providerFailure.stage}:${providerFailure.provider_error_code}`
+    : (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 500);
   const mutationNonce = createMutationNonce('processing_exhausted');
   const mutation = env.DB.prepare(
     `/* manual_lead:processing_exhausted */ UPDATE manual_news_leads SET
@@ -451,7 +461,12 @@ export async function failManualNewsLeadAfterExhaustion(
     leadId: id, action: 'processing_exhausted', mutationKind: 'processing_exhausted', mutationNonce,
     fromStatus: row.status, toStatus: 'failed',
     idempotencyKey: owner, resultingVersion: Number(row.version) + 1,
-    metadata: { processing_owner: owner, processing_attempt: processingAttempt }, createdAt: now,
+    metadata: {
+      processing_owner: owner,
+      processing_attempt: processingAttempt,
+      ...(providerFailure ? { provider_failure: providerFailure } : {}),
+    },
+    createdAt: now,
   })) > 0;
 }
 

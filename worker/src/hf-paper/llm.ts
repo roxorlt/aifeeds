@@ -88,11 +88,9 @@ export async function callDeepSeek(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+      console.error(`[hf-paper-llm] DeepSeek HTTP ${resp.status}`);
       return { text: null, error: `HTTP ${resp.status}` };
     }
     const data = (await resp.json()) as DeepSeekResponse;
@@ -104,10 +102,13 @@ export async function callDeepSeek(
       finish_reason: finish,
     };
   } catch (e) {
-    clearTimeout(timeoutId);
     const name = e instanceof Error ? e.name : 'unknown';
     console.error(`[hf-paper-llm] call failed: ${name}`);
     return { text: null, error: name };
+  } finally {
+    // Cover fetch plus full success-body consumption. Clearing this after
+    // headers would allow a stalled JSON body to wait forever.
+    clearTimeout(timeoutId);
   }
 }
 

@@ -423,6 +423,104 @@ describe('manual news lead domain', () => {
     expect(prompt.user).toContain('evidence_ids');
   });
 
+  test('deduplicates prompt-only evidence without changing persisted evidence or dropping distinct claim anchors', () => {
+    const repeatedEvidence: ManualNewsEvidence = {
+      ...officialAnthropic,
+      excerpt: ' Alibaba reportedly bans employees from using Claude Code.   Additional context. ',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Qwen3 remains available to affected employees.',
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    };
+    const assessmentPrompt = buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'Alibaba Claude Code', note: '',
+      evidence: [repeatedEvidence], prior_events: [],
+    });
+    const assessmentBody = JSON.parse(assessmentPrompt.user) as {
+      untrusted_data: { evidence: Array<Record<string, unknown>> };
+    };
+    expect(assessmentBody.untrusted_data.evidence).toEqual([expect.objectContaining({
+      id: repeatedEvidence.id,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
+      claims_supported: [
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    })]);
+    expect(assessmentBody.untrusted_data.evidence[0]).not.toHaveProperty('url');
+    expect(assessmentBody.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
+
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'Anthropic披露Claude水印来源信息',
+      summary: 'Anthropic披露Claude水印来源信息。',
+      claims: [{
+        text: 'Anthropic documented Claude watermark provenance on 2026-08-10.',
+        evidence_ids: [repeatedEvidence.id],
+      }],
+    }), [repeatedEvidence]);
+    const verificationBody = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [repeatedEvidence],
+    }).user) as {
+      untrusted_evidence: Array<Record<string, unknown>>;
+      facts: Array<{ allowed_evidence_ids: string[] }>;
+    };
+    expect(verificationBody.untrusted_evidence).toEqual([expect.objectContaining({
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Additional context.',
+      claims_supported: [
+        'Qwen3 remains available to affected employees.',
+        'GPT 56 remains a different literal anchor from GPT-5.6.',
+      ],
+    })]);
+    expect(verificationBody.facts.every((fact) => fact.allowed_evidence_ids[0] === repeatedEvidence.id))
+      .toBe(true);
+    expect(repeatedEvidence.claims_supported).toHaveLength(4);
+    expect(repeatedEvidence.excerpt).toContain('  Additional');
+
+    const punctuationSensitiveBody = JSON.parse(buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'GPT versions', note: '', prior_events: [],
+      evidence: [{
+        ...officialAnthropic,
+        excerpt: 'GPT-5.6 is available.',
+        claims_supported: ['GPT 56 is available.'],
+      }],
+    }).user) as { untrusted_data: { evidence: ManualNewsEvidence[] } };
+    expect(punctuationSensitiveBody.untrusted_data.evidence[0]).toMatchObject({
+      excerpt: 'GPT-5.6 is available.',
+      claims_supported: ['GPT 56 is available.'],
+    });
+  });
+
+  test('keeps the containing claim once and fails closed above the prompt evidence text boundary', () => {
+    const containingClaim = {
+      ...officialAnthropic,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code because of security concerns.',
+      ],
+    };
+    const body = JSON.parse(buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'Alibaba Claude Code', note: '',
+      evidence: [containingClaim], prior_events: [],
+    }).user) as { untrusted_data: { evidence: ManualNewsEvidence[] } };
+    expect(body.untrusted_data.evidence[0]).toMatchObject({
+      excerpt: '',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code because of security concerns.',
+      ],
+    });
+
+    expect(() => buildManualLeadAssessmentPrompt({
+      date: '2026-08-11', text: 'oversized', note: '', prior_events: [],
+      evidence: [{
+        ...officialAnthropic,
+        excerpt: 'A'.repeat(16_100),
+        claims_supported: ['B'.repeat(16_100)],
+      }],
+    })).toThrow(/prompt_evidence_too_large/);
+  });
+
   test('spells out the exact event identity and fail-closed relevance contract for the model', () => {
     const prompt = buildManualLeadAssessmentPrompt({
       date: '2026-08-11',
@@ -1266,7 +1364,14 @@ describe('manual news lead domain', () => {
     };
 
     expect(body.allowed_evidence_ids).toEqual(['ev-official']);
-    expect(body.untrusted_data.evidence).toEqual([officialAnthropic]);
+    expect(body.untrusted_data.evidence).toEqual([expect.objectContaining({
+      id: officialAnthropic.id,
+      title: officialAnthropic.title,
+      excerpt: officialAnthropic.excerpt,
+      claims_supported: officialAnthropic.claims_supported,
+    })]);
+    expect(body.untrusted_data.evidence[0]).not.toHaveProperty('url');
+    expect(body.untrusted_data.evidence[0]).not.toHaveProperty('fetch_audit');
     expect(body.regeneration).toEqual(expect.objectContaining({
       mode: 'validation_guided_regeneration', failure_code: 'unknown_evidence_id',
     }));
@@ -1860,17 +1965,20 @@ describe('manual news lead domain', () => {
     expect(prompt.system).toContain('否定关系');
     expect(prompt.system).toContain('连续原文');
     const body = JSON.parse(prompt.user) as {
-      facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
-      untrusted_evidence?: unknown;
+      facts: Array<{ fact_id: string; allowed_evidence_ids: string[] }>;
+      untrusted_evidence: Array<{ id: string; excerpt: string }>;
     };
-    expect(body.untrusted_evidence).toBeUndefined();
+    expect(body.untrusted_evidence).toEqual([
+      expect.objectContaining({ id: 'ev-official', excerpt: officialAnthropic.excerpt }),
+    ]);
     expect(body.facts.map((fact) => fact.fact_id)).toEqual([
       'field:title', 'field:summary', 'field:event_key', 'field:event_type',
       'field:occurred_at', 'field:material_update', 'claim:0',
     ]);
-    expect(body.facts.every((fact) => fact.allowed_evidence.map((item) => item.id).join(',') === 'ev-official'))
+    expect(body.facts.every((fact) => fact.allowed_evidence_ids.join(',') === 'ev-official'))
       .toBe(true);
     expect(prompt.user).not.toContain('Ignore prior rules');
+    expect(prompt.user.split(officialAnthropic.excerpt).length - 1).toBe(1);
   });
 
   test('always emits material_update as a fact and isolates bounded prior events to that fact', () => {
