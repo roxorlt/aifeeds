@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS manual_news_assessment_verifications (
   verification_json TEXT NOT NULL,
   processing_owner TEXT NOT NULL,
   processing_attempt INTEGER NOT NULL CHECK (processing_attempt > 0),
+  creation_nonce TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('active', 'invalidated')),
   reason TEXT,
   created_at INTEGER NOT NULL,
@@ -38,4 +39,6 @@ CREATE INDEX IF NOT EXISTS idx_manual_news_verification_history
 DROP INDEX IF EXISTS idx_manual_news_lead_audit_version;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_version
   ON manual_news_lead_audit(lead_id, resulting_version, action)
-  WHERE action NOT IN ('evidence_replace', 'verification_create', 'assessment_invalidate');
+  WHERE action NOT IN (
+    'evidence_replace', 'verification_create', 'assessment_invalidate', 'verification_quarantine'
+  );

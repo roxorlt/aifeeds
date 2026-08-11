@@ -93,6 +93,18 @@ describe('daily news review contract', () => {
       .resolves.toEqual(['news-6', 'news-2', 'news-7']);
   });
 
+  test('applied selection keeps the rollout fallback when review tables are not migrated yet', async () => {
+    const env = {
+      DB: {
+        prepare() {
+          throw new Error('D1_ERROR: no such table: daily_news_review_batches');
+        },
+      },
+    } as never;
+
+    await expect(getAppliedNewsReviewSelection(env, '2026-07-30')).resolves.toBeNull();
+  });
+
   test('notification lists all candidates and binds the immutable date and batch link', () => {
     const message = buildNewsReviewNotification(
       '2026-07-30',

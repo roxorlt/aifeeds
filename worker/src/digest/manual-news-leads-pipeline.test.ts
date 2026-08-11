@@ -9,6 +9,7 @@ import {
   applyManualLeadEvidencePolicy,
   validateManualLeadAssessment,
   type ManualNewsEvidence,
+  type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
@@ -71,7 +72,7 @@ function memoryStore(initial = lead()) {
   let current = structuredClone(initial);
   const transitions: string[] = [];
   let invalidateCalls = 0;
-  const priorEvents: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
+  const priorEvents: ManualLeadPriorEvent[] = [];
   const store: ManualLeadProcessingStore = {
     async getLead() { return structuredClone(current); },
     async hasPersistedAssessment() { return !!current.assessment; },
@@ -110,7 +111,9 @@ const officialEvidence: ManualNewsEvidence = {
   retrieved_at: 2,
   title: 'How Claude marks AI-generated content',
   excerpt: 'Only supported models and products are covered.',
-  claims_supported: ['Supported text may carry an invisible watermark.'],
+  claims_supported: [
+    'Anthropic Claude supported output provenance documentation covers watermark features for supported models and products.',
+  ],
   reliable: true,
 };
 
@@ -134,10 +137,24 @@ function assessed(overrides = {}) {
   };
 }
 
+function verifiedPriorEvent(): ManualLeadPriorEvent {
+  return {
+    event_key: 'anthropic-output-provenance-2026-08',
+    review_date: '2026-08-10',
+    lead_id: 'old-lead',
+    verification_digest: 'a'.repeat(64),
+    title: '此前Claude输出来源标记文档',
+    summary: '此前文档覆盖受支持产品。',
+    claims: [{ text: '此前文档覆盖受支持产品。', evidence_ids: ['ev-old'] }],
+  };
+}
+
 function verifiedFromPrompt(prompt: { user: string }) {
   const body = JSON.parse(prompt.user) as {
     facts: Array<{
       fact_id: string;
+      untrusted_candidate_value: string | boolean;
+      untrusted_prior_events?: Array<{ event_key: string }>;
       allowed_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
     }>;
   };
@@ -147,7 +164,22 @@ function verifiedFromPrompt(prompt: { user: string }) {
       fact_id: fact.fact_id,
       supported: true,
       issue_code: 'none',
-      source_quotes: [{ evidence_id: fact.allowed_evidence[0].id, quote: fact.allowed_evidence[0].title }],
+      source_quotes: [{
+        evidence_id: fact.allowed_evidence[0].id,
+        quote: fact.allowed_evidence[0].claims_supported[0],
+      }],
+      ...(fact.fact_id === 'field:material_update' ? {
+        comparison_result: {
+          value: fact.untrusted_candidate_value,
+          matched_event_key: fact.untrusted_prior_events?.[0]?.event_key || null,
+          prior_event_keys: fact.untrusted_prior_events?.map((event) => event.event_key) || [],
+          reason_code: fact.untrusted_prior_events?.length
+            ? (fact.untrusted_candidate_value ? 'material_change' : 'no_material_change')
+            : 'no_prior_match',
+          current_evidence_id: fact.allowed_evidence[0].id,
+          current_quote: fact.allowed_evidence[0].claims_supported[0],
+        },
+      } : {}),
     })),
   };
 }
@@ -419,9 +451,7 @@ describe('manual lead processing pipeline', () => {
 
   test('marks same-event cross-day evidence as duplicate unless it is a material update', async () => {
     const memory = memoryStore();
-    memory.priorEvents.push({
-      event_key: 'anthropic-output-provenance-2026-08', review_date: '2026-08-10', lead_id: 'old-lead',
-    });
+    memory.priorEvents.push(verifiedPriorEvent());
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
@@ -449,9 +479,7 @@ describe('manual lead processing pipeline', () => {
 
   test('an exact match with material_update true never terminates as duplicate', async () => {
     const memory = memoryStore();
-    memory.priorEvents.push({
-      event_key: 'anthropic-output-provenance-2026-08', review_date: '2026-08-10', lead_id: 'old-lead',
-    });
+    memory.priorEvents.push(verifiedPriorEvent());
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,

@@ -23,6 +23,9 @@ vi.mock('./news-review', () => ({
   getNewsReviewBatch: vi.fn(async () => insertedBatch),
   newsReviewExpiresAt: vi.fn(() => 999),
   newsReviewSecret: vi.fn(() => 'secret'),
+  sanitizeCurrentNewsReviewBatch: vi.fn(async () => ({
+    batch: activeBatch, changed: false, dropped_ids: [],
+  })),
 }));
 
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
@@ -89,6 +92,12 @@ async function fakeConfirmationEnv() {
       supported: true,
       issue_code: 'none',
       source_quotes: [{ evidence_id: evidenceForMarker.id, quote: evidenceForMarker.excerpt }],
+      ...(fact.fact_id === 'field:material_update' ? {
+        comparison_result: {
+          value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+          current_evidence_id: evidenceForMarker.id, current_quote: evidenceForMarker.excerpt,
+        },
+      } : {}),
     })),
   }, assessment, [evidenceForMarker]);
   const assessmentVersion = 7;
@@ -104,6 +113,7 @@ async function fakeConfirmationEnv() {
     verification_json: JSON.stringify(factVerification),
     processing_owner: 'workflow-owner',
     processing_attempt: 1,
+    creation_nonce: 'verification-create-confirm-7',
     status: 'active',
     reason: null,
     created_at: 3,
@@ -135,6 +145,16 @@ async function fakeConfirmationEnv() {
       return stmt;
     },
     async batch(statements: any[]) {
+      const quarantineStmt = statements.find((stmt: any) => stmt.sql.includes('manual_verification:quarantine */'));
+      if (quarantineStmt) {
+        verification.status = 'invalidated';
+        verification.reason = quarantineStmt.binds[0];
+        verification.invalidated_at = quarantineStmt.binds[1];
+        return statements.map((stmt: any) => ({
+          success: true,
+          meta: { changes: stmt.sql.includes('quarantine_item') ? 0 : 1 },
+        }));
+      }
       const batchStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_batch'));
       const confirmStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm */'));
       const prefreezeStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_prefreeze'));

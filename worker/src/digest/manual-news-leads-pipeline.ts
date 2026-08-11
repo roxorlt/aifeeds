@@ -14,6 +14,7 @@ import {
   type ManualNewsEvidence,
   type ManualNewsLeadAssessment,
   type ManualNewsLeadStatus,
+  type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
@@ -62,8 +63,8 @@ export interface ManualLeadProcessingStore {
     patch?: Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>>,
   ): Promise<ManualNewsLeadRecord>;
   replaceEvidence(id: string, expectedVersion: number, evidence: readonly ManualNewsEvidence[]): Promise<void>;
-  listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
-  findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
+  listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]>;
+  findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]>;
   saveVerifiedAssessment(
     id: string,
     expectedVersion: number,
@@ -298,7 +299,9 @@ export async function processManualNewsLead(
         }
         let verification;
         try {
-          verification = validateManualLeadFactVerification(verificationRaw, finalizedAssessment, evidence);
+          verification = validateManualLeadFactVerification(
+            verificationRaw, finalizedAssessment, evidence, { prior_events: priorEvents },
+          );
         } catch (error) {
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
           await transition('needs_review', {

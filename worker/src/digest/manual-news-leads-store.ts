@@ -8,12 +8,15 @@ import {
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
+  type ManualLeadPriorEvent,
   type ManualNewsLeadStatus,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import {
   loadManualNewsEvidence,
   loadVerifiedManualAssessment,
+  MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
+  manualVerificationSnapshotGuardBindings,
   type PersistedManualVerificationRow,
 } from './manual-news-leads-verification';
 import type {
@@ -28,6 +31,7 @@ import {
   getPublishedNewsReviewSelection,
   newsReviewExpiresAt,
   newsReviewSecret,
+  sanitizeCurrentNewsReviewBatch,
   type NewsReviewBatch,
 } from './news-review';
 
@@ -328,6 +332,17 @@ export async function retryManualNewsLead(
        SET status = 'invalidated', reason = 'manual_retry', invalidated_at = ?
        WHERE lead_id = ? AND status = 'active' AND ${retryGuard}`,
     ).bind(now, id, id, nextVersion, idempotencyKey, mutationNonce),
+    env.DB.prepare(
+      `/* manual_verification:retry_quarantine_item */ UPDATE items SET deleted_at = ?
+       WHERE id = ? AND deleted_at IS NULL AND EXISTS (
+         SELECT 1 FROM manual_news_assessment_verifications v
+         WHERE v.lead_id = ? AND v.status = 'invalidated'
+           AND v.reason = 'manual_retry' AND v.invalidated_at = ?
+       ) AND ${retryGuard}`,
+    ).bind(
+      new Date(now).toISOString(), `blog:manual:${id}`, id, now,
+      id, nextVersion, idempotencyKey, mutationNonce,
+    ),
   ]) as Array<{ meta?: { changes?: number } }>;
   const changed = auditedMutationChanges(results, 0, 1);
   const invalidationAudit = Number(results[2]?.meta?.changes || 0);
@@ -584,6 +599,17 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
       ).bind(now, id, id, expectedVersion, owner, attempt),
       this.env.DB.prepare(
+        `/* manual_verification:evidence_quarantine_item */ UPDATE items SET deleted_at = ?
+         WHERE id = ? AND deleted_at IS NULL AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_verifications v
+           WHERE v.lead_id = ? AND v.status = 'invalidated'
+             AND v.reason = 'evidence_replaced' AND v.invalidated_at = ?
+         ) AND ${leadGuard}`,
+      ).bind(
+        new Date(now).toISOString(), `blog:manual:${id}`, id, now,
+        id, expectedVersion, owner, attempt,
+      ),
+      this.env.DB.prepare(
         `/* manual_evidence:delete */ DELETE FROM manual_news_evidence
          WHERE lead_id = ? AND ${leadGuard}`,
       ).bind(id, id, expectedVersion, owner, attempt),
@@ -624,7 +650,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     }
   }
 
-  async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
+  async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
     const manual = await this.env.DB.prepare(
       `/* manual_assessment:recent_prior_events */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a
@@ -635,10 +661,16 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       `,
     ).bind(excludeLeadId, date, date)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
-    const verifiedManual: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
+    const verifiedManual: ManualLeadPriorEvent[] = [];
     for (const row of manual.results || []) {
       const verified = await loadVerifiedManualAssessment(this.env, row.lead_id);
-      if (verified?.assessment.event_key === row.event_key) verifiedManual.push(row);
+      if (verified?.assessment.event_key === row.event_key) verifiedManual.push({
+        ...row,
+        verification_digest: verified.record.canonical_digest,
+        title: verified.assessment.title,
+        summary: verified.assessment.summary,
+        claims: verified.assessment.claims,
+      });
     }
     const items = await this.env.DB.prepare(
       `/* manual_assessment:recent_non_manual_items */ SELECT
@@ -653,7 +685,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     return [...verifiedManual, ...(items.results || [])].filter((item) => !!item.event_key);
   }
 
-  async findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
+  async findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]> {
     const manual = await this.env.DB.prepare(
       `/* manual_assessment:exact_event_history */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a
@@ -664,10 +696,16 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       `,
     ).bind(eventKey, excludeLeadId)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
-    const verifiedManual: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
+    const verifiedManual: ManualLeadPriorEvent[] = [];
     for (const row of manual.results || []) {
       const verified = await loadVerifiedManualAssessment(this.env, row.lead_id);
-      if (verified?.assessment.event_key === eventKey) verifiedManual.push(row);
+      if (verified?.assessment.event_key === eventKey) verifiedManual.push({
+        ...row,
+        verification_digest: verified.record.canonical_digest,
+        title: verified.assessment.title,
+        summary: verified.assessment.summary,
+        claims: verified.assessment.claims,
+      });
     }
     const items = await this.env.DB.prepare(
       `/* manual_assessment:exact_non_manual_items */ SELECT
@@ -689,12 +727,14 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
   ): Promise<{ assessment_version: number }> {
     const { owner, attempt } = this.fence();
     const evidence = await loadManualNewsEvidence(this.env, id);
-    const priorEventKeys = assessment.matched_event_key
-      ? (await this.findPriorEventsByEventKey(assessment.matched_event_key, id))
-          .map((event) => event.event_key)
+    const priorEvents = assessment.matched_event_key
+      ? await this.findPriorEventsByEventKey(assessment.matched_event_key, id)
       : [];
+    const priorEventKeys = priorEvents.map((event) => event.event_key);
     const validatedAssessment = validateManualNewsProcessedAssessment(assessment, evidence, priorEventKeys);
-    const verification = validateManualLeadFactVerification(verificationRaw, validatedAssessment, evidence);
+    const verification = validateManualLeadFactVerification(
+      verificationRaw, validatedAssessment, evidence, { prior_events: priorEvents, persisted: true },
+    );
     if (verification.overall_verdict !== 'supported') throw new Error('fact_verification_not_supported');
     const assessmentVersion = expectedVersion * 1_000_000 + attempt;
     if (attempt >= 1_000_000 || !Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
@@ -770,11 +810,11 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
         `/* manual_verification:insert */ INSERT INTO manual_news_assessment_verifications (
            verification_id, lead_id, assessment_version, policy_version, canonical_digest,
            hmac_sha256, verification_json, processing_owner, processing_attempt,
-           status, reason, created_at, invalidated_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
+           creation_nonce, status, reason, created_at, invalidated_at
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
       ).bind(
         verificationId, id, assessmentVersion, proof.policy_version, proof.canonical_digest,
-        proof.hmac_sha256, JSON.stringify(verification), owner, attempt, now,
+        proof.hmac_sha256, JSON.stringify(verification), owner, attempt, creationNonce, now,
         id, expectedVersion, owner, attempt, id, owner, attempt,
       ),
       this.env.DB.prepare(
@@ -785,7 +825,8 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
          WHERE ${basicLeadGuard} AND EXISTS (
            SELECT 1 FROM manual_news_assessment_verifications created
            WHERE created.verification_id = ? AND created.lead_id = ?
-             AND created.assessment_version = ? AND created.status = 'active'
+             AND created.assessment_version = ? AND created.creation_nonce = ?
+             AND created.status = 'active'
          )`,
       ).bind(
         id, creationNonce, expectedVersion, JSON.stringify({
@@ -798,7 +839,7 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           mutation_nonce: creationNonce,
         }), now,
         id, expectedVersion, owner, attempt,
-        verificationId, id, assessmentVersion,
+        verificationId, id, assessmentVersion, creationNonce,
       ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
@@ -853,6 +894,17 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            SET status = 'invalidated', reason = ?, invalidated_at = ?
            WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
         ).bind(reason, now, id, id, expectedVersion, owner, attempt),
+        this.env.DB.prepare(
+          `/* manual_verification:invalidate_quarantine_item */ UPDATE items SET deleted_at = ?
+           WHERE id = ? AND deleted_at IS NULL AND EXISTS (
+             SELECT 1 FROM manual_news_assessment_verifications v
+             WHERE v.lead_id = ? AND v.status = 'invalidated'
+               AND v.reason = ? AND v.invalidated_at = ?
+           ) AND ${leadGuard}`,
+        ).bind(
+          new Date(now).toISOString(), `blog:manual:${id}`, id, reason, now,
+          id, expectedVersion, owner, attempt,
+        ),
       ]) as Array<{ meta?: { changes?: number } }>;
       if (Number(results[0]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
       const auditChanges = Number(results[1]?.meta?.changes || 0);
@@ -863,33 +915,6 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       throw new Error('d1_invalidate_assessment_failed');
     }
   }
-}
-
-const ACTIVE_VERIFICATION_GUARD_SQL = `EXISTS (
-  SELECT 1 FROM manual_news_assessment_verifications verification
-  WHERE verification.verification_id = ? AND verification.lead_id = ?
-    AND verification.assessment_version = ? AND verification.policy_version = ?
-    AND verification.canonical_digest = ? AND verification.hmac_sha256 = ?
-    AND verification.verification_json = ? AND verification.processing_owner = ?
-    AND verification.processing_attempt = ?
-    AND verification.status = 'active'
-)`;
-
-function activeVerificationGuardBindings(
-  leadId: string,
-  verification: PersistedManualVerificationRow,
-): unknown[] {
-  return [
-    verification.verification_id,
-    leadId,
-    Number(verification.assessment_version),
-    verification.policy_version,
-    verification.canonical_digest,
-    verification.hmac_sha256,
-    verification.verification_json,
-    verification.processing_owner,
-    Number(verification.processing_attempt),
-  ];
 }
 
 export async function confirmManualNewsLeadCandidate(
@@ -968,7 +993,11 @@ export async function confirmManualNewsLeadCandidate(
     manual_lead: { lead_id: lead.id, evidence_ids: lead.evidence.map((item) => item.id) },
   });
   const confirmationNonce = createMutationNonce('confirm');
-  const active = await getActiveNewsReviewBatch(env, lead.review_date);
+  let active = await getActiveNewsReviewBatch(env, lead.review_date);
+  const activeSanitization = active
+    ? await sanitizeCurrentNewsReviewBatch(env, lead.review_date, now)
+    : null;
+  if (activeSanitization) active = activeSanitization.batch;
   if ((active?.batch_revision || 0) !== expectedBatchRevision) {
     return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead };
   }
@@ -988,10 +1017,10 @@ export async function confirmManualNewsLeadCandidate(
          WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
            AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
              WHERE review_date = ? AND lineage_id = ? AND is_current = 1)
-           AND ${ACTIVE_VERIFICATION_GUARD_SQL}`,
+           AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
       ).bind(
         now, idempotencyKey, confirmationNonce, now, id, expectedVersion, lead.review_date, lead.review_date,
-        ...activeVerificationGuardBindings(id, verified.record),
+        ...manualVerificationSnapshotGuardBindings(id, verified.record),
       ),
       env.DB.prepare(
         `/* manual_lead:candidate_generation_advance */ UPDATE daily_news_review_candidate_generations
@@ -1064,10 +1093,17 @@ export async function confirmManualNewsLeadCandidate(
   const batchId = await buildNewsReviewBatchId(lead.review_date, merged.candidates);
   const batchRevision = active.batch_revision + 1;
   const candidateIds = merged.candidates.map((item) => item.item_id);
+  const existingManualVerifications = activeSanitization?.manual_verifications || [];
+  const existingManualGuard = existingManualVerifications.length
+    ? existingManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+    : '1 = 1';
+  const existingManualBindings = existingManualVerifications.flatMap((snapshot) =>
+    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
 
   const statements = [
     confirmedLeadItemStatement(
       env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record, active,
+      false, existingManualVerifications,
     ),
     env.DB.prepare(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
@@ -1078,14 +1114,16 @@ export async function confirmManualNewsLeadCandidate(
        WHERE EXISTS (SELECT 1 FROM manual_news_leads WHERE id = ? AND version = ?)
        AND EXISTS (SELECT 1 FROM daily_news_review_batches
            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)
-       AND ${ACTIVE_VERIFICATION_GUARD_SQL}
+       AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}
+       AND ${existingManualGuard}
        ON CONFLICT(review_date, batch_id) DO NOTHING`,
     ).bind(
       lead.review_date, batchId, JSON.stringify(candidateIds), JSON.stringify(merged.candidates),
       JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
       batchRevision, active.batch_id, lead.review_date, active.candidate_generation, lead.id, expectedVersion,
       lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
-      ...activeVerificationGuardBindings(lead.id, verified.record),
+      ...manualVerificationSnapshotGuardBindings(lead.id, verified.record),
+      ...existingManualBindings,
     ),
     env.DB.prepare(
       `/* manual_lead:supersede_batch */ UPDATE daily_news_review_batches SET superseded_by = ?, is_current = 0
@@ -1108,11 +1146,11 @@ export async function confirmManualNewsLeadCandidate(
          last_mutation_nonce = ?, updated_at = ?
        WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
          AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ? AND is_current = 1)
-         AND ${ACTIVE_VERIFICATION_GUARD_SQL}`,
+         AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL}`,
     ).bind(
       batchId, now, idempotencyKey, confirmationNonce, now,
       lead.id, expectedVersion, lead.review_date, batchId,
-      ...activeVerificationGuardBindings(lead.id, verified.record),
+      ...manualVerificationSnapshotGuardBindings(lead.id, verified.record),
     ),
     auditMutationStatement(env, {
       leadId: lead.id, action: 'confirm_candidate', mutationKind: 'confirm', mutationNonce: confirmationNonce,
@@ -1172,6 +1210,10 @@ function confirmedLeadItemStatement(
   verification: PersistedManualVerificationRow,
   expectedActiveBatch?: NewsReviewBatch,
   requireNoActiveBatch = false,
+  requiredManualVerifications: ReadonlyArray<{
+    lead_id: string;
+    verification: PersistedManualVerificationRow;
+  }> = [],
 ): D1PreparedStatement {
   const activeGuard = expectedActiveBatch
     ? ` AND EXISTS (SELECT 1 FROM daily_news_review_batches
@@ -1180,6 +1222,9 @@ function confirmedLeadItemStatement(
       ? ` AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
            WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`
       : '';
+  const existingManualGuard = requiredManualVerifications.length
+    ? requiredManualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+    : '1 = 1';
   const values: unknown[] = [
     candidate.item_id,
     `manual:${lead.id}`,
@@ -1193,7 +1238,9 @@ function confirmedLeadItemStatement(
     itemExtra,
     lead.id,
     expectedVersion,
-    ...activeVerificationGuardBindings(lead.id, verification),
+    ...manualVerificationSnapshotGuardBindings(lead.id, verification),
+    ...requiredManualVerifications.flatMap((snapshot) =>
+      manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification)),
   ];
   if (expectedActiveBatch) {
     values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
@@ -1206,7 +1253,7 @@ function confirmedLeadItemStatement(
        url, published_at, scraped_at, is_relevant, matched_by, lang, extra
      ) SELECT ?, 'blog', ?, 'manual_lead', ?, ?, ?, ?, ?, ?, ?, 1, 'manual_lead', 'zh', ?
      WHERE EXISTS (SELECT 1 FROM manual_news_leads WHERE id = ? AND version = ?)
-       AND ${ACTIVE_VERIFICATION_GUARD_SQL}${activeGuard}
+       AND ${MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL} AND ${existingManualGuard}${activeGuard}
      ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content,
        content_translated = excluded.content_translated, author = excluded.author,
        url = excluded.url, published_at = excluded.published_at, extra = excluded.extra`,
