@@ -571,13 +571,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.processing_attempt = ?
         AND l.status = 'extracting'
     )`;
-    const statements = [
-      this.env.DB.prepare(
+    const ownerGuardStatement = this.env.DB.prepare(
         `/* manual_evidence:owner_guard */ UPDATE manual_news_leads SET updated_at = updated_at
          WHERE id = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?
            AND status = 'extracting'`,
-      ).bind(id, expectedVersion, owner, attempt),
-      this.env.DB.prepare(
+      ).bind(id, expectedVersion, owner, attempt);
+    const invalidationAuditStatement = this.env.DB.prepare(
         `/* manual_verification:invalidate_audit */ INSERT INTO manual_news_lead_audit (
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
            resulting_version, metadata_json, created_at
@@ -592,13 +591,13 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           processing_attempt: attempt, lead_version: expectedVersion,
         }), now,
         id, expectedVersion, owner, attempt, id,
-      ),
-      this.env.DB.prepare(
+      );
+    const invalidationStatement = this.env.DB.prepare(
         `/* manual_verification:invalidate_for_evidence */ UPDATE manual_news_assessment_verifications
          SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = ?
          WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
-      ).bind(now, id, id, expectedVersion, owner, attempt),
-      this.env.DB.prepare(
+      ).bind(now, id, id, expectedVersion, owner, attempt);
+    const quarantineStatement = this.env.DB.prepare(
         `/* manual_verification:evidence_quarantine_item */ UPDATE items SET deleted_at = ?
          WHERE id = ? AND deleted_at IS NULL AND EXISTS (
            SELECT 1 FROM manual_news_assessment_verifications v
@@ -608,12 +607,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ).bind(
         new Date(now).toISOString(), `blog:manual:${id}`, id, now,
         id, expectedVersion, owner, attempt,
-      ),
-      this.env.DB.prepare(
+      );
+    const deleteEvidenceStatement = this.env.DB.prepare(
         `/* manual_evidence:delete */ DELETE FROM manual_news_evidence
          WHERE lead_id = ? AND ${leadGuard}`,
-      ).bind(id, id, expectedVersion, owner, attempt),
-      ...evidence.map((item) => this.env.DB.prepare(
+      ).bind(id, id, expectedVersion, owner, attempt);
+    const insertEvidenceStatements = evidence.map((item) => this.env.DB.prepare(
         `/* manual_evidence:insert */ INSERT INTO manual_news_evidence (
            lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
            title, excerpt, claims_supported_json, fetch_audit_json, reliable
@@ -622,13 +621,15 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
         id, item.id, item.url, item.source_type, item.publisher, item.published_at, item.retrieved_at,
         item.title, item.excerpt, JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
         item.reliable ? 1 : 0, id, expectedVersion, owner, attempt,
-      )),
-      this.env.DB.prepare(
+      ));
+    const replacementAuditStatement = this.env.DB.prepare(
         `/* manual_evidence:replace_audit */ INSERT INTO manual_news_lead_audit (
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
            resulting_version, metadata_json, created_at
          ) SELECT ?, 'evidence_replace', 'extracting', 'extracting', NULL, ?, ?, ?, ?
-         WHERE ${leadGuard}`,
+         WHERE ${leadGuard} AND (
+           SELECT COUNT(*) FROM manual_news_evidence WHERE lead_id = ?
+         ) = ?`,
       ).bind(
         id, replacementNonce, expectedVersion, JSON.stringify({
           processing_owner: owner,
@@ -638,15 +639,51 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           mutation_nonce: replacementNonce,
         }), now,
         id, expectedVersion, owner, attempt,
-      ),
+        id, evidence.length,
+      );
+    const statements = [
+      ownerGuardStatement,
+      invalidationAuditStatement,
+      invalidationStatement,
+      quarantineStatement,
+      deleteEvidenceStatement,
+      ...insertEvidenceStatements,
+      replacementAuditStatement,
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
-    if (Number(results[0]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
-    const auditChanges = Number(results[1]?.meta?.changes || 0);
-    const invalidated = Number(results[2]?.meta?.changes || 0);
-    if ((invalidated > 0 ? 1 : 0) !== auditChanges) throw new Error('manual_verification_audit_causality_mismatch');
-    for (let index = 4; index < results.length; index += 1) {
-      if (Number(results[index]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
+    const resultIndex = {
+      ownerGuard: 0,
+      invalidationAudit: 1,
+      invalidation: 2,
+      quarantine: 3,
+      evidenceDelete: 4,
+      evidenceInsertStart: 5,
+      evidenceReplaceAudit: 5 + insertEvidenceStatements.length,
+    } as const;
+    const changes = (index: number): number => Number(results[index]?.meta?.changes || 0);
+    if (changes(resultIndex.ownerGuard) !== 1) throw new Error('stale_processing_owner');
+    const invalidationAuditChanges = changes(resultIndex.invalidationAudit);
+    const invalidatedChanges = changes(resultIndex.invalidation);
+    if (![0, 1].includes(invalidationAuditChanges)
+      || ![0, 1].includes(invalidatedChanges)
+      || invalidationAuditChanges !== invalidatedChanges) {
+      throw new Error('manual_verification_audit_causality_mismatch');
+    }
+    const quarantineChanges = changes(resultIndex.quarantine);
+    if (![0, 1].includes(quarantineChanges) || quarantineChanges > invalidatedChanges) {
+      throw new Error('manual_verification_quarantine_causality_mismatch');
+    }
+    if (!Number.isInteger(changes(resultIndex.evidenceDelete))
+      || changes(resultIndex.evidenceDelete) < 0) {
+      throw new Error('manual_evidence_delete_result_invalid');
+    }
+    for (let offset = 0; offset < insertEvidenceStatements.length; offset += 1) {
+      if (changes(resultIndex.evidenceInsertStart + offset) !== 1) {
+        throw new Error('manual_evidence_write_causality_mismatch');
+      }
+    }
+    if (changes(resultIndex.evidenceReplaceAudit) !== 1) {
+      throw new Error('manual_evidence_write_causality_mismatch');
     }
   }
 
