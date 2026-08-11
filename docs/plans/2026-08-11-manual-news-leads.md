@@ -14,17 +14,18 @@
 3. Workflow 依次推进 submitted、validating、researching、extracting、verifying、clustering、scored，最终进入 recommended、needs_review、duplicate、rejected 或 failed。中间状态可安全恢复。
 4. Worker 不直接请求线索 URL。URL 与文字检索都只发往配置的固定 HTTPS 研究网关；网关负责逐跳 DNS 校验、连接 peer pinning、重定向审计、开放网络搜索和 PDF 文本转换。文字线索同时查询现有 D1 新闻与开放网络。来源文本和用户文本始终作为不可信数据。
 5. DeepSeek adapter 只允许严格 schema JSON；所有 claims 必须绑定已持久化 evidence ID。官方产品文档可单独支持其明确范围；政治/监管事件必须有原始文件或官方声明及独立可靠报道。
-6. 确认时使用 lead version 与当前 batch revision 条件写入。冻结前线索等待首批 freeze 合入；冻结后复制当前候选快照、按 event key 去重并生成不可变 V2+，旧批次记录 `superseded_by`。部分唯一索引保证每个日期/lineage 只有一个 active revision，冻结与确认均在 D1 batch 内 CAS 切换。
+6. 确认时使用 lead version 与当前 batch revision 条件写入。冻结前确认的 item、lead 与 audit 在同一 D1 batch 中共同受“该日期/lineage 仍无 active batch”约束；首次 freeze 抢先时不留部分写入并返回 revision conflict。冻结后复制当前候选快照、按 event key 去重并生成不可变 V2+，旧批次记录 `superseded_by`。部分唯一索引保证每个日期/lineage 只有一个 active revision，冻结与确认均在 D1 batch 内 CAS 切换。
+7. 任一后续 scheduled/date-scoped revision 都先合并 active snapshot 与 durable lead 中的 eligible confirmed manual candidates，再确定性裁至 10 条。手工候选保留 `origin=manual_lead` 与 `lead_id`；上限不足时只淘汰排序末尾的 scheduled 候选，异常导致无法保留全部手工候选时失败关闭。
 
 ## 安全与一致性
 
 - Mutating API 同时要求 Bearer secret、`Idempotency-Key` 与 `expected_version`；D1 条件更新负责并发冲突检测。
 - 只允许 HTTP(S) 标准端口、无 URL credentials；Worker 的唯一网络 peer 是 `MANUAL_NEWS_RESEARCH_ORIGIN` 指定的固定 HTTPS origin。网关逐跳返回 target URL、DNS 验证 IP 和实际连接 IP；Worker 要求两 IP 相同且均为公网，否则在读取正文前失败关闭。最多 3 跳，读取正文期间继续执行 12 秒 deadline，并以流式方式执行 2 MiB 增量上限。
-- PDF 二进制绝不在 Worker 中按 UTF-8/HTML 处理；网关必须返回 `source_content_type=application/pdf`、`extraction=pdf_text` 的有界纯文本和同一套 peer audit，否则拒绝。
+- PDF 二进制绝不在 Worker 中按 UTF-8/HTML 处理；网关必须返回 `source_content_type=application/pdf`、`extraction=pdf_text` 的有界纯文本和同一套 peer audit，否则拒绝。Worker 请求原始源 8 MiB、提取文本 2 MiB / 100 万字符上限；网关必须证明 requested/applied limits、原始/提取实际字节数、提取字符数、源/文本截断状态以及 parser result/version。截断、parser 失败、audit 与响应正文尺寸不一致或任一 actual 超过 applied limit 时全部失败关闭。
 - 来源权威等级只由最终抓取 URL 的精确 registrable-domain allowlist 决定；用户和搜索 hint 不能指定 `source_type`、`reliable` 或官方身份。
 - 模型额外字段、缺字段、非法枚举、未知 evidence ID 均失败关闭；不确定范围/时间必须显式输出。
 - 候选批次最多 10 条，确认操作保留当前 production selection，`rerender_enqueued` 固定为 `false`。
-- CF 持有审计记录；HK 不存事实副本，只展示 CF 响应。
+- CF 将规范化抓取审计持久化在每条 `manual_news_evidence.fetch_audit_json`；HK 不存事实副本，只展示 CF 响应。
 
 ## 发布与验收
 
@@ -38,5 +39,5 @@
 ## 研究网关契约
 
 - `/v1/search` 返回严格 `{results:[{url,title,snippet,published_at}]}`，最多 8 条；搜索摘要只用于发现 URL，所有候选 URL 仍须经过 `/v1/document` 重新取证。
-- `/v1/document` 只返回 UTF-8 文本，并通过 `X-AIFeeds-Fetch-Audit` 提供每一跳的 URL、DNS 验证 IP、实际连接 IP、原始类型和 extraction 类型。HTML 可返回原文，PDF 必须由网关转换成 `pdf_text`。
+- `/v1/document` 请求体为 `{url,limits:{source_bytes,extracted_text_bytes,extracted_text_characters},max_redirects}`；只返回 UTF-8 文本，并通过 `X-AIFeeds-Fetch-Audit` 提供严格对象：`hops`（逐跳 URL、DNS 验证 IP、实际连接 IP）、`source_content_type`、`extraction`、`requested_limits`、`applied_limits`、`actual_sizes`、`truncation:{source,extracted_text}`、`parser:{result,version}`。`requested_limits` 必须与 Worker 请求一致，applied 不得放宽 requested，actual 不得超过 applied；成功证据禁止任何截断且 parser result 必须为 `success`。HTML 可返回原文，PDF 必须由生产级 parser 转换成 `pdf_text`，不能把 PDF bytes 当文本返回。
 - origin 未配置、token 缺失、schema 不合法、审计缺失、peer 不一致、正文超时或超限时，线索进入失败/待复核状态，绝不能把仅有 D1 或搜索摘要伪装成已完成开放网络研究。

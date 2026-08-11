@@ -25,7 +25,9 @@ describe('manual news lead migration', () => {
       'review_date', 'status', 'version', 'confirmed_batch_id', 'confirmed_at',
       'submit_idempotency_key', 'last_mutation_idempotency_key',
     ]));
-    expect(tableColumns(db, 'manual_news_evidence')).toContain('claims_supported_json');
+    expect(tableColumns(db, 'manual_news_evidence')).toEqual(expect.arrayContaining([
+      'claims_supported_json', 'fetch_audit_json',
+    ]));
     expect(tableColumns(db, 'manual_news_event_assessments')).toContain('assessment_json');
     expect(tableColumns(db, 'manual_news_lead_audit')).toContain('metadata_json');
     const insert = db.prepare(`INSERT INTO daily_news_review_batches (

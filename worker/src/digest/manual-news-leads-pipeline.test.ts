@@ -6,6 +6,36 @@ import {
   type ManualNewsLeadRecord,
 } from './manual-news-leads-pipeline';
 import type { ManualNewsEvidence } from './manual-news-leads';
+import type { PublicDocument } from '../security/safe-url-fetch';
+
+function documentFixture(
+  url: string,
+  body: string,
+  extraction: PublicDocument['extraction'] = 'html',
+): PublicDocument {
+  const bytes = new TextEncoder().encode(body).byteLength;
+  const contentType = extraction === 'pdf_text' ? 'application/pdf' : 'text/html';
+  const limits = {
+    source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
+  };
+  return {
+    url, content_type: contentType, extraction, body, redirects: 0, bytes,
+    fetch_audit: {
+      hops: [{ url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
+      source_content_type: contentType,
+      extraction,
+      requested_limits: limits,
+      applied_limits: limits,
+      actual_sizes: {
+        source_bytes: extraction === 'pdf_text' ? 48_000 : bytes,
+        extracted_text_bytes: bytes,
+        extracted_text_characters: Array.from(body).length,
+      },
+      truncation: { source: false, extracted_text: false },
+      parser: { result: 'success', version: 'fixture-parser/1.0.0' },
+    },
+  };
+}
 
 function lead(overrides: Partial<ManualNewsLeadRecord> = {}): ManualNewsLeadRecord {
   return {
@@ -86,7 +116,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore();
     await processManualNewsLead('ml-20260811-abc123', memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: '<p>doc</p>', redirects: 0, bytes: 10 }),
+      fetch: async () => documentFixture(officialEvidence.url, '<p>doc</p>'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });
@@ -117,7 +147,7 @@ describe('manual lead processing pipeline', () => {
     };
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: letter.url, content_type: 'application/pdf', extraction: 'pdf_text', body: 'letter', redirects: 0, bytes: 6 }),
+      fetch: async () => documentFixture(letter.url, 'letter', 'pdf_text'),
       extract: async () => letter,
       assess: async () => assessed({
         title: '美国参议员桑德斯呼吁三家AI公司暂停AI开发',
@@ -138,7 +168,7 @@ describe('manual lead processing pipeline', () => {
     });
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });
@@ -150,7 +180,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore();
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ claims: [{ text: 'invented', evidence_ids: ['ev-missing'] }] }),
     });
@@ -161,7 +191,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore();
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ matched_event_key: 'invented-prior-event-2026-08' }),
     });
@@ -172,7 +202,7 @@ describe('manual lead processing pipeline', () => {
     const memory = memoryStore(lead({ status: 'extracting', version: 4 }));
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
-      fetch: async () => ({ url: officialEvidence.url, content_type: 'text/html', extraction: 'html', body: 'doc', redirects: 0, bytes: 3 }),
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
     });

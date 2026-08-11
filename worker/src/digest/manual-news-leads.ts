@@ -1,4 +1,4 @@
-import { validatePublicHttpUrl } from '../security/safe-url-fetch';
+import { validatePublicHttpUrl, type DocumentFetchAudit } from '../security/safe-url-fetch';
 
 export const MANUAL_NEWS_LEAD_STATUSES = [
   'submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored',
@@ -27,6 +27,7 @@ export interface ManualNewsEvidence {
   excerpt: string;
   claims_supported: string[];
   reliable: boolean;
+  fetch_audit?: DocumentFetchAudit | null;
 }
 
 export interface ManualNewsLeadAssessment {

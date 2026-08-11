@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS manual_news_evidence (
   title TEXT NOT NULL,
   excerpt TEXT NOT NULL,
   claims_supported_json TEXT NOT NULL,
+  fetch_audit_json TEXT NOT NULL DEFAULT 'null',
   reliable INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (lead_id, evidence_id)
 );

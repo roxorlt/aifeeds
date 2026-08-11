@@ -162,6 +162,7 @@ export async function extractManualNewsEvidence(
     excerpt,
     claims_supported: excerpt ? [excerpt] : [],
     reliable: identity.reliable,
+    fetch_audit: document.fetch_audit,
   };
 }
 

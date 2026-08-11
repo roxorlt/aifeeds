@@ -24,7 +24,8 @@ class SqliteD1 {
       CREATE TABLE manual_news_evidence (
         lead_id TEXT NOT NULL, evidence_id TEXT NOT NULL, url TEXT NOT NULL, source_type TEXT NOT NULL,
         publisher TEXT NOT NULL, published_at TEXT, retrieved_at INTEGER NOT NULL, title TEXT NOT NULL,
-        excerpt TEXT NOT NULL, claims_supported_json TEXT NOT NULL, reliable INTEGER NOT NULL,
+        excerpt TEXT NOT NULL, claims_supported_json TEXT NOT NULL, fetch_audit_json TEXT NOT NULL DEFAULT 'null',
+        reliable INTEGER NOT NULL,
         PRIMARY KEY (lead_id, evidence_id)
       );
       CREATE TABLE manual_news_event_assessments (
@@ -117,6 +118,48 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
 }
 
 describe('manual lead D1-backed dedupe', () => {
+  test('persists the normalized bounded-fetch audit with evidence', async () => {
+    const state = fixture();
+    const fetchAudit = {
+      hops: [{
+        url: 'https://support.claude.com/example',
+        validated_ip: '93.184.216.34',
+        connected_ip: '93.184.216.34',
+      }],
+      source_content_type: 'text/html',
+      extraction: 'html' as const,
+      requested_limits: {
+        source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
+      },
+      applied_limits: {
+        source_bytes: 8_388_608, extracted_text_bytes: 2_097_152, extracted_text_characters: 1_000_000,
+      },
+      actual_sizes: { source_bytes: 80, extracted_text_bytes: 60, extracted_text_characters: 60 },
+      truncation: { source: false, extracted_text: false },
+      parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' },
+    };
+    const store = new D1ManualLeadProcessingStore(state.env);
+    await store.replaceEvidence(state.leadId, [{
+      id: 'ev-audited',
+      url: 'https://support.claude.com/example',
+      source_type: 'official_help',
+      publisher: 'claude.com',
+      published_at: null,
+      retrieved_at: 10,
+      title: 'Official help',
+      excerpt: 'Supported products only.',
+      claims_supported: ['Supported products only.'],
+      reliable: true,
+      fetch_audit: fetchAudit,
+    }]);
+
+    const saved = await store.getLead(state.leadId);
+    expect(saved?.evidence).toEqual([expect.objectContaining({ id: 'ev-audited', fetch_audit: fetchAudit })]);
+    expect(JSON.parse(String(state.db.sqlite.prepare(
+      'SELECT fetch_audit_json FROM manual_news_evidence WHERE lead_id = ? AND evidence_id = ?',
+    ).get(state.leadId, 'ev-audited')?.fetch_audit_json))).toEqual(fetchAudit);
+  });
+
   test('a lone lead cannot classify itself as a same-day duplicate after its assessment is saved', async () => {
     const state = fixture();
     const result = await processManualNewsLead(

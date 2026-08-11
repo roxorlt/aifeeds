@@ -52,6 +52,7 @@ interface ManualEvidenceRow {
   title: string;
   excerpt: string;
   claims_supported_json: string;
+  fetch_audit_json: string;
   reliable: number;
 }
 
@@ -71,6 +72,7 @@ function evidenceFromRow(row: ManualEvidenceRow): ManualNewsEvidence {
     excerpt: row.excerpt,
     claims_supported: parseJson<string[]>(row.claims_supported_json, []),
     reliable: row.reliable === 1,
+    fetch_audit: parseJson<ManualNewsEvidence['fetch_audit']>(row.fetch_audit_json, null),
   };
 }
 
@@ -246,11 +248,12 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ...evidence.map((item) => this.env.DB.prepare(
         `/* manual_evidence:insert */ INSERT INTO manual_news_evidence (
            lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
-           title, excerpt, claims_supported_json, reliable
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           title, excerpt, claims_supported_json, fetch_audit_json, reliable
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id, item.id, item.url, item.source_type, item.publisher, item.published_at, item.retrieved_at,
-        item.title, item.excerpt, JSON.stringify(item.claims_supported), item.reliable ? 1 : 0,
+        item.title, item.excerpt, JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
+        item.reliable ? 1 : 0,
       )),
     ];
     await this.env.DB.batch(statements);
@@ -389,20 +392,27 @@ export async function confirmManualNewsLeadCandidate(
   }
   if (!active) {
     await env.DB.batch([
-      confirmedLeadItemStatement(env, lead, expectedVersion, candidate, publishedAt, itemExtra, now),
+      confirmedLeadItemStatement(env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, undefined, true),
       env.DB.prepare(
         `/* manual_lead:confirm_prefreeze */ UPDATE manual_news_leads SET
            version = version + 1, confirmed_at = ?, last_mutation_kind = 'confirm',
            last_mutation_idempotency_key = ?, updated_at = ?
-         WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')`,
-      ).bind(now, idempotencyKey, now, id, expectedVersion),
+         WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
+           AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
+             WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`,
+      ).bind(now, idempotencyKey, now, id, expectedVersion, lead.review_date, lead.review_date),
       env.DB.prepare(
         `/* manual_audit:confirm_prefreeze */ INSERT INTO manual_news_lead_audit
          (lead_id, action, from_status, to_status, idempotency_key, metadata_json, created_at)
          SELECT ?, 'confirm_candidate', status, status, ?, '{"pending_initial_freeze":true}', ?
          FROM manual_news_leads
-         WHERE id = ? AND last_mutation_idempotency_key = ? AND version = ?`,
-      ).bind(id, idempotencyKey, now, id, idempotencyKey, expectedVersion + 1),
+         WHERE id = ? AND last_mutation_idempotency_key = ? AND version = ?
+           AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
+             WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`,
+      ).bind(
+        id, idempotencyKey, now, id, idempotencyKey, expectedVersion + 1,
+        lead.review_date, lead.review_date,
+      ),
     ]);
     const latestRow = await env.DB.prepare(
       `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
@@ -410,6 +420,10 @@ export async function confirmManualNewsLeadCandidate(
     if (!latestRow) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
     const updated = await leadFromRow(env, latestRow);
     if (latestRow.last_mutation_kind !== 'confirm' || latestRow.last_mutation_idempotency_key !== idempotencyKey) {
+      const latestActive = await getActiveNewsReviewBatch(env, lead.review_date);
+      if (latestActive) {
+        return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: updated };
+      }
       return { ok: false, status: 409, error: 'lead_version_conflict', lead: updated };
     }
     return {
@@ -515,11 +529,15 @@ function confirmedLeadItemStatement(
   itemExtra: string,
   now: number,
   expectedActiveBatch?: NewsReviewBatch,
+  requireNoActiveBatch = false,
 ): D1PreparedStatement {
   const activeGuard = expectedActiveBatch
     ? ` AND EXISTS (SELECT 1 FROM daily_news_review_batches
          WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
-    : '';
+    : requireNoActiveBatch
+      ? ` AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
+           WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`
+      : '';
   const values: unknown[] = [
     candidate.item_id,
     `manual:${lead.id}`,
@@ -536,6 +554,8 @@ function confirmedLeadItemStatement(
   ];
   if (expectedActiveBatch) {
     values.push(lead.review_date, lead.review_date, expectedActiveBatch.batch_id, expectedActiveBatch.batch_revision);
+  } else if (requireNoActiveBatch) {
+    values.push(lead.review_date, lead.review_date);
   }
   return env.DB.prepare(
     `/* manual_lead:confirm_item */ INSERT INTO items (

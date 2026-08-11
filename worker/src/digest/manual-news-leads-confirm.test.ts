@@ -148,8 +148,11 @@ describe('manual lead candidate confirmation', () => {
       ok: true, changed: true, pending_initial_freeze: true, batch: null, rerender_enqueued: false,
       lead: { confirmed_at: 100 },
     });
-    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:confirm_item'))).toBe(true);
-    expect(memory.prepared.some((statement) => /daily_news_review_batches/.test(statement.sql))).toBe(false);
+    const itemStatement = memory.prepared.find((statement) => statement.sql.includes('manual_lead:confirm_item'));
+    expect(itemStatement?.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM daily_news_review_batches/);
+    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:confirm_batch'))).toBe(false);
+    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:supersede_batch'))).toBe(false);
+    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:activate_batch'))).toBe(false);
 
     const second = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 8, 0, 'different-confirm-key', 200,

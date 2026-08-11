@@ -14,6 +14,10 @@ const migrations = path.resolve(here, '../../migrations');
 class SerialSqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
   private batchTail: Promise<unknown> = Promise.resolve();
+  private nextBatchGate: {
+    entered: () => void;
+    released: Promise<void>;
+  } | null = null;
 
   constructor() {
     this.sqlite.exec(`CREATE TABLE items (
@@ -57,9 +61,31 @@ class SerialSqliteD1 {
         throw error;
       }
     };
+    const gate = this.nextBatchGate;
+    this.nextBatchGate = null;
+    if (gate) {
+      return Promise.resolve()
+        .then(() => gate.entered())
+        .then(() => gate.released)
+        .then(() => {
+          const previousTail = this.batchTail;
+          const gatedResult = previousTail.then(execute, execute);
+          this.batchTail = gatedResult.then(() => undefined, () => undefined);
+          return gatedResult;
+        });
+    }
     const result = this.batchTail.then(execute, execute);
     this.batchTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  pauseNextBatch(): { entered: Promise<void>; release: () => void } {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.nextBatchGate = { entered: markEntered, released };
+    return { entered, release };
   }
 
   close(): void { this.sqlite.close(); }
@@ -119,6 +145,50 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('initial freeze winning after a no-batch confirm read leaves no partial confirmation and retry creates V2', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-000000000000';
+    insertLead(current.db, leadId, 'event-manual-initial-race');
+    const gate = current.db.pauseNextBatch();
+
+    const confirmationPromise = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 0, 'confirm-before-freeze', 150,
+    );
+    await gate.entered;
+    const initial = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('initial'), candidates('initial').map((item) => item.item_id), 200,
+    );
+    gate.release();
+    const confirmation = await confirmationPromise;
+
+    expect(initial.batch).toMatchObject({ batch_revision: 1, is_current: true });
+    expect(confirmation).toMatchObject({
+      ok: false,
+      status: 409,
+      error: 'candidate_batch_revision_conflict',
+    });
+    expect(current.db.sqlite.prepare('SELECT COUNT(*) AS count FROM items WHERE id = ?')
+      .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
+    expect(current.db.sqlite.prepare(
+      'SELECT version, confirmed_at, confirmed_batch_id FROM manual_news_leads WHERE id = ?',
+    ).get(leadId)).toEqual({ version: 7, confirmed_at: null, confirmed_batch_id: null });
+    expect(current.db.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'confirm_candidate'",
+    ).get(leadId)).toEqual({ count: 0 });
+
+    const retry = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-after-freeze', 300,
+    );
+    expect(retry).toMatchObject({
+      ok: true,
+      changed: true,
+      pending_initial_freeze: false,
+      rerender_enqueued: false,
+      batch: { revision: 2, supersedes_revision: 1, current: true },
+    });
+    expect(activeCount(current.db)).toBe(1);
+  });
+
   test('concurrent scheduled freezes converge on one DB-enforced active revision', async () => {
     const current = state();
     const [left, right] = await Promise.all([
@@ -130,8 +200,9 @@ describe('news review revision CAS', () => {
     const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
     expect(active?.is_current).toBe(true);
     expect([left.batch.batch_id, right.batch.batch_id]).toContain(active?.batch_id);
+    const activeCandidates = active?.candidate_ids[0]?.startsWith('left-') ? candidates('left') : candidates('right');
     const retry = await freezeNewsReviewBatch(
-      current.env, '2026-08-11', candidates('left'), candidates('left').map((item) => item.item_id), 200,
+      current.env, '2026-08-11', activeCandidates, activeCandidates.map((item) => item.item_id), 200,
     );
     expect(retry).toMatchObject({ created: false, batch: { batch_id: active?.batch_id, is_current: true } });
   });
@@ -180,6 +251,46 @@ describe('news review revision CAS', () => {
       const retry = await confirmManualNewsLeadCandidate(current.env, leadId, 7, active!.batch_revision, 'confirm-c-retry', 300);
       expect(retry).toMatchObject({ ok: true, rerender_enqueued: false });
     }
+    expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('a changed scheduled V3 preserves the confirmed manual candidate from V2 before deterministic capping', async () => {
+    const current = state();
+    const base = candidates('base');
+    const initial = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', base, base.map((item) => item.item_id), 100,
+    );
+    const leadId = 'ml-20260811-dddddddddddd';
+    insertLead(current.db, leadId, 'event-manual-durable');
+    const confirmed = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-durable', 200,
+    );
+    expect(confirmed).toMatchObject({ ok: true, batch: { revision: 2 } });
+
+    const changedScheduled = [
+      ...base.map((candidate) => ({ ...candidate, title: `${candidate.title}（重评分）`, score: Number(candidate.score) - 5 })),
+      ...candidates('fresh'),
+    ];
+    const scheduled = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', changedScheduled, base.map((item) => item.item_id), 300,
+    );
+
+    expect(scheduled.batch).toMatchObject({
+      batch_revision: 3,
+      supersedes_batch_id: confirmed.ok ? confirmed.batch?.batch_id : undefined,
+      revision_origin: 'scheduled_freeze',
+      default_selected_ids: initial.batch.default_selected_ids,
+      applied_selected_ids: null,
+    });
+    expect(scheduled.batch.candidates).toHaveLength(10);
+    expect(scheduled.batch.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toEqual([
+      expect.objectContaining({
+        item_id: `blog:manual:${leadId}`,
+        lead_id: leadId,
+        event_key: 'event-manual-durable',
+      }),
+    ]);
+    expect(scheduled.batch.candidate_ids).not.toContain('fresh-5');
     expect(activeCount(current.db)).toBe(1);
   });
 });

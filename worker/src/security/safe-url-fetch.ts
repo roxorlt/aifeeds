@@ -1,5 +1,7 @@
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_TEXT_CHARACTERS = 1_000_000;
 const DEFAULT_MAX_REDIRECTS = 3;
 const DEFAULT_SEARCH_MAX_BYTES = 256 * 1024;
 
@@ -24,6 +26,7 @@ export interface PublicDocument {
   body: string;
   redirects: number;
   bytes: number;
+  fetch_audit: DocumentFetchAudit;
 }
 
 export interface PublicWebSearchResult {
@@ -33,16 +36,27 @@ export interface PublicWebSearchResult {
   published_at: string | null;
 }
 
-interface FetchAuditHop {
+export interface FetchAuditHop {
   url: string;
   validated_ip: string;
   connected_ip: string;
 }
 
-interface FetchAudit {
+export interface DocumentExtractionLimits {
+  source_bytes: number;
+  extracted_text_bytes: number;
+  extracted_text_characters: number;
+}
+
+export interface DocumentFetchAudit {
   hops: FetchAuditHop[];
   source_content_type: string;
   extraction: PublicDocument['extraction'];
+  requested_limits: DocumentExtractionLimits;
+  applied_limits: DocumentExtractionLimits;
+  actual_sizes: DocumentExtractionLimits;
+  truncation: { source: boolean; extracted_text: boolean };
+  parser: { result: 'success'; version: string };
 }
 
 function unsafe(reason: string): Error { return new Error(`unsafe_url:${reason}`); }
@@ -140,12 +154,41 @@ function strictObject(value: unknown, keys: readonly string[]): value is Record<
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }
 
-function parseFetchAudit(response: Response, requested: URL, maxRedirects: number): FetchAudit {
+function parseLimits(value: unknown, error: string, allowZero: boolean): DocumentExtractionLimits {
+  if (!strictObject(value, ['source_bytes', 'extracted_text_bytes', 'extracted_text_characters'])) {
+    throw new Error(error);
+  }
+  const entries = [value.source_bytes, value.extracted_text_bytes, value.extracted_text_characters];
+  if (entries.some((entry) => !Number.isSafeInteger(entry) || (allowZero ? Number(entry) < 0 : Number(entry) <= 0))) {
+    throw new Error(error);
+  }
+  return {
+    source_bytes: value.source_bytes as number,
+    extracted_text_bytes: value.extracted_text_bytes as number,
+    extracted_text_characters: value.extracted_text_characters as number,
+  };
+}
+
+function sameLimits(left: DocumentExtractionLimits, right: DocumentExtractionLimits): boolean {
+  return left.source_bytes === right.source_bytes
+    && left.extracted_text_bytes === right.extracted_text_bytes
+    && left.extracted_text_characters === right.extracted_text_characters;
+}
+
+function parseFetchAudit(
+  response: Response,
+  requested: URL,
+  maxRedirects: number,
+  expectedLimits: DocumentExtractionLimits,
+): DocumentFetchAudit {
   const encoded = response.headers.get('X-AIFeeds-Fetch-Audit') || '';
   if (!encoded || encoded.length > 8_192) throw new Error('unsafe_gateway_audit:missing');
   let raw: unknown;
   try { raw = JSON.parse(decodeURIComponent(encoded)); } catch { throw new Error('unsafe_gateway_audit:invalid_json'); }
-  if (!strictObject(raw, ['hops', 'source_content_type', 'extraction']) || !Array.isArray(raw.hops)) {
+  if (!strictObject(raw, [
+    'hops', 'source_content_type', 'extraction', 'requested_limits', 'applied_limits',
+    'actual_sizes', 'truncation', 'parser',
+  ]) || !Array.isArray(raw.hops)) {
     throw new Error('unsafe_gateway_audit:invalid_schema');
   }
   if (raw.hops.length < 1) throw new Error('unsafe_gateway_audit:missing_hop');
@@ -168,10 +211,11 @@ function parseFetchAudit(response: Response, requested: URL, maxRedirects: numbe
   if (typeof raw.source_content_type !== 'string' || !ALLOWED_SOURCE_TYPES.has(raw.source_content_type)) {
     throw new Error('unsafe_gateway_audit:content_type');
   }
+  if (typeof raw.extraction !== 'string') throw new Error('unsafe_gateway_audit:extraction');
   if (raw.source_content_type === 'application/pdf' && raw.extraction !== 'pdf_text') {
     throw new Error('invalid_pdf_extraction');
   }
-  if (!['html', 'text', 'json', 'pdf_text'].includes(String(raw.extraction))) {
+  if (!['html', 'text', 'json', 'pdf_text'].includes(raw.extraction)) {
     throw new Error('unsafe_gateway_audit:extraction');
   }
   const extraction = raw.extraction as PublicDocument['extraction'];
@@ -180,7 +224,45 @@ function parseFetchAudit(response: Response, requested: URL, maxRedirects: numbe
     'application/json': 'json', 'application/pdf': 'pdf_text',
   };
   if (expectedExtraction[raw.source_content_type] !== extraction) throw new Error('unsafe_gateway_audit:extraction_mismatch');
-  return { hops, source_content_type: raw.source_content_type, extraction };
+  const requestedLimits = parseLimits(raw.requested_limits, 'unsafe_gateway_audit:invalid_schema', false);
+  const appliedLimits = parseLimits(raw.applied_limits, 'unsafe_gateway_audit:invalid_schema', false);
+  const actualSizes = parseLimits(raw.actual_sizes, 'unsafe_gateway_audit:invalid_schema', true);
+  if (!sameLimits(requestedLimits, expectedLimits)
+    || appliedLimits.source_bytes > requestedLimits.source_bytes
+    || appliedLimits.extracted_text_bytes > requestedLimits.extracted_text_bytes
+    || appliedLimits.extracted_text_characters > requestedLimits.extracted_text_characters) {
+    throw new Error('unsafe_gateway_audit:limit_mismatch');
+  }
+  if (actualSizes.source_bytes > appliedLimits.source_bytes
+    || actualSizes.extracted_text_bytes > appliedLimits.extracted_text_bytes
+    || actualSizes.extracted_text_characters > appliedLimits.extracted_text_characters) {
+    throw new Error('unsafe_gateway_audit:actual_size');
+  }
+  if (!strictObject(raw.truncation, ['source', 'extracted_text'])
+    || typeof raw.truncation.source !== 'boolean' || typeof raw.truncation.extracted_text !== 'boolean') {
+    throw new Error('unsafe_gateway_audit:invalid_schema');
+  }
+  if (raw.truncation.source || raw.truncation.extracted_text) {
+    throw new Error('unsafe_gateway_audit:truncated');
+  }
+  if (!strictObject(raw.parser, ['result', 'version'])
+    || (raw.parser.result !== 'success' && raw.parser.result !== 'failed')
+    || typeof raw.parser.version !== 'string'
+    || !raw.parser.version.trim()
+    || raw.parser.version.length > 120) {
+    throw new Error('unsafe_gateway_audit:invalid_schema');
+  }
+  if (raw.parser.result !== 'success') throw new Error('unsafe_gateway_audit:parser_failed');
+  return {
+    hops,
+    source_content_type: raw.source_content_type,
+    extraction,
+    requested_limits: requestedLimits,
+    applied_limits: appliedLimits,
+    actual_sizes: actualSizes,
+    truncation: { source: raw.truncation.source, extracted_text: raw.truncation.extracted_text },
+    parser: { result: 'success', version: raw.parser.version },
+  };
 }
 
 async function withinDeadline<T>(promise: Promise<T>, deadline: number, controller: AbortController): Promise<T> {
@@ -277,21 +359,40 @@ export async function fetchPublicDocument(
     service?: TrustedResearchService;
     timeoutMs?: number;
     maxBytes?: number;
+    maxSourceBytes?: number;
+    maxTextCharacters?: number;
     maxRedirects?: number;
   } = {},
 ): Promise<PublicDocument> {
   const target = validatePublicHttpUrl(input);
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = deps.maxBytes ?? DEFAULT_MAX_BYTES;
+  const maxSourceBytes = deps.maxSourceBytes ?? DEFAULT_MAX_SOURCE_BYTES;
+  const maxTextCharacters = deps.maxTextCharacters ?? DEFAULT_MAX_TEXT_CHARACTERS;
   const maxRedirects = deps.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const requestedLimits: DocumentExtractionLimits = {
+    source_bytes: maxSourceBytes,
+    extracted_text_bytes: maxBytes,
+    extracted_text_characters: maxTextCharacters,
+  };
+  if (Object.values(requestedLimits).some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new Error('invalid_document_limits');
+  }
   const { response, deadline, controller } = await postTrusted(
-    deps.service, '/v1/document', { url: target.toString(), max_bytes: maxBytes, max_redirects: maxRedirects }, timeoutMs,
+    deps.service, '/v1/document', {
+      url: target.toString(), limits: requestedLimits, max_redirects: maxRedirects,
+    }, timeoutMs,
   );
   try {
     const transportType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
     if (transportType !== 'text/plain') throw new Error('invalid_gateway_content_type');
-    const audit = parseFetchAudit(response, target, maxRedirects);
+    const audit = parseFetchAudit(response, target, maxRedirects, requestedLimits);
     const body = await readBoundedBody(response, maxBytes, deadline, controller);
+    const bodyCharacters = Array.from(body.text).length;
+    if (audit.actual_sizes.extracted_text_bytes !== body.bytes
+      || audit.actual_sizes.extracted_text_characters !== bodyCharacters) {
+      throw new Error('unsafe_gateway_audit:body_size_mismatch');
+    }
     return {
       url: audit.hops.at(-1)!.url,
       content_type: audit.source_content_type,
@@ -299,6 +400,7 @@ export async function fetchPublicDocument(
       body: body.text,
       redirects: audit.hops.length - 1,
       bytes: body.bytes,
+      fetch_audit: audit,
     };
   } finally {
     controller.abort();
