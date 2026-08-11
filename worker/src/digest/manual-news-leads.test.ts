@@ -382,6 +382,24 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '法院命令OpenAI停止模型训练百度发布文心模型。',
+    '法院命令OpenAI停止模型训练anthropic发布Claude模型。',
+    '法院命令OpenAI停止模型训练\u2028anthropic发布Claude模型。',
+    '法院命令OpenAI停止模型训练\u2029百度发布文心模型。',
+  ])('allows exactly one governed complement and rejects every third action occurrence: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test('keeps the two-action court order grammar valid', () => {
+    const text = '法院命令OpenAI停止训练。';
+    expect(validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic]).claims[0].text).toBe(text);
+  });
+
+  test.each([
     'OpenAI发布模型训练工具。',
     'OpenAI发布开源模型。',
     'OpenAI发布合作平台。',
@@ -393,6 +411,25 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布命令行工具。',
+    'OpenAI发布支持向量模型。',
+    'OpenAI发布合作伙伴计划。',
+    'OpenAI发布企业支持分析平台。',
+  ])('keeps an action word inside a post-release compound noun phrase: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('does not hide real actions behind a post-release compound noun phrase', () => {
+    const text = 'OpenAI发布命令行工具并命令团队停止训练。';
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
   });
 
   test.each([
@@ -475,7 +512,14 @@ describe('manual news lead domain', () => {
     };
 
     expect(validateManualLeadFactVerification(valid, candidate, [officialAnthropic]))
-      .toEqual({ ...valid, prior_context: [] });
+      .toEqual({
+        ...valid,
+        primary_fact: {
+          fact_id: 'field:title',
+          candidate_value: candidate.title,
+        },
+        prior_context: [],
+      });
     expect(() => validateManualLeadFactVerification({ ...valid, extra: true }, candidate, [officialAnthropic]))
       .toThrow(/invalid_fact_verification_fields/);
     expect(() => validateManualLeadFactVerification({ ...valid, fact_results: valid.fact_results.slice(1) }, candidate, [officialAnthropic]))
@@ -1067,6 +1111,48 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    { candidate: 'OpenAI投资未央公司。', quote: 'OpenAI投资央公司。' },
+    { candidate: 'OpenAI投资华为公司。', quote: 'OpenAI投资华公司。' },
+    { candidate: 'OpenAI扩大在野业务。', quote: 'OpenAI扩大野业务。' },
+  ])('preserves Chinese function-word characters inside entity names: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
+    { candidate: 'OpenAI投资未央公司。', quote: 'OpenAI投资未央公司。' },
+    { candidate: 'OpenAI投资华为公司。', quote: 'OpenAI投资华为公司。' },
+    { candidate: 'OpenAI扩大在野业务。', quote: 'OpenAI扩大在野业务。' },
+  ])('accepts unchanged Chinese entities containing function-word characters: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    { candidate: 'OpenAI expanded Mongolia operations.', quote: 'OpenAI expanded operations in Mongolia.' },
+    { candidate: 'OpenAI expanded Freedonia operations.', quote: 'OpenAI expanded operations in Freedonia.' },
+  ])('normalizes an unlisted capitalized location only in a location context: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('keeps different unlisted English locations distinct', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI expanded Mongolia operations.',
+      'OpenAI expanded operations in Freedonia.',
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
     { candidate: 'OpenAI扩大蒙古运营。', quote: 'OpenAI在阿根廷扩大运营。' },
     { candidate: 'OpenAI扩大乌拉圭市场。', quote: 'OpenAI在巴拉圭市场扩大业务。' },
     { candidate: '监管机构禁止模型推理活动。', quote: '监管机构禁止模型评测活动。' },
@@ -1366,6 +1452,88 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       matching.raw, matching.candidate, matching.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test('binds occurred_at only to the title primary event, never a secondary claim', () => {
+    const quote = [
+      'OpenAI于2026年8月11日北京时间9点正式发布GPT 6',
+      'Anthropic于2026年8月11日北京时间8点正式发布Claude 5。',
+    ].join('；');
+    const evidence = [{
+      ...officialAnthropic,
+      title: quote,
+      excerpt: quote,
+      claims_supported: [quote],
+    }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'OpenAI正式发布GPT 6',
+      summary: 'OpenAI正式发布GPT 6。',
+      event_key: 'openai-gpt-6-primary-release-2026-08-11',
+      event_type: 'product_release',
+      occurred_at: '2026-08-11T00:00:00Z',
+      claims: [
+        { text: 'OpenAI正式发布GPT 6。', evidence_ids: ['ev-official'] },
+        {
+          text: 'Anthropic于2026年8月11日北京时间8点正式发布Claude 5。',
+          evidence_ids: ['ev-official'],
+        },
+      ],
+    }), evidence);
+    const promptBody = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate,
+      evidence,
+    }).user) as {
+      primary_fact?: { fact_id: string; untrusted_candidate_value: string };
+      facts: Array<{ fact_id: string; untrusted_primary_fact?: { fact_id: string; untrusted_candidate_value: string } }>;
+    };
+    expect(promptBody.primary_fact).toEqual({
+      fact_id: 'field:title',
+      untrusted_candidate_value: 'OpenAI正式发布GPT 6',
+    });
+    expect(promptBody.facts.find((fact) => fact.fact_id === 'field:occurred_at')?.untrusted_primary_fact)
+      .toEqual(promptBody.primary_fact);
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: promptBody.facts.map((fact) => supportedFactResult(
+        fact.fact_id, evidence[0].id, quote,
+      )),
+    };
+    expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
+      .toThrow(/fact_verification_instant_mismatch/);
+  });
+
+  test('accepts occurred_at when the primary event action and instant share one source clause', () => {
+    const quote = [
+      'OpenAI于2026年8月11日北京时间8点正式发布GPT 6',
+      'Anthropic于2026年8月11日北京时间9点正式发布Claude 5。',
+    ].join('；');
+    const evidence = [{
+      ...officialAnthropic,
+      title: quote,
+      excerpt: quote,
+      claims_supported: [quote],
+    }];
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'OpenAI正式发布GPT 6',
+      summary: 'OpenAI正式发布GPT 6。',
+      event_key: 'openai-gpt-6-primary-release-2026-08-11',
+      event_type: 'product_release',
+      occurred_at: '2026-08-11T00:00:00Z',
+      claims: [
+        { text: 'OpenAI正式发布GPT 6。', evidence_ids: ['ev-official'] },
+        { text: 'Anthropic正式发布Claude 5。', evidence_ids: ['ev-official'] },
+      ],
+    }), evidence);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate,
+      evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    }, candidate, evidence);
+    expect((verification as unknown as { primary_fact: { fact_id: string } }).primary_fact)
+      .toEqual(expect.objectContaining({ fact_id: 'field:title' }));
   });
 
   test.each([
@@ -1957,12 +2125,23 @@ describe('manual news lead domain', () => {
       verification,
     };
     const proof = await createManualLeadVerificationProof(proofInput, 'c'.repeat(64));
-    expect(proof.policy_version).toBe('fact-evidence-hmac-v6');
+    expect(proof.policy_version).toBe('fact-evidence-hmac-v7');
+    expect((verification as unknown as { primary_fact: { fact_id: string } }).primary_fact)
+      .toEqual(expect.objectContaining({ fact_id: 'field:title' }));
     const tamperedVerification = structuredClone(verification);
     tamperedVerification.fact_results.find((fact) => fact.fact_id === 'field:title')!
       .source_verifications![1].source_quotes[0].quote = 'tampered source-specific quote';
     await expect(isCurrentManualLeadVerification(
       { ...proofInput, verification: tamperedVerification }, proof, 'c'.repeat(64),
+    )).resolves.toBe(false);
+    const tamperedPrimaryFact = structuredClone(verification) as unknown as {
+      primary_fact: { candidate_value: string };
+    };
+    tamperedPrimaryFact.primary_fact.candidate_value = 'Anthropic正式发布Claude 5';
+    await expect(isCurrentManualLeadVerification(
+      { ...proofInput, verification: tamperedPrimaryFact as unknown as typeof verification },
+      proof,
+      'c'.repeat(64),
     )).resolves.toBe(false);
   });
 
