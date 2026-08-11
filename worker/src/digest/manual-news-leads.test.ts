@@ -70,7 +70,7 @@ function assessment(overrides: Record<string, unknown> = {}) {
     material_update: false,
     score: 82,
     recommendation: 'recommended',
-    occurred_at: '2026-08-10T13:30:00.000Z',
+    occurred_at: '2026-08-10',
     uncertainties: ['文档未说明所有模型均适用。'],
     claims: [{
       text: 'Anthropic官方文档说明，部分受支持的Claude文本可加入不可见水印，部分文件可带C2PA来源信息，范围仅限受支持的模型和产品。',
@@ -97,6 +97,43 @@ function supportedFactResult(factId: string, evidenceId: string, quote: string) 
         current_quote: quote,
       },
     } : {}),
+  };
+}
+
+function supportedTextVerification(
+  factText: string,
+  quote: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const evidence = [{
+    ...officialAnthropic,
+    excerpt: quote,
+    claims_supported: [quote],
+  }];
+  const candidate = validateManualLeadAssessment(assessment({
+    title: factText,
+    summary: factText,
+    event_key: 'structured-fact-verification-2026-08-11',
+    event_type: 'other',
+    occurred_at: null,
+    claims: [{ text: factText, evidence_ids: [evidence[0].id] }],
+    ...overrides,
+  }), evidence);
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate,
+    evidence,
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  return {
+    candidate,
+    evidence,
+    raw: {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => supportedFactResult(
+        fact.fact_id,
+        evidence[0].id,
+        quote,
+      )),
+    },
   };
 }
 
@@ -408,7 +445,7 @@ describe('manual news lead domain', () => {
       {
         candidate: '监管机构已命令三家公司强制暂停人工智能模型训练。',
         quote: '监管机构呼吁三家公司考虑暂停人工智能模型训练，但没有发布强制命令。',
-        error: /fact_verification_modality_mismatch/,
+        error: /fact_verification_(?:polarity|modality)_mismatch/,
       },
       {
         candidate: '监管机构呼吁三家公司考虑暂停人工智能模型训练。',
@@ -633,6 +670,164 @@ describe('manual news lead domain', () => {
 
     expect(() => validateManualLeadFactVerification(raw, candidate, evidence))
       .toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test('binds negation to the pause action instead of treating pause as sentence-level negative', () => {
+    const negative = supportedTextVerification(
+      'OpenAI已暂停AI训练并继续开源模型。',
+      'OpenAI并未暂停AI训练，但已继续开源模型。',
+      { event_key: 'openai-pause-ai-training-open-source-2026-08-11' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      negative.raw, negative.candidate, negative.evidence,
+    )).toThrow(/fact_verification_polarity_mismatch/);
+
+    const positive = supportedTextVerification(
+      'OpenAI已暂停AI训练并继续开源模型。',
+      'OpenAI已暂停AI训练并继续开源模型。',
+      { event_key: 'openai-pause-ai-training-open-source-2026-08-11' },
+    );
+    expect(validateManualLeadFactVerification(
+      positive.raw, positive.candidate, positive.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('requires Chinese subject, model, ordinal-version, and region slots independently', () => {
+    const candidateText = '百度在加拿大正式发布第五版文心模型，并宣布该模型已完成训练并向开发者开放。';
+    const mismatches = [
+      '阿里在加拿大正式发布第五版文心模型，并宣布该模型已完成训练并向开发者开放。',
+      '百度在加拿大正式发布第五版通义模型，并宣布该模型已完成训练并向开发者开放。',
+      '百度在加拿大正式发布第四版文心模型，并宣布该模型已完成训练并向开发者开放。',
+      '百度在澳大利亚正式发布第五版文心模型，并宣布该模型已完成训练并向开发者开放。',
+      '阿里在澳大利亚正式发布第四版通义模型，并宣布该模型已完成训练并向开发者开放。',
+    ];
+    for (const quote of mismatches) {
+      const fixture = supportedTextVerification(candidateText, quote);
+      expect(() => validateManualLeadFactVerification(
+        fixture.raw, fixture.candidate, fixture.evidence,
+      )).toThrow(/fact_verification_entity_slot_missing/);
+    }
+
+    const positive = supportedTextVerification(candidateText, candidateText);
+    expect(validateManualLeadFactVerification(
+      positive.raw, positive.candidate, positive.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    '腾讯发布混元模型并在新加坡开源模型权重。',
+    '智谱发布glm-5并在巴西开放模型服务。',
+    '月之暗面发布kimi k3并在阿联酋开源模型权重。',
+    '深度求索发布deepseek r2并在瑞士开放模型服务。',
+  ])('accepts matching pure-Chinese entities, lowercase products, and broad regions: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    {
+      candidate: 'OpenAI已签署AI合作协议。',
+      quote: 'OpenAI仍在讨论AI合作协议。',
+    },
+    {
+      candidate: '腾讯已完成对芯片公司的投资。',
+      quote: '腾讯仍在讨论对芯片公司的投资。',
+    },
+    {
+      candidate: '智谱已完成新一轮人工智能业务融资。',
+      quote: '智谱正在讨论新一轮人工智能业务融资。',
+    },
+    {
+      candidate: '监管机构已起诉模型供应商并禁止其在加拿大训练模型。',
+      quote: '监管机构正讨论是否起诉模型供应商并建议其减少在加拿大训练模型。',
+    },
+    {
+      candidate: '该公司已经开源人工智能模型并实施裁员。',
+      quote: '该公司计划开源人工智能模型并讨论是否裁员。',
+    },
+    {
+      candidate: '法院决定并下令公司停止训练模型。',
+      quote: '法院建议公司考虑停止训练模型。',
+    },
+    {
+      candidate: '该人工智能交易已获批，公司正式开展技术合作。',
+      quote: '该人工智能交易仍在申请审批，公司仅讨论开展技术合作。',
+    },
+  ])('does not let discussion or weaker action support completed action: $candidate', ({ candidate: factText, quote }) => {
+    const fixture = supportedTextVerification(factText, quote, {
+      event_type: 'industry_event',
+    });
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_(?:action|modality)_mismatch/);
+  });
+
+  test.each([
+    'OpenAI已签署AI合作协议。',
+    '腾讯已完成对芯片公司的投资。',
+    '智谱已完成新一轮人工智能业务融资。',
+    '监管机构已起诉模型供应商并禁止其在加拿大训练模型。',
+    '该公司已经开源人工智能模型并实施裁员。',
+    '法院决定并下令公司停止训练模型。',
+    '该人工智能交易已获批，公司正式开展技术合作。',
+  ])('accepts a source quote that matches every asserted action: %s', (factText) => {
+    const fixture = supportedTextVerification(factText, factText, {
+      event_type: 'industry_event',
+    });
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('fails closed when an asserted compound action cannot be structurally classified', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI已整合Acme并重构核心平台。',
+      'OpenAI已整合Acme并重构核心平台。',
+      { event_type: 'industry_event' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_action_mismatch/);
+  });
+
+  test('requires full occurred_at instant precision and normalizes timezone-equivalent evidence', () => {
+    const dateOnly = supportedTextVerification(
+      'OpenAI于2026-08-11发布模型。',
+      'OpenAI于2026-08-11发布模型。',
+      { occurred_at: '2026-08-11T08:00:00+08:00' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      dateOnly.raw, dateOnly.candidate, dateOnly.evidence,
+    )).toThrow(/fact_verification_instant_precision_mismatch/);
+
+    const wrongInstant = supportedTextVerification(
+      'OpenAI正式发布人工智能模型。',
+      '2026-08-11T01:00:00Z，OpenAI正式发布人工智能模型。',
+      { occurred_at: '2026-08-11T00:00:00Z' },
+    );
+    expect(() => validateManualLeadFactVerification(
+      wrongInstant.raw, wrongInstant.candidate, wrongInstant.evidence,
+    )).toThrow(/fact_verification_instant_mismatch/);
+
+    const equivalentInstant = supportedTextVerification(
+      'OpenAI正式发布人工智能模型。',
+      '2026-08-11T08:00:00+08:00，OpenAI正式发布人工智能模型。',
+      { occurred_at: '2026-08-11T08:00:00+08:00' },
+    );
+    expect(validateManualLeadFactVerification(
+      equivalentInstant.raw, equivalentInstant.candidate, equivalentInstant.evidence,
+    ).overall_verdict).toBe('supported');
+
+    const datePrecision = supportedTextVerification(
+      'OpenAI于2026年8月11日发布模型。',
+      'OpenAI于2026年8月11日发布模型。',
+      { occurred_at: '2026-08-11' },
+    );
+    expect(validateManualLeadFactVerification(
+      datePrecision.raw, datePrecision.candidate, datePrecision.evidence,
+    ).overall_verdict).toBe('supported');
   });
 
   test('validates material updates against an exact verified prior context and persists that context', () => {

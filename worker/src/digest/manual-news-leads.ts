@@ -272,7 +272,7 @@ export function buildManualLeadAssessmentPrompt(input: {
       '只使用 evidence 中明确出现的事实；每条 claim 必须引用实际支持它的 evidence_ids，不能用常识、线索原话或搜索摘要补齐。',
       'title 与 summary 使用严肃行业媒体中文：准确写主体、动作、对象和必要范围，禁止标题党、模糊代词、把媒体名称误写成事件主体。',
       '主体、产品版本、发布时间、适用模型/产品、法律效力或请求对象缺失时，必须写入 uncertainties，禁止猜测日期与范围。',
-      'occurred_at 只填写证据明确支持的事件发生时间（ISO-8601 日期或带时区时间）；来源发布时间不是事件发生时间，无法确认时必须为 null。',
+      'occurred_at 只填写证据明确支持的事件发生时间（ISO-8601 日期或带时区时间）；来源发布时间不是事件发生时间，无法确认时必须为 null。证据只支持日期时必须输出 YYYY-MM-DD 或 null，禁止补写时分秒；只有证据明确给出完整时刻和时区时才可输出完整时间戳。',
       '产品公告可由官方一手公告或帮助文档单独支持，但只能陈述文档明确覆盖的模型、产品、地区和输出类型。',
       '政治或监管事件必须区分个人呼吁、公开信、机构提案、立法程序与有约束力决定；要建议加入，必须同时有原始文件/官方声明和可靠独立报道。',
       'event_key 用规范化的“主体-动作-对象或版本-事件日期”表达现实事件，不得包含媒体名、标题修辞或抓取日期；同一真实事件的不同报道和不同核验运行必须给相同 event_key。',
@@ -467,6 +467,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '没有可比较的 prior event 时，material_update 必须为 false，comparison_result.reason_code=no_prior_match，且不得据此判断 duplicate。',
       '监管或发布效力必须一致：请求、呼吁、建议、拟议、可能、试点，不得写成命令、通过、生效、强制或正式发布，反向亦然。',
       '计划、可能、据称、传闻或未证实的信息不得支持“已经完成、正式发布或已经生效”的事实。',
+      '逐动作核验投资、融资、签署、起诉、禁止、开源、训练、合作、裁员、法规要求、决定、下令、获批等语义；“讨论、计划、申请”不得支持相应动作已完成。暂停和停止本身是动作，不是整句否定；否定词必须绑定到它实际修饰的动作。',
+      '完整时间戳必须由同一引文中的完整时间戳支持，并按时区换算为同一时刻；只有日期的引文不得支持带时分秒的 occurred_at。',
       '只有所有 fact 都 supported=true 且 issue_code=none 时 overall_verdict 才能为 supported。',
     ].join('\n'),
     user: JSON.stringify({
@@ -517,6 +519,8 @@ const FACT_VERIFICATION_ERROR_CODES = new Set([
   'fact_verification_fact_signal_missing',
   'fact_verification_action_mismatch',
   'fact_verification_date_mismatch',
+  'fact_verification_instant_mismatch',
+  'fact_verification_instant_precision_mismatch',
   'fact_verification_entity_slot_missing',
   'fact_verification_scope_signal_mismatch',
   'fact_verification_polarity_mismatch',
@@ -547,137 +551,337 @@ function exactStructuredAnchorPresent(anchor: string, text: string): boolean {
   return actual.some((_token, index) => expected.every((token, offset) => actual[index + offset] === token));
 }
 
-function hasObviousNegativePolarity(value: string): boolean {
-  return /(?:并非|绝非|从未|未必|尚未|未能|未曾|未获|未被|未经|尚无|拒绝|否认|停止|暂停|不(?:会|是|再|含|包含|支持|提供|发布|推出|允许|存在|发生|承认|采用|加入|添加)|无(?:法|任何|相关|支持|内容|证据|更新))/u.test(value)
-    || /\b(?:never|not|no|without|isn't|is\s+not|aren't|are\s+not|wasn't|was\s+not|hasn't|has\s+not|haven't|have\s+not|hadn't|had\s+not|didn't|did\s+not|doesn't|does\s+not|cannot|can't|failed\s+to|unable\s+to|den(?:y|ies|ied)|refus(?:e|es|ed)|stop(?:s|ped)?|paus(?:e|es|ed))\b/i.test(value);
-}
-
-type FactModality = 'advisory' | 'tentative' | 'unverified' | 'binding' | 'released' | 'completed';
-
-function factModalities(value: string): Set<FactModality> {
-  const result = new Set<FactModality>();
-  if (/(?:请求|要求|呼吁|建议|敦促)|\b(?:request(?:s|ed)?|call(?:s|ed)?\s+for|recommend(?:s|ed)?|urge(?:s|d)?|ask(?:s|ed)?)\b/i.test(value)) {
-    result.add('advisory');
-  }
-  if (/(?:计划|拟议|拟|可能|试点|考虑|寻求|提议|预计)|\b(?:plan(?:s|ned)?(?:\s+to)?|propos(?:e|es|ed)|may|might|could|possible|pilot|consider(?:s|ed)?|seek(?:s|ing)?|expected\s+to)\b/i.test(value)) {
-    result.add('tentative');
-  }
-  if (/(?:据称|传闻|未经证实|尚未证实|未获证实|尚无证据)|\b(?:reportedly|allegedly|unconfirmed|unverified|rumou?red|claimed|has\s+yet\s+to\s+be\s+confirmed)\b/i.test(value)) {
-    result.add('unverified');
-  }
-  if (/(?:命令|通过|生效|强制|必须)|\b(?:order(?:s|ed)?|pass(?:es|ed)?|effective|mandatory|must)\b/i.test(value)) {
-    result.add('binding');
-  }
-  if (/(?:正式发布|正式推出|已经发布|已发布)|\b(?:officially\s+(?:released|launched)|formally\s+(?:released|launched)|has\s+(?:released|launched))\b/i.test(value)) {
-    result.add('released');
-  }
-  if (/(?:已经|已完成|完成了|达成|落地|生效)|\b(?:acquired|expanded|exited|completed|closed|signed|took\s+effect|came\s+into\s+force)\b/i.test(value)) {
-    result.add('completed');
-  }
-  return result;
-}
-
-function hasFactModalityConflict(candidate: string, quote: string): boolean {
-  const expected = factModalities(candidate);
-  const actual = factModalities(quote);
-  const weak = new Set<FactModality>(['advisory', 'tentative', 'unverified']);
-  const strong = new Set<FactModality>(['binding', 'released', 'completed']);
-  const expectedWeak = [...expected].some((item) => weak.has(item));
-  const expectedStrong = [...expected].some((item) => strong.has(item));
-  const actualWeak = [...actual].some((item) => weak.has(item));
-  const actualStrong = [...actual].some((item) => strong.has(item));
-  if ((expectedWeak && actualStrong) || (expectedStrong && actualWeak)) return true;
-  // A declarative candidate with an action is an asserted fact. A source that
-  // only plans, requests, alleges, or explicitly leaves it unverified cannot
-  // support that completed assertion even when the action token itself matches.
-  return factActions(candidate).size > 0 && !expectedWeak && actualWeak;
-}
-
 type FactAction =
   | 'acquire' | 'sell' | 'expand' | 'exit' | 'add' | 'remove' | 'support'
-  | 'approve' | 'reject' | 'disclose' | 'release' | 'request' | 'mandate' | 'pause';
+  | 'approve' | 'apply_approval' | 'reject' | 'disclose' | 'release' | 'request'
+  | 'regulatory_require' | 'mandate' | 'order' | 'pause' | 'invest' | 'finance'
+  | 'sign' | 'sue' | 'ban' | 'open_source' | 'train' | 'partner' | 'layoff'
+  | 'decide' | 'discuss' | 'deny' | 'open_access' | 'limit_scope';
+
+interface FactActionOccurrence {
+  action: FactAction;
+  index: number;
+  end: number;
+  surface: string;
+  negated: boolean;
+  modality: 'weak' | 'asserted' | 'completed';
+}
 
 const FACT_ACTION_PATTERNS: ReadonlyArray<[FactAction, RegExp]> = [
-  ['acquire', /(?:收购|并购)|\b(?:acquir(?:e|es|ed)|buy(?:s|ing)?|bought)\b/i],
-  ['sell', /(?:出售|售出)|\b(?:sell(?:s|ing)?|sold|divest(?:s|ed)?)\b/i],
-  ['expand', /(?:扩大|扩展|拓展)|\b(?:expand(?:s|ed)?|extend(?:s|ed)?)\b/i],
-  ['exit', /(?:退出|撤出)|\b(?:exit(?:s|ed)?|withdraw(?:s|n)?)\b/i],
-  ['add', /(?:加入|添加|新增|增加)|\b(?:add(?:s|ed|ing)?|includ(?:e|es|ed))\b/i],
-  ['remove', /(?:移除|删除|撤下)|\b(?:remov(?:e|es|ed)|delet(?:e|es|ed))\b/i],
-  ['support', /(?:支持|提供)|\b(?:support(?:s|ed)?|provid(?:e|es|ed))\b/i],
-  ['approve', /(?:批准|通过)|\b(?:approv(?:e|es|ed)|pass(?:es|ed))\b/i],
-  ['reject', /(?:拒绝|否决)|\b(?:reject(?:s|ed)?|refus(?:e|es|ed))\b/i],
-  ['disclose', /(?:披露|说明|文档)|\b(?:disclos(?:e|es|ed)|document(?:s|ed|ation)?|state(?:s|d))\b/i],
-  ['release', /(?:发布|推出|上线)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?)\b/i],
-  ['request', /(?:请求|呼吁|建议)|\b(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?)\b/i],
-  ['mandate', /(?:命令|强制)|\b(?:order(?:s|ed)?|mandat(?:e|es|ed))\b/i],
-  ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped)?|paus(?:e|es|ed))\b/i],
+  ['apply_approval', /(?:申请(?:批准|审批)|寻求批准)|\b(?:appl(?:y|ies|ied)\s+for|seek(?:s|ing)?)\s+approval\b/giu],
+  ['acquire', /(?:收购|并购)|\b(?:acquir(?:e|es|ed)|buy(?:s|ing)?|bought)\b/giu],
+  ['sell', /(?:出售|售出)|\b(?:sell(?:s|ing)?|sold|divest(?:s|ed)?)\b/giu],
+  ['expand', /(?:扩大|扩展|拓展)|\b(?:expand(?:s|ed)?|extend(?:s|ed)?)\b/giu],
+  ['exit', /(?:退出|撤出)|\b(?:exit(?:s|ed)?|withdraw(?:s|n)?)\b/giu],
+  ['add', /(?:加入|添加|新增|增加|带有)|\b(?:add(?:s|ed|ing)?|includ(?:e|es|ed)|attach(?:es|ed)?)\b/giu],
+  ['remove', /(?:移除|删除|撤下)|\b(?:remov(?:e|es|ed)|delet(?:e|es|ed))\b/giu],
+  ['support', /(?:支持|提供)|\b(?:support(?:s|ed)?|provid(?:e|es|ed))\b/giu],
+  ['approve', /(?:获批|批准|通过(?:审核|审批|批准))|\b(?:approv(?:e|es|ed)|gain(?:s|ed)?\s+approval)\b/giu],
+  ['reject', /(?:拒绝|否决)|\b(?:reject(?:s|ed)?|refus(?:e|es|ed))\b/giu],
+  ['disclose', /(?:披露|说明|文档)|\b(?:disclos(?:e|es|ed)|document(?:s|ed|ation)?|state(?:s|d))\b/giu],
+  ['release', /(?:发布|推出|上线)|\b(?:releas(?:e|es|ed)|launch(?:es|ed)?)\b/giu],
+  ['request', /(?:请求|呼吁|建议|敦促)|\b(?:request(?:s|ed)?|recommend(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/giu],
+  ['regulatory_require', /(?:法规要求|法案要求|监管要求|要求)|\brequir(?:e|es|ed)\b/giu],
+  ['mandate', /(?:强制|必须)|\b(?:mandat(?:e|es|ed)|must)\b/giu],
+  ['order', /(?:下令|命令)|\b(?:order(?:s|ed))\b/giu],
+  ['pause', /(?:停止|暂停)|\b(?:stop(?:s|ped|ping)?|paus(?:e|es|ed|ing))\b/giu],
+  ['invest', /(?:投资)|\b(?:invest(?:s|ed|ing|ment)?)\b/giu],
+  ['finance', /(?:融资)|\b(?:financ(?:e|es|ed|ing)|fundrais(?:e|es|ing)|raised?\s+funding)\b/giu],
+  ['sign', /(?:签署|签订|签约)|\b(?:sign(?:s|ed|ing))\b/giu],
+  ['sue', /(?:起诉|提起诉讼)|\b(?:su(?:e|es|ed|ing)|file(?:s|d)?\s+(?:a\s+)?lawsuit)\b/giu],
+  ['ban', /(?:禁止|禁用)|\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/giu],
+  ['open_source', /(?:开源)|\b(?:open[ -]?sourc(?:e|es|ed|ing))\b/giu],
+  ['train', /(?:训练)|\b(?:train(?:s|ed|ing))\b/giu],
+  ['partner', /(?:合作)|\b(?:partner(?:s|ed|ing)?|collaborat(?:e|es|ed|ing|ion))\b/giu],
+  ['layoff', /(?:裁员)|\b(?:lay(?:s|ing)?\s+off|laid\s+off|job\s+cuts?)\b/giu],
+  ['decide', /(?:决定)|\b(?:decid(?:e|es|ed|ing))\b/giu],
+  ['discuss', /(?:讨论|商议|磋商)|\b(?:discuss(?:es|ed|ing)?|deliberat(?:e|es|ed|ing))\b/giu],
+  ['deny', /(?:否认)|\b(?:den(?:y|ies|ied|ying))\b/giu],
+  ['open_access', /(?:开放)|\b(?:open(?:s|ed|ing)?\s+(?:access|service))\b/giu],
+  ['limit_scope', /(?:受限|限定|限于|限制(?:为|在)?)|\b(?:limit(?:s|ed|ing)?|restrict(?:s|ed|ing)?|(?:cover|support)(?:s|ed|ing)?\s+[^.;,]{0,60}(?:\bonly\b|\bsupported\s+(?:models?|products?)\b))/giu],
 ];
 
 function factActions(value: string): Set<FactAction> {
-  return new Set(FACT_ACTION_PATTERNS.filter(([, pattern]) => pattern.test(value)).map(([action]) => action));
+  return new Set(factActionOccurrences(value).map((item) => item.action));
 }
 
 const OPPOSING_FACT_ACTIONS: ReadonlyArray<readonly [FactAction, FactAction]> = [
   ['acquire', 'sell'], ['expand', 'exit'], ['add', 'remove'], ['approve', 'reject'],
-  ['release', 'pause'], ['request', 'mandate'],
+  ['release', 'pause'], ['request', 'mandate'], ['approve', 'apply_approval'],
 ];
 
-function hasStructuredActionMismatch(expected: ReadonlySet<FactAction>, actual: ReadonlySet<FactAction>): boolean {
-  if (!expected.size || !actual.size) return false;
+function hasOpposingFactActions(candidate: string, quote: string): boolean {
+  const expected = factActions(candidate);
+  const actual = factActions(quote);
+  return OPPOSING_FACT_ACTIONS.some(([left, right]) =>
+    (expected.has(left) && actual.has(right)) || (expected.has(right) && actual.has(left)));
+}
+
+function actionLocalPrefix(value: string, index: number): string {
+  const before = value.slice(0, index);
+  const boundary = Math.max(
+    before.lastIndexOf('。'), before.lastIndexOf('；'), before.lastIndexOf(';'),
+    before.lastIndexOf('！'), before.lastIndexOf('!'), before.lastIndexOf('？'), before.lastIndexOf('?'),
+    before.lastIndexOf('，'), before.lastIndexOf(','), before.lastIndexOf('但'), before.lastIndexOf('却'),
+    before.lastIndexOf('并'), before.lastIndexOf('且'), before.lastIndexOf('同时'), before.lastIndexOf('以及'),
+    before.toLowerCase().lastIndexOf(' and '), before.toLowerCase().lastIndexOf(' but '),
+  );
+  return before.slice(boundary + 1).slice(-48);
+}
+
+function actionIsNegated(value: string, index: number): boolean {
+  const prefix = actionLocalPrefix(value, index);
+  return /(?:并?未|未|并非|非|绝非|没有|从未|尚未|未能|未曾|不曾|不再|不会|并不|尚无证据|拒绝|否认|停止|暂停|无法)(?:[^，。；;!?]{0,16})$/u.test(prefix)
+    || /\b(?:never|not|no|without|has(?:n't|\s+not)|have(?:n't|\s+not)|had(?:n't|\s+not)|did(?:n't|\s+not)|does(?:n't|\s+not)|is(?:n't|\s+not)|are(?:n't|\s+not)|was(?:n't|\s+not)|were(?:n't|\s+not)|failed\s+to|unable\s+to|refus(?:e|es|ed)\s+to|den(?:y|ies|ied)\s+|stop(?:s|ped)?\s+|paus(?:e|es|ed)\s+)(?:\W+\w+){0,5}\W*$/iu.test(prefix);
+}
+
+function actionModality(value: string, index: number, surface: string): FactActionOccurrence['modality'] {
+  const prefix = actionLocalPrefix(value, index);
+  if (/(?:计划|拟议|拟|可能|考虑|寻求|提议|预计|据称|传闻|未经证实|尚未证实|未获证实|尚无证据|讨论|商议|磋商|申请)|\b(?:plan(?:s|ned)?(?:\s+to)?|propos(?:e|es|ed)|may|might|could|consider(?:s|ed|ing)?|seek(?:s|ing)?|expected\s+to|reportedly|allegedly|unconfirmed|unverified|discuss(?:es|ed|ing)?|appl(?:y|ies|ied)\s+for)\b/iu.test(prefix)) {
+    return 'weak';
+  }
+  if (/(?:已经|已|正式|完成|达成|落地|生效|获批|下令)|\b(?:has|have|had|officially|formally|completed|closed)\b/iu.test(prefix)
+    || /(?:ed|bought|sold|signed|approved)$/iu.test(surface)) {
+    return 'completed';
+  }
+  return 'asserted';
+}
+
+function factActionOccurrences(value: string): FactActionOccurrence[] {
+  const occurrences: FactActionOccurrence[] = [];
+  for (const [action, pattern] of FACT_ACTION_PATTERNS) {
+    for (const match of value.matchAll(pattern)) {
+      const index = match.index;
+      if (index === undefined) continue;
+      occurrences.push({
+        action,
+        index,
+        end: index + match[0].length,
+        surface: match[0],
+        negated: actionIsNegated(value, index),
+        modality: actionModality(value, index, match[0]),
+      });
+    }
+  }
+  const sorted = occurrences.sort((left, right) => left.index - right.index || right.end - left.end);
+  return sorted.filter((occurrence) => {
+    if (occurrence.action !== 'train') return true;
+    return !sorted.some((parent) => parent.index < occurrence.index
+      && ['pause', 'ban', 'mandate', 'order', 'regulatory_require'].includes(parent.action)
+      && occurrence.index - parent.end <= 16);
+  });
+}
+
+function actionModalityCompatible(
+  expected: FactActionOccurrence['modality'],
+  actual: FactActionOccurrence['modality'],
+): boolean {
+  if (expected === 'weak') return actual === 'weak';
+  if (expected === 'completed') return actual === 'completed';
+  return actual !== 'weak';
+}
+
+function hasUnclassifiedCompoundAction(value: string): boolean {
+  const clauses = value.split(/(?:并且|并|同时|以及|而且|且)|\b(?:and|as\s+well\s+as)\b/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  if (clauses.length < 2) return false;
+  const assertionInherited = /(?:已经|已|将|正式|正在|计划|宣布|完成)|\b(?:has|have|had|will|officially|plans?\s+to)\b/iu.test(value);
+  return clauses.some((clause) => {
+    if (factActionOccurrences(clause).length) return false;
+    const asserted = assertionInherited
+      || /(?:已经|已|将|正式|正在|计划|宣布|完成)|\b(?:has|have|had|will|officially|plans?\s+to)\b/iu.test(clause);
+    if (!asserted) return false;
+    const chineseActionShape = /(?:已经|已|将|正式|正在|计划)?[\p{Script=Han}]{2,8}(?:(?:[A-Za-z][A-Za-z0-9._+-]*)|[\p{Script=Han}]{0,10}(?:模型|平台|系统|业务|协议|公司|服务|代码|权重|产品|市场))/u.test(clause);
+    const englishActionShape = /\b(?:has|have|had|will|officially|plans?\s+to)\s+[a-z][a-z-]+\b/iu.test(clause);
+    return chineseActionShape || englishActionShape;
+  });
+}
+
+function structuredActionVerificationError(candidate: string, quote: string): string | null {
+  if (hasUnclassifiedCompoundAction(candidate)) return 'fact_verification_action_mismatch';
+  const expected = factActionOccurrences(candidate);
+  const actual = factActionOccurrences(quote);
+  if (!expected.length) return null;
+  const expectedActions = new Set(expected.map((item) => item.action));
+  const actualActions = new Set(actual.map((item) => item.action));
+  for (const occurrence of expected) {
+    const sameAction = actual.filter((item) => item.action === occurrence.action);
+    if (sameAction.length
+      && !sameAction.some((item) => item.negated === occurrence.negated)) {
+      return 'fact_verification_polarity_mismatch';
+    }
+  }
+  for (const occurrence of expected) {
+    const sameAction = actual.filter((item) => item.action === occurrence.action);
+    if (!sameAction.length) continue;
+    const samePolarity = sameAction.filter((item) => item.negated === occurrence.negated);
+    if (!samePolarity.some((item) => actionModalityCompatible(occurrence.modality, item.modality))) {
+      return 'fact_verification_modality_mismatch';
+    }
+  }
   if (OPPOSING_FACT_ACTIONS.some(([left, right]) =>
-    (expected.has(left) && actual.has(right)) || (expected.has(right) && actual.has(left)))) return true;
-  const overlaps = [...expected].some((action) => actual.has(action));
-  return overlaps && [...expected].some((action) => !actual.has(action));
+    (expectedActions.has(left) && actualActions.has(right))
+    || (expectedActions.has(right) && actualActions.has(left)))) {
+    return 'fact_verification_action_mismatch';
+  }
+  if ([...expectedActions].some((action) => !actualActions.has(action))) {
+    return 'fact_verification_action_mismatch';
+  }
+  return null;
 }
 
 const LATIN_ENTITY_STOPWORDS = new Set([
-  'A', 'An', 'And', 'As', 'At', 'By', 'For', 'From', 'In', 'Into', 'New', 'Of', 'On', 'Or', 'Official',
-  'The', 'This', 'To', 'With', 'AI',
+  'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'new', 'of', 'on', 'or', 'official',
+  'the', 'this', 'to', 'with', 'ai', 'model', 'models', 'product', 'products', 'service', 'services',
+  'company', 'technology', 'documentation', 'document', 'release',
 ]);
 
-const REGION_SLOTS = [
-  '中国', '美国', '欧洲', '欧盟', '英国', '法国', '德国', '日本', '韩国', '印度', '亚洲', '非洲',
-  'China', 'United States', 'US', 'U.S.', 'Europe', 'European Union', 'EU', 'United Kingdom', 'UK',
-  'France', 'Germany', 'Japan', 'South Korea', 'India', 'Asia', 'Africa',
-] as const;
+type StructuredFactSlotKind = 'subject' | 'object' | 'version' | 'region' | 'named';
 
-function normalizedSemanticSlot(value: string): string {
-  return value.toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+interface StructuredFactSlot {
+  kind: StructuredFactSlotKind;
+  value: string;
 }
 
-function factEntitySlots(value: string): string[] {
-  const slots = new Map<string, string>();
+function normalizedSemanticSlot(value: string): string {
+  return value.toLowerCase().replace(/[._-]+/g, ' ').replace(/[“”"'()（）]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function addStructuredSlot(
+  slots: Map<string, StructuredFactSlot>,
+  kind: StructuredFactSlotKind,
+  value: string,
+): void {
+  const compactValue = value.replace(/^[\s的了对向为其该]+|[\s的了]+$/gu, '').trim();
+  const normalized = normalizedSemanticSlot(compactValue);
+  if (!normalized) return;
+  slots.set(`${kind}:${normalized}`, { kind, value: compactValue });
+}
+
+function actionSubject(value: string, firstAction: FactActionOccurrence | undefined): string | null {
+  if (!firstAction) return null;
+  let prefix = actionLocalPrefix(value, firstAction.index)
+    .replace(/(?:20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}日?)?(?:T[^\s，,]+)?)/gu, '')
+    .replace(/^(?:据称|传闻|报道称|消息称|官方|公司方面)\s*/u, '')
+    .replace(/(?:已经|正式|仍在|正在|计划|可能|宣布|将|已)+$/u, '');
+  const locationIndex = prefix.search(/(?:在|于|面向|覆盖)[\p{Script=Han}A-Za-z]/u);
+  if (locationIndex > 0) prefix = prefix.slice(0, locationIndex);
+  const latin = prefix.match(/([A-Za-z][A-Za-z0-9._+-]*(?:\s+[A-Za-z][A-Za-z0-9._+-]*){0,3})\s*$/u)?.[1];
+  if (latin) {
+    const words = latin.split(/\s+/).filter((word) => !LATIN_ENTITY_STOPWORDS.has(word.toLowerCase()));
+    if (words.length) return words[0];
+  }
+  const han = prefix.match(/([\p{Script=Han}]{2,16})\s*$/u)?.[1]
+    ?.replace(/^(?:该|这家|一家)/u, '');
+  if (!han || /^(?:官方|帮助|帮助中心|官方帮助|官方文档|文档|公告|声明|报道|部分|相关|目前|其中|消息|内容|范围|能力|产品|模型)$/u.test(han)) return null;
+  return han;
+}
+
+function actionObjectSegment(value: string, occurrence: FactActionOccurrence, all: FactActionOccurrence[]): string {
+  const nextAction = all.find((item) => item.index >= occurrence.end);
+  const punctuation = value.slice(occurrence.end).search(/[，,。；;！？!?]/u);
+  const punctuationEnd = punctuation < 0 ? value.length : occurrence.end + punctuation;
+  const nextEnd = nextAction ? nextAction.index : value.length;
+  return value.slice(occurrence.end, Math.min(punctuationEnd, nextEnd))
+    .replace(/^(?:了|对|向|为|其|该|一个|一项|一轮|的)+/u, '')
+    .replace(/(?:并|以及|同时|而且|以便|从而)\s*$/u, '')
+    .trim();
+}
+
+const GENERIC_CHINESE_MODEL_NAMES = new Set([
+  '人工智能', '大语言', '语言', '基础', '生成式', '多模态', '新', '该', '相关',
+]);
+
+function structuredFactSlots(value: string): StructuredFactSlot[] {
+  const slots = new Map<string, StructuredFactSlot>();
+  const actions = factActionOccurrences(value);
+  const subject = actionSubject(value, actions[0]);
+  if (subject) addStructuredSlot(slots, 'subject', subject);
+
   for (const token of value.match(/[A-Za-z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*/g) || []) {
     const named = /^[A-Z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*$/.test(token)
       || /[a-z][A-Z]|[A-Za-z]\d|\d[A-Za-z]/.test(token)
       || /^[A-Z]{2,}$/.test(token);
-    if (!named || LATIN_ENTITY_STOPWORDS.has(token)) continue;
-    slots.set(normalizedSemanticSlot(token), token);
+    if (!named || LATIN_ENTITY_STOPWORDS.has(token.toLowerCase())) continue;
+    addStructuredSlot(slots, 'named', token);
   }
-  for (const region of REGION_SLOTS) {
-    if (value.includes(region)) slots.set(normalizedSemanticSlot(region), region);
+
+  for (const match of value.matchAll(/第([零〇一二三四五六七八九十百两\d]+)(版|代|期|阶段)/gu)) {
+    addStructuredSlot(slots, 'version', match[0]);
   }
-  for (const entity of value.match(/[\u3400-\u9fff]{2,12}(?:公司|集团|大学|实验室|研究院|政府|议会)/gu) || []) {
-    slots.set(normalizedSemanticSlot(entity), entity);
+  for (const match of value.matchAll(/(?<![\d-])(?:v(?:ersion)?\s*)?\d+(?:\.\d+)+(?:[-_][a-z0-9]+)?(?![\d.])/giu)) {
+    addStructuredSlot(slots, 'version', match[0]);
+  }
+
+  const chineseRegionPattern = /(?:在|于|面向|覆盖|进入|退出)([\p{Script=Han}]{2,12}?)(?=(?:正式|已经|已|将|计划|发布|推出|上线|开源|开放|训练|投资|融资|签署|起诉|禁止|合作|裁员|扩大|扩展|市场|地区|业务|服务|模型|，|。|；|$))/gu;
+  for (const match of value.matchAll(chineseRegionPattern)) {
+    if (/(?:的|受支持|支持|范围|能力|限定|部分|产品)/u.test(match[1])) continue;
+    addStructuredSlot(slots, 'region', match[1]);
+  }
+  for (const match of value.matchAll(/\b(?:in|across|throughout|within)\s+([A-Za-z][A-Za-z -]{1,30}?)(?=\s+(?:market|region|while|and|for|to|by)|[,.;]|$)/giu)) {
+    addStructuredSlot(slots, 'region', match[1]);
+  }
+
+  for (const occurrence of actions) {
+    const object = actionObjectSegment(value, occurrence, actions);
+    if (!object) continue;
+    for (const token of object.match(/[A-Za-z][A-Za-z0-9]*(?:[._+-][A-Za-z0-9]+)*/g) || []) {
+      if (LATIN_ENTITY_STOPWORDS.has(token.toLowerCase())) continue;
+      addStructuredSlot(slots, 'named', token);
+    }
+    const withoutVersion = object.replace(/第[零〇一二三四五六七八九十百两\d]+(?:版|代|期|阶段)/gu, '');
+    for (const match of withoutVersion.matchAll(/([\p{Script=Han}]{2,12}?)(模型|系统|平台|芯片|产品|服务|协议|法案|法规|工具|代理|权重|数据集)/gu)) {
+      const name = match[1].replace(/^(?:新的?|首个|最新|一款|一项)/u, '');
+      if (GENERIC_CHINESE_MODEL_NAMES.has(name)
+        || /^(?:(?:人工智能|大语言|语言|基础|生成式|多模态|新|该|相关|受支持|支持|部分|模型|产品|服务|系统|平台|和|及|与))+$/u.test(name)) continue;
+      addStructuredSlot(slots, 'object', `${name}${match[2]}`);
+    }
   }
   return [...slots.values()];
 }
 
-function semanticSlotPresent(slot: string, quote: string): boolean {
-  const expected = normalizedSemanticSlot(slot);
-  const tokenList = structuredTokens(quote, false).map(normalizedSemanticSlot);
-  if (/^[a-z0-9 ]+$/i.test(expected)) {
-    if (tokenList.includes(expected)) return true;
-    const parts = expected.split(' ');
-    return tokenList.some((_token, index) => parts.every((part, offset) => tokenList[index + offset] === part));
+function semanticSlotPolarity(value: string, slot: StructuredFactSlot): Set<'positive' | 'negative'> {
+  const normalizedValue = normalizedSemanticSlot(value);
+  const normalizedSlot = normalizedSemanticSlot(slot.value);
+  const states = new Set<'positive' | 'negative'>();
+  let index = normalizedValue.indexOf(normalizedSlot);
+  while (index >= 0) {
+    const prefix = normalizedValue.slice(Math.max(0, index - 28), index);
+    const negative = /(?:并?未|没有|从未|尚未|不含|不包含|不支持|未覆盖|排除|拒绝|否认|停止|暂停)(?:[^，。；;!?]{0,12})$/u.test(prefix)
+      || /\b(?:never|not|no|without|exclude(?:s|ed|ing)?|den(?:y|ies|ied)|refus(?:e|es|ed))(?:\W+\w+){0,4}\W*$/iu.test(prefix);
+    states.add(negative ? 'negative' : 'positive');
+    index = normalizedValue.indexOf(normalizedSlot, index + normalizedSlot.length);
   }
-  return normalizedSemanticSlot(quote).includes(expected);
+  return states;
+}
+
+function structuredSlotVerificationError(candidate: string, quote: string): string | null {
+  const expected = structuredFactSlots(candidate);
+  const actual = structuredFactSlots(quote);
+  const actualByKind = new Map<StructuredFactSlotKind, StructuredFactSlot[]>();
+  for (const slot of actual) actualByKind.set(slot.kind, [...(actualByKind.get(slot.kind) || []), slot]);
+  let missing = false;
+  for (const slot of expected) {
+    const matching = (actualByKind.get(slot.kind) || [])
+      .filter((item) => normalizedSemanticSlot(item.value) === normalizedSemanticSlot(slot.value));
+    if (!matching.length) {
+      missing = true;
+      continue;
+    }
+    const expectedPolarity = semanticSlotPolarity(candidate, slot);
+    const quotePolarity = semanticSlotPolarity(quote, matching[0]);
+    if (expectedPolarity.size && quotePolarity.size
+      && ![...expectedPolarity].some((item) => quotePolarity.has(item))) {
+      return 'fact_verification_polarity_mismatch';
+    }
+  }
+  return missing ? 'fact_verification_entity_slot_missing' : null;
 }
 
 function normalizedFactDates(value: string): string[] {
   const dates = new Set<string>();
-  for (const match of value.matchAll(/\b(20\d{2})-(\d{1,2})-(\d{1,2})(?=$|[T\s,.;)\]])/g)) {
+  for (const match of value.matchAll(/\b(20\d{2})-(\d{1,2})-(\d{1,2})(?!\d)/g)) {
     dates.add(`${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`);
   }
   for (const match of value.matchAll(/(20\d{2})年(\d{1,2})月(\d{1,2})日/g)) {
@@ -691,6 +895,32 @@ function normalizedFactDates(value: string): string[] {
     dates.add(`${match[3]}-${months[match[1].toLowerCase()]}-${match[2].padStart(2, '0')}`);
   }
   return [...dates];
+}
+
+function normalizedFactInstants(value: string): string[] {
+  const instants = new Set<string>();
+  const pattern = /\b20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})(?![\w:+.-])/giu;
+  for (const match of value.matchAll(pattern)) {
+    const parsed = Date.parse(match[0]);
+    if (Number.isFinite(parsed)) instants.add(new Date(parsed).toISOString());
+  }
+  return [...instants];
+}
+
+function occurredAtVerificationError(candidate: string, quote: string): string | null {
+  const candidateInstants = normalizedFactInstants(candidate);
+  if (candidateInstants.length) {
+    const quoteInstants = new Set(normalizedFactInstants(quote));
+    if (!quoteInstants.size) return 'fact_verification_instant_precision_mismatch';
+    if (candidateInstants.some((instant) => !quoteInstants.has(instant))) {
+      return 'fact_verification_instant_mismatch';
+    }
+    return null;
+  }
+  const quoteDates = new Set(normalizedFactDates(quote));
+  return normalizedFactDates(candidate).some((date) => !quoteDates.has(date))
+    ? 'fact_verification_date_mismatch'
+    : null;
 }
 
 type FactScope = 'universal' | 'limited';
@@ -768,48 +998,46 @@ function expectedEventTypeActions(fact: ManualLeadVerificationFact): Set<FactAct
 function quoteSupportsStructuredFact(fact: ManualLeadVerificationFact, quote: string): string | null {
   if (typeof fact.candidate_value !== 'string') return null;
   const candidate = fact.candidate_value;
+  if (fact.field === 'occurred_at') return occurredAtVerificationError(candidate, quote);
   const candidateDates = fact.field === 'event_key' ? [] : normalizedFactDates(candidate);
   const quoteDates = new Set(normalizedFactDates(quote));
   if (candidateDates.some((date) => !quoteDates.has(date))) return 'fact_verification_date_mismatch';
-  if (fact.field === 'occurred_at') return null;
 
   const anchors = factVerificationAnchors(fact);
   if (anchors.some((anchor) => !exactStructuredAnchorPresent(anchor, quote))) {
     return 'fact_verification_anchor_missing';
   }
-  if (fact.field !== 'event_type'
-    && hasObviousNegativePolarity(candidate) !== hasObviousNegativePolarity(quote)) {
-    return 'fact_verification_polarity_mismatch';
-  }
   if (fact.field !== 'event_type' && hasFactScopeConflict(candidate, quote)) {
     return 'fact_verification_scope_signal_mismatch';
-  }
-  if (fact.field !== 'event_type' && hasFactModalityConflict(candidate, quote)) {
-    return 'fact_verification_modality_mismatch';
   }
   const expectedActions = fact.field === 'event_type'
     ? expectedEventTypeActions(fact)
     : factActions(candidate);
   const actualActions = factActions(quote);
-  if ((fact.field === 'event_type'
-    ? expectedActions.size > 0 && [...expectedActions].some((action) => !actualActions.has(action))
-    : hasStructuredActionMismatch(expectedActions, actualActions))) {
+  if (fact.field === 'event_type'
+    && expectedActions.size > 0
+    && [...expectedActions].some((action) => !actualActions.has(action))) {
     return 'fact_verification_action_mismatch';
   }
+  let actionError: string | null = null;
+  if (fact.field !== 'event_type') {
+    actionError = structuredActionVerificationError(candidate, quote);
+  }
+  let slotError: string | null = null;
+  if (['title', 'summary', 'claim'].includes(fact.field)) {
+    slotError = structuredSlotVerificationError(candidate, quote);
+    if (slotError === 'fact_verification_polarity_mismatch') return slotError;
+  }
+  if (actionError === 'fact_verification_polarity_mismatch'
+    || actionError === 'fact_verification_modality_mismatch') return actionError;
+  if (actionError === 'fact_verification_action_mismatch'
+    && hasOpposingFactActions(candidate, quote)) return actionError;
   if (['title', 'summary', 'claim'].includes(fact.field)
     && !hasDistinctiveSameLanguageFactSignal(candidate, quote)) {
     return 'fact_verification_fact_signal_missing';
   }
-  if (fact.field !== 'event_type' && expectedActions.size > 0
-    && [...expectedActions].some((action) => !actualActions.has(action))) {
-    return 'fact_verification_action_mismatch';
-  }
-  if (['title', 'summary', 'claim'].includes(fact.field)) {
-    const entitySlots = factEntitySlots(candidate);
-    if (entitySlots.some((slot) => !semanticSlotPresent(slot, quote))) {
-      return 'fact_verification_entity_slot_missing';
-    }
-  }
+  if (actionError) return actionError;
+  if (slotError) return slotError;
   return null;
 }
 
@@ -962,6 +1190,7 @@ export function validateManualLeadFactVerification(
       const quoteErrors = quotes.map((quote) => quoteSupportsStructuredFact(fact, quote.quote));
       if (!quoteErrors.some((error) => error === null)) {
         const priority = [
+          'fact_verification_instant_precision_mismatch', 'fact_verification_instant_mismatch',
           'fact_verification_date_mismatch', 'fact_verification_anchor_missing',
           'fact_verification_polarity_mismatch', 'fact_verification_modality_mismatch',
           'fact_verification_action_mismatch', 'fact_verification_scope_signal_mismatch',

@@ -219,7 +219,7 @@ function assessment() {
     summary: '官方帮助文档将能力范围限定为受支持产品。',
     event_key: 'anthropic-supported-output-provenance-2026-08-10',
     event_type: 'product_documentation', material_update: false, score: 82,
-    recommendation: 'recommended', occurred_at: '2026-08-10T13:30:00.000Z', uncertainties: [],
+    recommendation: 'recommended', occurred_at: '2026-08-10', uncertainties: [],
     claims: [{
       text: 'Anthropic官方帮助文档披露支持范围内Claude输出的来源标记，并将能力范围限定为受支持产品。',
       evidence_ids: ['ev-official'],

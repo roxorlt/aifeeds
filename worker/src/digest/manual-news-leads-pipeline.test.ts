@@ -126,7 +126,7 @@ function assessed(overrides = {}) {
     material_update: false,
     score: 82,
     recommendation: 'recommended',
-    occurred_at: '2026-08-10T00:00:00.000Z',
+    occurred_at: '2026-08-10',
     uncertainties: ['并非所有Claude输出均适用。'],
     claims: [{
       text: 'Anthropic官方文档披露部分受支持Claude输出的水印与来源标记，范围限定在受支持的模型和产品。',
