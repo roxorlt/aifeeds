@@ -39,14 +39,12 @@ export interface ManualAtomicFactSlots {
   object: string;
 }
 
-type ManualBilingualFactModality =
-  | 'reported'
-  | 'alleged'
-  | 'possible'
-  | 'planned'
-  | 'requested'
-  | 'asserted'
-  | 'completed';
+interface ManualBilingualModalitySlots {
+  attribution: Array<'reported' | 'alleged'>;
+  epistemic: Array<'possible'>;
+  intent: Array<'planned' | 'requested'>;
+  aspect: Array<'completed' | 'ongoing'>;
+}
 
 type ManualBilingualParticipantRole =
   | 'employees'
@@ -59,14 +57,15 @@ type ManualBilingualQuantifier = 'all' | 'some' | 'only' | 'none' | 'unspecified
 
 interface ManualBilingualSemanticSlots {
   action: FactAction;
-  predicate_modality: ManualBilingualFactModality;
+  predicate_modality: ManualBilingualModalitySlots;
   predicate_negated: boolean;
   participant_roles: ManualBilingualParticipantRole[];
   participant_quantifier: ManualBilingualQuantifier;
   object_relations: string[];
   object_polarity: 'positive' | 'negative';
-  object_modality: ManualBilingualFactModality;
+  object_modality: ManualBilingualModalitySlots;
   target_entities: string[];
+  target_qualifiers: string[];
   concepts: string[];
   versions: string[];
   regions: string[];
@@ -74,6 +73,9 @@ interface ManualBilingualSemanticSlots {
   scope: 'universal' | 'limited' | null;
   dates: string[];
   instants: string[];
+  relative_times: string[];
+  object_residue: '';
+  residue_policy: 'consumed-semantic-spans-v1';
 }
 
 export interface ManualSourceAtomicFact {
@@ -537,7 +539,9 @@ function canonicalFactReason(value: string): CanonicalFactReason {
       end = match.index + match[0].length;
     }
   }
-  if (!reasonText) return { present: false, canonical: null, residual: normalized };
+  if (!reasonText) return {
+    present: false, canonical: null, residual: normalized,
+  };
   const key = reasonText.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, '');
   let canonical: CanonicalFactReason['canonical'] = null;
   if (/(?:datasecurity|cybersecurity|informationsecurity|securityconcerns?|privacy|数据安全|信息安全|网络安全|安全担忧|安全顾虑|隐私)/u.test(key)) canonical = 'security';
@@ -550,23 +554,64 @@ function canonicalFactReason(value: string): CanonicalFactReason {
   return { present: true, canonical, residual };
 }
 
-function exactBilingualModality(
+const BILINGUAL_ATTRIBUTION_PATTERNS: ReadonlyArray<readonly [
+  ManualBilingualModalitySlots['attribution'][number], RegExp,
+]> = [
+  ['reported', /(?:据报道|报道称|消息称|据称)|\b(?:reportedly|according\s+to\s+(?:a\s+)?report)\b/iu],
+  ['alleged', /(?:涉嫌|被指|遭指控)|\b(?:allegedly|is\s+alleged\s+to|was\s+alleged\s+to)\b/iu],
+];
+const BILINGUAL_EPISTEMIC_PATTERNS: ReadonlyArray<readonly [
+  ManualBilingualModalitySlots['epistemic'][number], RegExp,
+]> = [
+  ['possible', /(?:可能|或许|也许|预计)|\b(?:may|might|could|possibly|perhaps)\b/iu],
+];
+const BILINGUAL_INTENT_PATTERNS: ReadonlyArray<readonly [
+  ManualBilingualModalitySlots['intent'][number], RegExp,
+]> = [
+  ['planned', /(?:计划|拟|准备|将)|\b(?:plans?|planned|intends?|intended|will|would)\b/iu],
+  ['requested', /(?:被要求|应请求)|\b(?:was|were|is|are)\s+(?:asked|requested|urged)\s+to\b/iu],
+];
+const BILINGUAL_ASPECT_PATTERNS: ReadonlyArray<readonly [
+  ManualBilingualModalitySlots['aspect'][number], RegExp,
+]> = [
+  ['ongoing', /(?:正在|仍在|继续)|\b(?:(?:is|are|was|were)\s+\w+ing|currently|ongoing)\b/iu],
+  ['completed', /(?:已经|已|正式|完成|达成|落地|生效|获批)|\b(?:has|have|had|officially|formally|already|completed|closed)\b/iu],
+];
+
+function bilingualModalitySlots(
   value: string,
   occurrence: FactActionOccurrence | null,
-): ManualBilingualFactModality {
+): ManualBilingualModalitySlots {
   const normalized = value.normalize('NFKC');
-  if (/(?:据报道|报道称|消息称|据称)|\b(?:reportedly|according\s+to\s+(?:a\s+)?report)\b/iu.test(normalized)) return 'reported';
-  if (/(?:涉嫌|被指|遭指控)|\b(?:allegedly|is\s+alleged\s+to|was\s+alleged\s+to)\b/iu.test(normalized)) return 'alleged';
-  if (/(?:可能|或许|也许|预计)|\b(?:may|might|could|possibly|perhaps)\b/iu.test(normalized)) return 'possible';
-  if (/(?:计划|拟|准备|将)|\b(?:plans?|planned|intends?|intended|will|would)\b/iu.test(normalized)) return 'planned';
-  if (/(?:被要求|应请求)|\b(?:was|were|is|are)\s+(?:asked|requested|urged)\s+to\b/iu.test(normalized)) return 'requested';
+  const attribution: ManualBilingualModalitySlots['attribution'] = [];
+  const epistemic: ManualBilingualModalitySlots['epistemic'] = [];
+  const intent: ManualBilingualModalitySlots['intent'] = [];
+  const aspect: ManualBilingualModalitySlots['aspect'] = [];
+  for (const [slot, pattern] of BILINGUAL_ATTRIBUTION_PATTERNS) {
+    if (pattern.test(normalized)) attribution.push(slot);
+  }
+  for (const [slot, pattern] of BILINGUAL_EPISTEMIC_PATTERNS) {
+    if (pattern.test(normalized)) epistemic.push(slot);
+  }
+  for (const [slot, pattern] of BILINGUAL_INTENT_PATTERNS) {
+    if (pattern.test(normalized)) intent.push(slot);
+  }
   if (occurrence?.action === 'request'
     && /(?:请求|呼吁|敦促)|\b(?:request(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/iu.test(normalized)) {
-    return 'requested';
+    intent.push('requested');
   }
-  if (/(?:已经|已|正式|完成|达成|落地|生效|获批)|\b(?:has|have|had|officially|formally|already|completed|closed)\b/iu.test(normalized)
-    || (occurrence && /(?:ed|bought|sold|signed|approved)$/iu.test(occurrence.surface))) return 'completed';
-  return 'asserted';
+  for (const [slot, pattern] of BILINGUAL_ASPECT_PATTERNS) {
+    if (pattern.test(normalized)) aspect.push(slot);
+  }
+  if (occurrence && /(?:ed|bought|sold|signed|approved)$/iu.test(occurrence.surface)) {
+    aspect.push('completed');
+  }
+  return {
+    attribution: [...new Set(attribution)].sort(),
+    epistemic: [...new Set(epistemic)].sort(),
+    intent: [...new Set(intent)].sort(),
+    aspect: [...new Set(aspect)].sort(),
+  };
 }
 
 const BILINGUAL_PARTICIPANT_PATTERNS: ReadonlyArray<readonly [
@@ -598,32 +643,37 @@ function bilingualParticipantQuantifier(value: string): ManualBilingualQuantifie
 }
 
 function bilingualObjectPolarity(value: string): 'positive' | 'negative' {
-  return /(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:not|never|without)\b/iu.test(value)
+  return /(?:无法|不能|不可|避免)|(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:unable\s+to|cannot|can['’]t|avoid(?:s|ed|ing)?|not|never|without)\b/iu.test(value)
     ? 'negative'
     : 'positive';
 }
 
+const BILINGUAL_OBJECT_RELATION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['use', /(?:使用|采用)|\b(?:use|uses|used|using)\b/iu],
+  ['access', /(?:访问|接入)|\b(?:access|accesses|accessed|accessing)\b/iu],
+  ['deploy', /(?:部署)|\b(?:deploy|deploys|deployed|deploying)\b/iu],
+  ['develop', /(?:开发|研发)|\b(?:develop|develops|developed|developing|development)\b/iu],
+  ['train', /(?:训练)|\b(?:train|trains|trained|training)\b/iu],
+  ['release', /(?:发布|推出|上线)|\b(?:release|releases|released|releasing|launch|launches|launched)\b/iu],
+  ['open_source', /(?:开源)|\bopen[ -]?sourc(?:e|es|ed|ing)\b/iu],
+  ['switch', /(?:改用|切换至)|\b(?:switch|switches|switched|switching)\s+to\b/iu],
+  ['share', /(?:共享|分享)|\b(?:share|shares|shared|sharing)\b/iu],
+  ['purchase', /(?:购买|采购)|\b(?:buy|buys|bought|purchase|purchases|purchased)\b/iu],
+  ['pause', /(?:停止|暂停)|\b(?:stop|stops|stopped|stopping|pause|pauses|paused|pausing)\b/iu],
+];
+
 function canonicalObjectRelations(value: string): string[] {
-  const relations: Array<readonly [string, RegExp]> = [
-    ['use', /(?:使用|采用)|\b(?:use|uses|used|using)\b/iu],
-    ['access', /(?:访问|接入)|\b(?:access|accesses|accessed|accessing)\b/iu],
-    ['deploy', /(?:部署)|\b(?:deploy|deploys|deployed|deploying)\b/iu],
-    ['develop', /(?:开发|研发)|\b(?:develop|develops|developed|developing)\b/iu],
-    ['train', /(?:训练)|\b(?:train|trains|trained|training)\b/iu],
-    ['release', /(?:发布|推出|上线)|\b(?:release|releases|released|releasing|launch|launches|launched)\b/iu],
-    ['open_source', /(?:开源)|\bopen[ -]?sourc(?:e|es|ed|ing)\b/iu],
-    ['switch', /(?:改用|切换至)|\b(?:switch|switches|switched|switching)\s+to\b/iu],
-    ['share', /(?:共享|分享)|\b(?:share|shares|shared|sharing)\b/iu],
-    ['purchase', /(?:购买|采购)|\b(?:buy|buys|bought|purchase|purchases|purchased)\b/iu],
-    ['pause', /(?:停止|暂停)|\b(?:stop|stops|stopped|stopping|pause|pauses|paused|pausing)\b/iu],
-  ];
-  return [...new Set(relations.filter(([, pattern]) => pattern.test(value)).map(([relation]) => relation))];
+  return [...new Set(BILINGUAL_OBJECT_RELATION_PATTERNS
+    .filter(([, pattern]) => pattern.test(value))
+    .map(([relation]) => relation))];
 }
 
 const BILINGUAL_FACT_CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
   ['ai', /(?:人工智能)|\bAI\b/iu],
   ['code', /(?:代码)|\bcode\b/iu],
   ['content', /(?:内容)|\bcontent\b/iu],
+  ['coverage', /(?:覆盖|适用于)|\bcoverage\b/iu],
+  ['legal_claim', /(?:版权|诉讼)|\b(?:copyright|lawsuit)\b/iu],
   ['model', /(?:模型)|\bmodels?\b/iu],
   ['output', /(?:输出)|\boutputs?\b/iu],
   ['product', /(?:产品)|\bproducts?\b/iu],
@@ -631,6 +681,7 @@ const BILINGUAL_FACT_CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
   ['support_scope', /(?:受支持|适用)|\bsupported\b/iu],
   ['system', /(?:系统)|\bsystems?\b/iu],
   ['tool', /(?:工具)|\btools?\b/iu],
+  ['watermark', /(?:水印)|\bwatermarks?\b/iu],
   ['weights', /(?:权重)|\bweights?\b/iu],
 ];
 
@@ -638,9 +689,125 @@ function bilingualFactConcepts(value: string): string[] {
   return BILINGUAL_FACT_CONCEPTS.filter(([, pattern]) => pattern.test(value)).map(([concept]) => concept);
 }
 
+const BILINGUAL_TARGET_QUALIFIERS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['enterprise', /(?:企业版)|\benterprise\b/iu],
+  ['pro', /(?:专业版)|\bpro\b/iu],
+  ['plus', /(?:增强版)|\bplus\b/iu],
+  ['lite', /(?:轻量版)|\blite\b/iu],
+  ['mini', /(?:迷你版)|\bmini\b/iu],
+];
+
+function aliasPresent(value: string, alias: string): boolean {
+  const escaped = alias.normalize('NFKC')
+    .replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    .replace(/\s+/gu, '\\s+');
+  return /[a-z0-9]/iu.test(alias)
+    ? new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'iu').test(value.normalize('NFKC'))
+    : value.normalize('NFKC').includes(alias.normalize('NFKC'));
+}
+
+function bilingualTargetQualifiers(value: string): string[] {
+  const containsProduct = Object.values(PRODUCT_ENTITY_REGISTRY).flat()
+    .some((alias) => aliasPresent(value, alias));
+  if (!containsProduct) return [];
+  return BILINGUAL_TARGET_QUALIFIERS
+    .filter(([, pattern]) => pattern.test(value))
+    .map(([qualifier]) => qualifier)
+    .sort();
+}
+
+interface IndexedSemanticValue {
+  value: string;
+  start: number;
+  end: number;
+}
+
+const SIMPLE_RELATIVE_FACT_TIMES: ReadonlyArray<readonly [string, RegExp]> = [
+  ['later', /\b(?:later|subsequently)\b|(?:稍后|随后)/iu],
+  ['recently', /\brecently\b|(?:最近|近期)/iu],
+  ['last_week', /\blast\s+week\b|上周/iu],
+  ['earlier', /\bearlier\b|(?:此前|早些时候)/iu],
+  ['this_morning', /\bthis\s+morning\b|(?:今天早上|今天上午|今晨)/iu],
+];
+const RELATIVE_WEEKDAYS: ReadonlyArray<readonly [string, string, string]> = [
+  ['monday', 'monday', '一'], ['tuesday', 'tuesday', '二'],
+  ['wednesday', 'wednesday', '三'], ['thursday', 'thursday', '四'],
+  ['friday', 'friday', '五'], ['saturday', 'saturday', '六'],
+  ['sunday', 'sunday', '[日天]'],
+];
+const RELATIVE_MONTHS: ReadonlyArray<readonly [string, string, string]> = [
+  ['january', 'january', '一'], ['february', 'february', '二'],
+  ['march', 'march', '三'], ['april', 'april', '四'], ['may', 'may', '五'],
+  ['june', 'june', '六'], ['july', 'july', '七'], ['august', 'august', '八'],
+  ['september', 'september', '九'], ['october', 'october', '十'],
+  ['november', 'november', '十一'], ['december', 'december', '十二'],
+];
+
+function regexSemanticSpans(value: string, pattern: RegExp, canonical: string): IndexedSemanticValue[] {
+  const flags = [...new Set(`${pattern.flags.replace(/y/gu, '')}g`)].join('');
+  const globalPattern = new RegExp(pattern.source, flags);
+  const spans: IndexedSemanticValue[] = [];
+  for (const match of value.matchAll(globalPattern)) {
+    if (match.index === undefined || !match[0]) continue;
+    spans.push({ value: canonical, start: match.index, end: match.index + match[0].length });
+  }
+  return spans;
+}
+
+function relativeFactTimeSpans(value: string): IndexedSemanticValue[] {
+  const normalized = value.normalize('NFKC');
+  const spans: IndexedSemanticValue[] = [];
+  for (const [canonical, pattern] of SIMPLE_RELATIVE_FACT_TIMES) {
+    spans.push(...regexSemanticSpans(normalized, pattern, canonical));
+  }
+  for (const [canonical, english, chinese] of RELATIVE_WEEKDAYS) {
+    spans.push(...regexSemanticSpans(
+      normalized,
+      new RegExp(`\\b(?:on\\s+)?${english}\\b|周${chinese}`, 'iu'),
+      `weekday:${canonical}`,
+    ));
+  }
+  for (const [canonical, english, chinese] of RELATIVE_MONTHS) {
+    spans.push(...regexSemanticSpans(
+      normalized,
+      new RegExp(`\\bin\\s+${english}\\b|(?<![零〇一二三四五六七八九十两\\d]年)${chinese}月(?![零〇一二三四五六七八九十两\\d])`, 'iu'),
+      `month:${canonical}`,
+    ));
+  }
+  const clockSpans = [
+    ...regexSemanticSpans(normalized, /\bat\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/iu, 'clock'),
+    ...regexSemanticSpans(normalized, /(?:上午|下午|晚上|傍晚|凌晨)(\d{1,2})(?:时|点)(?:(\d{1,2})分?)?/u, 'clock'),
+  ];
+  for (const span of clockSpans) {
+    const raw = normalized.slice(span.start, span.end);
+    const english = /(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)/iu.exec(raw);
+    const chinese = /(?:上午|下午|晚上|傍晚|凌晨)(\d{1,2})(?:时|点)(?:(\d{1,2})分?)?/u.exec(raw);
+    let hour = Number(english?.[1] || chinese?.[1]);
+    const minute = Number(english?.[2] || chinese?.[2] || '0');
+    const period = (english?.[3] || raw.slice(0, 2)).replace(/[.]/gu, '').toLowerCase();
+    if ((period === 'pm' || ['下午', '晚上', '傍晚'].includes(period)) && hour < 12) hour += 12;
+    if ((period === 'am' || period === '凌晨') && hour === 12) hour = 0;
+    if (hour <= 23 && minute <= 59) {
+      spans.push({ ...span, value: `clock:${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` });
+    }
+  }
+  return spans
+    .filter((span, index, all) => all.findIndex((item) => item.value === span.value
+      && item.start === span.start && item.end === span.end) === index)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function stripRelativeFactTimeText(value: string): string {
+  const characters = value.normalize('NFKC').split('');
+  for (const span of relativeFactTimeSpans(value)) {
+    for (let index = span.start; index < span.end; index += 1) characters[index] = ' ';
+  }
+  return characters.join('');
+}
+
 function bilingualFactVersions(value: string): string[] {
   const versions = new Set<string>();
-  const source = stripFactTemporalText(value).normalize('NFKC').toLowerCase();
+  const source = stripRelativeFactTimeText(stripFactTemporalText(value)).normalize('NFKC').toLowerCase();
   const add = (version: string) => versions.add(version.replace(/^v/iu, '').replace(/\s+/gu, '-'));
   for (const match of source.matchAll(/(?:\b(?:gpt|claude|gemini|qwen|deepseek|kimi|glm|minimax|llama|gemma|mistral|seed)\b|通义千问|通义|混元|豆包|盘古|文心)[\s-]*(?:sonnet\s+|opus\s+|flash\s+|pro\s+|lite\s+)?v?(\d+(?:\.\d+)*(?:-[a-z0-9.]+)?)/giu)) {
     add(match[1]);
@@ -658,23 +825,124 @@ function bilingualFactVersions(value: string): string[] {
 }
 
 function bilingualFactRegions(value: string): string[] {
+  const source = stripRelativeFactTimeText(value);
   const regions = new Set<string>();
   for (const [canonical, aliases] of FACT_REGION_ALIASES) {
-    if (aliases.some((alias) => regionAliasPresent(value, alias))) regions.add(canonical);
+    if (aliases.some((alias) => regionAliasPresent(source, alias))) regions.add(canonical);
   }
   const englishLocation = /\b(?:in|across|within|throughout|into)\s+(?:the\s+)?([A-Z][A-Za-z.-]*(?:\s+[A-Z][A-Za-z.-]*){0,2})(?=\s+(?:from|market|region|operations?|business|employees?|customers?|users?|contractors?|public)\b|[\s,.;]|$)/gu;
-  for (const match of value.matchAll(englishLocation)) {
+  for (const match of source.matchAll(englishLocation)) {
     if (registeredEntityIdentities(match[1]).size) continue;
     const canonical = canonicalRegionAlias(match[1]);
     if (!canonical) throw new Error('invalid_claim_object');
     regions.add(canonical);
   }
-  for (const match of value.matchAll(/([\p{Script=Han}]{2,10})(?=(?:市场|地区|区域))/gu)) {
+  for (const match of source.matchAll(/([\p{Script=Han}]{2,10})(?=(?:市场|地区|区域))/gu)) {
     const canonical = canonicalRegionAlias(match[1]);
     if (!canonical && !GENERIC_REGION_VALUES.has(match[1])) throw new Error('invalid_claim_object');
     if (canonical) regions.add(canonical);
   }
   return [...regions].sort();
+}
+
+const BILINGUAL_QUANTIFIER_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:所有|全部|每名|每位)|\b(?:all|every|each)\b/iu,
+  /(?:部分|一些|某些|若干)|\b(?:some|certain|several)\b/iu,
+  /(?:仅|只)|\bonly\b/iu,
+  /(?:没有任何|无任何)|\b(?:no|none)\b/iu,
+];
+const BILINGUAL_SCOPE_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|some|partial(?:ly)?|limited|supported)\b/iu,
+  /(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/iu,
+];
+const BILINGUAL_OBJECT_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:无法|不能|不可|避免)|\b(?:unable\s+to|cannot|can['’]t|avoid(?:s|ed|ing)?)\b/iu,
+  /(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:not|never|without)\b/iu,
+];
+const ABSOLUTE_FACT_TIME_PATTERNS: ReadonlyArray<RegExp> = [
+  /20\d{2}年\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|凌晨|晚上|傍晚|晚间)?\s*[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:[零〇一二三四五六七八九十两\d]{1,3}分?)?)?/iu,
+  /\b20\d{2}-\d{1,2}-\d{1,2}(?:T|\s+\d{1,2}:\d{2})?(?::\d{2}(?:\.\d+)?)?\s*(?:[AP]\.?\s*M\.?)?\s*(?:Z|(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|[+-]\d{1,2}:?\d{2})?/iu,
+  /\b(?:(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+\d{1,2}(?:st|nd|rd|th)?,?[\s-]+20\d{2}|\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:January|February|March|April|May|June|July|August|September|October|November|December)[\s-]+20\d{2})\b/iu,
+];
+
+function semanticAliasPattern(alias: string): RegExp {
+  const escaped = alias.normalize('NFKC')
+    .replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    .replace(/\s+/gu, '\\s+');
+  return /[a-z0-9]/iu.test(alias)
+    ? new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'iu')
+    : new RegExp(escaped, 'u');
+}
+
+function consumeSemanticPattern(mask: boolean[], value: string, pattern: RegExp): void {
+  for (const span of regexSemanticSpans(value, pattern, 'consumed')) {
+    for (let index = span.start; index < span.end; index += 1) mask[index] = true;
+  }
+}
+
+function consumeSemanticSpan(mask: boolean[], span: Pick<IndexedSemanticValue, 'start' | 'end'>): void {
+  for (let index = span.start; index < span.end; index += 1) mask[index] = true;
+}
+
+function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): void {
+  const structural = new Set(['在', '于', '对', '向', '为', '由', '被', '从', '至', '的', '了', '该', '其']);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let index = 0; index < value.length; index += 1) {
+      if (mask[index] || !structural.has(value[index])) continue;
+      const adjacentConsumed = index === 0 || index === value.length - 1
+        || mask[index - 1] || mask[index + 1];
+      if (adjacentConsumed) {
+        mask[index] = true;
+        changed = true;
+      }
+    }
+  }
+}
+
+function assertConsumedObjectSemantics(value: string): void {
+  const normalized = value.normalize('NFKC');
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  const patternGroups: ReadonlyArray<ReadonlyArray<RegExp>> = [
+    BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_OBJECT_RELATION_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_FACT_CONCEPTS.map(([, pattern]) => pattern),
+    BILINGUAL_TARGET_QUALIFIERS.map(([, pattern]) => pattern),
+    BILINGUAL_QUANTIFIER_PATTERNS,
+    BILINGUAL_SCOPE_PATTERNS,
+    BILINGUAL_OBJECT_POLARITY_PATTERNS,
+    BILINGUAL_ATTRIBUTION_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_EPISTEMIC_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_INTENT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_ASPECT_PATTERNS.map(([, pattern]) => pattern),
+    ABSOLUTE_FACT_TIME_PATTERNS,
+  ];
+  for (const patterns of patternGroups) {
+    for (const pattern of patterns) consumeSemanticPattern(mask, normalized, pattern);
+  }
+  for (const aliases of [
+    ...Object.values(AUTHORITY_ENTITY_REGISTRY),
+    ...Object.values(ORGANIZATION_ENTITY_REGISTRY),
+    ...Object.values(PRODUCT_ENTITY_REGISTRY),
+  ]) {
+    for (const alias of aliases) consumeSemanticPattern(mask, normalized, semanticAliasPattern(alias));
+  }
+  for (const [, aliases] of FACT_REGION_ALIASES) {
+    for (const alias of aliases) consumeSemanticPattern(mask, normalized, semanticAliasPattern(alias));
+  }
+  for (const span of relativeFactTimeSpans(normalized)) consumeSemanticSpan(mask, span);
+  for (const pattern of [
+    /(?<![a-z0-9])v?\d+(?:\.\d+)*(?:-[a-z0-9.]+)?(?![a-z0-9])/iu,
+    /第[零〇一二三四五六七八九十百两\d]+(?:版|代|期|阶段)/u,
+    /\b(?:from|to|by|for|of|the|a|an|who|whom|whose|that|which|their|its|on|at|in|into|with)\b/iu,
+    /(?:一个|一项|一款|一名|一位)/u,
+  ]) consumeSemanticPattern(mask, normalized, pattern);
+  consumeAdjacentChineseFunctionWords(mask, normalized);
+  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (residue) throw new Error('invalid_claim_object');
 }
 
 function projectionLanguageError(fact: ManualAtomicFactSlots): string | null {
@@ -696,7 +964,10 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
   if (participantRoles.length > 1) throw new Error('invalid_claim_object');
   const objectRelations = canonicalObjectRelations(reason.residual);
   const targetEntities = [...registeredEntityIdentities(reason.residual)].sort();
+  const targetQualifiers = bilingualTargetQualifiers(reason.residual);
   const concepts = bilingualFactConcepts(reason.residual).sort();
+  const regions = bilingualFactRegions(reason.residual);
+  const relativeTimes = [...new Set(relativeFactTimeSpans(reason.residual).map((span) => span.value))].sort();
   const action = predicateActions[0].action;
   if (isTemporalOnlyFactObject(fact.object)) throw new Error('invalid_claim_object');
   if (['ban', 'limit_scope', 'request', 'regulatory_require', 'mandate', 'order'].includes(action)
@@ -705,24 +976,29 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     && objectRelations.some((relation) => ['use', 'access', 'deploy', 'develop', 'train'].includes(relation))
     && participantRoles.length === 0) throw new Error('invalid_claim_object');
   if (!participantRoles.length && !objectRelations.length && !targetEntities.length && !concepts.length
-    && !bilingualFactRegions(reason.residual).length) throw new Error('invalid_claim_object');
+    && !regions.length) throw new Error('invalid_claim_object');
+  assertConsumedObjectSemantics(reason.residual);
   return {
     action,
-    predicate_modality: exactBilingualModality(fact.predicate, predicateActions[0]),
+    predicate_modality: bilingualModalitySlots(fact.predicate, predicateActions[0]),
     predicate_negated: predicateActions[0].negated,
     participant_roles: participantRoles,
     participant_quantifier: bilingualParticipantQuantifier(reason.residual),
     object_relations: objectRelations,
     object_polarity: bilingualObjectPolarity(reason.residual),
-    object_modality: exactBilingualModality(reason.residual, null),
+    object_modality: bilingualModalitySlots(reason.residual, null),
     target_entities: targetEntities,
+    target_qualifiers: targetQualifiers,
     concepts,
     versions: bilingualFactVersions(reason.residual),
-    regions: bilingualFactRegions(reason.residual),
+    regions,
     reason: reason.canonical,
     scope: dominantFactScope(reason.residual),
     dates: normalizedFactDates(fact.object).sort(),
     instants: normalizedFactInstants(fact.object).sort(),
+    relative_times: relativeTimes,
+    object_residue: '',
+    residue_policy: 'consumed-semantic-spans-v1',
   };
 }
 
@@ -743,13 +1019,14 @@ function semanticProjectionContract(
     || sourceSlots.object_polarity !== projectionSlots.object_polarity) {
     return 'invalid_editorial_projection_polarity';
   }
-  if (sourceSlots.predicate_modality !== projectionSlots.predicate_modality
-    || sourceSlots.object_modality !== projectionSlots.object_modality) {
+  if (canonicalJson(sourceSlots.predicate_modality) !== canonicalJson(projectionSlots.predicate_modality)
+    || canonicalJson(sourceSlots.object_modality) !== canonicalJson(projectionSlots.object_modality)) {
     return 'invalid_editorial_projection_modality';
   }
   if (canonicalJson(sourceSlots.regions) !== canonicalJson(projectionSlots.regions)
     || canonicalJson(sourceSlots.dates) !== canonicalJson(projectionSlots.dates)
-    || canonicalJson(sourceSlots.instants) !== canonicalJson(projectionSlots.instants)) {
+    || canonicalJson(sourceSlots.instants) !== canonicalJson(projectionSlots.instants)
+    || canonicalJson(sourceSlots.relative_times) !== canonicalJson(projectionSlots.relative_times)) {
     return 'invalid_editorial_projection_time';
   }
   if (sourceSlots.reason !== projectionSlots.reason
@@ -758,6 +1035,7 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.participant_roles) !== canonicalJson(projectionSlots.participant_roles)
     || canonicalJson(sourceSlots.object_relations) !== canonicalJson(projectionSlots.object_relations)
     || canonicalJson(sourceSlots.target_entities) !== canonicalJson(projectionSlots.target_entities)
+    || canonicalJson(sourceSlots.target_qualifiers) !== canonicalJson(projectionSlots.target_qualifiers)
     || canonicalJson(sourceSlots.concepts) !== canonicalJson(projectionSlots.concepts)
     || canonicalJson(sourceSlots.versions) !== canonicalJson(projectionSlots.versions)) {
     return 'invalid_editorial_projection_object';
@@ -975,7 +1253,8 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
-      '双语投影必须逐槽精确等价：reportedly/据称、allegedly/被指、possible/可能、planned/计划、requested/被要求、asserted 与 completed 不得互换；员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/情态、使用关系、目标、地区、原因、版本和日期均不得增删改。无法可靠翻译或归一化的关键槽必须 recommendation=needs_review，不得凭关键词相似猜测。',
+      '双语投影必须逐槽精确等价：来源归因（reportedly/据报道、allegedly/被指）、认识可能性（may/可能）、计划或未来（planned/will/计划/将）、进行或完成状态（ongoing/completed/正在/已）以及 polarity 是五组正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉其中任何一组。',
+      '员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/能力、使用关系、目标产品后缀、地区、原因、版本、绝对或相对时间均不得增删改。对象两侧每段实义文本都必须可归入明确槽位；most/half、unable、Enterprise/Pro、for confidential projects、later/last week/on Monday 等未知范围、能力、限定和附着时间不能省略。无法可靠翻译、归一化或完全消费的关键跨度必须 recommendation=needs_review，不得凭关键词相似猜测。',
       '中文投影的谓词和非专名叙述必须使用中文；公司、模型、产品及版本可保留官方英文名。禁止 OpenAI was sued稍后时间点 之类中英叙述混写，也禁止把纯时间、纯原因或纯情态写成 object。',
       'raw source fact 使用顺序 fact_ref：fact-01、fact-02……；title 只能用 title-01，summary 只能依次用 summary-01、summary-02……。程序会从源事实内容生成稳定 source fact id，并把投影映射转换为该稳定 id。',
       'title 只映射 primary fact（fact-01）。summary 项数必须与 source_facts 完全相等，并按原顺序一一映射：summary-01→fact-01、summary-02→fact-02……；禁止漏项、重复 fact_ref、乱序或额外 summary。',
@@ -1439,7 +1718,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '每个输入 fact 已被确定性拆成单一原子子句；逐条核验，不得把不同子句、不同主体或不同对象之间的词语互换拼接。',
       '每个 fact 只能使用其自身结构内的 allowed_evidence；禁止跨 fact 查看、引用或推断其他 evidence。',
       '先核验每条 source_fact、event_key 的主体/动作/对象/版本/日期语义、event_type、非空 occurred_at，以及无论 true 或 false 的 material_update；中文 title/summary 只在独立 projection_results 阶段核验。',
-      'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：精确情态类别、参与者角色与数量范围、对象内否定/情态、关系与目标、地区、原因、版本和日期；不得把 reported/alleged/possible/planned/requested 统称为弱情态。即使词面相似，只要任一槽不等价就必须 unsupported。',
+      'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：来源归因、认识可能性、计划/未来、进行/完成状态和 polarity 分属正交集合；参与者角色与数量范围、对象内否定/能力、关系、目标产品后缀、地区、原因、版本及绝对/相对时间也必须分别等价，不得把 compound modality 统称为弱情态。即使词面相似，只要任一槽不等价就必须 unsupported。',
+      '本地程序还会执行 consumed-semantic-spans fail-closed gate：源事实和中文投影的对象中，所有实义跨度都必须被已签名语义槽消费；无法分类的范围、能力、限定、对象补语或附着时间会直接拒绝，模型返回 supported 也不能覆盖该结果。',
       '逐项检查主体、动作方向、否定关系、对象、产品版本、时间与适用范围；不得用常识、用户线索、标题相似或同公司旧闻补齐事实。',
       '禁止用词面相似度、关键词比例或跨句词语重合代替结构核验；未知动作只有在完整规范化关键跨度一致时才可支持，未知复合谓词一律不支持。',
       '方向或否定关系相反使用 contradicted；版本、日期、时间或范围不一致使用 scope_or_time_mismatch；证据未出现该事实使用 not_found；其他不充分支持使用 unsupported。',
@@ -2135,7 +2415,7 @@ function controlComplementTailRemainder(
   action: FactActionOccurrence,
   strictObject: boolean,
 ): string {
-  const rawTail = stripFactTemporalText(value.slice(action.end))
+  const rawTail = stripRelativeFactTimeText(stripFactTemporalText(value.slice(action.end)))
     .replace(/^[\s，,、:：]*(?:了|对|向|为|其|该|一个|一项|一款|新的?)*\s*/u, '')
     .replace(/(?:在|于)\s*$/u, '')
     .replace(/\b(?:on|at)\s*$/iu, '')
@@ -2235,7 +2515,9 @@ function parseFactControlChain(value: string): FactControlChainParse {
     node.child = { occurrence: child, child: null };
     node = node.child;
   }
-  const prefix = reliable ? stripFactTemporalText(value.slice(0, actions[0].index)) : '';
+  const prefix = reliable
+    ? stripRelativeFactTimeText(stripFactTemporalText(value.slice(0, actions[0].index)))
+    : '';
   const parsedControlChain = reliable && actions.length > 1
     && STRICT_CONTROL_CHAIN_ROOTS.has(actions[0].action);
   const strictObject = parsedControlChain || node.occurrence.action === 'release';

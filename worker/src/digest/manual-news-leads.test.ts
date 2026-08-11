@@ -236,6 +236,16 @@ async function createMaliciouslySupportedAlibabaProjectionProof(input: {
   quote?: string;
 }) {
   const quote = input.quote ?? techCrunchAlibabaBan.claims_supported[0];
+  return createMaliciouslySupportedGeneratedProjectionProof(
+    alibabaBanGeneratedAssessment(input.projection, input.source),
+    quote,
+  );
+}
+
+async function createMaliciouslySupportedGeneratedProjectionProof(
+  rawAssessment: unknown,
+  quote: string,
+) {
   const evidence = [{
     ...techCrunchAlibabaBan,
     title: quote,
@@ -243,7 +253,7 @@ async function createMaliciouslySupportedAlibabaProjectionProof(input: {
     claims_supported: [quote],
   }];
   const generated = validateManualLeadGeneratedAssessment(
-    alibabaBanGeneratedAssessment(input.projection, input.source),
+    rawAssessment,
     evidence,
   );
   const candidate: ManualNewsProcessedAssessment = {
@@ -585,6 +595,95 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    ['reported possibility omitted', 'reportedly may ban', '据报道禁止', 'Alibaba reportedly may ban employees from using Claude Code.'],
+    ['reported future omitted', 'reportedly will ban', '据报道禁止', 'Alibaba reportedly will ban employees from using Claude Code.'],
+    ['reported completion omitted', 'reportedly banned', '据报道禁止', 'Alibaba reportedly banned employees from using Claude Code.'],
+    ['possibility added under reporting attribution', 'reportedly bans', '据报道可能禁止', 'Alibaba reportedly bans employees from using Claude Code.'],
+    ['completion added under reporting attribution', 'reportedly bans', '据报道已禁止', 'Alibaba reportedly bans employees from using Claude Code.'],
+    ['alleged possibility omitted', 'allegedly may ban', '被指禁止', 'Alibaba allegedly may ban employees from using Claude Code.'],
+  ])('keeps attribution, possibility, intent, and completion orthogonal despite malicious verifier support: %s', async (
+    _label,
+    sourcePredicate,
+    projectionPredicate,
+    quote,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: sourcePredicate },
+      projection: { predicate: projectionPredicate },
+      quote,
+    })).rejects.toThrow(/invalid_editorial_projection_modality/);
+  });
+
+  test.each([
+    ['most participant scope omitted', 'most of the staff from using Claude Code', '员工使用Claude Code'],
+    ['half participant scope omitted', 'half the staff from using Claude Code', '员工使用Claude Code'],
+    ['participant inability omitted', 'employees unable to use Claude Code', '员工使用Claude Code'],
+    ['enterprise target qualifier omitted', 'employees from using Claude Code Enterprise', '员工使用Claude Code'],
+    ['pro target qualifier omitted', 'employees from using Claude Code Pro', '员工使用Claude Code'],
+    ['confidential project scope omitted', 'employees from using Claude Code for confidential projects', '员工使用Claude Code'],
+    ['projection adds medical diagnosis processing', 'employees from using Claude Code', '员工使用Claude Code处理医疗诊断'],
+    ['projection adds avoidance relation', 'employees from using Claude Code', '员工避免使用Claude Code'],
+  ])('fails closed when unconsumed object semantics would be hidden by known slots: %s', async (
+    _label,
+    sourceObject,
+    projectionObject,
+  ) => {
+    const quote = `Alibaba reportedly bans ${sourceObject}.`;
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: sourceObject }, projection: { object: projectionObject }, quote,
+    })).rejects.toThrow(/(?:invalid_claim_object|invalid_editorial_projection_object|invalid_editorial_projection_polarity)/);
+  });
+
+  test.each([
+    ['later', '稍后'],
+    ['recently', '最近'],
+    ['last week', '上周'],
+    ['on Monday', '周一'],
+    ['earlier', '此前'],
+    ['this morning', '今天早上'],
+    ['in August', '八月'],
+    ['at 5 pm', '下午5点'],
+  ])('does not allow an attached relative time to disappear from a signed projection: %s', async (
+    sourceTime,
+  ) => {
+    const sourceObject = `employees from using Claude Code ${sourceTime}`;
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: sourceObject },
+      projection: { object: '员工使用Claude Code' },
+      quote: `Alibaba reportedly bans ${sourceObject}.`,
+    })).rejects.toThrow(/(?:invalid_editorial_projection_time|invalid_editorial_projection_object)/);
+  });
+
+  test('does not drop a relative time from an OpenAI lawsuit fact even when verifier says supported', async () => {
+    const quote = 'OpenAI was sued by Anthropic later.';
+    await expect(createMaliciouslySupportedGeneratedProjectionProof({
+      event_key: 'openai-anthropic-lawsuit', event_type: 'industry_event', material_update: false,
+      score: 85, recommendation: 'needs_review', occurred_at: null, uncertainties: [], matched_event_key: null,
+      source_facts: [{
+        fact_ref: 'fact-01', source_language: 'en',
+        atomic_fact: {
+          subject: 'OpenAI', subject_role: 'organization', predicate: 'was sued', object: 'by Anthropic later',
+        },
+        evidence_ids: [techCrunchAlibabaBan.id],
+      }],
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: {
+            subject: 'OpenAI', subject_role: 'organization', predicate: '已被起诉', object: 'Anthropic',
+          },
+        },
+        summary: [{
+          projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+          atomic_fact: {
+            subject: 'OpenAI', subject_role: 'organization', predicate: '已被起诉', object: 'Anthropic',
+          },
+        }],
+      },
+    }, quote)).rejects.toThrow(/(?:invalid_editorial_projection_time|invalid_editorial_projection_object)/);
+  });
+
+  test.each([
     [{ predicate: '据称禁止', object: '员工使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
     [{ predicate: '据称禁止', object: '美国员工使用Claude Code' }, { object: 'employees in the US from using Claude Code' }, 'Alibaba reportedly bans employees in the US from using Claude Code.'],
     [{ predicate: '据称禁止', object: '员工因安全担忧使用Claude Code' }, { object: 'employees from using Claude Code due to security concerns' }, 'Alibaba reportedly bans employees from using Claude Code due to security concerns.'],
@@ -594,6 +693,16 @@ describe('manual news lead domain', () => {
     [{ predicate: '已禁止', object: '员工使用Claude Code' }, { predicate: 'has banned' }, 'Alibaba has banned employees from using Claude Code.'],
     [{ predicate: '禁止', object: '员工使用Claude Code' }, { predicate: 'bans' }, 'Alibaba bans employees from using Claude Code.'],
     [{ predicate: '请求', object: '员工使用Claude Code' }, { predicate: 'requests', object: 'employees to use Claude Code' }, 'Alibaba requests employees to use Claude Code.'],
+    [{ predicate: '据报道可能禁止', object: '员工使用Claude Code' }, { predicate: 'reportedly may ban' }, 'Alibaba reportedly may ban employees from using Claude Code.'],
+    [{ predicate: '据报道将禁止', object: '员工使用Claude Code' }, { predicate: 'reportedly will ban' }, 'Alibaba reportedly will ban employees from using Claude Code.'],
+    [{ predicate: '据报道已禁止', object: '员工使用Claude Code' }, { predicate: 'reportedly banned' }, 'Alibaba reportedly banned employees from using Claude Code.'],
+    [{ predicate: '被指可能禁止', object: '员工使用Claude Code' }, { predicate: 'allegedly may ban' }, 'Alibaba allegedly may ban employees from using Claude Code.'],
+    [{ predicate: '据称禁止', object: '所有员工使用Claude Code' }, { object: 'all staff from using Claude Code' }, 'Alibaba reportedly bans all staff from using Claude Code.'],
+    [{ predicate: '据称禁止', object: '员工使用Claude Code Enterprise' }, { object: 'employees from using Claude Code Enterprise' }, 'Alibaba reportedly bans employees from using Claude Code Enterprise.'],
+    [{ predicate: '据称禁止', object: '员工使用Claude Code Pro' }, { object: 'employees from using Claude Code Pro' }, 'Alibaba reportedly bans employees from using Claude Code Pro.'],
+    [{ predicate: '据称禁止', object: '员工稍后使用Claude Code' }, { object: 'employees from using Claude Code later' }, 'Alibaba reportedly bans employees from using Claude Code later.'],
+    [{ predicate: '据称禁止', object: '员工周一使用Claude Code' }, { object: 'employees from using Claude Code on Monday' }, 'Alibaba reportedly bans employees from using Claude Code on Monday.'],
+    [{ predicate: '据称禁止', object: '员工下午5点使用Claude Code' }, { object: 'employees from using Claude Code at 5 pm' }, 'Alibaba reportedly bans employees from using Claude Code at 5 pm.'],
   ])('creates a current v8 proof for an exactly equivalent bilingual semantic projection: %#', async (
     projection,
     source,
@@ -922,6 +1031,9 @@ describe('manual news lead domain', () => {
     expect(assessmentPrompt.system).toContain('拆成多条 claims');
     expect(assessmentPrompt.system).toContain('英文证据写英文 source fact');
     expect(assessmentPrompt.system).toContain('独立的严肃中文编辑投影');
+    expect(assessmentPrompt.system).toContain('五组正交信息');
+    expect(assessmentPrompt.system).toContain('每段实义文本都必须可归入明确槽位');
+    expect(assessmentPrompt.system).toContain('绝对或相对时间');
 
     const candidate = validateManualLeadAssessment(assessment({
       title: 'OpenAI发布GPT 5，随后暂停GPT 6。',
@@ -939,6 +1051,8 @@ describe('manual news lead domain', () => {
     };
     expect(verifierPrompt.system).toContain('每个输入 fact 已被确定性拆成单一原子子句');
     expect(verifierPrompt.system).toContain('禁止用词面相似度');
+    expect(verifierPrompt.system).toContain('compound modality');
+    expect(verifierPrompt.system).toContain('consumed-semantic-spans fail-closed gate');
     expect(body.facts.map((fact) => fact.fact_id)).toEqual(expect.arrayContaining([
       'field:title:0', 'field:title:1', 'field:summary:0', 'field:summary:1',
       'claim:0', 'claim:1',
