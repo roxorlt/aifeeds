@@ -226,7 +226,8 @@ function trustedEndpoint(service: TrustedResearchService | undefined, path: '/v1
     (origin.pathname !== '/' && origin.pathname !== '') || origin.search || origin.hash
   ) throw new Error('invalid_trusted_research_origin');
   if (!service.token || service.token.length > 512) throw new Error('invalid_trusted_research_token');
-  return { url: new URL(path, origin), fetcher: service.fetcher ?? fetch, token: service.token };
+  const fetcher = service.fetcher ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
+  return { url: new URL(path, origin), fetcher, token: service.token };
 }
 
 function strictObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
