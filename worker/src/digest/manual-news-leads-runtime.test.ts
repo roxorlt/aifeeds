@@ -258,6 +258,101 @@ describe('manual lead evidence extraction', () => {
     )).toThrow(/evidence_disposition/);
   });
 
+  test.each([
+    ['noembed', 'noembed'],
+    ['noframes', 'NOFRAMES'],
+    ['iframe', 'IfRaMe'],
+    ['xmp', 'XMP'],
+    ['textarea', 'TeXtArEa'],
+    ['title', 'TiTlE'],
+    ['noscript', 'NoScRiPt'],
+  ])('treats %s descendants as inert raw text until the matching close tag', async (_name, tag) => {
+    const hiddenJson = JSON.stringify({
+      '@type': 'NewsArticle', articleBody: alibabaSupport,
+    });
+    const blocker = [
+      'Alibaba called reports that it banned employees from using Claude Code false.',
+      'Alibaba withdrew the restriction on employees using Claude Code.',
+      'Alibaba said the Claude Code restriction applies only to contractors.',
+    ].join(' ');
+    const html = `<html><head><title>Visible raw-text test</title></head><body>
+      <${tag} data-label="raw > text"><${tag}>nested opening is text
+        <script type="application/ld+json">${hiddenJson}</script>
+        <article>${alibabaSupport}</article>
+      </${tag} data-close="quoted > close">
+      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      `https://www.axios.com/${String(_name)}-raw-text`, html,
+    ));
+
+    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
+    await expect(createAlibabaCurrentProof(evidence!))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    '<script data-label="raw > text">const fake = \'<article>hidden support</article><main>hidden main</main>\';</script>',
+    '<STYLE data-label="raw > text">.fake::after { content: "<article>hidden support</article>"; }</STYLE>',
+  ])('never promotes ordinary script or style raw text into a body candidate', async (rawElement) => {
+    const blocker = 'Alibaba withdrew the restriction on employees using Claude Code.';
+    const html = `<html><head><title>Visible raw hidden test</title></head><body>
+      ${rawElement}
+      <article><p>${alibabaSupport}</p><p>${blocker}</p></article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/script-style-raw-text', html,
+    ));
+
+    expect(evidence?.excerpt).toBe(`${alibabaSupport} ${blocker}`);
+    await expect(createAlibabaCurrentProof(evidence!))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test('fails safely once plaintext begins instead of parsing later fake candidates', async () => {
+    const hiddenJson = JSON.stringify({ '@type': 'NewsArticle', articleBody: alibabaSupport });
+    const html = `<html><head><title>Plaintext trap</title></head><body>
+      <PlAiNtExT data-label="plain > text"><script type="application/ld+json">${hiddenJson}</script>
+      <article>${alibabaSupport}</article>
+      <article>Alibaba withdrew the restriction on employees using Claude Code.</article>
+    </body></html>`;
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/plaintext-trap', html,
+    ));
+    expect(evidence).toBeNull();
+  });
+
+  test.each([
+    'noembed', 'noframes', 'iframe', 'xmp', 'textarea', 'title', 'noscript', 'script', 'style',
+  ])('fails safely when a %s raw-text element is not closed', async (tag) => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      `https://www.axios.com/unclosed-${tag}`,
+      `<html><head><title>Unclosed raw</title></head><body><${tag} data-label="raw > text">
+        <article>${alibabaSupport}</article><main>hidden main candidate</main></body></html>`,
+    ));
+    expect(evidence).toBeNull();
+  });
+
+  test('fails safely on a malformed raw-text closing tag instead of scanning through it', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/malformed-raw-close',
+      `<html><head><title>Malformed close</title></head><body><noembed>
+        hidden text</noembed data-label="unterminated >
+        <article>${alibabaSupport}</article></body></html>`,
+    ));
+    expect(evidence).toBeNull();
+  });
+
+  test('keeps ordinary visible title extraction with quoted greater-than attributes', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://www.axios.com/normal-title',
+      `<html><head><title data-label="visible > title">Normal &amp; visible title</title></head>
+       <body><article>${alibabaSupport}</article></body></html>`,
+    ));
+    expect(evidence?.title).toBe('Normal & visible title');
+    expect(evidence?.excerpt).toBe(alibabaSupport);
+  });
+
   test('excludes article and main candidates nested under hidden ancestors', async () => {
     const html = `<html><head>
       <template><title>Hidden template title</title></template>

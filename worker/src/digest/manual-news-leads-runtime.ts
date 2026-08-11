@@ -141,11 +141,16 @@ const MANUAL_NEWS_HTML_MAX_BODY_CANDIDATES = 256;
 const MANUAL_NEWS_HTML_MAX_JSON_LD_SCRIPTS = 32;
 
 const HTML_HIDDEN_CONTAINERS = new Set([
-  'canvas', 'iframe', 'math', 'noscript', 'object', 'svg', 'template',
+  'canvas', 'math', 'object', 'svg', 'template',
 ]);
 const HTML_FOREIGN_SELF_CLOSING_CONTAINERS = new Set(['math', 'svg']);
-const HTML_RAW_HIDDEN_ELEMENTS = new Set(['script', 'style']);
-const HTML_RAW_TEXT_ELEMENTS = new Set(['textarea', 'title', 'xmp']);
+// These tokenizer states consume everything up to their own matching end tag.
+// Treat noscript as raw and hidden conservatively: its browser semantics depend
+// on whether scripting is enabled, while neither branch is article evidence.
+const HTML_RAW_HIDDEN_ELEMENTS = new Set([
+  'iframe', 'noembed', 'noframes', 'noscript', 'script', 'style', 'xmp',
+]);
+const HTML_RCDATA_ELEMENTS = new Set(['textarea', 'title']);
 
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
@@ -227,7 +232,11 @@ function findRawHtmlClosing(
     if (start < 0) return null;
     if (isHtmlTagBoundary(lowerHtml[start + prefix.length])) {
       const end = findHtmlTagEnd(html, start + prefix.length);
-      if (end !== null) return { start, end };
+      // Once an appropriate raw-text end tag starts, malformed/unbounded
+      // attributes make the tokenizer state ambiguous. Do not scan through
+      // them and accidentally activate later markup.
+      if (end === null) return null;
+      return { start, end };
     }
     searchFrom = start + prefix.length;
   }
@@ -360,7 +369,14 @@ function scanHtmlEvidence(html: string, collectStructured = true): HtmlEvidenceS
       continue;
     }
 
-    if (HTML_RAW_HIDDEN_ELEMENTS.has(tag) || HTML_RAW_TEXT_ELEMENTS.has(tag)) {
+    // HTML switches permanently to the plaintext tokenizer state here. There
+    // is no closing tag and no later structure can safely become evidence.
+    if (tag === 'plaintext') {
+      fail();
+      break;
+    }
+
+    if (HTML_RAW_HIDDEN_ELEMENTS.has(tag) || HTML_RCDATA_ELEMENTS.has(tag)) {
       const rawClosing = findRawHtmlClosing(html, lowerHtml, tag, tagEnd + 1);
       if (!rawClosing) {
         fail();
