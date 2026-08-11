@@ -28,13 +28,15 @@ vi.mock('./news-review', () => ({
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
 import {
   applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
   validateManualLeadAssessment,
+  validateManualLeadFactVerification,
 } from './manual-news-leads';
 import { getActiveNewsReviewBatch, newsReviewExpiresAt } from './news-review';
 
 async function fakeConfirmationEnv() {
-  const verificationSecret = 'manual-news-confirm-verification-secret-32-bytes';
+  const verificationSecret = 'a'.repeat(64);
   const rawAssessment = {
     title: 'Anthropic披露部分Claude输出的水印与来源标记',
     summary: '官方文档将范围限定为受支持的模型与产品。',
@@ -52,8 +54,11 @@ async function fakeConfirmationEnv() {
   };
   const evidence = {
     evidence_id: 'ev-1', url: row.input_url, source_type: 'official_help', publisher: 'Anthropic',
-    published_at: null, retrieved_at: 2, title: 'Documentation', excerpt: 'Supported outputs only.',
-    claims_supported_json: JSON.stringify(['Supported outputs only.']), reliable: 1,
+    published_at: null, retrieved_at: 2, title: 'Documentation',
+    excerpt: 'Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.',
+    claims_supported_json: JSON.stringify([
+      'Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.',
+    ]), reliable: 1,
   };
   const evidenceForMarker = {
     id: evidence.evidence_id,
@@ -64,7 +69,7 @@ async function fakeConfirmationEnv() {
     retrieved_at: evidence.retrieved_at,
     title: evidence.title,
     excerpt: evidence.excerpt,
-    claims_supported: ['Supported outputs only.'],
+    claims_supported: ['Anthropic Claude provenance documentation for 2026-08 supports documented outputs only.'],
     reliable: true,
     fetch_audit: null,
   };
@@ -74,15 +79,31 @@ async function fakeConfirmationEnv() {
     ...processedCore,
     duplicate_scope: null, matched_lead_id: null,
   };
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment, evidence: [evidenceForMarker],
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  const factVerification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: facts.map((fact) => ({
+      fact_id: fact.fact_id,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidenceForMarker.id, quote: evidenceForMarker.excerpt }],
+    })),
+  }, assessment, [evidenceForMarker]);
   const assessmentVersion = 7;
   const proof = await createManualLeadVerificationProof({
-    lead_id: row.id, assessment_version: assessmentVersion, assessment, evidence: [evidenceForMarker],
+    lead_id: row.id, assessment_version: assessmentVersion, assessment,
+    evidence: [evidenceForMarker], verification: factVerification,
   }, verificationSecret);
   const verification: Record<string, any> = {
     verification_id: 'mav-confirm-7',
+    lead_id: row.id,
     assessment_version: assessmentVersion,
     ...proof,
+    verification_json: JSON.stringify(factVerification),
     processing_owner: 'workflow-owner',
+    processing_attempt: 1,
     status: 'active',
     reason: null,
     created_at: 3,
@@ -149,6 +170,7 @@ async function fakeConfirmationEnv() {
       MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret,
     } as never,
     row,
+    evidence,
     assessment,
     verification,
     prepared,
@@ -240,6 +262,11 @@ describe('manual lead candidate confirmation', () => {
     ['no active verification', (verification: Record<string, any>) => { verification.status = 'invalidated'; }],
     ['old policy', (verification: Record<string, any>) => { verification.policy_version = 'legacy-v0'; }],
     ['wrong HMAC', (verification: Record<string, any>) => { verification.hmac_sha256 = '0'.repeat(64); }],
+    ['tampered verification JSON', (verification: Record<string, any>) => {
+      const parsed = JSON.parse(verification.verification_json);
+      parsed.fact_results[0].source_quotes[0].quote = 'Unrelated tampered quotation with enough words.';
+      verification.verification_json = JSON.stringify(parsed);
+    }],
     ['wrong assessment version', (verification: Record<string, any>) => { verification.assessment_version = 6; }],
   ])('rejects confirmation with %s before any candidate mutation', async (_label, mutate) => {
     const memory = await fakeConfirmationEnv();
@@ -252,5 +279,17 @@ describe('manual lead candidate confirmation', () => {
     expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
     expect(insertedBatch).toBeNull();
     expect(memory.row.confirmed_at).toBeNull();
+  });
+
+  test('rejects confirmation when a quoted evidence field changed after verification', async () => {
+    const memory = await fakeConfirmationEnv();
+    memory.evidence.excerpt = 'Changed evidence after the fact verification completed.';
+
+    const result = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-quote-tamper', 100,
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
+    expect(insertedBatch).toBeNull();
   });
 });

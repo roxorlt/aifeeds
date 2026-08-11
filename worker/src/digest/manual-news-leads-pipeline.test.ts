@@ -87,7 +87,7 @@ function memoryStore(initial = lead()) {
     },
     async listRecentPriorEvents() { return structuredClone(priorEvents); },
     async findPriorEventsByEventKey() { return structuredClone(priorEvents); },
-    async saveAssessment(_id, expectedVersion, assessment) {
+    async saveVerifiedAssessment(_id, expectedVersion, assessment) {
       expect(current.version).toBe(expectedVersion);
       current.assessment = structuredClone(assessment);
       return { assessment_version: expectedVersion };
@@ -259,6 +259,38 @@ describe('manual lead processing pipeline', () => {
     expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
   });
 
+  test('routes exhausted verifier JSON parsing to review instead of Workflow retry', async () => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async () => { throw new Error('json_parse_fail'); },
+    });
+
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'fact_verification_failed', error_message: 'invalid_fact_verification',
+    });
+  });
+
+  test('routes exhausted assessment JSON parsing to review instead of Workflow retry', async () => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => { throw new Error('json_parse_fail'); },
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+    });
+  });
+
   test('moves parsed but schema-invalid output to review without persisting or retrying it', async () => {
     const memory = memoryStore();
     let calls = 0;
@@ -309,8 +341,11 @@ describe('manual lead processing pipeline', () => {
       }),
       verify: async (prompt) => verifiedFromPrompt(prompt),
     });
-    expect(memory.current()).toMatchObject({ status: 'needs_review' });
-    expect(memory.current().assessment).toMatchObject({ recommendation: 'needs_review', evidence_tier: 'insufficient' });
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review',
+      assessment: null,
+      error_code: 'fact_verification_failed',
+    });
   });
 
   test.each([
@@ -368,16 +403,18 @@ describe('manual lead processing pipeline', () => {
       status: 'verifying', input_type: 'text', input_text: inputText, input_url: '', note, evidence: [evidence],
     }));
     let assessCalls = 0;
+    let verifyCalls = 0;
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => { throw new Error('unexpected_search'); },
       fetch: async () => { throw new Error('unexpected_fetch'); },
       extract: async () => { throw new Error('unexpected_extract'); },
       assess: async () => { assessCalls += 1; return assessed(); },
-      verify: async (prompt) => verifiedFromPrompt(prompt),
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
     });
 
     expect(assessCalls).toBe(1);
-    expect(memory.current().assessment).not.toBeNull();
+    expect(verifyCalls).toBe(1);
+    expect(memory.current().error_code).not.toBe('evidence_relevance_unverified');
   });
 
   test('marks same-event cross-day evidence as duplicate unless it is a material update', async () => {

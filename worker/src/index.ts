@@ -399,7 +399,7 @@ export interface Env {
   MANUAL_NEWS_RESEARCH_ORIGIN?: string;
   MANUAL_NEWS_RESEARCH_TOKEN?: string;
   // HMAC-SHA256 secret for independently persisted manual-news assessment
-  // verification records. Must be at least 32 UTF-8 bytes and unique per environment.
+  // verification records. Must be exactly 64 lowercase hex characters and unique per environment.
   MANUAL_NEWS_VERIFICATION_SECRET?: string;
   // RSSHub 基址 + token（feeds/parse.ts 的 via='rsshub' 分支用）。Phase 1 的 24 个
   // feed 全 via='native'，此项暂未启用；留作未来需要 RSSHub 中转的源（如某些无原生

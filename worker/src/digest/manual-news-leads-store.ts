@@ -1,15 +1,21 @@
 import type { Env } from '../index';
 import {
   assertManualLeadTransition,
+  createManualEvidenceDigest,
   createManualLeadVerificationProof,
-  isCurrentManualLeadVerification,
   mergeManualLeadCandidate,
+  validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
   type ManualNewsLeadStatus,
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
+import {
+  loadManualNewsEvidence,
+  loadVerifiedManualAssessment,
+  type PersistedManualVerificationRow,
+} from './manual-news-leads-verification';
 import type {
   ManualLeadProcessingStore,
   ManualNewsLeadRecord,
@@ -52,59 +58,6 @@ interface ManualLeadRow {
   confirmed_at: number | null;
   created_at: number;
   updated_at: number;
-}
-
-interface ManualEvidenceRow {
-  evidence_id: string;
-  url: string;
-  source_type: ManualNewsEvidence['source_type'];
-  publisher: string;
-  published_at: string | null;
-  retrieved_at: number;
-  title: string;
-  excerpt: string;
-  claims_supported_json: string;
-  fetch_audit_json: string;
-  reliable: number;
-}
-
-interface ManualVerificationRow {
-  verification_id: string;
-  assessment_version: number;
-  policy_version: string;
-  canonical_digest: string;
-  hmac_sha256: string;
-  processing_owner: string;
-  status: 'active' | 'invalidated';
-  reason: string | null;
-  created_at: number;
-  invalidated_at: number | null;
-  assessment_json: string;
-}
-
-interface ActiveVerifiedManualAssessment {
-  assessment: ManualNewsProcessedAssessment;
-  verification: ManualVerificationRow;
-}
-
-function parseJson<T>(value: string | null | undefined, fallback: T): T {
-  try { return JSON.parse(value || '') as T; } catch { return fallback; }
-}
-
-function evidenceFromRow(row: ManualEvidenceRow): ManualNewsEvidence {
-  return {
-    id: row.evidence_id,
-    url: row.url,
-    source_type: row.source_type,
-    publisher: row.publisher,
-    published_at: row.published_at,
-    retrieved_at: row.retrieved_at,
-    title: row.title,
-    excerpt: row.excerpt,
-    claims_supported: parseJson<string[]>(row.claims_supported_json, []),
-    reliable: row.reliable === 1,
-    fetch_audit: parseJson<ManualNewsEvidence['fetch_audit']>(row.fetch_audit_json, null),
-  };
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -173,52 +126,9 @@ async function runAuditedMutation(
   return auditedMutationChanges(results, 0, 1);
 }
 
-async function loadActiveVerifiedManualAssessment(
-  env: Env,
-  leadId: string,
-  evidence: readonly ManualNewsEvidence[],
-): Promise<ActiveVerifiedManualAssessment | null> {
-  const verificationRow = await env.DB.prepare(
-    `/* manual_verification:active_assessment */ SELECT
-       v.verification_id, v.assessment_version, v.policy_version, v.canonical_digest,
-       v.hmac_sha256, v.processing_owner, v.status, v.reason, v.created_at,
-       v.invalidated_at, a.assessment_json
-     FROM manual_news_assessment_verifications v
-     JOIN manual_news_event_assessments a
-       ON a.lead_id = v.lead_id AND a.assessment_version = v.assessment_version
-     WHERE v.lead_id = ? AND v.status = 'active'
-     ORDER BY v.assessment_version DESC, v.created_at DESC LIMIT 1`,
-  ).bind(leadId).first<ManualVerificationRow>();
-  if (verificationRow) {
-    const parsed = parseJson<ManualNewsProcessedAssessment | null>(verificationRow.assessment_json, null);
-    if (parsed) {
-      try {
-        const validated = validateManualNewsProcessedAssessment(parsed, evidence);
-        const current = await isCurrentManualLeadVerification({
-          lead_id: leadId,
-          assessment_version: Number(verificationRow.assessment_version),
-          assessment: validated,
-          evidence,
-        }, {
-          policy_version: verificationRow.policy_version,
-          canonical_digest: verificationRow.canonical_digest,
-          hmac_sha256: verificationRow.hmac_sha256,
-        }, env.MANUAL_NEWS_VERIFICATION_SECRET || '');
-        if (current) return { assessment: validated, verification: verificationRow };
-      } catch {
-        return null;
-      }
-    }
-  }
-  return null;
-}
-
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
-  const evidenceResult = await env.DB.prepare(
-    `/* manual_evidence:list */ SELECT * FROM manual_news_evidence WHERE lead_id = ? ORDER BY evidence_id`,
-  ).bind(row.id).all<ManualEvidenceRow>();
-  const evidence = (evidenceResult.results || []).map(evidenceFromRow);
-  const verified = await loadActiveVerifiedManualAssessment(env, row.id, evidence);
+  const evidence = await loadManualNewsEvidence(env, row.id);
+  const verified = await loadVerifiedManualAssessment(env, row.id, evidence);
   return {
     id: row.id,
     review_date: row.review_date,
@@ -372,6 +282,7 @@ export async function retryManualNewsLead(
   const nextVersion = expectedVersion + 1;
   const processingOwner = manualNewsLeadProcessingOwner(id, nextVersion);
   const mutationNonce = createMutationNonce('retry');
+  const invalidationNonce = createMutationNonce('assessment_invalidate');
   const mutation = env.DB.prepare(
     `/* manual_lead:retry */ UPDATE manual_news_leads SET
        status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
@@ -379,11 +290,51 @@ export async function retryManualNewsLead(
        last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
      WHERE id = ? AND version = ? AND status IN ('failed', 'needs_review', 'rejected')`,
   ).bind(idempotencyKey, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, id, expectedVersion);
-  const changed = await runAuditedMutation(env, mutation, auditMutationStatement(env, {
+  const retryAudit = auditMutationStatement(env, {
     leadId: id, action: 'retry', mutationKind: 'retry', mutationNonce,
     fromStatus: lead.status, toStatus: 'validating', idempotencyKey,
     resultingVersion: nextVersion, createdAt: now,
-  }));
+  });
+  const retryGuard = `EXISTS (
+    SELECT 1 FROM manual_news_leads l
+    WHERE l.id = ? AND l.version = ? AND l.status = 'validating'
+      AND l.last_mutation_kind = 'retry' AND l.last_mutation_idempotency_key = ?
+      AND l.last_mutation_nonce = ?
+  )`;
+  const results = await env.DB.batch([
+    mutation,
+    retryAudit,
+    env.DB.prepare(
+      `/* manual_verification:retry_invalidate_audit */ INSERT INTO manual_news_lead_audit (
+         lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+         resulting_version, metadata_json, created_at
+       ) SELECT ?, 'assessment_invalidate', 'validating', 'validating', NULL, ?, ?, ?, ?
+       WHERE ${retryGuard} AND EXISTS (
+         SELECT 1 FROM manual_news_assessment_verifications
+         WHERE lead_id = ? AND status = 'active'
+       )`,
+    ).bind(
+      id, invalidationNonce, nextVersion, JSON.stringify({
+        reason: 'manual_retry', lead_version: nextVersion,
+        previous_lead_version: expectedVersion,
+        previous_processing_attempt: lead.processing_attempt,
+        next_processing_owner: processingOwner,
+        mutation_nonce: invalidationNonce,
+      }), now,
+      id, nextVersion, idempotencyKey, mutationNonce, id,
+    ),
+    env.DB.prepare(
+      `/* manual_verification:retry_invalidate */ UPDATE manual_news_assessment_verifications
+       SET status = 'invalidated', reason = 'manual_retry', invalidated_at = ?
+       WHERE lead_id = ? AND status = 'active' AND ${retryGuard}`,
+    ).bind(now, id, id, nextVersion, idempotencyKey, mutationNonce),
+  ]) as Array<{ meta?: { changes?: number } }>;
+  const changed = auditedMutationChanges(results, 0, 1);
+  const invalidationAudit = Number(results[2]?.meta?.changes || 0);
+  const invalidated = Number(results[3]?.meta?.changes || 0);
+  if ((invalidated > 0 ? 1 : 0) !== invalidationAudit) {
+    throw new Error('manual_verification_audit_causality_mismatch');
+  }
   if (!changed) {
     const conflicted = await getManualNewsLead(env, id);
     if (await hasCompletedRetryAudit(env, id, expectedVersion, idempotencyKey)) {
@@ -404,7 +355,7 @@ export async function claimManualNewsLeadProcessing(
   id: string,
   owner: string,
   now = Date.now(),
-): Promise<boolean> {
+): Promise<number | null> {
   if (!owner || owner.length > 200) throw new Error('invalid_processing_owner');
   const result = await env.DB.prepare(
     `/* manual_lead:claim_processing */ UPDATE manual_news_leads SET
@@ -413,22 +364,24 @@ export async function claimManualNewsLeadProcessing(
      WHERE id = ? AND confirmed_at IS NULL
        AND status IN ('submitted','validating','researching','extracting','verifying','clustering','scored')
        AND (processing_owner IS NULL OR processing_owner = ?
-         OR processing_lease_until IS NULL OR processing_lease_until < ?)`,
-  ).bind(owner, now + PROCESSING_LEASE_MS, now, id, owner, now).run();
-  return Number(result.meta.changes || 0) > 0;
+         OR processing_lease_until IS NULL OR processing_lease_until < ?)
+     RETURNING processing_attempt`,
+  ).bind(owner, now + PROCESSING_LEASE_MS, now, id, owner, now).first<{ processing_attempt: number }>();
+  return result ? Number(result.processing_attempt) : null;
 }
 
 export async function failManualNewsLeadAfterExhaustion(
   env: Env,
   id: string,
   owner: string,
+  processingAttempt: number,
   error: unknown,
   now = Date.now(),
 ): Promise<boolean> {
   const row = await env.DB.prepare(
     `/* manual_lead:owned_processing */ SELECT status, version FROM manual_news_leads
-     WHERE id = ? AND processing_owner = ?`,
-  ).bind(id, owner).first<{ status: ManualNewsLeadStatus; version: number }>();
+     WHERE id = ? AND processing_owner = ? AND processing_attempt = ?`,
+  ).bind(id, owner, processingAttempt).first<{ status: ManualNewsLeadStatus; version: number }>();
   if (!row || !INTERMEDIATE_PROCESSING_STATUSES.includes(row.status)) return false;
   const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 500);
   const mutationNonce = createMutationNonce('processing_exhausted');
@@ -438,13 +391,13 @@ export async function failManualNewsLeadAfterExhaustion(
        error_message = ?, last_mutation_kind = 'processing_exhausted',
        last_mutation_idempotency_key = ?, last_mutation_nonce = ?, processing_owner = NULL,
        processing_lease_until = NULL, updated_at = ?
-     WHERE id = ? AND status = ? AND version = ? AND processing_owner = ?`,
-  ).bind(message, owner, mutationNonce, now, id, row.status, row.version, owner);
+     WHERE id = ? AND status = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?`,
+  ).bind(message, owner, mutationNonce, now, id, row.status, row.version, owner, processingAttempt);
   return await runAuditedMutation(env, mutation, auditMutationStatement(env, {
     leadId: id, action: 'processing_exhausted', mutationKind: 'processing_exhausted', mutationNonce,
     fromStatus: row.status, toStatus: 'failed',
     idempotencyKey: owner, resultingVersion: Number(row.version) + 1,
-    metadata: { processing_owner: owner }, createdAt: now,
+    metadata: { processing_owner: owner, processing_attempt: processingAttempt }, createdAt: now,
   })) > 0;
 }
 
@@ -521,11 +474,18 @@ export async function recoverStaleManualNewsLeads(
 }
 
 export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
-  constructor(private readonly env: Env, private readonly processingOwner?: string) {}
+  constructor(
+    private readonly env: Env,
+    private readonly processingOwner?: string,
+    private readonly processingAttempt?: number,
+  ) {}
 
-  private owner(): string {
+  private fence(): { owner: string; attempt: number } {
     if (!this.processingOwner) throw new Error('processing_owner_required');
-    return this.processingOwner;
+    if (!Number.isInteger(this.processingAttempt) || Number(this.processingAttempt) <= 0) {
+      throw new Error('processing_attempt_required');
+    }
+    return { owner: this.processingOwner, attempt: Number(this.processingAttempt) };
   }
 
   getLead(id: string): Promise<ManualNewsLeadRecord | null> {
@@ -549,24 +509,26 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
   ): Promise<ManualNewsLeadRecord> {
     assertManualLeadTransition(from, to);
     const now = Date.now();
+    const { owner, attempt } = this.fence();
     const current = await this.env.DB.prepare(
-      `/* manual_lead:transition_version */ SELECT version FROM manual_news_leads WHERE id = ? AND status = ?`,
-    ).bind(id, from).first<{ version: number }>();
+      `/* manual_lead:transition_version */ SELECT version FROM manual_news_leads
+       WHERE id = ? AND status = ? AND processing_owner = ? AND processing_attempt = ?`,
+    ).bind(id, from, owner, attempt).first<{ version: number }>();
     if (!current) throw new Error('lead_transition_conflict');
     const terminal = ['recommended', 'needs_review', 'duplicate', 'rejected', 'failed'].includes(to);
     const mutationNonce = createMutationNonce('status_transition');
-    const ownerGuard = this.processingOwner ? ' AND processing_owner = ?' : '';
     const mutation = this.env.DB.prepare(
       `/* manual_lead:transition */ UPDATE manual_news_leads SET
          status = ?, version = version + 1, error_code = ?, error_message = ?,
          last_mutation_kind = 'status_transition', last_mutation_idempotency_key = NULL,
          last_mutation_nonce = ?,
          processing_owner = ?, processing_lease_until = ?, updated_at = ?
-       WHERE id = ? AND status = ? AND version = ?${ownerGuard}`,
+       WHERE id = ? AND status = ? AND version = ?
+         AND processing_owner = ? AND processing_attempt = ?`,
     ).bind(
       to, patch.error_code ?? null, patch.error_message ?? null, mutationNonce,
-      terminal ? null : this.processingOwner || null, terminal ? null : now + PROCESSING_LEASE_MS,
-      now, id, from, Number(current.version), ...(this.processingOwner ? [this.processingOwner] : []),
+      terminal ? null : owner, terminal ? null : now + PROCESSING_LEASE_MS,
+      now, id, from, Number(current.version), owner, attempt,
     );
     const changed = await runAuditedMutation(this.env, mutation, auditMutationStatement(this.env, {
       leadId: id, action: 'status_transition', mutationKind: 'status_transition', mutationNonce,
@@ -584,18 +546,22 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     expectedVersion: number,
     evidence: readonly ManualNewsEvidence[],
   ): Promise<void> {
-    const owner = this.owner();
+    const { owner, attempt } = this.fence();
     const now = Date.now();
-    const mutationNonce = createMutationNonce('assessment_invalidate');
+    const invalidationNonce = createMutationNonce('assessment_invalidate');
+    const replacementNonce = createMutationNonce('evidence_replace');
+    const evidenceDigest = await createManualEvidenceDigest(evidence);
     const leadGuard = `EXISTS (
       SELECT 1 FROM manual_news_leads l
-      WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.status = 'extracting'
+      WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.processing_attempt = ?
+        AND l.status = 'extracting'
     )`;
     const statements = [
       this.env.DB.prepare(
         `/* manual_evidence:owner_guard */ UPDATE manual_news_leads SET updated_at = updated_at
-         WHERE id = ? AND version = ? AND processing_owner = ? AND status = 'extracting'`,
-      ).bind(id, expectedVersion, owner),
+         WHERE id = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?
+           AND status = 'extracting'`,
+      ).bind(id, expectedVersion, owner, attempt),
       this.env.DB.prepare(
         `/* manual_verification:invalidate_audit */ INSERT INTO manual_news_lead_audit (
            lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
@@ -606,18 +572,21 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
            WHERE lead_id = ? AND status = 'active'
          )`,
       ).bind(
-        id, mutationNonce, expectedVersion, JSON.stringify({ reason: 'evidence_replaced' }), now,
-        id, expectedVersion, owner, id,
+        id, invalidationNonce, expectedVersion, JSON.stringify({
+          reason: 'evidence_replaced', processing_owner: owner,
+          processing_attempt: attempt, lead_version: expectedVersion,
+        }), now,
+        id, expectedVersion, owner, attempt, id,
       ),
       this.env.DB.prepare(
         `/* manual_verification:invalidate_for_evidence */ UPDATE manual_news_assessment_verifications
          SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = ?
          WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
-      ).bind(now, id, id, expectedVersion, owner),
+      ).bind(now, id, id, expectedVersion, owner, attempt),
       this.env.DB.prepare(
         `/* manual_evidence:delete */ DELETE FROM manual_news_evidence
          WHERE lead_id = ? AND ${leadGuard}`,
-      ).bind(id, id, expectedVersion, owner),
+      ).bind(id, id, expectedVersion, owner, attempt),
       ...evidence.map((item) => this.env.DB.prepare(
         `/* manual_evidence:insert */ INSERT INTO manual_news_evidence (
            lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
@@ -626,8 +595,24 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       ).bind(
         id, item.id, item.url, item.source_type, item.publisher, item.published_at, item.retrieved_at,
         item.title, item.excerpt, JSON.stringify(item.claims_supported), JSON.stringify(item.fetch_audit || null),
-        item.reliable ? 1 : 0, id, expectedVersion, owner,
+        item.reliable ? 1 : 0, id, expectedVersion, owner, attempt,
       )),
+      this.env.DB.prepare(
+        `/* manual_evidence:replace_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'evidence_replace', 'extracting', 'extracting', NULL, ?, ?, ?, ?
+         WHERE ${leadGuard}`,
+      ).bind(
+        id, replacementNonce, expectedVersion, JSON.stringify({
+          processing_owner: owner,
+          processing_attempt: attempt,
+          lead_version: expectedVersion,
+          evidence_digest: evidenceDigest,
+          mutation_nonce: replacementNonce,
+        }), now,
+        id, expectedVersion, owner, attempt,
+      ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
     if (Number(results[0]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
@@ -640,99 +625,192 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
   }
 
   async listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
-    const result = await this.env.DB.prepare(
+    const manual = await this.env.DB.prepare(
       `/* manual_assessment:recent_prior_events */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a
        JOIN manual_news_assessment_verifications v
          ON v.lead_id = a.lead_id AND v.assessment_version = a.assessment_version AND v.status = 'active'
        JOIN manual_news_leads l ON l.id = a.lead_id
        WHERE l.id <> ? AND l.review_date BETWEEN date(?, '-14 days') AND ?
-         AND a.assessment_version = (
-           SELECT MAX(latest.assessment_version) FROM manual_news_assessment_verifications latest
-           WHERE latest.lead_id = a.lead_id AND latest.status = 'active'
-         )
-       UNION ALL
-       SELECT json_extract(extra, '$.event_fingerprint'), substr(COALESCE(published_at, scraped_at), 1, 10), id
+      `,
+    ).bind(excludeLeadId, date, date)
+      .all<{ event_key: string; review_date: string; lead_id: string }>();
+    const verifiedManual: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
+    for (const row of manual.results || []) {
+      const verified = await loadVerifiedManualAssessment(this.env, row.lead_id);
+      if (verified?.assessment.event_key === row.event_key) verifiedManual.push(row);
+    }
+    const items = await this.env.DB.prepare(
+      `/* manual_assessment:recent_non_manual_items */ SELECT
+         json_extract(extra, '$.event_fingerprint') AS event_key,
+         substr(COALESCE(published_at, scraped_at), 1, 10) AS review_date, id AS lead_id
        FROM items
        WHERE id <> ? AND json_extract(extra, '$.event_fingerprint') IS NOT NULL
+         AND COALESCE(source_ref, '') <> 'manual_lead'
          AND substr(COALESCE(published_at, scraped_at), 1, 10) BETWEEN date(?, '-14 days') AND ?`,
-    ).bind(excludeLeadId, date, date, `blog:manual:${excludeLeadId}`, date, date)
+    ).bind(`blog:manual:${excludeLeadId}`, date, date)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
-    return (result.results || []).filter((item) => !!item.event_key);
+    return [...verifiedManual, ...(items.results || [])].filter((item) => !!item.event_key);
   }
 
   async findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>> {
-    const result = await this.env.DB.prepare(
+    const manual = await this.env.DB.prepare(
       `/* manual_assessment:exact_event_history */ SELECT a.event_key, l.review_date, l.id AS lead_id
        FROM manual_news_event_assessments a
        JOIN manual_news_assessment_verifications v
          ON v.lead_id = a.lead_id AND v.assessment_version = a.assessment_version AND v.status = 'active'
        JOIN manual_news_leads l ON l.id = a.lead_id
        WHERE a.event_key = ? AND l.id <> ?
-         AND a.assessment_version = (
-           SELECT MAX(latest.assessment_version) FROM manual_news_assessment_verifications latest
-           WHERE latest.lead_id = a.lead_id AND latest.status = 'active'
-         )
-       UNION ALL
-       SELECT json_extract(extra, '$.event_fingerprint'), substr(COALESCE(published_at, scraped_at), 1, 10), id
-       FROM items
-       WHERE json_extract(extra, '$.event_fingerprint') = ? AND id <> ?`,
-    ).bind(eventKey, excludeLeadId, eventKey, `blog:manual:${excludeLeadId}`)
+      `,
+    ).bind(eventKey, excludeLeadId)
       .all<{ event_key: string; review_date: string; lead_id: string }>();
-    return (result.results || []).filter((item) => !!item.event_key);
+    const verifiedManual: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
+    for (const row of manual.results || []) {
+      const verified = await loadVerifiedManualAssessment(this.env, row.lead_id);
+      if (verified?.assessment.event_key === eventKey) verifiedManual.push(row);
+    }
+    const items = await this.env.DB.prepare(
+      `/* manual_assessment:exact_non_manual_items */ SELECT
+         json_extract(extra, '$.event_fingerprint') AS event_key,
+         substr(COALESCE(published_at, scraped_at), 1, 10) AS review_date, id AS lead_id
+       FROM items
+       WHERE json_extract(extra, '$.event_fingerprint') = ? AND id <> ?
+         AND COALESCE(source_ref, '') <> 'manual_lead'`,
+    ).bind(eventKey, `blog:manual:${excludeLeadId}`)
+      .all<{ event_key: string; review_date: string; lead_id: string }>();
+    return [...verifiedManual, ...(items.results || [])].filter((item) => !!item.event_key);
   }
 
-  async saveAssessment(
+  async saveVerifiedAssessment(
     id: string,
     expectedVersion: number,
     assessment: ManualNewsProcessedAssessment,
+    verificationRaw: unknown,
   ): Promise<{ assessment_version: number }> {
-    const owner = this.owner();
-    const latest = await this.env.DB.prepare(
-      `/* manual_assessment:max_version */ SELECT COALESCE(MAX(assessment_version), 0) AS assessment_version
-       FROM manual_news_event_assessments WHERE lead_id = ?`,
-    ).bind(id).first<{ assessment_version: number }>();
-    const assessmentVersion = Math.max(expectedVersion, Number(latest?.assessment_version || 0) + 1);
+    const { owner, attempt } = this.fence();
+    const evidence = await loadManualNewsEvidence(this.env, id);
+    const priorEventKeys = assessment.matched_event_key
+      ? (await this.findPriorEventsByEventKey(assessment.matched_event_key, id))
+          .map((event) => event.event_key)
+      : [];
+    const validatedAssessment = validateManualNewsProcessedAssessment(assessment, evidence, priorEventKeys);
+    const verification = validateManualLeadFactVerification(verificationRaw, validatedAssessment, evidence);
+    if (verification.overall_verdict !== 'supported') throw new Error('fact_verification_not_supported');
+    const assessmentVersion = expectedVersion * 1_000_000 + attempt;
+    if (attempt >= 1_000_000 || !Number.isSafeInteger(assessmentVersion) || assessmentVersion <= 0) {
+      throw new Error('invalid_assessment_version');
+    }
     const proof = await createManualLeadVerificationProof({
       lead_id: id,
       assessment_version: assessmentVersion,
-      assessment,
-      evidence: (await this.getLead(id))?.evidence || [],
+      assessment: validatedAssessment,
+      evidence,
+      verification,
     }, this.env.MANUAL_NEWS_VERIFICATION_SECRET || '');
     const now = Date.now();
+    const invalidationNonce = createMutationNonce('assessment_invalidate');
+    const creationNonce = createMutationNonce('verification_create');
     const verificationId = `mav:${id}:${assessmentVersion}:${proof.canonical_digest.slice(0, 16)}`;
-    const leadGuard = `EXISTS (
+    const basicLeadGuard = `EXISTS (
       SELECT 1 FROM manual_news_leads l
-      WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.status = 'verifying'
+      WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.processing_attempt = ?
+        AND l.status = 'verifying'
+    )`;
+    const preSaveGuard = `${basicLeadGuard} AND NOT EXISTS (
+      SELECT 1 FROM manual_news_assessment_verifications current
+      WHERE current.lead_id = ? AND current.status = 'active'
+        AND current.processing_owner = ? AND current.processing_attempt = ?
     )`;
     const statements = [
       this.env.DB.prepare(
         `/* manual_assessment:owner_guard */ UPDATE manual_news_leads SET updated_at = updated_at
-         WHERE id = ? AND version = ? AND processing_owner = ? AND status = 'verifying'`,
-      ).bind(id, expectedVersion, owner),
+         WHERE id = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?
+           AND status = 'verifying' AND NOT EXISTS (
+             SELECT 1 FROM manual_news_assessment_verifications current
+             WHERE current.lead_id = ? AND current.status = 'active'
+               AND current.processing_owner = ? AND current.processing_attempt = ?
+           )`,
+      ).bind(id, expectedVersion, owner, attempt, id, owner, attempt),
+      this.env.DB.prepare(
+        `/* manual_verification:replace_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'assessment_invalidate', 'verifying', 'verifying', NULL, ?, ?, ?, ?
+         WHERE ${preSaveGuard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_verifications old
+           WHERE old.lead_id = ? AND old.status = 'active'
+         )`,
+      ).bind(
+        id, invalidationNonce, expectedVersion, JSON.stringify({
+          reason: 'superseded_by_verification', processing_owner: owner,
+          processing_attempt: attempt, lead_version: expectedVersion,
+        }), now,
+        id, expectedVersion, owner, attempt, id, owner, attempt, id,
+      ),
+      this.env.DB.prepare(
+        `/* manual_verification:replace_active */ UPDATE manual_news_assessment_verifications
+         SET status = 'invalidated', reason = 'superseded_by_verification', invalidated_at = ?
+         WHERE lead_id = ? AND status = 'active' AND ${preSaveGuard}`,
+      ).bind(
+        now, id,
+        id, expectedVersion, owner, attempt, id, owner, attempt,
+      ),
       this.env.DB.prepare(
         `/* manual_assessment:insert */ INSERT INTO manual_news_event_assessments (
            lead_id, assessment_version, event_key, event_type, material_update, score,
            recommendation, assessment_json, created_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${leadGuard}`,
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${preSaveGuard}`,
       ).bind(
-        id, assessmentVersion, assessment.event_key, assessment.event_type, assessment.material_update ? 1 : 0,
-        assessment.score, assessment.recommendation, JSON.stringify(assessment), now,
-        id, expectedVersion, owner,
+        id, assessmentVersion, validatedAssessment.event_key, validatedAssessment.event_type,
+        validatedAssessment.material_update ? 1 : 0, validatedAssessment.score,
+        validatedAssessment.recommendation, JSON.stringify(validatedAssessment), now,
+        id, expectedVersion, owner, attempt, id, owner, attempt,
       ),
       this.env.DB.prepare(
         `/* manual_verification:insert */ INSERT INTO manual_news_assessment_verifications (
            verification_id, lead_id, assessment_version, policy_version, canonical_digest,
-           hmac_sha256, processing_owner, status, reason, created_at, invalidated_at
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${leadGuard}`,
+           hmac_sha256, verification_json, processing_owner, processing_attempt,
+           status, reason, created_at, invalidated_at
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, NULL WHERE ${preSaveGuard}`,
       ).bind(
         verificationId, id, assessmentVersion, proof.policy_version, proof.canonical_digest,
-        proof.hmac_sha256, owner, now, id, expectedVersion, owner,
+        proof.hmac_sha256, JSON.stringify(verification), owner, attempt, now,
+        id, expectedVersion, owner, attempt, id, owner, attempt,
+      ),
+      this.env.DB.prepare(
+        `/* manual_verification:create_audit */ INSERT INTO manual_news_lead_audit (
+           lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+           resulting_version, metadata_json, created_at
+         ) SELECT ?, 'verification_create', 'verifying', 'verifying', NULL, ?, ?, ?, ?
+         WHERE ${basicLeadGuard} AND EXISTS (
+           SELECT 1 FROM manual_news_assessment_verifications created
+           WHERE created.verification_id = ? AND created.lead_id = ?
+             AND created.assessment_version = ? AND created.status = 'active'
+         )`,
+      ).bind(
+        id, creationNonce, expectedVersion, JSON.stringify({
+          verification_id: verificationId,
+          assessment_version: assessmentVersion,
+          policy_version: proof.policy_version,
+          canonical_digest: proof.canonical_digest,
+          processing_owner: owner,
+          processing_attempt: attempt,
+          mutation_nonce: creationNonce,
+        }), now,
+        id, expectedVersion, owner, attempt,
+        verificationId, id, assessmentVersion,
       ),
     ];
     const results = await this.env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
     if (Number(results[0]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
-    if (Number(results[1]?.meta?.changes || 0) !== 1 || Number(results[2]?.meta?.changes || 0) !== 1) {
+    const invalidationAudit = Number(results[1]?.meta?.changes || 0);
+    const invalidated = Number(results[2]?.meta?.changes || 0);
+    if ((invalidated > 0 ? 1 : 0) !== invalidationAudit) {
+      throw new Error('manual_verification_audit_causality_mismatch');
+    }
+    if (Number(results[3]?.meta?.changes || 0) !== 1
+      || Number(results[4]?.meta?.changes || 0) !== 1
+      || Number(results[5]?.meta?.changes || 0) !== 1) {
       throw new Error('manual_assessment_write_causality_mismatch');
     }
     return { assessment_version: assessmentVersion };
@@ -740,19 +818,21 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
 
   async invalidateAssessment(id: string, expectedVersion: number, reason: string): Promise<void> {
     if (!/^[a-z0-9_:-]{1,100}$/.test(reason)) throw new Error('invalid_assessment_invalidation_reason');
-    const owner = this.owner();
+    const { owner, attempt } = this.fence();
     const now = Date.now();
     const mutationNonce = createMutationNonce('assessment_invalidate');
     try {
       const leadGuard = `EXISTS (
         SELECT 1 FROM manual_news_leads l
-        WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.status = 'verifying'
+        WHERE l.id = ? AND l.version = ? AND l.processing_owner = ? AND l.processing_attempt = ?
+          AND l.status = 'verifying'
       )`;
       const results = await this.env.DB.batch([
         this.env.DB.prepare(
           `/* manual_verification:invalidate_owner_guard */ UPDATE manual_news_leads SET updated_at = updated_at
-           WHERE id = ? AND version = ? AND processing_owner = ? AND status = 'verifying'`,
-        ).bind(id, expectedVersion, owner),
+           WHERE id = ? AND version = ? AND processing_owner = ? AND processing_attempt = ?
+             AND status = 'verifying'`,
+        ).bind(id, expectedVersion, owner, attempt),
         this.env.DB.prepare(
           `/* manual_verification:invalidate_audit */ INSERT INTO manual_news_lead_audit (
              lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
@@ -763,14 +843,16 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
              WHERE lead_id = ? AND status = 'active'
            )`,
         ).bind(
-          id, mutationNonce, expectedVersion, JSON.stringify({ reason }), now,
-          id, expectedVersion, owner, id,
+          id, mutationNonce, expectedVersion, JSON.stringify({
+            reason, processing_owner: owner, processing_attempt: attempt, lead_version: expectedVersion,
+          }), now,
+          id, expectedVersion, owner, attempt, id,
         ),
         this.env.DB.prepare(
           `/* manual_verification:invalidate */ UPDATE manual_news_assessment_verifications
            SET status = 'invalidated', reason = ?, invalidated_at = ?
            WHERE lead_id = ? AND status = 'active' AND ${leadGuard}`,
-        ).bind(reason, now, id, id, expectedVersion, owner),
+        ).bind(reason, now, id, id, expectedVersion, owner, attempt),
       ]) as Array<{ meta?: { changes?: number } }>;
       if (Number(results[0]?.meta?.changes || 0) !== 1) throw new Error('stale_processing_owner');
       const auditChanges = Number(results[1]?.meta?.changes || 0);
@@ -788,12 +870,14 @@ const ACTIVE_VERIFICATION_GUARD_SQL = `EXISTS (
   WHERE verification.verification_id = ? AND verification.lead_id = ?
     AND verification.assessment_version = ? AND verification.policy_version = ?
     AND verification.canonical_digest = ? AND verification.hmac_sha256 = ?
+    AND verification.verification_json = ? AND verification.processing_owner = ?
+    AND verification.processing_attempt = ?
     AND verification.status = 'active'
 )`;
 
 function activeVerificationGuardBindings(
   leadId: string,
-  verification: ManualVerificationRow,
+  verification: PersistedManualVerificationRow,
 ): unknown[] {
   return [
     verification.verification_id,
@@ -802,6 +886,9 @@ function activeVerificationGuardBindings(
     verification.policy_version,
     verification.canonical_digest,
     verification.hmac_sha256,
+    verification.verification_json,
+    verification.processing_owner,
+    Number(verification.processing_attempt),
   ];
 }
 
@@ -828,7 +915,7 @@ export async function confirmManualNewsLeadCandidate(
   const row = await env.DB.prepare(
     `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
   ).bind(id).first<ManualLeadRow>();
-  const verified = await loadActiveVerifiedManualAssessment(env, id, lead.evidence);
+  const verified = await loadVerifiedManualAssessment(env, id, lead.evidence);
   if (!verified || !lead.assessment) {
     return { ok: false, status: 409, error: 'lead_not_fact_verified', lead };
   }
@@ -892,7 +979,7 @@ export async function confirmManualNewsLeadCandidate(
          (review_date, lineage_id, generation, updated_at) VALUES (?, ?, 0, ?)`,
       ).bind(lead.review_date, lead.review_date, now),
       confirmedLeadItemStatement(
-        env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.verification, undefined, true,
+        env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record, undefined, true,
       ),
       env.DB.prepare(
         `/* manual_lead:confirm_prefreeze */ UPDATE manual_news_leads SET
@@ -904,7 +991,7 @@ export async function confirmManualNewsLeadCandidate(
            AND ${ACTIVE_VERIFICATION_GUARD_SQL}`,
       ).bind(
         now, idempotencyKey, confirmationNonce, now, id, expectedVersion, lead.review_date, lead.review_date,
-        ...activeVerificationGuardBindings(id, verified.verification),
+        ...activeVerificationGuardBindings(id, verified.record),
       ),
       env.DB.prepare(
         `/* manual_lead:candidate_generation_advance */ UPDATE daily_news_review_candidate_generations
@@ -980,7 +1067,7 @@ export async function confirmManualNewsLeadCandidate(
 
   const statements = [
     confirmedLeadItemStatement(
-      env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.verification, active,
+      env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, verified.record, active,
     ),
     env.DB.prepare(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
@@ -998,7 +1085,7 @@ export async function confirmManualNewsLeadCandidate(
       JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
       batchRevision, active.batch_id, lead.review_date, active.candidate_generation, lead.id, expectedVersion,
       lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
-      ...activeVerificationGuardBindings(lead.id, verified.verification),
+      ...activeVerificationGuardBindings(lead.id, verified.record),
     ),
     env.DB.prepare(
       `/* manual_lead:supersede_batch */ UPDATE daily_news_review_batches SET superseded_by = ?, is_current = 0
@@ -1025,7 +1112,7 @@ export async function confirmManualNewsLeadCandidate(
     ).bind(
       batchId, now, idempotencyKey, confirmationNonce, now,
       lead.id, expectedVersion, lead.review_date, batchId,
-      ...activeVerificationGuardBindings(lead.id, verified.verification),
+      ...activeVerificationGuardBindings(lead.id, verified.record),
     ),
     auditMutationStatement(env, {
       leadId: lead.id, action: 'confirm_candidate', mutationKind: 'confirm', mutationNonce: confirmationNonce,
@@ -1082,7 +1169,7 @@ function confirmedLeadItemStatement(
   publishedAt: string | null,
   itemExtra: string,
   now: number,
-  verification: ManualVerificationRow,
+  verification: PersistedManualVerificationRow,
   expectedActiveBatch?: NewsReviewBatch,
   requireNoActiveBatch = false,
 ): D1PreparedStatement {

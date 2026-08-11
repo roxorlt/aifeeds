@@ -27,7 +27,11 @@ const officialAnthropic: ManualNewsEvidence = {
   retrieved_at: 1,
   title: 'How Claude marks AI-generated content',
   excerpt: 'Documentation for supported models and products.',
-  claims_supported: ['Supported text can include an invisible watermark.', 'Supported files can include C2PA provenance.'],
+  claims_supported: [
+    'Supported text can include an invisible watermark.',
+    'Supported files can include C2PA provenance.',
+    'Anthropic documentation says supported Claude text can include an invisible watermark and supported files can include C2PA provenance.',
+  ],
   reliable: true,
 };
 
@@ -209,6 +213,24 @@ describe('manual news lead domain', () => {
     expect(prompt.user).not.toContain('Ignore prior rules');
   });
 
+  test('always emits material_update as a fact and isolates bounded prior events to that fact', () => {
+    const candidate = validateManualLeadAssessment(assessment({ material_update: false }), [officialAnthropic]);
+    const prompt = buildManualLeadFactVerificationPrompt({
+      assessment: candidate,
+      evidence: [officialAnthropic],
+      prior_events: [{ event_key: candidate.event_key, review_date: '2026-08-09', lead_id: 'prior-lead' }],
+    });
+    const facts = (JSON.parse(prompt.user) as {
+      facts: Array<{ fact_id: string; untrusted_prior_events?: unknown[] }>;
+    }).facts;
+
+    expect(facts.map((fact) => fact.fact_id)).toContain('field:material_update');
+    expect(facts.find((fact) => fact.fact_id === 'field:material_update')?.untrusted_prior_events)
+      .toHaveLength(1);
+    expect(facts.filter((fact) => fact.fact_id !== 'field:material_update')
+      .every((fact) => fact.untrusted_prior_events === undefined)).toBe(true);
+  });
+
   test('strictly validates exact fact coverage and source quotes against each isolated evidence context', () => {
     const candidate = validateManualLeadAssessment(assessment(), [officialAnthropic]);
     const prompt = buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence: [officialAnthropic] });
@@ -219,7 +241,7 @@ describe('manual news lead domain', () => {
         fact_id: fact.fact_id,
         supported: true,
         issue_code: 'none',
-        source_quotes: [{ evidence_id: 'ev-official', quote: 'Documentation for supported models and products.' }],
+        source_quotes: [{ evidence_id: 'ev-official', quote: officialAnthropic.claims_supported[2] }],
       })),
     };
 
@@ -237,7 +259,7 @@ describe('manual news lead domain', () => {
     const candidate = validateManualLeadAssessment(assessment(), [officialAnthropic]);
     const prompt = buildManualLeadFactVerificationPrompt({ assessment: candidate, evidence: [officialAnthropic] });
     const facts = (JSON.parse(prompt.user) as { facts: Array<{ fact_id: string }> }).facts;
-    const result = (quote: string, evidenceId = 'ev-official') => ({
+    const result = (quote = officialAnthropic.claims_supported[2], evidenceId = 'ev-official') => ({
       overall_verdict: 'supported',
       fact_results: facts.map((fact) => ({
         fact_id: fact.fact_id, supported: true, issue_code: 'none',
@@ -246,7 +268,8 @@ describe('manual news lead domain', () => {
     });
 
     expect(validateManualLeadFactVerification(
-      result('Documentation   for\n supported models and products.'), candidate, [officialAnthropic],
+      result('Anthropic documentation says supported Claude text can include an invisible watermark and\n supported files can include C2PA provenance.'),
+      candidate, [officialAnthropic],
     ).overall_verdict).toBe('supported');
     expect(() => validateManualLeadFactVerification(result('Text absent from every source.'), candidate, [officialAnthropic]))
       .toThrow(/fact_verification_quote_not_found/);
@@ -256,10 +279,105 @@ describe('manual news lead domain', () => {
       .toThrow(/invalid_fact_verification_quote/);
   });
 
+  test('rejects short, cross-source, anchor-free, and polarity-reversed quote evidence', () => {
+    const supportingQuote = officialAnthropic.claims_supported[2];
+    const negativeEvidence = {
+      ...independentReport,
+      claims_supported: ['Anthropic does not add C2PA provenance to Claude outputs.'],
+    };
+    const candidate = validateManualLeadAssessment(assessment({
+      claims: [{ text: assessment().claims[0].text, evidence_ids: ['ev-official', 'ev-media'] }],
+    }), [officialAnthropic, negativeEvidence]);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [officialAnthropic, negativeEvidence],
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const valid = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => ({
+        fact_id: fact.fact_id, supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: 'ev-official', quote: supportingQuote }],
+      })),
+    };
+    const replaceSummaryQuotes = (source_quotes: Array<{ evidence_id: string; quote: string }>) => ({
+      ...valid,
+      fact_results: valid.fact_results.map((fact) => fact.fact_id === 'field:summary'
+        ? { ...fact, source_quotes }
+        : fact),
+    });
+
+    expect(() => validateManualLeadFactVerification(
+      replaceSummaryQuotes([{ evidence_id: 'ev-official', quote: 'A' }]),
+      candidate, [officialAnthropic, negativeEvidence],
+    )).toThrow(/invalid_fact_verification_quote/);
+    expect(() => validateManualLeadFactVerification(replaceSummaryQuotes([
+      { evidence_id: 'ev-official', quote: supportingQuote },
+      { evidence_id: 'ev-media', quote: negativeEvidence.claims_supported[0] },
+    ]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/multiple_fact_quote_evidence/);
+    expect(() => validateManualLeadFactVerification(replaceSummaryQuotes([{
+      evidence_id: 'ev-official', quote: 'Documentation for supported models and products.',
+    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_anchor_missing/);
+    expect(() => validateManualLeadFactVerification(replaceSummaryQuotes([{
+      evidence_id: 'ev-media', quote: negativeEvidence.claims_supported[0],
+    }]), candidate, [officialAnthropic, negativeEvidence])).toThrow(/fact_verification_polarity_mismatch/);
+  });
+
+  test('rejects a long but generic same-language quote with no distinctive fact signal', () => {
+    const genericEvidence = {
+      ...officialAnthropic,
+      excerpt: '官方正式发布了这一重要消息并提供相关更新内容。',
+      claims_supported: ['官方正式发布了这一重要消息并提供相关更新内容。'],
+    };
+    const candidate = validateManualLeadAssessment(assessment({
+      title: '公司披露输出内容来源标记',
+      summary: '公司帮助文档将标记能力范围限定为受支持产品。',
+      event_key: 'company-output-provenance-documentation',
+      claims: [{ text: '公司帮助文档披露输出内容来源标记。', evidence_ids: [genericEvidence.id] }],
+    }), [genericEvidence]);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [genericEvidence],
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const result = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => ({
+        fact_id: fact.fact_id, supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: genericEvidence.id, quote: genericEvidence.excerpt }],
+      })),
+    };
+
+    expect(() => validateManualLeadFactVerification(result, candidate, [genericEvidence]))
+      .toThrow(/fact_verification_fact_signal_missing/);
+  });
+
+  test('rejects Chinese positive facts backed by an explicitly negative quote', () => {
+    const negativeEvidence = {
+      ...officialAnthropic,
+      excerpt: 'Anthropic并不支持C2PA来源标记，官方已经否认提供该能力。',
+      claims_supported: ['Anthropic并不支持C2PA来源标记，官方已经否认提供该能力。'],
+    };
+    const candidate = validateManualLeadAssessment(assessment({
+      title: 'Anthropic支持C2PA来源标记',
+      summary: 'Anthropic为受支持产品提供C2PA来源标记。',
+      claims: [{ text: 'Anthropic支持C2PA来源标记。', evidence_ids: [negativeEvidence.id] }],
+    }), [negativeEvidence]);
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [negativeEvidence],
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const result = {
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => ({
+        fact_id: fact.fact_id, supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: negativeEvidence.id, quote: negativeEvidence.excerpt }],
+      })),
+    };
+
+    expect(() => validateManualLeadFactVerification(result, candidate, [negativeEvidence]))
+      .toThrow(/fact_verification_polarity_mismatch/);
+  });
+
   test('binds every final assessment and evidence field to an HMAC verification proof', async () => {
     const evidence = [{
       ...officialAnthropic,
-      claims_supported: ['watermark', 'C2PA'],
+      claims_supported: [officialAnthropic.claims_supported[2]],
       fetch_audit: {
         hops: [{ url: officialAnthropic.url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
         source_content_type: 'text/html', extraction: 'html' as const,
@@ -274,13 +392,26 @@ describe('manual news lead domain', () => {
     const candidate: ManualNewsProcessedAssessment = {
       ...core, duplicate_scope: null, matched_lead_id: null,
     };
-    const secret = 'verification-test-secret-32-bytes-minimum';
-    const input = { lead_id: 'ml-20260811-proof', assessment_version: 9, assessment: candidate, evidence };
+    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence,
+    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    const verification = validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: facts.map((fact) => ({
+        fact_id: fact.fact_id, supported: true, issue_code: 'none',
+        source_quotes: [{ evidence_id: 'ev-official', quote: officialAnthropic.claims_supported[2] }],
+      })),
+    }, candidate, evidence);
+    const secret = 'a'.repeat(64);
+    const input = {
+      lead_id: 'ml-20260811-proof', assessment_version: 9,
+      assessment: candidate, evidence, verification,
+    };
     const proof = await createManualLeadVerificationProof(input, secret);
 
     expect(proof).toMatchObject({ canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/), hmac_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     await expect(isCurrentManualLeadVerification(input, proof, secret)).resolves.toBe(true);
-    await expect(isCurrentManualLeadVerification(input, proof, `${secret}-wrong`)).resolves.toBe(false);
+    await expect(isCurrentManualLeadVerification(input, proof, 'b'.repeat(64))).resolves.toBe(false);
     const assessmentMutations: ManualNewsProcessedAssessment[] = [
       { ...candidate, title: 'changed' },
       { ...candidate, summary: 'changed' },
@@ -323,9 +454,22 @@ describe('manual news lead domain', () => {
     }, proof, secret)).resolves.toBe(false);
     await expect(isCurrentManualLeadVerification({
       ...input, evidence: [{ ...evidence[0], claims_supported: ['C2PA', 'watermark'] }],
-    }, proof, secret)).resolves.toBe(true);
+    }, proof, secret)).resolves.toBe(false);
+    await expect(isCurrentManualLeadVerification({
+      ...input,
+      verification: {
+        ...verification,
+        fact_results: verification.fact_results.map((fact, index) => index === 0
+          ? { ...fact, source_quotes: [{ ...fact.source_quotes[0], quote: 'tampered audit quote' }] }
+          : fact),
+      },
+    }, proof, secret)).resolves.toBe(false);
     await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_verification_secret_invalid/);
     await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_verification_secret_invalid/);
+    await expect(createManualLeadVerificationProof(input, 'verification-test-secret-32-bytes-minimum'))
+      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+    await expect(createManualLeadVerificationProof(input, 'A'.repeat(64)))
+      .rejects.toThrow(/manual_news_verification_secret_invalid/);
   });
 
   test('uses a conservative exact compound anchor for an ASCII entity plus standalone version', () => {

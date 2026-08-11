@@ -269,7 +269,12 @@ export function createManualNewsLeadRuntimeAdapters(
   };
 }
 
-export async function processManualNewsLeadWithEnv(env: Env, leadId: string, processingOwner?: string): Promise<void> {
-  const store = new D1ManualLeadProcessingStore(env, processingOwner);
+export async function processManualNewsLeadWithEnv(
+  env: Env,
+  leadId: string,
+  processingOwner?: string,
+  processingAttempt?: number,
+): Promise<void> {
+  const store = new D1ManualLeadProcessingStore(env, processingOwner, processingAttempt);
   await processManualNewsLead(leadId, store, createManualNewsLeadRuntimeAdapters(env));
 }

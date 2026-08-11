@@ -5,7 +5,7 @@ vi.mock('./manual-news-leads-runtime', () => ({
   processManualNewsLeadWithEnv: vi.fn(async () => undefined),
 }));
 vi.mock('./manual-news-leads-store', () => ({
-  claimManualNewsLeadProcessing: vi.fn(async () => true),
+  claimManualNewsLeadProcessing: vi.fn(async () => 1),
   failManualNewsLeadAfterExhaustion: vi.fn(async () => true),
 }));
 
@@ -14,7 +14,10 @@ import { claimManualNewsLeadProcessing, failManualNewsLeadAfterExhaustion } from
 import { runManualNewsLeadWorkflow } from './manual-news-leads-workflow';
 
 describe('manual news lead workflow', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(claimManualNewsLeadProcessing).mockResolvedValue(1);
+  });
   test('a permanent pipeline result completes in one attempt without exhaustion handling', async () => {
     const step = { do: vi.fn(async (_name, _options, callback: () => Promise<void>) => callback()) };
     const env = {} as never;
@@ -28,6 +31,10 @@ describe('manual news lead workflow', () => {
   });
 
   test('lets the durable step retry two transient failures before succeeding', async () => {
+    vi.mocked(claimManualNewsLeadProcessing)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(3);
     vi.mocked(processManualNewsLeadWithEnv)
       .mockRejectedValueOnce(new Error('gateway_timeout'))
       .mockRejectedValueOnce(new Error('trusted_gateway_http_503'))
@@ -53,12 +60,24 @@ describe('manual news lead workflow', () => {
       expect.any(Function),
     );
     expect(processManualNewsLeadWithEnv).toHaveBeenCalledTimes(3);
-    expect(processManualNewsLeadWithEnv).toHaveBeenLastCalledWith(env, 'ml-20260811-abc123def456', 'workflow-1');
+    expect(processManualNewsLeadWithEnv).toHaveBeenNthCalledWith(
+      1, env, 'ml-20260811-abc123def456', 'workflow-1', 1,
+    );
+    expect(processManualNewsLeadWithEnv).toHaveBeenNthCalledWith(
+      2, env, 'ml-20260811-abc123def456', 'workflow-1', 2,
+    );
+    expect(processManualNewsLeadWithEnv).toHaveBeenNthCalledWith(
+      3, env, 'ml-20260811-abc123def456', 'workflow-1', 3,
+    );
     expect(claimManualNewsLeadProcessing).toHaveBeenCalledTimes(3);
     expect(failManualNewsLeadAfterExhaustion).not.toHaveBeenCalled();
   });
 
   test('marks a still-owned lead failed only after durable retry exhaustion', async () => {
+    vi.mocked(claimManualNewsLeadProcessing)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(3);
     vi.mocked(processManualNewsLeadWithEnv).mockRejectedValue(new Error('model_gateway_503'));
     const step = {
       do: vi.fn(async (_name, options, callback: () => Promise<void>) => {
@@ -76,7 +95,8 @@ describe('manual news lead workflow', () => {
 
     expect(processManualNewsLeadWithEnv).toHaveBeenCalledTimes(3);
     expect(failManualNewsLeadAfterExhaustion).toHaveBeenCalledWith(
-      env, 'ml-20260811-abc123def456', 'workflow-exhausted', expect.any(Error), expect.any(Number),
+      env, 'ml-20260811-abc123def456', 'workflow-exhausted', 3,
+      expect.any(Error), expect.any(Number),
     );
   });
 });

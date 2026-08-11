@@ -64,10 +64,11 @@ export interface ManualLeadProcessingStore {
   replaceEvidence(id: string, expectedVersion: number, evidence: readonly ManualNewsEvidence[]): Promise<void>;
   listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
   findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
-  saveAssessment(
+  saveVerifiedAssessment(
     id: string,
     expectedVersion: number,
     assessment: ProcessedManualLeadAssessment,
+    verification: unknown,
   ): Promise<{ assessment_version: number }>;
   invalidateAssessment(id: string, expectedVersion: number, reason: string): Promise<void>;
 }
@@ -89,6 +90,10 @@ export function isTransientManualLeadError(error: unknown): boolean {
   const message = conciseError(error).toLowerCase();
   return /(?:timeout|timed out|abort|429|(?:^|_)5\d\d(?:$|_)|gateway|network|fetch|d1|sqlite|database|model|no_text|empty_model|json_parse_fail|rate.?limit|temporar|unavailable)/
     .test(message);
+}
+
+function isDeterministicModelJsonError(error: unknown): boolean {
+  return /(?:^|_)json_parse_fail(?:$|_)/i.test(conciseError(error));
 }
 
 async function finalizeManualLeadAssessment(
@@ -235,6 +240,14 @@ export async function processManualNewsLead(
         try {
           raw = await adapters.assess(prompt);
         } catch (error) {
+          if (isDeterministicModelJsonError(error)) {
+            await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
+            await transition('needs_review', {
+              error_code: 'assessment_validation_failed',
+              error_message: 'invalid_assessment',
+            });
+            return (await store.getLead(leadId))!;
+          }
           if (isTransientManualLeadError(error)) throw error;
           await transition('failed', {
             error_code: 'assessment_failed',
@@ -256,13 +269,25 @@ export async function processManualNewsLead(
           });
           return (await store.getLead(leadId))!;
         }
+        const finalizedAssessment = await finalizeManualLeadAssessment(
+          leadId, normalized.date, validatedAssessment, store,
+        );
         let verificationRaw: unknown;
         try {
           verificationRaw = await adapters.verify(buildManualLeadFactVerificationPrompt({
-            assessment: validatedAssessment,
+            assessment: finalizedAssessment,
             evidence,
+            prior_events: priorEvents,
           }));
         } catch (error) {
+          if (isDeterministicModelJsonError(error)) {
+            await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
+            await transition('needs_review', {
+              error_code: 'fact_verification_failed',
+              error_message: 'invalid_fact_verification',
+            });
+            return (await store.getLead(leadId))!;
+          }
           if (isTransientManualLeadError(error)) throw error;
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_model_failed');
           await transition('failed', {
@@ -273,7 +298,7 @@ export async function processManualNewsLead(
         }
         let verification;
         try {
-          verification = validateManualLeadFactVerification(verificationRaw, validatedAssessment, evidence);
+          verification = validateManualLeadFactVerification(verificationRaw, finalizedAssessment, evidence);
         } catch (error) {
           await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
           await transition('needs_review', {
@@ -291,8 +316,8 @@ export async function processManualNewsLead(
           });
           return (await store.getLead(leadId))!;
         }
-        assessment = await finalizeManualLeadAssessment(leadId, normalized.date, validatedAssessment, store);
-        await store.saveAssessment(leadId, lead.version, assessment);
+        assessment = finalizedAssessment;
+        await store.saveVerifiedAssessment(leadId, lead.version, assessment, verification);
       }
       await transition('clustering');
     }

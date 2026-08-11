@@ -7,8 +7,10 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { Env } from '../index';
 import {
   applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
   validateManualLeadAssessment,
+  validateManualLeadFactVerification,
 } from './manual-news-leads';
 import { confirmManualNewsLeadCandidate, retryManualNewsLead } from './manual-news-leads-store';
 import {
@@ -115,7 +117,7 @@ function state() {
   const env = {
     DB: db as unknown as D1Database,
     DAILY_NEWS_REVIEW_SECRET: 'test-secret',
-    MANUAL_NEWS_VERIFICATION_SECRET: 'manual-news-race-verification-secret-32-bytes',
+    MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
   } as Env;
   return { db, env };
 }
@@ -128,11 +130,13 @@ function candidates(prefix: string): NewsReviewCandidate[] {
 }
 
 async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
+  const supportingText = `Official release documentation for ${eventKey} describes the product and published scope.`;
   const rawAssessment = {
-    title: `${id}核验标题`, summary: '核验摘要', event_key: eventKey,
+    title: 'Official product release documentation',
+    summary: 'Official release documentation describes the product and published scope.', event_key: eventKey,
     event_type: 'product_release', material_update: true, score: 90,
     recommendation: 'recommended', occurred_at: '2026-08-11', uncertainties: [],
-    claims: [{ text: '官方发布。', evidence_ids: [`ev-${id}`] }], matched_event_key: null,
+    claims: [{ text: 'Official release documentation describes the product and published scope.', evidence_ids: [`ev-${id}`] }], matched_event_key: null,
   };
   const evidence = {
     id: `ev-${id}`,
@@ -141,9 +145,9 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     publisher: 'anthropic.com',
     published_at: '2026-08-11',
     retrieved_at: 1,
-    title: 'Official',
-    excerpt: 'Official release.',
-    claims_supported: ['Official release.'],
+    title: 'Official product release documentation',
+    excerpt: supportingText,
+    claims_supported: [supportingText],
     reliable: true,
     fetch_audit: null,
   };
@@ -154,21 +158,33 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     duplicate_scope: null,
     matched_lead_id: null,
   };
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment, evidence: [evidence],
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: facts.map((fact) => ({
+      fact_id: fact.fact_id,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence.id, quote: supportingText }],
+    })),
+  }, assessment, [evidence]);
   const proof = await createManualLeadVerificationProof({
-    lead_id: id, assessment_version: 7, assessment, evidence: [evidence],
-  }, 'manual-news-race-verification-secret-32-bytes');
+    lead_id: id, assessment_version: 7, assessment, evidence: [evidence], verification,
+  }, 'b'.repeat(64));
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
-    submit_idempotency_key, created_at, updated_at
-  ) VALUES (?, '2026-08-11', 'url', '', ?, '', 'recommended', 7, ?, 1, 1)`).run(
+    submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+  ) VALUES (?, '2026-08-11', 'url', '', ?, '', 'recommended', 7, ?, 'workflow-owner', 1, 1, 1)`).run(
     id, `https://www.anthropic.com/news/${id}`, `submit-${id}`,
   );
   db.sqlite.prepare(`INSERT INTO manual_news_evidence (
     lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
-    title, excerpt, claims_supported_json, reliable
+    title, excerpt, claims_supported_json, reliable, fetch_audit_json
   ) VALUES (?, ?, ?, 'official_primary', 'anthropic.com', '2026-08-11', 1,
-    'Official', 'Official release.', '["Official release."]', 1)`).run(
-    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`,
+    'Official product release documentation', ?, ?, 1, 'null')`).run(
+    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`, supportingText, JSON.stringify([supportingText]),
   );
   db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
     lead_id, assessment_version, event_key, event_type, material_update, score,
@@ -178,9 +194,11 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
   );
   db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
     verification_id, lead_id, assessment_version, policy_version, canonical_digest,
-    hmac_sha256, processing_owner, status, reason, created_at, invalidated_at
-  ) VALUES (?, ?, 7, ?, ?, ?, 'workflow-owner', 'active', NULL, 1, NULL)`).run(
+    hmac_sha256, verification_json, processing_owner, processing_attempt,
+    status, reason, created_at, invalidated_at
+  ) VALUES (?, ?, 7, ?, ?, ?, ?, 'workflow-owner', 1, 'active', NULL, 1, NULL)`).run(
     `mav-${id}`, id, proof.policy_version, proof.canonical_digest, proof.hmac_sha256,
+    JSON.stringify(verification),
   );
 }
 
@@ -215,6 +233,36 @@ describe('news review revision CAS', () => {
     expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
       .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
     expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('confirmation cannot commit after verification JSON changes between validation and CAS', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-q00000000001';
+    await insertLead(current.db, leadId, 'event-verification-json-race');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verification-json-race'),
+      candidates('verification-json-race').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-after-verification-json-check', 150,
+    );
+    await gate.entered;
+    const active = current.db.sqlite.prepare(`SELECT verification_json
+      FROM manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+      .get(leadId) as { verification_json: string };
+    const changed = JSON.parse(active.verification_json);
+    changed.fact_results[0].source_quotes[0].quote = 'Tampered quotation after the verifier check.';
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET verification_json = ?
+      WHERE lead_id = ? AND status = 'active'`).run(JSON.stringify(changed), leadId);
+    gate.release();
+
+    await expect(confirmation).resolves.toMatchObject({ ok: false, status: 409 });
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(leadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
   });
 
   test('a retry CAS loser cannot write an audit for a concurrent confirmation winner', async () => {
@@ -262,7 +310,7 @@ describe('news review revision CAS', () => {
     expect(await confirmation).toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
     expect(current.db.sqlite.prepare(
       `SELECT action FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
-    ).all(leadId)).toEqual([{ action: 'retry' }]);
+    ).all(leadId)).toEqual([{ action: 'retry' }, { action: 'assessment_invalidate' }]);
   });
 
   test('prefreeze confirmation invalidates a freeze that already snapshotted no confirmed leads', async () => {
@@ -460,6 +508,50 @@ describe('news review revision CAS', () => {
     ]);
     expect(scheduled.batch.candidate_ids).not.toContain('fresh-5');
     expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('scheduled freeze drops a snapshot manual candidate when its active HMAC no longer verifies', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-h00000000001';
+    await insertLead(current.db, leadId, 'event-invalidated-hmac');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verified-v1'),
+      candidates('verified-v1').map((item) => item.item_id), 100,
+    );
+    const confirmed = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-before-hmac-tamper', 110,
+    );
+    expect(confirmed).toMatchObject({ ok: true, changed: true });
+    expect((await getActiveNewsReviewBatch(current.env, '2026-08-11'))?.candidates
+      .some((candidate) => candidate.lead_id === leadId)).toBe(true);
+
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET hmac_sha256 = ? WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verified-v3'),
+      candidates('verified-v3').map((item) => item.item_id), 120,
+    );
+
+    expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect(refreshed.batch.candidates.every((candidate) => candidate.origin !== 'manual_lead')).toBe(true);
+  });
+
+  test('scheduled freeze cannot preserve a manual-looking snapshot without a verified durable lead', async () => {
+    const current = state();
+    const scheduled = candidates('snapshot-guard');
+    const injected = {
+      item_id: 'blog:manual:ml-20260811-unverified001',
+      title: 'Unverified snapshot title', summary: 'Unverified snapshot summary',
+      source: 'snapshot', score: 99, event_key: 'unverified-snapshot-event',
+    };
+
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', [...scheduled, injected],
+      scheduled.map((candidate) => candidate.item_id), 100,
+    );
+
+    expect(frozen.batch.candidates).toEqual(scheduled);
+    expect(frozen.batch.candidate_ids).not.toContain(injected.item_id);
   });
 
   test('inactive legacy token is read-only and inactive applied selection is ignored', async () => {

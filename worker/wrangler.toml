@@ -170,7 +170,7 @@ binding = "DIGEST_DELIVER_WORKFLOW"
 class_name = "DigestDeliverWorkflow"
 
 # 工作台手工补录行业新闻线索：安全取证 → 双 pass 事实核验 → 聚类去重 → 评分。
-# 每个环境必须另行配置至少 32 UTF-8 bytes 的 Wrangler secret：
+# 每个环境必须另行配置恰好 64 个小写十六进制字符的 Wrangler secret：
 # MANUAL_NEWS_VERIFICATION_SECRET（只存 secret，不得写入 vars/仓库）。
 [[workflows]]
 name = "manual-news-lead-workflow"

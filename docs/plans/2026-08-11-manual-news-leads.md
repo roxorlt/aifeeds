@@ -25,8 +25,8 @@
 - 来源权威等级只由最终抓取 URL 的精确 registrable-domain allowlist 决定；用户和搜索 hint 不能指定 `source_type`、`reliable` 或官方身份。
 - 模型额外字段、缺字段、非法枚举、未知 evidence ID 均失败关闭；不确定范围/时间必须显式输出。
 - 结构化高置信 anchor 在模型调用前执行精确 token-set 门控；URL 和 note 不参与，`o3` 不匹配 `o3-mini`，`GPT-5.6` 不匹配 preview/5.60，并保守支持 `Claude 5` 这类实体+独立版本组合。纯中文且无结构 anchor 的线索交给双模型与 quote gate，不做伪中文分词。
-- 完整核验结果不写回 assessment JSON 自证。migration 034 的独立 verification 行使用 `MANUAL_NEWS_VERIFICATION_SECRET` 对 lead ID、assessment version、完整最终 assessment 和完整 evidence（含 `fetch_audit`）的规范摘要做 HMAC-SHA256。API、重放与确认只信当前 active 且 HMAC/摘要复算一致的记录；033 遗留且无 verification 的 assessment 默认隐藏。
-- evidence、assessment、verification 的写入/失效全部绑定 lead version、processing owner 和状态。接管后的旧 Workflow 对 `replaceEvidence`、`saveAssessment`、`invalidateAssessment` 均为零写入；失效只保留审计并把 verification 标记为 invalidated，不物理删除历史 assessment。
+- 完整核验结果不写回 assessment JSON 自证。migration 034 的独立 verification 行持久化严格验证后的 `verification_json`，并使用 `MANUAL_NEWS_VERIFICATION_SECRET` 对 lead ID、assessment version、完整最终 assessment、完整 evidence（含 `fetch_audit`）及完整 verification JSON 的规范摘要做 HMAC-SHA256。lead API、重放、确认、候选组装与跨日去重只信当前 active 且 schema/quote/digest/HMAC 全部复算一致的记录；033 遗留且无 verification 的 assessment 默认隐藏。
+- evidence、assessment、verification 的写入/失效全部绑定 lead version、processing owner、`processing_attempt` fencing token 和状态。接管后即使 owner 相同，旧 attempt 对 `replaceEvidence`、`saveVerifiedAssessment`、`invalidateAssessment` 和状态转换均为零写入；失效只保留带 owner/attempt/version/digest/nonce 的审计并把 verification 标记为 invalidated，不物理删除历史 assessment。
 - 候选批次最多 10 条，确认操作保留当前 production selection，`rerender_enqueued` 固定为 `false`。
 - `daily_news_review_candidate_generations` 按日期/lineage 懒初始化为 0；历史日期及既有 batch 的 `candidate_generation` 默认 0。它只在成功的 pre-freeze confirmation 中单调递增，同幂等键重放不重复递增；active revision 仍沿用原 batch revision CAS。
 - CF 将规范化抓取审计持久化在每条 `manual_news_evidence.fetch_audit_json`；HK 不存事实副本，只展示 CF 响应。
@@ -34,13 +34,13 @@
 ## 发布与验收
 
 1. staging 按顺序执行 migration 033、034；不得修改或重跑已执行的 033。034 只新增 `manual_news_assessment_verifications` 表和索引。
-2. 配置 staging `MANUAL_NEWS_RESEARCH_ORIGIN`、secret `MANUAL_NEWS_RESEARCH_TOKEN`，以及每环境独立、至少 32 UTF-8 bytes 的 secret `MANUAL_NEWS_VERIFICATION_SECRET`；研究网关必须实现 `/v1/search` 和 `/v1/document` 契约及连接 peer pinning。
+2. 配置 staging `MANUAL_NEWS_RESEARCH_ORIGIN`、secret `MANUAL_NEWS_RESEARCH_TOKEN`，以及每环境独立、恰好 64 个小写十六进制字符的 secret `MANUAL_NEWS_VERIFICATION_SECRET`（32 随机 bytes 的 lowercase hex）；研究网关必须实现 `/v1/search` 和 `/v1/document` 契约及连接 peer pinning。
 3. 部署 staging Worker，确认 `MANUAL_NEWS_LEAD_WORKFLOW` binding、研究网关失败关闭和 API 鉴权。
 4. 部署 staging HK，验证文字-only、URL-only、状态轮询、失败重试、确认候选、V1→V2，以及原 1–5 条排序/重生成回归。
 5. 验证确认前后 Top 5 与渲染任务均无自动变化。
 6. production 按相同顺序迁移与部署，完成两条示例线索的证据范围人工验收。
 
-新线索正常成本是两次 DeepSeek V4 Pro 调用。状态转换重放若 active verification 的 policy、完整 digest 与 HMAC 都仍有效，则复用 assessment，模型调用为 0；旧记录、证据变化或无效凭证会先失效再生成。第一次模型调用后、verification 原子持久化前发生瞬时失败时，Workflow 保持 at-least-once，下一次会重新执行两次模型调用，不在代码中伪造恢复结果。
+新线索正常成本是两次 DeepSeek V4 Pro 调用。同一次 Workflow 的状态转换重放若 active verification 的 policy、完整 digest 与 HMAC 都仍有效，则复用 assessment，模型调用为 0；运营侧显式 retry 在同一 D1 batch 中先审计并失效旧 active verification，确保下一轮重新检索和生成。旧记录、证据变化或无效凭证也会先失效再生成。第一次模型调用后、verification 原子持久化前发生瞬时失败时，Workflow 保持 at-least-once，下一次会重新执行两次模型调用，不在代码中伪造恢复结果。
 
 ## 研究网关契约
 

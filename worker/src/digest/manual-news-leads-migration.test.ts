@@ -37,7 +37,8 @@ describe('manual news lead migration', () => {
     expect(tableColumns(db, 'manual_news_event_assessments')).toContain('assessment_json');
     expect(tableColumns(db, 'manual_news_assessment_verifications')).toEqual(expect.arrayContaining([
       'verification_id', 'lead_id', 'assessment_version', 'policy_version', 'canonical_digest',
-      'hmac_sha256', 'processing_owner', 'status', 'reason', 'created_at', 'invalidated_at',
+      'hmac_sha256', 'verification_json', 'processing_owner', 'processing_attempt',
+      'status', 'reason', 'created_at', 'invalidated_at',
     ]));
     expect(tableColumns(db, 'manual_news_lead_audit')).toEqual(expect.arrayContaining([
       'metadata_json', 'resulting_version', 'mutation_nonce',
@@ -50,7 +51,7 @@ describe('manual news lead migration', () => {
     expect(() => insert.run('batch-v2', 2)).toThrow(/UNIQUE constraint failed/);
   });
 
-  test('allows one active verification per lead version while retaining invalidated history', () => {
+  test('allows only one active verification per lead while retaining invalidated history', () => {
     const db = new DatabaseSync(':memory:');
     db.exec('CREATE TABLE items (id TEXT PRIMARY KEY, extra TEXT)');
     db.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
@@ -58,17 +59,18 @@ describe('manual news lead migration', () => {
     db.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
     const insert = db.prepare(`INSERT INTO manual_news_assessment_verifications (
       verification_id, lead_id, assessment_version, policy_version, canonical_digest,
-      hmac_sha256, processing_owner, status, reason, created_at, invalidated_at
-    ) VALUES (?, 'lead-1', 4, 'fact-evidence-hmac-v2', ?, ?, 'owner-1', ?, ?, 1, ?)`);
-    insert.run('verification-1', 'a'.repeat(64), 'b'.repeat(64), 'active', null, null);
+      hmac_sha256, verification_json, processing_owner, processing_attempt,
+      status, reason, created_at, invalidated_at
+    ) VALUES (?, 'lead-1', ?, 'fact-evidence-hmac-v2', ?, ?, '{}', 'owner-1', 1, ?, ?, 1, ?)`);
+    insert.run('verification-1', 4, 'a'.repeat(64), 'b'.repeat(64), 'active', null, null);
 
     expect(() => insert.run(
-      'verification-2', 'c'.repeat(64), 'd'.repeat(64), 'active', null, null,
+      'verification-2', 5, 'c'.repeat(64), 'd'.repeat(64), 'active', null, null,
     )).toThrow(/UNIQUE constraint failed/);
     db.prepare(`UPDATE manual_news_assessment_verifications
       SET status = 'invalidated', reason = 'evidence_replaced', invalidated_at = 2
       WHERE verification_id = 'verification-1'`).run();
-    insert.run('verification-2', 'c'.repeat(64), 'd'.repeat(64), 'active', null, null);
+    insert.run('verification-2', 5, 'c'.repeat(64), 'd'.repeat(64), 'active', null, null);
 
     expect(db.prepare(`SELECT verification_id, status, reason, invalidated_at
       FROM manual_news_assessment_verifications ORDER BY verification_id`).all()).toEqual([

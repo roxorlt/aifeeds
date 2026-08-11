@@ -11,6 +11,7 @@ import {
   submitManualNewsLead,
 } from './manual-news-leads-store';
 import { newsReviewSecret } from './news-review';
+import { isManualNewsVerificationSecretConfigured } from './manual-news-leads';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const BASE_PATH = '/api/digest/daily-news-leads';
@@ -37,7 +38,8 @@ function processingDependenciesAvailable(env: Env): boolean {
     env.MANUAL_NEWS_LEAD_WORKFLOW
     && env.MANUAL_NEWS_RESEARCH_ORIGIN
     && env.MANUAL_NEWS_RESEARCH_TOKEN
-    && env.DEEPSEEK_API_KEY,
+    && env.DEEPSEEK_API_KEY
+    && isManualNewsVerificationSecretConfigured(env.MANUAL_NEWS_VERIFICATION_SECRET),
   );
 }
 

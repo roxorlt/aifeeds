@@ -1,6 +1,7 @@
 import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
 import { mergeManualLeadCandidate } from './manual-news-leads';
+import { loadVerifiedManualAssessment } from './manual-news-leads-verification';
 
 export interface NewsReviewCandidate {
   item_id: string;
@@ -541,11 +542,18 @@ interface NewsReviewPoolMetaCandidate {
 
 interface NewsReviewItemRow {
   id: string;
+  source_ref: string | null;
   title: string | null;
   content: string | null;
   content_translated: string | null;
   url: string | null;
   extra: string | null;
+}
+
+function isManualCandidateSnapshot(candidate: Pick<NewsReviewCandidate, 'item_id' | 'origin' | 'lead_id'>): boolean {
+  return candidate.origin === 'manual_lead'
+    || !!candidate.lead_id
+    || candidate.item_id.startsWith('blog:manual:');
 }
 
 function parseObject(value: string | null): Record<string, unknown> {
@@ -568,57 +576,41 @@ function compactReviewText(value: unknown, maxLength: number): string {
 interface ConfirmedManualCandidateRow {
   id: string;
   input_url: string;
-  assessment_json: string;
-  publisher: string | null;
-  evidence_url: string | null;
+}
+
+async function verifiedManualCandidate(
+  env: Env,
+  row: ConfirmedManualCandidateRow,
+): Promise<NewsReviewCandidate | null> {
+  const verified = await loadVerifiedManualAssessment(env, row.id);
+  if (!verified) return null;
+  const primaryEvidence = verified.evidence.find((item) => item.reliable) || verified.evidence[0];
+  const { assessment } = verified;
+  return {
+    item_id: `blog:manual:${row.id}`,
+    title: compactReviewText(assessment.title, 80),
+    summary: compactReviewText(assessment.summary, 180),
+    source: compactReviewText(primaryEvidence?.publisher || '手工补录', 40),
+    score: assessment.score,
+    ...(primaryEvidence?.url || row.input_url ? { url: primaryEvidence?.url || row.input_url } : {}),
+    event_key: assessment.event_key,
+    origin: 'manual_lead',
+    lead_id: row.id,
+  };
 }
 
 async function durableConfirmedManualCandidates(env: Env, date: string): Promise<NewsReviewCandidate[]> {
   const confirmed = await env.DB.prepare(
-    `/* news_review:confirmed_manual_candidates */ SELECT l.id, l.input_url, a.assessment_json,
-       (SELECT e.publisher FROM manual_news_evidence e
-        WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS publisher,
-       (SELECT e.url FROM manual_news_evidence e
-        WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS evidence_url
+    `/* news_review:confirmed_manual_candidates */ SELECT l.id, l.input_url
      FROM manual_news_leads l
-     JOIN manual_news_event_assessments a ON a.lead_id = l.id
-       AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version)
-         FROM manual_news_event_assessments a2
-         JOIN manual_news_assessment_verifications v2
-           ON v2.lead_id = a2.lead_id
-          AND v2.assessment_version = a2.assessment_version
-          AND v2.status = 'active'
-         WHERE a2.lead_id = l.id
-       )
-     JOIN manual_news_assessment_verifications v
-       ON v.lead_id = a.lead_id
-      AND v.assessment_version = a.assessment_version
-      AND v.status = 'active'
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC, l.id ASC`,
   ).bind(date).all<ConfirmedManualCandidateRow>();
   const candidates: NewsReviewCandidate[] = [];
   for (const row of confirmed.results || []) {
-    const assessment = parseObject(row.assessment_json);
-    const title = compactReviewText(assessment.title, 80);
-    const summary = compactReviewText(assessment.summary, 180);
-    const eventKey = compactReviewText(assessment.event_key, 200);
-    const score = Number(assessment.score);
-    if (!title || !summary || !eventKey || !Number.isFinite(score)) continue;
-    const url = row.evidence_url || row.input_url;
-    candidates.push({
-      item_id: `blog:manual:${row.id}`,
-      title,
-      summary,
-      source: compactReviewText(row.publisher || '手工补录', 40),
-      score,
-      ...(url ? { url } : {}),
-      event_key: eventKey,
-      origin: 'manual_lead',
-      lead_id: row.id,
-    });
+    const candidate = await verifiedManualCandidate(env, row);
+    if (candidate) candidates.push(candidate);
   }
   return candidates;
 }
@@ -630,13 +622,12 @@ async function preserveConfirmedManualCandidates(
   submittedDefaultIds: readonly string[],
   previous: NewsReviewBatch | null,
 ): Promise<{ candidates: NewsReviewCandidate[]; default_selected_ids: string[] }> {
+  // Batch JSON and caller-supplied candidates are snapshots, not authority for
+  // manual leads. Rebuild every manual candidate from its currently active,
+  // HMAC-verified assessment so key rotation or content tampering removes it.
   const manualByLead = new Map<string, NewsReviewCandidate>();
-  for (const candidate of [
-    ...(previous?.candidates || []),
-    ...submittedCandidates,
-    ...await durableConfirmedManualCandidates(env, date),
-  ]) {
-    if (candidate.origin !== 'manual_lead' || !candidate.lead_id) continue;
+  for (const candidate of await durableConfirmedManualCandidates(env, date)) {
+    if (!candidate.lead_id) continue;
     manualByLead.set(candidate.lead_id, candidate);
   }
   const manuals: NewsReviewCandidate[] = [];
@@ -658,7 +649,7 @@ async function preserveConfirmedManualCandidates(
   const availableById = new Map<string, NewsReviewCandidate>();
   for (const candidate of [...(previous?.candidates || []), ...submittedCandidates]) {
     availableById.set(candidate.item_id, candidate);
-    if (candidate.origin === 'manual_lead') continue;
+    if (isManualCandidateSnapshot(candidate)) continue;
     const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
     if (manual) defaultAliases.set(candidate.item_id, manual.item_id);
   }
@@ -670,7 +661,7 @@ async function preserveConfirmedManualCandidates(
     const aliasedId = defaultAliases.get(publishedId) || publishedId;
     if (manuals.some((candidate) => candidate.item_id === aliasedId)) continue;
     const candidate = availableById.get(publishedId);
-    if (!candidate || candidate.origin === 'manual_lead') continue;
+    if (!candidate || isManualCandidateSnapshot(candidate)) continue;
     if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
     seenItemIds.add(candidate.item_id);
     if (candidate.event_key) seenEventKeys.add(candidate.event_key);
@@ -680,7 +671,7 @@ async function preserveConfirmedManualCandidates(
 
   const unselectedScheduled: NewsReviewCandidate[] = [];
   for (const candidate of submittedCandidates) {
-    if (candidate.origin === 'manual_lead') continue;
+    if (isManualCandidateSnapshot(candidate)) continue;
     const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
     if (manual) {
       defaultAliases.set(candidate.item_id, manual.item_id);
@@ -735,10 +726,13 @@ export async function freezeNewsReviewBatchFromPool(
   const auditById = new Map(auditRows.map((candidate) => [String(candidate.id || ''), candidate]));
   const placeholders = candidateIds.map(() => '?').join(',');
   const itemResult = await env.DB.prepare(
-    `SELECT id, title, content, content_translated, url, extra FROM items WHERE id IN (${placeholders})`,
+    `SELECT id, source_ref, title, content, content_translated, url, extra
+     FROM items WHERE id IN (${placeholders})`,
   ).bind(...candidateIds).all<NewsReviewItemRow>();
   const itemById = new Map((itemResult.results || []).map((row) => [row.id, row]));
-  let candidates: NewsReviewCandidate[] = candidateIds.map((itemId) => {
+  const scheduledCandidateIds = candidateIds.filter((itemId) =>
+    !itemId.startsWith('blog:manual:') && itemById.get(itemId)?.source_ref !== 'manual_lead');
+  let candidates: NewsReviewCandidate[] = scheduledCandidateIds.map((itemId) => {
     const item = itemById.get(itemId);
     const audit = auditById.get(itemId);
     const extra = parseObject(item?.extra || null);
@@ -759,51 +753,22 @@ export async function freezeNewsReviewBatchFromPool(
       ...(item?.url ? { url: item.url } : {}),
     };
   });
-  let freezeDefaults = defaultIds.slice(0, 5);
+  let freezeDefaults = defaultIds.filter((itemId) => scheduledCandidateIds.includes(itemId)).slice(0, 5);
   const confirmed = await env.DB.prepare(
-    `SELECT l.id, l.input_url, a.assessment_json,
-       (SELECT e.publisher FROM manual_news_evidence e WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS publisher
+    `/* news_review:prefreeze_confirmed_manual */ SELECT l.id, l.input_url
      FROM manual_news_leads l
-     JOIN manual_news_event_assessments a ON a.lead_id = l.id
-       AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version)
-         FROM manual_news_event_assessments a2
-         JOIN manual_news_assessment_verifications v2
-           ON v2.lead_id = a2.lead_id
-          AND v2.assessment_version = a2.assessment_version
-          AND v2.status = 'active'
-         WHERE a2.lead_id = l.id
-       )
-     JOIN manual_news_assessment_verifications v
-       ON v.lead_id = a.lead_id
-      AND v.assessment_version = a.assessment_version
-      AND v.status = 'active'
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.confirmed_batch_id IS NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC`,
-  ).bind(date).all<{ id: string; input_url: string; assessment_json: string; publisher: string | null }>();
+  ).bind(date).all<ConfirmedManualCandidateRow>();
   for (const row of confirmed.results || []) {
-    const assessment = parseObject(row.assessment_json);
-    const title = compactReviewText(assessment.title, 80);
-    const summary = compactReviewText(assessment.summary, 180);
-    const eventKey = compactReviewText(assessment.event_key, 200);
-    const score = Number(assessment.score);
-    if (!title || !summary || !eventKey || !Number.isFinite(score)) continue;
+    const candidate = await verifiedManualCandidate(env, row);
+    if (!candidate) continue;
     const merged = mergeManualLeadCandidate({
       previous_candidates: candidates,
       previous_default_selected_ids: freezeDefaults,
       published_selected_ids: freezeDefaults,
-      candidate: {
-        item_id: `blog:manual:${row.id}`,
-        title,
-        summary,
-        source: compactReviewText(row.publisher || '手工补录', 40),
-        score,
-        ...(row.input_url ? { url: row.input_url } : {}),
-        event_key: eventKey,
-        origin: 'manual_lead',
-        lead_id: row.id,
-      },
+      candidate,
       max_candidates: 10,
     });
     candidates = merged.candidates;
