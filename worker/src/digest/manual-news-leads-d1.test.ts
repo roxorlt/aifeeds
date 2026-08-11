@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Env } from '../index';
 import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manual-news-leads-pipeline';
+import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import {
   D1ManualLeadProcessingStore,
   failManualNewsLeadAfterExhaustion,
@@ -15,7 +16,7 @@ import {
 class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
   failAudit = false;
-  failAssessmentClear = false;
+  failAssessmentInvalidate = false;
   private batchTail: Promise<void> = Promise.resolve();
   private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
   private nextFirstGate: { marker: string; entered: () => void; released: Promise<void> } | null = null;
@@ -50,6 +51,14 @@ class SqliteD1 {
       );
       CREATE INDEX idx_manual_news_assessments_event
         ON manual_news_event_assessments(event_key, created_at DESC);
+      CREATE TABLE manual_news_assessment_verifications (
+        verification_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, assessment_version INTEGER NOT NULL,
+        policy_version TEXT NOT NULL, canonical_digest TEXT NOT NULL, hmac_sha256 TEXT NOT NULL,
+        processing_owner TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, created_at INTEGER NOT NULL,
+        invalidated_at INTEGER
+      );
+      CREATE UNIQUE INDEX idx_manual_news_verification_one_active_version
+        ON manual_news_assessment_verifications(lead_id, assessment_version) WHERE status = 'active';
       CREATE TABLE manual_news_lead_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id TEXT NOT NULL, action TEXT NOT NULL,
         from_status TEXT, to_status TEXT, idempotency_key TEXT,
@@ -83,8 +92,8 @@ class SqliteD1 {
       all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
       run: async () => {
         if (this.failAudit && sql.includes('manual_audit:mutation')) throw new Error('injected_audit_failure');
-        if (this.failAssessmentClear && sql.includes('manual_assessment:clear')) {
-          throw new Error('injected_clear_failure');
+        if (this.failAssessmentInvalidate && sql.includes('manual_verification:invalidate')) {
+          throw new Error('injected_invalidate_failure');
         }
         const result = statement.run(...bindings);
         return { success: true, meta: { changes: Number(result.changes) } };
@@ -144,20 +153,29 @@ afterEach(() => {
   while (databases.length) databases.pop()!.close();
 });
 
-function fixture(status = 'verifying', version = 4) {
+const PROCESSING_OWNER = 'manual-news-test-owner';
+const VERIFICATION_SECRET = 'manual-news-verification-test-secret-32-bytes';
+
+function fixture(status = 'verifying', version = 4, processingOwner: string | null = PROCESSING_OWNER) {
   const db = new SqliteD1();
   databases.push(db);
   const leadId = 'ml-20260811-abc123def456';
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
-    submit_idempotency_key, created_at, updated_at
-  ) VALUES (?, '2026-08-11', 'url', '', 'https://support.claude.com/example', '', ?, ?, 'submit', 1, 1)`).run(leadId, status, version);
+    submit_idempotency_key, processing_owner, created_at, updated_at
+  ) VALUES (?, '2026-08-11', 'url', '', 'https://support.claude.com/example', '', ?, ?, 'submit', ?, 1, 1)`).run(
+    leadId, status, version, processingOwner,
+  );
   db.sqlite.prepare(`INSERT INTO manual_news_evidence (
     lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
     title, excerpt, claims_supported_json, reliable
   ) VALUES (?, 'ev-official', 'https://support.claude.com/example', 'official_help', 'claude.com',
     '2026-08-10T13:30:00.000Z', 2, 'Official help', 'Supported products only.', '["Supported products only."]', 1)`).run(leadId);
-  return { db, env: { DB: db as unknown as D1Database } as Env, leadId };
+  return {
+    db,
+    env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
+    leadId,
+  };
 }
 
 function assessment() {
@@ -174,14 +192,35 @@ function assessment() {
   };
 }
 
+function processedAssessment() {
+  const evidence = [{
+    id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help' as const,
+    publisher: 'claude.com', published_at: '2026-08-10T13:30:00.000Z', retrieved_at: 2,
+    title: 'Official help', excerpt: 'Supported products only.',
+    claims_supported: ['Supported products only.'], reliable: true, fetch_audit: null,
+  }];
+  return {
+    ...applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessment(), evidence), evidence),
+    duplicate_scope: null, matched_lead_id: null,
+  };
+}
+
 function verifyingAdapters(): ManualLeadProcessingAdapters {
   return {
     search: async () => [], fetch: async () => { throw new Error('unused'); },
     extract: async () => null, assess: async () => assessment(),
-    verify: async () => ({
-      overall_verdict: 'supported',
-      claim_results: [{ claim_index: 0, supported: true, issue_code: 'none', evidence_ids: ['ev-official'] }],
-    }),
+    verify: async (prompt) => {
+      const body = JSON.parse(prompt.user) as {
+        facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; title: string }> }>;
+      };
+      return {
+        overall_verdict: 'supported',
+        fact_results: body.facts.map((fact) => ({
+          fact_id: fact.fact_id, supported: true, issue_code: 'none',
+          source_quotes: [{ evidence_id: fact.allowed_evidence[0].id, quote: fact.allowed_evidence[0].title }],
+        })),
+      };
+    },
   };
 }
 
@@ -214,7 +253,7 @@ describe('manual lead D1-backed dedupe', () => {
   });
 
   test('persists the normalized bounded-fetch audit with evidence', async () => {
-    const state = fixture();
+    const state = fixture('extracting');
     const fetchAudit = {
       hops: [{
         url: 'https://support.claude.com/example',
@@ -233,8 +272,8 @@ describe('manual lead D1-backed dedupe', () => {
       truncation: { source: false, extracted_text: false },
       parser: { result: 'success' as const, version: 'research-gateway-parser/1.0.0' },
     };
-    const store = new D1ManualLeadProcessingStore(state.env);
-    await store.replaceEvidence(state.leadId, [{
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER);
+    await store.replaceEvidence(state.leadId, 4, [{
       id: 'ev-audited',
       url: 'https://support.claude.com/example',
       source_type: 'official_help',
@@ -255,47 +294,132 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(state.leadId, 'ev-audited')?.fetch_audit_json))).toEqual(fetchAudit);
   });
 
-  test('clears every persisted assessment for a lead before regeneration', async () => {
-    const state = fixture('verifying', 9);
-    for (const assessmentVersion of [2, 7]) {
-      state.db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
-        lead_id, assessment_version, event_key, event_type, material_update, score,
-        recommendation, assessment_json, created_at
-      ) VALUES (?, ?, ?, 'product_documentation', 0, 82, 'recommended', ?, ?)`).run(
-        state.leadId, assessmentVersion, assessment().event_key, JSON.stringify(assessment()), assessmentVersion,
-      );
-    }
-    const store = new D1ManualLeadProcessingStore(state.env);
-
-    await store.clearAssessment(state.leadId);
-
-    expect(state.db.sqlite.prepare(
-      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
-    ).get(state.leadId)).toEqual({ count: 0 });
-    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
-  });
-
-  test('classifies assessment cleanup failure as transient and preserves the stored row', async () => {
+  test('hides legacy assessments and preserves assessment history when active verification is invalidated', async () => {
     const state = fixture('verifying', 9);
     state.db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
       lead_id, assessment_version, event_key, event_type, material_update, score,
       recommendation, assessment_json, created_at
-    ) VALUES (?, 7, ?, 'product_documentation', 0, 82, 'recommended', ?, 7)`).run(
+    ) VALUES (?, 9, ?, 'product_documentation', 0, 82, 'recommended', ?, 7)`).run(
       state.leadId, assessment().event_key, JSON.stringify(assessment()),
     );
-    state.db.failAssessmentClear = true;
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER);
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
 
-    await expect(new D1ManualLeadProcessingStore(state.env).clearAssessment(state.leadId))
-      .rejects.toThrow(/d1_clear_assessment_failed/);
+    const saved = await store.saveAssessment(state.leadId, 9, processedAssessment());
+    expect(saved.assessment_version).toBe(10);
+    expect((await store.getLead(state.leadId))?.assessment).toMatchObject({ score: 82 });
+    await store.invalidateAssessment(state.leadId, 9, 'schema_invalid');
+
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
     expect(state.db.sqlite.prepare(
       'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 2 });
+    expect(state.db.sqlite.prepare(`SELECT status, reason, invalidated_at
+      FROM manual_news_assessment_verifications WHERE lead_id = ?`).get(state.leadId)).toMatchObject({
+      status: 'invalidated', reason: 'schema_invalid', invalidated_at: expect.any(Number),
+    });
+    expect(state.db.sqlite.prepare(`SELECT action, metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'assessment_invalidate'`).get(state.leadId)).toMatchObject({
+      action: 'assessment_invalidate', metadata_json: expect.stringContaining('schema_invalid'),
+    });
+  });
+
+  test('classifies verification invalidation failure as transient and preserves the active proof', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER);
+    await store.saveAssessment(state.leadId, 9, processedAssessment());
+    state.db.failAssessmentInvalidate = true;
+
+    await expect(store.invalidateAssessment(state.leadId, 9, 'schema_invalid'))
+      .rejects.toThrow(/d1_invalidate_assessment_failed/);
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_assessment_verifications
+       WHERE lead_id = ? AND status = 'active'`,
     ).get(state.leadId)).toEqual({ count: 1 });
+  });
+
+  test('rejects stale owners for evidence replacement, assessment save, and invalidation without writes', async () => {
+    const extracting = fixture('extracting', 4, 'new-owner');
+    const staleExtracting = new D1ManualLeadProcessingStore(extracting.env, 'old-owner');
+    await expect(staleExtracting.replaceEvidence(extracting.leadId, 4, [])).rejects.toThrow(/stale_processing_owner/);
+    expect(extracting.db.sqlite.prepare(
+      'SELECT evidence_id FROM manual_news_evidence WHERE lead_id = ?',
+    ).all(extracting.leadId)).toEqual([{ evidence_id: 'ev-official' }]);
+
+    const verifying = fixture('verifying', 9, 'new-owner');
+    const staleVerifying = new D1ManualLeadProcessingStore(verifying.env, 'old-owner');
+    await expect(staleVerifying.saveAssessment(verifying.leadId, 9, processedAssessment()))
+      .rejects.toThrow(/stale_processing_owner/);
+    expect(verifying.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(verifying.leadId)).toEqual({ count: 0 });
+
+    const current = new D1ManualLeadProcessingStore(verifying.env, 'new-owner');
+    await current.saveAssessment(verifying.leadId, 9, processedAssessment());
+    await expect(staleVerifying.invalidateAssessment(verifying.leadId, 9, 'stale_attempt'))
+      .rejects.toThrow(/stale_processing_owner/);
+    expect(verifying.db.sqlite.prepare(`SELECT status FROM manual_news_assessment_verifications
+      WHERE lead_id = ?`).get(verifying.leadId)).toEqual({ status: 'active' });
+  });
+
+  test('an in-flight assessment save becomes a zero-write loser after processing-owner takeover', async () => {
+    const state = fixture('verifying', 9, 'old-owner');
+    const gate = state.db.pauseNextBatch();
+    const saving = new D1ManualLeadProcessingStore(state.env, 'old-owner')
+      .saveAssessment(state.leadId, 9, processedAssessment());
+    await gate.entered;
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET processing_owner = 'new-owner'
+      WHERE id = ?`).run(state.leadId);
+    gate.release();
+
+    await expect(saving).rejects.toThrow(/stale_processing_owner/);
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_assessment_verifications WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+  });
+
+  test('fails closed when verification secret or HMAC is invalid', async () => {
+    const state = fixture('verifying', 9);
+    const missingSecret = { ...state.env, MANUAL_NEWS_VERIFICATION_SECRET: undefined } as Env;
+    await expect(new D1ManualLeadProcessingStore(missingSecret, PROCESSING_OWNER)
+      .saveAssessment(state.leadId, 9, processedAssessment()))
+      .rejects.toThrow(/manual_news_verification_secret_invalid/);
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER);
+    await store.saveAssessment(state.leadId, 9, processedAssessment());
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ?`).run('0'.repeat(64), state.leadId);
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+  });
+
+  test('retry invalidates a persisted bad-HMAC proof before saving a recovered assessment version', async () => {
+    const state = fixture('verifying', 9);
+    const store = new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER);
+    await store.saveAssessment(state.leadId, 9, processedAssessment());
+    state.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ?`).run('0'.repeat(64), state.leadId);
+
+    const result = await processManualNewsLead(state.leadId, store, verifyingAdapters());
+
+    expect(result).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
+    expect(state.db.sqlite.prepare(`SELECT assessment_version, status, reason
+      FROM manual_news_assessment_verifications WHERE lead_id = ? ORDER BY assessment_version`).all(state.leadId))
+      .toEqual([
+        { assessment_version: 9, status: 'invalidated', reason: 'persisted_verification_invalid' },
+        { assessment_version: 10, status: 'active', reason: null },
+      ]);
   });
 
   test('a lone lead cannot classify itself as a same-day duplicate after its assessment is saved', async () => {
     const state = fixture();
     const result = await processManualNewsLead(
-      state.leadId, new D1ManualLeadProcessingStore(state.env), verifyingAdapters(),
+      state.leadId, new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER), verifyingAdapters(),
     );
 
     expect(result).toMatchObject({ status: 'recommended', assessment: { duplicate_scope: null, matched_lead_id: null } });
@@ -313,17 +437,23 @@ describe('manual lead D1-backed dedupe', () => {
     }
 
     const result = await processManualNewsLead(
-      state.leadId, new D1ManualLeadProcessingStore(state.env), verifyingAdapters(),
+      state.leadId, new D1ManualLeadProcessingStore(state.env, PROCESSING_OWNER), verifyingAdapters(),
     );
     expect(result).toMatchObject({ status: 'recommended', assessment: { duplicate_scope: null, matched_lead_id: null } });
   });
 
-  test('exact event-key lookup covers all history while a material update remains eligible', async () => {
+  test('dedupe history ignores legacy rows and includes only independently verified assessments', async () => {
     const state = fixture();
     state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
       id, review_date, input_type, input_text, input_url, note, status, version,
-      submit_idempotency_key, created_at, updated_at
-    ) VALUES ('old-lead', '2026-01-01', 'text', 'old', '', '', 'recommended', 3, 'old-submit', 1, 1)`).run();
+      submit_idempotency_key, processing_owner, created_at, updated_at
+    ) VALUES ('old-lead', '2026-01-01', 'text', 'old', '', '', 'verifying', 3, 'old-submit', 'old-owner', 1, 1)`).run();
+    state.db.sqlite.prepare(`INSERT INTO manual_news_evidence (
+      lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, fetch_audit_json, reliable
+    ) SELECT 'old-lead', evidence_id, url, source_type, publisher, published_at, retrieved_at,
+      title, excerpt, claims_supported_json, fetch_audit_json, reliable
+      FROM manual_news_evidence WHERE lead_id = ?`).run(state.leadId);
     state.db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
       lead_id, assessment_version, event_key, event_type, material_update, score,
       recommendation, assessment_json, created_at
@@ -332,6 +462,11 @@ describe('manual lead D1-backed dedupe', () => {
     );
     const store = new D1ManualLeadProcessingStore(state.env);
 
+    expect(await store.findPriorEventsByEventKey(assessment().event_key, state.leadId)).toEqual([]);
+    await new D1ManualLeadProcessingStore(state.env, 'old-owner')
+      .saveAssessment('old-lead', 3, processedAssessment());
+    state.db.sqlite.prepare(`UPDATE manual_news_leads SET status = 'recommended', processing_owner = NULL
+      WHERE id = 'old-lead'`).run();
     expect(await store.findPriorEventsByEventKey(assessment().event_key, state.leadId))
       .toEqual([{ event_key: assessment().event_key, review_date: '2026-01-01', lead_id: 'old-lead' }]);
     expect(await store.listRecentPriorEvents('2026-08-11', state.leadId)).toEqual([]);

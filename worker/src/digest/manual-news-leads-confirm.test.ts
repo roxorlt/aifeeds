@@ -28,12 +28,13 @@ vi.mock('./news-review', () => ({
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
 import {
   applyManualLeadEvidencePolicy,
-  createManualLeadVerificationMarker,
+  createManualLeadVerificationProof,
   validateManualLeadAssessment,
 } from './manual-news-leads';
 import { getActiveNewsReviewBatch, newsReviewExpiresAt } from './news-review';
 
 async function fakeConfirmationEnv() {
+  const verificationSecret = 'manual-news-confirm-verification-secret-32-bytes';
   const rawAssessment = {
     title: 'Anthropic披露部分Claude输出的水印与来源标记',
     summary: '官方文档将范围限定为受支持的模型与产品。',
@@ -72,7 +73,21 @@ async function fakeConfirmationEnv() {
   const assessment = {
     ...processedCore,
     duplicate_scope: null, matched_lead_id: null,
-    verification: await createManualLeadVerificationMarker(processedCore, [evidenceForMarker]),
+  };
+  const assessmentVersion = 7;
+  const proof = await createManualLeadVerificationProof({
+    lead_id: row.id, assessment_version: assessmentVersion, assessment, evidence: [evidenceForMarker],
+  }, verificationSecret);
+  const verification: Record<string, any> = {
+    verification_id: 'mav-confirm-7',
+    assessment_version: assessmentVersion,
+    ...proof,
+    processing_owner: 'workflow-owner',
+    status: 'active',
+    reason: null,
+    created_at: 3,
+    invalidated_at: null,
+    assessment_json: JSON.stringify(assessment),
   };
   const prepared: any[] = [];
   const db = {
@@ -84,7 +99,9 @@ async function fakeConfirmationEnv() {
         bind(...values: any[]) { binds = values; return stmt; },
         async first() {
           if (sql.includes('manual_lead:by_id')) return { ...row };
-          if (sql.includes('manual_assessment:latest')) return { assessment_json: JSON.stringify(assessment) };
+          if (sql.includes('manual_verification:active_assessment')) {
+            return verification.status === 'active' ? { ...verification } : null;
+          }
           return null;
         },
         async all() {
@@ -125,7 +142,17 @@ async function fakeConfirmationEnv() {
       return statements.map(() => ({ success: true, meta: { changes: 1 } }));
     },
   };
-  return { env: { DB: db, DAILY_NEWS_REVIEW_SECRET: 'secret' } as never, row, assessment, prepared };
+  return {
+    env: {
+      DB: db,
+      DAILY_NEWS_REVIEW_SECRET: 'secret',
+      MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret,
+    } as never,
+    row,
+    assessment,
+    verification,
+    prepared,
+  };
 }
 
 describe('manual lead candidate confirmation', () => {
@@ -210,12 +237,13 @@ describe('manual lead candidate confirmation', () => {
   });
 
   test.each([
-    ['missing marker', (assessment: Record<string, any>) => { delete assessment.verification; }],
-    ['old marker policy', (assessment: Record<string, any>) => { assessment.verification.policy_version = 'legacy-v0'; }],
-    ['wrong digest', (assessment: Record<string, any>) => { assessment.verification.digest = '0'.repeat(64); }],
+    ['no active verification', (verification: Record<string, any>) => { verification.status = 'invalidated'; }],
+    ['old policy', (verification: Record<string, any>) => { verification.policy_version = 'legacy-v0'; }],
+    ['wrong HMAC', (verification: Record<string, any>) => { verification.hmac_sha256 = '0'.repeat(64); }],
+    ['wrong assessment version', (verification: Record<string, any>) => { verification.assessment_version = 6; }],
   ])('rejects confirmation with %s before any candidate mutation', async (_label, mutate) => {
     const memory = await fakeConfirmationEnv();
-    mutate(memory.assessment);
+    mutate(memory.verification);
 
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 1, `confirm-${_label}`, 100,

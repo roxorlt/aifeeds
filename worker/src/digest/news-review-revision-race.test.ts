@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { Env } from '../index';
 import {
   applyManualLeadEvidencePolicy,
-  createManualLeadVerificationMarker,
+  createManualLeadVerificationProof,
   validateManualLeadAssessment,
 } from './manual-news-leads';
 import { confirmManualNewsLeadCandidate, retryManualNewsLead } from './manual-news-leads-store';
@@ -40,6 +40,7 @@ class SerialSqliteD1 {
     )`);
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
@@ -111,7 +112,11 @@ afterEach(() => {
 function state() {
   const db = new SerialSqliteD1();
   states.push(db);
-  const env = { DB: db as unknown as D1Database, DAILY_NEWS_REVIEW_SECRET: 'test-secret' } as Env;
+  const env = {
+    DB: db as unknown as D1Database,
+    DAILY_NEWS_REVIEW_SECRET: 'test-secret',
+    MANUAL_NEWS_VERIFICATION_SECRET: 'manual-news-race-verification-secret-32-bytes',
+  } as Env;
   return { db, env };
 }
 
@@ -148,8 +153,10 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     ...processed,
     duplicate_scope: null,
     matched_lead_id: null,
-    verification: await createManualLeadVerificationMarker(processed, [evidence]),
   };
+  const proof = await createManualLeadVerificationProof({
+    lead_id: id, assessment_version: 7, assessment, evidence: [evidence],
+  }, 'manual-news-race-verification-secret-32-bytes');
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
     submit_idempotency_key, created_at, updated_at
@@ -169,6 +176,12 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
   ) VALUES (?, 7, ?, 'product_release', 1, 90, 'recommended', ?, 1)`).run(
     id, eventKey, JSON.stringify(assessment),
   );
+  db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+    verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+    hmac_sha256, processing_owner, status, reason, created_at, invalidated_at
+  ) VALUES (?, ?, 7, ?, ?, ?, 'workflow-owner', 'active', NULL, 1, NULL)`).run(
+    `mav-${id}`, id, proof.policy_version, proof.canonical_digest, proof.hmac_sha256,
+  );
 }
 
 function activeCount(db: SerialSqliteD1): number {
@@ -177,6 +190,33 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('confirmation cannot commit after its active verification is concurrently invalidated', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-v00000000001';
+    await insertLead(current.db, leadId, 'event-verification-confirm-race');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verification-race'),
+      candidates('verification-race').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-after-verification-check', 150,
+    );
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET status = 'invalidated', reason = 'concurrent_takeover', invalidated_at = 151
+      WHERE lead_id = ? AND status = 'active'`).run(leadId);
+    gate.release();
+
+    await expect(confirmation).resolves.toMatchObject({ ok: false, status: 409 });
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(leadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
+    expect(activeCount(current.db)).toBe(1);
+  });
+
   test('a retry CAS loser cannot write an audit for a concurrent confirmation winner', async () => {
     const current = state();
     const leadId = 'ml-20260811-a11111111111';

@@ -583,8 +583,18 @@ async function durableConfirmedManualCandidates(env: Env, date: string): Promise
      FROM manual_news_leads l
      JOIN manual_news_event_assessments a ON a.lead_id = l.id
        AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version) FROM manual_news_event_assessments a2 WHERE a2.lead_id = l.id
+         SELECT MAX(a2.assessment_version)
+         FROM manual_news_event_assessments a2
+         JOIN manual_news_assessment_verifications v2
+           ON v2.lead_id = a2.lead_id
+          AND v2.assessment_version = a2.assessment_version
+          AND v2.status = 'active'
+         WHERE a2.lead_id = l.id
        )
+     JOIN manual_news_assessment_verifications v
+       ON v.lead_id = a.lead_id
+      AND v.assessment_version = a.assessment_version
+      AND v.status = 'active'
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC, l.id ASC`,
@@ -756,8 +766,18 @@ export async function freezeNewsReviewBatchFromPool(
      FROM manual_news_leads l
      JOIN manual_news_event_assessments a ON a.lead_id = l.id
        AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version) FROM manual_news_event_assessments a2 WHERE a2.lead_id = l.id
+         SELECT MAX(a2.assessment_version)
+         FROM manual_news_event_assessments a2
+         JOIN manual_news_assessment_verifications v2
+           ON v2.lead_id = a2.lead_id
+          AND v2.assessment_version = a2.assessment_version
+          AND v2.status = 'active'
+         WHERE a2.lead_id = l.id
        )
+     JOIN manual_news_assessment_verifications v
+       ON v.lead_id = a.lead_id
+      AND v.assessment_version = a.assessment_version
+      AND v.status = 'active'
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.confirmed_batch_id IS NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC`,
