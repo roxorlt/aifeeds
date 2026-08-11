@@ -615,6 +615,27 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    ['apparently', 'apparently bans', '禁止'],
+    ['likely', 'likely bans', '禁止'],
+    ['set to', 'is set to ban', '禁止'],
+    ['purportedly', 'purportedly bans', '禁止'],
+    ['temporary duration', 'temporarily bans', '禁止'],
+    ['partial scope', 'partially bans', '禁止'],
+    ['conditionality', 'conditionally bans', '禁止'],
+    ['known attribution plus unknown duration', 'reportedly temporarily bans', '据报道禁止'],
+  ])('fails closed on unconsumed predicate semantics despite malicious verifier support: %s', async (
+    _label,
+    sourcePredicate,
+    projectionPredicate,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: sourcePredicate },
+      projection: { predicate: projectionPredicate },
+      quote: `Alibaba ${sourcePredicate} employees from using Claude Code.`,
+    })).rejects.toThrow(/(?:invalid_claim_predicate|invalid_editorial_projection_modality)/);
+  });
+
+  test.each([
     ['most participant scope omitted', 'most of the staff from using Claude Code', '员工使用Claude Code'],
     ['half participant scope omitted', 'half the staff from using Claude Code', '员工使用Claude Code'],
     ['participant inability omitted', 'employees unable to use Claude Code', '员工使用Claude Code'],
@@ -632,6 +653,27 @@ describe('manual news lead domain', () => {
     await expect(createMaliciouslySupportedAlibabaProjectionProof({
       source: { object: sourceObject }, projection: { object: projectionObject }, quote,
     })).rejects.toThrow(/(?:invalid_claim_object|invalid_editorial_projection_object|invalid_editorial_projection_polarity)/);
+  });
+
+  test.each(['Pro', 'Enterprise', 'Plus', 'Lite', 'Mini'])(
+    'does not consume an unbound target qualifier or allow its target to disappear: %s',
+    async (qualifier) => {
+      const sourceObject = `employees from using ${qualifier}`;
+      await expect(createMaliciouslySupportedAlibabaProjectionProof({
+        source: { object: sourceObject },
+        projection: { object: '员工使用' },
+        quote: `Alibaba reportedly bans ${sourceObject}.`,
+      })).rejects.toThrow(/(?:non_atomic_claim|invalid_claim_object|invalid_editorial_projection_object)/);
+    },
+  );
+
+  test('does not allow a bound target entity and qualifier to be deleted together', async () => {
+    const sourceObject = 'employees from using Claude Code Pro';
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: sourceObject },
+      projection: { object: '员工使用' },
+      quote: `Alibaba reportedly bans ${sourceObject}.`,
+    })).rejects.toThrow(/invalid_editorial_projection_object/);
   });
 
   test.each([
@@ -700,6 +742,9 @@ describe('manual news lead domain', () => {
     [{ predicate: '据称禁止', object: '所有员工使用Claude Code' }, { object: 'all staff from using Claude Code' }, 'Alibaba reportedly bans all staff from using Claude Code.'],
     [{ predicate: '据称禁止', object: '员工使用Claude Code Enterprise' }, { object: 'employees from using Claude Code Enterprise' }, 'Alibaba reportedly bans employees from using Claude Code Enterprise.'],
     [{ predicate: '据称禁止', object: '员工使用Claude Code Pro' }, { object: 'employees from using Claude Code Pro' }, 'Alibaba reportedly bans employees from using Claude Code Pro.'],
+    [{ predicate: '据称禁止', object: '员工使用Claude Code-Plus' }, { object: 'employees from using Claude Code-Plus' }, 'Alibaba reportedly bans employees from using Claude Code-Plus.'],
+    [{ predicate: '据称禁止', object: '员工使用Claude Code Lite' }, { object: 'employees from using Claude Code Lite' }, 'Alibaba reportedly bans employees from using Claude Code Lite.'],
+    [{ predicate: '据称禁止', object: '员工使用Claude Code Mini' }, { object: 'employees from using Claude Code Mini' }, 'Alibaba reportedly bans employees from using Claude Code Mini.'],
     [{ predicate: '据称禁止', object: '员工稍后使用Claude Code' }, { object: 'employees from using Claude Code later' }, 'Alibaba reportedly bans employees from using Claude Code later.'],
     [{ predicate: '据称禁止', object: '员工周一使用Claude Code' }, { object: 'employees from using Claude Code on Monday' }, 'Alibaba reportedly bans employees from using Claude Code on Monday.'],
     [{ predicate: '据称禁止', object: '员工下午5点使用Claude Code' }, { object: 'employees from using Claude Code at 5 pm' }, 'Alibaba reportedly bans employees from using Claude Code at 5 pm.'],
@@ -1032,6 +1077,7 @@ describe('manual news lead domain', () => {
     expect(assessmentPrompt.system).toContain('英文证据写英文 source fact');
     expect(assessmentPrompt.system).toContain('独立的严肃中文编辑投影');
     expect(assessmentPrompt.system).toContain('五组正交信息');
+    expect(assessmentPrompt.system).toContain('predicate 除主动作、助动词');
     expect(assessmentPrompt.system).toContain('每段实义文本都必须可归入明确槽位');
     expect(assessmentPrompt.system).toContain('绝对或相对时间');
 
@@ -1053,6 +1099,7 @@ describe('manual news lead domain', () => {
     expect(verifierPrompt.system).toContain('禁止用词面相似度');
     expect(verifierPrompt.system).toContain('compound modality');
     expect(verifierPrompt.system).toContain('consumed-semantic-spans fail-closed gate');
+    expect(verifierPrompt.system).toContain('未绑定产品 qualifier');
     expect(body.facts.map((fact) => fact.fact_id)).toEqual(expect.arrayContaining([
       'field:title:0', 'field:title:1', 'field:summary:0', 'field:summary:1',
       'claim:0', 'claim:1',
@@ -3111,6 +3158,12 @@ describe('manual news lead domain', () => {
     sourceFactTamper.source_facts![0].atomic_fact.object = 'employees from using another tool';
     await expect(isCurrentManualLeadVerification({ ...input, assessment: sourceFactTamper }, proof, secret))
       .resolves.toBe(false);
+    const predicateResidueTamper = structuredClone(candidate);
+    predicateResidueTamper.source_facts![0].atomic_fact.predicate = 'reportedly temporarily bans';
+    predicateResidueTamper.source_facts![0].text = 'Alibaba reportedly temporarily bans employees from using Claude Code.';
+    await expect(isCurrentManualLeadVerification({
+      ...input, assessment: predicateResidueTamper,
+    }, proof, secret)).resolves.toBe(false);
     const projectionTamper = structuredClone(candidate);
     projectionTamper.editorial_projection!.title.source_fact_ids = ['source-deadbeefdeadbeef'];
     await expect(isCurrentManualLeadVerification({ ...input, assessment: projectionTamper }, proof, secret))

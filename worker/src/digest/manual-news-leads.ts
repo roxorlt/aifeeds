@@ -59,6 +59,8 @@ interface ManualBilingualSemanticSlots {
   action: FactAction;
   predicate_modality: ManualBilingualModalitySlots;
   predicate_negated: boolean;
+  predicate_residue: '';
+  predicate_residue_policy: 'consumed-semantic-spans-v1';
   participant_roles: ManualBilingualParticipantRole[];
   participant_quantifier: ManualBilingualQuantifier;
   object_relations: string[];
@@ -697,23 +699,8 @@ const BILINGUAL_TARGET_QUALIFIERS: ReadonlyArray<readonly [string, RegExp]> = [
   ['mini', /(?:迷你版)|\bmini\b/iu],
 ];
 
-function aliasPresent(value: string, alias: string): boolean {
-  const escaped = alias.normalize('NFKC')
-    .replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-    .replace(/\s+/gu, '\\s+');
-  return /[a-z0-9]/iu.test(alias)
-    ? new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'iu').test(value.normalize('NFKC'))
-    : value.normalize('NFKC').includes(alias.normalize('NFKC'));
-}
-
 function bilingualTargetQualifiers(value: string): string[] {
-  const containsProduct = Object.values(PRODUCT_ENTITY_REGISTRY).flat()
-    .some((alias) => aliasPresent(value, alias));
-  if (!containsProduct) return [];
-  return BILINGUAL_TARGET_QUALIFIERS
-    .filter(([, pattern]) => pattern.test(value))
-    .map(([qualifier]) => qualifier)
-    .sort();
+  return [...new Set(boundTargetQualifierSpans(value).map((span) => span.value))].sort();
 }
 
 interface IndexedSemanticValue {
@@ -752,6 +739,29 @@ function regexSemanticSpans(value: string, pattern: RegExp, canonical: string): 
     spans.push({ value: canonical, start: match.index, end: match.index + match[0].length });
   }
   return spans;
+}
+
+function targetQualifierBridgeIsBound(value: string): boolean {
+  const bridge = value.normalize('NFKC').toLowerCase()
+    .replace(/^[\s._-]+|[\s._-]+$/gu, '')
+    .trim();
+  if (!bridge) return true;
+  const tokens = bridge.split(/[\s._-]+/u).filter(Boolean);
+  return tokens.length <= 4 && tokens.every((token) =>
+    token === 'code'
+    || PRODUCT_DESCRIPTOR_WORDS.has(token)
+    || isStructuredProductVersionToken(token));
+}
+
+function boundTargetQualifierSpans(value: string): IndexedSemanticValue[] {
+  const normalized = value.normalize('NFKC');
+  const productSpans = Object.values(PRODUCT_ENTITY_REGISTRY).flatMap((aliases) =>
+    aliases.flatMap((alias) => regexSemanticSpans(normalized, semanticAliasPattern(alias), alias)));
+  const qualifiers = BILINGUAL_TARGET_QUALIFIERS.flatMap(([canonical, pattern]) =>
+    regexSemanticSpans(normalized, pattern, canonical));
+  return qualifiers.filter((qualifier) => productSpans.some((product) =>
+    product.end <= qualifier.start
+    && targetQualifierBridgeIsBound(normalized.slice(product.end, qualifier.start))));
 }
 
 function relativeFactTimeSpans(value: string): IndexedSemanticValue[] {
@@ -859,6 +869,14 @@ const BILINGUAL_OBJECT_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:无法|不能|不可|避免)|\b(?:unable\s+to|cannot|can['’]t|avoid(?:s|ed|ing)?)\b/iu,
   /(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:not|never|without)\b/iu,
 ];
+const BILINGUAL_PREDICATE_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:并未|并不|没有|从未|尚未|未能|不再|不会|未|不|无)/u,
+  /\b(?:not|never|no\s+longer|cannot|can['’]t|(?:is|are|was|were|has|have|had|do|does|did|will|would|could|should)n['’]t)\b/iu,
+];
+const BILINGUAL_PREDICATE_AUXILIARY_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:被)/u,
+  /\b(?:am|is|are|was|were|be|been|being|has|have|had|do|does|did|to)\b/iu,
+];
 const ABSOLUTE_FACT_TIME_PATTERNS: ReadonlyArray<RegExp> = [
   /20\d{2}年\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|凌晨|晚上|傍晚|晚间)?\s*[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:[零〇一二三四五六七八九十两\d]{1,3}分?)?)?/iu,
   /\b20\d{2}-\d{1,2}-\d{1,2}(?:T|\s+\d{1,2}:\d{2})?(?::\d{2}(?:\.\d+)?)?\s*(?:[AP]\.?\s*M\.?)?\s*(?:Z|(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|[+-]\d{1,2}:?\d{2})?/iu,
@@ -901,6 +919,30 @@ function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): vo
   }
 }
 
+function assertConsumedPredicateSemantics(
+  value: string,
+  occurrence: FactActionOccurrence,
+): void {
+  const normalized = value.normalize('NFKC');
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  consumeSemanticSpan(mask, { start: occurrence.index, end: occurrence.end });
+  const patternGroups: ReadonlyArray<ReadonlyArray<RegExp>> = [
+    BILINGUAL_ATTRIBUTION_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_EPISTEMIC_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_INTENT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_ASPECT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_PREDICATE_POLARITY_PATTERNS,
+    BILINGUAL_PREDICATE_AUXILIARY_PATTERNS,
+  ];
+  for (const patterns of patternGroups) {
+    for (const pattern of patterns) consumeSemanticPattern(mask, normalized, pattern);
+  }
+  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (residue) throw new Error('invalid_claim_predicate');
+}
+
 function assertConsumedObjectSemantics(value: string): void {
   const normalized = value.normalize('NFKC');
   const mask = new Array<boolean>(normalized.length).fill(false);
@@ -908,7 +950,6 @@ function assertConsumedObjectSemantics(value: string): void {
     BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_OBJECT_RELATION_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_FACT_CONCEPTS.map(([, pattern]) => pattern),
-    BILINGUAL_TARGET_QUALIFIERS.map(([, pattern]) => pattern),
     BILINGUAL_QUANTIFIER_PATTERNS,
     BILINGUAL_SCOPE_PATTERNS,
     BILINGUAL_OBJECT_POLARITY_PATTERNS,
@@ -931,6 +972,7 @@ function assertConsumedObjectSemantics(value: string): void {
   for (const [, aliases] of FACT_REGION_ALIASES) {
     for (const alias of aliases) consumeSemanticPattern(mask, normalized, semanticAliasPattern(alias));
   }
+  for (const span of boundTargetQualifierSpans(normalized)) consumeSemanticSpan(mask, span);
   for (const span of relativeFactTimeSpans(normalized)) consumeSemanticSpan(mask, span);
   for (const pattern of [
     /(?<![a-z0-9])v?\d+(?:\.\d+)*(?:-[a-z0-9.]+)?(?![a-z0-9])/iu,
@@ -958,6 +1000,7 @@ function projectionLanguageError(fact: ManualAtomicFactSlots): string | null {
 function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSemanticSlots {
   const predicateActions = factActionOccurrences(fact.predicate);
   if (predicateActions.length !== 1) throw new Error('invalid_claim_predicate');
+  assertConsumedPredicateSemantics(fact.predicate, predicateActions[0]);
   const reason = canonicalFactReason(fact.object);
   if (reason.present && !reason.canonical) throw new Error('invalid_claim_object');
   const participantRoles = bilingualParticipantRoles(reason.residual);
@@ -982,6 +1025,8 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     action,
     predicate_modality: bilingualModalitySlots(fact.predicate, predicateActions[0]),
     predicate_negated: predicateActions[0].negated,
+    predicate_residue: '',
+    predicate_residue_policy: 'consumed-semantic-spans-v1',
     participant_roles: participantRoles,
     participant_quantifier: bilingualParticipantQuantifier(reason.residual),
     object_relations: objectRelations,
@@ -1253,8 +1298,8 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
-      '双语投影必须逐槽精确等价：来源归因（reportedly/据报道、allegedly/被指）、认识可能性（may/可能）、计划或未来（planned/will/计划/将）、进行或完成状态（ongoing/completed/正在/已）以及 polarity 是五组正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉其中任何一组。',
-      '员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/能力、使用关系、目标产品后缀、地区、原因、版本、绝对或相对时间均不得增删改。对象两侧每段实义文本都必须可归入明确槽位；most/half、unable、Enterprise/Pro、for confidential projects、later/last week/on Monday 等未知范围、能力、限定和附着时间不能省略。无法可靠翻译、归一化或完全消费的关键跨度必须 recommendation=needs_review，不得凭关键词相似猜测。',
+      '双语投影必须逐槽精确等价：来源归因（reportedly/据报道、allegedly/被指）、认识可能性（may/可能）、计划或未来（planned/will/计划/将）、进行或完成状态（ongoing/completed/正在/已）以及 polarity 是五组正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉其中任何一组。predicate 除主动作、助动词及这些已结构化槽外不得残留 apparently、likely、purportedly、temporarily、partially、conditionally 或其他未解释实义词；无法可靠归一化时必须 needs_review。',
+      '员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/能力、使用关系、目标产品后缀、地区、原因、版本、绝对或相对时间均不得增删改。对象两侧每段实义文本都必须可归入明确槽位；most/half、unable、for confidential projects、later/last week/on Monday 等未知范围、能力、限定和附着时间不能省略。Enterprise/Pro/Plus/Lite/Mini 仅在与同一目标产品短语明确绑定时才是产品 qualifier，单独出现时不得消费。无法可靠翻译、归一化或完全消费的关键跨度必须 recommendation=needs_review，不得凭关键词相似猜测。',
       '中文投影的谓词和非专名叙述必须使用中文；公司、模型、产品及版本可保留官方英文名。禁止 OpenAI was sued稍后时间点 之类中英叙述混写，也禁止把纯时间、纯原因或纯情态写成 object。',
       'raw source fact 使用顺序 fact_ref：fact-01、fact-02……；title 只能用 title-01，summary 只能依次用 summary-01、summary-02……。程序会从源事实内容生成稳定 source fact id，并把投影映射转换为该稳定 id。',
       'title 只映射 primary fact（fact-01）。summary 项数必须与 source_facts 完全相等，并按原顺序一一映射：summary-01→fact-01、summary-02→fact-02……；禁止漏项、重复 fact_ref、乱序或额外 summary。',
@@ -1719,7 +1764,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '每个 fact 只能使用其自身结构内的 allowed_evidence；禁止跨 fact 查看、引用或推断其他 evidence。',
       '先核验每条 source_fact、event_key 的主体/动作/对象/版本/日期语义、event_type、非空 occurred_at，以及无论 true 或 false 的 material_update；中文 title/summary 只在独立 projection_results 阶段核验。',
       'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：来源归因、认识可能性、计划/未来、进行/完成状态和 polarity 分属正交集合；参与者角色与数量范围、对象内否定/能力、关系、目标产品后缀、地区、原因、版本及绝对/相对时间也必须分别等价，不得把 compound modality 统称为弱情态。即使词面相似，只要任一槽不等价就必须 unsupported。',
-      '本地程序还会执行 consumed-semantic-spans fail-closed gate：源事实和中文投影的对象中，所有实义跨度都必须被已签名语义槽消费；无法分类的范围、能力、限定、对象补语或附着时间会直接拒绝，模型返回 supported 也不能覆盖该结果。',
+      '本地程序还会对 predicate 与 object 执行 consumed-semantic-spans fail-closed gate：除主动作、助动词和已签名正交槽外，所有实义跨度都必须被消费；无法分类的情态、时长、条件、范围、对象补语、未绑定产品 qualifier 或附着时间会直接拒绝，模型返回 supported 也不能覆盖该结果。',
       '逐项检查主体、动作方向、否定关系、对象、产品版本、时间与适用范围；不得用常识、用户线索、标题相似或同公司旧闻补齐事实。',
       '禁止用词面相似度、关键词比例或跨句词语重合代替结构核验；未知动作只有在完整规范化关键跨度一致时才可支持，未知复合谓词一律不支持。',
       '方向或否定关系相反使用 contradicted；版本、日期、时间或范围不一致使用 scope_or_time_mismatch；证据未出现该事实使用 not_found；其他不充分支持使用 unsupported。',
