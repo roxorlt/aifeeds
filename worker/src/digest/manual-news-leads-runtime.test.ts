@@ -189,21 +189,25 @@ describe('manual lead evidence extraction', () => {
   });
 
   test.each([
-    ['length', 'provider_output_exhausted'],
-    ['stop', 'provider_empty_final'],
-    ['insufficient_system_resource', 'provider_capacity'],
-    ['unknown', 'provider_no_text'],
-  ] as const)('classifies empty assessment finish=%s with bounded safe diagnostics', async (
+    ['length', 'no_text', 3, 'provider_output_exhausted'],
+    ['length', 'json_parse_fail', 17, 'provider_output_exhausted'],
+    ['stop', 'no_text', 3, 'provider_empty_final'],
+    ['insufficient_system_resource', 'no_text', 0, 'provider_capacity'],
+    ['insufficient_system_resource', 'json_parse_fail', 17, 'provider_capacity'],
+    ['unknown', 'no_text', 0, 'provider_no_text'],
+  ] as const)('classifies null assessment finish=%s with bounded safe diagnostics', async (
     finishReason,
+    rawError,
+    contentChars,
     expectedCode,
   ) => {
     const mockedCall = vi.mocked(callDeepSeekJson);
     mockedCall.mockResolvedValueOnce({
       data: null,
-      error: 'no_text',
+      error: rawError,
       diagnostics: {
         finish_reason: finishReason,
-        content_chars: 0,
+        content_chars: contentChars,
         reasoning_chars: 3_500,
         usage: {
           prompt_tokens: 1_200,
@@ -228,7 +232,7 @@ describe('manual lead evidence extraction', () => {
       provider_error_code: expectedCode,
       provider_diagnostics: {
         finish_reason: finishReason,
-        content_chars: 0,
+        content_chars: contentChars,
         reasoning_chars: 3_500,
         usage: { reasoning_tokens: 3_500 },
       },

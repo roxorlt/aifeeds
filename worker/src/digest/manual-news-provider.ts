@@ -176,15 +176,16 @@ export function classifyManualNewsProviderErrorCode(
   raw: string | undefined,
   diagnostics: ManualNewsProviderDiagnostics | undefined,
 ): string {
-  if (String(raw || '').trim() !== 'no_text') return stableManualNewsProviderErrorCode(raw);
-  if (diagnostics?.finish_reason === 'length' && diagnostics.content_chars === 0) {
+  const rawCode = String(raw || '').trim();
+  if (diagnostics?.finish_reason === 'insufficient_system_resource') return 'provider_capacity';
+  if (diagnostics?.finish_reason === 'length'
+    && (rawCode === 'no_text' || rawCode === 'json_parse_fail')) {
     return 'provider_output_exhausted';
   }
-  if (diagnostics?.finish_reason === 'insufficient_system_resource') return 'provider_capacity';
-  if (diagnostics?.finish_reason === 'stop' && diagnostics.content_chars === 0) {
+  if (diagnostics?.finish_reason === 'stop' && rawCode === 'no_text') {
     return 'provider_empty_final';
   }
-  return 'provider_no_text';
+  return stableManualNewsProviderErrorCode(raw);
 }
 
 export function manualNewsProviderFailureAudit(

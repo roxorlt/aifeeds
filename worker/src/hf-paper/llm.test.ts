@@ -209,7 +209,50 @@ describe("DeepSeek message roles", () => {
   });
 
   it.each([
+    ["length", "json_parse_fail"],
+    ["insufficient_system_resource", "json_parse_fail"],
+  ])("rejects partial JSON when the trusted finish reason is %s", async (finish, error) => {
+    vi.stubGlobal("fetch", vi.fn(async () => diagnosticResponse({
+      content: '{"ok":', reasoning: "PRIVATE-PARTIAL-COT", finish,
+    })));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await callDeepSeekJson<{ ok: boolean }>(
+      "test-key", "test-model", "prompt", { retries: 0 },
+    );
+
+    expect(result).toMatchObject({
+      data: null,
+      error,
+      diagnostics: { finish_reason: finish, content_chars: 6 },
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE-PARTIAL-COT");
+  });
+
+  it.each(["length", "insufficient_system_resource"])(
+    "fails closed on valid JSON when the trusted finish reason is %s",
+    async (finish) => {
+      vi.stubGlobal("fetch", vi.fn(async () => diagnosticResponse({
+        content: '{"ok":true}', reasoning: "PRIVATE-VALID-BUT-INCOMPLETE-COT", finish,
+      })));
+
+      const result = await callDeepSeekJson<{ ok: boolean }>(
+        "test-key", "test-model", "prompt", { retries: 0 },
+      );
+
+      expect(result).toMatchObject({
+        data: null,
+        error: "no_text",
+        diagnostics: { finish_reason: finish, content_chars: 11 },
+      });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE-VALID-BUT-INCOMPLETE-COT");
+    },
+  );
+
+  it.each([
     ["stop", "stop"],
+    ["length", "length"],
     ["insufficient_system_resource", "insufficient_system_resource"],
     ["future_provider_reason", "unknown"],
   ])("normalizes an empty %s finish reason without exposing content", async (finish, expected) => {

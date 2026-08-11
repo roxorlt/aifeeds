@@ -230,6 +230,19 @@ export async function callDeepSeekJson<T = unknown>(
     }
     try {
       const parsed = JSON.parse(result.text) as T;
+      // A parseable prefix is not necessarily a complete model response.
+      // Trust the provider's terminal reason over JSON.parse so callers never
+      // persist truncated output or output produced during a capacity failure.
+      if (result.diagnostics?.finish_reason === 'length'
+        || result.diagnostics?.finish_reason === 'insufficient_system_resource') {
+        if (attempt < retries) continue;
+        return {
+          data: null,
+          usage: result.usage,
+          diagnostics: result.diagnostics,
+          error: 'no_text',
+        };
+      }
       return { data: parsed, usage: result.usage, diagnostics: result.diagnostics };
     } catch {
       console.warn(`[hf-paper-llm] JSON parse fail attempt ${attempt + 1}`);
