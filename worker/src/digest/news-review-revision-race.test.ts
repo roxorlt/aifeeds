@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Env } from '../index';
-import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
+import { confirmManualNewsLeadCandidate, retryManualNewsLead } from './manual-news-leads-store';
 import {
   createNewsReviewToken,
   freezeNewsReviewBatch,
@@ -152,6 +152,54 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('a retry CAS loser cannot write an audit for a concurrent confirmation winner', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-a11111111111';
+    insertLead(current.db, leadId, 'event-retry-confirm-race-a');
+    current.db.sqlite.prepare("UPDATE manual_news_leads SET status = 'needs_review' WHERE id = ?").run(leadId);
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('base-a'), candidates('base-a').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const retry = retryManualNewsLead(current.env, leadId, 7, 'retry-race-a', 150);
+    await gate.entered;
+    const confirmation = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-race-a', 160,
+    );
+    gate.release();
+
+    expect(confirmation).toMatchObject({ ok: true, changed: true });
+    expect(await retry).toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
+    expect(current.db.sqlite.prepare(
+      `SELECT action FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(leadId)).toEqual([{ action: 'confirm_candidate' }]);
+  });
+
+  test('a confirmation CAS loser cannot write an audit for a concurrent retry winner', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-b22222222222';
+    insertLead(current.db, leadId, 'event-retry-confirm-race-b');
+    current.db.sqlite.prepare("UPDATE manual_news_leads SET status = 'needs_review' WHERE id = ?").run(leadId);
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('base-b'), candidates('base-b').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-race-b', 150,
+    );
+    await gate.entered;
+    const retry = await retryManualNewsLead(current.env, leadId, 7, 'retry-race-b', 160);
+    gate.release();
+
+    expect(retry).toMatchObject({ ok: true, changed: true });
+    expect(await confirmation).toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
+    expect(current.db.sqlite.prepare(
+      `SELECT action FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(leadId)).toEqual([{ action: 'retry' }]);
+  });
+
   test('prefreeze confirmation invalidates a freeze that already snapshotted no confirmed leads', async () => {
     const current = state();
     const leadId = 'ml-20260811-ffffffffffff';

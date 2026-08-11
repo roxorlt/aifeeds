@@ -41,6 +41,7 @@ interface ManualLeadRow {
   submit_idempotency_key: string;
   last_mutation_kind: string | null;
   last_mutation_idempotency_key: string | null;
+  last_mutation_nonce: string | null;
   processing_owner: string | null;
   processing_attempt: number;
   processing_lease_until: number | null;
@@ -89,11 +90,21 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+function createMutationNonce(action: string): string {
+  return `${action}:${crypto.randomUUID()}`;
+}
+
+export function manualNewsLeadProcessingOwner(id: string, version: number): string {
+  return `manual-news-${id}-v${version}`;
+}
+
 function auditMutationStatement(
   env: Env,
   input: {
     leadId: string;
     action: string;
+    mutationKind: string;
+    mutationNonce: string;
     fromStatus: ManualNewsLeadStatus | null;
     toStatus: ManualNewsLeadStatus | null;
     idempotencyKey?: string | null;
@@ -103,14 +114,32 @@ function auditMutationStatement(
   },
 ): D1PreparedStatement {
   return env.DB.prepare(
-    `/* manual_audit:mutation */ INSERT OR IGNORE INTO manual_news_lead_audit
-     (lead_id, action, from_status, to_status, idempotency_key, resulting_version, metadata_json, created_at)
-     SELECT ?, ?, ?, ?, ?, version, ?, ? FROM manual_news_leads
-     WHERE id = ? AND version = ?`,
+    `/* manual_audit:mutation */ INSERT INTO manual_news_lead_audit
+     (lead_id, action, from_status, to_status, idempotency_key, mutation_nonce,
+      resulting_version, metadata_json, created_at)
+     SELECT ?, ?, ?, ?, ?, ?, version, ?, ? FROM manual_news_leads
+     WHERE id = ? AND version = ? AND status = ?
+       AND last_mutation_kind = ? AND last_mutation_idempotency_key IS ?
+       AND last_mutation_nonce = ?`,
   ).bind(
     input.leadId, input.action, input.fromStatus, input.toStatus, input.idempotencyKey || null,
-    JSON.stringify(input.metadata || {}), input.createdAt, input.leadId, input.resultingVersion,
+    input.mutationNonce, JSON.stringify(input.metadata || {}), input.createdAt,
+    input.leadId, input.resultingVersion, input.toStatus, input.mutationKind,
+    input.idempotencyKey || null, input.mutationNonce,
   );
+}
+
+function auditedMutationChanges(
+  results: Array<{ meta?: { changes?: number } }>,
+  mutationIndex: number,
+  auditIndex: number,
+): number {
+  const mutationChanges = Number(results[mutationIndex]?.meta?.changes || 0);
+  const auditChanges = Number(results[auditIndex]?.meta?.changes || 0);
+  if (mutationChanges > 1 || auditChanges > 1 || mutationChanges !== auditChanges) {
+    throw new Error('manual_lead_audit_causality_mismatch');
+  }
+  return mutationChanges;
 }
 
 async function runAuditedMutation(
@@ -119,7 +148,7 @@ async function runAuditedMutation(
   audit: D1PreparedStatement,
 ): Promise<number> {
   const results = await env.DB.batch([mutation, audit]) as Array<{ meta?: { changes?: number } }>;
-  return Number(results[0]?.meta?.changes || 0);
+  return auditedMutationChanges(results, 0, 1);
 }
 
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
@@ -203,11 +232,14 @@ export async function submitManualNewsLead(
   }
   const hash = await sha256Hex(`${normalized.date}\0${idempotencyKey}\0${normalized.text}\0${normalized.url}`);
   const id = `ml-${normalized.date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
+  const mutationNonce = createMutationNonce('submit');
+  const processingOwner = manualNewsLeadProcessingOwner(id, 1);
   const insertStatement = env.DB.prepare(
     `/* manual_lead:insert */ INSERT OR IGNORE INTO manual_news_leads (
        id, review_date, input_type, input_text, input_url, note, status, version,
-       submit_idempotency_key, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, 'submitted', 1, ?, ?, ?)`,
+       submit_idempotency_key, last_mutation_kind, last_mutation_idempotency_key,
+       last_mutation_nonce, processing_owner, processing_lease_until, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'submitted', 1, ?, 'submit', ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id,
     normalized.date,
@@ -216,11 +248,16 @@ export async function submitManualNewsLead(
     normalized.url,
     normalized.note,
     idempotencyKey,
+    idempotencyKey,
+    mutationNonce,
+    processingOwner,
+    now + PROCESSING_LEASE_MS,
     now,
     now,
   );
   const created = await runAuditedMutation(env, insertStatement, auditMutationStatement(env, {
-    leadId: id, action: 'submit', fromStatus: null, toStatus: 'submitted', idempotencyKey,
+    leadId: id, action: 'submit', mutationKind: 'submit', mutationNonce,
+    fromStatus: null, toStatus: 'submitted', idempotencyKey,
     resultingVersion: 1, metadata: { input_type: normalized.input_type }, createdAt: now,
   })) > 0;
   let lead = await getManualNewsLead(env, id);
@@ -263,16 +300,20 @@ export async function retryManualNewsLead(
     return { ok: false, status: 409, error: 'lead_not_retryable', lead };
   }
   assertManualLeadTransition(lead.status, 'validating');
+  const nextVersion = expectedVersion + 1;
+  const processingOwner = manualNewsLeadProcessingOwner(id, nextVersion);
+  const mutationNonce = createMutationNonce('retry');
   const mutation = env.DB.prepare(
     `/* manual_lead:retry */ UPDATE manual_news_leads SET
        status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
        last_mutation_kind = 'retry', last_mutation_idempotency_key = ?,
-       processing_owner = NULL, processing_lease_until = NULL, updated_at = ?
+       last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
      WHERE id = ? AND version = ? AND status IN ('failed', 'needs_review', 'rejected')`,
-  ).bind(idempotencyKey, now, id, expectedVersion);
+  ).bind(idempotencyKey, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, id, expectedVersion);
   const changed = await runAuditedMutation(env, mutation, auditMutationStatement(env, {
-    leadId: id, action: 'retry', fromStatus: lead.status, toStatus: 'validating', idempotencyKey,
-    resultingVersion: expectedVersion + 1, createdAt: now,
+    leadId: id, action: 'retry', mutationKind: 'retry', mutationNonce,
+    fromStatus: lead.status, toStatus: 'validating', idempotencyKey,
+    resultingVersion: nextVersion, createdAt: now,
   }));
   if (!changed) {
     const conflicted = await getManualNewsLead(env, id);
@@ -315,15 +356,18 @@ export async function failManualNewsLeadAfterExhaustion(
   ).bind(id, owner).first<{ status: ManualNewsLeadStatus; version: number }>();
   if (!row || !INTERMEDIATE_PROCESSING_STATUSES.includes(row.status)) return false;
   const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 500);
+  const mutationNonce = createMutationNonce('processing_exhausted');
   const mutation = env.DB.prepare(
     `/* manual_lead:processing_exhausted */ UPDATE manual_news_leads SET
        status = 'failed', version = version + 1, error_code = 'processing_retry_exhausted',
        error_message = ?, last_mutation_kind = 'processing_exhausted',
-       last_mutation_idempotency_key = ?, processing_lease_until = NULL, updated_at = ?
+       last_mutation_idempotency_key = ?, last_mutation_nonce = ?, processing_owner = NULL,
+       processing_lease_until = NULL, updated_at = ?
      WHERE id = ? AND status = ? AND version = ? AND processing_owner = ?`,
-  ).bind(message, owner, now, id, row.status, row.version, owner);
+  ).bind(message, owner, mutationNonce, now, id, row.status, row.version, owner);
   return await runAuditedMutation(env, mutation, auditMutationStatement(env, {
-    leadId: id, action: 'processing_exhausted', fromStatus: row.status, toStatus: 'failed',
+    leadId: id, action: 'processing_exhausted', mutationKind: 'processing_exhausted', mutationNonce,
+    fromStatus: row.status, toStatus: 'failed',
     idempotencyKey: owner, resultingVersion: Number(row.version) + 1,
     metadata: { processing_owner: owner }, createdAt: now,
   })) > 0;
@@ -332,27 +376,33 @@ export async function failManualNewsLeadAfterExhaustion(
 export async function markManualNewsLeadEnqueueFailure(
   env: Env,
   id: string,
+  scheduledVersion: number,
+  scheduledOwner: string,
   error: unknown,
   now = Date.now(),
 ): Promise<boolean> {
   const row = await env.DB.prepare(
     `/* manual_lead:enqueue_failure_version */ SELECT status, version FROM manual_news_leads
-     WHERE id = ? AND status IN ('submitted','validating')`,
-  ).bind(id).first<{ status: ManualNewsLeadStatus; version: number }>();
+     WHERE id = ? AND version = ? AND processing_owner = ?
+       AND status IN ('submitted','validating')`,
+  ).bind(id, scheduledVersion, scheduledOwner).first<{ status: ManualNewsLeadStatus; version: number }>();
   if (!row) return false;
   const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 500);
-  const key = `enqueue:${row.version}`;
+  const key = `enqueue:${scheduledVersion}:${scheduledOwner}`;
+  const mutationNonce = createMutationNonce('enqueue_failure');
   const mutation = env.DB.prepare(
     `/* manual_lead:enqueue_failure */ UPDATE manual_news_leads SET
        status = 'failed', version = version + 1, error_code = 'workflow_enqueue_failed',
        error_message = ?, last_mutation_kind = 'enqueue_failure',
-       last_mutation_idempotency_key = ?, processing_owner = NULL,
+       last_mutation_idempotency_key = ?, last_mutation_nonce = ?, processing_owner = NULL,
        processing_lease_until = NULL, updated_at = ?
-     WHERE id = ? AND status = ? AND version = ?`,
-  ).bind(message, key, now, id, row.status, row.version);
+     WHERE id = ? AND status = ? AND version = ? AND processing_owner = ?`,
+  ).bind(message, key, mutationNonce, now, id, row.status, scheduledVersion, scheduledOwner);
   return await runAuditedMutation(env, mutation, auditMutationStatement(env, {
-    leadId: id, action: 'enqueue_failure', fromStatus: row.status, toStatus: 'failed',
+    leadId: id, action: 'enqueue_failure', mutationKind: 'enqueue_failure', mutationNonce,
+    fromStatus: row.status, toStatus: 'failed',
     idempotencyKey: key, resultingVersion: Number(row.version) + 1, createdAt: now,
+    metadata: { scheduled_version: scheduledVersion, processing_owner: scheduledOwner },
   })) > 0;
 }
 
@@ -372,17 +422,21 @@ export async function recoverStaleManualNewsLeads(
   const recovered: ManualNewsLeadRecord[] = [];
   for (const row of stale.results || []) {
     const key = `stale-recovery:${row.version}`;
+    const nextVersion = Number(row.version) + 1;
+    const processingOwner = manualNewsLeadProcessingOwner(row.id, nextVersion);
+    const mutationNonce = createMutationNonce('stale_recovery');
     const mutation = env.DB.prepare(
       `/* manual_lead:recover_stale */ UPDATE manual_news_leads SET
          status = 'validating', version = version + 1, error_code = NULL, error_message = NULL,
          last_mutation_kind = 'stale_recovery', last_mutation_idempotency_key = ?,
-         processing_owner = NULL, processing_lease_until = NULL, updated_at = ?
+         last_mutation_nonce = ?, processing_owner = ?, processing_lease_until = ?, updated_at = ?
        WHERE id = ? AND status = ? AND version = ?
          AND (processing_lease_until IS NULL OR processing_lease_until < ?)`,
-    ).bind(key, now, row.id, row.status, row.version, now);
+    ).bind(key, mutationNonce, processingOwner, now + PROCESSING_LEASE_MS, now, row.id, row.status, row.version, now);
     const changed = await runAuditedMutation(env, mutation, auditMutationStatement(env, {
-      leadId: row.id, action: 'stale_recovery', fromStatus: row.status, toStatus: 'validating',
-      idempotencyKey: key, resultingVersion: Number(row.version) + 1, createdAt: now,
+      leadId: row.id, action: 'stale_recovery', mutationKind: 'stale_recovery', mutationNonce,
+      fromStatus: row.status, toStatus: 'validating',
+      idempotencyKey: key, resultingVersion: nextVersion, createdAt: now,
     }));
     if (!changed) continue;
     const lead = await getManualNewsLead(env, row.id);
@@ -411,19 +465,23 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
     ).bind(id, from).first<{ version: number }>();
     if (!current) throw new Error('lead_transition_conflict');
     const terminal = ['recommended', 'needs_review', 'duplicate', 'rejected', 'failed'].includes(to);
+    const mutationNonce = createMutationNonce('status_transition');
     const ownerGuard = this.processingOwner ? ' AND processing_owner = ?' : '';
     const mutation = this.env.DB.prepare(
       `/* manual_lead:transition */ UPDATE manual_news_leads SET
          status = ?, version = version + 1, error_code = ?, error_message = ?,
+         last_mutation_kind = 'status_transition', last_mutation_idempotency_key = NULL,
+         last_mutation_nonce = ?,
          processing_owner = ?, processing_lease_until = ?, updated_at = ?
        WHERE id = ? AND status = ? AND version = ?${ownerGuard}`,
     ).bind(
-      to, patch.error_code ?? null, patch.error_message ?? null,
+      to, patch.error_code ?? null, patch.error_message ?? null, mutationNonce,
       terminal ? null : this.processingOwner || null, terminal ? null : now + PROCESSING_LEASE_MS,
       now, id, from, Number(current.version), ...(this.processingOwner ? [this.processingOwner] : []),
     );
     const changed = await runAuditedMutation(this.env, mutation, auditMutationStatement(this.env, {
-      leadId: id, action: 'status_transition', fromStatus: from, toStatus: to,
+      leadId: id, action: 'status_transition', mutationKind: 'status_transition', mutationNonce,
+      fromStatus: from, toStatus: to,
       resultingVersion: Number(current.version) + 1, createdAt: now,
     }));
     if (!changed) throw new Error('lead_transition_conflict');
@@ -576,12 +634,13 @@ export async function confirmManualNewsLeadCandidate(
     event_fingerprint: lead.assessment.event_key,
     manual_lead: { lead_id: lead.id, evidence_ids: lead.evidence.map((item) => item.id) },
   });
+  const confirmationNonce = createMutationNonce('confirm');
   const active = await getActiveNewsReviewBatch(env, lead.review_date);
   if ((active?.batch_revision || 0) !== expectedBatchRevision) {
     return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead };
   }
   if (!active) {
-    await env.DB.batch([
+    const results = await env.DB.batch([
       env.DB.prepare(
         `/* manual_lead:candidate_generation_init */ INSERT OR IGNORE INTO daily_news_review_candidate_generations
          (review_date, lineage_id, generation, updated_at) VALUES (?, ?, 0, ?)`,
@@ -590,11 +649,11 @@ export async function confirmManualNewsLeadCandidate(
       env.DB.prepare(
         `/* manual_lead:confirm_prefreeze */ UPDATE manual_news_leads SET
            version = version + 1, confirmed_at = ?, last_mutation_kind = 'confirm',
-           last_mutation_idempotency_key = ?, updated_at = ?
+           last_mutation_idempotency_key = ?, last_mutation_nonce = ?, updated_at = ?
          WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
            AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
              WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`,
-      ).bind(now, idempotencyKey, now, id, expectedVersion, lead.review_date, lead.review_date),
+      ).bind(now, idempotencyKey, confirmationNonce, now, id, expectedVersion, lead.review_date, lead.review_date),
       env.DB.prepare(
         `/* manual_lead:candidate_generation_advance */ UPDATE daily_news_review_candidate_generations
          SET generation = generation + 1, updated_at = ?
@@ -603,28 +662,39 @@ export async function confirmManualNewsLeadCandidate(
              WHERE review_date = ? AND lineage_id = ? AND is_current = 1)
            AND EXISTS (SELECT 1 FROM manual_news_leads
              WHERE id = ? AND version = ? AND last_mutation_kind = 'confirm'
-               AND last_mutation_idempotency_key = ?)`,
+               AND last_mutation_idempotency_key = ? AND last_mutation_nonce = ?)`,
       ).bind(
         now, lead.review_date, lead.review_date, lead.review_date, lead.review_date,
-        id, expectedVersion + 1, idempotencyKey,
+        id, expectedVersion + 1, idempotencyKey, confirmationNonce,
       ),
       auditMutationStatement(env, {
-        leadId: id, action: 'confirm_candidate', fromStatus: lead.status, toStatus: lead.status,
+        leadId: id, action: 'confirm_candidate', mutationKind: 'confirm', mutationNonce: confirmationNonce,
+        fromStatus: lead.status, toStatus: lead.status,
         idempotencyKey, resultingVersion: expectedVersion + 1,
         metadata: { pending_initial_freeze: true }, createdAt: now,
       }),
-    ]);
+    ]) as Array<{ meta?: { changes?: number } }>;
+    const changed = auditedMutationChanges(results, 2, 4);
     const latestRow = await env.DB.prepare(
       `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
     ).bind(id).first<ManualLeadRow>();
     if (!latestRow) return { ok: false, status: 404, error: 'manual_news_lead_not_found' };
     const updated = await leadFromRow(env, latestRow);
-    if (latestRow.last_mutation_kind !== 'confirm' || latestRow.last_mutation_idempotency_key !== idempotencyKey) {
+    if (!changed) {
+      if (latestRow.last_mutation_kind === 'confirm' && latestRow.last_mutation_idempotency_key === idempotencyKey) {
+        return {
+          ok: true, changed: false, lead: updated, batch: null,
+          pending_initial_freeze: true, rerender_enqueued: false,
+        };
+      }
       const latestActive = await getActiveNewsReviewBatch(env, lead.review_date);
       if (latestActive) {
         return { ok: false, status: 409, error: 'candidate_batch_revision_conflict', lead: updated };
       }
       return { ok: false, status: 409, error: 'lead_version_conflict', lead: updated };
+    }
+    if (latestRow.last_mutation_nonce !== confirmationNonce) {
+      throw new Error('manual_lead_audit_causality_mismatch');
     }
     return {
       ok: true,
@@ -691,12 +761,17 @@ export async function confirmManualNewsLeadCandidate(
     env.DB.prepare(
       `/* manual_lead:confirm */ UPDATE manual_news_leads SET
          version = version + 1, confirmed_batch_id = ?, confirmed_at = ?,
-         last_mutation_kind = 'confirm', last_mutation_idempotency_key = ?, updated_at = ?
+         last_mutation_kind = 'confirm', last_mutation_idempotency_key = ?,
+         last_mutation_nonce = ?, updated_at = ?
        WHERE id = ? AND version = ? AND status IN ('recommended', 'needs_review')
          AND EXISTS (SELECT 1 FROM daily_news_review_batches WHERE review_date = ? AND batch_id = ? AND is_current = 1)`,
-    ).bind(batchId, now, idempotencyKey, now, lead.id, expectedVersion, lead.review_date, batchId),
+    ).bind(
+      batchId, now, idempotencyKey, confirmationNonce, now,
+      lead.id, expectedVersion, lead.review_date, batchId,
+    ),
     auditMutationStatement(env, {
-      leadId: lead.id, action: 'confirm_candidate', fromStatus: lead.status, toStatus: lead.status,
+      leadId: lead.id, action: 'confirm_candidate', mutationKind: 'confirm', mutationNonce: confirmationNonce,
+      fromStatus: lead.status, toStatus: lead.status,
       idempotencyKey, resultingVersion: expectedVersion + 1,
       metadata: {
         batch_id: batchId, revision: batchRevision, supersedes: active.batch_id,
@@ -705,11 +780,25 @@ export async function confirmManualNewsLeadCandidate(
       createdAt: now,
     }),
   ];
-  await env.DB.batch(statements);
+  const results = await env.DB.batch(statements) as Array<{ meta?: { changes?: number } }>;
+  const changed = auditedMutationChanges(results, 4, 5);
   const updated = await getManualNewsLead(env, id);
   const batch = await getNewsReviewBatch(env, lead.review_date, batchId);
-  if (!updated || updated.confirmed_batch_id !== batchId || !batch) {
+  const updatedRow = await env.DB.prepare(
+    `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
+  ).bind(id).first<ManualLeadRow>();
+  if (!changed && updated && updatedRow?.last_mutation_kind === 'confirm'
+    && updatedRow.last_mutation_idempotency_key === idempotencyKey && batch) {
+    return {
+      ok: true, changed: false, lead: updated, batch: await publicConfirmedBatch(env, batch),
+      pending_initial_freeze: false, rerender_enqueued: false,
+    };
+  }
+  if (!updated || updated.confirmed_batch_id !== batchId || !batch || !changed) {
     return { ok: false, status: 409, error: 'lead_version_conflict', ...(updated ? { lead: updated } : {}) };
+  }
+  if (updatedRow?.last_mutation_nonce !== confirmationNonce) {
+    throw new Error('manual_lead_audit_causality_mismatch');
   }
   return {
     ok: true,

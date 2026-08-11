@@ -28,24 +28,32 @@ function fakeEnv() {
         async run() {
           statements.push({ sql, binds });
           if (sql.includes('manual_lead:insert')) {
-            const [id, reviewDate, inputType, inputText, inputUrl, note, submitKey, now] = binds;
+            const [
+              id, reviewDate, inputType, inputText, inputUrl, note, submitKey,
+              lastMutationKey, mutationNonce, processingOwner, processingLeaseUntil, now,
+            ] = binds;
             leads.set(String(id), {
               id, review_date: reviewDate, input_type: inputType, input_text: inputText, input_url: inputUrl,
               note, status: 'submitted', version: 1, error_code: null, error_message: null,
-              submit_idempotency_key: submitKey, last_mutation_kind: null, last_mutation_idempotency_key: null,
+              submit_idempotency_key: submitKey, last_mutation_kind: 'submit',
+              last_mutation_idempotency_key: lastMutationKey, last_mutation_nonce: mutationNonce,
+              processing_owner: processingOwner, processing_attempt: 0,
+              processing_lease_until: processingLeaseUntil,
               confirmed_batch_id: null, confirmed_at: null, created_at: now, updated_at: now,
             });
             return { success: true, meta: { changes: 1 } };
           }
           if (sql.includes('manual_lead:retry')) {
-            const [key, now, id, expectedVersion] = binds;
+            const [key, mutationNonce, processingOwner, processingLeaseUntil, now, id, expectedVersion] = binds;
             const row = leads.get(String(id));
             if (!row || row.version !== expectedVersion || !['failed', 'needs_review', 'rejected'].includes(String(row.status))) {
               return { success: true, meta: { changes: 0 } };
             }
             Object.assign(row, {
               status: 'validating', version: Number(row.version) + 1, error_code: null, error_message: null,
-              last_mutation_kind: 'retry', last_mutation_idempotency_key: key, updated_at: now,
+              last_mutation_kind: 'retry', last_mutation_idempotency_key: key,
+              last_mutation_nonce: mutationNonce, processing_owner: processingOwner,
+              processing_lease_until: processingLeaseUntil, updated_at: now,
             });
             return { success: true, meta: { changes: 1 } };
           }

@@ -7,6 +7,7 @@ vi.mock('./manual-news-leads-store', () => ({
   retryManualNewsLead: vi.fn(),
   submitManualNewsLead: vi.fn(),
   getManualNewsLeadCandidateState: vi.fn(),
+  manualNewsLeadProcessingOwner: (id: string, version: number) => `manual-news-${id}-v${version}`,
   markManualNewsLeadEnqueueFailure: vi.fn(),
   recoverStaleManualNewsLeads: vi.fn(),
 }));
@@ -29,7 +30,8 @@ const record = {
   id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'text',
   input_text: 'Anthropic 输出水印', input_url: '', note: '', status: 'submitted', version: 1,
   error_code: null, error_message: null, assessment: null, evidence: [], confirmed_batch_id: null, confirmed_at: null,
-  processing_owner: null, processing_attempt: 0, processing_lease_until: null,
+  processing_owner: 'manual-news-ml-20260811-abc123def456-v1',
+  processing_attempt: 0, processing_lease_until: 360001,
   created_at: 1, updated_at: 1,
 };
 
@@ -70,7 +72,16 @@ describe('manual daily news leads API', () => {
     vi.mocked(getManualNewsLeadCandidateState).mockResolvedValue({
       batch_id: 'nr-20260811-current000001', revision: 1,
     } as never);
-    vi.mocked(retryManualNewsLead).mockResolvedValue({ ok: true, changed: true, lead: { ...record, status: 'validating', version: 2 } } as never);
+    vi.mocked(retryManualNewsLead).mockResolvedValue({
+      ok: true,
+      changed: true,
+      lead: {
+        ...record,
+        status: 'validating',
+        version: 2,
+        processing_owner: `manual-news-${record.id}-v2`,
+      },
+    } as never);
     vi.mocked(confirmManualNewsLeadCandidate).mockResolvedValue({
       ok: true,
       lead: { ...record, status: 'recommended', version: 3, confirmed_batch_id: 'nr-20260811-abcdef123456' },
@@ -146,7 +157,13 @@ describe('manual daily news leads API', () => {
     await Promise.all(queued);
 
     expect(response.status).toBe(202);
-    expect(markManualNewsLeadEnqueueFailure).toHaveBeenCalledWith(expect.anything(), record.id, expect.any(Error));
+    expect(markManualNewsLeadEnqueueFailure).toHaveBeenCalledWith(
+      expect.anything(),
+      record.id,
+      record.version,
+      `manual-news-${record.id}-v${record.version}`,
+      expect.any(Error),
+    );
     expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
   });
 

@@ -6,7 +6,9 @@ import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manu
 import {
   D1ManualLeadProcessingStore,
   failManualNewsLeadAfterExhaustion,
+  markManualNewsLeadEnqueueFailure,
   recoverStaleManualNewsLeads,
+  retryManualNewsLead,
   submitManualNewsLead,
 } from './manual-news-leads-store';
 
@@ -14,6 +16,7 @@ class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
   failAudit = false;
   private batchTail: Promise<void> = Promise.resolve();
+  private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
 
   constructor() {
     this.sqlite.exec(`
@@ -26,6 +29,7 @@ class SqliteD1 {
         input_text TEXT NOT NULL DEFAULT '', input_url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL, version INTEGER NOT NULL, error_code TEXT, error_message TEXT,
         submit_idempotency_key TEXT NOT NULL, last_mutation_kind TEXT, last_mutation_idempotency_key TEXT,
+        last_mutation_nonce TEXT,
         processing_owner TEXT, processing_attempt INTEGER NOT NULL DEFAULT 0, processing_lease_until INTEGER,
         confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
@@ -47,7 +51,8 @@ class SqliteD1 {
       CREATE TABLE manual_news_lead_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id TEXT NOT NULL, action TEXT NOT NULL,
         from_status TEXT, to_status TEXT, idempotency_key TEXT,
-        resulting_version INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL
+        mutation_nonce TEXT NOT NULL, resulting_version INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL
       );
       CREATE UNIQUE INDEX idx_manual_news_lead_audit_version
         ON manual_news_lead_audit(lead_id, resulting_version, action);
@@ -76,6 +81,12 @@ class SqliteD1 {
   }
 
   async batch(statements: Array<{ run(): Promise<unknown> }>): Promise<unknown[]> {
+    const gate = this.nextBatchGate;
+    this.nextBatchGate = null;
+    if (gate) {
+      gate.entered();
+      await gate.released;
+    }
     let release!: () => void;
     const previous = this.batchTail;
     this.batchTail = new Promise<void>((resolve) => { release = resolve; });
@@ -92,6 +103,15 @@ class SqliteD1 {
     } finally {
       release();
     }
+  }
+
+  pauseNextBatch(): { entered: Promise<void>; release: () => void } {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.nextBatchGate = { entered: markEntered, released };
+    return { entered, release };
   }
 
   close(): void { this.sqlite.close(); }
@@ -284,6 +304,46 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(state.leadId)).toMatchObject({ count: 1, resulting_version: 5 });
   });
 
+  test('a stale-recovery CAS loser cannot audit the winning status transition', async () => {
+    const state = fixture('validating', 4);
+    state.db.sqlite.prepare(
+      `UPDATE manual_news_leads SET processing_owner = 'stale-owner', processing_lease_until = 10 WHERE id = ?`,
+    ).run(state.leadId);
+    const gate = state.db.pauseNextBatch();
+
+    const recovery = recoverStaleManualNewsLeads(state.env, '2026-08-11', 100);
+    await gate.entered;
+    await new D1ManualLeadProcessingStore(state.env, 'stale-owner').transition(
+      state.leadId, 'validating', 'researching',
+    );
+    gate.release();
+    expect(await recovery).toEqual([]);
+
+    expect(state.db.sqlite.prepare(
+      `SELECT action, to_status AS toStatus FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(state.leadId)).toEqual([{ action: 'status_transition', toStatus: 'researching' }]);
+  });
+
+  test('a status-transition CAS loser cannot audit the winning stale recovery', async () => {
+    const state = fixture('validating', 4);
+    state.db.sqlite.prepare(
+      `UPDATE manual_news_leads SET processing_owner = 'stale-owner', processing_lease_until = 10 WHERE id = ?`,
+    ).run(state.leadId);
+    const gate = state.db.pauseNextBatch();
+
+    const transition = new D1ManualLeadProcessingStore(state.env, 'stale-owner')
+      .transition(state.leadId, 'validating', 'researching');
+    await gate.entered;
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 100);
+    gate.release();
+    await expect(transition).rejects.toThrow('lead_transition_conflict');
+
+    expect(recovered).toHaveLength(1);
+    expect(state.db.sqlite.prepare(
+      `SELECT action, to_status AS toStatus FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(state.leadId)).toEqual([{ action: 'stale_recovery', toStatus: 'validating' }]);
+  });
+
   test('recovers every stale intermediate status to validating with an audited CAS', async () => {
     const state = fixture('validating', 4);
     const statuses = ['submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored'] as const;
@@ -302,7 +362,9 @@ describe('manual lead D1-backed dedupe', () => {
     expect(recovered.map((lead) => lead.id).sort()).toEqual(statuses.map((_, index) => `stale-${index}`).sort());
     expect(state.db.sqlite.prepare(
       `SELECT COUNT(*) AS count FROM manual_news_leads
-       WHERE status = 'validating' AND version = 5 AND processing_owner IS NULL`,
+       WHERE status = 'validating' AND version = 5
+         AND processing_owner = 'manual-news-' || id || '-v5'
+         AND processing_lease_until = 360100`,
     ).get()).toMatchObject({ count: statuses.length });
     expect(state.db.sqlite.prepare(
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
@@ -326,5 +388,75 @@ describe('manual lead D1-backed dedupe', () => {
       `SELECT COUNT(*) AS count FROM manual_news_lead_audit
        WHERE lead_id = ? AND action = 'processing_exhausted' AND resulting_version = 8`,
     ).get(state.leadId)).toMatchObject({ count: 1 });
+  });
+
+  test('retry and stale recovery reserve a fresh owner lease and recover only after expiry', async () => {
+    const state = fixture('failed', 7);
+    const retry = await retryManualNewsLead(state.env, state.leadId, 7, 'retry-v8', 100);
+
+    expect(retry).toMatchObject({
+      ok: true,
+      changed: true,
+      lead: {
+        version: 8,
+        status: 'validating',
+        processing_owner: `manual-news-${state.leadId}-v8`,
+        processing_lease_until: 360100,
+      },
+    });
+    expect(await recoverStaleManualNewsLeads(state.env, '2026-08-11', 101)).toEqual([]);
+
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360101);
+    expect(recovered).toEqual([expect.objectContaining({
+      version: 9,
+      processing_owner: `manual-news-${state.leadId}-v9`,
+      processing_lease_until: 720101,
+    })]);
+    expect(await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360102)).toEqual([]);
+    expect(state.db.sqlite.prepare(
+      `SELECT version, processing_owner AS owner, processing_lease_until AS lease
+       FROM manual_news_leads WHERE id = ?`,
+    ).get(state.leadId)).toEqual({
+      version: 9,
+      owner: `manual-news-${state.leadId}-v9`,
+      lease: 720101,
+    });
+  });
+
+  test('a deferred old enqueue failure cannot mutate or audit a newer recovered owner', async () => {
+    const state = fixture('failed', 7);
+    const retry = await retryManualNewsLead(state.env, state.leadId, 7, 'retry-v8', 100);
+    expect(retry.ok).toBe(true);
+    const ownerV8 = `manual-news-${state.leadId}-v8`;
+    let rejectOldCreate!: (reason: Error) => void;
+    const oldCreate = new Promise<never>((_resolve, reject) => { rejectOldCreate = reject; });
+    const oldFailure = oldCreate.catch((error) => markManualNewsLeadEnqueueFailure(
+      state.env, state.leadId, 8, ownerV8, error, 360102,
+    ));
+
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 360101);
+    expect(recovered).toHaveLength(1);
+    const before = state.db.sqlite.prepare(
+      `SELECT status, version, processing_owner AS owner, processing_lease_until AS lease,
+              last_mutation_nonce AS nonce
+       FROM manual_news_leads WHERE id = ?`,
+    ).get(state.leadId);
+    const auditBefore = state.db.sqlite.prepare(
+      `SELECT action, resulting_version AS version, mutation_nonce AS nonce
+       FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(state.leadId);
+
+    rejectOldCreate(new Error('v8 workflow create failed late'));
+    await expect(oldFailure).resolves.toBe(false);
+
+    expect(state.db.sqlite.prepare(
+      `SELECT status, version, processing_owner AS owner, processing_lease_until AS lease,
+              last_mutation_nonce AS nonce
+       FROM manual_news_leads WHERE id = ?`,
+    ).get(state.leadId)).toEqual(before);
+    expect(state.db.sqlite.prepare(
+      `SELECT action, resulting_version AS version, mutation_nonce AS nonce
+       FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
+    ).all(state.leadId)).toEqual(auditBefore);
   });
 });

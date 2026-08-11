@@ -42,7 +42,7 @@ function fakeConfirmationEnv() {
     id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'url', input_text: '',
     input_url: 'https://support.claude.com/example', note: '', status: 'recommended', version: 7,
     error_code: null, error_message: null, submit_idempotency_key: 'submit',
-    last_mutation_kind: null, last_mutation_idempotency_key: null,
+    last_mutation_kind: null, last_mutation_idempotency_key: null, last_mutation_nonce: null,
     confirmed_batch_id: null, confirmed_at: null, created_at: 1, updated_at: 1,
   };
   const evidence = {
@@ -76,7 +76,7 @@ function fakeConfirmationEnv() {
       const batchStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_batch'));
       const confirmStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm */'));
       const prefreezeStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_prefreeze'));
-      const expectedVersion = batchStmt ? confirmStmt.binds[5] : prefreezeStmt.binds[4];
+      const expectedVersion = batchStmt ? confirmStmt.binds[6] : prefreezeStmt.binds[5];
       if (row.version === expectedVersion && batchStmt) {
         const candidates = JSON.parse(batchStmt.binds[3]);
         insertedBatch = {
@@ -90,11 +90,13 @@ function fakeConfirmationEnv() {
         row.confirmed_at = confirmStmt.binds[1];
         row.last_mutation_kind = 'confirm';
         row.last_mutation_idempotency_key = confirmStmt.binds[2];
+        row.last_mutation_nonce = confirmStmt.binds[3];
       } else if (row.version === expectedVersion && prefreezeStmt) {
         row.version += 1;
         row.confirmed_at = prefreezeStmt.binds[0];
         row.last_mutation_kind = 'confirm';
         row.last_mutation_idempotency_key = prefreezeStmt.binds[1];
+        row.last_mutation_nonce = prefreezeStmt.binds[2];
       }
       return statements.map(() => ({ success: true, meta: { changes: 1 } }));
     },

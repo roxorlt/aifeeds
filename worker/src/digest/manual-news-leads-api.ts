@@ -4,6 +4,7 @@ import {
   getManualNewsLead,
   getManualNewsLeadCandidateState,
   listManualNewsLeads,
+  manualNewsLeadProcessingOwner,
   markManualNewsLeadEnqueueFailure,
   recoverStaleManualNewsLeads,
   retryManualNewsLead,
@@ -17,15 +18,16 @@ const BASE_PATH = '/api/digest/daily-news-leads';
 function scheduleLeadProcessing(
   env: Env,
   ctx: Pick<ExecutionContext, 'waitUntil'>,
-  lead: { id: string; version: number },
+  lead: { id: string; version: number; processing_owner: string | null },
 ): void {
   if (!env.MANUAL_NEWS_LEAD_WORKFLOW) throw new Error('manual_news_workflow_unavailable');
-  const owner = `manual-news-${lead.id}-v${lead.version}`;
-  const pending = env.MANUAL_NEWS_LEAD_WORKFLOW.create({
+  const owner = manualNewsLeadProcessingOwner(lead.id, lead.version);
+  if (lead.processing_owner !== owner) throw new Error('manual_news_processing_reservation_missing');
+  const pending = Promise.resolve().then(() => env.MANUAL_NEWS_LEAD_WORKFLOW!.create({
     id: owner,
     params: { lead_id: lead.id, processing_owner: owner },
-  }).then(() => undefined).catch(async (error) => {
-    await markManualNewsLeadEnqueueFailure(env, lead.id, error);
+  })).then(() => undefined).catch(async (error) => {
+    await markManualNewsLeadEnqueueFailure(env, lead.id, lead.version, owner, error);
   });
   ctx.waitUntil(pending);
 }

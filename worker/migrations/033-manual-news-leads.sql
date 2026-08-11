@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS manual_news_leads (
   submit_idempotency_key TEXT NOT NULL,
   last_mutation_kind TEXT,
   last_mutation_idempotency_key TEXT,
+  last_mutation_nonce TEXT,
   processing_owner TEXT,
   processing_attempt INTEGER NOT NULL DEFAULT 0,
   processing_lease_until INTEGER,
@@ -117,6 +118,7 @@ CREATE TABLE IF NOT EXISTS manual_news_lead_audit (
   from_status TEXT,
   to_status TEXT,
   idempotency_key TEXT,
+  mutation_nonce TEXT NOT NULL,
   resulting_version INTEGER NOT NULL,
   metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL
@@ -129,3 +131,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_version
 CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_idempotency
   ON manual_news_lead_audit(lead_id, action, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_mutation_nonce
+  ON manual_news_lead_audit(mutation_nonce);
