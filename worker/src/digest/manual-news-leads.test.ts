@@ -9,6 +9,10 @@ import {
   classifyManualLeadDuplicate,
   createManualLeadVerificationProof,
   isCurrentManualLeadVerification,
+  MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   manualLeadAssessmentValidationErrorCode,
   mergeManualLeadCandidate,
   missingManualLeadEvidenceAnchors,
@@ -294,14 +298,14 @@ describe('manual news lead domain', () => {
     const body = JSON.parse(prompt.user) as {
       allowed_evidence_ids: string[];
       output_schema: {
-        claims: Array<{
-          atomic_fact: { subject: string; predicate: string; object: string };
+        source_facts: Array<{
+          atomic_fact: { subject: string; subject_role: string; predicate: string; object: string };
           evidence_ids: string[];
         }>;
       };
       claim_contract_examples: {
         good: Array<{
-          atomic_fact: { subject: string; predicate: string; object: string };
+          atomic_fact: { subject: string; subject_role: string; predicate: string; object: string };
           evidence_ids: string[];
         }>;
         bad: Array<{ claim: Record<string, unknown>; failure_codes: string[] }>;
@@ -310,8 +314,11 @@ describe('manual news lead domain', () => {
 
     expect(body.allowed_evidence_ids).toEqual(['ev-official']);
     expect(body.claim_contract_examples.good).toContainEqual({
+      fact_ref: 'fact-01',
+      source_language: 'en',
       atomic_fact: {
         subject: 'Alibaba',
+        subject_role: 'organization',
         predicate: 'reportedly bans',
         object: 'employees from using Claude Code',
       },
@@ -325,25 +332,24 @@ describe('manual news lead domain', () => {
       }),
       failure_codes: expect.arrayContaining(['non_atomic_claim', 'unknown_evidence_id']),
     }));
-    expect(body.output_schema.claims[0]).toEqual(expect.objectContaining({
+    expect(body.output_schema.source_facts[0]).toEqual(expect.objectContaining({
       atomic_fact: {
         subject: expect.stringContaining('exactly one subject'),
+        subject_role: expect.stringContaining('organization'),
         predicate: expect.stringContaining('exactly one predicate'),
         object: expect.stringContaining('exactly one object'),
       },
     }));
     expect(prompt.system).toContain('evidence_ids 中的每个字符串只能逐字复制 allowed_evidence_ids');
-    expect(prompt.system).toContain('claims 不接受自由文本 text');
-    expect(prompt.system).toContain('主体、单一谓词、对象');
+    expect(prompt.system).toContain('source_facts 不接受自由文本 text');
+    expect(prompt.system).toContain('主体角色、主体、单一谓词、对象');
     expect(prompt.system).toContain('原因、改用其他产品等内容必须拆成各自独立的 claim');
-    expect(prompt.system).toContain('title 必须是单一原子句');
-    expect(prompt.system).toContain('summary 中多个事实必须用句号拆成多个完整原子句');
+    expect(prompt.system).toContain('editorial_projection.title 必须是单一中文原子句');
+    expect(prompt.system).toContain('summary 数组每项只承载一个完整中文原子句');
   });
 
-  test('normalizes a URL-only Alibaba Claude Code restriction from one strict atomic fact row', () => {
+  test('normalizes an English URL-only source fact into a mapped Chinese editorial projection', () => {
     const generated = {
-      title: 'Alibaba reportedly bans employees from using Claude Code',
-      summary: 'Alibaba reportedly bans employees from using Claude Code.',
       event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
       event_type: 'industry_event',
       material_update: false,
@@ -351,14 +357,35 @@ describe('manual news lead domain', () => {
       recommendation: 'recommended',
       occurred_at: null,
       uncertainties: ['TechCrunch attributes the restriction to internal company policy.'],
-      claims: [{
+      source_facts: [{
+        fact_ref: 'fact-01',
+        source_language: 'en',
         atomic_fact: {
           subject: 'Alibaba',
+          subject_role: 'organization',
           predicate: 'reportedly bans',
           object: 'employees from using Claude Code',
         },
         evidence_ids: ['ev-techcrunch-alibaba-ban'],
       }],
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01',
+          source_fact_refs: ['fact-01'],
+          atomic_fact: {
+            subject: '阿里巴巴', subject_role: 'organization',
+            predicate: '据称禁止', object: '员工使用Claude Code',
+          },
+        },
+        summary: [{
+          projection_ref: 'summary-01',
+          source_fact_refs: ['fact-01'],
+          atomic_fact: {
+            subject: '阿里巴巴', subject_role: 'organization',
+            predicate: '据称禁止', object: '员工使用Claude Code',
+          },
+        }],
+      },
       matched_event_key: null,
     };
 
@@ -366,10 +393,23 @@ describe('manual news lead domain', () => {
       generated,
       [techCrunchAlibabaBan],
     );
+    expect(validated).toMatchObject({
+      title: '阿里巴巴据称禁止员工使用Claude Code。',
+      summary: '阿里巴巴据称禁止员工使用Claude Code。',
+      generated_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    });
     expect(validated.claims).toEqual([{
       text: 'Alibaba reportedly bans employees from using Claude Code.',
       evidence_ids: ['ev-techcrunch-alibaba-ban'],
     }]);
+    expect(validated.source_facts).toEqual([expect.objectContaining({
+      fact_id: expect.stringMatching(/^source-[a-f0-9]{16}$/),
+      source_language: 'en',
+    })]);
+    expect(validated.editorial_projection?.title.source_fact_ids)
+      .toEqual([validated.source_facts?.[0].fact_id]);
 
     const verifierPrompt = buildManualLeadFactVerificationPrompt({
       assessment: validated,
@@ -377,11 +417,18 @@ describe('manual news lead domain', () => {
     });
     const promptBody = JSON.parse(verifierPrompt.user) as {
       facts: Array<{ fact_id: string; untrusted_candidate_value: string | boolean }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
     };
     expect(promptBody.facts).toContainEqual(expect.objectContaining({
-      fact_id: 'claim:0',
+      fact_id: validated.source_facts?.[0].fact_id,
       untrusted_candidate_value: 'Alibaba reportedly bans employees from using Claude Code.',
     }));
+    expect(promptBody.projections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        projection_id: 'title-01',
+        source_fact_ids: [validated.source_facts?.[0].fact_id],
+      }),
+    ]));
     expect(verifierPrompt.system).toContain('单一原子子句');
     expect(verifierPrompt.system).toContain('subject/predicate/object 槽位');
     expect(verifierPrompt.system).toContain('同一来源连续原文独立核验');
@@ -393,33 +440,165 @@ describe('manual news lead domain', () => {
         techCrunchAlibabaBan.id,
         quote,
       )),
+      projection_results: promptBody.projections.map((projection) => ({
+        projection_id: projection.projection_id,
+        source_fact_ids: projection.source_fact_ids,
+        supported: true,
+        issue_code: 'none',
+      })),
     }, validated, [techCrunchAlibabaBan])).toMatchObject({
       overall_verdict: 'supported',
       fact_results: expect.arrayContaining([
-        expect.objectContaining({ fact_id: 'claim:0', supported: true }),
+        expect.objectContaining({ fact_id: validated.source_facts?.[0].fact_id, supported: true }),
       ]),
     });
+  });
 
-    expect(() => validateManualLeadGeneratedAssessment({
-      ...generated,
-      title: '阿里巴巴投资OpenAI',
-      summary: '阿里巴巴投资OpenAI。',
-      claims: [{
-        atomic_fact: {
-          subject: '阿里巴巴', predicate: '投资', object: 'OpenAI',
+  test('fails closed on compound roles and incomplete subject/predicate/object slots', () => {
+    const base = {
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event', material_update: false, score: 88,
+      recommendation: 'recommended', occurred_at: null, uncertainties: [],
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
         },
-        evidence_ids: ['ev-techcrunch-alibaba-ban'],
+        summary: [{
+          projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        }],
+      },
+      matched_event_key: null,
+    };
+    for (const atomic_fact of [
+      { subject: 'Alibaba with Anthropic', subject_role: 'organization', predicate: 'reportedly bans', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba & Anthropic', subject_role: 'organization', predicate: 'reportedly bans', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba + Anthropic', subject_role: 'organization', predicate: 'reportedly bans', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba together with Anthropic', subject_role: 'organization', predicate: 'reportedly bans', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba along with Anthropic', subject_role: 'organization', predicate: 'reportedly bans', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba', subject_role: 'organization', predicate: 'bans due to security concerns', object: 'employees from using Claude Code' },
+      { subject: 'Alibaba', subject_role: 'organization', predicate: 'bans and requires', object: 'employees from using Claude Code' },
+      { subject: 'OpenAI', subject_role: 'organization', predicate: 'was sued', object: 'yesterday' },
+      { subject: 'OpenAI', subject_role: 'organization', predicate: 'was sued', object: 'due to copyright concerns' },
+      { subject: 'OpenAI', subject_role: 'organization', predicate: 'was sued', object: 'over AI concerns' },
+    ]) {
+      expect(() => validateManualLeadGeneratedAssessment({
+        ...base,
+        source_facts: [{
+          fact_ref: 'fact-01', source_language: 'en', atomic_fact,
+          evidence_ids: [techCrunchAlibabaBan.id],
+        }],
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
+    }
+  });
+
+  test('requires exact independent projection coverage after source quote verification', () => {
+    const candidate = validateManualLeadGeneratedAssessment({
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event', material_update: false, score: 88,
+      recommendation: 'needs_review', occurred_at: null, uncertainties: [], matched_event_key: null,
+      source_facts: [{
+        fact_ref: 'fact-01', source_language: 'en',
+        atomic_fact: {
+          subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+          object: 'employees from using Claude Code',
+        }, evidence_ids: [techCrunchAlibabaBan.id],
       }],
-    }, [techCrunchAlibabaBan])).toThrow(/assessment_evidence_language_mismatch/);
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        },
+        summary: [{
+          projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        }],
+      },
+    }, [techCrunchAlibabaBan]);
+    const body = JSON.parse(buildManualLeadFactVerificationPrompt({
+      assessment: candidate, evidence: [techCrunchAlibabaBan],
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    };
+    const quote = techCrunchAlibabaBan.claims_supported[0];
+    const raw = {
+      overall_verdict: 'supported',
+      fact_results: body.facts.map((fact) => supportedFactResult(fact.fact_id, techCrunchAlibabaBan.id, quote)),
+      projection_results: body.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+    };
+    expect(validateManualLeadFactVerification(raw, candidate, [techCrunchAlibabaBan]))
+      .toMatchObject({ overall_verdict: 'supported', projection_results: expect.any(Array) });
+
+    const omitted = structuredClone(raw);
+    omitted.projection_results.pop();
+    expect(() => validateManualLeadFactVerification(omitted, candidate, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_projection_verification_coverage/);
+    const remapped = structuredClone(raw);
+    remapped.projection_results[0].source_fact_ids = ['source-deadbeefdeadbeef'];
+    expect(() => validateManualLeadFactVerification(remapped, candidate, [techCrunchAlibabaBan]))
+      .toThrow(/invalid_projection_verification_result/);
+    const expanded = structuredClone(raw);
+    expanded.overall_verdict = 'unsupported';
+    expanded.projection_results[0] = {
+      ...expanded.projection_results[0], supported: false, issue_code: 'fact_expansion',
+    };
+    expect(validateManualLeadFactVerification(expanded, candidate, [techCrunchAlibabaBan]))
+      .toMatchObject({ overall_verdict: 'unsupported' });
+  });
+
+  test.each([
+    ['negation', { predicate: '并未禁止' }],
+    ['modality', { predicate: '已经正式禁止' }],
+    ['subject', { subject: 'Anthropic' }],
+    ['object', { object: '员工使用其他工具' }],
+    ['date', { object: '员工于2026年8月12日使用Claude Code' }],
+    ['version', { object: '员工使用Claude Code 2.0' }],
+  ])('rejects a Chinese projection that expands or omits the mapped source fact: %s', (_label, change) => {
+    const projection = {
+      subject: '阿里巴巴', subject_role: 'organization',
+      predicate: '据称禁止', object: '员工使用Claude Code',
+      ...change,
+    };
+    expect(() => validateManualLeadGeneratedAssessment({
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event', material_update: false, score: 88,
+      recommendation: 'recommended', occurred_at: null, uncertainties: [],
+      source_facts: [{
+        fact_ref: 'fact-01', source_language: 'en',
+        atomic_fact: {
+          subject: 'Alibaba', subject_role: 'organization',
+          predicate: 'reportedly bans', object: 'employees from using Claude Code',
+        },
+        evidence_ids: [techCrunchAlibabaBan.id],
+      }],
+      editorial_projection: {
+        title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: projection },
+        summary: [{ projection_ref: 'summary-01', source_fact_refs: ['fact-01'], atomic_fact: projection }],
+      },
+      matched_event_key: null,
+    }, [techCrunchAlibabaBan])).toThrow(/invalid_editorial_projection/);
   });
 
   test('fails closed when a generated atomic fact row hides a second predicate or subject', () => {
     const base = {
-      title: 'Alibaba reportedly bans employees from using Claude Code',
-      summary: 'Alibaba reportedly bans employees from using Claude Code.',
       event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
       event_type: 'industry_event', material_update: false, score: 88,
       recommendation: 'recommended', occurred_at: null, uncertainties: [],
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        },
+        summary: [{
+          projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        }],
+      },
       matched_event_key: null,
     };
     for (const atomic_fact of [
@@ -446,12 +625,17 @@ describe('manual news lead domain', () => {
     ]) {
       expect(() => validateManualLeadGeneratedAssessment({
         ...base,
-        claims: [{ atomic_fact, evidence_ids: ['ev-techcrunch-alibaba-ban'] }],
-      }, [techCrunchAlibabaBan])).toThrow(/non_atomic_claim/);
+        source_facts: [{
+          fact_ref: 'fact-01', source_language: 'en',
+          atomic_fact: { subject_role: 'organization', ...atomic_fact },
+          evidence_ids: ['ev-techcrunch-alibaba-ban'],
+        }],
+      }, [techCrunchAlibabaBan])).toThrow(/(?:non_atomic_claim|invalid_claim_(?:subject|predicate|object|fact))/);
     }
     expect(() => validateManualLeadGeneratedAssessment({
       ...base,
-      claims: [{
+      source_facts: [{
+        fact_ref: 'fact-01', source_language: 'en',
         text: 'Alibaba reportedly bans employees from using Claude Code and requires another product.',
         evidence_ids: ['ev-techcrunch-alibaba-ban'],
       }],
@@ -486,7 +670,8 @@ describe('manual news lead domain', () => {
     });
     expect(assessmentPrompt.system).toContain('每条 claim 必须是单一原子事实');
     expect(assessmentPrompt.system).toContain('拆成多条 claims');
-    expect(assessmentPrompt.system).toContain('英文证据写英文事实');
+    expect(assessmentPrompt.system).toContain('英文证据写英文 source fact');
+    expect(assessmentPrompt.system).toContain('独立的严肃中文编辑投影');
 
     const candidate = validateManualLeadAssessment(assessment({
       title: 'OpenAI发布GPT 5，随后暂停GPT 6。',
@@ -2449,8 +2634,7 @@ describe('manual news lead domain', () => {
 
   test('binds every final assessment and evidence field to an HMAC verification proof', async () => {
     const evidence = [{
-      ...officialAnthropic,
-      claims_supported: [officialAnthropic.claims_supported[2]],
+      ...techCrunchAlibabaBan,
       fetch_audit: {
         hops: [{ url: officialAnthropic.url, validated_ip: '93.184.216.34', connected_ip: '93.184.216.34' }],
         source_content_type: 'text/html', extraction: 'html' as const,
@@ -2461,18 +2645,49 @@ describe('manual news lead domain', () => {
         parser: { result: 'success' as const, version: 'parser/1' },
       },
     }];
-    const core = applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessment(), evidence), evidence);
+    const generated = validateManualLeadGeneratedAssessment({
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event', material_update: false, score: 88,
+      recommendation: 'needs_review', occurred_at: null, uncertainties: [], matched_event_key: null,
+      source_facts: [{
+        fact_ref: 'fact-01', source_language: 'en',
+        atomic_fact: {
+          subject: 'Alibaba', subject_role: 'organization',
+          predicate: 'reportedly bans', object: 'employees from using Claude Code',
+        },
+        evidence_ids: [techCrunchAlibabaBan.id],
+      }],
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        },
+        summary: [{
+          projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        }],
+      },
+    }, evidence);
+    const core = applyManualLeadEvidencePolicy(generated, evidence);
     const candidate: ManualNewsProcessedAssessment = {
       ...core, duplicate_scope: null, matched_lead_id: null,
     };
-    const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    const verificationPrompt = JSON.parse(buildManualLeadFactVerificationPrompt({
       assessment: candidate, evidence,
-    }).user) as { facts: Array<{ fact_id: string }> }).facts;
+    }).user) as {
+      facts: Array<{ fact_id: string }>;
+      projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    };
+    const facts = verificationPrompt.facts;
     const verification = validateManualLeadFactVerification({
       overall_verdict: 'supported',
       fact_results: facts.map((fact) => supportedFactResult(
-        fact.fact_id, 'ev-official', officialAnthropic.claims_supported[2],
+        fact.fact_id, techCrunchAlibabaBan.id, techCrunchAlibabaBan.claims_supported[0],
       )),
+      projection_results: verificationPrompt.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
     }, candidate, evidence);
     const secret = 'a'.repeat(64);
     const input = {
@@ -2491,14 +2706,15 @@ describe('manual news lead domain', () => {
       { ...candidate, event_type: 'product_release' },
       { ...candidate, material_update: true },
       { ...candidate, score: 81 },
-      { ...candidate, recommendation: 'needs_review' },
-      { ...candidate, occurred_at: null },
+      { ...candidate, recommendation: 'rejected' },
+      { ...candidate, occurred_at: '2026-08-11' },
       { ...candidate, uncertainties: ['changed'] },
-      { ...candidate, claims: [{ text: 'changed', evidence_ids: ['ev-official'] }] },
+      { ...candidate, claims: [{ text: 'changed', evidence_ids: [techCrunchAlibabaBan.id] }] },
       { ...candidate, matched_event_key: 'changed-event-key' },
-      { ...candidate, evidence_tier: 'insufficient' },
+      { ...candidate, evidence_tier: 'multi_source' },
       { ...candidate, duplicate_scope: 'cross_day' },
       { ...candidate, matched_lead_id: 'changed-lead' },
+      { ...candidate, generated_claim_contract: undefined },
     ];
     for (const changed of assessmentMutations) {
       await expect(isCurrentManualLeadVerification({ ...input, assessment: changed }, proof, secret))
@@ -2527,6 +2743,22 @@ describe('manual news lead domain', () => {
     await expect(isCurrentManualLeadVerification({
       ...input, evidence: [{ ...evidence[0], claims_supported: ['C2PA', 'watermark'] }],
     }, proof, secret)).resolves.toBe(false);
+    const sourceFactTamper = structuredClone(candidate);
+    sourceFactTamper.source_facts![0].atomic_fact.object = 'employees from using another tool';
+    await expect(isCurrentManualLeadVerification({ ...input, assessment: sourceFactTamper }, proof, secret))
+      .resolves.toBe(false);
+    const projectionTamper = structuredClone(candidate);
+    projectionTamper.editorial_projection!.title.source_fact_ids = ['source-deadbeefdeadbeef'];
+    await expect(isCurrentManualLeadVerification({ ...input, assessment: projectionTamper }, proof, secret))
+      .resolves.toBe(false);
+    const verificationTamper = structuredClone(verification);
+    verificationTamper.projection_results![0].issue_code = 'translation_mismatch';
+    await expect(isCurrentManualLeadVerification({ ...input, verification: verificationTamper }, proof, secret))
+      .resolves.toBe(false);
+    expect(proof.policy_version).toBe(MANUAL_LEAD_VERIFICATION_POLICY_VERSION);
+    await expect(isCurrentManualLeadVerification(input, {
+      ...proof, policy_version: 'fact-evidence-hmac-v7',
+    }, secret)).resolves.toBe(false);
     await expect(isCurrentManualLeadVerification({
       ...input,
       verification: {
@@ -2797,23 +3029,13 @@ describe('manual news lead domain', () => {
       evidence: matchingEvidence,
       verification,
     };
-    const proof = await createManualLeadVerificationProof(proofInput, 'c'.repeat(64));
-    expect(proof.policy_version).toBe('fact-evidence-hmac-v7');
+    await expect(createManualLeadVerificationProof(proofInput, 'c'.repeat(64)))
+      .rejects.toThrow(/manual_news_verification_contract_invalid/);
     expect((verification as unknown as { primary_fact: { fact_id: string } }).primary_fact)
       .toEqual(expect.objectContaining({ fact_id: 'field:title' }));
-    const tamperedVerification = structuredClone(verification);
-    tamperedVerification.fact_results.find((fact) => fact.fact_id === 'field:title')!
-      .source_verifications![1].source_quotes[0].quote = 'tampered source-specific quote';
     await expect(isCurrentManualLeadVerification(
-      { ...proofInput, verification: tamperedVerification }, proof, 'c'.repeat(64),
-    )).resolves.toBe(false);
-    const tamperedPrimaryFact = structuredClone(verification) as unknown as {
-      primary_fact: { candidate_value: string };
-    };
-    tamperedPrimaryFact.primary_fact.candidate_value = 'Anthropic正式发布Claude 5';
-    await expect(isCurrentManualLeadVerification(
-      { ...proofInput, verification: tamperedPrimaryFact as unknown as typeof verification },
-      proof,
+      proofInput,
+      { policy_version: 'fact-evidence-hmac-v7', canonical_digest: '0'.repeat(64), hmac_sha256: '0'.repeat(64) },
       'c'.repeat(64),
     )).resolves.toBe(false);
   });

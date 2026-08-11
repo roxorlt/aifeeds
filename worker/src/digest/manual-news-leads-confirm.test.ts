@@ -33,21 +33,43 @@ import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
-  validateManualLeadAssessment,
+  validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
 } from './manual-news-leads';
 import { getActiveNewsReviewBatch, newsReviewExpiresAt } from './news-review';
 
 async function fakeConfirmationEnv() {
   const verificationSecret = 'a'.repeat(64);
-  const supportedFact = 'On 2026-08-10, Anthropic provenance documentation covers supported Claude outputs only.';
+  const supportedFact = 'Anthropic documented provenance coverage for supported Claude outputs only on 2026-08-10.';
   const rawAssessment = {
-    title: supportedFact,
-    summary: supportedFact,
     event_key: 'anthropic-output-provenance-2026-08', event_type: 'product_documentation',
     material_update: false, score: 82, recommendation: 'recommended',
     occurred_at: '2026-08-10', uncertainties: [],
-    claims: [{ text: supportedFact, evidence_ids: ['ev-1'] }], matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01', source_language: 'en',
+      atomic_fact: {
+        subject: 'Anthropic', subject_role: 'organization', predicate: 'documented',
+        object: 'provenance coverage for supported Claude outputs only on 2026-08-10',
+      },
+      evidence_ids: ['ev-1'],
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已披露',
+          object: '2026年8月10日仅适用于受支持Claude输出的来源信息',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已披露',
+          object: '2026年8月10日仅适用于受支持Claude输出的来源信息',
+        },
+      }],
+    },
+    matched_event_key: null,
   };
   const row: Record<string, any> = {
     id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'url', input_text: '',
@@ -75,15 +97,19 @@ async function fakeConfirmationEnv() {
     reliable: true,
     fetch_audit: null,
   };
-  const core = validateManualLeadAssessment(rawAssessment, [evidenceForMarker]);
+  const core = validateManualLeadGeneratedAssessment(rawAssessment, [evidenceForMarker]);
   const processedCore = applyManualLeadEvidencePolicy(core, [evidenceForMarker]);
   const assessment = {
     ...processedCore,
     duplicate_scope: null, matched_lead_id: null,
   };
-  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+  const promptBody = JSON.parse(buildManualLeadFactVerificationPrompt({
     assessment, evidence: [evidenceForMarker],
-  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+  };
+  const facts = promptBody.facts;
   const factVerification = validateManualLeadFactVerification({
     overall_verdict: 'supported',
     fact_results: facts.map((fact) => ({
@@ -97,6 +123,10 @@ async function fakeConfirmationEnv() {
           current_evidence_id: evidenceForMarker.id, current_quote: evidenceForMarker.excerpt,
         },
       } : {}),
+    })),
+    projection_results: promptBody.projections.map((projection) => ({
+      projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+      supported: true, issue_code: 'none',
     })),
   }, assessment, [evidenceForMarker]);
   const assessmentVersion = 7;
@@ -215,6 +245,8 @@ describe('manual lead candidate confirmation', () => {
     expect(insertedBatch.candidates).toHaveLength(10);
     expect(insertedBatch.candidates.at(-1)).toMatchObject({
       item_id: `blog:manual:${memory.row.id}`, origin: 'manual_lead', lead_id: memory.row.id,
+      title: 'Anthropic已披露2026年8月10日仅适用于受支持Claude输出的来源信息。',
+      summary: 'Anthropic已披露2026年8月10日仅适用于受支持Claude输出的来源信息。',
     });
     expect(insertedBatch.candidates.some((item: any) => item.item_id === 'news-10')).toBe(false);
     expect(insertedBatch.default_selected_ids).toEqual(['news-2', 'news-1', 'news-5']);

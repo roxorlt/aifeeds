@@ -3,7 +3,10 @@ import {
   assertManualLeadTransition,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
+  MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   mergeManualLeadCandidate,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
@@ -84,11 +87,24 @@ function validatedTransitionAuditMetadata(
     'assessment_last_validation_code',
     'assessment_regeneration_trigger_code',
     'assessment_claim_contract',
+    'assessment_source_fact_contract',
+    'assessment_editorial_projection_contract',
+    'assessment_verification_policy',
+    'assessment_recovery',
   ]);
+  const generation = metadata.assessment_generation_attempts === 1
+    || metadata.assessment_generation_attempts === 2;
+  const recovery = metadata.assessment_recovery === 'persisted_verified';
   if (Object.keys(metadata).some((key) => !allowed.has(key))
-    || (metadata.assessment_generation_attempts !== 1 && metadata.assessment_generation_attempts !== 2)
-    || !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code)
+    || generation === recovery
+    || (generation && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code || ''))
+    || (recovery && (metadata.assessment_generation_attempts !== undefined
+      || metadata.assessment_last_validation_code !== undefined
+      || metadata.assessment_regeneration_trigger_code !== undefined))
     || metadata.assessment_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
+    || metadata.assessment_source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
+    || metadata.assessment_editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || metadata.assessment_verification_policy !== MANUAL_LEAD_VERIFICATION_POLICY_VERSION
     || (metadata.assessment_regeneration_trigger_code !== undefined
       && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
     throw new Error('invalid_transition_audit_metadata');
@@ -898,6 +914,10 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
           assessment_version: assessmentVersion,
           policy_version: proof.policy_version,
           canonical_digest: proof.canonical_digest,
+          assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+          assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+          assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+          assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
           processing_owner: owner,
           processing_attempt: attempt,
           mutation_nonce: creationNonce,

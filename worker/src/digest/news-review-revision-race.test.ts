@@ -9,7 +9,7 @@ import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
   createManualLeadVerificationProof,
-  validateManualLeadAssessment,
+  validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
 } from './manual-news-leads';
 import { confirmManualNewsLeadCandidate, retryManualNewsLead } from './manual-news-leads-store';
@@ -135,11 +135,31 @@ function candidates(prefix: string): NewsReviewCandidate[] {
 async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
   const supportingText = 'Anthropic released Claude 5 on 2026-08-11.';
   const rawAssessment = {
-    title: supportingText,
-    summary: supportingText, event_key: eventKey,
+    event_key: eventKey,
     event_type: 'product_release', material_update: false, score: 90,
     recommendation: 'recommended', occurred_at: '2026-08-11', uncertainties: [],
-    claims: [{ text: supportingText, evidence_ids: [`ev-${id}`] }], matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01', source_language: 'en',
+      atomic_fact: {
+        subject: 'Anthropic', subject_role: 'organization', predicate: 'released', object: 'Claude 5 on 2026-08-11',
+      },
+      evidence_ids: [`ev-${id}`],
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已发布', object: '2026年8月11日的Claude 5',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已发布', object: '2026年8月11日的Claude 5',
+        },
+      }],
+    },
+    matched_event_key: null,
   };
   const evidence = {
     id: `ev-${id}`,
@@ -154,16 +174,20 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
     reliable: true,
     fetch_audit: null,
   };
-  const core = validateManualLeadAssessment(rawAssessment, [evidence]);
+  const core = validateManualLeadGeneratedAssessment(rawAssessment, [evidence]);
   const processed = applyManualLeadEvidencePolicy(core, [evidence]);
   const assessment = {
     ...processed,
     duplicate_scope: null,
     matched_lead_id: null,
   };
-  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+  const promptBody = JSON.parse(buildManualLeadFactVerificationPrompt({
     assessment, evidence: [evidence],
-  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+  };
+  const facts = promptBody.facts;
   const verification = validateManualLeadFactVerification({
     overall_verdict: 'supported',
     fact_results: facts.map((fact) => ({
@@ -177,6 +201,10 @@ async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Pro
           current_evidence_id: evidence.id, current_quote: supportingText,
         },
       } : {}),
+    })),
+    projection_results: promptBody.projections.map((projection) => ({
+      projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+      supported: true, issue_code: 'none',
     })),
   }, assessment, [evidence]);
   const proof = await createManualLeadVerificationProof({

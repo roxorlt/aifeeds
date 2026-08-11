@@ -9,7 +9,10 @@ import {
   manualLeadFactVerificationErrorCode,
   missingManualLeadEvidenceAnchors,
   isRegeneratableManualLeadAssessmentValidationCode,
+  MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
@@ -80,11 +83,24 @@ export interface ManualLeadProcessingStore {
 export interface ManualLeadTransitionPatch
   extends Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>> {
   audit_metadata?: {
-    assessment_generation_attempts: 1 | 2;
-    assessment_last_validation_code: string;
+    assessment_generation_attempts?: 1 | 2;
+    assessment_last_validation_code?: string;
     assessment_regeneration_trigger_code?: string;
     assessment_claim_contract: typeof MANUAL_LEAD_GENERATED_CLAIM_CONTRACT;
+    assessment_source_fact_contract: typeof MANUAL_LEAD_SOURCE_FACT_CONTRACT;
+    assessment_editorial_projection_contract: typeof MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT;
+    assessment_verification_policy: typeof MANUAL_LEAD_VERIFICATION_POLICY_VERSION;
+    assessment_recovery?: 'persisted_verified';
   };
+}
+
+function manualLeadContractAuditMetadata() {
+  return {
+    assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+    assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+    assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+  } as const;
 }
 
 export interface ManualLeadProcessingAdapters {
@@ -287,7 +303,7 @@ export async function processManualNewsLead(
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: lastValidationCode,
-              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+              ...manualLeadContractAuditMetadata(),
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),
@@ -320,7 +336,7 @@ export async function processManualNewsLead(
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: 'valid',
-              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+              ...manualLeadContractAuditMetadata(),
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),
@@ -335,7 +351,7 @@ export async function processManualNewsLead(
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: validationCode,
-              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+              ...manualLeadContractAuditMetadata(),
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),
@@ -411,6 +427,11 @@ export async function processManualNewsLead(
         }
         assessment = finalizedAssessment;
         await store.saveVerifiedAssessment(leadId, lead.version, assessment, verification);
+      } else {
+        assessmentGenerationAudit = {
+          ...manualLeadContractAuditMetadata(),
+          assessment_recovery: 'persisted_verified',
+        };
       }
       await transition('clustering', assessmentGenerationAudit
         ? { audit_metadata: assessmentGenerationAudit }

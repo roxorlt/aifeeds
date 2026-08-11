@@ -9,7 +9,10 @@ import {
 import {
   applyManualLeadEvidencePolicy,
   validateManualLeadGeneratedAssessment,
+  MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
   MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   type ManualNewsEvidence,
   type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
@@ -147,10 +150,37 @@ const techCrunchAlibabaEvidence: ManualNewsEvidence = {
   reliable: true,
 };
 
-function assessed(overrides = {}) {
+function assessed(overrides: Record<string, unknown> = {}) {
+  const overrideClaims = Array.isArray(overrides.claims) ? overrides.claims : null;
+  const baseFact = {
+    subject: 'Anthropic', subject_role: 'organization', predicate: 'documented',
+    object: 'Claude watermark provenance on 2026-08-10',
+  };
+  const sourceFacts = (overrideClaims || [{
+    atomic_fact: baseFact, evidence_ids: ['ev-official'],
+  }]).map((claim, index) => {
+    const row = claim as { atomic_fact?: Record<string, unknown>; evidence_ids?: string[] };
+    const atomic = row.atomic_fact;
+    const subject = String(atomic?.subject || '');
+    const subjectRole = atomic?.subject_role
+      || (/参议员|法院|监管/u.test(subject) ? 'authority' : 'organization');
+    return {
+      fact_ref: `fact-${String(index + 1).padStart(2, '0')}`,
+      source_language: /\p{Script=Han}/u.test(JSON.stringify(atomic)) ? 'zh' : 'en',
+      ...(atomic ? { atomic_fact: { subject_role: subjectRole, ...atomic } } : {}),
+      evidence_ids: row.evidence_ids,
+      ...(!atomic ? claim as Record<string, unknown> : {}),
+    };
+  });
+  const firstAtomic = sourceFacts[0]?.atomic_fact as Record<string, unknown> | undefined;
+  const defaultProjection = overrideClaims && firstAtomic && /\p{Script=Han}/u.test(JSON.stringify(firstAtomic))
+    ? firstAtomic
+    : {
+      subject: 'Anthropic', subject_role: 'organization', predicate: '已披露',
+      object: '2026年8月10日的Claude水印来源信息',
+    };
+  const { claims: _claims, title: _title, summary: _summary, ...rest } = overrides;
   return {
-    title: supportedAssessmentFact,
-    summary: supportedAssessmentFact,
     event_key: 'anthropic-output-provenance-2026-08',
     event_type: 'product_documentation',
     material_update: false,
@@ -158,15 +188,13 @@ function assessed(overrides = {}) {
     recommendation: 'recommended',
     occurred_at: '2026-08-10',
     uncertainties: ['并非所有Claude输出均适用。'],
-    claims: [{
-      atomic_fact: {
-        subject: 'Anthropic', predicate: 'documented',
-        object: 'Claude watermark provenance on 2026-08-10',
-      },
-      evidence_ids: ['ev-official'],
-    }],
+    source_facts: sourceFacts,
+    editorial_projection: {
+      title: { projection_ref: 'title-01', source_fact_refs: ['fact-01'], atomic_fact: defaultProjection },
+      summary: [{ projection_ref: 'summary-01', source_fact_refs: ['fact-01'], atomic_fact: defaultProjection }],
+    },
     matched_event_key: null,
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -190,6 +218,7 @@ function verifiedFromPrompt(prompt: { user: string }) {
       untrusted_prior_events?: Array<{ event_key: string }>;
       allowed_evidence: Array<{ id: string; title: string; excerpt: string; claims_supported: string[] }>;
     }>;
+    projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
   };
   return {
     overall_verdict: 'supported',
@@ -214,6 +243,14 @@ function verifiedFromPrompt(prompt: { user: string }) {
         },
       } : {}),
     })),
+    ...(body.projections?.length ? {
+      projection_results: body.projections.map((projection) => ({
+        projection_id: projection.projection_id,
+        source_fact_ids: projection.source_fact_ids,
+        supported: true,
+        issue_code: 'none',
+      })),
+    } : {}),
   };
 }
 
@@ -279,19 +316,34 @@ describe('manual lead processing pipeline', () => {
       assess: async () => {
         assessCalls += 1;
         return {
-          title: 'Alibaba reportedly bans employees from using Claude Code',
-          summary: 'Alibaba reportedly bans employees from using Claude Code.',
           event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
           event_type: 'industry_event', material_update: false, score: 88,
           recommendation: 'recommended', occurred_at: null,
           uncertainties: ['TechCrunch is the only currently collected source.'],
-          claims: [{
+          source_facts: [{
+            fact_ref: 'fact-01', source_language: 'en',
             atomic_fact: {
-              subject: 'Alibaba', predicate: 'reportedly bans',
+              subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
               object: 'employees from using Claude Code',
             },
             evidence_ids: [techCrunchAlibabaEvidence.id],
           }],
+          editorial_projection: {
+            title: {
+              projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: '阿里巴巴', subject_role: 'organization',
+                predicate: '据称禁止', object: '员工使用Claude Code',
+              },
+            },
+            summary: [{
+              projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+              atomic_fact: {
+                subject: '阿里巴巴', subject_role: 'organization',
+                predicate: '据称禁止', object: '员工使用Claude Code',
+              },
+            }],
+          },
           matched_event_key: null,
         };
       },
@@ -307,10 +359,14 @@ describe('manual lead processing pipeline', () => {
     expect(memory.current()).toMatchObject({
       status: 'needs_review',
       assessment: {
+        title: '阿里巴巴据称禁止员工使用Claude Code。',
+        summary: '阿里巴巴据称禁止员工使用Claude Code。',
         claims: [{
           text: 'Alibaba reportedly bans employees from using Claude Code.',
           evidence_ids: [techCrunchAlibabaEvidence.id],
         }],
+        source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+        editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
       },
     });
     expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
@@ -323,10 +379,10 @@ describe('manual lead processing pipeline', () => {
   });
 
   test.each([
-    ['title negation reversal', 'field:title', 'contradicted'],
-    ['summary scope or time mismatch', 'field:summary', 'scope_or_time_mismatch'],
+    ['title negation reversal', 'projection:title-01', 'unsupported'],
+    ['summary scope or time mismatch', 'projection:summary-01', 'unsupported'],
     ['event identity absent from evidence', 'field:event_key', 'not_found'],
-    ['claim unsupported', 'claim:0', 'unsupported'],
+    ['source fact unsupported', 'source_fact', 'unsupported'],
   ])('invalidates and reviews a factual field rejected for %s', async (_label, factId, issueCode) => {
     const memory = memoryStore();
     let verifyCalls = 0;
@@ -338,12 +394,28 @@ describe('manual lead processing pipeline', () => {
       verify: async (prompt) => {
         verifyCalls += 1;
         const result = verifiedFromPrompt(prompt);
+        if (factId.startsWith('projection:')) {
+          const projectionId = factId.slice('projection:'.length);
+          return {
+            ...result,
+            overall_verdict: 'unsupported',
+            projection_results: result.projection_results?.map((projection) => projection.projection_id === projectionId
+              ? { ...projection, supported: false, issue_code: 'translation_mismatch' }
+              : projection),
+          };
+        }
         return {
           ...result,
           overall_verdict: 'unsupported',
-          fact_results: result.fact_results.map((fact) => fact.fact_id === factId
+          fact_results: result.fact_results.map((fact) => (fact.fact_id === factId
+            || (factId === 'source_fact' && fact.fact_id.startsWith('source-')))
             ? { ...fact, supported: false, issue_code: issueCode }
             : fact),
+          ...(factId === 'source_fact' ? {
+            projection_results: result.projection_results?.map((projection) => ({
+              ...projection, supported: false, issue_code: 'fact_omission',
+            })),
+          } : {}),
         };
       },
     });
@@ -493,12 +565,15 @@ describe('manual lead processing pipeline', () => {
     });
     expect(prompts[1].user).not.toContain('ev-missing');
     expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
-      audit_metadata: {
+      audit_metadata: expect.objectContaining({
         assessment_generation_attempts: 2,
         assessment_last_validation_code: 'valid',
         assessment_regeneration_trigger_code: 'unknown_evidence_id',
         assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
-      },
+        assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+        assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+        assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      }),
     }));
   });
 
@@ -647,6 +722,58 @@ describe('manual lead processing pipeline', () => {
     expect(verifyCalls).toBe(1);
     expect(memory.saveCalls()).toBe(1);
     expect(memory.current()).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
+  });
+
+  test('recovers after save-before-transition crash with the persisted bilingual contract audit intact', async () => {
+    const memory = memoryStore();
+    let crashAfterSave = true;
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    const crashingStore: ManualLeadProcessingStore = {
+      ...memory.store,
+      transition: async (id, from, to, patch) => {
+        if (from === 'verifying' && to === 'clustering' && crashAfterSave) {
+          crashAfterSave = false;
+          const error = new Error('simulated runtime fetch interruption');
+          error.name = 'TypeError';
+          throw error;
+        }
+        return memory.store.transition(id, from, to, patch);
+      },
+    };
+    const adapters = {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt: { system: string; user: string }) => {
+        verifyCalls += 1;
+        return verifiedFromPrompt(prompt);
+      },
+    };
+
+    await expect(processManualNewsLead(memory.current().id, crashingStore, adapters))
+      .rejects.toMatchObject({ name: 'TypeError' });
+    expect(memory.current()).toMatchObject({
+      status: 'verifying',
+      assessment: {
+        source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+        editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      },
+    });
+
+    await processManualNewsLead(memory.current().id, crashingStore, adapters);
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: {
+        assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+        assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+        assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+        assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+        assessment_recovery: 'persisted_verified',
+      },
+    }));
+    expect(memory.current().status).toBe('recommended');
   });
 
   test('does not promote an unsupported political claim and surfaces uncertainty', async () => {
