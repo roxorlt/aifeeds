@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  isTransientManualLeadError,
   processManualNewsLead,
   type ManualLeadProcessingStore,
   type ManualNewsLeadRecord,
@@ -13,6 +14,12 @@ import {
   type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function documentFixture(
   url: string,
@@ -193,6 +200,20 @@ function verifiedFromPrompt(prompt: { user: string }) {
 function processed(overrides: Record<string, unknown> = {}): ManualNewsProcessedAssessment {
   const core = applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessed(), [officialEvidence]), [officialEvidence]);
   return { ...core, duplicate_scope: null, matched_lead_id: null, ...overrides } as ManualNewsProcessedAssessment;
+}
+
+function deepSeekJsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: typeof value === 'string' ? value : JSON.stringify(value) } }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+async function assessThroughRealDeepSeekJson(): Promise<unknown> {
+  const result = await callDeepSeekJson<unknown>('test-key', DEEPSEEK_PRO, '{}', {
+    retries: 0, timeoutMs: 1_000, systemPrompt: 'test-contract',
+  });
+  if (!result.data) throw new Error(result.error || 'empty_model_assessment');
+  return result.data;
 }
 
 describe('manual lead processing pipeline', () => {
@@ -911,5 +932,104 @@ describe('manual lead processing pipeline', () => {
       .rejects.toThrow(/gateway_timeout|assessment_model_retryable_attempt_1_after_not_validated/);
     expect(memory.current().status).not.toBe('failed');
     expect(['researching', 'verifying']).toContain(memory.current().status);
+  });
+
+  test.each([
+    ['HTTP 503', 503],
+    ['HTTP 502', 502],
+    ['HTTP 429', 429],
+    ['HTTP 408', 408],
+    ['TypeError', 'TypeError'],
+    ['AbortError', 'AbortError'],
+    ['TimeoutError', 'TimeoutError'],
+  ] as const)('uses the real callDeepSeekJson %s contract for Workflow retry', async (expectedError, outcome) => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      if (typeof outcome === 'number') return new Response('provider failure', { status: outcome });
+      const error = outcome === 'TypeError'
+        ? new TypeError('transport failure')
+        : new Error('transport failure');
+      error.name = outcome;
+      throw error;
+    }));
+    const memory = memoryStore();
+
+    await expect(processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    })).rejects.toThrow(/assessment_model_retryable_attempt_1_after_not_validated/);
+
+    expect(isTransientManualLeadError(new Error(expectedError))).toBe(true);
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
+    expect(memory.transitions).not.toContain('verifying->failed');
+  });
+
+  test.each([400, 401, 403, 422])(
+    'keeps permanent DeepSeek HTTP %i on the terminal assessment failure path',
+    async (status) => {
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('permanent provider rejection', { status })));
+      const memory = memoryStore();
+
+      await processManualNewsLead(memory.current().id, memory.store, {
+        search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+        extract: async () => officialEvidence,
+        assess: assessThroughRealDeepSeekJson,
+        verify: async () => { throw new Error('unexpected_verify'); },
+      });
+
+      expect(isTransientManualLeadError(new Error(`HTTP ${status}`))).toBe(false);
+      expect(memory.current()).toMatchObject({
+        status: 'failed', error_code: 'assessment_failed', error_message: `HTTP ${status}`,
+      });
+    },
+  );
+
+  test('keeps real callDeepSeekJson parse failure on deterministic needs-review path', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async () => deepSeekJsonResponse('{not-json')));
+    const memory = memoryStore();
+
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(isTransientManualLeadError(new Error('json_parse_fail'))).toBe(false);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'invalid_assessment',
+    });
+  });
+
+  test('never classifies strict unknown evidence validation as transient from model or d1 substrings', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const invalid = assessed({
+      claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-model-d1-invented'] }],
+    });
+    const fetchMock = vi.fn(async () => deepSeekJsonResponse(invalid));
+    vi.stubGlobal('fetch', fetchMock);
+    const memory = memoryStore();
+
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: assessThroughRealDeepSeekJson,
+      verify: async () => { throw new Error('unexpected_verify'); },
+    });
+
+    expect(isTransientManualLeadError(
+      new Error('unknown_evidence_id:ev-model-d1-invented'),
+    )).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', assessment: null,
+      error_code: 'assessment_validation_failed', error_message: 'unknown_evidence_id',
+    });
   });
 });

@@ -99,8 +99,28 @@ function conciseError(error: unknown): string {
 }
 
 export function isTransientManualLeadError(error: unknown): boolean {
-  const message = conciseError(error).toLowerCase();
-  return /(?:timeout|timed out|abort|429|(?:^|_)5\d\d(?:$|_)|gateway|network|fetch|d1|sqlite|database|model|no_text|empty_model|json_parse_fail|rate.?limit|temporar|unavailable)/
+  const message = conciseError(error).trim();
+  const stableCode = message.split(':', 1)[0].toLowerCase();
+  if (isRegeneratableManualLeadAssessmentValidationCode(stableCode)
+    || stableCode === 'non_atomic_fact'
+    || stableCode === 'json_parse_fail') {
+    return false;
+  }
+
+  const errorName = error instanceof Error ? error.name : '';
+  if (['AbortError', 'TimeoutError', 'TypeError'].includes(errorName)
+    || /^(?:AbortError|TimeoutError|TypeError)$/i.test(message)) {
+    return true;
+  }
+  if (/^HTTP (?:408|429|5\d\d)$/i.test(message)) return true;
+  if (/^(?:429|5\d\d)$/.test(message)) return true;
+  if (/^assessment_model_retryable_attempt_[12]_after_[a-z0-9_]+$/i.test(message)) return true;
+  if (/^(?:no_text|empty_model_assessment|exhausted_retries)$/i.test(message)) return true;
+  if (/(?:^|:)(?:trusted_gateway_http_(?:408|429|5\d\d)|model_gateway_(?:408|429|5\d\d)|gateway_timeout)(?:$|[:\s])/i
+    .test(message)) return true;
+  if (/(?:^|:)(?:d1|sqlite|database)(?:$|[_:\s])/i.test(message)) return true;
+  if (/(?:^|:)(?:network|fetch)(?:_|\s)(?:error|failed|failure)(?:$|[:\s])/i.test(message)) return true;
+  return /\b(?:timed out|request timeout|connection timeout|temporarily unavailable|service unavailable)\b/i
     .test(message);
 }
 
