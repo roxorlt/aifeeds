@@ -1729,15 +1729,26 @@ function registeredEntityOccurrences(
   return selected;
 }
 
+function controllerPredicateIndexAfter(value: string, offset: number): number | null {
+  const indices = factActionOccurrences(value)
+    .filter((action) => action.index >= offset)
+    .map((action) => action.index);
+  for (const pattern of [
+    EVIDENCE_RELATION_STATUS_SIGNAL,
+    EVIDENCE_RELATION_DENIAL_SIGNAL,
+    EVIDENCE_RELATION_SCOPE_SIGNAL,
+  ]) {
+    const flags = [...new Set(`${pattern.flags}g`.split(''))].join('');
+    const matcher = new RegExp(pattern.source, flags);
+    matcher.lastIndex = offset;
+    const match = matcher.exec(value);
+    if (match) indices.push(match.index);
+  }
+  return indices.length ? Math.min(...indices) : null;
+}
+
 function controllerPredicateAfter(value: string, offset: number): boolean {
-  if (factActionOccurrences(value).some((action) => action.index >= offset)) return true;
-  return [EVIDENCE_RELATION_STATUS_SIGNAL, EVIDENCE_RELATION_DENIAL_SIGNAL, EVIDENCE_RELATION_SCOPE_SIGNAL]
-    .some((pattern) => {
-      const flags = [...new Set(`${pattern.flags}g`.split(''))].join('');
-      const matcher = new RegExp(pattern.source, flags);
-      matcher.lastIndex = offset;
-      return matcher.exec(value) !== null;
-    });
+  return controllerPredicateIndexAfter(value, offset) !== null;
 }
 
 function hasStructuredControlBeforeOrganization(
@@ -1771,6 +1782,33 @@ function leadingRegisteredEntityMatch(
   return null;
 }
 
+function bridgedRoleOrganizationMatch(value: string): {
+  identity: string;
+  start: number;
+  end: number;
+} | null {
+  let offset = 0;
+  let bridgeParts = 0;
+  while (offset < value.length && offset <= 48 && bridgeParts < 8) {
+    const organization = leadingRegisteredEntityMatch(
+      value.slice(offset), ORGANIZATION_ENTITY_REGISTRY,
+    );
+    if (organization) {
+      return {
+        identity: organization.identity,
+        start: offset,
+        end: offset + organization.length,
+      };
+    }
+    const bridge = /^(?:\s+|[\p{Ps}\p{Pe},，:：;；—–―-]+|\b(?:company|corporation|firm|is|was|are|were|the\s+latter)\b|(?:公司|企业|是|为|后者))/iu
+      .exec(value.slice(offset));
+    if (!bridge) return null;
+    offset += bridge[0].length;
+    bridgeParts += 1;
+  }
+  return null;
+}
+
 function leadingControllerIdentity(value: string): LeadingControllerIdentity {
   const normalized = normalizedRelationControllerText(value).replace(/^[\p{P}\p{S}]+/gu, '');
   const first = leadingRegisteredEntityMatch(normalized, {
@@ -1780,20 +1818,30 @@ function leadingControllerIdentity(value: string): LeadingControllerIdentity {
   });
   if (!first) return { identity: null, role_linked: false, ambiguous: false };
   const remainder = normalized.slice(first.length);
+  const organizations = registeredEntityOccurrences(normalized, ORGANIZATION_ENTITY_REGISTRY);
+  const firstOrganization = organizations.find((occurrence) => occurrence.start === 0);
   const role = new RegExp(
     `^(?:\\s*(?:'s\\s+)?(?:${ENGLISH_CONTROLLER_ROLE_MODIFIER_SOURCE}\\s+){0,3}${ENGLISH_CONTROLLER_ROLE_SOURCE}\\s+|\\s*的?(?:${CHINESE_CONTROLLER_ROLE_MODIFIER_SOURCE}){0,3}${CHINESE_CONTROLLER_ROLE_SOURCE}\\s*)`,
     'iu',
   ).exec(remainder);
   if (role) {
-    const second = leadingRegisteredEntityMatch(
-      remainder.slice(role[0].length), ORGANIZATION_ENTITY_REGISTRY,
-    );
-    if (second) return { identity: second.identity, role_linked: true, ambiguous: false };
-    return { identity: first.identity, role_linked: false, ambiguous: false };
+    const second = bridgedRoleOrganizationMatch(remainder.slice(role[0].length));
+    if (second && firstOrganization) {
+      const secondStart = first.length + role[0].length + second.start;
+      const secondEnd = first.length + role[0].length + second.end;
+      const predicateIndex = controllerPredicateIndexAfter(normalized, secondEnd);
+      const prePredicateOrganizations = predicateIndex === null ? [] : organizations.filter((occurrence) =>
+        occurrence.start >= firstOrganization.end && occurrence.end <= predicateIndex);
+      const controllerIdentities = new Set(prePredicateOrganizations.map((occurrence) => occurrence.identity));
+      if (controllerIdentities.size === 1 && controllerIdentities.has(second.identity)) {
+        return { identity: second.identity, role_linked: true, ambiguous: false };
+      }
+      if (predicateIndex !== null && secondStart < predicateIndex) {
+        return { identity: null, role_linked: true, ambiguous: true };
+      }
+    }
   }
 
-  const organizations = registeredEntityOccurrences(normalized, ORGANIZATION_ENTITY_REGISTRY);
-  const firstOrganization = organizations.find((occurrence) => occurrence.start === 0);
   const secondOrganization = firstOrganization && organizations.find((occurrence) =>
     occurrence.start >= firstOrganization.end && occurrence.identity !== firstOrganization.identity);
   if (firstOrganization && secondOrganization

@@ -379,22 +379,20 @@ async function createMaliciouslySupportedGeneratedProjectionProof(
 async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
   const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
   const sourceQuote = techCrunchAlibabaBan.claims_supported[0];
-  const evidence: ManualNewsEvidence[] = [{
+  const updateEvidence: ManualNewsEvidence = {
     ...officialAlibabaDenial,
     id: 'ev-role-controller-update',
-    title: sourceQuote,
-    excerpt: `${sourceQuote} ${quote}`,
-    claims_supported: [sourceQuote, quote],
-  }];
+    title: quote,
+    excerpt: quote,
+    claims_supported: [quote],
+  };
+  const evidence: ManualNewsEvidence[] = [techCrunchAlibabaBan, updateEvidence];
   raw.recommendation = 'needs_review';
   raw.uncertainties = ['该证据可能包含后续状态变化。'];
-  raw.source_facts[0].evidence_ids = [evidence[0].id];
-  raw.evidence_dispositions = [{
-    evidence_id: evidence[0].id,
-    disposition: 'contradicts_core',
-    source_fact_refs: ['fact-01'],
-    reason_code: null,
-  }];
+  raw.evidence_dispositions.push({
+    evidence_id: updateEvidence.id, disposition: 'material_update',
+    source_fact_refs: ['fact-01'], reason_code: null,
+  });
   const generated = validateManualLeadGeneratedAssessment(raw, evidence);
   const candidate: ManualNewsProcessedAssessment = {
     ...applyManualLeadEvidencePolicy(generated, evidence),
@@ -412,7 +410,7 @@ async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
   const verification = validateManualLeadFactVerification({
     overall_verdict: 'conflicted',
     fact_results: prompt.facts.map((fact) => supportedFactResult(
-      fact.fact_id, evidence[0].id, sourceQuote,
+      fact.fact_id, techCrunchAlibabaBan.id, sourceQuote,
     )),
     projection_results: prompt.projections.map((projection) => ({
       projection_id: projection.projection_id,
@@ -425,7 +423,10 @@ async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
       disposition: disposition.disposition,
       supported: true,
       issue_code: 'none',
-      source_quotes: [{ evidence_id: evidence[0].id, quote }],
+      source_quotes: [{
+        evidence_id: disposition.evidence_id,
+        quote: disposition.evidence_id === updateEvidence.id ? quote : sourceQuote,
+      }],
     })),
   }, candidate, evidence);
   const proofInput = {
@@ -914,11 +915,52 @@ describe('manual news lead domain', () => {
     '阿里巴巴重要客户OpenAI取消了Claude Code限制。',
     '阿里巴巴合作伙伴OpenAI取消了Claude Code限制。',
     'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba partner representative OpenAI cancelled its Claude Code restriction.',
     'Alibaba OpenAI cancelled its Claude Code restriction.',
     '阿里巴巴OpenAI取消了Claude Code限制。',
   ])('does not mint a current v9 update proof when a role noun phrase makes the second organization the controller: %s', async (statement) => {
     await expect(createMaliciouslySupportedControllerUpdateProof(statement))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba long-time investor was Microsoft, which withdrew its Claude Code restriction.',
+    'Alibaba partner company OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴的重要客户是OpenAI，后者取消了Claude Code限制。',
+    '阿里巴巴重要客户，OpenAI取消了Claude Code限制。',
+    '阿里巴巴的合作伙伴——OpenAI取消了Claude Code限制。',
+  ])('does not mint a current v9 material-update proof through a bridged role controller: %s', async (statement) => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(statement))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba long-time investor was Microsoft, which withdrew its Claude Code restriction.',
+    'Alibaba partner company OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴的重要客户是OpenAI，后者取消了Claude Code限制。',
+    '阿里巴巴重要客户，OpenAI取消了Claude Code限制。',
+    '阿里巴巴的合作伙伴——OpenAI取消了Claude Code限制。',
+  ])('resolves a bounded role bridge to the second organization, never the first: %s', (statement) => {
+    const bridgedControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-bridged-role-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色桥接后的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: bridgedControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, bridgedControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: bridgedControllerEvidence.id, relation: 'unrelated' },
+    ]) });
   });
 
   test.each([
@@ -985,6 +1027,7 @@ describe('manual news lead domain', () => {
 
   test.each([
     'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba partner representative OpenAI cancelled its Claude Code restriction.',
     'Alibaba OpenAI cancelled its Claude Code restriction.',
     '阿里巴巴业务盟友OpenAI取消了Claude Code限制。',
     '阿里巴巴OpenAI取消了Claude Code限制。',
@@ -1040,6 +1083,12 @@ describe('manual news lead domain', () => {
       .toMatchObject({ evidence_completeness: expect.arrayContaining([
         { evidence_id: itselfUpdate.id, relation: 'updates' },
       ]) });
+  });
+
+  test('keeps a genuine Alibaba itself update current through the material-update proof path', async () => {
+    await expect(createMaliciouslySupportedControllerUpdateProof(
+      'Alibaba itself cancelled its Claude Code restriction.',
+    )).resolves.toBe(true);
   });
 
   test.each([
