@@ -444,7 +444,7 @@ async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
 async function createTitleOnlyScopeProof(
   scopeClause: string,
   core: { sourceObject: string; projectionObject: string } | null = null,
-  form: 'independent' | 'support_extension' = 'independent',
+  form: 'independent' | 'support_extension' | 'only_glued' = 'independent',
 ) {
   const raw = alibabaBanGeneratedAssessment(
     core ? { object: core.projectionObject } : {},
@@ -452,13 +452,12 @@ async function createTitleOnlyScopeProof(
   );
   const source = raw.source_facts[0].atomic_fact;
   const support = `${source.subject} ${source.predicate} ${source.object}.`;
+  const extension = `${support.replace(/[.]$/u, '')} ${scopeClause.replace(/^[\s,]+|[.]$/gu, '')}.`;
   const evidence: ManualNewsEvidence[] = [{
     ...techCrunchAlibabaBan,
-    title: support,
-    excerpt: form === 'support_extension'
-      ? `${support.replace(/[.]$/u, '')} ${scopeClause.replace(/^[\s,]+|[.]$/gu, '')}.`
-      : `${support} ${scopeClause}`,
-    claims_supported: [support],
+    title: form === 'only_glued' ? extension : support,
+    excerpt: form === 'independent' ? `${support} ${scopeClause}` : extension,
+    claims_supported: [form === 'only_glued' ? extension : support],
   }];
   const generated = validateManualLeadGeneratedAssessment(
     raw, evidence,
@@ -1039,12 +1038,39 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    'Navigation | Latest / AI — Security; Events, Newsletters • Podcasts: Advertise',
+    'Ｎａｖｉｇａｔｉｏｎ Ｌａｔｅｓｔ Ｎｅｗｓｌｅｔｔｅｒｓ',
+  ])('fully consumes normalized chrome words and explicit separator punctuation: %s', async (tail) => {
+    await expect(createTitleOnlyScopeProof(tail, null, 'support_extension'))
+      .resolves.toBe(true);
+  });
+
+  test.each([
     'Internal Policy Archive',
     'Navigation in China',
     'Related employees in the security department',
   ])('does not treat an unknown or scope-bearing glued tail as page chrome: %s', async (tail) => {
     await expect(createTitleOnlyScopeProof(tail, null, 'support_extension'))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Navigation Latest Россия запретила доступ',
+    'Navigation Latest الموظفين فقط',
+    'Navigation Latest Διοίκηση περιορίζει',
+    'Navigation Latest ｏｎｌｙ ｃｏｎｔｒａｃｔｏｒｓ',
+    'Navigation Latest 🔒',
+  ])('fails closed on unconsumed Unicode in a glued chrome-looking tail: %s', async (tail) => {
+    await expect(createTitleOnlyScopeProof(tail, null, 'support_extension'))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test('fails closed when every evidence field contains only the same Unicode-glued sentence', async () => {
+    await expect(createTitleOnlyScopeProof(
+      'Navigation Latest Россия запретила доступ',
+      null,
+      'only_glued',
+    )).rejects.toThrow(/evidence_disposition|verification_semantics/);
   });
 
   test.each([
