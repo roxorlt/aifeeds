@@ -31,6 +31,7 @@ import type {
 import {
   isValidManualNewsProviderFailureAudit,
   manualNewsProviderFailureAudit,
+  type ManualNewsProviderFailureAudit,
 } from './manual-news-provider';
 import {
   buildNewsReviewBatchId,
@@ -176,8 +177,36 @@ async function runAuditedMutation(
   return auditedMutationChanges(results, 0, 1);
 }
 
+async function loadCurrentProviderFailure(
+  env: Env,
+  leadId: string,
+  version: number,
+): Promise<ManualNewsProviderFailureAudit | null> {
+  const rows = await env.DB.prepare(
+    `/* manual_audit:current_provider_failure */ SELECT metadata_json
+     FROM manual_news_lead_audit WHERE lead_id = ? AND resulting_version = ?
+     ORDER BY id DESC LIMIT 10`,
+  ).bind(leadId, version).all<{ metadata_json: string }>();
+  for (const row of rows.results || []) {
+    try {
+      const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+      if (isValidManualNewsProviderFailureAudit(metadata.provider_failure)) {
+        return metadata.provider_failure;
+      }
+    } catch {
+      // Old or malformed audit metadata is never exposed as trusted diagnostics.
+    }
+  }
+  return null;
+}
+
 async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLeadRecord> {
-  const evidence = await loadManualNewsEvidence(env, row.id);
+  const [evidence, providerFailure] = await Promise.all([
+    loadManualNewsEvidence(env, row.id),
+    String(row.error_message || '').startsWith('manual_news_provider_error:')
+      ? loadCurrentProviderFailure(env, row.id, Number(row.version))
+      : Promise.resolve(null),
+  ]);
   const verified = await loadVerifiedManualAssessment(env, row.id, evidence);
   return {
     id: row.id,
@@ -190,6 +219,7 @@ async function leadFromRow(env: Env, row: ManualLeadRow): Promise<ManualNewsLead
     version: Number(row.version),
     error_code: row.error_code,
     error_message: row.error_message,
+    ...(providerFailure ? { provider_failure: providerFailure } : {}),
     processing_owner: row.processing_owner || null,
     processing_attempt: Number(row.processing_attempt || 0),
     processing_lease_until: row.processing_lease_until === null || row.processing_lease_until === undefined

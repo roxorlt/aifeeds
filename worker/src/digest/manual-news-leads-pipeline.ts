@@ -48,6 +48,7 @@ export interface ManualNewsLeadRecord {
   version: number;
   error_code: string | null;
   error_message: string | null;
+  provider_failure?: ManualNewsProviderFailureAudit;
   processing_owner: string | null;
   processing_attempt: number;
   processing_lease_until: number | null;

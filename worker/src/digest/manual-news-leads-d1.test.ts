@@ -21,6 +21,7 @@ import {
   claimManualNewsLeadProcessing,
   D1ManualLeadProcessingStore,
   failManualNewsLeadAfterExhaustion,
+  getManualNewsLead,
   markManualNewsLeadEnqueueFailure,
   recoverStaleManualNewsLeads,
   retryManualNewsLead,
@@ -1409,13 +1410,20 @@ describe('manual lead D1-backed dedupe', () => {
        processing_lease_until = 999 WHERE id = ?`,
     ).run(state.leadId);
     const error = new ManualNewsProviderError({
-      stage: 'assessment', provider_error_code: 'provider_timeout',
+      stage: 'assessment', provider_error_code: 'provider_output_exhausted',
       metrics: {
         stage: 'assessment', request_id: `${state.leadId}:p6:assessment:1`,
         system_chars: 1_200, user_chars: 7_200, evidence_count: 1, attempt: 6,
       },
       assessment_generation_attempt: 1,
       assessment_last_validation_code: 'not_validated',
+      provider_diagnostics: {
+        finish_reason: 'length', content_chars: 0, reasoning_chars: 3_500,
+        usage: {
+          prompt_tokens: 1_200, completion_tokens: 3_500,
+          total_tokens: 4_700, reasoning_tokens: 3_500,
+        },
+      },
     });
 
     expect(await failManualNewsLeadAfterExhaustion(
@@ -1426,7 +1434,7 @@ describe('manual lead D1-backed dedupe', () => {
       'SELECT status, error_code, error_message FROM manual_news_leads WHERE id = ?',
     ).get(state.leadId)).toEqual({
       status: 'failed', error_code: 'processing_retry_exhausted',
-      error_message: 'manual_news_provider_error:assessment:provider_timeout',
+      error_message: 'manual_news_provider_error:assessment:provider_output_exhausted',
     });
     const audit = state.db.sqlite.prepare(
       `SELECT metadata_json FROM manual_news_lead_audit
@@ -1436,15 +1444,32 @@ describe('manual lead D1-backed dedupe', () => {
     expect(metadata).toEqual({
       processing_owner: 'workflow-owner', processing_attempt: 6,
       provider_failure: {
-        stage: 'assessment', provider_error_code: 'provider_timeout',
+        stage: 'assessment', provider_error_code: 'provider_output_exhausted',
         request_id: `${state.leadId}:p6:assessment:1`,
         system_chars: 1_200, user_chars: 7_200, evidence_count: 1, attempt: 6,
         assessment_generation_attempt: 1,
         assessment_last_validation_code: 'not_validated',
+        provider_diagnostics: {
+          finish_reason: 'length', content_chars: 0, reasoning_chars: 3_500,
+          usage: {
+            prompt_tokens: 1_200, completion_tokens: 3_500,
+            total_tokens: 4_700, reasoning_tokens: 3_500,
+          },
+        },
+      },
+    });
+    await expect(getManualNewsLead(state.env, state.leadId)).resolves.toMatchObject({
+      provider_failure: {
+        stage: 'assessment', provider_error_code: 'provider_output_exhausted',
+        provider_diagnostics: {
+          finish_reason: 'length', content_chars: 0, reasoning_chars: 3_500,
+          usage: { reasoning_tokens: 3_500 },
+        },
       },
     });
     expect(JSON.stringify(metadata)).not.toContain('https://');
     expect(JSON.stringify(metadata)).not.toContain('Bearer');
+    expect(JSON.stringify(metadata)).not.toContain('reasoning_content');
   });
 
   test('recovers safe provider diagnostics after a Workflow error serialization boundary', async () => {
@@ -1454,10 +1479,16 @@ describe('manual lead D1-backed dedupe', () => {
        processing_lease_until = 999 WHERE id = ?`,
     ).run(state.leadId);
     const original = new ManualNewsProviderError({
-      stage: 'verification', provider_error_code: 'provider_http_503',
+      stage: 'verification', provider_error_code: 'provider_capacity',
       metrics: {
         stage: 'verification', request_id: `${state.leadId}:p6:verification:2`,
         system_chars: 900, user_chars: 5_100, evidence_count: 1, attempt: 6,
+      },
+      provider_diagnostics: {
+        finish_reason: 'insufficient_system_resource',
+        content_chars: 0,
+        reasoning_chars: 900,
+        usage: { prompt_tokens: 800, completion_tokens: 900, total_tokens: 1_700, reasoning_tokens: 900 },
       },
     });
     const deserialized = new Error(original.message);
@@ -1469,7 +1500,7 @@ describe('manual lead D1-backed dedupe', () => {
     expect(state.db.sqlite.prepare(
       'SELECT error_message FROM manual_news_leads WHERE id = ?',
     ).get(state.leadId)).toEqual({
-      error_message: 'manual_news_provider_error:verification:provider_http_503',
+      error_message: 'manual_news_provider_error:verification:provider_capacity',
     });
     const audit = state.db.sqlite.prepare(
       `SELECT metadata_json FROM manual_news_lead_audit
@@ -1477,9 +1508,15 @@ describe('manual lead D1-backed dedupe', () => {
     ).get(state.leadId) as { metadata_json: string };
     expect(JSON.parse(audit.metadata_json)).toMatchObject({
       provider_failure: {
-        stage: 'verification', provider_error_code: 'provider_http_503',
+        stage: 'verification', provider_error_code: 'provider_capacity',
         request_id: `${state.leadId}:p6:verification:2`,
         system_chars: 900, user_chars: 5_100, evidence_count: 1, attempt: 6,
+        provider_diagnostics: {
+          finish_reason: 'insufficient_system_resource',
+          content_chars: 0,
+          reasoning_chars: 900,
+          usage: { prompt_tokens: 800, completion_tokens: 900, total_tokens: 1_700, reasoning_tokens: 900 },
+        },
       },
     });
   });

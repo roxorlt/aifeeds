@@ -21,6 +21,7 @@ import {
   runManualNewsLeadWorkflow,
 } from './manual-news-leads-workflow';
 import { MANUAL_NEWS_PROVIDER_TIMEOUT_MS } from './manual-news-leads-runtime';
+import { ManualNewsProviderError } from './manual-news-provider';
 
 describe('manual news lead workflow', () => {
   beforeEach(() => {
@@ -118,6 +119,47 @@ describe('manual news lead workflow', () => {
     expect(failManualNewsLeadAfterExhaustion).toHaveBeenCalledWith(
       env, 'ml-20260811-abc123def456', 'workflow-exhausted', 3,
       expect.any(Error), expect.any(Number),
+    );
+  });
+
+  test('retries a finish-reason output exhaustion three times and preserves its terminal code', async () => {
+    vi.mocked(claimManualNewsLeadProcessing)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(3);
+    const failure = new ManualNewsProviderError({
+      stage: 'assessment', provider_error_code: 'provider_output_exhausted',
+      metrics: {
+        stage: 'assessment', request_id: 'ml-20260811-abc123def456:p3:assessment:1',
+        system_chars: 4_083, user_chars: 6_086, evidence_count: 1, attempt: 3,
+      },
+      provider_diagnostics: {
+        finish_reason: 'length', content_chars: 11, reasoning_chars: 12_000,
+        usage: { completion_tokens: 12_000, reasoning_tokens: 12_000 },
+      },
+    });
+    vi.mocked(processManualNewsLeadWithEnv).mockRejectedValue(failure);
+    const step = {
+      do: vi.fn(async (_name, options, callback: () => Promise<void>) => {
+        let lastError;
+        for (let attempt = 0; attempt <= options.retries.limit; attempt++) {
+          try { return await callback(); } catch (error) { lastError = error; }
+        }
+        throw lastError;
+      }),
+    };
+
+    await expect(runManualNewsLeadWorkflow({} as never, {
+      lead_id: 'ml-20260811-abc123def456', processing_owner: 'workflow-finish-reason',
+    }, step as never)).rejects.toMatchObject({
+      provider_error_code: 'provider_output_exhausted',
+    });
+
+    expect(processManualNewsLeadWithEnv).toHaveBeenCalledTimes(3);
+    expect(failManualNewsLeadAfterExhaustion).toHaveBeenCalledWith(
+      expect.anything(), 'ml-20260811-abc123def456', 'workflow-finish-reason', 3,
+      expect.objectContaining({ provider_error_code: 'provider_output_exhausted' }),
+      expect.any(Number),
     );
   });
 });
