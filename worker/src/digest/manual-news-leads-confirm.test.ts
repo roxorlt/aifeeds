@@ -10,7 +10,8 @@ const activeBatch = {
   applied_selected_ids: null, selection_hash: null, edit_revision: 0, publish_status: 'not_requested',
   publish_error: null, published_at: null, notified_at: 1, notification_hash: 'old',
   auto_repaired_from_batch: null, auto_repaired_invalid_ids: [], superseded_by: null,
-  batch_revision: 1, supersedes_batch_id: null, revision_origin: 'scheduled_freeze', created_at: 1, expires_at: 9,
+  batch_revision: 1, supersedes_batch_id: null, revision_origin: 'scheduled_freeze',
+  lineage_id: '2026-08-11', is_current: true, candidate_generation: 0, created_at: 1, expires_at: 9,
 };
 
 let insertedBatch: any = null;
@@ -150,6 +151,8 @@ describe('manual lead candidate confirmation', () => {
     });
     const itemStatement = memory.prepared.find((statement) => statement.sql.includes('manual_lead:confirm_item'));
     expect(itemStatement?.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM daily_news_review_batches/);
+    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:candidate_generation_init'))).toBe(true);
+    expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:candidate_generation_advance'))).toBe(true);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:confirm_batch'))).toBe(false);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:supersede_batch'))).toBe(false);
     expect(memory.prepared.some((statement) => statement.sql.includes('manual_lead:activate_batch'))).toBe(false);

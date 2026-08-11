@@ -41,6 +41,7 @@ export interface NewsReviewBatch {
   revision_origin: 'scheduled_freeze' | 'manual_lead';
   lineage_id: string;
   is_current: boolean;
+  candidate_generation: number;
   created_at: number;
   expires_at: number;
 }
@@ -67,6 +68,7 @@ interface NewsReviewBatchRow {
   revision_origin?: NewsReviewBatch['revision_origin'];
   lineage_id?: string;
   is_current?: number;
+  candidate_generation?: number;
   created_at: number;
   expires_at: number;
 }
@@ -109,6 +111,7 @@ function toBatch(row: NewsReviewBatchRow): NewsReviewBatch {
     revision_origin: row.revision_origin || 'scheduled_freeze',
     lineage_id: row.lineage_id || row.review_date,
     is_current: row.is_current === undefined ? !row.superseded_by : row.is_current === 1,
+    candidate_generation: Number(row.candidate_generation || 0),
     candidate_ids: parseStringArray(row.candidate_ids),
     candidates: parseCandidates(row.candidates_json),
     default_selected_ids: parseStringArray(row.default_selected_ids),
@@ -254,6 +257,23 @@ export async function getActiveNewsReviewBatch(env: Env, date: string): Promise<
   return row ? toBatch(row) : null;
 }
 
+async function readNewsReviewCandidateGeneration(env: Env, date: string, now: number): Promise<number> {
+  assertReviewDate(date);
+  await env.DB.prepare(
+    `/* news_review:candidate_generation_init */ INSERT OR IGNORE INTO daily_news_review_candidate_generations
+     (review_date, lineage_id, generation, updated_at) VALUES (?, ?, 0, ?)`,
+  ).bind(date, date, now).run();
+  const row = await env.DB.prepare(
+    `/* news_review:candidate_generation_read */ SELECT generation
+     FROM daily_news_review_candidate_generations WHERE review_date = ? AND lineage_id = ?`,
+  ).bind(date, date).first<{ generation: number }>();
+  const generation = Number(row?.generation);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error('invalid_news_review_candidate_generation');
+  }
+  return generation;
+}
+
 export async function getAppliedNewsReviewSelection(env: Env, date: string): Promise<string[] | null> {
   try {
     const row = await env.DB.prepare(
@@ -323,6 +343,23 @@ export async function freezeNewsReviewBatch(
   defaultSelectedIds: readonly string[],
   now = Date.now(),
 ): Promise<FreezeNewsReviewBatchResult> {
+  const candidateGeneration = await readNewsReviewCandidateGeneration(env, date, now);
+  return freezeNewsReviewBatchAtGeneration(
+    env, date, candidates, defaultSelectedIds, now, candidateGeneration, 0,
+  );
+}
+
+const MAX_CANDIDATE_GENERATION_RETRIES = 3;
+
+async function freezeNewsReviewBatchAtGeneration(
+  env: Env,
+  date: string,
+  candidates: readonly NewsReviewCandidate[],
+  defaultSelectedIds: readonly string[],
+  now: number,
+  candidateGeneration: number,
+  generationRetry: number,
+): Promise<FreezeNewsReviewBatchResult> {
   if (candidates.length < 5 || candidates.length > 10) throw new Error('review_candidates_must_be_five_to_ten');
   const submittedCandidateIds = candidates.map((candidate) => candidate.item_id);
   if (new Set(submittedCandidateIds).size !== submittedCandidateIds.length) throw new Error('review_candidates_must_be_unique');
@@ -359,9 +396,12 @@ export async function freezeNewsReviewBatch(
        review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
        applied_selected_ids, selection_hash, edit_revision, publish_status,
        auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at,
-       batch_revision, supersedes_batch_id, revision_origin, lineage_id, is_current
-     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze', ?, ?
-     WHERE ${previous
+       batch_revision, supersedes_batch_id, revision_origin, lineage_id, is_current,
+       candidate_generation
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze', ?, ?, ?
+     WHERE EXISTS (SELECT 1 FROM daily_news_review_candidate_generations
+       WHERE review_date = ? AND lineage_id = ? AND generation = ?)
+     AND ${previous
        ? `EXISTS (SELECT 1 FROM daily_news_review_batches
             WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)`
        : `NOT EXISTS (SELECT 1 FROM daily_news_review_batches
@@ -373,6 +413,7 @@ export async function freezeNewsReviewBatch(
     selectionHash, repair.required ? 1 : 0, repair.required ? 'pending' : 'not_requested',
     repair.required ? previous!.batch_id : null, repair.required ? JSON.stringify(repair.invalid_ids) : null,
     now, newsReviewExpiresAt(date), batchRevision, previous?.batch_id || null, date, previous ? 0 : 1,
+    candidateGeneration, date, date, candidateGeneration,
     date, date, ...(previous ? [previous.batch_id, previous.batch_revision] : []),
   );
   const statements: D1PreparedStatement[] = [insert];
@@ -396,7 +437,20 @@ export async function freezeNewsReviewBatch(
   await env.DB.batch(statements);
   const inserted = await getNewsReviewBatch(env, date, batchId);
   const active = inserted?.is_current ? inserted : await getActiveNewsReviewBatch(env, date);
-  if (!active) throw new Error('news_review_batch_cas_failed');
+  if (!active) {
+    const latestGeneration = await readNewsReviewCandidateGeneration(env, date, now);
+    if (latestGeneration !== candidateGeneration) {
+      if (generationRetry >= MAX_CANDIDATE_GENERATION_RETRIES) {
+        throw new Error('news_review_candidate_generation_conflict');
+      }
+      // Re-run the complete candidate collection. In particular, this reloads
+      // durable pre-freeze confirmations instead of publishing the stale V1.
+      return freezeNewsReviewBatchAtGeneration(
+        env, date, candidates, defaultSelectedIds, now, latestGeneration, generationRetry + 1,
+      );
+    }
+    throw new Error('news_review_batch_cas_failed');
+  }
   return {
     batch: active,
     created: active.batch_id === batchId && !existing,
@@ -618,6 +672,10 @@ export async function freezeNewsReviewBatchFromPool(
   date: string,
   now = Date.now(),
 ): Promise<FreezeNewsReviewBatchResult> {
+  // Snapshot before any pool/manual candidate reads. The final insert is
+  // conditioned on this exact generation, so a concurrent pre-freeze confirm
+  // forces a complete recollection instead of publishing stale candidates.
+  const candidateGeneration = await readNewsReviewCandidateGeneration(env, date, now);
   const pool = await env.DB.prepare(
     `SELECT item_ids, items_meta FROM digest_pool
      WHERE slot_key = ? AND source = 'news' AND density = 'normal'`,
@@ -674,7 +732,6 @@ export async function freezeNewsReviewBatchFromPool(
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC`,
   ).bind(date).all<{ id: string; input_url: string; assessment_json: string; publisher: string | null }>();
-  const includedLeadIds: string[] = [];
   for (const row of confirmed.results || []) {
     const assessment = parseObject(row.assessment_json);
     const title = compactReviewText(assessment.title, 80);
@@ -701,9 +758,13 @@ export async function freezeNewsReviewBatchFromPool(
     });
     candidates = merged.candidates;
     freezeDefaults = merged.default_selected_ids;
-    includedLeadIds.push(row.id);
   }
-  const frozen = await freezeNewsReviewBatch(env, date, candidates, freezeDefaults, now);
+  const frozen = await freezeNewsReviewBatchAtGeneration(
+    env, date, candidates, freezeDefaults, now, candidateGeneration, 0,
+  );
+  const includedLeadIds = [...new Set(frozen.batch.candidates
+    .filter((candidate) => candidate.origin === 'manual_lead' && candidate.lead_id)
+    .map((candidate) => candidate.lead_id!))];
   if (includedLeadIds.length) {
     await env.DB.batch(includedLeadIds.map((leadId) => env.DB.prepare(
       `UPDATE manual_news_leads SET confirmed_batch_id = ?, updated_at = ?

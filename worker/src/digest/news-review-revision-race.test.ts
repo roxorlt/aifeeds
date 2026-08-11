@@ -145,6 +145,49 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('prefreeze confirmation invalidates a freeze that already snapshotted no confirmed leads', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-ffffffffffff';
+    insertLead(current.db, leadId, 'event-manual-reverse-race');
+    const gate = current.db.pauseNextBatch();
+
+    const freezePromise = freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('stale'), candidates('stale').map((item) => item.item_id), 100,
+    );
+    await gate.entered;
+    const confirmation = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 0, 'confirm-after-snapshot', 150,
+    );
+    expect(confirmation).toMatchObject({
+      ok: true,
+      changed: true,
+      pending_initial_freeze: true,
+      batch: null,
+      rerender_enqueued: false,
+    });
+    const replay = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 0, 'confirm-after-snapshot', 175,
+    );
+    expect(replay).toMatchObject({ ok: true, changed: false, pending_initial_freeze: true });
+    gate.release();
+    const frozen = await freezePromise;
+
+    expect(frozen.batch).toMatchObject({ batch_revision: 1, is_current: true, candidate_generation: 1 });
+    expect(frozen.batch.candidates).toContainEqual(expect.objectContaining({
+      item_id: `blog:manual:${leadId}`,
+      origin: 'manual_lead',
+      lead_id: leadId,
+      event_key: 'event-manual-reverse-race',
+    }));
+    expect(activeCount(current.db)).toBe(1);
+    expect(current.db.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
+    ).get()).toEqual({ count: 1 });
+    expect(current.db.sqlite.prepare(
+      "SELECT generation FROM daily_news_review_candidate_generations WHERE review_date = '2026-08-11' AND lineage_id = '2026-08-11'",
+    ).get()).toEqual({ generation: 1 });
+  });
+
   test('initial freeze winning after a no-batch confirm read leaves no partial confirmation and retry creates V2', async () => {
     const current = state();
     const leadId = 'ml-20260811-000000000000';
@@ -161,7 +204,7 @@ describe('news review revision CAS', () => {
     gate.release();
     const confirmation = await confirmationPromise;
 
-    expect(initial.batch).toMatchObject({ batch_revision: 1, is_current: true });
+    expect(initial.batch).toMatchObject({ batch_revision: 1, is_current: true, candidate_generation: 0 });
     expect(confirmation).toMatchObject({
       ok: false,
       status: 409,
@@ -175,6 +218,9 @@ describe('news review revision CAS', () => {
     expect(current.db.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'confirm_candidate'",
     ).get(leadId)).toEqual({ count: 0 });
+    expect(current.db.sqlite.prepare(
+      "SELECT generation FROM daily_news_review_candidate_generations WHERE review_date = '2026-08-11' AND lineage_id = '2026-08-11'",
+    ).get()).toEqual({ generation: 0 });
 
     const retry = await confirmManualNewsLeadCandidate(
       current.env, leadId, 7, 1, 'confirm-after-freeze', 300,

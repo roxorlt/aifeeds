@@ -20,6 +20,10 @@ describe('manual news lead migration', () => {
 
     expect(tableColumns(db, 'daily_news_review_batches')).toEqual(expect.arrayContaining([
       'batch_revision', 'supersedes_batch_id', 'revision_origin', 'lineage_id', 'is_current',
+      'candidate_generation',
+    ]));
+    expect(tableColumns(db, 'daily_news_review_candidate_generations')).toEqual(expect.arrayContaining([
+      'review_date', 'lineage_id', 'generation', 'updated_at',
     ]));
     expect(tableColumns(db, 'manual_news_leads')).toEqual(expect.arrayContaining([
       'review_date', 'status', 'version', 'confirmed_batch_id', 'confirmed_at',

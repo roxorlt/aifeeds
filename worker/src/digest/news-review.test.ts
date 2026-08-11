@@ -150,6 +150,7 @@ describe('daily news review contract', () => {
           const stmt = {
             bind(...values: unknown[]) { binds = values; return stmt; },
             async first<T>() {
+              if (/news_review:candidate_generation_read/i.test(sql)) return { generation: 0 } as T;
               if (/FROM digest_pool/i.test(sql)) return pool as T;
               if (/FROM daily_news_review_batches/i.test(sql) && /batch_id = \?/i.test(sql)) return saved as T | null;
               return null as T | null;
@@ -167,9 +168,13 @@ describe('daily news review contract', () => {
               if (/INSERT INTO daily_news_review_batches/i.test(sql)) {
                 saved = {
                   review_date: binds[0], batch_id: binds[1], candidate_ids: binds[2], candidates_json: binds[3],
-                  default_selected_ids: binds[4], applied_selected_ids: null, selection_hash: null,
-                  edit_revision: 0, publish_status: 'not_requested', publish_error: null, published_at: null,
-                  notified_at: null, notification_hash: null, superseded_by: null, created_at: binds[5], expires_at: binds[6],
+                  default_selected_ids: binds[4], applied_selected_ids: binds[5], selection_hash: binds[6],
+                  edit_revision: binds[7], publish_status: binds[8], publish_error: null, published_at: null,
+                  notified_at: null, notification_hash: null, superseded_by: null,
+                  auto_repaired_from_batch: binds[9], auto_repaired_invalid_ids: binds[10],
+                  created_at: binds[11], expires_at: binds[12], batch_revision: binds[13],
+                  supersedes_batch_id: binds[14], revision_origin: 'scheduled_freeze', lineage_id: binds[15],
+                  is_current: binds[16], candidate_generation: binds[17],
                 };
               }
               return { success: true };

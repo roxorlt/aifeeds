@@ -14,7 +14,7 @@
 3. Workflow 依次推进 submitted、validating、researching、extracting、verifying、clustering、scored，最终进入 recommended、needs_review、duplicate、rejected 或 failed。中间状态可安全恢复。
 4. Worker 不直接请求线索 URL。URL 与文字检索都只发往配置的固定 HTTPS 研究网关；网关负责逐跳 DNS 校验、连接 peer pinning、重定向审计、开放网络搜索和 PDF 文本转换。文字线索同时查询现有 D1 新闻与开放网络。来源文本和用户文本始终作为不可信数据。
 5. DeepSeek adapter 只允许严格 schema JSON；所有 claims 必须绑定已持久化 evidence ID。官方产品文档可单独支持其明确范围；政治/监管事件必须有原始文件或官方声明及独立可靠报道。
-6. 确认时使用 lead version 与当前 batch revision 条件写入。冻结前确认的 item、lead 与 audit 在同一 D1 batch 中共同受“该日期/lineage 仍无 active batch”约束；首次 freeze 抢先时不留部分写入并返回 revision conflict。冻结后复制当前候选快照、按 event key 去重并生成不可变 V2+，旧批次记录 `superseded_by`。部分唯一索引保证每个日期/lineage 只有一个 active revision，冻结与确认均在 D1 batch 内 CAS 切换。
+6. 确认时使用 lead version 与当前 batch revision 条件写入。冻结前确认的 item、lead、audit 与 date/lineage 单调 `candidate_generation` 递增在同一 D1 batch 中共同受“仍无 active batch”约束；首次 freeze 抢先时不留部分写入并返回 revision conflict。scheduled freeze 在读取任何候选前快照 generation，发布 revision 的同一 D1 batch 必须仍命中该 generation；若确认先提交导致 generation 前进，旧快照插入失败并重新采集候选，绝不发布遗漏线索的 V1。冻结后复制当前候选快照、按 event key 去重并生成不可变 V2+，旧批次记录 `superseded_by`。部分唯一索引保证每个日期/lineage 只有一个 active revision，冻结与确认均在 D1 batch 内 CAS 切换。
 7. 任一后续 scheduled/date-scoped revision 都先合并 active snapshot 与 durable lead 中的 eligible confirmed manual candidates，再确定性裁至 10 条。手工候选保留 `origin=manual_lead` 与 `lead_id`；上限不足时只淘汰排序末尾的 scheduled 候选，异常导致无法保留全部手工候选时失败关闭。
 
 ## 安全与一致性
@@ -25,6 +25,7 @@
 - 来源权威等级只由最终抓取 URL 的精确 registrable-domain allowlist 决定；用户和搜索 hint 不能指定 `source_type`、`reliable` 或官方身份。
 - 模型额外字段、缺字段、非法枚举、未知 evidence ID 均失败关闭；不确定范围/时间必须显式输出。
 - 候选批次最多 10 条，确认操作保留当前 production selection，`rerender_enqueued` 固定为 `false`。
+- `daily_news_review_candidate_generations` 按日期/lineage 懒初始化为 0；历史日期及既有 batch 的 `candidate_generation` 默认 0。它只在成功的 pre-freeze confirmation 中单调递增，同幂等键重放不重复递增；active revision 仍沿用原 batch revision CAS。
 - CF 将规范化抓取审计持久化在每条 `manual_news_evidence.fetch_audit_json`；HK 不存事实副本，只展示 CF 响应。
 
 ## 发布与验收

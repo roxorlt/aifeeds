@@ -392,6 +392,10 @@ export async function confirmManualNewsLeadCandidate(
   }
   if (!active) {
     await env.DB.batch([
+      env.DB.prepare(
+        `/* manual_lead:candidate_generation_init */ INSERT OR IGNORE INTO daily_news_review_candidate_generations
+         (review_date, lineage_id, generation, updated_at) VALUES (?, ?, 0, ?)`,
+      ).bind(lead.review_date, lead.review_date, now),
       confirmedLeadItemStatement(env, lead, expectedVersion, candidate, publishedAt, itemExtra, now, undefined, true),
       env.DB.prepare(
         `/* manual_lead:confirm_prefreeze */ UPDATE manual_news_leads SET
@@ -401,6 +405,19 @@ export async function confirmManualNewsLeadCandidate(
            AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
              WHERE review_date = ? AND lineage_id = ? AND is_current = 1)`,
       ).bind(now, idempotencyKey, now, id, expectedVersion, lead.review_date, lead.review_date),
+      env.DB.prepare(
+        `/* manual_lead:candidate_generation_advance */ UPDATE daily_news_review_candidate_generations
+         SET generation = generation + 1, updated_at = ?
+         WHERE review_date = ? AND lineage_id = ?
+           AND NOT EXISTS (SELECT 1 FROM daily_news_review_batches
+             WHERE review_date = ? AND lineage_id = ? AND is_current = 1)
+           AND EXISTS (SELECT 1 FROM manual_news_leads
+             WHERE id = ? AND version = ? AND last_mutation_kind = 'confirm'
+               AND last_mutation_idempotency_key = ?)`,
+      ).bind(
+        now, lead.review_date, lead.review_date, lead.review_date, lead.review_date,
+        id, expectedVersion + 1, idempotencyKey,
+      ),
       env.DB.prepare(
         `/* manual_audit:confirm_prefreeze */ INSERT INTO manual_news_lead_audit
          (lead_id, action, from_status, to_status, idempotency_key, metadata_json, created_at)
@@ -454,8 +471,8 @@ export async function confirmManualNewsLeadCandidate(
       `/* manual_lead:confirm_batch */ INSERT INTO daily_news_review_batches (
          review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
          created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
-         lineage_id, is_current
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0
+         lineage_id, is_current, candidate_generation
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_lead', ?, 0, ?
        WHERE EXISTS (SELECT 1 FROM manual_news_leads WHERE id = ? AND version = ?)
        AND EXISTS (SELECT 1 FROM daily_news_review_batches
            WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND batch_revision = ? AND is_current = 1)
@@ -463,7 +480,7 @@ export async function confirmManualNewsLeadCandidate(
     ).bind(
       lead.review_date, batchId, JSON.stringify(candidateIds), JSON.stringify(merged.candidates),
       JSON.stringify(merged.default_selected_ids), now, newsReviewExpiresAt(lead.review_date),
-      batchRevision, active.batch_id, lead.review_date, lead.id, expectedVersion,
+      batchRevision, active.batch_id, lead.review_date, active.candidate_generation, lead.id, expectedVersion,
       lead.review_date, lead.review_date, active.batch_id, active.batch_revision,
     ),
     env.DB.prepare(

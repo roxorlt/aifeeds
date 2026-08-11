@@ -3,6 +3,7 @@ ALTER TABLE daily_news_review_batches ADD COLUMN supersedes_batch_id TEXT;
 ALTER TABLE daily_news_review_batches ADD COLUMN revision_origin TEXT NOT NULL DEFAULT 'scheduled_freeze';
 ALTER TABLE daily_news_review_batches ADD COLUMN lineage_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE daily_news_review_batches ADD COLUMN is_current INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE daily_news_review_batches ADD COLUMN candidate_generation INTEGER NOT NULL DEFAULT 0;
 
 UPDATE daily_news_review_batches SET lineage_id = review_date WHERE lineage_id = '';
 UPDATE daily_news_review_batches SET is_current = 1
@@ -13,6 +14,17 @@ WHERE rowid IN (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_news_review_one_current
   ON daily_news_review_batches(review_date, lineage_id) WHERE is_current = 1;
+
+-- A date/lineage-scoped monotonic generation closes the pre-freeze confirmation
+-- race. Existing dates start at generation 0 and are initialized lazily, so a
+-- rollout over already-created review batches remains safe.
+CREATE TABLE IF NOT EXISTS daily_news_review_candidate_generations (
+  review_date TEXT NOT NULL,
+  lineage_id TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (review_date, lineage_id)
+);
 
 CREATE TABLE IF NOT EXISTS manual_news_leads (
   id TEXT PRIMARY KEY,
