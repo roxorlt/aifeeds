@@ -195,6 +195,47 @@ describe('manual lead evidence extraction', () => {
     }
   });
 
+  test('redacts adversarial URL forms without leaving credential, path, query, or fragment suffixes', async () => {
+    const statement = {
+      bind() { return statement; },
+      async all() { return { results: [] }; },
+    };
+    const unsafeMessage = [
+      'trusted_gateway_http_503',
+      '_https://u.example/p?q=1#uf',
+      'HtTpS://c.example/P?Q=2#CF',
+      "https://u:p's@d.example/c?t=3#df",
+      "http://p.example/a'b?t=4#pf",
+      '(https://r.example/i?q=5#rf),',
+      'https://t.example/f?q=6#tf...',
+    ].join(' ');
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: { prepare() { return statement; } },
+      MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+      MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+    } as never, {
+      researchFetcher: async () => { throw new Error(unsafeMessage); },
+    });
+
+    let message = '';
+    try {
+      await adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('search_public:trusted_gateway_http_503');
+    expect(message.match(/\[url\]/g)).toHaveLength(6);
+    expect(message).not.toMatch(/https?:\/\//i);
+    for (const leaked of [
+      'u.example', '/p', 'q=1', '#uf',
+      'c.example', '/P', 'Q=2', '#CF',
+      "u:p's", 'd.example', '/c', 't=3', '#df',
+      'p.example', "/a'b", 't=4', '#pf',
+      'r.example', '/i', 'q=5', '#rf',
+      't.example', '/f', 'q=6', '#tf',
+    ]) expect(message.toLowerCase()).not.toContain(leaked.toLowerCase());
+  });
+
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
       const target = JSON.parse(String(init?.body || '{}')).url as string;
