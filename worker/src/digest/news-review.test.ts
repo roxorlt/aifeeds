@@ -93,6 +93,18 @@ describe('daily news review contract', () => {
       .resolves.toEqual(['news-6', 'news-2', 'news-7']);
   });
 
+  test('applied selection keeps the rollout fallback when review tables are not migrated yet', async () => {
+    const env = {
+      DB: {
+        prepare() {
+          throw new Error('D1_ERROR: no such table: daily_news_review_batches');
+        },
+      },
+    } as never;
+
+    await expect(getAppliedNewsReviewSelection(env, '2026-07-30')).resolves.toBeNull();
+  });
+
   test('notification lists all candidates and binds the immutable date and batch link', () => {
     const message = buildNewsReviewNotification(
       '2026-07-30',
@@ -110,7 +122,7 @@ describe('daily news review contract', () => {
     expect(message.body).toContain('#news-review');
   });
 
-  test('pool snapshot keeps the calibrated defaults and includes confirmed pre-freeze manual leads', async () => {
+  test('pool snapshot keeps calibrated defaults and ignores an unverified legacy manual lead', async () => {
     const auditCandidates = candidates.map((candidate, index) => ({
       rank: index + 1,
       id: candidate.item_id,
@@ -128,6 +140,7 @@ describe('daily news review contract', () => {
     };
     const rows = new Map(candidates.map((candidate) => [candidate.item_id, {
       id: candidate.item_id,
+      source_ref: candidate.item_id === 'news-10' ? 'manual_lead' : null,
       title: candidate.title,
       content: candidate.summary,
       content_translated: candidate.summary,
@@ -191,16 +204,13 @@ describe('daily news review contract', () => {
     const result = await freezeNewsReviewBatchFromPool(env, '2026-07-30', Date.parse('2026-07-30T00:00:00Z'));
 
     expect(result.created).toBe(true);
-    expect(result.batch.candidate_ids).toEqual([
-      ...candidates.slice(0, 9).map((candidate) => candidate.item_id),
-      'blog:manual:ml-20260730-abc123def456',
-    ]);
+    expect(result.batch.candidate_ids).toEqual(candidates.slice(0, 9).map((candidate) => candidate.item_id));
     expect(result.batch.default_selected_ids).toEqual(candidates.slice(0, 5).map((candidate) => candidate.item_id));
     expect(result.batch.candidates[0]).toMatchObject({
       title: '候选新闻 1', summary: '候选新闻 1 摘要', source: '量子位', score: 100,
     });
     expect(inserted.some((entry) => /INSERT INTO daily_news_review_batches/i.test(entry.sql))).toBe(true);
-    expect(inserted.some((entry) => /UPDATE manual_news_leads SET confirmed_batch_id/i.test(entry.sql))).toBe(true);
+    expect(inserted.some((entry) => /UPDATE manual_news_leads SET confirmed_batch_id/i.test(entry.sql))).toBe(false);
   });
 
   test('a new batch compares against the previous production defaults when no human choice exists', async () => {

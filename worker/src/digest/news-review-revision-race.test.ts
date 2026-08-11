@@ -5,12 +5,22 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Env } from '../index';
+import {
+  applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
+  createManualLeadVerificationProof,
+  validateManualLeadAssessment,
+  validateManualLeadFactVerification,
+} from './manual-news-leads';
 import { confirmManualNewsLeadCandidate, retryManualNewsLead } from './manual-news-leads-store';
 import {
   createNewsReviewToken,
   freezeNewsReviewBatch,
   getActiveNewsReviewBatch,
   getAppliedNewsReviewSelection,
+  getNewsReviewBatch,
+  getVerifiedNewsReviewSelectionSnapshot,
+  sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
   type NewsReviewCandidate,
 } from './news-review';
@@ -35,6 +45,7 @@ class SerialSqliteD1 {
     )`);
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '032-daily-news-review.sql'), 'utf8'));
     this.sqlite.exec(fs.readFileSync(path.join(migrations, '033-manual-news-leads.sql'), 'utf8'));
+    this.sqlite.exec(fs.readFileSync(path.join(migrations, '034-manual-news-assessment-verifications.sql'), 'utf8'));
   }
 
   prepare(sql: string) {
@@ -106,7 +117,11 @@ afterEach(() => {
 function state() {
   const db = new SerialSqliteD1();
   states.push(db);
-  const env = { DB: db as unknown as D1Database, DAILY_NEWS_REVIEW_SECRET: 'test-secret' } as Env;
+  const env = {
+    DB: db as unknown as D1Database,
+    DAILY_NEWS_REVIEW_SECRET: 'test-secret',
+    MANUAL_NEWS_VERIFICATION_SECRET: 'b'.repeat(64),
+  } as Env;
   return { db, env };
 }
 
@@ -117,32 +132,82 @@ function candidates(prefix: string): NewsReviewCandidate[] {
   }));
 }
 
-function insertLead(db: SerialSqliteD1, id: string, eventKey: string): void {
-  const assessment = {
-    title: `${id}核验标题`, summary: '核验摘要', event_key: eventKey,
-    event_type: 'product_release', material_update: true, score: 90,
+async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
+  const supportingText = 'Anthropic released Claude 5 on 2026-08-11.';
+  const rawAssessment = {
+    title: supportingText,
+    summary: supportingText, event_key: eventKey,
+    event_type: 'product_release', material_update: false, score: 90,
     recommendation: 'recommended', occurred_at: '2026-08-11', uncertainties: [],
-    claims: [{ text: '官方发布。', evidence_ids: [`ev-${id}`] }], matched_event_key: null,
-    evidence_tier: 'official_primary', duplicate_scope: null, matched_lead_id: null,
+    claims: [{ text: supportingText, evidence_ids: [`ev-${id}`] }], matched_event_key: null,
   };
+  const evidence = {
+    id: `ev-${id}`,
+    url: `https://www.anthropic.com/news/${id}`,
+    source_type: 'official_primary' as const,
+    publisher: 'anthropic.com',
+    published_at: '2026-08-11',
+    retrieved_at: 1,
+    title: 'Official product release documentation',
+    excerpt: supportingText,
+    claims_supported: [supportingText],
+    reliable: true,
+    fetch_audit: null,
+  };
+  const core = validateManualLeadAssessment(rawAssessment, [evidence]);
+  const processed = applyManualLeadEvidencePolicy(core, [evidence]);
+  const assessment = {
+    ...processed,
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment, evidence: [evidence],
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: facts.map((fact) => ({
+      fact_id: fact.fact_id,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence.id, quote: supportingText }],
+      ...(fact.fact_id === 'field:material_update' ? {
+        comparison_result: {
+          value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+          current_evidence_id: evidence.id, current_quote: supportingText,
+        },
+      } : {}),
+    })),
+  }, assessment, [evidence]);
+  const proof = await createManualLeadVerificationProof({
+    lead_id: id, assessment_version: 7, assessment, evidence: [evidence], verification,
+  }, 'b'.repeat(64));
   db.sqlite.prepare(`INSERT INTO manual_news_leads (
     id, review_date, input_type, input_text, input_url, note, status, version,
-    submit_idempotency_key, created_at, updated_at
-  ) VALUES (?, '2026-08-11', 'url', '', ?, '', 'recommended', 7, ?, 1, 1)`).run(
+    submit_idempotency_key, processing_owner, processing_attempt, created_at, updated_at
+  ) VALUES (?, '2026-08-11', 'url', '', ?, '', 'recommended', 7, ?, 'workflow-owner', 1, 1, 1)`).run(
     id, `https://www.anthropic.com/news/${id}`, `submit-${id}`,
   );
   db.sqlite.prepare(`INSERT INTO manual_news_evidence (
     lead_id, evidence_id, url, source_type, publisher, published_at, retrieved_at,
-    title, excerpt, claims_supported_json, reliable
+    title, excerpt, claims_supported_json, reliable, fetch_audit_json
   ) VALUES (?, ?, ?, 'official_primary', 'anthropic.com', '2026-08-11', 1,
-    'Official', 'Official release.', '["Official release."]', 1)`).run(
-    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`,
+    'Official product release documentation', ?, ?, 1, 'null')`).run(
+    id, `ev-${id}`, `https://www.anthropic.com/news/${id}`, supportingText, JSON.stringify([supportingText]),
   );
   db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
     lead_id, assessment_version, event_key, event_type, material_update, score,
     recommendation, assessment_json, created_at
   ) VALUES (?, 7, ?, 'product_release', 1, 90, 'recommended', ?, 1)`).run(
     id, eventKey, JSON.stringify(assessment),
+  );
+  db.sqlite.prepare(`INSERT INTO manual_news_assessment_verifications (
+    verification_id, lead_id, assessment_version, policy_version, canonical_digest,
+    hmac_sha256, verification_json, processing_owner, processing_attempt,
+    creation_nonce, status, reason, created_at, invalidated_at
+  ) VALUES (?, ?, 7, ?, ?, ?, ?, 'workflow-owner', 1, ?, 'active', NULL, 1, NULL)`).run(
+    `mav-${id}`, id, proof.policy_version, proof.canonical_digest, proof.hmac_sha256,
+    JSON.stringify(verification), `verification-create-${id}`,
   );
 }
 
@@ -152,10 +217,274 @@ function activeCount(db: SerialSqliteD1): number {
 }
 
 describe('news review revision CAS', () => {
+  test('verified selection snapshot binds the active revision and fails closed on a soft-deleted selected item', async () => {
+    const current = state();
+    const selected = candidates('snapshot');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', selected, selected.map((item) => item.item_id), 100,
+    );
+    const insert = current.db.sqlite.prepare('INSERT INTO items (id, deleted_at) VALUES (?, NULL)');
+    for (const item of selected) insert.run(item.item_id);
+
+    await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 110)).resolves.toMatchObject({
+      batch_id: frozen.batch.batch_id,
+      batch_revision: 1,
+      selected_ids: selected.map((item) => item.item_id),
+      manual_verifications: [],
+    });
+
+    current.db.sqlite.prepare('UPDATE items SET deleted_at = ? WHERE id = ?')
+      .run('2026-08-11T00:00:00.000Z', selected[2].item_id);
+    await expect(getVerifiedNewsReviewSelectionSnapshot(current.env, '2026-08-11', 120))
+      .rejects.toThrow('news_review_verified_selection_stale');
+  });
+
+  test('refreshes the current batch into one immutable revision when a manual proof becomes invalid', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-sanitize0001';
+    await insertLead(current.db, leadId, 'event-sanitize-manual');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('sanitize'),
+      candidates('sanitize').map((item) => item.item_id), 100,
+    );
+    const confirmed = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-sanitize', 110,
+    );
+    expect(confirmed).toMatchObject({ ok: true, batch: { revision: 2 } });
+    const before = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+
+    const sanitized = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
+    expect(sanitized).toMatchObject({ changed: true, dropped_ids: [`blog:manual:${leadId}`] });
+    expect(sanitized.batch.batch_revision).toBe(3);
+    expect(sanitized.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect((await getNewsReviewBatch(current.env, '2026-08-11', before!.batch_id))?.candidates
+      .some((candidate) => candidate.lead_id === leadId)).toBe(true);
+    expect(activeCount(current.db)).toBe(1);
+
+    const replay = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 130);
+    expect(replay).toMatchObject({ changed: false, dropped_ids: [] });
+    expect(replay.batch.batch_id).toBe(sanitized.batch.batch_id);
+  });
+
+  test('rejects selection of a just-invalidated manual candidate as stale without publishing', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-staleselect1';
+    await insertLead(current.db, leadId, 'event-stale-selection');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('stale-selection'),
+      candidates('stale-selection').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-stale-selection', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', active!.batch_id);
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+
+    const result = await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: active!.batch_id, token,
+      selected_ids: [`blog:manual:${leadId}`, ...active!.candidate_ids.slice(0, 2)],
+    }, 120);
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'stale_candidate' });
+    const refreshed = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(refreshed?.batch_revision).toBe(3);
+    expect(refreshed?.applied_selected_ids).toBeNull();
+  });
+
+  test('sanitizes old manual snapshots before confirming another manual lead into the active batch', async () => {
+    const current = state();
+    const staleLeadId = 'ml-20260811-oldmanual001';
+    const newLeadId = 'ml-20260811-newmanual001';
+    await insertLead(current.db, staleLeadId, 'event-old-manual');
+    await insertLead(current.db, newLeadId, 'event-new-manual');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('confirm-sanitize'),
+      candidates('confirm-sanitize').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, staleLeadId, 7, frozen.batch.batch_revision, 'confirm-old-manual', 110,
+    );
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), staleLeadId);
+
+    const conflicted = await confirmManualNewsLeadCandidate(
+      current.env, newLeadId, 7, 2, 'confirm-new-manual', 120,
+    );
+    expect(conflicted).toMatchObject({
+      ok: false, status: 409, error: 'candidate_batch_revision_conflict',
+    });
+    const sanitized = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(sanitized?.batch_revision).toBe(3);
+    expect(sanitized?.candidates.some((candidate) => candidate.lead_id === staleLeadId)).toBe(false);
+
+    const retried = await confirmManualNewsLeadCandidate(
+      current.env, newLeadId, 7, 3, 'confirm-new-manual', 130,
+    );
+    expect(retried).toMatchObject({ ok: true, batch: { revision: 4 } });
+    const finalBatch = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(finalBatch?.candidates.some((candidate) => candidate.lead_id === staleLeadId)).toBe(false);
+    expect(finalBatch?.candidates.some((candidate) => candidate.lead_id === newLeadId)).toBe(true);
+  });
+
+  test('retries batch sanitation when a verified manual proof changes after validation but before CAS', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-sanitizeRace1';
+    await insertLead(current.db, leadId, 'event-sanitize-race');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('sanitize-race'),
+      candidates('sanitize-race').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-sanitize-race', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const staleSnapshot = active!.candidates.map((candidate) => candidate.lead_id === leadId
+      ? { ...candidate, title: 'stale manual snapshot' }
+      : candidate);
+    current.db.sqlite.prepare(`UPDATE daily_news_review_batches SET candidates_json = ?
+      WHERE review_date = '2026-08-11' AND batch_id = ?`).run(
+      JSON.stringify(staleSnapshot), active!.batch_id,
+    );
+    const gate = current.db.pauseNextBatch();
+    const sanitizing = sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 120);
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+    gate.release();
+
+    const result = await sanitizing;
+    expect(result).toMatchObject({ changed: true, dropped_ids: [`blog:manual:${leadId}`] });
+    expect(result.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('does not merge another lead when an existing manual proof changes before confirm CAS', async () => {
+    const current = state();
+    const oldLeadId = 'ml-20260811-oldRace0001';
+    const newLeadId = 'ml-20260811-newRace0001';
+    await insertLead(current.db, oldLeadId, 'event-old-race');
+    await insertLead(current.db, newLeadId, 'event-new-race');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('confirm-proof-race'),
+      candidates('confirm-proof-race').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, oldLeadId, 7, frozen.batch.batch_revision, 'confirm-old-race', 110,
+    );
+    const gate = current.db.pauseNextBatch();
+    const confirming = confirmManualNewsLeadCandidate(
+      current.env, newLeadId, 7, 2, 'confirm-new-race', 120,
+    );
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), oldLeadId);
+    gate.release();
+
+    await expect(confirming).resolves.toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
+    expect((await getActiveNewsReviewBatch(current.env, '2026-08-11'))?.batch_revision).toBe(2);
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(newLeadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${newLeadId}`)).toEqual({ count: 0 });
+    const cleaned = await sanitizeCurrentNewsReviewBatch(current.env, '2026-08-11', 130);
+    expect(cleaned.batch.batch_revision).toBe(3);
+    expect(cleaned.batch.candidates.some((candidate) => candidate.lead_id === oldLeadId)).toBe(false);
+  });
+
+  test('selection CAS rejects a manual proof invalidated after preflight without publishing it', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-selectRace01';
+    await insertLead(current.db, leadId, 'event-selection-proof-race');
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('selection-proof-race'),
+      candidates('selection-proof-race').map((item) => item.item_id), 100,
+    );
+    await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, frozen.batch.batch_revision, 'confirm-selection-race', 110,
+    );
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', active!.batch_id);
+    const gate = current.db.pauseNextBatch();
+    const selecting = submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: active!.batch_id, token,
+      selected_ids: [`blog:manual:${leadId}`, active!.candidate_ids[1]],
+    }, 120);
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET hmac_sha256 = ?
+      WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+    gate.release();
+
+    await expect(selecting).resolves.toMatchObject({ ok: false, status: 409, error: 'stale_candidate' });
+    const refreshed = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(refreshed?.batch_revision).toBe(3);
+    expect(refreshed?.applied_selected_ids).toBeNull();
+    expect(refreshed?.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+  });
+
+  test('confirmation cannot commit after its active verification is concurrently invalidated', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-v00000000001';
+    await insertLead(current.db, leadId, 'event-verification-confirm-race');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verification-race'),
+      candidates('verification-race').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-after-verification-check', 150,
+    );
+    await gate.entered;
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET status = 'invalidated', reason = 'concurrent_takeover', invalidated_at = 151
+      WHERE lead_id = ? AND status = 'active'`).run(leadId);
+    gate.release();
+
+    await expect(confirmation).resolves.toMatchObject({ ok: false, status: 409 });
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(leadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
+    expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('confirmation cannot commit after verification JSON changes between validation and CAS', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-q00000000001';
+    await insertLead(current.db, leadId, 'event-verification-json-race');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verification-json-race'),
+      candidates('verification-json-race').map((item) => item.item_id), 100,
+    );
+    const gate = current.db.pauseNextBatch();
+
+    const confirmation = confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-after-verification-json-check', 150,
+    );
+    await gate.entered;
+    const active = current.db.sqlite.prepare(`SELECT verification_json
+      FROM manual_news_assessment_verifications WHERE lead_id = ? AND status = 'active'`)
+      .get(leadId) as { verification_json: string };
+    const changed = JSON.parse(active.verification_json);
+    changed.fact_results[0].source_quotes[0].quote = 'Tampered quotation after the verifier check.';
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications SET verification_json = ?
+      WHERE lead_id = ? AND status = 'active'`).run(JSON.stringify(changed), leadId);
+    gate.release();
+
+    await expect(confirmation).resolves.toMatchObject({ ok: false, status: 409 });
+    expect(current.db.sqlite.prepare(`SELECT confirmed_at FROM manual_news_leads WHERE id = ?`)
+      .get(leadId)).toEqual({ confirmed_at: null });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM items WHERE id = ?`)
+      .get(`blog:manual:${leadId}`)).toEqual({ count: 0 });
+  });
+
   test('a retry CAS loser cannot write an audit for a concurrent confirmation winner', async () => {
     const current = state();
     const leadId = 'ml-20260811-a11111111111';
-    insertLead(current.db, leadId, 'event-retry-confirm-race-a');
+    await insertLead(current.db, leadId, 'event-retry-confirm-race-a');
     current.db.sqlite.prepare("UPDATE manual_news_leads SET status = 'needs_review' WHERE id = ?").run(leadId);
     await freezeNewsReviewBatch(
       current.env, '2026-08-11', candidates('base-a'), candidates('base-a').map((item) => item.item_id), 100,
@@ -179,7 +508,7 @@ describe('news review revision CAS', () => {
   test('a confirmation CAS loser cannot write an audit for a concurrent retry winner', async () => {
     const current = state();
     const leadId = 'ml-20260811-b22222222222';
-    insertLead(current.db, leadId, 'event-retry-confirm-race-b');
+    await insertLead(current.db, leadId, 'event-retry-confirm-race-b');
     current.db.sqlite.prepare("UPDATE manual_news_leads SET status = 'needs_review' WHERE id = ?").run(leadId);
     await freezeNewsReviewBatch(
       current.env, '2026-08-11', candidates('base-b'), candidates('base-b').map((item) => item.item_id), 100,
@@ -197,13 +526,13 @@ describe('news review revision CAS', () => {
     expect(await confirmation).toMatchObject({ ok: false, status: 409, error: 'lead_version_conflict' });
     expect(current.db.sqlite.prepare(
       `SELECT action FROM manual_news_lead_audit WHERE lead_id = ? ORDER BY id`,
-    ).all(leadId)).toEqual([{ action: 'retry' }]);
+    ).all(leadId)).toEqual([{ action: 'retry' }, { action: 'assessment_invalidate' }]);
   });
 
   test('prefreeze confirmation invalidates a freeze that already snapshotted no confirmed leads', async () => {
     const current = state();
     const leadId = 'ml-20260811-ffffffffffff';
-    insertLead(current.db, leadId, 'event-manual-reverse-race');
+    await insertLead(current.db, leadId, 'event-manual-reverse-race');
     const gate = current.db.pauseNextBatch();
 
     const freezePromise = freezeNewsReviewBatch(
@@ -246,7 +575,7 @@ describe('news review revision CAS', () => {
   test('initial freeze winning after a no-batch confirm read leaves no partial confirmation and retry creates V2', async () => {
     const current = state();
     const leadId = 'ml-20260811-000000000000';
-    insertLead(current.db, leadId, 'event-manual-initial-race');
+    await insertLead(current.db, leadId, 'event-manual-initial-race');
     const gate = current.db.pauseNextBatch();
 
     const confirmationPromise = confirmManualNewsLeadCandidate(
@@ -308,13 +637,37 @@ describe('news review revision CAS', () => {
     expect(retry).toMatchObject({ created: false, batch: { batch_id: active?.batch_id, is_current: true } });
   });
 
+  test('A to B to A creates a new immutable lineage revision instead of reusing historical A', async () => {
+    const current = state();
+    const firstA = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('a'), candidates('a').map((item) => item.item_id), 100,
+    );
+    const middleB = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('b'), candidates('b').map((item) => item.item_id), 200,
+    );
+    const secondA = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('a'), candidates('a').map((item) => item.item_id), 300,
+    );
+
+    expect(new Set([
+      firstA.batch.batch_id, middleB.batch.batch_id, secondA.batch.batch_id,
+    ])).toHaveLength(3);
+    expect(secondA).toMatchObject({
+      created: true,
+      superseded_batch_id: middleB.batch.batch_id,
+      batch: { batch_revision: 3, is_current: true, candidate_ids: candidates('a').map((item) => item.item_id) },
+    });
+    expect(current.db.sqlite.prepare(`SELECT COUNT(*) AS count FROM daily_news_review_batches
+      WHERE review_date = '2026-08-11'`).get()).toEqual({ count: 3 });
+  });
+
   test('competing manual confirmations allow one CAS winner, then the loser retries onto V3', async () => {
     const current = state();
     const initial = await freezeNewsReviewBatch(
       current.env, '2026-08-11', candidates('base'), candidates('base').map((item) => item.item_id), 100,
     );
-    insertLead(current.db, 'ml-20260811-aaaaaaaaaaaa', 'event-manual-a');
-    insertLead(current.db, 'ml-20260811-bbbbbbbbbbbb', 'event-manual-b');
+    await insertLead(current.db, 'ml-20260811-aaaaaaaaaaaa', 'event-manual-a');
+    await insertLead(current.db, 'ml-20260811-bbbbbbbbbbbb', 'event-manual-b');
     const firstRound = await Promise.all([
       confirmManualNewsLeadCandidate(current.env, 'ml-20260811-aaaaaaaaaaaa', 7, 1, 'confirm-a', 200),
       confirmManualNewsLeadCandidate(current.env, 'ml-20260811-bbbbbbbbbbbb', 7, 1, 'confirm-b', 200),
@@ -343,7 +696,7 @@ describe('news review revision CAS', () => {
       current.env, '2026-08-11', candidates('base'), candidates('base').map((item) => item.item_id), 100,
     );
     const leadId = 'ml-20260811-cccccccccccc';
-    insertLead(current.db, leadId, 'event-manual-c');
+    await insertLead(current.db, leadId, 'event-manual-c');
     const [, confirmation] = await Promise.all([
       freezeNewsReviewBatch(current.env, '2026-08-11', candidates('scheduled'), candidates('scheduled').map((item) => item.item_id), 200),
       confirmManualNewsLeadCandidate(current.env, leadId, 7, 1, 'confirm-c', 200),
@@ -364,7 +717,7 @@ describe('news review revision CAS', () => {
       current.env, '2026-08-11', base, base.map((item) => item.item_id), 100,
     );
     const leadId = 'ml-20260811-dddddddddddd';
-    insertLead(current.db, leadId, 'event-manual-durable');
+    await insertLead(current.db, leadId, 'event-manual-durable');
     const confirmed = await confirmManualNewsLeadCandidate(
       current.env, leadId, 7, 1, 'confirm-durable', 200,
     );
@@ -395,6 +748,50 @@ describe('news review revision CAS', () => {
     ]);
     expect(scheduled.batch.candidate_ids).not.toContain('fresh-5');
     expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('scheduled freeze drops a snapshot manual candidate when its active HMAC no longer verifies', async () => {
+    const current = state();
+    const leadId = 'ml-20260811-h00000000001';
+    await insertLead(current.db, leadId, 'event-invalidated-hmac');
+    await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verified-v1'),
+      candidates('verified-v1').map((item) => item.item_id), 100,
+    );
+    const confirmed = await confirmManualNewsLeadCandidate(
+      current.env, leadId, 7, 1, 'confirm-before-hmac-tamper', 110,
+    );
+    expect(confirmed).toMatchObject({ ok: true, changed: true });
+    expect((await getActiveNewsReviewBatch(current.env, '2026-08-11'))?.candidates
+      .some((candidate) => candidate.lead_id === leadId)).toBe(true);
+
+    current.db.sqlite.prepare(`UPDATE manual_news_assessment_verifications
+      SET hmac_sha256 = ? WHERE lead_id = ? AND status = 'active'`).run('0'.repeat(64), leadId);
+    const refreshed = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('verified-v3'),
+      candidates('verified-v3').map((item) => item.item_id), 120,
+    );
+
+    expect(refreshed.batch.candidates.some((candidate) => candidate.lead_id === leadId)).toBe(false);
+    expect(refreshed.batch.candidates.every((candidate) => candidate.origin !== 'manual_lead')).toBe(true);
+  });
+
+  test('scheduled freeze cannot preserve a manual-looking snapshot without a verified durable lead', async () => {
+    const current = state();
+    const scheduled = candidates('snapshot-guard');
+    const injected = {
+      item_id: 'blog:manual:ml-20260811-unverified001',
+      title: 'Unverified snapshot title', summary: 'Unverified snapshot summary',
+      source: 'snapshot', score: 99, event_key: 'unverified-snapshot-event',
+    };
+
+    const frozen = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', [...scheduled, injected],
+      scheduled.map((candidate) => candidate.item_id), 100,
+    );
+
+    expect(frozen.batch.candidates).toEqual(scheduled);
+    expect(frozen.batch.candidate_ids).not.toContain(injected.item_id);
   });
 
   test('inactive legacy token is read-only and inactive applied selection is ignored', async () => {
@@ -442,7 +839,7 @@ describe('news review revision CAS', () => {
     let revision = initial.batch.batch_revision;
     for (let index = 1; index <= 6; index++) {
       const leadId = `ml-20260811-${String(index).repeat(12)}`;
-      insertLead(current.db, leadId, `manual-cap-event-${index}`);
+      await insertLead(current.db, leadId, `manual-cap-event-${index}`);
       const beforeBatchCount = Number((current.db.sqlite.prepare(
         "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
       ).get() as { count: number }).count);

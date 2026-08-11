@@ -23,20 +23,31 @@ vi.mock('./news-review', () => ({
   getNewsReviewBatch: vi.fn(async () => insertedBatch),
   newsReviewExpiresAt: vi.fn(() => 999),
   newsReviewSecret: vi.fn(() => 'secret'),
+  sanitizeCurrentNewsReviewBatch: vi.fn(async () => ({
+    batch: activeBatch, changed: false, dropped_ids: [],
+  })),
 }));
 
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
+import {
+  applyManualLeadEvidencePolicy,
+  buildManualLeadFactVerificationPrompt,
+  createManualLeadVerificationProof,
+  validateManualLeadAssessment,
+  validateManualLeadFactVerification,
+} from './manual-news-leads';
 import { getActiveNewsReviewBatch, newsReviewExpiresAt } from './news-review';
 
-function fakeConfirmationEnv() {
-  const assessment = {
-    title: 'Anthropic披露部分Claude输出的水印与来源标记',
-    summary: '官方文档将范围限定为受支持的模型与产品。',
+async function fakeConfirmationEnv() {
+  const verificationSecret = 'a'.repeat(64);
+  const supportedFact = 'On 2026-08-10, Anthropic provenance documentation covers supported Claude outputs only.';
+  const rawAssessment = {
+    title: supportedFact,
+    summary: supportedFact,
     event_key: 'anthropic-output-provenance-2026-08', event_type: 'product_documentation',
     material_update: false, score: 82, recommendation: 'recommended',
-    occurred_at: '2026-08-10T00:00:00.000Z', uncertainties: [],
-    claims: [{ text: '范围受限。', evidence_ids: ['ev-1'] }], matched_event_key: null,
-    evidence_tier: 'official_primary', duplicate_scope: null, matched_lead_id: null,
+    occurred_at: '2026-08-10', uncertainties: [],
+    claims: [{ text: supportedFact, evidence_ids: ['ev-1'] }], matched_event_key: null,
   };
   const row: Record<string, any> = {
     id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'url', input_text: '',
@@ -47,8 +58,66 @@ function fakeConfirmationEnv() {
   };
   const evidence = {
     evidence_id: 'ev-1', url: row.input_url, source_type: 'official_help', publisher: 'Anthropic',
-    published_at: null, retrieved_at: 2, title: 'Documentation', excerpt: 'Supported outputs only.',
-    claims_supported_json: JSON.stringify(['Supported outputs only.']), reliable: 1,
+    published_at: null, retrieved_at: 2, title: 'Documentation',
+    excerpt: supportedFact,
+    claims_supported_json: JSON.stringify([supportedFact]), reliable: 1,
+  };
+  const evidenceForMarker = {
+    id: evidence.evidence_id,
+    url: evidence.url,
+    source_type: 'official_help' as const,
+    publisher: evidence.publisher,
+    published_at: evidence.published_at,
+    retrieved_at: evidence.retrieved_at,
+    title: evidence.title,
+    excerpt: evidence.excerpt,
+    claims_supported: [supportedFact],
+    reliable: true,
+    fetch_audit: null,
+  };
+  const core = validateManualLeadAssessment(rawAssessment, [evidenceForMarker]);
+  const processedCore = applyManualLeadEvidencePolicy(core, [evidenceForMarker]);
+  const assessment = {
+    ...processedCore,
+    duplicate_scope: null, matched_lead_id: null,
+  };
+  const facts = (JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment, evidence: [evidenceForMarker],
+  }).user) as { facts: Array<{ fact_id: string }> }).facts;
+  const factVerification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: facts.map((fact) => ({
+      fact_id: fact.fact_id,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidenceForMarker.id, quote: evidenceForMarker.excerpt }],
+      ...(fact.fact_id === 'field:material_update' ? {
+        comparison_result: {
+          value: false, matched_event_key: null, prior_event_keys: [], reason_code: 'no_prior_match',
+          current_evidence_id: evidenceForMarker.id, current_quote: evidenceForMarker.excerpt,
+        },
+      } : {}),
+    })),
+  }, assessment, [evidenceForMarker]);
+  const assessmentVersion = 7;
+  const proof = await createManualLeadVerificationProof({
+    lead_id: row.id, assessment_version: assessmentVersion, assessment,
+    evidence: [evidenceForMarker], verification: factVerification,
+  }, verificationSecret);
+  const verification: Record<string, any> = {
+    verification_id: 'mav-confirm-7',
+    lead_id: row.id,
+    assessment_version: assessmentVersion,
+    ...proof,
+    verification_json: JSON.stringify(factVerification),
+    processing_owner: 'workflow-owner',
+    processing_attempt: 1,
+    creation_nonce: 'verification-create-confirm-7',
+    status: 'active',
+    reason: null,
+    created_at: 3,
+    invalidated_at: null,
+    assessment_json: JSON.stringify(assessment),
   };
   const prepared: any[] = [];
   const db = {
@@ -60,7 +129,9 @@ function fakeConfirmationEnv() {
         bind(...values: any[]) { binds = values; return stmt; },
         async first() {
           if (sql.includes('manual_lead:by_id')) return { ...row };
-          if (sql.includes('manual_assessment:latest')) return { assessment_json: JSON.stringify(assessment) };
+          if (sql.includes('manual_verification:active_assessment')) {
+            return verification.status === 'active' ? { ...verification } : null;
+          }
           return null;
         },
         async all() {
@@ -73,6 +144,16 @@ function fakeConfirmationEnv() {
       return stmt;
     },
     async batch(statements: any[]) {
+      const quarantineStmt = statements.find((stmt: any) => stmt.sql.includes('manual_verification:quarantine */'));
+      if (quarantineStmt) {
+        verification.status = 'invalidated';
+        verification.reason = quarantineStmt.binds[0];
+        verification.invalidated_at = quarantineStmt.binds[1];
+        return statements.map((stmt: any) => ({
+          success: true,
+          meta: { changes: stmt.sql.includes('quarantine_item') ? 0 : 1 },
+        }));
+      }
       const batchStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_batch'));
       const confirmStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm */'));
       const prefreezeStmt = statements.find((stmt: any) => stmt.sql.includes('manual_lead:confirm_prefreeze'));
@@ -101,7 +182,18 @@ function fakeConfirmationEnv() {
       return statements.map(() => ({ success: true, meta: { changes: 1 } }));
     },
   };
-  return { env: { DB: db, DAILY_NEWS_REVIEW_SECRET: 'secret' } as never, row, prepared };
+  return {
+    env: {
+      DB: db,
+      DAILY_NEWS_REVIEW_SECRET: 'secret',
+      MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret,
+    } as never,
+    row,
+    evidence,
+    assessment,
+    verification,
+    prepared,
+  };
 }
 
 describe('manual lead candidate confirmation', () => {
@@ -111,7 +203,7 @@ describe('manual lead candidate confirmation', () => {
   });
 
   test('atomically supersedes V1 with a capped V2 while preserving current published Top selection', async () => {
-    const memory = fakeConfirmationEnv();
+    const memory = await fakeConfirmationEnv();
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 1, 'confirm-key-1', 100,
     );
@@ -130,7 +222,7 @@ describe('manual lead candidate confirmation', () => {
   });
 
   test('replays the same confirmation key without another mutation and rejects a second confirmation', async () => {
-    const memory = fakeConfirmationEnv();
+    const memory = await fakeConfirmationEnv();
     const first = await confirmManualNewsLeadCandidate(memory.env, memory.row.id, 7, 1, 'confirm-key-1', 100);
     expect(first.ok).toBe(true);
     const repeated = await confirmManualNewsLeadCandidate(memory.env, memory.row.id, 7, 1, 'confirm-key-1', 200);
@@ -139,9 +231,23 @@ describe('manual lead candidate confirmation', () => {
     expect(conflict).toMatchObject({ ok: false, status: 409, error: 'lead_already_confirmed', lead: { version: 8 } });
   });
 
+  test('idempotent confirmation replay reports that its historical batch is no longer current', async () => {
+    const memory = await fakeConfirmationEnv();
+    const first = await confirmManualNewsLeadCandidate(memory.env, memory.row.id, 7, 1, 'confirm-key-aba', 100);
+    expect(first).toMatchObject({ ok: true, batch: { current: true } });
+    insertedBatch.is_current = false;
+    insertedBatch.superseded_by = 'nr-20260811-currentcurrent';
+
+    const repeated = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-key-aba', 200,
+    );
+
+    expect(repeated).toMatchObject({ ok: true, changed: false, batch: { current: false } });
+  });
+
   test('persists a pre-freeze confirmed lead as a candidate item without selecting or rendering it', async () => {
     vi.mocked(getActiveNewsReviewBatch).mockResolvedValueOnce(null);
-    const memory = fakeConfirmationEnv();
+    const memory = await fakeConfirmationEnv();
 
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 0, 'confirm-prefreeze', 100,
@@ -166,7 +272,7 @@ describe('manual lead candidate confirmation', () => {
   });
 
   test('rejects a stale expected candidate revision before creating another batch', async () => {
-    const memory = fakeConfirmationEnv();
+    const memory = await fakeConfirmationEnv();
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 0, 'confirm-stale-batch', 100,
     );
@@ -176,12 +282,47 @@ describe('manual lead candidate confirmation', () => {
 
   test('rejects confirmation after the date-scoped review window expires', async () => {
     vi.mocked(newsReviewExpiresAt).mockReturnValueOnce(99);
-    const memory = fakeConfirmationEnv();
+    const memory = await fakeConfirmationEnv();
     const result = await confirmManualNewsLeadCandidate(
       memory.env, memory.row.id, 7, 1, 'confirm-after-expiry', 100,
     );
 
     expect(result).toMatchObject({ ok: false, status: 409, error: 'review_expired' });
+    expect(insertedBatch).toBeNull();
+  });
+
+  test.each([
+    ['no active verification', (verification: Record<string, any>) => { verification.status = 'invalidated'; }],
+    ['old policy', (verification: Record<string, any>) => { verification.policy_version = 'legacy-v0'; }],
+    ['wrong HMAC', (verification: Record<string, any>) => { verification.hmac_sha256 = '0'.repeat(64); }],
+    ['tampered verification JSON', (verification: Record<string, any>) => {
+      const parsed = JSON.parse(verification.verification_json);
+      parsed.fact_results[0].source_quotes[0].quote = 'Unrelated tampered quotation with enough words.';
+      verification.verification_json = JSON.stringify(parsed);
+    }],
+    ['wrong assessment version', (verification: Record<string, any>) => { verification.assessment_version = 6; }],
+  ])('rejects confirmation with %s before any candidate mutation', async (_label, mutate) => {
+    const memory = await fakeConfirmationEnv();
+    mutate(memory.verification);
+
+    const result = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, `confirm-${_label}`, 100,
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
+    expect(insertedBatch).toBeNull();
+    expect(memory.row.confirmed_at).toBeNull();
+  });
+
+  test('rejects confirmation when a quoted evidence field changed after verification', async () => {
+    const memory = await fakeConfirmationEnv();
+    memory.evidence.excerpt = 'Changed evidence after the fact verification completed.';
+
+    const result = await confirmManualNewsLeadCandidate(
+      memory.env, memory.row.id, 7, 1, 'confirm-quote-tamper', 100,
+    );
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'lead_not_fact_verified' });
     expect(insertedBatch).toBeNull();
   });
 });

@@ -20,16 +20,22 @@ export async function runManualNewsLeadWorkflow(
   step: Pick<WorkflowStep, 'do'>,
 ): Promise<void> {
   const owner = params.processing_owner || `manual-news-workflow:${params.lead_id}`;
+  let processingAttempt: number | null = null;
   try {
     await step.do('research-verify-score-lead', PROCESS_RETRY, async () => {
       const now = Date.now();
-      if (!await claimManualNewsLeadProcessing(env, params.lead_id, owner, now)) {
+      processingAttempt = await claimManualNewsLeadProcessing(env, params.lead_id, owner, now);
+      if (processingAttempt === null) {
         throw new Error('processing_lease_conflict');
       }
-      await processManualNewsLeadWithEnv(env, params.lead_id, owner);
+      await processManualNewsLeadWithEnv(env, params.lead_id, owner, processingAttempt);
     });
   } catch (error) {
-    await failManualNewsLeadAfterExhaustion(env, params.lead_id, owner, error, Date.now());
+    if (processingAttempt !== null) {
+      await failManualNewsLeadAfterExhaustion(
+        env, params.lead_id, owner, processingAttempt, error, Date.now(),
+      );
+    }
     throw error;
   }
 }

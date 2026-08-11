@@ -2,20 +2,24 @@ import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
   buildManualLeadAssessmentPrompt,
+  buildManualLeadFactVerificationPrompt,
   classifyManualLeadDuplicate,
+  manualLeadAssessmentValidationErrorCode,
+  manualLeadFactVerificationErrorCode,
+  missingManualLeadEvidenceAnchors,
   validateManualLeadAssessment,
+  validateManualLeadFactVerification,
+  validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
   type ManualNewsLeadAssessment,
   type ManualNewsLeadStatus,
+  type ManualLeadPriorEvent,
+  type ManualNewsProcessedAssessment,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 
-export type ProcessedManualLeadAssessment = ManualNewsLeadAssessment & {
-  evidence_tier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient';
-  duplicate_scope?: 'same_day' | 'cross_day' | null;
-  matched_lead_id?: string | null;
-};
+export type ProcessedManualLeadAssessment = ManualNewsProcessedAssessment;
 
 export interface ManualNewsLeadRecord {
   id: string;
@@ -51,16 +55,23 @@ export interface ManualSearchResult {
 
 export interface ManualLeadProcessingStore {
   getLead(id: string): Promise<ManualNewsLeadRecord | null>;
+  hasPersistedAssessment(id: string): Promise<boolean>;
   transition(
     id: string,
     from: ManualNewsLeadStatus,
     to: ManualNewsLeadStatus,
     patch?: Partial<Pick<ManualNewsLeadRecord, 'error_code' | 'error_message'>>,
   ): Promise<ManualNewsLeadRecord>;
-  replaceEvidence(id: string, evidence: readonly ManualNewsEvidence[]): Promise<void>;
-  listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
-  findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
-  saveAssessment(id: string, assessment: ProcessedManualLeadAssessment): Promise<void>;
+  replaceEvidence(id: string, expectedVersion: number, evidence: readonly ManualNewsEvidence[]): Promise<void>;
+  listRecentPriorEvents(date: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]>;
+  findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<ManualLeadPriorEvent[]>;
+  saveVerifiedAssessment(
+    id: string,
+    expectedVersion: number,
+    assessment: ProcessedManualLeadAssessment,
+    verification: unknown,
+  ): Promise<{ assessment_version: number }>;
+  invalidateAssessment(id: string, expectedVersion: number, reason: string): Promise<void>;
 }
 
 export interface ManualLeadProcessingAdapters {
@@ -68,6 +79,7 @@ export interface ManualLeadProcessingAdapters {
   fetch(url: string): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
   assess(prompt: { system: string; user: string }): Promise<unknown>;
+  verify(prompt: { system: string; user: string }): Promise<unknown>;
 }
 
 function conciseError(error: unknown): string {
@@ -79,6 +91,43 @@ export function isTransientManualLeadError(error: unknown): boolean {
   const message = conciseError(error).toLowerCase();
   return /(?:timeout|timed out|abort|429|(?:^|_)5\d\d(?:$|_)|gateway|network|fetch|d1|sqlite|database|model|no_text|empty_model|json_parse_fail|rate.?limit|temporar|unavailable)/
     .test(message);
+}
+
+function isDeterministicModelJsonError(error: unknown): boolean {
+  return /(?:^|_)json_parse_fail(?:$|_)/i.test(conciseError(error));
+}
+
+async function finalizeManualLeadAssessment(
+  leadId: string,
+  reviewDate: string,
+  assessment: ManualNewsLeadAssessment & { evidence_tier: ManualNewsProcessedAssessment['evidence_tier'] },
+  store: ManualLeadProcessingStore,
+): Promise<ProcessedManualLeadAssessment> {
+  const priorEvents = await store.findPriorEventsByEventKey(assessment.event_key, leadId);
+  const duplicate = classifyManualLeadDuplicate(assessment, priorEvents, reviewDate);
+  if (duplicate.duplicate) {
+    return {
+      ...assessment,
+      recommendation: 'duplicate',
+      duplicate_scope: duplicate.scope,
+      matched_lead_id: duplicate.matched_lead_id,
+      matched_event_key: duplicate.matched_lead_id ? assessment.event_key : assessment.matched_event_key,
+    };
+  }
+  const exactMatch = !!duplicate.matched_lead_id;
+  const advisoryDuplicate = assessment.recommendation === 'duplicate';
+  const unmatchedMaterialUpdate = assessment.material_update && !exactMatch;
+  return {
+    ...assessment,
+    material_update: unmatchedMaterialUpdate ? false : assessment.material_update,
+    recommendation: advisoryDuplicate || unmatchedMaterialUpdate ? 'needs_review' : assessment.recommendation,
+    uncertainties: unmatchedMaterialUpdate
+      ? [...assessment.uncertainties, '未找到可对应的既有事件，重要更新标记已转为人工复核。']
+      : assessment.uncertainties,
+    duplicate_scope: null,
+    matched_lead_id: duplicate.matched_lead_id,
+    matched_event_key: exactMatch ? assessment.event_key : null,
+  };
 }
 
 export async function processManualNewsLead(
@@ -136,7 +185,7 @@ export async function processManualNewsLead(
         }
       }
       if (!evidence.length && transientSourceError) throw transientSourceError;
-      await store.replaceEvidence(leadId, evidence);
+      await store.replaceEvidence(leadId, lead.version, evidence);
       if (!evidence.length) {
         await transition('needs_review', {
           error_code: 'evidence_insufficient',
@@ -151,78 +200,137 @@ export async function processManualNewsLead(
     if (status === 'verifying') {
       const evidence = lead.evidence;
       if (!evidence.length) {
+        await store.invalidateAssessment(leadId, lead.version, 'evidence_missing');
+        assessment = null;
         await transition('needs_review', {
           error_code: 'evidence_insufficient',
           error_message: '核验阶段缺少持久化证据，请重试并补充来源。',
         });
         return (await store.getLead(leadId))!;
       }
+      if (missingManualLeadEvidenceAnchors(normalized.text, evidence).length) {
+        await store.invalidateAssessment(leadId, lead.version, 'anchor_missing');
+        assessment = null;
+        await transition('needs_review', {
+          error_code: 'evidence_relevance_unverified',
+          error_message: 'high_confidence_anchor_missing',
+        });
+        return (await store.getLead(leadId))!;
+      }
+      if (!assessment && await store.hasPersistedAssessment(leadId)) {
+        await store.invalidateAssessment(leadId, lead.version, 'persisted_verification_invalid');
+      }
       const priorEvents = await store.listRecentPriorEvents(normalized.date, leadId);
-      const prompt = buildManualLeadAssessmentPrompt({
-        date: normalized.date,
-        text: normalized.text,
-        note: normalized.note,
-        evidence,
-        prior_events: priorEvents,
-      });
-      let raw: unknown;
-      try {
-        raw = await adapters.assess(prompt);
-      } catch (error) {
-        if (isTransientManualLeadError(error)) throw error;
-        await transition('failed', {
-          error_code: 'assessment_failed',
-          error_message: conciseError(error),
-        });
-        return (await store.getLead(leadId))!;
+      if (assessment) {
+        try {
+          assessment = validateManualNewsProcessedAssessment(assessment, evidence);
+        } catch {
+          await store.invalidateAssessment(leadId, lead.version, 'persisted_assessment_invalid');
+          assessment = null;
+        }
       }
-      try {
-        assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
-          raw, evidence, priorEvents.map((event) => event.event_key),
-        ), evidence);
-      } catch (error) {
-        await transition('failed', {
-          error_code: 'assessment_validation_failed',
-          error_message: conciseError(error),
+      if (!assessment) {
+        const prompt = buildManualLeadAssessmentPrompt({
+          date: normalized.date,
+          text: normalized.text,
+          note: normalized.note,
+          evidence,
+          prior_events: priorEvents,
         });
-        return (await store.getLead(leadId))!;
+        let raw: unknown;
+        try {
+          raw = await adapters.assess(prompt);
+        } catch (error) {
+          if (isDeterministicModelJsonError(error)) {
+            await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
+            await transition('needs_review', {
+              error_code: 'assessment_validation_failed',
+              error_message: 'invalid_assessment',
+            });
+            return (await store.getLead(leadId))!;
+          }
+          if (isTransientManualLeadError(error)) throw error;
+          await transition('failed', {
+            error_code: 'assessment_failed',
+            error_message: conciseError(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let validatedAssessment;
+        try {
+          validatedAssessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+            raw, evidence, priorEvents.map((event) => event.event_key),
+          ), evidence);
+        } catch (error) {
+          if (isTransientManualLeadError(error)) throw error;
+          await store.invalidateAssessment(leadId, lead.version, 'assessment_schema_invalid');
+          await transition('needs_review', {
+            error_code: 'assessment_validation_failed',
+            error_message: manualLeadAssessmentValidationErrorCode(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        const finalizedAssessment = await finalizeManualLeadAssessment(
+          leadId, normalized.date, validatedAssessment, store,
+        );
+        let verificationRaw: unknown;
+        try {
+          verificationRaw = await adapters.verify(buildManualLeadFactVerificationPrompt({
+            assessment: finalizedAssessment,
+            evidence,
+            prior_events: priorEvents,
+          }));
+        } catch (error) {
+          if (isDeterministicModelJsonError(error)) {
+            await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
+            await transition('needs_review', {
+              error_code: 'fact_verification_failed',
+              error_message: 'invalid_fact_verification',
+            });
+            return (await store.getLead(leadId))!;
+          }
+          if (isTransientManualLeadError(error)) throw error;
+          await store.invalidateAssessment(leadId, lead.version, 'fact_verification_model_failed');
+          await transition('failed', {
+            error_code: 'fact_verification_failed',
+            error_message: 'fact_verification_model_failed',
+          });
+          return (await store.getLead(leadId))!;
+        }
+        let verification;
+        try {
+          verification = validateManualLeadFactVerification(
+            verificationRaw, finalizedAssessment, evidence, { prior_events: priorEvents },
+          );
+        } catch (error) {
+          await store.invalidateAssessment(leadId, lead.version, 'fact_verification_schema_invalid');
+          await transition('needs_review', {
+            error_code: 'fact_verification_failed',
+            error_message: manualLeadFactVerificationErrorCode(error),
+          });
+          return (await store.getLead(leadId))!;
+        }
+        if (verification.overall_verdict !== 'supported') {
+          const issueCode = verification.fact_results.find((item) => !item.supported)?.issue_code || 'unsupported';
+          await store.invalidateAssessment(leadId, lead.version, `fact_${issueCode}`);
+          await transition('needs_review', {
+            error_code: 'fact_verification_failed',
+            error_message: issueCode,
+          });
+          return (await store.getLead(leadId))!;
+        }
+        assessment = finalizedAssessment;
+        await store.saveVerifiedAssessment(leadId, lead.version, assessment, verification);
       }
-      await store.saveAssessment(leadId, assessment);
       await transition('clustering');
     }
 
     if (!assessment) throw new Error(`assessment_missing:${status}`);
     if (status === 'clustering') {
-      const priorEvents = await store.findPriorEventsByEventKey(assessment.event_key, leadId);
-      const duplicate = classifyManualLeadDuplicate(assessment, priorEvents, normalized.date);
-      if (duplicate.duplicate) {
-        assessment = {
-          ...assessment,
-          recommendation: 'duplicate',
-          duplicate_scope: duplicate.scope,
-          matched_lead_id: duplicate.matched_lead_id,
-          matched_event_key: duplicate.matched_lead_id ? assessment.event_key : assessment.matched_event_key,
-        };
-        await store.saveAssessment(leadId, assessment);
+      if (assessment.recommendation === 'duplicate' && assessment.duplicate_scope !== null) {
         await transition('duplicate');
         return (await store.getLead(leadId))!;
       }
-
-      const exactMatch = !!duplicate.matched_lead_id;
-      const advisoryDuplicate = assessment.recommendation === 'duplicate';
-      const unmatchedMaterialUpdate = assessment.material_update && !exactMatch;
-      assessment = {
-        ...assessment,
-        material_update: unmatchedMaterialUpdate ? false : assessment.material_update,
-        recommendation: advisoryDuplicate || unmatchedMaterialUpdate ? 'needs_review' : assessment.recommendation,
-        uncertainties: unmatchedMaterialUpdate
-          ? [...assessment.uncertainties, '未找到可对应的既有事件，重要更新标记已转为人工复核。']
-          : assessment.uncertainties,
-        duplicate_scope: null,
-        matched_lead_id: duplicate.matched_lead_id,
-        matched_event_key: exactMatch ? assessment.event_key : null,
-      };
-      await store.saveAssessment(leadId, assessment);
       await transition('scored');
     }
     if (status !== 'scored') throw new Error(`lead_not_scoreable:${status}`);

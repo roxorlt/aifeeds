@@ -8,6 +8,7 @@ vi.mock('./news-review', () => ({
   getNewsReviewBatch: vi.fn(),
   markNewsReviewPublished: vi.fn(),
   newsReviewSecret: vi.fn((env) => env.DAILY_NEWS_REVIEW_SECRET || ''),
+  sanitizeCurrentNewsReviewBatch: vi.fn(),
   submitNewsReviewSelection: vi.fn(),
   verifyNewsReviewTokenSignature: vi.fn(async () => true),
 }));
@@ -24,6 +25,7 @@ import {
   getPublishedNewsReviewSelection,
   getNewsReviewBatch,
   markNewsReviewPublished,
+  sanitizeCurrentNewsReviewBatch,
   submitNewsReviewSelection,
 } from './news-review';
 import { getDailyStageState, pushDailyStageToCodex } from './codex-push';
@@ -79,6 +81,9 @@ describe('daily news review API', () => {
     vi.mocked(getActiveNewsReviewBatch).mockResolvedValue(batch as never);
     vi.mocked(getAppliedNewsReviewSelection).mockResolvedValue(null);
     vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(batch.default_selected_ids as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch, changed: false, dropped_ids: [],
+    } as never);
     vi.mocked(pushDailyStageToCodex).mockResolvedValue({ ok: true } as never);
     vi.mocked(generateDailyPage).mockResolvedValue({} as never);
   });
@@ -97,6 +102,9 @@ describe('daily news review API', () => {
       publish_status: 'published',
     };
     vi.mocked(getNewsReviewBatch).mockResolvedValue(reviewedBatch as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: reviewedBatch, changed: false, dropped_ids: [],
+    } as never);
     vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(reviewedBatch.applied_selected_ids);
     vi.mocked(getDailyStageState).mockResolvedValue({
       stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, pushed_at: 123,
@@ -113,6 +121,81 @@ describe('daily news review API', () => {
       editorial_revision: 7,
       editorial_content_hash: `sha256:${'a'.repeat(64)}`,
     });
+  });
+
+  test('GET returns a newly sanitized immutable revision without exposing an invalid manual snapshot', async () => {
+    const manual = {
+      item_id: 'blog:manual:ml-invalid', title: '失效线索', summary: '失效摘要',
+      source: '手工', score: 90, origin: 'manual_lead', lead_id: 'ml-invalid',
+    };
+    const requested = {
+      ...batch,
+      candidates: [...batch.candidates.slice(0, 9), manual],
+      candidate_ids: [...batch.candidate_ids.slice(0, 9), manual.item_id],
+      batch_revision: 2,
+      lineage_id: '2026-07-30',
+      is_current: true,
+    };
+    const refreshed = {
+      ...requested,
+      batch_id: 'nr-20260730-fedcba654321',
+      candidates: requested.candidates.filter((candidate) => candidate.item_id !== manual.item_id),
+      candidate_ids: requested.candidate_ids.filter((id) => id !== manual.item_id),
+      batch_revision: 3,
+      supersedes_batch_id: requested.batch_id,
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(requested as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: refreshed, changed: true, dropped_ids: [manual.item_id],
+    } as never);
+    vi.mocked(getPublishedNewsReviewSelection).mockResolvedValue(refreshed.default_selected_ids as never);
+
+    const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect(response.status).toBe(200);
+    expect(payload.batch_id).toBe(refreshed.batch_id);
+    expect(payload.candidate_revision).toBe(3);
+    expect(payload.candidates).not.toEqual(expect.arrayContaining([expect.objectContaining({ lead_id: 'ml-invalid' })]));
+  });
+
+  test('GET never exposes a manual snapshot from a superseded revision', async () => {
+    const manual = {
+      item_id: 'blog:manual:ml-stale-history', title: '历史线索', summary: '历史摘要',
+      source: '手工', score: 90, origin: 'manual_lead', lead_id: 'ml-stale-history',
+    };
+    const requested = {
+      ...batch,
+      candidates: [...batch.candidates.slice(0, 9), manual],
+      candidate_ids: [...batch.candidate_ids.slice(0, 9), manual.item_id],
+      superseded_by: 'nr-20260730-fedcba654321',
+      batch_revision: 2,
+      lineage_id: '2026-07-30',
+      is_current: false,
+    };
+    const refreshed = {
+      ...batch,
+      batch_id: 'nr-20260730-fedcba654321',
+      batch_revision: 3,
+      lineage_id: '2026-07-30',
+      is_current: true,
+    };
+    vi.mocked(getNewsReviewBatch).mockResolvedValue(requested as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: refreshed, changed: false, dropped_ids: [],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(request('GET'), env(), Date.parse('2026-07-30T08:00:00Z'));
+    const payload = await response.json<Record<string, unknown>>();
+
+    expect(response.status).toBe(200);
+    expect(payload.batch_id).toBe(requested.batch_id);
+    expect(payload.superseded).toBe(true);
+    expect(payload.read_only).toBe(true);
+    expect(payload.newer_batch).toEqual(expect.objectContaining({ batch_id: refreshed.batch_id }));
+    expect(payload.candidates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ lead_id: 'ml-stale-history' }),
+    ]));
   });
 
   test('authenticated HK may resolve the active review link without a PushDeer capability', async () => {
@@ -169,6 +252,77 @@ describe('daily news review API', () => {
         codex_id: 'daily-20260730',
       },
     });
+  });
+
+  test('manual API publish fails closed when a proof expires after editorial push but before finalize', async () => {
+    const changedBatch = {
+      ...batch,
+      applied_selected_ids: ['news-6', 'news-2'],
+      selection_hash: 'selection-hash-stale-finalize',
+      edit_revision: 1,
+      publish_status: 'pending',
+    };
+    vi.mocked(submitNewsReviewSelection).mockResolvedValue({
+      ok: true, changed: true, retry_publish: true, batch: changedBatch,
+      selected_ids: changedBatch.applied_selected_ids,
+    } as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: changedBatch, changed: false, dropped_ids: [],
+    } as never);
+    vi.mocked(getDailyStageState).mockResolvedValue({ stage: 'papers', revision: 3, pushed_at: 123 } as never);
+    vi.mocked(pushDailyStageToCodex)
+      .mockResolvedValueOnce({ ok: true, stage: 'editorial', revision: 7, content_hash: `sha256:${'a'.repeat(64)}` } as never)
+      .mockResolvedValueOnce({ ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale' } as never);
+
+    const response = await handleDailyNewsReviewApi(request('POST', {
+      selected_ids: changedBatch.applied_selected_ids,
+    }), env(), Date.parse('2026-07-30T08:00:00Z'));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false, stage: 'finalize', error: 'manual_news_finalize_snapshot_stale',
+    });
+    expect(markNewsReviewPublished).toHaveBeenCalledWith(
+      expect.anything(), '2026-07-30', batch.batch_id, 'selection-hash-stale-finalize',
+      'manual_news_finalize_snapshot_stale',
+    );
+    expect(generateDailyPage).not.toHaveBeenCalled();
+  });
+
+  test('revalidates the selected batch immediately before downstream generation', async () => {
+    const manualId = 'blog:manual:ml-finalize-stale';
+    const changedBatch = {
+      ...batch,
+      candidate_ids: [...batch.candidate_ids.slice(0, 9), manualId],
+      candidates: [...batch.candidates.slice(0, 9), {
+        item_id: manualId, title: 'manual', summary: 'manual', source: 'manual', score: 80,
+        origin: 'manual_lead', lead_id: 'ml-finalize-stale',
+      }],
+      applied_selected_ids: [manualId, 'news-1'],
+      selection_hash: 'selection-hash', edit_revision: 1, publish_status: 'pending',
+    };
+    const refreshed = {
+      ...changedBatch,
+      batch_id: 'nr-20260730-111111111111',
+      candidate_ids: changedBatch.candidate_ids.filter((id) => id !== manualId),
+      candidates: changedBatch.candidates.filter((candidate) => candidate.item_id !== manualId),
+      applied_selected_ids: ['news-1'],
+    };
+    vi.mocked(submitNewsReviewSelection).mockResolvedValue({
+      ok: true, changed: true, retry_publish: true, batch: changedBatch,
+      selected_ids: changedBatch.applied_selected_ids,
+    } as never);
+    vi.mocked(sanitizeCurrentNewsReviewBatch).mockResolvedValue({
+      batch: refreshed, changed: true, dropped_ids: [manualId],
+    } as never);
+
+    const response = await handleDailyNewsReviewApi(request('POST', {
+      selected_ids: changedBatch.applied_selected_ids,
+    }), env(), Date.parse('2026-07-30T08:00:00Z'));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, error: 'stale_candidate' });
+    expect(pushDailyStageToCodex).not.toHaveBeenCalled();
   });
 
   test('same default selection is a no-op and never regenerates downstream assets', async () => {

@@ -45,6 +45,7 @@ function env(overrides: Record<string, unknown> = {}) {
     MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
     MANUAL_NEWS_RESEARCH_TOKEN: 'test-research-token',
     DEEPSEEK_API_KEY: 'test-deepseek-key',
+    MANUAL_NEWS_VERIFICATION_SECRET: 'a'.repeat(64),
     ...overrides,
   } as never;
 }
@@ -194,6 +195,9 @@ describe('manual daily news leads API', () => {
       { MANUAL_NEWS_RESEARCH_ORIGIN: undefined },
       { MANUAL_NEWS_RESEARCH_TOKEN: undefined },
       { DEEPSEEK_API_KEY: undefined },
+      { MANUAL_NEWS_VERIFICATION_SECRET: undefined },
+      { MANUAL_NEWS_VERIFICATION_SECRET: 'too-short' },
+      { MANUAL_NEWS_VERIFICATION_SECRET: 'A'.repeat(64) },
     ]) {
       const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
         method: 'POST', headers: { 'Idempotency-Key': 'submit-missing-dependency' },
@@ -202,6 +206,33 @@ describe('manual daily news leads API', () => {
       expect(response.status).toBe(503);
     }
     expect(submitManualNewsLead).not.toHaveBeenCalled();
+  });
+
+  test('keeps GET readable while hiding assessment handling behind a missing verification secret', async () => {
+    const response = await handleManualNewsLeadsApi(
+      request('/api/digest/daily-news-leads?date=2026-08-11'),
+      env({ MANUAL_NEWS_VERIFICATION_SECRET: undefined }),
+      { waitUntil() {} } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(listManualNewsLeads).toHaveBeenCalled();
+    expect(recoverStaleManualNewsLeads).not.toHaveBeenCalled();
+  });
+
+  test('fails closed before retry when the verification secret is absent or malformed', async () => {
+    for (const verificationSecret of [undefined, 'too-short', 'A'.repeat(64)]) {
+      const response = await handleManualNewsLeadsApi(
+        request(`/api/digest/daily-news-leads/${record.id}/retry`, {
+          method: 'POST', headers: { 'Idempotency-Key': 'retry-invalid-verification-secret' },
+          body: JSON.stringify({ expected_version: 1 }),
+        }),
+        env({ MANUAL_NEWS_VERIFICATION_SECRET: verificationSecret }),
+        { waitUntil() {} } as never,
+      );
+      expect(response.status).toBe(503);
+    }
+    expect(retryManualNewsLead).not.toHaveBeenCalled();
   });
 
   test('retry requires expected_version and an idempotency key, then schedules a new processing pass', async () => {

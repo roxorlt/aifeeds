@@ -398,6 +398,9 @@ export interface Env {
   // HTML/JSON/PDF 文本提取及开放网络检索。Worker 绝不直接 fetch 用户提供的域名。
   MANUAL_NEWS_RESEARCH_ORIGIN?: string;
   MANUAL_NEWS_RESEARCH_TOKEN?: string;
+  // HMAC-SHA256 secret for independently persisted manual-news assessment
+  // verification records. Must be exactly 64 lowercase hex characters and unique per environment.
+  MANUAL_NEWS_VERIFICATION_SECRET?: string;
   // RSSHub 基址 + token（feeds/parse.ts 的 via='rsshub' 分支用）。Phase 1 的 24 个
   // feed 全 via='native'，此项暂未启用；留作未来需要 RSSHub 中转的源（如某些无原生
   // RSS 的国内厂商）。香港 host-rewrite 铁律：基址只走 env.RSSHUB_BASE，不靠 request host。

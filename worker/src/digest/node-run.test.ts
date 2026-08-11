@@ -154,6 +154,24 @@ describe('staged 08:00 node run', () => {
     expect(pushDailyToCodex).not.toHaveBeenCalled();
   });
 
+  test('08:00 scheduled finalize surfaces a stale locked manual editorial snapshot and retries fail closed', async () => {
+    vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => ({
+      stage, revision: 1, content_hash: `sha256:${stage}`, pushed_at: 123,
+    } as never));
+    vi.mocked(pushDailyStageToCodex).mockImplementation(async (_env, stage) => (
+      stage === 'finalize'
+        ? { ok: false, stage, error: 'manual_news_finalize_snapshot_stale' }
+        : { ok: true, stage }
+    ) as never);
+
+    await expect(runDigestNodeWorkflow(
+      makeEnv(),
+      { slotHourBjt: 8, date: '2026-07-21', dailyStage: 'papers' },
+      makeStep() as never,
+    )).rejects.toThrow('daily_stage_push_failed:finalize:manual_news_finalize_snapshot_stale');
+    expect(vi.mocked(pushDailyStageToCodex).mock.calls.map((call) => call[1])).toEqual(['papers', 'finalize']);
+  });
+
   test('actively rebuilds and pushes a missing prior batch before papers/finalize', async () => {
     vi.mocked(getDailyStageState).mockImplementation(async (_env, _date, stage) => (
       stage === 'foundation'

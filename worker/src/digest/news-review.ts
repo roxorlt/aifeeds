@@ -1,6 +1,12 @@
 import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
 import { mergeManualLeadCandidate } from './manual-news-leads';
+import {
+  loadVerifiedManualAssessment,
+  MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL,
+  manualVerificationSnapshotGuardBindings,
+  type PersistedManualVerificationRow,
+} from './manual-news-leads-verification';
 
 export interface NewsReviewCandidate {
   item_id: string;
@@ -44,6 +50,22 @@ export interface NewsReviewBatch {
   candidate_generation: number;
   created_at: number;
   expires_at: number;
+}
+
+export interface VerifiedNewsReviewManualProofRef {
+  item_id: string;
+  lead_id: string;
+  verification_id: string;
+  creation_nonce: string;
+  canonical_digest: string;
+}
+
+export interface VerifiedNewsReviewSelectionSnapshot {
+  batch_id: string;
+  batch_revision: number;
+  selection_hash: string;
+  selected_ids: string[];
+  manual_verifications: VerifiedNewsReviewManualProofRef[];
 }
 
 interface NewsReviewBatchRow {
@@ -161,9 +183,10 @@ export function newsReviewExpiresAt(date: string): number {
 export async function buildNewsReviewBatchId(
   date: string,
   candidates: readonly NewsReviewCandidate[],
+  lineage?: { batch_revision: number; supersedes_batch_id: string | null; lineage_id: string },
 ): Promise<string> {
   assertReviewDate(date);
-  const hash = await sha256Hex(stableJson({ date, candidates }));
+  const hash = await sha256Hex(stableJson({ date, candidates, ...(lineage ? { lineage } : {}) }));
   return `nr-${date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
 }
 
@@ -274,7 +297,7 @@ async function readNewsReviewCandidateGeneration(env: Env, date: string, now: nu
   return generation;
 }
 
-export async function getAppliedNewsReviewSelection(env: Env, date: string): Promise<string[] | null> {
+async function readAppliedNewsReviewSelection(env: Env, date: string): Promise<string[] | null> {
   try {
     const row = await env.DB.prepare(
       `SELECT applied_selected_ids FROM daily_news_review_batches
@@ -283,7 +306,7 @@ export async function getAppliedNewsReviewSelection(env: Env, date: string): Pro
        ORDER BY created_at DESC, edit_revision DESC LIMIT 1`,
     ).bind(date, date).first<{ applied_selected_ids: string }>();
     const ids = row ? parseStringArray(row.applied_selected_ids) : [];
-    return ids.length >= 1 && ids.length <= 5 ? ids : null;
+    return row && ids.length <= 5 ? ids : null;
   } catch (error) {
     // 部署迁移与 Worker 代码存在短暂先后窗口；缺表时回退默认 digest_pool，
     // 不能让邮件、日报页或默认视频因此中断。
@@ -292,13 +315,26 @@ export async function getAppliedNewsReviewSelection(env: Env, date: string): Pro
   }
 }
 
+export async function getAppliedNewsReviewSelection(env: Env, date: string): Promise<string[] | null> {
+  try {
+    const active = await getActiveNewsReviewBatch(env, date);
+    if (active?.candidates.some(isManualCandidateSnapshot)) {
+      await sanitizeCurrentNewsReviewBatch(env, date);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isRolloutSchemaGap = /(?:no such table|no such column):?\s*[\w.]+/i.test(message);
+    if (message !== 'news_review_batch_not_found' && !isRolloutSchemaGap) throw error;
+  }
+  return readAppliedNewsReviewSelection(env, date);
+}
+
 export async function getPublishedNewsReviewSelection(
   env: Env,
   date: string,
   currentBatch: NewsReviewBatch,
 ): Promise<string[]> {
-  const applied = await getAppliedNewsReviewSelection(env, date);
-  if (applied) return applied;
+  if (Array.isArray(currentBatch.applied_selected_ids)) return currentBatch.applied_selected_ids;
   try {
     const previous = await env.DB.prepare(
       `SELECT default_selected_ids FROM daily_news_review_batches
@@ -372,7 +408,23 @@ async function freezeNewsReviewBatchAtGeneration(
   const candidateIds = effectiveCandidates.map((candidate) => candidate.item_id);
   const validatedDefault = validateNewsReviewSelection(preserved.default_selected_ids, candidateIds);
   if (!validatedDefault.ok) throw new Error(`invalid_default_selection:${validatedDefault.error}`);
-  const batchId = await buildNewsReviewBatchId(date, effectiveCandidates);
+  if (previous
+    && stableJson(previous.candidates) === stableJson(effectiveCandidates)
+    && stableJson(previous.default_selected_ids) === stableJson(validatedDefault.selected_ids)) {
+    return {
+      batch: previous,
+      created: false,
+      superseded_batch_id: null,
+      auto_repaired: !!previous.auto_repaired_from_batch,
+      auto_repaired_invalid_ids: previous.auto_repaired_invalid_ids,
+    };
+  }
+  const batchRevision = (previous?.batch_revision || 0) + 1;
+  const batchId = await buildNewsReviewBatchId(date, effectiveCandidates, {
+    batch_revision: batchRevision,
+    supersedes_batch_id: previous?.batch_id || null,
+    lineage_id: date,
+  });
   const existing = await getNewsReviewBatch(env, date, batchId);
   if (existing) {
     const current = existing.is_current ? existing : await getActiveNewsReviewBatch(env, date);
@@ -384,7 +436,6 @@ async function freezeNewsReviewBatchAtGeneration(
       auto_repaired_invalid_ids: current.auto_repaired_invalid_ids,
     };
   }
-  const batchRevision = (previous?.batch_revision || 0) + 1;
   const previousPublishedIds = previous
     ? await getPublishedNewsReviewSelection(env, date, previous)
     : [];
@@ -452,12 +503,19 @@ async function freezeNewsReviewBatchAtGeneration(
     }
     throw new Error('news_review_batch_cas_failed');
   }
+  const verifiedActive = active.candidates.some(isManualCandidateSnapshot)
+    ? (await sanitizeCurrentNewsReviewBatch(env, date, now)).batch
+    : active;
   return {
-    batch: active,
-    created: active.batch_id === batchId && !existing,
-    superseded_batch_id: active.batch_id === batchId ? previous?.batch_id || null : null,
-    auto_repaired: active.batch_id === batchId && repair.required,
-    auto_repaired_invalid_ids: active.batch_id === batchId ? repair.invalid_ids : active.auto_repaired_invalid_ids,
+    batch: verifiedActive,
+    created: verifiedActive.batch_id === batchId ? !existing : verifiedActive.supersedes_batch_id === batchId,
+    superseded_batch_id: verifiedActive.batch_id === batchId
+      ? previous?.batch_id || null
+      : verifiedActive.supersedes_batch_id,
+    auto_repaired: verifiedActive.batch_id === batchId && repair.required,
+    auto_repaired_invalid_ids: verifiedActive.batch_id === batchId
+      ? repair.invalid_ids
+      : verifiedActive.auto_repaired_invalid_ids,
   };
 }
 
@@ -481,6 +539,16 @@ export async function submitNewsReviewSelection(
   if (batch.superseded_by || !batch.is_current || batch.lineage_id !== input.date) {
     return { ok: false, status: 409, error: 'review_batch_superseded', batch };
   }
+  const sanitized = await sanitizeCurrentNewsReviewBatch(env, input.date, now);
+  if (sanitized.batch.batch_id !== batch.batch_id) {
+    const requested = Array.isArray(input.selected_ids)
+      ? input.selected_ids.filter((id): id is string => typeof id === 'string')
+      : [];
+    if (requested.some((id) => sanitized.dropped_ids.includes(id))) {
+      return { ok: false, status: 409, error: 'stale_candidate', batch: sanitized.batch };
+    }
+    return { ok: false, status: 409, error: 'review_batch_superseded', batch: sanitized.batch };
+  }
   const validation = validateNewsReviewSelection(input.selected_ids, batch.candidate_ids);
   if (!validation.ok) return { ok: false, status: 400, error: validation.error, batch };
   const selectedIds = validation.selected_ids;
@@ -497,13 +565,32 @@ export async function submitNewsReviewSelection(
       selected_ids: selectedIds,
     };
   }
-  await env.DB.prepare(
+  const verificationGuard = sanitized.manual_verifications.length
+    ? sanitized.manual_verifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+    : '1 = 1';
+  const verificationBindings = sanitized.manual_verifications.flatMap((snapshot) =>
+    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  const writeStatement = env.DB.prepare(
     `UPDATE daily_news_review_batches SET
        applied_selected_ids = ?, selection_hash = ?, edit_revision = edit_revision + 1,
        publish_status = 'pending', publish_error = NULL, published_at = NULL
      WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
-       AND is_current = 1 AND superseded_by IS NULL`,
-  ).bind(JSON.stringify(selectedIds), hash, input.date, input.date, input.batch_id).run();
+       AND is_current = 1 AND superseded_by IS NULL AND ${verificationGuard}`,
+  ).bind(
+    JSON.stringify(selectedIds), hash, input.date, input.date, input.batch_id,
+    ...verificationBindings,
+  );
+  const [write] = await env.DB.batch([writeStatement]) as Array<{ meta?: { changes?: number } }>;
+  if (Number(write.meta?.changes || 0) !== 1) {
+    const refreshed = await sanitizeCurrentNewsReviewBatch(env, input.date, now);
+    const stale = selectedIds.some((id) => refreshed.dropped_ids.includes(id));
+    return {
+      ok: false,
+      status: 409,
+      error: stale ? 'stale_candidate' : 'review_selection_write_conflict',
+      batch: refreshed.batch,
+    };
+  }
   const updated = await getNewsReviewBatch(env, input.date, input.batch_id);
   if (!updated?.applied_selected_ids || updated.selection_hash !== hash) {
     return { ok: false, status: 409, error: 'review_selection_write_conflict', batch: updated || batch };
@@ -541,11 +628,19 @@ interface NewsReviewPoolMetaCandidate {
 
 interface NewsReviewItemRow {
   id: string;
+  source_ref: string | null;
   title: string | null;
   content: string | null;
   content_translated: string | null;
   url: string | null;
   extra: string | null;
+}
+
+function isManualCandidateSnapshot(candidate: Pick<NewsReviewCandidate, 'item_id' | 'origin' | 'lead_id'>): boolean {
+  return candidate.origin === 'manual_lead'
+    || !!candidate.lead_id
+    || candidate.item_id.startsWith('blog:manual:')
+    || candidate.item_id.startsWith('manual-news:');
 }
 
 function parseObject(value: string | null): Record<string, unknown> {
@@ -568,47 +663,289 @@ function compactReviewText(value: unknown, maxLength: number): string {
 interface ConfirmedManualCandidateRow {
   id: string;
   input_url: string;
-  assessment_json: string;
-  publisher: string | null;
-  evidence_url: string | null;
+}
+
+interface VerifiedManualCandidateSnapshot {
+  candidate: NewsReviewCandidate;
+  lead_id: string;
+  verification: PersistedManualVerificationRow;
+}
+
+async function verifiedManualCandidateSnapshot(
+  env: Env,
+  row: ConfirmedManualCandidateRow,
+): Promise<VerifiedManualCandidateSnapshot | null> {
+  const verified = await loadVerifiedManualAssessment(env, row.id);
+  if (!verified) return null;
+  const primaryEvidence = verified.evidence.find((item) => item.reliable) || verified.evidence[0];
+  const { assessment } = verified;
+  return {
+    lead_id: row.id,
+    verification: verified.record,
+    candidate: {
+      item_id: `blog:manual:${row.id}`,
+      title: compactReviewText(assessment.title, 80),
+      summary: compactReviewText(assessment.summary, 180),
+      source: compactReviewText(primaryEvidence?.publisher || '手工补录', 40),
+      score: assessment.score,
+      ...(primaryEvidence?.url || row.input_url ? { url: primaryEvidence?.url || row.input_url } : {}),
+      event_key: assessment.event_key,
+      origin: 'manual_lead',
+      lead_id: row.id,
+    },
+  };
+}
+
+async function verifiedManualCandidate(
+  env: Env,
+  row: ConfirmedManualCandidateRow,
+): Promise<NewsReviewCandidate | null> {
+  return (await verifiedManualCandidateSnapshot(env, row))?.candidate || null;
+}
+
+async function confirmedManualCandidateById(
+  env: Env,
+  leadId: string,
+): Promise<VerifiedManualCandidateSnapshot | null> {
+  const row = await env.DB.prepare(
+    `/* news_review:confirmed_manual_candidate_by_id */ SELECT id, input_url
+     FROM manual_news_leads
+     WHERE id = ? AND confirmed_at IS NOT NULL AND status IN ('recommended', 'needs_review')`,
+  ).bind(leadId).first<ConfirmedManualCandidateRow>();
+  return row ? verifiedManualCandidateSnapshot(env, row) : null;
+}
+
+function manualCandidateLeadId(candidate: NewsReviewCandidate): string | null {
+  if (candidate.lead_id) return candidate.lead_id;
+  if (candidate.item_id.startsWith('blog:manual:')) return candidate.item_id.slice('blog:manual:'.length);
+  if (candidate.item_id.startsWith('manual-news:')) return candidate.item_id.slice('manual-news:'.length);
+  return null;
+}
+
+export async function sanitizeCurrentNewsReviewBatch(
+  env: Env,
+  date: string,
+  now = Date.now(),
+): Promise<{
+  batch: NewsReviewBatch;
+  changed: boolean;
+  dropped_ids: string[];
+  manual_verifications: Array<{ lead_id: string; verification: PersistedManualVerificationRow }>;
+}> {
+  return sanitizeCurrentNewsReviewBatchAttempt(env, date, now, 0);
+}
+
+export async function getVerifiedNewsReviewSelectionSnapshot(
+  env: Env,
+  date: string,
+  now = Date.now(),
+): Promise<VerifiedNewsReviewSelectionSnapshot | null> {
+  let sanitized: Awaited<ReturnType<typeof sanitizeCurrentNewsReviewBatch>>;
+  try {
+    sanitized = await sanitizeCurrentNewsReviewBatch(env, date, now);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'news_review_batch_not_found'
+      || /(?:no such table|no such column):?\s*[\w.]+/i.test(message)) return null;
+    throw error;
+  }
+  const selectedIds = await getPublishedNewsReviewSelection(env, date, sanitized.batch);
+  const candidateIds = new Set(sanitized.batch.candidate_ids);
+  if (!selectedIds.length || selectedIds.some((id) => !candidateIds.has(id))) {
+    throw new Error('news_review_verified_selection_invalid');
+  }
+  const verificationByLead = new Map(sanitized.manual_verifications.map((entry) => [entry.lead_id, entry.verification]));
+  const manualVerifications: VerifiedNewsReviewManualProofRef[] = [];
+  const selectedManualSnapshots: Array<{ lead_id: string; verification: PersistedManualVerificationRow }> = [];
+  for (const itemId of selectedIds) {
+    if (!itemId.startsWith('blog:manual:')) continue;
+    const leadId = itemId.slice('blog:manual:'.length);
+    const verification = verificationByLead.get(leadId);
+    if (!verification) throw new Error('news_review_manual_verification_missing');
+    selectedManualSnapshots.push({ lead_id: leadId, verification });
+    manualVerifications.push({
+      item_id: itemId,
+      lead_id: leadId,
+      verification_id: verification.verification_id,
+      creation_nonce: verification.creation_nonce,
+      canonical_digest: verification.canonical_digest,
+    });
+  }
+
+  // One immediate DB read binds item visibility and every active proof to the
+  // same current snapshot. A later item/proof mutation is checked again by the
+  // consumer immediately before finalization/network I/O.
+  const itemPlaceholders = selectedIds.map(() => '?').join(',');
+  const verificationGuard = selectedManualSnapshots.length
+    ? selectedManualSnapshots.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+    : '1 = 1';
+  const row = await env.DB.prepare(
+    `/* news_review:verified_selection_guard */ SELECT COUNT(DISTINCT id) AS count
+     FROM items WHERE id IN (${itemPlaceholders}) AND deleted_at IS NULL
+       AND EXISTS (SELECT 1 FROM daily_news_review_batches current
+         WHERE current.review_date = ? AND current.lineage_id = ?
+           AND current.batch_id = ? AND current.batch_revision = ? AND current.is_current = 1
+           AND current.edit_revision = ? AND COALESCE(current.selection_hash, '') = ?
+           AND COALESCE(current.applied_selected_ids, '') = ?)
+       AND ${verificationGuard}`,
+  ).bind(
+    ...selectedIds,
+    date, date, sanitized.batch.batch_id, sanitized.batch.batch_revision,
+    sanitized.batch.edit_revision, sanitized.batch.selection_hash || '',
+    sanitized.batch.applied_selected_ids === null ? '' : JSON.stringify(sanitized.batch.applied_selected_ids),
+    ...selectedManualSnapshots.flatMap((entry) =>
+      manualVerificationSnapshotGuardBindings(entry.lead_id, entry.verification)),
+  ).first<{ count: number }>();
+  if (Number(row?.count || 0) !== new Set(selectedIds).size) {
+    throw new Error('news_review_verified_selection_stale');
+  }
+  return {
+    batch_id: sanitized.batch.batch_id,
+    batch_revision: sanitized.batch.batch_revision,
+    selection_hash: await newsReviewSelectionHash(selectedIds),
+    selected_ids: [...selectedIds],
+    manual_verifications: manualVerifications,
+  };
+}
+
+async function sanitizeCurrentNewsReviewBatchAttempt(
+  env: Env,
+  date: string,
+  now: number,
+  attempt: number,
+  initialBatchId?: string,
+  accumulatedDroppedIds: string[] = [],
+): ReturnType<typeof sanitizeCurrentNewsReviewBatch> {
+  const current = await getActiveNewsReviewBatch(env, date);
+  if (!current) throw new Error('news_review_batch_not_found');
+  const initialId = initialBatchId || current.batch_id;
+  const candidates: NewsReviewCandidate[] = [];
+  const droppedIds = [...accumulatedDroppedIds];
+  const manualVerifications: Array<{ lead_id: string; verification: PersistedManualVerificationRow }> = [];
+  for (const candidate of current.candidates) {
+    if (!isManualCandidateSnapshot(candidate)) {
+      candidates.push(candidate);
+      continue;
+    }
+    const leadId = manualCandidateLeadId(candidate);
+    const snapshot = leadId
+      ? await confirmedManualCandidateById(env, leadId)
+      : null;
+    if (!snapshot) {
+      droppedIds.push(candidate.item_id);
+      continue;
+    }
+    const refreshed = snapshot.candidate;
+    if (refreshed.item_id !== candidate.item_id) droppedIds.push(candidate.item_id);
+    candidates.push(refreshed);
+    manualVerifications.push({ lead_id: snapshot.lead_id, verification: snapshot.verification });
+  }
+  const candidateIds = candidates.map((candidate) => candidate.item_id);
+  const available = new Set(candidateIds);
+  const defaultSelected = current.default_selected_ids.filter((id) => available.has(id));
+  const publishedBefore = await getPublishedNewsReviewSelection(env, date, current);
+  const publishedAfter = publishedBefore.filter((id) => available.has(id));
+  const publishedChanged = stableJson(publishedAfter) !== stableJson(publishedBefore)
+    || publishedAfter.some((id) => {
+      const before = current.candidates.find((candidate) => candidate.item_id === id);
+      const after = candidates.find((candidate) => candidate.item_id === id);
+      return stableJson(before) !== stableJson(after);
+    });
+  const appliedSelected = current.applied_selected_ids !== null || publishedChanged
+    ? publishedAfter
+    : null;
+  const drifted = stableJson(candidates) !== stableJson(current.candidates)
+    || stableJson(defaultSelected) !== stableJson(current.default_selected_ids)
+    || stableJson(appliedSelected) !== stableJson(current.applied_selected_ids);
+  if (!drifted) return {
+    batch: current,
+    changed: current.batch_id !== initialId,
+    dropped_ids: [...new Set(droppedIds)],
+    manual_verifications: manualVerifications,
+  };
+
+  const batchRevision = current.batch_revision + 1;
+  const hash = await sha256Hex(stableJson({
+    date, candidates, sanitized_from: current.batch_id, batch_revision: batchRevision,
+  }));
+  const batchId = `nr-${date.replace(/-/g, '')}-${hash.slice(0, 12)}`;
+  const selectionHash = appliedSelected ? await newsReviewSelectionHash(appliedSelected) : null;
+  const editRevision = publishedChanged ? current.edit_revision + 1 : current.edit_revision;
+  const publishStatus = publishedChanged ? 'pending' : current.publish_status;
+  const verificationGuard = manualVerifications.length
+    ? manualVerifications.map(() => MANUAL_VERIFICATION_SNAPSHOT_GUARD_SQL).join(' AND ')
+    : '1 = 1';
+  const verificationBindings = manualVerifications.flatMap((snapshot) =>
+    manualVerificationSnapshotGuardBindings(snapshot.lead_id, snapshot.verification));
+  const statements = [
+    env.DB.prepare(
+      `/* news_review:sanitize_insert_cas */ INSERT INTO daily_news_review_batches (
+         review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
+         applied_selected_ids, selection_hash, edit_revision, publish_status,
+         publish_error, published_at, notified_at, notification_hash,
+         auto_repaired_from_batch, auto_repaired_invalid_ids, superseded_by,
+         created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin,
+         lineage_id, is_current, candidate_generation
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL,
+         ?, ?, ?, ?, ?, ?, 0, ?
+       WHERE EXISTS (SELECT 1 FROM daily_news_review_batches
+         WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
+           AND batch_revision = ? AND is_current = 1)
+       AND ${verificationGuard}
+       ON CONFLICT(review_date, batch_id) DO NOTHING`,
+    ).bind(
+      date, batchId, JSON.stringify(candidateIds), JSON.stringify(candidates), JSON.stringify(defaultSelected),
+      appliedSelected === null ? null : JSON.stringify(appliedSelected), selectionHash, editRevision, publishStatus,
+      publishedChanged ? null : current.publish_error, publishedChanged ? null : current.published_at,
+      current.batch_id, JSON.stringify(droppedIds), now, current.expires_at, batchRevision,
+      current.batch_id, current.revision_origin, date, current.candidate_generation,
+      date, date, current.batch_id, current.batch_revision,
+      ...verificationBindings,
+    ),
+    env.DB.prepare(
+      `/* news_review:sanitize_supersede_cas */ UPDATE daily_news_review_batches
+       SET superseded_by = ?, is_current = 0
+       WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
+         AND batch_revision = ? AND is_current = 1
+         AND EXISTS (SELECT 1 FROM daily_news_review_batches
+           WHERE review_date = ? AND batch_id = ? AND is_current = 0)`,
+    ).bind(batchId, date, date, current.batch_id, current.batch_revision, date, batchId),
+    env.DB.prepare(
+      `/* news_review:sanitize_activate_cas */ UPDATE daily_news_review_batches SET is_current = 1
+       WHERE review_date = ? AND lineage_id = ? AND batch_id = ? AND is_current = 0
+         AND EXISTS (SELECT 1 FROM daily_news_review_batches
+           WHERE review_date = ? AND batch_id = ? AND superseded_by = ?)`,
+    ).bind(date, date, batchId, date, current.batch_id, batchId),
+  ];
+  await env.DB.batch(statements);
+  const active = await getActiveNewsReviewBatch(env, date);
+  if (!active) throw new Error('news_review_batch_cas_failed');
+  if (active.batch_id !== batchId) {
+    if (attempt >= 2) throw new Error('news_review_manual_verification_conflict');
+    return sanitizeCurrentNewsReviewBatchAttempt(
+      env, date, now, attempt + 1, initialId, [...new Set(droppedIds)],
+    );
+  }
+  return {
+    batch: active,
+    changed: true,
+    dropped_ids: [...new Set(droppedIds)],
+    manual_verifications: manualVerifications,
+  };
 }
 
 async function durableConfirmedManualCandidates(env: Env, date: string): Promise<NewsReviewCandidate[]> {
   const confirmed = await env.DB.prepare(
-    `/* news_review:confirmed_manual_candidates */ SELECT l.id, l.input_url, a.assessment_json,
-       (SELECT e.publisher FROM manual_news_evidence e
-        WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS publisher,
-       (SELECT e.url FROM manual_news_evidence e
-        WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS evidence_url
+    `/* news_review:confirmed_manual_candidates */ SELECT l.id, l.input_url
      FROM manual_news_leads l
-     JOIN manual_news_event_assessments a ON a.lead_id = l.id
-       AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version) FROM manual_news_event_assessments a2 WHERE a2.lead_id = l.id
-       )
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC, l.id ASC`,
   ).bind(date).all<ConfirmedManualCandidateRow>();
   const candidates: NewsReviewCandidate[] = [];
   for (const row of confirmed.results || []) {
-    const assessment = parseObject(row.assessment_json);
-    const title = compactReviewText(assessment.title, 80);
-    const summary = compactReviewText(assessment.summary, 180);
-    const eventKey = compactReviewText(assessment.event_key, 200);
-    const score = Number(assessment.score);
-    if (!title || !summary || !eventKey || !Number.isFinite(score)) continue;
-    const url = row.evidence_url || row.input_url;
-    candidates.push({
-      item_id: `blog:manual:${row.id}`,
-      title,
-      summary,
-      source: compactReviewText(row.publisher || '手工补录', 40),
-      score,
-      ...(url ? { url } : {}),
-      event_key: eventKey,
-      origin: 'manual_lead',
-      lead_id: row.id,
-    });
+    const candidate = await verifiedManualCandidate(env, row);
+    if (candidate) candidates.push(candidate);
   }
   return candidates;
 }
@@ -620,13 +957,12 @@ async function preserveConfirmedManualCandidates(
   submittedDefaultIds: readonly string[],
   previous: NewsReviewBatch | null,
 ): Promise<{ candidates: NewsReviewCandidate[]; default_selected_ids: string[] }> {
+  // Batch JSON and caller-supplied candidates are snapshots, not authority for
+  // manual leads. Rebuild every manual candidate from its currently active,
+  // HMAC-verified assessment so key rotation or content tampering removes it.
   const manualByLead = new Map<string, NewsReviewCandidate>();
-  for (const candidate of [
-    ...(previous?.candidates || []),
-    ...submittedCandidates,
-    ...await durableConfirmedManualCandidates(env, date),
-  ]) {
-    if (candidate.origin !== 'manual_lead' || !candidate.lead_id) continue;
+  for (const candidate of await durableConfirmedManualCandidates(env, date)) {
+    if (!candidate.lead_id) continue;
     manualByLead.set(candidate.lead_id, candidate);
   }
   const manuals: NewsReviewCandidate[] = [];
@@ -648,7 +984,7 @@ async function preserveConfirmedManualCandidates(
   const availableById = new Map<string, NewsReviewCandidate>();
   for (const candidate of [...(previous?.candidates || []), ...submittedCandidates]) {
     availableById.set(candidate.item_id, candidate);
-    if (candidate.origin === 'manual_lead') continue;
+    if (isManualCandidateSnapshot(candidate)) continue;
     const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
     if (manual) defaultAliases.set(candidate.item_id, manual.item_id);
   }
@@ -660,7 +996,7 @@ async function preserveConfirmedManualCandidates(
     const aliasedId = defaultAliases.get(publishedId) || publishedId;
     if (manuals.some((candidate) => candidate.item_id === aliasedId)) continue;
     const candidate = availableById.get(publishedId);
-    if (!candidate || candidate.origin === 'manual_lead') continue;
+    if (!candidate || isManualCandidateSnapshot(candidate)) continue;
     if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
     seenItemIds.add(candidate.item_id);
     if (candidate.event_key) seenEventKeys.add(candidate.event_key);
@@ -670,7 +1006,7 @@ async function preserveConfirmedManualCandidates(
 
   const unselectedScheduled: NewsReviewCandidate[] = [];
   for (const candidate of submittedCandidates) {
-    if (candidate.origin === 'manual_lead') continue;
+    if (isManualCandidateSnapshot(candidate)) continue;
     const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
     if (manual) {
       defaultAliases.set(candidate.item_id, manual.item_id);
@@ -725,10 +1061,13 @@ export async function freezeNewsReviewBatchFromPool(
   const auditById = new Map(auditRows.map((candidate) => [String(candidate.id || ''), candidate]));
   const placeholders = candidateIds.map(() => '?').join(',');
   const itemResult = await env.DB.prepare(
-    `SELECT id, title, content, content_translated, url, extra FROM items WHERE id IN (${placeholders})`,
+    `SELECT id, source_ref, title, content, content_translated, url, extra
+     FROM items WHERE id IN (${placeholders})`,
   ).bind(...candidateIds).all<NewsReviewItemRow>();
   const itemById = new Map((itemResult.results || []).map((row) => [row.id, row]));
-  let candidates: NewsReviewCandidate[] = candidateIds.map((itemId) => {
+  const scheduledCandidateIds = candidateIds.filter((itemId) =>
+    !itemId.startsWith('blog:manual:') && itemById.get(itemId)?.source_ref !== 'manual_lead');
+  let candidates: NewsReviewCandidate[] = scheduledCandidateIds.map((itemId) => {
     const item = itemById.get(itemId);
     const audit = auditById.get(itemId);
     const extra = parseObject(item?.extra || null);
@@ -749,41 +1088,22 @@ export async function freezeNewsReviewBatchFromPool(
       ...(item?.url ? { url: item.url } : {}),
     };
   });
-  let freezeDefaults = defaultIds.slice(0, 5);
+  let freezeDefaults = defaultIds.filter((itemId) => scheduledCandidateIds.includes(itemId)).slice(0, 5);
   const confirmed = await env.DB.prepare(
-    `SELECT l.id, l.input_url, a.assessment_json,
-       (SELECT e.publisher FROM manual_news_evidence e WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS publisher
+    `/* news_review:prefreeze_confirmed_manual */ SELECT l.id, l.input_url
      FROM manual_news_leads l
-     JOIN manual_news_event_assessments a ON a.lead_id = l.id
-       AND a.assessment_version = (
-         SELECT MAX(a2.assessment_version) FROM manual_news_event_assessments a2 WHERE a2.lead_id = l.id
-       )
      WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.confirmed_batch_id IS NULL
        AND l.status IN ('recommended', 'needs_review')
      ORDER BY l.confirmed_at ASC`,
-  ).bind(date).all<{ id: string; input_url: string; assessment_json: string; publisher: string | null }>();
+  ).bind(date).all<ConfirmedManualCandidateRow>();
   for (const row of confirmed.results || []) {
-    const assessment = parseObject(row.assessment_json);
-    const title = compactReviewText(assessment.title, 80);
-    const summary = compactReviewText(assessment.summary, 180);
-    const eventKey = compactReviewText(assessment.event_key, 200);
-    const score = Number(assessment.score);
-    if (!title || !summary || !eventKey || !Number.isFinite(score)) continue;
+    const candidate = await verifiedManualCandidate(env, row);
+    if (!candidate) continue;
     const merged = mergeManualLeadCandidate({
       previous_candidates: candidates,
       previous_default_selected_ids: freezeDefaults,
       published_selected_ids: freezeDefaults,
-      candidate: {
-        item_id: `blog:manual:${row.id}`,
-        title,
-        summary,
-        source: compactReviewText(row.publisher || '手工补录', 40),
-        score,
-        ...(row.input_url ? { url: row.input_url } : {}),
-        event_key: eventKey,
-        origin: 'manual_lead',
-        lead_id: row.id,
-      },
+      candidate,
       max_candidates: 10,
     });
     candidates = merged.candidates;

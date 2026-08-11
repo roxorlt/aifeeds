@@ -13,7 +13,8 @@
 - [x] CF 本地实现：持久化线索/证据/评估/审计，安全 URL 取证，DeepSeek Pro 可注入严格 JSON 核验，事件聚类与跨日去重，独立 Workflow，以及不可变候选批次 V1→V2+。
 - [x] HK 本地实现：`/aifeeds/latest/` 可见的按日期补录入口、完整异步状态/证据/失败重试/确认 UI、登录保护的同源代理；确认候选不会自动替换 Top 5 或重渲染。
 - [x] 回归契约：保留原有 1–5 条选择、显式排序和重新生成；冻结前补录进入首批候选，冻结后生成 superseding revision。
-- [ ] 发布前：staging 执行 migration 033，部署并验证 Worker Workflow 与 HK；确认无误后按同序发布 production。
+- [x] CF 事实门控加固：第二次独立 DeepSeek Pro 逐字段/claim 核验并强制来源原文 quote；migration 034 独立保存完整 digest + HMAC verification，API/replay/confirm 仅接受 active 有效凭证，所有 evidence/assessment/verification mutation 受 owner/version/status CAS 保护。
+- [ ] 发布前：staging 按序执行 migration 033、034，配置每环境独立且至少 32 UTF-8 bytes 的 `MANUAL_NEWS_VERIFICATION_SECRET`，部署并验证 Worker Workflow 与 HK；确认无误后按同序发布 production。
 - [ ] 发布后：通过工作台分别录入 Anthropic 水印/C2PA 文档线索和 Bernie Sanders 致 AI 公司负责人公开信线索，核对证据范围，不能把后者写成有约束力的国会命令。
 
 ### A9. Admin 看板渐进加载（2026-07-24，已上线）

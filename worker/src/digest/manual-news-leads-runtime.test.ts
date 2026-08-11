@@ -3,6 +3,12 @@ import { describe, expect, test, vi } from 'vitest';
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+
+vi.mock('../hf-paper/llm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hf-paper/llm')>();
+  return { ...actual, callDeepSeekJson: vi.fn() };
+});
 
 function auditObject(
   url: string,
@@ -48,6 +54,23 @@ function documentFixture(
 }
 
 describe('manual lead evidence extraction', () => {
+  test('runs the independent claim verifier through DeepSeek Pro JSON mode', async () => {
+    const mockedCall = vi.mocked(callDeepSeekJson);
+    mockedCall.mockResolvedValueOnce({ data: { overall_verdict: 'supported', claim_results: [] } });
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: {} as never,
+      DEEPSEEK_API_KEY: 'test-key',
+    } as never);
+
+    await expect(adapters.verify({ system: 'independent verifier', user: '{"claims":[]}' }))
+      .resolves.toEqual({ overall_verdict: 'supported', claim_results: [] });
+    expect(mockedCall).toHaveBeenCalledWith(
+      'test-key', DEEPSEEK_PRO, '{"claims":[]}',
+      expect.objectContaining({ systemPrompt: 'independent verifier', retries: 1 }),
+    );
+    mockedCall.mockReset();
+  });
+
   test('keeps an explicit source publication time separate from retrieval time', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.anthropic.com/news/example',
@@ -271,15 +294,17 @@ describe('manual lead evidence extraction', () => {
     expect(report).toMatchObject({ source_type: 'independent_media', reliable: true });
     const evidence = [letter!, report!];
     const assessed = validateManualLeadAssessment({
-      title: '美国参议员桑德斯呼吁三家AI公司暂停AI开发',
-      summary: '这是单名参议员提出的请求，并非有约束力的国会命令。',
+      title: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发',
+      summary: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发。',
       event_key: 'sanders-ai-pause-letter-2026-08-10', event_type: 'political_regulatory',
       material_update: false, score: 88, recommendation: 'recommended', occurred_at: null,
       uncertainties: ['公开信未提供有约束力的法律措施。'],
-      claims: [{
-        text: '美国参议员伯尼·桑德斯向OpenAI、Anthropic和Meta负责人提出暂停AI开发的请求；这不是有约束力的国会命令。',
-        evidence_ids: evidence.map((item) => item.id),
-      }],
+      claims: [
+        {
+          text: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发。',
+          evidence_ids: evidence.map((item) => item.id),
+        },
+      ],
       matched_event_key: null,
     }, evidence);
     expect(applyManualLeadEvidencePolicy(assessed, evidence))
