@@ -468,6 +468,51 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '百度造芯片法院命令OpenAI停止发布GPT 6。',
+    '法院命令百度造芯片腾讯停止发布GPT 6。',
+    '监管消息法院要求Anthropic暂停Claude 5。',
+    '法院命令Acme停止发布GPT 6。',
+  ])('requires one canonical controller and one canonical organization target: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '法院命令OpenAI停止发布GPT 6。',
+    '监管机构命令Anthropic暂停Claude 5。',
+    '美国议员桑德斯要求OpenAI暂停GPT 6。',
+    'OpenAI要求Anthropic暂停Claude 5。',
+  ])('accepts an authority or organization controller with one organization target: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    '法院命令OpenAI停止发布人工智能模型评测系统。',
+    '法院命令OpenAI停止发布通用模型升级模型。',
+    '法院命令OpenAI停止发布百度造芯片模型。',
+    '监管机构禁止Anthropic发布Claude 5模型服务系统。',
+  ])('rejects a complement object with another organization or multiple noun heads: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '法院命令OpenAI停止发布人工智能模型。',
+    '法院命令OpenAI停止模型训练。',
+    '监管机构禁止Anthropic发布Claude 5命令行工具。',
+  ])('accepts one fully parsed product or noun-phrase complement object: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     '法院命令OpenAI停止发布大模型。',
     '监管机构命令百度停止发布开源模型。',
   ])('does not mistake a short ordinary control-chain object for another predicate: %s', (text) => {
@@ -563,6 +608,36 @@ describe('manual news lead domain', () => {
     expect(() => validateManualLeadAssessment(assessment({
       claims: [{ text, evidence_ids: ['ev-official'] }],
     }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    'OpenAI发布Acme 2支持向量模型。',
+    'OpenAI发布Nimbus V3命令行工具。',
+  ])('does not infer a product role from an unknown Latin name plus version alone: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test('accepts an unknown family only when an explicit model noun makes the product role unambiguous', () => {
+    const text = 'OpenAI发布Acme Model 2支持向量模型。';
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    '阿里发布通义命令行工具。',
+    '腾讯发布混元支持向量模型。',
+    '字节跳动发布豆包投资分析工具。',
+    '华为发布盘古合作伙伴计划。',
+    '阿里发布Qwen 4支持向量模型。',
+  ])('accepts a registered Chinese product family in a release object noun phrase: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
   });
 
   test.each([
@@ -837,7 +912,7 @@ describe('manual news lead domain', () => {
         overall_verdict: 'supported',
         fact_results: facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, item.quote)),
       };
-      expect(() => validateManualLeadFactVerification(result, candidate, evidence))
+      expect(() => validateManualLeadFactVerification(result, candidate, evidence), item.candidate)
         .toThrow(item.error);
     }
   });

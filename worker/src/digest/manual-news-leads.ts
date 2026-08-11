@@ -827,7 +827,7 @@ const ENGLISH_LOCATION_RELATION_WORDS = [
 const ENGLISH_LOCATION_RELATION_SOURCE = `(?:${ENGLISH_LOCATION_RELATION_WORDS.join('|')})`;
 const ENGLISH_LOCATION_RELATIONS: ReadonlySet<string> = new Set(ENGLISH_LOCATION_RELATION_WORDS);
 
-type CanonicalEntityRole = 'organization' | 'product' | 'unknown';
+type CanonicalEntityRole = 'authority' | 'organization' | 'product' | 'unknown';
 
 function canonicalEntityRoleKey(value: string): string {
   return value.normalize('NFKC').toLowerCase()
@@ -836,33 +836,57 @@ function canonicalEntityRoleKey(value: string): string {
     .trim();
 }
 
-const ORGANIZATION_ENTITY_ALIASES: ReadonlySet<string> = new Set([
-  'openai', 'anthropic', 'google', 'google deepmind', 'meta', 'microsoft', 'nvidia', 'apple',
-  'amazon', 'aws', 'xai', '百度', '腾讯', '阿里巴巴', '字节跳动', '智谱', '智谱ai',
-  '月之暗面', '深度求索',
-].map(canonicalEntityRoleKey));
-const PRODUCT_ENTITY_ALIASES: ReadonlySet<string> = new Set([
-  'gpt', 'claude', 'kimi', 'gemini', 'codex', 'chatgpt', '文心', '文心一言', 'ernie',
-].map(canonicalEntityRoleKey));
+const AUTHORITY_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
+  court: ['法院', '最高法院', 'the court', 'court'],
+  regulator: ['监管机构', '监管部门', '管理部门', '执法机构', 'the regulator', 'regulator', 'regulators'],
+  government: ['政府', '议会', '委员会', '欧盟委员会', 'government', 'parliament', 'commission'],
+  lawmaker: ['议员', '美国议员', 'lawmakers', 'senator'],
+};
+const ORGANIZATION_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
+  openai: ['openai'], anthropic: ['anthropic'], google: ['google', 'google deepmind'],
+  meta: ['meta'], microsoft: ['microsoft'], nvidia: ['nvidia'], apple: ['apple'],
+  amazon: ['amazon', 'aws'], xai: ['xai'], baidu: ['百度'], tencent: ['腾讯'],
+  alibaba: ['阿里', '阿里巴巴'], bytedance: ['字节', '字节跳动'], huawei: ['华为'],
+  zhipu: ['智谱', '智谱ai'], moonshot: ['月之暗面'], deepseek: ['深度求索'],
+};
+const PRODUCT_ENTITY_REGISTRY: Readonly<Record<string, readonly string[]>> = {
+  gpt: ['gpt'], claude: ['claude'], kimi: ['kimi'], gemini: ['gemini'], codex: ['codex'],
+  chatgpt: ['chatgpt'], ernie: ['ernie', '文心', '文心一言'], qwen: ['qwen', '通义', '通义千问'],
+  hunyuan: ['hunyuan', '混元'], doubao: ['doubao', '豆包'], pangu: ['pangu', '盘古'],
+  glm: ['glm'], llama: ['llama'], mistral: ['mistral'], longcat: ['longcat'],
+};
+
+function canonicalRegistryAliases(registry: Readonly<Record<string, readonly string[]>>): string[] {
+  return Object.values(registry).flat().map(canonicalEntityRoleKey);
+}
+
+const AUTHORITY_ENTITY_ALIASES = canonicalRegistryAliases(AUTHORITY_ENTITY_REGISTRY);
+const ORGANIZATION_ENTITY_ALIASES = canonicalRegistryAliases(ORGANIZATION_ENTITY_REGISTRY);
+const PRODUCT_ENTITY_ALIASES = canonicalRegistryAliases(PRODUCT_ENTITY_REGISTRY);
 
 function canonicalEntityRole(value: string): CanonicalEntityRole {
   const key = canonicalEntityRoleKey(value);
   if (!key) return 'unknown';
-  if (PRODUCT_ENTITY_ALIASES.has(key)) return 'product';
-  if (ORGANIZATION_ENTITY_ALIASES.has(key)) return 'organization';
-  const productFamily = [...PRODUCT_ENTITY_ALIASES].find((alias) =>
-    key.startsWith(`${alias} `));
+  if (PRODUCT_ENTITY_ALIASES.includes(key)) return 'product';
+  if (ORGANIZATION_ENTITY_ALIASES.includes(key)) return 'organization';
+  if (AUTHORITY_ENTITY_ALIASES.includes(key)) return 'authority';
+  if (/^(?:美国)?(?:参议员|议员|法官|部长)[\p{Script=Han}·]{2,8}$/u.test(key)
+    || /^(?:(?:美国|中国|欧盟|英国|联邦|最高|地方|人民|州|省|市|区|县)){1,3}(?:法院|监管机构|监管部门|议会|委员会)$/u.test(key)
+    || /^(?:senator|judge|minister)\s+[a-z][a-z .'-]{1,48}$/iu.test(key)) return 'authority';
+  const productFamily = PRODUCT_ENTITY_ALIASES.find((alias) =>
+    key.startsWith(`${alias} `) || key.startsWith(`${alias}v`) || new RegExp(`^${alias}\\d`, 'u').test(key));
   if (productFamily) {
     const version = key.slice(productFamily.length).trim();
     if (/^(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*(?:\s+(?:preview|pro|mini|lite|turbo))?$/iu.test(version)) {
       return 'product';
     }
   }
-  if (/^[a-z][a-z0-9+.-]{1,30}\s+(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*(?:\s+(?:preview|pro|mini|lite|turbo))?$/iu.test(key)) {
+  if (/^[a-z][a-z0-9+.-]{1,30}\s+(?:model|模型)\s+(?:v(?:ersion)?\s*)?[a-z]?\d+(?:\.\d+)*$/iu.test(key)) {
     return 'product';
   }
   if (/\b(?:inc|corp|corporation|company|labs?|research|technologies|technology)\b$/iu.test(key)
     || /^[a-z0-9+.-]{2,}ai$/iu.test(key)
+    || /^(?:一家|多家|三家|若干家)?(?:ai|人工智能)?(?:公司|机构|团队|组织)$/iu.test(key)
     || /(?:公司|集团|科技|实验室|研究院|研究所|团队|机构)$/u.test(key)) {
     return 'organization';
   }
@@ -875,6 +899,17 @@ function startsWithEntityRole(value: string, expected: CanonicalEntityRole): boo
     if (canonicalEntityRole(source.slice(0, boundary)) === expected) return true;
   }
   return false;
+}
+
+function containsRegisteredEntityRole(value: string, expected: CanonicalEntityRole): boolean {
+  const aliases = expected === 'authority' ? AUTHORITY_ENTITY_ALIASES
+    : expected === 'organization' ? ORGANIZATION_ENTITY_ALIASES
+      : expected === 'product' ? PRODUCT_ENTITY_ALIASES : [];
+  const source = canonicalEntityRoleKey(value);
+  const padded = ` ${source} `;
+  return aliases.some((alias) => /\p{Script=Han}/u.test(alias)
+    ? source.includes(alias)
+    : padded.includes(` ${alias} `));
 }
 
 function hasAtomicBoundary(value: string): boolean {
@@ -990,14 +1025,14 @@ function actionIsGovernedComplement(
     return false;
   }
   const normalized = between.normalize('NFKC').trim()
-    .replace(/^(?:to|that|for|the|a|an|其|该|对|向|为)\s*/iu, '')
-    .replace(/(?:立即|继续|正式|已经|已|将|再|考虑|计划|必须)+$/u, '')
+    .replace(/^(?:(?:to|that|for|the|a|an)\b|其|该|对|向|为)\s*/iu, '')
+    .replace(/(?:立即|继续|正式|已经|已|将|再|考虑|计划|必须|强制)+$/u, '')
     .replace(/\b(?:to|that)\s*$/iu, '')
     .trim();
   if (!normalized) return true;
   if (depth > 0) return false;
   if (STRICT_CONTROL_CHAIN_ROOTS.has(parent.action)) {
-    return controlSubjectSegmentFullyConsumed(normalized);
+    return controlSubjectSegmentFullyConsumed(normalized, ['organization']);
   }
   if (looksLikeDetachedChinesePredicate(normalized)) return false;
   const trailingLatinSubject = normalized.match(/([A-Z][A-Za-z0-9._+-]{1,})\s*$/u);
@@ -1021,47 +1056,84 @@ interface FactControlChainParse {
 }
 
 const CONTROL_OBJECT_NOUN_HEAD = '(?:模型训练|训练模型|模型|权重|服务|系统|平台|工具|计划|项目|产品|市场|业务|运营|协议|代码|数据集|能力|功能|训练|开发)';
-const CONTROL_AUTHORITY_SUBJECT = /^(?:法院|监管机构|监管部门|政府|议会|议员|委员会|管理部门|执法机构|美国议员|欧盟委员会)$/u;
-const CONTROL_GENERIC_SUBJECT = /^(?:该公司|公司|机构|团队|组织|一家(?:公司|机构)|多家(?:公司|机构)|三家(?:公司|机构)|the company|the regulator|the court|the letter|a senator|regulators?|lawmakers?)$/iu;
 
-function controlSubjectSegmentFullyConsumed(value: string): boolean {
+function controlSubjectSegmentFullyConsumed(
+  value: string,
+  allowedRoles: readonly CanonicalEntityRole[],
+): boolean {
   const subject = normalizedAtomicClause(stripFactTemporalText(value))
     .replace(/^(?:据称|传闻|报道称|消息称|官方|公司方面)\s*/u, '')
     .replace(/(?:已经|已|将|正在|正式|计划|可能|据称|宣布|完成)+$/u, '')
+    .replace(/(?:在|于)\s*$/u, '')
     .replace(/\b(?:has|have|had|will|would|may|might|reportedly|officially|formally)\s*$/iu, '')
     .trim();
   if (!subject) return false;
-  if (CONTROL_AUTHORITY_SUBJECT.test(subject) || CONTROL_GENERIC_SUBJECT.test(subject)) return true;
-  if (/^(?:一家|多家|三家|若干家)?(?:AI|人工智能)?(?:公司|机构|团队|组织)$/iu.test(subject)) return true;
-  if (new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'u').test(subject)) return false;
-  if (canonicalEntityRole(subject) !== 'unknown') return true;
-  if (/^[A-Za-z][A-Za-z0-9._+-]*$/u.test(subject)) return true;
-  return /^[\p{Script=Han}·]{2,16}$/u.test(subject)
-    && !/(?:内容|消息|说明|信息)(?:法院|机构|部门|政府|议会|议员|委员会)$/u.test(subject);
+  return allowedRoles.includes(canonicalEntityRole(subject));
 }
 
-function releasedProductNominalObjectLength(rawTail: string): number {
-  for (let boundary = 1; boundary < rawTail.length; boundary += 1) {
+function singleChineseNounPhraseLength(value: string): number {
+  const phrase = value.match(/^[\p{Script=Han}A-Za-z0-9._+-]{1,48}/u)?.[0] || '';
+  if (!phrase || containsRegisteredEntityRole(phrase, 'organization')) return 0;
+  const heads = [...phrase.matchAll(new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'gu'))];
+  if (heads.length !== 1) return 0;
+  const head = heads[0];
+  return head.index !== undefined && head.index + head[0].length === phrase.length ? phrase.length : 0;
+}
+
+function firstChineseNounPhraseLength(value: string): number {
+  const phrase = value.match(/^[\p{Script=Han}A-Za-z0-9._+-]{1,48}/u)?.[0] || '';
+  if (!phrase) return 0;
+  const head = phrase.match(new RegExp(CONTROL_OBJECT_NOUN_HEAD, 'u'));
+  if (head?.index === undefined) return 0;
+  const objectEnd = head.index + head[0].length;
+  return containsRegisteredEntityRole(phrase.slice(0, objectEnd), 'organization')
+    ? 0
+    : objectEnd;
+}
+
+function singleEnglishNounPhraseLength(value: string): number {
+  const phrase = value.match(new RegExp(`^(?:[a-z][a-z0-9-]*\\s+){0,5}${ENGLISH_OBJECT_NOUN_HEAD}\\b`, 'iu'))?.[0] || '';
+  if (!phrase || containsRegisteredEntityRole(phrase, 'organization')) return 0;
+  const heads = [...phrase.matchAll(new RegExp(`\\b${ENGLISH_OBJECT_NOUN_HEAD}\\b`, 'giu'))];
+  return heads.length === 1 ? phrase.length : 0;
+}
+
+function productComplementObjectLength(rawTail: string): number {
+  // Prefer the longest registered product span so a family alias such as "GPT"
+  // cannot consume a following version and hide semantic residue after "GPT 6".
+  for (let boundary = rawTail.length; boundary >= 1; boundary -= 1) {
     const rawPrefix = rawTail.slice(0, boundary);
     const product = rawPrefix.trim();
     if (!product || canonicalEntityRole(product) !== 'product') continue;
     const suffix = rawTail.slice(boundary);
     const leadingSpace = suffix.match(/^\s*/u)?.[0].length || 0;
-    if (startsWithEntityRole(suffix.slice(leadingSpace), 'organization')) return 0;
-    const nominal = suffix.slice(leadingSpace).match(
-      new RegExp(`^[\\p{Script=Han}]{1,16}?${CONTROL_OBJECT_NOUN_HEAD}`, 'u'),
-    );
-    if (nominal?.[0]) return boundary + leadingSpace + nominal[0].length;
+    if (startsWithEntityRole(suffix.slice(leadingSpace), 'organization')) return boundary;
+    const objectSuffix = suffix.slice(leadingSpace);
+    if (!normalizedAtomicClause(objectSuffix)) return rawTail.length;
+    const chineseLength = singleChineseNounPhraseLength(objectSuffix);
+    if (chineseLength) return boundary + leadingSpace + chineseLength;
+    const firstChineseLength = firstChineseNounPhraseLength(objectSuffix);
+    if (firstChineseLength) return boundary + leadingSpace + firstChineseLength;
+    const englishLength = singleEnglishNounPhraseLength(objectSuffix);
+    if (englishLength) return boundary + leadingSpace + englishLength;
   }
   return 0;
 }
 
-function controlComplementTailRemainder(value: string, action: FactActionOccurrence): string {
+function controlComplementTailRemainder(
+  value: string,
+  action: FactActionOccurrence,
+  strictObject: boolean,
+): string {
   const rawTail = stripFactTemporalText(value.slice(action.end))
     .replace(/^[\s，,、:：]*(?:了|对|向|为|其|该|一个|一项|一款|新的?)*\s*/u, '');
-  if (action.action === 'release') {
-    const productObjectLength = releasedProductNominalObjectLength(rawTail);
-    if (productObjectLength) return rawTail.slice(productObjectLength).trim();
+  if (strictObject) {
+    const productLength = productComplementObjectLength(rawTail);
+    if (productLength) return rawTail.slice(productLength).trim();
+    const chineseLength = singleChineseNounPhraseLength(rawTail);
+    if (chineseLength) return rawTail.slice(chineseLength).trim();
+    const englishLength = singleEnglishNounPhraseLength(rawTail);
+    return englishLength ? rawTail.slice(englishLength).trim() : rawTail;
   }
   const latinVersion = rawTail.match(
     new RegExp(`^(?:[A-Za-z][A-Za-z0-9._+-]*)(?:\\s+(?:v(?:ersion)?\\s*)?[A-Za-z]*\\d+(?:\\.\\d+)*(?:[-_][A-Za-z0-9]+)?)?(?:${CONTROL_OBJECT_NOUN_HEAD})?`, 'iu'),
@@ -1153,12 +1225,15 @@ function parseFactControlChain(value: string): FactControlChainParse {
     node = node.child;
   }
   const prefix = reliable ? stripFactTemporalText(value.slice(0, actions[0].index)) : '';
-  const remainder = reliable ? controlComplementTailRemainder(value, node.occurrence) : '';
   const parsedControlChain = reliable && actions.length > 1
     && STRICT_CONTROL_CHAIN_ROOTS.has(actions[0].action);
+  const strictObject = parsedControlChain || node.occurrence.action === 'release';
+  const remainder = reliable
+    ? controlComplementTailRemainder(value, node.occurrence, strictObject)
+    : '';
   const hasUnknownPredicate = reliable
     && (parsedControlChain
-      ? !controlSubjectSegmentFullyConsumed(prefix) || !!normalizedAtomicClause(remainder)
+      ? !controlSubjectSegmentFullyConsumed(prefix, ['authority', 'organization']) || !!normalizedAtomicClause(remainder)
       : prefixContainsDetachedUnknownPredicate(prefix) || looksLikeDetachedUnknownPredicate(remainder));
   return {
     root,
@@ -1809,7 +1884,23 @@ function structuredFactUnitVerificationError(candidate: string, quote: string): 
   }
   const usableSourceClauses = actualClauses.clauses.filter((clause) =>
     atomicActionChainReliable(clause) && !unknownCompoundShape(clause));
-  if (!usableSourceClauses.length) return 'fact_verification_action_mismatch';
+  if (!usableSourceClauses.length) {
+    // An unparseable source never supports the fact. Preserve the more useful
+    // force classification when the raw source explicitly crosses from a weak
+    // request to a binding regulatory action (or the reverse).
+    const expectedSet = factActions(candidateClause);
+    const actualSet = factActions(quote);
+    const expectedWeak = expectedSet.has('request');
+    const expectedStrong = [...expectedSet].some((action) =>
+      ['regulatory_require', 'mandate', 'order'].includes(action));
+    const actualWeak = actualSet.has('request');
+    const actualStrong = [...actualSet].some((action) =>
+      ['regulatory_require', 'mandate', 'order'].includes(action));
+    if ((expectedWeak && actualStrong) || (expectedStrong && actualWeak)) {
+      return 'fact_verification_modality_mismatch';
+    }
+    return 'fact_verification_action_mismatch';
+  }
   const errors = usableSourceClauses.map((clause) =>
     occurredAtVerificationError(candidateClause, clause)
       || compareAtomicKnownFact(
