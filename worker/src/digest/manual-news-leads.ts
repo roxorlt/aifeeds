@@ -1599,7 +1599,7 @@ interface AtomicEvidenceClause {
 const EVIDENCE_RELATION_LINK_SOURCE = '(?:但|尽管|虽然|不过|然而|以及|而且)|\\b(?:and|but|while|whereas|alongside|as\\s+well\\s+as|despite|notwithstanding|although|though|not\\s+to\\s+mention)\\b|(?<![\\p{L}\\p{N}_+.-])plus(?![\\p{L}\\p{N}_+.-])';
 
 function relationAdditionHasSemanticContent(value: string): boolean {
-  const normalized = normalizedSourceText(value);
+  const normalized = normalizedRelationControllerText(value);
   if (!normalized) return false;
   if (factActionOccurrences(normalized).length
     || EVIDENCE_RELATION_DENIAL_SIGNAL.test(normalized)
@@ -1629,7 +1629,7 @@ function relationAdditionHasSemanticContent(value: string): boolean {
 }
 
 function evidenceRelationUnitClauses(value: string): AtomicEvidenceClause[] {
-  const normalized = normalizedSourceText(value);
+  const normalized = normalizedRelationControllerText(value);
   if (!normalized) return [];
   const linkedParts = normalized
     .split(new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'giu'))
@@ -1681,6 +1681,74 @@ function isQuestionFramedEvidenceClause(value: string): boolean {
 interface LeadingControllerIdentity {
   identity: string | null;
   role_linked: boolean;
+  ambiguous: boolean;
+}
+
+interface RegisteredEntityOccurrence {
+  identity: string;
+  start: number;
+  end: number;
+}
+
+const ENGLISH_CONTROLLER_ROLE_MODIFIER_SOURCE = '(?:strategic|long[- ]?time|longstanding|enterprise|important|major|key)';
+const ENGLISH_CONTROLLER_ROLE_SOURCE = '(?:partner|investor|customer|supplier|affiliate|vendor|client|distributor|reseller)';
+const CHINESE_CONTROLLER_ROLE_MODIFIER_SOURCE = '(?:战略|长期|长年|企业|重要|主要|关键)';
+const CHINESE_CONTROLLER_ROLE_SOURCE = '(?:合作伙伴|投资方|投资者|客户|供应商|关联方|附属机构|经销商|代理商)';
+
+function normalizedRelationControllerText(value: string): string {
+  return normalizedSourceText(value).normalize('NFKC')
+    .replace(/[‘’ʼʻ＇`´]/gu, "'");
+}
+
+function registeredEntityOccurrences(
+  value: string,
+  registry: Readonly<Record<string, readonly string[]>>,
+): RegisteredEntityOccurrence[] {
+  const candidates = Object.entries(registry).flatMap(([identity, aliases]) =>
+    aliases.flatMap((alias) => {
+      const normalizedAlias = normalizedRelationControllerText(alias);
+      const escaped = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+        .replace(/\s+/gu, '\\s+');
+      const pattern = /[a-z0-9]/iu.test(normalizedAlias)
+        ? new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'giu')
+        : new RegExp(escaped, 'gu');
+      return [...value.matchAll(pattern)].map((match) => ({
+        identity,
+        start: match.index,
+        end: match.index + match[0].length,
+      }));
+    }));
+  const selected: RegisteredEntityOccurrence[] = [];
+  for (const candidate of candidates.sort((left, right) =>
+    left.start - right.start || (right.end - right.start) - (left.end - left.start))) {
+    if (selected.some((existing) => candidate.start < existing.end && candidate.end > existing.start)) {
+      continue;
+    }
+    selected.push(candidate);
+  }
+  return selected;
+}
+
+function controllerPredicateAfter(value: string, offset: number): boolean {
+  if (factActionOccurrences(value).some((action) => action.index >= offset)) return true;
+  return [EVIDENCE_RELATION_STATUS_SIGNAL, EVIDENCE_RELATION_DENIAL_SIGNAL, EVIDENCE_RELATION_SCOPE_SIGNAL]
+    .some((pattern) => {
+      const flags = [...new Set(`${pattern.flags}g`.split(''))].join('');
+      const matcher = new RegExp(pattern.source, flags);
+      matcher.lastIndex = offset;
+      return matcher.exec(value) !== null;
+    });
+}
+
+function hasStructuredControlBeforeOrganization(
+  value: string,
+  firstEnd: number,
+  secondStart: number,
+): boolean {
+  return atomicActionChainReliable(value) && factActionOccurrences(value).some((action) =>
+    action.index >= firstEnd
+    && action.end <= secondStart
+    && STRICT_CONTROL_CHAIN_ROOTS.has(action.action));
 }
 
 function leadingRegisteredEntityMatch(
@@ -1691,11 +1759,12 @@ function leadingRegisteredEntityMatch(
     .flatMap(([identity, aliases]) => aliases.map((alias) => ({ identity, alias })))
     .sort((left, right) => right.alias.length - left.alias.length);
   for (const entry of entries) {
-    const escaped = entry.alias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
-    const latin = /[a-z0-9]/iu.test(entry.alias);
+    const normalizedAlias = normalizedRelationControllerText(entry.alias);
+    const escaped = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
+    const latin = /[a-z0-9]/iu.test(normalizedAlias);
     const pattern = latin
       ? new RegExp(`^${escaped}(?=$|[^a-z0-9])`, 'iu')
-      : new RegExp(`^${escaped}(?=$|[\\s，,。.!！？?；;：:、“”‘’（）()的])`, 'u');
+      : new RegExp(`^${escaped}`, 'u');
     const match = pattern.exec(value);
     if (match) return { identity: entry.identity, length: match[0].length };
   }
@@ -1703,20 +1772,38 @@ function leadingRegisteredEntityMatch(
 }
 
 function leadingControllerIdentity(value: string): LeadingControllerIdentity {
-  const normalized = normalizedSourceText(value).replace(/^[\p{P}\p{S}]+/gu, '');
+  const normalized = normalizedRelationControllerText(value).replace(/^[\p{P}\p{S}]+/gu, '');
   const first = leadingRegisteredEntityMatch(normalized, {
     ...AUTHORITY_ENTITY_REGISTRY,
     ...ORGANIZATION_ENTITY_REGISTRY,
     ...PRODUCT_ENTITY_REGISTRY,
   });
-  if (!first) return { identity: null, role_linked: false };
+  if (!first) return { identity: null, role_linked: false, ambiguous: false };
   const remainder = normalized.slice(first.length);
-  const role = /^(?:\s*(?:'s\s+)?(?:partner|investor|customer|supplier|affiliate|vendor|client|distributor|reseller)\s+|\s*的?(?:合作伙伴|投资方|投资者|客户|供应商|关联方|附属机构|经销商|代理商)\s*)/iu.exec(remainder);
-  if (!role) return { identity: first.identity, role_linked: false };
-  const second = leadingRegisteredEntityMatch(
-    remainder.slice(role[0].length), ORGANIZATION_ENTITY_REGISTRY,
-  );
-  return { identity: second?.identity || null, role_linked: true };
+  const role = new RegExp(
+    `^(?:\\s*(?:'s\\s+)?(?:${ENGLISH_CONTROLLER_ROLE_MODIFIER_SOURCE}\\s+){0,3}${ENGLISH_CONTROLLER_ROLE_SOURCE}\\s+|\\s*的?(?:${CHINESE_CONTROLLER_ROLE_MODIFIER_SOURCE}){0,3}${CHINESE_CONTROLLER_ROLE_SOURCE}\\s*)`,
+    'iu',
+  ).exec(remainder);
+  if (role) {
+    const second = leadingRegisteredEntityMatch(
+      remainder.slice(role[0].length), ORGANIZATION_ENTITY_REGISTRY,
+    );
+    if (second) return { identity: second.identity, role_linked: true, ambiguous: false };
+    return { identity: first.identity, role_linked: false, ambiguous: false };
+  }
+
+  const organizations = registeredEntityOccurrences(normalized, ORGANIZATION_ENTITY_REGISTRY);
+  const firstOrganization = organizations.find((occurrence) => occurrence.start === 0);
+  const secondOrganization = firstOrganization && organizations.find((occurrence) =>
+    occurrence.start >= firstOrganization.end && occurrence.identity !== firstOrganization.identity);
+  if (firstOrganization && secondOrganization
+    && controllerPredicateAfter(normalized, secondOrganization.end)
+    && !hasStructuredControlBeforeOrganization(
+      normalized, firstOrganization.end, secondOrganization.start,
+    )) {
+    return { identity: null, role_linked: false, ambiguous: true };
+  }
+  return { identity: first.identity, role_linked: false, ambiguous: false };
 }
 
 function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: string): boolean {
@@ -1724,6 +1811,7 @@ function sourceFactSubjectMatchesClause(fact: ManualSourceAtomicFact, clause: st
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
   if (!expected) return false;
   const controller = leadingControllerIdentity(clause);
+  if (controller.ambiguous) return false;
   if (controller.role_linked) return controller.identity === expected;
   const structuredMatch = structuredFactUnits(clause).some((unit) => {
     if (!unit.subject) return false;
@@ -1901,6 +1989,7 @@ function evidenceClauseRelation(
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
 ): DeterministicEvidenceRelation {
+  if (leadingControllerIdentity(clause.text).ambiguous) return 'uncertain';
   let relatedButUnresolved = false;
   const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
   for (const fact of sourceFacts) {

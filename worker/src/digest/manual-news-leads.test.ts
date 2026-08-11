@@ -903,8 +903,19 @@ describe('manual news lead domain', () => {
     'Alibaba investor Microsoft withdrew its Claude Code restriction.',
     'Alibaba customer OpenAI cancelled its Claude Code restriction.',
     'Alibaba supplier Microsoft withdrew its Claude Code restriction.',
+    'Alibaba’s partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba strategic partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba long-time investor Microsoft withdrew its Claude Code restriction.',
+    'Alibaba enterprise customer OpenAI cancelled its Claude Code restriction.',
     '阿里巴巴的合作伙伴OpenAI取消了Claude Code限制。',
     '阿里巴巴的投资方Microsoft撤回了Claude Code限制。',
+    '阿里巴巴重要客户OpenAI取消了Claude Code限制。',
+    '阿里巴巴合作伙伴OpenAI取消了Claude Code限制。',
+    'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴OpenAI取消了Claude Code限制。',
   ])('does not mint a current v9 update proof when a role noun phrase makes the second organization the controller: %s', async (statement) => {
     await expect(createMaliciouslySupportedControllerUpdateProof(statement))
       .rejects.toThrow(/evidence_disposition|verification_semantics/);
@@ -940,12 +951,95 @@ describe('manual news lead domain', () => {
     });
   });
 
+  test.each([
+    'Alibaba’s partner OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba‘s long-time investor Microsoft withdrew its Claude Code restriction.',
+    'Alibabaʼs enterprise customer OpenAI cancelled its Claude Code restriction.',
+    'Alibaba strategic partner OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴重要客户OpenAI取消了Claude Code限制。',
+    '阿里巴巴合作伙伴OpenAI取消了Claude Code限制。',
+  ])('normalizes possessives and role modifiers before choosing the second organization controller: %s', (statement) => {
+    const roleControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-normalized-role-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['角色短语的控制主体不是阿里巴巴。'];
+    raw.evidence_dispositions.push({
+      evidence_id: roleControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, roleControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: roleControllerEvidence.id, relation: 'unrelated' },
+    ]) });
+  });
+
+  test.each([
+    'Alibaba strategic ally OpenAI cancelled its Claude Code restriction.',
+    'Alibaba OpenAI cancelled its Claude Code restriction.',
+    '阿里巴巴业务盟友OpenAI取消了Claude Code限制。',
+    '阿里巴巴OpenAI取消了Claude Code限制。',
+  ])('fails closed when two pre-predicate organizations leave the controller ambiguous: %s', (statement) => {
+    const ambiguousControllerEvidence: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: `ev-ambiguous-controller-${statement.length}`,
+      title: statement,
+      excerpt: statement,
+      claims_supported: [statement],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.uncertainties = ['双组织控制主体无法唯一确定。'];
+    raw.evidence_dispositions.push({
+      evidence_id: ambiguousControllerEvidence.id,
+      disposition: 'background',
+      source_fact_refs: [],
+      reason_code: 'insufficient_overlap',
+    });
+    expect(validateManualLeadGeneratedAssessment(
+      raw, [techCrunchAlibabaBan, ambiguousControllerEvidence],
+    )).toMatchObject({ evidence_completeness: expect.arrayContaining([
+      { evidence_id: ambiguousControllerEvidence.id, relation: 'uncertain' },
+    ]) });
+  });
+
   test('does not misread ordinary Alibaba employees as a role-linked second controller', () => {
     expect(validateManualLeadGeneratedAssessment(
       alibabaBanGeneratedAssessment(), [techCrunchAlibabaBan],
     )).toMatchObject({
       evidence_completeness: [{ evidence_id: techCrunchAlibabaBan.id, relation: 'supports' }],
     });
+  });
+
+  test('keeps Alibaba itself as the controller of a status change', () => {
+    const itselfUpdate: ManualNewsEvidence = {
+      ...officialAlibabaDenial,
+      id: 'ev-alibaba-itself-update',
+      title: 'Alibaba itself cancelled its Claude Code restriction.',
+      excerpt: 'Alibaba itself cancelled its Claude Code restriction.',
+      claims_supported: ['Alibaba itself cancelled its Claude Code restriction.'],
+    };
+    const raw = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
+    raw.recommendation = 'needs_review';
+    raw.uncertainties = ['阿里巴巴已取消该限制。'];
+    raw.evidence_dispositions.push({
+      evidence_id: itselfUpdate.id,
+      disposition: 'material_update',
+      source_fact_refs: ['fact-01'],
+      reason_code: null,
+    });
+    expect(validateManualLeadGeneratedAssessment(raw, [techCrunchAlibabaBan, itselfUpdate]))
+      .toMatchObject({ evidence_completeness: expect.arrayContaining([
+        { evidence_id: itselfUpdate.id, relation: 'updates' },
+      ]) });
   });
 
   test.each([
