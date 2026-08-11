@@ -294,18 +294,14 @@ describe('manual lead evidence extraction', () => {
     expect(report).toMatchObject({ source_type: 'independent_media', reliable: true });
     const evidence = [letter!, report!];
     const assessed = validateManualLeadAssessment({
-      title: '美国参议员桑德斯呼吁三家AI公司暂停AI开发',
-      summary: '这是单名参议员提出的请求，并非有约束力的国会命令。',
+      title: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发',
+      summary: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发。',
       event_key: 'sanders-ai-pause-letter-2026-08-10', event_type: 'political_regulatory',
       material_update: false, score: 88, recommendation: 'recommended', occurred_at: null,
       uncertainties: ['公开信未提供有约束力的法律措施。'],
       claims: [
         {
-          text: '美国参议员伯尼·桑德斯向OpenAI、Anthropic和Meta负责人提出暂停AI开发的请求。',
-          evidence_ids: evidence.map((item) => item.id),
-        },
-        {
-          text: '这不是有约束力的国会命令。',
+          text: '美国参议员伯尼·桑德斯呼吁三家AI公司暂停AI开发。',
           evidence_ids: evidence.map((item) => item.id),
         },
       ],
