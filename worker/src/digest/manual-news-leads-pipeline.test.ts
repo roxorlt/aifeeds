@@ -5,7 +5,11 @@ import {
   type ManualLeadProcessingStore,
   type ManualNewsLeadRecord,
 } from './manual-news-leads-pipeline';
-import type { ManualNewsEvidence } from './manual-news-leads';
+import {
+  createManualLeadVerificationMarker,
+  validateManualLeadAssessment,
+  type ManualNewsEvidence,
+} from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 
 function documentFixture(
@@ -65,6 +69,7 @@ function lead(overrides: Partial<ManualNewsLeadRecord> = {}): ManualNewsLeadReco
 function memoryStore(initial = lead()) {
   let current = structuredClone(initial);
   const transitions: string[] = [];
+  let clearCalls = 0;
   const priorEvents: Array<{ event_key: string; review_date: string; lead_id: string }> = [];
   const store: ManualLeadProcessingStore = {
     async getLead() { return structuredClone(current); },
@@ -80,8 +85,9 @@ function memoryStore(initial = lead()) {
     async listRecentPriorEvents() { return structuredClone(priorEvents); },
     async findPriorEventsByEventKey() { return structuredClone(priorEvents); },
     async saveAssessment(_id, assessment) { current.assessment = structuredClone(assessment); },
+    async clearAssessment() { clearCalls += 1; current.assessment = null; },
   };
-  return { store, transitions, current: () => current, priorEvents };
+  return { store, transitions, current: () => current, priorEvents, clearCalls: () => clearCalls };
 }
 
 const officialEvidence: ManualNewsEvidence = {
@@ -117,14 +123,48 @@ function assessed(overrides = {}) {
   };
 }
 
+function verified(
+  candidate = assessed(),
+  overrides: Record<string, unknown> = {},
+) {
+  const claims = candidate.claims as Array<{ evidence_ids: string[] }>;
+  return {
+    overall_verdict: 'supported',
+    claim_results: claims.map((claim, claimIndex) => ({
+      claim_index: claimIndex,
+      supported: true,
+      issue_code: 'none',
+      evidence_ids: claim.evidence_ids,
+    })),
+    ...overrides,
+  };
+}
+
+function verifiedFromPrompt(prompt: { user: string }) {
+  const body = JSON.parse(prompt.user) as {
+    untrusted_candidate: { claims: Array<{ evidence_ids: string[] }> };
+  };
+  return {
+    overall_verdict: 'supported',
+    claim_results: body.untrusted_candidate.claims.map((claim, claimIndex) => ({
+      claim_index: claimIndex,
+      supported: true,
+      issue_code: 'none',
+      evidence_ids: claim.evidence_ids,
+    })),
+  };
+}
+
 describe('manual lead processing pipeline', () => {
   test('moves through observable stages and produces an evidence-bounded recommendation', async () => {
     const memory = memoryStore();
+    let verifyCalls = 0;
     await processManualNewsLead('ml-20260811-abc123', memory.store, {
       search: async () => [],
       fetch: async () => documentFixture(officialEvidence.url, '<p>doc</p>'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
+      verify: async () => { verifyCalls += 1; return verified(); },
     });
 
     expect(memory.transitions).toEqual([
@@ -135,7 +175,86 @@ describe('manual lead processing pipeline', () => {
     expect(memory.current()).toMatchObject({ status: 'recommended' });
     expect(memory.current().assessment).toMatchObject({
       recommendation: 'recommended', evidence_tier: 'official_primary',
+      verification: {
+        policy_version: expect.any(String),
+        digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
     });
+    expect(verifyCalls).toBe(1);
+  });
+
+  test.each([
+    ['negation reversal', 'contradicted'],
+    ['scope or time mismatch', 'scope_or_time_mismatch'],
+    ['claim absent from evidence', 'not_found'],
+  ])('clears and reviews a claim rejected for %s', async (_label, issueCode) => {
+    const memory = memoryStore();
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async () => {
+        verifyCalls += 1;
+        return verified(assessed(), {
+          overall_verdict: 'unsupported',
+          claim_results: [{
+            claim_index: 0, supported: false, issue_code: issueCode, evidence_ids: ['ev-official'],
+          }],
+        });
+      },
+    });
+
+    expect(verifyCalls).toBe(1);
+    expect(memory.clearCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', error_code: 'claim_verification_failed',
+      error_message: issueCode, assessment: null,
+    });
+  });
+
+  test.each([
+    ['missing claim result', { overall_verdict: 'supported', claim_results: [] }, 'invalid_claim_verification_coverage'],
+    ['duplicate claim index', {
+      overall_verdict: 'supported',
+      claim_results: [
+        { claim_index: 0, supported: true, issue_code: 'none', evidence_ids: ['ev-official'] },
+        { claim_index: 0, supported: true, issue_code: 'none', evidence_ids: ['ev-official'] },
+      ],
+    }, 'invalid_claim_verification_coverage'],
+    ['unknown evidence id', {
+      overall_verdict: 'supported',
+      claim_results: [{ claim_index: 0, supported: true, issue_code: 'none', evidence_ids: ['ev-unknown'] }],
+    }, 'unknown_claim_verification_evidence_id'],
+  ])('fails closed on verifier schema: %s', async (_label, verification, expectedMessage) => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async () => verification,
+    });
+
+    expect(memory.clearCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', error_code: 'claim_verification_failed',
+      error_message: expectedMessage, assessment: null,
+    });
+  });
+
+  test('rethrows transient verifier failure without saving an assessment', async () => {
+    const memory = memoryStore();
+    await expect(processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed(),
+      verify: async () => { throw new Error('trusted_gateway_http_503'); },
+    })).rejects.toThrow(/trusted_gateway_http_503/);
+
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: null });
   });
 
   test('moves parsed but schema-invalid output to review without persisting or retrying it', async () => {
@@ -149,9 +268,11 @@ describe('manual lead processing pipeline', () => {
         calls += 1;
         return assessed({ event_key: 'Anthropic 水印 2026' });
       },
+      verify: async () => { throw new Error('unexpected_verify'); },
     });
 
     expect(calls).toBe(1);
+    expect(memory.clearCalls()).toBe(1);
     expect(memory.current()).toMatchObject({
       status: 'needs_review',
       error_code: 'assessment_validation_failed',
@@ -184,6 +305,7 @@ describe('manual lead processing pipeline', () => {
         event_type: 'political_regulatory',
         claims: [{ text: '这是一名参议员的请求。', evidence_ids: ['ev-letter'] }],
       }),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
     expect(memory.current()).toMatchObject({ status: 'needs_review' });
     expect(memory.current().assessment).toMatchObject({ recommendation: 'needs_review', evidence_tier: 'insufficient' });
@@ -192,8 +314,11 @@ describe('manual lead processing pipeline', () => {
   test.each([
     ['missing C2PA despite matching vendors', 'Anthropic Claude C2PA provenance watermark', '', 'Anthropic Claude availability update'],
     ['missing o3 product token', 'OpenAI 发布 o3 模型', '', 'OpenAI announces a model update'],
+    ['does not match o3 to a longer product token', 'OpenAI 发布 o3 模型', '', 'OpenAI releases o3-mini'],
     ['missing numeric version', '豆包发布 2.1 版本', '', '豆包发布新版本'],
+    ['does not match a numeric version to a suffixed token', '豆包发布 2.1 版本', '', '豆包发布 2.1-beta'],
     ['bounded GPT version mismatch', 'OpenAI 发布 GPT-5.6', '', 'OpenAI releases GPT-5.60'],
+    ['does not match GPT version to a preview token', 'OpenAI 发布 GPT-5.6', '', 'OpenAI releases GPT-5.6-preview'],
   ])('preflights %s before calling the model', async (_label, inputText, note, evidenceText) => {
     const evidence = {
       ...officialEvidence,
@@ -210,6 +335,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => { throw new Error('unexpected_fetch'); },
       extract: async () => { throw new Error('unexpected_extract'); },
       assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async () => { throw new Error('unexpected_verify'); },
     });
 
     expect(assessCalls).toBe(0);
@@ -245,6 +371,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => { throw new Error('unexpected_fetch'); },
       extract: async () => { throw new Error('unexpected_extract'); },
       assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
 
     expect(assessCalls).toBe(1);
@@ -261,6 +388,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
     expect(memory.current()).toMatchObject({ status: 'duplicate' });
     expect(memory.current().assessment).toMatchObject({ recommendation: 'duplicate', duplicate_scope: 'cross_day' });
@@ -272,6 +400,7 @@ describe('manual lead processing pipeline', () => {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ recommendation: 'duplicate' }),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
     expect(memory.current()).toMatchObject({ status: 'needs_review' });
     expect(memory.current().assessment).toMatchObject({
@@ -291,6 +420,7 @@ describe('manual lead processing pipeline', () => {
         material_update: true, recommendation: 'duplicate',
         matched_event_key: 'anthropic-output-provenance-2026-08',
       }),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
     expect(memory.current().status).not.toBe('duplicate');
     expect(memory.current().assessment).toMatchObject({
@@ -304,6 +434,7 @@ describe('manual lead processing pipeline', () => {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ material_update: true }),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
     expect(memory.current()).toMatchObject({ status: 'needs_review' });
     expect(memory.current().assessment).toMatchObject({ material_update: false, recommendation: 'needs_review' });
@@ -316,6 +447,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ claims: [{ text: 'invented', evidence_ids: ['ev-missing'] }] }),
+      verify: async () => { throw new Error('unexpected_verify'); },
     });
     expect(memory.current()).toMatchObject({
       status: 'needs_review', error_code: 'assessment_validation_failed',
@@ -330,6 +462,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed({ matched_event_key: 'invented-prior-event-2026-08' }),
+      verify: async () => { throw new Error('unexpected_verify'); },
     });
     expect(memory.current()).toMatchObject({
       status: 'needs_review', error_code: 'assessment_validation_failed',
@@ -337,7 +470,7 @@ describe('manual lead processing pipeline', () => {
     });
   });
 
-  test('reuses a valid persisted assessment when replaying the verifying stage', async () => {
+  test('clears a legacy unmarked assessment and regenerates both passes in the same replay', async () => {
     const persisted = {
       ...assessed(),
       event_type: 'product_documentation' as const,
@@ -345,19 +478,151 @@ describe('manual lead processing pipeline', () => {
       evidence_tier: 'official_primary' as const,
     };
     const memory = memoryStore(lead({
-      status: 'verifying', evidence: [officialEvidence], assessment: persisted,
+      status: 'verifying', evidence: [officialEvidence], assessment: persisted as never,
     }));
     let assessCalls = 0;
+    let verifyCalls = 0;
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => { throw new Error('unexpected_search'); },
       fetch: async () => { throw new Error('unexpected_fetch'); },
       extract: async () => { throw new Error('unexpected_extract'); },
       assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
     });
 
-    expect(assessCalls).toBe(0);
+    expect(memory.clearCalls()).toBe(1);
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
     expect(memory.transitions).toEqual(['verifying->clustering', 'clustering->scored', 'scored->recommended']);
+    expect(memory.current()).toMatchObject({
+      status: 'recommended',
+      assessment: { verification: { policy_version: expect.any(String), digest: expect.any(String) } },
+    });
+  });
+
+  test('clears a stale digest after an assessment summary change and regenerates in the same replay', async () => {
+    const core = validateManualLeadAssessment(assessed(), [officialEvidence]);
+    const marker = await createManualLeadVerificationMarker(core, [officialEvidence]);
+    const memory = memoryStore(lead({
+      status: 'verifying', evidence: [officialEvidence],
+      assessment: {
+        ...core,
+        summary: '被修改过的摘要。',
+        evidence_tier: 'official_primary',
+        verification: marker,
+      },
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(memory.clearCalls()).toBe(1);
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
     expect(memory.current()).toMatchObject({ status: 'recommended' });
+  });
+
+  test('clears a persisted assessment that fails strict evidence revalidation and regenerates it', async () => {
+    const invalidPersisted = {
+      ...assessed({ claims: [{ text: '旧事实。', evidence_ids: ['ev-removed'] }] }),
+      event_type: 'product_documentation' as const,
+      recommendation: 'recommended' as const,
+      evidence_tier: 'official_primary' as const,
+      verification: { policy_version: 'claim-evidence-v1', digest: '0'.repeat(64) },
+    };
+    const memory = memoryStore(lead({
+      status: 'verifying', evidence: [officialEvidence], assessment: invalidPersisted as never,
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(memory.clearCalls()).toBe(1);
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.current()).toMatchObject({ status: 'recommended' });
+  });
+
+  test('reuses only a current marker and skips both model passes', async () => {
+    const core = validateManualLeadAssessment(assessed(), [officialEvidence]);
+    const marker = await createManualLeadVerificationMarker(core, [officialEvidence]);
+    const memory = memoryStore(lead({
+      status: 'verifying', evidence: [officialEvidence],
+      assessment: { ...core, evidence_tier: 'official_primary', verification: marker },
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => { assessCalls += 1; return assessed(); },
+      verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
+    });
+
+    expect(memory.clearCalls()).toBe(0);
+    expect(assessCalls).toBe(0);
+    expect(verifyCalls).toBe(0);
+    expect(memory.current()).toMatchObject({ status: 'recommended' });
+  });
+
+  test('runs anchor preflight before marker reuse and clears a now-irrelevant assessment', async () => {
+    const core = validateManualLeadAssessment(assessed(), [officialEvidence]);
+    const marker = await createManualLeadVerificationMarker(core, [officialEvidence]);
+    const memory = memoryStore(lead({
+      status: 'verifying', input_type: 'text', input_text: 'Anthropic Claude C2PA', input_url: '',
+      evidence: [officialEvidence],
+      assessment: { ...core, evidence_tier: 'official_primary', verification: marker },
+    }));
+    let modelCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => { modelCalls += 1; return assessed(); },
+      verify: async () => { modelCalls += 1; return verified(); },
+    });
+
+    expect(modelCalls).toBe(0);
+    expect(memory.clearCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review', error_code: 'evidence_relevance_unverified', assessment: null,
+    });
+  });
+
+  test('propagates assessment cleanup failure before changing status or regenerating', async () => {
+    const persisted = {
+      ...assessed(), event_type: 'product_documentation' as const,
+      recommendation: 'recommended' as const, evidence_tier: 'official_primary' as const,
+    };
+    const memory = memoryStore(lead({
+      status: 'verifying', evidence: [officialEvidence], assessment: persisted as never,
+    }));
+    memory.store.clearAssessment = async () => { throw new Error('D1_clear_failure'); };
+    let modelCalls = 0;
+
+    await expect(processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => { throw new Error('unexpected_search'); },
+      fetch: async () => { throw new Error('unexpected_fetch'); },
+      extract: async () => { throw new Error('unexpected_extract'); },
+      assess: async () => { modelCalls += 1; return assessed(); },
+      verify: async () => { modelCalls += 1; return verified(); },
+    })).rejects.toThrow(/D1_clear_failure/);
+
+    expect(modelCalls).toBe(0);
+    expect(memory.current()).toMatchObject({ status: 'verifying', assessment: expect.any(Object) });
   });
 
   test('resumes safely from an intermediate extracting state after a durable workflow retry', async () => {
@@ -367,6 +632,7 @@ describe('manual lead processing pipeline', () => {
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
       assess: async () => assessed(),
+      verify: async (prompt) => verifiedFromPrompt(prompt),
     });
 
     expect(memory.transitions).toEqual([
@@ -383,6 +649,7 @@ describe('manual lead processing pipeline', () => {
     const adapters = {
       search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence, assess: async () => assessed(),
+      verify: async (prompt: { user: string }) => verifiedFromPrompt(prompt),
       ...override(),
     };
     if (_label === 'search timeout') {

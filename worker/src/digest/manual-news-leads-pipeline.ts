@@ -2,14 +2,21 @@ import {
   applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
   buildManualLeadAssessmentPrompt,
+  buildManualLeadClaimVerificationPrompt,
   classifyManualLeadDuplicate,
+  createManualLeadVerificationMarker,
+  isCurrentManualLeadVerification,
   manualLeadAssessmentValidationErrorCode,
+  manualLeadAssessmentCore,
+  manualLeadClaimVerificationErrorCode,
   missingManualLeadEvidenceAnchors,
   validateManualLeadAssessment,
+  validateManualLeadClaimVerification,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
   type ManualNewsLeadAssessment,
   type ManualNewsLeadStatus,
+  type ManualLeadVerificationMarker,
 } from './manual-news-leads';
 import type { PublicDocument } from '../security/safe-url-fetch';
 
@@ -17,6 +24,7 @@ export type ProcessedManualLeadAssessment = ManualNewsLeadAssessment & {
   evidence_tier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient';
   duplicate_scope?: 'same_day' | 'cross_day' | null;
   matched_lead_id?: string | null;
+  verification: ManualLeadVerificationMarker;
 };
 
 export interface ManualNewsLeadRecord {
@@ -63,6 +71,7 @@ export interface ManualLeadProcessingStore {
   listRecentPriorEvents(date: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
   findPriorEventsByEventKey(eventKey: string, excludeLeadId: string): Promise<Array<{ event_key: string; review_date: string; lead_id: string }>>;
   saveAssessment(id: string, assessment: ProcessedManualLeadAssessment): Promise<void>;
+  clearAssessment(id: string): Promise<void>;
 }
 
 export interface ManualLeadProcessingAdapters {
@@ -70,6 +79,7 @@ export interface ManualLeadProcessingAdapters {
   fetch(url: string): Promise<PublicDocument>;
   extract(document: PublicDocument, hint?: ManualSearchResult): Promise<ManualNewsEvidence | null>;
   assess(prompt: { system: string; user: string }): Promise<unknown>;
+  verify(prompt: { system: string; user: string }): Promise<unknown>;
 }
 
 function conciseError(error: unknown): string {
@@ -159,7 +169,9 @@ export async function processManualNewsLead(
         });
         return (await store.getLead(leadId))!;
       }
-      if (!assessment && missingManualLeadEvidenceAnchors(normalized.text, evidence).length) {
+      if (missingManualLeadEvidenceAnchors(normalized.text, evidence).length) {
+        await store.clearAssessment(leadId);
+        assessment = null;
         await transition('needs_review', {
           error_code: 'evidence_relevance_unverified',
           error_message: 'high_confidence_anchor_missing',
@@ -168,24 +180,22 @@ export async function processManualNewsLead(
       }
       const priorEvents = await store.listRecentPriorEvents(normalized.date, leadId);
       if (assessment) {
-        const {
-          evidence_tier: _evidenceTier,
-          duplicate_scope: _duplicateScope,
-          matched_lead_id: _matchedLeadId,
-          ...persistedRaw
-        } = assessment;
+        let validated: ReturnType<typeof applyManualLeadEvidencePolicy> | null = null;
         try {
-          assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
-            persistedRaw, evidence, priorEvents.map((event) => event.event_key),
+          validated = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+            manualLeadAssessmentCore(assessment), evidence, priorEvents.map((event) => event.event_key),
           ), evidence);
-        } catch (error) {
-          await transition('needs_review', {
-            error_code: 'assessment_validation_failed',
-            error_message: manualLeadAssessmentValidationErrorCode(error),
-          });
-          return (await store.getLead(leadId))!;
+        } catch {
+          validated = null;
         }
-      } else {
+        if (validated && await isCurrentManualLeadVerification(validated, assessment.verification, evidence)) {
+          assessment = { ...validated, verification: assessment.verification };
+        } else {
+          await store.clearAssessment(leadId);
+          assessment = null;
+        }
+      }
+      if (!assessment) {
         const prompt = buildManualLeadAssessmentPrompt({
           date: normalized.date,
           text: normalized.text,
@@ -205,10 +215,51 @@ export async function processManualNewsLead(
           return (await store.getLead(leadId))!;
         }
         try {
-          assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+          const validatedAssessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
             raw, evidence, priorEvents.map((event) => event.event_key),
           ), evidence);
+          let verificationRaw: unknown;
+          try {
+            verificationRaw = await adapters.verify(buildManualLeadClaimVerificationPrompt({
+              assessment: validatedAssessment,
+              evidence,
+            }));
+          } catch (error) {
+            if (isTransientManualLeadError(error)) throw error;
+            await store.clearAssessment(leadId);
+            await transition('failed', {
+              error_code: 'claim_verification_failed',
+              error_message: 'claim_verification_model_failed',
+            });
+            return (await store.getLead(leadId))!;
+          }
+          let verification;
+          try {
+            verification = validateManualLeadClaimVerification(verificationRaw, validatedAssessment, evidence);
+          } catch (error) {
+            await store.clearAssessment(leadId);
+            await transition('needs_review', {
+              error_code: 'claim_verification_failed',
+              error_message: manualLeadClaimVerificationErrorCode(error),
+            });
+            return (await store.getLead(leadId))!;
+          }
+          if (verification.overall_verdict !== 'supported') {
+            const issueCode = verification.claim_results.find((item) => !item.supported)?.issue_code || 'unsupported';
+            await store.clearAssessment(leadId);
+            await transition('needs_review', {
+              error_code: 'claim_verification_failed',
+              error_message: issueCode,
+            });
+            return (await store.getLead(leadId))!;
+          }
+          assessment = {
+            ...validatedAssessment,
+            verification: await createManualLeadVerificationMarker(validatedAssessment, evidence),
+          };
         } catch (error) {
+          if (isTransientManualLeadError(error)) throw error;
+          await store.clearAssessment(leadId);
           await transition('needs_review', {
             error_code: 'assessment_validation_failed',
             error_message: manualLeadAssessmentValidationErrorCode(error),

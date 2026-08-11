@@ -1,7 +1,11 @@
 import type { Env } from '../index';
 import {
+  applyManualLeadEvidencePolicy,
   assertManualLeadTransition,
+  isCurrentManualLeadVerification,
+  manualLeadAssessmentCore,
   mergeManualLeadCandidate,
+  validateManualLeadAssessment,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
   type ManualNewsLeadStatus,
@@ -581,6 +585,16 @@ export class D1ManualLeadProcessingStore implements ManualLeadProcessingStore {
       assessment.score, assessment.recommendation, JSON.stringify(assessment), Date.now(),
     ).run();
   }
+
+  async clearAssessment(id: string): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        `/* manual_assessment:clear */ DELETE FROM manual_news_event_assessments WHERE lead_id = ?`,
+      ).bind(id).run();
+    } catch {
+      throw new Error('d1_clear_assessment_failed');
+    }
+  }
 }
 
 export async function confirmManualNewsLeadCandidate(
@@ -606,6 +620,19 @@ export async function confirmManualNewsLeadCandidate(
   const row = await env.DB.prepare(
     `/* manual_lead:by_id */ SELECT * FROM manual_news_leads WHERE id = ?`,
   ).bind(id).first<ManualLeadRow>();
+  if (!lead.assessment) return { ok: false, status: 409, error: 'lead_not_confirmable', lead };
+  let factVerified = false;
+  try {
+    const validated = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
+      manualLeadAssessmentCore(lead.assessment), lead.evidence,
+    ), lead.evidence);
+    factVerified = await isCurrentManualLeadVerification(
+      validated, lead.assessment.verification, lead.evidence,
+    );
+  } catch {
+    factVerified = false;
+  }
+  if (!factVerified) return { ok: false, status: 409, error: 'lead_not_fact_verified', lead };
   if (row?.last_mutation_kind === 'confirm' && row.last_mutation_idempotency_key === idempotencyKey) {
     const batch = row.confirmed_batch_id
       ? await getNewsReviewBatch(env, row.review_date, row.confirmed_batch_id)
@@ -624,7 +651,7 @@ export async function confirmManualNewsLeadCandidate(
     return { ok: false, status: 409, error: 'review_expired', lead };
   }
   if (lead.version !== expectedVersion) return { ok: false, status: 409, error: 'lead_version_conflict', lead };
-  if (!['recommended', 'needs_review'].includes(lead.status) || !lead.assessment) {
+  if (!['recommended', 'needs_review'].includes(lead.status)) {
     return { ok: false, status: 409, error: 'lead_not_confirmable', lead };
   }
 

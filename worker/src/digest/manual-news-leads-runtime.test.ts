@@ -3,6 +3,12 @@ import { describe, expect, test, vi } from 'vitest';
 import { applyManualLeadEvidencePolicy, validateManualLeadAssessment } from './manual-news-leads';
 import { createManualNewsLeadRuntimeAdapters, extractManualNewsEvidence } from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
+import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
+
+vi.mock('../hf-paper/llm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hf-paper/llm')>();
+  return { ...actual, callDeepSeekJson: vi.fn() };
+});
 
 function auditObject(
   url: string,
@@ -48,6 +54,23 @@ function documentFixture(
 }
 
 describe('manual lead evidence extraction', () => {
+  test('runs the independent claim verifier through DeepSeek Pro JSON mode', async () => {
+    const mockedCall = vi.mocked(callDeepSeekJson);
+    mockedCall.mockResolvedValueOnce({ data: { overall_verdict: 'supported', claim_results: [] } });
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: {} as never,
+      DEEPSEEK_API_KEY: 'test-key',
+    } as never);
+
+    await expect(adapters.verify({ system: 'independent verifier', user: '{"claims":[]}' }))
+      .resolves.toEqual({ overall_verdict: 'supported', claim_results: [] });
+    expect(mockedCall).toHaveBeenCalledWith(
+      'test-key', DEEPSEEK_PRO, '{"claims":[]}',
+      expect.objectContaining({ systemPrompt: 'independent verifier', retries: 1 }),
+    );
+    mockedCall.mockReset();
+  });
+
   test('keeps an explicit source publication time separate from retrieval time', async () => {
     const evidence = await extractManualNewsEvidence(documentFixture(
       'https://www.anthropic.com/news/example',

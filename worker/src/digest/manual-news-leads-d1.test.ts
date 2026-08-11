@@ -15,6 +15,7 @@ import {
 class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
   failAudit = false;
+  failAssessmentClear = false;
   private batchTail: Promise<void> = Promise.resolve();
   private nextBatchGate: { entered: () => void; released: Promise<void> } | null = null;
   private nextFirstGate: { marker: string; entered: () => void; released: Promise<void> } | null = null;
@@ -82,6 +83,9 @@ class SqliteD1 {
       all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
       run: async () => {
         if (this.failAudit && sql.includes('manual_audit:mutation')) throw new Error('injected_audit_failure');
+        if (this.failAssessmentClear && sql.includes('manual_assessment:clear')) {
+          throw new Error('injected_clear_failure');
+        }
         const result = statement.run(...bindings);
         return { success: true, meta: { changes: Number(result.changes) } };
       },
@@ -174,6 +178,10 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
   return {
     search: async () => [], fetch: async () => { throw new Error('unused'); },
     extract: async () => null, assess: async () => assessment(),
+    verify: async () => ({
+      overall_verdict: 'supported',
+      claim_results: [{ claim_index: 0, supported: true, issue_code: 'none', evidence_ids: ['ev-official'] }],
+    }),
   };
 }
 
@@ -245,6 +253,43 @@ describe('manual lead D1-backed dedupe', () => {
     expect(JSON.parse(String(state.db.sqlite.prepare(
       'SELECT fetch_audit_json FROM manual_news_evidence WHERE lead_id = ? AND evidence_id = ?',
     ).get(state.leadId, 'ev-audited')?.fetch_audit_json))).toEqual(fetchAudit);
+  });
+
+  test('clears every persisted assessment for a lead before regeneration', async () => {
+    const state = fixture('verifying', 9);
+    for (const assessmentVersion of [2, 7]) {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
+        lead_id, assessment_version, event_key, event_type, material_update, score,
+        recommendation, assessment_json, created_at
+      ) VALUES (?, ?, ?, 'product_documentation', 0, 82, 'recommended', ?, ?)`).run(
+        state.leadId, assessmentVersion, assessment().event_key, JSON.stringify(assessment()), assessmentVersion,
+      );
+    }
+    const store = new D1ManualLeadProcessingStore(state.env);
+
+    await store.clearAssessment(state.leadId);
+
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 0 });
+    expect((await store.getLead(state.leadId))?.assessment).toBeNull();
+  });
+
+  test('classifies assessment cleanup failure as transient and preserves the stored row', async () => {
+    const state = fixture('verifying', 9);
+    state.db.sqlite.prepare(`INSERT INTO manual_news_event_assessments (
+      lead_id, assessment_version, event_key, event_type, material_update, score,
+      recommendation, assessment_json, created_at
+    ) VALUES (?, 7, ?, 'product_documentation', 0, 82, 'recommended', ?, 7)`).run(
+      state.leadId, assessment().event_key, JSON.stringify(assessment()),
+    );
+    state.db.failAssessmentClear = true;
+
+    await expect(new D1ManualLeadProcessingStore(state.env).clearAssessment(state.leadId))
+      .rejects.toThrow(/d1_clear_assessment_failed/);
+    expect(state.db.sqlite.prepare(
+      'SELECT COUNT(*) AS count FROM manual_news_event_assessments WHERE lead_id = ?',
+    ).get(state.leadId)).toEqual({ count: 1 });
   });
 
   test('a lone lead cannot classify itself as a same-day duplicate after its assessment is saved', async () => {
