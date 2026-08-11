@@ -441,8 +441,16 @@ async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
   return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
-async function createTitleOnlyScopeProof(scopeClause: string) {
-  const support = techCrunchAlibabaBan.claims_supported[0];
+async function createTitleOnlyScopeProof(
+  scopeClause: string,
+  core: { sourceObject: string; projectionObject: string } | null = null,
+) {
+  const raw = alibabaBanGeneratedAssessment(
+    core ? { object: core.projectionObject } : {},
+    core ? { object: core.sourceObject } : {},
+  );
+  const source = raw.source_facts[0].atomic_fact;
+  const support = `${source.subject} ${source.predicate} ${source.object}.`;
   const evidence: ManualNewsEvidence[] = [{
     ...techCrunchAlibabaBan,
     title: support,
@@ -450,7 +458,7 @@ async function createTitleOnlyScopeProof(scopeClause: string) {
     claims_supported: [support],
   }];
   const generated = validateManualLeadGeneratedAssessment(
-    alibabaBanGeneratedAssessment(), evidence,
+    raw, evidence,
   );
   const candidate: ManualNewsProcessedAssessment = {
     ...applyManualLeadEvidencePolicy(generated, evidence),
@@ -925,11 +933,51 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    'Alibaba said its Claude Code restriction applies only to employees in China.',
+    'Alibaba said its Claude Code restriction applies only to full-time employees.',
+    'Alibaba said its Claude Code restriction applies only to part-time employees.',
+    'Alibaba said its Claude Code restriction applies only to some employees.',
+    'Alibaba said its Claude Code restriction applies only to employees in the security department.',
+    'Alibaba said its Claude Code restriction applies only to employees in the cloud division.',
+    'Alibaba said its Claude Code restriction applies only to employees in the research team.',
+    'Alibaba said its Claude Code restriction applies only to employees on company devices.',
+    'Alibaba said its Claude Code restriction applies only to employees on confidential projects.',
+    'Alibaba said its Claude Code restriction applies only to employees in the confidential cohort.',
+    '阿里巴巴表示Claude Code限制仅适用于中国员工。',
+    '阿里巴巴表示Claude Code限制仅适用于全职员工。',
+    '阿里巴巴表示Claude Code限制仅适用于部分员工。',
+  ])('blocks a current v9 proof when the same participant has an additional scope qualifier: %s', async (scopeClause) => {
+    await expect(createTitleOnlyScopeProof(scopeClause))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
     'Alibaba said its Claude Code restriction applies only to employees.',
     '阿里巴巴表示Claude Code限制仅适用于员工。',
     'Anthropic said its Claude Code restriction applies only to contractors.',
   ])('keeps the title proof current for the same participant scope or another controller: %s', async (scopeClause) => {
     await expect(createTitleOnlyScopeProof(scopeClause)).resolves.toBe(true);
+  });
+
+  test.each([
+    {
+      sourceObject: 'employees in China from using Claude Code',
+      projectionObject: '中国员工使用Claude Code',
+      scopeClause: 'Alibaba said its Claude Code restriction applies only to employees in China.',
+    },
+    {
+      sourceObject: 'full-time employees from using Claude Code',
+      projectionObject: '全职员工使用Claude Code',
+      scopeClause: 'Alibaba said its Claude Code restriction applies only to full-time employees.',
+    },
+  ])('keeps a current v9 proof when the core fact has the same participant qualifier: $sourceObject', async (fixture) => {
+    await expect(createTitleOnlyScopeProof(fixture.scopeClause, fixture)).resolves.toBe(true);
+  });
+
+  test('does not apply another controller participant qualifier to the Alibaba core event', async () => {
+    await expect(createTitleOnlyScopeProof(
+      'Anthropic said its Claude Code restriction applies only to employees in China.',
+    )).resolves.toBe(true);
   });
 
   test('treats a question-framed misleading rumor headline as uncertain, not a declarative denial', () => {

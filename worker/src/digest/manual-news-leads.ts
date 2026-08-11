@@ -945,7 +945,7 @@ const BILINGUAL_PARTICIPANT_PATTERNS: ReadonlyArray<readonly [
   ManualBilingualParticipantRole,
   RegExp,
 ]> = [
-  ['employees', /(?:员工|雇员|职员)|\b(?:employees?|staff|workers?)\b/iu],
+  ['employees', /(?:员工|雇员|(?<!全)职员)|\b(?:employees?|staff|workers?)\b/iu],
   ['customers', /(?:客户)|\b(?:customers?|clients?)\b/iu],
   ['users', /(?:用户)|\busers?\b/iu],
   ['contractors', /(?:承包商|合同工)|\bcontractors?\b/iu],
@@ -1278,6 +1278,14 @@ const BILINGUAL_SCOPE_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|solely|some|partial(?:ly)?|limited|restricted|supported)\b/iu,
   /(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/iu,
 ];
+const BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE: ReadonlyArray<readonly [string, RegExp]> = [
+  ['employment:full_time', /(?:全职)|\bfull[ -]?time\b/iu],
+  ['employment:part_time', /(?:兼职)|\bpart[ -]?time\b/iu],
+];
+const PARTICIPANT_SCOPE_TARGET_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:(?:appl(?:y|ies|ied))\s+(?:only|solely)\s+to|(?:only|solely)\s+appl(?:y|ies|ied)\s+to|(?:is|are|was|were)\s+(?:limited|restricted)\s+to|(?:limited|restricted)\s+to|covers?\s+(?:only|solely))\s+(.+?)[.!?]?$/iu,
+  /(?:仅限于?|只限于?|仅适用于?|只适用于?|部分适用于?|限于)\s*(.+?)[。！？]?$/u,
+];
 const BILINGUAL_OBJECT_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:无法|不能|不可|避免)|\b(?:unable\s+to|cannot|can['’]t|avoid(?:s|ed|ing)?)\b/iu,
   /(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:not|never|without)\b/iu,
@@ -1328,6 +1336,73 @@ function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): vo
   }
 }
 
+function participantScopeTarget(value: string): string | null {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  for (const pattern of PARTICIPANT_SCOPE_TARGET_PATTERNS) {
+    const match = pattern.exec(normalized);
+    if (match?.[1]) return match[1].trim();
+  }
+  const participantSpans = BILINGUAL_PARTICIPANT_PATTERNS.flatMap(([, pattern]) =>
+    regexSemanticSpans(normalized, pattern, 'participant'));
+  if (participantSpans.length !== 1) return null;
+  const relationSpans = BILINGUAL_OBJECT_RELATION_PATTERNS.flatMap(([, pattern]) =>
+    regexSemanticSpans(normalized, pattern, 'relation'))
+    .filter((span) => span.start >= participantSpans[0].end)
+    .sort((left, right) => left.start - right.start);
+  const end = relationSpans[0]?.start ?? normalized.length;
+  return normalized.slice(0, end)
+    .replace(/\b(?:from|to)\s*$/iu, '')
+    .replace(/(?:以便|用于|从而)\s*$/u, '')
+    .trim();
+}
+
+interface ManualParticipantScopeSlots {
+  participant_roles: ManualBilingualParticipantRole[];
+  participant_quantifier: ManualBilingualQuantifier;
+  qualifiers: string[];
+  regions: string[];
+  residue: string;
+}
+
+function participantScopeSlots(value: string): ManualParticipantScopeSlots | null {
+  const target = participantScopeTarget(value);
+  if (!target) return null;
+  const participantRoles = bilingualParticipantRoles(target);
+  if (participantRoles.length !== 1) return null;
+  const mask = new Array<boolean>(target.length).fill(false);
+  for (const patterns of [
+    BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_QUANTIFIER_PATTERNS,
+    BILINGUAL_SCOPE_PATTERNS,
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.map(([, pattern]) => pattern),
+  ]) {
+    for (const pattern of patterns) consumeSemanticPattern(mask, target, pattern);
+  }
+  for (const [, aliases] of FACT_REGION_ALIASES) {
+    for (const alias of aliases) consumeSemanticPattern(mask, target, semanticAliasPattern(alias));
+  }
+  for (const span of relativeFactTimeSpans(target)) consumeSemanticSpan(mask, span);
+  for (const pattern of ABSOLUTE_FACT_TIME_PATTERNS) consumeSemanticPattern(mask, target, pattern);
+  for (const pattern of [
+    /\b(?:in|within|inside|on|at|for|of|the|a|an)\b/giu,
+  ]) consumeSemanticPattern(mask, target, pattern);
+  consumeAdjacentChineseFunctionWords(mask, target);
+  const residue = target.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('')
+    .toLocaleLowerCase('en-US')
+    .replace(/\b(department|division|team|device|project)s\b/gu, '$1')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return {
+    participant_roles: participantRoles,
+    participant_quantifier: bilingualParticipantQuantifier(target),
+    qualifiers: BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE
+      .filter(([, pattern]) => pattern.test(target))
+      .map(([qualifier]) => qualifier),
+    regions: bilingualFactRegions(target),
+    residue,
+  };
+}
+
 function assertConsumedPredicateSemantics(
   value: string,
   occurrence: FactActionOccurrence,
@@ -1344,6 +1419,7 @@ function assertConsumedObjectSemantics(value: string): void {
     BILINGUAL_FACT_CONCEPTS.map(([, pattern]) => pattern),
     BILINGUAL_QUANTIFIER_PATTERNS,
     BILINGUAL_SCOPE_PATTERNS,
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.map(([, pattern]) => pattern),
     BILINGUAL_OBJECT_POLARITY_PATTERNS,
     BILINGUAL_ATTRIBUTION_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_EPISTEMIC_PATTERNS.map(([, pattern]) => pattern),
@@ -1400,6 +1476,8 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
   if (reason.present && !reason.canonical) throw new Error('invalid_claim_object');
   const participantRoles = bilingualParticipantRoles(reason.residual);
   if (participantRoles.length > 1) throw new Error('invalid_claim_object');
+  const participantScope = participantRoles.length ? participantScopeSlots(reason.residual) : null;
+  if (participantRoles.length && !participantScope) throw new Error('invalid_claim_object');
   const objectRelations = canonicalObjectRelations(reason.residual);
   const targetEntities = [...registeredEntityIdentities(reason.residual)].sort();
   const targetQualifiers = bilingualTargetQualifiers(reason.residual);
@@ -1474,6 +1552,13 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.relative_times) !== canonicalJson(projectionSlots.relative_times)) {
     return 'invalid_editorial_projection_time';
   }
+  const sourceParticipantScope = sourceSlots.participant_roles.length
+    ? participantScopeSlots(canonicalFactReason(source.object).residual) : null;
+  const projectionParticipantScope = projectionSlots.participant_roles.length
+    ? participantScopeSlots(canonicalFactReason(projection.object).residual) : null;
+  if (canonicalJson(sourceParticipantScope) !== canonicalJson(projectionParticipantScope)) {
+    return 'invalid_editorial_projection_object';
+  }
   if (sourceSlots.reason !== projectionSlots.reason
     || sourceSlots.participant_quantifier !== projectionSlots.participant_quantifier
     || sourceSlots.scope !== projectionSlots.scope
@@ -1525,8 +1610,14 @@ function projectionContractError(
   if (canonicalJson([...sourceEntities].sort()) !== canonicalJson([...projectionEntities].sort())) {
     return 'invalid_editorial_projection_object';
   }
-  const sourceAnchors = highConfidenceLeadAnchors(source.object).map((item) => item.toLowerCase()).sort();
-  const projectionAnchors = highConfidenceLeadAnchors(projection.object).map((item) => item.toLowerCase()).sort();
+  const withoutParticipantEmploymentScope = (value: string) =>
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.reduce(
+      (result, [, pattern]) => result.replace(pattern, ' '), value,
+    );
+  const sourceAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(source.object))
+    .map((item) => item.toLowerCase()).sort();
+  const projectionAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(projection.object))
+    .map((item) => item.toLowerCase()).sort();
   if (canonicalJson(sourceAnchors) !== canonicalJson(projectionAnchors)) {
     return 'invalid_editorial_projection_object';
   }
@@ -2037,10 +2128,15 @@ function sameCoreScopeRelation(
   fact: ManualSourceAtomicFact,
   clause: string,
 ): 'same' | 'conflict' | 'unresolved' {
-  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
-  const actualParticipants = bilingualParticipantRoles(clause);
-  if (!actualParticipants.length) return expectedParticipants.length ? 'unresolved' : 'same';
-  if (canonicalJson(expectedParticipants) !== canonicalJson(actualParticipants)) return 'conflict';
+  const expected = participantScopeSlots(fact.atomic_fact.object);
+  const actual = participantScopeSlots(clause);
+  if (!actual) return expected ? 'unresolved' : 'same';
+  if (!expected) return 'conflict';
+  if (canonicalJson(expected.participant_roles) !== canonicalJson(actual.participant_roles)
+    || expected.participant_quantifier !== actual.participant_quantifier
+    || canonicalJson(expected.qualifiers) !== canonicalJson(actual.qualifiers)
+    || canonicalJson(expected.regions) !== canonicalJson(actual.regions)
+    || expected.residue !== actual.residue) return 'conflict';
   const expectedScope = dominantFactScope(fact.atomic_fact.object);
   const actualScope = dominantFactScope(clause);
   return expectedScope !== null && actualScope !== null && expectedScope !== actualScope
@@ -4026,7 +4122,7 @@ const LATIN_ENTITY_STOPWORDS = new Set([
   'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'new', 'of', 'on', 'or', 'official',
   'the', 'this', 'to', 'with', 'ai', 'model', 'models', 'product', 'products', 'service', 'services',
   'company', 'technology', 'documentation', 'document', 'release', 'artificial', 'intelligence',
-  'language', 'foundation', 'generative', 'multimodal',
+  'language', 'foundation', 'generative', 'multimodal', 'full-time', 'part-time',
 ]);
 
 type StructuredFactSlotKind = 'object' | 'version' | 'region';
