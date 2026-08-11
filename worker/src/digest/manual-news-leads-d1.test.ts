@@ -6,7 +6,12 @@ import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manu
 import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
+  MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+  MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
   validateManualLeadAssessment,
+  validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
   type ManualLeadPriorEvent,
   type ManualNewsEvidence,
@@ -204,8 +209,8 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
     title, excerpt, claims_supported_json, reliable
   ) VALUES (?, 'ev-official', 'https://support.claude.com/example', 'official_help', 'claude.com',
     '2026-08-10T13:30:00.000Z', 2, 'Official help',
-    'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
-    '["On 2026-08-10, Anthropic Claude provenance documentation covers supported products only."]', 1)`).run(leadId);
+    'Anthropic documented Claude provenance for supported products on 2026-08-10.',
+    '["Anthropic documented Claude provenance for supported products on 2026-08-10."]', 1)`).run(leadId);
   return {
     db,
     env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
@@ -213,7 +218,7 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   };
 }
 
-const fixtureFact = 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.';
+const fixtureFact = 'Anthropic documented Claude provenance for supported products on 2026-08-10.';
 
 function assessment() {
   return {
@@ -226,6 +231,51 @@ function assessment() {
   };
 }
 
+function generatedAssessment(overrides: Record<string, unknown> = {}) {
+  const overrideClaims = Array.isArray(overrides.claims) ? overrides.claims : null;
+  const sourceFacts = (overrideClaims || [{
+    atomic_fact: {
+      subject: 'Anthropic', predicate: 'documented',
+      object: 'Claude provenance for supported products on 2026-08-10',
+    },
+    evidence_ids: ['ev-official'],
+  }]).map((claim, index) => {
+    const row = claim as { atomic_fact?: Record<string, unknown>; evidence_ids?: string[] };
+    return {
+      fact_ref: `fact-${String(index + 1).padStart(2, '0')}`,
+      source_language: /\p{Script=Han}/u.test(JSON.stringify(row.atomic_fact)) ? 'zh' : 'en',
+      ...(row.atomic_fact ? { atomic_fact: { subject_role: 'organization', ...row.atomic_fact } } : {}),
+      evidence_ids: row.evidence_ids,
+      ...(!row.atomic_fact ? claim as Record<string, unknown> : {}),
+    };
+  });
+  const { claims: _claims, title: _title, summary: _summary, ...rest } = overrides;
+  return {
+    event_key: assessment().event_key,
+    event_type: assessment().event_type, material_update: false, score: 82,
+    recommendation: 'recommended', occurred_at: '2026-08-10', uncertainties: [],
+    source_facts: sourceFacts,
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已披露',
+          object: '2026年8月10日受支持产品的Claude来源信息',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01', source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: 'Anthropic', subject_role: 'organization', predicate: '已披露',
+          object: '2026年8月10日受支持产品的Claude来源信息',
+        },
+      }],
+    },
+    matched_event_key: null,
+    ...rest,
+  };
+}
+
 function processedAssessment() {
   const evidence = [{
     id: 'ev-official', url: 'https://support.claude.com/example', source_type: 'official_help' as const,
@@ -235,7 +285,7 @@ function processedAssessment() {
     reliable: true, fetch_audit: null,
   }];
   return {
-    ...applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessment(), evidence), evidence),
+    ...applyManualLeadEvidencePolicy(validateManualLeadGeneratedAssessment(generatedAssessment(), evidence), evidence),
     duplicate_scope: null, matched_lead_id: null,
   };
 }
@@ -316,7 +366,14 @@ function verifiedAssessment(
     assessment: candidate, evidence, prior_events: priorEvents,
   }).user) as {
     facts: Array<{ fact_id: string; untrusted_prior_events?: Array<{ event_key: string }> }>;
+    projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
   }).facts;
+  const promptBody = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate, evidence, prior_events: priorEvents,
+  }).user) as {
+    facts: Array<{ fact_id: string; untrusted_prior_events?: Array<{ event_key: string }> }>;
+    projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
+  };
   return validateManualLeadFactVerification({
     overall_verdict: 'supported',
     fact_results: facts.map((fact) => ({
@@ -334,6 +391,12 @@ function verifiedAssessment(
         },
       } : {}),
     })),
+    ...(promptBody.projections?.length ? {
+      projection_results: promptBody.projections.map((projection) => ({
+        projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+        supported: true, issue_code: 'none',
+      })),
+    } : {}),
   }, candidate, evidence, { prior_events: priorEvents });
 }
 
@@ -349,10 +412,11 @@ function saveFixtureAssessment(
 function verifyingAdapters(): ManualLeadProcessingAdapters {
   return {
     search: async () => [], fetch: async () => { throw new Error('unused'); },
-    extract: async () => null, assess: async () => assessment(),
+    extract: async () => null, assess: async () => generatedAssessment(),
     verify: async (prompt) => {
       const body = JSON.parse(prompt.user) as {
         facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
+        projections?: Array<{ projection_id: string; source_fact_ids: string[] }>;
       };
       return {
         overall_verdict: 'supported',
@@ -367,6 +431,12 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
             },
           } : {}),
         })),
+        ...(body.projections?.length ? {
+          projection_results: body.projections.map((projection) => ({
+            projection_id: projection.projection_id, source_fact_ids: projection.source_fact_ids,
+            supported: true, issue_code: 'none',
+          })),
+        } : {}),
       };
     },
   };
@@ -633,7 +703,11 @@ describe('manual lead D1-backed dedupe', () => {
     expect(createdAudit.mutation_nonce).toBe(createdVerification.creation_nonce);
     expect(JSON.parse(createdAudit.metadata_json)).toMatchObject({
       assessment_version: 9_000_001,
-      policy_version: expect.any(String),
+      policy_version: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
       canonical_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
       processing_owner: PROCESSING_OWNER,
       processing_attempt: 1,
@@ -1026,6 +1100,24 @@ describe('manual lead D1-backed dedupe', () => {
     expect(result).toMatchObject({ status: 'recommended', assessment: { score: 82 } });
     expect(assessCalls).toBe(0);
     expect(verifyCalls).toBe(0);
+    const transitionAudit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'status_transition'
+        AND from_status = 'verifying' AND to_status = 'clustering'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(transitionAudit.metadata_json)).toEqual({
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+      assessment_recovery: 'persisted_verified',
+    });
+    const createAudit = state.db.sqlite.prepare(`SELECT metadata_json FROM manual_news_lead_audit
+      WHERE lead_id = ? AND action = 'verification_create'`).get(state.leadId) as { metadata_json: string };
+    expect(JSON.parse(createAudit.metadata_json)).toMatchObject({
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
+    });
   });
 
   test('persists one HMAC verification after validation-guided assessment regeneration', async () => {
@@ -1041,8 +1133,14 @@ describe('manual lead D1-backed dedupe', () => {
         assess: async () => {
           assessCalls += 1;
           return assessCalls === 1
-            ? { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] }
-            : assessment();
+            ? generatedAssessment({ claims: [{
+              atomic_fact: {
+                subject: 'Anthropic', predicate: 'documented',
+                object: 'Claude provenance for supported products on 2026-08-10',
+              },
+              evidence_ids: ['ev-model-invented'],
+            }] })
+            : generatedAssessment();
         },
         verify: async (prompt) => {
           verifyCalls += 1;
@@ -1063,6 +1161,10 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_generation_attempts: 2,
       assessment_last_validation_code: 'valid',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
     });
   });
 
@@ -1076,7 +1178,13 @@ describe('manual lead D1-backed dedupe', () => {
         ...verifyingAdapters(),
         assess: async () => {
           assessCalls += 1;
-          return { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] };
+          return generatedAssessment({ claims: [{
+            atomic_fact: {
+              subject: 'Anthropic', predicate: 'documented',
+              object: 'Claude provenance for supported products on 2026-08-10',
+            },
+            evidence_ids: ['ev-model-invented'],
+          }] });
         },
         verify: async () => { throw new Error('unexpected_verify'); },
       },
@@ -1098,6 +1206,10 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_generation_attempts: 2,
       assessment_last_validation_code: 'unknown_evidence_id',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      assessment_source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+      assessment_editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+      assessment_verification_policy: MANUAL_LEAD_VERIFICATION_POLICY_VERSION,
     });
   });
 
