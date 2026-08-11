@@ -181,6 +181,105 @@ function supportedTextVerification(
   };
 }
 
+function alibabaBanGeneratedAssessment(
+  projection: { subject?: string; predicate?: string; object?: string } = {},
+  source: { predicate?: string; object?: string } = {},
+) {
+  return {
+    event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+    event_type: 'industry_event',
+    material_update: false,
+    score: 88,
+    recommendation: 'needs_review',
+    occurred_at: null,
+    uncertainties: [],
+    matched_event_key: null,
+    source_facts: [{
+      fact_ref: 'fact-01',
+      source_language: 'en',
+      atomic_fact: {
+        subject: 'Alibaba',
+        subject_role: 'organization',
+        predicate: source.predicate ?? 'reportedly bans',
+        object: source.object ?? 'employees from using Claude Code',
+      },
+      evidence_ids: [techCrunchAlibabaBan.id],
+    }],
+    editorial_projection: {
+      title: {
+        projection_ref: 'title-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: projection.subject ?? '阿里巴巴',
+          subject_role: 'organization',
+          predicate: projection.predicate ?? '据称禁止',
+          object: projection.object ?? '员工使用Claude Code',
+        },
+      },
+      summary: [{
+        projection_ref: 'summary-01',
+        source_fact_refs: ['fact-01'],
+        atomic_fact: {
+          subject: projection.subject ?? '阿里巴巴',
+          subject_role: 'organization',
+          predicate: projection.predicate ?? '据称禁止',
+          object: projection.object ?? '员工使用Claude Code',
+        },
+      }],
+    },
+  };
+}
+
+async function createMaliciouslySupportedAlibabaProjectionProof(input: {
+  projection?: { subject?: string; predicate?: string; object?: string };
+  source?: { predicate?: string; object?: string };
+  quote?: string;
+}) {
+  const quote = input.quote ?? techCrunchAlibabaBan.claims_supported[0];
+  const evidence = [{
+    ...techCrunchAlibabaBan,
+    title: quote,
+    excerpt: quote,
+    claims_supported: [quote],
+  }];
+  const generated = validateManualLeadGeneratedAssessment(
+    alibabaBanGeneratedAssessment(input.projection, input.source),
+    evidence,
+  );
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, evidence),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate,
+    evidence,
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(fact.fact_id, evidence[0].id, quote)),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+  }, candidate, evidence);
+  const proofInput = {
+    lead_id: 'ml-20260811-malicious-projection',
+    assessment_version: 8,
+    assessment: candidate,
+    evidence,
+    verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
+}
+
 describe('manual news lead domain', () => {
   test('accepts text-only and URL-only leads, but rejects empty or ambiguous inputs', () => {
     expect(validateManualNewsLeadInput({ date: '2026-08-11', text: 'Anthropic 输出水印', note: '' }))
@@ -452,6 +551,157 @@ describe('manual news lead domain', () => {
         expect.objectContaining({ fact_id: validated.source_facts?.[0].fact_id, supported: true }),
       ]),
     });
+  });
+
+  test.each([
+    ['predicate modality reported to possible', { predicate: '可能禁止' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['predicate modality alleged to reported', { predicate: '据称禁止' }, { predicate: 'allegedly bans' }, 'Alibaba allegedly bans employees from using Claude Code.'],
+    ['predicate modality planned to asserted', { predicate: '禁止' }, { predicate: 'plans to ban' }, 'Alibaba plans to ban employees from using Claude Code.'],
+    ['predicate modality completed to asserted', { predicate: '禁止' }, { predicate: 'has banned' }, 'Alibaba has banned employees from using Claude Code.'],
+    ['participant employees to customers', { object: '客户使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['participant employees to users', { object: '用户使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['participant employees to contractors', { object: '承包商使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['participant employees to public', { object: '公众使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['object-local polarity expansion', { object: '员工不使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['object-local modality omission', { object: '员工使用Claude Code' }, { object: 'employees who may use Claude Code' }, 'Alibaba reportedly bans employees who may use Claude Code.'],
+    ['object-local allegation omission', { object: '员工使用Claude Code' }, { object: 'employees allegedly using Claude Code' }, 'Alibaba reportedly bans employees allegedly using Claude Code.'],
+    ['object-local negation omission', { object: '员工使用Claude Code' }, { object: 'employees not to use Claude Code' }, 'Alibaba reportedly bans employees not to use Claude Code.'],
+    ['object relation use to access', { object: '员工访问Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    ['US region to China', { object: '中国员工使用Claude Code' }, { object: 'employees in the US from using Claude Code' }, 'Alibaba reportedly bans employees in the US from using Claude Code.'],
+    ['California region to Beijing', { object: '北京员工使用Claude Code' }, { object: 'employees in California from using Claude Code' }, 'Alibaba reportedly bans employees in California from using Claude Code.'],
+    ['Europe region to Asia', { object: '亚洲员工使用Claude Code' }, { object: 'employees in Europe from using Claude Code' }, 'Alibaba reportedly bans employees in Europe from using Claude Code.'],
+    ['security reason to cost reason', { object: '员工因成本原因使用Claude Code' }, { object: 'employees from using Claude Code due to security concerns' }, 'Alibaba reportedly bans employees from using Claude Code due to security concerns.'],
+    ['product version 2.0 to 2.1', { object: '员工使用Claude Code 2.1' }, { object: 'employees from using Claude Code 2.0' }, 'Alibaba reportedly bans employees from using Claude Code 2.0.'],
+    ['event date August 11 to August 12', { object: '员工于2026年8月12日使用Claude Code' }, { object: 'employees from using Claude Code on 2026-08-11' }, 'Alibaba reportedly bans employees from using Claude Code on 2026-08-11.'],
+    ['participant quantifier expansion', { object: '部分员工使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+  ])('blocks a malicious supported verifier from signing bilingual slot drift: %s', async (
+    _label,
+    projection,
+    source,
+    quote,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({ projection, source, quote }))
+      .rejects.toThrow(/invalid_editorial_projection/);
+  });
+
+  test.each([
+    [{ predicate: '据称禁止', object: '员工使用Claude Code' }, {}, techCrunchAlibabaBan.claims_supported[0]],
+    [{ predicate: '据称禁止', object: '美国员工使用Claude Code' }, { object: 'employees in the US from using Claude Code' }, 'Alibaba reportedly bans employees in the US from using Claude Code.'],
+    [{ predicate: '据称禁止', object: '员工因安全担忧使用Claude Code' }, { object: 'employees from using Claude Code due to security concerns' }, 'Alibaba reportedly bans employees from using Claude Code due to security concerns.'],
+    [{ predicate: '可能禁止', object: '部分员工使用Claude Code' }, { predicate: 'may ban', object: 'some staff from using Claude Code' }, 'Alibaba may ban some staff from using Claude Code.'],
+    [{ predicate: '被指禁止', object: '员工使用Claude Code' }, { predicate: 'allegedly bans' }, 'Alibaba allegedly bans employees from using Claude Code.'],
+    [{ predicate: '计划禁止', object: '员工使用Claude Code' }, { predicate: 'plans to ban' }, 'Alibaba plans to ban employees from using Claude Code.'],
+    [{ predicate: '已禁止', object: '员工使用Claude Code' }, { predicate: 'has banned' }, 'Alibaba has banned employees from using Claude Code.'],
+    [{ predicate: '禁止', object: '员工使用Claude Code' }, { predicate: 'bans' }, 'Alibaba bans employees from using Claude Code.'],
+    [{ predicate: '请求', object: '员工使用Claude Code' }, { predicate: 'requests', object: 'employees to use Claude Code' }, 'Alibaba requests employees to use Claude Code.'],
+  ])('creates a current v8 proof for an exactly equivalent bilingual semantic projection: %#', async (
+    projection,
+    source,
+    quote,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({ projection, source, quote }))
+      .resolves.toBe(true);
+  });
+
+  test.each([
+    'later',
+    'recently',
+    'last week',
+    'on Monday',
+    'in August',
+    'at 5 pm',
+    'this morning',
+    'earlier',
+    '稍后',
+    '最近',
+    '上周',
+    '周一',
+    '八月',
+    '下午5点',
+    '今天早上',
+    '此前',
+  ])('rejects a temporal-only action object: %s', (object) => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment({}, { object }),
+      [techCrunchAlibabaBan],
+    )).toThrow(/(?:invalid_claim_object|invalid_claim_source_language|invalid_editorial_projection)/);
+  });
+
+  test('requires an actual Chinese projection predicate and Chinese non-proper narration', () => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment({
+        predicate: 'was sued', object: 'Anthropic稍后时间点',
+      }, {
+        predicate: 'was sued', object: 'Anthropic in a copyright lawsuit',
+      }),
+      [techCrunchAlibabaBan],
+    )).toThrow(/invalid_editorial_projection_language/);
+  });
+
+  test('fails closed when an action-specific object cannot be deterministically canonicalized', () => {
+    expect(() => validateManualLeadGeneratedAssessment(
+      alibabaBanGeneratedAssessment(
+        { object: '员工试行未知工作区' },
+        { object: 'employees from piloting an unknown workspace' },
+      ),
+      [techCrunchAlibabaBan],
+    )).toThrow(/invalid_claim_object/);
+  });
+
+  test.each([
+    {
+      label: 'duplicate source reference',
+      refs: ['fact-01', 'fact-01', 'fact-02'],
+    },
+    {
+      label: 'out-of-order source references',
+      refs: ['fact-02', 'fact-01'],
+    },
+  ])('requires summary to map every source fact exactly once and in order: $label', ({ refs }) => {
+    const evidence = [{
+      ...techCrunchAlibabaBan,
+      excerpt: 'Alibaba reportedly bans employees from using Claude Code. Alibaba released Qwen 3.',
+      claims_supported: [
+        'Alibaba reportedly bans employees from using Claude Code.',
+        'Alibaba released Qwen 3.',
+      ],
+    }];
+    const facts = [
+      {
+        fact_ref: 'fact-01', source_language: 'en',
+        atomic_fact: {
+          subject: 'Alibaba', subject_role: 'organization', predicate: 'reportedly bans',
+          object: 'employees from using Claude Code',
+        },
+        evidence_ids: [techCrunchAlibabaBan.id],
+      },
+      {
+        fact_ref: 'fact-02', source_language: 'en',
+        atomic_fact: {
+          subject: 'Alibaba', subject_role: 'organization', predicate: 'released', object: 'Qwen 3',
+        },
+        evidence_ids: [techCrunchAlibabaBan.id],
+      },
+    ];
+    const projectionFor = (ref: string, index: number) => ({
+      projection_ref: `summary-${String(index + 1).padStart(2, '0')}`,
+      source_fact_refs: [ref],
+      atomic_fact: ref === 'fact-01'
+        ? { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' }
+        : { subject: '阿里巴巴', subject_role: 'organization', predicate: '已发布', object: 'Qwen 3' },
+    });
+    expect(() => validateManualLeadGeneratedAssessment({
+      event_key: 'alibaba-ai-updates-2026-08-11', event_type: 'industry_event',
+      material_update: false, score: 88, recommendation: 'needs_review', occurred_at: null,
+      uncertainties: [], matched_event_key: null, source_facts: facts,
+      editorial_projection: {
+        title: {
+          projection_ref: 'title-01', source_fact_refs: ['fact-01'],
+          atomic_fact: { subject: '阿里巴巴', subject_role: 'organization', predicate: '据称禁止', object: '员工使用Claude Code' },
+        },
+        summary: refs.map(projectionFor),
+      },
+    }, evidence)).toThrow(/invalid_editorial_projection_mapping/);
   });
 
   test('fails closed on compound roles and incomplete subject/predicate/object slots', () => {
@@ -2767,6 +3017,14 @@ describe('manual news lead domain', () => {
           ? { ...fact, source_quotes: [{ ...fact.source_quotes[0], quote: 'tampered audit quote' }] }
           : fact),
       },
+    }, proof, secret)).resolves.toBe(false);
+    const legacyBilingualContract = structuredClone(candidate);
+    Object.assign(legacyBilingualContract as unknown as Record<string, unknown>, {
+      source_fact_contract: 'source_atomic_facts_v1',
+      editorial_projection_contract: 'zh_editorial_projection_v1',
+    });
+    await expect(isCurrentManualLeadVerification({
+      ...input, assessment: legacyBilingualContract,
     }, proof, secret)).resolves.toBe(false);
     await expect(createManualLeadVerificationProof(input, '')).rejects.toThrow(/manual_news_verification_secret_invalid/);
     await expect(createManualLeadVerificationProof(input, 'too-short')).rejects.toThrow(/manual_news_verification_secret_invalid/);

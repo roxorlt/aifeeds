@@ -39,6 +39,43 @@ export interface ManualAtomicFactSlots {
   object: string;
 }
 
+type ManualBilingualFactModality =
+  | 'reported'
+  | 'alleged'
+  | 'possible'
+  | 'planned'
+  | 'requested'
+  | 'asserted'
+  | 'completed';
+
+type ManualBilingualParticipantRole =
+  | 'employees'
+  | 'customers'
+  | 'users'
+  | 'contractors'
+  | 'public';
+
+type ManualBilingualQuantifier = 'all' | 'some' | 'only' | 'none' | 'unspecified';
+
+interface ManualBilingualSemanticSlots {
+  action: FactAction;
+  predicate_modality: ManualBilingualFactModality;
+  predicate_negated: boolean;
+  participant_roles: ManualBilingualParticipantRole[];
+  participant_quantifier: ManualBilingualQuantifier;
+  object_relations: string[];
+  object_polarity: 'positive' | 'negative';
+  object_modality: ManualBilingualFactModality;
+  target_entities: string[];
+  concepts: string[];
+  versions: string[];
+  regions: string[];
+  reason: string | null;
+  scope: 'universal' | 'limited' | null;
+  dates: string[];
+  instants: string[];
+}
+
 export interface ManualSourceAtomicFact {
   fact_id: string;
   source_language: 'zh' | 'en' | 'other';
@@ -79,8 +116,8 @@ export interface ManualNewsLeadAssessment {
 }
 
 export const MANUAL_LEAD_GENERATED_CLAIM_CONTRACT = 'structured_atomic_fact_v1' as const;
-export const MANUAL_LEAD_SOURCE_FACT_CONTRACT = 'source_atomic_facts_v1' as const;
-export const MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT = 'zh_editorial_projection_v1' as const;
+export const MANUAL_LEAD_SOURCE_FACT_CONTRACT = 'source_atomic_facts_v2' as const;
+export const MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT = 'zh_editorial_projection_v2' as const;
 
 export const MANUAL_LEAD_VERIFICATION_POLICY_VERSION = 'fact-evidence-projection-hmac-v8' as const;
 
@@ -337,7 +374,8 @@ function generatedFactSlot(value: unknown, field: 'subject' | 'predicate' | 'obj
     'iu',
   );
   if (boundary.test(normalized)) throw new Error('non_atomic_claim');
-  if (/(?:因为|由于|所以|因此|从而|以便|尽管|虽然|如果|除非)|\b(?:because|therefore|so\s+that|in\s+order\s+to|although|unless|if)\b/iu.test(normalized)) {
+  if (field !== 'object'
+    && /(?:因为|由于|所以|因此|从而|以便|尽管|虽然|如果|除非)|\b(?:because|therefore|so\s+that|in\s+order\s+to|although|unless|if)\b/iu.test(normalized)) {
     throw new Error('non_atomic_claim');
   }
   if (field === 'subject'
@@ -349,11 +387,14 @@ function generatedFactSlot(value: unknown, field: 'subject' | 'predicate' | 'obj
     throw new Error('invalid_claim_predicate');
   }
   if (field === 'object') {
-    if (/^(?:昨天|今天|明天|此前|随后|目前|届时|可能|据称|正式|已经|已|尚未|未|不|无|\d{4}-\d{2}-\d{2}|\d{1,2}(?::\d{2})?(?:\s*[ap]\.m\.)?)$/iu.test(normalized)
-      || /^(?:因为|由于|出于|源于)|^(?:due\s+to|because\s+of|over\s+.+\s+concerns?)\b/iu.test(normalized)) {
+    if (isTemporalOnlyFactObject(normalized)) {
       throw new Error('invalid_claim_object');
     }
-    const substantive = normalized
+    const reason = canonicalFactReason(normalized);
+    if (reason.present && (!reason.canonical || !reason.residual)) {
+      throw new Error('invalid_claim_object');
+    }
+    const substantive = reason.residual
       .replace(/\b(?:yesterday|today|tomorrow|reportedly|allegedly|officially|possibly|maybe)\b/giu, '')
       .replace(/(?:昨天|今天|明天|据称|正式|可能|已经|已)/gu, '')
       .replace(/[\p{P}\p{S}\s\d]/gu, '');
@@ -463,6 +504,267 @@ function canonicalSubjectIdentity(value: string): string | null {
   return null;
 }
 
+function isTemporalOnlyFactObject(value: string): boolean {
+  const normalized = value.normalize('NFKC').replace(/[。.!！?？,，;；]+$/gu, '').trim();
+  if (!normalized) return true;
+  return /^(?:later|recently|earlier|previously|currently|today|yesterday|tomorrow|last\s+(?:week|month|year)|this\s+(?:morning|afternoon|evening)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|at\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))$/iu.test(normalized)
+    || /^(?:稍后|随后|最近|近期|此前|早些时候|目前|今天|昨天|明天|上周|本周|上月|本月|周[一二三四五六日天]|(?:一|二|三|四|五|六|七|八|九|十|十一|十二)月|今天早上|今天上午|今天下午|今天晚上|(?:上午|下午|晚上|傍晚|凌晨)?[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:半|[零〇一二三四五六七八九十两\d]{1,3}分?)?|20\d{2}年\d{1,2}月\d{1,2}日)$/u.test(normalized);
+}
+
+interface CanonicalFactReason {
+  present: boolean;
+  canonical: 'security' | 'cost' | 'legal' | 'safety' | 'performance' | null;
+  residual: string;
+}
+
+function canonicalFactReason(value: string): CanonicalFactReason {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  let reasonText: string | null = null;
+  let start = -1;
+  let end = -1;
+  const english = /\b(?:due\s+to|because\s+of|over)\s+(.+?)(?:\s+reasons?)?$/iu.exec(normalized);
+  if (english?.index !== undefined) {
+    reasonText = english[1];
+    start = english.index;
+    end = english.index + english[0].length;
+  } else {
+    const chineseMiddle = /因(.{1,24}?)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用))/u.exec(normalized);
+    const chineseTail = /(?:因为|由于|出于)(.{1,40})$/u.exec(normalized);
+    const match = chineseMiddle || chineseTail;
+    if (match?.index !== undefined) {
+      reasonText = match[1];
+      start = match.index;
+      end = match.index + match[0].length;
+    }
+  }
+  if (!reasonText) return { present: false, canonical: null, residual: normalized };
+  const key = reasonText.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, '');
+  let canonical: CanonicalFactReason['canonical'] = null;
+  if (/(?:datasecurity|cybersecurity|informationsecurity|securityconcerns?|privacy|数据安全|信息安全|网络安全|安全担忧|安全顾虑|隐私)/u.test(key)) canonical = 'security';
+  else if (/(?:costs?|costconcerns?|expense|budget|pricing|成本|费用|预算|价格)/u.test(key)) canonical = 'cost';
+  else if (/(?:legal|compliance|regulatory|copyright|法律|合规|监管|版权)/u.test(key)) canonical = 'legal';
+  else if (/(?:safety|安全风险|安全性)/u.test(key)) canonical = 'safety';
+  else if (/(?:performance|latency|quality|性能|延迟|质量)/u.test(key)) canonical = 'performance';
+  const residual = `${normalized.slice(0, start)} ${normalized.slice(end)}`
+    .replace(/\s+/gu, ' ').trim();
+  return { present: true, canonical, residual };
+}
+
+function exactBilingualModality(
+  value: string,
+  occurrence: FactActionOccurrence | null,
+): ManualBilingualFactModality {
+  const normalized = value.normalize('NFKC');
+  if (/(?:据报道|报道称|消息称|据称)|\b(?:reportedly|according\s+to\s+(?:a\s+)?report)\b/iu.test(normalized)) return 'reported';
+  if (/(?:涉嫌|被指|遭指控)|\b(?:allegedly|is\s+alleged\s+to|was\s+alleged\s+to)\b/iu.test(normalized)) return 'alleged';
+  if (/(?:可能|或许|也许|预计)|\b(?:may|might|could|possibly|perhaps)\b/iu.test(normalized)) return 'possible';
+  if (/(?:计划|拟|准备|将)|\b(?:plans?|planned|intends?|intended|will|would)\b/iu.test(normalized)) return 'planned';
+  if (/(?:被要求|应请求)|\b(?:was|were|is|are)\s+(?:asked|requested|urged)\s+to\b/iu.test(normalized)) return 'requested';
+  if (occurrence?.action === 'request'
+    && /(?:请求|呼吁|敦促)|\b(?:request(?:s|ed)?|urge(?:s|d)?|call(?:s|ed)?\s+for)\b/iu.test(normalized)) {
+    return 'requested';
+  }
+  if (/(?:已经|已|正式|完成|达成|落地|生效|获批)|\b(?:has|have|had|officially|formally|already|completed|closed)\b/iu.test(normalized)
+    || (occurrence && /(?:ed|bought|sold|signed|approved)$/iu.test(occurrence.surface))) return 'completed';
+  return 'asserted';
+}
+
+const BILINGUAL_PARTICIPANT_PATTERNS: ReadonlyArray<readonly [
+  ManualBilingualParticipantRole,
+  RegExp,
+]> = [
+  ['employees', /(?:员工|雇员|职员)|\b(?:employees?|staff|workers?)\b/iu],
+  ['customers', /(?:客户)|\b(?:customers?|clients?)\b/iu],
+  ['users', /(?:用户)|\busers?\b/iu],
+  ['contractors', /(?:承包商|合同工)|\bcontractors?\b/iu],
+  ['public', /(?:公众|大众)|\b(?:the\s+)?public\b/iu],
+];
+
+function bilingualParticipantRoles(value: string): ManualBilingualParticipantRole[] {
+  return BILINGUAL_PARTICIPANT_PATTERNS
+    .filter(([, pattern]) => pattern.test(value))
+    .map(([role]) => role);
+}
+
+function bilingualParticipantQuantifier(value: string): ManualBilingualQuantifier {
+  const matches: ManualBilingualQuantifier[] = [];
+  if (/(?:所有|全部|每名|每位)|\b(?:all|every|each)\b/iu.test(value)) matches.push('all');
+  if (/(?:部分|一些|某些|若干)|\b(?:some|certain|several)\b/iu.test(value)) matches.push('some');
+  if (/(?:仅|只)|\bonly\b/iu.test(value)) matches.push('only');
+  if (/(?:没有任何|无任何)|\b(?:no|none)\b/iu.test(value)) matches.push('none');
+  const unique = [...new Set(matches)];
+  if (unique.length > 1) throw new Error('invalid_claim_object');
+  return unique[0] ?? 'unspecified';
+}
+
+function bilingualObjectPolarity(value: string): 'positive' | 'negative' {
+  return /(?:不|未|无)(?=(?:使用|访问|部署|训练|开发|发布|开源|购买|采用|共享))|\b(?:not|never|without)\b/iu.test(value)
+    ? 'negative'
+    : 'positive';
+}
+
+function canonicalObjectRelations(value: string): string[] {
+  const relations: Array<readonly [string, RegExp]> = [
+    ['use', /(?:使用|采用)|\b(?:use|uses|used|using)\b/iu],
+    ['access', /(?:访问|接入)|\b(?:access|accesses|accessed|accessing)\b/iu],
+    ['deploy', /(?:部署)|\b(?:deploy|deploys|deployed|deploying)\b/iu],
+    ['develop', /(?:开发|研发)|\b(?:develop|develops|developed|developing)\b/iu],
+    ['train', /(?:训练)|\b(?:train|trains|trained|training)\b/iu],
+    ['release', /(?:发布|推出|上线)|\b(?:release|releases|released|releasing|launch|launches|launched)\b/iu],
+    ['open_source', /(?:开源)|\bopen[ -]?sourc(?:e|es|ed|ing)\b/iu],
+    ['switch', /(?:改用|切换至)|\b(?:switch|switches|switched|switching)\s+to\b/iu],
+    ['share', /(?:共享|分享)|\b(?:share|shares|shared|sharing)\b/iu],
+    ['purchase', /(?:购买|采购)|\b(?:buy|buys|bought|purchase|purchases|purchased)\b/iu],
+    ['pause', /(?:停止|暂停)|\b(?:stop|stops|stopped|stopping|pause|pauses|paused|pausing)\b/iu],
+  ];
+  return [...new Set(relations.filter(([, pattern]) => pattern.test(value)).map(([relation]) => relation))];
+}
+
+const BILINGUAL_FACT_CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['ai', /(?:人工智能)|\bAI\b/iu],
+  ['code', /(?:代码)|\bcode\b/iu],
+  ['content', /(?:内容)|\bcontent\b/iu],
+  ['model', /(?:模型)|\bmodels?\b/iu],
+  ['output', /(?:输出)|\boutputs?\b/iu],
+  ['product', /(?:产品)|\bproducts?\b/iu],
+  ['provenance', /(?:来源信息|来源|溯源)|\bprovenance\b/iu],
+  ['support_scope', /(?:受支持|适用)|\bsupported\b/iu],
+  ['system', /(?:系统)|\bsystems?\b/iu],
+  ['tool', /(?:工具)|\btools?\b/iu],
+  ['weights', /(?:权重)|\bweights?\b/iu],
+];
+
+function bilingualFactConcepts(value: string): string[] {
+  return BILINGUAL_FACT_CONCEPTS.filter(([, pattern]) => pattern.test(value)).map(([concept]) => concept);
+}
+
+function bilingualFactVersions(value: string): string[] {
+  const versions = new Set<string>();
+  const source = stripFactTemporalText(value).normalize('NFKC').toLowerCase();
+  const add = (version: string) => versions.add(version.replace(/^v/iu, '').replace(/\s+/gu, '-'));
+  for (const match of source.matchAll(/(?:\b(?:gpt|claude|gemini|qwen|deepseek|kimi|glm|minimax|llama|gemma|mistral|seed)\b|通义千问|通义|混元|豆包|盘古|文心)[\s-]*(?:sonnet\s+|opus\s+|flash\s+|pro\s+|lite\s+)?v?(\d+(?:\.\d+)*(?:-[a-z0-9.]+)?)/giu)) {
+    add(match[1]);
+  }
+  for (const match of source.matchAll(/(?<![a-z0-9])v?(\d+(?:\.\d+)*(?:-[a-z0-9.]+)?)(?![a-z0-9])/giu)) {
+    add(match[1]);
+  }
+  const chineseDigits: Record<string, number> = {
+    一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+  };
+  for (const match of source.matchAll(/第([一二三四五六七八九十]|\d+)版/gu)) {
+    add(String(chineseDigits[match[1]] ?? Number(match[1])));
+  }
+  return [...versions].sort();
+}
+
+function bilingualFactRegions(value: string): string[] {
+  const regions = new Set<string>();
+  for (const [canonical, aliases] of FACT_REGION_ALIASES) {
+    if (aliases.some((alias) => regionAliasPresent(value, alias))) regions.add(canonical);
+  }
+  const englishLocation = /\b(?:in|across|within|throughout|into)\s+(?:the\s+)?([A-Z][A-Za-z.-]*(?:\s+[A-Z][A-Za-z.-]*){0,2})(?=\s+(?:from|market|region|operations?|business|employees?|customers?|users?|contractors?|public)\b|[\s,.;]|$)/gu;
+  for (const match of value.matchAll(englishLocation)) {
+    if (registeredEntityIdentities(match[1]).size) continue;
+    const canonical = canonicalRegionAlias(match[1]);
+    if (!canonical) throw new Error('invalid_claim_object');
+    regions.add(canonical);
+  }
+  for (const match of value.matchAll(/([\p{Script=Han}]{2,10})(?=(?:市场|地区|区域))/gu)) {
+    const canonical = canonicalRegionAlias(match[1]);
+    if (!canonical && !GENERIC_REGION_VALUES.has(match[1])) throw new Error('invalid_claim_object');
+    if (canonical) regions.add(canonical);
+  }
+  return [...regions].sort();
+}
+
+function projectionLanguageError(fact: ManualAtomicFactSlots): string | null {
+  if (!/\p{Script=Han}/u.test(fact.predicate) || /[A-Za-z]/u.test(fact.predicate)) {
+    return 'invalid_editorial_projection_language';
+  }
+  if (/\b(?:employees?|staff|workers?|customers?|clients?|users?|contractors?|public|use|uses|used|using|access|may|might|could|not|never|without|reportedly|allegedly|later|recently|earlier|week|monday|august|morning|due|because|concerns?|reasons?|was|were|is|are|sued)\b/iu.test(fact.object)) {
+    return 'invalid_editorial_projection_language';
+  }
+  return null;
+}
+
+function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSemanticSlots {
+  const predicateActions = factActionOccurrences(fact.predicate);
+  if (predicateActions.length !== 1) throw new Error('invalid_claim_predicate');
+  const reason = canonicalFactReason(fact.object);
+  if (reason.present && !reason.canonical) throw new Error('invalid_claim_object');
+  const participantRoles = bilingualParticipantRoles(reason.residual);
+  if (participantRoles.length > 1) throw new Error('invalid_claim_object');
+  const objectRelations = canonicalObjectRelations(reason.residual);
+  const targetEntities = [...registeredEntityIdentities(reason.residual)].sort();
+  const concepts = bilingualFactConcepts(reason.residual).sort();
+  const action = predicateActions[0].action;
+  if (isTemporalOnlyFactObject(fact.object)) throw new Error('invalid_claim_object');
+  if (['ban', 'limit_scope', 'request', 'regulatory_require', 'mandate', 'order'].includes(action)
+    && participantRoles.length > 0 && !objectRelations.length) throw new Error('invalid_claim_object');
+  if (['ban', 'limit_scope'].includes(action)
+    && objectRelations.some((relation) => ['use', 'access', 'deploy', 'develop', 'train'].includes(relation))
+    && participantRoles.length === 0) throw new Error('invalid_claim_object');
+  if (!participantRoles.length && !objectRelations.length && !targetEntities.length && !concepts.length
+    && !bilingualFactRegions(reason.residual).length) throw new Error('invalid_claim_object');
+  return {
+    action,
+    predicate_modality: exactBilingualModality(fact.predicate, predicateActions[0]),
+    predicate_negated: predicateActions[0].negated,
+    participant_roles: participantRoles,
+    participant_quantifier: bilingualParticipantQuantifier(reason.residual),
+    object_relations: objectRelations,
+    object_polarity: bilingualObjectPolarity(reason.residual),
+    object_modality: exactBilingualModality(reason.residual, null),
+    target_entities: targetEntities,
+    concepts,
+    versions: bilingualFactVersions(reason.residual),
+    regions: bilingualFactRegions(reason.residual),
+    reason: reason.canonical,
+    scope: dominantFactScope(reason.residual),
+    dates: normalizedFactDates(fact.object).sort(),
+    instants: normalizedFactInstants(fact.object).sort(),
+  };
+}
+
+function semanticProjectionContract(
+  projection: ManualAtomicFactSlots,
+  source: ManualAtomicFactSlots,
+): string | null {
+  let sourceSlots: ManualBilingualSemanticSlots;
+  let projectionSlots: ManualBilingualSemanticSlots;
+  try {
+    sourceSlots = bilingualSemanticSlots(source);
+    projectionSlots = bilingualSemanticSlots(projection);
+  } catch {
+    return 'invalid_editorial_projection_object';
+  }
+  if (sourceSlots.action !== projectionSlots.action) return 'invalid_editorial_projection_action';
+  if (sourceSlots.predicate_negated !== projectionSlots.predicate_negated
+    || sourceSlots.object_polarity !== projectionSlots.object_polarity) {
+    return 'invalid_editorial_projection_polarity';
+  }
+  if (sourceSlots.predicate_modality !== projectionSlots.predicate_modality
+    || sourceSlots.object_modality !== projectionSlots.object_modality) {
+    return 'invalid_editorial_projection_modality';
+  }
+  if (canonicalJson(sourceSlots.regions) !== canonicalJson(projectionSlots.regions)
+    || canonicalJson(sourceSlots.dates) !== canonicalJson(projectionSlots.dates)
+    || canonicalJson(sourceSlots.instants) !== canonicalJson(projectionSlots.instants)) {
+    return 'invalid_editorial_projection_time';
+  }
+  if (sourceSlots.reason !== projectionSlots.reason
+    || sourceSlots.participant_quantifier !== projectionSlots.participant_quantifier
+    || sourceSlots.scope !== projectionSlots.scope
+    || canonicalJson(sourceSlots.participant_roles) !== canonicalJson(projectionSlots.participant_roles)
+    || canonicalJson(sourceSlots.object_relations) !== canonicalJson(projectionSlots.object_relations)
+    || canonicalJson(sourceSlots.target_entities) !== canonicalJson(projectionSlots.target_entities)
+    || canonicalJson(sourceSlots.concepts) !== canonicalJson(projectionSlots.concepts)
+    || canonicalJson(sourceSlots.versions) !== canonicalJson(projectionSlots.versions)) {
+    return 'invalid_editorial_projection_object';
+  }
+  return null;
+}
+
 function projectionContractError(
   projection: ManualAtomicFactSlots,
   source: ManualAtomicFactSlots,
@@ -475,6 +777,8 @@ function projectionContractError(
     : canonicalEntityRoleKey(projection.subject) !== canonicalEntityRoleKey(source.subject)) {
     return 'invalid_editorial_projection_subject';
   }
+  const semanticError = semanticProjectionContract(projection, source);
+  if (semanticError) return semanticError;
   const sourceActions = factActionOccurrences(source.predicate);
   const projectionActions = factActionOccurrences(projection.predicate);
   if (sourceActions.length !== 1 || projectionActions.length !== 1
@@ -484,16 +788,13 @@ function projectionContractError(
   if (sourceActions[0].negated !== projectionActions[0].negated) {
     return 'invalid_editorial_projection_polarity';
   }
-  if (sourceActions[0].modality !== projectionActions[0].modality) {
-    return 'invalid_editorial_projection_modality';
-  }
   const sourceObjectActions = generatedObjectActionOccurrences(source.object);
   const projectionObjectActions = generatedObjectActionOccurrences(projection.object);
   if (sourceObjectActions.length !== projectionObjectActions.length
     || sourceObjectActions.some((action, index) => {
       const translated = projectionObjectActions[index];
       return !translated || action.action !== translated.action
-        || action.negated !== translated.negated || action.modality !== translated.modality;
+        || action.negated !== translated.negated;
     })) return 'invalid_editorial_projection_object';
   const sourceEntities = registeredEntityIdentities(source.object);
   const projectionEntities = registeredEntityIdentities(projection.object);
@@ -534,8 +835,9 @@ function validatedProjectionSentence(
   const atomicFact = generatedAtomicFact(raw.atomic_fact);
   const textZh = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object)
     .replace(/\.$/u, '。');
-  if ((textZh.match(/\p{Script=Han}/gu) || []).length < 4) {
-    throw new Error('invalid_editorial_projection_language');
+  const languageError = projectionLanguageError(atomicFact);
+  if ((textZh.match(/\p{Script=Han}/gu) || []).length < 4 || languageError) {
+    throw new Error(languageError || 'invalid_editorial_projection_language');
   }
   const contractError = projectionContractError(atomicFact, source.atomic_fact);
   if (contractError) throw new Error(contractError);
@@ -592,7 +894,10 @@ export function validateManualLeadGeneratedAssessment(
     if (claim.source_language === 'zh' && !/\p{Script=Han}/u.test(text)) {
       throw new Error('invalid_claim_source_language');
     }
-    const factId = `source-${stableFactHash(canonicalJson({ atomic_fact: atomicFact }))}`;
+    const factId = `source-${stableFactHash(canonicalJson({
+      atomic_fact: atomicFact,
+      bilingual_semantic_slots: bilingualSemanticSlots(atomicFact),
+    }))}`;
     const result: ManualSourceAtomicFact = {
       fact_id: factId,
       source_language: claim.source_language as ManualSourceAtomicFact['source_language'],
@@ -624,11 +929,9 @@ export function validateManualLeadGeneratedAssessment(
   }
   const summaryProjection = raw.editorial_projection.summary.map((item, index) =>
     validatedProjectionSentence(item, `summary-${String(index + 1).padStart(2, '0')}`, sourceByRef));
-  const mappedSourceIds = new Set([
-    ...titleProjection.source_fact_ids,
-    ...summaryProjection.flatMap((item) => item.source_fact_ids),
-  ]);
-  if (sourceFacts.some((fact) => !mappedSourceIds.has(fact.fact_id))) {
+  if (summaryProjection.length !== sourceFacts.length
+    || summaryProjection.some((projection, index) =>
+      projection.source_fact_ids[0] !== sourceFacts[index].fact_id)) {
     throw new Error('invalid_editorial_projection_mapping');
   }
   const claims = sourceFacts.map((fact) => ({ text: fact.text, evidence_ids: fact.evidence_ids }));
@@ -672,7 +975,10 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
+      '双语投影必须逐槽精确等价：reportedly/据称、allegedly/被指、possible/可能、planned/计划、requested/被要求、asserted 与 completed 不得互换；员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/情态、使用关系、目标、地区、原因、版本和日期均不得增删改。无法可靠翻译或归一化的关键槽必须 recommendation=needs_review，不得凭关键词相似猜测。',
+      '中文投影的谓词和非专名叙述必须使用中文；公司、模型、产品及版本可保留官方英文名。禁止 OpenAI was sued稍后时间点 之类中英叙述混写，也禁止把纯时间、纯原因或纯情态写成 object。',
       'raw source fact 使用顺序 fact_ref：fact-01、fact-02……；title 只能用 title-01，summary 只能依次用 summary-01、summary-02……。程序会从源事实内容生成稳定 source fact id，并把投影映射转换为该稳定 id。',
+      'title 只映射 primary fact（fact-01）。summary 项数必须与 source_facts 完全相等，并按原顺序一一映射：summary-01→fact-01、summary-02→fact-02……；禁止漏项、重复 fact_ref、乱序或额外 summary。',
       '每条 claim 必须是单一原子事实，并完整重复主体、动作、对象、版本、地区、否定与完成状态；任一槽位若有多个独立谓词、主体或子句，必须拆成多条 claims，禁止用“并、又、随后、然后、while、whereas、斜线、分号、破折号”等合并；同一动作作用于不同对象也属于多个事实。',
       '控制动作本身可以是一个原子事实，例如“Alibaba reportedly bans employees from using Claude Code.”；原因、改用其他产品等内容必须拆成各自独立的 claim，禁止用逗号、因果词或并列词塞进同一 claim。',
       'editorial_projection.title 必须是单一中文原子句。summary 数组每项只承载一个完整中文原子句；每句完整重复自己的主体、动作和对象，禁止用逗号、分号、因果或并列结构合并事实。',
@@ -844,7 +1150,10 @@ function validatePersistedAssessmentContracts(
       throw new Error('invalid_processed_assessment_contract');
     }
     const atomicFact = generatedAtomicFact(fact.atomic_fact);
-    const expectedId = `source-${stableFactHash(canonicalJson({ atomic_fact: atomicFact }))}`;
+    const expectedId = `source-${stableFactHash(canonicalJson({
+      atomic_fact: atomicFact,
+      bilingual_semantic_slots: bilingualSemanticSlots(atomicFact),
+    }))}`;
     const expectedText = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object);
     if (fact.fact_id !== expectedId || seenFactIds.has(expectedId)
       || !['zh', 'en', 'other'].includes(String(fact.source_language))
@@ -882,7 +1191,8 @@ function validatePersistedAssessmentContracts(
     const atomicFact = generatedAtomicFact(value.atomic_fact);
     const textZh = joinGeneratedFactSlots(atomicFact.subject, atomicFact.predicate, atomicFact.object)
       .replace(/\.$/u, '。');
-    if (value.text_zh !== textZh || projectionContractError(atomicFact, source.atomic_fact)) {
+    if (value.text_zh !== textZh || projectionLanguageError(atomicFact)
+      || projectionContractError(atomicFact, source.atomic_fact)) {
       throw new Error('invalid_processed_assessment_contract');
     }
     return {
@@ -899,6 +1209,10 @@ function validatePersistedAssessmentContracts(
   }
   const summary = raw.editorial_projection.summary.map((item, index) =>
     validatePersistedProjection(item, `summary-${String(index + 1).padStart(2, '0')}`));
+  if (summary.length !== sourceFacts.length
+    || summary.some((projection, index) => projection.source_fact_ids[0] !== sourceFacts[index].fact_id)) {
+    throw new Error('invalid_processed_assessment_contract');
+  }
   if (raw.title !== title.text_zh || raw.summary !== summary.map((item) => item.text_zh).join('')
     || canonicalJson(raw.claims) !== canonicalJson(sourceFacts.map((fact) => ({
       text: fact.text, evidence_ids: fact.evidence_ids,
@@ -1041,7 +1355,12 @@ function manualLeadProjectionDefinitions(assessment: ManualNewsLeadAssessment) {
     source_fact_ids: [...projection.source_fact_ids],
     untrusted_chinese_projection: projection.text_zh,
     untrusted_projection_slots: projection.atomic_fact,
+    deterministic_projection_semantic_slots: bilingualSemanticSlots(projection.atomic_fact),
     untrusted_source_facts: projection.source_fact_ids.map((id) => sourceById.get(id)).filter(Boolean),
+    deterministic_source_semantic_slots: projection.source_fact_ids
+      .map((id) => sourceById.get(id))
+      .filter((fact): fact is ManualSourceAtomicFact => !!fact)
+      .map((fact) => bilingualSemanticSlots(fact.atomic_fact)),
   }));
 }
 
@@ -1120,6 +1439,7 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '每个输入 fact 已被确定性拆成单一原子子句；逐条核验，不得把不同子句、不同主体或不同对象之间的词语互换拼接。',
       '每个 fact 只能使用其自身结构内的 allowed_evidence；禁止跨 fact 查看、引用或推断其他 evidence。',
       '先核验每条 source_fact、event_key 的主体/动作/对象/版本/日期语义、event_type、非空 occurred_at，以及无论 true 或 false 的 material_update；中文 title/summary 只在独立 projection_results 阶段核验。',
+      'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：精确情态类别、参与者角色与数量范围、对象内否定/情态、关系与目标、地区、原因、版本和日期；不得把 reported/alleged/possible/planned/requested 统称为弱情态。即使词面相似，只要任一槽不等价就必须 unsupported。',
       '逐项检查主体、动作方向、否定关系、对象、产品版本、时间与适用范围；不得用常识、用户线索、标题相似或同公司旧闻补齐事实。',
       '禁止用词面相似度、关键词比例或跨句词语重合代替结构核验；未知动作只有在完整规范化关键跨度一致时才可支持，未知复合谓词一律不支持。',
       '方向或否定关系相反使用 contradicted；版本、日期、时间或范围不一致使用 scope_or_time_mismatch；证据未出现该事实使用 not_found；其他不充分支持使用 unsupported。',
@@ -2135,13 +2455,16 @@ const GENERIC_REGION_VALUES = new Set([
 
 const FACT_REGION_ALIASES: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['china', ['中国', '中国大陆', 'china', 'chinese', 'prc']],
-  ['united-states', ['美国', '美國', 'united states', 'united states of america', 'american', 'usa', 'u.s.', 'u.s.a.']],
+  ['united-states', ['美国', '美國', 'united states', 'united states of america', 'american', 'usa', 'us', 'u.s.', 'u.s.a.']],
+  ['california', ['加利福尼亚', '加利福尼亞', '加州', 'california', 'californian']],
+  ['beijing', ['北京', 'beijing']],
   ['canada', ['加拿大', 'canada', 'canadian']],
   ['australia', ['澳大利亚', '澳大利亞', '澳洲', 'australia', 'australian']],
   ['new-zealand', ['新西兰', '紐西蘭', 'new zealand', 'new zealander', 'new zealanders']],
   ['united-kingdom', ['英国', '英國', 'united kingdom', 'great britain', 'britain', 'british', 'uk', 'u.k.']],
   ['european-union', ['欧盟', '歐盟', 'european union', 'eu', 'e.u.']],
   ['europe', ['欧洲', '歐洲', 'europe', 'european']],
+  ['asia', ['亚洲', '亞洲', 'asia', 'asian']],
   ['india', ['印度', 'india', 'indian']],
   ['japan', ['日本', 'japan', 'japanese']],
   ['south-korea', ['韩国', '韓國', '南韩', '南韓', 'south korea', 'korea', 'korean']],
@@ -3228,6 +3551,53 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
 }
 
+function bilingualSemanticProofContract(assessment: ManualNewsLeadAssessment) {
+  if (assessment.source_fact_contract !== MANUAL_LEAD_SOURCE_FACT_CONTRACT
+    || assessment.editorial_projection_contract !== MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT
+    || !assessment.source_facts?.length || !assessment.editorial_projection) {
+    throw new Error('manual_news_verification_contract_invalid');
+  }
+  const sourceById = new Map(assessment.source_facts.map((fact) => [fact.fact_id, fact]));
+  const summary = assessment.editorial_projection.summary;
+  if (assessment.editorial_projection.title.source_fact_ids.length !== 1
+    || assessment.editorial_projection.title.source_fact_ids[0] !== assessment.source_facts[0].fact_id
+    || summary.length !== assessment.source_facts.length
+    || summary.some((projection, index) => projection.source_fact_ids.length !== 1
+      || projection.source_fact_ids[0] !== assessment.source_facts![index].fact_id)) {
+    throw new Error('manual_news_verification_contract_invalid');
+  }
+  const sourceFacts = assessment.source_facts.map((fact) => {
+    const semanticSlots = bilingualSemanticSlots(fact.atomic_fact);
+    const expectedId = `source-${stableFactHash(canonicalJson({
+      atomic_fact: fact.atomic_fact,
+      bilingual_semantic_slots: semanticSlots,
+    }))}`;
+    if (fact.fact_id !== expectedId
+      || fact.text !== joinGeneratedFactSlots(
+        fact.atomic_fact.subject, fact.atomic_fact.predicate, fact.atomic_fact.object,
+      )) throw new Error('manual_news_verification_contract_invalid');
+    return { fact_id: fact.fact_id, semantic_slots: semanticSlots };
+  });
+  const projections = [assessment.editorial_projection.title, ...summary].map((projection) => {
+    const source = sourceById.get(projection.source_fact_ids[0]);
+    if (!source || projectionLanguageError(projection.atomic_fact)
+      || projectionContractError(projection.atomic_fact, source.atomic_fact)) {
+      throw new Error('manual_news_verification_contract_invalid');
+    }
+    return {
+      projection_id: projection.projection_id,
+      source_fact_ids: [...projection.source_fact_ids],
+      semantic_slots: bilingualSemanticSlots(projection.atomic_fact),
+    };
+  });
+  return {
+    source_fact_contract: MANUAL_LEAD_SOURCE_FACT_CONTRACT,
+    editorial_projection_contract: MANUAL_LEAD_EDITORIAL_PROJECTION_CONTRACT,
+    source_facts: sourceFacts,
+    projections,
+  };
+}
+
 function canonicalVerificationPayload(
   assessment: ManualNewsProcessedAssessment,
   evidence: readonly ManualNewsEvidence[],
@@ -3263,6 +3633,7 @@ function canonicalVerificationPayload(
         evidence_ids: [...fact.evidence_ids].sort(),
       })) ?? null,
       editorial_projection: assessment.editorial_projection ?? null,
+      bilingual_semantic_contract: bilingualSemanticProofContract(assessment),
     },
     evidence: canonicalEvidence(evidence),
     verification: {
