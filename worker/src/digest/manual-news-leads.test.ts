@@ -650,6 +650,40 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    'OpenAI发布GPT 6 Acme造模型。',
+    '法院命令OpenAI停止发布GPT 6 Acme造模型。',
+    'OpenAI发布GPT 6启元推模型。',
+    '监管机构命令OpenAI停止发布GPT 6启元造模型。',
+    'Anthropic发布Claude 5 Nova改系统。',
+    '法院禁止Anthropic发布Claude 5玄光做平台。',
+  ])('requires the entire suffix after a canonical product to match the nominal grammar: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '深度求索发布DeepSeek V3支持向量模型。',
+    '深度求索发布深度求索模型。',
+    '阿里发布Qwen 4命令行工具。',
+    '腾讯发布Hunyuan 3支持向量模型。',
+    '字节跳动发布Doubao 2投资分析工具。',
+    '华为发布Pangu 5合作伙伴计划。',
+    '月之暗面发布Kimi K3命令行工具。',
+    '智谱发布GLM 5支持向量模型。',
+    '稀宇科技发布MiniMax M2命令行工具。',
+    'Meta发布Llama 4支持向量模型。',
+    'Google发布Gemma 3投资分析工具。',
+    'Mistral发布Mistral 3合作伙伴计划。',
+    '字节跳动发布Seed 2支持向量模型。',
+  ])('accepts a maintained high-frequency canonical product family: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     'OpenAI发布 百度投资分析工具。',
     'OpenAI发布\u2003腾讯融资服务。',
   ])('does not extend a release object noun phrase across a second subject and predicate: %s', (text) => {

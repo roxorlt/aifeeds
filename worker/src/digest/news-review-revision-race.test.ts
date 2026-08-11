@@ -133,7 +133,7 @@ function candidates(prefix: string): NewsReviewCandidate[] {
 }
 
 async function insertLead(db: SerialSqliteD1, id: string, eventKey: string): Promise<void> {
-  const supportingText = `Anthropic released ${eventKey} on 2026-08-11.`;
+  const supportingText = 'Anthropic released Claude 5 on 2026-08-11.';
   const rawAssessment = {
     title: supportingText,
     summary: supportingText, event_key: eventKey,
