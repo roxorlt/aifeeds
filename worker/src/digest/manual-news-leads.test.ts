@@ -441,6 +441,58 @@ async function createMaliciouslySupportedControllerUpdateProof(quote: string) {
   return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
+async function createTitleOnlyScopeProof(scopeClause: string) {
+  const support = techCrunchAlibabaBan.claims_supported[0];
+  const evidence: ManualNewsEvidence[] = [{
+    ...techCrunchAlibabaBan,
+    title: support,
+    excerpt: `${support} ${scopeClause}`,
+    claims_supported: [support],
+  }];
+  const generated = validateManualLeadGeneratedAssessment(
+    alibabaBanGeneratedAssessment(), evidence,
+  );
+  const candidate: ManualNewsProcessedAssessment = {
+    ...applyManualLeadEvidencePolicy(generated, evidence),
+    duplicate_scope: null,
+    matched_lead_id: null,
+  };
+  const prompt = JSON.parse(buildManualLeadFactVerificationPrompt({
+    assessment: candidate,
+    evidence,
+  }).user) as {
+    facts: Array<{ fact_id: string }>;
+    projections: Array<{ projection_id: string; source_fact_ids: string[] }>;
+    evidence_dispositions: Array<{ evidence_id: string; disposition: string }>;
+  };
+  const verification = validateManualLeadFactVerification({
+    overall_verdict: 'supported',
+    fact_results: prompt.facts.map((fact) => supportedFactResult(
+      fact.fact_id, evidence[0].id, support,
+    )),
+    projection_results: prompt.projections.map((projection) => ({
+      projection_id: projection.projection_id,
+      source_fact_ids: projection.source_fact_ids,
+      supported: true,
+      issue_code: 'none',
+    })),
+    disposition_results: prompt.evidence_dispositions.map((disposition) => ({
+      evidence_id: disposition.evidence_id,
+      disposition: disposition.disposition,
+      supported: true,
+      issue_code: 'none',
+      source_quotes: [{ evidence_id: evidence[0].id, quote: support }],
+    })),
+  }, candidate, evidence);
+  const proofInput = {
+    lead_id: 'ml-20260811-title-only-scope', assessment_version: 9,
+    assessment: candidate, evidence, verification,
+  };
+  const secret = 'a'.repeat(64);
+  const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return isCurrentManualLeadVerification(proofInput, proof, secret);
+}
+
 describe('manual news lead domain', () => {
   test('requires exactly one bounded disposition for every allowed evidence id', () => {
     const missing = structuredClone(alibabaBanGeneratedAssessment()) as Record<string, any>;
@@ -857,6 +909,27 @@ describe('manual news lead domain', () => {
       evidence_id: noisyTechCrunch.id,
       relation: 'supports',
     }] });
+  });
+
+  test.each([
+    'Alibaba said its Claude Code restriction applies only to contractors.',
+    'Alibaba said its Claude Code restriction applies solely to contractors.',
+    'Alibaba said its Claude Code restriction is limited to contractors.',
+    'Alibaba said its Claude Code restriction is restricted to contractors.',
+    'Alibaba said its Claude Code restriction covers only contractors.',
+    '阿里巴巴表示Claude Code限制仅适用于承包商。',
+    '阿里巴巴表示Claude Code限制仅限于承包商。',
+  ])('does not let a support title mint a current v9 proof over a different participant scope: %s', async (scopeClause) => {
+    await expect(createTitleOnlyScopeProof(scopeClause))
+      .rejects.toThrow(/evidence_disposition|verification_semantics/);
+  });
+
+  test.each([
+    'Alibaba said its Claude Code restriction applies only to employees.',
+    '阿里巴巴表示Claude Code限制仅适用于员工。',
+    'Anthropic said its Claude Code restriction applies only to contractors.',
+  ])('keeps the title proof current for the same participant scope or another controller: %s', async (scopeClause) => {
+    await expect(createTitleOnlyScopeProof(scopeClause)).resolves.toBe(true);
   });
 
   test('treats a question-framed misleading rumor headline as uncertain, not a declarative denial', () => {

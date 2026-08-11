@@ -1275,7 +1275,7 @@ const BILINGUAL_QUANTIFIER_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:没有任何|无任何)|\b(?:no|none)\b/iu,
 ];
 const BILINGUAL_SCOPE_PATTERNS: ReadonlyArray<RegExp> = [
-  /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|some|partial(?:ly)?|limited|supported)\b/iu,
+  /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|solely|some|partial(?:ly)?|limited|restricted|supported)\b/iu,
   /(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/iu,
 ];
 const BILINGUAL_OBJECT_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
@@ -2016,7 +2016,7 @@ function structurallyMatchesFactIgnoringAssertionStatus(
     && sameStructuredEventTarget(fact, clause);
 }
 
-const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu;
+const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限于?|只限于?|仅适用于?|只适用于?|部分适用于?|范围缩小|限于)|\b(?:(?:appl(?:y|ies|ied))\s+(?:only|solely)\s+to|(?:only|solely)\s+appl(?:y|ies|ied)\s+to|(?:is|are|was|were)\s+(?:limited|restricted)\s+to|(?:limited|restricted)\s+to|covers?\s+(?:only|solely)|scope\s+was\s+narrowed)\b/iu;
 const EVIDENCE_RELATION_STATUS_SIGNAL = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu;
 const EVIDENCE_RELATION_DENIAL_SIGNAL = /(?:否认|驳斥|反驳|质疑|拒绝承认|不实|虚假|误导)|\b(?:denial|den(?:y|ies|ied|ying)|refut(?:e|es|ed|ing)|disput(?:e|es|ed|ing)|reject(?:s|ed|ing)?\s+(?:the\s+)?reports?|call(?:s|ed|ing)?\s+(?:the\s+)?reports?\s+.*\s+(?:false|misleading))\b/iu;
 
@@ -2031,6 +2031,21 @@ function relationClauseHasUnexpectedSignal(
   ];
   return pairs.some(([clausePattern, factPattern]) =>
     clausePattern.test(clause) && !factPattern.test(fact.text));
+}
+
+function sameCoreScopeRelation(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): 'same' | 'conflict' | 'unresolved' {
+  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
+  const actualParticipants = bilingualParticipantRoles(clause);
+  if (!actualParticipants.length) return expectedParticipants.length ? 'unresolved' : 'same';
+  if (canonicalJson(expectedParticipants) !== canonicalJson(actualParticipants)) return 'conflict';
+  const expectedScope = dominantFactScope(fact.atomic_fact.object);
+  const actualScope = dominantFactScope(clause);
+  return expectedScope !== null && actualScope !== null && expectedScope !== actualScope
+    ? 'conflict'
+    : 'same';
 }
 
 function relationSupportFallbackSafe(
@@ -2088,7 +2103,11 @@ function evidenceClauseRelation(
     }
     const scopeChange = EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && scopeChange) {
-      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
+      const scopeRelation = sameCoreScopeRelation(fact, clause.text);
+      if (scopeRelation === 'conflict') {
+        return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
+      }
+      if (scopeRelation === 'unresolved') return 'blocking_uncertain';
     }
     const statusChange = EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && statusChange) {
@@ -4826,7 +4845,7 @@ function occurredAtActionVerificationError(
 type FactScope = 'universal' | 'limited';
 
 function dominantFactScope(value: string): FactScope | null {
-  if (/(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|some|partial(?:ly)?|limited|supported\s+(?:models?|products?))\b/i.test(value)) {
+  if (/(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|solely|some|partial(?:ly)?|limited|restricted|supported\s+(?:models?|products?))\b/i.test(value)) {
     return 'limited';
   }
   if (/(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/i.test(value)) {
