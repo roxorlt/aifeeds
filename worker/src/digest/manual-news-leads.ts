@@ -2274,25 +2274,54 @@ function aggregateWholeEvidenceRelations(
   return 'unrelated';
 }
 
-function isRedundantContextExpansion(
+const EVIDENCE_EXTRACTION_CHROME_TOKENS: ReadonlySet<string> = new Set([
+  'advertise', 'advertisement', 'ai', 'apps', 'categories', 'enterprise', 'event', 'events',
+  'home', 'latest', 'menu', 'navigation', 'news', 'newsletter', 'newsletters', 'podcast',
+  'podcasts', 'register', 'related', 'search', 'security', 'share', 'startup', 'startups',
+  'subscribe', 'techcrunch', 'topics', 'transportation',
+]);
+const EVIDENCE_EXTRACTION_CHROME_MARKERS: ReadonlySet<string> = new Set([
+  'advertise', 'advertisement', 'categories', 'event', 'events', 'menu', 'navigation',
+  'newsletter', 'newsletters', 'podcast', 'podcasts', 'register', 'search', 'subscribe', 'topics',
+]);
+const EVIDENCE_EXTRACTION_CHROME_WORD = /[A-Za-z]+/gu;
+const EVIDENCE_EXTRACTION_CHROME_SEPARATOR = /^[\s,.;:|/\\\-–—·•]*$/u;
+
+const EVIDENCE_EQUIVALENT_EVENT_CONTEXT = /^(?:in|under|within|as\s+part\s+of)\s+(?:(?:an?|the)\s+)?(?:(?:internal|company|corporate|organizational)\s+){1,3}(?:policy|restriction)$/iu;
+
+function evidenceExpansionResidual(
+  supportingClause: string,
+  candidateClause: string,
+): string | null {
+  const support = normalizedSourceText(supportingClause).normalize('NFKC').replace(/[.!。！]+$/u, '');
+  const candidate = normalizedSourceText(candidateClause).normalize('NFKC').replace(/[.!。！]+$/u, '');
+  if (!support || !candidate.startsWith(support)) return null;
+  const residual = candidate.slice(support.length).trim();
+  return residual || null;
+}
+
+function isProvenExtractionChromeExpansion(
   supportingClause: string,
   candidateClause: string,
 ): boolean {
-  const support = normalizedSourceText(supportingClause).replace(/[.!。！]+$/u, '');
-  const candidate = normalizedSourceText(candidateClause).replace(/[.!。！]+$/u, '');
-  if (!support || !candidate.startsWith(support)) return false;
-  const residual = candidate.slice(support.length).trim();
-  if (!/^(?:in|under|within|as\s+part\s+of)\b/iu.test(residual)) return false;
-  if (new RegExp(EVIDENCE_RELATION_LINK_SOURCE, 'iu').test(residual)
-    || EVIDENCE_RELATION_DENIAL_SIGNAL.test(residual)
-    || EVIDENCE_RELATION_STATUS_SIGNAL.test(residual)
-    || EVIDENCE_RELATION_SCOPE_SIGNAL.test(residual)
-    || factActionOccurrences(residual).length
-    || normalizedFactDates(residual).length
-    || normalizedFactInstants(residual).length
-    || relativeFactTimeSpans(residual).length) return false;
-  const supportEntities = registeredEntityIdentities(support);
-  return [...registeredEntityIdentities(residual)].every((entity) => supportEntities.has(entity));
+  const residual = evidenceExpansionResidual(supportingClause, candidateClause);
+  if (!residual || Array.from(residual).length > 240) return false;
+  const tokens = residual.match(EVIDENCE_EXTRACTION_CHROME_WORD)
+    ?.map((token) => token.toLocaleLowerCase('en-US')) || [];
+  // NFKC exposes compatibility letters; every remaining code point must be an explicit delimiter.
+  const separators = residual.replace(EVIDENCE_EXTRACTION_CHROME_WORD, '');
+  return tokens.length >= 1
+    && EVIDENCE_EXTRACTION_CHROME_SEPARATOR.test(separators)
+    && tokens.every((token) => EVIDENCE_EXTRACTION_CHROME_TOKENS.has(token))
+    && tokens.some((token) => EVIDENCE_EXTRACTION_CHROME_MARKERS.has(token));
+}
+
+function isProvenEquivalentEventContextExpansion(
+  supportingClause: string,
+  candidateClause: string,
+): boolean {
+  const residual = evidenceExpansionResidual(supportingClause, candidateClause);
+  return residual !== null && EVIDENCE_EQUIVALENT_EVENT_CONTEXT.test(residual);
 }
 
 function deterministicEvidenceRelation(
@@ -2305,10 +2334,15 @@ function deterministicEvidenceRelation(
   const relations = clauses.map((clause) =>
     evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
   const supportingClauses = clauses.filter((_, index) => relations[index] === 'supports');
-  const effectiveRelations = relations.filter((relation, index) =>
-    (relation !== 'uncertain' && relation !== 'blocking_uncertain')
-    || !supportingClauses.some((supporting) =>
-      isRedundantContextExpansion(supporting.text, clauses[index].text)));
+  const effectiveRelations = relations.flatMap((relation, index) => {
+    const expansions = supportingClauses.filter((supporting) =>
+      evidenceExpansionResidual(supporting.text, clauses[index].text) !== null);
+    if (!expansions.length) return [relation];
+    if (expansions.some((supporting) =>
+      isProvenExtractionChromeExpansion(supporting.text, clauses[index].text)
+      || isProvenEquivalentEventContextExpansion(supporting.text, clauses[index].text))) return [];
+    return ['blocking_uncertain' as const];
+  });
   return aggregateWholeEvidenceRelations(effectiveRelations);
 }
 
