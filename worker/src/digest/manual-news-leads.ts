@@ -44,6 +44,19 @@ interface ManualBilingualModalitySlots {
   epistemic: Array<'possible'>;
   intent: Array<'planned' | 'requested'>;
   aspect: Array<'completed' | 'ongoing'>;
+  tense: 'present' | 'past' | 'future' | 'not_applicable';
+  deontic: Array<'required'>;
+  voice: 'active' | 'passive' | 'not_applicable';
+}
+
+interface ManualProductTargetComponent {
+  kind: 'descriptor' | 'qualifier' | 'version';
+  value: string;
+}
+
+interface ManualProductTargetTuple {
+  entity: string;
+  components: ManualProductTargetComponent[];
 }
 
 type ManualBilingualParticipantRole =
@@ -68,6 +81,7 @@ interface ManualBilingualSemanticSlots {
   object_modality: ManualBilingualModalitySlots;
   target_entities: string[];
   target_qualifiers: string[];
+  product_targets: ManualProductTargetTuple[];
   concepts: string[];
   versions: string[];
   regions: string[];
@@ -613,7 +627,225 @@ function bilingualModalitySlots(
     epistemic: [...new Set(epistemic)].sort(),
     intent: [...new Set(intent)].sort(),
     aspect: [...new Set(aspect)].sort(),
+    tense: 'not_applicable',
+    deontic: [],
+    voice: 'not_applicable',
   };
+}
+
+function englishActionMorphology(surface: string): 'base' | 'progressive' | 'participle' {
+  const normalized = surface.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim();
+  if (/(?:ing|ying|pping|nning)$/u.test(normalized)) return 'progressive';
+  if (/(?:ed|ned|pped|ied|bought|sold|signed|approved|laid\s+off)$/u.test(normalized)) {
+    return 'participle';
+  }
+  return 'base';
+}
+
+function removeEnglishPredicateModifier(
+  tokens: string[],
+  pattern: readonly string[],
+): { tokens: string[]; found: boolean } {
+  const next = [...tokens];
+  let found = false;
+  for (let index = 0; index <= next.length - pattern.length;) {
+    if (pattern.every((token, offset) => next[index + offset] === token)) {
+      next.splice(index, pattern.length);
+      found = true;
+      continue;
+    }
+    index += 1;
+  }
+  return { tokens: next, found };
+}
+
+function structuredEnglishPredicateModality(
+  value: string,
+  occurrence: FactActionOccurrence,
+): ManualBilingualModalitySlots {
+  const normalized = value.normalize('NFKC').toLowerCase();
+  const tail = normalized.slice(occurrence.end).replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (tail) throw new Error('invalid_claim_predicate');
+  let tokens = (normalized.slice(0, occurrence.index).match(/[a-z]+(?:['’]t)?/gu) || [])
+    .map((token) => token.replace('’', "'"));
+  const attribution: ManualBilingualModalitySlots['attribution'] = [];
+  const epistemic: ManualBilingualModalitySlots['epistemic'] = [];
+  const intent: ManualBilingualModalitySlots['intent'] = [];
+  const aspect: ManualBilingualModalitySlots['aspect'] = [];
+  const deontic: ManualBilingualModalitySlots['deontic'] = [];
+  let tense: ManualBilingualModalitySlots['tense'] = 'present';
+  let voice: ManualBilingualModalitySlots['voice'] = 'active';
+
+  const consume = (pattern: readonly string[]) => {
+    const result = removeEnglishPredicateModifier(tokens, pattern);
+    tokens = result.tokens;
+    return result.found;
+  };
+  if (consume(['according', 'to', 'a', 'report']) || consume(['reportedly'])) attribution.push('reported');
+  if (consume(['allegedly']) || consume(['is', 'alleged', 'to']) || consume(['was', 'alleged', 'to'])) {
+    attribution.push('alleged');
+  }
+  if (consume(['possibly']) || consume(['perhaps'])) epistemic.push('possible');
+  const completedAdverb = consume(['officially']) || consume(['formally']) || consume(['already']);
+  const ongoingAdverb = consume(['currently']) || consume(['ongoing']);
+  const negative = consume(['not']) || consume(['never'])
+    || consume(["isn't"]) || consume(["aren't"]) || consume(["wasn't"])
+    || consume(["weren't"]) || consume(["hasn't"]) || consume(["haven't"])
+    || consume(["hadn't"]) || consume(["didn't"]) || consume(["doesn't"])
+    || consume(["won't"]);
+  if (negative !== occurrence.negated) throw new Error('invalid_claim_predicate');
+
+  const form = englishActionMorphology(occurrence.surface);
+  const exact = (...expected: string[]) => tokens.length === expected.length
+    && expected.every((token, index) => tokens[index] === token);
+  if (!tokens.length) {
+    if (form === 'progressive') throw new Error('invalid_claim_predicate');
+    if (form === 'participle') {
+      tense = 'past';
+      aspect.push('completed');
+    }
+  } else if ((exact('may') || exact('might') || exact('could')) && form === 'base') {
+    epistemic.push('possible');
+  } else if ((exact('may', 'be') || exact('might', 'be') || exact('could', 'be'))
+    && form === 'participle') {
+    epistemic.push('possible');
+    voice = 'passive';
+  } else if (exact('will') && form === 'base') {
+    tense = 'future';
+  } else if (exact('will', 'be') && form === 'participle') {
+    tense = 'future';
+    voice = 'passive';
+  } else if ((exact('is', 'to') || exact('are', 'to')) && form === 'base') {
+    intent.push('planned');
+  } else if ((exact('was', 'to') || exact('were', 'to')) && form === 'base') {
+    tense = 'past';
+    intent.push('planned');
+  } else if (exact('did') && form === 'base') {
+    tense = 'past';
+    aspect.push('completed');
+  } else if ((exact('has') || exact('have') || exact('had')) && form === 'participle') {
+    tense = 'past';
+    aspect.push('completed');
+  } else if ((exact('has', 'to') || exact('have', 'to')) && form === 'base') {
+    deontic.push('required');
+  } else if (exact('had', 'to') && form === 'base') {
+    tense = 'past';
+    deontic.push('required');
+  } else if (exact('must') && form === 'base') {
+    deontic.push('required');
+  } else if ((exact('plan', 'to') || exact('plans', 'to') || exact('planned', 'to')
+    || exact('intend', 'to') || exact('intends', 'to') || exact('intended', 'to'))
+    && form === 'base') {
+    intent.push('planned');
+  } else if ((exact('is', 'planning', 'to') || exact('are', 'planning', 'to')) && form === 'base') {
+    intent.push('planned');
+  } else if ((exact('was', 'planning', 'to') || exact('were', 'planning', 'to')) && form === 'base') {
+    tense = 'past';
+    intent.push('planned');
+  } else if ((exact('is') || exact('are')) && form === 'progressive') {
+    aspect.push('ongoing');
+  } else if ((exact('was') || exact('were')) && form === 'progressive') {
+    tense = 'past';
+    aspect.push('ongoing');
+  } else if ((exact('is') || exact('are')) && form === 'participle') {
+    voice = 'passive';
+    aspect.push('completed');
+  } else if ((exact('was') || exact('were')) && form === 'participle') {
+    tense = 'past';
+    voice = 'passive';
+    aspect.push('completed');
+  } else {
+    throw new Error('invalid_claim_predicate');
+  }
+  if (completedAdverb) aspect.push('completed');
+  if (ongoingAdverb) aspect.push('ongoing');
+  if (occurrence.action === 'request') intent.push('requested');
+  return {
+    attribution: [...new Set(attribution)].sort(),
+    epistemic: [...new Set(epistemic)].sort(),
+    intent: [...new Set(intent)].sort(),
+    aspect: [...new Set(aspect)].sort(),
+    tense,
+    deontic: [...new Set(deontic)].sort(),
+    voice,
+  };
+}
+
+function structuredChinesePredicateModality(
+  value: string,
+  occurrence: FactActionOccurrence,
+): ManualBilingualModalitySlots {
+  const normalized = value.normalize('NFKC');
+  const mask = new Array<boolean>(normalized.length).fill(false);
+  consumeSemanticSpan(mask, { start: occurrence.index, end: occurrence.end });
+  const attribution: ManualBilingualModalitySlots['attribution'] = [];
+  const epistemic: ManualBilingualModalitySlots['epistemic'] = [];
+  const intent: ManualBilingualModalitySlots['intent'] = [];
+  const aspect: ManualBilingualModalitySlots['aspect'] = [];
+  const deontic: ManualBilingualModalitySlots['deontic'] = [];
+  let tense: ManualBilingualModalitySlots['tense'] = 'present';
+  let voice: ManualBilingualModalitySlots['voice'] = 'active';
+  const consume = (pattern: RegExp) => consumeSemanticPattern(mask, normalized, pattern);
+  const has = (pattern: RegExp) => pattern.test(normalized.slice(0, occurrence.index));
+
+  if (has(/(?:据报道|报道称|消息称|据称)/u)) {
+    attribution.push('reported'); consume(/(?:据报道|报道称|消息称|据称)/u);
+  }
+  if (has(/(?:涉嫌|被指|遭指控)/u)) {
+    attribution.push('alleged'); consume(/(?:涉嫌|被指|遭指控)/u);
+  }
+  if (has(/(?:可能|或许|也许|预计)/u)) {
+    epistemic.push('possible'); consume(/(?:可能|或许|也许|预计)/u);
+  }
+  if (has(/(?:计划|拟|准备)/u)) {
+    intent.push('planned'); consume(/(?:计划|拟|准备)/u);
+  }
+  if (has(/(?:必须|需要)/u)) {
+    deontic.push('required'); consume(/(?:必须|需要)/u);
+  }
+  if (has(/(?:正在|仍在|继续)/u)) {
+    aspect.push('ongoing'); consume(/(?:正在|仍在|继续)/u);
+  }
+  if (has(/(?:已经|已|正式|完成)/u)) {
+    aspect.push('completed'); tense = 'past'; consume(/(?:已经|已|正式|完成)/u);
+  }
+  if (has(/曾/u)) {
+    tense = 'past'; consume(/曾/u);
+  }
+  if (has(/将/u)) {
+    if (tense === 'past') throw new Error('invalid_claim_predicate');
+    tense = 'future'; consume(/将/u);
+  }
+  if (has(/被(?!指)/u)) {
+    voice = 'passive'; consume(/被(?!指)/u);
+  }
+  for (const pattern of BILINGUAL_PREDICATE_POLARITY_PATTERNS) consume(pattern);
+  if (occurrence.action === 'request') intent.push('requested');
+  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('').replace(/[\p{P}\p{S}\s]+/gu, '');
+  if (residue) throw new Error('invalid_claim_predicate');
+  return {
+    attribution: [...new Set(attribution)].sort(),
+    epistemic: [...new Set(epistemic)].sort(),
+    intent: [...new Set(intent)].sort(),
+    aspect: [...new Set(aspect)].sort(),
+    tense,
+    deontic: [...new Set(deontic)].sort(),
+    voice,
+  };
+}
+
+function structuredPredicateModalitySlots(
+  value: string,
+  occurrence: FactActionOccurrence,
+): ManualBilingualModalitySlots {
+  const normalized = value.normalize('NFKC');
+  if (/\p{Script=Han}/u.test(normalized) && /[A-Za-z]/u.test(normalized)) {
+    throw new Error('invalid_claim_predicate');
+  }
+  return /\p{Script=Han}/u.test(normalized)
+    ? structuredChinesePredicateModality(normalized, occurrence)
+    : structuredEnglishPredicateModality(normalized, occurrence);
 }
 
 const BILINGUAL_PARTICIPANT_PATTERNS: ReadonlyArray<readonly [
@@ -709,6 +941,12 @@ interface IndexedSemanticValue {
   end: number;
 }
 
+interface IndexedProductTargetTuple extends ManualProductTargetTuple {
+  start: number;
+  end: number;
+  component_spans: IndexedSemanticValue[];
+}
+
 const SIMPLE_RELATIVE_FACT_TIMES: ReadonlyArray<readonly [string, RegExp]> = [
   ['later', /\b(?:later|subsequently)\b|(?:稍后|随后)/iu],
   ['recently', /\brecently\b|(?:最近|近期)/iu],
@@ -762,6 +1000,88 @@ function boundTargetQualifierSpans(value: string): IndexedSemanticValue[] {
   return qualifiers.filter((qualifier) => productSpans.some((product) =>
     product.end <= qualifier.start
     && targetQualifierBridgeIsBound(normalized.slice(product.end, qualifier.start))));
+}
+
+const PRODUCT_TARGET_QUALIFIER_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
+  ['enterprise', /^(?:enterprise(?![a-z0-9])|企业版)/iu],
+  ['pro', /^(?:pro(?![a-z0-9])|专业版)/iu],
+  ['plus', /^(?:plus(?![a-z0-9])|增强版)/iu],
+  ['lite', /^(?:lite(?![a-z0-9])|轻量版)/iu],
+  ['mini', /^(?:mini(?![a-z0-9])|迷你版)/iu],
+];
+function productTargetDescriptorAliases(): ReadonlyArray<readonly [string, RegExp]> {
+  return [
+    ['code', /^(?:code(?![a-z0-9])|代码)/iu],
+    ...[...PRODUCT_DESCRIPTOR_WORDS]
+      .filter((value) => !['enterprise', 'pro', 'plus', 'lite', 'mini'].includes(value))
+      .map((value) => [value, new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![a-z0-9])`, 'iu')] as const),
+  ];
+}
+
+function productTargetTuples(value: string): IndexedProductTargetTuple[] {
+  const normalized = value.normalize('NFKC');
+  const candidates = Object.entries(PRODUCT_ENTITY_REGISTRY).flatMap(([entity, aliases]) =>
+    aliases.flatMap((alias) => regexSemanticSpans(normalized, semanticAliasPattern(alias), entity)))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const productSpans = candidates.filter((candidate, index, all) =>
+    !all.some((other, otherIndex) => otherIndex !== index
+      && other.start <= candidate.start && other.end >= candidate.end
+      && other.end - other.start > candidate.end - candidate.start));
+  const targets: IndexedProductTargetTuple[] = [];
+  let consumedUntil = -1;
+  for (const product of productSpans) {
+    if (product.start < consumedUntil) continue;
+    let cursor = product.end;
+    const components: ManualProductTargetComponent[] = [];
+    const componentSpans: IndexedSemanticValue[] = [];
+    while (cursor < normalized.length) {
+      const separator = normalized.slice(cursor).match(/^[\s._-]*/u)?.[0] || '';
+      const componentStart = cursor + separator.length;
+      const remaining = normalized.slice(componentStart);
+      if (!remaining) break;
+      let matched: { kind: ManualProductTargetComponent['kind']; value: string; raw: string } | null = null;
+      for (const [canonical, pattern] of PRODUCT_TARGET_QUALIFIER_ALIASES) {
+        const match = pattern.exec(remaining);
+        if (match?.[0]) {
+          matched = { kind: 'qualifier', value: canonical, raw: match[0] };
+          break;
+        }
+      }
+      if (!matched) {
+        for (const [canonical, pattern] of productTargetDescriptorAliases()) {
+          const match = pattern.exec(remaining);
+          if (match?.[0]) {
+            matched = { kind: 'descriptor', value: canonical, raw: match[0] };
+            break;
+          }
+        }
+      }
+      if (!matched) {
+        const version = /^(?:v?\d+(?:\.\d+)*(?:-[a-z0-9.]+)?|\d+-\d+(?:\.\d+)?[bkm])(?![a-z0-9])/iu.exec(remaining);
+        if (version?.[0] && isStructuredProductVersionToken(version[0])) {
+          matched = {
+            kind: 'version',
+            value: version[0].toLowerCase().replace(/^v/u, ''),
+            raw: version[0],
+          };
+        }
+      }
+      if (!matched) break;
+      const end = componentStart + matched.raw.length;
+      components.push({ kind: matched.kind, value: matched.value });
+      componentSpans.push({ value: `${matched.kind}:${matched.value}`, start: componentStart, end });
+      cursor = end;
+    }
+    targets.push({
+      entity: product.value,
+      components,
+      start: product.start,
+      end: cursor,
+      component_spans: componentSpans,
+    });
+    consumedUntil = cursor;
+  }
+  return targets;
 }
 
 function relativeFactTimeSpans(value: string): IndexedSemanticValue[] {
@@ -873,10 +1193,6 @@ const BILINGUAL_PREDICATE_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:并未|并不|没有|从未|尚未|未能|不再|不会|未|不|无)/u,
   /\b(?:not|never|no\s+longer|cannot|can['’]t|(?:is|are|was|were|has|have|had|do|does|did|will|would|could|should)n['’]t)\b/iu,
 ];
-const BILINGUAL_PREDICATE_AUXILIARY_PATTERNS: ReadonlyArray<RegExp> = [
-  /(?:被)/u,
-  /\b(?:am|is|are|was|were|be|been|being|has|have|had|do|does|did|to)\b/iu,
-];
 const ABSOLUTE_FACT_TIME_PATTERNS: ReadonlyArray<RegExp> = [
   /20\d{2}年\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|凌晨|晚上|傍晚|晚间)?\s*[零〇一二三四五六七八九十两\d]{1,3}(?:时|点)(?:[零〇一二三四五六七八九十两\d]{1,3}分?)?)?/iu,
   /\b20\d{2}-\d{1,2}-\d{1,2}(?:T|\s+\d{1,2}:\d{2})?(?::\d{2}(?:\.\d+)?)?\s*(?:[AP]\.?\s*M\.?)?\s*(?:Z|(?:UTC|GMT)\s*[+-]?\s*\d{0,2}(?::?\d{2})?|[+-]\d{1,2}:?\d{2})?/iu,
@@ -922,25 +1238,8 @@ function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): vo
 function assertConsumedPredicateSemantics(
   value: string,
   occurrence: FactActionOccurrence,
-): void {
-  const normalized = value.normalize('NFKC');
-  const mask = new Array<boolean>(normalized.length).fill(false);
-  consumeSemanticSpan(mask, { start: occurrence.index, end: occurrence.end });
-  const patternGroups: ReadonlyArray<ReadonlyArray<RegExp>> = [
-    BILINGUAL_ATTRIBUTION_PATTERNS.map(([, pattern]) => pattern),
-    BILINGUAL_EPISTEMIC_PATTERNS.map(([, pattern]) => pattern),
-    BILINGUAL_INTENT_PATTERNS.map(([, pattern]) => pattern),
-    BILINGUAL_ASPECT_PATTERNS.map(([, pattern]) => pattern),
-    BILINGUAL_PREDICATE_POLARITY_PATTERNS,
-    BILINGUAL_PREDICATE_AUXILIARY_PATTERNS,
-  ];
-  for (const patterns of patternGroups) {
-    for (const pattern of patterns) consumeSemanticPattern(mask, normalized, pattern);
-  }
-  const residue = normalized.split('').map((character, index) => mask[index] ? ' ' : character)
-    .join('')
-    .replace(/[\p{P}\p{S}\s]+/gu, '');
-  if (residue) throw new Error('invalid_claim_predicate');
+): ManualBilingualModalitySlots {
+  return structuredPredicateModalitySlots(value, occurrence);
 }
 
 function assertConsumedObjectSemantics(value: string): void {
@@ -973,6 +1272,9 @@ function assertConsumedObjectSemantics(value: string): void {
     for (const alias of aliases) consumeSemanticPattern(mask, normalized, semanticAliasPattern(alias));
   }
   for (const span of boundTargetQualifierSpans(normalized)) consumeSemanticSpan(mask, span);
+  for (const target of productTargetTuples(normalized)) {
+    for (const span of target.component_spans) consumeSemanticSpan(mask, span);
+  }
   for (const span of relativeFactTimeSpans(normalized)) consumeSemanticSpan(mask, span);
   for (const pattern of [
     /(?<![a-z0-9])v?\d+(?:\.\d+)*(?:-[a-z0-9.]+)?(?![a-z0-9])/iu,
@@ -1000,7 +1302,7 @@ function projectionLanguageError(fact: ManualAtomicFactSlots): string | null {
 function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSemanticSlots {
   const predicateActions = factActionOccurrences(fact.predicate);
   if (predicateActions.length !== 1) throw new Error('invalid_claim_predicate');
-  assertConsumedPredicateSemantics(fact.predicate, predicateActions[0]);
+  const predicateModality = assertConsumedPredicateSemantics(fact.predicate, predicateActions[0]);
   const reason = canonicalFactReason(fact.object);
   if (reason.present && !reason.canonical) throw new Error('invalid_claim_object');
   const participantRoles = bilingualParticipantRoles(reason.residual);
@@ -1008,6 +1310,10 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
   const objectRelations = canonicalObjectRelations(reason.residual);
   const targetEntities = [...registeredEntityIdentities(reason.residual)].sort();
   const targetQualifiers = bilingualTargetQualifiers(reason.residual);
+  const productTargets = productTargetTuples(reason.residual).map((target) => ({
+    entity: target.entity,
+    components: target.components,
+  }));
   const concepts = bilingualFactConcepts(reason.residual).sort();
   const regions = bilingualFactRegions(reason.residual);
   const relativeTimes = [...new Set(relativeFactTimeSpans(reason.residual).map((span) => span.value))].sort();
@@ -1023,7 +1329,7 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
   assertConsumedObjectSemantics(reason.residual);
   return {
     action,
-    predicate_modality: bilingualModalitySlots(fact.predicate, predicateActions[0]),
+    predicate_modality: predicateModality,
     predicate_negated: predicateActions[0].negated,
     predicate_residue: '',
     predicate_residue_policy: 'consumed-semantic-spans-v1',
@@ -1034,6 +1340,7 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
     object_modality: bilingualModalitySlots(reason.residual, null),
     target_entities: targetEntities,
     target_qualifiers: targetQualifiers,
+    product_targets: productTargets,
     concepts,
     versions: bilingualFactVersions(reason.residual),
     regions,
@@ -1081,6 +1388,7 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.object_relations) !== canonicalJson(projectionSlots.object_relations)
     || canonicalJson(sourceSlots.target_entities) !== canonicalJson(projectionSlots.target_entities)
     || canonicalJson(sourceSlots.target_qualifiers) !== canonicalJson(projectionSlots.target_qualifiers)
+    || canonicalJson(sourceSlots.product_targets) !== canonicalJson(projectionSlots.product_targets)
     || canonicalJson(sourceSlots.concepts) !== canonicalJson(projectionSlots.concepts)
     || canonicalJson(sourceSlots.versions) !== canonicalJson(projectionSlots.versions)) {
     return 'invalid_editorial_projection_object';
@@ -1298,8 +1606,9 @@ export function buildManualLeadAssessmentPrompt(input: ManualLeadAssessmentPromp
       'atomic_fact.subject 只能有一个完整主体；atomic_fact.predicate 只能有一个谓词，可包含紧邻该谓词的时态、否定、计划或“据报道”等限定；atomic_fact.object 只能有一个对象及其必要版本、地区和范围。',
       'source_facts.atomic_fact 必须沿用直接证据的源语言、实体原文与谓词表达：英文证据写英文 source fact，中文证据写中文 source fact，禁止先翻译再绑定连续原文。',
       'editorial_projection 是独立的严肃中文编辑投影。title 与 summary 的每个中文原子句必须填写自己的四槽 atomic_fact，并通过 source_fact_refs 显式映射且只映射一个 source fact；不得新增、删除或改变主体、动作、对象、版本、时间、地区、否定、情态或完成状态。',
-      '双语投影必须逐槽精确等价：来源归因（reportedly/据报道、allegedly/被指）、认识可能性（may/可能）、计划或未来（planned/will/计划/将）、进行或完成状态（ongoing/completed/正在/已）以及 polarity 是五组正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉其中任何一组。predicate 除主动作、助动词及这些已结构化槽外不得残留 apparently、likely、purportedly、temporarily、partially、conditionally 或其他未解释实义词；无法可靠归一化时必须 needs_review。',
-      '员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/能力、使用关系、目标产品后缀、地区、原因、版本、绝对或相对时间均不得增删改。对象两侧每段实义文本都必须可归入明确槽位；most/half、unable、for confidential projects、later/last week/on Monday 等未知范围、能力、限定和附着时间不能省略。Enterprise/Pro/Plus/Lite/Mini 仅在与同一目标产品短语明确绑定时才是产品 qualifier，单独出现时不得消费。无法可靠翻译、归一化或完全消费的关键跨度必须 recommendation=needs_review，不得凭关键词相似猜测。',
+      '双语投影必须逐槽精确等价：来源归因、认识可能性、计划、时态、进行/完成体、义务、主动/被动语态及 polarity 是相互独立的正交信息；一句中出现多组时必须全部保留，不得用单一“弱情态”或优先级吞掉。英文助动链必须按完整结构表达：is/was to + action 是现在/过去计划，did + action 与 has/have/had + 过去分词是已完成，have/had to + action 是现在/过去义务而非完成，be + reportedly/allegedly + V-ing 是进行态，will be + 过去分词是未来被动；planned to 与 be planning to 均为计划。无法识别的助动词/修饰词组合必须 needs_review。',
+      'predicate 除主动作、完整助动链及已结构化正交槽外不得残留 apparently、likely、purportedly、temporarily、partially、conditionally 或其他未解释实义词。员工、客户、用户、承包商、公众及其 all/some/only 等数量范围不得互换；对象内部否定/能力、使用关系、目标产品后缀、地区、原因、版本、绝对或相对时间均不得增删改。对象两侧每段实义文本都必须可归入明确槽位；most/half、unable、for confidential projects、later/last week/on Monday 等未知范围、能力、限定和附着时间不能省略。',
+      '产品目标按位置绑定为 entity + 按原顺序排列的 descriptor/qualifier/version tuple；例如 Claude Code Pro 与 Claude Pro Code 不等价，CLAUDE CODE PRO 仅是大小写等价。Enterprise/Pro/Plus/Lite/Mini 只有紧邻并绑定同一注册产品时才可消费，单独出现或重排均必须 needs_review。无法可靠翻译、归一化或完全消费的关键跨度不得凭关键词相似猜测。',
       '中文投影的谓词和非专名叙述必须使用中文；公司、模型、产品及版本可保留官方英文名。禁止 OpenAI was sued稍后时间点 之类中英叙述混写，也禁止把纯时间、纯原因或纯情态写成 object。',
       'raw source fact 使用顺序 fact_ref：fact-01、fact-02……；title 只能用 title-01，summary 只能依次用 summary-01、summary-02……。程序会从源事实内容生成稳定 source fact id，并把投影映射转换为该稳定 id。',
       'title 只映射 primary fact（fact-01）。summary 项数必须与 source_facts 完全相等，并按原顺序一一映射：summary-01→fact-01、summary-02→fact-02……；禁止漏项、重复 fact_ref、乱序或额外 summary。',
@@ -1763,7 +2072,8 @@ export function buildManualLeadFactVerificationPrompt(input: {
       '每个输入 fact 已被确定性拆成单一原子子句；逐条核验，不得把不同子句、不同主体或不同对象之间的词语互换拼接。',
       '每个 fact 只能使用其自身结构内的 allowed_evidence；禁止跨 fact 查看、引用或推断其他 evidence。',
       '先核验每条 source_fact、event_key 的主体/动作/对象/版本/日期语义、event_type、非空 occurred_at，以及无论 true 或 false 的 material_update；中文 title/summary 只在独立 projection_results 阶段核验。',
-      'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：来源归因、认识可能性、计划/未来、进行/完成状态和 polarity 分属正交集合；参与者角色与数量范围、对象内否定/能力、关系、目标产品后缀、地区、原因、版本及绝对/相对时间也必须分别等价，不得把 compound modality 统称为弱情态。即使词面相似，只要任一槽不等价就必须 unsupported。',
+      'projection_results 必须逐槽比较本地附带的 deterministic semantic slots：来源归因、认识可能性、计划、时态、进行/完成体、义务、语态和 polarity 分属正交集合；is/was to、did、has/have/had + 过去分词、have/had to、be + attribution + V-ing、will be + 过去分词等完整助动链不得逐词吞并或互换。参与者角色与数量范围、对象内否定/能力、关系、地区、原因、绝对/相对时间也必须分别等价。',
+      '目标产品必须按 entity + 有序 descriptor/qualifier/version tuple 核验，禁止把 Claude Code Pro 与 Claude Pro Code、Claude Enterprise Code 或缺失 qualifier 视为同一目标；只允许大小写规范化。即使词面相似，只要任一槽或顺序不等价就必须 unsupported。',
       '本地程序还会对 predicate 与 object 执行 consumed-semantic-spans fail-closed gate：除主动作、助动词和已签名正交槽外，所有实义跨度都必须被消费；无法分类的情态、时长、条件、范围、对象补语、未绑定产品 qualifier 或附着时间会直接拒绝，模型返回 supported 也不能覆盖该结果。',
       '逐项检查主体、动作方向、否定关系、对象、产品版本、时间与适用范围；不得用常识、用户线索、标题相似或同公司旧闻补齐事实。',
       '禁止用词面相似度、关键词比例或跨句词语重合代替结构核验；未知动作只有在完整规范化关键跨度一致时才可支持，未知复合谓词一律不支持。',
@@ -2505,7 +2815,7 @@ function looksLikeDetachedChinesePredicate(value: string): boolean {
 function prefixContainsDetachedUnknownPredicate(value: string): boolean {
   const prefix = normalizedAtomicClause(value)
     .replace(/(?:已经|已|将|正在|正式|计划|可能|据称|宣布|完成)+$/u, '')
-    .replace(/\b(?:has|have|had|will|would|may|might|reportedly|officially|formally|plans?\s+to)\s*$/iu, '')
+    .replace(/\b(?:(?:is|are|was|were)\s+(?:reportedly\s+|allegedly\s+)?(?:planning\s+to|to)|(?:plan|plans|planned|intend|intends|intended)\s+to|has\s+to|have\s+to|had\s+to|has|have|had|did|will|would|may|might|reportedly|allegedly|officially|formally)\s*$/iu, '')
     .replace(/\b(?:fail(?:s|ed)?|unable|refus(?:e|es|ed))\s+to\s*$/iu, '')
     .trim();
   if (looksLikeDetachedEnglishPredicate(prefix)) return true;
@@ -2769,6 +3079,7 @@ interface StructuredFactUnit {
   slots: StructuredFactSlot[];
   negated: boolean;
   modality: FactActionOccurrence['modality'];
+  predicate_semantics: ManualBilingualModalitySlots | null;
 }
 
 const FACT_UNIT_BOUNDARY = new RegExp(
@@ -2875,7 +3186,7 @@ function leadingFactUnitSubject(value: string, occurrence: FactActionOccurrence)
     .replace(/^(?:尚无证据表明|没有证据表明|据称|传闻|报道称|消息称|官方|公司方面|随后|继而|然后|后又)\s*/u, '')
     .replace(/(?:已经|已|未|并未|正式|仍在|正在|正|继续|计划|可能|宣布|将|没有|从未|尚未|未能|不再|不会|并不)+$/u, '')
     .replace(/(?:在|于|对|向|为)\s*$/u, '')
-    .replace(/\b(?:has|have|had|is|are|was|were|will|would|can|could|may|might|plans?\s+to|reportedly|officially|formally)\s*$/iu, '')
+    .replace(/\b(?:(?:is|are|was|were)\s+(?:reportedly\s+|allegedly\s+)?(?:planning\s+to|to)|(?:plan|plans|planned|intend|intends|intended)\s+to|has\s+to|have\s+to|had\s+to|has|have|had|did|is|are|was|were|will|would|can|could|may|might|reportedly|allegedly|officially|formally)\s*$/iu, '')
     .replace(/^(?:the|a|an)\s+/iu, '')
     .trim();
   if (!prefix) return null;
@@ -3139,12 +3450,37 @@ function structuredFactUnits(value: string): StructuredFactUnit[] {
     const hasPriorActionInUnit = actions.some((item) => item.index >= unitStart && item.index < occurrence.index);
     const explicitSubject = hasPriorActionInUnit ? null : leadingFactUnitSubject(value, occurrence);
     if (explicitSubject) inheritedSubject = explicitSubject;
+    const subject = explicitSubject || inheritedSubject;
+    let predicateSemantics: ManualBilingualModalitySlots | null = null;
+    if (!hasPriorActionInUnit && subject) {
+      const unitStart = factUnitStart(value, occurrence.index);
+      const rawPrefix = stripRelativeFactTimeText(stripFactTemporalText(
+        value.slice(unitStart, occurrence.index),
+      ));
+      const escapedSubject = subject.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&').replace(/\s+/gu, '\\s+');
+      const predicatePrefix = rawPrefix.replace(new RegExp(`^\\s*${escapedSubject}`, 'iu'), '')
+        .replace(/^\s*(?:(?:在|于)|\b(?:on|at)\b)\s*/iu, '');
+      const predicate = `${predicatePrefix}${occurrence.surface}`.trim();
+      const localIndex = predicate.toLowerCase().lastIndexOf(occurrence.surface.toLowerCase());
+      if (localIndex >= 0) {
+        try {
+          predicateSemantics = structuredPredicateModalitySlots(predicate, {
+            ...occurrence,
+            index: localIndex,
+            end: localIndex + occurrence.surface.length,
+          });
+        } catch {
+          predicateSemantics = null;
+        }
+      }
+    }
     units.push({
       action: occurrence.action,
-      subject: explicitSubject || inheritedSubject,
-      slots: structuredFactUnitSlots(value, occurrence, actions, explicitSubject || inheritedSubject),
+      subject,
+      slots: structuredFactUnitSlots(value, occurrence, actions, subject),
       negated: factUnitNegated(value, occurrence, actions),
       modality: occurrence.modality,
+      predicate_semantics: predicateSemantics,
     });
   }
   return units;
@@ -3158,6 +3494,31 @@ function sameFactUnitIdentity(expected: StructuredFactUnit, actual: StructuredFa
   return expected.slots.every((slot) => actual.slots.some((item) =>
     item.kind === slot.kind
     && normalizedSemanticSlot(item.value) === normalizedSemanticSlot(slot.value)));
+}
+
+function isBarePredicateAssertion(value: ManualBilingualModalitySlots): boolean {
+  return !value.attribution.length
+    && !value.epistemic.length
+    && !value.intent.length
+    && !value.aspect.length
+    && !value.deontic.length
+    && value.tense === 'present'
+    && value.voice === 'active';
+}
+
+function structuredPredicateSemanticsCompatible(
+  expected: ManualBilingualModalitySlots,
+  actual: ManualBilingualModalitySlots,
+): boolean {
+  if (canonicalJson(expected) === canonicalJson(actual)) return true;
+  const actualCompletedAssertion = !actual.attribution.length
+    && !actual.epistemic.length
+    && !actual.intent.length
+    && canonicalJson(actual.aspect) === canonicalJson(['completed'])
+    && !actual.deontic.length
+    && actual.tense === 'past'
+    && actual.voice === 'active';
+  return isBarePredicateAssertion(expected) && actualCompletedAssertion;
 }
 
 function compareAtomicKnownFact(candidate: string, quote: string): string | null {
@@ -3179,6 +3540,18 @@ function compareAtomicKnownFact(candidate: string, quote: string): string | null
   for (const unit of expected) {
     const sameIdentity = actual.filter((item) => sameFactUnitIdentity(unit, item));
     const samePolarity = sameIdentity.filter((item) => item.negated === unit.negated);
+    const observedSemantics = samePolarity
+      .map((item) => item.predicate_semantics)
+      .filter((item): item is ManualBilingualModalitySlots => !!item);
+    const expectedSemantics = unit.predicate_semantics;
+    if (expectedSemantics
+      && (!isBarePredicateAssertion(expectedSemantics) || observedSemantics.length > 0)) {
+      if (!samePolarity.some((item) => item.predicate_semantics
+        && structuredPredicateSemanticsCompatible(expectedSemantics, item.predicate_semantics))) {
+        if (samePolarity.length) return 'fact_verification_modality_mismatch';
+      }
+      continue;
+    }
     if (!samePolarity.some((item) => actionModalityCompatible(unit.modality, item.modality))) {
       if (samePolarity.length) return 'fact_verification_modality_mismatch';
     }
@@ -4273,7 +4646,12 @@ function highConfidenceLeadAnchors(leadText: string): string[] {
     const hasLetter = /[a-z]/i.test(token);
     const hasDigit = /\d/.test(token);
     const numericVersion = /^\d+\.\d+(?:\.\d+)*$/.test(token);
-    const uppercaseAcronym = /^[A-Z]{3,}$/.test(token) && !NON_DISTINCTIVE_ACRONYMS.has(normalized);
+    const uppercaseAcronym = /^[A-Z]{3,}$/.test(token)
+      && !NON_DISTINCTIVE_ACRONYMS.has(normalized)
+      && canonicalEntityRole(token) === 'unknown'
+      && normalized !== 'code'
+      && !PRODUCT_DESCRIPTOR_WORDS.has(normalized)
+      && !PRODUCT_TARGET_QUALIFIER_ALIASES.some(([qualifier]) => qualifier === normalized);
     if ((!hasLetter || !hasDigit) && !numericVersion && !uppercaseAcronym) continue;
     if (!anchors.has(normalized)) anchors.set(normalized, token);
   }

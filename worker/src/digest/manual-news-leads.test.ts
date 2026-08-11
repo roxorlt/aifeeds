@@ -636,6 +636,74 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    ['present schedule omitted', 'is to ban', '禁止'],
+    ['past schedule collapsed to present', 'was to ban', '计划禁止'],
+    ['did-past completion omitted', 'did ban', '禁止'],
+    ['present obligation misread as completion', 'have to ban', '已禁止'],
+    ['past obligation misread as completion', 'had to ban', '已禁止'],
+    ['reported present progressive collapsed', 'is reportedly banning', '据报道禁止'],
+    ['alleged present progressive collapsed', 'is allegedly banning', '被指禁止'],
+    ['reported past progressive collapsed', 'was reportedly banning', '据报道禁止'],
+    ['future passive rewritten as completed', 'will be banned', '已被禁止'],
+  ])('keeps structured tense, aspect, deontic, and voice orthogonal: %s', async (
+    _label,
+    sourcePredicate,
+    projectionPredicate,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: sourcePredicate },
+      projection: { predicate: projectionPredicate },
+      quote: `Alibaba ${sourcePredicate} employees from using Claude Code.`,
+    })).rejects.toThrow(/(?:invalid_claim_predicate|invalid_editorial_projection_(?:modality|polarity))/);
+  });
+
+  test.each([
+    ['present scheduled', 'is to ban', '计划禁止'],
+    ['plural present scheduled', 'are to ban', '计划禁止'],
+    ['past scheduled', 'was to ban', '曾计划禁止'],
+    ['plural past scheduled', 'were to ban', '曾计划禁止'],
+    ['did-past completed', 'did ban', '已禁止'],
+    ['present perfect completed', 'has banned', '已禁止'],
+    ['plural present perfect completed', 'have banned', '已禁止'],
+    ['past perfect completed', 'had banned', '已禁止'],
+    ['present obligation', 'have to ban', '必须禁止'],
+    ['past obligation', 'had to ban', '曾必须禁止'],
+    ['reported present progressive', 'is reportedly banning', '据报道正在禁止'],
+    ['alleged present progressive', 'is allegedly banning', '被指正在禁止'],
+    ['reported past progressive', 'was reportedly banning', '据报道曾正在禁止'],
+    ['future passive', 'will be banned', '将被禁止'],
+    ['planned infinitive', 'planned to ban', '计划禁止'],
+    ['planning progressive', 'is planning to ban', '计划禁止'],
+  ])('creates a current proof for a recognized complete auxiliary structure: %s', async (
+    _label,
+    sourcePredicate,
+    projectionPredicate,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: sourcePredicate },
+      projection: { predicate: projectionPredicate },
+      quote: `Alibaba ${sourcePredicate} employees from using Claude Code.`,
+    })).resolves.toBe(true);
+  });
+
+  test.each([
+    ['obligation cannot be supported by completion', 'have to ban', '必须禁止', 'has banned'],
+    ['future passive cannot be supported by past completion', 'will be banned', '将被禁止', 'was banned'],
+    ['ongoing attribution cannot be supported by a bare assertion', 'is reportedly banning', '据报道正在禁止', 'bans'],
+  ])('rechecks the complete predicate structure against the source quote even when verifier says supported: %s', async (
+    _label,
+    sourcePredicate,
+    projectionPredicate,
+    quotePredicate,
+  ) => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { predicate: sourcePredicate },
+      projection: { predicate: projectionPredicate },
+      quote: `Alibaba ${quotePredicate} employees from using Claude Code.`,
+    })).rejects.toThrow(/fact_verification_modality_mismatch/);
+  });
+
+  test.each([
     ['most participant scope omitted', 'most of the staff from using Claude Code', '员工使用Claude Code'],
     ['half participant scope omitted', 'half the staff from using Claude Code', '员工使用Claude Code'],
     ['participant inability omitted', 'employees unable to use Claude Code', '员工使用Claude Code'],
@@ -674,6 +742,38 @@ describe('manual news lead domain', () => {
       projection: { object: '员工使用' },
       quote: `Alibaba reportedly bans ${sourceObject}.`,
     })).rejects.toThrow(/invalid_editorial_projection_object/);
+  });
+
+  test.each([
+    ['descriptor moved after qualifier', '员工使用Claude Pro代码'],
+    ['qualifier moved before descriptor', '员工使用Claude Enterprise代码'],
+  ])('binds product descriptor and qualifier into an ordered target tuple: %s', async (
+    _label,
+    projectionObject,
+  ) => {
+    const sourceObject = 'employees from using Claude Code Pro';
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: sourceObject },
+      projection: { object: projectionObject },
+      quote: `Alibaba reportedly bans ${sourceObject}.`,
+    })).rejects.toThrow(/invalid_editorial_projection_object/);
+  });
+
+  test('normalizes product target tuple casing without losing component order', async () => {
+    const sourceObject = 'employees from using CLAUDE CODE PRO';
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: sourceObject },
+      projection: { object: '员工使用Claude Code Pro' },
+      quote: `Alibaba reportedly bans ${sourceObject}.`,
+    })).resolves.toBe(true);
+  });
+
+  test('rechecks the ordered product target tuple against the source quote', async () => {
+    await expect(createMaliciouslySupportedAlibabaProjectionProof({
+      source: { object: 'employees from using Claude Code Pro' },
+      projection: { object: '员工使用Claude Code Pro' },
+      quote: 'Alibaba reportedly bans employees from using Claude Pro Code.',
+    })).rejects.toThrow(/fact_verification_entity_slot_missing/);
   });
 
   test.each([
@@ -1076,8 +1176,10 @@ describe('manual news lead domain', () => {
     expect(assessmentPrompt.system).toContain('拆成多条 claims');
     expect(assessmentPrompt.system).toContain('英文证据写英文 source fact');
     expect(assessmentPrompt.system).toContain('独立的严肃中文编辑投影');
-    expect(assessmentPrompt.system).toContain('五组正交信息');
-    expect(assessmentPrompt.system).toContain('predicate 除主动作、助动词');
+    expect(assessmentPrompt.system).toContain('时态、进行/完成体、义务、主动/被动语态');
+    expect(assessmentPrompt.system).toContain('have/had to + action 是现在/过去义务而非完成');
+    expect(assessmentPrompt.system).toContain('entity + 按原顺序排列的 descriptor/qualifier/version tuple');
+    expect(assessmentPrompt.system).toContain('predicate 除主动作、完整助动链');
     expect(assessmentPrompt.system).toContain('每段实义文本都必须可归入明确槽位');
     expect(assessmentPrompt.system).toContain('绝对或相对时间');
 
@@ -1097,9 +1199,11 @@ describe('manual news lead domain', () => {
     };
     expect(verifierPrompt.system).toContain('每个输入 fact 已被确定性拆成单一原子子句');
     expect(verifierPrompt.system).toContain('禁止用词面相似度');
-    expect(verifierPrompt.system).toContain('compound modality');
+    expect(verifierPrompt.system).toContain('完整助动链不得逐词吞并或互换');
     expect(verifierPrompt.system).toContain('consumed-semantic-spans fail-closed gate');
     expect(verifierPrompt.system).toContain('未绑定产品 qualifier');
+    expect(verifierPrompt.system).toContain('has/have/had + 过去分词、have/had to');
+    expect(verifierPrompt.system).toContain('有序 descriptor/qualifier/version tuple');
     expect(body.facts.map((fact) => fact.fact_id)).toEqual(expect.arrayContaining([
       'field:title:0', 'field:title:1', 'field:summary:0', 'field:summary:1',
       'claim:0', 'claim:1',
