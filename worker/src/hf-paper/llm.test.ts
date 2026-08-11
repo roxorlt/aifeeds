@@ -67,4 +67,22 @@ describe("DeepSeek message roles", () => {
       response_format: { type: "json_object" },
     });
   });
+
+  it("logs only parse metadata and never raw model output", async () => {
+    const sentinel = "RAW-SENTINEL-DO-NOT-LOG";
+    vi.stubGlobal("fetch", vi.fn(async () => okResponse(`{broken:${sentinel}`)));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await callDeepSeekJson("test-key", "test-model", "prompt", {
+      retries: 0, timeoutMs: 1_000, requestId: "request-123",
+    });
+
+    expect(result).toMatchObject({ data: null, error: "json_parse_fail" });
+    const logged = errorSpy.mock.calls.flat().join(" ");
+    expect(logged).not.toContain(sentinel);
+    expect(logged).toContain("model=test-model");
+    expect(logged).toContain("request=request-123");
+    expect(logged).toMatch(/length=\d+/);
+    expect(logged).toMatch(/sha256=[a-f0-9]{64}/);
+  });
 });

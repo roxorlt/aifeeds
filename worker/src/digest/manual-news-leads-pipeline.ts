@@ -28,6 +28,9 @@ export interface ManualNewsLeadRecord {
   version: number;
   error_code: string | null;
   error_message: string | null;
+  processing_owner: string | null;
+  processing_attempt: number;
+  processing_lease_until: number | null;
   assessment: ProcessedManualLeadAssessment | null;
   evidence: ManualNewsEvidence[];
   confirmed_batch_id: string | null;
@@ -72,6 +75,12 @@ function conciseError(error: unknown): string {
   return message.replace(/\s+/g, ' ').slice(0, 500);
 }
 
+export function isTransientManualLeadError(error: unknown): boolean {
+  const message = conciseError(error).toLowerCase();
+  return /(?:timeout|timed out|abort|429|(?:^|_)5\d\d(?:$|_)|gateway|network|fetch|d1|sqlite|database|model|no_text|empty_model|json_parse_fail|rate.?limit|temporar|unavailable)/
+    .test(message);
+}
+
 export async function processManualNewsLead(
   leadId: string,
   store: ManualLeadProcessingStore,
@@ -114,16 +123,19 @@ export async function processManualNewsLead(
       }
       if (status === 'researching') await transition('extracting');
       const evidence: ManualNewsEvidence[] = [];
+      let transientSourceError: unknown = null;
       for (const source of sources) {
         try {
           const document = await adapters.fetch(source.url);
           const extracted = await adapters.extract(document, source.hint);
           if (extracted && !evidence.some((item) => item.id === extracted.id)) evidence.push(extracted);
-        } catch {
+        } catch (error) {
+          if (isTransientManualLeadError(error)) transientSourceError = error;
           // A single bad source is evidence failure, not authority to downgrade or
           // fabricate the remaining sources. The final evidence gate decides.
         }
       }
+      if (!evidence.length && transientSourceError) throw transientSourceError;
       await store.replaceEvidence(leadId, evidence);
       if (!evidence.length) {
         await transition('needs_review', {
@@ -153,8 +165,18 @@ export async function processManualNewsLead(
         evidence,
         prior_events: priorEvents,
       });
+      let raw: unknown;
       try {
-        const raw = await adapters.assess(prompt);
+        raw = await adapters.assess(prompt);
+      } catch (error) {
+        if (isTransientManualLeadError(error)) throw error;
+        await transition('failed', {
+          error_code: 'assessment_failed',
+          error_message: conciseError(error),
+        });
+        return (await store.getLead(leadId))!;
+      }
+      try {
         assessment = applyManualLeadEvidencePolicy(validateManualLeadAssessment(
           raw, evidence, priorEvents.map((event) => event.event_key),
         ), evidence);
@@ -173,7 +195,7 @@ export async function processManualNewsLead(
     if (status === 'clustering') {
       const priorEvents = await store.findPriorEventsByEventKey(assessment.event_key, leadId);
       const duplicate = classifyManualLeadDuplicate(assessment, priorEvents, normalized.date);
-      if (duplicate.duplicate || assessment.recommendation === 'duplicate') {
+      if (duplicate.duplicate) {
         assessment = {
           ...assessment,
           recommendation: 'duplicate',
@@ -186,11 +208,19 @@ export async function processManualNewsLead(
         return (await store.getLead(leadId))!;
       }
 
+      const exactMatch = !!duplicate.matched_lead_id;
+      const advisoryDuplicate = assessment.recommendation === 'duplicate';
+      const unmatchedMaterialUpdate = assessment.material_update && !exactMatch;
       assessment = {
         ...assessment,
+        material_update: unmatchedMaterialUpdate ? false : assessment.material_update,
+        recommendation: advisoryDuplicate || unmatchedMaterialUpdate ? 'needs_review' : assessment.recommendation,
+        uncertainties: unmatchedMaterialUpdate
+          ? [...assessment.uncertainties, '未找到可对应的既有事件，重要更新标记已转为人工复核。']
+          : assessment.uncertainties,
         duplicate_scope: null,
         matched_lead_id: duplicate.matched_lead_id,
-        matched_event_key: duplicate.matched_lead_id ? assessment.event_key : assessment.matched_event_key,
+        matched_event_key: exactMatch ? assessment.event_key : null,
       };
       await store.saveAssessment(leadId, assessment);
       await transition('scored');
@@ -199,6 +229,7 @@ export async function processManualNewsLead(
     await transition(assessment.recommendation);
     return (await store.getLead(leadId))!;
   } catch (error) {
+    if (isTransientManualLeadError(error)) throw error;
     if (TRANSITION_TO_FAILED_FROM.has(status)) {
       await transition('failed', { error_code: 'processing_failed', error_message: conciseError(error) });
       return (await store.getLead(leadId))!;

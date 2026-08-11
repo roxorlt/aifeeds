@@ -54,23 +54,32 @@ function fakeEnv() {
       };
       return stmt;
     },
+    async batch(batchStatements: Array<{ run(): Promise<unknown> }>) {
+      const results: unknown[] = [];
+      for (const statement of batchStatements) results.push(await statement.run());
+      return results;
+    },
   };
   return { env: { DB: db } as never, leads, statements };
 }
 
 describe('manual lead D1 store', () => {
-  test('submit is idempotent for a date and request key', async () => {
+  test('submit replays the same normalized payload but rejects key reuse with a different payload', async () => {
     const memory = fakeEnv();
     const first = await submitManualNewsLead(memory.env, {
       date: '2026-08-11', text: 'Anthropic 输出水印', note: '核验范围',
     }, 'submit-key-1', 100);
     const repeated = await submitManualNewsLead(memory.env, {
-      date: '2026-08-11', text: 'different retry body',
+      date: '2026-08-11', text: '  Anthropic   输出水印 ', note: ' 核验范围 ',
     }, 'submit-key-1', 200);
 
     expect(first.created).toBe(true);
     expect(first.lead.id).toMatch(/^ml-20260811-[a-f0-9]{12}$/);
     expect(repeated).toMatchObject({ created: false, lead: { id: first.lead.id, input_text: 'Anthropic 输出水印' } });
+    expect(memory.statements.filter((entry) => entry.sql.includes('manual_lead:insert'))).toHaveLength(1);
+    await expect(submitManualNewsLead(memory.env, {
+      date: '2026-08-11', text: 'different retry body', note: '核验范围',
+    }, 'submit-key-1', 300)).rejects.toThrow(/idempotency_key_reused_with_different_payload/);
     expect(memory.statements.filter((entry) => entry.sql.includes('manual_lead:insert'))).toHaveLength(1);
   });
 

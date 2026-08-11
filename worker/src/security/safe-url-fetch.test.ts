@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import {
   fetchPublicDocument,
+  isPublicIpAddress,
   searchPublicWeb,
   validatePublicHttpUrl,
   type TrustedResearchService,
@@ -66,6 +67,67 @@ const publicHop = (url = 'https://example.com/story') => ({
 });
 
 describe('trusted manual-news research boundary', () => {
+  test.each([
+    ['unspecified IPv4', '0.0.0.1'],
+    ['private IPv4', '10.2.3.4'],
+    ['shared address space', '100.64.0.1'],
+    ['loopback IPv4', '127.1.2.3'],
+    ['link-local IPv4', '169.254.1.1'],
+    ['IETF protocol assignments', '192.0.0.9'],
+    ['documentation IPv4 TEST-NET-1', '192.0.2.1'],
+    ['6to4 relay anycast', '192.88.99.1'],
+    ['private IPv4 192.168', '192.168.1.1'],
+    ['benchmark IPv4', '198.18.0.1'],
+    ['documentation IPv4 TEST-NET-2', '198.51.100.1'],
+    ['documentation IPv4 TEST-NET-3', '203.0.113.1'],
+    ['multicast IPv4', '224.0.0.1'],
+    ['reserved IPv4', '240.0.0.1'],
+    ['unspecified IPv6', '::'],
+    ['loopback IPv6', '::1'],
+    ['discard-only IPv6', '100::1'],
+    ['documentation IPv6', '2001:db8::1'],
+    ['benchmark IPv6', '2001:2::1'],
+    ['site-local IPv6', 'fec0::1'],
+    ['unique-local IPv6', 'fd00::1'],
+    ['link-local IPv6', 'fe80::1'],
+    ['multicast IPv6', 'ff02::1'],
+    ['future/reserved IPv6', '4000::1'],
+    ['documentation IPv6 3fff', '3fff::1'],
+    ['segment-routing SIDs', '5f00::1'],
+    ['IPv4 mapped private', '::ffff:10.0.0.1'],
+    ['IPv4 compatible private', '::10.0.0.1'],
+    ['NAT64 well-known private', '64:ff9b::a00:1'],
+    ['NAT64 local-use private', '64:ff9b:1:a00:0:100::'],
+    ['6to4 private', '2002:0a00:0001::'],
+    ['Teredo private client', '2001:0:808:808::f5ff:fffe'],
+  ])('rejects non-global-unicast %s (%s)', (_label, address) => {
+    expect(isPublicIpAddress(address)).toBe(false);
+  });
+
+  test.each([
+    ['public IPv4', '8.8.8.8'],
+    ['public IPv4 documentation host replacement', '93.184.216.34'],
+    ['public IPv6 Cloudflare', '2606:4700:4700::1111'],
+    ['public IPv6 Google', '2001:4860:4860::8888'],
+    ['IPv4 mapped public', '::ffff:8.8.8.8'],
+    ['IPv4 compatible public', '::8.8.8.8'],
+    ['NAT64 well-known public', '64:ff9b::808:808'],
+    ['NAT64 local-use public', '64:ff9b:1:808:8:800::'],
+    ['6to4 public', '2002:0808:0808::'],
+    ['Teredo public server and client', '2001:0:808:808::f7f7:f7f7'],
+  ])('accepts recursively validated global-unicast %s (%s)', (_label, address) => {
+    expect(isPublicIpAddress(address)).toBe(true);
+  });
+
+  test('applies the same global-unicast policy to literal URLs and gateway peer audits', async () => {
+    expect(() => validatePublicHttpUrl('https://[64:ff9b::a00:1]/story')).toThrow(/unsafe_url:literal_address/);
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse('blocked', {
+        hops: [{ ...publicHop(), validated_ip: '64:ff9b::a00:1', connected_ip: '64:ff9b::a00:1' }],
+      }) as never),
+    })).rejects.toThrow(/unsafe_gateway_audit:peer_mismatch/);
+  });
+
   test('accepts only credential-free HTTP(S) target URLs on standard ports', () => {
     expect(validatePublicHttpUrl('https://example.com/news').toString()).toBe('https://example.com/news');
     for (const unsafe of [

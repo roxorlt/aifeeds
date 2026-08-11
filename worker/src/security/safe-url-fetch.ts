@@ -90,35 +90,116 @@ function parseIpv6(value: string): number[] | null {
   return [...left, ...Array(Math.max(0, omitted)).fill('0'), ...right].map((part) => parseInt(part, 16));
 }
 
+interface SpecialIpv4Range { cidr: string; reason: string; }
+
+// IANA IPv4 Special-Purpose Address Registry ranges. Treat the whole registry
+// as non-targetable: even globally routed anycast/protocol assignments are not
+// ordinary origin peers and must fail closed at this research boundary.
+const SPECIAL_IPV4_RANGES: readonly SpecialIpv4Range[] = [
+  { cidr: '0.0.0.0/8', reason: 'this-network' },
+  { cidr: '10.0.0.0/8', reason: 'private-use' },
+  { cidr: '100.64.0.0/10', reason: 'shared-address-space' },
+  { cidr: '127.0.0.0/8', reason: 'loopback' },
+  { cidr: '169.254.0.0/16', reason: 'link-local' },
+  { cidr: '172.16.0.0/12', reason: 'private-use' },
+  { cidr: '192.0.0.0/24', reason: 'ietf-protocol-assignments' },
+  { cidr: '192.0.2.0/24', reason: 'documentation' },
+  { cidr: '192.31.196.0/24', reason: 'as112-v4' },
+  { cidr: '192.52.193.0/24', reason: 'amt' },
+  { cidr: '192.88.99.0/24', reason: 'deprecated-6to4-relay' },
+  { cidr: '192.168.0.0/16', reason: 'private-use' },
+  { cidr: '192.175.48.0/24', reason: 'as112-direct-delegation' },
+  { cidr: '198.18.0.0/15', reason: 'benchmarking' },
+  { cidr: '198.51.100.0/24', reason: 'documentation' },
+  { cidr: '203.0.113.0/24', reason: 'documentation' },
+  { cidr: '224.0.0.0/4', reason: 'multicast' },
+  { cidr: '240.0.0.0/4', reason: 'reserved' },
+] as const;
+
+function ipv4Number(octets: readonly number[]): number {
+  return (((octets[0] * 256 + octets[1]) * 256 + octets[2]) * 256 + octets[3]) >>> 0;
+}
+
+const COMPILED_SPECIAL_IPV4_RANGES = SPECIAL_IPV4_RANGES.map((range) => {
+  const [address, prefixText] = range.cidr.split('/');
+  const octets = parseIpv4(address)!;
+  const prefix = Number(prefixText);
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return { ...range, network: ipv4Number(octets) & mask, mask };
+});
+
+function isGlobalUnicastIpv4(octets: readonly number[]): boolean {
+  const address = ipv4Number(octets);
+  return !COMPILED_SPECIAL_IPV4_RANGES.some((range) => (address & range.mask) === range.network);
+}
+
+function ipv6Bytes(words: readonly number[]): number[] {
+  return words.flatMap((word) => [word >>> 8, word & 0xff]);
+}
+
+function bytesMatchPrefix(bytes: readonly number[], prefix: readonly number[], prefixBits: number): boolean {
+  const fullBytes = Math.floor(prefixBits / 8);
+  for (let index = 0; index < fullBytes; index++) if (bytes[index] !== prefix[index]) return false;
+  const remaining = prefixBits % 8;
+  if (!remaining) return true;
+  const mask = (0xff << (8 - remaining)) & 0xff;
+  return (bytes[fullBytes] & mask) === (prefix[fullBytes] & mask);
+}
+
+function embeddedIpv4IsGlobal(bytes: readonly number[]): boolean {
+  return bytes.length === 4 && isGlobalUnicastIpv4(bytes);
+}
+
 export function isPublicIpAddress(value: string): boolean {
   const host = normalizedHostname(value);
   const ipv4 = parseIpv4(host);
-  if (ipv4) {
-    const [a, b] = ipv4;
-    if (
-      a === 0 || a === 10 || a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && (b === 0 || b === 168)) ||
-      (a === 198 && (b === 18 || b === 19 || b === 51)) ||
-      (a === 203 && b === 0) || a >= 224
-    ) return false;
-    return true;
-  }
+  if (ipv4) return isGlobalUnicastIpv4(ipv4);
   if (!host.includes(':')) return false;
   const ipv6 = parseIpv6(host);
   if (!ipv6) return false;
-  if (ipv6.every((part) => part === 0) || (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] === 1)) return false;
-  if ((ipv6[0] & 0xfe00) === 0xfc00) return false;
-  if ((ipv6[0] & 0xffc0) === 0xfe80) return false;
-  if ((ipv6[0] & 0xff00) === 0xff00) return false;
-  if (ipv6[0] === 0x2001 && ipv6[1] === 0x0db8) return false;
-  const embeddedV4 = ipv6.slice(0, 5).every((part) => part === 0) && (ipv6[5] === 0 || ipv6[5] === 0xffff);
-  if (embeddedV4) {
-    return isPublicIpAddress(`${ipv6[6] >> 8}.${ipv6[6] & 255}.${ipv6[7] >> 8}.${ipv6[7] & 255}`);
+  const bytes = ipv6Bytes(ipv6);
+
+  // IPv4-compatible and IPv4-mapped forms.
+  if (bytes.slice(0, 12).every((byte) => byte === 0)) return embeddedIpv4IsGlobal(bytes.slice(12));
+  if (bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return embeddedIpv4IsGlobal(bytes.slice(12));
   }
-  return true;
+  // RFC 6052 well-known NAT64 /96.
+  if (bytesMatchPrefix(bytes, [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0], 96)) {
+    return embeddedIpv4IsGlobal(bytes.slice(12));
+  }
+  // RFC 8215 local-use NAT64 /48. For a /48 prefix, the IPv4 bits occupy
+  // bytes 6,7,9,10 and byte 8 is the required zero u-octet (RFC 6052).
+  if (bytesMatchPrefix(bytes, [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01], 48)) {
+    return bytes[8] === 0 && embeddedIpv4IsGlobal([bytes[6], bytes[7], bytes[9], bytes[10]]);
+  }
+  // 6to4 carries the origin IPv4 directly after 2002::/16.
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return embeddedIpv4IsGlobal(bytes.slice(2, 6));
+  // Teredo carries a server IPv4 and an obfuscated client IPv4. Both peers must
+  // be global unicast; accepting only one would permit a private rebinding path.
+  if (bytesMatchPrefix(bytes, [0x20, 0x01, 0x00, 0x00], 32)) {
+    const client = bytes.slice(12, 16).map((byte) => byte ^ 0xff);
+    return embeddedIpv4IsGlobal(bytes.slice(4, 8)) && embeddedIpv4IsGlobal(client);
+  }
+
+  // Current ordinary IPv6 global unicast is 2000::/3. Reject future/reserved
+  // address space until IANA explicitly makes it targetable.
+  if ((bytes[0] & 0xe0) !== 0x20) return false;
+  const specialIpv6Prefixes: Array<{ bytes: number[]; bits: number }> = [
+    { bytes: [0x20, 0x01, 0x00, 0x00], bits: 23 }, // IETF protocol assignments
+    { bytes: [0x20, 0x01, 0x0d, 0xb8], bits: 32 }, // documentation
+    { bytes: [0x26, 0x20, 0x00, 0x4f, 0x80, 0x00], bits: 48 }, // AS112
+    { bytes: [0x3f, 0xff, 0x00], bits: 20 }, // documentation
+  ];
+  return !specialIpv6Prefixes.some((range) => bytesMatchPrefix(bytes, range.bytes, range.bits));
+}
+
+function canonicalIpAddress(value: string): string | null {
+  const host = normalizedHostname(value);
+  const ipv4 = parseIpv4(host);
+  if (ipv4) return ipv4.join('.');
+  const ipv6 = parseIpv6(host);
+  return ipv6 ? ipv6.map((word) => word.toString(16).padStart(4, '0')).join(':') : null;
 }
 
 export function validatePublicHttpUrl(input: string): URL {
@@ -200,9 +281,9 @@ function parseFetchAudit(
       throw new Error('unsafe_gateway_audit:invalid_hop');
     }
     const url = validatePublicHttpUrl(value.url).toString();
-    const validated = normalizedHostname(value.validated_ip);
-    const connected = normalizedHostname(value.connected_ip);
-    if (!isPublicIpAddress(validated) || !isPublicIpAddress(connected) || validated !== connected) {
+    const validated = canonicalIpAddress(value.validated_ip);
+    const connected = canonicalIpAddress(value.connected_ip);
+    if (!validated || !connected || !isPublicIpAddress(validated) || !isPublicIpAddress(connected) || validated !== connected) {
       throw new Error('unsafe_gateway_audit:peer_mismatch');
     }
     hops.push({ url, validated_ip: validated, connected_ip: connected });

@@ -278,9 +278,10 @@ export async function getAppliedNewsReviewSelection(env: Env, date: string): Pro
   try {
     const row = await env.DB.prepare(
       `SELECT applied_selected_ids FROM daily_news_review_batches
-       WHERE review_date = ? AND applied_selected_ids IS NOT NULL
+       WHERE review_date = ? AND lineage_id = ? AND is_current = 1
+         AND applied_selected_ids IS NOT NULL
        ORDER BY created_at DESC, edit_revision DESC LIMIT 1`,
-    ).bind(date).first<{ applied_selected_ids: string }>();
+    ).bind(date, date).first<{ applied_selected_ids: string }>();
     const ids = row ? parseStringArray(row.applied_selected_ids) : [];
     return ids.length >= 1 && ids.length <= 5 ? ids : null;
   } catch (error) {
@@ -477,7 +478,9 @@ export async function submitNewsReviewSelection(
   if (!tokenStatus.ok) return { ok: false, status: 401, error: 'invalid_review_token' };
   const batch = await getNewsReviewBatch(env, input.date, input.batch_id);
   if (!batch) return { ok: false, status: 404, error: 'review_batch_not_found' };
-  if (batch.superseded_by) return { ok: false, status: 409, error: 'review_batch_superseded', batch };
+  if (batch.superseded_by || !batch.is_current || batch.lineage_id !== input.date) {
+    return { ok: false, status: 409, error: 'review_batch_superseded', batch };
+  }
   const validation = validateNewsReviewSelection(input.selected_ids, batch.candidate_ids);
   if (!validation.ok) return { ok: false, status: 400, error: validation.error, batch };
   const selectedIds = validation.selected_ids;
@@ -498,8 +501,9 @@ export async function submitNewsReviewSelection(
     `UPDATE daily_news_review_batches SET
        applied_selected_ids = ?, selection_hash = ?, edit_revision = edit_revision + 1,
        publish_status = 'pending', publish_error = NULL, published_at = NULL
-     WHERE review_date = ? AND batch_id = ? AND superseded_by IS NULL`,
-  ).bind(JSON.stringify(selectedIds), hash, input.date, input.batch_id).run();
+     WHERE review_date = ? AND lineage_id = ? AND batch_id = ?
+       AND is_current = 1 AND superseded_by IS NULL`,
+  ).bind(JSON.stringify(selectedIds), hash, input.date, input.date, input.batch_id).run();
   const updated = await getNewsReviewBatch(env, input.date, input.batch_id);
   if (!updated?.applied_selected_ids || updated.selection_hash !== hash) {
     return { ok: false, status: 409, error: 'review_selection_write_conflict', batch: updated || batch };
@@ -638,12 +642,33 @@ async function preserveConfirmedManualCandidates(
       manuals.push(candidate);
     }
   }
-  if (manuals.length > 10) throw new Error('confirmed_manual_candidates_exceed_cap');
+  if (manuals.length > 10) throw new Error('candidate_cap_exhausted');
 
   const defaultAliases = new Map<string, string>();
-  const nonManual: NewsReviewCandidate[] = [];
+  const availableById = new Map<string, NewsReviewCandidate>();
+  for (const candidate of [...(previous?.candidates || []), ...submittedCandidates]) {
+    availableById.set(candidate.item_id, candidate);
+    if (candidate.origin === 'manual_lead') continue;
+    const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
+    if (manual) defaultAliases.set(candidate.item_id, manual.item_id);
+  }
+  const publishedIds = previous ? await getPublishedNewsReviewSelection(env, date, previous) : [];
+  const protectedScheduled: NewsReviewCandidate[] = [];
   const seenItemIds = new Set<string>();
   const seenEventKeys = new Set<string>();
+  for (const publishedId of publishedIds) {
+    const aliasedId = defaultAliases.get(publishedId) || publishedId;
+    if (manuals.some((candidate) => candidate.item_id === aliasedId)) continue;
+    const candidate = availableById.get(publishedId);
+    if (!candidate || candidate.origin === 'manual_lead') continue;
+    if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
+    seenItemIds.add(candidate.item_id);
+    if (candidate.event_key) seenEventKeys.add(candidate.event_key);
+    protectedScheduled.push(candidate);
+  }
+  if (manuals.length + protectedScheduled.length > 10) throw new Error('candidate_cap_exhausted');
+
+  const unselectedScheduled: NewsReviewCandidate[] = [];
   for (const candidate of submittedCandidates) {
     if (candidate.origin === 'manual_lead') continue;
     const manual = manualByIdentity.get(candidate.event_key || candidate.item_id);
@@ -658,9 +683,14 @@ async function preserveConfirmedManualCandidates(
     if (seenItemIds.has(candidate.item_id) || (candidate.event_key && seenEventKeys.has(candidate.event_key))) continue;
     seenItemIds.add(candidate.item_id);
     if (candidate.event_key) seenEventKeys.add(candidate.event_key);
-    nonManual.push(candidate);
+    unselectedScheduled.push(candidate);
   }
-  const candidates = [...nonManual.slice(0, 10 - manuals.length), ...manuals];
+  const scheduledCapacity = 10 - manuals.length;
+  const candidates = [
+    ...protectedScheduled,
+    ...unselectedScheduled.slice(0, scheduledCapacity - protectedScheduled.length),
+    ...manuals,
+  ];
   const candidateIds = new Set(candidates.map((candidate) => candidate.item_id));
   const defaultSelectedIds = [...new Set(submittedDefaultIds.map((id) => defaultAliases.get(id) || id))]
     .filter((id) => candidateIds.has(id));

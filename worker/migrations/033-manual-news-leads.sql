@@ -6,11 +6,27 @@ ALTER TABLE daily_news_review_batches ADD COLUMN is_current INTEGER NOT NULL DEF
 ALTER TABLE daily_news_review_batches ADD COLUMN candidate_generation INTEGER NOT NULL DEFAULT 0;
 
 UPDATE daily_news_review_batches SET lineage_id = review_date WHERE lineage_id = '';
-UPDATE daily_news_review_batches SET is_current = 1
-WHERE rowid IN (
-  SELECT MAX(rowid) FROM daily_news_review_batches
-  WHERE superseded_by IS NULL GROUP BY review_date
-);
+WITH ranked_legacy AS (
+  SELECT rowid AS legacy_rowid,
+         FIRST_VALUE(batch_id) OVER (
+           PARTITION BY review_date ORDER BY created_at DESC, rowid DESC
+         ) AS winner_batch_id,
+         ROW_NUMBER() OVER (
+           PARTITION BY review_date ORDER BY created_at DESC, rowid DESC
+         ) AS legacy_rank
+  FROM daily_news_review_batches
+  WHERE superseded_by IS NULL
+)
+UPDATE daily_news_review_batches
+SET superseded_by = (
+      SELECT winner_batch_id FROM ranked_legacy
+      WHERE legacy_rowid = daily_news_review_batches.rowid
+    ),
+    is_current = 0
+WHERE rowid IN (SELECT legacy_rowid FROM ranked_legacy WHERE legacy_rank > 1);
+
+UPDATE daily_news_review_batches
+SET is_current = CASE WHEN superseded_by IS NULL THEN 1 ELSE 0 END;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_news_review_one_current
   ON daily_news_review_batches(review_date, lineage_id) WHERE is_current = 1;
@@ -40,6 +56,9 @@ CREATE TABLE IF NOT EXISTS manual_news_leads (
   submit_idempotency_key TEXT NOT NULL,
   last_mutation_kind TEXT,
   last_mutation_idempotency_key TEXT,
+  processing_owner TEXT,
+  processing_attempt INTEGER NOT NULL DEFAULT 0,
+  processing_lease_until INTEGER,
   confirmed_batch_id TEXT,
   confirmed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -98,9 +117,15 @@ CREATE TABLE IF NOT EXISTS manual_news_lead_audit (
   from_status TEXT,
   to_status TEXT,
   idempotency_key TEXT,
+  resulting_version INTEGER NOT NULL,
   metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_manual_news_lead_audit
   ON manual_news_lead_audit(lead_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_version
+  ON manual_news_lead_audit(lead_id, resulting_version, action);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_news_lead_audit_idempotency
+  ON manual_news_lead_audit(lead_id, action, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;

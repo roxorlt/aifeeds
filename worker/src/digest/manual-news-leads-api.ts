@@ -4,10 +4,11 @@ import {
   getManualNewsLead,
   getManualNewsLeadCandidateState,
   listManualNewsLeads,
+  markManualNewsLeadEnqueueFailure,
+  recoverStaleManualNewsLeads,
   retryManualNewsLead,
   submitManualNewsLead,
 } from './manual-news-leads-store';
-import { processManualNewsLeadWithEnv } from './manual-news-leads-runtime';
 import { newsReviewSecret } from './news-review';
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -18,13 +19,24 @@ function scheduleLeadProcessing(
   ctx: Pick<ExecutionContext, 'waitUntil'>,
   lead: { id: string; version: number },
 ): void {
-  const pending = env.MANUAL_NEWS_LEAD_WORKFLOW
-    ? env.MANUAL_NEWS_LEAD_WORKFLOW.create({
-        id: `manual-news-${lead.id}-v${lead.version}`,
-        params: { lead_id: lead.id },
-      }).then(() => undefined).catch(() => processManualNewsLeadWithEnv(env, lead.id))
-    : processManualNewsLeadWithEnv(env, lead.id);
+  if (!env.MANUAL_NEWS_LEAD_WORKFLOW) throw new Error('manual_news_workflow_unavailable');
+  const owner = `manual-news-${lead.id}-v${lead.version}`;
+  const pending = env.MANUAL_NEWS_LEAD_WORKFLOW.create({
+    id: owner,
+    params: { lead_id: lead.id, processing_owner: owner },
+  }).then(() => undefined).catch(async (error) => {
+    await markManualNewsLeadEnqueueFailure(env, lead.id, error);
+  });
   ctx.waitUntil(pending);
+}
+
+function processingDependenciesAvailable(env: Env): boolean {
+  return Boolean(
+    env.MANUAL_NEWS_LEAD_WORKFLOW
+    && env.MANUAL_NEWS_RESEARCH_ORIGIN
+    && env.MANUAL_NEWS_RESEARCH_TOKEN
+    && env.DEEPSEEK_API_KEY,
+  );
 }
 
 function response(payload: unknown, status = 200): Response {
@@ -35,6 +47,20 @@ function response(payload: unknown, status = 200): Response {
       'Cache-Control': 'private, no-store',
     },
   });
+}
+
+function requestErrorResponse(error: unknown): Response {
+  const code = error instanceof Error ? error.message : 'internal_error';
+  if (code === 'request_too_large') return response({ ok: false, error: code }, 413);
+  if (code === 'idempotency_key_reused_with_different_payload') return response({ ok: false, error: code }, 409);
+  if (['trusted_research_service_required', 'invalid_trusted_research_origin', 'invalid_trusted_research_token', 'no_deepseek_key']
+    .includes(code)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
+  if (code === 'invalid_json' || code === 'invalid_review_date' || code === 'lead_input_required'
+    || code.startsWith('unsafe_url:')) return response({ ok: false, error: code }, 400);
+  console.error('[manual-news-leads-api] internal request failure', {
+    error: error instanceof Error ? error.name : typeof error,
+  });
+  return response({ ok: false, error: 'internal_error' }, 500);
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -69,12 +95,13 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   if (declared > MAX_BODY_BYTES) throw new Error('request_too_large');
   const text = await request.text();
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) throw new Error('request_too_large');
-  const parsed = JSON.parse(text) as unknown;
+  let parsed: unknown;
+  try { parsed = JSON.parse(text) as unknown; } catch { throw new Error('invalid_json'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid_json');
   return parsed as Record<string, unknown>;
 }
 
-export async function handleManualNewsLeadsApi(
+async function handleManualNewsLeadsApiInternal(
   request: Request,
   env: Env,
   ctx: Pick<ExecutionContext, 'waitUntil'>,
@@ -94,6 +121,10 @@ export async function handleManualNewsLeadsApi(
     if (request.method === 'GET') {
       const date = url.searchParams.get('date') || '';
       if (!validCalendarDate(date)) return response({ ok: false, error: 'invalid_review_date' }, 400);
+      const recovered = processingDependenciesAvailable(env)
+        ? await recoverStaleManualNewsLeads(env, date, now)
+        : [];
+      for (const lead of recovered) scheduleLeadProcessing(env, ctx, lead);
       const [leads, candidateBatch] = await Promise.all([
         listManualNewsLeads(env, date),
         getManualNewsLeadCandidateState(env, date),
@@ -101,6 +132,7 @@ export async function handleManualNewsLeadsApi(
       return response({ ok: true, date, leads, candidate_batch: candidateBatch });
     }
     if (request.method !== 'POST') return response({ ok: false, error: 'method_not_allowed' }, 405);
+    if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const key = idempotencyKey(request);
     if (!key) return response({ ok: false, error: 'invalid_idempotency_key' }, 400);
     try {
@@ -114,8 +146,7 @@ export async function handleManualNewsLeadsApi(
       if (result.created) scheduleLeadProcessing(env, ctx, result.lead);
       return response({ ok: true, ...result }, result.created ? 202 : 200);
     } catch (error) {
-      const code = error instanceof Error ? error.message : 'invalid_request';
-      return response({ ok: false, error: code }, code === 'request_too_large' ? 413 : 400);
+      return requestErrorResponse(error);
     }
   }
 
@@ -134,14 +165,14 @@ export async function handleManualNewsLeadsApi(
   try {
     body = await jsonBody(request);
   } catch (error) {
-    const code = error instanceof Error ? error.message : 'invalid_json';
-    return response({ ok: false, error: code }, code === 'request_too_large' ? 413 : 400);
+    return requestErrorResponse(error);
   }
   const expectedVersion = Number(body.expected_version);
   if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
     return response({ ok: false, error: 'invalid_expected_version' }, 400);
   }
   if (action === 'retry') {
+    if (!processingDependenciesAvailable(env)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
     const result = await retryManualNewsLead(env, leadId, expectedVersion, key, now);
     if (!result.ok) return response(result, result.status);
     if (result.changed) scheduleLeadProcessing(env, ctx, result.lead);
@@ -155,4 +186,17 @@ export async function handleManualNewsLeadsApi(
     env, leadId, expectedVersion, expectedBatchRevision, key, now,
   );
   return result.ok ? response(result) : response(result, result.status);
+}
+
+export async function handleManualNewsLeadsApi(
+  request: Request,
+  env: Env,
+  ctx: Pick<ExecutionContext, 'waitUntil'>,
+  now = Date.now(),
+): Promise<Response> {
+  try {
+    return await handleManualNewsLeadsApiInternal(request, env, ctx, now);
+  } catch (error) {
+    return requestErrorResponse(error);
+  }
 }

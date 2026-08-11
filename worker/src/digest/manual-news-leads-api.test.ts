@@ -7,6 +7,8 @@ vi.mock('./manual-news-leads-store', () => ({
   retryManualNewsLead: vi.fn(),
   submitManualNewsLead: vi.fn(),
   getManualNewsLeadCandidateState: vi.fn(),
+  markManualNewsLeadEnqueueFailure: vi.fn(),
+  recoverStaleManualNewsLeads: vi.fn(),
 }));
 vi.mock('./manual-news-leads-runtime', () => ({ processManualNewsLeadWithEnv: vi.fn(async () => undefined) }));
 
@@ -18,6 +20,8 @@ import {
   retryManualNewsLead,
   submitManualNewsLead,
   getManualNewsLeadCandidateState,
+  markManualNewsLeadEnqueueFailure,
+  recoverStaleManualNewsLeads,
 } from './manual-news-leads-store';
 import { processManualNewsLeadWithEnv } from './manual-news-leads-runtime';
 
@@ -25,13 +29,20 @@ const record = {
   id: 'ml-20260811-abc123def456', review_date: '2026-08-11', input_type: 'text',
   input_text: 'Anthropic 输出水印', input_url: '', note: '', status: 'submitted', version: 1,
   error_code: null, error_message: null, assessment: null, evidence: [], confirmed_batch_id: null, confirmed_at: null,
+  processing_owner: null, processing_attempt: 0, processing_lease_until: null,
   created_at: 1, updated_at: 1,
 };
+
+const workflowCreate = vi.fn(async () => ({ id: 'manual-news-lead-workflow-instance' }));
 
 function env(overrides: Record<string, unknown> = {}) {
   return {
     DAILY_NEWS_REVIEW_SECRET: 'shared-secret',
     DAILY_NEWS_REVIEW_ENABLED: '1',
+    MANUAL_NEWS_LEAD_WORKFLOW: { create: workflowCreate },
+    MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
+    MANUAL_NEWS_RESEARCH_TOKEN: 'test-research-token',
+    DEEPSEEK_API_KEY: 'test-deepseek-key',
     ...overrides,
   } as never;
 }
@@ -50,6 +61,9 @@ function request(path: string, init: RequestInit = {}, auth = true): Request {
 describe('manual daily news leads API', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    workflowCreate.mockResolvedValue({ id: 'manual-news-lead-workflow-instance' });
+    vi.mocked(recoverStaleManualNewsLeads).mockResolvedValue([] as never);
+    vi.mocked(markManualNewsLeadEnqueueFailure).mockResolvedValue(true as never);
     vi.mocked(submitManualNewsLead).mockResolvedValue({ lead: record, created: true } as never);
     vi.mocked(getManualNewsLead).mockResolvedValue(record as never);
     vi.mocked(listManualNewsLeads).mockResolvedValue([record] as never);
@@ -85,7 +99,14 @@ describe('manual daily news leads API', () => {
     expect(submitManualNewsLead).toHaveBeenCalledWith(expect.anything(), {
       date: '2026-08-11', text: 'Anthropic 输出水印', url: undefined, note: '核对范围',
     }, 'submit-20260811-anthropic', expect.any(Number));
-    expect(processManualNewsLeadWithEnv).toHaveBeenCalledWith(expect.anything(), record.id);
+    expect(workflowCreate).toHaveBeenCalledWith({
+      id: `manual-news-${record.id}-v${record.version}`,
+      params: {
+        lead_id: record.id,
+        processing_owner: `manual-news-${record.id}-v${record.version}`,
+      },
+    });
+    expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
     expect(queued).toHaveLength(1);
   });
 
@@ -103,13 +124,16 @@ describe('manual daily news leads API', () => {
     expect(response.status).toBe(202);
     expect(create).toHaveBeenCalledWith({
       id: `manual-news-${record.id}-v${record.version}`,
-      params: { lead_id: record.id },
+      params: {
+        lead_id: record.id,
+        processing_owner: `manual-news-${record.id}-v${record.version}`,
+      },
     });
     expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
     expect(queued).toHaveLength(1);
   });
 
-  test('falls back to request-lifetime processing if workflow instance creation fails', async () => {
+  test('marks enqueue failure durably and never falls back to request-lifetime processing', async () => {
     const create = vi.fn(async () => { throw new Error('workflow unavailable'); });
     const queued: Promise<unknown>[] = [];
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
@@ -122,7 +146,8 @@ describe('manual daily news leads API', () => {
     await Promise.all(queued);
 
     expect(response.status).toBe(202);
-    expect(processManualNewsLeadWithEnv).toHaveBeenCalledWith(expect.anything(), record.id);
+    expect(markManualNewsLeadEnqueueFailure).toHaveBeenCalledWith(expect.anything(), record.id, expect.any(Error));
+    expect(processManualNewsLeadWithEnv).not.toHaveBeenCalled();
   });
 
   test('lists date-scoped status and returns a single lead with evidence details', async () => {
@@ -134,6 +159,32 @@ describe('manual daily news leads API', () => {
     const detailResponse = await handleManualNewsLeadsApi(request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never);
     expect(detailResponse.status).toBe(200);
     expect(getManualNewsLead).toHaveBeenCalledWith(expect.anything(), record.id);
+  });
+
+  test('fails closed when the durable workflow binding is unavailable', async () => {
+    const unavailableEnv = env({ MANUAL_NEWS_LEAD_WORKFLOW: undefined });
+    const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-no-workflow' },
+      body: JSON.stringify({ date: '2026-08-11', text: '线索' }),
+    }), unavailableEnv, { waitUntil() {} } as never);
+
+    expect(response.status).toBe(503);
+    expect(submitManualNewsLead).not.toHaveBeenCalled();
+  });
+
+  test('fails closed before submit when research or model dependencies are unavailable', async () => {
+    for (const overrides of [
+      { MANUAL_NEWS_RESEARCH_ORIGIN: undefined },
+      { MANUAL_NEWS_RESEARCH_TOKEN: undefined },
+      { DEEPSEEK_API_KEY: undefined },
+    ]) {
+      const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+        method: 'POST', headers: { 'Idempotency-Key': 'submit-missing-dependency' },
+        body: JSON.stringify({ date: '2026-08-11', text: '线索' }),
+      }), env(overrides), { waitUntil() {} } as never);
+      expect(response.status).toBe(503);
+    }
+    expect(submitManualNewsLead).not.toHaveBeenCalled();
   });
 
   test('retry requires expected_version and an idempotency key, then schedules a new processing pass', async () => {
@@ -173,5 +224,52 @@ describe('manual daily news leads API', () => {
     }), env(), { waitUntil() {} } as never);
     expect(missingKey.status).toBe(400);
     expect(submitManualNewsLead).not.toHaveBeenCalled();
+  });
+
+  test('maps idempotency conflicts, validation, dependency, and internal errors without leaking raw exceptions', async () => {
+    vi.mocked(submitManualNewsLead).mockRejectedValueOnce(new Error('idempotency_key_reused_with_different_payload'));
+    const conflict = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-conflict' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'edited' }),
+    }), env(), { waitUntil() {} } as never);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.clone().json()).resolves.toEqual({ ok: false, error: 'idempotency_key_reused_with_different_payload' });
+
+    vi.mocked(submitManualNewsLead).mockRejectedValueOnce(new Error('trusted_research_service_required'));
+    const unavailable = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-dependency' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'dependency' }),
+    }), env(), { waitUntil() {} } as never);
+    expect(unavailable.status).toBe(503);
+
+    vi.mocked(submitManualNewsLead).mockRejectedValueOnce(new Error('D1 SQL leaked table and token=SENTINEL'));
+    const internal = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-internal' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'internal' }),
+    }), env(), { waitUntil() {} } as never);
+    expect(internal.status).toBe(500);
+    await expect(internal.clone().json()).resolves.toEqual({ ok: false, error: 'internal_error' });
+    expect(await internal.clone().text()).not.toContain('SENTINEL');
+  });
+
+  test('maps malformed and oversized bodies to client errors and catches internal failures on read routes', async () => {
+    const malformed = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-malformed' }, body: '{bad-json',
+    }), env(), { waitUntil() {} } as never);
+    expect(malformed.status).toBe(400);
+    await expect(malformed.clone().json()).resolves.toEqual({ ok: false, error: 'invalid_json' });
+
+    const oversized = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {
+      method: 'POST', headers: { 'Idempotency-Key': 'submit-oversize', 'Content-Length': '20000' },
+      body: JSON.stringify({ date: '2026-08-11', text: 'lead' }),
+    }), env(), { waitUntil() {} } as never);
+    expect(oversized.status).toBe(413);
+
+    vi.mocked(listManualNewsLeads).mockRejectedValueOnce(new Error('D1 token=SENTINEL-READ'));
+    const internal = await handleManualNewsLeadsApi(
+      request('/api/digest/daily-news-leads?date=2026-08-11'), env(), { waitUntil() {} } as never,
+    );
+    expect(internal.status).toBe(500);
+    expect(await internal.text()).not.toContain('SENTINEL-READ');
   });
 });

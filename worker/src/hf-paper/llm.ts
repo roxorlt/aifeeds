@@ -125,6 +125,7 @@ export async function callDeepSeekJson<T = unknown>(
     timeoutMs?: number;
     retries?: number;        // 默认 1 次(总 2 attempts)
     systemPrompt?: string;
+    requestId?: string;
   } = {},
 ): Promise<{ data: T | null; usage?: DeepSeekUsage; error?: string }> {
   const retries = opts.retries ?? 1;
@@ -144,12 +145,14 @@ export async function callDeepSeekJson<T = unknown>(
     try {
       const parsed = JSON.parse(result.text) as T;
       return { data: parsed, usage: result.usage };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'parse_error';
-      console.warn(`[hf-paper-llm] JSON parse fail attempt ${attempt + 1}: ${msg}`);
+    } catch {
+      console.warn(`[hf-paper-llm] JSON parse fail attempt ${attempt + 1}`);
       if (attempt < retries) continue;
-      // 把 raw text 前 500 字 log 出来 debug 用
-      console.error(`[hf-paper-llm] raw text(first 500): ${result.text.slice(0, 500)}`);
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(result.text));
+      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      console.error(
+        `[hf-paper-llm] invalid JSON model=${model} request=${opts.requestId || 'none'} length=${result.text.length} sha256=${hash}`,
+      );
       return { data: null, usage: result.usage, error: 'json_parse_fail' };
     }
   }

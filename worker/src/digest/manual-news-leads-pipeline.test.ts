@@ -49,6 +49,9 @@ function lead(overrides: Partial<ManualNewsLeadRecord> = {}): ManualNewsLeadReco
     version: 1,
     error_code: null,
     error_message: null,
+    processing_owner: null,
+    processing_attempt: 0,
+    processing_lease_until: null,
     assessment: null,
     evidence: [],
     confirmed_batch_id: null,
@@ -105,7 +108,10 @@ function assessed(overrides = {}) {
     recommendation: 'recommended',
     occurred_at: '2026-08-10T00:00:00.000Z',
     uncertainties: ['并非所有Claude输出均适用。'],
-    claims: [{ text: '范围限于受支持的输出。', evidence_ids: ['ev-official'] }],
+    claims: [{
+      text: 'Anthropic官方文档披露部分受支持Claude输出的水印与来源标记，范围限定在受支持的模型和产品。',
+      evidence_ids: ['ev-official'],
+    }],
     matched_event_key: null,
     ...overrides,
   };
@@ -176,6 +182,49 @@ describe('manual lead processing pipeline', () => {
     expect(memory.current().assessment).toMatchObject({ recommendation: 'duplicate', duplicate_scope: 'cross_day' });
   });
 
+  test('treats model duplicate as advisory without an exact event match', async () => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed({ recommendation: 'duplicate' }),
+    });
+    expect(memory.current()).toMatchObject({ status: 'needs_review' });
+    expect(memory.current().assessment).toMatchObject({
+      recommendation: 'needs_review', duplicate_scope: null, matched_lead_id: null,
+    });
+  });
+
+  test('an exact match with material_update true never terminates as duplicate', async () => {
+    const memory = memoryStore();
+    memory.priorEvents.push({
+      event_key: 'anthropic-output-provenance-2026-08', review_date: '2026-08-10', lead_id: 'old-lead',
+    });
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed({
+        material_update: true, recommendation: 'duplicate',
+        matched_event_key: 'anthropic-output-provenance-2026-08',
+      }),
+    });
+    expect(memory.current().status).not.toBe('duplicate');
+    expect(memory.current().assessment).toMatchObject({
+      material_update: true, recommendation: 'needs_review', matched_lead_id: 'old-lead',
+    });
+  });
+
+  test('normalizes an unmatched material update to needs_review', async () => {
+    const memory = memoryStore();
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence,
+      assess: async () => assessed({ material_update: true }),
+    });
+    expect(memory.current()).toMatchObject({ status: 'needs_review' });
+    expect(memory.current().assessment).toMatchObject({ material_update: false, recommendation: 'needs_review' });
+  });
+
   test('fails closed when model JSON cites unknown evidence', async () => {
     const memory = memoryStore();
     await processManualNewsLead(memory.current().id, memory.store, {
@@ -211,5 +260,26 @@ describe('manual lead processing pipeline', () => {
       'extracting->verifying', 'verifying->clustering', 'clustering->scored', 'scored->recommended',
     ]);
     expect(memory.current()).toMatchObject({ status: 'recommended' });
+  });
+
+  test.each([
+    ['search timeout', () => ({ search: async () => { throw new Error('gateway_timeout'); } })],
+    ['model gateway failure', () => ({ assess: async () => { throw new Error('trusted_gateway_http_503'); } })],
+  ])('throws transient %s without terminalizing the intermediate row', async (_label, override) => {
+    const memory = memoryStore();
+    const adapters = {
+      search: async () => [], fetch: async () => documentFixture(officialEvidence.url, 'doc'),
+      extract: async () => officialEvidence, assess: async () => assessed(),
+      ...override(),
+    };
+    if (_label === 'search timeout') {
+      memory.current().input_type = 'text';
+      memory.current().input_text = 'Anthropic 水印';
+      memory.current().input_url = '';
+    }
+    await expect(processManualNewsLead(memory.current().id, memory.store, adapters))
+      .rejects.toThrow(/gateway_timeout|trusted_gateway_http_503/);
+    expect(memory.current().status).not.toBe('failed');
+    expect(['researching', 'verifying']).toContain(memory.current().status);
   });
 });

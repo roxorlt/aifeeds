@@ -174,6 +174,7 @@ export function validateManualLeadAssessment(
     matchedEventKey = raw.matched_event_key.trim().toLowerCase();
     if (!eventKeyPattern.test(matchedEventKey)) throw new Error('invalid_matched_event_key');
     if (priorEventKeys && !priorEventKeys.includes(matchedEventKey)) throw new Error('unknown_matched_event_key');
+    if (matchedEventKey !== eventKey) throw new Error('matched_event_key_mismatch');
   }
   return {
     title,
@@ -235,6 +236,11 @@ export function applyManualLeadEvidencePolicy(
   assessment: ManualNewsLeadAssessment,
   evidence: readonly ManualNewsEvidence[],
 ): ManualNewsLeadAssessment & { evidence_tier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient' } {
+  const byId = new Map(evidence.map((item) => [item.id, item]));
+  const claimEvidence = assessment.claims.map((claim) => claim.evidence_ids
+    .map((id) => byId.get(id))
+    .filter((item): item is ManualNewsEvidence => !!item));
+  const everyClaimReliable = claimEvidence.every((items) => items.some((item) => item.reliable));
   const cited = new Set(assessment.claims.flatMap((claim) => claim.evidence_ids));
   const usable = evidence.filter((item) => cited.has(item.id) && item.reliable);
   const hasOfficialProduct = usable.some((item) => item.source_type === 'official_primary' || item.source_type === 'official_help');
@@ -243,23 +249,53 @@ export function applyManualLeadEvidencePolicy(
   let evidenceTier: 'official_primary' | 'original_plus_independent' | 'multi_source' | 'insufficient' = 'insufficient';
   let sufficient = false;
   if (assessment.event_type === 'political_regulatory') {
-    sufficient = hasOriginal && hasIndependent;
+    const everyClaimHasOriginalAndIndependent = claimEvidence.every((items) =>
+      items.some((item) => item.reliable && (item.source_type === 'original_document' || item.source_type === 'official_statement'))
+      && items.some((item) => item.reliable && item.source_type === 'independent_media'));
+    sufficient = everyClaimReliable && hasOriginal && hasIndependent && everyClaimHasOriginalAndIndependent;
     if (sufficient) evidenceTier = 'original_plus_independent';
   } else if (assessment.event_type === 'product_release' || assessment.event_type === 'product_documentation') {
-    sufficient = hasOfficialProduct || usable.filter((item) => item.source_type === 'independent_media').length >= 2;
+    sufficient = everyClaimReliable
+      && (hasOfficialProduct || usable.filter((item) => item.source_type === 'independent_media').length >= 2);
     if (hasOfficialProduct) evidenceTier = 'official_primary';
     else if (sufficient) evidenceTier = 'multi_source';
   } else {
-    sufficient = hasOriginal || usable.filter((item) => item.source_type === 'independent_media').length >= 2;
+    sufficient = everyClaimReliable
+      && (hasOriginal || usable.filter((item) => item.source_type === 'independent_media').length >= 2);
     if (sufficient) evidenceTier = hasOriginal ? 'official_primary' : 'multi_source';
   }
+  const copyCovered = decisiveCopyFactsCovered(assessment.title, assessment.summary, assessment.claims.map((claim) => claim.text));
+  const uncertainties = copyCovered || assessment.uncertainties.includes('标题或摘要中的关键事实未被逐条证据 claim 覆盖。')
+    ? assessment.uncertainties
+    : [...assessment.uncertainties, '标题或摘要中的关键事实未被逐条证据 claim 覆盖。'];
   return {
     ...assessment,
-    recommendation: !sufficient && assessment.recommendation === 'recommended'
+    recommendation: (!sufficient || !copyCovered) && assessment.recommendation === 'recommended'
       ? 'needs_review'
       : assessment.recommendation,
-    evidence_tier: evidenceTier,
+    uncertainties,
+    evidence_tier: sufficient ? evidenceTier : 'insufficient',
   };
+}
+
+function factTokens(value: string): Set<string> {
+  const normalized = value.toLowerCase().replace(/\s+/g, ' ');
+  const tokens = new Set(normalized.match(/[a-z][a-z0-9._+-]{1,}|\d+(?:\.\d+)?/g) || []);
+  for (const run of normalized.match(/[\u3400-\u9fff]{2,}/g) || []) {
+    for (let index = 0; index < run.length - 1; index++) tokens.add(run.slice(index, index + 2));
+  }
+  return tokens;
+}
+
+function decisiveCopyFactsCovered(title: string, summary: string, claims: readonly string[]): boolean {
+  const claimTokens = factTokens(claims.join(' '));
+  const clauses = `${title}。${summary}`.split(/[。！？；;：:\n]+/).map((clause) => clause.trim()).filter(Boolean);
+  return clauses.every((clause) => {
+    const tokens = [...factTokens(clause)];
+    if (!tokens.length) return false;
+    const covered = tokens.filter((token) => claimTokens.has(token)).length;
+    return covered / tokens.length >= 0.3;
+  });
 }
 
 export function classifyManualLeadDuplicate(
@@ -291,19 +327,27 @@ export function mergeManualLeadCandidate(input: {
   enqueue_rerender: false;
 } {
   const max = Math.max(5, Math.min(20, input.max_candidates ?? 10));
-  const sameEventRemoved = input.previous_candidates.filter((item) =>
-    item.item_id !== input.candidate.item_id && (!input.candidate.event_key || item.event_key !== input.candidate.event_key));
+  const sameEventRemoved = input.previous_candidates.filter((item) => {
+    if (item.item_id === input.candidate.item_id) return false;
+    if (!input.candidate.event_key || item.event_key !== input.candidate.event_key) return true;
+    // A confirmed manual candidate is durable provenance, never an eviction
+    // target. A scheduled duplicate may be replaced by its verified manual lead.
+    return item.origin === 'manual_lead';
+  });
   const candidates = [...sameEventRemoved, input.candidate];
-  const protectedIds = new Set([...input.previous_default_selected_ids, ...input.published_selected_ids]);
+  const protectedIds = new Set(input.published_selected_ids.length
+    ? input.published_selected_ids
+    : input.previous_default_selected_ids);
   const evicted: string[] = input.previous_candidates
     .filter((item) => !sameEventRemoved.some((candidate) => candidate.item_id === item.item_id))
     .map((item) => item.item_id);
   while (candidates.length > max) {
     let index = -1;
-    for (let cursor = candidates.length - 2; cursor >= 0; cursor--) {
-      if (!protectedIds.has(candidates[cursor].item_id)) { index = cursor; break; }
+    for (let cursor = candidates.length - 1; cursor >= 0; cursor--) {
+      const item = candidates[cursor];
+      if (item.origin !== 'manual_lead' && !protectedIds.has(item.item_id)) { index = cursor; break; }
     }
-    if (index < 0) index = Math.max(0, candidates.length - 2);
+    if (index < 0) throw new Error('candidate_cap_exhausted');
     evicted.push(candidates[index].item_id);
     candidates.splice(index, 1);
   }

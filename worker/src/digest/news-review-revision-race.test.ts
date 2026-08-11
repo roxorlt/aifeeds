@@ -6,7 +6,14 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Env } from '../index';
 import { confirmManualNewsLeadCandidate } from './manual-news-leads-store';
-import { freezeNewsReviewBatch, getActiveNewsReviewBatch, type NewsReviewCandidate } from './news-review';
+import {
+  createNewsReviewToken,
+  freezeNewsReviewBatch,
+  getActiveNewsReviewBatch,
+  getAppliedNewsReviewSelection,
+  submitNewsReviewSelection,
+  type NewsReviewCandidate,
+} from './news-review';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrations = path.resolve(here, '../../migrations');
@@ -278,6 +285,8 @@ describe('news review revision CAS', () => {
     expect(activeCount(current.db)).toBe(1);
     expect(activeV3).toMatchObject({ batch_revision: 3, default_selected_ids: initial.batch.default_selected_ids });
     expect(activeV3?.applied_selected_ids).toBeNull();
+    expect(activeV3?.candidates.filter((candidate) => candidate.origin === 'manual_lead').map((candidate) => candidate.lead_id).sort())
+      .toEqual(['ml-20260811-aaaaaaaaaaaa', 'ml-20260811-bbbbbbbbbbbb']);
   });
 
   test('scheduled freeze racing a manual confirm leaves one active revision and confirm can safely retry', async () => {
@@ -338,5 +347,75 @@ describe('news review revision CAS', () => {
     ]);
     expect(scheduled.batch.candidate_ids).not.toContain('fresh-5');
     expect(activeCount(current.db)).toBe(1);
+  });
+
+  test('inactive legacy token is read-only and inactive applied selection is ignored', async () => {
+    const current = state();
+    const active = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', candidates('active'), candidates('active').map((item) => item.item_id), 100,
+    );
+    current.db.sqlite.prepare(`UPDATE daily_news_review_batches SET
+      applied_selected_ids = ?, edit_revision = 1, created_at = 100
+      WHERE review_date = ? AND batch_id = ?`).run(
+      JSON.stringify(['active-2']), '2026-08-11', active.batch.batch_id,
+    );
+    const inactiveCandidates = candidates('inactive');
+    const inactiveBatchId = 'nr-20260811-111111111111';
+    current.db.sqlite.prepare(`INSERT INTO daily_news_review_batches (
+      review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
+      applied_selected_ids, created_at, expires_at, batch_revision, lineage_id,
+      is_current, candidate_generation
+    ) VALUES ('2026-08-11', ?, ?, ?, ?, ?, 999, 999999, 1, '2026-08-11', 0, 0)`).run(
+      inactiveBatchId,
+      JSON.stringify(inactiveCandidates.map((item) => item.item_id)),
+      JSON.stringify(inactiveCandidates),
+      JSON.stringify(inactiveCandidates.slice(0, 5).map((item) => item.item_id)),
+      JSON.stringify(['inactive-3']),
+    );
+
+    await expect(getAppliedNewsReviewSelection(current.env, '2026-08-11')).resolves.toEqual(['active-2']);
+    const token = await createNewsReviewToken('test-secret', '2026-08-11', inactiveBatchId);
+    const result = await submitNewsReviewSelection(current.env, {
+      date: '2026-08-11', batch_id: inactiveBatchId, token, selected_ids: ['inactive-1'],
+    }, 200);
+
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'review_batch_superseded' });
+    expect(current.db.sqlite.prepare(`SELECT applied_selected_ids, edit_revision
+      FROM daily_news_review_batches WHERE review_date = '2026-08-11' AND batch_id = ?`)
+      .get(inactiveBatchId)).toEqual({ applied_selected_ids: JSON.stringify(['inactive-3']), edit_revision: 0 });
+  });
+
+  test('sixth manual candidate cannot evict five published selections or five confirmed manual candidates', async () => {
+    const current = state();
+    const scheduled = [...candidates('selected'), ...candidates('tail')];
+    const initial = await freezeNewsReviewBatch(
+      current.env, '2026-08-11', scheduled, scheduled.slice(0, 5).map((item) => item.item_id), 100,
+    );
+    let revision = initial.batch.batch_revision;
+    for (let index = 1; index <= 6; index++) {
+      const leadId = `ml-20260811-${String(index).repeat(12)}`;
+      insertLead(current.db, leadId, `manual-cap-event-${index}`);
+      const beforeBatchCount = Number((current.db.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
+      ).get() as { count: number }).count);
+      const result = await confirmManualNewsLeadCandidate(
+        current.env, leadId, 7, revision, `confirm-cap-${index}`, 100 + index,
+      );
+      if (index <= 5) {
+        expect(result).toMatchObject({ ok: true, batch: { revision: revision + 1 } });
+        revision += 1;
+      } else {
+        expect(result).toMatchObject({ ok: false, status: 409, error: 'candidate_cap_exhausted' });
+        expect(Number((current.db.sqlite.prepare(
+          "SELECT COUNT(*) AS count FROM daily_news_review_batches WHERE review_date = '2026-08-11'",
+        ).get() as { count: number }).count)).toBe(beforeBatchCount);
+        expect(current.db.sqlite.prepare(
+          'SELECT version, confirmed_at, confirmed_batch_id FROM manual_news_leads WHERE id = ?',
+        ).get(leadId)).toEqual({ version: 7, confirmed_at: null, confirmed_batch_id: null });
+      }
+    }
+    const active = await getActiveNewsReviewBatch(current.env, '2026-08-11');
+    expect(active?.candidates.filter((candidate) => candidate.origin === 'manual_lead')).toHaveLength(5);
+    expect(active?.candidate_ids.slice(0, 5)).toEqual(scheduled.slice(0, 5).map((item) => item.item_id));
   });
 });

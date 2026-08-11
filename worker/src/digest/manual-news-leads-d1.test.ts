@@ -3,10 +3,17 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Env } from '../index';
 import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manual-news-leads-pipeline';
-import { D1ManualLeadProcessingStore } from './manual-news-leads-store';
+import {
+  D1ManualLeadProcessingStore,
+  failManualNewsLeadAfterExhaustion,
+  recoverStaleManualNewsLeads,
+  submitManualNewsLead,
+} from './manual-news-leads-store';
 
 class SqliteD1 {
   readonly sqlite = new DatabaseSync(':memory:');
+  failAudit = false;
+  private batchTail: Promise<void> = Promise.resolve();
 
   constructor() {
     this.sqlite.exec(`
@@ -19,6 +26,7 @@ class SqliteD1 {
         input_text TEXT NOT NULL DEFAULT '', input_url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL, version INTEGER NOT NULL, error_code TEXT, error_message TEXT,
         submit_idempotency_key TEXT NOT NULL, last_mutation_kind TEXT, last_mutation_idempotency_key TEXT,
+        processing_owner TEXT, processing_attempt INTEGER NOT NULL DEFAULT 0, processing_lease_until INTEGER,
         confirmed_batch_id TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE manual_news_evidence (
@@ -39,8 +47,12 @@ class SqliteD1 {
       CREATE TABLE manual_news_lead_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id TEXT NOT NULL, action TEXT NOT NULL,
         from_status TEXT, to_status TEXT, idempotency_key TEXT,
-        metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL
+        resulting_version INTEGER NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL
       );
+      CREATE UNIQUE INDEX idx_manual_news_lead_audit_version
+        ON manual_news_lead_audit(lead_id, resulting_version, action);
+      CREATE UNIQUE INDEX idx_manual_news_lead_audit_idempotency
+        ON manual_news_lead_audit(lead_id, action, idempotency_key) WHERE idempotency_key IS NOT NULL;
     `);
   }
 
@@ -55,6 +67,7 @@ class SqliteD1 {
       first: async <T>() => (statement.get(...bindings) as T | undefined) ?? null,
       all: async <T>() => ({ results: statement.all(...bindings) as T[], success: true, meta: {} }),
       run: async () => {
+        if (this.failAudit && sql.includes('manual_audit:mutation')) throw new Error('injected_audit_failure');
         const result = statement.run(...bindings);
         return { success: true, meta: { changes: Number(result.changes) } };
       },
@@ -63,6 +76,10 @@ class SqliteD1 {
   }
 
   async batch(statements: Array<{ run(): Promise<unknown> }>): Promise<unknown[]> {
+    let release!: () => void;
+    const previous = this.batchTail;
+    this.batchTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
     this.sqlite.exec('BEGIN');
     try {
       const results: unknown[] = [];
@@ -72,6 +89,8 @@ class SqliteD1 {
     } catch (error) {
       this.sqlite.exec('ROLLBACK');
       throw error;
+    } finally {
+      release();
     }
   }
 
@@ -106,7 +125,10 @@ function assessment() {
     event_key: 'anthropic-supported-output-provenance-2026-08-10',
     event_type: 'product_documentation', material_update: false, score: 82,
     recommendation: 'recommended', occurred_at: '2026-08-10T13:30:00.000Z', uncertainties: [],
-    claims: [{ text: '范围仅限受支持产品。', evidence_ids: ['ev-official'] }], matched_event_key: null,
+    claims: [{
+      text: 'Anthropic官方帮助文档披露支持范围内Claude输出的来源标记，并将能力范围限定为受支持产品。',
+      evidence_ids: ['ev-official'],
+    }], matched_event_key: null,
   };
 }
 
@@ -118,6 +140,33 @@ function verifyingAdapters(): ManualLeadProcessingAdapters {
 }
 
 describe('manual lead D1-backed dedupe', () => {
+  test('atomically rolls back submit if its audit insert fails and writes one audit on replay', async () => {
+    const state = fixture();
+    state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+    state.db.sqlite.prepare('DELETE FROM manual_news_evidence').run();
+    state.db.failAudit = true;
+
+    await expect(submitManualNewsLead(state.env, {
+      date: '2026-08-11', text: 'Anthropic 输出水印', note: '限定范围',
+    }, 'submit-atomic', 20)).rejects.toThrow('injected_audit_failure');
+    expect(state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_leads').get())
+      .toMatchObject({ count: 0 });
+
+    state.db.failAudit = false;
+    const first = await submitManualNewsLead(state.env, {
+      date: '2026-08-11', text: 'Anthropic 输出水印', note: '限定范围',
+    }, 'submit-atomic', 21);
+    const replay = await submitManualNewsLead(state.env, {
+      date: '2026-08-11', text: '  Anthropic 输出水印 ', note: ' 限定范围 ',
+    }, 'submit-atomic', 22);
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'submit' AND resulting_version = 1`,
+    ).get(first.lead.id)).toMatchObject({ count: 1 });
+  });
+
   test('persists the normalized bounded-fetch audit with evidence', async () => {
     const state = fixture();
     const fetchAudit = {
@@ -203,5 +252,79 @@ describe('manual lead D1-backed dedupe', () => {
     expect(await store.findPriorEventsByEventKey(assessment().event_key, state.leadId))
       .toEqual([{ event_key: assessment().event_key, review_date: '2026-01-01', lead_id: 'old-lead' }]);
     expect(await store.listRecentPriorEvents('2026-08-11', state.leadId)).toEqual([]);
+  });
+
+  test('rolls back a status transition when its audit insert fails', async () => {
+    const state = fixture('validating', 4);
+    state.db.failAudit = true;
+
+    await expect(new D1ManualLeadProcessingStore(state.env).transition(
+      state.leadId, 'validating', 'researching',
+    )).rejects.toThrow('injected_audit_failure');
+
+    expect(state.db.sqlite.prepare('SELECT status, version FROM manual_news_leads WHERE id = ?')
+      .get(state.leadId)).toMatchObject({ status: 'validating', version: 4 });
+    expect(state.db.sqlite.prepare('SELECT COUNT(*) AS count FROM manual_news_lead_audit')
+      .get()).toMatchObject({ count: 0 });
+  });
+
+  test('concurrent transition CAS writes exactly one winner audit', async () => {
+    const state = fixture('validating', 4);
+    const store = new D1ManualLeadProcessingStore(state.env);
+
+    const results = await Promise.allSettled([
+      store.transition(state.leadId, 'validating', 'researching'),
+      store.transition(state.leadId, 'validating', 'researching'),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count, MAX(resulting_version) AS resulting_version
+       FROM manual_news_lead_audit WHERE lead_id = ? AND action = 'status_transition'`,
+    ).get(state.leadId)).toMatchObject({ count: 1, resulting_version: 5 });
+  });
+
+  test('recovers every stale intermediate status to validating with an audited CAS', async () => {
+    const state = fixture('validating', 4);
+    const statuses = ['submitted', 'validating', 'researching', 'extracting', 'verifying', 'clustering', 'scored'] as const;
+    state.db.sqlite.prepare('DELETE FROM manual_news_leads').run();
+    for (const [index, status] of statuses.entries()) {
+      state.db.sqlite.prepare(`INSERT INTO manual_news_leads (
+        id, review_date, input_type, input_text, input_url, note, status, version,
+        submit_idempotency_key, processing_owner, processing_attempt, processing_lease_until,
+        created_at, updated_at
+      ) VALUES (?, '2026-08-11', 'text', 'lead', '', '', ?, 4, ?, 'stale-owner', 1, 10, 1, ?)`)
+        .run(`stale-${index}`, status, `submit-${index}`, index);
+    }
+
+    const recovered = await recoverStaleManualNewsLeads(state.env, '2026-08-11', 100);
+
+    expect(recovered.map((lead) => lead.id).sort()).toEqual(statuses.map((_, index) => `stale-${index}`).sort());
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_leads
+       WHERE status = 'validating' AND version = 5 AND processing_owner IS NULL`,
+    ).get()).toMatchObject({ count: statuses.length });
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_lead_audit
+       WHERE action = 'stale_recovery' AND resulting_version = 5`,
+    ).get()).toMatchObject({ count: statuses.length });
+  });
+
+  test('marks a still-owned lead failed after workflow retry exhaustion and audits the terminal version', async () => {
+    const state = fixture('researching', 7);
+    state.db.sqlite.prepare(
+      `UPDATE manual_news_leads SET processing_owner = 'workflow-owner', processing_lease_until = 999 WHERE id = ?`,
+    ).run(state.leadId);
+
+    expect(await failManualNewsLeadAfterExhaustion(
+      state.env, state.leadId, 'workflow-owner', new Error('gateway timeout'), 100,
+    )).toBe(true);
+
+    expect(state.db.sqlite.prepare('SELECT status, version, error_code FROM manual_news_leads WHERE id = ?')
+      .get(state.leadId)).toMatchObject({ status: 'failed', version: 8, error_code: 'processing_retry_exhausted' });
+    expect(state.db.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM manual_news_lead_audit
+       WHERE lead_id = ? AND action = 'processing_exhausted' AND resulting_version = 8`,
+    ).get(state.leadId)).toMatchObject({ count: 1 });
   });
 });

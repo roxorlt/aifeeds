@@ -392,7 +392,7 @@ export interface Env {
   BLOG_PIPELINE_WORKFLOW?: Workflow;
   PODCAST_PIPELINE_WORKFLOW?: Workflow;
   // 手工补录行业新闻线索的异步检索、核验、聚类与评分。optional 便于本地测试；
-  // 生产与 staging 均由 wrangler.toml 绑定，API 仅在缺失时回落 waitUntil。
+  // 生产与 staging 均须由 wrangler.toml 绑定，API 缺失时返回 503，绝不回落到请求生命周期。
   MANUAL_NEWS_LEAD_WORKFLOW?: Workflow;
   // 固定可信研究网关：网关负责逐跳 DNS 校验与连接 peer pinning，并提供有审计元数据的
   // HTML/JSON/PDF 文本提取及开放网络检索。Worker 绝不直接 fetch 用户提供的域名。
