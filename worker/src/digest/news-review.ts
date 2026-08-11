@@ -1,5 +1,6 @@
 import type { Env } from '../index';
 import { pushDeerMessage } from '../notifier';
+import { mergeManualLeadCandidate } from './manual-news-leads';
 
 export interface NewsReviewCandidate {
   item_id: string;
@@ -8,6 +9,9 @@ export interface NewsReviewCandidate {
   source: string;
   score: number | null;
   url?: string;
+  event_key?: string;
+  origin?: 'manual_lead';
+  lead_id?: string;
 }
 
 export interface NewsReviewTokenResult {
@@ -32,6 +36,9 @@ export interface NewsReviewBatch {
   auto_repaired_from_batch: string | null;
   auto_repaired_invalid_ids: string[];
   superseded_by: string | null;
+  batch_revision: number;
+  supersedes_batch_id: string | null;
+  revision_origin: 'scheduled_freeze' | 'manual_lead';
   created_at: number;
   expires_at: number;
 }
@@ -53,6 +60,9 @@ interface NewsReviewBatchRow {
   auto_repaired_from_batch: string | null;
   auto_repaired_invalid_ids: string | null;
   superseded_by: string | null;
+  batch_revision?: number;
+  supersedes_batch_id?: string | null;
+  revision_origin?: NewsReviewBatch['revision_origin'];
   created_at: number;
   expires_at: number;
 }
@@ -90,6 +100,9 @@ function parseCandidates(value: string): NewsReviewCandidate[] {
 function toBatch(row: NewsReviewBatchRow): NewsReviewBatch {
   return {
     ...row,
+    batch_revision: Number(row.batch_revision || 1),
+    supersedes_batch_id: row.supersedes_batch_id || null,
+    revision_origin: row.revision_origin || 'scheduled_freeze',
     candidate_ids: parseStringArray(row.candidate_ids),
     candidates: parseCandidates(row.candidates_json),
     default_selected_ids: parseStringArray(row.default_selected_ids),
@@ -319,6 +332,7 @@ export async function freezeNewsReviewBatch(
     auto_repaired_invalid_ids: existing.auto_repaired_invalid_ids,
   };
   const previous = await getActiveNewsReviewBatch(env, date);
+  const batchRevision = (previous?.batch_revision || 0) + 1;
   const previousPublishedIds = previous
     ? await getPublishedNewsReviewSelection(env, date, previous)
     : [];
@@ -331,8 +345,9 @@ export async function freezeNewsReviewBatch(
       `INSERT INTO daily_news_review_batches (
          review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
          applied_selected_ids, selection_hash, edit_revision, publish_status,
-         auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?)`,
+         auto_repaired_from_batch, auto_repaired_invalid_ids, created_at, expires_at,
+         batch_revision, supersedes_batch_id, revision_origin
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?, ?, 'scheduled_freeze')`,
     ).bind(
       date,
       batchId,
@@ -345,13 +360,15 @@ export async function freezeNewsReviewBatch(
       JSON.stringify(repair.invalid_ids),
       now,
       newsReviewExpiresAt(date),
+      batchRevision,
+      previous?.batch_id || null,
     ).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO daily_news_review_batches (
          review_date, batch_id, candidate_ids, candidates_json, default_selected_ids,
-         created_at, expires_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         created_at, expires_at, batch_revision, supersedes_batch_id, revision_origin
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled_freeze')`,
     ).bind(
       date,
       batchId,
@@ -360,6 +377,8 @@ export async function freezeNewsReviewBatch(
       JSON.stringify(validatedDefault.selected_ids),
       now,
       newsReviewExpiresAt(date),
+      batchRevision,
+      previous?.batch_id || null,
     ).run();
   }
   if (previous && previous.batch_id !== batchId) {
@@ -507,7 +526,7 @@ export async function freezeNewsReviewBatchFromPool(
     `SELECT id, title, content, content_translated, url, extra FROM items WHERE id IN (${placeholders})`,
   ).bind(...candidateIds).all<NewsReviewItemRow>();
   const itemById = new Map((itemResult.results || []).map((row) => [row.id, row]));
-  const candidates: NewsReviewCandidate[] = candidateIds.map((itemId) => {
+  let candidates: NewsReviewCandidate[] = candidateIds.map((itemId) => {
     const item = itemById.get(itemId);
     const audit = auditById.get(itemId);
     const extra = parseObject(item?.extra || null);
@@ -528,7 +547,56 @@ export async function freezeNewsReviewBatchFromPool(
       ...(item?.url ? { url: item.url } : {}),
     };
   });
-  return freezeNewsReviewBatch(env, date, candidates, defaultIds.slice(0, 5), now);
+  let freezeDefaults = defaultIds.slice(0, 5);
+  const confirmed = await env.DB.prepare(
+    `SELECT l.id, l.input_url, a.assessment_json,
+       (SELECT e.publisher FROM manual_news_evidence e WHERE e.lead_id = l.id AND e.reliable = 1 ORDER BY e.evidence_id LIMIT 1) AS publisher
+     FROM manual_news_leads l
+     JOIN manual_news_event_assessments a ON a.lead_id = l.id
+       AND a.assessment_version = (
+         SELECT MAX(a2.assessment_version) FROM manual_news_event_assessments a2 WHERE a2.lead_id = l.id
+       )
+     WHERE l.review_date = ? AND l.confirmed_at IS NOT NULL AND l.confirmed_batch_id IS NULL
+       AND l.status IN ('recommended', 'needs_review')
+     ORDER BY l.confirmed_at ASC`,
+  ).bind(date).all<{ id: string; input_url: string; assessment_json: string; publisher: string | null }>();
+  const includedLeadIds: string[] = [];
+  for (const row of confirmed.results || []) {
+    const assessment = parseObject(row.assessment_json);
+    const title = compactReviewText(assessment.title, 80);
+    const summary = compactReviewText(assessment.summary, 180);
+    const eventKey = compactReviewText(assessment.event_key, 200);
+    const score = Number(assessment.score);
+    if (!title || !summary || !eventKey || !Number.isFinite(score)) continue;
+    const merged = mergeManualLeadCandidate({
+      previous_candidates: candidates,
+      previous_default_selected_ids: freezeDefaults,
+      published_selected_ids: freezeDefaults,
+      candidate: {
+        item_id: `blog:manual:${row.id}`,
+        title,
+        summary,
+        source: compactReviewText(row.publisher || '手工补录', 40),
+        score,
+        ...(row.input_url ? { url: row.input_url } : {}),
+        event_key: eventKey,
+        origin: 'manual_lead',
+        lead_id: row.id,
+      },
+      max_candidates: 10,
+    });
+    candidates = merged.candidates;
+    freezeDefaults = merged.default_selected_ids;
+    includedLeadIds.push(row.id);
+  }
+  const frozen = await freezeNewsReviewBatch(env, date, candidates, freezeDefaults, now);
+  if (includedLeadIds.length) {
+    await env.DB.batch(includedLeadIds.map((leadId) => env.DB.prepare(
+      `UPDATE manual_news_leads SET confirmed_batch_id = ?, updated_at = ?
+       WHERE id = ? AND confirmed_batch_id IS NULL`,
+    ).bind(frozen.batch.batch_id, now, leadId)));
+  }
+  return frozen;
 }
 
 export function buildNewsReviewNotification(

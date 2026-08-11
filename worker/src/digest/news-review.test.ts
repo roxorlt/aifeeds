@@ -110,7 +110,7 @@ describe('daily news review contract', () => {
     expect(message.body).toContain('#news-review');
   });
 
-  test('pool snapshot keeps the calibrated order and default top five', async () => {
+  test('pool snapshot keeps the calibrated defaults and includes confirmed pre-freeze manual leads', async () => {
     const auditCandidates = candidates.map((candidate, index) => ({
       rank: index + 1,
       id: candidate.item_id,
@@ -135,6 +135,12 @@ describe('daily news review contract', () => {
       extra: JSON.stringify({ title_zh: candidate.title, ai_summary_zh: candidate.summary }),
     }]));
     const inserted: Array<{ sql: string; binds: unknown[] }> = [];
+    const manualAssessment = {
+      title: 'Anthropic披露部分Claude输出的水印与来源标记',
+      summary: '官方文档将范围限定为受支持的模型与产品。',
+      event_key: 'anthropic-output-provenance-2026-08',
+      score: 82,
+    };
     let saved: Record<string, unknown> | null = null;
     const env = {
       DAILY_NEWS_REVIEW_SECRET: 'secret',
@@ -150,6 +156,10 @@ describe('daily news review contract', () => {
             },
             async all<T>() {
               if (/FROM items/i.test(sql)) return { results: binds.map((id) => rows.get(String(id))) as T[] };
+              if (/FROM manual_news_leads/i.test(sql)) return { results: [{
+                id: 'ml-20260730-abc123def456', input_url: 'https://support.claude.com/example',
+                assessment_json: JSON.stringify(manualAssessment), publisher: 'Anthropic',
+              }] as T[] };
               return { results: [] as T[] };
             },
             async run() {
@@ -167,18 +177,25 @@ describe('daily news review contract', () => {
           };
           return stmt;
         },
+        async batch(statements: Array<{ run(): Promise<unknown> }>) {
+          return Promise.all(statements.map((statement) => statement.run()));
+        },
       },
     } as never;
 
     const result = await freezeNewsReviewBatchFromPool(env, '2026-07-30', Date.parse('2026-07-30T00:00:00Z'));
 
     expect(result.created).toBe(true);
-    expect(result.batch.candidate_ids).toEqual(candidates.map((candidate) => candidate.item_id));
+    expect(result.batch.candidate_ids).toEqual([
+      ...candidates.slice(0, 9).map((candidate) => candidate.item_id),
+      'blog:manual:ml-20260730-abc123def456',
+    ]);
     expect(result.batch.default_selected_ids).toEqual(candidates.slice(0, 5).map((candidate) => candidate.item_id));
     expect(result.batch.candidates[0]).toMatchObject({
       title: '候选新闻 1', summary: '候选新闻 1 摘要', source: '量子位', score: 100,
     });
     expect(inserted.some((entry) => /INSERT INTO daily_news_review_batches/i.test(entry.sql))).toBe(true);
+    expect(inserted.some((entry) => /UPDATE manual_news_leads SET confirmed_batch_id/i.test(entry.sql))).toBe(true);
   });
 
   test('a new batch compares against the previous production defaults when no human choice exists', async () => {

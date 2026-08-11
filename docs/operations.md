@@ -3,7 +3,9 @@
 > 维护目标：跨 session、跨设备、跨人都能快速搞清楚「谁在哪里跑什么」。
 > 每次新增/下线服务都要同步改这个文档。
 
-最后更新：2026-07-23（admin analytics 统一非真人过滤已上线：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；PR #209 / production `94946fc`）
+最后更新：2026-08-11（手工补录行业新闻线索 vertical MVP 已完成本地实现，新增 D1 migration 033、内部 API 与 `manual-news-lead-workflow`；尚未迁移或部署，见「手工补录行业新闻线索」）
+
+历史：2026-07-23（admin analytics 统一非真人过滤已上线：声明式 crawler telemetry 200 no-op，历史 DAU/性能/错误查询排除 crawler 与未标记浏览器自动化；PR #209 / production `94946fc`）
 
 历史：2026-07-21（ai-feeds.cc 内容镜像与国内搜索稳定 sitemap 已上线：首期 137 个内容页、148 个可发现 URL，全量公网门禁通过）
 
@@ -3672,6 +3674,22 @@ GraphQL dimension 名（schema introspection 拿的）：`siteTag` / `requestHos
   - BJT 07:50 / UTC 前一日 23:50：`editorial`，只重建并推 `news/x`
   - BJT 08:00 / UTC 00:00：只重建 `hf-paper` + `_subject`，依次推 `papers`、`finalize`；正常路径不重算前两批
 - **缺批恢复**：08:00 读取 `digest_pool` 的 `_codex_stage_<stage>/meta` 状态。状态不存在才补建对应早批；有 revision/hash 但无 `pushed_at` 时只补推、不重算。stage HTTP/状态落库失败会先走 Workflow step retry + PushDeer；08:00 邮件和 SEO step 完成后再令 Workflow 保持失败，避免下游故障遮蔽原日报业务。
+
+### 手工补录行业新闻线索（2026-08-11，本地完成、待部署）
+
+> 工作台可按日期提交文字线索、URL 或两者组合。CF Worker 持有线索、证据、核验/聚类/评分结果和候选批次版本；HK 仅通过同源、登录保护的代理展示和操作。完整设计见
+> [`docs/plans/2026-08-11-manual-news-leads.md`](plans/2026-08-11-manual-news-leads.md)。
+
+- 内部 API（`Bearer DAILY_NEWS_REVIEW_SECRET`）：
+  - `POST /api/digest/daily-news-leads`：提交；必须带 `Idempotency-Key`。
+  - `GET /api/digest/daily-news-leads?date=YYYY-MM-DD` 与 `GET /api/digest/daily-news-leads/:id`：按日期/单条查询。
+  - `POST /api/digest/daily-news-leads/:id/retry` 与 `/confirm-candidate`：必须同时带幂等键和 `expected_version`。
+- `manual-news-lead-workflow` 负责安全取证、严格 JSON 事实核验、事件聚类/跨日去重和评分；Workflow 中途重试可从持久状态继续。生产与 staging 使用独立 Workflow binding `MANUAL_NEWS_LEAD_WORKFLOW`。
+- migration `033-manual-news-leads.sql` 新增 `manual_news_leads`、`manual_news_evidence`、`manual_news_event_assessments`、`manual_news_lead_audit`，并给 `daily_news_review_batches` 增加不可变 revision / supersedes / origin 字段。
+- 确认线索只产生候选池 revision：冻结前进入当天首批候选，冻结后生成 V2+ 并标记旧批次被替代。它不会修改已发布 Top 5，也不会触发 HK 重渲染；仍须用户在原审核区选择 1–5 条、排序并显式重新生成。
+- URL 取证仅允许无凭据的标准端口 HTTP(S)，逐跳校验重定向和解析 IP，拒绝 localhost、私网、链路本地、metadata/ULA，最多 3 次跳转，并限制超时、类型和 2 MiB 响应体。
+- 发布顺序：先 staging 执行 migration 033 → 部署 Worker/Workflow → 验证提交/状态/确认不触发渲染 → 再部署 HK 代理与 latest 页面；production 重复同序。不得先发布 HK 表单后遗漏 CF migration。
+- 当前文本线索的检索 adapter 查询已入库新闻；URL 线索直接安全取证。若未来接开放互联网搜索，只替换 adapter，并沿用相同 SSRF、证据门槛和严格 JSON 校验，不能把搜索摘要直接当成事实。
 - **v2 契约**：`protocol_version=2`，含 `batch_id/stage/revision/content_hash/expected_stages/final_manifest`。每批 `digest.meta.source_order` 表示本批源，另固定带 `final_source_order=['news','x','ph','gh','hf-paper']`；每个 item 在早批即带由 `source+item_id` 派生的稳定 `segment_id` 和批内临时 `card_index`。finalize 按 `item_id` 重绑最终 `card_index`，`final_manifest.section_order` 是 `final_source_order` 过滤空栏目后的有序子集。
 - **hash / revision**：稳定 JSON（不含 `generated_at`）算完整 `sha256:`；同内容重放复用 revision/hash/render_key，内容变化 revision +1 并清除旧 `pushed_at`。finalize 会重新计算三批当前内容 hash，与已锁定 state 不一致则拒绝，防止 final manifest 引用旧批却夹带新条目。
 - **final manifest**：精确带三批 `revision/content_hash`，以及每条 `segment_id/item_id/source/card_index/stage/revision` 和自身 `manifest_hash`。相同 stage/revision/hash 的接收幂等、冲突 409 由 HK v2 ingest 状态机执行。

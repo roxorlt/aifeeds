@@ -127,6 +127,7 @@ import { generateDailyPage, backfillDailyPages } from './digest/daily-page-run';
 import { backfillItemPages, generateItemPage } from './seo/item-page-run';
 import { checkDailyPageFreshness } from './digest/daily-page-monitor';
 import { handleDailyNewsReviewApi } from './digest/news-review-api';
+import { handleManualNewsLeadsApi } from './digest/manual-news-leads-api';
 import { freezeNewsReviewBatchFromPool, markNewsReviewPublished, notifyNewsReviewBatch } from './digest/news-review';
 import { isSeoPath, handleSeoRoute } from './seo-routes';
 import { handleItemRoute } from './seo/item-routes';
@@ -390,6 +391,9 @@ export interface Env {
   // 设计：docs/plans/2026-06-09-ai-vendor-feeds-source-design.md §8
   BLOG_PIPELINE_WORKFLOW?: Workflow;
   PODCAST_PIPELINE_WORKFLOW?: Workflow;
+  // 手工补录行业新闻线索的异步检索、核验、聚类与评分。optional 便于本地测试；
+  // 生产与 staging 均由 wrangler.toml 绑定，API 仅在缺失时回落 waitUntil。
+  MANUAL_NEWS_LEAD_WORKFLOW?: Workflow;
   // RSSHub 基址 + token（feeds/parse.ts 的 via='rsshub' 分支用）。Phase 1 的 24 个
   // feed 全 via='native'，此项暂未启用；留作未来需要 RSSHub 中转的源（如某些无原生
   // RSS 的国内厂商）。香港 host-rewrite 铁律：基址只走 env.RSSHUB_BASE，不靠 request host。
@@ -412,6 +416,7 @@ export { BlogPipelineWorkflow } from './workflows/blog-pipeline';
 export { PodcastPipelineWorkflow } from './workflows/podcast-pipeline';
 export { DigestNodeRunWorkflow } from './digest/node-run';
 export { DigestDeliverWorkflow } from './digest/deliver';
+export { ManualNewsLeadWorkflow } from './digest/manual-news-leads-workflow';
 
 // CORS origins allowed
 const ALLOWED_ORIGINS = [
@@ -734,6 +739,9 @@ export default {
       }
       if (path === '/api/digest/daily-news-review') {
         return handleDailyNewsReviewApi(request, env);
+      }
+      if (path === '/api/digest/daily-news-leads' || path.startsWith('/api/digest/daily-news-leads/')) {
+        return handleManualNewsLeadsApi(request, env, ctx);
       }
 
       if (path === '/api/ingest' && request.method === 'POST') {
@@ -5948,6 +5956,7 @@ function isBotGateExempt(path: string, method: string): boolean {
   // health, unknown subpaths, and wrong methods before any other work.
   if (path.startsWith('/api/cc-sync/')) return true;
   if (path === '/api/digest/daily-news-review') return true;
+  if (path === '/api/digest/daily-news-leads' || path.startsWith('/api/digest/daily-news-leads/')) return true;
   // 受信 HK 渲染机上传；handler 自带 Bearer 鉴权，UA 可能是 Node/undici。
   if (path === '/api/digest/daily-video') return true;
   if (method === 'GET' || method === 'HEAD') {
