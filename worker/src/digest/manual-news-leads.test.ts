@@ -13,6 +13,7 @@ import {
   mergeManualLeadCandidate,
   missingManualLeadEvidenceAnchors,
   validateManualLeadAssessment,
+  validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
   validateManualNewsLeadInput,
   type ManualNewsEvidence,
@@ -59,6 +60,21 @@ const independentReport: ManualNewsEvidence = {
   title: 'Sanders calls for AI development pause',
   excerpt: 'Independent reporting describes the request.',
   claims_supported: ['The request was sent to OpenAI, Anthropic and Meta leaders.'],
+  reliable: true,
+};
+
+const techCrunchAlibabaBan: ManualNewsEvidence = {
+  id: 'ev-techcrunch-alibaba-ban',
+  url: 'https://techcrunch.com/example/alibaba-claude-code-ban',
+  source_type: 'independent_media',
+  publisher: 'TechCrunch',
+  published_at: '2026-08-11T01:00:00Z',
+  retrieved_at: 1,
+  title: 'Alibaba reportedly bans employees from using Claude Code',
+  excerpt: 'Alibaba reportedly bans employees from using Claude Code in an internal company restriction.',
+  claims_supported: [
+    'Alibaba reportedly bans employees from using Claude Code.',
+  ],
   reliable: true,
 };
 
@@ -277,27 +293,169 @@ describe('manual news lead domain', () => {
     });
     const body = JSON.parse(prompt.user) as {
       allowed_evidence_ids: string[];
+      output_schema: {
+        claims: Array<{
+          atomic_fact: { subject: string; predicate: string; object: string };
+          evidence_ids: string[];
+        }>;
+      };
       claim_contract_examples: {
-        good: Array<{ text: string; evidence_ids: string[] }>;
-        bad: Array<{ claim: { text: string; evidence_ids: string[] }; failure_codes: string[] }>;
+        good: Array<{
+          atomic_fact: { subject: string; predicate: string; object: string };
+          evidence_ids: string[];
+        }>;
+        bad: Array<{ claim: Record<string, unknown>; failure_codes: string[] }>;
       };
     };
 
     expect(body.allowed_evidence_ids).toEqual(['ev-official']);
     expect(body.claim_contract_examples.good).toContainEqual({
-      text: '阿里巴巴将禁止员工使用Claude Code。',
+      atomic_fact: {
+        subject: 'Alibaba',
+        predicate: 'reportedly bans',
+        object: 'employees from using Claude Code',
+      },
       evidence_ids: ['<EXACT_ALLOWED_EVIDENCE_ID>'],
     });
     expect(body.claim_contract_examples.bad).toContainEqual(expect.objectContaining({
       claim: expect.objectContaining({
-        text: '阿里巴巴将禁止员工使用Claude Code，因为担忧数据安全，并要求改用其他产品。',
+        atomic_fact: expect.objectContaining({
+          predicate: '将禁止并要求改用',
+        }),
       }),
       failure_codes: expect.arrayContaining(['non_atomic_claim', 'unknown_evidence_id']),
     }));
+    expect(body.output_schema.claims[0]).toEqual(expect.objectContaining({
+      atomic_fact: {
+        subject: expect.stringContaining('exactly one subject'),
+        predicate: expect.stringContaining('exactly one predicate'),
+        object: expect.stringContaining('exactly one object'),
+      },
+    }));
     expect(prompt.system).toContain('evidence_ids 中的每个字符串只能逐字复制 allowed_evidence_ids');
+    expect(prompt.system).toContain('claims 不接受自由文本 text');
+    expect(prompt.system).toContain('主体、单一谓词、对象');
     expect(prompt.system).toContain('原因、改用其他产品等内容必须拆成各自独立的 claim');
     expect(prompt.system).toContain('title 必须是单一原子句');
     expect(prompt.system).toContain('summary 中多个事实必须用句号拆成多个完整原子句');
+  });
+
+  test('normalizes a URL-only Alibaba Claude Code restriction from one strict atomic fact row', () => {
+    const generated = {
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      summary: 'Alibaba reportedly bans employees from using Claude Code.',
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event',
+      material_update: false,
+      score: 88,
+      recommendation: 'recommended',
+      occurred_at: null,
+      uncertainties: ['TechCrunch attributes the restriction to internal company policy.'],
+      claims: [{
+        atomic_fact: {
+          subject: 'Alibaba',
+          predicate: 'reportedly bans',
+          object: 'employees from using Claude Code',
+        },
+        evidence_ids: ['ev-techcrunch-alibaba-ban'],
+      }],
+      matched_event_key: null,
+    };
+
+    const validated = validateManualLeadGeneratedAssessment(
+      generated,
+      [techCrunchAlibabaBan],
+    );
+    expect(validated.claims).toEqual([{
+      text: 'Alibaba reportedly bans employees from using Claude Code.',
+      evidence_ids: ['ev-techcrunch-alibaba-ban'],
+    }]);
+
+    const verifierPrompt = buildManualLeadFactVerificationPrompt({
+      assessment: validated,
+      evidence: [techCrunchAlibabaBan],
+    });
+    const promptBody = JSON.parse(verifierPrompt.user) as {
+      facts: Array<{ fact_id: string; untrusted_candidate_value: string | boolean }>;
+    };
+    expect(promptBody.facts).toContainEqual(expect.objectContaining({
+      fact_id: 'claim:0',
+      untrusted_candidate_value: 'Alibaba reportedly bans employees from using Claude Code.',
+    }));
+    expect(verifierPrompt.system).toContain('单一原子子句');
+    expect(verifierPrompt.system).toContain('subject/predicate/object 槽位');
+    expect(verifierPrompt.system).toContain('同一来源连续原文独立核验');
+    const quote = techCrunchAlibabaBan.claims_supported[0];
+    expect(validateManualLeadFactVerification({
+      overall_verdict: 'supported',
+      fact_results: promptBody.facts.map((fact) => supportedFactResult(
+        fact.fact_id,
+        techCrunchAlibabaBan.id,
+        quote,
+      )),
+    }, validated, [techCrunchAlibabaBan])).toMatchObject({
+      overall_verdict: 'supported',
+      fact_results: expect.arrayContaining([
+        expect.objectContaining({ fact_id: 'claim:0', supported: true }),
+      ]),
+    });
+
+    expect(() => validateManualLeadGeneratedAssessment({
+      ...generated,
+      title: '阿里巴巴投资OpenAI',
+      summary: '阿里巴巴投资OpenAI。',
+      claims: [{
+        atomic_fact: {
+          subject: '阿里巴巴', predicate: '投资', object: 'OpenAI',
+        },
+        evidence_ids: ['ev-techcrunch-alibaba-ban'],
+      }],
+    }, [techCrunchAlibabaBan])).toThrow(/assessment_evidence_language_mismatch/);
+  });
+
+  test('fails closed when a generated atomic fact row hides a second predicate or subject', () => {
+    const base = {
+      title: 'Alibaba reportedly bans employees from using Claude Code',
+      summary: 'Alibaba reportedly bans employees from using Claude Code.',
+      event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+      event_type: 'industry_event', material_update: false, score: 88,
+      recommendation: 'recommended', occurred_at: null, uncertainties: [],
+      matched_event_key: null,
+    };
+    for (const atomic_fact of [
+      {
+        subject: 'Alibaba',
+        predicate: 'reportedly bans and requires switching',
+        object: 'employees from using Claude Code',
+      },
+      {
+        subject: 'Alibaba and TechCrunch',
+        predicate: 'reportedly bans',
+        object: 'employees from using Claude Code',
+      },
+      {
+        subject: 'Alibaba',
+        predicate: 'reportedly bans',
+        object: 'employees from using Claude Code, and requires another product',
+      },
+      {
+        subject: 'Alibaba',
+        predicate: 'reportedly bans',
+        object: 'employees from using Claude Code because data security requires another product',
+      },
+    ]) {
+      expect(() => validateManualLeadGeneratedAssessment({
+        ...base,
+        claims: [{ atomic_fact, evidence_ids: ['ev-techcrunch-alibaba-ban'] }],
+      }, [techCrunchAlibabaBan])).toThrow(/non_atomic_claim/);
+    }
+    expect(() => validateManualLeadGeneratedAssessment({
+      ...base,
+      claims: [{
+        text: 'Alibaba reportedly bans employees from using Claude Code and requires another product.',
+        evidence_ids: ['ev-techcrunch-alibaba-ban'],
+      }],
+    }, [techCrunchAlibabaBan])).toThrow(/invalid_claim/);
   });
 
   test('builds validation-guided regeneration from original context without echoing invalid raw output', () => {
@@ -328,6 +486,7 @@ describe('manual news lead domain', () => {
     });
     expect(assessmentPrompt.system).toContain('每条 claim 必须是单一原子事实');
     expect(assessmentPrompt.system).toContain('拆成多条 claims');
+    expect(assessmentPrompt.system).toContain('英文证据写英文事实');
 
     const candidate = validateManualLeadAssessment(assessment({
       title: 'OpenAI发布GPT 5，随后暂停GPT 6。',

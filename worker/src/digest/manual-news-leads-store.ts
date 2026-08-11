@@ -3,6 +3,7 @@ import {
   assertManualLeadTransition,
   createManualEvidenceDigest,
   createManualLeadVerificationProof,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   mergeManualLeadCandidate,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
@@ -82,10 +83,12 @@ function validatedTransitionAuditMetadata(
     'assessment_generation_attempts',
     'assessment_last_validation_code',
     'assessment_regeneration_trigger_code',
+    'assessment_claim_contract',
   ]);
   if (Object.keys(metadata).some((key) => !allowed.has(key))
     || (metadata.assessment_generation_attempts !== 1 && metadata.assessment_generation_attempts !== 2)
     || !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_last_validation_code)
+    || metadata.assessment_claim_contract !== MANUAL_LEAD_GENERATED_CLAIM_CONTRACT
     || (metadata.assessment_regeneration_trigger_code !== undefined
       && !/^[a-z0-9_]{1,80}$/.test(metadata.assessment_regeneration_trigger_code))) {
     throw new Error('invalid_transition_audit_metadata');

@@ -9,7 +9,8 @@ import {
   manualLeadFactVerificationErrorCode,
   missingManualLeadEvidenceAnchors,
   isRegeneratableManualLeadAssessmentValidationCode,
-  validateManualLeadAssessment,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+  validateManualLeadGeneratedAssessment,
   validateManualLeadFactVerification,
   validateManualNewsProcessedAssessment,
   validateManualNewsLeadInput,
@@ -82,6 +83,7 @@ export interface ManualLeadTransitionPatch
     assessment_generation_attempts: 1 | 2;
     assessment_last_validation_code: string;
     assessment_regeneration_trigger_code?: string;
+    assessment_claim_contract: typeof MANUAL_LEAD_GENERATED_CLAIM_CONTRACT;
   };
 }
 
@@ -285,6 +287,7 @@ export async function processManualNewsLead(
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: lastValidationCode,
+              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),
@@ -311,12 +314,13 @@ export async function processManualNewsLead(
             return (await store.getLead(leadId))!;
           }
           try {
-            validatedCore = validateManualLeadAssessment(
+            validatedCore = validateManualLeadGeneratedAssessment(
               raw, evidence, priorEvents.map((event) => event.event_key),
             );
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: 'valid',
+              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),
@@ -331,6 +335,7 @@ export async function processManualNewsLead(
             assessmentGenerationAudit = {
               assessment_generation_attempts: generationAttempts,
               assessment_last_validation_code: validationCode,
+              assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
               ...(regenerationTriggerCode
                 ? { assessment_regeneration_trigger_code: regenerationTriggerCode }
                 : {}),

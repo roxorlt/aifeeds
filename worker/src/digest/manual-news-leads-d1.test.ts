@@ -6,6 +6,7 @@ import { processManualNewsLead, type ManualLeadProcessingAdapters } from './manu
 import {
   applyManualLeadEvidencePolicy,
   buildManualLeadFactVerificationPrompt,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   validateManualLeadAssessment,
   validateManualLeadFactVerification,
   type ManualLeadPriorEvent,
@@ -204,8 +205,8 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
     title, excerpt, claims_supported_json, reliable
   ) VALUES (?, 'ev-official', 'https://support.claude.com/example', 'official_help', 'claude.com',
     '2026-08-10T13:30:00.000Z', 2, 'Official help',
-    'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.',
-    '["On 2026-08-10, Anthropic Claude provenance documentation covers supported products only."]', 1)`).run(leadId);
+    'Anthropic documented Claude provenance for supported products on 2026-08-10.',
+    '["Anthropic documented Claude provenance for supported products on 2026-08-10."]', 1)`).run(leadId);
   return {
     db,
     env: { DB: db as unknown as D1Database, MANUAL_NEWS_VERIFICATION_SECRET: VERIFICATION_SECRET } as Env,
@@ -213,7 +214,7 @@ function fixture(status = 'verifying', version = 4, processingOwner: string | nu
   };
 }
 
-const fixtureFact = 'On 2026-08-10, Anthropic Claude provenance documentation covers supported products only.';
+const fixtureFact = 'Anthropic documented Claude provenance for supported products on 2026-08-10.';
 
 function assessment() {
   return {
@@ -223,6 +224,20 @@ function assessment() {
     event_type: 'product_documentation', material_update: false, score: 82,
     recommendation: 'recommended', occurred_at: '2026-08-10', uncertainties: [],
     claims: [{ text: fixtureFact, evidence_ids: ['ev-official'] }], matched_event_key: null,
+  };
+}
+
+function generatedAssessment(overrides: Record<string, unknown> = {}) {
+  return {
+    ...assessment(),
+    claims: [{
+      atomic_fact: {
+        subject: 'Anthropic', predicate: 'documented',
+        object: 'Claude provenance for supported products on 2026-08-10',
+      },
+      evidence_ids: ['ev-official'],
+    }],
+    ...overrides,
   };
 }
 
@@ -349,7 +364,7 @@ function saveFixtureAssessment(
 function verifyingAdapters(): ManualLeadProcessingAdapters {
   return {
     search: async () => [], fetch: async () => { throw new Error('unused'); },
-    extract: async () => null, assess: async () => assessment(),
+    extract: async () => null, assess: async () => generatedAssessment(),
     verify: async (prompt) => {
       const body = JSON.parse(prompt.user) as {
         facts: Array<{ fact_id: string; allowed_evidence: Array<{ id: string; excerpt: string }> }>;
@@ -1041,8 +1056,14 @@ describe('manual lead D1-backed dedupe', () => {
         assess: async () => {
           assessCalls += 1;
           return assessCalls === 1
-            ? { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] }
-            : assessment();
+            ? generatedAssessment({ claims: [{
+              atomic_fact: {
+                subject: 'Anthropic', predicate: 'documented',
+                object: 'Claude provenance for supported products on 2026-08-10',
+              },
+              evidence_ids: ['ev-model-invented'],
+            }] })
+            : generatedAssessment();
         },
         verify: async (prompt) => {
           verifyCalls += 1;
@@ -1063,6 +1084,7 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_generation_attempts: 2,
       assessment_last_validation_code: 'valid',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     });
   });
 
@@ -1076,7 +1098,13 @@ describe('manual lead D1-backed dedupe', () => {
         ...verifyingAdapters(),
         assess: async () => {
           assessCalls += 1;
-          return { ...assessment(), claims: [{ text: fixtureFact, evidence_ids: ['ev-model-invented'] }] };
+          return generatedAssessment({ claims: [{
+            atomic_fact: {
+              subject: 'Anthropic', predicate: 'documented',
+              object: 'Claude provenance for supported products on 2026-08-10',
+            },
+            evidence_ids: ['ev-model-invented'],
+          }] });
         },
         verify: async () => { throw new Error('unexpected_verify'); },
       },
@@ -1098,6 +1126,7 @@ describe('manual lead D1-backed dedupe', () => {
       assessment_generation_attempts: 2,
       assessment_last_validation_code: 'unknown_evidence_id',
       assessment_regeneration_trigger_code: 'unknown_evidence_id',
+      assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
     });
   });
 

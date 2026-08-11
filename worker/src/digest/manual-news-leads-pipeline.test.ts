@@ -8,7 +8,8 @@ import {
 } from './manual-news-leads-pipeline';
 import {
   applyManualLeadEvidencePolicy,
-  validateManualLeadAssessment,
+  validateManualLeadGeneratedAssessment,
+  MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
   type ManualNewsEvidence,
   type ManualLeadPriorEvent,
   type ManualNewsProcessedAssessment,
@@ -126,12 +127,25 @@ const officialEvidence: ManualNewsEvidence = {
   title: 'How Claude marks AI-generated content',
   excerpt: 'Only supported models and products are covered.',
   claims_supported: [
-    'On 2026-08-10, Anthropic documented Claude watermark provenance.',
+    'Anthropic documented Claude watermark provenance on 2026-08-10.',
   ],
   reliable: true,
 };
 
 const supportedAssessmentFact = officialEvidence.claims_supported[0];
+
+const techCrunchAlibabaEvidence: ManualNewsEvidence = {
+  id: 'ev-techcrunch-alibaba-ban',
+  url: 'https://techcrunch.com/example/alibaba-claude-code-ban',
+  source_type: 'independent_media',
+  publisher: 'TechCrunch',
+  published_at: '2026-08-11T01:00:00Z',
+  retrieved_at: 2,
+  title: 'Alibaba reportedly bans employees from using Claude Code',
+  excerpt: 'Alibaba reportedly bans employees from using Claude Code.',
+  claims_supported: ['Alibaba reportedly bans employees from using Claude Code.'],
+  reliable: true,
+};
 
 function assessed(overrides = {}) {
   return {
@@ -144,7 +158,13 @@ function assessed(overrides = {}) {
     recommendation: 'recommended',
     occurred_at: '2026-08-10',
     uncertainties: ['并非所有Claude输出均适用。'],
-    claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-official'] }],
+    claims: [{
+      atomic_fact: {
+        subject: 'Anthropic', predicate: 'documented',
+        object: 'Claude watermark provenance on 2026-08-10',
+      },
+      evidence_ids: ['ev-official'],
+    }],
     matched_event_key: null,
     ...overrides,
   };
@@ -198,7 +218,10 @@ function verifiedFromPrompt(prompt: { user: string }) {
 }
 
 function processed(overrides: Record<string, unknown> = {}): ManualNewsProcessedAssessment {
-  const core = applyManualLeadEvidencePolicy(validateManualLeadAssessment(assessed(), [officialEvidence]), [officialEvidence]);
+  const core = applyManualLeadEvidencePolicy(
+    validateManualLeadGeneratedAssessment(assessed(), [officialEvidence]),
+    [officialEvidence],
+  );
   return { ...core, duplicate_scope: null, matched_lead_id: null, ...overrides } as ManualNewsProcessedAssessment;
 }
 
@@ -239,6 +262,64 @@ describe('manual lead processing pipeline', () => {
       duplicate_scope: null, matched_lead_id: null,
     });
     expect(verifyCalls).toBe(1);
+  });
+
+  test('processes a URL-only TechCrunch Alibaba Claude Code restriction as one atomic fact row', async () => {
+    const memory = memoryStore(lead({
+      input_url: techCrunchAlibabaEvidence.url,
+      input_text: '',
+      input_type: 'url',
+    }));
+    let assessCalls = 0;
+    let verifyCalls = 0;
+    await processManualNewsLead(memory.current().id, memory.store, {
+      search: async () => [],
+      fetch: async () => documentFixture(techCrunchAlibabaEvidence.url, '<title>Alibaba reportedly bans employees from using Claude Code</title>'),
+      extract: async () => techCrunchAlibabaEvidence,
+      assess: async () => {
+        assessCalls += 1;
+        return {
+          title: 'Alibaba reportedly bans employees from using Claude Code',
+          summary: 'Alibaba reportedly bans employees from using Claude Code.',
+          event_key: 'alibaba-claude-code-employee-ban-2026-08-11',
+          event_type: 'industry_event', material_update: false, score: 88,
+          recommendation: 'recommended', occurred_at: null,
+          uncertainties: ['TechCrunch is the only currently collected source.'],
+          claims: [{
+            atomic_fact: {
+              subject: 'Alibaba', predicate: 'reportedly bans',
+              object: 'employees from using Claude Code',
+            },
+            evidence_ids: [techCrunchAlibabaEvidence.id],
+          }],
+          matched_event_key: null,
+        };
+      },
+      verify: async (prompt) => {
+        verifyCalls += 1;
+        return verifiedFromPrompt(prompt);
+      },
+    });
+
+    expect(assessCalls).toBe(1);
+    expect(verifyCalls).toBe(1);
+    expect(memory.saveCalls()).toBe(1);
+    expect(memory.current()).toMatchObject({
+      status: 'needs_review',
+      assessment: {
+        claims: [{
+          text: 'Alibaba reportedly bans employees from using Claude Code.',
+          evidence_ids: [techCrunchAlibabaEvidence.id],
+        }],
+      },
+    });
+    expect(memory.transitionPatches).toContainEqual(expect.objectContaining({
+      audit_metadata: expect.objectContaining({
+        assessment_generation_attempts: 1,
+        assessment_last_validation_code: 'valid',
+        assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
+      }),
+    }));
   });
 
   test.each([
@@ -386,7 +467,13 @@ describe('manual lead processing pipeline', () => {
         prompts.push(prompt);
         assessCalls += 1;
         return assessCalls === 1
-          ? assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] })
+          ? assessed({ claims: [{
+            atomic_fact: {
+              subject: 'Anthropic', predicate: 'documented',
+              object: 'Claude watermark provenance on 2026-08-10',
+            },
+            evidence_ids: ['ev-missing'],
+          }] })
           : assessed();
       },
       verify: async (prompt) => { verifyCalls += 1; return verifiedFromPrompt(prompt); },
@@ -410,6 +497,7 @@ describe('manual lead processing pipeline', () => {
         assessment_generation_attempts: 2,
         assessment_last_validation_code: 'valid',
         assessment_regeneration_trigger_code: 'unknown_evidence_id',
+        assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       },
     }));
   });
@@ -425,7 +513,10 @@ describe('manual lead processing pipeline', () => {
         assessCalls += 1;
         return assessCalls === 1 ? assessed({
           claims: [{
-            text: '阿里巴巴将禁止员工使用Claude Code，因为担忧数据安全，并要求改用其他产品。',
+            atomic_fact: {
+              subject: '阿里巴巴', predicate: '将禁止',
+              object: '员工使用Claude Code，因为担忧数据安全，并要求改用其他产品',
+            },
             evidence_ids: ['ev-official'],
           }],
         }) : assessed();
@@ -454,9 +545,18 @@ describe('manual lead processing pipeline', () => {
       assess: async () => {
         assessCalls += 1;
         return assessCalls === 1
-          ? assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] })
+          ? assessed({ claims: [{
+            atomic_fact: {
+              subject: 'Anthropic', predicate: 'documented',
+              object: 'Claude watermark provenance on 2026-08-10',
+            },
+            evidence_ids: ['ev-missing'],
+          }] })
           : assessed({ claims: [{
-            text: 'OpenAI发布GPT 5，并暂停GPT 6。', evidence_ids: ['ev-official'],
+            atomic_fact: {
+              subject: 'OpenAI', predicate: '发布', object: 'GPT 5，并暂停GPT 6',
+            },
+            evidence_ids: ['ev-official'],
           }] });
       },
       verify: async () => { verifyCalls += 1; throw new Error('unexpected_verify'); },
@@ -474,6 +574,7 @@ describe('manual lead processing pipeline', () => {
         assessment_generation_attempts: 2,
         assessment_last_validation_code: 'non_atomic_claim',
         assessment_regeneration_trigger_code: 'unknown_evidence_id',
+        assessment_claim_contract: MANUAL_LEAD_GENERATED_CLAIM_CONTRACT,
       },
     });
   });
@@ -517,7 +618,13 @@ describe('manual lead processing pipeline', () => {
       assess: async () => {
         assessCalls += 1;
         if (assessCalls === 1) {
-          return assessed({ claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-missing'] }] });
+          return assessed({ claims: [{
+            atomic_fact: {
+              subject: 'Anthropic', predicate: 'documented',
+              object: 'Claude watermark provenance on 2026-08-10',
+            },
+            evidence_ids: ['ev-missing'],
+          }] });
         }
         if (assessCalls === 2) throw new Error('trusted_gateway_http_503');
         return assessed();
@@ -554,17 +661,25 @@ describe('manual lead processing pipeline', () => {
       url: 'https://www.sanders.senate.gov/example.pdf',
       source_type: 'original_document' as const,
       publisher: 'Office of Senator Bernie Sanders',
+      title: '美国参议员桑德斯要求OpenAI停止AI开发',
+      excerpt: '美国参议员桑德斯要求OpenAI停止AI开发。',
+      claims_supported: ['美国参议员桑德斯要求OpenAI停止AI开发。'],
     };
     await processManualNewsLead(memory.current().id, memory.store, {
       search: async () => [],
       fetch: async () => documentFixture(letter.url, 'letter', 'pdf_text'),
       extract: async () => letter,
       assess: async () => assessed({
-        title: '美国参议员桑德斯呼吁三家AI公司暂停AI开发',
-        summary: '这是单名参议员的请求，并非有约束力的国会命令。',
+        title: '美国参议员桑德斯要求OpenAI停止AI开发',
+        summary: '美国参议员桑德斯要求OpenAI停止AI开发。',
         event_key: 'sanders-ai-pause-letter-2026-08-10',
         event_type: 'political_regulatory',
-        claims: [{ text: '这是一名参议员的请求。', evidence_ids: ['ev-letter'] }],
+        claims: [{
+          atomic_fact: {
+            subject: '美国参议员桑德斯', predicate: '要求', object: 'OpenAI停止AI开发',
+          },
+          evidence_ids: ['ev-letter'],
+        }],
       }),
       verify: async (prompt) => verifiedFromPrompt(prompt),
     });
@@ -708,7 +823,13 @@ describe('manual lead processing pipeline', () => {
       search: async () => [],
       fetch: async () => documentFixture(officialEvidence.url, 'doc'),
       extract: async () => officialEvidence,
-      assess: async () => assessed({ claims: [{ text: 'invented', evidence_ids: ['ev-missing'] }] }),
+      assess: async () => assessed({ claims: [{
+        atomic_fact: {
+          subject: 'Anthropic', predicate: 'documented',
+          object: 'Claude watermark provenance on 2026-08-10',
+        },
+        evidence_ids: ['ev-missing'],
+      }] }),
       verify: async () => { throw new Error('unexpected_verify'); },
     });
     expect(memory.current()).toMatchObject({
@@ -809,12 +930,8 @@ describe('manual lead processing pipeline', () => {
 
   test('clears a persisted assessment that fails strict evidence revalidation and regenerates it', async () => {
     const invalidPersisted = {
-      ...assessed({ claims: [{ text: '旧事实。', evidence_ids: ['ev-removed'] }] }),
-      event_type: 'product_documentation' as const,
-      recommendation: 'recommended' as const,
-      evidence_tier: 'official_primary' as const,
-      duplicate_scope: null,
-      matched_lead_id: null,
+      ...processed(),
+      claims: [{ text: '旧事实。', evidence_ids: ['ev-removed'] }],
     };
     const memory = memoryStore(lead({
       status: 'verifying', evidence: [officialEvidence], assessment: invalidPersisted as never,
@@ -1010,7 +1127,13 @@ describe('manual lead processing pipeline', () => {
   test('never classifies strict unknown evidence validation as transient from model or d1 substrings', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const invalid = assessed({
-      claims: [{ text: supportedAssessmentFact, evidence_ids: ['ev-model-d1-invented'] }],
+      claims: [{
+        atomic_fact: {
+          subject: 'Anthropic', predicate: 'documented',
+          object: 'Claude watermark provenance on 2026-08-10',
+        },
+        evidence_ids: ['ev-model-d1-invented'],
+      }],
     });
     const fetchMock = vi.fn(async () => deepSeekJsonResponse(invalid));
     vi.stubGlobal('fetch', fetchMock);
