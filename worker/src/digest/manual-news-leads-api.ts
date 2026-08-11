@@ -38,6 +38,7 @@ function processingDependenciesAvailable(env: Env): boolean {
     env.MANUAL_NEWS_LEAD_WORKFLOW
     && env.MANUAL_NEWS_RESEARCH_ORIGIN
     && env.MANUAL_NEWS_RESEARCH_TOKEN
+    && /^[a-f0-9]{64}$/.test(env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET || '')
     && env.DEEPSEEK_API_KEY
     && isManualNewsVerificationSecretConfigured(env.MANUAL_NEWS_VERIFICATION_SECRET),
   );
@@ -57,7 +58,8 @@ function requestErrorResponse(error: unknown): Response {
   const code = error instanceof Error ? error.message : 'internal_error';
   if (code === 'request_too_large') return response({ ok: false, error: code }, 413);
   if (code === 'idempotency_key_reused_with_different_payload') return response({ ok: false, error: code }, 409);
-  if (['trusted_research_service_required', 'invalid_trusted_research_origin', 'invalid_trusted_research_token', 'no_deepseek_key']
+  if (['trusted_research_service_required', 'invalid_trusted_research_origin', 'invalid_trusted_research_token',
+    'trusted_research_response_secret_required', 'no_deepseek_key']
     .includes(code)) return response({ ok: false, error: 'dependency_unavailable' }, 503);
   if (code === 'invalid_json' || code === 'invalid_review_date' || code === 'lead_input_required'
     || code.startsWith('unsafe_url:')) return response({ ok: false, error: code }, 400);

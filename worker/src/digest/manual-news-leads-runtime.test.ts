@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
 
 import {
   applyManualLeadEvidencePolicy,
@@ -34,6 +35,7 @@ function auditObject(
   sourceContentType: string,
   extraction: PublicDocument['extraction'],
   body: string,
+  protocol: { request_nonce?: string; request_timestamp?: string } = {},
 ): PublicDocument['fetch_audit'] {
   const extractedBytes = new TextEncoder().encode(body).byteLength;
   const articleText = extraction === 'article_text';
@@ -56,17 +58,41 @@ function auditObject(
     truncation: { source: false, extracted_text: false },
     parser: {
       result: 'success' as const,
-      version: articleText ? 'chromium/128.0.6613.84' : 'research-gateway-parser/1.0.0',
+      version: articleText ? 'chromium/149.0.7735.12' : 'research-gateway-parser/1.0.0',
     },
     ...(articleText ? { document: {
       title: 'Validated source title', published_at: '2026-07-04T08:00:00.000Z',
       selection: 'article' as const, content_complete: true as const,
     } } : {}),
+    protocol_version: 'article_text_v2' as const,
+    request_nonce: protocol.request_nonce || '22'.repeat(16),
+    request_timestamp: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
+    extracted_at: protocol.request_timestamp || '2026-08-12T00:00:00.000Z',
+    final_url: url,
+    body_sha256: createHash('sha256').update(body).digest('hex'),
+    response_hmac: '33'.repeat(32),
   };
 }
 
-function audit(url: string, sourceContentType: string, extraction: PublicDocument['extraction'], body: string): string {
-  return encodeURIComponent(JSON.stringify(auditObject(url, sourceContentType, extraction, body)));
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+function signedAudit(
+  url: string,
+  sourceContentType: string,
+  extraction: PublicDocument['extraction'],
+  body: string,
+  protocol: { request_nonce: string; request_timestamp: string },
+): string {
+  const auditValue = auditObject(url, sourceContentType, extraction, body, protocol);
+  const { response_hmac: _placeholder, ...unsigned } = auditValue;
+  const response_hmac = createHmac('sha256', Buffer.from('11'.repeat(32), 'hex'))
+    .update(canonicalJson(unsigned)).digest('hex');
+  return encodeURIComponent(JSON.stringify({ ...unsigned, response_hmac }));
 }
 
 function documentFixture(
@@ -150,7 +176,7 @@ function supportedFactResult(factId: string, evidenceId: string, quote: string) 
   };
 }
 
-async function createAlibabaCurrentProof(
+async function createAlibabaProof(
   evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>,
 ) {
   const generated = validateManualLeadGeneratedAssessment(alibabaGeneratedAssessment(evidence.id), [evidence]);
@@ -183,6 +209,13 @@ async function createAlibabaCurrentProof(
   };
   const secret = 'a'.repeat(64);
   const proof = await createManualLeadVerificationProof(proofInput, secret);
+  return { proofInput, proof, secret };
+}
+
+async function createAlibabaCurrentProof(
+  evidence: NonNullable<Awaited<ReturnType<typeof extractManualNewsEvidence>>>,
+) {
+  const { proofInput, proof, secret } = await createAlibabaProof(evidence);
   return isCurrentManualLeadVerification(proofInput, proof, secret);
 }
 
@@ -381,11 +414,27 @@ describe('manual lead evidence extraction', () => {
       retrieved_at: 1234,
       fetch_audit: {
         extraction: 'article_text',
-        parser: { version: 'chromium/128.0.6613.84' },
+        parser: { version: 'chromium/149.0.7735.12' },
         document: { content_complete: true },
       },
     });
     await expect(createAlibabaCurrentProof(evidence!)).resolves.toBe(true);
+  });
+
+  test('v9 proof binds authenticated v2 body and response signature audit fields', async () => {
+    const evidence = await extractManualNewsEvidence(documentFixture(
+      'https://techcrunch.com/2026/07/04/alibaba-claude-code/', alibabaSupport,
+    ));
+    const { proofInput, proof, secret } = await createAlibabaProof(evidence!);
+    const tampered = structuredClone(proofInput);
+    const tamperedEvidence = tampered.evidence[0]!;
+    const tamperedAudit = tamperedEvidence.fetch_audit!;
+    const originalAudit = proofInput.evidence[0]!.fetch_audit!;
+    tamperedAudit.response_hmac = '44'.repeat(32);
+    await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
+    tamperedAudit.response_hmac = originalAudit.response_hmac;
+    tamperedAudit.body_sha256 = '55'.repeat(32);
+    await expect(isCurrentManualLeadVerification(tampered, proof, secret)).resolves.toBe(false);
   });
 
   test('does not truncate a complete trusted article to the former 3000-character prefix', async () => {
@@ -424,6 +473,18 @@ describe('manual lead evidence extraction', () => {
     );
     incomplete.content_complete = undefined;
     expect(await extractManualNewsEvidence(incomplete)).toBeNull();
+
+    const legacyV1 = documentFixture(
+      'https://www.axios.com/v1', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    legacyV1.fetch_audit.protocol_version = undefined;
+    expect(await extractManualNewsEvidence(legacyV1)).toBeNull();
+
+    const forgedDigest = documentFixture(
+      'https://www.axios.com/forged', alibabaSupport, 'article_text', { title: 'Report' },
+    );
+    forgedDigest.fetch_audit.body_sha256 = '00'.repeat(32);
+    expect(await extractManualNewsEvidence(forgedDigest)).toBeNull();
 
     for (const body of [
       `${alibabaSupport}\u200b hidden blocker`,
@@ -507,6 +568,7 @@ describe('manual lead evidence extraction', () => {
       DB: db,
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => new Response(JSON.stringify({ results: [{
         url: 'https://www.axios.com/report', title: 'Independent report', snippet: 'Independent evidence.',
@@ -527,6 +589,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { throw new TypeError('D1 receiver mismatch'); } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, { researchFetcher });
 
     await expect(adapters.search({ date: '2026-08-11', text: 'Anthropic watermark', note: '' }))
@@ -543,6 +606,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'secret-test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => {
         throw new TypeError('Illegal invocation for Bearer secret-test-token');
@@ -570,6 +634,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => {
         throw new Error(
@@ -609,6 +674,7 @@ describe('manual lead evidence extraction', () => {
       DB: { prepare() { return statement; } },
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, {
       researchFetcher: async () => { throw new Error(unsafeMessage); },
     });
@@ -634,7 +700,10 @@ describe('manual lead evidence extraction', () => {
 
   test('Bernie letter uses bounded trusted PDF text conversion and still needs an independent report', async () => {
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const target = JSON.parse(String(init?.body || '{}')).url as string;
+      const request = JSON.parse(String(init?.body || '{}')) as {
+        url: string; request_nonce: string; request_timestamp: string;
+      };
+      const target = request.url;
       const pdf = target.endsWith('.pdf');
       const body = pdf
         ? 'Senator Bernie Sanders asks OpenAI, Anthropic, and Meta leaders to pause AI development.'
@@ -642,8 +711,8 @@ describe('manual lead evidence extraction', () => {
       return new Response(body, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'X-AIFeeds-Fetch-Audit': audit(
-            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'article_text', body,
+          'X-AIFeeds-Fetch-Audit': signedAudit(
+            target, pdf ? 'application/pdf' : 'text/html', pdf ? 'pdf_text' : 'article_text', body, request,
           ),
         },
       });
@@ -652,6 +721,7 @@ describe('manual lead evidence extraction', () => {
       DB: {} as never,
       MANUAL_NEWS_RESEARCH_ORIGIN: 'https://research-gateway.example',
       MANUAL_NEWS_RESEARCH_TOKEN: 'test-token',
+      MANUAL_NEWS_RESEARCH_RESPONSE_SECRET: '11'.repeat(32),
     } as never, { researchFetcher: fetcher });
     const letter = await adapters.extract(await adapters.fetch('https://www.sanders.senate.gov/letter.pdf'));
     const report = await adapters.extract(await adapters.fetch('https://www.axios.com/report'));

@@ -138,7 +138,7 @@ function normalizedHintPublishedAt(value: string | null | undefined): string | n
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
-function completeTrustedArticle(document: PublicDocument): boolean {
+async function completeTrustedArticle(document: PublicDocument): Promise<boolean> {
   if (document.extraction !== 'article_text'
     || !['text/html', 'application/xhtml+xml'].includes(document.content_type)
     || document.content_complete !== true
@@ -150,7 +150,15 @@ function completeTrustedArticle(document: PublicDocument): boolean {
     || document.fetch_audit.document.selection !== document.selection
     || document.fetch_audit.document.content_complete !== true
     || document.fetch_audit.extraction !== 'article_text'
-    || !/^chromium\/\d+(?:\.\d+){0,3}$/.test(document.fetch_audit.parser.version)
+    || document.fetch_audit.protocol_version !== 'article_text_v2'
+    || document.fetch_audit.final_url !== document.url
+    || !/^(?:[a-f0-9]{32,128}|[A-Za-z0-9_-]{22,171})$/.test(document.fetch_audit.request_nonce || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.request_timestamp || '')
+    || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(document.fetch_audit.extracted_at || '')
+    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.body_sha256 || '')
+    || !/^[a-f0-9]{64}$/.test(document.fetch_audit.response_hmac || '')
+    || !/^chromium\/(\d+)\.\d+\.\d+\.\d+$/.test(document.fetch_audit.parser.version)
+    || Number(/^chromium\/(\d+)/.exec(document.fetch_audit.parser.version)?.[1] || 0) < 149
     || document.fetch_audit.truncation.source || document.fetch_audit.truncation.extracted_text) return false;
   const bytes = new TextEncoder().encode(document.body).byteLength;
   const characters = Array.from(document.body);
@@ -159,8 +167,11 @@ function completeTrustedArticle(document: PublicDocument): boolean {
     || characters.length > MANUAL_NEWS_ARTICLE_MAX_CHARACTERS
     || document.fetch_audit.actual_sizes.extracted_text_bytes !== bytes
     || document.fetch_audit.actual_sizes.extracted_text_characters !== characters.length) return false;
-  return !characters.some((character) => /\p{Default_Ignorable_Code_Point}/u.test(character)
-    && character !== '\u200c' && character !== '\u200d' && !/^[\ufe00-\ufe0f]$/u.test(character));
+  if (characters.some((character) => /\p{Default_Ignorable_Code_Point}/u.test(character)
+    && character !== '\u200c' && character !== '\u200d' && !/^[\ufe00-\ufe0f]$/u.test(character))) return false;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(document.body));
+  const bodyHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return bodyHash === document.fetch_audit.body_sha256;
 }
 
 async function evidenceId(url: string): Promise<string> {
@@ -176,7 +187,7 @@ export async function extractManualNewsEvidence(
 ): Promise<ManualNewsEvidence | null> {
   const identity = sourceIdentity(document.url);
   if (document.extraction === 'html') return null;
-  if (document.extraction === 'article_text' && !completeTrustedArticle(document)) return null;
+  if (document.extraction === 'article_text' && !await completeTrustedArticle(document)) return null;
   const articleText = document.extraction === 'article_text';
   const title = articleText ? document.title! : compact(hint?.title || '', 220);
   const excerpt = articleText ? document.body : compact(document.body, 3_000);
@@ -222,10 +233,12 @@ async function searchExistingNews(env: Env, input: { text: string }): Promise<Ma
 }
 
 function researchService(env: Env, fetcher?: TrustedGatewayFetcher): TrustedResearchService | undefined {
-  if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN) return undefined;
+  if (!env.MANUAL_NEWS_RESEARCH_ORIGIN || !env.MANUAL_NEWS_RESEARCH_TOKEN
+    || !env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET) return undefined;
   return {
     origin: env.MANUAL_NEWS_RESEARCH_ORIGIN,
     token: env.MANUAL_NEWS_RESEARCH_TOKEN,
+    responseSecret: env.MANUAL_NEWS_RESEARCH_RESPONSE_SECRET,
     ...(fetcher ? { fetcher } : {}),
   };
 }

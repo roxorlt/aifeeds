@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
 
 import {
   fetchPublicDocument,
@@ -8,8 +9,23 @@ import {
   type TrustedResearchService,
 } from './safe-url-fetch';
 
-function service(fetcher: typeof fetch): TrustedResearchService {
-  return { origin: 'https://research-gateway.example', token: 'test-token', fetcher };
+const responseSecret = '11'.repeat(32);
+const requestNonce = '22'.repeat(16);
+const protocolNow = Date.parse('2026-08-12T00:00:00.000Z');
+const requestTimestamp = new Date(protocolNow).toISOString();
+
+function service(fetcher: typeof fetch, overrides: Partial<TrustedResearchService> = {}): TrustedResearchService {
+  return {
+    origin: 'https://research-gateway.example', token: 'test-token', responseSecret, fetcher,
+    protocolNow: () => protocolNow, nonceFactory: () => requestNonce, ...overrides,
+  };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
 }
 
 const documentLimits = {
@@ -38,12 +54,23 @@ function fetchAudit(input: {
     selection: 'article' | 'main';
     content_complete: boolean;
   };
+  protocol?: Partial<{
+    protocol_version: string;
+    request_nonce: string;
+    request_timestamp: string;
+    extracted_at: string;
+    final_url: string;
+    body_sha256: string;
+    response_hmac: string;
+  }>;
+  body?: string;
 }): string {
   const sourceContentType = input.source_content_type || 'text/html';
   const extraction = input.extraction || (sourceContentType === 'text/html'
     || sourceContentType === 'application/xhtml+xml' ? 'article_text' : 'text');
   const articleText = extraction === 'article_text';
-  return encodeURIComponent(JSON.stringify({
+  const body = input.body || '';
+  const unsigned = {
     hops: input.hops,
     source_content_type: sourceContentType,
     extraction,
@@ -53,13 +80,25 @@ function fetchAudit(input: {
     actual_sizes: input.actual_sizes || { source_bytes: 12, extracted_text_bytes: 12, extracted_text_characters: 12 },
     truncation: input.truncation || { source: false, extracted_text: false },
     parser: input.parser || {
-      result: 'success', version: articleText ? 'chromium/128.0.6613.84' : 'research-gateway-parser/1.0.0',
+      result: 'success', version: articleText ? 'chromium/149.0.7735.12' : 'research-gateway-parser/1.0.0',
     },
     ...(articleText ? { document: input.document || {
       title: 'Validated source title', published_at: '2026-07-04T08:00:00.000Z',
       selection: 'article', content_complete: true,
     } } : {}),
-  }));
+    protocol_version: input.protocol?.protocol_version || 'article_text_v2',
+    request_nonce: input.protocol?.request_nonce || requestNonce,
+    request_timestamp: input.protocol?.request_timestamp || requestTimestamp,
+    extracted_at: input.protocol?.extracted_at || requestTimestamp,
+    final_url: input.protocol?.final_url || input.hops.at(-1)!.url,
+    body_sha256: input.protocol?.body_sha256 || createHash('sha256').update(body).digest('hex'),
+  };
+  const audit = {
+    ...unsigned,
+    response_hmac: input.protocol?.response_hmac
+      || createHmac('sha256', Buffer.from(responseSecret, 'hex')).update(canonicalJson(unsigned)).digest('hex'),
+  };
+  return encodeURIComponent(JSON.stringify(audit));
 }
 
 function gatewayResponse(body: BodyInit | null, input: Parameters<typeof fetchAudit>[0], headers: Record<string, string> = {}) {
@@ -69,6 +108,7 @@ function gatewayResponse(body: BodyInit | null, input: Parameters<typeof fetchAu
     ? input
     : {
       ...input,
+      body: bodyText,
       actual_sizes: {
         source_bytes: bodyBytes!,
         extracted_text_bytes: bodyBytes!,
@@ -78,7 +118,7 @@ function gatewayResponse(body: BodyInit | null, input: Parameters<typeof fetchAu
   return new Response(body, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'X-AIFeeds-Fetch-Audit': fetchAudit(auditInput),
+      'X-AIFeeds-Fetch-Audit': fetchAudit({ ...auditInput, body: bodyText || '' }),
       ...headers,
     },
   });
@@ -174,11 +214,13 @@ describe('trusted manual-news research boundary', () => {
       url: 'https://example.com/story',
       limits: documentLimits,
       max_redirects: 3,
-      extraction_mode: 'article_text_v1',
+      extraction_mode: 'article_text_v2',
+      request_nonce: requestNonce,
+      request_timestamp: requestTimestamp,
     });
   });
 
-  test('requests and exposes a complete Chromium article_text_v1 document contract', async () => {
+  test('requests and exposes a signed complete Chromium article_text_v2 document contract', async () => {
     const body = 'Alibaba reportedly bans employees from using Claude Code. Full article context remains intact.';
     const fetcher = vi.fn(async () => gatewayResponse(body, {
       hops: [publicHop()],
@@ -203,7 +245,10 @@ describe('trusted manual-news research boundary', () => {
       fetch_audit: {
         extraction: 'article_text',
         applied_limits: articleAppliedLimits,
-        parser: { result: 'success', version: 'chromium/128.0.6613.84' },
+        parser: { result: 'success', version: 'chromium/149.0.7735.12' },
+        protocol_version: 'article_text_v2',
+        request_nonce: requestNonce,
+        final_url: 'https://example.com/story',
       },
     });
   });
@@ -226,6 +271,48 @@ describe('trusted manual-news research boundary', () => {
         }) as never),
       })).rejects.toThrow(/unsafe_gateway_audit/);
     }
+  });
+
+  test('fails closed before outbound document fetch when the response HMAC dependency is absent or malformed', async () => {
+    const fetcher = vi.fn();
+    for (const responseSecretValue of [undefined, '', 'aa', 'AA'.repeat(32)]) {
+      await expect(fetchPublicDocument('https://example.com/story', {
+        service: service(fetcher as typeof fetch, { responseSecret: responseSecretValue }),
+      })).rejects.toThrow(/trusted_research_response_secret_required/);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  test('rejects v2 nonce, timestamp, final URL, body digest, HMAC, and Chromium version tampering', async () => {
+    const body = 'Alibaba reportedly bans employees from using Claude Code.';
+    const cases: Array<{ protocol?: Parameters<typeof fetchAudit>[0]['protocol']; parser?: { result: 'success'; version: string } }> = [
+      { protocol: { request_nonce: '33'.repeat(16) } },
+      { protocol: { request_timestamp: '2026-08-11T23:59:59.000Z' } },
+      { protocol: { extracted_at: '2026-08-11T23:50:00.000Z' } },
+      { protocol: { extracted_at: '2026-08-12T00:01:00.000Z' } },
+      { protocol: { final_url: 'https://example.com/other' } },
+      { protocol: { body_sha256: '00'.repeat(32) } },
+      { protocol: { response_hmac: '00'.repeat(32) } },
+      { protocol: { protocol_version: 'article_text_v1' } },
+      { parser: { result: 'success', version: 'chromium/1.0.0.0' } },
+      { parser: { result: 'success', version: 'chromium/149' } },
+    ];
+    for (const mutation of cases) {
+      await expect(fetchPublicDocument('https://example.com/story', {
+        service: service(async () => gatewayResponse(body, {
+          hops: [publicHop()], ...mutation,
+        }) as never),
+      })).rejects.toThrow(/unsafe_gateway_audit/);
+    }
+  });
+
+  test('rejects a replayed v2 response bound to a prior request nonce', async () => {
+    const body = 'Complete article text.';
+    await expect(fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, {
+        hops: [publicHop()], protocol: { request_nonce: requestNonce },
+      }) as never, { nonceFactory: () => '44'.repeat(16) }),
+    })).rejects.toThrow(/unsafe_gateway_audit:protocol/);
   });
 
   test('rejects unsafe invisible or over-cap article text instead of accepting a truncated prefix', async () => {
@@ -415,6 +502,21 @@ describe('trusted manual-news research boundary', () => {
         source_content_type: 'application/pdf', extraction: 'binary',
       }) as never),
     })).rejects.toThrow(/invalid_pdf_extraction/);
+  });
+
+  test.each([
+    ['text/plain', 'text', 'Plain trusted document.'],
+    ['application/json', 'json', '{"ok":true}'],
+  ])('keeps signed v2 envelope verification for non-HTML %s documents', async (sourceType, extraction, body) => {
+    const document = await fetchPublicDocument('https://example.com/story', {
+      service: service(async () => gatewayResponse(body, {
+        hops: [publicHop()], source_content_type: sourceType, extraction,
+      }) as never),
+    });
+    expect(document).toMatchObject({
+      content_type: sourceType, extraction, body,
+      fetch_audit: { protocol_version: 'article_text_v2', body_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+    });
   });
 
   test('uses an edge-supported manual redirect mode and rejects gateway redirects without following them', async () => {
