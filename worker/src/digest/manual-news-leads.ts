@@ -945,7 +945,7 @@ const BILINGUAL_PARTICIPANT_PATTERNS: ReadonlyArray<readonly [
   ManualBilingualParticipantRole,
   RegExp,
 ]> = [
-  ['employees', /(?:员工|雇员|职员)|\b(?:employees?|staff|workers?)\b/iu],
+  ['employees', /(?:员工|雇员|(?<!全)职员)|\b(?:employees?|staff|workers?)\b/iu],
   ['customers', /(?:客户)|\b(?:customers?|clients?)\b/iu],
   ['users', /(?:用户)|\busers?\b/iu],
   ['contractors', /(?:承包商|合同工)|\bcontractors?\b/iu],
@@ -1275,8 +1275,16 @@ const BILINGUAL_QUANTIFIER_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:没有任何|无任何)|\b(?:no|none)\b/iu,
 ];
 const BILINGUAL_SCOPE_PATTERNS: ReadonlyArray<RegExp> = [
-  /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|some|partial(?:ly)?|limited|supported)\b/iu,
+  /(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|solely|some|partial(?:ly)?|limited|restricted|supported)\b/iu,
   /(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/iu,
+];
+const BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE: ReadonlyArray<readonly [string, RegExp]> = [
+  ['employment:full_time', /(?:全职)|\bfull[ -]?time\b/iu],
+  ['employment:part_time', /(?:兼职)|\bpart[ -]?time\b/iu],
+];
+const PARTICIPANT_SCOPE_TARGET_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:(?:appl(?:y|ies|ied))\s+(?:only|solely)\s+to|(?:only|solely)\s+appl(?:y|ies|ied)\s+to|(?:is|are|was|were)\s+(?:limited|restricted)\s+to|(?:limited|restricted)\s+to|covers?\s+(?:only|solely))\s+(.+?)[.!?]?$/iu,
+  /(?:仅限于?|只限于?|仅适用于?|只适用于?|部分适用于?|限于)\s*(.+?)[。！？]?$/u,
 ];
 const BILINGUAL_OBJECT_POLARITY_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:无法|不能|不可|避免)|\b(?:unable\s+to|cannot|can['’]t|avoid(?:s|ed|ing)?)\b/iu,
@@ -1328,6 +1336,73 @@ function consumeAdjacentChineseFunctionWords(mask: boolean[], value: string): vo
   }
 }
 
+function participantScopeTarget(value: string): string | null {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  for (const pattern of PARTICIPANT_SCOPE_TARGET_PATTERNS) {
+    const match = pattern.exec(normalized);
+    if (match?.[1]) return match[1].trim();
+  }
+  const participantSpans = BILINGUAL_PARTICIPANT_PATTERNS.flatMap(([, pattern]) =>
+    regexSemanticSpans(normalized, pattern, 'participant'));
+  if (participantSpans.length !== 1) return null;
+  const relationSpans = BILINGUAL_OBJECT_RELATION_PATTERNS.flatMap(([, pattern]) =>
+    regexSemanticSpans(normalized, pattern, 'relation'))
+    .filter((span) => span.start >= participantSpans[0].end)
+    .sort((left, right) => left.start - right.start);
+  const end = relationSpans[0]?.start ?? normalized.length;
+  return normalized.slice(0, end)
+    .replace(/\b(?:from|to)\s*$/iu, '')
+    .replace(/(?:以便|用于|从而)\s*$/u, '')
+    .trim();
+}
+
+interface ManualParticipantScopeSlots {
+  participant_roles: ManualBilingualParticipantRole[];
+  participant_quantifier: ManualBilingualQuantifier;
+  qualifiers: string[];
+  regions: string[];
+  residue: string;
+}
+
+function participantScopeSlots(value: string): ManualParticipantScopeSlots | null {
+  const target = participantScopeTarget(value);
+  if (!target) return null;
+  const participantRoles = bilingualParticipantRoles(target);
+  if (participantRoles.length !== 1) return null;
+  const mask = new Array<boolean>(target.length).fill(false);
+  for (const patterns of [
+    BILINGUAL_PARTICIPANT_PATTERNS.map(([, pattern]) => pattern),
+    BILINGUAL_QUANTIFIER_PATTERNS,
+    BILINGUAL_SCOPE_PATTERNS,
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.map(([, pattern]) => pattern),
+  ]) {
+    for (const pattern of patterns) consumeSemanticPattern(mask, target, pattern);
+  }
+  for (const [, aliases] of FACT_REGION_ALIASES) {
+    for (const alias of aliases) consumeSemanticPattern(mask, target, semanticAliasPattern(alias));
+  }
+  for (const span of relativeFactTimeSpans(target)) consumeSemanticSpan(mask, span);
+  for (const pattern of ABSOLUTE_FACT_TIME_PATTERNS) consumeSemanticPattern(mask, target, pattern);
+  for (const pattern of [
+    /\b(?:in|within|inside|on|at|for|of|the|a|an)\b/giu,
+  ]) consumeSemanticPattern(mask, target, pattern);
+  consumeAdjacentChineseFunctionWords(mask, target);
+  const residue = target.split('').map((character, index) => mask[index] ? ' ' : character)
+    .join('')
+    .toLocaleLowerCase('en-US')
+    .replace(/\b(department|division|team|device|project)s\b/gu, '$1')
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  return {
+    participant_roles: participantRoles,
+    participant_quantifier: bilingualParticipantQuantifier(target),
+    qualifiers: BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE
+      .filter(([, pattern]) => pattern.test(target))
+      .map(([qualifier]) => qualifier),
+    regions: bilingualFactRegions(target),
+    residue,
+  };
+}
+
 function assertConsumedPredicateSemantics(
   value: string,
   occurrence: FactActionOccurrence,
@@ -1344,6 +1419,7 @@ function assertConsumedObjectSemantics(value: string): void {
     BILINGUAL_FACT_CONCEPTS.map(([, pattern]) => pattern),
     BILINGUAL_QUANTIFIER_PATTERNS,
     BILINGUAL_SCOPE_PATTERNS,
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.map(([, pattern]) => pattern),
     BILINGUAL_OBJECT_POLARITY_PATTERNS,
     BILINGUAL_ATTRIBUTION_PATTERNS.map(([, pattern]) => pattern),
     BILINGUAL_EPISTEMIC_PATTERNS.map(([, pattern]) => pattern),
@@ -1400,6 +1476,8 @@ function bilingualSemanticSlots(fact: ManualAtomicFactSlots): ManualBilingualSem
   if (reason.present && !reason.canonical) throw new Error('invalid_claim_object');
   const participantRoles = bilingualParticipantRoles(reason.residual);
   if (participantRoles.length > 1) throw new Error('invalid_claim_object');
+  const participantScope = participantRoles.length ? participantScopeSlots(reason.residual) : null;
+  if (participantRoles.length && !participantScope) throw new Error('invalid_claim_object');
   const objectRelations = canonicalObjectRelations(reason.residual);
   const targetEntities = [...registeredEntityIdentities(reason.residual)].sort();
   const targetQualifiers = bilingualTargetQualifiers(reason.residual);
@@ -1474,6 +1552,13 @@ function semanticProjectionContract(
     || canonicalJson(sourceSlots.relative_times) !== canonicalJson(projectionSlots.relative_times)) {
     return 'invalid_editorial_projection_time';
   }
+  const sourceParticipantScope = sourceSlots.participant_roles.length
+    ? participantScopeSlots(canonicalFactReason(source.object).residual) : null;
+  const projectionParticipantScope = projectionSlots.participant_roles.length
+    ? participantScopeSlots(canonicalFactReason(projection.object).residual) : null;
+  if (canonicalJson(sourceParticipantScope) !== canonicalJson(projectionParticipantScope)) {
+    return 'invalid_editorial_projection_object';
+  }
   if (sourceSlots.reason !== projectionSlots.reason
     || sourceSlots.participant_quantifier !== projectionSlots.participant_quantifier
     || sourceSlots.scope !== projectionSlots.scope
@@ -1525,8 +1610,14 @@ function projectionContractError(
   if (canonicalJson([...sourceEntities].sort()) !== canonicalJson([...projectionEntities].sort())) {
     return 'invalid_editorial_projection_object';
   }
-  const sourceAnchors = highConfidenceLeadAnchors(source.object).map((item) => item.toLowerCase()).sort();
-  const projectionAnchors = highConfidenceLeadAnchors(projection.object).map((item) => item.toLowerCase()).sort();
+  const withoutParticipantEmploymentScope = (value: string) =>
+    BILINGUAL_PARTICIPANT_EMPLOYMENT_SCOPE.reduce(
+      (result, [, pattern]) => result.replace(pattern, ' '), value,
+    );
+  const sourceAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(source.object))
+    .map((item) => item.toLowerCase()).sort();
+  const projectionAnchors = highConfidenceLeadAnchors(withoutParticipantEmploymentScope(projection.object))
+    .map((item) => item.toLowerCase()).sort();
   if (canonicalJson(sourceAnchors) !== canonicalJson(projectionAnchors)) {
     return 'invalid_editorial_projection_object';
   }
@@ -1589,6 +1680,7 @@ function validatedProjectionSentence(
 }
 
 type DeterministicEvidenceRelation = 'supports' | 'conflicts' | 'updates' | 'uncertain' | 'unrelated';
+type DeterministicEvidenceClauseRelation = DeterministicEvidenceRelation | 'blocking_uncertain';
 
 interface AtomicEvidenceClause {
   text: string;
@@ -1925,6 +2017,23 @@ function sameCoreProductAndSubject(fact: ManualSourceAtomicFact, clause: string)
   return anchors.length > 0 && anchors.every((anchor) => exactStructuredAnchorPresent(anchor, clause));
 }
 
+function sameCoreEventBlockingUncertainty(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+  explicitSignal = false,
+): boolean {
+  if (!sameCoreProductAndSubject(fact, clause)) return false;
+  const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
+  const actualActions = factActionOccurrences(clause);
+  const sameAction = expectedActions.length === 1
+    && actualActions.some((action) => action.action === expectedActions[0].action);
+  if (!sameAction && !explicitSignal) return false;
+  const expectedParticipants = bilingualParticipantRoles(fact.atomic_fact.object);
+  const actualParticipants = bilingualParticipantRoles(clause);
+  return canonicalJson(expectedParticipants) === canonicalJson(actualParticipants)
+    || (explicitSignal && actualParticipants.length === 0);
+}
+
 function mentionsCoreSubjectAndProduct(fact: ManualSourceAtomicFact, clause: string): boolean {
   const expectedSubject = canonicalSubjectIdentity(fact.atomic_fact.subject)
     || canonicalEntityRoleKey(fact.atomic_fact.subject);
@@ -1998,7 +2107,7 @@ function structurallyMatchesFactIgnoringAssertionStatus(
     && sameStructuredEventTarget(fact, clause);
 }
 
-const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限|只适用|仅适用|部分适用|范围缩小|限于)|\b(?:only applies|limited to|restricted to|scope was narrowed)\b/iu;
+const EVIDENCE_RELATION_SCOPE_SIGNAL = /(?:仅限于?|只限于?|仅适用于?|只适用于?|部分适用于?|范围缩小|限于)|\b(?:(?:appl(?:y|ies|ied))\s+(?:only|solely)\s+to|(?:only|solely)\s+appl(?:y|ies|ied)\s+to|(?:is|are|was|were)\s+(?:limited|restricted)\s+to|(?:limited|restricted)\s+to|covers?\s+(?:only|solely)|scope\s+was\s+narrowed)\b/iu;
 const EVIDENCE_RELATION_STATUS_SIGNAL = /(?:恢复|取消|撤回|收回|撤销|反转|改为|随后更新|后来更新|状态变化)|\b(?:revers(?:e|es|ed)|updated|resum(?:e|es|ed)|withdrawn|withdrew|withdraws?|retract(?:s|ed)?|rescind(?:s|ed)?|cancelled|canceled|subsequently changed)\b/iu;
 const EVIDENCE_RELATION_DENIAL_SIGNAL = /(?:否认|驳斥|反驳|质疑|拒绝承认|不实|虚假|误导)|\b(?:denial|den(?:y|ies|ied|ying)|refut(?:e|es|ed|ing)|disput(?:e|es|ed|ing)|reject(?:s|ed|ing)?\s+(?:the\s+)?reports?|call(?:s|ed|ing)?\s+(?:the\s+)?reports?\s+.*\s+(?:false|misleading))\b/iu;
 
@@ -2013,6 +2122,26 @@ function relationClauseHasUnexpectedSignal(
   ];
   return pairs.some(([clausePattern, factPattern]) =>
     clausePattern.test(clause) && !factPattern.test(fact.text));
+}
+
+function sameCoreScopeRelation(
+  fact: ManualSourceAtomicFact,
+  clause: string,
+): 'same' | 'conflict' | 'unresolved' {
+  const expected = participantScopeSlots(fact.atomic_fact.object);
+  const actual = participantScopeSlots(clause);
+  if (!actual) return expected ? 'unresolved' : 'same';
+  if (!expected) return 'conflict';
+  if (canonicalJson(expected.participant_roles) !== canonicalJson(actual.participant_roles)
+    || expected.participant_quantifier !== actual.participant_quantifier
+    || canonicalJson(expected.qualifiers) !== canonicalJson(actual.qualifiers)
+    || canonicalJson(expected.regions) !== canonicalJson(actual.regions)
+    || expected.residue !== actual.residue) return 'conflict';
+  const expectedScope = dominantFactScope(fact.atomic_fact.object);
+  const actualScope = dominantFactScope(clause);
+  return expectedScope !== null && actualScope !== null && expectedScope !== actualScope
+    ? 'conflict'
+    : 'same';
 }
 
 function relationSupportFallbackSafe(
@@ -2036,7 +2165,7 @@ function evidenceClauseRelation(
   evidence: Pick<ManualNewsEvidence, 'source_type' | 'reliable' | 'published_at'>,
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
-): DeterministicEvidenceRelation {
+): DeterministicEvidenceClauseRelation {
   if (leadingControllerIdentity(clause.text).ambiguous) return 'uncertain';
   let relatedButUnresolved = false;
   const trustedRelationSource = evidence.reliable && evidence.source_type !== 'other';
@@ -2046,6 +2175,7 @@ function evidenceClauseRelation(
     const productTargetMatches = sameCoreProductAndSubject(fact, clause.text);
     const questionFramed = isQuestionFramedEvidenceClause(clause.text);
     if (questionFramed) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       if (targetMatches || productTargetMatches || mentionsCoreSubjectAndProduct(fact, clause.text)) {
         relatedButUnresolved = true;
       }
@@ -2054,25 +2184,30 @@ function evidenceClauseRelation(
     const exactError = structuredFactUnitVerificationError(fact.text, clause.text);
     if (exactError === null) {
       if (!relationSupportFallbackSafe(fact, clause)) {
+        if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
         relatedButUnresolved = true;
         continue;
       }
-      return evidence.reliable ? 'supports' : 'uncertain';
+      return evidence.reliable ? 'supports' : 'blocking_uncertain';
     }
     if (targetMatches && exactError === 'fact_verification_polarity_mismatch') {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
     }
     const denial = directDenialEmbeddedClause(clause.text);
     if (denial && denialTargetsCoreEvent(fact, denial)) {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
     }
     const scopeChange = EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && scopeChange) {
-      return trustedRelationSource ? 'conflicts' : 'uncertain';
+      const scopeRelation = sameCoreScopeRelation(fact, clause.text);
+      if (scopeRelation === 'conflict') {
+        return trustedRelationSource ? 'conflicts' : 'blocking_uncertain';
+      }
+      if (scopeRelation === 'unresolved') return 'blocking_uncertain';
     }
     const statusChange = EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text);
     if ((targetMatches || productTargetMatches) && statusChange) {
-      if (!trustedRelationSource) return 'uncertain';
+      if (!trustedRelationSource) return 'blocking_uncertain';
       const citedTimes = sourceFacts.flatMap((sourceFact) => sourceFact.evidence_ids)
         .map((id) => evidenceById.get(id)?.published_at || '')
         .map((value) => Date.parse(value))
@@ -2085,7 +2220,9 @@ function evidenceClauseRelation(
     }
     const unresolvedDenial = /(?:未(?:能)?(?:确认|证实|验证)|无法(?:确认|证实|验证)|拒绝(?:确认|证实|验证)|\b(?:would|could|did|can)\s+not\s+(?:confirm|verify|validate|substantiate)|\b(?:cannot|can't|won't)\s+(?:confirm|verify|validate|substantiate))/iu.test(clause.text);
     if ((targetMatches || productTargetMatches) && unresolvedDenial) {
-      return 'uncertain';
+      return sameCoreEventBlockingUncertainty(fact, clause.text, true)
+        ? 'blocking_uncertain'
+        : 'uncertain';
     }
     const expectedActions = factActionOccurrences(fact.atomic_fact.predicate);
     const actualActions = factActionOccurrences(clause.text);
@@ -2097,25 +2234,43 @@ function evidenceClauseRelation(
       return 'supports';
     }
     if (!clause.reliable) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       if (targetMatches || productTargetMatches) relatedButUnresolved = true;
       continue;
     }
     if (targetMatches || productTargetMatches || (subjectMatches && highConfidenceLeadAnchors(fact.atomic_fact.object)
       .some((anchor) => exactStructuredAnchorPresent(anchor, clause.text)))) {
+      if (sameCoreEventBlockingUncertainty(fact, clause.text)) return 'blocking_uncertain';
       relatedButUnresolved = true;
     }
   }
+  if (clause.linked_addition
+    && (EVIDENCE_RELATION_DENIAL_SIGNAL.test(clause.text)
+      || EVIDENCE_RELATION_STATUS_SIGNAL.test(clause.text)
+      || EVIDENCE_RELATION_SCOPE_SIGNAL.test(clause.text))
+    && !leadingControllerIdentity(clause.text).identity) return 'blocking_uncertain';
   if (clause.linked_addition) return 'uncertain';
   return relatedButUnresolved ? 'uncertain' : 'unrelated';
 }
 
 function aggregateEvidenceRelations(
-  relations: readonly DeterministicEvidenceRelation[],
+  relations: readonly DeterministicEvidenceClauseRelation[],
 ): DeterministicEvidenceRelation {
   if (relations.includes('updates')) return 'updates';
   if (relations.includes('conflicts')) return 'conflicts';
-  if (relations.includes('uncertain')) return 'uncertain';
+  if (relations.includes('blocking_uncertain') || relations.includes('uncertain')) return 'uncertain';
   if (relations.includes('supports')) return 'supports';
+  return 'unrelated';
+}
+
+function aggregateWholeEvidenceRelations(
+  relations: readonly DeterministicEvidenceClauseRelation[],
+): DeterministicEvidenceRelation {
+  if (relations.includes('updates')) return 'updates';
+  if (relations.includes('conflicts')) return 'conflicts';
+  if (relations.includes('blocking_uncertain')) return 'uncertain';
+  if (relations.includes('supports')) return 'supports';
+  if (relations.includes('uncertain')) return 'uncertain';
   return 'unrelated';
 }
 
@@ -2150,10 +2305,11 @@ function deterministicEvidenceRelation(
   const relations = clauses.map((clause) =>
     evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
   const supportingClauses = clauses.filter((_, index) => relations[index] === 'supports');
-  const effectiveRelations = relations.filter((relation, index) => relation !== 'uncertain'
+  const effectiveRelations = relations.filter((relation, index) =>
+    (relation !== 'uncertain' && relation !== 'blocking_uncertain')
     || !supportingClauses.some((supporting) =>
       isRedundantContextExpansion(supporting.text, clauses[index].text)));
-  return aggregateEvidenceRelations(effectiveRelations);
+  return aggregateWholeEvidenceRelations(effectiveRelations);
 }
 
 function deterministicDispositionQuoteRelations(
@@ -2161,7 +2317,7 @@ function deterministicDispositionQuoteRelations(
   evidence: ManualNewsEvidence,
   sourceFacts: readonly ManualSourceAtomicFact[],
   evidenceById: ReadonlyMap<string, ManualNewsEvidence>,
-): DeterministicEvidenceRelation[] {
+): DeterministicEvidenceClauseRelation[] {
   const clauses = evidenceRelationUnitClauses(quote);
   if (!clauses.length) return ['uncertain'];
   return clauses.map((clause) => evidenceClauseRelation(clause, evidence, sourceFacts, evidenceById));
@@ -3966,7 +4122,7 @@ const LATIN_ENTITY_STOPWORDS = new Set([
   'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'new', 'of', 'on', 'or', 'official',
   'the', 'this', 'to', 'with', 'ai', 'model', 'models', 'product', 'products', 'service', 'services',
   'company', 'technology', 'documentation', 'document', 'release', 'artificial', 'intelligence',
-  'language', 'foundation', 'generative', 'multimodal',
+  'language', 'foundation', 'generative', 'multimodal', 'full-time', 'part-time',
 ]);
 
 type StructuredFactSlotKind = 'object' | 'version' | 'region';
@@ -4785,7 +4941,7 @@ function occurredAtActionVerificationError(
 type FactScope = 'universal' | 'limited';
 
 function dominantFactScope(value: string): FactScope | null {
-  if (/(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|some|partial(?:ly)?|limited|supported\s+(?:models?|products?))\b/i.test(value)) {
+  if (/(?:仅|只限|部分|受支持|限定|局部)|\b(?:only|solely|some|partial(?:ly)?|limited|restricted|supported\s+(?:models?|products?))\b/i.test(value)) {
     return 'limited';
   }
   if (/(?:所有|全部|全量|全球|任何)|\b(?:all|every|global(?:ly)?|universal(?:ly)?|any)\b/i.test(value)) {
@@ -5247,7 +5403,8 @@ export function validateManualLeadFactVerification(
               ? quoteRelations.every((relation) => relation === 'updates')
               : relation === 'uncertain'
                 ? definition.disposition === 'background'
-                  && quoteRelations.every((quoteRelation) => quoteRelation === 'uncertain')
+                  && quoteRelations.every((quoteRelation) =>
+                    quoteRelation === 'uncertain' || quoteRelation === 'blocking_uncertain')
                 : quoteRelations.every((quoteRelation) => quoteRelation === 'unrelated');
         const locallyConsistent = (relation === 'supports'
           ? definition.disposition === 'supports_core'
