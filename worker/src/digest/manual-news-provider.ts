@@ -1,3 +1,5 @@
+import type { DeepSeekSafeDiagnostics } from '../hf-paper/llm';
+
 export type ManualNewsProviderStage = 'assessment' | 'verification';
 
 export interface ManualNewsProviderCallContext {
@@ -14,25 +16,81 @@ export interface ManualNewsProviderCallMetrics extends ManualNewsProviderCallCon
 
 export interface ManualNewsProviderFailureAudit extends ManualNewsProviderCallMetrics {
   provider_error_code: string;
+  provider_diagnostics?: ManualNewsProviderDiagnostics;
   assessment_generation_attempt?: 1 | 2;
   assessment_last_validation_code?: string;
+}
+
+export interface ManualNewsProviderDiagnostics {
+  finish_reason: DeepSeekSafeDiagnostics['finish_reason'];
+  content_chars: number;
+  reasoning_chars: number;
+  usage: Pick<
+    DeepSeekSafeDiagnostics['usage'],
+    'prompt_tokens' | 'completion_tokens' | 'total_tokens' | 'reasoning_tokens'
+  >;
 }
 
 interface ManualNewsProviderErrorInput {
   stage: ManualNewsProviderStage;
   provider_error_code: string;
   metrics: ManualNewsProviderCallMetrics;
+  provider_diagnostics?: ManualNewsProviderDiagnostics;
   assessment_generation_attempt?: 1 | 2;
   assessment_last_validation_code?: string;
 }
 
-const SAFE_PROVIDER_ERROR = /^provider_(?:timeout|transport_error|no_text|json_parse_fail|prompt_too_large|retry_exhausted|unknown_error|http_\d{3})$/;
+const SAFE_PROVIDER_ERROR = /^provider_(?:timeout|transport_error|no_text|empty_final|output_exhausted|capacity|json_parse_fail|prompt_too_large|retry_exhausted|unknown_error|http_\d{3})$/;
 const SAFE_REQUEST_ID = /^[A-Za-z0-9:_-]{1,240}$/;
 const SAFE_VALIDATION_CODE = /^[a-z0-9_]{1,80}$/;
 const PROVIDER_ERROR_PREFIX = 'manual_news_provider_error';
+const SAFE_FINISH_REASONS = new Set([
+  'stop', 'length', 'content_filter', 'tool_calls', 'insufficient_system_resource', 'unknown',
+]);
 
 function validMetricCount(value: number, max: number): boolean {
   return Number.isInteger(value) && value >= 0 && value <= max;
+}
+
+function isValidProviderDiagnostics(value: unknown): value is ManualNewsProviderDiagnostics {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).some((key) => ![
+    'finish_reason', 'content_chars', 'reasoning_chars', 'usage',
+  ].includes(key))
+    || !SAFE_FINISH_REASONS.has(String(row.finish_reason))
+    || typeof row.content_chars !== 'number'
+    || !validMetricCount(row.content_chars, 10_000_000)
+    || typeof row.reasoning_chars !== 'number'
+    || !validMetricCount(row.reasoning_chars, 10_000_000)
+    || !row.usage || typeof row.usage !== 'object' || Array.isArray(row.usage)) return false;
+  const usage = row.usage as Record<string, unknown>;
+  const allowedUsage = new Set([
+    'prompt_tokens', 'completion_tokens', 'total_tokens', 'reasoning_tokens',
+  ]);
+  return !Object.keys(usage).some((key) => !allowedUsage.has(key))
+    && Object.values(usage).every((metric) => typeof metric === 'number'
+      && validMetricCount(metric, 100_000_000));
+}
+
+export function manualNewsProviderDiagnostics(
+  diagnostics: DeepSeekSafeDiagnostics | undefined,
+): ManualNewsProviderDiagnostics | undefined {
+  if (!diagnostics) return undefined;
+  const usage: ManualNewsProviderDiagnostics['usage'] = {};
+  for (const field of [
+    'prompt_tokens', 'completion_tokens', 'total_tokens', 'reasoning_tokens',
+  ] as const) {
+    const value = diagnostics.usage[field];
+    if (value !== undefined) usage[field] = value;
+  }
+  const safe: ManualNewsProviderDiagnostics = {
+    finish_reason: diagnostics.finish_reason,
+    content_chars: diagnostics.content_chars,
+    reasoning_chars: diagnostics.reasoning_chars,
+    usage,
+  };
+  return isValidProviderDiagnostics(safe) ? safe : undefined;
 }
 
 export function isValidManualNewsProviderFailureAudit(
@@ -43,7 +101,7 @@ export function isValidManualNewsProviderFailureAudit(
   const allowed = new Set([
     'stage', 'provider_error_code', 'request_id', 'system_chars', 'user_chars',
     'evidence_count', 'attempt', 'assessment_generation_attempt',
-    'assessment_last_validation_code',
+    'assessment_last_validation_code', 'provider_diagnostics',
   ]);
   return !Object.keys(row).some((key) => !allowed.has(key))
     && ['assessment', 'verification'].includes(String(row.stage))
@@ -53,6 +111,8 @@ export function isValidManualNewsProviderFailureAudit(
     && validMetricCount(Number(row.user_chars), 4_000_000)
     && validMetricCount(Number(row.evidence_count), 100)
     && validMetricCount(Number(row.attempt), 1_000_000)
+    && (row.provider_diagnostics === undefined
+      || isValidProviderDiagnostics(row.provider_diagnostics))
     && (row.assessment_generation_attempt === undefined
       || row.assessment_generation_attempt === 1
       || row.assessment_generation_attempt === 2)
@@ -64,6 +124,7 @@ export class ManualNewsProviderError extends Error {
   readonly stage: ManualNewsProviderStage;
   readonly provider_error_code: string;
   readonly metrics: ManualNewsProviderCallMetrics;
+  readonly provider_diagnostics?: ManualNewsProviderDiagnostics;
   readonly assessment_generation_attempt?: 1 | 2;
   readonly assessment_last_validation_code?: string;
 
@@ -72,6 +133,9 @@ export class ManualNewsProviderError extends Error {
       ...input.metrics,
       stage: input.stage,
       provider_error_code: input.provider_error_code,
+      ...(input.provider_diagnostics
+        ? { provider_diagnostics: input.provider_diagnostics }
+        : {}),
       ...(input.assessment_generation_attempt
         ? { assessment_generation_attempt: input.assessment_generation_attempt }
         : {}),
@@ -90,6 +154,7 @@ export class ManualNewsProviderError extends Error {
     this.stage = input.stage;
     this.provider_error_code = input.provider_error_code;
     this.metrics = { ...input.metrics, stage: input.stage };
+    this.provider_diagnostics = input.provider_diagnostics;
     this.assessment_generation_attempt = input.assessment_generation_attempt;
     this.assessment_last_validation_code = input.assessment_last_validation_code;
   }
@@ -107,6 +172,21 @@ export function stableManualNewsProviderErrorCode(raw: string | undefined): stri
   return 'provider_unknown_error';
 }
 
+export function classifyManualNewsProviderErrorCode(
+  raw: string | undefined,
+  diagnostics: ManualNewsProviderDiagnostics | undefined,
+): string {
+  if (String(raw || '').trim() !== 'no_text') return stableManualNewsProviderErrorCode(raw);
+  if (diagnostics?.finish_reason === 'length' && diagnostics.content_chars === 0) {
+    return 'provider_output_exhausted';
+  }
+  if (diagnostics?.finish_reason === 'insufficient_system_resource') return 'provider_capacity';
+  if (diagnostics?.finish_reason === 'stop' && diagnostics.content_chars === 0) {
+    return 'provider_empty_final';
+  }
+  return 'provider_no_text';
+}
+
 export function manualNewsProviderFailureAudit(
   error: unknown,
 ): ManualNewsProviderFailureAudit | null {
@@ -114,6 +194,9 @@ export function manualNewsProviderFailureAudit(
     const audit: ManualNewsProviderFailureAudit = {
       ...error.metrics,
       provider_error_code: error.provider_error_code,
+      ...(error.provider_diagnostics
+        ? { provider_diagnostics: error.provider_diagnostics }
+        : {}),
       ...(error.assessment_generation_attempt
         ? { assessment_generation_attempt: error.assessment_generation_attempt }
         : {}),
@@ -154,6 +237,7 @@ export function withManualNewsAssessmentFailureContext(
     stage: error.stage,
     provider_error_code: error.provider_error_code,
     metrics: error.metrics,
+    provider_diagnostics: error.provider_diagnostics,
     assessment_generation_attempt: generationAttempt,
     assessment_last_validation_code: SAFE_VALIDATION_CODE.test(lastValidationCode)
       ? lastValidationCode
@@ -164,9 +248,14 @@ export function withManualNewsAssessmentFailureContext(
 export function isTransientManualNewsProviderFailure(error: unknown): boolean | null {
   const failure = manualNewsProviderFailureAudit(error);
   if (!failure) return null;
+  // Empty JSON-mode finals, output-budget exhaustion, and provider capacity
+  // are retried only by the outer durable Workflow; manual calls have retries=0.
   return failure.provider_error_code === 'provider_timeout'
     || failure.provider_error_code === 'provider_transport_error'
     || failure.provider_error_code === 'provider_no_text'
+    || failure.provider_error_code === 'provider_empty_final'
+    || failure.provider_error_code === 'provider_output_exhausted'
+    || failure.provider_error_code === 'provider_capacity'
     || failure.provider_error_code === 'provider_retry_exhausted'
     || /^provider_http_(?:408|429|5\d\d)$/.test(failure.provider_error_code);
 }

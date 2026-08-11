@@ -1204,7 +1204,10 @@ describe('manual lead processing pipeline', () => {
 
   test.each([
     ['assessment', 'provider_timeout'],
+    ['assessment', 'provider_output_exhausted'],
+    ['assessment', 'provider_empty_final'],
     ['verification', 'provider_http_503'],
+    ['verification', 'provider_capacity'],
   ] as const)('preserves the safe %s provider root cause for Workflow exhaustion', async (
     stage,
     providerErrorCode,

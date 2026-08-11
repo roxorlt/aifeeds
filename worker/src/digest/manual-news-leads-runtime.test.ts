@@ -9,7 +9,11 @@ import {
 } from './manual-news-leads-runtime';
 import type { PublicDocument } from '../security/safe-url-fetch';
 import { callDeepSeekJson, DEEPSEEK_PRO } from '../hf-paper/llm';
-import { ManualNewsProviderError } from './manual-news-provider';
+import {
+  ManualNewsProviderError,
+  manualNewsProviderDiagnostics,
+  manualNewsProviderFailureAudit,
+} from './manual-news-provider';
 
 vi.mock('../hf-paper/llm', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hf-paper/llm')>();
@@ -84,7 +88,7 @@ describe('manual lead evidence extraction', () => {
       1,
       'test-key', DEEPSEEK_PRO, '{"evidence":"https://private.example/path"}',
       expect.objectContaining({
-        systemPrompt: 'assessment secret body', retries: 0, timeoutMs: 210_000,
+        systemPrompt: 'assessment secret body', retries: 0, timeoutMs: 210_000, maxTokens: 12_000,
         requestId: 'ml-safe-request:p6:assessment:1',
       }),
     );
@@ -92,7 +96,7 @@ describe('manual lead evidence extraction', () => {
       2,
       'test-key', DEEPSEEK_PRO, '{"claims":[]}',
       expect.objectContaining({
-        systemPrompt: 'independent verifier', retries: 0, timeoutMs: 210_000,
+        systemPrompt: 'independent verifier', retries: 0, timeoutMs: 210_000, maxTokens: 12_000,
         requestId: 'ml-safe-request:p6:verification:2',
       }),
     );
@@ -166,6 +170,70 @@ describe('manual lead evidence extraction', () => {
     expect(String((failure as Error).message)).toMatch(
       new RegExp(`^manual_news_provider_error:${stage}:${stableCode}:`),
     );
+    mockedCall.mockReset();
+  });
+
+  test('drops out-of-range or non-whitelisted provider diagnostics before audit', () => {
+    expect(manualNewsProviderDiagnostics({
+      finish_reason: 'length',
+      content_chars: 0,
+      reasoning_chars: 10_000_001,
+      usage: { reasoning_tokens: 100_000_001 },
+    })).toBeUndefined();
+    expect(manualNewsProviderDiagnostics({
+      finish_reason: 'future-provider-value' as never,
+      content_chars: 0,
+      reasoning_chars: 1,
+      usage: {},
+    })).toBeUndefined();
+  });
+
+  test.each([
+    ['length', 'provider_output_exhausted'],
+    ['stop', 'provider_empty_final'],
+    ['insufficient_system_resource', 'provider_capacity'],
+    ['unknown', 'provider_no_text'],
+  ] as const)('classifies empty assessment finish=%s with bounded safe diagnostics', async (
+    finishReason,
+    expectedCode,
+  ) => {
+    const mockedCall = vi.mocked(callDeepSeekJson);
+    mockedCall.mockResolvedValueOnce({
+      data: null,
+      error: 'no_text',
+      diagnostics: {
+        finish_reason: finishReason,
+        content_chars: 0,
+        reasoning_chars: 3_500,
+        usage: {
+          prompt_tokens: 1_200,
+          completion_tokens: 3_500,
+          total_tokens: 4_700,
+          reasoning_tokens: 3_500,
+        },
+      },
+    } as never);
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const adapters = createManualNewsLeadRuntimeAdapters({
+      DB: {} as never, DEEPSEEK_API_KEY: 'test-key',
+    } as never, { modelContext: { leadId: 'ml-safe-request', processingAttempt: 2 } });
+
+    const failure = await adapters.assess(
+      { system: 'rules', user: '{"evidence":[]}' },
+      { request_id: 'ml-safe-request:p2:assessment:1', evidence_count: 1, attempt: 2 },
+    ).catch((error) => error);
+
+    expect(failure).toMatchObject({ provider_error_code: expectedCode });
+    expect(manualNewsProviderFailureAudit(failure)).toMatchObject({
+      provider_error_code: expectedCode,
+      provider_diagnostics: {
+        finish_reason: finishReason,
+        content_chars: 0,
+        reasoning_chars: 3_500,
+        usage: { reasoning_tokens: 3_500 },
+      },
+    });
+    expect(JSON.stringify(manualNewsProviderFailureAudit(failure))).not.toContain('reasoning_content');
     mockedCall.mockReset();
   });
 

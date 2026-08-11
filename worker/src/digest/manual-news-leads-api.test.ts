@@ -207,6 +207,34 @@ describe('manual daily news leads API', () => {
     },
   );
 
+  test('returns only bounded provider diagnostics on an authorized error payload', async () => {
+    const failed = {
+      ...record,
+      status: 'failed',
+      error_code: 'processing_retry_exhausted',
+      error_message: 'manual_news_provider_error:assessment:provider_output_exhausted',
+      provider_failure: {
+        stage: 'assessment', provider_error_code: 'provider_output_exhausted',
+        request_id: `${record.id}:p6:assessment:1`,
+        system_chars: 4_083, user_chars: 6_086, evidence_count: 1, attempt: 6,
+        provider_diagnostics: {
+          finish_reason: 'length', content_chars: 0, reasoning_chars: 3_500,
+          usage: { prompt_tokens: 1_200, completion_tokens: 3_500, total_tokens: 4_700, reasoning_tokens: 3_500 },
+        },
+      },
+    };
+    vi.mocked(getManualNewsLead).mockResolvedValueOnce(failed as never);
+
+    const result = await handleManualNewsLeadsApi(
+      request(`/api/digest/daily-news-leads/${record.id}`), env(), { waitUntil() {} } as never,
+    );
+    const payload = await result.json<Record<string, unknown>>();
+
+    expect(payload).toMatchObject({ lead: { provider_failure: failed.provider_failure } });
+    expect(JSON.stringify(payload)).not.toContain('reasoning_content');
+    expect(JSON.stringify(payload)).not.toContain('PRIVATE');
+  });
+
   test('fails closed when the durable workflow binding is unavailable', async () => {
     const unavailableEnv = env({ MANUAL_NEWS_LEAD_WORKFLOW: undefined });
     const response = await handleManualNewsLeadsApi(request('/api/digest/daily-news-leads', {

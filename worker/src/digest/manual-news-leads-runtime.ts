@@ -15,8 +15,9 @@ import {
 } from './manual-news-leads-pipeline';
 import { D1ManualLeadProcessingStore } from './manual-news-leads-store';
 import {
+  classifyManualNewsProviderErrorCode,
   ManualNewsProviderError,
-  stableManualNewsProviderErrorCode,
+  manualNewsProviderDiagnostics,
   type ManualNewsProviderCallContext,
   type ManualNewsProviderCallMetrics,
   type ManualNewsProviderStage,
@@ -292,17 +293,21 @@ export function createManualNewsLeadRuntimeAdapters(
       prompt.user,
       {
         systemPrompt: prompt.system,
-        maxTokens: 3_500,
+        maxTokens: 12_000,
         timeoutMs: MANUAL_NEWS_PROVIDER_TIMEOUT_MS,
         retries: 0,
         requestId: metrics.request_id,
       },
     );
     if (!result.data) {
+      const providerDiagnostics = manualNewsProviderDiagnostics(result.diagnostics);
       throw new ManualNewsProviderError({
         stage,
-        provider_error_code: stableManualNewsProviderErrorCode(result.error || 'no_text'),
+        provider_error_code: classifyManualNewsProviderErrorCode(
+          result.error || 'no_text', providerDiagnostics,
+        ),
         metrics,
+        provider_diagnostics: providerDiagnostics,
       });
     }
     return result.data;
