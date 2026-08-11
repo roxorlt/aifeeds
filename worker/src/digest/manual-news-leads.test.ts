@@ -423,6 +423,29 @@ describe('manual news lead domain', () => {
   });
 
   test.each([
+    '法院命令OpenAI停止发布GPT 6百度升级大模型。',
+    '百度升级大模型法院命令OpenAI停止发布GPT 6。',
+    '法院命令OpenAI停止发布GPT 6\u2028百度升级大模型。',
+    '法院命令百度升级大模型OpenAI停止发布GPT 6。',
+    '百度升级大模型OpenAI发布GPT-6。',
+    '法院命令百度升级大模型停止发布GPT-6。',
+  ])('rejects a short Chinese subject-predicate-object outside the consumed control tree: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
+  });
+
+  test.each([
+    '法院命令OpenAI停止发布大模型。',
+    '监管机构命令百度停止发布开源模型。',
+  ])('does not mistake a short ordinary control-chain object for another predicate: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
     '百度升级文心模型法院命令OpenAI停止发布GPT 6。',
     'anthropic commercializes Claude法院命令OpenAI停止开源GPT 6权重。',
   ])('rejects an unknown predicate in the unconsumed prefix before a valid control chain: %s', (text) => {
@@ -462,6 +485,27 @@ describe('manual news lead domain', () => {
     expect(validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,
     ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布Codex命令行工具。',
+    'OpenAI发布GPT-6支持向量模型。',
+    'OpenAI发布ChatGPT投资分析工具。',
+    'OpenAI发布Gemini合作伙伴计划。',
+  ])('accepts an adjacent brand or model prefix inside one release object noun phrase: %s', (text) => {
+    const fixture = supportedTextVerification(text, text);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test.each([
+    'OpenAI发布Codex命令行工具百度升级大模型。',
+    'OpenAI发布GPT-6支持向量模型 腾讯融资混元模型。',
+  ])('rejects a real second subject and predicate after a branded release object: %s', (text) => {
+    expect(() => validateManualLeadAssessment(assessment({
+      claims: [{ text, evidence_ids: ['ev-official'] }],
+    }), [officialAnthropic])).toThrow(/non_atomic_claim/);
   });
 
   test.each([
@@ -1235,6 +1279,40 @@ describe('manual news lead domain', () => {
     const fixture = supportedTextVerification(
       'OpenAI expanded Costa Rica operations.',
       'OpenAI expanded operations in New Zealand.',
+    );
+    expect(() => validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    )).toThrow(/fact_verification_entity_slot_missing/);
+  });
+
+  test.each([
+    {
+      candidate: 'OpenAI expanded operations across Europe.',
+      quote: 'OpenAI expanded European operations.',
+    },
+    {
+      candidate: 'OpenAI expanded operations around Costa Rica.',
+      quote: 'OpenAI expanded Costa Rica operations.',
+    },
+    {
+      candidate: 'OpenAI expanded operations among Papua New Guinea.',
+      quote: 'OpenAI expanded Papua New Guinea operations.',
+    },
+    {
+      candidate: 'OpenAI expanded operations over New Zealand.',
+      quote: 'OpenAI expanded New Zealand operations.',
+    },
+  ])('treats directional location words as prepositions rather than unknown verbs: $candidate', ({ candidate, quote }) => {
+    const fixture = supportedTextVerification(candidate, quote);
+    expect(validateManualLeadFactVerification(
+      fixture.raw, fixture.candidate, fixture.evidence,
+    ).overall_verdict).toBe('supported');
+  });
+
+  test('still rejects a different location behind a directional preposition', () => {
+    const fixture = supportedTextVerification(
+      'OpenAI expanded operations around Costa Rica.',
+      'OpenAI expanded operations around Papua New Guinea.',
     );
     expect(() => validateManualLeadFactVerification(
       fixture.raw, fixture.candidate, fixture.evidence,

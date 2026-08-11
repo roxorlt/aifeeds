@@ -820,6 +820,19 @@ const ATOMIC_SEQUENCING_BOUNDARY = new RegExp(ATOMIC_COORDINATION_SOURCE, 'iu');
 
 const CHINESE_OBJECT_NOUN_HEAD = '(?:工具|模型|平台|计划|服务|系统|分析|能力|框架|套件|方案|功能|模块|报告|数据集|引擎|应用|产品)';
 const ENGLISH_OBJECT_NOUN_HEAD = '(?:tools?|models?|platforms?|plans?|services?|systems?|analysis|analytics|capabilit(?:y|ies)|frameworks?|kits?|solutions?|features?|modules?|reports?|datasets?|engines?|applications?|products?|outputs?)';
+const ENGLISH_LOCATION_RELATION_WORDS = [
+  'in', 'across', 'around', 'among', 'over', 'under', 'within', 'throughout', 'into', 'for',
+  'near', 'between', 'beyond', 'along', 'via', 'toward', 'towards',
+] as const;
+const ENGLISH_LOCATION_RELATION_SOURCE = `(?:${ENGLISH_LOCATION_RELATION_WORDS.join('|')})`;
+const ENGLISH_LOCATION_RELATIONS: ReadonlySet<string> = new Set(ENGLISH_LOCATION_RELATION_WORDS);
+
+function isAdjacentLatinProductPrefix(raw: string): boolean {
+  const normalized = raw.normalize('NFKC');
+  if (!normalized || normalized !== normalized.trim() || /\s/u.test(normalized)) return false;
+  return /^[A-Z][A-Za-z0-9._+-]{1,39}$/u.test(normalized)
+    && (/[a-z]/u.test(normalized) || /\d|[._+-]/u.test(normalized) || /^[A-Z]{2,}$/u.test(normalized));
+}
 
 function hasAtomicBoundary(value: string): boolean {
   return new RegExp(FACT_UNIT_BOUNDARY.source, 'iu').test(value);
@@ -845,7 +858,9 @@ function actionLooksLikeNominalModifier(
   if (nominalPrefix) {
     const chinesePremodifiers = /^(?:(?:模型|产品|人工智能|AI|企业|技术|客户|开发者|核心|智能|数据)){1,3}$/iu;
     const englishPremodifiers = /^(?:new|model|product|ai|enterprise|technical|customer|developer|core|smart|data)(?:\s+(?:new|model|product|ai|enterprise|technical|customer|developer|core|smart|data)){0,2}$/iu;
-    if (!chinesePremodifiers.test(nominalPrefix) && !englishPremodifiers.test(nominalPrefix)) return false;
+    if (!chinesePremodifiers.test(nominalPrefix)
+      && !englishPremodifiers.test(nominalPrefix)
+      && !isAdjacentLatinProductPrefix(between)) return false;
   }
 
   const nextAction = all.find((item) => item.index >= occurrence.end);
@@ -933,6 +948,7 @@ function actionIsGovernedComplement(
     .replace(/(?:立即|继续|正式|已经|已|将|再|考虑|计划|必须)+$/u, '')
     .trim();
   if (!normalized) return true;
+  if (looksLikeDetachedChinesePredicate(normalized)) return false;
   if (depth > 0) return false;
   const trailingLatinSubject = normalized.match(/([A-Z][A-Za-z0-9._+-]{1,})\s*$/u);
   if (trailingLatinSubject) {
@@ -959,6 +975,14 @@ const CONTROL_OBJECT_NOUN_HEAD = '(?:模型|权重|服务|系统|平台|工具|�
 function controlComplementTailRemainder(value: string, action: FactActionOccurrence): string {
   const rawTail = stripFactTemporalText(value.slice(action.end))
     .replace(/^[\s，,、:：]*(?:了|对|向|为|其|该|一个|一项|一款|新的?)*\s*/u, '');
+  if (action.action === 'release') {
+    const brandedNominalObject = rawTail.match(
+      new RegExp(`^([A-Z][A-Za-z0-9._+-]{1,39})([\\p{Script=Han}]{1,16}?${CONTROL_OBJECT_NOUN_HEAD})`, 'u'),
+    );
+    if (brandedNominalObject?.[0] && isAdjacentLatinProductPrefix(brandedNominalObject[1])) {
+      return rawTail.slice(brandedNominalObject[0].length).trim();
+    }
+  }
   const latinVersion = rawTail.match(
     new RegExp(`^(?:[A-Za-z][A-Za-z0-9._+-]*)(?:\\s+(?:v(?:ersion)?\\s*)?[A-Za-z]*\\d+(?:\\.\\d+)*(?:[-_][A-Za-z0-9]+)?)?(?:${CONTROL_OBJECT_NOUN_HEAD})?`, 'iu'),
   );
@@ -971,8 +995,41 @@ function controlComplementTailRemainder(value: string, action: FactActionOccurre
   return englishObject?.[0] ? rawTail.slice(englishObject[0].length).trim() : rawTail;
 }
 
-function looksLikeDetachedUnknownPredicate(value: string): boolean {
-  const remainder = normalizedAtomicClause(value).replace(/^[，,、:：\s]+/u, '');
+function looksLikeDetachedChinesePredicate(value: string): boolean {
+  let remainder = normalizedAtomicClause(value).replace(/^[，,、:：\s]+/u, '');
+  while (remainder) {
+    const chinese = remainder.match(new RegExp(`^([\\p{Script=Han}·]+?)${CONTROL_OBJECT_NOUN_HEAD}`, 'u'));
+    if (!chinese) break;
+    const predicateShape = chinese[1]
+      .replace(/(?:人工智能|大语言|多模态|生成式|开源|核心|通用|智能|新型|最新|大型|大)+$/u, '')
+      .replace(/·/gu, '');
+    // This fragment is already outside the parsed control object. Two non-empty Han spans
+    // (a normal two-character subject plus a short predicate) before a noun head are enough
+    // to fail closed; bare adjective/object noun phrases are consumed before reaching here.
+    if (/^[\p{Script=Han}]{4,}$/u.test(predicateShape)) return true;
+    const next = remainder.slice(chinese[0].length).trim();
+    if (next === remainder) break;
+    remainder = next;
+  }
+  return false;
+}
+
+function prefixContainsDetachedUnknownPredicate(value: string): boolean {
+  const prefix = normalizedAtomicClause(value)
+    .replace(/(?:已经|已|将|正在|正式|计划|可能|据称|宣布|完成)+$/u, '')
+    .replace(/\b(?:has|have|had|will|would|may|might|reportedly|officially|formally|plans?\s+to)\s*$/iu, '')
+    .replace(/\b(?:fail(?:s|ed)?|unable|refus(?:e|es|ed))\s+to\s*$/iu, '')
+    .trim();
+  if (looksLikeDetachedEnglishPredicate(prefix)) return true;
+  const detached = prefix.match(new RegExp(`^([\\p{Script=Han}·]+?${CONTROL_OBJECT_NOUN_HEAD})(.+)$`, 'u'));
+  if (!detached || !looksLikeDetachedChinesePredicate(detached[1])) return false;
+  const subject = detached[2].trim();
+  if (/^[A-Z][A-Za-z0-9._+-]{1,39}$/u.test(subject)) return true;
+  return /^[\p{Script=Han}·]{2,16}$/u.test(subject)
+    && !/^(?:公司|团队|机构|官方|部门|组织|人员)$/u.test(subject);
+}
+
+function looksLikeDetachedEnglishPredicate(remainder: string): boolean {
   if (!remainder) return false;
   const englishWords = remainder.match(/[A-Za-z][A-Za-z0-9._+-]*/gu) || [];
   for (let index = 0; index + 2 < englishWords.length; index += 1) {
@@ -984,13 +1041,20 @@ function looksLikeDetachedUnknownPredicate(value: string): boolean {
     if (/^[A-Z]/u.test(rawSubject) && /^[A-Z]/u.test(rawPredicate)
       && /^(?:operations?|business|market|region)$/u.test(object)) continue;
     if (!LATIN_ENTITY_STOPWORDS.has(subject)
-      && !/^(?:across|within|throughout|into|from|near|after|before|during|over|under)$/u.test(subject)
+      && !ENGLISH_LOCATION_RELATIONS.has(subject)
+      && !ENGLISH_LOCATION_RELATIONS.has(predicate)
+      && !/^(?:from|after|before|during)$/u.test(subject)
       && /^[a-z][a-z0-9-]{2,}(?:s|ed|ing)$/u.test(predicate)) return true;
   }
+  return false;
+}
+
+function looksLikeDetachedUnknownPredicate(value: string): boolean {
+  const remainder = normalizedAtomicClause(value).replace(/^[，,、:：\s]+/u, '');
+  if (looksLikeDetachedEnglishPredicate(remainder)) return true;
   if (/^[a-z][a-z0-9._+-]{2,}\s*[\p{Script=Han}]{2,6}(?=[A-Z][A-Za-z0-9._+-]*)/u.test(remainder)) return true;
   if (/^[\p{Script=Han}·]{4,}(?=[A-Z][A-Za-z0-9._+-]*(?:\s+[A-Za-z0-9._+-]+)?(?:模型|权重|服务|系统|平台|工具|产品)?)/u.test(remainder)) return true;
-  const chinese = remainder.match(new RegExp(`^([\\p{Script=Han}·]+?)${CONTROL_OBJECT_NOUN_HEAD}`, 'u'));
-  return !!chinese && Array.from(chinese[1]).length >= 6;
+  return looksLikeDetachedChinesePredicate(remainder);
 }
 
 function parseFactControlChain(value: string): FactControlChainParse {
@@ -1008,12 +1072,10 @@ function parseFactControlChain(value: string): FactControlChainParse {
     node.child = { occurrence: child, child: null };
     node = node.child;
   }
-  const prefix = reliable && actions.length > 1
-    ? stripFactTemporalText(value.slice(0, actions[0].index))
-    : '';
+  const prefix = reliable ? stripFactTemporalText(value.slice(0, actions[0].index)) : '';
   const remainder = reliable ? controlComplementTailRemainder(value, node.occurrence) : '';
   const hasUnknownPredicate = reliable
-    && (looksLikeDetachedUnknownPredicate(prefix) || looksLikeDetachedUnknownPredicate(remainder));
+    && (prefixContainsDetachedUnknownPredicate(prefix) || looksLikeDetachedUnknownPredicate(remainder));
   return {
     root,
     actions,
@@ -1368,7 +1430,7 @@ function factUnitRegionSlots(value: string, directObject: string): StructuredFac
   for (const match of directObject.matchAll(/(?:在|于|面向|覆盖|进入|退出)?([\p{Script=Han}]{2,12}?)(?=(?:市场|地区|业务|运营))/gu)) {
     addRegion(match[1]);
   }
-  for (const match of source.matchAll(/\b(?:in|across|throughout|within|into|for)\s+(?:the\s+)?([A-Za-z][A-Za-z -]{1,30}?)(?=\s+(?:market|region|operations?|business))/giu)) {
+  for (const match of source.matchAll(new RegExp(`\\b${ENGLISH_LOCATION_RELATION_SOURCE}\\s+(?:the\\s+)?([A-Za-z][A-Za-z -]{1,30}?)(?=\\s+(?:market|region|operations?|business))`, 'giu'))) {
     const canonical = canonicalRegionAlias(match[1]);
     if (canonical) addStructuredSlot(slots, 'region', canonical);
   }
@@ -1379,7 +1441,7 @@ function factUnitRegionSlots(value: string, directObject: string): StructuredFac
   for (const match of source.matchAll(/\b([A-Z][A-Za-z-]{2,30}(?:\s+[A-Z][A-Za-z-]{2,30}){0,2})(?=\s+(?:market|region|operations?|business))\b/gu)) {
     addEnglishRegion(match[1]);
   }
-  for (const match of source.matchAll(/\b(?:market|region|operations?|business)\s+(?:in|across|throughout|within|into|for)\s+(?:the\s+)?([A-Z][A-Za-z-]{2,30}(?:\s+[A-Z][A-Za-z-]{2,30}){0,2})\b/gu)) {
+  for (const match of source.matchAll(new RegExp(`\\b(?:market|region|operations?|business)\\s+${ENGLISH_LOCATION_RELATION_SOURCE}\\s+(?:the\\s+)?([A-Z][A-Za-z-]{2,30}(?:\\s+[A-Z][A-Za-z-]{2,30}){0,2})\\b`, 'gu'))) {
     addEnglishRegion(match[1]);
   }
   return [...slots.values()];
@@ -1446,7 +1508,7 @@ function markContextualEnglishLocations(value: string): string {
   };
   return value
     .replace(
-      /\b(operations?|business|market|region)\s+(?:in|across|throughout|within|into|for)\s+(?:the\s+)?([A-Z][A-Za-z-]{2,30}(?:\s+[A-Z][A-Za-z-]{2,30}){0,2})\b/g,
+      new RegExp(`\\b(operations?|business|market|region)\\s+${ENGLISH_LOCATION_RELATION_SOURCE}\\s+(?:the\\s+)?([A-Z][A-Za-z-]{2,30}(?:\\s+[A-Z][A-Za-z-]{2,30}){0,2})\\b`, 'g'),
       (_match, head: string, location: string) => `${head} in ${marker(location)}`,
     )
     .replace(
@@ -1478,12 +1540,12 @@ function canonicalSemanticResidue(value: string, subject: string | null): string
   for (const [pattern, replacement] of SEMANTIC_RESIDUE_LEXEMES) source = source.replace(pattern, replacement);
   if (/\bzz_region_[a-z0-9_]+\b/u.test(source)) source = source.replace(/\bzz_market\b/gu, ' ');
   source = source.replace(
-    /\b(zz_(?:operations|service))\s+(?:(?:in|for|across|within|throughout|into)\s+)?(zz_region_[a-z0-9_]+)\b/giu,
+    new RegExp(`\\b(zz_(?:operations|service))\\s+(?:${ENGLISH_LOCATION_RELATION_SOURCE}\\s+)?(zz_region_[a-z0-9_]+)\\b`, 'giu'),
     '$2 $1',
   );
   source = normalizeChineseFactSyntax(source)
     .replace(/(?:中国标准时间|北京时间)/gu, ' ')
-    .replace(/\b(?:the|a|an|its|their|on|at|in|into|for|from|across|within|throughout|by|to|of|with|and|but|as|has|have|had|is|are|was|were|will|would|can|could|may|might|not|never|already|officially|formally|reportedly|allegedly|unconfirmed|unverified|says?|said|that)\b/giu, ' ')
+    .replace(/\b(?:the|a|an|its|their|on|at|in|into|for|from|across|around|among|over|under|within|throughout|near|between|beyond|along|via|toward|towards|by|to|of|with|and|but|as|has|have|had|is|are|was|were|will|would|can|could|may|might|not|never|already|officially|formally|reportedly|allegedly|unconfirmed|unverified|says?|said|that)\b/giu, ' ')
     .replace(/[^a-z0-9_\p{Script=Han}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
